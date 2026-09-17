@@ -14,5 +14,6 @@
   "author": "Atlasia (LK Foods)",
   "version": "0.7.0",
   "homePage": "",
+  "auto_update": false,
   "i18n": {}
 }
