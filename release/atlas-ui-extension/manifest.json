@@ -1,0 +1,18 @@
+{
+  "display_name": "阿特拉斯 / Atlas",
+  "loading_order": 100,
+  "requires": [],
+  "optional": [],
+  "minimum_client_version": "1.12.0",
+  "js": "index.js",
+  "css": "style.css",
+  "generate_interceptor": "atlasGenerateInterceptor",
+  "hooks": {
+    "activate": "activate",
+    "disable": "disable"
+  },
+  "author": "Atlasia (LK Foods)",
+  "version": "0.7.0",
+  "homePage": "",
+  "i18n": {}
+}
