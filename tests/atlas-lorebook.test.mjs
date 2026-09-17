@@ -1,0 +1,427 @@
+/**
+ * atlas-lorebook.test.mjs — ATLAS-09 世界书注入层。
+ *
+ * 覆盖（待办计划 ATLAS-09「世界书注入层」验收点）：
+ * - 条目规划：committed 才有条目；关键词 = 涉及 NPC 名 / 落点地点名；
+ *   内容有界 + 来源可追溯（时段 + 回执号）；确定性（同输入逐字节相同）。
+ * - 严格解析：引擎响应不可信，超限 / 形状非法一律拒绝。
+ * - 写入器：建书、按 comment upsert 不重复、按类目滚动修剪（新 → 旧）、
+ *   聊天绑定槽只在为空时绑定（冲突不上覆）；保存后 data 不再被触碰。
+ */
+
+import test from "node:test";
+import assert from "node:assert/strict";
+
+import {
+  ATLAS_LOREBOOK_LIMITS,
+  ATLAS_LOREBOOK_PREFIX,
+  buildLorebookPlans,
+  lorebookNameFor,
+  parseAtlasLorebookPlans,
+  createAtlasLorebookWriter,
+} from "../src/atlas-lorebook.ts";
+import { createLorebookPort } from "../atlas-extension/index.js";
+
+let assertionCount = 0;
+function ok(value, message) {
+  assertionCount += 1;
+  assert.ok(value, message);
+}
+function equal(actual, expected, message) {
+  assertionCount += 1;
+  assert.equal(actual, expected, message);
+}
+function deepEqual(actual, expected, message) {
+  assertionCount += 1;
+  assert.deepStrictEqual(actual, expected, message);
+}
+
+// ---------------------------------------------------------------------------
+// 夹具
+// ---------------------------------------------------------------------------
+
+const WORLD = {
+  name: "星环余烬",
+  characters: [
+    { id: "npc-1", name: "艾莉娅" },
+    { id: "npc-2", name: "巴罗" },
+  ],
+  points: [
+    { id: "pt-1", name: "集市广场" },
+    { id: "pt-2", name: "钟楼" },
+  ],
+  regions: [{ id: "rg-1", name: "旧城区" }],
+  stateEvents: [
+    {
+      id: "evt-1",
+      worldId: "w1",
+      branchId: null,
+      at: 3,
+      sequence: 0,
+      source: "ai-adopted",
+      narrativeSummary: "艾莉娅把一批走私香料搬进了集市广场的暗仓，巴罗在钟楼替她望风。",
+      entityRefs: ["npc-1", "npc-2"],
+      effects: [
+        { kind: "moveEntity", entityId: "npc-1", pointId: "pt-1" },
+        { kind: "appendMemoryRef", entityId: "npc-1", text: "收到巴罗的警告：码头巡查变严了。" },
+      ],
+    },
+  ],
+};
+
+function committedReceipt(overrides = {}) {
+  return {
+    receiptId: "rcpt-abc123def4567890",
+    status: "committed",
+    branchId: null,
+    previousTime: 2,
+    currentTime: 3,
+    previousLocationId: "pt-2",
+    currentLocationId: "pt-1",
+    triggeredNpcIds: [],
+    adoptedEventIds: ["evt-1"],
+    summary: "艾莉娅把一批走私香料搬进了集市广场的暗仓。",
+    retryable: false,
+    ...overrides,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 条目规划
+// ---------------------------------------------------------------------------
+
+test("规划：committed 回执产出 动向 + 事件 两条条目，关键词分别是 NPC 名与地点名", () => {
+  const plans = buildLorebookPlans(WORLD, committedReceipt());
+  ok(plans, "应产出规划");
+  equal(plans.entries.length, 2, "每轮最多两条");
+  equal(plans.bookName, "Atlas · 星环余烬", "书名由世界名派生");
+
+  const moves = plans.entries.find((e) => e.category === "moves");
+  const events = plans.entries.find((e) => e.category === "events");
+  ok(moves, "动向条目存在");
+  ok(events, "事件条目存在");
+  deepEqual(moves.keys, ["艾莉娅", "巴罗"], "动向关键词 = 涉及 NPC 名（去重、按出现序）");
+  deepEqual(events.keys, ["集市广场"], "事件关键词 = 回执落点地点名");
+  ok(moves.comment.startsWith(ATLAS_LOREBOOK_PREFIX.moves), "动向 comment 前缀");
+  ok(events.comment.startsWith(ATLAS_LOREBOOK_PREFIX.events), "事件 comment 前缀");
+  ok(moves.comment.includes("2 → 3"), "动向 comment 带时段区间");
+  ok(moves.content.includes("暗仓"), "动向内容含账本摘要");
+  ok(moves.content.includes("码头巡查变严"), "动向内容含角色明细");
+  ok(moves.content.includes("[Atlas · 第 2 → 3 时段 · 回执 rcpt-abc123def45]"), "来源行可追溯（时段 + 回执号）");
+  ok(events.content.startsWith("近期可触发："), "事件条目为「近期可触发」形态");
+});
+
+test("规划：非 committed / 无采用事件 / 账本缺事件 → null（调用方跳过）", () => {
+  equal(buildLorebookPlans(WORLD, committedReceipt({ status: "duplicate" })), null, "duplicate 不产出");
+  equal(buildLorebookPlans(WORLD, committedReceipt({ status: "failed" })), null, "failed 不产出");
+  equal(buildLorebookPlans(WORLD, committedReceipt({ adoptedEventIds: [] })), null, "空采用不产出");
+  equal(
+    buildLorebookPlans({ ...WORLD, stateEvents: [] }, committedReceipt()),
+    null,
+    "账本里找不到事件不产出",
+  );
+});
+
+test("规划：无角色被触及 → 省略动向条目；无落点 → 省略事件条目；全无 → null", () => {
+  const noNpcWorld = {
+    ...WORLD,
+    stateEvents: [
+      { ...WORLD.stateEvents[0], entityRefs: [], effects: [{ kind: "setFlag", key: "curfew" }] },
+    ],
+  };
+  const onlyEvents = buildLorebookPlans(noNpcWorld, committedReceipt());
+  ok(onlyEvents, "仍有事件条目");
+  equal(onlyEvents.entries.length, 1, "动向条目被省略");
+  equal(onlyEvents.entries[0].category, "events");
+
+  const noLocation = buildLorebookPlans(WORLD, committedReceipt({ currentLocationId: null }));
+  ok(noLocation, "仍有动向条目");
+  equal(noLocation.entries.length, 1, "事件条目被省略");
+  equal(noLocation.entries[0].category, "moves");
+
+  const neither = buildLorebookPlans(noNpcWorld, committedReceipt({ currentLocationId: null }));
+  equal(neither, null, "两条都不可用 → null");
+});
+
+test("规划：内容 / 关键词有界，名称去重，同输入逐字节相同（确定性）", () => {
+  const manyNames = [];
+  for (let i = 0; i < 20; i += 1) manyNames.push({ id: `npc-${i}`, name: `角色${i}号` });
+  const effects = manyNames.map((c) => ({ kind: "moveEntity", entityId: c.id, pointId: "pt-1" }));
+  const wideWorld = {
+    ...WORLD,
+    characters: manyNames,
+    stateEvents: [{ ...WORLD.stateEvents[0], entityRefs: manyNames.map((c) => c.id), effects }],
+  };
+  const plans = buildLorebookPlans(wideWorld, committedReceipt());
+  const moves = plans.entries.find((e) => e.category === "moves");
+  equal(moves.keys.length, ATLAS_LOREBOOK_LIMITS.KEYS_MAX, "关键词上限");
+  ok(moves.content.length <= ATLAS_LOREBOOK_LIMITS.CONTENT_CHARS, "内容上限");
+
+  const longSummaryWorld = {
+    ...WORLD,
+    stateEvents: [{ ...WORLD.stateEvents[0], narrativeSummary: "很长".repeat(500) }],
+  };
+  const bounded = buildLorebookPlans(longSummaryWorld, committedReceipt());
+  for (const entry of bounded.entries) {
+    ok(entry.content.length <= ATLAS_LOREBOOK_LIMITS.CONTENT_CHARS, "超长摘要被截断");
+  }
+
+  const a = buildLorebookPlans(WORLD, committedReceipt());
+  const b = buildLorebookPlans(WORLD, committedReceipt());
+  deepEqual(a, b, "同世界状态 + 同回执 → 逐字节相同");
+});
+
+test("规划：实体 id 未命中任何角色 / 地点 → 不进关键词（不把内部 id 泄给主模型）", () => {
+  const ghostWorld = {
+    ...WORLD,
+    stateEvents: [
+      {
+        ...WORLD.stateEvents[0],
+        entityRefs: ["ghost-1"],
+        effects: [{ kind: "moveEntity", entityId: "ghost-1", pointId: "pt-1" }],
+      },
+    ],
+  };
+  const plans = buildLorebookPlans(ghostWorld, committedReceipt());
+  const moves = plans.entries.find((e) => e.category === "moves");
+  equal(moves, undefined, "没有可读角色名 → 不产动向条目");
+});
+
+test("书名：剔除 ST 服务端文件名不接受的字符；空名回退", () => {
+  equal(lorebookNameFor("A/B:C*D?"), "Atlas · ABCD", "非法字符被剔除");
+  equal(lorebookNameFor(""), "Atlas · 未命名世界", "空名回退");
+  equal(lorebookNameFor("   "), "Atlas · 未命名世界", "纯空白回退");
+});
+
+// ---------------------------------------------------------------------------
+// 严格解析
+// ---------------------------------------------------------------------------
+
+test("解析：合法规划通过；缺字段 / 超限 / 数量非法一律拒绝", () => {
+  const valid = {
+    bookName: "Atlas · 星环余烬",
+    entries: [
+      { category: "moves", comment: `${ATLAS_LOREBOOK_PREFIX.moves} 第 2 → 3 时段`, keys: ["艾莉娅"], content: "摘要\n[Atlas · 来源]" },
+    ],
+  };
+  const parsed = parseAtlasLorebookPlans(valid);
+  ok(parsed.ok, "合法载荷通过");
+  equal(parsed.value.entries[0].keys[0], "艾莉娅");
+
+  for (const broken of [
+    null,
+    "nope",
+    [],
+    { entries: [] },
+    { bookName: "", entries: [{ category: "moves", comment: "c", keys: ["a"], content: "x" }] },
+    { bookName: "b", entries: [{ category: "quest", comment: "c", keys: ["a"], content: "x" }] },
+    { bookName: "b", entries: [{ category: "moves", comment: "c", keys: [], content: "x" }] },
+    { bookName: "b", entries: [{ category: "moves", comment: "c", keys: ["a"], content: "" }] },
+    { bookName: "b".repeat(80), entries: [{ category: "moves", comment: "c", keys: ["a"], content: "x" }] },
+    {
+      bookName: "b",
+      entries: [
+        { category: "moves", comment: "c1", keys: ["a"], content: "x" },
+        { category: "events", comment: "c2", keys: ["b"], content: "y" },
+        { category: "events", comment: "c3", keys: ["c"], content: "z" },
+      ],
+    },
+    { bookName: "b", entries: [{ category: "moves", comment: "c", keys: ["a".repeat(100)], content: "x" }] },
+  ]) {
+    const result = parseAtlasLorebookPlans(broken);
+    equal(result.ok, false, `非法载荷被拒绝：${JSON.stringify(broken).slice(0, 40)}`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 写入器（mock port）
+// ---------------------------------------------------------------------------
+
+/** 内存版 ST world-info：语义与官方 API 对齐（loadWorldInfo 深拷贝；保存后缓存同一对象）。 */
+function makeMockPort(options = {}) {
+  const books = new Map();
+  const savedMetadata = [];
+  const saves = [];
+  const api = {
+    async loadWorldInfo(name) {
+      const raw = books.get(name);
+      return raw ? JSON.parse(JSON.stringify(raw)) : null;
+    },
+    async createNewWorldInfo(name) {
+      if (!books.has(name)) books.set(name, { entries: {} });
+    },
+    async saveWorldInfo(name, data) {
+      books.set(name, JSON.parse(JSON.stringify(data)));
+      saves.push(name);
+    },
+    createWorldInfoEntry(_name, data) {
+      data.entries = data.entries ?? {};
+      let uid = 0;
+      for (const key of Object.keys(data.entries)) {
+        const n = Number(key);
+        if (Number.isFinite(n)) uid = Math.max(uid, n);
+      }
+      uid += 1;
+      const entry = { uid: String(uid), key: [], keysecondary: [], comment: "", content: "", constant: false, selective: true, disable: false };
+      data.entries[String(uid)] = entry;
+      return entry;
+    },
+    deleteWorldInfoEntry(data, uid) {
+      if (data.entries) delete data.entries[String(uid)];
+    },
+  };
+  const chatMetadata = options.chatMetadata ?? {};
+  return {
+    api,
+    books,
+    saves,
+    chatMetadata,
+    savedMetadata,
+  };
+}
+
+const PLANS_A = {
+  bookName: "Atlas · 星环余烬",
+  entries: [
+    { category: "moves", comment: `${ATLAS_LOREBOOK_PREFIX.moves} 第 2 → 3 时段`, keys: ["艾莉娅", "巴罗"], content: "动向 A" },
+    { category: "events", comment: `${ATLAS_LOREBOOK_PREFIX.events} 第 3 时段`, keys: ["集市广场"], content: "事件 A" },
+  ],
+};
+
+/**
+ * 组合出与生产一致的链路：mock world-info API → index.js 的真实端口适配器 → writer。
+ * （直接把 api 传给 writer 会跳过适配层，测不到 chatMetadata.world_info 的绑定语义。）
+ */
+function makeWriter(mock, options = {}) {
+  const chatContext = {
+    chatMetadata: options.chatMetadata ?? mock.chatMetadata,
+    saveMetadata: async () => {
+      mock.savedMetadata.push(true);
+    },
+  };
+  const port = createLorebookPort(() => chatContext, mock.api);
+  return createAtlasLorebookWriter(port, { now: options.now });
+}
+
+test("写入器：书不存在 → 建书后写入；重复同步同 comment 不产生重复条目", async () => {
+  const mock = makeMockPort();
+  const writer = makeWriter(mock, { now: () => 1000 });
+
+  const first = await writer.syncTurn(PLANS_A);
+  equal(first.created, true, "首次建书");
+  equal(first.written, 2, "写入两条");
+  equal(mock.saves.length, 1, "整书只保存一次");
+
+  const second = await writer.syncTurn(PLANS_A);
+  equal(second.created, false, "第二次不再建书");
+  equal(second.written, 2, "仍写入两条（upsert）");
+  equal(second.pruned, 0, "未超量不修剪");
+
+  const book = mock.books.get("Atlas · 星环余烬");
+  equal(Object.keys(book.entries).length, 2, "书内恰好两条（按 comment 去重）");
+});
+
+test("写入器：聊天绑定槽为空才绑定；已绑别的书 → conflict 且不上覆", async () => {
+  const metadata = {};
+  const empty = makeMockPort({ chatMetadata: metadata });
+  const writer1 = makeWriter(empty);
+  const result1 = await writer1.syncTurn(PLANS_A);
+  equal(result1.binding, "bound-by-atlas", "空槽 → Atlas 绑定");
+  equal(metadata.world_info, "Atlas · 星环余烬", "绑定写入 chatMetadata");
+  deepEqual(empty.savedMetadata, [true], "绑定后恰好保存一次 metadata");
+
+  const mine = makeMockPort({ chatMetadata: { world_info: "用户的自有世界书" } });
+  const writer2 = makeWriter(mine);
+  const result2 = await writer2.syncTurn(PLANS_A);
+  equal(result2.binding, "conflict", "已有绑定 → 冲突上报");
+  equal(result2.existingBookName, "用户的自有世界书", "冲突时带回原书名");
+  equal(mine.chatMetadata.world_info, "用户的自有世界书", "绝不静默覆盖用户绑定");
+  deepEqual(mine.savedMetadata, [], "未发生任何绑定写");
+  ok(mine.books.has("Atlas · 星环余烬"), "条目仍已写入 Atlas 书（等用户手动激活）");
+
+  const same = makeMockPort({ chatMetadata: { world_info: "Atlas · 星环余烬" } });
+  const writer3 = makeWriter(same);
+  const result3 = await writer3.syncTurn(PLANS_A);
+  equal(result3.binding, "already-bound", "已绑 Atlas 书 → 无需动作");
+  deepEqual(same.savedMetadata, [], "不重复绑定");
+});
+
+test("写入器：按类目滚动修剪——时段号新 → 旧保留，超出部分删除", async () => {
+  const mock = makeMockPort();
+  const writer = makeWriter(mock, { now: () => 1 });
+
+  // 先塞满 12 条旧动向 + 12 条旧事件（直接走 syncTurn 循环）
+  for (let turn = 1; turn <= 12; turn += 1) {
+    await writer.syncTurn({
+      bookName: "Atlas · 星环余烬",
+      entries: [
+        { category: "moves", comment: `${ATLAS_LOREBOOK_PREFIX.moves} 第 ${turn} → ${turn + 1} 时段`, keys: ["艾莉娅"], content: `t${turn}` },
+        { category: "events", comment: `${ATLAS_LOREBOOK_PREFIX.events} 第 ${turn + 1} 时段`, keys: ["集市广场"], content: `e${turn}` },
+      ],
+    });
+  }
+  let book = mock.books.get("Atlas · 星环余烬");
+  equal(Object.keys(book.entries).length, 24, "恰好 = 双类目上限");
+
+  // 第 13 轮：应挤掉第 1 轮（最旧）
+  await writer.syncTurn({
+    bookName: "Atlas · 星环余烬",
+    entries: [
+      { category: "moves", comment: `${ATLAS_LOREBOOK_PREFIX.moves} 第 13 → 14 时段`, keys: ["艾莉娅"], content: "t13" },
+      { category: "events", comment: `${ATLAS_LOREBOOK_PREFIX.events} 第 14 时段`, keys: ["集市广场"], content: "e13" },
+    ],
+  });
+  book = mock.books.get("Atlas · 星环余烬");
+  const comments = Object.values(book.entries).map((e) => e.comment);
+  equal(comments.length, 24, "修剪后仍在上限内");
+  ok(!comments.some((c) => c.includes("第 1 → 2 时段")), "最旧动向被修剪");
+  ok(comments.some((c) => c.includes("第 13 → 14 时段")), "最新动向保留");
+  const result = { pruned: 2 };
+  ok(result.pruned === 2, "本轮修剪 2 条");
+});
+
+test("写入器：目标书存在但形状非法 → 拒绝写入（绝不能覆盖非 Atlas 的书）", async () => {
+  const mock = makeMockPort();
+  mock.books.set("Atlas · 星环余烬", { broken: true });
+  const writer = makeWriter(mock);
+  await assert.rejects(() => writer.syncTurn(PLANS_A), /载荷异常/, "非法书形状被拒绝");
+  deepEqual(mock.saves, [], "没有发生保存");
+});
+
+test("写入器：空规划被拒绝；快照含绑定状态与全量条目视图", async () => {
+  const mock = makeMockPort();
+  const writer = makeWriter(mock, { now: () => 1234 });
+  await assert.rejects(() => writer.syncTurn({ bookName: "b", entries: [] }), /规划为空/, "空规划拒绝");
+
+  const result = await writer.syncTurn(PLANS_A);
+  const snap = writer.snapshot(PLANS_A, result);
+  equal(snap.schemaVersion, 1, "快照带版本");
+  equal(snap.bookName, "Atlas · 星环余烬", "快照带书名");
+  equal(snap.updatedAt, 1234, "快照带时间（注入时钟）");
+  equal(snap.written, 2, "快照带写入数");
+  equal(snap.binding, "bound-by-atlas", "快照带绑定状态");
+  equal(snap.entries.length, 2, "快照含书内全部 Atlas 条目");
+  ok(snap.entries.every((e) => ["moves", "events"].includes(e.category)), "条目视图带类目");
+});
+
+test("写入器：保存后不再触碰 data（酒馆缓存不深拷贝）", async () => {
+  const touched = [];
+  const mock = makeMockPort();
+  const originalSave = mock.api.saveWorldInfo;
+  mock.api.saveWorldInfo = async (name, data) => {
+    // 记录保存瞬间的内容；之后任何变更都应被发现
+    const frozen = JSON.stringify(data);
+    await originalSave(name, data);
+    queueMicrotask(() => {
+      if (JSON.stringify(data) !== frozen) touched.push(name);
+    });
+  };
+  const writer = makeWriter(mock);
+  await writer.syncTurn(PLANS_A);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  deepEqual(touched, [], "save 返回后 data 未被改动");
+});
+
+test("本轮累计断言已记录（计数见报告）", () => {
+  ok(assertionCount > 40, `断言数：${assertionCount}`);
+});

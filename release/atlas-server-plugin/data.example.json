@@ -1,0 +1,7 @@
+{
+  "_comment": "data.example.json — ATLAS-00 骨架占位。真实世界存储契约在 ATLAS-02 定义，禁止在此存放任何用户数据或密钥。",
+  "schemaVersion": 1,
+  "worlds": [],
+  "bindings": [],
+  "apiPresets": []
+}

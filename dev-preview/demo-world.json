@@ -1,0 +1,672 @@
+{
+  "schemaVersion": 1,
+  "id": "atlas-preview-chronicle",
+  "name": "完整体验 · 星环余烬",
+  "description": "可完整阅读的示例世界：3 地区、6 地点、10 事件、4 人物、1 条正史与 2 条 IF。用于体验地图、时间轴、事件详情、特异点与两种阅读器；不含 API 密钥。",
+  "currentRegionId": "north",
+  "currentYear": 418,
+  "createdAt": 1000,
+  "updatedAt": 1000,
+  "regions": [
+    {
+      "id": "north",
+      "name": "霜线北境",
+      "type": "mountain",
+      "description": "雪线驿站与无火大厅所在的边境。这里的人负责守住王都不愿记起的旧约。",
+      "coordinates": {
+        "x": 28,
+        "y": 24
+      },
+      "subtitle": "北境",
+      "tone": "#b7d1d1",
+      "worldId": "atlas-preview-chronicle"
+    },
+    {
+      "id": "capital",
+      "name": "白塔王都",
+      "type": "city",
+      "description": "钟塔、玻璃温室与潮门都藏在这座曾经只相信唯一历史的城市里。",
+      "coordinates": {
+        "x": 54,
+        "y": 47
+      },
+      "subtitle": "王都",
+      "tone": "#e4c77f",
+      "worldId": "atlas-preview-chronicle"
+    },
+    {
+      "id": "isles",
+      "name": "鲸歌群岛",
+      "type": "sea",
+      "description": "潮门彼端的群岛；鲸骨档案馆在这里保存被放弃的可能性。",
+      "coordinates": {
+        "x": 77,
+        "y": 72
+      },
+      "subtitle": "群岛",
+      "tone": "#85bcc8",
+      "worldId": "atlas-preview-chronicle"
+    }
+  ],
+  "events": {
+    "north": [
+      {
+        "id": "chronicle-letter",
+        "year": "418.02",
+        "title": "霜原来信",
+        "summary": "雪线驿站送来一封没有署名的信：白塔将在七次月落后响起不该存在的第十三声。",
+        "content": "雪停在午夜。薇尔·星环站在雪线驿站的檐下，手里那封信没有蜡印，纸却仍带着温度。\n\n信上只写了一句话：\"第十三声响起时，不要让任何人握住钟锤。\"\n\n塔尔说这像个拙劣的圈套；薇尔却认出了信纸边缘的潮盐。群岛有人冒着封海，把答案送到了北境。她把信折回胸前，决定先去无火大厅。",
+        "branches": 0,
+        "characterIds": [
+          "chronicle-c1",
+          "chronicle-c3"
+        ]
+      },
+      {
+        "id": "chronicle-hall",
+        "year": "418.04",
+        "title": "无火大厅",
+        "summary": "北境三位守望者在熄灭的壁炉前交出旧王留下的半枚钥匙。",
+        "content": "无火大厅没有窗，只有三面被烟熏黑的墙。守望者们把半枚钥匙放在石桌中央，钥匙的切面像一道没有愈合的伤。\n\n\"白塔的钟不是报时，\"最年长的守望者说，\"它在替某个世界记住没有发生过的事。\"\n\n薇尔收下钥匙时，远方冰原传来第一声鲸鸣。那声音不该越过群山，却准确地叫出了她的名字。",
+        "branches": 0,
+        "characterIds": [
+          "chronicle-c1",
+          "chronicle-c3"
+        ]
+      }
+    ],
+    "capital": [
+      {
+        "id": "chronicle-bell",
+        "year": "418.07",
+        "title": "白塔第十三声",
+        "summary": "白塔在正午敲响第十三声，整座王都在同一瞬间记起了彼此矛盾的昨天。",
+        "content": "第十二声结束后，王都所有的影子都先于人群转过了身。\n\n第十三声随即落下。市场里的母亲认得一个从未出生的孩子；卫兵拔剑，却说不清自己是在保护王冠还是推翻它。伊莱恩站在钟锤旁，像早已等候这一刻。\n\n薇尔将半枚钥匙嵌进钟座，听见海潮从石头深处涌来。她可以放下钟锤，让这座城忘记一切；也可以再敲一次，让所有被抹去的可能性都有名字。",
+        "branches": 2,
+        "singularity": true,
+        "characterIds": [
+          "chronicle-c1",
+          "chronicle-c2",
+          "chronicle-c4"
+        ]
+      },
+      {
+        "id": "chronicle-key",
+        "year": "418.08",
+        "title": "钥匙交接",
+        "summary": "白塔钟声之后，伊莱恩将另一半钥匙交给薇尔，承认自己一直在阻止更坏的结局。",
+        "content": "钟声散去时，伊莱恩没有逃。他把另一半钥匙放在台阶上，手背满是被钟锤震裂的血痕。\n\n\"我不是来夺走王冠的，\"他说，\"我是来替所有已经失去王冠的你们守门。\"\n\n薇尔没有立刻相信他，却把钥匙拾起。两枚钥匙合拢的一刻，白塔地下的潮门显出一道细缝，缝隙另一端是正在退潮的群岛。",
+        "branches": 0,
+        "characterIds": [
+          "chronicle-c1",
+          "chronicle-c2"
+        ]
+      },
+      {
+        "id": "chronicle-lantern",
+        "year": "418.10",
+        "title": "玻璃温室的灯",
+        "summary": "一个与主线无关的温室守夜人点亮旧灯，留下可单独阅读的事件详情样本。",
+        "content": "玻璃温室位于王都最安静的角落。钟声之后，守夜人把一盏从未点过的蓝灯挂在藤架上。\n\n他不知道白塔发生了什么，也不知道这盏灯会不会引来什么人；他只记得园丁曾说，世界越乱，越要给晚归的人留一扇看得见的窗。\n\n这不是任何故事线的一步。它只是一个地点、一个人和一个晚上留下的记录。",
+        "branches": 0,
+        "characterIds": [
+          "chronicle-c2"
+        ]
+      },
+      {
+        "id": "chronicle-garden",
+        "year": "418.12",
+        "title": "静默花园",
+        "summary": "选择放下钟锤后，王都保住了秩序，却开始遗忘所有无法被证明的奇迹。",
+        "content": "薇尔放下钟锤。第十四声没有到来，王都的街道重新安静，仿佛那十三次震动只是集体的幻觉。\n\n只有温室里的蓝灯还在燃烧。赛芙说，海会记住这一天，但陆地会把它忘得很干净。\n\n薇尔把两枚钥匙埋进花园，决定让人们继续过平常的日子；代价是，那些本可以被拯救的世界线，只能在梦里敲门。",
+        "branches": 1,
+        "characterIds": [
+          "chronicle-c1",
+          "chronicle-c4"
+        ]
+      },
+      {
+        "id": "chronicle-fourteenth",
+        "year": "418.12",
+        "title": "第十四声之后",
+        "summary": "选择再敲一次钟后，王都看见了无数相互重叠的自己。",
+        "content": "第十四声没有声音。它像一滴墨落进水里，王都的每一扇窗都映出另一座王都。\n\n薇尔看见自己在不同的世界里戴冠、流亡、死去，又在每一次结尾回到钟座前。伊莱恩跪在石阶上，终于承认他怕的从来不是混乱，而是人们拥有选择。\n\n潮门彻底打开。赛芙在海那边唱起引航歌，歌里说：记得所有可能的人，必须亲手选择自己要失去哪一种。",
+        "branches": 1,
+        "characterIds": [
+          "chronicle-c1",
+          "chronicle-c2",
+          "chronicle-c4"
+        ]
+      }
+    ],
+    "isles": [
+      {
+        "id": "chronicle-departure",
+        "year": "418.11",
+        "title": "潮门启航",
+        "summary": "钥匙开启潮门，薇尔与赛芙驾船前往鲸骨档案馆寻找王都记忆的源头。",
+        "content": "潮门不是一扇门，而是一片竖起来的海。船穿过它时，甲板上的雪融成盐，北境的寒风从桅杆间退去。\n\n赛芙把耳朵贴在船舷上，说鲸群正在替所有迷路的世界唱同一首歌。塔尔第一次离开群山，却没有回头。\n\n他们驶向鲸骨档案馆。那里收藏的不是书，而是每一个被放弃的结局留下的骨白色回声。",
+        "branches": 0,
+        "characterIds": [
+          "chronicle-c1",
+          "chronicle-c3",
+          "chronicle-c4"
+        ]
+      },
+      {
+        "id": "chronicle-whale",
+        "year": "418.13",
+        "title": "鲸骨档案",
+        "summary": "档案馆证实白塔钟声是三百年前一场未完成的选择，且每个选择都仍在等待归属。",
+        "content": "鲸骨档案馆的穹顶像一艘倒扣的船。每一根骨梁都刻着一座已经不存在的城名。\n\n薇尔在最深处找到一页没有写完的航海日志：三百年前，有人第一次听见第十三声，却在敲下第十四声前把钟锤沉进海里。于是所有分歧被封存，没有消失。\n\n赛芙问薇尔：\"现在轮到你了。你是要替它们选一个结局，还是让每一个结局都自己活下去？\"",
+        "branches": 1,
+        "characterIds": [
+          "chronicle-c1",
+          "chronicle-c4"
+        ]
+      },
+      {
+        "id": "chronicle-return",
+        "year": "419.01",
+        "title": "归航的晨星",
+        "summary": "众人带着可被选择的未来回到王都，白塔不再替任何人决定结局。",
+        "content": "新年的第一束光穿过潮门时，王都的钟没有响。人们仍然记得混乱，也仍然记得彼此不同的昨天，但再没有谁要求另一个人忘掉。\n\n薇尔把两枚钥匙交给守夜人、园丁和船夫，让它们不再属于王冠，也不再属于白塔。\n\n晨星升起，赛芙说这不是最好的结局，只是一个被所有人共同写下的结局。薇尔望向海面，第一次相信未被选择的世界也许并没有死去。",
+        "branches": 0,
+        "characterIds": [
+          "chronicle-c1",
+          "chronicle-c2",
+          "chronicle-c3",
+          "chronicle-c4"
+        ]
+      }
+    ]
+  },
+  "characters": [
+    {
+      "id": "chronicle-c1",
+      "worldId": "atlas-preview-chronicle",
+      "name": "薇尔·星环",
+      "role": "持钥人",
+      "description": "流亡王族的后裔。她想守住王都，却不愿再让一个人的选择替所有人决定未来。",
+      "currentRegionId": "capital",
+      "tags": [
+        "主角",
+        "持钥人",
+        "王族"
+      ]
+    },
+    {
+      "id": "chronicle-c2",
+      "worldId": "atlas-preview-chronicle",
+      "name": "伊莱恩·莫尔",
+      "role": "白塔守钟人",
+      "description": "看守第十三声多年的守钟人。他既是阻止者，也是把选择推到薇尔面前的人。",
+      "currentRegionId": "capital",
+      "tags": [
+        "守钟人",
+        "灰色角色",
+        "白塔"
+      ]
+    },
+    {
+      "id": "chronicle-c3",
+      "worldId": "atlas-preview-chronicle",
+      "name": "塔尔·霜铁",
+      "role": "北境守望者",
+      "description": "无火大厅的最后一位年轻守望者，习惯用最实际的方式保护看不见的承诺。",
+      "currentRegionId": "north",
+      "tags": [
+        "北境",
+        "守望者",
+        "同伴"
+      ]
+    },
+    {
+      "id": "chronicle-c4",
+      "worldId": "atlas-preview-chronicle",
+      "name": "赛芙·潮歌",
+      "role": "群岛引航人",
+      "description": "能听懂鲸鸣中的旧航线。她相信每个被放弃的结局都值得拥有自己的名字。",
+      "currentRegionId": "isles",
+      "tags": [
+        "群岛",
+        "引航人",
+        "神秘"
+      ]
+    }
+  ],
+  "points": [
+    {
+      "id": 4101,
+      "name": "雪线驿站",
+      "x": 20,
+      "y": 20,
+      "regionId": "north"
+    },
+    {
+      "id": 4102,
+      "name": "无火大厅",
+      "x": 34,
+      "y": 28,
+      "regionId": "north"
+    },
+    {
+      "id": 4103,
+      "name": "白塔钟座",
+      "x": 53,
+      "y": 42,
+      "regionId": "capital"
+    },
+    {
+      "id": 4104,
+      "name": "玻璃温室",
+      "x": 63,
+      "y": 54,
+      "regionId": "capital"
+    },
+    {
+      "id": 4105,
+      "name": "潮门港",
+      "x": 71,
+      "y": 68,
+      "regionId": "isles"
+    },
+    {
+      "id": 4106,
+      "name": "鲸骨档案馆",
+      "x": 82,
+      "y": 76,
+      "regionId": "isles"
+    }
+  ],
+  "stories": [
+    {
+      "id": "chronicle-canon",
+      "mode": "canon",
+      "title": "正史 · 星环余烬",
+      "steps": [
+        {
+          "eventId": "chronicle-letter",
+          "choice": null
+        },
+        {
+          "eventId": "chronicle-hall",
+          "choice": null
+        },
+        {
+          "eventId": "chronicle-bell",
+          "choice": null
+        },
+        {
+          "eventId": "chronicle-key",
+          "choice": null
+        },
+        {
+          "eventId": "chronicle-departure",
+          "choice": null
+        },
+        {
+          "eventId": "chronicle-return",
+          "choice": null
+        }
+      ],
+      "chapters": [
+        {
+          "id": "chronicle-canon-c1",
+          "title": "第一章 · 雪线来信",
+          "fromStep": 0
+        },
+        {
+          "id": "chronicle-canon-c2",
+          "title": "第二章 · 白塔回声",
+          "fromStep": 2
+        },
+        {
+          "id": "chronicle-canon-c3",
+          "title": "第三章 · 潮门归航",
+          "fromStep": 4
+        }
+      ],
+      "worldId": "atlas-preview-chronicle"
+    },
+    {
+      "id": "chronicle-if-silence",
+      "mode": "if",
+      "title": "IF · 静默花园",
+      "parentStoryId": "chronicle-canon",
+      "divergenceEventId": "chronicle-bell",
+      "steps": [
+        {
+          "eventId": "chronicle-letter",
+          "choice": null
+        },
+        {
+          "eventId": "chronicle-hall",
+          "choice": null
+        },
+        {
+          "eventId": "chronicle-bell",
+          "choice": "放下钟锤，保全沉默"
+        },
+        {
+          "eventId": "chronicle-garden",
+          "choice": "把钥匙埋进温室"
+        },
+        {
+          "eventId": "chronicle-return",
+          "choice": "让未被书写的名字随潮水离去"
+        }
+      ],
+      "chapters": [
+        {
+          "id": "chronicle-if-silence-c1",
+          "title": "分歧 · 没有第十四声的夜",
+          "fromStep": 0
+        },
+        {
+          "id": "chronicle-if-silence-c2",
+          "title": "结局 · 被保全的平静",
+          "fromStep": 3
+        }
+      ],
+      "worldId": "atlas-preview-chronicle"
+    },
+    {
+      "id": "chronicle-if-echo",
+      "mode": "if",
+      "title": "IF · 第十四声之后",
+      "parentStoryId": "chronicle-canon",
+      "divergenceEventId": "chronicle-bell",
+      "steps": [
+        {
+          "eventId": "chronicle-letter",
+          "choice": null
+        },
+        {
+          "eventId": "chronicle-hall",
+          "choice": null
+        },
+        {
+          "eventId": "chronicle-bell",
+          "choice": "敲响第十四声，接受回响"
+        },
+        {
+          "eventId": "chronicle-fourteenth",
+          "choice": "允许所有可能性显形"
+        },
+        {
+          "eventId": "chronicle-whale",
+          "choice": "让每个结局自己寻找归宿"
+        },
+        {
+          "eventId": "chronicle-return",
+          "choice": "带着多重记忆归航"
+        }
+      ],
+      "chapters": [
+        {
+          "id": "chronicle-if-echo-c1",
+          "title": "分歧 · 所有窗都映出另一座城",
+          "fromStep": 0
+        },
+        {
+          "id": "chronicle-if-echo-c2",
+          "title": "结局 · 选择仍在继续",
+          "fromStep": 3
+        }
+      ],
+      "worldId": "atlas-preview-chronicle"
+    }
+  ],
+  "characterStates": [
+    {
+      "characterId": "chronicle-c1",
+      "currentRegionId": "capital",
+      "currentPointId": "4103",
+      "status": "持钥人，已在白塔钟座",
+      "updatedAt": 0
+    },
+    {
+      "characterId": "chronicle-c2",
+      "currentRegionId": "capital",
+      "currentPointId": "4103",
+      "status": "白塔守钟人，等待第十三声",
+      "updatedAt": 0
+    },
+    {
+      "characterId": "chronicle-c3",
+      "currentRegionId": "north",
+      "currentPointId": "4102",
+      "status": "无火大厅守望者",
+      "updatedAt": 0
+    },
+    {
+      "characterId": "chronicle-c4",
+      "currentRegionId": "isles",
+      "currentPointId": "4105",
+      "status": "潮门引航人",
+      "updatedAt": 0
+    }
+  ],
+  "characterMemories": [
+    {
+      "id": "chronicle-mem-c1-hall",
+      "characterId": "chronicle-c1",
+      "at": 418.04,
+      "content": "无火大厅里，三位守望者交出旧王留下的半枚钥匙；鲸鸣越过群山叫出了我的名字。",
+      "regionId": "north",
+      "pointId": "4102",
+      "eventId": "chronicle-hall",
+      "important": true,
+      "createdAt": 0,
+      "branchId": null
+    },
+    {
+      "id": "chronicle-mem-c1-silence",
+      "characterId": "chronicle-c1",
+      "at": 418.12,
+      "content": "我放下钟锤，把两枚钥匙埋进温室花园——王都保住了秩序，却开始遗忘所有无法被证明的奇迹。",
+      "regionId": "capital",
+      "pointId": "4104",
+      "eventId": "chronicle-garden",
+      "important": true,
+      "createdAt": 0,
+      "branchId": "chronicle-if-silence"
+    },
+    {
+      "id": "chronicle-mem-c4-whale",
+      "characterId": "chronicle-c4",
+      "at": 418.13,
+      "content": "鲸骨档案馆证实：三百年前有人第一次听见第十三声，却在敲下第十四声前把钟锤沉进海里。",
+      "regionId": "isles",
+      "pointId": "4106",
+      "eventId": "chronicle-whale",
+      "important": true,
+      "createdAt": 0,
+      "branchId": "chronicle-if-echo"
+    }
+  ],
+  "storyRuntimes": [
+    {
+      "storyId": "chronicle-canon",
+      "currentTime": 418.07,
+      "currentRegionId": "capital",
+      "currentPointId": "4103",
+      "worldFlags": [
+        "bell-rung"
+      ],
+      "actionLog": [
+        "act-c-letter",
+        "act-c-hall",
+        "act-c-bell"
+      ],
+      "updatedAt": 0
+    },
+    {
+      "storyId": "chronicle-if-silence",
+      "currentTime": 418.12,
+      "currentRegionId": "capital",
+      "currentPointId": "4104",
+      "worldFlags": [
+        "key-buried"
+      ],
+      "actionLog": [],
+      "snapshotFrom": "chronicle-canon",
+      "updatedAt": 0
+    },
+    {
+      "storyId": "chronicle-if-echo",
+      "currentTime": 418.13,
+      "currentRegionId": "isles",
+      "currentPointId": "4106",
+      "worldFlags": [
+        "echo-open"
+      ],
+      "actionLog": [],
+      "snapshotFrom": "chronicle-canon",
+      "updatedAt": 0
+    }
+  ],
+  "agentSessions": [
+    {
+      "storyId": "chronicle-canon",
+      "presentationMode": "reader",
+      "knowledgeScope": "全知作者视角：展示整条正史分支",
+      "updatedAt": 0
+    },
+    {
+      "storyId": "chronicle-if-silence",
+      "presentationMode": "firstPerson",
+      "viewpointCharacterId": "chronicle-c1",
+      "updatedAt": 0
+    },
+    {
+      "storyId": "chronicle-if-echo",
+      "presentationMode": "firstPerson",
+      "viewpointCharacterId": "chronicle-c1",
+      "updatedAt": 0
+    }
+  ],
+  "triggers": [
+    {
+      "id": "chronicle-trig-bell",
+      "enabled": true,
+      "title": "白塔余响",
+      "conditionSummary": "抵达王都（capital）时，钟座残留第十三声的回响",
+      "condition": {
+        "regionId": "capital"
+      },
+      "outcomeTemplate": "钟座深处传来第十三声的余响，薇尔指尖一颤。",
+      "outcomeTags": [
+        "bell-rung"
+      ],
+      "createdAt": 0,
+      "updatedAt": 0
+    }
+  ],
+  "actions": [
+    {
+      "id": "act-c-letter",
+      "at": 418.02,
+      "kind": "interact",
+      "actorId": "chronicle-c1",
+      "fromRegionId": "north",
+      "fromPointId": "4101",
+      "toRegionId": "north",
+      "toPointId": "4101",
+      "duration": 1,
+      "durationSource": "baseline",
+      "baselineVersion": "dtb-1",
+      "startedAt": 418.02,
+      "endedAt": 419.02,
+      "outcomeId": "out-c-letter"
+    },
+    {
+      "id": "act-c-hall",
+      "at": 418.04,
+      "kind": "move",
+      "actorId": "chronicle-c1",
+      "fromRegionId": "north",
+      "fromPointId": "4101",
+      "toRegionId": "north",
+      "toPointId": "4102",
+      "duration": 2,
+      "durationSource": "baseline",
+      "baselineVersion": "dtb-1",
+      "startedAt": 419.02,
+      "endedAt": 421.02,
+      "outcomeId": "out-c-hall"
+    },
+    {
+      "id": "act-c-bell",
+      "at": 418.07,
+      "kind": "choice",
+      "actorId": "chronicle-c1",
+      "fromRegionId": "capital",
+      "fromPointId": "4103",
+      "toRegionId": "capital",
+      "toPointId": "4103",
+      "duration": 1,
+      "durationSource": "baseline",
+      "baselineVersion": "dtb-1",
+      "startedAt": 421.02,
+      "endedAt": 422.02,
+      "outcomeId": "out-c-bell"
+    }
+  ],
+  "outcomes": [
+    {
+      "id": "out-c-letter",
+      "actionId": "act-c-letter",
+      "kind": "nothing",
+      "result": "薇尔读到无火大厅的来信，决定前往北境。",
+      "reason": "已确收信件"
+    },
+    {
+      "id": "out-c-hall",
+      "actionId": "act-c-hall",
+      "kind": "nothing",
+      "result": "北境雪原，薇尔在无火大厅接过旧王留下的半枚钥匙。",
+      "reason": "抵达无火大厅"
+    },
+    {
+      "id": "out-c-bell",
+      "actionId": "act-c-bell",
+      "kind": "trigger",
+      "triggerId": "chronicle-trig-bell",
+      "result": "白塔第十三声落下；余响在钟座深处震动，王都记起了彼此矛盾的昨天。",
+      "reason": "抵达王都触发白塔余响",
+      "changeRefs": [
+        "trigger:chronicle-trig-bell",
+        "flag:bell-rung"
+      ]
+    }
+  ],
+  "entryAnchors": [
+    {
+      "id": "anc-chronicle-letter",
+      "sourceCardId": "chronicle-letter",
+      "cardType": "event",
+      "eventId": "chronicle-letter",
+      "at": 200.5,
+      "regionId": "north",
+      "pointId": "4101",
+      "x": 20,
+      "y": 20,
+      "entryPolicy": "import-moment",
+      "completenessNote": "中段导入：雪线来信的正文与北境背景",
+      "createdAt": 0
+    }
+  ],
+  "travelSettings": {
+    "enabled": true,
+    "distancePerCell": 2,
+    "distanceUnit": "里",
+    "defaultSpeed": 8,
+    "terrainFactors": {
+      "north": 1.4,
+      "capital": 1,
+      "isles": 1.2
+    }
+  }
+}

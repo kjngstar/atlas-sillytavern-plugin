@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Atlas 世界工作台 · 本地预览</title>
+<link rel="stylesheet" href="../atlas-extension/style.css">
+<style>
+  /* 宿主页面背景：只为衬托悬浮窗，不属于插件样式。 */
+  html, body { margin: 0; height: 100%; background: #e6e1d4; }
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    background:
+      repeating-linear-gradient(0deg, transparent, transparent 39px, rgba(37,95,91,.06) 39px, rgba(37,95,91,.06) 40px),
+      repeating-linear-gradient(90deg, transparent, transparent 39px, rgba(37,95,91,.06) 39px, rgba(37,95,91,.06) 40px);
+    pointer-events: none;
+  }
+  #dev-controls { display: grid; gap: 7px; min-width: 0; }
+  #dev-controls textarea {
+    width: 100%; box-sizing: border-box; resize: vertical; min-height: 46px;
+    border: 1px solid #cfc9b8; border-radius: 7px; background: #fff;
+    font: 13px/1.5 system-ui, sans-serif; color: #13272c; padding: 7px 9px;
+  }
+  #dev-controls .dev-row { display: flex; gap: 6px; flex-wrap: wrap; }
+  #dev-controls .dev-row > * { flex: 1 1 auto; }
+  #dev-controls input[type="text"] {
+    width: 100%; box-sizing: border-box; min-width: 0;
+    border: 1px solid #cfc9b8; border-radius: 7px; background: #fff;
+    font: 12px/1.5 system-ui, sans-serif; color: #13272c; padding: 6px 9px;
+  }
+  #dev-controls label.dev-ck { display: flex; gap: 6px; align-items: center; font: 12px/1.5 system-ui, sans-serif; color: #3b5b5d; }
+  #dev-controls .dev-btn {
+    border: 1px solid #255f5b; border-radius: 8px; background: #255f5b; color: #f2dfad;
+    padding: 7px 10px; font: 700 13px/1.4 Georgia, serif; cursor: pointer;
+  }
+  #dev-controls .dev-btn--ghost { background: transparent; color: #255f5b; }
+  #dev-controls .dev-btn:hover { background: #1e4d49; color: #f2dfad; }
+  #dev-controls .dev-btn--ghost:hover { background: rgba(37,95,91,.08); color: #255f5b; }
+  #host-status { font: 11px/1.55 system-ui, sans-serif; color: #6f7f7d; overflow-wrap: anywhere; }
+  #dev-note { font: 11px/1.55 system-ui, sans-serif; color: #8a6a1c; }
+</style>
+</head>
+<body>
+<script>
+  // file:// 下浏览器会拦掉 ES module 引入（插件根本不会启动），这里给出明确指引。
+  if (location.protocol === "file:") {
+    document.body.innerHTML =
+      '<div style="font:14px/1.7 system-ui,sans-serif;max-width:640px;margin:80px auto;padding:28px;'
+      + 'border:1px solid #e2dccd;border-left:4px solid #255f5b;border-radius:10px;background:#fbfaf6;color:#13272c;">'
+      + '<h1 style="font:700 17px Georgia,serif;margin:0 0 12px;">请用本地服务打开预览</h1>'
+      + '<p style="margin:0 0 10px;">直接双击 HTML 会因浏览器 CORS 拦截 ES module 而看不到任何内容（插件不会启动）。</p>'
+      + '<p style="margin:0 0 10px;">正确做法：双击项目根目录的 <code>预览.bat</code>，它会启动本地服务并自动打开浏览器。</p>'
+      + '<p style="margin:0;color:#6f7f7d;font-size:13px;">等价命令：<code>node dev-preview/serve.mjs</code></p>'
+      + '</div>';
+  }
+</script>
+<script type="module">
+  const MOCK_DRAFT = JSON.stringify({
+    summary: "演示推演：午后集市人流渐多，商贩吆喝此起彼伏，一切如常。",
+    duration: 1,
+    locationChange: null,
+    npcChanges: [],
+    memoryDrafts: [],
+  });
+  const CANNED_REPLY = "（演示回复）你在集市边缘停下，人流从两侧涌过，远处钟楼敲响了午后的钟声。";
+
+  const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  // ---- SillyTavern stub（必须在 import 插件模块之前就位）----
+  const listeners = new Map();
+  const eventSource = {
+    on(name, fn) { if (!listeners.has(name)) listeners.set(name, new Set()); listeners.get(name).add(fn); },
+    off(name, fn) { listeners.get(name)?.delete(fn); },
+    removeListener(name, fn) { listeners.get(name)?.delete(fn); },
+    emit(name, payload) { for (const fn of [...(listeners.get(name) ?? [])]) fn(payload); },
+  };
+  const chat = [];
+  const extensionSettings = { atlas_world_sim: { panelOpen: true, docs: null } };
+  const contextValue = {
+    chatId: "preview-chat-1",
+    chat,
+    chatMetadata: {},
+    extensionSettings,
+    saveMetadata: async () => {},
+    saveSettingsDebounced: () => {},
+    getRequestHeaders: () => ({ "X-CSRF-Token": "preview-token" }),
+    eventSource,
+    event_types: {
+      APP_READY: "app_ready",
+      CHAT_CHANGED: "chat_changed",
+      MESSAGE_SENT: "message_sent",
+      MESSAGE_RECEIVED: "message_received",
+      GENERATION_ENDED_AFTER_COMMANDS: "generation_ended_after_commands",
+      GENERATION_ENDED: "generation_ended",
+      GENERATION_STOPPED: "generation_stopped",
+    },
+    setExtensionPrompt() {},
+  };
+  window.SillyTavern = { getContext: () => contextValue };
+
+  // ---- 模拟后端代理（可选）----
+  const realFetch = window.fetch.bind(window);
+  let mockEnabled = true;
+  window.fetch = async (input, init) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    if (mockEnabled && url.includes("/api/backends/chat-completions/generate")) {
+      await delay(600);
+      return new Response(JSON.stringify({ choices: [{ message: { content: MOCK_DRAFT } }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return realFetch(input, init);
+  };
+
+  // ---- 宿主侧引擎实例（与插件共用 extensionSettings 存储）----
+  const engineMod = await import("../atlas-extension/dist/atlas-ui-core.mjs");
+  const hostStore = engineMod.createBrowserDocumentStore({
+    readAll: () => extensionSettings.atlas_world_sim.docs ?? null,
+    writeAll: (docs) => { extensionSettings.atlas_world_sim.docs = docs; },
+  });
+  const hostEngine = engineMod.createAtlasServerCore({ store: hostStore, fetchFn: window.fetch });
+  const hostApi = engineMod.createLocalAtlasApi(hostEngine);
+
+  // ---- 预览控制槽：插件右栏会调用它（每次重渲染都会重建，故状态放在模块作用域）----
+  let sendText = "";
+  let statusText = "初始化中…";
+  let statusReady = false;
+
+  const setStatus = (text) => { statusText = text; };
+  const paintStatus = () => {
+    const node = document.getElementById("host-status");
+    if (node) node.textContent = statusText;
+  };
+
+  window.__atlasDevSlot = (box) => {
+    const wrap = document.createElement("div");
+    wrap.id = "dev-controls";
+
+    const hint = document.createElement("div");
+    hint.id = "dev-note";
+    hint.textContent = "这是本地预览夹具的控制面板，正式环境不会出现。";
+    wrap.append(hint);
+
+    const textarea = document.createElement("textarea");
+    textarea.rows = 2;
+    textarea.placeholder = "输入行动，例如：我们去集市转转";
+    textarea.value = sendText;
+    textarea.addEventListener("input", () => { sendText = textarea.value; });
+    wrap.append(textarea);
+
+    const row1 = document.createElement("div");
+    row1.className = "dev-row";
+    const sendBtn = document.createElement("button");
+    sendBtn.type = "button";
+    sendBtn.className = "dev-btn";
+    sendBtn.textContent = "发送行动";
+    sendBtn.addEventListener("click", async () => {
+      const text = textarea.value.trim();
+      if (!text) return;
+      sendText = "";
+      textarea.value = "";
+      chat.push({ mes: text, is_user: true });
+      eventSource.emit("message_sent", chat.length - 1);
+      await delay(400);
+      const interceptor = window.atlasGenerateInterceptor;
+      if (typeof interceptor === "function") await interceptor(chat, 4096, () => {}, "normal");
+    });
+    const replyBtn = document.createElement("button");
+    replyBtn.type = "button";
+    replyBtn.className = "dev-btn dev-btn--ghost";
+    replyBtn.textContent = "角色回复";
+    replyBtn.addEventListener("click", () => {
+      if (typeof window.atlasGenerateInterceptor !== "function") { setStatus("拦截器未就绪"); paintStatus(); return; }
+      chat.push({ mes: CANNED_REPLY, is_user: false });
+      eventSource.emit("generation_ended_after_commands", chat.length - 1);
+    });
+    row1.append(sendBtn, replyBtn);
+    wrap.append(row1);
+
+    const presetHint = document.createElement("div");
+    presetHint.id = "dev-note";
+    presetHint.textContent = "演示推演预设（仅写入本地存储）";
+    wrap.append(presetHint);
+
+    const mkInput = (value, placeholder) => {
+      const input = document.createElement("input");
+      input.type = "text";
+      input.value = value;
+      input.placeholder = placeholder;
+      return input;
+    };
+    const endpointInput = mkInput("https://mock.local/v1/chat/completions", "endpoint");
+    const modelInput = mkInput("atlas-mock-model", "model");
+    const keyInput = mkInput("sk-preview-demo", "apiKey");
+    wrap.append(endpointInput, modelInput, keyInput);
+
+    const presetBtn = document.createElement("button");
+    presetBtn.type = "button";
+    presetBtn.className = "dev-btn dev-btn--ghost";
+    presetBtn.textContent = "保存推演预设";
+    presetBtn.addEventListener("click", async () => {
+      const preset = {
+        name: "preview",
+        endpoint: endpointInput.value.trim(),
+        model: modelInput.value.trim(),
+        apiKey: keyInput.value.trim(),
+        maxTokens: 512,
+        temperature: 0.7,
+      };
+      const result = await hostApi.request("PUT", "/settings", { worldTurn: preset });
+      setStatus(result.status === 200 ? "推演预设已保存 ✓" : "预设被拒绝");
+      paintStatus();
+    });
+    wrap.append(presetBtn);
+
+    const ckLabel = document.createElement("label");
+    ckLabel.className = "dev-ck";
+    const ck = document.createElement("input");
+    ck.type = "checkbox";
+    ck.checked = mockEnabled;
+    ck.addEventListener("change", () => { mockEnabled = ck.checked; });
+    ckLabel.append(ck, document.createTextNode("模拟推演（不调真实模型）"));
+    wrap.append(ckLabel);
+
+    const status = document.createElement("div");
+    status.id = "host-status";
+    status.textContent = statusText;
+    wrap.append(status);
+
+    box.append(wrap);
+  };
+
+  // ---- 世界书 stub 模块（与酒馆 world-info 公开 API 同形；预览专用）----
+  // 插件的 lorebook 端口优先用 window.__atlasWorldInfoModule，预览里无需真实酒馆即可演示
+  // 「推演结果写入 Atlas 世界书」。数据挂 extensionSettings，刷新后仍在。
+  const loreStore = () => {
+    const settings = extensionSettings.atlas_world_sim;
+    if (!settings.lorebooks) settings.lorebooks = {};
+    return settings.lorebooks;
+  };
+  window.__atlasWorldInfoModule = {
+    async loadWorldInfo(name) {
+      const raw = loreStore()[name];
+      return raw ? JSON.parse(JSON.stringify(raw)) : null;
+    },
+    async createNewWorldInfo(name) {
+      const books = loreStore();
+      if (!books[name]) books[name] = { entries: {} };
+    },
+    async saveWorldInfo(name, data) {
+      loreStore()[name] = JSON.parse(JSON.stringify(data));
+    },
+    createWorldInfoEntry(_name, data) {
+      data.entries = data.entries ?? {};
+      let uid = 0;
+      for (const k of Object.keys(data.entries)) {
+        const n = Number(k);
+        if (Number.isFinite(n)) uid = Math.max(uid, n);
+      }
+      uid += 1;
+      const entry = {
+        uid: String(uid), key: [], keysecondary: [], comment: "", content: "",
+        constant: false, selective: true, disable: false, addMemo: true,
+        order: 100, position: 0, world: "", depth: 4, probability: 100,
+      };
+      data.entries[String(uid)] = entry;
+      return entry;
+    },
+    deleteWorldInfoEntry(data, uid) {
+      if (data.entries) delete data.entries[String(uid)];
+    },
+  };
+
+  // ---- 演示世界：先入库，再启动插件（插件启动时即可读到）----
+  const DEMO_WORLD_ID = "atlas-preview-chronicle";
+  setStatus("准备演示世界…");
+  if (!(await hostStore.read(`world:${DEMO_WORLD_ID}`))) {
+    const demoWorld = await fetch("./demo-world.json").then((r) => r.json());
+    const imported = await hostApi.request("POST", "/worlds/import", { world: demoWorld });
+    setStatus(imported.status === 200 ? `演示世界「${demoWorld.name}」已导入 ✓` : "演示世界导入失败");
+  } else {
+    setStatus("演示世界已就绪 ✓");
+  }
+
+  // ---- 导入插件（模块加载即幂等自初始化 connectAtlas，工作台挂载）----
+  setStatus("加载 Atlas 工作台…");
+  const mod = await import("../atlas-extension/index.js");
+  for (let i = 0; i < 50 && !document.getElementById("atlas-extension-panel-root"); i += 1) await delay(100);
+  if (!document.getElementById("atlas-extension-panel-root")) {
+    setStatus("工作台未挂载——查看控制台警告");
+    throw new Error("atlas workbench missing");
+  }
+
+  // ---- 首次自动绑定演示世界，省去手动「读取世界列表 → 绑定」----
+  // （验证「未绑定」空态时可先解绑，再刷新页面即回到未绑定。）
+  const connection = await mod.connectAtlas();
+  if (connection && !contextValue.chatMetadata[mod.ATLAS_BINDING_KEY]) {
+    await connection.core.bindToWorld(DEMO_WORLD_ID);
+  }
+  connection?.rerender?.();
+  setStatus("演示世界已绑定 ✓ 左栏可看世界动向，右栏是变化简览");
+  paintStatus();
+
+  eventSource.emit("app_ready");
+</script>
+</body>
+</html>

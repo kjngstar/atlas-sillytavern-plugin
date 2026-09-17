@@ -1,0 +1,1088 @@
+/* 阿特拉斯 / Atlas UI Extension — ATLAS-09 世界工作台（悬浮窗）。
+ *
+ * 视觉 = Atlasia 设计令牌（纸质米色 / 深青 / 金 / 衬线 / 45° 菱形 brand-mark）。
+ * 形态 = 居中悬浮窗（可拖动，不遮满屏），非全屏铺满。
+ * 布局 = 左功能栏（导航 + 世界动向） ｜ 中央页面区（随栏位切换） ｜ 右侧世界变化简览。
+ * 只用自有命名空间（.aw-*），不覆盖酒馆任何既有选择器。
+ * CSS 保持独立文件——用户可自行替换以定制外观。 */
+
+.atlas-workbench {
+  --aw-paper: #f2efe7;
+  --aw-panel: #fbfaf6;
+  --aw-ink: #13272c;
+  --aw-teal: #255f5b;
+  --aw-teal-deep: #1e4d49;
+  --aw-gold: #c4a363;
+  --aw-gold-soft: #f2dfad;
+  --aw-gold-deep: #8a6a1c;
+  --aw-muted: #6f7f7d;
+  --aw-line: #e2dccd;
+  --aw-rail-bg: #14272a;
+  --aw-rail-text: #a8b8ad;
+  --aw-rail-dim: #79908d;
+  --aw-serif: Georgia, "Songti SC", "SimSun", serif;
+  --aw-sans: system-ui, "Microsoft YaHei", sans-serif;
+
+  /* 悬浮窗：inset + margin:auto 居中，把 translate 留给拖拽（JS 写 style.translate） */
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  width: min(1180px, 94vw);
+  height: min(780px, 88vh);
+  z-index: 2000;
+  display: flex;
+  overflow: hidden;
+  border-radius: 14px;
+  border: 1px solid rgba(196, 163, 99, 0.42);
+  background: var(--aw-paper);
+  color: var(--aw-ink);
+  font-family: var(--aw-serif);
+  font-size: 14px;
+  line-height: 1.55;
+  box-shadow:
+    0 30px 80px rgba(8, 20, 22, 0.42),
+    0 2px 10px rgba(8, 20, 22, 0.2);
+}
+
+.atlas-workbench button,
+.atlas-workbench input,
+.atlas-workbench select {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.atlas-workbench input { cursor: text; }
+
+.atlas-workbench button:focus-visible,
+.atlas-workbench select:focus-visible,
+.atlas-workbench input:focus-visible {
+  outline: 2px solid var(--aw-gold);
+  outline-offset: 2px;
+}
+
+/* ------------------------------------------------------------------ *
+ * 左栏：品牌 + 导航 + 世界动向 + 引擎状态
+ * ------------------------------------------------------------------ */
+
+.aw-rail {
+  width: 224px;
+  flex: 0 0 224px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--aw-rail-bg);
+  color: var(--aw-rail-text);
+}
+
+.aw-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 14px 12px;
+  color: var(--aw-gold-soft);
+  letter-spacing: 0.2em;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.aw-brand__mark {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  display: inline-grid;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid #7fa49c;
+  transform: rotate(45deg);
+  color: var(--aw-gold-soft);
+  font-size: 12px;
+}
+
+.aw-brand__text { transform: none; }
+
+.aw-rail__label {
+  display: block;
+  padding: 0 6px 6px;
+  font-family: var(--aw-sans);
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  font-weight: 700;
+  color: var(--aw-rail-dim);
+}
+
+.aw-nav {
+  display: grid;
+  gap: 3px;
+  padding: 6px 10px 10px;
+  border-bottom: 1px solid rgba(196, 163, 99, 0.16);
+}
+
+.aw-nav__btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 38px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--aw-rail-text);
+  font-size: 14px;
+  text-align: left;
+}
+
+.aw-nav__btn:hover { color: var(--aw-gold-soft); background: rgba(196, 163, 99, 0.1); }
+
+.aw-nav__btn.is-active {
+  color: var(--aw-gold-soft);
+  background: rgba(196, 163, 99, 0.14);
+  box-shadow: inset 2px 0 0 var(--aw-gold);
+}
+
+.aw-nav__icon { width: 18px; flex: 0 0 18px; display: inline-grid; place-items: center; color: #8ca7a0; }
+.aw-nav__label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 世界动向流（写入世界书的条目预览） */
+
+.aw-moves {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 12px 12px 8px;
+}
+
+.aw-moves__list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-right: 2px;
+}
+
+.aw-move {
+  border-left: 2px solid var(--aw-gold);
+  padding-left: 10px;
+  font-family: var(--aw-sans);
+}
+
+.aw-move__title {
+  font-weight: 700;
+  color: #f3ecd9;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.aw-move__text {
+  color: var(--aw-rail-text);
+  margin-top: 2px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.aw-move__meta {
+  font-size: 11px;
+  color: #c9a961;
+  margin-top: 3px;
+}
+
+.aw-move.is-live { border-left-color: #7fd0bd; }
+.aw-move.is-live .aw-move__title { color: #9fe0ce; }
+.aw-move.is-live .aw-move__text { color: #cfe7df; }
+
+.aw-move__empty {
+  color: var(--aw-rail-text);
+  font-family: var(--aw-sans);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.aw-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  border-top: 1px solid rgba(196, 163, 99, 0.16);
+  font-family: var(--aw-sans);
+  font-size: 12px;
+}
+
+.aw-foot__dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  border-radius: 50%;
+  background: #8a8a80;
+}
+
+.aw-foot__dot.is-ok { background: #63b06a; }
+.aw-foot__dot.is-bad { background: #d0745a; }
+.aw-foot__text { flex: 1; min-width: 0; color: var(--aw-rail-text); }
+
+.aw-foot__exit {
+  border: 1px solid rgba(196, 163, 99, 0.4);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--aw-gold-soft);
+  padding: 4px 12px;
+  font-size: 12px;
+}
+
+.aw-foot__exit:hover { background: rgba(196, 163, 99, 0.14); }
+
+/* ------------------------------------------------------------------ *
+ * 中央：顶栏（拖拽把手）+ 页面区
+ * ------------------------------------------------------------------ */
+
+.aw-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.aw-topbar {
+  min-height: 48px;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 16px;
+  background: rgba(251, 250, 246, 0.96);
+  border-bottom: 1px solid var(--aw-line);
+}
+
+.aw-topbar.is-draggable { cursor: grab; user-select: none; }
+.aw-topbar.is-draggable:active { cursor: grabbing; }
+
+.aw-topbar__left { min-width: 0; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+.aw-topbar__world {
+  font-size: 15px;
+  font-weight: 700;
+  color: #1e383a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.aw-topbar__branch,
+.aw-topbar__hint {
+  font-family: var(--aw-sans);
+  font-size: 11px;
+  color: var(--aw-muted);
+  border: 1px solid var(--aw-line);
+  border-radius: 999px;
+  padding: 2px 9px;
+  white-space: nowrap;
+}
+
+.aw-topbar__hint { color: var(--aw-muted); border-style: dashed; }
+
+.aw-topbar__right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.aw-chip {
+  font-family: var(--aw-sans);
+  font-size: 12px;
+  color: var(--aw-muted);
+  background: var(--aw-panel);
+  border: 1px solid var(--aw-line);
+  border-radius: 999px;
+  padding: 3px 10px;
+  white-space: nowrap;
+}
+
+.aw-chip--teal { color: #f2dfad; background: var(--aw-teal); border-color: var(--aw-teal); }
+.aw-chip--gold { color: var(--aw-gold-deep); background: rgba(196, 163, 99, 0.16); border-color: var(--aw-gold); }
+.aw-chip--busy { color: #856830; border-color: var(--aw-gold); background: rgba(196, 163, 99, 0.14); }
+
+/* 页面区（随左栏栏位切换内容；地图页时为铺满的地图画布） */
+
+.aw-center {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px 20px 22px;
+  background: var(--aw-paper);
+}
+
+.aw-page-head { display: grid; gap: 4px; }
+
+.aw-page-title {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 700;
+  color: #1e383a;
+  letter-spacing: 0.04em;
+}
+
+.aw-page-desc {
+  margin: 0;
+  font-family: var(--aw-sans);
+  font-size: 12px;
+  color: var(--aw-muted);
+  line-height: 1.6;
+}
+
+/* 空态：45° 菱形标记 + 说明 */
+
+.aw-emptybox {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  padding: 40px 20px;
+  border: 1px dashed #d5cfbe;
+  border-radius: 12px;
+  background: rgba(251, 250, 246, 0.7);
+}
+
+.aw-emptybox__mark {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--aw-gold);
+  transform: rotate(45deg);
+}
+
+.aw-diamond {
+  width: 9px;
+  height: 9px;
+  background: var(--aw-teal);
+  transform: rotate(0deg);
+}
+
+.aw-emptybox__text {
+  margin: 0;
+  max-width: 420px;
+  text-align: center;
+  font-family: var(--aw-sans);
+  font-size: 13px;
+  color: var(--aw-muted);
+  line-height: 1.7;
+}
+
+/* 概览统计卡 */
+
+.aw-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.aw-stat {
+  border: 1px solid var(--aw-line);
+  border-top: 2px solid var(--aw-gold);
+  border-radius: 10px;
+  background: var(--aw-panel);
+  padding: 11px 13px;
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.aw-stat__label {
+  font-family: var(--aw-sans);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--aw-muted);
+}
+
+.aw-stat__value {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--aw-teal);
+  overflow-wrap: anywhere;
+}
+
+/* 通用面板 */
+
+.aw-panel {
+  border: 1px solid var(--aw-line);
+  border-radius: 10px;
+  background: var(--aw-panel);
+  padding: 13px 15px;
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.aw-panel__text {
+  margin: 0;
+  font-size: 13px;
+  color: #25484a;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+
+.aw-panel__meta {
+  margin: 0;
+  font-family: var(--aw-sans);
+  font-size: 11px;
+  color: var(--aw-muted);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.aw-eyebrow {
+  font-family: var(--aw-sans);
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--aw-gold-deep);
+  font-weight: 700;
+}
+
+/* 怎么玩 */
+
+.aw-guide {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 5px;
+}
+
+.aw-guide__item {
+  font-size: 13px;
+  color: #25484a;
+  line-height: 1.7;
+}
+
+/* 附近人物卡 */
+
+.aw-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 10px;
+}
+
+.aw-card {
+  border: 1px solid var(--aw-line);
+  border-left: 3px solid var(--aw-teal);
+  border-radius: 10px;
+  background: var(--aw-panel);
+  padding: 10px 12px;
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.aw-card--npc { border-left-color: var(--aw-gold); }
+
+.aw-card__title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  color: #1e383a;
+  overflow-wrap: anywhere;
+}
+
+.aw-card__text {
+  margin: 0;
+  font-family: var(--aw-sans);
+  font-size: 12px;
+  color: var(--aw-muted);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.aw-card__meta {
+  margin: 0;
+  font-family: var(--aw-sans);
+  font-size: 11px;
+  color: var(--aw-gold-deep);
+  overflow-wrap: anywhere;
+}
+
+.aw-tag {
+  justify-self: start;
+  font-family: var(--aw-sans);
+  font-size: 11px;
+  color: var(--aw-teal);
+  border: 1px solid rgba(37, 95, 91, 0.35);
+  border-radius: 999px;
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+
+/* 世界书条目面板（变化页） */
+
+.aw-lorebook__list { display: grid; gap: 8px; }
+
+.aw-lorebook__list .aw-card { border-left-color: var(--aw-gold-deep); }
+
+.aw-lorebook__list .aw-card__text {
+  white-space: pre-line;
+  font-size: 12px;
+}
+
+/* 世界变化时间轴 */
+
+.aw-timeline { display: grid; gap: 10px; }
+
+.aw-timeline__item {
+  display: grid;
+  grid-template-columns: 104px minmax(0, 1fr);
+  gap: 12px;
+  border: 1px solid var(--aw-line);
+  border-radius: 10px;
+  background: var(--aw-panel);
+  padding: 11px 13px;
+}
+
+.aw-timeline__item.is-committed { border-left: 3px solid var(--aw-teal); }
+.aw-timeline__item.is-duplicate { border-left: 3px solid #9aa39c; }
+.aw-timeline__item.is-pending-review { border-left: 3px solid var(--aw-gold); }
+.aw-timeline__item.is-failed { border-left: 3px solid #a3543c; }
+.aw-timeline__item.is-live { border-left: 3px solid var(--aw-gold); background: rgba(196, 163, 99, 0.08); }
+
+.aw-timeline__time {
+  font-family: var(--aw-sans);
+  font-size: 11px;
+  color: var(--aw-gold-deep);
+  padding-top: 3px;
+}
+
+.aw-timeline__body { display: grid; gap: 4px; min-width: 0; }
+.aw-timeline__head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+/* 操作按钮组 */
+
+.aw-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+
+.aw-btn {
+  border: 1px solid var(--aw-teal);
+  border-radius: 8px;
+  background: var(--aw-panel);
+  color: var(--aw-teal);
+  padding: 8px 13px;
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.aw-btn:hover { background: rgba(37, 95, 91, 0.08); }
+.aw-btn--primary { background: var(--aw-teal); color: var(--aw-gold-soft); }
+.aw-btn--primary:hover { background: var(--aw-teal-deep); }
+
+.aw-btn--ghost { border-color: var(--aw-line); color: #3b5b5d; background: transparent; }
+.aw-btn--ghost:hover { border-color: var(--aw-teal); color: var(--aw-teal); background: rgba(37, 95, 91, 0.06); }
+.aw-btn--ghost.is-active { border-color: var(--aw-teal); color: var(--aw-teal); background: rgba(37, 95, 91, 0.12); }
+
+.aw-btn--danger { border-color: #a3543c; color: #a3543c; }
+.aw-btn--danger:hover { background: rgba(163, 84, 60, 0.08); }
+
+/* ------------------------------------------------------------------ *
+ * 设置页：世界绑定 + API 预设表单
+ * ------------------------------------------------------------------ */
+
+.aw-world-list-panel { gap: 8px; }
+
+.aw-list { display: grid; gap: 6px; }
+
+.aw-list__item {
+  text-align: left;
+  width: 100%;
+  border: 1px solid var(--aw-line);
+  border-radius: 8px;
+  background: var(--aw-panel);
+  color: #25484a;
+  font-size: 13px;
+  padding: 8px 11px;
+  overflow-wrap: anywhere;
+}
+
+.aw-list__item:hover { border-color: var(--aw-teal); color: var(--aw-teal); background: rgba(37, 95, 91, 0.05); }
+
+.aw-list__item.is-current {
+  border-color: var(--aw-teal);
+  background: rgba(37, 95, 91, 0.1);
+  color: var(--aw-teal);
+  font-weight: 700;
+}
+
+.aw-form { display: grid; gap: 11px; min-width: 0; }
+
+.aw-form__row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 11px;
+  min-width: 0;
+}
+
+.aw-form__status {
+  margin: 0;
+  font-family: var(--aw-sans);
+  font-size: 12px;
+  color: var(--aw-teal);
+  overflow-wrap: anywhere;
+}
+
+.aw-form__status.is-error { color: #a3543c; }
+.aw-form__status.is-warn { color: var(--aw-gold-deep); }
+
+.aw-field {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.aw-field__label {
+  font-family: var(--aw-sans);
+  font-size: 12px;
+  font-weight: 700;
+  color: #3b5b5d;
+}
+
+.aw-field__hint {
+  font-family: var(--aw-sans);
+  font-size: 11px;
+  color: var(--aw-muted);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+/* 输入控件：<select> 的 min-content = 最宽 option，必须显式允许收缩 */
+
+.aw-input {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #cfc9b8;
+  border-radius: 7px;
+  background: #fff;
+  color: var(--aw-ink);
+  font-family: var(--aw-sans);
+  font-size: 13px;
+  padding: 7px 10px;
+}
+
+.aw-input:hover { border-color: var(--aw-teal); }
+
+select.aw-input,
+.aw-region {
+  appearance: auto;
+  text-overflow: ellipsis;
+}
+
+/* 说明条 */
+
+.aw-note {
+  border: 1px solid var(--aw-line);
+  border-left: 3px solid var(--aw-teal);
+  border-radius: 8px;
+  background: var(--aw-panel);
+  color: #25484a;
+  padding: 10px 12px;
+  font-family: var(--aw-sans);
+  font-size: 12px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+
+.aw-note--error { border-left-color: #a3543c; color: #7c3a26; }
+
+/* ------------------------------------------------------------------ *
+ * 地图（「地图」页专用；其余页面不渲染它）
+ * ------------------------------------------------------------------ */
+
+.aw-maparea {
+  position: relative;
+  flex: 1;
+  min-height: 320px;
+  min-width: 0;
+  border-radius: 10px;
+  overflow: hidden;
+  background:
+    repeating-linear-gradient(0deg, transparent, transparent 27px, rgba(37, 95, 91, 0.06) 27px, rgba(37, 95, 91, 0.06) 28px),
+    repeating-linear-gradient(90deg, transparent, transparent 27px, rgba(37, 95, 91, 0.06) 27px, rgba(37, 95, 91, 0.06) 28px),
+    var(--aw-paper);
+}
+
+.aw-maparea__hint {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--aw-muted);
+  font-family: var(--aw-sans);
+  font-size: 14px;
+  padding: 24px;
+  text-align: center;
+}
+
+.aw-viewport {
+  position: absolute;
+  inset: 12px;
+  overflow: hidden;
+  border: 1px solid #d8d2c2;
+  border-radius: 8px;
+  box-shadow: inset 0 0 60px rgba(16, 27, 29, 0.07);
+  background: var(--aw-paper);
+}
+
+.aw-layer {
+  position: absolute;
+  inset: 0;
+  transform-origin: center center;
+  transition: transform 0.15s ease-out;
+  background-size: 100% 100%;
+  background-repeat: no-repeat;
+}
+
+.aw-layer.has-image { background-color: transparent; }
+
+/* 装帧：四角标 + 指北针 + 比例尺 + 金色虚线路线 */
+
+.aw-corner {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  border: 1px solid rgba(138, 106, 28, 0.55);
+  pointer-events: none;
+  z-index: 3;
+}
+
+.aw-corner--tl { top: 8px; left: 8px; border-right: 0; border-bottom: 0; }
+.aw-corner--tr { top: 8px; right: 8px; border-left: 0; border-bottom: 0; }
+.aw-corner--bl { bottom: 8px; left: 8px; border-right: 0; border-top: 0; }
+.aw-corner--br { bottom: 8px; right: 8px; border-left: 0; border-top: 0; }
+
+.aw-compass {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(138, 106, 28, 0.5);
+  border-radius: 50%;
+  background: rgba(251, 250, 246, 0.88);
+  z-index: 3;
+  pointer-events: none;
+}
+
+.aw-compass__n {
+  font-family: var(--aw-sans);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--aw-gold-deep);
+  line-height: 1;
+}
+
+.aw-compass__needle {
+  width: 1px;
+  height: 11px;
+  background: linear-gradient(to bottom, #a3543c 0 50%, var(--aw-teal) 50% 100%);
+  margin-top: 1px;
+}
+
+.aw-scale {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  font-family: var(--aw-sans);
+  font-size: 10px;
+  color: var(--aw-gold-deep);
+  background: rgba(251, 250, 246, 0.88);
+  border: 1px solid rgba(138, 106, 28, 0.35);
+  border-radius: 4px;
+  padding: 1px 7px;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.aw-route { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
+
+/* 地点徽章：当前位置深青底金字，其余纸面白底 */
+
+.aw-point {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  font-size: 12px;
+  padding: 3px 12px;
+  border-radius: 3px;
+  border: 1px solid #b3ab92;
+  background: var(--aw-panel);
+  color: #25484a;
+  white-space: nowrap;
+  font-family: var(--aw-serif);
+  z-index: 3;
+}
+
+.aw-point:hover { border-color: var(--aw-teal); color: var(--aw-teal); }
+
+.aw-point.is-current {
+  border-color: var(--aw-teal);
+  background: var(--aw-teal);
+  color: var(--aw-gold-soft);
+  font-weight: 700;
+}
+
+/* NPC 金色圆点 + 名牌；物件 = 深青小菱形 */
+
+.aw-npc {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--aw-gold);
+  border: 2px solid #fff8df;
+  box-shadow: 0 0 0 2px rgba(196, 163, 99, 0.4), 0 2px 6px rgba(25, 48, 45, 0.3);
+  z-index: 4;
+}
+
+.aw-npc__name {
+  position: absolute;
+  left: 14px;
+  top: -6px;
+  font-family: var(--aw-sans);
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(251, 250, 246, 0.94);
+  color: #59472c;
+  white-space: nowrap;
+  border: 1px solid rgba(196, 163, 99, 0.5);
+  z-index: 5;
+}
+
+.aw-object {
+  position: absolute;
+  transform: translate(-50%, -50%) rotate(45deg);
+  width: 9px;
+  height: 9px;
+  background: var(--aw-panel);
+  border: 1.5px solid var(--aw-teal);
+  box-shadow: 0 1px 4px rgba(25, 48, 45, 0.25);
+  z-index: 3;
+}
+
+/* 地图浮动工具：地区筛选（左上） + 缩放（右下） */
+
+.aw-maptools {
+  position: absolute;
+  top: 22px;
+  left: 22px;
+  right: 22px;
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  z-index: 6;
+  pointer-events: none;
+}
+
+.aw-maptools.is-visible { display: flex; }
+.aw-maptools > * { pointer-events: auto; }
+
+.aw-region {
+  width: auto;
+  max-width: 180px;
+  min-width: 0;
+  border: 1px solid #cfc9b8;
+  border-radius: 6px;
+  background: var(--aw-panel);
+  color: #25484a;
+  font-family: var(--aw-sans);
+  font-size: 12px;
+  padding: 5px 8px;
+}
+
+.aw-zoom {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--aw-sans);
+}
+
+.aw-zoom__btn {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #cfc9b8;
+  border-radius: 6px;
+  background: var(--aw-panel);
+  color: #25484a;
+  font-size: 13px;
+}
+
+.aw-zoom__btn:hover { border-color: var(--aw-teal); color: var(--aw-teal); }
+.aw-zoom__label { font-size: 11px; color: var(--aw-muted); min-width: 36px; text-align: right; }
+
+/* 旅行预览条 */
+
+.aw-travel {
+  position: absolute;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(92%, 560px);
+  padding: 8px 14px;
+  border: 1px solid var(--aw-gold);
+  border-radius: 10px;
+  background: rgba(251, 250, 246, 0.97);
+  box-shadow: 0 8px 24px rgba(16, 27, 29, 0.16);
+  z-index: 7;
+}
+
+.aw-travel:empty { display: none; }
+.aw-travel__title { font-weight: 700; color: #1e383a; white-space: nowrap; }
+.aw-travel__meta { font-family: var(--aw-sans); font-size: 12px; color: var(--aw-muted); white-space: nowrap; }
+.aw-travel__actions { display: flex; gap: 6px; }
+
+/* ------------------------------------------------------------------ *
+ * 右栏：世界变化简览（首页预览） + 预览控制槽
+ * ------------------------------------------------------------------ */
+
+.aw-side {
+  width: 256px;
+  flex: 0 0 256px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 12px 12px;
+  background: var(--aw-panel);
+  border-left: 1px solid var(--aw-line);
+}
+
+.aw-side__foot {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-right: 2px;
+}
+
+.aw-side__changes { display: grid; gap: 8px; justify-items: stretch; }
+
+.aw-changes { display: grid; gap: 7px; }
+
+.aw-changes__row {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr);
+  gap: 7px;
+  align-items: start;
+  border-bottom: 1px dashed var(--aw-line);
+  padding-bottom: 6px;
+}
+
+.aw-changes__dot {
+  width: 8px;
+  height: 8px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: #9aa39c;
+}
+
+.aw-changes__dot.is-committed { background: var(--aw-teal); }
+.aw-changes__dot.is-duplicate { background: #9aa39c; }
+.aw-changes__dot.is-pending-review { background: var(--aw-gold); }
+.aw-changes__dot.is-failed { background: #a3543c; }
+.aw-changes__row.is-live .aw-changes__dot { background: var(--aw-gold); }
+
+.aw-changes__text {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+  font-family: var(--aw-sans);
+  font-size: 12px;
+}
+
+.aw-changes__span { color: #1e383a; font-size: 12px; overflow-wrap: anywhere; }
+.aw-changes__summary { color: var(--aw-muted); overflow-wrap: anywhere; }
+.aw-changes__row.is-live .aw-changes__summary { color: var(--aw-gold-deep); }
+
+.aw-changes__empty {
+  font-family: var(--aw-sans);
+  font-size: 12px;
+  color: var(--aw-muted);
+  line-height: 1.65;
+}
+
+/* 开发预览槽（仅本地预览夹具注入；生产环境不出现） */
+
+.aw-dev { display: none; }
+.aw-dev.is-visible { display: block; }
+
+.aw-dev__box {
+  border: 1px dashed var(--aw-gold);
+  border-radius: 10px;
+  background: rgba(196, 163, 99, 0.08);
+  padding: 10px 11px;
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.aw-dev__box .aw-btn { width: 100%; }
+.aw-dev__box .aw-note { background: #fff; }
+
+/* ------------------------------------------------------------------ *
+ * 窄屏：收窄左栏（仅图标）、右栏移到下行
+ * ------------------------------------------------------------------ */
+
+@media (max-width: 980px) {
+  .atlas-workbench { width: 96vw; height: 90vh; }
+
+  .aw-rail { width: 64px; flex-basis: 64px; }
+  .aw-brand { justify-content: center; padding-inline: 0; }
+  .aw-brand__text,
+  .aw-rail__label,
+  .aw-nav__label,
+  .aw-moves,
+  .aw-foot__text { display: none; }
+  .aw-nav { padding-inline: 8px; }
+  .aw-nav__btn { justify-content: center; padding: 8px; }
+  .aw-nav__icon { width: auto; }
+  .aw-foot { flex-direction: column; padding-inline: 8px; }
+  .aw-side { width: 224px; flex-basis: 224px; }
+}
+
+@media (max-width: 720px) {
+  .atlas-workbench {
+    width: 96vw;
+    height: 92vh;
+    border-radius: 12px;
+  }
+
+  .aw-side { display: none; }
+  .aw-topbar__hint { display: none; }
+  .aw-center { padding: 14px 12px 18px; }
+  .aw-timeline__item { grid-template-columns: minmax(0, 1fr); gap: 5px; }
+  .aw-timeline__time { padding-top: 0; }
+  .aw-maptools { left: 14px; right: 14px; top: 16px; }
+  .aw-region { max-width: 120px; }
+  .aw-travel { flex-wrap: wrap; justify-content: center; bottom: 16px; }
+}

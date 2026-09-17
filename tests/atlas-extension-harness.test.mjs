@@ -1,0 +1,814 @@
+/**
+ * atlas-extension-harness.test.mjs — ATLAS-03 UI Extension mock harness。
+ *
+ * 覆盖验收要求（上级 README ATLAS-03 / 第 10 节）：
+ * - 真正运行初始化函数并验证事件监听注册与清理（init / dispose 成对）。
+ * - 五种模式的清楚空状态：离线 / 协议不兼容 / 未绑定 / 世界不存在 / 就绪。
+ * - 绑定只存 chatMetadata 契约形状；切聊天立即重读；A / B 两聊天切换 20 次不串状态。
+ * - 面板开关状态经 extensionSettings 恢复；绑定载荷绝无密钥字段。
+ * - 回合流（ATLAS-05）：MESSAGE_SENT → prepare → 注入；GENERATION_ENDED → commit → 回执；
+ *   停止 / 空回复 / 失败不推进世界；重复通知只 commit 一次；回执持久化可恢复。
+ * - index.js 在无酒馆环境中可安全导入（不触碰 document / SillyTavern 全局）。
+ */
+
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { createAtlasUiCore, atlasClampZoom, ATLAS_UI_EVENTS } from "../src/atlas-ui-core.ts";
+import {
+  createAtlasExtension,
+  connectAtlas,
+  ATLAS_DISPLAY_NAME,
+  ATLAS_EXTENSION_VERSION,
+} from "../atlas-extension/index.js";
+
+let assertionCount = 0;
+function ok(value, message) {
+  assertionCount += 1;
+  assert.ok(value, message);
+}
+function equal(actual, expected, message) {
+  assertionCount += 1;
+  assert.equal(actual, expected, message);
+}
+function deepEqual(actual, expected, message) {
+  assertionCount += 1;
+  assert.deepStrictEqual(actual, expected, message);
+}
+
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const NOW_BASE = 1_700_000_000_000;
+
+// ---------------------------------------------------------------------------
+// Mock 三件套：api / host / emitter
+// ---------------------------------------------------------------------------
+
+function makeApi({ health = { protocolVersion: 1, ok: true }, stateByChat = {}, failHealth = false, travelPreview = null, turnBehavior = {} } = {}) {
+  const calls = [];
+  const defaultPrepareResponse = {
+    turnId: "turn-1",
+    injectionText: "【世界上下文】当前位置：白塔钟座",
+    sourceRefs: ["point:p-1", "npc:npc-1"],
+    relevantNpcIds: ["npc-1"],
+    triggerIds: [],
+    currentTime: 12,
+    currentLocationId: "p-1",
+  };
+  const defaultReceipt = {
+    receiptId: "receipt-1",
+    status: "committed",
+    branchId: null,
+    previousTime: 12,
+    currentTime: 13,
+    triggeredNpcIds: ["npc-1"],
+    adoptedEventIds: ["evt-1"],
+    summary: "时间推进一个时段；林拾在集市有了新见闻。",
+    retryable: false,
+  };
+  return {
+    calls,
+    async request(method, path, body) {
+      calls.push({ method, path, body });
+      if (path === "/health") {
+        if (failHealth) throw new Error("network down");
+        return { status: 200, body: health };
+      }
+      if (method === "POST" && path === "/turns/prepare") {
+        if (turnBehavior.prepareError) return { status: 500, body: { ok: false, error: { code: "INTERNAL", message: turnBehavior.prepareError } } };
+        if (turnBehavior.prepareThrow) throw new Error("network down");
+        return { status: 200, body: { ok: true, data: { response: turnBehavior.prepareResponse ?? defaultPrepareResponse } } };
+      }
+      if (method === "POST" && path === "/turns/commit") {
+        if (turnBehavior.commitError) return { status: 500, body: { ok: false, error: { code: "INTERNAL", message: turnBehavior.commitError } } };
+        if (turnBehavior.commitThrow) throw new Error("network down");
+        return { status: 200, body: { ok: true, data: { receipt: turnBehavior.receipt ?? defaultReceipt } } };
+      }
+      if (method === "POST" && path === "/turns/retry") {
+        if (turnBehavior.retryError) return { status: 500, body: { ok: false, error: { code: "INTERNAL", message: turnBehavior.retryError } } };
+        return { status: 200, body: { ok: true, data: { receipt: turnBehavior.retryReceipt ?? defaultReceipt } } };
+      }
+      if (method === "POST" && path === "/map/travel-preview") {
+        if (travelPreview) return { status: 200, body: { ok: true, data: { preview: travelPreview } } };
+        return { status: 200, body: { ok: true, data: { preview: null } } };
+      }
+      if (method === "POST" && path === "/bindings") {
+        const action = body?.action;
+        if (action === "bind") {
+          if (body.binding.worldId === "missing-world") {
+            return { status: 404, body: { ok: false, error: { code: "WORLD_NOT_FOUND", message: "世界不存在" } } };
+          }
+          return { status: 200, body: { ok: true, data: { chatId: body.binding.chatId, bound: true } } };
+        }
+        return { status: 200, body: { ok: true, data: { bound: false } } };
+      }
+      if (method === "GET" && path === "/worlds") {
+        return {
+          status: 200,
+          body: { ok: true, data: { worlds: [{ id: "w-1", name: "演示世界", pointCount: 6 }] } },
+        };
+      }
+      const chatMatch = path.match(/^\/state\/(.+)$/);
+      if (method === "GET" && chatMatch) {
+        const payload = stateByChat[decodeURIComponent(chatMatch[1])];
+        if (!payload) {
+          return { status: 400, body: { ok: false, error: { code: "NOT_BOUND", message: "未绑定" } } };
+        }
+        if (payload === "WORLD_MISSING") {
+          return { status: 404, body: { ok: false, error: { code: "WORLD_NOT_FOUND", message: "世界不存在" } } };
+        }
+        return { status: 200, body: { ok: true, data: payload } };
+      }
+      return { status: 404, body: { ok: false, error: { code: "INVALID_PAYLOAD", message: "未知路由" } } };
+    },
+  };
+}
+
+function makeHost() {
+  const bindings = new Map(); // chatId → raw binding
+  let currentChat = null;
+  let panelOpen = false;
+  const writtenPayloads = [];
+  const filledInputs = [];
+  const dataStore = new Map(); // extensionSettings 键值（readData / writeData）
+  return {
+    writtenPayloads,
+    filledInputs,
+    dataStore,
+    setChat(chatId) {
+      currentChat = chatId;
+    },
+    setBinding(chatId, raw) {
+      if (raw === undefined) bindings.delete(chatId);
+      else bindings.set(chatId, raw);
+    },
+    setPanelOpen(open) {
+      panelOpen = open;
+    },
+    host: {
+      getChatId: () => currentChat,
+      readBinding: () => (currentChat !== null && bindings.has(currentChat) ? bindings.get(currentChat) : null),
+      async writeBinding(binding) {
+        writtenPayloads.push(binding);
+        bindings.set(currentChat, binding);
+      },
+      async clearBinding() {
+        bindings.delete(currentChat);
+      },
+      readPanelOpen: () => panelOpen,
+      writePanelOpen(open) {
+        panelOpen = open;
+      },
+      fillInput(text) {
+        filledInputs.push(text);
+      },
+      readData(key) {
+        return dataStore.has(key) ? dataStore.get(key) : null;
+      },
+      writeData(key, value) {
+        dataStore.set(key, value);
+      },
+    },
+  };
+}
+
+function makeEmitter() {
+  const listeners = new Map();
+  return {
+    listeners,
+    on(event, handler) {
+      if (!listeners.has(event)) listeners.set(event, new Set());
+      listeners.get(event).add(handler);
+    },
+    off(event, handler) {
+      listeners.get(event)?.delete(handler);
+    },
+  };
+}
+
+async function flush() {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+const STATE_PAYLOAD = {
+  worldId: "w-1",
+  worldName: "演示世界",
+  branchId: null,
+  currentTime: 12,
+  currentLocationId: "p-1",
+  nearbyPointIds: ["p-2"],
+  relevantNpcIds: ["npc-1"],
+  npcReasons: { "npc-1": ["samePoint"] },
+  triggerIds: [],
+};
+
+function bindingFor(chatId, worldId = "w-1", overrides = {}) {
+  return {
+    schemaVersion: 1,
+    enabled: true,
+    chatId,
+    characterId: null,
+    worldId,
+    branchId: null,
+    currentLocationId: "p-1",
+    worldTimeCursor: 12,
+    lastCommittedMessageId: null,
+    lastCheckpointId: null,
+    ...overrides,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// manifest 与静态资源
+// ---------------------------------------------------------------------------
+
+test("manifest：显示名固定、入口正确、版本一致", () => {
+  const manifest = JSON.parse(readFileSync(join(root, "atlas-extension", "manifest.json"), "utf8"));
+  equal(manifest.display_name, "阿特拉斯 / Atlas", "display_name");
+  equal(manifest.js, "index.js", "js 入口");
+  ok(typeof manifest.css === "string" && manifest.css.length > 0, "css 存在");
+  equal(manifest.version, ATLAS_EXTENSION_VERSION, "manifest 版本与代码一致");
+});
+
+test("settings.html 与 style.css：真实结构、字号达标（ATLAS-09 工作台契约）", () => {
+  const settings = readFileSync(join(root, "atlas-extension", "settings.html"), "utf8");
+  ok(settings.includes("atlas-extension-settings-root"), "settings 根节点存在");
+  ok(settings.includes("阿特拉斯 / Atlas"), "设置页有产品名");
+  const css = readFileSync(join(root, "atlas-extension", "style.css"), "utf8");
+  ok(css.includes("font-size: 14px"), "主要文字 ≥14px");
+  ok(css.includes("font-size: 13px"), "控件文字 ≥13px（ATLAS-09 工作台令牌，原 300px 面板的 16px 契约随全屏工作台重设计退役）");
+  ok(css.includes("focus-visible"), "键盘焦点可见");
+  ok(css.includes(".aw-nav__btn.is-active"), "左栏导航激活态存在");
+  ok(css.includes(".aw-move"), "世界动向条目样式存在");
+  ok(css.includes("--aw-paper: #f2efe7"), "Atlasia 纸质米色令牌存在");
+});
+
+// ---------------------------------------------------------------------------
+// UI 形态契约（ATLAS-09：悬浮窗 + 中区随栏位切换 + 预览控制入右栏）
+// ---------------------------------------------------------------------------
+
+test("形态契约：工作台是悬浮窗而非全屏铺满", () => {
+  const css = readFileSync(join(root, "atlas-extension", "style.css"), "utf8");
+  ok(css.includes("width: min(1180px"), "有明确的最大宽度（全屏方案无此值）");
+  ok(css.includes("height: min(780px"), "有明确的最大高度（全屏方案无此值）");
+  ok(css.includes("margin: auto"), "用 inset+margin:auto 居中，把 translate 让给拖拽");
+  ok(css.includes("border-radius: 14px"), "悬浮窗圆角");
+  // 全屏方案的判据：inset:0 之后再无宽度上限、且撑满视口
+  ok(!/\.atlas-workbench\s*\{[^}]*width:\s*100vw/.test(css), "工作台不写 width:100vw（窄屏断点除外）");
+  ok(css.includes("box-shadow"), "悬浮窗需要投影与宿主页面分层");
+});
+
+test("形态契约：中区按栏位切页，地图只属于地图页", () => {
+  const js = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
+  ok(js.includes("core.setPage(page.id)"), "导航按钮切换页面状态");
+  ok(js.includes('if (state().page === "map") renderMap(d)'), "只有地图页才渲染地图");
+  for (const page of ["overview", "map", "nearby", "changes", "settings"]) {
+    ok(js.includes(`s.page === "${page}"`), `中区有独立的「${page}」页分支`);
+  }
+  // 回归：renderCenter 有 12 处无参调用点，缺省参数缺失会直接 TypeError（切页即崩）
+  ok(js.includes("function renderCenter(d = data())"), "renderCenter 有缺省数据源，无参调用不崩");
+});
+
+test("形态契约：预览控制挂右栏槽位，不常驻生产界面", () => {
+  const js = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
+  const css = readFileSync(join(root, "atlas-extension", "style.css"), "utf8");
+  const preview = readFileSync(join(root, "dev-preview", "index.html"), "utf8");
+  ok(js.includes("window.__atlasDevSlot"), "插件只在宿主提供钩子时注入预览控制");
+  ok(css.includes(".aw-dev { display: none; }"), "预览控制默认隐藏（生产不出现）");
+  ok(css.includes(".aw-side__changes"), "右栏有世界变化简览容器");
+  ok(preview.includes("window.__atlasDevSlot ="), "本地预览夹具提供该钩子");
+  ok(!preview.includes("host-chip"), "旧的左下角悬浮控制条已移除");
+  ok(preview.includes("__atlasDevSlot"), "夹具与插件槽位对齐");
+});
+
+test("connectAtlas 并发安全：模块自初始化与 activate 共享同一次挂载", () => {
+  const js = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
+  ok(js.includes("if (connecting) return connecting;"), "有在途连接闸门（只有 connected 检查会双重挂载）");
+  ok(js.includes("connecting = connectOnce();"), "在途 Promise 被记录");
+  ok(/finally\s*\{\s*connecting = null;/.test(js), "连接结束后清空在途标记");
+  equal((js.match(/renderPanel\(/g) ?? []).length, 2, "renderPanel 只声明一次 + 调用一次（不存在第二处挂载）");
+  ok(js.includes("void connectAtlas();"), "模块加载仍自初始化（旧版酒馆无 hooks）");
+  ok(js.includes("export async function activate()"), "同时保留 hooks.activate 入口");
+});
+
+test("世界书注入层：端口适配 + onLorebookSync 接线 + 变化页条目面板（ATLAS-09）", () => {
+  const js = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
+  ok(js.includes("export function createLorebookPort"), "world-info → port 适配器存在且导出（单测复用真实适配器）");
+  ok(js.includes("chatMetadata.world_info"), "绑定走 chatMetadata.world_info 槽");
+  ok(js.includes("window.__atlasWorldInfoModule"), "预览 / 测试可注入 world-info stub");
+  ok(js.includes("onLorebookSync:"), "connectAtlas 注入世界书写入钩子");
+  ok(js.includes('engineStore.write("lorebook"'), "写入后快照落 store（面板可见性）");
+  ok(js.includes("buildLorebookPanel"), "变化页有世界书条目面板");
+  ok(js.includes("lorebookNameFor") === false, "书名派生只发生在引擎侧（index.js 不重复实现）");
+
+  const entry = readFileSync(join(root, "src", "atlas-browser-entry.ts"), "utf8");
+  ok(entry.includes("createAtlasLorebookWriter"), "打包入口导出世界书写入器");
+
+  const core = readFileSync(join(root, "src", "atlas-ui-core.ts"), "utf8");
+  ok(core.includes("syncLorebookAfterCommit(body)"), "commit 与 retry 成功路径都调用世界书同步");
+  equal((core.match(/syncLorebookAfterCommit\(body\)/g) ?? []).length, 2, "恰好两处调用（commit + retry）");
+  ok(core.includes("lorebookHint"), "写入失败 / 绑定冲突有用户可见提示字段");
+});
+
+// ---------------------------------------------------------------------------
+// 监听注册与清理
+// ---------------------------------------------------------------------------
+
+test("harness：init 注册恰好的事件、dispose 成对清理", async () => {
+  const api = makeApi();
+  const hostWrap = makeHost();
+  hostWrap.setChat("chat-a");
+  const emitter = makeEmitter();
+  const core = createAtlasUiCore({ api, host: hostWrap.host, emitter, now: () => NOW_BASE });
+  equal(emitter.listeners.size, 0, "init 前无监听");
+  core.init();
+  await flush();
+  deepEqual([...emitter.listeners.keys()].sort(), [...ATLAS_UI_EVENTS].sort(), "只注册已实现的事件");
+  equal(emitter.listeners.get("APP_READY").size, 1, "APP_READY 一个监听");
+  equal(emitter.listeners.get("CHAT_CHANGED").size, 1, "CHAT_CHANGED 一个监听");
+  core.dispose();
+  equal(emitter.listeners.get("APP_READY").size, 0, "dispose 后 APP_READY 清理");
+  equal(emitter.listeners.get("CHAT_CHANGED").size, 0, "dispose 后 CHAT_CHANGED 清理");
+  // dispose 后事件不再响应
+  await core.handleEvent("CHAT_CHANGED");
+  const callsAfterDispose = api.calls.length;
+  await core.handleEvent("CHAT_CHANGED");
+  equal(api.calls.length, callsAfterDispose, "dispose 后不再发起请求");
+});
+
+// ---------------------------------------------------------------------------
+// 五种模式
+// ---------------------------------------------------------------------------
+
+test("模式：引擎未就绪（health 抛错）——纯浏览器模式不再引导安装 Server Plugin", async () => {
+  const api = makeApi({ failHealth: true });
+  const hostWrap = makeHost();
+  hostWrap.setChat("chat-a");
+  const core = createAtlasUiCore({ api, host: hostWrap.host, emitter: makeEmitter(), now: () => NOW_BASE });
+  await core.handleEvent("APP_READY");
+  equal(core.getState().mode, "offline", "offline 模式");
+  ok(core.getState().modeHint.includes("引擎未就绪"), "空状态文案可读（ATLAS-09 文案清退）");
+  ok(!core.getState().modeHint.includes("Server Plugin"), "不再出现 Server Plugin 安装引导");
+  ok(!core.getState().modeHint.includes("enableServerPlugins"), "不再出现服务端开关指引");
+});
+
+test("模式：协议不兼容（health 版本 2）", async () => {
+  const api = makeApi({ health: { protocolVersion: 2, ok: true } });
+  const hostWrap = makeHost();
+  hostWrap.setChat("chat-a");
+  hostWrap.setBinding("chat-a", bindingFor("chat-a"));
+  const core = createAtlasUiCore({ api, host: hostWrap.host, emitter: makeEmitter(), now: () => NOW_BASE });
+  await core.handleEvent("APP_READY");
+  equal(core.getState().mode, "protocol-incompatible", "incompatible 模式");
+  equal(core.getState().serviceProtocolVersion, 2, "记录实际协议版本");
+  ok(core.getState().modeHint.includes("2"), "提示包含实际版本号");
+});
+
+test("模式：未绑定 → 就绪（health + state 200）", async () => {
+  const api = makeApi({ stateByChat: { "chat-a": STATE_PAYLOAD } });
+  const hostWrap = makeHost();
+  hostWrap.setChat("chat-a");
+  const core = createAtlasUiCore({ api, host: hostWrap.host, emitter: makeEmitter(), now: () => NOW_BASE });
+  await core.handleEvent("APP_READY");
+  equal(core.getState().mode, "unbound", "无绑定 → unbound");
+  hostWrap.setBinding("chat-a", bindingFor("chat-a"));
+  await core.handleEvent("CHAT_CHANGED");
+  equal(core.getState().mode, "ready", "绑定后 → ready");
+  equal(core.getState().stateData.worldName, "演示世界", "state 数据进入面板状态");
+  equal(core.getState().modeHint, null, "就绪无空状态文案");
+});
+
+test("模式：世界不存在（state 404 WORLD_NOT_FOUND）", async () => {
+  const api = makeApi({ stateByChat: { "chat-a": "WORLD_MISSING" } });
+  const hostWrap = makeHost();
+  hostWrap.setChat("chat-a");
+  hostWrap.setBinding("chat-a", bindingFor("chat-a"));
+  const core = createAtlasUiCore({ api, host: hostWrap.host, emitter: makeEmitter(), now: () => NOW_BASE });
+  await core.handleEvent("APP_READY");
+  equal(core.getState().mode, "world-missing", "world-missing 模式");
+  ok(core.getState().modeHint.includes("重新选择"), "给出解绑重绑指引");
+});
+
+test("模式：绑定形状损坏 → 按未绑定处理且不采用", async () => {
+  const api = makeApi({ stateByChat: { "chat-a": STATE_PAYLOAD } });
+  const hostWrap = makeHost();
+  hostWrap.setChat("chat-a");
+  hostWrap.setBinding("chat-a", { schemaVersion: 1, enabled: true, chatId: "chat-a", worldId: "" });
+  const core = createAtlasUiCore({ api, host: hostWrap.host, emitter: makeEmitter(), now: () => NOW_BASE });
+  await core.handleEvent("APP_READY");
+  equal(core.getState().mode, "unbound", "非法绑定 → unbound");
+  equal(core.getState().bindingInvalid, true, "bindingInvalid 标记");
+  ok(core.getState().modeHint.includes("损坏"), "损坏说明用户可见");
+});
+
+test("防御：绑定 chatId 与当前聊天不一致 → 不采用", async () => {
+  const api = makeApi({ stateByChat: { "chat-b": STATE_PAYLOAD } });
+  const hostWrap = makeHost();
+  hostWrap.setChat("chat-b");
+  hostWrap.setBinding("chat-b", bindingFor("chat-a"));
+  const core = createAtlasUiCore({ api, host: hostWrap.host, emitter: makeEmitter(), now: () => NOW_BASE });
+  await core.handleEvent("APP_READY");
+  equal(core.getState().mode, "unbound", "跨聊天绑定不采用");
+  equal(core.getState().binding, null, "binding 为空");
+});
+
+// ---------------------------------------------------------------------------
+// A / B 聊天隔离：切换 20 次
+// ---------------------------------------------------------------------------
+
+test("A / B 聊天各绑不同世界：切换 20 次状态不串", async () => {
+  const api = makeApi({
+    stateByChat: {
+      "chat-a": { ...STATE_PAYLOAD, worldName: "世界A", currentTime: 10 },
+      "chat-b": { ...STATE_PAYLOAD, worldName: "世界B", currentTime: 20 },
+    },
+  });
+  const hostWrap = makeHost();
+  const core = createAtlasUiCore({ api, host: hostWrap.host, emitter: makeEmitter(), now: () => NOW_BASE });
+  core.init();
+  await flush();
+  hostWrap.setChat("chat-a");
+  hostWrap.setBinding("chat-a", bindingFor("chat-a"));
+  hostWrap.setChat("chat-b");
+  hostWrap.setBinding("chat-b", bindingFor("chat-b"));
+  let lastSeen = null;
+  for (let i = 0; i < 20; i += 1) {
+    const chatId = i % 2 === 0 ? "chat-a" : "chat-b";
+    hostWrap.setChat(chatId);
+    await core.handleEvent("CHAT_CHANGED");
+    const state = core.getState();
+    equal(state.mode, "ready", `第 ${i + 1} 次切换后 ready`);
+    const expectName = chatId === "chat-a" ? "世界A" : "世界B";
+    equal(state.stateData.worldName, expectName, `第 ${i + 1} 次切换后世界正确`);
+    equal(state.chatId, chatId, "chatId 跟随当前聊天");
+    lastSeen = state;
+  }
+  equal(lastSeen.chatId, "chat-b", "最终停在第 20 次（B）");
+});
+
+// ---------------------------------------------------------------------------
+// 绑定操作
+// ---------------------------------------------------------------------------
+
+test("bindToWorld：服务端校验通过才写 chatMetadata，载荷无密钥", async () => {
+  const api = makeApi({ stateByChat: { "chat-a": STATE_PAYLOAD } });
+  const hostWrap = makeHost();
+  hostWrap.setChat("chat-a");
+  const core = createAtlasUiCore({ api, host: hostWrap.host, emitter: makeEmitter(), now: () => NOW_BASE });
+  await core.handleEvent("APP_READY");
+  await core.bindToWorld("w-1");
+  const bindCalls = api.calls.filter((c) => c.method === "POST" && c.path === "/bindings");
+  equal(bindCalls.length, 1, "一次绑定请求");
+  equal(hostWrap.writtenPayloads.length, 1, "chatMetadata 写入一次");
+  const payload = hostWrap.writtenPayloads[0];
+  equal(payload.chatId, "chat-a", "写入当前聊天 id");
+  equal(payload.worldId, "w-1", "写入世界 id");
+  for (const forbidden of ["apikey", "api_key", "key", "token", "secret", "password", "authorization"]) {
+    ok(!Object.keys(payload).some((k) => k.toLowerCase().includes(forbidden)), `绑定载荷无 ${forbidden} 字段`);
+  }
+  equal(core.getState().mode, "ready", "绑定后刷新 → ready");
+
+  // 世界不存在：服务端拒绝 → 不写 chatMetadata
+  const before = hostWrap.writtenPayloads.length;
+  await core.bindToWorld("missing-world");
+  equal(hostWrap.writtenPayloads.length, before, "拒绝后零写入");
+  ok(core.getState().lastError.includes("世界不存在"), "失败原因用户可见");
+});
+
+test("unbind / setEnabled：写路径正确", async () => {
+  const api = makeApi({ stateByChat: { "chat-a": STATE_PAYLOAD } });
+  const hostWrap = makeHost();
+  hostWrap.setChat("chat-a");
+  hostWrap.setBinding("chat-a", bindingFor("chat-a"));
+  const core = createAtlasUiCore({ api, host: hostWrap.host, emitter: makeEmitter(), now: () => NOW_BASE });
+  await core.handleEvent("APP_READY");
+  await core.setEnabled(false);
+  equal(hostWrap.writtenPayloads.at(-1).enabled, false, "停用写入 metadata");
+  equal(core.getState().mode, "unbound", "停用后 state 视图不再返回 → unbound");
+  await core.unbind();
+  equal(api.calls.some((c) => c.body?.action === "unbind" && c.body?.chatId === "chat-a"), true, "解绑请求发出");
+  equal(hostWrap.writtenPayloads.length, 1, "解绑后无额外绑定写入");
+});
+
+test("requestWorlds：返回列表；失败返回空数组", async () => {
+  const api = makeApi();
+  const hostWrap = makeHost();
+  hostWrap.setChat("chat-a");
+  const core = createAtlasUiCore({ api, host: hostWrap.host, emitter: makeEmitter(), now: () => NOW_BASE });
+  const worlds = await core.requestWorlds();
+  equal(worlds.length, 1, "世界列表返回");
+  equal(worlds[0].id, "w-1", "世界 id");
+  const failing = createAtlasUiCore({
+    api: { request: async () => { throw new Error("down"); } },
+    host: hostWrap.host,
+    emitter: makeEmitter(),
+    now: () => NOW_BASE,
+  });
+  const empty = await failing.requestWorlds();
+  deepEqual(empty, [], "失败 → 空数组");
+  ok(failing.getState().lastError !== null, "错误用户可见");
+});
+
+// ---------------------------------------------------------------------------
+// 面板开关恢复 + 事件驱动 health 重新检查
+// ---------------------------------------------------------------------------
+
+test("面板开关：经 extensionSettings 持久化并在 init 恢复", async () => {
+  const api = makeApi();
+  const hostWrap = makeHost();
+  hostWrap.setChat("chat-a");
+  hostWrap.setPanelOpen(true);
+  const core = createAtlasUiCore({ api, host: hostWrap.host, emitter: makeEmitter(), now: () => NOW_BASE });
+  core.init();
+  equal(core.getState().panelOpen, true, "init 恢复面板展开状态");
+  core.setPanelOpen(false);
+  equal(hostWrap.host.readPanelOpen(), false, "关闭写入宿主（extensionSettings）");
+});
+
+test("事件驱动时强制重新检查 health（不用 30s 缓存）", async () => {
+  let clock = NOW_BASE;
+  const api = makeApi();
+  const hostWrap = makeHost();
+  hostWrap.setChat("chat-a");
+  const core = createAtlasUiCore({ api, host: hostWrap.host, emitter: makeEmitter(), now: () => clock });
+  await core.handleEvent("APP_READY");
+  clock += 1000; // 缓存窗口内
+  await core.handleEvent("CHAT_CHANGED");
+  const healthCalls = api.calls.filter((c) => c.path === "/health").length;
+  equal(healthCalls, 2, "两次事件各做一次 health 检查");
+});
+
+// ---------------------------------------------------------------------------
+// 地图：旅行预览 / 确认填入（不自动发送）/ 缩放钳制
+// ---------------------------------------------------------------------------
+
+const MAP_STATE_PAYLOAD = {
+  ...STATE_PAYLOAD,
+  map: {
+    points: [
+      { id: "p-1", name: "白塔钟座", x: 53, y: 42, regionId: "capital" },
+      { id: "p-4", name: "玻璃温室", x: 63, y: 54, regionId: "capital" },
+    ],
+    pointCount: 2,
+    mapImagePresent: false,
+  },
+};
+
+test("atlasClampZoom：1x..3x 钳制，底图不会被推出视口", () => {
+  equal(atlasClampZoom(0.5), 1, "低于 1x 钳到 1x");
+  equal(atlasClampZoom(1), 1, "1x 原样");
+  equal(atlasClampZoom(2.5), 2.5, "中间值原样");
+  equal(atlasClampZoom(5), 3, "高于 3x 钳到 3x");
+  equal(atlasClampZoom(Number.NaN), 1, "NaN 回退 1x");
+});
+
+test("地图：点击目的地 → 预览；确认只填输入框；取消关闭；切聊天清空预览", async () => {
+  const api = makeApi({
+    stateByChat: { "chat-a": MAP_STATE_PAYLOAD },
+    travelPreview: { destinationId: "p-4", distance: 14, estimatedDuration: 3, factors: ["baseline"] },
+  });
+  const hostWrap = makeHost();
+  hostWrap.setChat("chat-a");
+  hostWrap.setBinding("chat-a", bindingFor("chat-a"));
+  const core = createAtlasUiCore({ api, host: hostWrap.host, emitter: makeEmitter(), now: () => NOW_BASE });
+  await core.handleEvent("APP_READY");
+  equal(core.getState().mode, "ready", "就绪");
+
+  await core.selectDestination("p-4");
+  const preview = core.getState().destinationPreview;
+  ok(preview !== null, "预览已暂存");
+  equal(preview.destinationName, "玻璃温室", "目的地名称来自地图点集");
+  equal(preview.distance, 14, "距离来自共享算法结果");
+  equal(preview.estimatedDuration, 3, "预计耗时");
+
+  core.confirmTravel();
+  deepEqual(hostWrap.filledInputs, ["前往 玻璃温室。"], "确认只填入输入框文本");
+  equal(core.getState().destinationPreview, null, "确认后预览关闭");
+  const sendCalls = api.calls.filter((c) => String(c.path).includes("send"));
+  equal(sendCalls.length, 0, "核心层绝不触发发送");
+
+  // 取消路径
+  await core.selectDestination("p-4");
+  core.cancelTravel();
+  equal(core.getState().destinationPreview, null, "取消后预览关闭");
+
+  // 服务端无预览（未知终点）→ 提示且不填输入框
+  const noPreview = makeApi({ stateByChat: { "chat-a": MAP_STATE_PAYLOAD } });
+  const core2 = createAtlasUiCore({ api: noPreview, host: hostWrap.host, emitter: makeEmitter(), now: () => NOW_BASE });
+  await core2.handleEvent("APP_READY");
+  await core2.selectDestination("p-4");
+  equal(core2.getState().destinationPreview, null, "无预览结果 → 不暂存");
+  ok(core2.getState().lastError !== null, "失败提示用户可见");
+  equal(hostWrap.filledInputs.length, 1, "失败路径不填输入框");
+
+  // 切聊天 → 残留预览清空
+  await core.selectDestination("p-4");
+  hostWrap.setChat("chat-b");
+  await core.handleEvent("CHAT_CHANGED");
+  equal(core.getState().destinationPreview, null, "切聊天后预览清空");
+});
+
+// ---------------------------------------------------------------------------
+// ATLAS-05：生成前注入与回复后世界推演（回合流）
+// ---------------------------------------------------------------------------
+
+/** 测试用事件适配器：载荷即结构化字段（真实 ST 适配在 index.js createEventAdapter）。 */
+function makeAdaptEvent() {
+  return (event, payload) => {
+    if (event === "MESSAGE_SENT") {
+      return payload ? { kind: "message-sent", messageId: String(payload.messageId ?? ""), userText: String(payload.userText ?? "") } : null;
+    }
+    if (event === "MESSAGE_RECEIVED") {
+      return payload
+        ? { kind: "generation-ended", assistantMessageId: String(payload.assistantMessageId ?? ""), assistantText: String(payload.assistantText ?? "") }
+        : null;
+    }
+    if (event === "GENERATION_STOPPED") return { kind: "generation-stopped" };
+    return null;
+  };
+}
+
+async function readyCore(turnBehavior = {}) {
+  const api = makeApi({ stateByChat: { "chat-a": STATE_PAYLOAD }, turnBehavior });
+  const hostWrap = makeHost();
+  hostWrap.setChat("chat-a");
+  hostWrap.setBinding("chat-a", bindingFor("chat-a"));
+  const core = createAtlasUiCore({
+    api,
+    host: hostWrap.host,
+    emitter: makeEmitter(),
+    adaptEvent: makeAdaptEvent(),
+    now: () => NOW_BASE,
+  });
+  await core.handleEvent("APP_READY");
+  return { api, hostWrap, core };
+}
+
+test("回合：未适配 / 未绑定 / 停用时不发 prepare 请求", async () => {
+  const { api, core } = await readyCore();
+  equal(core.getState().mode, "ready", "前置：就绪");
+  // 载荷无法适配 → 忽略，绝不猜测
+  await core.handleEvent("MESSAGE_SENT", null);
+  equal(api.calls.filter((c) => c.path === "/turns/prepare").length, 0, "未适配载荷 → 零请求");
+  // 正常发送
+  await core.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "我从城门走向集市。" });
+  const prepares = api.calls.filter((c) => c.path === "/turns/prepare");
+  equal(prepares.length, 1, "一次 prepare");
+  const pending = core.getState().pendingTurn;
+  ok(pending !== null, "pendingTurn 建立");
+  equal(pending.turnId, "turn-1", "turnId 来自服务端");
+  equal(pending.messageId, "m-0", "messageId 保留");
+  // 停用绑定 → 不再 prepare
+  await core.handleEvent("GENERATION_STOPPED");
+  await core.setEnabled(false);
+  await core.handleEvent("MESSAGE_SENT", { messageId: "m-1", userText: "第二条。" });
+  equal(api.calls.filter((c) => c.path === "/turns/prepare").length, 1, "停用后零 prepare");
+});
+
+test("回合：GENERATION_ENDED → commit 一次 → 回执入列并持久化 → 刷新状态", async () => {
+  const { api, hostWrap, core } = await readyCore();
+  await core.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "我从城门走向集市。" });
+  await core.handleEvent("MESSAGE_RECEIVED", { assistantMessageId: "m-1", assistantText: "你穿过城门，集市喧闹扑面而来。" });
+  const commits = api.calls.filter((c) => c.path === "/turns/commit");
+  equal(commits.length, 1, "恰好一次 commit");
+  const receipt = core.getState().receipts;
+  equal(receipt.length, 1, "回执入列");
+  equal(receipt[0].receiptId, "receipt-1", "回执 id");
+  equal(receipt[0].adoptedEventCount, 1, "采纳变化条数来自 adoptedEventIds");
+  ok(receipt[0].summary.length <= 300, "摘要截断上界");
+  equal(core.getState().pendingTurn, null, "pendingTurn 清空");
+  equal(core.getState().lastError, null, "无错误");
+  deepEqual(hostWrap.dataStore.get("receipts"), receipt, "回执写入 extensionSettings");
+  equal(api.calls.filter((c) => c.path === "/state/chat-a").length >= 2, true, "commit 成功后刷新世界状态");
+});
+
+test("回合：同一条回复的重复 GENERATION_ENDED 只 commit 一次", async () => {
+  const { api, core } = await readyCore();
+  await core.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "你好。" });
+  // 并发触发两次完成通知（真实 ST 中 MESSAGE_RECEIVED 与 GENERATION_ENDED 可能先后到达）
+  const first = core.handleEvent("MESSAGE_RECEIVED", { assistantMessageId: "m-1", assistantText: "回答。" });
+  const second = core.handleEvent("GENERATION_ENDED", { assistantMessageId: "m-1", assistantText: "回答。" });
+  await Promise.all([first, second]);
+  equal(api.calls.filter((c) => c.path === "/turns/commit").length, 1, "重复通知不重复推进世界");
+  equal(core.getState().receipts.length, 1, "回执去重后仍一条");
+});
+
+test("回合：GENERATION_STOPPED / 空回复 → 放弃 pending，不推进世界", async () => {
+  const stopped = await readyCore();
+  await stopped.core.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "写字。" });
+  await stopped.core.handleEvent("GENERATION_STOPPED");
+  equal(stopped.api.calls.filter((c) => c.path === "/turns/commit").length, 0, "停止 → 零 commit");
+  equal(stopped.core.getState().pendingTurn, null, "pending 放弃");
+
+  const empty = await readyCore();
+  await empty.core.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "写字。" });
+  await empty.core.handleEvent("MESSAGE_RECEIVED", { assistantMessageId: "m-1", assistantText: "   " });
+  equal(empty.api.calls.filter((c) => c.path === "/turns/commit").length, 0, "空回复 → 零 commit");
+  equal(empty.core.getState().pendingTurn, null, "空回复放弃 pending");
+});
+
+test("回合：prepare 失败不阻断（提示用户可见），无注入不建 pending", async () => {
+  const failed = await readyCore({ prepareError: "相关性筛选失败" });
+  await failed.core.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "你好。" });
+  equal(failed.core.getState().pendingTurn, null, "无 pending");
+  ok(failed.core.getState().lastError.includes("相关性筛选失败"), "失败原因用户可见");
+  const thrown = await readyCore({ prepareThrow: true });
+  await thrown.core.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "你好。" });
+  ok(thrown.core.getState().lastError.includes("未注入"), "网络失败提示可读");
+});
+
+test("回合：commit 失败 → retryableCommit；retry 沿用原键且成功后清空", async () => {
+  const { api, core } = await readyCore({ commitError: "推演模型超时" });
+  await core.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "推进剧情。" });
+  await core.handleEvent("MESSAGE_RECEIVED", { assistantMessageId: "m-1", assistantText: "剧情推进了。" });
+  equal(core.getState().pendingTurn, null, "失败后 pending 清空");
+  const retryable = core.getState().retryableCommit;
+  ok(retryable !== null, "retryableCommit 保留");
+  equal(retryable.chatId, "chat-a", "键字段：chatId");
+  equal(retryable.userMessageId, "m-0", "键字段：userMessageId");
+  equal(retryable.assistantMessageId, "m-1", "键字段：assistantMessageId");
+
+  // 重试失败：仍保留 retryable
+  const failing = await readyCore({ commitError: "x", retryError: "仍然失败" });
+  await failing.core.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "推进剧情。" });
+  await failing.core.handleEvent("MESSAGE_RECEIVED", { assistantMessageId: "m-1", assistantText: "剧情推进了。" });
+  await failing.core.retryLastCommit();
+  equal(failing.core.getState().retryableCommit !== null, true, "重试失败仍可再试");
+  ok(failing.core.getState().lastError.includes("仍然失败"), "重试失败原因可见");
+
+  // 重试成功：清空 retryable，回执入列
+  await core.retryLastCommit();
+  const retries = api.calls.filter((c) => c.path === "/turns/retry");
+  equal(retries.length, 1, "一次 retry 请求");
+  equal(retries[0].body.userMessageId, "m-0", "retry 沿用原幂等键字段");
+  equal(retries[0].body.assistantMessageId, "m-1", "retry 键：assistantMessageId");
+  equal(core.getState().retryableCommit, null, "成功后清空 retryable");
+  equal(core.getState().receipts.length, 1, "回执入列");
+  equal(core.getState().lastError, null, "错误清除");
+});
+
+test("回合：回执经 extensionSettings 持久化；新 core init 恢复合法条目、拒收非法形状", async () => {
+  const first = await readyCore();
+  await first.core.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "推进。" });
+  await first.core.handleEvent("MESSAGE_RECEIVED", { assistantMessageId: "m-1", assistantText: "推进了。" });
+  first.core.dispose();
+
+  // 第二个 core 复用同一宿主（同一 extensionSettings）
+  const secondApi = makeApi({ stateByChat: { "chat-a": STATE_PAYLOAD } });
+  const second = createAtlasUiCore({
+    api: secondApi,
+    host: first.hostWrap.host,
+    emitter: makeEmitter(),
+    adaptEvent: makeAdaptEvent(),
+    now: () => NOW_BASE,
+  });
+  second.init();
+  await flush();
+  equal(second.getState().receipts.length, 1, "刷新后回执仍在");
+  equal(second.getState().receipts[0].receiptId, "receipt-1", "回执内容一致");
+  second.dispose();
+
+  // 非法持久化形状：非对象条目 / 缺 receiptId / 缺 summary 全部拒收
+  const badHostWrap = makeHost();
+  badHostWrap.setChat("chat-a");
+  badHostWrap.dataStore.set("receipts", [
+    "junk",
+    null,
+    { receiptId: "r-1", summary: "只有回执号与摘要", previousTime: "not-a-number" },
+    { summary: "缺 receiptId" },
+    { receiptId: "r-2", summary: "合法条目", currentTime: 5 },
+  ]);
+  const badCore = createAtlasUiCore({ api: secondApi, host: badHostWrap.host, emitter: makeEmitter(), now: () => NOW_BASE });
+  badCore.init();
+  await flush();
+  equal(badCore.getState().receipts.length, 2, "非法条目逐条拒收，合法条目保留");
+  equal(badCore.getState().receipts[1].previousTime, 0, "非法数值字段回退默认");
+  badCore.dispose();
+});
+
+test("回合：处于 pending 期间禁止第二条 prepare（同一时刻最多一条在途回合）", async () => {
+  const { api, core } = await readyCore();
+  await core.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "第一条。" });
+  await core.handleEvent("MESSAGE_SENT", { messageId: "m-1", userText: "第二条。" });
+  equal(api.calls.filter((c) => c.path === "/turns/prepare").length, 1, "在途回合未结束前不再 prepare");
+  equal(core.getState().pendingTurn.messageId, "m-0", "保留第一条 pending");
+});
+
+// ---------------------------------------------------------------------------
+// index.js 在无酒馆环境的安全性
+// ---------------------------------------------------------------------------
+
+test("index.js：无 SillyTavern / document 时导入与 connectAtlas 都安全", async () => {
+  const extension = createAtlasExtension();
+  equal(extension.displayName, ATLAS_DISPLAY_NAME, "显示名导出保留");
+  extension.mount();
+  equal(extension.mounted, true, "mount 占位保留");
+  const result = await connectAtlas();
+  equal(result, null, "Node 环境 connectAtlas 返回 null 不抛错");
+});
+
+test(`本轮累计断言已记录（计数见报告）`, () => {
+  ok(assertionCount > 60, "断言数量达到覆盖要求");
+});
