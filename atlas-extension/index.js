@@ -1329,11 +1329,153 @@ function renderPanel(core, root, clampZoom, api, store) {
 // 绝不静默覆盖用户已绑定的世界书。
 // ---------------------------------------------------------------------------
 
+/**
+ * 兼容性（参照 shujuku/SP·数据库 的 host-compat 层做法，2026-09-18）：
+ * 世界书操作优先走 SillyTavern.getContext() 的**原生公开接口**
+ * （1.13.x st-context.js 起暴露 loadWorldInfo / saveWorldInfo），
+ * 完全不依赖酒馆源码的目录层级；只有原生接口缺失（旧版酒馆）才退回
+ * 相对路径动态 import world-info.js。
+ *
+ * 原生模式下的缺位能力这样补（同样来自 shujuku 实测可用的做法）：
+ * - createNewWorldInfo：context 不暴露 → 直接 POST /api/worldinfo/create
+ *   （createNewWorldInfo 模块函数内部就是这一条，端点与载荷稳定）；
+ * - createWorldInfoEntry：context 不暴露 → 按 world-info 条目模板自建
+ *   （字段集与 ST 1.13 条目默认值对齐，缺失的新字段酒馆加载时会回填默认值）；
+ * - deleteWorldInfoEntry：直接 delete data.entries[uid]。
+ */
+
+/** 判定 context 是否带原生世界书接口（loadWorldInfo + saveWorldInfo）。 */
+export function hasNativeWorldInfoApi(context) {
+  return Boolean(
+    context &&
+      typeof context.loadWorldInfo === "function" &&
+      typeof context.saveWorldInfo === "function"
+  );
+}
+
+/** world-info 条目默认模板（与 SillyTavern 1.13 条目默认值对齐）。 */
+export function nativeWorldInfoEntryDefaults() {
+  return {
+    key: [],
+    keysecondary: [],
+    comment: "",
+    content: "",
+    constant: false,
+    vectorized: false,
+    selective: true,
+    selectiveLogic: 0,
+    addMemo: true,
+    order: 100,
+    position: 0,
+    disable: false,
+    excludeRecursion: false,
+    preventRecursion: false,
+    matchPersonaDescription: false,
+    matchCharacterDescription: false,
+    matchCharacterPersonality: false,
+    matchCharacterDepthPrompt: false,
+    matchScenario: false,
+    matchCreatorNotes: false,
+    delayUntilRecursion: 0,
+    probability: 100,
+    useProbability: true,
+    depth: 4,
+    group: "",
+    groupOverride: false,
+    groupWeight: 100,
+    scanDepth: null,
+    caseSensitive: null,
+    matchWholeWords: null,
+    useGroupScoring: null,
+    automationId: "",
+    role: 0,
+    sticky: null,
+    cooldown: null,
+    delay: null,
+  };
+}
+
+/**
+ * 用 getContext() 的原生接口拼出与 world-info.js 模块同形的世界书模块。
+ * 每个方法内部都重新 getContext()，不缓存任何聊天 / 设置快照。
+ * @param {() => object} getContext
+ */
+export function createNativeWorldInfoModule(getContext) {
+  const ctx = () => {
+    try {
+      return getContext() ?? null;
+    } catch {
+      return null;
+    }
+  };
+  return {
+    native: true,
+    async loadWorldInfo(name) {
+      const c = ctx();
+      if (!c || typeof c.loadWorldInfo !== "function") {
+        throw new Error("SillyTavern loadWorldInfo 接口不可用");
+      }
+      return c.loadWorldInfo(name);
+    },
+    async saveWorldInfo(name, data, immediately) {
+      const c = ctx();
+      if (!c || typeof c.saveWorldInfo !== "function") {
+        throw new Error("SillyTavern saveWorldInfo 接口不可用");
+      }
+      return c.saveWorldInfo(name, data, immediately !== false);
+    },
+    async createNewWorldInfo(name) {
+      const c = ctx();
+      const headers =
+        c && typeof c.getRequestHeaders === "function"
+          ? c.getRequestHeaders()
+          : {};
+      const response = await fetch("/api/worldinfo/create", {
+        method: "POST",
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      if (!response.ok) {
+        throw new Error(`世界书创建失败（HTTP ${response.status}）`);
+      }
+    },
+    createWorldInfoEntry(_name, data) {
+      if (!data || typeof data !== "object" || !data.entries) return null;
+      let maxUid = -1;
+      for (const key of Object.keys(data.entries)) {
+        const uid = Number(key);
+        if (Number.isInteger(uid) && uid > maxUid) maxUid = uid;
+      }
+      const uid = maxUid + 1;
+      const entry = { ...nativeWorldInfoEntryDefaults(), uid };
+      data.entries[String(uid)] = entry;
+      return entry;
+    },
+    deleteWorldInfoEntry(data, uid) {
+      if (data && data.entries && Object.prototype.hasOwnProperty.call(data.entries, String(uid))) {
+        delete data.entries[String(uid)];
+      }
+    },
+  };
+}
+
 async function loadStWorldInfo() {
-  // 预览夹具 / 测试可注入 window.__atlasWorldInfoModule；真实酒馆走相对路径动态 import。
+  // 预览夹具 / 测试可注入 window.__atlasWorldInfoModule（最高优先）。
   if (typeof window !== "undefined" && window.__atlasWorldInfoModule) {
     return window.__atlasWorldInfoModule;
   }
+  // 首选：getContext() 原生公开接口（1.13+），与酒馆目录结构完全解耦。
+  if (typeof SillyTavern !== "undefined") {
+    try {
+      const context = SillyTavern.getContext();
+      if (hasNativeWorldInfoApi(context)) {
+        return createNativeWorldInfoModule(() => SillyTavern.getContext());
+      }
+    } catch {
+      /* getContext 还没就绪 → 落到 import 回退 */
+    }
+  }
+  // 回退：相对路径动态 import（旧版酒馆；路径随安装挂载点，两条深度都试）。
   let lastError = null;
   for (const path of ["../../../world-info.js", "../../world-info.js"]) {
     try {

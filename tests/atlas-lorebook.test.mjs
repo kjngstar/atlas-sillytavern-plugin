@@ -20,7 +20,7 @@ import {
   parseAtlasLorebookPlans,
   createAtlasLorebookWriter,
 } from "../src/atlas-lorebook.ts";
-import { createLorebookPort } from "../atlas-extension/index.js";
+import { createLorebookPort, createNativeWorldInfoModule, hasNativeWorldInfoApi } from "../atlas-extension/index.js";
 
 let assertionCount = 0;
 function ok(value, message) {
@@ -422,6 +422,134 @@ test("写入器：保存后不再触碰 data（酒馆缓存不深拷贝）", asy
   deepEqual(touched, [], "save 返回后 data 未被改动");
 });
 
+// ---------------------------------------------------------------------------
+// 原生世界书模块（shujuku 式 getContext 公开接口，2026-09-18 兼容性收口）
+// ---------------------------------------------------------------------------
+
+test("原生模块：可用性判定只认 loadWorldInfo + saveWorldInfo 同时存在", () => {
+  equal(hasNativeWorldInfoApi(null), false, "null context 不可用");
+  equal(hasNativeWorldInfoApi({ loadWorldInfo: () => {} }), false, "缺 saveWorldInfo 不可用");
+  equal(
+    hasNativeWorldInfoApi({ loadWorldInfo: () => {}, saveWorldInfo: () => {} }),
+    true,
+    "两接口齐备即可用"
+  );
+});
+
+test("原生模块：每次调用都重新 getContext；saveWorldInfo 缺省 immediately=true", async () => {
+  let calls = 0;
+  const saved = [];
+  const getContext = () => {
+    calls += 1;
+    return {
+      loadWorldInfo: async (name) => ({ entries: {}, requested: name }),
+      saveWorldInfo: async (name, data, immediately) => {
+        saved.push([name, immediately]);
+      },
+    };
+  };
+  const mod = createNativeWorldInfoModule(getContext);
+
+  const book = await mod.loadWorldInfo("A");
+  await mod.loadWorldInfo("B");
+  equal(calls, 2, "每次方法调用都重新取 context");
+  equal(book.requested, "A", "透传参数");
+
+  await mod.saveWorldInfo("A", { entries: {} });
+  await mod.saveWorldInfo("A", { entries: {} }, false);
+  deepEqual(saved, [["A", true], ["A", false]], "immediately 缺省为 true，显式 false 可透传");
+});
+
+test("原生模块：createNewWorldInfo 走 POST /api/worldinfo/create 并带 CSRF 头", async () => {
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url, init });
+    return { ok: true, status: 200 };
+  };
+  try {
+    const mod = createNativeWorldInfoModule(() => ({
+      getRequestHeaders: () => ({ Authorization: "Bearer test", "X-CSRF": "t" }),
+    }));
+    await mod.createNewWorldInfo("Atlas · 星环余烬");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  equal(calls.length, 1, "恰好一次请求");
+  ok(calls[0].url.includes("/api/worldinfo/create"), "端点正确");
+  equal(calls[0].init.method, "POST", "POST 方法");
+  deepEqual(JSON.parse(calls[0].init.body), { name: "Atlas · 星环余烬" }, "载荷 = { name }");
+  ok(calls[0].init.headers["X-CSRF"] === "t" && calls[0].init.headers["Content-Type"] === "application/json", "CSRF 头与 Content-Type 并存");
+});
+
+test("原生模块：createWorldInfoEntry 分配 max 数字 uid + 1 并带全套默认字段；deleteWorldInfoEntry 按 String(uid) 删", () => {
+  const mod = createNativeWorldInfoModule(() => ({}));
+  const data = { entries: { "0": { uid: 0, content: "旧" }, "3": { uid: 3, content: "旧" }, "junk": {} } };
+  const entry = mod.createWorldInfoEntry("Atlas", data);
+  ok(entry.uid === 4, `uid = max(0,3)+1 = 4（实际 ${entry.uid}）`);
+  ok(entry.content === "" && entry.selective === true && entry.order === 100 && entry.probability === 100 && entry.depth === 4, "关键默认字段齐备");
+  ok(data.entries["4"] === entry, "条目已写回 data.entries");
+
+  mod.deleteWorldInfoEntry(data, 4);
+  ok(!Object.prototype.hasOwnProperty.call(data.entries, "4"), "删除后键不存在");
+  mod.deleteWorldInfoEntry(data, "不存在的键");
+  ok(true, "删除不存在的键不抛");
+  mod.deleteWorldInfoEntry(null, 1);
+  ok(true, "null data 不抛");
+});
+
+test("原生模块全链路：原生 context → 原生模块 → 真实端口 → writer 同步成功", async () => {
+  const books = new Map();
+  const saves = [];
+  const chatMetadata = {};
+  let savedMetadata = 0;
+  const getContext = () => ({
+    loadWorldInfo: async (name) => {
+      const raw = books.get(name);
+      return raw ? JSON.parse(JSON.stringify(raw)) : null;
+    },
+    saveWorldInfo: async (name, data) => {
+      books.set(name, JSON.parse(JSON.stringify(data)));
+      saves.push(name);
+    },
+    getRequestHeaders: () => ({}),
+    chatMetadata,
+    saveMetadata: async () => {
+      savedMetadata += 1;
+    },
+  });
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    const name = JSON.parse(init.body).name;
+    if (!books.has(name)) books.set(name, { entries: {} });
+    return { ok: true, status: 200 };
+  };
+  try {
+    const nativeModule = createNativeWorldInfoModule(getContext);
+    ok(hasNativeWorldInfoApi(getContext()), "夹具 context 满足原生判定");
+    ok(nativeModule.native === true, "标记为原生模块");
+
+    const port = createLorebookPort(getContext, nativeModule);
+    const writer = createAtlasLorebookWriter(port, { now: () => 2000 });
+    var result = await writer.syncTurn(PLANS_A);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  equal(result.bookName, PLANS_A.bookName, "书名一致");
+  equal(result.written, PLANS_A.entries.length, "两条条目全部写入");
+  equal(result.binding, "bound-by-atlas", "聊天槽被 Atlas 绑定");
+  ok(saves.length >= 1, "原生 saveWorldInfo 被调用");
+  equal(savedMetadata, 1, "绑定后 saveMetadata 恰好一次");
+
+  const stored = books.get(PLANS_A.bookName);
+  const comments = Object.values(stored.entries).map((e) => e.comment);
+  ok(comments.some((c) => c.startsWith(ATLAS_LOREBOOK_PREFIX.moves)), "动向条目在原生存储中");
+  ok(comments.some((c) => c.startsWith(ATLAS_LOREBOOK_PREFIX.events)), "事件条目在原生存储中");
+  ok(Object.values(stored.entries).every((e) => e.probability === 100 && e.selective === true), "原生默认字段随条目落库");
+});
+
 test("本轮累计断言已记录（计数见报告）", () => {
-  ok(assertionCount > 40, `断言数：${assertionCount}`);
+  ok(assertionCount > 60, `断言数：${assertionCount}`);
 });
