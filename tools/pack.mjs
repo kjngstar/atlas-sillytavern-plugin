@@ -90,4 +90,15 @@ for (const target of PACK_TARGETS) {
     console.log(`  - ${file}`);
   }
 }
+
+// 4) 同步仓库根安装单元：SillyTavern「Install extension」要求 manifest.json
+//    位于仓库根，且 index.js 加载 ./dist/atlas-ui-core.mjs。发布仓库根 = 安装单元。
+const uiRelease = join(releaseDir, "atlas-ui-extension");
+const ROOT_INSTALL_FILES = ["manifest.json", "index.js", "style.css", "settings.html"];
+for (const file of ROOT_INSTALL_FILES) {
+  copyFileSync(join(uiRelease, file), join(root, file));
+}
+copyTree(join(uiRelease, "dist"), join(root, "dist"));
+console.log("synced root install unit (manifest.json / index.js / style.css / settings.html / dist/)");
+
 console.log("ATLAS-FIX-01 pack complete（自包含安装包）.");

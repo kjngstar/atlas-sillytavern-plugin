@@ -1,6 +1,11 @@
-# 构建产物(任何层级)
-dist/
-**/dist/
+# 构建产物（仅限开发目录内的中间产物）
+# 注意：仓库根 dist/ 是发布安装单元的一部分（manifest.json 指向 ./dist/），必须提交
+/atlas-extension/dist/
+/atlas-server-plugin/dist/
+/release/
+
+# 第三方参考代码（不发布）
+/tools/ref/
 
 # Node / 包管理
 node_modules/
