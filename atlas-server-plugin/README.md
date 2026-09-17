@@ -53,4 +53,4 @@ SillyTavern Server Plugin：同源服务端，承载世界存储、聊天绑定�
 - 更新：用新版目录覆盖 `plugins/atlas/`（保留 `data/`）后重启 SillyTavern。
 - 卸载：删除 `plugins/atlas/`；如需彻底清除数据，手动删除 `data/` 目录（含世界与绑定，删除前请确认）。
 
-完整规格见上级 `../README.md`。
+> 这是进阶形态：世界数据落服务端文件（文件级数据安全）。常规使用只需安装 UI 扩展，见 `../atlas-extension/README.md`。
