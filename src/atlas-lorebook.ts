@@ -280,6 +280,13 @@ export interface AtlasLorebookPort {
   /** 当前聊天绑定的世界书名（chatMetadata.world_info）；未绑定 → null */
   getChatBookName(): Promise<string | null>;
   bindChatBook(name: string): Promise<void>;
+  /**
+   * 首选目标世界书（作者 2026-09-18 拍板，参照 shujuku 角色卡世界书方式）：
+   * 返回当前角色卡的主世界书名（character.data.extensions.world）时，
+   * 条目直接写入该书、完全不占用聊天绑定槽；null / 未实现 → 回退
+   * plans.bookName（Atlas 专属书 + 绑定空槽）。
+   */
+  resolvePreferredBook?(): Promise<string | null>;
 }
 
 export interface AtlasLorebookEntryView {
@@ -294,7 +301,8 @@ export interface AtlasLorebookSyncResult {
   created: boolean;
   written: number;
   pruned: number;
-  binding: "bound-by-atlas" | "already-bound" | "conflict";
+  /** char-primary = 写入当前角色卡的主世界书（不占聊天绑定槽） */
+  binding: "char-primary" | "bound-by-atlas" | "already-bound" | "conflict";
   existingBookName: string | null;
   /** 同步后书内的全部 Atlas 条目（面板可见性用） */
   entries: AtlasLorebookEntryView[];
@@ -361,18 +369,33 @@ export function createAtlasLorebookWriter(port: AtlasLorebookPort, opts: { now?:
 
   return {
     /**
-     * 把一轮的条目规划写入 Atlas 专属世界书：
+     * 把一轮的条目规划写入目标世界书（作者 2026-09-18 拍板：角色卡世界书优先）：
+     * 0. 端口能解析出角色卡主世界书 → 直接写该书（cardMode，不占聊天绑定槽）；
+     *    否则目标 = plans.bookName（Atlas 专属书）；
      * 1. 书不存在 → createBook；存在但非法 → 拒绝（不覆盖）；
      * 2. 按 comment upsert（同轮重复同步不产生重复条目）；
      * 3. 按类目滚动修剪（时段号新 → 旧保留 MOVES_KEEP / EVENTS_KEEP）；
      * 4. 整书保存一次；保存后不再改动 data（酒馆缓存不深拷贝）；
-     * 5. 聊天绑定槽为空才绑定；已绑定别的书 → conflict（绝不静默覆盖）。
+     * 5. 专属书模式下：聊天绑定槽为空才绑定；已绑定别的书 → conflict（绝不静默覆盖）。
      */
     async syncTurn(plans: AtlasLorebookPlans): Promise<AtlasLorebookSyncResult> {
       if (!plans || !Array.isArray(plans.entries) || plans.entries.length === 0) {
         throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "lorebook 规划为空，跳过写入。");
       }
-      const { data, created } = await loadOrCreate(plans.bookName);
+      let targetName = plans.bookName;
+      let cardMode = false;
+      if (typeof port.resolvePreferredBook === "function") {
+        try {
+          const preferred = await port.resolvePreferredBook();
+          if (typeof preferred === "string" && preferred.trim()) {
+            targetName = preferred;
+            cardMode = true;
+          }
+        } catch {
+          // 目标解析失败 → 回退专属书路径
+        }
+      }
+      const { data, created } = await loadOrCreate(targetName);
       const entriesRecord = data.entries as Record<string, unknown>;
 
       let written = 0;
@@ -410,27 +433,33 @@ export function createAtlasLorebookWriter(port: AtlasLorebookPort, opts: { now?:
       // 保存前抓一次全量视图（保存后不得再碰 data）
       const finalEntries = collectAtlasEntries(data).map((item) => item.view);
 
-      await port.saveBook(plans.bookName, data);
+      await port.saveBook(targetName, data);
 
-      // 聊天绑定：只有一个槽，绝不静默覆盖
-      const chatBook = await port.getChatBookName();
+      // 聊天绑定：只有专属书模式才涉及绑定槽（角色卡世界书随角色激活，无需绑定）
       let binding: AtlasLorebookSyncResult["binding"];
-      if (chatBook === null || chatBook === "") {
-        await port.bindChatBook(plans.bookName);
-        binding = "bound-by-atlas";
-      } else if (chatBook === plans.bookName) {
-        binding = "already-bound";
+      let existingBookName: string | null = null;
+      if (cardMode) {
+        binding = "char-primary";
       } else {
-        binding = "conflict";
+        const chatBook = await port.getChatBookName();
+        if (chatBook === null || chatBook === "") {
+          await port.bindChatBook(targetName);
+          binding = "bound-by-atlas";
+        } else if (chatBook === targetName) {
+          binding = "already-bound";
+        } else {
+          binding = "conflict";
+          existingBookName = chatBook;
+        }
       }
 
       return {
-        bookName: plans.bookName,
+        bookName: targetName,
         created,
         written,
         pruned,
         binding,
-        existingBookName: binding === "conflict" ? chatBook : null,
+        existingBookName,
         entries: finalEntries,
       };
     },
@@ -439,7 +468,7 @@ export function createAtlasLorebookWriter(port: AtlasLorebookPort, opts: { now?:
     snapshot(plans: AtlasLorebookPlans, result: AtlasLorebookSyncResult) {
       return {
         schemaVersion: 1 as const,
-        bookName: plans.bookName,
+        bookName: result.bookName,
         updatedAt: now(),
         created: result.created,
         written: result.written,

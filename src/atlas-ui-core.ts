@@ -307,8 +307,10 @@ export function createAtlasUiCore(deps: {
     healthCheckedAt = now();
     try {
       const result = await api.request("GET", "/health");
-      const body = result.body as Record<string, unknown>;
-      const version = typeof body.protocolVersion === "number" ? body.protocolVersion : null;
+      // 响应契约 = { ok: true, data: { protocolVersion, ... } }（与 /state 等分支同形）。
+      const body = result.body as { ok?: boolean; data?: Record<string, unknown> };
+      const payload = body?.data;
+      const version = payload && typeof payload.protocolVersion === "number" ? payload.protocolVersion : null;
       if (version !== ATLAS_PROTOCOL_VERSION) {
         setState({ serviceStatus: "incompatible", serviceProtocolVersion: version, mode: "protocol-incompatible" });
         return;
