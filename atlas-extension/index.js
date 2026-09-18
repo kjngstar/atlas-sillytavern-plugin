@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.7.3";
+export const ATLAS_EXTENSION_VERSION = "0.7.4";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -1648,6 +1648,7 @@ async function connectOnce() {
       document.body.append(root);
     }
     rerender = renderPanel(core, root, mod.atlasClampZoom, api, engineStore);
+    installMenuButton(core);
     core.init();
     connected = { core, rerender };
     return connected;
@@ -1657,9 +1658,58 @@ async function connectOnce() {
   }
 }
 
+// 扩展菜单入口（作者 2026-09-19 反馈：0.7.3 修好隐藏后没有任何打开入口）。
+// 做法 = shujuku 同款：往 #extensionsMenu 追加条目，容器未就绪则 2s 间隔重试。
+let menuButtonTimer = null;
+
+function installMenuButton(core) {
+  if (typeof document === "undefined") return;
+  ensureAtlasMenuItem(core);
+  let tries = 1;
+  menuButtonTimer = setInterval(() => {
+    tries += 1;
+    const done = ensureAtlasMenuItem(core);
+    if (done || tries >= 10) {
+      if (menuButtonTimer) clearInterval(menuButtonTimer);
+      menuButtonTimer = null;
+    }
+  }, 2000);
+}
+
+function ensureAtlasMenuItem(core) {
+  const menu = document.getElementById("extensionsMenu");
+  if (!menu) return false;
+  let item = document.getElementById("atlas-menu-open");
+  if (!item) {
+    item = el("div", "list-group-item flex-container flexGap5 interactable");
+    item.id = "atlas-menu-open";
+    item.setAttribute("tabindex", "0");
+    item.title = "打开阿特拉斯世界工作台";
+    const icon = el("div", "fa-fw fa-solid fa-globe extensionsMenuExtensionButton");
+    const label = el("span", null, "阿特拉斯 / Atlas");
+    item.append(icon, label);
+    item.addEventListener("click", (event) => {
+      event.stopPropagation();
+      core.setPanelOpen(true);
+    });
+    menu.append(item);
+  }
+  return true;
+}
+
+function removeMenuButton() {
+  if (menuButtonTimer) {
+    clearInterval(menuButtonTimer);
+    menuButtonTimer = null;
+  }
+  const item = document.getElementById("atlas-menu-open");
+  if (item) item.remove();
+}
+
 export async function disconnectAtlas() {
   if (!connected) return;
   connected.core.dispose();
+  removeMenuButton();
   const root = document.getElementById("atlas-extension-panel-root");
   if (root) root.remove();
   connected = null;

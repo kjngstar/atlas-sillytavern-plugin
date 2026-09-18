@@ -286,6 +286,15 @@ test("形态契约：右上角常驻关闭钮（作者 2026-09-19 反馈）", ()
   );
 });
 
+test("形态契约：扩展菜单打开入口（作者 2026-09-19 反馈：修好隐藏后没有打开入口）", () => {
+  const js = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
+  ok(js.includes('document.getElementById("extensionsMenu")'), "往酒馆扩展菜单 #extensionsMenu 挂条目");
+  ok(js.includes('item.id = "atlas-menu-open"'), "菜单条目有稳定 id（幂等不重复挂载）");
+  ok(js.includes("installMenuButton(core)"), "连接时安装菜单入口");
+  ok(js.includes("removeMenuButton();"), "停用 / 断开时移除菜单入口");
+  ok(/core\.setPanelOpen\(true\)/.test(js), "点击菜单 = 打开工作台");
+});
+
 test("形态契约：预览控制挂右栏槽位，不常驻生产界面", () => {
   const js = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
   const css = readFileSync(join(root, "atlas-extension", "style.css"), "utf8");
