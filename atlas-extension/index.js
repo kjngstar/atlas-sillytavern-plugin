@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.7.1";
+export const ATLAS_EXTENSION_VERSION = "0.7.2";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -405,6 +405,12 @@ function renderPanel(core, root, clampZoom, api, store) {
   const topbar = el("div", "aw-topbar");
   const topbarLeft = el("div", "aw-topbar__left");
   const topbarRight = el("div", "aw-topbar__right");
+  // 右上角常驻关闭钮（作者 2026-09-19 反馈）：随 renderTopbar 追加在状态 chips 之后
+  const topbarClose = el("button", "aw-topbar__close", "×");
+  topbarClose.type = "button";
+  topbarClose.title = "关闭工作台";
+  topbarClose.setAttribute("aria-label", "关闭工作台，返回酒馆聊天");
+  topbarClose.addEventListener("click", () => core.setPanelOpen(false));
   topbar.append(topbarLeft, topbarRight);
 
   const center = el("div", "aw-center");
@@ -472,6 +478,7 @@ function renderPanel(core, root, clampZoom, api, store) {
       const pointName = (d.map?.points ?? []).find((p) => String(p.id) === String(d.currentLocationId))?.name;
       topbarRight.append(el("span", "aw-chip aw-chip--teal", `位置：${pointName ?? String(d.currentLocationId)}`));
     }
+    topbarRight.append(topbarClose);
   }
 
   function renderMoves() {
