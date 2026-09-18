@@ -4787,7 +4787,7 @@ function createAtlasServerCore(deps) {
     return okResult({
       ok: true,
       plugin: "atlas",
-      version: "0.7.3",
+      version: "0.7.4",
       protocolVersion: 1,
       time: now()
     });
