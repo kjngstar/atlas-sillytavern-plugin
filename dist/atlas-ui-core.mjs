@@ -563,18 +563,32 @@ function createAtlasLorebookWriter(port, opts = {}) {
   }
   return {
     /**
-     * 把一轮的条目规划写入 Atlas 专属世界书：
+     * 把一轮的条目规划写入目标世界书（作者 2026-09-18 拍板：角色卡世界书优先）：
+     * 0. 端口能解析出角色卡主世界书 → 直接写该书（cardMode，不占聊天绑定槽）；
+     *    否则目标 = plans.bookName（Atlas 专属书）；
      * 1. 书不存在 → createBook；存在但非法 → 拒绝（不覆盖）；
      * 2. 按 comment upsert（同轮重复同步不产生重复条目）；
      * 3. 按类目滚动修剪（时段号新 → 旧保留 MOVES_KEEP / EVENTS_KEEP）；
      * 4. 整书保存一次；保存后不再改动 data（酒馆缓存不深拷贝）；
-     * 5. 聊天绑定槽为空才绑定；已绑定别的书 → conflict（绝不静默覆盖）。
+     * 5. 专属书模式下：聊天绑定槽为空才绑定；已绑定别的书 → conflict（绝不静默覆盖）。
      */
     async syncTurn(plans) {
       if (!plans || !Array.isArray(plans.entries) || plans.entries.length === 0) {
         throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "lorebook 规划为空，跳过写入。");
       }
-      const { data, created } = await loadOrCreate(plans.bookName);
+      let targetName = plans.bookName;
+      let cardMode = false;
+      if (typeof port.resolvePreferredBook === "function") {
+        try {
+          const preferred = await port.resolvePreferredBook();
+          if (typeof preferred === "string" && preferred.trim()) {
+            targetName = preferred;
+            cardMode = true;
+          }
+        } catch {
+        }
+      }
+      const { data, created } = await loadOrCreate(targetName);
       const entriesRecord = data.entries;
       let written = 0;
       for (const plan of plans.entries) {
@@ -604,24 +618,30 @@ function createAtlasLorebookWriter(port, opts = {}) {
         }
       }
       const finalEntries = collectAtlasEntries(data).map((item) => item.view);
-      await port.saveBook(plans.bookName, data);
-      const chatBook = await port.getChatBookName();
+      await port.saveBook(targetName, data);
       let binding;
-      if (chatBook === null || chatBook === "") {
-        await port.bindChatBook(plans.bookName);
-        binding = "bound-by-atlas";
-      } else if (chatBook === plans.bookName) {
-        binding = "already-bound";
+      let existingBookName = null;
+      if (cardMode) {
+        binding = "char-primary";
       } else {
-        binding = "conflict";
+        const chatBook = await port.getChatBookName();
+        if (chatBook === null || chatBook === "") {
+          await port.bindChatBook(targetName);
+          binding = "bound-by-atlas";
+        } else if (chatBook === targetName) {
+          binding = "already-bound";
+        } else {
+          binding = "conflict";
+          existingBookName = chatBook;
+        }
       }
       return {
-        bookName: plans.bookName,
+        bookName: targetName,
         created,
         written,
         pruned,
         binding,
-        existingBookName: binding === "conflict" ? chatBook : null,
+        existingBookName,
         entries: finalEntries
       };
     },
@@ -629,7 +649,7 @@ function createAtlasLorebookWriter(port, opts = {}) {
     snapshot(plans, result) {
       return {
         schemaVersion: 1,
-        bookName: plans.bookName,
+        bookName: result.bookName,
         updatedAt: now(),
         created: result.created,
         written: result.written,
@@ -759,7 +779,8 @@ function createAtlasUiCore(deps) {
     try {
       const result = await api.request("GET", "/health");
       const body = result.body;
-      const version = typeof body.protocolVersion === "number" ? body.protocolVersion : null;
+      const payload = body?.data;
+      const version = payload && typeof payload.protocolVersion === "number" ? payload.protocolVersion : null;
       if (version !== ATLAS_PROTOCOL_VERSION) {
         setState({ serviceStatus: "incompatible", serviceProtocolVersion: version, mode: "protocol-incompatible" });
         return;
@@ -4766,7 +4787,7 @@ function createAtlasServerCore(deps) {
     return okResult({
       ok: true,
       plugin: "atlas",
-      version: "0.1.0",
+      version: "0.7.1",
       protocolVersion: 1,
       time: now()
     });

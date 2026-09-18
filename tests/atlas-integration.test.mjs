@@ -280,7 +280,7 @@ function turnApiFixture(prepareDelayMs, { hang = false } = {}) {
     calls,
     async request(method, path, body) {
       calls.push({ method, path, body });
-      if (path === "/health") return { status: 200, body: { protocolVersion: 1, ok: true } };
+      if (path === "/health") return { status: 200, body: { ok: true, data: { protocolVersion: 1 } } };
       if (method === "POST" && path === "/bindings") return { status: 200, body: { ok: true, data: { bound: true } } };
       if (method === "GET" && path.startsWith("/state/")) {
         return {

@@ -299,7 +299,11 @@ function makeWriter(mock, options = {}) {
       mock.savedMetadata.push(true);
     },
   };
-  const port = createLorebookPort(() => chatContext, mock.api);
+  let port = createLorebookPort(() => chatContext, mock.api);
+  if (options.preferred !== undefined) {
+    const preferred = options.preferred;
+    port = { ...port, resolvePreferredBook: async () => preferred };
+  }
   return createAtlasLorebookWriter(port, { now: options.now });
 }
 
@@ -550,6 +554,49 @@ test("原生模块全链路：原生 context → 原生模块 → 真实端口 �
   ok(Object.values(stored.entries).every((e) => e.probability === 100 && e.selective === true), "原生默认字段随条目落库");
 });
 
+test("角色卡世界书：解析出卡书 → 写入卡书、绑定槽零触碰；null → 回退专属书", async () => {
+  const mockCard = makeMockPort();
+  const writerCard = makeWriter(mockCard, { now: () => 3000, preferred: "艾莉莉亚的世界书" });
+  const cardResult = await writerCard.syncTurn(PLANS_A);
+
+  equal(cardResult.bookName, "艾莉莉亚的世界书", "条目写入角色卡主世界书");
+  equal(cardResult.binding, "char-primary", "绑定状态 = char-primary");
+  equal(cardResult.written, PLANS_A.entries.length, "条目全部写入");
+  equal(mockCard.savedMetadata.length, 0, "完全不触碰聊天绑定槽");
+  ok(mockCard.books.has("艾莉莉亚的世界书"), "卡书已落库");
+  ok(!mockCard.books.has(PLANS_A.bookName), "专属书未创建");
+  const storedCard = mockCard.books.get("艾莉莉亚的世界书");
+  const cardComments = Object.values(storedCard.entries).map((e) => e.comment);
+  ok(cardComments.some((c) => c.startsWith(ATLAS_LOREBOOK_PREFIX.moves)), "动向条目在卡书中");
+  ok(cardComments.some((c) => c.startsWith(ATLAS_LOREBOOK_PREFIX.events)), "事件条目在卡书中");
+
+  const snapshotCard = writerCard.snapshot(PLANS_A, cardResult);
+  equal(snapshotCard.bookName, "艾莉莉亚的世界书", "快照记录实际目标书名");
+  equal(snapshotCard.binding, "char-primary", "快照绑定状态正确");
+
+  const mockFallback = makeMockPort();
+  const writerFallback = makeWriter(mockFallback, { now: () => 3000, preferred: null });
+  const fallbackResult = await writerFallback.syncTurn(PLANS_A);
+  equal(fallbackResult.bookName, PLANS_A.bookName, "null → 回退专属书");
+  equal(fallbackResult.binding, "bound-by-atlas", "回退路径仍走聊天绑定");
+});
+
+test("角色卡世界书：解析抛错 → 回退专属书不炸", async () => {
+  const mock = makeMockPort();
+  const chatContext = {
+    chatMetadata: mock.chatMetadata,
+    saveMetadata: async () => {
+      mock.savedMetadata.push(true);
+    },
+  };
+  let port = createLorebookPort(() => chatContext, mock.api);
+  port = { ...port, resolvePreferredBook: async () => { throw new Error("boom"); } };
+  const writer = createAtlasLorebookWriter(port, { now: () => 4000 });
+  const result = await writer.syncTurn(PLANS_A);
+  equal(result.bookName, PLANS_A.bookName, "回退专属书");
+  equal(result.binding, "bound-by-atlas", "绑定正常");
+});
+
 test("本轮累计断言已记录（计数见报告）", () => {
-  ok(assertionCount > 60, `断言数：${assertionCount}`);
+  ok(assertionCount > 75, `断言数：${assertionCount}`);
 });

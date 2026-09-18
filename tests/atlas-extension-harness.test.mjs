@@ -46,7 +46,7 @@ const NOW_BASE = 1_700_000_000_000;
 // Mock 三件套：api / host / emitter
 // ---------------------------------------------------------------------------
 
-function makeApi({ health = { protocolVersion: 1, ok: true }, stateByChat = {}, failHealth = false, travelPreview = null, turnBehavior = {} } = {}) {
+function makeApi({ health = { ok: true, data: { protocolVersion: 1 } }, stateByChat = {}, failHealth = false, travelPreview = null, turnBehavior = {} } = {}) {
   const calls = [];
   const defaultPrepareResponse = {
     turnId: "turn-1",
@@ -355,7 +355,7 @@ test("模式：引擎未就绪（health 抛错）——纯浏览器模式不再�
 });
 
 test("模式：协议不兼容（health 版本 2）", async () => {
-  const api = makeApi({ health: { protocolVersion: 2, ok: true } });
+  const api = makeApi({ health: { ok: true, data: { protocolVersion: 2 } } });
   const hostWrap = makeHost();
   hostWrap.setChat("chat-a");
   hostWrap.setBinding("chat-a", bindingFor("chat-a"));

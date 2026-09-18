@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.7.0";
+export const ATLAS_EXTENSION_VERSION = "0.7.1";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -595,7 +595,7 @@ function renderPanel(core, root, clampZoom, api, store) {
       panel.append(el(
         "p",
         "aw-panel__text",
-        "还没有世界书条目——每轮世界推进后，「NPC 动向」与「近期可触发」会自动写入 Atlas 专属世界书，主模型经酒馆正常激活管线就能看到。",
+        "还没有世界书条目——每轮世界推进后，「NPC 动向」与「近期可触发」会自动写入当前角色卡的世界书（角色卡没有世界书时写入 Atlas 专属世界书），主模型经酒馆正常激活管线就能看到。",
       ));
       return panel;
     }
@@ -610,6 +610,12 @@ function renderPanel(core, root, clampZoom, api, store) {
         "div",
         "aw-note aw-note--error",
         `本聊天已绑定《${String(snap.existingBookName ?? "")}》，Atlas 没有改动它。条目要生效需在酒馆世界书设置里切换或同时激活《${String(snap.bookName ?? "")}》。`,
+      ));
+    } else if (snap.binding === "char-primary") {
+      panel.append(el(
+        "div",
+        "aw-note",
+        `写入当前角色卡的世界书《${String(snap.bookName ?? "")}》——随角色卡激活，不占用聊天绑定槽。`,
       ));
     } else {
       panel.append(el(
@@ -1518,6 +1524,19 @@ export function createLorebookPort(context, worldInfo) {
     },
     deleteEntry(data, uid) {
       worldInfo.deleteWorldInfoEntry(data, uid);
+    },
+    // 作者 2026-09-18 拍板（参照 shujuku 角色卡世界书方式）：条目优先写入
+    // 当前角色卡的主世界书（data.extensions.world 指向的具名书，随角色激活，
+    // 不占聊天绑定槽）；解析不到（无卡书 / 角色不可用）→ null 回退专属书。
+    async resolvePreferredBook() {
+      try {
+        const ctx = context();
+        const character = ctx?.characters?.[ctx?.characterId] ?? null;
+        const name = character?.data?.extensions?.world;
+        return typeof name === "string" && name.trim().length > 0 ? name : null;
+      } catch {
+        return null;
+      }
     },
     async getChatBookName() {
       const metadata = context().chatMetadata;

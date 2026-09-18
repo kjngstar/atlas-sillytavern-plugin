@@ -353,7 +353,7 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
     return okResult({
       ok: true,
       plugin: "atlas",
-      version: "0.1.0",
+      version: "0.7.1",
       protocolVersion: 1,
       time: now(),
     });
