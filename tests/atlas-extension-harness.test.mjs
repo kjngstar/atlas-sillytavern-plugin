@@ -279,6 +279,11 @@ test("形态契约：右上角常驻关闭钮（作者 2026-09-19 反馈）", ()
   ok(js.includes("topbarRight.append(topbarClose);"), "每次顶栏重渲染后关闭钮仍存在（chips 重排不清掉它）");
   ok(/topbarClose\.addEventListener\("click", \(\) => core\.setPanelOpen\(false\)\)/.test(js), "点击 = 关闭工作台");
   ok(css.includes(".aw-topbar__close"), "关闭钮有样式");
+  // 回归（作者 2026-09-19）：setPanelOpen 只改状态，渲染层必须消费 panelOpen 否则永远关不掉
+  ok(
+    js.includes('root.style.display = state().panelOpen === false ? "none" : ""'),
+    "renderPage 消费 panelOpen 同步根节点可见性（× / 退出真正能关掉）"
+  );
 });
 
 test("形态契约：预览控制挂右栏槽位，不常驻生产界面", () => {

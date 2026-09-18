@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.7.2";
+export const ATLAS_EXTENSION_VERSION = "0.7.3";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -1312,6 +1312,9 @@ function renderPanel(core, root, clampZoom, api, store) {
 
   function renderPage() {
     const d = data();
+    // 关闭可见性（作者 2026-09-19 反馈：× 与退出都关不掉）——setPanelOpen 只改状态，
+    // 这里负责消费：panelOpen=false 时隐藏根节点（面板 DOM 保留，重开零重建）。
+    root.style.display = state().panelOpen === false ? "none" : "";
     renderNav();
     renderEngineStatus();
     renderTopbar(d);
