@@ -271,6 +271,16 @@ test("形态契约：中区按栏位切页，地图只属于地图页", () => {
   ok(js.includes("function renderCenter(d = data())"), "renderCenter 有缺省数据源，无参调用不崩");
 });
 
+test("形态契约：右上角常驻关闭钮（作者 2026-09-19 反馈）", () => {
+  const js = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
+  const css = readFileSync(join(root, "atlas-extension", "style.css"), "utf8");
+  ok(js.includes('el("button", "aw-topbar__close", "×")'), "顶栏有关闭钮");
+  ok(js.includes('topbarClose.setAttribute("aria-label", "关闭工作台，返回酒馆聊天")'), "关闭钮带无障碍名称");
+  ok(js.includes("topbarRight.append(topbarClose);"), "每次顶栏重渲染后关闭钮仍存在（chips 重排不清掉它）");
+  ok(/topbarClose\.addEventListener\("click", \(\) => core\.setPanelOpen\(false\)\)/.test(js), "点击 = 关闭工作台");
+  ok(css.includes(".aw-topbar__close"), "关闭钮有样式");
+});
+
 test("形态契约：预览控制挂右栏槽位，不常驻生产界面", () => {
   const js = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
   const css = readFileSync(join(root, "atlas-extension", "style.css"), "utf8");

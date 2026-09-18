@@ -295,6 +295,29 @@
   min-width: 0;
 }
 
+/* 右上角关闭钮（作者 2026-09-19 反馈）：方形、可用键盘聚焦 */
+.aw-topbar__close {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  font-family: var(--aw-sans);
+  font-size: 17px;
+  line-height: 1;
+  color: #1e383a;
+  background: transparent;
+  border: 1px solid var(--aw-line);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.aw-topbar__close:hover { background: #255f5b; border-color: #255f5b; color: #f3ecd9; }
+
+.aw-topbar__close:focus-visible { outline: 2px solid #255f5b; outline-offset: 2px; }
+
 .aw-chip {
   font-family: var(--aw-sans);
   font-size: 12px;
