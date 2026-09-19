@@ -3222,6 +3222,439 @@ function hashString(input) {
   return h.toString(16).padStart(8, "0");
 }
 
+// lib/world-travel.ts
+function getDefaultTravelBaseline() {
+  return JSON.parse(JSON.stringify(DEFAULT_TRAVEL_BASELINE));
+}
+var FORBIDDEN_WORLD_AGENT_KEYS = [
+  "storyId",
+  "branchId",
+  "steps",
+  "runtime",
+  "storyRuntimes",
+  "actions",
+  "outcomes",
+  "characterStates",
+  "characterMemories"
+];
+function worldAgentHasWritableStoryState(agent) {
+  if (!agent || typeof agent !== "object" || Array.isArray(agent)) return false;
+  const obj = agent;
+  return FORBIDDEN_WORLD_AGENT_KEYS.some((key) => key in obj);
+}
+function isValidWorldAgent(agent) {
+  if (!agent || typeof agent !== "object") return false;
+  if (typeof agent.id !== "string" || agent.id.length === 0) return false;
+  if (typeof agent.worldId !== "string" || agent.worldId.length === 0) return false;
+  if (!WORLD_AGENT_STATUSES.includes(agent.status)) return false;
+  if (typeof agent.baselineVersion !== "string" || agent.baselineVersion.length === 0) return false;
+  if (typeof agent.sourceRevision !== "string" || agent.sourceRevision.length === 0) return false;
+  if (worldAgentHasWritableStoryState(agent)) return false;
+  return true;
+}
+function computeWorldSourceRevision(world) {
+  const bibleFingerprint = (entries) => entries.map((e) => ({ id: e.id, title: e.title, content: e.content, enabled: e.enabled ?? true }));
+  const fingerprint = {
+    globalPrompt: world.globalPrompt ?? null,
+    worldBible: bibleFingerprint(world.worldBible ?? []),
+    regionBooks: (world.regions ?? []).map((r) => ({
+      id: r.id,
+      book: bibleFingerprint(r.worldBook ?? [])
+    })),
+    pointBooks: (world.points ?? []).map((p) => ({
+      id: p.id,
+      book: bibleFingerprint(p.worldBook ?? [])
+    })),
+    regions: (world.regions ?? []).map((r) => ({
+      id: r.id,
+      name: r.name,
+      type: r.type,
+      x: r.coordinates?.x ?? null,
+      y: r.coordinates?.y ?? null
+    })),
+    points: (world.points ?? []).map((p) => ({
+      id: p.id,
+      name: p.name,
+      x: p.x,
+      y: p.y,
+      regionId: p.regionId ?? null
+    })),
+    characters: (world.characters ?? []).map((c) => ({
+      id: c.id,
+      name: c.name,
+      role: c.role,
+      description: c.description
+    })),
+    travelSettings: world.travelSettings ?? null
+  };
+  return `rev-${hashString(stableStringify(fingerprint))}`;
+}
+function detectWorldAgentDrift(world) {
+  const currentRevision = computeWorldSourceRevision(world);
+  const storedRevision = world.worldAgent?.sourceRevision ?? null;
+  return {
+    stale: storedRevision !== null && storedRevision !== currentRevision,
+    storedRevision,
+    currentRevision
+  };
+}
+function resolveTravelContext(world) {
+  const baseline = getDefaultTravelBaseline();
+  const agent = world.worldAgent ?? null;
+  if (!agent) {
+    return {
+      status: "disabled",
+      baseline,
+      baselineVersion: baseline.version,
+      worldAgent: null,
+      worldAgentRevision: null,
+      stale: false,
+      reason: "当前世界没有世界 Agent，按默认移动提示基线游玩。"
+    };
+  }
+  if (!isValidWorldAgent(agent)) {
+    return {
+      status: "disabled",
+      baseline,
+      baselineVersion: baseline.version,
+      worldAgent: null,
+      worldAgentRevision: null,
+      stale: false,
+      reason: "世界 Agent 配置不完整或不可用，已无条件回退默认移动提示基线。"
+    };
+  }
+  const drift = detectWorldAgentDrift(world);
+  const hasGuide = Boolean(agent.travelGuide && agent.travelGuide.content.trim().length > 0);
+  let status;
+  let reason;
+  if (drift.stale) {
+    status = "stale";
+    reason = "世界资料已变化，世界 Agent 辅助待刷新；可继续使用旧版本，或显式刷新。";
+  } else if (hasGuide) {
+    status = "active";
+    reason = "当前世界 Agent 可为所有故事提供世界观与旅行辅助。";
+  } else if (agent.status === "optimizing") {
+    status = "optimizing";
+    reason = "正在生成世界辅助；其他故事仍可按默认基线游玩。";
+  } else {
+    status = "ready";
+    reason = "世界 Agent 已建立来源清单，可供选择为辅助来源（暂无旅行辅助）。";
+  }
+  return {
+    status,
+    baseline,
+    baselineVersion: baseline.version,
+    worldAgent: agent,
+    worldAgentRevision: agent.sourceRevision,
+    stale: drift.stale,
+    reason
+  };
+}
+
+// lib/world-engine.ts
+var DEFAULT_CLOCK_CONFIG = {
+  /** 每天时段数（默认 4：晨 / 午 / 昏 / 夜） */
+  periodsPerDay: 4,
+  /** 每月天数 */
+  daysPerMonth: 30,
+  /** 每年月数 */
+  monthsPerYear: 12
+};
+function normalizeClockConfig(cfg = DEFAULT_CLOCK_CONFIG) {
+  return {
+    periodsPerDay: Math.max(1, Math.floor(cfg.periodsPerDay)),
+    daysPerMonth: Math.max(1, Math.floor(cfg.daysPerMonth)),
+    monthsPerYear: Math.max(1, Math.floor(cfg.monthsPerYear))
+  };
+}
+function toCalendar(totalPeriods, cfg = DEFAULT_CLOCK_CONFIG) {
+  const c = normalizeClockConfig(cfg);
+  const t = Math.max(0, Math.floor(totalPeriods));
+  const perMonth = c.periodsPerDay * c.daysPerMonth;
+  const perYear = perMonth * c.monthsPerYear;
+  const year = Math.floor(t / perYear) + 1;
+  const restYear = t % perYear;
+  const month = Math.floor(restYear / perMonth) + 1;
+  const restMonth = restYear % perMonth;
+  const day = Math.floor(restMonth / c.periodsPerDay) + 1;
+  const period = restMonth % c.periodsPerDay;
+  return { year, month, day, period };
+}
+function formatCalendar(cal) {
+  return `第 ${cal.year} 年 ${cal.month} 月 ${cal.day} 日 · 第 ${cal.period + 1} 时段`;
+}
+function gridDistance(ax, ay, bx, by) {
+  return Math.round(Math.sqrt((bx - ax) ** 2 + (by - ay) ** 2));
+}
+function computeDistance(ax, ay, bx, by, settings) {
+  const cells = gridDistance(ax, ay, bx, by);
+  if (!settings || settings.enabled !== true || !(settings.distancePerCell > 0)) {
+    return { cells, value: null, unit: null, calibrated: false };
+  }
+  const value = Math.round(cells * settings.distancePerCell * 100) / 100;
+  return { cells, value, unit: settings.distanceUnit, calibrated: true };
+}
+function resolveTerrainCue(keys, settings) {
+  const factors = settings && settings.terrainFactors ? settings.terrainFactors : null;
+  for (const key of keys) {
+    if (factors && Object.prototype.hasOwnProperty.call(factors, key)) {
+      const factor = factors[key];
+      if (typeof factor === "number" && factor > 0) {
+        return { key, label: `自定义地形「${key}」`, factor, source: "settings" };
+      }
+    }
+  }
+  const baseline = getDefaultTravelBaseline();
+  const road = baseline.terrainTiers[0];
+  return {
+    key: keys[0] ?? "road",
+    label: road ? road.label : "大道 / 平原",
+    factor: road ? road.factor : 1,
+    source: "baseline"
+  };
+}
+function resolveSpeedTier(speedTierId) {
+  const baseline = getDefaultTravelBaseline();
+  if (speedTierId) {
+    const hit = baseline.speedTiers.find((t) => t.id === speedTierId);
+    if (hit) return hit;
+  }
+  const normal = baseline.speedTiers.find((t) => t.id === "normal");
+  return normal ?? baseline.speedTiers[0] ?? null;
+}
+var DEFAULT_NEARBY_RADIUS = 12;
+function findPoint(world, pointId) {
+  if (!pointId) return null;
+  return (world.points ?? []).find((p) => String(p.id) === pointId) ?? null;
+}
+function nearbyPoints(world, cx, cy, radius, excludePointId) {
+  return (world.points ?? []).filter((p) => String(p.id) !== String(excludePointId ?? "")).filter((p) => gridDistance(cx, cy, p.x, p.y) <= radius).map((p) => String(p.id));
+}
+function buildTravelHint(world, input = {}) {
+  const baseline = getDefaultTravelBaseline();
+  const ctx = resolveTravelContext(world);
+  const from = findPoint(world, input.fromPointId);
+  const to = findPoint(world, input.toPointId);
+  const via = (input.viaPointIds ?? []).map((id) => findPoint(world, id)).filter((p) => p !== null).map((p) => ({ pointId: String(p.id), name: p.name, x: p.x, y: p.y }));
+  let cells = 0;
+  if (from && to) {
+    const legs = [];
+    let prev = from;
+    for (const v of via) {
+      legs.push([prev.x, prev.y, v.x, v.y]);
+      prev = { ...prev, x: v.x, y: v.y };
+    }
+    legs.push([prev.x, prev.y, to.x, to.y]);
+    cells = legs.reduce((sum, [ax, ay, bx, by]) => sum + gridDistance(ax, ay, bx, by), 0);
+  }
+  const distance = from && to ? { ...computeDistance(from.x, from.y, to.x, to.y, world.travelSettings), cells } : { cells, value: null, unit: null, calibrated: false };
+  const terrainKeys = [];
+  if (from && to) terrainKeys.push(`${String(from.id)}->${String(to.id)}`);
+  if (to?.regionId) terrainKeys.push(to.regionId);
+  if (to) terrainKeys.push(String(to.id));
+  const terrainCue = resolveTerrainCue(terrainKeys, world.travelSettings);
+  const speedTier = resolveSpeedTier(input.speedTierId);
+  const cellsPerPeriod = speedTier ? speedTier.cellsPerPeriod : 0;
+  const rawPeriods = cellsPerPeriod > 0 ? cells * terrainCue.factor / cellsPerPeriod : 0;
+  const suggestedPeriods = cells > 0 ? Math.max(1, Math.round(rawPeriods)) : 0;
+  const suggestedDuration = speedTier && cells > 0 ? suggestedPeriods : null;
+  const requiresAuthorConfirmation = !distance.calibrated;
+  const abstractExpression = speedTier ? `约 ${cells} 格程 ÷ ${speedTier.label}（${cellsPerPeriod} 格/时段）${terrainCue.factor !== 1 ? ` × 地形 ${terrainCue.factor}` : ""} ≈ ${suggestedPeriods} 个时段` : `约 ${cells} 格程（无可用速度档，需作者确认时长）`;
+  const distText = distance.calibrated ? `${distance.cells} 格 ≈ ${distance.value} ${distance.unit}` : `${distance.cells} 格程（地图未标定，不给真实里数）`;
+  const basis = `网格距离 ${distText}；地形 ${terrainCue.label} ×${terrainCue.factor}；速度档 ${speedTier ? speedTier.label : "无"}。${requiresAuthorConfirmation ? "未标定地图，需作者确认。" : ""}`;
+  const radius = typeof input.radius === "number" && input.radius > 0 ? input.radius : DEFAULT_NEARBY_RADIUS;
+  const nearby = to ? nearbyPoints(world, to.x, to.y, Number(radius), String(to.id)) : [];
+  const cues = [];
+  if (from && to) {
+    cues.push(`从「${from.name}」(${from.x},${from.y}) 到「${to.name}」(${to.x},${to.y})：${distText}`);
+  } else {
+    cues.push("起点或终点尚未选定，无法计算网格距离。");
+  }
+  if (via.length) cues.push(`途经：${via.map((v) => `「${v.name}」`).join(" → ")}`);
+  cues.push(`地形：${terrainCue.label} ×${terrainCue.factor}（来源：${terrainCue.source === "settings" ? "地图设置" : "默认基线"}）`);
+  cues.push(`速度档：${speedTier ? `${speedTier.label}（${cellsPerPeriod} 格/时段）` : "无"}`);
+  cues.push(abstractExpression);
+  if (nearby.length) cues.push(`附近地点（半径 ${radius} 格）：${nearby.length} 个`);
+  const guide = ctx.worldAgent?.travelGuide;
+  const worldAgentAssistApplied = Boolean(guide && guide.content.trim());
+  if (worldAgentAssistApplied && guide) {
+    cues.push(`世界 Agent 旅行辅助（revision ${ctx.worldAgentRevision}）：${guide.content.trim()}`);
+    if (guide.assumptions && guide.assumptions.length) {
+      cues.push(`辅助假设：${guide.assumptions.join("；")}`);
+    }
+  }
+  if (input.storyId) {
+    const branch = input.branchId ?? input.storyId;
+    const runtime = (world.storyRuntimes ?? []).find((r) => r.storyId === branch) ?? (world.storyRuntimes ?? []).find((r) => r.storyId === input.storyId);
+    if (runtime) {
+      cues.push(`故事上下文：${formatCalendar(toCalendar(runtime.currentTime))}（第 ${runtime.currentTime} 时段）`);
+    }
+  }
+  if (input.focusCardId) {
+    const card = (world.cardProfiles ?? []).find((c) => c.id === input.focusCardId);
+    cues.push(card ? `当前焦点卡：${card.summary ?? card.sourceCardId}` : `当前焦点卡：${input.focusCardId}（配置缺失）`);
+  }
+  return {
+    baselineVersion: baseline.version,
+    worldAgentRevision: ctx.worldAgentRevision,
+    status: ctx.status,
+    from: { pointId: from ? String(from.id) : null, name: from ? from.name : null, x: from ? from.x : null, y: from ? from.y : null },
+    to: { pointId: to ? String(to.id) : null, name: to ? to.name : null, x: to ? to.x : null, y: to ? to.y : null },
+    via,
+    distance,
+    speedTier: speedTier ? { id: speedTier.id, label: speedTier.label, cellsPerPeriod } : null,
+    terrainCue,
+    abstractExpression,
+    suggestedPeriods,
+    suggestedDuration,
+    basis,
+    requiresAuthorConfirmation,
+    nearbyPointIds: nearby,
+    cues,
+    worldAgentAssistApplied
+  };
+}
+function collectWorldBookIds(world, regionIds, pointIds) {
+  const out = [];
+  const push = (entries) => {
+    for (const e of entries ?? []) {
+      if (e.enabled === false) continue;
+      out.push(e.id);
+    }
+  };
+  push(world.worldBible);
+  const regionSet = new Set(regionIds);
+  for (const r of world.regions ?? []) if (regionSet.has(r.id)) push(r.worldBook);
+  const pointSet = new Set(pointIds);
+  for (const p of world.points ?? []) if (pointSet.has(String(p.id))) push(p.worldBook);
+  return out;
+}
+function resolveActionSources(world, action, opts) {
+  const radius = typeof opts?.radius === "number" && opts.radius > 0 ? opts.radius : 12;
+  const regionIds = /* @__PURE__ */ new Set();
+  const pointIds = /* @__PURE__ */ new Set();
+  for (const id of [action.fromRegionId, action.toRegionId]) if (id) regionIds.add(id);
+  for (const id of [action.fromPointId, action.toPointId]) if (id) pointIds.add(id);
+  for (const id of action.viaPointIds ?? []) if (id) pointIds.add(id);
+  for (const p of world.points ?? []) {
+    if (pointIds.has(String(p.id)) && p.regionId) regionIds.add(p.regionId);
+  }
+  const anchorPointId = action.toPointId ?? action.fromPointId;
+  const anchor = anchorPointId ? (world.points ?? []).find((p) => String(p.id) === anchorPointId) : null;
+  const nearby = anchor ? nearbyPoints(world, anchor.x, anchor.y, radius, String(anchor.id)) : [];
+  const characterIds = /* @__PURE__ */ new Set();
+  for (const id of opts?.companionIds ?? []) if (id) characterIds.add(id);
+  if (action.actorId) characterIds.add(action.actorId);
+  const targetPoints = /* @__PURE__ */ new Set([...pointIds, ...nearby]);
+  const branch = opts?.branchId ?? branchScopeForStory(world, opts?.storyId ?? null);
+  for (const s of branchCharacterStates(world, branch)) {
+    if (s.currentPointId && targetPoints.has(String(s.currentPointId))) characterIds.add(s.characterId);
+  }
+  const worldBookIds = collectWorldBookIds(world, [...regionIds], [...pointIds, ...nearby]);
+  const triggerIds = [];
+  for (const t of world.triggers ?? []) {
+    if (t.enabled === false) continue;
+    const scopeRegions = t.scopeRegionIds ?? [];
+    const scopePoints = t.scopePointIds ?? [];
+    const inScope = scopeRegions.length === 0 && scopePoints.length === 0 ? true : scopeRegions.some((id) => regionIds.has(id)) || scopePoints.some((id) => pointIds.has(id) || nearby.includes(id));
+    if (inScope) triggerIds.push(t.id);
+  }
+  return {
+    regionIds: [...regionIds],
+    pointIds: [...pointIds],
+    characterIds: [...characterIds],
+    triggerIds,
+    nearbyPointIds: nearby,
+    radius,
+    worldBookIds
+  };
+}
+function triggerMatches(trigger, ctx) {
+  if (trigger.enabled === false) return false;
+  const cond = trigger.condition;
+  if (!cond) return true;
+  if (typeof cond.minTime === "number" && ctx.at < cond.minTime) return false;
+  if (typeof cond.maxTime === "number" && ctx.at > cond.maxTime) return false;
+  if (cond.regionId && ctx.regionId !== cond.regionId) return false;
+  if (cond.pointId && ctx.pointId !== cond.pointId) return false;
+  if (cond.characterIds && cond.characterIds.length > 0) {
+    const present = new Set(ctx.characterIds);
+    if (!cond.characterIds.some((id) => present.has(id))) return false;
+  }
+  if (cond.requiresFlag && !ctx.flags.includes(cond.requiresFlag)) return false;
+  if (cond.forbidsFlag && ctx.flags.includes(cond.forbidsFlag)) return false;
+  return true;
+}
+function selectTriggers(world, sources, ctx) {
+  const allowed = new Set(sources.triggerIds);
+  return (world.triggers ?? []).filter((t) => allowed.has(t.id) && triggerMatches(t, ctx));
+}
+function deriveActionSeed(world, storyId, actionCount, at) {
+  const raw = `${world.id}|${storyId ?? "-"}|${actionCount}|${at}`;
+  return parseInt(hashString(raw).slice(0, 8), 16) >>> 0;
+}
+
+// src/atlas-adjudicate.ts
+function knownEntityIds(world) {
+  const ids = /* @__PURE__ */ new Set();
+  for (const c of world.characters ?? []) ids.add(String(c.id));
+  for (const e of world.entityRecords ?? []) ids.add(String(e.id));
+  return ids;
+}
+function adjudicateAtlasDraft(world, input) {
+  const draft = input.draft;
+  const notes = [];
+  const aiDuration = typeof draft.duration === "number" && Number.isFinite(draft.duration) && draft.duration >= 0 ? Math.floor(draft.duration) : 0;
+  const rawEffects = Array.isArray(draft.rawEffects) ? [...draft.rawEffects] : [];
+  const memoryDrafts = Array.isArray(draft.memoryDrafts) ? draft.memoryDrafts.map((m) => ({ entityId: String(m?.entityId ?? ""), text: String(m?.text ?? "") })) : [];
+  const next = {
+    duration: aiDuration,
+    locationChange: draft.locationChange ?? null,
+    rawEffects,
+    memoryDrafts,
+    summary: draft.summary
+  };
+  const rawToPointId = next.locationChange && typeof next.locationChange.toPointId === "string" ? next.locationChange.toPointId.trim() : "";
+  if (next.locationChange && rawToPointId) {
+    const toPoint = (world.points ?? []).find((p) => String(p.id) === String(rawToPointId));
+    if (!toPoint) {
+      notes.push(`〔裁定〕忽略未知地点「${rawToPointId.slice(0, 32)}」的移动`);
+      next.locationChange = null;
+    } else if (input.currentPointId) {
+      const hint = buildTravelHint(world, { fromPointId: String(input.currentPointId), toPointId: rawToPointId });
+      const travelPeriods = Math.max(0, Math.round(hint.suggestedPeriods));
+      if (travelPeriods > aiDuration) {
+        notes.push(`〔裁定〕旅程 ${hint.distance.cells} 格 → 耗时 ${travelPeriods} 时段（网格算法；AI 给 ${aiDuration}）`);
+        next.duration = travelPeriods;
+      }
+    }
+  }
+  const known = knownEntityIds(world);
+  const beforeEffects = rawEffects.length;
+  next.rawEffects = rawEffects.filter((raw) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return true;
+    const entityId = raw.entityId;
+    if (typeof entityId !== "string" || entityId.trim() === "") return true;
+    return known.has(entityId.trim());
+  });
+  next.rawEffects = next.rawEffects ?? [];
+  const droppedEffects = beforeEffects - (next.rawEffects ?? []).length;
+  if (droppedEffects > 0) notes.push(`〔裁定〕丢弃 ${droppedEffects} 条引用未知实体的变化`);
+  const beforeMemories = memoryDrafts.length;
+  next.memoryDrafts = memoryDrafts.filter(
+    (m) => m.entityId.trim() !== "" && m.text.trim() !== "" && known.has(m.entityId.trim())
+  );
+  next.memoryDrafts = next.memoryDrafts ?? [];
+  const droppedMemories = beforeMemories - (next.memoryDrafts ?? []).length;
+  if (droppedMemories > 0) notes.push(`〔裁定〕丢弃 ${droppedMemories} 条未知实体的记忆`);
+  if (notes.length > 0) {
+    const base = next.summary.trim();
+    const merged = `${base}${base ? "；" : ""}${notes.join("；")}`;
+    next.summary = merged.slice(0, W0_LIMITS.maxStateEventSummary);
+  }
+  return { draft: next, notes };
+}
+
 // lib/world-definition.ts
 function latestRevision(world) {
   const list = world.definitionRevisions ?? [];
@@ -4309,378 +4742,6 @@ function charactersInRegion(world, regionId, opts = {}) {
   return (world.characters ?? []).map((c) => c.id).filter((id) => resolveCharacterPosition(world, id, opts).regionId === regionId);
 }
 
-// lib/world-travel.ts
-function getDefaultTravelBaseline() {
-  return JSON.parse(JSON.stringify(DEFAULT_TRAVEL_BASELINE));
-}
-var FORBIDDEN_WORLD_AGENT_KEYS = [
-  "storyId",
-  "branchId",
-  "steps",
-  "runtime",
-  "storyRuntimes",
-  "actions",
-  "outcomes",
-  "characterStates",
-  "characterMemories"
-];
-function worldAgentHasWritableStoryState(agent) {
-  if (!agent || typeof agent !== "object" || Array.isArray(agent)) return false;
-  const obj = agent;
-  return FORBIDDEN_WORLD_AGENT_KEYS.some((key) => key in obj);
-}
-function isValidWorldAgent(agent) {
-  if (!agent || typeof agent !== "object") return false;
-  if (typeof agent.id !== "string" || agent.id.length === 0) return false;
-  if (typeof agent.worldId !== "string" || agent.worldId.length === 0) return false;
-  if (!WORLD_AGENT_STATUSES.includes(agent.status)) return false;
-  if (typeof agent.baselineVersion !== "string" || agent.baselineVersion.length === 0) return false;
-  if (typeof agent.sourceRevision !== "string" || agent.sourceRevision.length === 0) return false;
-  if (worldAgentHasWritableStoryState(agent)) return false;
-  return true;
-}
-function computeWorldSourceRevision(world) {
-  const bibleFingerprint = (entries) => entries.map((e) => ({ id: e.id, title: e.title, content: e.content, enabled: e.enabled ?? true }));
-  const fingerprint = {
-    globalPrompt: world.globalPrompt ?? null,
-    worldBible: bibleFingerprint(world.worldBible ?? []),
-    regionBooks: (world.regions ?? []).map((r) => ({
-      id: r.id,
-      book: bibleFingerprint(r.worldBook ?? [])
-    })),
-    pointBooks: (world.points ?? []).map((p) => ({
-      id: p.id,
-      book: bibleFingerprint(p.worldBook ?? [])
-    })),
-    regions: (world.regions ?? []).map((r) => ({
-      id: r.id,
-      name: r.name,
-      type: r.type,
-      x: r.coordinates?.x ?? null,
-      y: r.coordinates?.y ?? null
-    })),
-    points: (world.points ?? []).map((p) => ({
-      id: p.id,
-      name: p.name,
-      x: p.x,
-      y: p.y,
-      regionId: p.regionId ?? null
-    })),
-    characters: (world.characters ?? []).map((c) => ({
-      id: c.id,
-      name: c.name,
-      role: c.role,
-      description: c.description
-    })),
-    travelSettings: world.travelSettings ?? null
-  };
-  return `rev-${hashString(stableStringify(fingerprint))}`;
-}
-function detectWorldAgentDrift(world) {
-  const currentRevision = computeWorldSourceRevision(world);
-  const storedRevision = world.worldAgent?.sourceRevision ?? null;
-  return {
-    stale: storedRevision !== null && storedRevision !== currentRevision,
-    storedRevision,
-    currentRevision
-  };
-}
-function resolveTravelContext(world) {
-  const baseline = getDefaultTravelBaseline();
-  const agent = world.worldAgent ?? null;
-  if (!agent) {
-    return {
-      status: "disabled",
-      baseline,
-      baselineVersion: baseline.version,
-      worldAgent: null,
-      worldAgentRevision: null,
-      stale: false,
-      reason: "当前世界没有世界 Agent，按默认移动提示基线游玩。"
-    };
-  }
-  if (!isValidWorldAgent(agent)) {
-    return {
-      status: "disabled",
-      baseline,
-      baselineVersion: baseline.version,
-      worldAgent: null,
-      worldAgentRevision: null,
-      stale: false,
-      reason: "世界 Agent 配置不完整或不可用，已无条件回退默认移动提示基线。"
-    };
-  }
-  const drift = detectWorldAgentDrift(world);
-  const hasGuide = Boolean(agent.travelGuide && agent.travelGuide.content.trim().length > 0);
-  let status;
-  let reason;
-  if (drift.stale) {
-    status = "stale";
-    reason = "世界资料已变化，世界 Agent 辅助待刷新；可继续使用旧版本，或显式刷新。";
-  } else if (hasGuide) {
-    status = "active";
-    reason = "当前世界 Agent 可为所有故事提供世界观与旅行辅助。";
-  } else if (agent.status === "optimizing") {
-    status = "optimizing";
-    reason = "正在生成世界辅助；其他故事仍可按默认基线游玩。";
-  } else {
-    status = "ready";
-    reason = "世界 Agent 已建立来源清单，可供选择为辅助来源（暂无旅行辅助）。";
-  }
-  return {
-    status,
-    baseline,
-    baselineVersion: baseline.version,
-    worldAgent: agent,
-    worldAgentRevision: agent.sourceRevision,
-    stale: drift.stale,
-    reason
-  };
-}
-
-// lib/world-engine.ts
-var DEFAULT_CLOCK_CONFIG = {
-  /** 每天时段数（默认 4：晨 / 午 / 昏 / 夜） */
-  periodsPerDay: 4,
-  /** 每月天数 */
-  daysPerMonth: 30,
-  /** 每年月数 */
-  monthsPerYear: 12
-};
-function normalizeClockConfig(cfg = DEFAULT_CLOCK_CONFIG) {
-  return {
-    periodsPerDay: Math.max(1, Math.floor(cfg.periodsPerDay)),
-    daysPerMonth: Math.max(1, Math.floor(cfg.daysPerMonth)),
-    monthsPerYear: Math.max(1, Math.floor(cfg.monthsPerYear))
-  };
-}
-function toCalendar(totalPeriods, cfg = DEFAULT_CLOCK_CONFIG) {
-  const c = normalizeClockConfig(cfg);
-  const t = Math.max(0, Math.floor(totalPeriods));
-  const perMonth = c.periodsPerDay * c.daysPerMonth;
-  const perYear = perMonth * c.monthsPerYear;
-  const year = Math.floor(t / perYear) + 1;
-  const restYear = t % perYear;
-  const month = Math.floor(restYear / perMonth) + 1;
-  const restMonth = restYear % perMonth;
-  const day = Math.floor(restMonth / c.periodsPerDay) + 1;
-  const period = restMonth % c.periodsPerDay;
-  return { year, month, day, period };
-}
-function formatCalendar(cal) {
-  return `第 ${cal.year} 年 ${cal.month} 月 ${cal.day} 日 · 第 ${cal.period + 1} 时段`;
-}
-function gridDistance(ax, ay, bx, by) {
-  return Math.round(Math.sqrt((bx - ax) ** 2 + (by - ay) ** 2));
-}
-function computeDistance(ax, ay, bx, by, settings) {
-  const cells = gridDistance(ax, ay, bx, by);
-  if (!settings || settings.enabled !== true || !(settings.distancePerCell > 0)) {
-    return { cells, value: null, unit: null, calibrated: false };
-  }
-  const value = Math.round(cells * settings.distancePerCell * 100) / 100;
-  return { cells, value, unit: settings.distanceUnit, calibrated: true };
-}
-function resolveTerrainCue(keys, settings) {
-  const factors = settings && settings.terrainFactors ? settings.terrainFactors : null;
-  for (const key of keys) {
-    if (factors && Object.prototype.hasOwnProperty.call(factors, key)) {
-      const factor = factors[key];
-      if (typeof factor === "number" && factor > 0) {
-        return { key, label: `自定义地形「${key}」`, factor, source: "settings" };
-      }
-    }
-  }
-  const baseline = getDefaultTravelBaseline();
-  const road = baseline.terrainTiers[0];
-  return {
-    key: keys[0] ?? "road",
-    label: road ? road.label : "大道 / 平原",
-    factor: road ? road.factor : 1,
-    source: "baseline"
-  };
-}
-function resolveSpeedTier(speedTierId) {
-  const baseline = getDefaultTravelBaseline();
-  if (speedTierId) {
-    const hit = baseline.speedTiers.find((t) => t.id === speedTierId);
-    if (hit) return hit;
-  }
-  const normal = baseline.speedTiers.find((t) => t.id === "normal");
-  return normal ?? baseline.speedTiers[0] ?? null;
-}
-var DEFAULT_NEARBY_RADIUS = 12;
-function findPoint(world, pointId) {
-  if (!pointId) return null;
-  return (world.points ?? []).find((p) => String(p.id) === pointId) ?? null;
-}
-function nearbyPoints(world, cx, cy, radius, excludePointId) {
-  return (world.points ?? []).filter((p) => String(p.id) !== String(excludePointId ?? "")).filter((p) => gridDistance(cx, cy, p.x, p.y) <= radius).map((p) => String(p.id));
-}
-function buildTravelHint(world, input = {}) {
-  const baseline = getDefaultTravelBaseline();
-  const ctx = resolveTravelContext(world);
-  const from = findPoint(world, input.fromPointId);
-  const to = findPoint(world, input.toPointId);
-  const via = (input.viaPointIds ?? []).map((id) => findPoint(world, id)).filter((p) => p !== null).map((p) => ({ pointId: String(p.id), name: p.name, x: p.x, y: p.y }));
-  let cells = 0;
-  if (from && to) {
-    const legs = [];
-    let prev = from;
-    for (const v of via) {
-      legs.push([prev.x, prev.y, v.x, v.y]);
-      prev = { ...prev, x: v.x, y: v.y };
-    }
-    legs.push([prev.x, prev.y, to.x, to.y]);
-    cells = legs.reduce((sum, [ax, ay, bx, by]) => sum + gridDistance(ax, ay, bx, by), 0);
-  }
-  const distance = from && to ? { ...computeDistance(from.x, from.y, to.x, to.y, world.travelSettings), cells } : { cells, value: null, unit: null, calibrated: false };
-  const terrainKeys = [];
-  if (from && to) terrainKeys.push(`${String(from.id)}->${String(to.id)}`);
-  if (to?.regionId) terrainKeys.push(to.regionId);
-  if (to) terrainKeys.push(String(to.id));
-  const terrainCue = resolveTerrainCue(terrainKeys, world.travelSettings);
-  const speedTier = resolveSpeedTier(input.speedTierId);
-  const cellsPerPeriod = speedTier ? speedTier.cellsPerPeriod : 0;
-  const rawPeriods = cellsPerPeriod > 0 ? cells * terrainCue.factor / cellsPerPeriod : 0;
-  const suggestedPeriods = cells > 0 ? Math.max(1, Math.round(rawPeriods)) : 0;
-  const suggestedDuration = speedTier && cells > 0 ? suggestedPeriods : null;
-  const requiresAuthorConfirmation = !distance.calibrated;
-  const abstractExpression = speedTier ? `约 ${cells} 格程 ÷ ${speedTier.label}（${cellsPerPeriod} 格/时段）${terrainCue.factor !== 1 ? ` × 地形 ${terrainCue.factor}` : ""} ≈ ${suggestedPeriods} 个时段` : `约 ${cells} 格程（无可用速度档，需作者确认时长）`;
-  const distText = distance.calibrated ? `${distance.cells} 格 ≈ ${distance.value} ${distance.unit}` : `${distance.cells} 格程（地图未标定，不给真实里数）`;
-  const basis = `网格距离 ${distText}；地形 ${terrainCue.label} ×${terrainCue.factor}；速度档 ${speedTier ? speedTier.label : "无"}。${requiresAuthorConfirmation ? "未标定地图，需作者确认。" : ""}`;
-  const radius = typeof input.radius === "number" && input.radius > 0 ? input.radius : DEFAULT_NEARBY_RADIUS;
-  const nearby = to ? nearbyPoints(world, to.x, to.y, Number(radius), String(to.id)) : [];
-  const cues = [];
-  if (from && to) {
-    cues.push(`从「${from.name}」(${from.x},${from.y}) 到「${to.name}」(${to.x},${to.y})：${distText}`);
-  } else {
-    cues.push("起点或终点尚未选定，无法计算网格距离。");
-  }
-  if (via.length) cues.push(`途经：${via.map((v) => `「${v.name}」`).join(" → ")}`);
-  cues.push(`地形：${terrainCue.label} ×${terrainCue.factor}（来源：${terrainCue.source === "settings" ? "地图设置" : "默认基线"}）`);
-  cues.push(`速度档：${speedTier ? `${speedTier.label}（${cellsPerPeriod} 格/时段）` : "无"}`);
-  cues.push(abstractExpression);
-  if (nearby.length) cues.push(`附近地点（半径 ${radius} 格）：${nearby.length} 个`);
-  const guide = ctx.worldAgent?.travelGuide;
-  const worldAgentAssistApplied = Boolean(guide && guide.content.trim());
-  if (worldAgentAssistApplied && guide) {
-    cues.push(`世界 Agent 旅行辅助（revision ${ctx.worldAgentRevision}）：${guide.content.trim()}`);
-    if (guide.assumptions && guide.assumptions.length) {
-      cues.push(`辅助假设：${guide.assumptions.join("；")}`);
-    }
-  }
-  if (input.storyId) {
-    const branch = input.branchId ?? input.storyId;
-    const runtime = (world.storyRuntimes ?? []).find((r) => r.storyId === branch) ?? (world.storyRuntimes ?? []).find((r) => r.storyId === input.storyId);
-    if (runtime) {
-      cues.push(`故事上下文：${formatCalendar(toCalendar(runtime.currentTime))}（第 ${runtime.currentTime} 时段）`);
-    }
-  }
-  if (input.focusCardId) {
-    const card = (world.cardProfiles ?? []).find((c) => c.id === input.focusCardId);
-    cues.push(card ? `当前焦点卡：${card.summary ?? card.sourceCardId}` : `当前焦点卡：${input.focusCardId}（配置缺失）`);
-  }
-  return {
-    baselineVersion: baseline.version,
-    worldAgentRevision: ctx.worldAgentRevision,
-    status: ctx.status,
-    from: { pointId: from ? String(from.id) : null, name: from ? from.name : null, x: from ? from.x : null, y: from ? from.y : null },
-    to: { pointId: to ? String(to.id) : null, name: to ? to.name : null, x: to ? to.x : null, y: to ? to.y : null },
-    via,
-    distance,
-    speedTier: speedTier ? { id: speedTier.id, label: speedTier.label, cellsPerPeriod } : null,
-    terrainCue,
-    abstractExpression,
-    suggestedPeriods,
-    suggestedDuration,
-    basis,
-    requiresAuthorConfirmation,
-    nearbyPointIds: nearby,
-    cues,
-    worldAgentAssistApplied
-  };
-}
-function collectWorldBookIds(world, regionIds, pointIds) {
-  const out = [];
-  const push = (entries) => {
-    for (const e of entries ?? []) {
-      if (e.enabled === false) continue;
-      out.push(e.id);
-    }
-  };
-  push(world.worldBible);
-  const regionSet = new Set(regionIds);
-  for (const r of world.regions ?? []) if (regionSet.has(r.id)) push(r.worldBook);
-  const pointSet = new Set(pointIds);
-  for (const p of world.points ?? []) if (pointSet.has(String(p.id))) push(p.worldBook);
-  return out;
-}
-function resolveActionSources(world, action, opts) {
-  const radius = typeof opts?.radius === "number" && opts.radius > 0 ? opts.radius : 12;
-  const regionIds = /* @__PURE__ */ new Set();
-  const pointIds = /* @__PURE__ */ new Set();
-  for (const id of [action.fromRegionId, action.toRegionId]) if (id) regionIds.add(id);
-  for (const id of [action.fromPointId, action.toPointId]) if (id) pointIds.add(id);
-  for (const id of action.viaPointIds ?? []) if (id) pointIds.add(id);
-  for (const p of world.points ?? []) {
-    if (pointIds.has(String(p.id)) && p.regionId) regionIds.add(p.regionId);
-  }
-  const anchorPointId = action.toPointId ?? action.fromPointId;
-  const anchor = anchorPointId ? (world.points ?? []).find((p) => String(p.id) === anchorPointId) : null;
-  const nearby = anchor ? nearbyPoints(world, anchor.x, anchor.y, radius, String(anchor.id)) : [];
-  const characterIds = /* @__PURE__ */ new Set();
-  for (const id of opts?.companionIds ?? []) if (id) characterIds.add(id);
-  if (action.actorId) characterIds.add(action.actorId);
-  const targetPoints = /* @__PURE__ */ new Set([...pointIds, ...nearby]);
-  const branch = opts?.branchId ?? branchScopeForStory(world, opts?.storyId ?? null);
-  for (const s of branchCharacterStates(world, branch)) {
-    if (s.currentPointId && targetPoints.has(String(s.currentPointId))) characterIds.add(s.characterId);
-  }
-  const worldBookIds = collectWorldBookIds(world, [...regionIds], [...pointIds, ...nearby]);
-  const triggerIds = [];
-  for (const t of world.triggers ?? []) {
-    if (t.enabled === false) continue;
-    const scopeRegions = t.scopeRegionIds ?? [];
-    const scopePoints = t.scopePointIds ?? [];
-    const inScope = scopeRegions.length === 0 && scopePoints.length === 0 ? true : scopeRegions.some((id) => regionIds.has(id)) || scopePoints.some((id) => pointIds.has(id) || nearby.includes(id));
-    if (inScope) triggerIds.push(t.id);
-  }
-  return {
-    regionIds: [...regionIds],
-    pointIds: [...pointIds],
-    characterIds: [...characterIds],
-    triggerIds,
-    nearbyPointIds: nearby,
-    radius,
-    worldBookIds
-  };
-}
-function triggerMatches(trigger, ctx) {
-  if (trigger.enabled === false) return false;
-  const cond = trigger.condition;
-  if (!cond) return true;
-  if (typeof cond.minTime === "number" && ctx.at < cond.minTime) return false;
-  if (typeof cond.maxTime === "number" && ctx.at > cond.maxTime) return false;
-  if (cond.regionId && ctx.regionId !== cond.regionId) return false;
-  if (cond.pointId && ctx.pointId !== cond.pointId) return false;
-  if (cond.characterIds && cond.characterIds.length > 0) {
-    const present = new Set(ctx.characterIds);
-    if (!cond.characterIds.some((id) => present.has(id))) return false;
-  }
-  if (cond.requiresFlag && !ctx.flags.includes(cond.requiresFlag)) return false;
-  if (cond.forbidsFlag && ctx.flags.includes(cond.forbidsFlag)) return false;
-  return true;
-}
-function selectTriggers(world, sources, ctx) {
-  const allowed = new Set(sources.triggerIds);
-  return (world.triggers ?? []).filter((t) => allowed.has(t.id) && triggerMatches(t, ctx));
-}
-function deriveActionSeed(world, storyId, actionCount, at) {
-  const raw = `${world.id}|${storyId ?? "-"}|${actionCount}|${at}`;
-  return parseInt(hashString(raw).slice(0, 8), 16) >>> 0;
-}
-
 // src/atlas-relevance.ts
 function deriveAtlasTurnSeed(world, chatId, messageId, at) {
   const actionCount = parseInt(hashString(`${chatId}|${messageId}`).slice(0, 8), 16) >>> 0;
@@ -5313,7 +5374,7 @@ function createAtlasServerCore(deps) {
     return okResult({
       ok: true,
       plugin: "atlas",
-      version: "0.8.3",
+      version: "0.9.0",
       protocolVersion: 1,
       time: now()
     });
@@ -5612,6 +5673,20 @@ function createAtlasServerCore(deps) {
     }
     try {
       draft = parseAtlasWorldTurnDraft(call.text);
+      const adjudication = adjudicateAtlasDraft(baseWorld, {
+        branchId: pending.binding.branchId,
+        currentPointId: pending.binding.currentPointId,
+        draft
+      });
+      if (adjudication.notes.length > 0) {
+        pushLog({
+          at: now(),
+          kind: "world-turn-adjudication",
+          chatId: request.chatId,
+          notes: adjudication.notes
+        });
+      }
+      draft = adjudication.draft;
       output = commitAtlasTurn(baseWorld, {
         request,
         branchId: pending.binding.branchId,

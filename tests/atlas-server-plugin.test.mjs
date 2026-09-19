@@ -478,12 +478,6 @@ const FAILURE_CASES = [
     retryable: true,
   },
   { name: "非 JSON", script: () => jsonResponse(200, { notChoices: true }), code: ATLAS_ERROR_CODES.RESPONSE_MALFORMED, retryable: false },
-  {
-    name: "损坏草稿（未知地点）",
-    script: () => openAiResponse({ ...GOOD_DRAFT, locationChange: { toPointId: "pt-nowhere" } }),
-    code: ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
-    retryable: true,
-  },
 ];
 
 for (const failure of FAILURE_CASES) {
@@ -507,6 +501,23 @@ for (const failure of FAILURE_CASES) {
     ok(JSON.stringify(worldSnapshot).length > 0, "原世界快照仍有效");
   });
 }
+
+test("裁决（0.9.0）：未知地点草稿降级——移动被忽略，其余变化照常原子提交", async () => {
+  const fetcher = makeFetch([() => openAiResponse({ ...GOOD_DRAFT, locationChange: { toPointId: "pt-nowhere" } })]);
+  const store = createMemoryDocumentStore();
+  const world = buildWorld();
+  const core = createAtlasServerCore({ store, fetchFn: fetcher.fetchFn, now: () => NOW });
+  await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
+  await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
+  await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+
+  const result = await core.handle("POST", "/turns/commit", commitRequest(world));
+  const receipt = result.body.data.receipt;
+  equal(receipt.status, "committed", "未知地点不再炸整单");
+  equal(receipt.currentTime, 430.07, "非移动回合时间仍由 AI 推断（12 时段）");
+  ok(!("currentLocationId" in receipt) || receipt.currentLocationId === "4103", "位置未移动");
+  ok(receipt.summary.includes("〔裁定〕") && receipt.summary.includes("未知地点"), "裁定说明可审计");
+});
 
 test("retry：沿用原幂等键，成功后世界恰好推进一次", async () => {
   // 第一次 429 失败，重试成功

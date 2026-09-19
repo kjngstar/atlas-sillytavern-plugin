@@ -15,6 +15,7 @@
 
 import type { EntityRecord, World } from "../lib/world-schema.ts";
 import { parseWorld } from "../lib/world-schema.ts";
+import { adjudicateAtlasDraft } from "./atlas-adjudicate.ts";
 import { ledgerForBranch } from "../lib/world-ledger.ts";
 import { createCheckpoint, previewRestore, restoreAsPlayhead } from "../lib/world-checkpoint.ts";
 import { resolveCharacterPosition } from "../lib/world-npc.ts";
@@ -395,7 +396,7 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
     return okResult({
       ok: true,
       plugin: "atlas",
-      version: "0.8.3",
+      version: "0.9.0",
       protocolVersion: 1,
       time: now(),
     });
@@ -744,6 +745,22 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
     }
     try {
       draft = parseAtlasWorldTurnDraft(call.text);
+      // 0.9.0 算法裁决层：网格旅行算法裁定移动耗时、实体白名单强制、未知地点降级丢弃。
+      // 裁定说明合入 summary（可审计），独立 notes 记入日志。
+      const adjudication = adjudicateAtlasDraft(baseWorld, {
+        branchId: pending.binding.branchId,
+        currentPointId: pending.binding.currentPointId,
+        draft,
+      });
+      if (adjudication.notes.length > 0) {
+        pushLog({
+          at: now(),
+          kind: "world-turn-adjudication",
+          chatId: request.chatId,
+          notes: adjudication.notes,
+        });
+      }
+      draft = adjudication.draft;
       output = commitAtlasTurn(baseWorld, {
         request,
         branchId: pending.binding.branchId,
