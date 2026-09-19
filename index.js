@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.2";
+export const ATLAS_EXTENSION_VERSION = "0.9.3";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -505,6 +505,8 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
   const devSlot = el("div", "aw-dev");
   const sideFoot = el("div", "aw-side__foot");
   sideFoot.append(sideChanges, devSlot);
+  // 修复：sideFoot 此前从未挂进 side（v0.7.0 起的孤儿节点）——右栏永远只剩标题。
+  side.append(sideFoot);
 
   root.append(rail, main, side);
 
@@ -1918,9 +1920,10 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     renderSide();
   }
 
-  void loadPresetIntoForm().then(() => {
-    if (state().page === "settings") renderCenter();
-  });
+  // ATLAS-18 回归修复：此处原为 `void loadPresetIntoForm().then(...)` —— 该函数在
+  // 六栏重写（设置页拆成 推进/API 两页）时已被删除，调用点漏删 → 挂载即 ReferenceError，
+  // 被 connectOnce 的 catch 吞掉 → 面板只剩静态骨架、零功能（0.9.2 全量必现）。
+  // 设置的懒加载已由 ensureSettingsLoaded（进入 推进/API 页时拉取一次）接管。
 
   core.__renderPage = renderPage;
   renderPage();
