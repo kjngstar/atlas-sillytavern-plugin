@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.8.2";
+export const ATLAS_EXTENSION_VERSION = "0.8.3";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -1199,6 +1199,42 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     }
     panel.append(slots);
 
+    // 0.8.3 预设库（shujuku 式）：每个功能槽可存多个具名预设，下拉一键切换渠道
+    const libRow = el("div", "aw-field");
+    libRow.append(el("span", "aw-field__label", "预设库（切换渠道）"));
+    const libSelect = document.createElement("select");
+    libSelect.className = "aw-input";
+    libSelect.setAttribute("aria-label", "选择已保存的预设，选择后立即启用");
+    const libPlaceholder = document.createElement("option");
+    libPlaceholder.value = "";
+    libPlaceholder.textContent = presetLibrary.length === 0
+      ? "暂无已保存预设——填好后点「保存为预设」"
+      : "选择要切换的预设…";
+    libSelect.append(libPlaceholder);
+    for (const entry of presetLibrary) {
+      const opt = document.createElement("option");
+      opt.value = String(entry.name ?? "");
+      opt.textContent = `${String(entry.name ?? "")}（${String(entry.model ?? "?")}）`;
+      if (entry.name === formState.name) opt.selected = true;
+      libSelect.append(opt);
+    }
+    libSelect.addEventListener("change", () => {
+      if (libSelect.value) void activatePreset(libSelect.value);
+    });
+    libRow.append(libSelect);
+    const libActions = el("div", "aw-actions");
+    const libSave = el("button", "aw-btn aw-btn--ghost", "保存为预设");
+    libSave.type = "button";
+    libSave.setAttribute("aria-label", "把当前表单按预设名称保存进预设库并启用");
+    libSave.addEventListener("click", () => void savePreset({ toLibrary: true }));
+    const libDelete = el("button", "aw-btn aw-btn--danger", "删除预设");
+    libDelete.type = "button";
+    libDelete.setAttribute("aria-label", "从预设库删除当前选中的预设");
+    libDelete.addEventListener("click", () => void deletePreset(libSelect.value || formState.name));
+    libActions.append(libSave, libDelete);
+    libRow.append(libActions);
+    panel.append(libRow);
+
     const form = el("form", "aw-form");
     form.addEventListener("submit", (event) => {
       event.preventDefault();
@@ -1378,6 +1414,8 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
 
   // 表单态：从浏览器存储的 settings 文档读取真实值（含密钥），仅内存持有
   const formState = { name: "", endpoint: "", apiKey: "", model: "", maxTokens: 512, temperature: 0.7, keyTail: null, systemPrompt: "" };
+  /** 0.8.3 预设库（shujuku 式）：当前功能槽的具名预设列表；切换渠道 = 下拉一键载入+启用。 */
+  let presetLibrary = [];
 
   async function loadPresetIntoForm() {
     formState.name = "";
@@ -1388,6 +1426,8 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     formState.systemPrompt = "";
     if (!store) return;
     const raw = await store.read("settings");
+    const lib = raw && typeof raw === "object" ? raw.presetLibrary?.[settingsSlot] : null;
+    presetLibrary = Array.isArray(lib) ? lib.filter((p) => p && typeof p === "object") : [];
     const preset = raw && typeof raw === "object" ? raw[settingsSlot] : null;
     if (preset && typeof preset === "object") {
       formState.name = String(preset.name ?? "");
@@ -1402,29 +1442,20 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     }
   }
 
-  async function savePreset(options = {}) {
-    if (options.clear) {
-      const result = await api.request("PUT", "/settings", { [settingsSlot]: null });
-      apiFormStatus = result.status === 200 ? "已清空该槽。" : `清空被拒绝：${result.body?.error?.message ?? `HTTP ${result.status}`}`;
-      apiFormStatusKind = result.status === 200 ? "ok" : "error";
-      await loadPresetIntoForm();
-      renderCenter();
-      return;
-    }
+  /** 表单 → 合法预设对象；地址 / 模型缺失时给出可操作提示并返回 null。 */
+  function buildPresetFromForm() {
     const endpoint = (formState.endpoint || "").trim();
     if (!endpoint) {
       apiFormStatus = "请先填写 API 地址（形如 http://localhost:8317/v1）。";
       apiFormStatusKind = "error";
-      renderCenter();
-      return;
+      return null;
     }
     const model = (formState.model || "").trim();
     if (!model) {
       // 服务端校验 model 必填，但报错很笼统；这里前置给出可操作的提示（0.8.2）。
       apiFormStatus = "模型名必填：先点「加载模型」选择，或直接手填模型名。";
       apiFormStatusKind = "error";
-      renderCenter();
-      return;
+      return null;
     }
     const preset = {
       name: (formState.name || settingsSlot).trim().slice(0, 64),
@@ -1436,15 +1467,87 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     };
     const customPrompt = (formState.systemPrompt || "").trim();
     if (customPrompt) preset.systemPrompt = customPrompt.slice(0, 8000);
-    const result = await api.request("PUT", "/settings", { [settingsSlot]: preset });
+    return preset;
+  }
+
+  async function savePreset(options = {}) {
+    if (options.clear) {
+      const result = await api.request("PUT", "/settings", { [settingsSlot]: null });
+      apiFormStatus = result.status === 200 ? "已清空该槽。" : `清空被拒绝：${result.body?.error?.message ?? `HTTP ${result.status}`}`;
+      apiFormStatusKind = result.status === 200 ? "ok" : "error";
+      await loadPresetIntoForm();
+      renderCenter();
+      return;
+    }
+    const preset = buildPresetFromForm();
+    if (!preset) {
+      renderCenter();
+      return;
+    }
+    // 0.8.3 预设库：显式「保存为预设」按名入册（同名覆盖）；普通保存若同名已在库中也同步，
+    // 保证库里的条目和实际启用的内容一致。presetLibrary 载荷按槽局部更新（服务端按槽合并）。
+    let libraryPayload = null;
+    if (options.toLibrary && !(formState.name || "").trim()) {
+      apiFormStatus = "先在「预设名称」里起个名字，再保存为预设。";
+      apiFormStatusKind = "error";
+      renderCenter();
+      return;
+    }
+    if (options.toLibrary || presetLibrary.some((p) => p && p.name === preset.name)) {
+      const index = presetLibrary.findIndex((p) => p && p.name === preset.name);
+      if (index >= 0) presetLibrary.splice(index, 1, preset);
+      else presetLibrary.push(preset);
+      libraryPayload = { [settingsSlot]: presetLibrary };
+    }
+    const result = await api.request("PUT", "/settings", {
+      [settingsSlot]: preset,
+      ...(libraryPayload ? { presetLibrary: libraryPayload } : {}),
+    });
     if (result.status === 200) {
-      apiFormStatus = "预设已保存。密钥只存在浏览器侧，不会出现在日志里。";
+      apiFormStatus = options.toLibrary
+        ? `预设「${preset.name}」已入库并启用。`
+        : "预设已保存。密钥只存在浏览器侧，不会出现在日志里。";
       apiFormStatusKind = "ok";
       await loadPresetIntoForm();
     } else {
       apiFormStatus = `保存被拒绝：${result.body?.error?.message ?? `HTTP ${result.status}`}`;
       apiFormStatusKind = "error";
     }
+    renderCenter();
+  }
+
+  /** 0.8.3 一键切换：载入库中预设进表单并立即启用该槽（shujuku 式切渠道）。 */
+  async function activatePreset(name) {
+    const entry = presetLibrary.find((p) => p && p.name === name);
+    if (!entry) return;
+    formState.name = String(entry.name ?? "");
+    formState.endpoint = String(entry.endpoint ?? "");
+    formState.model = String(entry.model ?? "");
+    formState.maxTokens = typeof entry.maxTokens === "number" ? entry.maxTokens : 512;
+    formState.temperature = typeof entry.temperature === "number" ? entry.temperature : 0.7;
+    const key = typeof entry.apiKey === "string" ? entry.apiKey.trim() : "";
+    formState.apiKey = key;
+    formState.keyTail = key.length >= 4 ? key.slice(-4) : null;
+    formState.systemPrompt = typeof entry.systemPrompt === "string" ? entry.systemPrompt : "";
+    const result = await api.request("PUT", "/settings", { [settingsSlot]: entry });
+    apiFormStatus = result.status === 200
+      ? `已切换并启用「${name}」。`
+      : `切换被拒绝：${result.body?.error?.message ?? `HTTP ${result.status}`}`;
+    apiFormStatusKind = result.status === 200 ? "ok" : "error";
+    renderCenter();
+  }
+
+  /** 0.8.3 从库中删除预设（只动库，不影响当前启用的槽内容）。 */
+  async function deletePreset(name) {
+    if (!name) return;
+    const next = presetLibrary.filter((p) => p && p.name !== name);
+    if (next.length === presetLibrary.length) return;
+    const result = await api.request("PUT", "/settings", { presetLibrary: { [settingsSlot]: next } });
+    apiFormStatus = result.status === 200
+      ? `已删除预设「${name}」。`
+      : `删除被拒绝：${result.body?.error?.message ?? `HTTP ${result.status}`}`;
+    apiFormStatusKind = result.status === 200 ? "ok" : "error";
+    if (result.status === 200) presetLibrary = next;
     renderCenter();
   }
 
