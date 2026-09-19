@@ -982,7 +982,7 @@ function modeHintFor(mode, bindingInvalid, protocolVersion, bindingDisabled) {
     case "protocol-incompatible":
       return `Atlas 引擎协议版本（${String(protocolVersion)}）与扩展（${ATLAS_PROTOCOL_VERSION}）不一致，安装包可能不完整：请重新安装最新版插件。`;
     case "unbound":
-      return "当前聊天未绑定 Atlas 世界。在设置页选择一个世界即可开始。";
+      return "当前聊天未绑定 Atlas 世界。发送第一条消息会按角色卡自动建世；也可在「概览」的高级区绑定已有世界。";
     case "world-missing":
       return "绑定的世界不存在或已被删除。请解绑后重新选择世界。";
     case "ready":
