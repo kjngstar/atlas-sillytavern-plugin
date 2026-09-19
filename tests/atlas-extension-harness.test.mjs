@@ -268,9 +268,11 @@ test("形态契约：中区按栏位切页，地图只属于地图页", () => {
   const js = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
   ok(js.includes("core.setPage(page.id)"), "导航按钮切换页面状态");
   ok(js.includes('if (state().page === "map") renderMap(d)'), "只有地图页才渲染地图");
-  for (const page of ["overview", "map", "nearby", "changes", "settings"]) {
+  // ATLAS-18：侧边栏六项（删「设置」、新增「推进」）
+  for (const page of ["overview", "map", "nearby", "changes", "progression", "api"]) {
     ok(js.includes(`s.page === "${page}"`), `中区有独立的「${page}」页分支`);
   }
+  ok(!js.includes('s.page === "settings"'), "「设置」页分支已删除（职责并入概览 / 推进 / API）");
   // 回归：renderCenter 有 12 处无参调用点，缺省参数缺失会直接 TypeError（切页即崩）
   ok(js.includes("function renderCenter(d = data())"), "renderCenter 有缺省数据源，无参调用不崩");
 });
@@ -1070,4 +1072,88 @@ test("index.js：无 SillyTavern / document 时导入与 connectAtlas 都安全"
 
 test(`本轮累计断言已记录（计数见报告）`, () => {
   ok(assertionCount > 60, "断言数量达到覆盖要求");
+});
+
+// ---------------------------------------------------------------------------
+// ATLAS-18：自动建世状态机（可执行）
+// ---------------------------------------------------------------------------
+
+/** ATLAS-18 夹具：无绑定的就绪 core + 可注入的 ensureWorld。 */
+async function unboundCoreWith(ensureWorld) {
+  const api = makeApi({ stateByChat: { "chat-auto": STATE_PAYLOAD } });
+  const hostWrap = makeHost();
+  hostWrap.setChat("chat-auto");
+  const core = createAtlasUiCore({
+    api,
+    host: hostWrap.host,
+    emitter: makeEmitter(),
+    adaptEvent: makeAdaptEvent(),
+    now: () => NOW_BASE,
+    endedDebounceMs: 0,
+    mutationDebounceMs: 0,
+    ensureWorld,
+  });
+  await core.handleEvent("APP_READY");
+  return { api, hostWrap, core };
+}
+
+test("ATLAS-18 建世状态机：首次未绑定 → 一次 ensure + 同一条消息继续 prepare", async () => {
+  let ensureCalls = 0;
+  let coreRef = null;
+  const { api, core } = await unboundCoreWith(async () => {
+    ensureCalls += 1;
+    await coreRef.bindToWorld("world-auto-0123456789abcdef");
+    return true;
+  });
+  coreRef = core;
+
+  equal(core.getState().worldInitialization, "idle", "初始 idle（本次尚未触发初始化）");
+  await core.handleEvent("MESSAGE_SENT", { messageId: "m-1", userText: "我看看四周。" });
+  await flush();
+
+  equal(ensureCalls, 1, "首条消息触发恰一次 ensure");
+  equal(String(core.getState().binding?.worldId ?? ""), "world-auto-0123456789abcdef", "绑定到确定性世界");
+  equal(core.getState().worldInitialization, "ready", "状态变为 ready");
+  equal(api.calls.filter((c) => c.path === "/turns/prepare").length, 1, "同一条消息继续 prepare（不需要再发第二条）");
+});
+
+test("ATLAS-18 建世状态机：ensure 失败 → failed + 脱敏提示，可重试且不阻断生成", async () => {
+  let calls = 0;
+  const { api, core } = await unboundCoreWith(async () => {
+    calls += 1;
+    return false;
+  });
+
+  await core.handleEvent("MESSAGE_SENT", { messageId: "m-1", userText: "你好。" });
+  await flush();
+  equal(calls, 1, "失败也调用了一次 ensure");
+  equal(core.getState().worldInitialization, "failed", "状态为 failed");
+  const message = String(core.getState().worldInitializationError ?? "");
+  ok(message.length > 0, "有可读失败原因");
+  ok(!/@|http|Bearer|sk-/i.test(message), "失败原因脱敏（无端点 / Key）");
+  equal(api.calls.filter((c) => c.path === "/turns/prepare").length, 0, "未绑定时不 prepare");
+
+  await core.handleEvent("MESSAGE_SENT", { messageId: "m-2", userText: "再看一次。" });
+  await flush();
+  equal(calls, 2, "下一条消息可重试初始化");
+
+  await core.initializeWorld();
+  equal(calls, 3, "「重试初始化」按钮复用同一钩子");
+});
+
+test("ATLAS-18 建世状态机：已绑定（启用 / 停用）都不触发 ensure", async () => {
+  let calls = 0;
+  const { api, core } = await unboundCoreWith(async () => { calls += 1; return true; });
+  await core.bindToWorld("world-existing");
+  await flush();
+  await core.handleEvent("MESSAGE_SENT", { messageId: "m-1", userText: "继续。" });
+  await flush();
+  equal(calls, 0, "已绑定启用 → 零 ensure");
+  equal(api.calls.filter((c) => c.path === "/turns/prepare").length, 1, "启用状态照常 prepare");
+
+  await core.setEnabled(false);
+  await core.handleEvent("MESSAGE_SENT", { messageId: "m-2", userText: "停用后再说。" });
+  await flush();
+  equal(calls, 0, "已绑定停用 → 零 ensure");
+  equal(api.calls.filter((c) => c.path === "/turns/prepare").length, 1, "停用后不再 prepare");
 });

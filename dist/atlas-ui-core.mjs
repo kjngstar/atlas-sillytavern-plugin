@@ -995,6 +995,8 @@ function createAtlasUiCore(deps) {
   let state = {
     mode: "unbound",
     page: "overview",
+    worldInitialization: "idle",
+    worldInitializationError: null,
     panelOpen: false,
     serviceStatus: "checking",
     serviceProtocolVersion: null,
@@ -1256,6 +1258,7 @@ function createAtlasUiCore(deps) {
     if (state.pendingTurn) return;
     let binding = state.binding;
     if (!binding && deps.ensureWorld) {
+      setState({ worldInitialization: "initializing", worldInitializationError: null });
       let ensured = false;
       try {
         ensured = await deps.ensureWorld();
@@ -1264,7 +1267,14 @@ function createAtlasUiCore(deps) {
       }
       if (disposed) return;
       binding = state.binding;
-      if (!ensured || !binding) return;
+      if (!ensured || !binding) {
+        setState({
+          worldInitialization: "failed",
+          worldInitializationError: "世界初始化未完成——可在「概览」重试，本条消息未推演。"
+        });
+        return;
+      }
+      setState({ worldInitialization: "ready", worldInitializationError: null });
     }
     if (!binding?.enabled) return;
     const request = {
@@ -1515,6 +1525,25 @@ function createAtlasUiCore(deps) {
     setPanelOpen(open) {
       setState({ panelOpen: open });
       host.writePanelOpen(open);
+    },
+    /** ATLAS-18：概览页「重试初始化」按钮用（未注入 ensureWorld 时安全无操作）。 */
+    async initializeWorld() {
+      if (disposed) return false;
+      if (state.binding) {
+        setState({ worldInitialization: "ready", worldInitializationError: null });
+        return true;
+      }
+      if (!deps.ensureWorld) return false;
+      setState({ worldInitialization: "initializing", worldInitializationError: null });
+      try {
+        const ensured = await deps.ensureWorld();
+        if (disposed) return false;
+        setState(ensured && state.binding ? { worldInitialization: "ready", worldInitializationError: null } : { worldInitialization: "failed", worldInitializationError: "世界初始化未完成，可重试。" });
+        return Boolean(ensured && state.binding);
+      } catch {
+        if (!disposed) setState({ worldInitialization: "failed", worldInitializationError: "世界初始化失败，可重试。" });
+        return false;
+      }
     },
     setPage(page) {
       setState({ page });
@@ -7509,6 +7538,18 @@ function buildWorldFromTemplate(template, opts) {
 // src/atlas-starter-world.ts
 var MAX_NAME_CHARS2 = 60;
 var MAX_DESCRIPTION_CHARS = 2e3;
+var FNV_OFFSET_64 = 0xcbf29ce484222325n;
+var FNV_PRIME_64 = 0x100000001b3n;
+var MASK_64 = 0xffffffffffffffffn;
+function starterWorldIdForChat(chatId) {
+  const bytes = new TextEncoder().encode(typeof chatId === "string" ? chatId : "");
+  let hash = FNV_OFFSET_64;
+  for (const byte of bytes) {
+    hash ^= BigInt(byte);
+    hash = hash * FNV_PRIME_64 & MASK_64;
+  }
+  return `world-auto-${hash.toString(16).padStart(16, "0")}`;
+}
 function buildStarterWorld(options) {
   const cardName = (options.name ?? "").trim().slice(0, MAX_NAME_CHARS2);
   const worldName = cardName ? `${cardName} 的世界` : "新世界";
@@ -7569,5 +7610,6 @@ export {
   getDemoTemplate,
   getDemoTemplateByName,
   lorebookNameFor,
-  parseAtlasChatBinding
+  parseAtlasChatBinding,
+  starterWorldIdForChat
 };

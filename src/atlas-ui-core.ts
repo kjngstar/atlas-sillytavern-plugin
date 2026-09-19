@@ -31,7 +31,20 @@ export { DEFAULT_WORLD_TURN_SYSTEM_PROMPT } from "./atlas-api-client.ts";
 export { atlasCustomIncludeHeaders } from "./atlas-proxy-fetch.ts";
 
 export type AtlasUiMode = "offline" | "protocol-incompatible" | "unbound" | "world-missing" | "ready";
-export type AtlasUiPage = "overview" | "map" | "nearby" | "changes" | "api" | "settings";
+export type AtlasUiPage = "overview" | "map" | "nearby" | "changes" | "progression" | "api";
+
+/**
+ * ATLAS-18：侧边栏固定六项（顺序不可自行调整）。
+ * 已取消含义模糊的「设置」：世界初始化回到「概览」，推进行为与提示词在「推进」，连接资料在「API」。
+ */
+export const ATLAS_UI_PAGES: ReadonlyArray<{ id: AtlasUiPage; label: string }> = [
+  { id: "overview", label: "概览" },
+  { id: "map", label: "地图" },
+  { id: "nearby", label: "附近" },
+  { id: "changes", label: "变化" },
+  { id: "progression", label: "推进" },
+  { id: "api", label: "API" },
+];
 export type AtlasServiceStatus = "checking" | "online" | "offline" | "incompatible";
 
 /** 在途回合：MESSAGE_SENT 后 prepare 的产物；停止 / 失败即放弃，绝不推进世界。 */
@@ -61,6 +74,12 @@ export interface AtlasReceiptRecord {
 export interface AtlasUiState {
   mode: AtlasUiMode;
   page: AtlasUiPage;
+  /**
+   * ATLAS-18：首条消息自动建世的可见状态（idle = 已绑定或无需初始化）。
+   * 失败时 worldInitializationError 只保留脱敏分类，不含路径 / Key / 请求正文。
+   */
+  worldInitialization: "idle" | "initializing" | "failed" | "ready";
+  worldInitializationError?: string | null;
   panelOpen: boolean;
   serviceStatus: AtlasServiceStatus;
   /** 服务端协议版本（incompatible 时记录实际值） */
@@ -169,6 +188,8 @@ export interface AtlasUiCore {
   getState(): AtlasUiState;
   setPanelOpen(open: boolean): void;
   setPage(page: AtlasUiPage): void;
+  /** ATLAS-18：手动重试首条消息自动建世（概览页按钮）。 */
+  initializeWorld(): Promise<boolean>;
   bindToWorld(worldId: string): Promise<void>;
   unbind(): Promise<void>;
   setEnabled(enabled: boolean): Promise<void>;
@@ -253,6 +274,8 @@ export function createAtlasUiCore(deps: {
   let state: AtlasUiState = {
     mode: "unbound",
     page: "overview",
+    worldInitialization: "idle",
+    worldInitializationError: null,
     panelOpen: false,
     serviceStatus: "checking",
     serviceProtocolVersion: null,
@@ -566,6 +589,7 @@ export function createAtlasUiCore(deps: {
     // 失败绝不阻断酒馆生成，只是本条消息不推演（与未绑定行为一致）。
     let binding = state.binding;
     if (!binding && deps.ensureWorld) {
+      setState({ worldInitialization: "initializing", worldInitializationError: null });
       let ensured = false;
       try {
         ensured = await deps.ensureWorld();
@@ -574,7 +598,15 @@ export function createAtlasUiCore(deps: {
       }
       if (disposed) return;
       binding = state.binding;
-      if (!ensured || !binding) return;
+      if (!ensured || !binding) {
+        // 失败绝不阻断酒馆生成：本条消息不推演，下一条消息或「重试初始化」可再试
+        setState({
+          worldInitialization: "failed",
+          worldInitializationError: "世界初始化未完成——可在「概览」重试，本条消息未推演。",
+        });
+        return;
+      }
+      setState({ worldInitialization: "ready", worldInitializationError: null });
     }
     if (!binding?.enabled) return;
     const request = {
@@ -857,6 +889,28 @@ export function createAtlasUiCore(deps: {
     setPanelOpen(open: boolean) {
       setState({ panelOpen: open });
       host.writePanelOpen(open);
+    },
+
+    /** ATLAS-18：概览页「重试初始化」按钮用（未注入 ensureWorld 时安全无操作）。 */
+    async initializeWorld(): Promise<boolean> {
+      if (disposed) return false;
+      if (state.binding) {
+        setState({ worldInitialization: "ready", worldInitializationError: null });
+        return true;
+      }
+      if (!deps.ensureWorld) return false;
+      setState({ worldInitialization: "initializing", worldInitializationError: null });
+      try {
+        const ensured = await deps.ensureWorld();
+        if (disposed) return false;
+        setState(ensured && state.binding
+          ? { worldInitialization: "ready", worldInitializationError: null }
+          : { worldInitialization: "failed", worldInitializationError: "世界初始化未完成，可重试。" });
+        return Boolean(ensured && state.binding);
+      } catch {
+        if (!disposed) setState({ worldInitialization: "failed", worldInitializationError: "世界初始化失败，可重试。" });
+        return false;
+      }
     },
 
     setPage(page: AtlasUiPage) {

@@ -644,26 +644,6 @@
   font-weight: 700;
 }
 
-.aw-form { display: grid; gap: 11px; min-width: 0; }
-
-.aw-form__row {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 11px;
-  min-width: 0;
-}
-
-.aw-form__status {
-  margin: 0;
-  font-family: var(--aw-sans);
-  font-size: 12px;
-  color: var(--aw-teal);
-  overflow-wrap: anywhere;
-}
-
-.aw-form__status.is-error { color: #a3543c; }
-.aw-form__status.is-warn { color: var(--aw-gold-deep); }
-
 .aw-field {
   display: grid;
   gap: 5px;
@@ -676,14 +656,6 @@
   font-size: 12px;
   font-weight: 700;
   color: #3b5b5d;
-}
-
-.aw-field__hint {
-  font-family: var(--aw-sans);
-  font-size: 11px;
-  color: var(--aw-muted);
-  line-height: 1.55;
-  overflow-wrap: anywhere;
 }
 
 /* 输入控件：<select> 的 min-content = 最宽 option，必须显式允许收缩 */
@@ -718,13 +690,13 @@
 
 .aw-input:hover { border-color: var(--aw-teal); }
 
-select.aw-input,
-.aw-region {
+.atlas-workbench select.aw-input,
+.atlas-workbench .aw-region {
   appearance: auto;
   text-overflow: ellipsis;
 }
 
-textarea.aw-input--area {
+.atlas-workbench textarea.aw-input--area {
   resize: vertical;
   line-height: 1.5;
   font-family: var(--aw-sans);
@@ -1155,4 +1127,115 @@ textarea.aw-input--area {
   .aw-maptools { left: 14px; right: 14px; top: 16px; }
   .aw-region { max-width: 120px; }
   .aw-travel { flex-wrap: wrap; justify-content: center; bottom: 16px; }
+}
+
+/* ===========================================================================
+ * ATLAS-18 控件可读性契约（规格 0.8）
+ * 真实酒馆里宿主主题会覆盖插件输入控件；这里在 .atlas-workbench 内用双类 + !important
+ * 强制浅底深字，且**不越界**到酒馆其他输入框（所有选择器都带 .atlas-workbench 作用域）。
+ * =========================================================================== */
+
+.atlas-workbench.atlas-workbench input.aw-input:not([type="checkbox"]):not([type="radio"]),
+.atlas-workbench.atlas-workbench select.aw-input,
+.atlas-workbench.atlas-workbench textarea.aw-input {
+  background-color: #fff !important;
+  color: #1e383a !important;
+  -webkit-text-fill-color: #1e383a !important;
+  caret-color: #1e383a;
+  color-scheme: light;
+}
+
+.atlas-workbench.atlas-workbench select.aw-input option {
+  background-color: #fff !important;
+  color: #1e383a !important;
+}
+
+.atlas-workbench.atlas-workbench .aw-input::placeholder {
+  color: #6f7c78 !important;
+  -webkit-text-fill-color: #6f7c78 !important;
+  opacity: 1;
+}
+
+.atlas-workbench.atlas-workbench input.aw-input:-webkit-autofill {
+  -webkit-box-shadow: 0 0 0 1000px #fff inset !important;
+  -webkit-text-fill-color: #1e383a !important;
+}
+
+.atlas-workbench.atlas-workbench .aw-input:disabled,
+.atlas-workbench.atlas-workbench .aw-input[readonly] {
+  background-color: #f2efe7 !important;
+  color: #6f7c78 !important;
+  -webkit-text-fill-color: #6f7c78 !important;
+}
+
+.atlas-workbench.atlas-workbench .aw-input:focus,
+.atlas-workbench.atlas-workbench .aw-input:focus-visible {
+  outline: 2px solid #255f5b;
+  outline-offset: 1px;
+}
+
+/* ATLAS-18 新面板元素：沿用既有纸面令牌，不引入新色板 */
+.aw-details__summary,
+.aw-details > summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--aw-teal);
+  padding: 6px 0;
+}
+
+.aw-details__body {
+  padding: 4px 0 8px;
+}
+
+.aw-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--aw-ink);
+  margin: 6px 0;
+}
+
+.aw-status {
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--aw-teal);
+  overflow-wrap: anywhere;
+}
+
+.aw-status--error {
+  color: #a2453c;
+}
+
+.aw-world-card .aw-actions {
+  margin-top: 8px;
+}
+
+/* ATLAS-18 一致性核对补漏：这些类此前被使用但从未有样式（世界书条目面板 / 通用键值行） */
+.aw-lorebook-panel .aw-rows {
+  display: grid;
+  gap: 4px;
+  margin: 8px 0;
+}
+
+.aw-row,
+.aw-rows > .aw-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.aw-row__label {
+  flex: 0 0 auto;
+  color: var(--aw-muted);
+}
+
+.aw-row__value {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--aw-ink);
+  overflow-wrap: anywhere;
 }
