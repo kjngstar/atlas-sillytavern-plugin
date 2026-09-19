@@ -48,7 +48,13 @@ export {
   buildWorldFromTemplate,
   type DemoTemplate,
 } from "../lib/demo-events.ts";
-export { createStProxyFetch, ATLAS_ST_GENERATE_PATH } from "./atlas-proxy-fetch.ts";
+// atlasCustomIncludeHeaders 必须转出：index.js 的 testConnection / 模型列表从 loadUiCore() 解构它
+// （0.9.2/0.9.3 漏转 → 测试连接报 "atlasCustomIncludeHeaders is not a function"，加载模型全废）。
+export {
+  createStProxyFetch,
+  atlasCustomIncludeHeaders,
+  ATLAS_ST_GENERATE_PATH,
+} from "./atlas-proxy-fetch.ts";
 
 export { buildStarterWorld, starterWorldIdForChat } from "./atlas-starter-world.ts";
 
