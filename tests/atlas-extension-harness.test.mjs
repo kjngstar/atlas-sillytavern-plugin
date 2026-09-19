@@ -929,6 +929,133 @@ test("回合：处于 pending 期间禁止第二条 prepare（同一时刻最多
 });
 
 // ---------------------------------------------------------------------------
+// 0.8.2 自动建世（首条消息）+ starter world schema 校验
+// ---------------------------------------------------------------------------
+
+async function unboundCore(extraDeps = {}) {
+  const api = makeApi({ stateByChat: { "chat-a": STATE_PAYLOAD } });
+  const hostWrap = makeHost();
+  hostWrap.setChat("chat-a");
+  const core = createAtlasUiCore({
+    api,
+    host: hostWrap.host,
+    emitter: makeEmitter(),
+    adaptEvent: makeAdaptEvent(),
+    now: () => NOW_BASE,
+    endedDebounceMs: 0,
+    mutationDebounceMs: 0,
+    ...extraDeps,
+  });
+  await core.handleEvent("APP_READY");
+  return { api, hostWrap, core };
+}
+
+test("自动建世：未绑定聊天首条消息 → ensureWorld → 绑定成功后照常 prepare", async () => {
+  let ensureCalls = 0;
+  const { api, core } = await unboundCore({
+    ensureWorld: async () => {
+      ensureCalls += 1;
+      await core.bindToWorld("w-1");
+      return Boolean(core.getState().binding);
+    },
+  });
+  equal(core.getState().mode, "unbound", "前置：未绑定");
+  await core.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "我从城门走向集市。" });
+  equal(ensureCalls, 1, "ensureWorld 恰好调用一次");
+  const prepares = api.calls.filter((c) => c.path === "/turns/prepare");
+  equal(prepares.length, 1, "绑定就绪后本条消息照常 prepare");
+  ok(core.getState().pendingTurn !== null, "pendingTurn 建立");
+  equal(core.getState().binding?.worldId, "w-1", "世界已绑定");
+  equal(core.getState().mode, "ready", "进入就绪模式");
+  core.dispose();
+});
+
+test("自动建世：ensureWorld 失败 → 本条消息不 prepare，状态保持未绑定", async () => {
+  const { api, core } = await unboundCore({ ensureWorld: async () => false });
+  await core.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "我从城门走向集市。" });
+  equal(api.calls.filter((c) => c.path === "/turns/prepare").length, 0, "建世失败 → 零 prepare");
+  equal(core.getState().pendingTurn, null, "无 pending");
+  equal(core.getState().mode, "unbound", "保持未绑定");
+  core.dispose();
+});
+
+test("自动建世：已绑定聊天不触发 ensureWorld；停用绑定也不触发", async () => {
+  let ensureCalls = 0;
+  const ensureWorld = async () => {
+    ensureCalls += 1;
+    return true;
+  };
+  // 已绑定：readyCore 夹具 + ensureWorld 间谍
+  const api = makeApi({ stateByChat: { "chat-a": STATE_PAYLOAD } });
+  const hostWrap = makeHost();
+  hostWrap.setChat("chat-a");
+  hostWrap.setBinding("chat-a", bindingFor("chat-a", "w-1"));
+  const bound = createAtlasUiCore({
+    api,
+    host: hostWrap.host,
+    emitter: makeEmitter(),
+    adaptEvent: makeAdaptEvent(),
+    now: () => NOW_BASE,
+    endedDebounceMs: 0,
+    mutationDebounceMs: 0,
+    ensureWorld,
+  });
+  await bound.handleEvent("APP_READY");
+  equal(bound.getState().mode, "ready", "前置：就绪");
+  await bound.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "第一条。" });
+  equal(ensureCalls, 0, "已绑定 → ensureWorld 不被调用");
+  equal(api.calls.filter((c) => c.path === "/turns/prepare").length, 1, "照常 prepare");
+  bound.dispose();
+
+  // 已停用：binding 存在但 enabled=false → 不调用 ensureWorld 也不 prepare
+  const disabledApi = makeApi({ stateByChat: {} });
+  const disabledHost = makeHost();
+  disabledHost.setChat("chat-a");
+  disabledHost.setBinding("chat-a", bindingFor("chat-a", "w-1", { enabled: false }));
+  const disabled = createAtlasUiCore({
+    api: disabledApi,
+    host: disabledHost.host,
+    emitter: makeEmitter(),
+    adaptEvent: makeAdaptEvent(),
+    now: () => NOW_BASE,
+    endedDebounceMs: 0,
+    mutationDebounceMs: 0,
+    ensureWorld,
+  });
+  await disabled.handleEvent("APP_READY");
+  await disabled.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "第一条。" });
+  equal(ensureCalls, 0, "停用分支未触发 ensureWorld（全程零调用）");
+  equal(disabledApi.calls.filter((c) => c.path === "/turns/prepare").length, 0, "停用 → 零 prepare");
+  disabled.dispose();
+});
+
+test("starter world：buildStarterWorld 产物必须通过 parseWorld；角色卡名/描述正确落位", async () => {
+  const { buildStarterWorld } = await import("../src/atlas-starter-world.ts");
+  const { parseWorld } = await import("../lib/world-schema.ts");
+  const world = buildStarterWorld({
+    id: "world-test-1",
+    now: NOW_BASE,
+    name: "爱丽丝",
+    description: "x".repeat(3000),
+  });
+  const parsed = parseWorld(world);
+  ok(parsed !== null, "parseWorld 通过（/worlds/import 服务端同款校验）");
+  equal(parsed.name, "爱丽丝 的世界", "世界名取自角色卡");
+  equal(parsed.currentRegionId, "start", "初始地区 start");
+  equal(parsed.characters.length, 1, "一个主角实体");
+  equal(parsed.characters[0].name, "爱丽丝", "主角名 = 角色卡名");
+  ok(parsed.description.length <= 2000, "描述有界（≤2000）");
+  equal(parsed.regions.length, 1, "一个地区");
+  equal(parsed.points.length, 1, "一个地点");
+  equal(parsed.points[0].regionId, "start", "地点归属 start");
+  // 缺省回退：无名无描述也能过 schema
+  const fallback = parseWorld(buildStarterWorld({ id: "world-test-2", now: NOW_BASE }));
+  ok(fallback !== null, "无名无描述也通过 parseWorld");
+  equal(fallback.name, "新世界", "世界名回退");
+  equal(fallback.characters[0].name, "主角", "主角名回退");
+});
+
+// ---------------------------------------------------------------------------
 // index.js 在无酒馆环境的安全性
 // ---------------------------------------------------------------------------
 

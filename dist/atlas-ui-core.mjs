@@ -662,6 +662,245 @@ function createAtlasLorebookWriter(port, opts = {}) {
   };
 }
 
+// src/atlas-api-client.ts
+function buildAtlasChatUrl(endpoint) {
+  let url;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+  const cleanPath = url.pathname.replace(/\/+$/, "");
+  if (cleanPath.endsWith("/chat/completions")) return url.toString();
+  const base = cleanPath.replace(/\/models$/, "").replace(/\/chat$/, "");
+  url.pathname = `${base}/chat/completions`;
+  return url.toString();
+}
+var DEFAULT_WORLD_TURN_SYSTEM_PROMPT = "你是阿特拉斯世界推演引擎。基于给定的当前世界状态（位置、时间、附近人物、可达内容）与本轮用户行动、助手回复，推断本轮对世界造成的**有界结构化变化**。\n严格要求：只输出一个 JSON 对象，不要输出任何多余说明或代码围栏；字段：\nduration（本轮消耗的时段数，非负数字，≤10000）、\nlocationChange（对象或 null：{toPointId, toRegionId}，id 必须来自上下文中出现的地点）、\nnpcChanges（数组，每条形如 {entityId, key, value} 更新人物状态 / {entityId, tag} 加标签 / {entityId, removeTag} 删标签 / {entityId, targetEntityId, key, value} 改关系；entityId 必须来自上下文）、\nmemoryDrafts（数组，每条 {entityId, text}，为人物追加一条记忆，≤500 字）、\neventDrafts（数组，事件的摘要文字，仅叙述用）、\ntriggerResults（数组，本轮命中的触发器 id）、\nsummary（本轮世界变化的一句话摘要，≤500 字）。\n禁止：编造上下文之外的实体 id；输出时间地点之外的世界重写；输出任何密钥、路径或代码。";
+function buildWorldTurnUserContent(input) {
+  return [
+    "【当前世界状态与可达内容】",
+    input.injectionText,
+    "",
+    "【本轮用户行动】",
+    input.userText,
+    "",
+    "【本轮助手回复】",
+    input.assistantText,
+    "",
+    "请按系统要求只输出一个 JSON 对象。"
+  ].join("\n");
+}
+function errorMessageForStatus(status) {
+  if (status === 401 || status === 403) return { code: ATLAS_ERROR_CODES.API_AUTH_FAILED, retryable: false };
+  if (status === 404) return { code: ATLAS_ERROR_CODES.API_NOT_FOUND, retryable: false };
+  if (status === 429) return { code: ATLAS_ERROR_CODES.API_RATE_LIMITED, retryable: true };
+  if (status >= 500) return { code: ATLAS_ERROR_CODES.API_REQUEST_FAILED, retryable: true };
+  return { code: ATLAS_ERROR_CODES.API_REQUEST_FAILED, retryable: false };
+}
+async function callAtlasWorldTurnApi(preset, input, deps = {}) {
+  const now = deps.now ?? Date.now;
+  const startedAt = now();
+  const fail3 = (code, message, retryable, status) => ({
+    ok: false,
+    code,
+    message,
+    retryable,
+    ...typeof status === "number" ? { status } : {},
+    durationMs: now() - startedAt
+  });
+  const url = buildAtlasChatUrl(preset.endpoint);
+  if (!url) return fail3(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "推演 API 地址无效，无法构造请求。", false);
+  if (!preset.model.trim()) return fail3(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "推演预设未填写模型名称。", false);
+  const timeoutMs = Math.min(Math.max(preset.timeoutMs ?? 3e4, 1e3), 12e4);
+  const fetchFn = deps.fetchFn ?? globalThis.fetch;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    let response;
+    try {
+      response = await fetchFn(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...preset.apiKey.trim() ? { Authorization: `Bearer ${preset.apiKey.trim()}` } : {}
+        },
+        body: JSON.stringify({
+          model: preset.model.trim(),
+          messages: [
+            { role: "system", content: preset.systemPrompt?.trim() || DEFAULT_WORLD_TURN_SYSTEM_PROMPT },
+            { role: "user", content: buildWorldTurnUserContent(input) }
+          ],
+          stream: false,
+          ...typeof preset.temperature === "number" ? { temperature: preset.temperature } : {},
+          ...typeof preset.maxTokens === "number" ? { max_tokens: preset.maxTokens } : {}
+        }),
+        signal: controller.signal
+      });
+    } catch {
+      if (controller.signal.aborted) return fail3(ATLAS_ERROR_CODES.API_TIMEOUT, `推演请求超过 ${timeoutMs}ms 超时。`, true);
+      return fail3(ATLAS_ERROR_CODES.SERVICE_OFFLINE, "无法连接推演服务，请检查网络或服务状态。", true);
+    }
+    if (!response.ok) {
+      const mapped = errorMessageForStatus(response.status);
+      return fail3(mapped.code, `推演服务返回 HTTP ${response.status}。`, mapped.retryable, response.status);
+    }
+    let payload;
+    try {
+      payload = await response.json();
+    } catch {
+      return fail3(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "推演服务返回了无法解析的内容。", false);
+    }
+    const text = extractAssistantText(payload);
+    if (text === null || text.trim().length === 0) {
+      return fail3(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "推演服务返回为空或不支持的格式。", false);
+    }
+    return { ok: true, text, status: response.status, durationMs: now() - startedAt };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+function extractAssistantText(payload) {
+  if (!payload || typeof payload !== "object") return null;
+  const p = payload;
+  if (Array.isArray(p.choices) && p.choices.length > 0) {
+    const choice = p.choices[0];
+    if (typeof choice?.message?.content === "string") return choice.message.content;
+    if (typeof choice?.text === "string") return choice.text;
+  }
+  for (const key of ["text", "content", "response"]) {
+    if (typeof p[key] === "string") return p[key];
+  }
+  return null;
+}
+function extractJsonObject(text) {
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidates = [fenced?.[1] ?? "", text];
+  for (const candidate of candidates) {
+    const trimmed = candidate.trim();
+    if (!trimmed.startsWith("{")) continue;
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed;
+      }
+    } catch {
+    }
+  }
+  return null;
+}
+function toDuration(value) {
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0) return Math.floor(value);
+  if (typeof value === "string") {
+    const parsed = Number(value.trim());
+    if (Number.isFinite(parsed) && parsed >= 0) return Math.floor(parsed);
+  }
+  return null;
+}
+function toLocationChange(value) {
+  if (value === null || value === void 0) return null;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "locationChange 必须是对象或 null");
+  }
+  const record = value;
+  const toPointId = typeof record.toPointId === "string" && record.toPointId.trim() ? record.toPointId.trim() : null;
+  const toRegionId = typeof record.toRegionId === "string" && record.toRegionId.trim() ? record.toRegionId.trim() : null;
+  if (!toPointId && !toRegionId) return null;
+  return { toPointId, toRegionId };
+}
+function npcChangeToEffect(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const record = raw;
+  const entityId = typeof record.entityId === "string" ? record.entityId.trim() : "";
+  if (!entityId || entityId.length > ATLAS_LIMITS.ID_CHARS) return null;
+  if (typeof record.key === "string" && record.key.trim() && "value" in record) {
+    return { kind: "setTemporalField", entityId, key: record.key.trim(), value: record.value };
+  }
+  if (typeof record.tag === "string" && record.tag.trim()) {
+    return { kind: "addTag", entityId, tag: record.tag.trim() };
+  }
+  if (typeof record.removeTag === "string" && record.removeTag.trim()) {
+    return { kind: "removeTag", entityId, tag: record.removeTag.trim() };
+  }
+  if (typeof record.targetEntityId === "string" && record.targetEntityId.trim() && typeof record.key === "string" && record.key.trim() && "value" in record) {
+    return { kind: "adjustRelation", entityId, targetEntityId: record.targetEntityId.trim(), key: record.key.trim(), value: record.value };
+  }
+  return null;
+}
+function parseAtlasWorldTurnDraft(text) {
+  const parsed = extractJsonObject(text ?? "");
+  if (!parsed) {
+    throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "推演输出不是合法的 JSON 对象。");
+  }
+  const summary = typeof parsed.summary === "string" ? parsed.summary.trim() : "";
+  if (!summary) {
+    throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "推演输出缺少 summary 摘要。");
+  }
+  const rawDuration = "duration" in parsed ? toDuration(parsed.duration) : 0;
+  if (rawDuration === null) {
+    throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, `推演输出 duration 非法：${String(parsed.duration)}`);
+  }
+  const rawEffects = [];
+  if (parsed.npcChanges !== void 0 && parsed.npcChanges !== null) {
+    if (!Array.isArray(parsed.npcChanges)) {
+      throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "推演输出 npcChanges 必须是数组。");
+    }
+    if (parsed.npcChanges.length > ATLAS_LIMITS.REF_ARRAY) {
+      throw new AtlasError(ATLAS_ERROR_CODES.FIELD_LIMIT_EXCEEDED, `npcChanges 超过 ${ATLAS_LIMITS.REF_ARRAY} 项上限`);
+    }
+    parsed.npcChanges.forEach((item, index) => {
+      const effect = npcChangeToEffect(item);
+      if (!effect) {
+        throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, `npcChanges[${index}] 不是可识别的变化形状。`);
+      }
+      rawEffects.push(effect);
+    });
+  }
+  const memoryDrafts = [];
+  if (parsed.memoryDrafts !== void 0 && parsed.memoryDrafts !== null) {
+    if (!Array.isArray(parsed.memoryDrafts)) {
+      throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "推演输出 memoryDrafts 必须是数组。");
+    }
+    if (parsed.memoryDrafts.length > ATLAS_LIMITS.REF_ARRAY) {
+      throw new AtlasError(ATLAS_ERROR_CODES.FIELD_LIMIT_EXCEEDED, `memoryDrafts 超过 ${ATLAS_LIMITS.REF_ARRAY} 项上限`);
+    }
+    parsed.memoryDrafts.forEach((item, index) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, `memoryDrafts[${index}] 必须是对象。`);
+      }
+      const record = item;
+      const entityId = typeof record.entityId === "string" ? record.entityId.trim() : "";
+      const memoryText = typeof record.text === "string" ? record.text.trim() : "";
+      if (!entityId || !memoryText) {
+        throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, `memoryDrafts[${index}] 需要 entityId 与非空 text。`);
+      }
+      memoryDrafts.push({ entityId, text: memoryText });
+    });
+  }
+  const locationChange = toLocationChange(parsed.locationChange);
+  return {
+    duration: rawDuration,
+    locationChange,
+    rawEffects,
+    memoryDrafts,
+    summary
+  };
+}
+function maskPreset(preset) {
+  if (!preset) return null;
+  const key = preset.apiKey ?? "";
+  return {
+    name: preset.name,
+    endpoint: preset.endpoint,
+    model: preset.model,
+    maxTokens: preset.maxTokens ?? null,
+    temperature: preset.temperature ?? null,
+    timeoutMs: preset.timeoutMs ?? null,
+    apiKey: { exists: key.trim().length > 0, tail: key.trim().length >= 4 ? key.trim().slice(-4) : null }
+  };
+}
+
 // src/atlas-ui-core.ts
 function atlasClampZoom(value) {
   if (!Number.isFinite(value)) return 1;
@@ -958,10 +1197,22 @@ function createAtlasUiCore(deps) {
   }
   async function onMessageSent(messageId, userText) {
     if (disposed || !messageId) return;
-    const binding = state.binding;
     const chatId = state.chatId;
-    if (!binding?.enabled || !chatId || state.serviceStatus !== "online") return;
+    if (!chatId || state.serviceStatus !== "online") return;
     if (state.pendingTurn) return;
+    let binding = state.binding;
+    if (!binding && deps.ensureWorld) {
+      let ensured = false;
+      try {
+        ensured = await deps.ensureWorld();
+      } catch {
+        ensured = false;
+      }
+      if (disposed) return;
+      binding = state.binding;
+      if (!ensured || !binding) return;
+    }
+    if (!binding?.enabled) return;
     const request = {
       chatId,
       messageId: messageId.slice(0, ATLAS_LIMITS.ID_CHARS),
@@ -4851,245 +5102,6 @@ function commitAtlasTurn(world, input) {
   };
 }
 
-// src/atlas-api-client.ts
-function buildAtlasChatUrl(endpoint) {
-  let url;
-  try {
-    url = new URL(endpoint);
-  } catch {
-    return null;
-  }
-  if (url.protocol !== "https:" && url.protocol !== "http:") return null;
-  const cleanPath = url.pathname.replace(/\/+$/, "");
-  if (cleanPath.endsWith("/chat/completions")) return url.toString();
-  const base = cleanPath.replace(/\/models$/, "").replace(/\/chat$/, "");
-  url.pathname = `${base}/chat/completions`;
-  return url.toString();
-}
-var DEFAULT_WORLD_TURN_SYSTEM_PROMPT = "你是阿特拉斯世界推演引擎。基于给定的当前世界状态（位置、时间、附近人物、可达内容）与本轮用户行动、助手回复，推断本轮对世界造成的**有界结构化变化**。\n严格要求：只输出一个 JSON 对象，不要输出任何多余说明或代码围栏；字段：\nduration（本轮消耗的时段数，非负数字，≤10000）、\nlocationChange（对象或 null：{toPointId, toRegionId}，id 必须来自上下文中出现的地点）、\nnpcChanges（数组，每条形如 {entityId, key, value} 更新人物状态 / {entityId, tag} 加标签 / {entityId, removeTag} 删标签 / {entityId, targetEntityId, key, value} 改关系；entityId 必须来自上下文）、\nmemoryDrafts（数组，每条 {entityId, text}，为人物追加一条记忆，≤500 字）、\neventDrafts（数组，事件的摘要文字，仅叙述用）、\ntriggerResults（数组，本轮命中的触发器 id）、\nsummary（本轮世界变化的一句话摘要，≤500 字）。\n禁止：编造上下文之外的实体 id；输出时间地点之外的世界重写；输出任何密钥、路径或代码。";
-function buildWorldTurnUserContent(input) {
-  return [
-    "【当前世界状态与可达内容】",
-    input.injectionText,
-    "",
-    "【本轮用户行动】",
-    input.userText,
-    "",
-    "【本轮助手回复】",
-    input.assistantText,
-    "",
-    "请按系统要求只输出一个 JSON 对象。"
-  ].join("\n");
-}
-function errorMessageForStatus(status) {
-  if (status === 401 || status === 403) return { code: ATLAS_ERROR_CODES.API_AUTH_FAILED, retryable: false };
-  if (status === 404) return { code: ATLAS_ERROR_CODES.API_NOT_FOUND, retryable: false };
-  if (status === 429) return { code: ATLAS_ERROR_CODES.API_RATE_LIMITED, retryable: true };
-  if (status >= 500) return { code: ATLAS_ERROR_CODES.API_REQUEST_FAILED, retryable: true };
-  return { code: ATLAS_ERROR_CODES.API_REQUEST_FAILED, retryable: false };
-}
-async function callAtlasWorldTurnApi(preset, input, deps = {}) {
-  const now = deps.now ?? Date.now;
-  const startedAt = now();
-  const fail3 = (code, message, retryable, status) => ({
-    ok: false,
-    code,
-    message,
-    retryable,
-    ...typeof status === "number" ? { status } : {},
-    durationMs: now() - startedAt
-  });
-  const url = buildAtlasChatUrl(preset.endpoint);
-  if (!url) return fail3(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "推演 API 地址无效，无法构造请求。", false);
-  if (!preset.model.trim()) return fail3(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "推演预设未填写模型名称。", false);
-  const timeoutMs = Math.min(Math.max(preset.timeoutMs ?? 3e4, 1e3), 12e4);
-  const fetchFn = deps.fetchFn ?? globalThis.fetch;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    let response;
-    try {
-      response = await fetchFn(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...preset.apiKey.trim() ? { Authorization: `Bearer ${preset.apiKey.trim()}` } : {}
-        },
-        body: JSON.stringify({
-          model: preset.model.trim(),
-          messages: [
-            { role: "system", content: preset.systemPrompt?.trim() || DEFAULT_WORLD_TURN_SYSTEM_PROMPT },
-            { role: "user", content: buildWorldTurnUserContent(input) }
-          ],
-          stream: false,
-          ...typeof preset.temperature === "number" ? { temperature: preset.temperature } : {},
-          ...typeof preset.maxTokens === "number" ? { max_tokens: preset.maxTokens } : {}
-        }),
-        signal: controller.signal
-      });
-    } catch {
-      if (controller.signal.aborted) return fail3(ATLAS_ERROR_CODES.API_TIMEOUT, `推演请求超过 ${timeoutMs}ms 超时。`, true);
-      return fail3(ATLAS_ERROR_CODES.SERVICE_OFFLINE, "无法连接推演服务，请检查网络或服务状态。", true);
-    }
-    if (!response.ok) {
-      const mapped = errorMessageForStatus(response.status);
-      return fail3(mapped.code, `推演服务返回 HTTP ${response.status}。`, mapped.retryable, response.status);
-    }
-    let payload;
-    try {
-      payload = await response.json();
-    } catch {
-      return fail3(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "推演服务返回了无法解析的内容。", false);
-    }
-    const text = extractAssistantText(payload);
-    if (text === null || text.trim().length === 0) {
-      return fail3(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "推演服务返回为空或不支持的格式。", false);
-    }
-    return { ok: true, text, status: response.status, durationMs: now() - startedAt };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-function extractAssistantText(payload) {
-  if (!payload || typeof payload !== "object") return null;
-  const p = payload;
-  if (Array.isArray(p.choices) && p.choices.length > 0) {
-    const choice = p.choices[0];
-    if (typeof choice?.message?.content === "string") return choice.message.content;
-    if (typeof choice?.text === "string") return choice.text;
-  }
-  for (const key of ["text", "content", "response"]) {
-    if (typeof p[key] === "string") return p[key];
-  }
-  return null;
-}
-function extractJsonObject(text) {
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const candidates = [fenced?.[1] ?? "", text];
-  for (const candidate of candidates) {
-    const trimmed = candidate.trim();
-    if (!trimmed.startsWith("{")) continue;
-    try {
-      const parsed = JSON.parse(trimmed);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        return parsed;
-      }
-    } catch {
-    }
-  }
-  return null;
-}
-function toDuration(value) {
-  if (typeof value === "number" && Number.isFinite(value) && value >= 0) return Math.floor(value);
-  if (typeof value === "string") {
-    const parsed = Number(value.trim());
-    if (Number.isFinite(parsed) && parsed >= 0) return Math.floor(parsed);
-  }
-  return null;
-}
-function toLocationChange(value) {
-  if (value === null || value === void 0) return null;
-  if (typeof value !== "object" || Array.isArray(value)) {
-    throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "locationChange 必须是对象或 null");
-  }
-  const record = value;
-  const toPointId = typeof record.toPointId === "string" && record.toPointId.trim() ? record.toPointId.trim() : null;
-  const toRegionId = typeof record.toRegionId === "string" && record.toRegionId.trim() ? record.toRegionId.trim() : null;
-  if (!toPointId && !toRegionId) return null;
-  return { toPointId, toRegionId };
-}
-function npcChangeToEffect(raw) {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
-  const record = raw;
-  const entityId = typeof record.entityId === "string" ? record.entityId.trim() : "";
-  if (!entityId || entityId.length > ATLAS_LIMITS.ID_CHARS) return null;
-  if (typeof record.key === "string" && record.key.trim() && "value" in record) {
-    return { kind: "setTemporalField", entityId, key: record.key.trim(), value: record.value };
-  }
-  if (typeof record.tag === "string" && record.tag.trim()) {
-    return { kind: "addTag", entityId, tag: record.tag.trim() };
-  }
-  if (typeof record.removeTag === "string" && record.removeTag.trim()) {
-    return { kind: "removeTag", entityId, tag: record.removeTag.trim() };
-  }
-  if (typeof record.targetEntityId === "string" && record.targetEntityId.trim() && typeof record.key === "string" && record.key.trim() && "value" in record) {
-    return { kind: "adjustRelation", entityId, targetEntityId: record.targetEntityId.trim(), key: record.key.trim(), value: record.value };
-  }
-  return null;
-}
-function parseAtlasWorldTurnDraft(text) {
-  const parsed = extractJsonObject(text ?? "");
-  if (!parsed) {
-    throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "推演输出不是合法的 JSON 对象。");
-  }
-  const summary = typeof parsed.summary === "string" ? parsed.summary.trim() : "";
-  if (!summary) {
-    throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "推演输出缺少 summary 摘要。");
-  }
-  const rawDuration = "duration" in parsed ? toDuration(parsed.duration) : 0;
-  if (rawDuration === null) {
-    throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, `推演输出 duration 非法：${String(parsed.duration)}`);
-  }
-  const rawEffects = [];
-  if (parsed.npcChanges !== void 0 && parsed.npcChanges !== null) {
-    if (!Array.isArray(parsed.npcChanges)) {
-      throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "推演输出 npcChanges 必须是数组。");
-    }
-    if (parsed.npcChanges.length > ATLAS_LIMITS.REF_ARRAY) {
-      throw new AtlasError(ATLAS_ERROR_CODES.FIELD_LIMIT_EXCEEDED, `npcChanges 超过 ${ATLAS_LIMITS.REF_ARRAY} 项上限`);
-    }
-    parsed.npcChanges.forEach((item, index) => {
-      const effect = npcChangeToEffect(item);
-      if (!effect) {
-        throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, `npcChanges[${index}] 不是可识别的变化形状。`);
-      }
-      rawEffects.push(effect);
-    });
-  }
-  const memoryDrafts = [];
-  if (parsed.memoryDrafts !== void 0 && parsed.memoryDrafts !== null) {
-    if (!Array.isArray(parsed.memoryDrafts)) {
-      throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "推演输出 memoryDrafts 必须是数组。");
-    }
-    if (parsed.memoryDrafts.length > ATLAS_LIMITS.REF_ARRAY) {
-      throw new AtlasError(ATLAS_ERROR_CODES.FIELD_LIMIT_EXCEEDED, `memoryDrafts 超过 ${ATLAS_LIMITS.REF_ARRAY} 项上限`);
-    }
-    parsed.memoryDrafts.forEach((item, index) => {
-      if (!item || typeof item !== "object" || Array.isArray(item)) {
-        throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, `memoryDrafts[${index}] 必须是对象。`);
-      }
-      const record = item;
-      const entityId = typeof record.entityId === "string" ? record.entityId.trim() : "";
-      const memoryText = typeof record.text === "string" ? record.text.trim() : "";
-      if (!entityId || !memoryText) {
-        throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, `memoryDrafts[${index}] 需要 entityId 与非空 text。`);
-      }
-      memoryDrafts.push({ entityId, text: memoryText });
-    });
-  }
-  const locationChange = toLocationChange(parsed.locationChange);
-  return {
-    duration: rawDuration,
-    locationChange,
-    rawEffects,
-    memoryDrafts,
-    summary
-  };
-}
-function maskPreset(preset) {
-  if (!preset) return null;
-  const key = preset.apiKey ?? "";
-  return {
-    name: preset.name,
-    endpoint: preset.endpoint,
-    model: preset.model,
-    maxTokens: preset.maxTokens ?? null,
-    temperature: preset.temperature ?? null,
-    timeoutMs: preset.timeoutMs ?? null,
-    apiKey: { exists: key.trim().length > 0, tail: key.trim().length >= 4 ? key.trim().slice(-4) : null }
-  };
-}
-
 // src/atlas-server.ts
 var DEFAULT_SETTINGS = {
   schemaVersion: 1,
@@ -5279,7 +5291,7 @@ function createAtlasServerCore(deps) {
     return okResult({
       ok: true,
       plugin: "atlas",
-      version: "0.8.1",
+      version: "0.8.2",
       protocolVersion: 1,
       time: now()
     });
@@ -6606,6 +6618,46 @@ function createStProxyFetch(deps) {
     });
   };
 }
+
+// src/atlas-starter-world.ts
+var MAX_NAME_CHARS = 60;
+var MAX_DESCRIPTION_CHARS = 2e3;
+function buildStarterWorld(options) {
+  const cardName = (options.name ?? "").trim().slice(0, MAX_NAME_CHARS);
+  const worldName = cardName ? `${cardName} 的世界` : "新世界";
+  const description = (options.description ?? "").trim().slice(0, MAX_DESCRIPTION_CHARS);
+  return {
+    schemaVersion: 1,
+    id: options.id,
+    name: worldName,
+    description,
+    currentRegionId: "start",
+    currentYear: 1,
+    createdAt: options.now,
+    updatedAt: options.now,
+    regions: [
+      {
+        id: "start",
+        worldId: options.id,
+        name: "起点",
+        type: "other",
+        description: description ? description.slice(0, 500) : "故事开始的地方。",
+        coordinates: { x: 0, y: 0 }
+      }
+    ],
+    points: [{ id: 1, name: "起点", x: 50, y: 50, regionId: "start" }],
+    characters: [
+      {
+        id: "char-main",
+        worldId: options.id,
+        name: cardName || "主角",
+        role: "主角",
+        description: description.slice(0, 1e3),
+        currentRegionId: "start"
+      }
+    ]
+  };
+}
 export {
   ATLAS_BROWSER_DOC_LIMITS,
   ATLAS_ERROR_CODES,
@@ -6619,6 +6671,7 @@ export {
   DEFAULT_WORLD_TURN_SYSTEM_PROMPT,
   DEMO_TEMPLATES,
   atlasClampZoom,
+  buildStarterWorld,
   buildWorldFromTemplate,
   createAtlasLorebookWriter,
   createAtlasServerCore,

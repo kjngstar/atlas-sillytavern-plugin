@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.8.1";
+export const ATLAS_EXTENSION_VERSION = "0.8.2";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -1224,7 +1224,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     endpointInput.type = "text";
     endpointInput.className = "aw-input";
     endpointInput.value = formState.endpoint ?? "";
-    endpointInput.placeholder = "https://example.com/v1/chat/completions";
+    endpointInput.placeholder = "http://localhost:8317/v1（填基础地址即可，自动补 /chat/completions）";
     endpointInput.addEventListener("input", () => { formState.endpoint = endpointInput.value; });
 
     const keyInput = document.createElement("input");
@@ -1333,6 +1333,23 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     defaultDetails.append(defaultSummary, defaultPre);
     form.append(defaultDetails);
 
+    // 0.8.2：作者反馈「提示词查看不对劲」——只有默认提示词可看，自定义后看不到生效版。
+    const activeDetails = document.createElement("details");
+    activeDetails.className = "aw-details";
+    const activeSummary = document.createElement("summary");
+    activeSummary.textContent = "查看当前生效提示词";
+    activeSummary.setAttribute("aria-label", "展开查看下一轮推演实际使用的提示词");
+    const activePre = document.createElement("pre");
+    activePre.className = "aw-pre";
+    activeDetails.append(activeSummary, activePre);
+    const syncActivePrompt = () => {
+      activePre.textContent = (formState.systemPrompt || "").trim() || mod.DEFAULT_WORLD_TURN_SYSTEM_PROMPT || "";
+    };
+    syncActivePrompt();
+    promptInput.addEventListener("input", syncActivePrompt);
+    promptReset.addEventListener("click", () => { syncActivePrompt(); });
+    form.append(activeDetails);
+
     const userNote = el(
       "p",
       "aw-panel__meta",
@@ -1394,10 +1411,25 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       renderCenter();
       return;
     }
+    const endpoint = (formState.endpoint || "").trim();
+    if (!endpoint) {
+      apiFormStatus = "请先填写 API 地址（形如 http://localhost:8317/v1）。";
+      apiFormStatusKind = "error";
+      renderCenter();
+      return;
+    }
+    const model = (formState.model || "").trim();
+    if (!model) {
+      // 服务端校验 model 必填，但报错很笼统；这里前置给出可操作的提示（0.8.2）。
+      apiFormStatus = "模型名必填：先点「加载模型」选择，或直接手填模型名。";
+      apiFormStatusKind = "error";
+      renderCenter();
+      return;
+    }
     const preset = {
       name: (formState.name || settingsSlot).trim().slice(0, 64),
-      endpoint: (formState.endpoint || "").trim(),
-      model: (formState.model || "").trim(),
+      endpoint,
+      model,
       apiKey: (formState.apiKey || "").trim(),
       maxTokens: Number.isFinite(formState.maxTokens) ? formState.maxTokens : 512,
       temperature: Number.isFinite(formState.temperature) ? formState.temperature : 0.7,
@@ -1432,17 +1464,41 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       const ctx = SillyTavern.getContext();
       const headers = { "Content-Type": "application/json" };
       if (typeof ctx.getRequestHeaders === "function") Object.assign(headers, ctx.getRequestHeaders());
+      // shujuku 同款载荷（2026-09-19 实测口径）：custom_include_headers 必须是
+      // 「原始头字符串」而不是对象——酒馆后端按行解析，传对象 = 鉴权头被丢弃 →
+      // 端点收到无 Authorization 的请求 → 永远取不到模型（0.8.1 及之前的真实病因）。
       const response = await fetch("/api/backends/chat-completions/status", {
         method: "POST",
         headers,
         body: JSON.stringify({
+          reverse_proxy: endpoint,
+          proxy_password: "",
           chat_completion_source: "custom",
           custom_url: endpoint,
-          ...(formState.apiKey ? { custom_include_headers: { Authorization: `Bearer ${formState.apiKey}` } } : {}),
+          custom_include_headers: formState.apiKey ? `Authorization: Bearer ${formState.apiKey}` : "",
         }),
       });
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => "");
+        let detail = errorText.slice(0, 200);
+        try {
+          const errorJson = JSON.parse(errorText);
+          detail = String(errorJson.error ?? errorJson.message ?? detail);
+        } catch { /* 保留原文 */ }
+        apiFormStatus = `端点状态检查失败（HTTP ${response.status}）：${detail || "无详情"}`;
+        apiFormStatusKind = "error";
+        renderCenter();
+        return;
+      }
       const payload = await response.json().catch(() => ({}));
-      const raw = Array.isArray(payload?.data) ? payload.data : Array.isArray(payload) ? payload : [];
+      // shujuku 同款三重回退解析：{models} / {data} / 裸数组
+      const raw = Array.isArray(payload?.models)
+        ? payload.models
+        : Array.isArray(payload?.data)
+          ? payload.data
+          : Array.isArray(payload)
+            ? payload
+            : [];
       modelOptions = raw
         .map((item) => (typeof item === "string" ? item : item && typeof item === "object" ? item.id : null))
         .filter((item) => typeof item === "string" && item.length > 0)
@@ -1772,12 +1828,41 @@ async function connectOnce() {
 
     let rerender = () => {};
     const adaptEvent = createEventAdapter(context);
+    /** 0.8.2 首条消息自动建世；core 由下方 const 赋值后回填（调用只发生在初始化完成之后）。 */
+    let coreRef = null;
     const core = mod.createAtlasUiCore({
       api,
       host: createHost(context),
       emitter: createEmitter(context),
       adaptEvent,
       resolveAssistantFloor: createAssistantFloorResolver(context),
+      ensureWorld: async () => {
+        try {
+          const ctx = context();
+          // 角色卡信息：name2 = 当前角色名；description 从角色档案取（读不到就留空回退）。
+          const cardName = typeof ctx.name2 === "string" && ctx.name2.trim() ? ctx.name2.trim() : null;
+          const card = Array.isArray(ctx.characters) && typeof ctx.characterId === "string"
+            ? ctx.characters.find((c) => c && c.avatar === ctx.characterId) ?? null
+            : null;
+          const world = mod.buildStarterWorld({
+            id: `world-${Date.now()}`,
+            now: Date.now(),
+            name: cardName,
+            description: typeof card?.description === "string" ? card.description : "",
+          });
+          const result = await api.request("POST", "/worlds/import", { world });
+          if (result.status !== 200 || !result.body?.ok) {
+            console.warn("[atlas] 自动建世被拒绝：", result.body?.error?.message ?? `HTTP ${result.status}`);
+            return false;
+          }
+          if (!coreRef) return false;
+          await coreRef.bindToWorld(String(world.id));
+          return Boolean(coreRef.getState().binding);
+        } catch (error) {
+          console.warn("[atlas] 自动建世失败（聊天不受影响）：", error instanceof Error ? error.message : String(error));
+          return false;
+        }
+      },
       onStateChange: () => rerender(),
       ...(lorebookWriter
         ? {
@@ -1790,6 +1875,7 @@ async function connectOnce() {
           }
         : {}),
     });
+    coreRef = core;
     installGenerateInterceptor(core);
 
     // 根节点：挂在 body 下；样式只遵循公开扩展机制
