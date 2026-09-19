@@ -26,7 +26,7 @@ import {
 import { parseAtlasLorebookPlans, type AtlasLorebookPlans } from "./atlas-lorebook.ts";
 
 export type AtlasUiMode = "offline" | "protocol-incompatible" | "unbound" | "world-missing" | "ready";
-export type AtlasUiPage = "overview" | "map" | "nearby" | "changes" | "settings";
+export type AtlasUiPage = "overview" | "map" | "nearby" | "changes" | "api" | "settings";
 export type AtlasServiceStatus = "checking" | "online" | "offline" | "incompatible";
 
 /** 在途回合：MESSAGE_SENT 后 prepare 的产物；停止 / 失败即放弃，绝不推进世界。 */

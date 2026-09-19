@@ -38,6 +38,14 @@ export {
 } from "./atlas-browser-store.ts";
 
 export { createLocalAtlasApi } from "./atlas-local-api.ts";
+
+export {
+  DEMO_TEMPLATES,
+  getDemoTemplate,
+  getDemoTemplateByName,
+  buildWorldFromTemplate,
+  type DemoTemplate,
+} from "../lib/demo-events.ts";
 export { createStProxyFetch, ATLAS_ST_GENERATE_PATH } from "./atlas-proxy-fetch.ts";
 
 export {
