@@ -16,7 +16,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const ATLAS_PLUGIN_ID = "atlas";
-export const ATLAS_PLUGIN_VERSION = "0.7.5";
+export const ATLAS_PLUGIN_VERSION = "0.7.6";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_API_BASE = "/api/plugins/atlas";
 

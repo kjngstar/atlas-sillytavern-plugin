@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.7.5";
+export const ATLAS_EXTENSION_VERSION = "0.7.6";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -1235,6 +1235,49 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     paramRow.append(field("最大回复长度", maxTokensInput), field("温度", temperatureInput));
     form.append(paramRow);
 
+    // 推演提示词（shujuku 式：可看可改；留空 = 内置默认）
+    const promptInput = document.createElement("textarea");
+    promptInput.className = "aw-input aw-input--area";
+    promptInput.rows = 10;
+    promptInput.spellcheck = false;
+    promptInput.setAttribute("aria-label", "推演系统提示词（留空使用内置默认）");
+    promptInput.value = formState.systemPrompt ?? "";
+    promptInput.placeholder = "留空 = 使用内置默认提示词";
+    promptInput.addEventListener("input", () => { formState.systemPrompt = promptInput.value; });
+
+    const promptRow = field("推演提示词（系统提示）", promptInput,
+      "发送给推演模型的 system 正文；控制世界如何推演。留空使用内置默认。改动只影响之后的推演请求。",
+    );
+    const promptActions = el("div", "aw-actions");
+    const promptReset = el("button", "aw-btn aw-btn--ghost", "恢复默认");
+    promptReset.type = "button";
+    promptReset.setAttribute("aria-label", "清空自定义提示词，恢复内置默认");
+    promptReset.addEventListener("click", () => {
+      formState.systemPrompt = "";
+      promptInput.value = "";
+    });
+    promptActions.append(promptReset);
+    promptRow.append(promptActions);
+    form.append(promptRow);
+
+    const defaultDetails = document.createElement("details");
+    defaultDetails.className = "aw-details";
+    const defaultSummary = document.createElement("summary");
+    defaultSummary.textContent = "查看内置默认提示词";
+    defaultSummary.setAttribute("aria-label", "展开查看内置默认推演提示词");
+    const defaultPre = document.createElement("pre");
+    defaultPre.className = "aw-pre";
+    defaultPre.textContent = mod.DEFAULT_WORLD_TURN_SYSTEM_PROMPT ?? "";
+    defaultDetails.append(defaultSummary, defaultPre);
+    form.append(defaultDetails);
+
+    const userNote = el(
+      "p",
+      "aw-panel__meta",
+      "用户正文由系统自动组装：【当前世界状态与可达内容】+【本轮用户行动】+【本轮助手回复】，无需在此填写。",
+    );
+    form.append(userNote);
+
     const actions = el("div", "aw-actions");
     const save = el("button", "aw-btn aw-btn--primary", "保存预设");
     save.type = "submit";
@@ -1255,7 +1298,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
   }
 
   // 表单态：从浏览器存储的 settings 文档读取真实值（含密钥），仅内存持有
-  const formState = { name: "", endpoint: "", apiKey: "", model: "", maxTokens: 512, temperature: 0.7, keyTail: null };
+  const formState = { name: "", endpoint: "", apiKey: "", model: "", maxTokens: 512, temperature: 0.7, keyTail: null, systemPrompt: "" };
 
   async function loadPresetIntoForm() {
     formState.name = "";
@@ -1263,6 +1306,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     formState.apiKey = "";
     formState.model = "";
     formState.keyTail = null;
+    formState.systemPrompt = "";
     if (!store) return;
     const raw = await store.read("settings");
     const preset = raw && typeof raw === "object" ? raw[settingsSlot] : null;
@@ -1275,6 +1319,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       const key = typeof preset.apiKey === "string" ? preset.apiKey.trim() : "";
       formState.apiKey = key;
       formState.keyTail = key.length >= 4 ? key.slice(-4) : null;
+      formState.systemPrompt = typeof preset.systemPrompt === "string" ? preset.systemPrompt : "";
     }
   }
 
@@ -1295,6 +1340,8 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       maxTokens: Number.isFinite(formState.maxTokens) ? formState.maxTokens : 512,
       temperature: Number.isFinite(formState.temperature) ? formState.temperature : 0.7,
     };
+    const customPrompt = (formState.systemPrompt || "").trim();
+    if (customPrompt) preset.systemPrompt = customPrompt.slice(0, 8000);
     const result = await api.request("PUT", "/settings", { [settingsSlot]: preset });
     if (result.status === 200) {
       apiFormStatus = "预设已保存。密钥只存在浏览器侧，不会出现在日志里。";

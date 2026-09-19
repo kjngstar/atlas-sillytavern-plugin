@@ -20,7 +20,7 @@ import { parseWorld } from "../lib/world-schema.ts";
 import { appendStateEvent } from "../lib/world-ledger.ts";
 import { upsertEntityRecord } from "../lib/world-definition.ts";
 import { createAtlasServerCore, createMemoryDocumentStore, ATLAS_ROUTE_MANIFEST } from "../src/atlas-server.ts";
-import { parseAtlasWorldTurnDraft, buildAtlasChatUrl } from "../src/atlas-api-client.ts";
+import { parseAtlasWorldTurnDraft, buildAtlasChatUrl, callAtlasWorldTurnApi, DEFAULT_WORLD_TURN_SYSTEM_PROMPT } from "../src/atlas-api-client.ts";
 import {
   ATLAS_ERROR_CODES,
   ATLAS_LIMITS,
@@ -610,6 +610,38 @@ test("buildAtlasChatUrl：规范化与拒绝", () => {
   equal(buildAtlasChatUrl("https://api.example.com/v1/chat/completions"), "https://api.example.com/v1/chat/completions", "幂等");
   equal(buildAtlasChatUrl("ftp://x"), null, "非 http(s) 拒绝");
   equal(buildAtlasChatUrl("::bad::"), null, "非法 URL 拒绝");
+});
+
+// ---------------------------------------------------------------------------
+// systemPrompt：推演提示词可看可改（0.7.6）
+// ---------------------------------------------------------------------------
+
+test("systemPrompt：自定义系统提示词生效，留空回退内置默认", async () => {
+  const custom = "自定义推演规则：本轮只追踪天气变化。";
+  const scenarios = [
+    { label: "自定义提示词", prompt: custom, expected: custom },
+    { label: "省略字段", prompt: undefined, expected: DEFAULT_WORLD_TURN_SYSTEM_PROMPT },
+    { label: "空白字符串", prompt: "   ", expected: DEFAULT_WORLD_TURN_SYSTEM_PROMPT },
+  ];
+  for (const scenario of scenarios) {
+    const presetValue = scenario.prompt === undefined ? preset() : preset({ systemPrompt: scenario.prompt });
+    const { fetchFn, calls } = makeFetch([() => openAiResponse(GOOD_DRAFT)]);
+    const call = await callAtlasWorldTurnApi(presetValue, { injectionText: "注入", userText: "用户", assistantText: "助手" }, { fetchFn, now: () => NOW });
+    ok(call.ok, `${scenario.label}：请求成功`);
+    equal(calls[0].body.messages[0].role, "system", `${scenario.label}：第一条是 system`);
+    equal(calls[0].body.messages[0].content, scenario.expected, `${scenario.label}：system 正文符合预期`);
+    equal(calls[0].body.messages[1].role, "user", `${scenario.label}：第二条是 user`);
+  }
+});
+
+test("systemPrompt：服务端校验（上限 8000 / 非字符串拒绝）", async () => {
+  const core = createAtlasServerCore({ store: createMemoryDocumentStore(), now: () => NOW });
+  const good = await core.handle("PUT", "/settings", { worldTurn: preset({ systemPrompt: "好".repeat(8000) }) }, { local: true });
+  equal(good.status, 200, "8000 字以内接受");
+  const over = await core.handle("PUT", "/settings", { worldTurn: preset({ systemPrompt: "长".repeat(8001) }) }, { local: true });
+  equal(over.status, 400, "超 8000 字拒绝");
+  const wrongType = await core.handle("PUT", "/settings", { worldTurn: preset({ systemPrompt: 123 }) }, { local: true });
+  equal(wrongType.status, 400, "非字符串拒绝");
 });
 
 // ---------------------------------------------------------------------------

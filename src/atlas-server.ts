@@ -104,6 +104,7 @@ const SETTINGS_DOC = "settings";
 const MAX_ENDPOINT_CHARS = 2048;
 const MAX_API_KEY_CHARS = 4096;
 const MAX_PRESET_NAME_CHARS = 64;
+const MAX_SYSTEM_PROMPT_CHARS = 8000;
 const RPM_WINDOW_MS = 60_000;
 
 function isValidPreset(value: unknown): value is AtlasApiPreset {
@@ -123,6 +124,7 @@ function isValidPreset(value: unknown): value is AtlasApiPreset {
   if (record.maxTokens !== undefined && (typeof record.maxTokens !== "number" || record.maxTokens < 1 || record.maxTokens > 8192)) return false;
   if (record.temperature !== undefined && (typeof record.temperature !== "number" || record.temperature < 0 || record.temperature > 2)) return false;
   if (record.timeoutMs !== undefined && (typeof record.timeoutMs !== "number" || record.timeoutMs < 1000 || record.timeoutMs > 120_000)) return false;
+  if (record.systemPrompt !== undefined && (typeof record.systemPrompt !== "string" || record.systemPrompt.length > MAX_SYSTEM_PROMPT_CHARS)) return false;
   return true;
 }
 
@@ -353,7 +355,7 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
     return okResult({
       ok: true,
       plugin: "atlas",
-      version: "0.7.5",
+      version: "0.7.6",
       protocolVersion: 1,
       time: now(),
     });

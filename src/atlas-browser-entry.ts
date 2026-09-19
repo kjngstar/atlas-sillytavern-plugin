@@ -31,6 +31,8 @@ export {
   type AtlasDocumentStore,
 } from "./atlas-server.ts";
 
+export { DEFAULT_WORLD_TURN_SYSTEM_PROMPT } from "./atlas-api-client.ts";
+
 export {
   createBrowserDocumentStore,
   ATLAS_BROWSER_DOC_LIMITS,
