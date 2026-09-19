@@ -39,3 +39,15 @@ test("dist/atlas-ui-core.mjs 覆盖 index.js 全部 loadUiCore 解构需求 + �
   assert.equal(typeof dist.starterWorldIdForChat, "function", "确定性建世链路");
   assert.equal(dist.ATLAS_ST_GENERATE_PATH, "/api/backends/chat-completions/generate");
 });
+
+test("index.js PAGES 与 ui-core ATLAS_UI_PAGES 双源一致（防导航漂移）", async () => {
+  const { ATLAS_UI_PAGES } = await import("../src/atlas-ui-core.ts");
+  const js = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
+  const block = js.match(/const PAGES = \[[\s\S]*?\];/);
+  assert.ok(block, "index.js 应有 PAGES 数组");
+  for (const page of ATLAS_UI_PAGES) {
+    assert.ok(block[0].includes(`id: "${page.id}"`), `index.js PAGES 缺少页面 ${page.id}`);
+    assert.ok(block[0].includes(`label: "${page.label}"`), `index.js PAGES 缺少标签 ${page.label}`);
+  }
+  assert.ok(!block[0].includes("settings"), "不得回流 settings 页");
+});

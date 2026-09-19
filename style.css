@@ -1315,3 +1315,16 @@
   max-height: 120px;
   overflow: auto;
 }
+
+/* 日志页：报错条目高亮 */
+.aw-log__row.is-error {
+  padding: 4px 6px;
+  border-left: 3px solid #a3543c;
+  background: rgba(163, 84, 60, 0.08);
+  border-radius: 0 6px 6px 0;
+}
+
+.aw-log__row.is-error .aw-log__text {
+  color: #a3543c;
+  font-weight: 700;
+}
