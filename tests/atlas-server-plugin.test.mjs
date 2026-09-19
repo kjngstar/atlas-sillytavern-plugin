@@ -189,8 +189,8 @@ async function setup(fetchScripts, overrides = {}) {
 // 路由清单与健康检查
 // ---------------------------------------------------------------------------
 
-test("路由清单：14 条且全部在 /api/plugins/atlas 前缀下", () => {
-  equal(ATLAS_ROUTE_MANIFEST.length, 14, "dispatch 核心路由数");
+test("路由清单：15 条且全部在 /api/plugins/atlas 前缀下", () => {
+  equal(ATLAS_ROUTE_MANIFEST.length, 15, "dispatch 核心路由数（ATLAS-18 新增 ensure-starter）");
   equal(ATLAS_PLUGIN_ROUTES.length, ATLAS_ROUTE_MANIFEST.length, "index.mjs 与核心路由清单一致");
   const plugin = createAtlasServerPlugin();
   for (const route of plugin.routes) {
@@ -221,9 +221,13 @@ test("settings：GET 永不返回明文 Key，PUT 仅限本机会话", async () 
   const view = await core.handle("GET", "/settings");
   const serialized = JSON.stringify(view.body);
   ok(!serialized.includes(SECRET), "settings 响应无明文 Key");
-  equal(view.body.data.worldTurn.apiKey.exists, true, "Key 存在标记");
-  equal(view.body.data.worldTurn.apiKey.tail, SECRET.slice(-4), "只有尾号掩码");
-  ok(!("apiKey" in view.body.data.worldTurn.apiKey && typeof view.body.data.worldTurn.apiKey.apiKey === "string"), "apiKey 不是字符串");
+  equal(view.body.data.schemaVersion, 2, "GET 出 schemaVersion 2");
+  equal(view.body.data.apiPresets.length, 1, "旧载荷已被迁移成 v2 连接库");
+  equal(view.body.data.apiPresets[0].apiKey.exists, true, "Key 存在标记");
+  equal(view.body.data.apiPresets[0].apiKey.tail, SECRET.slice(-4), "只有尾号掩码");
+  ok(!("apiKey" in view.body.data.apiPresets[0].apiKey && typeof view.body.data.apiPresets[0].apiKey.apiKey === "string"), "apiKey 不是字符串");
+  equal(typeof view.body.data.builtInPrompt.systemPrompt, "string", "内置默认提示词只读可见");
+  equal(view.body.data.builtInPrompt.readOnly, true, "内置默认只读");
 
   const importDenied = await core.handle("POST", "/worlds/import", { world: {} }, { local: false });
   equal(importDenied.status, 403, "非本机会话导入被拒");
@@ -239,49 +243,109 @@ test("settings：非法预设被拒绝", async () => {
   assertionCount += 2;
 });
 
-test("settings：预设库（0.8.3）——多预设入库 / 脱敏 / 去重 / 按槽局部合并 / 持久化 / 数量上限", async () => {
+test("settings v2：两库命令——入库 / 指纹去重 / 脱敏 / 两库独立 / 持久化 / 上限", async () => {
   const { core, store } = await setup(null, { skipSettings: true });
-  const p1 = preset({ name: "渠道A" });
-  const p2 = preset({ name: "渠道B", endpoint: "https://b.example.invalid/v1" });
-  const put = await core.handle(
-    "PUT",
-    "/settings",
-    { worldTurn: p1, presetLibrary: { worldTurn: [p1, p2] } },
-    { local: true },
-  );
-  equal(put.status, 200, "入库 200");
-  equal(put.body.data.presetLibrary.worldTurn.length, 2, "两个预设入库");
-  ok(!JSON.stringify(put.body.data).includes(SECRET), "库响应脱敏（无明文 Key）");
+  const saveApi = (name, endpoint) => ({
+    action: "api.save",
+    preset: { name, endpoint, model: "atlas-mock", maxTokens: 1024, temperature: 0.7, timeoutMs: 30_000 },
+    apiKeyMode: "replace",
+    apiKey: SECRET,
+  });
 
-  const p1b = preset({ name: "渠道A", model: "atlas-mock-2" });
-  const dup = await core.handle("PUT", "/settings", { presetLibrary: { worldTurn: [p1b, p2, p1b] } }, { local: true });
-  equal(dup.status, 200, "去重 PUT 200");
-  equal(dup.body.data.presetLibrary.worldTurn.length, 2, "同名去重后仍 2 条");
-  equal(dup.body.data.presetLibrary.worldTurn[0].model, "atlas-mock-2", "同名后者胜");
+  const created = await core.handle("PUT", "/settings", saveApi("渠道A", "https://a.example.invalid/v1/chat/completions"), { local: true });
+  equal(created.status, 200, "新建连接 200");
+  equal(created.body.data.apiPresets.length, 1, "一条连接入库");
+  equal(created.body.data.activeApiPresetId, null, "保存 ≠ 激活");
+  ok(!JSON.stringify(created.body.data).includes(SECRET), "命令响应脱敏（无明文 Key）");
+  const apiId = created.body.data.apiPresets[0].id;
 
-  const p3 = preset({ name: "重大事件专用" });
-  const partial = await core.handle("PUT", "/settings", { presetLibrary: { majorEvent: [p3] } }, { local: true });
-  equal(partial.status, 200, "局部更新 200");
-  equal(partial.body.data.presetLibrary.worldTurn.length, 2, "未传槽沿用现有库");
-  equal(partial.body.data.presetLibrary.majorEvent.length, 1, "传入槽更新");
+  const second = await core.handle("PUT", "/settings", saveApi("渠道B", "https://b.example.invalid/v1/chat/completions"), { local: true });
+  equal(second.body.data.apiPresets.length, 2, "第二条连接入库");
 
-  const mixed = await core.handle(
-    "PUT",
-    "/settings",
-    { presetLibrary: { worldTurn: [preset({ endpoint: "bad-url" }), p2] } },
-    { local: true },
-  );
-  equal(mixed.status, 200, "非法条目不炸整单");
-  equal(mixed.body.data.presetLibrary.worldTurn.length, 1, "非法条目被丢弃");
+  // 两库独立：提示词命令不改动 API 库与活动引用
+  const promptSaved = await core.handle("PUT", "/settings", { action: "prompt.save", preset: { name: "P1", systemPrompt: "只输出 JSON。" } }, { local: true });
+  equal(promptSaved.status, 200, "提示词入库 200");
+  equal(promptSaved.body.data.promptPresets.length, 1, "一条提示词");
+  deepEqual(promptSaved.body.data.apiPresets.map((p) => p.name), ["渠道A", "渠道B"], "提示词命令未改 API 库");
+  const promptId = promptSaved.body.data.promptPresets[0].id;
 
-  const capped = Array.from({ length: 25 }, (_, i) => preset({ name: `n${i}` }));
-  const cap = await core.handle("PUT", "/settings", { presetLibrary: { majorEvent: capped } }, { local: true });
-  equal(cap.body.data.presetLibrary.majorEvent.length, 20, "每槽上限 20 截断");
+  // 分别激活：互不干扰
+  await core.handle("PUT", "/settings", { action: "api.activate", id: apiId }, { local: true });
+  const activated = await core.handle("PUT", "/settings", { action: "prompt.activate", id: promptId }, { local: true });
+  equal(activated.body.data.activeApiPresetId, apiId, "切提示词不动活动 API");
+  equal(activated.body.data.activePromptPresetId, promptId, "活动提示词已设置");
 
+  // Key 三态：keep 不改密钥
+  const kept = await core.handle("PUT", "/settings", {
+    action: "api.save",
+    preset: { id: apiId, name: "渠道A改", endpoint: "https://a.example.invalid/v1/chat/completions", model: "atlas-mock-2", maxTokens: 512, temperature: 0.2, timeoutMs: 20_000 },
+    apiKeyMode: "keep",
+  }, { local: true });
+  equal(kept.body.data.apiPresets[0].apiKey.exists, true, "keep 保留密钥");
+  equal(kept.body.data.apiPresets[0].model, "atlas-mock-2", "其余字段已更新");
+  equal(kept.body.data.apiPresets[0].id, apiId, "ID 稳定（重命名不换 ID）");
+  const cleared = await core.handle("PUT", "/settings", {
+    action: "api.save",
+    preset: { id: apiId, name: "渠道A改", endpoint: "https://a.example.invalid/v1/chat/completions", model: "atlas-mock-2", maxTokens: 512, temperature: 0.2, timeoutMs: 20_000 },
+    apiKeyMode: "clear",
+  }, { local: true });
+  equal(cleared.body.data.apiPresets[0].apiKey.exists, false, "clear 后密钥为空");
+
+  // 持久化：换一个 core 读同一 store
   const fresh = createAtlasServerCore({ store, now: () => NOW });
   const again = await fresh.handle("GET", "/settings");
-  equal(again.body.data.presetLibrary.worldTurn.length, 1, "刷新后 worldTurn 库仍在");
-  equal(again.body.data.presetLibrary.majorEvent.length, 20, "刷新后 majorEvent 库仍在");
+  equal(again.body.data.apiPresets.length, 2, "刷新后连接库仍在");
+  equal(again.body.data.promptPresets.length, 1, "刷新后提示词库仍在");
+  equal(again.body.data.activeApiPresetId, apiId, "刷新后活动 API 仍在");
+  equal(again.body.data.activePromptPresetId, promptId, "刷新后活动提示词仍在");
+
+  // 上限 20
+  let last = again;
+  for (let i = 0; i < 18; i += 1) {
+    last = await core.handle("PUT", "/settings", saveApi(`批量${i}`, `https://b${i}.example.invalid/v1/chat/completions`), { local: true });
+  }
+  equal(last.body.data.apiPresets.length, 20, "封顶 20 条");
+  const overflow = await core.handle("PUT", "/settings", saveApi("第21条", "https://c.example.invalid/v1/chat/completions"), { local: true });
+  equal(overflow.status, 413, "第 21 条被拒（FIELD_LIMIT_EXCEEDED → 413）");
+  equal(overflow.body.error.code, ATLAS_ERROR_CODES.FIELD_LIMIT_EXCEEDED, "上限错误码");
+
+  // 悬挂引用：激活不存在的 ID 必须失败且存储不变
+  const ghost = await core.handle("PUT", "/settings", { action: "api.activate", id: "ghost-id" }, { local: true });
+  equal(ghost.status, 400, "激活不存在的连接被拒");
+  const after = await core.handle("GET", "/settings");
+  equal(after.body.data.activeApiPresetId, apiId, "失败不改变活动引用");
+});
+
+test("settings v2：v1 旧数据在读取路径迁移，首个写入落库 v2（重启可复现）", async () => {
+  const store = createMemoryDocumentStore();
+  // 模拟线上 v1 存档：组合式 worldTurn + 预设库 + majorEvent
+  await store.write("settings", {
+    schemaVersion: 1,
+    worldTurn: { ...preset(), systemPrompt: "旧提示词正文" },
+    majorEvent: preset({ name: "重大" }),
+    presetLibrary: { worldTurn: [preset({ name: "渠道A" })], majorEvent: [] },
+    autoCommit: false,
+    rpmLimit: 42,
+  });
+  const core = createAtlasServerCore({ store, now: () => NOW });
+  const first = await core.handle("GET", "/settings");
+  equal(first.body.data.schemaVersion, 2, "GET 已是 v2 视图");
+  equal(first.body.data.runtime === undefined ? first.body.data.rpmLimit : first.body.data.rpmLimit, 42, "runtime 字段迁移保留");
+  equal(first.body.data.autoCommit, false, "autoCommit 迁移保留");
+  ok(first.body.data.apiPresets.length >= 1, "连接从 v1 迁移出来");
+  ok(first.body.data.promptPresets.some((p) => p.systemPrompt === "旧提示词正文"), "提示词从 v1 迁移出来");
+  equal(String(first.body.data.activePromptPresetId ?? "").length > 0, true, "活动提示词指向迁移出的预设");
+  // 读取路径不写 store：此时存档仍是 v1
+  const stillV1 = await store.read("settings");
+  equal(stillV1.schemaVersion, 1, "迁移发生在读取路径，不写 store");
+
+  // 首个成功写入 → 落库 v2，且 majorEvent 旧数据不丢（legacyMajorEvent 保留在存储里）
+  const wrote = await core.handle("PUT", "/settings", { action: "runtime.update", rpmLimit: 60 }, { local: true });
+  equal(wrote.status, 200, "写入成功");
+  const persisted = await store.read("settings");
+  equal(persisted.schemaVersion, 2, "写入后落库 v2");
+  ok("legacyMajorEvent" in persisted, "majorEvent 旧数据被兼容保留（不删不执行）");
+  ok(!JSON.stringify(persisted).includes("majorEvent\":{" ), "不再有组合式 majorEvent 运行字段");
 });
 
 // ---------------------------------------------------------------------------
@@ -447,6 +511,64 @@ test("commit：恰好 1 请求、原子落账、绑定游标推进", async () =>
   const logSerialized = JSON.stringify(fresh.logs());
   ok(!logSerialized.includes(SECRET), "日志无明文 Key");
   ok(!logSerialized.includes("mock.example.invalid"), "日志无 endpoint");
+});
+
+test("settings v2 运行时组合：commit 用「活动 API + 活动提示词」，两库独立切换", async () => {
+  const fetcher = makeFetch([() => openAiResponse(GOOD_DRAFT), () => openAiResponse(GOOD_DRAFT)]);
+  const store = createMemoryDocumentStore();
+  const world = buildWorld();
+  const core = createAtlasServerCore({ store, fetchFn: fetcher.fetchFn, now: () => NOW });
+  await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
+  await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
+
+  const saveApi = (name, endpoint) => ({
+    action: "api.save",
+    preset: { name, endpoint, model: "atlas-mock", maxTokens: 1024, temperature: 0.7, timeoutMs: 5000 },
+    apiKeyMode: "replace",
+    apiKey: "sk-runtime-test",
+  });
+  const apiA = (await core.handle("PUT", "/settings", saveApi("A", "https://a.example.invalid/v1/chat/completions"), { local: true })).body.data.apiPresets[0].id;
+  const apiB = (await core.handle("PUT", "/settings", saveApi("B", "https://b.example.invalid/v1/chat/completions"), { local: true })).body.data.apiPresets[1].id;
+  const promptP2 = (await core.handle("PUT", "/settings", { action: "prompt.save", preset: { name: "P2", systemPrompt: "P2 专用提示词正文" } }, { local: true })).body.data.promptPresets[0].id;
+
+  // 活动 API = A，活动提示词 = P2
+  await core.handle("PUT", "/settings", { action: "api.activate", id: apiA }, { local: true });
+  await core.handle("PUT", "/settings", { action: "prompt.activate", id: promptP2 }, { local: true });
+
+  const commit1 = await core.handle("POST", "/turns/commit", commitRequest(world), { local: true });
+  equal(commit1.body.ok, true, "组合提交成功");
+  const sent1 = fetcher.calls[0].body;
+  equal(sent1.messages[0].content, "P2 专用提示词正文", "system 正文来自活动提示词预设");
+  equal(fetcher.calls[0].url, "https://a.example.invalid/v1/chat/completions", "请求打到活动 API A");
+
+  // 切到 API B：提示词仍是 P2
+  await core.handle("PUT", "/settings", { action: "api.activate", id: apiB }, { local: true });
+  const commit2 = await core.handle("POST", "/turns/commit", commitRequest(world, { assistantMessageId: "msg-2", userMessageId: "msg-20" }), { local: true });
+  equal(commit2.body.ok, true, "换连接后仍能提交");
+  equal(fetcher.calls[1].url, "https://b.example.invalid/v1/chat/completions", "请求打到活动 API B");
+  equal(fetcher.calls[1].body.messages[0].content, "P2 专用提示词正文", "切 API 不影响提示词选择");
+
+  // 没有任何明文密钥进日志
+  const logDump = JSON.stringify(core.logs());
+  ok(!logDump.includes("sk-runtime-test"), "日志无明文 Key");
+});
+
+test("settings v2：store 写入失败时缓存保持旧设置（不留半更新状态）", async () => {
+  const store = createMemoryDocumentStore();
+  const core = createAtlasServerCore({ store, now: () => NOW });
+  const before = (await core.handle("GET", "/settings")).body.data;
+  equal(before.rpmLimit, 30, "初始 rpmLimit");
+
+  const originalWrite = store.write.bind(store);
+  store.write = async (name, value) => {
+    if (name === "settings") throw new Error("disk full");
+    return originalWrite(name, value);
+  };
+  const failed = await core.handle("PUT", "/settings", { action: "runtime.update", rpmLimit: 60 }, { local: true });
+  equal(failed.body.ok, false, "写入失败被上报");
+  store.write = originalWrite;
+  const after = (await core.handle("GET", "/settings")).body.data;
+  equal(after.rpmLimit, 30, "失败后缓存仍是旧设置");
 });
 
 test("commit：未配置 API → API_NOT_CONFIGURED，0 fetch", async () => {
@@ -691,14 +813,19 @@ test("systemPrompt：自定义系统提示词生效，留空回退内置默认",
   }
 });
 
-test("systemPrompt：服务端校验（上限 8000 / 非字符串拒绝）", async () => {
+test("提示词预设：服务端校验（上限 8000 / 空拒绝 / 内置默认不可覆盖删除）", async () => {
   const core = createAtlasServerCore({ store: createMemoryDocumentStore(), now: () => NOW });
-  const good = await core.handle("PUT", "/settings", { worldTurn: preset({ systemPrompt: "好".repeat(8000) }) }, { local: true });
+  const good = await core.handle("PUT", "/settings", { action: "prompt.save", preset: { name: "长提示词", systemPrompt: "好".repeat(8000) } }, { local: true });
   equal(good.status, 200, "8000 字以内接受");
-  const over = await core.handle("PUT", "/settings", { worldTurn: preset({ systemPrompt: "长".repeat(8001) }) }, { local: true });
-  equal(over.status, 400, "超 8000 字拒绝");
-  const wrongType = await core.handle("PUT", "/settings", { worldTurn: preset({ systemPrompt: 123 }) }, { local: true });
-  equal(wrongType.status, 400, "非字符串拒绝");
+  const over = await core.handle("PUT", "/settings", { action: "prompt.save", preset: { name: "超长", systemPrompt: "长".repeat(8001) } }, { local: true });
+  equal(over.status, 413, "超 8000 字拒绝（FIELD_LIMIT_EXCEEDED → 413）");
+  equal(over.body.error.code, ATLAS_ERROR_CODES.FIELD_LIMIT_EXCEEDED, "超限错误码");
+  const empty = await core.handle("PUT", "/settings", { action: "prompt.save", preset: { name: "空", systemPrompt: "   " } }, { local: true });
+  equal(empty.status, 400, "空提示词拒绝（空 = 内置默认，无需保存）");
+  const builtin = await core.handle("PUT", "/settings", { action: "prompt.save", preset: { id: "builtin-default", name: "内置默认", systemPrompt: "偷改" } }, { local: true });
+  equal(builtin.status, 400, "内置默认不可覆盖");
+  const delBuiltin = await core.handle("PUT", "/settings", { action: "prompt.delete", id: "builtin-default" }, { local: true });
+  equal(delBuiltin.status, 400, "内置默认不可删除");
 });
 
 // ---------------------------------------------------------------------------

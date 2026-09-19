@@ -710,7 +710,7 @@ function errorMessageForStatus(status) {
 async function callAtlasWorldTurnApi(preset, input, deps = {}) {
   const now = deps.now ?? Date.now;
   const startedAt = now();
-  const fail3 = (code, message, retryable, status) => ({
+  const fail4 = (code, message, retryable, status) => ({
     ok: false,
     code,
     message,
@@ -719,8 +719,8 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
     durationMs: now() - startedAt
   });
   const url = buildAtlasChatUrl(preset.endpoint);
-  if (!url) return fail3(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "推演 API 地址无效，无法构造请求。", false);
-  if (!preset.model.trim()) return fail3(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "推演预设未填写模型名称。", false);
+  if (!url) return fail4(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "推演 API 地址无效，无法构造请求。", false);
+  if (!preset.model.trim()) return fail4(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "推演预设未填写模型名称。", false);
   const timeoutMs = Math.min(Math.max(preset.timeoutMs ?? 3e4, 1e3), 12e4);
   const fetchFn = deps.fetchFn ?? globalThis.fetch;
   const controller = new AbortController();
@@ -747,22 +747,22 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
         signal: controller.signal
       });
     } catch {
-      if (controller.signal.aborted) return fail3(ATLAS_ERROR_CODES.API_TIMEOUT, `推演请求超过 ${timeoutMs}ms 超时。`, true);
-      return fail3(ATLAS_ERROR_CODES.SERVICE_OFFLINE, "无法连接推演服务，请检查网络或服务状态。", true);
+      if (controller.signal.aborted) return fail4(ATLAS_ERROR_CODES.API_TIMEOUT, `推演请求超过 ${timeoutMs}ms 超时。`, true);
+      return fail4(ATLAS_ERROR_CODES.SERVICE_OFFLINE, "无法连接推演服务，请检查网络或服务状态。", true);
     }
     if (!response.ok) {
       const mapped = errorMessageForStatus(response.status);
-      return fail3(mapped.code, mapped.message, mapped.retryable, response.status);
+      return fail4(mapped.code, mapped.message, mapped.retryable, response.status);
     }
     let payload;
     try {
       payload = await response.json();
     } catch {
-      return fail3(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "推演服务返回了无法解析的内容。", false);
+      return fail4(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "推演服务返回了无法解析的内容。", false);
     }
     const text = extractAssistantText(payload);
     if (text === null || text.trim().length === 0) {
-      return fail3(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "推演服务返回为空或不支持的格式。", false);
+      return fail4(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "推演服务返回为空或不支持的格式。", false);
     }
     return { ok: true, text, status: response.status, durationMs: now() - startedAt };
   } finally {
@@ -893,19 +893,6 @@ function parseAtlasWorldTurnDraft(text) {
     rawEffects,
     memoryDrafts,
     summary
-  };
-}
-function maskPreset(preset) {
-  if (!preset) return null;
-  const key = preset.apiKey ?? "";
-  return {
-    name: preset.name,
-    endpoint: preset.endpoint,
-    model: preset.model,
-    maxTokens: preset.maxTokens ?? null,
-    temperature: preset.temperature ?? null,
-    timeoutMs: preset.timeoutMs ?? null,
-    apiKey: { exists: key.trim().length > 0, tail: key.trim().length >= 4 ? key.trim().slice(-4) : null }
   };
 }
 
@@ -5478,79 +5465,573 @@ function commitAtlasTurn(world, input) {
   };
 }
 
-// src/atlas-server.ts
-var MAX_LIBRARY_PRESETS_PER_SLOT = 20;
-function sanitizePresetLibrary(value, base) {
-  const result = {
-    worldTurn: base?.worldTurn ?? [],
-    majorEvent: base?.majorEvent ?? []
-  };
-  if (!value || typeof value !== "object" || Array.isArray(value)) return result;
-  const record = value;
-  for (const slot of ["worldTurn", "majorEvent"]) {
-    const list = record[slot];
-    if (!Array.isArray(list)) continue;
-    const byName = /* @__PURE__ */ new Map();
-    for (const entry of list) {
-      if (!isValidPreset(entry)) continue;
-      byName.set(entry.name, entry);
-    }
-    result[slot] = [...byName.values()].slice(0, MAX_LIBRARY_PRESETS_PER_SLOT);
-  }
-  return result;
-}
-var DEFAULT_SETTINGS = {
-  schemaVersion: 1,
-  worldTurn: null,
-  majorEvent: null,
-  presetLibrary: { worldTurn: [], majorEvent: [] },
-  autoCommit: true,
-  rpmLimit: 30
-};
-var SETTINGS_DOC = "settings";
+// src/atlas-settings.ts
+var ATLAS_SETTINGS_SCHEMA_VERSION = 2;
+var BUILTIN_PROMPT_PRESET_ID = "builtin-default";
+var MAX_PRESETS_PER_LIBRARY = 20;
+var MAX_NAME_CHARS = 64;
 var MAX_ENDPOINT_CHARS = 2048;
+var MAX_MODEL_CHARS = 128;
 var MAX_API_KEY_CHARS = 4096;
-var MAX_PRESET_NAME_CHARS = 64;
-var MAX_SYSTEM_PROMPT_CHARS = 8e3;
-var RPM_WINDOW_MS = 6e4;
-function isValidPreset(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const record = value;
-  if (typeof record.name !== "string" || !record.name.trim() || record.name.length > MAX_PRESET_NAME_CHARS) return false;
-  if (typeof record.endpoint !== "string" || record.endpoint.length > MAX_ENDPOINT_CHARS) return false;
-  try {
-    const url = new URL(record.endpoint);
-    if (url.protocol !== "https:" && url.protocol !== "http:") return false;
-  } catch {
-    return false;
-  }
-  if (typeof record.model !== "string" || !record.model.trim() || record.model.length > ATLAS_LIMITS.ID_CHARS) return false;
-  if (typeof record.apiKey !== "string" || record.apiKey.length > MAX_API_KEY_CHARS) return false;
-  if (record.maxTokens !== void 0 && (typeof record.maxTokens !== "number" || record.maxTokens < 1 || record.maxTokens > 8192)) return false;
-  if (record.temperature !== void 0 && (typeof record.temperature !== "number" || record.temperature < 0 || record.temperature > 2)) return false;
-  if (record.timeoutMs !== void 0 && (typeof record.timeoutMs !== "number" || record.timeoutMs < 1e3 || record.timeoutMs > 12e4)) return false;
-  if (record.systemPrompt !== void 0 && (typeof record.systemPrompt !== "string" || record.systemPrompt.length > MAX_SYSTEM_PROMPT_CHARS)) return false;
-  return true;
+var MIN_MAX_TOKENS = 1;
+var MAX_MAX_TOKENS = 8192;
+var MIN_TEMPERATURE = 0;
+var MAX_TEMPERATURE = 2;
+var MIN_TIMEOUT_MS = 1e3;
+var MAX_TIMEOUT_MS = 12e4;
+var MAX_PROMPT_CHARS = 8e3;
+var MIN_RPM = 1;
+var MAX_RPM = 600;
+var ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+function nowOf(deps) {
+  return deps.now ? deps.now() : 0;
 }
-function validateSettingsBody(raw) {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    return new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "设置必须是对象");
+function generateId() {
+  const cryptoRef = globalThis.crypto;
+  if (cryptoRef?.randomUUID) return cryptoRef.randomUUID();
+  const rand = Math.floor(Math.random() * 4294967295).toString(16);
+  return `p-${Date.now().toString(36)}-${rand}`;
+}
+function normalizeId(raw) {
+  if (typeof raw !== "string") return null;
+  const cleaned = raw.trim().replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 128);
+  if (!cleaned || !ID_PATTERN.test(cleaned)) return null;
+  return cleaned;
+}
+function isFiniteIntIn(value, min, max) {
+  return typeof value === "number" && Number.isFinite(value) && Number.isInteger(value) && value >= min && value <= max;
+}
+function isFiniteIn(value, min, max) {
+  return typeof value === "number" && Number.isFinite(value) && value >= min && value <= max;
+}
+function isHttpUrl(value) {
+  return /^https?:\/\/\S+$/i.test(value);
+}
+function fingerprintOfConnection(input) {
+  return [input.endpoint, input.model, input.apiKey, input.maxTokens, input.temperature, input.timeoutMs].join("\0");
+}
+function uniqueName(base, used) {
+  const trimmed = base.trim().slice(0, MAX_NAME_CHARS) || "未命名";
+  if (!used.has(trimmed)) {
+    used.add(trimmed);
+    return trimmed;
   }
-  const record = raw;
-  for (const key of ["worldTurn", "majorEvent"]) {
-    const value = record[key];
-    if (value !== void 0 && value !== null && !isValidPreset(value)) {
-      return new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, `${key} 预设字段非法（name / endpoint / model / apiKey 或数值超限）`);
+  for (let n = 2; n < 1e3; n += 1) {
+    const candidate = `${trimmed} (${n})`.slice(0, MAX_NAME_CHARS);
+    if (!used.has(candidate)) {
+      used.add(candidate);
+      return candidate;
     }
   }
-  if (record.autoCommit !== void 0 && typeof record.autoCommit !== "boolean") {
-    return new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "autoCommit 必须是布尔值");
-  }
-  if (record.rpmLimit !== void 0 && (typeof record.rpmLimit !== "number" || record.rpmLimit < 1 || record.rpmLimit > 600)) {
-    return new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "rpmLimit 必须是 1..600 的数字");
-  }
-  return null;
+  const fallback = `${trimmed} (${Date.now()})`.slice(0, MAX_NAME_CHARS);
+  used.add(fallback);
+  return fallback;
 }
+function resolveId(kind, index, fingerprint, deps, usedIds) {
+  const injected = deps.legacyIdFor ? normalizeId(deps.legacyIdFor(kind, index, fingerprint)) : null;
+  const base = injected ?? generateId();
+  let candidate = base;
+  let salt = 0;
+  while (usedIds.has(candidate)) {
+    salt += 1;
+    candidate = normalizeId(`${base}-${salt}`) ?? `${base}-${salt}`.slice(0, 128);
+  }
+  usedIds.add(candidate);
+  return candidate;
+}
+function createDefaultSettingsV2() {
+  return {
+    schemaVersion: ATLAS_SETTINGS_SCHEMA_VERSION,
+    apiPresets: [],
+    promptPresets: [],
+    activeApiPresetId: null,
+    activePromptPresetId: null,
+    autoCommit: true,
+    rpmLimit: 30
+  };
+}
+function parseConnectionPreset(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const record = raw;
+  const id = normalizeId(record.id);
+  if (!id) return null;
+  if (typeof record.name !== "string" || !record.name.trim() || record.name.length > MAX_NAME_CHARS) return null;
+  if (typeof record.endpoint !== "string" || record.endpoint.length > MAX_ENDPOINT_CHARS || !isHttpUrl(record.endpoint)) return null;
+  if (typeof record.model !== "string" || !record.model.trim() || record.model.length > MAX_MODEL_CHARS) return null;
+  if (typeof record.apiKey !== "string" || record.apiKey.length > MAX_API_KEY_CHARS) return null;
+  if (!isFiniteIntIn(record.maxTokens, MIN_MAX_TOKENS, MAX_MAX_TOKENS)) return null;
+  if (!isFiniteIn(record.temperature, MIN_TEMPERATURE, MAX_TEMPERATURE)) return null;
+  if (!isFiniteIntIn(record.timeoutMs, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS)) return null;
+  return {
+    id,
+    name: record.name.trim(),
+    endpoint: record.endpoint,
+    model: record.model.trim(),
+    apiKey: record.apiKey,
+    maxTokens: record.maxTokens,
+    temperature: record.temperature,
+    timeoutMs: record.timeoutMs
+  };
+}
+function parsePromptPreset(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const record = raw;
+  const id = normalizeId(record.id);
+  if (!id || id === BUILTIN_PROMPT_PRESET_ID) return null;
+  if (typeof record.name !== "string" || !record.name.trim() || record.name.length > MAX_NAME_CHARS) return null;
+  if (typeof record.systemPrompt !== "string") return null;
+  const prompt = record.systemPrompt.trim();
+  if (!prompt || prompt.length > MAX_PROMPT_CHARS) return null;
+  return { id, name: record.name.trim(), systemPrompt: prompt };
+}
+function sanitizeSettingsV2(raw, deps = {}) {
+  const diagnostics = { skipped: 0, apiSkipped: 0, promptSkipped: 0, legacyMajorEventPreserved: false };
+  const base = createDefaultSettingsV2();
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { settings: base, diagnostics };
+  const record = raw;
+  const seenIds = /* @__PURE__ */ new Set();
+  const apiPresets = [];
+  if (Array.isArray(record.apiPresets)) {
+    for (const entry of record.apiPresets.slice(0, MAX_PRESETS_PER_LIBRARY * 4)) {
+      const parsed = parseConnectionPreset(entry);
+      if (!parsed || seenIds.has(parsed.id)) {
+        diagnostics.skipped += 1;
+        diagnostics.apiSkipped += 1;
+        continue;
+      }
+      if (apiPresets.length >= MAX_PRESETS_PER_LIBRARY) {
+        diagnostics.skipped += 1;
+        diagnostics.apiSkipped += 1;
+        continue;
+      }
+      seenIds.add(parsed.id);
+      const updatedAt = entry.updatedAt;
+      apiPresets.push({ ...parsed, updatedAt: typeof updatedAt === "number" && Number.isFinite(updatedAt) ? updatedAt : nowOf(deps) });
+    }
+  }
+  const promptPresets = [];
+  if (Array.isArray(record.promptPresets)) {
+    for (const entry of record.promptPresets.slice(0, MAX_PRESETS_PER_LIBRARY * 4)) {
+      const parsed = parsePromptPreset(entry);
+      if (!parsed || seenIds.has(parsed.id)) {
+        diagnostics.skipped += 1;
+        diagnostics.promptSkipped += 1;
+        continue;
+      }
+      if (promptPresets.length >= MAX_PRESETS_PER_LIBRARY) {
+        diagnostics.skipped += 1;
+        diagnostics.promptSkipped += 1;
+        continue;
+      }
+      seenIds.add(parsed.id);
+      const updatedAt = entry.updatedAt;
+      promptPresets.push({ ...parsed, updatedAt: typeof updatedAt === "number" && Number.isFinite(updatedAt) ? updatedAt : nowOf(deps) });
+    }
+  }
+  const activeApi = normalizeId(record.activeApiPresetId);
+  const activePrompt = normalizeId(record.activePromptPresetId);
+  const settings = {
+    schemaVersion: ATLAS_SETTINGS_SCHEMA_VERSION,
+    apiPresets,
+    promptPresets,
+    // 悬挂引用归一为 null（= 未配置 / 内置默认），绝不回退列表首项
+    activeApiPresetId: activeApi && apiPresets.some((p) => p.id === activeApi) ? activeApi : null,
+    activePromptPresetId: activePrompt && promptPresets.some((p) => p.id === activePrompt) ? activePrompt : null,
+    autoCommit: typeof record.autoCommit === "boolean" ? record.autoCommit : true,
+    rpmLimit: isFiniteIntIn(record.rpmLimit, MIN_RPM, MAX_RPM) ? record.rpmLimit : 30
+  };
+  if ("legacyMajorEvent" in record) {
+    settings.legacyMajorEvent = record.legacyMajorEvent;
+    diagnostics.legacyMajorEventPreserved = record.legacyMajorEvent !== null && record.legacyMajorEvent !== void 0;
+  }
+  return { settings, diagnostics };
+}
+function parseLegacyPreset(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const record = raw;
+  if (typeof record.name !== "string" || !record.name.trim() || record.name.length > MAX_NAME_CHARS) return null;
+  if (typeof record.endpoint !== "string" || record.endpoint.length > MAX_ENDPOINT_CHARS || !isHttpUrl(record.endpoint)) return null;
+  if (typeof record.model !== "string" || !record.model.trim() || record.model.length > MAX_MODEL_CHARS) return null;
+  const apiKey = typeof record.apiKey === "string" && record.apiKey.length <= MAX_API_KEY_CHARS ? record.apiKey : null;
+  if (apiKey === null) return null;
+  const maxTokens = isFiniteIntIn(record.maxTokens, MIN_MAX_TOKENS, MAX_MAX_TOKENS) ? record.maxTokens : 1024;
+  const temperature = isFiniteIn(record.temperature, MIN_TEMPERATURE, MAX_TEMPERATURE) ? record.temperature : 0.7;
+  const timeoutMs = isFiniteIntIn(record.timeoutMs, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS) ? record.timeoutMs : 3e4;
+  const systemPrompt = typeof record.systemPrompt === "string" ? record.systemPrompt : "";
+  return { name: record.name.trim(), endpoint: record.endpoint, model: record.model.trim(), apiKey, maxTokens, temperature, timeoutMs, systemPrompt };
+}
+function migrateAtlasSettings(raw, deps = {}) {
+  const diagnostics = { skipped: 0, apiSkipped: 0, promptSkipped: 0, legacyMajorEventPreserved: false };
+  const settings = createDefaultSettingsV2();
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { settings, diagnostics };
+  const record = raw;
+  const library = record.presetLibrary && typeof record.presetLibrary === "object" && !Array.isArray(record.presetLibrary) ? record.presetLibrary : {};
+  const list = [];
+  if (Array.isArray(library.worldTurn)) list.push(...library.worldTurn);
+  if (record.worldTurn !== void 0 && record.worldTurn !== null) list.push(record.worldTurn);
+  const usedIds = /* @__PURE__ */ new Set();
+  const usedApiNames = /* @__PURE__ */ new Set();
+  const usedPromptNames = /* @__PURE__ */ new Set();
+  const byFingerprint = /* @__PURE__ */ new Map();
+  const promptByText = /* @__PURE__ */ new Map();
+  let apiIndex = 0;
+  for (const entry of list) {
+    const legacy = parseLegacyPreset(entry);
+    if (!legacy) {
+      diagnostics.skipped += 1;
+      diagnostics.apiSkipped += 1;
+      continue;
+    }
+    const fingerprint = fingerprintOfConnection(legacy);
+    let apiId = byFingerprint.get(fingerprint);
+    if (!apiId) {
+      apiId = resolveId("api", apiIndex, fingerprint, deps, usedIds);
+      apiIndex += 1;
+      byFingerprint.set(fingerprint, apiId);
+      settings.apiPresets.push({
+        id: apiId,
+        name: uniqueName(legacy.name, usedApiNames),
+        endpoint: legacy.endpoint,
+        model: legacy.model,
+        apiKey: legacy.apiKey,
+        maxTokens: legacy.maxTokens,
+        temperature: legacy.temperature,
+        timeoutMs: legacy.timeoutMs,
+        updatedAt: nowOf(deps)
+      });
+    }
+    const isActiveSource = entry === record.worldTurn;
+    if (isActiveSource) settings.activeApiPresetId = apiId;
+    const promptText = legacy.systemPrompt.trim();
+    if (!promptText || promptText.length > MAX_PROMPT_CHARS) continue;
+    if (!promptByText.has(promptText)) {
+      const promptId = resolveId("prompt", promptByText.size, promptText, deps, usedIds);
+      promptByText.set(promptText, promptId);
+      settings.promptPresets.push({
+        id: promptId,
+        name: uniqueName(`${legacy.name} · 提示词`, usedPromptNames),
+        systemPrompt: promptText,
+        updatedAt: nowOf(deps)
+      });
+    }
+    if (isActiveSource) settings.activePromptPresetId = promptByText.get(promptText) ?? null;
+  }
+  if (settings.activeApiPresetId === null && record.worldTurn === null && settings.apiPresets.length > 0) {
+    settings.activeApiPresetId = null;
+  }
+  const legacyMajor = [];
+  if (record.majorEvent !== void 0 && record.majorEvent !== null) legacyMajor.push(record.majorEvent);
+  if (Array.isArray(library.majorEvent)) legacyMajor.push(...library.majorEvent);
+  if (legacyMajor.length > 0) {
+    settings.legacyMajorEvent = JSON.parse(JSON.stringify(legacyMajor));
+    diagnostics.legacyMajorEventPreserved = true;
+  }
+  if (typeof record.autoCommit === "boolean") settings.autoCommit = record.autoCommit;
+  if (isFiniteIntIn(record.rpmLimit, MIN_RPM, MAX_RPM)) settings.rpmLimit = record.rpmLimit;
+  return { settings, diagnostics };
+}
+function fail3(settings, code, message) {
+  return { ok: false, settings, code, message };
+}
+function applySettingsCommand(settings, command, deps = {}) {
+  const now = nowOf(deps);
+  switch (command.action) {
+    case "api.save": {
+      const preset = command.preset;
+      if (typeof preset.name !== "string" || !preset.name.trim() || preset.name.length > MAX_NAME_CHARS) {
+        return fail3(settings, "INVALID_PAYLOAD", "连接名称必填且不超过 64 字。");
+      }
+      if (typeof preset.endpoint !== "string" || preset.endpoint.length > MAX_ENDPOINT_CHARS || !isHttpUrl(preset.endpoint)) {
+        return fail3(settings, "INVALID_PAYLOAD", "端点必须是 http(s) 绝对地址。");
+      }
+      if (typeof preset.model !== "string" || !preset.model.trim() || preset.model.length > MAX_MODEL_CHARS) {
+        return fail3(settings, "INVALID_PAYLOAD", "模型名必填且不超过 128 字。");
+      }
+      if (!isFiniteIntIn(preset.maxTokens, MIN_MAX_TOKENS, MAX_MAX_TOKENS)) {
+        return fail3(settings, "INVALID_PAYLOAD", `最大回复长度必须是 ${MIN_MAX_TOKENS}..${MAX_MAX_TOKENS} 的整数。`);
+      }
+      if (!isFiniteIn(preset.temperature, MIN_TEMPERATURE, MAX_TEMPERATURE)) {
+        return fail3(settings, "INVALID_PAYLOAD", `温度必须在 ${MIN_TEMPERATURE}..${MAX_TEMPERATURE}。`);
+      }
+      if (!isFiniteIntIn(preset.timeoutMs, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS)) {
+        return fail3(settings, "INVALID_PAYLOAD", `超时必须是 ${MIN_TIMEOUT_MS}..${MAX_TIMEOUT_MS} 毫秒。`);
+      }
+      const targetId = preset.id === void 0 ? null : normalizeId(preset.id);
+      if (preset.id !== void 0 && targetId === null) {
+        return fail3(settings, "INVALID_PAYLOAD", "预设 ID 形状非法。");
+      }
+      const existingIndex = targetId ? settings.apiPresets.findIndex((p) => p.id === targetId) : -1;
+      if (targetId && existingIndex < 0) {
+        return fail3(settings, "INVALID_PAYLOAD", "要更新的连接不存在（另存为请省略 id）。");
+      }
+      let apiKey;
+      if (command.apiKeyMode === "keep") {
+        if (existingIndex < 0) return fail3(settings, "INVALID_PAYLOAD", "新建连接必须提供密钥（可用空字符串表示无需密钥）。");
+        apiKey = settings.apiPresets[existingIndex].apiKey;
+      } else if (command.apiKeyMode === "clear") {
+        apiKey = "";
+      } else {
+        const rawKey = command.apiKey ?? "";
+        if (typeof rawKey !== "string" || rawKey.length > MAX_API_KEY_CHARS) {
+          return fail3(settings, "INVALID_PAYLOAD", "密钥必须是字符串且不超过 4096 字。");
+        }
+        apiKey = rawKey;
+      }
+      if (existingIndex < 0 && settings.apiPresets.length >= MAX_PRESETS_PER_LIBRARY) {
+        return fail3(settings, "FIELD_LIMIT_EXCEEDED", `最多保存 ${MAX_PRESETS_PER_LIBRARY} 条 API 连接。`);
+      }
+      const usedApiNames = new Set(settings.apiPresets.filter((_, i) => i !== existingIndex).map((p) => p.name));
+      const entry = {
+        id: targetId ?? normalizeId(`api-${now.toString(36)}-${settings.apiPresets.length}`) ?? `api-${settings.apiPresets.length}`,
+        name: uniqueName(preset.name, usedApiNames),
+        endpoint: preset.endpoint,
+        model: preset.model.trim(),
+        apiKey,
+        maxTokens: preset.maxTokens,
+        temperature: preset.temperature,
+        timeoutMs: preset.timeoutMs,
+        updatedAt: now
+      };
+      const apiPresets = existingIndex >= 0 ? settings.apiPresets.map((p, i) => i === existingIndex ? entry : p) : [...settings.apiPresets, entry];
+      return { ok: true, settings: { ...settings, apiPresets } };
+    }
+    case "api.delete": {
+      const id = normalizeId(command.id);
+      if (!id) return fail3(settings, "INVALID_PAYLOAD", "预设 ID 形状非法。");
+      if (!settings.apiPresets.some((p) => p.id === id)) {
+        return fail3(settings, "INVALID_PAYLOAD", "要删除的连接不存在。");
+      }
+      return {
+        ok: true,
+        settings: {
+          ...settings,
+          apiPresets: settings.apiPresets.filter((p) => p.id !== id),
+          // 删除活动项必须在同一次快照里清引用
+          activeApiPresetId: settings.activeApiPresetId === id ? null : settings.activeApiPresetId
+        }
+      };
+    }
+    case "api.activate": {
+      if (command.id === null) return { ok: true, settings: { ...settings, activeApiPresetId: null } };
+      const id = normalizeId(command.id);
+      if (!id || !settings.apiPresets.some((p) => p.id === id)) {
+        return fail3(settings, "INVALID_PAYLOAD", "要启用的连接不存在。");
+      }
+      return { ok: true, settings: { ...settings, activeApiPresetId: id } };
+    }
+    case "prompt.save": {
+      const preset = command.preset;
+      if (preset.id !== void 0 && normalizeId(preset.id) === BUILTIN_PROMPT_PRESET_ID) {
+        return fail3(settings, "INVALID_PAYLOAD", "内置默认提示词不可覆盖，请另存为新预设。");
+      }
+      if (typeof preset.name !== "string" || !preset.name.trim() || preset.name.length > MAX_NAME_CHARS) {
+        return fail3(settings, "INVALID_PAYLOAD", "提示词名称必填且不超过 64 字。");
+      }
+      const text = typeof preset.systemPrompt === "string" ? preset.systemPrompt.trim() : "";
+      if (!text) return fail3(settings, "INVALID_PAYLOAD", "提示词正文不能为空（空 = 内置默认，无需保存）。");
+      if (text.length > MAX_PROMPT_CHARS) return fail3(settings, "FIELD_LIMIT_EXCEEDED", `提示词不超过 ${MAX_PROMPT_CHARS} 字。`);
+      const targetId = preset.id === void 0 ? null : normalizeId(preset.id);
+      if (preset.id !== void 0 && targetId === null) return fail3(settings, "INVALID_PAYLOAD", "预设 ID 形状非法。");
+      const existingIndex = targetId ? settings.promptPresets.findIndex((p) => p.id === targetId) : -1;
+      if (targetId && existingIndex < 0) return fail3(settings, "INVALID_PAYLOAD", "要更新的提示词预设不存在（另存为请省略 id）。");
+      if (existingIndex < 0 && settings.promptPresets.length >= MAX_PRESETS_PER_LIBRARY) {
+        return fail3(settings, "FIELD_LIMIT_EXCEEDED", `最多保存 ${MAX_PRESETS_PER_LIBRARY} 条提示词预设。`);
+      }
+      const usedNames = new Set(settings.promptPresets.filter((_, i) => i !== existingIndex).map((p) => p.name));
+      const entry = {
+        id: targetId ?? normalizeId(`prompt-${now.toString(36)}-${settings.promptPresets.length}`) ?? `prompt-${settings.promptPresets.length}`,
+        name: uniqueName(preset.name, usedNames),
+        systemPrompt: text,
+        updatedAt: now
+      };
+      const promptPresets = existingIndex >= 0 ? settings.promptPresets.map((p, i) => i === existingIndex ? entry : p) : [...settings.promptPresets, entry];
+      return { ok: true, settings: { ...settings, promptPresets } };
+    }
+    case "prompt.delete": {
+      const id = normalizeId(command.id);
+      if (!id) return fail3(settings, "INVALID_PAYLOAD", "预设 ID 形状非法。");
+      if (id === BUILTIN_PROMPT_PRESET_ID) return fail3(settings, "INVALID_PAYLOAD", "内置默认提示词不可删除。");
+      if (!settings.promptPresets.some((p) => p.id === id)) return fail3(settings, "INVALID_PAYLOAD", "要删除的提示词预设不存在。");
+      return {
+        ok: true,
+        settings: {
+          ...settings,
+          promptPresets: settings.promptPresets.filter((p) => p.id !== id),
+          activePromptPresetId: settings.activePromptPresetId === id ? null : settings.activePromptPresetId
+        }
+      };
+    }
+    case "prompt.activate": {
+      if (command.id === null) return { ok: true, settings: { ...settings, activePromptPresetId: null } };
+      const id = normalizeId(command.id);
+      if (!id || !settings.promptPresets.some((p) => p.id === id)) {
+        return fail3(settings, "INVALID_PAYLOAD", "要启用的提示词预设不存在。");
+      }
+      return { ok: true, settings: { ...settings, activePromptPresetId: id } };
+    }
+    case "runtime.update": {
+      const next = { ...settings };
+      if (command.autoCommit !== void 0) {
+        if (typeof command.autoCommit !== "boolean") return fail3(settings, "INVALID_PAYLOAD", "自动提交必须是布尔值。");
+        next.autoCommit = command.autoCommit;
+      }
+      if (command.rpmLimit !== void 0) {
+        if (!isFiniteIntIn(command.rpmLimit, MIN_RPM, MAX_RPM)) {
+          return fail3(settings, "INVALID_PAYLOAD", `RPM 上限必须是 ${MIN_RPM}..${MAX_RPM} 的整数。`);
+        }
+        next.rpmLimit = command.rpmLimit;
+      }
+      return { ok: true, settings: next };
+    }
+    default:
+      return fail3(settings, "INVALID_PAYLOAD", "未知的设置命令。");
+  }
+}
+function applyLegacySettingsPatch(settings, body, deps = {}) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return fail3(settings, "INVALID_PAYLOAD", "设置必须是对象");
+  }
+  const record = body;
+  const now = nowOf(deps);
+  let next = { ...settings };
+  const usedIds = new Set(next.apiPresets.map((p) => p.id));
+  const usedPromptIds = new Set(next.promptPresets.map((p) => p.id));
+  const upsertConnection = (legacy) => {
+    const fingerprint = fingerprintOfConnection(legacy);
+    const existing = next.apiPresets.find((p) => fingerprintOfConnection({
+      endpoint: p.endpoint,
+      model: p.model,
+      apiKey: p.apiKey,
+      maxTokens: p.maxTokens,
+      temperature: p.temperature,
+      timeoutMs: p.timeoutMs
+    }) === fingerprint);
+    if (existing) return existing.id;
+    if (next.apiPresets.length >= MAX_PRESETS_PER_LIBRARY) return null;
+    const id = resolveId("api", next.apiPresets.length, fingerprint, deps, usedIds);
+    const names = new Set(next.apiPresets.map((p) => p.name));
+    next = {
+      ...next,
+      apiPresets: [...next.apiPresets, {
+        id,
+        name: uniqueName(legacy.name, names),
+        endpoint: legacy.endpoint,
+        model: legacy.model,
+        apiKey: legacy.apiKey,
+        maxTokens: legacy.maxTokens,
+        temperature: legacy.temperature,
+        timeoutMs: legacy.timeoutMs,
+        updatedAt: now
+      }]
+    };
+    return id;
+  };
+  const upsertPrompt = (legacy) => {
+    const text = legacy.systemPrompt.trim();
+    if (!text || text.length > MAX_PROMPT_CHARS) return null;
+    const existing = next.promptPresets.find((p) => p.systemPrompt === text);
+    if (existing) return existing.id;
+    if (next.promptPresets.length >= MAX_PRESETS_PER_LIBRARY) return null;
+    const id = resolveId("prompt", next.promptPresets.length, text, deps, usedPromptIds);
+    const names = new Set(next.promptPresets.map((p) => p.name));
+    next = {
+      ...next,
+      promptPresets: [...next.promptPresets, {
+        id,
+        name: uniqueName(`${legacy.name} · 提示词`, names),
+        systemPrompt: text,
+        updatedAt: now
+      }]
+    };
+    return id;
+  };
+  const library = record.presetLibrary && typeof record.presetLibrary === "object" && !Array.isArray(record.presetLibrary) ? record.presetLibrary : null;
+  if (library && Array.isArray(library.worldTurn)) {
+    for (const entry of library.worldTurn) {
+      const legacy = parseLegacyPreset(entry);
+      if (!legacy) return fail3(settings, "INVALID_PAYLOAD", "presetLibrary.worldTurn 存在非法预设（name / endpoint / model / apiKey 或数值超限）");
+      upsertConnection(legacy);
+      upsertPrompt(legacy);
+    }
+  }
+  const legacyMajor = [];
+  if (record.majorEvent !== void 0 && record.majorEvent !== null) legacyMajor.push(record.majorEvent);
+  if (library && Array.isArray(library.majorEvent)) legacyMajor.push(...library.majorEvent);
+  if (legacyMajor.length > 0) {
+    next = { ...next, legacyMajorEvent: JSON.parse(JSON.stringify(legacyMajor)) };
+  }
+  if (record.worldTurn !== void 0) {
+    if (record.worldTurn === null) {
+      next = { ...next, activeApiPresetId: null, activePromptPresetId: null };
+    } else {
+      const legacy = parseLegacyPreset(record.worldTurn);
+      if (!legacy) return fail3(settings, "INVALID_PAYLOAD", "worldTurn 预设字段非法（name / endpoint / model / apiKey 或数值超限）");
+      const apiId = upsertConnection(legacy);
+      if (!apiId) return fail3(settings, "FIELD_LIMIT_EXCEEDED", `最多保存 ${MAX_PRESETS_PER_LIBRARY} 条 API 连接。`);
+      const promptId = upsertPrompt(legacy);
+      next = { ...next, activeApiPresetId: apiId, activePromptPresetId: promptId };
+    }
+  }
+  if (record.autoCommit !== void 0) {
+    if (typeof record.autoCommit !== "boolean") return fail3(settings, "INVALID_PAYLOAD", "autoCommit 必须是布尔值");
+    next = { ...next, autoCommit: record.autoCommit };
+  }
+  if (record.rpmLimit !== void 0) {
+    if (!isFiniteIntIn(record.rpmLimit, MIN_RPM, MAX_RPM)) return fail3(settings, "INVALID_PAYLOAD", "rpmLimit 必须是 1..600 的数字");
+    next = { ...next, rpmLimit: record.rpmLimit };
+  }
+  return { ok: true, settings: next };
+}
+function settingsViewV2(settings) {
+  const activeApi = settings.activeApiPresetId && settings.apiPresets.some((p) => p.id === settings.activeApiPresetId) ? settings.activeApiPresetId : null;
+  const activePrompt = settings.activePromptPresetId && settings.promptPresets.some((p) => p.id === settings.activePromptPresetId) ? settings.activePromptPresetId : null;
+  return {
+    schemaVersion: ATLAS_SETTINGS_SCHEMA_VERSION,
+    apiPresets: settings.apiPresets.map((p) => {
+      const key = p.apiKey ?? "";
+      return {
+        id: p.id,
+        name: p.name,
+        endpoint: p.endpoint,
+        model: p.model,
+        maxTokens: p.maxTokens,
+        temperature: p.temperature,
+        timeoutMs: p.timeoutMs,
+        apiKey: { exists: key.trim().length > 0, tail: key.trim().length >= 4 ? key.trim().slice(-4) : null }
+      };
+    }),
+    promptPresets: settings.promptPresets.map((p) => ({ ...p })),
+    activeApiPresetId: activeApi,
+    activePromptPresetId: activePrompt,
+    builtInPrompt: {
+      id: BUILTIN_PROMPT_PRESET_ID,
+      name: "内置默认",
+      readOnly: true,
+      systemPrompt: DEFAULT_WORLD_TURN_SYSTEM_PROMPT
+    },
+    autoCommit: settings.autoCommit,
+    rpmLimit: settings.rpmLimit
+  };
+}
+function resolveWorldTurnPreset(settings) {
+  const connection = settings.apiPresets.find((p) => p.id === settings.activeApiPresetId);
+  if (!connection) return null;
+  const prompt = settings.promptPresets.find((p) => p.id === settings.activePromptPresetId);
+  return {
+    name: connection.name,
+    endpoint: connection.endpoint,
+    model: connection.model,
+    apiKey: connection.apiKey,
+    maxTokens: connection.maxTokens,
+    temperature: connection.temperature,
+    timeoutMs: connection.timeoutMs,
+    ...prompt ? { systemPrompt: prompt.systemPrompt } : {}
+  };
+}
+
+// src/atlas-server.ts
+var SETTINGS_DOC = "settings";
+var RPM_WINDOW_MS = 6e4;
 var MAP_POINTS_MAX = 200;
 var MAP_POINT_NAME_CHARS = 80;
 function httpStatusFor(code) {
@@ -5595,7 +6076,7 @@ function errorResult(thrown) {
 function createAtlasServerCore(deps) {
   const store = deps.store;
   const now = deps.now ?? Date.now;
-  let settings = { ...DEFAULT_SETTINGS };
+  let settings = createDefaultSettingsV2();
   let settingsLoaded = false;
   const worldCache = /* @__PURE__ */ new Map();
   const bindingCache = /* @__PURE__ */ new Map();
@@ -5612,15 +6093,32 @@ function createAtlasServerCore(deps) {
     const raw = await store.read(SETTINGS_DOC);
     if (raw && typeof raw === "object" && !Array.isArray(raw)) {
       const record = raw;
-      settings = {
-        schemaVersion: 1,
-        worldTurn: isValidPreset(record.worldTurn) ? record.worldTurn : null,
-        majorEvent: isValidPreset(record.majorEvent) ? record.majorEvent : null,
-        presetLibrary: sanitizePresetLibrary(record.presetLibrary),
-        autoCommit: typeof record.autoCommit === "boolean" ? record.autoCommit : true,
-        rpmLimit: typeof record.rpmLimit === "number" && record.rpmLimit >= 1 && record.rpmLimit <= 600 ? record.rpmLimit : 30
-      };
+      if (record.schemaVersion === ATLAS_SETTINGS_SCHEMA_VERSION) {
+        const sanitized = sanitizeSettingsV2(record, { now });
+        settings = sanitized.settings;
+        if (sanitized.diagnostics.skipped > 0) {
+          pushLog({ at: now(), kind: "settings-sanitize", skipped: sanitized.diagnostics.skipped });
+        }
+      } else {
+        const migrated = migrateAtlasSettings(record, { now });
+        settings = migrated.settings;
+        pushLog({
+          at: now(),
+          kind: "settings-migrate",
+          from: typeof record.schemaVersion === "number" ? record.schemaVersion : "unknown",
+          to: ATLAS_SETTINGS_SCHEMA_VERSION,
+          apiPresets: migrated.settings.apiPresets.length,
+          promptPresets: migrated.settings.promptPresets.length,
+          skipped: migrated.diagnostics.skipped
+        });
+      }
     }
+    settingsLoaded = true;
+    return settings;
+  }
+  async function persistSettings(next) {
+    await store.write(SETTINGS_DOC, next);
+    settings = next;
     settingsLoaded = true;
     return settings;
   }
@@ -5696,46 +6194,24 @@ function createAtlasServerCore(deps) {
   }
   async function handleGetSettings() {
     const current = await loadSettings();
-    return okResult({
-      schemaVersion: 1,
-      worldTurn: maskPreset(current.worldTurn),
-      majorEvent: maskPreset(current.majorEvent),
-      presetLibrary: {
-        worldTurn: current.presetLibrary.worldTurn.map(maskPreset),
-        majorEvent: current.presetLibrary.majorEvent.map(maskPreset)
-      },
-      autoCommit: current.autoCommit,
-      rpmLimit: current.rpmLimit
-    });
+    return okResult(settingsViewV2(current));
   }
   async function handlePutSettings(body, ctx) {
     if (!ctx.local) throw new AtlasError(ATLAS_ERROR_CODES.FORBIDDEN, "只有本机已登录会话可以修改 Atlas 设置。");
-    const invalid = validateSettingsBody(body);
-    if (invalid) throw invalid;
-    const record = body;
     const current = await loadSettings();
-    const next = {
-      schemaVersion: 1,
-      worldTurn: record.worldTurn === void 0 ? current.worldTurn : record.worldTurn,
-      majorEvent: record.majorEvent === void 0 ? current.majorEvent : record.majorEvent,
-      presetLibrary: record.presetLibrary === void 0 ? current.presetLibrary : sanitizePresetLibrary(record.presetLibrary, current.presetLibrary),
-      autoCommit: typeof record.autoCommit === "boolean" ? record.autoCommit : current.autoCommit,
-      rpmLimit: typeof record.rpmLimit === "number" ? record.rpmLimit : current.rpmLimit
-    };
-    await store.write(SETTINGS_DOC, next);
-    settings = next;
-    settingsLoaded = true;
-    return okResult({
-      schemaVersion: 1,
-      worldTurn: maskPreset(next.worldTurn),
-      majorEvent: maskPreset(next.majorEvent),
-      presetLibrary: {
-        worldTurn: next.presetLibrary.worldTurn.map(maskPreset),
-        majorEvent: next.presetLibrary.majorEvent.map(maskPreset)
-      },
-      autoCommit: next.autoCommit,
-      rpmLimit: next.rpmLimit
-    });
+    const isCommand = Boolean(body) && typeof body === "object" && !Array.isArray(body) && typeof body.action === "string";
+    const result = isCommand ? applySettingsCommand(current, body, { now }) : applyLegacySettingsPatch(current, body, { now });
+    if (!result.ok) {
+      throw new AtlasError(
+        result.code === "FIELD_LIMIT_EXCEEDED" ? ATLAS_ERROR_CODES.FIELD_LIMIT_EXCEEDED : ATLAS_ERROR_CODES.INVALID_PAYLOAD,
+        result.message ?? "设置更新被拒绝。"
+      );
+    }
+    const saved = await persistSettings(result.settings);
+    if (!isCommand) {
+      pushLog({ at: now(), kind: "settings-legacy-patch", apiPresets: saved.apiPresets.length });
+    }
+    return okResult(settingsViewV2(saved));
   }
   function worldSummary(world) {
     return {
@@ -5768,6 +6244,23 @@ function createAtlasServerCore(deps) {
     await store.write(`world:${parsed.id}`, parsed);
     worldCache.set(parsed.id, parsed);
     return okResult(worldSummary(parsed));
+  }
+  async function handleEnsureStarter(body, ctx) {
+    if (!ctx.local) throw new AtlasError(ATLAS_ERROR_CODES.FORBIDDEN, "只有本机已登录会话可以初始化 Atlas 世界。");
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "ensure-starter 请求必须是对象");
+    }
+    const parsed = parseWorld(body.world);
+    if (!parsed) throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "自动建世数据无法通过 schema 校验，已拒绝。");
+    return enqueue(`ensure:${parsed.id}`, async () => {
+      const existing = await getWorld(parsed.id);
+      if (existing) {
+        return okResult({ created: false, world: worldSummary(existing) });
+      }
+      await store.write(`world:${parsed.id}`, parsed);
+      worldCache.set(parsed.id, parsed);
+      return okResult({ created: true, world: worldSummary(parsed) });
+    });
   }
   async function handleBindings(body) {
     if (!body || typeof body !== "object" || Array.isArray(body)) {
@@ -5916,7 +6409,7 @@ function createAtlasServerCore(deps) {
       return okResult({ receipt: { ...cached, status: "duplicate" }, duplicate: true });
     }
     const current = await loadSettings();
-    const preset = current.worldTurn;
+    const preset = resolveWorldTurnPreset(current);
     if (!preset) {
       throw new AtlasError(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "未配置独立推演 API，世界不会更新。");
     }
@@ -6224,6 +6717,7 @@ function createAtlasServerCore(deps) {
       if (method === "PUT" && route === "/settings") return await handlePutSettings(body, ctx);
       if (method === "GET" && route === "/worlds") return await handleListWorlds();
       if (method === "POST" && route === "/worlds/import") return await handleImportWorld(body, ctx);
+      if (method === "POST" && route === "/worlds/ensure-starter") return await handleEnsureStarter(body, ctx);
       if (method === "POST" && route === "/bindings") return await handleBindings(body);
       const stateMatch = route.match(/^\/state\/([^/]+)$/);
       if (method === "GET" && stateMatch) return await handleState(decodeURIComponent(stateMatch[1]));
@@ -7013,10 +7507,10 @@ function buildWorldFromTemplate(template, opts) {
 }
 
 // src/atlas-starter-world.ts
-var MAX_NAME_CHARS = 60;
+var MAX_NAME_CHARS2 = 60;
 var MAX_DESCRIPTION_CHARS = 2e3;
 function buildStarterWorld(options) {
-  const cardName = (options.name ?? "").trim().slice(0, MAX_NAME_CHARS);
+  const cardName = (options.name ?? "").trim().slice(0, MAX_NAME_CHARS2);
   const worldName = cardName ? `${cardName} 的世界` : "新世界";
   const description = (options.description ?? "").trim().slice(0, MAX_DESCRIPTION_CHARS);
   return {

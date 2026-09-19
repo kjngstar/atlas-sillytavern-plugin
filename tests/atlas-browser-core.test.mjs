@@ -129,21 +129,42 @@ test("local api: GET /health 进程内返回 ok", async () => {
   assert.equal(body.ok, true);
 });
 
-test("local api: PUT/GET /settings 走同一 store（进程内零网络）", async () => {
+test("local api: PUT/GET /settings 走同一 store（进程内零网络，ATLAS-18 v2 命令）", async () => {
   const core = createAtlasServerCore({ store: createMemoryDocumentStore() });
   const api = createLocalAtlasApi(core);
-  const put = await api.request("PUT", "/settings", {
-    worldTurn: { name: "p1", endpoint: "https://api.example.com/v1/chat/completions", model: "m1", apiKey: "k" },
-    autoCommit: false,
+  const saved = await api.request("PUT", "/settings", {
+    action: "api.save",
+    preset: {
+      name: "p1",
+      endpoint: "https://api.example.com/v1/chat/completions",
+      model: "m1",
+      maxTokens: 1024,
+      temperature: 0.5,
+      timeoutMs: 30_000,
+    },
+    apiKeyMode: "replace",
+    apiKey: "sk-local-test",
   });
-  assert.equal(put.status, 200);
+  assert.equal(saved.status, 200);
+  const activated = await api.request("PUT", "/settings", {
+    action: "api.activate",
+    id: saved.body.data.apiPresets[0].id,
+  });
+  assert.equal(activated.status, 200);
+  const runtime = await api.request("PUT", "/settings", { action: "runtime.update", autoCommit: false });
+  assert.equal(runtime.status, 200);
+
   const get = await api.request("GET", "/settings");
   assert.equal(get.status, 200);
+  assert.equal(get.body.data.schemaVersion, 2, "GET 出 v2 形状");
   assert.equal(get.body.data.autoCommit, false);
-  assert.equal(get.body.data.worldTurn.model, "m1");
-  // 脱敏：apiKey 只出掩码
-  assert.equal(get.body.data.worldTurn.apiKey.exists, true);
-  assert.equal(get.body.data.worldTurn.apiKey.tail, undefined || get.body.data.worldTurn.apiKey.tail);
+  assert.equal(get.body.data.apiPresets.length, 1);
+  assert.equal(get.body.data.apiPresets[0].model, "m1");
+  assert.equal(get.body.data.activeApiPresetId, saved.body.data.apiPresets[0].id, "活动引用持久化");
+  // 脱敏：apiKey 只出掩码，且响应里搜不到明文
+  assert.equal(get.body.data.apiPresets[0].apiKey.exists, true);
+  assert.equal(get.body.data.apiPresets[0].apiKey.tail, "test");
+  assert.ok(!JSON.stringify(get.body).includes("sk-local-test"), "GET 不含明文 Key");
 });
 
 test("local api: 未知路由 → ok:false + 稳定错误码", async () => {
