@@ -738,9 +738,10 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     if (s.page === "overview") {
       center.append(pageHeader(String(d.worldName ?? "世界概览"), ready ? "世界状态一览；左栏是写入世界书的动向，右侧是最近变化。" : undefined));
       if (!ready) {
+        if (s.modeHint) center.append(el("div", "aw-note", s.modeHint));
+        if (s.lastError) center.append(el("div", "aw-note aw-note--error", s.lastError));
         center.append(buildWorldCard(s));
         center.append(buildAdvancedWorldSection(s));
-        if (s.lastError) center.append(el("div", "aw-note aw-note--error", s.lastError));
         return;
       }
       if (s.lastError) center.append(el("div", "aw-note aw-note--error", s.lastError));

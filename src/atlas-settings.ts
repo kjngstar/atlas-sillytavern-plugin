@@ -508,8 +508,12 @@ export function applySettingsCommand(
         return fail(settings, "FIELD_LIMIT_EXCEEDED", `最多保存 ${MAX_PRESETS_PER_LIBRARY} 条 API 连接。`);
       }
       const usedApiNames = new Set(settings.apiPresets.filter((_, i) => i !== existingIndex).map((p) => p.name));
+      // 新建 ID：规格 0.4 规则 1 —— 优先 randomUUID（resolveId 内含碰撞兜底）；
+      // 同毫秒内「删除→再新建同长度」用 now+length 会撞 ID（复核发现）
       const entry: AtlasApiConnectionPreset = {
-        id: targetId ?? normalizeId(`api-${now.toString(36)}-${settings.apiPresets.length}`) ?? `api-${settings.apiPresets.length}`,
+        id: targetId ?? resolveId("api", settings.apiPresets.length, fingerprintOfConnection({
+          endpoint: preset.endpoint, model: preset.model, apiKey, maxTokens: preset.maxTokens, temperature: preset.temperature, timeoutMs: preset.timeoutMs,
+        }), deps, new Set(settings.apiPresets.map((p) => p.id))),
         name: uniqueName(preset.name, usedApiNames),
         endpoint: preset.endpoint,
         model: preset.model.trim(),
@@ -568,7 +572,7 @@ export function applySettingsCommand(
       }
       const usedNames = new Set(settings.promptPresets.filter((_, i) => i !== existingIndex).map((p) => p.name));
       const entry: AtlasPromptPreset = {
-        id: targetId ?? normalizeId(`prompt-${now.toString(36)}-${settings.promptPresets.length}`) ?? `prompt-${settings.promptPresets.length}`,
+        id: targetId ?? resolveId("prompt", settings.promptPresets.length, text, deps, new Set(settings.promptPresets.map((p) => p.id))),
         name: uniqueName(preset.name, usedNames),
         systemPrompt: text,
         updatedAt: now,
