@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.7.4";
+export const ATLAS_EXTENSION_VERSION = "0.7.5";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -293,6 +293,7 @@ const PAGES = [
   { id: "map", label: "地图" },
   { id: "nearby", label: "附近" },
   { id: "changes", label: "变化" },
+  { id: "api", label: "API" },
   { id: "settings", label: "设置" },
 ];
 
@@ -339,7 +340,7 @@ function computeMapBounds(points) {
   };
 }
 
-function renderPanel(core, root, clampZoom, api, store) {
+function renderPanel(core, root, clampZoom, api, store, mod) {
   root.className = "atlas-workbench";
   root.id = "atlas-extension-panel-root";
   root.setAttribute("role", "application");
@@ -781,12 +782,18 @@ function renderPanel(core, root, clampZoom, api, store) {
       return;
     }
 
+    if (s.page === "api") {
+      center.append(pageHeader("API", "推演 API 预设管理（shujuku 式）：在这里配置好，其余页面直接使用。密钥只保存在浏览器侧，经酒馆后端代理转发。"));
+      if (s.lastError) center.append(el("div", "aw-note aw-note--error", s.lastError));
+      center.append(buildApiPanel());
+      return;
+    }
+
     if (s.page === "settings") {
-      center.append(pageHeader("设置", "推演 API 预设、世界绑定与本地存储。API 密钥只保存在浏览器侧，经酒馆后端代理转发。"));
+      center.append(pageHeader("设置", "世界绑定与导入。每个聊天各自记住自己的世界，切聊天自动跟随。"));
       if (s.modeHint && !ready) center.append(el("div", "aw-note", s.modeHint));
       if (s.lastError) center.append(el("div", "aw-note aw-note--error", s.lastError));
       center.append(buildBindingPanel(s));
-      center.append(buildApiPanel());
       return;
     }
   }
@@ -1005,6 +1012,35 @@ function renderPanel(core, root, clampZoom, api, store) {
       unbind.addEventListener("click", () => void core.unbind());
       actions.append(disable, unbind);
     } else {
+      const demo = el("button", "aw-btn aw-btn--primary", "一键创建演示世界并绑定");
+      demo.type = "button";
+      demo.setAttribute("aria-label", "创建演示世界并绑定到当前聊天");
+      demo.addEventListener("click", async () => {
+        demo.disabled = true;
+        try {
+          const world = mod.buildWorldFromTemplate(mod.DEMO_TEMPLATES[0], {
+            id: `world-${Date.now()}`,
+            now: Date.now(),
+          });
+          const result = await api.request("POST", "/worlds/import", { world });
+          if (result.status !== 200 || !result.body?.ok) {
+            apiFormStatus = `演示世界创建被拒绝：${result.body?.error?.message ?? `HTTP ${result.status}`}`;
+            apiFormStatusKind = "error";
+            core.__renderPage?.();
+            return;
+          }
+          await core.bindToWorld(String(world.id));
+          core.setPage("overview");
+          core.__renderPage?.();
+        } catch (error) {
+          apiFormStatus = `演示世界创建失败：${error instanceof Error ? error.message : String(error)}`;
+          apiFormStatusKind = "error";
+          core.__renderPage?.();
+        } finally {
+          demo.disabled = false;
+        }
+      });
+      actions.append(demo);
       const list = el("button", "aw-btn", "读取可绑定世界列表");
       list.type = "button";
       list.setAttribute("aria-label", "读取 Atlas 世界列表");
@@ -1062,7 +1098,13 @@ function renderPanel(core, root, clampZoom, api, store) {
         const item = el("button", "aw-list__item", `${String(world.name ?? world.id)}（${String(world.pointCount ?? 0)} 地点）`);
         item.type = "button";
         item.setAttribute("aria-label", `绑定世界 ${String(world.name ?? world.id)}`);
-        item.addEventListener("click", () => void core.bindToWorld(String(world.id)));
+        item.addEventListener("click", async () => {
+          await core.bindToWorld(String(world.id));
+          if (core.getState().binding) {
+            core.setPage("overview");
+            core.__renderPage?.();
+          }
+        });
         list.append(item);
       }
       wrap.append(list);
@@ -1647,7 +1689,7 @@ async function connectOnce() {
       root.id = "atlas-extension-panel-root";
       document.body.append(root);
     }
-    rerender = renderPanel(core, root, mod.atlasClampZoom, api, engineStore);
+    rerender = renderPanel(core, root, mod.atlasClampZoom, api, engineStore, mod);
     installMenuButton(core);
     core.init();
     connected = { core, rerender };
