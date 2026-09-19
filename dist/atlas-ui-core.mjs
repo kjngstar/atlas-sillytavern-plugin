@@ -5811,7 +5811,14 @@ function applySettingsCommand(settings, command, deps = {}) {
       }
       const usedApiNames = new Set(settings.apiPresets.filter((_, i) => i !== existingIndex).map((p) => p.name));
       const entry = {
-        id: targetId ?? normalizeId(`api-${now.toString(36)}-${settings.apiPresets.length}`) ?? `api-${settings.apiPresets.length}`,
+        id: targetId ?? resolveId("api", settings.apiPresets.length, fingerprintOfConnection({
+          endpoint: preset.endpoint,
+          model: preset.model,
+          apiKey,
+          maxTokens: preset.maxTokens,
+          temperature: preset.temperature,
+          timeoutMs: preset.timeoutMs
+        }), deps, new Set(settings.apiPresets.map((p) => p.id))),
         name: uniqueName(preset.name, usedApiNames),
         endpoint: preset.endpoint,
         model: preset.model.trim(),
@@ -5868,7 +5875,7 @@ function applySettingsCommand(settings, command, deps = {}) {
       }
       const usedNames = new Set(settings.promptPresets.filter((_, i) => i !== existingIndex).map((p) => p.name));
       const entry = {
-        id: targetId ?? normalizeId(`prompt-${now.toString(36)}-${settings.promptPresets.length}`) ?? `prompt-${settings.promptPresets.length}`,
+        id: targetId ?? resolveId("prompt", settings.promptPresets.length, text, deps, new Set(settings.promptPresets.map((p) => p.id))),
         name: uniqueName(preset.name, usedNames),
         systemPrompt: text,
         updatedAt: now
