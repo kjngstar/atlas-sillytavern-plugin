@@ -182,20 +182,70 @@ export async function callAtlasWorldTurnApi(
       return fail(mapped.code, mapped.message, mapped.retryable, response.status);
     }
 
-    let payload: unknown;
+    // 0.9.6：先取原始文本（响应片段可进诊断日志/报错），JSON 解析失败再尝试 SSE data: 行
+    // （部分网关无视 stream:false 强制流式返回）。
+    let rawText = "";
     try {
-      payload = await response.json();
+      rawText = typeof response.text === "function" ? await response.text() : JSON.stringify(await response.json());
     } catch {
-      return fail(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "推演服务返回了无法解析的内容。", false);
+      rawText = "";
+    }
+    let payload: unknown = null;
+    try {
+      payload = JSON.parse(rawText);
+    } catch {
+      payload = firstSsePayload(rawText);
     }
     const text = extractAssistantText(payload);
     if (text === null || text.trim().length === 0) {
-      return fail(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "推演服务返回为空或不支持的格式。", false);
+      const snippet = rawText.replace(/\s+/g, " ").trim().slice(0, 200);
+      return fail(
+        ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
+        `推演服务返回为空或不支持的格式${snippet ? `（响应开头：${snippet}）` : "（响应体为空）"}。`,
+        false,
+      );
     }
     return { ok: true, text, status: response.status, durationMs: now() - startedAt };
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** 从 SSE 文本里取第一个可解析的 data: 载荷（网关强制流式化时的兜底）。 */
+function firstSsePayload(raw: string): unknown {
+  if (!raw.includes("data:")) return null;
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("data:")) continue;
+    const data = trimmed.slice(5).trim();
+    if (!data || data === "[DONE]") continue;
+    try {
+      return JSON.parse(data);
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+/** content 字段兼容：字符串 / OpenAI 分段数组（[{type:"text",text:"..."}]）/ 纯文本数组。 */
+function textContentOf(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    const parts = value
+      .map((part) => {
+        if (typeof part === "string") return part;
+        if (part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string") {
+          return part as { text: string };
+        }
+        return null;
+      })
+      .filter((part): part is { text: string } => part !== null)
+      .map((part) => part.text)
+      .join("");
+    return parts.length > 0 ? parts : null;
+  }
+  return null;
 }
 
 /** 从 OpenAI 风格或兼容响应中取助手正文。 */
@@ -206,14 +256,20 @@ function extractAssistantText(payload: unknown): string | null {
     text?: unknown;
     content?: unknown;
     response?: unknown;
+    message?: { content?: unknown };
   };
   if (Array.isArray(p.choices) && p.choices.length > 0) {
     const choice = p.choices[0];
-    if (typeof choice?.message?.content === "string") return choice.message.content;
+    const fromMessage = textContentOf(choice?.message?.content);
+    if (fromMessage !== null) return fromMessage;
     if (typeof choice?.text === "string") return choice.text;
   }
+  // ollama 原生 /api/chat 形状：{ message: { content } }
+  const fromOllamaMessage = textContentOf(p.message?.content);
+  if (fromOllamaMessage !== null) return fromOllamaMessage;
   for (const key of ["text", "content", "response"] as const) {
-    if (typeof p[key] === "string") return p[key] as string;
+    const value = textContentOf(p[key]);
+    if (value !== null) return value;
   }
   return null;
 }

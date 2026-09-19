@@ -754,31 +754,75 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
       const mapped = errorMessageForStatus(response.status);
       return fail4(mapped.code, mapped.message, mapped.retryable, response.status);
     }
-    let payload;
+    let rawText = "";
     try {
-      payload = await response.json();
+      rawText = typeof response.text === "function" ? await response.text() : JSON.stringify(await response.json());
     } catch {
-      return fail4(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "推演服务返回了无法解析的内容。", false);
+      rawText = "";
+    }
+    let payload = null;
+    try {
+      payload = JSON.parse(rawText);
+    } catch {
+      payload = firstSsePayload(rawText);
     }
     const text = extractAssistantText(payload);
     if (text === null || text.trim().length === 0) {
-      return fail4(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "推演服务返回为空或不支持的格式。", false);
+      const snippet = rawText.replace(/\s+/g, " ").trim().slice(0, 200);
+      return fail4(
+        ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
+        `推演服务返回为空或不支持的格式${snippet ? `（响应开头：${snippet}）` : "（响应体为空）"}。`,
+        false
+      );
     }
     return { ok: true, text, status: response.status, durationMs: now() - startedAt };
   } finally {
     clearTimeout(timer);
   }
 }
+function firstSsePayload(raw) {
+  if (!raw.includes("data:")) return null;
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("data:")) continue;
+    const data = trimmed.slice(5).trim();
+    if (!data || data === "[DONE]") continue;
+    try {
+      return JSON.parse(data);
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+function textContentOf(value) {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    const parts = value.map((part) => {
+      if (typeof part === "string") return part;
+      if (part && typeof part === "object" && typeof part.text === "string") {
+        return part;
+      }
+      return null;
+    }).filter((part) => part !== null).map((part) => part.text).join("");
+    return parts.length > 0 ? parts : null;
+  }
+  return null;
+}
 function extractAssistantText(payload) {
   if (!payload || typeof payload !== "object") return null;
   const p = payload;
   if (Array.isArray(p.choices) && p.choices.length > 0) {
     const choice = p.choices[0];
-    if (typeof choice?.message?.content === "string") return choice.message.content;
+    const fromMessage = textContentOf(choice?.message?.content);
+    if (fromMessage !== null) return fromMessage;
     if (typeof choice?.text === "string") return choice.text;
   }
+  const fromOllamaMessage = textContentOf(p.message?.content);
+  if (fromOllamaMessage !== null) return fromOllamaMessage;
   for (const key of ["text", "content", "response"]) {
-    if (typeof p[key] === "string") return p[key];
+    const value = textContentOf(p[key]);
+    if (value !== null) return value;
   }
   return null;
 }
