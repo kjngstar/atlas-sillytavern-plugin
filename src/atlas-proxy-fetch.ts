@@ -7,11 +7,13 @@
  *
  *   POST /api/backends/chat-completions/generate
  *   { chat_completion_source: "custom", custom_url: <原地址>, model, messages, stream:false,
- *     temperature?, max_tokens?, custom_include_headers: { Authorization: "Bearer <key>" } }
+ *     temperature?, max_tokens?, custom_include_headers: "Authorization: Bearer <key>" }
  *
  * 契约依据（2026-09-17 上游源码实测，release 分支 chat-completions.js）：
  * - :2394-2410 CUSTOM 分支：apiUrl=custom_url；密钥读服务端 secret（CUSTOM 豁免缺失检查 :2615）；
  *   mergeObjectWithYaml(bodyParams, custom_include_body)；mergeObjectWithYaml(headers, custom_include_headers)。
+ *   custom_include_headers 只接受**原始头字符串**（按行解析；传对象 = 头被静默丢弃，
+ *   0.9.1 及之前生成路径的真实缺陷，ATLAS-FIX-02 修复）。
  *   → 我们把密钥放进 custom_include_headers，由代理合并进上游请求头，服务端无需预存 secret。
  * - 非流式响应原样透传上游 JSON（→ response.json() 兼容）。
  * - CSRF：酒馆 /api 路由要求 token，经 context().getRequestHeaders() 合并（P0-05 同模式）。
@@ -21,6 +23,19 @@
  */
 
 export const ATLAS_ST_GENERATE_PATH = "/api/backends/chat-completions/generate";
+
+/**
+ * custom_include_headers 的**唯一序列化口径**（ATLAS-FIX-02）：
+ * 酒馆后端经 `mergeObjectWithYaml` 按行解析该字段——只接受「原始头字符串」
+ * （shujuku 同款口径）。传对象会被**静默丢弃**，上游收不到 Authorization。
+ * - 有值 → `Authorization: <headerValue>`（headerValue 通常已是 "Bearer xxx"）
+ * - 无值 → ""（空字符串，绝不能是对象 / undefined）
+ * 模型列表（index.js loadModels → /status）与生成（/generate）共用本函数。
+ */
+export function atlasCustomIncludeHeaders(headerValue: string | null | undefined): string {
+  const value = (headerValue ?? "").trim();
+  return value ? `Authorization: ${value}` : "";
+}
 
 export interface StProxyFetchDeps {
   /** 通常 = SillyTavern.getContext；测试注入 fake。 */
@@ -86,7 +101,7 @@ export function createStProxyFetch(deps: StProxyFetchDeps): typeof fetch {
       stream: payload.stream ?? false,
       ...(payload.temperature !== undefined ? { temperature: payload.temperature } : {}),
       ...(payload.max_tokens !== undefined ? { max_tokens: payload.max_tokens } : {}),
-      custom_include_headers: authorization ? { Authorization: authorization } : {},
+      custom_include_headers: atlasCustomIncludeHeaders(authorization),
     };
 
     return innerFetch(ATLAS_ST_GENERATE_PATH, {

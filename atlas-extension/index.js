@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.1";
+export const ATLAS_EXTENSION_VERSION = "0.9.2";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -339,9 +339,33 @@ export function createGenerateInterceptor(core, io = {}) {
   };
 }
 
-/** 安装到 globalThis（manifest generate_interceptor 按名字查找）。 */
-function installGenerateInterceptor(core) {
-  window[ATLAS_INTERCEPTOR_GLOBAL] = createGenerateInterceptor(core);
+/** 安装到 globalThis（manifest generate_interceptor 按名字查找）。重复安装 = 覆盖为最新闭包。
+ *  io 仅测试注入（setExtensionPrompt / waitMs）；生产走默认酒馆通道。 */
+export function installGenerateInterceptor(core, io = {}) {
+  window[ATLAS_INTERCEPTOR_GLOBAL] = createGenerateInterceptor(core, io);
+}
+
+/** 拖拽进行中的清理回调（disable 时可能正拖着窗口；防止 document 级监听泄漏）。 */
+let activeDragCleanup = null;
+
+/**
+ * ATLAS-FIX-02：卸载本插件安装的**全部全局痕迹**。
+ * 宿主按名字查找 `window[ATLAS_INTERCEPTOR_GLOBAL]`——停用后如果残留旧闭包，
+ * 普通生成仍会被旧闭包接管（pending 已 dispose，注入空串，但闭包引用已死核心）。
+ * 必须删除，让宿主查不到 → 零注入；再次 activate 时 install 覆盖为最新实例。
+ */
+export function atlasUninstallGlobals() {
+  if (typeof window !== "undefined" && window[ATLAS_INTERCEPTOR_GLOBAL] !== undefined) {
+    try {
+      delete window[ATLAS_INTERCEPTOR_GLOBAL];
+    } catch {
+      window[ATLAS_INTERCEPTOR_GLOBAL] = undefined;
+    }
+  }
+  if (typeof activeDragCleanup === "function") {
+    activeDragCleanup();
+    activeDragCleanup = null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -502,9 +526,11 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     const onUp = () => {
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
+      activeDragCleanup = null;
     };
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
+    activeDragCleanup = onUp;
   });
   topbar.classList.add("is-draggable");
 
@@ -1567,9 +1593,9 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       const ctx = SillyTavern.getContext();
       const headers = { "Content-Type": "application/json" };
       if (typeof ctx.getRequestHeaders === "function") Object.assign(headers, ctx.getRequestHeaders());
-      // shujuku 同款载荷（2026-09-19 实测口径）：custom_include_headers 必须是
-      // 「原始头字符串」而不是对象——酒馆后端按行解析，传对象 = 鉴权头被丢弃 →
-      // 端点收到无 Authorization 的请求 → 永远取不到模型（0.8.1 及之前的真实病因）。
+      // ATLAS-FIX-02：custom_include_headers 必须是「原始头字符串」（酒馆按行解析，
+      // 传对象 = 鉴权头被静默丢弃）；序列化口径与生成路径共用 atlasCustomIncludeHeaders。
+      const { atlasCustomIncludeHeaders } = await loadUiCore();
       const response = await fetch("/api/backends/chat-completions/status", {
         method: "POST",
         headers,
@@ -1578,7 +1604,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
           proxy_password: "",
           chat_completion_source: "custom",
           custom_url: endpoint,
-          custom_include_headers: formState.apiKey ? `Authorization: Bearer ${formState.apiKey}` : "",
+          custom_include_headers: atlasCustomIncludeHeaders(formState.apiKey ? `Bearer ${formState.apiKey}` : ""),
         }),
       });
       if (!response.ok) {
@@ -2053,6 +2079,8 @@ export async function disconnectAtlas() {
   removeMenuButton();
   const root = document.getElementById("atlas-extension-panel-root");
   if (root) root.remove();
+  // ATLAS-FIX-02：全局痕迹一并清除（interceptor + 拖拽中监听），否则宿主仍会调用已死闭包
+  atlasUninstallGlobals();
   connected = null;
 }
 

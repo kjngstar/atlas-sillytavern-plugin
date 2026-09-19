@@ -21,9 +21,10 @@ import assert from "node:assert/strict";
 
 import { createBrowserDocumentStore, ATLAS_BROWSER_DOC_LIMITS } from "../src/atlas-browser-store.ts";
 import { createLocalAtlasApi } from "../src/atlas-local-api.ts";
-import { createStProxyFetch, ATLAS_ST_GENERATE_PATH } from "../src/atlas-proxy-fetch.ts";
+import { createStProxyFetch, atlasCustomIncludeHeaders, ATLAS_ST_GENERATE_PATH } from "../src/atlas-proxy-fetch.ts";
 import { createAtlasServerCore, createMemoryDocumentStore } from "../src/atlas-server.ts";
 import { ATLAS_ERROR_CODES } from "../src/atlas-contract.ts";
+import { callAtlasWorldTurnApi } from "../src/atlas-api-client.ts";
 
 // ---------------------------------------------------------------------------
 // 测试辅助
@@ -207,13 +208,14 @@ test("proxy fetch: 改写为后端代理 custom 请求（CSRF + custom_url + cus
   assert.equal(sentBody.stream, false);
   assert.equal(sentBody.temperature, 0.7);
   assert.equal(sentBody.max_tokens, 512);
-  // 密钥经 custom_include_headers 转交（上游 2410 行 mergeObjectWithYaml 合并进上游请求头）
-  assert.equal(sentBody.custom_include_headers.Authorization, "Bearer sk-test-123");
+  // 密钥经 custom_include_headers 转交——ATLAS-FIX-02：必须是「原始头字符串」
+  // （酒馆 mergeObjectWithYaml 按行解析；shujuku 同款口径）。传对象 = 鉴权头被静默丢弃。
+  assert.equal(sentBody.custom_include_headers, "Authorization: Bearer sk-test-123");
   // 外层请求头不得带明文密钥（密钥只在 body 内转交）
   assert.equal(sentHeaders.Authorization, undefined);
 });
 
-test("proxy fetch: 无密钥 → custom_include_headers 不含 Authorization", async () => {
+test("proxy fetch: 无密钥 → custom_include_headers 是空字符串", async () => {
   const fetchFn = makeCapturingFetch({});
   const proxyFetch = createStProxyFetch({ getContext: fakeContext(), fetchFn });
   await proxyFetch("https://api.example.com/v1/chat/completions", {
@@ -222,7 +224,119 @@ test("proxy fetch: 无密钥 → custom_include_headers 不含 Authorization", a
     body: JSON.stringify({ model: "m1", messages: [], stream: false }),
   });
   const sentBody = JSON.parse(fetchFn.calls[0].init.body);
-  assert.equal(sentBody.custom_include_headers.Authorization, undefined);
+  assert.equal(sentBody.custom_include_headers, "");
+});
+
+test("ATLAS-FIX-02：custom_include_headers 序列化口径（模型列表与生成共用）", () => {
+  assert.equal(atlasCustomIncludeHeaders("Bearer sk-abc"), "Authorization: Bearer sk-abc", "完整头值 → 原始头字符串");
+  assert.equal(atlasCustomIncludeHeaders("Bearer sk-x"), "Authorization: Bearer sk-x");
+  assert.equal(atlasCustomIncludeHeaders(""), "", "空 → 空字符串（绝不能是对象）");
+  assert.equal(atlasCustomIncludeHeaders(null), "", "null → 空字符串");
+  assert.equal(atlasCustomIncludeHeaders(undefined), "", "undefined → 空字符串");
+  assert.equal(atlasCustomIncludeHeaders("   "), "", "纯空白 → 空字符串");
+  // 形状守卫：序列化结果必须是 string，绝不能是对象（对象会被酒馆静默丢弃）
+  assert.equal(typeof atlasCustomIncludeHeaders("Bearer k"), "string");
+});
+
+test("ATLAS-FIX-02 集成：浏览器预设 → 代理请求体 → 模拟上游按 YAML 头鉴权成功", async () => {
+  // 模拟酒馆后端代理行为：收到 /generate 后解析 custom_include_headers（YAML 行），
+  // 把鉴权头合并进上游请求；只有头字符串格式正确且密钥匹配才返回草稿，否则 401。
+  const UPSTREAM_KEY = "Bearer sk-good-key";
+  const proxyFetchStub = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    const headerLine = body.custom_include_headers;
+    if (typeof headerLine !== "string") {
+      return { ok: false, status: 500, json: async () => ({ error: { message: "对象头已被酒馆丢弃（真实缺陷复现）" } }) };
+    }
+    const match = /^Authorization:\s*(.+)$/.exec(headerLine.trim());
+    const received = match ? match[1].trim() : "";
+    if (received !== UPSTREAM_KEY) {
+      return { ok: false, status: 401, json: async () => ({ error: { message: "上游鉴权失败" } }) };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        choices: [{
+          message: {
+            content: JSON.stringify({
+              duration: 2,
+              locationChange: null,
+              npcChanges: [],
+              memoryDrafts: [],
+              summary: "集成链路：鉴权成功，草稿可解析。",
+            }),
+          },
+        }],
+      }),
+    };
+  };
+  const proxyFetch = createStProxyFetch({ getContext: fakeContext(), fetchFn: proxyFetchStub });
+
+  const result = await callAtlasWorldTurnApi(
+    { name: "集成", endpoint: "https://api.example.com/v1/chat/completions", model: "m1", apiKey: "sk-good-key" },
+    { injectionText: "ctx", userText: "用户行动", assistantText: "回复" },
+    { fetchFn: proxyFetch },
+  );
+  assert.ok(result.ok, `完整链路应鉴权成功：${result.ok ? "" : result.message}`);
+  assert.ok(result.text.includes("集成链路"), "上游返回的草稿正文可用");
+});
+
+test("ATLAS-FIX-02 集成：鉴权头格式错误 → 上游 401，错误码 API_AUTH_FAILED", async () => {
+  const proxyFetchStub = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    const ok = body.custom_include_headers === "Authorization: Bearer sk-right";
+    return ok
+      ? { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: "{}" } }] }) }
+      : { ok: false, status: 401, json: async () => ({ error: { message: "unauthorized" } }) };
+  };
+  const proxyFetch = createStProxyFetch({ getContext: fakeContext(), fetchFn: proxyFetchStub });
+  const result = await callAtlasWorldTurnApi(
+    { name: "错钥", endpoint: "https://api.example.com/v1/chat/completions", model: "m1", apiKey: "sk-wrong" },
+    { injectionText: "ctx", userText: "u", assistantText: "a" },
+    { fetchFn: proxyFetch },
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.code, ATLAS_ERROR_CODES.API_AUTH_FAILED);
+  assert.ok(!JSON.stringify(result).includes("sk-"), "错误信息不得含密钥");
+});
+
+test("ATLAS-FIX-02：错误提示分类（401/403/404/429/非 JSON/空结构/不可达）", async () => {
+  const call = (status, rawBody, parseError) => {
+    const fetchFn = async () => ({
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => {
+        if (parseError) throw new Error("not json");
+        return rawBody;
+      },
+    });
+    return callAtlasWorldTurnApi(
+      { name: "t", endpoint: "https://api.example.com/v1/chat/completions", model: "m1", apiKey: "" },
+      { injectionText: "c", userText: "u", assistantText: "a" },
+      { fetchFn },
+    );
+  };
+  const auth = await call(401, {});
+  assert.equal(auth.code, ATLAS_ERROR_CODES.API_AUTH_FAILED, "401 → 鉴权失败");
+  const forbidden = await call(403, {});
+  assert.equal(forbidden.code, ATLAS_ERROR_CODES.API_AUTH_FAILED, "403 → 鉴权失败");
+  const notFound = await call(404, {});
+  assert.equal(notFound.code, ATLAS_ERROR_CODES.API_NOT_FOUND, "404 → 地址或模型不存在");
+  assert.ok(/模型|地址/.test(notFound.message), "404 提示指明模型名或地址");
+  const rate = await call(429, {});
+  assert.equal(rate.code, ATLAS_ERROR_CODES.API_RATE_LIMITED, "429 → 限流");
+  assert.equal(rate.retryable, true, "限流可重试");
+  const badJson = await call(200, {}, true);
+  assert.equal(badJson.code, ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "响应非 JSON → 结构损坏");
+  const emptyStructure = await call(200, { object: "without choices" });
+  assert.equal(emptyStructure.code, ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "响应结构非法（无可取正文）");
+  const offline = await callAtlasWorldTurnApi(
+    { name: "t", endpoint: "https://api.example.com/v1/chat/completions", model: "m1", apiKey: "" },
+    { injectionText: "c", userText: "u", assistantText: "a" },
+    { fetchFn: async () => { throw new Error("ECONNREFUSED"); } },
+  );
+  assert.equal(offline.code, ATLAS_ERROR_CODES.SERVICE_OFFLINE, "地址不可达 → SERVICE_OFFLINE");
 });
 
 test("proxy fetch: signal 透传（超时中止链路保持）", async () => {

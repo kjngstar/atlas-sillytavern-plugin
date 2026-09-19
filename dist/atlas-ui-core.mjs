@@ -693,11 +693,19 @@ function buildWorldTurnUserContent(input) {
   ].join("\n");
 }
 function errorMessageForStatus(status) {
-  if (status === 401 || status === 403) return { code: ATLAS_ERROR_CODES.API_AUTH_FAILED, retryable: false };
-  if (status === 404) return { code: ATLAS_ERROR_CODES.API_NOT_FOUND, retryable: false };
-  if (status === 429) return { code: ATLAS_ERROR_CODES.API_RATE_LIMITED, retryable: true };
-  if (status >= 500) return { code: ATLAS_ERROR_CODES.API_REQUEST_FAILED, retryable: true };
-  return { code: ATLAS_ERROR_CODES.API_REQUEST_FAILED, retryable: false };
+  if (status === 401 || status === 403) {
+    return { code: ATLAS_ERROR_CODES.API_AUTH_FAILED, retryable: false, message: "推演服务鉴权失败（HTTP 401/403），请检查密钥。" };
+  }
+  if (status === 404) {
+    return { code: ATLAS_ERROR_CODES.API_NOT_FOUND, retryable: false, message: "推演服务返回 HTTP 404：API 地址或模型名可能不存在。" };
+  }
+  if (status === 429) {
+    return { code: ATLAS_ERROR_CODES.API_RATE_LIMITED, retryable: true, message: "推演服务限流（HTTP 429），请稍后重试。" };
+  }
+  if (status >= 500) {
+    return { code: ATLAS_ERROR_CODES.API_REQUEST_FAILED, retryable: true, message: `推演服务错误（HTTP ${status}）。` };
+  }
+  return { code: ATLAS_ERROR_CODES.API_REQUEST_FAILED, retryable: false, message: `推演服务返回 HTTP ${status}。` };
 }
 async function callAtlasWorldTurnApi(preset, input, deps = {}) {
   const now = deps.now ?? Date.now;
@@ -744,7 +752,7 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
     }
     if (!response.ok) {
       const mapped = errorMessageForStatus(response.status);
-      return fail3(mapped.code, `推演服务返回 HTTP ${response.status}。`, mapped.retryable, response.status);
+      return fail3(mapped.code, mapped.message, mapped.retryable, response.status);
     }
     let payload;
     try {
@@ -898,6 +906,65 @@ function maskPreset(preset) {
     temperature: preset.temperature ?? null,
     timeoutMs: preset.timeoutMs ?? null,
     apiKey: { exists: key.trim().length > 0, tail: key.trim().length >= 4 ? key.trim().slice(-4) : null }
+  };
+}
+
+// src/atlas-proxy-fetch.ts
+var ATLAS_ST_GENERATE_PATH = "/api/backends/chat-completions/generate";
+function atlasCustomIncludeHeaders(headerValue) {
+  const value = (headerValue ?? "").trim();
+  return value ? `Authorization: ${value}` : "";
+}
+function pickAuthorization(headers) {
+  if (!headers || typeof headers !== "object" || Array.isArray(headers)) return null;
+  const record = headers;
+  for (const [key, value] of Object.entries(record)) {
+    if (key.toLowerCase() === "authorization" && typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return null;
+}
+function createStProxyFetch(deps) {
+  const innerFetch = deps.fetchFn ?? globalThis.fetch.bind(globalThis);
+  return async function atlasProxiedFetch(input, init) {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const method = (init?.method ?? "POST").toUpperCase();
+    let payload = null;
+    if (method === "POST" && typeof init?.body === "string" && init.body.trimStart().startsWith("{")) {
+      try {
+        const parsed = JSON.parse(init.body);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && "model" in parsed && "messages" in parsed) {
+          payload = parsed;
+        }
+      } catch {
+        payload = null;
+      }
+    }
+    if (!payload) {
+      return innerFetch(input, init);
+    }
+    const authorization = pickAuthorization(init?.headers);
+    const csrfHeaders = deps.getContext().getRequestHeaders() ?? {};
+    const proxyBody = {
+      chat_completion_source: "custom",
+      custom_url: url,
+      model: payload.model,
+      messages: payload.messages,
+      stream: payload.stream ?? false,
+      ...payload.temperature !== void 0 ? { temperature: payload.temperature } : {},
+      ...payload.max_tokens !== void 0 ? { max_tokens: payload.max_tokens } : {},
+      custom_include_headers: atlasCustomIncludeHeaders(authorization)
+    };
+    return innerFetch(ATLAS_ST_GENERATE_PATH, {
+      method: "POST",
+      headers: {
+        ...csrfHeaders,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(proxyBody),
+      signal: init?.signal
+    });
   };
 }
 
@@ -3714,6 +3781,230 @@ function adjudicateAtlasDraft(world, input) {
   return { draft: next, notes };
 }
 
+// lib/world-npc.ts
+function resolveCharacterPosition(world, characterId, opts = {}) {
+  const state = characterStateFor(world, characterId, opts.branchId ?? null);
+  if (state) {
+    return {
+      characterId,
+      regionId: state.currentRegionId ?? null,
+      pointId: state.currentPointId ?? null,
+      source: "state",
+      scope: state.branchId ? "branch" : "canon",
+      branchId: state.branchId ?? null
+    };
+  }
+  const legacy = (world.characters ?? []).find((c) => c.id === characterId);
+  if (legacy) {
+    return {
+      characterId,
+      regionId: legacy.currentRegionId ?? null,
+      pointId: null,
+      source: "legacy",
+      scope: "legacy",
+      branchId: null
+    };
+  }
+  return { characterId, regionId: null, pointId: null, source: "none", scope: "none", branchId: null };
+}
+function pointBelongsToRegion(world, pointId, regionId) {
+  const p = (world.points ?? []).find((x) => String(x.id) === String(pointId));
+  if (!p) return false;
+  return (p.regionId ?? null) === (regionId ?? null);
+}
+function moveCharacterTo(world, characterId, regionId, pointId, now = 0, opts = {}) {
+  if (!(world.characters ?? []).some((c) => c.id === characterId)) {
+    return { world, ok: false, reason: `人物 ${characterId} 不存在，未移动。` };
+  }
+  if (regionId && !(world.regions ?? []).some((r) => r.id === regionId)) {
+    return { world, ok: false, reason: `地区 ${regionId} 不存在，未移动（避免写入悬空引用）。` };
+  }
+  if (pointId) {
+    if (!(world.points ?? []).some((p) => String(p.id) === String(pointId))) {
+      return { world, ok: false, reason: `地点 ${pointId} 不存在，未移动。` };
+    }
+    if (!pointBelongsToRegion(world, pointId, regionId)) {
+      return {
+        world,
+        ok: false,
+        reason: `地点 ${pointId} 不属于地区 ${regionId ?? "未指定"}，未移动（地点与地区必须一致）。`
+      };
+    }
+  }
+  const branchId = opts.branchId ?? null;
+  const states = [...world.characterStates ?? []];
+  const idx = states.findIndex(
+    (s) => s.characterId === characterId && (branchId ? s.branchId === branchId : !s.branchId)
+  );
+  const patch = {
+    characterId,
+    currentRegionId: regionId ?? null,
+    currentPointId: pointId ?? null,
+    updatedAt: now,
+    ...branchId ? { branchId } : {}
+  };
+  if (idx >= 0) {
+    const prev = states[idx];
+    states[idx] = { ...prev, ...patch, ...prev.status !== void 0 ? { status: prev.status } : {} };
+  } else {
+    states.push(patch);
+  }
+  return { world: { ...world, characterStates: states }, ok: true, reason: "已移动。" };
+}
+function charactersAtPoint(world, pointId, opts = {}) {
+  const target = String(pointId);
+  return (world.characters ?? []).map((c) => c.id).filter((id) => {
+    const pos = resolveCharacterPosition(world, id, opts);
+    return pos.pointId !== null && String(pos.pointId) === target;
+  });
+}
+function charactersInRegion(world, regionId, opts = {}) {
+  return (world.characters ?? []).map((c) => c.id).filter((id) => resolveCharacterPosition(world, id, opts).regionId === regionId);
+}
+
+// src/atlas-schedule.ts
+var DEFAULT_PERIODS_PER_DAY = 12;
+var MIN_PERIODS_PER_DAY = 1;
+var MAX_PERIODS_PER_DAY = 72;
+var MAX_ROUTINE_SEGMENTS = 12;
+function periodsPerDayOf(world) {
+  const cfg = (world.entityRecords ?? []).find((r) => r.type === "world");
+  const raw = cfg?.baseline["periodsPerDay"];
+  if (typeof raw === "number" && Number.isFinite(raw) && Number.isInteger(raw) && raw >= MIN_PERIODS_PER_DAY && raw <= MAX_PERIODS_PER_DAY) {
+    return raw;
+  }
+  return DEFAULT_PERIODS_PER_DAY;
+}
+function parseRoutineSegments(raw) {
+  if (!Array.isArray(raw)) return [];
+  const segments = [];
+  for (const item of raw) {
+    if (typeof item !== "string" || item.length === 0 || item.length > 200) continue;
+    const match = /^(\d+)-(\d+):(.+)$/.exec(item.trim());
+    if (!match) continue;
+    const start = Number(match[1]);
+    const end = Number(match[2]);
+    const pointId = match[3].trim();
+    if (!Number.isInteger(start) || !Number.isInteger(end)) continue;
+    if (start < 0 || end <= start || pointId === "") continue;
+    segments.push({ start, end, pointId });
+    if (segments.length >= MAX_ROUTINE_SEGMENTS) break;
+  }
+  return segments;
+}
+function routineFor(world, characterId) {
+  const record = (world.entityRecords ?? []).find((r) => String(r.id) === String(characterId));
+  if (!record) return [];
+  return parseRoutineSegments(record.baseline["routine"]);
+}
+function routinePointAt(segments, periodOfDay) {
+  for (const seg of segments) {
+    if (periodOfDay >= seg.start && periodOfDay < seg.end) return seg.pointId;
+  }
+  return null;
+}
+var PROTAGONIST_ROLES = /* @__PURE__ */ new Set(["protagonist", "主角", "player", "玩家", "user", "observer", "观察者"]);
+function isProtagonistRole(role) {
+  if (typeof role !== "string") return false;
+  return PROTAGONIST_ROLES.has(role.trim().toLowerCase()) || PROTAGONIST_ROLES.has(role.trim());
+}
+function settleNpcSchedules(world, input) {
+  const prevTime = Math.max(0, Math.floor(input.prevTime));
+  const newTime = Math.max(prevTime, Math.floor(input.newTime));
+  const periodsPerDay = periodsPerDayOf(world);
+  const knownPointIds = new Set((world.points ?? []).map((p) => String(p.id)));
+  const nameOf = (id) => (world.characters ?? []).find((c) => String(c.id) === String(id))?.name ?? id;
+  const playerAt = (at) => {
+    if (input.playerToPointId) {
+      return at === newTime ? input.playerToPointId : null;
+    }
+    return input.playerFromPointId;
+  };
+  const characters = (world.characters ?? []).filter((c) => !isProtagonistRole(c.role));
+  const hasRoutineRecord = new Set(
+    (world.entityRecords ?? []).filter((r) => characters.some((c) => String(c.id) === String(r.id))).map((r) => String(r.id))
+  );
+  const isNpcRole = (id) => {
+    const role = (world.characters ?? []).find((c) => String(c.id) === String(id))?.role;
+    return typeof role === "string" && role.trim().toLowerCase() === "npc";
+  };
+  const isEncounterCandidate = (id) => hasRoutineRecord.has(id) || isNpcRole(id);
+  const positions = /* @__PURE__ */ new Map();
+  for (const c of characters) {
+    const pos = resolveCharacterPosition(world, String(c.id), { branchId: input.branchId });
+    positions.set(String(c.id), { regionId: pos.regionId, pointId: pos.pointId });
+  }
+  const routines = /* @__PURE__ */ new Map();
+  const droppedUnknownPoints = /* @__PURE__ */ new Map();
+  for (const c of characters) {
+    const id = String(c.id);
+    const segments = routineFor(world, id).filter((seg) => {
+      if (knownPointIds.has(seg.pointId)) return true;
+      droppedUnknownPoints.set(seg.pointId, id);
+      return false;
+    });
+    routines.set(id, segments);
+  }
+  const working = world;
+  let current = working;
+  const moves = [];
+  const encounters = [];
+  const seenEncounters = /* @__PURE__ */ new Set();
+  const now = input.now ?? 0;
+  for (let at = prevTime + 1; at <= newTime; at += 1) {
+    const periodOfDay = (at % periodsPerDay + periodsPerDay) % periodsPerDay;
+    for (const c of characters) {
+      const id = String(c.id);
+      const segments = routines.get(id) ?? [];
+      if (segments.length === 0) continue;
+      const target = routinePointAt(segments, periodOfDay);
+      const pos = positions.get(id);
+      if (!target || target === pos.pointId) continue;
+      const point = (world.points ?? []).find((p) => String(p.id) === String(target));
+      const regionId = point?.regionId ?? null;
+      const fromPointId = pos.pointId;
+      const moved = moveCharacterTo(current, id, regionId ?? null, target, now, { branchId: input.branchId });
+      if (moved.ok) {
+        current = moved.world;
+        pos.regionId = regionId ?? null;
+        pos.pointId = target;
+        moves.push({ characterId: id, characterName: nameOf(id), pointId: target, fromPointId, periodOfDay });
+      }
+    }
+    const playerPointId = playerAt(at);
+    if (!playerPointId) continue;
+    for (const c of characters) {
+      const id = String(c.id);
+      if (!isEncounterCandidate(id)) continue;
+      const pos = positions.get(id);
+      if (!pos.pointId || String(pos.pointId) !== String(playerPointId)) continue;
+      const key = `${id}:${pos.pointId}`;
+      if (seenEncounters.has(key)) continue;
+      seenEncounters.add(key);
+      encounters.push({ characterId: id, characterName: nameOf(id), pointId: pos.pointId, at });
+    }
+  }
+  const notes = [];
+  for (const unknownPoint of droppedUnknownPoints.keys()) {
+    notes.push(`〔日程〕忽略日程里的未知地点「${unknownPoint.slice(0, 32)}」`);
+  }
+  if (moves.length > 0) {
+    const detail = moves.slice(0, 6).map((m) => `${m.characterName} 从「${(m.fromPointId ?? "?").slice(0, 24)}」到「${m.pointId.slice(0, 24)}」（日内第 ${m.periodOfDay} 时段）`).join("；");
+    notes.push(`〔日程〕${moves.length} 次 NPC 日常移动：${detail}${moves.length > 6 ? "…" : ""}`);
+  }
+  if (encounters.length > 0) {
+    const detail = encounters.slice(0, 6).map((e) => `${e.characterName} 在「${e.pointId.slice(0, 24)}」相遇（时段 ${e.at}）`).join("；");
+    notes.push(`〔日程〕同段同地遭遇：${detail}${encounters.length > 6 ? "…" : ""}`);
+  }
+  return { world: current, moves, encounters, notes };
+}
+function mergeSettlementNotes(summary, notes) {
+  if (notes.length === 0) return summary;
+  const base = summary.trim();
+  const merged = `${base}${base ? "；" : ""}${notes.join("；")}`;
+  return merged.slice(0, W0_LIMITS.maxStateEventSummary);
+}
+
 // lib/world-definition.ts
 function latestRevision(world) {
   const list = world.definitionRevisions ?? [];
@@ -4764,43 +5055,6 @@ function restoreAsPlayhead(world, checkpointId, opts = { now: 0 }) {
   };
 }
 
-// lib/world-npc.ts
-function resolveCharacterPosition(world, characterId, opts = {}) {
-  const state = characterStateFor(world, characterId, opts.branchId ?? null);
-  if (state) {
-    return {
-      characterId,
-      regionId: state.currentRegionId ?? null,
-      pointId: state.currentPointId ?? null,
-      source: "state",
-      scope: state.branchId ? "branch" : "canon",
-      branchId: state.branchId ?? null
-    };
-  }
-  const legacy = (world.characters ?? []).find((c) => c.id === characterId);
-  if (legacy) {
-    return {
-      characterId,
-      regionId: legacy.currentRegionId ?? null,
-      pointId: null,
-      source: "legacy",
-      scope: "legacy",
-      branchId: null
-    };
-  }
-  return { characterId, regionId: null, pointId: null, source: "none", scope: "none", branchId: null };
-}
-function charactersAtPoint(world, pointId, opts = {}) {
-  const target = String(pointId);
-  return (world.characters ?? []).map((c) => c.id).filter((id) => {
-    const pos = resolveCharacterPosition(world, id, opts);
-    return pos.pointId !== null && String(pos.pointId) === target;
-  });
-}
-function charactersInRegion(world, regionId, opts = {}) {
-  return (world.characters ?? []).map((c) => c.id).filter((id) => resolveCharacterPosition(world, id, opts).regionId === regionId);
-}
-
 // src/atlas-relevance.ts
 function deriveAtlasTurnSeed(world, chatId, messageId, at) {
   const actionCount = parseInt(hashString(`${chatId}|${messageId}`).slice(0, 8), 16) >>> 0;
@@ -5435,7 +5689,7 @@ function createAtlasServerCore(deps) {
     return okResult({
       ok: true,
       plugin: "atlas",
-      version: "0.9.1",
+      version: "0.9.2",
       protocolVersion: 1,
       time: now()
     });
@@ -5768,8 +6022,34 @@ function createAtlasServerCore(deps) {
     if (receipt.status === "failed") {
       return okResult({ receipt });
     }
-    await store.write(`world:${binding.worldId}`, output.world);
-    worldCache.set(binding.worldId, output.world);
+    let settledWorld = output.world;
+    if (receipt.status === "committed") {
+      const settlement = settleNpcSchedules(output.world, {
+        branchId: pending.binding.branchId,
+        prevTime: pending.binding.worldTimeCursor,
+        newTime: receipt.currentTime,
+        playerFromPointId: pending.binding.currentPointId,
+        playerToPointId: receipt.currentLocationId ?? null,
+        now: now()
+      });
+      settledWorld = settlement.world;
+      if (settlement.encounters.length > 0) {
+        receipt.triggeredNpcIds = settlement.encounters.map((e) => e.characterId);
+      }
+      if (settlement.notes.length > 0) {
+        receipt.summary = mergeSettlementNotes(receipt.summary, settlement.notes);
+        pushLog({
+          at: now(),
+          kind: "world-turn-settlement",
+          chatId: request.chatId,
+          moves: settlement.moves.length,
+          encounters: settlement.encounters.length,
+          notes: settlement.notes
+        });
+      }
+    }
+    await store.write(`world:${binding.worldId}`, settledWorld);
+    worldCache.set(binding.worldId, settledWorld);
     const nextBinding = {
       ...binding,
       worldTimeCursor: receipt.currentTime,
@@ -6729,61 +7009,6 @@ function buildWorldFromTemplate(template, opts) {
     ...outcomes ? { outcomes } : {},
     ...entryAnchors ? { entryAnchors } : {},
     ...travelSettings ? { travelSettings } : {}
-  };
-}
-
-// src/atlas-proxy-fetch.ts
-var ATLAS_ST_GENERATE_PATH = "/api/backends/chat-completions/generate";
-function pickAuthorization(headers) {
-  if (!headers || typeof headers !== "object" || Array.isArray(headers)) return null;
-  const record = headers;
-  for (const [key, value] of Object.entries(record)) {
-    if (key.toLowerCase() === "authorization" && typeof value === "string" && value.trim()) {
-      return value.trim();
-    }
-  }
-  return null;
-}
-function createStProxyFetch(deps) {
-  const innerFetch = deps.fetchFn ?? globalThis.fetch.bind(globalThis);
-  return async function atlasProxiedFetch(input, init) {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const method = (init?.method ?? "POST").toUpperCase();
-    let payload = null;
-    if (method === "POST" && typeof init?.body === "string" && init.body.trimStart().startsWith("{")) {
-      try {
-        const parsed = JSON.parse(init.body);
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && "model" in parsed && "messages" in parsed) {
-          payload = parsed;
-        }
-      } catch {
-        payload = null;
-      }
-    }
-    if (!payload) {
-      return innerFetch(input, init);
-    }
-    const authorization = pickAuthorization(init?.headers);
-    const csrfHeaders = deps.getContext().getRequestHeaders() ?? {};
-    const proxyBody = {
-      chat_completion_source: "custom",
-      custom_url: url,
-      model: payload.model,
-      messages: payload.messages,
-      stream: payload.stream ?? false,
-      ...payload.temperature !== void 0 ? { temperature: payload.temperature } : {},
-      ...payload.max_tokens !== void 0 ? { max_tokens: payload.max_tokens } : {},
-      custom_include_headers: authorization ? { Authorization: authorization } : {}
-    };
-    return innerFetch(ATLAS_ST_GENERATE_PATH, {
-      method: "POST",
-      headers: {
-        ...csrfHeaders,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(proxyBody),
-      signal: init?.signal
-    });
   };
 }
 

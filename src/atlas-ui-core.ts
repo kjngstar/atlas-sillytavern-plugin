@@ -27,6 +27,8 @@ import { parseAtlasLorebookPlans, type AtlasLorebookPlans } from "./atlas-lorebo
 
 /** 内置默认推演提示词（API 页「查看内置默认提示词」用；开发态 src 直载时也必须可见）。 */
 export { DEFAULT_WORLD_TURN_SYSTEM_PROMPT } from "./atlas-api-client.ts";
+// ATLAS-FIX-02：custom_include_headers 的唯一序列化口径（模型列表 / 生成共用；随 bundle 供给 index.js）。
+export { atlasCustomIncludeHeaders } from "./atlas-proxy-fetch.ts";
 
 export type AtlasUiMode = "offline" | "protocol-incompatible" | "unbound" | "world-missing" | "ready";
 export type AtlasUiPage = "overview" | "map" | "nearby" | "changes" | "api" | "settings";

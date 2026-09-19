@@ -16,6 +16,7 @@
 import type { EntityRecord, World } from "../lib/world-schema.ts";
 import { parseWorld } from "../lib/world-schema.ts";
 import { adjudicateAtlasDraft } from "./atlas-adjudicate.ts";
+import { settleNpcSchedules, mergeSettlementNotes } from "./atlas-schedule.ts";
 import { ledgerForBranch } from "../lib/world-ledger.ts";
 import { createCheckpoint, previewRestore, restoreAsPlayhead } from "../lib/world-checkpoint.ts";
 import { resolveCharacterPosition } from "../lib/world-npc.ts";
@@ -396,7 +397,7 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
     return okResult({
       ok: true,
       plugin: "atlas",
-      version: "0.9.1",
+      version: "0.9.2",
       protocolVersion: 1,
       time: now(),
     });
@@ -783,9 +784,40 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
       return okResult({ receipt });
     }
 
+    // 6.5 ATLAS-13 回合边界 NPC 日程结算：只结算新鲜提交（duplicate 的位置已是
+    //     确定性重算结果，重放只会重复注记）。结算读提交后的世界与时间——
+    //     玩家先提交的事实即现实；NPC 移动只写 NPC 自己的 CharacterState；
+    //     同段同地遭遇进 triggeredNpcIds + 〔日程〕注记（可审计）。
+    let settledWorld = output.world;
+    if (receipt.status === "committed") {
+      const settlement = settleNpcSchedules(output.world, {
+        branchId: pending.binding.branchId,
+        prevTime: pending.binding.worldTimeCursor,
+        newTime: receipt.currentTime,
+        playerFromPointId: pending.binding.currentPointId,
+        playerToPointId: receipt.currentLocationId ?? null,
+        now: now(),
+      });
+      settledWorld = settlement.world;
+      if (settlement.encounters.length > 0) {
+        receipt.triggeredNpcIds = settlement.encounters.map((e) => e.characterId);
+      }
+      if (settlement.notes.length > 0) {
+        receipt.summary = mergeSettlementNotes(receipt.summary, settlement.notes);
+        pushLog({
+          at: now(),
+          kind: "world-turn-settlement",
+          chatId: request.chatId,
+          moves: settlement.moves.length,
+          encounters: settlement.encounters.length,
+          notes: settlement.notes,
+        });
+      }
+    }
+
     // 7. 成功：原子保存新世界 + 更新绑定游标 + 清理 pending + 缓存回执
-    await store.write(`world:${binding.worldId}`, output.world);
-    worldCache.set(binding.worldId, output.world);
+    await store.write(`world:${binding.worldId}`, settledWorld);
+    worldCache.set(binding.worldId, settledWorld);
     const nextBinding: AtlasChatBinding = {
       ...binding,
       worldTimeCursor: receipt.currentTime,
