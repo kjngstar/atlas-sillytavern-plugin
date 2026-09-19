@@ -4376,7 +4376,7 @@ function buildAtlasChatUrl(endpoint) {
   url.pathname = `${base}/chat/completions`;
   return url.toString();
 }
-var WORLD_TURN_SYSTEM_PROMPT = "你是阿特拉斯世界推演引擎。基于给定的当前世界状态（位置、时间、附近人物、可达内容）与本轮用户行动、助手回复，推断本轮对世界造成的**有界结构化变化**。\n严格要求：只输出一个 JSON 对象，不要输出任何多余说明或代码围栏；字段：\nduration（本轮消耗的时段数，非负数字，≤10000）、\nlocationChange（对象或 null：{toPointId, toRegionId}，id 必须来自上下文中出现的地点）、\nnpcChanges（数组，每条形如 {entityId, key, value} 更新人物状态 / {entityId, tag} 加标签 / {entityId, removeTag} 删标签 / {entityId, targetEntityId, key, value} 改关系；entityId 必须来自上下文）、\nmemoryDrafts（数组，每条 {entityId, text}，为人物追加一条记忆，≤500 字）、\neventDrafts（数组，事件的摘要文字，仅叙述用）、\ntriggerResults（数组，本轮命中的触发器 id）、\nsummary（本轮世界变化的一句话摘要，≤500 字）。\n禁止：编造上下文之外的实体 id；输出时间地点之外的世界重写；输出任何密钥、路径或代码。";
+var DEFAULT_WORLD_TURN_SYSTEM_PROMPT = "你是阿特拉斯世界推演引擎。基于给定的当前世界状态（位置、时间、附近人物、可达内容）与本轮用户行动、助手回复，推断本轮对世界造成的**有界结构化变化**。\n严格要求：只输出一个 JSON 对象，不要输出任何多余说明或代码围栏；字段：\nduration（本轮消耗的时段数，非负数字，≤10000）、\nlocationChange（对象或 null：{toPointId, toRegionId}，id 必须来自上下文中出现的地点）、\nnpcChanges（数组，每条形如 {entityId, key, value} 更新人物状态 / {entityId, tag} 加标签 / {entityId, removeTag} 删标签 / {entityId, targetEntityId, key, value} 改关系；entityId 必须来自上下文）、\nmemoryDrafts（数组，每条 {entityId, text}，为人物追加一条记忆，≤500 字）、\neventDrafts（数组，事件的摘要文字，仅叙述用）、\ntriggerResults（数组，本轮命中的触发器 id）、\nsummary（本轮世界变化的一句话摘要，≤500 字）。\n禁止：编造上下文之外的实体 id；输出时间地点之外的世界重写；输出任何密钥、路径或代码。";
 function buildWorldTurnUserContent(input) {
   return [
     "【当前世界状态与可达内容】",
@@ -4428,7 +4428,7 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
         body: JSON.stringify({
           model: preset.model.trim(),
           messages: [
-            { role: "system", content: WORLD_TURN_SYSTEM_PROMPT },
+            { role: "system", content: preset.systemPrompt?.trim() || DEFAULT_WORLD_TURN_SYSTEM_PROMPT },
             { role: "user", content: buildWorldTurnUserContent(input) }
           ],
           stream: false,
@@ -4612,6 +4612,7 @@ var SETTINGS_DOC = "settings";
 var MAX_ENDPOINT_CHARS = 2048;
 var MAX_API_KEY_CHARS = 4096;
 var MAX_PRESET_NAME_CHARS = 64;
+var MAX_SYSTEM_PROMPT_CHARS = 8e3;
 var RPM_WINDOW_MS = 6e4;
 function isValidPreset(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -4629,6 +4630,7 @@ function isValidPreset(value) {
   if (record.maxTokens !== void 0 && (typeof record.maxTokens !== "number" || record.maxTokens < 1 || record.maxTokens > 8192)) return false;
   if (record.temperature !== void 0 && (typeof record.temperature !== "number" || record.temperature < 0 || record.temperature > 2)) return false;
   if (record.timeoutMs !== void 0 && (typeof record.timeoutMs !== "number" || record.timeoutMs < 1e3 || record.timeoutMs > 12e4)) return false;
+  if (record.systemPrompt !== void 0 && (typeof record.systemPrompt !== "string" || record.systemPrompt.length > MAX_SYSTEM_PROMPT_CHARS)) return false;
   return true;
 }
 function validateSettingsBody(raw) {
@@ -4787,7 +4789,7 @@ function createAtlasServerCore(deps) {
     return okResult({
       ok: true,
       plugin: "atlas",
-      version: "0.7.5",
+      version: "0.7.6",
       protocolVersion: 1,
       time: now()
     });
@@ -6031,6 +6033,7 @@ export {
   ATLAS_ST_GENERATE_PATH,
   ATLAS_UI_EVENTS,
   AtlasError,
+  DEFAULT_WORLD_TURN_SYSTEM_PROMPT,
   DEMO_TEMPLATES,
   atlasClampZoom,
   buildWorldFromTemplate,

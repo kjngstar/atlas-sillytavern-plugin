@@ -710,6 +710,39 @@ select.aw-input,
   text-overflow: ellipsis;
 }
 
+textarea.aw-input--area {
+  resize: vertical;
+  line-height: 1.5;
+  font-family: var(--aw-sans);
+}
+
+.aw-details {
+  margin-top: 10px;
+  border: 1px solid var(--aw-line);
+  border-radius: 7px;
+  background: var(--aw-panel);
+}
+
+.aw-details > summary {
+  cursor: pointer;
+  padding: 8px 10px;
+  font-family: var(--aw-sans);
+  font-size: 12px;
+  color: var(--aw-muted);
+  user-select: none;
+}
+
+.aw-pre {
+  margin: 0;
+  padding: 0 10px 10px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--aw-sans);
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--aw-ink);
+}
+
 /* 说明条 */
 
 .aw-note {

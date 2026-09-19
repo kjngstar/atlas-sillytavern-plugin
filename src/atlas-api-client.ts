@@ -29,6 +29,8 @@ export interface AtlasApiPreset {
   maxTokens?: number;
   temperature?: number;
   timeoutMs?: number;
+  /** 自定义系统提示词；留空 / 省略 = 使用内置默认（DEFAULT_WORLD_TURN_SYSTEM_PROMPT）。 */
+  systemPrompt?: string;
 }
 
 export interface AtlasApiCallResult {
@@ -64,7 +66,11 @@ export function buildAtlasChatUrl(endpoint: string): string | null {
   return url.toString();
 }
 
-const WORLD_TURN_SYSTEM_PROMPT =
+/**
+ * 内置默认系统提示词（UI「API」页可查看；预设 systemPrompt 留空时生效）。
+ * 修改输出契约（字段名 / 形状）必须同步 parseAtlasWorldTurnDraft，否则解析会整单失败。
+ */
+export const DEFAULT_WORLD_TURN_SYSTEM_PROMPT =
   "你是阿特拉斯世界推演引擎。基于给定的当前世界状态（位置、时间、附近人物、可达内容）与本轮用户行动、助手回复，" +
   "推断本轮对世界造成的**有界结构化变化**。\n" +
   "严格要求：只输出一个 JSON 对象，不要输出任何多余说明或代码围栏；字段：\n" +
@@ -149,7 +155,7 @@ export async function callAtlasWorldTurnApi(
         body: JSON.stringify({
           model: preset.model.trim(),
           messages: [
-            { role: "system", content: WORLD_TURN_SYSTEM_PROMPT },
+            { role: "system", content: preset.systemPrompt?.trim() || DEFAULT_WORLD_TURN_SYSTEM_PROMPT },
             { role: "user", content: buildWorldTurnUserContent(input) },
           ],
           stream: false,
