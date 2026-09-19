@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.5";
+export const ATLAS_EXTENSION_VERSION = "0.9.6";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -51,6 +51,30 @@ export function createAtlasExtension() {
 let connected = null;
 /** 在途连接 Promise：模块自初始化与 hooks.activate 并发触发时共享同一次挂载。 */
 let connecting = null;
+
+// ---------------------------------------------------------------------------
+// 运行日志（诊断用，作者 2026-09-20 反馈「增加一个日志区」）：
+// 环形缓冲只留最近 ATLAS_LOG_LIMIT 条，仅内存不落盘；**任何明细先过 redactSecrets，
+// 密钥绝不入日志**（纪律同 AR-ATLAS-07 / 规格 0.7.2）。
+// ---------------------------------------------------------------------------
+const ATLAS_LOG_LIMIT = 80;
+const atlasLogEntries = [];
+
+function redactSecrets(text) {
+  return String(text)
+    .replace(/Bearer\s+[^\s"',}】]+/gi, "Bearer [REDACTED]")
+    .replace(/("apiKey"\s*:\s*)"[^"]*"/g, '$1"[REDACTED]"');
+}
+
+function atlasLog(tag, text, detail = null) {
+  atlasLogEntries.push({
+    at: new Date(),
+    tag: String(tag),
+    text: redactSecrets(text),
+    ...(detail ? { detail: redactSecrets(detail).replace(/\s+/g, " ").slice(0, 400) } : {}),
+  });
+  if (atlasLogEntries.length > ATLAS_LOG_LIMIT) atlasLogEntries.shift();
+}
 
 async function loadUiCore() {
   // 先组件内构建产物（发布形态），再上级 src（开发形态，工程内运行才可用）
@@ -732,6 +756,51 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     return panel;
   }
 
+  /** 运行日志面板（诊断）：环形缓冲最近 N 条，可一键复制给作者排障。 */
+  function buildLogPanel() {
+    const details = document.createElement("details");
+    details.className = "aw-details";
+    const summary = document.createElement("summary");
+    summary.className = "aw-details__summary";
+    summary.textContent = `运行日志（最近 ${atlasLogEntries.length} 条，可用于排障）`;
+    details.append(summary);
+    const body = el("div", "aw-details__body");
+    const copy = el("button", "aw-btn aw-btn--ghost", "复制全部日志");
+    copy.type = "button";
+    copy.setAttribute("aria-label", "复制运行日志到剪贴板");
+    copy.addEventListener("click", async () => {
+      const text = atlasLogEntries
+        .map((entry) => `${entry.at.toLocaleTimeString()} [${entry.tag}] ${entry.text}${entry.detail ? `\n  ${entry.detail}` : ""}`)
+        .join("\n");
+      try {
+        await navigator.clipboard.writeText(text || "（日志为空）");
+        setStatus("日志已复制到剪贴板。", "ok");
+      } catch {
+        setStatus("复制被浏览器拦截，请展开后手动选择文本。", "error");
+      }
+      renderCenter();
+    });
+    body.append(copy);
+    if (atlasLogEntries.length === 0) {
+      body.append(el("p", "aw-panel__text", "暂无日志。跑一轮对话或点「加载模型列表」后，这里会记录每条推演请求的状态、耗时与响应开头（密钥已脱敏）。"));
+    } else {
+      const list = el("div", "aw-log");
+      for (const entry of [...atlasLogEntries].reverse()) {
+        const row = el("div", "aw-log__row");
+        row.append(
+          el("span", "aw-log__time", entry.at.toLocaleTimeString()),
+          el("span", "aw-log__tag", entry.tag),
+          el("span", "aw-log__text", entry.text),
+        );
+        if (entry.detail) row.append(el("pre", "aw-log__detail", entry.detail));
+        list.append(row);
+      }
+      body.append(list);
+    }
+    details.append(body);
+    return details;
+  }
+
   function renderCenter(d = data()) {
     center.innerHTML = "";
     const s = state();
@@ -873,6 +942,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       if (s.lorebookHint) center.append(el("div", "aw-note aw-note--error", s.lorebookHint));
       if (s.worldNotice) center.append(el("div", "aw-note", s.worldNotice));
       center.append(buildLorebookPanel());
+      center.append(buildLogPanel());
       return;
     }
 
@@ -889,6 +959,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       if (s.lastError) center.append(el("div", "aw-note aw-note--error", s.lastError));
       ensureSettingsLoaded();
       center.append(buildApiPanel());
+      center.append(buildLogPanel());
       return;
     }
   }
@@ -1324,6 +1395,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     settingsV2 = result.body.data;
     apiLibrary = Array.isArray(settingsV2.apiPresets) ? settingsV2.apiPresets : [];
     promptLibrary = Array.isArray(settingsV2.promptPresets) ? settingsV2.promptPresets : [];
+    atlasLog("设置", `命令 ${command.action} → 成功（连接 ${apiLibrary.length} 条 / 提示词 ${promptLibrary.length} 条）`);
     return true;
   }
 
@@ -2310,6 +2382,25 @@ async function ensureStarterWorld() {
 async function connectOnce() {
   try {
     const mod = await loadUiCore();
+
+    /** 模型请求日志包装：记录每条推演 HTTP 的状态 / 耗时 / 响应片段（脱敏）。 */
+    const loggingModelFetch = async (input, init) => {
+      const startedAt = Date.now();
+      const path = typeof input === "string" ? input : (input && typeof input.url === "string" ? input.url : String(input));
+      try {
+        const response = await globalThis.fetch(input, init);
+        let snippet = "";
+        try {
+          snippet = redactSecrets(await response.clone().text());
+        } catch { /* 片段读不到不影响请求本身 */ }
+        atlasLog("推演", `POST ${path} → HTTP ${response.status}，${Date.now() - startedAt}ms`, snippet);
+        return response;
+      } catch (error) {
+        atlasLog("推演", `POST ${path} → 网络失败，${Date.now() - startedAt}ms`, error instanceof Error ? error.message : String(error));
+        throw error;
+      }
+    };
+
     const context = () => SillyTavern.getContext();
     // ATLAS-09 纯浏览器接线：引擎核心整体打进本扩展，进程内 dispatch，零网络。
     // 文档落 extensionSettings（酒馆设置持久化）；推演模型经酒馆后端代理转发。
@@ -2329,9 +2420,27 @@ async function connectOnce() {
     });
     const engine = mod.createAtlasServerCore({
       store: engineStore,
-      fetchFn: mod.createStProxyFetch({ getContext: context }),
+      fetchFn: mod.createStProxyFetch({ getContext: context, fetchFn: loggingModelFetch }),
     });
-    const api = mod.createLocalAtlasApi(engine);
+    // 引擎请求包装：每个 dispatch 记一条日志（方法 + 路径 + 结果码，绝不记请求体）
+    const logApiCall = async (method, path, call) => {
+      const startedAt = Date.now();
+      try {
+        const result = await call();
+        const ok = result && typeof result === "object" && "ok" in result ? result.ok : undefined;
+        const status = result && typeof result === "object" && "status" in result ? result.status : "";
+        const errCode = result && typeof result === "object" && result.body?.ok === false ? result.body?.error?.code : null;
+        atlasLog("引擎", `${method} ${path} → ${ok === false ? `失败（${errCode ?? "ERR"}）` : String(status) || "完成"}，${Date.now() - startedAt}ms`);
+        return result;
+      } catch (error) {
+        atlasLog("引擎", `${method} ${path} → 异常，${Date.now() - startedAt}ms`, error instanceof Error ? error.message : String(error));
+        throw error;
+      }
+    };
+    const innerApi = mod.createLocalAtlasApi(engine);
+    const api = {
+      request: (method, path, body) => logApiCall(method, path, () => innerApi.request(method, path, body)),
+    };
     atlasRuntime.mod = mod;
     atlasRuntime.api = api;
 

@@ -379,3 +379,32 @@ test("proxy fetch: 非 chat-completions 载荷直接透传不改写", async () =
   await proxyFetch("https://other.example.com/ping", { method: "POST", body: "not-json" });
   assert.equal(fetchFn.calls[0].url, "https://other.example.com/ping");
 });
+
+
+// ---------------------------------------------------------------------------
+// 0.9.6：响应形状兼容（作者真实酒馆报「返回为空或不支持的格式」）
+// ---------------------------------------------------------------------------
+
+test("callAtlasWorldTurnApi：content 分段数组 / ollama 形状 / SSE 强制流式均可取正文", async () => {
+  const input = { injectionText: "c", userText: "u", assistantText: "a" };
+  const preset = { name: "t", endpoint: "https://api.example.com/v1/chat/completions", model: "m1", apiKey: "" };
+  const withBody = (body) =>
+    callAtlasWorldTurnApi(preset, input, {
+      fetchFn: async () => ({ ok: true, status: 200, text: async () => (typeof body === "string" ? body : JSON.stringify(body)) }),
+    });
+
+  const parts = await withBody({ choices: [{ message: { content: [{ type: "text", text: "{\"duration\":1}" }] } }] });
+  assert.ok(parts.ok, "content 分段数组应可用: " + String(parts.ok ? "" : parts.message));
+  assert.ok(parts.text.includes("duration"));
+
+  const ollama = await withBody({ message: { role: "assistant", content: "{\"duration\":2}" } });
+  assert.ok(ollama.ok, "ollama 形状应可用: " + String(ollama.ok ? "" : ollama.message));
+
+  const sse = await withBody('data: ' + JSON.stringify({ choices: [{ message: { content: JSON.stringify({ duration: 3 }) } }] }) + '\n\ndata: [DONE]\n');
+  assert.ok(sse.ok, "SSE 强制流式应可兜底: " + String(sse.ok ? "" : sse.message));
+
+  const errorShape = await withBody({ error: { message: "quota exceeded" } });
+  assert.equal(errorShape.code, ATLAS_ERROR_CODES.RESPONSE_MALFORMED);
+  assert.ok(errorShape.message.includes("quota exceeded"), "报错应含响应片段: " + errorShape.message);
+  assert.ok(!errorShape.message.includes("Bearer sk-"), "片段不得含密钥");
+});
