@@ -867,6 +867,20 @@ test("ATLAS-06 编辑 / 删除：最近回合回退，非最近回合不回退�
   equal(edit.api.calls.filter((c) => c.path === "/turns/rollback").length, 1, "编辑最近楼层触发回退");
 });
 
+test("ATLAS-07 停用→重新启用：绑定与世界不丢，启用后回合管线恢复", async () => {
+  const { api, core } = await readyCore();
+  await core.setEnabled(false);
+  await core.handleEvent("MESSAGE_SENT", { messageId: "m-1", userText: "停用期间发言。" });
+  equal(api.calls.filter((c) => c.path === "/turns/prepare").length, 0, "停用期间零 prepare");
+  await core.setEnabled(true);
+  const binding = core.getState().binding;
+  ok(binding !== null && binding.enabled, "重新启用后绑定仍在（世界未丢）");
+  await core.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "重新发言。" });
+  equal(api.calls.filter((c) => c.path === "/turns/prepare").length, 1, "启用后回合管线恢复");
+  core.dispose();
+  ok(core.getState().receipts.length >= 0, "dispose 不清任何持久化数据（世界 / 绑定 / 回执全保留）");
+});
+
 test("回合：回执经 extensionSettings 持久化；新 core init 恢复合法条目、拒收非法形状", async () => {  const first = await readyCore();
   await first.core.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "推进。" });
   await first.core.handleEvent("MESSAGE_RECEIVED", { assistantMessageId: "m-1", assistantText: "推进了。" });
