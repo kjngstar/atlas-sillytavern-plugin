@@ -377,8 +377,8 @@ const PAGES = [
   { id: "map", label: "地图" },
   { id: "nearby", label: "附近" },
   { id: "changes", label: "变化" },
+  { id: "progression", label: "推进" },
   { id: "api", label: "API" },
-  { id: "settings", label: "设置" },
 ];
 
 const NPC_REASON_LABELS = {
@@ -436,10 +436,8 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
   let regionFilter = "";
   let dragOffsetX = 0;
   let dragOffsetY = 0;
-  let settingsSlot = "worldTurn";
   let modelOptions = [];
-  let apiFormStatus = "";
-  let apiFormStatusKind = "";
+  let settingsLoadedOnce = false;
 
   const state = () => core.getState();
   const data = () => state().stateData ?? {};
@@ -740,9 +738,14 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     if (s.page === "overview") {
       center.append(pageHeader(String(d.worldName ?? "世界概览"), ready ? "世界状态一览；左栏是写入世界书的动向，右侧是最近变化。" : undefined));
       if (!ready) {
-        center.append(emptyBox(s.modeHint ?? "尚未绑定世界——前往「设置」页选择或导入世界。"));
+        center.append(buildWorldCard(s));
+        center.append(buildAdvancedWorldSection(s));
+        if (s.lastError) center.append(el("div", "aw-note aw-note--error", s.lastError));
         return;
       }
+      if (s.lastError) center.append(el("div", "aw-note aw-note--error", s.lastError));
+      center.append(buildWorldCard(s));
+      center.append(buildAdvancedWorldSection(s));
       if (s.worldNotice) center.append(el("div", "aw-note", s.worldNotice));
       const stats = el("div", "aw-stats");
       const statsSpec = [
@@ -870,18 +873,19 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       return;
     }
 
-    if (s.page === "api") {
-      center.append(pageHeader("API", "推演 API 预设管理（shujuku 式）：在这里配置好，其余页面直接使用。密钥只保存在浏览器侧，经酒馆后端代理转发。"));
+    if (s.page === "progression") {
+      center.append(pageHeader("世界推进", "控制每轮回复后如何更新世界。这里只管理推进行为和提示词，不配置 API 地址。"));
       if (s.lastError) center.append(el("div", "aw-note aw-note--error", s.lastError));
-      center.append(buildApiPanel());
+      ensureSettingsLoaded();
+      center.append(buildProgressionPanel());
       return;
     }
 
-    if (s.page === "settings") {
-      center.append(pageHeader("设置", "世界绑定与导入。每个聊天各自记住自己的世界，切聊天自动跟随。"));
-      if (s.modeHint && !ready) center.append(el("div", "aw-note", s.modeHint));
+    if (s.page === "api") {
+      center.append(pageHeader("API 连接", "保存并切换世界推演使用的独立模型连接。提示词请在左侧「推进」中管理。"));
       if (s.lastError) center.append(el("div", "aw-note aw-note--error", s.lastError));
-      center.append(buildBindingPanel(s));
+      ensureSettingsLoaded();
+      center.append(buildApiPanel());
       return;
     }
   }
@@ -1085,92 +1089,158 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
   // 设置页：世界绑定 + 推演 API 管理（范式参照 shujuku：预设槽 / 加载模型 / 参数）
   // ---------------------------------------------------------------------------
 
-  function buildBindingPanel(s) {
-    const panel = el("section", "aw-panel");
-    panel.append(el("span", "aw-eyebrow", "世界绑定"));
+  // ---------------------------------------------------------------------------
+  // ATLAS-18 概览：当前世界卡（初始化状态 / 启停 / 高级迁移折叠）
+  // ---------------------------------------------------------------------------
+
+  function buildWorldCard(s) {
+    const panel = el("section", "aw-panel aw-world-card");
+    panel.append(el("span", "aw-eyebrow", "当前世界"));
+
+    if (s.binding) {
+      panel.append(el("p", "aw-panel__text", `已绑定：${String(s.binding.worldId)}`));
+      panel.append(el("p", "aw-panel__meta", "每条回复完成后自动推演世界；结果写入世界书。"));
+      const actions = el("div", "aw-actions");
+      const toggle = el("button", "aw-btn", s.binding.enabled ? "停用本聊天推演" : "启用本聊天推演");
+      toggle.type = "button";
+      toggle.setAttribute("aria-label", "启用或停用本聊天的 Atlas 推演");
+      toggle.addEventListener("click", () => void core.setEnabled(!s.binding?.enabled));
+      actions.append(toggle);
+      panel.append(actions);
+      return panel;
+    }
+
+    // 未绑定：主路径 = 发送第一条消息自动建世（无需导入任何 JSON）
+    panel.append(el("p", "aw-panel__text", "无需导入。发送第一条消息后，Atlas 会根据当前角色卡自动初始化世界。"));
+    const status = s.worldInitialization ?? "idle";
+    if (status === "initializing") {
+      panel.append(el("p", "aw-panel__meta", "正在初始化世界…（本回合先生成回复，世界稍后就绪）"));
+    } else if (status === "failed") {
+      panel.append(el("div", "aw-note aw-note--error", String(s.worldInitializationError ?? "世界初始化未完成。")));
+      const retry = el("button", "aw-btn aw-btn--primary", "重试初始化");
+      retry.type = "button";
+      retry.setAttribute("aria-label", "重试自动初始化世界");
+      retry.addEventListener("click", async () => {
+        retry.disabled = true;
+        try {
+          await core.initializeWorld();
+        } finally {
+          retry.disabled = false;
+          core.__renderPage?.();
+        }
+      });
+      const actions = el("div", "aw-actions");
+      actions.append(retry);
+      panel.append(actions);
+    } else {
+      panel.append(el("p", "aw-panel__meta", "也可以直接在下方「高级」里绑定已有世界或导入 JSON。"));
+    }
+    return panel;
+  }
+
+  /** 概览底部：默认折叠的高级世界管理（迁移 / 恢复 / 诊断）。 */
+  function buildAdvancedWorldSection(s) {
+    const details = document.createElement("details");
+    details.className = "aw-details";
+    const summary = document.createElement("summary");
+    summary.className = "aw-details__summary";
+    summary.textContent = "高级：迁移或恢复已有世界";
+    details.append(summary);
+
+    const body = el("div", "aw-details__body");
     const actions = el("div", "aw-actions");
-    if (s.mode === "ready" || s.mode === "world-missing") {
-      const disable = el("button", "aw-btn", s.binding?.enabled ? "停用本聊天推演" : "启用本聊天推演");
-      disable.type = "button";
-      disable.setAttribute("aria-label", "启用或停用本聊天的 Atlas 推演");
-      disable.addEventListener("click", () => void core.setEnabled(!s.binding?.enabled));
-      const unbind = el("button", "aw-btn aw-btn--danger", "解绑世界");
+
+    const demo = el("button", "aw-btn aw-btn--ghost", "一键创建演示世界并绑定");
+    demo.type = "button";
+    demo.setAttribute("aria-label", "创建演示世界并绑定到当前聊天");
+    demo.addEventListener("click", async () => {
+      demo.disabled = true;
+      try {
+        const world = mod.buildWorldFromTemplate(mod.DEMO_TEMPLATES[0], {
+          id: `world-demo-${Date.now()}`,
+          now: Date.now(),
+        });
+        const result = await api.request("POST", "/worlds/import", { world });
+        if (result.status !== 200 || !result.body?.ok) {
+          settingsStatus = `演示世界创建被拒绝：${result.body?.error?.message ?? `HTTP ${result.status}`}`;
+          settingsStatusKind = "error";
+          core.__renderPage?.();
+          return;
+        }
+        await core.bindToWorld(String(world.id));
+        core.setPage("overview");
+        core.__renderPage?.();
+      } catch (error) {
+        settingsStatus = `演示世界创建失败：${error instanceof Error ? error.message : String(error)}`;
+        settingsStatusKind = "error";
+        core.__renderPage?.();
+      } finally {
+        demo.disabled = false;
+      }
+    });
+    actions.append(demo);
+
+    const list = el("button", "aw-btn aw-btn--ghost", "读取可绑定世界列表");
+    list.type = "button";
+    list.setAttribute("aria-label", "读取 Atlas 世界列表");
+    list.addEventListener("click", async () => {
+      const worlds = await core.requestWorlds();
+      renderWorldList(worlds);
+    });
+    actions.append(list);
+
+    const importLabel = el("label", "aw-btn aw-btn--ghost", "导入世界 JSON");
+    const file = document.createElement("input");
+    file.type = "file";
+    file.accept = ".json,application/json";
+    file.setAttribute("aria-label", "选择 Atlas 世界 JSON 文件导入");
+    file.style.display = "none";
+    file.addEventListener("change", async () => {
+      const selected = file.files && file.files[0];
+      if (!selected) return;
+      try {
+        const parsed = JSON.parse(await selected.text());
+        const result = await api.request("POST", "/worlds/import", { world: parsed });
+        if (result.status !== 200 || !result.body?.ok) {
+          settingsStatus = `世界导入被拒绝：${result.body?.error?.message ?? `HTTP ${result.status}`}`;
+          settingsStatusKind = "error";
+          renderCenter();
+          return;
+        }
+        const worlds = await core.requestWorlds();
+        settingsStatus = `已导入「${String(result.body.data?.name ?? result.body.data?.id ?? "")}」。`;
+        settingsStatusKind = "ok";
+        renderCenter();
+        renderWorldList(worlds);
+      } catch (error) {
+        settingsStatus = `世界导入失败：${error instanceof Error ? error.message : String(error)}`;
+        settingsStatusKind = "error";
+        renderCenter();
+      }
+    });
+    importLabel.append(file);
+    actions.append(importLabel);
+
+    if (s.binding) {
+      const unbind = el("button", "aw-btn aw-btn--danger", "解绑本聊天世界");
       unbind.type = "button";
       unbind.setAttribute("aria-label", "解绑当前聊天的 Atlas 世界");
-      unbind.addEventListener("click", () => void core.unbind());
-      actions.append(disable, unbind);
-    } else {
-      const demo = el("button", "aw-btn aw-btn--primary", "一键创建演示世界并绑定");
-      demo.type = "button";
-      demo.setAttribute("aria-label", "创建演示世界并绑定到当前聊天");
-      demo.addEventListener("click", async () => {
-        demo.disabled = true;
-        try {
-          const world = mod.buildWorldFromTemplate(mod.DEMO_TEMPLATES[0], {
-            id: `world-${Date.now()}`,
-            now: Date.now(),
-          });
-          const result = await api.request("POST", "/worlds/import", { world });
-          if (result.status !== 200 || !result.body?.ok) {
-            apiFormStatus = `演示世界创建被拒绝：${result.body?.error?.message ?? `HTTP ${result.status}`}`;
-            apiFormStatusKind = "error";
-            core.__renderPage?.();
-            return;
-          }
-          await core.bindToWorld(String(world.id));
-          core.setPage("overview");
-          core.__renderPage?.();
-        } catch (error) {
-          apiFormStatus = `演示世界创建失败：${error instanceof Error ? error.message : String(error)}`;
-          apiFormStatusKind = "error";
-          core.__renderPage?.();
-        } finally {
-          demo.disabled = false;
-        }
+      unbind.addEventListener("click", async () => {
+        const confirmed = typeof window === "undefined" || typeof window.confirm !== "function"
+          ? true
+          : window.confirm("解绑后，下一条消息会按当前角色卡自动重建世界；只想暂停推演请用「停用」。继续解绑？");
+        if (!confirmed) return;
+        await core.unbind();
       });
-      actions.append(demo);
-      const list = el("button", "aw-btn", "读取可绑定世界列表");
-      list.type = "button";
-      list.setAttribute("aria-label", "读取 Atlas 世界列表");
-      list.addEventListener("click", async () => {
-        const worlds = await core.requestWorlds();
-        renderWorldList(worlds);
-      });
-      actions.append(list);
-      const importLabel = el("label", "aw-btn aw-btn--ghost", "导入世界 JSON");
-      const file = document.createElement("input");
-      file.type = "file";
-      file.accept = ".json,application/json";
-      file.setAttribute("aria-label", "选择 Atlas 世界 JSON 文件导入");
-      file.style.display = "none";
-      file.addEventListener("change", async () => {
-        const selected = file.files && file.files[0];
-        if (!selected) return;
-        try {
-          const parsed = JSON.parse(await selected.text());
-          const result = await api.request("POST", "/worlds/import", { world: parsed });
-          if (result.status !== 200 || !result.body?.ok) {
-            apiFormStatus = `世界导入被拒绝：${result.body?.error?.message ?? `HTTP ${result.status}`}`;
-            apiFormStatusKind = "error";
-            renderCenter();
-            return;
-          }
-          const worlds = await core.requestWorlds();
-          apiFormStatus = `已导入「${String(result.body.data?.name ?? result.body.data?.id ?? "")}」。`;
-          apiFormStatusKind = "ok";
-          renderCenter();
-          renderWorldList(worlds);
-        } catch (error) {
-          apiFormStatus = `世界导入失败：${error instanceof Error ? error.message : String(error)}`;
-          apiFormStatusKind = "error";
-          renderCenter();
-        }
-      });
-      importLabel.append(file);
-      actions.append(importLabel);
+      actions.append(unbind);
     }
-    panel.append(actions);
-    return panel;
+
+    body.append(actions);
+    if (settingsStatus) {
+      body.append(el("p", `aw-status${settingsStatusKind === "error" ? " aw-status--error" : ""}`, settingsStatus));
+    }
+    details.append(body);
+    return details;
   }
 
   function renderWorldList(worlds) {
@@ -1200,402 +1270,586 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     center.append(wrap);
   }
 
-  function buildApiPanel() {
+  // ---------------------------------------------------------------------------
+  // ATLAS-18 设置 v2：两库（API 连接 / 提示词）草稿 + 命令
+  // ---------------------------------------------------------------------------
+
+  let settingsV2 = null;
+  let apiLibrary = [];
+  let apiDraft = null;
+  let apiDraftDirty = false;
+  let apiKeyInput = "";
+  let apiKeyClear = false;
+  let promptLibrary = [];
+  let promptDraft = null;
+  let promptDraftDirty = false;
+  let settingsStatus = "";
+  let settingsStatusKind = "";
+
+  const BUILTIN_PROMPT_ID = "builtin-default";
+
+  function statusLine() {
+    if (!settingsStatus) return null;
+    return el("p", `aw-status${settingsStatusKind === "error" ? " aw-status--error" : ""}`, settingsStatus);
+  }
+
+  function setStatus(text, kind = "ok") {
+    settingsStatus = text;
+    settingsStatusKind = kind;
+  }
+
+  async function loadSettingsV2(force = false) {
+    if (settingsV2 && !force) return settingsV2;
+    const result = await api.request("GET", "/settings");
+    if (result.status !== 200 || !result.body?.ok) {
+      setStatus(`读取设置失败：${result.body?.error?.message ?? `HTTP ${result.status}`}`, "error");
+      return settingsV2;
+    }
+    settingsV2 = result.body.data;
+    apiLibrary = Array.isArray(settingsV2.apiPresets) ? settingsV2.apiPresets : [];
+    promptLibrary = Array.isArray(settingsV2.promptPresets) ? settingsV2.promptPresets : [];
+    return settingsV2;
+  }
+
+  async function sendSettingsCommand(command) {
+    const result = await api.request("PUT", "/settings", command);
+    if (result.status !== 200 || !result.body?.ok) {
+      setStatus(`设置未保存：${result.body?.error?.message ?? `HTTP ${result.status}`}`, "error");
+      return false;
+    }
+    settingsV2 = result.body.data;
+    apiLibrary = Array.isArray(settingsV2.apiPresets) ? settingsV2.apiPresets : [];
+    promptLibrary = Array.isArray(settingsV2.promptPresets) ? settingsV2.promptPresets : [];
+    return true;
+  }
+
+  /** 统一未保存确认文案（规格 0.7.4）。 */
+  function confirmDiscard(what) {
+    if (typeof window === "undefined" || typeof window.confirm !== "function") return true;
+    return window.confirm(`当前有未保存的更改。继续将丢弃这些更改。（${what}）`);
+  }
+
+  function newApiDraft() {
+    return {
+      id: null,
+      name: "",
+      endpoint: "",
+      model: "",
+      maxTokens: 1024,
+      temperature: 0.7,
+      timeoutMs: 30_000,
+    };
+  }
+
+  function newPromptDraft() {
+    return { id: null, name: "", systemPrompt: "" };
+  }
+
+  function activePromptText() {
+    if (!settingsV2) return "";
+    const active = promptLibrary.find((p) => p.id === settingsV2.activePromptPresetId);
+    if (active) return String(active.systemPrompt ?? "");
+    return String(settingsV2.builtInPrompt?.systemPrompt ?? "");
+  }
+
+  function activeApiLabel() {
+    const active = apiLibrary.find((p) => p.id === settingsV2?.activeApiPresetId);
+    return active ? `${active.name}（${active.model}）` : "未配置";
+  }
+
+  // ---------------------------------------------------------------------------
+  // ATLAS-18 「推进」页：只管理推进行为与提示词（不出现 endpoint / Key / 模型输入）
+  // ---------------------------------------------------------------------------
+
+  function buildProgressionPanel() {
     const panel = el("section", "aw-panel");
-    panel.append(el("span", "aw-eyebrow", "推演 API · 预设"));
-    panel.append(el(
-      "p",
-      "aw-panel__meta",
-      "密钥只存在浏览器侧（extensionSettings），请求经酒馆后端代理转发，服务端不预存。预设分「世界推演」与「重大事件」两个槽。",
-    ));
+    panel.append(el("span", "aw-eyebrow", "推进状态"));
+    const s = state();
 
-    const slots = el("div", "aw-actions");
-    for (const [slotId, label] of [["worldTurn", "世界推演"], ["majorEvent", "重大事件"]]) {
-      const btn = el("button", `aw-btn aw-btn--ghost${settingsSlot === slotId ? " is-active" : ""}`, label);
-      btn.type = "button";
-      btn.setAttribute("aria-label", `编辑${label}预设`);
-      btn.addEventListener("click", async () => {
-        settingsSlot = slotId;
-        modelOptions = [];
-        apiFormStatus = "";
-        await loadPresetIntoForm();
-        renderCenter();
-      });
-      slots.append(btn);
+    const stats = el("div", "aw-stats");
+    const rows = [
+      ["本聊天推演", s.binding ? (s.binding.enabled ? "已启用" : "已停用") : "未绑定"],
+      ["自动提交", settingsV2?.autoCommit === false ? "关闭" : "开启"],
+      ["当前提示词", promptLibrary.find((p) => p.id === settingsV2?.activePromptPresetId)?.name ?? "内置默认"],
+      ["当前 API", activeApiLabel()],
+    ];
+    for (const [label, value] of rows) {
+      const card = el("div", "aw-stat");
+      card.append(el("span", "aw-stat__label", label), el("span", "aw-stat__value", String(value)));
+      stats.append(card);
     }
-    panel.append(slots);
+    panel.append(stats);
 
-    // 0.8.3 预设库（shujuku 式）：每个功能槽可存多个具名预设，下拉一键切换渠道
-    const libRow = el("div", "aw-field");
-    libRow.append(el("span", "aw-field__label", "预设库（切换渠道）"));
-    const libSelect = document.createElement("select");
-    libSelect.className = "aw-input";
-    libSelect.setAttribute("aria-label", "选择已保存的预设，选择后立即启用");
-    const libPlaceholder = document.createElement("option");
-    libPlaceholder.value = "";
-    libPlaceholder.textContent = presetLibrary.length === 0
-      ? "暂无已保存预设——填好后点「保存为预设」"
-      : "选择要切换的预设…";
-    libSelect.append(libPlaceholder);
-    for (const entry of presetLibrary) {
-      const opt = document.createElement("option");
-      opt.value = String(entry.name ?? "");
-      opt.textContent = `${String(entry.name ?? "")}（${String(entry.model ?? "?")}）`;
-      if (entry.name === formState.name) opt.selected = true;
-      libSelect.append(opt);
+    const runtimeActions = el("div", "aw-actions");
+    const toggle = el("button", "aw-btn", s.binding?.enabled ? "停用本聊天推演" : "启用本聊天推演");
+    toggle.type = "button";
+    toggle.setAttribute("aria-label", "启用或停用本聊天的 Atlas 推演");
+    toggle.addEventListener("click", () => { void core.setEnabled(!state().binding?.enabled); });
+    const autoCommit = el("button", "aw-btn aw-btn--ghost", settingsV2?.autoCommit === false ? "开启自动提交" : "关闭自动提交");
+    autoCommit.type = "button";
+    autoCommit.setAttribute("aria-label", "切换每条回复后自动提交");
+    autoCommit.addEventListener("click", async () => {
+      const ok = await sendSettingsCommand({ action: "runtime.update", autoCommit: settingsV2?.autoCommit === false });
+      setStatus(ok ? "推进设置已更新。" : settingsStatus, ok ? "ok" : "error");
+      renderCenter();
+    });
+    const gotoApi = el("button", "aw-btn aw-btn--ghost", "前往 API");
+    gotoApi.type = "button";
+    gotoApi.setAttribute("aria-label", "前往 API 连接页");
+    gotoApi.addEventListener("click", () => core.setPage("api"));
+    runtimeActions.append(toggle, autoCommit, gotoApi);
+    panel.append(runtimeActions);
+    panel.append(el("p", "aw-panel__meta", "「推进」只管推进行为与提示词；API 地址、密钥与模型请在「API」页配置。"));
+
+    if (statusLine()) panel.append(statusLine());
+
+    // 提示词预设卡
+    const promptPanel = el("section", "aw-panel");
+    promptPanel.append(el("span", "aw-eyebrow", "推演提示词预设"));
+
+    const selectRow = el("div", "aw-field");
+    selectRow.append(el("span", "aw-field__label", "推演提示词预设"));
+    const promptSelect = document.createElement("select");
+    promptSelect.className = "aw-input";
+    promptSelect.setAttribute("aria-label", "选择提示词预设");
+    const builtinOption = document.createElement("option");
+    builtinOption.value = BUILTIN_PROMPT_ID;
+    builtinOption.textContent = `内置默认（只读）${settingsV2?.activePromptPresetId ? "" : " · 当前使用"}`;
+    promptSelect.append(builtinOption);
+    for (const preset of promptLibrary) {
+      const option = document.createElement("option");
+      option.value = preset.id;
+      option.textContent = `${preset.name}${settingsV2?.activePromptPresetId === preset.id ? " · 当前使用" : ""}`;
+      promptSelect.append(option);
     }
-    libSelect.addEventListener("change", () => {
-      if (libSelect.value) void activatePreset(libSelect.value);
+    promptSelect.value = promptDraft?.id ?? (settingsV2?.activePromptPresetId ?? BUILTIN_PROMPT_ID);
+    promptSelect.addEventListener("change", () => {
+      if (promptDraftDirty && !confirmDiscard("提示词")) {
+        promptSelect.value = promptDraft?.id ?? BUILTIN_PROMPT_ID;
+        return;
+      }
+      const preset = promptLibrary.find((p) => p.id === promptSelect.value);
+      promptDraft = preset
+        ? { id: preset.id, name: preset.name, systemPrompt: preset.systemPrompt }
+        : newPromptDraft();
+      promptDraftDirty = false;
+      setStatus("", "ok");
+      renderCenter();
     });
-    libRow.append(libSelect);
-    const libActions = el("div", "aw-actions");
-    const libSave = el("button", "aw-btn aw-btn--ghost", "保存为预设");
-    libSave.type = "button";
-    libSave.setAttribute("aria-label", "把当前表单按预设名称保存进预设库并启用");
-    libSave.addEventListener("click", () => void savePreset({ toLibrary: true }));
-    const libDelete = el("button", "aw-btn aw-btn--danger", "删除预设");
-    libDelete.type = "button";
-    libDelete.setAttribute("aria-label", "从预设库删除当前选中的预设");
-    libDelete.addEventListener("click", () => void deletePreset(libSelect.value || formState.name));
-    libActions.append(libSave, libDelete);
-    libRow.append(libActions);
-    panel.append(libRow);
+    selectRow.append(promptSelect);
+    promptPanel.append(selectRow);
 
-    const form = el("form", "aw-form");
-    form.addEventListener("submit", (event) => {
-      event.preventDefault();
-      void savePreset();
-    });
-
-    const field = (label, node, hint) => {
-      const row = el("label", "aw-field");
-      row.append(el("span", "aw-field__label", label));
-      row.append(node);
-      if (hint) row.append(el("span", "aw-field__hint", hint));
-      return row;
-    };
-
+    const isBuiltinDraft = !promptDraft?.id;
+    const nameField = el("div", "aw-field");
+    nameField.append(el("span", "aw-field__label", "提示词名称"));
     const nameInput = document.createElement("input");
-    nameInput.type = "text";
     nameInput.className = "aw-input";
-    nameInput.value = formState.name ?? "";
-    nameInput.placeholder = "例如：主力推演";
-    nameInput.addEventListener("input", () => { formState.name = nameInput.value; });
-
-    const endpointInput = document.createElement("input");
-    endpointInput.type = "text";
-    endpointInput.className = "aw-input";
-    endpointInput.value = formState.endpoint ?? "";
-    endpointInput.placeholder = "http://localhost:8317/v1（填基础地址即可，自动补 /chat/completions）";
-    endpointInput.addEventListener("input", () => { formState.endpoint = endpointInput.value; });
-
-    const keyInput = document.createElement("input");
-    keyInput.type = "password";
-    keyInput.className = "aw-input";
-    keyInput.value = formState.apiKey ?? "";
-    keyInput.autocomplete = "off";
-    keyInput.placeholder = formState.keyTail ? `已保存（尾号 ${formState.keyTail}），留空则不变` : "sk-...";
-    keyInput.addEventListener("input", () => { formState.apiKey = keyInput.value; });
-
-    const modelInput = document.createElement("input");
-    modelInput.type = "text";
-    modelInput.className = "aw-input";
-    modelInput.value = formState.model ?? "";
-    modelInput.placeholder = "模型名";
-    modelInput.addEventListener("input", () => { formState.model = modelInput.value; });
-
-    const maxTokensInput = document.createElement("input");
-    maxTokensInput.type = "number";
-    maxTokensInput.min = "1";
-    maxTokensInput.max = "8192";
-    maxTokensInput.className = "aw-input";
-    maxTokensInput.value = String(formState.maxTokens ?? 512);
-    maxTokensInput.addEventListener("input", () => { formState.maxTokens = Number(maxTokensInput.value); });
-
-    const temperatureInput = document.createElement("input");
-    temperatureInput.type = "number";
-    temperatureInput.min = "0";
-    temperatureInput.max = "2";
-    temperatureInput.step = "0.05";
-    temperatureInput.className = "aw-input";
-    temperatureInput.value = String(formState.temperature ?? 0.7);
-    temperatureInput.addEventListener("input", () => { formState.temperature = Number(temperatureInput.value); });
-
-    form.append(field("预设名称", nameInput));
-    form.append(field("端点（chat/completions 地址）", endpointInput));
-    form.append(field("API 密钥", keyInput));
-    form.append(field("模型名", modelInput));
-
-    const modelRow = el("div", "aw-field");
-    modelRow.append(el("span", "aw-field__label", "模型列表"));
-    const modelSelect = document.createElement("select");
-    modelSelect.className = "aw-input";
-    modelSelect.setAttribute("aria-label", "从已加载的模型列表中选择");
-    const placeholder = document.createElement("option");
-    placeholder.value = "";
-    placeholder.textContent = modelOptions.length === 0 ? "未加载——点击「加载模型」" : "请选择";
-    modelSelect.append(placeholder);
-    for (const option of modelOptions) {
-      const opt = document.createElement("option");
-      opt.value = option;
-      opt.textContent = option;
-      if (option === formState.model) opt.selected = true;
-      modelSelect.append(opt);
-    }
-    modelSelect.addEventListener("change", () => {
-      formState.model = modelSelect.value;
-      modelInput.value = modelSelect.value;
+    nameInput.type = "text";
+    nameInput.maxLength = 64;
+    nameInput.value = promptDraft?.name ?? "";
+    nameInput.readOnly = Boolean(isBuiltinDraft);
+    nameInput.placeholder = isBuiltinDraft ? "内置默认不可改名" : "例如：严厉推演";
+    nameInput.setAttribute("aria-label", "提示词名称");
+    nameInput.addEventListener("input", () => {
+      if (!promptDraft) promptDraft = newPromptDraft();
+      promptDraft.name = nameInput.value;
+      promptDraftDirty = true;
     });
-    modelRow.append(modelSelect);
+    nameField.append(nameInput);
+    promptPanel.append(nameField);
 
-    const loadBtn = el("button", "aw-btn aw-btn--ghost", "加载模型");
-    loadBtn.type = "button";
-    loadBtn.setAttribute("aria-label", "通过酒馆后端代理加载该端点的模型列表");
-    loadBtn.addEventListener("click", () => void loadModels());
-    modelRow.append(loadBtn);
-    form.append(modelRow);
+    const bodyField = el("div", "aw-field");
+    bodyField.append(el("span", "aw-field__label", "系统提示词"));
+    const bodyInput = document.createElement("textarea");
+    bodyInput.className = "aw-input aw-input--area";
+    bodyInput.rows = 6;
+    bodyInput.maxLength = 8000;
+    bodyInput.readOnly = Boolean(isBuiltinDraft);
+    bodyInput.value = isBuiltinDraft ? String(settingsV2?.builtInPrompt?.systemPrompt ?? "") : (promptDraft?.systemPrompt ?? "");
+    bodyInput.placeholder = "留空 = 使用内置默认。";
+    bodyInput.setAttribute("aria-label", "系统提示词正文");
+    bodyInput.addEventListener("input", () => {
+      if (!promptDraft) promptDraft = newPromptDraft();
+      promptDraft.systemPrompt = bodyInput.value;
+      promptDraftDirty = true;
+    });
+    bodyField.append(bodyInput);
+    promptPanel.append(bodyField);
 
-    const paramRow = el("div", "aw-form__row");
-    paramRow.append(field("最大回复长度", maxTokensInput), field("温度", temperatureInput));
-    form.append(paramRow);
-
-    // 推演提示词（shujuku 式：可看可改；留空 = 内置默认）
-    const promptInput = document.createElement("textarea");
-    promptInput.className = "aw-input aw-input--area";
-    promptInput.rows = 10;
-    promptInput.spellcheck = false;
-    promptInput.setAttribute("aria-label", "推演系统提示词（留空使用内置默认）");
-    promptInput.value = formState.systemPrompt ?? "";
-    promptInput.placeholder = "留空 = 使用内置默认提示词";
-    promptInput.addEventListener("input", () => { formState.systemPrompt = promptInput.value; });
-
-    const promptRow = field("推演提示词（系统提示）", promptInput,
-      "发送给推演模型的 system 正文；控制世界如何推演。留空使用内置默认。改动只影响之后的推演请求。",
-    );
     const promptActions = el("div", "aw-actions");
-    const promptReset = el("button", "aw-btn aw-btn--ghost", "恢复默认");
-    promptReset.type = "button";
-    promptReset.setAttribute("aria-label", "清空自定义提示词，恢复内置默认");
-    promptReset.addEventListener("click", () => {
-      formState.systemPrompt = "";
-      promptInput.value = "";
-    });
-    promptActions.append(promptReset);
-    promptRow.append(promptActions);
-    form.append(promptRow);
-
-    const defaultDetails = document.createElement("details");
-    defaultDetails.className = "aw-details";
-    const defaultSummary = document.createElement("summary");
-    defaultSummary.textContent = "查看内置默认提示词";
-    defaultSummary.setAttribute("aria-label", "展开查看内置默认推演提示词");
-    const defaultPre = document.createElement("pre");
-    defaultPre.className = "aw-pre";
-    defaultPre.textContent = mod.DEFAULT_WORLD_TURN_SYSTEM_PROMPT ?? "";
-    defaultDetails.append(defaultSummary, defaultPre);
-    form.append(defaultDetails);
-
-    // 0.8.2：作者反馈「提示词查看不对劲」——只有默认提示词可看，自定义后看不到生效版。
-    const activeDetails = document.createElement("details");
-    activeDetails.className = "aw-details";
-    const activeSummary = document.createElement("summary");
-    activeSummary.textContent = "查看当前生效提示词";
-    activeSummary.setAttribute("aria-label", "展开查看下一轮推演实际使用的提示词");
-    const activePre = document.createElement("pre");
-    activePre.className = "aw-pre";
-    activeDetails.append(activeSummary, activePre);
-    const syncActivePrompt = () => {
-      activePre.textContent = (formState.systemPrompt || "").trim() || mod.DEFAULT_WORLD_TURN_SYSTEM_PROMPT || "";
+    const addButton = (label, ariaLabel, handler, variant = "aw-btn aw-btn--ghost") => {
+      const button = el("button", variant, label);
+      button.type = "button";
+      button.setAttribute("aria-label", ariaLabel);
+      button.addEventListener("click", handler);
+      promptActions.append(button);
+      return button;
     };
-    syncActivePrompt();
-    promptInput.addEventListener("input", syncActivePrompt);
-    promptReset.addEventListener("click", () => { syncActivePrompt(); });
-    form.append(activeDetails);
 
-    const userNote = el(
-      "p",
-      "aw-panel__meta",
-      "用户正文由系统自动组装：【当前世界状态与可达内容】+【本轮用户行动】+【本轮助手回复】，无需在此填写。",
-    );
-    form.append(userNote);
-
-    const actions = el("div", "aw-actions");
-    const save = el("button", "aw-btn aw-btn--primary", "保存预设");
-    save.type = "submit";
-    save.setAttribute("aria-label", "保存当前预设");
-    const clear = el("button", "aw-btn aw-btn--danger", "清空该槽");
-    clear.type = "button";
-    clear.setAttribute("aria-label", "清空当前预设槽");
-    clear.addEventListener("click", () => void savePreset({ clear: true }));
-    actions.append(save, clear);
-    form.append(actions);
-
-    if (apiFormStatus) {
-      form.append(el("p", `aw-form__status is-${apiFormStatusKind || "ok"}`, apiFormStatus));
+    addButton("新建", "新建提示词草稿", () => {
+      if (promptDraftDirty && !confirmDiscard("提示词")) return;
+      promptDraft = newPromptDraft();
+      promptDraftDirty = false;
+      setStatus("", "ok");
+      renderCenter();
+    });
+    if (!isBuiltinDraft) {
+      addButton("保存", "保存当前提示词预设", async () => {
+        if (!promptDraft?.name.trim() || !promptDraft.systemPrompt.trim()) {
+          setStatus("提示词名称与正文都不能为空。", "error");
+          renderCenter();
+          return;
+        }
+        const ok = await sendSettingsCommand({
+          action: "prompt.save",
+          preset: { id: promptDraft.id, name: promptDraft.name, systemPrompt: promptDraft.systemPrompt },
+        });
+        if (ok) { promptDraftDirty = false; setStatus("提示词已保存。"); }
+        renderCenter();
+      }, "aw-btn aw-btn--primary");
     }
+    addButton("另存为", "以新名称保存提示词副本", async () => {
+      const name = typeof window !== "undefined" && typeof window.prompt === "function"
+        ? window.prompt("新提示词预设名称", promptDraft?.name ? `${promptDraft.name} 副本` : "新提示词")
+        : null;
+      if (!name || !name.trim()) return;
+      const ok = await sendSettingsCommand({
+        action: "prompt.save",
+        preset: { name: name.trim(), systemPrompt: promptDraft?.systemPrompt || settingsV2?.builtInPrompt?.systemPrompt || "" },
+      });
+      if (ok) { promptDraftDirty = false; setStatus("已另存为新的提示词预设。"); }
+      renderCenter();
+    });
+    addButton("设为当前使用", "把选中的提示词设为当前使用", async () => {
+      const id = promptDraft?.id ?? null;
+      const ok = await sendSettingsCommand({ action: "prompt.activate", id });
+      if (ok) setStatus(id ? "已切换当前提示词。" : "已切回内置默认提示词。");
+      renderCenter();
+    });
+    if (isBuiltinDraft) {
+      addButton("复制内置默认为新预设", "把内置默认提示词复制成可编辑预设", async () => {
+        const ok = await sendSettingsCommand({
+          action: "prompt.save",
+          preset: { name: "自定义提示词", systemPrompt: String(settingsV2?.builtInPrompt?.systemPrompt ?? "") },
+        });
+        if (ok) {
+          const created = promptLibrary[promptLibrary.length - 1];
+          promptDraft = created
+            ? { id: created.id, name: created.name, systemPrompt: created.systemPrompt }
+            : newPromptDraft();
+          promptDraftDirty = false;
+          setStatus("已复制为新预设，可继续编辑。");
+        }
+        renderCenter();
+      }, "aw-btn aw-btn--primary");
+    } else {
+      addButton("删除", "删除选中的提示词预设", async () => {
+        const confirmed = typeof window === "undefined" || typeof window.confirm !== "function"
+          ? true
+          : window.confirm(`删除提示词预设「${promptDraft?.name ?? ""}」？`);
+        if (!confirmed) return;
+        const ok = await sendSettingsCommand({ action: "prompt.delete", id: promptDraft.id });
+        if (ok) {
+          promptDraft = newPromptDraft();
+          promptDraftDirty = false;
+          setStatus("提示词预设已删除。");
+        }
+        renderCenter();
+      }, "aw-btn aw-btn--danger");
+    }
+    promptPanel.append(promptActions);
+    panel.append(promptPanel);
 
-    panel.append(form);
+    // 当前生效提示词（默认折叠，只读）
+    const details = document.createElement("details");
+    details.className = "aw-details";
+    const summary = document.createElement("summary");
+    summary.className = "aw-details__summary";
+    summary.textContent = "当前生效提示词（只读）";
+    const visible = el("pre", "aw-pre", activePromptText());
+    details.append(summary, visible);
+    panel.append(details);
+    panel.append(el("p", "aw-panel__meta", "用户行动、助手回复与世界上下文由系统自动组装，不在这里编辑。"));
     return panel;
   }
 
-  // 表单态：从浏览器存储的 settings 文档读取真实值（含密钥），仅内存持有
-  const formState = { name: "", endpoint: "", apiKey: "", model: "", maxTokens: 512, temperature: 0.7, keyTail: null, systemPrompt: "" };
-  /** 0.8.3 预设库（shujuku 式）：当前功能槽的具名预设列表；切换渠道 = 下拉一键载入+启用。 */
-  let presetLibrary = [];
+  // ---------------------------------------------------------------------------
+  // ATLAS-18 「API」页：只管理连接资料（不出现提示词编辑）
+  // ---------------------------------------------------------------------------
 
-  async function loadPresetIntoForm() {
-    formState.name = "";
-    formState.endpoint = "";
-    formState.apiKey = "";
-    formState.model = "";
-    formState.keyTail = null;
-    formState.systemPrompt = "";
-    if (!store) return;
-    const raw = await store.read("settings");
-    const lib = raw && typeof raw === "object" ? raw.presetLibrary?.[settingsSlot] : null;
-    presetLibrary = Array.isArray(lib) ? lib.filter((p) => p && typeof p === "object") : [];
-    const preset = raw && typeof raw === "object" ? raw[settingsSlot] : null;
-    if (preset && typeof preset === "object") {
-      formState.name = String(preset.name ?? "");
-      formState.endpoint = String(preset.endpoint ?? "");
-      formState.model = String(preset.model ?? "");
-      formState.maxTokens = typeof preset.maxTokens === "number" ? preset.maxTokens : 512;
-      formState.temperature = typeof preset.temperature === "number" ? preset.temperature : 0.7;
-      const key = typeof preset.apiKey === "string" ? preset.apiKey.trim() : "";
-      formState.apiKey = key;
-      formState.keyTail = key.length >= 4 ? key.slice(-4) : null;
-      formState.systemPrompt = typeof preset.systemPrompt === "string" ? preset.systemPrompt : "";
+  function buildApiPanel() {
+    const panel = el("section", "aw-panel");
+    panel.append(el("span", "aw-eyebrow", "当前连接"));
+    panel.append(el("p", "aw-panel__text", `当前 API：${activeApiLabel()}`));
+    const active = apiLibrary.find((p) => p.id === settingsV2?.activeApiPresetId);
+    if (active) {
+      panel.append(el("p", "aw-panel__meta", `模型：${active.model} · 密钥：${active.apiKey?.exists ? `已保存（尾号 ${active.apiKey.tail ?? "----"}）` : "未设置"}`));
     }
-  }
+    const promptName = promptLibrary.find((p) => p.id === settingsV2?.activePromptPresetId)?.name ?? "内置默认";
+    const summaryRow = el("div", "aw-actions");
+    summaryRow.append(el("span", "aw-panel__meta", `当前提示词：${promptName}`));
+    const gotoProgression = el("button", "aw-btn aw-btn--ghost", "前往推进");
+    gotoProgression.type = "button";
+    gotoProgression.setAttribute("aria-label", "前往推进页管理提示词");
+    gotoProgression.addEventListener("click", () => core.setPage("progression"));
+    summaryRow.append(gotoProgression);
+    panel.append(summaryRow);
+    if (statusLine()) panel.append(statusLine());
 
-  /** 表单 → 合法预设对象；地址 / 模型缺失时给出可操作提示并返回 null。 */
-  function buildPresetFromForm() {
-    const endpoint = (formState.endpoint || "").trim();
-    if (!endpoint) {
-      apiFormStatus = "请先填写 API 地址（形如 http://localhost:8317/v1）。";
-      apiFormStatusKind = "error";
-      return null;
+    const libRow = el("div", "aw-field");
+    libRow.append(el("span", "aw-field__label", "已保存的 API 连接"));
+    const libSelect = document.createElement("select");
+    libSelect.className = "aw-input";
+    libSelect.setAttribute("aria-label", "选择已保存的 API 连接");
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = apiLibrary.length === 0 ? "暂无已保存连接——填好后点「保存」" : "选择连接以载入草稿";
+    libSelect.append(placeholder);
+    for (const preset of apiLibrary) {
+      const option = document.createElement("option");
+      option.value = preset.id;
+      option.textContent = `${preset.name}（${preset.model}）${settingsV2?.activeApiPresetId === preset.id ? " · 当前使用" : ""}`;
+      libSelect.append(option);
     }
-    const model = (formState.model || "").trim();
-    if (!model) {
-      // 服务端校验 model 必填，但报错很笼统；这里前置给出可操作的提示（0.8.2）。
-      apiFormStatus = "模型名必填：先点「加载模型」选择，或直接手填模型名。";
-      apiFormStatusKind = "error";
-      return null;
-    }
-    const preset = {
-      name: (formState.name || settingsSlot).trim().slice(0, 64),
-      endpoint,
-      model,
-      apiKey: (formState.apiKey || "").trim(),
-      maxTokens: Number.isFinite(formState.maxTokens) ? formState.maxTokens : 512,
-      temperature: Number.isFinite(formState.temperature) ? formState.temperature : 0.7,
-    };
-    const customPrompt = (formState.systemPrompt || "").trim();
-    if (customPrompt) preset.systemPrompt = customPrompt.slice(0, 8000);
-    return preset;
-  }
-
-  async function savePreset(options = {}) {
-    if (options.clear) {
-      const result = await api.request("PUT", "/settings", { [settingsSlot]: null });
-      apiFormStatus = result.status === 200 ? "已清空该槽。" : `清空被拒绝：${result.body?.error?.message ?? `HTTP ${result.status}`}`;
-      apiFormStatusKind = result.status === 200 ? "ok" : "error";
-      await loadPresetIntoForm();
+    libSelect.value = apiDraft?.id ?? "";
+    libSelect.addEventListener("change", () => {
+      if (apiDraftDirty && !confirmDiscard("API 连接")) {
+        libSelect.value = apiDraft?.id ?? "";
+        return;
+      }
+      const preset = apiLibrary.find((p) => p.id === libSelect.value);
+      apiDraft = preset
+        ? { id: preset.id, name: preset.name, endpoint: preset.endpoint, model: preset.model, maxTokens: preset.maxTokens, temperature: preset.temperature, timeoutMs: preset.timeoutMs }
+        : newApiDraft();
+      apiDraftDirty = false;
+      apiKeyInput = "";
+      apiKeyClear = false;
+      modelOptions = [];
+      setStatus("", "ok");
       renderCenter();
-      return;
-    }
-    const preset = buildPresetFromForm();
-    if (!preset) {
-      renderCenter();
-      return;
-    }
-    // 0.8.3 预设库：显式「保存为预设」按名入册（同名覆盖）；普通保存若同名已在库中也同步，
-    // 保证库里的条目和实际启用的内容一致。presetLibrary 载荷按槽局部更新（服务端按槽合并）。
-    let libraryPayload = null;
-    if (options.toLibrary && !(formState.name || "").trim()) {
-      apiFormStatus = "先在「预设名称」里起个名字，再保存为预设。";
-      apiFormStatusKind = "error";
-      renderCenter();
-      return;
-    }
-    if (options.toLibrary || presetLibrary.some((p) => p && p.name === preset.name)) {
-      const index = presetLibrary.findIndex((p) => p && p.name === preset.name);
-      if (index >= 0) presetLibrary.splice(index, 1, preset);
-      else presetLibrary.push(preset);
-      libraryPayload = { [settingsSlot]: presetLibrary };
-    }
-    const result = await api.request("PUT", "/settings", {
-      [settingsSlot]: preset,
-      ...(libraryPayload ? { presetLibrary: libraryPayload } : {}),
     });
-    if (result.status === 200) {
-      apiFormStatus = options.toLibrary
-        ? `预设「${preset.name}」已入库并启用。`
-        : "预设已保存。密钥只存在浏览器侧，不会出现在日志里。";
-      apiFormStatusKind = "ok";
-      await loadPresetIntoForm();
-    } else {
-      apiFormStatus = `保存被拒绝：${result.body?.error?.message ?? `HTTP ${result.status}`}`;
-      apiFormStatusKind = "error";
+    libRow.append(libSelect);
+    panel.append(libRow);
+
+    const draft = apiDraft ?? newApiDraft();
+    const fields = [
+      { key: "name", label: "连接名称", type: "text", maxLength: 64, placeholder: "例如：本地 8317", aria: "连接名称" },
+      { key: "endpoint", label: "端点（http(s) 绝对地址）", type: "text", maxLength: 2048, placeholder: "http://localhost:8317/v1", aria: "API 端点" },
+      { key: "apiKey", label: "API 密钥（留空保持已保存的密钥）", type: "password", maxLength: 4096, placeholder: active?.apiKey?.exists ? `已保存（尾号 ${active.apiKey.tail ?? "----"}），留空保持不变` : "未设置", aria: "API 密钥" },
+      { key: "model", label: "模型名", type: "text", maxLength: 128, placeholder: "例如：gpt-4o-mini", aria: "模型名" },
+      { key: "maxTokens", label: "最大回复长度", type: "number", min: 1, max: 8192, aria: "最大回复长度" },
+      { key: "temperature", label: "温度", type: "number", min: 0, max: 2, step: 0.1, aria: "温度" },
+      { key: "timeoutMs", label: "超时毫秒", type: "number", min: 1000, max: 120000, aria: "超时毫秒" },
+    ];
+    const inputs = {};
+    for (const field of fields) {
+      const wrap = el("div", "aw-field");
+      wrap.append(el("span", "aw-field__label", field.label));
+      const input = document.createElement("input");
+      input.className = "aw-input";
+      input.type = field.type;
+      input.setAttribute("aria-label", field.aria);
+      if (field.maxLength) input.maxLength = field.maxLength;
+      if (field.min !== undefined) input.min = String(field.min);
+      if (field.max !== undefined) input.max = String(field.max);
+      if (field.step !== undefined) input.step = String(field.step);
+      input.placeholder = field.placeholder ?? "";
+      if (field.key === "apiKey") {
+        // 密钥框始终为空：已保存的密钥不回填 DOM（规格 0.7.2）
+        input.value = apiKeyInput === "" ? "" : apiKeyInput;
+        input.addEventListener("input", () => {
+          apiKeyInput = input.value;
+          apiDraftDirty = true;
+        });
+      } else {
+        input.value = String(draft[field.key] ?? "");
+        input.addEventListener("input", () => {
+          const numeric = field.type === "number";
+          draft[field.key] = numeric ? Number(input.value) : input.value;
+          apiDraft = draft;
+          apiDraftDirty = true;
+        });
+      }
+      wrap.append(input);
+      inputs[field.key] = input;
+      panel.append(wrap);
     }
-    renderCenter();
+
+    // 模型列表（测试连接的产物）
+    if (modelOptions.length > 0) {
+      const modelRow = el("div", "aw-field");
+      modelRow.append(el("span", "aw-field__label", "从端点读到的模型（点击填入）"));
+      const modelSelect = document.createElement("select");
+      modelSelect.className = "aw-input";
+      modelSelect.setAttribute("aria-label", "选择端点返回的模型名");
+      const blank = document.createElement("option");
+      blank.value = "";
+      blank.textContent = `共 ${modelOptions.length} 个`;
+      modelSelect.append(blank);
+      for (const name of modelOptions) {
+        const option = document.createElement("option");
+        option.value = name;
+        option.textContent = name;
+        modelSelect.append(option);
+      }
+      modelSelect.addEventListener("change", () => {
+        if (!modelSelect.value) return;
+        draft.model = modelSelect.value;
+        apiDraft = draft;
+        apiDraftDirty = true;
+        inputs.model.value = modelSelect.value;
+      });
+      modelRow.append(modelSelect);
+      panel.append(modelRow);
+    }
+
+    const clearKeyRow = el("label", "aw-check");
+    const clearKey = document.createElement("input");
+    clearKey.type = "checkbox";
+    clearKey.checked = apiKeyClear;
+    clearKey.setAttribute("aria-label", "保存时清除已保存的密钥");
+    clearKey.addEventListener("change", () => {
+      apiKeyClear = clearKey.checked;
+      apiDraftDirty = true;
+    });
+    clearKeyRow.append(clearKey, el("span", null, "保存时清除已保存的密钥"));
+    panel.append(clearKeyRow);
+
+    const actions = el("div", "aw-actions");
+    const addButton = (label, ariaLabel, handler, variant = "aw-btn aw-btn--ghost") => {
+      const button = el("button", variant, label);
+      button.type = "button";
+      button.setAttribute("aria-label", ariaLabel);
+      button.addEventListener("click", handler);
+      actions.append(button);
+      return button;
+    };
+
+    addButton("新建", "新建 API 连接草稿", () => {
+      if (apiDraftDirty && !confirmDiscard("API 连接")) return;
+      apiDraft = newApiDraft();
+      apiDraftDirty = false;
+      apiKeyInput = "";
+      apiKeyClear = false;
+      modelOptions = [];
+      setStatus("", "ok");
+      renderCenter();
+    });
+    addButton("保存", "保存当前 API 连接", async () => {
+      const preset = apiDraft ?? newApiDraft();
+      if (!preset.name.trim() || !preset.endpoint.trim() || !preset.model.trim()) {
+        setStatus("连接名称、端点与模型名都不能为空。", "error");
+        renderCenter();
+        return;
+      }
+      const apiKeyMode = apiKeyClear ? "clear" : (apiKeyInput ? "replace" : (preset.id ? "keep" : "replace"));
+      const ok = await sendSettingsCommand({
+        action: "api.save",
+        preset: {
+          ...(preset.id ? { id: preset.id } : {}),
+          name: preset.name,
+          endpoint: preset.endpoint,
+          model: preset.model,
+          maxTokens: Number(preset.maxTokens) || 1024,
+          temperature: Number.isFinite(Number(preset.temperature)) ? Number(preset.temperature) : 0.7,
+          timeoutMs: Number(preset.timeoutMs) || 30_000,
+        },
+        apiKeyMode,
+        ...(apiKeyMode === "replace" ? { apiKey: apiKeyInput } : {}),
+      });
+      if (ok) {
+        const saved = apiLibrary.find((p) => p.name === preset.name.trim()) ?? apiLibrary[apiLibrary.length - 1];
+        apiDraft = saved
+          ? { id: saved.id, name: saved.name, endpoint: saved.endpoint, model: saved.model, maxTokens: saved.maxTokens, temperature: saved.temperature, timeoutMs: saved.timeoutMs }
+          : apiDraft;
+        apiDraftDirty = false;
+        apiKeyInput = "";
+        apiKeyClear = false;
+        setStatus("API 连接已保存。");
+      }
+      renderCenter();
+    }, "aw-btn aw-btn--primary");
+    addButton("另存为", "以新名称保存连接副本", async () => {
+      const name = typeof window !== "undefined" && typeof window.prompt === "function"
+        ? window.prompt("新连接名称", apiDraft?.name ? `${apiDraft.name} 副本` : "新连接")
+        : null;
+      if (!name || !name.trim()) return;
+      const preset = apiDraft ?? newApiDraft();
+      const ok = await sendSettingsCommand({
+        action: "api.save",
+        preset: {
+          name: name.trim(),
+          endpoint: preset.endpoint,
+          model: preset.model,
+          maxTokens: Number(preset.maxTokens) || 1024,
+          temperature: Number.isFinite(Number(preset.temperature)) ? Number(preset.temperature) : 0.7,
+          timeoutMs: Number(preset.timeoutMs) || 30_000,
+        },
+        apiKeyMode: apiKeyInput ? "replace" : "replace",
+        apiKey: apiKeyInput,
+      });
+      if (ok) {
+        apiDraftDirty = false;
+        apiKeyInput = "";
+        setStatus("已另存为新的连接。");
+      }
+      renderCenter();
+    });
+    addButton("设为当前使用", "把选中的连接设为当前使用", async () => {
+      if (!apiDraft?.id) {
+        setStatus("请先保存连接再设为当前使用。", "error");
+        renderCenter();
+        return;
+      }
+      const ok = await sendSettingsCommand({ action: "api.activate", id: apiDraft.id });
+      if (ok) setStatus("已切换当前 API 连接。");
+      renderCenter();
+    });
+    addButton("测试连接", "通过酒馆后端代理检查端点与鉴权", async () => {
+      await testConnection(apiDraft ?? newApiDraft());
+    });
+    addButton("删除", "删除选中的 API 连接", async () => {
+      if (!apiDraft?.id) {
+        setStatus("当前草稿尚未保存，无需删除。", "error");
+        renderCenter();
+        return;
+      }
+      const confirmed = typeof window === "undefined" || typeof window.confirm !== "function"
+        ? true
+        : window.confirm(`删除连接「${apiDraft.name}」？`);
+      if (!confirmed) return;
+      const ok = await sendSettingsCommand({ action: "api.delete", id: apiDraft.id });
+      if (ok) {
+        apiDraft = newApiDraft();
+        apiDraftDirty = false;
+        setStatus("连接已删除。");
+      }
+      renderCenter();
+    }, "aw-btn aw-btn--danger");
+
+    panel.append(actions);
+    panel.append(el("p", "aw-panel__meta", "密钥只保存在浏览器侧，经酒馆后端代理转发，服务端不预存；GET 响应只返回是否存在与尾号。"));
+    panel.append(el("p", "aw-panel__meta", "提示词请在左侧「推进」中管理——本页只配置连接。"));
+    return panel;
   }
 
-  /** 0.8.3 一键切换：载入库中预设进表单并立即启用该槽（shujuku 式切渠道）。 */
-  async function activatePreset(name) {
-    const entry = presetLibrary.find((p) => p && p.name === name);
-    if (!entry) return;
-    formState.name = String(entry.name ?? "");
-    formState.endpoint = String(entry.endpoint ?? "");
-    formState.model = String(entry.model ?? "");
-    formState.maxTokens = typeof entry.maxTokens === "number" ? entry.maxTokens : 512;
-    formState.temperature = typeof entry.temperature === "number" ? entry.temperature : 0.7;
-    const key = typeof entry.apiKey === "string" ? entry.apiKey.trim() : "";
-    formState.apiKey = key;
-    formState.keyTail = key.length >= 4 ? key.slice(-4) : null;
-    formState.systemPrompt = typeof entry.systemPrompt === "string" ? entry.systemPrompt : "";
-    const result = await api.request("PUT", "/settings", { [settingsSlot]: entry });
-    apiFormStatus = result.status === 200
-      ? `已切换并启用「${name}」。`
-      : `切换被拒绝：${result.body?.error?.message ?? `HTTP ${result.status}`}`;
-    apiFormStatusKind = result.status === 200 ? "ok" : "error";
-    renderCenter();
-  }
-
-  /** 0.8.3 从库中删除预设（只动库，不影响当前启用的槽内容）。 */
-  async function deletePreset(name) {
-    if (!name) return;
-    const next = presetLibrary.filter((p) => p && p.name !== name);
-    if (next.length === presetLibrary.length) return;
-    const result = await api.request("PUT", "/settings", { presetLibrary: { [settingsSlot]: next } });
-    apiFormStatus = result.status === 200
-      ? `已删除预设「${name}」。`
-      : `删除被拒绝：${result.body?.error?.message ?? `HTTP ${result.status}`}`;
-    apiFormStatusKind = result.status === 200 ? "ok" : "error";
-    if (result.status === 200) presetLibrary = next;
-    renderCenter();
-  }
-
-  /** 通过酒馆后端代理拉取模型列表（custom source；与推演请求同一转发通道）。 */
-  async function loadModels() {
-    const endpoint = (formState.endpoint || "").trim();
+  /** 测试连接：只走模型列表 / 最小鉴权检查，不 commit、不写世界、不写聊天。 */
+  async function testConnection(preset) {
+    const endpoint = String(preset.endpoint || "").trim();
     if (!endpoint) {
-      apiFormStatus = "请先填写端点，再加载模型。";
-      apiFormStatusKind = "error";
+      setStatus("请先填写端点，再测试连接。", "error");
       renderCenter();
       return;
     }
-    apiFormStatus = "正在通过酒馆后端代理加载模型列表…";
-    apiFormStatusKind = "";
+    setStatus("正在通过酒馆后端代理检查端点…", "ok");
     renderCenter();
     try {
       const ctx = SillyTavern.getContext();
       const headers = { "Content-Type": "application/json" };
       if (typeof ctx.getRequestHeaders === "function") Object.assign(headers, ctx.getRequestHeaders());
-      // ATLAS-FIX-02：custom_include_headers 必须是「原始头字符串」（酒馆按行解析，
-      // 传对象 = 鉴权头被静默丢弃）；序列化口径与生成路径共用 atlasCustomIncludeHeaders。
+      // ATLAS-FIX-02：custom_include_headers 必须是原始头字符串（与生成路径共用同一序列化口径）
       const { atlasCustomIncludeHeaders } = await loadUiCore();
+      const keyValue = apiKeyInput ? `Bearer ${apiKeyInput}` : "";
       const response = await fetch("/api/backends/chat-completions/status", {
         method: "POST",
         headers,
@@ -1604,7 +1858,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
           proxy_password: "",
           chat_completion_source: "custom",
           custom_url: endpoint,
-          custom_include_headers: atlasCustomIncludeHeaders(formState.apiKey ? `Bearer ${formState.apiKey}` : ""),
+          custom_include_headers: atlasCustomIncludeHeaders(keyValue),
         }),
       });
       if (!response.ok) {
@@ -1614,8 +1868,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
           const errorJson = JSON.parse(errorText);
           detail = String(errorJson.error ?? errorJson.message ?? detail);
         } catch { /* 保留原文 */ }
-        apiFormStatus = `端点状态检查失败（HTTP ${response.status}）：${detail || "无详情"}`;
-        apiFormStatusKind = "error";
+        setStatus(`测试连接失败（HTTP ${response.status}）：${detail || "无详情"}`, "error");
         renderCenter();
         return;
       }
@@ -1633,17 +1886,21 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
         .filter((item) => typeof item === "string" && item.length > 0)
         .slice(0, 500);
       if (modelOptions.length === 0) {
-        apiFormStatus = "未取到模型列表（端点可能不支持 /models，可直接手填模型名）。";
-        apiFormStatusKind = "error";
+        setStatus("端点可达，但没读到模型列表（可直接手填模型名）。", "ok");
       } else {
-        apiFormStatus = `已加载 ${String(modelOptions.length)} 个模型。`;
-        apiFormStatusKind = "ok";
+        setStatus(`连接成功，读到 ${String(modelOptions.length)} 个模型。`, "ok");
       }
     } catch (error) {
-      apiFormStatus = `加载模型失败：${error instanceof Error ? error.message : String(error)}`;
-      apiFormStatusKind = "error";
+      setStatus(`测试连接失败：${error instanceof Error ? error.message : String(error)}`, "error");
     }
     renderCenter();
+  }
+
+  /** 首次进入需要设置的页面时拉取一次 v2 设置（失败不重复轰炸）。 */
+  function ensureSettingsLoaded() {
+    if (settingsLoadedOnce) return;
+    settingsLoadedOnce = true;
+    void loadSettingsV2().then(() => renderCenter());
   }
 
   function renderPage() {
@@ -1918,6 +2175,103 @@ export async function connectAtlas() {
   }
 }
 
+/**
+ * ATLAS-18 首条消息自动建世（唯一流程）：
+ * - **确定性 world ID**：starterWorldIdForChat(chatId)（同聊天永远同 ID，替换旧的 `world-${Date.now()}`）；
+ * - **并发闸门**：同聊天重复 MESSAGE_SENT 复用同一在途 Promise（不靠按钮 disabled）；
+ * - **幂等写入**：POST /worlds/ensure-starter——已存在则 created:false 且绝不覆盖；
+ * - **切聊天保护**：ensure 完成后若用户已切走，不把旧聊天世界绑到新聊天；
+ * - 失败只记控制台，绝不阻断酒馆生成。
+ */
+const ensureWorldInFlight = new Map();
+
+/**
+ * 模块级运行期引用：ensureStarterWorld 是模块级函数，不能闭包 connectOnce 的局部变量
+ * （否则 ReferenceError 被 catch 吞掉 → 自动建世永远静默失败）。disconnect 时清空。
+ */
+const atlasRuntime = { mod: null, api: null, core: null };
+
+function resolveCharacterCard(context) {
+  const ctx = context();
+  const characters = Array.isArray(ctx.characters) ? ctx.characters : [];
+  const rawId = ctx.characterId;
+
+  // 来源 1：characters[characterId]（数值索引，或可转为有效索引的字符串）
+  if (typeof rawId === "number" && Number.isInteger(rawId) && characters[rawId]) {
+    return characters[rawId];
+  }
+  if (typeof rawId === "string" && /^\d+$/.test(rawId)) {
+    const index = Number(rawId);
+    if (Number.isInteger(index) && characters[index]) return characters[index];
+  }
+  // 来源 2：按 avatar / id 匹配字符串 characterId
+  if (typeof rawId === "string" && rawId) {
+    const byAvatar = characters.find((c) => c && (c.avatar === rawId || c.id === rawId));
+    if (byAvatar) return byAvatar;
+  }
+  // 来源 3：name2 / 聊天内可读名 作为名称回退
+  const readable = typeof ctx.name2 === "string" && ctx.name2.trim()
+    ? ctx.name2.trim()
+    : typeof ctx.characterName === "string" && ctx.characterName.trim()
+      ? ctx.characterName.trim()
+      : null;
+  if (readable) {
+    const byName = characters.find((c) => c && (c.name === readable || c.name2 === readable));
+    if (byName) return byName;
+  }
+  // 来源 4：无角色卡 / 群聊 → null（调用方回退「新世界」）
+  return null;
+}
+
+async function ensureStarterWorld() {
+  if (typeof SillyTavern === "undefined") return false;
+  const context = () => SillyTavern.getContext();
+  const chatId = typeof context().chatId === "string" && context().chatId ? context().chatId : "";
+  if (!chatId) return false;
+  const existing = ensureWorldInFlight.get(chatId);
+  if (existing) return existing;
+
+  const task = (async () => {
+    try {
+      const ctx = context();
+      const card = resolveCharacterCard(context);
+      const cardName = (typeof card?.name === "string" && card.name.trim())
+        || (typeof ctx.name2 === "string" && ctx.name2.trim())
+        || (typeof ctx.characterName === "string" && ctx.characterName.trim())
+        || null;
+      const description = typeof card?.description === "string" ? card.description : "";
+      const { mod, api, core } = atlasRuntime;
+      if (!mod || !api) return false;
+      const world = mod.buildStarterWorld({
+        id: mod.starterWorldIdForChat(chatId),
+        now: Date.now(),
+        name: cardName,
+        description,
+      });
+      const result = await api.request("POST", "/worlds/ensure-starter", { world });
+      if (result.status !== 200 || !result.body?.ok) {
+        console.warn("[atlas] 自动建世被拒绝：", result.body?.error?.message ?? `HTTP ${result.status}`);
+        return false;
+      }
+      // 切聊天保护：ensure 期间用户已经切走 → 不绑定新聊天（回到原聊天时同 ID 复用已建世界）
+      const nowChatId = typeof context().chatId === "string" ? context().chatId : "";
+      if (nowChatId !== chatId) return false;
+      if (!core) return false;
+      await core.bindToWorld(String(world.id));
+      return Boolean(core.getState().binding);
+    } catch (error) {
+      console.warn("[atlas] 自动建世失败（聊天不受影响）：", error instanceof Error ? error.message : String(error));
+      return false;
+    }
+  })();
+  ensureWorldInFlight.set(chatId, task);
+  try {
+    return await task;
+  } finally {
+    ensureWorldInFlight.delete(chatId);
+  }
+}
+
 async function connectOnce() {
   try {
     const mod = await loadUiCore();
@@ -1943,6 +2297,8 @@ async function connectOnce() {
       fetchFn: mod.createStProxyFetch({ getContext: context }),
     });
     const api = mod.createLocalAtlasApi(engine);
+    atlasRuntime.mod = mod;
+    atlasRuntime.api = api;
 
     // ATLAS-09 世界书注入层：条目规划由引擎在 commit 成功时给出，这里经酒馆
     // world-info 公开 API 落成 Atlas 专属世界书；模块不可用（旧版酒馆 / 预览无 stub）
@@ -1965,33 +2321,8 @@ async function connectOnce() {
       emitter: createEmitter(context),
       adaptEvent,
       resolveAssistantFloor: createAssistantFloorResolver(context),
-      ensureWorld: async () => {
-        try {
-          const ctx = context();
-          // 角色卡信息：name2 = 当前角色名；description 从角色档案取（读不到就留空回退）。
-          const cardName = typeof ctx.name2 === "string" && ctx.name2.trim() ? ctx.name2.trim() : null;
-          const card = Array.isArray(ctx.characters) && typeof ctx.characterId === "string"
-            ? ctx.characters.find((c) => c && c.avatar === ctx.characterId) ?? null
-            : null;
-          const world = mod.buildStarterWorld({
-            id: `world-${Date.now()}`,
-            now: Date.now(),
-            name: cardName,
-            description: typeof card?.description === "string" ? card.description : "",
-          });
-          const result = await api.request("POST", "/worlds/import", { world });
-          if (result.status !== 200 || !result.body?.ok) {
-            console.warn("[atlas] 自动建世被拒绝：", result.body?.error?.message ?? `HTTP ${result.status}`);
-            return false;
-          }
-          if (!coreRef) return false;
-          await coreRef.bindToWorld(String(world.id));
-          return Boolean(coreRef.getState().binding);
-        } catch (error) {
-          console.warn("[atlas] 自动建世失败（聊天不受影响）：", error instanceof Error ? error.message : String(error));
-          return false;
-        }
-      },
+      ensureWorld: () => ensureStarterWorld(),
+
       onStateChange: () => rerender(),
       ...(lorebookWriter
         ? {
@@ -2005,6 +2336,7 @@ async function connectOnce() {
         : {}),
     });
     coreRef = core;
+    atlasRuntime.core = core;
     installGenerateInterceptor(core);
 
     // 根节点：挂在 body 下；样式只遵循公开扩展机制
@@ -2081,6 +2413,9 @@ export async function disconnectAtlas() {
   if (root) root.remove();
   // ATLAS-FIX-02：全局痕迹一并清除（interceptor + 拖拽中监听），否则宿主仍会调用已死闭包
   atlasUninstallGlobals();
+  atlasRuntime.mod = null;
+  atlasRuntime.api = null;
+  atlasRuntime.core = null;
   connected = null;
 }
 

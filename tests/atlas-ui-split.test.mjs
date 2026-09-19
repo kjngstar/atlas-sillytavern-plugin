@@ -79,3 +79,54 @@ test("CSS 合约：样式必须限定在 .atlas-workbench 内，不污染酒馆�
   }
   assert.deepEqual(offenders, [], "不得存在无作用域的裸控件选择器");
 });
+
+// ---------------------------------------------------------------------------
+// ATLAS-18 结构与职责不变量（源码级；真实观感仍由人工验收）
+// ---------------------------------------------------------------------------
+
+test("职责隔离：API 页不出现提示词编辑，推进页不出现连接字段", () => {
+  const js = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
+  const apiPanel = js.slice(js.indexOf("function buildApiPanel()"), js.indexOf("async function testConnection"));
+  const progression = js.slice(js.indexOf("function buildProgressionPanel()"), js.indexOf("function buildApiPanel()"));
+  assert.ok(apiPanel.length > 0 && progression.length > 0, "两个面板都存在");
+  assert.ok(!/systemPrompt/.test(apiPanel), "API 页不出现提示词字段");
+  assert.ok(!/aw-input--area/.test(apiPanel), "API 页不出现提示词 textarea");
+  assert.ok(/pages?.*「推进」|前往推进/.test(apiPanel), "API 页提供「前往推进」只读跳转");
+  assert.ok(!/endpoint/.test(progression.replace(/当前 API[\s\S]*?api\)/, "")), "推进页不出现端点输入（只读摘要除外）");
+  assert.ok(/前往 API/.test(progression), "推进页提供「前往 API」只读跳转");
+  assert.ok(/当前生效提示词/.test(progression), "推进页有只读的当前生效提示词");
+});
+
+test("majorEvent 已从生产 UI 隐藏（未接线功能不得露出）", () => {
+  const js = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
+  assert.ok(!js.includes("majorEvent"), "生产 UI 不再出现 majorEvent 槽位");
+  assert.ok(!js.includes("重大事件"), "生产 UI 不再出现「重大事件」按钮");
+});
+
+test("高级世界管理默认折叠；普通未绑定状态不要求导入", () => {
+  const js = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
+  assert.ok(/高级：迁移或恢复已有世界/.test(js), "高级入口文案存在");
+  assert.ok(/createElement\("details"\)/.test(js), "用 <details> 折叠");
+  assert.ok(!/details\.open\s*=\s*true/.test(js), "默认不展开");
+  assert.ok(/无需导入/.test(js), "未绑定主路径写明无需导入");
+  assert.ok(!/前往「设置」/.test(js), "不再引导用户去「设置」页");
+});
+
+test("草稿保护：统一未保存确认文案，且两页草稿互不阻塞", () => {
+  const js = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
+  assert.ok(/当前有未保存的更改。继续将丢弃这些更改。/.test(js), "统一确认文案");
+  assert.ok(/apiDraftDirty/.test(js) && /promptDraftDirty/.test(js), "两个草稿各自维护 dirty");
+  assert.ok(/confirmDiscard\("API 连接"\)/.test(js) && /confirmDiscard\("提示词"\)/.test(js), "确认分别作用于两个编辑区");
+});
+
+test("自动建世：确定性 ID + 并发闸门 + 切聊天保护（不再用时间戳 ID）", () => {
+  const js = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
+  assert.ok(/starterWorldIdForChat\(chatId\)/.test(js), "世界 ID 由 chatId 确定性派生");
+  assert.ok(!/id: `world-\$\{Date\.now\(\)\}`/.test(js), "建世不再使用时间戳 ID（避免重试重复世界）");
+  assert.ok(/const ensureWorldInFlight = new Map\(\)/.test(js), "并发闸门是 Map<chatId, Promise>");
+  assert.ok(/ensureWorldInFlight\.get\(chatId\)/.test(js), "同聊天复用在途 Promise");
+  assert.ok(/ensureWorldInFlight\.delete\(chatId\)/.test(js), "finally 清理在途标记");
+  assert.ok(/"\/worlds\/ensure-starter"/.test(js), "走幂等端点，不走会覆盖的 import");
+  assert.ok(/nowChatId !== chatId/.test(js), "ensure 期间切聊天则不绑定");
+  assert.ok(!/初始化失败[\s\S]{0,120}throw/.test(js), "初始化失败不抛出（不阻断酒馆生成）");
+});
