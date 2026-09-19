@@ -356,7 +356,7 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
     return okResult({
       ok: true,
       plugin: "atlas",
-      version: "0.8.0",
+      version: "0.8.1",
       protocolVersion: 1,
       time: now(),
     });
@@ -605,8 +605,11 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
       return okResult({ receipt: { ...cached, status: "duplicate" }, duplicate: true });
     }
 
-    // 2. 未配置推演 API → 明确报错，不假装更新世界
-    const preset = settings.worldTurn;
+    // 2. 未配置推演 API → 明确报错，不假装更新世界。
+    //    ATLAS-07 旅程测试暴露的真 bug：这里曾直接读闭包 settings（初始 DEFAULT），
+    //    服务重启后首个 commit 会误判「未配置」——必须经 loadSettings 从 store 惰性加载。
+    const current = await loadSettings();
+    const preset = current.worldTurn;
     if (!preset) {
       throw new AtlasError(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "未配置独立推演 API，世界不会更新。");
     }
@@ -754,7 +757,7 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
     if (!parsed.ok) throw parsed.error;
     const request = parsed.value;
     const binding = requireBoundBinding(await getBinding(request.chatId));
-    if (!settings.autoCommit) {
+    if (!(await loadSettings()).autoCommit) {
       throw new AtlasError(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "当前聊天已关闭自动推演，commit 被拒绝。");
     }
     return enqueue(request.chatId, () => executeCommit(binding, request));
