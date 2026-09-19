@@ -416,7 +416,7 @@ test("Server Plugin：路由清单与 health 响应无敏感字段", () => {
   const plugin = createAtlasServerPlugin();
   assert.equal(plugin.id, ATLAS_PLUGIN_ID, "插件 ID 固定为 atlas");
   // ATLAS-04：骨架升级为完整路由清单（health / settings / worlds / bindings / state / map image / turns / travel）
-  assert.equal(plugin.routes.length, 13, "ATLAS-04 注册 13 条路由");
+  assert.equal(plugin.routes.length, 14, "ATLAS-04 注册 14 条路由（ATLAS-06 增加 rollback）");
   assert.equal(plugin.routes[0].path, "/api/plugins/atlas/health", "路由路径固定");
   assert.equal(plugin.routes[0].method, "GET", "health 为 GET");
   for (const route of plugin.routes) {

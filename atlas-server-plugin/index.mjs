@@ -16,7 +16,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const ATLAS_PLUGIN_ID = "atlas";
-export const ATLAS_PLUGIN_VERSION = "0.7.6";
+export const ATLAS_PLUGIN_VERSION = "0.8.0";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_API_BASE = "/api/plugins/atlas";
 
@@ -34,6 +34,7 @@ export const ATLAS_PLUGIN_ROUTES = [
   { method: "POST", path: "/turns/commit" },
   { method: "POST", path: "/turns/retry" },
   { method: "POST", path: "/turns/restore" },
+  { method: "POST", path: "/turns/rollback" },
   { method: "POST", path: "/map/travel-preview" },
 ];
 
@@ -278,6 +279,7 @@ export async function init(router, options = {}) {
   post({ path: "/turns/commit" });
   post({ path: "/turns/retry" });
   post({ path: "/turns/restore" });
+  post({ path: "/turns/rollback" });
   post({ path: "/map/travel-preview" });
 
   return { core };

@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.7.6";
+export const ATLAS_EXTENSION_VERSION = "0.8.0";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -157,8 +157,12 @@ function createEmitter(context) {
     CHAT_CHANGED: ["CHAT_CHANGED"],
     MESSAGE_SENT: ["MESSAGE_SENT"],
     MESSAGE_RECEIVED: ["MESSAGE_RECEIVED"],
+    GENERATION_STARTED: ["GENERATION_STARTED"],
     GENERATION_ENDED: ["GENERATION_ENDED_AFTER_COMMANDS", "GENERATION_ENDED"],
     GENERATION_STOPPED: ["GENERATION_STOPPED"],
+    MESSAGE_SWIPED: ["MESSAGE_SWIPED"],
+    MESSAGE_EDITED: ["MESSAGE_EDITED"],
+    MESSAGE_DELETED: ["MESSAGE_DELETED"],
   };
   const nameFor = (event) => {
     const candidates = EVENT_MAP[event];
@@ -229,6 +233,59 @@ function createEventAdapter(context) {
       clearInjection();
       return { kind: "generation-stopped" };
     }
+    if (event === "GENERATION_STARTED") {
+      // shujuku 门控：酒馆内部 quiet 生成（type=quiet / params.quiet_prompt / dryRun /
+      // automatic_trigger）不触发 prepare / 注入 / 推演。ST 载荷 = (type, params, dryRun)。
+      const raw = Array.isArray(payload) ? payload : [payload];
+      const type = typeof raw[0] === "string" ? raw[0] : "";
+      const params = raw[1] && typeof raw[1] === "object" ? raw[1] : {};
+      const dryRun = raw[2] === true || params.dryRun === true;
+      const gated =
+        type === "quiet" ||
+        dryRun ||
+        (typeof params.quiet_prompt === "string" && params.quiet_prompt.length > 0) ||
+        params.automatic_trigger === true;
+      return { kind: "generation-started", gated };
+    }
+    if (event === "MESSAGE_SWIPED") {
+      const chat = context().chat;
+      const index = Number(payload);
+      if (!Array.isArray(chat) || !Number.isInteger(index) || index < 0 || index >= chat.length) return null;
+      const mes = chat[index];
+      // regenerating 判定：只有「滑到最右侧新变体（正在生成）」才回退世界；
+      // 切换查看旧变体不动世界。swipes 形状读不到 → null（UI 侧宁可漏回退，不可误回退）。
+      let regenerating = null;
+      if (mes && Array.isArray(mes.swipes) && mes.swipes.length > 0) {
+        regenerating = Number(mes.swipe_id ?? 0) === mes.swipes.length - 1;
+      }
+      return {
+        kind: "message-swiped",
+        messageId: String(index),
+        userMessageId: String(Math.max(0, index - 1)),
+        userText: String(chat[index - 1]?.mes ?? ""),
+        regenerating,
+      };
+    }
+    if (event === "MESSAGE_EDITED" || event === "MESSAGE_DELETED") {
+      const index = Number(payload);
+      if (!Number.isInteger(index) || index < 0) return null;
+      return { kind: event === "MESSAGE_EDITED" ? "message-edited" : "message-deleted", messageId: String(index) };
+    }
+    return null;
+  };
+}
+
+/** ATLAS-06 楼层重解析：防抖窗口结束后重读真实末条 AI 楼层（ENDED 锚点可能早于楼层落盘）。 */
+function createAssistantFloorResolver(context) {
+  return function resolveAssistantFloor() {
+    const chat = context().chat;
+    if (!Array.isArray(chat)) return null;
+    for (let index = chat.length - 1; index >= 0; index -= 1) {
+      const mes = chat[index];
+      if (mes && mes.is_user === false && typeof mes.mes === "string" && mes.mes.trim()) {
+        return { assistantMessageId: String(index), assistantText: mes.mes };
+      }
+    }
     return null;
   };
 }
@@ -259,12 +316,15 @@ export function createGenerateInterceptor(core, io = {}) {
       : (key, value) => defaultSetExtensionPrompt(key, value, 2, 4);
   const waitMs = typeof io.waitMs === "number" ? io.waitMs : 10_000;
   return async function atlasGenerateInterceptor(chat, contextSize, abort, type) {
-    // 官方四参数契约：chat（不改动）、contextSize / type（不使用）、abort（绝不调用）。
-    // 注入通道是 setExtensionPrompt 临时上下文，而非修改 chat 数组（不污染可见历史）。
+    // 官方四参数契约：chat（不改动）、contextSize（不使用）、abort（绝不调用）。
+    // ATLAS-06 门控：酒馆内部 quiet 生成（总结 / 向量索引等）不注入阿特拉斯上下文。
     void chat;
     void contextSize;
     void abort;
-    void type;
+    if (type === "quiet") {
+      setPrompt(ATLAS_INJECTION_KEY, "", 2, 4);
+      return;
+    }
     try {
       await core.waitPendingTurn(waitMs);
       const pending = core.getState().pendingTurn;
@@ -657,6 +717,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
         center.append(emptyBox(s.modeHint ?? "尚未绑定世界——前往「设置」页选择或导入世界。"));
         return;
       }
+      if (s.worldNotice) center.append(el("div", "aw-note", s.worldNotice));
       const stats = el("div", "aw-stats");
       const statsSpec = [
         ["世界时间", `第 ${String(d.currentTime ?? 0)} 时段`],
@@ -778,6 +839,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       center.append(timeline);
       // ATLAS-09 世界书注入层：条目面板（快照来自扩展端写入后的 store 文档）
       if (s.lorebookHint) center.append(el("div", "aw-note aw-note--error", s.lorebookHint));
+      if (s.worldNotice) center.append(el("div", "aw-note", s.worldNotice));
       center.append(buildLorebookPanel());
       return;
     }
@@ -1715,6 +1777,7 @@ async function connectOnce() {
       host: createHost(context),
       emitter: createEmitter(context),
       adaptEvent,
+      resolveAssistantFloor: createAssistantFloorResolver(context),
       onStateChange: () => rerender(),
       ...(lorebookWriter
         ? {

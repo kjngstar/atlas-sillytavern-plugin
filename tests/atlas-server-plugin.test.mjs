@@ -20,6 +20,7 @@ import { parseWorld } from "../lib/world-schema.ts";
 import { appendStateEvent } from "../lib/world-ledger.ts";
 import { upsertEntityRecord } from "../lib/world-definition.ts";
 import { createAtlasServerCore, createMemoryDocumentStore, ATLAS_ROUTE_MANIFEST } from "../src/atlas-server.ts";
+import { isCheckpointIntact } from "../lib/world-checkpoint.ts";
 import { parseAtlasWorldTurnDraft, buildAtlasChatUrl, callAtlasWorldTurnApi, DEFAULT_WORLD_TURN_SYSTEM_PROMPT } from "../src/atlas-api-client.ts";
 import {
   ATLAS_ERROR_CODES,
@@ -188,8 +189,8 @@ async function setup(fetchScripts, overrides = {}) {
 // 路由清单与健康检查
 // ---------------------------------------------------------------------------
 
-test("路由清单：13 条且全部在 /api/plugins/atlas 前缀下", () => {
-  equal(ATLAS_ROUTE_MANIFEST.length, 13, "dispatch 核心路由数");
+test("路由清单：14 条且全部在 /api/plugins/atlas 前缀下", () => {
+  equal(ATLAS_ROUTE_MANIFEST.length, 14, "dispatch 核心路由数");
   equal(ATLAS_PLUGIN_ROUTES.length, ATLAS_ROUTE_MANIFEST.length, "index.mjs 与核心路由清单一致");
   const plugin = createAtlasServerPlugin();
   for (const route of plugin.routes) {
@@ -642,6 +643,93 @@ test("systemPrompt：服务端校验（上限 8000 / 非字符串拒绝）", asy
   equal(over.status, 400, "超 8000 字拒绝");
   const wrongType = await core.handle("PUT", "/settings", { worldTurn: preset({ systemPrompt: 123 }) }, { local: true });
   equal(wrongType.status, 400, "非字符串拒绝");
+});
+
+// ---------------------------------------------------------------------------
+// ATLAS-06：swipe / 编辑 / 删除 → 检查点回退
+// ---------------------------------------------------------------------------
+
+test("ATLAS-06 rollback：回退世界与绑定游标，账本保留，变体重提交为同级结果", async () => {
+  const fetcher = makeFetch([() => openAiResponse(GOOD_DRAFT), () => openAiResponse(GOOD_DRAFT)]);
+  const store = createMemoryDocumentStore();
+  const world = buildWorld();
+  const fresh = createAtlasServerCore({ store, fetchFn: fetcher.fetchFn, now: () => NOW });
+  await fresh.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
+  await fresh.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
+  await fresh.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+
+  // 回合 A：swipeId null 首次提交 → 时间 418.07 → 430.07
+  const first = await fresh.handle("POST", "/turns/commit", commitRequest(world));
+  equal(first.body.data.receipt.status, "committed", "变体 A committed");
+  equal(first.body.data.receipt.currentTime, 430.07, "变体 A 时间推进");
+
+  // 回合前检查点已随提交持久化 + 楼层映射已写
+  const worldAfterCommit = await store.read("world:atlas-server-fixture");
+  const ckpts = (worldAfterCommit.checkpoints ?? []).filter((c) => String(c.reason ?? "").startsWith("atlas-turn:"));
+  equal(ckpts.length, 1, "恰好一个回合前技术检查点");
+  const turnKeys = await store.list("turn:chat-a:");
+  equal(turnKeys.length, 1, "楼层↔检查点映射已写");
+
+  // swipe → rollback：世界与绑定游标回到回合前
+  const rb = await fresh.handle("POST", "/turns/rollback", { chatId: "chat-a", assistantMessageId: "msg-11" });
+  equal(rb.status, 200, "rollback 200");
+  const stateAfter = await fresh.handle("GET", "/state/chat-a");
+  equal(stateAfter.body.data.currentTime, CURRENT_TIME, "时间游标回到回合前");
+  equal(stateAfter.body.data.currentLocationId, "4103", "位置游标回到回合前");
+  const worldAfterRollback = await store.read("world:atlas-server-fixture");
+  equal(
+    (worldAfterRollback.stateEvents ?? []).length,
+    (worldAfterCommit.stateEvents ?? []).length,
+    "账本事件一条不删（默认保留可返回历史）",
+  );
+  ok(isCheckpointIntact(ckpts[0]), "检查点 hash 完整（可追溯）");
+
+  // 变体 B 重提交（唯一 swipeId）：committed 同级结果——时间从回合前重新推进到 430.07，不累计
+  const variant = commitRequest(world, { swipeId: "swipe-2" });
+  const second = await fresh.handle("POST", "/turns/commit", variant);
+  equal(second.body.data.receipt.status, "committed", "变体 B committed（非 duplicate）");
+  equal(second.body.data.receipt.currentTime, 430.07, "同级结果：时间不累计推进");
+
+  // 回退后的映射标记 rolledBack（保留历史），变体 B 有自己的映射
+  const rolledDoc = await store.read(turnKeys[0]);
+  equal(rolledDoc.rolledBack, true, "旧变体映射标记已回退");
+  equal((await store.list("turn:chat-a:")).length, 2, "变体 B 映射已写");
+});
+
+test("ATLAS-06 rollback：只允许回退最近一条未回退回合；未知楼层拒绝", async () => {
+  // 时钟递增：committedAt 必须可比较（回退守卫按提交时间找「最近一条」）
+  let tick = NOW;
+  const clock = () => tick;
+  const fetcher = makeFetch([() => openAiResponse(GOOD_DRAFT), () => openAiResponse(GOOD_DRAFT), () => openAiResponse(GOOD_DRAFT)]);
+  const store = createMemoryDocumentStore();
+  const world = buildWorld();
+  const fresh = createAtlasServerCore({ store, fetchFn: fetcher.fetchFn, now: clock });
+  await fresh.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
+  await fresh.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
+  await fresh.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+
+  // 两个连续回合：A（msg-10/msg-11）→ B（msg-14/msg-15）
+  tick += 1;
+  await fresh.handle("POST", "/turns/commit", commitRequest(world));
+  tick += 1;
+  await fresh.handle("POST", "/turns/commit", commitRequest(world, { turnId: "turn-y", userMessageId: "msg-14", assistantMessageId: "msg-15" }));
+
+  // 回退中间回合 A → 拒绝（会连带抹掉 B）
+  const mid = await fresh.handle("POST", "/turns/rollback", { chatId: "chat-a", assistantMessageId: "msg-11" });
+  equal(mid.status, 400, "非最近回合拒绝");
+  ok(mid.body.error.message.includes("最近一次"), "拒绝原因可读");
+
+  // 回退最近回合 B → 成功；之后 A 成为最近 → 可回退
+  const last = await fresh.handle("POST", "/turns/rollback", { chatId: "chat-a", assistantMessageId: "msg-15" });
+  equal(last.status, 200, "最近回合可回退");
+  const thenA = await fresh.handle("POST", "/turns/rollback", { chatId: "chat-a", assistantMessageId: "msg-11" });
+  equal(thenA.status, 200, "B 回退后 A 成为最近，可回退");
+
+  // 未知楼层 / 重复回退 → 拒绝
+  const unknown = await fresh.handle("POST", "/turns/rollback", { chatId: "chat-a", assistantMessageId: "msg-nope" });
+  equal(unknown.status, 400, "未知楼层拒绝");
+  const repeat = await fresh.handle("POST", "/turns/rollback", { chatId: "chat-a", assistantMessageId: "msg-11" });
+  equal(repeat.status, 400, "已回退回合不可再回退");
 });
 
 // ---------------------------------------------------------------------------
