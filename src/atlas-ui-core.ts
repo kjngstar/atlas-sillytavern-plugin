@@ -25,6 +25,9 @@ import {
 } from "./atlas-contract.ts";
 import { parseAtlasLorebookPlans, type AtlasLorebookPlans } from "./atlas-lorebook.ts";
 
+/** 内置默认推演提示词（API 页「查看内置默认提示词」用；开发态 src 直载时也必须可见）。 */
+export { DEFAULT_WORLD_TURN_SYSTEM_PROMPT } from "./atlas-api-client.ts";
+
 export type AtlasUiMode = "offline" | "protocol-incompatible" | "unbound" | "world-missing" | "ready";
 export type AtlasUiPage = "overview" | "map" | "nearby" | "changes" | "api" | "settings";
 export type AtlasServiceStatus = "checking" | "online" | "offline" | "incompatible";
@@ -235,6 +238,12 @@ export function createAtlasUiCore(deps: {
   endedDebounceMs?: number;
   /** 楼层变动（swipe / 编辑 / 删除）聚合防抖窗口（ms；测试可调小）。 */
   mutationDebounceMs?: number;
+  /**
+   * 首条消息自动建世（0.8.2）：聊天未绑定且服务在线时，MESSAGE_SENT 先调用本钩子
+   * （index.js：读角色卡 → buildStarterWorld → /worlds/import → bindToWorld）。
+   * 返回 true = 绑定就绪，本条消息照常 prepare；false / 未注入 = 保持未绑定，跳过。
+   */
+  ensureWorld?: () => Promise<boolean>;
 }): AtlasUiCore {
   const { api, host, emitter } = deps;
   const now = deps.now ?? Date.now;
@@ -548,10 +557,24 @@ export function createAtlasUiCore(deps: {
   /** MESSAGE_SENT：建 pending turn 并调用 prepare（失败不阻断酒馆生成，只提示）。 */
   async function onMessageSent(messageId: string, userText: string): Promise<void> {
     if (disposed || !messageId) return;
-    const binding = state.binding;
     const chatId = state.chatId;
-    if (!binding?.enabled || !chatId || state.serviceStatus !== "online") return;
+    if (!chatId || state.serviceStatus !== "online") return;
     if (state.pendingTurn) return; // 同一时刻只允许一条在途回合
+    // 0.8.2 自动建世：未绑定（且未手动停用）时先经宿主钩子建最小世界并绑定；
+    // 失败绝不阻断酒馆生成，只是本条消息不推演（与未绑定行为一致）。
+    let binding = state.binding;
+    if (!binding && deps.ensureWorld) {
+      let ensured = false;
+      try {
+        ensured = await deps.ensureWorld();
+      } catch {
+        ensured = false;
+      }
+      if (disposed) return;
+      binding = state.binding;
+      if (!ensured || !binding) return;
+    }
+    if (!binding?.enabled) return;
     const request = {
       chatId,
       messageId: messageId.slice(0, ATLAS_LIMITS.ID_CHARS),

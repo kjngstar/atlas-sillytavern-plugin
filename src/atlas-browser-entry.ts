@@ -50,6 +50,8 @@ export {
 } from "../lib/demo-events.ts";
 export { createStProxyFetch, ATLAS_ST_GENERATE_PATH } from "./atlas-proxy-fetch.ts";
 
+export { buildStarterWorld } from "./atlas-starter-world.ts";
+
 export {
   createAtlasLorebookWriter,
   lorebookNameFor,
