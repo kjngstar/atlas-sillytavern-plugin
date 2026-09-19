@@ -5279,7 +5279,7 @@ function createAtlasServerCore(deps) {
     return okResult({
       ok: true,
       plugin: "atlas",
-      version: "0.8.0",
+      version: "0.8.1",
       protocolVersion: 1,
       time: now()
     });
@@ -5496,7 +5496,8 @@ function createAtlasServerCore(deps) {
       const cached = receiptCache.get(idempotencyKey);
       return okResult({ receipt: { ...cached, status: "duplicate" }, duplicate: true });
     }
-    const preset = settings.worldTurn;
+    const current = await loadSettings();
+    const preset = current.worldTurn;
     if (!preset) {
       throw new AtlasError(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "未配置独立推演 API，世界不会更新。");
     }
@@ -5624,7 +5625,7 @@ function createAtlasServerCore(deps) {
     if (!parsed.ok) throw parsed.error;
     const request = parsed.value;
     const binding = requireBoundBinding(await getBinding(request.chatId));
-    if (!settings.autoCommit) {
+    if (!(await loadSettings()).autoCommit) {
       throw new AtlasError(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "当前聊天已关闭自动推演，commit 被拒绝。");
     }
     return enqueue(request.chatId, () => executeCommit(binding, request));
