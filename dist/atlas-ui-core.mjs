@@ -703,7 +703,7 @@ function errorMessageForStatus(status) {
     return { code: ATLAS_ERROR_CODES.API_RATE_LIMITED, retryable: true, message: "推演服务限流（HTTP 429），请稍后重试。" };
   }
   if (status >= 500) {
-    return { code: ATLAS_ERROR_CODES.API_REQUEST_FAILED, retryable: true, message: `推演服务错误（HTTP ${status}）。` };
+    return { code: ATLAS_ERROR_CODES.API_REQUEST_FAILED, retryable: true, message: `推演服务错误（HTTP ${status}）：酒馆后端代理没能从你的 API 端点拿到正常响应，请先在「API」页测试连接，确认端点/网关本身可用。` };
   }
   return { code: ATLAS_ERROR_CODES.API_REQUEST_FAILED, retryable: false, message: `推演服务返回 HTTP ${status}。` };
 }
@@ -7606,6 +7606,7 @@ export {
   DEFAULT_WORLD_TURN_SYSTEM_PROMPT,
   DEMO_TEMPLATES,
   atlasClampZoom,
+  atlasCustomIncludeHeaders,
   buildStarterWorld,
   buildWorldFromTemplate,
   createAtlasLorebookWriter,

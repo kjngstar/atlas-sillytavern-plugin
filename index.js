@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.3";
+export const ATLAS_EXTENSION_VERSION = "0.9.4";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -1096,12 +1096,13 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
   // ATLAS-18 概览：当前世界卡（初始化状态 / 启停 / 高级迁移折叠）
   // ---------------------------------------------------------------------------
 
-  function buildWorldCard(s) {
+  function buildWorldCard(s, d = data()) {
     const panel = el("section", "aw-panel aw-world-card");
     panel.append(el("span", "aw-eyebrow", "当前世界"));
 
     if (s.binding) {
-      panel.append(el("p", "aw-panel__text", `已绑定：${String(s.binding.worldId)}`));
+      // 世界 ID（world-auto-<hash>）是按聊天派生的确定性 ID（防重复建世），对用户无意义——展示世界名
+      panel.append(el("p", "aw-panel__text", `已绑定：${String(d.worldName ?? s.binding.worldId)}`));
       panel.append(el("p", "aw-panel__meta", "每条回复完成后自动推演世界；结果写入世界书。"));
       const actions = el("div", "aw-actions");
       const toggle = el("button", "aw-btn", s.binding.enabled ? "停用本聊天推演" : "启用本聊天推演");
