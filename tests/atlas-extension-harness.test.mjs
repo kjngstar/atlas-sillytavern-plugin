@@ -90,6 +90,10 @@ function makeApi({ health = { ok: true, data: { protocolVersion: 1 } }, stateByC
         if (turnBehavior.retryError) return { status: 500, body: { ok: false, error: { code: "INTERNAL", message: turnBehavior.retryError } } };
         return { status: 200, body: { ok: true, data: { receipt: turnBehavior.retryReceipt ?? defaultReceipt } } };
       }
+      if (method === "POST" && path === "/turns/rollback") {
+        if (turnBehavior.rollbackError) return { status: 400, body: { ok: false, error: { code: "INVALID_PAYLOAD", message: turnBehavior.rollbackError } } };
+        return { status: 200, body: { ok: true, data: { rolledBack: { assistantMessageId: body?.assistantMessageId ?? "" }, restored: null } } };
+      }
       if (method === "POST" && path === "/map/travel-preview") {
         if (travelPreview) return { status: 200, body: { ok: true, data: { preview: travelPreview } } };
         return { status: 200, body: { ok: true, data: { preview: null } } };
@@ -650,21 +654,38 @@ function makeAdaptEvent() {
         : null;
     }
     if (event === "GENERATION_STOPPED") return { kind: "generation-stopped" };
+    if (event === "GENERATION_STARTED") return { kind: "generation-started", gated: payload?.gated === true };
+    if (event === "MESSAGE_SWIPED") {
+      return payload
+        ? {
+            kind: "message-swiped",
+            messageId: String(payload.messageId ?? ""),
+            userMessageId: String(payload.userMessageId ?? ""),
+            userText: String(payload.userText ?? ""),
+            regenerating: payload.regenerating === true ? true : payload.regenerating === false ? false : null,
+          }
+        : null;
+    }
+    if (event === "MESSAGE_EDITED") return payload ? { kind: "message-edited", messageId: String(payload.messageId ?? "") } : null;
+    if (event === "MESSAGE_DELETED") return payload ? { kind: "message-deleted", messageId: String(payload.messageId ?? "") } : null;
     return null;
   };
 }
 
-async function readyCore(turnBehavior = {}) {
+async function readyCore(turnBehavior = {}, bindingOverrides = {}) {
   const api = makeApi({ stateByChat: { "chat-a": STATE_PAYLOAD }, turnBehavior });
   const hostWrap = makeHost();
   hostWrap.setChat("chat-a");
-  hostWrap.setBinding("chat-a", bindingFor("chat-a"));
+  hostWrap.setBinding("chat-a", bindingFor("chat-a", "w-1", bindingOverrides));
   const core = createAtlasUiCore({
     api,
     host: hostWrap.host,
     emitter: makeEmitter(),
     adaptEvent: makeAdaptEvent(),
     now: () => NOW_BASE,
+    // ATLAS-06：ENDED 走防抖重解析；测试里 0ms + flush 让计时器立刻落定
+    endedDebounceMs: 0,
+    mutationDebounceMs: 0,
   });
   await core.handleEvent("APP_READY");
   return { api, hostWrap, core };
@@ -695,6 +716,7 @@ test("回合：GENERATION_ENDED → commit 一次 → 回执入列并持久化 �
   const { api, hostWrap, core } = await readyCore();
   await core.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "我从城门走向集市。" });
   await core.handleEvent("MESSAGE_RECEIVED", { assistantMessageId: "m-1", assistantText: "你穿过城门，集市喧闹扑面而来。" });
+  await flush(); // ATLAS-06：ENDED 防抖（0ms）计时器落定
   const commits = api.calls.filter((c) => c.path === "/turns/commit");
   equal(commits.length, 1, "恰好一次 commit");
   const receipt = core.getState().receipts;
@@ -715,6 +737,7 @@ test("回合：同一条回复的重复 GENERATION_ENDED 只 commit 一次", asy
   const first = core.handleEvent("MESSAGE_RECEIVED", { assistantMessageId: "m-1", assistantText: "回答。" });
   const second = core.handleEvent("GENERATION_ENDED", { assistantMessageId: "m-1", assistantText: "回答。" });
   await Promise.all([first, second]);
+  await flush(); // ATLAS-06：ENDED 防抖落定（两次通知合并成一次消费）
   equal(api.calls.filter((c) => c.path === "/turns/commit").length, 1, "重复通知不重复推进世界");
   equal(core.getState().receipts.length, 1, "回执去重后仍一条");
 });
@@ -729,6 +752,7 @@ test("回合：GENERATION_STOPPED / 空回复 → 放弃 pending，不推进世�
   const empty = await readyCore();
   await empty.core.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "写字。" });
   await empty.core.handleEvent("MESSAGE_RECEIVED", { assistantMessageId: "m-1", assistantText: "   " });
+  await flush(); // ATLAS-06：ENDED 防抖落定
   equal(empty.api.calls.filter((c) => c.path === "/turns/commit").length, 0, "空回复 → 零 commit");
   equal(empty.core.getState().pendingTurn, null, "空回复放弃 pending");
 });
@@ -747,6 +771,7 @@ test("回合：commit 失败 → retryableCommit；retry 沿用原键且成功�
   const { api, core } = await readyCore({ commitError: "推演模型超时" });
   await core.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "推进剧情。" });
   await core.handleEvent("MESSAGE_RECEIVED", { assistantMessageId: "m-1", assistantText: "剧情推进了。" });
+  await flush(); // ATLAS-06：ENDED 防抖落定
   equal(core.getState().pendingTurn, null, "失败后 pending 清空");
   const retryable = core.getState().retryableCommit;
   ok(retryable !== null, "retryableCommit 保留");
@@ -758,6 +783,7 @@ test("回合：commit 失败 → retryableCommit；retry 沿用原键且成功�
   const failing = await readyCore({ commitError: "x", retryError: "仍然失败" });
   await failing.core.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "推进剧情。" });
   await failing.core.handleEvent("MESSAGE_RECEIVED", { assistantMessageId: "m-1", assistantText: "剧情推进了。" });
+  await flush(); // ATLAS-06：ENDED 防抖落定
   await failing.core.retryLastCommit();
   equal(failing.core.getState().retryableCommit !== null, true, "重试失败仍可再试");
   ok(failing.core.getState().lastError.includes("仍然失败"), "重试失败原因可见");
@@ -773,10 +799,78 @@ test("回合：commit 失败 → retryableCommit；retry 沿用原键且成功�
   equal(core.getState().lastError, null, "错误清除");
 });
 
-test("回合：回执经 extensionSettings 持久化；新 core init 恢复合法条目、拒收非法形状", async () => {
-  const first = await readyCore();
+// ---------------------------------------------------------------------------
+// ATLAS-06：生成门控 + 楼层变动回退
+// ---------------------------------------------------------------------------
+
+test("ATLAS-06 门控：quiet / dryRun 生成不触发 prepare / commit，闸门随后复位", async () => {
+  const { api, core } = await readyCore();
+  // 酒馆内部 quiet 生成（总结 / 向量索引）：不建 pending、不推演
+  await core.handleEvent("GENERATION_STARTED", { gated: true });
+  await core.handleEvent("MESSAGE_SENT", { messageId: "m-9", userText: "后台生成。" });
+  equal(api.calls.filter((c) => c.path === "/turns/prepare").length, 0, "quiet 期间零 prepare");
+  await core.handleEvent("MESSAGE_RECEIVED", { assistantMessageId: "m-10", assistantText: "后台结果。" });
+  await flush();
+  equal(api.calls.filter((c) => c.path === "/turns/commit").length, 0, "quiet 的 ENDED 零 commit");
+  // 闸门复位：真实用户回合照常工作
+  await core.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "我从城门走向集市。" });
+  equal(api.calls.filter((c) => c.path === "/turns/prepare").length, 1, "闸门复位后 prepare 恢复");
+});
+
+test("ATLAS-06 swipe：回退最近回合 → rearm → 新变体以唯一 swipeId 同级重提交", async () => {
+  const { api, core } = await readyCore({}, { lastCommittedMessageId: "m-1" });
+  // 右滑生成新变体（regenerating=true）→ 回退世界
+  await core.handleEvent("MESSAGE_SWIPED", { messageId: "m-1", userMessageId: "m-0", userText: "我从城门走向集市。", regenerating: true });
+  await flush();
+  const rollbacks = api.calls.filter((c) => c.path === "/turns/rollback");
+  equal(rollbacks.length, 1, "恰好一次回退请求");
+  equal(rollbacks[0].body.assistantMessageId, "m-1", "回退目标楼层");
+  ok(core.getState().rearmTurn !== null, "rearm 暂存重推演输入");
+  ok(core.getState().worldNotice !== null, "回退提示可见");
+  // 新变体生成结束 → 用 rearm 重建回合并以唯一 swipeId 提交
+  await core.handleEvent("MESSAGE_RECEIVED", { assistantMessageId: "m-1", assistantText: "变体 B 的回复。" });
+  await flush();
+  const commits = api.calls.filter((c) => c.path === "/turns/commit");
+  equal(commits.length, 1, "变体重提交恰好一次");
+  ok(/^swipe-/.test(String(commits[0].body.swipeId ?? "")), "变体使用唯一 swipeId（同键会被幂等判重）");
+  equal(commits[0].body.userMessageId, "m-0", "变体沿用原用户楼层");
+  equal(core.getState().rearmTurn, null, "提交后 rearm 清空");
+});
+
+test("ATLAS-06 swipe：查看旧变体（regenerating=false / null）不动世界", async () => {
+  const view = await readyCore({}, { lastCommittedMessageId: "m-1" });
+  await view.core.handleEvent("MESSAGE_SWIPED", { messageId: "m-1", userMessageId: "m-0", userText: "x", regenerating: false });
+  await flush();
+  equal(view.api.calls.filter((c) => c.path === "/turns/rollback").length, 0, "查看旧变体零回退");
+  const unknownShape = await readyCore({}, { lastCommittedMessageId: "m-1" });
+  await unknownShape.core.handleEvent("MESSAGE_SWIPED", { messageId: "m-1", userMessageId: "m-0", userText: "x", regenerating: null });
+  await flush();
+  equal(unknownShape.api.calls.filter((c) => c.path === "/turns/rollback").length, 0, "形状不可判定时不回退（宁可漏、不可误）");
+});
+
+test("ATLAS-06 编辑 / 删除：最近回合回退，非最近回合不回退；防抖聚合只回退一次", async () => {
+  const { api, core } = await readyCore({}, { lastCommittedMessageId: "m-1" });
+  // 非最近楼层：不回退
+  await core.handleEvent("MESSAGE_DELETED", { messageId: "m-5" });
+  await flush();
+  equal(api.calls.filter((c) => c.path === "/turns/rollback").length, 0, "非最近楼层零回退");
+  // 最近楼层删除：防抖窗口内连发两次（批量删除）只回退一次
+  await core.handleEvent("MESSAGE_DELETED", { messageId: "m-1" });
+  await core.handleEvent("MESSAGE_DELETED", { messageId: "m-1" });
+  await flush();
+  equal(api.calls.filter((c) => c.path === "/turns/rollback").length, 1, "防抖聚合后恰好一次回退");
+  ok(core.getState().worldNotice.includes("回退"), "回退提示可见");
+  // 编辑最近楼层 → 回退
+  const edit = await readyCore({}, { lastCommittedMessageId: "m-1" });
+  await edit.core.handleEvent("MESSAGE_EDITED", { messageId: "m-1" });
+  await flush();
+  equal(edit.api.calls.filter((c) => c.path === "/turns/rollback").length, 1, "编辑最近楼层触发回退");
+});
+
+test("回合：回执经 extensionSettings 持久化；新 core init 恢复合法条目、拒收非法形状", async () => {  const first = await readyCore();
   await first.core.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "推进。" });
   await first.core.handleEvent("MESSAGE_RECEIVED", { assistantMessageId: "m-1", assistantText: "推进了。" });
+  await flush(); // ATLAS-06：ENDED 防抖落定
   first.core.dispose();
 
   // 第二个 core 复用同一宿主（同一 extensionSettings）

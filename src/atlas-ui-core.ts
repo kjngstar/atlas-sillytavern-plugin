@@ -79,6 +79,10 @@ export interface AtlasUiState {
   /** 世界书写入状态提示（失败 / 冲突时非空；成功写图为 null） */
   lorebookHint: string | null;
   lastError: string | null;
+  /** ATLAS-06：楼层变动（swipe / 编辑 / 删除）回退提示（非错误；渲染为普通提示） */
+  worldNotice: string | null;
+  /** ATLAS-06：swipe 回退后暂存的同级重推演输入（生成结束后用它重建回合） */
+  rearmTurn: { userMessageId: string; userText: string; swipeId: string } | null;
 }
 
 export interface AtlasDestinationPreview {
@@ -129,13 +133,28 @@ export const ATLAS_UI_EVENTS = [
   "MESSAGE_RECEIVED",
   "GENERATION_ENDED",
   "GENERATION_STOPPED",
+  "GENERATION_STARTED",
+  "MESSAGE_SWIPED",
+  "MESSAGE_EDITED",
+  "MESSAGE_DELETED",
 ] as const;
 
-/** 事件载荷适配结果（ST 各事件数据形状不统一，适配在 index.js 完成）。 */
+/**
+ * 事件载荷适配结果（ST 各事件数据形状不统一，适配在 index.js 完成）。
+ * ATLAS-06 新增：
+ * - generation-started：酒馆生成门控（quiet / dryRun / automatic_trigger → gated，shujuku 同款）；
+ * - message-swiped：regenerating = 适配器据 swipes 形状判断「是否正在生成新变体」；
+ *   无法判定时为 null → UI 跳过（宁可漏回退，不可误回退）；
+ * - message-edited / message-deleted：楼层变动回退触发器。
+ */
 export type AtlasAdaptedEvent =
   | { kind: "message-sent"; messageId: string; userText: string }
   | { kind: "generation-ended"; assistantMessageId: string; assistantText: string }
-  | { kind: "generation-stopped" };
+  | { kind: "generation-stopped" }
+  | { kind: "generation-started"; gated: boolean }
+  | { kind: "message-swiped"; messageId: string; userMessageId: string; userText: string; regenerating: boolean | null }
+  | { kind: "message-edited"; messageId: string }
+  | { kind: "message-deleted"; messageId: string };
 
 export interface AtlasUiCore {
   init(): void;
@@ -206,6 +225,16 @@ export function createAtlasUiCore(deps: {
   onLorebookSync?: (plans: AtlasLorebookPlans) => Promise<unknown>;
   /** 酒馆事件载荷适配（ST 事件数据形状不统一；返回 null = 无法适配，忽略该事件） */
   adaptEvent?: (event: string, payload: unknown) => AtlasAdaptedEvent | null;
+  /**
+   * ATLAS-06 楼层重解析（shujuku 意图快照）：GENERATION_ENDED 的锚点可能早于宿主把
+   * AI 楼层 push 进 chat，防抖窗口结束后用本钩子重读真实末条 AI 楼层；
+   * 返回 null（无 AI 楼层 / 聊天不可读）→ 回退用事件锚点。
+   */
+  resolveAssistantFloor?: () => { assistantMessageId: string; assistantText: string } | null;
+  /** GENERATION_ENDED 防抖窗口（ms；测试可调小）。 */
+  endedDebounceMs?: number;
+  /** 楼层变动（swipe / 编辑 / 删除）聚合防抖窗口（ms；测试可调小）。 */
+  mutationDebounceMs?: number;
 }): AtlasUiCore {
   const { api, host, emitter } = deps;
   const now = deps.now ?? Date.now;
@@ -227,6 +256,8 @@ export function createAtlasUiCore(deps: {
     modeHint: modeHintFor("unbound", false, null, false),
     lorebookHint: null,
     lastError: null,
+    worldNotice: null,
+    rearmTurn: null,
   };
   let initialized = false;
   let disposed = false;
@@ -234,6 +265,17 @@ export function createAtlasUiCore(deps: {
   let commitInFlight = false;
   /** 最近一次 MESSAGE_SENT 触发的 prepare 任务（waitPendingTurn 等它落定）。 */
   let lastPrepareTask: Promise<void> | null = null;
+  /** ATLAS-06：当前生成是否被门控（quiet / dryRun / automatic_trigger → 事件全部忽略）。 */
+  let generationGate = false;
+  /** ATLAS-06：rearm 重推演时本次 commit 使用的唯一 swipeId。 */
+  let swipeIdForNextCommit: string | null = null;
+  /** ATLAS-06 防抖计时器（ENDED 重解析 / 楼层变动聚合）。 */
+  let endedTimer: ReturnType<typeof setTimeout> | null = null;
+  let mutationTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastEndedEvent: { assistantMessageId: string; assistantText: string } | null = null;
+  let mutationQueue: Extract<AtlasAdaptedEvent, { kind: "message-swiped" | "message-edited" | "message-deleted" }>[] = [];
+  /** ATLAS-06：本会话已回退过的楼层（防抖窗口外的重复事件也不再二次回退；切聊天清空）。 */
+  const rolledBackFloors = new Set<string>();
   const listeners: Array<{ event: string; handler: (payload?: unknown) => void }> = [];
 
   function setState(patch: Partial<AtlasUiState>): void {
@@ -402,6 +444,12 @@ export function createAtlasUiCore(deps: {
     if (disposed) return;
     if (event === "APP_READY" || event === "CHAT_CHANGED") {
       healthCheckedAt = -Infinity; // 事件驱动时强制重新检查服务
+      // 切聊天：清回合/门控/防抖状态（rearm 属于旧聊天的楼层，绝不能带过去）
+      generationGate = false;
+      swipeIdForNextCommit = null;
+      clearTimers();
+      rolledBackFloors.clear();
+      setState({ rearmTurn: null });
       void track(refresh());
       return;
     }
@@ -409,11 +457,74 @@ export function createAtlasUiCore(deps: {
     const adapted = deps.adaptEvent?.(event, payload) ?? null;
     if (!adapted) return;
     if (adapted.kind === "message-sent") {
+      if (generationGate) return; // shujuku 门控：quiet / dryRun / automatic_trigger 不触发 prepare
+      setState({ rearmTurn: null }); // 真实用户回合优先于 swipe rearm
       const task = onMessageSent(adapted.messageId, adapted.userText);
       lastPrepareTask = task;
       void track(task);
-    } else if (adapted.kind === "generation-ended") void track(onGenerationEnded(adapted.assistantMessageId, adapted.assistantText));
-    else onGenerationStopped();
+    } else if (adapted.kind === "generation-started") {
+      generationGate = adapted.gated;
+    } else if (adapted.kind === "generation-ended") {
+      // shujuku 门控：被门控生成（总结 / 向量索引等酒馆内部 quiet 请求）的 ENDED 不推演。
+      // 闸门在消费后复位——真实生成随后会有自己的 STARTED / ENDED。
+      if (generationGate) {
+        generationGate = false;
+        return;
+      }
+      scheduleGenerationEnded(adapted);
+    } else if (adapted.kind === "generation-stopped") {
+      generationGate = false;
+      onGenerationStopped();
+    } else {
+      // 楼层变动（swipe / 编辑 / 删除）：300ms 级防抖聚合——批量删除与 regenerate
+      // 「先删后加」会连发事件（shujuku 纪要 §5），绝不能逐事件回退（会连环建分支）。
+      scheduleMutation(adapted);
+    }
+  }
+
+  function clearTimers(): void {
+    if (endedTimer) { clearTimeout(endedTimer); endedTimer = null; }
+    if (mutationTimer) { clearTimeout(mutationTimer); mutationTimer = null; }
+    lastEndedEvent = null;
+    mutationQueue = [];
+  }
+
+  /**
+   * ATLAS-06 ENDED 楼层重解析：GENERATION_ENDED 的 message_id 只作锚点——
+   * 事件到达时宿主可能还没把 AI 楼层 push 进 chat（shujuku 意图快照同款问题）。
+   * 防抖窗口结束后用 resolveAssistantFloor 重读真实末条 AI 楼层，读不到再退回事件锚点。
+   */
+  function scheduleGenerationEnded(adapted: Extract<AtlasAdaptedEvent, { kind: "generation-ended" }>): void {
+    lastEndedEvent = { assistantMessageId: adapted.assistantMessageId, assistantText: adapted.assistantText };
+    if (endedTimer) clearTimeout(endedTimer);
+    endedTimer = setTimeout(() => {
+      endedTimer = null;
+      void track(consumeGenerationEnded());
+    }, Math.max(0, deps.endedDebounceMs ?? 350));
+  }
+
+  async function consumeGenerationEnded(): Promise<void> {
+    const fromHost = deps.resolveAssistantFloor?.() ?? null;
+    // 重解析结果只在「完整可用」时采用；否则退回事件锚点。
+    // 空文本不在这里拦截——交给 onGenerationEnded 统一走「放弃 pending」路径。
+    const resolved =
+      fromHost && fromHost.assistantMessageId && fromHost.assistantText.trim()
+        ? fromHost
+        : lastEndedEvent;
+    lastEndedEvent = null;
+    if (!resolved || !resolved.assistantMessageId) return;
+    await onGenerationEnded(resolved.assistantMessageId, String(resolved.assistantText ?? ""));
+  }
+
+  function scheduleMutation(adapted: Extract<AtlasAdaptedEvent, { kind: "message-swiped" | "message-edited" | "message-deleted" }>): void {
+    mutationQueue.push(adapted);
+    if (mutationTimer) clearTimeout(mutationTimer);
+    mutationTimer = setTimeout(() => {
+      mutationTimer = null;
+      const queue = mutationQueue;
+      mutationQueue = [];
+      void track(processMutations(queue));
+    }, Math.max(0, deps.mutationDebounceMs ?? 400));
   }
 
   /**
@@ -485,25 +596,40 @@ export function createAtlasUiCore(deps: {
   /** 最终回复完成：commit（至多 1 次请求；重复通知 / 空回复 / 停止不推进世界）。 */
   async function onGenerationEnded(assistantMessageId: string, assistantText: string): Promise<void> {
     if (disposed) return;
-    const pending = state.pendingTurn;
+    let pending = state.pendingTurn;
+    // ATLAS-06 swipe 同级重推演：回退后没有 pending；用 rearm 暂存的用户楼层重建回合。
+    // swipeId 换成唯一新值（swipe-<ts>）——同键重提交会被账本幂等判 duplicate，永远推不动。
+    if (!pending && state.rearmTurn) {
+      const rearm = state.rearmTurn;
+      await onMessageSent(rearm.userMessageId, rearm.userText);
+      pending = state.pendingTurn;
+      if (pending) {
+        swipeIdForNextCommit = rearm.swipeId;
+      } else {
+        setState({ rearmTurn: null }); // prepare 失败：放弃重推演，不悄悄推进世界
+        return;
+      }
+    }
     if (!pending) return;
     if (commitInFlight) return; // 同一条回复的重复事件通知只 commit 一次
     if (!assistantMessageId || !assistantText || assistantText.trim().length === 0) {
       setState({ pendingTurn: null }); // 空回复：放弃 pending，不推进世界
       return;
     }
+    const commitSwipeId = swipeIdForNextCommit;
+    swipeIdForNextCommit = null;
     const request = {
       turnId: pending.turnId,
       chatId: pending.chatId,
       userMessageId: pending.messageId,
       assistantMessageId: assistantMessageId.slice(0, ATLAS_LIMITS.ID_CHARS),
-      swipeId: null,
+      swipeId: commitSwipeId,
       userText: pending.userText,
       assistantText: assistantText.slice(0, ATLAS_LIMITS.ASSISTANT_TEXT_CHARS),
     };
     const parsed = parseAtlasTurnCommitRequest(request);
     if (!parsed.ok) {
-      setState({ pendingTurn: null });
+      setState({ pendingTurn: null, rearmTurn: null });
       return;
     }
     commitInFlight = true;
@@ -513,7 +639,7 @@ export function createAtlasUiCore(deps: {
       const receiptParsed = body.data?.receipt ? parseAtlasTurnReceipt(body.data.receipt) : null;
       if (result.status === 200 && body.ok && receiptParsed?.ok) {
         addReceipt(receiptParsed.value);
-        setState({ pendingTurn: null, lastError: null });
+        setState({ pendingTurn: null, rearmTurn: null, lastError: null });
         if (receiptParsed.value.status === "committed" || receiptParsed.value.status === "duplicate") {
           healthCheckedAt = -Infinity;
           await refresh();
@@ -524,22 +650,24 @@ export function createAtlasUiCore(deps: {
       // commit 失败：保留可重试信息，清 pending；零部分写入由服务端保证
       setState({
         pendingTurn: null,
+        rearmTurn: null,
         retryableCommit: {
           chatId: parsed.value.chatId,
           userMessageId: parsed.value.userMessageId,
           assistantMessageId: parsed.value.assistantMessageId,
-          swipeId: null,
+          swipeId: commitSwipeId,
         },
         lastError: body.error?.message ?? `世界推演失败（HTTP ${result.status}），可从「变化」页重试。`,
       });
     } catch {
       setState({
         pendingTurn: null,
+        rearmTurn: null,
         retryableCommit: {
           chatId: parsed.value.chatId,
           userMessageId: parsed.value.userMessageId,
           assistantMessageId: parsed.value.assistantMessageId,
-          swipeId: null,
+          swipeId: commitSwipeId,
         },
         lastError: "世界推演失败：服务不可用，可从「变化」页重试。",
       });
@@ -552,6 +680,71 @@ export function createAtlasUiCore(deps: {
   function onGenerationStopped(): void {
     if (disposed) return;
     if (state.pendingTurn) setState({ pendingTurn: null });
+  }
+
+  // -------------------------------------------------------------------------
+  // ATLAS-06：楼层变动（swipe / 编辑 / 删除）→ 世界回退
+  // -------------------------------------------------------------------------
+
+  /**
+   * 防抖窗口结束后统一处理楼层变动（顺序重放，语义 = 最终状态）。
+   * 只有「最近一次已推演的回复楼层」会触发回退；更早的楼层拒绝
+   * （回退中间楼层会连带抹掉其后所有推演，必须显式拒绝而不是悄悄做）。
+   */
+  async function processMutations(
+    queue: Extract<AtlasAdaptedEvent, { kind: "message-swiped" | "message-edited" | "message-deleted" }>[],
+  ): Promise<void> {
+    for (const event of queue) {
+      if (disposed) return;
+      const binding = state.binding;
+      if (!binding?.enabled || !state.chatId || state.serviceStatus !== "online") return;
+      if (binding.lastCommittedMessageId !== event.messageId) continue; // 非最近回合：不影响世界
+      if (rolledBackFloors.has(`${state.chatId}:${event.messageId}`)) continue; // 本会话已回退过
+      if (event.kind === "message-swiped") {
+        if (event.regenerating === false) continue; // 仅切换查看旧变体：不动世界
+        if (event.regenerating === null) continue; // 形状无法判定：宁可漏回退，不可误回退
+        const rolledBack = await rollbackLastTurn(event.messageId);
+        if (rolledBack) {
+          rolledBackFloors.add(`${state.chatId}:${event.messageId}`);
+          if (event.userMessageId && event.userText) {
+            setState({
+              rearmTurn: { userMessageId: event.userMessageId, userText: event.userText, swipeId: `swipe-${now()}` },
+              worldNotice: "已回退到本回合之前；新变体生成完成后将重新推演为同级结果。",
+            });
+          }
+        }
+      } else {
+        const rolledBack = await rollbackLastTurn(event.messageId);
+        if (rolledBack) {
+          rolledBackFloors.add(`${state.chatId}:${event.messageId}`);
+          setState({
+            worldNotice: event.kind === "message-edited"
+              ? "该回复已编辑：世界已回退到本回合之前；如需按新文本重新推演，请重新生成（swipe）该回复。"
+              : "该回复已删除：世界已回退到本回合之前（推演历史保留在检查点里，可追溯）。",
+          });
+        }
+      }
+    }
+  }
+
+  /** 调服务端 /turns/rollback 回退最近一次已推演回合；成功后刷新世界状态。 */
+  async function rollbackLastTurn(assistantMessageId: string): Promise<boolean> {
+    const chatId = state.chatId;
+    if (!chatId) return false;
+    try {
+      const result = await api.request("POST", "/turns/rollback", { chatId, assistantMessageId });
+      if (result.status === 200) {
+        healthCheckedAt = -Infinity;
+        await refresh();
+        return true;
+      }
+      const body = result.body as { error?: { message?: string } };
+      setState({ lastError: body.error?.message ?? `世界回退被拒绝（HTTP ${result.status}）。` });
+      return false;
+    } catch {
+      setState({ lastError: "世界回退失败：服务不可用。" });
+      return false;
+    }
   }
 
   /** 重试失败的 commit（沿用原幂等键；服务端 retry 端点）。 */
@@ -613,6 +806,7 @@ export function createAtlasUiCore(deps: {
 
     dispose() {
       disposed = true;
+      clearTimers();
       for (const { event, handler } of listeners) {
         emitter.off(event, handler);
       }

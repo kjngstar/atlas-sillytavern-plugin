@@ -673,7 +673,11 @@ var ATLAS_UI_EVENTS = [
   "MESSAGE_SENT",
   "MESSAGE_RECEIVED",
   "GENERATION_ENDED",
-  "GENERATION_STOPPED"
+  "GENERATION_STOPPED",
+  "GENERATION_STARTED",
+  "MESSAGE_SWIPED",
+  "MESSAGE_EDITED",
+  "MESSAGE_DELETED"
 ];
 var HEALTH_CACHE_MS = 3e4;
 function modeHintFor(mode, bindingInvalid, protocolVersion, bindingDisabled) {
@@ -711,13 +715,22 @@ function createAtlasUiCore(deps) {
     retryableCommit: null,
     modeHint: modeHintFor("unbound", false, null, false),
     lorebookHint: null,
-    lastError: null
+    lastError: null,
+    worldNotice: null,
+    rearmTurn: null
   };
   let initialized = false;
   let disposed = false;
   let healthCheckedAt = -Infinity;
   let commitInFlight = false;
   let lastPrepareTask = null;
+  let generationGate = false;
+  let swipeIdForNextCommit = null;
+  let endedTimer = null;
+  let mutationTimer = null;
+  let lastEndedEvent = null;
+  let mutationQueue = [];
+  const rolledBackFloors = /* @__PURE__ */ new Set();
   const listeners = [];
   function setState(patch) {
     state = { ...state, ...patch };
@@ -863,17 +876,73 @@ function createAtlasUiCore(deps) {
     if (disposed) return;
     if (event === "APP_READY" || event === "CHAT_CHANGED") {
       healthCheckedAt = -Infinity;
+      generationGate = false;
+      swipeIdForNextCommit = null;
+      clearTimers();
+      rolledBackFloors.clear();
+      setState({ rearmTurn: null });
       void track(refresh());
       return;
     }
     const adapted = deps.adaptEvent?.(event, payload) ?? null;
     if (!adapted) return;
     if (adapted.kind === "message-sent") {
+      if (generationGate) return;
+      setState({ rearmTurn: null });
       const task = onMessageSent(adapted.messageId, adapted.userText);
       lastPrepareTask = task;
       void track(task);
-    } else if (adapted.kind === "generation-ended") void track(onGenerationEnded(adapted.assistantMessageId, adapted.assistantText));
-    else onGenerationStopped();
+    } else if (adapted.kind === "generation-started") {
+      generationGate = adapted.gated;
+    } else if (adapted.kind === "generation-ended") {
+      if (generationGate) {
+        generationGate = false;
+        return;
+      }
+      scheduleGenerationEnded(adapted);
+    } else if (adapted.kind === "generation-stopped") {
+      generationGate = false;
+      onGenerationStopped();
+    } else {
+      scheduleMutation(adapted);
+    }
+  }
+  function clearTimers() {
+    if (endedTimer) {
+      clearTimeout(endedTimer);
+      endedTimer = null;
+    }
+    if (mutationTimer) {
+      clearTimeout(mutationTimer);
+      mutationTimer = null;
+    }
+    lastEndedEvent = null;
+    mutationQueue = [];
+  }
+  function scheduleGenerationEnded(adapted) {
+    lastEndedEvent = { assistantMessageId: adapted.assistantMessageId, assistantText: adapted.assistantText };
+    if (endedTimer) clearTimeout(endedTimer);
+    endedTimer = setTimeout(() => {
+      endedTimer = null;
+      void track(consumeGenerationEnded());
+    }, Math.max(0, deps.endedDebounceMs ?? 350));
+  }
+  async function consumeGenerationEnded() {
+    const fromHost = deps.resolveAssistantFloor?.() ?? null;
+    const resolved = fromHost && fromHost.assistantMessageId && fromHost.assistantText.trim() ? fromHost : lastEndedEvent;
+    lastEndedEvent = null;
+    if (!resolved || !resolved.assistantMessageId) return;
+    await onGenerationEnded(resolved.assistantMessageId, String(resolved.assistantText ?? ""));
+  }
+  function scheduleMutation(adapted) {
+    mutationQueue.push(adapted);
+    if (mutationTimer) clearTimeout(mutationTimer);
+    mutationTimer = setTimeout(() => {
+      mutationTimer = null;
+      const queue = mutationQueue;
+      mutationQueue = [];
+      void track(processMutations(queue));
+    }, Math.max(0, deps.mutationDebounceMs ?? 400));
   }
   async function waitPendingTurn(timeoutMs = 1e4) {
     const task = lastPrepareTask;
@@ -935,25 +1004,38 @@ function createAtlasUiCore(deps) {
   }
   async function onGenerationEnded(assistantMessageId, assistantText) {
     if (disposed) return;
-    const pending = state.pendingTurn;
+    let pending = state.pendingTurn;
+    if (!pending && state.rearmTurn) {
+      const rearm = state.rearmTurn;
+      await onMessageSent(rearm.userMessageId, rearm.userText);
+      pending = state.pendingTurn;
+      if (pending) {
+        swipeIdForNextCommit = rearm.swipeId;
+      } else {
+        setState({ rearmTurn: null });
+        return;
+      }
+    }
     if (!pending) return;
     if (commitInFlight) return;
     if (!assistantMessageId || !assistantText || assistantText.trim().length === 0) {
       setState({ pendingTurn: null });
       return;
     }
+    const commitSwipeId = swipeIdForNextCommit;
+    swipeIdForNextCommit = null;
     const request = {
       turnId: pending.turnId,
       chatId: pending.chatId,
       userMessageId: pending.messageId,
       assistantMessageId: assistantMessageId.slice(0, ATLAS_LIMITS.ID_CHARS),
-      swipeId: null,
+      swipeId: commitSwipeId,
       userText: pending.userText,
       assistantText: assistantText.slice(0, ATLAS_LIMITS.ASSISTANT_TEXT_CHARS)
     };
     const parsed = parseAtlasTurnCommitRequest(request);
     if (!parsed.ok) {
-      setState({ pendingTurn: null });
+      setState({ pendingTurn: null, rearmTurn: null });
       return;
     }
     commitInFlight = true;
@@ -963,7 +1045,7 @@ function createAtlasUiCore(deps) {
       const receiptParsed = body.data?.receipt ? parseAtlasTurnReceipt(body.data.receipt) : null;
       if (result.status === 200 && body.ok && receiptParsed?.ok) {
         addReceipt(receiptParsed.value);
-        setState({ pendingTurn: null, lastError: null });
+        setState({ pendingTurn: null, rearmTurn: null, lastError: null });
         if (receiptParsed.value.status === "committed" || receiptParsed.value.status === "duplicate") {
           healthCheckedAt = -Infinity;
           await refresh();
@@ -973,22 +1055,24 @@ function createAtlasUiCore(deps) {
       }
       setState({
         pendingTurn: null,
+        rearmTurn: null,
         retryableCommit: {
           chatId: parsed.value.chatId,
           userMessageId: parsed.value.userMessageId,
           assistantMessageId: parsed.value.assistantMessageId,
-          swipeId: null
+          swipeId: commitSwipeId
         },
         lastError: body.error?.message ?? `世界推演失败（HTTP ${result.status}），可从「变化」页重试。`
       });
     } catch {
       setState({
         pendingTurn: null,
+        rearmTurn: null,
         retryableCommit: {
           chatId: parsed.value.chatId,
           userMessageId: parsed.value.userMessageId,
           assistantMessageId: parsed.value.assistantMessageId,
-          swipeId: null
+          swipeId: commitSwipeId
         },
         lastError: "世界推演失败：服务不可用，可从「变化」页重试。"
       });
@@ -999,6 +1083,55 @@ function createAtlasUiCore(deps) {
   function onGenerationStopped() {
     if (disposed) return;
     if (state.pendingTurn) setState({ pendingTurn: null });
+  }
+  async function processMutations(queue) {
+    for (const event of queue) {
+      if (disposed) return;
+      const binding = state.binding;
+      if (!binding?.enabled || !state.chatId || state.serviceStatus !== "online") return;
+      if (binding.lastCommittedMessageId !== event.messageId) continue;
+      if (rolledBackFloors.has(`${state.chatId}:${event.messageId}`)) continue;
+      if (event.kind === "message-swiped") {
+        if (event.regenerating === false) continue;
+        if (event.regenerating === null) continue;
+        const rolledBack = await rollbackLastTurn(event.messageId);
+        if (rolledBack) {
+          rolledBackFloors.add(`${state.chatId}:${event.messageId}`);
+          if (event.userMessageId && event.userText) {
+            setState({
+              rearmTurn: { userMessageId: event.userMessageId, userText: event.userText, swipeId: `swipe-${now()}` },
+              worldNotice: "已回退到本回合之前；新变体生成完成后将重新推演为同级结果。"
+            });
+          }
+        }
+      } else {
+        const rolledBack = await rollbackLastTurn(event.messageId);
+        if (rolledBack) {
+          rolledBackFloors.add(`${state.chatId}:${event.messageId}`);
+          setState({
+            worldNotice: event.kind === "message-edited" ? "该回复已编辑：世界已回退到本回合之前；如需按新文本重新推演，请重新生成（swipe）该回复。" : "该回复已删除：世界已回退到本回合之前（推演历史保留在检查点里，可追溯）。"
+          });
+        }
+      }
+    }
+  }
+  async function rollbackLastTurn(assistantMessageId) {
+    const chatId = state.chatId;
+    if (!chatId) return false;
+    try {
+      const result = await api.request("POST", "/turns/rollback", { chatId, assistantMessageId });
+      if (result.status === 200) {
+        healthCheckedAt = -Infinity;
+        await refresh();
+        return true;
+      }
+      const body = result.body;
+      setState({ lastError: body.error?.message ?? `世界回退被拒绝（HTTP ${result.status}）。` });
+      return false;
+    } catch {
+      setState({ lastError: "世界回退失败：服务不可用。" });
+      return false;
+    }
   }
   async function retryLastCommit() {
     if (disposed) return;
@@ -1055,6 +1188,7 @@ function createAtlasUiCore(deps) {
     },
     dispose() {
       disposed = true;
+      clearTimers();
       for (const { event, handler } of listeners) {
         emitter.off(event, handler);
       }
@@ -3489,6 +3623,243 @@ function resolveWorldProjection(world, request) {
   }
   return replayFromLedger(world, branchId, at, pin);
 }
+function createProjectionCheckpoint(world, branchId, at) {
+  const projection = replayFromLedger(world, branchId, at);
+  return {
+    worldId: world.id,
+    branchId,
+    at,
+    definitionRevisionId: projection.definitionRevisionId,
+    entityStates: projection.entityStates,
+    flags: projection.flags,
+    memoryRefs: projection.memoryRefs,
+    narrativeEntries: projection.narrativeEntries,
+    sourceChain: projection.sourceChain,
+    stateHash: projection.hash
+  };
+}
+
+// lib/world-timepoint.ts
+function actionEndTime(action) {
+  if (typeof action.endedAt === "number" && Number.isFinite(action.endedAt)) return action.endedAt;
+  if (typeof action.at === "number" && Number.isFinite(action.at)) return action.at;
+  return null;
+}
+var TIME_EPS = 1e-9;
+function branchTimeChainIsConsistent(actions) {
+  if (actions.length === 0) return false;
+  let prevEnd = -Infinity;
+  for (const a of actions) {
+    if (typeof a.at !== "number" || !Number.isFinite(a.at)) return false;
+    const start = typeof a.startedAt === "number" ? a.startedAt : a.at;
+    const end = typeof a.endedAt === "number" ? a.endedAt : a.at;
+    if (!(start <= a.at + TIME_EPS && a.at <= end + TIME_EPS)) return false;
+    if (start < prevEnd - TIME_EPS) return false;
+    prevEnd = end;
+  }
+  return true;
+}
+function actionSortTime(action, useEndedAt) {
+  if (useEndedAt && typeof action.endedAt === "number" && Number.isFinite(action.endedAt)) {
+    return action.endedAt;
+  }
+  if (typeof action.at === "number" && Number.isFinite(action.at)) return action.at;
+  return actionEndTime(action);
+}
+function actionLanding(action) {
+  if (action.toPointId) return { regionId: action.toRegionId ?? null, pointId: action.toPointId };
+  if (action.toRegionId) return { regionId: action.toRegionId, pointId: null };
+  return { regionId: action.fromRegionId ?? null, pointId: action.fromPointId ?? null };
+}
+var outcomeFlagRefs = (world, actionIds) => {
+  const ids = new Set(actionIds);
+  const out = [];
+  for (const o of world.outcomes ?? []) {
+    if (!ids.has(o.actionId)) continue;
+    for (const ref of o.changeRefs ?? []) {
+      if (ref.startsWith("flag:") && ref.length > 5) out.push(ref.slice(5));
+    }
+  }
+  return out;
+};
+function projectRuntimeAt(world, storyId, at, opts = {}) {
+  if (!storyId?.trim()) return null;
+  const source = (world.storyRuntimes ?? []).find((r) => r.storyId === storyId);
+  if (!source) return null;
+  const anchorAt = typeof at === "number" && Number.isFinite(at) ? at : 0;
+  const now = opts.now ?? 0;
+  const reasons = [];
+  let approx = false;
+  const actionById = new Map((world.actions ?? []).map((a) => [a.id, a]));
+  const keptActionIds = [];
+  const droppedActionIds = [];
+  const undatedActionIds = [];
+  const orderedActions = (source.actionLog ?? []).map((id) => actionById.get(id)).filter((a) => Boolean(a));
+  const useEndedAt = branchTimeChainIsConsistent(orderedActions);
+  for (const id of source.actionLog ?? []) {
+    const action = actionById.get(id);
+    if (!action) {
+      droppedActionIds.push(id);
+      reasons.push(`行动 ${id} 的引用已失效，未作为历史依据。`);
+      approx = true;
+      continue;
+    }
+    const end = actionSortTime(action, useEndedAt);
+    if (end === null) {
+      droppedActionIds.push(id);
+      undatedActionIds.push(id);
+      continue;
+    }
+    if (end <= anchorAt) keptActionIds.push(id);
+    else droppedActionIds.push(id);
+  }
+  if (undatedActionIds.length > 0) {
+    approx = true;
+    reasons.push(
+      `${undatedActionIds.length} 条行动缺少可定位的时间字段，已按「不在锚点之前」处理；该时点为近似起点。`
+    );
+  }
+  let positionSource = "unknown";
+  let regionId = null;
+  let pointId = null;
+  const lastKept = keptActionIds.length ? actionById.get(keptActionIds[keptActionIds.length - 1]) : void 0;
+  if (lastKept) {
+    const landing = actionLanding(lastKept);
+    regionId = landing.regionId;
+    pointId = landing.pointId;
+    positionSource = "action";
+  } else {
+    const anchorEventId = opts.anchorEventId ?? null;
+    let anchorRegionId = null;
+    let anchorEventTitle = null;
+    if (anchorEventId) {
+      for (const [regionKey, list] of Object.entries(world.events ?? {})) {
+        const hit = (list ?? []).find((e) => e.id === anchorEventId);
+        if (hit) {
+          anchorRegionId = regionKey;
+          anchorEventTitle = hit.title;
+          break;
+        }
+      }
+    }
+    if (anchorRegionId) {
+      regionId = anchorRegionId;
+      pointId = null;
+      positionSource = "event";
+      reasons.push(
+        `该分支在锚点前没有可定位的行动，起点按事件「${anchorEventTitle ?? anchorEventId}」所在地区近似。`
+      );
+    } else if (world.currentRegionId) {
+      regionId = world.currentRegionId;
+      pointId = null;
+      positionSource = "event";
+      reasons.push("该分支在锚点前没有可定位的行动，起点按世界当前地区近似。");
+    } else {
+      reasons.push("该分支在锚点前没有可定位的行动，且没有可用的地区锚点：起点未知。");
+    }
+    approx = true;
+  }
+  const droppedFlags = new Set(outcomeFlagRefs(world, droppedActionIds));
+  const keptFlags = new Set(outcomeFlagRefs(world, keptActionIds));
+  const revokedFlags = [...droppedFlags].filter((f) => !keptFlags.has(f));
+  const worldFlags = (source.worldFlags ?? []).filter((f) => !revokedFlags.includes(f));
+  if (revokedFlags.length > 0) {
+    reasons.push(`已撤销 ${revokedFlags.length} 个由锚点之后行动产生的世界标记：${revokedFlags.join("、")}。`);
+  }
+  const runtime = {
+    storyId,
+    currentTime: anchorAt,
+    currentRegionId: regionId,
+    ...source.currentPointId !== void 0 || pointId !== null ? { currentPointId: pointId } : {},
+    ...source.companions ? { companions: [...source.companions] } : {},
+    ...source.worldFlags || worldFlags.length ? { worldFlags } : {},
+    actionLog: keptActionIds.slice(-W0_LIMITS.maxActions),
+    snapshotFrom: source.snapshotFrom ?? null,
+    updatedAt: now
+  };
+  return {
+    storyId,
+    anchorAt,
+    runtime,
+    keptActionIds,
+    droppedActionIds,
+    revokedFlags,
+    characterPositions: projectCharacterPositionsAt(world, {
+      storyId,
+      at: anchorAt,
+      keptActionIds,
+      droppedActionIds,
+      actionById
+    }),
+    positionSource,
+    approx: approx || revokedFlags.length > 0,
+    reasons
+  };
+}
+function projectCharacterPositionsAt(world, ctx) {
+  const droppedByActor = /* @__PURE__ */ new Set();
+  for (const id of ctx.droppedActionIds) {
+    const action = ctx.actionById.get(id);
+    if (action?.actorId) droppedByActor.add(action.actorId);
+  }
+  const keptByActor = /* @__PURE__ */ new Map();
+  for (const id of ctx.keptActionIds) {
+    const action = ctx.actionById.get(id);
+    if (!action?.actorId) continue;
+    const landing = actionLanding(action);
+    keptByActor.set(action.actorId, { actionId: action.id, regionId: landing.regionId, pointId: landing.pointId });
+  }
+  const out = [];
+  for (const c of world.characters ?? []) {
+    const kept = keptByActor.get(c.id);
+    if (kept) {
+      out.push({
+        characterId: c.id,
+        regionId: kept.regionId,
+        pointId: kept.pointId,
+        source: "action",
+        actionId: kept.actionId,
+        approx: false
+      });
+      continue;
+    }
+    const state = (world.characterStates ?? []).find(
+      (s) => s.characterId === c.id && !s.branchId
+    );
+    if (state) {
+      out.push({
+        characterId: c.id,
+        regionId: state.currentRegionId ?? null,
+        pointId: state.currentPointId ?? null,
+        source: "baseline",
+        actionId: null,
+        // 基线可能被本分支锚点之后的行动改写过 → 诚实标近似
+        approx: droppedByActor.has(c.id)
+      });
+      continue;
+    }
+    if (c.currentRegionId) {
+      out.push({
+        characterId: c.id,
+        regionId: c.currentRegionId,
+        pointId: null,
+        source: "legacy",
+        actionId: null,
+        approx: droppedByActor.has(c.id)
+      });
+      continue;
+    }
+    out.push({
+      characterId: c.id,
+      regionId: null,
+      pointId: null,
+      source: "unknown",
+      actionId: null,
+      approx: true
+    });
+  }
+  return out;
+}
 
 // lib/world-checkpoint.ts
 function checkpointSnapshotHash(snapshot) {
@@ -3496,6 +3867,71 @@ function checkpointSnapshotHash(snapshot) {
 }
 function isCheckpointIntact(checkpoint) {
   return checkpointSnapshotHash(checkpoint.snapshot) === checkpoint.snapshot.stateHash;
+}
+function createCheckpoint(world, opts) {
+  const reason = opts.reason.trim();
+  if (!reason) return { ok: false, error: "检查点必须说明创建原因" };
+  if (reason.length > W0_LIMITS.maxCheckpointReason) {
+    return { ok: false, error: `创建原因超过上限 ${W0_LIMITS.maxCheckpointReason} 字` };
+  }
+  if (opts.name !== void 0 && opts.name.length > W0_LIMITS.maxCheckpointName) {
+    return { ok: false, error: `检查点名称超过上限 ${W0_LIMITS.maxCheckpointName} 字` };
+  }
+  const list = world.checkpoints ?? [];
+  if (list.length >= W0_LIMITS.maxCheckpoints) {
+    return { ok: false, error: `检查点数量已达上限（${W0_LIMITS.maxCheckpoints}）；永久压缩需先生成完整备份并二次确认` };
+  }
+  if (opts.branchId && !(world.stories ?? []).some((s) => s.id === opts.branchId)) {
+    return { ok: false, error: `分支不存在：${opts.branchId}` };
+  }
+  const materialized = createProjectionCheckpoint(world, opts.branchId, opts.at);
+  const runtimeSnapshot = captureRuntime(world, opts.branchId, opts.at, { now: opts.now ?? 0 });
+  const checkpoint = {
+    id: `ckpt-${hashString(`${world.id}|${opts.branchId ?? "-"}|${opts.at}|${list.length}|${reason}`)}`,
+    worldId: world.id,
+    kind: opts.kind,
+    reason,
+    ...opts.name ? { name: opts.name } : {},
+    branchId: opts.branchId ?? null,
+    at: opts.at,
+    ledgerHead: materialized.sourceChain.length > 0 ? materialized.sourceChain[materialized.sourceChain.length - 1] : null,
+    ledgerCount: materialized.sourceChain.length,
+    ...runtimeSnapshot ? { runtime: runtimeSnapshot } : {},
+    // R5-RC-01：按检查点时刻选择权威定义修订（而不是最新修订）
+    definitionRevisionId: materialized.definitionRevisionId ?? null,
+    parentCheckpointId: list.length > 0 ? list[list.length - 1].id : null,
+    snapshot: {
+      entityStates: materialized.entityStates,
+      flags: materialized.flags,
+      memoryRefs: materialized.memoryRefs,
+      narrativeEntries: materialized.narrativeEntries,
+      sourceChain: materialized.sourceChain,
+      stateHash: materialized.stateHash
+    },
+    createdAt: opts.now ?? 0
+  };
+  return { ok: true, value: { ...world, checkpoints: [...list, checkpoint] } };
+}
+function runtimeStoryId(world, branchId) {
+  if (branchId) return branchId;
+  const canon = (world.stories ?? []).find((s) => s.mode === "canon");
+  return canon?.id ?? null;
+}
+function captureRuntime(world, branchId, at, opts = { now: 0 }) {
+  const storyId = runtimeStoryId(world, branchId);
+  if (!storyId) return null;
+  const projection = projectRuntimeAt(world, storyId, at, { now: opts.now ?? 0 });
+  if (!projection) return null;
+  const rt = projection.runtime;
+  return {
+    currentTime: rt.currentTime,
+    currentRegionId: rt.currentRegionId ?? null,
+    currentPointId: rt.currentPointId ?? null,
+    worldFlags: [...rt.worldFlags ?? []],
+    approx: projection.approx,
+    // PLAY-05：连同当时的已播放行动指针一起物化，回退时直接照它还原
+    actionLog: [...rt.actionLog ?? []]
+  };
 }
 function checkpointById(world, checkpointId) {
   const hit = (world.checkpoints ?? []).find((c) => c.id === checkpointId);
@@ -3527,6 +3963,60 @@ function previewRestore(world, checkpointId) {
         const revision = checkpoint.definitionRevisionId ? (world.definitionRevisions ?? []).find((r) => r.id === checkpoint.definitionRevisionId) : null;
         return revision && !revision.snapshot ? { definitionApprox: true } : {};
       })()
+    }
+  };
+}
+function restoreAsPlayhead(world, checkpointId, opts = { now: 0 }) {
+  const checkpoint = checkpointById(world, checkpointId);
+  if (!checkpoint) return { ok: false, error: "检查点不存在或已损坏，拒绝作为恢复源" };
+  const playhead = {
+    branchId: checkpoint.branchId,
+    at: checkpoint.at,
+    checkpointId: checkpoint.id,
+    updatedAt: opts.now ?? 0
+  };
+  const others = (world.playheads ?? []).filter((p) => p.branchId !== checkpoint.branchId);
+  let next = { ...world, playheads: [...others, playhead] };
+  const storyId = runtimeStoryId(world, checkpoint.branchId);
+  const runtimes = [...world.storyRuntimes ?? []];
+  const idx = storyId ? runtimes.findIndex((r) => r.storyId === storyId) : -1;
+  const saved = checkpoint.runtime ?? null;
+  let replayedActionsDropped = 0;
+  if (idx >= 0) {
+    const rt = runtimes[idx];
+    const savedLog = saved && Array.isArray(saved.actionLog) ? new Set(saved.actionLog) : null;
+    const orderedActions = (rt.actionLog ?? []).map((id) => (world.actions ?? []).find((a) => a.id === id)).filter((a) => Boolean(a));
+    const useEndedAt = branchTimeChainIsConsistent(orderedActions);
+    const kept = (rt.actionLog ?? []).filter((id) => {
+      const action = (world.actions ?? []).find((a) => a.id === id);
+      if (!action) return true;
+      if (savedLog) return savedLog.has(id);
+      const end = actionSortTime(action, useEndedAt);
+      if (end === null) return true;
+      return end <= checkpoint.at;
+    });
+    replayedActionsDropped = (rt.actionLog ?? []).length - kept.length;
+    runtimes[idx] = {
+      ...rt,
+      // 有 runtime 快照 → 完整还原；没有（旧检查点）→ 至少把时间对齐到检查点
+      currentTime: saved ? saved.currentTime : checkpoint.at,
+      ...saved ? { currentRegionId: saved.currentRegionId } : {},
+      ...saved && saved.currentPointId !== null ? { currentPointId: saved.currentPointId } : {},
+      ...saved ? { worldFlags: [...saved.worldFlags] } : {},
+      actionLog: kept,
+      updatedAt: opts.now ?? 0
+    };
+    next = { ...next, storyRuntimes: runtimes };
+  }
+  return {
+    ok: true,
+    value: next,
+    restored: {
+      branchId: checkpoint.branchId,
+      at: checkpoint.at,
+      runtimeRestored: Boolean(saved) && idx >= 0,
+      approx: !saved || saved.approx,
+      replayedActionsDropped
     }
   };
 }
@@ -4789,7 +5279,7 @@ function createAtlasServerCore(deps) {
     return okResult({
       ok: true,
       plugin: "atlas",
-      version: "0.7.6",
+      version: "0.8.0",
       protocolVersion: 1,
       time: now()
     });
@@ -5062,9 +5552,23 @@ function createAtlasServerCore(deps) {
     }
     let draft;
     let output;
+    let baseWorld = world;
+    let checkpointId = null;
+    const ckpt = createCheckpoint(world, {
+      branchId: pending.binding.branchId,
+      at: pending.binding.worldTimeCursor,
+      kind: "technical",
+      reason: `atlas-turn:${request.assistantMessageId}`.slice(0, 200),
+      now: now()
+    });
+    if (ckpt.ok) {
+      baseWorld = ckpt.value;
+      const list = baseWorld.checkpoints ?? [];
+      checkpointId = list.length > 0 ? list[list.length - 1].id : null;
+    }
     try {
       draft = parseAtlasWorldTurnDraft(call.text);
-      output = commitAtlasTurn(world, {
+      output = commitAtlasTurn(baseWorld, {
         request,
         branchId: pending.binding.branchId,
         currentTime: pending.binding.worldTimeCursor,
@@ -5095,6 +5599,23 @@ function createAtlasServerCore(deps) {
     bindingCache.set(binding.chatId, nextBinding);
     await store.remove(`pending:${idempotencyKey}`);
     receiptCache.set(idempotencyKey, receipt);
+    if (checkpointId) {
+      await store.write(`turn:${binding.chatId}:${idempotencyKey}`, {
+        schemaVersion: 1,
+        chatId: binding.chatId,
+        idempotencyKey,
+        userMessageId: request.userMessageId,
+        assistantMessageId: request.assistantMessageId,
+        swipeId: request.swipeId,
+        checkpointId,
+        committedAt: now(),
+        previousBinding: {
+          worldTimeCursor: binding.worldTimeCursor,
+          currentLocationId: binding.currentLocationId,
+          lastCommittedMessageId: binding.lastCommittedMessageId
+        }
+      });
+    }
     const lorebook = buildLorebookPlans(output.world, receipt);
     return okResult(lorebook ? { receipt, lorebook } : { receipt });
   }
@@ -5151,6 +5672,66 @@ function createAtlasServerCore(deps) {
     }
     return okResult({ preview: preview.value });
   }
+  async function handleRollback(body) {
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "rollback 请求必须是对象");
+    }
+    const record = body;
+    const chatId = typeof record.chatId === "string" ? record.chatId.trim() : "";
+    const assistantMessageId = typeof record.assistantMessageId === "string" ? record.assistantMessageId.trim() : "";
+    const swipeId = typeof record.swipeId === "string" && record.swipeId.trim() ? record.swipeId.trim() : void 0;
+    if (!chatId || !assistantMessageId || assistantMessageId.length > ATLAS_LIMITS.ID_CHARS) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "rollback 需要 chatId 与 assistantMessageId。");
+    }
+    const binding = requireBoundBinding(await getBinding(chatId));
+    const keys = await store.list(`turn:${chatId}:`);
+    const entries = [];
+    for (const key of keys) {
+      const doc = await store.read(key);
+      if (doc && !doc.rolledBack) entries.push({ key, doc });
+    }
+    entries.sort((a, b) => Number(b.doc.committedAt ?? 0) - Number(a.doc.committedAt ?? 0));
+    const target = entries.find(
+      (e) => e.doc.assistantMessageId === assistantMessageId && (swipeId === void 0 || e.doc.swipeId === swipeId)
+    );
+    if (!target) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "没有找到该楼层的推演回合映射（可能该回合未推演或已回退）。");
+    }
+    const latest = entries[0];
+    if (latest && latest.key !== target.key) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "只能回退最近一次已推演的回合；回退中间楼层会连带抹掉其后所有推演。");
+    }
+    if (binding.lastCommittedMessageId !== assistantMessageId) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "该楼层不是当前最近一次已推演的回复，拒绝回退。");
+    }
+    const checkpointId = typeof target.doc.checkpointId === "string" ? target.doc.checkpointId : "";
+    if (!checkpointId) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "回合映射缺少检查点，无法回退。");
+    }
+    const world = await requireWorld(binding);
+    const restored = restoreAsPlayhead(world, checkpointId, { now: now() });
+    if (!restored.ok) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, restored.error);
+    }
+    await store.write(`world:${binding.worldId}`, restored.value);
+    worldCache.set(binding.worldId, restored.value);
+    const previous = target.doc.previousBinding ?? {};
+    const nextBinding = {
+      ...binding,
+      worldTimeCursor: typeof previous.worldTimeCursor === "number" ? previous.worldTimeCursor : binding.worldTimeCursor,
+      currentLocationId: previous.currentLocationId ?? binding.currentLocationId,
+      lastCommittedMessageId: previous.lastCommittedMessageId ?? null
+    };
+    await store.write(`binding:${binding.chatId}`, nextBinding);
+    bindingCache.set(binding.chatId, nextBinding);
+    await store.write(target.key, { ...target.doc, rolledBack: true, rolledBackAt: now() });
+    const oldKey = typeof target.doc.idempotencyKey === "string" ? target.doc.idempotencyKey : null;
+    if (oldKey) receiptCache.delete(oldKey);
+    return okResult({
+      rolledBack: { assistantMessageId, checkpointId },
+      restored: restored.restored ?? null
+    });
+  }
   async function handleTravelPreview(body) {
     if (!body || typeof body !== "object" || Array.isArray(body)) {
       throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "travel-preview 请求必须是对象");
@@ -5191,6 +5772,7 @@ function createAtlasServerCore(deps) {
       if (method === "POST" && route === "/turns/commit") return await handleCommit(body);
       if (method === "POST" && route === "/turns/retry") return await handleRetry(body);
       if (method === "POST" && route === "/turns/restore") return await handleRestore(body);
+      if (method === "POST" && route === "/turns/rollback") return await handleRollback(body);
       if (method === "POST" && route === "/map/travel-preview") return await handleTravelPreview(body);
       throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, `未知路由：${method} ${route}`);
     } catch (thrown) {

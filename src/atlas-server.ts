@@ -16,7 +16,7 @@
 import type { EntityRecord, World } from "../lib/world-schema.ts";
 import { parseWorld } from "../lib/world-schema.ts";
 import { ledgerForBranch } from "../lib/world-ledger.ts";
-import { previewRestore } from "../lib/world-checkpoint.ts";
+import { createCheckpoint, previewRestore, restoreAsPlayhead } from "../lib/world-checkpoint.ts";
 import { resolveCharacterPosition } from "../lib/world-npc.ts";
 import type {
   AtlasChatBinding,
@@ -165,6 +165,7 @@ export const ATLAS_ROUTE_MANIFEST = [
   { method: "POST", path: "/turns/commit" },
   { method: "POST", path: "/turns/retry" },
   { method: "POST", path: "/turns/restore" },
+  { method: "POST", path: "/turns/rollback" },
   { method: "POST", path: "/map/travel-preview" },
 ] as const;
 
@@ -355,7 +356,7 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
     return okResult({
       ok: true,
       plugin: "atlas",
-      version: "0.7.6",
+      version: "0.8.0",
       protocolVersion: 1,
       time: now(),
     });
@@ -671,9 +672,25 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
     //    统一补 retryable=true（重试 = 重新推演一次，可能产出合法草稿）。
     let draft;
     let output;
+    // ATLAS-06：提交前落一个「回合前」技术检查点（swipe / 编辑 / 删除的回退锚点）。
+    // 失败（如数量达上限）不阻断推演——该回合只是没有回退点，不写映射。
+    let baseWorld = world;
+    let checkpointId: string | null = null;
+    const ckpt = createCheckpoint(world, {
+      branchId: pending.binding.branchId,
+      at: pending.binding.worldTimeCursor,
+      kind: "technical",
+      reason: `atlas-turn:${request.assistantMessageId}`.slice(0, 200),
+      now: now(),
+    });
+    if (ckpt.ok) {
+      baseWorld = ckpt.value;
+      const list = baseWorld.checkpoints ?? [];
+      checkpointId = list.length > 0 ? list[list.length - 1]!.id : null;
+    }
     try {
       draft = parseAtlasWorldTurnDraft(call.text);
-      output = commitAtlasTurn(world, {
+      output = commitAtlasTurn(baseWorld, {
         request,
         branchId: pending.binding.branchId,
         currentTime: pending.binding.worldTimeCursor,
@@ -707,6 +724,25 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
     bindingCache.set(binding.chatId, nextBinding);
     await store.remove(`pending:${idempotencyKey}`);
     receiptCache.set(idempotencyKey, receipt);
+    // ATLAS-06：楼层 ↔ 检查点稳定映射（swipe / 编辑 / 删除回退的依据）。
+    // 只在有检查点时写；回滚时标记 rolledBack 保留历史，文档永不删除。
+    if (checkpointId) {
+      await store.write(`turn:${binding.chatId}:${idempotencyKey}`, {
+        schemaVersion: 1,
+        chatId: binding.chatId,
+        idempotencyKey,
+        userMessageId: request.userMessageId,
+        assistantMessageId: request.assistantMessageId,
+        swipeId: request.swipeId,
+        checkpointId,
+        committedAt: now(),
+        previousBinding: {
+          worldTimeCursor: binding.worldTimeCursor,
+          currentLocationId: binding.currentLocationId,
+          lastCommittedMessageId: binding.lastCommittedMessageId,
+        },
+      });
+    }
     // 8. 世界书条目规划（纯派生，零 IO；写入由 UI 扩展经酒馆 world-info API 完成）。
     //    duplicate / failed 不产出规划：duplicate 本就写过了，failed 零部分写入。
     const lorebook = buildLorebookPlans(output.world, receipt);
@@ -770,6 +806,80 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
     return okResult({ preview: preview.value });
   }
 
+  /**
+   * ATLAS-06：swipe / 编辑 / 删除的世界回退。
+   * 语义 = Atlasia「设为游玩头」：回到该回合之前的检查点，**账本未来事件一条不删**（默认保留可返回历史）；
+   * 绑定游标照回合映射里的 previousBinding 快照精确还原。
+   * 守卫：只允许回退该聊天最近一条未回退回合——中间楼层回退会连带抹掉其后所有推演，必须显式拒绝。
+   */
+  async function handleRollback(body: unknown): Promise<AtlasRouteResult> {
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "rollback 请求必须是对象");
+    }
+    const record = body as Record<string, unknown>;
+    const chatId = typeof record.chatId === "string" ? record.chatId.trim() : "";
+    const assistantMessageId = typeof record.assistantMessageId === "string" ? record.assistantMessageId.trim() : "";
+    const swipeId = typeof record.swipeId === "string" && record.swipeId.trim() ? record.swipeId.trim() : undefined;
+    if (!chatId || !assistantMessageId || assistantMessageId.length > ATLAS_LIMITS.ID_CHARS) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "rollback 需要 chatId 与 assistantMessageId。");
+    }
+    const binding = requireBoundBinding(await getBinding(chatId));
+    // 收集该聊天全部未回退的回合映射，按提交时间倒序
+    const keys = await store.list(`turn:${chatId}:`);
+    const entries: Array<{ key: string; doc: Record<string, unknown> & { committedAt?: number; rolledBack?: boolean; assistantMessageId?: string; swipeId?: string | null } }> = [];
+    for (const key of keys) {
+      const doc = (await store.read(key)) as Record<string, unknown> | null;
+      if (doc && !doc.rolledBack) entries.push({ key, doc });
+    }
+    entries.sort((a, b) => Number(b.doc.committedAt ?? 0) - Number(a.doc.committedAt ?? 0));
+    const target = entries.find(
+      (e) => e.doc.assistantMessageId === assistantMessageId && (swipeId === undefined || e.doc.swipeId === swipeId),
+    );
+    if (!target) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "没有找到该楼层的推演回合映射（可能该回合未推演或已回退）。");
+    }
+    const latest = entries[0];
+    if (latest && latest.key !== target.key) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "只能回退最近一次已推演的回合；回退中间楼层会连带抹掉其后所有推演。");
+    }
+    if (binding.lastCommittedMessageId !== assistantMessageId) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "该楼层不是当前最近一次已推演的回复，拒绝回退。");
+    }
+    const checkpointId = typeof target.doc.checkpointId === "string" ? target.doc.checkpointId : "";
+    if (!checkpointId) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "回合映射缺少检查点，无法回退。");
+    }
+    const world = await requireWorld(binding);
+    const restored = restoreAsPlayhead(world, checkpointId, { now: now() });
+    if (!restored.ok) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, restored.error);
+    }
+    // 世界写回游玩头状态（账本未来保留）；绑定游标照 previousBinding 快照还原
+    await store.write(`world:${binding.worldId}`, restored.value);
+    worldCache.set(binding.worldId, restored.value);
+    const previous = (target.doc.previousBinding ?? {}) as {
+      worldTimeCursor?: number;
+      currentLocationId?: string | null;
+      lastCommittedMessageId?: string | null;
+    };
+    const nextBinding: AtlasChatBinding = {
+      ...binding,
+      worldTimeCursor: typeof previous.worldTimeCursor === "number" ? previous.worldTimeCursor : binding.worldTimeCursor,
+      currentLocationId: previous.currentLocationId ?? binding.currentLocationId,
+      lastCommittedMessageId: previous.lastCommittedMessageId ?? null,
+    };
+    await store.write(`binding:${binding.chatId}`, nextBinding);
+    bindingCache.set(binding.chatId, nextBinding);
+    // 标记该回合已回退（文档保留 = 可审计的历史）；清幂等缓存让同变体之后的重提交能重新推进
+    await store.write(target.key, { ...target.doc, rolledBack: true, rolledBackAt: now() });
+    const oldKey = typeof target.doc.idempotencyKey === "string" ? target.doc.idempotencyKey : null;
+    if (oldKey) receiptCache.delete(oldKey);
+    return okResult({
+      rolledBack: { assistantMessageId, checkpointId },
+      restored: restored.restored ?? null,
+    });
+  }
+
   async function handleTravelPreview(body: unknown): Promise<AtlasRouteResult> {
     if (!body || typeof body !== "object" || Array.isArray(body)) {
       throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "travel-preview 请求必须是对象");
@@ -820,6 +930,7 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
       if (method === "POST" && route === "/turns/commit") return await handleCommit(body);
       if (method === "POST" && route === "/turns/retry") return await handleRetry(body);
       if (method === "POST" && route === "/turns/restore") return await handleRestore(body);
+      if (method === "POST" && route === "/turns/rollback") return await handleRollback(body);
       if (method === "POST" && route === "/map/travel-preview") return await handleTravelPreview(body);
       throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, `未知路由：${method} ${route}`);
     } catch (thrown) {
