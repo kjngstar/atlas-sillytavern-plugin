@@ -67,10 +67,13 @@ function redactSecrets(text) {
 }
 
 function atlasLog(tag, text, detail = null) {
+  const clean = redactSecrets(text);
   atlasLogEntries.push({
     at: new Date(),
     tag: String(tag),
-    text: redactSecrets(text),
+    text: clean,
+    // 报错分级：失败 / 错误 / 异常 / 4xx·5xx 一律标 error，日志页高亮 + 可筛选
+    level: /失败|错误|异常|HTTP [45]\d\d|网络失败/.test(clean) ? "error" : "info",
     ...(detail ? { detail: redactSecrets(detail).replace(/\s+/g, " ").slice(0, 400) } : {}),
   });
   if (atlasLogEntries.length > ATLAS_LOG_LIMIT) atlasLogEntries.shift();
@@ -396,6 +399,7 @@ export function atlasUninstallGlobals() {
 // 面板 DOM（五页；地图 = 查看 / 定位 / 目的地预览）
 // ---------------------------------------------------------------------------
 
+// 注意：必须与 ui-core 的 ATLAS_UI_PAGES 逐一对应（导出守卫测试把关双源漂移）
 const PAGES = [
   { id: "overview", label: "概览" },
   { id: "map", label: "地图" },
@@ -403,6 +407,7 @@ const PAGES = [
   { id: "changes", label: "变化" },
   { id: "progression", label: "推进" },
   { id: "api", label: "API" },
+  { id: "logs", label: "日志" },
 ];
 
 const NPC_REASON_LABELS = {
@@ -476,7 +481,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
   const brandText = el("span", "aw-brand__text", "ATLAS");
   brand.append(brandMark, brandText);
 
-  const PAGE_ICONS = { overview: "◈", map: "▣", nearby: "◉", changes: "≋", settings: "✳" };
+  const PAGE_ICONS = { overview: "◈", map: "▣", nearby: "◉", changes: "≋", progression: "➤", api: "✳", logs: "⚑" };
   const nav = el("nav", "aw-nav");
   nav.setAttribute("aria-label", "工作台分区导航");
   nav.append(el("span", "aw-rail__label", "导航"));
@@ -756,49 +761,94 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     return panel;
   }
 
-  /** 运行日志面板（诊断）：环形缓冲最近 N 条，可一键复制给作者排障。 */
-  function buildLogPanel() {
-    const details = document.createElement("details");
-    details.className = "aw-details";
-    const summary = document.createElement("summary");
-    summary.className = "aw-details__summary";
-    summary.textContent = `运行日志（最近 ${atlasLogEntries.length} 条，可用于排障）`;
-    details.append(summary);
-    const body = el("div", "aw-details__body");
+  /** 日志页筛选器状态（仅页面内使用；0 = 全部）。 */
+  let logFilter = "all";
+
+  function atlasLogAsText() {
+    return atlasLogEntries
+      .map((entry) => `${entry.at.toLocaleTimeString()} [${entry.level === "error" ? "报错" : entry.tag}] ${entry.text}${entry.detail ? `\n  ${entry.detail}` : ""}`)
+      .join("\n");
+  }
+
+  /** 日志页（侧边栏「日志」）：报错高亮 + 筛选 + 复制 / 清空。 */
+  function buildLogPage() {
+    const wrap = el("div", "aw-panel");
+
+    const controls = el("div", "aw-actions");
+    const filterSelect = document.createElement("select");
+    filterSelect.className = "aw-input";
+    filterSelect.setAttribute("aria-label", "筛选日志");
+    const options = [
+      ["all", `全部（${atlasLogEntries.length} 条）`],
+      ["error", `仅报错（${atlasLogEntries.filter((entry) => entry.level === "error").length} 条）`],
+      ["推演", "仅推演请求"],
+      ["引擎", "仅引擎操作"],
+      ["设置", "仅设置命令"],
+    ];
+    for (const [value, label] of options) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      filterSelect.append(option);
+    }
+    filterSelect.value = logFilter;
+    filterSelect.addEventListener("change", () => {
+      logFilter = filterSelect.value;
+      renderCenter();
+    });
+    controls.append(filterSelect);
+
     const copy = el("button", "aw-btn aw-btn--ghost", "复制全部日志");
     copy.type = "button";
     copy.setAttribute("aria-label", "复制运行日志到剪贴板");
     copy.addEventListener("click", async () => {
-      const text = atlasLogEntries
-        .map((entry) => `${entry.at.toLocaleTimeString()} [${entry.tag}] ${entry.text}${entry.detail ? `\n  ${entry.detail}` : ""}`)
-        .join("\n");
       try {
-        await navigator.clipboard.writeText(text || "（日志为空）");
+        await navigator.clipboard.writeText(atlasLogAsText() || "（日志为空）");
         setStatus("日志已复制到剪贴板。", "ok");
       } catch {
-        setStatus("复制被浏览器拦截，请展开后手动选择文本。", "error");
+        setStatus("复制被浏览器拦截，请手动选择文本复制。", "error");
       }
       renderCenter();
     });
-    body.append(copy);
-    if (atlasLogEntries.length === 0) {
-      body.append(el("p", "aw-panel__text", "暂无日志。跑一轮对话或点「加载模型列表」后，这里会记录每条推演请求的状态、耗时与响应开头（密钥已脱敏）。"));
-    } else {
-      const list = el("div", "aw-log");
-      for (const entry of [...atlasLogEntries].reverse()) {
-        const row = el("div", "aw-log__row");
-        row.append(
-          el("span", "aw-log__time", entry.at.toLocaleTimeString()),
-          el("span", "aw-log__tag", entry.tag),
-          el("span", "aw-log__text", entry.text),
-        );
-        if (entry.detail) row.append(el("pre", "aw-log__detail", entry.detail));
-        list.append(row);
-      }
-      body.append(list);
+    controls.append(copy);
+
+    const clear = el("button", "aw-btn aw-btn--danger", "清空日志");
+    clear.type = "button";
+    clear.setAttribute("aria-label", "清空运行日志");
+    clear.addEventListener("click", () => {
+      atlasLogEntries.length = 0;
+      logFilter = "all";
+      renderCenter();
+    });
+    controls.append(clear);
+    wrap.append(controls);
+
+    const filtered = atlasLogEntries.filter((entry) => {
+      if (logFilter === "all") return true;
+      if (logFilter === "error") return entry.level === "error";
+      return entry.tag === logFilter;
+    });
+
+    if (filtered.length === 0) {
+      wrap.append(el("p", "aw-panel__text", atlasLogEntries.length === 0
+        ? "暂无日志。跑一轮对话或点「加载模型列表」后，这里会记录每条推演请求的状态、耗时与响应开头（密钥已脱敏）。"
+        : "当前筛选下没有日志条目。"));
+      return wrap;
     }
-    details.append(body);
-    return details;
+
+    const list = el("div", "aw-log");
+    for (const entry of [...filtered].reverse()) {
+      const row = el("div", `aw-log__row${entry.level === "error" ? " is-error" : ""}`);
+      row.append(
+        el("span", "aw-log__time", entry.at.toLocaleTimeString()),
+        el("span", "aw-log__tag", entry.tag),
+        el("span", "aw-log__text", entry.text),
+      );
+      if (entry.detail) row.append(el("pre", "aw-log__detail", entry.detail));
+      list.append(row);
+    }
+    wrap.append(list);
+    return wrap;
   }
 
   function renderCenter(d = data()) {
@@ -942,7 +992,6 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       if (s.lorebookHint) center.append(el("div", "aw-note aw-note--error", s.lorebookHint));
       if (s.worldNotice) center.append(el("div", "aw-note", s.worldNotice));
       center.append(buildLorebookPanel());
-      center.append(buildLogPanel());
       return;
     }
 
@@ -959,7 +1008,12 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       if (s.lastError) center.append(el("div", "aw-note aw-note--error", s.lastError));
       ensureSettingsLoaded();
       center.append(buildApiPanel());
-      center.append(buildLogPanel());
+      return;
+    }
+
+    if (s.page === "logs") {
+      center.append(pageHeader("运行日志", "最近 " + String(ATLAS_LOG_LIMIT) + " 条引擎与推演记录；报错红色高亮，可复制给作者排障。密钥自动脱敏。"));
+      center.append(buildLogPage());
       return;
     }
   }

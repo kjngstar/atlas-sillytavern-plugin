@@ -268,8 +268,8 @@ test("形态契约：中区按栏位切页，地图只属于地图页", () => {
   const js = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
   ok(js.includes("core.setPage(page.id)"), "导航按钮切换页面状态");
   ok(js.includes('if (state().page === "map") renderMap(d)'), "只有地图页才渲染地图");
-  // ATLAS-18：侧边栏六项（删「设置」、新增「推进」）
-  for (const page of ["overview", "map", "nearby", "changes", "progression", "api"]) {
+  // 侧边栏七项（0.9.7 新增「日志」）
+  for (const page of ["overview", "map", "nearby", "changes", "progression", "api", "logs"]) {
     ok(js.includes(`s.page === "${page}"`), `中区有独立的「${page}」页分支`);
   }
   ok(!js.includes('s.page === "settings"'), "「设置」页分支已删除（职责并入概览 / 推进 / API）");
