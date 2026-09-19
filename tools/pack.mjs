@@ -91,6 +91,15 @@ for (const target of PACK_TARGETS) {
   }
 }
 
+// 3.5) 许可证：每个发布单元自带 LICENSE（自包含安装包的组成部分）。
+const rootLicense = join(root, "LICENSE");
+if (existsSync(rootLicense)) {
+  for (const target of PACK_TARGETS) {
+    copyFileSync(rootLicense, join(releaseDir, target.name, "LICENSE"));
+  }
+  console.log("copied LICENSE -> release/atlas-ui-extension/, release/atlas-server-plugin/");
+}
+
 // 4) 同步仓库根安装单元：SillyTavern「Install extension」要求 manifest.json
 //    位于仓库根，且 index.js 加载 ./dist/atlas-ui-core.mjs。发布仓库根 = 安装单元。
 const uiRelease = join(releaseDir, "atlas-ui-extension");

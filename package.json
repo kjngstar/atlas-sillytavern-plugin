@@ -13,5 +13,11 @@
   "devDependencies": {
     "esbuild": "^0.28.0",
     "typescript": "^5.9.3"
+  },
+  "author": "kjngstar",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kjngstar/atlas-sillytavern-plugin.git"
   }
 }
