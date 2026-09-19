@@ -106,12 +106,20 @@ export function buildWorldTurnUserContent(input: AtlasWorldTurnPromptInput): str
   ].join("\n");
 }
 
-function errorMessageForStatus(status: number): { code: AtlasErrorCode; retryable: boolean } {
-  if (status === 401 || status === 403) return { code: ATLAS_ERROR_CODES.API_AUTH_FAILED, retryable: false };
-  if (status === 404) return { code: ATLAS_ERROR_CODES.API_NOT_FOUND, retryable: false };
-  if (status === 429) return { code: ATLAS_ERROR_CODES.API_RATE_LIMITED, retryable: true };
-  if (status >= 500) return { code: ATLAS_ERROR_CODES.API_REQUEST_FAILED, retryable: true };
-  return { code: ATLAS_ERROR_CODES.API_REQUEST_FAILED, retryable: false };
+function errorMessageForStatus(status: number): { code: AtlasErrorCode; retryable: boolean; message: string } {
+  if (status === 401 || status === 403) {
+    return { code: ATLAS_ERROR_CODES.API_AUTH_FAILED, retryable: false, message: "推演服务鉴权失败（HTTP 401/403），请检查密钥。" };
+  }
+  if (status === 404) {
+    return { code: ATLAS_ERROR_CODES.API_NOT_FOUND, retryable: false, message: "推演服务返回 HTTP 404：API 地址或模型名可能不存在。" };
+  }
+  if (status === 429) {
+    return { code: ATLAS_ERROR_CODES.API_RATE_LIMITED, retryable: true, message: "推演服务限流（HTTP 429），请稍后重试。" };
+  }
+  if (status >= 500) {
+    return { code: ATLAS_ERROR_CODES.API_REQUEST_FAILED, retryable: true, message: `推演服务错误（HTTP ${status}）。` };
+  }
+  return { code: ATLAS_ERROR_CODES.API_REQUEST_FAILED, retryable: false, message: `推演服务返回 HTTP ${status}。` };
 }
 
 /**
@@ -171,7 +179,7 @@ export async function callAtlasWorldTurnApi(
 
     if (!response.ok) {
       const mapped = errorMessageForStatus(response.status);
-      return fail(mapped.code, `推演服务返回 HTTP ${response.status}。`, mapped.retryable, response.status);
+      return fail(mapped.code, mapped.message, mapped.retryable, response.status);
     }
 
     let payload: unknown;
