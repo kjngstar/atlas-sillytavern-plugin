@@ -41,10 +41,21 @@ import { prepareAtlasTurn, commitAtlasTurn } from "./atlas-turn.ts";
 import { buildLorebookPlans } from "./atlas-lorebook.ts";
 import {
   callAtlasWorldTurnApi,
-  maskPreset,
   parseAtlasWorldTurnDraft,
   type AtlasApiPreset,
 } from "./atlas-api-client.ts";
+import {
+  ATLAS_SETTINGS_SCHEMA_VERSION,
+  applyLegacySettingsPatch,
+  applySettingsCommand,
+  createDefaultSettingsV2,
+  migrateAtlasSettings,
+  resolveWorldTurnPreset,
+  sanitizeSettingsV2,
+  settingsViewV2,
+  type AtlasServerSettingsV2,
+  type AtlasSettingsCommand,
+} from "./atlas-settings.ts";
 
 // ---------------------------------------------------------------------------
 // 存储契约
@@ -84,109 +95,15 @@ export function createMemoryDocumentStore(): AtlasDocumentStore & { dump(): Map<
 // 设置（独立 API 预设；服务端保存，GET 只出脱敏视图）
 // ---------------------------------------------------------------------------
 
-export interface AtlasServerSettings {
-  schemaVersion: 1;
-  worldTurn: AtlasApiPreset | null;
-  majorEvent: AtlasApiPreset | null;
-  /**
-   * 0.8.3 预设库（shujuku 式）：每个功能槽可存多个具名预设，UI 一键切换渠道。
-   * worldTurn / majorEvent 两字段 = 当前**激活**的预设；本库只是可切换的存档。
-   */
-  presetLibrary: AtlasPresetLibrary;
-  /** 每条最终回复后是否自动 commit（关掉则只能手动 retry / 由 UI 决定） */
-  autoCommit: boolean;
-  /** 每分钟每预设最大请求数 */
-  rpmLimit: number;
-}
-
-/** 预设库：按功能槽分组的具名预设列表（name 槽内唯一；数量有界）。 */
-export interface AtlasPresetLibrary {
-  worldTurn: AtlasApiPreset[];
-  majorEvent: AtlasApiPreset[];
-}
-
-const MAX_LIBRARY_PRESETS_PER_SLOT = 20;
-
 /**
- * 不可信数据 → 合法预设库：逐条 isValidPreset、槽内按 name 去重（后者胜）、数量截断。
- * base = 现有库：请求里**缺槽**（非数组）时沿用 base 的该槽——支持 UI 只更新一个槽。
+ * ATLAS-18：设置类型已迁移到 `src/atlas-settings.ts`（schemaVersion 2）。
+ * 这里保留旧名作为类型别名，避免一次性改动所有引用点；结构以 v2 为准。
  */
-function sanitizePresetLibrary(value: unknown, base?: AtlasPresetLibrary): AtlasPresetLibrary {
-  const result: AtlasPresetLibrary = {
-    worldTurn: base?.worldTurn ?? [],
-    majorEvent: base?.majorEvent ?? [],
-  };
-  if (!value || typeof value !== "object" || Array.isArray(value)) return result;
-  const record = value as Record<string, unknown>;
-  for (const slot of ["worldTurn", "majorEvent"] as const) {
-    const list = record[slot];
-    if (!Array.isArray(list)) continue;
-    const byName = new Map<string, AtlasApiPreset>();
-    for (const entry of list) {
-      if (!isValidPreset(entry)) continue;
-      byName.set(entry.name, entry);
-    }
-    result[slot] = [...byName.values()].slice(0, MAX_LIBRARY_PRESETS_PER_SLOT);
-  }
-  return result;
-}
-
-const DEFAULT_SETTINGS: AtlasServerSettings = {
-  schemaVersion: 1,
-  worldTurn: null,
-  majorEvent: null,
-  presetLibrary: { worldTurn: [], majorEvent: [] },
-  autoCommit: true,
-  rpmLimit: 30,
-};
+export type AtlasServerSettings = AtlasServerSettingsV2;
 
 const SETTINGS_DOC = "settings";
-const MAX_ENDPOINT_CHARS = 2048;
-const MAX_API_KEY_CHARS = 4096;
-const MAX_PRESET_NAME_CHARS = 64;
-const MAX_SYSTEM_PROMPT_CHARS = 8000;
 const RPM_WINDOW_MS = 60_000;
 
-function isValidPreset(value: unknown): value is AtlasApiPreset {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const record = value as Record<string, unknown>;
-  if (typeof record.name !== "string" || !record.name.trim() || record.name.length > MAX_PRESET_NAME_CHARS) return false;
-  if (typeof record.endpoint !== "string" || record.endpoint.length > MAX_ENDPOINT_CHARS) return false;
-  // endpoint 必须是可构造 chat/completions 请求的 http(s) 绝对地址
-  try {
-    const url = new URL(record.endpoint);
-    if (url.protocol !== "https:" && url.protocol !== "http:") return false;
-  } catch {
-    return false;
-  }
-  if (typeof record.model !== "string" || !record.model.trim() || record.model.length > ATLAS_LIMITS.ID_CHARS) return false;
-  if (typeof record.apiKey !== "string" || record.apiKey.length > MAX_API_KEY_CHARS) return false;
-  if (record.maxTokens !== undefined && (typeof record.maxTokens !== "number" || record.maxTokens < 1 || record.maxTokens > 8192)) return false;
-  if (record.temperature !== undefined && (typeof record.temperature !== "number" || record.temperature < 0 || record.temperature > 2)) return false;
-  if (record.timeoutMs !== undefined && (typeof record.timeoutMs !== "number" || record.timeoutMs < 1000 || record.timeoutMs > 120_000)) return false;
-  if (record.systemPrompt !== undefined && (typeof record.systemPrompt !== "string" || record.systemPrompt.length > MAX_SYSTEM_PROMPT_CHARS)) return false;
-  return true;
-}
-
-function validateSettingsBody(raw: unknown): AtlasError | null {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    return new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "设置必须是对象");
-  }
-  const record = raw as Record<string, unknown>;
-  for (const key of ["worldTurn", "majorEvent"] as const) {
-    const value = record[key];
-    if (value !== undefined && value !== null && !isValidPreset(value)) {
-      return new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, `${key} 预设字段非法（name / endpoint / model / apiKey 或数值超限）`);
-    }
-  }
-  if (record.autoCommit !== undefined && typeof record.autoCommit !== "boolean") {
-    return new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "autoCommit 必须是布尔值");
-  }
-  if (record.rpmLimit !== undefined && (typeof record.rpmLimit !== "number" || record.rpmLimit < 1 || record.rpmLimit > 600)) {
-    return new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "rpmLimit 必须是 1..600 的数字");
-  }
-  return null;
-}
 
 // ---------------------------------------------------------------------------
 // 路由与错误映射
@@ -198,6 +115,7 @@ export const ATLAS_ROUTE_MANIFEST = [
   { method: "PUT", path: "/settings" },
   { method: "GET", path: "/worlds" },
   { method: "POST", path: "/worlds/import" },
+  { method: "POST", path: "/worlds/ensure-starter" },
   { method: "POST", path: "/bindings" },
   { method: "GET", path: "/state/:chatId" },
   { method: "GET", path: "/map/image/:chatId" },
@@ -286,8 +204,9 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
   const store = deps.store;
   const now = deps.now ?? Date.now;
 
-  let settings: AtlasServerSettings = { ...DEFAULT_SETTINGS };
+  let settings: AtlasServerSettingsV2 = createDefaultSettingsV2();
   let settingsLoaded = false;
+  /** 迁移发生在读取路径上：不写 store；第一次成功设置写入时才持久化 v2（规格 0.5）。 */
   const worldCache = new Map<string, World | null>();
   const bindingCache = new Map<string, AtlasChatBinding | null>();
   const receiptCache = new Map<string, AtlasTurnReceipt>();
@@ -300,20 +219,44 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
     if (logs.length > 200) logs.shift();
   }
 
-  async function loadSettings(): Promise<AtlasServerSettings> {
+  /**
+   * 惰性加载设置：识别 schemaVersion 2 与 v1。
+   * - v2：sanitize（非法条目丢弃、悬挂引用归一为 null）。
+   * - v1（或形状可疑的旧数据）：纯函数迁移，**不写 store**；首个成功写入时落库 v2。
+   */
+  async function loadSettings(): Promise<AtlasServerSettingsV2> {
     if (settingsLoaded) return settings;
     const raw = await store.read(SETTINGS_DOC);
     if (raw && typeof raw === "object" && !Array.isArray(raw)) {
       const record = raw as Record<string, unknown>;
-      settings = {
-        schemaVersion: 1,
-        worldTurn: isValidPreset(record.worldTurn) ? record.worldTurn : null,
-        majorEvent: isValidPreset(record.majorEvent) ? record.majorEvent : null,
-        presetLibrary: sanitizePresetLibrary(record.presetLibrary),
-        autoCommit: typeof record.autoCommit === "boolean" ? record.autoCommit : true,
-        rpmLimit: typeof record.rpmLimit === "number" && record.rpmLimit >= 1 && record.rpmLimit <= 600 ? record.rpmLimit : 30,
-      };
+      if (record.schemaVersion === ATLAS_SETTINGS_SCHEMA_VERSION) {
+        const sanitized = sanitizeSettingsV2(record, { now });
+        settings = sanitized.settings;
+        if (sanitized.diagnostics.skipped > 0) {
+          pushLog({ at: now(), kind: "settings-sanitize", skipped: sanitized.diagnostics.skipped });
+        }
+      } else {
+        const migrated = migrateAtlasSettings(record, { now });
+        settings = migrated.settings;
+        pushLog({
+          at: now(),
+          kind: "settings-migrate",
+          from: typeof record.schemaVersion === "number" ? record.schemaVersion : "unknown",
+          to: ATLAS_SETTINGS_SCHEMA_VERSION,
+          apiPresets: migrated.settings.apiPresets.length,
+          promptPresets: migrated.settings.promptPresets.length,
+          skipped: migrated.diagnostics.skipped,
+        });
+      }
     }
+    settingsLoaded = true;
+    return settings;
+  }
+
+  /** 写入设置：先落 store，成功后替换内存（失败保持旧值——不留下半更新状态）。 */
+  async function persistSettings(next: AtlasServerSettingsV2): Promise<AtlasServerSettingsV2> {
+    await store.write(SETTINGS_DOC, next);
+    settings = next;
     settingsLoaded = true;
     return settings;
   }
@@ -405,50 +348,35 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
 
   async function handleGetSettings(): Promise<AtlasRouteResult> {
     const current = await loadSettings();
-    return okResult({
-      schemaVersion: 1,
-      worldTurn: maskPreset(current.worldTurn),
-      majorEvent: maskPreset(current.majorEvent),
-      presetLibrary: {
-        worldTurn: current.presetLibrary.worldTurn.map(maskPreset),
-        majorEvent: current.presetLibrary.majorEvent.map(maskPreset),
-      },
-      autoCommit: current.autoCommit,
-      rpmLimit: current.rpmLimit,
-    });
+    // ATLAS-18：唯一脱敏视图（两库 + 两个活动引用 + 内置提示词只读全文）；绝不含明文 Key。
+    return okResult(settingsViewV2(current));
   }
 
+  /**
+   * PUT /settings：
+   * - 新形态 = **命令**（带 action 字段）：校验 → 生成全新 next 快照 → 写 store → 成功后才替换缓存。
+   * - 兼容形态 = v1 部分更新载荷（worldTurn / presetLibrary / autoCommit / rpmLimit）：
+   *   立即按 v2 语义迁移应用（不保留组合式存储），并在同一次写入里落库 v2。
+   */
   async function handlePutSettings(body: unknown, ctx: AtlasRequestContext): Promise<AtlasRouteResult> {
     if (!ctx.local) throw new AtlasError(ATLAS_ERROR_CODES.FORBIDDEN, "只有本机已登录会话可以修改 Atlas 设置。");
-    const invalid = validateSettingsBody(body);
-    if (invalid) throw invalid;
-    const record = body as Record<string, unknown>;
     const current = await loadSettings();
-    const next: AtlasServerSettings = {
-      schemaVersion: 1,
-      worldTurn: record.worldTurn === undefined ? current.worldTurn : (record.worldTurn as AtlasApiPreset | null),
-      majorEvent: record.majorEvent === undefined ? current.majorEvent : (record.majorEvent as AtlasApiPreset | null),
-      presetLibrary:
-        record.presetLibrary === undefined
-          ? current.presetLibrary
-          : sanitizePresetLibrary(record.presetLibrary, current.presetLibrary),
-      autoCommit: typeof record.autoCommit === "boolean" ? record.autoCommit : current.autoCommit,
-      rpmLimit: typeof record.rpmLimit === "number" ? record.rpmLimit : current.rpmLimit,
-    };
-    await store.write(SETTINGS_DOC, next);
-    settings = next;
-    settingsLoaded = true;
-    return okResult({
-      schemaVersion: 1,
-      worldTurn: maskPreset(next.worldTurn),
-      majorEvent: maskPreset(next.majorEvent),
-      presetLibrary: {
-        worldTurn: next.presetLibrary.worldTurn.map(maskPreset),
-        majorEvent: next.presetLibrary.majorEvent.map(maskPreset),
-      },
-      autoCommit: next.autoCommit,
-      rpmLimit: next.rpmLimit,
-    });
+    const isCommand = Boolean(body) && typeof body === "object" && !Array.isArray(body) &&
+      typeof (body as { action?: unknown }).action === "string";
+    const result = isCommand
+      ? applySettingsCommand(current, body as AtlasSettingsCommand, { now })
+      : applyLegacySettingsPatch(current, body, { now });
+    if (!result.ok) {
+      throw new AtlasError(
+        (result.code === "FIELD_LIMIT_EXCEEDED" ? ATLAS_ERROR_CODES.FIELD_LIMIT_EXCEEDED : ATLAS_ERROR_CODES.INVALID_PAYLOAD),
+        result.message ?? "设置更新被拒绝。",
+      );
+    }
+    const saved = await persistSettings(result.settings);
+    if (!isCommand) {
+      pushLog({ at: now(), kind: "settings-legacy-patch", apiPresets: saved.apiPresets.length });
+    }
+    return okResult(settingsViewV2(saved));
   }
 
   function worldSummary(world: World): Record<string, unknown> {
@@ -484,6 +412,30 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
     await store.write(`world:${parsed.id}`, parsed);
     worldCache.set(parsed.id, parsed);
     return okResult(worldSummary(parsed));
+  }
+
+  /**
+   * ATLAS-18：确定性建世端点（规格 0.9）。
+   * 与 `/worlds/import` 的区别 = **幂等且绝不覆盖**：同 id 世界已存在时只回报 created:false。
+   * 建世本身零模型调用；只有后续正常 commit 才推演。
+   */
+  async function handleEnsureStarter(body: unknown, ctx: AtlasRequestContext): Promise<AtlasRouteResult> {
+    if (!ctx.local) throw new AtlasError(ATLAS_ERROR_CODES.FORBIDDEN, "只有本机已登录会话可以初始化 Atlas 世界。");
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "ensure-starter 请求必须是对象");
+    }
+    const parsed = parseWorld((body as Record<string, unknown>).world);
+    if (!parsed) throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "自动建世数据无法通过 schema 校验，已拒绝。");
+    // 同一 world.id 串行（复用每实体队列）：并发首条消息只创建一个世界
+    return enqueue(`ensure:${parsed.id}`, async () => {
+      const existing = await getWorld(parsed.id);
+      if (existing) {
+        return okResult({ created: false, world: worldSummary(existing) });
+      }
+      await store.write(`world:${parsed.id}`, parsed);
+      worldCache.set(parsed.id, parsed);
+      return okResult({ created: true, world: worldSummary(parsed) });
+    });
   }
 
   async function handleBindings(body: unknown): Promise<AtlasRouteResult> {
@@ -662,7 +614,8 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
     //    ATLAS-07 旅程测试暴露的真 bug：这里曾直接读闭包 settings（初始 DEFAULT），
     //    服务重启后首个 commit 会误判「未配置」——必须经 loadSettings 从 store 惰性加载。
     const current = await loadSettings();
-    const preset = current.worldTurn;
+    // ATLAS-18：运行时由「活动 API 连接 + 活动提示词」组合，不再读组合式 worldTurn
+    const preset = resolveWorldTurnPreset(current);
     if (!preset) {
       throw new AtlasError(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "未配置独立推演 API，世界不会更新。");
     }
@@ -1025,6 +978,7 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
       if (method === "PUT" && route === "/settings") return await handlePutSettings(body, ctx);
       if (method === "GET" && route === "/worlds") return await handleListWorlds();
       if (method === "POST" && route === "/worlds/import") return await handleImportWorld(body, ctx);
+      if (method === "POST" && route === "/worlds/ensure-starter") return await handleEnsureStarter(body, ctx);
       if (method === "POST" && route === "/bindings") return await handleBindings(body);
       const stateMatch = route.match(/^\/state\/([^/]+)$/);
       if (method === "GET" && stateMatch) return await handleState(decodeURIComponent(stateMatch[1]));
@@ -1049,7 +1003,7 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
       return logs.map((entry) => ({ ...entry }));
     },
     /** 测试辅助：注入设置（跳过 PUT 校验流程；仅供测试进程使用） */
-    __setSettingsForTest(next: Partial<AtlasServerSettings>): void {
+    __setSettingsForTest(next: Partial<AtlasServerSettingsV2>): void {
       settings = { ...settings, ...next };
       settingsLoaded = true;
     },

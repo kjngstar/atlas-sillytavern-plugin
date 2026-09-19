@@ -27,6 +27,7 @@ export const ATLAS_PLUGIN_ROUTES = [
   { method: "PUT", path: "/settings" },
   { method: "GET", path: "/worlds" },
   { method: "POST", path: "/worlds/import" },
+  { method: "POST", path: "/worlds/ensure-starter" },
   { method: "POST", path: "/bindings" },
   { method: "GET", path: "/state/:chatId" },
   { method: "GET", path: "/map/image/:chatId" },
@@ -272,6 +273,7 @@ export async function init(router, options = {}) {
   put({ path: "/settings" });
   get({ path: "/worlds" });
   post({ path: "/worlds/import" });
+  post({ path: "/worlds/ensure-starter" });
   post({ path: "/bindings" });
   get({ path: "/state/:chatId" });
   get({ path: "/map/image/:chatId" });

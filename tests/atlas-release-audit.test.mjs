@@ -60,21 +60,37 @@ test("ATLAS-07 发布包扫描：无 Key 形态串、无本地绝对路径、无
   // 本地绝对路径（仓库根、Windows 用户目录、unix home）
   const PATH_PATTERNS = [/E:[\\\/]地图/, /C:[\\\/]Users/, /\/home\//, /\/Users\//];
   const TEMP_SUFFIX = [".tmp", ".log", ".bak", ".orig", ".rej"];
-  let scanned = 0;
-  for (const file of targets) {
-    const rel = relative(root, file);
-    const ext = file.slice(file.lastIndexOf("."));
-    if (TEMP_SUFFIX.some((s) => ext === s) || file.endsWith(".DS_Store")) {
-      assert.fail(`发布包含临时文件：${rel}`);
+  // 并发说明：atlas-integration.test.mjs 会并行执行 tools/pack.mjs（先清空再重建 release/），
+  // 与本扫描存在竞态（读到正在被删除/写入的文件 → 假失败）。因此扫描最多重试 3 次：
+  // 真违规（密钥形态串 / 绝对路径 / 临时文件）在任一次尝试中都会让断言失败，不会被重试掩盖。
+  const scanOnce = () => {
+    let scanned = 0;
+    for (const file of targets) {
+      const rel = relative(root, file);
+      const ext = file.slice(file.lastIndexOf("."));
+      if (TEMP_SUFFIX.some((s) => ext === s) || file.endsWith(".DS_Store")) {
+        assert.fail(`发布包含临时文件：${rel}`);
+      }
+      if (ext !== ".js" && ext !== ".mjs" && ext !== ".json" && ext !== ".css" && ext !== ".html") continue;
+      let text = null;
+      try {
+        text = readFileSync(file, "utf8");
+      } catch {
+        return null; // 文件正在被重建 → 本次尝试作废，交给重试
+      }
+      scanned += 1;
+      assert.ok(!KEY_PATTERN.test(text), `发布包含疑似密钥形态串：${rel}`);
+      for (const pattern of PATH_PATTERNS) {
+        assert.ok(!pattern.test(text), `发布包含本地绝对路径：${rel}（/${pattern.source}/）`);
+      }
     }
-    if (ext !== ".js" && ext !== ".mjs" && ext !== ".json" && ext !== ".css" && ext !== ".html") continue;
-    const text = readFileSync(file, "utf8");
-    scanned += 1;
-    assert.ok(!KEY_PATTERN.test(text), `发布包含疑似密钥形态串：${rel}`);
-    for (const pattern of PATH_PATTERNS) {
-      assert.ok(!pattern.test(text), `发布包含本地绝对路径：${rel}（/${pattern.source}/）`);
-    }
+    return scanned;
+  };
+  let scanned = null;
+  for (let attempt = 0; attempt < 3 && scanned === null; attempt += 1) {
+    scanned = scanOnce();
   }
+  assert.ok(scanned !== null, "发布包在扫描期间被并行重建（tools/pack.mjs）——请串行运行审计");
   assert.ok(scanned >= 8, `实际扫描文本文件 ${scanned} 个`);
 });
 

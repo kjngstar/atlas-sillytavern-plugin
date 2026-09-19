@@ -619,6 +619,119 @@ export function applySettingsCommand(
   }
 }
 
+/**
+ * 兼容适配器（规格 0.6）：v1 部分更新载荷 → v2 语义。
+ * 只在兼容期内使用；UI 新代码一律发命令。语义：
+ * - `worldTurn` 非 null → upsert 连接（按指纹）并**激活**它；其提示词非空则 upsert + 激活。
+ * - `worldTurn: null` → 清空两个活动引用（等价 api.activate null）。
+ * - `presetLibrary.worldTurn` → 逐条 upsert（不激活）；`majorEvent` / `presetLibrary.majorEvent` → legacyMajorEvent。
+ * - `autoCommit` / `rpmLimit` → runtime.update。
+ */
+export function applyLegacySettingsPatch(
+  settings: AtlasServerSettingsV2,
+  body: unknown,
+  deps: AtlasSettingsDeps = {},
+): AtlasSettingsCommandResult {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return fail(settings, "INVALID_PAYLOAD", "设置必须是对象");
+  }
+  const record = body as Record<string, unknown>;
+  const now = nowOf(deps);
+  let next: AtlasServerSettingsV2 = { ...settings };
+  const usedIds = new Set<string>(next.apiPresets.map((p) => p.id));
+  const usedPromptIds = new Set<string>(next.promptPresets.map((p) => p.id));
+
+  const upsertConnection = (legacy: LegacyPresetShape): string | null => {
+    const fingerprint = fingerprintOfConnection(legacy);
+    const existing = next.apiPresets.find((p) => fingerprintOfConnection({
+      endpoint: p.endpoint, model: p.model, apiKey: p.apiKey,
+      maxTokens: p.maxTokens, temperature: p.temperature, timeoutMs: p.timeoutMs,
+    }) === fingerprint);
+    if (existing) return existing.id;
+    if (next.apiPresets.length >= MAX_PRESETS_PER_LIBRARY) return null;
+    const id = resolveId("api", next.apiPresets.length, fingerprint, deps, usedIds);
+    const names = new Set(next.apiPresets.map((p) => p.name));
+    next = {
+      ...next,
+      apiPresets: [...next.apiPresets, {
+        id,
+        name: uniqueName(legacy.name, names),
+        endpoint: legacy.endpoint,
+        model: legacy.model,
+        apiKey: legacy.apiKey,
+        maxTokens: legacy.maxTokens,
+        temperature: legacy.temperature,
+        timeoutMs: legacy.timeoutMs,
+        updatedAt: now,
+      }],
+    };
+    return id;
+  };
+
+  const upsertPrompt = (legacy: LegacyPresetShape): string | null => {
+    const text = legacy.systemPrompt.trim();
+    if (!text || text.length > MAX_PROMPT_CHARS) return null;
+    const existing = next.promptPresets.find((p) => p.systemPrompt === text);
+    if (existing) return existing.id;
+    if (next.promptPresets.length >= MAX_PRESETS_PER_LIBRARY) return null;
+    const id = resolveId("prompt", next.promptPresets.length, text, deps, usedPromptIds);
+    const names = new Set(next.promptPresets.map((p) => p.name));
+    next = {
+      ...next,
+      promptPresets: [...next.promptPresets, {
+        id,
+        name: uniqueName(`${legacy.name} · 提示词`, names),
+        systemPrompt: text,
+        updatedAt: now,
+      }],
+    };
+    return id;
+  };
+
+  // 预设库（只入库，不改活动引用）
+  const library = record.presetLibrary && typeof record.presetLibrary === "object" && !Array.isArray(record.presetLibrary)
+    ? (record.presetLibrary as Record<string, unknown>)
+    : null;
+  if (library && Array.isArray(library.worldTurn)) {
+    for (const entry of library.worldTurn) {
+      const legacy = parseLegacyPreset(entry);
+      if (!legacy) return fail(settings, "INVALID_PAYLOAD", "presetLibrary.worldTurn 存在非法预设（name / endpoint / model / apiKey 或数值超限）");
+      upsertConnection(legacy);
+      upsertPrompt(legacy);
+    }
+  }
+  const legacyMajor: unknown[] = [];
+  if (record.majorEvent !== undefined && record.majorEvent !== null) legacyMajor.push(record.majorEvent);
+  if (library && Array.isArray(library.majorEvent)) legacyMajor.push(...library.majorEvent);
+  if (legacyMajor.length > 0) {
+    next = { ...next, legacyMajorEvent: JSON.parse(JSON.stringify(legacyMajor)) };
+  }
+
+  // 活动组合预设 → 两库 + 两个活动引用
+  if (record.worldTurn !== undefined) {
+    if (record.worldTurn === null) {
+      next = { ...next, activeApiPresetId: null, activePromptPresetId: null };
+    } else {
+      const legacy = parseLegacyPreset(record.worldTurn);
+      if (!legacy) return fail(settings, "INVALID_PAYLOAD", "worldTurn 预设字段非法（name / endpoint / model / apiKey 或数值超限）");
+      const apiId = upsertConnection(legacy);
+      if (!apiId) return fail(settings, "FIELD_LIMIT_EXCEEDED", `最多保存 ${MAX_PRESETS_PER_LIBRARY} 条 API 连接。`);
+      const promptId = upsertPrompt(legacy);
+      next = { ...next, activeApiPresetId: apiId, activePromptPresetId: promptId };
+    }
+  }
+
+  if (record.autoCommit !== undefined) {
+    if (typeof record.autoCommit !== "boolean") return fail(settings, "INVALID_PAYLOAD", "autoCommit 必须是布尔值");
+    next = { ...next, autoCommit: record.autoCommit };
+  }
+  if (record.rpmLimit !== undefined) {
+    if (!isFiniteIntIn(record.rpmLimit, MIN_RPM, MAX_RPM)) return fail(settings, "INVALID_PAYLOAD", "rpmLimit 必须是 1..600 的数字");
+    next = { ...next, rpmLimit: record.rpmLimit };
+  }
+  return { ok: true, settings: next };
+}
+
 // ---------------------------------------------------------------------------
 // 脱敏视图 + 运行时组合
 // ---------------------------------------------------------------------------

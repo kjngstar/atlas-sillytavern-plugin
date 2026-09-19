@@ -146,7 +146,8 @@ test("ensure-starter → bindings：建世后可直接绑定，无需 import", a
     },
   });
   assert.equal(bound.body.ok, true, "绑定成功");
+  assert.equal(bound.body.data.worldId, id, "绑定回报指向自动建世的世界");
   const state = await core.handle("GET", "/state/chat-1");
   assert.equal(state.body.ok, true, "绑定后 state 可读");
-  assert.equal(state.body.data.binding.worldId ?? state.body.data.worldId, id);
+  assert.equal(state.body.data.worldId, id, "state 指向同一个世界（无需 import 即可开玩）");
 });

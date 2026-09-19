@@ -27,6 +27,28 @@ export interface StarterWorldOptions {
 const MAX_NAME_CHARS = 60;
 const MAX_DESCRIPTION_CHARS = 2000;
 
+// 64 位 FNV-1a 常量（ATLAS-18：确定性 world ID 的哈希基座）
+const FNV_OFFSET_64 = 0xcbf29ce484222325n;
+const FNV_PRIME_64 = 0x100000001b3n;
+const MASK_64 = 0xffffffffffffffffn;
+
+/**
+ * ATLAS-18：同一聊天 ⇒ 同一世界 ID（首条消息自动建世必须确定性，禁 `world-${Date.now()}`）。
+ *
+ * - UTF-8 字节上的 64 位 FNV-1a → `world-auto-<16 位十六进制>`；
+ * - 不暴露原 chatId（哈希单向），不依赖时间与随机；
+ * - 同聊天重复触发（并发、重试、刷新）永远得到同一个世界，天然幂等。
+ */
+export function starterWorldIdForChat(chatId: string): string {
+  const bytes = new TextEncoder().encode(typeof chatId === "string" ? chatId : "");
+  let hash = FNV_OFFSET_64;
+  for (const byte of bytes) {
+    hash ^= BigInt(byte);
+    hash = (hash * FNV_PRIME_64) & MASK_64;
+  }
+  return `world-auto-${hash.toString(16).padStart(16, "0")}`;
+}
+
 /** 由角色卡信息构造最小合法世界（parseWorld 必过；失败只会来自调用方传入非法 id）。 */
 export function buildStarterWorld(options: StarterWorldOptions): World {
   const cardName = (options.name ?? "").trim().slice(0, MAX_NAME_CHARS);
