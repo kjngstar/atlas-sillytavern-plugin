@@ -3594,6 +3594,51 @@ function deriveActionSeed(world, storyId, actionCount, at) {
   return parseInt(hashString(raw).slice(0, 8), 16) >>> 0;
 }
 
+// src/atlas-time-intent.ts
+var TIME_WORD_TABLE = [
+  { pattern: /一整天|整天|大半天/g, periods: 4 },
+  { pattern: /半天|半日/g, periods: 3 },
+  { pattern: /许久|半晌|好一会儿|好一阵/g, periods: 2 },
+  { pattern: /一会儿|一会|片刻|良久/g, periods: 1 }
+];
+var ACTION_MARKER_PATTERN = /然后|接着|随后|而后|之后|再|又|最后|顺便/g;
+function extractAtlasTimeIntent(userText) {
+  const text = typeof userText === "string" ? userText : "";
+  if (!text.trim()) {
+    return { actionMarkers: [], estimatedActions: 0, timeWords: [], suggestedPeriods: null };
+  }
+  const actionMarkers = [];
+  for (const match of text.matchAll(ACTION_MARKER_PATTERN)) {
+    if (!actionMarkers.includes(match[0])) actionMarkers.push(match[0]);
+  }
+  const timeWords = [];
+  let suggestedPeriods = null;
+  for (const entry of TIME_WORD_TABLE) {
+    for (const match of text.matchAll(entry.pattern)) {
+      if (!timeWords.includes(match[0])) timeWords.push(match[0]);
+      suggestedPeriods = suggestedPeriods === null ? entry.periods : Math.max(suggestedPeriods, entry.periods);
+    }
+  }
+  return {
+    actionMarkers,
+    estimatedActions: actionMarkers.length > 0 ? actionMarkers.length + 1 : text.trim() ? 1 : 0,
+    timeWords,
+    suggestedPeriods
+  };
+}
+function renderAtlasTimeHint(userText) {
+  const intent = extractAtlasTimeIntent(userText);
+  const parts = [];
+  if (intent.actionMarkers.length > 0) {
+    parts.push(`检测到约 ${intent.estimatedActions} 个连贯动作`);
+  }
+  if (intent.suggestedPeriods !== null) {
+    parts.push(`时间词「${intent.timeWords.join("、")}」→ 至少 ${intent.suggestedPeriods} 时段`);
+  }
+  if (parts.length === 0) return null;
+  return `〔时间估计〕${parts.join("；")}（校准 duration 时参考）`;
+}
+
 // src/atlas-adjudicate.ts
 function knownEntityIds(world) {
   const ids = /* @__PURE__ */ new Set();
@@ -3628,6 +3673,20 @@ function adjudicateAtlasDraft(world, input) {
         next.duration = travelPeriods;
       }
     }
+  }
+  if (input.userText) {
+    const intent = extractAtlasTimeIntent(input.userText);
+    if (intent.suggestedPeriods !== null && intent.suggestedPeriods > (next.duration ?? 0)) {
+      notes.push(
+        `〔裁定〕行动文本出现时间词「${intent.timeWords.join("、")}」→ 至少 ${intent.suggestedPeriods} 时段（AI 给 ${next.duration ?? 0}）`
+      );
+      next.duration = intent.suggestedPeriods;
+    }
+  }
+  const hasChange = next.locationChange && (next.locationChange.toPointId || next.locationChange.toRegionId) || (next.rawEffects ?? []).length > 0 || (next.memoryDrafts ?? []).length > 0;
+  if (hasChange && (next.duration ?? 0) < 1) {
+    notes.push(`〔裁定〕有世界变化但 AI 给 0 时段 → 保底推进 1 时段`);
+    next.duration = 1;
   }
   const known = knownEntityIds(world);
   const beforeEffects = rawEffects.length;
@@ -4981,6 +5040,8 @@ function prepareAtlasTurn(world, input) {
   if (relevance.relevantNpcIds.length > 0) {
     headerLines.push(`附近人物：${relevance.relevantNpcIds.join("、")}`);
   }
+  const timeHint = renderAtlasTimeHint(request.userText);
+  if (timeHint) headerLines.push(timeHint);
   const full = `${headerLines.join("\n")}
 ${planText}`;
   const injectionText = full.length <= budgetChars ? full : `${full.slice(0, budgetChars)}
@@ -5374,7 +5435,7 @@ function createAtlasServerCore(deps) {
     return okResult({
       ok: true,
       plugin: "atlas",
-      version: "0.9.0",
+      version: "0.9.1",
       protocolVersion: 1,
       time: now()
     });
@@ -5676,6 +5737,7 @@ function createAtlasServerCore(deps) {
       const adjudication = adjudicateAtlasDraft(baseWorld, {
         branchId: pending.binding.branchId,
         currentPointId: pending.binding.currentPointId,
+        userText: request.userText,
         draft
       });
       if (adjudication.notes.length > 0) {

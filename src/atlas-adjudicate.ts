@@ -13,12 +13,16 @@
  *   （world.characters ∪ world.entityRecords），未知引用整条丢弃并记录
  *   （此前只有提示词约束，算法不强制）。
  * - 裁定说明合入 summary 尾部（〔裁定〕前缀）——账本 / 回执 / 变化页全程可审计。
+ *
+ * 0.9.1 时间辅助：用户行动文本的显式时间词（"用了一会儿""花了半天"）→ 耗时下限；
+ * 有世界变化但 AI 给 0 时段 → 保底推进 1 时段（时间随变化流动）。抽取器见 atlas-time-intent.ts。
  */
 
 import type { World } from "../lib/world-schema.ts";
 import { W0_LIMITS } from "../lib/world-schema.ts";
 import { buildTravelHint } from "../lib/world-engine.ts";
 import type { AtlasWorldChangeDraft } from "./atlas-turn.ts";
+import { extractAtlasTimeIntent } from "./atlas-time-intent.ts";
 
 export interface AtlasAdjudicationResult {
   /** 裁决后的草稿（同形状；只收紧、不放松） */
@@ -41,6 +45,8 @@ export function adjudicateAtlasDraft(
     branchId: string | null;
     /** 本回合开始时的位置（绑定游标） */
     currentPointId: string | null;
+    /** 用户行动原文（0.9.1：显式时间词 → 耗时下限；缺省不参与） */
+    userText?: string | null;
     draft: AtlasWorldChangeDraft;
   },
 ): AtlasAdjudicationResult {
@@ -81,6 +87,27 @@ export function adjudicateAtlasDraft(
         next.duration = travelPeriods;
       }
     }
+  }
+
+  // 1b) 0.9.1 时间意图：用户文本里的显式时间词 → 耗时下限（动作数量只是 prepare 软引导，不作硬限）
+  if (input.userText) {
+    const intent = extractAtlasTimeIntent(input.userText);
+    if (intent.suggestedPeriods !== null && intent.suggestedPeriods > (next.duration ?? 0)) {
+      notes.push(
+        `〔裁定〕行动文本出现时间词「${intent.timeWords.join("、")}」→ 至少 ${intent.suggestedPeriods} 时段（AI 给 ${next.duration ?? 0}）`,
+      );
+      next.duration = intent.suggestedPeriods;
+    }
+  }
+
+  // 1c) 0.9.1 保底：世界确实发生了变化 / 位移，但 AI 给 0 时段 → 时间必须随变化流动
+  const hasChange =
+    (next.locationChange && (next.locationChange.toPointId || next.locationChange.toRegionId)) ||
+    (next.rawEffects ?? []).length > 0 ||
+    (next.memoryDrafts ?? []).length > 0;
+  if (hasChange && (next.duration ?? 0) < 1) {
+    notes.push(`〔裁定〕有世界变化但 AI 给 0 时段 → 保底推进 1 时段`);
+    next.duration = 1;
   }
 
   // 2) 实体白名单：引用未知实体的 effect / 记忆整条丢弃

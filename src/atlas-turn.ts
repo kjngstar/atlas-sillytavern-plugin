@@ -37,6 +37,7 @@ import {
   atlasTravelPreview,
   computeAtlasRelevance,
 } from "./atlas-relevance.ts";
+import { renderAtlasTimeHint } from "./atlas-time-intent.ts";
 
 // ---------------------------------------------------------------------------
 // prepare
@@ -113,6 +114,9 @@ export function prepareAtlasTurn(world: World, input: AtlasTurnPrepareInput): At
   if (relevance.relevantNpcIds.length > 0) {
     headerLines.push(`附近人物：${relevance.relevantNpcIds.join("、")}`);
   }
+  // 0.9.1 时间意图：用户行动含连贯动作 / 显式时间词时给 AI 软引导（硬下限在裁决层）
+  const timeHint = renderAtlasTimeHint(request.userText);
+  if (timeHint) headerLines.push(timeHint);
   const full = `${headerLines.join("\n")}\n${planText}`;
   const injectionText = full.length <= budgetChars
     ? full

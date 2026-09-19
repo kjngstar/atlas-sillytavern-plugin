@@ -1,6 +1,6 @@
 {
   "name": "atlas-sillytavern-plugin",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "private": true,
   "description": "Atlas — SillyTavern 世界引擎扩展（独立项目；内嵌 Atlasia 世界核心快照）",
   "type": "module",

@@ -396,7 +396,7 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
     return okResult({
       ok: true,
       plugin: "atlas",
-      version: "0.9.0",
+      version: "0.9.1",
       protocolVersion: 1,
       time: now(),
     });
@@ -750,6 +750,7 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
       const adjudication = adjudicateAtlasDraft(baseWorld, {
         branchId: pending.binding.branchId,
         currentPointId: pending.binding.currentPointId,
+        userText: request.userText,
         draft,
       });
       if (adjudication.notes.length > 0) {
