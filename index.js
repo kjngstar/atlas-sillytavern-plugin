@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.4";
+export const ATLAS_EXTENSION_VERSION = "0.9.5";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -1370,19 +1370,21 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     panel.append(el("span", "aw-eyebrow", "推进状态"));
     const s = state();
 
-    const stats = el("div", "aw-stats");
-    const rows = [
+    // 状态行内联（shujuku 式：label + 值一行一条），不再用统计卡阵
+    const rows = el("div", "aw-rows");
+    const statusRows = [
       ["本聊天推演", s.binding ? (s.binding.enabled ? "已启用" : "已停用") : "未绑定"],
-      ["自动提交", settingsV2?.autoCommit === false ? "关闭" : "开启"],
+      ["自动提交", settingsV2?.autoCommit === false ? "关闭（回复后不自动推进）" : "开启（每条回复后自动推进）"],
       ["当前提示词", promptLibrary.find((p) => p.id === settingsV2?.activePromptPresetId)?.name ?? "内置默认"],
       ["当前 API", activeApiLabel()],
     ];
-    for (const [label, value] of rows) {
-      const card = el("div", "aw-stat");
-      card.append(el("span", "aw-stat__label", label), el("span", "aw-stat__value", String(value)));
-      stats.append(card);
+    for (const [label, value] of statusRows) {
+      const row = el("div", "aw-row");
+      row.append(el("span", "aw-row__label", label));
+      row.append(el("span", "aw-row__value", String(value)));
+      rows.append(row);
     }
-    panel.append(stats);
+    panel.append(rows);
 
     const runtimeActions = el("div", "aw-actions");
     const toggle = el("button", "aw-btn", s.binding?.enabled ? "停用本聊天推演" : "启用本聊天推演");
@@ -1406,6 +1408,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     panel.append(el("p", "aw-panel__meta", "「推进」只管推进行为与提示词；API 地址、密钥与模型请在「API」页配置。"));
 
     if (statusLine()) panel.append(statusLine());
+    panel.append(el("div", "aw-divider"));
 
     // 提示词预设卡
     const promptPanel = el("section", "aw-panel");
@@ -1458,6 +1461,10 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       if (!promptDraft) promptDraft = newPromptDraft();
       promptDraft.name = nameInput.value;
       promptDraftDirty = true;
+      // 覆盖式保存必须始终明示目标（防「随便改改点保存」静默覆盖原预设）
+      if (promptSaveButton && promptDraft.id) {
+        promptSaveButton.textContent = promptDraft.name.trim() ? `保存修改到「${promptDraft.name.trim()}」` : "保存修改";
+      }
     });
     nameField.append(nameInput);
     promptPanel.append(nameField);
@@ -1497,8 +1504,8 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       setStatus("", "ok");
       renderCenter();
     });
-    if (!isBuiltinDraft) {
-      addButton("保存", "保存当前提示词预设", async () => {
+    const promptSaveButton = !isBuiltinDraft
+      ? addButton(promptDraft?.id ? `保存修改到「${promptDraft.name}」` : "保存新预设", "保存当前提示词预设", async () => {
         if (!promptDraft?.name.trim() || !promptDraft.systemPrompt.trim()) {
           setStatus("提示词名称与正文都不能为空。", "error");
           renderCenter();
@@ -1510,8 +1517,8 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
         });
         if (ok) { promptDraftDirty = false; setStatus("提示词已保存。"); }
         renderCenter();
-      }, "aw-btn aw-btn--primary");
-    }
+      }, "aw-btn aw-btn--primary")
+      : null;
     addButton("另存为", "以新名称保存提示词副本", async () => {
       const name = typeof window !== "undefined" && typeof window.prompt === "function"
         ? window.prompt("新提示词预设名称", promptDraft?.name ? `${promptDraft.name} 副本` : "新提示词")
@@ -1636,17 +1643,20 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     panel.append(libRow);
 
     const draft = apiDraft ?? newApiDraft();
+    const textField = (key, label, type, maxLength, placeholder, aria) => ({ key, label, type, maxLength, placeholder, aria });
+    const numberField = (key, label, min, max, step, aria) => ({ key, label, type: "number", min, max, step, aria });
     const fields = [
-      { key: "name", label: "连接名称", type: "text", maxLength: 64, placeholder: "例如：本地 8317", aria: "连接名称" },
-      { key: "endpoint", label: "端点（http(s) 绝对地址）", type: "text", maxLength: 2048, placeholder: "http://localhost:8317/v1", aria: "API 端点" },
-      { key: "apiKey", label: "API 密钥（留空保持已保存的密钥）", type: "password", maxLength: 4096, placeholder: active?.apiKey?.exists ? `已保存（尾号 ${active.apiKey.tail ?? "----"}），留空保持不变` : "未设置", aria: "API 密钥" },
-      { key: "model", label: "模型名", type: "text", maxLength: 128, placeholder: "例如：gpt-4o-mini", aria: "模型名" },
-      { key: "maxTokens", label: "最大回复长度", type: "number", min: 1, max: 8192, aria: "最大回复长度" },
-      { key: "temperature", label: "温度", type: "number", min: 0, max: 2, step: 0.1, aria: "温度" },
-      { key: "timeoutMs", label: "超时毫秒", type: "number", min: 1000, max: 120000, aria: "超时毫秒" },
+      textField("name", "连接名称", "text", 64, "例如：本地 8317", "连接名称"),
+      textField("endpoint", "端点（http(s) 绝对地址）", "text", 2048, "http://localhost:8317/v1", "API 端点"),
+      textField("apiKey", "API 密钥（留空保持已保存的密钥）", "password", 4096, active?.apiKey?.exists ? `已保存（尾号 ${active.apiKey.tail ?? "----"}），留空保持不变` : "未设置", "API 密钥"),
+    ];
+    const numberFields = [
+      numberField("maxTokens", "最大回复长度", 1, 8192, 1, "最大回复长度"),
+      numberField("temperature", "温度", 0, 2, 0.1, "温度"),
+      numberField("timeoutMs", "超时毫秒", 1000, 120000, 1000, "超时毫秒"),
     ];
     const inputs = {};
-    for (const field of fields) {
+    const appendField = (field) => {
       const wrap = el("div", "aw-field");
       wrap.append(el("span", "aw-field__label", field.label));
       const input = document.createElement("input");
@@ -1672,40 +1682,63 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
           draft[field.key] = numeric ? Number(input.value) : input.value;
           apiDraft = draft;
           apiDraftDirty = true;
+          // 覆盖式保存必须始终明示目标（防改完名点保存静默覆盖别的连接）
+          if (field.key === "name" && saveApiButton) {
+            saveApiButton.textContent = draft.id
+              ? (draft.name.trim() ? `保存修改到「${draft.name.trim()}」` : "保存修改")
+              : "保存新连接";
+          }
         });
       }
       wrap.append(input);
       inputs[field.key] = input;
-      panel.append(wrap);
-    }
+      return wrap;
+    };
+    for (const field of fields) panel.append(appendField(field));
 
-    // 模型列表（测试连接的产物）
-    if (modelOptions.length > 0) {
-      const modelRow = el("div", "aw-field");
-      modelRow.append(el("span", "aw-field__label", "从端点读到的模型（点击填入）"));
-      const modelSelect = document.createElement("select");
-      modelSelect.className = "aw-input";
-      modelSelect.setAttribute("aria-label", "选择端点返回的模型名");
-      const blank = document.createElement("option");
-      blank.value = "";
-      blank.textContent = `共 ${modelOptions.length} 个`;
-      modelSelect.append(blank);
-      for (const name of modelOptions) {
-        const option = document.createElement("option");
-        option.value = name;
-        option.textContent = name;
-        modelSelect.append(option);
-      }
-      modelSelect.addEventListener("change", () => {
-        if (!modelSelect.value) return;
-        draft.model = modelSelect.value;
-        apiDraft = draft;
-        apiDraftDirty = true;
-        inputs.model.value = modelSelect.value;
-      });
-      modelRow.append(modelSelect);
-      panel.append(modelRow);
+    // shujuku 式：独立的「加载模型列表」按钮紧跟密钥，模型下拉**常驻**（占位提示先加载）
+    const loadModelsRow = el("div", "aw-actions");
+    const loadModelsBtn = el("button", "aw-btn", "加载模型列表");
+    loadModelsBtn.type = "button";
+    loadModelsBtn.setAttribute("aria-label", "通过酒馆后端代理加载模型列表并检查鉴权");
+    loadModelsBtn.addEventListener("click", async () => {
+      await testConnection(apiDraft ?? newApiDraft());
+    });
+    loadModelsRow.append(loadModelsBtn, el("span", "aw-panel__meta", "同时检查端点与鉴权；失败会给出可读错误。"));
+    panel.append(loadModelsRow);
+
+    // 模型名：手填 + 列表选择双入口（列表选择点选即填入上方输入框）
+    panel.append(appendField(textField("model", "模型名（手动输入）", "text", 128, "例如：gpt-4o-mini", "模型名")));
+    const modelRow = el("div", "aw-field");
+    modelRow.append(el("span", "aw-field__label", "或从列表选择"));
+    const modelSelect = document.createElement("select");
+    modelSelect.className = "aw-input";
+    modelSelect.setAttribute("aria-label", "选择端点返回的模型名");
+    const blank = document.createElement("option");
+    blank.value = "";
+    blank.textContent = modelOptions.length === 0 ? "-- 请先加载模型列表 --" : `-- 共 ${modelOptions.length} 个，点选填入 --`;
+    modelSelect.append(blank);
+    for (const name of modelOptions) {
+      const option = document.createElement("option");
+      option.value = name;
+      option.textContent = name;
+      modelSelect.append(option);
     }
+    modelSelect.addEventListener("change", () => {
+      if (!modelSelect.value) return;
+      draft.model = modelSelect.value;
+      apiDraft = draft;
+      apiDraftDirty = true;
+      inputs.model.value = modelSelect.value;
+    });
+    modelRow.append(modelSelect);
+    panel.append(modelRow);
+
+    // 数字参数两列（超时独占一行）
+    const grid = el("div", "aw-grid-2");
+    grid.append(appendField(numberFields[0]), appendField(numberFields[1]));
+    panel.append(grid);
+    panel.append(appendField(numberFields[2]));
 
     const clearKeyRow = el("label", "aw-check");
     const clearKey = document.createElement("input");
@@ -1739,7 +1772,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       setStatus("", "ok");
       renderCenter();
     });
-    addButton("保存", "保存当前 API 连接", async () => {
+    const saveApiButton = addButton(draft.id ? `保存修改到「${draft.name}」` : "保存新连接", "保存当前 API 连接", async () => {
       const preset = apiDraft ?? newApiDraft();
       if (!preset.name.trim() || !preset.endpoint.trim() || !preset.model.trim()) {
         setStatus("连接名称、端点与模型名都不能为空。", "error");
@@ -1809,9 +1842,6 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       if (ok) setStatus("已切换当前 API 连接。");
       renderCenter();
     });
-    addButton("测试连接", "通过酒馆后端代理检查端点与鉴权", async () => {
-      await testConnection(apiDraft ?? newApiDraft());
-    });
     addButton("删除", "删除选中的 API 连接", async () => {
       if (!apiDraft?.id) {
         setStatus("当前草稿尚未保存，无需删除。", "error");
@@ -1841,11 +1871,11 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
   async function testConnection(preset) {
     const endpoint = String(preset.endpoint || "").trim();
     if (!endpoint) {
-      setStatus("请先填写端点，再测试连接。", "error");
+      setStatus("请先填写端点，再加载模型。", "error");
       renderCenter();
       return;
     }
-    setStatus("正在通过酒馆后端代理检查端点…", "ok");
+    setStatus("正在通过酒馆后端代理读取模型列表…", "ok");
     renderCenter();
     try {
       const ctx = SillyTavern.getContext();
@@ -1872,7 +1902,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
           const errorJson = JSON.parse(errorText);
           detail = String(errorJson.error ?? errorJson.message ?? detail);
         } catch { /* 保留原文 */ }
-        setStatus(`测试连接失败（HTTP ${response.status}）：${detail || "无详情"}`, "error");
+        setStatus(`加载模型失败（HTTP ${response.status}）：${detail || "无详情"}`, "error");
         renderCenter();
         return;
       }
@@ -1895,7 +1925,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
         setStatus(`连接成功，读到 ${String(modelOptions.length)} 个模型。`, "ok");
       }
     } catch (error) {
-      setStatus(`测试连接失败：${error instanceof Error ? error.message : String(error)}`, "error");
+      setStatus(`加载模型失败：${error instanceof Error ? error.message : String(error)}`, "error");
     }
     renderCenter();
   }

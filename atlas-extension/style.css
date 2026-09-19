@@ -1239,3 +1239,24 @@
   color: var(--aw-ink);
   overflow-wrap: anywhere;
 }
+
+/* ===========================================================================
+ * 0.9.5 排版补丁（作者反馈「推进页排布诡异」→ shujuku 式分区）
+ * =========================================================================== */
+
+.aw-divider {
+  border: 0;
+  border-top: 1px dashed var(--aw-line);
+  margin: 14px 0;
+}
+
+.aw-grid-2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 11px;
+  min-width: 0;
+}
+
+@media (max-width: 720px) {
+  .aw-grid-2 { grid-template-columns: minmax(0, 1fr); }
+}
