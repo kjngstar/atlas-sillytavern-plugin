@@ -5103,10 +5103,31 @@ function commitAtlasTurn(world, input) {
 }
 
 // src/atlas-server.ts
+var MAX_LIBRARY_PRESETS_PER_SLOT = 20;
+function sanitizePresetLibrary(value, base) {
+  const result = {
+    worldTurn: base?.worldTurn ?? [],
+    majorEvent: base?.majorEvent ?? []
+  };
+  if (!value || typeof value !== "object" || Array.isArray(value)) return result;
+  const record = value;
+  for (const slot of ["worldTurn", "majorEvent"]) {
+    const list = record[slot];
+    if (!Array.isArray(list)) continue;
+    const byName = /* @__PURE__ */ new Map();
+    for (const entry of list) {
+      if (!isValidPreset(entry)) continue;
+      byName.set(entry.name, entry);
+    }
+    result[slot] = [...byName.values()].slice(0, MAX_LIBRARY_PRESETS_PER_SLOT);
+  }
+  return result;
+}
 var DEFAULT_SETTINGS = {
   schemaVersion: 1,
   worldTurn: null,
   majorEvent: null,
+  presetLibrary: { worldTurn: [], majorEvent: [] },
   autoCommit: true,
   rpmLimit: 30
 };
@@ -5219,6 +5240,7 @@ function createAtlasServerCore(deps) {
         schemaVersion: 1,
         worldTurn: isValidPreset(record.worldTurn) ? record.worldTurn : null,
         majorEvent: isValidPreset(record.majorEvent) ? record.majorEvent : null,
+        presetLibrary: sanitizePresetLibrary(record.presetLibrary),
         autoCommit: typeof record.autoCommit === "boolean" ? record.autoCommit : true,
         rpmLimit: typeof record.rpmLimit === "number" && record.rpmLimit >= 1 && record.rpmLimit <= 600 ? record.rpmLimit : 30
       };
@@ -5291,7 +5313,7 @@ function createAtlasServerCore(deps) {
     return okResult({
       ok: true,
       plugin: "atlas",
-      version: "0.8.2",
+      version: "0.8.3",
       protocolVersion: 1,
       time: now()
     });
@@ -5302,6 +5324,10 @@ function createAtlasServerCore(deps) {
       schemaVersion: 1,
       worldTurn: maskPreset(current.worldTurn),
       majorEvent: maskPreset(current.majorEvent),
+      presetLibrary: {
+        worldTurn: current.presetLibrary.worldTurn.map(maskPreset),
+        majorEvent: current.presetLibrary.majorEvent.map(maskPreset)
+      },
       autoCommit: current.autoCommit,
       rpmLimit: current.rpmLimit
     });
@@ -5316,6 +5342,7 @@ function createAtlasServerCore(deps) {
       schemaVersion: 1,
       worldTurn: record.worldTurn === void 0 ? current.worldTurn : record.worldTurn,
       majorEvent: record.majorEvent === void 0 ? current.majorEvent : record.majorEvent,
+      presetLibrary: record.presetLibrary === void 0 ? current.presetLibrary : sanitizePresetLibrary(record.presetLibrary, current.presetLibrary),
       autoCommit: typeof record.autoCommit === "boolean" ? record.autoCommit : current.autoCommit,
       rpmLimit: typeof record.rpmLimit === "number" ? record.rpmLimit : current.rpmLimit
     };
@@ -5326,6 +5353,10 @@ function createAtlasServerCore(deps) {
       schemaVersion: 1,
       worldTurn: maskPreset(next.worldTurn),
       majorEvent: maskPreset(next.majorEvent),
+      presetLibrary: {
+        worldTurn: next.presetLibrary.worldTurn.map(maskPreset),
+        majorEvent: next.presetLibrary.majorEvent.map(maskPreset)
+      },
       autoCommit: next.autoCommit,
       rpmLimit: next.rpmLimit
     });

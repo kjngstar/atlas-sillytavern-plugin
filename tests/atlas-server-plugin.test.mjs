@@ -239,6 +239,51 @@ test("settings：非法预设被拒绝", async () => {
   assertionCount += 2;
 });
 
+test("settings：预设库（0.8.3）——多预设入库 / 脱敏 / 去重 / 按槽局部合并 / 持久化 / 数量上限", async () => {
+  const { core, store } = await setup(null, { skipSettings: true });
+  const p1 = preset({ name: "渠道A" });
+  const p2 = preset({ name: "渠道B", endpoint: "https://b.example.invalid/v1" });
+  const put = await core.handle(
+    "PUT",
+    "/settings",
+    { worldTurn: p1, presetLibrary: { worldTurn: [p1, p2] } },
+    { local: true },
+  );
+  equal(put.status, 200, "入库 200");
+  equal(put.body.data.presetLibrary.worldTurn.length, 2, "两个预设入库");
+  ok(!JSON.stringify(put.body.data).includes(SECRET), "库响应脱敏（无明文 Key）");
+
+  const p1b = preset({ name: "渠道A", model: "atlas-mock-2" });
+  const dup = await core.handle("PUT", "/settings", { presetLibrary: { worldTurn: [p1b, p2, p1b] } }, { local: true });
+  equal(dup.status, 200, "去重 PUT 200");
+  equal(dup.body.data.presetLibrary.worldTurn.length, 2, "同名去重后仍 2 条");
+  equal(dup.body.data.presetLibrary.worldTurn[0].model, "atlas-mock-2", "同名后者胜");
+
+  const p3 = preset({ name: "重大事件专用" });
+  const partial = await core.handle("PUT", "/settings", { presetLibrary: { majorEvent: [p3] } }, { local: true });
+  equal(partial.status, 200, "局部更新 200");
+  equal(partial.body.data.presetLibrary.worldTurn.length, 2, "未传槽沿用现有库");
+  equal(partial.body.data.presetLibrary.majorEvent.length, 1, "传入槽更新");
+
+  const mixed = await core.handle(
+    "PUT",
+    "/settings",
+    { presetLibrary: { worldTurn: [preset({ endpoint: "bad-url" }), p2] } },
+    { local: true },
+  );
+  equal(mixed.status, 200, "非法条目不炸整单");
+  equal(mixed.body.data.presetLibrary.worldTurn.length, 1, "非法条目被丢弃");
+
+  const capped = Array.from({ length: 25 }, (_, i) => preset({ name: `n${i}` }));
+  const cap = await core.handle("PUT", "/settings", { presetLibrary: { majorEvent: capped } }, { local: true });
+  equal(cap.body.data.presetLibrary.majorEvent.length, 20, "每槽上限 20 截断");
+
+  const fresh = createAtlasServerCore({ store, now: () => NOW });
+  const again = await fresh.handle("GET", "/settings");
+  equal(again.body.data.presetLibrary.worldTurn.length, 1, "刷新后 worldTurn 库仍在");
+  equal(again.body.data.presetLibrary.majorEvent.length, 20, "刷新后 majorEvent 库仍在");
+});
+
 // ---------------------------------------------------------------------------
 // worlds / bindings / state
 // ---------------------------------------------------------------------------

@@ -86,16 +86,54 @@ export interface AtlasServerSettings {
   schemaVersion: 1;
   worldTurn: AtlasApiPreset | null;
   majorEvent: AtlasApiPreset | null;
+  /**
+   * 0.8.3 预设库（shujuku 式）：每个功能槽可存多个具名预设，UI 一键切换渠道。
+   * worldTurn / majorEvent 两字段 = 当前**激活**的预设；本库只是可切换的存档。
+   */
+  presetLibrary: AtlasPresetLibrary;
   /** 每条最终回复后是否自动 commit（关掉则只能手动 retry / 由 UI 决定） */
   autoCommit: boolean;
   /** 每分钟每预设最大请求数 */
   rpmLimit: number;
 }
 
+/** 预设库：按功能槽分组的具名预设列表（name 槽内唯一；数量有界）。 */
+export interface AtlasPresetLibrary {
+  worldTurn: AtlasApiPreset[];
+  majorEvent: AtlasApiPreset[];
+}
+
+const MAX_LIBRARY_PRESETS_PER_SLOT = 20;
+
+/**
+ * 不可信数据 → 合法预设库：逐条 isValidPreset、槽内按 name 去重（后者胜）、数量截断。
+ * base = 现有库：请求里**缺槽**（非数组）时沿用 base 的该槽——支持 UI 只更新一个槽。
+ */
+function sanitizePresetLibrary(value: unknown, base?: AtlasPresetLibrary): AtlasPresetLibrary {
+  const result: AtlasPresetLibrary = {
+    worldTurn: base?.worldTurn ?? [],
+    majorEvent: base?.majorEvent ?? [],
+  };
+  if (!value || typeof value !== "object" || Array.isArray(value)) return result;
+  const record = value as Record<string, unknown>;
+  for (const slot of ["worldTurn", "majorEvent"] as const) {
+    const list = record[slot];
+    if (!Array.isArray(list)) continue;
+    const byName = new Map<string, AtlasApiPreset>();
+    for (const entry of list) {
+      if (!isValidPreset(entry)) continue;
+      byName.set(entry.name, entry);
+    }
+    result[slot] = [...byName.values()].slice(0, MAX_LIBRARY_PRESETS_PER_SLOT);
+  }
+  return result;
+}
+
 const DEFAULT_SETTINGS: AtlasServerSettings = {
   schemaVersion: 1,
   worldTurn: null,
   majorEvent: null,
+  presetLibrary: { worldTurn: [], majorEvent: [] },
   autoCommit: true,
   rpmLimit: 30,
 };
@@ -269,6 +307,7 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
         schemaVersion: 1,
         worldTurn: isValidPreset(record.worldTurn) ? record.worldTurn : null,
         majorEvent: isValidPreset(record.majorEvent) ? record.majorEvent : null,
+        presetLibrary: sanitizePresetLibrary(record.presetLibrary),
         autoCommit: typeof record.autoCommit === "boolean" ? record.autoCommit : true,
         rpmLimit: typeof record.rpmLimit === "number" && record.rpmLimit >= 1 && record.rpmLimit <= 600 ? record.rpmLimit : 30,
       };
@@ -356,7 +395,7 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
     return okResult({
       ok: true,
       plugin: "atlas",
-      version: "0.8.2",
+      version: "0.8.3",
       protocolVersion: 1,
       time: now(),
     });
@@ -368,6 +407,10 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
       schemaVersion: 1,
       worldTurn: maskPreset(current.worldTurn),
       majorEvent: maskPreset(current.majorEvent),
+      presetLibrary: {
+        worldTurn: current.presetLibrary.worldTurn.map(maskPreset),
+        majorEvent: current.presetLibrary.majorEvent.map(maskPreset),
+      },
       autoCommit: current.autoCommit,
       rpmLimit: current.rpmLimit,
     });
@@ -383,6 +426,10 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
       schemaVersion: 1,
       worldTurn: record.worldTurn === undefined ? current.worldTurn : (record.worldTurn as AtlasApiPreset | null),
       majorEvent: record.majorEvent === undefined ? current.majorEvent : (record.majorEvent as AtlasApiPreset | null),
+      presetLibrary:
+        record.presetLibrary === undefined
+          ? current.presetLibrary
+          : sanitizePresetLibrary(record.presetLibrary, current.presetLibrary),
       autoCommit: typeof record.autoCommit === "boolean" ? record.autoCommit : current.autoCommit,
       rpmLimit: typeof record.rpmLimit === "number" ? record.rpmLimit : current.rpmLimit,
     };
@@ -393,6 +440,10 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
       schemaVersion: 1,
       worldTurn: maskPreset(next.worldTurn),
       majorEvent: maskPreset(next.majorEvent),
+      presetLibrary: {
+        worldTurn: next.presetLibrary.worldTurn.map(maskPreset),
+        majorEvent: next.presetLibrary.majorEvent.map(maskPreset),
+      },
       autoCommit: next.autoCommit,
       rpmLimit: next.rpmLimit,
     });

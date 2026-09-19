@@ -702,6 +702,20 @@
   padding: 7px 10px;
 }
 
+/* 0.8.3 作者反馈：酒馆自带 input:not([type=checkbox])… 的特异性 (0,2,1) 高于 .aw-input (0,1,0)，
+ * 会把深色底压进浅色面板，文字与底色不可区分。用 (0,3,0) 双类压回，底色/文字统一走 Atlas
+ * 令牌——即「跟着 Atlas 主题走」，浅色面板下恒为浅底深字。 */
+.atlas-workbench .aw-input.aw-input,
+.atlas-workbench textarea.aw-input--area {
+  background: var(--aw-panel);
+  color: var(--aw-ink);
+}
+
+.atlas-workbench .aw-input.aw-input::placeholder {
+  color: var(--aw-muted);
+  opacity: 1;
+}
+
 .aw-input:hover { border-color: var(--aw-teal); }
 
 select.aw-input,
