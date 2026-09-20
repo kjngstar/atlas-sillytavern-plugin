@@ -24,7 +24,7 @@ import { createLocalAtlasApi } from "../src/atlas-local-api.ts";
 import { createStProxyFetch, atlasCustomIncludeHeaders, normalizeAtlasClaudeBase, normalizeAtlasGeminiBase, normalizeAtlasExcludeBody, normalizeAtlasPromptPostProcessing, ATLAS_ST_GENERATE_PATH } from "../src/atlas-proxy-fetch.ts";
 import { createAtlasServerCore, createMemoryDocumentStore } from "../src/atlas-server.ts";
 import { ATLAS_ERROR_CODES } from "../src/atlas-contract.ts";
-import { callAtlasWorldTurnApi } from "../src/atlas-api-client.ts";
+import { callAtlasWorldTurnApi, parseAtlasWorldTurnDraft } from "../src/atlas-api-client.ts";
 
 // ---------------------------------------------------------------------------
 // 测试辅助
@@ -816,4 +816,32 @@ test("callAtlasWorldTurnApi：非 MiniMax 域 / 非 sk-cp- 密钥 / claude 协�
   );
   assert.equal(t.calls.length, 1);
   assert.equal(r.ok, false);
+});
+
+// ---------------------------------------------------------------------------
+// 0.9.15 推理模型内嵌思考段剥离（MiniMax-M3 / DeepSeek-R1 把 <think> 写进 content）
+// ---------------------------------------------------------------------------
+
+const VALID_DRAFT = JSON.stringify({ summary: "捏了脸", duration: 1, npcChanges: [] });
+
+test("parseAtlasWorldTurnDraft：<think>…</think> 包着的 JSON 正常解析（MiniMax-M3 实测形状）", () => {
+  const text = `<think>Let me analyze this turn carefully to produce the structured JSON output.\n\n**Context Summary:**\n- World time: Period 0</think>\n${VALID_DRAFT}`;
+  const draft = parseAtlasWorldTurnDraft(text);
+  assert.equal(draft.summary, "捏了脸");
+});
+
+test("parseAtlasWorldTurnDraft：<thinking> 变体 + json 围栏混合也剥", () => {
+  const text = `<thinking>推理中…</thinking>\n\`\`\`json\n${VALID_DRAFT}\n\`\`\``;
+  const draft = parseAtlasWorldTurnDraft(text);
+  assert.equal(draft.summary, "捏了脸");
+});
+
+test("parseAtlasWorldTurnDraft：未闭合 <think>（finish_reason 截断）→ 剥到末尾，输出为空则报错", () => {
+  const text = `<think>只有推理没有正文`;
+  assert.throws(() => parseAtlasWorldTurnDraft(text), /不是合法的 JSON 对象/);
+});
+
+test("parseAtlasWorldTurnDraft：无 think 的普通输出不受影响", () => {
+  const draft = parseAtlasWorldTurnDraft(VALID_DRAFT);
+  assert.equal(draft.summary, "捏了脸");
 });

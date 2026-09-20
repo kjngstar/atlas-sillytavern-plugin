@@ -934,9 +934,12 @@ function extractAssistantText(payload) {
   }
   return null;
 }
+function stripThinkSegments(text) {
+  return text.replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, "").replace(/<think(?:ing)?>[\s\S]*$/i, "").trim();
+}
 function extractJsonObject(text) {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const candidates = [fenced?.[1] ?? "", text];
+  const candidates = [fenced?.[1] ?? "", stripThinkSegments(text), text];
   for (const candidate of candidates) {
     const trimmed = candidate.trim();
     if (!trimmed.startsWith("{")) continue;

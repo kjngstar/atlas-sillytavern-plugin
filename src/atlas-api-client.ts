@@ -442,9 +442,22 @@ function extractAssistantText(payload: unknown): string | null {
 // ---------------------------------------------------------------------------
 
 /** 从可能被 ```json 围栏或夹带说明文字的响应中取第一个 JSON 对象。 */
+/**
+ * 剥推理模型的内嵌思考段（MiniMax-M3 / DeepSeek-R1 等把 <think>…</think> 直接写在
+ * content 里）。成对剥除；未闭合（finish_reason 截断）剥到末尾。
+ * 变体 <thinking> 一并覆盖（shujuku 内容替换默认示例同款词对）。
+ */
+function stripThinkSegments(text: string): string {
+  return text
+    .replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, "")
+    .replace(/<think(?:ing)?>[\s\S]*$/i, "")
+    .trim();
+}
+
 function extractJsonObject(text: string): Record<string, unknown> | null {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const candidates = [fenced?.[1] ?? "", text];
+  // 推理段剥除版排最前（think 包着的 JSON 是推理模型常态），原文兜底
+  const candidates = [fenced?.[1] ?? "", stripThinkSegments(text), text];
   for (const candidate of candidates) {
     const trimmed = candidate.trim();
     if (!trimmed.startsWith("{")) continue;
