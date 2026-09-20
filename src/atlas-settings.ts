@@ -42,19 +42,55 @@ const MAX_RPM = 600;
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
+/** 连接方式（0.9.13 全抄 shujuku）：custom = 自定义 API；main = 酒馆主 API（TavernHelper.generateRaw）；profile = 酒馆连接预设（ConnectionManagerRequestService）。 */
+export type AtlasConnectionMode = "custom" | "main" | "profile";
+
+/** 接口协议（0.9.13 对齐 shujuku customApiFormat 四值）：openai_responses 在原版酒馆等同 openai（无独立 /responses 路由），gemini 映射 makersuite 源。 */
+export type AtlasApiFormat = "openai" | "openai_responses" | "claude" | "gemini";
+
+const CONNECTION_MODES: readonly AtlasConnectionMode[] = ["custom", "main", "profile"];
+const API_FORMATS: readonly AtlasApiFormat[] = ["openai", "openai_responses", "claude", "gemini"];
+/** 提示词后处理（SillyTavern custom_prompt_post_processing 全集；"" = 不携带，后端按 none 原样透传）。 */
+const PROMPT_POST_PROCESSING = ["", "merge_tools", "semi_tools", "strict_tools", "merge", "semi", "strict", "single"] as const;
+
+export function normalizeConnectionMode(raw: unknown): AtlasConnectionMode {
+  return CONNECTION_MODES.includes(raw as AtlasConnectionMode) ? (raw as AtlasConnectionMode) : "custom";
+}
+
+export function normalizeApiFormat(raw: unknown): AtlasApiFormat {
+  // openai_responses 在原版酒馆无独立后端 → 归一为 openai（shujuku 同款回退）
+  if (raw === "openai_responses") return "openai";
+  return API_FORMATS.includes(raw as AtlasApiFormat) ? (raw as AtlasApiFormat) : "openai";
+}
+
+export function normalizePromptPostProcessing(raw: unknown): string {
+  return typeof raw === "string" && (PROMPT_POST_PROCESSING as readonly string[]).includes(raw) ? raw : "";
+}
+
 /** API 连接预设：连接资料的唯一载体（不含提示词）。 */
 export interface AtlasApiConnectionPreset {
   id: string;
   name: string;
+  connectionMode?: AtlasConnectionMode;
   endpoint: string;
   model: string;
-  /** 只持久化；GET 响应永不返回明文（见 settingsViewV2）。 */
+  /** 只持久化；GET 回明文供编辑器回填（0.9.12 作者令）。 */
   apiKey: string;
   maxTokens: number;
   temperature: number;
   timeoutMs: number;
-  /** 接口协议（0.9.10，shujuku 同款）：openai = /chat/completions；claude = Anthropic Messages（MiniMax 订阅密钥 / Claude 代理）。缺省 openai。 */
-  apiFormat?: "openai" | "claude";
+  /** 接口协议；缺省 openai。 */
+  apiFormat?: AtlasApiFormat;
+  /** 酒馆连接预设模式的 profile id。 */
+  profileId?: string;
+  /** 附加请求体参数（custom_include_body，JSON / YAML object 文本）。 */
+  bodyParams?: string;
+  /** 排除请求体字段（custom_exclude_body，逗号 / 换行分隔字段名）。 */
+  excludeBodyParams?: string;
+  /** 附加请求标头（每行 Header: Value，追加在 Authorization 之后）。 */
+  requestHeaders?: string;
+  /** 提示词后处理（custom_prompt_post_processing）；"" = 不携带。 */
+  promptPostProcessing?: string;
   updatedAt: number;
 }
 
@@ -106,12 +142,18 @@ export type AtlasSettingsCommand =
       preset: {
         id?: string;
         name: string;
+        connectionMode?: AtlasConnectionMode;
         endpoint: string;
         model: string;
         maxTokens: number;
         temperature: number;
         timeoutMs: number;
-        apiFormat?: "openai" | "claude";
+        apiFormat?: AtlasApiFormat;
+        profileId?: string;
+        bodyParams?: string;
+        excludeBodyParams?: string;
+        requestHeaders?: string;
+        promptPostProcessing?: string;
       };
       apiKeyMode: "keep" | "replace" | "clear";
       apiKey?: string;
@@ -229,8 +271,16 @@ function parseConnectionPreset(raw: unknown): Omit<AtlasApiConnectionPreset, "id
   const id = normalizeId(record.id);
   if (!id) return null;
   if (typeof record.name !== "string" || !record.name.trim() || record.name.length > MAX_NAME_CHARS) return null;
-  if (typeof record.endpoint !== "string" || record.endpoint.length > MAX_ENDPOINT_CHARS || !isHttpUrl(record.endpoint)) return null;
-  if (typeof record.model !== "string" || !record.model.trim() || record.model.length > MAX_MODEL_CHARS) return null;
+  const connectionMode = normalizeConnectionMode(record.connectionMode);
+  // main / profile 模式不走自定义端点：endpoint / model 允许为空（0.9.13 照抄 shujuku 连接方式）
+  const endpointOk =
+    connectionMode !== "custom" ||
+    (typeof record.endpoint === "string" && record.endpoint.length <= MAX_ENDPOINT_CHARS && isHttpUrl(record.endpoint));
+  if (!endpointOk) return null;
+  const modelOk =
+    connectionMode !== "custom" ||
+    (typeof record.model === "string" && !!record.model.trim() && record.model.length <= MAX_MODEL_CHARS);
+  if (!modelOk) return null;
   if (typeof record.apiKey !== "string" || record.apiKey.length > MAX_API_KEY_CHARS) return null;
   if (!isFiniteIntIn(record.maxTokens, MIN_MAX_TOKENS, MAX_MAX_TOKENS)) return null;
   if (!isFiniteIn(record.temperature, MIN_TEMPERATURE, MAX_TEMPERATURE)) return null;
@@ -238,13 +288,19 @@ function parseConnectionPreset(raw: unknown): Omit<AtlasApiConnectionPreset, "id
   return {
     id,
     name: record.name.trim(),
-    endpoint: record.endpoint,
-    model: record.model.trim(),
+    connectionMode,
+    endpoint: typeof record.endpoint === "string" ? record.endpoint : "",
+    model: typeof record.model === "string" ? record.model.trim() : "",
     apiKey: record.apiKey,
     maxTokens: record.maxTokens,
     temperature: record.temperature,
     timeoutMs: record.timeoutMs,
-    ...(record.apiFormat === "claude" ? { apiFormat: "claude" as const } : {}),
+    ...(normalizeApiFormat(record.apiFormat) !== "openai" ? { apiFormat: normalizeApiFormat(record.apiFormat) } : {}),
+    ...(typeof record.profileId === "string" && record.profileId.trim() ? { profileId: record.profileId.trim().slice(0, 128) } : {}),
+    ...(typeof record.bodyParams === "string" && record.bodyParams.trim() ? { bodyParams: record.bodyParams.slice(0, 4000) } : {}),
+    ...(typeof record.excludeBodyParams === "string" && record.excludeBodyParams.trim() ? { excludeBodyParams: record.excludeBodyParams.slice(0, 2000) } : {}),
+    ...(typeof record.requestHeaders === "string" && record.requestHeaders.trim() ? { requestHeaders: record.requestHeaders.slice(0, 2000) } : {}),
+    ...(typeof record.promptPostProcessing === "string" && record.promptPostProcessing ? { promptPostProcessing: normalizePromptPostProcessing(record.promptPostProcessing) } : {}),
   };
 }
 
@@ -469,14 +525,29 @@ export function applySettingsCommand(
   switch (command.action) {
     case "api.save": {
       const preset = command.preset;
+      const connectionMode = normalizeConnectionMode(preset.connectionMode);
       if (typeof preset.name !== "string" || !preset.name.trim() || preset.name.length > MAX_NAME_CHARS) {
         return fail(settings, "INVALID_PAYLOAD", "连接名称必填且不超过 64 字。");
       }
-      if (typeof preset.endpoint !== "string" || preset.endpoint.length > MAX_ENDPOINT_CHARS || !isHttpUrl(preset.endpoint)) {
-        return fail(settings, "INVALID_PAYLOAD", "端点必须是 http(s) 绝对地址。");
+      // main / profile 模式不走自定义端点：endpoint / model 仅 custom 必填（0.9.13 照抄 shujuku）
+      if (connectionMode === "custom") {
+        if (typeof preset.endpoint !== "string" || preset.endpoint.length > MAX_ENDPOINT_CHARS || !isHttpUrl(preset.endpoint)) {
+          return fail(settings, "INVALID_PAYLOAD", "端点必须是 http(s) 绝对地址。");
+        }
+        if (typeof preset.model !== "string" || !preset.model.trim() || preset.model.length > MAX_MODEL_CHARS) {
+          return fail(settings, "INVALID_PAYLOAD", "模型名必填且不超过 128 字。");
+        }
+      } else if (connectionMode === "profile" && !(typeof preset.profileId === "string" && !!preset.profileId.trim())) {
+        return fail(settings, "INVALID_PAYLOAD", "酒馆连接预设模式需要选择连接预设。");
       }
-      if (typeof preset.model !== "string" || !preset.model.trim() || preset.model.length > MAX_MODEL_CHARS) {
-        return fail(settings, "INVALID_PAYLOAD", "模型名必填且不超过 128 字。");
+      if (typeof preset.bodyParams === "string" && preset.bodyParams.length > 4000) {
+        return fail(settings, "INVALID_PAYLOAD", "附加请求体参数不超过 4000 字。");
+      }
+      if (typeof preset.excludeBodyParams === "string" && preset.excludeBodyParams.length > 2000) {
+        return fail(settings, "INVALID_PAYLOAD", "排除请求体字段不超过 2000 字。");
+      }
+      if (typeof preset.requestHeaders === "string" && preset.requestHeaders.length > 2000) {
+        return fail(settings, "INVALID_PAYLOAD", "附加请求标头不超过 2000 字。");
       }
       if (!isFiniteIntIn(preset.maxTokens, MIN_MAX_TOKENS, MAX_MAX_TOKENS)) {
         return fail(settings, "INVALID_PAYLOAD", `最大回复长度必须是 ${MIN_MAX_TOKENS}..${MAX_MAX_TOKENS} 的整数。`);
@@ -519,13 +590,19 @@ export function applySettingsCommand(
           endpoint: preset.endpoint, model: preset.model, apiKey, maxTokens: preset.maxTokens, temperature: preset.temperature, timeoutMs: preset.timeoutMs,
         }), deps, new Set(settings.apiPresets.map((p) => p.id))),
         name: uniqueName(preset.name, usedApiNames),
+        ...(connectionMode !== "custom" ? { connectionMode } : {}),
         endpoint: preset.endpoint,
         model: preset.model.trim(),
         apiKey,
         maxTokens: preset.maxTokens,
         temperature: preset.temperature,
         timeoutMs: preset.timeoutMs,
-        ...(preset.apiFormat === "claude" ? { apiFormat: "claude" as const } : {}),
+        ...(normalizeApiFormat(preset.apiFormat) !== "openai" ? { apiFormat: normalizeApiFormat(preset.apiFormat) } : {}),
+        ...(connectionMode === "profile" && typeof preset.profileId === "string" && preset.profileId.trim() ? { profileId: preset.profileId.trim().slice(0, 128) } : {}),
+        ...(typeof preset.bodyParams === "string" && preset.bodyParams.trim() ? { bodyParams: preset.bodyParams.slice(0, 4000) } : {}),
+        ...(typeof preset.excludeBodyParams === "string" && preset.excludeBodyParams.trim() ? { excludeBodyParams: preset.excludeBodyParams.slice(0, 2000) } : {}),
+        ...(typeof preset.requestHeaders === "string" && preset.requestHeaders.trim() ? { requestHeaders: preset.requestHeaders.slice(0, 2000) } : {}),
+        ...(normalizePromptPostProcessing(preset.promptPostProcessing) ? { promptPostProcessing: normalizePromptPostProcessing(preset.promptPostProcessing) } : {}),
         updatedAt: now,
       };
       const apiPresets = existingIndex >= 0
@@ -750,12 +827,18 @@ export interface AtlasSettingsView {
   apiPresets: Array<{
     id: string;
     name: string;
+    connectionMode: AtlasConnectionMode;
     endpoint: string;
     model: string;
     maxTokens: number;
     temperature: number;
     timeoutMs: number;
-    apiFormat: "openai" | "claude";
+    apiFormat: AtlasApiFormat;
+    profileId: string;
+    bodyParams: string;
+    excludeBodyParams: string;
+    requestHeaders: string;
+    promptPostProcessing: string;
     /** 0.9.12（作者令，照抄 shujuku）：GET 返回明文密钥供编辑器回填与测试连接复用——密钥本就存在作者自己的浏览器存储里。 */
     apiKey: string;
   }>;
@@ -782,12 +865,18 @@ export function settingsViewV2(settings: AtlasServerSettingsV2): AtlasSettingsVi
       return {
         id: p.id,
         name: p.name,
+        connectionMode: normalizeConnectionMode(p.connectionMode),
         endpoint: p.endpoint,
         model: p.model,
         maxTokens: p.maxTokens,
         temperature: p.temperature,
         timeoutMs: p.timeoutMs,
-        apiFormat: p.apiFormat === "claude" ? "claude" : "openai",
+        apiFormat: normalizeApiFormat(p.apiFormat),
+        profileId: p.profileId ?? "",
+        bodyParams: p.bodyParams ?? "",
+        excludeBodyParams: p.excludeBodyParams ?? "",
+        requestHeaders: p.requestHeaders ?? "",
+        promptPostProcessing: normalizePromptPostProcessing(p.promptPostProcessing),
         // 0.9.12（作者令，照抄 shujuku）：GET 返回明文密钥，编辑器回填 / 测试连接复用，不再每次重输
         apiKey: key,
       };
@@ -815,6 +904,8 @@ export function resolveWorldTurnPreset(settings: AtlasServerSettingsV2): AtlasAp
   const connection = settings.apiPresets.find((p) => p.id === settings.activeApiPresetId);
   if (!connection) return null;
   const prompt = settings.promptPresets.find((p) => p.id === settings.activePromptPresetId);
+  const mode = normalizeConnectionMode(connection.connectionMode);
+  const format = normalizeApiFormat(connection.apiFormat);
   return {
     name: connection.name,
     endpoint: connection.endpoint,
@@ -823,7 +914,13 @@ export function resolveWorldTurnPreset(settings: AtlasServerSettingsV2): AtlasAp
     maxTokens: connection.maxTokens,
     temperature: connection.temperature,
     timeoutMs: connection.timeoutMs,
-    ...(connection.apiFormat === "claude" ? { apiFormat: "claude" as const } : {}),
+    ...(mode !== "custom" ? { connectionMode: mode } : {}),
+    ...(format !== "openai" ? { apiFormat: format } : {}),
+    ...(mode === "profile" && connection.profileId ? { profileId: connection.profileId } : {}),
+    ...(connection.bodyParams ? { bodyParams: connection.bodyParams } : {}),
+    ...(connection.excludeBodyParams ? { excludeBodyParams: connection.excludeBodyParams } : {}),
+    ...(connection.requestHeaders ? { requestHeaders: connection.requestHeaders } : {}),
+    ...(normalizePromptPostProcessing(connection.promptPostProcessing) ? { promptPostProcessing: normalizePromptPostProcessing(connection.promptPostProcessing) } : {}),
     ...(prompt ? { systemPrompt: prompt.systemPrompt } : {}),
   };
 }

@@ -21,7 +21,7 @@ import assert from "node:assert/strict";
 
 import { createBrowserDocumentStore, ATLAS_BROWSER_DOC_LIMITS } from "../src/atlas-browser-store.ts";
 import { createLocalAtlasApi } from "../src/atlas-local-api.ts";
-import { createStProxyFetch, atlasCustomIncludeHeaders, normalizeAtlasClaudeBase, ATLAS_ST_GENERATE_PATH } from "../src/atlas-proxy-fetch.ts";
+import { createStProxyFetch, atlasCustomIncludeHeaders, normalizeAtlasClaudeBase, normalizeAtlasGeminiBase, normalizeAtlasExcludeBody, normalizeAtlasPromptPostProcessing, ATLAS_ST_GENERATE_PATH } from "../src/atlas-proxy-fetch.ts";
 import { createAtlasServerCore, createMemoryDocumentStore } from "../src/atlas-server.ts";
 import { ATLAS_ERROR_CODES } from "../src/atlas-contract.ts";
 import { callAtlasWorldTurnApi } from "../src/atlas-api-client.ts";
@@ -542,4 +542,153 @@ test("callAtlasWorldTurnApi：apiFormat claude → 请求带 X-Atlas-Api-Format 
     { fetchFn: fetchOk },
   );
   assert.equal(seen[1]["X-Atlas-Api-Format"], undefined);
+});
+
+// ---------------------------------------------------------------------------
+// 0.9.13 全抄 shujuku：gemini 源映射 + 高级字段（include/exclude body / 附加标头 / 后处理）
+// ---------------------------------------------------------------------------
+
+test("normalizeAtlasGeminiBase：剥版本段与路径尾巴，不补任何后缀", () => {
+  assert.equal(normalizeAtlasGeminiBase("https://generativelanguage.googleapis.com/v1beta"), "https://generativelanguage.googleapis.com");
+  assert.equal(normalizeAtlasGeminiBase("https://gw.example.com/v1beta/chat/completions"), "https://gw.example.com");
+  assert.equal(normalizeAtlasGeminiBase("https://gw.example.com/v1/"), "https://gw.example.com");
+  assert.equal(normalizeAtlasGeminiBase("https://gw.example.com/gemini"), "https://gw.example.com/gemini", "协议根保留");
+  assert.equal(normalizeAtlasGeminiBase(""), "");
+  assert.equal(normalizeAtlasGeminiBase(null), "");
+});
+
+test("normalizeAtlasExcludeBody：裸字段名 → '- key' YAML 行；已是 YAML/JSON 形状原样", () => {
+  assert.equal(normalizeAtlasExcludeBody("top_p, reasoning_effort"), "- top_p\n- reasoning_effort");
+  assert.equal(normalizeAtlasExcludeBody("top_p\nreasoning_effort"), "- top_p\n- reasoning_effort");
+  assert.equal(normalizeAtlasExcludeBody("- top_p"), "- top_p");
+  assert.equal(normalizeAtlasExcludeBody("[\"top_p\"]"), "[\"top_p\"]");
+  assert.equal(normalizeAtlasExcludeBody("{top_p: 1}"), "{top_p: 1}");
+  assert.equal(normalizeAtlasExcludeBody("  "), "");
+  assert.equal(normalizeAtlasExcludeBody(42), "");
+});
+
+test("normalizeAtlasPromptPostProcessing：八值白名单，非法值回空（不携带）", () => {
+  assert.equal(normalizeAtlasPromptPostProcessing("strict"), "strict");
+  assert.equal(normalizeAtlasPromptPostProcessing("semi_tools"), "semi_tools");
+  assert.equal(normalizeAtlasPromptPostProcessing("single"), "single");
+  assert.equal(normalizeAtlasPromptPostProcessing(""), "");
+  assert.equal(normalizeAtlasPromptPostProcessing("merge"), "merge");
+  assert.equal(normalizeAtlasPromptPostProcessing("nonsense"), "");
+  assert.equal(normalizeAtlasPromptPostProcessing(undefined), "");
+});
+
+test("createStProxyFetch：X-Atlas-Api-Format: gemini → makersuite 源（reverse_proxy 剥版本段）", async () => {
+  const captured = [];
+  const fakeFetch = async (input, init) => {
+    captured.push({ init });
+    return { ok: true, status: 200, text: async () => JSON.stringify({ choices: [{ message: { content: "ok" } }] }) };
+  };
+  const proxied = createStProxyFetch({ getContext: () => ({ getRequestHeaders: () => ({}) }), fetchFn: fakeFetch });
+  await proxied("https://generativelanguage.googleapis.com/v1beta/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: "Bearer AIza-abc", "X-Atlas-Api-Format": "gemini" },
+    body: JSON.stringify({ model: "gemini-2.0-flash", messages: [{ role: "user", content: "hi" }], stream: false }),
+  });
+  const body = JSON.parse(captured[0].init.body);
+  assert.equal(body.chat_completion_source, "makersuite");
+  assert.equal(body.reverse_proxy, "https://generativelanguage.googleapis.com");
+  assert.equal(body.proxy_password, "AIza-abc", "makersuite 源同样收裸密钥");
+});
+
+test("createStProxyFetch：xAtlas* 保留字段 → custom_include_body / custom_exclude_body / 附加标头 / post_processing，且保留字段绝不透传", async () => {
+  const captured = [];
+  const fakeFetch = async (input, init) => {
+    captured.push({ init });
+    return { ok: true, status: 200, text: async () => JSON.stringify({ choices: [{ message: { content: "ok" } }] }) };
+  };
+  const proxied = createStProxyFetch({ getContext: () => ({ getRequestHeaders: () => ({}) }), fetchFn: fakeFetch });
+  await proxied("https://api.example.com/v1/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: "Bearer sk-x", "X-Atlas-Api-Format": "claude" },
+    body: JSON.stringify({
+      model: "m1",
+      messages: [{ role: "user", content: "hi" }],
+      stream: false,
+      xAtlasConnectionMode: "custom",
+      xAtlasProfileId: "p1",
+      xAtlasBodyParams: "response_format:/n  type: json_object",
+      xAtlasExcludeBodyParams: "top_p, reasoning_effort",
+      xAtlasExtraHeaders: "X-Custom-Header: value",
+      xAtlasPromptPostProcessing: "strict",
+    }),
+  });
+  const body = JSON.parse(captured[0].init.body);
+  assert.equal(body.custom_include_body, "response_format:/n  type: json_object");
+  assert.equal(body.custom_exclude_body, "- top_p\n- reasoning_effort");
+  assert.equal(body.custom_prompt_post_processing, "strict");
+  // 附加标头拼在 Authorization 之后（shujuku 同款：两段 filter(Boolean) join("\n")）
+  assert.equal(body.custom_include_headers, "Authorization: Bearer sk-x\nX-Custom-Header: value");
+  // 消费即弃：xAtlas* 一个都不许出现在发给酒馆的 body 里
+  for (const key of Object.keys(body)) {
+    assert.ok(!key.startsWith("xAtlas"), `保留字段 ${key} 不得透传上游`);
+  }
+  assert.equal(body.xAtlasBodyParams, undefined);
+  assert.equal(body.xAtlasConnectionMode, undefined);
+});
+
+test("createStProxyFetch：非法 post_processing 值 → 不携带 custom_prompt_post_processing", async () => {
+  const captured = [];
+  const fakeFetch = async (input, init) => {
+    captured.push({ init });
+    return { ok: true, status: 200, text: async () => JSON.stringify({ choices: [{ message: { content: "ok" } }] }) };
+  };
+  const proxied = createStProxyFetch({ getContext: () => ({ getRequestHeaders: () => ({}) }), fetchFn: fakeFetch });
+  await proxied("https://api.example.com/v1/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "m1",
+      messages: [{ role: "user", content: "hi" }],
+      stream: false,
+      xAtlasPromptPostProcessing: "nonsense",
+    }),
+  });
+  const body = JSON.parse(captured[0].init.body);
+  assert.equal(body.custom_prompt_post_processing, undefined);
+});
+
+test("callAtlasWorldTurnApi：main/profile 模式 → atlas://host 占位 + 保留字段入 body；custom 不带", async () => {
+  const seen = [];
+  const fetchOk = async (input, init) => {
+    seen.push({ input: typeof input === "string" ? input : input.toString(), init });
+    return { ok: true, status: 200, text: async () => JSON.stringify({ choices: [{ message: { content: "ok" } }] }) };
+  };
+  const base = { injectionText: "c", userText: "u", assistantText: "a" };
+  await callAtlasWorldTurnApi(
+    { name: "t", endpoint: "", model: "", apiKey: "", connectionMode: "main", maxTokens: 512 },
+    base,
+    { fetchFn: fetchOk },
+  );
+  assert.equal(seen[0].input, "atlas://host", "main 模式端点仅占位");
+  const mainBody = JSON.parse(seen[0].init.body);
+  assert.equal(mainBody.xAtlasConnectionMode, "main");
+  assert.equal(mainBody.xAtlasProfileId, undefined);
+
+  await callAtlasWorldTurnApi(
+    { name: "t", endpoint: "", model: "", apiKey: "", connectionMode: "profile", profileId: "p1", bodyParams: "k: v", excludeBodyParams: "top_p", requestHeaders: "X-A: b", promptPostProcessing: "merge" },
+    base,
+    { fetchFn: fetchOk },
+  );
+  assert.equal(seen[1].input, "atlas://host");
+  const profileBody = JSON.parse(seen[1].init.body);
+  assert.equal(profileBody.xAtlasConnectionMode, "profile");
+  assert.equal(profileBody.xAtlasProfileId, "p1");
+  assert.equal(profileBody.xAtlasBodyParams, "k: v");
+  assert.equal(profileBody.xAtlasExcludeBodyParams, "top_p");
+  assert.equal(profileBody.xAtlasExtraHeaders, "X-A: b");
+  assert.equal(profileBody.xAtlasPromptPostProcessing, "merge");
+
+  await callAtlasWorldTurnApi(
+    { name: "t", endpoint: "https://api.example.com/v1/chat/completions", model: "m1", apiKey: "k", connectionMode: "custom" },
+    base,
+    { fetchFn: fetchOk },
+  );
+  const customBody = JSON.parse(seen[2].init.body);
+  assert.equal(seen[2].input, "https://api.example.com/v1/chat/completions");
+  assert.equal(customBody.xAtlasConnectionMode, undefined, "custom 模式不带路由保留字段");
 });

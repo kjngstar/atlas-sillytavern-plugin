@@ -718,9 +718,10 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
     ...typeof status === "number" ? { status } : {},
     durationMs: now() - startedAt
   });
-  const url = buildAtlasChatUrl(preset.endpoint);
+  const mode = preset.connectionMode ?? "custom";
+  const url = mode === "custom" ? buildAtlasChatUrl(preset.endpoint) : "atlas://host";
   if (!url) return fail4(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "推演 API 地址无效，无法构造请求。", false);
-  if (!preset.model.trim()) return fail4(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "推演预设未填写模型名称。", false);
+  if (mode === "custom" && !preset.model.trim()) return fail4(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "推演预设未填写模型名称。", false);
   const timeoutMs = Math.min(Math.max(preset.timeoutMs ?? 3e4, 1e3), 12e4);
   const fetchFn = deps.fetchFn ?? globalThis.fetch;
   const controller = new AbortController();
@@ -734,17 +735,27 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
           "Content-Type": "application/json",
           ...preset.apiKey.trim() ? { Authorization: `Bearer ${preset.apiKey.trim()}` } : {},
           // 浏览器代理适配层据此把请求映射为酒馆 claude 源（Anthropic Messages）；直连（测试）时无副作用
-          ...preset.apiFormat === "claude" ? { "X-Atlas-Api-Format": "claude" } : {}
+          ...preset.apiFormat === "claude" ? { "X-Atlas-Api-Format": "claude" } : {},
+          ...preset.apiFormat === "gemini" ? { "X-Atlas-Api-Format": "gemini" } : {}
         },
         body: JSON.stringify({
-          model: preset.model.trim(),
+          model: preset.model.trim() || "host",
           messages: [
             { role: "system", content: preset.systemPrompt?.trim() || DEFAULT_WORLD_TURN_SYSTEM_PROMPT },
             { role: "user", content: buildWorldTurnUserContent(input) }
           ],
           stream: false,
           ...typeof preset.temperature === "number" ? { temperature: preset.temperature } : {},
-          ...typeof preset.maxTokens === "number" ? { max_tokens: preset.maxTokens } : {}
+          ...typeof preset.maxTokens === "number" ? { max_tokens: preset.maxTokens } : {},
+          // 0.9.13 宿主适配通道（shujuku 同款能力）：代理层消费这些保留字段并映射为
+          // custom_include_body / custom_exclude_body / 附加标头 / custom_prompt_post_processing，
+          // 绝不透传上游；main / profile 模式据此路由到 TavernHelper / ConnectionManager。
+          ...mode !== "custom" ? { xAtlasConnectionMode: mode } : {},
+          ...mode === "profile" && preset.profileId?.trim() ? { xAtlasProfileId: preset.profileId.trim() } : {},
+          ...preset.bodyParams?.trim() ? { xAtlasBodyParams: preset.bodyParams } : {},
+          ...preset.excludeBodyParams?.trim() ? { xAtlasExcludeBodyParams: preset.excludeBodyParams } : {},
+          ...preset.requestHeaders?.trim() ? { xAtlasExtraHeaders: preset.requestHeaders } : {},
+          ...preset.promptPostProcessing?.trim() ? { xAtlasPromptPostProcessing: preset.promptPostProcessing } : {}
         }),
         signal: controller.signal
       });
@@ -996,6 +1007,33 @@ function normalizeAtlasClaudeBase(rawUrl) {
   if (!base.endsWith("/v1")) return `${base}/v1`;
   return base;
 }
+function normalizeAtlasGeminiBase(rawUrl) {
+  let base = String(rawUrl || "").trim().replace(/\/+$/, "");
+  if (!base) return "";
+  for (let changed = true; changed && base; ) {
+    changed = false;
+    for (const suffix of ["/chat/completions", "/messages", "/responses", "/interactions", "/v1beta", "/v1"]) {
+      if (base.endsWith(suffix)) {
+        base = base.slice(0, -suffix.length).replace(/\/+$/, "");
+        changed = true;
+        break;
+      }
+    }
+  }
+  return base;
+}
+function normalizeAtlasExcludeBody(raw) {
+  if (typeof raw !== "string") return "";
+  const trimmed = raw.trim();
+  if (!trimmed) return "";
+  if (trimmed.startsWith("- ") || trimmed.startsWith("[") || trimmed.startsWith("{")) return trimmed;
+  const keys = trimmed.split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
+  return keys.map((key) => `- ${key}`).join("\n");
+}
+function normalizeAtlasPromptPostProcessing(raw) {
+  const allowed = ["", "merge_tools", "semi_tools", "strict_tools", "merge", "semi", "strict", "single"];
+  return typeof raw === "string" && allowed.includes(raw) ? raw : "";
+}
 function pickAuthorization(headers) {
   if (!headers || typeof headers !== "object" || Array.isArray(headers)) return null;
   const record = headers;
@@ -1010,8 +1048,9 @@ function pickAtlasApiFormat(headers) {
   if (!headers || typeof headers !== "object" || Array.isArray(headers)) return null;
   const record = headers;
   for (const [key, value] of Object.entries(record)) {
-    if (key.toLowerCase() === "x-atlas-api-format" && typeof value === "string" && value.trim().toLowerCase() === "claude") {
-      return "claude";
+    if (key.toLowerCase() === "x-atlas-api-format" && typeof value === "string") {
+      const format = value.trim().toLowerCase();
+      if (format === "claude" || format === "gemini") return format;
     }
   }
   return null;
@@ -1042,18 +1081,27 @@ function createStProxyFetch(deps) {
     const authorization = pickAuthorization(init?.headers);
     const apiFormat = pickAtlasApiFormat(init?.headers);
     const csrfHeaders = deps.getContext().getRequestHeaders() ?? {};
-    const claudeBase = apiFormat === "claude" ? normalizeAtlasClaudeBase(url) : null;
+    const bodyParams = typeof payload.xAtlasBodyParams === "string" ? payload.xAtlasBodyParams.trim() : "";
+    const excludeBody = typeof payload.xAtlasExcludeBodyParams === "string" ? payload.xAtlasExcludeBodyParams : "";
+    const extraHeaders = typeof payload.xAtlasExtraHeaders === "string" ? payload.xAtlasExtraHeaders.trim() : "";
+    const promptPost = normalizeAtlasPromptPostProcessing(payload.xAtlasPromptPostProcessing);
+    const nativeBase = apiFormat === "claude" ? normalizeAtlasClaudeBase(url) : apiFormat === "gemini" ? normalizeAtlasGeminiBase(url) : null;
+    const nativeSource = apiFormat === "claude" ? "claude" : apiFormat === "gemini" ? "makersuite" : null;
+    const includeHeaders = [atlasCustomIncludeHeaders(authorization), extraHeaders].filter(Boolean).join("\n");
     const proxyBody = {
-      chat_completion_source: claudeBase ? "claude" : "custom",
-      ...claudeBase ? { reverse_proxy: claudeBase } : {},
-      ...claudeBase ? { proxy_password: stripBearerPrefix(authorization) } : {},
+      chat_completion_source: nativeSource ?? "custom",
+      ...nativeBase ? { reverse_proxy: nativeBase } : {},
+      ...nativeBase ? { proxy_password: stripBearerPrefix(authorization) } : {},
       custom_url: url,
       model: payload.model,
       messages: payload.messages,
       stream: payload.stream ?? false,
       ...payload.temperature !== void 0 ? { temperature: payload.temperature } : {},
       ...payload.max_tokens !== void 0 ? { max_tokens: payload.max_tokens } : {},
-      custom_include_headers: atlasCustomIncludeHeaders(authorization)
+      custom_include_headers: includeHeaders,
+      ...bodyParams ? { custom_include_body: bodyParams } : {},
+      ...excludeBody.trim() ? { custom_exclude_body: normalizeAtlasExcludeBody(excludeBody) } : {},
+      ...promptPost ? { custom_prompt_post_processing: promptPost } : {}
     };
     return innerFetch(ATLAS_ST_GENERATE_PATH, {
       method: "POST",
@@ -5624,6 +5672,19 @@ var MAX_PROMPT_CHARS = 8e3;
 var MIN_RPM = 1;
 var MAX_RPM = 600;
 var ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+var CONNECTION_MODES = ["custom", "main", "profile"];
+var API_FORMATS = ["openai", "openai_responses", "claude", "gemini"];
+var PROMPT_POST_PROCESSING = ["", "merge_tools", "semi_tools", "strict_tools", "merge", "semi", "strict", "single"];
+function normalizeConnectionMode(raw) {
+  return CONNECTION_MODES.includes(raw) ? raw : "custom";
+}
+function normalizeApiFormat(raw) {
+  if (raw === "openai_responses") return "openai";
+  return API_FORMATS.includes(raw) ? raw : "openai";
+}
+function normalizePromptPostProcessing(raw) {
+  return typeof raw === "string" && PROMPT_POST_PROCESSING.includes(raw) ? raw : "";
+}
 function nowOf(deps) {
   return deps.now ? deps.now() : 0;
 }
@@ -5697,8 +5758,11 @@ function parseConnectionPreset(raw) {
   const id = normalizeId(record.id);
   if (!id) return null;
   if (typeof record.name !== "string" || !record.name.trim() || record.name.length > MAX_NAME_CHARS) return null;
-  if (typeof record.endpoint !== "string" || record.endpoint.length > MAX_ENDPOINT_CHARS || !isHttpUrl(record.endpoint)) return null;
-  if (typeof record.model !== "string" || !record.model.trim() || record.model.length > MAX_MODEL_CHARS) return null;
+  const connectionMode = normalizeConnectionMode(record.connectionMode);
+  const endpointOk = connectionMode !== "custom" || typeof record.endpoint === "string" && record.endpoint.length <= MAX_ENDPOINT_CHARS && isHttpUrl(record.endpoint);
+  if (!endpointOk) return null;
+  const modelOk = connectionMode !== "custom" || typeof record.model === "string" && !!record.model.trim() && record.model.length <= MAX_MODEL_CHARS;
+  if (!modelOk) return null;
   if (typeof record.apiKey !== "string" || record.apiKey.length > MAX_API_KEY_CHARS) return null;
   if (!isFiniteIntIn(record.maxTokens, MIN_MAX_TOKENS, MAX_MAX_TOKENS)) return null;
   if (!isFiniteIn(record.temperature, MIN_TEMPERATURE, MAX_TEMPERATURE)) return null;
@@ -5706,13 +5770,19 @@ function parseConnectionPreset(raw) {
   return {
     id,
     name: record.name.trim(),
-    endpoint: record.endpoint,
-    model: record.model.trim(),
+    connectionMode,
+    endpoint: typeof record.endpoint === "string" ? record.endpoint : "",
+    model: typeof record.model === "string" ? record.model.trim() : "",
     apiKey: record.apiKey,
     maxTokens: record.maxTokens,
     temperature: record.temperature,
     timeoutMs: record.timeoutMs,
-    ...record.apiFormat === "claude" ? { apiFormat: "claude" } : {}
+    ...normalizeApiFormat(record.apiFormat) !== "openai" ? { apiFormat: normalizeApiFormat(record.apiFormat) } : {},
+    ...typeof record.profileId === "string" && record.profileId.trim() ? { profileId: record.profileId.trim().slice(0, 128) } : {},
+    ...typeof record.bodyParams === "string" && record.bodyParams.trim() ? { bodyParams: record.bodyParams.slice(0, 4e3) } : {},
+    ...typeof record.excludeBodyParams === "string" && record.excludeBodyParams.trim() ? { excludeBodyParams: record.excludeBodyParams.slice(0, 2e3) } : {},
+    ...typeof record.requestHeaders === "string" && record.requestHeaders.trim() ? { requestHeaders: record.requestHeaders.slice(0, 2e3) } : {},
+    ...typeof record.promptPostProcessing === "string" && record.promptPostProcessing ? { promptPostProcessing: normalizePromptPostProcessing(record.promptPostProcessing) } : {}
   };
 }
 function parsePromptPreset(raw) {
@@ -5880,14 +5950,28 @@ function applySettingsCommand(settings, command, deps = {}) {
   switch (command.action) {
     case "api.save": {
       const preset = command.preset;
+      const connectionMode = normalizeConnectionMode(preset.connectionMode);
       if (typeof preset.name !== "string" || !preset.name.trim() || preset.name.length > MAX_NAME_CHARS) {
         return fail3(settings, "INVALID_PAYLOAD", "连接名称必填且不超过 64 字。");
       }
-      if (typeof preset.endpoint !== "string" || preset.endpoint.length > MAX_ENDPOINT_CHARS || !isHttpUrl(preset.endpoint)) {
-        return fail3(settings, "INVALID_PAYLOAD", "端点必须是 http(s) 绝对地址。");
+      if (connectionMode === "custom") {
+        if (typeof preset.endpoint !== "string" || preset.endpoint.length > MAX_ENDPOINT_CHARS || !isHttpUrl(preset.endpoint)) {
+          return fail3(settings, "INVALID_PAYLOAD", "端点必须是 http(s) 绝对地址。");
+        }
+        if (typeof preset.model !== "string" || !preset.model.trim() || preset.model.length > MAX_MODEL_CHARS) {
+          return fail3(settings, "INVALID_PAYLOAD", "模型名必填且不超过 128 字。");
+        }
+      } else if (connectionMode === "profile" && !(typeof preset.profileId === "string" && !!preset.profileId.trim())) {
+        return fail3(settings, "INVALID_PAYLOAD", "酒馆连接预设模式需要选择连接预设。");
       }
-      if (typeof preset.model !== "string" || !preset.model.trim() || preset.model.length > MAX_MODEL_CHARS) {
-        return fail3(settings, "INVALID_PAYLOAD", "模型名必填且不超过 128 字。");
+      if (typeof preset.bodyParams === "string" && preset.bodyParams.length > 4e3) {
+        return fail3(settings, "INVALID_PAYLOAD", "附加请求体参数不超过 4000 字。");
+      }
+      if (typeof preset.excludeBodyParams === "string" && preset.excludeBodyParams.length > 2e3) {
+        return fail3(settings, "INVALID_PAYLOAD", "排除请求体字段不超过 2000 字。");
+      }
+      if (typeof preset.requestHeaders === "string" && preset.requestHeaders.length > 2e3) {
+        return fail3(settings, "INVALID_PAYLOAD", "附加请求标头不超过 2000 字。");
       }
       if (!isFiniteIntIn(preset.maxTokens, MIN_MAX_TOKENS, MAX_MAX_TOKENS)) {
         return fail3(settings, "INVALID_PAYLOAD", `最大回复长度必须是 ${MIN_MAX_TOKENS}..${MAX_MAX_TOKENS} 的整数。`);
@@ -5933,13 +6017,19 @@ function applySettingsCommand(settings, command, deps = {}) {
           timeoutMs: preset.timeoutMs
         }), deps, new Set(settings.apiPresets.map((p) => p.id))),
         name: uniqueName(preset.name, usedApiNames),
+        ...connectionMode !== "custom" ? { connectionMode } : {},
         endpoint: preset.endpoint,
         model: preset.model.trim(),
         apiKey,
         maxTokens: preset.maxTokens,
         temperature: preset.temperature,
         timeoutMs: preset.timeoutMs,
-        ...preset.apiFormat === "claude" ? { apiFormat: "claude" } : {},
+        ...normalizeApiFormat(preset.apiFormat) !== "openai" ? { apiFormat: normalizeApiFormat(preset.apiFormat) } : {},
+        ...connectionMode === "profile" && typeof preset.profileId === "string" && preset.profileId.trim() ? { profileId: preset.profileId.trim().slice(0, 128) } : {},
+        ...typeof preset.bodyParams === "string" && preset.bodyParams.trim() ? { bodyParams: preset.bodyParams.slice(0, 4e3) } : {},
+        ...typeof preset.excludeBodyParams === "string" && preset.excludeBodyParams.trim() ? { excludeBodyParams: preset.excludeBodyParams.slice(0, 2e3) } : {},
+        ...typeof preset.requestHeaders === "string" && preset.requestHeaders.trim() ? { requestHeaders: preset.requestHeaders.slice(0, 2e3) } : {},
+        ...normalizePromptPostProcessing(preset.promptPostProcessing) ? { promptPostProcessing: normalizePromptPostProcessing(preset.promptPostProcessing) } : {},
         updatedAt: now
       };
       const apiPresets = existingIndex >= 0 ? settings.apiPresets.map((p, i) => i === existingIndex ? entry : p) : [...settings.apiPresets, entry];
@@ -6142,12 +6232,18 @@ function settingsViewV2(settings) {
       return {
         id: p.id,
         name: p.name,
+        connectionMode: normalizeConnectionMode(p.connectionMode),
         endpoint: p.endpoint,
         model: p.model,
         maxTokens: p.maxTokens,
         temperature: p.temperature,
         timeoutMs: p.timeoutMs,
-        apiFormat: p.apiFormat === "claude" ? "claude" : "openai",
+        apiFormat: normalizeApiFormat(p.apiFormat),
+        profileId: p.profileId ?? "",
+        bodyParams: p.bodyParams ?? "",
+        excludeBodyParams: p.excludeBodyParams ?? "",
+        requestHeaders: p.requestHeaders ?? "",
+        promptPostProcessing: normalizePromptPostProcessing(p.promptPostProcessing),
         // 0.9.12（作者令，照抄 shujuku）：GET 返回明文密钥，编辑器回填 / 测试连接复用，不再每次重输
         apiKey: key
       };
@@ -6169,6 +6265,8 @@ function resolveWorldTurnPreset(settings) {
   const connection = settings.apiPresets.find((p) => p.id === settings.activeApiPresetId);
   if (!connection) return null;
   const prompt = settings.promptPresets.find((p) => p.id === settings.activePromptPresetId);
+  const mode = normalizeConnectionMode(connection.connectionMode);
+  const format = normalizeApiFormat(connection.apiFormat);
   return {
     name: connection.name,
     endpoint: connection.endpoint,
@@ -6177,7 +6275,13 @@ function resolveWorldTurnPreset(settings) {
     maxTokens: connection.maxTokens,
     temperature: connection.temperature,
     timeoutMs: connection.timeoutMs,
-    ...connection.apiFormat === "claude" ? { apiFormat: "claude" } : {},
+    ...mode !== "custom" ? { connectionMode: mode } : {},
+    ...format !== "openai" ? { apiFormat: format } : {},
+    ...mode === "profile" && connection.profileId ? { profileId: connection.profileId } : {},
+    ...connection.bodyParams ? { bodyParams: connection.bodyParams } : {},
+    ...connection.excludeBodyParams ? { excludeBodyParams: connection.excludeBodyParams } : {},
+    ...connection.requestHeaders ? { requestHeaders: connection.requestHeaders } : {},
+    ...normalizePromptPostProcessing(connection.promptPostProcessing) ? { promptPostProcessing: normalizePromptPostProcessing(connection.promptPostProcessing) } : {},
     ...prompt ? { systemPrompt: prompt.systemPrompt } : {}
   };
 }
@@ -7659,6 +7763,132 @@ function buildWorldFromTemplate(template, opts) {
   };
 }
 
+// src/atlas-host-connections.ts
+function toResponse(like) {
+  return like;
+}
+function textResponse(text) {
+  const body = JSON.stringify({ choices: [{ message: { content: text } }] });
+  return toResponse({
+    ok: true,
+    status: 200,
+    text: async () => body,
+    json: async () => JSON.parse(body),
+    clone: () => ({ text: async () => body })
+  });
+}
+function hostErrorJsonResponse(message) {
+  const body = JSON.stringify({ error: { message } });
+  return toResponse({
+    ok: true,
+    status: 200,
+    text: async () => body,
+    json: async () => JSON.parse(body),
+    clone: () => ({ text: async () => body })
+  });
+}
+function parseHostPayload(init) {
+  if (typeof init?.body !== "string" || !init.body.trimStart().startsWith("{")) return null;
+  try {
+    const parsed = JSON.parse(init.body);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+function orderedPromptsOf(payload) {
+  const messages = Array.isArray(payload.messages) ? payload.messages : [];
+  return messages.filter((m) => !!m && typeof m === "object" && typeof m.role === "string" && typeof m.content === "string").map((m) => ({ role: m.role, content: m.content }));
+}
+function isTavernMainAvailable(getHost) {
+  const helper = getHost();
+  return !!helper && typeof helper.generateRaw === "function";
+}
+function isConnectionManagerAvailable(getContext) {
+  const ctx = getContext();
+  return !!ctx?.ConnectionManagerRequestService && typeof ctx.ConnectionManagerRequestService.sendRequest === "function";
+}
+function getConnectionManagerProfiles(getContext) {
+  const ctx = getContext();
+  const profiles = ctx?.extensionSettings?.connectionManager?.profiles;
+  if (!Array.isArray(profiles)) return [];
+  return profiles.filter((p) => !!p && typeof p === "object" && typeof p.id === "string").map((p) => ({ id: p.id, name: String(p.name ?? p.id) }));
+}
+function createTavernMainFetch(deps) {
+  return async (_input, init) => {
+    const payload = parseHostPayload(init);
+    const helper = deps.getTavernHelper();
+    if (!helper || typeof helper.generateRaw !== "function") {
+      return hostErrorJsonResponse("主API生成不可用：未检测到酒馆助手（TavernHelper.generateRaw）。请安装酒馆助手（JS-Slash-Runner），或改用自定义 API 连接。");
+    }
+    const prompts = payload ? orderedPromptsOf(payload) : [];
+    if (prompts.length === 0) return hostErrorJsonResponse("主API生成失败：请求缺少有效的 messages。");
+    const maxTokens = typeof payload?.max_tokens === "number" ? payload.max_tokens : void 0;
+    try {
+      const response = await helper.generateRaw({ ordered_prompts: prompts, should_stream: false, ...maxTokens ? { max_tokens: maxTokens } : {} });
+      const text = typeof response === "string" ? response : String(response ?? "");
+      if (!text.trim()) return hostErrorJsonResponse("主API生成返回为空。");
+      return textResponse(text.trim());
+    } catch (error) {
+      return hostErrorJsonResponse(`主API生成失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+}
+var profileCallTail = Promise.resolve();
+function triggerSlash(helper, command) {
+  const fn = helper?.triggerSlash;
+  if (typeof fn !== "function") return Promise.resolve("");
+  return fn(command);
+}
+function createTavernProfileFetch(deps) {
+  return async (_input, init) => {
+    const payload = parseHostPayload(init);
+    const ctx = deps.getContext();
+    const service = ctx?.ConnectionManagerRequestService;
+    if (!service || typeof service.sendRequest !== "function") {
+      return hostErrorJsonResponse("ConnectionManagerRequestService 不可用。请检查酒馆版本或连接管理器配置。");
+    }
+    const profileId = typeof payload?.xAtlasProfileId === "string" ? payload.xAtlasProfileId.trim() : "";
+    if (!profileId) return hostErrorJsonResponse("酒馆连接预设模式未选择连接预设。");
+    const prompts = payload ? orderedPromptsOf(payload) : [];
+    if (prompts.length === 0) return hostErrorJsonResponse("酒馆连接预设调用失败：请求缺少有效的 messages。");
+    const maxTokens = typeof payload?.max_tokens === "number" ? payload.max_tokens : 1024;
+    const profiles = getConnectionManagerProfiles(deps.getContext);
+    const target = profiles.find((p) => p.id === profileId);
+    const targetName = target?.name ?? profileId;
+    const run = async () => {
+      const helper = deps.getTavernHelper();
+      const originalProfile = await triggerSlash(helper, "/profile");
+      const needSwitch = !!originalProfile && originalProfile !== targetName;
+      try {
+        if (needSwitch) {
+          await triggerSlash(helper, `/profile await=true "${targetName.replace(/"/g, '\\"')}"`);
+        }
+        const response = await service.sendRequest(profileId, prompts, maxTokens);
+        const content = response?.result?.choices?.[0]?.message?.content ?? response?.content;
+        const text = typeof content === "string" ? content : "";
+        if (!text.trim()) return hostErrorJsonResponse("酒馆连接预设返回为空或形状不支持。");
+        return textResponse(text.trim());
+      } catch (error) {
+        return hostErrorJsonResponse(`酒馆连接预设调用失败：${error instanceof Error ? error.message : String(error)}`);
+      } finally {
+        if (needSwitch) {
+          try {
+            const current = await triggerSlash(helper, "/profile");
+            if (current !== originalProfile) {
+              await triggerSlash(helper, `/profile await=true "${originalProfile.replace(/"/g, '\\"')}"`);
+            }
+          } catch {
+          }
+        }
+      }
+    };
+    const result = profileCallTail.then(run, run);
+    profileCallTail = result.catch(() => void 0);
+    return result;
+  };
+}
+
 // src/atlas-starter-world.ts
 var MAX_NAME_CHARS2 = 60;
 var MAX_DESCRIPTION_CHARS = 2e3;
@@ -7732,10 +7962,18 @@ export {
   createBrowserDocumentStore,
   createLocalAtlasApi,
   createStProxyFetch,
+  createTavernMainFetch,
+  createTavernProfileFetch,
+  getConnectionManagerProfiles,
   getDemoTemplate,
   getDemoTemplateByName,
+  isConnectionManagerAvailable,
+  isTavernMainAvailable,
   lorebookNameFor,
   normalizeAtlasClaudeBase,
+  normalizeAtlasExcludeBody,
+  normalizeAtlasGeminiBase,
+  normalizeAtlasPromptPostProcessing,
   parseAtlasChatBinding,
   starterWorldIdForChat
 };

@@ -31,8 +31,20 @@ export interface AtlasApiPreset {
   timeoutMs?: number;
   /** 自定义系统提示词；留空 / 省略 = 使用内置默认（DEFAULT_WORLD_TURN_SYSTEM_PROMPT）。 */
   systemPrompt?: string;
-  /** 接口协议（0.9.10，shujuku 同款）：缺省 openai = /chat/completions；claude = Anthropic Messages（经酒馆 claude 源变形，MiniMax 订阅密钥 / Claude 代理用）。 */
-  apiFormat?: "openai" | "claude";
+  /** 接口协议（0.9.13 对齐 shujuku）：缺省 openai；claude = Anthropic Messages；gemini 映射 makersuite；openai_responses 原版酒馆等同 openai。 */
+  apiFormat?: "openai" | "openai_responses" | "claude" | "gemini";
+  /** 连接方式（0.9.13 全抄 shujuku）：缺省 custom；main = 酒馆主 API；profile = 酒馆连接预设（由宿主适配 fetch 承接）。 */
+  connectionMode?: "custom" | "main" | "profile";
+  /** 酒馆连接预设模式的 profile id。 */
+  profileId?: string;
+  /** 附加请求体参数（custom_include_body）。 */
+  bodyParams?: string;
+  /** 排除请求体字段（custom_exclude_body）。 */
+  excludeBodyParams?: string;
+  /** 附加请求标头（每行 Header: Value）。 */
+  requestHeaders?: string;
+  /** 提示词后处理（custom_prompt_post_processing）；"" = 不携带。 */
+  promptPostProcessing?: string;
 }
 
 export interface AtlasApiCallResult {
@@ -144,9 +156,11 @@ export async function callAtlasWorldTurnApi(
     durationMs: now() - startedAt,
   });
 
-  const url = buildAtlasChatUrl(preset.endpoint);
+  const mode = preset.connectionMode ?? "custom";
+  // main / profile 模式不走自定义端点（宿主适配 fetch 承接），URL 仅作占位供日志与代理识别
+  const url = mode === "custom" ? buildAtlasChatUrl(preset.endpoint) : "atlas://host";
   if (!url) return fail(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "推演 API 地址无效，无法构造请求。", false);
-  if (!preset.model.trim()) return fail(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "推演预设未填写模型名称。", false);
+  if (mode === "custom" && !preset.model.trim()) return fail(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "推演预设未填写模型名称。", false);
 
   const timeoutMs = Math.min(Math.max(preset.timeoutMs ?? 30_000, 1_000), 120_000);
   const fetchFn = deps.fetchFn ?? globalThis.fetch;
@@ -163,9 +177,10 @@ export async function callAtlasWorldTurnApi(
           ...(preset.apiKey.trim() ? { Authorization: `Bearer ${preset.apiKey.trim()}` } : {}),
           // 浏览器代理适配层据此把请求映射为酒馆 claude 源（Anthropic Messages）；直连（测试）时无副作用
           ...(preset.apiFormat === "claude" ? { "X-Atlas-Api-Format": "claude" } : {}),
+          ...(preset.apiFormat === "gemini" ? { "X-Atlas-Api-Format": "gemini" } : {}),
         },
         body: JSON.stringify({
-          model: preset.model.trim(),
+          model: preset.model.trim() || "host",
           messages: [
             { role: "system", content: preset.systemPrompt?.trim() || DEFAULT_WORLD_TURN_SYSTEM_PROMPT },
             { role: "user", content: buildWorldTurnUserContent(input) },
@@ -173,6 +188,15 @@ export async function callAtlasWorldTurnApi(
           stream: false,
           ...(typeof preset.temperature === "number" ? { temperature: preset.temperature } : {}),
           ...(typeof preset.maxTokens === "number" ? { max_tokens: preset.maxTokens } : {}),
+          // 0.9.13 宿主适配通道（shujuku 同款能力）：代理层消费这些保留字段并映射为
+          // custom_include_body / custom_exclude_body / 附加标头 / custom_prompt_post_processing，
+          // 绝不透传上游；main / profile 模式据此路由到 TavernHelper / ConnectionManager。
+          ...(mode !== "custom" ? { xAtlasConnectionMode: mode } : {}),
+          ...(mode === "profile" && preset.profileId?.trim() ? { xAtlasProfileId: preset.profileId.trim() } : {}),
+          ...(preset.bodyParams?.trim() ? { xAtlasBodyParams: preset.bodyParams } : {}),
+          ...(preset.excludeBodyParams?.trim() ? { xAtlasExcludeBodyParams: preset.excludeBodyParams } : {}),
+          ...(preset.requestHeaders?.trim() ? { xAtlasExtraHeaders: preset.requestHeaders } : {}),
+          ...(preset.promptPostProcessing?.trim() ? { xAtlasPromptPostProcessing: preset.promptPostProcessing } : {}),
         }),
         signal: controller.signal,
       });

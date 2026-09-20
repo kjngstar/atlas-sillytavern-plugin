@@ -71,6 +71,44 @@ export function normalizeAtlasClaudeBase(rawUrl: unknown): string {
   return base;
 }
 
+/**
+ * Gemini（makersuite 源）反向代理基址归一化（0.9.13，shujuku makersuite 分支同款语义）：
+ * 原版 ST makersuite 源 fetch(`${apiUrl}/${apiVersion}/models/...`)，服务端自补 /v1beta
+ * ——基址**不得带版本段**（剥 /v1beta、/v1 与显式协议路径段）。
+ */
+export function normalizeAtlasGeminiBase(rawUrl: unknown): string {
+  let base = String(rawUrl || "").trim().replace(/\/+$/, "");
+  if (!base) return "";
+  // 引擎会拼 /chat/completions，用户端点又自带版本段 → 循环剥到没有可剥后缀
+  for (let changed = true; changed && base; ) {
+    changed = false;
+    for (const suffix of ["/chat/completions", "/messages", "/responses", "/interactions", "/v1beta", "/v1"]) {
+      if (base.endsWith(suffix)) {
+        base = base.slice(0, -suffix.length).replace(/\/+$/, "");
+        changed = true;
+        break;
+      }
+    }
+  }
+  return base;
+}
+
+/** custom_exclude_body 归一化（shujuku 同款）：裸字段名（逗号 / 换行分隔）→ "- key" YAML 行；已是 YAML/JSON 形状则原样。 */
+export function normalizeAtlasExcludeBody(raw: unknown): string {
+  if (typeof raw !== "string") return "";
+  const trimmed = raw.trim();
+  if (!trimmed) return "";
+  if (trimmed.startsWith("- ") || trimmed.startsWith("[") || trimmed.startsWith("{")) return trimmed;
+  const keys = trimmed.split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
+  return keys.map((key) => `- ${key}`).join("\n");
+}
+
+/** 提示词后处理白名单（SillyTavern custom_prompt_post_processing 全集；"" = 不携带）。 */
+export function normalizeAtlasPromptPostProcessing(raw: unknown): string {
+  const allowed = ["", "merge_tools", "semi_tools", "strict_tools", "merge", "semi", "strict", "single"];
+  return typeof raw === "string" && allowed.includes(raw) ? raw : "";
+}
+
 export interface StProxyFetchDeps {
   /** 通常 = SillyTavern.getContext；测试注入 fake。 */
   getContext(): { getRequestHeaders(): Record<string, string> };
@@ -84,6 +122,13 @@ interface ChatCompletionBody {
   stream?: unknown;
   temperature?: unknown;
   max_tokens?: unknown;
+  // 0.9.13 宿主适配保留字段（引擎下发，代理层消费后绝不透传上游）
+  xAtlasConnectionMode?: unknown;
+  xAtlasProfileId?: unknown;
+  xAtlasBodyParams?: unknown;
+  xAtlasExcludeBodyParams?: unknown;
+  xAtlasExtraHeaders?: unknown;
+  xAtlasPromptPostProcessing?: unknown;
 }
 
 function pickAuthorization(headers: unknown): string | null {
@@ -97,13 +142,14 @@ function pickAuthorization(headers: unknown): string | null {
   return null;
 }
 
-/** 引擎核心经请求头声明的接口协议（X-Atlas-Api-Format: claude = Anthropic Messages）。 */
-function pickAtlasApiFormat(headers: unknown): "claude" | null {
+/** 引擎核心经请求头声明的接口协议（X-Atlas-Api-Format: claude / gemini）。 */
+function pickAtlasApiFormat(headers: unknown): "claude" | "gemini" | null {
   if (!headers || typeof headers !== "object" || Array.isArray(headers)) return null;
   const record = headers as Record<string, unknown>;
   for (const [key, value] of Object.entries(record)) {
-    if (key.toLowerCase() === "x-atlas-api-format" && typeof value === "string" && value.trim().toLowerCase() === "claude") {
-      return "claude";
+    if (key.toLowerCase() === "x-atlas-api-format" && typeof value === "string") {
+      const format = value.trim().toLowerCase();
+      if (format === "claude" || format === "gemini") return format;
     }
   }
   return null;
@@ -146,21 +192,39 @@ export function createStProxyFetch(deps: StProxyFetchDeps): typeof fetch {
     const apiFormat = pickAtlasApiFormat(init?.headers);
     const csrfHeaders = deps.getContext().getRequestHeaders() ?? {};
 
-    // claude 协议（shujuku 同款映射，0.9.10）：chat_completion_source:"claude"，
-    // 服务端做 Anthropic 变形（fetch(reverse_proxy + '/messages')，x-api-key=proxy_password）。
-    // custom_url / custom_include_headers 与 shujuku 一并携带（后端按源取用，不影响）。
-    const claudeBase = apiFormat === "claude" ? normalizeAtlasClaudeBase(url) : null;
+    // 0.9.13 宿主适配保留字段（消费即弃，绝不透传上游）
+    const bodyParams = typeof payload.xAtlasBodyParams === "string" ? payload.xAtlasBodyParams.trim() : "";
+    const excludeBody = typeof payload.xAtlasExcludeBodyParams === "string" ? payload.xAtlasExcludeBodyParams : "";
+    const extraHeaders = typeof payload.xAtlasExtraHeaders === "string" ? payload.xAtlasExtraHeaders.trim() : "";
+    const promptPost = normalizeAtlasPromptPostProcessing(payload.xAtlasPromptPostProcessing);
+
+    // claude / gemini 协议（shujuku 同款映射）：映射到酒馆原生协议源，服务端做协议变形。
+    // claude → chat_completion_source:"claude"（基址补 /v1，x-api-key=proxy_password）；
+    // gemini → "makersuite"（基址剥版本段，服务端自补 /v1beta）。
+    const nativeBase = apiFormat === "claude"
+      ? normalizeAtlasClaudeBase(url)
+      : apiFormat === "gemini"
+        ? normalizeAtlasGeminiBase(url)
+        : null;
+    const nativeSource = apiFormat === "claude" ? "claude" : apiFormat === "gemini" ? "makersuite" : null;
+
+    // custom_include_headers：Authorization 在前 + 附加标头（shujuku 同款拼接口径，原始头字符串）
+    const includeHeaders = [atlasCustomIncludeHeaders(authorization), extraHeaders].filter(Boolean).join("\n");
+
     const proxyBody: Record<string, unknown> = {
-      chat_completion_source: claudeBase ? "claude" : "custom",
-      ...(claudeBase ? { reverse_proxy: claudeBase } : {}),
-      ...(claudeBase ? { proxy_password: stripBearerPrefix(authorization) } : {}),
+      chat_completion_source: nativeSource ?? "custom",
+      ...(nativeBase ? { reverse_proxy: nativeBase } : {}),
+      ...(nativeBase ? { proxy_password: stripBearerPrefix(authorization) } : {}),
       custom_url: url,
       model: payload.model,
       messages: payload.messages,
       stream: payload.stream ?? false,
       ...(payload.temperature !== undefined ? { temperature: payload.temperature } : {}),
       ...(payload.max_tokens !== undefined ? { max_tokens: payload.max_tokens } : {}),
-      custom_include_headers: atlasCustomIncludeHeaders(authorization),
+      custom_include_headers: includeHeaders,
+      ...(bodyParams ? { custom_include_body: bodyParams } : {}),
+      ...(excludeBody.trim() ? { custom_exclude_body: normalizeAtlasExcludeBody(excludeBody) } : {}),
+      ...(promptPost ? { custom_prompt_post_processing: promptPost } : {}),
     };
 
     return innerFetch(ATLAS_ST_GENERATE_PATH, {

@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.12";
+export const ATLAS_EXTENSION_VERSION = "0.9.13";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -1466,12 +1466,60 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     return {
       id: null,
       name: "",
+      connectionMode: "custom",
       endpoint: "",
       model: "",
       maxTokens: 1024,
       temperature: 0.7,
       timeoutMs: 30_000,
       apiFormat: "openai",
+      profileId: "",
+      bodyParams: "",
+      excludeBodyParams: "",
+      requestHeaders: "",
+      promptPostProcessing: "",
+    };
+  }
+
+  /** 视图条目 → 草稿（0.9.13 全字段）。 */
+  function apiDraftFromView(preset) {
+    return preset
+      ? {
+          id: preset.id,
+          name: preset.name,
+          connectionMode: preset.connectionMode ?? "custom",
+          endpoint: preset.endpoint ?? "",
+          model: preset.model ?? "",
+          maxTokens: preset.maxTokens,
+          temperature: preset.temperature,
+          timeoutMs: preset.timeoutMs,
+          apiFormat: preset.apiFormat ?? "openai",
+          profileId: preset.profileId ?? "",
+          bodyParams: preset.bodyParams ?? "",
+          excludeBodyParams: preset.excludeBodyParams ?? "",
+          requestHeaders: preset.requestHeaders ?? "",
+          promptPostProcessing: preset.promptPostProcessing ?? "",
+        }
+      : newApiDraft();
+  }
+
+  /** 草稿 → api.save 预设载荷（0.9.13 全字段）。 */
+  function apiPayloadFromDraft(preset) {
+    return {
+      ...(preset.id ? { id: preset.id } : {}),
+      name: preset.name,
+      connectionMode: preset.connectionMode === "main" || preset.connectionMode === "profile" ? preset.connectionMode : "custom",
+      endpoint: String(preset.endpoint ?? ""),
+      model: String(preset.model ?? ""),
+      maxTokens: Number(preset.maxTokens) || 1024,
+      temperature: Number.isFinite(Number(preset.temperature)) ? Number(preset.temperature) : 0.7,
+      timeoutMs: Number(preset.timeoutMs) || 30_000,
+      apiFormat: preset.apiFormat ?? "openai",
+      profileId: String(preset.profileId ?? ""),
+      bodyParams: String(preset.bodyParams ?? ""),
+      excludeBodyParams: String(preset.excludeBodyParams ?? ""),
+      requestHeaders: String(preset.requestHeaders ?? ""),
+      promptPostProcessing: String(preset.promptPostProcessing ?? ""),
     };
   }
 
@@ -1761,9 +1809,9 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
   function buildApiPanel() {
     const panel = el("section", "aw-panel");
     panel.append(el("span", "aw-eyebrow", "API 连接"));
-    panel.append(el("p", "aw-panel__text", "管理 Atlas 推演用的 API 连接：协议、密钥与模型都在这里；提示词请到「推进」页。"));
+    panel.append(el("p", "aw-panel__text", "管理 Atlas 推演用的 API 连接：连接方式、协议、密钥与模型都在这里；提示词请到「推进」页。"));
     const active = apiLibrary.find((p) => p.id === settingsV2?.activeApiPresetId);
-    panel.append(el("p", "aw-panel__meta", `当前使用：${activeApiLabel()}${active ? ` · 模型 ${active.model} · 密钥${active.apiKey ? `已保存（尾号 ${String(active.apiKey).slice(-4)}）` : "未设置"}` : ""}`));
+    panel.append(el("p", "aw-panel__meta", `当前使用：${activeApiLabel()}${active ? ` · 模型 ${active.model || "（跟随酒馆）"}` : ""}`));
     const gotoRow = el("div", "aw-actions");
     const gotoProgression = el("button", "aw-btn aw-btn--ghost", "前往推进");
     gotoProgression.type = "button";
@@ -1787,7 +1835,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     for (const preset of apiLibrary) {
       const option = document.createElement("option");
       option.value = preset.id;
-      option.textContent = `${preset.name}（${preset.model}）`;
+      option.textContent = `${preset.name}（${preset.model || (preset.connectionMode === "main" ? "酒馆主API" : preset.connectionMode === "profile" ? "酒馆预设" : "自定义")}）`;
       libSelect.append(option);
     }
     libSelect.value = apiDraft?.id ?? "";
@@ -1797,9 +1845,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
         return;
       }
       const preset = apiLibrary.find((p) => p.id === libSelect.value);
-      apiDraft = preset
-        ? { id: preset.id, name: preset.name, endpoint: preset.endpoint, model: preset.model, maxTokens: preset.maxTokens, temperature: preset.temperature, timeoutMs: preset.timeoutMs, apiFormat: preset.apiFormat === "claude" ? "claude" : "openai" }
-        : newApiDraft();
+      apiDraft = apiDraftFromView(preset);
       apiDraftDirty = false;
       apiKeyInput = preset ? String(preset.apiKey ?? "") : "";
       modelOptions = [];
@@ -1848,12 +1894,64 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     presetField.append(el("span", "aw-hint", "选中预设会立即设为当前使用并载入下方编辑器；新建的连接在点「保存」之前不会出现在这里。"));
     panel.append(presetField);
 
-    // ---- 编辑器（shujuku 式：名称 → 协议 → 端点/密钥 → 模型 → 参数 → dirty 操作条） ----
+    // ---- 编辑器（shujuku 式：名称 → 连接方式 → 按模式显隐 → dirty 操作条） ----
     const draft = apiDraft ?? newApiDraft();
-    const textField = (key, label, type, maxLength, placeholder, aria) => ({ key, label, type, maxLength, placeholder, aria });
-    const numberField = (key, label, min, max, step, aria) => ({ key, label, type: "number", min, max, step, aria });
+    const modeOf = (d) => (d?.connectionMode === "main" || d?.connectionMode === "profile" ? d.connectionMode : "custom");
+    const currentMode = modeOf(draft);
     const inputs = {};
     let apiSaveButton = null;
+
+    // 名称（各模式通用）
+    const nameField = el("div", "aw-field");
+    nameField.append(el("span", "aw-field__label", "连接名称"));
+    const nameInput = document.createElement("input");
+    nameInput.className = "aw-input";
+    nameInput.type = "text";
+    nameInput.maxLength = 64;
+    nameInput.value = String(draft.name ?? "");
+    nameInput.placeholder = "例如：MiniMax 订阅 / 酒馆主 API";
+    nameInput.setAttribute("aria-label", "连接名称");
+    nameInput.addEventListener("input", () => {
+      draft.name = nameInput.value;
+      apiDraft = draft;
+      apiDraftDirty = true;
+      if (apiSaveButton) {
+        apiSaveButton.textContent = draft.id
+          ? (draft.name.trim() ? `保存修改到「${draft.name.trim()}」` : "保存修改")
+          : "保存新连接";
+      }
+      if (syncApiDirty) syncApiDirty();
+    });
+    nameField.append(nameInput);
+    panel.append(nameField);
+
+    // 连接方式（shujuku 分段控件：自定义 / 酒馆主 API / 酒馆连接预设）
+    const modeField = el("div", "aw-field");
+    modeField.append(el("span", "aw-field__label", "连接方式"));
+    const modeRow = el("div", "aw-select-row");
+    const modeButtons = [];
+    for (const [value, label] of [["custom", "自定义"], ["main", "酒馆主 API"], ["profile", "酒馆连接预设"]]) {
+      const btn = el("button", `aw-btn aw-btn--icon aw-mode-btn${currentMode === value ? " is-active" : ""}`, label);
+      btn.type = "button";
+      btn.setAttribute("aria-label", `连接方式：${label}${currentMode === value ? "（当前）" : ""}`);
+      btn.addEventListener("click", () => {
+        if (modeOf(draft) === value) return;
+        draft.connectionMode = value;
+        apiDraft = draft;
+        apiDraftDirty = true;
+        renderCenter();
+      });
+      modeButtons.push(btn);
+      modeRow.append(btn);
+    }
+    modeField.append(modeRow);
+    modeField.append(el("span", "aw-hint", modeOf(draft) === "main"
+      ? "使用酒馆当前主 API 发起推演（TavernHelper.generateRaw）——需要安装酒馆助手（JS-Slash-Runner）；密钥与模型跟随酒馆主 API 设置。"
+      : modeOf(draft) === "profile"
+        ? "使用酒馆连接管理器的某个连接预设发起推演；发送前临时切换到目标预设，完成后恢复原预设。"
+        : "自定义端点 + 密钥 + 模型，经酒馆后端代理转发。"));
+    panel.append(modeField);
+
     const appendField = (field, hint) => {
       const wrap = el("div", "aw-field");
       wrap.append(el("span", "aw-field__label", field.label));
@@ -1867,10 +1965,10 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       if (field.step !== undefined) input.step = String(field.step);
       input.placeholder = field.placeholder ?? "";
       if (field.key === "apiKey") {
-        // 密钥框始终为空：已保存的密钥不回填 DOM（规格 0.7.2）
         input.value = apiKeyInput;
         input.addEventListener("input", () => {
           apiKeyInput = input.value;
+          apiDraft = draft;
           apiDraftDirty = true;
           if (syncApiDirty) syncApiDirty();
         });
@@ -1881,7 +1979,6 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
           draft[field.key] = numeric ? Number(input.value) : input.value;
           apiDraft = draft;
           apiDraftDirty = true;
-          // 覆盖式保存必须始终明示目标（防改完名点保存静默覆盖别的连接）
           if (field.key === "name" && apiSaveButton) {
             apiSaveButton.textContent = draft.id
               ? (draft.name.trim() ? `保存修改到「${draft.name.trim()}」` : "保存修改")
@@ -1895,84 +1992,188 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       inputs[field.key] = input;
       return wrap;
     };
+    const textField = (key, label, type, maxLength, placeholder, aria) => ({ key, label, type, maxLength, placeholder, aria });
+    const numberField = (key, label, min, max, step, aria) => ({ key, label, type: "number", min, max, step, aria });
 
-    panel.append(appendField(textField("name", "连接名称", "text", 64, "例如：MiniMax 订阅", "连接名称")));
-
-    // 接口协议（0.9.12，shujuku 同款字段）
-    const formatField = el("div", "aw-field");
-    formatField.append(el("span", "aw-field__label", "接口协议"));
-    const formatSelect = document.createElement("select");
-    formatSelect.className = "aw-input";
-    formatSelect.setAttribute("aria-label", "选择接口协议");
-    const formatOptions = [
-      { value: "openai", label: "OpenAI 兼容（/chat/completions，默认）" },
-      { value: "claude", label: "Claude / Anthropic Messages（MiniMax 订阅、Claude 代理）" },
-    ];
-    for (const opt of formatOptions) {
-      const option = document.createElement("option");
-      option.value = opt.value;
-      option.textContent = opt.label;
-      formatSelect.append(option);
-    }
-    formatSelect.value = draft.apiFormat === "claude" ? "claude" : "openai";
-    formatSelect.addEventListener("change", () => {
-      draft.apiFormat = formatSelect.value === "claude" ? "claude" : "openai";
-      apiDraft = draft;
-      apiDraftDirty = true;
-      if (syncApiDirty) syncApiDirty();
-    });
-    formatField.append(formatSelect);
-    formatField.append(el("span", "aw-hint", "OpenAI 兼容 = 标准 /chat/completions（绝大多数中转站）；Claude（Anthropic Messages）= MiniMax Token Plan 订阅密钥（sk-cp-）、Claude 官方与中转代理——端点填协议根（如 https://api.minimaxi.com/anthropic），Atlas 自动补 /v1。"));
-    panel.append(formatField);
-
-    panel.append(appendField(textField("endpoint", "端点（http(s) 绝对地址）", "text", 2048, "http://localhost:8317/v1", "API 端点"), "Claude 协议填协议根即可，OpenAI 协议填到 /v1（Atlas 会自动补 /chat/completions）。"));
-    panel.append(appendField(textField("apiKey", "API 密钥", "password", 4096, active?.apiKey ? `已保存（尾号 ${String(active.apiKey).slice(-4)}），可直接修改` : "sk-…", "API 密钥"), "密钥保存在本浏览器的扩展设置里，载入预设时自动回填——加载模型与推演直接用它，不用每次重输。"));
-
-    // shujuku 式：独立的「加载模型列表」按钮紧跟密钥；模型下拉仅在加载到时出现
-    const loadModelsRow = el("div", "aw-actions");
-    const loadModelsBtn = el("button", "aw-btn", "加载模型列表");
-    loadModelsBtn.type = "button";
-    loadModelsBtn.setAttribute("aria-label", "通过酒馆后端代理加载模型列表并检查鉴权");
-    loadModelsBtn.addEventListener("click", async () => {
-      await testConnection(apiDraft ?? newApiDraft());
-    });
-    loadModelsRow.append(loadModelsBtn, el("span", "aw-panel__meta", "同时检查端点与鉴权；失败会给出可读错误，详见「日志」页。"));
-    panel.append(loadModelsRow);
-
-    panel.append(appendField(textField("model", "模型名（手动输入）", "text", 128, "例如：gpt-4o-mini", "模型名")));
-    if (modelOptions.length > 0) {
-      const modelRow = el("div", "aw-field");
-      modelRow.append(el("span", "aw-field__label", "或从列表选择"));
-      const modelSelect = document.createElement("select");
-      modelSelect.className = "aw-input";
-      modelSelect.setAttribute("aria-label", "选择端点返回的模型名");
-      const blank = document.createElement("option");
-      blank.value = "";
-      blank.textContent = `-- 共 ${modelOptions.length} 个，点选填入 --`;
-      modelSelect.append(blank);
-      for (const name of modelOptions) {
+    if (currentMode === "custom") {
+      // 接口协议（shujuku 四值；openai_responses 在原版酒馆等同 openai）
+      const formatField = el("div", "aw-field");
+      formatField.append(el("span", "aw-field__label", "接口协议"));
+      const formatSelect = document.createElement("select");
+      formatSelect.className = "aw-input";
+      formatSelect.setAttribute("aria-label", "选择接口协议");
+      const formatOptions = [
+        { value: "openai", label: "兼容 OpenAI（/chat/completions，默认）" },
+        { value: "openai_responses", label: "兼容 OpenAI Responses（原版酒馆下等同 OpenAI）" },
+        { value: "claude", label: "兼容 Claude Messages（MiniMax 订阅、Claude 代理）" },
+        { value: "gemini", label: "兼容 Gemini（映射酒馆 makersuite 源）" },
+      ];
+      for (const opt of formatOptions) {
         const option = document.createElement("option");
-        option.value = name;
-        option.textContent = name;
-        modelSelect.append(option);
+        option.value = opt.value;
+        option.textContent = opt.label;
+        formatSelect.append(option);
       }
-      modelSelect.addEventListener("change", () => {
-        if (!modelSelect.value) return;
-        draft.model = modelSelect.value;
+      formatSelect.value = draft.apiFormat === "claude" || draft.apiFormat === "gemini" ? draft.apiFormat : "openai";
+      formatSelect.addEventListener("change", () => {
+        draft.apiFormat = formatSelect.value;
         apiDraft = draft;
         apiDraftDirty = true;
-        inputs.model.value = modelSelect.value;
         if (syncApiDirty) syncApiDirty();
       });
-      modelRow.append(modelSelect);
-      panel.append(modelRow);
-    }
+      formatField.append(formatSelect);
+      formatField.append(el("span", "aw-hint", "决定酒馆后端按哪个协议变形：Claude / Gemini 填协议根即可（如 https://api.minimaxi.com/anthropic），Atlas 自动补版本段。"));
+      panel.append(formatField);
 
-    const grid = el("div", "aw-grid-2");
-    grid.append(appendField(numberField("maxTokens", "最大回复长度", 1, 8192, 1, "最大回复长度")));
-    grid.append(appendField(numberField("temperature", "温度", 0, 2, 0.1, "温度")));
-    panel.append(grid);
-    panel.append(appendField(numberField("timeoutMs", "超时毫秒", 1000, 120000, 1000, "超时毫秒")));
+      panel.append(appendField(textField("endpoint", "端点（http(s) 绝对地址）", "text", 2048, "http://localhost:8317/v1", "API 端点"), "Claude / Gemini 协议填协议根，OpenAI 协议填到 /v1。"));
+      panel.append(appendField(textField("apiKey", "API 密钥", "password", 4096, active?.apiKey ? `已保存（尾号 ${String(active.apiKey).slice(-4)}），可直接修改` : "sk-…", "API 密钥"), "密钥保存在本浏览器的扩展设置里，载入预设时自动回填——加载模型与推演直接用它，不用每次重输。"));
+
+      const loadModelsRow = el("div", "aw-actions");
+      const loadModelsBtn = el("button", "aw-btn", "加载模型列表");
+      loadModelsBtn.type = "button";
+      loadModelsBtn.setAttribute("aria-label", "通过酒馆后端代理加载模型列表并检查鉴权");
+      loadModelsBtn.addEventListener("click", async () => {
+        await testConnection(apiDraft ?? newApiDraft());
+      });
+      loadModelsRow.append(loadModelsBtn, el("span", "aw-panel__meta", "同时检查端点与鉴权；失败会给出可读错误，详见「日志」页。"));
+      panel.append(loadModelsRow);
+
+      panel.append(appendField(textField("model", "模型名（手动输入）", "text", 128, "例如：gpt-4o-mini", "模型名")));
+      if (modelOptions.length > 0) {
+        const modelRow = el("div", "aw-field");
+        modelRow.append(el("span", "aw-field__label", "或从列表选择"));
+        const modelSelect = document.createElement("select");
+        modelSelect.className = "aw-input";
+        modelSelect.setAttribute("aria-label", "选择端点返回的模型名");
+        const blank = document.createElement("option");
+        blank.value = "";
+        blank.textContent = `-- 共 ${modelOptions.length} 个，点选填入 --`;
+        modelSelect.append(blank);
+        for (const name of modelOptions) {
+          const option = document.createElement("option");
+          option.value = name;
+          option.textContent = name;
+          modelSelect.append(option);
+        }
+        modelSelect.addEventListener("change", () => {
+          if (!modelSelect.value) return;
+          draft.model = modelSelect.value;
+          apiDraft = draft;
+          apiDraftDirty = true;
+          inputs.model.value = modelSelect.value;
+          if (syncApiDirty) syncApiDirty();
+        });
+        modelRow.append(modelSelect);
+        panel.append(modelRow);
+      }
+
+      const grid = el("div", "aw-grid-2");
+      grid.append(appendField(numberField("maxTokens", "最大回复长度", 1, 8192, 1, "最大回复长度")));
+      grid.append(appendField(numberField("temperature", "温度", 0, 2, 0.1, "温度")));
+      panel.append(grid);
+      panel.append(appendField(numberField("timeoutMs", "超时毫秒", 1000, 120000, 1000, "超时毫秒")));
+
+      // 高级参数（shujuku：附加请求体 / 排除字段 / 附加标头 / 提示词后处理）
+      const advDetails = document.createElement("details");
+      advDetails.className = "aw-details";
+      const advSummary = el("summary", "aw-details__summary", "高级参数（请求体注入 / 排除字段 / 附加标头 / 提示词后处理）");
+      const advBody = el("div", "aw-details__body");
+      const textareaField = (key, label, hint, placeholder, rows) => {
+        const wrap = el("div", "aw-field");
+        wrap.append(el("span", "aw-field__label", label));
+        const area = document.createElement("textarea");
+        area.className = "aw-input aw-input--area";
+        area.rows = rows;
+        area.maxLength = key === "bodyParams" ? 4000 : 2000;
+        area.value = String(draft[key] ?? "");
+        area.placeholder = placeholder;
+        area.setAttribute("aria-label", label);
+        area.addEventListener("input", () => {
+          draft[key] = area.value;
+          apiDraft = draft;
+          apiDraftDirty = true;
+          if (syncApiDirty) syncApiDirty();
+        });
+        wrap.append(area);
+        wrap.append(el("span", "aw-hint", hint));
+        return wrap;
+      };
+      advBody.append(textareaField("bodyParams", "附加请求体参数", "合并进最终模型请求体（custom_include_body）；JSON / YAML object 均可。", "response_format:\n  type: json_object", 3));
+      advBody.append(textareaField("excludeBodyParams", "排除请求体字段", "从最终模型请求体删除指定字段（custom_exclude_body）；逗号或换行分隔。", "top_p, reasoning_effort", 2));
+      advBody.append(textareaField("requestHeaders", "附加请求标头", "每行一个 Header: Value，追加在 Authorization 之后。", "X-Custom-Header: value", 2));
+      const postField = el("div", "aw-field");
+      postField.append(el("span", "aw-field__label", "提示词后处理"));
+      const postSelect = document.createElement("select");
+      postSelect.className = "aw-input";
+      postSelect.setAttribute("aria-label", "选择提示词后处理");
+      for (const [value, label] of [
+        ["", "未选择（原样透传消息，保留 system 段角色）"],
+        ["strict", "严格（强制对话角色交替、用户最先）"],
+        ["semi", "半严格（强制对话角色交替）"],
+        ["merge", "合并相同角色连续的发言"],
+        ["strict_tools", "严格（含工具）"],
+        ["semi_tools", "半严格（含工具）"],
+        ["merge_tools", "合并相同角色连续的发言（含工具）"],
+        ["single", "单一用户消息（无工具）"],
+      ]) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = label;
+        postSelect.append(option);
+      }
+      postSelect.value = String(draft.promptPostProcessing ?? "");
+      postSelect.addEventListener("change", () => {
+        draft.promptPostProcessing = postSelect.value;
+        apiDraft = draft;
+        apiDraftDirty = true;
+        if (syncApiDirty) syncApiDirty();
+      });
+      postField.append(postSelect);
+      postField.append(el("span", "aw-hint", "SillyTavern custom_prompt_post_processing；默认未选择 = 不携带该字段，消息原样透传。"));
+      advBody.append(postField);
+      advDetails.append(advSummary, advBody);
+      panel.append(advDetails);
+    } else if (currentMode === "profile") {
+      // 酒馆连接预设：profile 下拉 + 刷新
+      let profileOptions = [];
+      try {
+        profileOptions = getConnectionManagerProfiles(SillyTavern.getContext());
+      } catch { profileOptions = []; }
+      const profileField = el("div", "aw-field");
+      profileField.append(el("span", "aw-field__label", "酒馆连接预设"));
+      const profileRow = el("div", "aw-select-row");
+      const profileSelect = document.createElement("select");
+      profileSelect.className = "aw-input";
+      profileSelect.setAttribute("aria-label", "选择酒馆连接管理器预设");
+      const blankProfile = document.createElement("option");
+      blankProfile.value = "";
+      blankProfile.textContent = profileOptions.length === 0 ? "未读到连接管理器预设（先在酒馆里建好）" : "请选择连接预设";
+      profileSelect.append(blankProfile);
+      for (const profile of profileOptions) {
+        const option = document.createElement("option");
+        option.value = profile.id;
+        option.textContent = profile.name;
+        if (String(profile.id) === String(draft.profileId ?? "")) option.selected = true;
+        profileSelect.append(option);
+      }
+      profileSelect.addEventListener("change", () => {
+        draft.profileId = profileSelect.value;
+        apiDraft = draft;
+        apiDraftDirty = true;
+        if (syncApiDirty) syncApiDirty();
+      });
+      profileRow.append(profileSelect);
+      const refreshBtn = el("button", "aw-btn aw-btn--icon", "刷新");
+      refreshBtn.type = "button";
+      refreshBtn.setAttribute("aria-label", "刷新酒馆连接预设列表");
+      refreshBtn.addEventListener("click", () => renderCenter());
+      profileRow.append(refreshBtn);
+      profileField.append(profileRow);
+      profileField.append(el("span", "aw-hint", "推演时经酒馆连接管理器用该预设发送；发送前临时切换活动预设，完成后恢复。可在下方点「测试连接」检查可用性。"));
+      panel.append(profileField);
+    } else {
+      panel.append(el("div", "aw-note", "酒馆主 API 模式：推演经酒馆助手（TavernHelper.generateRaw）走酒馆当前主 API，密钥与模型跟随酒馆设置，无需在 Atlas 里填端点。下方「测试连接」会检查酒馆助手是否可用。"));
+    }
 
     // dirty 操作条（shujuku 式：未修改时「放弃修改 / 保存」禁用；保存后自动设为当前使用）
     const actions = el("div", "aw-actions");
@@ -1981,9 +2182,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     apiDiscardButton.setAttribute("aria-label", "放弃未保存的 API 连接修改");
     apiDiscardButton.addEventListener("click", () => {
       const preset = apiLibrary.find((p) => p.id === apiDraft?.id);
-      apiDraft = preset
-        ? { id: preset.id, name: preset.name, endpoint: preset.endpoint, model: preset.model, maxTokens: preset.maxTokens, temperature: preset.temperature, timeoutMs: preset.timeoutMs, apiFormat: preset.apiFormat === "claude" ? "claude" : "openai" }
-        : newApiDraft();
+      apiDraft = apiDraftFromView(preset);
       apiDraftDirty = false;
       apiKeyInput = preset ? String(preset.apiKey ?? "") : "";
       modelOptions = [];
@@ -1996,33 +2195,31 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     apiSaveButton.setAttribute("aria-label", "保存当前 API 连接");
     apiSaveButton.addEventListener("click", async () => {
       const preset = apiDraft ?? newApiDraft();
-      if (!preset.name.trim() || !preset.endpoint.trim() || !preset.model.trim()) {
-        setStatus("连接名称、端点与模型名都不能为空。", "error");
+      if (!preset.name.trim()) {
+        setStatus("连接名称不能为空。", "error");
         renderCenter();
         return;
       }
-      // 0.9.12：编辑器始终回填已存密钥，字段值即权威值——保存一律 replace（清空字段 = 删除密钥）
-      const apiKeyMode = "replace";
+      const modeValue = preset.connectionMode === "main" || preset.connectionMode === "profile" ? preset.connectionMode : "custom";
+      if (modeValue === "custom" && (!String(preset.endpoint ?? "").trim() || !String(preset.model ?? "").trim())) {
+        setStatus("自定义连接的端点与模型名都不能为空。", "error");
+        renderCenter();
+        return;
+      }
+      if (modeValue === "profile" && !String(preset.profileId ?? "").trim()) {
+        setStatus("酒馆连接预设模式需要先选择连接预设。", "error");
+        renderCenter();
+        return;
+      }
       const ok = await sendSettingsCommand({
         action: "api.save",
-        preset: {
-          ...(preset.id ? { id: preset.id } : {}),
-          name: preset.name,
-          endpoint: preset.endpoint,
-          model: preset.model,
-          maxTokens: Number(preset.maxTokens) || 1024,
-          temperature: Number.isFinite(Number(preset.temperature)) ? Number(preset.temperature) : 0.7,
-          timeoutMs: Number(preset.timeoutMs) || 30_000,
-          apiFormat: preset.apiFormat === "claude" ? "claude" : "openai",
-        },
-        apiKeyMode,
+        preset: apiPayloadFromDraft(preset),
+        apiKeyMode: "replace",
         apiKey: apiKeyInput,
       });
       if (ok) {
         const saved = apiLibrary.find((p) => p.name === preset.name.trim()) ?? apiLibrary[apiLibrary.length - 1];
-        apiDraft = saved
-          ? { id: saved.id, name: saved.name, endpoint: saved.endpoint, model: saved.model, maxTokens: saved.maxTokens, temperature: saved.temperature, timeoutMs: saved.timeoutMs, apiFormat: saved.apiFormat === "claude" ? "claude" : "openai" }
-          : apiDraft;
+        apiDraft = apiDraftFromView(saved);
         apiDraftDirty = false;
         apiKeyInput = saved ? String(saved.apiKey ?? "") : "";
         // shujuku 语义：保存（新建）后自动设为当前使用
@@ -2041,17 +2238,12 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
         : null;
       if (!name || !name.trim()) return;
       const preset = apiDraft ?? newApiDraft();
+      const payload = apiPayloadFromDraft(preset);
+      delete payload.id;
+      payload.name = name.trim();
       const ok = await sendSettingsCommand({
         action: "api.save",
-        preset: {
-          name: name.trim(),
-          endpoint: preset.endpoint,
-          model: preset.model,
-          maxTokens: Number(preset.maxTokens) || 1024,
-          temperature: Number.isFinite(Number(preset.temperature)) ? Number(preset.temperature) : 0.7,
-          timeoutMs: Number(preset.timeoutMs) || 30_000,
-          apiFormat: preset.apiFormat === "claude" ? "claude" : "openai",
-        },
+        preset: payload,
         apiKeyMode: "replace",
         apiKey: apiKeyInput,
       });
@@ -2074,8 +2266,37 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     return panel;
   }
 
-  /** 测试连接：只走模型列表 / 最小鉴权检查，不 commit、不写世界、不写聊天。 */
+  /** 测试连接：按连接方式分流——main 查酒馆助手、profile 查连接管理器、custom 走模型列表 / 最小鉴权检查。 */
   async function testConnection(preset) {
+    const mode = preset.connectionMode === "main" || preset.connectionMode === "profile" ? preset.connectionMode : "custom";
+    if (mode === "main") {
+      if (isTavernMainAvailable(getTavernHelper)) {
+        setStatus("酒馆助手（TavernHelper.generateRaw）可用，主 API 推演就绪。", "ok");
+      } else {
+        setStatus("未检测到酒馆助手（TavernHelper.generateRaw）——请安装 JS-Slash-Runner，或改用自定义连接。", "error");
+      }
+      renderCenter();
+      return;
+    }
+    if (mode === "profile") {
+      let ctx = null;
+      try { ctx = SillyTavern.getContext(); } catch { ctx = null; }
+      if (!isConnectionManagerAvailable(ctx)) {
+        setStatus("ConnectionManagerRequestService 不可用——请检查酒馆版本或连接管理器配置。", "error");
+        renderCenter();
+        return;
+      }
+      const profiles = getConnectionManagerProfiles(ctx);
+      if (!String(preset.profileId ?? "").trim()) {
+        setStatus("请先选择酒馆连接预设再测试。", "error");
+        renderCenter();
+        return;
+      }
+      const target = profiles.find((p) => String(p.id) === String(preset.profileId));
+      setStatus(target ? `连接管理器可用，目标预设：「${target.name}」。` : "连接管理器可用，但所选预设不在当前列表里（点「刷新」重读）。", target ? "ok" : "error");
+      renderCenter();
+      return;
+    }
     const endpoint = String(preset.endpoint || "").trim();
     if (!endpoint) {
       setStatus("请先填写端点，再加载模型。", "error");
@@ -2090,18 +2311,21 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       const headers = { "Content-Type": "application/json" };
       if (typeof ctx.getRequestHeaders === "function") Object.assign(headers, ctx.getRequestHeaders());
       // ATLAS-FIX-02：custom_include_headers 必须是原始头字符串（与生成路径共用同一序列化口径）
-      // 0.9.12：claude 协议 → chat_completion_source:"claude" + reverse_proxy（基址补 /v1）+ proxy_password
-      const { atlasCustomIncludeHeaders, normalizeAtlasClaudeBase } = await loadUiCore();
+      // 0.9.10/0.9.13：claude → claude 源（reverse_proxy 补 /v1）；gemini → makersuite 源（剥版本段）
+      const { atlasCustomIncludeHeaders, normalizeAtlasClaudeBase, normalizeAtlasGeminiBase } = await loadUiCore();
       const keyValue = apiKeyInput ? `Bearer ${apiKeyInput}` : "";
-      const isClaude = (apiDraft?.apiFormat ?? preset.apiFormat) === "claude" || preset.apiFormat === "claude";
-      const claudeBase = isClaude ? normalizeAtlasClaudeBase(endpoint) : null;
+      const apiFormatValue = String(preset.apiFormat ?? "openai");
+      const claudeBase = apiFormatValue === "claude" ? normalizeAtlasClaudeBase(endpoint) : null;
+      const geminiBase = apiFormatValue === "gemini" ? normalizeAtlasGeminiBase(endpoint) : null;
+      const nativeSource = claudeBase ? "claude" : geminiBase ? "makersuite" : "custom";
       const response = await fetch("/api/backends/chat-completions/status", {
         method: "POST",
         headers,
         body: JSON.stringify({
-          ...(claudeBase
-            ? { chat_completion_source: "claude", reverse_proxy: claudeBase, proxy_password: apiKeyInput || "" }
-            : { chat_completion_source: "custom", reverse_proxy: endpoint, proxy_password: "" }),
+          chat_completion_source: nativeSource,
+          ...(claudeBase ? { reverse_proxy: claudeBase, proxy_password: apiKeyInput || "" } : {}),
+          ...(geminiBase ? { reverse_proxy: geminiBase, proxy_password: apiKeyInput || "" } : {}),
+          ...(nativeSource === "custom" ? { reverse_proxy: endpoint, proxy_password: "" } : {}),
           custom_url: endpoint,
           custom_include_headers: atlasCustomIncludeHeaders(keyValue),
         }),
@@ -2571,9 +2795,39 @@ async function connectOnce() {
         if (typeof ctx.saveSettingsDebounced === "function") ctx.saveSettingsDebounced();
       },
     });
+    // 0.9.13 连接方式分发（shujuku 同款三通道）：引擎请求体带 xAtlasConnectionMode 时
+    // 路由到 酒馆主 API（TavernHelper.generateRaw）/ 酒馆连接预设（ConnectionManager），
+    // 其余走酒馆后端代理（custom 源 / claude / makersuite 协议映射）。
+    const getTavernHelper = () => globalThis.TavernHelper ?? globalThis.getTavernHelper?.() ?? null;
+    const hostDispatchFetch = async (input, init) => {
+      let mode = null;
+      try {
+        const parsed = typeof init?.body === "string" ? JSON.parse(init.body) : null;
+        mode = parsed && typeof parsed === "object" ? parsed.xAtlasConnectionMode ?? null : null;
+      } catch { mode = null; }
+      if (mode !== "main" && mode !== "profile") {
+        return mod.createStProxyFetch({ getContext: context, fetchFn: loggingModelFetch })(input, init);
+      }
+      const adapter = mode === "main"
+        ? mod.createTavernMainFetch({ getTavernHelper })
+        : mod.createTavernProfileFetch({ getContext: context, getTavernHelper });
+      const startedAt = Date.now();
+      try {
+        const response = await adapter(input, init);
+        let snippet = "";
+        try {
+          snippet = redactSecrets(await response.clone().text()).replace(/\s+/g, " ").slice(0, 200);
+        } catch { /* 片段读不到不影响请求本身 */ }
+        atlasLog("推演", `POST atlas://host（${mode === "main" ? "酒馆主API" : "酒馆连接预设"}） → HTTP ${response.status}，${Date.now() - startedAt}ms`, snippet);
+        return response;
+      } catch (error) {
+        atlasLog("推演", `POST atlas://host（${mode === "main" ? "酒馆主API" : "酒馆连接预设"}） → 异常，${Date.now() - startedAt}ms`, error instanceof Error ? error.message : String(error));
+        throw error;
+      }
+    };
     const engine = mod.createAtlasServerCore({
       store: engineStore,
-      fetchFn: mod.createStProxyFetch({ getContext: context, fetchFn: loggingModelFetch }),
+      fetchFn: hostDispatchFetch,
     });
     // 引擎请求包装：每个 dispatch 记一条日志（方法 + 路径 + 结果码，绝不记请求体）
     const logApiCall = async (method, path, call) => {

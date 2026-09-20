@@ -90,7 +90,7 @@ test("职责隔离：API 页不出现提示词编辑，推进页不出现连接�
   const progression = js.slice(js.indexOf("function buildProgressionPanel()"), js.indexOf("function buildApiPanel()"));
   assert.ok(apiPanel.length > 0 && progression.length > 0, "两个面板都存在");
   assert.ok(!/systemPrompt/.test(apiPanel), "API 页不出现提示词字段");
-  assert.ok(!/aw-input--area/.test(apiPanel), "API 页不出现提示词 textarea");
+  assert.ok(!/"系统提示词正文"/.test(apiPanel), "API 页不出现提示词正文编辑器（多行输入框允许用于高级参数）");
   assert.ok(/pages?.*「推进」|前往推进/.test(apiPanel), "API 页提供「前往推进」只读跳转");
   assert.ok(!/endpoint/.test(progression.replace(/当前 API[\s\S]*?api\)/, "")), "推进页不出现端点输入（只读摘要除外）");
   assert.ok(/前往 API/.test(progression), "推进页提供「前往 API」只读跳转");

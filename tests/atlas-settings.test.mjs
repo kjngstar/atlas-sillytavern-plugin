@@ -17,6 +17,9 @@ import {
   applySettingsCommand,
   settingsViewV2,
   resolveWorldTurnPreset,
+  normalizeConnectionMode,
+  normalizeApiFormat,
+  normalizePromptPostProcessing,
 } from "../src/atlas-settings.ts";
 import { DEFAULT_WORLD_TURN_SYSTEM_PROMPT } from "../src/atlas-api-client.ts";
 
@@ -394,4 +397,108 @@ test("运行时组合：活动 API + 活动提示词 → AtlasApiPreset；无活
 
   const none = resolveWorldTurnPreset(createDefaultSettingsV2());
   assert.equal(none, null, "未配置活动 API → null（提交时必须报 API_NOT_CONFIGURED，零 fetch）");
+});
+
+// ---------------------------------------------------------------------------
+// 0.9.13 全抄 shujuku：三连接方式 + 四协议 + 高级字段 roundtrip
+// ---------------------------------------------------------------------------
+
+test("normalize 枚举：connectionMode / apiFormat / promptPostProcessing 白名单回退", () => {
+  assert.equal(normalizeConnectionMode("main"), "main");
+  assert.equal(normalizeConnectionMode("profile"), "profile");
+  assert.equal(normalizeConnectionMode("custom"), "custom");
+  assert.equal(normalizeConnectionMode("carrier-pigeon"), "custom");
+  assert.equal(normalizeConnectionMode(undefined), "custom");
+
+  assert.equal(normalizeApiFormat("claude"), "claude");
+  assert.equal(normalizeApiFormat("gemini"), "gemini");
+  assert.equal(normalizeApiFormat("openai_responses"), "openai", "shujuku 同款回退：原版酒馆无独立后端");
+  assert.equal(normalizeApiFormat("openai"), "openai");
+  assert.equal(normalizeApiFormat("nope"), "openai");
+
+  assert.equal(normalizePromptPostProcessing("strict"), "strict");
+  assert.equal(normalizePromptPostProcessing("single"), "single");
+  assert.equal(normalizePromptPostProcessing("nonsense"), "");
+  assert.equal(normalizePromptPostProcessing(undefined), "");
+});
+
+test("api.save：main/profile 模式 endpoint 与 model 允许为空；新字段完整落库", () => {
+  const base = createDefaultSettingsV2();
+
+  const mainSaved = applySettingsCommand(base, {
+    action: "api.save",
+    preset: {
+      name: "酒馆主API", endpoint: "", model: "", connectionMode: "main",
+      maxTokens: 1024, temperature: 0.7, timeoutMs: 30_000,
+    },
+    apiKeyMode: "replace", apiKey: "",
+  }, testDeps());
+  assert.equal(mainSaved.ok, true, mainSaved.ok ? "" : mainSaved.message);
+  const mainPreset = mainSaved.settings.apiPresets[0];
+  assert.equal(mainPreset.connectionMode, "main");
+
+  const profileSaved = applySettingsCommand(mainSaved.settings, {
+    action: "api.save",
+    preset: {
+      name: "酒馆连接预设", endpoint: "", model: "", connectionMode: "profile", profileId: "prof-1",
+      maxTokens: 1024, temperature: 0.7, timeoutMs: 30_000,
+      bodyParams: "response_format:\n  type: json_object",
+      excludeBodyParams: "top_p, reasoning_effort",
+      requestHeaders: "X-Custom-Header: value",
+      promptPostProcessing: "strict",
+    },
+    apiKeyMode: "replace", apiKey: "",
+  }, testDeps());
+  assert.equal(profileSaved.ok, true, profileSaved.ok ? "" : profileSaved.message);
+  const p = profileSaved.settings.apiPresets[1];
+  assert.equal(p.connectionMode, "profile");
+  assert.equal(p.profileId, "prof-1");
+  assert.equal(p.bodyParams, "response_format:\n  type: json_object");
+  assert.equal(p.excludeBodyParams, "top_p, reasoning_effort");
+  assert.equal(p.requestHeaders, "X-Custom-Header: value");
+  assert.equal(p.promptPostProcessing, "strict");
+
+  // settingsViewV2 回传（0.9.12 作者令：Key 明文回传编辑器）
+  const view = settingsViewV2(profileSaved.settings);
+  const viewPreset = view.apiPresets.find((x) => x.id === p.id);
+  assert.equal(viewPreset.connectionMode, "profile");
+  assert.equal(viewPreset.profileId, "prof-1");
+  assert.equal(viewPreset.bodyParams, p.bodyParams);
+  assert.equal(viewPreset.excludeBodyParams, p.excludeBodyParams);
+  assert.equal(viewPreset.requestHeaders, p.requestHeaders);
+  assert.equal(viewPreset.promptPostProcessing, p.promptPostProcessing);
+
+  // 运行时透传（resolveWorldTurnPreset → callAtlasWorldTurnApi 消费面）
+  profileSaved.settings.activeApiPresetId = p.id;
+  const runtime = resolveWorldTurnPreset(profileSaved.settings);
+  assert.equal(runtime.connectionMode, "profile");
+  assert.equal(runtime.profileId, "prof-1");
+  assert.equal(runtime.bodyParams, p.bodyParams);
+  assert.equal(runtime.promptPostProcessing, "strict");
+});
+
+test("api.save：custom 模式仍要求 endpoint 与 model；非法 connectionMode 归一为 custom", () => {
+  const base = createDefaultSettingsV2();
+  const badEndpoint = applySettingsCommand(base, {
+    action: "api.save",
+    preset: { name: "x", endpoint: "", model: "m", connectionMode: "custom", maxTokens: 10, temperature: 0, timeoutMs: 1000 },
+    apiKeyMode: "replace", apiKey: TEST_KEY,
+  }, testDeps());
+  assert.equal(badEndpoint.ok, false, "custom 模式空 endpoint 必须拒绝");
+
+  // 存储层宽容（shujuku 同款归一）：未知 mode → custom；custom 校验随之生效
+  const badMode = applySettingsCommand(base, {
+    action: "api.save",
+    preset: { name: "x", endpoint: "", model: "m", connectionMode: "carrier-pigeon", maxTokens: 10, temperature: 0, timeoutMs: 1000 },
+    apiKeyMode: "replace", apiKey: TEST_KEY,
+  }, testDeps());
+  assert.equal(badMode.ok, false, "未知 mode 归一为 custom 后，空 endpoint 仍须拒绝");
+
+  const tolerated = applySettingsCommand(base, {
+    action: "api.save",
+    preset: { name: "x", endpoint: "https://a.com/v1", model: "m", connectionMode: "carrier-pigeon", maxTokens: 10, temperature: 0, timeoutMs: 1000 },
+    apiKeyMode: "replace", apiKey: TEST_KEY,
+  }, testDeps());
+  assert.equal(tolerated.ok, true, tolerated.ok ? "" : tolerated.message);
+  assert.equal(tolerated.settings.apiPresets[0].connectionMode, undefined, "custom 是缺省态：落库省略字段（读取侧 normalize 回 custom）");
 });

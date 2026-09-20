@@ -54,8 +54,19 @@ export {
   createStProxyFetch,
   atlasCustomIncludeHeaders,
   normalizeAtlasClaudeBase,
+  normalizeAtlasGeminiBase,
+  normalizeAtlasExcludeBody,
+  normalizeAtlasPromptPostProcessing,
   ATLAS_ST_GENERATE_PATH,
 } from "./atlas-proxy-fetch.ts";
+
+export {
+  isTavernMainAvailable,
+  isConnectionManagerAvailable,
+  getConnectionManagerProfiles,
+  createTavernMainFetch,
+  createTavernProfileFetch,
+} from "./atlas-host-connections.ts";
 
 export { buildStarterWorld, starterWorldIdForChat } from "./atlas-starter-world.ts";
 
