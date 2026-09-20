@@ -911,4 +911,33 @@ test("callAtlasWorldTurnApi：promptSegments 装配消息数组，占位符替�
     { fetchFn },
   );
   assert.equal(capturedBody.messages.length, 2, "无分段维持旧两条");
+
+  // 0.9.21 世界书资料块：loreSupplement 非空 → 默认 user 正文带资料块；{{worldLore}} 可引用
+  await callAtlasWorldTurnApi(
+    { name: "t", endpoint: "https://api.example.com/v1/chat/completions", model: "m1", apiKey: "" },
+    { ...input, loreSupplement: "- 低语森林：卡书里的地点描述" },
+    { fetchFn },
+  );
+  assert.equal(capturedBody.messages.length, 2, "带资料仍维持两条");
+  assert.ok(capturedBody.messages[1].content.includes("【世界书资料（当前角色卡"), "默认 user 正文含资料块标题");
+  assert.ok(capturedBody.messages[1].content.includes("低语森林"), "资料内容进入 user 正文");
+
+  await callAtlasWorldTurnApi(
+    {
+      name: "t", endpoint: "https://api.example.com/v1/chat/completions", model: "m1", apiKey: "",
+      promptSegments: [{ role: "user", content: "资料：{{worldLore}}｜状态：{{worldState}}" }],
+    },
+    { ...input, loreSupplement: "卡书条目X" },
+    { fetchFn },
+  );
+  assert.ok(capturedBody.messages[0].content.includes("资料：卡书条目X"), "{{worldLore}} 已替换");
+  assert.ok(!capturedBody.messages[0].content.includes("【世界书资料（当前角色卡"), "分段模式下资料块只走占位符不重复追加");
+
+  // 无 supplement → 无资料块（旧行为）
+  await callAtlasWorldTurnApi(
+    { name: "t", endpoint: "https://api.example.com/v1/chat/completions", model: "m1", apiKey: "" },
+    input,
+    { fetchFn },
+  );
+  assert.ok(!capturedBody.messages[1].content.includes("【世界书资料（当前角色卡"), "无 supplement 不出现资料块");
 });

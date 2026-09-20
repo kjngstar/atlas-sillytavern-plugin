@@ -269,6 +269,12 @@ export function createAtlasUiCore(deps: {
    * 返回 true = 绑定就绪，本条消息照常 prepare；false / 未注入 = 保持未绑定，跳过。
    */
   ensureWorld?: () => Promise<boolean>;
+  /**
+   * 0.9.21 世界书资料（可选）：宿主侧读当前角色卡世界书 → 有界文本。
+   * commit 前调用；失败 / 未注入 → 无资料块，照常推演（绝不因资料失败阻断回合）。
+   * 只进推演请求，不进主聊天注入（主聊天由酒馆世界书激活管线负责）。
+   */
+  getLoreSupplement?: () => Promise<string>;
 }): AtlasUiCore {
   const { api, host, emitter } = deps;
   const now = deps.now ?? Date.now;
@@ -697,6 +703,17 @@ export function createAtlasUiCore(deps: {
     }
     const commitSwipeId = swipeIdForNextCommit;
     swipeIdForNextCommit = null;
+    // 0.9.21 世界书资料（可选钩子）：失败 / 空一律当无资料，绝不阻断回合
+    let loreSupplement: string | undefined;
+    if (deps.getLoreSupplement) {
+      try {
+        const text = await deps.getLoreSupplement();
+        if (disposed) return;
+        if (typeof text === "string" && text.trim().length > 0) loreSupplement = text;
+      } catch {
+        loreSupplement = undefined;
+      }
+    }
     const request = {
       turnId: pending.turnId,
       chatId: pending.chatId,
@@ -705,6 +722,7 @@ export function createAtlasUiCore(deps: {
       swipeId: commitSwipeId,
       userText: pending.userText,
       assistantText: assistantText.slice(0, ATLAS_LIMITS.ASSISTANT_TEXT_CHARS),
+      ...(loreSupplement ? { loreSupplement } : {}),
     };
     const parsed = parseAtlasTurnCommitRequest(request);
     if (!parsed.ok) {

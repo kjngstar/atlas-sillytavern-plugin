@@ -317,6 +317,38 @@ test("commit 请求：swipeId 缺省 / null / 字符串均合法，非字符串�
   assertRejected(parseAtlasTurnCommitRequest(longAssistant), "FIELD_LIMIT_EXCEEDED", "超长 assistantText");
 });
 
+// 0.9.21 世界书资料补充：可选宽容字段——字符串截断保留，非字符串 / 空白丢弃，绝不拒整单
+test("commit 请求：loreSupplement 可选宽容处理", () => {
+  const withLore = validCommitRequest();
+  withLore.loreSupplement = "- 低语森林：地点描述";
+  const parsedLore = parseAtlasTurnCommitRequest(withLore);
+  assert.ok(parsedLore.ok, "带 loreSupplement 合法");
+  assert.equal(parsedLore.value.loreSupplement, "- 低语森林：地点描述", "loreSupplement 保留");
+
+  const longLore = validCommitRequest();
+  longLore.loreSupplement = "料".repeat(ATLAS_LIMITS.LORE_SUPPLEMENT_CHARS + 100);
+  const parsedLong = parseAtlasTurnCommitRequest(longLore);
+  assert.ok(parsedLong.ok, "超长 loreSupplement 不拒整单");
+  assert.equal(parsedLong.value.loreSupplement.length, ATLAS_LIMITS.LORE_SUPPLEMENT_CHARS, "超长 loreSupplement 截断到上限");
+
+  const badLore = validCommitRequest();
+  badLore.loreSupplement = 42;
+  const parsedBad = parseAtlasTurnCommitRequest(badLore);
+  assert.ok(parsedBad.ok, "非字符串 loreSupplement 不拒整单");
+  assert.equal(parsedBad.value.loreSupplement, undefined, "非字符串 loreSupplement 丢弃");
+
+  const blankLore = validCommitRequest();
+  blankLore.loreSupplement = "   ";
+  const parsedBlank = parseAtlasTurnCommitRequest(blankLore);
+  assert.ok(parsedBlank.ok, "空白 loreSupplement 不拒整单");
+  assert.equal(parsedBlank.value.loreSupplement, undefined, "空白 loreSupplement 丢弃");
+
+  const noLore = validCommitRequest();
+  const parsedNone = parseAtlasTurnCommitRequest(noLore);
+  assert.ok(parsedNone.ok, "无 loreSupplement 合法（旧行为）");
+  assert.equal(parsedNone.value.loreSupplement, undefined, "无 loreSupplement 字段缺省");
+});
+
 test("幂等键只由 chat + 消息对 + swipe 决定", () => {
   const base = validCommitRequest();
   deepEqual(atlasCommitIdempotencyKey(base), "chat-0001::msg-100::msg-101::", "null swipe 记为空段");

@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.20";
+export const ATLAS_EXTENSION_VERSION = "0.9.21";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -3153,6 +3153,77 @@ async function ensureStarterWorld() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 0.9.21 世界书资料块（抄 shujuku 读卡书思路，走 ST 原生 world-info API）：
+// 自动建世只读卡名+描述，推演 AI 长期「瞎着」推世界——本块把当前角色卡世界书
+// 的启用条目变成有界文本，随 commit 请求喂给推演模型（只进推演，不进主聊天注入）。
+// ---------------------------------------------------------------------------
+
+const LORE_SUPPLEMENT_LIMITS = {
+  /** 单条目正文截断 */
+  ENTRY_CONTENT_CHARS: 400,
+  /** 条目数上限（按书内顺序取前 N 条启用的） */
+  ENTRIES_MAX: 60,
+  /** 总字符上限（与引擎 ATLAS_LIMITS.LORE_SUPPLEMENT_CHARS 同口径，双保险） */
+  TOTAL_CHARS: 6000,
+  /** 缓存 TTL（ms）：同一本书 1 分钟内复用，避免每回合都打 ST 内部接口 */
+  CACHE_TTL_MS: 60_000,
+};
+
+let loreSupplementCache = { bookName: null, at: 0, text: "" };
+
+/**
+ * 读当前角色卡世界书 → 有界资料文本（失败 / 无书 / 空书 → 空串，绝不抛错）。
+ * 书名解析与条目写入同源：卡主世界书（data.extensions.world）优先，聊天绑定书回退。
+ * Atlas 自写条目（动向 / 事件）排除——那是给主模型看的推演结果，回喂推演纯属复读。
+ */
+async function readCardLoreSupplement() {
+  try {
+    if (typeof SillyTavern === "undefined") return "";
+    const ctx = SillyTavern.getContext();
+    const character = ctx?.characters?.[ctx?.characterId] ?? null;
+    const cardBook = typeof character?.data?.extensions?.world === "string" ? character.data.extensions.world.trim() : "";
+    const chatBook = typeof ctx?.chatMetadata?.world_info === "string" ? ctx.chatMetadata.world_info.trim() : "";
+    const bookName = cardBook || chatBook;
+    if (!bookName) return "";
+    const cached = loreSupplementCache;
+    if (cached.bookName === bookName && Date.now() - cached.at < LORE_SUPPLEMENT_LIMITS.CACHE_TTL_MS) {
+      return cached.text;
+    }
+    const worldInfo = await loadStWorldInfo();
+    const data = await worldInfo.loadWorldInfo(bookName);
+    const rawEntries = data && typeof data === "object" && data.entries && typeof data.entries === "object"
+      ? Object.values(data.entries)
+      : [];
+    const prefixList = atlasRuntime.mod?.ATLAS_LOREBOOK_PREFIX;
+    const atlasPrefixes = prefixList && typeof prefixList === "object" ? Object.values(prefixList) : ["Atlas 动向 ·", "Atlas 事件 ·"];
+    const lines = [];
+    let total = 0;
+    for (const entry of rawEntries) {
+      if (lines.length >= LORE_SUPPLEMENT_LIMITS.ENTRIES_MAX) break;
+      if (!entry || typeof entry !== "object" || entry.disable === true) continue;
+      const content = typeof entry.content === "string" ? entry.content.trim() : "";
+      if (!content) continue;
+      const comment = typeof entry.comment === "string" ? entry.comment.trim() : "";
+      if (atlasPrefixes.some((prefix) => comment.startsWith(prefix))) continue; // Atlas 自写条目不回喂
+      const keys = Array.isArray(entry.key) ? entry.key.filter((k) => typeof k === "string" && k.trim()) : [];
+      const title = comment || (keys.length > 0 ? keys.slice(0, 4).join(" / ") : "条目");
+      const clipped = content.length > LORE_SUPPLEMENT_LIMITS.ENTRY_CONTENT_CHARS
+        ? `${content.slice(0, LORE_SUPPLEMENT_LIMITS.ENTRY_CONTENT_CHARS)}…`
+        : content;
+      const line = `- ${title}：${clipped.replace(/\s+/g, " ")}`;
+      if (total + line.length > LORE_SUPPLEMENT_LIMITS.TOTAL_CHARS) break;
+      lines.push(line);
+      total += line.length;
+    }
+    const text = lines.join("\n");
+    loreSupplementCache = { bookName, at: Date.now(), text };
+    return text;
+  } catch {
+    return ""; // 任何失败（书不存在 / API 不可用）都静默降级：无资料照常推演
+  }
+}
+
 async function connectOnce() {
   try {
     const mod = await loadUiCore();
@@ -3285,6 +3356,8 @@ async function connectOnce() {
       adaptEvent,
       resolveAssistantFloor: createAssistantFloorResolver(context),
       ensureWorld: () => ensureStarterWorld(),
+      // 0.9.21 世界书资料块：commit 前读当前卡书启用条目（有界），喂给推演 AI
+      getLoreSupplement: () => readCardLoreSupplement(),
 
       onStateChange: () => rerender(),
       ...(lorebookWriter

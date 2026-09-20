@@ -70,6 +70,8 @@ export const ATLAS_LIMITS = {
   TIME_MAX: Number.MAX_SAFE_INTEGER,
   /** 单回合推演时长上限（时段数） */
   TURN_DURATION_MAX: 10_000,
+  /** 0.9.21 世界书资料补充块最大字符数（推演请求专用；主聊天注入不带） */
+  LORE_SUPPLEMENT_CHARS: 6_000,
   /** Server Plugin 响应体最大字节数 */
   RESPONSE_BODY_BYTES: 262_144,
 } as const;
@@ -127,6 +129,8 @@ export interface AtlasTurnCommitRequest {
   swipeId?: string | null;
   userText: string;
   assistantText: string;
+  /** 0.9.21 可选：宿主侧卡书条目有界文本（只进推演请求，不进主聊天注入） */
+  loreSupplement?: string;
 }
 
 export type AtlasTurnReceiptStatus = "committed" | "duplicate" | "pending-review" | "failed";
@@ -426,6 +430,10 @@ export function parseAtlasTurnCommitRequest(raw: unknown): ParseResult<AtlasTurn
     };
     if ("swipeId" in record && record.swipeId !== undefined) {
       request.swipeId = requireStringOrNull(record, "swipeId", "AtlasTurnCommitRequest") as string | null | undefined;
+    }
+    // 0.9.21 世界书资料补充：可选宽容字段——非字符串直接丢弃（绝不因宿主噪声拒整单）
+    if (typeof record.loreSupplement === "string" && record.loreSupplement.trim().length > 0) {
+      request.loreSupplement = record.loreSupplement.slice(0, ATLAS_LIMITS.LORE_SUPPLEMENT_CHARS);
     }
     return request;
   });

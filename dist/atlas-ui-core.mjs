@@ -55,6 +55,8 @@ var ATLAS_LIMITS = {
   TIME_MAX: Number.MAX_SAFE_INTEGER,
   /** 单回合推演时长上限（时段数） */
   TURN_DURATION_MAX: 1e4,
+  /** 0.9.21 世界书资料补充块最大字符数（推演请求专用；主聊天注入不带） */
+  LORE_SUPPLEMENT_CHARS: 6e3,
   /** Server Plugin 响应体最大字节数 */
   RESPONSE_BODY_BYTES: 262144
 };
@@ -295,6 +297,9 @@ function parseAtlasTurnCommitRequest(raw) {
     };
     if ("swipeId" in record && record.swipeId !== void 0) {
       request.swipeId = requireStringOrNull(record, "swipeId", "AtlasTurnCommitRequest");
+    }
+    if (typeof record.loreSupplement === "string" && record.loreSupplement.trim().length > 0) {
+      request.loreSupplement = record.loreSupplement.slice(0, ATLAS_LIMITS.LORE_SUPPLEMENT_CHARS);
     }
     return request;
   });
@@ -678,10 +683,16 @@ function buildAtlasChatUrl(endpoint) {
   return url.toString();
 }
 var DEFAULT_WORLD_TURN_SYSTEM_PROMPT = "你是阿特拉斯世界推演引擎。基于给定的当前世界状态（位置、时间、附近人物、可达内容）与本轮用户行动、助手回复，推断本轮对世界造成的**有界结构化变化**。\n严格要求：只输出一个 JSON 对象，不要输出任何多余说明或代码围栏；字段：\nduration（本轮消耗的时段数，非负数字，≤10000）、\nlocationChange（对象或 null：{toPointId, toRegionId}，id 必须来自上下文中出现的地点）、\nnpcChanges（数组，每条形如 {entityId, key, value} 更新人物状态 / {entityId, tag} 加标签 / {entityId, removeTag} 删标签 / {entityId, targetEntityId, key, value} 改关系；entityId 必须来自上下文）、\nmemoryDrafts（数组，每条 {entityId, text}，为人物追加一条记忆，≤500 字）、\neventDrafts（数组，事件的摘要文字，仅叙述用）、\ntriggerResults（数组，本轮命中的触发器 id）、\nsummary（本轮世界变化的一句话摘要，≤500 字）。\n禁止：编造上下文之外的实体 id；输出时间地点之外的世界重写；输出任何密钥、路径或代码。";
+var LORE_SUPPLEMENT_HEADER = "【世界书资料（当前角色卡，可能有噪声，仅供理解世界）】";
 function buildWorldTurnUserContent(input) {
-  return [
+  const parts = [
     "【当前世界状态与可达内容】",
-    input.injectionText,
+    input.injectionText
+  ];
+  if (input.loreSupplement && input.loreSupplement.trim().length > 0) {
+    parts.push("", LORE_SUPPLEMENT_HEADER, input.loreSupplement);
+  }
+  parts.push(
     "",
     "【本轮用户行动】",
     input.userText,
@@ -690,13 +701,14 @@ function buildWorldTurnUserContent(input) {
     input.assistantText,
     "",
     "请按系统要求只输出一个 JSON 对象。"
-  ].join("\n");
+  );
+  return parts.join("\n");
 }
-var PROMPT_PLACEHOLDER_PATTERN = /\{\{\s*(worldState|userAction|assistantReply)\s*\}\}/g;
+var PROMPT_PLACEHOLDER_PATTERN = /\{\{\s*(worldState|userAction|assistantReply|worldLore)\s*\}\}/g;
 function substitutePromptPlaceholders(content, input) {
   return content.replace(
     PROMPT_PLACEHOLDER_PATTERN,
-    (_, key) => key === "worldState" ? input.injectionText : key === "userAction" ? input.userText : input.assistantText
+    (_, key) => key === "worldState" ? input.injectionText : key === "userAction" ? input.userText : key === "worldLore" ? input.loreSupplement ?? "" : input.assistantText
   );
 }
 var PROMPT_MESSAGE_ROLES = ["system", "user", "assistant"];
@@ -1597,6 +1609,16 @@ function createAtlasUiCore(deps) {
     }
     const commitSwipeId = swipeIdForNextCommit;
     swipeIdForNextCommit = null;
+    let loreSupplement;
+    if (deps.getLoreSupplement) {
+      try {
+        const text = await deps.getLoreSupplement();
+        if (disposed) return;
+        if (typeof text === "string" && text.trim().length > 0) loreSupplement = text;
+      } catch {
+        loreSupplement = void 0;
+      }
+    }
     const request = {
       turnId: pending.turnId,
       chatId: pending.chatId,
@@ -1604,7 +1626,8 @@ function createAtlasUiCore(deps) {
       assistantMessageId: assistantMessageId.slice(0, ATLAS_LIMITS.ID_CHARS),
       swipeId: commitSwipeId,
       userText: pending.userText,
-      assistantText: assistantText.slice(0, ATLAS_LIMITS.ASSISTANT_TEXT_CHARS)
+      assistantText: assistantText.slice(0, ATLAS_LIMITS.ASSISTANT_TEXT_CHARS),
+      ...loreSupplement ? { loreSupplement } : {}
     };
     const parsed = parseAtlasTurnCommitRequest(request);
     if (!parsed.ok) {
@@ -6757,7 +6780,7 @@ function createAtlasServerCore(deps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.20",
+      version: "0.9.21",
       protocolVersion: 1,
       time: now()
     });
@@ -7017,7 +7040,9 @@ function createAtlasServerCore(deps) {
     const call = await callAtlasWorldTurnApi(preset, {
       injectionText: prepareOutput.response.injectionText,
       userText: request.userText,
-      assistantText: request.assistantText
+      assistantText: request.assistantText,
+      // 0.9.21 世界书资料块：宿主侧卡书条目（有界），只进推演请求
+      ...request.loreSupplement ? { loreSupplement: request.loreSupplement } : {}
     }, { fetchFn: deps.fetchFn, now });
     pushLog({
       at: now(),

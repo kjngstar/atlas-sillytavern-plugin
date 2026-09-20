@@ -108,13 +108,23 @@ export interface AtlasWorldTurnPromptInput {
   injectionText: string;
   userText: string;
   assistantText: string;
+  /** 0.9.21 可选：宿主侧卡书条目有界文本（世界书资料块；缺省 = 不出现该块） */
+  loreSupplement?: string;
 }
+
+/** 0.9.21 世界书资料块标题（只进推演请求；主聊天注入不带，避免与酒馆世界书激活重复） */
+const LORE_SUPPLEMENT_HEADER = "【世界书资料（当前角色卡，可能有噪声，仅供理解世界）】";
 
 /** 组装 world-turn 请求的用户正文（有界：调用方注入文本已过预算）。 */
 export function buildWorldTurnUserContent(input: AtlasWorldTurnPromptInput): string {
-  return [
+  const parts = [
     "【当前世界状态与可达内容】",
     input.injectionText,
+  ];
+  if (input.loreSupplement && input.loreSupplement.trim().length > 0) {
+    parts.push("", LORE_SUPPLEMENT_HEADER, input.loreSupplement);
+  }
+  parts.push(
     "",
     "【本轮用户行动】",
     input.userText,
@@ -123,15 +133,22 @@ export function buildWorldTurnUserContent(input: AtlasWorldTurnPromptInput): str
     input.assistantText,
     "",
     "请按系统要求只输出一个 JSON 对象。",
-  ].join("\n");
+  );
+  return parts.join("\n");
 }
 
-/** 分段正文占位符（0.9.18）：{{worldState}} / {{userAction}} / {{assistantReply}}，容忍花括号内空白。 */
-const PROMPT_PLACEHOLDER_PATTERN = /\{\{\s*(worldState|userAction|assistantReply)\s*\}\}/g;
+/** 分段正文占位符（0.9.18）：{{worldState}} / {{userAction}} / {{assistantReply}}；0.9.21 增 {{worldLore}}。容忍花括号内空白。 */
+const PROMPT_PLACEHOLDER_PATTERN = /\{\{\s*(worldState|userAction|assistantReply|worldLore)\s*\}\}/g;
 
 function substitutePromptPlaceholders(content: string, input: AtlasWorldTurnPromptInput): string {
   return content.replace(PROMPT_PLACEHOLDER_PATTERN, (_, key: string) =>
-    key === "worldState" ? input.injectionText : key === "userAction" ? input.userText : input.assistantText,
+    key === "worldState"
+      ? input.injectionText
+      : key === "userAction"
+        ? input.userText
+        : key === "worldLore"
+          ? (input.loreSupplement ?? "")
+          : input.assistantText,
   );
 }
 

@@ -343,7 +343,7 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.20",
+      version: "0.9.21",
       protocolVersion: 1,
       time: now(),
     });
@@ -664,6 +664,8 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
       injectionText: prepareOutput.response.injectionText,
       userText: request.userText,
       assistantText: request.assistantText,
+      // 0.9.21 世界书资料块：宿主侧卡书条目（有界），只进推演请求
+      ...(request.loreSupplement ? { loreSupplement: request.loreSupplement } : {}),
     }, { fetchFn: deps.fetchFn, now });
     pushLog({
       at: now(),
