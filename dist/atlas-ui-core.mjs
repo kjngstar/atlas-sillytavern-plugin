@@ -697,7 +697,7 @@ var DEFAULT_PROMPT_SEGMENTS = [
     role: "system",
     name: "主系统提示词（推演引擎职责）",
     mainSlot: "A",
-    content: "你是阿特拉斯世界推演引擎。你收到一份本轮的剧情素材（世界状态、前文、用户行动、助手回复），你的唯一职责：推断本轮对世界造成的**有界结构化变化**——谁出现在哪里、人物状态与关系如何变化、势力格局有无变动、时间推进多少。\n严格要求：只输出一个 JSON 对象，不要输出任何多余说明、推理过程或代码围栏。字段契约：\nduration（本轮消耗的时段数，非负数字，≤10000）、\nlocationChange（对象或 null：{toPointId, toRegionId}，id 必须来自上下文中出现的地点）、\nnpcChanges（数组，积极挖掘本轮动向，形状：{entityId, key, value} 更新人物状态 / {entityId, toPointId} 人物移动到上下文中出现的地点 / {entityId, toRegionId} 移动到已知地区 / {entityId, tag} 加标签 / {entityId, removeTag} 删标签 / {flag, value} 记录世界标记（里程碑、禁忌、传言等）/ {entityId, targetEntityId, key, value} 改关系；entityId 必须来自上下文）、\nmemoryDrafts（数组，每条 {entityId, text}，为人物追加一条记忆，≤500 字）、\neventDrafts（数组，事件摘要文字，仅叙述用）、\ntriggerResults（数组，本轮命中的触发器 id）、\nsummary（本轮世界变化的一句话摘要，≤500 字）。\n推断姿态：主动而非保守——只要剧情暗示了人物去了别处、态度与关系起了变化、状态被事件改变、出现了值得铭记或标记的事，就输出对应变化；只在整轮确实平静无事时才输出空数组。\n上下文提供「人物 id 对照 / 地点 id 对照 / 地区 id 对照」：npcChanges 的 entityId 与 locationChange 的 id 一律使用对照表里的 id 原文，不要用名字当 id。\n禁止：编造上下文之外的实体 id 或地点 id；输出时间地点之外的世界重写；输出任何密钥、路径或代码。\n若本轮确无任何人物 / 关系 / 记忆变化，npcChanges 与 memoryDrafts 输出空数组，duration 与 locationChange 仍须如实填写，不要为凑数编造变化。"
+    content: "你是阿特拉斯世界推演引擎。你收到一份本轮的剧情素材（世界状态、前文、用户行动、助手回复），你的唯一职责：推断本轮对世界造成的**有界结构化变化**——谁出现在哪里、人物状态与关系如何变化、势力格局有无变动、时间推进多少。\n严格要求：只输出一个 JSON 对象，不要输出任何多余说明、推理过程或代码围栏。字段契约：\nduration（本轮消耗的时段数，非负数字，≤10000）、\nlocationChange（对象或 null：{toPointId, toRegionId}，id 必须来自上下文中出现的地点）、\nnpcChanges（数组，积极挖掘本轮动向，形状：{entityId, key, value} 更新人物状态 / {entityId, toPointId} 人物移动到上下文中出现的地点 / {entityId, toRegionId} 移动到已知地区 / {entityId, tag} 加标签 / {entityId, removeTag} 删标签 / {flag, value} 记录世界标记（里程碑、禁忌、传言等）/ {entityId, targetEntityId, key, value} 改关系；entityId 必须来自上下文）、\nmemoryDrafts（数组，每条 {entityId, text}，为人物追加一条记忆，≤500 字）、\nnewLocations（数组，本轮剧情里**新出现**的地点 / 地区：{name, regionName?, description?}；regionName 必须是本轮输出 regions 或上下文已有的地区名；已有地点不要重复列；没有就输出空数组）、\neventDrafts（数组，事件摘要文字，仅叙述用）、\ntriggerResults（数组，本轮命中的触发器 id）、\nsummary（本轮世界变化的一句话摘要，≤500 字）。\n推断姿态：主动而非保守——只要剧情暗示了人物去了别处、态度与关系起了变化、状态被事件改变、出现了值得铭记或标记的事，就输出对应变化；只在整轮确实平静无事时才输出空数组。\n上下文提供「人物 id 对照 / 地点 id 对照 / 地区 id 对照」：npcChanges 的 entityId 与 locationChange 的 id 一律使用对照表里的 id 原文，不要用名字当 id。\n禁止：编造上下文之外的实体 id 或地点 id；输出时间地点之外的世界重写；输出任何密钥、路径或代码。\n若本轮确无任何人物 / 关系 / 记忆变化，npcChanges 与 memoryDrafts 输出空数组，duration 与 locationChange 仍须如实填写，不要为凑数编造变化。"
   },
   {
     role: "user",
@@ -1169,12 +1169,36 @@ function parseAtlasWorldTurnDraft(text) {
     });
   }
   const locationChange = toLocationChange(draftSource.locationChange);
+  const newLocations = [];
+  let droppedLocations = 0;
+  if (draftSource.newLocations !== void 0 && draftSource.newLocations !== null) {
+    if (!Array.isArray(draftSource.newLocations)) {
+      throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "推演输出 newLocations 必须是数组。");
+    }
+    for (const item of draftSource.newLocations) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        droppedLocations += 1;
+        continue;
+      }
+      const record = item;
+      const name = typeof record.name === "string" ? record.name.trim() : "";
+      if (!name) {
+        droppedLocations += 1;
+        continue;
+      }
+      const regionName = typeof record.regionName === "string" && record.regionName.trim() ? record.regionName.trim() : void 0;
+      const description = typeof record.description === "string" && record.description.trim() ? record.description.trim() : void 0;
+      newLocations.push({ name, ...regionName ? { regionName } : {}, ...description ? { description } : {} });
+    }
+  }
+  const droppedTotal = droppedEffects + droppedMemories + droppedLocations;
   return {
     duration: rawDuration,
     locationChange,
     rawEffects,
     memoryDrafts,
-    summary: droppedEffects + droppedMemories > 0 ? `${summary}（解析时丢弃 ${droppedEffects} 条无法识别的变化、${droppedMemories} 条残缺记忆）` : summary
+    ...newLocations.length > 0 ? { newLocations } : {},
+    summary: droppedTotal > 0 ? `${summary}（解析时丢弃 ${droppedEffects} 条无法识别的变化、${droppedMemories} 条残缺记忆、${droppedLocations} 条残缺新地点）` : summary
   };
 }
 function salvageDraftContainerFromRawText(raw) {
@@ -1189,6 +1213,8 @@ function salvageDraftContainerFromRawText(raw) {
   if (effects.length > 0) container.npcChanges = effects;
   const memories = salvageObjectArrayFromRawText(raw, "memoryDrafts").filter((item) => typeof item.entityId === "string" && item.entityId.trim() && typeof item.text === "string" && item.text.trim()).slice(0, ATLAS_LIMITS.REF_ARRAY);
   if (memories.length > 0) container.memoryDrafts = memories;
+  const newLocations = salvageObjectArrayFromRawText(raw, "newLocations").filter((item) => typeof item.name === "string" && item.name.trim()).slice(0, 12);
+  if (newLocations.length > 0) container.newLocations = newLocations;
   const locationRaw = extractRawStringField(raw, "toPointId");
   const regionRaw = extractRawStringField(raw, "toRegionId");
   if (locationRaw || regionRaw) container.locationChange = { toPointId: locationRaw ?? null, toRegionId: regionRaw ?? null };
@@ -6078,6 +6104,111 @@ function renderContextPlan(plan) {
 【已截断：超出 ${plan.budgetChars} 字符预算】`;
 }
 
+// src/atlas-geo-apply.ts
+var NEW_LOCATIONS_MAX = 12;
+var NAME_CHARS = 40;
+var DESC_CHARS = 300;
+function sanitizeNewLocations(raw) {
+  if (!Array.isArray(raw)) return [];
+  const result = [];
+  for (const item of raw.slice(0, NEW_LOCATIONS_MAX * 2)) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const record = item;
+    const name = String(record.name ?? "").trim().replace(/\s+/g, " ").slice(0, NAME_CHARS);
+    if (!name) continue;
+    const regionName = String(record.regionName ?? "").trim().replace(/\s+/g, " ").slice(0, NAME_CHARS);
+    const description = String(record.description ?? "").trim().replace(/\s+/g, " ").slice(0, DESC_CHARS);
+    result.push({
+      name,
+      ...regionName ? { regionName } : {},
+      ...description ? { description } : {}
+    });
+    if (result.length >= NEW_LOCATIONS_MAX) break;
+  }
+  return result;
+}
+function applyNewLocations(world, locations, options) {
+  const empty = {
+    world,
+    regionsAdded: 0,
+    pointsAdded: 0,
+    skipped: 0,
+    regionNames: [],
+    pointNames: [],
+    revisionAppended: false
+  };
+  if (!Array.isArray(locations) || locations.length === 0) return empty;
+  const clean = (text) => String(text ?? "").trim().replace(/\s+/g, " ");
+  const norm = (text) => text.toLowerCase();
+  const existingRegionNames = new Set((world.regions ?? []).map((r) => norm(clean(r.name))));
+  const existingPointNames = new Set((world.points ?? []).map((p) => norm(clean(p.name))));
+  const regionIdByName = new Map((world.regions ?? []).map((r) => [norm(clean(r.name)), String(r.id)]));
+  let skipped = 0;
+  const newRegions = [];
+  for (const item of locations) {
+    if (newRegions.length >= 6) break;
+    if (existingRegionNames.has(norm(item.name))) {
+      skipped += 1;
+      continue;
+    }
+    const id = `turn-r-${hashString(`${world.id}|r|${item.name}|${options.now}`)}`;
+    newRegions.push({
+      id,
+      worldId: world.id,
+      name: item.name,
+      type: "other",
+      description: item.description || "由剧情推演提炼。",
+      coordinates: { x: 0, y: 0 }
+    });
+    existingRegionNames.add(norm(item.name));
+    regionIdByName.set(norm(item.name), id);
+  }
+  const nextPointIdBase = (world.points ?? []).reduce((max, p) => Math.max(max, Number(p.id) || 0), 0) + 1;
+  const newPoints = [];
+  for (const item of locations) {
+    if (newPoints.length >= NEW_LOCATIONS_MAX) break;
+    if (existingPointNames.has(norm(item.name))) {
+      skipped += 1;
+      continue;
+    }
+    const regionId = (item.regionName ? regionIdByName.get(norm(item.regionName)) : null) ?? "start";
+    const index = newPoints.length;
+    const angle = index * 2.39996;
+    const radius = 14 + 3.4 * Math.sqrt(index + 1);
+    newPoints.push({
+      id: nextPointIdBase + newPoints.length,
+      name: item.name,
+      x: Math.round(Math.min(96, Math.max(4, 50 + radius * Math.cos(angle)))),
+      y: Math.round(Math.min(96, Math.max(4, 50 + radius * Math.sin(angle)))),
+      regionId
+    });
+    existingPointNames.add(norm(item.name));
+  }
+  if (newRegions.length === 0 && newPoints.length === 0) {
+    return { ...empty, skipped };
+  }
+  let updated = {
+    ...world,
+    regions: [...world.regions ?? [], ...newRegions],
+    points: [...world.points ?? [], ...newPoints],
+    updatedAt: options.now
+  };
+  const revision = appendDefinitionRevision(updated, {
+    authorNote: `剧情推演新地点：+${newRegions.length} 地区 +${newPoints.length} 地点`,
+    now: options.now
+  });
+  if (revision.ok) updated = revision.value;
+  return {
+    world: updated,
+    regionsAdded: newRegions.length,
+    pointsAdded: newPoints.length,
+    skipped,
+    regionNames: newRegions.map((r) => r.name),
+    pointNames: newPoints.map((p) => p.name),
+    revisionAppended: revision.ok
+  };
+}
+
 // src/atlas-turn.ts
 function pointName(world, pointId) {
   if (!pointId) return null;
@@ -6235,11 +6366,21 @@ function commitAtlasTurn(world, input) {
   const locationChange = input.draft.locationChange ?? null;
   const toPointId = locationChange ? requireKnownPoint(world, locationChange.toPointId, "locationChange") : null;
   const toRegionId = locationChange ? requireKnownRegion(world, locationChange.toRegionId, "locationChange") : null;
+  const newLocations = sanitizeNewLocations(input.draft.newLocations);
   const summary = input.draft.summary.trim();
   if (effects.length === 0) {
     const cursorAdvanced = duration > 0 || toPointId !== null || toRegionId !== null;
+    let zeroWorld = world;
+    let geoNote2 = "";
+    if (newLocations.length > 0) {
+      const geo = applyNewLocations(world, newLocations, { now: input.now ?? 0 });
+      zeroWorld = geo.world;
+      if (geo.pointsAdded + geo.regionsAdded > 0) {
+        geoNote2 = `；新增地点 ${geo.pointNames.join("、")}${geo.regionNames.length > 0 ? `（地区 ${geo.regionNames.join("、")}）` : ""}`;
+      }
+    }
     return {
-      world,
+      world: zeroWorld,
       receipt: {
         receiptId: `rcpt-${hashString(idempotencyKey)}`,
         status: "committed",
@@ -6250,7 +6391,7 @@ function commitAtlasTurn(world, input) {
         ...toPointId !== null ? { currentLocationId: toPointId } : {},
         triggeredNpcIds: [],
         adoptedEventIds: [],
-        summary: cursorAdvanced ? `${summary}（本轮无实体变化：仅时间 / 位置推进，未写入账本）` : "本轮无世界变化。",
+        summary: cursorAdvanced ? `${summary}（本轮无实体变化：仅时间 / 位置推进，未写入账本）${geoNote2}` : geoNote2 ? `${summary}${geoNote2}` : "本轮无世界变化。",
         retryable: false
       }
     };
@@ -6293,8 +6434,17 @@ function commitAtlasTurn(world, input) {
       }
     };
   }
+  let finalWorld = result.world;
+  let geoNote = "";
+  if (newLocations.length > 0) {
+    const geo = applyNewLocations(result.world, newLocations, { now: input.now ?? 0 });
+    finalWorld = geo.world;
+    if (geo.pointsAdded + geo.regionsAdded > 0) {
+      geoNote = `；新增地点 ${geo.pointNames.join("、")}${geo.regionNames.length > 0 ? `（地区 ${geo.regionNames.join("、")}）` : ""}`;
+    }
+  }
   return {
-    world: result.world,
+    world: finalWorld,
     receipt: {
       receiptId: `rcpt-${result.adopted[0]?.eventId ?? hashString(idempotencyKey)}`,
       status: "committed",
@@ -6305,7 +6455,7 @@ function commitAtlasTurn(world, input) {
       ...toPointId !== null || toRegionId !== null ? { currentLocationId: toPointId ?? input.currentPointId } : {},
       triggeredNpcIds: [],
       adoptedEventIds: result.adopted.map((item) => item.eventId ?? "").filter((id) => id.length > 0),
-      summary,
+      summary: `${summary}${geoNote}`,
       retryable: false
     }
   };
@@ -7229,7 +7379,7 @@ function createAtlasServerCore(deps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.30",
+      version: "0.9.31",
       protocolVersion: 1,
       time: now()
     });
@@ -7332,6 +7482,30 @@ function createAtlasServerCore(deps) {
     }
     checkRpm();
     rpmTimestamps.push(now());
+    const outcome = await runGeoExtraction({ world, preset, lore, recentTexts, source: "manual" });
+    if (outcome.regionsAdded === 0 && outcome.pointsAdded === 0) {
+      return okResult({
+        regionsAdded: 0,
+        pointsAdded: 0,
+        skipped: outcome.skipped,
+        message: "没有提炼出新的地理实体（可能都已存在，或资料里没有地理描述）。"
+      });
+    }
+    return okResult({
+      regionsAdded: outcome.regionsAdded,
+      pointsAdded: outcome.pointsAdded,
+      skipped: outcome.skipped,
+      revisionAppended: outcome.revisionAppended,
+      regionNames: outcome.regionNames,
+      pointNames: outcome.pointNames
+    });
+  }
+  async function runGeoExtraction(input) {
+    const world = input.world;
+    const preset = input.preset;
+    const lore = input.lore;
+    const recentTexts = input.recentTexts;
+    const storyMode = recentTexts.length > 0;
     const contractRule = '只输出一个 JSON 对象：{"regions":[{"name":"...","description":"..."}],"points":[{"name":"...","regionName":"..."}]}';
     const commonRules = '规则：name ≤20 字；regionName 必须是 regions 里出现过的名字（没有合适地区就省略该字段）；只提炼明确或强烈暗示的地理实体（城市 / 森林 / 遗迹 / 建筑等），角色、文风、格式规则一律不要；宁缺毋滥；最多 12 个地区、40 个地点；没有地理信息就输出 {"regions":[],"points":[]}。';
     const existingGeoNames = [
@@ -7427,8 +7601,8 @@ function createAtlasServerCore(deps) {
       nextPointId += 1;
     }
     if (newRegions.length === 0 && newPoints.length === 0) {
-      pushLog({ at: now(), kind: "world-geo-adopt", worldId: world.id, regionsAdded: 0, pointsAdded: 0, skipped });
-      return okResult({ regionsAdded: 0, pointsAdded: 0, skipped, message: "没有提炼出新的地理实体（可能都已存在，或资料里没有地理描述）。" });
+      pushLog({ at: now(), kind: "world-geo-adopt", worldId: world.id, source: input.source, regionsAdded: 0, pointsAdded: 0, skipped });
+      return { regionsAdded: 0, pointsAdded: 0, skipped, revisionAppended: false, regionNames: [], pointNames: [] };
     }
     let updated = {
       ...world,
@@ -7437,7 +7611,7 @@ function createAtlasServerCore(deps) {
       updatedAt: now()
     };
     const revision = appendDefinitionRevision(updated, {
-      authorNote: `世界书提炼地理：+${newRegions.length} 地区 +${newPoints.length} 地点`,
+      authorNote: `${input.source === "auto" ? "首轮自动建图" : "世界书提炼地理"}：+${newRegions.length} 地区 +${newPoints.length} 地点`,
       now: now()
     });
     if (revision.ok) updated = revision.value;
@@ -7447,19 +7621,20 @@ function createAtlasServerCore(deps) {
       at: now(),
       kind: "world-geo-adopt",
       worldId: world.id,
+      source: input.source,
       regionsAdded: newRegions.length,
       pointsAdded: newPoints.length,
       skipped,
       revisionAppended: revision.ok
     });
-    return okResult({
+    return {
       regionsAdded: newRegions.length,
       pointsAdded: newPoints.length,
       skipped,
       revisionAppended: revision.ok,
       regionNames: newRegions.map((r) => r.name),
       pointNames: newPoints.map((p) => p.name)
-    });
+    };
   }
   async function handleBindings(body) {
     if (!body || typeof body !== "object" || Array.isArray(body)) {
@@ -7816,6 +7991,39 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
       });
     }
     const lorebook = buildLorebookPlans(output.world, receipt);
+    if (receipt.status === "committed" && (settledWorld.points ?? []).length <= 1) {
+      const markerKey = `geo-auto:${binding.worldId}`;
+      let marker = null;
+      try {
+        marker = await store.read(markerKey);
+      } catch {
+        marker = null;
+      }
+      if (!marker) {
+        await store.write(markerKey, { at: now() });
+        try {
+          const geo = await runGeoExtraction({
+            world: settledWorld,
+            preset,
+            lore: request.loreSupplement ?? "",
+            recentTexts: recentAssistantTexts,
+            source: "auto"
+          });
+          if (geo.pointsAdded + geo.regionsAdded > 0) {
+            receipt.summary = `${receipt.summary}；首轮自动建图：+${geo.regionsAdded} 地区 +${geo.pointsAdded} 地点`.slice(0, 480);
+          }
+        } catch (thrown) {
+          pushLog({
+            at: now(),
+            kind: "world-geo-auto",
+            worldId: binding.worldId,
+            ok: false,
+            code: thrown instanceof AtlasError ? thrown.code : "INTERNAL",
+            message: thrown instanceof Error ? thrown.message.slice(0, 200) : String(thrown).slice(0, 200)
+          });
+        }
+      }
+    }
     return okResult(lorebook ? { receipt, lorebook } : { receipt });
   }
   async function handleCommit(body) {

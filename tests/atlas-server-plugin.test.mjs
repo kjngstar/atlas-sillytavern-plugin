@@ -684,6 +684,49 @@ test("0.9.30 放宽：完全无法解析 → 不拒单，按无结构变化处�
   ok(!JSON.stringify(core.logs()).includes("sk-runtime-test"), "日志无明文 Key");
 });
 
+test("0.9.31 首轮自动建图：≤1 点世界首次 commit 后自动提炼一次，之后不再跑", async () => {
+  // 单点世界：把夹具世界裁到只剩绑定游标所在点
+  const full = buildWorld();
+  const trimmed = parseWorld({
+    ...JSON.parse(JSON.stringify(full)),
+    points: full.points.filter((p) => String(p.id) === "4103"),
+  });
+  ok(trimmed !== null, "单点世界可解析");
+  const world = trimmed;
+
+  const geoSpec = {
+    regions: [{ name: "旧城区", description: "老城根" }],
+    points: [
+      { name: "钟楼", regionName: "旧城区" },
+      { name: String(world.points[0].name), regionName: "旧城区" },
+    ],
+  };
+  const fetcher = makeFetch([
+    () => openAiResponse(GOOD_DRAFT),
+    () => openAiResponse(geoSpec),
+  ]);
+  const store = createMemoryDocumentStore();
+  const core = createAtlasServerCore({ store, fetchFn: fetcher.fetchFn, now: () => NOW });
+  await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
+  await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
+  await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+
+  const result = await core.handle("POST", "/turns/commit", commitRequest(world));
+  equal(result.body.ok, true, "提交成功");
+  equal(fetcher.calls.length, 2, "推演 + 一次性自动建图，恰好 2 条");
+  ok(result.body.data.receipt.summary.includes("首轮自动建图"), "回执注明自动建图");
+  const state = await core.handle("GET", "/state/chat-a");
+  ok(JSON.stringify(state.body).includes("钟楼"), "新地点已进世界");
+  const autoLogs = core.logs().filter((l) => l.kind === "world-geo-adopt" && l.source === "auto");
+  equal(autoLogs.length, 1, "自动建图日志恰好一条");
+  equal(autoLogs[0].pointsAdded, 1, "重名点跳过，恰好 +1");
+
+  // 第二次 commit：地图已长出来 → 不再自动建图
+  const second = await core.handle("POST", "/turns/commit", commitRequest(world, { assistantMessageId: "msg-12", userMessageId: "msg-20" }), { local: true });
+  equal(second.body.ok, true, "第二次提交成功");
+  equal(fetcher.calls.length, 3, "第二次只发推演（自动建图不重复）");
+});
+
 test("retry：沿用原幂等键，成功后世界恰好推进一次", async () => {
   // 第一次 429 失败，重试成功
   const fetcher = makeFetch([() => jsonResponse(429, {}), () => openAiResponse(GOOD_DRAFT)]);

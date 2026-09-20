@@ -898,6 +898,24 @@ test("0.9.29 动向扩展：npcChanges 支持 moveEntity / setFlag 映射（白�
   );
 });
 
+test("0.9.31 解析：newLocations 名称制清单（坏条目丢弃计数，不整单炸）", () => {
+  const draft = parseAtlasWorldTurnDraft(JSON.stringify({
+    duration: 1,
+    npcChanges: [],
+    memoryDrafts: [],
+    newLocations: [
+      { name: "钟楼", regionName: "旧城区", description: "立在潮门旁。" },
+      { regionName: "没名字的不算" },
+      "junk",
+    ],
+    summary: "提到钟楼。",
+  }));
+  assert.equal(draft.newLocations.length, 1, "合法条目保留");
+  assert.equal(draft.newLocations[0].name, "钟楼");
+  assert.equal(draft.newLocations[0].regionName, "旧城区");
+  assert.ok(draft.summary.includes("2 条残缺新地点"), "坏条目丢弃计数进摘要");
+});
+
 // ---------------------------------------------------------------------------
 // 0.9.18 分段提示词：promptSegments 逐段装配 + 占位符替换；全非法回退旧两条
 // ---------------------------------------------------------------------------

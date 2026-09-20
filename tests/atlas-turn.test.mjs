@@ -413,6 +413,55 @@ test("commit：moveEntity / setFlag effect 走账本采用（0.9.29 动向扩展
   ok(parseWorld(JSON.parse(JSON.stringify(output.world))) !== null, "提交后世界可解析往返");
 });
 
+test("commit：newLocations 并入世界——重名跳过、地区归属、定义修订（0.9.31 每轮新地点）", () => {
+  const world = buildFixture();
+  const pointsBefore = (world.points ?? []).length;
+  const region = (world.regions ?? [])[0];
+  const existingPointName = String((world.points ?? [])[0]?.name ?? "");
+  const output = commitAtlasTurn(world, commitInput(world, {
+    draft: {
+      duration: 1,
+      locationChange: null,
+      rawEffects: [{ kind: "setTemporalField", entityId: "entity-city", key: "ruler", value: "商会" }],
+      memoryDrafts: [],
+      newLocations: [
+        { name: "潮门钟楼", regionName: region?.name, description: "钟楼立在潮门旁。" },
+        { name: existingPointName, regionName: region?.name },
+        { name: "   " },
+      ],
+      summary: "旅行者抵达钟楼。",
+    },
+  }));
+  equal(output.receipt.status, "committed", "提交成功");
+  equal((output.world.points ?? []).length, pointsBefore + 1, "重名与坏条目跳过，恰好 +1 地点");
+  const added = (output.world.points ?? []).find((p) => p.name === "潮门钟楼");
+  ok(added, "新地点存在");
+  equal(String(added.regionId), String(region.id), "地区归属正确");
+  ok(output.receipt.summary.includes("新增地点"), "回执注明新增地点");
+  ok(parseWorld(JSON.parse(JSON.stringify(output.world))) !== null, "提交后世界可解析往返");
+});
+
+test("commit：零 effect + 新地点 → 地点照常并入（0.9.31，游标路径不吞新地点）", () => {
+  const world = buildFixture();
+  const pointsBefore = (world.points ?? []).length;
+  const region = (world.regions ?? [])[0];
+  const output = commitAtlasTurn(world, commitInput(world, {
+    draft: {
+      duration: 0,
+      locationChange: null,
+      rawEffects: [],
+      memoryDrafts: [],
+      newLocations: [{ name: "北门集市", regionName: region?.name }],
+      summary: "路上的人谈起北门集市。",
+    },
+  }));
+  equal(output.receipt.status, "committed", "提交成功");
+  equal(output.receipt.currentTime, CURRENT_TIME, "时间不推");
+  equal(output.receipt.adoptedEventIds.length, 0, "账本零事件");
+  equal((output.world.points ?? []).length, pointsBefore + 1, "地点并入");
+  ok(output.receipt.summary.includes("新增地点"), "回执注明新增地点");
+});
+
 test("commit：IF 分支事件不泄漏进正史账本", () => {
   const world = buildFixture();
   const canonBefore = ledgerForBranch(world, null).length;

@@ -18,6 +18,7 @@ import { latestDefinitionRevision } from "../lib/world-definition.ts";
 import { adoptPendingProposals, type PendingChangeProposal } from "../lib/world-ledger.ts";
 import { buildContextPlan, renderContextPlan } from "../lib/context-plan.ts";
 import { hashString } from "../lib/world-cards.ts";
+import { applyNewLocations, sanitizeNewLocations, type NewLocationDraft } from "./atlas-geo-apply.ts";
 import type {
   AtlasTravelPreview,
   AtlasTurnCommitRequest,
@@ -192,6 +193,8 @@ export interface AtlasWorldChangeDraft {
   rawEffects?: unknown[];
   /** 记忆草稿 → appendMemoryRef effect（entityId 必须是已知实体） */
   memoryDrafts?: Array<{ entityId: string; text: string }>;
+  /** 0.9.31 本轮剧情新出现的地点（名称制；commit 时确定性并入世界，不走账本 effect） */
+  newLocations?: NewLocationDraft[];
   summary: string;
 }
 
@@ -309,17 +312,29 @@ export function commitAtlasTurn(world: World, input: AtlasTurnCommitInput): Atla
   const toRegionId = locationChange
     ? requireKnownRegion(world, locationChange.toRegionId, "locationChange")
     : null;
+  // 0.9.31 每轮新地点：名称制草稿 → 清洗（坏条目丢弃）；commit 时确定性并入（不走账本 effect）
+  const newLocations = sanitizeNewLocations(input.draft.newLocations);
 
   // 3. 零 effect 回合：零账本写入，直接给 committed 回执。
   //    0.9.27 修复：账本铁律「提案至少要包含一个 effect」（lib/world-ledger.ts），
   //    而「仅时间推进 / 仅位置移动、无实体变化」是模型可合法产出的草稿——
   //    此前这类草稿会走提案路径被账本整单拒收。现改为游标推进回执：
   //    时间与位置由回执驱动绑定游标（同成功路径），账本零写入、零部分写入。
+  //    0.9.31：newLocations 在此路径同样并入（造点不依赖账本）。
   const summary = input.draft.summary.trim();
   if (effects.length === 0) {
     const cursorAdvanced = duration > 0 || toPointId !== null || toRegionId !== null;
+    let zeroWorld = world;
+    let geoNote = "";
+    if (newLocations.length > 0) {
+      const geo = applyNewLocations(world, newLocations, { now: input.now ?? 0 });
+      zeroWorld = geo.world;
+      if (geo.pointsAdded + geo.regionsAdded > 0) {
+        geoNote = `；新增地点 ${geo.pointNames.join("、")}${geo.regionNames.length > 0 ? `（地区 ${geo.regionNames.join("、")}）` : ""}`;
+      }
+    }
     return {
-      world,
+      world: zeroWorld,
       receipt: {
         receiptId: `rcpt-${hashString(idempotencyKey)}`,
         status: "committed",
@@ -331,8 +346,8 @@ export function commitAtlasTurn(world: World, input: AtlasTurnCommitInput): Atla
         triggeredNpcIds: [],
         adoptedEventIds: [],
         summary: cursorAdvanced
-          ? `${summary}（本轮无实体变化：仅时间 / 位置推进，未写入账本）`
-          : "本轮无世界变化。",
+          ? `${summary}（本轮无实体变化：仅时间 / 位置推进，未写入账本）${geoNote}`
+          : geoNote ? `${summary}${geoNote}` : "本轮无世界变化。",
         retryable: false,
       },
     };
@@ -380,8 +395,20 @@ export function commitAtlasTurn(world: World, input: AtlasTurnCommitInput): Atla
     };
   }
 
+  // 4.5 0.9.31 每轮新地点：账本 effect 不能造点（lib 白名单无 addPoint），
+  //     在提案采用成功后把本轮 newLocations 并入世界（geo 同款确定性口径）。
+  let finalWorld = result.world;
+  let geoNote = "";
+  if (newLocations.length > 0) {
+    const geo = applyNewLocations(result.world, newLocations, { now: input.now ?? 0 });
+    finalWorld = geo.world;
+    if (geo.pointsAdded + geo.regionsAdded > 0) {
+      geoNote = `；新增地点 ${geo.pointNames.join("、")}${geo.regionNames.length > 0 ? `（地区 ${geo.regionNames.join("、")}）` : ""}`;
+    }
+  }
+
   return {
-    world: result.world,
+    world: finalWorld,
     receipt: {
       receiptId: `rcpt-${result.adopted[0]?.eventId ?? hashString(idempotencyKey)}`,
       status: "committed",
@@ -394,7 +421,7 @@ export function commitAtlasTurn(world: World, input: AtlasTurnCommitInput): Atla
         : {}),
       triggeredNpcIds: [],
       adoptedEventIds: result.adopted.map((item) => item.eventId ?? "").filter((id) => id.length > 0),
-      summary,
+      summary: `${summary}${geoNote}`,
       retryable: false,
     },
   };

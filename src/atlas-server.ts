@@ -347,7 +347,7 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.30",
+      version: "0.9.31",
       protocolVersion: 1,
       time: now(),
     });
@@ -489,6 +489,49 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
     checkRpm();
     rpmTimestamps.push(now());
 
+    const outcome = await runGeoExtraction({ world, preset, lore, recentTexts, source: "manual" });
+    if (outcome.regionsAdded === 0 && outcome.pointsAdded === 0) {
+      return okResult({
+        regionsAdded: 0,
+        pointsAdded: 0,
+        skipped: outcome.skipped,
+        message: "没有提炼出新的地理实体（可能都已存在，或资料里没有地理描述）。",
+      });
+    }
+    return okResult({
+      regionsAdded: outcome.regionsAdded,
+      pointsAdded: outcome.pointsAdded,
+      skipped: outcome.skipped,
+      revisionAppended: outcome.revisionAppended,
+      regionNames: outcome.regionNames,
+      pointNames: outcome.pointNames,
+    });
+  }
+
+  /**
+   * 0.9.31 提炼核心（手动 /worlds/geo/adopt 与首轮自动建图共用）：
+   * 恰好 1 条推演请求（复用推演预设 + 救场逻辑）；重名跳过；黄金角螺旋布点；
+   * 成功后原子写世界 + 追加定义修订。产出只增不改。
+   */
+  async function runGeoExtraction(input: {
+    world: World;
+    preset: NonNullable<ReturnType<typeof resolveWorldTurnPreset>>;
+    lore: string;
+    recentTexts: string[];
+    source: "manual" | "auto";
+  }): Promise<{
+    regionsAdded: number;
+    pointsAdded: number;
+    skipped: number;
+    revisionAppended: boolean;
+    regionNames: string[];
+    pointNames: string[];
+  }> {
+    const world = input.world;
+    const preset = input.preset;
+    const lore = input.lore;
+    const recentTexts = input.recentTexts;
+    const storyMode = recentTexts.length > 0;
     // 恰好 1 条推演请求：分段模式注入提炼指令（复用 callAtlasWorldTurnApi 的
     // 超时 / 救场 / 错误分类，不新开 fetch 路径）
     const contractRule =
@@ -600,8 +643,8 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
     }
 
     if (newRegions.length === 0 && newPoints.length === 0) {
-      pushLog({ at: now(), kind: "world-geo-adopt", worldId: world.id, regionsAdded: 0, pointsAdded: 0, skipped });
-      return okResult({ regionsAdded: 0, pointsAdded: 0, skipped, message: "没有提炼出新的地理实体（可能都已存在，或资料里没有地理描述）。" });
+      pushLog({ at: now(), kind: "world-geo-adopt", worldId: world.id, source: input.source, regionsAdded: 0, pointsAdded: 0, skipped });
+      return { regionsAdded: 0, pointsAdded: 0, skipped, revisionAppended: false, regionNames: [], pointNames: [] };
     }
 
     let updated: World = {
@@ -611,7 +654,7 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
       updatedAt: now(),
     };
     const revision = appendDefinitionRevision(updated, {
-      authorNote: `世界书提炼地理：+${newRegions.length} 地区 +${newPoints.length} 地点`,
+      authorNote: `${input.source === "auto" ? "首轮自动建图" : "世界书提炼地理"}：+${newRegions.length} 地区 +${newPoints.length} 地点`,
       now: now(),
     });
     if (revision.ok) updated = revision.value;
@@ -622,19 +665,20 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
       at: now(),
       kind: "world-geo-adopt",
       worldId: world.id,
+      source: input.source,
       regionsAdded: newRegions.length,
       pointsAdded: newPoints.length,
       skipped,
       revisionAppended: revision.ok,
     });
-    return okResult({
+    return {
       regionsAdded: newRegions.length,
       pointsAdded: newPoints.length,
       skipped,
       revisionAppended: revision.ok,
       regionNames: newRegions.map((r) => r.name),
       pointNames: newPoints.map((p) => p.name),
-    });
+    };
   }
 
   async function handleBindings(body: unknown): Promise<AtlasRouteResult> {
@@ -1060,6 +1104,45 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
     // 8. 世界书条目规划（纯派生，零 IO；写入由 UI 扩展经酒馆 world-info API 完成）。
     //    duplicate / failed 不产出规划：duplicate 本就写过了，failed 零部分写入。
     const lorebook = buildLorebookPlans(output.world, receipt);
+
+    // 9. 0.9.31 首轮自动建图（作者需求：第一次推演生成当前地图，之后地图有了就不再重复）。
+    //    条件：committed + 地图还只有起点（≤1 点）+ 本世界从未跑过自动建图（store 标记防零产出重试）。
+    //    红线例外记档：本轮最多第 2 条请求（推演 + 一次性建图），作者 2026-09-21 拍板。
+    if (receipt.status === "committed" && (settledWorld.points ?? []).length <= 1) {
+      const markerKey = `geo-auto:${binding.worldId}`;
+      let marker: unknown = null;
+      try {
+        marker = await store.read(markerKey);
+      } catch {
+        marker = null;
+      }
+      if (!marker) {
+        await store.write(markerKey, { at: now() });
+        try {
+          const geo = await runGeoExtraction({
+            world: settledWorld,
+            preset,
+            lore: request.loreSupplement ?? "",
+            recentTexts: recentAssistantTexts,
+            source: "auto",
+          });
+          if (geo.pointsAdded + geo.regionsAdded > 0) {
+            receipt.summary = `${receipt.summary}；首轮自动建图：+${geo.regionsAdded} 地区 +${geo.pointsAdded} 地点`.slice(0, 480);
+          }
+        } catch (thrown) {
+          // 自动建图失败不阻断回合（世界已提交）；原因记日志，作者可手动提炼兜底
+          pushLog({
+            at: now(),
+            kind: "world-geo-auto",
+            worldId: binding.worldId,
+            ok: false,
+            code: thrown instanceof AtlasError ? thrown.code : "INTERNAL",
+            message: thrown instanceof Error ? thrown.message.slice(0, 200) : String(thrown).slice(0, 200),
+          });
+        }
+      }
+    }
+
     return okResult(lorebook ? { receipt, lorebook } : { receipt });
   }
 

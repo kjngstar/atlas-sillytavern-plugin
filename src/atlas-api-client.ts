@@ -111,6 +111,7 @@ export const DEFAULT_PROMPT_SEGMENTS: Array<{ role: string; name: string; mainSl
       "{entityId, tag} 加标签 / {entityId, removeTag} 删标签 / {flag, value} 记录世界标记（里程碑、禁忌、传言等）/ " +
       "{entityId, targetEntityId, key, value} 改关系；entityId 必须来自上下文）、\n" +
       "memoryDrafts（数组，每条 {entityId, text}，为人物追加一条记忆，≤500 字）、\n" +
+      "newLocations（数组，本轮剧情里**新出现**的地点 / 地区：{name, regionName?, description?}；regionName 必须是本轮输出 regions 或上下文已有的地区名；已有地点不要重复列；没有就输出空数组）、\n" +
       "eventDrafts（数组，事件摘要文字，仅叙述用）、\n" +
       "triggerResults（数组，本轮命中的触发器 id）、\n" +
       "summary（本轮世界变化的一句话摘要，≤500 字）。\n" +
@@ -785,13 +786,38 @@ export function parseAtlasWorldTurnDraft(text: string): AtlasWorldChangeDraft {
   }
 
   const locationChange = toLocationChange(draftSource.locationChange);
+  // 0.9.31 每轮新地点：{name, regionName?, description?} 名称制清单（坏条目丢弃计数；细节清洗在 commit 侧）
+  const newLocations: Array<{ name: string; regionName?: string; description?: string }> = [];
+  let droppedLocations = 0;
+  if (draftSource.newLocations !== undefined && draftSource.newLocations !== null) {
+    if (!Array.isArray(draftSource.newLocations)) {
+      throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "推演输出 newLocations 必须是数组。");
+    }
+    for (const item of draftSource.newLocations) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        droppedLocations += 1;
+        continue;
+      }
+      const record = item as Record<string, unknown>;
+      const name = typeof record.name === "string" ? record.name.trim() : "";
+      if (!name) {
+        droppedLocations += 1;
+        continue;
+      }
+      const regionName = typeof record.regionName === "string" && record.regionName.trim() ? record.regionName.trim() : undefined;
+      const description = typeof record.description === "string" && record.description.trim() ? record.description.trim() : undefined;
+      newLocations.push({ name, ...(regionName ? { regionName } : {}), ...(description ? { description } : {}) });
+    }
+  }
+  const droppedTotal = droppedEffects + droppedMemories + droppedLocations;
   return {
     duration: rawDuration,
     locationChange,
     rawEffects,
     memoryDrafts,
-    summary: droppedEffects + droppedMemories > 0
-      ? `${summary}（解析时丢弃 ${droppedEffects} 条无法识别的变化、${droppedMemories} 条残缺记忆）`
+    ...(newLocations.length > 0 ? { newLocations } : {}),
+    summary: droppedTotal > 0
+      ? `${summary}（解析时丢弃 ${droppedEffects} 条无法识别的变化、${droppedMemories} 条残缺记忆、${droppedLocations} 条残缺新地点）`
       : summary,
   };
 }
@@ -814,6 +840,10 @@ function salvageDraftContainerFromRawText(raw: string): Record<string, unknown> 
     .filter((item) => typeof item.entityId === "string" && item.entityId.trim() && typeof item.text === "string" && item.text.trim())
     .slice(0, ATLAS_LIMITS.REF_ARRAY);
   if (memories.length > 0) container.memoryDrafts = memories;
+  const newLocations = salvageObjectArrayFromRawText(raw, "newLocations")
+    .filter((item) => typeof item.name === "string" && item.name.trim())
+    .slice(0, 12);
+  if (newLocations.length > 0) container.newLocations = newLocations;
   const locationRaw = extractRawStringField(raw, "toPointId");
   const regionRaw = extractRawStringField(raw, "toRegionId");
   if (locationRaw || regionRaw) container.locationChange = { toPointId: locationRaw ?? null, toRegionId: regionRaw ?? null };
