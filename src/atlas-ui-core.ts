@@ -62,8 +62,10 @@ export interface AtlasPendingTurn {
   triggerIds: string[];
 }
 
-/** 变化页回执记录（去重后 ≤10 条；摘要截断，无密钥）。 */
+/** 变化页回执记录（归属聊天；去重后 ≤10 条；摘要截断，无密钥）。 */
 export interface AtlasReceiptRecord {
+  /** 0.9.28 归属聊天：回执只属于产生它的聊天，换卡 / 换聊天不再串显 */
+  chatId: string;
   receiptId: string;
   status: string;
   summary: string;
@@ -97,9 +99,9 @@ export interface AtlasUiState {
   destinationPreview: AtlasDestinationPreview | null;
   /** 在途回合（MESSAGE_SENT → prepare 成功；停止 / 失败即放弃） */
   pendingTurn: AtlasPendingTurn | null;
-  /** 最近回执（去重 ≤10；持久化于 extensionSettings，刷新后仍在） */
+  /** 最近回执（当前聊天；去重 ≤10；按聊天分桶持久化于 extensionSettings，刷新 / 切回后仍在） */
   receipts: AtlasReceiptRecord[];
-  /** commit 失败后的可重试回合（仅会话内） */
+  /** commit 失败后的可重试回合（仅会话内；换聊天即弃——绝不带进新聊天） */
   retryableCommit: { chatId: string; userMessageId: string; assistantMessageId: string; swipeId: string | null } | null;
   /** 用户可读的模式说明（空状态文案） */
   modeHint: string | null;
@@ -346,12 +348,75 @@ export function createAtlasUiCore(deps: {
     deps.onStateChange?.();
   }
 
-  /** 回执记录：去重、摘要截断（≤300）、有界（≤10）并持久化到 extensionSettings。 */
+  /** 回执记录：归属当前聊天、去重、摘要截断（≤300）、有界（每聊天 ≤10）并按聊天分桶持久化。 */
   const RECEIPTS_MAX = 10;
-  function addReceipt(receipt: AtlasTurnReceipt): void {
+  /** 0.9.28 分桶持久化最多保留的聊天数（按各桶最新回执时间修剪）。 */
+  const RECEIPTS_CHATS_MAX = 20;
+  let legacyReceiptsCleared = false;
+
+  /** 持久化桶形状不可信：逐桶逐条校验（宽容降级，绝不炸面板）。 */
+  function sanitizeReceiptRecord(raw: unknown, fallbackChatId: string): AtlasReceiptRecord | null {
+    if (!raw || typeof raw !== "object") return null;
+    const record = raw as Record<string, unknown>;
+    if (typeof record.receiptId !== "string" || typeof record.summary !== "string") return null;
+    return {
+      receiptId: record.receiptId,
+      chatId: typeof record.chatId === "string" && record.chatId ? record.chatId : fallbackChatId,
+      status: typeof record.status === "string" ? record.status : "committed",
+      summary: record.summary.slice(0, 300),
+      previousTime: typeof record.previousTime === "number" ? record.previousTime : 0,
+      currentTime: typeof record.currentTime === "number" ? record.currentTime : 0,
+      currentLocationId: typeof record.currentLocationId === "string" ? record.currentLocationId : null,
+      adoptedEventCount: typeof record.adoptedEventCount === "number" ? record.adoptedEventCount : 0,
+      recordedAt: typeof record.recordedAt === "number" ? record.recordedAt : 0,
+    };
+  }
+
+  function readReceiptBuckets(): Record<string, AtlasReceiptRecord[]> {
+    const raw = host.readData("receiptsByChat");
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+    const buckets: Record<string, AtlasReceiptRecord[]> = {};
+    for (const [chatId, list] of Object.entries(raw as Record<string, unknown>)) {
+      if (!Array.isArray(list)) continue;
+      const records = list.slice(0, RECEIPTS_MAX)
+        .map((item) => sanitizeReceiptRecord(item, chatId))
+        .filter((item): item is AtlasReceiptRecord => item !== null);
+      if (records.length > 0) buckets[chatId] = records;
+    }
+    return buckets;
+  }
+
+  function persistReceipts(chatId: string, receipts: AtlasReceiptRecord[]): void {
+    const buckets = readReceiptBuckets();
+    if (receipts.length > 0) buckets[chatId] = receipts;
+    else delete buckets[chatId];
+    const kept = Object.entries(buckets)
+      .sort((left, right) => (right[1][0]?.recordedAt ?? 0) - (left[1][0]?.recordedAt ?? 0))
+      .slice(0, RECEIPTS_CHATS_MAX);
+    host.writeData("receiptsByChat", Object.fromEntries(kept));
+    // 0.9.28 迁移：旧全局 receipts 键（无聊天归属）一次性废弃，不再恢复
+    if (!legacyReceiptsCleared) {
+      legacyReceiptsCleared = true;
+      host.writeData("receipts", null);
+    }
+  }
+
+  /** 恢复指定聊天的回执（切聊天 / init 时调用；无聊天 = 空列表）。 */
+  function restoreReceiptsForChat(chatId: string | null): void {
+    if (chatId === null) {
+      setState({ receipts: [] });
+      return;
+    }
+    setState({ receipts: readReceiptBuckets()[chatId] ?? [] });
+  }
+
+  function addReceipt(receipt: AtlasTurnReceipt, chatId: string): void {
+    // 0.9.28 归属守卫：跨聊天迟到的回执直接丢弃（服务端世界已一致，只是 UI 不显示过期回执）
+    if (chatId !== state.chatId) return;
     if (state.receipts.some((r) => r.receiptId === receipt.receiptId)) return;
     const record: AtlasReceiptRecord = {
       receiptId: receipt.receiptId,
+      chatId,
       status: receipt.status,
       summary: receipt.summary.slice(0, 300),
       previousTime: receipt.previousTime,
@@ -362,7 +427,7 @@ export function createAtlasUiCore(deps: {
     };
     const receipts = [record, ...state.receipts].slice(0, RECEIPTS_MAX);
     setState({ receipts });
-    host.writeData("receipts", receipts);
+    persistReceipts(chatId, receipts);
   }
 
   /** 世界书绑定冲突 / 写入失败 → 用户可读提示；成功且无冲突 → null。 */
@@ -529,7 +594,18 @@ export function createAtlasUiCore(deps: {
       setState({ rearmTurn: null });
       // 0.9.17 数据隔离：先把旧聊天的数据从面板上摘掉再刷新——
       // 切卡 / 关聊天的瞬间绝不能让上一张卡的世界还挂在界面上。
-      setState({ binding: null, stateData: null, mode: "unbound", modeHint: null });
+      // 0.9.28 补全：回执 / 重试挂单 / 错误同样归属聊天——一并摘掉，
+      // 然后恢复新聊天自己的回执桶（换卡后看到的永远是当前聊天的世界变化）。
+      setState({
+        binding: null,
+        stateData: null,
+        mode: "unbound",
+        modeHint: null,
+        pendingTurn: null,
+        retryableCommit: null,
+        lastError: null,
+      });
+      restoreReceiptsForChat(host.getChatId());
       void track(refresh());
       return;
     }
@@ -799,12 +875,14 @@ export function createAtlasUiCore(deps: {
       const result = await api.request("POST", "/turns/commit", value);
       const body = result.body as { ok?: boolean; data?: { receipt?: unknown }; error?: { message?: string; code?: string } };
       const receiptParsed = body.data?.receipt ? parseAtlasTurnReceipt(body.data.receipt) : null;
+      // 0.9.28 归属守卫：请求在途时用户可能已切聊天——过期回执 / 失败挂单绝不写进新聊天
+      const stale = state.chatId !== value.chatId;
       if (result.status === 200 && body.ok && receiptParsed?.ok) {
-        addReceipt(receiptParsed.value);
-        setState({ pendingTurn: null, rearmTurn: null, lastError: null });
+        addReceipt(receiptParsed.value, value.chatId);
+        setState({ pendingTurn: null, rearmTurn: null, ...(stale ? {} : { lastError: null }) });
         if (receiptParsed.value.status === "committed" || receiptParsed.value.status === "duplicate") {
           healthCheckedAt = -Infinity;
-          await refresh();
+          if (!stale) await refresh();
         }
         await syncLorebookAfterCommit(body);
         return;
@@ -813,25 +891,30 @@ export function createAtlasUiCore(deps: {
       setState({
         pendingTurn: null,
         rearmTurn: null,
-        retryableCommit: {
-          chatId: value.chatId,
-          userMessageId: value.userMessageId,
-          assistantMessageId: value.assistantMessageId,
-          swipeId,
-        },
-        lastError: body.error?.message ?? `世界推演失败（HTTP ${result.status}），可从「变化」页重试。`,
+        ...(stale ? {} : {
+          retryableCommit: {
+            chatId: value.chatId,
+            userMessageId: value.userMessageId,
+            assistantMessageId: value.assistantMessageId,
+            swipeId,
+          },
+          lastError: body.error?.message ?? `世界推演失败（HTTP ${result.status}），可从「变化」页重试。`,
+        }),
       });
     } catch {
+      const stale = state.chatId !== value.chatId;
       setState({
         pendingTurn: null,
         rearmTurn: null,
-        retryableCommit: {
-          chatId: value.chatId,
-          userMessageId: value.userMessageId,
-          assistantMessageId: value.assistantMessageId,
-          swipeId,
-        },
-        lastError: "世界推演失败：服务不可用，可从「变化」页重试。",
+        ...(stale ? {} : {
+          retryableCommit: {
+            chatId: value.chatId,
+            userMessageId: value.userMessageId,
+            assistantMessageId: value.assistantMessageId,
+            swipeId,
+          },
+          lastError: "世界推演失败：服务不可用，可从「变化」页重试。",
+        }),
       });
     } finally {
       commitInFlight = false;
@@ -978,12 +1061,17 @@ export function createAtlasUiCore(deps: {
     if (disposed) return;
     const failed = state.retryableCommit;
     if (!failed) return;
+    // 0.9.28 归属守卫：挂单属于旧聊天 → 直接作废（服务端零部分写入，世界一致）
+    if (failed.chatId !== state.chatId) {
+      setState({ retryableCommit: null });
+      return;
+    }
     try {
       const result = await api.request("POST", "/turns/retry", failed);
       const body = result.body as { ok?: boolean; data?: { receipt?: unknown }; error?: { message?: string } };
       const receiptParsed = body.data?.receipt ? parseAtlasTurnReceipt(body.data.receipt) : null;
       if (result.status === 200 && body.ok && receiptParsed?.ok) {
-        addReceipt(receiptParsed.value);
+        addReceipt(receiptParsed.value, failed.chatId);
         setState({ retryableCommit: null, lastError: null });
         if (receiptParsed.value.status === "committed" || receiptParsed.value.status === "duplicate") {
           healthCheckedAt = -Infinity;
@@ -992,9 +1080,13 @@ export function createAtlasUiCore(deps: {
         await syncLorebookAfterCommit(body);
         return;
       }
-      setState({ lastError: body.error?.message ?? `重试失败（HTTP ${result.status}）` });
+      if (state.chatId === failed.chatId) {
+        setState({ lastError: body.error?.message ?? `重试失败（HTTP ${result.status}）` });
+      }
     } catch {
-      setState({ lastError: "重试失败：服务不可用。" });
+      if (state.chatId === failed.chatId) {
+        setState({ lastError: "重试失败：服务不可用。" });
+      }
     }
   }
 
@@ -1006,27 +1098,9 @@ export function createAtlasUiCore(deps: {
         register(event, (payload) => handleEventSync(event, payload));
       }
       setState({ panelOpen: host.readPanelOpen() });
-      // 回执恢复（extensionSettings 持久化；形状不可信，逐条严格校验）
-      const storedReceipts = host.readData("receipts");
-      if (Array.isArray(storedReceipts)) {
-        const restored: AtlasReceiptRecord[] = [];
-        for (const raw of storedReceipts.slice(0, 10)) {
-          if (!raw || typeof raw !== "object") continue;
-          const record = raw as Record<string, unknown>;
-          if (typeof record.receiptId !== "string" || typeof record.summary !== "string") continue;
-          restored.push({
-            receiptId: record.receiptId,
-            status: typeof record.status === "string" ? record.status : "committed",
-            summary: record.summary.slice(0, 300),
-            previousTime: typeof record.previousTime === "number" ? record.previousTime : 0,
-            currentTime: typeof record.currentTime === "number" ? record.currentTime : 0,
-            currentLocationId: typeof record.currentLocationId === "string" ? record.currentLocationId : null,
-            adoptedEventCount: typeof record.adoptedEventCount === "number" ? record.adoptedEventCount : 0,
-            recordedAt: typeof record.recordedAt === "number" ? record.recordedAt : 0,
-          });
-        }
-        if (restored.length > 0) setState({ receipts: restored });
-      }
+      // 0.9.28 回执按聊天分桶持久化：init 只恢复当前聊天的回执（旧全局键废弃不迁移；
+      // 形状不可信，逐条严格校验）
+      restoreReceiptsForChat(host.getChatId());
       void refresh();
     },
 

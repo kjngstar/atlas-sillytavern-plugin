@@ -728,7 +728,8 @@ test("回合：GENERATION_ENDED → commit 一次 → 回执入列并持久化 �
   ok(receipt[0].summary.length <= 300, "摘要截断上界");
   equal(core.getState().pendingTurn, null, "pendingTurn 清空");
   equal(core.getState().lastError, null, "无错误");
-  deepEqual(hostWrap.dataStore.get("receipts"), receipt, "回执写入 extensionSettings");
+  deepEqual(hostWrap.dataStore.get("receiptsByChat")?.["chat-a"], receipt, "回执按聊天分桶写入 extensionSettings");
+  equal(hostWrap.dataStore.get("receipts"), null, "0.9.28 旧全局键已废弃（一次性清除）");
   equal(api.calls.filter((c) => c.path === "/state/chat-a").length >= 2, true, "commit 成功后刷新世界状态");
 });
 
@@ -904,22 +905,101 @@ test("回合：回执经 extensionSettings 持久化；新 core init 恢复合�
   equal(second.getState().receipts[0].receiptId, "receipt-1", "回执内容一致");
   second.dispose();
 
-  // 非法持久化形状：非对象条目 / 缺 receiptId / 缺 summary 全部拒收
+  // 非法持久化形状：非对象条目 / 缺 receiptId / 缺 summary 全部拒收（0.9.28 分桶形状）
   const badHostWrap = makeHost();
   badHostWrap.setChat("chat-a");
-  badHostWrap.dataStore.set("receipts", [
-    "junk",
-    null,
-    { receiptId: "r-1", summary: "只有回执号与摘要", previousTime: "not-a-number" },
-    { summary: "缺 receiptId" },
-    { receiptId: "r-2", summary: "合法条目", currentTime: 5 },
-  ]);
+  badHostWrap.dataStore.set("receiptsByChat", {
+    "chat-a": [
+      "junk",
+      null,
+      { receiptId: "r-1", summary: "只有回执号与摘要", previousTime: "not-a-number" },
+      { summary: "缺 receiptId" },
+      { receiptId: "r-2", summary: "合法条目", currentTime: 5 },
+    ],
+    "chat-other": [{ receiptId: "r-3", summary: "别的聊天的回执" }],
+    "chat-broken": "not-an-array",
+  });
   const badCore = createAtlasUiCore({ api: secondApi, host: badHostWrap.host, emitter: makeEmitter(), now: () => NOW_BASE });
   badCore.init();
   await flush();
   equal(badCore.getState().receipts.length, 2, "非法条目逐条拒收，合法条目保留");
   equal(badCore.getState().receipts[1].previousTime, 0, "非法数值字段回退默认");
   badCore.dispose();
+});
+
+test("0.9.28 回执归属：换聊天三清（回执 / 重试挂单 / 错误），各聊天回执分桶互不串", async () => {
+  const { api, hostWrap, core } = await readyCore({ commitError: "推演模型超时" });
+  // chat-a 产生一条失败回执挂单
+  await core.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "推进。" });
+  await core.handleEvent("MESSAGE_RECEIVED", { assistantMessageId: "m-1", assistantText: "推进了。" });
+  await flush();
+  ok(core.getState().retryableCommit !== null, "前置：chat-a 有失败挂单");
+  ok(core.getState().lastError !== null, "前置：chat-a 有错误提示");
+  // 切到 chat-b（预置自己的回执桶）→ chat-a 的挂单 / 错误 / 回执必须全部摘掉
+  hostWrap.dataStore.set("receiptsByChat", {
+    "chat-b": [{ receiptId: "r-b1", chatId: "chat-b", status: "committed", summary: "chat-b 自己的变化", previousTime: 1, currentTime: 2, currentLocationId: null, adoptedEventCount: 1, recordedAt: NOW_BASE }],
+  });
+  hostWrap.setChat("chat-b");
+  await core.handleEvent("CHAT_CHANGED");
+  await flush();
+  equal(core.getState().retryableCommit, null, "旧聊天失败挂单不进新聊天");
+  equal(core.getState().lastError, null, "旧聊天错误不进新聊天");
+  equal(core.getState().receipts.length, 1, "新聊天恢复自己的回执桶");
+  equal(core.getState().receipts[0].receiptId, "r-b1", "恢复的是 chat-b 的回执");
+  equal(core.getState().receipts[0].chatId, "chat-b", "回执记录带聊天归属");
+  // 切回 chat-a → 它的持久化回执恢复（此处为空——失败回合无回执），挂单不复活
+  hostWrap.setChat("chat-a");
+  await core.handleEvent("CHAT_CHANGED");
+  await flush();
+  equal(core.getState().retryableCommit, null, "切回后旧挂单不复活");
+  equal(core.getState().receipts.length, 0, "chat-a 无已持久化回执 → 空列表");
+});
+
+test("0.9.28 在途回执归属：commit 落定前切聊天 → 过期回执 / 失败挂单不写进新聊天", async () => {
+  const inner = makeApi({});
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const calls = [];
+  const api = {
+    calls,
+    async request(method, path, body) {
+      if (path === "/turns/commit") {
+        calls.push({ method, path, body }); // 发出即记账（inner 的记录在 gate 释放后才落）
+        await gate; // 卡住 commit，制造「在途」窗口
+      }
+      return inner.request(method, path, body);
+    },
+  };
+  const hostWrap = makeHost();
+  hostWrap.setChat("chat-a");
+  hostWrap.setBinding("chat-a", bindingFor("chat-a"));
+  const core = createAtlasUiCore({
+    api,
+    host: hostWrap.host,
+    emitter: makeEmitter(),
+    adaptEvent: makeAdaptEvent(),
+    now: () => NOW_BASE,
+    endedDebounceMs: 0,
+    mutationDebounceMs: 0,
+  });
+  await core.handleEvent("APP_READY");
+  await core.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "推进。" });
+  const ended = core.handleEvent("MESSAGE_RECEIVED", { assistantMessageId: "m-1", assistantText: "推进了。" });
+  await flush(); // ENDED 防抖落定：commit 已发出并卡在 gate
+  equal(api.calls.filter((c) => c.path === "/turns/commit").length, 1, "前置：commit 在途");
+  // 在途窗口内切聊天：先起切换（其 flushAsyncWork 会等在途任务），再放行 commit，避免互等死锁
+  hostWrap.setChat("chat-b");
+  const switching = core.handleEvent("CHAT_CHANGED");
+  release();
+  await switching;
+  await ended;
+  await flush();
+  equal(core.getState().pendingTurn, null, "旧回合 pending 随切换摘除");
+  equal(core.getState().retryableCommit, null, "过期失败不设挂单");
+  equal(core.getState().lastError, null, "过期失败不报错到新聊天");
+  equal(core.getState().receipts.length, 0, "过期回执不入新聊天列表");
+  ok(core.getState().chatId === "chat-b", "前置：当前聊天已是 chat-b");
+  // 服务端世界仍一致：chat-a 的世界写入由幂等键兜底，UI 只是如实不显示过期回执
 });
 
 test("回合：处于 pending 期间禁止第二条 prepare（同一时刻最多一条在途回合）", async () => {

@@ -1497,10 +1497,59 @@ function createAtlasUiCore(deps) {
     deps.onStateChange?.();
   }
   const RECEIPTS_MAX = 10;
-  function addReceipt(receipt) {
+  const RECEIPTS_CHATS_MAX = 20;
+  let legacyReceiptsCleared = false;
+  function sanitizeReceiptRecord(raw, fallbackChatId) {
+    if (!raw || typeof raw !== "object") return null;
+    const record = raw;
+    if (typeof record.receiptId !== "string" || typeof record.summary !== "string") return null;
+    return {
+      receiptId: record.receiptId,
+      chatId: typeof record.chatId === "string" && record.chatId ? record.chatId : fallbackChatId,
+      status: typeof record.status === "string" ? record.status : "committed",
+      summary: record.summary.slice(0, 300),
+      previousTime: typeof record.previousTime === "number" ? record.previousTime : 0,
+      currentTime: typeof record.currentTime === "number" ? record.currentTime : 0,
+      currentLocationId: typeof record.currentLocationId === "string" ? record.currentLocationId : null,
+      adoptedEventCount: typeof record.adoptedEventCount === "number" ? record.adoptedEventCount : 0,
+      recordedAt: typeof record.recordedAt === "number" ? record.recordedAt : 0
+    };
+  }
+  function readReceiptBuckets() {
+    const raw = host.readData("receiptsByChat");
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+    const buckets = {};
+    for (const [chatId, list] of Object.entries(raw)) {
+      if (!Array.isArray(list)) continue;
+      const records = list.slice(0, RECEIPTS_MAX).map((item) => sanitizeReceiptRecord(item, chatId)).filter((item) => item !== null);
+      if (records.length > 0) buckets[chatId] = records;
+    }
+    return buckets;
+  }
+  function persistReceipts(chatId, receipts) {
+    const buckets = readReceiptBuckets();
+    if (receipts.length > 0) buckets[chatId] = receipts;
+    else delete buckets[chatId];
+    const kept = Object.entries(buckets).sort((left, right) => (right[1][0]?.recordedAt ?? 0) - (left[1][0]?.recordedAt ?? 0)).slice(0, RECEIPTS_CHATS_MAX);
+    host.writeData("receiptsByChat", Object.fromEntries(kept));
+    if (!legacyReceiptsCleared) {
+      legacyReceiptsCleared = true;
+      host.writeData("receipts", null);
+    }
+  }
+  function restoreReceiptsForChat(chatId) {
+    if (chatId === null) {
+      setState({ receipts: [] });
+      return;
+    }
+    setState({ receipts: readReceiptBuckets()[chatId] ?? [] });
+  }
+  function addReceipt(receipt, chatId) {
+    if (chatId !== state.chatId) return;
     if (state.receipts.some((r) => r.receiptId === receipt.receiptId)) return;
     const record = {
       receiptId: receipt.receiptId,
+      chatId,
       status: receipt.status,
       summary: receipt.summary.slice(0, 300),
       previousTime: receipt.previousTime,
@@ -1511,7 +1560,7 @@ function createAtlasUiCore(deps) {
     };
     const receipts = [record, ...state.receipts].slice(0, RECEIPTS_MAX);
     setState({ receipts });
-    host.writeData("receipts", receipts);
+    persistReceipts(chatId, receipts);
   }
   function lorebookHintFromResult(result) {
     if (!result || typeof result !== "object" || Array.isArray(result)) return null;
@@ -1649,7 +1698,16 @@ function createAtlasUiCore(deps) {
       clearTimers();
       rolledBackFloors.clear();
       setState({ rearmTurn: null });
-      setState({ binding: null, stateData: null, mode: "unbound", modeHint: null });
+      setState({
+        binding: null,
+        stateData: null,
+        mode: "unbound",
+        modeHint: null,
+        pendingTurn: null,
+        retryableCommit: null,
+        lastError: null
+      });
+      restoreReceiptsForChat(host.getChatId());
       void track(refresh());
       return;
     }
@@ -1864,12 +1922,13 @@ function createAtlasUiCore(deps) {
       const result = await api.request("POST", "/turns/commit", value);
       const body = result.body;
       const receiptParsed = body.data?.receipt ? parseAtlasTurnReceipt(body.data.receipt) : null;
+      const stale = state.chatId !== value.chatId;
       if (result.status === 200 && body.ok && receiptParsed?.ok) {
-        addReceipt(receiptParsed.value);
-        setState({ pendingTurn: null, rearmTurn: null, lastError: null });
+        addReceipt(receiptParsed.value, value.chatId);
+        setState({ pendingTurn: null, rearmTurn: null, ...stale ? {} : { lastError: null } });
         if (receiptParsed.value.status === "committed" || receiptParsed.value.status === "duplicate") {
           healthCheckedAt = -Infinity;
-          await refresh();
+          if (!stale) await refresh();
         }
         await syncLorebookAfterCommit(body);
         return;
@@ -1877,25 +1936,30 @@ function createAtlasUiCore(deps) {
       setState({
         pendingTurn: null,
         rearmTurn: null,
-        retryableCommit: {
-          chatId: value.chatId,
-          userMessageId: value.userMessageId,
-          assistantMessageId: value.assistantMessageId,
-          swipeId
-        },
-        lastError: body.error?.message ?? `世界推演失败（HTTP ${result.status}），可从「变化」页重试。`
+        ...stale ? {} : {
+          retryableCommit: {
+            chatId: value.chatId,
+            userMessageId: value.userMessageId,
+            assistantMessageId: value.assistantMessageId,
+            swipeId
+          },
+          lastError: body.error?.message ?? `世界推演失败（HTTP ${result.status}），可从「变化」页重试。`
+        }
       });
     } catch {
+      const stale = state.chatId !== value.chatId;
       setState({
         pendingTurn: null,
         rearmTurn: null,
-        retryableCommit: {
-          chatId: value.chatId,
-          userMessageId: value.userMessageId,
-          assistantMessageId: value.assistantMessageId,
-          swipeId
-        },
-        lastError: "世界推演失败：服务不可用，可从「变化」页重试。"
+        ...stale ? {} : {
+          retryableCommit: {
+            chatId: value.chatId,
+            userMessageId: value.userMessageId,
+            assistantMessageId: value.assistantMessageId,
+            swipeId
+          },
+          lastError: "世界推演失败：服务不可用，可从「变化」页重试。"
+        }
       });
     } finally {
       commitInFlight = false;
@@ -2015,12 +2079,16 @@ function createAtlasUiCore(deps) {
     if (disposed) return;
     const failed = state.retryableCommit;
     if (!failed) return;
+    if (failed.chatId !== state.chatId) {
+      setState({ retryableCommit: null });
+      return;
+    }
     try {
       const result = await api.request("POST", "/turns/retry", failed);
       const body = result.body;
       const receiptParsed = body.data?.receipt ? parseAtlasTurnReceipt(body.data.receipt) : null;
       if (result.status === 200 && body.ok && receiptParsed?.ok) {
-        addReceipt(receiptParsed.value);
+        addReceipt(receiptParsed.value, failed.chatId);
         setState({ retryableCommit: null, lastError: null });
         if (receiptParsed.value.status === "committed" || receiptParsed.value.status === "duplicate") {
           healthCheckedAt = -Infinity;
@@ -2029,9 +2097,13 @@ function createAtlasUiCore(deps) {
         await syncLorebookAfterCommit(body);
         return;
       }
-      setState({ lastError: body.error?.message ?? `重试失败（HTTP ${result.status}）` });
+      if (state.chatId === failed.chatId) {
+        setState({ lastError: body.error?.message ?? `重试失败（HTTP ${result.status}）` });
+      }
     } catch {
-      setState({ lastError: "重试失败：服务不可用。" });
+      if (state.chatId === failed.chatId) {
+        setState({ lastError: "重试失败：服务不可用。" });
+      }
     }
   }
   return {
@@ -2042,26 +2114,7 @@ function createAtlasUiCore(deps) {
         register(event, (payload) => handleEventSync(event, payload));
       }
       setState({ panelOpen: host.readPanelOpen() });
-      const storedReceipts = host.readData("receipts");
-      if (Array.isArray(storedReceipts)) {
-        const restored = [];
-        for (const raw of storedReceipts.slice(0, 10)) {
-          if (!raw || typeof raw !== "object") continue;
-          const record = raw;
-          if (typeof record.receiptId !== "string" || typeof record.summary !== "string") continue;
-          restored.push({
-            receiptId: record.receiptId,
-            status: typeof record.status === "string" ? record.status : "committed",
-            summary: record.summary.slice(0, 300),
-            previousTime: typeof record.previousTime === "number" ? record.previousTime : 0,
-            currentTime: typeof record.currentTime === "number" ? record.currentTime : 0,
-            currentLocationId: typeof record.currentLocationId === "string" ? record.currentLocationId : null,
-            adoptedEventCount: typeof record.adoptedEventCount === "number" ? record.adoptedEventCount : 0,
-            recordedAt: typeof record.recordedAt === "number" ? record.recordedAt : 0
-          });
-        }
-        if (restored.length > 0) setState({ receipts: restored });
-      }
+      restoreReceiptsForChat(host.getChatId());
       void refresh();
     },
     dispose() {
@@ -7143,7 +7196,7 @@ function createAtlasServerCore(deps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.27",
+      version: "0.9.28",
       protocolVersion: 1,
       time: now()
     });
