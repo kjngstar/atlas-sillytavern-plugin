@@ -1443,6 +1443,19 @@
   flex: 0 0 auto;
 }
 
+/* 0.9.25 shujuku 栏位段：主槽位选择 + 栏位名称（外层 flex，min-width:0 防溢出） */
+.aw-seg-item__slot {
+  width: 150px;
+  min-width: 0;
+  flex: 0 0 auto;
+}
+
+.aw-seg-item__name {
+  width: 110px;
+  min-width: 0;
+  flex: 1 1 110px;
+}
+
 .aw-seg-item__head .aw-btn--icon { padding: 5px 8px; font-size: 12px; }
 
 .aw-seg-item__area { width: 100%; min-width: 0; }
@@ -1456,3 +1469,14 @@
   color: var(--aw-muted);
   font-family: var(--aw-sans);
 }
+
+/* 0.9.24 世界书提炼地理按钮条（空地图时显示） */
+.aw-geobar {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: end center;
+  padding: 0 24px 40px;
+  pointer-events: none;
+}
+.aw-geobar .aw-btn--primary { pointer-events: auto; }

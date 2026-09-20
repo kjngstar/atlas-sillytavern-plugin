@@ -16,7 +16,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const ATLAS_PLUGIN_ID = "atlas";
-export const ATLAS_PLUGIN_VERSION = "0.9.23";
+export const ATLAS_PLUGIN_VERSION = "0.9.25";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_API_BASE = "/api/plugins/atlas";
 
@@ -28,6 +28,7 @@ export const ATLAS_PLUGIN_ROUTES = [
   { method: "GET", path: "/worlds" },
   { method: "POST", path: "/worlds/import" },
   { method: "POST", path: "/worlds/ensure-starter" },
+  { method: "POST", path: "/worlds/geo/adopt" },
   { method: "POST", path: "/bindings" },
   { method: "GET", path: "/state/:chatId" },
   { method: "GET", path: "/map/image/:chatId" },

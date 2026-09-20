@@ -190,7 +190,7 @@ async function setup(fetchScripts, overrides = {}) {
 // ---------------------------------------------------------------------------
 
 test("路由清单：15 条且全部在 /api/plugins/atlas 前缀下", () => {
-  equal(ATLAS_ROUTE_MANIFEST.length, 15, "dispatch 核心路由数（ATLAS-18 新增 ensure-starter）");
+  equal(ATLAS_ROUTE_MANIFEST.length, 16, "dispatch 核心路由数（ATLAS-18 ensure-starter + 0.9.x geo/adopt）");
   equal(ATLAS_PLUGIN_ROUTES.length, ATLAS_ROUTE_MANIFEST.length, "index.mjs 与核心路由清单一致");
   const plugin = createAtlasServerPlugin();
   for (const route of plugin.routes) {
@@ -773,7 +773,7 @@ test("未知路由返回 400 与稳定错误码", async () => {
 // 解析器与 URL 工具专项
 // ---------------------------------------------------------------------------
 
-test("parseAtlasWorldTurnDraft：围栏 JSON / 字符串 duration / 非法输入", () => {
+test("parseAtlasWorldTurnDraft：围栏 JSON / 字符串 duration / 容错抢救（0.9.25 shujuku 口径）", () => {
   const fenced = parseAtlasWorldTurnDraft("```json\n" + JSON.stringify(GOOD_DRAFT) + "\n```");
   equal(fenced.duration, 12, "围栏 JSON 解析");
   const stringDuration = parseAtlasWorldTurnDraft(JSON.stringify({ ...GOOD_DRAFT, duration: "3" }));
@@ -781,8 +781,18 @@ test("parseAtlasWorldTurnDraft：围栏 JSON / 字符串 duration / 非法输入
   assert.throws(() => parseAtlasWorldTurnDraft("这不是 JSON"), (err) => err.code === ATLAS_ERROR_CODES.RESPONSE_MALFORMED);
   assert.throws(() => parseAtlasWorldTurnDraft(JSON.stringify({ ...GOOD_DRAFT, summary: "" })), (err) => err.code === ATLAS_ERROR_CODES.RESPONSE_MALFORMED);
   assert.throws(() => parseAtlasWorldTurnDraft(JSON.stringify({ ...GOOD_DRAFT, duration: -1 })), (err) => err.code === ATLAS_ERROR_CODES.RESPONSE_MALFORMED);
-  assert.throws(() => parseAtlasWorldTurnDraft(JSON.stringify({ ...GOOD_DRAFT, npcChanges: [{ foo: 1 }] })), (err) => err.code === ATLAS_ERROR_CODES.RESPONSE_MALFORMED);
-  assertionCount += 6;
+  // 0.9.25：坏条丢弃不整单炸（shujuku filter(Boolean) 同款）
+  const dropped = parseAtlasWorldTurnDraft(JSON.stringify({ ...GOOD_DRAFT, npcChanges: [{ foo: 1 }] }));
+  equal(dropped.rawEffects.length, 0, "无法识别的变化条目被丢弃");
+  ok(dropped.summary.includes("丢弃 1 条"), "丢弃计数并入摘要");
+  // 0.9.25：JSON 完全损坏（外层截断）时字段级抢救——summary / duration / npcChanges 从原文提取
+  const salvaged = parseAtlasWorldTurnDraft(
+    '前置说明 {"summary": "被说明文字包住的摘要", "duration": "7", "npcChanges": [{"entityId": "npc-1", "tag": "受伤"}, {"垃圾": true}]',
+  );
+  equal(salvaged.summary, "被说明文字包住的摘要", "字段级抢救出 summary");
+  equal(salvaged.duration, 7, "字段级抢救出 duration");
+  equal(salvaged.rawEffects.length, 1, "抢救出 1 条合法变化、坏条丢弃");
+  assertionCount += 9;
 });
 
 test("buildAtlasChatUrl：规范化与拒绝", () => {

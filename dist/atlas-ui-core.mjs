@@ -301,6 +301,16 @@ function parseAtlasTurnCommitRequest(raw) {
     if (typeof record.loreSupplement === "string" && record.loreSupplement.trim().length > 0) {
       request.loreSupplement = record.loreSupplement.slice(0, ATLAS_LIMITS.LORE_SUPPLEMENT_CHARS);
     }
+    if (Array.isArray(record.recentAssistantTexts)) {
+      const texts = record.recentAssistantTexts.filter((item) => typeof item === "string" && item.trim().length > 0).slice(0, 10).map((item) => item.slice(0, ATLAS_LIMITS.ASSISTANT_TEXT_CHARS));
+      if (texts.length > 0) request.recentAssistantTexts = texts;
+    }
+    if (typeof record.personaDescription === "string" && record.personaDescription.trim().length > 0) {
+      request.personaDescription = record.personaDescription.slice(0, 2e3);
+    }
+    if (typeof record.charDescription === "string" && record.charDescription.trim().length > 0) {
+      request.charDescription = record.charDescription.slice(0, 4e3);
+    }
     return request;
   });
 }
@@ -682,34 +692,50 @@ function buildAtlasChatUrl(endpoint) {
   url.pathname = `${base}/chat/completions`;
   return url.toString();
 }
-var DEFAULT_WORLD_TURN_SYSTEM_PROMPT = "你是阿特拉斯世界推演引擎。基于给定的当前世界状态（位置、时间、附近人物、可达内容）与本轮用户行动、助手回复，推断本轮对世界造成的**有界结构化变化**。\n严格要求：只输出一个 JSON 对象，不要输出任何多余说明或代码围栏；字段：\nduration（本轮消耗的时段数，非负数字，≤10000）、\nlocationChange（对象或 null：{toPointId, toRegionId}，id 必须来自上下文中出现的地点）、\nnpcChanges（数组，每条形如 {entityId, key, value} 更新人物状态 / {entityId, tag} 加标签 / {entityId, removeTag} 删标签 / {entityId, targetEntityId, key, value} 改关系；entityId 必须来自上下文）、\nmemoryDrafts（数组，每条 {entityId, text}，为人物追加一条记忆，≤500 字）、\neventDrafts（数组，事件的摘要文字，仅叙述用）、\ntriggerResults（数组，本轮命中的触发器 id）、\nsummary（本轮世界变化的一句话摘要，≤500 字）。\n禁止：编造上下文之外的实体 id；输出时间地点之外的世界重写；输出任何密钥、路径或代码。";
-var LORE_SUPPLEMENT_HEADER = "【世界书资料（当前角色卡，可能有噪声，仅供理解世界）】";
-function buildWorldTurnUserContent(input) {
-  const parts = [
-    "【当前世界状态与可达内容】",
-    input.injectionText
-  ];
-  if (input.loreSupplement && input.loreSupplement.trim().length > 0) {
-    parts.push("", LORE_SUPPLEMENT_HEADER, input.loreSupplement);
+var DEFAULT_PROMPT_SEGMENTS = [
+  {
+    role: "system",
+    name: "主系统提示词（推演引擎职责）",
+    mainSlot: "A",
+    content: "你是阿特拉斯世界推演引擎。你收到一份本轮的剧情素材（世界状态、前文、用户行动、助手回复），你的唯一职责：推断本轮对世界造成的**有界结构化变化**——谁出现在哪里、人物状态与关系如何变化、势力格局有无变动、时间推进多少。\n严格要求：只输出一个 JSON 对象，不要输出任何多余说明、推理过程或代码围栏。字段契约：\nduration（本轮消耗的时段数，非负数字，≤10000）、\nlocationChange（对象或 null：{toPointId, toRegionId}，id 必须来自上下文中出现的地点）、\nnpcChanges（数组，每条形如 {entityId, key, value} 更新人物状态 / {entityId, tag} 加标签 / {entityId, removeTag} 删标签 / {entityId, targetEntityId, key, value} 改关系；entityId 必须来自上下文）、\nmemoryDrafts（数组，每条 {entityId, text}，为人物追加一条记忆，≤500 字）、\neventDrafts（数组，事件摘要文字，仅叙述用）、\ntriggerResults（数组，本轮命中的触发器 id）、\nsummary（本轮世界变化的一句话摘要，≤500 字）。\n禁止：编造上下文之外的实体 id；输出时间地点之外的世界重写；输出任何密钥、路径或代码。"
+  },
+  {
+    role: "user",
+    name: "推演任务指令（本轮素材）",
+    mainSlot: "B",
+    content: "【当前世界状态与可达内容】\n$5\n\n$1\n【上轮世界变化】\n$6\n\n【前文故事发展（AI 输出）】\n$7\n\n【用户设定】\n$U\n\n【角色描述】\n$C\n\n【本轮用户行动】\n$8\n\n【本轮助手回复】\n{{assistantReply}}\n\n请按系统要求只输出一个 JSON 对象。"
   }
-  parts.push(
-    "",
-    "【本轮用户行动】",
-    input.userText,
-    "",
-    "【本轮助手回复】",
-    input.assistantText,
-    "",
-    "请按系统要求只输出一个 JSON 对象。"
-  );
-  return parts.join("\n");
+];
+var DEFAULT_WORLD_TURN_SYSTEM_PROMPT = DEFAULT_PROMPT_SEGMENTS[0].content;
+var LORE_SUPPLEMENT_HEADER = "【世界书资料（当前角色卡，可能有噪声，仅供理解世界）】";
+function wrapWorldbookContext(content) {
+  const text = String(content ?? "");
+  return text ? `
+<worldbook_context>
+${text}
+</worldbook_context>
+` : "";
 }
-var PROMPT_PLACEHOLDER_PATTERN = /\{\{\s*(worldState|userAction|assistantReply|worldLore)\s*\}\}/g;
 function substitutePromptPlaceholders(content, input) {
-  return content.replace(
-    PROMPT_PLACEHOLDER_PATTERN,
-    (_, key) => key === "worldState" ? input.injectionText : key === "userAction" ? input.userText : key === "worldLore" ? input.loreSupplement ?? "" : input.assistantText
-  );
+  if (!content) return "";
+  let processed = String(content);
+  const loreRaw = input.loreSupplement ?? "";
+  const loreText = loreRaw ? `${LORE_SUPPLEMENT_HEADER}${wrapWorldbookContext(loreRaw)}` : "";
+  const replacements = {
+    $1: loreText,
+    $9: "",
+    $5: input.injectionText ?? "",
+    $6: input.lastTurnSummary ?? "",
+    $7: input.recentContextText ?? "",
+    $8: input.userText ?? "",
+    $U: input.personaDescription ?? "",
+    $C: input.charDescription ?? ""
+  };
+  for (const [key, value] of Object.entries(replacements)) {
+    processed = processed.replace(new RegExp(`(?<!\\\\)\\${key}`, "g"), () => value);
+  }
+  processed = processed.replace(/\{\{\s*worldState\s*\}\}/g, input.injectionText ?? "").replace(/\{\{\s*userAction\s*\}\}/g, input.userText ?? "").replace(/\{\{\s*worldLore\s*\}\}/g, loreRaw).replace(/\{\{\s*assistantReply\s*\}\}/g, input.assistantText ?? "");
+  return processed;
 }
 var PROMPT_MESSAGE_ROLES = ["system", "user", "assistant"];
 function buildWorldTurnMessages(preset, input) {
@@ -719,10 +745,11 @@ function buildWorldTurnMessages(preset, input) {
     content: typeof segment?.content === "string" ? segment.content : ""
   })).filter((segment) => PROMPT_MESSAGE_ROLES.includes(segment.role) && segment.content.trim().length > 0).map((segment) => ({ role: segment.role, content: substitutePromptPlaceholders(segment.content, input) }));
   if (messages.length > 0) return messages;
+  const systemContent = preset.systemPrompt?.trim() || DEFAULT_PROMPT_SEGMENTS[0].content;
   return [
-    { role: "system", content: preset.systemPrompt?.trim() || DEFAULT_WORLD_TURN_SYSTEM_PROMPT },
-    { role: "user", content: buildWorldTurnUserContent(input) }
-  ];
+    { role: "system", content: substitutePromptPlaceholders(systemContent, input) },
+    { role: "user", content: substitutePromptPlaceholders(DEFAULT_PROMPT_SEGMENTS[1].content, input) }
+  ].filter((segment) => segment.content.trim().length > 0);
 }
 function errorMessageForStatus(status) {
   if (status === 401 || status === 403) {
@@ -829,9 +856,12 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
       }
       const text2 = extractAssistantText(payload);
       if (text2 === null || text2.trim().length === 0) {
-        return { text: null, gatewayError: gatewayErrorMessage(payload), rawText };
+        const emptyChoices = Boolean(
+          payload && typeof payload === "object" && Array.isArray(payload.choices) && payload.choices.length === 0
+        );
+        return { text: null, gatewayError: gatewayErrorMessage(payload), rawText, emptyChoices };
       }
-      return { text: text2.trim(), gatewayError: null, rawText };
+      return { text: text2.trim(), gatewayError: null, rawText, emptyChoices: false };
     };
     let parsed = await parseCall(response);
     let status = response.status;
@@ -859,6 +889,13 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
     }
     const text = parsed.text;
     if (text === null || text.length === 0) {
+      if (parsed.emptyChoices) {
+        return fail4(
+          ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
+          "模型返回了空回复（choices 为空、0 补全 token）——通常是供应商安全过滤静默拦截了本次输入（Gemini 系常见），也可能是上游网关故障。可选：在「推进」页关闭「世界书资料」缩小输入，或换模型 / 供应商。",
+          false
+        );
+      }
       const gatewayError = parsed.gatewayError;
       if (gatewayError) {
         const moderationLike = /sensitive|unprocessable|敏感|审核/i.test(gatewayError) || /unprocessable_entity_error|new_sensitive/i.test(parsed.rawText);
@@ -974,12 +1011,13 @@ function extractAssistantText(payload) {
 }
 function extractJsonObject(text) {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const candidates = [fenced?.[1] ?? "", text];
+  const candidates = [fenced?.[1] ?? "", text, extractBalancedJsonObject(text)];
   for (const candidate of candidates) {
-    const trimmed = candidate.trim();
-    if (!trimmed.startsWith("{")) continue;
+    if (!candidate) continue;
+    const sanitized = sanitizeJsonText(candidate);
+    if (!sanitized) continue;
     try {
-      const parsed = JSON.parse(trimmed);
+      const parsed = JSON.parse(sanitized);
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
         return parsed;
       }
@@ -987,6 +1025,41 @@ function extractJsonObject(text) {
     }
   }
   return null;
+}
+function extractBalancedJsonObject(text) {
+  const start = text.indexOf("{");
+  if (start < 0) return "";
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i += 1) {
+    const ch = text[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === "{") depth += 1;
+    if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return text.slice(start);
+}
+function sanitizeJsonText(jsonStr) {
+  if (!jsonStr) return "";
+  let sanitized = String(jsonStr).replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/\s*```$/i, "").replace(/[\u201C\u201D]/g, '"').replace(/[\u2018\u2019]/g, "'").replace(/^[^{]*?(\{)/s, "$1").trim();
+  sanitized = extractBalancedJsonObject(sanitized) || sanitized;
+  return sanitized.replace(/,\s*([}\]])/g, "$1").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
 function toDuration(value) {
   if (typeof value === "number" && Number.isFinite(value) && value >= 0) return Math.floor(value);
@@ -1027,63 +1100,185 @@ function npcChangeToEffect(raw) {
   return null;
 }
 function parseAtlasWorldTurnDraft(text) {
-  const parsed = extractJsonObject(text ?? "");
-  if (!parsed) {
+  const source = text ?? "";
+  const parsed = extractJsonObject(source);
+  const draftSource = parsed ?? salvageDraftContainerFromRawText(source);
+  if (!draftSource) {
     throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "推演输出不是合法的 JSON 对象。");
   }
-  const summary = typeof parsed.summary === "string" ? parsed.summary.trim() : "";
+  const summary = typeof draftSource.summary === "string" ? draftSource.summary.trim() : "";
   if (!summary) {
     throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "推演输出缺少 summary 摘要。");
   }
-  const rawDuration = "duration" in parsed ? toDuration(parsed.duration) : 0;
+  const rawDuration = "duration" in draftSource ? toDuration(draftSource.duration) : 0;
   if (rawDuration === null) {
-    throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, `推演输出 duration 非法：${String(parsed.duration)}`);
+    throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, `推演输出 duration 非法：${String(draftSource.duration)}`);
   }
   const rawEffects = [];
-  if (parsed.npcChanges !== void 0 && parsed.npcChanges !== null) {
-    if (!Array.isArray(parsed.npcChanges)) {
+  let droppedEffects = 0;
+  if (draftSource.npcChanges !== void 0 && draftSource.npcChanges !== null) {
+    if (!Array.isArray(draftSource.npcChanges)) {
       throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "推演输出 npcChanges 必须是数组。");
     }
-    if (parsed.npcChanges.length > ATLAS_LIMITS.REF_ARRAY) {
-      throw new AtlasError(ATLAS_ERROR_CODES.FIELD_LIMIT_EXCEEDED, `npcChanges 超过 ${ATLAS_LIMITS.REF_ARRAY} 项上限`);
-    }
-    parsed.npcChanges.forEach((item, index) => {
+    draftSource.npcChanges.forEach((item) => {
       const effect = npcChangeToEffect(item);
       if (!effect) {
-        throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, `npcChanges[${index}] 不是可识别的变化形状。`);
+        droppedEffects += 1;
+        return;
       }
+      if (rawEffects.length >= ATLAS_LIMITS.REF_ARRAY) return;
       rawEffects.push(effect);
     });
   }
   const memoryDrafts = [];
-  if (parsed.memoryDrafts !== void 0 && parsed.memoryDrafts !== null) {
-    if (!Array.isArray(parsed.memoryDrafts)) {
+  let droppedMemories = 0;
+  if (draftSource.memoryDrafts !== void 0 && draftSource.memoryDrafts !== null) {
+    if (!Array.isArray(draftSource.memoryDrafts)) {
       throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "推演输出 memoryDrafts 必须是数组。");
     }
-    if (parsed.memoryDrafts.length > ATLAS_LIMITS.REF_ARRAY) {
-      throw new AtlasError(ATLAS_ERROR_CODES.FIELD_LIMIT_EXCEEDED, `memoryDrafts 超过 ${ATLAS_LIMITS.REF_ARRAY} 项上限`);
-    }
-    parsed.memoryDrafts.forEach((item, index) => {
+    draftSource.memoryDrafts.forEach((item) => {
       if (!item || typeof item !== "object" || Array.isArray(item)) {
-        throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, `memoryDrafts[${index}] 必须是对象。`);
+        droppedMemories += 1;
+        return;
       }
       const record = item;
       const entityId = typeof record.entityId === "string" ? record.entityId.trim() : "";
       const memoryText = typeof record.text === "string" ? record.text.trim() : "";
       if (!entityId || !memoryText) {
-        throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, `memoryDrafts[${index}] 需要 entityId 与非空 text。`);
+        droppedMemories += 1;
+        return;
       }
+      if (memoryDrafts.length >= ATLAS_LIMITS.REF_ARRAY) return;
       memoryDrafts.push({ entityId, text: memoryText });
     });
   }
-  const locationChange = toLocationChange(parsed.locationChange);
+  const locationChange = toLocationChange(draftSource.locationChange);
   return {
     duration: rawDuration,
     locationChange,
     rawEffects,
     memoryDrafts,
-    summary
+    summary: droppedEffects + droppedMemories > 0 ? `${summary}（解析时丢弃 ${droppedEffects} 条无法识别的变化、${droppedMemories} 条残缺记忆）` : summary
   };
+}
+function salvageDraftContainerFromRawText(raw) {
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  const summary = extractRawStringField(raw, "summary");
+  const durationText = extractRawStringField(raw, "duration");
+  if (!summary && !durationText) return null;
+  const container = {};
+  if (summary) container.summary = summary;
+  if (durationText) container.duration = durationText;
+  const effects = salvageObjectArrayFromRawText(raw, "npcChanges").map((item) => npcChangeToEffect(item)).filter((item) => item !== null).slice(0, ATLAS_LIMITS.REF_ARRAY);
+  if (effects.length > 0) container.npcChanges = effects;
+  const memories = salvageObjectArrayFromRawText(raw, "memoryDrafts").filter((item) => typeof item.entityId === "string" && item.entityId.trim() && typeof item.text === "string" && item.text.trim()).slice(0, ATLAS_LIMITS.REF_ARRAY);
+  if (memories.length > 0) container.memoryDrafts = memories;
+  const locationRaw = extractRawStringField(raw, "toPointId");
+  const regionRaw = extractRawStringField(raw, "toRegionId");
+  if (locationRaw || regionRaw) container.locationChange = { toPointId: locationRaw ?? null, toRegionId: regionRaw ?? null };
+  return container;
+}
+function extractRawStringField(source, fieldName) {
+  if (typeof source !== "string" || !fieldName) return "";
+  const match = new RegExp(`"${fieldName}"\\s*:\\s*"`).exec(source);
+  if (!match) return "";
+  let i = match.index + match[0].length;
+  let result = "";
+  let escaped = false;
+  while (i < source.length) {
+    const ch = source[i];
+    if (escaped) {
+      result += ch;
+      escaped = false;
+      i += 1;
+      continue;
+    }
+    if (ch === "\\") {
+      result += ch;
+      escaped = true;
+      i += 1;
+      continue;
+    }
+    if (ch === '"') break;
+    result += ch;
+    i += 1;
+  }
+  return result.replace(/\\n/g, "\n").replace(/\\r/g, "\r").replace(/\\t/g, "	").replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+}
+function salvageObjectArrayFromRawText(raw, fieldName) {
+  const arrayMatch = new RegExp(`"${fieldName}"\\s*:\\s*\\[`).exec(raw);
+  if (!arrayMatch) return [];
+  const arrayStart = raw.indexOf("[", arrayMatch.index);
+  if (arrayStart < 0) return [];
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let arrayEnd = -1;
+  for (let i = arrayStart; i < raw.length; i += 1) {
+    const ch = raw[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === "[") depth += 1;
+    if (ch === "]") {
+      depth -= 1;
+      if (depth === 0) {
+        arrayEnd = i;
+        break;
+      }
+    }
+  }
+  if (arrayEnd < 0) return [];
+  const arrayContent = raw.slice(arrayStart + 1, arrayEnd);
+  const objects = [];
+  let objStart = -1;
+  depth = 0;
+  inString = false;
+  escaped = false;
+  for (let i = 0; i < arrayContent.length; i += 1) {
+    const ch = arrayContent[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === "{") {
+      if (depth === 0) objStart = i;
+      depth += 1;
+    } else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0 && objStart >= 0) {
+        const objText = arrayContent.slice(objStart, i + 1);
+        try {
+          const obj = JSON.parse(sanitizeJsonText(objText));
+          if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+            objects.push(obj);
+          }
+        } catch {
+        }
+        objStart = -1;
+      }
+    }
+  }
+  return objects;
 }
 
 // src/atlas-proxy-fetch.ts
@@ -1596,6 +1791,20 @@ function createAtlasUiCore(deps) {
       setState({ lastError: "本轮未注入阿特拉斯上下文：服务不可用。" });
     }
   }
+  async function safeCommitContext(hook, assistantText) {
+    try {
+      const raw = await hook(assistantText);
+      if (!raw || typeof raw !== "object") return null;
+      const texts = Array.isArray(raw.recentAssistantTexts) ? raw.recentAssistantTexts.filter((item) => typeof item === "string" && item.trim().length > 0).filter((item) => item !== assistantText).slice(-10) : [];
+      return {
+        ...texts.length > 0 ? { recentAssistantTexts: texts } : {},
+        ...typeof raw.personaDescription === "string" && raw.personaDescription.trim() ? { personaDescription: raw.personaDescription } : {},
+        ...typeof raw.charDescription === "string" && raw.charDescription.trim() ? { charDescription: raw.charDescription } : {}
+      };
+    } catch {
+      return null;
+    }
+  }
   async function onGenerationEnded(assistantMessageId, assistantText) {
     if (disposed) return;
     let pending = state.pendingTurn;
@@ -1628,6 +1837,7 @@ function createAtlasUiCore(deps) {
         loreSupplement = void 0;
       }
     }
+    const commitContext = deps.getCommitContext ? await safeCommitContext(deps.getCommitContext, assistantText) : null;
     const request = {
       turnId: pending.turnId,
       chatId: pending.chatId,
@@ -1636,7 +1846,10 @@ function createAtlasUiCore(deps) {
       swipeId: commitSwipeId,
       userText: pending.userText,
       assistantText: assistantText.slice(0, ATLAS_LIMITS.ASSISTANT_TEXT_CHARS),
-      ...loreSupplement ? { loreSupplement } : {}
+      ...loreSupplement ? { loreSupplement } : {},
+      ...commitContext?.recentAssistantTexts?.length ? { recentAssistantTexts: commitContext.recentAssistantTexts } : {},
+      ...commitContext?.personaDescription ? { personaDescription: commitContext.personaDescription } : {},
+      ...commitContext?.charDescription ? { charDescription: commitContext.charDescription } : {}
     };
     const parsed = parseAtlasTurnCommitRequest(request);
     if (!parsed.ok) {
@@ -1723,6 +1936,8 @@ function createAtlasUiCore(deps) {
     } catch {
       lastAssistant = "";
     }
+    const manualAssistantText = (lastAssistant.trim().length > 0 ? lastAssistant : "（无新剧情，仅时间与日程流动。）").slice(0, ATLAS_LIMITS.ASSISTANT_TEXT_CHARS);
+    const commitContext = deps.getCommitContext ? await safeCommitContext(deps.getCommitContext, manualAssistantText) : null;
     const request = {
       turnId: `turn-manual-${ts}`,
       chatId,
@@ -1730,8 +1945,11 @@ function createAtlasUiCore(deps) {
       assistantMessageId: `manual-a-${ts}`,
       swipeId: null,
       userText: "（手动推进：不新增剧情，仅让世界按日程与惯性流动。）",
-      assistantText: (lastAssistant.trim().length > 0 ? lastAssistant : "（无新剧情，仅时间与日程流动。）").slice(0, ATLAS_LIMITS.ASSISTANT_TEXT_CHARS),
-      ...loreSupplement ? { loreSupplement } : {}
+      assistantText: manualAssistantText,
+      ...loreSupplement ? { loreSupplement } : {},
+      ...commitContext?.recentAssistantTexts?.length ? { recentAssistantTexts: commitContext.recentAssistantTexts } : {},
+      ...commitContext?.personaDescription ? { personaDescription: commitContext.personaDescription } : {},
+      ...commitContext?.charDescription ? { charDescription: commitContext.charDescription } : {}
     };
     const parsed = parseAtlasTurnCommitRequest(request);
     if (!parsed.ok) {
@@ -4487,6 +4705,19 @@ function latestRevision(world) {
 function latestDefinitionRevision(world) {
   return latestRevision(world);
 }
+function captureDefinitionSnapshot(world) {
+  const snapshot = {
+    worldBible: JSON.parse(JSON.stringify(world.worldBible ?? [])),
+    regions: JSON.parse(JSON.stringify(world.regions ?? [])),
+    points: JSON.parse(JSON.stringify(world.points ?? [])),
+    globalPrompt: world.globalPrompt ?? null,
+    triggers: JSON.parse(JSON.stringify(world.triggers ?? [])),
+    entities: JSON.parse(JSON.stringify(world.entityRecords ?? [])),
+    contentHash: ""
+  };
+  snapshot.contentHash = `defsnap-${hashString(JSON.stringify(snapshot))}`;
+  return snapshot;
+}
 function definitionRevisionFor(world, at, branchId = null) {
   const candidates = (world.definitionRevisions ?? []).filter((r) => (r.effectiveAt ?? 0) <= at).filter((r) => !r.effectiveBranchId || r.effectiveBranchId === branchId);
   if (candidates.length === 0) {
@@ -4504,6 +4735,43 @@ function definitionRevisionFor(world, at, branchId = null) {
     return a.createdAt - b.createdAt;
   }).pop() ?? null;
   return { revision: selected, approx: false, reason: null };
+}
+function appendDefinitionRevision(world, opts) {
+  const note = opts.authorNote.trim();
+  if (!note) return { ok: false, error: "修订说明不能为空" };
+  if (note.length > W0_LIMITS.maxRevisionNote) {
+    return { ok: false, error: `修订说明超过上限 ${W0_LIMITS.maxRevisionNote} 字` };
+  }
+  const list = world.definitionRevisions ?? [];
+  if (list.length >= W0_LIMITS.maxDefinitionRevisions) {
+    return { ok: false, error: `定义修订数量已达上限（${W0_LIMITS.maxDefinitionRevisions}）；请先归档或压缩历史` };
+  }
+  const knownEntityIds2 = new Set((world.entityRecords ?? []).map((e) => e.id));
+  for (const entityId of opts.changedEntityIds ?? []) {
+    if (!knownEntityIds2.has(entityId)) {
+      return { ok: false, error: `修订引用了不存在的实体：${entityId}` };
+    }
+  }
+  if (opts.effectiveAt !== void 0 && (!Number.isFinite(opts.effectiveAt) || opts.effectiveAt < 0)) {
+    return { ok: false, error: "生效时间必须是非负的世界内时间" };
+  }
+  if (opts.effectiveBranchId && !(world.stories ?? []).some((st) => st.id === opts.effectiveBranchId)) {
+    return { ok: false, error: `生效分支不存在：${opts.effectiveBranchId}` };
+  }
+  const parent = latestRevision(world);
+  const revision = {
+    id: `defrev-${hashString(`${world.id}|${list.length}|${note}|${opts.now}`)}`,
+    worldId: world.id,
+    createdAt: opts.now,
+    authorNote: note,
+    ...opts.changedEntityIds?.length ? { entityBaselineRefs: [...opts.changedEntityIds] } : {},
+    ...parent ? { parentRevisionId: parent.id } : {},
+    ...opts.isRetcon ? { isRetcon: true } : {},
+    effectiveAt: opts.effectiveAt ?? 0,
+    ...opts.effectiveBranchId ? { effectiveBranchId: opts.effectiveBranchId } : {},
+    snapshot: captureDefinitionSnapshot(world)
+  };
+  return { ok: true, value: { ...world, definitionRevisions: [...list, revision] } };
 }
 function entityRecordById(world, entityId) {
   return (world.entityRecords ?? []).find((e) => e.id === entityId) ?? null;
@@ -6005,7 +6273,13 @@ function normalizePromptSegments(raw) {
     const content = typeof record.content === "string" ? record.content.trim() : "";
     if (!content) continue;
     if (segments.length >= MAX_PROMPT_SEGMENTS) break;
-    segments.push({ role, content: content.slice(0, MAX_PROMPT_CHARS) });
+    const segment = { role, content: content.slice(0, MAX_PROMPT_CHARS) };
+    if (typeof record.name === "string" && record.name.trim()) segment.name = record.name.trim().slice(0, 64);
+    if (record.mainSlot === "A" || record.mainSlot === "B" || record.mainSlot === "") {
+      segment.mainSlot = record.mainSlot;
+    }
+    if (record.deletable === false) segment.deletable = false;
+    segments.push(segment);
   }
   return segments;
 }
@@ -6131,8 +6405,15 @@ function parsePromptPreset(raw) {
     id,
     name: record.name.trim(),
     systemPrompt: prompt.slice(0, MAX_PROMPT_CHARS),
-    ...segments.length > 0 ? { segments } : {}
+    ...segments.length > 0 ? { segments } : {},
+    ...normalizeContextTurnCount(record.contextTurnCount) !== null ? { contextTurnCount: normalizeContextTurnCount(record.contextTurnCount) } : {}
   };
+}
+function normalizeContextTurnCount(raw) {
+  const value = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw.trim()) : NaN;
+  if (!Number.isFinite(value)) return null;
+  const truncated = Math.trunc(value);
+  return truncated >= 1 && truncated <= 10 ? truncated : null;
 }
 function sanitizeSettingsV2(raw, deps = {}) {
   const diagnostics = { skipped: 0, apiSkipped: 0, promptSkipped: 0, legacyMajorEventPreserved: false };
@@ -6439,6 +6720,7 @@ function applySettingsCommand(settings, command, deps = {}) {
         name: uniqueName(preset.name, usedNames),
         systemPrompt: text,
         ...segments.length > 0 ? { segments } : {},
+        ...normalizeContextTurnCount(preset.contextTurnCount) !== null ? { contextTurnCount: normalizeContextTurnCount(preset.contextTurnCount) } : {},
         updatedAt: now
       };
       const promptPresets = existingIndex >= 0 ? settings.promptPresets.map((p, i) => i === existingIndex ? entry : p) : [...settings.promptPresets, entry];
@@ -6694,7 +6976,9 @@ function resolveWorldTurnPreset(settings) {
     ...connection.requestHeaders ? { requestHeaders: connection.requestHeaders } : {},
     ...normalizePromptPostProcessing(connection.promptPostProcessing) ? { promptPostProcessing: normalizePromptPostProcessing(connection.promptPostProcessing) } : {},
     // 0.9.18 systemPrompt 优先级：连接级覆盖 > 提示词预设分段模式 > 提示词预设单条 > 空（内置默认兜底）
-    ...connectionPrompt ? { systemPrompt: connectionPrompt } : prompt && prompt.segments && prompt.segments.length > 0 ? { promptSegments: prompt.segments } : prompt ? { systemPrompt: prompt.systemPrompt } : {}
+    ...connectionPrompt ? { systemPrompt: connectionPrompt } : prompt && prompt.segments && prompt.segments.length > 0 ? { promptSegments: prompt.segments } : prompt ? { systemPrompt: prompt.systemPrompt } : {},
+    // 0.9.25 shujuku contextTurnCount：$7 前文条数（预设级设置，缺省 3 由引擎侧兜底）
+    ...prompt?.contextTurnCount ? { contextTurnCount: prompt.contextTurnCount } : {}
   };
 }
 
@@ -6858,7 +7142,7 @@ function createAtlasServerCore(deps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.23",
+      version: "0.9.25",
       protocolVersion: 1,
       time: now()
     });
@@ -6931,6 +7215,151 @@ function createAtlasServerCore(deps) {
       await store.write(`world:${parsed.id}`, parsed);
       worldCache.set(parsed.id, parsed);
       return okResult({ created: true, world: worldSummary(parsed) });
+    });
+  }
+  const GEO_LIMITS = { REGIONS_MAX: 12, POINTS_MAX: 40, NAME_CHARS: 40, DESC_CHARS: 300 };
+  async function handleGeoAdopt(body) {
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "geo/adopt 请求必须是对象");
+    }
+    const record = body;
+    const chatId = typeof record.chatId === "string" ? record.chatId : "";
+    if (!chatId || chatId.length > ATLAS_LIMITS.ID_CHARS) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "chatId 非法");
+    }
+    const lore = typeof record.loreSupplement === "string" ? record.loreSupplement.trim() : "";
+    if (!lore) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "没有可用的世界书资料——卡书无启用条目，或「世界书资料」开关处于关闭状态。");
+    }
+    const binding = requireBoundBinding(await getBinding(chatId));
+    const world = await requireWorld(binding);
+    const current = await loadSettings();
+    const preset = resolveWorldTurnPreset(current);
+    if (!preset) {
+      throw new AtlasError(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "未配置推演 API，无法提炼地理。");
+    }
+    checkRpm();
+    rpmTimestamps.push(now());
+    const extractionSegments = [
+      {
+        role: "system",
+        content: "你是地理信息抽取器。只输出一个 JSON 对象，不输出任何其它文字、解释或代码围栏。"
+      },
+      {
+        role: "user",
+        content: [
+          "从下面的角色卡世界书资料中提炼「地区 / 地点」。",
+          '只输出一个 JSON 对象：{"regions":[{"name":"...","description":"..."}],"points":[{"name":"...","regionName":"..."}]}',
+          '规则：name ≤20 字；regionName 必须是 regions 里出现过的名字（没有合适地区就省略该字段）；只提炼资料中明确或强烈暗示的地理实体（城市 / 森林 / 遗迹 / 建筑等），角色、文风、格式规则一律不要；宁缺毋滥；最多 12 个地区、40 个地点；资料里没有地理信息就输出 {"regions":[],"points":[]}。',
+          "【世界书资料】",
+          lore.slice(0, ATLAS_LIMITS.LORE_SUPPLEMENT_CHARS)
+        ].join("\n")
+      }
+    ];
+    const call = await callAtlasWorldTurnApi(
+      { ...preset, promptSegments: extractionSegments },
+      { injectionText: "", userText: "", assistantText: "" },
+      { fetchFn: deps.fetchFn, now }
+    );
+    pushLog({
+      at: now(),
+      kind: "world-geo-extract",
+      presetName: preset.name,
+      model: preset.model,
+      ok: call.ok,
+      status: call.status,
+      durationMs: call.durationMs
+    });
+    if (!call.ok) {
+      throw new AtlasError(call.code, call.message, { retryable: call.retryable });
+    }
+    let spec = {};
+    try {
+      const stripped = call.text.replace(/^```(?:json)?/i, "").replace(/```\s*$/, "").trim();
+      const start = stripped.indexOf("{");
+      const end = stripped.lastIndexOf("}");
+      spec = JSON.parse(start >= 0 && end > start ? stripped.slice(start, end + 1) : stripped);
+    } catch {
+      throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "提炼结果不是合法 JSON——模型没有遵守输出契约，可重试一次。", { retryable: true });
+    }
+    const cleanName = (value) => {
+      const text = String(value ?? "").trim().replace(/\s+/g, " ");
+      return text ? text.slice(0, GEO_LIMITS.NAME_CHARS) : null;
+    };
+    const cleanDesc = (value) => String(value ?? "").trim().replace(/\s+/g, " ").slice(0, GEO_LIMITS.DESC_CHARS);
+    const norm = (text) => text.toLowerCase();
+    const existingRegionNames = new Set((world.regions ?? []).map((r) => norm(String(r.name))));
+    const existingPointNames = new Set((world.points ?? []).map((p) => norm(String(p.name))));
+    const regionIdByName = new Map((world.regions ?? []).map((r) => [norm(String(r.name)), String(r.id)]));
+    let skipped = 0;
+    const newRegions = [];
+    for (const raw of (Array.isArray(spec.regions) ? spec.regions : []).slice(0, GEO_LIMITS.REGIONS_MAX + 8)) {
+      if (newRegions.length >= GEO_LIMITS.REGIONS_MAX) break;
+      const name = cleanName(raw?.name);
+      if (!name || existingRegionNames.has(norm(name)) || newRegions.some((r) => norm(r.name) === norm(name))) {
+        skipped += 1;
+        continue;
+      }
+      const id = `geo-r-${hashString(`${world.id}|r|${name}|${now()}`)}`;
+      newRegions.push({ id, worldId: world.id, name, type: "other", description: cleanDesc(raw?.description) || "由世界书提炼。", coordinates: { x: 0, y: 0 } });
+      regionIdByName.set(norm(name), id);
+    }
+    let nextPointId = (world.points ?? []).reduce((max, p) => Math.max(max, Number(p.id) || 0), 0) + 1;
+    const newPoints = [];
+    for (const raw of (Array.isArray(spec.points) ? spec.points : []).slice(0, GEO_LIMITS.POINTS_MAX + 8)) {
+      if (newPoints.length >= GEO_LIMITS.POINTS_MAX) break;
+      const name = cleanName(raw?.name);
+      if (!name || existingPointNames.has(norm(name)) || newPoints.some((p) => norm(p.name) === norm(name))) {
+        skipped += 1;
+        continue;
+      }
+      const regionName = cleanName(raw?.regionName);
+      const regionId = (regionName ? regionIdByName.get(norm(regionName)) : null) ?? "start";
+      const index = newPoints.length;
+      const angle = index * 2.39996;
+      const radius = 14 + 3.4 * Math.sqrt(index + 1);
+      newPoints.push({
+        id: nextPointId,
+        name,
+        x: Math.round(Math.min(96, Math.max(4, 50 + radius * Math.cos(angle)))),
+        y: Math.round(Math.min(96, Math.max(4, 50 + radius * Math.sin(angle)))),
+        regionId
+      });
+      nextPointId += 1;
+    }
+    if (newRegions.length === 0 && newPoints.length === 0) {
+      pushLog({ at: now(), kind: "world-geo-adopt", worldId: world.id, regionsAdded: 0, pointsAdded: 0, skipped });
+      return okResult({ regionsAdded: 0, pointsAdded: 0, skipped, message: "没有提炼出新的地理实体（可能都已存在，或资料里没有地理描述）。" });
+    }
+    let updated = {
+      ...world,
+      regions: [...world.regions ?? [], ...newRegions],
+      points: [...world.points ?? [], ...newPoints],
+      updatedAt: now()
+    };
+    const revision = appendDefinitionRevision(updated, {
+      authorNote: `世界书提炼地理：+${newRegions.length} 地区 +${newPoints.length} 地点`,
+      now: now()
+    });
+    if (revision.ok) updated = revision.value;
+    await store.write(`world:${world.id}`, updated);
+    worldCache.set(world.id, updated);
+    pushLog({
+      at: now(),
+      kind: "world-geo-adopt",
+      worldId: world.id,
+      regionsAdded: newRegions.length,
+      pointsAdded: newPoints.length,
+      skipped,
+      revisionAppended: revision.ok
+    });
+    return okResult({
+      regionsAdded: newRegions.length,
+      pointsAdded: newPoints.length,
+      skipped,
+      revisionAppended: revision.ok,
+      regionNames: newRegions.map((r) => r.name),
+      pointNames: newPoints.map((p) => p.name)
     });
   }
   async function handleBindings(body) {
@@ -7115,12 +7544,23 @@ function createAtlasServerCore(deps) {
     };
     await store.write(`pending:${idempotencyKey}`, pending);
     rpmTimestamps.push(now());
+    const branchEvents = ledgerForBranch(world, binding.branchId).filter((e) => e.at <= binding.worldTimeCursor);
+    const lastLedgerEvent = branchEvents.at(-1) ?? null;
+    const lastTurnSummary = lastLedgerEvent ? lastLedgerEvent.narrativeSummary.slice(0, 500) : "";
+    const turnCount = Math.min(Math.max(typeof preset.contextTurnCount === "number" ? preset.contextTurnCount : 3, 1), 10);
+    const recentAssistantTexts = (Array.isArray(request.recentAssistantTexts) ? request.recentAssistantTexts : []).slice(-turnCount);
+    const recentContextText = recentAssistantTexts.length > 0 ? `以下是前文的故事发展（AI输出）：
+${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s*\/?>/gi, "\n").replace(/<\/?[^>]+(>|$)/g, "").trim()}"`).join(" \n ")}` : "";
     const call = await callAtlasWorldTurnApi(preset, {
       injectionText: prepareOutput.response.injectionText,
       userText: request.userText,
       assistantText: request.assistantText,
       // 0.9.21 世界书资料块：宿主侧卡书条目（有界），只进推演请求
-      ...request.loreSupplement ? { loreSupplement: request.loreSupplement } : {}
+      ...request.loreSupplement ? { loreSupplement: request.loreSupplement } : {},
+      ...lastTurnSummary ? { lastTurnSummary } : {},
+      ...recentContextText ? { recentContextText } : {},
+      ...request.personaDescription ? { personaDescription: request.personaDescription } : {},
+      ...request.charDescription ? { charDescription: request.charDescription } : {}
     }, { fetchFn: deps.fetchFn, now });
     pushLog({
       at: now(),
@@ -7402,6 +7842,7 @@ function createAtlasServerCore(deps) {
       if (method === "GET" && route === "/worlds") return await handleListWorlds();
       if (method === "POST" && route === "/worlds/import") return await handleImportWorld(body, ctx);
       if (method === "POST" && route === "/worlds/ensure-starter") return await handleEnsureStarter(body, ctx);
+      if (method === "POST" && route === "/worlds/geo/adopt") return await handleGeoAdopt(body);
       if (method === "POST" && route === "/bindings") return await handleBindings(body);
       const stateMatch = route.match(/^\/state\/([^/]+)$/);
       if (method === "GET" && stateMatch) return await handleState(decodeURIComponent(stateMatch[1]));

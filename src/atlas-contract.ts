@@ -131,6 +131,12 @@ export interface AtlasTurnCommitRequest {
   assistantText: string;
   /** 0.9.21 可选：宿主侧卡书条目有界文本（只进推演请求，不进主聊天注入） */
   loreSupplement?: string;
+  /** 0.9.25 shujuku 占位符体系：$7 前文上下文——最近 N 条 AI 楼层正文（宿主采集，有界） */
+  recentAssistantTexts?: string[];
+  /** 0.9.25 shujuku 占位符体系：$U 用户设定描述（persona，有界） */
+  personaDescription?: string;
+  /** 0.9.25 shujuku 占位符体系：$C 角色描述（有界） */
+  charDescription?: string;
 }
 
 export type AtlasTurnReceiptStatus = "committed" | "duplicate" | "pending-review" | "failed";
@@ -434,6 +440,20 @@ export function parseAtlasTurnCommitRequest(raw: unknown): ParseResult<AtlasTurn
     // 0.9.21 世界书资料补充：可选宽容字段——非字符串直接丢弃（绝不因宿主噪声拒整单）
     if (typeof record.loreSupplement === "string" && record.loreSupplement.trim().length > 0) {
       request.loreSupplement = record.loreSupplement.slice(0, ATLAS_LIMITS.LORE_SUPPLEMENT_CHARS);
+    }
+    // 0.9.25 shujuku 占位符体系：$7 / $U / $C 宿主采集字段，全部宽容可选——形状不对就丢弃，不拒整单
+    if (Array.isArray(record.recentAssistantTexts)) {
+      const texts = record.recentAssistantTexts
+        .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+        .slice(0, 10)
+        .map((item) => item.slice(0, ATLAS_LIMITS.ASSISTANT_TEXT_CHARS));
+      if (texts.length > 0) request.recentAssistantTexts = texts;
+    }
+    if (typeof record.personaDescription === "string" && record.personaDescription.trim().length > 0) {
+      request.personaDescription = record.personaDescription.slice(0, 2000);
+    }
+    if (typeof record.charDescription === "string" && record.charDescription.trim().length > 0) {
+      request.charDescription = record.charDescription.slice(0, 4000);
     }
     return request;
   });

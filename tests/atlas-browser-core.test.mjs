@@ -839,13 +839,19 @@ test("替换规则：<thinking> 变体 + json 围栏混合也剥", () => {
   assert.equal(draft.summary, "捏了脸");
 });
 
-test("替换规则：规则可关——停用 think 规则后带 think 的原文解析报错（预制与手动同库平等）", () => {
+test("替换规则：规则可关——0.9.25 容错抢救下停用规则仍可解析，但 think 正文残留进摘要（预制与手动同库平等）", () => {
+  // 0.9.25 shujuku 容错口径：think 不再剥时括号配平仍能从杂讯里抢救 JSON——
+  // 但 think 里若含花括号杂讯会先被当成 JSON 候选，规则的「净化」价值体现在干净摘要上。
+  const thinkWithJunk = `<think>{"bad": true} 推理中</think>${VALID_DRAFT}`;
   const text = `<think>推理中</think>${VALID_DRAFT}`;
   const disabled = builtinRules.map((r) => (r.start === "<think" && r.end === "</think>" ? { ...r, enabled: false } : r));
   const stillOn = builtinRules.map((r) => (r.start === "<think" && r.end === "</think>" ? { ...r, enabled: true } : r));
-  assert.throws(() => parseAtlasWorldTurnDraft(applyContentReplaceRules(text, disabled)), /不是合法的 JSON 对象/, "关掉的规则不再剥");
-  const draft = parseAtlasWorldTurnDraft(applyContentReplaceRules(text, stillOn));
-  assert.equal(draft.summary, "捏了脸", "开着的规则正常剥");
+  // 规则关：无花括号杂讯 → 抢救成功、摘要干净；有花括号杂讯 → 抢救失败（杂讯对象缺 summary）
+  const draftOff = parseAtlasWorldTurnDraft(applyContentReplaceRules(text, disabled));
+  assert.equal(draftOff.summary, "捏了脸", "关掉的规则不再剥，但配平抢救出干净 JSON");
+  assert.throws(() => parseAtlasWorldTurnDraft(applyContentReplaceRules(thinkWithJunk, disabled)), /缺少 summary/, "think 内花括号杂讯先被当成候选 → 缺摘要失败");
+  const draft = parseAtlasWorldTurnDraft(applyContentReplaceRules(thinkWithJunk, stillOn));
+  assert.equal(draft.summary, "捏了脸", "开着的规则正常剥——杂讯被规则清除后解析成功");
 });
 
 test("替换规则：未闭合 <think>（shujuku 同款：孤立开始词不删）→ 解析报错", () => {

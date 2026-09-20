@@ -47,8 +47,11 @@ export interface AtlasApiPreset {
   requestHeaders?: string;
   /** 提示词后处理（custom_prompt_post_processing）；"" = 不携带。 */
   promptPostProcessing?: string;
-  /** 0.9.18 分段提示词（shujuku prompt-builder 同款）：非空时取代固定 system+user 两条，逐段装配 + 占位符替换。 */
-  promptSegments?: Array<{ role: string; content: string }>;
+  /** 0.9.18 分段提示词（shujuku prompt-builder 同款）：非空时取代固定 system+user 两条，逐段装配 + 占位符替换。
+   *  0.9.25 升级为 shujuku promptGroup 栏位段：段可带 name / mainSlot("A"|"B"|"") / deletable（全部可选，旧形状兼容）。 */
+  promptSegments?: Array<{ role: string; name?: string; mainSlot?: string; deletable?: boolean; content: string }>;
+  /** 0.9.25 shujuku 占位符体系：前文上下文条数（$7 取最近 N 条 AI 楼层；宿主采集端使用，预设级设置）。 */
+  contextTurnCount?: number;
 }
 
 export interface AtlasApiCallResult {
@@ -87,22 +90,49 @@ export function buildAtlasChatUrl(endpoint: string): string | null {
 }
 
 /**
- * 内置默认系统提示词（UI「API」页可查看；预设 systemPrompt 留空时生效）。
+ * 内置默认提示词（UI「API」页可查看；预设留空时生效）。
+ * 0.9.25 重写为 shujuku promptGroup 栏位段结构：主系统提示词（mainSlot A，system）+
+ * 推演任务指令（mainSlot B，user），占位符发送时替换。
  * 修改输出契约（字段名 / 形状）必须同步 parseAtlasWorldTurnDraft，否则解析会整单失败。
  */
-export const DEFAULT_WORLD_TURN_SYSTEM_PROMPT =
-  "你是阿特拉斯世界推演引擎。基于给定的当前世界状态（位置、时间、附近人物、可达内容）与本轮用户行动、助手回复，" +
-  "推断本轮对世界造成的**有界结构化变化**。\n" +
-  "严格要求：只输出一个 JSON 对象，不要输出任何多余说明或代码围栏；字段：\n" +
-  "duration（本轮消耗的时段数，非负数字，≤10000）、\n" +
-  "locationChange（对象或 null：{toPointId, toRegionId}，id 必须来自上下文中出现的地点）、\n" +
-  "npcChanges（数组，每条形如 {entityId, key, value} 更新人物状态 / {entityId, tag} 加标签 / " +
-  "{entityId, removeTag} 删标签 / {entityId, targetEntityId, key, value} 改关系；entityId 必须来自上下文）、\n" +
-  "memoryDrafts（数组，每条 {entityId, text}，为人物追加一条记忆，≤500 字）、\n" +
-  "eventDrafts（数组，事件的摘要文字，仅叙述用）、\n" +
-  "triggerResults（数组，本轮命中的触发器 id）、\n" +
-  "summary（本轮世界变化的一句话摘要，≤500 字）。\n" +
-  "禁止：编造上下文之外的实体 id；输出时间地点之外的世界重写；输出任何密钥、路径或代码。";
+export const DEFAULT_PROMPT_SEGMENTS: Array<{ role: string; name: string; mainSlot: string; content: string }> = [
+  {
+    role: "system",
+    name: "主系统提示词（推演引擎职责）",
+    mainSlot: "A",
+    content:
+      "你是阿特拉斯世界推演引擎。你收到一份本轮的剧情素材（世界状态、前文、用户行动、助手回复），" +
+      "你的唯一职责：推断本轮对世界造成的**有界结构化变化**——谁出现在哪里、人物状态与关系如何变化、势力格局有无变动、时间推进多少。\n" +
+      "严格要求：只输出一个 JSON 对象，不要输出任何多余说明、推理过程或代码围栏。字段契约：\n" +
+      "duration（本轮消耗的时段数，非负数字，≤10000）、\n" +
+      "locationChange（对象或 null：{toPointId, toRegionId}，id 必须来自上下文中出现的地点）、\n" +
+      "npcChanges（数组，每条形如 {entityId, key, value} 更新人物状态 / {entityId, tag} 加标签 / " +
+      "{entityId, removeTag} 删标签 / {entityId, targetEntityId, key, value} 改关系；entityId 必须来自上下文）、\n" +
+      "memoryDrafts（数组，每条 {entityId, text}，为人物追加一条记忆，≤500 字）、\n" +
+      "eventDrafts（数组，事件摘要文字，仅叙述用）、\n" +
+      "triggerResults（数组，本轮命中的触发器 id）、\n" +
+      "summary（本轮世界变化的一句话摘要，≤500 字）。\n" +
+      "禁止：编造上下文之外的实体 id；输出时间地点之外的世界重写；输出任何密钥、路径或代码。",
+  },
+  {
+    role: "user",
+    name: "推演任务指令（本轮素材）",
+    mainSlot: "B",
+    content:
+      "【当前世界状态与可达内容】\n$5\n\n" +
+      "$1\n" +
+      "【上轮世界变化】\n$6\n\n" +
+      "【前文故事发展（AI 输出）】\n$7\n\n" +
+      "【用户设定】\n$U\n\n" +
+      "【角色描述】\n$C\n\n" +
+      "【本轮用户行动】\n$8\n\n" +
+      "【本轮助手回复】\n{{assistantReply}}\n\n" +
+      "请按系统要求只输出一个 JSON 对象。",
+  },
+];
+
+/** 兼容旧调用方：内置默认单条系统提示词（= 栏位 A 原文）。 */
+export const DEFAULT_WORLD_TURN_SYSTEM_PROMPT = DEFAULT_PROMPT_SEGMENTS[0]!.content;
 
 export interface AtlasWorldTurnPromptInput {
   injectionText: string;
@@ -110,54 +140,71 @@ export interface AtlasWorldTurnPromptInput {
   assistantText: string;
   /** 0.9.21 可选：宿主侧卡书条目有界文本（世界书资料块；缺省 = 不出现该块） */
   loreSupplement?: string;
+  /** 0.9.25 shujuku 占位符体系：$6 上轮推演结果（绑定分支最后一条账本摘要；缺省 = 空串） */
+  lastTurnSummary?: string;
+  /** 0.9.25 shujuku 占位符体系：$7 前文上下文（最近 N 条 AI 楼层正文；缺省 = 空串） */
+  recentContextText?: string;
+  /** 0.9.25 shujuku 占位符体系：$U 用户设定描述（persona；缺省 = 空串） */
+  personaDescription?: string;
+  /** 0.9.25 shujuku 占位符体系：$C 角色描述（缺省 = 空串） */
+  charDescription?: string;
 }
 
 /** 0.9.21 世界书资料块标题（只进推演请求；主聊天注入不带，避免与酒馆世界书激活重复） */
 const LORE_SUPPLEMENT_HEADER = "【世界书资料（当前角色卡，可能有噪声，仅供理解世界）】";
 
-/** 组装 world-turn 请求的用户正文（有界：调用方注入文本已过预算）。 */
-export function buildWorldTurnUserContent(input: AtlasWorldTurnPromptInput): string {
-  const parts = [
-    "【当前世界状态与可达内容】",
-    input.injectionText,
-  ];
-  if (input.loreSupplement && input.loreSupplement.trim().length > 0) {
-    parts.push("", LORE_SUPPLEMENT_HEADER, input.loreSupplement);
-  }
-  parts.push(
-    "",
-    "【本轮用户行动】",
-    input.userText,
-    "",
-    "【本轮助手回复】",
-    input.assistantText,
-    "",
-    "请按系统要求只输出一个 JSON 对象。",
-  );
-  return parts.join("\n");
+/** shujuku 占位符包裹：<worldbook_context> 里的内容不参与剧情复述，仅供理解世界。 */
+function wrapWorldbookContext(content: string): string {
+  const text = String(content ?? "");
+  return text ? `\n<worldbook_context>\n${text}\n</worldbook_context>\n` : "";
 }
 
-/** 分段正文占位符（0.9.18）：{{worldState}} / {{userAction}} / {{assistantReply}}；0.9.21 增 {{worldLore}}。容忍花括号内空白。 */
-const PROMPT_PLACEHOLDER_PATTERN = /\{\{\s*(worldState|userAction|assistantReply|worldLore)\s*\}\}/g;
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
-function substitutePromptPlaceholders(content: string, input: AtlasWorldTurnPromptInput): string {
-  return content.replace(PROMPT_PLACEHOLDER_PATTERN, (_, key: string) =>
-    key === "worldState"
-      ? input.injectionText
-      : key === "userAction"
-        ? input.userText
-        : key === "worldLore"
-          ? (input.loreSupplement ?? "")
-          : input.assistantText,
-  );
+/**
+ * 0.9.25 shujuku 占位符替换引擎（照抄 plot-task-engine performReplacements 口径）：
+ * $1 世界书资料（<worldbook_context> 包裹）/ $9 排除库资料（Atlas 无表格库，恒空）/ $5 世界状态 /
+ * $6 上轮推演结果 / $7 前文上下文 / $8 本轮用户行动 / $U 用户设定 / $C 角色描述。
+ * 空 value 原样删除占位符（shujuku 同款：空内容不留孤立标题）。
+ * 兼容旧 0.9.18 别名：{{worldState}} / {{userAction}} / {{assistantReply}} / {{worldLore}}。
+ */
+export function substitutePromptPlaceholders(content: string, input: AtlasWorldTurnPromptInput): string {
+  if (!content) return "";
+  let processed = String(content);
+  const loreRaw = input.loreSupplement ?? "";
+  const loreText = loreRaw
+    ? `${LORE_SUPPLEMENT_HEADER}${wrapWorldbookContext(loreRaw)}`
+    : "";
+  const replacements: Record<string, string> = {
+    $1: loreText,
+    $9: "",
+    $5: input.injectionText ?? "",
+    $6: input.lastTurnSummary ?? "",
+    $7: input.recentContextText ?? "",
+    $8: input.userText ?? "",
+    $U: input.personaDescription ?? "",
+    $C: input.charDescription ?? "",
+  };
+  for (const [key, value] of Object.entries(replacements)) {
+    processed = processed.replace(new RegExp(`(?<!\\\\)\\${key}`, "g"), () => value);
+  }
+  // 旧别名兼容（0.9.18 预设零迁移）
+  processed = processed
+    .replace(/\{\{\s*worldState\s*\}\}/g, input.injectionText ?? "")
+    .replace(/\{\{\s*userAction\s*\}\}/g, input.userText ?? "")
+    .replace(/\{\{\s*worldLore\s*\}\}/g, loreRaw)
+    .replace(/\{\{\s*assistantReply\s*\}\}/g, input.assistantText ?? "");
+  return processed;
 }
 
 const PROMPT_MESSAGE_ROLES: readonly string[] = ["system", "user", "assistant"];
 
 /**
- * 装配 world-turn 消息数组（0.9.18 shujuku prompt-builder 同款分段模式）：
- * preset.promptSegments 非空 → 占位符替换后逐段入列（角色白名单过滤，全非法回退旧两条）；
- * 否则维持固定 system+user 两条（旧预设零迁移）。
+ * 装配 world-turn 消息数组（0.9.25 shujuku promptGroup 栏位段模式）：
+ * preset.promptSegments 非空 → 占位符替换后逐段入列（角色白名单过滤，全非法回退内置栏位组）；
+ * 否则使用内置默认栏位组（主系统提示词 A + 推演任务指令 B）。
  * 输出契约不变：无论分段怎么写，模型仍须只输出一个 JSON 对象（parseAtlasWorldTurnDraft 把关）。
  */
 export function buildWorldTurnMessages(preset: AtlasApiPreset, input: AtlasWorldTurnPromptInput): Array<{ role: string; content: string }> {
@@ -170,10 +217,12 @@ export function buildWorldTurnMessages(preset: AtlasApiPreset, input: AtlasWorld
     .filter((segment) => PROMPT_MESSAGE_ROLES.includes(segment.role) && segment.content.trim().length > 0)
     .map((segment) => ({ role: segment.role, content: substitutePromptPlaceholders(segment.content, input) }));
   if (messages.length > 0) return messages;
+  // 无分段：连接级 systemPrompt 覆盖主系统提示词（0.9.17 语义保留），任务指令固定用内置 B 槽
+  const systemContent = preset.systemPrompt?.trim() || DEFAULT_PROMPT_SEGMENTS[0]!.content;
   return [
-    { role: "system", content: preset.systemPrompt?.trim() || DEFAULT_WORLD_TURN_SYSTEM_PROMPT },
-    { role: "user", content: buildWorldTurnUserContent(input) },
-  ];
+    { role: "system", content: substitutePromptPlaceholders(systemContent, input) },
+    { role: "user", content: substitutePromptPlaceholders(DEFAULT_PROMPT_SEGMENTS[1]!.content, input) },
+  ].filter((segment) => segment.content.trim().length > 0);
 }
 
 function errorMessageForStatus(status: number): { code: AtlasErrorCode; retryable: boolean; message: string } {
@@ -288,7 +337,7 @@ export async function callAtlasWorldTurnApi(
       return fail(ATLAS_ERROR_CODES.SERVICE_OFFLINE, "无法连接推演服务，请检查网络或服务状态。", true);
     }
 
-    const parseCall = async (resp: Response): Promise<{ text: string | null; gatewayError: string | null; rawText: string }> => {
+    const parseCall = async (resp: Response): Promise<{ text: string | null; gatewayError: string | null; rawText: string; emptyChoices: boolean }> => {
       let rawText = "";
       try {
         rawText = typeof resp.text === "function" ? await resp.text() : JSON.stringify(await resp.json());
@@ -303,9 +352,15 @@ export async function callAtlasWorldTurnApi(
       }
       const text = extractAssistantText(payload);
       if (text === null || text.trim().length === 0) {
-        return { text: null, gatewayError: gatewayErrorMessage(payload), rawText };
+        // 0.9.24 空回复专项：choices 数组存在且为空（Gemini 系安全过滤静默拦截的典型形状）
+        const emptyChoices = Boolean(
+          payload && typeof payload === "object" &&
+          Array.isArray((payload as { choices?: unknown }).choices) &&
+          (payload as { choices: unknown[] }).choices.length === 0,
+        );
+        return { text: null, gatewayError: gatewayErrorMessage(payload), rawText, emptyChoices };
       }
-      return { text: text.trim(), gatewayError: null, rawText };
+      return { text: text.trim(), gatewayError: null, rawText, emptyChoices: false };
     };
 
     let parsed = await parseCall(response);
@@ -346,6 +401,15 @@ export async function callAtlasWorldTurnApi(
 
     const text = parsed.text;
     if (text === null || text.length === 0) {
+      // 0.9.24 空回复（choices 空 + 0 补全）：Gemini 系安全过滤静默拦截的典型形状——
+      // 不报错直接给空气，重试大概率同样被拦
+      if (parsed.emptyChoices) {
+        return fail(
+          ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
+          "模型返回了空回复（choices 为空、0 补全 token）——通常是供应商安全过滤静默拦截了本次输入（Gemini 系常见），也可能是上游网关故障。可选：在「推进」页关闭「世界书资料」缩小输入，或换模型 / 供应商。",
+          false,
+        );
+      }
       // 网关「200 包错误 JSON」形状（new-api / one-api 系常见）：{"error":{"message":"..."},"quota_error":false}
       const gatewayError = parsed.gatewayError;
       if (gatewayError) {
@@ -507,12 +571,13 @@ function extractAssistantText(payload: unknown): string | null {
 /** 从可能被 ```json 围栏或夹带说明文字的响应中取第一个 JSON 对象。 */
 function extractJsonObject(text: string): Record<string, unknown> | null {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const candidates = [fenced?.[1] ?? "", text];
+  const candidates = [fenced?.[1] ?? "", text, extractBalancedJsonObject(text)];
   for (const candidate of candidates) {
-    const trimmed = candidate.trim();
-    if (!trimmed.startsWith("{")) continue;
+    if (!candidate) continue;
+    const sanitized = sanitizeJsonText(candidate);
+    if (!sanitized) continue;
     try {
-      const parsed = JSON.parse(trimmed) as unknown;
+      const parsed = JSON.parse(sanitized) as unknown;
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
         return parsed as Record<string, unknown>;
       }
@@ -521,6 +586,55 @@ function extractJsonObject(text: string): Record<string, unknown> | null {
     }
   }
   return null;
+}
+
+/** shujuku extractBalancedJsonObject 同款：从第一个 { 起做字符串感知的括号配平扫描（容忍字符串里的花括号）。 */
+function extractBalancedJsonObject(text: string): string {
+  const start = text.indexOf("{");
+  if (start < 0) return "";
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i += 1) {
+    const ch = text[i]!;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === "{") depth += 1;
+    if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return text.slice(start);
+}
+
+/** shujuku sanitize 同款：剥围栏残留、弯引号转直引号、掐掉对象前导垃圾、去尾逗号。 */
+function sanitizeJsonText(jsonStr: string): string {
+  if (!jsonStr) return "";
+  let sanitized = String(jsonStr)
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/^[^{]*?(\{)/s, "$1")
+    .trim();
+  sanitized = extractBalancedJsonObject(sanitized) || sanitized;
+  return sanitized
+    .replace(/,\s*([}\]])/g, "$1")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n");
 }
 
 function toDuration(value: unknown): number | null {
@@ -569,72 +683,216 @@ function npcChangeToEffect(raw: unknown): Record<string, unknown> | null {
 }
 
 /**
- * 解析 world-turn 模型输出为 AtlasWorldChangeDraft。
- * JSON 损坏 / 缺摘要 / duration 非法 → AtlasError(RESPONSE_MALFORMED 或 FIELD_LIMIT_EXCEEDED)。
+ * 解析 world-turn 模型输出为 AtlasWorldChangeDraft（0.9.25 shujuku 容错口径）：
+ * 三层 JSON 抢救（围栏 / 括号配平 / 消毒）→ 字段级白名单映射；
+ * npcChanges / memoryDrafts 逐条抢救——无法识别的条目**丢弃并计数**（shujuku filter(Boolean) 同款），
+ * 不再因单条垃圾整单炸掉；summary 仍必填（缺摘要 = 无法归档，必须失败）。
+ * JSON 完全损坏时走 salvageDraftFromRawText 兜底（原始文本字段级提取）。
  * eventDrafts / triggerResults 仅叙述性字段，v1 不映射为 effect（记入 summary 语境）。
  */
 export function parseAtlasWorldTurnDraft(text: string): AtlasWorldChangeDraft {
-  const parsed = extractJsonObject(text ?? "");
-  if (!parsed) {
+  const source = text ?? "";
+  const parsed = extractJsonObject(source);
+  const draftSource = parsed ?? salvageDraftContainerFromRawText(source);
+  if (!draftSource) {
     throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "推演输出不是合法的 JSON 对象。");
   }
-  const summary = typeof parsed.summary === "string" ? parsed.summary.trim() : "";
+  const summary = typeof draftSource.summary === "string" ? draftSource.summary.trim() : "";
   if (!summary) {
     throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "推演输出缺少 summary 摘要。");
   }
 
-  const rawDuration = "duration" in parsed ? toDuration(parsed.duration) : 0;
+  const rawDuration = "duration" in draftSource ? toDuration(draftSource.duration) : 0;
   if (rawDuration === null) {
-    throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, `推演输出 duration 非法：${String(parsed.duration)}`);
+    throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, `推演输出 duration 非法：${String(draftSource.duration)}`);
   }
 
   const rawEffects: unknown[] = [];
-  if (parsed.npcChanges !== undefined && parsed.npcChanges !== null) {
-    if (!Array.isArray(parsed.npcChanges)) {
+  let droppedEffects = 0;
+  if (draftSource.npcChanges !== undefined && draftSource.npcChanges !== null) {
+    if (!Array.isArray(draftSource.npcChanges)) {
       throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "推演输出 npcChanges 必须是数组。");
     }
-    if (parsed.npcChanges.length > ATLAS_LIMITS.REF_ARRAY) {
-      throw new AtlasError(ATLAS_ERROR_CODES.FIELD_LIMIT_EXCEEDED, `npcChanges 超过 ${ATLAS_LIMITS.REF_ARRAY} 项上限`);
-    }
-    parsed.npcChanges.forEach((item, index) => {
+    draftSource.npcChanges.forEach((item) => {
       const effect = npcChangeToEffect(item);
       if (!effect) {
-        throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, `npcChanges[${index}] 不是可识别的变化形状。`);
+        droppedEffects += 1; // shujuku 同款：坏条丢弃，不整单拒绝（白名单仍由 parseStateEffect 二次把关）
+        return;
       }
+      if (rawEffects.length >= ATLAS_LIMITS.REF_ARRAY) return;
       rawEffects.push(effect);
     });
   }
 
   const memoryDrafts: Array<{ entityId: string; text: string }> = [];
-  if (parsed.memoryDrafts !== undefined && parsed.memoryDrafts !== null) {
-    if (!Array.isArray(parsed.memoryDrafts)) {
+  let droppedMemories = 0;
+  if (draftSource.memoryDrafts !== undefined && draftSource.memoryDrafts !== null) {
+    if (!Array.isArray(draftSource.memoryDrafts)) {
       throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "推演输出 memoryDrafts 必须是数组。");
     }
-    if (parsed.memoryDrafts.length > ATLAS_LIMITS.REF_ARRAY) {
-      throw new AtlasError(ATLAS_ERROR_CODES.FIELD_LIMIT_EXCEEDED, `memoryDrafts 超过 ${ATLAS_LIMITS.REF_ARRAY} 项上限`);
-    }
-    parsed.memoryDrafts.forEach((item, index) => {
+    draftSource.memoryDrafts.forEach((item) => {
       if (!item || typeof item !== "object" || Array.isArray(item)) {
-        throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, `memoryDrafts[${index}] 必须是对象。`);
+        droppedMemories += 1;
+        return;
       }
       const record = item as Record<string, unknown>;
       const entityId = typeof record.entityId === "string" ? record.entityId.trim() : "";
       const memoryText = typeof record.text === "string" ? record.text.trim() : "";
       if (!entityId || !memoryText) {
-        throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, `memoryDrafts[${index}] 需要 entityId 与非空 text。`);
+        droppedMemories += 1;
+        return;
       }
+      if (memoryDrafts.length >= ATLAS_LIMITS.REF_ARRAY) return;
       memoryDrafts.push({ entityId, text: memoryText });
     });
   }
 
-  const locationChange = toLocationChange(parsed.locationChange);
+  const locationChange = toLocationChange(draftSource.locationChange);
   return {
     duration: rawDuration,
     locationChange,
     rawEffects,
     memoryDrafts,
-    summary,
+    summary: droppedEffects + droppedMemories > 0
+      ? `${summary}（解析时丢弃 ${droppedEffects} 条无法识别的变化、${droppedMemories} 条残缺记忆）`
+      : summary,
   };
+}
+
+/** JSON 完全损坏时的兜底：从原始文本里按平衡扫描抽 NPC / 记忆对象数组，逐字段提取（shujuku salvage 同款思路）。 */
+function salvageDraftContainerFromRawText(raw: string): Record<string, unknown> | null {
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  const summary = extractRawStringField(raw, "summary");
+  const durationText = extractRawStringField(raw, "duration");
+  if (!summary && !durationText) return null;
+  const container: Record<string, unknown> = {};
+  if (summary) container.summary = summary;
+  if (durationText) container.duration = durationText;
+  const effects = salvageObjectArrayFromRawText(raw, "npcChanges")
+    .map((item) => npcChangeToEffect(item))
+    .filter((item): item is Record<string, unknown> => item !== null)
+    .slice(0, ATLAS_LIMITS.REF_ARRAY);
+  if (effects.length > 0) container.npcChanges = effects;
+  const memories = salvageObjectArrayFromRawText(raw, "memoryDrafts")
+    .filter((item) => typeof item.entityId === "string" && item.entityId.trim() && typeof item.text === "string" && item.text.trim())
+    .slice(0, ATLAS_LIMITS.REF_ARRAY);
+  if (memories.length > 0) container.memoryDrafts = memories;
+  const locationRaw = extractRawStringField(raw, "toPointId");
+  const regionRaw = extractRawStringField(raw, "toRegionId");
+  if (locationRaw || regionRaw) container.locationChange = { toPointId: locationRaw ?? null, toRegionId: regionRaw ?? null };
+  return container;
+}
+
+/** 从原始文本提取 "field": "value" 的字符串值（处理转义；shujuku extractStringField 同款）。 */
+function extractRawStringField(source: string, fieldName: string): string {
+  if (typeof source !== "string" || !fieldName) return "";
+  const match = new RegExp(`"${fieldName}"\\s*:\\s*"`).exec(source);
+  if (!match) return "";
+  let i = match.index + match[0].length;
+  let result = "";
+  let escaped = false;
+  while (i < source.length) {
+    const ch = source[i]!;
+    if (escaped) {
+      result += ch;
+      escaped = false;
+      i += 1;
+      continue;
+    }
+    if (ch === "\\") {
+      result += ch;
+      escaped = true;
+      i += 1;
+      continue;
+    }
+    if (ch === '"') break;
+    result += ch;
+    i += 1;
+  }
+  return result
+    .replace(/\\n/g, "\n")
+    .replace(/\\r/g, "\r")
+    .replace(/\\t/g, "\t")
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, "\\");
+}
+
+/** 从原始文本提取 "field": [ ... ] 里的对象数组（括号配平逐个抽对象）。 */
+function salvageObjectArrayFromRawText(raw: string, fieldName: string): Array<Record<string, unknown>> {
+  const arrayMatch = new RegExp(`"${fieldName}"\\s*:\\s*\\[`).exec(raw);
+  if (!arrayMatch) return [];
+  const arrayStart = raw.indexOf("[", arrayMatch.index);
+  if (arrayStart < 0) return [];
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let arrayEnd = -1;
+  for (let i = arrayStart; i < raw.length; i += 1) {
+    const ch = raw[i]!;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === "[") depth += 1;
+    if (ch === "]") {
+      depth -= 1;
+      if (depth === 0) {
+        arrayEnd = i;
+        break;
+      }
+    }
+  }
+  if (arrayEnd < 0) return [];
+  const arrayContent = raw.slice(arrayStart + 1, arrayEnd);
+  const objects: Array<Record<string, unknown>> = [];
+  let objStart = -1;
+  depth = 0;
+  inString = false;
+  escaped = false;
+  for (let i = 0; i < arrayContent.length; i += 1) {
+    const ch = arrayContent[i]!;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === "{") {
+      if (depth === 0) objStart = i;
+      depth += 1;
+    } else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0 && objStart >= 0) {
+        const objText = arrayContent.slice(objStart, i + 1);
+        try {
+          const obj = JSON.parse(sanitizeJsonText(objText)) as unknown;
+          if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+            objects.push(obj as Record<string, unknown>);
+          }
+        } catch {
+          // 单对象抢救失败 → 丢弃该条
+        }
+        objStart = -1;
+      }
+    }
+  }
+  return objects;
 }
 
 // ---------------------------------------------------------------------------

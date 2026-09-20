@@ -283,6 +283,16 @@ export function createAtlasUiCore(deps: {
    * 未注入 / 失败 / 空 → 用占位正文（仅时间与日程流动）。
    */
   getLastAssistantText?: () => Promise<string | null>;
+  /**
+   * 0.9.25 shujuku 占位符体系（可选）：commit 前采集宿主上下文——
+   * recentAssistantTexts（$7 前文 AI 楼层，已排除当前楼层）/ personaDescription（$U）/
+   * charDescription（$C）。失败 / 未注入 → 字段缺省，照常推演（绝不因上下文失败阻断回合）。
+   */
+  getCommitContext?: (assistantText: string) => Promise<{
+    recentAssistantTexts?: string[];
+    personaDescription?: string;
+    charDescription?: string;
+  } | null>;
 }): AtlasUiCore {
   const { api, host, emitter } = deps;
   const now = deps.now ?? Date.now;
@@ -686,9 +696,43 @@ export function createAtlasUiCore(deps: {
     }
   }
 
+  /**
+   * 0.9.25 shujuku 占位符体系采集：宿主钩子失败 / 形状不对 → 全部缺省，绝不阻断回合。
+   * recentAssistantTexts 过滤掉与当前楼层相同的正文（$7 是「前文」，不含本楼层）。
+   */
+  async function safeCommitContext(
+    hook: (assistantText: string) => Promise<{
+      recentAssistantTexts?: string[];
+      personaDescription?: string;
+      charDescription?: string;
+    } | null>,
+    assistantText: string,
+  ): Promise<{ recentAssistantTexts?: string[]; personaDescription?: string; charDescription?: string } | null> {
+    try {
+      const raw = await hook(assistantText);
+      if (!raw || typeof raw !== "object") return null;
+      const texts = Array.isArray(raw.recentAssistantTexts)
+        ? raw.recentAssistantTexts
+            .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+            .filter((item) => item !== assistantText)
+            .slice(-10)
+        : [];
+      return {
+        ...(texts.length > 0 ? { recentAssistantTexts: texts } : {}),
+        ...(typeof raw.personaDescription === "string" && raw.personaDescription.trim()
+          ? { personaDescription: raw.personaDescription }
+          : {}),
+        ...(typeof raw.charDescription === "string" && raw.charDescription.trim()
+          ? { charDescription: raw.charDescription }
+          : {}),
+      };
+    } catch {
+      return null;
+    }
+  }
+
   /** 最终回复完成：commit（至多 1 次请求；重复通知 / 空回复 / 停止不推进世界）。 */
-  async function onGenerationEnded(assistantMessageId: string, assistantText: string): Promise<void> {
-    if (disposed) return;
+  async function onGenerationEnded(assistantMessageId: string, assistantText: string): Promise<void> {    if (disposed) return;
     let pending = state.pendingTurn;
     // ATLAS-06 swipe 同级重推演：回退后没有 pending；用 rearm 暂存的用户楼层重建回合。
     // swipeId 换成唯一新值（swipe-<ts>）——同键重提交会被账本幂等判 duplicate，永远推不动。
@@ -722,6 +766,8 @@ export function createAtlasUiCore(deps: {
         loreSupplement = undefined;
       }
     }
+    // 0.9.25 shujuku 占位符体系：$7 前文 / $U 用户设定 / $C 角色描述（可选钩子，失败即缺省）
+    const commitContext = deps.getCommitContext ? await safeCommitContext(deps.getCommitContext, assistantText) : null;
     const request = {
       turnId: pending.turnId,
       chatId: pending.chatId,
@@ -731,6 +777,9 @@ export function createAtlasUiCore(deps: {
       userText: pending.userText,
       assistantText: assistantText.slice(0, ATLAS_LIMITS.ASSISTANT_TEXT_CHARS),
       ...(loreSupplement ? { loreSupplement } : {}),
+      ...(commitContext?.recentAssistantTexts?.length ? { recentAssistantTexts: commitContext.recentAssistantTexts } : {}),
+      ...(commitContext?.personaDescription ? { personaDescription: commitContext.personaDescription } : {}),
+      ...(commitContext?.charDescription ? { charDescription: commitContext.charDescription } : {}),
     };
     const parsed = parseAtlasTurnCommitRequest(request);
     if (!parsed.ok) {
@@ -829,6 +878,9 @@ export function createAtlasUiCore(deps: {
     } catch {
       lastAssistant = "";
     }
+    const manualAssistantText = (lastAssistant.trim().length > 0 ? lastAssistant : "（无新剧情，仅时间与日程流动。）")
+      .slice(0, ATLAS_LIMITS.ASSISTANT_TEXT_CHARS);
+    const commitContext = deps.getCommitContext ? await safeCommitContext(deps.getCommitContext, manualAssistantText) : null;
     const request = {
       turnId: `turn-manual-${ts}`,
       chatId,
@@ -836,9 +888,11 @@ export function createAtlasUiCore(deps: {
       assistantMessageId: `manual-a-${ts}`,
       swipeId: null,
       userText: "（手动推进：不新增剧情，仅让世界按日程与惯性流动。）",
-      assistantText: (lastAssistant.trim().length > 0 ? lastAssistant : "（无新剧情，仅时间与日程流动。）")
-        .slice(0, ATLAS_LIMITS.ASSISTANT_TEXT_CHARS),
+      assistantText: manualAssistantText,
       ...(loreSupplement ? { loreSupplement } : {}),
+      ...(commitContext?.recentAssistantTexts?.length ? { recentAssistantTexts: commitContext.recentAssistantTexts } : {}),
+      ...(commitContext?.personaDescription ? { personaDescription: commitContext.personaDescription } : {}),
+      ...(commitContext?.charDescription ? { charDescription: commitContext.charDescription } : {}),
     };
     const parsed = parseAtlasTurnCommitRequest(request);
     if (!parsed.ok) {

@@ -19,6 +19,8 @@ import { adjudicateAtlasDraft } from "./atlas-adjudicate.ts";
 import { settleNpcSchedules, mergeSettlementNotes } from "./atlas-schedule.ts";
 import { applyContentReplaceRules } from "./atlas-content-replace.ts";
 import { ledgerForBranch } from "../lib/world-ledger.ts";
+import { appendDefinitionRevision } from "../lib/world-definition.ts";
+import { hashString } from "../lib/world-cards.ts";
 import { createCheckpoint, previewRestore, restoreAsPlayhead } from "../lib/world-checkpoint.ts";
 import { resolveCharacterPosition } from "../lib/world-npc.ts";
 import type {
@@ -117,6 +119,7 @@ export const ATLAS_ROUTE_MANIFEST = [
   { method: "GET", path: "/worlds" },
   { method: "POST", path: "/worlds/import" },
   { method: "POST", path: "/worlds/ensure-starter" },
+  { method: "POST", path: "/worlds/geo/adopt" },
   { method: "POST", path: "/bindings" },
   { method: "GET", path: "/state/:chatId" },
   { method: "GET", path: "/map/image/:chatId" },
@@ -343,7 +346,7 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.23",
+      version: "0.9.25",
       protocolVersion: 1,
       time: now(),
     });
@@ -438,6 +441,173 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
       await store.write(`world:${parsed.id}`, parsed);
       worldCache.set(parsed.id, parsed);
       return okResult({ created: true, world: worldSummary(parsed) });
+    });
+  }
+
+  /** 0.9.24 世界书提炼地理上限（宁缺毋滥；坐标自动环形布点避免重叠）。 */
+  const GEO_LIMITS = { REGIONS_MAX: 12, POINTS_MAX: 40, NAME_CHARS: 40, DESC_CHARS: 300 } as const;
+
+  /**
+   * POST /worlds/geo/adopt — 从世界书资料提炼地理并原子并入世界（0.9.24）。
+   * 恰好 1 条推演请求（复用推演预设 + 救场逻辑）；重名跳过；成功后追加定义修订。
+   * 产出只增不改：绝不删除 / 改写已有地区与地点。
+   */
+  async function handleGeoAdopt(body: unknown): Promise<AtlasRouteResult> {
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "geo/adopt 请求必须是对象");
+    }
+    const record = body as Record<string, unknown>;
+    const chatId = typeof record.chatId === "string" ? record.chatId : "";
+    if (!chatId || chatId.length > ATLAS_LIMITS.ID_CHARS) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "chatId 非法");
+    }
+    const lore = typeof record.loreSupplement === "string" ? record.loreSupplement.trim() : "";
+    if (!lore) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "没有可用的世界书资料——卡书无启用条目，或「世界书资料」开关处于关闭状态。");
+    }
+    const binding = requireBoundBinding(await getBinding(chatId));
+    const world = await requireWorld(binding);
+    const current = await loadSettings();
+    const preset = resolveWorldTurnPreset(current);
+    if (!preset) {
+      throw new AtlasError(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "未配置推演 API，无法提炼地理。");
+    }
+    checkRpm();
+    rpmTimestamps.push(now());
+
+    // 恰好 1 条推演请求：分段模式注入提炼指令（复用 callAtlasWorldTurnApi 的
+    // 超时 / 救场 / 错误分类，不新开 fetch 路径）
+    const extractionSegments = [
+      {
+        role: "system",
+        content: "你是地理信息抽取器。只输出一个 JSON 对象，不输出任何其它文字、解释或代码围栏。",
+      },
+      {
+        role: "user",
+        content: [
+          "从下面的角色卡世界书资料中提炼「地区 / 地点」。",
+          '只输出一个 JSON 对象：{"regions":[{"name":"...","description":"..."}],"points":[{"name":"...","regionName":"..."}]}',
+          "规则：name ≤20 字；regionName 必须是 regions 里出现过的名字（没有合适地区就省略该字段）；只提炼资料中明确或强烈暗示的地理实体（城市 / 森林 / 遗迹 / 建筑等），角色、文风、格式规则一律不要；宁缺毋滥；最多 12 个地区、40 个地点；资料里没有地理信息就输出 {\"regions\":[],\"points\":[]}。",
+          "【世界书资料】",
+          lore.slice(0, ATLAS_LIMITS.LORE_SUPPLEMENT_CHARS),
+        ].join("\n"),
+      },
+    ];
+    const call = await callAtlasWorldTurnApi(
+      { ...preset, promptSegments: extractionSegments },
+      { injectionText: "", userText: "", assistantText: "" },
+      { fetchFn: deps.fetchFn, now },
+    );
+    pushLog({
+      at: now(),
+      kind: "world-geo-extract",
+      presetName: preset.name,
+      model: preset.model,
+      ok: call.ok,
+      status: call.status,
+      durationMs: call.durationMs,
+    });
+    if (!call.ok) {
+      throw new AtlasError(call.code, call.message, { retryable: call.retryable });
+    }
+
+    // 解析（不可信）：剥代码围栏 → 取最外层 JSON 对象
+    let spec: { regions?: unknown; points?: unknown } = {};
+    try {
+      const stripped = call.text.replace(/^```(?:json)?/i, "").replace(/```\s*$/, "").trim();
+      const start = stripped.indexOf("{");
+      const end = stripped.lastIndexOf("}");
+      spec = JSON.parse(start >= 0 && end > start ? stripped.slice(start, end + 1) : stripped);
+    } catch {
+      throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "提炼结果不是合法 JSON——模型没有遵守输出契约，可重试一次。", { retryable: true });
+    }
+
+    const cleanName = (value: unknown): string | null => {
+      const text = String(value ?? "").trim().replace(/\s+/g, " ");
+      return text ? text.slice(0, GEO_LIMITS.NAME_CHARS) : null;
+    };
+    const cleanDesc = (value: unknown): string =>
+      String(value ?? "").trim().replace(/\s+/g, " ").slice(0, GEO_LIMITS.DESC_CHARS);
+    const norm = (text: string) => text.toLowerCase();
+
+    const existingRegionNames = new Set((world.regions ?? []).map((r) => norm(String(r.name))));
+    const existingPointNames = new Set((world.points ?? []).map((p) => norm(String(p.name))));
+    const regionIdByName = new Map((world.regions ?? []).map((r) => [norm(String(r.name)), String(r.id)]));
+    let skipped = 0;
+
+    const newRegions: Array<{ id: string; worldId: string; name: string; type: "other"; description: string; coordinates: { x: number; y: number } }> = [];
+    for (const raw of (Array.isArray(spec.regions) ? spec.regions : []).slice(0, GEO_LIMITS.REGIONS_MAX + 8)) {
+      if (newRegions.length >= GEO_LIMITS.REGIONS_MAX) break;
+      const name = cleanName((raw as { name?: unknown })?.name);
+      if (!name || existingRegionNames.has(norm(name)) || newRegions.some((r) => norm(r.name) === norm(name))) {
+        skipped += 1;
+        continue;
+      }
+      const id = `geo-r-${hashString(`${world.id}|r|${name}|${now()}`)}`;
+      newRegions.push({ id, worldId: world.id, name, type: "other", description: cleanDesc((raw as { description?: unknown })?.description) || "由世界书提炼。", coordinates: { x: 0, y: 0 } });
+      regionIdByName.set(norm(name), id);
+    }
+
+    let nextPointId = (world.points ?? []).reduce((max, p) => Math.max(max, Number(p.id) || 0), 0) + 1;
+    const newPoints: Array<{ id: number; name: string; x: number; y: number; regionId?: string }> = [];
+    for (const raw of (Array.isArray(spec.points) ? spec.points : []).slice(0, GEO_LIMITS.POINTS_MAX + 8)) {
+      if (newPoints.length >= GEO_LIMITS.POINTS_MAX) break;
+      const name = cleanName((raw as { name?: unknown })?.name);
+      if (!name || existingPointNames.has(norm(name)) || newPoints.some((p) => norm(p.name) === norm(name))) {
+        skipped += 1;
+        continue;
+      }
+      const regionName = cleanName((raw as { regionName?: unknown })?.regionName);
+      const regionId = (regionName ? regionIdByName.get(norm(regionName)) : null) ?? "start";
+      // 黄金角螺旋布点：绕「起点」外圈散开，绝不与已有点重叠坐标
+      const index = newPoints.length;
+      const angle = index * 2.39996;
+      const radius = 14 + 3.4 * Math.sqrt(index + 1);
+      newPoints.push({
+        id: nextPointId,
+        name,
+        x: Math.round(Math.min(96, Math.max(4, 50 + radius * Math.cos(angle)))),
+        y: Math.round(Math.min(96, Math.max(4, 50 + radius * Math.sin(angle)))),
+        regionId,
+      });
+      nextPointId += 1;
+    }
+
+    if (newRegions.length === 0 && newPoints.length === 0) {
+      pushLog({ at: now(), kind: "world-geo-adopt", worldId: world.id, regionsAdded: 0, pointsAdded: 0, skipped });
+      return okResult({ regionsAdded: 0, pointsAdded: 0, skipped, message: "没有提炼出新的地理实体（可能都已存在，或资料里没有地理描述）。" });
+    }
+
+    let updated: World = {
+      ...world,
+      regions: [...(world.regions ?? []), ...newRegions],
+      points: [...(world.points ?? []), ...newPoints],
+      updatedAt: now(),
+    };
+    const revision = appendDefinitionRevision(updated, {
+      authorNote: `世界书提炼地理：+${newRegions.length} 地区 +${newPoints.length} 地点`,
+      now: now(),
+    });
+    if (revision.ok) updated = revision.value;
+
+    await store.write(`world:${world.id}`, updated);
+    worldCache.set(world.id, updated);
+    pushLog({
+      at: now(),
+      kind: "world-geo-adopt",
+      worldId: world.id,
+      regionsAdded: newRegions.length,
+      pointsAdded: newPoints.length,
+      skipped,
+      revisionAppended: revision.ok,
+    });
+    return okResult({
+      regionsAdded: newRegions.length,
+      pointsAdded: newPoints.length,
+      skipped,
+      revisionAppended: revision.ok,
+      regionNames: newRegions.map((r) => r.name),
+      pointNames: newPoints.map((p) => p.name),
     });
   }
 
@@ -660,12 +830,29 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
 
     // 5. 恰好 1 条推演请求
     rpmTimestamps.push(now());
+    // 0.9.25 shujuku 占位符体系上下文装配：
+    // $6 上轮推演结果 = 绑定分支内、游标前最后一条账本摘要；$7 前文 = 最近 N 条 AI 楼层（shujuku 同款叙述格式）
+    const branchEvents = ledgerForBranch(world, binding.branchId).filter((e) => e.at <= binding.worldTimeCursor);
+    const lastLedgerEvent = branchEvents.at(-1) ?? null;
+    const lastTurnSummary = lastLedgerEvent ? lastLedgerEvent.narrativeSummary.slice(0, 500) : "";
+    // $7 前文条数 = 活动提示词预设的 contextTurnCount（shujuku plotSettings 同名设置；缺省 3，上限 10）
+    const turnCount = Math.min(Math.max(typeof preset.contextTurnCount === "number" ? preset.contextTurnCount : 3, 1), 10);
+    const recentAssistantTexts = (Array.isArray(request.recentAssistantTexts) ? request.recentAssistantTexts : []).slice(-turnCount);
+    const recentContextText = recentAssistantTexts.length > 0
+      ? `以下是前文的故事发展（AI输出）：\n${recentAssistantTexts
+          .map((text) => `assistant："${String(text).replace(/<br\s*\/?>/gi, "\n").replace(/<\/?[^>]+(>|$)/g, "").trim()}"`)
+          .join(" \n ")}`
+      : "";
     const call = await callAtlasWorldTurnApi(preset, {
       injectionText: prepareOutput.response.injectionText,
       userText: request.userText,
       assistantText: request.assistantText,
       // 0.9.21 世界书资料块：宿主侧卡书条目（有界），只进推演请求
       ...(request.loreSupplement ? { loreSupplement: request.loreSupplement } : {}),
+      ...(lastTurnSummary ? { lastTurnSummary } : {}),
+      ...(recentContextText ? { recentContextText } : {}),
+      ...(request.personaDescription ? { personaDescription: request.personaDescription } : {}),
+      ...(request.charDescription ? { charDescription: request.charDescription } : {}),
     }, { fetchFn: deps.fetchFn, now });
     pushLog({
       at: now(),
@@ -998,6 +1185,7 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
       if (method === "GET" && route === "/worlds") return await handleListWorlds();
       if (method === "POST" && route === "/worlds/import") return await handleImportWorld(body, ctx);
       if (method === "POST" && route === "/worlds/ensure-starter") return await handleEnsureStarter(body, ctx);
+      if (method === "POST" && route === "/worlds/geo/adopt") return await handleGeoAdopt(body);
       if (method === "POST" && route === "/bindings") return await handleBindings(body);
       const stateMatch = route.match(/^\/state\/([^/]+)$/);
       if (method === "GET" && stateMatch) return await handleState(decodeURIComponent(stateMatch[1]));

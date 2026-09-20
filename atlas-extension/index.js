@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.23";
+export const ATLAS_EXTENSION_VERSION = "0.9.25";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -1096,7 +1096,45 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       renderPage();
     });
     mapTools.append(regionSelect, zoomBox);
-    mapCanvas.append(mapTools, viewport, mapHint, travelBar);
+    // 0.9.24 世界书提炼地理：空地图时显示（有真实地理后自动隐藏）
+    const geoBar = el("div", "aw-geobar");
+    const geoBtn = el("button", "aw-btn aw-btn--primary", "从世界书提炼地理");
+    geoBtn.type = "button";
+    geoBtn.setAttribute("aria-label", "用一次推演请求从角色卡世界书提炼地区与地点并加入地图");
+    let geoBusy = false;
+    geoBtn.addEventListener("click", async () => {
+      if (geoBusy) return;
+      const confirmed = typeof window === "undefined" || typeof window.confirm !== "function"
+        ? true
+        : window.confirm("用 1 次推演请求从角色卡世界书提炼地区 / 地点并加入地图，继续？");
+      if (!confirmed) return;
+      geoBusy = true;
+      try {
+        const lore = await readCardLoreSupplement();
+        if (!lore) {
+          setStatus("没有可用的世界书资料——检查卡书是否有启用条目，或先在「推进」页开启「世界书资料」。", "error");
+          return;
+        }
+        const chatId = String(state().chatId ?? "");
+        if (!chatId) { setStatus("当前没有活动聊天。", "error"); return; }
+        const result = await api.request("POST", "/worlds/geo/adopt", { chatId, loreSupplement: lore });
+        const data = result.body?.data ?? {};
+        if (result.status === 200 && result.body?.ok) {
+          atlasLog("地图", `世界书提炼完成：+${data.regionsAdded ?? 0} 地区 +${data.pointsAdded ?? 0} 地点（跳过 ${data.skipped ?? 0}）`);
+          setStatus(`提炼完成：新增 ${data.regionsAdded ?? 0} 地区 / ${data.pointsAdded ?? 0} 地点。`, "ok");
+          await core.refresh();
+        } else {
+          atlasLog("地图", `世界书提炼失败 → ${result.body?.error?.message ?? `HTTP ${result.status}`}`);
+          setStatus(result.body?.error?.message ?? `提炼失败（HTTP ${result.status}）`, "error");
+        }
+      } catch (error) {
+        setStatus(`提炼失败：${error instanceof Error ? error.message : String(error)}`, "error");
+      } finally {
+        geoBusy = false;
+      }
+    });
+    geoBar.append(geoBtn);
+    mapCanvas.append(mapTools, viewport, mapHint, geoBar, travelBar);
     return mapCanvas;
   }
 
@@ -1121,7 +1159,9 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       const hasRealGeo = pointsAll.length > 1 || regions.length > 1;
       mapHint.textContent = hasRealGeo
         ? ""
-        : "这个世界还没有地理数据：自动建世只创建「起点」，推演暂不能生成新地点（AI 生成地点在后续版本规划中）。";
+        : "这个世界还没有地理数据：自动建世只创建「起点」。点下方「从世界书提炼地理」可把卡书里的地点变成地图。";
+      const geoBar = mapHint.parentElement?.querySelector?.(".aw-geobar");
+      if (geoBar) geoBar.style.display = hasRealGeo ? "none" : "";
     }
     regionSelect.innerHTML = "";
     const allOption = document.createElement("option");
@@ -1561,7 +1601,19 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
   }
 
   function newPromptDraft() {
-    return { id: null, name: "", systemPrompt: "", segments: [] };
+    return { id: null, name: "", systemPrompt: "", segments: [], contextTurnCount: 3 };
+  }
+
+  /** 0.9.25 shujuku 栏位段克隆：保留名称 / 主槽位（丢字段 = 编辑一轮就退化）。 */
+  function cloneSegments(segments) {
+    return Array.isArray(segments)
+      ? segments.map((s) => ({
+          role: s.role,
+          content: s.content,
+          ...(typeof s.name === "string" && s.name ? { name: s.name } : {}),
+          ...(s.mainSlot === "A" || s.mainSlot === "B" || s.mainSlot === "" ? { mainSlot: s.mainSlot } : {}),
+        }))
+      : [];
   }
 
   /** 分段角色白名单（0.9.18，与 src/atlas-settings.ts PROMPT_SEGMENT_ROLES 同口径）。 */
@@ -1686,7 +1738,8 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
             id: preset.id,
             name: preset.name,
             systemPrompt: preset.systemPrompt,
-            segments: Array.isArray(preset.segments) ? preset.segments.map((s) => ({ role: s.role, content: s.content })) : [],
+            segments: cloneSegments(preset.segments),
+            contextTurnCount: Number.isFinite(preset.contextTurnCount) ? preset.contextTurnCount : 3,
           }
         : newPromptDraft();
       promptDraftDirty = false;
@@ -1801,8 +1854,10 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
         setStatus("分段最多 16 段。", "error");
         return;
       }
-      if (atTop) promptDraft.segments.unshift({ role: "system", content: "" });
-      else promptDraft.segments.push({ role: "system", content: "" });
+      // 0.9.25 shujuku promptGroup 栏位段：段带名称与主槽位（A=主系统提示词位 / B=任务指令位）
+      const segment = { role: "system", name: "", mainSlot: "", content: "" };
+      if (atTop) promptDraft.segments.unshift(segment);
+      else promptDraft.segments.push(segment);
       promptDraftDirty = true;
       renderSegRows();
       if (syncPromptDirty) syncPromptDirty();
@@ -1840,6 +1895,36 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
           if (syncPromptDirty) syncPromptDirty();
         });
         head.append(roleSelect);
+        // 0.9.25 shujuku 栏位段：主槽位 A / B / 无（仅标注语义，发送顺序仍按段序）
+        const slotSelect = document.createElement("select");
+        slotSelect.className = "aw-input aw-seg-item__slot";
+        slotSelect.setAttribute("aria-label", `第 ${index + 1} 段主槽位`);
+        for (const [slotValue, slotLabel] of [["", "槽位：无"], ["A", "槽位 A（主提示词）"], ["B", "槽位 B（任务指令）"]]) {
+          const opt = document.createElement("option");
+          opt.value = slotValue;
+          opt.textContent = slotLabel;
+          slotSelect.append(opt);
+        }
+        slotSelect.value = segment.mainSlot === "A" || segment.mainSlot === "B" ? segment.mainSlot : "";
+        slotSelect.addEventListener("change", () => {
+          segment.mainSlot = slotSelect.value;
+          promptDraftDirty = true;
+          if (syncPromptDirty) syncPromptDirty();
+        });
+        head.append(slotSelect);
+        const nameInput = document.createElement("input");
+        nameInput.className = "aw-input aw-seg-item__name";
+        nameInput.type = "text";
+        nameInput.maxLength = 64;
+        nameInput.placeholder = "栏位名称";
+        nameInput.value = String(segment.name ?? "");
+        nameInput.setAttribute("aria-label", `第 ${index + 1} 段栏位名称`);
+        nameInput.addEventListener("input", () => {
+          segment.name = nameInput.value;
+          promptDraftDirty = true;
+          if (syncPromptDirty) syncPromptDirty();
+        });
+        head.append(nameInput);
         const upBtn = el("button", "aw-btn aw-btn--icon", "↑");
         upBtn.type = "button";
         upBtn.setAttribute("aria-label", `上移第 ${index + 1} 段`);
@@ -1866,7 +1951,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
         area.rows = 5;
         area.maxLength = 8000;
         area.value = String(segment.content ?? "");
-        area.placeholder = "分段正文，支持 {{worldState}} / {{userAction}} / {{assistantReply}}";
+        area.placeholder = "栏位正文，支持 $5 世界状态 / $1 世界书资料 / $6 上轮推演 / $7 前文 / $8 用户行动 / $U 用户设定 / $C 角色描述";
         area.setAttribute("aria-label", `第 ${index + 1} 段正文`);
         area.addEventListener("input", () => {
           segment.content = area.value;
@@ -1878,7 +1963,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
         segRows.append(item);
       });
       if (segments.length === 0) {
-        segRows.append(el("p", "aw-seg-empty", "还没有分段——点下方「插入一段」启用。空段保存时自动剔除。"));
+        segRows.append(el("p", "aw-seg-empty", "还没有栏位——点下方「插入一段」启用。空段保存时自动剔除。"));
       }
       syncSegStatus();
     };
@@ -1894,10 +1979,35 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       insertBottomBtn.setAttribute("aria-label", "在最下方插入一个提示词分段");
       insertBottomBtn.addEventListener("click", () => addSegment(false));
       segSection.append(insertTopBtn, segRows, insertBottomBtn);
-      segSection.append(el("span", "aw-hint", "占位符在发送时替换：{{worldState}}=世界状态上下文，{{userAction}}=本轮用户行动，{{assistantReply}}=本轮助手回复。角色任意排列（如 system→user→assistant→user）；输出契约不变——模型仍须只输出一个 JSON 对象。"));
+      segSection.append(el("span", "aw-hint", "0.9.25 shujuku 栏位段：占位符在发送时替换——$5=世界状态上下文，$1=世界书资料（worldbook_context 包裹），$6=上轮推演结果，$7=前文 AI 楼层（条数见下方设置），$8=本轮用户行动，$U=用户设定，$C=角色描述，$9=保留位（恒空）。旧 {{worldState}} / {{userAction}} / {{assistantReply}} / {{worldLore}} 写法继续兼容。主槽位 A / B 仅作栏位标注（shujuku mainSlot 同款），发送顺序按段序；输出契约不变——模型仍须只输出一个 JSON 对象。"));
       renderSegRows();
     }
     promptPanel.append(segSection);
+
+    // 0.9.25 shujuku contextTurnCount：$7 前文上下文条数（随预设保存，引擎侧发送时切片）
+    const turnField = el("div", "aw-field");
+    turnField.append(el("span", "aw-field__label", "前文上下文条数（$7）"));
+    const turnRow = el("div", "aw-select-row");
+    const turnSelect = document.createElement("select");
+    turnSelect.className = "aw-input";
+    turnSelect.setAttribute("aria-label", "前文上下文条数");
+    for (let n = 1; n <= 10; n++) {
+      const opt = document.createElement("option");
+      opt.value = String(n);
+      opt.textContent = `最近 ${n} 条 AI 楼层`;
+      turnSelect.append(opt);
+    }
+    turnSelect.value = String(Math.min(Math.max(Number.parseInt(String(promptDraft?.contextTurnCount ?? 3), 10) || 3, 1), 10));
+    turnSelect.addEventListener("change", () => {
+      if (!promptDraft) promptDraft = newPromptDraft();
+      promptDraft.contextTurnCount = Number.parseInt(turnSelect.value, 10) || 3;
+      promptDraftDirty = true;
+      if (syncPromptDirty) syncPromptDirty();
+    });
+    turnRow.append(turnSelect);
+    turnField.append(turnRow);
+    turnField.append(el("span", "aw-hint", "推演请求会把最近 N 条 AI 楼层作为 $7 前文上下文注入（shujuku plotSettings.contextTurnCount 同款）。随当前预设一起保存。"));
+    promptPanel.append(turnField);
 
     // 当前生效提示词（默认折叠，只读）
     const details = document.createElement("details");
@@ -1921,7 +2031,8 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
             id: preset.id,
             name: preset.name,
             systemPrompt: preset.systemPrompt,
-            segments: Array.isArray(preset.segments) ? preset.segments.map((s) => ({ role: s.role, content: s.content })) : [],
+            segments: cloneSegments(preset.segments),
+            contextTurnCount: Number.isFinite(preset.contextTurnCount) ? preset.contextTurnCount : 3,
           }
         : newPromptDraft();
       promptDraftDirty = false;
@@ -1945,7 +2056,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
                 id: created.id,
                 name: created.name,
                 systemPrompt: created.systemPrompt,
-                segments: Array.isArray(created.segments) ? created.segments.map((s) => ({ role: s.role, content: s.content })) : [],
+                segments: cloneSegments(created.segments),
               }
             : newPromptDraft();
           promptDraftDirty = false;
@@ -1964,8 +2075,14 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
           return;
         }
         // 0.9.18 分段模式：有非空分段 → 保存 segments（正文忽略，存空串）；否则走单条正文
+        // 0.9.25 栏位段：保存时保留名称 / 主槽位（shujuku promptGroup 字段）
         const draftSegments = (Array.isArray(promptDraft.segments) ? promptDraft.segments : [])
-          .map((s) => ({ role: PROMPT_SEGMENT_ROLES.includes(s?.role) ? s.role : "system", content: String(s?.content ?? "").trim() }))
+          .map((s) => ({
+            role: PROMPT_SEGMENT_ROLES.includes(s?.role) ? s.role : "system",
+            ...(typeof s?.name === "string" && s.name.trim() ? { name: s.name.trim().slice(0, 64) } : {}),
+            ...(s?.mainSlot === "A" || s?.mainSlot === "B" ? { mainSlot: s.mainSlot } : {}),
+            content: String(s?.content ?? "").trim(),
+          }))
           .filter((s) => s.content.length > 0)
           .slice(0, 16);
         const useSegments = draftSegments.length > 0;
@@ -1974,6 +2091,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
           renderCenter();
           return;
         }
+        const turnCount = Math.min(Math.max(Number.parseInt(String(promptDraft.contextTurnCount ?? 3), 10) || 3, 1), 10);
         const ok = await sendSettingsCommand({
           action: "prompt.save",
           preset: {
@@ -1981,9 +2099,10 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
             name: promptDraft.name,
             systemPrompt: useSegments ? "" : promptDraft.systemPrompt,
             ...(useSegments ? { segments: draftSegments } : {}),
+            contextTurnCount: turnCount,
           },
         });
-        if (ok) { promptDraftDirty = false; setStatus(useSegments ? `分段提示词已保存（${draftSegments.length} 段）。` : "提示词已保存。"); }
+        if (ok) { promptDraftDirty = false; setStatus(useSegments ? `栏位提示词已保存（${draftSegments.length} 段）。` : "提示词已保存。"); }
         renderCenter();
       });
     }
@@ -3392,6 +3511,39 @@ async function connectOnce() {
           }
         } catch { /* 无聊天 / 宿主不可用 → null */ }
         return null;
+      },
+
+      // 0.9.25 shujuku 占位符体系：$7 前文 AI 楼层（排除当前楼层）/ $U 用户设定 / $C 角色描述。
+      // 访问器照抄 shujuku host-state-gateway fallback 链；任何失败 → null（字段缺省，照常推演）。
+      getCommitContext: async (assistantText) => {
+        try {
+          const ctx = SillyTavern.getContext();
+          const chat = Array.isArray(ctx?.chat) ? ctx.chat : [];
+          const texts = [];
+          for (let i = chat.length - 1; i >= 0 && texts.length < 11; i--) {
+            const message = chat[i];
+            if (message && message.is_user === false && typeof message.mes === "string" && message.mes.trim()) {
+              texts.unshift(message.mes);
+            }
+          }
+          const recentAssistantTexts = texts
+            .filter((text) => text !== assistantText)
+            .slice(-10);
+          const personaDescription = String(
+            ctx?.powerUserSettings?.persona_description || ctx?.persona_description || "",
+          );
+          const character = Array.isArray(ctx?.characters) && Number.isInteger(ctx?.characterId)
+            ? ctx.characters[ctx.characterId]
+            : null;
+          const charDescription = String(
+            character?.description || character?.data?.description || ctx?.name2_description || "",
+          );
+          return {
+            ...(recentAssistantTexts.length > 0 ? { recentAssistantTexts } : {}),
+            ...(personaDescription.trim() ? { personaDescription } : {}),
+            ...(charDescription.trim() ? { charDescription } : {}),
+          };
+        } catch { return null; }
       },
 
       onStateChange: () => rerender(),

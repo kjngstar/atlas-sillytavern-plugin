@@ -115,15 +115,22 @@ export interface AtlasApiConnectionPreset {
 export const PROMPT_SEGMENT_ROLES = ["system", "user", "assistant"] as const;
 export type AtlasPromptSegmentRole = (typeof PROMPT_SEGMENT_ROLES)[number];
 
-/** 提示词分段（0.9.18 长段多角色预设）：正文支持 {{worldState}}/{{userAction}}/{{assistantReply}} 占位符。 */
+/** 提示词分段（0.9.18 长段多角色预设；0.9.25 升级 shujuku promptGroup 栏位段）：
+ *  正文支持 $1/$5/$6/$7/$8/$9/$U/$C 与旧 {{...}} 占位符；name / mainSlot("A"|"B") / deletable 为 shujuku 栏位字段。 */
 export interface AtlasPromptSegment {
   role: AtlasPromptSegmentRole;
   content: string;
+  /** 栏位显示名（shujuku promptGroup segment.name；缺省 = 未命名栏位）。 */
+  name?: string;
+  /** 主槽位标记（shujuku mainSlot A/B；仅 UI 语义，发送顺序仍按数组序）。 */
+  mainSlot?: "A" | "B" | "";
+  deletable?: boolean;
 }
 
 export const MAX_PROMPT_SEGMENTS = 16;
 
-/** 分段归一化：角色白名单小写归一、内容 trim、空段丢弃、超限截断；非法输入 → 空数组（回退单提示词模式）。 */
+/** 分段归一化：角色白名单小写归一、内容 trim、空段丢弃、超限截断；非法输入 → 空数组（回退单提示词模式）。
+ *  0.9.25：保留 shujuku 栏位字段 name / mainSlot / deletable（可选，形状不对即丢弃）。 */
 export function normalizePromptSegments(raw: unknown): AtlasPromptSegment[] {
   if (!Array.isArray(raw)) return [];
   const segments: AtlasPromptSegment[] = [];
@@ -135,7 +142,13 @@ export function normalizePromptSegments(raw: unknown): AtlasPromptSegment[] {
     const content = typeof record.content === "string" ? record.content.trim() : "";
     if (!content) continue;
     if (segments.length >= MAX_PROMPT_SEGMENTS) break;
-    segments.push({ role: role as AtlasPromptSegmentRole, content: content.slice(0, MAX_PROMPT_CHARS) });
+    const segment: AtlasPromptSegment = { role: role as AtlasPromptSegmentRole, content: content.slice(0, MAX_PROMPT_CHARS) };
+    if (typeof record.name === "string" && record.name.trim()) segment.name = record.name.trim().slice(0, 64);
+    if (record.mainSlot === "A" || record.mainSlot === "B" || record.mainSlot === "") {
+      segment.mainSlot = record.mainSlot;
+    }
+    if (record.deletable === false) segment.deletable = false;
+    segments.push(segment);
   }
   return segments;
 }
@@ -147,6 +160,8 @@ export interface AtlasPromptPreset {
   systemPrompt: string;
   /** 0.9.18 分段模式：非空时取代 systemPrompt 单条（引擎逐段装配 + 占位符替换）。 */
   segments?: AtlasPromptSegment[];
+  /** 0.9.25 shujuku contextTurnCount：$7 前文上下文条数（1–10，缺省 3）。 */
+  contextTurnCount?: number;
   updatedAt: number;
 }
 
@@ -214,7 +229,7 @@ export type AtlasSettingsCommand =
     }
   | { action: "api.delete"; id: string }
   | { action: "api.activate"; id: string | null }
-  | { action: "prompt.save"; preset: { id?: string; name: string; systemPrompt: string; segments?: AtlasPromptSegment[] } }
+  | { action: "prompt.save"; preset: { id?: string; name: string; systemPrompt: string; segments?: AtlasPromptSegment[]; contextTurnCount?: number } }
   | { action: "prompt.delete"; id: string }
   | { action: "prompt.activate"; id: string | null }
   | { action: "replace.save"; preset: { id?: string; name: string; start: string; end: string; enabled?: boolean } }
@@ -386,7 +401,18 @@ function parsePromptPreset(raw: unknown): { id: string; name: string; systemProm
     name: record.name.trim(),
     systemPrompt: prompt.slice(0, MAX_PROMPT_CHARS),
     ...(segments.length > 0 ? { segments } : {}),
+    ...(normalizeContextTurnCount(record.contextTurnCount) !== null
+      ? { contextTurnCount: normalizeContextTurnCount(record.contextTurnCount)! }
+      : {}),
   };
+}
+
+/** 0.9.25 shujuku contextTurnCount 归一：1–10 整数；非法 → null（缺省 3）。 */
+function normalizeContextTurnCount(raw: unknown): number | null {
+  const value = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw.trim()) : NaN;
+  if (!Number.isFinite(value)) return null;
+  const truncated = Math.trunc(value);
+  return truncated >= 1 && truncated <= 10 ? truncated : null;
 }
 
 /**
@@ -751,6 +777,9 @@ export function applySettingsCommand(
         name: uniqueName(preset.name, usedNames),
         systemPrompt: text,
         ...(segments.length > 0 ? { segments } : {}),
+        ...(normalizeContextTurnCount(preset.contextTurnCount) !== null
+          ? { contextTurnCount: normalizeContextTurnCount(preset.contextTurnCount)! }
+          : {}),
         updatedAt: now,
       };
       const promptPresets = existingIndex >= 0
@@ -1083,5 +1112,7 @@ export function resolveWorldTurnPreset(settings: AtlasServerSettingsV2): AtlasAp
         : prompt
           ? { systemPrompt: prompt.systemPrompt }
           : {}),
+    // 0.9.25 shujuku contextTurnCount：$7 前文条数（预设级设置，缺省 3 由引擎侧兜底）
+    ...(prompt?.contextTurnCount ? { contextTurnCount: prompt.contextTurnCount } : {}),
   };
 }
