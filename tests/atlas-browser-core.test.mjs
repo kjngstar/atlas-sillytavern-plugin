@@ -161,10 +161,8 @@ test("local api: PUT/GET /settings 走同一 store（进程内零网络，ATLAS-
   assert.equal(get.body.data.apiPresets.length, 1);
   assert.equal(get.body.data.apiPresets[0].model, "m1");
   assert.equal(get.body.data.activeApiPresetId, saved.body.data.apiPresets[0].id, "活动引用持久化");
-  // 脱敏：apiKey 只出掩码，且响应里搜不到明文
-  assert.equal(get.body.data.apiPresets[0].apiKey.exists, true);
-  assert.equal(get.body.data.apiPresets[0].apiKey.tail, "test");
-  assert.ok(!JSON.stringify(get.body).includes("sk-local-test"), "GET 不含明文 Key");
+  // 0.9.12（作者令，照抄 shujuku）：GET 回传明文 Key 供编辑器回填 / 测试连接复用
+  assert.equal(get.body.data.apiPresets[0].apiKey, "sk-local-test");
 });
 
 test("local api: 未知路由 → ok:false + 稳定错误码", async () => {

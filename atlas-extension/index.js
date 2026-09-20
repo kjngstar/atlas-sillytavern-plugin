@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.11";
+export const ATLAS_EXTENSION_VERSION = "0.9.12";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -1032,6 +1032,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
   const travelBar = el("div", "aw-travel");
   const mapCanvas = el("div", "aw-maparea");
   let mapBuilt = false;
+  let mapScaleEl = null;
 
   const applyTransform = () => {
     mapLayer.style.transform = `scale(${zoom}) translate(${panX}px, ${panY}px)`;
@@ -1053,7 +1054,8 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     for (const corner of ["tl", "tr", "bl", "br"]) viewport.append(el("span", `aw-corner aw-corner--${corner}`));
     const compass = el("div", "aw-compass");
     compass.append(el("span", "aw-compass__n", "N"), el("i", "aw-compass__needle"));
-    viewport.append(compass, el("div", "aw-scale", "1 格 ≈ 一日路程"));
+    mapScaleEl = el("div", "aw-scale", "1 格 ≈ 一日路程");
+    viewport.append(compass, mapScaleEl);
     for (const [label, delta, aria] of [["＋", 0.25, "放大地图"], ["－", -0.25, "缩小地图"], ["⌂", 0, "重置地图缩放"]]) {
       const btn = el("button", "aw-zoom__btn", label);
       btn.type = "button";
@@ -1088,6 +1090,8 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     const objects = regionFilter ? objectsAll.filter((o) => String(o.regionId ?? "") === regionFilter) : objectsAll;
 
     const regions = Array.isArray(d.regions) ? d.regions : [];
+    // 刻度尺只在有真实地理（多于一个地点或地区）后显示——空图挂尺子是假信息（作者 2026-09-20）
+    if (mapScaleEl) mapScaleEl.style.display = pointsAll.length > 1 || regions.length > 1 ? "" : "none";
     regionSelect.innerHTML = "";
     const allOption = document.createElement("option");
     allOption.value = "";
@@ -1407,8 +1411,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
   let apiLibrary = [];
   let apiDraft = null;
   let apiDraftDirty = false;
-  let apiKeyInput = "";
-  let apiKeyClear = false;
+  let apiKeyInput = ""; // 0.9.12（shujuku 语义）：编辑器持有的密钥——载入预设时回填，保存 / 测试连接直接用它
   let promptLibrary = [];
   let promptDraft = null;
   let promptDraftDirty = false;
@@ -1760,7 +1763,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     panel.append(el("span", "aw-eyebrow", "API 连接"));
     panel.append(el("p", "aw-panel__text", "管理 Atlas 推演用的 API 连接：协议、密钥与模型都在这里；提示词请到「推进」页。"));
     const active = apiLibrary.find((p) => p.id === settingsV2?.activeApiPresetId);
-    panel.append(el("p", "aw-panel__meta", `当前使用：${activeApiLabel()}${active ? ` · 模型 ${active.model} · 密钥${active.apiKey?.exists ? `已保存（尾号 ${active.apiKey.tail ?? "----"}）` : "未设置"}` : ""}`));
+    panel.append(el("p", "aw-panel__meta", `当前使用：${activeApiLabel()}${active ? ` · 模型 ${active.model} · 密钥${active.apiKey ? `已保存（尾号 ${String(active.apiKey).slice(-4)}）` : "未设置"}` : ""}`));
     const gotoRow = el("div", "aw-actions");
     const gotoProgression = el("button", "aw-btn aw-btn--ghost", "前往推进");
     gotoProgression.type = "button";
@@ -1798,8 +1801,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
         ? { id: preset.id, name: preset.name, endpoint: preset.endpoint, model: preset.model, maxTokens: preset.maxTokens, temperature: preset.temperature, timeoutMs: preset.timeoutMs, apiFormat: preset.apiFormat === "claude" ? "claude" : "openai" }
         : newApiDraft();
       apiDraftDirty = false;
-      apiKeyInput = "";
-      apiKeyClear = false;
+      apiKeyInput = preset ? String(preset.apiKey ?? "") : "";
       modelOptions = [];
       setStatus("", "ok");
       if (preset) void sendSettingsCommand({ action: "api.activate", id: preset.id });
@@ -1814,7 +1816,6 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       apiDraft = newApiDraft();
       apiDraftDirty = false;
       apiKeyInput = "";
-      apiKeyClear = false;
       modelOptions = [];
       setStatus("", "ok");
       renderCenter();
@@ -1897,7 +1898,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
 
     panel.append(appendField(textField("name", "连接名称", "text", 64, "例如：MiniMax 订阅", "连接名称")));
 
-    // 接口协议（0.9.11，shujuku 同款字段）
+    // 接口协议（0.9.12，shujuku 同款字段）
     const formatField = el("div", "aw-field");
     formatField.append(el("span", "aw-field__label", "接口协议"));
     const formatSelect = document.createElement("select");
@@ -1925,7 +1926,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     panel.append(formatField);
 
     panel.append(appendField(textField("endpoint", "端点（http(s) 绝对地址）", "text", 2048, "http://localhost:8317/v1", "API 端点"), "Claude 协议填协议根即可，OpenAI 协议填到 /v1（Atlas 会自动补 /chat/completions）。"));
-    panel.append(appendField(textField("apiKey", "API 密钥（留空保持已保存的密钥）", "password", 4096, active?.apiKey?.exists ? `已保存（尾号 ${active.apiKey.tail ?? "----"}），留空保持不变` : "未设置", "API 密钥"), "密钥只保存在浏览器侧，经酒馆后端代理转发，服务端不预存；GET 只返回是否存在与尾号。"));
+    panel.append(appendField(textField("apiKey", "API 密钥", "password", 4096, active?.apiKey ? `已保存（尾号 ${String(active.apiKey).slice(-4)}），可直接修改` : "sk-…", "API 密钥"), "密钥保存在本浏览器的扩展设置里，载入预设时自动回填——加载模型与推演直接用它，不用每次重输。"));
 
     // shujuku 式：独立的「加载模型列表」按钮紧跟密钥；模型下拉仅在加载到时出现
     const loadModelsRow = el("div", "aw-actions");
@@ -1973,19 +1974,6 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     panel.append(grid);
     panel.append(appendField(numberField("timeoutMs", "超时毫秒", 1000, 120000, 1000, "超时毫秒")));
 
-    const clearKeyRow = el("label", "aw-check");
-    const clearKey = document.createElement("input");
-    clearKey.type = "checkbox";
-    clearKey.checked = apiKeyClear;
-    clearKey.setAttribute("aria-label", "保存时清除已保存的密钥");
-    clearKey.addEventListener("change", () => {
-      apiKeyClear = clearKey.checked;
-      apiDraftDirty = true;
-      if (syncApiDirty) syncApiDirty();
-    });
-    clearKeyRow.append(clearKey, el("span", null, "保存时清除已保存的密钥"));
-    panel.append(clearKeyRow);
-
     // dirty 操作条（shujuku 式：未修改时「放弃修改 / 保存」禁用；保存后自动设为当前使用）
     const actions = el("div", "aw-actions");
     const apiDiscardButton = el("button", "aw-btn aw-btn--ghost", "放弃修改");
@@ -1997,8 +1985,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
         ? { id: preset.id, name: preset.name, endpoint: preset.endpoint, model: preset.model, maxTokens: preset.maxTokens, temperature: preset.temperature, timeoutMs: preset.timeoutMs, apiFormat: preset.apiFormat === "claude" ? "claude" : "openai" }
         : newApiDraft();
       apiDraftDirty = false;
-      apiKeyInput = "";
-      apiKeyClear = false;
+      apiKeyInput = preset ? String(preset.apiKey ?? "") : "";
       modelOptions = [];
       setStatus("", "ok");
       renderCenter();
@@ -2014,7 +2001,8 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
         renderCenter();
         return;
       }
-      const apiKeyMode = apiKeyClear ? "clear" : (apiKeyInput ? "replace" : (preset.id ? "keep" : "replace"));
+      // 0.9.12：编辑器始终回填已存密钥，字段值即权威值——保存一律 replace（清空字段 = 删除密钥）
+      const apiKeyMode = "replace";
       const ok = await sendSettingsCommand({
         action: "api.save",
         preset: {
@@ -2028,7 +2016,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
           apiFormat: preset.apiFormat === "claude" ? "claude" : "openai",
         },
         apiKeyMode,
-        ...(apiKeyMode === "replace" ? { apiKey: apiKeyInput } : {}),
+        apiKey: apiKeyInput,
       });
       if (ok) {
         const saved = apiLibrary.find((p) => p.name === preset.name.trim()) ?? apiLibrary[apiLibrary.length - 1];
@@ -2036,8 +2024,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
           ? { id: saved.id, name: saved.name, endpoint: saved.endpoint, model: saved.model, maxTokens: saved.maxTokens, temperature: saved.temperature, timeoutMs: saved.timeoutMs, apiFormat: saved.apiFormat === "claude" ? "claude" : "openai" }
           : apiDraft;
         apiDraftDirty = false;
-        apiKeyInput = "";
-        apiKeyClear = false;
+        apiKeyInput = saved ? String(saved.apiKey ?? "") : "";
         // shujuku 语义：保存（新建）后自动设为当前使用
         if (saved) void sendSettingsCommand({ action: "api.activate", id: saved.id });
         setStatus("API 连接已保存并设为当前使用。");
@@ -2070,7 +2057,6 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       });
       if (ok) {
         apiDraftDirty = false;
-        apiKeyInput = "";
         setStatus("已另存为新的连接。");
       }
       renderCenter();
@@ -2104,7 +2090,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       const headers = { "Content-Type": "application/json" };
       if (typeof ctx.getRequestHeaders === "function") Object.assign(headers, ctx.getRequestHeaders());
       // ATLAS-FIX-02：custom_include_headers 必须是原始头字符串（与生成路径共用同一序列化口径）
-      // 0.9.11：claude 协议 → chat_completion_source:"claude" + reverse_proxy（基址补 /v1）+ proxy_password
+      // 0.9.12：claude 协议 → chat_completion_source:"claude" + reverse_proxy（基址补 /v1）+ proxy_password
       const { atlasCustomIncludeHeaders, normalizeAtlasClaudeBase } = await loadUiCore();
       const keyValue = apiKeyInput ? `Bearer ${apiKeyInput}` : "";
       const isClaude = (apiDraft?.apiFormat ?? preset.apiFormat) === "claude" || preset.apiFormat === "claude";

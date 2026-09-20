@@ -6148,7 +6148,8 @@ function settingsViewV2(settings) {
         temperature: p.temperature,
         timeoutMs: p.timeoutMs,
         apiFormat: p.apiFormat === "claude" ? "claude" : "openai",
-        apiKey: { exists: key.trim().length > 0, tail: key.trim().length >= 4 ? key.trim().slice(-4) : null }
+        // 0.9.12（作者令，照抄 shujuku）：GET 返回明文密钥，编辑器回填 / 测试连接复用，不再每次重输
+        apiKey: key
       };
     }),
     promptPresets: settings.promptPresets.map((p) => ({ ...p })),

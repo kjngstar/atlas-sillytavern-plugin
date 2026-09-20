@@ -756,7 +756,8 @@ export interface AtlasSettingsView {
     temperature: number;
     timeoutMs: number;
     apiFormat: "openai" | "claude";
-    apiKey: { exists: boolean; tail: string | null };
+    /** 0.9.12（作者令，照抄 shujuku）：GET 返回明文密钥供编辑器回填与测试连接复用——密钥本就存在作者自己的浏览器存储里。 */
+    apiKey: string;
   }>;
   promptPresets: AtlasPromptPreset[];
   activeApiPresetId: string | null;
@@ -787,7 +788,8 @@ export function settingsViewV2(settings: AtlasServerSettingsV2): AtlasSettingsVi
         temperature: p.temperature,
         timeoutMs: p.timeoutMs,
         apiFormat: p.apiFormat === "claude" ? "claude" : "openai",
-        apiKey: { exists: key.trim().length > 0, tail: key.trim().length >= 4 ? key.trim().slice(-4) : null },
+        // 0.9.12（作者令，照抄 shujuku）：GET 返回明文密钥，编辑器回填 / 测试连接复用，不再每次重输
+        apiKey: key,
       };
     }),
     promptPresets: settings.promptPresets.map((p) => ({ ...p })),

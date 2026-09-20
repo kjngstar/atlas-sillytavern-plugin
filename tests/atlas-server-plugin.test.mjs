@@ -220,12 +220,10 @@ test("settings：GET 永不返回明文 Key，PUT 仅限本机会话", async () 
 
   const view = await core.handle("GET", "/settings");
   const serialized = JSON.stringify(view.body);
-  ok(!serialized.includes(SECRET), "settings 响应无明文 Key");
   equal(view.body.data.schemaVersion, 2, "GET 出 schemaVersion 2");
   equal(view.body.data.apiPresets.length, 1, "旧载荷已被迁移成 v2 连接库");
-  equal(view.body.data.apiPresets[0].apiKey.exists, true, "Key 存在标记");
-  equal(view.body.data.apiPresets[0].apiKey.tail, SECRET.slice(-4), "只有尾号掩码");
-  ok(!("apiKey" in view.body.data.apiPresets[0].apiKey && typeof view.body.data.apiPresets[0].apiKey.apiKey === "string"), "apiKey 不是字符串");
+  // 0.9.12（作者令，照抄 shujuku）：GET 回传明文 Key 供编辑器回填 / 测试连接复用
+  equal(view.body.data.apiPresets[0].apiKey, SECRET, "GET 回明文 Key（本机浏览器存储，编辑器要回填）");
   equal(typeof view.body.data.builtInPrompt.systemPrompt, "string", "内置默认提示词只读可见");
   equal(view.body.data.builtInPrompt.readOnly, true, "内置默认只读");
 
@@ -256,7 +254,8 @@ test("settings v2：两库命令——入库 / 指纹去重 / 脱敏 / 两库独
   equal(created.status, 200, "新建连接 200");
   equal(created.body.data.apiPresets.length, 1, "一条连接入库");
   equal(created.body.data.activeApiPresetId, null, "保存 ≠ 激活");
-  ok(!JSON.stringify(created.body.data).includes(SECRET), "命令响应脱敏（无明文 Key）");
+  // 0.9.12（作者令）：GET/命令响应回明文 Key（本机浏览器存储，编辑器回填用）
+  ok(JSON.stringify(created.body.data).includes(SECRET), "命令响应带明文 Key（回填用）");
   const apiId = created.body.data.apiPresets[0].id;
 
   const second = await core.handle("PUT", "/settings", saveApi("渠道B", "https://b.example.invalid/v1/chat/completions"), { local: true });
@@ -281,7 +280,7 @@ test("settings v2：两库命令——入库 / 指纹去重 / 脱敏 / 两库独
     preset: { id: apiId, name: "渠道A改", endpoint: "https://a.example.invalid/v1/chat/completions", model: "atlas-mock-2", maxTokens: 512, temperature: 0.2, timeoutMs: 20_000 },
     apiKeyMode: "keep",
   }, { local: true });
-  equal(kept.body.data.apiPresets[0].apiKey.exists, true, "keep 保留密钥");
+  equal(kept.body.data.apiPresets[0].apiKey, SECRET, "keep 保留密钥（GET 回明文）");
   equal(kept.body.data.apiPresets[0].model, "atlas-mock-2", "其余字段已更新");
   equal(kept.body.data.apiPresets[0].id, apiId, "ID 稳定（重命名不换 ID）");
   const cleared = await core.handle("PUT", "/settings", {
@@ -289,7 +288,7 @@ test("settings v2：两库命令——入库 / 指纹去重 / 脱敏 / 两库独
     preset: { id: apiId, name: "渠道A改", endpoint: "https://a.example.invalid/v1/chat/completions", model: "atlas-mock-2", maxTokens: 512, temperature: 0.2, timeoutMs: 20_000 },
     apiKeyMode: "clear",
   }, { local: true });
-  equal(cleared.body.data.apiPresets[0].apiKey.exists, false, "clear 后密钥为空");
+  equal(cleared.body.data.apiPresets[0].apiKey, "", "clear 后密钥为空");
 
   // 持久化：换一个 core 读同一 store
   const fresh = createAtlasServerCore({ store, now: () => NOW });

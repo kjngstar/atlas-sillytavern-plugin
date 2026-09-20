@@ -366,12 +366,11 @@ test("悬挂引用：v2 数据里活动 API 指向不存在的 ID → 归一为 
 // 0.6 GET 脱敏视图 + 运行时组合
 // ---------------------------------------------------------------------------
 
-test("脱敏视图：不含明文 Key，只给 exists + 尾号；含内置默认提示词全文", () => {
+test("GET 视图：明文 Key 回传（0.9.12 作者令照抄 shujuku）；含内置默认提示词全文", () => {
   const s = withApi(createDefaultSettingsV2());
   const view = settingsViewV2(s);
-  const dump = JSON.stringify(view);
-  assert.ok(!dump.includes(TEST_KEY), "序列化后搜不到密钥");
-  assert.deepEqual(view.apiPresets[0].apiKey, { exists: true, tail: TEST_KEY.slice(-4) });
+  assert.equal(view.apiPresets[0].apiKey, TEST_KEY, "明文 Key 供编辑器回填 / 测试连接复用");
+  assert.equal(view.apiPresets[0].apiFormat, "openai", "协议字段缺省 openai");
   assert.equal(view.schemaVersion, 2);
   assert.equal(view.builtInPrompt.id, BUILTIN_PROMPT_PRESET_ID);
   assert.equal(view.builtInPrompt.readOnly, true);
