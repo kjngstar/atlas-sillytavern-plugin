@@ -644,6 +644,18 @@
   background: rgba(37, 95, 91, 0.12);
 }
 
+/* 0.9.16 替换页规则行：名称 / 开始词 / 结束词 / 开关 / 保存 / 删除 */
+.aw-replace-row {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) auto auto auto;
+}
+.aw-replace-row .aw-input { min-width: 0; }
+.aw-replace-row input[type="checkbox"] {
+  align-self: center;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--aw-teal);
+}
+
 /* ------------------------------------------------------------------ *
  * 设置页：世界绑定 + API 预设表单
  * ------------------------------------------------------------------ */

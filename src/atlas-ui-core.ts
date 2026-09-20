@@ -31,10 +31,10 @@ export { DEFAULT_WORLD_TURN_SYSTEM_PROMPT } from "./atlas-api-client.ts";
 export { atlasCustomIncludeHeaders } from "./atlas-proxy-fetch.ts";
 
 export type AtlasUiMode = "offline" | "protocol-incompatible" | "unbound" | "world-missing" | "ready";
-export type AtlasUiPage = "overview" | "map" | "nearby" | "changes" | "progression" | "api" | "logs";
+export type AtlasUiPage = "overview" | "map" | "nearby" | "changes" | "progression" | "api" | "replace" | "logs";
 
 /**
- * 侧边栏七项（顺序不可自行调整）。0.9.7 新增「日志」（作者 2026-09-20 反馈：要专门看报错的地方）。
+ * 侧边栏八项（顺序不可自行调整）。0.9.7 新增「日志」；0.9.16 新增「替换」（内容替换规则库，照抄 shujuku + 开关增强）。
  * 已取消含义模糊的「设置」：世界初始化回到「概览」，推进行为与提示词在「推进」，连接资料在「API」。
  */
 export const ATLAS_UI_PAGES: ReadonlyArray<{ id: AtlasUiPage; label: string }> = [
@@ -44,6 +44,7 @@ export const ATLAS_UI_PAGES: ReadonlyArray<{ id: AtlasUiPage; label: string }> =
   { id: "changes", label: "变化" },
   { id: "progression", label: "推进" },
   { id: "api", label: "API" },
+  { id: "replace", label: "替换" },
   { id: "logs", label: "日志" },
 ];
 export type AtlasServiceStatus = "checking" | "online" | "offline" | "incompatible";

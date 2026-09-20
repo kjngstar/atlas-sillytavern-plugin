@@ -20,6 +20,12 @@ import {
   DEFAULT_WORLD_TURN_SYSTEM_PROMPT,
   type AtlasApiPreset,
 } from "./atlas-api-client.ts";
+import {
+  DEFAULT_CONTENT_REPLACE_RULES,
+  MAX_REPLACE_RULES,
+  normalizeContentReplaceRules,
+  type AtlasContentReplaceRule,
+} from "./atlas-content-replace.ts";
 
 export const ATLAS_SETTINGS_SCHEMA_VERSION = 2;
 /** 内置默认提示词的虚拟 ID（只在 UI 层出现；持久层用 activePromptPresetId = null 表示）。 */
@@ -116,6 +122,8 @@ export interface AtlasServerSettingsV2 {
   activePromptPresetId: string | null;
   autoCommit: boolean;
   rpmLimit: number;
+  /** 0.9.16 内容替换规则库（照抄 shujuku + 开关增强；字段缺失时补预制库）。 */
+  contentReplaceRules?: AtlasContentReplaceRule[];
   /** v1 的 majorEvent 旧数据：只兼容保留，不执行、不展示。 */
   legacyMajorEvent?: unknown;
 }
@@ -168,6 +176,9 @@ export type AtlasSettingsCommand =
   | { action: "prompt.save"; preset: { id?: string; name: string; systemPrompt: string } }
   | { action: "prompt.delete"; id: string }
   | { action: "prompt.activate"; id: string | null }
+  | { action: "replace.save"; preset: { id?: string; name: string; start: string; end: string; enabled?: boolean } }
+  | { action: "replace.delete"; id: string }
+  | { action: "replace.reset" }
   | { action: "runtime.update"; autoCommit?: boolean; rpmLimit?: number };
 
 // ---------------------------------------------------------------------------
@@ -264,6 +275,10 @@ export function createDefaultSettingsV2(): AtlasServerSettingsV2 {
     activePromptPresetId: null,
     autoCommit: true,
     rpmLimit: 30,
+    contentReplaceRules: DEFAULT_CONTENT_REPLACE_RULES.map((rule, index) => ({
+      ...rule,
+      id: `cr-builtin-${index + 1}`,
+    })),
   };
 }
 
@@ -387,6 +402,12 @@ export function sanitizeSettingsV2(raw: unknown, deps: AtlasSettingsDeps = {}): 
     autoCommit: typeof record.autoCommit === "boolean" ? record.autoCommit : true,
     rpmLimit: isFiniteIntIn(record.rpmLimit, MIN_RPM, MAX_RPM) ? record.rpmLimit : 30,
   };
+  // 0.9.16 内容替换规则：字段缺失（旧存档）→ 预制库兜底；显式空数组 = 用户全删，尊重
+  if (record.contentReplaceRules === undefined) {
+    settings.contentReplaceRules = base.contentReplaceRules;
+  } else {
+    settings.contentReplaceRules = normalizeContentReplaceRules(record.contentReplaceRules);
+  }
   if ("legacyMajorEvent" in record) {
     settings.legacyMajorEvent = record.legacyMajorEvent;
     diagnostics.legacyMajorEventPreserved = record.legacyMajorEvent !== null && record.legacyMajorEvent !== undefined;
@@ -714,6 +735,44 @@ export function applySettingsCommand(
       }
       return { ok: true, settings: next };
     }
+    case "replace.save": {
+      const preset = command.preset;
+      const name = typeof preset.name === "string" ? preset.name.trim().slice(0, MAX_NAME_CHARS) : "";
+      const start = typeof preset.start === "string" ? preset.start.trim().slice(0, 256) : "";
+      const end = typeof preset.end === "string" ? preset.end.trim().slice(0, 256) : "";
+      if (!name || !start || !end) {
+        return fail(settings, "INVALID_PAYLOAD", "规则名称、开始词、结束词都不能为空。");
+      }
+      const enabled = preset.enabled !== false;
+      const rules = [...(settings.contentReplaceRules ?? [])];
+      const targetId = preset.id === undefined ? null : normalizeId(preset.id);
+      if (preset.id !== undefined && targetId === null) {
+        return fail(settings, "INVALID_PAYLOAD", "规则 ID 形状非法。");
+      }
+      const existingIndex = targetId ? rules.findIndex((r) => r.id === targetId) : -1;
+      if (preset.id !== undefined && existingIndex < 0) {
+        return fail(settings, "INVALID_PAYLOAD", "要编辑的规则不存在（另存请省略 id）。");
+      }
+      if (existingIndex < 0 && rules.length >= MAX_REPLACE_RULES) {
+        return fail(settings, "FIELD_LIMIT_EXCEEDED", `最多保存 ${MAX_REPLACE_RULES} 条替换规则。`);
+      }
+      const rule: AtlasContentReplaceRule = { id: targetId ?? generateId(), name, start, end, enabled };
+      if (existingIndex >= 0) rules[existingIndex] = rule;
+      else rules.push(rule);
+      return { ok: true, settings: { ...settings, contentReplaceRules: rules } };
+    }
+    case "replace.delete": {
+      const targetId = normalizeId(command.id);
+      if (!targetId) return fail(settings, "INVALID_PAYLOAD", "规则 ID 形状非法。");
+      const rules = (settings.contentReplaceRules ?? []).filter((r) => r.id !== targetId);
+      if (rules.length === (settings.contentReplaceRules ?? []).length) {
+        return fail(settings, "INVALID_PAYLOAD", "要删除的规则不存在。");
+      }
+      return { ok: true, settings: { ...settings, contentReplaceRules: rules } };
+    }
+    case "replace.reset": {
+      return { ok: true, settings: { ...settings, contentReplaceRules: createDefaultSettingsV2().contentReplaceRules } };
+    }
     default:
       return fail(settings, "INVALID_PAYLOAD", "未知的设置命令。");
   }
@@ -864,6 +923,8 @@ export interface AtlasSettingsView {
   builtInPrompt: { id: string; name: string; readOnly: true; systemPrompt: string };
   autoCommit: boolean;
   rpmLimit: number;
+  /** 0.9.16 内容替换规则库（含预制 + 手动，同库平等）。 */
+  contentReplaceRules: AtlasContentReplaceRule[];
 }
 
 /** GET /settings 的唯一视图：Key 只给 exists + 尾号；悬挂引用归一为 null。 */
@@ -909,6 +970,7 @@ export function settingsViewV2(settings: AtlasServerSettingsV2): AtlasSettingsVi
     },
     autoCommit: settings.autoCommit,
     rpmLimit: settings.rpmLimit,
+    contentReplaceRules: settings.contentReplaceRules ?? [],
   };
 }
 

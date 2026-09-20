@@ -17,15 +17,15 @@ import { ATLAS_UI_PAGES } from "../src/atlas-ui-core.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-test("侧边栏七栏：顺序固定为 概览/地图/附近/变化/推进/API/日志，且不存在「设置」", () => {
+test("侧边栏八栏：顺序固定为 概览/地图/附近/变化/推进/API/替换/日志，且不存在「设置」", () => {
   assert.deepEqual(
     ATLAS_UI_PAGES.map((p) => p.id),
-    ["overview", "map", "nearby", "changes", "progression", "api", "logs"],
+    ["overview", "map", "nearby", "changes", "progression", "api", "replace", "logs"],
     "页面 id 顺序固定",
   );
   assert.deepEqual(
     ATLAS_UI_PAGES.map((p) => p.label),
-    ["概览", "地图", "附近", "变化", "推进", "API", "日志"],
+    ["概览", "地图", "附近", "变化", "推进", "API", "替换", "日志"],
     "用户标签固定",
   );
   assert.ok(

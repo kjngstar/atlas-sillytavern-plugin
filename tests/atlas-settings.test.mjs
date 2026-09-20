@@ -16,6 +16,7 @@ import {
   migrateAtlasSettings,
   applySettingsCommand,
   settingsViewV2,
+  sanitizeSettingsV2,
   resolveWorldTurnPreset,
   normalizeConnectionMode,
   normalizeApiFormat,
@@ -501,4 +502,77 @@ test("api.save：custom 模式仍要求 endpoint 与 model；非法 connectionMo
   }, testDeps());
   assert.equal(tolerated.ok, true, tolerated.ok ? "" : tolerated.message);
   assert.equal(tolerated.settings.apiPresets[0].connectionMode, undefined, "custom 是缺省态：落库省略字段（读取侧 normalize 回 custom）");
+});
+
+// ---------------------------------------------------------------------------
+// 0.9.16 内容替换规则库：命令 + sanitize 兜底
+// ---------------------------------------------------------------------------
+
+test("replace.save/delete/reset：规则增删改 + 恢复预制（预制与手动同库平等）", () => {
+  let s = createDefaultSettingsV2();
+  assert.ok((s.contentReplaceRules ?? []).length >= 14, "默认带 shujuku 同款预制库");
+  assert.ok(s.contentReplaceRules.some((r) => r.start === "<think" && r.enabled !== false), "预制含 think 规则且默认启用");
+
+  // 新增
+  const added = applySettingsCommand(s, {
+    action: "replace.save",
+    preset: { name: "我的规则", start: "<note", end: "</note>", enabled: true },
+  }, testDeps());
+  assert.equal(added.ok, true, added.ok ? "" : added.message);
+  const addedRule = added.settings.contentReplaceRules.at(-1);
+  assert.equal(addedRule.name, "我的规则");
+  assert.ok(!addedRule.builtin, "手动规则无 builtin 标记");
+
+  // 编辑（改名 + 停用）
+  const edited = applySettingsCommand(added.settings, {
+    action: "replace.save",
+    preset: { id: addedRule.id, name: "我的规则改", start: "<note", end: "</note>", enabled: false },
+  }, testDeps());
+  assert.equal(edited.ok, true);
+  const editedRule = edited.settings.contentReplaceRules.find((r) => r.id === addedRule.id);
+  assert.equal(editedRule.name, "我的规则改");
+  assert.equal(editedRule.enabled, false);
+
+  // 删除
+  const deleted = applySettingsCommand(edited.settings, { action: "replace.delete", id: addedRule.id }, testDeps());
+  assert.equal(deleted.ok, true);
+  assert.ok(!deleted.settings.contentReplaceRules.some((r) => r.id === addedRule.id));
+
+  // 清空后恢复预制
+  let emptied = deleted.settings;
+  for (const r of [...emptied.contentReplaceRules]) {
+    emptied = applySettingsCommand(emptied, { action: "replace.delete", id: r.id }, testDeps()).settings;
+  }
+  assert.equal(emptied.contentReplaceRules.length, 0, "全删后为空（尊重用户）");
+  const reset = applySettingsCommand(emptied, { action: "replace.reset" }, testDeps());
+  assert.equal(reset.ok, true);
+  assert.ok(reset.settings.contentReplaceRules.length >= 14, "reset 还原预制库");
+});
+
+test("replace.save：非法载荷拒绝；sanitize 旧档缺 contentReplaceRules → 补预制库", () => {
+  const s = createDefaultSettingsV2();
+  const bad = applySettingsCommand(s, {
+    action: "replace.save",
+    preset: { name: "", start: "<a", end: "</a>" },
+  }, testDeps());
+  assert.equal(bad.ok, false, "名称必填");
+
+  const badEnd = applySettingsCommand(s, {
+    action: "replace.save",
+    preset: { name: "x", start: "<a", end: "" },
+  }, testDeps());
+  assert.equal(badEnd.ok, false, "结束词必填");
+
+  // 旧档（无 contentReplaceRules 字段）经 sanitize 补预制库；坏条目丢弃不炸库
+  const legacyRecord = { schemaVersion: 2, apiPresets: [], promptPresets: [], activeApiPresetId: null, activePromptPresetId: null, autoCommit: true, rpmLimit: 30 };
+  const sanitized = sanitizeSettingsV2(legacyRecord, testDeps());
+  assert.ok((sanitized.settings.contentReplaceRules ?? []).length >= 14, "字段缺失 → 补预制");
+
+  // 显式空数组 = 用户全删，尊重
+  const emptied = sanitizeSettingsV2({ ...legacyRecord, contentReplaceRules: [] }, testDeps());
+  assert.deepEqual(emptied.settings.contentReplaceRules, []);
+
+  // junk / 重复 id 丢弃
+  const junk = sanitizeSettingsV2({ ...legacyRecord, contentReplaceRules: [{ id: "r1", name: "n", start: "<a", end: "</a>", enabled: true }, "junk", { id: "r1", name: "dup", start: "<b", end: "</b>" }] }, testDeps());
+  assert.equal(junk.settings.contentReplaceRules.length, 1, "坏条目与重复 id 被丢弃");
 });

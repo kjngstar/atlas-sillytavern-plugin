@@ -934,12 +934,9 @@ function extractAssistantText(payload) {
   }
   return null;
 }
-function stripThinkSegments(text) {
-  return text.replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, "").replace(/<think(?:ing)?>[\s\S]*$/i, "").trim();
-}
 function extractJsonObject(text) {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const candidates = [fenced?.[1] ?? "", stripThinkSegments(text), text];
+  const candidates = [fenced?.[1] ?? "", text];
   for (const candidate of candidates) {
     const trimmed = candidate.trim();
     if (!trimmed.startsWith("{")) continue;
@@ -4253,6 +4250,117 @@ function mergeSettlementNotes(summary, notes) {
   return merged.slice(0, W0_LIMITS.maxStateEventSummary);
 }
 
+// src/atlas-content-replace.ts
+var DEFAULT_CONTENT_REPLACE_RULES = [
+  { name: "思考段 thinking", start: "<thinking", end: "</thinking>", enabled: true, builtin: true },
+  { name: "思考段 think", start: "<think", end: "</think>", enabled: true, builtin: true },
+  { name: "思考段 thought", start: "<thought", end: "</thought>", enabled: true, builtin: true },
+  { name: "免责声明", start: "<disclaimer", end: "</disclaimer>", enabled: true, builtin: true },
+  { name: "JSON 补丁", start: "<JSONPatch", end: "</JSONPatch>", enabled: true, builtin: true },
+  { name: "分析段", start: "<Analysis", end: "</Analysis>", enabled: true, builtin: true },
+  { name: "变量更新", start: "<UpdateVariable", end: "</UpdateVariable>", enabled: true, builtin: true },
+  { name: "吐槽段", start: "<tucao", end: "</tucao>", enabled: true, builtin: true },
+  { name: "状态栏占位", start: "<StatusPlaceHolderImpl", end: "</StatusPlaceHolderImpl>", enabled: true, builtin: true },
+  { name: "摘要段", start: "<summary", end: "</summary>", enabled: true, builtin: true },
+  { name: "选项段", start: "<options", end: "</options>", enabled: true, builtin: true },
+  { name: "复盘段", start: "<review", end: "</review>", enabled: true, builtin: true },
+  { name: "润色段", start: "<refine", end: "</refine>", enabled: true, builtin: true },
+  { name: "DM 校验段", start: "<dm_check", end: "</dm_check>", enabled: true, builtin: true },
+  { name: "补充段", start: "<supplement", end: "</supplement>", enabled: true, builtin: true }
+];
+var MAX_REPLACE_RULES = 50;
+var MAX_RULE_NAME_CHARS = 64;
+var MAX_RULE_BOUNDARY_CHARS = 256;
+function removeAllMatchedBoundaries(text, startBoundary, endBoundary) {
+  const source = String(text ?? "");
+  const start = String(startBoundary || "");
+  const end = String(endBoundary || "");
+  if (!source || !start || !end) return source;
+  const lowerSource = source.toLowerCase();
+  const lowerStart = start.toLowerCase();
+  const lowerEnd = end.toLowerCase();
+  const openStartIndexes = [];
+  const matchedRanges = [];
+  let searchIndex = 0;
+  while (searchIndex < lowerSource.length) {
+    const nextStartIdx = lowerSource.indexOf(lowerStart, searchIndex);
+    const nextEndIdx = lowerSource.indexOf(lowerEnd, searchIndex);
+    if (nextStartIdx === -1 && nextEndIdx === -1) break;
+    const isStartBoundary = nextStartIdx !== -1 && (nextEndIdx === -1 || nextStartIdx <= nextEndIdx);
+    if (isStartBoundary) {
+      openStartIndexes.push(nextStartIdx);
+      searchIndex = nextStartIdx + lowerStart.length;
+      continue;
+    }
+    if (openStartIndexes.length > 0) {
+      const matchedStartIdx = openStartIndexes.pop();
+      const matchedEndIdx = nextEndIdx + lowerEnd.length;
+      if (matchedEndIdx > matchedStartIdx) {
+        matchedRanges.push({ start: matchedStartIdx, end: matchedEndIdx });
+      }
+    }
+    searchIndex = nextEndIdx + lowerEnd.length;
+  }
+  if (matchedRanges.length === 0) return source;
+  matchedRanges.sort((left, right) => left.start - right.start || left.end - right.end);
+  const mergedRanges = [];
+  matchedRanges.forEach((range) => {
+    const previousRange = mergedRanges[mergedRanges.length - 1];
+    if (!previousRange || range.start > previousRange.end) {
+      mergedRanges.push({ ...range });
+      return;
+    }
+    previousRange.end = Math.max(previousRange.end, range.end);
+  });
+  let result = source;
+  for (let rangeIndex = mergedRanges.length - 1; rangeIndex >= 0; rangeIndex--) {
+    const range = mergedRanges[rangeIndex];
+    result = result.slice(0, range.start) + result.slice(range.end);
+  }
+  return result;
+}
+function applyContentReplaceRules(text, rules) {
+  let result = String(text ?? "");
+  if (!result) return result;
+  for (const rule of rules) {
+    if (!rule || rule.enabled === false) continue;
+    const start = String(rule.start ?? "").trim();
+    const end = String(rule.end ?? "").trim();
+    if (!start || !end) continue;
+    result = removeAllMatchedBoundaries(result, start, end);
+  }
+  return result.replace(/\n{3,}/g, "\n\n").trim();
+}
+function normalizeContentReplaceRules(raw) {
+  const normalized = [];
+  const seenIds = /* @__PURE__ */ new Set();
+  const seenPairs = /* @__PURE__ */ new Set();
+  if (!Array.isArray(raw)) return normalized;
+  for (const entry of raw.slice(0, MAX_REPLACE_RULES * 2)) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const record = entry;
+    const id = typeof record.id === "string" && record.id.trim() ? record.id.trim().slice(0, 128) : null;
+    const name = typeof record.name === "string" && record.name.trim() ? record.name.trim().slice(0, MAX_RULE_NAME_CHARS) : null;
+    const start = typeof record.start === "string" ? record.start.trim().slice(0, MAX_RULE_BOUNDARY_CHARS) : "";
+    const end = typeof record.end === "string" ? record.end.trim().slice(0, MAX_RULE_BOUNDARY_CHARS) : "";
+    if (!id || !name || !start || !end) continue;
+    if (seenIds.has(id)) continue;
+    const pairKey = `${start}\0${end}`;
+    if (seenPairs.has(pairKey)) continue;
+    seenIds.add(id);
+    seenPairs.add(pairKey);
+    normalized.push({
+      id,
+      name,
+      start,
+      end,
+      enabled: record.enabled !== false,
+      ...record.builtin === true ? { builtin: true } : {}
+    });
+  }
+  return normalized.slice(0, MAX_REPLACE_RULES);
+}
+
 // lib/world-definition.ts
 function latestRevision(world) {
   const list = world.definitionRevisions ?? [];
@@ -5823,7 +5931,11 @@ function createDefaultSettingsV2() {
     activeApiPresetId: null,
     activePromptPresetId: null,
     autoCommit: true,
-    rpmLimit: 30
+    rpmLimit: 30,
+    contentReplaceRules: DEFAULT_CONTENT_REPLACE_RULES.map((rule, index) => ({
+      ...rule,
+      id: `cr-builtin-${index + 1}`
+    }))
   };
 }
 function parseConnectionPreset(raw) {
@@ -5928,6 +6040,11 @@ function sanitizeSettingsV2(raw, deps = {}) {
     autoCommit: typeof record.autoCommit === "boolean" ? record.autoCommit : true,
     rpmLimit: isFiniteIntIn(record.rpmLimit, MIN_RPM, MAX_RPM) ? record.rpmLimit : 30
   };
+  if (record.contentReplaceRules === void 0) {
+    settings.contentReplaceRules = base.contentReplaceRules;
+  } else {
+    settings.contentReplaceRules = normalizeContentReplaceRules(record.contentReplaceRules);
+  }
   if ("legacyMajorEvent" in record) {
     settings.legacyMajorEvent = record.legacyMajorEvent;
     diagnostics.legacyMajorEventPreserved = record.legacyMajorEvent !== null && record.legacyMajorEvent !== void 0;
@@ -6205,6 +6322,44 @@ function applySettingsCommand(settings, command, deps = {}) {
       }
       return { ok: true, settings: next };
     }
+    case "replace.save": {
+      const preset = command.preset;
+      const name = typeof preset.name === "string" ? preset.name.trim().slice(0, MAX_NAME_CHARS) : "";
+      const start = typeof preset.start === "string" ? preset.start.trim().slice(0, 256) : "";
+      const end = typeof preset.end === "string" ? preset.end.trim().slice(0, 256) : "";
+      if (!name || !start || !end) {
+        return fail3(settings, "INVALID_PAYLOAD", "规则名称、开始词、结束词都不能为空。");
+      }
+      const enabled = preset.enabled !== false;
+      const rules = [...settings.contentReplaceRules ?? []];
+      const targetId = preset.id === void 0 ? null : normalizeId(preset.id);
+      if (preset.id !== void 0 && targetId === null) {
+        return fail3(settings, "INVALID_PAYLOAD", "规则 ID 形状非法。");
+      }
+      const existingIndex = targetId ? rules.findIndex((r) => r.id === targetId) : -1;
+      if (preset.id !== void 0 && existingIndex < 0) {
+        return fail3(settings, "INVALID_PAYLOAD", "要编辑的规则不存在（另存请省略 id）。");
+      }
+      if (existingIndex < 0 && rules.length >= MAX_REPLACE_RULES) {
+        return fail3(settings, "FIELD_LIMIT_EXCEEDED", `最多保存 ${MAX_REPLACE_RULES} 条替换规则。`);
+      }
+      const rule = { id: targetId ?? generateId(), name, start, end, enabled };
+      if (existingIndex >= 0) rules[existingIndex] = rule;
+      else rules.push(rule);
+      return { ok: true, settings: { ...settings, contentReplaceRules: rules } };
+    }
+    case "replace.delete": {
+      const targetId = normalizeId(command.id);
+      if (!targetId) return fail3(settings, "INVALID_PAYLOAD", "规则 ID 形状非法。");
+      const rules = (settings.contentReplaceRules ?? []).filter((r) => r.id !== targetId);
+      if (rules.length === (settings.contentReplaceRules ?? []).length) {
+        return fail3(settings, "INVALID_PAYLOAD", "要删除的规则不存在。");
+      }
+      return { ok: true, settings: { ...settings, contentReplaceRules: rules } };
+    }
+    case "replace.reset": {
+      return { ok: true, settings: { ...settings, contentReplaceRules: createDefaultSettingsV2().contentReplaceRules } };
+    }
     default:
       return fail3(settings, "INVALID_PAYLOAD", "未知的设置命令。");
   }
@@ -6343,7 +6498,8 @@ function settingsViewV2(settings) {
       systemPrompt: DEFAULT_WORLD_TURN_SYSTEM_PROMPT
     },
     autoCommit: settings.autoCommit,
-    rpmLimit: settings.rpmLimit
+    rpmLimit: settings.rpmLimit,
+    contentReplaceRules: settings.contentReplaceRules ?? []
   };
 }
 function resolveWorldTurnPreset(settings) {
@@ -6825,7 +6981,8 @@ function createAtlasServerCore(deps) {
       checkpointId = list.length > 0 ? list[list.length - 1].id : null;
     }
     try {
-      draft = parseAtlasWorldTurnDraft(call.text);
+      const cleanedText = applyContentReplaceRules(call.text, current.contentReplaceRules ?? []);
+      draft = parseAtlasWorldTurnDraft(cleanedText);
       const adjudication = adjudicateAtlasDraft(baseWorld, {
         branchId: pending.binding.branchId,
         currentPointId: pending.binding.currentPointId,

@@ -819,29 +819,43 @@ test("callAtlasWorldTurnApi：非 MiniMax 域 / 非 sk-cp- 密钥 / claude 协�
 });
 
 // ---------------------------------------------------------------------------
-// 0.9.15 推理模型内嵌思考段剥离（MiniMax-M3 / DeepSeek-R1 把 <think> 写进 content）
+// 0.9.16 内容替换规则库接管 think 剥离（0.9.15 的解析层强制剥离已撤——预制规则可关才成立）
+// 引擎流程等价：applyContentReplaceRules(text, settings.contentReplaceRules) → parseAtlasWorldTurnDraft
 // ---------------------------------------------------------------------------
 
 const VALID_DRAFT = JSON.stringify({ summary: "捏了脸", duration: 1, npcChanges: [] });
+const { applyContentReplaceRules, DEFAULT_CONTENT_REPLACE_RULES } = await import("../src/atlas-content-replace.ts");
+const builtinRules = DEFAULT_CONTENT_REPLACE_RULES.map((rule, index) => ({ ...rule, id: `cr-builtin-${index + 1}` }));
 
-test("parseAtlasWorldTurnDraft：<think>…</think> 包着的 JSON 正常解析（MiniMax-M3 实测形状）", () => {
+test("替换规则：<think>…</think> 包着的 JSON 经预制规则后正常解析（MiniMax-M3 实测形状）", () => {
   const text = `<think>Let me analyze this turn carefully to produce the structured JSON output.\n\n**Context Summary:**\n- World time: Period 0</think>\n${VALID_DRAFT}`;
-  const draft = parseAtlasWorldTurnDraft(text);
+  const draft = parseAtlasWorldTurnDraft(applyContentReplaceRules(text, builtinRules));
   assert.equal(draft.summary, "捏了脸");
 });
 
-test("parseAtlasWorldTurnDraft：<thinking> 变体 + json 围栏混合也剥", () => {
+test("替换规则：<thinking> 变体 + json 围栏混合也剥", () => {
   const text = `<thinking>推理中…</thinking>\n\`\`\`json\n${VALID_DRAFT}\n\`\`\``;
-  const draft = parseAtlasWorldTurnDraft(text);
+  const draft = parseAtlasWorldTurnDraft(applyContentReplaceRules(text, builtinRules));
   assert.equal(draft.summary, "捏了脸");
 });
 
-test("parseAtlasWorldTurnDraft：未闭合 <think>（finish_reason 截断）→ 剥到末尾，输出为空则报错", () => {
+test("替换规则：规则可关——停用 think 规则后带 think 的原文解析报错（预制与手动同库平等）", () => {
+  const text = `<think>推理中</think>${VALID_DRAFT}`;
+  const disabled = builtinRules.map((r) => (r.start === "<think" && r.end === "</think>" ? { ...r, enabled: false } : r));
+  const stillOn = builtinRules.map((r) => (r.start === "<think" && r.end === "</think>" ? { ...r, enabled: true } : r));
+  assert.throws(() => parseAtlasWorldTurnDraft(applyContentReplaceRules(text, disabled)), /不是合法的 JSON 对象/, "关掉的规则不再剥");
+  const draft = parseAtlasWorldTurnDraft(applyContentReplaceRules(text, stillOn));
+  assert.equal(draft.summary, "捏了脸", "开着的规则正常剥");
+});
+
+test("替换规则：未闭合 <think>（shujuku 同款：孤立开始词不删）→ 解析报错", () => {
   const text = `<think>只有推理没有正文`;
-  assert.throws(() => parseAtlasWorldTurnDraft(text), /不是合法的 JSON 对象/);
+  assert.throws(() => parseAtlasWorldTurnDraft(applyContentReplaceRules(text, builtinRules)), /不是合法的 JSON 对象/);
 });
 
-test("parseAtlasWorldTurnDraft：无 think 的普通输出不受影响", () => {
-  const draft = parseAtlasWorldTurnDraft(VALID_DRAFT);
+test("替换规则：无 think 的普通输出不受影响；嵌套词对整体删除", () => {
+  const draft = parseAtlasWorldTurnDraft(applyContentReplaceRules(VALID_DRAFT, builtinRules));
   assert.equal(draft.summary, "捏了脸");
+  const nested = applyContentReplaceRules(`A<think>B<think>C</think>D</think>E`, builtinRules.filter((r) => r.start === "<think" && r.end === "</think>"));
+  assert.equal(nested, "AE", "栈式配对：嵌套段整体删除");
 });

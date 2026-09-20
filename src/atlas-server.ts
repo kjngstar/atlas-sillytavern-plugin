@@ -17,6 +17,7 @@ import type { EntityRecord, World } from "../lib/world-schema.ts";
 import { parseWorld } from "../lib/world-schema.ts";
 import { adjudicateAtlasDraft } from "./atlas-adjudicate.ts";
 import { settleNpcSchedules, mergeSettlementNotes } from "./atlas-schedule.ts";
+import { applyContentReplaceRules } from "./atlas-content-replace.ts";
 import { ledgerForBranch } from "../lib/world-ledger.ts";
 import { createCheckpoint, previewRestore, restoreAsPlayhead } from "../lib/world-checkpoint.ts";
 import { resolveCharacterPosition } from "../lib/world-npc.ts";
@@ -700,7 +701,10 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
       checkpointId = list.length > 0 ? list[list.length - 1]!.id : null;
     }
     try {
-      draft = parseAtlasWorldTurnDraft(call.text);
+      // 0.9.16 内容替换规则库（照抄 shujuku + 开关增强）：推演输出先过启用的词对规则
+      // （剥 think / 推理段 / 杂段），再进草稿解析。
+      const cleanedText = applyContentReplaceRules(call.text, current.contentReplaceRules ?? []);
+      draft = parseAtlasWorldTurnDraft(cleanedText);
       // 0.9.0 算法裁决层：网格旅行算法裁定移动耗时、实体白名单强制、未知地点降级丢弃。
       // 裁定说明合入 summary（可审计），独立 notes 记入日志。
       const adjudication = adjudicateAtlasDraft(baseWorld, {

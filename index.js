@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.15";
+export const ATLAS_EXTENSION_VERSION = "0.9.16";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -407,6 +407,7 @@ const PAGES = [
   { id: "changes", label: "变化" },
   { id: "progression", label: "推进" },
   { id: "api", label: "API" },
+  { id: "replace", label: "替换" },
   { id: "logs", label: "日志" },
 ];
 
@@ -1008,6 +1009,14 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       if (s.lastError) center.append(el("div", "aw-note aw-note--error", s.lastError));
       ensureSettingsLoaded();
       center.append(buildApiPanel());
+      return;
+    }
+
+    if (s.page === "replace") {
+      center.append(pageHeader("内容替换", "推演返回正文在解析前按规则删除成对词段（照抄 shujuku 内容替换）。预制规则可开关 / 删除 / 修改，与手动新增的规则同库平等。"));
+      if (s.lastError) center.append(el("div", "aw-note aw-note--error", s.lastError));
+      ensureSettingsLoaded();
+      center.append(buildReplacePanel());
       return;
     }
 
@@ -2425,6 +2434,134 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       setStatus(`加载模型失败：${error instanceof Error ? error.message : String(error)}`, "error");
     }
     renderCenter();
+  }
+
+  // ---------------------------------------------------------------------------
+  // 0.9.16 「替换」页：内容替换规则库（照抄 shujuku 内容替换 + 开关/删改增强）
+  // ---------------------------------------------------------------------------
+
+  /** 单行规则编辑器：名称 / 开始词 / 结束词 / 启用开关 / 保存 / 删除（预制与手动同库平等）。 */
+  function buildReplacePanel() {
+    const panel = el("div", "aw-panel");
+    panel.append(el("span", "aw-eyebrow", "替换规则"));
+    panel.append(el("span", "aw-hint", "推演返回的正文在解析前按启用的规则删除「开始词…结束词」之间的全部内容（大小写不敏感，支持嵌套）。预制规则与手动规则完全平等：都可以修改、关闭或删除。"));
+
+    const listWrap = el("div", "aw-list");
+
+    const rebuild = () => {
+      listWrap.replaceChildren();
+      const rules = Array.isArray(settingsV2?.contentReplaceRules) ? settingsV2.contentReplaceRules : [];
+      if (rules.length === 0) {
+        listWrap.append(el("p", "aw-panel__meta", "没有规则。可点下方「恢复预制规则」还原默认库。"));
+      }
+      for (const rule of rules) {
+        const row = el("div", "aw-select-row aw-replace-row");
+
+        const nameInput = document.createElement("input");
+        nameInput.className = "aw-input";
+        nameInput.value = String(rule.name ?? "");
+        nameInput.setAttribute("aria-label", "规则名称");
+        nameInput.placeholder = "名称";
+
+        const startInput = document.createElement("input");
+        startInput.className = "aw-input";
+        startInput.value = String(rule.start ?? "");
+        startInput.setAttribute("aria-label", "开始词");
+        startInput.placeholder = "开始词（如 <think）";
+
+        const endInput = document.createElement("input");
+        endInput.className = "aw-input";
+        endInput.value = String(rule.end ?? "");
+        endInput.setAttribute("aria-label", "结束词");
+        endInput.placeholder = "结束词（如 </think>）";
+
+        const enabledCheck = document.createElement("input");
+        enabledCheck.type = "checkbox";
+        enabledCheck.checked = rule.enabled !== false;
+        enabledCheck.setAttribute("aria-label", `启用规则：${rule.name}`);
+        enabledCheck.title = "启用 / 停用该规则";
+        enabledCheck.addEventListener("change", async () => {
+          const ok = await sendSettingsCommand({
+            action: "replace.save",
+            preset: { id: rule.id, name: nameInput.value, start: startInput.value, end: endInput.value, enabled: enabledCheck.checked },
+          });
+          if (ok) { setStatus(`规则「${nameInput.value}」已${enabledCheck.checked ? "启用" : "停用"}。`, "ok"); rebuild(); }
+          renderCenter();
+        });
+
+        const saveBtn = el("button", "aw-btn aw-btn--icon", "保存");
+        saveBtn.setAttribute("aria-label", `保存规则：${rule.name}`);
+        saveBtn.addEventListener("click", async () => {
+          const ok = await sendSettingsCommand({
+            action: "replace.save",
+            preset: { id: rule.id, name: nameInput.value, start: startInput.value, end: endInput.value, enabled: enabledCheck.checked },
+          });
+          if (ok) { setStatus("规则已保存。", "ok"); rebuild(); }
+          renderCenter();
+        });
+
+        const deleteBtn = el("button", "aw-btn aw-btn--danger aw-btn--icon", "删除");
+        deleteBtn.setAttribute("aria-label", `删除规则：${rule.name}`);
+        deleteBtn.addEventListener("click", async () => {
+          if (!confirmDiscard(`删除规则「${rule.name}」`)) return;
+          const ok = await sendSettingsCommand({ action: "replace.delete", id: rule.id });
+          if (ok) { setStatus(`规则「${rule.name}」已删除。`, "ok"); rebuild(); }
+          renderCenter();
+        });
+
+        row.append(nameInput, startInput, endInput, enabledCheck, saveBtn, deleteBtn);
+        listWrap.append(row);
+      }
+    };
+    rebuild();
+
+    // 新增规则行（与编辑行同款字段，提交不带 id = 新建）
+    const addRow = el("div", "aw-select-row aw-replace-row");
+    const newName = document.createElement("input");
+    newName.className = "aw-input";
+    newName.placeholder = "名称（如：思考段）";
+    newName.setAttribute("aria-label", "新规则名称");
+    const newStart = document.createElement("input");
+    newStart.className = "aw-input";
+    newStart.placeholder = "开始词（如 <think）";
+    newStart.setAttribute("aria-label", "新规则开始词");
+    const newEnd = document.createElement("input");
+    newEnd.className = "aw-input";
+    newEnd.placeholder = "结束词（如 </think>）";
+    newEnd.setAttribute("aria-label", "新规则结束词");
+    const addBtn = el("button", "aw-btn aw-btn--primary aw-btn--icon", "添加规则");
+    addBtn.setAttribute("aria-label", "添加替换规则");
+    addBtn.addEventListener("click", async () => {
+      const ok = await sendSettingsCommand({
+        action: "replace.save",
+        preset: { name: newName.value, start: newStart.value, end: newEnd.value, enabled: true },
+      });
+      if (ok) {
+        setStatus("规则已添加。");
+        newName.value = ""; newStart.value = ""; newEnd.value = "";
+        rebuild();
+      }
+      renderCenter();
+    });
+    addRow.append(newName, newStart, newEnd, addBtn);
+
+    const resetBtn = el("button", "aw-btn aw-btn--ghost", "恢复预制规则");
+    resetBtn.setAttribute("aria-label", "恢复预制替换规则");
+    resetBtn.addEventListener("click", async () => {
+      if (!confirmDiscard("恢复预制规则（将覆盖当前全部规则）")) return;
+      const ok = await sendSettingsCommand({ action: "replace.reset" });
+      if (ok) { setStatus("已恢复预制规则库。", "ok"); rebuild(); }
+      renderCenter();
+    });
+
+    const actions = el("div", "aw-actions");
+    actions.append(addBtn, resetBtn);
+
+    panel.append(listWrap);
+    panel.append(el("span", "aw-field__label", "新增规则"));
+    panel.append(addRow);
+    panel.append(actions);
+    return panel;
   }
 
   /** 首次进入需要设置的页面时拉取一次 v2 设置（失败不重复轰炸）。 */
