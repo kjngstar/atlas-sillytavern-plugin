@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.31";
+export const ATLAS_EXTENSION_VERSION = "0.9.32";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -1056,6 +1056,12 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
   const mapCanvas = el("div", "aw-maparea");
   let mapBuilt = false;
   let mapScaleEl = null;
+  // 0.9.32 子图视图栈：空 = 世界图；每层 = {pointId, name}（点挂子图，递归）
+  let mapStack = [];
+  let mapStackKey = "";
+  let mapCrumb = null;
+  let mapPanel = null;
+  let lastMapData = null;
 
   const applyTransform = () => {
     mapLayer.style.transform = `scale(${zoom}) translate(${panX}px, ${panY}px)`;
@@ -1181,25 +1187,157 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     });
     geoBar.append(geoBtn, storyGeoBtn);
     geoBar.append(el("span", "aw-hint", "地图随剧情生长：重名地点自动跳过，绝不删改已有地理。"));
-    mapCanvas.append(mapTools, viewport, mapHint, geoBar, travelBar);
+    // 0.9.32 子图面包屑 + 标记点信息面板
+    mapCrumb = el("div", "aw-mapcrumb");
+    mapCrumb.style.display = "none";
+    mapPanel = el("div", "aw-mappanel");
+    mapPanel.style.display = "none";
+    viewport.append(mapPanel);
+    mapCanvas.append(mapCrumb, mapTools, viewport, mapHint, geoBar, travelBar);
     return mapCanvas;
   }
 
   /** 由 renderPage 在 renderCenter 之后调用（renderCenter 负责把 mapCanvas 挂回中区）。 */
+  /** 0.9.32 返回上一层子图（世界图 = 栈空）。 */
+  function popMapStack() {
+    mapStack.pop();
+    closeMapPanel();
+    setZoom(1);
+    renderMap(data());
+  }
+
+  function closeMapPanel() {
+    if (mapPanel) {
+      mapPanel.style.display = "none";
+      mapPanel.innerHTML = "";
+    }
+  }
+
+  /** 0.9.32 面包屑：子图层级 + 返回按钮。 */
+  function renderMapCrumb(d, view, currentSub) {
+    if (!mapCrumb) return;
+    mapCrumb.innerHTML = "";
+    if (!view || !currentSub) {
+      mapCrumb.style.display = "none";
+      return;
+    }
+    mapCrumb.style.display = "";
+    const back = el("button", "aw-mapcrumb__back", `← 返回${mapStack.length > 1 ? "上一层" : "世界图"}`);
+    back.type = "button";
+    back.setAttribute("aria-label", "返回上一层地图");
+    back.addEventListener("click", () => popMapStack());
+    const trail = mapStack.map((item) => item.name).join(" › ");
+    mapCrumb.append(back, el("span", "aw-mapcrumb__title", `当前：${trail} 内部`));
+  }
+
+  /** 0.9.32 标记点简略信息面板：名称 / 地区 / 描述 / 路线预览 / 进入子图。 */
+  function openMapPanel(point, { inSub, currentSub }) {
+    const d = lastMapData;
+    if (!mapPanel || !d) return;
+    mapPanel.innerHTML = "";
+    const submaps = (d.map?.submaps ?? {});
+    const pointMeta = (d.map?.pointMeta ?? {});
+    const hasSub = !inSub && Boolean(submaps[String(point.id)]);
+    const regions = Array.isArray(d.regions) ? d.regions : [];
+    const region = regions.find((r) => String(r.id) === String(point.regionId ?? ""));
+    const description = inSub
+      ? String(point.description ?? "").trim()
+      : String(pointMeta[String(point.id)]?.description ?? "").trim();
+
+    const head = el("div", "aw-mappanel__head");
+    head.append(el("strong", "aw-mappanel__name", String(point.name)));
+    const close = el("button", "aw-mappanel__close", "×");
+    close.type = "button";
+    close.setAttribute("aria-label", "关闭地点信息");
+    close.addEventListener("click", closeMapPanel);
+    head.append(close);
+    mapPanel.append(head);
+
+    const metaLines = [];
+    if (inSub) metaLines.push(`属于：${mapStack[mapStack.length - 1]?.name ?? ""} 内部`);
+    else if (region) metaLines.push(`地区：${String(region.name)}`);
+    const scale = inSub ? currentSub?.scale ?? null : null;
+    if (scale) metaLines.push(`比例尺：1 格 ≈ ${scale.distancePerCell}${scale.unit ? ` ${scale.unit}` : ""}`);
+    if (metaLines.length > 0) mapPanel.append(el("div", "aw-mappanel__meta", metaLines.join(" · ")));
+    if (description) mapPanel.append(el("div", "aw-mappanel__desc", description));
+
+    const actions = el("div", "aw-mappanel__actions");
+    if (!inSub && String(point.id) !== String(d.currentLocationId ?? "")) {
+      const routeBtn = el("button", "aw-btn aw-btn--primary", "预览前往路线");
+      routeBtn.type = "button";
+      routeBtn.setAttribute("aria-label", `预览前往 ${point.name} 的路线`);
+      routeBtn.addEventListener("click", () => {
+        closeMapPanel();
+        void core.selectDestination(String(point.id));
+      });
+      actions.append(routeBtn);
+    }
+    if (hasSub) {
+      const enterBtn = el("button", "aw-btn", "进入内部地图");
+      enterBtn.type = "button";
+      enterBtn.setAttribute("aria-label", `进入 ${point.name} 的内部地图`);
+      enterBtn.addEventListener("click", () => {
+        mapStack.push({ pointId: String(point.id), name: String(point.name) });
+        closeMapPanel();
+        setZoom(1);
+        renderMap(data());
+      });
+      actions.append(enterBtn);
+    }
+    if (inSub) {
+      actions.append(el("span", "aw-hint", "内部点位暂不接入旅行推算。"));
+    }
+    if (actions.childElementCount > 0) mapPanel.append(actions);
+    mapPanel.style.display = "";
+  }
+
   function renderMap(d) {
     if (!d.worldId) return;
+    // 0.9.32 换聊天 / 换世界 → 子图视图栈立即作废（数据隔离，绝不让旧子图带进新卡）
+    const viewKey = `${String(d.chatId ?? "")}|${String(d.worldId ?? "")}`;
+    if (mapStackKey !== viewKey) {
+      mapStack = [];
+      mapStackKey = viewKey;
+      closeMapPanel();
+    }
+    lastMapData = d;
     mapLayer.innerHTML = "";
     const mapData = d.map ?? {};
+    const submaps = mapData.submaps && typeof mapData.submaps === "object" ? mapData.submaps : {};
+    const pointMeta = mapData.pointMeta && typeof mapData.pointMeta === "object" ? mapData.pointMeta : {};
+    // 0.9.32 子图视图：栈顶决定当前渲染哪张图（世界图或任意点挂子图，递归）
+    const view = mapStack[mapStack.length - 1] ?? null;
+    const currentSub = view ? submaps[String(view.pointId)] ?? null : null;
+    const inSub = Boolean(currentSub);
+    renderMapCrumb(d, view, currentSub);
+
     const pointsAll = Array.isArray(mapData.points) ? mapData.points : [];
-    const points = regionFilter ? pointsAll.filter((p) => String(p.regionId ?? "") === regionFilter) : pointsAll;
-    const npcsAll = Array.isArray(d.npcDirectory) ? d.npcDirectory : [];
-    const npcs = regionFilter ? npcsAll.filter((n) => String(n.regionId ?? "") === regionFilter) : npcsAll;
-    const objectsAll = Array.isArray(d.objectDirectory) ? d.objectDirectory : [];
-    const objects = regionFilter ? objectsAll.filter((o) => String(o.regionId ?? "") === regionFilter) : objectsAll;
+    const points = inSub
+      ? currentSub.points
+      : regionFilter
+        ? pointsAll.filter((p) => String(p.regionId ?? "") === regionFilter)
+        : pointsAll;
+    const npcsAll = inSub ? [] : Array.isArray(d.npcDirectory) ? d.npcDirectory : [];
+    const npcs = inSub ? [] : regionFilter ? npcsAll.filter((n) => String(n.regionId ?? "") === regionFilter) : npcsAll;
+    const objectsAll = inSub ? [] : Array.isArray(d.objectDirectory) ? d.objectDirectory : [];
+    const objects = inSub ? [] : regionFilter ? objectsAll.filter((o) => String(o.regionId ?? "") === regionFilter) : objectsAll;
+    if (regionSelect) regionSelect.style.display = inSub ? "none" : "";
+    if (travelBar) travelBar.style.display = inSub ? "none" : "";
 
     const regions = Array.isArray(d.regions) ? d.regions : [];
-    // 刻度尺只在有真实地理（多于一个地点或地区）后显示——空图挂尺子是假信息（作者 2026-09-20）
-    if (mapScaleEl) mapScaleEl.style.display = pointsAll.length > 1 || regions.length > 1 ? "" : "none";
+    // 刻度尺：子图优先用自身比例尺；世界图沿用原口径（多于一个地点或地区才显示）
+    if (mapScaleEl) {
+      if (inSub) {
+        const scale = currentSub.scale ?? null;
+        mapScaleEl.textContent = scale
+          ? `1 格 ≈ ${scale.distancePerCell}${scale.unit ? ` ${scale.unit}` : ""}`
+          : "未标定（按格程计算）";
+        mapScaleEl.style.display = "";
+      } else {
+        mapScaleEl.textContent = "1 格 ≈ 一日路程";
+        mapScaleEl.style.display = pointsAll.length > 1 || regions.length > 1 ? "" : "none";
+      }
+    }
     // 0.9.20 空地理诚实提示；0.9.26 地图抢救后文案更新——单点地图不是渲染坏了，
     // 是世界里真的只有一个地点；提炼按钮（世界书 / 近期剧情）现在常显可随时生长地图
     if (mapHint) {
@@ -1232,18 +1370,21 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     for (const point of points) {
       const marker = el("button", "aw-point");
       marker.type = "button";
+      const hasSub = Boolean(inSub ? false : submaps[String(point.id)]);
       marker.textContent = String(point.name);
       marker.title = String(point.name);
       const pos = toPercent(Number(point.x), Number(point.y));
       marker.style.left = pos.left;
       marker.style.top = pos.top;
+      if (hasSub) marker.classList.add("aw-point--sub");
+      // 0.9.32 点击 = 简略信息面板（路线 / 进入子图都在面板里），不再一键直接拉路线
       if (String(point.id) === String(d.currentLocationId ?? "")) {
         marker.classList.add("is-current");
-        marker.setAttribute("aria-label", `当前位置 ${point.name}`);
+        marker.setAttribute("aria-label", `当前位置 ${point.name}，点击查看详情`);
       } else {
-        marker.setAttribute("aria-label", `地点 ${point.name}，点击预览前往路线`);
-        marker.addEventListener("click", () => void core.selectDestination(String(point.id)));
+        marker.setAttribute("aria-label", `地点 ${point.name}，点击查看详情`);
       }
+      marker.addEventListener("click", () => openMapPanel(point, { inSub, currentSub }));
       mapLayer.append(marker);
     }
 

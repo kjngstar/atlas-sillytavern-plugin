@@ -193,8 +193,9 @@ export interface AtlasWorldChangeDraft {
   rawEffects?: unknown[];
   /** 记忆草稿 → appendMemoryRef effect（entityId 必须是已知实体） */
   memoryDrafts?: Array<{ entityId: string; text: string }>;
-  /** 0.9.31 本轮剧情新出现的地点（名称制；commit 时确定性并入世界，不走账本 effect） */
-  newLocations?: NewLocationDraft[];
+  /** 0.9.31/32 本轮剧情新出现的地点（名称制；commit 时 sanitizeNewLocations 确定性清洗并入，不走账本 effect）。
+   *  0.9.32：submap 在解析层只保证是对象，形状清洗在 commit 侧 sanitizeSubMap——故草稿类型放宽为 unknown。 */
+  newLocations?: Array<{ name: string; regionName?: string; description?: string; submap?: unknown }>;
   summary: string;
 }
 
@@ -202,6 +203,12 @@ export interface AtlasTurnCommitOutput {
   receipt: AtlasTurnReceipt;
   /** 成功时为新世界；duplicate / failed 时与入参引用相等（零写入）。 */
   world: World;
+  /** 0.9.31/32 新地点并入结果（仅 Atlas 侧消费：sidecar 子图落库用；不在回执契约内）。 */
+  geo?: {
+    regionsAdded: number;
+    pointsAdded: number;
+    createdPoints: Array<{ id: number; name: string; description?: string; submap?: import("./atlas-geo-apply.ts").SubMapDraft }>;
+  };
 }
 
 function fail(code: (typeof ATLAS_ERROR_CODES)[keyof typeof ATLAS_ERROR_CODES], message: string): never {
@@ -326,15 +333,22 @@ export function commitAtlasTurn(world: World, input: AtlasTurnCommitInput): Atla
     const cursorAdvanced = duration > 0 || toPointId !== null || toRegionId !== null;
     let zeroWorld = world;
     let geoNote = "";
+    let zeroGeo: AtlasTurnCommitOutput["geo"] | undefined;
     if (newLocations.length > 0) {
       const geo = applyNewLocations(world, newLocations, { now: input.now ?? 0 });
       zeroWorld = geo.world;
       if (geo.pointsAdded + geo.regionsAdded > 0) {
         geoNote = `；新增地点 ${geo.pointNames.join("、")}${geo.regionNames.length > 0 ? `（地区 ${geo.regionNames.join("、")}）` : ""}`;
+        zeroGeo = {
+          regionsAdded: geo.regionsAdded,
+          pointsAdded: geo.pointsAdded,
+          createdPoints: geo.createdPoints.map((p) => ({ id: p.id, name: p.name, ...(p.description ? { description: p.description } : {}), ...(p.submap ? { submap: p.submap } : {}) })),
+        };
       }
     }
     return {
       world: zeroWorld,
+      ...(zeroGeo ? { geo: zeroGeo } : {}),
       receipt: {
         receiptId: `rcpt-${hashString(idempotencyKey)}`,
         status: "committed",
@@ -399,16 +413,23 @@ export function commitAtlasTurn(world: World, input: AtlasTurnCommitInput): Atla
   //     在提案采用成功后把本轮 newLocations 并入世界（geo 同款确定性口径）。
   let finalWorld = result.world;
   let geoNote = "";
+  let successGeo: AtlasTurnCommitOutput["geo"] | undefined;
   if (newLocations.length > 0) {
     const geo = applyNewLocations(result.world, newLocations, { now: input.now ?? 0 });
     finalWorld = geo.world;
     if (geo.pointsAdded + geo.regionsAdded > 0) {
       geoNote = `；新增地点 ${geo.pointNames.join("、")}${geo.regionNames.length > 0 ? `（地区 ${geo.regionNames.join("、")}）` : ""}`;
+      successGeo = {
+        regionsAdded: geo.regionsAdded,
+        pointsAdded: geo.pointsAdded,
+        createdPoints: geo.createdPoints.map((p) => ({ id: p.id, name: p.name, ...(p.description ? { description: p.description } : {}), ...(p.submap ? { submap: p.submap } : {}) })),
+      };
     }
   }
 
   return {
     world: finalWorld,
+    ...(successGeo ? { geo: successGeo } : {}),
     receipt: {
       receiptId: `rcpt-${result.adopted[0]?.eventId ?? hashString(idempotencyKey)}`,
       status: "committed",

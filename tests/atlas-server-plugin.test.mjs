@@ -727,6 +727,52 @@ test("0.9.31 首轮自动建图：≤1 点世界首次 commit 后自动提炼一
   equal(fetcher.calls.length, 3, "第二次只发推演（自动建图不重复）");
 });
 
+test("0.9.32 点挂子图：commit 落 sidecar（maps:<worldId>），/state 带出 submaps 与点位描述", async () => {
+  const draftWithSub = {
+    ...GOOD_DRAFT,
+    npcChanges: [{ entityId: "entity-npc", key: "whereabouts", value: "潮门" }],
+    newLocations: [
+      {
+        name: "潮门钟楼",
+        description: "潮门旁的旧钟楼。",
+        submap: {
+          scale: { distancePerCell: 5, unit: "米" },
+          points: [{ name: "钟室" }, { name: "楼梯间" }],
+        },
+      },
+    ],
+  };
+  const fetcher = makeFetch([() => openAiResponse(draftWithSub)]);
+  const store = createMemoryDocumentStore();
+  const world = buildWorld();
+  const core = createAtlasServerCore({ store, fetchFn: fetcher.fetchFn, now: () => NOW });
+  await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
+  await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
+  await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+
+  const result = await core.handle("POST", "/turns/commit", commitRequest(world));
+  equal(result.body.ok, true, "提交成功");
+  ok(result.body.data.receipt.summary.includes("新增地点"), "回执注明新增地点");
+
+  // sidecar 文档：maps:<worldId> 写入且键 = 新点 id
+  const worldNow = (await core.handle("GET", "/state/chat-a")).body.data;
+  const newPoint = worldNow.map.points.find((p) => p.name === "潮门钟楼");
+  ok(newPoint, "新地点已进世界点位");
+  const doc = await store.read(`maps:${world.id}`);
+  ok(doc, "sidecar 文档已写入");
+  const sub = doc.submaps[String(newPoint.id)];
+  ok(sub, "子图键 = 点位 id");
+  equal(sub.points.length, 2, "子图两点位");
+  ok(sub.points.every((p) => Number.isFinite(p.x) && Number.isFinite(p.y)), "子图点位有网格坐标");
+  equal(sub.scale.distancePerCell, 5, "子图比例尺");
+  equal(doc.pointMeta[String(newPoint.id)].description, "潮门旁的旧钟楼。", "点位描述入 sidecar");
+
+  // /state 带出 submap（UI 渲染数据源）
+  ok(worldNow.map.submaps && worldNow.map.submaps[String(newPoint.id)], "/state 带出子图");
+  equal(worldNow.map.submaps[String(newPoint.id)].points.length, 2, "/state 子图点位");
+  equal(worldNow.map.pointMeta[String(newPoint.id)].description, "潮门旁的旧钟楼。", "/state 带出点位描述");
+});
+
 test("retry：沿用原幂等键，成功后世界恰好推进一次", async () => {
   // 第一次 429 失败，重试成功
   const fetcher = makeFetch([() => jsonResponse(429, {}), () => openAiResponse(GOOD_DRAFT)]);

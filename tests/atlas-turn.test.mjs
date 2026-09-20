@@ -462,6 +462,42 @@ test("commit：零 effect + 新地点 → 地点照常并入（0.9.31，游标�
   ok(output.receipt.summary.includes("新增地点"), "回执注明新增地点");
 });
 
+test("commit：newLocations 携带 submap → createdPoints 透出（0.9.32 点挂子图）", () => {
+  const world = buildFixture();
+  const region = (world.regions ?? [])[0];
+  const output = commitAtlasTurn(world, commitInput(world, {
+    draft: {
+      duration: 1,
+      locationChange: null,
+      rawEffects: [{ kind: "setTemporalField", entityId: "entity-city", key: "ruler", value: "商会" }],
+      memoryDrafts: [],
+      newLocations: [
+        {
+          name: "潮门钟楼",
+          regionName: region?.name,
+          description: "潮门旁的旧钟楼。",
+          submap: {
+            scale: { distancePerCell: 5, unit: "米" },
+            points: [{ name: "钟室", description: "大钟悬于此。" }, { name: "楼梯间" }, { name: "值班室" }],
+          },
+        },
+        { name: "空壳楼", submap: { points: [] } },
+      ],
+      summary: "他们爬上钟楼。",
+    },
+  }));
+  equal(output.receipt.status, "committed", "提交成功");
+  ok(output.geo, "geo 结果透出");
+  const tower = output.geo.createdPoints.find((p) => p.name === "潮门钟楼");
+  ok(tower, "钟楼已创建");
+  equal(String(tower.id) !== "", true, "带数字点位 id（供 sidecar 键）");
+  ok(tower.submap, "submap 草稿透出");
+  equal(tower.submap.points.length, 3, "子图三点位");
+  equal(tower.submap.scale.distancePerCell, 5, "比例尺透出");
+  ok(!output.geo.createdPoints.some((p) => p.name === "空壳楼") || !output.geo.createdPoints.find((p) => p.name === "空壳楼").submap, "空子图被清洗丢弃");
+  ok(parseWorld(JSON.parse(JSON.stringify(output.world))) !== null, "世界可解析往返");
+});
+
 test("commit：IF 分支事件不泄漏进正史账本", () => {
   const world = buildFixture();
   const canonBefore = ledgerForBranch(world, null).length;

@@ -111,7 +111,8 @@ export const DEFAULT_PROMPT_SEGMENTS: Array<{ role: string; name: string; mainSl
       "{entityId, tag} 加标签 / {entityId, removeTag} 删标签 / {flag, value} 记录世界标记（里程碑、禁忌、传言等）/ " +
       "{entityId, targetEntityId, key, value} 改关系；entityId 必须来自上下文）、\n" +
       "memoryDrafts（数组，每条 {entityId, text}，为人物追加一条记忆，≤500 字）、\n" +
-      "newLocations（数组，本轮剧情里**新出现**的地点 / 地区：{name, regionName?, description?}；regionName 必须是本轮输出 regions 或上下文已有的地区名；已有地点不要重复列；没有就输出空数组）、\n" +
+      "newLocations（数组，本轮剧情里**新出现**的地点 / 地区：{name, regionName?, description?, submap?}；regionName 必须是本轮输出 regions 或上下文已有的地区名；已有地点不要重复列；没有就输出空数组；" +
+      "只有当剧情真的走进某地点内部（楼 / 院 / 遗迹内部）时，才给该地点挂可选的 submap: {scale?: {distancePerCell, unit}, points: [{name}]}——只给内部点位名字即可，坐标由算法决定；剧情没进去就不要编内部结构）、\n" +
       "eventDrafts（数组，事件摘要文字，仅叙述用）、\n" +
       "triggerResults（数组，本轮命中的触发器 id）、\n" +
       "summary（本轮世界变化的一句话摘要，≤500 字）。\n" +
@@ -787,7 +788,7 @@ export function parseAtlasWorldTurnDraft(text: string): AtlasWorldChangeDraft {
 
   const locationChange = toLocationChange(draftSource.locationChange);
   // 0.9.31 每轮新地点：{name, regionName?, description?} 名称制清单（坏条目丢弃计数；细节清洗在 commit 侧）
-  const newLocations: Array<{ name: string; regionName?: string; description?: string }> = [];
+  const newLocations: Array<{ name: string; regionName?: string; description?: string; submap?: unknown }> = [];
   let droppedLocations = 0;
   if (draftSource.newLocations !== undefined && draftSource.newLocations !== null) {
     if (!Array.isArray(draftSource.newLocations)) {
@@ -806,7 +807,11 @@ export function parseAtlasWorldTurnDraft(text: string): AtlasWorldChangeDraft {
       }
       const regionName = typeof record.regionName === "string" && record.regionName.trim() ? record.regionName.trim() : undefined;
       const description = typeof record.description === "string" && record.description.trim() ? record.description.trim() : undefined;
-      newLocations.push({ name, ...(regionName ? { regionName } : {}), ...(description ? { description } : {}) });
+      // 0.9.32 submap 原样透传（形状校验 / 清洗在 commit 侧 sanitizeSubMap）——此前在这里被丢弃，
+      // 导致「点挂子图」永远拿不到内部结构，sidecar 只剩点位描述。
+      const submap =
+        record.submap && typeof record.submap === "object" && !Array.isArray(record.submap) ? record.submap : undefined;
+      newLocations.push({ name, ...(regionName ? { regionName } : {}), ...(description ? { description } : {}), ...(submap ? { submap } : {}) });
     }
   }
   const droppedTotal = droppedEffects + droppedMemories + droppedLocations;

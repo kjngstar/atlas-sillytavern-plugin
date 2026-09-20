@@ -697,7 +697,7 @@ var DEFAULT_PROMPT_SEGMENTS = [
     role: "system",
     name: "主系统提示词（推演引擎职责）",
     mainSlot: "A",
-    content: "你是阿特拉斯世界推演引擎。你收到一份本轮的剧情素材（世界状态、前文、用户行动、助手回复），你的唯一职责：推断本轮对世界造成的**有界结构化变化**——谁出现在哪里、人物状态与关系如何变化、势力格局有无变动、时间推进多少。\n严格要求：只输出一个 JSON 对象，不要输出任何多余说明、推理过程或代码围栏。字段契约：\nduration（本轮消耗的时段数，非负数字，≤10000）、\nlocationChange（对象或 null：{toPointId, toRegionId}，id 必须来自上下文中出现的地点）、\nnpcChanges（数组，积极挖掘本轮动向，形状：{entityId, key, value} 更新人物状态 / {entityId, toPointId} 人物移动到上下文中出现的地点 / {entityId, toRegionId} 移动到已知地区 / {entityId, tag} 加标签 / {entityId, removeTag} 删标签 / {flag, value} 记录世界标记（里程碑、禁忌、传言等）/ {entityId, targetEntityId, key, value} 改关系；entityId 必须来自上下文）、\nmemoryDrafts（数组，每条 {entityId, text}，为人物追加一条记忆，≤500 字）、\nnewLocations（数组，本轮剧情里**新出现**的地点 / 地区：{name, regionName?, description?}；regionName 必须是本轮输出 regions 或上下文已有的地区名；已有地点不要重复列；没有就输出空数组）、\neventDrafts（数组，事件摘要文字，仅叙述用）、\ntriggerResults（数组，本轮命中的触发器 id）、\nsummary（本轮世界变化的一句话摘要，≤500 字）。\n推断姿态：主动而非保守——只要剧情暗示了人物去了别处、态度与关系起了变化、状态被事件改变、出现了值得铭记或标记的事，就输出对应变化；只在整轮确实平静无事时才输出空数组。\n上下文提供「人物 id 对照 / 地点 id 对照 / 地区 id 对照」：npcChanges 的 entityId 与 locationChange 的 id 一律使用对照表里的 id 原文，不要用名字当 id。\n禁止：编造上下文之外的实体 id 或地点 id；输出时间地点之外的世界重写；输出任何密钥、路径或代码。\n若本轮确无任何人物 / 关系 / 记忆变化，npcChanges 与 memoryDrafts 输出空数组，duration 与 locationChange 仍须如实填写，不要为凑数编造变化。"
+    content: "你是阿特拉斯世界推演引擎。你收到一份本轮的剧情素材（世界状态、前文、用户行动、助手回复），你的唯一职责：推断本轮对世界造成的**有界结构化变化**——谁出现在哪里、人物状态与关系如何变化、势力格局有无变动、时间推进多少。\n严格要求：只输出一个 JSON 对象，不要输出任何多余说明、推理过程或代码围栏。字段契约：\nduration（本轮消耗的时段数，非负数字，≤10000）、\nlocationChange（对象或 null：{toPointId, toRegionId}，id 必须来自上下文中出现的地点）、\nnpcChanges（数组，积极挖掘本轮动向，形状：{entityId, key, value} 更新人物状态 / {entityId, toPointId} 人物移动到上下文中出现的地点 / {entityId, toRegionId} 移动到已知地区 / {entityId, tag} 加标签 / {entityId, removeTag} 删标签 / {flag, value} 记录世界标记（里程碑、禁忌、传言等）/ {entityId, targetEntityId, key, value} 改关系；entityId 必须来自上下文）、\nmemoryDrafts（数组，每条 {entityId, text}，为人物追加一条记忆，≤500 字）、\nnewLocations（数组，本轮剧情里**新出现**的地点 / 地区：{name, regionName?, description?, submap?}；regionName 必须是本轮输出 regions 或上下文已有的地区名；已有地点不要重复列；没有就输出空数组；只有当剧情真的走进某地点内部（楼 / 院 / 遗迹内部）时，才给该地点挂可选的 submap: {scale?: {distancePerCell, unit}, points: [{name}]}——只给内部点位名字即可，坐标由算法决定；剧情没进去就不要编内部结构）、\neventDrafts（数组，事件摘要文字，仅叙述用）、\ntriggerResults（数组，本轮命中的触发器 id）、\nsummary（本轮世界变化的一句话摘要，≤500 字）。\n推断姿态：主动而非保守——只要剧情暗示了人物去了别处、态度与关系起了变化、状态被事件改变、出现了值得铭记或标记的事，就输出对应变化；只在整轮确实平静无事时才输出空数组。\n上下文提供「人物 id 对照 / 地点 id 对照 / 地区 id 对照」：npcChanges 的 entityId 与 locationChange 的 id 一律使用对照表里的 id 原文，不要用名字当 id。\n禁止：编造上下文之外的实体 id 或地点 id；输出时间地点之外的世界重写；输出任何密钥、路径或代码。\n若本轮确无任何人物 / 关系 / 记忆变化，npcChanges 与 memoryDrafts 输出空数组，duration 与 locationChange 仍须如实填写，不要为凑数编造变化。"
   },
   {
     role: "user",
@@ -1188,7 +1188,8 @@ function parseAtlasWorldTurnDraft(text) {
       }
       const regionName = typeof record.regionName === "string" && record.regionName.trim() ? record.regionName.trim() : void 0;
       const description = typeof record.description === "string" && record.description.trim() ? record.description.trim() : void 0;
-      newLocations.push({ name, ...regionName ? { regionName } : {}, ...description ? { description } : {} });
+      const submap = record.submap && typeof record.submap === "object" && !Array.isArray(record.submap) ? record.submap : void 0;
+      newLocations.push({ name, ...regionName ? { regionName } : {}, ...description ? { description } : {}, ...submap ? { submap } : {} });
     }
   }
   const droppedTotal = droppedEffects + droppedMemories + droppedLocations;
@@ -4400,7 +4401,10 @@ function adjudicateAtlasDraft(world, input) {
     locationChange: draft.locationChange ?? null,
     rawEffects,
     memoryDrafts,
-    summary: draft.summary
+    summary: draft.summary,
+    // 0.9.32 透传：新地点不在裁定范围（commit 时 sanitizeNewLocations 清洗 + 确定性并入），
+    // 但重建 draft 时必须带上——此前被整组丢弃，回执永远不注明「新增地点」。
+    ...Array.isArray(draft.newLocations) ? { newLocations: [...draft.newLocations] } : {}
   };
   const rawToPointId = next.locationChange && typeof next.locationChange.toPointId === "string" ? next.locationChange.toPointId.trim() : "";
   if (next.locationChange && rawToPointId) {
@@ -6108,6 +6112,32 @@ function renderContextPlan(plan) {
 var NEW_LOCATIONS_MAX = 12;
 var NAME_CHARS = 40;
 var DESC_CHARS = 300;
+var SUBMAP_POINTS_MAX = 40;
+function sanitizeSubMap(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return void 0;
+  const record = raw;
+  let scale;
+  const scaleRaw = record.scale;
+  if (scaleRaw && typeof scaleRaw === "object" && !Array.isArray(scaleRaw)) {
+    const distance = Number(scaleRaw.distancePerCell);
+    if (Number.isFinite(distance) && distance > 0) {
+      const unit = String(scaleRaw.unit ?? "").trim().slice(0, 12);
+      scale = { distancePerCell: Math.round(distance * 100) / 100, ...unit ? { unit } : {} };
+    }
+  }
+  const rawPoints = Array.isArray(record.points) ? record.points : [];
+  const points = [];
+  for (const item of rawPoints.slice(0, SUBMAP_POINTS_MAX * 2)) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const name = String(item.name ?? "").trim().replace(/\s+/g, " ").slice(0, NAME_CHARS);
+    if (!name) continue;
+    const description = String(item.description ?? "").trim().replace(/\s+/g, " ").slice(0, DESC_CHARS);
+    points.push({ name, ...description ? { description } : {} });
+    if (points.length >= SUBMAP_POINTS_MAX) break;
+  }
+  if (points.length === 0) return void 0;
+  return { ...scale ? { scale } : {}, points };
+}
 function sanitizeNewLocations(raw) {
   if (!Array.isArray(raw)) return [];
   const result = [];
@@ -6118,10 +6148,12 @@ function sanitizeNewLocations(raw) {
     if (!name) continue;
     const regionName = String(record.regionName ?? "").trim().replace(/\s+/g, " ").slice(0, NAME_CHARS);
     const description = String(record.description ?? "").trim().replace(/\s+/g, " ").slice(0, DESC_CHARS);
+    const submap = sanitizeSubMap(record.submap);
     result.push({
       name,
       ...regionName ? { regionName } : {},
-      ...description ? { description } : {}
+      ...description ? { description } : {},
+      ...submap ? { submap } : {}
     });
     if (result.length >= NEW_LOCATIONS_MAX) break;
   }
@@ -6135,7 +6167,8 @@ function applyNewLocations(world, locations, options) {
     skipped: 0,
     regionNames: [],
     pointNames: [],
-    revisionAppended: false
+    revisionAppended: false,
+    createdPoints: []
   };
   if (!Array.isArray(locations) || locations.length === 0) return empty;
   const clean = (text) => String(text ?? "").trim().replace(/\s+/g, " ");
@@ -6198,6 +6231,15 @@ function applyNewLocations(world, locations, options) {
     now: options.now
   });
   if (revision.ok) updated = revision.value;
+  const createdPoints = newPoints.map((p) => {
+    const source = locations.find((item) => norm(item.name) === norm(p.name));
+    return {
+      id: p.id,
+      name: p.name,
+      ...source?.description ? { description: source.description } : {},
+      ...source?.submap ? { submap: source.submap } : {}
+    };
+  });
   return {
     world: updated,
     regionsAdded: newRegions.length,
@@ -6205,8 +6247,80 @@ function applyNewLocations(world, locations, options) {
     skipped,
     regionNames: newRegions.map((r) => r.name),
     pointNames: newPoints.map((p) => p.name),
-    revisionAppended: revision.ok
+    revisionAppended: revision.ok,
+    createdPoints
   };
+}
+function emptyMapDoc() {
+  return { schemaVersion: 1, pointMeta: {}, submaps: {} };
+}
+function sanitizeMapDoc(raw) {
+  const doc = emptyMapDoc();
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return doc;
+  const record = raw;
+  const meta = record.pointMeta;
+  if (meta && typeof meta === "object" && !Array.isArray(meta)) {
+    for (const [key, value] of Object.entries(meta).slice(0, 120)) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+      const description = String(value.description ?? "").trim().slice(0, 300);
+      if (description) doc.pointMeta[key] = { description };
+    }
+  }
+  const submaps = record.submaps;
+  if (submaps && typeof submaps === "object" && !Array.isArray(submaps)) {
+    for (const [key, value] of Object.entries(submaps).slice(0, 60)) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+      const subRecord = value;
+      let scale;
+      const scaleRaw = subRecord.scale;
+      if (scaleRaw && typeof scaleRaw === "object" && !Array.isArray(scaleRaw)) {
+        const distance = Number(scaleRaw.distancePerCell);
+        if (Number.isFinite(distance) && distance > 0) {
+          const unit = String(scaleRaw.unit ?? "").trim().slice(0, 12);
+          scale = { distancePerCell: Math.round(distance * 100) / 100, ...unit ? { unit } : {} };
+        }
+      }
+      const points = [];
+      if (Array.isArray(subRecord.points)) {
+        for (const item of subRecord.points.slice(0, SUBMAP_POINTS_MAX)) {
+          if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+          const pointRecord = item;
+          const name = String(pointRecord.name ?? "").trim().slice(0, NAME_CHARS);
+          const x = Number(pointRecord.x);
+          const y = Number(pointRecord.y);
+          if (!name || !Number.isFinite(x) || !Number.isFinite(y)) continue;
+          const description = String(pointRecord.description ?? "").trim().slice(0, 300);
+          points.push({
+            id: String(pointRecord.id ?? `${key}-${points.length + 1}`).slice(0, 64),
+            name,
+            x: Math.round(x),
+            y: Math.round(y),
+            ...description ? { description } : {}
+          });
+        }
+      }
+      if (points.length > 0) doc.submaps[key] = { ...scale ? { scale } : {}, points };
+    }
+  }
+  return doc;
+}
+function buildSubMapFromDraft(draft, context) {
+  const points = [];
+  for (const item of draft.points.slice(0, SUBMAP_POINTS_MAX)) {
+    const index = points.length;
+    const angle = index * 2.39996;
+    const radius = index === 0 ? 0 : 12 + 3.2 * Math.sqrt(index);
+    const x = Math.round(Math.min(96, Math.max(4, 50 + radius * Math.cos(angle))));
+    const y = Math.round(Math.min(96, Math.max(4, 50 + radius * Math.sin(angle))));
+    points.push({
+      id: `sub-${hashString(`${context.worldId}|${context.pointId}|${item.name}|${context.now}`)}-${index}`,
+      name: item.name,
+      x,
+      y,
+      ...item.description ? { description: item.description } : {}
+    });
+  }
+  return { ...draft.scale ? { scale: draft.scale } : {}, points };
 }
 
 // src/atlas-turn.ts
@@ -6372,15 +6486,22 @@ function commitAtlasTurn(world, input) {
     const cursorAdvanced = duration > 0 || toPointId !== null || toRegionId !== null;
     let zeroWorld = world;
     let geoNote2 = "";
+    let zeroGeo;
     if (newLocations.length > 0) {
       const geo = applyNewLocations(world, newLocations, { now: input.now ?? 0 });
       zeroWorld = geo.world;
       if (geo.pointsAdded + geo.regionsAdded > 0) {
         geoNote2 = `；新增地点 ${geo.pointNames.join("、")}${geo.regionNames.length > 0 ? `（地区 ${geo.regionNames.join("、")}）` : ""}`;
+        zeroGeo = {
+          regionsAdded: geo.regionsAdded,
+          pointsAdded: geo.pointsAdded,
+          createdPoints: geo.createdPoints.map((p) => ({ id: p.id, name: p.name, ...p.description ? { description: p.description } : {}, ...p.submap ? { submap: p.submap } : {} }))
+        };
       }
     }
     return {
       world: zeroWorld,
+      ...zeroGeo ? { geo: zeroGeo } : {},
       receipt: {
         receiptId: `rcpt-${hashString(idempotencyKey)}`,
         status: "committed",
@@ -6436,15 +6557,22 @@ function commitAtlasTurn(world, input) {
   }
   let finalWorld = result.world;
   let geoNote = "";
+  let successGeo;
   if (newLocations.length > 0) {
     const geo = applyNewLocations(result.world, newLocations, { now: input.now ?? 0 });
     finalWorld = geo.world;
     if (geo.pointsAdded + geo.regionsAdded > 0) {
       geoNote = `；新增地点 ${geo.pointNames.join("、")}${geo.regionNames.length > 0 ? `（地区 ${geo.regionNames.join("、")}）` : ""}`;
+      successGeo = {
+        regionsAdded: geo.regionsAdded,
+        pointsAdded: geo.pointsAdded,
+        createdPoints: geo.createdPoints.map((p) => ({ id: p.id, name: p.name, ...p.description ? { description: p.description } : {}, ...p.submap ? { submap: p.submap } : {} }))
+      };
     }
   }
   return {
     world: finalWorld,
+    ...successGeo ? { geo: successGeo } : {},
     receipt: {
       receiptId: `rcpt-${result.adopted[0]?.eventId ?? hashString(idempotencyKey)}`,
       status: "committed",
@@ -7379,7 +7507,7 @@ function createAtlasServerCore(deps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.31",
+      version: "0.9.32",
       protocolVersion: 1,
       time: now()
     });
@@ -7719,6 +7847,14 @@ function createAtlasServerCore(deps) {
     const branchEvents = ledgerForBranch(world, binding.branchId).filter((e) => e.at <= binding.worldTimeCursor);
     const lastEvent = branchEvents.at(-1) ?? null;
     const lastAdvance = lastEvent ? { at: lastEvent.at, summary: lastEvent.narrativeSummary.slice(0, 200), source: lastEvent.source } : null;
+    const mapDoc = sanitizeMapDoc(await store.read(`maps:${world.id}`).catch(() => null));
+    const pointMetaEntries = Object.entries(mapDoc.pointMeta).slice(0, 80);
+    const submapEntries = Object.entries(mapDoc.submaps).slice(0, 40).map(([key, sub]) => ({
+      pointId: key,
+      scale: sub.scale ?? null,
+      points: sub.points.slice(0, 40),
+      pointCount: sub.points.length
+    }));
     return okResult({
       chatId,
       worldId: world.id,
@@ -7733,7 +7869,10 @@ function createAtlasServerCore(deps) {
       map: {
         points: mapPoints,
         pointCount: (world.points ?? []).length,
-        mapImagePresent: Boolean(world.mapImage)
+        mapImagePresent: Boolean(world.mapImage),
+        pointMeta: Object.fromEntries(pointMetaEntries),
+        submaps: Object.fromEntries(submapEntries.map((entry) => [entry.pointId, { scale: entry.scale, points: entry.points }])),
+        submapCount: submapEntries.length
       },
       npcDirectory,
       regions,
@@ -7991,6 +8130,27 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
       });
     }
     const lorebook = buildLorebookPlans(output.world, receipt);
+    if (output.geo && output.geo.createdPoints.length > 0) {
+      const docKey = `maps:${binding.worldId}`;
+      const doc = sanitizeMapDoc(await store.read(docKey).catch(() => null));
+      let changed = false;
+      for (const created of output.geo.createdPoints) {
+        const key = String(created.id);
+        if (created.description && !doc.pointMeta[key]) {
+          doc.pointMeta[key] = { description: created.description };
+          changed = true;
+        }
+        if (created.submap && !doc.submaps[key]) {
+          doc.submaps[key] = buildSubMapFromDraft(created.submap, {
+            worldId: binding.worldId,
+            pointId: key,
+            now: now()
+          });
+          changed = true;
+        }
+      }
+      if (changed) await store.write(docKey, doc);
+    }
     if (receipt.status === "committed" && (settledWorld.points ?? []).length <= 1) {
       const markerKey = `geo-auto:${binding.worldId}`;
       let marker = null;

@@ -67,6 +67,9 @@ export function adjudicateAtlasDraft(
     rawEffects,
     memoryDrafts,
     summary: draft.summary,
+    // 0.9.32 透传：新地点不在裁定范围（commit 时 sanitizeNewLocations 清洗 + 确定性并入），
+    // 但重建 draft 时必须带上——此前被整组丢弃，回执永远不注明「新增地点」。
+    ...(Array.isArray(draft.newLocations) ? { newLocations: [...draft.newLocations] } : {}),
   };
 
   // 1) 位置：未知地点 → 丢弃移动；已知 → 网格旅行算法裁定耗时下限

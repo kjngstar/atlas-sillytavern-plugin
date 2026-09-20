@@ -41,6 +41,7 @@ import {
 } from "./atlas-contract.ts";
 import { computeAtlasRelevance, atlasTravelPreview } from "./atlas-relevance.ts";
 import { prepareAtlasTurn, commitAtlasTurn } from "./atlas-turn.ts";
+import { buildSubMapFromDraft, sanitizeMapDoc } from "./atlas-geo-apply.ts";
 import { buildLorebookPlans } from "./atlas-lorebook.ts";
 import {
   callAtlasWorldTurnApi,
@@ -347,7 +348,7 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.31",
+      version: "0.9.32",
       protocolVersion: 1,
       time: now(),
     });
@@ -777,6 +778,15 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
     const lastAdvance = lastEvent
       ? { at: lastEvent.at, summary: lastEvent.narrativeSummary.slice(0, 200), source: lastEvent.source }
       : null;
+    // 0.9.32 地图 sidecar（点位描述 + 点挂子图）：独立文档，有界随 /state 下发
+    const mapDoc = sanitizeMapDoc(await store.read(`maps:${world.id}`).catch(() => null));
+    const pointMetaEntries = Object.entries(mapDoc.pointMeta).slice(0, 80);
+    const submapEntries = Object.entries(mapDoc.submaps).slice(0, 40).map(([key, sub]) => ({
+      pointId: key,
+      scale: sub.scale ?? null,
+      points: sub.points.slice(0, 40),
+      pointCount: sub.points.length,
+    }));
     return okResult({
       chatId,
       worldId: world.id,
@@ -792,6 +802,9 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
         points: mapPoints,
         pointCount: (world.points ?? []).length,
         mapImagePresent: Boolean(world.mapImage),
+        pointMeta: Object.fromEntries(pointMetaEntries),
+        submaps: Object.fromEntries(submapEntries.map((entry) => [entry.pointId, { scale: entry.scale, points: entry.points }])),
+        submapCount: submapEntries.length,
       },
       npcDirectory,
       regions,
@@ -1104,6 +1117,30 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
     // 8. 世界书条目规划（纯派生，零 IO；写入由 UI 扩展经酒馆 world-info API 完成）。
     //    duplicate / failed 不产出规划：duplicate 本就写过了，failed 零部分写入。
     const lorebook = buildLorebookPlans(output.world, receipt);
+
+    // 9.5 0.9.32 点挂子图 sidecar：newLocations 携带的 submap / description 落到
+    //     maps:<worldId> 独立文档（lib/ 点位 schema 不动；只增不改）。
+    if (output.geo && output.geo.createdPoints.length > 0) {
+      const docKey = `maps:${binding.worldId}`;
+      const doc = sanitizeMapDoc(await store.read(docKey).catch(() => null));
+      let changed = false;
+      for (const created of output.geo.createdPoints) {
+        const key = String(created.id);
+        if (created.description && !doc.pointMeta[key]) {
+          doc.pointMeta[key] = { description: created.description };
+          changed = true;
+        }
+        if (created.submap && !doc.submaps[key]) {
+          doc.submaps[key] = buildSubMapFromDraft(created.submap, {
+            worldId: binding.worldId,
+            pointId: key,
+            now: now(),
+          });
+          changed = true;
+        }
+      }
+      if (changed) await store.write(docKey, doc);
+    }
 
     // 9. 0.9.31 首轮自动建图（作者需求：第一次推演生成当前地图，之后地图有了就不再重复）。
     //    条件：committed + 地图还只有起点（≤1 点）+ 本世界从未跑过自动建图（store 标记防零产出重试）。
