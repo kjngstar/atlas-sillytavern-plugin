@@ -42,7 +42,7 @@ function connection(overrides = {}) {
     model: "gpt-4o-mini",
     apiKey: TEST_KEY,
     maxTokens: 1024,
-    temperature: 0.7,
+    temperature: 0.7, topP: 0.95,
     timeoutMs: 30_000,
     ...overrides,
   };
@@ -164,7 +164,7 @@ test("迁移：非法条目跳过并计数，诊断不泄漏密钥与正文", ()
     majorEvent: null,
     presetLibrary: {
       worldTurn: [
-        { name: "", endpoint: "https://x.example.com", model: "m", apiKey: "sk-leak-me", maxTokens: 1, temperature: 0, timeoutMs: 1000 },
+        { name: "", endpoint: "https://x.example.com", model: "m", apiKey: "sk-leak-me", maxTokens: 1, temperature: 0, topP: 0.95, timeoutMs: 1000 },
         connection({ name: "合法", apiKey: "sk-leak-me-2" }),
       ],
       majorEvent: [],
@@ -191,7 +191,7 @@ function withApi(settings, name = "渠道A") {
       endpoint: "https://api.example.com/v1/chat/completions",
       model: "m1",
       maxTokens: 1024,
-      temperature: 0.7,
+      temperature: 0.7, topP: 0.95,
       timeoutMs: 30_000,
     },
     apiKeyMode: "replace",
@@ -205,7 +205,7 @@ test("api.save：新建用 keep 必须失败；新建不自动激活", () => {
   const base = createDefaultSettingsV2();
   const bad = applySettingsCommand(base, {
     action: "api.save",
-    preset: { name: "x", endpoint: "https://api.example.com/v1/chat/completions", model: "m", maxTokens: 10, temperature: 0, timeoutMs: 1000 },
+    preset: { name: "x", endpoint: "https://api.example.com/v1/chat/completions", model: "m", maxTokens: 10, temperature: 0, topP: 0.95, timeoutMs: 1000 },
     apiKeyMode: "keep",
   }, testDeps());
   assert.equal(bad.ok, false, "新建使用 keep 必须拒绝");
@@ -222,7 +222,7 @@ test("api.save：Key 的 keep / replace / clear 三路径", () => {
 
   const kept = applySettingsCommand(s, {
     action: "api.save",
-    preset: { id, name: "渠道A改", endpoint: "https://api.example.com/v1/chat/completions", model: "m2", maxTokens: 512, temperature: 0.2, timeoutMs: 20_000 },
+    preset: { id, name: "渠道A改", endpoint: "https://api.example.com/v1/chat/completions", model: "m2", maxTokens: 512, temperature: 0.2, topP: 0.95, timeoutMs: 20_000 },
     apiKeyMode: "keep",
   }, testDeps());
   assert.equal(kept.ok, true);
@@ -233,7 +233,7 @@ test("api.save：Key 的 keep / replace / clear 三路径", () => {
 
   const replaced = applySettingsCommand(s, {
     action: "api.save",
-    preset: { id, name: "渠道A改", endpoint: "https://api.example.com/v1/chat/completions", model: "m2", maxTokens: 512, temperature: 0.2, timeoutMs: 20_000 },
+    preset: { id, name: "渠道A改", endpoint: "https://api.example.com/v1/chat/completions", model: "m2", maxTokens: 512, temperature: 0.2, topP: 0.95, timeoutMs: 20_000 },
     apiKeyMode: "replace",
     apiKey: "sk-new-key",
   }, testDeps());
@@ -242,7 +242,7 @@ test("api.save：Key 的 keep / replace / clear 三路径", () => {
 
   const cleared = applySettingsCommand(replaced.settings, {
     action: "api.save",
-    preset: { id, name: "渠道A改", endpoint: "https://api.example.com/v1/chat/completions", model: "m2", maxTokens: 512, temperature: 0.2, timeoutMs: 20_000 },
+    preset: { id, name: "渠道A改", endpoint: "https://api.example.com/v1/chat/completions", model: "m2", maxTokens: 512, temperature: 0.2, topP: 0.95, timeoutMs: 20_000 },
     apiKeyMode: "clear",
   }, testDeps());
   assert.equal(cleared.ok, true);
@@ -333,7 +333,7 @@ test("上限与校验：每库 20 条上限、非法 ID / 超长字段 / 非法�
   assert.equal(s.apiPresets.length, 20);
   const overflow = applySettingsCommand(s, {
     action: "api.save",
-    preset: { name: "第21条", endpoint: "https://api.example.com/v1/chat/completions", model: "m", maxTokens: 10, temperature: 0, timeoutMs: 1000 },
+    preset: { name: "第21条", endpoint: "https://api.example.com/v1/chat/completions", model: "m", maxTokens: 10, temperature: 0, topP: 0.95, timeoutMs: 1000 },
     apiKeyMode: "replace",
     apiKey: "",
   }, testDeps());
@@ -344,7 +344,7 @@ test("上限与校验：每库 20 条上限、非法 ID / 超长字段 / 非法�
   assert.equal(badId.ok, false, "非法 ID 形状被拒");
   const badTemp = applySettingsCommand(base, {
     action: "api.save",
-    preset: { name: "x", endpoint: "https://api.example.com/v1/chat/completions", model: "m", maxTokens: 10, temperature: 9, timeoutMs: 1000 },
+    preset: { name: "x", endpoint: "https://api.example.com/v1/chat/completions", model: "m", maxTokens: 10, temperature: 9, topP: 0.95, timeoutMs: 1000 },
     apiKeyMode: "replace",
     apiKey: "",
   }, testDeps());
@@ -429,7 +429,7 @@ test("api.save：main/profile 模式 endpoint 与 model 允许为空；新字段
     action: "api.save",
     preset: {
       name: "酒馆主API", endpoint: "", model: "", connectionMode: "main",
-      maxTokens: 1024, temperature: 0.7, timeoutMs: 30_000,
+      maxTokens: 1024, temperature: 0.7, topP: 0.95, timeoutMs: 30_000,
     },
     apiKeyMode: "replace", apiKey: "",
   }, testDeps());
@@ -441,7 +441,7 @@ test("api.save：main/profile 模式 endpoint 与 model 允许为空；新字段
     action: "api.save",
     preset: {
       name: "酒馆连接预设", endpoint: "", model: "", connectionMode: "profile", profileId: "prof-1",
-      maxTokens: 1024, temperature: 0.7, timeoutMs: 30_000,
+      maxTokens: 1024, temperature: 0.7, topP: 0.95, timeoutMs: 30_000,
       bodyParams: "response_format:\n  type: json_object",
       excludeBodyParams: "top_p, reasoning_effort",
       requestHeaders: "X-Custom-Header: value",
@@ -481,7 +481,7 @@ test("api.save：custom 模式仍要求 endpoint 与 model；非法 connectionMo
   const base = createDefaultSettingsV2();
   const badEndpoint = applySettingsCommand(base, {
     action: "api.save",
-    preset: { name: "x", endpoint: "", model: "m", connectionMode: "custom", maxTokens: 10, temperature: 0, timeoutMs: 1000 },
+    preset: { name: "x", endpoint: "", model: "m", connectionMode: "custom", maxTokens: 10, temperature: 0, topP: 0.95, timeoutMs: 1000 },
     apiKeyMode: "replace", apiKey: TEST_KEY,
   }, testDeps());
   assert.equal(badEndpoint.ok, false, "custom 模式空 endpoint 必须拒绝");
@@ -489,14 +489,14 @@ test("api.save：custom 模式仍要求 endpoint 与 model；非法 connectionMo
   // 存储层宽容（shujuku 同款归一）：未知 mode → custom；custom 校验随之生效
   const badMode = applySettingsCommand(base, {
     action: "api.save",
-    preset: { name: "x", endpoint: "", model: "m", connectionMode: "carrier-pigeon", maxTokens: 10, temperature: 0, timeoutMs: 1000 },
+    preset: { name: "x", endpoint: "", model: "m", connectionMode: "carrier-pigeon", maxTokens: 10, temperature: 0, topP: 0.95, timeoutMs: 1000 },
     apiKeyMode: "replace", apiKey: TEST_KEY,
   }, testDeps());
   assert.equal(badMode.ok, false, "未知 mode 归一为 custom 后，空 endpoint 仍须拒绝");
 
   const tolerated = applySettingsCommand(base, {
     action: "api.save",
-    preset: { name: "x", endpoint: "https://a.com/v1", model: "m", connectionMode: "carrier-pigeon", maxTokens: 10, temperature: 0, timeoutMs: 1000 },
+    preset: { name: "x", endpoint: "https://a.com/v1", model: "m", connectionMode: "carrier-pigeon", maxTokens: 10, temperature: 0, topP: 0.95, timeoutMs: 1000 },
     apiKeyMode: "replace", apiKey: TEST_KEY,
   }, testDeps());
   assert.equal(tolerated.ok, true, tolerated.ok ? "" : tolerated.message);

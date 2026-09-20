@@ -722,66 +722,115 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
   const url = mode === "custom" ? buildAtlasChatUrl(preset.endpoint) : "atlas://host";
   if (!url) return fail4(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "推演 API 地址无效，无法构造请求。", false);
   if (mode === "custom" && !preset.model.trim()) return fail4(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "推演预设未填写模型名称。", false);
+  const bodyMessages = [
+    { role: "system", content: preset.systemPrompt?.trim() || DEFAULT_WORLD_TURN_SYSTEM_PROMPT },
+    { role: "user", content: buildWorldTurnUserContent(input) }
+  ].map((m) => ({ ...m, role: m.role.toLowerCase() }));
+  const bodyModel = preset.model.trim().replace(/^models\//, "") || "host";
+  const maxTokens = typeof preset.maxTokens === "number" && preset.maxTokens > 0 ? preset.maxTokens : 2e4;
+  const temperature = typeof preset.temperature === "number" ? preset.temperature : 1;
+  const topP = typeof preset.topP === "number" ? preset.topP : 0.95;
   const timeoutMs = Math.min(Math.max(preset.timeoutMs ?? 3e4, 1e3), 12e4);
   const fetchFn = deps.fetchFn ?? globalThis.fetch;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const buildPayload = (forClaude) => {
+    const requestUrl = forClaude ? rescueAnthropicUrl(url) : url;
+    const headers = {
+      "Content-Type": "application/json",
+      ...preset.apiKey.trim() ? { Authorization: `Bearer ${preset.apiKey.trim()}` } : {},
+      // 浏览器代理适配层据此映射为酒馆 claude / gemini 源；直连（测试）时无副作用
+      ...preset.apiFormat === "claude" || forClaude ? { "X-Atlas-Api-Format": "claude" } : {},
+      ...preset.apiFormat === "gemini" ? { "X-Atlas-Api-Format": "gemini" } : {}
+    };
+    const body = JSON.stringify({
+      model: bodyModel,
+      messages: bodyMessages,
+      max_tokens: maxTokens,
+      temperature,
+      top_p: topP,
+      stream: false,
+      group_names: [],
+      include_reasoning: false,
+      reasoning_effort: "medium",
+      enable_web_search: false,
+      request_images: false,
+      // 0.9.13 宿主适配通道（shujuku 同款能力）：代理层消费这些保留字段并映射为
+      // custom_include_body / custom_exclude_body / 附加标头 / custom_prompt_post_processing，
+      // 绝不透传上游；main / profile 模式据此路由到 TavernHelper / ConnectionManager。
+      ...mode !== "custom" ? { xAtlasConnectionMode: mode } : {},
+      ...mode === "profile" && preset.profileId?.trim() ? { xAtlasProfileId: preset.profileId.trim() } : {},
+      // 0.9.14 shujuku 同款：custom_url 用「用户原始端点」，ST 后端自己决定拼接，
+      // 不由引擎预拼 /chat/completions（与 shujuku 走同一条 URL 构造路径）。
+      ...mode === "custom" && preset.endpoint.trim() ? { xAtlasCustomUrl: preset.endpoint.trim() } : {},
+      ...preset.bodyParams?.trim() ? { xAtlasBodyParams: preset.bodyParams } : {},
+      ...preset.excludeBodyParams?.trim() ? { xAtlasExcludeBodyParams: preset.excludeBodyParams } : {},
+      ...preset.requestHeaders?.trim() ? { xAtlasExtraHeaders: preset.requestHeaders } : {},
+      ...preset.promptPostProcessing?.trim() ? { xAtlasPromptPostProcessing: preset.promptPostProcessing } : {}
+    });
+    return { url: requestUrl, headers, body };
+  };
   try {
     let response;
+    let rescueAttempted = false;
+    const initial = buildPayload(false);
     try {
-      response = await fetchFn(url, {
+      response = await fetchFn(initial.url, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...preset.apiKey.trim() ? { Authorization: `Bearer ${preset.apiKey.trim()}` } : {},
-          // 浏览器代理适配层据此把请求映射为酒馆 claude 源（Anthropic Messages）；直连（测试）时无副作用
-          ...preset.apiFormat === "claude" ? { "X-Atlas-Api-Format": "claude" } : {},
-          ...preset.apiFormat === "gemini" ? { "X-Atlas-Api-Format": "gemini" } : {}
-        },
-        body: JSON.stringify({
-          model: preset.model.trim() || "host",
-          messages: [
-            { role: "system", content: preset.systemPrompt?.trim() || DEFAULT_WORLD_TURN_SYSTEM_PROMPT },
-            { role: "user", content: buildWorldTurnUserContent(input) }
-          ],
-          stream: false,
-          ...typeof preset.temperature === "number" ? { temperature: preset.temperature } : {},
-          ...typeof preset.maxTokens === "number" ? { max_tokens: preset.maxTokens } : {},
-          // 0.9.13 宿主适配通道（shujuku 同款能力）：代理层消费这些保留字段并映射为
-          // custom_include_body / custom_exclude_body / 附加标头 / custom_prompt_post_processing，
-          // 绝不透传上游；main / profile 模式据此路由到 TavernHelper / ConnectionManager。
-          ...mode !== "custom" ? { xAtlasConnectionMode: mode } : {},
-          ...mode === "profile" && preset.profileId?.trim() ? { xAtlasProfileId: preset.profileId.trim() } : {},
-          ...preset.bodyParams?.trim() ? { xAtlasBodyParams: preset.bodyParams } : {},
-          ...preset.excludeBodyParams?.trim() ? { xAtlasExcludeBodyParams: preset.excludeBodyParams } : {},
-          ...preset.requestHeaders?.trim() ? { xAtlasExtraHeaders: preset.requestHeaders } : {},
-          ...preset.promptPostProcessing?.trim() ? { xAtlasPromptPostProcessing: preset.promptPostProcessing } : {}
-        }),
+        headers: initial.headers,
+        body: initial.body,
         signal: controller.signal
       });
     } catch {
       if (controller.signal.aborted) return fail4(ATLAS_ERROR_CODES.API_TIMEOUT, `推演请求超过 ${timeoutMs}ms 超时。`, true);
       return fail4(ATLAS_ERROR_CODES.SERVICE_OFFLINE, "无法连接推演服务，请检查网络或服务状态。", true);
     }
-    if (!response.ok) {
-      const mapped = errorMessageForStatus(response.status);
-      return fail4(mapped.code, mapped.message, mapped.retryable, response.status);
+    const parseCall = async (resp) => {
+      let rawText = "";
+      try {
+        rawText = typeof resp.text === "function" ? await resp.text() : JSON.stringify(await resp.json());
+      } catch {
+        rawText = "";
+      }
+      let payload = null;
+      try {
+        payload = JSON.parse(rawText);
+      } catch {
+        payload = firstSsePayload(rawText);
+      }
+      const text2 = extractAssistantText(payload);
+      if (text2 === null || text2.trim().length === 0) {
+        return { text: null, gatewayError: gatewayErrorMessage(payload), rawText };
+      }
+      return { text: text2.trim(), gatewayError: null, rawText };
+    };
+    let parsed = await parseCall(response);
+    let status = response.status;
+    if (mode === "custom" && preset.apiFormat !== "claude" && parsed.gatewayError && /Not Found/i.test(parsed.gatewayError) && isMinimaxUrl(url) && /^sk-cp-/i.test(preset.apiKey.trim())) {
+      const rescue = buildPayload(true);
+      try {
+        const rescueResponse = await fetchFn(rescue.url, {
+          method: "POST",
+          headers: rescue.headers,
+          body: rescue.body,
+          signal: controller.signal
+        });
+        status = rescueResponse.status;
+        const rescueParsed = await parseCall(rescueResponse);
+        if (rescueParsed.text !== null) {
+          parsed = rescueParsed;
+          rescueAttempted = true;
+        }
+      } catch {
+      }
     }
-    let rawText = "";
-    try {
-      rawText = typeof response.text === "function" ? await response.text() : JSON.stringify(await response.json());
-    } catch {
-      rawText = "";
+    if (!response.ok && !rescueAttempted) {
+      const mapped = errorMessageForStatus(status);
+      return fail4(mapped.code, mapped.message, mapped.retryable, status);
     }
-    let payload = null;
-    try {
-      payload = JSON.parse(rawText);
-    } catch {
-      payload = firstSsePayload(rawText);
-    }
-    const text = extractAssistantText(payload);
-    if (text === null || text.trim().length === 0) {
-      const gatewayError = gatewayErrorMessage(payload);
+    const text = parsed.text;
+    if (text === null || text.length === 0) {
+      const gatewayError = parsed.gatewayError;
       if (gatewayError) {
         const minimaxHint = minimaxNotFoundHint(url, gatewayError, preset.apiKey);
         return fail4(
@@ -790,16 +839,34 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
           false
         );
       }
-      const snippet = rawText.replace(/\s+/g, " ").trim().slice(0, 200);
+      const snippet = parsed.rawText.replace(/\s+/g, " ").trim().slice(0, 200);
       return fail4(
         ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
         `推演服务返回为空或不支持的格式${snippet ? `（响应开头：${snippet}）` : "（响应体为空）"}。`,
         false
       );
     }
-    return { ok: true, text, status: response.status, durationMs: now() - startedAt };
+    return {
+      ok: true,
+      text,
+      status,
+      durationMs: now() - startedAt,
+      ...rescueAttempted ? { notice: "已按 MiniMax 订阅密钥自动切换 Anthropic 路由（…/anthropic）重试成功。建议到「API」页把该连接的接口协议改为 Claude（Anthropic）、端点改为 …/anthropic 并保存。" } : {}
+    };
   } finally {
     clearTimeout(timer);
+  }
+}
+function isMinimaxUrl(url) {
+  return /minimax/i.test(url);
+}
+function rescueAnthropicUrl(url) {
+  try {
+    const parsed = new URL(url);
+    parsed.pathname = "/anthropic/chat/completions";
+    return parsed.toString();
+  } catch {
+    return url;
   }
 }
 function gatewayErrorMessage(payload) {
@@ -1085,14 +1152,16 @@ function createStProxyFetch(deps) {
     const excludeBody = typeof payload.xAtlasExcludeBodyParams === "string" ? payload.xAtlasExcludeBodyParams : "";
     const extraHeaders = typeof payload.xAtlasExtraHeaders === "string" ? payload.xAtlasExtraHeaders.trim() : "";
     const promptPost = normalizeAtlasPromptPostProcessing(payload.xAtlasPromptPostProcessing);
+    const customUrlRaw = typeof payload.xAtlasCustomUrl === "string" && payload.xAtlasCustomUrl.trim() ? payload.xAtlasCustomUrl.trim() : url;
     const nativeBase = apiFormat === "claude" ? normalizeAtlasClaudeBase(url) : apiFormat === "gemini" ? normalizeAtlasGeminiBase(url) : null;
     const nativeSource = apiFormat === "claude" ? "claude" : apiFormat === "gemini" ? "makersuite" : null;
     const includeHeaders = [atlasCustomIncludeHeaders(authorization), extraHeaders].filter(Boolean).join("\n");
     const proxyBody = {
       chat_completion_source: nativeSource ?? "custom",
-      ...nativeBase ? { reverse_proxy: nativeBase } : {},
-      ...nativeBase ? { proxy_password: stripBearerPrefix(authorization) } : {},
-      custom_url: url,
+      // shujuku buildCustomApiRequestBody_ACU：custom 源也带 reverse_proxy = 原始端点
+      // （ST 后端 custom 源优先走 reverse_proxy；shujuku 的 custom_url/reverse_proxy 都填 apiUrl）
+      ...nativeBase ? { reverse_proxy: nativeBase, proxy_password: stripBearerPrefix(authorization) } : { reverse_proxy: customUrlRaw, proxy_password: "" },
+      custom_url: customUrlRaw,
       model: payload.model,
       messages: payload.messages,
       stream: payload.stream ?? false,
@@ -5663,9 +5732,11 @@ var MAX_ENDPOINT_CHARS = 2048;
 var MAX_MODEL_CHARS = 128;
 var MAX_API_KEY_CHARS = 4096;
 var MIN_MAX_TOKENS = 1;
-var MAX_MAX_TOKENS = 8192;
+var MAX_MAX_TOKENS = 65536;
 var MIN_TEMPERATURE = 0;
 var MAX_TEMPERATURE = 2;
+var MIN_TOP_P = 0;
+var MAX_TOP_P = 1;
 var MIN_TIMEOUT_MS = 1e3;
 var MAX_TIMEOUT_MS = 12e4;
 var MAX_PROMPT_CHARS = 8e3;
@@ -5710,7 +5781,7 @@ function isHttpUrl(value) {
   return /^https?:\/\/\S+$/i.test(value);
 }
 function fingerprintOfConnection(input) {
-  return [input.endpoint, input.model, input.apiKey, input.maxTokens, input.temperature, input.timeoutMs].join("\0");
+  return [input.endpoint, input.model, input.apiKey, input.maxTokens, input.temperature, input.topP, input.timeoutMs].join("\0");
 }
 function uniqueName(base, used) {
   const trimmed = base.trim().slice(0, MAX_NAME_CHARS) || "未命名";
@@ -5776,6 +5847,8 @@ function parseConnectionPreset(raw) {
     apiKey: record.apiKey,
     maxTokens: record.maxTokens,
     temperature: record.temperature,
+    // 0.9.14 新字段：旧存档没有 topP → 宽容回退 0.95（shujuku 同款默认），绝不因此丢条目
+    topP: isFiniteIn(record.topP, MIN_TOP_P, MAX_TOP_P) ? record.topP : 0.95,
     timeoutMs: record.timeoutMs,
     ...normalizeApiFormat(record.apiFormat) !== "openai" ? { apiFormat: normalizeApiFormat(record.apiFormat) } : {},
     ...typeof record.profileId === "string" && record.profileId.trim() ? { profileId: record.profileId.trim().slice(0, 128) } : {},
@@ -5870,7 +5943,7 @@ function parseLegacyPreset(raw) {
   const temperature = isFiniteIn(record.temperature, MIN_TEMPERATURE, MAX_TEMPERATURE) ? record.temperature : 0.7;
   const timeoutMs = isFiniteIntIn(record.timeoutMs, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS) ? record.timeoutMs : 3e4;
   const systemPrompt = typeof record.systemPrompt === "string" ? record.systemPrompt : "";
-  return { name: record.name.trim(), endpoint: record.endpoint, model: record.model.trim(), apiKey, maxTokens, temperature, timeoutMs, systemPrompt };
+  return { name: record.name.trim(), endpoint: record.endpoint, model: record.model.trim(), apiKey, maxTokens, temperature, topP: 0.95, timeoutMs, systemPrompt };
 }
 function migrateAtlasSettings(raw, deps = {}) {
   const diagnostics = { skipped: 0, apiSkipped: 0, promptSkipped: 0, legacyMajorEventPreserved: false };
@@ -5908,6 +5981,7 @@ function migrateAtlasSettings(raw, deps = {}) {
         apiKey: legacy.apiKey,
         maxTokens: legacy.maxTokens,
         temperature: legacy.temperature,
+        topP: legacy.topP,
         timeoutMs: legacy.timeoutMs,
         updatedAt: nowOf(deps)
       });
@@ -5979,6 +6053,9 @@ function applySettingsCommand(settings, command, deps = {}) {
       if (!isFiniteIn(preset.temperature, MIN_TEMPERATURE, MAX_TEMPERATURE)) {
         return fail3(settings, "INVALID_PAYLOAD", `温度必须在 ${MIN_TEMPERATURE}..${MAX_TEMPERATURE}。`);
       }
+      if (!isFiniteIn(preset.topP, MIN_TOP_P, MAX_TOP_P)) {
+        return fail3(settings, "INVALID_PAYLOAD", `top_p 必须在 ${MIN_TOP_P}..${MAX_TOP_P}。`);
+      }
       if (!isFiniteIntIn(preset.timeoutMs, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS)) {
         return fail3(settings, "INVALID_PAYLOAD", `超时必须是 ${MIN_TIMEOUT_MS}..${MAX_TIMEOUT_MS} 毫秒。`);
       }
@@ -6014,6 +6091,7 @@ function applySettingsCommand(settings, command, deps = {}) {
           apiKey,
           maxTokens: preset.maxTokens,
           temperature: preset.temperature,
+          topP: preset.topP,
           timeoutMs: preset.timeoutMs
         }), deps, new Set(settings.apiPresets.map((p) => p.id))),
         name: uniqueName(preset.name, usedApiNames),
@@ -6023,6 +6101,7 @@ function applySettingsCommand(settings, command, deps = {}) {
         apiKey,
         maxTokens: preset.maxTokens,
         temperature: preset.temperature,
+        topP: preset.topP,
         timeoutMs: preset.timeoutMs,
         ...normalizeApiFormat(preset.apiFormat) !== "openai" ? { apiFormat: normalizeApiFormat(preset.apiFormat) } : {},
         ...connectionMode === "profile" && typeof preset.profileId === "string" && preset.profileId.trim() ? { profileId: preset.profileId.trim().slice(0, 128) } : {},
@@ -6144,6 +6223,7 @@ function applyLegacySettingsPatch(settings, body, deps = {}) {
       apiKey: p.apiKey,
       maxTokens: p.maxTokens,
       temperature: p.temperature,
+      topP: typeof p.topP === "number" ? p.topP : 0.95,
       timeoutMs: p.timeoutMs
     }) === fingerprint);
     if (existing) return existing.id;
@@ -6160,6 +6240,7 @@ function applyLegacySettingsPatch(settings, body, deps = {}) {
         apiKey: legacy.apiKey,
         maxTokens: legacy.maxTokens,
         temperature: legacy.temperature,
+        topP: typeof legacy.topP === "number" ? legacy.topP : 0.95,
         timeoutMs: legacy.timeoutMs,
         updatedAt: now
       }]
@@ -6237,6 +6318,7 @@ function settingsViewV2(settings) {
         model: p.model,
         maxTokens: p.maxTokens,
         temperature: p.temperature,
+        topP: typeof p.topP === "number" ? p.topP : 0.95,
         timeoutMs: p.timeoutMs,
         apiFormat: normalizeApiFormat(p.apiFormat),
         profileId: p.profileId ?? "",
@@ -6274,6 +6356,7 @@ function resolveWorldTurnPreset(settings) {
     apiKey: connection.apiKey,
     maxTokens: connection.maxTokens,
     temperature: connection.temperature,
+    topP: typeof connection.topP === "number" ? connection.topP : 0.95,
     timeoutMs: connection.timeoutMs,
     ...mode !== "custom" ? { connectionMode: mode } : {},
     ...format !== "openai" ? { apiFormat: format } : {},
@@ -6715,7 +6798,9 @@ function createAtlasServerCore(deps) {
       status: call.status,
       durationMs: call.durationMs,
       requestChars: request.userText.length + request.assistantText.length,
-      responseChars: call.ok ? call.text.length : 0
+      responseChars: call.ok ? call.text.length : 0,
+      // 0.9.14 自动救场提示（如 MiniMax 订阅密钥自动切换 Anthropic 路由）随日志落档
+      ...call.ok && call.notice ? { notice: call.notice } : {}
     });
     if (!call.ok) {
       throw new AtlasError(call.code, call.message, { retryable: call.retryable });

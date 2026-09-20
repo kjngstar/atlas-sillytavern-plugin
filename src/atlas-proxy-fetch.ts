@@ -125,6 +125,8 @@ interface ChatCompletionBody {
   // 0.9.13 宿主适配保留字段（引擎下发，代理层消费后绝不透传上游）
   xAtlasConnectionMode?: unknown;
   xAtlasProfileId?: unknown;
+  /** 0.9.14 shujuku 同款：用户原始端点——custom_url 发它，ST 后端自己决定 /chat/completions 拼接。 */
+  xAtlasCustomUrl?: unknown;
   xAtlasBodyParams?: unknown;
   xAtlasExcludeBodyParams?: unknown;
   xAtlasExtraHeaders?: unknown;
@@ -197,10 +199,16 @@ export function createStProxyFetch(deps: StProxyFetchDeps): typeof fetch {
     const excludeBody = typeof payload.xAtlasExcludeBodyParams === "string" ? payload.xAtlasExcludeBodyParams : "";
     const extraHeaders = typeof payload.xAtlasExtraHeaders === "string" ? payload.xAtlasExtraHeaders.trim() : "";
     const promptPost = normalizeAtlasPromptPostProcessing(payload.xAtlasPromptPostProcessing);
+    // 0.9.14 shujuku 同款：custom_url 用「用户原始端点」（引擎经 xAtlasCustomUrl 下发），
+    // ST 后端自行决定 /chat/completions 拼接——与 shujuku 发出的请求同构。
+    const customUrlRaw = typeof payload.xAtlasCustomUrl === "string" && payload.xAtlasCustomUrl.trim()
+      ? payload.xAtlasCustomUrl.trim()
+      : url;
 
     // claude / gemini 协议（shujuku 同款映射）：映射到酒馆原生协议源，服务端做协议变形。
     // claude → chat_completion_source:"claude"（基址补 /v1，x-api-key=proxy_password）；
     // gemini → "makersuite"（基址剥版本段，服务端自补 /v1beta）。
+    // 注意：归一化基于「引擎实际请求 URL」（救场重试时已带 /anthropic），不是 xAtlasCustomUrl。
     const nativeBase = apiFormat === "claude"
       ? normalizeAtlasClaudeBase(url)
       : apiFormat === "gemini"
@@ -213,9 +221,12 @@ export function createStProxyFetch(deps: StProxyFetchDeps): typeof fetch {
 
     const proxyBody: Record<string, unknown> = {
       chat_completion_source: nativeSource ?? "custom",
-      ...(nativeBase ? { reverse_proxy: nativeBase } : {}),
-      ...(nativeBase ? { proxy_password: stripBearerPrefix(authorization) } : {}),
-      custom_url: url,
+      // shujuku buildCustomApiRequestBody_ACU：custom 源也带 reverse_proxy = 原始端点
+      // （ST 后端 custom 源优先走 reverse_proxy；shujuku 的 custom_url/reverse_proxy 都填 apiUrl）
+      ...(nativeBase
+        ? { reverse_proxy: nativeBase, proxy_password: stripBearerPrefix(authorization) }
+        : { reverse_proxy: customUrlRaw, proxy_password: "" }),
+      custom_url: customUrlRaw,
       model: payload.model,
       messages: payload.messages,
       stream: payload.stream ?? false,

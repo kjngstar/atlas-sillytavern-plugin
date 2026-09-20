@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.13";
+export const ATLAS_EXTENSION_VERSION = "0.9.14";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -1471,6 +1471,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       model: "",
       maxTokens: 1024,
       temperature: 0.7,
+      topP: 0.95,
       timeoutMs: 30_000,
       apiFormat: "openai",
       profileId: "",
@@ -1492,6 +1493,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
           model: preset.model ?? "",
           maxTokens: preset.maxTokens,
           temperature: preset.temperature,
+          topP: typeof preset.topP === "number" ? preset.topP : 0.95,
           timeoutMs: preset.timeoutMs,
           apiFormat: preset.apiFormat ?? "openai",
           profileId: preset.profileId ?? "",
@@ -1513,6 +1515,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       model: String(preset.model ?? ""),
       maxTokens: Number(preset.maxTokens) || 1024,
       temperature: Number.isFinite(Number(preset.temperature)) ? Number(preset.temperature) : 0.7,
+      topP: Number.isFinite(Number(preset.topP)) ? Number(preset.topP) : 0.95,
       timeoutMs: Number(preset.timeoutMs) || 30_000,
       apiFormat: preset.apiFormat ?? "openai",
       profileId: String(preset.profileId ?? ""),
@@ -2068,8 +2071,9 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       }
 
       const grid = el("div", "aw-grid-2");
-      grid.append(appendField(numberField("maxTokens", "最大回复长度", 1, 8192, 1, "最大回复长度")));
+      grid.append(appendField(numberField("maxTokens", "最大回复长度", 1, 65536, 1, "最大回复长度")));
       grid.append(appendField(numberField("temperature", "温度", 0, 2, 0.1, "温度")));
+      grid.append(appendField(numberField("topP", "top_p", 0, 1, 0.05, "top_p")));
       panel.append(grid);
       panel.append(appendField(numberField("timeoutMs", "超时毫秒", 1000, 120000, 1000, "超时毫秒")));
 
@@ -2300,6 +2304,59 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     const endpoint = String(preset.endpoint || "").trim();
     if (!endpoint) {
       setStatus("请先填写端点，再加载模型。", "error");
+      renderCenter();
+      return;
+    }
+    // 0.9.14：claude / gemini 协议不走 /status 拉模型列表——MiniMax 等网关对 /models 放行
+    // 但对 completions 拒绝（订阅密钥），「测试全绿、推演就炸」的假阳性就是这么来的。
+    // 改发一条 max_tokens=1 的真实小请求走同一协议映射，端点 / 密钥 / 协议 / 模型四件套一起验。
+    const apiFormatValue0 = String(preset.apiFormat ?? "openai");
+    if (apiFormatValue0 === "claude" || apiFormatValue0 === "gemini") {
+      if (!String(preset.model ?? "").trim()) {
+        setStatus("协议为 Claude / Gemini 时请先手填模型名（如 MiniMax-M3），再测试连接。", "error");
+        renderCenter();
+        return;
+      }
+      setStatus(apiFormatValue0 === "claude" ? "正在按 Claude（Anthropic）协议发送真实探测请求…" : "正在按 Gemini 协议发送真实探测请求…", "ok");
+      renderCenter();
+      const startedProbeAt = Date.now();
+      try {
+        const { atlasCustomIncludeHeaders, normalizeAtlasClaudeBase, normalizeAtlasGeminiBase } = await loadUiCore();
+        const ctx = SillyTavern.getContext();
+        const headers = { "Content-Type": "application/json" };
+        if (typeof ctx.getRequestHeaders === "function") Object.assign(headers, ctx.getRequestHeaders());
+        const probeBase = apiFormatValue0 === "claude" ? normalizeAtlasClaudeBase(endpoint) : normalizeAtlasGeminiBase(endpoint);
+        const probeResponse = await fetch("/api/backends/chat-completions/generate", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            chat_completion_source: apiFormatValue0 === "claude" ? "claude" : "makersuite",
+            reverse_proxy: probeBase,
+            proxy_password: apiKeyInput || "",
+            custom_url: endpoint,
+            model: String(preset.model).trim(),
+            messages: [{ role: "user", content: "ping" }],
+            max_tokens: 1,
+            stream: false,
+            custom_include_headers: atlasCustomIncludeHeaders(apiKeyInput ? `Bearer ${apiKeyInput}` : ""),
+          }),
+        });
+        let probeSnippet = "";
+        try {
+          probeSnippet = redactSecrets(await probeResponse.clone().text()).replace(/\s+/g, " ").slice(0, 300);
+        } catch { /* 片段读不到不影响判定 */ }
+        atlasLog("推演", `POST /api/backends/chat-completions/generate（${apiFormatValue0} 真实探测） → ${endpoint} · 模型=${String(preset.model).trim()} → HTTP ${probeResponse.status}，${Date.now() - startedProbeAt}ms`, probeSnippet);
+        const probePayload = await probeResponse.json().catch(() => null);
+        const probeError = probePayload && typeof probePayload === "object" ? probePayload.error : null;
+        const probeErrorText = typeof probeError === "string" ? probeError : probeError && typeof probeError === "object" ? String(probeError.message ?? "") : "";
+        if (!probeResponse.ok || probeErrorText) {
+          setStatus(`协议探测失败：${probeErrorText || `HTTP ${probeResponse.status}`}——端点 / 密钥 / 协议 / 模型至少一项不通，请对照日志核对。`, "error");
+        } else {
+          setStatus("协议探测成功：端点、密钥、协议、模型全部可用，可以推演。", "ok");
+        }
+      } catch (error) {
+        setStatus(`协议探测失败：${error instanceof Error ? error.message : String(error)}`, "error");
+      }
       renderCenter();
       return;
     }

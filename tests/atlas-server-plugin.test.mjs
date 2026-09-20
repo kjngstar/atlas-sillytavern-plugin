@@ -245,7 +245,7 @@ test("settings v2：两库命令——入库 / 指纹去重 / 脱敏 / 两库独
   const { core, store } = await setup(null, { skipSettings: true });
   const saveApi = (name, endpoint) => ({
     action: "api.save",
-    preset: { name, endpoint, model: "atlas-mock", maxTokens: 1024, temperature: 0.7, timeoutMs: 30_000 },
+    preset: { name, endpoint, model: "atlas-mock", maxTokens: 1024, temperature: 0.7, topP: 0.95, timeoutMs: 30_000 },
     apiKeyMode: "replace",
     apiKey: SECRET,
   });
@@ -277,7 +277,7 @@ test("settings v2：两库命令——入库 / 指纹去重 / 脱敏 / 两库独
   // Key 三态：keep 不改密钥
   const kept = await core.handle("PUT", "/settings", {
     action: "api.save",
-    preset: { id: apiId, name: "渠道A改", endpoint: "https://a.example.invalid/v1/chat/completions", model: "atlas-mock-2", maxTokens: 512, temperature: 0.2, timeoutMs: 20_000 },
+    preset: { id: apiId, name: "渠道A改", endpoint: "https://a.example.invalid/v1/chat/completions", model: "atlas-mock-2", maxTokens: 512, temperature: 0.2, topP: 0.95, timeoutMs: 20_000 },
     apiKeyMode: "keep",
   }, { local: true });
   equal(kept.body.data.apiPresets[0].apiKey, SECRET, "keep 保留密钥（GET 回明文）");
@@ -285,7 +285,7 @@ test("settings v2：两库命令——入库 / 指纹去重 / 脱敏 / 两库独
   equal(kept.body.data.apiPresets[0].id, apiId, "ID 稳定（重命名不换 ID）");
   const cleared = await core.handle("PUT", "/settings", {
     action: "api.save",
-    preset: { id: apiId, name: "渠道A改", endpoint: "https://a.example.invalid/v1/chat/completions", model: "atlas-mock-2", maxTokens: 512, temperature: 0.2, timeoutMs: 20_000 },
+    preset: { id: apiId, name: "渠道A改", endpoint: "https://a.example.invalid/v1/chat/completions", model: "atlas-mock-2", maxTokens: 512, temperature: 0.2, topP: 0.95, timeoutMs: 20_000 },
     apiKeyMode: "clear",
   }, { local: true });
   equal(cleared.body.data.apiPresets[0].apiKey, "", "clear 后密钥为空");
@@ -522,7 +522,7 @@ test("settings v2 运行时组合：commit 用「活动 API + 活动提示词」
 
   const saveApi = (name, endpoint) => ({
     action: "api.save",
-    preset: { name, endpoint, model: "atlas-mock", maxTokens: 1024, temperature: 0.7, timeoutMs: 5000 },
+    preset: { name, endpoint, model: "atlas-mock", maxTokens: 1024, temperature: 0.7, topP: 0.95, timeoutMs: 5000 },
     apiKeyMode: "replace",
     apiKey: "sk-runtime-test",
   });

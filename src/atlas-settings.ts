@@ -31,9 +31,11 @@ const MAX_ENDPOINT_CHARS = 2048;
 const MAX_MODEL_CHARS = 128;
 const MAX_API_KEY_CHARS = 4096;
 const MIN_MAX_TOKENS = 1;
-const MAX_MAX_TOKENS = 8192;
+const MAX_MAX_TOKENS = 65536;
 const MIN_TEMPERATURE = 0;
 const MAX_TEMPERATURE = 2;
+const MIN_TOP_P = 0;
+const MAX_TOP_P = 1;
 const MIN_TIMEOUT_MS = 1_000;
 const MAX_TIMEOUT_MS = 120_000;
 const MAX_PROMPT_CHARS = 8000;
@@ -78,6 +80,8 @@ export interface AtlasApiConnectionPreset {
   apiKey: string;
   maxTokens: number;
   temperature: number;
+  /** top_p（0.9.14 全抄 shujuku；0..1）。 */
+  topP: number;
   timeoutMs: number;
   /** 接口协议；缺省 openai。 */
   apiFormat?: AtlasApiFormat;
@@ -147,6 +151,7 @@ export type AtlasSettingsCommand =
         model: string;
         maxTokens: number;
         temperature: number;
+        topP: number;
         timeoutMs: number;
         apiFormat?: AtlasApiFormat;
         profileId?: string;
@@ -208,9 +213,10 @@ function fingerprintOfConnection(input: {
   apiKey: string;
   maxTokens: number;
   temperature: number;
+  topP: number;
   timeoutMs: number;
 }): string {
-  return [input.endpoint, input.model, input.apiKey, input.maxTokens, input.temperature, input.timeoutMs].join("\u0000");
+  return [input.endpoint, input.model, input.apiKey, input.maxTokens, input.temperature, input.topP, input.timeoutMs].join("\u0000");
 }
 
 /** 名称冲突顺延：`名字`、`名字 (2)`、`名字 (3)`…（不覆盖已有项）。 */
@@ -294,6 +300,8 @@ function parseConnectionPreset(raw: unknown): Omit<AtlasApiConnectionPreset, "id
     apiKey: record.apiKey,
     maxTokens: record.maxTokens,
     temperature: record.temperature,
+    // 0.9.14 新字段：旧存档没有 topP → 宽容回退 0.95（shujuku 同款默认），绝不因此丢条目
+    topP: isFiniteIn(record.topP, MIN_TOP_P, MAX_TOP_P) ? record.topP : 0.95,
     timeoutMs: record.timeoutMs,
     ...(normalizeApiFormat(record.apiFormat) !== "openai" ? { apiFormat: normalizeApiFormat(record.apiFormat) } : {}),
     ...(typeof record.profileId === "string" && record.profileId.trim() ? { profileId: record.profileId.trim().slice(0, 128) } : {}),
@@ -397,6 +405,7 @@ interface LegacyPresetShape {
   apiKey: string;
   maxTokens: number;
   temperature: number;
+  topP: number;
   timeoutMs: number;
   /** 旧组合预设的提示词正文（缺省 = 空串，表示使用内置默认）。 */
   systemPrompt: string;
@@ -414,7 +423,7 @@ function parseLegacyPreset(raw: unknown): LegacyPresetShape | null {
   const temperature = isFiniteIn(record.temperature, MIN_TEMPERATURE, MAX_TEMPERATURE) ? record.temperature : 0.7;
   const timeoutMs = isFiniteIntIn(record.timeoutMs, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS) ? record.timeoutMs : 30_000;
   const systemPrompt = typeof record.systemPrompt === "string" ? record.systemPrompt : "";
-  return { name: record.name.trim(), endpoint: record.endpoint, model: record.model.trim(), apiKey, maxTokens, temperature, timeoutMs, systemPrompt };
+  return { name: record.name.trim(), endpoint: record.endpoint, model: record.model.trim(), apiKey, maxTokens, temperature, topP: 0.95, timeoutMs, systemPrompt };
 }
 
 /**
@@ -467,6 +476,7 @@ export function migrateAtlasSettings(raw: unknown, deps: AtlasSettingsDeps = {})
         apiKey: legacy.apiKey,
         maxTokens: legacy.maxTokens,
         temperature: legacy.temperature,
+        topP: legacy.topP,
         timeoutMs: legacy.timeoutMs,
         updatedAt: nowOf(deps),
       });
@@ -555,6 +565,9 @@ export function applySettingsCommand(
       if (!isFiniteIn(preset.temperature, MIN_TEMPERATURE, MAX_TEMPERATURE)) {
         return fail(settings, "INVALID_PAYLOAD", `温度必须在 ${MIN_TEMPERATURE}..${MAX_TEMPERATURE}。`);
       }
+      if (!isFiniteIn(preset.topP, MIN_TOP_P, MAX_TOP_P)) {
+        return fail(settings, "INVALID_PAYLOAD", `top_p 必须在 ${MIN_TOP_P}..${MAX_TOP_P}。`);
+      }
       if (!isFiniteIntIn(preset.timeoutMs, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS)) {
         return fail(settings, "INVALID_PAYLOAD", `超时必须是 ${MIN_TIMEOUT_MS}..${MAX_TIMEOUT_MS} 毫秒。`);
       }
@@ -587,7 +600,7 @@ export function applySettingsCommand(
       // 同毫秒内「删除→再新建同长度」用 now+length 会撞 ID（复核发现）
       const entry: AtlasApiConnectionPreset = {
         id: targetId ?? resolveId("api", settings.apiPresets.length, fingerprintOfConnection({
-          endpoint: preset.endpoint, model: preset.model, apiKey, maxTokens: preset.maxTokens, temperature: preset.temperature, timeoutMs: preset.timeoutMs,
+          endpoint: preset.endpoint, model: preset.model, apiKey, maxTokens: preset.maxTokens, temperature: preset.temperature, topP: preset.topP, timeoutMs: preset.timeoutMs,
         }), deps, new Set(settings.apiPresets.map((p) => p.id))),
         name: uniqueName(preset.name, usedApiNames),
         ...(connectionMode !== "custom" ? { connectionMode } : {}),
@@ -596,6 +609,7 @@ export function applySettingsCommand(
         apiKey,
         maxTokens: preset.maxTokens,
         temperature: preset.temperature,
+        topP: preset.topP,
         timeoutMs: preset.timeoutMs,
         ...(normalizeApiFormat(preset.apiFormat) !== "openai" ? { apiFormat: normalizeApiFormat(preset.apiFormat) } : {}),
         ...(connectionMode === "profile" && typeof preset.profileId === "string" && preset.profileId.trim() ? { profileId: preset.profileId.trim().slice(0, 128) } : {}),
@@ -731,7 +745,7 @@ export function applyLegacySettingsPatch(
     const fingerprint = fingerprintOfConnection(legacy);
     const existing = next.apiPresets.find((p) => fingerprintOfConnection({
       endpoint: p.endpoint, model: p.model, apiKey: p.apiKey,
-      maxTokens: p.maxTokens, temperature: p.temperature, timeoutMs: p.timeoutMs,
+      maxTokens: p.maxTokens, temperature: p.temperature, topP: typeof p.topP === "number" ? p.topP : 0.95, timeoutMs: p.timeoutMs,
     }) === fingerprint);
     if (existing) return existing.id;
     if (next.apiPresets.length >= MAX_PRESETS_PER_LIBRARY) return null;
@@ -747,6 +761,7 @@ export function applyLegacySettingsPatch(
         apiKey: legacy.apiKey,
         maxTokens: legacy.maxTokens,
         temperature: legacy.temperature,
+        topP: typeof legacy.topP === "number" ? legacy.topP : 0.95,
         timeoutMs: legacy.timeoutMs,
         updatedAt: now,
       }],
@@ -832,6 +847,7 @@ export interface AtlasSettingsView {
     model: string;
     maxTokens: number;
     temperature: number;
+    topP: number;
     timeoutMs: number;
     apiFormat: AtlasApiFormat;
     profileId: string;
@@ -870,6 +886,7 @@ export function settingsViewV2(settings: AtlasServerSettingsV2): AtlasSettingsVi
         model: p.model,
         maxTokens: p.maxTokens,
         temperature: p.temperature,
+        topP: typeof p.topP === "number" ? p.topP : 0.95,
         timeoutMs: p.timeoutMs,
         apiFormat: normalizeApiFormat(p.apiFormat),
         profileId: p.profileId ?? "",
@@ -913,6 +930,7 @@ export function resolveWorldTurnPreset(settings: AtlasServerSettingsV2): AtlasAp
     apiKey: connection.apiKey,
     maxTokens: connection.maxTokens,
     temperature: connection.temperature,
+    topP: typeof connection.topP === "number" ? connection.topP : 0.95,
     timeoutMs: connection.timeoutMs,
     ...(mode !== "custom" ? { connectionMode: mode } : {}),
     ...(format !== "openai" ? { apiFormat: format } : {}),

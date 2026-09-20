@@ -28,6 +28,8 @@ export interface AtlasApiPreset {
   apiKey: string;
   maxTokens?: number;
   temperature?: number;
+  /** top_p（0.9.14 全抄 shujuku buildCustomApiRequestBody_ACU；缺省 0.95）。 */
+  topP?: number;
   timeoutMs?: number;
   /** 自定义系统提示词；留空 / 省略 = 使用内置默认（DEFAULT_WORLD_TURN_SYSTEM_PROMPT）。 */
   systemPrompt?: string;
@@ -52,6 +54,8 @@ export interface AtlasApiCallResult {
   text: string;
   status: number;
   durationMs: number;
+  /** 0.9.14 自动救场提示（如 MiniMax 订阅密钥自动切换 Anthropic 路由），随引擎 world-turn 日志落档。 */
+  notice?: string;
 }
 
 export interface AtlasApiCallFailure {
@@ -162,42 +166,71 @@ export async function callAtlasWorldTurnApi(
   if (!url) return fail(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "推演 API 地址无效，无法构造请求。", false);
   if (mode === "custom" && !preset.model.trim()) return fail(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "推演预设未填写模型名称。", false);
 
+  // 0.9.14 全抄 shujuku buildCustomApiRequestBody_ACU 的字段口径（能跑通是唯一标准）：
+  // max_tokens 默认 20000 / temperature 默认 1.0 / top_p 默认 0.95 / reasoning_effort 'medium'
+  // / include_reasoning·enable_web_search·request_images 显式 false / group_names 空数组；
+  // role 归一小写、model 去 'models/' 前缀——与 shujuku 发出的请求逐字段同构。
+  const bodyMessages = [
+    { role: "system", content: preset.systemPrompt?.trim() || DEFAULT_WORLD_TURN_SYSTEM_PROMPT },
+    { role: "user", content: buildWorldTurnUserContent(input) },
+  ].map((m) => ({ ...m, role: m.role.toLowerCase() }));
+  const bodyModel = preset.model.trim().replace(/^models\//, "") || "host";
+  const maxTokens = typeof preset.maxTokens === "number" && preset.maxTokens > 0 ? preset.maxTokens : 20_000;
+  const temperature = typeof preset.temperature === "number" ? preset.temperature : 1.0;
+  const topP = typeof preset.topP === "number" ? preset.topP : 0.95;
+
   const timeoutMs = Math.min(Math.max(preset.timeoutMs ?? 30_000, 1_000), 120_000);
   const fetchFn = deps.fetchFn ?? globalThis.fetch;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
+  /** 组装 fetch 载荷（0.9.14：rescue 模式改走 Anthropic 路由）。 */
+  const buildPayload = (forClaude: boolean): { url: string; headers: Record<string, string>; body: string } => {
+    const requestUrl = forClaude ? rescueAnthropicUrl(url) : url;
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...(preset.apiKey.trim() ? { Authorization: `Bearer ${preset.apiKey.trim()}` } : {}),
+      // 浏览器代理适配层据此映射为酒馆 claude / gemini 源；直连（测试）时无副作用
+      ...(preset.apiFormat === "claude" || forClaude ? { "X-Atlas-Api-Format": "claude" } : {}),
+      ...(preset.apiFormat === "gemini" ? { "X-Atlas-Api-Format": "gemini" } : {}),
+    };
+    const body = JSON.stringify({
+      model: bodyModel,
+      messages: bodyMessages,
+      max_tokens: maxTokens,
+      temperature,
+      top_p: topP,
+      stream: false,
+      group_names: [],
+      include_reasoning: false,
+      reasoning_effort: "medium",
+      enable_web_search: false,
+      request_images: false,
+      // 0.9.13 宿主适配通道（shujuku 同款能力）：代理层消费这些保留字段并映射为
+      // custom_include_body / custom_exclude_body / 附加标头 / custom_prompt_post_processing，
+      // 绝不透传上游；main / profile 模式据此路由到 TavernHelper / ConnectionManager。
+      ...(mode !== "custom" ? { xAtlasConnectionMode: mode } : {}),
+      ...(mode === "profile" && preset.profileId?.trim() ? { xAtlasProfileId: preset.profileId.trim() } : {}),
+      // 0.9.14 shujuku 同款：custom_url 用「用户原始端点」，ST 后端自己决定拼接，
+      // 不由引擎预拼 /chat/completions（与 shujuku 走同一条 URL 构造路径）。
+      ...(mode === "custom" && preset.endpoint.trim() ? { xAtlasCustomUrl: preset.endpoint.trim() } : {}),
+      ...(preset.bodyParams?.trim() ? { xAtlasBodyParams: preset.bodyParams } : {}),
+      ...(preset.excludeBodyParams?.trim() ? { xAtlasExcludeBodyParams: preset.excludeBodyParams } : {}),
+      ...(preset.requestHeaders?.trim() ? { xAtlasExtraHeaders: preset.requestHeaders } : {}),
+      ...(preset.promptPostProcessing?.trim() ? { xAtlasPromptPostProcessing: preset.promptPostProcessing } : {}),
+    });
+    return { url: requestUrl, headers, body };
+  };
+
   try {
     let response: Response;
+    let rescueAttempted = false;
+    const initial = buildPayload(false);
     try {
-      response = await fetchFn(url, {
+      response = await fetchFn(initial.url, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(preset.apiKey.trim() ? { Authorization: `Bearer ${preset.apiKey.trim()}` } : {}),
-          // 浏览器代理适配层据此把请求映射为酒馆 claude 源（Anthropic Messages）；直连（测试）时无副作用
-          ...(preset.apiFormat === "claude" ? { "X-Atlas-Api-Format": "claude" } : {}),
-          ...(preset.apiFormat === "gemini" ? { "X-Atlas-Api-Format": "gemini" } : {}),
-        },
-        body: JSON.stringify({
-          model: preset.model.trim() || "host",
-          messages: [
-            { role: "system", content: preset.systemPrompt?.trim() || DEFAULT_WORLD_TURN_SYSTEM_PROMPT },
-            { role: "user", content: buildWorldTurnUserContent(input) },
-          ],
-          stream: false,
-          ...(typeof preset.temperature === "number" ? { temperature: preset.temperature } : {}),
-          ...(typeof preset.maxTokens === "number" ? { max_tokens: preset.maxTokens } : {}),
-          // 0.9.13 宿主适配通道（shujuku 同款能力）：代理层消费这些保留字段并映射为
-          // custom_include_body / custom_exclude_body / 附加标头 / custom_prompt_post_processing，
-          // 绝不透传上游；main / profile 模式据此路由到 TavernHelper / ConnectionManager。
-          ...(mode !== "custom" ? { xAtlasConnectionMode: mode } : {}),
-          ...(mode === "profile" && preset.profileId?.trim() ? { xAtlasProfileId: preset.profileId.trim() } : {}),
-          ...(preset.bodyParams?.trim() ? { xAtlasBodyParams: preset.bodyParams } : {}),
-          ...(preset.excludeBodyParams?.trim() ? { xAtlasExcludeBodyParams: preset.excludeBodyParams } : {}),
-          ...(preset.requestHeaders?.trim() ? { xAtlasExtraHeaders: preset.requestHeaders } : {}),
-          ...(preset.promptPostProcessing?.trim() ? { xAtlasPromptPostProcessing: preset.promptPostProcessing } : {}),
-        }),
+        headers: initial.headers,
+        body: initial.body,
         signal: controller.signal,
       });
     } catch {
@@ -205,29 +238,66 @@ export async function callAtlasWorldTurnApi(
       return fail(ATLAS_ERROR_CODES.SERVICE_OFFLINE, "无法连接推演服务，请检查网络或服务状态。", true);
     }
 
-    if (!response.ok) {
-      const mapped = errorMessageForStatus(response.status);
-      return fail(mapped.code, mapped.message, mapped.retryable, response.status);
+    const parseCall = async (resp: Response): Promise<{ text: string | null; gatewayError: string | null; rawText: string }> => {
+      let rawText = "";
+      try {
+        rawText = typeof resp.text === "function" ? await resp.text() : JSON.stringify(await resp.json());
+      } catch {
+        rawText = "";
+      }
+      let payload: unknown = null;
+      try {
+        payload = JSON.parse(rawText);
+      } catch {
+        payload = firstSsePayload(rawText);
+      }
+      const text = extractAssistantText(payload);
+      if (text === null || text.trim().length === 0) {
+        return { text: null, gatewayError: gatewayErrorMessage(payload), rawText };
+      }
+      return { text: text.trim(), gatewayError: null, rawText };
+    };
+
+    let parsed = await parseCall(response);
+    let status = response.status;
+
+    // 0.9.14 自动救场（第二层保险）：MiniMax 订阅密钥（sk-cp-）打 OpenAI 路径挨 Not Found 时，
+    // 自动改走官方 Anthropic 兼容路由（origin + /anthropic）重试一次——成功即通，notice 落引擎日志；
+    // 失败则保留原错误与专项提示。非 MiniMax 域 / 非 sk-cp- 密钥不做任何魔法。
+    if (
+      mode === "custom" &&
+      preset.apiFormat !== "claude" &&
+      parsed.gatewayError &&
+      /Not Found/i.test(parsed.gatewayError) &&
+      isMinimaxUrl(url) &&
+      /^sk-cp-/i.test(preset.apiKey.trim())
+    ) {
+      const rescue = buildPayload(true);
+      try {
+        const rescueResponse = await fetchFn(rescue.url, {
+          method: "POST",
+          headers: rescue.headers,
+          body: rescue.body,
+          signal: controller.signal,
+        });
+        status = rescueResponse.status;
+        const rescueParsed = await parseCall(rescueResponse);
+        if (rescueParsed.text !== null) {
+          parsed = rescueParsed;
+          rescueAttempted = true;
+        }
+      } catch { /* 救场失败 → 落回原错误路径 */ }
     }
 
-    // 0.9.6：先取原始文本（响应片段可进诊断日志/报错），JSON 解析失败再尝试 SSE data: 行
-    // （部分网关无视 stream:false 强制流式返回）。
-    let rawText = "";
-    try {
-      rawText = typeof response.text === "function" ? await response.text() : JSON.stringify(await response.json());
-    } catch {
-      rawText = "";
+    if (!response.ok && !rescueAttempted) {
+      const mapped = errorMessageForStatus(status);
+      return fail(mapped.code, mapped.message, mapped.retryable, status);
     }
-    let payload: unknown = null;
-    try {
-      payload = JSON.parse(rawText);
-    } catch {
-      payload = firstSsePayload(rawText);
-    }
-    const text = extractAssistantText(payload);
-    if (text === null || text.trim().length === 0) {
+
+    const text = parsed.text;
+    if (text === null || text.length === 0) {
       // 网关「200 包错误 JSON」形状（new-api / one-api 系常见）：{"error":{"message":"..."},"quota_error":false}
-      const gatewayError = gatewayErrorMessage(payload);
+      const gatewayError = parsed.gatewayError;
       if (gatewayError) {
         const minimaxHint = minimaxNotFoundHint(url, gatewayError, preset.apiKey);
         return fail(
@@ -236,16 +306,42 @@ export async function callAtlasWorldTurnApi(
           false,
         );
       }
-      const snippet = rawText.replace(/\s+/g, " ").trim().slice(0, 200);
+      const snippet = parsed.rawText.replace(/\s+/g, " ").trim().slice(0, 200);
       return fail(
         ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
         `推演服务返回为空或不支持的格式${snippet ? `（响应开头：${snippet}）` : "（响应体为空）"}。`,
         false,
       );
     }
-    return { ok: true, text, status: response.status, durationMs: now() - startedAt };
+    return {
+      ok: true,
+      text,
+      status,
+      durationMs: now() - startedAt,
+      ...(rescueAttempted ? { notice: "已按 MiniMax 订阅密钥自动切换 Anthropic 路由（…/anthropic）重试成功。建议到「API」页把该连接的接口协议改为 Claude（Anthropic）、端点改为 …/anthropic 并保存。" } : {}),
+    };
   } finally {
     clearTimeout(timer);
+  }
+}
+
+/** MiniMax 域判定（国内站 / 国际站）。 */
+function isMinimaxUrl(url: string): boolean {
+  return /minimax/i.test(url);
+}
+
+/**
+ * 订阅密钥救场 URL：OpenAI 路径 URL → 同源 Anthropic 兼容路由。
+ * https://api.minimaxi.com/v1/chat/completions → https://api.minimaxi.com/anthropic/chat/completions
+ * （代理层 normalizeAtlasClaudeBase 会把基址归一为 …/anthropic/v1 后交 claude 源。）
+ */
+function rescueAnthropicUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    parsed.pathname = "/anthropic/chat/completions";
+    return parsed.toString();
+  } catch {
+    return url;
   }
 }
 

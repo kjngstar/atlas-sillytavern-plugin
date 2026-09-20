@@ -672,6 +672,8 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
       durationMs: call.durationMs,
       requestChars: request.userText.length + request.assistantText.length,
       responseChars: call.ok ? call.text.length : 0,
+      // 0.9.14 自动救场提示（如 MiniMax 订阅密钥自动切换 Anthropic 路由）随日志落档
+      ...(call.ok && call.notice ? { notice: call.notice } : {}),
     });
     if (!call.ok) {
       throw new AtlasError(call.code, call.message, { retryable: call.retryable });

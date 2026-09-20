@@ -140,6 +140,7 @@ test("local api: PUT/GET /settings 走同一 store（进程内零网络，ATLAS-
       model: "m1",
       maxTokens: 1024,
       temperature: 0.5,
+      topP: 0.95,
       timeoutMs: 30_000,
     },
     apiKeyMode: "replace",
@@ -504,7 +505,7 @@ test("createStProxyFetch：X-Atlas-Api-Format: claude → claude 源映射（rev
   assert.equal(body.model, "MiniMax-M3");
 });
 
-test("createStProxyFetch：无协议头 → 维持 custom 源（不含 reverse_proxy / proxy_password）", async () => {
+test("createStProxyFetch：无协议头 → 维持 custom 源（0.9.14 shujuku 同款：reverse_proxy=原始端点，proxy_password 空串）", async () => {
   const captured = [];
   const fakeFetch = async (input, init) => {
     captured.push({ init });
@@ -518,8 +519,11 @@ test("createStProxyFetch：无协议头 → 维持 custom 源（不含 reverse_p
   });
   const body = JSON.parse(captured[0].init.body);
   assert.equal(body.chat_completion_source, "custom");
-  assert.equal(body.reverse_proxy, undefined);
-  assert.equal(body.proxy_password, undefined);
+  // 0.9.14 全抄 shujuku buildCustomApiRequestBody_ACU：custom 源 reverse_proxy = custom_url、proxy_password 空串
+  assert.equal(body.reverse_proxy, "https://api.example.com/v1/chat/completions");
+  assert.equal(body.proxy_password, "");
+  // 无 xAtlasCustomUrl 时 custom_url 回退引擎 URL
+  assert.equal(body.custom_url, "https://api.example.com/v1/chat/completions");
   assert.equal(body.custom_include_headers, "Authorization: Bearer sk-api-xyz");
 });
 
@@ -691,4 +695,125 @@ test("callAtlasWorldTurnApi：main/profile 模式 → atlas://host 占位 + 保�
   const customBody = JSON.parse(seen[2].init.body);
   assert.equal(seen[2].input, "https://api.example.com/v1/chat/completions");
   assert.equal(customBody.xAtlasConnectionMode, undefined, "custom 模式不带路由保留字段");
+});
+
+// ---------------------------------------------------------------------------
+// 0.9.14 全盘对齐 shujuku 请求构造（逐字段同构）+ MiniMax 订阅密钥自动救场
+// ---------------------------------------------------------------------------
+
+test("callAtlasWorldTurnApi：请求体逐字段同构 shujuku buildCustomApiRequestBody_ACU", async () => {
+  const bodies = [];
+  const fetchOk = async (input, init) => {
+    bodies.push(JSON.parse(init.body));
+    return { ok: true, status: 200, text: async () => JSON.stringify({ choices: [{ message: { content: "ok" } }] }) };
+  };
+  await callAtlasWorldTurnApi(
+    { name: "t", endpoint: "https://api.example.com/v1", model: "models/MiniMax-M3", apiKey: "k" },
+    { injectionText: "c", userText: "u", assistantText: "a" },
+    { fetchFn: fetchOk },
+  );
+  const b = bodies[0];
+  // shujuku 字段口径：默认值 + 显式 false + 空数组 + role 小写 + models/ 前缀剥离
+  assert.equal(b.model, "MiniMax-M3", "strip models/ 前缀（shujuku 同款）");
+  assert.deepEqual(b.messages.map((m) => m.role), ["system", "user"], "role 归一小写");
+  assert.equal(b.max_tokens, 20_000, "maxTokens 缺省 20000（shujuku 同款）");
+  assert.equal(b.temperature, 1.0, "temperature 缺省 1.0");
+  assert.equal(b.top_p, 0.95, "top_p 缺省 0.95（shujuku 同款）");
+  assert.equal(b.stream, false);
+  assert.deepEqual(b.group_names, []);
+  assert.equal(b.include_reasoning, false);
+  assert.equal(b.reasoning_effort, "medium");
+  assert.equal(b.enable_web_search, false);
+  assert.equal(b.request_images, false);
+  assert.equal(b.xAtlasCustomUrl, "https://api.example.com/v1", "原始端点随 body 下发（代理层用作 custom_url）");
+});
+
+test("createStProxyFetch：xAtlasCustomUrl → custom_url/reverse_proxy 发用户原始端点（shujuku 同构）", async () => {
+  const captured = [];
+  const fakeFetch = async (input, init) => {
+    captured.push({ init });
+    return { ok: true, status: 200, text: async () => JSON.stringify({ choices: [{ message: { content: "ok" } }] }) };
+  };
+  const proxied = createStProxyFetch({ getContext: () => ({ getRequestHeaders: () => ({}) }), fetchFn: fakeFetch });
+  await proxied("https://api.example.com/v1/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: "Bearer sk-x" },
+    body: JSON.stringify({
+      model: "m1",
+      messages: [{ role: "user", content: "hi" }],
+      stream: false,
+      xAtlasCustomUrl: "https://api.example.com/v1",
+    }),
+  });
+  const body = JSON.parse(captured[0].init.body);
+  assert.equal(body.chat_completion_source, "custom");
+  assert.equal(body.custom_url, "https://api.example.com/v1", "custom_url = 用户原始端点，ST 后端自行拼接");
+  assert.equal(body.reverse_proxy, "https://api.example.com/v1", "custom 源也带 reverse_proxy（shujuku buildCustomApiRequestBody_ACU 同款）");
+  assert.equal(body.proxy_password, "");
+});
+
+test("callAtlasWorldTurnApi：MiniMax 订阅密钥 Not Found → 自动换 anthropic 路由救场成功（notice 落档）", async () => {
+  const seen = [];
+  const fetchFn = async (input, init) => {
+    const url = typeof input === "string" ? input : input.toString();
+    const body = JSON.parse(init.body);
+    seen.push({ url, format: init.headers?.["X-Atlas-Api-Format"] ?? null, body });
+    if (url.includes("/anthropic")) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ choices: [{ message: { content: "救场成功" } }] }) };
+    }
+    // 模拟 MiniMax 官方对订阅密钥打 /v1/chat/completions 的 Not Found（HTTP 200 包错误 JSON）
+    return { ok: true, status: 200, text: async () => JSON.stringify({ error: { message: "Not Found" }, quota_error: false }) };
+  };
+  const result = await callAtlasWorldTurnApi(
+    { name: "t", endpoint: "https://api.minimaxi.com/v1", model: "MiniMax-M3", apiKey: "sk-cp-sub" },
+    { injectionText: "c", userText: "u", assistantText: "a" },
+    { fetchFn },
+  );
+  assert.equal(result.ok, true);
+  assert.equal(result.text, "救场成功");
+  assert.match(result.notice ?? "", /anthropic/);
+  assert.equal(seen.length, 2, "两次请求：原路径 + 救场");
+  assert.equal(seen[1].url, "https://api.minimaxi.com/anthropic/chat/completions");
+  assert.equal(seen[1].format, "claude", "救场请求带 claude 协议头");
+});
+
+test("callAtlasWorldTurnApi：非 MiniMax 域 / 非 sk-cp- 密钥 / claude 协议 → 不触发救场", async () => {
+  const makeFetch = () => {
+    const calls = [];
+    const fetchFn = async (input, init) => {
+      calls.push(1);
+      return { ok: true, status: 200, text: async () => JSON.stringify({ error: { message: "Not Found" }, quota_error: false }) };
+    };
+    return { fetchFn, calls };
+  };
+
+  // 非 MiniMax 域
+  let t = makeFetch();
+  let r = await callAtlasWorldTurnApi(
+    { name: "t", endpoint: "https://api.example.com/v1", model: "m", apiKey: "sk-cp-sub" },
+    { injectionText: "c", userText: "u", assistantText: "a" },
+    { fetchFn: t.fetchFn },
+  );
+  assert.equal(t.calls.length, 1);
+  assert.equal(r.ok, false);
+
+  // 非 sk-cp- 密钥
+  t = makeFetch();
+  r = await callAtlasWorldTurnApi(
+    { name: "t", endpoint: "https://api.minimaxi.com/v1", model: "m", apiKey: "sk-api-pay" },
+    { injectionText: "c", userText: "u", assistantText: "a" },
+    { fetchFn: t.fetchFn },
+  );
+  assert.equal(t.calls.length, 1);
+  assert.equal(r.ok, false);
+
+  // 已是 claude 协议
+  t = makeFetch();
+  r = await callAtlasWorldTurnApi(
+    { name: "t", endpoint: "https://api.minimaxi.com/anthropic", model: "m", apiKey: "sk-cp-sub", apiFormat: "claude" },
+    { injectionText: "c", userText: "u", assistantText: "a" },
+    { fetchFn: t.fetchFn },
+  );
+  assert.equal(t.calls.length, 1);
+  assert.equal(r.ok, false);
 });
