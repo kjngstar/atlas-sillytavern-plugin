@@ -697,7 +697,7 @@ var DEFAULT_PROMPT_SEGMENTS = [
     role: "system",
     name: "主系统提示词（推演引擎职责）",
     mainSlot: "A",
-    content: "你是阿特拉斯世界推演引擎。你收到一份本轮的剧情素材（世界状态、前文、用户行动、助手回复），你的唯一职责：推断本轮对世界造成的**有界结构化变化**——谁出现在哪里、人物状态与关系如何变化、势力格局有无变动、时间推进多少。\n严格要求：只输出一个 JSON 对象，不要输出任何多余说明、推理过程或代码围栏。字段契约：\nduration（本轮消耗的时段数，非负数字，≤10000）、\nlocationChange（对象或 null：{toPointId, toRegionId}，id 必须来自上下文中出现的地点）、\nnpcChanges（数组，每条形如 {entityId, key, value} 更新人物状态 / {entityId, tag} 加标签 / {entityId, removeTag} 删标签 / {entityId, targetEntityId, key, value} 改关系；entityId 必须来自上下文）、\nmemoryDrafts（数组，每条 {entityId, text}，为人物追加一条记忆，≤500 字）、\neventDrafts（数组，事件摘要文字，仅叙述用）、\ntriggerResults（数组，本轮命中的触发器 id）、\nsummary（本轮世界变化的一句话摘要，≤500 字）。\n禁止：编造上下文之外的实体 id；输出时间地点之外的世界重写；输出任何密钥、路径或代码。"
+    content: "你是阿特拉斯世界推演引擎。你收到一份本轮的剧情素材（世界状态、前文、用户行动、助手回复），你的唯一职责：推断本轮对世界造成的**有界结构化变化**——谁出现在哪里、人物状态与关系如何变化、势力格局有无变动、时间推进多少。\n严格要求：只输出一个 JSON 对象，不要输出任何多余说明、推理过程或代码围栏。字段契约：\nduration（本轮消耗的时段数，非负数字，≤10000）、\nlocationChange（对象或 null：{toPointId, toRegionId}，id 必须来自上下文中出现的地点）、\nnpcChanges（数组，每条形如 {entityId, key, value} 更新人物状态 / {entityId, tag} 加标签 / {entityId, removeTag} 删标签 / {entityId, targetEntityId, key, value} 改关系；entityId 必须来自上下文）、\nmemoryDrafts（数组，每条 {entityId, text}，为人物追加一条记忆，≤500 字）、\neventDrafts（数组，事件摘要文字，仅叙述用）、\ntriggerResults（数组，本轮命中的触发器 id）、\nsummary（本轮世界变化的一句话摘要，≤500 字）。\n禁止：编造上下文之外的实体 id；输出时间地点之外的世界重写；输出任何密钥、路径或代码。\n若本轮确无任何人物 / 关系 / 记忆变化，npcChanges 与 memoryDrafts 输出空数组，duration 与 locationChange 仍须如实填写，不要为凑数编造变化。"
   },
   {
     role: "user",
@@ -6150,7 +6150,8 @@ function commitAtlasTurn(world, input) {
   const toPointId = locationChange ? requireKnownPoint(world, locationChange.toPointId, "locationChange") : null;
   const toRegionId = locationChange ? requireKnownRegion(world, locationChange.toRegionId, "locationChange") : null;
   const summary = input.draft.summary.trim();
-  if (effects.length === 0 && duration === 0 && toPointId === null && toRegionId === null) {
+  if (effects.length === 0) {
+    const cursorAdvanced = duration > 0 || toPointId !== null || toRegionId !== null;
     return {
       world,
       receipt: {
@@ -6158,12 +6159,12 @@ function commitAtlasTurn(world, input) {
         status: "committed",
         branchId,
         previousTime: input.currentTime,
-        currentTime: input.currentTime,
+        currentTime: at,
         previousLocationId: input.currentPointId,
-        currentLocationId: input.currentPointId,
+        ...toPointId !== null ? { currentLocationId: toPointId } : {},
         triggeredNpcIds: [],
         adoptedEventIds: [],
-        summary: "本轮无世界变化。",
+        summary: cursorAdvanced ? `${summary}（本轮无实体变化：仅时间 / 位置推进，未写入账本）` : "本轮无世界变化。",
         retryable: false
       }
     };
@@ -7142,7 +7143,7 @@ function createAtlasServerCore(deps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.26",
+      version: "0.9.27",
       protocolVersion: 1,
       time: now()
     });

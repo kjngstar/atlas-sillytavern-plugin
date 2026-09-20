@@ -339,6 +339,47 @@ test("commit：无变化回合零写入并返回 committed 空回执", () => {
   equal(output.receipt.adoptedEventIds.length, 0, "无事件");
 });
 
+test("commit：仅时间推进零 effect 草稿 → 游标推进回执，不再被账本「至少一个 effect」拒收（0.9.27，MiniMax-M3 真实翻车形状）", () => {
+  const world = buildFixture();
+  const eventsBefore = (world.stateEvents ?? []).length;
+  const before = JSON.stringify(world);
+  const output = commitAtlasTurn(world, commitInput(world, {
+    draft: {
+      duration: 4,
+      locationChange: null,
+      rawEffects: [],
+      memoryDrafts: [],
+      summary: "众人在客栈休整一夜，无特殊事件。",
+    },
+  }));
+  equal(output.receipt.status, "committed", "仅时间推进回合提交成功");
+  equal(output.receipt.currentTime, CURRENT_TIME + 4, "时间游标推进 4 时段");
+  equal(output.receipt.adoptedEventIds.length, 0, "账本零事件");
+  equal(output.world, world, "引用相等：世界零写入");
+  equal(before, JSON.stringify(output.world), "世界字节不变");
+  equal((world.stateEvents ?? []).length, eventsBefore, "账本长度不变");
+  ok(output.receipt.summary.includes("无实体变化"), "回执摘要注明仅时间推进");
+  equal(output.receipt.retryable, false, "成功不可重试");
+});
+
+test("commit：仅位置移动零 effect 草稿 → 位置游标随回执推进", () => {
+  const world = buildFixture();
+  const output = commitAtlasTurn(world, commitInput(world, {
+    draft: {
+      duration: 0,
+      locationChange: { toPointId: "4104", toRegionId: "capital" },
+      rawEffects: [],
+      memoryDrafts: [],
+      summary: "一行人悄然移步潮门。",
+    },
+  }));
+  equal(output.receipt.status, "committed", "仅位移回合提交成功");
+  equal(output.receipt.currentTime, CURRENT_TIME, "时间不变");
+  equal(output.receipt.currentLocationId, "4104", "位置游标写入 receipt");
+  equal(output.receipt.adoptedEventIds.length, 0, "账本零事件");
+  equal(output.world, world, "引用相等：零写入");
+});
+
 test("commit：IF 分支事件不泄漏进正史账本", () => {
   const world = buildFixture();
   const canonBefore = ledgerForBranch(world, null).length;

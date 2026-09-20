@@ -112,7 +112,8 @@ export const DEFAULT_PROMPT_SEGMENTS: Array<{ role: string; name: string; mainSl
       "eventDrafts（数组，事件摘要文字，仅叙述用）、\n" +
       "triggerResults（数组，本轮命中的触发器 id）、\n" +
       "summary（本轮世界变化的一句话摘要，≤500 字）。\n" +
-      "禁止：编造上下文之外的实体 id；输出时间地点之外的世界重写；输出任何密钥、路径或代码。",
+      "禁止：编造上下文之外的实体 id；输出时间地点之外的世界重写；输出任何密钥、路径或代码。\n" +
+      "若本轮确无任何人物 / 关系 / 记忆变化，npcChanges 与 memoryDrafts 输出空数组，duration 与 locationChange 仍须如实填写，不要为凑数编造变化。",
   },
   {
     role: "user",

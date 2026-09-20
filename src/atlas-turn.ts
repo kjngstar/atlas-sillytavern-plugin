@@ -294,9 +294,14 @@ export function commitAtlasTurn(world: World, input: AtlasTurnCommitInput): Atla
     ? requireKnownRegion(world, locationChange.toRegionId, "locationChange")
     : null;
 
-  // 3. 无变化回合：零写入，直接给 committed 空回执
+  // 3. 零 effect 回合：零账本写入，直接给 committed 回执。
+  //    0.9.27 修复：账本铁律「提案至少要包含一个 effect」（lib/world-ledger.ts），
+  //    而「仅时间推进 / 仅位置移动、无实体变化」是模型可合法产出的草稿——
+  //    此前这类草稿会走提案路径被账本整单拒收。现改为游标推进回执：
+  //    时间与位置由回执驱动绑定游标（同成功路径），账本零写入、零部分写入。
   const summary = input.draft.summary.trim();
-  if (effects.length === 0 && duration === 0 && toPointId === null && toRegionId === null) {
+  if (effects.length === 0) {
+    const cursorAdvanced = duration > 0 || toPointId !== null || toRegionId !== null;
     return {
       world,
       receipt: {
@@ -304,12 +309,14 @@ export function commitAtlasTurn(world: World, input: AtlasTurnCommitInput): Atla
         status: "committed",
         branchId,
         previousTime: input.currentTime,
-        currentTime: input.currentTime,
+        currentTime: at,
         previousLocationId: input.currentPointId,
-        currentLocationId: input.currentPointId,
+        ...(toPointId !== null ? { currentLocationId: toPointId } : {}),
         triggeredNpcIds: [],
         adoptedEventIds: [],
-        summary: "本轮无世界变化。",
+        summary: cursorAdvanced
+          ? `${summary}（本轮无实体变化：仅时间 / 位置推进，未写入账本）`
+          : "本轮无世界变化。",
         retryable: false,
       },
     };
