@@ -1480,3 +1480,106 @@
   pointer-events: none;
 }
 .aw-geobar .aw-btn--primary { pointer-events: auto; }
+
+/* 0.9.32 点挂子图：面包屑（画布顶部） + 标记点信息面板（viewport 右上） + 子图角标 */
+
+.aw-mapcrumb {
+  position: absolute;
+  top: 64px;
+  left: 22px;
+  z-index: 7;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--aw-sans);
+  font-size: 12px;
+}
+
+.aw-mapcrumb__back {
+  padding: 3px 10px;
+  border-radius: 6px;
+  border: 1px solid #cfc9b8;
+  background: var(--aw-panel);
+  color: #25484a;
+}
+
+.aw-mapcrumb__back:hover { border-color: var(--aw-teal); color: var(--aw-teal); }
+
+.aw-mapcrumb__title {
+  padding: 3px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(196, 163, 99, 0.5);
+  background: rgba(251, 250, 246, 0.94);
+  color: #59472c;
+  white-space: nowrap;
+}
+
+.aw-mappanel {
+  position: absolute;
+  top: 64px; /* 避开 mapTools 行（zoom 控件 top:22） */
+  right: 14px;
+  width: min(280px, 62%);
+  z-index: 8;
+  padding: 12px 14px;
+  border-radius: 8px;
+  border: 1px solid rgba(196, 163, 99, 0.55);
+  background: rgba(251, 250, 246, 0.97);
+  box-shadow: 0 10px 28px rgba(8, 20, 22, 0.18);
+  font-family: var(--aw-sans);
+}
+
+.aw-mappanel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.aw-mappanel__name {
+  font-family: var(--aw-serif);
+  font-size: 15px;
+  color: var(--aw-ink);
+}
+
+.aw-mappanel__close {
+  border: 0;
+  background: none;
+  padding: 0 2px;
+  font-size: 16px;
+  line-height: 1;
+  color: var(--aw-muted);
+}
+
+.aw-mappanel__close:hover { color: var(--aw-ink); }
+
+.aw-mappanel__meta {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--aw-muted);
+}
+
+.aw-mappanel__desc {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #25484a;
+}
+
+.aw-mappanel__actions {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* 子图角标：可深入内部的地点带金色小菱形（呼应 45° brand-mark） */
+.aw-point--sub::after {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+  transform: rotate(45deg);
+  background: var(--aw-gold);
+}

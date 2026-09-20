@@ -348,7 +348,7 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.32",
+      version: "0.9.33",
       protocolVersion: 1,
       time: now(),
     });
@@ -1120,26 +1120,39 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
 
     // 9.5 0.9.32 点挂子图 sidecar：newLocations 携带的 submap / description 落到
     //     maps:<worldId> 独立文档（lib/ 点位 schema 不动；只增不改）。
-    if (output.geo && output.geo.createdPoints.length > 0) {
-      const docKey = `maps:${binding.worldId}`;
-      const doc = sanitizeMapDoc(await store.read(docKey).catch(() => null));
-      let changed = false;
-      for (const created of output.geo.createdPoints) {
-        const key = String(created.id);
-        if (created.description && !doc.pointMeta[key]) {
-          doc.pointMeta[key] = { description: created.description };
-          changed = true;
+    //     整段容错：世界已在步骤 7 提交，sidecar 只是增强数据——写失败记日志不阻断
+    //     （否则回执已缓存、世界已落盘，API 却报 500，作者会以为回合失败去重试）。
+    try {
+      if (output.geo && output.geo.createdPoints.length > 0) {
+        const docKey = `maps:${binding.worldId}`;
+        const doc = sanitizeMapDoc(await store.read(docKey).catch(() => null));
+        let changed = false;
+        for (const created of output.geo.createdPoints) {
+          const key = String(created.id);
+          if (created.description && !doc.pointMeta[key]) {
+            doc.pointMeta[key] = { description: created.description };
+            changed = true;
+          }
+          if (created.submap && !doc.submaps[key]) {
+            doc.submaps[key] = buildSubMapFromDraft(created.submap, {
+              worldId: binding.worldId,
+              pointId: key,
+              now: now(),
+            });
+            changed = true;
+          }
         }
-        if (created.submap && !doc.submaps[key]) {
-          doc.submaps[key] = buildSubMapFromDraft(created.submap, {
-            worldId: binding.worldId,
-            pointId: key,
-            now: now(),
-          });
-          changed = true;
-        }
+        if (changed) await store.write(docKey, doc);
       }
-      if (changed) await store.write(docKey, doc);
+    } catch (thrown) {
+      pushLog({
+        at: now(),
+        level: "error",
+        kind: "world-turn-sidecar-failed",
+        chatId: request.chatId,
+        worldId: binding.worldId,
+        summary: `子图 / 点位描述落库失败（回合本身已提交成功，无需重试推演）：${thrown instanceof Error ? thrown.message : String(thrown)}`.slice(0, 300),
+      });
     }
 
     // 9. 0.9.31 首轮自动建图（作者需求：第一次推演生成当前地图，之后地图有了就不再重复）。

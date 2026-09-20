@@ -7507,7 +7507,7 @@ function createAtlasServerCore(deps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.32",
+      version: "0.9.33",
       protocolVersion: 1,
       time: now()
     });
@@ -8130,26 +8130,37 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
       });
     }
     const lorebook = buildLorebookPlans(output.world, receipt);
-    if (output.geo && output.geo.createdPoints.length > 0) {
-      const docKey = `maps:${binding.worldId}`;
-      const doc = sanitizeMapDoc(await store.read(docKey).catch(() => null));
-      let changed = false;
-      for (const created of output.geo.createdPoints) {
-        const key = String(created.id);
-        if (created.description && !doc.pointMeta[key]) {
-          doc.pointMeta[key] = { description: created.description };
-          changed = true;
+    try {
+      if (output.geo && output.geo.createdPoints.length > 0) {
+        const docKey = `maps:${binding.worldId}`;
+        const doc = sanitizeMapDoc(await store.read(docKey).catch(() => null));
+        let changed = false;
+        for (const created of output.geo.createdPoints) {
+          const key = String(created.id);
+          if (created.description && !doc.pointMeta[key]) {
+            doc.pointMeta[key] = { description: created.description };
+            changed = true;
+          }
+          if (created.submap && !doc.submaps[key]) {
+            doc.submaps[key] = buildSubMapFromDraft(created.submap, {
+              worldId: binding.worldId,
+              pointId: key,
+              now: now()
+            });
+            changed = true;
+          }
         }
-        if (created.submap && !doc.submaps[key]) {
-          doc.submaps[key] = buildSubMapFromDraft(created.submap, {
-            worldId: binding.worldId,
-            pointId: key,
-            now: now()
-          });
-          changed = true;
-        }
+        if (changed) await store.write(docKey, doc);
       }
-      if (changed) await store.write(docKey, doc);
+    } catch (thrown) {
+      pushLog({
+        at: now(),
+        level: "error",
+        kind: "world-turn-sidecar-failed",
+        chatId: request.chatId,
+        worldId: binding.worldId,
+        summary: `子图 / 点位描述落库失败（回合本身已提交成功，无需重试推演）：${thrown instanceof Error ? thrown.message : String(thrown)}`.slice(0, 300)
+      });
     }
     if (receipt.status === "committed" && (settledWorld.points ?? []).length <= 1) {
       const markerKey = `geo-auto:${binding.worldId}`;
