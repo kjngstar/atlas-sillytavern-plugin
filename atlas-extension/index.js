@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.9";
+export const ATLAS_EXTENSION_VERSION = "0.9.10";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -1468,6 +1468,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       maxTokens: 1024,
       temperature: 0.7,
       timeoutMs: 30_000,
+      apiFormat: "openai",
     };
   }
 
@@ -1756,7 +1757,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       }
       const preset = apiLibrary.find((p) => p.id === libSelect.value);
       apiDraft = preset
-        ? { id: preset.id, name: preset.name, endpoint: preset.endpoint, model: preset.model, maxTokens: preset.maxTokens, temperature: preset.temperature, timeoutMs: preset.timeoutMs }
+        ? { id: preset.id, name: preset.name, endpoint: preset.endpoint, model: preset.model, maxTokens: preset.maxTokens, temperature: preset.temperature, timeoutMs: preset.timeoutMs, apiFormat: preset.apiFormat === "claude" ? "claude" : "openai" }
         : newApiDraft();
       apiDraftDirty = false;
       apiKeyInput = "";
@@ -1821,6 +1822,32 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       return wrap;
     };
     for (const field of fields) panel.append(appendField(field));
+
+    // 接口协议（0.9.10，shujuku 同款字段）：claude = Anthropic Messages，
+    // 经酒馆 claude 源变形（MiniMax Token Plan 订阅密钥 / Claude 官方与中转代理用）
+    const formatRow = el("div", "aw-field");
+    formatRow.append(el("span", "aw-field__label", "接口协议"));
+    const formatSelect = document.createElement("select");
+    formatSelect.className = "aw-input";
+    formatSelect.setAttribute("aria-label", "选择接口协议");
+    const formatOptions = [
+      { value: "openai", label: "OpenAI 兼容（/chat/completions，默认）" },
+      { value: "claude", label: "Claude / Anthropic Messages（MiniMax 订阅、Claude 代理）" },
+    ];
+    for (const opt of formatOptions) {
+      const option = document.createElement("option");
+      option.value = opt.value;
+      option.textContent = opt.label;
+      formatSelect.append(option);
+    }
+    formatSelect.value = draft.apiFormat === "claude" ? "claude" : "openai";
+    formatSelect.addEventListener("change", () => {
+      draft.apiFormat = formatSelect.value === "claude" ? "claude" : "openai";
+      apiDraft = draft;
+      apiDraftDirty = true;
+    });
+    formatRow.append(formatSelect);
+    panel.append(formatRow);
 
     // shujuku 式：独立的「加载模型列表」按钮紧跟密钥，模型下拉**常驻**（占位提示先加载）
     const loadModelsRow = el("div", "aw-actions");
@@ -1916,6 +1943,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
           maxTokens: Number(preset.maxTokens) || 1024,
           temperature: Number.isFinite(Number(preset.temperature)) ? Number(preset.temperature) : 0.7,
           timeoutMs: Number(preset.timeoutMs) || 30_000,
+          apiFormat: preset.apiFormat === "claude" ? "claude" : "openai",
         },
         apiKeyMode,
         ...(apiKeyMode === "replace" ? { apiKey: apiKeyInput } : {}),
@@ -1923,7 +1951,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       if (ok) {
         const saved = apiLibrary.find((p) => p.name === preset.name.trim()) ?? apiLibrary[apiLibrary.length - 1];
         apiDraft = saved
-          ? { id: saved.id, name: saved.name, endpoint: saved.endpoint, model: saved.model, maxTokens: saved.maxTokens, temperature: saved.temperature, timeoutMs: saved.timeoutMs }
+          ? { id: saved.id, name: saved.name, endpoint: saved.endpoint, model: saved.model, maxTokens: saved.maxTokens, temperature: saved.temperature, timeoutMs: saved.timeoutMs, apiFormat: saved.apiFormat === "claude" ? "claude" : "openai" }
           : apiDraft;
         apiDraftDirty = false;
         apiKeyInput = "";
@@ -1947,6 +1975,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
           maxTokens: Number(preset.maxTokens) || 1024,
           temperature: Number.isFinite(Number(preset.temperature)) ? Number(preset.temperature) : 0.7,
           timeoutMs: Number(preset.timeoutMs) || 30_000,
+          apiFormat: preset.apiFormat === "claude" ? "claude" : "openai",
         },
         apiKeyMode: apiKeyInput ? "replace" : "replace",
         apiKey: apiKeyInput,
@@ -2009,15 +2038,18 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       const headers = { "Content-Type": "application/json" };
       if (typeof ctx.getRequestHeaders === "function") Object.assign(headers, ctx.getRequestHeaders());
       // ATLAS-FIX-02：custom_include_headers 必须是原始头字符串（与生成路径共用同一序列化口径）
-      const { atlasCustomIncludeHeaders } = await loadUiCore();
+      // 0.9.10：claude 协议 → chat_completion_source:"claude" + reverse_proxy（基址补 /v1）+ proxy_password
+      const { atlasCustomIncludeHeaders, normalizeAtlasClaudeBase } = await loadUiCore();
       const keyValue = apiKeyInput ? `Bearer ${apiKeyInput}` : "";
+      const isClaude = (apiDraft?.apiFormat ?? preset.apiFormat) === "claude" || preset.apiFormat === "claude";
+      const claudeBase = isClaude ? normalizeAtlasClaudeBase(endpoint) : null;
       const response = await fetch("/api/backends/chat-completions/status", {
         method: "POST",
         headers,
         body: JSON.stringify({
-          reverse_proxy: endpoint,
-          proxy_password: "",
-          chat_completion_source: "custom",
+          ...(claudeBase
+            ? { chat_completion_source: "claude", reverse_proxy: claudeBase, proxy_password: apiKeyInput || "" }
+            : { chat_completion_source: "custom", reverse_proxy: endpoint, proxy_password: "" }),
           custom_url: endpoint,
           custom_include_headers: atlasCustomIncludeHeaders(keyValue),
         }),

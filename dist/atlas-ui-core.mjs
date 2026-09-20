@@ -732,7 +732,9 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...preset.apiKey.trim() ? { Authorization: `Bearer ${preset.apiKey.trim()}` } : {}
+          ...preset.apiKey.trim() ? { Authorization: `Bearer ${preset.apiKey.trim()}` } : {},
+          // 浏览器代理适配层据此把请求映射为酒馆 claude 源（Anthropic Messages）；直连（测试）时无副作用
+          ...preset.apiFormat === "claude" ? { "X-Atlas-Api-Format": "claude" } : {}
         },
         body: JSON.stringify({
           model: preset.model.trim(),
@@ -804,9 +806,9 @@ function minimaxNotFoundHint(url, gatewayError, apiKey) {
   if (!/minimax/i.test(url)) return "";
   const isSubscriptionKey = /^sk-cp-/i.test(apiKey.trim());
   if (isSubscriptionKey) {
-    return " 【MiniMax 检测】你的密钥是 Token Plan 订阅密钥（sk-cp- 开头），它只能走 Anthropic 兼容路由（把 API 地址换成 https://api.minimaxi.com/anthropic 或 https://api.minimax.io/anthropic，并在酒馆里选 Claude/Anthropic 源），不能用于 /v1/chat/completions；如需 OpenAI 兼容调用，请改用按量付费密钥（sk-api- 开头）并确保账户有余额。";
+    return " 【MiniMax 检测】你的密钥是 Token Plan 订阅密钥（sk-cp- 开头），它只能走 Anthropic Messages 协议——在 Atlas「API」页把接口协议切到 Claude（Anthropic），端点填 https://api.minimaxi.com/anthropic（国际站用 https://api.minimax.io/anthropic）；如需 OpenAI 兼容调用，请改用按量付费密钥（sk-api- 开头）并确保账户有余额。";
   }
-  return " 【MiniMax 检测】① 国内站（minimaxi.com / minimax.chat）与国际站（minimax.io）密钥不通用，请确认密钥归属的平台与 API 地址一致；② 订阅密钥（sk-cp- 开头）只能走 Anthropic 兼容路由（…/anthropic），按量付费密钥（sk-api- 开头）才能用 /v1/chat/completions 且账户需有余额；③ 到控制台「模型列表」核对 MiniMax-M3 是否为该账号可调用名称。";
+  return " 【MiniMax 检测】① 国内站（minimaxi.com / minimax.chat）与国际站（minimax.io）密钥不通用，请确认密钥归属的平台与 API 地址一致；② 订阅密钥（sk-cp- 开头）只能走 Anthropic Messages 协议（Atlas「API」页把接口协议切到 Claude（Anthropic），端点填 …/anthropic），按量付费密钥（sk-api- 开头）才能用 /v1/chat/completions 且账户需有余额；③ 到控制台「模型列表」核对 MiniMax-M3 是否为该账号可调用名称。";
 }
 function firstSsePayload(raw) {
   if (!raw.includes("data:")) return null;
@@ -974,6 +976,26 @@ function atlasCustomIncludeHeaders(headerValue) {
   const value = (headerValue ?? "").trim();
   return value ? `Authorization: ${value}` : "";
 }
+function normalizeAtlasClaudeBase(rawUrl) {
+  let base = String(rawUrl || "").trim().replace(/\/+$/, "");
+  if (!base) return "";
+  for (const suffix of ["/chat/completions", "/messages", "/responses", "/interactions"]) {
+    if (base.endsWith(suffix)) {
+      base = base.slice(0, -suffix.length).replace(/\/+$/, "");
+      break;
+    }
+  }
+  if (base.endsWith("/v1beta")) base = base.slice(0, -"/v1beta".length).replace(/\/+$/, "");
+  let path = "";
+  try {
+    path = new URL(base).pathname.replace(/\/+$/, "");
+  } catch {
+    return base;
+  }
+  if (path === "" || path === "/") return `${base}/v1`;
+  if (!base.endsWith("/v1")) return `${base}/v1`;
+  return base;
+}
 function pickAuthorization(headers) {
   if (!headers || typeof headers !== "object" || Array.isArray(headers)) return null;
   const record = headers;
@@ -983,6 +1005,20 @@ function pickAuthorization(headers) {
     }
   }
   return null;
+}
+function pickAtlasApiFormat(headers) {
+  if (!headers || typeof headers !== "object" || Array.isArray(headers)) return null;
+  const record = headers;
+  for (const [key, value] of Object.entries(record)) {
+    if (key.toLowerCase() === "x-atlas-api-format" && typeof value === "string" && value.trim().toLowerCase() === "claude") {
+      return "claude";
+    }
+  }
+  return null;
+}
+function stripBearerPrefix(authorization) {
+  if (!authorization) return "";
+  return authorization.replace(/^Bearer\s+/i, "");
 }
 function createStProxyFetch(deps) {
   const innerFetch = deps.fetchFn ?? globalThis.fetch.bind(globalThis);
@@ -1004,9 +1040,13 @@ function createStProxyFetch(deps) {
       return innerFetch(input, init);
     }
     const authorization = pickAuthorization(init?.headers);
+    const apiFormat = pickAtlasApiFormat(init?.headers);
     const csrfHeaders = deps.getContext().getRequestHeaders() ?? {};
+    const claudeBase = apiFormat === "claude" ? normalizeAtlasClaudeBase(url) : null;
     const proxyBody = {
-      chat_completion_source: "custom",
+      chat_completion_source: claudeBase ? "claude" : "custom",
+      ...claudeBase ? { reverse_proxy: claudeBase } : {},
+      ...claudeBase ? { proxy_password: stripBearerPrefix(authorization) } : {},
       custom_url: url,
       model: payload.model,
       messages: payload.messages,
@@ -5671,7 +5711,8 @@ function parseConnectionPreset(raw) {
     apiKey: record.apiKey,
     maxTokens: record.maxTokens,
     temperature: record.temperature,
-    timeoutMs: record.timeoutMs
+    timeoutMs: record.timeoutMs,
+    ...record.apiFormat === "claude" ? { apiFormat: "claude" } : {}
   };
 }
 function parsePromptPreset(raw) {
@@ -5898,6 +5939,7 @@ function applySettingsCommand(settings, command, deps = {}) {
         maxTokens: preset.maxTokens,
         temperature: preset.temperature,
         timeoutMs: preset.timeoutMs,
+        ...preset.apiFormat === "claude" ? { apiFormat: "claude" } : {},
         updatedAt: now
       };
       const apiPresets = existingIndex >= 0 ? settings.apiPresets.map((p, i) => i === existingIndex ? entry : p) : [...settings.apiPresets, entry];
@@ -6105,6 +6147,7 @@ function settingsViewV2(settings) {
         maxTokens: p.maxTokens,
         temperature: p.temperature,
         timeoutMs: p.timeoutMs,
+        apiFormat: p.apiFormat === "claude" ? "claude" : "openai",
         apiKey: { exists: key.trim().length > 0, tail: key.trim().length >= 4 ? key.trim().slice(-4) : null }
       };
     }),
@@ -6133,6 +6176,7 @@ function resolveWorldTurnPreset(settings) {
     maxTokens: connection.maxTokens,
     temperature: connection.temperature,
     timeoutMs: connection.timeoutMs,
+    ...connection.apiFormat === "claude" ? { apiFormat: "claude" } : {},
     ...prompt ? { systemPrompt: prompt.systemPrompt } : {}
   };
 }
@@ -7690,6 +7734,7 @@ export {
   getDemoTemplate,
   getDemoTemplateByName,
   lorebookNameFor,
+  normalizeAtlasClaudeBase,
   parseAtlasChatBinding,
   starterWorldIdForChat
 };

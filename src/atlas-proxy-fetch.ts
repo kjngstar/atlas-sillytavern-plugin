@@ -9,6 +9,11 @@
  *   { chat_completion_source: "custom", custom_url: <原地址>, model, messages, stream:false,
  *     temperature?, max_tokens?, custom_include_headers: "Authorization: Bearer <key>" }
  *
+ * 0.9.10 Claude 协议（shujuku 同款）：引擎核心带 X-Atlas-Api-Format: claude 头时改映射为
+ *   { chat_completion_source: "claude", reverse_proxy: <归一化基址（补 /v1）>,
+ *     proxy_password: <裸密钥>, custom_url, model, messages, ... }
+ *   由酒馆后端做 Anthropic 变形（MiniMax 订阅密钥走 /anthropic 即靠这条路）。
+ *
  * 契约依据（2026-09-17 上游源码实测，release 分支 chat-completions.js）：
  * - :2394-2410 CUSTOM 分支：apiUrl=custom_url；密钥读服务端 secret（CUSTOM 豁免缺失检查 :2615）；
  *   mergeObjectWithYaml(bodyParams, custom_include_body)；mergeObjectWithYaml(headers, custom_include_headers)。
@@ -37,6 +42,35 @@ export function atlasCustomIncludeHeaders(headerValue: string | null | undefined
   return value ? `Authorization: ${value}` : "";
 }
 
+/**
+ * Claude（Anthropic Messages）反向代理基址归一化（0.9.10，照搬 shujuku
+ * normalizeSTNativeProxyBase_ACU 的 claude 分支语义）：
+ * 原版 ST claude 源 fetch(apiUrl + '/messages')，基址须含 /v1（ST 官方常量即
+ * https://api.anthropic.com/v1）。剥显式协议路径段防重复（/messages、/v1beta 等），
+ * 并按 ST 惯例补 /v1；不改写用户自建代理的其他子路径段。
+ * 例：https://api.minimaxi.com/anthropic → https://api.minimaxi.com/anthropic/v1
+ */
+export function normalizeAtlasClaudeBase(rawUrl: unknown): string {
+  let base = String(rawUrl || "").trim().replace(/\/+$/, "");
+  if (!base) return "";
+  for (const suffix of ["/chat/completions", "/messages", "/responses", "/interactions"]) {
+    if (base.endsWith(suffix)) {
+      base = base.slice(0, -suffix.length).replace(/\/+$/, "");
+      break;
+    }
+  }
+  if (base.endsWith("/v1beta")) base = base.slice(0, -"/v1beta".length).replace(/\/+$/, "");
+  let path = "";
+  try {
+    path = new URL(base).pathname.replace(/\/+$/, "");
+  } catch {
+    return base; // 非法 URL 原样透传，交由后端报错
+  }
+  if (path === "" || path === "/") return `${base}/v1`;
+  if (!base.endsWith("/v1")) return `${base}/v1`;
+  return base;
+}
+
 export interface StProxyFetchDeps {
   /** 通常 = SillyTavern.getContext；测试注入 fake。 */
   getContext(): { getRequestHeaders(): Record<string, string> };
@@ -61,6 +95,24 @@ function pickAuthorization(headers: unknown): string | null {
     }
   }
   return null;
+}
+
+/** 引擎核心经请求头声明的接口协议（X-Atlas-Api-Format: claude = Anthropic Messages）。 */
+function pickAtlasApiFormat(headers: unknown): "claude" | null {
+  if (!headers || typeof headers !== "object" || Array.isArray(headers)) return null;
+  const record = headers as Record<string, unknown>;
+  for (const [key, value] of Object.entries(record)) {
+    if (key.toLowerCase() === "x-atlas-api-format" && typeof value === "string" && value.trim().toLowerCase() === "claude") {
+      return "claude";
+    }
+  }
+  return null;
+}
+
+/** "Bearer xxx" → "xxx"（claude 源 proxy_password 收裸密钥，shujuku 同款）。 */
+function stripBearerPrefix(authorization: string | null): string {
+  if (!authorization) return "";
+  return authorization.replace(/^Bearer\s+/i, "");
 }
 
 export function createStProxyFetch(deps: StProxyFetchDeps): typeof fetch {
@@ -91,10 +143,17 @@ export function createStProxyFetch(deps: StProxyFetchDeps): typeof fetch {
     }
 
     const authorization = pickAuthorization(init?.headers);
+    const apiFormat = pickAtlasApiFormat(init?.headers);
     const csrfHeaders = deps.getContext().getRequestHeaders() ?? {};
 
+    // claude 协议（shujuku 同款映射，0.9.10）：chat_completion_source:"claude"，
+    // 服务端做 Anthropic 变形（fetch(reverse_proxy + '/messages')，x-api-key=proxy_password）。
+    // custom_url / custom_include_headers 与 shujuku 一并携带（后端按源取用，不影响）。
+    const claudeBase = apiFormat === "claude" ? normalizeAtlasClaudeBase(url) : null;
     const proxyBody: Record<string, unknown> = {
-      chat_completion_source: "custom",
+      chat_completion_source: claudeBase ? "claude" : "custom",
+      ...(claudeBase ? { reverse_proxy: claudeBase } : {}),
+      ...(claudeBase ? { proxy_password: stripBearerPrefix(authorization) } : {}),
       custom_url: url,
       model: payload.model,
       messages: payload.messages,

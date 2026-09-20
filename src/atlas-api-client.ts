@@ -31,6 +31,8 @@ export interface AtlasApiPreset {
   timeoutMs?: number;
   /** 自定义系统提示词；留空 / 省略 = 使用内置默认（DEFAULT_WORLD_TURN_SYSTEM_PROMPT）。 */
   systemPrompt?: string;
+  /** 接口协议（0.9.10，shujuku 同款）：缺省 openai = /chat/completions；claude = Anthropic Messages（经酒馆 claude 源变形，MiniMax 订阅密钥 / Claude 代理用）。 */
+  apiFormat?: "openai" | "claude";
 }
 
 export interface AtlasApiCallResult {
@@ -159,6 +161,8 @@ export async function callAtlasWorldTurnApi(
         headers: {
           "Content-Type": "application/json",
           ...(preset.apiKey.trim() ? { Authorization: `Bearer ${preset.apiKey.trim()}` } : {}),
+          // 浏览器代理适配层据此把请求映射为酒馆 claude 源（Anthropic Messages）；直连（测试）时无副作用
+          ...(preset.apiFormat === "claude" ? { "X-Atlas-Api-Format": "claude" } : {}),
         },
         body: JSON.stringify({
           model: preset.model.trim(),
@@ -245,9 +249,9 @@ function minimaxNotFoundHint(url: string, gatewayError: string, apiKey: string):
   if (!/minimax/i.test(url)) return "";
   const isSubscriptionKey = /^sk-cp-/i.test(apiKey.trim());
   if (isSubscriptionKey) {
-    return " 【MiniMax 检测】你的密钥是 Token Plan 订阅密钥（sk-cp- 开头），它只能走 Anthropic 兼容路由（把 API 地址换成 https://api.minimaxi.com/anthropic 或 https://api.minimax.io/anthropic，并在酒馆里选 Claude/Anthropic 源），不能用于 /v1/chat/completions；如需 OpenAI 兼容调用，请改用按量付费密钥（sk-api- 开头）并确保账户有余额。";
+    return " 【MiniMax 检测】你的密钥是 Token Plan 订阅密钥（sk-cp- 开头），它只能走 Anthropic Messages 协议——在 Atlas「API」页把接口协议切到 Claude（Anthropic），端点填 https://api.minimaxi.com/anthropic（国际站用 https://api.minimax.io/anthropic）；如需 OpenAI 兼容调用，请改用按量付费密钥（sk-api- 开头）并确保账户有余额。";
   }
-  return " 【MiniMax 检测】① 国内站（minimaxi.com / minimax.chat）与国际站（minimax.io）密钥不通用，请确认密钥归属的平台与 API 地址一致；② 订阅密钥（sk-cp- 开头）只能走 Anthropic 兼容路由（…/anthropic），按量付费密钥（sk-api- 开头）才能用 /v1/chat/completions 且账户需有余额；③ 到控制台「模型列表」核对 MiniMax-M3 是否为该账号可调用名称。";
+  return " 【MiniMax 检测】① 国内站（minimaxi.com / minimax.chat）与国际站（minimax.io）密钥不通用，请确认密钥归属的平台与 API 地址一致；② 订阅密钥（sk-cp- 开头）只能走 Anthropic Messages 协议（Atlas「API」页把接口协议切到 Claude（Anthropic），端点填 …/anthropic），按量付费密钥（sk-api- 开头）才能用 /v1/chat/completions 且账户需有余额；③ 到控制台「模型列表」核对 MiniMax-M3 是否为该账号可调用名称。";
 }
 
 /** 从 SSE 文本里取第一个可解析的 data: 载荷（网关强制流式化时的兜底）。 */

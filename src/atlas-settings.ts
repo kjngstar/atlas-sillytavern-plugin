@@ -53,6 +53,8 @@ export interface AtlasApiConnectionPreset {
   maxTokens: number;
   temperature: number;
   timeoutMs: number;
+  /** 接口协议（0.9.10，shujuku 同款）：openai = /chat/completions；claude = Anthropic Messages（MiniMax 订阅密钥 / Claude 代理）。缺省 openai。 */
+  apiFormat?: "openai" | "claude";
   updatedAt: number;
 }
 
@@ -109,6 +111,7 @@ export type AtlasSettingsCommand =
         maxTokens: number;
         temperature: number;
         timeoutMs: number;
+        apiFormat?: "openai" | "claude";
       };
       apiKeyMode: "keep" | "replace" | "clear";
       apiKey?: string;
@@ -241,6 +244,7 @@ function parseConnectionPreset(raw: unknown): Omit<AtlasApiConnectionPreset, "id
     maxTokens: record.maxTokens,
     temperature: record.temperature,
     timeoutMs: record.timeoutMs,
+    ...(record.apiFormat === "claude" ? { apiFormat: "claude" as const } : {}),
   };
 }
 
@@ -521,6 +525,7 @@ export function applySettingsCommand(
         maxTokens: preset.maxTokens,
         temperature: preset.temperature,
         timeoutMs: preset.timeoutMs,
+        ...(preset.apiFormat === "claude" ? { apiFormat: "claude" as const } : {}),
         updatedAt: now,
       };
       const apiPresets = existingIndex >= 0
@@ -750,6 +755,7 @@ export interface AtlasSettingsView {
     maxTokens: number;
     temperature: number;
     timeoutMs: number;
+    apiFormat: "openai" | "claude";
     apiKey: { exists: boolean; tail: string | null };
   }>;
   promptPresets: AtlasPromptPreset[];
@@ -780,6 +786,7 @@ export function settingsViewV2(settings: AtlasServerSettingsV2): AtlasSettingsVi
         maxTokens: p.maxTokens,
         temperature: p.temperature,
         timeoutMs: p.timeoutMs,
+        apiFormat: p.apiFormat === "claude" ? "claude" : "openai",
         apiKey: { exists: key.trim().length > 0, tail: key.trim().length >= 4 ? key.trim().slice(-4) : null },
       };
     }),
@@ -814,6 +821,7 @@ export function resolveWorldTurnPreset(settings: AtlasServerSettingsV2): AtlasAp
     maxTokens: connection.maxTokens,
     temperature: connection.temperature,
     timeoutMs: connection.timeoutMs,
+    ...(connection.apiFormat === "claude" ? { apiFormat: "claude" as const } : {}),
     ...(prompt ? { systemPrompt: prompt.systemPrompt } : {}),
   };
 }

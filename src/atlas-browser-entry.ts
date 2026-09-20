@@ -53,6 +53,7 @@ export {
 export {
   createStProxyFetch,
   atlasCustomIncludeHeaders,
+  normalizeAtlasClaudeBase,
   ATLAS_ST_GENERATE_PATH,
 } from "./atlas-proxy-fetch.ts";
 

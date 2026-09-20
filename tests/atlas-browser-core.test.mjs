@@ -21,7 +21,7 @@ import assert from "node:assert/strict";
 
 import { createBrowserDocumentStore, ATLAS_BROWSER_DOC_LIMITS } from "../src/atlas-browser-store.ts";
 import { createLocalAtlasApi } from "../src/atlas-local-api.ts";
-import { createStProxyFetch, atlasCustomIncludeHeaders, ATLAS_ST_GENERATE_PATH } from "../src/atlas-proxy-fetch.ts";
+import { createStProxyFetch, atlasCustomIncludeHeaders, normalizeAtlasClaudeBase, ATLAS_ST_GENERATE_PATH } from "../src/atlas-proxy-fetch.ts";
 import { createAtlasServerCore, createMemoryDocumentStore } from "../src/atlas-server.ts";
 import { ATLAS_ERROR_CODES } from "../src/atlas-contract.ts";
 import { callAtlasWorldTurnApi } from "../src/atlas-api-client.ts";
@@ -459,4 +459,89 @@ test("callAtlasWorldTurnApi：MiniMax 端点 Not Found → 附加 MiniMax 专项
     { fetchFn: async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ error: { message: "Insufficient Balance" }, quota_error: true }) }) },
   );
   assert.ok(!otherErr.message.includes("【MiniMax 检测】"), "非 Not Found 不应附加专项提示");
+});
+
+
+test("normalizeAtlasClaudeBase：shujuku 同款 claude 基址归一化", () => {
+  // MiniMax 订阅密钥的实际用法：/anthropic → /anthropic/v1
+  assert.equal(normalizeAtlasClaudeBase("https://api.minimaxi.com/anthropic"), "https://api.minimaxi.com/anthropic/v1");
+  assert.equal(normalizeAtlasClaudeBase("https://api.minimax.io/anthropic"), "https://api.minimax.io/anthropic/v1");
+  // 已含 /v1 不重复补
+  assert.equal(normalizeAtlasClaudeBase("https://api.anthropic.com/v1"), "https://api.anthropic.com/v1");
+  // 引擎经 buildAtlasChatUrl 拼上的 /chat/completions 会被剥掉
+  assert.equal(normalizeAtlasClaudeBase("https://api.minimaxi.com/anthropic/chat/completions"), "https://api.minimaxi.com/anthropic/v1");
+  assert.equal(normalizeAtlasClaudeBase("https://api.anthropic.com/v1/messages"), "https://api.anthropic.com/v1");
+  // 裸域名 / 尾斜杠 / v1beta
+  assert.equal(normalizeAtlasClaudeBase("https://api.anthropic.com"), "https://api.anthropic.com/v1");
+  assert.equal(normalizeAtlasClaudeBase("https://api.minimaxi.com/anthropic/"), "https://api.minimaxi.com/anthropic/v1");
+  assert.equal(normalizeAtlasClaudeBase("https://gw.example.com/v1beta"), "https://gw.example.com/v1");
+  // 用户自建子路径视为有意为之，只补 /v1
+  assert.equal(normalizeAtlasClaudeBase("https://gw.example.com/claude"), "https://gw.example.com/claude/v1");
+  // 空值与非法输入
+  assert.equal(normalizeAtlasClaudeBase(""), "");
+  assert.equal(normalizeAtlasClaudeBase(null), "");
+  assert.equal(normalizeAtlasClaudeBase("not-a-url"), "not-a-url");
+});
+
+test("createStProxyFetch：X-Atlas-Api-Format: claude → claude 源映射（reverse_proxy + proxy_password）", async () => {
+  const captured = [];
+  const fakeFetch = async (input, init) => {
+    captured.push({ input: typeof input === "string" ? input : input.toString(), init });
+    return { ok: true, status: 200, text: async () => JSON.stringify({ choices: [{ message: { content: "ok" } }] }) };
+  };
+  const proxied = createStProxyFetch({ getContext: () => ({ getRequestHeaders: () => ({ "X-CSRF": "t" }) }), fetchFn: fakeFetch });
+  // 引擎对 claude 端点也会先 buildAtlasChatUrl 拼上 /chat/completions，代理层负责剥掉
+  await proxied("https://api.minimaxi.com/anthropic/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: "Bearer sk-cp-abc", "X-Atlas-Api-Format": "claude" },
+    body: JSON.stringify({ model: "MiniMax-M3", messages: [{ role: "user", content: "hi" }], stream: false }),
+  });
+  assert.equal(captured.length, 1);
+  assert.equal(captured[0].input, ATLAS_ST_GENERATE_PATH);
+  const body = JSON.parse(captured[0].init.body);
+  assert.equal(body.chat_completion_source, "claude");
+  assert.equal(body.reverse_proxy, "https://api.minimaxi.com/anthropic/v1");
+  assert.equal(body.proxy_password, "sk-cp-abc", "claude 源 proxy_password 收裸密钥（无 Bearer 前缀）");
+  assert.equal(body.custom_url, "https://api.minimaxi.com/anthropic/chat/completions");
+  assert.equal(body.model, "MiniMax-M3");
+});
+
+test("createStProxyFetch：无协议头 → 维持 custom 源（不含 reverse_proxy / proxy_password）", async () => {
+  const captured = [];
+  const fakeFetch = async (input, init) => {
+    captured.push({ init });
+    return { ok: true, status: 200, text: async () => JSON.stringify({ choices: [{ message: { content: "ok" } }] }) };
+  };
+  const proxied = createStProxyFetch({ getContext: () => ({ getRequestHeaders: () => ({}) }), fetchFn: fakeFetch });
+  await proxied("https://api.example.com/v1/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: "Bearer sk-api-xyz" },
+    body: JSON.stringify({ model: "m1", messages: [{ role: "user", content: "hi" }], stream: false }),
+  });
+  const body = JSON.parse(captured[0].init.body);
+  assert.equal(body.chat_completion_source, "custom");
+  assert.equal(body.reverse_proxy, undefined);
+  assert.equal(body.proxy_password, undefined);
+  assert.equal(body.custom_include_headers, "Authorization: Bearer sk-api-xyz");
+});
+
+test("callAtlasWorldTurnApi：apiFormat claude → 请求带 X-Atlas-Api-Format 头；openai 不带", async () => {
+  const seen = [];
+  const fetchOk = async (input, init) => {
+    seen.push(init?.headers ?? {});
+    return { ok: true, status: 200, text: async () => JSON.stringify({ choices: [{ message: { content: "ok" } }] }) };
+  };
+  const base = { injectionText: "c", userText: "u", assistantText: "a" };
+  await callAtlasWorldTurnApi(
+    { name: "t", endpoint: "https://api.minimaxi.com/anthropic", model: "MiniMax-M3", apiKey: "sk-cp-abc", apiFormat: "claude" },
+    base,
+    { fetchFn: fetchOk },
+  );
+  assert.equal(seen[0]["X-Atlas-Api-Format"], "claude");
+  await callAtlasWorldTurnApi(
+    { name: "t", endpoint: "https://api.example.com/v1", model: "m1", apiKey: "k" },
+    base,
+    { fetchFn: fetchOk },
+  );
+  assert.equal(seen[1]["X-Atlas-Api-Format"], undefined);
 });
