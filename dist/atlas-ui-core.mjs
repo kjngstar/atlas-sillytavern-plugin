@@ -770,9 +770,10 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
     if (text === null || text.trim().length === 0) {
       const gatewayError = gatewayErrorMessage(payload);
       if (gatewayError) {
+        const minimaxHint = minimaxNotFoundHint(url, gatewayError, preset.apiKey);
         return fail4(
           ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
-          `推演服务返回错误：${gatewayError}（HTTP 200，但响应体是错误 JSON）——通常是模型名在网关上不存在 / 无可用渠道，或端点路径不完整（一般应为 http(s)://地址/v1，Atlas 会自动补 /chat/completions）。请到「日志」页核对实际发送的目标与模型名。`,
+          `推演服务返回错误：${gatewayError}（HTTP 200，但响应体是错误 JSON）——通常是模型名在网关上不存在 / 无可用渠道，或端点路径不完整（一般应为 http(s)://地址/v1，Atlas 会自动补 /chat/completions）。请到「日志」页核对实际发送的目标与模型名。${minimaxHint}`,
           false
         );
       }
@@ -797,6 +798,15 @@ function gatewayErrorMessage(payload) {
     if (typeof message === "string" && message.trim()) return message.slice(0, 120);
   }
   return null;
+}
+function minimaxNotFoundHint(url, gatewayError, apiKey) {
+  if (!/Not Found/i.test(gatewayError)) return "";
+  if (!/minimax/i.test(url)) return "";
+  const isSubscriptionKey = /^sk-cp-/i.test(apiKey.trim());
+  if (isSubscriptionKey) {
+    return " 【MiniMax 检测】你的密钥是 Token Plan 订阅密钥（sk-cp- 开头），它只能走 Anthropic 兼容路由（把 API 地址换成 https://api.minimaxi.com/anthropic 或 https://api.minimax.io/anthropic，并在酒馆里选 Claude/Anthropic 源），不能用于 /v1/chat/completions；如需 OpenAI 兼容调用，请改用按量付费密钥（sk-api- 开头）并确保账户有余额。";
+  }
+  return " 【MiniMax 检测】① 国内站（minimaxi.com / minimax.chat）与国际站（minimax.io）密钥不通用，请确认密钥归属的平台与 API 地址一致；② 订阅密钥（sk-cp- 开头）只能走 Anthropic 兼容路由（…/anthropic），按量付费密钥（sk-api- 开头）才能用 /v1/chat/completions 且账户需有余额；③ 到控制台「模型列表」核对 MiniMax-M3 是否为该账号可调用名称。";
 }
 function firstSsePayload(raw) {
   if (!raw.includes("data:")) return null;

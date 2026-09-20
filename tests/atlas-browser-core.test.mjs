@@ -421,3 +421,42 @@ test("callAtlasWorldTurnApi：网关 200 包错误 JSON → 报错带网关 mess
   assert.ok(result.message.includes("Not Found"), "报错应含网关错误文本");
   assert.ok(result.message.includes("模型名"), "报错应含模型名指引");
 });
+
+test("callAtlasWorldTurnApi：MiniMax 端点 Not Found → 附加 MiniMax 专项提示（sk-cp 订阅密钥指 Anthropic 路由）", async () => {
+  const base = { injectionText: "c", userText: "u", assistantText: "a" };
+  const notFound = JSON.stringify({ error: { message: "Not Found" }, quota_error: false });
+  const fetchOk = async () => ({ ok: true, status: 200, text: async () => notFound });
+
+  // 订阅密钥：提示走 Anthropic 路由
+  const sub = await callAtlasWorldTurnApi(
+    { name: "t", endpoint: "https://api.minimaxi.com/v1", model: "MiniMax-M3", apiKey: "sk-cp-abc" },
+    base,
+    { fetchFn: fetchOk },
+  );
+  assert.ok(sub.message.includes("【MiniMax 检测】"), "MiniMax 端点应附加专项提示");
+  assert.ok(sub.message.includes("anthropic"), "订阅密钥应指向 Anthropic 兼容路由");
+
+  // 非订阅密钥：提示平台归属与余额
+  const payg = await callAtlasWorldTurnApi(
+    { name: "t", endpoint: "https://api.minimaxi.com/v1", model: "MiniMax-M3", apiKey: "sk-api-xyz" },
+    base,
+    { fetchFn: fetchOk },
+  );
+  assert.ok(payg.message.includes("密钥不通用"), "应提示国内/国际站密钥不通用");
+
+  // 非 MiniMax 端点：不附加提示
+  const other = await callAtlasWorldTurnApi(
+    { name: "t", endpoint: "https://api.example.com/v1", model: "m1", apiKey: "sk-cp-abc" },
+    base,
+    { fetchFn: fetchOk },
+  );
+  assert.ok(!other.message.includes("【MiniMax 检测】"), "非 MiniMax 端点不应附加专项提示");
+
+  // 非 Not Found 网关错误：不附加提示
+  const otherErr = await callAtlasWorldTurnApi(
+    { name: "t", endpoint: "https://api.minimaxi.com/v1", model: "MiniMax-M3", apiKey: "sk-cp-abc" },
+    base,
+    { fetchFn: async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ error: { message: "Insufficient Balance" }, quota_error: true }) }) },
+  );
+  assert.ok(!otherErr.message.includes("【MiniMax 检测】"), "非 Not Found 不应附加专项提示");
+});
