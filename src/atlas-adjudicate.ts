@@ -112,11 +112,23 @@ export function adjudicateAtlasDraft(
 
   // 2) 实体白名单：引用未知实体的 effect / 记忆整条丢弃
   //    （无 entityId 的形状（如 setFlag）与解析失败项仍交给 commit 的 parseStateEffect 严格拒绝）
+  //    0.9.29：moveEntity 的目的地同样算法裁定——未知地点 / 未知地区整条丢弃（同 locationChange 口径）
   const known = knownEntityIds(world);
   const beforeEffects = rawEffects.length;
   next.rawEffects = rawEffects.filter((raw) => {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) return true;
-    const entityId = (raw as { entityId?: unknown }).entityId;
+    const record = raw as { entityId?: unknown; kind?: unknown; pointId?: unknown; regionId?: unknown };
+    if (record.kind === "moveEntity") {
+      const pointId = typeof record.pointId === "string" ? record.pointId.trim() : "";
+      const regionId = typeof record.regionId === "string" ? record.regionId.trim() : "";
+      const pointKnown = !pointId || (world.points ?? []).some((p) => String(p.id) === String(pointId));
+      const regionKnown = !regionId || (world.regions ?? []).some((r) => String(r.id) === String(regionId));
+      if (!pointKnown || !regionKnown) {
+        notes.push(`〔裁定〕忽略引用未知${!pointKnown ? "地点" : "地区"}的人物移动`);
+        return false;
+      }
+    }
+    const entityId = record.entityId;
     if (typeof entityId !== "string" || entityId.trim() === "") return true;
     return known.has(entityId.trim());
   });

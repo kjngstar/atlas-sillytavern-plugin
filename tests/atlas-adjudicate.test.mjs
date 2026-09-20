@@ -116,3 +116,23 @@ test("裁决：确定性——同输入两次裁决逐字节一致", () => {
   assert.deepEqual(a.draft, b.draft, "草稿一致");
   assert.deepEqual(a.notes, b.notes, "说明一致");
 });
+
+test("0.9.29 裁决：moveEntity 未知地点 / 地区整条丢弃，已知地点保留（NPC 动向口径同 locationChange）", () => {
+  const world = fixtureWorld();
+  const result = adjudicateAtlasDraft(world, {
+    branchId: null,
+    currentPointId: "1",
+    draft: draft({
+      rawEffects: [
+        { kind: "moveEntity", entityId: "char-main", pointId: "9999" },
+        { kind: "moveEntity", entityId: "char-main", pointId: "2" },
+        { kind: "moveEntity", entityId: "char-main", regionId: "no-such-region" },
+        { kind: "setFlag", key: "storm-passed" },
+      ],
+    }),
+  });
+  assert.equal(result.draft.rawEffects.length, 2, "两条非法移动被丢弃，已知移动 + setFlag 保留");
+  assert.ok(result.draft.rawEffects.some((e) => e.kind === "moveEntity" && e.pointId === "2"), "已知地点移动保留");
+  assert.equal(result.notes.filter((n) => n.includes("未知地点")).length, 1, "未知地点裁定说明");
+  assert.equal(result.notes.filter((n) => n.includes("未知地区")).length, 1, "未知地区裁定说明");
+});

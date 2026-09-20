@@ -866,6 +866,38 @@ test("替换规则：无 think 的普通输出不受影响；嵌套词对整体�
   assert.equal(nested, "AE", "栈式配对：嵌套段整体删除");
 });
 
+test("0.9.29 动向扩展：npcChanges 支持 moveEntity / setFlag 映射（白名单二次校验仍把关）", () => {
+  const text = JSON.stringify({
+    duration: 2,
+    locationChange: null,
+    npcChanges: [
+      { entityId: "npc-1", toPointId: "point-9", toRegionId: "region-3" },
+      { entityId: "npc-2", pointId: "point-7" },
+      { flag: "storm-passed", value: "yes" },
+      { flag: "curse-lifted" },
+      { entityId: "npc-3", key: "mood", value: "放松" },
+      { entityId: "npc-4", tag: "负伤" },
+      { entityId: "npc-5", targetEntityId: "npc-6", key: "trust", value: 3 },
+    ],
+    memoryDrafts: [],
+    summary: "林拾移步远镇；商会风_flag。",
+  });
+  const draft = parseAtlasWorldTurnDraft(text);
+  assert.deepEqual(
+    draft.rawEffects,
+    [
+      { kind: "moveEntity", entityId: "npc-1", pointId: "point-9", regionId: "region-3" },
+      { kind: "moveEntity", entityId: "npc-2", pointId: "point-7" },
+      { kind: "setFlag", key: "storm-passed", value: "yes" },
+      { kind: "setFlag", key: "curse-lifted" },
+      { kind: "setTemporalField", entityId: "npc-3", key: "mood", value: "放松" },
+      { kind: "addTag", entityId: "npc-4", tag: "负伤" },
+      { kind: "adjustRelation", entityId: "npc-5", targetEntityId: "npc-6", key: "trust", value: 3 },
+    ],
+    "七种形状全部映射到白名单 effect",
+  );
+});
+
 // ---------------------------------------------------------------------------
 // 0.9.18 分段提示词：promptSegments 逐段装配 + 占位符替换；全非法回退旧两条
 // ---------------------------------------------------------------------------

@@ -106,13 +106,17 @@ export const DEFAULT_PROMPT_SEGMENTS: Array<{ role: string; name: string; mainSl
       "严格要求：只输出一个 JSON 对象，不要输出任何多余说明、推理过程或代码围栏。字段契约：\n" +
       "duration（本轮消耗的时段数，非负数字，≤10000）、\n" +
       "locationChange（对象或 null：{toPointId, toRegionId}，id 必须来自上下文中出现的地点）、\n" +
-      "npcChanges（数组，每条形如 {entityId, key, value} 更新人物状态 / {entityId, tag} 加标签 / " +
-      "{entityId, removeTag} 删标签 / {entityId, targetEntityId, key, value} 改关系；entityId 必须来自上下文）、\n" +
+      "npcChanges（数组，积极挖掘本轮动向，形状：{entityId, key, value} 更新人物状态 / " +
+      "{entityId, toPointId} 人物移动到上下文中出现的地点 / {entityId, toRegionId} 移动到已知地区 / " +
+      "{entityId, tag} 加标签 / {entityId, removeTag} 删标签 / {flag, value} 记录世界标记（里程碑、禁忌、传言等）/ " +
+      "{entityId, targetEntityId, key, value} 改关系；entityId 必须来自上下文）、\n" +
       "memoryDrafts（数组，每条 {entityId, text}，为人物追加一条记忆，≤500 字）、\n" +
       "eventDrafts（数组，事件摘要文字，仅叙述用）、\n" +
       "triggerResults（数组，本轮命中的触发器 id）、\n" +
       "summary（本轮世界变化的一句话摘要，≤500 字）。\n" +
-      "禁止：编造上下文之外的实体 id；输出时间地点之外的世界重写；输出任何密钥、路径或代码。\n" +
+      "推断姿态：主动而非保守——只要剧情暗示了人物去了别处、态度与关系起了变化、状态被事件改变、出现了值得铭记或标记的事，就输出对应变化；" +
+      "只在整轮确实平静无事时才输出空数组。\n" +
+      "禁止：编造上下文之外的实体 id 或地点 id；输出时间地点之外的世界重写；输出任何密钥、路径或代码。\n" +
       "若本轮确无任何人物 / 关系 / 记忆变化，npcChanges 与 memoryDrafts 输出空数组，duration 与 locationChange 仍须如实填写，不要为凑数编造变化。",
   },
   {
@@ -659,26 +663,57 @@ function toLocationChange(value: unknown): AtlasWorldChangeDraft["locationChange
   return { toPointId, toRegionId };
 }
 
-/** npcChanges 的白名单映射（映射后仍会经共享 parseStateEffect 二次校验）。 */
+/**
+ * npcChanges 的白名单映射（0.9.29 扩动向：moveEntity / setFlag；映射后仍经共享 parseStateEffect 二次校验）。
+ * 支持形状（按优先级）：
+ * - {entityId, targetEntityId, key, value}        → adjustRelation（有 targetEntityId 优先判定）
+ * - {entityId, key, value}                        → setTemporalField（人物状态）
+ * - {entityId, toPointId|pointId|toRegionId}      → moveEntity（人物移动到已知地点 / 地区）
+ * - {entityId, tag}                               → addTag
+ * - {entityId, removeTag}                         → removeTag
+ * - {flag, value?}                                → setFlag（世界标记，无 entityId）
+ */
 function npcChangeToEffect(raw: unknown): Record<string, unknown> | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const record = raw as Record<string, unknown>;
   const entityId = typeof record.entityId === "string" ? record.entityId.trim() : "";
-  if (!entityId || entityId.length > ATLAS_LIMITS.ID_CHARS) return null;
-  if (typeof record.key === "string" && record.key.trim() && "value" in record) {
-    return { kind: "setTemporalField", entityId, key: record.key.trim(), value: record.value };
-  }
-  if (typeof record.tag === "string" && record.tag.trim()) {
-    return { kind: "addTag", entityId, tag: record.tag.trim() };
-  }
-  if (typeof record.removeTag === "string" && record.removeTag.trim()) {
-    return { kind: "removeTag", entityId, tag: record.removeTag.trim() };
-  }
+  const entityIdOk = entityId !== "" && entityId.length <= ATLAS_LIMITS.ID_CHARS;
+  // adjustRelation 优先于 setTemporalField：两者都有 key/value，靠 targetEntityId 区分
   if (
+    entityIdOk &&
     typeof record.targetEntityId === "string" && record.targetEntityId.trim() &&
     typeof record.key === "string" && record.key.trim() && "value" in record
   ) {
     return { kind: "adjustRelation", entityId, targetEntityId: record.targetEntityId.trim(), key: record.key.trim(), value: record.value };
+  }
+  if (typeof record.key === "string" && record.key.trim() && "value" in record && entityIdOk) {
+    return { kind: "setTemporalField", entityId, key: record.key.trim(), value: record.value };
+  }
+  if (entityIdOk) {
+    const toPointId = typeof (record.toPointId ?? record.pointId) === "string"
+      ? String(record.toPointId ?? record.pointId).trim()
+      : "";
+    const toRegionId = typeof (record.toRegionId ?? record.regionId) === "string"
+      ? String(record.toRegionId ?? record.regionId).trim()
+      : "";
+    if (toPointId || toRegionId) {
+      return {
+        kind: "moveEntity",
+        entityId,
+        ...(toPointId ? { pointId: toPointId } : {}),
+        ...(toRegionId ? { regionId: toRegionId } : {}),
+      };
+    }
+  }
+  if (typeof record.tag === "string" && record.tag.trim() && entityIdOk) {
+    return { kind: "addTag", entityId, tag: record.tag.trim() };
+  }
+  if (typeof record.removeTag === "string" && record.removeTag.trim() && entityIdOk) {
+    return { kind: "removeTag", entityId, tag: record.removeTag.trim() };
+  }
+  if (typeof record.flag === "string" && record.flag.trim()) {
+    const flagValue = typeof record.value === "string" && record.value.trim() ? record.value.trim() : undefined;
+    return { kind: "setFlag", key: record.flag.trim(), ...(flagValue ? { value: flagValue } : {}) };
   }
   return null;
 }

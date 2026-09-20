@@ -380,6 +380,29 @@ test("commit：仅位置移动零 effect 草稿 → 位置游标随回执推进"
   equal(output.world, world, "引用相等：零写入");
 });
 
+test("commit：moveEntity / setFlag effect 走账本采用（0.9.29 动向扩展端到端）", () => {
+  const world = buildFixture();
+  const output = commitAtlasTurn(world, commitInput(world, {
+    draft: {
+      duration: 1,
+      locationChange: null,
+      rawEffects: [
+        { kind: "moveEntity", entityId: "entity-npc", pointId: "4104" },
+        { kind: "setFlag", key: "merchant-arrived", value: "yes" },
+      ],
+      memoryDrafts: [],
+      summary: "旅行者移步潮门；商会抵达成标记。",
+    },
+  }));
+  equal(output.receipt.status, "committed", "NPC 移动 + 世界标记落账成功");
+  equal(output.receipt.adoptedEventIds.length, 1, "恰好一条账本事件");
+  const event = output.world.stateEvents.at(-1);
+  equal(event.effects.length, 2, "两条 effect 原样入库");
+  ok(event.effects.some((e) => e.kind === "moveEntity" && String(e.pointId) === "4104"), "moveEntity 入库");
+  ok(event.effects.some((e) => e.kind === "setFlag"), "setFlag 入库");
+  ok(parseWorld(JSON.parse(JSON.stringify(output.world))) !== null, "提交后世界可解析往返");
+});
+
 test("commit：IF 分支事件不泄漏进正史账本", () => {
   const world = buildFixture();
   const canonBefore = ledgerForBranch(world, null).length;

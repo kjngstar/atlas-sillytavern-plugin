@@ -697,7 +697,7 @@ var DEFAULT_PROMPT_SEGMENTS = [
     role: "system",
     name: "主系统提示词（推演引擎职责）",
     mainSlot: "A",
-    content: "你是阿特拉斯世界推演引擎。你收到一份本轮的剧情素材（世界状态、前文、用户行动、助手回复），你的唯一职责：推断本轮对世界造成的**有界结构化变化**——谁出现在哪里、人物状态与关系如何变化、势力格局有无变动、时间推进多少。\n严格要求：只输出一个 JSON 对象，不要输出任何多余说明、推理过程或代码围栏。字段契约：\nduration（本轮消耗的时段数，非负数字，≤10000）、\nlocationChange（对象或 null：{toPointId, toRegionId}，id 必须来自上下文中出现的地点）、\nnpcChanges（数组，每条形如 {entityId, key, value} 更新人物状态 / {entityId, tag} 加标签 / {entityId, removeTag} 删标签 / {entityId, targetEntityId, key, value} 改关系；entityId 必须来自上下文）、\nmemoryDrafts（数组，每条 {entityId, text}，为人物追加一条记忆，≤500 字）、\neventDrafts（数组，事件摘要文字，仅叙述用）、\ntriggerResults（数组，本轮命中的触发器 id）、\nsummary（本轮世界变化的一句话摘要，≤500 字）。\n禁止：编造上下文之外的实体 id；输出时间地点之外的世界重写；输出任何密钥、路径或代码。\n若本轮确无任何人物 / 关系 / 记忆变化，npcChanges 与 memoryDrafts 输出空数组，duration 与 locationChange 仍须如实填写，不要为凑数编造变化。"
+    content: "你是阿特拉斯世界推演引擎。你收到一份本轮的剧情素材（世界状态、前文、用户行动、助手回复），你的唯一职责：推断本轮对世界造成的**有界结构化变化**——谁出现在哪里、人物状态与关系如何变化、势力格局有无变动、时间推进多少。\n严格要求：只输出一个 JSON 对象，不要输出任何多余说明、推理过程或代码围栏。字段契约：\nduration（本轮消耗的时段数，非负数字，≤10000）、\nlocationChange（对象或 null：{toPointId, toRegionId}，id 必须来自上下文中出现的地点）、\nnpcChanges（数组，积极挖掘本轮动向，形状：{entityId, key, value} 更新人物状态 / {entityId, toPointId} 人物移动到上下文中出现的地点 / {entityId, toRegionId} 移动到已知地区 / {entityId, tag} 加标签 / {entityId, removeTag} 删标签 / {flag, value} 记录世界标记（里程碑、禁忌、传言等）/ {entityId, targetEntityId, key, value} 改关系；entityId 必须来自上下文）、\nmemoryDrafts（数组，每条 {entityId, text}，为人物追加一条记忆，≤500 字）、\neventDrafts（数组，事件摘要文字，仅叙述用）、\ntriggerResults（数组，本轮命中的触发器 id）、\nsummary（本轮世界变化的一句话摘要，≤500 字）。\n推断姿态：主动而非保守——只要剧情暗示了人物去了别处、态度与关系起了变化、状态被事件改变、出现了值得铭记或标记的事，就输出对应变化；只在整轮确实平静无事时才输出空数组。\n禁止：编造上下文之外的实体 id 或地点 id；输出时间地点之外的世界重写；输出任何密钥、路径或代码。\n若本轮确无任何人物 / 关系 / 记忆变化，npcChanges 与 memoryDrafts 输出空数组，duration 与 locationChange 仍须如实填写，不要为凑数编造变化。"
   },
   {
     role: "user",
@@ -1084,18 +1084,34 @@ function npcChangeToEffect(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const record = raw;
   const entityId = typeof record.entityId === "string" ? record.entityId.trim() : "";
-  if (!entityId || entityId.length > ATLAS_LIMITS.ID_CHARS) return null;
-  if (typeof record.key === "string" && record.key.trim() && "value" in record) {
+  const entityIdOk = entityId !== "" && entityId.length <= ATLAS_LIMITS.ID_CHARS;
+  if (entityIdOk && typeof record.targetEntityId === "string" && record.targetEntityId.trim() && typeof record.key === "string" && record.key.trim() && "value" in record) {
+    return { kind: "adjustRelation", entityId, targetEntityId: record.targetEntityId.trim(), key: record.key.trim(), value: record.value };
+  }
+  if (typeof record.key === "string" && record.key.trim() && "value" in record && entityIdOk) {
     return { kind: "setTemporalField", entityId, key: record.key.trim(), value: record.value };
   }
-  if (typeof record.tag === "string" && record.tag.trim()) {
+  if (entityIdOk) {
+    const toPointId = typeof (record.toPointId ?? record.pointId) === "string" ? String(record.toPointId ?? record.pointId).trim() : "";
+    const toRegionId = typeof (record.toRegionId ?? record.regionId) === "string" ? String(record.toRegionId ?? record.regionId).trim() : "";
+    if (toPointId || toRegionId) {
+      return {
+        kind: "moveEntity",
+        entityId,
+        ...toPointId ? { pointId: toPointId } : {},
+        ...toRegionId ? { regionId: toRegionId } : {}
+      };
+    }
+  }
+  if (typeof record.tag === "string" && record.tag.trim() && entityIdOk) {
     return { kind: "addTag", entityId, tag: record.tag.trim() };
   }
-  if (typeof record.removeTag === "string" && record.removeTag.trim()) {
+  if (typeof record.removeTag === "string" && record.removeTag.trim() && entityIdOk) {
     return { kind: "removeTag", entityId, tag: record.removeTag.trim() };
   }
-  if (typeof record.targetEntityId === "string" && record.targetEntityId.trim() && typeof record.key === "string" && record.key.trim() && "value" in record) {
-    return { kind: "adjustRelation", entityId, targetEntityId: record.targetEntityId.trim(), key: record.key.trim(), value: record.value };
+  if (typeof record.flag === "string" && record.flag.trim()) {
+    const flagValue = typeof record.value === "string" && record.value.trim() ? record.value.trim() : void 0;
+    return { kind: "setFlag", key: record.flag.trim(), ...flagValue ? { value: flagValue } : {} };
   }
   return null;
 }
@@ -4393,7 +4409,18 @@ function adjudicateAtlasDraft(world, input) {
   const beforeEffects = rawEffects.length;
   next.rawEffects = rawEffects.filter((raw) => {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) return true;
-    const entityId = raw.entityId;
+    const record = raw;
+    if (record.kind === "moveEntity") {
+      const pointId = typeof record.pointId === "string" ? record.pointId.trim() : "";
+      const regionId = typeof record.regionId === "string" ? record.regionId.trim() : "";
+      const pointKnown = !pointId || (world.points ?? []).some((p) => String(p.id) === String(pointId));
+      const regionKnown = !regionId || (world.regions ?? []).some((r) => String(r.id) === String(regionId));
+      if (!pointKnown || !regionKnown) {
+        notes.push(`〔裁定〕忽略引用未知${!pointKnown ? "地点" : "地区"}的人物移动`);
+        return false;
+      }
+    }
+    const entityId = record.entityId;
     if (typeof entityId !== "string" || entityId.trim() === "") return true;
     return known.has(entityId.trim());
   });
@@ -7196,7 +7223,7 @@ function createAtlasServerCore(deps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.28",
+      version: "0.9.29",
       protocolVersion: 1,
       time: now()
     });
