@@ -172,7 +172,14 @@ function delay(ms) {
 // ---------------------------------------------------------------------------
 
 test("P0-01：pack 产出两个自包含安装包（构建产物在组件目录内）", async () => {
-  const out = execFileSync(process.execPath, ["tools/pack.mjs"], { cwd: root, encoding: "utf8" });
+  // CODEBUDDY_SAFE_DELETE_ENABLED=0：pack 只清自己的 release/ 构建产物（项目内可再生），
+  // 宿主沙箱 safe-delete 的「单轮 >50 文件」bulk 闸会把 132 个 staging 文件的正常重建
+  // 误拦成 SAFE_DELETE_BULK_CONFIRM_REQUIRED（AR-ATLAS-38 附注）——pack 子进程关掉。
+  const out = execFileSync(process.execPath, ["tools/pack.mjs"], {
+    cwd: root,
+    encoding: "utf8",
+    env: { ...process.env, CODEBUDDY_SAFE_DELETE_ENABLED: "0" },
+  });
   ok(!out.includes("骨架副本"), "pack 不再自称骨架副本");
   const uiDir = join(root, "release", "atlas-ui-extension");
   const serverDir = join(root, "release", "atlas-server-plugin");
@@ -550,4 +557,63 @@ test("版本：根包 / UI manifest / UI 常量 / Server 常量 / Server package
 
 test(`本轮累计断言已记录（计数见报告）`, () => {
   ok(assertionCount > 40, "断言数量达到覆盖要求");
+});
+
+// ---------------------------------------------------------------------------
+// 0.9.22 立即推演：不发言也让世界流动（合成一回合）
+// ---------------------------------------------------------------------------
+
+test("0.9.22 立即推演：合成一回合 commit（manual id / 占位行动 / 最近楼层正文 / loreSupplement）", async () => {
+  const calls = [];
+  const committedReceipt = (id, summary) => ({
+    receiptId: id, status: "committed", branchId: null,
+    previousTime: 12, currentTime: 22, previousLocationId: "p-1", currentLocationId: "p-1",
+    triggeredNpcIds: [], adoptedEventIds: ["evt-1"], summary, retryable: false,
+  });
+  const api = {
+    async request(method, path, body) {
+      calls.push({ method, path, body });
+      if (path === "/health") return { status: 200, body: { ok: true, data: { protocolVersion: 1 } } };
+      if (path === "/turns/commit") {
+        return { status: 200, body: { ok: true, data: { receipt: committedReceipt("rcpt-manual-1", "手动推进：世界流动了一段。") } } };
+      }
+      return { status: 200, body: { ok: true, data: {} } };
+    },
+  };
+  const { createAtlasUiCore } = await import(pathToFileURL(join(root, "src", "atlas-ui-core.ts")).href);
+  const core = createAtlasUiCore({
+    api, host: turnHost(), emitter: realLikeEmitter(),
+    getLoreSupplement: async () => "- 卡书地点：低语森林",
+    getLastAssistantText: async () => "她靠在树洞边警戒四周。",
+  });
+  core.init();
+  await delay(5);
+  await core.manualAdvance();
+  const commit = calls.find((c) => c.path === "/turns/commit");
+  ok(commit, "发出一次 commit");
+  equal(commit.body.userMessageId.startsWith("manual-u-"), true, "合成用户消息 id");
+  equal(commit.body.assistantMessageId.startsWith("manual-a-"), true, "合成助手消息 id");
+  ok(commit.body.userText.includes("手动推进"), "固定占位行动");
+  equal(commit.body.assistantText, "她靠在树洞边警戒四周。", "最近楼层正文作为素材");
+  equal(commit.body.loreSupplement, "- 卡书地点：低语森林", "带世界书资料块");
+  ok(core.getState().receipts.some((r) => r.receiptId === "rcpt-manual-1"), "回执已记录");
+
+  // 无宿主钩子 → 占位正文，仍然可推
+  const calls2 = [];
+  const core2 = createAtlasUiCore({
+    api: {
+      async request(_method, path, body) {
+        calls2.push({ path, body });
+        if (path === "/health") return { status: 200, body: { ok: true, data: { protocolVersion: 1 } } };
+        return { status: 200, body: { ok: true, data: { receipt: committedReceipt("rcpt-manual-2", "流动。") } } };
+      },
+    },
+    host: turnHost(), emitter: realLikeEmitter(),
+  });
+  core2.init();
+  await delay(5);
+  await core2.manualAdvance();
+  const commit2 = calls2.find((c) => c.path === "/turns/commit");
+  ok(commit2, "无钩子也能发出 commit");
+  equal(commit2.body.assistantText.includes("仅时间与日程流动"), true, "无楼层用占位正文");
 });

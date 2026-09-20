@@ -20,6 +20,7 @@ import {
   parseAtlasTurnPrepareRequest,
   parseAtlasTurnPrepareResponse,
   parseAtlasTurnReceipt,
+  type AtlasTurnCommitRequest,
   type AtlasTurnPrepareResponse,
   type AtlasTurnReceipt,
 } from "./atlas-contract.ts";
@@ -204,6 +205,8 @@ export interface AtlasUiCore {
   onGenerationEnded(assistantMessageId: string, assistantText: string): Promise<void>;
   onGenerationStopped(): void;
   retryLastCommit(): Promise<void>;
+  /** 0.9.22 立即推演：不发言也让世界流动（推进页按钮；合成一回合）。 */
+  manualAdvance(): Promise<void>;
   /**
    * 等待最近一次 MESSAGE_SENT 触发的 prepare 落定（有界超时）。
    * 真实酒馆的事件监听是 fire-and-forget；生成拦截器在注入前必须调用本方法，
@@ -275,6 +278,11 @@ export function createAtlasUiCore(deps: {
    * 只进推演请求，不进主聊天注入（主聊天由酒馆世界书激活管线负责）。
    */
   getLoreSupplement?: () => Promise<string>;
+  /**
+   * 0.9.22 立即推演（可选）：读最近一条助手楼层正文作为推演素材；
+   * 未注入 / 失败 / 空 → 用占位正文（仅时间与日程流动）。
+   */
+  getLastAssistantText?: () => Promise<string | null>;
 }): AtlasUiCore {
   const { api, host, emitter } = deps;
   const now = deps.now ?? Date.now;
@@ -729,9 +737,17 @@ export function createAtlasUiCore(deps: {
       setState({ pendingTurn: null, rearmTurn: null });
       return;
     }
+    await executeCommitRequest(parsed.value, commitSwipeId);
+  }
+
+  /**
+   * 共享 commit 执行器（正常回合 / 手动立即推演共用）：请求已过契约解析。
+   * committed / duplicate → 记回执 + 刷新；failed / HTTP 错误 → 记可重试信息。
+   */
+  async function executeCommitRequest(value: AtlasTurnCommitRequest, swipeId: string | null): Promise<void> {
     commitInFlight = true;
     try {
-      const result = await api.request("POST", "/turns/commit", parsed.value);
+      const result = await api.request("POST", "/turns/commit", value);
       const body = result.body as { ok?: boolean; data?: { receipt?: unknown }; error?: { message?: string; code?: string } };
       const receiptParsed = body.data?.receipt ? parseAtlasTurnReceipt(body.data.receipt) : null;
       if (result.status === 200 && body.ok && receiptParsed?.ok) {
@@ -749,10 +765,10 @@ export function createAtlasUiCore(deps: {
         pendingTurn: null,
         rearmTurn: null,
         retryableCommit: {
-          chatId: parsed.value.chatId,
-          userMessageId: parsed.value.userMessageId,
-          assistantMessageId: parsed.value.assistantMessageId,
-          swipeId: commitSwipeId,
+          chatId: value.chatId,
+          userMessageId: value.userMessageId,
+          assistantMessageId: value.assistantMessageId,
+          swipeId,
         },
         lastError: body.error?.message ?? `世界推演失败（HTTP ${result.status}），可从「变化」页重试。`,
       });
@@ -761,16 +777,75 @@ export function createAtlasUiCore(deps: {
         pendingTurn: null,
         rearmTurn: null,
         retryableCommit: {
-          chatId: parsed.value.chatId,
-          userMessageId: parsed.value.userMessageId,
-          assistantMessageId: parsed.value.assistantMessageId,
-          swipeId: commitSwipeId,
+          chatId: value.chatId,
+          userMessageId: value.userMessageId,
+          assistantMessageId: value.assistantMessageId,
+          swipeId,
         },
         lastError: "世界推演失败：服务不可用，可从「变化」页重试。",
       });
     } finally {
       commitInFlight = false;
     }
+  }
+
+  /**
+   * 0.9.22 立即推演：不发言也让世界流动。合成一回合——用户行动 = 固定占位
+   * （不新增剧情），助手正文 = 最近楼层正文（宿主钩子提供，缺省用占位）。
+   * 消息 id 用 manual-<ts> 合成，幂等键每次按下都不同 → 每按一次推进一回合。
+   */
+  async function manualAdvance(): Promise<void> {
+    if (disposed || commitInFlight) return;
+    const chatId = state.chatId;
+    const binding = state.binding;
+    if (!chatId || state.serviceStatus !== "online") {
+      setState({ lastError: "引擎未就绪，无法立即推演。" });
+      return;
+    }
+    if (!binding?.enabled) {
+      setState({ lastError: "本聊天推演未启用——先在「推进」页启用再立即推演。" });
+      return;
+    }
+    if (state.pendingTurn) {
+      setState({ lastError: "有回合正在推演，稍后再试。" });
+      return;
+    }
+    let loreSupplement: string | undefined;
+    if (deps.getLoreSupplement) {
+      try {
+        const text = await deps.getLoreSupplement();
+        if (disposed) return;
+        if (typeof text === "string" && text.trim().length > 0) loreSupplement = text;
+      } catch {
+        loreSupplement = undefined;
+      }
+    }
+    const ts = now();
+    let lastAssistant = "";
+    try {
+      const text = await deps.getLastAssistantText?.();
+      if (disposed) return;
+      if (typeof text === "string") lastAssistant = text;
+    } catch {
+      lastAssistant = "";
+    }
+    const request = {
+      turnId: `turn-manual-${ts}`,
+      chatId,
+      userMessageId: `manual-u-${ts}`,
+      assistantMessageId: `manual-a-${ts}`,
+      swipeId: null,
+      userText: "（手动推进：不新增剧情，仅让世界按日程与惯性流动。）",
+      assistantText: (lastAssistant.trim().length > 0 ? lastAssistant : "（无新剧情，仅时间与日程流动。）")
+        .slice(0, ATLAS_LIMITS.ASSISTANT_TEXT_CHARS),
+      ...(loreSupplement ? { loreSupplement } : {}),
+    };
+    const parsed = parseAtlasTurnCommitRequest(request);
+    if (!parsed.ok) {
+      setState({ lastError: "立即推演请求组装失败（契约校验未过）。" });
+      return;
+    }
+    await executeCommitRequest(parsed.value, null);
   }
 
   /** 停止 / 生成失败：放弃 pending，不推进世界。 */
@@ -931,9 +1006,11 @@ export function createAtlasUiCore(deps: {
       host.writePanelOpen(open);
     },
 
+    /** 0.9.22 立即推演：不发言也让世界流动（推进页按钮）。 */
+    manualAdvance,
+
     /** ATLAS-18：概览页「重试初始化」按钮用（未注入 ensureWorld 时安全无操作）。 */
-    async initializeWorld(): Promise<boolean> {
-      if (disposed) return false;
+    async initializeWorld(): Promise<boolean> {      if (disposed) return false;
       if (state.binding) {
         setState({ worldInitialization: "ready", worldInitializationError: null });
         return true;

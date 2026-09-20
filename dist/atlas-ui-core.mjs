@@ -861,6 +861,15 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
     if (text === null || text.length === 0) {
       const gatewayError = parsed.gatewayError;
       if (gatewayError) {
+        const moderationLike = /sensitive|unprocessable|敏感|审核/i.test(gatewayError) || /unprocessable_entity_error|new_sensitive/i.test(parsed.rawText);
+        if (moderationLike) {
+          const snippet2 = parsed.rawText.replace(/\s+/g, " ").trim().slice(0, 200);
+          return fail4(
+            ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
+            `推演被模型服务商内容审核拦截（HTTP 200 包 422 unprocessable / sensitive）——本次推演的输入触发了供应商的敏感内容检测，重试同样会被拦。可选：换模型 / 换供应商，或调整涉及的卡书条目与行动文本。原始错误：${snippet2}`,
+            false
+          );
+        }
         const minimaxHint = minimaxNotFoundHint(url, gatewayError, preset.apiKey);
         return fail4(
           ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
@@ -1634,9 +1643,12 @@ function createAtlasUiCore(deps) {
       setState({ pendingTurn: null, rearmTurn: null });
       return;
     }
+    await executeCommitRequest(parsed.value, commitSwipeId);
+  }
+  async function executeCommitRequest(value, swipeId) {
     commitInFlight = true;
     try {
-      const result = await api.request("POST", "/turns/commit", parsed.value);
+      const result = await api.request("POST", "/turns/commit", value);
       const body = result.body;
       const receiptParsed = body.data?.receipt ? parseAtlasTurnReceipt(body.data.receipt) : null;
       if (result.status === 200 && body.ok && receiptParsed?.ok) {
@@ -1653,10 +1665,10 @@ function createAtlasUiCore(deps) {
         pendingTurn: null,
         rearmTurn: null,
         retryableCommit: {
-          chatId: parsed.value.chatId,
-          userMessageId: parsed.value.userMessageId,
-          assistantMessageId: parsed.value.assistantMessageId,
-          swipeId: commitSwipeId
+          chatId: value.chatId,
+          userMessageId: value.userMessageId,
+          assistantMessageId: value.assistantMessageId,
+          swipeId
         },
         lastError: body.error?.message ?? `世界推演失败（HTTP ${result.status}），可从「变化」页重试。`
       });
@@ -1665,16 +1677,68 @@ function createAtlasUiCore(deps) {
         pendingTurn: null,
         rearmTurn: null,
         retryableCommit: {
-          chatId: parsed.value.chatId,
-          userMessageId: parsed.value.userMessageId,
-          assistantMessageId: parsed.value.assistantMessageId,
-          swipeId: commitSwipeId
+          chatId: value.chatId,
+          userMessageId: value.userMessageId,
+          assistantMessageId: value.assistantMessageId,
+          swipeId
         },
         lastError: "世界推演失败：服务不可用，可从「变化」页重试。"
       });
     } finally {
       commitInFlight = false;
     }
+  }
+  async function manualAdvance() {
+    if (disposed || commitInFlight) return;
+    const chatId = state.chatId;
+    const binding = state.binding;
+    if (!chatId || state.serviceStatus !== "online") {
+      setState({ lastError: "引擎未就绪，无法立即推演。" });
+      return;
+    }
+    if (!binding?.enabled) {
+      setState({ lastError: "本聊天推演未启用——先在「推进」页启用再立即推演。" });
+      return;
+    }
+    if (state.pendingTurn) {
+      setState({ lastError: "有回合正在推演，稍后再试。" });
+      return;
+    }
+    let loreSupplement;
+    if (deps.getLoreSupplement) {
+      try {
+        const text = await deps.getLoreSupplement();
+        if (disposed) return;
+        if (typeof text === "string" && text.trim().length > 0) loreSupplement = text;
+      } catch {
+        loreSupplement = void 0;
+      }
+    }
+    const ts = now();
+    let lastAssistant = "";
+    try {
+      const text = await deps.getLastAssistantText?.();
+      if (disposed) return;
+      if (typeof text === "string") lastAssistant = text;
+    } catch {
+      lastAssistant = "";
+    }
+    const request = {
+      turnId: `turn-manual-${ts}`,
+      chatId,
+      userMessageId: `manual-u-${ts}`,
+      assistantMessageId: `manual-a-${ts}`,
+      swipeId: null,
+      userText: "（手动推进：不新增剧情，仅让世界按日程与惯性流动。）",
+      assistantText: (lastAssistant.trim().length > 0 ? lastAssistant : "（无新剧情，仅时间与日程流动。）").slice(0, ATLAS_LIMITS.ASSISTANT_TEXT_CHARS),
+      ...loreSupplement ? { loreSupplement } : {}
+    };
+    const parsed = parseAtlasTurnCommitRequest(request);
+    if (!parsed.ok) {
+      setState({ lastError: "立即推演请求组装失败（契约校验未过）。" });
+      return;
+    }
+    await executeCommitRequest(parsed.value, null);
   }
   function onGenerationStopped() {
     if (disposed) return;
@@ -1807,6 +1871,8 @@ function createAtlasUiCore(deps) {
       setState({ panelOpen: open });
       host.writePanelOpen(open);
     },
+    /** 0.9.22 立即推演：不发言也让世界流动（推进页按钮）。 */
+    manualAdvance,
     /** ATLAS-18：概览页「重试初始化」按钮用（未注入 ensureWorld 时安全无操作）。 */
     async initializeWorld() {
       if (disposed) return false;
@@ -6780,7 +6846,7 @@ function createAtlasServerCore(deps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.21",
+      version: "0.9.22",
       protocolVersion: 1,
       time: now()
     });

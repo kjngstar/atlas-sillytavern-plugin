@@ -349,6 +349,19 @@ export async function callAtlasWorldTurnApi(
       // 网关「200 包错误 JSON」形状（new-api / one-api 系常见）：{"error":{"message":"..."},"quota_error":false}
       const gatewayError = parsed.gatewayError;
       if (gatewayError) {
+        // 0.9.22 内容审核拦截专项：MiniMax 等供应商对输入做敏感检测（422 unprocessable_entity /
+        // new_sensitive），HTTP 200 包错误 JSON。重试同样被拦，必须换模型 / 供应商或调整文本。
+        const moderationLike =
+          /sensitive|unprocessable|敏感|审核/i.test(gatewayError) ||
+          /unprocessable_entity_error|new_sensitive/i.test(parsed.rawText);
+        if (moderationLike) {
+          const snippet = parsed.rawText.replace(/\s+/g, " ").trim().slice(0, 200);
+          return fail(
+            ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
+            `推演被模型服务商内容审核拦截（HTTP 200 包 422 unprocessable / sensitive）——本次推演的输入触发了供应商的敏感内容检测，重试同样会被拦。可选：换模型 / 换供应商，或调整涉及的卡书条目与行动文本。原始错误：${snippet}`,
+            false,
+          );
+        }
         const minimaxHint = minimaxNotFoundHint(url, gatewayError, preset.apiKey);
         return fail(
           ATLAS_ERROR_CODES.RESPONSE_MALFORMED,

@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.21";
+export const ATLAS_EXTENSION_VERSION = "0.9.22";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -1625,7 +1625,18 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     gotoApi.type = "button";
     gotoApi.setAttribute("aria-label", "前往 API 连接页");
     gotoApi.addEventListener("click", () => core.setPage("api"));
-    runtimeActions.append(toggle, autoCommit, gotoApi);
+    // 0.9.22 立即推演：不发言也让世界流动（合成一回合，消耗一次推演请求）
+    const manualBtn = el("button", "aw-btn", "立即推演");
+    manualBtn.type = "button";
+    manualBtn.setAttribute("aria-label", "立即推演一次（不新增剧情，消耗一次推演请求）");
+    manualBtn.addEventListener("click", () => {
+      const confirmed = typeof window === "undefined" || typeof window.confirm !== "function"
+        ? true
+        : window.confirm("立即推演会消耗一次推演请求（不新增剧情，仅让世界流动），继续？");
+      if (!confirmed) return;
+      void core.manualAdvance();
+    });
+    runtimeActions.append(toggle, autoCommit, manualBtn, gotoApi);
     panel.append(runtimeActions);
     if (statusLine()) panel.append(statusLine());
     panel.append(el("p", "aw-panel__meta", "「推进」只管推进行为与提示词；API 地址、密钥与模型请在「API」页配置。"));
@@ -3358,6 +3369,20 @@ async function connectOnce() {
       ensureWorld: () => ensureStarterWorld(),
       // 0.9.21 世界书资料块：commit 前读当前卡书启用条目（有界），喂给推演 AI
       getLoreSupplement: () => readCardLoreSupplement(),
+      // 0.9.22 立即推演：读最近一条助手楼层正文作为推演素材（无楼层 → null，用占位）
+      getLastAssistantText: async () => {
+        try {
+          const ctx = SillyTavern.getContext();
+          const chat = Array.isArray(ctx?.chat) ? ctx.chat : [];
+          for (let i = chat.length - 1; i >= 0; i--) {
+            const message = chat[i];
+            if (message && message.is_user === false && typeof message.mes === "string" && message.mes.trim()) {
+              return message.mes;
+            }
+          }
+        } catch { /* 无聊天 / 宿主不可用 → null */ }
+        return null;
+      },
 
       onStateChange: () => rerender(),
       ...(lorebookWriter
