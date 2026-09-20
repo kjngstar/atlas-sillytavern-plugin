@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.18";
+export const ATLAS_EXTENSION_VERSION = "0.9.19";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -1751,30 +1751,55 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       : "留空 = 使用内置默认；用户行动、助手回复与世界上下文由系统自动组装，不在这里编辑。启用下方分段模式后本正文不发送。"));
     promptPanel.append(bodyField);
 
-    // 0.9.18 分段模式（shujuku prompt-builder 同款长段多角色预设）：≥1 段时取代上方单条正文
-    const segDetails = document.createElement("details");
-    segDetails.className = "aw-details";
-    const segSummary = document.createElement("summary");
-    segSummary.className = "aw-details__summary";
-    segSummary.textContent = "分段模式（长段多角色预设）";
-    const segBody = el("div", "aw-details__body");
+    // 0.9.19 分段模式（shujuku AcuPromptSegments 同款长段多角色预设）：≥1 段时取代上方单条正文
+    const segSection = el("section", "aw-seg-section");
+    const segHead = el("div", "aw-seg-head");
+    segHead.append(el("span", "aw-seg-head__title", "分段模式（长段多角色预设）"));
+    const segStatus = el("span", "aw-seg-head__status");
+    segHead.append(segStatus);
+    segSection.append(segHead);
     const segRows = el("div", "aw-seg-rows");
-    const syncSegSummary = () => {
+    const syncSegStatus = () => {
       const count = Array.isArray(promptDraft?.segments) ? promptDraft.segments.filter((s) => String(s.content ?? "").trim()).length : 0;
-      segSummary.textContent = `分段模式（长段多角色预设）${count > 0 ? `· 已启用 ${count} 段，发送时忽略上方正文` : "· 未启用"}`;
+      segStatus.textContent = count > 0 ? `已启用 ${count} 段 · 发送时忽略上方正文` : "未启用";
+    };
+    const addSegment = (atTop) => {
+      if (!promptDraft) promptDraft = newPromptDraft();
+      if (!Array.isArray(promptDraft.segments)) promptDraft.segments = [];
+      if (promptDraft.segments.length >= 16) {
+        setStatus("分段最多 16 段。", "error");
+        return;
+      }
+      if (atTop) promptDraft.segments.unshift({ role: "system", content: "" });
+      else promptDraft.segments.push({ role: "system", content: "" });
+      promptDraftDirty = true;
+      renderSegRows();
+      if (syncPromptDirty) syncPromptDirty();
+    };
+    const moveSegment = (index, delta) => {
+      if (!promptDraft || !Array.isArray(promptDraft.segments)) return;
+      const target = index + delta;
+      if (target < 0 || target >= promptDraft.segments.length) return;
+      const [moved] = promptDraft.segments.splice(index, 1);
+      promptDraft.segments.splice(target, 0, moved);
+      promptDraftDirty = true;
+      renderSegRows();
+      if (syncPromptDirty) syncPromptDirty();
     };
     const renderSegRows = () => {
       segRows.innerHTML = "";
       const segments = Array.isArray(promptDraft?.segments) ? promptDraft.segments : [];
       segments.forEach((segment, index) => {
-        const row = el("div", "aw-seg-row");
+        const item = el("div", "aw-seg-item");
+        const head = el("div", "aw-seg-item__head");
+        head.append(el("span", "aw-seg-item__index", `#${index + 1}`));
         const roleSelect = document.createElement("select");
-        roleSelect.className = "aw-input";
+        roleSelect.className = "aw-input aw-seg-item__role";
         roleSelect.setAttribute("aria-label", `第 ${index + 1} 段角色`);
-        for (const [value, label] of [["system", "system"], ["user", "user"], ["assistant", "assistant"]]) {
+        for (const role of PROMPT_SEGMENT_ROLES) {
           const opt = document.createElement("option");
-          opt.value = value;
-          opt.textContent = label;
+          opt.value = role;
+          opt.textContent = role;
           roleSelect.append(opt);
         }
         roleSelect.value = PROMPT_SEGMENT_ROLES.includes(segment.role) ? segment.role : "system";
@@ -1783,20 +1808,18 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
           promptDraftDirty = true;
           if (syncPromptDirty) syncPromptDirty();
         });
-        const area = document.createElement("textarea");
-        area.className = "aw-input aw-input--area";
-        area.rows = 3;
-        area.maxLength = 8000;
-        area.value = String(segment.content ?? "");
-        area.placeholder = "分段正文，支持 {{worldState}} / {{userAction}} / {{assistantReply}}";
-        area.setAttribute("aria-label", `第 ${index + 1} 段正文`);
-        area.addEventListener("input", () => {
-          segment.content = area.value;
-          promptDraftDirty = true;
-          syncSegSummary();
-          if (syncPromptDirty) syncPromptDirty();
-        });
-        const delBtn = el("button", "aw-btn aw-btn--icon", "✕");
+        head.append(roleSelect);
+        const upBtn = el("button", "aw-btn aw-btn--icon", "↑");
+        upBtn.type = "button";
+        upBtn.setAttribute("aria-label", `上移第 ${index + 1} 段`);
+        upBtn.disabled = index === 0;
+        upBtn.addEventListener("click", () => moveSegment(index, -1));
+        const downBtn = el("button", "aw-btn aw-btn--icon", "↓");
+        downBtn.type = "button";
+        downBtn.setAttribute("aria-label", `下移第 ${index + 1} 段`);
+        downBtn.disabled = index === segments.length - 1;
+        downBtn.addEventListener("click", () => moveSegment(index, 1));
+        const delBtn = el("button", "aw-btn aw-btn--icon aw-btn--danger", "✕");
         delBtn.type = "button";
         delBtn.setAttribute("aria-label", `删除第 ${index + 1} 段`);
         delBtn.addEventListener("click", () => {
@@ -1806,38 +1829,44 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
           renderSegRows();
           if (syncPromptDirty) syncPromptDirty();
         });
-        row.append(roleSelect, area, delBtn);
-        segRows.append(row);
+        head.append(upBtn, downBtn, delBtn);
+        const area = document.createElement("textarea");
+        area.className = "aw-input aw-input--area aw-seg-item__area";
+        area.rows = 5;
+        area.maxLength = 8000;
+        area.value = String(segment.content ?? "");
+        area.placeholder = "分段正文，支持 {{worldState}} / {{userAction}} / {{assistantReply}}";
+        area.setAttribute("aria-label", `第 ${index + 1} 段正文`);
+        area.addEventListener("input", () => {
+          segment.content = area.value;
+          promptDraftDirty = true;
+          syncSegStatus();
+          if (syncPromptDirty) syncPromptDirty();
+        });
+        item.append(head, area);
+        segRows.append(item);
       });
       if (segments.length === 0) {
-        segRows.append(el("span", "aw-hint", "还没有分段——点「添加一段」启用。空段保存时自动剔除。"));
+        segRows.append(el("p", "aw-seg-empty", "还没有分段——点下方「插入一段」启用。空段保存时自动剔除。"));
       }
-      syncSegSummary();
+      syncSegStatus();
     };
     if (isBuiltinDraft) {
-      segBody.append(el("span", "aw-hint", "内置默认不支持分段——先复制为新预设。"));
+      segSection.append(el("p", "aw-seg-empty", "内置默认不支持分段——先复制为新预设。"));
     } else {
-      const addSegBtn = el("button", "aw-btn", "添加一段");
-      addSegBtn.type = "button";
-      addSegBtn.setAttribute("aria-label", "添加一个提示词分段");
-      addSegBtn.addEventListener("click", () => {
-        if (!promptDraft) promptDraft = newPromptDraft();
-        if (!Array.isArray(promptDraft.segments)) promptDraft.segments = [];
-        if (promptDraft.segments.length >= 16) {
-          setStatus("分段最多 16 段。", "error");
-          return;
-        }
-        promptDraft.segments.push({ role: "system", content: "" });
-        promptDraftDirty = true;
-        renderSegRows();
-        if (syncPromptDirty) syncPromptDirty();
-      });
-      segBody.append(addSegBtn, el("span", "aw-hint", "占位符在发送时替换：{{worldState}}=世界状态上下文，{{userAction}}=本轮用户行动，{{assistantReply}}=本轮助手回复。角色任意排列（如 system→user→assistant→user）；输出契约不变——模型仍须只输出一个 JSON 对象。"));
-      segBody.append(segRows);
+      const insertTopBtn = el("button", "aw-btn aw-btn--ghost aw-seg-insert", "在最上方插入一段");
+      insertTopBtn.type = "button";
+      insertTopBtn.setAttribute("aria-label", "在最上方插入一个提示词分段");
+      insertTopBtn.addEventListener("click", () => addSegment(true));
+      const insertBottomBtn = el("button", "aw-btn aw-btn--ghost aw-seg-insert", "在最下方插入一段");
+      insertBottomBtn.type = "button";
+      insertBottomBtn.setAttribute("aria-label", "在最下方插入一个提示词分段");
+      insertBottomBtn.addEventListener("click", () => addSegment(false));
+      segSection.append(insertTopBtn, segRows, insertBottomBtn);
+      segSection.append(el("span", "aw-hint", "占位符在发送时替换：{{worldState}}=世界状态上下文，{{userAction}}=本轮用户行动，{{assistantReply}}=本轮助手回复。角色任意排列（如 system→user→assistant→user）；输出契约不变——模型仍须只输出一个 JSON 对象。"));
       renderSegRows();
     }
-    segDetails.append(segSummary, segBody);
-    promptPanel.append(segDetails);
+    promptPanel.append(segSection);
 
     // 当前生效提示词（默认折叠，只读）
     const details = document.createElement("details");
