@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.25";
+export const ATLAS_EXTENSION_VERSION = "0.9.26";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -1096,17 +1096,45 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       renderPage();
     });
     mapTools.append(regionSelect, zoomBox);
-    // 0.9.24 世界书提炼地理：空地图时显示（有真实地理后自动隐藏）
+    // 0.9.24 世界书提炼地理；0.9.26 地图抢救：geoBar 常显 + 新增「从近期剧情提炼新地点」
+    // （复用同一条 adopt 管线：重名自动跳过，产出只增不改——地图跟着剧情长）
     const geoBar = el("div", "aw-geobar");
     const geoBtn = el("button", "aw-btn aw-btn--primary", "从世界书提炼地理");
     geoBtn.type = "button";
     geoBtn.setAttribute("aria-label", "用一次推演请求从角色卡世界书提炼地区与地点并加入地图");
     let geoBusy = false;
+    /** 0.9.26 剧情提炼素材：最近 AI 楼层（服务端按地名去重，重复提及无妨）。 */
+    const readRecentFloors = () => {
+      try {
+        const ctx = SillyTavern.getContext();
+        const chat = Array.isArray(ctx?.chat) ? ctx.chat : [];
+        const texts = [];
+        for (let i = chat.length - 1; i >= 0 && texts.length < 10; i--) {
+          const message = chat[i];
+          if (message && message.is_user === false && typeof message.mes === "string" && message.mes.trim()) {
+            texts.unshift(message.mes.slice(0, 2000));
+          }
+        }
+        return texts;
+      } catch { return []; }
+    };
+    const runGeoAdopt = async (payload, label) => {
+      const result = await api.request("POST", "/worlds/geo/adopt", payload);
+      const data = result.body?.data ?? {};
+      if (result.status === 200 && result.body?.ok) {
+        atlasLog("地图", `${label}完成：+${data.regionsAdded ?? 0} 地区 +${data.pointsAdded ?? 0} 地点（跳过 ${data.skipped ?? 0}）`);
+        setStatus(`提炼完成：新增 ${data.regionsAdded ?? 0} 地区 / ${data.pointsAdded ?? 0} 地点${data.skipped ? `（重名跳过 ${data.skipped}）` : ""}。`, "ok");
+        await core.refresh();
+      } else {
+        atlasLog("地图", `${label}失败 → ${result.body?.error?.message ?? `HTTP ${result.status}`}`);
+        setStatus(result.body?.error?.message ?? `提炼失败（HTTP ${result.status}）`, "error");
+      }
+    };
     geoBtn.addEventListener("click", async () => {
       if (geoBusy) return;
       const confirmed = typeof window === "undefined" || typeof window.confirm !== "function"
         ? true
-        : window.confirm("用 1 次推演请求从角色卡世界书提炼地区 / 地点并加入地图，继续？");
+        : window.confirm("用 1 次推演请求从角色卡世界书提炼地区 / 地点并加入地图（重名自动跳过），继续？");
       if (!confirmed) return;
       geoBusy = true;
       try {
@@ -1117,23 +1145,42 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
         }
         const chatId = String(state().chatId ?? "");
         if (!chatId) { setStatus("当前没有活动聊天。", "error"); return; }
-        const result = await api.request("POST", "/worlds/geo/adopt", { chatId, loreSupplement: lore });
-        const data = result.body?.data ?? {};
-        if (result.status === 200 && result.body?.ok) {
-          atlasLog("地图", `世界书提炼完成：+${data.regionsAdded ?? 0} 地区 +${data.pointsAdded ?? 0} 地点（跳过 ${data.skipped ?? 0}）`);
-          setStatus(`提炼完成：新增 ${data.regionsAdded ?? 0} 地区 / ${data.pointsAdded ?? 0} 地点。`, "ok");
-          await core.refresh();
-        } else {
-          atlasLog("地图", `世界书提炼失败 → ${result.body?.error?.message ?? `HTTP ${result.status}`}`);
-          setStatus(result.body?.error?.message ?? `提炼失败（HTTP ${result.status}）`, "error");
-        }
+        await runGeoAdopt({ chatId, loreSupplement: lore }, "世界书提炼");
       } catch (error) {
         setStatus(`提炼失败：${error instanceof Error ? error.message : String(error)}`, "error");
       } finally {
         geoBusy = false;
       }
     });
-    geoBar.append(geoBtn);
+    const storyGeoBtn = el("button", "aw-btn", "从近期剧情提炼新地点");
+    storyGeoBtn.type = "button";
+    storyGeoBtn.setAttribute("aria-label", "用一次推演请求从近期剧情提炼新出现的地点并加入地图（已有地点自动跳过）");
+    storyGeoBtn.addEventListener("click", async () => {
+      if (geoBusy) return;
+      const recentTexts = readRecentFloors();
+      if (recentTexts.length === 0) {
+        setStatus("最近没有可用的 AI 楼层——先和角色对话几轮，再从剧情提炼。", "error");
+        return;
+      }
+      const confirmed = typeof window === "undefined" || typeof window.confirm !== "function"
+        ? true
+        : window.confirm(`用 1 次推演请求从最近 ${recentTexts.length} 条 AI 楼层提炼新地点并加入地图（重名自动跳过），继续？`);
+      if (!confirmed) return;
+      geoBusy = true;
+      try {
+        const chatId = String(state().chatId ?? "");
+        if (!chatId) { setStatus("当前没有活动聊天。", "error"); return; }
+        let lore = "";
+        try { lore = (await readCardLoreSupplement()) ?? ""; } catch { lore = ""; }
+        await runGeoAdopt({ chatId, recentTexts, ...(lore ? { loreSupplement: lore } : {}) }, "剧情提炼");
+      } catch (error) {
+        setStatus(`提炼失败：${error instanceof Error ? error.message : String(error)}`, "error");
+      } finally {
+        geoBusy = false;
+      }
+    });
+    geoBar.append(geoBtn, storyGeoBtn);
+    geoBar.append(el("span", "aw-hint", "地图随剧情生长：重名地点自动跳过，绝不删改已有地理。"));
     mapCanvas.append(mapTools, viewport, mapHint, geoBar, travelBar);
     return mapCanvas;
   }
@@ -1153,15 +1200,13 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     const regions = Array.isArray(d.regions) ? d.regions : [];
     // 刻度尺只在有真实地理（多于一个地点或地区）后显示——空图挂尺子是假信息（作者 2026-09-20）
     if (mapScaleEl) mapScaleEl.style.display = pointsAll.length > 1 || regions.length > 1 ? "" : "none";
-    // 0.9.20 空地理诚实提示：自动建世只有「起点」一个地点，推演管线（effect 白名单）
-    // 暂不能生成新地点——单点地图不是渲染坏了，是世界里真的只有一个地点
+    // 0.9.20 空地理诚实提示；0.9.26 地图抢救后文案更新——单点地图不是渲染坏了，
+    // 是世界里真的只有一个地点；提炼按钮（世界书 / 近期剧情）现在常显可随时生长地图
     if (mapHint) {
       const hasRealGeo = pointsAll.length > 1 || regions.length > 1;
       mapHint.textContent = hasRealGeo
         ? ""
-        : "这个世界还没有地理数据：自动建世只创建「起点」。点下方「从世界书提炼地理」可把卡书里的地点变成地图。";
-      const geoBar = mapHint.parentElement?.querySelector?.(".aw-geobar");
-      if (geoBar) geoBar.style.display = hasRealGeo ? "none" : "";
+        : "这个世界还没有地理数据：自动建世只创建「起点」。点下方「从世界书提炼地理」导入卡书里的地点；之后随着剧情推进，可用「从近期剧情提炼新地点」让地图继续生长。";
     }
     regionSelect.innerHTML = "";
     const allOption = document.createElement("option");

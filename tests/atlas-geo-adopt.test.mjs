@@ -201,3 +201,62 @@ test("geo/adopt：代码围栏包裹的 JSON 也能解析；未绑定聊天 → 
   assert.equal(unbound.body.ok, false, "未绑定聊天被拒");
   assert.equal(fetchCalls.length, 1, "绑定检查在模型请求之前");
 });
+
+// ---------------------------------------------------------------------------
+// 0.9.26 地图抢救：剧情模式（recentTexts）
+// ---------------------------------------------------------------------------
+
+test("geo/adopt 剧情模式：只给 recentTexts（无 lore）→ 正常提炼，剧情文本进请求", async () => {
+  const { core, fetchCalls } = await makeCore({
+    fetchScripts: [() => openAiResponse(JSON.stringify({
+      regions: [{ name: "灰港", description: "剧情里抵达的港口城市" }],
+      points: [{ name: "旧灯塔", regionName: "灰港" }],
+    }))],
+  });
+  const result = await core.handle("POST", "/worlds/geo/adopt", {
+    chatId: "chat-1",
+    recentTexts: ["他们抵达灰港，在旧灯塔下过夜。"],
+  });
+  assert.equal(result.status, 200);
+  assert.equal(result.body.ok, true, "剧情模式不再要求 loreSupplement");
+  assert.equal(result.body.data.regionsAdded, 1);
+  assert.equal(result.body.data.pointsAdded, 1);
+  assert.equal(fetchCalls.length, 1);
+  assert.ok(JSON.stringify(fetchCalls[0].body).includes("灰港"), "剧情文本进入提炼请求");
+});
+
+test("geo/adopt 剧情模式：已有地点不重复输出 → 全部跳过；夹带说明文字的响应可抢救", async () => {
+  const { core, fetchCalls } = await makeCore({
+    fetchScripts: [
+      () => openAiResponse(JSON.stringify({
+        regions: [{ name: "低语森林" }],
+        points: [{ name: "避风树洞", regionName: "低语森林" }],
+      })),
+      // 第二次：模型输出前后夹说明文字 + 只提炼出已有地点 → 抢救解析成功 + 全跳过
+      () => openAiResponse('好的，以下是提炼结果：{"regions":[],"points":[{"name":"避风树洞","regionName":"低语森林"}]} 请查收。'),
+    ],
+  });
+  const first = await adopt(core);
+  assert.equal(first.body.data.regionsAdded, 1);
+
+  const second = await core.handle("POST", "/worlds/geo/adopt", {
+    chatId: "chat-1",
+    recentTexts: ["他们回到了避风树洞休整。"],
+  });
+  assert.equal(second.body.ok, true, "夹带说明文字的响应经容错提取仍可解析");
+  assert.equal(second.body.data.regionsAdded, 0);
+  assert.equal(second.body.data.pointsAdded, 0, "已有地点跳过");
+  assert.equal(second.body.data.skipped, 1);
+  assert.equal(fetchCalls.length, 2);
+});
+
+test("geo/adopt 剧情模式：形状不对的 recentTexts 宽容丢弃；两者都空 → INVALID_PAYLOAD", async () => {
+  const { core, fetchCalls } = await makeCore({ fetchScripts: [] });
+  const garbage = await core.handle("POST", "/worlds/geo/adopt", {
+    chatId: "chat-1",
+    recentTexts: [42, null, "   ", { bad: true }],
+  });
+  assert.equal(garbage.body.ok, false);
+  assert.equal(garbage.body.error.code, ATLAS_ERROR_CODES.INVALID_PAYLOAD, "有效条目为 0 → 拒绝");
+  assert.equal(fetchCalls.length, 0, "零请求");
+});

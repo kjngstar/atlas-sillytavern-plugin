@@ -568,8 +568,8 @@ function extractAssistantText(payload: unknown): string | null {
 // 模型输出 → AtlasWorldChangeDraft（不可信数据；损坏一律 RESPONSE_MALFORMED）
 // ---------------------------------------------------------------------------
 
-/** 从可能被 ```json 围栏或夹带说明文字的响应中取第一个 JSON 对象。 */
-function extractJsonObject(text: string): Record<string, unknown> | null {
+/** 从可能被 ```json 围栏或夹带说明文字的响应中取第一个 JSON 对象（0.9.26 导出供 geo 提炼复用）。 */
+export function extractJsonObject(text: string): Record<string, unknown> | null {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
   const candidates = [fenced?.[1] ?? "", text, extractBalancedJsonObject(text)];
   for (const candidate of candidates) {

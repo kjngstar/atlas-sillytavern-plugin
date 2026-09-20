@@ -7142,7 +7142,7 @@ function createAtlasServerCore(deps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.25",
+      version: "0.9.26",
       protocolVersion: 1,
       time: now()
     });
@@ -7228,8 +7228,13 @@ function createAtlasServerCore(deps) {
       throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "chatId 非法");
     }
     const lore = typeof record.loreSupplement === "string" ? record.loreSupplement.trim() : "";
-    if (!lore) {
-      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "没有可用的世界书资料——卡书无启用条目，或「世界书资料」开关处于关闭状态。");
+    const recentTexts = Array.isArray(record.recentTexts) ? record.recentTexts.filter((item) => typeof item === "string" && item.trim().length > 0).slice(0, 10).map((item) => item.slice(0, 2e3)) : [];
+    const storyMode = recentTexts.length > 0;
+    if (!lore && !storyMode) {
+      throw new AtlasError(
+        ATLAS_ERROR_CODES.INVALID_PAYLOAD,
+        "没有可用的提炼素材——剧情模式需要近期 AI 楼层，世界书模式需要卡书启用条目（或「世界书资料」开关未关闭）。"
+      );
     }
     const binding = requireBoundBinding(await getBinding(chatId));
     const world = await requireWorld(binding);
@@ -7240,21 +7245,33 @@ function createAtlasServerCore(deps) {
     }
     checkRpm();
     rpmTimestamps.push(now());
+    const contractRule = '只输出一个 JSON 对象：{"regions":[{"name":"...","description":"..."}],"points":[{"name":"...","regionName":"..."}]}';
+    const commonRules = '规则：name ≤20 字；regionName 必须是 regions 里出现过的名字（没有合适地区就省略该字段）；只提炼明确或强烈暗示的地理实体（城市 / 森林 / 遗迹 / 建筑等），角色、文风、格式规则一律不要；宁缺毋滥；最多 12 个地区、40 个地点；没有地理信息就输出 {"regions":[],"points":[]}。';
+    const existingGeoNames = [
+      ...(world.regions ?? []).map((r) => String(r.name)),
+      ...(world.points ?? []).map((p) => String(p.name))
+    ].slice(0, 60);
+    const userContent = storyMode ? [
+      "从下面的近期剧情中提炼**剧情里新出现或被明确抵达 / 提及**的地点与地区（已有地点名单里的不要重复输出）。",
+      contractRule,
+      commonRules,
+      ...existingGeoNames.length > 0 ? [`已有地理（禁止重复输出这些名字）：${existingGeoNames.join("、")}`] : [],
+      ...lore ? ["【世界书背景资料（帮助理解地名归属，不要从中提炼——只提炼剧情里的）】", lore.slice(0, ATLAS_LIMITS.LORE_SUPPLEMENT_CHARS)] : [],
+      "【近期剧情（AI 输出，按时间先后）】",
+      recentTexts.join("\n---\n").slice(0, ATLAS_LIMITS.LORE_SUPPLEMENT_CHARS)
+    ].join("\n") : [
+      "从下面的角色卡世界书资料中提炼「地区 / 地点」。",
+      contractRule,
+      commonRules,
+      "【世界书资料】",
+      lore.slice(0, ATLAS_LIMITS.LORE_SUPPLEMENT_CHARS)
+    ].join("\n");
     const extractionSegments = [
       {
         role: "system",
         content: "你是地理信息抽取器。只输出一个 JSON 对象，不输出任何其它文字、解释或代码围栏。"
       },
-      {
-        role: "user",
-        content: [
-          "从下面的角色卡世界书资料中提炼「地区 / 地点」。",
-          '只输出一个 JSON 对象：{"regions":[{"name":"...","description":"..."}],"points":[{"name":"...","regionName":"..."}]}',
-          '规则：name ≤20 字；regionName 必须是 regions 里出现过的名字（没有合适地区就省略该字段）；只提炼资料中明确或强烈暗示的地理实体（城市 / 森林 / 遗迹 / 建筑等），角色、文风、格式规则一律不要；宁缺毋滥；最多 12 个地区、40 个地点；资料里没有地理信息就输出 {"regions":[],"points":[]}。',
-          "【世界书资料】",
-          lore.slice(0, ATLAS_LIMITS.LORE_SUPPLEMENT_CHARS)
-        ].join("\n")
-      }
+      { role: "user", content: userContent }
     ];
     const call = await callAtlasWorldTurnApi(
       { ...preset, promptSegments: extractionSegments },
@@ -7273,13 +7290,8 @@ function createAtlasServerCore(deps) {
     if (!call.ok) {
       throw new AtlasError(call.code, call.message, { retryable: call.retryable });
     }
-    let spec = {};
-    try {
-      const stripped = call.text.replace(/^```(?:json)?/i, "").replace(/```\s*$/, "").trim();
-      const start = stripped.indexOf("{");
-      const end = stripped.lastIndexOf("}");
-      spec = JSON.parse(start >= 0 && end > start ? stripped.slice(start, end + 1) : stripped);
-    } catch {
+    const spec = extractJsonObject(call.text);
+    if (!spec) {
       throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "提炼结果不是合法 JSON——模型没有遵守输出契约，可重试一次。", { retryable: true });
     }
     const cleanName = (value) => {
