@@ -768,6 +768,14 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
     }
     const text = extractAssistantText(payload);
     if (text === null || text.trim().length === 0) {
+      const gatewayError = gatewayErrorMessage(payload);
+      if (gatewayError) {
+        return fail4(
+          ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
+          `推演服务返回错误：${gatewayError}（HTTP 200，但响应体是错误 JSON）——通常是模型名在网关上不存在 / 无可用渠道，或端点路径不完整（一般应为 http(s)://地址/v1，Atlas 会自动补 /chat/completions）。请到「日志」页核对实际发送的目标与模型名。`,
+          false
+        );
+      }
       const snippet = rawText.replace(/\s+/g, " ").trim().slice(0, 200);
       return fail4(
         ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
@@ -779,6 +787,16 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
   } finally {
     clearTimeout(timer);
   }
+}
+function gatewayErrorMessage(payload) {
+  if (!payload || typeof payload !== "object") return null;
+  const error = payload.error;
+  if (typeof error === "string") return error.slice(0, 120) || null;
+  if (error && typeof error === "object") {
+    const message = error.message;
+    if (typeof message === "string" && message.trim()) return message.slice(0, 120);
+  }
+  return null;
 }
 function firstSsePayload(raw) {
   if (!raw.includes("data:")) return null;

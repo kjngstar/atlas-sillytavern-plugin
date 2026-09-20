@@ -198,6 +198,15 @@ export async function callAtlasWorldTurnApi(
     }
     const text = extractAssistantText(payload);
     if (text === null || text.trim().length === 0) {
+      // 网关「200 包错误 JSON」形状（new-api / one-api 系常见）：{"error":{"message":"..."},"quota_error":false}
+      const gatewayError = gatewayErrorMessage(payload);
+      if (gatewayError) {
+        return fail(
+          ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
+          `推演服务返回错误：${gatewayError}（HTTP 200，但响应体是错误 JSON）——通常是模型名在网关上不存在 / 无可用渠道，或端点路径不完整（一般应为 http(s)://地址/v1，Atlas 会自动补 /chat/completions）。请到「日志」页核对实际发送的目标与模型名。`,
+          false,
+        );
+      }
       const snippet = rawText.replace(/\s+/g, " ").trim().slice(0, 200);
       return fail(
         ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
@@ -209,6 +218,19 @@ export async function callAtlasWorldTurnApi(
   } finally {
     clearTimeout(timer);
   }
+}
+
+
+/** 提取网关错误 JSON 的 message（如 new-api 的 {"error":{"message":"Not Found"}}）。 */
+function gatewayErrorMessage(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object") return null;
+  const error = (payload as { error?: unknown }).error;
+  if (typeof error === "string") return error.slice(0, 120) || null;
+  if (error && typeof error === "object") {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === "string" && message.trim()) return message.slice(0, 120);
+  }
+  return null;
 }
 
 /** 从 SSE 文本里取第一个可解析的 data: 载荷（网关强制流式化时的兜底）。 */

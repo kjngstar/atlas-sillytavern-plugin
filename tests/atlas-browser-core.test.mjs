@@ -408,3 +408,16 @@ test("callAtlasWorldTurnApi：content 分段数组 / ollama 形状 / SSE 强制�
   assert.ok(errorShape.message.includes("quota exceeded"), "报错应含响应片段: " + errorShape.message);
   assert.ok(!errorShape.message.includes("Bearer sk-"), "片段不得含密钥");
 });
+
+
+test("callAtlasWorldTurnApi：网关 200 包错误 JSON → 报错带网关 message 与指引", async () => {
+  const preset = { name: "t", endpoint: "https://api.example.com/v1", model: "m1", apiKey: "" };
+  const result = await callAtlasWorldTurnApi(
+    preset,
+    { injectionText: "c", userText: "u", assistantText: "a" },
+    { fetchFn: async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ error: { message: "Not Found" }, quota_error: false }) }) },
+  );
+  assert.equal(result.code, ATLAS_ERROR_CODES.RESPONSE_MALFORMED);
+  assert.ok(result.message.includes("Not Found"), "报错应含网关错误文本");
+  assert.ok(result.message.includes("模型名"), "报错应含模型名指引");
+});

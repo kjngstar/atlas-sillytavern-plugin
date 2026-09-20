@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.7";
+export const ATLAS_EXTENSION_VERSION = "0.9.8";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -2003,6 +2003,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     }
     setStatus("正在通过酒馆后端代理读取模型列表…", "ok");
     renderCenter();
+    const startedStatusAt = Date.now();
     try {
       const ctx = SillyTavern.getContext();
       const headers = { "Content-Type": "application/json" };
@@ -2021,6 +2022,11 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
           custom_include_headers: atlasCustomIncludeHeaders(keyValue),
         }),
       });
+      let statusSnippet = "";
+      try {
+        statusSnippet = redactSecrets(await response.clone().text()).replace(/\s+/g, " ").slice(0, 300);
+      } catch { /* 片段读不到不影响判定 */ }
+      atlasLog("推演", `POST /api/backends/chat-completions/status → ${endpoint} · 模型列表 → HTTP ${response.status}，${Date.now() - startedStatusAt}ms`, statusSnippet);
       if (!response.ok) {
         const errorText = await response.text().catch(() => "");
         let detail = errorText.slice(0, 200);
@@ -2441,16 +2447,25 @@ async function connectOnce() {
     const loggingModelFetch = async (input, init) => {
       const startedAt = Date.now();
       const path = typeof input === "string" ? input : (input && typeof input.url === "string" ? input.url : String(input));
+      // 从代理请求体提取「真实上游地址 + 模型名」（绝不含密钥字段）
+      let target = "";
+      try {
+        const parsed = JSON.parse(init && typeof init.body === "string" ? init.body : "{}");
+        if (parsed && typeof parsed === "object" && parsed.custom_url) {
+          target = `${String(parsed.custom_url)} · 模型=${String(parsed.model ?? "?")}`;
+        }
+      } catch { /* 非代理载荷按原样记路径 */ }
+      const label = target ? `${path} → ${target}` : path;
       try {
         const response = await globalThis.fetch(input, init);
         let snippet = "";
         try {
           snippet = redactSecrets(await response.clone().text());
         } catch { /* 片段读不到不影响请求本身 */ }
-        atlasLog("推演", `POST ${path} → HTTP ${response.status}，${Date.now() - startedAt}ms`, snippet);
+        atlasLog("推演", `POST ${label} → HTTP ${response.status}，${Date.now() - startedAt}ms`, snippet);
         return response;
       } catch (error) {
-        atlasLog("推演", `POST ${path} → 网络失败，${Date.now() - startedAt}ms`, error instanceof Error ? error.message : String(error));
+        atlasLog("推演", `POST ${label} → 网络失败，${Date.now() - startedAt}ms`, error instanceof Error ? error.message : String(error));
         throw error;
       }
     };
