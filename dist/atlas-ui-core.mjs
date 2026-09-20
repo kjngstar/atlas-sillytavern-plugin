@@ -6074,6 +6074,7 @@ function createDefaultSettingsV2() {
     activePromptPresetId: null,
     autoCommit: true,
     rpmLimit: 30,
+    loreSupplementEnabled: true,
     contentReplaceRules: DEFAULT_CONTENT_REPLACE_RULES.map((rule, index) => ({
       ...rule,
       id: `cr-builtin-${index + 1}`
@@ -6187,7 +6188,8 @@ function sanitizeSettingsV2(raw, deps = {}) {
     activeApiPresetId: activeApi && apiPresets.some((p) => p.id === activeApi) ? activeApi : null,
     activePromptPresetId: activePrompt && promptPresets.some((p) => p.id === activePrompt) ? activePrompt : null,
     autoCommit: typeof record.autoCommit === "boolean" ? record.autoCommit : true,
-    rpmLimit: isFiniteIntIn(record.rpmLimit, MIN_RPM, MAX_RPM) ? record.rpmLimit : 30
+    rpmLimit: isFiniteIntIn(record.rpmLimit, MIN_RPM, MAX_RPM) ? record.rpmLimit : 30,
+    loreSupplementEnabled: typeof record.loreSupplementEnabled === "boolean" ? record.loreSupplementEnabled : true
   };
   if (record.contentReplaceRules === void 0) {
     settings.contentReplaceRules = base.contentReplaceRules;
@@ -6283,6 +6285,7 @@ function migrateAtlasSettings(raw, deps = {}) {
   }
   if (typeof record.autoCommit === "boolean") settings.autoCommit = record.autoCommit;
   if (isFiniteIntIn(record.rpmLimit, MIN_RPM, MAX_RPM)) settings.rpmLimit = record.rpmLimit;
+  if (typeof record.loreSupplementEnabled === "boolean") settings.loreSupplementEnabled = record.loreSupplementEnabled;
   return { settings, diagnostics };
 }
 function fail3(settings, code, message) {
@@ -6469,6 +6472,10 @@ function applySettingsCommand(settings, command, deps = {}) {
         if (typeof command.autoCommit !== "boolean") return fail3(settings, "INVALID_PAYLOAD", "自动提交必须是布尔值。");
         next.autoCommit = command.autoCommit;
       }
+      if (command.loreSupplementEnabled !== void 0) {
+        if (typeof command.loreSupplementEnabled !== "boolean") return fail3(settings, "INVALID_PAYLOAD", "世界书资料开关必须是布尔值。");
+        next.loreSupplementEnabled = command.loreSupplementEnabled;
+      }
       if (command.rpmLimit !== void 0) {
         if (!isFiniteIntIn(command.rpmLimit, MIN_RPM, MAX_RPM)) {
           return fail3(settings, "INVALID_PAYLOAD", `RPM 上限必须是 ${MIN_RPM}..${MAX_RPM} 的整数。`);
@@ -6610,6 +6617,10 @@ function applyLegacySettingsPatch(settings, body, deps = {}) {
     if (typeof record.autoCommit !== "boolean") return fail3(settings, "INVALID_PAYLOAD", "autoCommit 必须是布尔值");
     next = { ...next, autoCommit: record.autoCommit };
   }
+  if (record.loreSupplementEnabled !== void 0) {
+    if (typeof record.loreSupplementEnabled !== "boolean") return fail3(settings, "INVALID_PAYLOAD", "loreSupplementEnabled 必须是布尔值");
+    next = { ...next, loreSupplementEnabled: record.loreSupplementEnabled };
+  }
   if (record.rpmLimit !== void 0) {
     if (!isFiniteIntIn(record.rpmLimit, MIN_RPM, MAX_RPM)) return fail3(settings, "INVALID_PAYLOAD", "rpmLimit 必须是 1..600 的数字");
     next = { ...next, rpmLimit: record.rpmLimit };
@@ -6654,6 +6665,7 @@ function settingsViewV2(settings) {
       systemPrompt: DEFAULT_WORLD_TURN_SYSTEM_PROMPT
     },
     autoCommit: settings.autoCommit,
+    loreSupplementEnabled: settings.loreSupplementEnabled ?? true,
     rpmLimit: settings.rpmLimit,
     contentReplaceRules: settings.contentReplaceRules ?? []
   };
@@ -6846,7 +6858,7 @@ function createAtlasServerCore(deps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.22",
+      version: "0.9.23",
       protocolVersion: 1,
       time: now()
     });

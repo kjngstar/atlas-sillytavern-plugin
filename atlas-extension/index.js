@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.22";
+export const ATLAS_EXTENSION_VERSION = "0.9.23";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -1636,7 +1636,16 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       if (!confirmed) return;
       void core.manualAdvance();
     });
-    runtimeActions.append(toggle, autoCommit, manualBtn, gotoApi);
+    // 0.9.22 世界书资料开关：被供应商审核拦截时的逃生门（关掉 = 推演回到 0.9.20 前的上下文）
+    const loreToggle = el("button", "aw-btn aw-btn--ghost", settingsV2?.loreSupplementEnabled === false ? "开启世界书资料" : "关闭世界书资料");
+    loreToggle.type = "button";
+    loreToggle.setAttribute("aria-label", "切换推演是否附带世界书资料（被审核拦截时关闭）");
+    loreToggle.addEventListener("click", async () => {
+      const ok = await sendSettingsCommand({ action: "runtime.update", loreSupplementEnabled: settingsV2?.loreSupplementEnabled === false });
+      setStatus(ok ? "推进设置已更新。" : settingsStatus, ok ? "ok" : "error");
+      renderCenter();
+    });
+    runtimeActions.append(toggle, autoCommit, manualBtn, loreToggle, gotoApi);
     panel.append(runtimeActions);
     if (statusLine()) panel.append(statusLine());
     panel.append(el("p", "aw-panel__meta", "「推进」只管推进行为与提示词；API 地址、密钥与模型请在「API」页配置。"));
@@ -3367,8 +3376,9 @@ async function connectOnce() {
       adaptEvent,
       resolveAssistantFloor: createAssistantFloorResolver(context),
       ensureWorld: () => ensureStarterWorld(),
-      // 0.9.21 世界书资料块：commit 前读当前卡书启用条目（有界），喂给推演 AI
-      getLoreSupplement: () => readCardLoreSupplement(),
+      // 0.9.21 世界书资料块：commit 前读当前卡书启用条目（有界），喂给推演 AI；
+      // 0.9.22 开关：被供应商审核拦截时可在推进页关闭（settingsV2.loreSupplementEnabled）
+      getLoreSupplement: () => (settingsV2?.loreSupplementEnabled === false ? Promise.resolve("") : readCardLoreSupplement()),
       // 0.9.22 立即推演：读最近一条助手楼层正文作为推演素材（无楼层 → null，用占位）
       getLastAssistantText: async () => {
         try {

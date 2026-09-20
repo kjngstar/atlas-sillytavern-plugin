@@ -799,3 +799,28 @@ test("resolveWorldTurnPreset：segments → promptSegments；连接级 systemPro
   assert.equal(runtimeSingle.systemPrompt, "单条正文");
   assert.equal(runtimeSingle.promptSegments, undefined, "单条预设不产生 promptSegments");
 });
+
+// 0.9.22 世界书资料开关（审核拦截逃生门）：缺省 true，runtime.update 可切换，非法值拒绝
+test("loreSupplementEnabled：缺省 true / runtime.update 切换 / 非法值拒绝 / 视图回传", () => {
+  const base = createDefaultSettingsV2(testDeps());
+  assert.equal(base.loreSupplementEnabled, true, "缺省开启");
+  const view0 = settingsViewV2(base);
+  assert.equal(view0.loreSupplementEnabled, true, "视图回传缺省值");
+
+  const off = applySettingsCommand(base, { action: "runtime.update", loreSupplementEnabled: false }, testDeps());
+  assert.equal(off.ok, true, "关闭合法");
+  assert.equal(off.settings.loreSupplementEnabled, false, "已关闭");
+  assert.equal(settingsViewV2(off.settings).loreSupplementEnabled, false, "视图回传关闭态");
+
+  const reopened = applySettingsCommand(off.settings, { action: "runtime.update", loreSupplementEnabled: true }, testDeps());
+  assert.equal(reopened.settings.loreSupplementEnabled, true, "可再开");
+
+  const bad = applySettingsCommand(base, { action: "runtime.update", loreSupplementEnabled: "yes" }, testDeps());
+  assert.equal(bad.ok, false, "非布尔值被拒");
+
+  // sanitize：旧存档缺字段 → 补 true；显式 false 保留
+  const legacy = migrateAtlasSettings(v1Fixture(), testDeps());
+  assert.equal(legacy.settings.loreSupplementEnabled, true, "旧存档补缺省 true");
+  const explicitOff = sanitizeSettingsV2({ ...JSON.parse(JSON.stringify(base)), loreSupplementEnabled: false }, testDeps());
+  assert.equal(explicitOff.settings.loreSupplementEnabled, false, "显式 false 保留");
+});

@@ -160,6 +160,8 @@ export interface AtlasServerSettingsV2 {
   activePromptPresetId: string | null;
   autoCommit: boolean;
   rpmLimit: number;
+  /** 0.9.22 推演是否附带世界书资料块（被供应商审核拦截时的逃生门；缺省 true）。 */
+  loreSupplementEnabled?: boolean;
   /** 0.9.16 内容替换规则库（照抄 shujuku + 开关增强；字段缺失时补预制库）。 */
   contentReplaceRules?: AtlasContentReplaceRule[];
   /** v1 的 majorEvent 旧数据：只兼容保留，不执行、不展示。 */
@@ -218,7 +220,7 @@ export type AtlasSettingsCommand =
   | { action: "replace.save"; preset: { id?: string; name: string; start: string; end: string; enabled?: boolean } }
   | { action: "replace.delete"; id: string }
   | { action: "replace.reset" }
-  | { action: "runtime.update"; autoCommit?: boolean; rpmLimit?: number };
+  | { action: "runtime.update"; autoCommit?: boolean; rpmLimit?: number; loreSupplementEnabled?: boolean };
 
 // ---------------------------------------------------------------------------
 // 基础工具
@@ -314,6 +316,7 @@ export function createDefaultSettingsV2(): AtlasServerSettingsV2 {
     activePromptPresetId: null,
     autoCommit: true,
     rpmLimit: 30,
+    loreSupplementEnabled: true,
     contentReplaceRules: DEFAULT_CONTENT_REPLACE_RULES.map((rule, index) => ({
       ...rule,
       id: `cr-builtin-${index + 1}`,
@@ -448,6 +451,7 @@ export function sanitizeSettingsV2(raw: unknown, deps: AtlasSettingsDeps = {}): 
     activePromptPresetId: activePrompt && promptPresets.some((p) => p.id === activePrompt) ? activePrompt : null,
     autoCommit: typeof record.autoCommit === "boolean" ? record.autoCommit : true,
     rpmLimit: isFiniteIntIn(record.rpmLimit, MIN_RPM, MAX_RPM) ? record.rpmLimit : 30,
+    loreSupplementEnabled: typeof record.loreSupplementEnabled === "boolean" ? record.loreSupplementEnabled : true,
   };
   // 0.9.16 内容替换规则：字段缺失（旧存档）→ 预制库兜底；显式空数组 = 用户全删，尊重
   if (record.contentReplaceRules === undefined) {
@@ -583,6 +587,7 @@ export function migrateAtlasSettings(raw: unknown, deps: AtlasSettingsDeps = {})
 
   if (typeof record.autoCommit === "boolean") settings.autoCommit = record.autoCommit;
   if (isFiniteIntIn(record.rpmLimit, MIN_RPM, MAX_RPM)) settings.rpmLimit = record.rpmLimit;
+  if (typeof record.loreSupplementEnabled === "boolean") settings.loreSupplementEnabled = record.loreSupplementEnabled;
   return { settings, diagnostics };
 }
 
@@ -781,6 +786,10 @@ export function applySettingsCommand(
         if (typeof command.autoCommit !== "boolean") return fail(settings, "INVALID_PAYLOAD", "自动提交必须是布尔值。");
         next.autoCommit = command.autoCommit;
       }
+      if (command.loreSupplementEnabled !== undefined) {
+        if (typeof command.loreSupplementEnabled !== "boolean") return fail(settings, "INVALID_PAYLOAD", "世界书资料开关必须是布尔值。");
+        next.loreSupplementEnabled = command.loreSupplementEnabled;
+      }
       if (command.rpmLimit !== undefined) {
         if (!isFiniteIntIn(command.rpmLimit, MIN_RPM, MAX_RPM)) {
           return fail(settings, "INVALID_PAYLOAD", `RPM 上限必须是 ${MIN_RPM}..${MAX_RPM} 的整数。`);
@@ -939,6 +948,10 @@ export function applyLegacySettingsPatch(
     if (typeof record.autoCommit !== "boolean") return fail(settings, "INVALID_PAYLOAD", "autoCommit 必须是布尔值");
     next = { ...next, autoCommit: record.autoCommit };
   }
+  if (record.loreSupplementEnabled !== undefined) {
+    if (typeof record.loreSupplementEnabled !== "boolean") return fail(settings, "INVALID_PAYLOAD", "loreSupplementEnabled 必须是布尔值");
+    next = { ...next, loreSupplementEnabled: record.loreSupplementEnabled };
+  }
   if (record.rpmLimit !== undefined) {
     if (!isFiniteIntIn(record.rpmLimit, MIN_RPM, MAX_RPM)) return fail(settings, "INVALID_PAYLOAD", "rpmLimit 必须是 1..600 的数字");
     next = { ...next, rpmLimit: record.rpmLimit };
@@ -977,6 +990,8 @@ export interface AtlasSettingsView {
   activePromptPresetId: string | null;
   builtInPrompt: { id: string; name: string; readOnly: true; systemPrompt: string };
   autoCommit: boolean;
+  /** 0.9.22 推演是否附带世界书资料块（审核拦截逃生门）。 */
+  loreSupplementEnabled: boolean;
   rpmLimit: number;
   /** 0.9.16 内容替换规则库（含预制 + 手动，同库平等）。 */
   contentReplaceRules: AtlasContentReplaceRule[];
@@ -1025,6 +1040,7 @@ export function settingsViewV2(settings: AtlasServerSettingsV2): AtlasSettingsVi
       systemPrompt: DEFAULT_WORLD_TURN_SYSTEM_PROMPT,
     },
     autoCommit: settings.autoCommit,
+    loreSupplementEnabled: settings.loreSupplementEnabled ?? true,
     rpmLimit: settings.rpmLimit,
     contentReplaceRules: settings.contentReplaceRules ?? [],
   };
