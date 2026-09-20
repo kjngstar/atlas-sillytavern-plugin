@@ -6757,7 +6757,7 @@ function createAtlasServerCore(deps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.19",
+      version: "0.9.20",
       protocolVersion: 1,
       time: now()
     });

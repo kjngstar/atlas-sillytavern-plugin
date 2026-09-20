@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.19";
+export const ATLAS_EXTENSION_VERSION = "0.9.20";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -625,12 +625,15 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     }
     for (const receipt of receipts.slice(0, 10)) {
       const card = el("div", "aw-move");
+      // 0.9.20：失败回执标红（原因在 summary 第二句，之前截断后根本看不见）
+      if (receipt.status === "failed") card.classList.add("is-failed");
       const title = receipt.summary
         ? receipt.summary.split(/[。！?\n]/)[0].slice(0, 22)
         : `世界推进 · 第 ${String(receipt.previousTime)} → ${String(receipt.currentTime)} 时段`;
       card.append(el("div", "aw-move__title", title));
       if (receipt.summary && receipt.summary.length > title.length) {
-        card.append(el("div", "aw-move__text", receipt.summary.slice(0, 70)));
+        // 失败回执全文展示——「失败原因：…」跟在第二句，截 70 字正好把它剪掉
+        card.append(el("div", "aw-move__text", receipt.summary.slice(0, receipt.status === "failed" ? 300 : 70)));
       }
       card.append(el("div", "aw-move__meta", `第 ${String(receipt.previousTime)} → ${String(receipt.currentTime)} 时段`));
       movesList.append(card);
@@ -1112,6 +1115,14 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     const regions = Array.isArray(d.regions) ? d.regions : [];
     // 刻度尺只在有真实地理（多于一个地点或地区）后显示——空图挂尺子是假信息（作者 2026-09-20）
     if (mapScaleEl) mapScaleEl.style.display = pointsAll.length > 1 || regions.length > 1 ? "" : "none";
+    // 0.9.20 空地理诚实提示：自动建世只有「起点」一个地点，推演管线（effect 白名单）
+    // 暂不能生成新地点——单点地图不是渲染坏了，是世界里真的只有一个地点
+    if (mapHint) {
+      const hasRealGeo = pointsAll.length > 1 || regions.length > 1;
+      mapHint.textContent = hasRealGeo
+        ? ""
+        : "这个世界还没有地理数据：自动建世只创建「起点」，推演暂不能生成新地点（AI 生成地点在后续版本规划中）。";
+    }
     regionSelect.innerHTML = "";
     const allOption = document.createElement("option");
     allOption.value = "";
@@ -3233,6 +3244,12 @@ async function connectOnce() {
         const status = result && typeof result === "object" && "status" in result ? result.status : "";
         const errCode = result && typeof result === "object" && result.body?.ok === false ? result.body?.error?.code : null;
         atlasLog("引擎", `${method} ${path} → ${ok === false ? `失败（${errCode ?? "ERR"}）` : String(status) || "完成"}，${Date.now() - startedAt}ms`);
+        // 0.9.20：200 信封里也可能装着失败回执——「校验失败」必须进日志页，
+        // 否则作者只能看到一行 200，具体原因永远查无可查（2026-09-20 反馈）
+        const receipt = result && typeof result === "object" ? result.body?.data?.receipt : null;
+        if (receipt && receipt.status === "failed") {
+          atlasLog("推演", `回合提交失败 → ${String(receipt.summary ?? "未知原因").slice(0, 300)}`);
+        }
         return result;
       } catch (error) {
         atlasLog("引擎", `${method} ${path} → 异常，${Date.now() - startedAt}ms`, error instanceof Error ? error.message : String(error));

@@ -808,13 +808,19 @@
   position: absolute;
   inset: 0;
   display: grid;
-  place-items: center;
+  /* 0.9.20：空地理提示放底部——居中会压住起点标记 */
+  place-items: end center;
   color: var(--aw-muted);
   font-family: var(--aw-sans);
-  font-size: 14px;
-  padding: 24px;
+  font-size: 12px;
+  padding: 0 24px 16px;
   text-align: center;
 }
+
+/* 0.9.20 变化页失败回执标红 */
+.aw-move.is-failed { border-left-color: #a3543c; }
+.aw-move.is-failed .aw-move__title,
+.aw-move.is-failed .aw-move__text { color: #a3543c; }
 
 .aw-viewport {
   position: absolute;
