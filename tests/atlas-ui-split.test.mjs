@@ -84,12 +84,15 @@ test("CSS 合约：样式必须限定在 .atlas-workbench 内，不污染酒馆�
 // ATLAS-18 结构与职责不变量（源码级；真实观感仍由人工验收）
 // ---------------------------------------------------------------------------
 
-test("职责隔离：API 页不出现提示词编辑，推进页不出现连接字段", () => {
+test("职责隔离：API 页不出现提示词预设库编辑，推进页不出现连接字段", () => {
   const js = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
   const apiPanel = js.slice(js.indexOf("function buildApiPanel()"), js.indexOf("async function testConnection"));
   const progression = js.slice(js.indexOf("function buildProgressionPanel()"), js.indexOf("function buildApiPanel()"));
   assert.ok(apiPanel.length > 0 && progression.length > 0, "两个面板都存在");
-  assert.ok(!/systemPrompt/.test(apiPanel), "API 页不出现提示词字段");
+  // 0.9.17 起：API 页允许「按连接 System Prompt（可选）」覆盖字段（chatbox 同款），
+  // 但提示词预设库机器（promptDraft / promptLibrary / prompt.save）仍归「推进」页专属。
+  assert.ok(!/promptDraft|promptLibrary|prompt\.save/.test(apiPanel), "API 页不出现提示词预设库编辑");
+  assert.ok(/System Prompt（可选）/.test(apiPanel), "API 页提供按连接 System Prompt（可选）覆盖");
   assert.ok(!/"系统提示词正文"/.test(apiPanel), "API 页不出现提示词正文编辑器（多行输入框允许用于高级参数）");
   assert.ok(/pages?.*「推进」|前往推进/.test(apiPanel), "API 页提供「前往推进」只读跳转");
   assert.ok(!/endpoint/.test(progression.replace(/当前 API[\s\S]*?api\)/, "")), "推进页不出现端点输入（只读摘要除外）");

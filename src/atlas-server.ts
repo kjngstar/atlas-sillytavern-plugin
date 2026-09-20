@@ -341,7 +341,9 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
     return okResult({
       ok: true,
       plugin: "atlas",
-      version: "0.9.2",
+      // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
+      // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
+      version: "0.9.18",
       protocolVersion: 1,
       time: now(),
     });
@@ -536,6 +538,7 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
       ? { at: lastEvent.at, summary: lastEvent.narrativeSummary.slice(0, 200), source: lastEvent.source }
       : null;
     return okResult({
+      chatId,
       worldId: world.id,
       worldName: world.name,
       branchId: binding.branchId,
@@ -739,6 +742,14 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
     }
     const receipt = output.receipt;
     if (receipt.status === "failed") {
+      // 0.9.17：提交失败也要落日志（带具体校验原因）——否则「1 条校验失败」永远查不到是哪条。
+      pushLog({
+        at: now(),
+        kind: "world-turn-commit-failed",
+        chatId: request.chatId,
+        worldId: binding.worldId,
+        summary: receipt.summary,
+      });
       // commitAtlasTurn 保证零部分写入；保留 pending 供 retry
       return okResult({ receipt });
     }

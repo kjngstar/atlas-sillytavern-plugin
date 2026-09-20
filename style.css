@@ -1369,3 +1369,28 @@
   color: #a3543c;
   font-weight: 700;
 }
+
+/* 0.9.18 提示词分段模式：角色下拉 + 正文 + 删除 的一行布局 */
+.aw-seg-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.aw-seg-row {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr) 32px;
+  gap: 6px;
+  align-items: start;
+}
+
+@media (max-width: 820px) {
+  .aw-seg-row {
+    grid-template-columns: minmax(0, 1fr) 32px;
+  }
+
+  .aw-seg-row .aw-input:first-child {
+    grid-column: 1 / -1;
+  }
+}

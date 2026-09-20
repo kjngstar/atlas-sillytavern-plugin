@@ -859,3 +859,56 @@ test("替换规则：无 think 的普通输出不受影响；嵌套词对整体�
   const nested = applyContentReplaceRules(`A<think>B<think>C</think>D</think>E`, builtinRules.filter((r) => r.start === "<think" && r.end === "</think>"));
   assert.equal(nested, "AE", "栈式配对：嵌套段整体删除");
 });
+
+// ---------------------------------------------------------------------------
+// 0.9.18 分段提示词：promptSegments 逐段装配 + 占位符替换；全非法回退旧两条
+// ---------------------------------------------------------------------------
+
+test("callAtlasWorldTurnApi：promptSegments 装配消息数组，占位符替换，非法段剔除", async () => {
+  let capturedBody = null;
+  const fetchFn = async (_url, init) => {
+    capturedBody = JSON.parse(init.body);
+    return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: "{}" } }] }) };
+  };
+  const input = { injectionText: "世界上下文A", userText: "用户行动B", assistantText: "回复C" };
+  const result = await callAtlasWorldTurnApi(
+    {
+      name: "t", endpoint: "https://api.example.com/v1/chat/completions", model: "m1", apiKey: "",
+      promptSegments: [
+        { role: "system", content: "你是推演引擎，{{userAction}} 是本轮行动。" },
+        { role: "user", content: "状态：{{worldState}}\n回复：{{assistantReply}}" },
+        { role: "assistant", content: "好的，我会只输出 JSON。" },
+        { role: "carrier", content: "非法角色应被剔除" },
+        { role: "user", content: "   " },
+      ],
+    },
+    input,
+    { fetchFn },
+  );
+  assert.ok(result.ok, result.ok ? "分段请求成功" : `分段请求应成功：${result.message}`);
+  const messages = capturedBody.messages;
+  assert.equal(messages.length, 3, "非法角色与空白段被剔除");
+  assert.equal(messages[0].role, "system");
+  assert.equal(messages[2].role, "assistant");
+  assert.ok(messages[0].content.includes("用户行动B"), "{{userAction}} 已替换");
+  assert.ok(messages[1].content.includes("世界上下文A"), "{{worldState}} 已替换");
+  assert.ok(messages[1].content.includes("回复C"), "{{assistantReply}} 已替换");
+  assert.ok(!messages.some((m) => m.content.includes("{{")), "消息中无残留占位符");
+
+  // 全部段非法 → 回退固定 system+user 两条（内置默认提示词兜底）
+  await callAtlasWorldTurnApi(
+    { name: "t", endpoint: "https://api.example.com/v1/chat/completions", model: "m1", apiKey: "", promptSegments: [{ role: "dragon", content: "x" }] },
+    input,
+    { fetchFn },
+  );
+  assert.equal(capturedBody.messages.length, 2, "全非法回退两条");
+  assert.ok(capturedBody.messages[0].content.includes("阿特拉斯世界推演引擎"), "回退内置默认 system");
+
+  // 无 promptSegments → 旧行为不变（两条）
+  await callAtlasWorldTurnApi(
+    { name: "t", endpoint: "https://api.example.com/v1/chat/completions", model: "m1", apiKey: "" },
+    input,
+    { fetchFn },
+  );
+  assert.equal(capturedBody.messages.length, 2, "无分段维持旧两条");
+});

@@ -1157,3 +1157,95 @@ test("ATLAS-18 建世状态机：已绑定（启用 / 停用）都不触发 ensu
   equal(calls, 0, "已绑定停用 → 零 ensure");
   equal(api.calls.filter((c) => c.path === "/turns/prepare").length, 1, "停用后不再 prepare");
 });
+
+// ---------------------------------------------------------------------------
+// 0.9.17 数据隔离（shujuku 式聊天身份核对）：切卡 / 关聊天绝不残留上一张卡的数据
+// ---------------------------------------------------------------------------
+
+test("数据隔离：无活动聊天时强制未绑定（chatMetadata 滞留防御）", async () => {
+  // 宿主 chatId 为空（已关闭聊天 / 欢迎页），但 chatMetadata 仍滞留旧聊天的绑定
+  const api = makeApi({ stateByChat: { "chat-old": STATE_PAYLOAD } });
+  const hostWrap = makeHost();
+  hostWrap.setChat(null);
+  const staleBinding = bindingFor("chat-old");
+  hostWrap.host.readBinding = () => staleBinding; // 滞留的 metadata
+  const core = createAtlasUiCore({ api, host: hostWrap.host, emitter: makeEmitter(), now: () => NOW_BASE });
+  core.init();
+  await flush();
+  const state = core.getState();
+  equal(state.chatId, null, "chatId 识别为无聊天");
+  equal(state.binding, null, "滞留绑定不采用");
+  equal(state.mode, "unbound", "强制未绑定");
+  equal(state.stateData, null, "stateData 清空（旧世界不显示）");
+  equal(api.calls.filter((c) => String(c.path).startsWith("/state/")).length, 0, "无聊天时不发 /state 请求");
+});
+
+test("数据隔离：CHAT_CHANGED 先摘旧数据再刷新（加载期间不显示上一张卡的世界）", async () => {
+  const api = makeApi({ stateByChat: { "chat-a": STATE_PAYLOAD, "chat-b": STATE_PAYLOAD } });
+  const hostWrap = makeHost();
+  hostWrap.setChat("chat-a");
+  hostWrap.setBinding("chat-a", bindingFor("chat-a"));
+  hostWrap.setBinding("chat-b", bindingFor("chat-b"));
+  const core = createAtlasUiCore({ api, host: hostWrap.host, emitter: makeEmitter(), now: () => NOW_BASE });
+  core.init();
+  await flush();
+  equal(core.getState().mode, "ready", "chat-a 就绪");
+  ok(core.getState().stateData !== null, "chat-a 数据已显示");
+
+  // /state 故意挂起，观察切换瞬间的中间态
+  let releaseState = () => {};
+  const gate = new Promise((resolve) => { releaseState = resolve; });
+  const originalRequest = api.request.bind(api);
+  api.request = async (method, path, body) => {
+    if (path.startsWith("/state/")) { await gate; }
+    return originalRequest(method, path, body);
+  };
+
+  hostWrap.setChat("chat-b");
+  const eventDone = core.handleEvent("CHAT_CHANGED");
+  await flush();
+  // CHAT_CHANGED 同步清场后、/state 返回前：旧数据必须已经摘掉
+  equal(core.getState().stateData, null, "旧聊天数据已被摘掉");
+  equal(core.getState().chatId, "chat-b", "身份已切到新聊天");
+  equal(core.getState().binding?.chatId, "chat-b", "绑定已换绑到新聊天");
+  releaseState();
+  await eventDone;
+  equal(core.getState().mode, "ready", "chat-b 就绪");
+  equal(core.getState().stateData?.worldName, "演示世界", "chat-b 数据正常显示");
+});
+
+test("数据隔离：旧聊天的迟到 /state 响应被丢弃（跨聊天竞态）", async () => {
+  const api = makeApi({ stateByChat: { "chat-a": STATE_PAYLOAD, "chat-b": STATE_PAYLOAD } });
+  const hostWrap = makeHost();
+  hostWrap.setChat("chat-a");
+  hostWrap.setBinding("chat-a", bindingFor("chat-a"));
+  const core = createAtlasUiCore({ api, host: hostWrap.host, emitter: makeEmitter(), now: () => NOW_BASE });
+  core.init();
+  await flush();
+  equal(core.getState().mode, "ready", "chat-a 就绪");
+
+  let releaseState = () => {};
+  const gate = new Promise((resolve) => { releaseState = resolve; });
+  const originalRequest = api.request.bind(api);
+  api.request = async (method, path, body) => {
+    if (path.startsWith("/state/")) { await gate; }
+    return originalRequest(method, path, body);
+  };
+
+  // 发起 chat-b 的切换刷新，但在 /state 返回前宿主已再次切走（chat-c，无绑定）
+  hostWrap.setChat("chat-b");
+  hostWrap.setBinding("chat-b", bindingFor("chat-b"));
+  const eventDone = core.handleEvent("CHAT_CHANGED");
+  await flush();
+  // 真实宿主会再发一次 CHAT_CHANGED（切到 chat-c）：同步清场 + 重新 syncFromHost
+  hostWrap.setChat("chat-c");
+  const eventC = core.handleEvent("CHAT_CHANGED");
+  await flush();
+  releaseState();
+  await eventDone;
+  await eventC;
+  const state = core.getState();
+  equal(state.chatId, "chat-c", "当前聊天是 chat-c");
+  ok(state.stateData === null, "chat-b 的迟到响应被丢弃（stateData 不跨聊天存活）");
+  equal(state.mode, "unbound", "chat-c 无绑定 → 未绑定态");
+});

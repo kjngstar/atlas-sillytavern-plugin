@@ -419,8 +419,10 @@ test("normalize 枚举：connectionMode / apiFormat / promptPostProcessing 白�
 
   assert.equal(normalizePromptPostProcessing("strict"), "strict");
   assert.equal(normalizePromptPostProcessing("single"), "single");
-  assert.equal(normalizePromptPostProcessing("nonsense"), "");
-  assert.equal(normalizePromptPostProcessing(undefined), "");
+  // 0.9.17 shujuku 同款：显式空串 = 未选择保留；缺失/非法 → 默认 strict（强制角色交替）
+  assert.equal(normalizePromptPostProcessing(""), "");
+  assert.equal(normalizePromptPostProcessing("nonsense"), "strict");
+  assert.equal(normalizePromptPostProcessing(undefined), "strict");
 });
 
 test("api.save：main/profile 模式 endpoint 与 model 允许为空；新字段完整落库", () => {
@@ -575,4 +577,225 @@ test("replace.save：非法载荷拒绝；sanitize 旧档缺 contentReplaceRules
   // junk / 重复 id 丢弃
   const junk = sanitizeSettingsV2({ ...legacyRecord, contentReplaceRules: [{ id: "r1", name: "n", start: "<a", end: "</a>", enabled: true }, "junk", { id: "r1", name: "dup", start: "<b", end: "</b>" }] }, testDeps());
   assert.equal(junk.settings.contentReplaceRules.length, 1, "坏条目与重复 id 被丢弃");
+});
+
+// ---------------------------------------------------------------------------
+// 0.9.17 chatbox 同款：按连接 System Prompt（可选）——落库 / 清空 / 视图回传 / 运行时优先级
+// ---------------------------------------------------------------------------
+
+test("api.save systemPrompt：落库 trim；空白清空；视图回传；超长拒绝", () => {
+  const base = createDefaultSettingsV2();
+  const saved = applySettingsCommand(base, {
+    action: "api.save",
+    preset: {
+      name: "带提示词连接", endpoint: "https://api.example.com/v1", model: "m1",
+      maxTokens: 1024, temperature: 0.7, topP: 0.95, timeoutMs: 30_000,
+      systemPrompt: "  你是测试系统提示词。  ",
+    },
+    apiKeyMode: "replace", apiKey: "",
+  }, testDeps());
+  assert.equal(saved.ok, true, saved.ok ? "" : saved.message);
+  const p = saved.settings.apiPresets[0];
+  assert.equal(p.systemPrompt, "你是测试系统提示词。", "保存时 trim");
+
+  // 空白 = 清空覆盖（条目上不再带 systemPrompt）
+  const cleared = applySettingsCommand(saved.settings, {
+    action: "api.save",
+    preset: { ...p, id: p.id, systemPrompt: "   " },
+    apiKeyMode: "keep",
+  }, testDeps());
+  assert.equal(cleared.ok, true, cleared.ok ? "" : cleared.message);
+  assert.equal(cleared.settings.apiPresets[0].systemPrompt, undefined, "空白清空后字段省略");
+
+  // 视图回传：空 → ""（编辑器回填不炸）
+  const view = settingsViewV2(cleared.settings);
+  assert.equal(view.apiPresets[0].systemPrompt, "");
+
+  // 超长（>8000）拒绝
+  const tooLong = applySettingsCommand(base, {
+    action: "api.save",
+    preset: {
+      name: "超长", endpoint: "https://api.example.com/v1", model: "m1",
+      maxTokens: 1024, temperature: 0.7, topP: 0.95, timeoutMs: 30_000,
+      systemPrompt: "x".repeat(8001),
+    },
+    apiKeyMode: "replace", apiKey: "",
+  }, testDeps());
+  assert.equal(tooLong.ok, false, "超过 8000 字拒绝");
+});
+
+test("resolveWorldTurnPreset systemPrompt 优先级：连接覆盖 > 提示词预设 > 空", () => {
+  const base = createDefaultSettingsV2();
+  const connSaved = applySettingsCommand(base, {
+    action: "api.save",
+    preset: {
+      name: "连接", endpoint: "https://api.example.com/v1", model: "m1",
+      maxTokens: 1024, temperature: 0.7, topP: 0.95, timeoutMs: 30_000,
+      systemPrompt: "连接级提示词",
+    },
+    apiKeyMode: "replace", apiKey: "",
+  }, testDeps());
+  const promptSaved = applySettingsCommand(connSaved.settings, {
+    action: "prompt.save",
+    preset: { name: "全局提示词", systemPrompt: "全局提示词预设正文" },
+  }, testDeps());
+  assert.equal(promptSaved.ok, true);
+  const activated = applySettingsCommand(promptSaved.settings, { action: "prompt.activate", id: promptSaved.settings.promptPresets[0].id }, testDeps());
+  const withBoth = applySettingsCommand(activated.settings, { action: "api.activate", id: activated.settings.apiPresets[0].id }, testDeps());
+
+  // 连接级覆盖生效
+  const runtime1 = resolveWorldTurnPreset(withBoth.settings);
+  assert.equal(runtime1.systemPrompt, "连接级提示词", "连接级 System Prompt 优先于提示词预设");
+
+  // 清掉连接级 → 回落提示词预设
+  const clearedConn = applySettingsCommand(withBoth.settings, {
+    action: "api.save",
+    preset: { ...withBoth.settings.apiPresets[0], systemPrompt: "" },
+    apiKeyMode: "keep",
+  }, testDeps());
+  const runtime2 = resolveWorldTurnPreset(clearedConn.settings);
+  assert.equal(runtime2.systemPrompt, "全局提示词预设正文", "回落「推进」页活动提示词预设");
+
+  // 预设也清 → 空串兜底（引擎用内置默认）
+  const noPrompt = applySettingsCommand(clearedConn.settings, { action: "prompt.activate", id: null }, testDeps());
+  const runtime3 = resolveWorldTurnPreset(noPrompt.settings);
+  assert.equal(runtime3.systemPrompt, undefined, "两级都空 → 不带 systemPrompt，引擎内置默认兜底");
+
+  // sanitize：旧档无 systemPrompt 不受影响；坏类型忽略
+  const sanitized = sanitizeSettingsV2({
+    schemaVersion: 2,
+    apiPresets: [{ id: "a1", name: "n", endpoint: "https://api.example.com/v1", model: "m", apiKey: "", maxTokens: 1024, temperature: 0.7, topP: 0.95, timeoutMs: 30_000, systemPrompt: 42, updatedAt: NOW }],
+    promptPresets: [], activeApiPresetId: "a1", activePromptPresetId: null, autoCommit: true, rpmLimit: 30,
+  }, testDeps());
+  assert.equal(sanitized.settings.apiPresets[0].systemPrompt, undefined, "非字符串 systemPrompt 丢弃");
+  assert.equal(sanitized.diagnostics.apiSkipped, 0, "绝不因 systemPrompt 非法丢整条连接");
+});
+
+test("promptPostProcessing 默认 strict（shujuku 同款）：缺失落库补 strict；显式空串保留；运行时据此携带", () => {
+  const base = createDefaultSettingsV2();
+
+  // 旧存档条目没有 promptPostProcessing 字段 → sanitize 不炸；视图显示 strict；运行时携带 strict
+  const legacy = sanitizeSettingsV2({
+    schemaVersion: 2,
+    apiPresets: [{ id: "a1", name: "旧连接", endpoint: "https://api.example.com/v1", model: "m", apiKey: "", maxTokens: 1024, temperature: 0.7, topP: 0.95, timeoutMs: 30_000, updatedAt: NOW }],
+    promptPresets: [], activeApiPresetId: "a1", activePromptPresetId: null, autoCommit: true, rpmLimit: 30,
+  }, testDeps());
+  assert.equal(legacy.diagnostics.apiSkipped, 0, "缺字段不丢条目");
+  assert.equal(settingsViewV2(legacy.settings).apiPresets[0].promptPostProcessing, "strict", "视图缺省显示严格");
+  const runtimeLegacy = resolveWorldTurnPreset(legacy.settings);
+  assert.equal(runtimeLegacy.promptPostProcessing, "strict", "旧连接运行时默认带严格角色交替");
+
+  // 显式「未选择」（空串）→ 落库保留空串 → 运行时不携带
+  const savedNone = applySettingsCommand(base, {
+    action: "api.save",
+    preset: { name: "n1", endpoint: "https://api.example.com/v1", model: "m1", maxTokens: 1024, temperature: 0.7, topP: 0.95, timeoutMs: 30_000, promptPostProcessing: "" },
+    apiKeyMode: "replace", apiKey: "",
+  }, testDeps());
+  assert.equal(savedNone.ok, true, savedNone.ok ? "" : savedNone.message);
+  assert.equal(savedNone.settings.apiPresets[0].promptPostProcessing, "", "显式未选择保留空串");
+  assert.equal(settingsViewV2(savedNone.settings).apiPresets[0].promptPostProcessing, "");
+  const runtimeNone = resolveWorldTurnPreset({ ...savedNone.settings, activeApiPresetId: savedNone.settings.apiPresets[0].id });
+  assert.equal(runtimeNone.promptPostProcessing, undefined, "未选择 → 请求不携带该字段");
+
+  // 非法值经保存归一为 strict
+  const savedJunk = applySettingsCommand(base, {
+    action: "api.save",
+    preset: { name: "n2", endpoint: "https://api.example.com/v1", model: "m1", maxTokens: 1024, temperature: 0.7, topP: 0.95, timeoutMs: 30_000, promptPostProcessing: "carrier-pigeon" },
+    apiKeyMode: "replace", apiKey: "",
+  }, testDeps());
+  assert.equal(savedJunk.settings.apiPresets[0].promptPostProcessing, "strict", "非法值归一为严格");
+});
+
+// ---------------------------------------------------------------------------
+// 0.9.18 分段提示词：落库 / 视图 / sanitize / 运行时 promptSegments 与优先级
+// ---------------------------------------------------------------------------
+
+test("prompt.save segments：非法角色与空段剔除；正文可空；超 16 段截断；视图与 sanitize 往返", () => {
+  const base = createDefaultSettingsV2();
+  const manySegments = Array.from({ length: 20 }, (_, i) => ({ role: "user", content: `段${i}` }));
+  const saved = applySettingsCommand(base, {
+    action: "prompt.save",
+    preset: {
+      name: "分段预设",
+      systemPrompt: "",
+      segments: [
+        { role: "system", content: "第一条" },
+        { role: "dragon", content: "非法角色" },
+        { role: "user", content: "   " },
+        ...manySegments,
+      ],
+    },
+  }, testDeps());
+  assert.equal(saved.ok, true, saved.ok ? "" : saved.message);
+  const p = saved.settings.promptPresets[0];
+  assert.equal(p.segments.length, 16, "剔除非法后截断到 16 段上限");
+  assert.equal(p.segments[0].content, "第一条");
+  assert.equal(p.systemPrompt, "", "分段模式正文允许为空");
+
+  // 视图回传 + sanitize 往返（结构化克隆模拟落盘重读）
+  const view = settingsViewV2(saved.settings);
+  assert.equal(view.promptPresets[0].segments.length, 16);
+  const sanitized = sanitizeSettingsV2(JSON.parse(JSON.stringify(saved.settings)), testDeps());
+  assert.equal(sanitized.settings.promptPresets[0].segments.length, 16, "分段预设经 sanitize 存活");
+  assert.equal(sanitized.diagnostics.promptSkipped, 0, "不丢条目");
+
+  // 两者都空 → 拒绝
+  const bothEmpty = applySettingsCommand(base, {
+    action: "prompt.save",
+    preset: { name: "空空", systemPrompt: "  ", segments: [{ role: "user", content: " " }] },
+  }, testDeps());
+  assert.equal(bothEmpty.ok, false, "正文与有效分段都空拒绝");
+});
+
+test("resolveWorldTurnPreset：segments → promptSegments；连接级 systemPrompt 仍最高优先；单条旧预设不回归", () => {
+  const base = createDefaultSettingsV2();
+  const segSaved = applySettingsCommand(base, {
+    action: "prompt.save",
+    preset: {
+      name: "分段预设",
+      systemPrompt: "",
+      segments: [{ role: "system", content: "分段系统指令" }, { role: "user", content: "状态：{{worldState}}" }],
+    },
+  }, testDeps());
+  assert.equal(segSaved.ok, true);
+  const promptId = segSaved.settings.promptPresets[0].id;
+  const connSaved = applySettingsCommand(segSaved.settings, {
+    action: "api.save",
+    preset: { name: "c", endpoint: "https://api.example.com/v1", model: "m", maxTokens: 1024, temperature: 0.7, topP: 0.95, timeoutMs: 30_000 },
+    apiKeyMode: "replace", apiKey: "",
+  }, testDeps());
+  const activated = applySettingsCommand(connSaved.settings, { action: "prompt.activate", id: promptId }, testDeps());
+  const withApi = applySettingsCommand(activated.settings, { action: "api.activate", id: activated.settings.apiPresets[0].id }, testDeps());
+
+  // 分段预设 → 运行时 promptSegments（不带 systemPrompt）
+  const runtimeSeg = resolveWorldTurnPreset(withApi.settings);
+  assert.equal(runtimeSeg.promptSegments.length, 2, "分段预设运行时走 promptSegments");
+  assert.equal(runtimeSeg.promptSegments[0].content, "分段系统指令");
+  assert.equal(runtimeSeg.systemPrompt, undefined, "分段模式不带单条 systemPrompt");
+
+  // 连接级 systemPrompt 覆盖分段（与 0.9.17 优先级一致）
+  const overrideSaved = applySettingsCommand(withApi.settings, {
+    action: "api.save",
+    preset: { ...withApi.settings.apiPresets[0], systemPrompt: "连接级覆盖" },
+    apiKeyMode: "keep",
+  }, testDeps());
+  const runtimeOverride = resolveWorldTurnPreset(overrideSaved.settings);
+  assert.equal(runtimeOverride.systemPrompt, "连接级覆盖", "连接级覆盖最高优先");
+  assert.equal(runtimeOverride.promptSegments, undefined, "被覆盖时不下发分段");
+
+  // 旧单条预设（无 segments）→ systemPrompt 透传，行为不回归（先清掉连接级覆盖）
+  const singleSaved = applySettingsCommand(overrideSaved.settings, {
+    action: "api.save",
+    preset: { ...overrideSaved.settings.apiPresets[0], systemPrompt: "" },
+    apiKeyMode: "keep",
+  }, testDeps());
+  const singlePrompt = applySettingsCommand(singleSaved.settings, {
+    action: "prompt.save",
+    preset: { name: "单条预设", systemPrompt: "单条正文" },
+  }, testDeps());
+  const singleId = singlePrompt.settings.promptPresets.find((p) => p.name === "单条预设").id;
+  const singleAct = applySettingsCommand(singlePrompt.settings, { action: "prompt.activate", id: singleId }, testDeps());
+  const runtimeSingle = resolveWorldTurnPreset(singleAct.settings);
+  assert.equal(runtimeSingle.systemPrompt, "单条正文");
+  assert.equal(runtimeSingle.promptSegments, undefined, "单条预设不产生 promptSegments");
 });

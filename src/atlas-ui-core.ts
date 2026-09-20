@@ -406,6 +406,12 @@ export function createAtlasUiCore(deps: {
     setState({ chatId, panelOpen, destinationPreview: null });
     if (state.serviceStatus === "offline" || state.serviceStatus === "incompatible") return;
 
+    // 0.9.17 数据隔离（shujuku hasActiveChatContext 口径）：没有活动聊天 = 没有任何数据。
+    // 宿主 chatMetadata 可能仍滞留上一个聊天的绑定（关聊天 / 切卡瞬间），绝不能拿来用。
+    if (chatId === null) {
+      setState({ binding: null, bindingInvalid: false, mode: "unbound", stateData: null });
+      return;
+    }
     const raw = host.readBinding();
     if (raw === null || raw === undefined) {
       setState({ binding: null, bindingInvalid: false, mode: "unbound", stateData: null });
@@ -417,7 +423,7 @@ export function createAtlasUiCore(deps: {
       return;
     }
     const binding = parsed.value;
-    if (chatId !== null && binding.chatId !== chatId) {
+    if (binding.chatId !== chatId) {
       // 绑定属于另一个聊天（不该发生；防御性处理为未绑定）
       setState({ binding: null, bindingInvalid: false, mode: "unbound", stateData: null });
       return;
@@ -432,10 +438,21 @@ export function createAtlasUiCore(deps: {
       setState({ mode: "unbound", stateData: null });
       return;
     }
+    // 0.9.17：请求与绑定必须同属当前聊天；响应必须自报同一 chatId 才收（跨聊天竞态丢弃）。
+    if (binding.chatId !== state.chatId) {
+      setState({ binding: null, mode: "unbound", stateData: null });
+      return;
+    }
     try {
       const result = await api.request("GET", `/state/${encodeURIComponent(binding.chatId)}`);
       const body = result.body as { ok?: boolean; error?: { code?: string; message?: string }; data?: Record<string, unknown> };
+      // 等待期间聊天已切换 → 响应属于旧聊天，丢弃（stateData 绝不跨聊天存活）
+      if (state.chatId === null || binding.chatId !== state.chatId) return;
       if (result.status === 200 && body.ok && body.data) {
+        const responseChatId = typeof (body.data as Record<string, unknown>).chatId === "string"
+          ? (body.data as Record<string, unknown>).chatId as string
+          : binding.chatId;
+        if (responseChatId !== state.chatId) return;
         setState({ mode: "ready", stateData: body.data, lastError: null });
         return;
       }
@@ -486,6 +503,9 @@ export function createAtlasUiCore(deps: {
       clearTimers();
       rolledBackFloors.clear();
       setState({ rearmTurn: null });
+      // 0.9.17 数据隔离：先把旧聊天的数据从面板上摘掉再刷新——
+      // 切卡 / 关聊天的瞬间绝不能让上一张卡的世界还挂在界面上。
+      setState({ binding: null, stateData: null, mode: "unbound", modeHint: null });
       void track(refresh());
       return;
     }

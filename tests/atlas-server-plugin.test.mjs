@@ -198,7 +198,7 @@ test("路由清单：15 条且全部在 /api/plugins/atlas 前缀下", () => {
   }
 });
 
-test("health：无敏感字段", async () => {
+test("health：无敏感字段；版本与 ATLAS_PLUGIN_VERSION 一致（0.9.18 防 health 版本再次烂掉）", async () => {
   const { core } = await setup(null);
   const result = await core.handle("GET", "/health");
   equal(result.status, 200, "health 200");
@@ -206,6 +206,8 @@ test("health：无敏感字段", async () => {
   for (const forbidden of ["key", "token", "secret", "authorization", "env", "path", "cwd"]) {
     ok(!serialized.includes(forbidden), `health 响应不含 ${forbidden}`);
   }
+  const serverMod = await import("../atlas-server-plugin/index.mjs");
+  equal(result.body.data.version, serverMod.ATLAS_PLUGIN_VERSION, "health version = 插件版本（六处同步第 6 处）");
 });
 
 // ---------------------------------------------------------------------------

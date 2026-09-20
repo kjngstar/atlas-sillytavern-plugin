@@ -72,7 +72,12 @@ export function normalizeApiFormat(raw: unknown): AtlasApiFormat {
 }
 
 export function normalizePromptPostProcessing(raw: unknown): string {
-  return typeof raw === "string" && (PROMPT_POST_PROCESSING as readonly string[]).includes(raw) ? raw : "";
+  // 0.9.17 shujuku 同款语义：显式空串 = 用户选择「未选择」，保留（请求不携带）；
+  // 缺失 / 非字符串 / 非法值 → 默认 strict（强制对话角色交替，shujuku 更高级，作者钦定）。
+  if (typeof raw !== "string") return "strict";
+  const normalized = raw.trim();
+  if (normalized === "") return "";
+  return (PROMPT_POST_PROCESSING as readonly string[]).includes(normalized) ? normalized : "strict";
 }
 
 /** API 连接预设：连接资料的唯一载体（不含提示词）。 */
@@ -101,14 +106,47 @@ export interface AtlasApiConnectionPreset {
   requestHeaders?: string;
   /** 提示词后处理（custom_prompt_post_processing）；"" = 不携带。 */
   promptPostProcessing?: string;
+  /** 0.9.17 按连接覆盖的系统提示词（chatbox 同款「System Prompt（可选）」）；空 = 跟随「推进」页活动提示词预设 / 内置默认。 */
+  systemPrompt?: string;
   updatedAt: number;
 }
 
-/** 提示词预设：只承载 systemPrompt，与连接完全解耦。 */
+/** 提示词分段角色白名单（0.9.18 shujuku prompt-builder 同款三角色）。 */
+export const PROMPT_SEGMENT_ROLES = ["system", "user", "assistant"] as const;
+export type AtlasPromptSegmentRole = (typeof PROMPT_SEGMENT_ROLES)[number];
+
+/** 提示词分段（0.9.18 长段多角色预设）：正文支持 {{worldState}}/{{userAction}}/{{assistantReply}} 占位符。 */
+export interface AtlasPromptSegment {
+  role: AtlasPromptSegmentRole;
+  content: string;
+}
+
+export const MAX_PROMPT_SEGMENTS = 16;
+
+/** 分段归一化：角色白名单小写归一、内容 trim、空段丢弃、超限截断；非法输入 → 空数组（回退单提示词模式）。 */
+export function normalizePromptSegments(raw: unknown): AtlasPromptSegment[] {
+  if (!Array.isArray(raw)) return [];
+  const segments: AtlasPromptSegment[] = [];
+  for (const entry of raw.slice(0, MAX_PROMPT_SEGMENTS * 2)) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const record = entry as Record<string, unknown>;
+    const role = typeof record.role === "string" ? record.role.trim().toLowerCase() : "";
+    if (!(PROMPT_SEGMENT_ROLES as readonly string[]).includes(role)) continue;
+    const content = typeof record.content === "string" ? record.content.trim() : "";
+    if (!content) continue;
+    if (segments.length >= MAX_PROMPT_SEGMENTS) break;
+    segments.push({ role: role as AtlasPromptSegmentRole, content: content.slice(0, MAX_PROMPT_CHARS) });
+  }
+  return segments;
+}
+
+/** 提示词预设：单提示词（systemPrompt）或分段预设（segments 非空，优先生效）。 */
 export interface AtlasPromptPreset {
   id: string;
   name: string;
   systemPrompt: string;
+  /** 0.9.18 分段模式：非空时取代 systemPrompt 单条（引擎逐段装配 + 占位符替换）。 */
+  segments?: AtlasPromptSegment[];
   updatedAt: number;
 }
 
@@ -167,13 +205,14 @@ export type AtlasSettingsCommand =
         excludeBodyParams?: string;
         requestHeaders?: string;
         promptPostProcessing?: string;
+        systemPrompt?: string;
       };
       apiKeyMode: "keep" | "replace" | "clear";
       apiKey?: string;
     }
   | { action: "api.delete"; id: string }
   | { action: "api.activate"; id: string | null }
-  | { action: "prompt.save"; preset: { id?: string; name: string; systemPrompt: string } }
+  | { action: "prompt.save"; preset: { id?: string; name: string; systemPrompt: string; segments?: AtlasPromptSegment[] } }
   | { action: "prompt.delete"; id: string }
   | { action: "prompt.activate"; id: string | null }
   | { action: "replace.save"; preset: { id?: string; name: string; start: string; end: string; enabled?: boolean } }
@@ -323,11 +362,12 @@ function parseConnectionPreset(raw: unknown): Omit<AtlasApiConnectionPreset, "id
     ...(typeof record.bodyParams === "string" && record.bodyParams.trim() ? { bodyParams: record.bodyParams.slice(0, 4000) } : {}),
     ...(typeof record.excludeBodyParams === "string" && record.excludeBodyParams.trim() ? { excludeBodyParams: record.excludeBodyParams.slice(0, 2000) } : {}),
     ...(typeof record.requestHeaders === "string" && record.requestHeaders.trim() ? { requestHeaders: record.requestHeaders.slice(0, 2000) } : {}),
-    ...(typeof record.promptPostProcessing === "string" && record.promptPostProcessing ? { promptPostProcessing: normalizePromptPostProcessing(record.promptPostProcessing) } : {}),
+    ...(typeof record.promptPostProcessing === "string" ? { promptPostProcessing: normalizePromptPostProcessing(record.promptPostProcessing) } : {}),
+    ...(typeof record.systemPrompt === "string" && record.systemPrompt.trim() ? { systemPrompt: record.systemPrompt.slice(0, MAX_PROMPT_CHARS) } : {}),
   };
 }
 
-function parsePromptPreset(raw: unknown): { id: string; name: string; systemPrompt: string } | null {
+function parsePromptPreset(raw: unknown): { id: string; name: string; systemPrompt: string; segments?: AtlasPromptSegment[] } | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const record = raw as Record<string, unknown>;
   const id = normalizeId(record.id);
@@ -335,8 +375,15 @@ function parsePromptPreset(raw: unknown): { id: string; name: string; systemProm
   if (typeof record.name !== "string" || !record.name.trim() || record.name.length > MAX_NAME_CHARS) return null;
   if (typeof record.systemPrompt !== "string") return null;
   const prompt = record.systemPrompt.trim();
-  if (!prompt || prompt.length > MAX_PROMPT_CHARS) return null;
-  return { id, name: record.name.trim(), systemPrompt: prompt };
+  // 0.9.18：单提示词（systemPrompt 非空）或分段预设（segments 非空）二选一即可合法
+  const segments = normalizePromptSegments(record.segments);
+  if ((!prompt || prompt.length > MAX_PROMPT_CHARS) && segments.length === 0) return null;
+  return {
+    id,
+    name: record.name.trim(),
+    systemPrompt: prompt.slice(0, MAX_PROMPT_CHARS),
+    ...(segments.length > 0 ? { segments } : {}),
+  };
 }
 
 /**
@@ -580,6 +627,9 @@ export function applySettingsCommand(
       if (typeof preset.requestHeaders === "string" && preset.requestHeaders.length > 2000) {
         return fail(settings, "INVALID_PAYLOAD", "附加请求标头不超过 2000 字。");
       }
+      if (typeof preset.systemPrompt === "string" && preset.systemPrompt.length > MAX_PROMPT_CHARS) {
+        return fail(settings, "INVALID_PAYLOAD", `System Prompt 不超过 ${MAX_PROMPT_CHARS} 字。`);
+      }
       if (!isFiniteIntIn(preset.maxTokens, MIN_MAX_TOKENS, MAX_MAX_TOKENS)) {
         return fail(settings, "INVALID_PAYLOAD", `最大回复长度必须是 ${MIN_MAX_TOKENS}..${MAX_MAX_TOKENS} 的整数。`);
       }
@@ -637,7 +687,8 @@ export function applySettingsCommand(
         ...(typeof preset.bodyParams === "string" && preset.bodyParams.trim() ? { bodyParams: preset.bodyParams.slice(0, 4000) } : {}),
         ...(typeof preset.excludeBodyParams === "string" && preset.excludeBodyParams.trim() ? { excludeBodyParams: preset.excludeBodyParams.slice(0, 2000) } : {}),
         ...(typeof preset.requestHeaders === "string" && preset.requestHeaders.trim() ? { requestHeaders: preset.requestHeaders.slice(0, 2000) } : {}),
-        ...(normalizePromptPostProcessing(preset.promptPostProcessing) ? { promptPostProcessing: normalizePromptPostProcessing(preset.promptPostProcessing) } : {}),
+        ...(typeof preset.promptPostProcessing === "string" ? { promptPostProcessing: normalizePromptPostProcessing(preset.promptPostProcessing) } : {}),
+        ...(typeof preset.systemPrompt === "string" && preset.systemPrompt.trim() ? { systemPrompt: preset.systemPrompt.trim().slice(0, MAX_PROMPT_CHARS) } : {}),
         updatedAt: now,
       };
       const apiPresets = existingIndex >= 0
@@ -678,7 +729,9 @@ export function applySettingsCommand(
         return fail(settings, "INVALID_PAYLOAD", "提示词名称必填且不超过 64 字。");
       }
       const text = typeof preset.systemPrompt === "string" ? preset.systemPrompt.trim() : "";
-      if (!text) return fail(settings, "INVALID_PAYLOAD", "提示词正文不能为空（空 = 内置默认，无需保存）。");
+      // 0.9.18 分段模式：segments 非空时正文可为空（分段取代单提示词）；两者都空才拒绝
+      const segments = normalizePromptSegments(preset.segments);
+      if (!text && segments.length === 0) return fail(settings, "INVALID_PAYLOAD", "提示词正文不能为空（空 = 内置默认，无需保存；分段预设请至少给出 1 段）。");
       if (text.length > MAX_PROMPT_CHARS) return fail(settings, "FIELD_LIMIT_EXCEEDED", `提示词不超过 ${MAX_PROMPT_CHARS} 字。`);
       const targetId = preset.id === undefined ? null : normalizeId(preset.id);
       if (preset.id !== undefined && targetId === null) return fail(settings, "INVALID_PAYLOAD", "预设 ID 形状非法。");
@@ -692,6 +745,7 @@ export function applySettingsCommand(
         id: targetId ?? resolveId("prompt", settings.promptPresets.length, text, deps, new Set(settings.promptPresets.map((p) => p.id))),
         name: uniqueName(preset.name, usedNames),
         systemPrompt: text,
+        ...(segments.length > 0 ? { segments } : {}),
         updatedAt: now,
       };
       const promptPresets = existingIndex >= 0
@@ -914,6 +968,7 @@ export interface AtlasSettingsView {
     excludeBodyParams: string;
     requestHeaders: string;
     promptPostProcessing: string;
+    systemPrompt: string;
     /** 0.9.12（作者令，照抄 shujuku）：GET 返回明文密钥供编辑器回填与测试连接复用——密钥本就存在作者自己的浏览器存储里。 */
     apiKey: string;
   }>;
@@ -955,6 +1010,7 @@ export function settingsViewV2(settings: AtlasServerSettingsV2): AtlasSettingsVi
         excludeBodyParams: p.excludeBodyParams ?? "",
         requestHeaders: p.requestHeaders ?? "",
         promptPostProcessing: normalizePromptPostProcessing(p.promptPostProcessing),
+        systemPrompt: p.systemPrompt ?? "",
         // 0.9.12（作者令，照抄 shujuku）：GET 返回明文密钥，编辑器回填 / 测试连接复用，不再每次重输
         apiKey: key,
       };
@@ -977,7 +1033,8 @@ export function settingsViewV2(settings: AtlasServerSettingsV2): AtlasSettingsVi
 /**
  * 运行时组合：活动 API 连接 + 活动提示词 → 现有 AtlasApiPreset。
  * 未配置活动 API → null（提交必须报 API_NOT_CONFIGURED，零 fetch）。
- * 活动提示词为 null → systemPrompt 空串（交给 DEFAULT_WORLD_TURN_SYSTEM_PROMPT 兜底）。
+ * systemPrompt 优先级（0.9.17 chatbox 同款 + 0.9.18 分段）：连接级 System Prompt（可选）>
+ * 「推进」页活动提示词预设分段模式（segments）> 单条 systemPrompt > 空（DEFAULT_WORLD_TURN_SYSTEM_PROMPT 兜底）。
  */
 export function resolveWorldTurnPreset(settings: AtlasServerSettingsV2): AtlasApiPreset | null {
   const connection = settings.apiPresets.find((p) => p.id === settings.activeApiPresetId);
@@ -985,6 +1042,7 @@ export function resolveWorldTurnPreset(settings: AtlasServerSettingsV2): AtlasAp
   const prompt = settings.promptPresets.find((p) => p.id === settings.activePromptPresetId);
   const mode = normalizeConnectionMode(connection.connectionMode);
   const format = normalizeApiFormat(connection.apiFormat);
+  const connectionPrompt = typeof connection.systemPrompt === "string" ? connection.systemPrompt.trim() : "";
   return {
     name: connection.name,
     endpoint: connection.endpoint,
@@ -1001,6 +1059,13 @@ export function resolveWorldTurnPreset(settings: AtlasServerSettingsV2): AtlasAp
     ...(connection.excludeBodyParams ? { excludeBodyParams: connection.excludeBodyParams } : {}),
     ...(connection.requestHeaders ? { requestHeaders: connection.requestHeaders } : {}),
     ...(normalizePromptPostProcessing(connection.promptPostProcessing) ? { promptPostProcessing: normalizePromptPostProcessing(connection.promptPostProcessing) } : {}),
-    ...(prompt ? { systemPrompt: prompt.systemPrompt } : {}),
+    // 0.9.18 systemPrompt 优先级：连接级覆盖 > 提示词预设分段模式 > 提示词预设单条 > 空（内置默认兜底）
+    ...(connectionPrompt
+      ? { systemPrompt: connectionPrompt }
+      : prompt && prompt.segments && prompt.segments.length > 0
+        ? { promptSegments: prompt.segments }
+        : prompt
+          ? { systemPrompt: prompt.systemPrompt }
+          : {}),
   };
 }

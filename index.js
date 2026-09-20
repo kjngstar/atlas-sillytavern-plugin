@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.16";
+export const ATLAS_EXTENSION_VERSION = "0.9.18";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -122,8 +122,19 @@ export function createApi(context) {
 function createHost(context) {
   return {
     getChatId() {
-      const value = context().chatId;
-      return value === undefined || value === null ? null : String(value);
+      // shujuku getActiveChatId_ACU 口径（0.9.17 数据隔离）：优先 getCurrentChatId()，
+      // 兜底 chatId 变量；空串 / "null" / undefined 一律视为「当前没有聊天」。
+      // 直接信 context().chatId 会在关聊天 / 切卡瞬间拿到滞留值 → 面板残留旧卡数据。
+      const ctx = context();
+      let value;
+      try {
+        value = typeof ctx.getCurrentChatId === "function" ? ctx.getCurrentChatId() : ctx.chatId;
+      } catch {
+        value = ctx.chatId;
+      }
+      const normalized = value === undefined || value === null ? "" : String(value).trim();
+      if (!normalized || normalized === "null" || normalized === "undefined") return null;
+      return normalized;
     },
     readBinding() {
       const metadata = context().chatMetadata;
@@ -1487,7 +1498,8 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       bodyParams: "",
       excludeBodyParams: "",
       requestHeaders: "",
-      promptPostProcessing: "",
+      promptPostProcessing: "strict",
+      systemPrompt: "",
     };
   }
 
@@ -1510,6 +1522,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
           excludeBodyParams: preset.excludeBodyParams ?? "",
           requestHeaders: preset.requestHeaders ?? "",
           promptPostProcessing: preset.promptPostProcessing ?? "",
+          systemPrompt: preset.systemPrompt ?? "",
         }
       : newApiDraft();
   }
@@ -1532,16 +1545,24 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       excludeBodyParams: String(preset.excludeBodyParams ?? ""),
       requestHeaders: String(preset.requestHeaders ?? ""),
       promptPostProcessing: String(preset.promptPostProcessing ?? ""),
+      systemPrompt: String(preset.systemPrompt ?? ""),
     };
   }
 
   function newPromptDraft() {
-    return { id: null, name: "", systemPrompt: "" };
+    return { id: null, name: "", systemPrompt: "", segments: [] };
   }
+
+  /** 分段角色白名单（0.9.18，与 src/atlas-settings.ts PROMPT_SEGMENT_ROLES 同口径）。 */
+  const PROMPT_SEGMENT_ROLES = ["system", "user", "assistant"];
 
   function activePromptText() {
     if (!settingsV2) return "";
     const active = promptLibrary.find((p) => p.id === settingsV2.activePromptPresetId);
+    // 0.9.18 分段模式：预览逐段 [role] 正文（占位符保持原样，发送时才替换）
+    if (active && Array.isArray(active.segments) && active.segments.length > 0) {
+      return active.segments.map((s) => `[${s.role}] ${String(s.content ?? "")}`).join("\n\n");
+    }
     if (active) return String(active.systemPrompt ?? "");
     return String(settingsV2.builtInPrompt?.systemPrompt ?? "");
   }
@@ -1616,7 +1637,10 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     for (const preset of promptLibrary) {
       const option = document.createElement("option");
       option.value = preset.id;
-      option.textContent = preset.name;
+      // 0.9.18：分段预设标注段数，一眼区分
+      option.textContent = Array.isArray(preset.segments) && preset.segments.length > 0
+        ? `${preset.name}（分段 ${preset.segments.length}）`
+        : preset.name;
       promptSelect.append(option);
     }
     promptSelect.value = promptDraft?.id ?? (settingsV2?.activePromptPresetId ?? BUILTIN_PROMPT_ID);
@@ -1627,7 +1651,12 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       }
       const preset = promptLibrary.find((p) => p.id === promptSelect.value);
       promptDraft = preset
-        ? { id: preset.id, name: preset.name, systemPrompt: preset.systemPrompt }
+        ? {
+            id: preset.id,
+            name: preset.name,
+            systemPrompt: preset.systemPrompt,
+            segments: Array.isArray(preset.segments) ? preset.segments.map((s) => ({ role: s.role, content: s.content })) : [],
+          }
         : newPromptDraft();
       promptDraftDirty = false;
       setStatus("", "ok");
@@ -1719,8 +1748,96 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     bodyField.append(bodyInput);
     bodyField.append(el("span", "aw-hint", isBuiltinDraft
       ? "内置默认为只读——点「复制内置默认为新预设」或「另存为」后即可修改。"
-      : "留空 = 使用内置默认；用户行动、助手回复与世界上下文由系统自动组装，不在这里编辑。"));
+      : "留空 = 使用内置默认；用户行动、助手回复与世界上下文由系统自动组装，不在这里编辑。启用下方分段模式后本正文不发送。"));
     promptPanel.append(bodyField);
+
+    // 0.9.18 分段模式（shujuku prompt-builder 同款长段多角色预设）：≥1 段时取代上方单条正文
+    const segDetails = document.createElement("details");
+    segDetails.className = "aw-details";
+    const segSummary = document.createElement("summary");
+    segSummary.className = "aw-details__summary";
+    segSummary.textContent = "分段模式（长段多角色预设）";
+    const segBody = el("div", "aw-details__body");
+    const segRows = el("div", "aw-seg-rows");
+    const syncSegSummary = () => {
+      const count = Array.isArray(promptDraft?.segments) ? promptDraft.segments.filter((s) => String(s.content ?? "").trim()).length : 0;
+      segSummary.textContent = `分段模式（长段多角色预设）${count > 0 ? `· 已启用 ${count} 段，发送时忽略上方正文` : "· 未启用"}`;
+    };
+    const renderSegRows = () => {
+      segRows.innerHTML = "";
+      const segments = Array.isArray(promptDraft?.segments) ? promptDraft.segments : [];
+      segments.forEach((segment, index) => {
+        const row = el("div", "aw-seg-row");
+        const roleSelect = document.createElement("select");
+        roleSelect.className = "aw-input";
+        roleSelect.setAttribute("aria-label", `第 ${index + 1} 段角色`);
+        for (const [value, label] of [["system", "system"], ["user", "user"], ["assistant", "assistant"]]) {
+          const opt = document.createElement("option");
+          opt.value = value;
+          opt.textContent = label;
+          roleSelect.append(opt);
+        }
+        roleSelect.value = PROMPT_SEGMENT_ROLES.includes(segment.role) ? segment.role : "system";
+        roleSelect.addEventListener("change", () => {
+          segment.role = roleSelect.value;
+          promptDraftDirty = true;
+          if (syncPromptDirty) syncPromptDirty();
+        });
+        const area = document.createElement("textarea");
+        area.className = "aw-input aw-input--area";
+        area.rows = 3;
+        area.maxLength = 8000;
+        area.value = String(segment.content ?? "");
+        area.placeholder = "分段正文，支持 {{worldState}} / {{userAction}} / {{assistantReply}}";
+        area.setAttribute("aria-label", `第 ${index + 1} 段正文`);
+        area.addEventListener("input", () => {
+          segment.content = area.value;
+          promptDraftDirty = true;
+          syncSegSummary();
+          if (syncPromptDirty) syncPromptDirty();
+        });
+        const delBtn = el("button", "aw-btn aw-btn--icon", "✕");
+        delBtn.type = "button";
+        delBtn.setAttribute("aria-label", `删除第 ${index + 1} 段`);
+        delBtn.addEventListener("click", () => {
+          if (!promptDraft || !Array.isArray(promptDraft.segments)) return;
+          promptDraft.segments = promptDraft.segments.filter((_, i) => i !== index);
+          promptDraftDirty = true;
+          renderSegRows();
+          if (syncPromptDirty) syncPromptDirty();
+        });
+        row.append(roleSelect, area, delBtn);
+        segRows.append(row);
+      });
+      if (segments.length === 0) {
+        segRows.append(el("span", "aw-hint", "还没有分段——点「添加一段」启用。空段保存时自动剔除。"));
+      }
+      syncSegSummary();
+    };
+    if (isBuiltinDraft) {
+      segBody.append(el("span", "aw-hint", "内置默认不支持分段——先复制为新预设。"));
+    } else {
+      const addSegBtn = el("button", "aw-btn", "添加一段");
+      addSegBtn.type = "button";
+      addSegBtn.setAttribute("aria-label", "添加一个提示词分段");
+      addSegBtn.addEventListener("click", () => {
+        if (!promptDraft) promptDraft = newPromptDraft();
+        if (!Array.isArray(promptDraft.segments)) promptDraft.segments = [];
+        if (promptDraft.segments.length >= 16) {
+          setStatus("分段最多 16 段。", "error");
+          return;
+        }
+        promptDraft.segments.push({ role: "system", content: "" });
+        promptDraftDirty = true;
+        renderSegRows();
+        if (syncPromptDirty) syncPromptDirty();
+      });
+      segBody.append(addSegBtn, el("span", "aw-hint", "占位符在发送时替换：{{worldState}}=世界状态上下文，{{userAction}}=本轮用户行动，{{assistantReply}}=本轮助手回复。角色任意排列（如 system→user→assistant→user）；输出契约不变——模型仍须只输出一个 JSON 对象。"));
+      segBody.append(segRows);
+      renderSegRows();
+    }
+    segDetails.append(segSummary, segBody);
+    promptPanel.append(segDetails);
 
     // 当前生效提示词（默认折叠，只读）
     const details = document.createElement("details");
@@ -1740,7 +1857,12 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     discardButton.addEventListener("click", () => {
       const preset = promptLibrary.find((p) => p.id === promptDraft?.id);
       promptDraft = preset
-        ? { id: preset.id, name: preset.name, systemPrompt: preset.systemPrompt }
+        ? {
+            id: preset.id,
+            name: preset.name,
+            systemPrompt: preset.systemPrompt,
+            segments: Array.isArray(preset.segments) ? preset.segments.map((s) => ({ role: s.role, content: s.content })) : [],
+          }
         : newPromptDraft();
       promptDraftDirty = false;
       setStatus("", "ok");
@@ -1759,7 +1881,12 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
         if (ok) {
           const created = promptLibrary[promptLibrary.length - 1];
           promptDraft = created
-            ? { id: created.id, name: created.name, systemPrompt: created.systemPrompt }
+            ? {
+                id: created.id,
+                name: created.name,
+                systemPrompt: created.systemPrompt,
+                segments: Array.isArray(created.segments) ? created.segments.map((s) => ({ role: s.role, content: s.content })) : [],
+              }
             : newPromptDraft();
           promptDraftDirty = false;
           setStatus("已复制为新预设，可继续编辑。");
@@ -1771,16 +1898,32 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       promptSaveButton.type = "button";
       promptSaveButton.setAttribute("aria-label", "保存当前提示词预设");
       promptSaveButton.addEventListener("click", async () => {
-        if (!promptDraft?.name.trim() || !promptDraft.systemPrompt.trim()) {
-          setStatus("提示词名称与正文都不能为空。", "error");
+        if (!promptDraft?.name.trim()) {
+          setStatus("提示词名称不能为空。", "error");
+          renderCenter();
+          return;
+        }
+        // 0.9.18 分段模式：有非空分段 → 保存 segments（正文忽略，存空串）；否则走单条正文
+        const draftSegments = (Array.isArray(promptDraft.segments) ? promptDraft.segments : [])
+          .map((s) => ({ role: PROMPT_SEGMENT_ROLES.includes(s?.role) ? s.role : "system", content: String(s?.content ?? "").trim() }))
+          .filter((s) => s.content.length > 0)
+          .slice(0, 16);
+        const useSegments = draftSegments.length > 0;
+        if (!useSegments && !promptDraft.systemPrompt.trim()) {
+          setStatus("提示词正文不能为空（或启用分段模式并至少写 1 段）。", "error");
           renderCenter();
           return;
         }
         const ok = await sendSettingsCommand({
           action: "prompt.save",
-          preset: { id: promptDraft.id, name: promptDraft.name, systemPrompt: promptDraft.systemPrompt },
+          preset: {
+            ...(promptDraft.id ? { id: promptDraft.id } : {}),
+            name: promptDraft.name,
+            systemPrompt: useSegments ? "" : promptDraft.systemPrompt,
+            ...(useSegments ? { segments: draftSegments } : {}),
+          },
         });
-        if (ok) { promptDraftDirty = false; setStatus("提示词已保存。"); }
+        if (ok) { promptDraftDirty = false; setStatus(useSegments ? `分段提示词已保存（${draftSegments.length} 段）。` : "提示词已保存。"); }
         renderCenter();
       });
     }
@@ -1793,9 +1936,18 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
         ? window.prompt("新提示词预设名称", promptDraft?.name ? `${promptDraft.name} 副本` : "新提示词")
         : null;
       if (!name || !name.trim()) return;
+      const draftSegmentsForCopy = (Array.isArray(promptDraft?.segments) ? promptDraft.segments : [])
+        .map((s) => ({ role: PROMPT_SEGMENT_ROLES.includes(s?.role) ? s.role : "system", content: String(s?.content ?? "").trim() }))
+        .filter((s) => s.content.length > 0)
+        .slice(0, 16);
+      const useSegmentsForCopy = draftSegmentsForCopy.length > 0;
       const ok = await sendSettingsCommand({
         action: "prompt.save",
-        preset: { name: name.trim(), systemPrompt: promptDraft?.systemPrompt || settingsV2?.builtInPrompt?.systemPrompt || "" },
+        preset: {
+          name: name.trim(),
+          systemPrompt: useSegmentsForCopy ? "" : (promptDraft?.systemPrompt || settingsV2?.builtInPrompt?.systemPrompt || ""),
+          ...(useSegmentsForCopy ? { segments: draftSegmentsForCopy } : {}),
+        },
       });
       if (ok) { promptDraftDirty = false; setStatus("已另存为新的提示词预设。"); }
       renderCenter();
@@ -2142,7 +2294,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
         if (syncApiDirty) syncApiDirty();
       });
       postField.append(postSelect);
-      postField.append(el("span", "aw-hint", "SillyTavern custom_prompt_post_processing；默认未选择 = 不携带该字段，消息原样透传。"));
+      postField.append(el("span", "aw-hint", "SillyTavern custom_prompt_post_processing；shujuku 同款默认「严格」（强制对话角色交替、用户最先）；选「未选择」= 不携带该字段，消息原样透传。"));
       advBody.append(postField);
       advDetails.append(advSummary, advBody);
       panel.append(advDetails);
@@ -2187,6 +2339,26 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     } else {
       panel.append(el("div", "aw-note", "酒馆主 API 模式：推演经酒馆助手（TavernHelper.generateRaw）走酒馆当前主 API，密钥与模型跟随酒馆设置，无需在 Atlas 里填端点。下方「测试连接」会检查酒馆助手是否可用。"));
     }
+
+    // System Prompt（可选，chatbox 同款）：各连接方式通用；留空 = 跟随「推进」页活动提示词预设 / 内置默认
+    const sysPromptField = el("div", "aw-field");
+    sysPromptField.append(el("span", "aw-field__label", "System Prompt（可选）"));
+    const sysPromptArea = document.createElement("textarea");
+    sysPromptArea.className = "aw-input aw-input--area";
+    sysPromptArea.rows = 3;
+    sysPromptArea.maxLength = 8000;
+    sysPromptArea.placeholder = "可选";
+    sysPromptArea.setAttribute("aria-label", "System Prompt（可选）");
+    sysPromptArea.value = String(draft.systemPrompt ?? "");
+    sysPromptArea.addEventListener("input", () => {
+      draft.systemPrompt = sysPromptArea.value;
+      apiDraft = draft;
+      apiDraftDirty = true;
+      if (syncApiDirty) syncApiDirty();
+    });
+    sysPromptField.append(sysPromptArea);
+    sysPromptField.append(el("span", "aw-hint", "本连接专用的系统提示词，三种连接方式都生效；留空 = 跟随「推进」页的活动提示词预设（无则内置默认）。填写后优先于「推进」页预设。"));
+    panel.append(sysPromptField);
 
     // dirty 操作条（shujuku 式：未修改时「放弃修改 / 保存」禁用；保存后自动设为当前使用）
     const actions = el("div", "aw-actions");

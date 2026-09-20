@@ -47,6 +47,8 @@ export interface AtlasApiPreset {
   requestHeaders?: string;
   /** 提示词后处理（custom_prompt_post_processing）；"" = 不携带。 */
   promptPostProcessing?: string;
+  /** 0.9.18 分段提示词（shujuku prompt-builder 同款）：非空时取代固定 system+user 两条，逐段装配 + 占位符替换。 */
+  promptSegments?: Array<{ role: string; content: string }>;
 }
 
 export interface AtlasApiCallResult {
@@ -124,6 +126,39 @@ export function buildWorldTurnUserContent(input: AtlasWorldTurnPromptInput): str
   ].join("\n");
 }
 
+/** 分段正文占位符（0.9.18）：{{worldState}} / {{userAction}} / {{assistantReply}}，容忍花括号内空白。 */
+const PROMPT_PLACEHOLDER_PATTERN = /\{\{\s*(worldState|userAction|assistantReply)\s*\}\}/g;
+
+function substitutePromptPlaceholders(content: string, input: AtlasWorldTurnPromptInput): string {
+  return content.replace(PROMPT_PLACEHOLDER_PATTERN, (_, key: string) =>
+    key === "worldState" ? input.injectionText : key === "userAction" ? input.userText : input.assistantText,
+  );
+}
+
+const PROMPT_MESSAGE_ROLES: readonly string[] = ["system", "user", "assistant"];
+
+/**
+ * 装配 world-turn 消息数组（0.9.18 shujuku prompt-builder 同款分段模式）：
+ * preset.promptSegments 非空 → 占位符替换后逐段入列（角色白名单过滤，全非法回退旧两条）；
+ * 否则维持固定 system+user 两条（旧预设零迁移）。
+ * 输出契约不变：无论分段怎么写，模型仍须只输出一个 JSON 对象（parseAtlasWorldTurnDraft 把关）。
+ */
+export function buildWorldTurnMessages(preset: AtlasApiPreset, input: AtlasWorldTurnPromptInput): Array<{ role: string; content: string }> {
+  const rawSegments = Array.isArray(preset.promptSegments) ? preset.promptSegments : [];
+  const messages = rawSegments
+    .map((segment) => ({
+      role: typeof segment?.role === "string" ? segment.role.trim().toLowerCase() : "",
+      content: typeof segment?.content === "string" ? segment.content : "",
+    }))
+    .filter((segment) => PROMPT_MESSAGE_ROLES.includes(segment.role) && segment.content.trim().length > 0)
+    .map((segment) => ({ role: segment.role, content: substitutePromptPlaceholders(segment.content, input) }));
+  if (messages.length > 0) return messages;
+  return [
+    { role: "system", content: preset.systemPrompt?.trim() || DEFAULT_WORLD_TURN_SYSTEM_PROMPT },
+    { role: "user", content: buildWorldTurnUserContent(input) },
+  ];
+}
+
 function errorMessageForStatus(status: number): { code: AtlasErrorCode; retryable: boolean; message: string } {
   if (status === 401 || status === 403) {
     return { code: ATLAS_ERROR_CODES.API_AUTH_FAILED, retryable: false, message: "推演服务鉴权失败（HTTP 401/403），请检查密钥。" };
@@ -170,10 +205,8 @@ export async function callAtlasWorldTurnApi(
   // max_tokens 默认 20000 / temperature 默认 1.0 / top_p 默认 0.95 / reasoning_effort 'medium'
   // / include_reasoning·enable_web_search·request_images 显式 false / group_names 空数组；
   // role 归一小写、model 去 'models/' 前缀——与 shujuku 发出的请求逐字段同构。
-  const bodyMessages = [
-    { role: "system", content: preset.systemPrompt?.trim() || DEFAULT_WORLD_TURN_SYSTEM_PROMPT },
-    { role: "user", content: buildWorldTurnUserContent(input) },
-  ].map((m) => ({ ...m, role: m.role.toLowerCase() }));
+  // 请求消息装配（0.9.18 分段模式优先，见 buildWorldTurnMessages）；role 归一小写与 shujuku 同款
+  const bodyMessages = buildWorldTurnMessages(preset, input).map((m) => ({ ...m, role: m.role.toLowerCase() }));
   const bodyModel = preset.model.trim().replace(/^models\//, "") || "host";
   const maxTokens = typeof preset.maxTokens === "number" && preset.maxTokens > 0 ? preset.maxTokens : 20_000;
   const temperature = typeof preset.temperature === "number" ? preset.temperature : 1.0;

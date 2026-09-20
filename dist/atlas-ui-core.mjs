@@ -692,6 +692,26 @@ function buildWorldTurnUserContent(input) {
     "请按系统要求只输出一个 JSON 对象。"
   ].join("\n");
 }
+var PROMPT_PLACEHOLDER_PATTERN = /\{\{\s*(worldState|userAction|assistantReply)\s*\}\}/g;
+function substitutePromptPlaceholders(content, input) {
+  return content.replace(
+    PROMPT_PLACEHOLDER_PATTERN,
+    (_, key) => key === "worldState" ? input.injectionText : key === "userAction" ? input.userText : input.assistantText
+  );
+}
+var PROMPT_MESSAGE_ROLES = ["system", "user", "assistant"];
+function buildWorldTurnMessages(preset, input) {
+  const rawSegments = Array.isArray(preset.promptSegments) ? preset.promptSegments : [];
+  const messages = rawSegments.map((segment) => ({
+    role: typeof segment?.role === "string" ? segment.role.trim().toLowerCase() : "",
+    content: typeof segment?.content === "string" ? segment.content : ""
+  })).filter((segment) => PROMPT_MESSAGE_ROLES.includes(segment.role) && segment.content.trim().length > 0).map((segment) => ({ role: segment.role, content: substitutePromptPlaceholders(segment.content, input) }));
+  if (messages.length > 0) return messages;
+  return [
+    { role: "system", content: preset.systemPrompt?.trim() || DEFAULT_WORLD_TURN_SYSTEM_PROMPT },
+    { role: "user", content: buildWorldTurnUserContent(input) }
+  ];
+}
 function errorMessageForStatus(status) {
   if (status === 401 || status === 403) {
     return { code: ATLAS_ERROR_CODES.API_AUTH_FAILED, retryable: false, message: "推演服务鉴权失败（HTTP 401/403），请检查密钥。" };
@@ -722,10 +742,7 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
   const url = mode === "custom" ? buildAtlasChatUrl(preset.endpoint) : "atlas://host";
   if (!url) return fail4(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "推演 API 地址无效，无法构造请求。", false);
   if (mode === "custom" && !preset.model.trim()) return fail4(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "推演预设未填写模型名称。", false);
-  const bodyMessages = [
-    { role: "system", content: preset.systemPrompt?.trim() || DEFAULT_WORLD_TURN_SYSTEM_PROMPT },
-    { role: "user", content: buildWorldTurnUserContent(input) }
-  ].map((m) => ({ ...m, role: m.role.toLowerCase() }));
+  const bodyMessages = buildWorldTurnMessages(preset, input).map((m) => ({ ...m, role: m.role.toLowerCase() }));
   const bodyModel = preset.model.trim().replace(/^models\//, "") || "host";
   const maxTokens = typeof preset.maxTokens === "number" && preset.maxTokens > 0 ? preset.maxTokens : 2e4;
   const temperature = typeof preset.temperature === "number" ? preset.temperature : 1;
@@ -1332,6 +1349,10 @@ function createAtlasUiCore(deps) {
     const panelOpen = host.readPanelOpen();
     setState({ chatId, panelOpen, destinationPreview: null });
     if (state.serviceStatus === "offline" || state.serviceStatus === "incompatible") return;
+    if (chatId === null) {
+      setState({ binding: null, bindingInvalid: false, mode: "unbound", stateData: null });
+      return;
+    }
     const raw = host.readBinding();
     if (raw === null || raw === void 0) {
       setState({ binding: null, bindingInvalid: false, mode: "unbound", stateData: null });
@@ -1343,7 +1364,7 @@ function createAtlasUiCore(deps) {
       return;
     }
     const binding = parsed.value;
-    if (chatId !== null && binding.chatId !== chatId) {
+    if (binding.chatId !== chatId) {
       setState({ binding: null, bindingInvalid: false, mode: "unbound", stateData: null });
       return;
     }
@@ -1356,10 +1377,17 @@ function createAtlasUiCore(deps) {
       setState({ mode: "unbound", stateData: null });
       return;
     }
+    if (binding.chatId !== state.chatId) {
+      setState({ binding: null, mode: "unbound", stateData: null });
+      return;
+    }
     try {
       const result = await api.request("GET", `/state/${encodeURIComponent(binding.chatId)}`);
       const body = result.body;
+      if (state.chatId === null || binding.chatId !== state.chatId) return;
       if (result.status === 200 && body.ok && body.data) {
+        const responseChatId = typeof body.data.chatId === "string" ? body.data.chatId : binding.chatId;
+        if (responseChatId !== state.chatId) return;
         setState({ mode: "ready", stateData: body.data, lastError: null });
         return;
       }
@@ -1405,6 +1433,7 @@ function createAtlasUiCore(deps) {
       clearTimers();
       rolledBackFloors.clear();
       setState({ rearmTurn: null });
+      setState({ binding: null, stateData: null, mode: "unbound", modeHint: null });
       void track(refresh());
       return;
     }
@@ -5799,6 +5828,10 @@ function commitAtlasTurn(world, input) {
   };
   const result = adoptPendingProposals(world, [pending], { now: input.now ?? 0, source: "ai-adopted" });
   if (!result.ok) {
+    const firstReason = result.rejected.find(
+      (item) => item.ok === false && item.error && item.error !== "同批存在被拒绝的提案，整单未提交"
+    )?.error;
+    const detail = firstReason ? ` 失败原因：${firstReason.slice(0, 300)}` : "";
     return {
       world,
       receipt: {
@@ -5811,7 +5844,7 @@ function commitAtlasTurn(world, input) {
         currentLocationId: input.currentPointId,
         triggeredNpcIds: [],
         adoptedEventIds: [],
-        summary: result.error ?? "写入失败",
+        summary: `${result.error ?? "写入失败"}${detail}`,
         retryable: true
       }
     };
@@ -5865,7 +5898,27 @@ function normalizeApiFormat(raw) {
   return API_FORMATS.includes(raw) ? raw : "openai";
 }
 function normalizePromptPostProcessing(raw) {
-  return typeof raw === "string" && PROMPT_POST_PROCESSING.includes(raw) ? raw : "";
+  if (typeof raw !== "string") return "strict";
+  const normalized = raw.trim();
+  if (normalized === "") return "";
+  return PROMPT_POST_PROCESSING.includes(normalized) ? normalized : "strict";
+}
+var PROMPT_SEGMENT_ROLES = ["system", "user", "assistant"];
+var MAX_PROMPT_SEGMENTS = 16;
+function normalizePromptSegments(raw) {
+  if (!Array.isArray(raw)) return [];
+  const segments = [];
+  for (const entry of raw.slice(0, MAX_PROMPT_SEGMENTS * 2)) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const record = entry;
+    const role = typeof record.role === "string" ? record.role.trim().toLowerCase() : "";
+    if (!PROMPT_SEGMENT_ROLES.includes(role)) continue;
+    const content = typeof record.content === "string" ? record.content.trim() : "";
+    if (!content) continue;
+    if (segments.length >= MAX_PROMPT_SEGMENTS) break;
+    segments.push({ role, content: content.slice(0, MAX_PROMPT_CHARS) });
+  }
+  return segments;
 }
 function nowOf(deps) {
   return deps.now ? deps.now() : 0;
@@ -5970,7 +6023,8 @@ function parseConnectionPreset(raw) {
     ...typeof record.bodyParams === "string" && record.bodyParams.trim() ? { bodyParams: record.bodyParams.slice(0, 4e3) } : {},
     ...typeof record.excludeBodyParams === "string" && record.excludeBodyParams.trim() ? { excludeBodyParams: record.excludeBodyParams.slice(0, 2e3) } : {},
     ...typeof record.requestHeaders === "string" && record.requestHeaders.trim() ? { requestHeaders: record.requestHeaders.slice(0, 2e3) } : {},
-    ...typeof record.promptPostProcessing === "string" && record.promptPostProcessing ? { promptPostProcessing: normalizePromptPostProcessing(record.promptPostProcessing) } : {}
+    ...typeof record.promptPostProcessing === "string" ? { promptPostProcessing: normalizePromptPostProcessing(record.promptPostProcessing) } : {},
+    ...typeof record.systemPrompt === "string" && record.systemPrompt.trim() ? { systemPrompt: record.systemPrompt.slice(0, MAX_PROMPT_CHARS) } : {}
   };
 }
 function parsePromptPreset(raw) {
@@ -5981,8 +6035,14 @@ function parsePromptPreset(raw) {
   if (typeof record.name !== "string" || !record.name.trim() || record.name.length > MAX_NAME_CHARS) return null;
   if (typeof record.systemPrompt !== "string") return null;
   const prompt = record.systemPrompt.trim();
-  if (!prompt || prompt.length > MAX_PROMPT_CHARS) return null;
-  return { id, name: record.name.trim(), systemPrompt: prompt };
+  const segments = normalizePromptSegments(record.segments);
+  if ((!prompt || prompt.length > MAX_PROMPT_CHARS) && segments.length === 0) return null;
+  return {
+    id,
+    name: record.name.trim(),
+    systemPrompt: prompt.slice(0, MAX_PROMPT_CHARS),
+    ...segments.length > 0 ? { segments } : {}
+  };
 }
 function sanitizeSettingsV2(raw, deps = {}) {
   const diagnostics = { skipped: 0, apiSkipped: 0, promptSkipped: 0, legacyMajorEventPreserved: false };
@@ -6167,6 +6227,9 @@ function applySettingsCommand(settings, command, deps = {}) {
       if (typeof preset.requestHeaders === "string" && preset.requestHeaders.length > 2e3) {
         return fail3(settings, "INVALID_PAYLOAD", "附加请求标头不超过 2000 字。");
       }
+      if (typeof preset.systemPrompt === "string" && preset.systemPrompt.length > MAX_PROMPT_CHARS) {
+        return fail3(settings, "INVALID_PAYLOAD", `System Prompt 不超过 ${MAX_PROMPT_CHARS} 字。`);
+      }
       if (!isFiniteIntIn(preset.maxTokens, MIN_MAX_TOKENS, MAX_MAX_TOKENS)) {
         return fail3(settings, "INVALID_PAYLOAD", `最大回复长度必须是 ${MIN_MAX_TOKENS}..${MAX_MAX_TOKENS} 的整数。`);
       }
@@ -6228,7 +6291,8 @@ function applySettingsCommand(settings, command, deps = {}) {
         ...typeof preset.bodyParams === "string" && preset.bodyParams.trim() ? { bodyParams: preset.bodyParams.slice(0, 4e3) } : {},
         ...typeof preset.excludeBodyParams === "string" && preset.excludeBodyParams.trim() ? { excludeBodyParams: preset.excludeBodyParams.slice(0, 2e3) } : {},
         ...typeof preset.requestHeaders === "string" && preset.requestHeaders.trim() ? { requestHeaders: preset.requestHeaders.slice(0, 2e3) } : {},
-        ...normalizePromptPostProcessing(preset.promptPostProcessing) ? { promptPostProcessing: normalizePromptPostProcessing(preset.promptPostProcessing) } : {},
+        ...typeof preset.promptPostProcessing === "string" ? { promptPostProcessing: normalizePromptPostProcessing(preset.promptPostProcessing) } : {},
+        ...typeof preset.systemPrompt === "string" && preset.systemPrompt.trim() ? { systemPrompt: preset.systemPrompt.trim().slice(0, MAX_PROMPT_CHARS) } : {},
         updatedAt: now
       };
       const apiPresets = existingIndex >= 0 ? settings.apiPresets.map((p, i) => i === existingIndex ? entry : p) : [...settings.apiPresets, entry];
@@ -6267,7 +6331,8 @@ function applySettingsCommand(settings, command, deps = {}) {
         return fail3(settings, "INVALID_PAYLOAD", "提示词名称必填且不超过 64 字。");
       }
       const text = typeof preset.systemPrompt === "string" ? preset.systemPrompt.trim() : "";
-      if (!text) return fail3(settings, "INVALID_PAYLOAD", "提示词正文不能为空（空 = 内置默认，无需保存）。");
+      const segments = normalizePromptSegments(preset.segments);
+      if (!text && segments.length === 0) return fail3(settings, "INVALID_PAYLOAD", "提示词正文不能为空（空 = 内置默认，无需保存；分段预设请至少给出 1 段）。");
       if (text.length > MAX_PROMPT_CHARS) return fail3(settings, "FIELD_LIMIT_EXCEEDED", `提示词不超过 ${MAX_PROMPT_CHARS} 字。`);
       const targetId = preset.id === void 0 ? null : normalizeId(preset.id);
       if (preset.id !== void 0 && targetId === null) return fail3(settings, "INVALID_PAYLOAD", "预设 ID 形状非法。");
@@ -6281,6 +6346,7 @@ function applySettingsCommand(settings, command, deps = {}) {
         id: targetId ?? resolveId("prompt", settings.promptPresets.length, text, deps, new Set(settings.promptPresets.map((p) => p.id))),
         name: uniqueName(preset.name, usedNames),
         systemPrompt: text,
+        ...segments.length > 0 ? { segments } : {},
         updatedAt: now
       };
       const promptPresets = existingIndex >= 0 ? settings.promptPresets.map((p, i) => i === existingIndex ? entry : p) : [...settings.promptPresets, entry];
@@ -6484,6 +6550,7 @@ function settingsViewV2(settings) {
         excludeBodyParams: p.excludeBodyParams ?? "",
         requestHeaders: p.requestHeaders ?? "",
         promptPostProcessing: normalizePromptPostProcessing(p.promptPostProcessing),
+        systemPrompt: p.systemPrompt ?? "",
         // 0.9.12（作者令，照抄 shujuku）：GET 返回明文密钥，编辑器回填 / 测试连接复用，不再每次重输
         apiKey: key
       };
@@ -6508,6 +6575,7 @@ function resolveWorldTurnPreset(settings) {
   const prompt = settings.promptPresets.find((p) => p.id === settings.activePromptPresetId);
   const mode = normalizeConnectionMode(connection.connectionMode);
   const format = normalizeApiFormat(connection.apiFormat);
+  const connectionPrompt = typeof connection.systemPrompt === "string" ? connection.systemPrompt.trim() : "";
   return {
     name: connection.name,
     endpoint: connection.endpoint,
@@ -6524,7 +6592,8 @@ function resolveWorldTurnPreset(settings) {
     ...connection.excludeBodyParams ? { excludeBodyParams: connection.excludeBodyParams } : {},
     ...connection.requestHeaders ? { requestHeaders: connection.requestHeaders } : {},
     ...normalizePromptPostProcessing(connection.promptPostProcessing) ? { promptPostProcessing: normalizePromptPostProcessing(connection.promptPostProcessing) } : {},
-    ...prompt ? { systemPrompt: prompt.systemPrompt } : {}
+    // 0.9.18 systemPrompt 优先级：连接级覆盖 > 提示词预设分段模式 > 提示词预设单条 > 空（内置默认兜底）
+    ...connectionPrompt ? { systemPrompt: connectionPrompt } : prompt && prompt.segments && prompt.segments.length > 0 ? { promptSegments: prompt.segments } : prompt ? { systemPrompt: prompt.systemPrompt } : {}
   };
 }
 
@@ -6686,7 +6755,9 @@ function createAtlasServerCore(deps) {
     return okResult({
       ok: true,
       plugin: "atlas",
-      version: "0.9.2",
+      // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
+      // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
+      version: "0.9.18",
       protocolVersion: 1,
       time: now()
     });
@@ -6845,6 +6916,7 @@ function createAtlasServerCore(deps) {
     const lastEvent = branchEvents.at(-1) ?? null;
     const lastAdvance = lastEvent ? { at: lastEvent.at, summary: lastEvent.narrativeSummary.slice(0, 200), source: lastEvent.source } : null;
     return okResult({
+      chatId,
       worldId: world.id,
       worldName: world.name,
       branchId: binding.branchId,
@@ -7015,6 +7087,13 @@ function createAtlasServerCore(deps) {
     }
     const receipt = output.receipt;
     if (receipt.status === "failed") {
+      pushLog({
+        at: now(),
+        kind: "world-turn-commit-failed",
+        chatId: request.chatId,
+        worldId: binding.worldId,
+        summary: receipt.summary
+      });
       return okResult({ receipt });
     }
     let settledWorld = output.world;

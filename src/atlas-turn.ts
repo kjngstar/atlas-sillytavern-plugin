@@ -333,6 +333,12 @@ export function commitAtlasTurn(world: World, input: AtlasTurnCommitInput): Atla
   };
   const result = adoptPendingProposals(world, [pending], { now: input.now ?? 0, source: "ai-adopted" });
   if (!result.ok) {
+    // 0.9.17 诊断透出：通用消息「整单未提交：N 条校验失败」不带原因，用户无法修。
+    // rejected 里首条非「整单连坐」的 error 就是真实校验原因（如未知地点引用 / 版本过期）。
+    const firstReason = result.rejected.find(
+      (item) => item.ok === false && item.error && item.error !== "同批存在被拒绝的提案，整单未提交",
+    )?.error;
+    const detail = firstReason ? ` 失败原因：${firstReason.slice(0, 300)}` : "";
     return {
       world,
       receipt: {
@@ -345,7 +351,7 @@ export function commitAtlasTurn(world: World, input: AtlasTurnCommitInput): Atla
         currentLocationId: input.currentPointId,
         triggeredNpcIds: [],
         adoptedEventIds: [],
-        summary: result.error ?? "写入失败",
+        summary: `${result.error ?? "写入失败"}${detail}`,
         retryable: true,
       },
     };
