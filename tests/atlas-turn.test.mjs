@@ -228,6 +228,16 @@ test("prepare：非法 currentTime 被拒绝", () => {
   assertionCount += 1;
 });
 
+test("prepare：注入文本带人物 / 地点 / 地区 id 对照表（0.9.30，「采纳 0 条」根因修复）", () => {
+  const world = buildFixture();
+  const { response } = prepareAtlasTurn(world, prepareInput(world));
+  ok(response.injectionText.includes("人物 id 对照："), "有人物 id 对照");
+  ok(response.injectionText.includes("entity-city="), "实体 id=名字 形式（entity-city）");
+  ok(response.injectionText.includes("entity-npc="), "实体 id=名字 形式（entity-npc）");
+  ok(response.injectionText.includes("地点 id 对照："), "有地点 id 对照");
+  ok(response.injectionText.includes("4104="), "地点 id=名字 形式（4104）");
+});
+
 // ---------------------------------------------------------------------------
 // commit
 // ---------------------------------------------------------------------------

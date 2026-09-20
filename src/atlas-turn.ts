@@ -114,6 +114,22 @@ export function prepareAtlasTurn(world: World, input: AtlasTurnPrepareInput): At
   if (relevance.relevantNpcIds.length > 0) {
     headerLines.push(`附近人物：${relevance.relevantNpcIds.join("、")}`);
   }
+  // 0.9.30 id 对照表：npcChanges / locationChange 只认 id，而共享装配单（lib/ 快照）渲染实体只给名字
+  // ——模型拿不到 id 只能编，「采纳 0 条（丢弃引用未知实体）」的根因。
+  // 人物沿用装配单过滤结果（分支 / 时间 / 隐私过滤不能绕过）；
+  // 地点 / 地区是静态地理，用全量清单（封顶 60，远途移动也能引用）。
+  const entityRoster = plan.entities.map((e) => `${e.id}=${e.name}`).join("；");
+  if (entityRoster) headerLines.push(`人物 id 对照：${entityRoster}`);
+  const pointRoster = (world.points ?? [])
+    .slice(0, 60)
+    .map((p) => `${String(p.id)}=${p.name}`)
+    .join("；");
+  if (pointRoster) headerLines.push(`地点 id 对照：${pointRoster}`);
+  const regionRoster = (world.regions ?? [])
+    .slice(0, 60)
+    .map((r) => `${r.id}=${r.name}`)
+    .join("；");
+  if (regionRoster) headerLines.push(`地区 id 对照：${regionRoster}`);
   // 0.9.1 时间意图：用户行动含连贯动作 / 显式时间词时给 AI 软引导（硬下限在裁决层）
   const timeHint = renderAtlasTimeHint(request.userText);
   if (timeHint) headerLines.push(timeHint);

@@ -642,6 +642,48 @@ test("裁决（0.9.0）：未知地点草稿降级——移动被忽略，其余
   ok(receipt.summary.includes("〔裁定〕") && receipt.summary.includes("未知地点"), "裁定说明可审计");
 });
 
+test("0.9.30 放宽：JSON 被写进 <think> 里 → 剥除失败后从原文救回，正常提交", async () => {
+  // MiniMax-M3 嫌疑行为：JSON 全在 think 段内，think 剥除后什么都不剩
+  const insideThink = `<think>Let me analyze.\n${JSON.stringify(GOOD_DRAFT)}</think>`;
+  const fetcher = makeFetch([() => jsonResponse(200, { choices: [{ message: { content: insideThink } }] })]);
+  const store = createMemoryDocumentStore();
+  const world = buildWorld();
+  const core = createAtlasServerCore({ store, fetchFn: fetcher.fetchFn, now: () => NOW });
+  await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
+  await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
+  await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+
+  const result = await core.handle("POST", "/turns/commit", commitRequest(world));
+  const receipt = result.body.data.receipt;
+  equal(receipt.status, "committed", "原文重试救回，正常提交");
+  equal(receipt.currentTime, 430.07, "草稿内容完整生效（12 时段）");
+  equal(fetcher.calls.length, 1, "仍恰好 1 条推演请求");
+});
+
+test("0.9.30 放宽：完全无法解析 → 不拒单，按无结构变化处理，原文记日志", async () => {
+  const pureProse = `<think>Let me analyze this turn carefully.\n角色们聊了聊天，没有任何事件发生。</think>`;
+  const fetcher = makeFetch([() => jsonResponse(200, { choices: [{ message: { content: pureProse } }] })]);
+  const store = createMemoryDocumentStore();
+  const world = buildWorld();
+  const worldSnapshot = JSON.stringify(world);
+  const core = createAtlasServerCore({ store, fetchFn: fetcher.fetchFn, now: () => NOW });
+  await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
+  await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
+  await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+
+  const result = await core.handle("POST", "/turns/commit", commitRequest(world));
+  equal(result.body.ok, true, "不再 502 拒单");
+  const receipt = result.body.data.receipt;
+  equal(receipt.status, "committed", "按无结构变化提交");
+  equal(receipt.currentTime, CURRENT_TIME, "时间不推进");
+  equal(receipt.adoptedEventIds.length, 0, "账本零事件");
+  equal(JSON.stringify(JSON.parse(worldSnapshot)), JSON.stringify(world), "世界零写入");
+  const fallbackLogs = core.logs().filter((l) => l.kind === "world-turn-parse-fallback");
+  equal(fallbackLogs.length, 1, "解析降级日志恰好一条");
+  ok(fallbackLogs[0].excerpt.includes("Let me analyze"), "原文摘录进日志（供作者查看模型回复）");
+  ok(!JSON.stringify(core.logs()).includes("sk-runtime-test"), "日志无明文 Key");
+});
+
 test("retry：沿用原幂等键，成功后世界恰好推进一次", async () => {
   // 第一次 429 失败，重试成功
   const fetcher = makeFetch([() => jsonResponse(429, {}), () => openAiResponse(GOOD_DRAFT)]);

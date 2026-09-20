@@ -347,7 +347,7 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.29",
+      version: "0.9.30",
       protocolVersion: 1,
       time: now(),
     });
@@ -922,7 +922,32 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
       // 0.9.16 内容替换规则库（照抄 shujuku + 开关增强）：推演输出先过启用的词对规则
       // （剥 think / 推理段 / 杂段），再进草稿解析。
       const cleanedText = applyContentReplaceRules(call.text, current.contentReplaceRules ?? []);
-      draft = parseAtlasWorldTurnDraft(cleanedText);
+      // 0.9.30 放宽格式校验（作者拍板「先把回复格式的校验去掉」）：
+      // 推理模型（MiniMax-M3 等）会把 JSON 写进 <think> 里——剥 think 后可能什么都不剩。
+      // 解析失败先退回原文再试一次；仍失败则不拒单，按「无结构变化」处理，原文记入日志供诊断。
+      try {
+        draft = parseAtlasWorldTurnDraft(cleanedText);
+      } catch {
+        try {
+          draft = parseAtlasWorldTurnDraft(call.text);
+        } catch {
+          pushLog({
+            at: now(),
+            kind: "world-turn-parse-fallback",
+            chatId: request.chatId,
+            presetName: preset.name,
+            model: preset.model,
+            excerpt: call.text.slice(0, 1500),
+          });
+          draft = {
+            duration: 0,
+            locationChange: null,
+            rawEffects: [],
+            memoryDrafts: [],
+            summary: "推演输出无法解析为 JSON，本轮按无结构变化处理（原文前 1500 字见日志页）。",
+          };
+        }
+      }
       // 0.9.0 算法裁决层：网格旅行算法裁定移动耗时、实体白名单强制、未知地点降级丢弃。
       // 裁定说明合入 summary（可审计），独立 notes 记入日志。
       const adjudication = adjudicateAtlasDraft(baseWorld, {

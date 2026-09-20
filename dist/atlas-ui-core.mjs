@@ -697,7 +697,7 @@ var DEFAULT_PROMPT_SEGMENTS = [
     role: "system",
     name: "主系统提示词（推演引擎职责）",
     mainSlot: "A",
-    content: "你是阿特拉斯世界推演引擎。你收到一份本轮的剧情素材（世界状态、前文、用户行动、助手回复），你的唯一职责：推断本轮对世界造成的**有界结构化变化**——谁出现在哪里、人物状态与关系如何变化、势力格局有无变动、时间推进多少。\n严格要求：只输出一个 JSON 对象，不要输出任何多余说明、推理过程或代码围栏。字段契约：\nduration（本轮消耗的时段数，非负数字，≤10000）、\nlocationChange（对象或 null：{toPointId, toRegionId}，id 必须来自上下文中出现的地点）、\nnpcChanges（数组，积极挖掘本轮动向，形状：{entityId, key, value} 更新人物状态 / {entityId, toPointId} 人物移动到上下文中出现的地点 / {entityId, toRegionId} 移动到已知地区 / {entityId, tag} 加标签 / {entityId, removeTag} 删标签 / {flag, value} 记录世界标记（里程碑、禁忌、传言等）/ {entityId, targetEntityId, key, value} 改关系；entityId 必须来自上下文）、\nmemoryDrafts（数组，每条 {entityId, text}，为人物追加一条记忆，≤500 字）、\neventDrafts（数组，事件摘要文字，仅叙述用）、\ntriggerResults（数组，本轮命中的触发器 id）、\nsummary（本轮世界变化的一句话摘要，≤500 字）。\n推断姿态：主动而非保守——只要剧情暗示了人物去了别处、态度与关系起了变化、状态被事件改变、出现了值得铭记或标记的事，就输出对应变化；只在整轮确实平静无事时才输出空数组。\n禁止：编造上下文之外的实体 id 或地点 id；输出时间地点之外的世界重写；输出任何密钥、路径或代码。\n若本轮确无任何人物 / 关系 / 记忆变化，npcChanges 与 memoryDrafts 输出空数组，duration 与 locationChange 仍须如实填写，不要为凑数编造变化。"
+    content: "你是阿特拉斯世界推演引擎。你收到一份本轮的剧情素材（世界状态、前文、用户行动、助手回复），你的唯一职责：推断本轮对世界造成的**有界结构化变化**——谁出现在哪里、人物状态与关系如何变化、势力格局有无变动、时间推进多少。\n严格要求：只输出一个 JSON 对象，不要输出任何多余说明、推理过程或代码围栏。字段契约：\nduration（本轮消耗的时段数，非负数字，≤10000）、\nlocationChange（对象或 null：{toPointId, toRegionId}，id 必须来自上下文中出现的地点）、\nnpcChanges（数组，积极挖掘本轮动向，形状：{entityId, key, value} 更新人物状态 / {entityId, toPointId} 人物移动到上下文中出现的地点 / {entityId, toRegionId} 移动到已知地区 / {entityId, tag} 加标签 / {entityId, removeTag} 删标签 / {flag, value} 记录世界标记（里程碑、禁忌、传言等）/ {entityId, targetEntityId, key, value} 改关系；entityId 必须来自上下文）、\nmemoryDrafts（数组，每条 {entityId, text}，为人物追加一条记忆，≤500 字）、\neventDrafts（数组，事件摘要文字，仅叙述用）、\ntriggerResults（数组，本轮命中的触发器 id）、\nsummary（本轮世界变化的一句话摘要，≤500 字）。\n推断姿态：主动而非保守——只要剧情暗示了人物去了别处、态度与关系起了变化、状态被事件改变、出现了值得铭记或标记的事，就输出对应变化；只在整轮确实平静无事时才输出空数组。\n上下文提供「人物 id 对照 / 地点 id 对照 / 地区 id 对照」：npcChanges 的 entityId 与 locationChange 的 id 一律使用对照表里的 id 原文，不要用名字当 id。\n禁止：编造上下文之外的实体 id 或地点 id；输出时间地点之外的世界重写；输出任何密钥、路径或代码。\n若本轮确无任何人物 / 关系 / 记忆变化，npcChanges 与 memoryDrafts 输出空数组，duration 与 locationChange 仍须如实填写，不要为凑数编造变化。"
   },
   {
     role: "user",
@@ -6116,6 +6116,12 @@ function prepareAtlasTurn(world, input) {
   if (relevance.relevantNpcIds.length > 0) {
     headerLines.push(`附近人物：${relevance.relevantNpcIds.join("、")}`);
   }
+  const entityRoster = plan.entities.map((e) => `${e.id}=${e.name}`).join("；");
+  if (entityRoster) headerLines.push(`人物 id 对照：${entityRoster}`);
+  const pointRoster = (world.points ?? []).slice(0, 60).map((p) => `${String(p.id)}=${p.name}`).join("；");
+  if (pointRoster) headerLines.push(`地点 id 对照：${pointRoster}`);
+  const regionRoster = (world.regions ?? []).slice(0, 60).map((r) => `${r.id}=${r.name}`).join("；");
+  if (regionRoster) headerLines.push(`地区 id 对照：${regionRoster}`);
   const timeHint = renderAtlasTimeHint(request.userText);
   if (timeHint) headerLines.push(timeHint);
   const full = `${headerLines.join("\n")}
@@ -7223,7 +7229,7 @@ function createAtlasServerCore(deps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.29",
+      version: "0.9.30",
       protocolVersion: 1,
       time: now()
     });
@@ -7690,7 +7696,29 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
     }
     try {
       const cleanedText = applyContentReplaceRules(call.text, current.contentReplaceRules ?? []);
-      draft = parseAtlasWorldTurnDraft(cleanedText);
+      try {
+        draft = parseAtlasWorldTurnDraft(cleanedText);
+      } catch {
+        try {
+          draft = parseAtlasWorldTurnDraft(call.text);
+        } catch {
+          pushLog({
+            at: now(),
+            kind: "world-turn-parse-fallback",
+            chatId: request.chatId,
+            presetName: preset.name,
+            model: preset.model,
+            excerpt: call.text.slice(0, 1500)
+          });
+          draft = {
+            duration: 0,
+            locationChange: null,
+            rawEffects: [],
+            memoryDrafts: [],
+            summary: "推演输出无法解析为 JSON，本轮按无结构变化处理（原文前 1500 字见日志页）。"
+          };
+        }
+      }
       const adjudication = adjudicateAtlasDraft(baseWorld, {
         branchId: pending.binding.branchId,
         currentPointId: pending.binding.currentPointId,
