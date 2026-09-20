@@ -41,6 +41,7 @@ SillyTavern UI 扩展：**世界工作台（悬浮窗）** + 聊天绑定 + 生�
 
 ## 版本
 
+- 0.9.11：**API / 推进两页整体重排（整体照搬 shujuku 页面设计）**——①顶部「当前预设」选择行：下拉**选中即设为当前使用**（替代原「载入草稿 + 设为当前使用」两步），旁列紧凑「新建 / 删除」按钮；②表单改 shujuku 式「标签 + 灰色 hint」语言（端点/密钥/协议都带一句人话说明）；③「加载模型列表」紧跟密钥，模型下拉仅在加载到后出现；④底部 dirty 操作条：未修改时「放弃修改 / 保存」禁用，保存（新建）后自动设为当前使用；⑤推进页同款改造：提示词预设选中即激活 + dirty 操作条；⑥明确「修改后不会自动保存」。新增样式 `aw-select-row / aw-hint / aw-btn--icon / :disabled`。
 - 0.9.10：**接口协议选择（抄 shujuku 的 API 干法）**——API 页新增「接口协议」下拉：OpenAI 兼容（默认）/ Claude（Anthropic Messages）。选 Claude 时请求映射为酒馆 claude 源（`reverse_proxy` 基址自动补 `/v1` + `proxy_password` 裸密钥），由酒馆后端做 Anthropic 变形——**MiniMax Token Plan 订阅密钥（sk-cp-）的正路**：端点填 `https://api.minimaxi.com/anthropic` 即可，不再被 `/v1` 的 Not Found 卡死。MiniMax 检测提示同步改为指引本页协议切换。协议随连接保存 / 另存 / 测试连接全链路生效。注：Claude 协议经酒馆后端代理（浏览器 UI 扩展路径）生效；服务端插件直连路径暂不支持。
 - 0.9.9：**MiniMax 专项诊断**——MiniMax 官方端点返回「Not Found（HTTP 200 包错误 JSON）」时，报错附加专项提示：Token Plan 订阅密钥（sk-cp- 开头）只能走 Anthropic 兼容路由（…/anthropic），按量付费密钥（sk-api- 开头）才能用 /v1/chat/completions；并提示国内站（minimaxi.com / minimax.chat）与国际站（minimax.io）密钥不通用、到控制台核对模型名。
 - 0.9.8：**日志增强 + 网关错误定位**——推演日志现在记录实际发送的「上游地址 · 模型名」，「加载模型列表」也进日志；识别 new-api / one-api 系网关的「HTTP 200 包错误 JSON」形状，报错直接给出网关错误文本与「检查模型名 / 端点路径」指引。

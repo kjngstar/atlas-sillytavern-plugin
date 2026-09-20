@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.10";
+export const ATLAS_EXTENSION_VERSION = "0.9.11";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -1532,34 +1532,34 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     gotoApi.addEventListener("click", () => core.setPage("api"));
     runtimeActions.append(toggle, autoCommit, gotoApi);
     panel.append(runtimeActions);
-    panel.append(el("p", "aw-panel__meta", "「推进」只管推进行为与提示词；API 地址、密钥与模型请在「API」页配置。"));
-
     if (statusLine()) panel.append(statusLine());
+    panel.append(el("p", "aw-panel__meta", "「推进」只管推进行为与提示词；API 地址、密钥与模型请在「API」页配置。"));
     panel.append(el("div", "aw-divider"));
 
-    // 提示词预设卡
+    // shujuku 式提示词区：顶部「当前预设」选择行（选中即激活）＋ 新建 / 删除，编辑器 + dirty 操作条
     const promptPanel = el("section", "aw-panel");
     promptPanel.append(el("span", "aw-eyebrow", "推演提示词预设"));
 
-    const selectRow = el("div", "aw-field");
-    selectRow.append(el("span", "aw-field__label", "推演提示词预设"));
+    const selectField = el("div", "aw-field");
+    selectField.append(el("span", "aw-field__label", "当前提示词预设"));
+    const selectRow = el("div", "aw-select-row");
     const promptSelect = document.createElement("select");
     promptSelect.className = "aw-input";
-    promptSelect.setAttribute("aria-label", "选择提示词预设");
+    promptSelect.setAttribute("aria-label", "选择提示词预设（选中即设为当前使用）");
     const builtinOption = document.createElement("option");
     builtinOption.value = BUILTIN_PROMPT_ID;
-    builtinOption.textContent = `内置默认（只读）${settingsV2?.activePromptPresetId ? "" : " · 当前使用"}`;
+    builtinOption.textContent = "内置默认（只读）";
     promptSelect.append(builtinOption);
     for (const preset of promptLibrary) {
       const option = document.createElement("option");
       option.value = preset.id;
-      option.textContent = `${preset.name}${settingsV2?.activePromptPresetId === preset.id ? " · 当前使用" : ""}`;
+      option.textContent = preset.name;
       promptSelect.append(option);
     }
     promptSelect.value = promptDraft?.id ?? (settingsV2?.activePromptPresetId ?? BUILTIN_PROMPT_ID);
     promptSelect.addEventListener("change", () => {
       if (promptDraftDirty && !confirmDiscard("提示词")) {
-        promptSelect.value = promptDraft?.id ?? BUILTIN_PROMPT_ID;
+        promptSelect.value = promptDraft?.id ?? (settingsV2?.activePromptPresetId ?? BUILTIN_PROMPT_ID);
         return;
       }
       const preset = promptLibrary.find((p) => p.id === promptSelect.value);
@@ -1568,12 +1568,52 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
         : newPromptDraft();
       promptDraftDirty = false;
       setStatus("", "ok");
+      // shujuku 语义：选中即设为当前使用（内置默认 = activate null）
+      void sendSettingsCommand({ action: "prompt.activate", id: preset ? preset.id : null });
       renderCenter();
     });
     selectRow.append(promptSelect);
-    promptPanel.append(selectRow);
+    const promptNewBtn = el("button", "aw-btn aw-btn--icon", "新建");
+    promptNewBtn.type = "button";
+    promptNewBtn.setAttribute("aria-label", "新建提示词预设");
+    promptNewBtn.addEventListener("click", () => {
+      if (promptDraftDirty && !confirmDiscard("提示词")) return;
+      promptDraft = newPromptDraft();
+      promptDraftDirty = false;
+      setStatus("", "ok");
+      renderCenter();
+    });
+    selectRow.append(promptNewBtn);
+    const promptDeleteBtn = el("button", "aw-btn aw-btn--danger aw-btn--icon", "删除");
+    promptDeleteBtn.type = "button";
+    promptDeleteBtn.setAttribute("aria-label", "删除当前选中的提示词预设");
+    promptDeleteBtn.disabled = !promptDraft?.id;
+    promptDeleteBtn.addEventListener("click", async () => {
+      if (!promptDraft?.id) {
+        setStatus("当前草稿尚未保存，无需删除。", "error");
+        renderCenter();
+        return;
+      }
+      const confirmed = typeof window === "undefined" || typeof window.confirm !== "function"
+        ? true
+        : window.confirm(`删除提示词预设「${promptDraft.name}」？`);
+      if (!confirmed) return;
+      const ok = await sendSettingsCommand({ action: "prompt.delete", id: promptDraft.id });
+      if (ok) {
+        promptDraft = newPromptDraft();
+        promptDraftDirty = false;
+        setStatus("提示词预设已删除。");
+      }
+      renderCenter();
+    });
+    selectRow.append(promptDeleteBtn);
+    selectField.append(selectRow);
+    selectField.append(el("span", "aw-hint", "选中预设会立即设为当前使用并载入下方编辑器；「新建」开新草稿，「删除」删当前选中的预设。"));
+    promptPanel.append(selectField);
 
     const isBuiltinDraft = !promptDraft?.id;
+    let promptSaveButton = null;
+
     const nameField = el("div", "aw-field");
     nameField.append(el("span", "aw-field__label", "提示词名称"));
     const nameInput = document.createElement("input");
@@ -1592,6 +1632,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       if (promptSaveButton && promptDraft.id) {
         promptSaveButton.textContent = promptDraft.name.trim() ? `保存修改到「${promptDraft.name.trim()}」` : "保存修改";
       }
+      if (syncPromptDirty) syncPromptDirty();
     });
     nameField.append(nameInput);
     promptPanel.append(nameField);
@@ -1610,62 +1651,44 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       if (!promptDraft) promptDraft = newPromptDraft();
       promptDraft.systemPrompt = bodyInput.value;
       promptDraftDirty = true;
+      if (syncPromptDirty) syncPromptDirty();
     });
     bodyField.append(bodyInput);
+    bodyField.append(el("span", "aw-hint", isBuiltinDraft
+      ? "内置默认为只读——点「复制内置默认为新预设」或「另存为」后即可修改。"
+      : "留空 = 使用内置默认；用户行动、助手回复与世界上下文由系统自动组装，不在这里编辑。"));
     promptPanel.append(bodyField);
 
-    const promptActions = el("div", "aw-actions");
-    const addButton = (label, ariaLabel, handler, variant = "aw-btn aw-btn--ghost") => {
-      const button = el("button", variant, label);
-      button.type = "button";
-      button.setAttribute("aria-label", ariaLabel);
-      button.addEventListener("click", handler);
-      promptActions.append(button);
-      return button;
-    };
+    // 当前生效提示词（默认折叠，只读）
+    const details = document.createElement("details");
+    details.className = "aw-details";
+    const summary = document.createElement("summary");
+    summary.className = "aw-details__summary";
+    summary.textContent = "当前生效提示词（只读）";
+    const visible = el("pre", "aw-pre", activePromptText());
+    details.append(summary, visible);
+    promptPanel.append(details);
 
-    addButton("新建", "新建提示词草稿", () => {
-      if (promptDraftDirty && !confirmDiscard("提示词")) return;
-      promptDraft = newPromptDraft();
+    // dirty 操作条（shujuku 式：未修改时「放弃修改 / 保存」禁用）
+    const promptActions = el("div", "aw-actions");
+    const discardButton = el("button", "aw-btn aw-btn--ghost", "放弃修改");
+    discardButton.type = "button";
+    discardButton.setAttribute("aria-label", "放弃未保存的提示词修改");
+    discardButton.addEventListener("click", () => {
+      const preset = promptLibrary.find((p) => p.id === promptDraft?.id);
+      promptDraft = preset
+        ? { id: preset.id, name: preset.name, systemPrompt: preset.systemPrompt }
+        : newPromptDraft();
       promptDraftDirty = false;
       setStatus("", "ok");
       renderCenter();
     });
-    const promptSaveButton = !isBuiltinDraft
-      ? addButton(promptDraft?.id ? `保存修改到「${promptDraft.name}」` : "保存新预设", "保存当前提示词预设", async () => {
-        if (!promptDraft?.name.trim() || !promptDraft.systemPrompt.trim()) {
-          setStatus("提示词名称与正文都不能为空。", "error");
-          renderCenter();
-          return;
-        }
-        const ok = await sendSettingsCommand({
-          action: "prompt.save",
-          preset: { id: promptDraft.id, name: promptDraft.name, systemPrompt: promptDraft.systemPrompt },
-        });
-        if (ok) { promptDraftDirty = false; setStatus("提示词已保存。"); }
-        renderCenter();
-      }, "aw-btn aw-btn--primary")
-      : null;
-    addButton("另存为", "以新名称保存提示词副本", async () => {
-      const name = typeof window !== "undefined" && typeof window.prompt === "function"
-        ? window.prompt("新提示词预设名称", promptDraft?.name ? `${promptDraft.name} 副本` : "新提示词")
-        : null;
-      if (!name || !name.trim()) return;
-      const ok = await sendSettingsCommand({
-        action: "prompt.save",
-        preset: { name: name.trim(), systemPrompt: promptDraft?.systemPrompt || settingsV2?.builtInPrompt?.systemPrompt || "" },
-      });
-      if (ok) { promptDraftDirty = false; setStatus("已另存为新的提示词预设。"); }
-      renderCenter();
-    });
-    addButton("设为当前使用", "把选中的提示词设为当前使用", async () => {
-      const id = promptDraft?.id ?? null;
-      const ok = await sendSettingsCommand({ action: "prompt.activate", id });
-      if (ok) setStatus(id ? "已切换当前提示词。" : "已切回内置默认提示词。");
-      renderCenter();
-    });
+    promptActions.append(discardButton);
     if (isBuiltinDraft) {
-      addButton("复制内置默认为新预设", "把内置默认提示词复制成可编辑预设", async () => {
+      promptSaveButton = el("button", "aw-btn aw-btn--primary", "复制内置默认为新预设");
+      promptSaveButton.type = "button";
+      promptSaveButton.setAttribute("aria-label", "把内置默认提示词复制成可编辑预设");
+      promptSaveButton.addEventListener("click", async () => {
         const ok = await sendSettingsCommand({
           action: "prompt.save",
           preset: { name: "自定义提示词", systemPrompt: String(settingsV2?.builtInPrompt?.systemPrompt ?? "") },
@@ -1679,35 +1702,52 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
           setStatus("已复制为新预设，可继续编辑。");
         }
         renderCenter();
-      }, "aw-btn aw-btn--primary");
+      });
     } else {
-      addButton("删除", "删除选中的提示词预设", async () => {
-        const confirmed = typeof window === "undefined" || typeof window.confirm !== "function"
-          ? true
-          : window.confirm(`删除提示词预设「${promptDraft?.name ?? ""}」？`);
-        if (!confirmed) return;
-        const ok = await sendSettingsCommand({ action: "prompt.delete", id: promptDraft.id });
-        if (ok) {
-          promptDraft = newPromptDraft();
-          promptDraftDirty = false;
-          setStatus("提示词预设已删除。");
+      promptSaveButton = el("button", "aw-btn aw-btn--primary", promptDraft?.id ? `保存修改到「${promptDraft.name}」` : "保存新预设");
+      promptSaveButton.type = "button";
+      promptSaveButton.setAttribute("aria-label", "保存当前提示词预设");
+      promptSaveButton.addEventListener("click", async () => {
+        if (!promptDraft?.name.trim() || !promptDraft.systemPrompt.trim()) {
+          setStatus("提示词名称与正文都不能为空。", "error");
+          renderCenter();
+          return;
         }
+        const ok = await sendSettingsCommand({
+          action: "prompt.save",
+          preset: { id: promptDraft.id, name: promptDraft.name, systemPrompt: promptDraft.systemPrompt },
+        });
+        if (ok) { promptDraftDirty = false; setStatus("提示词已保存。"); }
         renderCenter();
-      }, "aw-btn aw-btn--danger");
+      });
     }
-    promptPanel.append(promptActions);
+    promptActions.append(promptSaveButton);
+    const promptSaveAsButton = el("button", "aw-btn aw-btn--ghost", "另存为");
+    promptSaveAsButton.type = "button";
+    promptSaveAsButton.setAttribute("aria-label", "以新名称保存提示词副本");
+    promptSaveAsButton.addEventListener("click", async () => {
+      const name = typeof window !== "undefined" && typeof window.prompt === "function"
+        ? window.prompt("新提示词预设名称", promptDraft?.name ? `${promptDraft.name} 副本` : "新提示词")
+        : null;
+      if (!name || !name.trim()) return;
+      const ok = await sendSettingsCommand({
+        action: "prompt.save",
+        preset: { name: name.trim(), systemPrompt: promptDraft?.systemPrompt || settingsV2?.builtInPrompt?.systemPrompt || "" },
+      });
+      if (ok) { promptDraftDirty = false; setStatus("已另存为新的提示词预设。"); }
+      renderCenter();
+    });
+    promptActions.append(promptSaveAsButton);
     panel.append(promptPanel);
+    panel.append(promptActions);
 
-    // 当前生效提示词（默认折叠，只读）
-    const details = document.createElement("details");
-    details.className = "aw-details";
-    const summary = document.createElement("summary");
-    summary.className = "aw-details__summary";
-    summary.textContent = "当前生效提示词（只读）";
-    const visible = el("pre", "aw-pre", activePromptText());
-    details.append(summary, visible);
-    panel.append(details);
-    panel.append(el("p", "aw-panel__meta", "用户行动、助手回复与世界上下文由系统自动组装，不在这里编辑。"));
+    let syncPromptDirty = () => {};
+    syncPromptDirty = () => {
+      discardButton.disabled = !promptDraftDirty;
+      if (!isBuiltinDraft && promptSaveButton) promptSaveButton.disabled = !promptDraftDirty;
+    };
+    syncPromptDirty();
+    panel.append(el("p", "aw-panel__meta", "修改后不会自动保存——改动只有点了保存按钮才会落盘。"));
     return panel;
   }
 
@@ -1717,36 +1757,34 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
 
   function buildApiPanel() {
     const panel = el("section", "aw-panel");
-    panel.append(el("span", "aw-eyebrow", "当前连接"));
-    panel.append(el("p", "aw-panel__text", `当前 API：${activeApiLabel()}`));
+    panel.append(el("span", "aw-eyebrow", "API 连接"));
+    panel.append(el("p", "aw-panel__text", "管理 Atlas 推演用的 API 连接：协议、密钥与模型都在这里；提示词请到「推进」页。"));
     const active = apiLibrary.find((p) => p.id === settingsV2?.activeApiPresetId);
-    if (active) {
-      panel.append(el("p", "aw-panel__meta", `模型：${active.model} · 密钥：${active.apiKey?.exists ? `已保存（尾号 ${active.apiKey.tail ?? "----"}）` : "未设置"}`));
-    }
-    const promptName = promptLibrary.find((p) => p.id === settingsV2?.activePromptPresetId)?.name ?? "内置默认";
-    const summaryRow = el("div", "aw-actions");
-    summaryRow.append(el("span", "aw-panel__meta", `当前提示词：${promptName}`));
+    panel.append(el("p", "aw-panel__meta", `当前使用：${activeApiLabel()}${active ? ` · 模型 ${active.model} · 密钥${active.apiKey?.exists ? `已保存（尾号 ${active.apiKey.tail ?? "----"}）` : "未设置"}` : ""}`));
+    const gotoRow = el("div", "aw-actions");
     const gotoProgression = el("button", "aw-btn aw-btn--ghost", "前往推进");
     gotoProgression.type = "button";
     gotoProgression.setAttribute("aria-label", "前往推进页管理提示词");
     gotoProgression.addEventListener("click", () => core.setPage("progression"));
-    summaryRow.append(gotoProgression);
-    panel.append(summaryRow);
+    gotoRow.append(gotoProgression);
+    panel.append(gotoRow);
     if (statusLine()) panel.append(statusLine());
 
-    const libRow = el("div", "aw-field");
-    libRow.append(el("span", "aw-field__label", "已保存的 API 连接"));
+    // 顶部预设选择行（shujuku 式：下拉选中即激活 + 新建 / 删除）
+    const presetField = el("div", "aw-field");
+    presetField.append(el("span", "aw-field__label", "当前 API 预设"));
+    const presetRow = el("div", "aw-select-row");
     const libSelect = document.createElement("select");
     libSelect.className = "aw-input";
-    libSelect.setAttribute("aria-label", "选择已保存的 API 连接");
+    libSelect.setAttribute("aria-label", "选择 API 预设（选中即设为当前使用）");
     const placeholder = document.createElement("option");
     placeholder.value = "";
-    placeholder.textContent = apiLibrary.length === 0 ? "暂无已保存连接——填好后点「保存」" : "选择连接以载入草稿";
+    placeholder.textContent = apiLibrary.length === 0 ? "暂无已保存连接——填好下方编辑器后点「保存」" : "选择已保存的连接";
     libSelect.append(placeholder);
     for (const preset of apiLibrary) {
       const option = document.createElement("option");
       option.value = preset.id;
-      option.textContent = `${preset.name}（${preset.model}）${settingsV2?.activeApiPresetId === preset.id ? " · 当前使用" : ""}`;
+      option.textContent = `${preset.name}（${preset.model}）`;
       libSelect.append(option);
     }
     libSelect.value = apiDraft?.id ?? "";
@@ -1764,26 +1802,58 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       apiKeyClear = false;
       modelOptions = [];
       setStatus("", "ok");
+      if (preset) void sendSettingsCommand({ action: "api.activate", id: preset.id });
       renderCenter();
     });
-    libRow.append(libSelect);
-    panel.append(libRow);
+    presetRow.append(libSelect);
+    const apiNewBtn = el("button", "aw-btn aw-btn--icon", "新建");
+    apiNewBtn.type = "button";
+    apiNewBtn.setAttribute("aria-label", "新建 API 预设");
+    apiNewBtn.addEventListener("click", () => {
+      if (apiDraftDirty && !confirmDiscard("API 连接")) return;
+      apiDraft = newApiDraft();
+      apiDraftDirty = false;
+      apiKeyInput = "";
+      apiKeyClear = false;
+      modelOptions = [];
+      setStatus("", "ok");
+      renderCenter();
+    });
+    presetRow.append(apiNewBtn);
+    const apiDeleteBtn = el("button", "aw-btn aw-btn--danger aw-btn--icon", "删除");
+    apiDeleteBtn.type = "button";
+    apiDeleteBtn.setAttribute("aria-label", "删除当前选中的 API 预设");
+    apiDeleteBtn.disabled = !apiDraft?.id;
+    apiDeleteBtn.addEventListener("click", async () => {
+      if (!apiDraft?.id) {
+        setStatus("当前草稿尚未保存，无需删除。", "error");
+        renderCenter();
+        return;
+      }
+      const confirmed = typeof window === "undefined" || typeof window.confirm !== "function"
+        ? true
+        : window.confirm(`删除连接「${apiDraft.name}」？`);
+      if (!confirmed) return;
+      const ok = await sendSettingsCommand({ action: "api.delete", id: apiDraft.id });
+      if (ok) {
+        apiDraft = newApiDraft();
+        apiDraftDirty = false;
+        setStatus("连接已删除。");
+      }
+      renderCenter();
+    });
+    presetRow.append(apiDeleteBtn);
+    presetField.append(presetRow);
+    presetField.append(el("span", "aw-hint", "选中预设会立即设为当前使用并载入下方编辑器；新建的连接在点「保存」之前不会出现在这里。"));
+    panel.append(presetField);
 
+    // ---- 编辑器（shujuku 式：名称 → 协议 → 端点/密钥 → 模型 → 参数 → dirty 操作条） ----
     const draft = apiDraft ?? newApiDraft();
     const textField = (key, label, type, maxLength, placeholder, aria) => ({ key, label, type, maxLength, placeholder, aria });
     const numberField = (key, label, min, max, step, aria) => ({ key, label, type: "number", min, max, step, aria });
-    const fields = [
-      textField("name", "连接名称", "text", 64, "例如：本地 8317", "连接名称"),
-      textField("endpoint", "端点（http(s) 绝对地址）", "text", 2048, "http://localhost:8317/v1", "API 端点"),
-      textField("apiKey", "API 密钥（留空保持已保存的密钥）", "password", 4096, active?.apiKey?.exists ? `已保存（尾号 ${active.apiKey.tail ?? "----"}），留空保持不变` : "未设置", "API 密钥"),
-    ];
-    const numberFields = [
-      numberField("maxTokens", "最大回复长度", 1, 8192, 1, "最大回复长度"),
-      numberField("temperature", "温度", 0, 2, 0.1, "温度"),
-      numberField("timeoutMs", "超时毫秒", 1000, 120000, 1000, "超时毫秒"),
-    ];
     const inputs = {};
-    const appendField = (field) => {
+    let apiSaveButton = null;
+    const appendField = (field, hint) => {
       const wrap = el("div", "aw-field");
       wrap.append(el("span", "aw-field__label", field.label));
       const input = document.createElement("input");
@@ -1797,10 +1867,11 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       input.placeholder = field.placeholder ?? "";
       if (field.key === "apiKey") {
         // 密钥框始终为空：已保存的密钥不回填 DOM（规格 0.7.2）
-        input.value = apiKeyInput === "" ? "" : apiKeyInput;
+        input.value = apiKeyInput;
         input.addEventListener("input", () => {
           apiKeyInput = input.value;
           apiDraftDirty = true;
+          if (syncApiDirty) syncApiDirty();
         });
       } else {
         input.value = String(draft[field.key] ?? "");
@@ -1810,23 +1881,25 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
           apiDraft = draft;
           apiDraftDirty = true;
           // 覆盖式保存必须始终明示目标（防改完名点保存静默覆盖别的连接）
-          if (field.key === "name" && saveApiButton) {
-            saveApiButton.textContent = draft.id
+          if (field.key === "name" && apiSaveButton) {
+            apiSaveButton.textContent = draft.id
               ? (draft.name.trim() ? `保存修改到「${draft.name.trim()}」` : "保存修改")
               : "保存新连接";
           }
+          if (syncApiDirty) syncApiDirty();
         });
       }
       wrap.append(input);
+      if (hint) wrap.append(el("span", "aw-hint", hint));
       inputs[field.key] = input;
       return wrap;
     };
-    for (const field of fields) panel.append(appendField(field));
 
-    // 接口协议（0.9.10，shujuku 同款字段）：claude = Anthropic Messages，
-    // 经酒馆 claude 源变形（MiniMax Token Plan 订阅密钥 / Claude 官方与中转代理用）
-    const formatRow = el("div", "aw-field");
-    formatRow.append(el("span", "aw-field__label", "接口协议"));
+    panel.append(appendField(textField("name", "连接名称", "text", 64, "例如：MiniMax 订阅", "连接名称")));
+
+    // 接口协议（0.9.11，shujuku 同款字段）
+    const formatField = el("div", "aw-field");
+    formatField.append(el("span", "aw-field__label", "接口协议"));
     const formatSelect = document.createElement("select");
     formatSelect.className = "aw-input";
     formatSelect.setAttribute("aria-label", "选择接口协议");
@@ -1845,11 +1918,16 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       draft.apiFormat = formatSelect.value === "claude" ? "claude" : "openai";
       apiDraft = draft;
       apiDraftDirty = true;
+      if (syncApiDirty) syncApiDirty();
     });
-    formatRow.append(formatSelect);
-    panel.append(formatRow);
+    formatField.append(formatSelect);
+    formatField.append(el("span", "aw-hint", "OpenAI 兼容 = 标准 /chat/completions（绝大多数中转站）；Claude（Anthropic Messages）= MiniMax Token Plan 订阅密钥（sk-cp-）、Claude 官方与中转代理——端点填协议根（如 https://api.minimaxi.com/anthropic），Atlas 自动补 /v1。"));
+    panel.append(formatField);
 
-    // shujuku 式：独立的「加载模型列表」按钮紧跟密钥，模型下拉**常驻**（占位提示先加载）
+    panel.append(appendField(textField("endpoint", "端点（http(s) 绝对地址）", "text", 2048, "http://localhost:8317/v1", "API 端点"), "Claude 协议填协议根即可，OpenAI 协议填到 /v1（Atlas 会自动补 /chat/completions）。"));
+    panel.append(appendField(textField("apiKey", "API 密钥（留空保持已保存的密钥）", "password", 4096, active?.apiKey?.exists ? `已保存（尾号 ${active.apiKey.tail ?? "----"}），留空保持不变` : "未设置", "API 密钥"), "密钥只保存在浏览器侧，经酒馆后端代理转发，服务端不预存；GET 只返回是否存在与尾号。"));
+
+    // shujuku 式：独立的「加载模型列表」按钮紧跟密钥；模型下拉仅在加载到时出现
     const loadModelsRow = el("div", "aw-actions");
     const loadModelsBtn = el("button", "aw-btn", "加载模型列表");
     loadModelsBtn.type = "button";
@@ -1857,41 +1935,43 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     loadModelsBtn.addEventListener("click", async () => {
       await testConnection(apiDraft ?? newApiDraft());
     });
-    loadModelsRow.append(loadModelsBtn, el("span", "aw-panel__meta", "同时检查端点与鉴权；失败会给出可读错误。"));
+    loadModelsRow.append(loadModelsBtn, el("span", "aw-panel__meta", "同时检查端点与鉴权；失败会给出可读错误，详见「日志」页。"));
     panel.append(loadModelsRow);
 
-    // 模型名：手填 + 列表选择双入口（列表选择点选即填入上方输入框）
     panel.append(appendField(textField("model", "模型名（手动输入）", "text", 128, "例如：gpt-4o-mini", "模型名")));
-    const modelRow = el("div", "aw-field");
-    modelRow.append(el("span", "aw-field__label", "或从列表选择"));
-    const modelSelect = document.createElement("select");
-    modelSelect.className = "aw-input";
-    modelSelect.setAttribute("aria-label", "选择端点返回的模型名");
-    const blank = document.createElement("option");
-    blank.value = "";
-    blank.textContent = modelOptions.length === 0 ? "-- 请先加载模型列表 --" : `-- 共 ${modelOptions.length} 个，点选填入 --`;
-    modelSelect.append(blank);
-    for (const name of modelOptions) {
-      const option = document.createElement("option");
-      option.value = name;
-      option.textContent = name;
-      modelSelect.append(option);
+    if (modelOptions.length > 0) {
+      const modelRow = el("div", "aw-field");
+      modelRow.append(el("span", "aw-field__label", "或从列表选择"));
+      const modelSelect = document.createElement("select");
+      modelSelect.className = "aw-input";
+      modelSelect.setAttribute("aria-label", "选择端点返回的模型名");
+      const blank = document.createElement("option");
+      blank.value = "";
+      blank.textContent = `-- 共 ${modelOptions.length} 个，点选填入 --`;
+      modelSelect.append(blank);
+      for (const name of modelOptions) {
+        const option = document.createElement("option");
+        option.value = name;
+        option.textContent = name;
+        modelSelect.append(option);
+      }
+      modelSelect.addEventListener("change", () => {
+        if (!modelSelect.value) return;
+        draft.model = modelSelect.value;
+        apiDraft = draft;
+        apiDraftDirty = true;
+        inputs.model.value = modelSelect.value;
+        if (syncApiDirty) syncApiDirty();
+      });
+      modelRow.append(modelSelect);
+      panel.append(modelRow);
     }
-    modelSelect.addEventListener("change", () => {
-      if (!modelSelect.value) return;
-      draft.model = modelSelect.value;
-      apiDraft = draft;
-      apiDraftDirty = true;
-      inputs.model.value = modelSelect.value;
-    });
-    modelRow.append(modelSelect);
-    panel.append(modelRow);
 
-    // 数字参数两列（超时独占一行）
     const grid = el("div", "aw-grid-2");
-    grid.append(appendField(numberFields[0]), appendField(numberFields[1]));
+    grid.append(appendField(numberField("maxTokens", "最大回复长度", 1, 8192, 1, "最大回复长度")));
+    grid.append(appendField(numberField("temperature", "温度", 0, 2, 0.1, "温度")));
     panel.append(grid);
-    panel.append(appendField(numberFields[2]));
+    panel.append(appendField(numberField("timeoutMs", "超时毫秒", 1000, 120000, 1000, "超时毫秒")));
 
     const clearKeyRow = el("label", "aw-check");
     const clearKey = document.createElement("input");
@@ -1901,23 +1981,21 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     clearKey.addEventListener("change", () => {
       apiKeyClear = clearKey.checked;
       apiDraftDirty = true;
+      if (syncApiDirty) syncApiDirty();
     });
     clearKeyRow.append(clearKey, el("span", null, "保存时清除已保存的密钥"));
     panel.append(clearKeyRow);
 
+    // dirty 操作条（shujuku 式：未修改时「放弃修改 / 保存」禁用；保存后自动设为当前使用）
     const actions = el("div", "aw-actions");
-    const addButton = (label, ariaLabel, handler, variant = "aw-btn aw-btn--ghost") => {
-      const button = el("button", variant, label);
-      button.type = "button";
-      button.setAttribute("aria-label", ariaLabel);
-      button.addEventListener("click", handler);
-      actions.append(button);
-      return button;
-    };
-
-    addButton("新建", "新建 API 连接草稿", () => {
-      if (apiDraftDirty && !confirmDiscard("API 连接")) return;
-      apiDraft = newApiDraft();
+    const apiDiscardButton = el("button", "aw-btn aw-btn--ghost", "放弃修改");
+    apiDiscardButton.type = "button";
+    apiDiscardButton.setAttribute("aria-label", "放弃未保存的 API 连接修改");
+    apiDiscardButton.addEventListener("click", () => {
+      const preset = apiLibrary.find((p) => p.id === apiDraft?.id);
+      apiDraft = preset
+        ? { id: preset.id, name: preset.name, endpoint: preset.endpoint, model: preset.model, maxTokens: preset.maxTokens, temperature: preset.temperature, timeoutMs: preset.timeoutMs, apiFormat: preset.apiFormat === "claude" ? "claude" : "openai" }
+        : newApiDraft();
       apiDraftDirty = false;
       apiKeyInput = "";
       apiKeyClear = false;
@@ -1925,7 +2003,11 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       setStatus("", "ok");
       renderCenter();
     });
-    const saveApiButton = addButton(draft.id ? `保存修改到「${draft.name}」` : "保存新连接", "保存当前 API 连接", async () => {
+    actions.append(apiDiscardButton);
+    apiSaveButton = el("button", "aw-btn aw-btn--primary", draft.id ? `保存修改到「${draft.name}」` : "保存新连接");
+    apiSaveButton.type = "button";
+    apiSaveButton.setAttribute("aria-label", "保存当前 API 连接");
+    apiSaveButton.addEventListener("click", async () => {
       const preset = apiDraft ?? newApiDraft();
       if (!preset.name.trim() || !preset.endpoint.trim() || !preset.model.trim()) {
         setStatus("连接名称、端点与模型名都不能为空。", "error");
@@ -1956,11 +2038,17 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
         apiDraftDirty = false;
         apiKeyInput = "";
         apiKeyClear = false;
-        setStatus("API 连接已保存。");
+        // shujuku 语义：保存（新建）后自动设为当前使用
+        if (saved) void sendSettingsCommand({ action: "api.activate", id: saved.id });
+        setStatus("API 连接已保存并设为当前使用。");
       }
       renderCenter();
-    }, "aw-btn aw-btn--primary");
-    addButton("另存为", "以新名称保存连接副本", async () => {
+    });
+    actions.append(apiSaveButton);
+    const apiSaveAsButton = el("button", "aw-btn aw-btn--ghost", "另存为");
+    apiSaveAsButton.type = "button";
+    apiSaveAsButton.setAttribute("aria-label", "以新名称保存连接副本");
+    apiSaveAsButton.addEventListener("click", async () => {
       const name = typeof window !== "undefined" && typeof window.prompt === "function"
         ? window.prompt("新连接名称", apiDraft?.name ? `${apiDraft.name} 副本` : "新连接")
         : null;
@@ -1977,7 +2065,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
           timeoutMs: Number(preset.timeoutMs) || 30_000,
           apiFormat: preset.apiFormat === "claude" ? "claude" : "openai",
         },
-        apiKeyMode: apiKeyInput ? "replace" : "replace",
+        apiKeyMode: "replace",
         apiKey: apiKeyInput,
       });
       if (ok) {
@@ -1987,38 +2075,16 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       }
       renderCenter();
     });
-    addButton("设为当前使用", "把选中的连接设为当前使用", async () => {
-      if (!apiDraft?.id) {
-        setStatus("请先保存连接再设为当前使用。", "error");
-        renderCenter();
-        return;
-      }
-      const ok = await sendSettingsCommand({ action: "api.activate", id: apiDraft.id });
-      if (ok) setStatus("已切换当前 API 连接。");
-      renderCenter();
-    });
-    addButton("删除", "删除选中的 API 连接", async () => {
-      if (!apiDraft?.id) {
-        setStatus("当前草稿尚未保存，无需删除。", "error");
-        renderCenter();
-        return;
-      }
-      const confirmed = typeof window === "undefined" || typeof window.confirm !== "function"
-        ? true
-        : window.confirm(`删除连接「${apiDraft.name}」？`);
-      if (!confirmed) return;
-      const ok = await sendSettingsCommand({ action: "api.delete", id: apiDraft.id });
-      if (ok) {
-        apiDraft = newApiDraft();
-        apiDraftDirty = false;
-        setStatus("连接已删除。");
-      }
-      renderCenter();
-    }, "aw-btn aw-btn--danger");
-
+    actions.append(apiSaveAsButton);
     panel.append(actions);
-    panel.append(el("p", "aw-panel__meta", "密钥只保存在浏览器侧，经酒馆后端代理转发，服务端不预存；GET 响应只返回是否存在与尾号。"));
-    panel.append(el("p", "aw-panel__meta", "提示词请在左侧「推进」中管理——本页只配置连接。"));
+
+    let syncApiDirty = () => {};
+    syncApiDirty = () => {
+      apiDiscardButton.disabled = !apiDraftDirty;
+      if (apiSaveButton) apiSaveButton.disabled = !apiDraftDirty;
+    };
+    syncApiDirty();
+    panel.append(el("p", "aw-panel__meta", "修改后不会自动保存——改动只有点了保存按钮才会落盘。"));
     return panel;
   }
 
@@ -2038,7 +2104,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       const headers = { "Content-Type": "application/json" };
       if (typeof ctx.getRequestHeaders === "function") Object.assign(headers, ctx.getRequestHeaders());
       // ATLAS-FIX-02：custom_include_headers 必须是原始头字符串（与生成路径共用同一序列化口径）
-      // 0.9.10：claude 协议 → chat_completion_source:"claude" + reverse_proxy（基址补 /v1）+ proxy_password
+      // 0.9.11：claude 协议 → chat_completion_source:"claude" + reverse_proxy（基址补 /v1）+ proxy_password
       const { atlasCustomIncludeHeaders, normalizeAtlasClaudeBase } = await loadUiCore();
       const keyValue = apiKeyInput ? `Bearer ${apiKeyInput}` : "";
       const isClaude = (apiDraft?.apiFormat ?? preset.apiFormat) === "claude" || preset.apiFormat === "claude";

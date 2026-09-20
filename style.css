@@ -615,6 +615,27 @@
 .aw-btn--danger { border-color: #a3543c; color: #a3543c; }
 .aw-btn--danger:hover { background: rgba(163, 84, 60, 0.08); }
 
+/* 0.9.11 shujuku 式表单语言：紧凑图标按钮 / 禁用态 / 预设选择行 / 灰色 hint */
+.aw-btn--icon { padding: 7px 11px; font-size: 12px; }
+.aw-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.aw-btn:disabled:hover { background: var(--aw-panel); }
+.aw-btn--primary:disabled:hover { background: var(--aw-teal); }
+.aw-select-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content max-content;
+  gap: 6px;
+  align-items: stretch;
+  min-width: 0;
+}
+.aw-hint {
+  display: block;
+  margin: 4px 0 2px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--aw-muted);
+  font-family: var(--aw-sans);
+}
+
 /* ------------------------------------------------------------------ *
  * 设置页：世界绑定 + API 预设表单
  * ------------------------------------------------------------------ */
