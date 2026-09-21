@@ -44,6 +44,8 @@ export const ATLAS_ERROR_CODES = {
   DUPLICATE_COMMIT: "DUPLICATE_COMMIT",
   /** 世界账本写入失败（零部分写入） */
   WRITE_FAILED: "WRITE_FAILED",
+  /** 0.9.42 会话承载：携带的世界文档落后于最新已接受版本（双开同聊天等场景），拒绝提交 */
+  SESSION_STALE: "SESSION_STALE",
 } as const;
 
 export type AtlasErrorCode = (typeof ATLAS_ERROR_CODES)[keyof typeof ATLAS_ERROR_CODES];

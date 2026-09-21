@@ -13,13 +13,16 @@ import assert from "node:assert/strict";
 
 import { buildStarterWorld, starterWorldIdForChat } from "../src/atlas-starter-world.ts";
 import { createAtlasServerCore, createMemoryDocumentStore } from "../src/atlas-server.ts";
+import { createSessionCarrier, carrierAsCore } from "./atlas-session-helper.mjs";
 
 const NOW = 1_700_000_000_000;
 
+/** 0.9.42 会话承载：世界落会话（carrier.session.world），全局 store 不再有世界档。 */
 async function makeCore() {
   const store = createMemoryDocumentStore();
-  const core = createAtlasServerCore({ store, now: () => NOW });
-  return { store, core };
+  const rawCore = createAtlasServerCore({ store, now: () => NOW });
+  const carrier = createSessionCarrier(rawCore);
+  return { store, core: carrierAsCore(carrier), carrier };
 }
 
 function starterWorld(id, name = "测试角色") {
@@ -62,8 +65,8 @@ test("starterWorldIdForChat：不同 chatId 的分布不集中在同一 ID（抽
 // POST /worlds/ensure-starter
 // ---------------------------------------------------------------------------
 
-test("ensure-starter：首次创建 created=true，世界可被后续读取", async () => {
-  const { core } = await makeCore();
+test("ensure-starter：首次创建 created=true，世界落会话可被后续读取", async () => {
+  const { core, carrier } = await makeCore();
   const world = starterWorld("world-auto-0123456789abcdef");
   const first = await ensure(core, world);
   assert.equal(first.status, 200);
@@ -72,61 +75,60 @@ test("ensure-starter：首次创建 created=true，世界可被后续读取", as
   assert.equal(first.body.data.world.id, world.id);
   assert.equal(first.body.data.world.name, world.name, "返回脱敏摘要含世界名");
 
+  assert.ok(carrier.session.world, "世界已入会话（0.9.42 会话承载）");
+  assert.equal(carrier.session.world.id, world.id, "会话世界 ID 一致");
   const listed = await core.handle("GET", "/worlds");
   assert.ok(
-    listed.body.data.worlds.some((w) => w.id === world.id),
-    "世界已落库，列表可见",
+    !listed.body.data.worlds.some((w) => w.id === world.id),
+    "全局 store 不再落世界档（世界只住会话）",
   );
 });
 
 test("ensure-starter：世界已存在 → created=false 且绝不覆盖已有内容", async () => {
-  const { core, store } = await makeCore();
+  const { core, carrier } = await makeCore();
   const world = starterWorld("world-auto-aaaaaaaaaaaaaaaa", "原角色");
   await ensure(core, world);
 
-  // 模拟用户/推演已经改动过这个世界（改名 + 加地点）
-  const stored = await store.read(`world:${world.id}`);
-  stored.name = "被改过的世界名";
-  stored.points = [...stored.points, { id: 2, name: "后来加的地点", x: 20, y: 20, regionId: "start" }];
-  await store.write(`world:${world.id}`, stored);
+  // 模拟用户/推演已经改动过这个世界（改名 + 加地点）——0.9.42 起直接改会话文档
+  carrier.session.world.name = "被改过的世界名";
+  carrier.session.world.points = [
+    ...carrier.session.world.points,
+    { id: 2, name: "后来加的地点", x: 20, y: 20, regionId: "start" },
+  ];
 
   const again = await ensure(core, starterWorld("world-auto-aaaaaaaaaaaaaaaa", "新角色名"));
   assert.equal(again.body.data.created, false, "第二次 = created:false");
-  const after = await store.read(`world:${world.id}`);
-  assert.equal(after.name, "被改过的世界名", "既有世界名未被覆盖");
-  assert.equal(after.points.length, 2, "既有地点未被覆盖");
+  assert.equal(carrier.session.world.name, "被改过的世界名", "既有世界名未被覆盖");
+  assert.equal(carrier.session.world.points.length, 2, "既有地点未被覆盖");
 });
 
 test("ensure-starter：非法世界被拒且零写入", async () => {
-  const { core, store } = await makeCore();
+  const { core, store, carrier } = await makeCore();
   const bad = await ensure(core, { id: "x" });
   assert.equal(bad.body.ok, false);
   assert.equal(bad.body.error.code, "INVALID_PAYLOAD", "parseWorld 不过 → INVALID_PAYLOAD");
-  assert.equal(await store.read("world:x"), null, "拒绝时不写任何东西");
+  assert.equal(carrier.session.world, null, "拒绝时不写会话");
+  assert.equal(await store.read("world:x"), null, "拒绝时不写全局 store");
 });
 
 test("ensure-starter：远端（非本机）调用 403", async () => {
-  const { core, store } = await makeCore();
+  const { core, store, carrier } = await makeCore();
   const world = starterWorld("world-auto-bbbbbbbbbbbbbbbb");
   const denied = await ensure(core, world, { local: false });
   assert.equal(denied.body.ok, false);
   assert.equal(denied.body.error.code, "FORBIDDEN");
-  assert.equal(await store.read(`world:${world.id}`), null, "拒绝时不写");
+  assert.equal(carrier.session.world, null, "拒绝时不写会话");
+  assert.equal(await store.read(`world:${world.id}`), null, "拒绝时不写全局 store");
 });
 
-test("ensure-starter：并发同名 ensure 串行，只创建一个世界", async () => {
-  const { core, store } = await makeCore();
+test("ensure-starter：会话模式下顺序 ensure 只创建一次（并发由浏览器闸门 + rev 冲突检测把守）", async () => {
+  const { core, carrier } = await makeCore();
   const id = "world-auto-cccccccccccccccc";
-  const results = await Promise.all([
-    ensure(core, starterWorld(id, "并发A")),
-    ensure(core, starterWorld(id, "并发B")),
-    ensure(core, starterWorld(id, "并发C")),
-  ]);
-  const createdCount = results.filter((r) => r.body.data.created === true).length;
-  assert.equal(createdCount, 1, "并发下恰好一次 created:true");
-  const stored = await store.read(`world:${id}`);
-  assert.ok(stored, "世界确实落库");
-  assert.equal(stored.id, id);
+  const first = await ensure(core, starterWorld(id, "并发A"));
+  assert.equal(first.body.data.created, true, "首次创建");
+  const second = await ensure(core, starterWorld(id, "并发B"));
+  assert.equal(second.body.data.created, false, "同一会话再次 ensure → created:false");
+  assert.equal(carrier.session.world.name, "并发A 的世界", "既有世界未被覆盖（starter 命名规则：`${name} 的世界`）");
 });
 
 test("ensure-starter → bindings：建世后可直接绑定，无需 import", async () => {

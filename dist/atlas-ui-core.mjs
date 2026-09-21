@@ -32,7 +32,9 @@ var ATLAS_ERROR_CODES = {
   /** 重复提交（沿用原 receipt，幂等） */
   DUPLICATE_COMMIT: "DUPLICATE_COMMIT",
   /** 世界账本写入失败（零部分写入） */
-  WRITE_FAILED: "WRITE_FAILED"
+  WRITE_FAILED: "WRITE_FAILED",
+  /** 0.9.42 会话承载：携带的世界文档落后于最新已接受版本（双开同聊天等场景），拒绝提交 */
+  SESSION_STALE: "SESSION_STALE"
 };
 var ATLAS_LIMITS = {
   /** ID 类字段最大字符数 */
@@ -1654,7 +1656,7 @@ function createAtlasUiCore(deps) {
       setState({ binding: null, bindingInvalid: false, mode: "unbound", stateData: null });
       return;
     }
-    const raw = host.readBinding();
+    const raw = await host.readBinding();
     if (raw === null || raw === void 0) {
       setState({ binding: null, bindingInvalid: false, mode: "unbound", stateData: null });
       return;
@@ -1683,7 +1685,7 @@ function createAtlasUiCore(deps) {
       return;
     }
     try {
-      const result = await api.request("GET", `/state/${encodeURIComponent(binding.chatId)}`);
+      const result = await api.request("POST", "/state", { chatId: binding.chatId });
       const body = result.body;
       if (state.chatId === null || binding.chatId !== state.chatId) return;
       if (result.status === 200 && body.ok && body.data) {
@@ -7471,8 +7473,223 @@ function resolveWorldTurnPreset(settings) {
 }
 
 // src/atlas-server.ts
+var ATLAS_SESSION_SCHEMA_VERSION = 1;
+var SESSION_TURNS_MAX = 2e3;
+function createEmptySessionDoc() {
+  return {
+    schemaVersion: ATLAS_SESSION_SCHEMA_VERSION,
+    rev: 0,
+    binding: null,
+    world: null,
+    maps: null,
+    turns: {},
+    geoAuto: {}
+  };
+}
+function isPlainRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function parseAtlasSessionDoc(raw) {
+  const session = createEmptySessionDoc();
+  if (!isPlainRecord(raw) || raw.schemaVersion !== ATLAS_SESSION_SCHEMA_VERSION) return session;
+  session.rev = typeof raw.rev === "number" && Number.isFinite(raw.rev) && raw.rev >= 0 ? Math.floor(raw.rev) : 0;
+  if (isPlainRecord(raw.turns)) {
+    for (const [key, value] of Object.entries(raw.turns).slice(0, SESSION_TURNS_MAX)) {
+      if (key) session.turns[key] = value;
+    }
+  }
+  if (isPlainRecord(raw.geoAuto)) {
+    for (const [key, value] of Object.entries(raw.geoAuto)) {
+      if (key) session.geoAuto[key] = value;
+    }
+  }
+  session.binding = raw.binding ?? null;
+  session.world = raw.world ?? null;
+  session.maps = raw.maps ?? null;
+  return session;
+}
+function cloneSessionDoc(session) {
+  try {
+    return JSON.parse(JSON.stringify(session));
+  } catch {
+    return createEmptySessionDoc();
+  }
+}
+function idOfDoc(value) {
+  if (!isPlainRecord(value)) return "";
+  const id = value.id;
+  return typeof id === "string" || typeof id === "number" ? String(id) : "";
+}
+function chatIdOfBinding(binding) {
+  if (!isPlainRecord(binding)) return "";
+  const chatId = binding.chatId;
+  return typeof chatId === "string" ? chatId : "";
+}
+function createSessionOverlayStore(session, fallback) {
+  let mutated = false;
+  const OWNED_PREFIXES = ["world:", "binding:", "maps:", "geo-auto:", "turn:"];
+  function worldName() {
+    return session.world !== null ? `world:${idOfDoc(session.world)}` : null;
+  }
+  function bindingName() {
+    return session.binding !== null ? `binding:${chatIdOfBinding(session.binding)}` : null;
+  }
+  function mapsName() {
+    if (session.maps === null) return null;
+    const worldId = idOfDoc(session.world);
+    return worldId ? `maps:${worldId}` : null;
+  }
+  return {
+    changed() {
+      return mutated;
+    },
+    async read(name) {
+      if (name === "settings" || name.startsWith("pending:")) return fallback.read(name);
+      if (name.startsWith("world:")) {
+        const current = worldName();
+        return current === name ? session.world : null;
+      }
+      if (name.startsWith("binding:")) {
+        const current = bindingName();
+        return current === name ? session.binding : null;
+      }
+      if (name.startsWith("maps:")) {
+        const current = mapsName();
+        return current === name ? session.maps : null;
+      }
+      if (name.startsWith("geo-auto:")) {
+        const worldId = name.slice("geo-auto:".length);
+        return worldId in session.geoAuto ? session.geoAuto[worldId] : null;
+      }
+      if (name.startsWith("turn:")) {
+        return name in session.turns ? session.turns[name] : null;
+      }
+      return fallback.read(name);
+    },
+    async write(name, value) {
+      if (name === "settings" || name.startsWith("pending:")) return fallback.write(name, value);
+      if (name.startsWith("world:")) {
+        const id = name.slice("world:".length);
+        const currentId = idOfDoc(session.world);
+        if (session.world !== null && currentId !== id) {
+          throw new AtlasError(
+            ATLAS_ERROR_CODES.INVALID_PAYLOAD,
+            "当前聊天会话已包含另一个世界，拒绝覆盖；请先解绑再导入 / 初始化。"
+          );
+        }
+        session.world = value;
+        mutated = true;
+        return;
+      }
+      if (name.startsWith("binding:")) {
+        session.binding = value;
+        mutated = true;
+        return;
+      }
+      if (name.startsWith("maps:")) {
+        const worldId = name.slice("maps:".length);
+        const currentId = idOfDoc(session.world);
+        if (session.world !== null && currentId !== worldId) {
+          throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "地图文档与当前会话世界不一致，拒绝写入。");
+        }
+        session.maps = value;
+        mutated = true;
+        return;
+      }
+      if (name.startsWith("geo-auto:")) {
+        session.geoAuto[name.slice("geo-auto:".length)] = value;
+        mutated = true;
+        return;
+      }
+      if (name.startsWith("turn:")) {
+        if (!(name in session.turns) && Object.keys(session.turns).length >= SESSION_TURNS_MAX) {
+          throw new AtlasError(ATLAS_ERROR_CODES.FIELD_LIMIT_EXCEEDED, `会话回合映射超过 ${SESSION_TURNS_MAX} 条上限。`);
+        }
+        session.turns[name] = value;
+        mutated = true;
+        return;
+      }
+      return fallback.write(name, value);
+    },
+    async remove(name) {
+      if (name === "settings" || name.startsWith("pending:")) return fallback.remove(name);
+      if (name.startsWith("binding:")) {
+        session.binding = null;
+        mutated = true;
+        return;
+      }
+      if (name.startsWith("world:")) {
+        if (worldName() === name) {
+          session.world = null;
+          mutated = true;
+        }
+        return;
+      }
+      if (name.startsWith("maps:")) {
+        if (mapsName() === name) {
+          session.maps = null;
+          mutated = true;
+        }
+        return;
+      }
+      if (name.startsWith("geo-auto:")) {
+        const worldId = name.slice("geo-auto:".length);
+        if (worldId in session.geoAuto) {
+          delete session.geoAuto[worldId];
+          mutated = true;
+        }
+        return;
+      }
+      if (name.startsWith("turn:")) {
+        if (name in session.turns) {
+          delete session.turns[name];
+          mutated = true;
+        }
+        return;
+      }
+      return fallback.remove(name);
+    },
+    async list(prefix) {
+      if (prefix === "settings" || prefix.startsWith("pending:")) return fallback.list(prefix);
+      if (OWNED_PREFIXES.some((p) => prefix.startsWith(p))) {
+        const names = [];
+        if (prefix.startsWith("turn:")) {
+          for (const key of Object.keys(session.turns)) {
+            if (key.startsWith(prefix)) names.push(key);
+          }
+        }
+        const world = worldName();
+        if (world && world.startsWith(prefix)) names.push(world);
+        const binding = bindingName();
+        if (binding && binding.startsWith(prefix)) names.push(binding);
+        const maps = mapsName();
+        if (maps && maps.startsWith(prefix)) names.push(maps);
+        for (const worldId of Object.keys(session.geoAuto)) {
+          const name = `geo-auto:${worldId}`;
+          if (name.startsWith(prefix)) names.push(name);
+        }
+        return names.sort();
+      }
+      return fallback.list(prefix);
+    }
+  };
+}
 var SETTINGS_DOC = "settings";
 var RPM_WINDOW_MS = 6e4;
+var ATLAS_SESSION_ROUTES = /* @__PURE__ */ new Set([
+  "POST /worlds/import",
+  "POST /worlds/ensure-starter",
+  "POST /worlds/geo/adopt",
+  "POST /bindings",
+  "POST /state",
+  "POST /map/image",
+  "POST /turns/prepare",
+  "POST /turns/commit",
+  "POST /turns/retry",
+  "POST /turns/restore",
+  "POST /turns/rollback",
+  "POST /map/travel-preview"
+]);
 var MAP_POINTS_MAX = 200;
 var MAP_POINT_NAME_CHARS = 80;
 function httpStatusFor(code) {
@@ -7489,6 +7706,7 @@ function httpStatusFor(code) {
       return 413;
     case ATLAS_ERROR_CODES.API_NOT_CONFIGURED:
     case ATLAS_ERROR_CODES.DUPLICATE_COMMIT:
+    case ATLAS_ERROR_CODES.SESSION_STALE:
       return 409;
     case ATLAS_ERROR_CODES.API_RATE_LIMITED:
       return 429;
@@ -7514,8 +7732,19 @@ function errorResult(thrown) {
   const error = toSerializedError(thrown);
   return { status: httpStatusFor(error.code), body: { ok: false, error } };
 }
-function createAtlasServerCore(deps) {
-  const store = deps.store;
+async function withSharedMutex(map, key, task) {
+  const previous = map.get(key) ?? Promise.resolve();
+  const next = previous.then(task, task);
+  map.set(
+    key,
+    next.then(
+      () => void 0,
+      () => void 0
+    )
+  );
+  return next;
+}
+function createCoreInstance(store, deps, shared) {
   const now = deps.now ?? Date.now;
   let settings = createDefaultSettingsV2();
   let settingsLoaded = false;
@@ -7523,13 +7752,14 @@ function createAtlasServerCore(deps) {
   const bindingCache = /* @__PURE__ */ new Map();
   const receiptCache = /* @__PURE__ */ new Map();
   const queues = /* @__PURE__ */ new Map();
-  const rpmTimestamps = [];
-  const logs = [];
+  const rpmTimestamps = shared.rpmTimestamps;
   function pushLog(entry) {
+    const logs = shared.logs;
     logs.push(entry);
     if (logs.length > 200) logs.shift();
   }
   async function loadSettings() {
+    if (shared.settingsOverride) return shared.settingsOverride;
     if (settingsLoaded) return settings;
     const raw = await store.read(SETTINGS_DOC);
     if (raw && typeof raw === "object" && !Array.isArray(raw)) {
@@ -7630,7 +7860,7 @@ function createAtlasServerCore(deps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.41",
+      version: "0.9.42",
       protocolVersion: 1,
       time: now()
     });
@@ -7695,7 +7925,7 @@ function createAtlasServerCore(deps) {
     }
     const parsed = parseWorld(body.world);
     if (!parsed) throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "自动建世数据无法通过 schema 校验，已拒绝。");
-    return enqueue(`ensure:${parsed.id}`, async () => {
+    return withSharedMutex(shared.ensureMutex, `ensure:${parsed.id}`, async () => {
       const existing = await getWorld(parsed.id);
       if (existing) {
         return okResult({ created: false, world: worldSummary(existing) });
@@ -7917,7 +8147,18 @@ function createAtlasServerCore(deps) {
     bindingCache.set(binding.chatId, binding);
     return okResult({ chatId: binding.chatId, worldId: binding.worldId, bound: binding.enabled });
   }
-  async function handleState(chatId) {
+  function chatIdFromRequest(body) {
+    if (!isPlainRecord(body)) return "";
+    if (typeof body.chatId === "string" && body.chatId) return body.chatId;
+    const session = body.session;
+    if (isPlainRecord(session)) {
+      const chatId = chatIdOfBinding(session.binding);
+      if (chatId) return chatId;
+    }
+    return "";
+  }
+  async function handleState(body) {
+    const chatId = chatIdFromRequest(body);
     if (!chatId || chatId.length > ATLAS_LIMITS.ID_CHARS) {
       throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "chatId 非法");
     }
@@ -8021,7 +8262,8 @@ function createAtlasServerCore(deps) {
       lastAdvance
     });
   }
-  async function handleMapImage(chatId) {
+  async function handleMapImage(body) {
+    const chatId = chatIdFromRequest(body);
     if (!chatId || chatId.length > ATLAS_LIMITS.ID_CHARS) {
       throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "chatId 非法");
     }
@@ -8059,9 +8301,15 @@ function createAtlasServerCore(deps) {
   async function executeCommit(binding, request) {
     const world = await requireWorld(binding);
     const idempotencyKey = atlasCommitIdempotencyKey(request);
+    const turnDocKey = `turn:${binding.chatId}:${idempotencyKey}`;
     if (receiptCache.has(idempotencyKey)) {
       const cached = receiptCache.get(idempotencyKey);
       return okResult({ receipt: { ...cached, status: "duplicate" }, duplicate: true });
+    }
+    const storedTurnDoc = await store.read(turnDocKey);
+    if (storedTurnDoc && storedTurnDoc.receipt && !storedTurnDoc.rolledBack) {
+      receiptCache.set(idempotencyKey, storedTurnDoc.receipt);
+      return okResult({ receipt: { ...storedTurnDoc.receipt, status: "duplicate" }, duplicate: true });
     }
     const current = await loadSettings();
     const preset = resolveWorldTurnPreset(current);
@@ -8263,6 +8511,8 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
         swipeId: request.swipeId,
         checkpointId,
         committedAt: now(),
+        // 0.9.42 会话承载：回执进回合映射文档（幂等判定不再依赖进程内存）
+        receipt,
         previousBinding: {
           worldTimeCursor: binding.worldTimeCursor,
           currentLocationId: binding.currentLocationId,
@@ -8391,6 +8641,11 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
       if (receiptCache.has(key)) {
         return okResult({ receipt: { ...receiptCache.get(key), status: "duplicate" }, duplicate: true });
       }
+      const storedTurnDoc = await store.read(`turn:${chatId}:${key}`);
+      if (storedTurnDoc && storedTurnDoc.receipt && !storedTurnDoc.rolledBack) {
+        receiptCache.set(key, storedTurnDoc.receipt);
+        return okResult({ receipt: { ...storedTurnDoc.receipt, status: "duplicate" }, duplicate: true });
+      }
       const stored = await store.read(`pending:${key}`);
       if (!stored) {
         throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "没有可重试的待处理回合。");
@@ -8498,6 +8753,53 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
     });
     return okResult({ preview });
   }
+  async function handleSessionExport(body) {
+    if (!isPlainRecord(body)) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "session/export 请求必须是对象");
+    }
+    const chatId = typeof body.chatId === "string" ? body.chatId : "";
+    const worldId = typeof body.worldId === "string" ? body.worldId : "";
+    if (!chatId || chatId.length > ATLAS_LIMITS.ID_CHARS || !worldId || worldId.length > ATLAS_LIMITS.ID_CHARS) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "session/export 需要 chatId 与 worldId。");
+    }
+    const binding = await store.read(`binding:${chatId}`);
+    const world = await store.read(`world:${worldId}`);
+    const maps = await store.read(`maps:${worldId}`);
+    const geoAuto = await store.read(`geo-auto:${worldId}`);
+    const turns = {};
+    for (const key of await store.list(`turn:${chatId}:`)) {
+      turns[key] = await store.read(key);
+    }
+    const session = {
+      ...createEmptySessionDoc(),
+      ...binding ? { binding } : {},
+      ...world ? { world } : {},
+      ...maps ? { maps } : {},
+      turns,
+      ...geoAuto ? { geoAuto: { [worldId]: geoAuto } } : {}
+    };
+    return okResult({ session, found: Boolean(world || binding) });
+  }
+  async function handleSessionPurge(body, ctx) {
+    if (!ctx.local) throw new AtlasError(ATLAS_ERROR_CODES.FORBIDDEN, "只有本机已登录会话可以清理旧世界文档。");
+    if (!isPlainRecord(body)) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "session/purge 请求必须是对象");
+    }
+    const chatId = typeof body.chatId === "string" ? body.chatId : "";
+    const worldId = typeof body.worldId === "string" ? body.worldId : "";
+    if (!chatId || chatId.length > ATLAS_LIMITS.ID_CHARS || !worldId || worldId.length > ATLAS_LIMITS.ID_CHARS) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "session/purge 需要 chatId 与 worldId。");
+    }
+    await store.remove(`binding:${chatId}`);
+    await store.remove(`world:${worldId}`);
+    await store.remove(`maps:${worldId}`);
+    await store.remove(`geo-auto:${worldId}`);
+    const turnKeys = await store.list(`turn:${chatId}:`);
+    for (const key of turnKeys) await store.remove(key);
+    worldCache.delete(worldId);
+    bindingCache.delete(chatId);
+    return okResult({ purged: true, turnDocs: turnKeys.length });
+  }
   async function handle(method, path, body, ctx = {}) {
     try {
       const [, cleanPath = ""] = path.match(/^\/api\/plugins\/atlas(\/.*)$/) ?? [null, path];
@@ -8510,31 +8812,87 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
       if (method === "POST" && route === "/worlds/ensure-starter") return await handleEnsureStarter(body, ctx);
       if (method === "POST" && route === "/worlds/geo/adopt") return await handleGeoAdopt(body);
       if (method === "POST" && route === "/bindings") return await handleBindings(body);
-      const stateMatch = route.match(/^\/state\/([^/]+)$/);
-      if (method === "GET" && stateMatch) return await handleState(decodeURIComponent(stateMatch[1]));
-      const imageMatch = route.match(/^\/map\/image\/([^/]+)$/);
-      if (method === "GET" && imageMatch) return await handleMapImage(decodeURIComponent(imageMatch[1]));
+      if (method === "POST" && route === "/state") return await handleState(body);
+      if (method === "POST" && route === "/map/image") return await handleMapImage(body);
       if (method === "POST" && route === "/turns/prepare") return await handlePrepare(body);
       if (method === "POST" && route === "/turns/commit") return await handleCommit(body);
       if (method === "POST" && route === "/turns/retry") return await handleRetry(body);
       if (method === "POST" && route === "/turns/restore") return await handleRestore(body);
       if (method === "POST" && route === "/turns/rollback") return await handleRollback(body);
       if (method === "POST" && route === "/map/travel-preview") return await handleTravelPreview(body);
+      if (method === "POST" && route === "/session/export") return await handleSessionExport(body);
+      if (method === "POST" && route === "/session/purge") return await handleSessionPurge(body, ctx);
       throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, `未知路由：${method} ${route}`);
     } catch (thrown) {
       return errorResult(thrown);
     }
   }
+  return { handle };
+}
+function createAtlasServerCore(deps) {
+  const shared = {
+    rpmTimestamps: [],
+    logs: [],
+    settingsOverride: null,
+    revByChat: /* @__PURE__ */ new Map(),
+    chatMutex: /* @__PURE__ */ new Map(),
+    ensureMutex: /* @__PURE__ */ new Map()
+  };
+  const globalCore = createCoreInstance(deps.store, deps, shared);
+  async function handle(method, path, body, ctx = {}) {
+    try {
+      const [, cleanPath = ""] = path.match(/^\/api\/plugins\/atlas(\/.*)$/) ?? [null, path];
+      const route = (cleanPath ?? path).replace(/\/+$/, "") || "/";
+      if (!ATLAS_SESSION_ROUTES.has(`${method} ${route}`)) {
+        return await globalCore.handle(method, path, body, ctx);
+      }
+      const record = isPlainRecord(body) ? body : {};
+      const session = parseAtlasSessionDoc(record.session);
+      const chatId = typeof record.chatId === "string" && record.chatId || chatIdOfBinding(session.binding);
+      const run = async () => {
+        if (chatId) {
+          const known = shared.revByChat.get(chatId);
+          if (known !== void 0 && known > session.rev) {
+            throw new AtlasError(
+              ATLAS_ERROR_CODES.SESSION_STALE,
+              "世界数据已被其他窗口更新，请刷新页面或重新进入聊天后重试。"
+            );
+          }
+        }
+        const overlay = createSessionOverlayStore(session, deps.store);
+        const instance = createCoreInstance(overlay, deps, shared);
+        const result = await instance.handle(method, path, body, ctx);
+        if (result.status === 200 && isPlainRecord(result.body) && result.body.ok === true && overlay.changed()) {
+          const next = cloneSessionDoc(session);
+          next.rev = session.rev + 1;
+          if (chatId) rememberRev(chatId, next.rev);
+          result.body.session = next;
+        } else if (chatId) {
+          rememberRev(chatId, session.rev);
+        }
+        return result;
+      };
+      if (chatId) {
+        return await withSharedMutex(shared.chatMutex, chatId, run);
+      }
+      return run();
+    } catch (thrown) {
+      return errorResult(thrown);
+    }
+  }
+  function rememberRev(chatId, rev) {
+    const current = shared.revByChat.get(chatId) ?? 0;
+    if (rev > current) shared.revByChat.set(chatId, rev);
+  }
   return {
     handle,
-    /** 诊断 / 测试用：脱敏日志副本 */
+    /** 诊断 / 测试用：脱敏日志副本（含会话路由内产生的日志） */
     logs() {
-      return logs.map((entry) => ({ ...entry }));
+      return shared.logs.map((entry) => ({ ...entry }));
     },
     /** 测试辅助：注入设置（跳过 PUT 校验流程；仅供测试进程使用） */
     __setSettingsForTest(next) {
-      settings = { ...settings, ...next };
-      settingsLoaded = true;
+      shared.settingsOverride = { ...createDefaultSettingsV2(), ...next };
     }
   };
 }

@@ -122,6 +122,13 @@ function presetFixture() {
 
 function fakeRouter() {
   const routes = [];
+  // 0.9.42 会话承载：模拟浏览器——会话文档随请求往返，200 ok 响应带回的新会话覆盖本地
+  const SESSION_ROUTES = new Set([
+    "POST /worlds/import", "POST /worlds/ensure-starter", "POST /worlds/geo/adopt", "POST /bindings",
+    "POST /state", "POST /map/image", "POST /turns/prepare", "POST /turns/commit", "POST /turns/retry",
+    "POST /turns/restore", "POST /turns/rollback", "POST /map/travel-preview",
+  ]);
+  let carriedSession = null;
   return {
     routes,
     get(path, handler) { routes.push({ method: "GET", path, handler }); },
@@ -131,6 +138,9 @@ function fakeRouter() {
     async invoke(method, template, { params = {}, body, user, remoteAddress = "127.0.0.1" } = {}) {
       const route = routes.find((r) => r.method === method && r.path === template);
       if (!route) return { status: 404, body: { ok: false, error: { code: "NO_ROUTE", message: `${method} ${template}` } } };
+      if (SESSION_ROUTES.has(`${method} ${template}`)) {
+        body = { ...(body ?? {}), session: carriedSession };
+      }
       let concretePath = template;
       for (const [key, value] of Object.entries(params)) {
         concretePath = concretePath.replace(`:${key}`, encodeURIComponent(String(value)));
@@ -143,6 +153,9 @@ function fakeRouter() {
       };
       const req = { baseUrl: "/api/plugins/atlas", path: concretePath, body, user, socket: { remoteAddress } };
       await route.handler(req, res);
+      if (res.statusCode === 200 && captured && typeof captured === "object" && captured.ok === true && captured.session) {
+        carriedSession = captured.session;
+      }
       return { status: res.statusCode, body: captured };
     },
   };
@@ -443,14 +456,14 @@ async function wiredPlugin() {
 test("P0-06：动态路由用真实请求路径；map/image 已注册并可访问", async () => {
   const { router, dataDir, world } = await wiredPlugin();
   try {
-    const state = await router.invoke("GET", "/state/:chatId", { params: { chatId: "chat-a" } });
-    equal(state.status, 200, "GET /state/:chatId 用真实 chatId 命中绑定（不再 400 NOT_BOUND）");
+    const state = await router.invoke("POST", "/state", { body: { chatId: "chat-a" } });
+    equal(state.status, 200, "POST /state（chatId 随体）命中绑定（0.9.42 会话承载改排）");
     equal(state.body?.data?.worldId, world.id, "返回绑定世界的状态");
     ok(state.body?.data?.map && typeof state.body.data.map === "object", "state 携带 map 有界数据");
-    const image = await router.invoke("GET", "/map/image/:chatId", { params: { chatId: "chat-a" } });
-    equal(image.status, 200, "GET /map/image/:chatId 已注册且可达");
+    const image = await router.invoke("POST", "/map/image", { body: { chatId: "chat-a" } });
+    equal(image.status, 200, "POST /map/image 已注册且可达");
     equal(image.body?.ok, true, "map/image 契约信封");
-    ok(router.routes.some((r) => r.method === "GET" && r.path === "/map/image/:chatId"), "路由清单含 map image");
+    ok(router.routes.some((r) => r.method === "POST" && r.path === "/map/image"), "路由清单含 map image");
   } finally {
     rmtree(dataDir);
   }

@@ -114,9 +114,9 @@ function makeApi({ health = { ok: true, data: { protocolVersion: 1 } }, stateByC
           body: { ok: true, data: { worlds: [{ id: "w-1", name: "演示世界", pointCount: 6 }] } },
         };
       }
-      const chatMatch = path.match(/^\/state\/(.+)$/);
-      if (method === "GET" && chatMatch) {
-        const payload = stateByChat[decodeURIComponent(chatMatch[1])];
+      // 0.9.42 会话承载：/state 改 POST，chatId 随体携带
+      if (method === "POST" && path === "/state") {
+        const payload = stateByChat[typeof body?.chatId === "string" ? body.chatId : ""];
         if (!payload) {
           return { status: 400, body: { ok: false, error: { code: "NOT_BOUND", message: "未绑定" } } };
         }
@@ -730,7 +730,7 @@ test("回合：GENERATION_ENDED → commit 一次 → 回执入列并持久化 �
   equal(core.getState().lastError, null, "无错误");
   deepEqual(hostWrap.dataStore.get("receiptsByChat")?.["chat-a"], receipt, "回执按聊天分桶写入 extensionSettings");
   equal(hostWrap.dataStore.get("receipts"), null, "0.9.28 旧全局键已废弃（一次性清除）");
-  equal(api.calls.filter((c) => c.path === "/state/chat-a").length >= 2, true, "commit 成功后刷新世界状态");
+  equal(api.calls.filter((c) => c.path === "/state" && c.body?.chatId === "chat-a").length >= 2, true, "commit 成功后刷新世界状态");
 });
 
 test("回合：同一条回复的重复 GENERATION_ENDED 只 commit 一次", async () => {
@@ -1277,7 +1277,7 @@ test("数据隔离：CHAT_CHANGED 先摘旧数据再刷新（加载期间不显�
   const gate = new Promise((resolve) => { releaseState = resolve; });
   const originalRequest = api.request.bind(api);
   api.request = async (method, path, body) => {
-    if (path.startsWith("/state/")) { await gate; }
+    if (path === "/state") { await gate; }
     return originalRequest(method, path, body);
   };
 
@@ -1308,7 +1308,7 @@ test("数据隔离：旧聊天的迟到 /state 响应被丢弃（跨聊天竞态
   const gate = new Promise((resolve) => { releaseState = resolve; });
   const originalRequest = api.request.bind(api);
   api.request = async (method, path, body) => {
-    if (path.startsWith("/state/")) { await gate; }
+    if (path === "/state") { await gate; }
     return originalRequest(method, path, body);
   };
 

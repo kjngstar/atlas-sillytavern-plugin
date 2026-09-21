@@ -12,6 +12,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createAtlasServerCore, createMemoryDocumentStore } from "../src/atlas-server.ts";
+import { createSessionCarrier, carrierAsCore } from "./atlas-session-helper.mjs";
 import { buildWorldFromTemplate, getDemoTemplate } from "../lib/demo-events.ts";
 import { parseWorld } from "../lib/world-schema.ts";
 import { upsertEntityRecord } from "../lib/world-definition.ts";
@@ -116,11 +117,13 @@ function openAiResponse(draft) {
 /** 组装核心：导入世界 + 绑定指定聊天。时钟严格递增（回退「最近一条」守卫依赖 committedAt 可比）。 */
 async function setup(store, fetchFn, chatId = "chat-a") {
   let tick = NOW;
-  const core = createAtlasServerCore({ store, fetchFn, now: () => (tick += 1) });
+  const rawCore = createAtlasServerCore({ store, fetchFn, now: () => (tick += 1) });
+  const carrier = createSessionCarrier(rawCore);
+  const core = carrierAsCore(carrier);
   const world = buildWorld();
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world, chatId) });
-  return { core, world };
+  return { core, world, carrier, store };
 }
 
 test("ATLAS-07 场景 A：零 API 基线——prepare / 地图 / 旅行预览可用，commit 明确拒绝", async () => {
@@ -160,10 +163,8 @@ test("ATLAS-07 场景 B + swipe + 多聊天：完整旅程一条龙", async () =
     () => openAiResponse(GOOD_DRAFT), // 4. 变体 B 重提交
   ]);
   const store = createMemoryDocumentStore();
-  const { core, world } = await setup(store, fetcher.fetchFn);
+  const { core, world, carrier } = await setup(store, fetcher.fetchFn);
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
-  // 多聊天隔离：chat-b 绑定同一世界，只做对照
-  await core.handle("POST", "/bindings", { action: "bind", binding: binding(world, "chat-b") });
 
   // --- 场景 B：正常回合 ---
   const prepared = await core.handle("POST", "/turns/prepare", {
@@ -187,8 +188,11 @@ test("ATLAS-07 场景 B + swipe + 多聊天：完整旅程一条龙", async () =
   assert.ok(fetcher.calls[0].headers.Authorization.includes(SECRET), "密钥只进 Authorization 头");
   assert.ok(!JSON.stringify(fetcher.calls[0].body).includes(SECRET), "请求体无密钥");
 
-  // --- 刷新恢复：新建 core（同 store）状态一致 + 同请求 duplicate（账本标记防重） ---
-  const refreshed = createAtlasServerCore({ store, fetchFn: makeFetch([() => openAiResponse(GOOD_DRAFT)]).fetchFn, now: () => NOW });
+  // --- 刷新恢复：0.9.42 起世界住会话（chatMetadata），新核心实例播种同一会话快照 → 状态一致 + 同请求 duplicate（账本标记防重） ---
+  const refreshed = carrierAsCore(createSessionCarrier(
+    createAtlasServerCore({ store, fetchFn: makeFetch([() => openAiResponse(GOOD_DRAFT)]).fetchFn, now: () => NOW }),
+    { session: carrier.session },
+  ));
   const stateAfter = await refreshed.handle("GET", "/state/chat-a");
   assert.equal(stateAfter.body.data.currentTime, 430.07, "刷新恢复：游标一致");
   assert.equal(stateAfter.body.data.currentLocationId, "4104", "刷新恢复：位置一致");
@@ -221,8 +225,13 @@ test("ATLAS-07 场景 B + swipe + 多聊天：完整旅程一条龙", async () =
   assert.equal(variantCommit.body.data.receipt.status, "committed", "变体 committed（非 duplicate）");
   assert.equal(variantCommit.body.data.receipt.currentTime, 442.07, "同级结果：时间不累计（442.07 而非 454.07）");
 
-  // --- 多聊天隔离 ---
-  const stateB = await core.handle("GET", "/state/chat-b");
+  // --- 多聊天隔离：0.9.42 会话承载 = 每聊天一个会话（一卡多聊 = 独立世界副本）---
+  const coreB = carrierAsCore(createSessionCarrier(
+    createAtlasServerCore({ store, fetchFn: makeFetch([]).fetchFn, now: () => NOW }),
+  ));
+  await coreB.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
+  await coreB.handle("POST", "/bindings", { action: "bind", binding: binding(world, "chat-b") });
+  const stateB = await coreB.handle("GET", "/state/chat-b");
   assert.equal(stateB.body.data.currentTime, CURRENT_TIME, "chat-b 游标不受 chat-a 推进影响");
   assert.equal(stateB.body.data.currentLocationId, "4103", "chat-b 位置独立");
 

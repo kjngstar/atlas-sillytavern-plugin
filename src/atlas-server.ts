@@ -97,6 +97,250 @@ export function createMemoryDocumentStore(): AtlasDocumentStore & { dump(): Map<
 }
 
 // ---------------------------------------------------------------------------
+// 0.9.42 会话承载：世界文档随请求往返（存聊天 chatMetadata，作者拍板「空间换安全」）
+//
+// 会话文档 = { schemaVersion, rev, binding, world, maps, turns, geoAuto } 单对象；
+// 世界/绑定/地图/回合映射/geo-auto 的读写经会话覆盖层落到该文档，响应带回新会话；
+// settings / pending 是全局或瞬态数据，留全局 store。rev 单调递增用于双开冲突检测。
+// ---------------------------------------------------------------------------
+
+export const ATLAS_SESSION_SCHEMA_VERSION = 1;
+/** 会话内回合映射条数上限（百楼量级 × 安全余量；超额拒绝写入）。 */
+const SESSION_TURNS_MAX = 2000;
+
+export interface AtlasSessionDoc {
+  schemaVersion: number;
+  rev: number;
+  binding: unknown | null;
+  world: unknown | null;
+  maps: unknown | null;
+  turns: Record<string, unknown>;
+  geoAuto: Record<string, unknown>;
+}
+
+export function createEmptySessionDoc(): AtlasSessionDoc {
+  return {
+    schemaVersion: ATLAS_SESSION_SCHEMA_VERSION,
+    rev: 0,
+    binding: null,
+    world: null,
+    maps: null,
+    turns: {},
+    geoAuto: {},
+  };
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** 宽容解析：任何损坏形状按空会话处理（绝不抛错、绝不破坏浏览器侧数据）。 */
+export function parseAtlasSessionDoc(raw: unknown): AtlasSessionDoc {
+  const session = createEmptySessionDoc();
+  if (!isPlainRecord(raw) || raw.schemaVersion !== ATLAS_SESSION_SCHEMA_VERSION) return session;
+  session.rev = typeof raw.rev === "number" && Number.isFinite(raw.rev) && raw.rev >= 0 ? Math.floor(raw.rev) : 0;
+  if (isPlainRecord(raw.turns)) {
+    for (const [key, value] of Object.entries(raw.turns).slice(0, SESSION_TURNS_MAX)) {
+      if (key) session.turns[key] = value;
+    }
+  }
+  if (isPlainRecord(raw.geoAuto)) {
+    for (const [key, value] of Object.entries(raw.geoAuto)) {
+      if (key) session.geoAuto[key] = value;
+    }
+  }
+  session.binding = raw.binding ?? null;
+  session.world = raw.world ?? null;
+  session.maps = raw.maps ?? null;
+  return session;
+}
+
+/** 深拷贝（JSON 口径；响应本来就要过 JSON，不可序列化值按 undefined 丢弃）。 */
+export function cloneSessionDoc(session: AtlasSessionDoc): AtlasSessionDoc {
+  try {
+    return JSON.parse(JSON.stringify(session)) as AtlasSessionDoc;
+  } catch {
+    return createEmptySessionDoc();
+  }
+}
+
+function idOfDoc(value: unknown): string {
+  if (!isPlainRecord(value)) return "";
+  const id = value.id;
+  return typeof id === "string" || typeof id === "number" ? String(id) : "";
+}
+
+function chatIdOfBinding(binding: unknown): string {
+  if (!isPlainRecord(binding)) return "";
+  const chatId = binding.chatId;
+  return typeof chatId === "string" ? chatId : "";
+}
+
+/**
+ * 会话覆盖层存储：世界 / 绑定 / 地图 / 回合映射 / geo-auto 的读写落在会话文档；
+ * settings / pending 委托全局 store。任何会话键写入都标记 changed（响应带回新会话）。
+ * 回合映射以完整存储键（`turn:<chatId>:<幂等键>`）为键，与旧 store 语义一一对应。
+ */
+export function createSessionOverlayStore(
+  session: AtlasSessionDoc,
+  fallback: AtlasDocumentStore,
+): AtlasDocumentStore & { changed(): boolean } {
+  let mutated = false;
+  const OWNED_PREFIXES = ["world:", "binding:", "maps:", "geo-auto:", "turn:"];
+
+  function worldName(): string | null {
+    return session.world !== null ? `world:${idOfDoc(session.world)}` : null;
+  }
+  function bindingName(): string | null {
+    return session.binding !== null ? `binding:${chatIdOfBinding(session.binding)}` : null;
+  }
+  function mapsName(): string | null {
+    if (session.maps === null) return null;
+    const worldId = idOfDoc(session.world);
+    return worldId ? `maps:${worldId}` : null;
+  }
+
+  return {
+    changed() {
+      return mutated;
+    },
+
+    async read(name: string) {
+      if (name === "settings" || name.startsWith("pending:")) return fallback.read(name);
+      if (name.startsWith("world:")) {
+        const current = worldName();
+        return current === name ? session.world : null;
+      }
+      if (name.startsWith("binding:")) {
+        const current = bindingName();
+        return current === name ? session.binding : null;
+      }
+      if (name.startsWith("maps:")) {
+        const current = mapsName();
+        return current === name ? session.maps : null;
+      }
+      if (name.startsWith("geo-auto:")) {
+        const worldId = name.slice("geo-auto:".length);
+        return worldId in session.geoAuto ? session.geoAuto[worldId] : null;
+      }
+      if (name.startsWith("turn:")) {
+        return name in session.turns ? session.turns[name] : null;
+      }
+      return fallback.read(name);
+    },
+
+    async write(name: string, value: unknown) {
+      if (name === "settings" || name.startsWith("pending:")) return fallback.write(name, value);
+      if (name.startsWith("world:")) {
+        const id = name.slice("world:".length);
+        const currentId = idOfDoc(session.world);
+        if (session.world !== null && currentId !== id) {
+          throw new AtlasError(
+            ATLAS_ERROR_CODES.INVALID_PAYLOAD,
+            "当前聊天会话已包含另一个世界，拒绝覆盖；请先解绑再导入 / 初始化。",
+          );
+        }
+        session.world = value;
+        mutated = true;
+        return;
+      }
+      if (name.startsWith("binding:")) {
+        session.binding = value;
+        mutated = true;
+        return;
+      }
+      if (name.startsWith("maps:")) {
+        const worldId = name.slice("maps:".length);
+        const currentId = idOfDoc(session.world);
+        if (session.world !== null && currentId !== worldId) {
+          throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "地图文档与当前会话世界不一致，拒绝写入。");
+        }
+        session.maps = value;
+        mutated = true;
+        return;
+      }
+      if (name.startsWith("geo-auto:")) {
+        session.geoAuto[name.slice("geo-auto:".length)] = value;
+        mutated = true;
+        return;
+      }
+      if (name.startsWith("turn:")) {
+        if (!(name in session.turns) && Object.keys(session.turns).length >= SESSION_TURNS_MAX) {
+          throw new AtlasError(ATLAS_ERROR_CODES.FIELD_LIMIT_EXCEEDED, `会话回合映射超过 ${SESSION_TURNS_MAX} 条上限。`);
+        }
+        session.turns[name] = value;
+        mutated = true;
+        return;
+      }
+      return fallback.write(name, value);
+    },
+
+    async remove(name: string) {
+      if (name === "settings" || name.startsWith("pending:")) return fallback.remove(name);
+      if (name.startsWith("binding:")) {
+        session.binding = null;
+        mutated = true;
+        return;
+      }
+      if (name.startsWith("world:")) {
+        if (worldName() === name) {
+          session.world = null;
+          mutated = true;
+        }
+        return;
+      }
+      if (name.startsWith("maps:")) {
+        if (mapsName() === name) {
+          session.maps = null;
+          mutated = true;
+        }
+        return;
+      }
+      if (name.startsWith("geo-auto:")) {
+        const worldId = name.slice("geo-auto:".length);
+        if (worldId in session.geoAuto) {
+          delete session.geoAuto[worldId];
+          mutated = true;
+        }
+        return;
+      }
+      if (name.startsWith("turn:")) {
+        if (name in session.turns) {
+          delete session.turns[name];
+          mutated = true;
+        }
+        return;
+      }
+      return fallback.remove(name);
+    },
+
+    async list(prefix: string) {
+      if (prefix === "settings" || prefix.startsWith("pending:")) return fallback.list(prefix);
+      if (OWNED_PREFIXES.some((p) => prefix.startsWith(p))) {
+        const names: string[] = [];
+        if (prefix.startsWith("turn:")) {
+          for (const key of Object.keys(session.turns)) {
+            if (key.startsWith(prefix)) names.push(key);
+          }
+        }
+        const world = worldName();
+        if (world && world.startsWith(prefix)) names.push(world);
+        const binding = bindingName();
+        if (binding && binding.startsWith(prefix)) names.push(binding);
+        const maps = mapsName();
+        if (maps && maps.startsWith(prefix)) names.push(maps);
+        for (const worldId of Object.keys(session.geoAuto)) {
+          const name = `geo-auto:${worldId}`;
+          if (name.startsWith(prefix)) names.push(name);
+        }
+        return names.sort();
+      }
+      return fallback.list(prefix);
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // 设置（独立 API 预设；服务端保存，GET 只出脱敏视图）
 // ---------------------------------------------------------------------------
 
@@ -123,15 +367,37 @@ export const ATLAS_ROUTE_MANIFEST = [
   { method: "POST", path: "/worlds/ensure-starter" },
   { method: "POST", path: "/worlds/geo/adopt" },
   { method: "POST", path: "/bindings" },
-  { method: "GET", path: "/state/:chatId" },
-  { method: "GET", path: "/map/image/:chatId" },
+  { method: "POST", path: "/state" },
+  { method: "POST", path: "/map/image" },
   { method: "POST", path: "/turns/prepare" },
   { method: "POST", path: "/turns/commit" },
   { method: "POST", path: "/turns/retry" },
   { method: "POST", path: "/turns/restore" },
   { method: "POST", path: "/turns/rollback" },
   { method: "POST", path: "/map/travel-preview" },
+  { method: "POST", path: "/session/export" },
+  { method: "POST", path: "/session/purge" },
 ] as const;
+
+/**
+ * 0.9.42 会话承载路由：请求体携带世界会话文档（body.session），
+ * 世界/绑定/地图/回合映射/geo-auto 的读写落在会话覆盖层，
+ * 响应带回新会话由浏览器写回 chatMetadata。settings / pending 留全局 store。
+ */
+const ATLAS_SESSION_ROUTES = new Set<string>([
+  "POST /worlds/import",
+  "POST /worlds/ensure-starter",
+  "POST /worlds/geo/adopt",
+  "POST /bindings",
+  "POST /state",
+  "POST /map/image",
+  "POST /turns/prepare",
+  "POST /turns/commit",
+  "POST /turns/retry",
+  "POST /turns/restore",
+  "POST /turns/rollback",
+  "POST /map/travel-preview",
+]);
 
 /** 地图数据上限（有界结果；不返回完整世界）。 */
 const MAP_POINTS_MAX = 200;
@@ -151,6 +417,7 @@ function httpStatusFor(code: string): number {
       return 413;
     case ATLAS_ERROR_CODES.API_NOT_CONFIGURED:
     case ATLAS_ERROR_CODES.DUPLICATE_COMMIT:
+    case ATLAS_ERROR_CODES.SESSION_STALE:
       return 409;
     case ATLAS_ERROR_CODES.API_RATE_LIMITED:
       return 429;
@@ -206,8 +473,39 @@ interface StoredPendingCommit {
   savedAt: number;
 }
 
-export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
-  const store = deps.store;
+/** 跨请求共享互斥：会话路由按 chatId 串行、ensure 按 worldId 串行（实例按请求重建，互斥必须共享）。 */
+async function withSharedMutex<T>(map: Map<string, Promise<void>>, key: string, task: () => Promise<T>): Promise<T> {
+  const previous = map.get(key) ?? Promise.resolve();
+  const next = previous.then(task, task);
+  map.set(
+    key,
+    next.then(
+      () => undefined,
+      () => undefined,
+    ),
+  );
+  return next;
+}
+
+/** 跨请求共享运行时：RPM 窗口、诊断日志、rev 登记表、测试设置注入（实例可按请求重建，这些必须共享）。 */
+interface AtlasSharedRuntime {
+  rpmTimestamps: number[];
+  logs: Array<Record<string, unknown>>;
+  settingsOverride: AtlasServerSettingsV2 | null;
+  /** chatId → 已见最新会话 rev（SESSION_STALE 冲突检测；进程重启清零，尽力而为） */
+  revByChat: Map<string, number>;
+  /** chatId → 在途会话请求链（同聊天请求串行，双开并发不会互相冲账） */
+  chatMutex: Map<string, Promise<void>>;
+  /** worldId → 在途 ensure 链（并发首条消息只创建一个世界） */
+  ensureMutex: Map<string, Promise<void>>;
+}
+
+/** 单实例核心：store 决定数据从哪来（全局文档库，或 0.9.42 的会话覆盖层）。 */
+function createCoreInstance(
+  store: AtlasDocumentStore,
+  deps: { fetchFn?: typeof fetch; now?: () => number },
+  shared: AtlasSharedRuntime,
+) {
   const now = deps.now ?? Date.now;
 
   let settings: AtlasServerSettingsV2 = createDefaultSettingsV2();
@@ -217,10 +515,10 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
   const bindingCache = new Map<string, AtlasChatBinding | null>();
   const receiptCache = new Map<string, AtlasTurnReceipt>();
   const queues = new Map<string, Promise<unknown>>();
-  const rpmTimestamps: number[] = [];
-  const logs: Array<Record<string, unknown>> = [];
+  const rpmTimestamps = shared.rpmTimestamps;
 
   function pushLog(entry: Record<string, unknown>): void {
+    const logs = shared.logs;
     logs.push(entry);
     if (logs.length > 200) logs.shift();
   }
@@ -231,6 +529,7 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
    * - v1（或形状可疑的旧数据）：纯函数迁移，**不写 store**；首个成功写入时落库 v2。
    */
   async function loadSettings(): Promise<AtlasServerSettingsV2> {
+    if (shared.settingsOverride) return shared.settingsOverride;
     if (settingsLoaded) return settings;
     const raw = await store.read(SETTINGS_DOC);
     if (raw && typeof raw === "object" && !Array.isArray(raw)) {
@@ -348,7 +647,7 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.41",
+      version: "0.9.42",
       protocolVersion: 1,
       time: now(),
     });
@@ -434,8 +733,8 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
     }
     const parsed = parseWorld((body as Record<string, unknown>).world);
     if (!parsed) throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "自动建世数据无法通过 schema 校验，已拒绝。");
-    // 同一 world.id 串行（复用每实体队列）：并发首条消息只创建一个世界
-    return enqueue(`ensure:${parsed.id}`, async () => {
+    // 同一 world.id 跨请求串行（并发首条消息只创建一个世界；实例按请求重建，互斥在共享 runtime）
+    return withSharedMutex(shared.ensureMutex, `ensure:${parsed.id}`, async () => {
       const existing = await getWorld(parsed.id);
       if (existing) {
         return okResult({ created: false, world: worldSummary(existing) });
@@ -716,7 +1015,20 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
     return okResult({ chatId: binding.chatId, worldId: binding.worldId, bound: binding.enabled });
   }
 
-  async function handleState(chatId: string): Promise<AtlasRouteResult> {
+  /** 请求体 / 会话绑定里的 chatId（/state、/map/image 无路径参数，随体携带）。 */
+  function chatIdFromRequest(body: unknown): string {
+    if (!isPlainRecord(body)) return "";
+    if (typeof body.chatId === "string" && body.chatId) return body.chatId;
+    const session = body.session;
+    if (isPlainRecord(session)) {
+      const chatId = chatIdOfBinding(session.binding);
+      if (chatId) return chatId;
+    }
+    return "";
+  }
+
+  async function handleState(body: unknown): Promise<AtlasRouteResult> {
+    const chatId = chatIdFromRequest(body);
     if (!chatId || chatId.length > ATLAS_LIMITS.ID_CHARS) {
       throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "chatId 非法");
     }
@@ -848,7 +1160,8 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
   }
 
   /** 底图（base64 dataURL）；独立于 JSON API 的专用只读端点，避免撑爆 /state。 */
-  async function handleMapImage(chatId: string): Promise<AtlasRouteResult> {
+  async function handleMapImage(body: unknown): Promise<AtlasRouteResult> {
+    const chatId = chatIdFromRequest(body);
     if (!chatId || chatId.length > ATLAS_LIMITS.ID_CHARS) {
       throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "chatId 非法");
     }
@@ -894,11 +1207,18 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
   ): Promise<AtlasRouteResult> {
     const world = await requireWorld(binding);
     const idempotencyKey = atlasCommitIdempotencyKey(request);
+    // 回合映射存储键（0.9.42 起随会话往返；回执持久化进文档，跨请求 / 跨重启幂等）
+    const turnDocKey = `turn:${binding.chatId}:${idempotencyKey}`;
 
     // 1. 幂等：已提交过 → 沿用原回执内容，status 标记为 duplicate，0 fetch
     if (receiptCache.has(idempotencyKey)) {
       const cached = receiptCache.get(idempotencyKey);
       return okResult({ receipt: { ...cached, status: "duplicate" }, duplicate: true });
+    }
+    const storedTurnDoc = (await store.read(turnDocKey)) as { receipt?: AtlasTurnReceipt; rolledBack?: boolean } | null;
+    if (storedTurnDoc && storedTurnDoc.receipt && !storedTurnDoc.rolledBack) {
+      receiptCache.set(idempotencyKey, storedTurnDoc.receipt);
+      return okResult({ receipt: { ...storedTurnDoc.receipt, status: "duplicate" }, duplicate: true });
     }
 
     // 2. 未配置推演 API → 明确报错，不假装更新世界。
@@ -1141,6 +1461,8 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
         swipeId: request.swipeId,
         checkpointId,
         committedAt: now(),
+        // 0.9.42 会话承载：回执进回合映射文档（幂等判定不再依赖进程内存）
+        receipt,
         previousBinding: {
           worldTimeCursor: binding.worldTimeCursor,
           currentLocationId: binding.currentLocationId,
@@ -1296,6 +1618,12 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
       if (receiptCache.has(key)) {
         return okResult({ receipt: { ...receiptCache.get(key), status: "duplicate" }, duplicate: true });
       }
+      // 0.9.42 会话承载：回执持久化在回合映射文档里，跨请求可查
+      const storedTurnDoc = (await store.read(`turn:${chatId}:${key}`)) as { receipt?: AtlasTurnReceipt; rolledBack?: boolean } | null;
+      if (storedTurnDoc && storedTurnDoc.receipt && !storedTurnDoc.rolledBack) {
+        receiptCache.set(key, storedTurnDoc.receipt);
+        return okResult({ receipt: { ...storedTurnDoc.receipt, status: "duplicate" }, duplicate: true });
+      }
       const stored = (await store.read(`pending:${key}`)) as StoredPendingCommit | null;
       if (!stored) {
         throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "没有可重试的待处理回合。");
@@ -1421,6 +1749,61 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
   }
 
   // -------------------------------------------------------------------------
+  // 0.9.42 存量迁移：旧独立文档（server data/ 或浏览器 extensionSettings KV）↔ 会话
+  // -------------------------------------------------------------------------
+
+  /** POST /session/export — 从全局 store 读旧世界文档，打包成会话文档返回（只读，不动旧档）。 */
+  async function handleSessionExport(body: unknown): Promise<AtlasRouteResult> {
+    if (!isPlainRecord(body)) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "session/export 请求必须是对象");
+    }
+    const chatId = typeof body.chatId === "string" ? body.chatId : "";
+    const worldId = typeof body.worldId === "string" ? body.worldId : "";
+    if (!chatId || chatId.length > ATLAS_LIMITS.ID_CHARS || !worldId || worldId.length > ATLAS_LIMITS.ID_CHARS) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "session/export 需要 chatId 与 worldId。");
+    }
+    const binding = await store.read(`binding:${chatId}`);
+    const world = await store.read(`world:${worldId}`);
+    const maps = await store.read(`maps:${worldId}`);
+    const geoAuto = await store.read(`geo-auto:${worldId}`);
+    const turns: Record<string, unknown> = {};
+    for (const key of await store.list(`turn:${chatId}:`)) {
+      turns[key] = await store.read(key);
+    }
+    const session: AtlasSessionDoc = {
+      ...createEmptySessionDoc(),
+      ...(binding ? { binding } : {}),
+      ...(world ? { world } : {}),
+      ...(maps ? { maps } : {}),
+      turns,
+      ...(geoAuto ? { geoAuto: { [worldId]: geoAuto } } : {}),
+    };
+    return okResult({ session, found: Boolean(world || binding) });
+  }
+
+  /** POST /session/purge — 迁移确认后清理全局 store 里的旧世界文档（本机会话限定）。 */
+  async function handleSessionPurge(body: unknown, ctx: AtlasRequestContext): Promise<AtlasRouteResult> {
+    if (!ctx.local) throw new AtlasError(ATLAS_ERROR_CODES.FORBIDDEN, "只有本机已登录会话可以清理旧世界文档。");
+    if (!isPlainRecord(body)) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "session/purge 请求必须是对象");
+    }
+    const chatId = typeof body.chatId === "string" ? body.chatId : "";
+    const worldId = typeof body.worldId === "string" ? body.worldId : "";
+    if (!chatId || chatId.length > ATLAS_LIMITS.ID_CHARS || !worldId || worldId.length > ATLAS_LIMITS.ID_CHARS) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "session/purge 需要 chatId 与 worldId。");
+    }
+    await store.remove(`binding:${chatId}`);
+    await store.remove(`world:${worldId}`);
+    await store.remove(`maps:${worldId}`);
+    await store.remove(`geo-auto:${worldId}`);
+    const turnKeys = await store.list(`turn:${chatId}:`);
+    for (const key of turnKeys) await store.remove(key);
+    worldCache.delete(worldId);
+    bindingCache.delete(chatId);
+    return okResult({ purged: true, turnDocs: turnKeys.length });
+  }
+
+  // -------------------------------------------------------------------------
   // dispatch
   // -------------------------------------------------------------------------
 
@@ -1441,32 +1824,109 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
       if (method === "POST" && route === "/worlds/ensure-starter") return await handleEnsureStarter(body, ctx);
       if (method === "POST" && route === "/worlds/geo/adopt") return await handleGeoAdopt(body);
       if (method === "POST" && route === "/bindings") return await handleBindings(body);
-      const stateMatch = route.match(/^\/state\/([^/]+)$/);
-      if (method === "GET" && stateMatch) return await handleState(decodeURIComponent(stateMatch[1]));
-      const imageMatch = route.match(/^\/map\/image\/([^/]+)$/);
-      if (method === "GET" && imageMatch) return await handleMapImage(decodeURIComponent(imageMatch[1]));
+      if (method === "POST" && route === "/state") return await handleState(body);
+      if (method === "POST" && route === "/map/image") return await handleMapImage(body);
       if (method === "POST" && route === "/turns/prepare") return await handlePrepare(body);
       if (method === "POST" && route === "/turns/commit") return await handleCommit(body);
       if (method === "POST" && route === "/turns/retry") return await handleRetry(body);
       if (method === "POST" && route === "/turns/restore") return await handleRestore(body);
       if (method === "POST" && route === "/turns/rollback") return await handleRollback(body);
       if (method === "POST" && route === "/map/travel-preview") return await handleTravelPreview(body);
+      if (method === "POST" && route === "/session/export") return await handleSessionExport(body);
+      if (method === "POST" && route === "/session/purge") return await handleSessionPurge(body, ctx);
       throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, `未知路由：${method} ${route}`);
     } catch (thrown) {
       return errorResult(thrown);
     }
   }
 
+  return { handle };
+}
+
+/**
+ * Atlas 核心（0.9.42 会话承载外层）。
+ *
+ * - 非会话路由（health / settings / worlds 列表 / session export / purge）直接走全局实例。
+ * - 会话路由（世界 / 绑定 / 回合相关）：从 body.session 解析会话文档 → 覆盖层 store →
+ *   按请求创建单实例核心执行 → 响应带回新会话（rev+1），由浏览器写回 chatMetadata。
+ * - rev 冲突检测：内存 registry 记每个聊天见过的最新 rev；携带更旧会话的变更请求
+ *   返回 409 SESSION_STALE（双开同聊天防后写覆盖；registry 随进程重启清零，尽力而为）。
+ */
+export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
+  const shared: AtlasSharedRuntime = {
+    rpmTimestamps: [],
+    logs: [],
+    settingsOverride: null,
+    revByChat: new Map(),
+    chatMutex: new Map(),
+    ensureMutex: new Map(),
+  };
+  const globalCore = createCoreInstance(deps.store, deps, shared);
+
+  async function handle(
+    method: string,
+    path: string,
+    body: unknown,
+    ctx: AtlasRequestContext = {},
+  ): Promise<AtlasRouteResult> {
+    try {
+      const [, cleanPath = ""] = path.match(/^\/api\/plugins\/atlas(\/.*)$/) ?? [null, path];
+      const route = (cleanPath ?? path).replace(/\/+$/, "") || "/";
+      if (!ATLAS_SESSION_ROUTES.has(`${method} ${route}`)) {
+        return await globalCore.handle(method, path, body, ctx);
+      }
+      const record = isPlainRecord(body) ? body : {};
+      const session = parseAtlasSessionDoc(record.session);
+      const chatId =
+        (typeof record.chatId === "string" && record.chatId) || chatIdOfBinding(session.binding);
+      const run = async (): Promise<AtlasRouteResult> => {
+        if (chatId) {
+          // rev 校验在互斥内：前一条请求落账后，后到的旧 rev 立即 409，绝不并发冲账
+          const known = shared.revByChat.get(chatId);
+          if (known !== undefined && known > session.rev) {
+            throw new AtlasError(
+              ATLAS_ERROR_CODES.SESSION_STALE,
+              "世界数据已被其他窗口更新，请刷新页面或重新进入聊天后重试。",
+            );
+          }
+        }
+        const overlay = createSessionOverlayStore(session, deps.store);
+        const instance = createCoreInstance(overlay, deps, shared);
+        const result = await instance.handle(method, path, body, ctx);
+        if (result.status === 200 && isPlainRecord(result.body) && result.body.ok === true && overlay.changed()) {
+          const next = cloneSessionDoc(session);
+          next.rev = session.rev + 1;
+          if (chatId) rememberRev(chatId, next.rev);
+          result.body.session = next;
+        } else if (chatId) {
+          rememberRev(chatId, session.rev);
+        }
+        return result;
+      };
+      if (chatId) {
+        // 必须 await：异步 rejection 不经过 try/catch 的话，SESSION_STALE 会以未处理异常逃出 409 信封
+        return await withSharedMutex(shared.chatMutex, chatId, run);
+      }
+      return run();
+    } catch (thrown) {
+      return errorResult(thrown);
+    }
+  }
+
+  function rememberRev(chatId: string, rev: number): void {
+    const current = shared.revByChat.get(chatId) ?? 0;
+    if (rev > current) shared.revByChat.set(chatId, rev);
+  }
+
   return {
     handle,
-    /** 诊断 / 测试用：脱敏日志副本 */
+    /** 诊断 / 测试用：脱敏日志副本（含会话路由内产生的日志） */
     logs(): Record<string, unknown>[] {
-      return logs.map((entry) => ({ ...entry }));
+      return shared.logs.map((entry) => ({ ...entry }));
     },
     /** 测试辅助：注入设置（跳过 PUT 校验流程；仅供测试进程使用） */
     __setSettingsForTest(next: Partial<AtlasServerSettingsV2>): void {
-      settings = { ...settings, ...next };
-      settingsLoaded = true;
+      shared.settingsOverride = { ...createDefaultSettingsV2(), ...next };
     },
   };
 }

@@ -136,7 +136,8 @@ export interface AtlasUiApi {
 /** 宿主适配：chatMetadata / extensionSettings 的读写（每次调用都重新取当前聊天）。 */
 export interface AtlasUiHost {
   getChatId(): string | null;
-  readBinding(): unknown;
+  /** 0.9.42 起为异步：宿主可能需要先把旧世界文档迁移进会话（chatMetadata.atlas）再返回绑定。 */
+  readBinding(): unknown | Promise<unknown>;
   writeBinding(binding: AtlasChatBinding): Promise<void>;
   clearBinding(): Promise<void>;
   readPanelOpen(): boolean;
@@ -501,7 +502,7 @@ export function createAtlasUiCore(deps: {
       setState({ binding: null, bindingInvalid: false, mode: "unbound", stateData: null });
       return;
     }
-    const raw = host.readBinding();
+    const raw = await host.readBinding();
     if (raw === null || raw === undefined) {
       setState({ binding: null, bindingInvalid: false, mode: "unbound", stateData: null });
       return;
@@ -533,7 +534,8 @@ export function createAtlasUiCore(deps: {
       return;
     }
     try {
-      const result = await api.request("GET", `/state/${encodeURIComponent(binding.chatId)}`);
+      // 0.9.42 会话承载：/state 改 POST，chatId 随体携带（世界文档由 api 封装随请求带上）
+      const result = await api.request("POST", "/state", { chatId: binding.chatId });
       const body = result.body as { ok?: boolean; error?: { code?: string; message?: string }; data?: Record<string, unknown> };
       // 等待期间聊天已切换 → 响应属于旧聊天，丢弃（stateData 绝不跨聊天存活）
       if (state.chatId === null || binding.chatId !== state.chatId) return;

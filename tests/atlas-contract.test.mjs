@@ -447,8 +447,8 @@ test("manifest.json 显示名固定且指向最小入口", () => {
 test("Server Plugin：路由清单与 health 响应无敏感字段", () => {
   const plugin = createAtlasServerPlugin();
   assert.equal(plugin.id, ATLAS_PLUGIN_ID, "插件 ID 固定为 atlas");
-  // ATLAS-04 骨架 + ATLAS-06 rollback + ATLAS-18 ensure-starter
-  assert.equal(plugin.routes.length, 16, "ATLAS-18 起注册 16 条路由（ensure-starter + geo/adopt）");
+  // ATLAS-04 骨架 + ATLAS-06 rollback + ATLAS-18 ensure-starter；0.9.42 会话承载：/state 与 /map/image 改 POST + /session/export + /session/purge
+  assert.equal(plugin.routes.length, 18, "0.9.42 起注册 18 条路由（会话承载改排 + 存量迁移两条）");
   assert.equal(plugin.routes[0].path, "/api/plugins/atlas/health", "路由路径固定");
   assert.equal(plugin.routes[0].method, "GET", "health 为 GET");
   for (const route of plugin.routes) {

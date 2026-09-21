@@ -16,11 +16,11 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const ATLAS_PLUGIN_ID = "atlas";
-export const ATLAS_PLUGIN_VERSION = "0.9.41";
+export const ATLAS_PLUGIN_VERSION = "0.9.42";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_API_BASE = "/api/plugins/atlas";
 
-/** 相对路由清单（ST 会自动挂到 /api/plugins/atlas 前缀下）。 */
+/** 相对路由清单（ST 会自动挂到 /api/plugins/atlas 前缀下）。0.9.42 会话承载：世界数据随请求体往返。 */
 export const ATLAS_PLUGIN_ROUTES = [
   { method: "GET", path: "/health" },
   { method: "GET", path: "/settings" },
@@ -30,14 +30,16 @@ export const ATLAS_PLUGIN_ROUTES = [
   { method: "POST", path: "/worlds/ensure-starter" },
   { method: "POST", path: "/worlds/geo/adopt" },
   { method: "POST", path: "/bindings" },
-  { method: "GET", path: "/state/:chatId" },
-  { method: "GET", path: "/map/image/:chatId" },
+  { method: "POST", path: "/state" },
+  { method: "POST", path: "/map/image" },
   { method: "POST", path: "/turns/prepare" },
   { method: "POST", path: "/turns/commit" },
   { method: "POST", path: "/turns/retry" },
   { method: "POST", path: "/turns/restore" },
   { method: "POST", path: "/turns/rollback" },
   { method: "POST", path: "/map/travel-preview" },
+  { method: "POST", path: "/session/export" },
+  { method: "POST", path: "/session/purge" },
 ];
 
 function isoNow() {
@@ -275,15 +277,18 @@ export async function init(router, options = {}) {
   get({ path: "/worlds" });
   post({ path: "/worlds/import" });
   post({ path: "/worlds/ensure-starter" });
+  post({ path: "/worlds/geo/adopt" });
   post({ path: "/bindings" });
-  get({ path: "/state/:chatId" });
-  get({ path: "/map/image/:chatId" });
+  post({ path: "/state" });
+  post({ path: "/map/image" });
   post({ path: "/turns/prepare" });
   post({ path: "/turns/commit" });
   post({ path: "/turns/retry" });
   post({ path: "/turns/restore" });
   post({ path: "/turns/rollback" });
   post({ path: "/map/travel-preview" });
+  post({ path: "/session/export" });
+  post({ path: "/session/purge" });
 
   return { core };
 }

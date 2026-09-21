@@ -13,11 +13,14 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.41";
+export const ATLAS_EXTENSION_VERSION = "0.9.42";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
 export const ATLAS_BINDING_KEY = "atlas_binding";
+/** 0.9.42 会话承载：世界文档（world/maps/turns/geoAuto/binding/rev）挂在 chatMetadata.atlas。 */
+export const ATLAS_SESSION_KEY = "atlas";
+export const ATLAS_SESSION_SCHEMA_VERSION = 1;
 export const ATLAS_SETTINGS_KEY = "atlas_world_sim";
 /** 生成拦截器注入键（setExtensionPrompt 用；临时上下文，不写入可见聊天历史）。 */
 export const ATLAS_INJECTION_KEY = "atlas_world_context";
@@ -27,6 +30,114 @@ export const ATLAS_INTERCEPTOR_GLOBAL = "atlasGenerateInterceptor";
 export const ATLAS_API_BASE = "/api/plugins/atlas";
 /** 最低兼容 SillyTavern 客户端版本（manifest hooks / generate_interceptor / setExtensionPrompt / getRequestHeaders）。 */
 export const ATLAS_MINIMUM_CLIENT_VERSION = "1.12.0";
+
+// ---------------------------------------------------------------------------
+// 0.9.42 会话承载：世界数据随聊天走（chatMetadata.atlas 单文档，空间换安全）
+// ---------------------------------------------------------------------------
+
+/** 判定 chatMetadata 上的会话文档是否为当前 schema（宽容：损坏一律按不存在处理）。 */
+export function isValidAtlasSession(value) {
+  return Boolean(
+    value && typeof value === "object" && !Array.isArray(value) && value.schemaVersion === ATLAS_SESSION_SCHEMA_VERSION,
+  );
+}
+
+export function createEmptyAtlasSession() {
+  return { schemaVersion: ATLAS_SESSION_SCHEMA_VERSION, rev: 0, binding: null, world: null, maps: null, turns: {}, geoAuto: {} };
+}
+
+/** 读取当前聊天会话文档（无则 null；绝不创建半截对象）。 */
+function readAtlasSession(context) {
+  const metadata = context().chatMetadata;
+  if (!metadata || typeof metadata !== "object") return null;
+  return isValidAtlasSession(metadata[ATLAS_SESSION_KEY]) ? metadata[ATLAS_SESSION_KEY] : null;
+}
+
+/** 写回会话文档并触发酒馆存档（世界数据的唯一落盘路径）。 */
+async function writeAtlasSession(context, session) {
+  const ctx = context();
+  const metadata = ctx.chatMetadata;
+  if (!metadata || typeof metadata !== "object") return;
+  metadata[ATLAS_SESSION_KEY] = session;
+  if (typeof ctx.saveMetadata === "function") await ctx.saveMetadata();
+}
+
+/**
+ * 存量迁移（一次性）：旧版把世界文档散在 extensionSettings 浏览器 KV（或 server data/）
+ * 且绑定挂在 chatMetadata.atlas_binding —— 全部折叠进 chatMetadata.atlas 单文档。
+ * 迁移完成即清理旧档（浏览器 KV 本地清；server data/ 由 /session/purge 清，HTTP 模式才用）。
+ * 任何失败都静默降级：旧数据原样保留，下次再试。
+ */
+let sessionMigrationInFlight = null;
+function migrateChatSession(context) {
+  const metadata = context().chatMetadata;
+  const chatId = context().chatId ?? "";
+  if (!metadata || typeof metadata !== "object") return Promise.resolve();
+  if (isValidAtlasSession(metadata[ATLAS_SESSION_KEY])) return Promise.resolve();
+  if (!metadata[ATLAS_BINDING_KEY]) return Promise.resolve(); // 没有旧绑定 = 新聊天，会话由首次写入创建
+  if (sessionMigrationInFlight) return sessionMigrationInFlight;
+  const task = (async () => {
+    try {
+      const legacyBinding = metadata[ATLAS_BINDING_KEY];
+      const worldId = String(legacyBinding?.worldId ?? "");
+      const legacyChatId = String(legacyBinding?.chatId ?? chatId ?? "");
+      const store = atlasRuntime.engineStore ?? null;
+      const session = createEmptyAtlasSession();
+      session.binding = legacyBinding;
+      if (store && worldId) {
+        session.world = (await store.read(`world:${worldId}`)) ?? null;
+        session.maps = (await store.read(`maps:${worldId}`)) ?? null;
+        const geo = await store.read(`geo-auto:${worldId}`);
+        if (geo) session.geoAuto[worldId] = geo;
+      }
+      if (store && legacyChatId) {
+        for (const key of await store.list(`turn:${legacyChatId}:`)) {
+          session.turns[key] = (await store.read(key)) ?? null;
+        }
+      }
+      // 服务端（HTTP 模式）兜底：浏览器 KV 里没有就问 server 要
+      if (!session.world && atlasRuntime.api && worldId) {
+        try {
+          const result = await atlasRuntime.api.request("POST", "/session/export", { chatId: legacyChatId, worldId });
+          const exported = result?.body?.data?.session;
+          if (exported && exported.schemaVersion === ATLAS_SESSION_SCHEMA_VERSION) {
+            session.world = exported.world ?? null;
+            session.maps = exported.maps ?? null;
+            session.turns = exported.turns ?? {};
+            session.geoAuto = exported.geoAuto ?? {};
+          }
+        } catch { /* server 也没有 → 按空世界迁，绑定保住让 UI 引导重建 */ }
+      }
+      metadata[ATLAS_SESSION_KEY] = session;
+      delete metadata[ATLAS_BINDING_KEY];
+      const ctx = context();
+      if (typeof ctx.saveMetadata === "function") await ctx.saveMetadata();
+      // 迁移成功 → 清理浏览器 KV 旧档（server data/ 由 /session/purge 处理，尽力而为）
+      if (store && worldId) {
+        try {
+          await store.remove(`world:${worldId}`);
+          await store.remove(`maps:${worldId}`);
+          await store.remove(`geo-auto:${worldId}`);
+        } catch { /* 清理失败不影响会话 */ }
+      }
+      if (store && legacyChatId) {
+        try {
+          for (const key of await store.list(`turn:${legacyChatId}:`)) await store.remove(key);
+        } catch { /* 清理失败不影响会话 */ }
+      }
+      if (atlasRuntime.api && worldId) {
+        try {
+          await atlasRuntime.api.request("POST", "/session/purge", { chatId: legacyChatId, worldId });
+        } catch { /* HTTP 模式外该端点不存在，忽略 */ }
+      }
+    } catch { /* 迁移失败静默降级：旧数据原样保留，下次事件再试 */ }
+    finally {
+      sessionMigrationInFlight = null;
+    }
+  })();
+  sessionMigrationInFlight = task;
+  return task;
+}
 
 /** 创建扩展身份实例（保持 ATLAS-00 兼容：harness 校验身份与生命周期占位）。 */
 export function createAtlasExtension() {
@@ -136,19 +247,37 @@ function createHost(context) {
       if (!normalized || normalized === "null" || normalized === "undefined") return null;
       return normalized;
     },
-    readBinding() {
+    /** 0.9.42：异步——先做一次性存量迁移（旧世界文档 → chatMetadata.atlas），再读绑定。 */
+    async readBinding() {
       const metadata = context().chatMetadata;
-      return metadata ? metadata[ATLAS_BINDING_KEY] ?? null : null;
+      if (!metadata || typeof metadata !== "object") return null;
+      await migrateChatSession(context);
+      const session = readAtlasSession(context);
+      if (session) return session.binding ?? null;
+      // 兜底：迁移被跳过（如引擎未就绪）时仍能读到旧键
+      return metadata[ATLAS_BINDING_KEY] ?? null;
     },
+    /** 0.9.42：绑定写进会话文档（chatMetadata.atlas.binding）。 */
     async writeBinding(binding) {
       const metadata = context().chatMetadata;
-      if (!metadata) return;
-      metadata[ATLAS_BINDING_KEY] = binding;
+      if (!metadata || typeof metadata !== "object") return;
+      const session = isValidAtlasSession(metadata[ATLAS_SESSION_KEY])
+        ? metadata[ATLAS_SESSION_KEY]
+        : createEmptyAtlasSession();
+      session.binding = binding;
+      metadata[ATLAS_SESSION_KEY] = session;
+      delete metadata[ATLAS_BINDING_KEY];
       await context().saveMetadata();
     },
+    /** 0.9.42：解绑只清会话里的绑定（世界数据保留，方便重新绑定）。 */
     async clearBinding() {
       const metadata = context().chatMetadata;
-      if (!metadata) return;
+      if (!metadata || typeof metadata !== "object") return;
+      const session = isValidAtlasSession(metadata[ATLAS_SESSION_KEY])
+        ? metadata[ATLAS_SESSION_KEY]
+        : createEmptyAtlasSession();
+      session.binding = null;
+      metadata[ATLAS_SESSION_KEY] = session;
       delete metadata[ATLAS_BINDING_KEY];
       await context().saveMetadata();
     },
@@ -1568,7 +1697,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       const worldId = String(d.worldId ?? "");
       if (!mapImageCache.has(worldId)) {
         mapImageCache.set(worldId, null);
-        void api.request("GET", `/map/image/${encodeURIComponent(String(state().chatId))}`).then((result) => {
+        void api.request("POST", "/map/image", { chatId: String(state().chatId ?? "") }).then((result) => {
           const payload = result.body?.data?.dataUrl;
           mapImageCache.set(worldId, typeof payload === "string" ? payload : null);
           if (state().page === "map") renderMap(data());
@@ -1724,11 +1853,11 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
           renderCenter();
           return;
         }
-        const worlds = await core.requestWorlds();
-        settingsStatus = `已导入「${String(result.body.data?.name ?? result.body.data?.id ?? "")}」。`;
+        // 0.9.42 会话承载：导入的世界已进当前聊天会话——直接绑定（旧「可绑定列表」只列未迁移的存量世界）
+        await core.bindToWorld(String(parsed.id));
+        settingsStatus = `已导入并绑定「${String(result.body.data?.name ?? result.body.data?.id ?? "")}」。`;
         settingsStatusKind = "ok";
         renderCenter();
-        renderWorldList(worlds);
       } catch (error) {
         settingsStatus = `世界导入失败：${error instanceof Error ? error.message : String(error)}`;
         settingsStatusKind = "error";
@@ -3576,7 +3705,7 @@ const ensureWorldInFlight = new Map();
  * 模块级运行期引用：ensureStarterWorld 是模块级函数，不能闭包 connectOnce 的局部变量
  * （否则 ReferenceError 被 catch 吞掉 → 自动建世永远静默失败）。disconnect 时清空。
  */
-const atlasRuntime = { mod: null, api: null, core: null };
+const atlasRuntime = { mod: null, api: null, core: null, engineStore: null };
 
 function resolveCharacterCard(context) {
   const ctx = context();
@@ -3873,11 +4002,45 @@ async function connectOnce() {
       }
     };
     const innerApi = mod.createLocalAtlasApi(engine);
-    const api = {
-      request: (method, path, body) => logApiCall(method, path, () => innerApi.request(method, path, body)),
+    // 0.9.42 会话承载：会话路由请求自动带上 chatMetadata.atlas（世界文档），
+    // 响应带回新会话（rev+1）自动写回聊天并触发存档——世界数据的往返只在此一处。
+    const SESSION_ROUTE_PREFIXES = [
+      "/state",
+      "/map/image",
+      "/map/travel-preview",
+      "/turns/",
+      "/bindings",
+      "/worlds/import",
+      "/worlds/ensure-starter",
+      "/worlds/geo/adopt",
+      "/session/",
+    ];
+    const pathWantsSession = (path) =>
+      SESSION_ROUTE_PREFIXES.some((prefix) => path === prefix || path.startsWith(prefix));
+    const sessionApi = {
+      async request(method, path, body) {
+        let payload = body;
+        if (method === "POST" && pathWantsSession(path)) {
+          const session = readAtlasSession(context);
+          if (session) payload = { ...(body ?? {}), session };
+        }
+        const result = await logApiCall(method, path, () => innerApi.request(method, path, payload));
+        try {
+          const responseSession = result?.body?.session;
+          if (responseSession && responseSession.schemaVersion === ATLAS_SESSION_SCHEMA_VERSION) {
+            await writeAtlasSession(context, responseSession);
+          }
+        } catch (error) {
+          // 写回失败（聊天正被切换等）：引擎侧已提交，本侧会话等下次响应覆盖；记日志排查
+          atlasLog("引擎", "会话写回失败（引擎侧已提交，稍后自动覆盖）：", error instanceof Error ? error.message : String(error));
+        }
+        return result;
+      },
     };
+    const api = sessionApi;
     atlasRuntime.mod = mod;
     atlasRuntime.api = api;
+    atlasRuntime.engineStore = engineStore;
 
     // ATLAS-09 世界书注入层：条目规划由引擎在 commit 成功时给出，这里经酒馆
     // world-info 公开 API 落成 Atlas 专属世界书；模块不可用（旧版酒馆 / 预览无 stub）
@@ -4045,6 +4208,7 @@ export async function disconnectAtlas() {
   atlasRuntime.mod = null;
   atlasRuntime.api = null;
   atlasRuntime.core = null;
+  atlasRuntime.engineStore = null;
   connected = null;
 }
 

@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import { buildStarterWorld } from "../src/atlas-starter-world.ts";
 import { createAtlasServerCore, createMemoryDocumentStore } from "../src/atlas-server.ts";
 import { ATLAS_ERROR_CODES } from "../src/atlas-contract.ts";
+import { createSessionCarrier, carrierAsCore } from "./atlas-session-helper.mjs";
 
 const WORLD_ID = "world-auto-0123456789abcdef";
 
@@ -49,7 +50,10 @@ async function makeCore({ fetchScripts, configurePreset = true } = {}) {
     return script();
   };
   const store = createMemoryDocumentStore();
-  const core = createAtlasServerCore({ store, fetchFn, now: () => (tick += 1) });
+  const rawCore = createAtlasServerCore({ store, fetchFn, now: () => (tick += 1) });
+  // 0.9.42 会话承载：世界 / 绑定走会话往返，不落全局 store
+  const carrier = createSessionCarrier(rawCore);
+  const core = carrierAsCore(carrier);
 
   await core.handle(
     "POST",
@@ -72,7 +76,7 @@ async function makeCore({ fetchScripts, configurePreset = true } = {}) {
   if (configurePreset) {
     await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
   }
-  return { store, core, fetchCalls };
+  return { store, core, carrier, fetchCalls };
 }
 
 const EXTRACTION_JSON = JSON.stringify({
@@ -92,11 +96,11 @@ async function adopt(core, loreSupplement = "- 低语森林：迷雾笼罩的古
 }
 
 test("geo/adopt：成功提炼 → 加地区加点、修订追加、只增不改、恰好 1 次请求", async () => {
-  const { store, core, fetchCalls } = await makeCore({
+  const { carrier, core, fetchCalls } = await makeCore({
     fetchScripts: [() => openAiResponse(EXTRACTION_JSON)],
   });
 
-  const before = await store.read(`world:${WORLD_ID}`);
+  const before = JSON.parse(JSON.stringify(carrier.session.world));
   const result = await adopt(core);
 
   assert.equal(result.status, 200);
@@ -117,7 +121,7 @@ test("geo/adopt：成功提炼 → 加地区加点、修订追加、只增不改
     "请求体不含明文密钥",
   );
 
-  const after = await store.read(`world:${WORLD_ID}`);
+  const after = carrier.session.world;
   assert.equal(after.regions.length, 2, "1 起始地区 + 1 新地区");
   assert.equal(after.points.length, 3, "1 起始地点 + 2 新地点");
   const newRegion = after.regions.find((r) => r.name === "低语森林");

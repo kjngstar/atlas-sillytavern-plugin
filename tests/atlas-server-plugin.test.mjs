@@ -20,6 +20,7 @@ import { parseWorld } from "../lib/world-schema.ts";
 import { appendStateEvent } from "../lib/world-ledger.ts";
 import { upsertEntityRecord } from "../lib/world-definition.ts";
 import { createAtlasServerCore, createMemoryDocumentStore, ATLAS_ROUTE_MANIFEST } from "../src/atlas-server.ts";
+import { createSessionCarrier, carrierAsCore } from "./atlas-session-helper.mjs";
 import { isCheckpointIntact } from "../lib/world-checkpoint.ts";
 import { parseAtlasWorldTurnDraft, buildAtlasChatUrl, callAtlasWorldTurnApi, DEFAULT_WORLD_TURN_SYSTEM_PROMPT } from "../src/atlas-api-client.ts";
 import {
@@ -167,30 +168,39 @@ function openAiResponse(draft) {
   return jsonResponse(200, { choices: [{ message: { content: JSON.stringify(draft) } }] });
 }
 
-/** 组装核心：已导入世界 + 已绑定 + 已配置预设。 */
+/** 0.9.42 会话承载：内联核心统一包会话载体（世界 / 绑定 / 回合映射随请求往返，不落全局 store）。 */
+function sessionCore(store, deps = {}) {
+  const rawCore = createAtlasServerCore({ store, now: () => NOW, ...deps });
+  const carrier = createSessionCarrier(rawCore);
+  return { core: carrierAsCore(carrier), carrier, store };
+}
+
+/** 组装核心：已导入世界 + 已绑定 + 已配置预设（0.9.42 会话承载：世界走会话，不落 store）。 */
 async function setup(fetchScripts, overrides = {}) {
   const store = createMemoryDocumentStore();
   const world = buildWorld();
-  const core = createAtlasServerCore({
+  const rawCore = createAtlasServerCore({
     store,
     fetchFn: fetchScripts ? makeFetch(fetchScripts).fetchFn : undefined,
     now: () => NOW,
     ...overrides,
   });
+  const carrier = createSessionCarrier(rawCore);
+  const core = carrierAsCore(carrier);
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   if (overrides.skipSettings !== true) {
     await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
   }
-  return { store, core, world };
+  return { store, core, world, carrier };
 }
 
 // ---------------------------------------------------------------------------
 // 路由清单与健康检查
 // ---------------------------------------------------------------------------
 
-test("路由清单：15 条且全部在 /api/plugins/atlas 前缀下", () => {
-  equal(ATLAS_ROUTE_MANIFEST.length, 16, "dispatch 核心路由数（ATLAS-18 ensure-starter + 0.9.x geo/adopt）");
+test("路由清单：18 条且全部在 /api/plugins/atlas 前缀下", () => {
+  equal(ATLAS_ROUTE_MANIFEST.length, 18, "dispatch 核心路由数（0.9.42：/state 与 /map/image 改 POST、新增 /session/export + /session/purge）");
   equal(ATLAS_PLUGIN_ROUTES.length, ATLAS_ROUTE_MANIFEST.length, "index.mjs 与核心路由清单一致");
   const plugin = createAtlasServerPlugin();
   for (const route of plugin.routes) {
@@ -293,7 +303,7 @@ test("settings v2：两库命令——入库 / 指纹去重 / 脱敏 / 两库独
   equal(cleared.body.data.apiPresets[0].apiKey, "", "clear 后密钥为空");
 
   // 持久化：换一个 core 读同一 store
-  const fresh = createAtlasServerCore({ store, now: () => NOW });
+  const { core: fresh } = sessionCore(store);
   const again = await fresh.handle("GET", "/settings");
   equal(again.body.data.apiPresets.length, 2, "刷新后连接库仍在");
   equal(again.body.data.promptPresets.length, 1, "刷新后提示词库仍在");
@@ -328,7 +338,7 @@ test("settings v2：v1 旧数据在读取路径迁移，首个写入落库 v2（
     autoCommit: false,
     rpmLimit: 42,
   });
-  const core = createAtlasServerCore({ store, now: () => NOW });
+  const { core } = sessionCore(store);
   const first = await core.handle("GET", "/settings");
   equal(first.body.data.schemaVersion, 2, "GET 已是 v2 视图");
   equal(first.body.data.runtime === undefined ? first.body.data.rpmLimit : first.body.data.rpmLimit, 42, "runtime 字段迁移保留");
@@ -353,8 +363,11 @@ test("settings v2：v1 旧数据在读取路径迁移，首个写入落库 v2（
 // worlds / bindings / state
 // ---------------------------------------------------------------------------
 
-test("worlds：只返回摘要，不返回账本 / 记忆 / 世界书正文", async () => {
-  const { core, world } = await setup(null);
+test("worlds：只返回摘要，不返回账本 / 记忆 / 世界书正文（0.9.42 起该端点只服务存量迁移视图）", async () => {
+  const { core, world, store } = await setup(null);
+  // 0.9.42 会话承载：新世界只住会话、不再进 GET /worlds；该端点仅回显全局 store 的存量世界档
+  const seeded = JSON.parse(JSON.stringify(world));
+  await store.write(`world:${world.id}`, seeded);
   const result = await core.handle("GET", "/worlds");
   const worlds = result.body.data.worlds;
   equal(worlds.length, 1, "恰好一个世界");
@@ -480,7 +493,7 @@ test("commit：恰好 1 请求、原子落账、绑定游标推进", async () =>
   const fetcher = makeFetch([() => openAiResponse(GOOD_DRAFT)]);
   const store = createMemoryDocumentStore();
   const world = buildWorld();
-  const fresh = createAtlasServerCore({ store, fetchFn: fetcher.fetchFn, now: () => NOW });
+  const { core: fresh } = sessionCore(store, { fetchFn: fetcher.fetchFn });
   await fresh.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await fresh.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await fresh.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
@@ -518,7 +531,7 @@ test("settings v2 运行时组合：commit 用「活动 API + 活动提示词」
   const fetcher = makeFetch([() => openAiResponse(GOOD_DRAFT), () => openAiResponse(GOOD_DRAFT)]);
   const store = createMemoryDocumentStore();
   const world = buildWorld();
-  const core = createAtlasServerCore({ store, fetchFn: fetcher.fetchFn, now: () => NOW });
+  const { core } = sessionCore(store, { fetchFn: fetcher.fetchFn });
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
 
@@ -556,7 +569,7 @@ test("settings v2 运行时组合：commit 用「活动 API + 活动提示词」
 
 test("settings v2：store 写入失败时缓存保持旧设置（不留半更新状态）", async () => {
   const store = createMemoryDocumentStore();
-  const core = createAtlasServerCore({ store, now: () => NOW });
+  const { core } = sessionCore(store);
   const before = (await core.handle("GET", "/settings")).body.data;
   equal(before.rpmLimit, 30, "初始 rpmLimit");
 
@@ -576,7 +589,7 @@ test("commit：未配置 API → API_NOT_CONFIGURED，0 fetch", async () => {
   const fetcher = makeFetch([() => openAiResponse(GOOD_DRAFT)]);
   const store = createMemoryDocumentStore();
   const world = buildWorld();
-  const core = createAtlasServerCore({ store, fetchFn: fetcher.fetchFn, now: () => NOW });
+  const { core } = sessionCore(store, { fetchFn: fetcher.fetchFn });
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   const result = await core.handle("POST", "/turns/commit", commitRequest(world));
@@ -609,7 +622,7 @@ for (const failure of FAILURE_CASES) {
     const store = createMemoryDocumentStore();
     const world = buildWorld();
     const worldSnapshot = JSON.stringify(world);
-    const core = createAtlasServerCore({ store, fetchFn: fetcher.fetchFn, now: () => NOW });
+    const { core } = sessionCore(store, { fetchFn: fetcher.fetchFn });
     await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
     await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
     await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
@@ -629,7 +642,7 @@ test("裁决（0.9.0）：未知地点草稿降级——移动被忽略，其余
   const fetcher = makeFetch([() => openAiResponse({ ...GOOD_DRAFT, locationChange: { toPointId: "pt-nowhere" } })]);
   const store = createMemoryDocumentStore();
   const world = buildWorld();
-  const core = createAtlasServerCore({ store, fetchFn: fetcher.fetchFn, now: () => NOW });
+  const { core } = sessionCore(store, { fetchFn: fetcher.fetchFn });
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
@@ -648,7 +661,7 @@ test("0.9.30 放宽：JSON 被写进 <think> 里 → 剥除失败后从原文救
   const fetcher = makeFetch([() => jsonResponse(200, { choices: [{ message: { content: insideThink } }] })]);
   const store = createMemoryDocumentStore();
   const world = buildWorld();
-  const core = createAtlasServerCore({ store, fetchFn: fetcher.fetchFn, now: () => NOW });
+  const { core } = sessionCore(store, { fetchFn: fetcher.fetchFn });
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
@@ -666,7 +679,7 @@ test("0.9.30 放宽：完全无法解析 → 不拒单，按无结构变化处�
   const store = createMemoryDocumentStore();
   const world = buildWorld();
   const worldSnapshot = JSON.stringify(world);
-  const core = createAtlasServerCore({ store, fetchFn: fetcher.fetchFn, now: () => NOW });
+  const { core } = sessionCore(store, { fetchFn: fetcher.fetchFn });
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
@@ -706,7 +719,7 @@ test("0.9.31 首轮自动建图：≤1 点世界首次 commit 后自动提炼一
     () => openAiResponse(geoSpec),
   ]);
   const store = createMemoryDocumentStore();
-  const core = createAtlasServerCore({ store, fetchFn: fetcher.fetchFn, now: () => NOW });
+  const { core } = sessionCore(store, { fetchFn: fetcher.fetchFn });
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
@@ -742,7 +755,7 @@ test("0.9.36 自动建图①：本轮 assistantText 进提炼素材（首回合�
     () => openAiResponse(geoSpec),
   ]);
   const store = createMemoryDocumentStore();
-  const core = createAtlasServerCore({ store, fetchFn: fetcher.fetchFn, now: () => NOW });
+  const { core } = sessionCore(store, { fetchFn: fetcher.fetchFn });
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
@@ -772,7 +785,7 @@ test("0.9.36 自动建图②：素材全空 → 零提炼请求、不烧标记�
     () => openAiResponse(geoSpec),
   ]);
   const store = createMemoryDocumentStore();
-  const core = createAtlasServerCore({ store, fetchFn: fetcher.fetchFn, now: () => NOW });
+  const { core } = sessionCore(store, { fetchFn: fetcher.fetchFn });
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
@@ -804,17 +817,17 @@ test("0.9.36 自动建图③：0.9.35 烧掉的旧标记（无 done）升级后�
     () => openAiResponse(geoSpec),
   ]);
   const store = createMemoryDocumentStore();
-  const core = createAtlasServerCore({ store, fetchFn: fetcher.fetchFn, now: () => NOW });
+  const { core, carrier } = sessionCore(store, { fetchFn: fetcher.fetchFn });
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
-  // 模拟 0.9.31~0.9.35 留下的旧标记：提炼前就写、无 done / attempts 字段
-  await store.write(`geo-auto:${world.id}`, { at: NOW });
+  // 模拟 0.9.31~0.9.35 留下的旧标记：提炼前就写、无 done / attempts 字段（0.9.42 起标记住会话）
+  carrier.session.geoAuto[world.id] = { at: NOW };
 
   const result = await core.handle("POST", "/turns/commit", commitRequest(world));
   equal(result.body.ok, true, "提交成功");
   equal(fetcher.calls.length, 2, "旧标记不阻断 → 自动建图重试");
-  const marker = await store.read(`geo-auto:${world.id}`);
+  const marker = carrier.session.geoAuto[world.id];
   equal(marker?.done, true, "建图成功后标记翻转为 done");
   ok(JSON.stringify(result.body.data.receipt.summary).includes("首轮自动建图"), "回执注明自动建图");
 });
@@ -827,11 +840,11 @@ test("0.9.36 自动建图④：尝试达上限（3 次）→ 不再发提炼请�
   });
   const fetcher = makeFetch([() => openAiResponse(GOOD_DRAFT)]);
   const store = createMemoryDocumentStore();
-  const core = createAtlasServerCore({ store, fetchFn: fetcher.fetchFn, now: () => NOW });
+  const { core, carrier } = sessionCore(store, { fetchFn: fetcher.fetchFn });
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
-  await store.write(`geo-auto:${world.id}`, { at: NOW, attempts: 3 });
+  carrier.session.geoAuto[world.id] = { at: NOW, attempts: 3 };
 
   const result = await core.handle("POST", "/turns/commit", commitRequest(world));
   equal(result.body.ok, true, "提交成功");
@@ -855,7 +868,7 @@ test("0.9.36 自动建图⑤：提炼响应 content 为空、JSON 在 reasoning_
     }),
   ]);
   const store = createMemoryDocumentStore();
-  const core = createAtlasServerCore({ store, fetchFn: fetcher.fetchFn, now: () => NOW });
+  const { core } = sessionCore(store, { fetchFn: fetcher.fetchFn });
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
@@ -886,7 +899,7 @@ test("0.9.32 点挂子图：commit 落 sidecar（maps:<worldId>），/state 带�
   const fetcher = makeFetch([() => openAiResponse(draftWithSub)]);
   const store = createMemoryDocumentStore();
   const world = buildWorld();
-  const core = createAtlasServerCore({ store, fetchFn: fetcher.fetchFn, now: () => NOW });
+  const { core, carrier } = sessionCore(store, { fetchFn: fetcher.fetchFn });
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
@@ -899,7 +912,7 @@ test("0.9.32 点挂子图：commit 落 sidecar（maps:<worldId>），/state 带�
   const worldNow = (await core.handle("GET", "/state/chat-a")).body.data;
   const newPoint = worldNow.map.points.find((p) => p.name === "潮门钟楼");
   ok(newPoint, "新地点已进世界点位");
-  const doc = await store.read(`maps:${world.id}`);
+  const doc = carrier.session.maps;
   ok(doc, "sidecar 文档已写入");
   const sub = doc.submaps[String(newPoint.id)];
   ok(sub, "子图键 = 点位 id");
@@ -933,7 +946,7 @@ test("0.9.41 地图三型标点：/state 带人物动向字段（status / recent
   ];
   const world = parseWorld(worldJson);
   ok(world !== null, "夹具世界可解析");
-  const core = createAtlasServerCore({ store, fetchFn: fetcher.fetchFn, now: () => NOW });
+  const { core } = sessionCore(store, { fetchFn: fetcher.fetchFn });
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
@@ -958,7 +971,7 @@ test("retry：沿用原幂等键，成功后世界恰好推进一次", async () 
   const fetcher = makeFetch([() => jsonResponse(429, {}), () => openAiResponse(GOOD_DRAFT)]);
   const store = createMemoryDocumentStore();
   const world = buildWorld();
-  const core = createAtlasServerCore({ store, fetchFn: fetcher.fetchFn, now: () => NOW });
+  const { core } = sessionCore(store, { fetchFn: fetcher.fetchFn });
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
@@ -1002,7 +1015,7 @@ test("RPM：超过限额直接 429，0 fetch", async () => {
   const fetcher = makeFetch([() => jsonResponse(429, {})]);
   const store = createMemoryDocumentStore();
   const world = buildWorld();
-  const core = createAtlasServerCore({ store, fetchFn: fetcher.fetchFn, now: () => NOW });
+  const { core } = sessionCore(store, { fetchFn: fetcher.fetchFn });
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset(), rpmLimit: 1 }, { local: true });
@@ -1035,7 +1048,7 @@ test("队列：同聊天并发 commit 串行执行，不并发冲击", async () 
   };
   const store = createMemoryDocumentStore();
   const world = buildWorld();
-  const core = createAtlasServerCore({ store, fetchFn: slowFetch, now: () => NOW });
+  const { core } = sessionCore(store, { fetchFn: slowFetch });
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset(), rpmLimit: 50 }, { local: true });
@@ -1044,7 +1057,8 @@ test("队列：同聊天并发 commit 串行执行，不并发冲击", async () 
   const second = core.handle("POST", "/turns/commit", commitRequest(world));
   const [r1, r2] = await Promise.all([first, second]);
   const statuses = [r1, r2].map((r) => r.body?.data?.receipt?.status ?? r.body?.error?.code);
-  deepEqual(statuses.sort(), ["committed", "duplicate"], "并发提交 → 1 committed + 1 duplicate");
+  // 0.9.42 会话承载：并发双发携带同一份旧会话 → 后到者 409 SESSION_STALE（双开保护），互斥仍保证世界只推进一次
+  deepEqual(statuses.sort(), ["SESSION_STALE", "committed"], "并发提交 → 1 committed + 1 SESSION_STALE");
   equal(maxInFlight, 1, "任一时刻至多 1 条在途请求");
 });
 
@@ -1152,7 +1166,7 @@ test("systemPrompt：自定义系统提示词生效，留空回退内置默认�
 });
 
 test("提示词预设：服务端校验（上限 8000 / 空拒绝 / 内置默认不可覆盖删除）", async () => {
-  const core = createAtlasServerCore({ store: createMemoryDocumentStore(), now: () => NOW });
+  const { core } = sessionCore(createMemoryDocumentStore());
   const good = await core.handle("PUT", "/settings", { action: "prompt.save", preset: { name: "长提示词", systemPrompt: "好".repeat(8000) } }, { local: true });
   equal(good.status, 200, "8000 字以内接受");
   const over = await core.handle("PUT", "/settings", { action: "prompt.save", preset: { name: "超长", systemPrompt: "长".repeat(8001) } }, { local: true });
@@ -1174,7 +1188,7 @@ test("ATLAS-06 rollback：回退世界与绑定游标，账本保留，变体重
   const fetcher = makeFetch([() => openAiResponse(GOOD_DRAFT), () => openAiResponse(GOOD_DRAFT)]);
   const store = createMemoryDocumentStore();
   const world = buildWorld();
-  const fresh = createAtlasServerCore({ store, fetchFn: fetcher.fetchFn, now: () => NOW });
+  const { core: fresh, carrier } = sessionCore(store, { fetchFn: fetcher.fetchFn });
   await fresh.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await fresh.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await fresh.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
@@ -1184,11 +1198,11 @@ test("ATLAS-06 rollback：回退世界与绑定游标，账本保留，变体重
   equal(first.body.data.receipt.status, "committed", "变体 A committed");
   equal(first.body.data.receipt.currentTime, 430.07, "变体 A 时间推进");
 
-  // 回合前检查点已随提交持久化 + 楼层映射已写
-  const worldAfterCommit = await store.read("world:atlas-server-fixture");
+  // 回合前检查点已随提交持久化 + 楼层映射已写（0.9.42 起世界与映射都住会话）
+  const worldAfterCommit = carrier.session.world;
   const ckpts = (worldAfterCommit.checkpoints ?? []).filter((c) => String(c.reason ?? "").startsWith("atlas-turn:"));
   equal(ckpts.length, 1, "恰好一个回合前技术检查点");
-  const turnKeys = await store.list("turn:chat-a:");
+  const turnKeys = Object.keys(carrier.session.turns).filter((k) => k.startsWith("turn:chat-a:"));
   equal(turnKeys.length, 1, "楼层↔检查点映射已写");
 
   // swipe → rollback：世界与绑定游标回到回合前
@@ -1197,7 +1211,7 @@ test("ATLAS-06 rollback：回退世界与绑定游标，账本保留，变体重
   const stateAfter = await fresh.handle("GET", "/state/chat-a");
   equal(stateAfter.body.data.currentTime, CURRENT_TIME, "时间游标回到回合前");
   equal(stateAfter.body.data.currentLocationId, "4103", "位置游标回到回合前");
-  const worldAfterRollback = await store.read("world:atlas-server-fixture");
+  const worldAfterRollback = carrier.session.world;
   equal(
     (worldAfterRollback.stateEvents ?? []).length,
     (worldAfterCommit.stateEvents ?? []).length,
@@ -1212,9 +1226,9 @@ test("ATLAS-06 rollback：回退世界与绑定游标，账本保留，变体重
   equal(second.body.data.receipt.currentTime, 430.07, "同级结果：时间不累计推进");
 
   // 回退后的映射标记 rolledBack（保留历史），变体 B 有自己的映射
-  const rolledDoc = await store.read(turnKeys[0]);
+  const rolledDoc = carrier.session.turns[turnKeys[0]];
   equal(rolledDoc.rolledBack, true, "旧变体映射标记已回退");
-  equal((await store.list("turn:chat-a:")).length, 2, "变体 B 映射已写");
+  equal(Object.keys(carrier.session.turns).filter((k) => k.startsWith("turn:chat-a:")).length, 2, "变体 B 映射已写");
 });
 
 test("ATLAS-06 rollback：只允许回退最近一条未回退回合；未知楼层拒绝", async () => {
@@ -1224,7 +1238,7 @@ test("ATLAS-06 rollback：只允许回退最近一条未回退回合；未知楼
   const fetcher = makeFetch([() => openAiResponse(GOOD_DRAFT), () => openAiResponse(GOOD_DRAFT), () => openAiResponse(GOOD_DRAFT)]);
   const store = createMemoryDocumentStore();
   const world = buildWorld();
-  const fresh = createAtlasServerCore({ store, fetchFn: fetcher.fetchFn, now: clock });
+  const fresh = sessionCore(store, { fetchFn: fetcher.fetchFn, now: clock }).core;
   await fresh.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await fresh.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await fresh.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
