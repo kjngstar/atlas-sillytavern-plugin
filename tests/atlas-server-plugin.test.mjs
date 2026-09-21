@@ -914,6 +914,45 @@ test("0.9.32 点挂子图：commit 落 sidecar（maps:<worldId>），/state 带�
   equal(worldNow.map.pointMeta[String(newPoint.id)].description, "潮门旁的旧钟楼。", "/state 带出点位描述");
 });
 
+test("0.9.41 地图三型标点：/state 带人物动向字段（status / recentNarratives / pointName）与物品描述", async () => {
+  const fetcher = makeFetch([() => openAiResponse(GOOD_DRAFT)]);
+  const store = createMemoryDocumentStore();
+  const built = buildWorld();
+  // 物品实体：挂起点 4103（白塔钟座），带 baseline 描述
+  const itemResult = upsertEntityRecord(built, {
+    id: "entity-item", worldId: built.id, type: "item", name: "旧铜钥匙",
+    baseline: { description: "一把生锈的铜钥匙，环上刻着古精灵文字。" },
+    temporalSchema: [{ key: "description", kind: "base", valueType: "string" }],
+    mapAnchor: { pointId: "4103" },
+  }, { now: 1000 });
+  ok(itemResult.ok, "物品实体建档成功");
+  // 人物动态状态：chronicle-c1 在 4103（capital 区，relevance sameRegion/samePoint 命中）
+  const worldJson = JSON.parse(JSON.stringify(itemResult.value));
+  worldJson.characterStates = [
+    { characterId: "chronicle-c1", currentRegionId: "capital", currentPointId: "4103", status: "正在清点行囊，准备离开王都。", updatedAt: 999, branchId: null },
+  ];
+  const world = parseWorld(worldJson);
+  ok(world !== null, "夹具世界可解析");
+  const core = createAtlasServerCore({ store, fetchFn: fetcher.fetchFn, now: () => NOW });
+  await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
+  await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
+  await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+  const committed = await core.handle("POST", "/turns/commit", commitRequest(world));
+  equal(committed.body.ok, true, "提交成功");
+
+  const state = (await core.handle("GET", "/state/chat-a")).body.data;
+  const npc = (state.npcDirectory ?? []).find((n) => n.id === "chronicle-c1");
+  ok(npc, "人物目录含同区角色");
+  equal(npc.status, "正在清点行囊，准备离开王都。", "人物动向 = CharacterState.status");
+  equal(npc.pointName, "白塔钟座", "人物所在地点名");
+  ok(Array.isArray(npc.recentNarratives), "最近涉及叙事为数组");
+
+  const item = (state.objectDirectory ?? []).find((o) => o.id === "entity-item");
+  ok(item, "物品目录含带锚点实体");
+  equal(item.description, "一把生锈的铜钥匙，环上刻着古精灵文字。", "物品描述 = baseline.description");
+  equal(item.pointName, "白塔钟座", "物品所在地点名");
+});
+
 test("retry：沿用原幂等键，成功后世界恰好推进一次", async () => {
   // 第一次 429 失败，重试成功
   const fetcher = makeFetch([() => jsonResponse(429, {}), () => openAiResponse(GOOD_DRAFT)]);

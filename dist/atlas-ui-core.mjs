@@ -7630,7 +7630,7 @@ function createAtlasServerCore(deps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.40",
+      version: "0.9.41",
       protocolVersion: 1,
       time: now()
     });
@@ -7940,17 +7940,25 @@ function createAtlasServerCore(deps) {
       regionId: p.regionId ?? null
     }));
     const pointById2 = new Map((world.points ?? []).map((p) => [String(p.id), p]));
+    const branchEvents = ledgerForBranch(world, binding.branchId).filter((e) => e.at <= binding.worldTimeCursor);
     const npcDirectory = (world.characters ?? []).filter((c) => relevance.relevantNpcIds.includes(String(c.id))).slice(0, 48).map((c) => {
       const pos = resolveCharacterPosition(world, String(c.id), { branchId: binding.branchId });
       const anchorPoint = pos.pointId !== null ? pointById2.get(String(pos.pointId)) : void 0;
+      const npcId = String(c.id);
+      const status = (world.characterStates ?? []).filter((s) => String(s.characterId) === npcId && (!s.branchId || s.branchId === binding.branchId)).sort((a, b) => Number(b.updatedAt ?? 0) - Number(a.updatedAt ?? 0)).map((s) => String(s.status ?? "").trim()).find((t) => t.length > 0) ?? null;
+      const recentNarratives = branchEvents.filter((e) => (e.entityRefs ?? []).map(String).includes(npcId)).slice(-2).reverse().map((e) => e.narrativeSummary.slice(0, 140));
+      const anchorName = anchorPoint ? String(anchorPoint.name ?? "") : null;
       return {
-        id: String(c.id),
+        id: npcId,
         name: String(c.name ?? c.id).slice(0, MAP_POINT_NAME_CHARS),
         pointId: pos.pointId,
         regionId: pos.regionId ?? (anchorPoint ? anchorPoint.regionId ?? null : null),
         x: anchorPoint ? anchorPoint.x : null,
         y: anchorPoint ? anchorPoint.y : null,
-        reason: relevance.npcReasons[String(c.id)] ?? null
+        reason: relevance.npcReasons[npcId] ?? null,
+        status: status ? status.slice(0, 160) : null,
+        recentNarratives,
+        pointName: anchorName ? anchorName.slice(0, MAP_POINT_NAME_CHARS) : null
       };
     });
     const regions = (world.regions ?? []).slice(0, 64).map((r) => ({
@@ -7964,6 +7972,8 @@ function createAtlasServerCore(deps) {
     }).slice(0, 32).map((e) => {
       const anchor = e.mapAnchor;
       const anchorPoint = anchor.pointId ? pointById2.get(String(anchor.pointId)) : void 0;
+      const baseline = e.baseline ?? {};
+      const rawDesc = ["description", "desc", "text", "summary"].map((k) => typeof baseline[k] === "string" ? String(baseline[k]).trim() : "").find((t) => t.length > 0) ?? null;
       return {
         id: String(e.id),
         name: String(e.name ?? e.id).slice(0, MAP_POINT_NAME_CHARS),
@@ -7971,10 +7981,11 @@ function createAtlasServerCore(deps) {
         pointId: anchor.pointId ?? null,
         regionId: anchor.regionId ?? (anchorPoint ? anchorPoint.regionId ?? null : null),
         x: typeof anchor.x === "number" ? anchor.x : anchorPoint ? anchorPoint.x : null,
-        y: typeof anchor.y === "number" ? anchor.y : anchorPoint ? anchorPoint.y : null
+        y: typeof anchor.y === "number" ? anchor.y : anchorPoint ? anchorPoint.y : null,
+        description: rawDesc ? rawDesc.slice(0, 200) : null,
+        pointName: anchorPoint ? String(anchorPoint.name ?? "").slice(0, MAP_POINT_NAME_CHARS) : null
       };
     });
-    const branchEvents = ledgerForBranch(world, binding.branchId).filter((e) => e.at <= binding.worldTimeCursor);
     const lastEvent = branchEvents.at(-1) ?? null;
     const lastAdvance = lastEvent ? { at: lastEvent.at, summary: lastEvent.narrativeSummary.slice(0, 200), source: lastEvent.source } : null;
     const mapDoc = sanitizeMapDoc(await store.read(`maps:${world.id}`).catch(() => null));

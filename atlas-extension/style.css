@@ -964,24 +964,45 @@
   border-color: rgba(251, 250, 246, 0.6);
 }
 
-/* NPC 金色圆点 + 名牌；物件 = 深青小菱形 */
+/* 0.9.41 人物 = 金圆字头像 + hover 名牌；物品 = 紫色小方块 + hover 名牌。
+   button 语义可点（开人物 / 物品面板）；left/top 过渡 = 后台 moveEntity 落账后标点平滑走位 */
 
 .aw-npc {
   position: absolute;
   transform: translate(-50%, -50%);
-  width: 12px;
-  height: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
   border-radius: 50%;
-  background: var(--aw-gold);
+  background: linear-gradient(135deg, #d8b26a 0%, #b9924a 100%);
   border: 2px solid #fff8df;
   box-shadow: 0 0 0 2px rgba(196, 163, 99, 0.4), 0 2px 6px rgba(25, 48, 45, 0.3);
   z-index: 4;
+  cursor: pointer;
+  transition: left 0.9s ease, top 0.9s ease, box-shadow 0.2s ease;
+  font-family: var(--aw-serif);
+}
+
+.aw-npc:hover,
+.aw-npc:focus-visible {
+  box-shadow: 0 0 0 3px rgba(196, 163, 99, 0.55), 0 4px 10px rgba(25, 48, 45, 0.35);
+}
+
+.aw-npc__avatar {
+  font-size: 11px;
+  line-height: 1;
+  color: #42320f;
+  font-weight: 700;
+  pointer-events: none;
 }
 
 .aw-npc__name {
   position: absolute;
-  left: 14px;
-  top: -6px;
+  left: 24px;
+  top: -4px;
   font-family: var(--aw-sans);
   font-size: 11px;
   padding: 1px 6px;
@@ -990,18 +1011,113 @@
   color: #59472c;
   white-space: nowrap;
   border: 1px solid rgba(196, 163, 99, 0.5);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
   z-index: 5;
 }
+
+.aw-npc:hover .aw-npc__name,
+.aw-npc:focus-visible .aw-npc__name { opacity: 1; }
 
 .aw-object {
   position: absolute;
   transform: translate(-50%, -50%) rotate(45deg);
-  width: 9px;
-  height: 9px;
-  background: var(--aw-panel);
-  border: 1.5px solid var(--aw-teal);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  padding: 0;
+  background: #ece4f6;
+  border: 1.5px solid #7a5fb8;
   box-shadow: 0 1px 4px rgba(25, 48, 45, 0.25);
   z-index: 3;
+  cursor: pointer;
+  transition: left 0.9s ease, top 0.9s ease, transform 0.2s ease, box-shadow 0.2s ease;
+  font-family: var(--aw-serif);
+}
+
+.aw-object:hover,
+.aw-object:focus-visible {
+  transform: translate(-50%, -50%) rotate(45deg) scale(1.25);
+  box-shadow: 0 3px 8px rgba(25, 48, 45, 0.35);
+}
+
+.aw-object__gem { display: none; }
+
+.aw-object__name {
+  position: absolute;
+  left: 12px;
+  top: 4px;
+  transform: rotate(-45deg);
+  transform-origin: 0 0;
+  font-family: var(--aw-sans);
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(251, 250, 246, 0.94);
+  color: #4b3a6e;
+  white-space: nowrap;
+  border: 1px solid rgba(122, 95, 184, 0.5);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+  z-index: 5;
+}
+
+.aw-object:hover .aw-object__name,
+.aw-object:focus-visible .aw-object__name { opacity: 1; }
+
+/* 0.9.41 图例：三型标点说明（地图左下、比例尺上方） */
+
+.aw-maplegend {
+  position: absolute;
+  left: 12px;
+  bottom: 34px;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  font-family: var(--aw-sans);
+  font-size: 10px;
+  color: var(--aw-gold-deep);
+  background: rgba(251, 250, 246, 0.88);
+  border: 1px solid rgba(138, 106, 28, 0.35);
+  border-radius: 4px;
+  padding: 3px 8px;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.aw-maplegend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.aw-maplegend__dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+}
+
+.aw-maplegend__dot--loc {
+  border-radius: 2px;
+  background: var(--aw-panel);
+  border: 1.5px solid var(--aw-teal);
+}
+
+.aw-maplegend__dot--npc {
+  border-radius: 50%;
+  background: #c8a45c;
+  border: 1.5px solid #fff8df;
+  box-shadow: 0 0 0 1px rgba(196, 163, 99, 0.5);
+}
+
+.aw-maplegend__dot--obj {
+  transform: rotate(45deg);
+  background: #ece4f6;
+  border: 1.5px solid #7a5fb8;
 }
 
 /* 地图浮动工具：地区筛选（左上） + 缩放（右下） */
@@ -1639,6 +1755,127 @@
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+/* 0.9.41 面板扩展：人物 / 物品 popover（头像 + 想法 / 动向 / 描述段落）+ 地点在场名单 */
+
+.aw-mappanel__headrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.aw-mappanel__avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  font-size: 12px;
+  font-weight: 700;
+  flex: 0 0 auto;
+}
+
+.aw-mappanel__avatar--npc {
+  background: linear-gradient(135deg, #d8b26a 0%, #b9924a 100%);
+  color: #42320f;
+  border: 2px solid #fff8df;
+}
+
+.aw-mappanel__avatar--obj {
+  background: #ece4f6;
+  color: #4b3a6e;
+  border: 1.5px solid #7a5fb8;
+  border-radius: 4px;
+}
+
+.aw-mappanel__section {
+  margin-top: 10px;
+  min-width: 0;
+}
+
+.aw-mappanel__section-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: #8a6a1c;
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
+}
+
+.aw-mappanel__section-text {
+  font-size: 12px;
+  line-height: 1.6;
+  color: #25484a;
+  margin-bottom: 4px;
+  word-break: break-word;
+}
+
+.aw-mappanel__here {
+  margin-top: 10px;
+  min-width: 0;
+}
+
+.aw-mappanel__here-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: #8a6a1c;
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
+}
+
+.aw-mappanel__here-empty {
+  font-size: 12px;
+  color: var(--aw-muted, #6b7c7d);
+}
+
+.aw-mappanel__person {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 6px 6px 0;
+  padding: 3px 10px 3px 4px;
+  border-radius: 14px;
+  border: 1px solid var(--aw-line, #ddd6c4);
+  background: var(--aw-panel, #fbfaf6);
+  cursor: pointer;
+  font-family: var(--aw-serif);
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+
+.aw-mappanel__person:hover,
+.aw-mappanel__person:focus-visible {
+  border-color: var(--aw-teal, #25484a);
+  transform: translateY(-1px);
+}
+
+.aw-mappanel__person-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.aw-mappanel__person--npc .aw-mappanel__person-avatar {
+  background: linear-gradient(135deg, #d8b26a 0%, #b9924a 100%);
+  color: #42320f;
+}
+
+.aw-mappanel__person--obj .aw-mappanel__person-avatar {
+  background: #ece4f6;
+  color: #4b3a6e;
+  border-radius: 4px;
+}
+
+.aw-mappanel__person-name {
+  font-size: 12px;
+  color: #25484a;
+  white-space: nowrap;
 }
 
 /* 子图角标：可深入内部的地点带金色小菱形（呼应 45° brand-mark） */

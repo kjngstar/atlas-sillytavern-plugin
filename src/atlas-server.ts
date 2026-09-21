@@ -348,7 +348,7 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.40",
+      version: "0.9.41",
       protocolVersion: 1,
       time: now(),
     });
@@ -741,20 +741,38 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
     }));
     // 相关 NPC 位置目录（ATLAS-09 地图标记）：动态状态优先，旧档案回退；坐标 = 锚点地点坐标
     const pointById = new Map((world.points ?? []).map((p) => [String(p.id), p]));
+    // 0.9.41 人物 popover：分支作用域账本（游标前）供「最近涉及叙事」提取
+    const branchEvents = ledgerForBranch(world, binding.branchId).filter((e) => e.at <= binding.worldTimeCursor);
     const npcDirectory = (world.characters ?? [])
       .filter((c) => relevance.relevantNpcIds.includes(String(c.id)))
       .slice(0, 48)
       .map((c) => {
         const pos = resolveCharacterPosition(world, String(c.id), { branchId: binding.branchId });
         const anchorPoint = pos.pointId !== null ? pointById.get(String(pos.pointId)) : undefined;
+        // 0.9.41 人物 popover 数据：状态摘要 + 最近涉及该 NPC 的账本叙事（想法 / 动向）
+        const npcId = String(c.id);
+        const status = (world.characterStates ?? [])
+          .filter((s) => String(s.characterId) === npcId && (!s.branchId || s.branchId === binding.branchId))
+          .sort((a, b) => Number(b.updatedAt ?? 0) - Number(a.updatedAt ?? 0))
+          .map((s) => String(s.status ?? "").trim())
+          .find((t) => t.length > 0) ?? null;
+        const recentNarratives = branchEvents
+          .filter((e) => (e.entityRefs ?? []).map(String).includes(npcId))
+          .slice(-2)
+          .reverse()
+          .map((e) => e.narrativeSummary.slice(0, 140));
+        const anchorName = anchorPoint ? String(anchorPoint.name ?? "") : null;
         return {
-          id: String(c.id),
+          id: npcId,
           name: String(c.name ?? c.id).slice(0, MAP_POINT_NAME_CHARS),
           pointId: pos.pointId,
           regionId: pos.regionId ?? (anchorPoint ? anchorPoint.regionId ?? null : null),
           x: anchorPoint ? anchorPoint.x : null,
           y: anchorPoint ? anchorPoint.y : null,
-          reason: relevance.npcReasons[String(c.id)] ?? null,
+          reason: relevance.npcReasons[npcId] ?? null,
+          status: status ? status.slice(0, 160) : null,
+          recentNarratives,
+          pointName: anchorName ? anchorName.slice(0, MAP_POINT_NAME_CHARS) : null,
         };
       });
     const regions = (world.regions ?? []).slice(0, 64).map((r) => ({
@@ -772,6 +790,11 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
       .map((e: EntityRecord) => {
         const anchor = e.mapAnchor!;
         const anchorPoint = anchor.pointId ? pointById.get(String(anchor.pointId)) : undefined;
+        // 0.9.41 物品 popover：描述取 baseline（description / desc / text 任一），有界
+        const baseline = e.baseline ?? {};
+        const rawDesc = ["description", "desc", "text", "summary"]
+          .map((k) => (typeof baseline[k] === "string" ? String(baseline[k]).trim() : ""))
+          .find((t) => t.length > 0) ?? null;
         return {
           id: String(e.id),
           name: String(e.name ?? e.id).slice(0, MAP_POINT_NAME_CHARS),
@@ -780,10 +803,11 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
           regionId: anchor.regionId ?? (anchorPoint ? anchorPoint.regionId ?? null : null),
           x: typeof anchor.x === "number" ? anchor.x : anchorPoint ? anchorPoint.x : null,
           y: typeof anchor.y === "number" ? anchor.y : anchorPoint ? anchorPoint.y : null,
+          description: rawDesc ? rawDesc.slice(0, 200) : null,
+          pointName: anchorPoint ? String(anchorPoint.name ?? "").slice(0, MAP_POINT_NAME_CHARS) : null,
         };
       });
     // 最近一次时间推进：分支作用域内、游标之前的最后一条账本事件
-    const branchEvents = ledgerForBranch(world, binding.branchId).filter((e) => e.at <= binding.worldTimeCursor);
     const lastEvent = branchEvents.at(-1) ?? null;
     const lastAdvance = lastEvent
       ? { at: lastEvent.at, summary: lastEvent.narrativeSummary.slice(0, 200), source: lastEvent.source }

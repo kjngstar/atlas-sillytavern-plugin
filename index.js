@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.40";
+export const ATLAS_EXTENSION_VERSION = "0.9.41";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -1193,6 +1193,14 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     mapPanel = el("div", "aw-mappanel");
     mapPanel.style.display = "none";
     viewport.append(mapPanel);
+    // 0.9.41 图例：地点 / 人物 / 物品三型标点（原型 mapview 同款信息架构）
+    const legend = el("div", "aw-maplegend");
+    legend.append(
+      el("span", "aw-maplegend__item", el("i", "aw-maplegend__dot aw-maplegend__dot--loc"), "地点"),
+      el("span", "aw-maplegend__item", el("i", "aw-maplegend__dot aw-maplegend__dot--npc"), "人物"),
+      el("span", "aw-maplegend__item", el("i", "aw-maplegend__dot aw-maplegend__dot--obj"), "物品"),
+    );
+    viewport.append(legend);
     mapCanvas.append(mapCrumb, mapTools, viewport, mapHint, geoBar, travelBar);
     return mapCanvas;
   }
@@ -1262,6 +1270,34 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     if (description) mapPanel.append(el("div", "aw-mappanel__desc", description));
 
     const actions = el("div", "aw-mappanel__actions");
+    // 0.9.41 在场名单：当前地点上的人物 / 物品（npcDirectory / objectDirectory 按 pointId 分组）
+    const d0 = lastMapData;
+    const hereNpcs = Array.isArray(d0?.npcDirectory) ? d0.npcDirectory.filter((n) => String(n.pointId ?? "") === String(point.id)) : [];
+    const hereObjects = Array.isArray(d0?.objectDirectory) ? d0.objectDirectory.filter((o) => String(o.pointId ?? "") === String(point.id)) : [];
+    const here = el("div", "aw-mappanel__here");
+    const hereLabel = el("div", "aw-mappanel__here-label", `当前在这里（${hereNpcs.length + hereObjects.length}）`);
+    here.append(hereLabel);
+    if (hereNpcs.length === 0 && hereObjects.length === 0) {
+      here.append(el("div", "aw-mappanel__here-empty", "无人"));
+    }
+    for (const npc of hereNpcs) {
+      const row = el("button", "aw-mappanel__person aw-mappanel__person--npc");
+      row.type = "button";
+      row.append(el("span", "aw-mappanel__person-avatar", String(npc.name ?? "?").slice(0, 1)));
+      row.append(el("span", "aw-mappanel__person-name", String(npc.name)));
+      row.addEventListener("click", () => openNpcPanel(npc));
+      here.append(row);
+    }
+    for (const obj of hereObjects) {
+      const row = el("button", "aw-mappanel__person aw-mappanel__person--obj");
+      row.type = "button";
+      row.append(el("span", "aw-mappanel__person-avatar", "◆"));
+      row.append(el("span", "aw-mappanel__person-name", String(obj.name)));
+      row.addEventListener("click", () => openObjectPanel(obj));
+      here.append(row);
+    }
+    mapPanel.append(here);
+
     if (!inSub && String(point.id) !== String(d.currentLocationId ?? "")) {
       const routeBtn = el("button", "aw-btn aw-btn--primary", "预览前往路线");
       routeBtn.type = "button";
@@ -1288,6 +1324,79 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       actions.append(el("span", "aw-hint", "内部点位暂不接入旅行推算。"));
     }
     if (actions.childElementCount > 0) mapPanel.append(actions);
+    mapPanel.style.display = "";
+  }
+
+  /** 0.9.41 人物面板：想法（最近涉及叙事）+ 动向（状态摘要 / 在场原因）。 */
+  function openNpcPanel(npc) {
+    if (!mapPanel) return;
+    mapPanel.innerHTML = "";
+    const head = el("div", "aw-mappanel__head");
+    const headRow = el("div", "aw-mappanel__headrow");
+    headRow.append(el("span", "aw-mappanel__avatar aw-mappanel__avatar--npc", String(npc.name ?? "?").slice(0, 1)));
+    headRow.append(el("strong", "aw-mappanel__name", String(npc.name)));
+    head.append(headRow);
+    const close = el("button", "aw-mappanel__close", "×");
+    close.type = "button";
+    close.setAttribute("aria-label", "关闭人物信息");
+    close.addEventListener("click", closeMapPanel);
+    head.append(close);
+    mapPanel.append(head);
+
+    const metaLines = [];
+    if (npc.pointName) metaLines.push(`所在：${npc.pointName}`);
+    if (npc.reason) metaLines.push(NPC_REASON_LABELS[String(npc.reason)] ?? String(npc.reason));
+    if (metaLines.length > 0) mapPanel.append(el("div", "aw-mappanel__meta", metaLines.join(" · ")));
+
+    // 动向：CharacterState 状态摘要
+    if (npc.status) {
+      const status = el("div", "aw-mappanel__section");
+      status.append(el("div", "aw-mappanel__section-label", "动向"));
+      status.append(el("div", "aw-mappanel__section-text", String(npc.status)));
+      mapPanel.append(status);
+    }
+    // 想法：最近涉及该 NPC 的账本叙事
+    const narratives = Array.isArray(npc.recentNarratives) ? npc.recentNarratives.filter(Boolean) : [];
+    if (narratives.length > 0) {
+      const thoughts = el("div", "aw-mappanel__section");
+      thoughts.append(el("div", "aw-mappanel__section-label", "最近动向"));
+      for (const text of narratives) {
+        thoughts.append(el("div", "aw-mappanel__section-text", `· ${text}`));
+      }
+      mapPanel.append(thoughts);
+    }
+    if (!npc.status && narratives.length === 0) {
+      mapPanel.append(el("div", "aw-mappanel__here-empty", "暂无动向记录——推演推进后这里会出现该角色的想法与动向。"));
+    }
+    mapPanel.style.display = "";
+  }
+
+  /** 0.9.41 物品面板：描述 + 所在。 */
+  function openObjectPanel(object) {
+    if (!mapPanel) return;
+    mapPanel.innerHTML = "";
+    const head = el("div", "aw-mappanel__head");
+    const headRow = el("div", "aw-mappanel__headrow");
+    headRow.append(el("span", "aw-mappanel__avatar aw-mappanel__avatar--obj", "◆"));
+    headRow.append(el("strong", "aw-mappanel__name", String(object.name)));
+    head.append(headRow);
+    const close = el("button", "aw-mappanel__close", "×");
+    close.type = "button";
+    close.setAttribute("aria-label", "关闭物品信息");
+    close.addEventListener("click", closeMapPanel);
+    head.append(close);
+    mapPanel.append(head);
+
+    const metaLines = [];
+    metaLines.push(`类型：${String(object.type)}`);
+    if (object.pointName) metaLines.push(`所在：${object.pointName}`);
+    mapPanel.append(el("div", "aw-mappanel__meta", metaLines.join(" · ")));
+    if (object.description) {
+      const desc = el("div", "aw-mappanel__section");
+      desc.append(el("div", "aw-mappanel__section-label", "描述"));
+      desc.append(el("div", "aw-mappanel__section-text", String(object.description)));
+      mapPanel.append(desc);
+    }
     mapPanel.style.display = "";
   }
 
@@ -1390,23 +1499,40 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
 
     for (const npc of npcs) {
       if (npc.x === null || npc.y === null) continue;
-      const dot = el("span", "aw-npc");
+      // 0.9.41 人物标点 = 金圆字头像（原型 mapview 同款信息架构）：点击出人物 popover
+      const dot = el("button", "aw-npc");
+      dot.type = "button";
       const pos = toPercent(Number(npc.x), Number(npc.y));
       dot.style.left = pos.left;
       dot.style.top = pos.top;
       const reasonLabel = npc.reason ? (NPC_REASON_LABELS[String(npc.reason)] ?? String(npc.reason)) : "";
       dot.title = `${String(npc.name)}${reasonLabel ? `（${reasonLabel}）` : ""}`;
+      dot.setAttribute("aria-label", `人物 ${npc.name}，点击查看想法与动向`);
+      dot.append(el("span", "aw-npc__avatar", String(npc.name ?? "?").slice(0, 1)));
       dot.append(el("span", "aw-npc__name", String(npc.name)));
+      dot.addEventListener("click", (e) => {
+        e.stopPropagation();
+        openNpcPanel(npc);
+      });
       mapLayer.append(dot);
     }
 
     for (const object of objects) {
       if (object.x === null || object.y === null) continue;
-      const dot = el("span", "aw-object");
+      // 0.9.41 物品标点 = 紫色小方块：点击出物品 popover
+      const dot = el("button", "aw-object");
+      dot.type = "button";
       const pos = toPercent(Number(object.x), Number(object.y));
       dot.style.left = pos.left;
       dot.style.top = pos.top;
       dot.title = `${String(object.name)}（${String(object.type)}）`;
+      dot.setAttribute("aria-label", `物品 ${object.name}，点击查看详情`);
+      dot.append(el("span", "aw-object__gem"));
+      dot.append(el("span", "aw-object__name", String(object.name)));
+      dot.addEventListener("click", (e) => {
+        e.stopPropagation();
+        openObjectPanel(object);
+      });
       mapLayer.append(dot);
     }
 
