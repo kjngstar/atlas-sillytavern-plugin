@@ -354,181 +354,69 @@ var ATLAS_LOREBOOK_LIMITS = {
   KEYS_MAX: 8,
   /** 关键词单条最大字符 */
   KEY_CHARS: 64,
-  /** 条目内容最大字符（含来源行） */
+  /** 条目内容最大字符 */
   CONTENT_CHARS: 480,
-  /** 内容里摘要的最大字符 */
-  SUMMARY_CHARS: 260,
-  /** 内容里明细行（记忆 / 叙事）的最大字符 */
-  DETAIL_CHARS: 120,
-  /** 明细行数上限 */
-  DETAIL_LINES_MAX: 4,
-  /** 每轮条目上限（动向 1 + 事件 1） */
-  ENTRIES_PER_TURN_MAX: 2,
-  /** 动向类条目滚动保留数（超出删最旧） */
-  MOVES_KEEP: 12,
-  /** 事件类条目滚动保留数 */
-  EVENTS_KEEP: 12,
+  /** 近期动向单行最大字符 */
+  RECENT_LINE_CHARS: 160,
+  /** 近期动向保留条数 */
+  RECENT_LINES_MAX: 5,
   /** comment 最大字符 */
   COMMENT_CHARS: 96,
   /** 书名最大字符（含前缀） */
   BOOK_NAME_CHARS: 72
 };
 var ATLAS_LOREBOOK_PREFIX = {
-  moves: "Atlas 动向 ·",
-  events: "Atlas 事件 ·",
-  /**
-   * 0.9.35 常驻聚合条目（照抄 shujuku TavernDB-ACU-ReadableDataTable 形态）：
-   * 固定 comment、constant 蓝灯、高 order、prevent_recursion，每轮整体重写内容。
-   * 同时作为 readCardLoreSupplement 的回喂排除前缀（总览条目不回喂推演）。
-   */
+  /** 0.9.40 唯一在产条目前缀（滚动条目 comment 与前缀相同，固定不带时段） */
+  moves: "Atlas 动向",
+  /** 0.9.39 及之前的逐轮事件条目（仅用于回喂排除与存量清理，不再生成） */
+  events: "Atlas 事件",
+  /** 0.9.35 常驻聚合条目（0.9.40 起废弃；保留前缀用于回喂排除与存量清理） */
   status: "Atlas 状态总览"
 };
-var ATLAS_STATUS_OVERVIEW_KEY = "Atlas 状态总览-Key";
+var ATLAS_MOVES_ENTRY_COMMENT = ATLAS_LOREBOOK_PREFIX.moves;
+var ATLAS_MOVES_ENTRY_KEY = "Atlas 动向-Key";
 function lorebookNameFor(worldName) {
   const clean = String(worldName ?? "").replace(/[\\/:*?"<>|]/g, "").trim().slice(0, 32);
   const base = clean.length > 0 ? clean : "未命名世界";
   return `Atlas · ${base}`.slice(0, ATLAS_LOREBOOK_LIMITS.BOOK_NAME_CHARS);
 }
 function buildNameIndex(world) {
-  const characters = /* @__PURE__ */ new Map();
-  for (const c of world.characters ?? []) {
-    if (c && c.id !== void 0 && c.name) characters.set(String(c.id), String(c.name).slice(0, ATLAS_LOREBOOK_LIMITS.KEY_CHARS));
-  }
   const points = /* @__PURE__ */ new Map();
   for (const p of world.points ?? []) {
     if (p && p.id !== void 0 && p.name) points.set(String(p.id), String(p.name).slice(0, ATLAS_LOREBOOK_LIMITS.KEY_CHARS));
   }
-  const regions = /* @__PURE__ */ new Map();
-  for (const r of world.regions ?? []) {
-    if (r && r.id !== void 0 && r.name) regions.set(String(r.id), String(r.name).slice(0, ATLAS_LOREBOOK_LIMITS.KEY_CHARS));
-  }
-  return { characters, points, regions };
-}
-function dedupeKeys(values) {
-  const out = [];
-  for (const raw of values) {
-    const key = String(raw ?? "").trim().slice(0, ATLAS_LOREBOOK_LIMITS.KEY_CHARS);
-    if (key.length === 0) continue;
-    if (out.some((existing) => existing === key)) continue;
-    out.push(key);
-    if (out.length >= ATLAS_LOREBOOK_LIMITS.KEYS_MAX) break;
-  }
-  return out;
+  return { points };
 }
 function clip(text, max) {
   const clean = String(text ?? "").trim();
   if (clean.length <= max) return clean;
   return `${clean.slice(0, Math.max(0, max - 1))}…`;
 }
-function traceLine(receipt) {
-  return `[Atlas · 第 ${String(receipt.previousTime)} → ${String(receipt.currentTime)} 时段 · 回执 ${String(receipt.receiptId).slice(0, 16)}]`;
+function stripEngineNotes(text) {
+  return String(text ?? "").replace(/（本轮无[^）]*）/g, "").replace(/本轮无世界变化。?/g, "").trim();
 }
-function involvedEntityIds(event) {
-  const ids = [];
-  const push = (raw) => {
-    const id = String(raw ?? "").trim();
-    if (id.length === 0 || ids.includes(id)) return;
-    ids.push(id);
-  };
-  for (const id of event.entityRefs ?? []) push(id);
-  for (const effect of event.effects ?? []) {
-    const record = effect;
-    push(record?.entityId);
-    push(record?.targetEntityId);
-  }
-  return ids.slice(0, ATLAS_LOREBOOK_LIMITS.KEYS_MAX * 2);
-}
-function detailLines(event, names) {
-  const lines = [];
-  for (const effect of event.effects ?? []) {
-    if (lines.length >= ATLAS_LOREBOOK_LIMITS.DETAIL_LINES_MAX) break;
-    const record = effect;
-    const kind = String(record?.kind ?? "");
-    const text = typeof record?.text === "string" ? record.text.trim() : "";
-    if (!text) continue;
-    if (kind !== "appendMemoryRef" && kind !== "attachNarrativeEntry") continue;
-    const name = names.get(String(record?.entityId ?? "")) ?? null;
-    const who = name ? `${name}：` : "";
-    lines.push(`· ${who}${clip(text, ATLAS_LOREBOOK_LIMITS.DETAIL_CHARS)}`);
-  }
-  return lines;
-}
-function buildStatusOverview(world, receipt) {
+function buildLorebookPlans(world, receipt) {
+  if (receipt.status !== "committed") return null;
   const index = buildNameIndex(world);
   const locationName = receipt.currentLocationId !== void 0 && receipt.currentLocationId !== null ? index.points.get(String(receipt.currentLocationId)) ?? "未知地点" : null;
-  const recent = (world.stateEvents ?? []).slice(-5).reverse().map((e) => `· [第 ${String(e.at)} 时段] ${clip(e.narrativeSummary ?? "", 160)}`);
+  const recent = (world.stateEvents ?? []).slice(-ATLAS_LOREBOOK_LIMITS.RECENT_LINES_MAX).reverse().map((e) => `· [第 ${String(e.at)} 时段] ${clip(stripEngineNotes(e.narrativeSummary ?? ""), ATLAS_LOREBOOK_LIMITS.RECENT_LINE_CHARS)}`);
   const lines = [
-    "【世界状态总览】本条目由 Atlas 每轮推演后自动更新：以下是当前时间点的权威世界状态，进行剧情分析时以此最新数据为准，优先级高于其他背景设定。",
+    "【世界动向】本条目由 Atlas 每轮推演后自动更新：以下是当前时间点的权威世界动向，进行剧情分析时以此最新数据为准，优先级高于其他背景设定。",
     `当前时间：第 ${String(receipt.currentTime)} 时段`,
     ...locationName ? [`当前位置：${locationName}`] : [],
     "近期动向：",
     ...recent.length > 0 ? recent : ["· （暂无已归档的世界变化）"]
   ];
-  return {
-    comment: ATLAS_LOREBOOK_PREFIX.status,
-    keys: [ATLAS_STATUS_OVERVIEW_KEY],
-    content: lines.join("\n").slice(0, ATLAS_LOREBOOK_LIMITS.CONTENT_CHARS)
+  const entry = {
+    category: "moves",
+    comment: ATLAS_MOVES_ENTRY_COMMENT,
+    keys: [ATLAS_MOVES_ENTRY_KEY],
+    content: lines.join("\n").slice(0, ATLAS_LOREBOOK_LIMITS.CONTENT_CHARS),
+    constant: true
   };
-}
-function buildLorebookPlans(world, receipt) {
-  if (receipt.status !== "committed") return null;
-  const adoptedIds = (receipt.adoptedEventIds ?? []).map((id) => String(id));
-  const event = adoptedIds.length > 0 ? (world.stateEvents ?? []).find((e) => e && adoptedIds.includes(String(e.id))) ?? null : null;
-  if (!event && adoptedIds.length === 0) {
-    const fallbackSummary = clip(receipt.summary, ATLAS_LOREBOOK_LIMITS.SUMMARY_CHARS);
-    if (!fallbackSummary || fallbackSummary === "本轮无世界变化。") return null;
-    const index2 = buildNameIndex(world);
-    const trace2 = traceLine(receipt);
-    const locationKeys2 = dedupeKeys([
-      receipt.currentLocationId !== void 0 && receipt.currentLocationId !== null ? index2.points.get(String(receipt.currentLocationId)) ?? "" : ""
-    ]);
-    const lines = [`近期动态：${fallbackSummary}`, trace2];
-    const entry = {
-      category: "moves",
-      comment: clip(`${ATLAS_LOREBOOK_PREFIX.moves} 第 ${String(receipt.previousTime)} → ${String(receipt.currentTime)} 时段`, ATLAS_LOREBOOK_LIMITS.COMMENT_CHARS),
-      keys: locationKeys2,
-      content: lines.join("\n").slice(0, ATLAS_LOREBOOK_LIMITS.CONTENT_CHARS)
-    };
-    if (locationKeys2.length === 0) return null;
-    return {
-      bookName: lorebookNameFor(String(world.name ?? "")),
-      entries: [entry],
-      statusOverview: buildStatusOverview(world, receipt)
-    };
-  }
-  if (!event) return null;
-  const index = buildNameIndex(world);
-  const entries = [];
-  const trace = traceLine(receipt);
-  const summary = clip(event.narrativeSummary ?? receipt.summary, ATLAS_LOREBOOK_LIMITS.SUMMARY_CHARS);
-  const involved = involvedEntityIds(event);
-  const characterNames = dedupeKeys(involved.map((id) => index.characters.get(id) ?? "").filter(Boolean));
-  if (characterNames.length > 0) {
-    const lines = [summary, ...detailLines(event, index.characters), trace];
-    entries.push({
-      category: "moves",
-      comment: clip(`${ATLAS_LOREBOOK_PREFIX.moves} 第 ${String(receipt.previousTime)} → ${String(receipt.currentTime)} 时段`, ATLAS_LOREBOOK_LIMITS.COMMENT_CHARS),
-      keys: characterNames,
-      content: lines.join("\n").slice(0, ATLAS_LOREBOOK_LIMITS.CONTENT_CHARS)
-    });
-  }
-  const locationKeys = dedupeKeys([
-    receipt.currentLocationId !== void 0 && receipt.currentLocationId !== null ? index.points.get(String(receipt.currentLocationId)) ?? "" : ""
-  ]);
-  if (locationKeys.length > 0) {
-    const lines = [`近期可触发：${summary}`, trace];
-    entries.push({
-      category: "events",
-      comment: clip(`${ATLAS_LOREBOOK_PREFIX.events} 第 ${String(receipt.currentTime)} 时段`, ATLAS_LOREBOOK_LIMITS.COMMENT_CHARS),
-      keys: locationKeys,
-      content: lines.join("\n").slice(0, ATLAS_LOREBOOK_LIMITS.CONTENT_CHARS)
-    });
-  }
-  if (entries.length === 0) return null;
   return {
     bookName: lorebookNameFor(String(world.name ?? "")),
-    entries: entries.slice(0, ATLAS_LOREBOOK_LIMITS.ENTRIES_PER_TURN_MAX),
-    statusOverview: buildStatusOverview(world, receipt)
+    entries: [entry]
   };
 }
 function asBoundedString(value, max) {
@@ -545,46 +433,38 @@ function parseAtlasLorebookPlans(raw) {
   if (!bookName || bookName.trim().length === 0) {
     return { ok: false, error: new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "lorebook.bookName 非法") };
   }
-  if (!Array.isArray(record.entries) || record.entries.length === 0 || record.entries.length > ATLAS_LOREBOOK_LIMITS.ENTRIES_PER_TURN_MAX) {
+  if (!Array.isArray(record.entries) || record.entries.length === 0 || record.entries.length > 1) {
     return { ok: false, error: new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "lorebook.entries 数量非法") };
   }
-  const entries = [];
-  for (const item of record.entries) {
-    if (!item || typeof item !== "object" || Array.isArray(item)) {
-      return { ok: false, error: new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "lorebook 条目必须是对象") };
-    }
-    const entry = item;
-    const category = entry.category === "moves" || entry.category === "events" ? entry.category : null;
-    const comment = asBoundedString(entry.comment, ATLAS_LOREBOOK_LIMITS.COMMENT_CHARS);
-    const content = asBoundedString(entry.content, ATLAS_LOREBOOK_LIMITS.CONTENT_CHARS);
-    if (!category || !comment || !content) {
-      return { ok: false, error: new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "lorebook 条目字段非法或超限") };
-    }
-    if (!Array.isArray(entry.keys) || entry.keys.length === 0 || entry.keys.length > ATLAS_LOREBOOK_LIMITS.KEYS_MAX) {
-      return { ok: false, error: new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "lorebook 条目 keys 数量非法") };
-    }
-    const keys = [];
-    for (const key of entry.keys) {
-      const bounded = asBoundedString(key, ATLAS_LOREBOOK_LIMITS.KEY_CHARS);
-      if (!bounded || bounded.trim().length === 0) {
-        return { ok: false, error: new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "lorebook 条目 key 非法") };
-      }
-      keys.push(bounded);
-    }
-    entries.push({ category, comment, keys, content });
+  const item = record.entries[0];
+  if (!item || typeof item !== "object" || Array.isArray(item)) {
+    return { ok: false, error: new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "lorebook 条目必须是对象") };
   }
-  let statusOverview;
-  const rawOverview = record.statusOverview;
-  if (rawOverview && typeof rawOverview === "object" && !Array.isArray(rawOverview)) {
-    const ov = rawOverview;
-    const ovComment = asBoundedString(ov.comment, ATLAS_LOREBOOK_LIMITS.COMMENT_CHARS);
-    const ovContent = asBoundedString(ov.content, ATLAS_LOREBOOK_LIMITS.CONTENT_CHARS);
-    const ovKeys = Array.isArray(ov.keys) ? ov.keys.map((k) => asBoundedString(k, ATLAS_LOREBOOK_LIMITS.KEY_CHARS)).filter((k) => Boolean(k && k.trim())) : [];
-    if (ovComment && ovContent && ovKeys.length > 0) {
-      statusOverview = { comment: ovComment, keys: ovKeys.slice(0, ATLAS_LOREBOOK_LIMITS.KEYS_MAX), content: ovContent };
-    }
+  const entry = item;
+  const category = entry.category === "moves" || entry.category === "events" ? entry.category : null;
+  const comment = asBoundedString(entry.comment, ATLAS_LOREBOOK_LIMITS.COMMENT_CHARS);
+  const content = asBoundedString(entry.content, ATLAS_LOREBOOK_LIMITS.CONTENT_CHARS);
+  if (!category || !comment || !content) {
+    return { ok: false, error: new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "lorebook 条目字段非法或超限") };
   }
-  return { ok: true, value: { bookName, entries, ...statusOverview ? { statusOverview } : {} } };
+  if (!Array.isArray(entry.keys) || entry.keys.length === 0 || entry.keys.length > ATLAS_LOREBOOK_LIMITS.KEYS_MAX) {
+    return { ok: false, error: new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "lorebook 条目 keys 数量非法") };
+  }
+  const keys = [];
+  for (const key of entry.keys) {
+    const bounded = asBoundedString(key, ATLAS_LOREBOOK_LIMITS.KEY_CHARS);
+    if (!bounded || bounded.trim().length === 0) {
+      return { ok: false, error: new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "lorebook 条目 key 非法") };
+    }
+    keys.push(bounded);
+  }
+  return {
+    ok: true,
+    value: {
+      bookName,
+      entries: [{ category, comment, keys, content, ...entry.constant === true ? { constant: true } : {} }]
+    }
+  };
 }
 function asEntriesRecord(data) {
   if (!data || typeof data !== "object" || Array.isArray(data)) return null;
@@ -601,11 +481,6 @@ function entryView(raw) {
   const keys = Array.isArray(entry.key) ? entry.key.map((k) => String(k)).slice(0, ATLAS_LOREBOOK_LIMITS.KEYS_MAX) : [];
   const content = typeof entry.content === "string" ? entry.content.slice(0, ATLAS_LOREBOOK_LIMITS.CONTENT_CHARS) : "";
   return { category, comment, keys, content };
-}
-function periodOf(comment) {
-  const matches = [...comment.matchAll(/(\d+)/g)];
-  const last = matches[matches.length - 1];
-  return last ? Number(last[1]) : -1;
 }
 function collectAtlasEntries(data) {
   const entries = data.entries;
@@ -640,7 +515,9 @@ function createAtlasLorebookWriter(port, opts = {}) {
      *    否则目标 = plans.bookName（Atlas 专属书）；
      * 1. 书不存在 → createBook；存在但非法 → 拒绝（不覆盖）；
      * 2. 按 comment upsert（同轮重复同步不产生重复条目）；
-     * 3. 按类目滚动修剪（时段号新 → 旧保留 MOVES_KEEP / EVENTS_KEEP）；
+     * 3. 0.9.40 收口：书里只保留唯一的「Atlas 动向」滚动条目——旧版逐轮条目
+     *    （「Atlas 动向 · 第 X → Y 时段」「Atlas 事件 · …」）与「Atlas 状态总览」
+     *    一律清除（作者 2026-09-21 拍板：世界书只要动向、不强调时段）；
      * 4. 整书保存一次；保存后不再改动 data（酒馆缓存不深拷贝）；
      * 5. 专属书模式下：聊天绑定槽为空才绑定；已绑定别的书 → conflict（绝不静默覆盖）。
      */
@@ -664,6 +541,7 @@ function createAtlasLorebookWriter(port, opts = {}) {
       const entriesRecord = data.entries;
       let written = 0;
       for (const plan of plans.entries) {
+        const isConstant = plan.constant === true;
         const existingUid = Object.keys(entriesRecord).find((uid) => {
           const raw = entriesRecord[uid];
           return raw && typeof raw.comment === "string" && raw.comment === plan.comment;
@@ -674,47 +552,25 @@ function createAtlasLorebookWriter(port, opts = {}) {
           entry.keysecondary = [];
           entry.content = plan.content;
           entry.disable = false;
-          entry.constant = false;
-        } else {
-          port.createEntry(data, { comment: plan.comment, keys: [...plan.keys], content: plan.content });
-        }
-        written += 1;
-      }
-      if (plans.statusOverview) {
-        const plan = plans.statusOverview;
-        const existingUid = Object.keys(entriesRecord).find((uid) => {
-          const raw = entriesRecord[uid];
-          return raw && typeof raw.comment === "string" && raw.comment === plan.comment;
-        });
-        if (existingUid !== void 0) {
-          const entry = entriesRecord[existingUid];
-          entry.constant = true;
-          entry.disable = false;
-          entry.prevent_recursion = true;
-          entry.key = [...plan.keys];
-          if (entry.content !== plan.content) {
-            entry.content = plan.content;
-            written += 1;
-          }
+          entry.constant = isConstant;
+          if (isConstant) entry.prevent_recursion = true;
         } else {
           port.createEntry(data, {
             comment: plan.comment,
             keys: [...plan.keys],
             content: plan.content,
-            constant: true,
-            order: 9998,
-            position: 0,
-            preventRecursion: true
+            ...isConstant ? { constant: true, order: 9998, position: 0, preventRecursion: true } : {}
           });
-          written += 1;
         }
+        written += 1;
       }
       let pruned = 0;
-      const caps = { moves: ATLAS_LOREBOOK_LIMITS.MOVES_KEEP, events: ATLAS_LOREBOOK_LIMITS.EVENTS_KEEP };
-      for (const category of ["moves", "events"]) {
-        const pool = collectAtlasEntries(data).filter((item) => item.view.category === category).sort((a, b) => periodOf(b.view.comment) - periodOf(a.view.comment));
-        for (const item of pool.slice(caps[category])) {
-          port.deleteEntry(data, item.uid);
+      const atlasPrefixes = Object.values(ATLAS_LOREBOOK_PREFIX);
+      for (const [uid, raw] of Object.entries(entriesRecord)) {
+        const comment = raw && typeof raw === "object" && typeof raw.comment === "string" ? raw.comment : "";
+        const isAtlas = atlasPrefixes.some((prefix) => comment.startsWith(prefix));
+        if (isAtlas && comment !== ATLAS_MOVES_ENTRY_COMMENT) {
+          port.deleteEntry(data, uid);
           pruned += 1;
         }
       }
@@ -7573,7 +7429,10 @@ function settingsViewV2(settings) {
       id: BUILTIN_PROMPT_PRESET_ID,
       name: "内置默认",
       readOnly: true,
-      systemPrompt: DEFAULT_WORLD_TURN_SYSTEM_PROMPT
+      systemPrompt: DEFAULT_WORLD_TURN_SYSTEM_PROMPT,
+      // 0.9.40（作者反馈「怎么还是长这样」）：内置默认以只读分段展示，
+      // 让 0.9.39 的 8 段多轮结构在推进页直接可见、可复制
+      segments: DEFAULT_PROMPT_SEGMENTS.map((s) => ({ ...s }))
     },
     autoCommit: settings.autoCommit,
     loreSupplementEnabled: settings.loreSupplementEnabled ?? true,
@@ -7771,7 +7630,7 @@ function createAtlasServerCore(deps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.39",
+      version: "0.9.40",
       protocolVersion: 1,
       time: now()
     });

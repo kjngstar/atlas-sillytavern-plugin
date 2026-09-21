@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.39";
+export const ATLAS_EXTENSION_VERSION = "0.9.40";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -1814,6 +1814,11 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       return active.segments.map((s) => `[${s.role}] ${String(s.content ?? "")}`).join("\n\n");
     }
     if (active) return String(active.systemPrompt ?? "");
+    // 0.9.40 内置默认以分段形态预览（与发送时多轮组装一致）
+    const builtinSegs = Array.isArray(settingsV2.builtInPrompt?.segments) ? settingsV2.builtInPrompt.segments : [];
+    if (builtinSegs.length > 0) {
+      return builtinSegs.map((s) => `[${String(s?.role ?? "system")}] ${String(s?.content ?? "")}`).join("\n\n");
+    }
     return String(settingsV2.builtInPrompt?.systemPrompt ?? "");
   }
 
@@ -2020,7 +2025,9 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     bodyField.append(el("span", "aw-hint", isBuiltinDraft
       ? "内置默认为只读——点「复制内置默认为新预设」或「另存为」后即可修改。"
       : "留空 = 使用内置默认；用户行动、助手回复与世界上下文由系统自动组装，不在这里编辑。启用下方分段模式后本正文不发送。"));
-    promptPanel.append(bodyField);
+    // 0.9.40 内置默认不再展示单条正文编辑器（作者反馈「怎么还是长这样」）：
+    // 改在下方分段区以只读形态展示 8 段多轮结构
+    if (!isBuiltinDraft) promptPanel.append(bodyField);
 
     // 0.9.19 分段模式（shujuku AcuPromptSegments 同款长段多角色预设）：≥1 段时取代上方单条正文
     const segSection = el("section", "aw-seg-section");
@@ -2155,7 +2162,34 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       syncSegStatus();
     };
     if (isBuiltinDraft) {
-      segSection.append(el("p", "aw-seg-empty", "内置默认不支持分段——先复制为新预设。"));
+      // 0.9.40 内置默认以只读分段展示（作者反馈「怎么还是长这样」）：
+      // 0.9.39 起发送侧已是 8 段多轮结构，推进页必须直接可见、可对照
+      const builtinSegs = Array.isArray(settingsV2?.builtInPrompt?.segments) ? settingsV2.builtInPrompt.segments : [];
+      segStatus.textContent = builtinSegs.length > 0 ? `内置默认 ${builtinSegs.length} 段（只读）` : "未启用";
+      if (builtinSegs.length > 0) {
+        const readOnlyRows = el("div", "aw-seg-rows aw-seg-rows--readonly");
+        builtinSegs.forEach((segment, index) => {
+          const item = el("div", "aw-seg-item aw-seg-item--readonly");
+          const head = el("div", "aw-seg-item__head");
+          head.append(el("span", "aw-seg-item__index", `#${index + 1}`));
+          const slotLabel = segment?.mainSlot === "A" ? " · 槽位 A（主提示词）" : segment?.mainSlot === "B" ? " · 槽位 B（任务指令）" : "";
+          const nameLabel = typeof segment?.name === "string" && segment.name.trim() ? ` · ${segment.name.trim()}` : "";
+          head.append(el("span", "aw-seg-item__roletag", `${String(segment?.role ?? "system")}${nameLabel}${slotLabel}`));
+          item.append(head);
+          const area = document.createElement("textarea");
+          area.className = "aw-input aw-input--area aw-seg-item__area";
+          area.rows = 5;
+          area.readOnly = true;
+          area.value = String(segment?.content ?? "");
+          area.setAttribute("aria-label", `内置默认第 ${index + 1} 段正文（只读）`);
+          item.append(area);
+          readOnlyRows.append(item);
+        });
+        segSection.append(readOnlyRows);
+        segSection.append(el("span", "aw-hint", "内置默认（0.9.39 多轮结构，只读）：system 身份契约 → assistant 确认 → user 背景设定 → user 任务指令 → user 本轮素材 → assistant 输出引导，发送时按段序组装并替换占位符。点「复制内置默认为新预设」即可复制成可编辑预设。"));
+      } else {
+        segSection.append(el("p", "aw-seg-empty", "内置默认不支持分段——先复制为新预设。"));
+      }
     } else {
       const insertTopBtn = el("button", "aw-btn aw-btn--ghost aw-seg-insert", "在最上方插入一段");
       insertTopBtn.type = "button";
@@ -2232,9 +2266,24 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       promptSaveButton.type = "button";
       promptSaveButton.setAttribute("aria-label", "把内置默认提示词复制成可编辑预设");
       promptSaveButton.addEventListener("click", async () => {
+        // 0.9.40 复制内置默认 = 连 8 段多轮结构一起复制（不再是单条正文）
+        const builtinSegs = Array.isArray(settingsV2?.builtInPrompt?.segments) ? settingsV2.builtInPrompt.segments : [];
+        const copiedSegments = builtinSegs
+          .map((s) => ({
+            role: PROMPT_SEGMENT_ROLES.includes(s?.role) ? s.role : "system",
+            ...(typeof s?.name === "string" && s.name.trim() ? { name: s.name.trim().slice(0, 64) } : {}),
+            ...(s?.mainSlot === "A" || s?.mainSlot === "B" ? { mainSlot: s.mainSlot } : {}),
+            content: String(s?.content ?? "").trim(),
+          }))
+          .filter((s) => s.content.length > 0)
+          .slice(0, 16);
         const ok = await sendSettingsCommand({
           action: "prompt.save",
-          preset: { name: "自定义提示词", systemPrompt: String(settingsV2?.builtInPrompt?.systemPrompt ?? "") },
+          preset: {
+            name: "自定义提示词",
+            systemPrompt: copiedSegments.length > 0 ? "" : String(settingsV2?.builtInPrompt?.systemPrompt ?? ""),
+            ...(copiedSegments.length > 0 ? { segments: copiedSegments } : {}),
+          },
         });
         if (ok) {
           const created = promptLibrary[promptLibrary.length - 1];

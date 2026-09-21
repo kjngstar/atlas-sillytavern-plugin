@@ -1,21 +1,28 @@
 /**
  * atlas-lorebook.ts — ATLAS-09 世界书注入层。
  *
- * 目标（作者拍板）：commit 完成后，把「NPC 动向」「近期可触发的任务 / 活动」写成
+ * 目标（作者拍板，0.9.40 收口）：commit 完成后，把世界的「当前动向」写成
  * Atlas 专属世界书条目，让主模型经酒馆正常世界书激活管线看到推演结果；
  * 当轮注入（setExtensionPrompt）仍只负责"本轮即时上下文"。
+ *
+ * 0.9.40 设计（作者 2026-09-21 拍板：世界书只要动向、不特意强调时段）：
+ * - 单条滚动条目「Atlas 动向」：固定 comment（不带时段）、constant 蓝灯常驻，
+ *   每个 committed 回合后整体重写内容（含零 effect 回合——当前时间必须永远最新）。
+ * - 内容只保留叙事与权威状态（当前时间 / 位置 / 近期动向），剥离引擎附加的
+ *   「（本轮无实体变化：仅时间 / 位置推进，未写入账本）」类无变化注记。
+ * - 旧版逐轮条目（「Atlas 动向 · 第 X → Y 时段」「Atlas 事件 · …」）与
+ *   0.9.35「Atlas 状态总览」由 writer 在同步时清理，存量书自动收敛为单条。
  *
  * 分层纪律：
  * - 本模块零 DOM、零酒馆依赖（酒馆 world-info API 由调用方以 port 注入），
  *   条目规划（buildLorebookPlans）是纯函数，在引擎核心 commit 成功后调用。
- * - 条目有界：每轮最多 2 条（动向 1 + 事件 1），关键词 / 内容 / 总量均有上限。
- * - 条目可追溯：内容尾部带「来源：第 X → Y 时段 + 回执号」。
+ * - 条目有界：内容 / key 均有上限；确定性：同世界状态 + 同回执 → 逐字节相同。
  * - 面板可见：writer 返回快照，调用方自行持久化并渲染。
  * - 聊天绑定槽（chatMetadata.world_info）只有一个：只在为空时绑定，
  *   绝不静默覆盖用户已绑定的世界书（冲突时上报 conflict，由 UI 提示）。
  */
 
-import type { StateEvent, World } from "../lib/world-schema.ts";
+import type { World } from "../lib/world-schema.ts";
 import { ATLAS_ERROR_CODES, AtlasError, type AtlasTurnReceipt } from "./atlas-contract.ts";
 
 // ---------------------------------------------------------------------------
@@ -27,40 +34,33 @@ export const ATLAS_LOREBOOK_LIMITS = {
   KEYS_MAX: 8,
   /** 关键词单条最大字符 */
   KEY_CHARS: 64,
-  /** 条目内容最大字符（含来源行） */
+  /** 条目内容最大字符 */
   CONTENT_CHARS: 480,
-  /** 内容里摘要的最大字符 */
-  SUMMARY_CHARS: 260,
-  /** 内容里明细行（记忆 / 叙事）的最大字符 */
-  DETAIL_CHARS: 120,
-  /** 明细行数上限 */
-  DETAIL_LINES_MAX: 4,
-  /** 每轮条目上限（动向 1 + 事件 1） */
-  ENTRIES_PER_TURN_MAX: 2,
-  /** 动向类条目滚动保留数（超出删最旧） */
-  MOVES_KEEP: 12,
-  /** 事件类条目滚动保留数 */
-  EVENTS_KEEP: 12,
+  /** 近期动向单行最大字符 */
+  RECENT_LINE_CHARS: 160,
+  /** 近期动向保留条数 */
+  RECENT_LINES_MAX: 5,
   /** comment 最大字符 */
   COMMENT_CHARS: 96,
   /** 书名最大字符（含前缀） */
   BOOK_NAME_CHARS: 72,
 } as const;
 
-/** Atlas 条目 comment 前缀（修剪 / 识别都按前缀 + 时段号） */
+/** Atlas 条目 comment 前缀（识别 / 回喂排除 / 存量清理都按前缀）。 */
 export const ATLAS_LOREBOOK_PREFIX = {
-  moves: "Atlas 动向 ·",
-  events: "Atlas 事件 ·",
-  /**
-   * 0.9.35 常驻聚合条目（照抄 shujuku TavernDB-ACU-ReadableDataTable 形态）：
-   * 固定 comment、constant 蓝灯、高 order、prevent_recursion，每轮整体重写内容。
-   * 同时作为 readCardLoreSupplement 的回喂排除前缀（总览条目不回喂推演）。
-   */
+  /** 0.9.40 唯一在产条目前缀（滚动条目 comment 与前缀相同，固定不带时段） */
+  moves: "Atlas 动向",
+  /** 0.9.39 及之前的逐轮事件条目（仅用于回喂排除与存量清理，不再生成） */
+  events: "Atlas 事件",
+  /** 0.9.35 常驻聚合条目（0.9.40 起废弃；保留前缀用于回喂排除与存量清理） */
   status: "Atlas 状态总览",
 } as const;
 
-/** 常驻聚合条目的占位 key（条目靠 constant 激活，key 仅为宿主兼容保留；照 shujuku 的 -Key 风格）。 */
-export const ATLAS_STATUS_OVERVIEW_KEY = "Atlas 状态总览-Key";
+/** 滚动条目的固定 comment（不带时段——条目每轮整体重写，无需时段区分）。 */
+export const ATLAS_MOVES_ENTRY_COMMENT = ATLAS_LOREBOOK_PREFIX.moves;
+
+/** 滚动条目的占位 key（条目靠 constant 激活，key 仅为宿主兼容保留）。 */
+export const ATLAS_MOVES_ENTRY_KEY = "Atlas 动向-Key";
 
 // ---------------------------------------------------------------------------
 // 世界书名：由世界名派生；剔除 ST 服务端文件名不接受的字符
@@ -84,53 +84,25 @@ export interface AtlasLorebookPlanEntry {
   comment: string;
   keys: string[];
   content: string;
-}
-
-/** 0.9.35 常驻聚合条目规划（照 shujuku TavernDB-ACU-ReadableDataTable：固定 comment + constant + 每轮整体重写） */
-export interface AtlasStatusOverviewPlan {
-  comment: string;
-  keys: string[];
-  content: string;
+  /** 常驻条目（constant 蓝灯）：滚动「Atlas 动向」恒为 true */
+  constant?: boolean;
 }
 
 export interface AtlasLorebookPlans {
   bookName: string;
   entries: AtlasLorebookPlanEntry[];
-  statusOverview?: AtlasStatusOverviewPlan;
 }
 
 interface NameIndex {
-  characters: Map<string, string>;
   points: Map<string, string>;
-  regions: Map<string, string>;
 }
 
 function buildNameIndex(world: World): NameIndex {
-  const characters = new Map<string, string>();
-  for (const c of world.characters ?? []) {
-    if (c && c.id !== undefined && c.name) characters.set(String(c.id), String(c.name).slice(0, ATLAS_LOREBOOK_LIMITS.KEY_CHARS));
-  }
   const points = new Map<string, string>();
   for (const p of world.points ?? []) {
     if (p && p.id !== undefined && p.name) points.set(String(p.id), String(p.name).slice(0, ATLAS_LOREBOOK_LIMITS.KEY_CHARS));
   }
-  const regions = new Map<string, string>();
-  for (const r of world.regions ?? []) {
-    if (r && r.id !== undefined && r.name) regions.set(String(r.id), String(r.name).slice(0, ATLAS_LOREBOOK_LIMITS.KEY_CHARS));
-  }
-  return { characters, points, regions };
-}
-
-function dedupeKeys(values: string[]): string[] {
-  const out: string[] = [];
-  for (const raw of values) {
-    const key = String(raw ?? "").trim().slice(0, ATLAS_LOREBOOK_LIMITS.KEY_CHARS);
-    if (key.length === 0) continue;
-    if (out.some((existing) => existing === key)) continue;
-    out.push(key);
-    if (out.length >= ATLAS_LOREBOOK_LIMITS.KEYS_MAX) break;
-  }
-  return out;
+  return { points };
 }
 
 function clip(text: string, max: number): string {
@@ -139,157 +111,52 @@ function clip(text: string, max: number): string {
   return `${clean.slice(0, Math.max(0, max - 1))}…`;
 }
 
-function traceLine(receipt: AtlasTurnReceipt): string {
-  return `[Atlas · 第 ${String(receipt.previousTime)} → ${String(receipt.currentTime)} 时段 · 回执 ${String(receipt.receiptId).slice(0, 16)}]`;
-}
-
-/** 从 effects / entityRefs 收集受影响实体 id（去重、有界）。 */
-function involvedEntityIds(event: StateEvent): string[] {
-  const ids: string[] = [];
-  const push = (raw: unknown) => {
-    const id = String(raw ?? "").trim();
-    if (id.length === 0 || ids.includes(id)) return;
-    ids.push(id);
-  };
-  for (const id of event.entityRefs ?? []) push(id);
-  for (const effect of event.effects ?? []) {
-    const record = effect as Record<string, unknown>;
-    push(record?.entityId);
-    push(record?.targetEntityId);
-  }
-  return ids.slice(0, ATLAS_LOREBOOK_LIMITS.KEYS_MAX * 2);
-}
-
-/** 明细行：本轮落在角色身上的记忆 / 叙事文本（有界）。 */
-function detailLines(event: StateEvent, names: Map<string, string>): string[] {
-  const lines: string[] = [];
-  for (const effect of event.effects ?? []) {
-    if (lines.length >= ATLAS_LOREBOOK_LIMITS.DETAIL_LINES_MAX) break;
-    const record = effect as Record<string, unknown>;
-    const kind = String(record?.kind ?? "");
-    const text = typeof record?.text === "string" ? record.text.trim() : "";
-    if (!text) continue;
-    if (kind !== "appendMemoryRef" && kind !== "attachNarrativeEntry") continue;
-    const name = names.get(String(record?.entityId ?? "")) ?? null;
-    const who = name ? `${name}：` : "";
-    lines.push(`· ${who}${clip(text, ATLAS_LOREBOOK_LIMITS.DETAIL_CHARS)}`);
-  }
-  return lines;
+/**
+ * 剥离引擎附加的「无变化」注记（作者 2026-09-21 反馈：世界书只保留叙事，
+ * 「这里写时间没变化怎么还推进时段了」类引擎口径一律不进条目）。
+ */
+function stripEngineNotes(text: string): string {
+  return String(text ?? "")
+    .replace(/（本轮无[^）]*）/g, "")
+    .replace(/本轮无世界变化。?/g, "")
+    .trim();
 }
 
 /**
- * commit 成功后，从账本事件派生世界书条目规划。
- * - committed 且有采用事件才有条目；duplicate / failed → null（调用方跳过）。
- * - 0.9.34：零 effect 回合（采纳 0 条——仅时间 / 位置推进，或变化被裁定丢弃）不再
- *   直接跳过：用回执摘要写一条动向条目（关键词 = 当前地点名）。作者真实酒馆验收发现
- *   「采纳 0 条」时世界书永远没有 Atlas 条目，推演处理过的信息全部丢失。
- * - 每轮最多 2 条：动向（关键词 = 涉及 NPC 名）+ 事件（关键词 = 所在地点名）。
- * - 没有可用关键词的条目直接省略；两条都省略 → null。
+ * commit 成功后，从世界状态派生滚动条目规划（0.9.40）。
+ * - committed 才有条目；duplicate / failed → null（调用方跳过）。
+ * - 每个 committed 回合（含零 effect——仅时间 / 位置推进）都产出同一条规划：
+ *   writer 按 comment upsert 整体重写，「当前时间」永远最新（修复 0.9.39 及之前
+ *   零 effect 回合不重写总览导致条目时间停在旧时段的矛盾）。
  * - 确定性：同世界状态 + 同回执 → 逐字节相同（可重放）。
  */
-/**
- * 0.9.35 常驻聚合条目（照抄 shujuku TavernDB-ACU-ReadableDataTable 形态）：
- * 世界当前权威状态的确定性聚合——同世界状态 + 同回执 → 逐字节相同。
- * 每轮 commit 后整体重写内容（writer 按 comment upsert），而非追加滚动条目。
- */
-function buildStatusOverview(world: World, receipt: AtlasTurnReceipt): AtlasStatusOverviewPlan {
+export function buildLorebookPlans(world: World, receipt: AtlasTurnReceipt): AtlasLorebookPlans | null {
+  if (receipt.status !== "committed") return null;
   const index = buildNameIndex(world);
   const locationName = receipt.currentLocationId !== undefined && receipt.currentLocationId !== null
     ? index.points.get(String(receipt.currentLocationId)) ?? "未知地点"
     : null;
   const recent = (world.stateEvents ?? [])
-    .slice(-5)
+    .slice(-ATLAS_LOREBOOK_LIMITS.RECENT_LINES_MAX)
     .reverse()
-    .map((e) => `· [第 ${String(e.at)} 时段] ${clip(e.narrativeSummary ?? "", 160)}`);
+    .map((e) => `· [第 ${String(e.at)} 时段] ${clip(stripEngineNotes(e.narrativeSummary ?? ""), ATLAS_LOREBOOK_LIMITS.RECENT_LINE_CHARS)}`);
   const lines = [
-    "【世界状态总览】本条目由 Atlas 每轮推演后自动更新：以下是当前时间点的权威世界状态，进行剧情分析时以此最新数据为准，优先级高于其他背景设定。",
+    "【世界动向】本条目由 Atlas 每轮推演后自动更新：以下是当前时间点的权威世界动向，进行剧情分析时以此最新数据为准，优先级高于其他背景设定。",
     `当前时间：第 ${String(receipt.currentTime)} 时段`,
     ...(locationName ? [`当前位置：${locationName}`] : []),
     "近期动向：",
     ...(recent.length > 0 ? recent : ["· （暂无已归档的世界变化）"]),
   ];
-  return {
-    comment: ATLAS_LOREBOOK_PREFIX.status,
-    keys: [ATLAS_STATUS_OVERVIEW_KEY],
+  const entry: AtlasLorebookPlanEntry = {
+    category: "moves",
+    comment: ATLAS_MOVES_ENTRY_COMMENT,
+    keys: [ATLAS_MOVES_ENTRY_KEY],
     content: lines.join("\n").slice(0, ATLAS_LOREBOOK_LIMITS.CONTENT_CHARS),
+    constant: true,
   };
-}
-
-export function buildLorebookPlans(world: World, receipt: AtlasTurnReceipt): AtlasLorebookPlans | null {
-  if (receipt.status !== "committed") return null;
-  const adoptedIds = (receipt.adoptedEventIds ?? []).map((id) => String(id));
-
-  const event = adoptedIds.length > 0
-    ? (world.stateEvents ?? []).find((e) => e && adoptedIds.includes(String(e.id))) ?? null
-    : null;
-
-  // 0.9.34 零 effect 回合回退：采纳 0 条（仅时间 / 位置推进）但回执有实质摘要
-  // （排除「本轮无世界变化」占位）。adoptedIds 非空却找不到事件属防御分支，保持 null。
-  if (!event && adoptedIds.length === 0) {
-    const fallbackSummary = clip(receipt.summary, ATLAS_LOREBOOK_LIMITS.SUMMARY_CHARS);
-    if (!fallbackSummary || fallbackSummary === "本轮无世界变化。") return null;
-    const index = buildNameIndex(world);
-    const trace = traceLine(receipt);
-    const locationKeys = dedupeKeys([
-      receipt.currentLocationId !== undefined && receipt.currentLocationId !== null
-        ? index.points.get(String(receipt.currentLocationId)) ?? ""
-        : "",
-    ]);
-    const lines = [`近期动态：${fallbackSummary}`, trace];
-    const entry: AtlasLorebookPlanEntry = {
-      category: "moves",
-      comment: clip(`${ATLAS_LOREBOOK_PREFIX.moves} 第 ${String(receipt.previousTime)} → ${String(receipt.currentTime)} 时段`, ATLAS_LOREBOOK_LIMITS.COMMENT_CHARS),
-      keys: locationKeys,
-      content: lines.join("\n").slice(0, ATLAS_LOREBOOK_LIMITS.CONTENT_CHARS),
-    };
-    if (locationKeys.length === 0) return null; // 无激活关键词，写了也永远不触发
-    return {
-      bookName: lorebookNameFor(String(world.name ?? "")),
-      entries: [entry],
-      statusOverview: buildStatusOverview(world, receipt),
-    };
-  }
-
-  // adoptedIds 非空却找不到事件 = 防御状态（不该发生），保持 null 不产出
-  if (!event) return null;
-
-  const index = buildNameIndex(world);
-  const entries: AtlasLorebookPlanEntry[] = [];
-  const trace = traceLine(receipt);
-  const summary = clip(event.narrativeSummary ?? receipt.summary, ATLAS_LOREBOOK_LIMITS.SUMMARY_CHARS);
-
-  // 动向：关键词 = 本轮被 effect 触及的角色名
-  const involved = involvedEntityIds(event);
-  const characterNames = dedupeKeys(involved.map((id) => index.characters.get(id) ?? "").filter(Boolean));
-  if (characterNames.length > 0) {
-    const lines = [summary, ...detailLines(event, index.characters), trace];
-    entries.push({
-      category: "moves",
-      comment: clip(`${ATLAS_LOREBOOK_PREFIX.moves} 第 ${String(receipt.previousTime)} → ${String(receipt.currentTime)} 时段`, ATLAS_LOREBOOK_LIMITS.COMMENT_CHARS),
-      keys: characterNames,
-      content: lines.join("\n").slice(0, ATLAS_LOREBOOK_LIMITS.CONTENT_CHARS),
-    });
-  }
-
-  // 事件：关键词 = 回执落点地点名（+ 地区名），让「走近某地」也能激活
-  const locationKeys = dedupeKeys([
-    receipt.currentLocationId !== undefined && receipt.currentLocationId !== null ? index.points.get(String(receipt.currentLocationId)) ?? "" : "",
-  ]);
-  if (locationKeys.length > 0) {
-    const lines = [`近期可触发：${summary}`, trace];
-    entries.push({
-      category: "events",
-      comment: clip(`${ATLAS_LOREBOOK_PREFIX.events} 第 ${String(receipt.currentTime)} 时段`, ATLAS_LOREBOOK_LIMITS.COMMENT_CHARS),
-      keys: locationKeys,
-      content: lines.join("\n").slice(0, ATLAS_LOREBOOK_LIMITS.CONTENT_CHARS),
-    });
-  }
-
-  if (entries.length === 0) return null;
   return {
     bookName: lorebookNameFor(String(world.name ?? "")),
-    entries: entries.slice(0, ATLAS_LOREBOOK_LIMITS.ENTRIES_PER_TURN_MAX),
-    statusOverview: buildStatusOverview(world, receipt),
+    entries: [entry],
   };
 }
 
@@ -312,49 +179,38 @@ export function parseAtlasLorebookPlans(raw: unknown): { ok: true; value: AtlasL
   if (!bookName || bookName.trim().length === 0) {
     return { ok: false, error: new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "lorebook.bookName 非法") };
   }
-  if (!Array.isArray(record.entries) || record.entries.length === 0 || record.entries.length > ATLAS_LOREBOOK_LIMITS.ENTRIES_PER_TURN_MAX) {
+  if (!Array.isArray(record.entries) || record.entries.length === 0 || record.entries.length > 1) {
     return { ok: false, error: new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "lorebook.entries 数量非法") };
   }
-  const entries: AtlasLorebookPlanEntry[] = [];
-  for (const item of record.entries) {
-    if (!item || typeof item !== "object" || Array.isArray(item)) {
-      return { ok: false, error: new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "lorebook 条目必须是对象") };
-    }
-    const entry = item as Record<string, unknown>;
-    const category = entry.category === "moves" || entry.category === "events" ? entry.category : null;
-    const comment = asBoundedString(entry.comment, ATLAS_LOREBOOK_LIMITS.COMMENT_CHARS);
-    const content = asBoundedString(entry.content, ATLAS_LOREBOOK_LIMITS.CONTENT_CHARS);
-    if (!category || !comment || !content) {
-      return { ok: false, error: new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "lorebook 条目字段非法或超限") };
-    }
-    if (!Array.isArray(entry.keys) || entry.keys.length === 0 || entry.keys.length > ATLAS_LOREBOOK_LIMITS.KEYS_MAX) {
-      return { ok: false, error: new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "lorebook 条目 keys 数量非法") };
-    }
-    const keys: string[] = [];
-    for (const key of entry.keys) {
-      const bounded = asBoundedString(key, ATLAS_LOREBOOK_LIMITS.KEY_CHARS);
-      if (!bounded || bounded.trim().length === 0) {
-        return { ok: false, error: new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "lorebook 条目 key 非法") };
-      }
-      keys.push(bounded);
-    }
-    entries.push({ category, comment, keys, content });
+  const item = record.entries[0];
+  if (!item || typeof item !== "object" || Array.isArray(item)) {
+    return { ok: false, error: new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "lorebook 条目必须是对象") };
   }
-  // 0.9.35 常驻聚合条目（可选）：字段合法即透传，形状不对丢弃不拒单
-  let statusOverview: AtlasStatusOverviewPlan | undefined;
-  const rawOverview = record.statusOverview;
-  if (rawOverview && typeof rawOverview === "object" && !Array.isArray(rawOverview)) {
-    const ov = rawOverview as Record<string, unknown>;
-    const ovComment = asBoundedString(ov.comment, ATLAS_LOREBOOK_LIMITS.COMMENT_CHARS);
-    const ovContent = asBoundedString(ov.content, ATLAS_LOREBOOK_LIMITS.CONTENT_CHARS);
-    const ovKeys = Array.isArray(ov.keys)
-      ? ov.keys.map((k) => asBoundedString(k, ATLAS_LOREBOOK_LIMITS.KEY_CHARS)).filter((k): k is string => Boolean(k && k.trim()))
-      : [];
-    if (ovComment && ovContent && ovKeys.length > 0) {
-      statusOverview = { comment: ovComment, keys: ovKeys.slice(0, ATLAS_LOREBOOK_LIMITS.KEYS_MAX), content: ovContent };
-    }
+  const entry = item as Record<string, unknown>;
+  const category = entry.category === "moves" || entry.category === "events" ? entry.category : null;
+  const comment = asBoundedString(entry.comment, ATLAS_LOREBOOK_LIMITS.COMMENT_CHARS);
+  const content = asBoundedString(entry.content, ATLAS_LOREBOOK_LIMITS.CONTENT_CHARS);
+  if (!category || !comment || !content) {
+    return { ok: false, error: new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "lorebook 条目字段非法或超限") };
   }
-  return { ok: true, value: { bookName, entries, ...(statusOverview ? { statusOverview } : {}) } };
+  if (!Array.isArray(entry.keys) || entry.keys.length === 0 || entry.keys.length > ATLAS_LOREBOOK_LIMITS.KEYS_MAX) {
+    return { ok: false, error: new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "lorebook 条目 keys 数量非法") };
+  }
+  const keys: string[] = [];
+  for (const key of entry.keys) {
+    const bounded = asBoundedString(key, ATLAS_LOREBOOK_LIMITS.KEY_CHARS);
+    if (!bounded || bounded.trim().length === 0) {
+      return { ok: false, error: new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "lorebook 条目 key 非法") };
+    }
+    keys.push(bounded);
+  }
+  return {
+    ok: true,
+    value: {
+      bookName,
+      entries: [{ category, comment, keys, content, ...(entry.constant === true ? { constant: true } : {}) }],
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -368,7 +224,7 @@ export interface AtlasLorebookPort {
   /** 整书保存；保存后调用方不再改动该 data（酒馆缓存不深拷贝） */
   saveBook(name: string, data: unknown): Promise<void>;
   /** 在 data.entries 里创建一条模板条目并按 patch 填字段（酒馆 createWorldInfoEntry）。
-   *  0.9.35：constant / order / position / preventRecursion 为常驻聚合条目可选字段。 */
+   *  constant / order / position / preventRecursion 为常驻条目可选字段。 */
   createEntry(
     data: Record<string, unknown>,
     patch: {
@@ -435,13 +291,6 @@ function entryView(raw: unknown): AtlasLorebookEntryView | null {
   return { category, comment, keys, content };
 }
 
-/** comment 里的时段号（取最后一个数字）；无 → -1（排最旧）。 */
-function periodOf(comment: string): number {
-  const matches = [...comment.matchAll(/(\d+)/g)];
-  const last = matches[matches.length - 1];
-  return last ? Number(last[1]) : -1;
-}
-
 function collectAtlasEntries(data: Record<string, unknown>): Array<{ uid: string; view: AtlasLorebookEntryView }> {
   const entries = data.entries as Record<string, unknown>;
   const out: Array<{ uid: string; view: AtlasLorebookEntryView }> = [];
@@ -479,7 +328,9 @@ export function createAtlasLorebookWriter(port: AtlasLorebookPort, opts: { now?:
      *    否则目标 = plans.bookName（Atlas 专属书）；
      * 1. 书不存在 → createBook；存在但非法 → 拒绝（不覆盖）；
      * 2. 按 comment upsert（同轮重复同步不产生重复条目）；
-     * 3. 按类目滚动修剪（时段号新 → 旧保留 MOVES_KEEP / EVENTS_KEEP）；
+     * 3. 0.9.40 收口：书里只保留唯一的「Atlas 动向」滚动条目——旧版逐轮条目
+     *    （「Atlas 动向 · 第 X → Y 时段」「Atlas 事件 · …」）与「Atlas 状态总览」
+     *    一律清除（作者 2026-09-21 拍板：世界书只要动向、不强调时段）；
      * 4. 整书保存一次；保存后不再改动 data（酒馆缓存不深拷贝）；
      * 5. 专属书模式下：聊天绑定槽为空才绑定；已绑定别的书 → conflict（绝不静默覆盖）。
      */
@@ -505,6 +356,7 @@ export function createAtlasLorebookWriter(port: AtlasLorebookPort, opts: { now?:
 
       let written = 0;
       for (const plan of plans.entries) {
+        const isConstant = plan.constant === true;
         const existingUid = Object.keys(entriesRecord).find((uid) => {
           const raw = entriesRecord[uid] as Record<string, unknown> | null;
           return raw && typeof raw.comment === "string" && raw.comment === plan.comment;
@@ -515,57 +367,32 @@ export function createAtlasLorebookWriter(port: AtlasLorebookPort, opts: { now?:
           entry.keysecondary = [];
           entry.content = plan.content;
           entry.disable = false;
-          entry.constant = false;
-        } else {
-          port.createEntry(data, { comment: plan.comment, keys: [...plan.keys], content: plan.content });
-        }
-        written += 1;
-      }
-
-      // 0.9.35 常驻聚合条目（完全照抄 shujuku TavernDB-ACU-ReadableDataTable 形态）：
-      // 固定 comment 按 upsert 整体重写（不追加时段条目）；constant 蓝灯 + order 9998 +
-      // prevent_recursion + 角色定义前（position 0）；内容未变则跳过内容写（already
-      // up-to-date 同款），仅兜底常驻字段防手改。总览条目不进滚动修剪池（comment
-      // 不带动向 / 事件前缀）。
-      if (plans.statusOverview) {
-        const plan = plans.statusOverview;
-        const existingUid = Object.keys(entriesRecord).find((uid) => {
-          const raw = entriesRecord[uid] as Record<string, unknown> | null;
-          return raw && typeof raw.comment === "string" && raw.comment === plan.comment;
-        });
-        if (existingUid !== undefined) {
-          const entry = entriesRecord[existingUid] as Record<string, unknown>;
-          entry.constant = true;
-          entry.disable = false;
-          entry.prevent_recursion = true;
-          entry.key = [...plan.keys];
-          if (entry.content !== plan.content) {
-            entry.content = plan.content;
-            written += 1;
-          }
+          entry.constant = isConstant;
+          if (isConstant) entry.prevent_recursion = true;
         } else {
           port.createEntry(data, {
             comment: plan.comment,
             keys: [...plan.keys],
             content: plan.content,
-            constant: true,
-            order: 9998,
-            position: 0,
-            preventRecursion: true,
+            ...(isConstant ? { constant: true, order: 9998, position: 0, preventRecursion: true } : {}),
           });
-          written += 1;
         }
+        written += 1;
       }
 
-      // 滚动修剪：每类目只留最近 K 条
+      // 0.9.40 存量清理：凡 Atlas 条目但 comment 不是当前滚动条目 → 删除
+      // （旧版逐轮条目 / 0.9.35 状态总览一次性收敛，之后每轮此循环都是 no-op）。
+      // 注意不能走 collectAtlasEntries——entryView 只认 moves/events 前缀，
+      // 「Atlas 状态总览」会漏删；这里按 Atlas 前缀全集直接扫原始 entries。
       let pruned = 0;
-      const caps: Record<"moves" | "events", number> = { moves: ATLAS_LOREBOOK_LIMITS.MOVES_KEEP, events: ATLAS_LOREBOOK_LIMITS.EVENTS_KEEP };
-      for (const category of ["moves", "events"] as const) {
-        const pool = collectAtlasEntries(data)
-          .filter((item) => item.view.category === category)
-          .sort((a, b) => periodOf(b.view.comment) - periodOf(a.view.comment));
-        for (const item of pool.slice(caps[category])) {
-          port.deleteEntry(data, item.uid);
+      const atlasPrefixes = Object.values(ATLAS_LOREBOOK_PREFIX);
+      for (const [uid, raw] of Object.entries(entriesRecord)) {
+        const comment = raw && typeof raw === "object" && typeof (raw as Record<string, unknown>).comment === "string"
+          ? (raw as Record<string, unknown>).comment as string
+          : "";
+        const isAtlas = atlasPrefixes.some((prefix) => comment.startsWith(prefix));
+        if (isAtlas && comment !== ATLAS_MOVES_ENTRY_COMMENT) {
+          port.deleteEntry(data, uid);
           pruned += 1;
         }
       }

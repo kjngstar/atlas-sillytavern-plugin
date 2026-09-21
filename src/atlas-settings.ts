@@ -17,6 +17,7 @@
  */
 
 import {
+  DEFAULT_PROMPT_SEGMENTS,
   DEFAULT_WORLD_TURN_SYSTEM_PROMPT,
   type AtlasApiPreset,
 } from "./atlas-api-client.ts";
@@ -1017,7 +1018,14 @@ export interface AtlasSettingsView {
   promptPresets: AtlasPromptPreset[];
   activeApiPresetId: string | null;
   activePromptPresetId: string | null;
-  builtInPrompt: { id: string; name: string; readOnly: true; systemPrompt: string };
+  /** 0.9.40 内置默认带全套分段（只读展示）：推进页能直接看到 8 段多轮结构 */
+  builtInPrompt: {
+    id: string;
+    name: string;
+    readOnly: true;
+    systemPrompt: string;
+    segments: Array<{ role: string; name: string; mainSlot?: string; content: string }>;
+  };
   autoCommit: boolean;
   /** 0.9.22 推演是否附带世界书资料块（审核拦截逃生门）。 */
   loreSupplementEnabled: boolean;
@@ -1067,6 +1075,9 @@ export function settingsViewV2(settings: AtlasServerSettingsV2): AtlasSettingsVi
       name: "内置默认",
       readOnly: true,
       systemPrompt: DEFAULT_WORLD_TURN_SYSTEM_PROMPT,
+      // 0.9.40（作者反馈「怎么还是长这样」）：内置默认以只读分段展示，
+      // 让 0.9.39 的 8 段多轮结构在推进页直接可见、可复制
+      segments: DEFAULT_PROMPT_SEGMENTS.map((s) => ({ ...s })),
     },
     autoCommit: settings.autoCommit,
     loreSupplementEnabled: settings.loreSupplementEnabled ?? true,

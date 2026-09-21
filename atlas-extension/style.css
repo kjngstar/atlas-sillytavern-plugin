@@ -1503,6 +1503,29 @@
   font-family: var(--aw-sans);
 }
 
+/* 0.9.40 内置默认只读分段：role 标签 + 只读正文 */
+.aw-seg-item--readonly { opacity: 0.94; }
+
+.aw-seg-item__roletag {
+  font-size: 12px;
+  font-weight: 600;
+  color: #25484a;
+  font-family: var(--aw-sans);
+  padding: 3px 8px;
+  border: 1px solid var(--aw-line);
+  border-radius: 4px;
+  background: rgba(37, 72, 74, 0.05);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.aw-seg-item--readonly .aw-seg-item__area {
+  background: rgba(37, 72, 74, 0.03);
+  resize: vertical;
+}
+
 /* 0.9.24 世界书提炼地理按钮条；0.9.38 收纳为底部工具条——
    此前是 inset:0 的全画布 grid，三个子元素被均分三行，按钮悬浮在地图中央压住标记 */
 .aw-geobar {
