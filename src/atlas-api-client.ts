@@ -91,17 +91,20 @@ export function buildAtlasChatUrl(endpoint: string): string | null {
 
 /**
  * 内置默认提示词（UI「API」页可查看；预设留空时生效）。
- * 0.9.25 重写为 shujuku promptGroup 栏位段结构：主系统提示词（mainSlot A，system）+
- * 推演任务指令（mainSlot B，user），占位符发送时替换。
+ * 0.9.39 重写为 shujuku 剧情推进同款多轮分段结构：
+ * system 身份契约 → assistant 确认 → user 背景素材 → assistant 确认 →
+ * user 硬规则任务（HARD GATE）→ assistant 确认 → user 本轮素材触发 → assistant 输出引导（{）。
+ * 逐段锁行为；可删确认段（deletable 不标 false）供被网关 / 模型嫌弃时手动摘除。
  * 修改输出契约（字段名 / 形状）必须同步 parseAtlasWorldTurnDraft，否则解析会整单失败。
+ * 注意：段内禁止出现 $5 / $8 等字面占位符（会被替换引擎展开成整块内容），引用素材一律写「已在上方提供」。
  */
-export const DEFAULT_PROMPT_SEGMENTS: Array<{ role: string; name: string; mainSlot: string; content: string }> = [
+export const DEFAULT_PROMPT_SEGMENTS: Array<{ role: string; name: string; mainSlot?: string; content: string }> = [
   {
     role: "system",
-    name: "主系统提示词（推演引擎职责）",
+    name: "引擎身份与输出契约",
     mainSlot: "A",
     content:
-      "你是阿特拉斯世界推演引擎。你收到一份本轮的剧情素材（世界状态、前文、用户行动、助手回复），" +
+      "你是阿特拉斯世界推演引擎。你将收到一份本轮的剧情素材（世界状态、前文、用户行动、助手回复），" +
       "你的唯一职责：推断本轮对世界造成的**有界结构化变化**——谁出现在哪里、人物状态与关系如何变化、势力格局有无变动、时间推进多少。\n" +
       "严格要求：只输出一个 JSON 对象，不要输出任何多余说明、推理过程或代码围栏。字段契约：\n" +
       "duration（本轮消耗的时段数，非负数字，≤10000）、\n" +
@@ -116,28 +119,95 @@ export const DEFAULT_PROMPT_SEGMENTS: Array<{ role: string; name: string; mainSl
       "eventDrafts（数组，事件摘要文字，仅叙述用）、\n" +
       "triggerResults（数组，本轮命中的触发器 id）、\n" +
       "summary（本轮世界变化的一句话摘要，≤500 字）。\n" +
-      "推断姿态：主动而非保守——只要剧情暗示了人物去了别处、态度与关系起了变化、状态被事件改变、出现了值得铭记或标记的事，就输出对应变化；" +
-      "只在整轮确实平静无事时才输出空数组。\n" +
-      "上下文提供「人物 id 对照 / 地点 id 对照 / 地区 id 对照」：npcChanges 的 entityId 与 locationChange 的 id 一律使用对照表里的 id 原文，不要用名字当 id。\n" +
-      "禁止：编造上下文之外的实体 id 或地点 id；输出时间地点之外的世界重写；输出任何密钥、路径或代码。\n" +
-      "若本轮确无任何人物 / 关系 / 记忆变化，npcChanges 与 memoryDrafts 输出空数组，duration 与 locationChange 仍须如实填写，不要为凑数编造变化。",
+      "禁止：输出时间地点之外的世界重写；输出任何密钥、路径或代码。",
+  },
+  {
+    role: "assistant",
+    name: "确认·身份",
+    content:
+      "收到，我将以世界推演引擎的身份工作：只推断有界的世界变化，严格按 JSON 契约输出，绝不输出契约之外的任何内容。",
   },
   {
     role: "user",
-    name: "推演任务指令（本轮素材）",
+    name: "背景设定（只读参考）",
+    content:
+      "【背景设定（只供理解世界，与本轮推演任务无直接关系）】\n" +
+      "<用户设定>\n$U\n</用户设定>\n" +
+      "<角色描述>\n$C\n</角色描述>\n" +
+      "$1\n" +
+      "============================此处为分割线====================\n" +
+      "请充分阅读以上资料；后续推演将以此为世界背景，不得改写其中任何既有设定。",
+  },
+  {
+    role: "assistant",
+    name: "确认·背景",
+    content:
+      "收到，我已通读背景设定，将把其中的人物、地点与规则运用到后续推演当中，绝不改动任何既有设定。",
+  },
+  {
+    role: "user",
+    name: "推演任务指令（HARD GATE）",
     mainSlot: "B",
     content:
-      "【当前世界状态与可达内容】\n$5\n\n" +
-      "$1\n" +
-      "【上轮世界变化】\n$6\n\n" +
-      "【前文故事发展（AI 输出）】\n$7\n\n" +
-      "【用户设定】\n$U\n\n" +
-      "【角色描述】\n$C\n\n" +
+      "---BEGIN PROMPT---\n" +
+      "[System]\n" +
+      "你是执行型世界推演 AI，专注于本轮有界结构化变化的推断，禁止发散叙事。\n\n" +
+      "[Input]\n" +
+      "- WORLD_STATE: 当前世界状态与可达内容（已在上方提供）\n" +
+      "- LAST_TURN: 上轮世界变化（已在上方提供）\n" +
+      "- PREVIOUS_PLOT: 前文故事发展（已在上方提供）\n" +
+      "- USER_ACTION: 本轮用户行动（稍后提供）\n" +
+      "- ASSISTANT_REPLY: 本轮助手回复（稍后提供）\n\n" +
+      "============================================================\n" +
+      "【核心规则 - HARD GATE】\n" +
+      "============================================================\n\n" +
+      "**一、id 纪律**\n" +
+      "上下文提供「人物 id 对照 / 地点 id 对照 / 地区 id 对照」：npcChanges 与 locationChange 的 id 一律使用对照表里的 id 原文，不要用名字当 id，禁止编造对照表之外的实体 id 或地点 id。\n\n" +
+      "**二、推断姿态**\n" +
+      "主动而非保守——只要剧情暗示了人物去了别处、态度与关系起了变化、状态被事件改变、出现了值得铭记或标记的事，就输出对应变化；只在整轮确实平静无事时才输出空数组。\n\n" +
+      "**三、时间与位置**\n" +
+      "duration 按剧情如实推断（注意「一整天 / 半天 / 许久 / 一会儿」等时间词）；无人物 / 关系 / 记忆变化时 npcChanges 与 memoryDrafts 输出空数组，duration 与 locationChange 仍须如实填写，不要为凑数编造变化。\n\n" +
+      "**四、newLocations**\n" +
+      "只列本轮剧情新出现或被明确抵达 / 提及的地点与地区；已有地点不要重复；宁缺毋滥。\n\n" +
+      "**五、纪律红线**\n" +
+      "禁止输出时间地点之外的世界重写；禁止输出任何密钥、路径或代码；全程只输出一个 JSON 对象，不输出说明文字或代码围栏。",
+  },
+  {
+    role: "assistant",
+    name: "确认·规则",
+    content:
+      "收到命令，我将严格遵守 HARD GATE：只使用对照表 id 原文、积极推断而不越界、如实填写时间与位置、newLocations 宁缺毋滥。",
+  },
+  {
+    role: "user",
+    name: "本轮素材（触发）",
+    content:
+      "现在开始本轮推演，以下是你尚未看到的两份素材。\n\n" +
       "【本轮用户行动】\n$8\n\n" +
       "【本轮助手回复】\n{{assistantReply}}\n\n" +
-      "请按系统要求只输出一个 JSON 对象。",
+      "请立即按契约只输出一个 JSON 对象。",
+  },
+  {
+    role: "assistant",
+    name: "输出引导",
+    content: "{",
   },
 ];
+
+/**
+ * 0.9.39 前的旧版任务指令模板（保留给「按连接 System Prompt」回退路径：
+ * 连接级 systemPrompt 覆盖主系统提示词 + 固定素材装配 user 段，0.9.17 语义不变）。
+ */
+export const LEGACY_WORLD_TURN_TASK_CONTENT =
+  "【当前世界状态与可达内容】\n$5\n\n" +
+  "$1\n" +
+  "【上轮世界变化】\n$6\n\n" +
+  "【前文故事发展（AI 输出）】\n$7\n\n" +
+  "【用户设定】\n$U\n\n" +
+  "【角色描述】\n$C\n\n" +
+  "【本轮用户行动】\n$8\n\n" +
+  "【本轮助手回复】\n{{assistantReply}}\n\n" +
+  "请按系统要求只输出一个 JSON 对象。";
 
 /** 兼容旧调用方：内置默认单条系统提示词（= 栏位 A 原文）。 */
 export const DEFAULT_WORLD_TURN_SYSTEM_PROMPT = DEFAULT_PROMPT_SEGMENTS[0]!.content;
@@ -225,12 +295,18 @@ export function buildWorldTurnMessages(preset: AtlasApiPreset, input: AtlasWorld
     .filter((segment) => PROMPT_MESSAGE_ROLES.includes(segment.role) && segment.content.trim().length > 0)
     .map((segment) => ({ role: segment.role, content: substitutePromptPlaceholders(segment.content, input) }));
   if (messages.length > 0) return messages;
-  // 无分段：连接级 systemPrompt 覆盖主系统提示词（0.9.17 语义保留），任务指令固定用内置 B 槽
-  const systemContent = preset.systemPrompt?.trim() || DEFAULT_PROMPT_SEGMENTS[0]!.content;
-  return [
-    { role: "system", content: substitutePromptPlaceholders(systemContent, input) },
-    { role: "user", content: substitutePromptPlaceholders(DEFAULT_PROMPT_SEGMENTS[1]!.content, input) },
-  ].filter((segment) => segment.content.trim().length > 0);
+  // 无分段回退：连接级 systemPrompt 覆盖主系统提示词（0.9.17 语义保留，素材段用
+  // 0.9.39 前的旧版单条任务模板）；完全未配置时用整套内置默认分段（0.9.39 多轮结构）
+  const connectionSystem = preset.systemPrompt?.trim() || "";
+  if (connectionSystem) {
+    return [
+      { role: "system", content: substitutePromptPlaceholders(connectionSystem, input) },
+      { role: "user", content: substitutePromptPlaceholders(LEGACY_WORLD_TURN_TASK_CONTENT, input) },
+    ].filter((segment) => segment.content.trim().length > 0);
+  }
+  return DEFAULT_PROMPT_SEGMENTS
+    .map((segment) => ({ role: segment.role, content: substitutePromptPlaceholders(segment.content, input) }))
+    .filter((segment) => segment.content.trim().length > 0);
 }
 
 function errorMessageForStatus(status: number): { code: AtlasErrorCode; retryable: boolean; message: string } {

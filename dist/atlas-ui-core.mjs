@@ -781,17 +781,48 @@ function buildAtlasChatUrl(endpoint) {
 var DEFAULT_PROMPT_SEGMENTS = [
   {
     role: "system",
-    name: "主系统提示词（推演引擎职责）",
+    name: "引擎身份与输出契约",
     mainSlot: "A",
-    content: "你是阿特拉斯世界推演引擎。你收到一份本轮的剧情素材（世界状态、前文、用户行动、助手回复），你的唯一职责：推断本轮对世界造成的**有界结构化变化**——谁出现在哪里、人物状态与关系如何变化、势力格局有无变动、时间推进多少。\n严格要求：只输出一个 JSON 对象，不要输出任何多余说明、推理过程或代码围栏。字段契约：\nduration（本轮消耗的时段数，非负数字，≤10000）、\nlocationChange（对象或 null：{toPointId, toRegionId}，id 必须来自上下文中出现的地点）、\nnpcChanges（数组，积极挖掘本轮动向，形状：{entityId, key, value} 更新人物状态 / {entityId, toPointId} 人物移动到上下文中出现的地点 / {entityId, toRegionId} 移动到已知地区 / {entityId, tag} 加标签 / {entityId, removeTag} 删标签 / {flag, value} 记录世界标记（里程碑、禁忌、传言等）/ {entityId, targetEntityId, key, value} 改关系；entityId 必须来自上下文）、\nmemoryDrafts（数组，每条 {entityId, text}，为人物追加一条记忆，≤500 字）、\nnewLocations（数组，本轮剧情里**新出现**的地点 / 地区：{name, regionName?, description?, submap?}；regionName 必须是本轮输出 regions 或上下文已有的地区名；已有地点不要重复列；教室 / 学校 / 商店 / 车站等剧情真实发生的具体场所也算地点（校园日常类故事尤其如此），剧情所在的主要场所应列出；没有就输出空数组；只有当剧情真的走进某地点内部（楼 / 院 / 遗迹内部）时，才给该地点挂可选的 submap: {scale?: {distancePerCell, unit}, points: [{name}]}——只给内部点位名字即可，坐标由算法决定；剧情没进去就不要编内部结构）、\neventDrafts（数组，事件摘要文字，仅叙述用）、\ntriggerResults（数组，本轮命中的触发器 id）、\nsummary（本轮世界变化的一句话摘要，≤500 字）。\n推断姿态：主动而非保守——只要剧情暗示了人物去了别处、态度与关系起了变化、状态被事件改变、出现了值得铭记或标记的事，就输出对应变化；只在整轮确实平静无事时才输出空数组。\n上下文提供「人物 id 对照 / 地点 id 对照 / 地区 id 对照」：npcChanges 的 entityId 与 locationChange 的 id 一律使用对照表里的 id 原文，不要用名字当 id。\n禁止：编造上下文之外的实体 id 或地点 id；输出时间地点之外的世界重写；输出任何密钥、路径或代码。\n若本轮确无任何人物 / 关系 / 记忆变化，npcChanges 与 memoryDrafts 输出空数组，duration 与 locationChange 仍须如实填写，不要为凑数编造变化。"
+    content: "你是阿特拉斯世界推演引擎。你将收到一份本轮的剧情素材（世界状态、前文、用户行动、助手回复），你的唯一职责：推断本轮对世界造成的**有界结构化变化**——谁出现在哪里、人物状态与关系如何变化、势力格局有无变动、时间推进多少。\n严格要求：只输出一个 JSON 对象，不要输出任何多余说明、推理过程或代码围栏。字段契约：\nduration（本轮消耗的时段数，非负数字，≤10000）、\nlocationChange（对象或 null：{toPointId, toRegionId}，id 必须来自上下文中出现的地点）、\nnpcChanges（数组，积极挖掘本轮动向，形状：{entityId, key, value} 更新人物状态 / {entityId, toPointId} 人物移动到上下文中出现的地点 / {entityId, toRegionId} 移动到已知地区 / {entityId, tag} 加标签 / {entityId, removeTag} 删标签 / {flag, value} 记录世界标记（里程碑、禁忌、传言等）/ {entityId, targetEntityId, key, value} 改关系；entityId 必须来自上下文）、\nmemoryDrafts（数组，每条 {entityId, text}，为人物追加一条记忆，≤500 字）、\nnewLocations（数组，本轮剧情里**新出现**的地点 / 地区：{name, regionName?, description?, submap?}；regionName 必须是本轮输出 regions 或上下文已有的地区名；已有地点不要重复列；教室 / 学校 / 商店 / 车站等剧情真实发生的具体场所也算地点（校园日常类故事尤其如此），剧情所在的主要场所应列出；没有就输出空数组；只有当剧情真的走进某地点内部（楼 / 院 / 遗迹内部）时，才给该地点挂可选的 submap: {scale?: {distancePerCell, unit}, points: [{name}]}——只给内部点位名字即可，坐标由算法决定；剧情没进去就不要编内部结构）、\neventDrafts（数组，事件摘要文字，仅叙述用）、\ntriggerResults（数组，本轮命中的触发器 id）、\nsummary（本轮世界变化的一句话摘要，≤500 字）。\n禁止：输出时间地点之外的世界重写；输出任何密钥、路径或代码。"
+  },
+  {
+    role: "assistant",
+    name: "确认·身份",
+    content: "收到，我将以世界推演引擎的身份工作：只推断有界的世界变化，严格按 JSON 契约输出，绝不输出契约之外的任何内容。"
   },
   {
     role: "user",
-    name: "推演任务指令（本轮素材）",
+    name: "背景设定（只读参考）",
+    content: "【背景设定（只供理解世界，与本轮推演任务无直接关系）】\n<用户设定>\n$U\n</用户设定>\n<角色描述>\n$C\n</角色描述>\n$1\n============================此处为分割线====================\n请充分阅读以上资料；后续推演将以此为世界背景，不得改写其中任何既有设定。"
+  },
+  {
+    role: "assistant",
+    name: "确认·背景",
+    content: "收到，我已通读背景设定，将把其中的人物、地点与规则运用到后续推演当中，绝不改动任何既有设定。"
+  },
+  {
+    role: "user",
+    name: "推演任务指令（HARD GATE）",
     mainSlot: "B",
-    content: "【当前世界状态与可达内容】\n$5\n\n$1\n【上轮世界变化】\n$6\n\n【前文故事发展（AI 输出）】\n$7\n\n【用户设定】\n$U\n\n【角色描述】\n$C\n\n【本轮用户行动】\n$8\n\n【本轮助手回复】\n{{assistantReply}}\n\n请按系统要求只输出一个 JSON 对象。"
+    content: "---BEGIN PROMPT---\n[System]\n你是执行型世界推演 AI，专注于本轮有界结构化变化的推断，禁止发散叙事。\n\n[Input]\n- WORLD_STATE: 当前世界状态与可达内容（已在上方提供）\n- LAST_TURN: 上轮世界变化（已在上方提供）\n- PREVIOUS_PLOT: 前文故事发展（已在上方提供）\n- USER_ACTION: 本轮用户行动（稍后提供）\n- ASSISTANT_REPLY: 本轮助手回复（稍后提供）\n\n============================================================\n【核心规则 - HARD GATE】\n============================================================\n\n**一、id 纪律**\n上下文提供「人物 id 对照 / 地点 id 对照 / 地区 id 对照」：npcChanges 与 locationChange 的 id 一律使用对照表里的 id 原文，不要用名字当 id，禁止编造对照表之外的实体 id 或地点 id。\n\n**二、推断姿态**\n主动而非保守——只要剧情暗示了人物去了别处、态度与关系起了变化、状态被事件改变、出现了值得铭记或标记的事，就输出对应变化；只在整轮确实平静无事时才输出空数组。\n\n**三、时间与位置**\nduration 按剧情如实推断（注意「一整天 / 半天 / 许久 / 一会儿」等时间词）；无人物 / 关系 / 记忆变化时 npcChanges 与 memoryDrafts 输出空数组，duration 与 locationChange 仍须如实填写，不要为凑数编造变化。\n\n**四、newLocations**\n只列本轮剧情新出现或被明确抵达 / 提及的地点与地区；已有地点不要重复；宁缺毋滥。\n\n**五、纪律红线**\n禁止输出时间地点之外的世界重写；禁止输出任何密钥、路径或代码；全程只输出一个 JSON 对象，不输出说明文字或代码围栏。"
+  },
+  {
+    role: "assistant",
+    name: "确认·规则",
+    content: "收到命令，我将严格遵守 HARD GATE：只使用对照表 id 原文、积极推断而不越界、如实填写时间与位置、newLocations 宁缺毋滥。"
+  },
+  {
+    role: "user",
+    name: "本轮素材（触发）",
+    content: "现在开始本轮推演，以下是你尚未看到的两份素材。\n\n【本轮用户行动】\n$8\n\n【本轮助手回复】\n{{assistantReply}}\n\n请立即按契约只输出一个 JSON 对象。"
+  },
+  {
+    role: "assistant",
+    name: "输出引导",
+    content: "{"
   }
 ];
+var LEGACY_WORLD_TURN_TASK_CONTENT = "【当前世界状态与可达内容】\n$5\n\n$1\n【上轮世界变化】\n$6\n\n【前文故事发展（AI 输出）】\n$7\n\n【用户设定】\n$U\n\n【角色描述】\n$C\n\n【本轮用户行动】\n$8\n\n【本轮助手回复】\n{{assistantReply}}\n\n请按系统要求只输出一个 JSON 对象。";
 var DEFAULT_WORLD_TURN_SYSTEM_PROMPT = DEFAULT_PROMPT_SEGMENTS[0].content;
 var LORE_SUPPLEMENT_HEADER = "【世界书资料（当前角色卡，可能有噪声，仅供理解世界）】";
 function wrapWorldbookContext(content) {
@@ -831,11 +862,14 @@ function buildWorldTurnMessages(preset, input) {
     content: typeof segment?.content === "string" ? segment.content : ""
   })).filter((segment) => PROMPT_MESSAGE_ROLES.includes(segment.role) && segment.content.trim().length > 0).map((segment) => ({ role: segment.role, content: substitutePromptPlaceholders(segment.content, input) }));
   if (messages.length > 0) return messages;
-  const systemContent = preset.systemPrompt?.trim() || DEFAULT_PROMPT_SEGMENTS[0].content;
-  return [
-    { role: "system", content: substitutePromptPlaceholders(systemContent, input) },
-    { role: "user", content: substitutePromptPlaceholders(DEFAULT_PROMPT_SEGMENTS[1].content, input) }
-  ].filter((segment) => segment.content.trim().length > 0);
+  const connectionSystem = preset.systemPrompt?.trim() || "";
+  if (connectionSystem) {
+    return [
+      { role: "system", content: substitutePromptPlaceholders(connectionSystem, input) },
+      { role: "user", content: substitutePromptPlaceholders(LEGACY_WORLD_TURN_TASK_CONTENT, input) }
+    ].filter((segment) => segment.content.trim().length > 0);
+  }
+  return DEFAULT_PROMPT_SEGMENTS.map((segment) => ({ role: segment.role, content: substitutePromptPlaceholders(segment.content, input) })).filter((segment) => segment.content.trim().length > 0);
 }
 function errorMessageForStatus(status) {
   if (status === 401 || status === 403) {
@@ -7737,7 +7771,7 @@ function createAtlasServerCore(deps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.38",
+      version: "0.9.39",
       protocolVersion: 1,
       time: now()
     });

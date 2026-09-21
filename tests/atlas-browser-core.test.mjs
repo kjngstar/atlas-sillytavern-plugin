@@ -741,7 +741,11 @@ test("callAtlasWorldTurnApi：请求体逐字段同构 shujuku buildCustomApiReq
   const b = bodies[0];
   // shujuku 字段口径：默认值 + 显式 false + 空数组 + role 小写 + models/ 前缀剥离
   assert.equal(b.model, "MiniMax-M3", "strip models/ 前缀（shujuku 同款）");
-  assert.deepEqual(b.messages.map((m) => m.role), ["system", "user"], "role 归一小写");
+  assert.deepEqual(
+    b.messages.map((m) => m.role),
+    ["system", "assistant", "user", "assistant", "user", "assistant", "user", "assistant"],
+    "0.9.39 多轮分段默认（shujuku 剧情推进同款 user/assistant 交替）",
+  );
   assert.equal(b.max_tokens, 20_000, "maxTokens 缺省 20000（shujuku 同款）");
   assert.equal(b.temperature, 1.0, "temperature 缺省 1.0");
   assert.equal(b.top_p, 0.95, "top_p 缺省 0.95（shujuku 同款）");
@@ -977,32 +981,35 @@ test("callAtlasWorldTurnApi：promptSegments 装配消息数组，占位符替�
   assert.ok(messages[1].content.includes("回复C"), "{{assistantReply}} 已替换");
   assert.ok(!messages.some((m) => m.content.includes("{{")), "消息中无残留占位符");
 
-  // 全部段非法 → 回退固定 system+user 两条（内置默认提示词兜底）
+  // 全部段非法 → 回退整套内置默认分段（0.9.39 多轮结构：8 段）
   await callAtlasWorldTurnApi(
     { name: "t", endpoint: "https://api.example.com/v1/chat/completions", model: "m1", apiKey: "", promptSegments: [{ role: "dragon", content: "x" }] },
     input,
     { fetchFn },
   );
-  assert.equal(capturedBody.messages.length, 2, "全非法回退两条");
+  assert.equal(capturedBody.messages.length, 8, "全非法回退整套内置默认（8 段）");
   assert.ok(capturedBody.messages[0].content.includes("阿特拉斯世界推演引擎"), "回退内置默认 system");
 
-  // 无 promptSegments → 旧行为不变（两条）
+  // 无 promptSegments → 同样使用整套内置默认分段
   await callAtlasWorldTurnApi(
     { name: "t", endpoint: "https://api.example.com/v1/chat/completions", model: "m1", apiKey: "" },
     input,
     { fetchFn },
   );
-  assert.equal(capturedBody.messages.length, 2, "无分段维持旧两条");
+  assert.equal(capturedBody.messages.length, 8, "无分段使用内置默认 8 段");
+  assert.equal(capturedBody.messages[capturedBody.messages.length - 1].content, "{", "末段输出引导（JSON prefill）");
 
-  // 0.9.21 世界书资料块：loreSupplement 非空 → 默认 user 正文带资料块；{{worldLore}} 可引用
+  // 0.9.21 世界书资料块：loreSupplement 非空 → 资料进「背景设定」段（$1）；{{worldLore}} 可引用
   await callAtlasWorldTurnApi(
     { name: "t", endpoint: "https://api.example.com/v1/chat/completions", model: "m1", apiKey: "" },
     { ...input, loreSupplement: "- 低语森林：卡书里的地点描述" },
     { fetchFn },
   );
-  assert.equal(capturedBody.messages.length, 2, "带资料仍维持两条");
-  assert.ok(capturedBody.messages[1].content.includes("【世界书资料（当前角色卡"), "默认 user 正文含资料块标题");
-  assert.ok(capturedBody.messages[1].content.includes("低语森林"), "资料内容进入 user 正文");
+  assert.equal(capturedBody.messages.length, 8, "带资料仍是整套默认分段");
+  const loreSegment = capturedBody.messages.find((m) => m.content.includes("【世界书资料（当前角色卡"));
+  assert.ok(loreSegment, "资料块进入背景设定段");
+  assert.ok(loreSegment.content.includes("低语森林"), "资料内容进正文");
+  assert.ok(loreSegment.content.includes("用户行动B") === false, "背景段不混入本轮素材（$8 在触发段）");
 
   await callAtlasWorldTurnApi(
     {
@@ -1015,11 +1022,11 @@ test("callAtlasWorldTurnApi：promptSegments 装配消息数组，占位符替�
   assert.ok(capturedBody.messages[0].content.includes("资料：卡书条目X"), "{{worldLore}} 已替换");
   assert.ok(!capturedBody.messages[0].content.includes("【世界书资料（当前角色卡"), "分段模式下资料块只走占位符不重复追加");
 
-  // 无 supplement → 无资料块（旧行为）
+  // 无 supplement → 无资料块（占位符空值原样删除）
   await callAtlasWorldTurnApi(
     { name: "t", endpoint: "https://api.example.com/v1/chat/completions", model: "m1", apiKey: "" },
     input,
     { fetchFn },
   );
-  assert.ok(!capturedBody.messages[1].content.includes("【世界书资料（当前角色卡"), "无 supplement 不出现资料块");
+  assert.ok(!capturedBody.messages.some((m) => m.content.includes("【世界书资料（当前角色卡")), "无 supplement 不出现资料块");
 });

@@ -1078,7 +1078,7 @@ test("buildAtlasChatUrl：规范化与拒绝", () => {
 // systemPrompt：推演提示词可看可改（0.7.6）
 // ---------------------------------------------------------------------------
 
-test("systemPrompt：自定义系统提示词生效，留空回退内置默认", async () => {
+test("systemPrompt：自定义系统提示词生效，留空回退内置默认分段（0.9.39 多轮结构）", async () => {
   const custom = "自定义推演规则：本轮只追踪天气变化。";
   const scenarios = [
     { label: "自定义提示词", prompt: custom, expected: custom },
@@ -1092,7 +1092,23 @@ test("systemPrompt：自定义系统提示词生效，留空回退内置默认",
     ok(call.ok, `${scenario.label}：请求成功`);
     equal(calls[0].body.messages[0].role, "system", `${scenario.label}：第一条是 system`);
     equal(calls[0].body.messages[0].content, scenario.expected, `${scenario.label}：system 正文符合预期`);
-    equal(calls[0].body.messages[1].role, "user", `${scenario.label}：第二条是 user`);
+  }
+  // 自定义 systemPrompt → 旧版单条任务模板（两条，0.9.17 语义保留）
+  {
+    const { fetchFn, calls } = makeFetch([() => openAiResponse(GOOD_DRAFT)]);
+    await callAtlasWorldTurnApi(preset({ systemPrompt: custom }), { injectionText: "注入", userText: "用户", assistantText: "助手" }, { fetchFn, now: () => NOW });
+    equal(calls[0].body.messages.length, 2, "自定义 systemPrompt：两条");
+    equal(calls[0].body.messages[1].role, "user", "自定义 systemPrompt：第二条是 user（素材段）");
+    ok(calls[0].body.messages[1].content.includes("用户"), "素材段含本轮用户行动");
+  }
+  // 留空 → 整套内置默认分段（8 段多轮结构）
+  {
+    const { fetchFn, calls } = makeFetch([() => openAiResponse(GOOD_DRAFT)]);
+    await callAtlasWorldTurnApi(preset(), { injectionText: "注入", userText: "用户", assistantText: "助手" }, { fetchFn, now: () => NOW });
+    equal(calls[0].body.messages.length, 8, "留空：整套内置默认 8 段");
+    equal(calls[0].body.messages[1].role, "assistant", "第二段是 assistant 确认（shujuku 剧情推进同款）");
+    ok(calls[0].body.messages[calls[0].body.messages.length - 2].content.includes("用户"), "触发段含本轮素材");
+    equal(calls[0].body.messages[calls[0].body.messages.length - 1].content, "{", "末段输出引导（JSON prefill）");
   }
 });
 
