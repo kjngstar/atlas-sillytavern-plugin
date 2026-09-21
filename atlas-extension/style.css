@@ -808,12 +808,13 @@
   position: absolute;
   inset: 0;
   display: grid;
-  /* 0.9.20：空地理提示放底部——居中会压住起点标记 */
+  /* 0.9.20：空地理提示放底部——居中会压住起点标记；
+     0.9.38：geobar 收纳为底部工具条，提示抬到工具条上方避免重叠 */
   place-items: end center;
   color: var(--aw-muted);
   font-family: var(--aw-sans);
   font-size: 12px;
-  padding: 0 24px 16px;
+  padding: 0 24px 56px;
   text-align: center;
 }
 
@@ -829,7 +830,12 @@
   border: 1px solid #d8d2c2;
   border-radius: 8px;
   box-shadow: inset 0 0 60px rgba(16, 27, 29, 0.07);
-  background: var(--aw-paper);
+  /* 0.9.38 网格纸回归：0.9.32 起不透明纸面盖死了 .aw-maparea 的网格纹理，
+     地图变成一张空白纸——网格搬进 viewport 本体（has-image 时被图层图片覆盖，无冲突） */
+  background:
+    repeating-linear-gradient(0deg, transparent, transparent 27px, rgba(37, 95, 91, 0.06) 27px, rgba(37, 95, 91, 0.06) 28px),
+    repeating-linear-gradient(90deg, transparent, transparent 27px, rgba(37, 95, 91, 0.06) 27px, rgba(37, 95, 91, 0.06) 28px),
+    var(--aw-paper);
 }
 
 .aw-layer {
@@ -906,11 +912,14 @@
 
 .aw-route { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
 
-/* 地点徽章：当前位置深青底金字，其余纸面白底 */
+/* 地点徽章：金色菱形标 + 名牌；当前位置深青底金字，其余纸面白底 */
 
 .aw-point {
   position: absolute;
   transform: translate(-50%, -50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 12px;
   padding: 3px 12px;
   border-radius: 3px;
@@ -920,15 +929,39 @@
   white-space: nowrap;
   font-family: var(--aw-serif);
   z-index: 3;
+  box-shadow: 0 1px 2px rgba(16, 27, 29, 0.12);
 }
 
-.aw-point:hover { border-color: var(--aw-teal); color: var(--aw-teal); }
+/* 0.9.38 标点可视交互：金色菱形针脚 + 悬停抬升——此前徽章与死文字无异，
+   用户以为标点不可点（点击本来就会开信息面板） */
+.aw-point::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  transform: rotate(45deg);
+  background: var(--aw-gold-deep);
+  border: 1px solid rgba(138, 106, 28, 0.55);
+}
+
+.aw-point:hover,
+.aw-point:focus-visible {
+  border-color: var(--aw-teal);
+  color: var(--aw-teal);
+  transform: translate(-50%, -50%) translateY(-2px);
+  box-shadow: 0 3px 6px rgba(16, 27, 29, 0.16);
+}
 
 .aw-point.is-current {
   border-color: var(--aw-teal);
   background: var(--aw-teal);
   color: var(--aw-gold-soft);
   font-weight: 700;
+}
+
+.aw-point.is-current::before {
+  background: var(--aw-gold-soft);
+  border-color: rgba(251, 250, 246, 0.6);
 }
 
 /* NPC 金色圆点 + 名牌；物件 = 深青小菱形 */
@@ -1470,16 +1503,28 @@
   font-family: var(--aw-sans);
 }
 
-/* 0.9.24 世界书提炼地理按钮条（空地图时显示） */
+/* 0.9.24 世界书提炼地理按钮条；0.9.38 收纳为底部工具条——
+   此前是 inset:0 的全画布 grid，三个子元素被均分三行，按钮悬浮在地图中央压住标记 */
 .aw-geobar {
   position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: end center;
-  padding: 0 24px 40px;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
   pointer-events: none;
+  z-index: 4;
 }
-.aw-geobar .aw-btn--primary { pointer-events: auto; }
+.aw-geobar .aw-btn {
+  pointer-events: auto;
+  padding: 5px 11px;
+  font-size: 12px;
+  box-shadow: 0 1px 3px rgba(16, 27, 29, 0.14);
+}
+.aw-geobar .aw-hint { font-size: 11px; }
 
 /* 0.9.32 点挂子图：面包屑（画布顶部） + 标记点信息面板（viewport 右上） + 子图角标 */
 
