@@ -14,7 +14,8 @@
 
 import type { StateEffect, World } from "../lib/world-schema.ts";
 import { W0_LIMITS, parseStateEffect } from "../lib/world-schema.ts";
-import { latestDefinitionRevision } from "../lib/world-definition.ts";
+import type { EntityRecord } from "../lib/world-schema.ts";
+import { appendDefinitionRevision, latestDefinitionRevision, upsertEntityRecord } from "../lib/world-definition.ts";
 import { adoptPendingProposals, type PendingChangeProposal } from "../lib/world-ledger.ts";
 import { buildContextPlan, renderContextPlan } from "../lib/context-plan.ts";
 import { hashString } from "../lib/world-cards.ts";
@@ -282,8 +283,102 @@ function draftToEffects(world: World, draft: AtlasWorldChangeDraft): { effects: 
  * - failed：预检 / 容量 / 校验失败 → 零部分写入（adoptPendingProposals 保证）；
  * - committed：唯一一次写入，事件 actionId 记录幂等键供审计与重放。
  */
-export function commitAtlasTurn(world: World, input: AtlasTurnCommitInput): AtlasTurnCommitOutput {
-  const request = input.request;
+// ---------------------------------------------------------------------------
+// 0.9.37 角色实体自动建档（commit 侧确定性衍生；lib/ 快照零改动）
+// ---------------------------------------------------------------------------
+
+/** 从 effect 集合收集被引用的实体 id（setFlag 无实体引用，天然不在列）。 */
+function referencedEntityIdsOf(effects: StateEffect[]): Set<string> {
+  const ids = new Set<string>();
+  for (const effect of effects) {
+    const record = effect as unknown as Record<string, unknown>;
+    for (const key of ["entityId", "targetEntityId"] as const) {
+      const value = record[key];
+      if (typeof value === "string" && value.trim()) ids.add(value);
+    }
+  }
+  return ids;
+}
+
+/** 由草稿值推断字段声明类型（推断不出返回 null → 交由账本给出明确报错）。 */
+function inferValueType(value: unknown): "string" | "number" | "boolean" | "string[]" | null {
+  if (typeof value === "string") return "string";
+  if (typeof value === "number") return "number";
+  if (typeof value === "boolean") return "boolean";
+  if (Array.isArray(value) && value.every((v) => typeof v === "string")) return "string[]";
+  return null;
+}
+
+/**
+ * 0.9.37 角色实体自动建档：账本 effect 校验只认 entityRecords（lib/world-ledger.ts
+ * validateEffect），而角色（含自动建世的主角 char-main）住在 world.characters——
+ * 0.9.34 裁定白名单（characters ∪ entityRecords）放行的引用，到了账本这里必被拒
+ * （真实酒馆实测：setTemporalField / appendMemoryRef → 「实体不存在：char-main」整单拒收）。
+ * 修法：commit 时把草稿引用到、且只存在于 characters 的角色确定性建档（只增不改），
+ * 并为本轮 setTemporalField 用到的 key 自动声明 temporal 字段（值类型按草稿值推断）。
+ * 建档经 appendDefinitionRevision 留审计；建档失败不打断（该实体相关 effect 交由
+ * 账本给出明确报错），失败路径返回原世界，零部分写入语义不变。
+ */
+function provisionReferencedCharacters(world: World, effects: StateEffect[], now: number): World {
+  const referenced = referencedEntityIdsOf(effects);
+  if (referenced.size === 0) return world;
+  const knownRecords = new Set((world.entityRecords ?? []).map((e) => String(e.id)));
+  const characters = new Map((world.characters ?? []).map((c) => [String(c.id), c]));
+  const toProvision = [...referenced].filter((id) => !knownRecords.has(id) && characters.has(id));
+  if (toProvision.length === 0) return world;
+
+  let next = world;
+  const provisionedNames: string[] = [];
+  for (const id of toProvision) {
+    const character = characters.get(id)!;
+    const upsert = upsertEntityRecord(
+      next,
+      {
+        id,
+        worldId: next.id,
+        type: "npc",
+        name: (String(character.name ?? "").trim() || id).slice(0, 60),
+        baseline: {},
+        temporalSchema: [],
+      },
+      { now },
+    );
+    if (!upsert.ok) continue;
+    next = upsert.value;
+    provisionedNames.push(`${String(character.name ?? "").trim() || id}(${id})`);
+  }
+  if (provisionedNames.length === 0) return world;
+
+  // 本轮 setTemporalField 用到的 key 自动声明（仅限本轮新建的实体；已有实体保持
+  // 其声明契约不变——未声明字段的报错是上游定义纪律，不在此放宽）
+  const provisionedIds = new Set(toProvision);
+  for (const effect of effects) {
+    if (effect.kind !== "setTemporalField") continue;
+    if (!provisionedIds.has(effect.entityId)) continue;
+    const record = (next.entityRecords ?? []).find((e) => e.id === effect.entityId);
+    if (!record) continue;
+    if (record.temporalSchema.some((f) => f.key === effect.key)) continue;
+    const valueType = inferValueType(effect.value);
+    if (!valueType) continue;
+    const updated: EntityRecord = {
+      ...record,
+      temporalSchema: [...record.temporalSchema, { key: effect.key, kind: "temporal", valueType }],
+    };
+    const upsert = upsertEntityRecord(next, updated, { now });
+    if (upsert.ok) next = upsert.value;
+  }
+
+  // 审计：定义修订留痕（修订失败不影响回合——建档本身已生效，账本校验已能通过）
+  const revision = appendDefinitionRevision(next, {
+    authorNote: `角色自动建档（回合推演）：${provisionedNames.join("、")}`,
+    now,
+    changedEntityIds: [...provisionedIds].filter((id) => (next.entityRecords ?? []).some((e) => e.id === id)),
+  });
+  if (revision.ok) next = revision.value;
+  return next;
+}
+
+export function commitAtlasTurn(world: World, input: AtlasTurnCommitInput): AtlasTurnCommitOutput {  const request = input.request;
   const idempotencyKey = atlasCommitIdempotencyKey(request);
   // 幂等标记：提案 id 会作为账本事件的 sessionId（见共享 applyChangeProposal），
   // 因此同键重复提交——哪怕草稿内容变了——都能从这里找回原事件。
@@ -319,6 +414,10 @@ export function commitAtlasTurn(world: World, input: AtlasTurnCommitInput): Atla
 
   // 2. 草稿校验（不可信数据）：全部通过才开始写
   const { effects, at: duration } = draftToEffects(world, input.draft);
+  // 2.5 0.9.37 角色实体自动建档：草稿引用到、且只存在于 characters 的角色
+  //     （自动建世主角 char-main 等）先确定性建档 + 声明本轮用到的时态字段，
+  //     否则裁定白名单放行的引用会被账本「实体不存在」整单拒收。
+  const effectiveWorld = provisionReferencedCharacters(world, effects, input.now ?? 0);
   const at = input.currentTime + duration;
   const locationChange = input.draft.locationChange ?? null;
   const toPointId = locationChange
@@ -339,11 +438,11 @@ export function commitAtlasTurn(world: World, input: AtlasTurnCommitInput): Atla
   const summary = input.draft.summary.trim();
   if (effects.length === 0) {
     const cursorAdvanced = duration > 0 || toPointId !== null || toRegionId !== null;
-    let zeroWorld = world;
+    let zeroWorld = effectiveWorld;
     let geoNote = "";
     let zeroGeo: AtlasTurnCommitOutput["geo"] | undefined;
     if (newLocations.length > 0) {
-      const geo = applyNewLocations(world, newLocations, { now: input.now ?? 0 });
+      const geo = applyNewLocations(effectiveWorld, newLocations, { now: input.now ?? 0 });
       zeroWorld = geo.world;
       if (geo.pointsAdded + geo.regionsAdded > 0) {
         geoNote = `；新增地点 ${geo.pointNames.join("、")}${geo.regionNames.length > 0 ? `（地区 ${geo.regionNames.join("、")}）` : ""}`;
@@ -383,15 +482,15 @@ export function commitAtlasTurn(world: World, input: AtlasTurnCommitInput): Atla
     branchId,
     effects,
     origin: {
-      worldId: world.id,
+      worldId: effectiveWorld.id,
       branchId,
-      definitionRevisionId: latestDefinitionRevision(world)?.id ?? null,
+      definitionRevisionId: latestDefinitionRevision(effectiveWorld)?.id ?? null,
       requestId: idempotencyKey,
       ...(input.now !== undefined ? { createdAt: input.now } : {}),
     },
     selected: true,
   };
-  const result = adoptPendingProposals(world, [pending], { now: input.now ?? 0, source: "ai-adopted" });
+  const result = adoptPendingProposals(effectiveWorld, [pending], { now: input.now ?? 0, source: "ai-adopted" });
   if (!result.ok) {
     // 0.9.17 诊断透出：通用消息「整单未提交：N 条校验失败」不带原因，用户无法修。
     // rejected 里首条非「整单连坐」的 error 就是真实校验原因（如未知地点引用 / 版本过期）。

@@ -18,6 +18,7 @@ import { upsertEntityRecord } from "../lib/world-definition.ts";
 import { gridDistance } from "../lib/world-engine.ts";
 import { computeAtlasRelevance, atlasTravelPreview, deriveAtlasTurnSeed } from "../src/atlas-relevance.ts";
 import { prepareAtlasTurn, commitAtlasTurn } from "../src/atlas-turn.ts";
+import { buildStarterWorld } from "../src/atlas-starter-world.ts";
 import {
   ATLAS_ERROR_CODES,
   ATLAS_LIMITS,
@@ -371,6 +372,80 @@ test("commit：无变化回合零写入并返回 committed 空回执", () => {
   equal(output.world, world, "引用相等：零写入");
   equal(before, JSON.stringify(output.world), "世界字节不变");
   equal(output.receipt.adoptedEventIds.length, 0, "无事件");
+});
+
+// ---------------------------------------------------------------------------
+// 0.9.37 角色实体自动建档（真实酒馆实测：自动建世主角 char-main 被
+// 账本「实体不存在」整单拒收——裁定白名单认 characters，账本只认 entityRecords）
+// ---------------------------------------------------------------------------
+
+test("0.9.37 角色自动建档：characters-only 世界的主角变化不再被账本拒收", () => {
+  const world = buildStarterWorld({ id: "world-auto-turn37", now: NOW, name: "羽风灵", description: "随性的旅者。" });
+  equal((world.entityRecords ?? []).length, 0, "自动建世世界零实体档案（复现现场）");
+  equal(world.characters?.[0]?.id, "char-main", "主角住在 characters 里");
+
+  const output = commitAtlasTurn(world, {
+    request: commitRequest(world).value,
+    branchId: null,
+    currentTime: 0,
+    currentPointId: "1",
+    currentRegionId: "start",
+    draft: {
+      duration: 1,
+      locationChange: null,
+      rawEffects: [
+        { kind: "setTemporalField", entityId: "char-main", key: "attitude_towards_user", value: "感到新鲜与有趣" },
+      ],
+      memoryDrafts: [{ entityId: "char-main", text: "初次见面，觉得用户随性不按常理出牌。" }],
+      summary: "主角对用户产生了初步好感。",
+    },
+    now: NOW + 1,
+  });
+
+  equal(output.receipt.status, "committed", "主角 effect 不再被「实体不存在」整单拒收");
+  const record = (output.world.entityRecords ?? []).find((e) => e.id === "char-main");
+  ok(record, "char-main 已确定性建档（只增不改）");
+  equal(record?.name, "羽风灵", "档案名取自角色名");
+  ok(
+    (record?.temporalSchema ?? []).some((f) => f.key === "attitude_towards_user" && f.kind === "temporal" && f.valueType === "string"),
+    "本轮用到的 key 已自动声明 temporal 字段（值类型按草稿值推断）",
+  );
+  const events = ledgerForBranch(output.world, null);
+  equal(events.length, 1, "账本事件正常落库");
+  ok(
+    events[0].effects.some((e) => e.kind === "appendMemoryRef" && e.entityId === "char-main"),
+    "主角记忆进账本",
+  );
+  ok(
+    (output.world.definitionRevisions ?? []).some((r) => String(r.authorNote ?? "").includes("角色自动建档")),
+    "建档经定义修订留痕（可审计）",
+  );
+});
+
+test("0.9.37 角色自动建档：已有实体的未声明字段纪律不放宽；未引用角色不建档", () => {
+  const world = buildFixture();
+  const recordsBefore = (world.entityRecords ?? []).map((e) => e.id);
+
+  const output = commitAtlasTurn(world, commitInput(world, {
+    draft: {
+      duration: 1,
+      locationChange: null,
+      rawEffects: [{ kind: "setTemporalField", entityId: "entity-npc", key: "mood", value: "愉快" }],
+      memoryDrafts: [],
+      summary: "薇尔心情不错。",
+    },
+  }));
+
+  equal(output.receipt.status, "failed", "已有实体未声明字段仍被拒（上游定义纪律不放宽）");
+  ok(output.receipt.summary.includes("未声明字段 mood"), "失败原因指明字段");
+  deepEqual((output.world.entityRecords ?? []).map((e) => e.id), recordsBefore, "零部分写入：实体目录不变");
+
+  // 未被草稿引用的角色（char-main 等）绝不顺手建档（只增不改按需）
+  const untouched = commitAtlasTurn(world, commitInput(world, {
+    draft: { duration: 1, locationChange: null, rawEffects: [], memoryDrafts: [], summary: "平静回合。" },
+  }));
+  equal(untouched.receipt.status, "committed", "平静回合照常提交");
+  deepEqual((untouched.world.entityRecords ?? []).map((e) => e.id), recordsBefore, "无引用 → 零建档");
 });
 
 test("commit：仅时间推进零 effect 草稿 → 游标推进回执，不再被账本「至少一个 effect」拒收（0.9.27，MiniMax-M3 真实翻车形状）", () => {

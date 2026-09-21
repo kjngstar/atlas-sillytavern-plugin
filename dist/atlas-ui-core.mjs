@@ -4989,6 +4989,59 @@ function appendDefinitionRevision(world, opts) {
 function entityRecordById(world, entityId) {
   return (world.entityRecords ?? []).find((e) => e.id === entityId) ?? null;
 }
+function validateEntity(world, entity) {
+  if (entity.worldId !== world.id) return "实体的 worldId 与当前世界不一致";
+  if (!entity.type.trim()) return "实体类型不能为空";
+  if (!entity.name.trim()) return "实体名称不能为空";
+  const keys = /* @__PURE__ */ new Set();
+  for (const field of entity.temporalSchema) {
+    if (keys.has(field.key)) return `字段声明重复：${field.key}`;
+    keys.add(field.key);
+  }
+  for (const key of Object.keys(entity.baseline)) {
+    const declared = entity.temporalSchema.find((f) => f.key === key);
+    if (!declared) return `基线字段 ${key} 未在字段声明中登记`;
+    if (declared.kind === "temporal") {
+      return `字段 ${key} 是时态字段：其值只能由「登记世界变化」产生（R5-02 账本），不能写进基线。如确属设定修订，请改为 base 字段或通过定义修订调整声明`;
+    }
+    const value = entity.baseline[key];
+    if (declared.valueType === "string" && typeof value !== "string") return `字段 ${key} 应为字符串`;
+    if (declared.valueType === "number" && typeof value !== "number") return `字段 ${key} 应为数字`;
+    if (declared.valueType === "boolean" && typeof value !== "boolean") return `字段 ${key} 应为布尔值`;
+    if (declared.valueType === "string[]" && !(Array.isArray(value) && value.every((v) => typeof v === "string"))) {
+      return `字段 ${key} 应为字符串数组`;
+    }
+  }
+  for (const temporal of entity.temporalSchema.filter((f) => f.kind === "temporal")) {
+    if (temporal.key in entity.baseline) {
+      return `时态字段 ${temporal.key} 不能有基线值`;
+    }
+  }
+  if (entity.mapAnchor?.regionId && !(world.regions ?? []).some((r) => r.id === entity.mapAnchor?.regionId)) {
+    return `地图锚点引用了不存在的地区：${entity.mapAnchor.regionId}`;
+  }
+  if (entity.mapAnchor?.pointId && !(world.points ?? []).some((p) => String(p.id) === String(entity.mapAnchor?.pointId))) {
+    return `地图锚点引用了不存在的地点：${entity.mapAnchor.pointId}`;
+  }
+  return null;
+}
+function upsertEntityRecord(world, entity, opts = { now: 0 }) {
+  const invalid = validateEntity(world, entity);
+  if (invalid) return { ok: false, error: invalid };
+  const list = world.entityRecords ?? [];
+  if (!list.some((e) => e.id === entity.id) && list.length >= W0_LIMITS.maxEntityRecords) {
+    return { ok: false, error: `实体数量已达上限（${W0_LIMITS.maxEntityRecords}）` };
+  }
+  const exists = list.some((e) => e.id === entity.id);
+  const existing = list.find((e) => e.id === entity.id);
+  const stamped = {
+    ...entity,
+    ...existing ? { createdAt: existing.createdAt ?? opts.now } : { createdAt: opts.now },
+    updatedAt: opts.now
+  };
+  const next = exists ? list.map((e) => e.id === entity.id ? stamped : e) : [...list, stamped];
+  return { ok: true, value: { ...world, entityRecords: next } };
+}
 
 // lib/world-lineage.ts
 function resolveForkAt(world, branchId) {
@@ -6553,6 +6606,76 @@ function draftToEffects(world, draft) {
   }
   return { effects, at: Math.floor(duration) };
 }
+function referencedEntityIdsOf(effects) {
+  const ids = /* @__PURE__ */ new Set();
+  for (const effect of effects) {
+    const record = effect;
+    for (const key of ["entityId", "targetEntityId"]) {
+      const value = record[key];
+      if (typeof value === "string" && value.trim()) ids.add(value);
+    }
+  }
+  return ids;
+}
+function inferValueType(value) {
+  if (typeof value === "string") return "string";
+  if (typeof value === "number") return "number";
+  if (typeof value === "boolean") return "boolean";
+  if (Array.isArray(value) && value.every((v) => typeof v === "string")) return "string[]";
+  return null;
+}
+function provisionReferencedCharacters(world, effects, now) {
+  const referenced = referencedEntityIdsOf(effects);
+  if (referenced.size === 0) return world;
+  const knownRecords = new Set((world.entityRecords ?? []).map((e) => String(e.id)));
+  const characters = new Map((world.characters ?? []).map((c) => [String(c.id), c]));
+  const toProvision = [...referenced].filter((id) => !knownRecords.has(id) && characters.has(id));
+  if (toProvision.length === 0) return world;
+  let next = world;
+  const provisionedNames = [];
+  for (const id of toProvision) {
+    const character = characters.get(id);
+    const upsert = upsertEntityRecord(
+      next,
+      {
+        id,
+        worldId: next.id,
+        type: "npc",
+        name: (String(character.name ?? "").trim() || id).slice(0, 60),
+        baseline: {},
+        temporalSchema: []
+      },
+      { now }
+    );
+    if (!upsert.ok) continue;
+    next = upsert.value;
+    provisionedNames.push(`${String(character.name ?? "").trim() || id}(${id})`);
+  }
+  if (provisionedNames.length === 0) return world;
+  const provisionedIds = new Set(toProvision);
+  for (const effect of effects) {
+    if (effect.kind !== "setTemporalField") continue;
+    if (!provisionedIds.has(effect.entityId)) continue;
+    const record = (next.entityRecords ?? []).find((e) => e.id === effect.entityId);
+    if (!record) continue;
+    if (record.temporalSchema.some((f) => f.key === effect.key)) continue;
+    const valueType = inferValueType(effect.value);
+    if (!valueType) continue;
+    const updated = {
+      ...record,
+      temporalSchema: [...record.temporalSchema, { key: effect.key, kind: "temporal", valueType }]
+    };
+    const upsert = upsertEntityRecord(next, updated, { now });
+    if (upsert.ok) next = upsert.value;
+  }
+  const revision = appendDefinitionRevision(next, {
+    authorNote: `角色自动建档（回合推演）：${provisionedNames.join("、")}`,
+    now,
+    changedEntityIds: [...provisionedIds].filter((id) => (next.entityRecords ?? []).some((e) => e.id === id))
+  });
+  if (revision.ok) next = revision.value;
+  return next;
+}
 function commitAtlasTurn(world, input) {
   const request = input.request;
   const idempotencyKey = atlasCommitIdempotencyKey(request);
@@ -6582,6 +6705,7 @@ function commitAtlasTurn(world, input) {
     };
   }
   const { effects, at: duration } = draftToEffects(world, input.draft);
+  const effectiveWorld = provisionReferencedCharacters(world, effects, input.now ?? 0);
   const at = input.currentTime + duration;
   const locationChange = input.draft.locationChange ?? null;
   const toPointId = locationChange ? requireKnownPoint(world, locationChange.toPointId, "locationChange") : null;
@@ -6590,11 +6714,11 @@ function commitAtlasTurn(world, input) {
   const summary = input.draft.summary.trim();
   if (effects.length === 0) {
     const cursorAdvanced = duration > 0 || toPointId !== null || toRegionId !== null;
-    let zeroWorld = world;
+    let zeroWorld = effectiveWorld;
     let geoNote2 = "";
     let zeroGeo;
     if (newLocations.length > 0) {
-      const geo = applyNewLocations(world, newLocations, { now: input.now ?? 0 });
+      const geo = applyNewLocations(effectiveWorld, newLocations, { now: input.now ?? 0 });
       zeroWorld = geo.world;
       if (geo.pointsAdded + geo.regionsAdded > 0) {
         geoNote2 = `；新增地点 ${geo.pointNames.join("、")}${geo.regionNames.length > 0 ? `（地区 ${geo.regionNames.join("、")}）` : ""}`;
@@ -6630,15 +6754,15 @@ function commitAtlasTurn(world, input) {
     branchId,
     effects,
     origin: {
-      worldId: world.id,
+      worldId: effectiveWorld.id,
       branchId,
-      definitionRevisionId: latestDefinitionRevision(world)?.id ?? null,
+      definitionRevisionId: latestDefinitionRevision(effectiveWorld)?.id ?? null,
       requestId: idempotencyKey,
       ...input.now !== void 0 ? { createdAt: input.now } : {}
     },
     selected: true
   };
-  const result = adoptPendingProposals(world, [pending], { now: input.now ?? 0, source: "ai-adopted" });
+  const result = adoptPendingProposals(effectiveWorld, [pending], { now: input.now ?? 0, source: "ai-adopted" });
   if (!result.ok) {
     const firstReason = result.rejected.find(
       (item) => item.ok === false && item.error && item.error !== "同批存在被拒绝的提案，整单未提交"
@@ -7613,7 +7737,7 @@ function createAtlasServerCore(deps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.36",
+      version: "0.9.37",
       protocolVersion: 1,
       time: now()
     });
