@@ -238,6 +238,30 @@ test("prepare：注入文本带人物 / 地点 / 地区 id 对照表（0.9.30，
   ok(response.injectionText.includes("4104="), "地点 id=名字 形式（4104）");
 });
 
+test("prepare：0.9.34 人物对照表 = 裁定校验集同口径全集——装配单外的角色也在名单里", () => {
+  const world = buildFixture();
+  // 装配单（plan.entities）按相关性过滤；直接往 world.characters 塞一个
+  // 与当前场景无关的角色——0.9.33 之前它不会出现在对照表里，模型引用必被裁定丢弃
+  const farCharacter = {
+    id: "entity-far-npc",
+    name: "远方的铁匠",
+    branchId: null,
+    state: { lastSequence: 0 },
+  };
+  const withFar = {
+    ...world,
+    characters: [...(world.characters ?? []), farCharacter],
+  };
+  const { response } = prepareAtlasTurn(withFar, prepareInput(withFar));
+  ok(
+    response.injectionText.includes("entity-far-npc=远方的铁匠"),
+    "world.characters 全集角色进对照表（id=名字）",
+  );
+  // 裁定校验认这个 id：commit 不再「引用未知实体」整条丢弃
+  const known = new Set((withFar.characters ?? []).map((c) => String(c.id)));
+  ok(known.has("entity-far-npc"), "对照表与裁定校验集（knownEntityIds）同源");
+});
+
 // ---------------------------------------------------------------------------
 // commit
 // ---------------------------------------------------------------------------

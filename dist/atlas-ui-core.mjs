@@ -449,8 +449,28 @@ function detailLines(event, names) {
 function buildLorebookPlans(world, receipt) {
   if (receipt.status !== "committed") return null;
   const adoptedIds = (receipt.adoptedEventIds ?? []).map((id) => String(id));
-  if (adoptedIds.length === 0) return null;
-  const event = (world.stateEvents ?? []).find((e) => e && adoptedIds.includes(String(e.id)));
+  const event = adoptedIds.length > 0 ? (world.stateEvents ?? []).find((e) => e && adoptedIds.includes(String(e.id))) ?? null : null;
+  if (!event && adoptedIds.length === 0) {
+    const fallbackSummary = clip(receipt.summary, ATLAS_LOREBOOK_LIMITS.SUMMARY_CHARS);
+    if (!fallbackSummary || fallbackSummary === "本轮无世界变化。") return null;
+    const index2 = buildNameIndex(world);
+    const trace2 = traceLine(receipt);
+    const locationKeys2 = dedupeKeys([
+      receipt.currentLocationId !== void 0 && receipt.currentLocationId !== null ? index2.points.get(String(receipt.currentLocationId)) ?? "" : ""
+    ]);
+    const lines = [`近期动态：${fallbackSummary}`, trace2];
+    const entry = {
+      category: "moves",
+      comment: clip(`${ATLAS_LOREBOOK_PREFIX.moves} 第 ${String(receipt.previousTime)} → ${String(receipt.currentTime)} 时段`, ATLAS_LOREBOOK_LIMITS.COMMENT_CHARS),
+      keys: locationKeys2,
+      content: lines.join("\n").slice(0, ATLAS_LOREBOOK_LIMITS.CONTENT_CHARS)
+    };
+    if (locationKeys2.length === 0) return null;
+    return {
+      bookName: lorebookNameFor(String(world.name ?? "")),
+      entries: [entry]
+    };
+  }
   if (!event) return null;
   const index = buildNameIndex(world);
   const entries = [];
@@ -697,7 +717,7 @@ var DEFAULT_PROMPT_SEGMENTS = [
     role: "system",
     name: "主系统提示词（推演引擎职责）",
     mainSlot: "A",
-    content: "你是阿特拉斯世界推演引擎。你收到一份本轮的剧情素材（世界状态、前文、用户行动、助手回复），你的唯一职责：推断本轮对世界造成的**有界结构化变化**——谁出现在哪里、人物状态与关系如何变化、势力格局有无变动、时间推进多少。\n严格要求：只输出一个 JSON 对象，不要输出任何多余说明、推理过程或代码围栏。字段契约：\nduration（本轮消耗的时段数，非负数字，≤10000）、\nlocationChange（对象或 null：{toPointId, toRegionId}，id 必须来自上下文中出现的地点）、\nnpcChanges（数组，积极挖掘本轮动向，形状：{entityId, key, value} 更新人物状态 / {entityId, toPointId} 人物移动到上下文中出现的地点 / {entityId, toRegionId} 移动到已知地区 / {entityId, tag} 加标签 / {entityId, removeTag} 删标签 / {flag, value} 记录世界标记（里程碑、禁忌、传言等）/ {entityId, targetEntityId, key, value} 改关系；entityId 必须来自上下文）、\nmemoryDrafts（数组，每条 {entityId, text}，为人物追加一条记忆，≤500 字）、\nnewLocations（数组，本轮剧情里**新出现**的地点 / 地区：{name, regionName?, description?, submap?}；regionName 必须是本轮输出 regions 或上下文已有的地区名；已有地点不要重复列；没有就输出空数组；只有当剧情真的走进某地点内部（楼 / 院 / 遗迹内部）时，才给该地点挂可选的 submap: {scale?: {distancePerCell, unit}, points: [{name}]}——只给内部点位名字即可，坐标由算法决定；剧情没进去就不要编内部结构）、\neventDrafts（数组，事件摘要文字，仅叙述用）、\ntriggerResults（数组，本轮命中的触发器 id）、\nsummary（本轮世界变化的一句话摘要，≤500 字）。\n推断姿态：主动而非保守——只要剧情暗示了人物去了别处、态度与关系起了变化、状态被事件改变、出现了值得铭记或标记的事，就输出对应变化；只在整轮确实平静无事时才输出空数组。\n上下文提供「人物 id 对照 / 地点 id 对照 / 地区 id 对照」：npcChanges 的 entityId 与 locationChange 的 id 一律使用对照表里的 id 原文，不要用名字当 id。\n禁止：编造上下文之外的实体 id 或地点 id；输出时间地点之外的世界重写；输出任何密钥、路径或代码。\n若本轮确无任何人物 / 关系 / 记忆变化，npcChanges 与 memoryDrafts 输出空数组，duration 与 locationChange 仍须如实填写，不要为凑数编造变化。"
+    content: "你是阿特拉斯世界推演引擎。你收到一份本轮的剧情素材（世界状态、前文、用户行动、助手回复），你的唯一职责：推断本轮对世界造成的**有界结构化变化**——谁出现在哪里、人物状态与关系如何变化、势力格局有无变动、时间推进多少。\n严格要求：只输出一个 JSON 对象，不要输出任何多余说明、推理过程或代码围栏。字段契约：\nduration（本轮消耗的时段数，非负数字，≤10000）、\nlocationChange（对象或 null：{toPointId, toRegionId}，id 必须来自上下文中出现的地点）、\nnpcChanges（数组，积极挖掘本轮动向，形状：{entityId, key, value} 更新人物状态 / {entityId, toPointId} 人物移动到上下文中出现的地点 / {entityId, toRegionId} 移动到已知地区 / {entityId, tag} 加标签 / {entityId, removeTag} 删标签 / {flag, value} 记录世界标记（里程碑、禁忌、传言等）/ {entityId, targetEntityId, key, value} 改关系；entityId 必须来自上下文）、\nmemoryDrafts（数组，每条 {entityId, text}，为人物追加一条记忆，≤500 字）、\nnewLocations（数组，本轮剧情里**新出现**的地点 / 地区：{name, regionName?, description?, submap?}；regionName 必须是本轮输出 regions 或上下文已有的地区名；已有地点不要重复列；教室 / 学校 / 商店 / 车站等剧情真实发生的具体场所也算地点（校园日常类故事尤其如此），剧情所在的主要场所应列出；没有就输出空数组；只有当剧情真的走进某地点内部（楼 / 院 / 遗迹内部）时，才给该地点挂可选的 submap: {scale?: {distancePerCell, unit}, points: [{name}]}——只给内部点位名字即可，坐标由算法决定；剧情没进去就不要编内部结构）、\neventDrafts（数组，事件摘要文字，仅叙述用）、\ntriggerResults（数组，本轮命中的触发器 id）、\nsummary（本轮世界变化的一句话摘要，≤500 字）。\n推断姿态：主动而非保守——只要剧情暗示了人物去了别处、态度与关系起了变化、状态被事件改变、出现了值得铭记或标记的事，就输出对应变化；只在整轮确实平静无事时才输出空数组。\n上下文提供「人物 id 对照 / 地点 id 对照 / 地区 id 对照」：npcChanges 的 entityId 与 locationChange 的 id 一律使用对照表里的 id 原文，不要用名字当 id。\n禁止：编造上下文之外的实体 id 或地点 id；输出时间地点之外的世界重写；输出任何密钥、路径或代码。\n若本轮确无任何人物 / 关系 / 记忆变化，npcChanges 与 memoryDrafts 输出空数组，duration 与 locationChange 仍须如实填写，不要为凑数编造变化。"
   },
   {
     role: "user",
@@ -6361,7 +6381,10 @@ function prepareAtlasTurn(world, input) {
   if (relevance.relevantNpcIds.length > 0) {
     headerLines.push(`附近人物：${relevance.relevantNpcIds.join("、")}`);
   }
-  const entityRoster = plan.entities.map((e) => `${e.id}=${e.name}`).join("；");
+  const entityRoster = [
+    ...(world.characters ?? []).map((c) => ({ id: String(c.id), name: String(c.name ?? c.id) })),
+    ...(world.entityRecords ?? []).map((e) => ({ id: String(e.id), name: String(e.name ?? e.id) }))
+  ].slice(0, 60).map((item) => `${item.id}=${item.name}`).join("；");
   if (entityRoster) headerLines.push(`人物 id 对照：${entityRoster}`);
   const pointRoster = (world.points ?? []).slice(0, 60).map((p) => `${String(p.id)}=${p.name}`).join("；");
   if (pointRoster) headerLines.push(`地点 id 对照：${pointRoster}`);
@@ -7507,7 +7530,7 @@ function createAtlasServerCore(deps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.33",
+      version: "0.9.34",
       protocolVersion: 1,
       time: now()
     });
@@ -7635,7 +7658,7 @@ function createAtlasServerCore(deps) {
     const recentTexts = input.recentTexts;
     const storyMode = recentTexts.length > 0;
     const contractRule = '只输出一个 JSON 对象：{"regions":[{"name":"...","description":"..."}],"points":[{"name":"...","regionName":"..."}]}';
-    const commonRules = '规则：name ≤20 字；regionName 必须是 regions 里出现过的名字（没有合适地区就省略该字段）；只提炼明确或强烈暗示的地理实体（城市 / 森林 / 遗迹 / 建筑等），角色、文风、格式规则一律不要；宁缺毋滥；最多 12 个地区、40 个地点；没有地理信息就输出 {"regions":[],"points":[]}。';
+    const commonRules = '规则：name ≤20 字；regionName 必须是 regions 里出现过的名字（没有合适地区就省略该字段）；只提炼明确或强烈暗示的地理实体——城市 / 森林 / 遗迹 / 建筑等，教室 / 学校 / 商店 / 车站等剧情人物真实所处的具体场所也算地点（校园日常类故事尤其如此），角色、文风、格式规则一律不要；宁缺毋滥；最多 12 个地区、40 个地点；没有地理信息就输出 {"regions":[],"points":[]}。';
     const existingGeoNames = [
       ...(world.regions ?? []).map((r) => String(r.name)),
       ...(world.points ?? []).map((p) => String(p.name))
@@ -7681,7 +7704,14 @@ function createAtlasServerCore(deps) {
     }
     const spec = extractJsonObject(call.text);
     if (!spec) {
-      throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "提炼结果不是合法 JSON——模型没有遵守输出契约，可重试一次。", { retryable: true });
+      pushLog({
+        at: now(),
+        kind: "world-geo-extract-fallback",
+        worldId: world.id,
+        source: input.source,
+        excerpt: call.text.slice(0, 1500)
+      });
+      return { regionsAdded: 0, pointsAdded: 0, skipped: 0, revisionAppended: false, regionNames: [], pointNames: [] };
     }
     const cleanName = (value) => {
       const text = String(value ?? "").trim().replace(/\s+/g, " ");

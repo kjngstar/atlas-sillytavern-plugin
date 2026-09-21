@@ -348,7 +348,7 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.33",
+      version: "0.9.34",
       protocolVersion: 1,
       time: now(),
     });
@@ -538,7 +538,7 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
     const contractRule =
       '只输出一个 JSON 对象：{"regions":[{"name":"...","description":"..."}],"points":[{"name":"...","regionName":"..."}]}';
     const commonRules =
-      "规则：name ≤20 字；regionName 必须是 regions 里出现过的名字（没有合适地区就省略该字段）；只提炼明确或强烈暗示的地理实体（城市 / 森林 / 遗迹 / 建筑等），角色、文风、格式规则一律不要；宁缺毋滥；最多 12 个地区、40 个地点；没有地理信息就输出 {\"regions\":[],\"points\":[]}。";
+      "规则：name ≤20 字；regionName 必须是 regions 里出现过的名字（没有合适地区就省略该字段）；只提炼明确或强烈暗示的地理实体——城市 / 森林 / 遗迹 / 建筑等，教室 / 学校 / 商店 / 车站等剧情人物真实所处的具体场所也算地点（校园日常类故事尤其如此），角色、文风、格式规则一律不要；宁缺毋滥；最多 12 个地区、40 个地点；没有地理信息就输出 {\"regions\":[],\"points\":[]}。";
     const existingGeoNames = [
       ...(world.regions ?? []).map((r) => String(r.name)),
       ...(world.points ?? []).map((p) => String(p.name)),
@@ -586,10 +586,20 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
     }
 
     // 解析（不可信）：0.9.26 起复用推演输出的三层容错提取（围栏 / 括号配平 / 消毒）——
-    // 提炼模型夹说明文字或截断 JSON 时能抢出结果；完全抢不出才报错
+    // 提炼模型夹说明文字或截断 JSON 时能抢出结果。
+    // 0.9.34 放宽（0.9.30 主链同口径）：抢不出 JSON 不再 502——MiniMax-M3 实测会只回
+    // 纯推理 think（甚至 finish_reason=tool_calls、正文为空），这等价于「没提炼出地理」
+    // 而非错误，按 +0 安静处理，原文记日志供作者查看模型回复。
     const spec = extractJsonObject(call.text);
     if (!spec) {
-      throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "提炼结果不是合法 JSON——模型没有遵守输出契约，可重试一次。", { retryable: true });
+      pushLog({
+        at: now(),
+        kind: "world-geo-extract-fallback",
+        worldId: world.id,
+        source: input.source,
+        excerpt: call.text.slice(0, 1500),
+      });
+      return { regionsAdded: 0, pointsAdded: 0, skipped: 0, revisionAppended: false, regionNames: [], pointNames: [] };
     }
 
     const cleanName = (value: unknown): string | null => {

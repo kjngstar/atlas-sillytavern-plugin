@@ -176,15 +176,18 @@ test("geo/adopt：未配置推演 API → API_NOT_CONFIGURED，零请求", async
   assert.equal(fetchCalls.length, 0, "未配置时不发请求");
 });
 
-test("geo/adopt：模型输出非法 JSON → RESPONSE_MALFORMED 且可重试", async () => {
+test("0.9.34 geo/adopt：模型输出非法 JSON → 不再 502，按 +0 降级并记日志", async () => {
   const { core, fetchCalls } = await makeCore({
     fetchScripts: [() => openAiResponse("这不是 JSON，我偏要自由发挥。")],
   });
   const result = await adopt(core);
-  assert.equal(result.body.ok, false);
-  assert.equal(result.body.error.code, ATLAS_ERROR_CODES.RESPONSE_MALFORMED);
-  assert.equal(result.body.error.details.retryable, true, "模型不守契约可重试");
+  assert.equal(result.body.ok, true, "降级为 200（+0 产出）");
+  assert.equal(result.body.data.regionsAdded, 0);
+  assert.equal(result.body.data.pointsAdded, 0);
   assert.equal(fetchCalls.length, 1);
+  const logs = core.logs().filter((l) => l.kind === "world-geo-extract-fallback");
+  assert.equal(logs.length, 1, "降级日志恰好一条");
+  assert.ok(logs[0].excerpt.includes("自由发挥"), "原文摘录进日志（供作者查看模型回复）");
 });
 
 test("geo/adopt：代码围栏包裹的 JSON 也能解析；未绑定聊天 → 绑定错误", async () => {

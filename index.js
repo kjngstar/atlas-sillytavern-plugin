@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.33";
+export const ATLAS_EXTENSION_VERSION = "0.9.34";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -733,7 +733,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       panel.append(el(
         "p",
         "aw-panel__text",
-        "还没有世界书条目——每轮世界推进后，「NPC 动向」与「近期可触发」会自动写入当前角色卡的世界书（角色卡没有世界书时写入 Atlas 专属世界书），主模型经酒馆正常激活管线就能看到。",
+        "本区显示的是 Atlas **写入**世界书的条目（每轮世界推进后自动写「NPC 动向 / 近期可触发」，采纳 0 条的回合也会写一条动向摘要）。注意与「推演时注入卡书资料」是两回事：注入是只读的，每轮推演都会把当前角色绑定的全部世界书（primary + additional）带给推演模型，不会在这里列条目。",
       ));
       return panel;
     }
@@ -1056,7 +1056,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
   const mapCanvas = el("div", "aw-maparea");
   let mapBuilt = false;
   let mapScaleEl = null;
-  // 0.9.33 子图视图栈：空 = 世界图；每层 = {pointId, name}（点挂子图，递归）
+  // 0.9.34 子图视图栈：空 = 世界图；每层 = {pointId, name}（点挂子图，递归）
   let mapStack = [];
   let mapStackKey = "";
   let mapCrumb = null;
@@ -1187,7 +1187,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     });
     geoBar.append(geoBtn, storyGeoBtn);
     geoBar.append(el("span", "aw-hint", "地图随剧情生长：重名地点自动跳过，绝不删改已有地理。"));
-    // 0.9.33 子图面包屑 + 标记点信息面板
+    // 0.9.34 子图面包屑 + 标记点信息面板
     mapCrumb = el("div", "aw-mapcrumb");
     mapCrumb.style.display = "none";
     mapPanel = el("div", "aw-mappanel");
@@ -1198,7 +1198,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
   }
 
   /** 由 renderPage 在 renderCenter 之后调用（renderCenter 负责把 mapCanvas 挂回中区）。 */
-  /** 0.9.33 返回上一层子图（世界图 = 栈空）。 */
+  /** 0.9.34 返回上一层子图（世界图 = 栈空）。 */
   function popMapStack() {
     mapStack.pop();
     closeMapPanel();
@@ -1213,7 +1213,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     }
   }
 
-  /** 0.9.33 面包屑：子图层级 + 返回按钮。 */
+  /** 0.9.34 面包屑：子图层级 + 返回按钮。 */
   function renderMapCrumb(d, view, currentSub) {
     if (!mapCrumb) return;
     mapCrumb.innerHTML = "";
@@ -1230,7 +1230,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     mapCrumb.append(back, el("span", "aw-mapcrumb__title", `当前：${trail} 内部`));
   }
 
-  /** 0.9.33 标记点简略信息面板：名称 / 地区 / 描述 / 路线预览 / 进入子图。 */
+  /** 0.9.34 标记点简略信息面板：名称 / 地区 / 描述 / 路线预览 / 进入子图。 */
   function openMapPanel(point, { inSub, currentSub }) {
     const d = lastMapData;
     if (!mapPanel || !d) return;
@@ -1293,7 +1293,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
 
   function renderMap(d) {
     if (!d.worldId) return;
-    // 0.9.33 换聊天 / 换世界 → 子图视图栈立即作废（数据隔离，绝不让旧子图带进新卡）
+    // 0.9.34 换聊天 / 换世界 → 子图视图栈立即作废（数据隔离，绝不让旧子图带进新卡）
     const viewKey = `${String(d.chatId ?? "")}|${String(d.worldId ?? "")}`;
     if (mapStackKey !== viewKey) {
       mapStack = [];
@@ -1305,7 +1305,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     const mapData = d.map ?? {};
     const submaps = mapData.submaps && typeof mapData.submaps === "object" ? mapData.submaps : {};
     const pointMeta = mapData.pointMeta && typeof mapData.pointMeta === "object" ? mapData.pointMeta : {};
-    // 0.9.33 子图视图：栈顶决定当前渲染哪张图（世界图或任意点挂子图，递归）
+    // 0.9.34 子图视图：栈顶决定当前渲染哪张图（世界图或任意点挂子图，递归）
     const view = mapStack[mapStack.length - 1] ?? null;
     const currentSub = view ? submaps[String(view.pointId)] ?? null : null;
     const inSub = Boolean(currentSub);
@@ -1377,7 +1377,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       marker.style.left = pos.left;
       marker.style.top = pos.top;
       if (hasSub) marker.classList.add("aw-point--sub");
-      // 0.9.33 点击 = 简略信息面板（路线 / 进入子图都在面板里），不再一键直接拉路线
+      // 0.9.34 点击 = 简略信息面板（路线 / 进入子图都在面板里），不再一键直接拉路线
       if (String(point.id) === String(d.currentLocationId ?? "")) {
         marker.classList.add("is-current");
         marker.setAttribute("aria-label", `当前位置 ${point.name}，点击查看详情`);
@@ -1411,7 +1411,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     }
 
     const preview = state().destinationPreview;
-    // 0.9.33 子图视图跳过路线预览：世界图坐标塞进子图 bounds 的 toPercent 会画出错乱折线
+    // 0.9.34 子图视图跳过路线预览：世界图坐标塞进子图 bounds 的 toPercent 会画出错乱折线
     if (preview && !inSub) {
       const from = pointsAll.find((p) => String(p.id) === String(d.currentLocationId ?? ""));
       const to = pointsAll.find((p) => String(p.id) === String(preview.destinationId));
@@ -3499,51 +3499,90 @@ const LORE_SUPPLEMENT_LIMITS = {
 let loreSupplementCache = { bookName: null, at: 0, text: "" };
 
 /**
- * 读当前角色卡世界书 → 有界资料文本（失败 / 无书 / 空书 → 空串，绝不抛错）。
- * 书名解析与条目写入同源：卡主世界书（data.extensions.world）优先，聊天绑定书回退。
- * Atlas 自写条目（动向 / 事件）排除——那是给主模型看的推演结果，回喂推演纯属复读。
+ * 读当前角色世界书 → 有界资料文本（失败 / 无书 / 空书 → 空串，绝不抛错）。
+ * 0.9.34 多书合并（照抄 shujuku getCurrentCharacterWorldbookBinding 口径）：
+ * TavernHelper.getCharWorldbookNames('current')（角色绑定 primary + additional 全部）
+ * → 卡主世界书（data.extensions.world）→ 聊天绑定书，全部并入去重逐本读取。
+ * 此前只读「卡主书 or 聊天书」一本——世界书挂载在 additional 槽的卡（本次验收的真实卡）
+ * 完全读不到，静默空串。Atlas 自写条目（动向 / 事件）排除——回喂推演纯属复读。
  */
 async function readCardLoreSupplement() {
   try {
     if (typeof SillyTavern === "undefined") return "";
     const ctx = SillyTavern.getContext();
     const character = ctx?.characters?.[ctx?.characterId] ?? null;
-    const cardBook = typeof character?.data?.extensions?.world === "string" ? character.data.extensions.world.trim() : "";
-    const chatBook = typeof ctx?.chatMetadata?.world_info === "string" ? ctx.chatMetadata.world_info.trim() : "";
-    const bookName = cardBook || chatBook;
-    if (!bookName) return "";
+
+    // 1) 收集候选书名（有序去重）
+    const bookNames = [];
+    const pushBook = (value) => {
+      const name = typeof value === "string" ? value.trim() : "";
+      if (name && !bookNames.includes(name)) bookNames.push(name);
+    };
+    try {
+      // TavernHelper.getCharWorldbookNames 返回结构随版本有差异：数组 / {primary, additional} / 字符串，全部防御兼容
+      const th = globalThis.TavernHelper ?? globalThis.getTavernHelper?.() ?? null;
+      if (th && typeof th.getCharWorldbookNames === "function") {
+        const bound = await th.getCharWorldbookNames("current");
+        if (Array.isArray(bound)) {
+          for (const item of bound) pushBook(typeof item === "string" ? item : item?.name);
+        } else if (bound && typeof bound === "object") {
+          pushBook(bound.primary);
+          if (Array.isArray(bound.additional)) {
+            for (const item of bound.additional) pushBook(typeof item === "string" ? item : item?.name);
+          }
+        } else {
+          pushBook(bound);
+        }
+      }
+    } catch { /* 酒馆助手不可用 → 原生路径兜底 */ }
+    pushBook(character?.data?.extensions?.world);
+    pushBook(ctx?.chatMetadata?.world_info);
+    if (bookNames.length === 0) return "";
+
+    // 2) 缓存键 = 全部书名（任一书变化即失效）
+    const cacheKey = bookNames.join("|");
     const cached = loreSupplementCache;
-    if (cached.bookName === bookName && Date.now() - cached.at < LORE_SUPPLEMENT_LIMITS.CACHE_TTL_MS) {
+    if (cached.bookName === cacheKey && Date.now() - cached.at < LORE_SUPPLEMENT_LIMITS.CACHE_TTL_MS) {
       return cached.text;
     }
+
+    // 3) 逐本读取合并（单本失败跳过，不影响其余书）
     const worldInfo = await loadStWorldInfo();
-    const data = await worldInfo.loadWorldInfo(bookName);
-    const rawEntries = data && typeof data === "object" && data.entries && typeof data.entries === "object"
-      ? Object.values(data.entries)
-      : [];
     const prefixList = atlasRuntime.mod?.ATLAS_LOREBOOK_PREFIX;
     const atlasPrefixes = prefixList && typeof prefixList === "object" ? Object.values(prefixList) : ["Atlas 动向 ·", "Atlas 事件 ·"];
     const lines = [];
     let total = 0;
-    for (const entry of rawEntries) {
+    for (const bookName of bookNames) {
+      let rawEntries = [];
+      try {
+        const data = await worldInfo.loadWorldInfo(bookName);
+        rawEntries = data && typeof data === "object" && data.entries && typeof data.entries === "object"
+          ? Object.values(data.entries)
+          : [];
+      } catch {
+        continue; // 单本书不存在 / 读取失败 → 跳过该本
+      }
+      for (const entry of rawEntries) {
+        if (lines.length >= LORE_SUPPLEMENT_LIMITS.ENTRIES_MAX) break;
+        if (!entry || typeof entry !== "object" || entry.disable === true) continue;
+        const content = typeof entry.content === "string" ? entry.content.trim() : "";
+        if (!content) continue;
+        const comment = typeof entry.comment === "string" ? entry.comment.trim() : "";
+        if (atlasPrefixes.some((prefix) => comment.startsWith(prefix))) continue; // Atlas 自写条目不回喂
+        const keys = Array.isArray(entry.key) ? entry.key.filter((k) => typeof k === "string" && k.trim()) : [];
+        const title = comment || (keys.length > 0 ? keys.slice(0, 4).join(" / ") : "条目");
+        const clipped = content.length > LORE_SUPPLEMENT_LIMITS.ENTRY_CONTENT_CHARS
+          ? `${content.slice(0, LORE_SUPPLEMENT_LIMITS.ENTRY_CONTENT_CHARS)}…`
+          : content;
+        const line = `- [${bookName}] ${title}：${clipped.replace(/\s+/g, " ")}`;
+        if (total + line.length > LORE_SUPPLEMENT_LIMITS.TOTAL_CHARS) break;
+        lines.push(line);
+        total += line.length;
+      }
       if (lines.length >= LORE_SUPPLEMENT_LIMITS.ENTRIES_MAX) break;
-      if (!entry || typeof entry !== "object" || entry.disable === true) continue;
-      const content = typeof entry.content === "string" ? entry.content.trim() : "";
-      if (!content) continue;
-      const comment = typeof entry.comment === "string" ? entry.comment.trim() : "";
-      if (atlasPrefixes.some((prefix) => comment.startsWith(prefix))) continue; // Atlas 自写条目不回喂
-      const keys = Array.isArray(entry.key) ? entry.key.filter((k) => typeof k === "string" && k.trim()) : [];
-      const title = comment || (keys.length > 0 ? keys.slice(0, 4).join(" / ") : "条目");
-      const clipped = content.length > LORE_SUPPLEMENT_LIMITS.ENTRY_CONTENT_CHARS
-        ? `${content.slice(0, LORE_SUPPLEMENT_LIMITS.ENTRY_CONTENT_CHARS)}…`
-        : content;
-      const line = `- ${title}：${clipped.replace(/\s+/g, " ")}`;
-      if (total + line.length > LORE_SUPPLEMENT_LIMITS.TOTAL_CHARS) break;
-      lines.push(line);
-      total += line.length;
     }
     const text = lines.join("\n");
-    loreSupplementCache = { bookName, at: Date.now(), text };
+    loreSupplementCache = { bookName: cacheKey, at: Date.now(), text };
     return text;
   } catch {
     return ""; // 任何失败（书不存在 / API 不可用）都静默降级：无资料照常推演

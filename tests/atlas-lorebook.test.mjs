@@ -111,14 +111,29 @@ test("规划：committed 回执产出 动向 + 事件 两条条目，关键词�
   ok(events.content.startsWith("近期可触发："), "事件条目为「近期可触发」形态");
 });
 
-test("规划：非 committed / 无采用事件 / 账本缺事件 → null（调用方跳过）", () => {
+test("规划：0.9.34 零 effect 回合回退——采纳 0 条也写动向摘要条目；防御状态保持 null", () => {
   equal(buildLorebookPlans(WORLD, committedReceipt({ status: "duplicate" })), null, "duplicate 不产出");
   equal(buildLorebookPlans(WORLD, committedReceipt({ status: "failed" })), null, "failed 不产出");
-  equal(buildLorebookPlans(WORLD, committedReceipt({ adoptedEventIds: [] })), null, "空采用不产出");
+  const zeroEffect = buildLorebookPlans(WORLD, committedReceipt({ adoptedEventIds: [] }));
+  ok(zeroEffect, "零 effect 回合回退产出动向条目");
+  equal(zeroEffect.entries.length, 1, "只有一条动向");
+  equal(zeroEffect.entries[0].category, "moves");
+  ok(zeroEffect.entries[0].content.startsWith("近期动态："), "内容 = 回执摘要回退形态");
+  deepEqual(zeroEffect.entries[0].keys, ["集市广场"], "关键词 = 当前地点名");
+  equal(
+    buildLorebookPlans(WORLD, committedReceipt({ adoptedEventIds: [], summary: "本轮无世界变化。" })),
+    null,
+    "「本轮无世界变化」占位摘要不产出",
+  );
+  equal(
+    buildLorebookPlans(WORLD, committedReceipt({ adoptedEventIds: [], currentLocationId: null })),
+    null,
+    "零 effect 且无落点（无激活关键词）不产出",
+  );
   equal(
     buildLorebookPlans({ ...WORLD, stateEvents: [] }, committedReceipt()),
     null,
-    "账本里找不到事件不产出",
+    "账本里找不到事件（防御状态）不产出",
   );
 });
 

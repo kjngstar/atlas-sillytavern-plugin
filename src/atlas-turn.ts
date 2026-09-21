@@ -117,9 +117,17 @@ export function prepareAtlasTurn(world: World, input: AtlasTurnPrepareInput): At
   }
   // 0.9.30 id 对照表：npcChanges / locationChange 只认 id，而共享装配单（lib/ 快照）渲染实体只给名字
   // ——模型拿不到 id 只能编，「采纳 0 条（丢弃引用未知实体）」的根因。
-  // 人物沿用装配单过滤结果（分支 / 时间 / 隐私过滤不能绕过）；
-  // 地点 / 地区是静态地理，用全量清单（封顶 60，远途移动也能引用）。
-  const entityRoster = plan.entities.map((e) => `${e.id}=${e.name}`).join("；");
+  // 0.9.34 修复：人物对照表改为与裁定校验集（adjudicate knownEntityIds）同口径的全集封顶 60——
+  // 此前沿用装配单过滤子集，名单比校验集窄：模型引用装配单外的真实角色（卡书认知到的）
+  // 必被裁定丢弃，MiniMax 实测 4 条变化 / 记忆全灭。id 只是引用键，账本 effect 仍受
+  // parseStateEffect 白名单与裁定实体校验双重把关，此处放宽不构成注入面。
+  const entityRoster = [
+    ...(world.characters ?? []).map((c) => ({ id: String(c.id), name: String(c.name ?? c.id) })),
+    ...(world.entityRecords ?? []).map((e) => ({ id: String(e.id), name: String(e.name ?? e.id) })),
+  ]
+    .slice(0, 60)
+    .map((item) => `${item.id}=${item.name}`)
+    .join("；");
   if (entityRoster) headerLines.push(`人物 id 对照：${entityRoster}`);
   const pointRoster = (world.points ?? [])
     .slice(0, 60)

@@ -162,7 +162,10 @@ function detailLines(event: StateEvent, names: Map<string, string>): string[] {
 
 /**
  * commit 成功后，从账本事件派生世界书条目规划。
- * - committed 且有采用事件才有条目；duplicate / failed / 空轮 → null（调用方跳过）。
+ * - committed 且有采用事件才有条目；duplicate / failed → null（调用方跳过）。
+ * - 0.9.34：零 effect 回合（采纳 0 条——仅时间 / 位置推进，或变化被裁定丢弃）不再
+ *   直接跳过：用回执摘要写一条动向条目（关键词 = 当前地点名）。作者真实酒馆验收发现
+ *   「采纳 0 条」时世界书永远没有 Atlas 条目，推演处理过的信息全部丢失。
  * - 每轮最多 2 条：动向（关键词 = 涉及 NPC 名）+ 事件（关键词 = 所在地点名）。
  * - 没有可用关键词的条目直接省略；两条都省略 → null。
  * - 确定性：同世界状态 + 同回执 → 逐字节相同（可重放）。
@@ -170,9 +173,38 @@ function detailLines(event: StateEvent, names: Map<string, string>): string[] {
 export function buildLorebookPlans(world: World, receipt: AtlasTurnReceipt): AtlasLorebookPlans | null {
   if (receipt.status !== "committed") return null;
   const adoptedIds = (receipt.adoptedEventIds ?? []).map((id) => String(id));
-  if (adoptedIds.length === 0) return null;
 
-  const event = (world.stateEvents ?? []).find((e) => e && adoptedIds.includes(String(e.id)));
+  const event = adoptedIds.length > 0
+    ? (world.stateEvents ?? []).find((e) => e && adoptedIds.includes(String(e.id))) ?? null
+    : null;
+
+  // 0.9.34 零 effect 回合回退：采纳 0 条（仅时间 / 位置推进）但回执有实质摘要
+  // （排除「本轮无世界变化」占位）。adoptedIds 非空却找不到事件属防御分支，保持 null。
+  if (!event && adoptedIds.length === 0) {
+    const fallbackSummary = clip(receipt.summary, ATLAS_LOREBOOK_LIMITS.SUMMARY_CHARS);
+    if (!fallbackSummary || fallbackSummary === "本轮无世界变化。") return null;
+    const index = buildNameIndex(world);
+    const trace = traceLine(receipt);
+    const locationKeys = dedupeKeys([
+      receipt.currentLocationId !== undefined && receipt.currentLocationId !== null
+        ? index.points.get(String(receipt.currentLocationId)) ?? ""
+        : "",
+    ]);
+    const lines = [`近期动态：${fallbackSummary}`, trace];
+    const entry: AtlasLorebookPlanEntry = {
+      category: "moves",
+      comment: clip(`${ATLAS_LOREBOOK_PREFIX.moves} 第 ${String(receipt.previousTime)} → ${String(receipt.currentTime)} 时段`, ATLAS_LOREBOOK_LIMITS.COMMENT_CHARS),
+      keys: locationKeys,
+      content: lines.join("\n").slice(0, ATLAS_LOREBOOK_LIMITS.CONTENT_CHARS),
+    };
+    if (locationKeys.length === 0) return null; // 无激活关键词，写了也永远不触发
+    return {
+      bookName: lorebookNameFor(String(world.name ?? "")),
+      entries: [entry],
+    };
+  }
+
+  // adoptedIds 非空却找不到事件 = 防御状态（不该发生），保持 null 不产出
   if (!event) return null;
 
   const index = buildNameIndex(world);

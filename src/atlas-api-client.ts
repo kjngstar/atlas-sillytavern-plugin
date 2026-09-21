@@ -111,7 +111,7 @@ export const DEFAULT_PROMPT_SEGMENTS: Array<{ role: string; name: string; mainSl
       "{entityId, tag} 加标签 / {entityId, removeTag} 删标签 / {flag, value} 记录世界标记（里程碑、禁忌、传言等）/ " +
       "{entityId, targetEntityId, key, value} 改关系；entityId 必须来自上下文）、\n" +
       "memoryDrafts（数组，每条 {entityId, text}，为人物追加一条记忆，≤500 字）、\n" +
-      "newLocations（数组，本轮剧情里**新出现**的地点 / 地区：{name, regionName?, description?, submap?}；regionName 必须是本轮输出 regions 或上下文已有的地区名；已有地点不要重复列；没有就输出空数组；" +
+      "newLocations（数组，本轮剧情里**新出现**的地点 / 地区：{name, regionName?, description?, submap?}；regionName 必须是本轮输出 regions 或上下文已有的地区名；已有地点不要重复列；教室 / 学校 / 商店 / 车站等剧情真实发生的具体场所也算地点（校园日常类故事尤其如此），剧情所在的主要场所应列出；没有就输出空数组；" +
       "只有当剧情真的走进某地点内部（楼 / 院 / 遗迹内部）时，才给该地点挂可选的 submap: {scale?: {distancePerCell, unit}, points: [{name}]}——只给内部点位名字即可，坐标由算法决定；剧情没进去就不要编内部结构）、\n" +
       "eventDrafts（数组，事件摘要文字，仅叙述用）、\n" +
       "triggerResults（数组，本轮命中的触发器 id）、\n" +
