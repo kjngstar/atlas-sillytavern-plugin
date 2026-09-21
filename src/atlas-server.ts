@@ -348,7 +348,7 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.35",
+      version: "0.9.36",
       protocolVersion: 1,
       time: now(),
     });
@@ -1166,39 +1166,75 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
     }
 
     // 9. 0.9.31 首轮自动建图（作者需求：第一次推演生成当前地图，之后地图有了就不再重复）。
-    //    条件：committed + 地图还只有起点（≤1 点）+ 本世界从未跑过自动建图（store 标记防零产出重试）。
-    //    红线例外记档：本轮最多第 2 条请求（推演 + 一次性建图），作者 2026-09-21 拍板。
+    //    条件：committed + 地图还只有起点（≤1 点）。红线例外记档：本轮最多第 2 条请求
+    //    （推演 + 一次性建图），作者 2026-09-21 拍板。
+    //    0.9.36 三修（作者实测「根本做不到地图的生成」）：
+    //    ① 素材补当前楼层——recentAssistantTexts 是「前文」，明确排除当前楼层；首回合
+    //       既无前文又常无卡书 → 提炼请求带着空素材必然 +0。本轮 assistantText 是
+    //       首回合唯一的剧情来源，必须进提炼素材。
+    //    ② 素材全空 → 不发请求也不烧标记（0.9.31~0.9.35 会白烧 1 条请求并永久放弃建图）。
+    //    ③ 标记改「完成标记 + 尝试计数（上限 3）」——产出 0 / 失败不再永久放弃；
+    //       旧形状标记（无 done，0.9.35 及之前烧毁）视为 0 次尝试，存量世界升级即自愈。
     if (receipt.status === "committed" && (settledWorld.points ?? []).length <= 1) {
       const markerKey = `geo-auto:${binding.worldId}`;
-      let marker: unknown = null;
-      try {
-        marker = await store.read(markerKey);
-      } catch {
-        marker = null;
-      }
-      if (!marker) {
-        await store.write(markerKey, { at: now() });
+      const GEO_AUTO_ATTEMPTS_MAX = 3;
+      const currentFloorText = typeof request.assistantText === "string" ? request.assistantText.trim() : "";
+      const autoTexts = [
+        ...recentAssistantTexts,
+        ...(currentFloorText ? [currentFloorText.slice(0, 2000)] : []),
+      ];
+      const autoLore = typeof request.loreSupplement === "string" ? request.loreSupplement.trim() : "";
+      if (autoTexts.length === 0 && !autoLore) {
+        // 素材全空（无卡书 / 世界书资料关闭且无楼层）：不发请求，留待后续回合再试
+      } else {
+        let markerRecord: { done?: unknown; attempts?: unknown } | null = null;
         try {
-          const geo = await runGeoExtraction({
-            world: settledWorld,
-            preset,
-            lore: request.loreSupplement ?? "",
-            recentTexts: recentAssistantTexts,
-            source: "auto",
-          });
-          if (geo.pointsAdded + geo.regionsAdded > 0) {
-            receipt.summary = `${receipt.summary}；首轮自动建图：+${geo.regionsAdded} 地区 +${geo.pointsAdded} 地点`.slice(0, 480);
+          const raw = await store.read(markerKey);
+          if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+            markerRecord = raw as { done?: unknown; attempts?: unknown };
           }
-        } catch (thrown) {
-          // 自动建图失败不阻断回合（世界已提交）；原因记日志，作者可手动提炼兜底
-          pushLog({
-            at: now(),
-            kind: "world-geo-auto",
-            worldId: binding.worldId,
-            ok: false,
-            code: thrown instanceof AtlasError ? thrown.code : "INTERNAL",
-            message: thrown instanceof Error ? thrown.message.slice(0, 200) : String(thrown).slice(0, 200),
-          });
+        } catch {
+          markerRecord = null;
+        }
+        const attempts = typeof markerRecord?.attempts === "number" && Number.isFinite(markerRecord.attempts) && markerRecord.attempts >= 0
+          ? Math.floor(markerRecord.attempts)
+          : 0;
+        const done = markerRecord?.done === true;
+        if (!done && attempts < GEO_AUTO_ATTEMPTS_MAX) {
+          await store.write(markerKey, { at: now(), attempts: attempts + 1 });
+          try {
+            const geo = await runGeoExtraction({
+              world: settledWorld,
+              preset,
+              lore: autoLore,
+              recentTexts: autoTexts,
+              source: "auto",
+            });
+            if (geo.pointsAdded + geo.regionsAdded > 0) {
+              await store.write(markerKey, { at: now(), done: true });
+              receipt.summary = `${receipt.summary}；首轮自动建图：+${geo.regionsAdded} 地区 +${geo.pointsAdded} 地点`.slice(0, 480);
+            } else {
+              // 有素材但 0 产出（如模型没提炼出地理）：不烧毁机会，后续回合自动重试（上限 3 次）
+              pushLog({
+                at: now(),
+                kind: "world-geo-auto",
+                worldId: binding.worldId,
+                ok: true,
+                code: "ZERO_YIELD",
+                message: `自动建图提炼 0 产出（第 ${attempts + 1}/${GEO_AUTO_ATTEMPTS_MAX} 次），留待后续回合重试`.slice(0, 200),
+              });
+            }
+          } catch (thrown) {
+            // 自动建图失败不阻断回合（世界已提交）；原因记日志，作者可手动提炼兜底
+            pushLog({
+              at: now(),
+              kind: "world-geo-auto",
+              worldId: binding.worldId,
+              ok: false,
+              code: thrown instanceof AtlasError ? thrown.code : "INTERNAL",
+              message: thrown instanceof Error ? thrown.message.slice(0, 200) : String(thrown).slice(0, 200),
+            });
+          }
         }
       }
     }

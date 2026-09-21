@@ -1078,16 +1078,33 @@ function textContentOf(value) {
   }
   return null;
 }
+function pickFirstNonEmpty(values) {
+  for (const value of values) {
+    if (value !== null && value.trim().length > 0) return value;
+  }
+  for (const value of values) {
+    if (value !== null) return value;
+  }
+  return null;
+}
 function extractAssistantText(payload) {
   if (!payload || typeof payload !== "object") return null;
   const p = payload;
   if (Array.isArray(p.choices) && p.choices.length > 0) {
     const choice = p.choices[0];
     const fromMessage = textContentOf(choice?.message?.content);
-    if (fromMessage !== null) return fromMessage;
-    if (typeof choice?.text === "string") return choice.text;
+    const fromReasoning = textContentOf(choice?.message?.reasoning_content) ?? textContentOf(choice?.message?.reasoning);
+    const picked = pickFirstNonEmpty([
+      fromMessage,
+      fromReasoning,
+      typeof choice?.text === "string" ? choice.text : null
+    ]);
+    if (picked !== null) return picked;
   }
-  const fromOllamaMessage = textContentOf(p.message?.content);
+  const fromOllamaMessage = pickFirstNonEmpty([
+    textContentOf(p.message?.content),
+    textContentOf(p.message?.reasoning_content)
+  ]);
   if (fromOllamaMessage !== null) return fromOllamaMessage;
   for (const key of ["text", "content", "response"]) {
     const value = textContentOf(p[key]);
@@ -7596,7 +7613,7 @@ function createAtlasServerCore(deps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.35",
+      version: "0.9.36",
       protocolVersion: 1,
       time: now()
     });
@@ -8260,34 +8277,59 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
     }
     if (receipt.status === "committed" && (settledWorld.points ?? []).length <= 1) {
       const markerKey = `geo-auto:${binding.worldId}`;
-      let marker = null;
-      try {
-        marker = await store.read(markerKey);
-      } catch {
-        marker = null;
-      }
-      if (!marker) {
-        await store.write(markerKey, { at: now() });
+      const GEO_AUTO_ATTEMPTS_MAX = 3;
+      const currentFloorText = typeof request.assistantText === "string" ? request.assistantText.trim() : "";
+      const autoTexts = [
+        ...recentAssistantTexts,
+        ...currentFloorText ? [currentFloorText.slice(0, 2e3)] : []
+      ];
+      const autoLore = typeof request.loreSupplement === "string" ? request.loreSupplement.trim() : "";
+      if (autoTexts.length === 0 && !autoLore) {
+      } else {
+        let markerRecord = null;
         try {
-          const geo = await runGeoExtraction({
-            world: settledWorld,
-            preset,
-            lore: request.loreSupplement ?? "",
-            recentTexts: recentAssistantTexts,
-            source: "auto"
-          });
-          if (geo.pointsAdded + geo.regionsAdded > 0) {
-            receipt.summary = `${receipt.summary}；首轮自动建图：+${geo.regionsAdded} 地区 +${geo.pointsAdded} 地点`.slice(0, 480);
+          const raw = await store.read(markerKey);
+          if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+            markerRecord = raw;
           }
-        } catch (thrown) {
-          pushLog({
-            at: now(),
-            kind: "world-geo-auto",
-            worldId: binding.worldId,
-            ok: false,
-            code: thrown instanceof AtlasError ? thrown.code : "INTERNAL",
-            message: thrown instanceof Error ? thrown.message.slice(0, 200) : String(thrown).slice(0, 200)
-          });
+        } catch {
+          markerRecord = null;
+        }
+        const attempts = typeof markerRecord?.attempts === "number" && Number.isFinite(markerRecord.attempts) && markerRecord.attempts >= 0 ? Math.floor(markerRecord.attempts) : 0;
+        const done = markerRecord?.done === true;
+        if (!done && attempts < GEO_AUTO_ATTEMPTS_MAX) {
+          await store.write(markerKey, { at: now(), attempts: attempts + 1 });
+          try {
+            const geo = await runGeoExtraction({
+              world: settledWorld,
+              preset,
+              lore: autoLore,
+              recentTexts: autoTexts,
+              source: "auto"
+            });
+            if (geo.pointsAdded + geo.regionsAdded > 0) {
+              await store.write(markerKey, { at: now(), done: true });
+              receipt.summary = `${receipt.summary}；首轮自动建图：+${geo.regionsAdded} 地区 +${geo.pointsAdded} 地点`.slice(0, 480);
+            } else {
+              pushLog({
+                at: now(),
+                kind: "world-geo-auto",
+                worldId: binding.worldId,
+                ok: true,
+                code: "ZERO_YIELD",
+                message: `自动建图提炼 0 产出（第 ${attempts + 1}/${GEO_AUTO_ATTEMPTS_MAX} 次），留待后续回合重试`.slice(0, 200)
+              });
+            }
+          } catch (thrown) {
+            pushLog({
+              at: now(),
+              kind: "world-geo-auto",
+              worldId: binding.worldId,
+              ok: false,
+              code: thrown instanceof AtlasError ? thrown.code : "INTERNAL",
+              message: thrown instanceof Error ? thrown.message.slice(0, 200) : String(thrown).slice(0, 200)
+            });
+          }
         }
       }
     }

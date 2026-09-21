@@ -727,6 +727,147 @@ test("0.9.31 首轮自动建图：≤1 点世界首次 commit 后自动提炼一
   equal(fetcher.calls.length, 3, "第二次只发推演（自动建图不重复）");
 });
 
+test("0.9.36 自动建图①：本轮 assistantText 进提炼素材（首回合唯一剧情来源）", async () => {
+  const full = buildWorld();
+  const world = parseWorld({
+    ...JSON.parse(JSON.stringify(full)),
+    points: full.points.filter((p) => String(p.id) === "4103"),
+  });
+  const geoSpec = {
+    regions: [{ name: "旧城区" }],
+    points: [{ name: "钟楼", regionName: "旧城区" }],
+  };
+  const fetcher = makeFetch([
+    () => openAiResponse(GOOD_DRAFT),
+    () => openAiResponse(geoSpec),
+  ]);
+  const store = createMemoryDocumentStore();
+  const core = createAtlasServerCore({ store, fetchFn: fetcher.fetchFn, now: () => NOW });
+  await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
+  await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
+  await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+
+  const result = await core.handle("POST", "/turns/commit", commitRequest(world));
+  equal(result.body.ok, true, "提交成功");
+  equal(fetcher.calls.length, 2, "推演 + 自动建图，恰好 2 条");
+  ok(
+    JSON.stringify(fetcher.calls[1].body).includes("你沿主干道走向潮门"),
+    "本轮楼层正文进入提炼请求（0.9.35 及之前只给前文楼层，首回合素材为空）",
+  );
+});
+
+test("0.9.36 自动建图②：素材全空 → 零提炼请求、不烧标记；下回合有素材时自愈建图", async () => {
+  const full = buildWorld();
+  const world = parseWorld({
+    ...JSON.parse(JSON.stringify(full)),
+    points: full.points.filter((p) => String(p.id) === "4103"),
+  });
+  const geoSpec = {
+    regions: [{ name: "旧城区" }],
+    points: [{ name: "钟楼", regionName: "旧城区" }],
+  };
+  const fetcher = makeFetch([
+    () => openAiResponse(GOOD_DRAFT),
+    () => openAiResponse(GOOD_DRAFT),
+    () => openAiResponse(geoSpec),
+  ]);
+  const store = createMemoryDocumentStore();
+  const core = createAtlasServerCore({ store, fetchFn: fetcher.fetchFn, now: () => NOW });
+  await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
+  await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
+  await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+
+  const first = await core.handle("POST", "/turns/commit", commitRequest(world, { assistantText: "  " }));
+  equal(first.body.ok, true, "首回合提交成功");
+  equal(fetcher.calls.length, 1, "素材全空 → 不发提炼请求（0.9.35 会白烧 1 条）");
+  equal(await store.read(`geo-auto:${world.id}`), null, "标记未烧毁（0.9.35 会永久放弃）");
+
+  const second = await core.handle("POST", "/turns/commit", commitRequest(world, { assistantMessageId: "msg-12", userMessageId: "msg-20" }), { local: true });
+  equal(second.body.ok, true, "次回合提交成功");
+  equal(fetcher.calls.length, 3, "次回合有素材 → 自动建图补跑");
+  const state = await core.handle("GET", "/state/chat-a");
+  ok(JSON.stringify(state.body).includes("钟楼"), "新地点已进世界");
+});
+
+test("0.9.36 自动建图③：0.9.35 烧掉的旧标记（无 done）升级后自愈重试", async () => {
+  const full = buildWorld();
+  const world = parseWorld({
+    ...JSON.parse(JSON.stringify(full)),
+    points: full.points.filter((p) => String(p.id) === "4103"),
+  });
+  const geoSpec = {
+    regions: [{ name: "旧城区" }],
+    points: [{ name: "钟楼", regionName: "旧城区" }],
+  };
+  const fetcher = makeFetch([
+    () => openAiResponse(GOOD_DRAFT),
+    () => openAiResponse(geoSpec),
+  ]);
+  const store = createMemoryDocumentStore();
+  const core = createAtlasServerCore({ store, fetchFn: fetcher.fetchFn, now: () => NOW });
+  await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
+  await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
+  await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+  // 模拟 0.9.31~0.9.35 留下的旧标记：提炼前就写、无 done / attempts 字段
+  await store.write(`geo-auto:${world.id}`, { at: NOW });
+
+  const result = await core.handle("POST", "/turns/commit", commitRequest(world));
+  equal(result.body.ok, true, "提交成功");
+  equal(fetcher.calls.length, 2, "旧标记不阻断 → 自动建图重试");
+  const marker = await store.read(`geo-auto:${world.id}`);
+  equal(marker?.done, true, "建图成功后标记翻转为 done");
+  ok(JSON.stringify(result.body.data.receipt.summary).includes("首轮自动建图"), "回执注明自动建图");
+});
+
+test("0.9.36 自动建图④：尝试达上限（3 次）→ 不再发提炼请求", async () => {
+  const full = buildWorld();
+  const world = parseWorld({
+    ...JSON.parse(JSON.stringify(full)),
+    points: full.points.filter((p) => String(p.id) === "4103"),
+  });
+  const fetcher = makeFetch([() => openAiResponse(GOOD_DRAFT)]);
+  const store = createMemoryDocumentStore();
+  const core = createAtlasServerCore({ store, fetchFn: fetcher.fetchFn, now: () => NOW });
+  await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
+  await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
+  await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+  await store.write(`geo-auto:${world.id}`, { at: NOW, attempts: 3 });
+
+  const result = await core.handle("POST", "/turns/commit", commitRequest(world));
+  equal(result.body.ok, true, "提交成功");
+  equal(fetcher.calls.length, 1, "上限已到 → 只发推演，不再烧提炼请求");
+});
+
+test("0.9.36 自动建图⑤：提炼响应 content 为空、JSON 在 reasoning_content → 照样建图", async () => {
+  const full = buildWorld();
+  const world = parseWorld({
+    ...JSON.parse(JSON.stringify(full)),
+    points: full.points.filter((p) => String(p.id) === "4103"),
+  });
+  const geoSpec = {
+    regions: [{ name: "旧城区" }],
+    points: [{ name: "钟楼", regionName: "旧城区" }],
+  };
+  const fetcher = makeFetch([
+    () => openAiResponse(GOOD_DRAFT),
+    () => jsonResponse(200, {
+      choices: [{ message: { content: "", reasoning_content: JSON.stringify(geoSpec), finish_reason: "tool_calls" } }],
+    }),
+  ]);
+  const store = createMemoryDocumentStore();
+  const core = createAtlasServerCore({ store, fetchFn: fetcher.fetchFn, now: () => NOW });
+  await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
+  await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
+  await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+
+  const result = await core.handle("POST", "/turns/commit", commitRequest(world));
+  equal(result.body.ok, true, "提交成功");
+  equal(fetcher.calls.length, 2, "推演 + 自动建图");
+  const state = await core.handle("GET", "/state/chat-a");
+  ok(JSON.stringify(state.body).includes("钟楼"), "推理字段里的地理清单被救回并建图");
+  ok(result.body.data.receipt.summary.includes("首轮自动建图"), "回执注明自动建图");
+});
+
 test("0.9.32 点挂子图：commit 落 sidecar（maps:<worldId>），/state 带出 submaps 与点位描述", async () => {
   const draftWithSub = {
     ...GOOD_DRAFT,

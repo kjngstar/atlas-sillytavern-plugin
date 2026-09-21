@@ -408,6 +408,32 @@ test("callAtlasWorldTurnApi：content 分段数组 / ollama 形状 / SSE 强制�
   assert.ok(!errorShape.message.includes("Bearer sk-"), "片段不得含密钥");
 });
 
+test("0.9.36 reasoning_content 兜底：content 为空、输出全在推理字段 → 救回正文（MiniMax-M3 think-only 形状）", async () => {
+  const input = { injectionText: "c", userText: "u", assistantText: "a" };
+  const preset = { name: "t", endpoint: "https://api.example.com/v1/chat/completions", model: "MiniMax-M3", apiKey: "" };
+  const draft = JSON.stringify({ duration: 3, locationChange: null, npcChanges: [], memoryDrafts: [], summary: "推理字段救回。" });
+  const withBody = (body) =>
+    callAtlasWorldTurnApi(preset, input, {
+      fetchFn: async () => ({ ok: true, status: 200, text: async () => JSON.stringify(body) }),
+    });
+
+  const openaiShape = await withBody({
+    choices: [{ message: { content: "", reasoning_content: `让我想一想……\n${draft}`, finish_reason: "tool_calls" } }],
+  });
+  assert.ok(openaiShape.ok, "reasoning_content 应救回正文: " + String(openaiShape.ok ? "" : openaiShape.message));
+  assert.ok(openaiShape.text.includes("推理字段救回"), "正文取自推理字段");
+
+  const contentFirst = await withBody({ choices: [{ message: { content: draft, reasoning_content: "{junk reasoning" } }] });
+  assert.ok(contentFirst.ok && contentFirst.text.trim().startsWith("{"), "content 非空时优先 content，不被推理字段污染");
+
+  const stillEmpty = await withBody({ choices: [{ message: { content: "" } }] });
+  assert.equal(stillEmpty.ok, false, "无推理字段时仍按空回复报错");
+  assert.equal(stillEmpty.code, ATLAS_ERROR_CODES.RESPONSE_MALFORMED);
+
+  const ollama = await withBody({ message: { role: "assistant", content: "", reasoning_content: draft } });
+  assert.ok(ollama.ok, "ollama 形状的 reasoning_content 同样兜底");
+});
+
 
 test("callAtlasWorldTurnApi：网关 200 包错误 JSON → 报错带网关 message 与指引", async () => {
   const preset = { name: "t", endpoint: "https://api.example.com/v1", model: "m1", apiKey: "" };

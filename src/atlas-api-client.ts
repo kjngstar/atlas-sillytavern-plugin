@@ -546,24 +546,46 @@ function textContentOf(value: unknown): string | null {
   return null;
 }
 
+/** 0.9.36 候选择优：先取第一个非空候选；全空则取第一个非 null（调用方对空串有既有处理）。 */
+function pickFirstNonEmpty(values: Array<string | null>): string | null {
+  for (const value of values) {
+    if (value !== null && value.trim().length > 0) return value;
+  }
+  for (const value of values) {
+    if (value !== null) return value;
+  }
+  return null;
+}
+
 /** 从 OpenAI 风格或兼容响应中取助手正文。 */
 function extractAssistantText(payload: unknown): string | null {
   if (!payload || typeof payload !== "object") return null;
   const p = payload as {
-    choices?: Array<{ message?: { content?: unknown }; text?: unknown }>;
+    choices?: Array<{ message?: { content?: unknown; reasoning_content?: unknown; reasoning?: unknown }; text?: unknown }>;
     text?: unknown;
     content?: unknown;
     response?: unknown;
-    message?: { content?: unknown };
+    message?: { content?: unknown; reasoning_content?: unknown };
   };
   if (Array.isArray(p.choices) && p.choices.length > 0) {
     const choice = p.choices[0];
+    // 0.9.36 推理字段兜底：MiniMax-M3 实测会把全部输出（含 JSON）写进 reasoning_content、
+    // content 为空（甚至 finish_reason=tool_calls）——此前判「空回复」整单报废，
+    // 下游 JSON 抢救链（extractJsonObject / 容错解析）完全没机会介入。
     const fromMessage = textContentOf(choice?.message?.content);
-    if (fromMessage !== null) return fromMessage;
-    if (typeof choice?.text === "string") return choice.text;
+    const fromReasoning = textContentOf(choice?.message?.reasoning_content) ?? textContentOf(choice?.message?.reasoning);
+    const picked = pickFirstNonEmpty([
+      fromMessage,
+      fromReasoning,
+      typeof choice?.text === "string" ? choice.text : null,
+    ]);
+    if (picked !== null) return picked;
   }
   // ollama 原生 /api/chat 形状：{ message: { content } }
-  const fromOllamaMessage = textContentOf(p.message?.content);
+  const fromOllamaMessage = pickFirstNonEmpty([
+    textContentOf(p.message?.content),
+    textContentOf(p.message?.reasoning_content),
+  ]);
   if (fromOllamaMessage !== null) return fromOllamaMessage;
   for (const key of ["text", "content", "response"] as const) {
     const value = textContentOf(p[key]);
