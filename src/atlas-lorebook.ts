@@ -51,7 +51,16 @@ export const ATLAS_LOREBOOK_LIMITS = {
 export const ATLAS_LOREBOOK_PREFIX = {
   moves: "Atlas 动向 ·",
   events: "Atlas 事件 ·",
+  /**
+   * 0.9.35 常驻聚合条目（照抄 shujuku TavernDB-ACU-ReadableDataTable 形态）：
+   * 固定 comment、constant 蓝灯、高 order、prevent_recursion，每轮整体重写内容。
+   * 同时作为 readCardLoreSupplement 的回喂排除前缀（总览条目不回喂推演）。
+   */
+  status: "Atlas 状态总览",
 } as const;
+
+/** 常驻聚合条目的占位 key（条目靠 constant 激活，key 仅为宿主兼容保留；照 shujuku 的 -Key 风格）。 */
+export const ATLAS_STATUS_OVERVIEW_KEY = "Atlas 状态总览-Key";
 
 // ---------------------------------------------------------------------------
 // 世界书名：由世界名派生；剔除 ST 服务端文件名不接受的字符
@@ -77,9 +86,17 @@ export interface AtlasLorebookPlanEntry {
   content: string;
 }
 
+/** 0.9.35 常驻聚合条目规划（照 shujuku TavernDB-ACU-ReadableDataTable：固定 comment + constant + 每轮整体重写） */
+export interface AtlasStatusOverviewPlan {
+  comment: string;
+  keys: string[];
+  content: string;
+}
+
 export interface AtlasLorebookPlans {
   bookName: string;
   entries: AtlasLorebookPlanEntry[];
+  statusOverview?: AtlasStatusOverviewPlan;
 }
 
 interface NameIndex {
@@ -170,6 +187,34 @@ function detailLines(event: StateEvent, names: Map<string, string>): string[] {
  * - 没有可用关键词的条目直接省略；两条都省略 → null。
  * - 确定性：同世界状态 + 同回执 → 逐字节相同（可重放）。
  */
+/**
+ * 0.9.35 常驻聚合条目（照抄 shujuku TavernDB-ACU-ReadableDataTable 形态）：
+ * 世界当前权威状态的确定性聚合——同世界状态 + 同回执 → 逐字节相同。
+ * 每轮 commit 后整体重写内容（writer 按 comment upsert），而非追加滚动条目。
+ */
+function buildStatusOverview(world: World, receipt: AtlasTurnReceipt): AtlasStatusOverviewPlan {
+  const index = buildNameIndex(world);
+  const locationName = receipt.currentLocationId !== undefined && receipt.currentLocationId !== null
+    ? index.points.get(String(receipt.currentLocationId)) ?? "未知地点"
+    : null;
+  const recent = (world.stateEvents ?? [])
+    .slice(-5)
+    .reverse()
+    .map((e) => `· [第 ${String(e.at)} 时段] ${clip(e.narrativeSummary ?? "", 160)}`);
+  const lines = [
+    "【世界状态总览】本条目由 Atlas 每轮推演后自动更新：以下是当前时间点的权威世界状态，进行剧情分析时以此最新数据为准，优先级高于其他背景设定。",
+    `当前时间：第 ${String(receipt.currentTime)} 时段`,
+    ...(locationName ? [`当前位置：${locationName}`] : []),
+    "近期动向：",
+    ...(recent.length > 0 ? recent : ["· （暂无已归档的世界变化）"]),
+  ];
+  return {
+    comment: ATLAS_LOREBOOK_PREFIX.status,
+    keys: [ATLAS_STATUS_OVERVIEW_KEY],
+    content: lines.join("\n").slice(0, ATLAS_LOREBOOK_LIMITS.CONTENT_CHARS),
+  };
+}
+
 export function buildLorebookPlans(world: World, receipt: AtlasTurnReceipt): AtlasLorebookPlans | null {
   if (receipt.status !== "committed") return null;
   const adoptedIds = (receipt.adoptedEventIds ?? []).map((id) => String(id));
@@ -201,6 +246,7 @@ export function buildLorebookPlans(world: World, receipt: AtlasTurnReceipt): Atl
     return {
       bookName: lorebookNameFor(String(world.name ?? "")),
       entries: [entry],
+      statusOverview: buildStatusOverview(world, receipt),
     };
   }
 
@@ -243,6 +289,7 @@ export function buildLorebookPlans(world: World, receipt: AtlasTurnReceipt): Atl
   return {
     bookName: lorebookNameFor(String(world.name ?? "")),
     entries: entries.slice(0, ATLAS_LOREBOOK_LIMITS.ENTRIES_PER_TURN_MAX),
+    statusOverview: buildStatusOverview(world, receipt),
   };
 }
 
@@ -293,7 +340,21 @@ export function parseAtlasLorebookPlans(raw: unknown): { ok: true; value: AtlasL
     }
     entries.push({ category, comment, keys, content });
   }
-  return { ok: true, value: { bookName, entries } };
+  // 0.9.35 常驻聚合条目（可选）：字段合法即透传，形状不对丢弃不拒单
+  let statusOverview: AtlasStatusOverviewPlan | undefined;
+  const rawOverview = record.statusOverview;
+  if (rawOverview && typeof rawOverview === "object" && !Array.isArray(rawOverview)) {
+    const ov = rawOverview as Record<string, unknown>;
+    const ovComment = asBoundedString(ov.comment, ATLAS_LOREBOOK_LIMITS.COMMENT_CHARS);
+    const ovContent = asBoundedString(ov.content, ATLAS_LOREBOOK_LIMITS.CONTENT_CHARS);
+    const ovKeys = Array.isArray(ov.keys)
+      ? ov.keys.map((k) => asBoundedString(k, ATLAS_LOREBOOK_LIMITS.KEY_CHARS)).filter((k): k is string => Boolean(k && k.trim()))
+      : [];
+    if (ovComment && ovContent && ovKeys.length > 0) {
+      statusOverview = { comment: ovComment, keys: ovKeys.slice(0, ATLAS_LOREBOOK_LIMITS.KEYS_MAX), content: ovContent };
+    }
+  }
+  return { ok: true, value: { bookName, entries, ...(statusOverview ? { statusOverview } : {}) } };
 }
 
 // ---------------------------------------------------------------------------
@@ -306,8 +367,20 @@ export interface AtlasLorebookPort {
   createBook(name: string): Promise<void>;
   /** 整书保存；保存后调用方不再改动该 data（酒馆缓存不深拷贝） */
   saveBook(name: string, data: unknown): Promise<void>;
-  /** 在 data.entries 里创建一条模板条目并按 patch 填字段（酒馆 createWorldInfoEntry） */
-  createEntry(data: Record<string, unknown>, patch: { comment: string; keys: string[]; content: string }): unknown;
+  /** 在 data.entries 里创建一条模板条目并按 patch 填字段（酒馆 createWorldInfoEntry）。
+   *  0.9.35：constant / order / position / preventRecursion 为常驻聚合条目可选字段。 */
+  createEntry(
+    data: Record<string, unknown>,
+    patch: {
+      comment: string;
+      keys: string[];
+      content: string;
+      constant?: boolean;
+      order?: number;
+      position?: number;
+      preventRecursion?: boolean;
+    },
+  ): unknown;
   deleteEntry(data: Record<string, unknown>, uid: string): void;
   /** 当前聊天绑定的世界书名（chatMetadata.world_info）；未绑定 → null */
   getChatBookName(): Promise<string | null>;
@@ -447,6 +520,41 @@ export function createAtlasLorebookWriter(port: AtlasLorebookPort, opts: { now?:
           port.createEntry(data, { comment: plan.comment, keys: [...plan.keys], content: plan.content });
         }
         written += 1;
+      }
+
+      // 0.9.35 常驻聚合条目（完全照抄 shujuku TavernDB-ACU-ReadableDataTable 形态）：
+      // 固定 comment 按 upsert 整体重写（不追加时段条目）；constant 蓝灯 + order 9998 +
+      // prevent_recursion + 角色定义前（position 0）；内容未变则跳过内容写（already
+      // up-to-date 同款），仅兜底常驻字段防手改。总览条目不进滚动修剪池（comment
+      // 不带动向 / 事件前缀）。
+      if (plans.statusOverview) {
+        const plan = plans.statusOverview;
+        const existingUid = Object.keys(entriesRecord).find((uid) => {
+          const raw = entriesRecord[uid] as Record<string, unknown> | null;
+          return raw && typeof raw.comment === "string" && raw.comment === plan.comment;
+        });
+        if (existingUid !== undefined) {
+          const entry = entriesRecord[existingUid] as Record<string, unknown>;
+          entry.constant = true;
+          entry.disable = false;
+          entry.prevent_recursion = true;
+          entry.key = [...plan.keys];
+          if (entry.content !== plan.content) {
+            entry.content = plan.content;
+            written += 1;
+          }
+        } else {
+          port.createEntry(data, {
+            comment: plan.comment,
+            keys: [...plan.keys],
+            content: plan.content,
+            constant: true,
+            order: 9998,
+            position: 0,
+            preventRecursion: true,
+          });
+          written += 1;
+        }
       }
 
       // 滚动修剪：每类目只留最近 K 条

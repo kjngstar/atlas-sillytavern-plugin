@@ -375,8 +375,15 @@ var ATLAS_LOREBOOK_LIMITS = {
 };
 var ATLAS_LOREBOOK_PREFIX = {
   moves: "Atlas 动向 ·",
-  events: "Atlas 事件 ·"
+  events: "Atlas 事件 ·",
+  /**
+   * 0.9.35 常驻聚合条目（照抄 shujuku TavernDB-ACU-ReadableDataTable 形态）：
+   * 固定 comment、constant 蓝灯、高 order、prevent_recursion，每轮整体重写内容。
+   * 同时作为 readCardLoreSupplement 的回喂排除前缀（总览条目不回喂推演）。
+   */
+  status: "Atlas 状态总览"
 };
+var ATLAS_STATUS_OVERVIEW_KEY = "Atlas 状态总览-Key";
 function lorebookNameFor(worldName) {
   const clean = String(worldName ?? "").replace(/[\\/:*?"<>|]/g, "").trim().slice(0, 32);
   const base = clean.length > 0 ? clean : "未命名世界";
@@ -446,6 +453,23 @@ function detailLines(event, names) {
   }
   return lines;
 }
+function buildStatusOverview(world, receipt) {
+  const index = buildNameIndex(world);
+  const locationName = receipt.currentLocationId !== void 0 && receipt.currentLocationId !== null ? index.points.get(String(receipt.currentLocationId)) ?? "未知地点" : null;
+  const recent = (world.stateEvents ?? []).slice(-5).reverse().map((e) => `· [第 ${String(e.at)} 时段] ${clip(e.narrativeSummary ?? "", 160)}`);
+  const lines = [
+    "【世界状态总览】本条目由 Atlas 每轮推演后自动更新：以下是当前时间点的权威世界状态，进行剧情分析时以此最新数据为准，优先级高于其他背景设定。",
+    `当前时间：第 ${String(receipt.currentTime)} 时段`,
+    ...locationName ? [`当前位置：${locationName}`] : [],
+    "近期动向：",
+    ...recent.length > 0 ? recent : ["· （暂无已归档的世界变化）"]
+  ];
+  return {
+    comment: ATLAS_LOREBOOK_PREFIX.status,
+    keys: [ATLAS_STATUS_OVERVIEW_KEY],
+    content: lines.join("\n").slice(0, ATLAS_LOREBOOK_LIMITS.CONTENT_CHARS)
+  };
+}
 function buildLorebookPlans(world, receipt) {
   if (receipt.status !== "committed") return null;
   const adoptedIds = (receipt.adoptedEventIds ?? []).map((id) => String(id));
@@ -468,7 +492,8 @@ function buildLorebookPlans(world, receipt) {
     if (locationKeys2.length === 0) return null;
     return {
       bookName: lorebookNameFor(String(world.name ?? "")),
-      entries: [entry]
+      entries: [entry],
+      statusOverview: buildStatusOverview(world, receipt)
     };
   }
   if (!event) return null;
@@ -502,7 +527,8 @@ function buildLorebookPlans(world, receipt) {
   if (entries.length === 0) return null;
   return {
     bookName: lorebookNameFor(String(world.name ?? "")),
-    entries: entries.slice(0, ATLAS_LOREBOOK_LIMITS.ENTRIES_PER_TURN_MAX)
+    entries: entries.slice(0, ATLAS_LOREBOOK_LIMITS.ENTRIES_PER_TURN_MAX),
+    statusOverview: buildStatusOverview(world, receipt)
   };
 }
 function asBoundedString(value, max) {
@@ -547,7 +573,18 @@ function parseAtlasLorebookPlans(raw) {
     }
     entries.push({ category, comment, keys, content });
   }
-  return { ok: true, value: { bookName, entries } };
+  let statusOverview;
+  const rawOverview = record.statusOverview;
+  if (rawOverview && typeof rawOverview === "object" && !Array.isArray(rawOverview)) {
+    const ov = rawOverview;
+    const ovComment = asBoundedString(ov.comment, ATLAS_LOREBOOK_LIMITS.COMMENT_CHARS);
+    const ovContent = asBoundedString(ov.content, ATLAS_LOREBOOK_LIMITS.CONTENT_CHARS);
+    const ovKeys = Array.isArray(ov.keys) ? ov.keys.map((k) => asBoundedString(k, ATLAS_LOREBOOK_LIMITS.KEY_CHARS)).filter((k) => Boolean(k && k.trim())) : [];
+    if (ovComment && ovContent && ovKeys.length > 0) {
+      statusOverview = { comment: ovComment, keys: ovKeys.slice(0, ATLAS_LOREBOOK_LIMITS.KEYS_MAX), content: ovContent };
+    }
+  }
+  return { ok: true, value: { bookName, entries, ...statusOverview ? { statusOverview } : {} } };
 }
 function asEntriesRecord(data) {
   if (!data || typeof data !== "object" || Array.isArray(data)) return null;
@@ -642,6 +679,35 @@ function createAtlasLorebookWriter(port, opts = {}) {
           port.createEntry(data, { comment: plan.comment, keys: [...plan.keys], content: plan.content });
         }
         written += 1;
+      }
+      if (plans.statusOverview) {
+        const plan = plans.statusOverview;
+        const existingUid = Object.keys(entriesRecord).find((uid) => {
+          const raw = entriesRecord[uid];
+          return raw && typeof raw.comment === "string" && raw.comment === plan.comment;
+        });
+        if (existingUid !== void 0) {
+          const entry = entriesRecord[existingUid];
+          entry.constant = true;
+          entry.disable = false;
+          entry.prevent_recursion = true;
+          entry.key = [...plan.keys];
+          if (entry.content !== plan.content) {
+            entry.content = plan.content;
+            written += 1;
+          }
+        } else {
+          port.createEntry(data, {
+            comment: plan.comment,
+            keys: [...plan.keys],
+            content: plan.content,
+            constant: true,
+            order: 9998,
+            position: 0,
+            preventRecursion: true
+          });
+          written += 1;
+        }
       }
       let pruned = 0;
       const caps = { moves: ATLAS_LOREBOOK_LIMITS.MOVES_KEEP, events: ATLAS_LOREBOOK_LIMITS.EVENTS_KEEP };
@@ -7530,7 +7596,7 @@ function createAtlasServerCore(deps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.34",
+      version: "0.9.35",
       protocolVersion: 1,
       time: now()
     });

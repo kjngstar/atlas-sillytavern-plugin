@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.34";
+export const ATLAS_EXTENSION_VERSION = "0.9.35";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -1056,7 +1056,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
   const mapCanvas = el("div", "aw-maparea");
   let mapBuilt = false;
   let mapScaleEl = null;
-  // 0.9.34 子图视图栈：空 = 世界图；每层 = {pointId, name}（点挂子图，递归）
+  // 0.9.35 子图视图栈：空 = 世界图；每层 = {pointId, name}（点挂子图，递归）
   let mapStack = [];
   let mapStackKey = "";
   let mapCrumb = null;
@@ -1187,7 +1187,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     });
     geoBar.append(geoBtn, storyGeoBtn);
     geoBar.append(el("span", "aw-hint", "地图随剧情生长：重名地点自动跳过，绝不删改已有地理。"));
-    // 0.9.34 子图面包屑 + 标记点信息面板
+    // 0.9.35 子图面包屑 + 标记点信息面板
     mapCrumb = el("div", "aw-mapcrumb");
     mapCrumb.style.display = "none";
     mapPanel = el("div", "aw-mappanel");
@@ -1198,7 +1198,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
   }
 
   /** 由 renderPage 在 renderCenter 之后调用（renderCenter 负责把 mapCanvas 挂回中区）。 */
-  /** 0.9.34 返回上一层子图（世界图 = 栈空）。 */
+  /** 0.9.35 返回上一层子图（世界图 = 栈空）。 */
   function popMapStack() {
     mapStack.pop();
     closeMapPanel();
@@ -1213,7 +1213,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     }
   }
 
-  /** 0.9.34 面包屑：子图层级 + 返回按钮。 */
+  /** 0.9.35 面包屑：子图层级 + 返回按钮。 */
   function renderMapCrumb(d, view, currentSub) {
     if (!mapCrumb) return;
     mapCrumb.innerHTML = "";
@@ -1230,7 +1230,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     mapCrumb.append(back, el("span", "aw-mapcrumb__title", `当前：${trail} 内部`));
   }
 
-  /** 0.9.34 标记点简略信息面板：名称 / 地区 / 描述 / 路线预览 / 进入子图。 */
+  /** 0.9.35 标记点简略信息面板：名称 / 地区 / 描述 / 路线预览 / 进入子图。 */
   function openMapPanel(point, { inSub, currentSub }) {
     const d = lastMapData;
     if (!mapPanel || !d) return;
@@ -1293,7 +1293,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
 
   function renderMap(d) {
     if (!d.worldId) return;
-    // 0.9.34 换聊天 / 换世界 → 子图视图栈立即作废（数据隔离，绝不让旧子图带进新卡）
+    // 0.9.35 换聊天 / 换世界 → 子图视图栈立即作废（数据隔离，绝不让旧子图带进新卡）
     const viewKey = `${String(d.chatId ?? "")}|${String(d.worldId ?? "")}`;
     if (mapStackKey !== viewKey) {
       mapStack = [];
@@ -1305,7 +1305,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     const mapData = d.map ?? {};
     const submaps = mapData.submaps && typeof mapData.submaps === "object" ? mapData.submaps : {};
     const pointMeta = mapData.pointMeta && typeof mapData.pointMeta === "object" ? mapData.pointMeta : {};
-    // 0.9.34 子图视图：栈顶决定当前渲染哪张图（世界图或任意点挂子图，递归）
+    // 0.9.35 子图视图：栈顶决定当前渲染哪张图（世界图或任意点挂子图，递归）
     const view = mapStack[mapStack.length - 1] ?? null;
     const currentSub = view ? submaps[String(view.pointId)] ?? null : null;
     const inSub = Boolean(currentSub);
@@ -1377,7 +1377,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       marker.style.left = pos.left;
       marker.style.top = pos.top;
       if (hasSub) marker.classList.add("aw-point--sub");
-      // 0.9.34 点击 = 简略信息面板（路线 / 进入子图都在面板里），不再一键直接拉路线
+      // 0.9.35 点击 = 简略信息面板（路线 / 进入子图都在面板里），不再一键直接拉路线
       if (String(point.id) === String(d.currentLocationId ?? "")) {
         marker.classList.add("is-current");
         marker.setAttribute("aria-label", `当前位置 ${point.name}，点击查看详情`);
@@ -1411,7 +1411,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     }
 
     const preview = state().destinationPreview;
-    // 0.9.34 子图视图跳过路线预览：世界图坐标塞进子图 bounds 的 toPercent 会画出错乱折线
+    // 0.9.35 子图视图跳过路线预览：世界图坐标塞进子图 bounds 的 toPercent 会画出错乱折线
     if (preview && !inSub) {
       const from = pointsAll.find((p) => String(p.id) === String(d.currentLocationId ?? ""));
       const to = pointsAll.find((p) => String(p.id) === String(preview.destinationId));
@@ -3328,7 +3328,12 @@ export function createLorebookPort(context, worldInfo) {
       entry.comment = patch.comment;
       entry.content = patch.content;
       entry.disable = false;
-      entry.constant = false;
+      // 0.9.35 常驻聚合条目字段（照 shujuku TavernDB-ACU-ReadableDataTable）：
+      // constant 蓝灯 + 高 order + 角色定义前（position 0）+ 防递归；滚动条目走缺省（false）
+      entry.constant = patch.constant === true;
+      if (typeof patch.order === "number") entry.order = patch.order;
+      if (typeof patch.position === "number") entry.position = patch.position;
+      entry.prevent_recursion = patch.preventRecursion === true;
       entry.selective = true;
       return entry;
     },
@@ -3500,7 +3505,7 @@ let loreSupplementCache = { bookName: null, at: 0, text: "" };
 
 /**
  * 读当前角色世界书 → 有界资料文本（失败 / 无书 / 空书 → 空串，绝不抛错）。
- * 0.9.34 多书合并（照抄 shujuku getCurrentCharacterWorldbookBinding 口径）：
+ * 0.9.35 多书合并（照抄 shujuku getCurrentCharacterWorldbookBinding 口径）：
  * TavernHelper.getCharWorldbookNames('current')（角色绑定 primary + additional 全部）
  * → 卡主世界书（data.extensions.world）→ 聊天绑定书，全部并入去重逐本读取。
  * 此前只读「卡主书 or 聊天书」一本——世界书挂载在 additional 槽的卡（本次验收的真实卡）

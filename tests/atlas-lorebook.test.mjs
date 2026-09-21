@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import {
   ATLAS_LOREBOOK_LIMITS,
   ATLAS_LOREBOOK_PREFIX,
+  ATLAS_STATUS_OVERVIEW_KEY,
   buildLorebookPlans,
   lorebookNameFor,
   parseAtlasLorebookPlans,
@@ -610,6 +611,42 @@ test("角色卡世界书：解析抛错 → 回退专属书不炸", async () => 
   const result = await writer.syncTurn(PLANS_A);
   equal(result.bookName, PLANS_A.bookName, "回退专属书");
   equal(result.binding, "bound-by-atlas", "绑定正常");
+});
+
+test("0.9.35 常驻聚合条目：固定 comment upsert、constant 蓝灯、内容整体重写、不产生重复条目", async () => {
+  const mock = makeMockPort();
+  const writer = makeWriter(mock, { now: () => 1 });
+  const plansWithOverview = (content) => ({
+    ...PLANS_A,
+    statusOverview: { comment: ATLAS_LOREBOOK_PREFIX.status, keys: [ATLAS_STATUS_OVERVIEW_KEY], content },
+  });
+
+  const first = await writer.syncTurn(plansWithOverview("总览 v1"));
+  const book1 = mock.books.get("Atlas · 星环余烬");
+  const overview1 = Object.values(book1.entries).find((e) => e.comment === ATLAS_LOREBOOK_PREFIX.status);
+  ok(overview1, "总览条目已创建");
+  equal(overview1.content, "总览 v1", "首写内容");
+  equal(overview1.constant, true, "constant 蓝灯常驻");
+  equal(overview1.order, 9998, "高 order（照 shujuku 9998 区间）");
+  equal(overview1.position, 0, "角色定义前（照 shujuku 卡上实际形态）");
+  equal(overview1.prevent_recursion, true, "防递归");
+  deepEqual(overview1.key, [ATLAS_STATUS_OVERVIEW_KEY], "占位 key（条目靠 constant 激活）");
+  equal(first.written, 3, "滚动 2 条 + 总览 1 条");
+
+  // 第二轮：内容变化 → 整体重写且仍只有一条；滚动条目照常滚动
+  await writer.syncTurn({
+    ...PLANS_A,
+    entries: [
+      { category: "moves", comment: `${ATLAS_LOREBOOK_PREFIX.moves} 第 3 → 4 时段`, keys: ["艾莉娅"], content: "动向 B" },
+      { category: "events", comment: `${ATLAS_LOREBOOK_PREFIX.events} 第 4 时段`, keys: ["集市广场"], content: "事件 B" },
+    ],
+    statusOverview: { comment: ATLAS_LOREBOOK_PREFIX.status, keys: [ATLAS_STATUS_OVERVIEW_KEY], content: "总览 v2" },
+  });
+  const book2 = mock.books.get("Atlas · 星环余烬");
+  const overviews = Object.values(book2.entries).filter((e) => e.comment === ATLAS_LOREBOOK_PREFIX.status);
+  equal(overviews.length, 1, "总览条目始终只有一条（upsert 不追加）");
+  equal(overviews[0].content, "总览 v2", "内容整体重写");
+  equal(overviews[0].constant, true, "第二轮仍保持蓝灯");
 });
 
 test("本轮累计断言已记录（计数见报告）", () => {
