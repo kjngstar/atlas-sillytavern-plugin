@@ -35,6 +35,10 @@ test("R01: 地图工具显示、hint 不遮挡、网格平铺、底图网格分�
   const { renderPanel } = await import("data:text/javascript;base64," + Buffer.from(source + "\nexport {renderPanel};").toString("base64"));
   const { createDefaultSettingsV2, settingsViewV2 } = await import(pathToFileURL(resolve(root, "src/atlas-settings.ts")).href);
   const { DEFAULT_PROMPT_SEGMENTS } = await import(pathToFileURL(resolve(root, "src/atlas-api-client.ts")).href);
+  // R08：地图相机 / 手势 API 由 UI 核心模块（mod）提供，index.js 不再内联实现
+  const cameraMod = await import(pathToFileURL(resolve(root, "src/atlas-map-camera.ts")).href);
+  const interactionMod = await import(pathToFileURL(resolve(root, "src/atlas-map-interactions.ts")).href);
+  const mapMod = { ...cameraMod, ...interactionMod };
 
   const world = {
     points: [
@@ -75,7 +79,7 @@ test("R01: 地图工具显示、hint 不遮挡、网格平铺、底图网格分�
   const api = { request: async () => ({ status: 200, body: { ok: true, data: settings } }) };
   const container = document.createElement("div");
   document.body.append(container);
-  renderPanel(core, container, (x) => x, api, { read: async () => null }, {});
+  renderPanel(core, container, (x) => x, api, { read: async () => null }, mapMod);
 
   const css = (n) => window.getComputedStyle(n);
 
@@ -138,6 +142,10 @@ test("R01: 有底图时网格仍被绘制（叠加默认）且缓存键含底图
   const { renderPanel } = await import("data:text/javascript;base64," + Buffer.from(source + "\nexport {renderPanel};").toString("base64"));
   const { createDefaultSettingsV2, settingsViewV2 } = await import(pathToFileURL(resolve(root, "src/atlas-settings.ts")).href);
   const { DEFAULT_PROMPT_SEGMENTS } = await import(pathToFileURL(resolve(root, "src/atlas-api-client.ts")).href);
+  // R08：地图相机 / 手势 API 由 UI 核心模块（mod）提供，index.js 不再内联实现
+  const cameraMod = await import(pathToFileURL(resolve(root, "src/atlas-map-camera.ts")).href);
+  const interactionMod = await import(pathToFileURL(resolve(root, "src/atlas-map-interactions.ts")).href);
+  const mapMod = { ...cameraMod, ...interactionMod };
 
   let imageRequests = 0;
   const settings = {
@@ -183,7 +191,7 @@ test("R01: 有底图时网格仍被绘制（叠加默认）且缓存键含底图
   };
   const container = document.createElement("div");
   document.body.append(container);
-  renderPanel(core, container, (x) => x, api, { read: async () => null }, {});
+  renderPanel(core, container, (x) => x, api, { read: async () => null }, mapMod);
   await new Promise((r) => setTimeout(r, 20));
 
   const grid = container.querySelector(".aw-grid");

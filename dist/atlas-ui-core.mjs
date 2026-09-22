@@ -11527,6 +11527,306 @@ function buildStarterWorld(options) {
     ]
   };
 }
+
+// src/atlas-map-camera.ts
+var MAP_FRAME_PAD_RATIO = 0.08;
+var MAP_FRAME_PAD_MIN = 4;
+var MAP_VIEW_FALLBACK_W = 320;
+var MAP_VIEW_FALLBACK_H = 240;
+var MAP_ZOOM_MIN_FACTOR = 0.2;
+var MAP_ZOOM_MAX_FACTOR = 8;
+function emptyMapFrame() {
+  return { minX: 0, minY: 0, maxX: 100, maxY: 100, spanX: 100, spanY: 100 };
+}
+function computeMapFrame(points) {
+  const xs = [];
+  const ys = [];
+  for (const p of Array.isArray(points) ? points : []) {
+    const x = Number(p?.x);
+    const y = Number(p?.y);
+    if (Number.isFinite(x) && Number.isFinite(y)) {
+      xs.push(x);
+      ys.push(y);
+    }
+  }
+  if (xs.length === 0) return emptyMapFrame();
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  const padX = Math.max(MAP_FRAME_PAD_MIN, (maxX - minX) * MAP_FRAME_PAD_RATIO);
+  const padY = Math.max(MAP_FRAME_PAD_MIN, (maxY - minY) * MAP_FRAME_PAD_RATIO);
+  const fx = { minX: minX - padX, maxX: maxX + padX, minY: minY - padY, maxY: maxY + padY };
+  return {
+    minX: fx.minX,
+    minY: fx.minY,
+    maxX: fx.maxX,
+    maxY: fx.maxY,
+    spanX: Math.max(1e-9, fx.maxX - fx.minX),
+    spanY: Math.max(1e-9, fx.maxY - fx.minY)
+  };
+}
+function viewSize(viewW, viewH) {
+  return {
+    vw: Number.isFinite(viewW) && viewW > 0 ? viewW : MAP_VIEW_FALLBACK_W,
+    vh: Number.isFinite(viewH) && viewH > 0 ? viewH : MAP_VIEW_FALLBACK_H
+  };
+}
+function scaleRange(fitK) {
+  const base = Number.isFinite(fitK) && fitK > 0 ? fitK : 1;
+  return {
+    min: base * MAP_ZOOM_MIN_FACTOR,
+    max: base * MAP_ZOOM_MAX_FACTOR
+  };
+}
+function clampK(k, fitK) {
+  const { min, max } = scaleRange(fitK);
+  const value = Number.isFinite(k) ? k : min;
+  return Math.min(max, Math.max(min, value));
+}
+function fitCamera(frame, viewW, viewH) {
+  const { vw, vh } = viewSize(viewW, viewH);
+  const f = frame && Number.isFinite(frame.spanX) && frame.spanX > 0 && Number.isFinite(frame.spanY) && frame.spanY > 0 ? frame : emptyMapFrame();
+  const fitK = Math.min(vw / f.spanX, vh / f.spanY);
+  return {
+    k: clampK(fitK, fitK),
+    cx: f.minX + f.spanX / 2,
+    cy: f.minY + f.spanY / 2,
+    fitK: Number.isFinite(fitK) && fitK > 0 ? fitK : 1
+  };
+}
+function setCameraZoom(cam, nextK) {
+  return { ...cam, k: clampK(nextK, cam.fitK) };
+}
+function zoomCameraAtPoint(cam, screenX, screenY, viewW, viewH, factor) {
+  const { vw, vh } = viewSize(viewW, viewH);
+  const world = screenToWorld(cam, screenX, screenY, vw, vh);
+  const next = setCameraZoom(cam, cam.k * (Number.isFinite(factor) && factor > 0 ? factor : 1));
+  if (next.k === cam.k) return cam;
+  return {
+    ...next,
+    cx: world.x - (screenX - vw / 2) / next.k,
+    cy: world.y - (screenY - vh / 2) / next.k
+  };
+}
+function panCameraBy(cam, dxScreen, dyScreen) {
+  const k = Number.isFinite(cam.k) && cam.k > 0 ? cam.k : 1;
+  const dx = Number.isFinite(dxScreen) ? dxScreen : 0;
+  const dy = Number.isFinite(dyScreen) ? dyScreen : 0;
+  return { ...cam, cx: cam.cx - dx / k, cy: cam.cy - dy / k };
+}
+function centerCameraOn(cam, worldX, worldY) {
+  return { ...cam, cx: Number(worldX), cy: Number(worldY) };
+}
+function worldToScreen(cam, worldX, worldY, viewW, viewH) {
+  const { vw, vh } = viewSize(viewW, viewH);
+  return {
+    x: vw / 2 + (Number(worldX) - cam.cx) * cam.k,
+    y: vh / 2 + (Number(worldY) - cam.cy) * cam.k
+  };
+}
+function screenToWorld(cam, screenX, screenY, viewW, viewH) {
+  const { vw, vh } = viewSize(viewW, viewH);
+  return {
+    x: cam.cx + (Number(screenX) - vw / 2) / cam.k,
+    y: cam.cy + (Number(screenY) - vh / 2) / cam.k
+  };
+}
+function cameraStageTransform(cam, viewW, viewH) {
+  const { vw, vh } = viewSize(viewW, viewH);
+  return { tx: vw / 2 - cam.cx * cam.k, ty: vh / 2 - cam.cy * cam.k, k: cam.k };
+}
+function cameraZoomPercent(cam) {
+  return Number.isFinite(cam.fitK) && cam.fitK > 0 ? cam.k / cam.fitK * 100 : 100;
+}
+function markerInverseScale(cam) {
+  return Number.isFinite(cam.k) && cam.k > 0 && Number.isFinite(cam.fitK) && cam.fitK > 0 ? cam.fitK / cam.k : 1;
+}
+
+// src/atlas-map-interactions.ts
+var MAP_GESTURE_THRESHOLD_PX = 6;
+function createPanGesture(opts = {}) {
+  const threshold = Number.isFinite(opts.threshold) && opts.threshold > 0 ? opts.threshold : MAP_GESTURE_THRESHOLD_PX;
+  let active = false;
+  let blocked = false;
+  let startX = 0;
+  let startY = 0;
+  let lastX = 0;
+  let lastY = 0;
+  let panning = false;
+  let panned = false;
+  return {
+    down(screenX, screenY, downOpts = {}) {
+      if (downOpts.interactive) {
+        blocked = true;
+        return false;
+      }
+      active = true;
+      blocked = false;
+      startX = Number(screenX) || 0;
+      startY = Number(screenY) || 0;
+      lastX = startX;
+      lastY = startY;
+      panning = false;
+      panned = false;
+      return true;
+    },
+    move(screenX, screenY) {
+      if (!active) return null;
+      const x = Number(screenX) || 0;
+      const y = Number(screenY) || 0;
+      if (!panning) {
+        if (Math.hypot(x - startX, y - startY) > threshold) {
+          panning = true;
+          panned = true;
+        } else {
+          return null;
+        }
+      }
+      const dx = x - lastX;
+      const dy = y - lastY;
+      lastX = x;
+      lastY = y;
+      return { panning: true, dx, dy };
+    },
+    up() {
+      const result = { panned };
+      active = false;
+      panning = false;
+      return result;
+    },
+    cancel() {
+      active = false;
+      blocked = false;
+      panning = false;
+      panned = false;
+    },
+    get isPanning() {
+      return panning;
+    },
+    consumeClick() {
+      const swallow = panned;
+      panned = false;
+      return swallow;
+    }
+  };
+}
+function createDragGesture(opts = {}) {
+  const threshold = Number.isFinite(opts.threshold) && opts.threshold > 0 ? opts.threshold : MAP_GESTURE_THRESHOLD_PX;
+  let active = false;
+  let startX = 0;
+  let startY = 0;
+  let lastX = 0;
+  let lastY = 0;
+  let dragging = false;
+  let dragged = false;
+  return {
+    down(screenX, screenY) {
+      active = true;
+      startX = Number(screenX) || 0;
+      startY = Number(screenY) || 0;
+      lastX = startX;
+      lastY = startY;
+      dragging = false;
+      dragged = false;
+      return true;
+    },
+    move(screenX, screenY) {
+      if (!active) return null;
+      const x = Number(screenX) || 0;
+      const y = Number(screenY) || 0;
+      if (!dragging) {
+        if (Math.hypot(x - startX, y - startY) > threshold) {
+          dragging = true;
+          dragged = true;
+        } else {
+          return null;
+        }
+      }
+      const result = {
+        dragging: true,
+        dx: x - lastX,
+        dy: y - lastY,
+        totalDx: x - startX,
+        totalDy: y - startY
+      };
+      lastX = x;
+      lastY = y;
+      return result;
+    },
+    up() {
+      const result = { dragged };
+      active = false;
+      dragging = false;
+      return result;
+    },
+    cancel() {
+      active = false;
+      dragging = false;
+      dragged = false;
+    },
+    get isDragging() {
+      return dragging;
+    },
+    consumeClick() {
+      const swallow = dragged;
+      dragged = false;
+      return swallow;
+    }
+  };
+}
+function createPinchTracker() {
+  const pointers = /* @__PURE__ */ new Map();
+  let lastDistance = 0;
+  const distance = () => {
+    const [a, b] = [...pointers.values()];
+    return Math.hypot(b.x - a.x, b.y - a.y);
+  };
+  const midpoint = () => {
+    const [a, b] = [...pointers.values()];
+    return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+  };
+  const settle = () => {
+    lastDistance = pointers.size >= 2 ? distance() : 0;
+  };
+  const emit = () => {
+    if (pointers.size < 2 || lastDistance <= 0) return null;
+    const dist = distance();
+    if (!Number.isFinite(dist) || dist <= 0) return null;
+    const mid = midpoint();
+    const factor = dist / lastDistance;
+    lastDistance = dist;
+    return { factor: Number.isFinite(factor) && factor > 0 ? factor : 1, x: mid.x, y: mid.y };
+  };
+  return {
+    down(pointerId, screenX, screenY) {
+      pointers.set(Number(pointerId), { x: Number(screenX) || 0, y: Number(screenY) || 0 });
+      settle();
+      return emit();
+    },
+    move(pointerId, screenX, screenY) {
+      const p = pointers.get(Number(pointerId));
+      if (!p) return null;
+      p.x = Number(screenX) || 0;
+      p.y = Number(screenY) || 0;
+      return emit();
+    },
+    up(pointerId) {
+      pointers.delete(Number(pointerId));
+      settle();
+    },
+    cancel() {
+      pointers.clear();
+      lastDistance = 0;
+    },
+    get active() {
+      return pointers.size >= 2;
+    },
+    get count() {
+      return pointers.size;
+    }
+  };
+}
 export {
   ATLAS_BROWSER_DOC_LIMITS,
   ATLAS_ERROR_CODES,
@@ -11539,28 +11839,46 @@ export {
   AtlasError,
   DEFAULT_WORLD_TURN_SYSTEM_PROMPT,
   DEMO_TEMPLATES,
+  MAP_GESTURE_THRESHOLD_PX,
+  MAP_ZOOM_MAX_FACTOR,
+  MAP_ZOOM_MIN_FACTOR,
   atlasClampZoom,
   atlasCustomIncludeHeaders,
   buildStarterWorld,
   buildWorldFromTemplate,
+  cameraStageTransform,
+  cameraZoomPercent,
+  centerCameraOn,
+  computeMapFrame,
   createAtlasLorebookWriter,
   createAtlasServerCore,
   createAtlasUiCore,
   createBrowserDocumentStore,
+  createDragGesture,
   createLocalAtlasApi,
+  createPanGesture,
+  createPinchTracker,
   createStProxyFetch,
   createTavernMainFetch,
   createTavernProfileFetch,
+  emptyMapFrame,
+  fitCamera,
   getConnectionManagerProfiles,
   getDemoTemplate,
   getDemoTemplateByName,
   isConnectionManagerAvailable,
   isTavernMainAvailable,
   lorebookNameFor,
+  markerInverseScale,
   normalizeAtlasClaudeBase,
   normalizeAtlasExcludeBody,
   normalizeAtlasGeminiBase,
   normalizeAtlasPromptPostProcessing,
+  panCameraBy,
   parseAtlasChatBinding,
-  starterWorldIdForChat
+  screenToWorld,
+  setCameraZoom,
+  starterWorldIdForChat,
+  worldToScreen,
+  zoomCameraAtPoint
 };

@@ -23,8 +23,8 @@ export const ATLAS_SESSION_KEY = "atlas";
 export const ATLAS_SESSION_SCHEMA_VERSION = 1;
 /** 0.9.48（T01）：会话写回守卫纯函数（导出供测试；sessionApi 写回前调用）。 */
 export { atlasSessionWriteGuard };
-/** 0.9.49（M03）：地图等比显示布局纯函数（导出供测试）。 */
-export { computeMapLayout };
+/** R08：地图相机纯数学已迁至 src/atlas-map-camera.ts（dist 经 atlas-browser-entry 导出，
+ *  renderPanel 从 mod 解构使用；旧 computeMapLayout 的 20px fit 下限一并删除）。 */
 /** 0.9.50（M05）：动态比例尺条纯函数（导出供测试）。 */
 export { computeScaleBar, formatDistanceMeters };
 /** 0.9.51（M06）：旅行距离换算纯函数（定义处无需 export——此行集中导出供测试）。 */
@@ -959,47 +959,6 @@ function el(tag, className, text) {
   return node;
 }
 
-function computeMapBounds(points) {
-  if (points.length === 0) return { minX: 0, minY: 0, maxX: 100, maxY: 100 };
-  const xs = points.map((p) => p.x);
-  const ys = points.map((p) => p.y);
-  const padX = Math.max(4, (Math.max(...xs) - Math.min(...xs)) * 0.08);
-  const padY = Math.max(4, (Math.max(...ys) - Math.min(...ys)) * 0.08);
-  return {
-    minX: Math.min(...xs) - padX,
-    maxX: Math.max(...xs) + padX,
-    minY: Math.min(...ys) - padY,
-    maxY: Math.max(...ys) + padY,
-  };
-}
-
-/**
- * 0.9.49（M03 等比坐标变换）：地图显示布局（纯函数，可测）。
- *
- * 旧实现用 toPercent 把 x/y **分别**拉满容器——正方形世界会被拉成长方形，
- * 格子不再是格子，比例尺无从谈起（外部 AI 计划 M03 指认的几何 bug）。
- * 新口径：单一 cellPx（每格 CSS 像素数）同时用于 x/y，等比 contain 拟合视口，
- * 居中留白；格网背景与标点、路线、命中共用同一变换——屏幕格子 = 真实格子。
- * zoom / 平移仍作用于外层 transform，只改显示不改变世界距离。
- */
-function computeMapLayout(points, viewW, viewH) {
-  const bounds = computeMapBounds(points);
-  const spanX = Math.max(1, bounds.maxX - bounds.minX);
-  const spanY = Math.max(1, bounds.maxY - bounds.minY);
-  const w = Math.max(320, Number(viewW) || 0);
-  const h = Math.max(240, Number(viewH) || 0);
-  const cellPx = Math.max(20, Math.min(w / spanX, h / spanY));
-  const widthPx = spanX * cellPx;
-  const heightPx = spanY * cellPx;
-  const offsetX = (w - widthPx) / 2;
-  const offsetY = (h - heightPx) / 2;
-  const toPixel = (x, y) => ({
-    left: offsetX + (Number(x) - bounds.minX) * cellPx,
-    top: offsetY + (Number(y) - bounds.minY) * cellPx,
-  });
-  return { bounds, spanX, spanY, cellPx, widthPx, heightPx, offsetX, offsetY, toPixel, viewW: w, viewH: h };
-}
-
 /**
  * 0.9.50（M05 动态比例尺条，纯函数，可测）：
  * 「1 格 = N 米」是地图数据（标定）；左下角标尺条是随相机变化的显示——
@@ -1082,9 +1041,33 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
   root.setAttribute("role", "application");
   root.setAttribute("aria-label", "阿特拉斯世界工作台");
   root.innerHTML = "";
-  let zoom = 1;
-  let panX = 0;
-  let panY = 0;
+  // R08 地图相机：screen = v + (world - c) * k（src/atlas-map-camera.ts 纯数学）。
+  // 相机按视图（世界图 / 各层子图）持久化——筛选 / 重渲染不重算，返回父层恢复原相机。
+  const {
+    computeMapFrame,
+    fitCamera,
+    setCameraZoom,
+    zoomCameraAtPoint,
+    panCameraBy,
+    centerCameraOn,
+    worldToScreen,
+    screenToWorld,
+    cameraStageTransform,
+    cameraZoomPercent,
+    markerInverseScale,
+    createPanGesture,
+    createDragGesture,
+    createPinchTracker,
+  } = mod;
+  const cameraApiMissing =
+    typeof computeMapFrame !== "function" ||
+    typeof fitCamera !== "function" ||
+    typeof createPanGesture !== "function";
+  let camera = null; // 当前视图相机（MapCamera）
+  let cameraViewKey = "";
+  let cameraFrame = null;
+  let cameraViewport = { w: 0, h: 0 };
+  const mapCameras = new Map();
   let regionFilter = "";
   let dragOffsetX = 0;
   let dragOffsetY = 0;
@@ -1749,25 +1732,59 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
   let mapPanel = null;
   let lastMapData = null;
 
-  const applyTransform = () => {
-    stage.style.transform = `scale(${zoom}) translate(${panX}px, ${panY}px)`;
-    zoomLabel.textContent = `${Math.round(zoom * 100)}%`;
-  };
-  const setZoom = (next) => {
-    zoom = clampZoom(next);
-    if (zoom === 1) {
-      panX = 0;
-      panY = 0;
-    }
-    applyTransform();
-    // 0.9.50（M05）：缩放后条长按同一标尺距离真实重算（连续缩放都重算）
+  /** R08 网格盒原点（stage 空间；renderMap 按固定 frame 外扩设置）。 */
+  let gridBoxOrigin = { x: 0, y: 0 };
+
+  /** R08 相机施加：stage 变换 + 缩放百分比 + 标记反缩放 + 网格线宽 + 标尺条。 */
+  const applyCamera = () => {
+    if (!camera) return;
+    const t = cameraStageTransform(camera, cameraViewport.w, cameraViewport.h);
+    stage.style.transform = `translate(${t.tx}px, ${t.ty}px) scale(${t.k})`;
+    zoomLabel.textContent = `${Math.round(cameraZoomPercent(camera))}%`;
+    // 标记视觉尺寸 / 命中区域用屏幕像素控制（CSS scale(var(--aw-marker-inv)) 抵消
+    // stage 缩放），与世界每格像素数分离——放大不再撑大按钮。
+    mapLayer.style.setProperty("--aw-marker-inv", String(markerInverseScale(camera)));
+    updateGridVisual();
     updateScaleBarVisual();
   };
+
+  /** 相机变更统一出口：写回视图相机表（返回父层 / 重渲染可恢复），再施加 DOM。 */
+  const commitCamera = (next) => {
+    if (!next) return;
+    camera = next;
+    if (cameraViewKey) mapCameras.set(cameraViewKey, camera);
+    applyCamera();
+  };
+
+  /**
+   * R08 网格视觉：格线画在 stage 空间（周期 1 世界单位），线宽 = 1/k stage px
+   * → 屏幕恒 1px；background-position 吸附世界整数格，格线与标点共用同一
+   * 相机变换永远对齐。k < 4（格距 < 4 屏幕像素）时格线糊成色块，诚实隐藏。
+   */
+  function updateGridVisual() {
+    if (!gridLayer || !camera) return;
+    const cell = camera.k;
+    if (!Number.isFinite(cell) || cell < 4) {
+      gridLayer.style.display = "none";
+      return;
+    }
+    gridLayer.style.display = "";
+    const line = `var(--am-grid-minor, var(--aw-teal-wash))`;
+    const lineW = 1 / cell;
+    const gap = Math.max(0, 1 - lineW);
+    gridLayer.style.backgroundImage =
+      `repeating-linear-gradient(0deg, transparent, transparent ${gap}px, ${line} ${gap}px, ${line} 1px), ` +
+      `repeating-linear-gradient(90deg, transparent, transparent ${gap}px, ${line} ${gap}px, ${line} 1px)`;
+    gridLayer.style.backgroundSize = "100% 100%";
+    gridLayer.style.backgroundRepeat = "repeat";
+    const frac = (v) => v - Math.floor(v);
+    gridLayer.style.backgroundPosition = `${-frac(gridBoxOrigin.x)}px ${-frac(gridBoxOrigin.y)}px`;
+  }
 
   /** 0.9.50 标尺条视觉更新：标定图按候选距离画真实条长；未标定/旧式单位画桩线 + 文字。 */
   function updateScaleBarVisual() {
     if (!scaleBarEl || !scaleLabelEl || !scaleCtx) return;
-    const { calibration, legacyScale, cellPx } = scaleCtx;
+    const { calibration, legacyScale } = scaleCtx;
     if (!calibration) {
       scaleBarEl.classList.add("is-stub");
       scaleBarEl.style.width = "";
@@ -1776,7 +1793,8 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
         : "未标定（按格程计算）";
       return;
     }
-    const bar = computeScaleBar({ metersPerCell: calibration.metersPerCell, cellPx, zoom });
+    // R08：每格屏幕像素 = 相机比例 k（zoom 已并入 k，比例尺恒按 zoom:1 计算）
+    const bar = computeScaleBar({ metersPerCell: calibration.metersPerCell, cellPx: camera?.k ?? 0, zoom: 1 });
     if (!bar) return;
     scaleBarEl.classList.remove("is-stub");
     scaleBarEl.style.width = `${Math.round(bar.barWidthPx * 10) / 10}px`;
@@ -1901,7 +1919,11 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
         lastH = h;
         if (resizeTimer) clearTimeout(resizeTimer);
         resizeTimer = setTimeout(() => {
-          if (state().page === "map" && lastMapData) renderMap(data());
+          if (state().page === "map" && lastMapData) {
+            // R08：视口尺寸变化 → 各视图相机按新视口重新 fitAll（等比布局重算）
+            mapCameras.clear();
+            renderMap(data());
+          }
         }, 120);
       });
       observer.observe(viewport);
@@ -1926,11 +1948,25 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     });
     mapScaleEl.append(scaleToggle, scaleDetailEl);
     viewport.append(compass, mapScaleEl);
-    for (const [label, delta, aria] of [["＋", 0.25, "放大地图"], ["－", -0.25, "缩小地图"], ["⌂", 0, "重置地图缩放"]]) {
+    // R08：＋/－ 以视口中心为锚缩放；⌂ = fitAll 全图适配（重置是单独操作，
+    // 回到 100% 不再连带清空平移——旧 setZoom(1) 清 pan 的行为删除）；
+    // ⌖ = 定位当前位置（保持比例，视口中心对准玩家）。
+    const zoomByFactor = (factor) => {
+      if (!camera) return;
+      commitCamera(setCameraZoom(camera, camera.k * factor));
+    };
+    for (const [label, aria, action] of [
+      ["＋", "放大地图", () => zoomByFactor(1.25)],
+      ["－", "缩小地图", () => zoomByFactor(0.8)],
+      ["⌂", "全图适配（重置缩放与平移）", () => {
+        if (cameraFrame) commitCamera(fitCamera(cameraFrame, cameraViewport.w, cameraViewport.h));
+      }],
+      ["⌖", "定位当前位置", () => locatePlayerCamera()],
+    ]) {
       const btn = el("button", "aw-zoom__btn", label);
       btn.type = "button";
       btn.setAttribute("aria-label", aria);
-      btn.addEventListener("click", () => setZoom(delta === 0 ? 1 : zoom + delta));
+      btn.addEventListener("click", action);
       zoomBox.append(btn);
     }
     zoomBox.append(zoomLabel);
@@ -2055,8 +2091,76 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     mapCrumb.style.display = "none";
     mapPanel = el("div", "aw-mappanel");
     mapPanel.style.display = "none";
+    // R08 地图手势（状态机在 src/atlas-map-interactions.ts，可完整测试）：
+    // - 空白 pointerdown 超过阈值才 pan；按钮 / 输入框 / 弹层起手不启动拖拽。
+    // - 双指 = pinch 缩放（中点锚定）；单指回落重启平移基线。
+    // - pointercancel / capture 释放；pan 结束的合成 click 被吞，不当空白点击。
+    const panGesture = createPanGesture();
+    const pinch = createPinchTracker();
+    const activePointers = new Map();
+    const GESTURE_BLOCK_SELECTOR =
+      "button, input, select, textarea, label, .aw-mappanel, .aw-maptools, .aw-scale, .aw-mapcrumb, .aw-maplegend, .aw-travel, .aw-zoom";
+    viewport.addEventListener("pointerdown", (e) => {
+      if (!camera) return;
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      viewport.setPointerCapture?.(e.pointerId);
+      if (activePointers.size >= 2) {
+        panGesture.cancel(); // 进入双指：终止单指平移
+        pinch.down(e.pointerId, e.clientX, e.clientY);
+        return;
+      }
+      const interactive = Boolean(e.target?.closest?.(GESTURE_BLOCK_SELECTOR));
+      panGesture.down(e.clientX, e.clientY, { interactive });
+    });
+    viewport.addEventListener("pointermove", (e) => {
+      if (!camera) return;
+      if (activePointers.has(e.pointerId)) activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pinch.active) {
+        const update = pinch.move(e.pointerId, e.clientX, e.clientY);
+        if (update) {
+          const rect = viewport.getBoundingClientRect();
+          commitCamera(zoomCameraAtPoint(camera, update.x - rect.left, update.y - rect.top, viewport.clientWidth || 0, viewport.clientHeight || 0, update.factor));
+        }
+        return;
+      }
+      const step = panGesture.move(e.clientX, e.clientY);
+      if (step?.panning) commitCamera(panCameraBy(camera, step.dx, step.dy));
+    });
+    const endMapPointer = (e, cancelled) => {
+      if (activePointers.has(e.pointerId)) {
+        activePointers.delete(e.pointerId);
+        if (cancelled) pinch.cancel();
+        else pinch.up(e.pointerId);
+      }
+      if (pinch.active) return;
+      if (activePointers.size === 1) {
+        // 双指回落到单指：以剩余指位重启平移基线
+        const [only] = [...activePointers.values()];
+        panGesture.cancel();
+        panGesture.down(only.x, only.y);
+        return;
+      }
+      if (cancelled) panGesture.cancel();
+      else panGesture.up(); // suppress 标记保留给 click 消费（不在 pointerup 提前清除）
+    };
+    viewport.addEventListener("pointerup", (e) => endMapPointer(e, false));
+    viewport.addEventListener("pointercancel", (e) => endMapPointer(e, true));
+    // 光标缩放：光标下世界点不漂移（zoomCameraAtPoint）；ctrl+滚轮 = 触控板捏合细步
+    viewport.addEventListener("wheel", (e) => {
+      if (!camera) return;
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      const factor = e.ctrlKey
+        ? Math.min(2, Math.max(0.5, Math.exp(-e.deltaY * 0.01)))
+        : e.deltaY < 0 ? 1.2 : 1 / 1.2;
+      commitCamera(zoomCameraAtPoint(camera, e.clientX - rect.left, e.clientY - rect.top, viewport.clientWidth || 0, viewport.clientHeight || 0, factor));
+    }, { passive: false });
     // 0.9.47 mapview 同款交互：点地图空白处 / 按 ESC 关面板；面板内点击不冒泡
-    viewport.addEventListener("click", () => closeMapPanel());
+    viewport.addEventListener("click", () => {
+      if (panGesture.consumeClick()) return; // pan 结束的合成 click 不当空白点击
+      closeMapPanel();
+    });
     mapPanel.addEventListener("click", (e) => e.stopPropagation());
     viewport.append(mapPanel);
     // 0.9.41 图例：地点 / 人物 / 物品三型标点（原型 mapview 同款信息架构）
@@ -2078,12 +2182,28 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     return mapCanvas;
   }
 
-  /** 由 renderPage 在 renderCenter 之后调用（renderCenter 负责把 mapCanvas 挂回中区）。 */
-  /** 0.9.35 返回上一层子图（世界图 = 栈空）。 */
+  /** R08 定位当前位置：保持比例，视口中心对准玩家所在地点（子图视图不可用）。 */
+  function locatePlayerCamera() {
+    if (!camera || !cameraFrame) return;
+    if (mapStack.length > 0) {
+      setStatus("定位当前位置只在世界图可用。", "warn");
+      return;
+    }
+    const d = lastMapData;
+    const target = (Array.isArray(d?.map?.points) ? d.map.points : []).find(
+      (p) => String(p.id) === String(d?.currentLocationId ?? ""),
+    );
+    if (!target) {
+      setStatus("当前位置不在地图上。", "warn");
+      return;
+    }
+    commitCamera(centerCameraOn(camera, Number(target.x), Number(target.y)));
+  }
+
+  /** 0.9.35 返回上一层子图（世界图 = 栈空）。R08：相机按视图持久化，返回恢复原相机。 */
   function popMapStack() {
     mapStack.pop();
     closeMapPanel();
-    setZoom(1);
     renderMap(data());
   }
 
@@ -2116,7 +2236,6 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     rootLink.setAttribute("aria-label", "返回世界图");
     rootLink.addEventListener("click", () => {
       mapStack = [];
-      setZoom(1);
       renderMap(data());
     });
     trail.append(rootLink);
@@ -2133,7 +2252,6 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
         link.setAttribute("aria-label", `跳回 ${label}`);
         link.addEventListener("click", () => {
           mapStack = mapStack.slice(0, i + 1);
-          setZoom(1);
           renderMap(data());
         });
       }
@@ -2167,38 +2285,53 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     mapPanel.style.right = "auto";
   }
 
-  /** 0.9.47 人物拖拽纠偏（0.9.44 UI 半边被 pack 回滚，本版补回）：拖到地点标点上松手 → 确认 → move-author。 */
+  /**
+   * R08 人物拖拽纠偏（手势状态机：src/atlas-map-interactions.ts createDragGesture）：
+   * - 阈值起拖；拖拽中显示跟随光标的影子（视觉反馈，pointer-events:none 不挡命中）；
+   * - 拖到地点标点上松手 → 确认 → move-author；非目标处松手不写世界；
+   * - 命中检测天然排除拖拽影子（pointer-events:none）与人物标记本身（只认 .aw-point）；
+   * - suppressClick 不在 pointerup 提前清除——由 click 事件 consumeClick() 吞掉
+   *   合成 click（旧实现 pointerup 清掉后拖完松手仍会打开人物面板）。
+   */
   function attachNpcDrag(dot, npc, onClick) {
-    let startX = 0;
-    let startY = 0;
-    let tracking = false;
-    let suppressClick = false;
+    const gesture = createDragGesture();
+    let ghost = null;
+    const removeGhost = () => {
+      if (ghost) {
+        ghost.remove();
+        ghost = null;
+      }
+    };
     dot.addEventListener("pointerdown", (e) => {
       if (e.button !== 0) return;
-      startX = e.clientX;
-      startY = e.clientY;
-      tracking = true;
-      suppressClick = false;
+      gesture.down(e.clientX, e.clientY);
       dot.setPointerCapture?.(e.pointerId);
     });
     dot.addEventListener("pointermove", (e) => {
-      if (!tracking || suppressClick) return;
-      if (Math.hypot(e.clientX - startX, e.clientY - startY) > 6) {
-        suppressClick = true;
+      const step = gesture.move(e.clientX, e.clientY);
+      if (!step) return;
+      if (step.dragging && !ghost) {
         dot.classList.add("is-dragging");
+        ghost = el("div", "aw-dragghost", String(npc.name ?? "?").slice(0, 1));
+        ghost.setAttribute("aria-hidden", "true");
+        viewport.append(ghost);
+      }
+      if (ghost) {
+        const rect = viewport.getBoundingClientRect();
+        ghost.style.left = `${e.clientX - rect.left}px`;
+        ghost.style.top = `${e.clientY - rect.top}px`;
       }
     });
-    const endDrag = (e) => {
-      if (!tracking) return;
-      tracking = false;
+    const finishDrag = (e, cancelled) => {
+      const wasDragging = gesture.isDragging;
+      const result = cancelled ? gesture.cancel() : gesture.up();
       dot.classList.remove("is-dragging");
-      if (!suppressClick) return; // 原地松手 = 点击，交给 onClick
-      suppressClick = false;
+      removeGhost();
+      if (cancelled || !wasDragging || !result.dragged) return; // 原地松手 = 点击，交给 click
       const hit = document.elementFromPoint(e.clientX, e.clientY)?.closest?.(".aw-point");
       const toPointId = hit?.dataset?.pointId ?? null;
       if (!toPointId) {
         setStatus("拖动取消：请把人物拖到目标地点标点上。", "error");
-        renderCenter();
         return;
       }
       const chatId = String(state().chatId ?? "");
@@ -2209,12 +2342,12 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       if (!ok) return;
       void api
         .request("POST", "/worlds/move-author", { chatId, entityId, toPointId })
-        .then((result) => {
-          if (result.status === 200 && result.body?.ok) {
+        .then((result_) => {
+          if (result_.status === 200 && result_.body?.ok) {
             setStatus(`已把「${String(npc.name)}」拖到「${label}」。`, "ok");
             void core.refresh();
           } else {
-            setStatus(result.body?.error?.message ?? `纠偏失败（HTTP ${result.status}）`, "error");
+            setStatus(result_.body?.error?.message ?? `纠偏失败（HTTP ${result_.status}）`, "error");
           }
           renderCenter();
         })
@@ -2223,19 +2356,12 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
           renderCenter();
         });
     };
-    dot.addEventListener("pointerup", endDrag);
-    dot.addEventListener("pointercancel", () => {
-      tracking = false;
-      suppressClick = false;
-      dot.classList.remove("is-dragging");
-    });
+    dot.addEventListener("pointerup", (e) => finishDrag(e, false));
+    dot.addEventListener("pointercancel", (e) => finishDrag(e, true));
     // 点击（未被拖拽吞掉时）
     dot.addEventListener("click", (e) => {
       e.stopPropagation();
-      if (suppressClick) {
-        suppressClick = false;
-        return;
-      }
+      if (gesture.consumeClick()) return; // 拖拽结束的合成 click：吞掉
       onClick(dot);
     });
   }
@@ -2249,7 +2375,6 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     if (!target) return;
     if (mapStack.length > 0) {
       mapStack = [];
-      setZoom(1);
       renderMap(data());
     }
     const marker = mapLayer?.querySelector(`[data-point-id="${String(pointId)}"]`) ?? null;
@@ -2338,7 +2463,6 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       enterBtn.addEventListener("click", () => {
         mapStack.push({ pointId: String(point.id), name: String(point.name) });
         closeMapPanel();
-        setZoom(1);
         renderMap(data());
       });
       actions.append(enterBtn);
@@ -2522,9 +2646,39 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       regionSelect.append(option);
     }
 
-    // 0.9.49（M03）：等比 fit 布局——单一 cellPx 同时用于 x/y，屏幕格子 = 真实格子
-    const layout = computeMapLayout(points, viewport.clientWidth || 0, viewport.clientHeight || 0);
-    const toPixel = layout.toPixel;
+    // R08 相机接线：frame 按当前图的**全量**点位固定（筛选只改可见对象，
+    // 不重算 frame / 相机）；相机按视图持久化（世界图 / 各层子图各自记忆），
+    // fitAll 无每格像素下限——大世界完整收入视口（旧 20px 下限删除）。
+    if (cameraApiMissing) {
+      if (mapHint) {
+        mapHint.textContent = "UI 核心模块过旧（缺少地图相机 API）：请重新执行 npm run build 更新 dist/ 后刷新。";
+        mapHint.style.display = "";
+      }
+      return;
+    }
+    const camKey = `${mapStackKey}|${inSub ? String(view.pointId) : "world"}`;
+    const framePoints = inSub ? (Array.isArray(currentSub.points) ? currentSub.points : []) : pointsAll;
+    cameraFrame = computeMapFrame(framePoints);
+    cameraViewKey = camKey;
+    cameraViewport = { w: viewport.clientWidth || 0, h: viewport.clientHeight || 0 };
+    let cam = mapCameras.get(camKey) ?? null;
+    if (!cam) {
+      cam = fitCamera(cameraFrame, cameraViewport.w, cameraViewport.h);
+      mapCameras.set(camKey, cam);
+    }
+    camera = cam;
+    // R08 图层盒：stage 子元素直接用世界单位 px 定位（负坐标合法），变换由相机统一给出。
+    // 网格盒 = frame 外扩余量（平移出图仍见格线）；底图盒 = frame 精确框。
+    const gridMargin = Math.ceil(Math.max(400, Math.max(cameraFrame.spanX, cameraFrame.spanY)));
+    gridBoxOrigin = { x: cameraFrame.minX - gridMargin, y: cameraFrame.minY - gridMargin };
+    gridLayer.style.left = `${gridBoxOrigin.x}px`;
+    gridLayer.style.top = `${gridBoxOrigin.y}px`;
+    gridLayer.style.width = `${cameraFrame.spanX + gridMargin * 2}px`;
+    gridLayer.style.height = `${cameraFrame.spanY + gridMargin * 2}px`;
+    imageLayer.style.left = `${cameraFrame.minX}px`;
+    imageLayer.style.top = `${cameraFrame.minY}px`;
+    imageLayer.style.width = `${cameraFrame.spanX}px`;
+    imageLayer.style.height = `${cameraFrame.spanY}px`;
     // 0.9.50（M04/M05）动态标尺条：标定（calibrations[mapId]）优先画米制条；
     // 旧式自由单位比例尺只做文字说明（换算未知，不画伪物理条）；世界图沿用
     // 「多于一个地点或地区才显示」的显隐口径。缩放 / resize 经 updateScaleBarVisual 重算。
@@ -2536,27 +2690,16 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
         const mapId = inSub ? String(view.pointId) : "world";
         const calibration = calibrations[mapId] ?? null;
         const legacyScale = inSub ? currentSub?.scale ?? null : null;
-        scaleCtx = { calibration, legacyScale, mapId, cellPx: layout.cellPx };
-        updateScaleBarVisual();
+        scaleCtx = { calibration, legacyScale, mapId };
         rebuildScaleDetail(d, mapId, calibration, legacyScale);
       } else {
         scaleCtx = null;
       }
     }
     // R01 图层接线：viewport 静态装饰纹理保持关闭（固定背景格不能冒充可测量网格）；
-    // 网格画在独立 gridLayer（repeat 语义由 CSS 保证平铺，不再被 no-repeat 裁成单块）；
-    // 底图画在独立 imageLayer。默认叠加显示（M02：有底图时网格仍然可见），
-    // 视图切换（叠加/网格/底图）只改可见性，不改坐标与数据。皮肤令牌走 --am-grid-*。
+    // 网格视觉（线宽 / 对齐 / 显隐）由 applyCamera → updateGridVisual 按相机实时绘制；
+    // 底图画在独立 imageLayer。视图切换（叠加/网格/底图）只改可见性，不改坐标与数据。
     viewport.style.backgroundImage = "none";
-    const line = `var(--am-grid-minor, var(--aw-teal-wash))`;
-    const gap = Math.max(1, layout.cellPx - 1);
-    gridLayer.style.backgroundImage =
-      `repeating-linear-gradient(0deg, transparent, transparent ${gap}px, ${line} ${gap}px, ${line} ${layout.cellPx}px), ` +
-      `repeating-linear-gradient(90deg, transparent, transparent ${gap}px, ${line} ${gap}px, ${line} ${layout.cellPx}px)`;
-    // repeating-gradient 自身已平铺；size 拉满元素即可，绝不复用 no-repeat 的单块行为
-    gridLayer.style.backgroundSize = "100% 100%";
-    gridLayer.style.backgroundRepeat = "repeat";
-    gridLayer.style.backgroundPosition = `${layout.offsetX}px ${layout.offsetY}px`;
     stage.dataset.view = mapViewMode;
 
     for (const point of points) {
@@ -2565,9 +2708,9 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       const hasSub = Boolean(inSub ? false : submaps[String(point.id)]);
       marker.textContent = String(point.name);
       marker.title = String(point.name);
-      const pos = toPixel(Number(point.x), Number(point.y));
-      marker.style.left = `${pos.left}px`;
-      marker.style.top = `${pos.top}px`;
+      // R08：标记直接按世界单位定位（screen = v + (world - c) * k 由相机统一给出）
+      marker.style.left = `${Number(point.x)}px`;
+      marker.style.top = `${Number(point.y)}px`;
       if (hasSub) marker.classList.add("aw-point--sub");
       // 0.9.35 点击 = 简略信息面板（路线 / 进入子图都在面板里），不再一键直接拉路线
       if (String(point.id) === String(d.currentLocationId ?? "")) {
@@ -2591,9 +2734,9 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       const idx = projectionSlot;
       projectionSlot += 1;
       const angle = idx * 2.399963;
-      const radius = Math.min(layout.spanX, layout.spanY) * 0.12 * Math.sqrt(idx + 1);
-      const cx = layout.bounds.minX + layout.spanX / 2;
-      const cy = layout.bounds.minY + layout.spanY / 2;
+      const radius = Math.min(cameraFrame.spanX, cameraFrame.spanY) * 0.12 * Math.sqrt(idx + 1);
+      const cx = cameraFrame.minX + cameraFrame.spanX / 2;
+      const cy = cameraFrame.minY + cameraFrame.spanY / 2;
       return { x: cx + Math.cos(angle) * radius, y: cy + Math.sin(angle) * radius };
     };
 
@@ -2604,9 +2747,8 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       dot.type = "button";
       dot.dataset.entityId = String(npc.id ?? "");
       const worldPos = inSub ? projectionPos() : { x: npc.x, y: npc.y };
-      const pos = toPixel(Number(worldPos.x), Number(worldPos.y));
-      dot.style.left = `${pos.left}px`;
-      dot.style.top = `${pos.top}px`;
+      dot.style.left = `${Number(worldPos.x)}px`;
+      dot.style.top = `${Number(worldPos.y)}px`;
       const reasonLabel = npc.reason ? (NPC_REASON_LABELS[String(npc.reason)] ?? String(npc.reason)) : "";
       const subTag = inSub ? `（${String(currentSub?.name ?? view?.name ?? "")} 内）` : "";
       dot.title = `${String(npc.name)}${reasonLabel ? `（${reasonLabel}）` : ""}${subTag}`;
@@ -2625,9 +2767,8 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       dot.type = "button";
       dot.dataset.objId = String(object.id ?? "");
       const worldPos = inSub ? projectionPos() : { x: object.x, y: object.y };
-      const pos = toPixel(Number(worldPos.x), Number(worldPos.y));
-      dot.style.left = `${pos.left}px`;
-      dot.style.top = `${pos.top}px`;
+      dot.style.left = `${Number(worldPos.x)}px`;
+      dot.style.top = `${Number(worldPos.y)}px`;
       dot.title = `${String(object.name)}（${String(object.type)}）`;
       dot.setAttribute("aria-label", `物品 ${object.name}，点击查看详情`);
       dot.append(el("span", "aw-object__gem"));
@@ -2640,20 +2781,25 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     }
 
     const preview = state().destinationPreview;
-    // 0.9.35 子图视图跳过路线预览：世界图坐标塞进子图 bounds 的 toPercent 会画出错乱折线
+    // 0.9.35 子图视图跳过路线预览：子图点位非世界点位，画不出有意义路线
     if (preview && !inSub) {
       const from = pointsAll.find((p) => String(p.id) === String(d.currentLocationId ?? ""));
       const to = pointsAll.find((p) => String(p.id) === String(preview.destinationId));
       if (from && to) {
-        const a = toPixel(Number(from.x), Number(from.y));
-        const b = toPixel(Number(to.x), Number(to.y));
+        // R08：SVG 盒 = frame 精确框（stage 空间），viewBox = frame 局部坐标——
+        // 路线、标记、网格、底图共用同一相机变换
+        const a = { x: Number(from.x) - cameraFrame.minX, y: Number(from.y) - cameraFrame.minY };
+        const b = { x: Number(to.x) - cameraFrame.minX, y: Number(to.y) - cameraFrame.minY };
         const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
         svg.setAttribute("class", "aw-route");
-        // 0.9.49（M03）：路线画布与标点共用同一等比变换（px 坐标 + 视口 viewBox）
-        svg.setAttribute("viewBox", `0 0 ${layout.viewW} ${layout.viewH}`);
+        svg.setAttribute("viewBox", `0 0 ${cameraFrame.spanX} ${cameraFrame.spanY}`);
         svg.setAttribute("preserveAspectRatio", "none");
+        svg.style.left = `${cameraFrame.minX}px`;
+        svg.style.top = `${cameraFrame.minY}px`;
+        svg.style.width = `${cameraFrame.spanX}px`;
+        svg.style.height = `${cameraFrame.spanY}px`;
         const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-        path.setAttribute("d", `M ${a.left} ${a.top} Q ${(a.left + b.left) / 2} ${(a.top + b.top) / 2 - 24} ${b.left} ${b.top}`);
+        path.setAttribute("d", `M ${a.x} ${a.y} Q ${(a.x + b.x) / 2} ${(a.y + b.y) / 2 - Math.min(24, cameraFrame.spanY * 0.05)} ${b.x} ${b.y}`);
         path.setAttribute("fill", "none");
         path.setAttribute("stroke", "#c4a363");
         path.setAttribute("stroke-width", "1.5");
@@ -2691,7 +2837,7 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       imageLayer.style.backgroundImage = "";
     }
 
-    applyTransform();
+    applyCamera();
 
     travelBar.innerHTML = "";
     if (preview) {

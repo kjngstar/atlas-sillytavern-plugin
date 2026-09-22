@@ -857,6 +857,8 @@
   border: 1px solid var(--am-border, #d8d2c2);
   border-radius: 8px;
   box-shadow: var(--am-shadow, inset 0 0 60px rgba(16, 27, 29, 0.07));
+  /* R08：触摸平移 / 双指缩放由指针事件接管，交给浏览器默认行为会滚动页面 */
+  touch-action: none;
   /* 0.9.38 网格纸回归：0.9.32 起不透明纸面盖死了 .aw-maparea 的网格纹理，
      地图变成一张空白纸——网格搬进 viewport 本体（has-image 时被图层图片覆盖，无冲突） */
   background:
@@ -866,12 +868,13 @@
 }
 
 /* R01 图层栈：zoom/pan 变换作用于 stage，底图 / 网格 / 标点三层同步移动；
-   image 与 grid 分离，不再共用同一个 backgroundImage 属性 */
+   image 与 grid 分离，不再共用同一个 backgroundImage 属性。
+   R08 相机：transform-origin 0 0（screen = translate(t) + world*k）；
+   pan/zoom 连续驱动，去掉 transition（拖拽跟手优先） */
 .aw-stage {
   position: absolute;
   inset: 0;
-  transform-origin: center center;
-  transition: transform 0.15s ease-out;
+  transform-origin: 0 0;
 }
 
 .aw-image,
@@ -1068,9 +1071,11 @@
 
 /* 地点徽章：金色菱形标 + 名牌；当前位置深青底金字，其余纸面白底 */
 
+/* R08：标记视觉尺寸 / 命中区域用屏幕像素控制——scale(var(--aw-marker-inv))
+   抵消 stage 相机缩放（JS 每帧写入 1/k·fitK），与世界每格像素数分离 */
 .aw-point {
   position: absolute;
-  transform: translate(-50%, -50%);
+  transform: translate(-50%, -50%) scale(var(--aw-marker-inv, 1));
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -1102,7 +1107,7 @@
 .aw-point:focus-visible {
   border-color: var(--aw-teal);
   color: var(--aw-teal);
-  transform: translate(-50%, -50%) translateY(-2px);
+  transform: translate(-50%, -50%) translateY(-2px) scale(var(--aw-marker-inv, 1));
   box-shadow: 0 3px 6px rgba(16, 27, 29, 0.16);
 }
 
@@ -1123,7 +1128,7 @@
 
 .aw-npc {
   position: absolute;
-  transform: translate(-50%, -50%);
+  transform: translate(-50%, -50%) scale(var(--aw-marker-inv, 1));
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1176,7 +1181,7 @@
 
 .aw-object {
   position: absolute;
-  transform: translate(-50%, -50%) rotate(45deg);
+  transform: translate(-50%, -50%) rotate(45deg) scale(var(--aw-marker-inv, 1));
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1195,7 +1200,7 @@
 
 .aw-object:hover,
 .aw-object:focus-visible {
-  transform: translate(-50%, -50%) rotate(45deg) scale(1.25);
+  transform: translate(-50%, -50%) rotate(45deg) scale(calc(1.25 * var(--aw-marker-inv, 1)));
   box-shadow: 0 3px 8px rgba(25, 48, 45, 0.35);
 }
 
@@ -1880,7 +1885,26 @@
 /* 0.9.47 拖拽纠偏 + 标点选中高亮（mapview 同款交互） */
 .aw-npc { cursor: grab; }
 .aw-npc:active { cursor: grabbing; }
-.aw-npc.is-dragging { z-index: 9; opacity: 0.9; box-shadow: 0 6px 16px rgba(8, 20, 22, 0.35); }
+.aw-npc.is-dragging { z-index: 9; opacity: 0.45; box-shadow: 0 6px 16px rgba(8, 20, 22, 0.35); }
+/* R08 拖拽影子：跟随光标的视觉反馈；pointer-events:none 保证 elementFromPoint
+   命中检测不受影子遮挡（命中只认 .aw-point，天然排除人物标记本身） */
+.aw-dragghost {
+  position: absolute;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #d8b26a 0%, #b9924a 100%);
+  border: 2px solid #fff8df;
+  box-shadow: 0 0 0 2px var(--aw-gold-line), 0 8px 20px rgba(8, 20, 22, 0.45);
+  color: #42320f;
+  font-weight: 700;
+  font-size: 12px;
+  transform: translate(-50%, -120%);
+  pointer-events: none;
+  z-index: 20;
+}
 .aw-maparea .is-active-marker { outline: 2px solid var(--aw-gold); outline-offset: 2px; }
 
 .aw-mappanel {

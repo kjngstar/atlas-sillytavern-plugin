@@ -70,6 +70,34 @@ export {
 
 export { buildStarterWorld, starterWorldIdForChat } from "./atlas-starter-world.ts";
 
+// R08 地图相机与手势：index.js renderPanel 从 mod 解构使用（dist 必须导出，
+// atlas-r08-camera.test.mjs 显式把关）。
+export {
+  computeMapFrame,
+  emptyMapFrame,
+  fitCamera,
+  setCameraZoom,
+  zoomCameraAtPoint,
+  panCameraBy,
+  centerCameraOn,
+  worldToScreen,
+  screenToWorld,
+  cameraStageTransform,
+  cameraZoomPercent,
+  markerInverseScale,
+  MAP_ZOOM_MIN_FACTOR,
+  MAP_ZOOM_MAX_FACTOR,
+  type MapCamera,
+  type MapFrame,
+} from "./atlas-map-camera.ts";
+
+export {
+  createPanGesture,
+  createDragGesture,
+  createPinchTracker,
+  MAP_GESTURE_THRESHOLD_PX,
+} from "./atlas-map-interactions.ts";
+
 export {
   createAtlasLorebookWriter,
   lorebookNameFor,

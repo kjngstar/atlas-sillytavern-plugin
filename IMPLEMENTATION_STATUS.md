@@ -204,3 +204,28 @@
 残留：
 - 合并两个已存在实体（引用重定向 + 撤销记录）需要账本「转移事件」能力，lib/ 快照无对应 effect——按计划不破坏快照，列为协议 v3 残项（本阶段用「拒绝歧义 + identityUpdates 改名」覆盖验收路径）
 - 人物详情页的持有物列表 / 所在地链接跳转 → R09 弹窗与跳转一起收口
+
+## R08 — 地图相机与点击 / 拖拽手势（2026-09-23）
+
+- [x] 新建 `src/atlas-map-camera.ts`（纯数学，无 DOM）：统一 `screen = v + (world - c) * k` / `world = c + (screen - v) / k`；computeMapFrame（8% 留白、负坐标合法）、fitCamera、worldToScreen / screenToWorld、zoomCameraAtPoint（光标锚定）、panCameraBy、centerCameraOn、cameraStageTransform、cameraZoomPercent、markerInverseScale
+- [x] **删除每格 20px fit 下限**：fitAll 无绝对像素下限与绝对比例夹取（缩放范围纯相对 fit 基准 0.2×~8×）——10 万格大世界完整收入视口；宽图 / 长图 / 负坐标 / 单点 / 空图均可看全
+- [x] 标记视觉尺寸 / 命中区域用屏幕像素控制：CSS `scale(var(--aw-marker-inv, 1))` 抵消 stage 缩放（--aw-marker-inv 由相机实时写入），放大不再撑大按钮
+- [x] index.js 地图重接线：stage 子元素直接按世界单位 px 定位（transform-origin 0 0，screen = translate(t) + world*k）；网格盒 = frame 外扩（平移出图仍见格线，线宽屏幕恒 1px，格距 < 4px 诚实隐藏）；底图盒 / 路线 SVG = frame 精确框，图像、网格、路线、标记、命中共用同一相机变换
+- [x] 手势状态机 `src/atlas-map-interactions.ts`（纯逻辑）：pan（空白起手超阈值 6px 才拖，按钮 / 输入框 / 弹层起手 interactive 不启动）、NPC 拖拽纠偏、双指 pinch（距离比 = 因子，中点锚定）
+- [x] **拖拽 click 吞咽修复**：suppressClick 不在 pointerup 提前清除，由 click 事件 consumeClick() 消费（旧实现拖完松手仍会打开人物面板——回归门禁测试锁定）；pan 结束的合成 click 同样吞掉，不当空白点击
+- [x] NPC 拖拽视觉反馈：跟随光标的 .aw-dragghost 影子（pointer-events:none 不挡命中），原标记 45% 透明；命中检测只认 .aw-point（天然排除影子与人物标记本身），非目标处松手不写世界
+- [x] 手势健壮性：pointercancel 复位、setPointerCapture、双指回落单指重启平移基线、触摸 touch-action:none
+- [x] **回到 100% 不再清空平移**（旧 setZoom(1) 连带清 pan 的行为删除）；重置 = ⌂ fitAll 单独操作；新增 ⌖ 定位当前位置按钮（保持比例对准玩家，子图视图禁用）
+- [x] 相机按视图持久化（chatId|worldId|子图栈路径）：筛选 / 重渲染不重算 frame / 相机（筛选只改可见对象），进子图返回恢复原相机；视口 resize → 重新 fitAll
+- [x] 相机 / 手势 API 经 atlas-browser-entry 进 dist（ui-core-exports 模式），renderPanel 从 mod 解构；dist 导出门禁测试锁定
+- [x] 比例尺接线适配：cellPx = 相机比例 k（zoom 已并入），动态标尺条随连续缩放实时重算
+
+证据：
+- 新增 `tests/atlas-r08-camera.test.mjs` 11 项通过：fit 无下限（大世界收入视口）+ 五类图 fitAll 看全 + 往返误差 < 1e-9 + 光标缩放不漂移 / 边界夹取 + setCameraZoom 不清平移（回归门禁）+ 百分比 / 反缩放 / stage transform 一致性 + pan 阈值与 interactive + suppressClick 不提前清除（回归门禁）+ pointercancel 复位 + pinch 因子 / 中点 + dist 导出
+- 旧 `tests/atlas-map-layout.test.mjs`（绑定被删除的 computeMapLayout）删除，由 R08 测试文件取代
+- 门禁：typecheck 0 errors；pack 通过（镜像同步）；test 447/447（442 + 11 新增 − 6 旧布局测试移除）
+
+残留：
+- 真实浏览器手势验收（拖拽跟手 / 触摸双指 / 长中文标签遮挡）→ R14 交互验收
+- 相机「销毁时移除监听」：扩展卸载路径 disconnectAtlas 移除整个面板 DOM，监听随节点销毁；ResizeObserver 随 panel 移除后不再触发——无独立 teardown 钩子，未单独实现
+- 弹窗随 pan / zoom / resize 重新定位（anchorPanelToMarker 仅开面板时计算）→ R09 selectedEntityId 弹窗刷新一起收口
