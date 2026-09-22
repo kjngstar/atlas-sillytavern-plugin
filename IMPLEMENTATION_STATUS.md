@@ -47,6 +47,7 @@
 | R08 热修 | ✅ 完成 | marker `inverseScale = 1/k`（旧公式 fit 时撑满视口吞点击）+ 仅空白/双指 setPointerCapture；452/452 |
 | R12 | ✅ 完成 | 原子事务收口：`pending.remove` best-effort（失败记日志不抛错）+ `reconcilePendingCommits` 启动清理 orphan；460/460 |
 | R10 | ✅ 完成 | v2 mapScaleHints 接入提交链路：`applyScaleHintsToDoc` 纯函数（人工锁定 / frame 不匹配 / unknown-conflict 跳过纪律）+ executeCommit 应用到 maps sidecar + 日志分流；471/471 |
+| R09 | ✅ 完成（后端） | SubMap schema 升级加 `frame: { cols, rows, frameRevision }` 字段 + `validateSubmapDepth` 深度校验 + `handleScaleCalibrate` 使用真实 frame；UI 弹窗与子图三层级留实机阶段；481/481 |
 | R09 | 未开始 | |
 | R10 | 未开始 | |
 | R11 | 未开始 | |
@@ -300,3 +301,20 @@
 - SubMap / AtlasMapDoc 未持久化 `cols/rows/frameRevision`——目前默认 100×100 是写死兜底；待 R09 子图层级改造时给 SubMap 加 `frame` 字段（schema 升 v3），届时按真实 frame 校验。
 - `/worlds/scale/calibrate` 路由仍写死 100×100 提示词；同上等 R09 一起改。
 - 标定 UI（R10 子任务"标定 UI"）未做——前端需要读 `stateData.maps.calibrations[mapId]` 渲染当前标定 + 锁定切换 + 重新估计按钮；纳入 R11 皮肤工作附近做。
+
+## R09 — SubMap schema 升级 + frame 持久化 + 深度校验（2026-09-23）
+
+- [x] `src/atlas-geo-apply.ts`：SubMap / SubMapDraft 加 `frame?: SubMapFrame` 字段；SubMapFrame = `{ cols, rows, frameRevision }`；新增 `SUBMAP_FRAME_DEFAULT = { cols:100, rows:100, frameRevision:1 }` 与 `SUBMAP_DEPTH_MAX = 4`
+- [x] `sanitizeSubMap` / `sanitizeMapDoc`：frame 字段严格类型校验（拒绝字符串 / 负数 / 超大值）；旧子图（无 frame）→ `SUBMAP_FRAME_DEFAULT` 兜底；显式合法 frame 保留
+- [x] 新增 `validateSubmapDepth(doc, pointId)` 纯函数：当前 schema 单层（`mapsDoc.submaps[pointId]`），循环引用防御 + 深度上限校验；返回 `{ ok, depth, maxReached }`
+- [x] `atlas-server.ts handleScaleCalibrate`：使用真实 frame（世界图 / 子图各自的 cols/rows）替换原写死 100×100——AI 标定不再被默认 frame 误导
+- [x] `sanitizeMapDoc` 同步导出（已 export）
+
+证据：
+- 新增 `tests/atlas-r09-submap-frame.test.mjs` 10 项通过：frame 透传 / 坏值丢弃 / sanitizeMapDoc 兜底 / sanitizeMapDoc 保留 / sanitizeNewLocations 透传 / validateSubmapDepth 单层 / 未挂子图 / 循环引用防御 / SUBMAP_DEPTH_MAX 常量 / SUBMAP_FRAME_DEFAULT 形状
+- 门禁：typecheck 0 errors；pack 通过；test **481/481**（471 → 481）
+
+残留：
+- UI 弹窗跟随选中态刷新（pan / zoom / resize）+ 子图导航渲染（atlas-ui-core.ts 改造）— **未做**。需要真实 SillyTavern 环境验证 JS 命中 / DOM 重建 / 焦点切换；本环境无酒馆实例，纳入 R13 实机验收阶段。
+- 子图三级（world → building → room）真实三层结构需要 schema v4（SubMap 携带子 submaps）；当前 `mapsDoc.submaps[pointId]` 单层，`validateSubmapDepth` 已埋好接口，UI 接入即可。
+- `/worlds/scale/calibrate` 提示词仍写死 100×100；调用方应改为读 `doc.submaps[mapId].frame` 真实值动态拼提示。R11 集成阶段一起改。

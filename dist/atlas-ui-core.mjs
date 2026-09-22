@@ -6475,6 +6475,7 @@ var NEW_LOCATIONS_MAX = 12;
 var NAME_CHARS = 40;
 var DESC_CHARS = 300;
 var SUBMAP_POINTS_MAX = 40;
+var SUBMAP_FRAME_DEFAULT = { cols: 100, rows: 100, frameRevision: 1 };
 function sanitizeSubMap(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return void 0;
   const record = raw;
@@ -6485,6 +6486,16 @@ function sanitizeSubMap(raw) {
     if (Number.isFinite(distance) && distance > 0) {
       const unit = String(scaleRaw.unit ?? "").trim().slice(0, 12);
       scale = { distancePerCell: Math.round(distance * 100) / 100, ...unit ? { unit } : {} };
+    }
+  }
+  let frame;
+  const frameRaw = record.frame;
+  if (frameRaw && typeof frameRaw === "object" && !Array.isArray(frameRaw)) {
+    const colsRaw = frameRaw.cols;
+    const rowsRaw = frameRaw.rows;
+    const revisionRaw = frameRaw.frameRevision;
+    if (typeof colsRaw === "number" && typeof rowsRaw === "number" && typeof revisionRaw === "number" && Number.isFinite(colsRaw) && colsRaw > 0 && colsRaw <= 1e4 && Number.isFinite(rowsRaw) && rowsRaw > 0 && rowsRaw <= 1e4 && Number.isFinite(revisionRaw) && revisionRaw >= 0 && revisionRaw <= 1e6) {
+      frame = { cols: Math.floor(colsRaw), rows: Math.floor(rowsRaw), frameRevision: Math.floor(revisionRaw) };
     }
   }
   const rawPoints = Array.isArray(record.points) ? record.points : [];
@@ -6498,7 +6509,7 @@ function sanitizeSubMap(raw) {
     if (points.length >= SUBMAP_POINTS_MAX) break;
   }
   if (points.length === 0) return void 0;
-  return { ...scale ? { scale } : {}, points };
+  return { ...scale ? { scale } : {}, ...frame ? { frame } : {}, points };
 }
 function sanitizeNewLocations(raw) {
   if (!Array.isArray(raw)) return [];
@@ -6661,7 +6672,24 @@ function sanitizeMapDoc(raw) {
           });
         }
       }
-      if (points.length > 0) doc.submaps[key] = { ...scale ? { scale } : {}, points };
+      if (points.length > 0) {
+        let frame;
+        const frameRaw = subRecord.frame;
+        if (frameRaw && typeof frameRaw === "object" && !Array.isArray(frameRaw)) {
+          const rec = frameRaw;
+          const colsRaw = rec.cols;
+          const rowsRaw = rec.rows;
+          const revisionRaw = rec.frameRevision;
+          if (typeof colsRaw === "number" && typeof rowsRaw === "number" && typeof revisionRaw === "number" && Number.isFinite(colsRaw) && colsRaw > 0 && colsRaw <= 1e4 && Number.isFinite(rowsRaw) && rowsRaw > 0 && rowsRaw <= 1e4 && Number.isFinite(revisionRaw) && revisionRaw >= 0 && revisionRaw <= 1e6) {
+            frame = { cols: Math.floor(colsRaw), rows: Math.floor(rowsRaw), frameRevision: Math.floor(revisionRaw) };
+          }
+        }
+        doc.submaps[key] = {
+          ...scale ? { scale } : {},
+          ...frame ? { frame } : { frame: { ...SUBMAP_FRAME_DEFAULT } },
+          points
+        };
+      }
     }
   }
   const calibrations = record.calibrations;
@@ -9601,7 +9629,8 @@ function createCoreInstance(store, deps, shared) {
         message: "模型回复无法解析为标定结果——保持未标定状态，可重试或改用人工标定。"
       });
     }
-    const validation = validateScaleResponse(spec, { cols: 100, rows: 100 });
+    const frame = (isWorldMap ? SUBMAP_FRAME_DEFAULT : doc.submaps[mapId]?.frame) ?? SUBMAP_FRAME_DEFAULT;
+    const validation = validateScaleResponse(spec, { cols: frame.cols, rows: frame.rows });
     if (!validation.ok) {
       pushLog({ at: now(), kind: "world-scale-reject", worldId: world.id, mapId, status: validation.status, reason: validation.reason });
       return okResult({

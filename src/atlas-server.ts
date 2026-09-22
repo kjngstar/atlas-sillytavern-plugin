@@ -45,7 +45,7 @@ import { computeAtlasRelevance, atlasTravelPreview } from "./atlas-relevance.ts"
 import { prepareAtlasTurn, commitAtlasTurn, provisionReferencedCharacters } from "./atlas-turn.ts";
 import { applyAtlasV2Turn } from "./atlas-turn-v2.ts";
 import { parseAtlasWorldTurnDraftV2 } from "./atlas-contract-v2.ts";
-import { buildSubMapFromDraft, sanitizeMapDoc } from "./atlas-geo-apply.ts";
+import { buildSubMapFromDraft, sanitizeMapDoc, SUBMAP_FRAME_DEFAULT, validateSubmapDepth } from "./atlas-geo-apply.ts";
 import { detectStartPlaceholder, resolveSceneStatus, retireStartPlaceholder, sanitizeSceneDoc, sceneDocKey, type SceneDoc } from "./atlas-scene.ts";
 import { validateScaleResponse, applyScaleHintsToDoc, type V2ScaleHintInput, type FrameRef } from "./atlas-scale.ts";
 import { buildLorebookPlans } from "./atlas-lorebook.ts";
@@ -1147,8 +1147,9 @@ function createCoreInstance(
         message: "模型回复无法解析为标定结果——保持未标定状态，可重试或改用人工标定。",
       });
     }
-    // 数值与空间校验（frame = 100×100 等距方格；1% 相对容差）
-    const validation = validateScaleResponse(spec, { cols: 100, rows: 100 });
+    // 数值与空间校验：使用真实 frame（0.9.51 子图自带 frame 字段；旧子图 100×100 兜底）
+    const frame = (isWorldMap ? SUBMAP_FRAME_DEFAULT : doc.submaps[mapId]?.frame) ?? SUBMAP_FRAME_DEFAULT;
+    const validation = validateScaleResponse(spec, { cols: frame.cols, rows: frame.rows });
     if (!validation.ok) {
       pushLog({ at: now(), kind: "world-scale-reject", worldId: world.id, mapId, status: validation.status, reason: validation.reason });
       return okResult({

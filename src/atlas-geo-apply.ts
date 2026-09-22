@@ -19,6 +19,8 @@ const NAME_CHARS = 40;
 const DESC_CHARS = 300;
 /** 子图内点数上限（一层内部结构足够；递归深度由点挂点自然形成）。 */
 export const SUBMAP_POINTS_MAX = 40;
+/** R09：子图最大递归层级（世界→建筑→房间→细节）。超过的 parentLocationRef 不再下钻，记 warning。 */
+export const SUBMAP_DEPTH_MAX = 4;
 
 /** 子图比例尺（可选；不标定就保持「格程」诚实表达）。 */
 export interface SubMapScale {
@@ -26,9 +28,58 @@ export interface SubMapScale {
   unit?: string;
 }
 
+/**
+ * R09：子图 frame——持久化 cols/rows/frameRevision，让 v2 mapScaleHints 校验真正生效。
+ * 旧子图（0.9.50 及之前）无 frame 字段：sanitizeMapDoc 兜底默认 100×100。
+ */
+export interface SubMapFrame {
+  cols: number;
+  rows: number;
+  frameRevision: number;
+}
+
+/** 子图 frame 默认值（0.9.51 兼容档）。 */
+export const SUBMAP_FRAME_DEFAULT: SubMapFrame = { cols: 100, rows: 100, frameRevision: 1 };
+
+/**
+ * R09：检查给定点挂 submap 的嵌套深度是否在 SUBMAP_DEPTH_MAX 范围内。
+ * 当前 schema 单层（mapsDoc.submaps[pointId]）；递归结构待 schema v4 升级。
+ * 本函数先实现**前置校验**——UI 层在允许进入子图前调，确认未超过深度上限。
+ *
+ * 返回 { ok, depth, maxReached }：
+ * - depth = 1 表示世界图；depth = 2 表示建筑层；...
+ * - ok = true 当 depth <= SUBMAP_DEPTH_MAX
+ */
+export function validateSubmapDepth(doc: AtlasMapDoc, pointId: string): { ok: boolean; depth: number; maxReached: boolean } {
+  const seen = new Set<string>();
+  let depth = 0;
+  let current: string | null = pointId;
+  while (current !== null) {
+    if (seen.has(current)) {
+      // 循环引用：递归结构最坏情况，UI 应回退到最近有效祖先。
+      return { ok: false, depth, maxReached: depth >= SUBMAP_DEPTH_MAX };
+    }
+    seen.add(current);
+    if (!(current in doc.submaps)) {
+      break;
+    }
+    depth += 1;
+    if (depth > SUBMAP_DEPTH_MAX) {
+      return { ok: false, depth, maxReached: true };
+    }
+    // 当前 schema 单层：submaps 不嵌套子图，所以一旦找到一层就停。
+    // 待 schema v4 升级 SubMap 携带 submaps 时改成递归遍历。
+    break;
+  }
+  // depth = 0 表示未找到任何 submap；depth = 1 表示该 pointId 是直接宿主
+  return { ok: depth <= SUBMAP_DEPTH_MAX, depth, maxReached: depth > SUBMAP_DEPTH_MAX };
+}
+
 /** 点挂子图（0.9.32）：与父图同构——网格 + 标记点 + 可选比例尺；递归结构。 */
 export interface SubMapDraft {
   scale?: SubMapScale;
+  /** R09：可选 frame；缺省 = 100×100 default。 */
+  frame?: SubMapFrame;
   points: Array<{ name: string; description?: string }>;
 }
 
@@ -58,8 +109,8 @@ export interface GeoAdoptOutcome {
   createdPoints: CreatedPoint[];
 }
 
-/** 子图清洗（不可信）：点名单必须；比例尺数字必须为正；超界丢弃 / 截断。 */
-function sanitizeSubMap(raw: unknown): SubMapDraft | undefined {
+/** 子图清洗（不可信）：点名单必须；比例尺数字必须为正；frame cols/rows 走宽容默认。 */
+export function sanitizeSubMap(raw: unknown): SubMapDraft | undefined {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
   const record = raw as Record<string, unknown>;
   let scale: SubMapScale | undefined;
@@ -69,6 +120,21 @@ function sanitizeSubMap(raw: unknown): SubMapDraft | undefined {
     if (Number.isFinite(distance) && distance > 0) {
       const unit = String((scaleRaw as Record<string, unknown>).unit ?? "").trim().slice(0, 12);
       scale = { distancePerCell: Math.round(distance * 100) / 100, ...(unit ? { unit } : {}) };
+    }
+  }
+  // R09：frame 清洗——cols/rows 正整数，frameRevision 非负整数；坏值丢弃走默认。
+  let frame: SubMapFrame | undefined;
+  const frameRaw = record.frame;
+  if (frameRaw && typeof frameRaw === "object" && !Array.isArray(frameRaw)) {
+    const colsRaw = (frameRaw as Record<string, unknown>).cols;
+    const rowsRaw = (frameRaw as Record<string, unknown>).rows;
+    const revisionRaw = (frameRaw as Record<string, unknown>).frameRevision;
+    // 严格 number 类型：拒绝字符串 / null / boolean 伪数字
+    if (typeof colsRaw === "number" && typeof rowsRaw === "number" && typeof revisionRaw === "number"
+        && Number.isFinite(colsRaw) && colsRaw > 0 && colsRaw <= 10000
+        && Number.isFinite(rowsRaw) && rowsRaw > 0 && rowsRaw <= 10000
+        && Number.isFinite(revisionRaw) && revisionRaw >= 0 && revisionRaw <= 1000000) {
+      frame = { cols: Math.floor(colsRaw), rows: Math.floor(rowsRaw), frameRevision: Math.floor(revisionRaw) };
     }
   }
   const rawPoints = Array.isArray(record.points) ? record.points : [];
@@ -82,7 +148,7 @@ function sanitizeSubMap(raw: unknown): SubMapDraft | undefined {
     if (points.length >= SUBMAP_POINTS_MAX) break;
   }
   if (points.length === 0) return undefined;
-  return { ...(scale ? { scale } : {}), points };
+  return { ...(scale ? { scale } : {}), ...(frame ? { frame } : {}), points };
 }
 
 /** 不可信 newLocations 清洗：坏条目丢弃（name 必填；字段截断；条目封顶）。 */
@@ -232,9 +298,11 @@ export interface SubMapPoint {
   description?: string;
 }
 
-/** 子图：与父图同构——网格 + 标记点 + 可选比例尺。 */
+/** 子图：与父图同构——网格 + 标记点 + 可选比例尺 + R09 frame 字段。 */
 export interface SubMap {
   scale?: SubMapScale;
+  /** R09：子图 frame（cols/rows/frameRevision）。sanitize 缺省 = SUBMAP_FRAME_DEFAULT。 */
+  frame?: SubMapFrame;
   points: SubMapPoint[];
 }
 
@@ -300,8 +368,29 @@ export function sanitizeMapDoc(raw: unknown): AtlasMapDoc {
           });
         }
       }
-      if (points.length > 0) doc.submaps[key] = { ...(scale ? { scale } : {}), points };
+      if (points.length > 0) {
+      // R09：解析 frame 字段——严格类型校验，缺省走 SUBMAP_FRAME_DEFAULT
+      let frame: SubMapFrame | undefined;
+      const frameRaw = subRecord.frame;
+      if (frameRaw && typeof frameRaw === "object" && !Array.isArray(frameRaw)) {
+        const rec = frameRaw as Record<string, unknown>;
+        const colsRaw = rec.cols;
+        const rowsRaw = rec.rows;
+        const revisionRaw = rec.frameRevision;
+        if (typeof colsRaw === "number" && typeof rowsRaw === "number" && typeof revisionRaw === "number"
+            && Number.isFinite(colsRaw) && colsRaw > 0 && colsRaw <= 10000
+            && Number.isFinite(rowsRaw) && rowsRaw > 0 && rowsRaw <= 10000
+            && Number.isFinite(revisionRaw) && revisionRaw >= 0 && revisionRaw <= 1000000) {
+          frame = { cols: Math.floor(colsRaw), rows: Math.floor(rowsRaw), frameRevision: Math.floor(revisionRaw) };
+        }
+      }
+      doc.submaps[key] = {
+        ...(scale ? { scale } : {}),
+        ...(frame ? { frame } : { frame: { ...SUBMAP_FRAME_DEFAULT } }),
+        points,
+      };
     }
+  }
   }
   // 0.9.50 标定清洗：每格距离必须正有限；来源白名单外按 legacy 处理；封顶 40 张图
   const calibrations = record.calibrations;
