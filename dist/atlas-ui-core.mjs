@@ -7902,6 +7902,100 @@ function sceneDocKey(worldId) {
   return `scene:${worldId}`;
 }
 
+// src/atlas-pending-reconcile.ts
+async function scanPendingEntries(store) {
+  const errors = [];
+  let names;
+  try {
+    names = await store.list("pending:");
+  } catch (thrown) {
+    return { entries: [], malformed: 0, errors: [`扫描 pending 列表失败：${describeError(thrown)}`] };
+  }
+  const entries = [];
+  let malformed = 0;
+  for (const name of names) {
+    if (!name.startsWith("pending:")) continue;
+    const idempotencyKey = name.slice("pending:".length);
+    if (!idempotencyKey) {
+      malformed += 1;
+      continue;
+    }
+    let raw;
+    try {
+      raw = await store.read(name);
+    } catch (thrown) {
+      errors.push(`读取 ${name} 失败：${describeError(thrown)}`);
+      continue;
+    }
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      malformed += 1;
+      continue;
+    }
+    const binding = raw.binding;
+    if (!binding || typeof binding !== "object" || Array.isArray(binding)) {
+      malformed += 1;
+      continue;
+    }
+    const chatId = binding.chatId;
+    if (typeof chatId !== "string" || chatId.length === 0) {
+      malformed += 1;
+      continue;
+    }
+    entries.push({ name, idempotencyKey, chatId });
+  }
+  return { entries, malformed, errors };
+}
+async function reconcilePendingCommits(store, options = {}) {
+  const { entries, malformed, errors: scanErrors } = await scanPendingEntries(store);
+  const errors = [...scanErrors];
+  let cleaned = 0;
+  let kept = 0;
+  const limit = options.limit ?? Infinity;
+  for (const entry of entries) {
+    if (cleaned + kept >= limit) break;
+    let turnDoc;
+    try {
+      turnDoc = await store.read(`turn:${entry.chatId}:${entry.idempotencyKey}`);
+    } catch (thrown) {
+      errors.push(`读取 turn:${entry.chatId}:${entry.idempotencyKey} 失败：${describeError(thrown)}`);
+      kept += 1;
+      continue;
+    }
+    if (isTurnCommitted(turnDoc)) {
+      try {
+        await store.remove(entry.name);
+        cleaned += 1;
+      } catch (thrown) {
+        if (options.reportDeleteErrors !== false) {
+          errors.push(`删除 orphan ${entry.name} 失败：${describeError(thrown)}`);
+        }
+        kept += 1;
+      }
+    } else {
+      kept += 1;
+    }
+  }
+  return {
+    scanned: entries.length,
+    cleaned,
+    kept,
+    malformed,
+    errors
+  };
+}
+function isTurnCommitted(doc) {
+  if (!doc || typeof doc !== "object" || Array.isArray(doc)) return false;
+  const record = doc;
+  if (record.rolledBack === true) return false;
+  const receipt = record.receipt;
+  if (!receipt || typeof receipt !== "object" || Array.isArray(receipt)) return false;
+  return true;
+}
+function describeError(value) {
+  if (value instanceof Error) return value.message;
+  return String(value);
+}
+
 // src/atlas-settings.ts
 var ATLAS_SETTINGS_SCHEMA_VERSION = 2;
 var BUILTIN_PROMPT_PRESET_ID = "builtin-default";
@@ -10112,7 +10206,6 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
     };
     await store.write(`binding:${binding.chatId}`, nextBinding);
     bindingCache.set(binding.chatId, nextBinding);
-    await store.remove(`pending:${idempotencyKey}`);
     receiptCache.set(idempotencyKey, receipt);
     await store.write(`turn:${binding.chatId}:${idempotencyKey}`, {
       schemaVersion: 1,
@@ -10131,6 +10224,19 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
         lastCommittedMessageId: binding.lastCommittedMessageId
       }
     });
+    try {
+      await store.remove(`pending:${idempotencyKey}`);
+    } catch (thrown) {
+      pushLog({
+        at: now(),
+        level: "warn",
+        kind: "pending-remove-failed",
+        chatId: request.chatId,
+        worldId: binding.worldId,
+        idempotencyKey,
+        message: `pending 文档删除失败（commit 已成功，将在下次启动 / 路由初始化时清理）：${thrown instanceof Error ? thrown.message : String(thrown)}`.slice(0, 300)
+      });
+    }
     const lorebook = buildLorebookPlans(output.world, receipt);
     try {
       if ("geo" in output && output.geo && output.geo.createdPoints.length > 0) {
@@ -10587,6 +10693,22 @@ function createAtlasServerCore(deps) {
     /** 诊断 / 测试用：脱敏日志副本（含会话路由内产生的日志） */
     logs() {
       return shared.logs.map((entry) => ({ ...entry }));
+    },
+    /** R12：清理 orphan pending（commit 已成功但 pending 没删）。UI 启动钩子 / 调试用。 */
+    async reconcilePending() {
+      const report = await reconcilePendingCommits(deps.store);
+      if (report.cleaned > 0 || report.errors.length > 0) {
+        shared.logs.push({
+          at: deps.now ? deps.now() : Date.now(),
+          kind: "pending-reconcile",
+          scanned: report.scanned,
+          cleaned: report.cleaned,
+          kept: report.kept,
+          malformed: report.malformed,
+          ...report.errors.length > 0 ? { errors: report.errors.slice(0, 10) } : {}
+        });
+      }
+      return report;
     },
     /** 测试辅助：注入设置（跳过 PUT 校验流程；仅供测试进程使用） */
     __setSettingsForTest(next) {

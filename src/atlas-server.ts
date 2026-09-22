@@ -49,6 +49,7 @@ import { buildSubMapFromDraft, sanitizeMapDoc } from "./atlas-geo-apply.ts";
 import { detectStartPlaceholder, resolveSceneStatus, retireStartPlaceholder, sanitizeSceneDoc, sceneDocKey, type SceneDoc } from "./atlas-scene.ts";
 import { validateScaleResponse } from "./atlas-scale.ts";
 import { buildLorebookPlans } from "./atlas-lorebook.ts";
+import { reconcilePendingCommits, type ReconcileReport } from "./atlas-pending-reconcile.ts";
 import {
   buildWorldTurnMessages,
   callAtlasWorldTurnApi,
@@ -1984,7 +1985,6 @@ function createCoreInstance(
     };
     await store.write(`binding:${binding.chatId}`, nextBinding);
     bindingCache.set(binding.chatId, nextBinding);
-    await store.remove(`pending:${idempotencyKey}`);
     receiptCache.set(idempotencyKey, receipt);
     // ATLAS-06：楼层 ↔ 检查点稳定映射（swipe / 编辑 / 删除回退的依据）。
     // 0.9.48（T04 去重解耦）：回合记录不再以检查点存在为条件——检查点耗尽（200 上限）后
@@ -2007,6 +2007,22 @@ function createCoreInstance(
         lastCommittedMessageId: binding.lastCommittedMessageId,
       },
     });
+    // R12：pending.remove 是全局 store 的独立 IO，不在会话覆盖层内。失败不阻断
+    // 响应（响应已带新 session，author 看到 commit 成功），留 orphan pending——
+    // 由启动钩子调 reconcilePendingCommits 清理（atlas-pending-reconcile.ts）。
+    try {
+      await store.remove(`pending:${idempotencyKey}`);
+    } catch (thrown) {
+      pushLog({
+        at: now(),
+        level: "warn",
+        kind: "pending-remove-failed",
+        chatId: request.chatId,
+        worldId: binding.worldId,
+        idempotencyKey,
+        message: `pending 文档删除失败（commit 已成功，将在下次启动 / 路由初始化时清理）：${thrown instanceof Error ? thrown.message : String(thrown)}`.slice(0, 300),
+      });
+    }
     // 8. 世界书条目规划（纯派生，零 IO；写入由 UI 扩展经酒馆 world-info API 完成）。
     //    duplicate / failed 不产出规划：duplicate 本就写过了，failed 零部分写入。
     const lorebook = buildLorebookPlans(output.world, receipt);
@@ -2568,6 +2584,22 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
     /** 诊断 / 测试用：脱敏日志副本（含会话路由内产生的日志） */
     logs(): Record<string, unknown>[] {
       return shared.logs.map((entry) => ({ ...entry }));
+    },
+    /** R12：清理 orphan pending（commit 已成功但 pending 没删）。UI 启动钩子 / 调试用。 */
+    async reconcilePending(): Promise<ReconcileReport> {
+      const report = await reconcilePendingCommits(deps.store);
+      if (report.cleaned > 0 || report.errors.length > 0) {
+        shared.logs.push({
+          at: deps.now ? deps.now() : Date.now(),
+          kind: "pending-reconcile",
+          scanned: report.scanned,
+          cleaned: report.cleaned,
+          kept: report.kept,
+          malformed: report.malformed,
+          ...(report.errors.length > 0 ? { errors: report.errors.slice(0, 10) } : {}),
+        });
+      }
+      return report;
     },
     /** 测试辅助：注入设置（跳过 PUT 校验流程；仅供测试进程使用） */
     __setSettingsForTest(next: Partial<AtlasServerSettingsV2>): void {

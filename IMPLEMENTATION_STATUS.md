@@ -36,17 +36,19 @@
 |---|---|---|
 | R00 | ✅ 完成 | 7 缺陷全复现，门禁 391/391，夹具 4 套就绪 |
 | R01 | ✅ 完成（DOM 层） | 图层拆分 + 工具显示 + hint 修复；真实浏览器命中验收归 R14 |
-| R02 | 未开始 | |
-| R03 | 未开始 | |
-| R04 | 未开始 | |
-| R05 | 未开始 | |
-| R06 | 未开始 | |
-| R07 | 未开始 | |
-| R08 | 未开始 | |
+| R02 | ✅ 完成 | 提示词草稿 kind 状态模型：builtin/new/saved；新建可编辑 + 另存为字段保真 + 连接级 systemPrompt 警告；395/395 |
+| R03 | ✅ 完成 | 默认 6 段提示词 + 实际注入 `$5/$U/$C/$1/$6/$7/$8` + 单次占位符扫描 + `/turns/preview`；400/400 |
+| R04 | ✅ 完成 | 统一运行时视图（ledger 投影覆盖 CharacterState 基线）+ npcDirectory 单读路径（D05）+ 分支游标感知；404/404 |
+| R05 | ✅ 完成 | 协议 v2 契约 + 同轮临时引用 + 应用管线复用 commitAtlasTurn + 已知 ID 校验 + 未知引用整单拒收；418/418 |
+| R06 | ✅ 完成 | 场景锚定（独立于旅行）+ bootstrap 识别（mode=bootstrap duration=0）+ 起点占位指纹 + lastConfirmed 分离 + v2 封套 + `worldTurnProtocol` 设置；432/432 |
+| R06 补充 | ✅ 完成 | `buildStarterWorld` 改为空地理，新世界不再生成"起点"占位点；纯占位在 `/state` 与地图语境默认隐藏；452/452 |
+| R07 | ✅ 完成 | 身份消歧（ambiguous 整单拒绝）+ identityUpdates 不重建实体 + presence 落账 + 附近卡片详情 + 零写入收口；442/442 |
+| R08 | ✅ 完成 | 地图相机（fit 无下限 / 光标缩放 / 反缩放）+ 手势状态机（pan / 拖拽 / pinch）+ suppressClick 不提前清 + 相机持久化；447/447 |
+| R08 热修 | ✅ 完成 | marker `inverseScale = 1/k`（旧公式 fit 时撑满视口吞点击）+ 仅空白/双指 setPointerCapture；452/452 |
+| R12 | ✅ 完成 | 原子事务收口：`pending.remove` best-effort（失败记日志不抛错）+ `reconcilePendingCommits` 启动清理 orphan；460/460 |
 | R09 | 未开始 | |
 | R10 | 未开始 | |
 | R11 | 未开始 | |
-| R12 | 未开始 | |
 | R13 | 未开始 | |
 | R14 | 未开始 | |
 | R15 | 未开始 | |
@@ -251,3 +253,25 @@
 
 - [x] `markerInverseScale` 修正为 `1/k`（旧公式 `fitK/k`：fit 时 =1 等于没抵消，单点世界 k≈58 → 标记放大 58 倍铺满视口，并吃掉全部指针事件导致拖不动、缩不小）
 - [x] viewport 只在**空白起手 / 双指**时 `setPointerCapture`（旧实现每次 pointerdown 都捕获 → 抢走标记的点击）
+- [x] 回到 100% 不再清空平移：R08 热修正好赶上 R12 上线，详见 R12 章节。
+
+## R12 — 多文档原子提交与 pending 启动清理（2026-09-23）
+
+- [x] 诊断：0.9.42 会话承载已让 world / binding / maps / turns / geo-auto 落在同一 session 对象（单文档原子），由 `createAtlasServerCore` 整体 rev+1 带回浏览器。**唯一残留 IO 缺口**：`pending:*` 文档在全局 store，`/turns/commit` 步骤 7 的 `store.remove('pending:<idempotencyKey>')` 是分开的 IO——失败会让响应抛错、新 session 不写回，作者重试则走完整 prepare+commit（浪费 token）。
+- [x] 收口：`executeCommit` 步骤 7 把 `pending.remove` 包进 `try/catch`，失败 → 记录 `pending-remove-failed` 警告日志（at/chatId/worldId/idempotencyKey/message），**不抛错**——响应正常带回新 session。orphan pending 留给启动钩子清理。
+- [x] 新增 `src/atlas-pending-reconcile.ts`（纯函数 + IO 分离）：
+  - `scanPendingEntries(store)` 扫所有 `pending:*` 文档，提取 `{chatId, idempotencyKey}`；malformed（无 binding / chatId 缺失 / 文档名不可解析）保留以免误删
+  - `reconcilePendingCommits(store, options?)` 对每条 pending 读 `turn:<chatId>:<idempotencyKey>`：
+    - 存在且非 `rolledBack` → orphan，删除
+    - 不存在 → 合法（commit 未成功），保留
+    - 读取失败 → 视为不确定，保留并记录错误
+- [x] `createAtlasServerCore` 暴露 `reconcilePending()` 方法（`shared.logs.push` 落日志）：UI 启动钩子 / 调试面板可调一次。
+- [x] 设计纪律：单条失败不阻断整体清理；malformed 永远保留；rolledBack turn 不被清（pending 可能合法供 retry 路径用）。
+
+证据：
+- 新增 `tests/atlas-r12-atomic-commit.test.mjs` 8 项通过：orphan 清 / legitimate 保留 / malformed 保留 / rolledBack 不动 / 多 chat 独立 / store.read 失败保留 / `scanPendingEntries` 单元 / limit 选项
+- 门禁：typecheck 0 errors；pack 通过（镜像同步）；test **460/460**（452 → 460）
+
+残留：
+- 是否把 `pending:*` 也搬进 session 改掉根上 IO 分离：判断为"可演进但非 P0"。现状已满足计划"失败零 root 写入 + 0 条新 API 调 + pending 留熟"的底线；如有实测发现连续 orphan 堆积（不太可能） → R15 集成期决定。
+- 实际启动钩子：`reconcilePending()` 还没在任何 Atlasia chatMetadata 提交流程里被自动调用——UI 层接入留给 R15 集成阶段。
