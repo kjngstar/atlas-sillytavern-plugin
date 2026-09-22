@@ -832,7 +832,9 @@
   inset: 0;
   display: grid;
   /* 0.9.20：空地理提示放底部——居中会压住起点标记；
-     0.9.38：geobar 收纳为底部工具条，提示抬到工具条上方避免重叠 */
+     0.9.38：geobar 收纳为底部工具条，提示抬到工具条上方避免重叠
+     R01：提示是纯文字说明，永远不拦截指针——旧实现空文字也铺满整层挡点击 */
+  pointer-events: none;
   place-items: end center;
   color: var(--am-error, var(--aw-muted));
   font-family: var(--am-font-family, var(--aw-sans));
@@ -840,6 +842,8 @@
   padding: 0 24px 56px;
   text-align: center;
 }
+
+.aw-maparea__hint:empty { display: none; }
 
 /* 0.9.20 变化页失败回执标红 */
 .aw-move.is-failed { border-left-color: var(--aw-danger); }
@@ -861,16 +865,61 @@
     var(--am-canvas, var(--aw-paper));
 }
 
-.aw-layer {
+/* R01 图层栈：zoom/pan 变换作用于 stage，底图 / 网格 / 标点三层同步移动；
+   image 与 grid 分离，不再共用同一个 backgroundImage 属性 */
+.aw-stage {
   position: absolute;
   inset: 0;
   transform-origin: center center;
   transition: transform 0.15s ease-out;
-  background-size: 100% 100%;
-  background-repeat: no-repeat;
 }
 
-.aw-layer.has-image { background-color: transparent; }
+.aw-image,
+.aw-grid {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.aw-grid { background-repeat: repeat; }
+
+.aw-image { background-repeat: no-repeat; background-size: 100% 100%; }
+.aw-image.has-image { background-color: transparent; }
+
+/* R01（M02）视图切换：叠加（默认）/ 纯网格 / 纯底图 */
+.aw-stage[data-view="grid"] .aw-image { display: none; }
+.aw-stage[data-view="image"] .aw-grid { display: none; }
+
+.aw-mapview {
+  display: inline-flex;
+  border: 1px solid var(--am-border, rgba(138, 106, 28, 0.35));
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--aw-panel);
+}
+
+.aw-mapview__btn {
+  border: none;
+  background: transparent;
+  color: var(--aw-ink-soft);
+  font-family: var(--am-font-family, var(--aw-sans));
+  font-size: 11px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.aw-mapview__btn + .aw-mapview__btn { border-left: 1px solid var(--am-border, rgba(138, 106, 28, 0.25)); }
+
+.aw-mapview__btn[aria-pressed="true"] {
+  background: var(--aw-teal-soft, rgba(31, 122, 122, 0.12));
+  color: var(--aw-ink-strong);
+  font-weight: 600;
+}
+
+.aw-layer {
+  position: absolute;
+  inset: 0;
+}
 
 /* 装帧：四角标 + 指北针 + 比例尺 + 金色虚线路线 */
 
@@ -976,9 +1025,13 @@
 
 .aw-scale__label { white-space: nowrap; }
 
+/* R01：比例尺详情升级为独立浮层——展开时向上弹出、盖过图例（z-index 7），
+   不再与图例（z-index 3 固定 bottom）在同一区域互相遮挡 */
 .aw-scale__detail {
   display: none;
-  margin-top: 4px;
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 6px);
   width: 230px;
   background: var(--aw-panel);
   border: 1px solid rgba(138, 106, 28, 0.35);
@@ -986,7 +1039,9 @@
   padding: 7px 9px;
   box-shadow: 0 4px 14px rgba(31, 42, 51, 0.18);
   pointer-events: auto;
+  z-index: 7;
 }
+.aw-scale.is-detail-open { z-index: 7; }
 .aw-scale.is-detail-open .aw-scale__detail { display: block; }
 
 .aw-scale__row { line-height: 1.7; color: var(--aw-ink-soft); }

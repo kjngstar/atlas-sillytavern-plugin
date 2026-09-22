@@ -214,7 +214,7 @@ function atlasLog(tag, text, detail = null) {
 
 async function loadUiCore() {
   // 先组件内构建产物（发布形态），再上级 src（开发形态，工程内运行才可用）
-  const attempts = ["./dist/atlas-ui-core.mjs", "../src/atlas-ui-core.ts"];
+  const attempts = ["./dist/atlas-ui-core.mjs"];
   let lastError = null;
   for (const specifier of attempts) {
     try {
@@ -1562,6 +1562,9 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
         return;
       }
       center.append(buildMap());
+      // R01：地图动作（提炼 / 标定 / 纠偏）的成败反馈直接显示在地图页，
+      // 不再只写 settingsStatus 让用户切到设置页才能看到结果
+      if (statusLine()) center.append(statusLine());
       return;
     }
 
@@ -1686,6 +1689,13 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
   // ---------------------------------------------------------------------------
 
   const viewport = el("div", "aw-viewport");
+  // R01 图层拆分：底图（aw-image）/ 网格（aw-grid）/ 标点路线（aw-layer）各占一个
+  // 独立元素——底图与网格不再抢同一个 backgroundImage 属性（旧实现两者复用 mapLayer，
+  // 后赋值覆盖前者，有底图时网格必然消失）。zoom/pan 变换作用在 aw-stage 包装层，
+  // 三层同步缩放平移，格线与标点永远对齐。
+  const stage = el("div", "aw-stage");
+  const imageLayer = el("div", "aw-image");
+  const gridLayer = el("div", "aw-grid");
   const mapLayer = el("div", "aw-layer");
   const mapHint = el("div", "aw-maparea__hint");
   const zoomBox = el("div", "aw-zoom");
@@ -1694,6 +1704,8 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
   const mapTools = el("div", "aw-maptools");
   const travelBar = el("div", "aw-travel");
   const mapCanvas = el("div", "aw-maparea");
+  // R01（M02 快捷视图）：叠加（默认）/ 纯网格 / 纯底图；只影响可见性
+  let mapViewMode = "overlay";
   let mapBuilt = false;
   let mapScaleEl = null;
   // 0.9.50 标尺条：条 / 标签 / 详情元素与展开态（重建 renderMap 时保持展开）
@@ -1712,7 +1724,7 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
   let lastMapData = null;
 
   const applyTransform = () => {
-    mapLayer.style.transform = `scale(${zoom}) translate(${panX}px, ${panY}px)`;
+    stage.style.transform = `scale(${zoom}) translate(${panX}px, ${panY}px)`;
     zoomLabel.textContent = `${Math.round(zoom * 100)}%`;
   };
   const setZoom = (next) => {
@@ -1846,7 +1858,8 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
   function buildMap() {
     if (mapBuilt) return mapCanvas;
     mapBuilt = true;
-    viewport.append(mapLayer);
+    stage.append(imageLayer, gridLayer, mapLayer);
+    viewport.append(stage);
     // 0.9.49（M03）：视口尺寸变化 → 等比布局重算（cellPx / 留白 / 格网同步刷新）
     if (typeof ResizeObserver === "function") {
       let resizeTimer = null;
@@ -1903,7 +1916,29 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       // 只调 renderCenter 会留下未筛选的旧标记。
       renderPage();
     });
-    mapTools.append(regionSelect, zoomBox);
+    mapTools.append(regionSelect);
+    // R01（M02）：网格 / 底图 / 叠加 快捷视图切换——只改图层可见性，不碰坐标与标定
+    const viewSwitch = el("div", "aw-mapview");
+    viewSwitch.setAttribute("role", "group");
+    viewSwitch.setAttribute("aria-label", "地图图层视图：叠加、纯网格或纯底图");
+    for (const [mode, label, aria] of [
+      ["overlay", "叠加", "叠加显示底图与网格"],
+      ["grid", "网格", "只显示网格"],
+      ["image", "底图", "只显示底图"],
+    ]) {
+      const viewBtn = el("button", "aw-mapview__btn", label);
+      viewBtn.type = "button";
+      viewBtn.dataset.mode = mode;
+      viewBtn.setAttribute("aria-label", aria);
+      viewBtn.setAttribute("aria-pressed", String(mapViewMode === mode));
+      viewBtn.addEventListener("click", () => {
+        mapViewMode = mode;
+        viewSwitch.querySelectorAll(".aw-mapview__btn").forEach((n) => n.setAttribute("aria-pressed", String(n.dataset.mode === mode)));
+        if (lastMapData) renderMap(data());
+      });
+      viewSwitch.append(viewBtn);
+    }
+    mapTools.append(viewSwitch, zoomBox);
     // 0.9.24 世界书提炼地理；0.9.26 地图抢救：geoBar 常显 + 新增「从近期剧情提炼新地点」
     // （复用同一条 adopt 管线：重名自动跳过，产出只增不改——地图跟着剧情长）
     const geoBar = el("div", "aw-geobar");
@@ -2442,7 +2477,12 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       mapHint.textContent = hasRealGeo
         ? ""
         : "这个世界还没有地理数据：自动建世只创建「起点」。点下方「从世界书提炼地理」导入卡书里的地点；之后随着剧情推进，可用「从近期剧情提炼新地点」让地图继续生长。";
+      // R01：空提示不渲染占位覆盖层（旧实现空文字仍是 inset:0 的 absolute 层，挡住点击）
+      mapHint.style.display = mapHint.textContent ? "" : "none";
     }
+    // R01：地图工具条显式显示（旧实现依赖 .is-visible 但从未有人加，工具永远 display:none）；
+    // 按钮各自的禁用逻辑独立于可见性
+    mapTools.classList.add("is-visible");
     regionSelect.innerHTML = "";
     const allOption = document.createElement("option");
     allOption.value = "";
@@ -2477,17 +2517,21 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
         scaleCtx = null;
       }
     }
-    // 真实格网挂 mapLayer（与标点共用 zoom/平移 transform，缩放后格线仍是格子）；
-    // viewport 的静态装饰纹理关闭——固定背景格不能冒充可测量网格
+    // R01 图层接线：viewport 静态装饰纹理保持关闭（固定背景格不能冒充可测量网格）；
+    // 网格画在独立 gridLayer（repeat 语义由 CSS 保证平铺，不再被 no-repeat 裁成单块）；
+    // 底图画在独立 imageLayer。默认叠加显示（M02：有底图时网格仍然可见），
+    // 视图切换（叠加/网格/底图）只改可见性，不改坐标与数据。皮肤令牌走 --am-grid-*。
     viewport.style.backgroundImage = "none";
-    if (!mapData.mapImagePresent) {
-      mapLayer.style.backgroundImage =
-        "repeating-linear-gradient(0deg, transparent, transparent " +
-        `${Math.max(1, layout.cellPx - 1)}px, var(--aw-teal-wash) ${Math.max(1, layout.cellPx - 1)}px, var(--aw-teal-wash) ${layout.cellPx}px), ` +
-        `repeating-linear-gradient(90deg, transparent, transparent ${Math.max(1, layout.cellPx - 1)}px, var(--aw-teal-wash) ${Math.max(1, layout.cellPx - 1)}px, var(--aw-teal-wash) ${layout.cellPx}px)`;
-      mapLayer.style.backgroundSize = `${layout.cellPx}px ${layout.cellPx}px`;
-      mapLayer.style.backgroundPosition = `${layout.offsetX}px ${layout.offsetY}px`;
-    }
+    const line = `var(--am-grid-minor, var(--aw-teal-wash))`;
+    const gap = Math.max(1, layout.cellPx - 1);
+    gridLayer.style.backgroundImage =
+      `repeating-linear-gradient(0deg, transparent, transparent ${gap}px, ${line} ${gap}px, ${line} ${layout.cellPx}px), ` +
+      `repeating-linear-gradient(90deg, transparent, transparent ${gap}px, ${line} ${gap}px, ${line} ${layout.cellPx}px)`;
+    // repeating-gradient 自身已平铺；size 拉满元素即可，绝不复用 no-repeat 的单块行为
+    gridLayer.style.backgroundSize = "100% 100%";
+    gridLayer.style.backgroundRepeat = "repeat";
+    gridLayer.style.backgroundPosition = `${layout.offsetX}px ${layout.offsetY}px`;
+    stage.dataset.view = mapViewMode;
 
     for (const point of points) {
       const marker = el("button", "aw-point");
@@ -2595,23 +2639,30 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     }
 
     if (mapData.mapImagePresent) {
+      // R01 缓存键含底图版本（world.updatedAt）：换图 / 删图 / 世界更新都会换键，
+      // 旧缓存不会残留在新图上；拉取失败删键允许下次重试，不永久记住失败。
       const worldId = String(d.worldId ?? "");
-      if (!mapImageCache.has(worldId)) {
-        mapImageCache.set(worldId, null);
+      const imageRevision = String(mapData.mapImageRevision ?? d.currentTime ?? 0);
+      const cacheKey = `${worldId}|${imageRevision}`;
+      if (!mapImageCache.has(cacheKey)) {
+        mapImageCache.set(cacheKey, null);
         void api.request("POST", "/map/image", { chatId: String(state().chatId ?? "") }).then((result) => {
           const payload = result.body?.data?.dataUrl;
-          mapImageCache.set(worldId, typeof payload === "string" ? payload : null);
+          mapImageCache.set(cacheKey, typeof payload === "string" ? payload : null);
           if (state().page === "map") renderMap(data());
-        }).catch(() => mapImageCache.set(worldId, null));
+        }).catch(() => mapImageCache.delete(cacheKey));
       }
-      const imageUrl = mapImageCache.get(worldId);
+      const imageUrl = mapImageCache.get(cacheKey);
       if (imageUrl) {
-        mapLayer.classList.add("has-image");
-        mapLayer.style.backgroundImage = `url("${imageUrl}")`;
-        // 0.9.49（M03）：底图模式铺满视口，清掉格网布局的 size/position 内联
-        mapLayer.style.backgroundSize = "100% 100%";
-        mapLayer.style.backgroundPosition = "";
+        imageLayer.classList.add("has-image");
+        imageLayer.style.backgroundImage = `url("${imageUrl}")`;
+        imageLayer.style.backgroundSize = "100% 100%";
+        imageLayer.style.backgroundRepeat = "no-repeat";
       }
+    } else {
+      // 无底图 / 删图 / 加载失败：清空底图层与旧缓存键，回到干净网格
+      imageLayer.classList.remove("has-image");
+      imageLayer.style.backgroundImage = "";
     }
 
     applyTransform();

@@ -8513,6 +8513,8 @@ function createCoreInstance(store, deps, shared) {
         points: mapPoints,
         pointCount: (world.points ?? []).length,
         mapImagePresent: Boolean(world.mapImage),
+        // R01：底图版本（世界更新时间）——前端缓存键的失效依据，换图 / 删图必换键
+        mapImageRevision: world.updatedAt ?? 0,
         pointMeta: Object.fromEntries(pointMetaEntries),
         submaps: Object.fromEntries(submapEntries.map((entry) => [entry.pointId, { scale: entry.scale, points: entry.points }])),
         submapCount: submapEntries.length,
