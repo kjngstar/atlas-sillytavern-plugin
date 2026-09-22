@@ -165,3 +165,23 @@
 - 事件明细超摘要上限时只保留主摘要 + 警告（不做独立事件存储，等 R12 原子提交一起收口）
 - mapScaleHints 解析已支持，应用（地图尺度接线）在 R10
 - v2 分支的端到端服务级测试（含 store / 日志）依赖真实酒馆链路 → R14 交互验收
+
+## R06 — 首次定位、开场识别与「起点」迁移（2026-09-23）
+
+- [x] 新建 `src/atlas-scene.ts`：起点占位指纹（生成来源 + 结构指纹：1 地点 id=1/起点/(50,50)/start + 1 地区 + 无账本 + 无修订 + 无额外人物）——名字匹配单独不足；用户真正创建的「起点」因编辑证据不被误判
+- [x] 占位迁移：retired 不删除——定义修订审计 + `scene:<worldId>` sidecar 记录；重复运行幂等；地图点列 / 真实地点语境过滤 retired 点
+- [x] 场景未知与 lastConfirmed 分开表达：/state 新增 `scene` 块（known / placeholder+retired / lastConfirmed / bootstrap 簿记）
+- [x] 开场识别 `POST /scene/bootstrap`（mode=bootstrap，duration=0）：apply=false 预览（零写入，明确 callCount=1）；apply=true 一次 v2 提交（时间游标不动、地点游标随 scene 锚定）；成功锚定后占位自动 retired；诚实未知（无证据 → resolution=unknown → 不造点、不退役、不写 lastConfirmed）
+- [x] v2 封套上线（R05 残项收口）：`DEFAULT_PROMPT_SEGMENTS_V2` 6 段（契约含 schemaVersion/baseRevision/new: 引用/scene/presence 模板 + $5/$U/$C/$1/$6/$7/$8 素材 + 核对）；新增 `$B` 占位符 = 世界时间游标
+- [x] 协议设置 `worldTurnProtocol`（缺省 v2；v1 = 旧契约逃生门）：runtime.update 命令 + sanitize + settingsView（内置默认分段按协议展示）+ 推进页切换按钮；作者自定义预设不被覆盖（混合模式：v1 输出仍走 v1 管线）
+- [x] 推进页「场景定位」区：当前场景 / 上次确认 / 协议三行 + 识别按钮（预览 → 应用，确认对话框注明消耗 1 次请求）+ 占位迁移状态提示
+- [x] 路由 22 条（核心 + 插件清单同步）
+
+证据：
+- 新增 `tests/atlas-r06-scene.test.mjs` 14 项通过：占位指纹 5（含「用户创建的真起点保留」）+ retired 幂等 2 + 场景状态分离 1 + v2 封套 1 + 服务端 bootstrap 5（预览零写入 / 应用单次提交 / 未知诚实拒绝 / state 场景块 / 协议逃生门）
+- 门禁：typecheck 0 errors；pack 通过；test 432/432（418 + 14）
+
+残留：
+- 首轮普通推进同轮场景识别 = v2 封套场景锚定路径本身（已可用）；真实模型行为抽样 → R14
+- 地图上占位点的「占位」视觉标注（非过滤式隐藏）→ R08/R11 地图改造一起收
+- bootstrap 提交未建 ATLAS-06 技术检查点（duration=0 无回退需求；如需归 R12 事务化）

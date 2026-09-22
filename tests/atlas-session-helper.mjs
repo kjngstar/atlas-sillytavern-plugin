@@ -12,6 +12,7 @@ const SESSION_ROUTE_METHODS = (method, path) =>
     path === "/map/image" ||
     path === "/map/travel-preview" ||
     path.startsWith("/turns/") ||
+    path === "/scene/bootstrap" ||
     path === "/bindings" ||
     path === "/worlds/import" ||
     path === "/worlds/ensure-starter" ||

@@ -46,6 +46,7 @@ import { prepareAtlasTurn, commitAtlasTurn, provisionReferencedCharacters } from
 import { applyAtlasV2Turn } from "./atlas-turn-v2.ts";
 import { parseAtlasWorldTurnDraftV2 } from "./atlas-contract-v2.ts";
 import { buildSubMapFromDraft, sanitizeMapDoc } from "./atlas-geo-apply.ts";
+import { detectStartPlaceholder, resolveSceneStatus, retireStartPlaceholder, sanitizeSceneDoc, sceneDocKey, type SceneDoc } from "./atlas-scene.ts";
 import { validateScaleResponse } from "./atlas-scale.ts";
 import { buildLorebookPlans } from "./atlas-lorebook.ts";
 import {
@@ -53,6 +54,9 @@ import {
   callAtlasWorldTurnApi,
   extractJsonObject,
   parseAtlasWorldTurnDraft,
+  DEFAULT_PROMPT_SEGMENTS_V2,
+  V2_BOOTSTRAP_TASK_CONTENT,
+  isV2ProtocolEnabled,
   type AtlasApiPreset,
   type AtlasWorldTurnPromptInput,
 } from "./atlas-api-client.ts";
@@ -380,6 +384,7 @@ export const ATLAS_ROUTE_MANIFEST = [
   { method: "POST", path: "/map/image" },
   { method: "POST", path: "/turns/prepare" },
   { method: "POST", path: "/turns/preview" },
+  { method: "POST", path: "/scene/bootstrap" },
   { method: "POST", path: "/turns/commit" },
   { method: "POST", path: "/turns/retry" },
   { method: "POST", path: "/turns/restore" },
@@ -405,6 +410,7 @@ const ATLAS_SESSION_ROUTES = new Set<string>([
   "POST /map/image",
   "POST /turns/prepare",
   "POST /turns/preview",
+  "POST /scene/bootstrap",
   "POST /turns/commit",
   "POST /turns/retry",
   "POST /turns/restore",
@@ -1219,8 +1225,12 @@ function createCoreInstance(
       currentRegionId: pointRegionId(world, binding.currentLocationId ?? null),
       flags: flagsFor(world, binding.branchId, binding.worldTimeCursor),
     });
+    // R06 场景状态：占位指纹 + retired 列表 + lastConfirmed（与「当前未知」分开表达）
+    // retired 占位点在真实地点语境（地图点列 / 附近）默认过滤，结构保留（引用不悬空）
+    const sceneDoc = sanitizeSceneDoc(await store.read(sceneDocKey(world.id)).catch(() => null));
+    const retiredPointIds = new Set(sceneDoc.retiredPointIds);
     // 有界地图数据：静态世界结构（地点列表），不含世界书 / 记忆 / 账本
-    const mapPoints = (world.points ?? []).slice(0, MAP_POINTS_MAX).map((p) => ({
+    const mapPoints = (world.points ?? []).filter((p) => !retiredPointIds.has(String(p.id))).slice(0, MAP_POINTS_MAX).map((p) => ({
       id: String(p.id),
       name: String(p.name).slice(0, MAP_POINT_NAME_CHARS),
       x: p.x,
@@ -1314,6 +1324,11 @@ function createCoreInstance(
     const calibrationEntries = Object.entries(mapDoc.calibrations)
       .filter(([key]) => key === "world" || worldPointIds.has(key))
       .slice(0, 40);
+    // R06 场景状态：占位指纹 + retired 列表 + lastConfirmed（与「当前未知」分开表达）
+    const scene = resolveSceneStatus(world, sceneDoc, binding.currentLocationId ?? null);
+    const lastConfirmedPointName = scene.lastConfirmed
+      ? (world.points ?? []).find((p) => String(p.id) === scene.lastConfirmed!.pointId)?.name ?? null
+      : null;
     return okResult({
       chatId,
       worldId: world.id,
@@ -1321,6 +1336,19 @@ function createCoreInstance(
       branchId: binding.branchId,
       currentTime: binding.worldTimeCursor,
       currentLocationId: binding.currentLocationId ?? null,
+      scene: {
+        known: scene.known,
+        placeholder: {
+          isPlaceholder: scene.placeholder.isPlaceholder,
+          pointId: scene.placeholder.pointId,
+          retired: scene.placeholder.retired,
+          reasons: scene.placeholder.reasons.slice(0, 5),
+        },
+        lastConfirmed: scene.lastConfirmed
+          ? { pointId: scene.lastConfirmed.pointId, pointName: lastConfirmedPointName, at: scene.lastConfirmed.at }
+          : null,
+        bootstrap: sceneDoc.bootstrap,
+      },
       nearbyPointIds: relevance.nearbyPointIds,
       relevantNpcIds: relevance.relevantNpcIds,
       npcReasons: relevance.npcReasons,
@@ -1416,7 +1444,7 @@ function createCoreInstance(
         ? payload.recentAssistantTexts.filter((t): t is string => typeof t === "string")
         : [],
     });
-    const messages = buildWorldTurnMessages(preset, prepared.input).map((m) => ({
+    const messages = buildWorldTurnMessages(prepared.effectivePreset, prepared.input).map((m) => ({
       role: m.role,
       content: m.content,
       chars: m.content.length,
@@ -1432,9 +1460,188 @@ function createCoreInstance(
     return okResult({
       messages,
       promptSource,
+      protocol: prepared.protocol,
       promptPresetName: preset.name,
       contextTurnCount: Math.min(Math.max(typeof preset.contextTurnCount === "number" ? preset.contextTurnCount : 3, 1), 10),
       missing,
+    });
+  }
+
+  /**
+   * R06：开场识别（mode=bootstrap，duration=0）——已有开场白而尚无普通回合时，
+   * 从真实剧情建立初始锚点，不必再发一个「只造地点不定位」的请求。
+   * apply=false：预览解析结果（不写世界）；apply=true：一次 v2 提交（不推进时间），
+   * 成功后把起始占位标记 retired（审计 + sidecar），并记录 lastConfirmed。
+   */
+  async function handleSceneBootstrap(body: unknown): Promise<AtlasRouteResult> {
+    const payload = (body ?? {}) as {
+      chatId?: unknown;
+      apply?: unknown;
+      userText?: unknown;
+      assistantText?: unknown;
+      recentAssistantTexts?: unknown;
+      personaDescription?: unknown;
+      charDescription?: unknown;
+      loreSupplement?: unknown;
+    };
+    const chatId = typeof payload.chatId === "string" ? payload.chatId : "";
+    if (!chatId || chatId.length > ATLAS_LIMITS.ID_CHARS) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "chatId 非法");
+    }
+    const binding = requireBoundBinding(await getBinding(chatId));
+    const apply = payload.apply === true;
+    const assistantText = typeof payload.assistantText === "string" ? payload.assistantText.trim() : "";
+    if (!assistantText) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "开场材料（assistantText）为空——开场识别至少需要一段开场白。");
+    }
+    const userText = typeof payload.userText === "string" ? payload.userText : "";
+    // 2. 未配置推演 API → 明确报错；RPM 保护
+    const current = await loadSettings();
+    const preset = resolveWorldTurnPreset(current);
+    if (!preset) {
+      throw new AtlasError(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "未配置独立推演 API，无法进行开场识别。");
+    }
+    checkRpm();
+
+    const prepared = await prepareWorldTurnInputs(
+      binding,
+      preset,
+      {
+        chatId: binding.chatId,
+        userMessageId: "bootstrap",
+        userText,
+        assistantText,
+        recentAssistantTexts: Array.isArray(payload.recentAssistantTexts)
+          ? payload.recentAssistantTexts.filter((t): t is string => typeof t === "string")
+          : [],
+        ...(typeof payload.loreSupplement === "string" ? { loreSupplement: payload.loreSupplement } : {}),
+        ...(typeof payload.personaDescription === "string" ? { personaDescription: payload.personaDescription } : {}),
+        ...(typeof payload.charDescription === "string" ? { charDescription: payload.charDescription } : {}),
+      },
+      { mode: "bootstrap" },
+    );
+    const world = prepared.world;
+
+    // 恰好 1 条推演请求
+    rpmTimestamps.push(now());
+    const call = await callAtlasWorldTurnApi(prepared.effectivePreset, prepared.input, { fetchFn: deps.fetchFn, now });
+    pushLog({
+      at: now(),
+      kind: "scene-bootstrap",
+      chatId: binding.chatId,
+      presetName: preset.name,
+      model: preset.model,
+      ok: call.ok,
+      ...(call.ok ? {} : { code: call.code }),
+      status: call.status,
+      durationMs: call.durationMs,
+      apply,
+    });
+    if (!call.ok) {
+      throw new AtlasError(call.code, call.message, { retryable: call.retryable });
+    }
+
+    const cleanedText = applyContentReplaceRules(call.text, current.contentReplaceRules ?? []);
+    const v2Sources: Record<string, string> = {
+      "msg:u": userText,
+      "msg:a": assistantText,
+      ...(prepared.input.loreSupplement ? { lore: prepared.input.loreSupplement } : {}),
+    };
+    const v2Ctx = { baseRevision: binding.worldTimeCursor, sources: v2Sources };
+    let v2result = parseAtlasWorldTurnDraftV2(cleanedText, v2Ctx);
+    if (!v2result.ok && cleanedText !== call.text) {
+      v2result = parseAtlasWorldTurnDraftV2(call.text, v2Ctx);
+    }
+    if (!v2result.ok) {
+      pushLog({
+        at: now(),
+        kind: "scene-bootstrap-rejected",
+        chatId: binding.chatId,
+        errorCount: v2result.errors.length,
+        errors: v2result.errors.slice(0, 10),
+        excerpt: call.text.slice(0, 1500),
+      });
+      throw new AtlasError(
+        ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
+        `开场识别输出未通过 v2 校验（${v2result.errors.length} 处）：${v2result.errors.slice(0, 3).map((e) => `${e.path} ${e.message}`).join("；")}。可重试识别。`,
+        { retryable: true },
+      );
+    }
+    // bootstrap 铁律：只定位不推进时间
+    const draft = { ...v2result.draft, duration: 0 };
+
+    if (!apply) {
+      return okResult({
+        status: "preview",
+        protocol: "v2",
+        callCount: 1,
+        baseRevision: binding.worldTimeCursor,
+        scene: draft.scene,
+        newLocations: draft.discoveries.locations.map((l) => ({ ref: l.ref, name: l.name, regionRef: l.regionRef })),
+        newCharacters: draft.discoveries.characters.map((c) => ({ ref: c.ref, displayName: c.displayName, description: c.description.slice(0, 120) })),
+        npcUpdates: draft.npcUpdates.map((u) => ({ entityRef: u.entityRef, locationRef: u.location.locationRef, presence: u.presence, status: u.status })),
+        summary: draft.summary,
+      });
+    }
+
+    // apply：一次 v2 提交（duration=0；时间游标不动，地点游标随 scene 锚定）
+    const placeholder = detectStartPlaceholder(world);
+    const sceneDoc = sanitizeSceneDoc(await store.read(sceneDocKey(world.id)).catch(() => null));
+    const bootstrapRequest: AtlasTurnCommitRequest = {
+      turnId: `bootstrap-${binding.worldTimeCursor}`,
+      chatId: binding.chatId,
+      userMessageId: `bootstrap-${binding.worldTimeCursor}`,
+      assistantMessageId: "scene-identify",
+      swipeId: null,
+      userText,
+      assistantText,
+    };
+    const output = applyAtlasV2Turn(world, {
+      draft,
+      request: bootstrapRequest,
+      branchId: binding.branchId,
+      currentTime: binding.worldTimeCursor,
+      currentPointId: binding.currentLocationId ?? null,
+      currentRegionId: pointRegionId(world, binding.currentLocationId ?? null),
+      now: now(),
+    });
+    const receipt = output.receipt;
+    if (receipt.status === "failed") {
+      pushLog({ at: now(), kind: "scene-bootstrap-failed", chatId: binding.chatId, summary: receipt.summary });
+      return okResult({ status: "failed", receipt });
+    }
+
+    // 成功：占位 retired（修订审计 + sidecar）+ lastConfirmed + bootstrap 簿记 + 世界/绑定落盘
+    // 占位退役只在**真的锚定到地点**时执行——识别失败 / 诚实未知（无 locationRef）不迁移
+    let finalWorld = output.world;
+    let nextDoc: SceneDoc = { ...sceneDoc, bootstrap: { attempts: (sceneDoc.bootstrap?.attempts ?? 0) + 1, lastAt: now(), lastStatus: receipt.status } };
+    if (receipt.status === "committed" && receipt.currentLocationId) {
+      const retire = retireStartPlaceholder(finalWorld, nextDoc, { now: now(), info: placeholder });
+      finalWorld = retire.world;
+      nextDoc = retire.doc;
+      nextDoc = { ...nextDoc, lastConfirmed: { branchId: binding.branchId, pointId: String(receipt.currentLocationId), at: receipt.currentTime } };
+    }
+    await store.write(`world:${binding.worldId}`, finalWorld);
+    worldCache.set(binding.worldId, finalWorld);
+    if (receipt.status === "committed") {
+      const nextBinding: AtlasChatBinding = {
+        ...binding,
+        currentLocationId: receipt.currentLocationId ?? binding.currentLocationId,
+        worldTimeCursor: receipt.currentTime,
+      };
+      await store.write(`binding:${binding.chatId}`, nextBinding);
+      bindingCache.set(binding.chatId, nextBinding);
+    }
+    await store.write(sceneDocKey(world.id), nextDoc);
+    if (output.refResolution.warnings.length > 0) {
+      pushLog({ at: now(), kind: "scene-bootstrap-warnings", chatId: binding.chatId, warnings: output.refResolution.warnings.slice(0, 10) });
+    }
+    return okResult({
+      status: receipt.status,
+      receipt,
+      refResolution: output.refResolution,
+      placeholderRetired: nextDoc.retiredPointIds.length > sceneDoc.retiredPointIds.length,
+      callCount: 1,
     });
   }
 
@@ -1448,6 +1655,7 @@ function createCoreInstance(
     binding: AtlasChatBinding,
     preset: NonNullable<ReturnType<typeof resolveWorldTurnPreset>>,
     request: Pick<AtlasTurnCommitRequest, "chatId" | "userMessageId" | "userText" | "assistantText" | "recentAssistantTexts" | "loreSupplement" | "personaDescription" | "charDescription">,
+    options?: { mode?: "turn" | "bootstrap" },
   ) {
     const world = await requireWorld(binding);
     const currentPointId = binding.currentLocationId ?? null;
@@ -1488,8 +1696,23 @@ function createCoreInstance(
       ...(recentContextText ? { recentContextText } : {}),
       ...(request.personaDescription ? { personaDescription: request.personaDescription } : {}),
       ...(request.charDescription ? { charDescription: request.charDescription } : {}),
+      // R06 v2：baseRevision = 世界时间游标（$B，模型必须逐字回显）
+      baseRevision: binding.worldTimeCursor,
     };
-    return { world, prepareOutput, currentPointId, currentRegionId, input, recentAssistantTexts };
+    // R06 协议选择（提示词资产与输出协议分开版本）：
+    // - v2（缺省）且作者未自定义提示词（无连接级 systemPrompt / 无预设分段）→ 内置 v2 封套；
+    // - bootstrap 模式：追加开场识别任务段（duration=0，只定位不推进）；
+    // - 作者自定义内容原样生效（混合模式：v1 输出仍由 v1 管线解析）。
+    const protocol = (await loadSettings()).worldTurnProtocol ?? "v2";
+    const authorOverridden = Boolean(preset.systemPrompt?.trim()) || (Array.isArray(preset.promptSegments) && preset.promptSegments.length > 0);
+    let effectivePreset = preset;
+    if (isV2ProtocolEnabled(protocol) && !authorOverridden) {
+      const v2Segments = options?.mode === "bootstrap"
+        ? [...DEFAULT_PROMPT_SEGMENTS_V2.slice(0, 4), { role: "user", name: "开场识别任务（mode=bootstrap）", mainSlot: "B", content: V2_BOOTSTRAP_TASK_CONTENT }, DEFAULT_PROMPT_SEGMENTS_V2[5]!]
+        : DEFAULT_PROMPT_SEGMENTS_V2;
+      effectivePreset = { ...preset, promptSegments: v2Segments.map((s) => ({ ...s })) };
+    }
+    return { world, prepareOutput, currentPointId, currentRegionId, input, recentAssistantTexts, effectivePreset, protocol };
   }
 
   /** commit / retry 共享的执行体：恰好 1 条 API 请求 + 原子提交。 */
@@ -1544,7 +1767,7 @@ function createCoreInstance(
 
     // 5. 恰好 1 条推演请求
     rpmTimestamps.push(now());
-    const call = await callAtlasWorldTurnApi(preset, prepared.input, { fetchFn: deps.fetchFn, now });
+    const call = await callAtlasWorldTurnApi(prepared.effectivePreset, prepared.input, { fetchFn: deps.fetchFn, now });
     pushLog({
       at: now(),
       kind: "world-turn",
@@ -2237,6 +2460,7 @@ function createCoreInstance(
       if (method === "POST" && route === "/map/image") return await handleMapImage(body);
       if (method === "POST" && route === "/turns/prepare") return await handlePrepare(body);
       if (method === "POST" && route === "/turns/preview") return await handleTurnPreview(body);
+      if (method === "POST" && route === "/scene/bootstrap") return await handleSceneBootstrap(body);
       if (method === "POST" && route === "/turns/commit") return await handleCommit(body);
       if (method === "POST" && route === "/turns/retry") return await handleRetry(body);
       if (method === "POST" && route === "/turns/restore") return await handleRestore(body);

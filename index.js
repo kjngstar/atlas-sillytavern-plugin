@@ -3152,6 +3152,118 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     runtimeActions.append(toggle, autoCommit, manualBtn, loreToggle, gotoApi);
     panel.append(runtimeActions);
     if (statusLine()) panel.append(statusLine());
+
+    // R06：场景定位——当前场景未知与「上次确认」分开表达；开场识别（mode=bootstrap，
+    // duration=0，只定位不推进时间）；起始占位迁移状态显式化
+    const sceneState = state().scene ?? null;
+    const sceneSection = el("div", "aw-rows");
+    const sceneKnown = sceneState ? Boolean(sceneState.known) : null;
+    const sceneStatusRows = [
+      ["当前场景", sceneKnown === null ? "—" : sceneKnown ? "已锚定" : "未知（尚无可信证据）"],
+      [
+        "上次确认",
+        sceneState?.lastConfirmed
+          ? `${sceneState.lastConfirmed.pointName ?? sceneState.lastConfirmed.pointId}${sceneState.lastConfirmed.at != null ? `（时刻 ${sceneState.lastConfirmed.at}）` : ""}`
+          : "无",
+      ],
+      [
+        "推进协议",
+        `v${String(settingsV2?.worldTurnProtocol ?? "v2").replace(/^v/, "")}`,
+      ],
+    ];
+    for (const [label, value] of sceneStatusRows) {
+      const row = el("div", "aw-row");
+      row.append(el("span", "aw-row__label", label));
+      row.append(el("span", "aw-row__value", String(value)));
+      sceneSection.append(row);
+    }
+    if (sceneState?.placeholder?.isPlaceholder && !sceneState.placeholder.retired) {
+      sceneSection.append(el("span", "aw-hint", "当前世界的「起点」为系统占位（结构指纹吻合、无编辑证据）。识别当前场景成功后会自动退役（保留历史引用，不再按真实地点展示）。"));
+    } else if (sceneState?.placeholder?.retired) {
+      sceneSection.append(el("span", "aw-hint", "系统占位「起点」已退役：历史引用保留，地图与地点列表不再展示。"));
+    }
+    const sceneActions = el("div", "aw-actions");
+    const sceneBtn = el("button", "aw-btn", "识别当前场景");
+    sceneBtn.type = "button";
+    sceneBtn.setAttribute("aria-label", "从开场白识别当前场景与在场人物（消耗 1 次推演请求，先预览不写入）");
+    let scenePreview = null;
+    const scenePreviewBox = el("div", "aw-request-preview");
+    sceneBtn.addEventListener("click", async () => {
+      const chatId = String(state().chatId ?? "");
+      if (!chatId) { setStatus("当前没有活动聊天。", "error"); return; }
+      const confirmed = typeof window === "undefined" || typeof window.confirm !== "function"
+        ? true
+        : window.confirm("识别当前场景会消耗 1 次推演请求（mode=bootstrap，只定位不推进时间）。先生成预览，确认后才写入世界。继续？");
+      if (!confirmed) return;
+      sceneBtn.disabled = true;
+      try {
+        const ctx = typeof context === "function" ? context() : null;
+        const chat = Array.isArray(ctx?.chat) ? ctx.chat : [];
+        const assistantText = [...chat].reverse().map((m) => String(m?.mes ?? "")).find((t) => t.trim().length > 0) ?? "";
+        const userText = [...chat].reverse().map((m) => (!m?.is_user ? "" : String(m?.mes ?? ""))).find((t) => t.trim().length > 0) ?? "";
+        const recentAssistantTexts = chat.filter((m) => !m?.is_user).slice(-3).map((m) => String(m?.mes ?? ""));
+        const result = await api.request("POST", "/scene/bootstrap", { chatId, apply: false, userText, assistantText, recentAssistantTexts });
+        scenePreviewBox.innerHTML = "";
+        if (result.status !== 200 || !result.body?.ok) {
+          scenePreviewBox.append(el("p", "aw-note aw-note--error", result.body?.error?.message ?? `识别失败（HTTP ${result.status}）`));
+          return;
+        }
+        scenePreview = result.body.data ?? null;
+        const data = scenePreview;
+        const sceneText = data.scene
+          ? `${data.scene.resolution}${data.scene.locationRef ? ` · ${data.scene.locationRef}` : ""}${data.scene.transition ? ` · ${data.scene.transition}` : ""}`
+          : "—";
+        scenePreviewBox.append(el("p", "aw-panel__meta", `识别结果（预览，未写入）：场景 ${sceneText}`));
+        if (Array.isArray(data.newLocations) && data.newLocations.length > 0) {
+          scenePreviewBox.append(el("p", "aw-panel__meta", `新地点：${data.newLocations.map((l) => l.name).join("、")}`));
+        }
+        if (Array.isArray(data.newCharacters) && data.newCharacters.length > 0) {
+          scenePreviewBox.append(el("p", "aw-panel__meta", `新人物：${data.newCharacters.map((c) => c.displayName).join("、")}`));
+        }
+        if (Array.isArray(data.npcUpdates) && data.npcUpdates.length > 0) {
+          scenePreviewBox.append(el("p", "aw-panel__meta", `人物更新：${data.npcUpdates.map((u) => `${u.entityRef}${u.locationRef ? `→${u.locationRef}` : ""}${u.status ? `（${u.status}）` : ""}`).join("；")}`));
+        }
+        scenePreviewBox.append(el("p", "aw-panel__meta", data.summary ? `摘要：${data.summary}` : "（无摘要）"));
+        const applyBtn = el("button", "aw-btn aw-btn--primary", "应用（一次提交，不推进时间）");
+        applyBtn.type = "button";
+        applyBtn.setAttribute("aria-label", "按预览结果提交场景锚定（duration=0，不推进时间）");
+        applyBtn.addEventListener("click", async () => {
+          applyBtn.disabled = true;
+          try {
+            const applyResult = await api.request("POST", "/scene/bootstrap", { chatId, apply: true, userText, assistantText, recentAssistantTexts });
+            if (applyResult.status !== 200 || !applyResult.body?.ok) {
+              setStatus(applyResult.body?.error?.message ?? `应用失败（HTTP ${applyResult.status}）`, "error");
+              return;
+            }
+            const applied = applyResult.body.data ?? {};
+            setStatus(applied.status === "committed" ? "场景已锚定，世界已更新。" : `应用完成：${applied.status ?? "未知状态"}。`, applied.status === "committed" ? "ok" : "error");
+            scenePreview = null;
+            scenePreviewBox.innerHTML = "";
+            renderCenter();
+          } finally {
+            applyBtn.disabled = false;
+          }
+        });
+        scenePreviewBox.append(applyBtn);
+      } catch (error) {
+        setStatus(`识别失败：${error instanceof Error ? error.message : String(error)}`, "error");
+      } finally {
+        sceneBtn.disabled = false;
+      }
+    });
+    const protocolBtn = el("button", "aw-btn aw-btn--ghost", String(settingsV2?.worldTurnProtocol ?? "v2") === "v1" ? "切换到 v2 协议" : "回退 v1 协议（逃生门）");
+    protocolBtn.type = "button";
+    protocolBtn.setAttribute("aria-label", "切换推进输出协议（v2 为默认新封套；v1 为旧契约逃生门）");
+    protocolBtn.addEventListener("click", async () => {
+      const next = String(settingsV2?.worldTurnProtocol ?? "v2") === "v1" ? "v2" : "v1";
+      const ok = await sendSettingsCommand({ action: "runtime.update", worldTurnProtocol: next });
+      setStatus(ok ? `推进协议已切换为 ${next}。` : settingsStatus, ok ? "ok" : "error");
+      renderCenter();
+    });
+    sceneActions.append(sceneBtn, protocolBtn);
+    panel.append(sceneSection);
+    panel.append(sceneActions);
+    panel.append(scenePreviewBox);
     panel.append(el("p", "aw-panel__meta", "「推进」只管推进行为与提示词；API 地址、密钥与模型请在「API」页配置。"));
     panel.append(el("div", "aw-divider"));
 

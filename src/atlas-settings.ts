@@ -18,6 +18,7 @@
 
 import {
   DEFAULT_PROMPT_SEGMENTS,
+  DEFAULT_PROMPT_SEGMENTS_V2,
   DEFAULT_WORLD_TURN_SYSTEM_PROMPT,
   type AtlasApiPreset,
 } from "./atlas-api-client.ts";
@@ -178,6 +179,8 @@ export interface AtlasServerSettingsV2 {
   rpmLimit: number;
   /** 0.9.22 推演是否附带世界书资料块（被供应商审核拦截时的逃生门；缺省 true）。 */
   loreSupplementEnabled?: boolean;
+  /** R06 推进输出协议："v2"（新封套，缺省）或 "v1"（旧契约逃生门）。 */
+  worldTurnProtocol?: "v1" | "v2";
   /** 0.9.16 内容替换规则库（照抄 shujuku + 开关增强；字段缺失时补预制库）。 */
   contentReplaceRules?: AtlasContentReplaceRule[];
   /** v1 的 majorEvent 旧数据：只兼容保留，不执行、不展示。 */
@@ -236,7 +239,7 @@ export type AtlasSettingsCommand =
   | { action: "replace.save"; preset: { id?: string; name: string; start: string; end: string; enabled?: boolean } }
   | { action: "replace.delete"; id: string }
   | { action: "replace.reset" }
-  | { action: "runtime.update"; autoCommit?: boolean; rpmLimit?: number; loreSupplementEnabled?: boolean };
+  | { action: "runtime.update"; autoCommit?: boolean; rpmLimit?: number; loreSupplementEnabled?: boolean; worldTurnProtocol?: "v1" | "v2" };
 
 // ---------------------------------------------------------------------------
 // 基础工具
@@ -333,6 +336,8 @@ export function createDefaultSettingsV2(): AtlasServerSettingsV2 {
     autoCommit: true,
     rpmLimit: 30,
     loreSupplementEnabled: true,
+    // R06：推进输出协议（v2 = 新封套 + 临时引用；v1 = 旧契约逃生门）。缺省 v2。
+    worldTurnProtocol: "v2",
     contentReplaceRules: DEFAULT_CONTENT_REPLACE_RULES.map((rule, index) => ({
       ...rule,
       id: `cr-builtin-${index + 1}`,
@@ -479,6 +484,8 @@ export function sanitizeSettingsV2(raw: unknown, deps: AtlasSettingsDeps = {}): 
     autoCommit: typeof record.autoCommit === "boolean" ? record.autoCommit : true,
     rpmLimit: isFiniteIntIn(record.rpmLimit, MIN_RPM, MAX_RPM) ? record.rpmLimit : 30,
     loreSupplementEnabled: typeof record.loreSupplementEnabled === "boolean" ? record.loreSupplementEnabled : true,
+    // R06：推进协议（非法值 → 缺省 v2）
+    worldTurnProtocol: record.worldTurnProtocol === "v1" ? "v1" : "v2",
   };
   // 0.9.16 内容替换规则：字段缺失（旧存档）→ 预制库兜底；显式空数组 = 用户全删，尊重
   if (record.contentReplaceRules === undefined) {
@@ -820,6 +827,12 @@ export function applySettingsCommand(
         if (typeof command.loreSupplementEnabled !== "boolean") return fail(settings, "INVALID_PAYLOAD", "世界书资料开关必须是布尔值。");
         next.loreSupplementEnabled = command.loreSupplementEnabled;
       }
+      if (command.worldTurnProtocol !== undefined) {
+        if (command.worldTurnProtocol !== "v1" && command.worldTurnProtocol !== "v2") {
+          return fail(settings, "INVALID_PAYLOAD", "推进协议只能是 v1 或 v2。");
+        }
+        next.worldTurnProtocol = command.worldTurnProtocol;
+      }
       if (command.rpmLimit !== undefined) {
         if (!isFiniteIntIn(command.rpmLimit, MIN_RPM, MAX_RPM)) {
           return fail(settings, "INVALID_PAYLOAD", `RPM 上限必须是 ${MIN_RPM}..${MAX_RPM} 的整数。`);
@@ -1036,6 +1049,8 @@ export interface AtlasSettingsView {
   autoCommit: boolean;
   /** 0.9.22 推演是否附带世界书资料块（审核拦截逃生门）。 */
   loreSupplementEnabled: boolean;
+  /** R06 推进输出协议（v2 缺省）。 */
+  worldTurnProtocol: "v1" | "v2";
   rpmLimit: number;
   /** 0.9.16 内容替换规则库（含预制 + 手动，同库平等）。 */
   contentReplaceRules: AtlasContentReplaceRule[];
@@ -1085,12 +1100,12 @@ export function settingsViewV2(settings: AtlasServerSettingsV2): AtlasSettingsVi
       name: "内置默认",
       readOnly: true,
       systemPrompt: DEFAULT_WORLD_TURN_SYSTEM_PROMPT,
-      // 0.9.40（作者反馈「怎么还是长这样」）：内置默认以只读分段展示，
-      // 让 0.9.39 的 8 段多轮结构在推进页直接可见、可复制
-      segments: DEFAULT_PROMPT_SEGMENTS.map((s) => ({ ...s })),
+      // R06：内置默认按当前协议展示对应封套（v2 = 临时引用 / 证据 / scene；v1 = 旧契约逃生门）
+      segments: ((settings.worldTurnProtocol ?? "v2") === "v1" ? DEFAULT_PROMPT_SEGMENTS : DEFAULT_PROMPT_SEGMENTS_V2).map((s) => ({ ...s })),
     },
     autoCommit: settings.autoCommit,
     loreSupplementEnabled: settings.loreSupplementEnabled ?? true,
+    worldTurnProtocol: settings.worldTurnProtocol === "v1" ? "v1" : "v2",
     rpmLimit: settings.rpmLimit,
     contentReplaceRules: settings.contentReplaceRules ?? [],
   };

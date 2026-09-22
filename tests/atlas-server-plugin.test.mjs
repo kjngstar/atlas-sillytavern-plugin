@@ -199,8 +199,8 @@ async function setup(fetchScripts, overrides = {}) {
 // 路由清单与健康检查
 // ---------------------------------------------------------------------------
 
-test("路由清单：21 条且全部在 /api/plugins/atlas 前缀下", () => {
-  equal(ATLAS_ROUTE_MANIFEST.length, 21, "dispatch 核心路由数（0.9.42 会话承载改排 + 0.9.44 /worlds/move-author + 0.9.50 /worlds/scale/calibrate + R03 /turns/preview）");
+test("路由清单：22 条且全部在 /api/plugins/atlas 前缀下", () => {
+  equal(ATLAS_ROUTE_MANIFEST.length, 22, "dispatch 核心路由数（… + R03 /turns/preview + R06 /scene/bootstrap）");
   equal(ATLAS_PLUGIN_ROUTES.length, ATLAS_ROUTE_MANIFEST.length, "index.mjs 与核心路由清单一致");
   const plugin = createAtlasServerPlugin();
   for (const route of plugin.routes) {
