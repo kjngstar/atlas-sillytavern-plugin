@@ -1712,13 +1712,37 @@
 
 .aw-mapcrumb__back:hover { border-color: var(--aw-teal); color: var(--aw-teal); }
 
-.aw-mapcrumb__title {
-  padding: 3px 10px;
+.aw-mapcrumb__trail {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
   border-radius: 6px;
   border: 1px solid var(--aw-gold-line);
   background: var(--aw-veil-strong);
-  color: #59472c;
   white-space: nowrap;
+}
+
+/* 0.9.49（M02）：面包屑祖先链可点击，当前层禁用高亮 */
+.aw-mapcrumb__link {
+  padding: 2px 6px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #59472c;
+  font: inherit;
+  cursor: pointer;
+}
+
+.aw-mapcrumb__link:hover:not(:disabled) { background: var(--aw-gold-wash); color: var(--aw-gold-strong); }
+
+.aw-mapcrumb__link.is-current {
+  color: var(--aw-gold-strong);
+  font-weight: 600;
+  cursor: default;
+}
+
+.aw-mapcrumb__sep { color: var(--aw-gold-line); }
 }
 
 /* 0.9.47 拖拽纠偏 + 标点选中高亮（mapview 同款交互） */

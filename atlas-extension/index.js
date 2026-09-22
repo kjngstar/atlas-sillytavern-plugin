@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.48";
+export const ATLAS_EXTENSION_VERSION = "0.9.49";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -23,6 +23,8 @@ export const ATLAS_SESSION_KEY = "atlas";
 export const ATLAS_SESSION_SCHEMA_VERSION = 1;
 /** 0.9.48（T01）：会话写回守卫纯函数（导出供测试；sessionApi 写回前调用）。 */
 export { atlasSessionWriteGuard };
+/** 0.9.49（M03）：地图等比显示布局纯函数（导出供测试）。 */
+export { computeMapLayout };
 export const ATLAS_SETTINGS_KEY = "atlas_world_sim";
 /** 生成拦截器注入键（setExtensionPrompt 用；临时上下文，不写入可见聊天历史）。 */
 export const ATLAS_INJECTION_KEY = "atlas_world_context";
@@ -694,6 +696,33 @@ function computeMapBounds(points) {
   };
 }
 
+/**
+ * 0.9.49（M03 等比坐标变换）：地图显示布局（纯函数，可测）。
+ *
+ * 旧实现用 toPercent 把 x/y **分别**拉满容器——正方形世界会被拉成长方形，
+ * 格子不再是格子，比例尺无从谈起（外部 AI 计划 M03 指认的几何 bug）。
+ * 新口径：单一 cellPx（每格 CSS 像素数）同时用于 x/y，等比 contain 拟合视口，
+ * 居中留白；格网背景与标点、路线、命中共用同一变换——屏幕格子 = 真实格子。
+ * zoom / 平移仍作用于外层 transform，只改显示不改变世界距离。
+ */
+function computeMapLayout(points, viewW, viewH) {
+  const bounds = computeMapBounds(points);
+  const spanX = Math.max(1, bounds.maxX - bounds.minX);
+  const spanY = Math.max(1, bounds.maxY - bounds.minY);
+  const w = Math.max(320, Number(viewW) || 0);
+  const h = Math.max(240, Number(viewH) || 0);
+  const cellPx = Math.max(20, Math.min(w / spanX, h / spanY));
+  const widthPx = spanX * cellPx;
+  const heightPx = spanY * cellPx;
+  const offsetX = (w - widthPx) / 2;
+  const offsetY = (h - heightPx) / 2;
+  const toPixel = (x, y) => ({
+    left: offsetX + (Number(x) - bounds.minX) * cellPx,
+    top: offsetY + (Number(y) - bounds.minY) * cellPx,
+  });
+  return { bounds, spanX, spanY, cellPx, widthPx, heightPx, offsetX, offsetY, toPixel, viewW: w, viewH: h };
+}
+
 function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
   root.className = "atlas-workbench";
   root.id = "atlas-extension-panel-root";
@@ -1327,6 +1356,26 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     if (mapBuilt) return mapCanvas;
     mapBuilt = true;
     viewport.append(mapLayer);
+    // 0.9.49（M03）：视口尺寸变化 → 等比布局重算（cellPx / 留白 / 格网同步刷新）
+    if (typeof ResizeObserver === "function") {
+      let resizeTimer = null;
+      let lastW = 0;
+      let lastH = 0;
+      const observer = new ResizeObserver((entries) => {
+        const rect = entries[0]?.contentRect;
+        if (!rect) return;
+        const w = Math.round(rect.width);
+        const h = Math.round(rect.height);
+        if (w === lastW && h === lastH) return;
+        lastW = w;
+        lastH = h;
+        if (resizeTimer) clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(() => {
+          if (state().page === "map" && lastMapData) renderMap(data());
+        }, 120);
+      });
+      observer.observe(viewport);
+    }
     for (const corner of ["tl", "tr", "bl", "br"]) viewport.append(el("span", `aw-corner aw-corner--${corner}`));
     const compass = el("div", "aw-compass");
     compass.append(el("span", "aw-compass__n", "N"), el("i", "aw-compass__needle"));
@@ -1492,8 +1541,38 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     back.type = "button";
     back.setAttribute("aria-label", "返回上一层地图");
     back.addEventListener("click", () => popMapStack());
-    const trail = mapStack.map((item) => item.name).join(" › ");
-    mapCrumb.append(back, el("span", "aw-mapcrumb__title", `当前：${trail} 内部`));
+    // 0.9.49（M02 面包屑修正）：祖先链全部可点击（截断视图栈跳回该层）；
+    // 当前层显示子图真名（旧实现拼栈内点名还标成「内部」，层级语义是糊的）
+    const trail = el("span", "aw-mapcrumb__trail");
+    const rootLink = el("button", "aw-mapcrumb__link", "世界图");
+    rootLink.type = "button";
+    rootLink.setAttribute("aria-label", "返回世界图");
+    rootLink.addEventListener("click", () => {
+      mapStack = [];
+      setZoom(1);
+      renderMap(data());
+    });
+    trail.append(rootLink);
+    mapStack.forEach((item, i) => {
+      trail.append(el("span", "aw-mapcrumb__sep", "›"));
+      const isCurrent = i === mapStack.length - 1;
+      const label = isCurrent ? String(currentSub.name || item.name) : String(item.name);
+      const link = el("button", `aw-mapcrumb__link${isCurrent ? " is-current" : ""}`, label);
+      link.type = "button";
+      if (isCurrent) {
+        link.disabled = true;
+        link.setAttribute("aria-current", "page");
+      } else {
+        link.setAttribute("aria-label", `跳回 ${label}`);
+        link.addEventListener("click", () => {
+          mapStack = mapStack.slice(0, i + 1);
+          setZoom(1);
+          renderMap(data());
+        });
+      }
+      trail.append(link);
+    });
+    mapCrumb.append(back, trail);
   }
 
   /** 0.9.35 标记点简略信息面板：名称 / 地区 / 描述 / 路线预览 / 进入子图。 */
@@ -1592,6 +1671,22 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       }
       onClick(dot);
     });
+  }
+
+  /** 0.9.49（M02 跨层定位）：回到世界图并打开目标地点的信息面板（在场名单 / 进子图入口都在那里）。 */
+  function locateToPointPanel(pointId) {
+    closeMapPanel();
+    const d = lastMapData;
+    if (!d) return;
+    const target = (Array.isArray(d.map?.points) ? d.map.points : []).find((p) => String(p.id) === String(pointId));
+    if (!target) return;
+    if (mapStack.length > 0) {
+      mapStack = [];
+      setZoom(1);
+      renderMap(data());
+    }
+    const marker = mapLayer?.querySelector(`[data-point-id="${String(pointId)}"]`) ?? null;
+    openMapPanel(target, { inSub: false, currentSub: null }, marker);
   }
 
   function openMapPanel(point, { inSub, currentSub }, anchorEl = null) {
@@ -1710,6 +1805,19 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     if (npc.reason) metaLines.push(NPC_REASON_LABELS[String(npc.reason)] ?? String(npc.reason));
     if (metaLines.length > 0) mapPanel.append(el("div", "aw-mappanel__meta", metaLines.join(" · ")));
 
+    // 0.9.49（M02 跨层定位）：人物在别的地图层时（无锚点标点），一键跳回世界图并打开所在地点
+    if (npc.pointId && !anchorEl) {
+      const locate = el("div", "aw-mappanel__actions");
+      const locateBtn = el("button", "aw-btn", "打开所在地图");
+      locateBtn.type = "button";
+      locateBtn.setAttribute("aria-label", `跳到 ${npc.pointName ?? "所在地点"} 的地图位置`);
+      locateBtn.addEventListener("click", () => {
+        locateToPointPanel(npc.pointId);
+      });
+      locate.append(locateBtn);
+      mapPanel.append(locate);
+    }
+
     // 动向：CharacterState 状态摘要
     if (npc.status) {
       const status = el("div", "aw-mappanel__section");
@@ -1754,6 +1862,19 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     metaLines.push(`类型：${String(object.type)}`);
     if (object.pointName) metaLines.push(`所在：${object.pointName}`);
     mapPanel.append(el("div", "aw-mappanel__meta", metaLines.join(" · ")));
+
+    // 0.9.49（M02 跨层定位）：物品在别的地图层时（无锚点标点），一键跳回世界图并打开所在地点
+    if (object.pointId && !anchorEl) {
+      const locate = el("div", "aw-mappanel__actions");
+      const locateBtn = el("button", "aw-btn", "打开所在地图");
+      locateBtn.type = "button";
+      locateBtn.setAttribute("aria-label", `跳到 ${object.pointName ?? "所在地点"} 的地图位置`);
+      locateBtn.addEventListener("click", () => {
+        locateToPointPanel(object.pointId);
+      });
+      locate.append(locateBtn);
+      mapPanel.append(locate);
+    }
     if (object.description) {
       const desc = el("div", "aw-mappanel__section");
       desc.append(el("div", "aw-mappanel__section-label", "描述"));
@@ -1790,10 +1911,20 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       : regionFilter
         ? pointsAll.filter((p) => String(p.regionId ?? "") === regionFilter)
         : pointsAll;
-    const npcsAll = inSub ? [] : Array.isArray(d.npcDirectory) ? d.npcDirectory : [];
-    const npcs = inSub ? [] : regionFilter ? npcsAll.filter((n) => String(n.regionId ?? "") === regionFilter) : npcsAll;
-    const objectsAll = inSub ? [] : Array.isArray(d.objectDirectory) ? d.objectDirectory : [];
-    const objects = inSub ? [] : regionFilter ? objectsAll.filter((o) => String(o.regionId ?? "") === regionFilter) : objectsAll;
+    // 0.9.49（M02 子图投影）：进子图不再清空人物与物品——按 pointId === 子图宿主点
+    // 从权威实体目录投影（NPC/物品显示在所在子图内部，确定性散布；不建立第二套位置数据）
+    const npcsAll = Array.isArray(d.npcDirectory) ? d.npcDirectory : [];
+    const objectsAll = Array.isArray(d.objectDirectory) ? d.objectDirectory : [];
+    let npcs;
+    let objects;
+    if (inSub) {
+      const ownerId = String(view.pointId);
+      npcs = npcsAll.filter((n) => String(n.pointId ?? "") === ownerId);
+      objects = objectsAll.filter((o) => String(o.pointId ?? "") === ownerId);
+    } else {
+      npcs = regionFilter ? npcsAll.filter((n) => String(n.regionId ?? "") === regionFilter) : npcsAll;
+      objects = regionFilter ? objectsAll.filter((o) => String(o.regionId ?? "") === regionFilter) : objectsAll;
+    }
     if (regionSelect) regionSelect.style.display = inSub ? "none" : "";
     if (travelBar) travelBar.style.display = inSub ? "none" : "";
 
@@ -1832,13 +1963,20 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       regionSelect.append(option);
     }
 
-    const bounds = computeMapBounds(points);
-    const spanX = Math.max(1, bounds.maxX - bounds.minX);
-    const spanY = Math.max(1, bounds.maxY - bounds.minY);
-    const toPercent = (x, y) => ({
-      left: `${((x - bounds.minX) / spanX) * 100}%`,
-      top: `${((y - bounds.minY) / spanY) * 100}%`,
-    });
+    // 0.9.49（M03）：等比 fit 布局——单一 cellPx 同时用于 x/y，屏幕格子 = 真实格子
+    const layout = computeMapLayout(points, viewport.clientWidth || 0, viewport.clientHeight || 0);
+    const toPixel = layout.toPixel;
+    // 真实格网挂 mapLayer（与标点共用 zoom/平移 transform，缩放后格线仍是格子）；
+    // viewport 的静态装饰纹理关闭——固定背景格不能冒充可测量网格
+    viewport.style.backgroundImage = "none";
+    if (!mapData.mapImagePresent) {
+      mapLayer.style.backgroundImage =
+        "repeating-linear-gradient(0deg, transparent, transparent " +
+        `${Math.max(1, layout.cellPx - 1)}px, var(--aw-teal-wash) ${Math.max(1, layout.cellPx - 1)}px, var(--aw-teal-wash) ${layout.cellPx}px), ` +
+        `repeating-linear-gradient(90deg, transparent, transparent ${Math.max(1, layout.cellPx - 1)}px, var(--aw-teal-wash) ${Math.max(1, layout.cellPx - 1)}px, var(--aw-teal-wash) ${layout.cellPx}px)`;
+      mapLayer.style.backgroundSize = `${layout.cellPx}px ${layout.cellPx}px`;
+      mapLayer.style.backgroundPosition = `${layout.offsetX}px ${layout.offsetY}px`;
+    }
 
     for (const point of points) {
       const marker = el("button", "aw-point");
@@ -1846,9 +1984,9 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       const hasSub = Boolean(inSub ? false : submaps[String(point.id)]);
       marker.textContent = String(point.name);
       marker.title = String(point.name);
-      const pos = toPercent(Number(point.x), Number(point.y));
-      marker.style.left = pos.left;
-      marker.style.top = pos.top;
+      const pos = toPixel(Number(point.x), Number(point.y));
+      marker.style.left = `${pos.left}px`;
+      marker.style.top = `${pos.top}px`;
       if (hasSub) marker.classList.add("aw-point--sub");
       // 0.9.35 点击 = 简略信息面板（路线 / 进入子图都在面板里），不再一键直接拉路线
       if (String(point.id) === String(d.currentLocationId ?? "")) {
@@ -1865,33 +2003,50 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       mapLayer.append(marker);
     }
 
+    // 子图投影标点的显示位：世界状态只给「在宿主点内」，子图内无精确坐标——
+    // 用黄金角螺旋在子图中心附近确定性散布（同一实体永远同一位置，纯排版数据不回写世界）
+    let projectionSlot = 0;
+    const projectionPos = () => {
+      const idx = projectionSlot;
+      projectionSlot += 1;
+      const angle = idx * 2.399963;
+      const radius = Math.min(layout.spanX, layout.spanY) * 0.12 * Math.sqrt(idx + 1);
+      const cx = layout.bounds.minX + layout.spanX / 2;
+      const cy = layout.bounds.minY + layout.spanY / 2;
+      return { x: cx + Math.cos(angle) * radius, y: cy + Math.sin(angle) * radius };
+    };
+
     for (const npc of npcs) {
-      if (npc.x === null || npc.y === null) continue;
+      if (!inSub && (npc.x === null || npc.y === null)) continue;
       // 0.9.41 人物标点 = 金圆字头像（原型 mapview 同款信息架构）：点击出人物 popover
       const dot = el("button", "aw-npc");
       dot.type = "button";
       dot.dataset.entityId = String(npc.id ?? "");
-      const pos = toPercent(Number(npc.x), Number(npc.y));
-      dot.style.left = pos.left;
-      dot.style.top = pos.top;
+      const worldPos = inSub ? projectionPos() : { x: npc.x, y: npc.y };
+      const pos = toPixel(Number(worldPos.x), Number(worldPos.y));
+      dot.style.left = `${pos.left}px`;
+      dot.style.top = `${pos.top}px`;
       const reasonLabel = npc.reason ? (NPC_REASON_LABELS[String(npc.reason)] ?? String(npc.reason)) : "";
-      dot.title = `${String(npc.name)}${reasonLabel ? `（${reasonLabel}）` : ""}`;
-      dot.setAttribute("aria-label", `人物 ${npc.name}，点击查看想法与动向；按住拖到地点上可纠偏位置`);
+      const subTag = inSub ? `（${String(currentSub?.name ?? view?.name ?? "")} 内）` : "";
+      dot.title = `${String(npc.name)}${reasonLabel ? `（${reasonLabel}）` : ""}${subTag}`;
+      dot.setAttribute("aria-label", `人物 ${npc.name}${subTag}，点击查看想法与动向；按住拖到地点上可纠偏位置`);
       dot.append(el("span", "aw-npc__avatar", String(npc.name ?? "?").slice(0, 1)));
       dot.append(el("span", "aw-npc__name", String(npc.name)));
-      attachNpcDrag(dot, npc, (anchor) => openNpcPanel(npc, anchor));
+      if (!inSub) attachNpcDrag(dot, npc, (anchor) => openNpcPanel(npc, anchor)); // 拖拽纠偏只在世界图层有意义（子图点位非世界点位）
+      else dot.addEventListener("click", (e) => { e.stopPropagation(); openNpcPanel(npc, dot); });
       mapLayer.append(dot);
     }
 
     for (const object of objects) {
-      if (object.x === null || object.y === null) continue;
+      if (!inSub && (object.x === null || object.y === null)) continue;
       // 0.9.41 物品标点 = 紫色小方块：点击出物品 popover
       const dot = el("button", "aw-object");
       dot.type = "button";
       dot.dataset.objId = String(object.id ?? "");
-      const pos = toPercent(Number(object.x), Number(object.y));
-      dot.style.left = pos.left;
-      dot.style.top = pos.top;
+      const worldPos = inSub ? projectionPos() : { x: object.x, y: object.y };
+      const pos = toPixel(Number(worldPos.x), Number(worldPos.y));
+      dot.style.left = `${pos.left}px`;
+      dot.style.top = `${pos.top}px`;
       dot.title = `${String(object.name)}（${String(object.type)}）`;
       dot.setAttribute("aria-label", `物品 ${object.name}，点击查看详情`);
       dot.append(el("span", "aw-object__gem"));
@@ -1909,18 +2064,15 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       const from = pointsAll.find((p) => String(p.id) === String(d.currentLocationId ?? ""));
       const to = pointsAll.find((p) => String(p.id) === String(preview.destinationId));
       if (from && to) {
-        const a = toPercent(Number(from.x), Number(from.y));
-        const b = toPercent(Number(to.x), Number(to.y));
+        const a = toPixel(Number(from.x), Number(from.y));
+        const b = toPixel(Number(to.x), Number(to.y));
         const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
         svg.setAttribute("class", "aw-route");
-        svg.setAttribute("viewBox", "0 0 100 100");
+        // 0.9.49（M03）：路线画布与标点共用同一等比变换（px 坐标 + 视口 viewBox）
+        svg.setAttribute("viewBox", `0 0 ${layout.viewW} ${layout.viewH}`);
         svg.setAttribute("preserveAspectRatio", "none");
         const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-        const x1 = parseFloat(a.left);
-        const y1 = parseFloat(a.top);
-        const x2 = parseFloat(b.left);
-        const y2 = parseFloat(b.top);
-        path.setAttribute("d", `M ${x1} ${y1} Q ${(x1 + x2) / 2} ${(y1 + y2) / 2 - 6} ${x2} ${y2}`);
+        path.setAttribute("d", `M ${a.left} ${a.top} Q ${(a.left + b.left) / 2} ${(a.top + b.top) / 2 - 24} ${b.left} ${b.top}`);
         path.setAttribute("fill", "none");
         path.setAttribute("stroke", "#c4a363");
         path.setAttribute("stroke-width", "1.5");
@@ -1945,6 +2097,9 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       if (imageUrl) {
         mapLayer.classList.add("has-image");
         mapLayer.style.backgroundImage = `url("${imageUrl}")`;
+        // 0.9.49（M03）：底图模式铺满视口，清掉格网布局的 size/position 内联
+        mapLayer.style.backgroundSize = "100% 100%";
+        mapLayer.style.backgroundPosition = "";
       }
     }
 
