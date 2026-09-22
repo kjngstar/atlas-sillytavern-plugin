@@ -111,3 +111,24 @@
 残留：
 - 预算截断显示（背景块按预算截断并标注）暂未实现——当前装配无预算机制，列入 v2 封套（R05）
 - 真实模型行为抽样验证 → R14（真实酒馆环境）
+
+## R04 — 统一人物位置、状态与附近投影（2026-09-23）
+
+- [x] 新建 `src/atlas-runtime-view.ts`：`resolveAtlasRuntimeView(world, {branchId, at, entityIds})` 单一读取口径
+  - 基线 = resolveCharacterPosition（CharacterState 兼容 / 旧角色字段回退）
+  - 账本 = projectEntityState 分支游标重放，最新有效 moveEntity / status 覆盖旧值
+  - 规则 3：pointId 有效时按地点归属重解析地区，不延续不一致地区
+  - 注册表 = characters ∪ entityRecords[type=npc] 去重，实体记录人物不再不可见
+- [x] handleState npcDirectory 改为消费统一视图（D05 修复：账本点位 = 目录点位）；DTO 增加 positionSource
+- [x] 分支 / 游标感知：投影按 branchId + at 截断，不展示未来状态
+
+证据：
+- 新增 `tests/atlas-r04-runtime-view.test.mjs` 4 项通过：
+  - N04（D05 场景复刻）：提交后账本 `_pointId:"2"` = 目录点位，status「正在交谈」同时可见（基线：null / 空）
+  - 兼容基线回退；N09 注册表关联；地区一致性规则
+- 门禁：typecheck 0 errors；pack 通过；test 404/404
+
+残留：
+- nearby DTO（地点名称 / 理由数组 / 精度）增强与 atlas-relevance 消费改造 → 与 R07 附近列表一起收口
+- 物品持有者关系解析（location 指向人物）→ R09 物品详情
+- 游标回退 / 兄弟分支隔离已在 projectEntityState 分支谱系中保证；端到端回归归 R12/R14

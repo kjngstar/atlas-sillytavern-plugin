@@ -24,6 +24,7 @@ import { appendDefinitionRevision } from "../lib/world-definition.ts";
 import { hashString } from "../lib/world-cards.ts";
 import { createCheckpoint, previewRestore, restoreAsPlayhead } from "../lib/world-checkpoint.ts";
 import { resolveCharacterPosition, moveCharacterTo } from "../lib/world-npc.ts";
+import { resolveAtlasRuntimeView } from "./atlas-runtime-view.ts";
 import type {
   AtlasChatBinding,
   AtlasTurnCommitRequest,
@@ -1224,42 +1225,38 @@ function createCoreInstance(
       y: p.y,
       regionId: p.regionId ?? null,
     }));
-    // 相关 NPC 位置目录（ATLAS-09 地图标记）：动态状态优先，旧档案回退；坐标 = 锚点地点坐标
+    // 相关 NPC 位置目录（ATLAS-09 地图标记）：R04 统一运行时视图——
+    // 账本投影（最新事实）覆盖 CharacterState 基线 / 旧档案，单点读取口径（D05 修复）
     const pointById = new Map((world.points ?? []).map((p) => [String(p.id), p]));
+    const runtimeView = resolveAtlasRuntimeView(world, {
+      branchId: binding.branchId,
+      at: binding.worldTimeCursor,
+      entityIds: relevance.relevantNpcIds,
+    });
     // 0.9.41 人物 popover：分支作用域账本（游标前）供「最近涉及叙事」提取
     const branchEvents = ledgerForBranch(world, binding.branchId).filter((e) => e.at <= binding.worldTimeCursor);
-    const npcDirectory = (world.characters ?? [])
-      .filter((c) => relevance.relevantNpcIds.includes(String(c.id)))
-      .slice(0, 48)
-      .map((c) => {
-        const pos = resolveCharacterPosition(world, String(c.id), { branchId: binding.branchId });
-        const anchorPoint = pos.pointId !== null ? pointById.get(String(pos.pointId)) : undefined;
-        // 0.9.41 人物 popover 数据：状态摘要 + 最近涉及该 NPC 的账本叙事（想法 / 动向）
-        const npcId = String(c.id);
-        const status = (world.characterStates ?? [])
-          .filter((s) => String(s.characterId) === npcId && (!s.branchId || s.branchId === binding.branchId))
-          .sort((a, b) => Number(b.updatedAt ?? 0) - Number(a.updatedAt ?? 0))
-          .map((s) => String(s.status ?? "").trim())
-          .find((t) => t.length > 0) ?? null;
-        const recentNarratives = branchEvents
-          .filter((e) => (e.entityRefs ?? []).map(String).includes(npcId))
-          .slice(-2)
-          .reverse()
-          .map((e) => e.narrativeSummary.slice(0, 140));
-        const anchorName = anchorPoint ? String(anchorPoint.name ?? "") : null;
-        return {
-          id: npcId,
-          name: String(c.name ?? c.id).slice(0, MAP_POINT_NAME_CHARS),
-          pointId: pos.pointId,
-          regionId: pos.regionId ?? (anchorPoint ? anchorPoint.regionId ?? null : null),
-          x: anchorPoint ? anchorPoint.x : null,
-          y: anchorPoint ? anchorPoint.y : null,
-          reason: relevance.npcReasons[npcId] ?? null,
-          status: status ? status.slice(0, 160) : null,
-          recentNarratives,
-          pointName: anchorName ? anchorName.slice(0, MAP_POINT_NAME_CHARS) : null,
-        };
-      });
+    const npcDirectory = runtimeView.npcs.slice(0, 48).map((view) => {
+      const anchorPoint = view.pointId !== null ? pointById.get(String(view.pointId)) : undefined;
+      const recentNarratives = branchEvents
+        .filter((e) => (e.entityRefs ?? []).map(String).includes(view.id))
+        .slice(-2)
+        .reverse()
+        .map((e) => e.narrativeSummary.slice(0, 140));
+      const anchorName = anchorPoint ? String(anchorPoint.name ?? "") : null;
+      return {
+        id: view.id,
+        name: String(view.name).slice(0, MAP_POINT_NAME_CHARS),
+        pointId: view.pointId,
+        regionId: view.regionId,
+        x: view.x,
+        y: view.y,
+        reason: relevance.npcReasons[view.id] ?? null,
+        status: view.status ? view.status.slice(0, 160) : null,
+        recentNarratives,
+        pointName: anchorName ? anchorName.slice(0, MAP_POINT_NAME_CHARS) : null,
+        positionSource: view.source,
+      };
+    });
     const regions = (world.regions ?? []).slice(0, 64).map((r) => ({
       id: String(r.id),
       name: String(r.name ?? r.id).slice(0, MAP_POINT_NAME_CHARS),

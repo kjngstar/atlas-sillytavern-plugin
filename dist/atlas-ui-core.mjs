@@ -5261,6 +5261,31 @@ function applyEffectToState(state, effect) {
       break;
   }
 }
+function projectEntityState(world, entityId, branchId, at) {
+  const entity = entityRecordById(world, entityId);
+  if (!entity) return {};
+  const state = {};
+  for (const key of Object.keys(entity.baseline)) {
+    state[key] = entity.baseline[key];
+  }
+  const { segments } = branchLineage(world, branchId, at);
+  const replay = [];
+  for (const segment of segments) {
+    const cutoff = segment.cutoffAt ?? at;
+    const canonSegment = segment.branchId === null;
+    const events = stateEventsOf(world).filter((e) => (canonSegment ? isCanonLedgerBranch(world, e.branchId) : e.branchId === segment.branchId) && e.at <= cutoff).sort(compareStateEvents);
+    replay.push(...events);
+  }
+  for (const event of replay) {
+    if (!event.entityRefs.includes(entityId)) continue;
+    for (const effect of event.effects) {
+      if ("entityId" in effect && effect.entityId === entityId) {
+        applyEffectToState(state, effect);
+      }
+    }
+  }
+  return state;
+}
 function shapeErrorOf(effect, index) {
   if (!effect || typeof effect !== "object") return `第 ${index + 1} 个 effect 不是对象`;
   const kind = effect.kind;
@@ -5989,6 +6014,66 @@ function restoreAsPlayhead(world, checkpointId, opts = { now: 0 }) {
       replayedActionsDropped
     }
   };
+}
+
+// src/atlas-runtime-view.ts
+function baselineStatus(world, characterId, branchId) {
+  return (world.characterStates ?? []).filter((s) => String(s.characterId) === characterId && (!s.branchId || s.branchId === branchId)).sort((a, b) => Number(b.updatedAt ?? 0) - Number(a.updatedAt ?? 0)).map((s) => String(s.status ?? "").trim()).find((t) => t.length > 0) ?? null;
+}
+function resolveAtlasRuntimeView(world, opts) {
+  const pointById2 = new Map((world.points ?? []).map((p) => [String(p.id), p]));
+  const regionById = new Map((world.regions ?? []).map((r) => [String(r.id), r]));
+  const registry = /* @__PURE__ */ new Map();
+  for (const c of world.characters ?? []) {
+    registry.set(String(c.id), String(c.name ?? c.id));
+  }
+  for (const e of world.entityRecords ?? []) {
+    if (String(e.type).toLowerCase() !== "npc") continue;
+    const id = String(e.id);
+    if (!registry.has(id)) registry.set(id, String(e.name ?? id));
+  }
+  const wanted = Array.isArray(opts.entityIds) ? opts.entityIds.map(String).filter((id) => registry.has(id)) : [...registry.keys()];
+  const npcs = wanted.map((id) => {
+    const displayName = registry.get(id) ?? id;
+    const base = resolveCharacterPosition(world, id, { branchId: opts.branchId });
+    let pointId = base.pointId;
+    let regionId = base.regionId;
+    let source = base.source === "none" ? "none" : base.source === "state" ? "state" : "legacy";
+    let status = baselineStatus(world, id, opts.branchId);
+    let statusSource = status ? "state" : "none";
+    const projected = projectEntityState(world, id, opts.branchId, opts.at);
+    if (projected && (projected._pointId !== void 0 || projected._regionId !== void 0)) {
+      const projPoint = projected._pointId != null ? String(projected._pointId) : null;
+      const projRegion = projected._regionId != null ? String(projected._regionId) : null;
+      if (projPoint !== null) {
+        pointId = projPoint;
+        const point = pointById2.get(String(pointId));
+        regionId = point ? point.regionId ?? null : projRegion ?? regionId;
+      } else if (projRegion !== null) {
+        regionId = projRegion;
+      }
+      source = "ledger";
+    }
+    const projStatus = projected?.status;
+    if (typeof projStatus === "string" && projStatus.trim()) {
+      status = projStatus.trim();
+      statusSource = "ledger";
+    }
+    const anchorPoint = pointId !== null ? pointById2.get(String(pointId)) : void 0;
+    const resolvedRegion = regionId !== null && regionById.has(String(regionId)) ? regionId : anchorPoint ? anchorPoint.regionId ?? null : regionId;
+    return {
+      id,
+      name: displayName,
+      pointId,
+      regionId: resolvedRegion,
+      x: anchorPoint ? anchorPoint.x : null,
+      y: anchorPoint ? anchorPoint.y : null,
+      status,
+      source,
+      statusSource
+    };
+  });
+  return { npcs };
 }
 
 // src/atlas-relevance.ts
@@ -8436,25 +8521,28 @@ function createCoreInstance(store, deps, shared) {
       regionId: p.regionId ?? null
     }));
     const pointById2 = new Map((world.points ?? []).map((p) => [String(p.id), p]));
+    const runtimeView = resolveAtlasRuntimeView(world, {
+      branchId: binding.branchId,
+      at: binding.worldTimeCursor,
+      entityIds: relevance.relevantNpcIds
+    });
     const branchEvents = ledgerForBranch(world, binding.branchId).filter((e) => e.at <= binding.worldTimeCursor);
-    const npcDirectory = (world.characters ?? []).filter((c) => relevance.relevantNpcIds.includes(String(c.id))).slice(0, 48).map((c) => {
-      const pos = resolveCharacterPosition(world, String(c.id), { branchId: binding.branchId });
-      const anchorPoint = pos.pointId !== null ? pointById2.get(String(pos.pointId)) : void 0;
-      const npcId = String(c.id);
-      const status = (world.characterStates ?? []).filter((s) => String(s.characterId) === npcId && (!s.branchId || s.branchId === binding.branchId)).sort((a, b) => Number(b.updatedAt ?? 0) - Number(a.updatedAt ?? 0)).map((s) => String(s.status ?? "").trim()).find((t) => t.length > 0) ?? null;
-      const recentNarratives = branchEvents.filter((e) => (e.entityRefs ?? []).map(String).includes(npcId)).slice(-2).reverse().map((e) => e.narrativeSummary.slice(0, 140));
+    const npcDirectory = runtimeView.npcs.slice(0, 48).map((view) => {
+      const anchorPoint = view.pointId !== null ? pointById2.get(String(view.pointId)) : void 0;
+      const recentNarratives = branchEvents.filter((e) => (e.entityRefs ?? []).map(String).includes(view.id)).slice(-2).reverse().map((e) => e.narrativeSummary.slice(0, 140));
       const anchorName = anchorPoint ? String(anchorPoint.name ?? "") : null;
       return {
-        id: npcId,
-        name: String(c.name ?? c.id).slice(0, MAP_POINT_NAME_CHARS),
-        pointId: pos.pointId,
-        regionId: pos.regionId ?? (anchorPoint ? anchorPoint.regionId ?? null : null),
-        x: anchorPoint ? anchorPoint.x : null,
-        y: anchorPoint ? anchorPoint.y : null,
-        reason: relevance.npcReasons[npcId] ?? null,
-        status: status ? status.slice(0, 160) : null,
+        id: view.id,
+        name: String(view.name).slice(0, MAP_POINT_NAME_CHARS),
+        pointId: view.pointId,
+        regionId: view.regionId,
+        x: view.x,
+        y: view.y,
+        reason: relevance.npcReasons[view.id] ?? null,
+        status: view.status ? view.status.slice(0, 160) : null,
         recentNarratives,
-        pointName: anchorName ? anchorName.slice(0, MAP_POINT_NAME_CHARS) : null
+        pointName: anchorName ? anchorName.slice(0, MAP_POINT_NAME_CHARS) : null,
+        positionSource: view.source
       };
     });
     const regions = (world.regions ?? []).slice(0, 64).map((r) => ({
