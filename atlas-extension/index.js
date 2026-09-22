@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.50";
+export const ATLAS_EXTENSION_VERSION = "0.9.51";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -27,6 +27,8 @@ export { atlasSessionWriteGuard };
 export { computeMapLayout };
 /** 0.9.50（M05）：动态比例尺条纯函数（导出供测试）。 */
 export { computeScaleBar, formatDistanceMeters };
+/** 0.9.51（M06）：旅行距离换算纯函数（定义处无需 export——此行集中导出供测试）。 */
+export { formatTravelDistance };
 export const ATLAS_SETTINGS_KEY = "atlas_world_sim";
 /** 生成拦截器注入键（setExtensionPrompt 用；临时上下文，不写入可见聊天历史）。 */
 export const ATLAS_INJECTION_KEY = "atlas_world_context";
@@ -655,6 +657,279 @@ export function applyAtlasSkin(root, { theme, customCss } = {}) {
   return { theme: normalized, customCss: css };
 }
 
+// ---------------------------------------------------------------------------
+// 0.9.51（M07/M08）地图皮肤：--am-* 令牌注册表 + .atlas-map-skin.json 导入。
+// 注册表是唯一权威（验证 / 默认 / 样例导出 / CSS 合约测试都从它派生，防多份清单漂移）。
+// 继承优先级：工作台主题映射（--aw-*，含 paper/dark）→ 用户地图皮肤（--am-* 注入覆盖）
+//   → 用户自定义 CSS（0.9.45 既有 <style data-atlas-custom-skin>，天然最后）。
+// 皮肤只换外观：绝不触碰 metersPerCell / frame / 实体坐标 / 操作回调 / 标尺长度。
+// ---------------------------------------------------------------------------
+
+/** 地图皮肤令牌大小上限（纯令牌文件；计划 12.3 建议 64 KiB）。 */
+export const ATLAS_MAP_SKIN_BYTES_MAX = 64 * 1024;
+/** 令牌条数上限（注册表 31 键 + 余量；超限明确拒绝，不静默截断）。 */
+export const ATLAS_MAP_SKIN_TOKENS_MAX = 64;
+
+/** 颜色只接受 #hex（3/4/6/8 位）——不解释 rgb()/hsl()/named/任意 CSS 表达式。 */
+const ATLAS_MAP_SKIN_COLOR_RE = /^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
+
+/** 地图皮肤令牌注册表：语义键 → {type, css, min/max 或 enum}。缺省令牌不注入（跟随工作台）。 */
+export const ATLAS_MAP_SKIN_TOKENS = {
+  "colors.canvas": { type: "color", css: "--am-canvas" },
+  "colors.gridMinor": { type: "color", css: "--am-grid-minor" },
+  "colors.text": { type: "color", css: "--am-text" },
+  "colors.textMuted": { type: "color", css: "--am-text-muted" },
+  "colors.border": { type: "color", css: "--am-border" },
+  "colors.focusRing": { type: "color", css: "--am-focus-ring" },
+  "colors.location": { type: "color", css: "--am-location" },
+  "colors.person": { type: "color", css: "--am-person" },
+  "colors.item": { type: "color", css: "--am-item" },
+  "colors.popoverBg": { type: "color", css: "--am-popover-bg" },
+  "colors.popoverHeaderBg": { type: "color", css: "--am-popover-header-bg" },
+  "colors.rowHover": { type: "color", css: "--am-row-hover" },
+  "colors.buttonBg": { type: "color", css: "--am-button-bg" },
+  "colors.buttonText": { type: "color", css: "--am-button-text" },
+  "colors.buttonHover": { type: "color", css: "--am-button-hover" },
+  "colors.scaleText": { type: "color", css: "--am-scale-text" },
+  "colors.scaleBg": { type: "color", css: "--am-scale-bg" },
+  "colors.error": { type: "color", css: "--am-error" },
+  "colors.estimated": { type: "color", css: "--am-estimated" },
+  "metrics.popoverWidthPx": { type: "number", css: "--am-popover-width-px", min: 220, max: 480 },
+  "metrics.popoverRadiusPx": { type: "number", css: "--am-popover-radius-px", min: 0, max: 24 },
+  "metrics.controlRadiusPx": { type: "number", css: "--am-control-radius-px", min: 0, max: 16 },
+  "metrics.controlHeightPx": { type: "number", css: "--am-control-height-px", min: 24, max: 56 },
+  "metrics.bodyFontSizePx": { type: "number", css: "--am-body-font-size-px", min: 10, max: 20 },
+  "metrics.titleFontSizePx": { type: "number", css: "--am-title-font-size-px", min: 11, max: 24 },
+  "metrics.spacingPx": { type: "number", css: "--am-spacing-px", min: 2, max: 24 },
+  "effects.shadow": { type: "enum", css: "--am-shadow", enum: ["none", "soft", "medium", "strong"] },
+  "effects.motion": { type: "enum", css: "--am-motion", enum: ["none", "subtle", "normal"] },
+  "fonts.family": { type: "enum", css: "--am-font-family", enum: ["system", "serif", "sans"] },
+  "markers.locationShape": { type: "enum", css: "--am-marker-radius-location", enum: ["circle", "rounded-square", "square", "diamond"] },
+  "markers.personShape": { type: "enum", css: "--am-marker-radius-person", enum: ["circle", "rounded-square", "square", "diamond"] },
+  "markers.itemShape": { type: "enum", css: "--am-marker-radius-item", enum: ["circle", "rounded-square", "square", "diamond"] },
+};
+
+/** effects/shapes/fonts 的语义枚举 → 具体 CSS 值（转换层供值，用户字符串绝不直接拼接进 CSS）。 */
+const ATLAS_MAP_SKIN_CSS_VALUES = {
+  "--am-shadow": { none: "none", soft: "0 2px 8px rgba(31,42,51,0.14)", medium: "0 4px 14px rgba(31,42,51,0.18)", strong: "0 8px 24px rgba(31,42,51,0.28)" },
+  "--am-motion": { none: "0s", subtle: "0.12s", normal: "0.25s" },
+  "--am-font-family": { system: "var(--aw-sans)", serif: "var(--aw-serif)", sans: "var(--aw-sans)" },
+  "--am-marker-radius-location": { circle: "50%", "rounded-square": "6px", square: "1px", diamond: "50% 0 50% 0" },
+  "--am-marker-radius-person": { circle: "50%", "rounded-square": "6px", square: "1px", diamond: "50% 0 50% 0" },
+  "--am-marker-radius-item": { circle: "50%", "rounded-square": "4px", square: "1px", diamond: "50% 0 50% 0" },
+};
+
+/**
+ * 解析并校验 .atlas-map-skin.json（不可信输入；纯函数，可测）。
+ * 返回 {ok:true, skin:{meta + tokens + unknownKeys}} 或 {ok:false, error, warnings}。
+ * 纪律：未知版本明确拒绝；未知令牌不执行只提示；超范围数字 clamp 到边界；
+ * 白名单逐键显式构造新对象——__proto__/constructor 等危险键天然进不了结果。
+ */
+export function parseAtlasMapSkin(raw) {
+  if (typeof raw === "string") {
+    if (raw.length > ATLAS_MAP_SKIN_BYTES_MAX) {
+      return { ok: false, error: `皮肤文件超过 ${Math.round(ATLAS_MAP_SKIN_BYTES_MAX / 1024)} KiB 上限（纯令牌文件不该这么大）。`, warnings: [] };
+    }
+  }
+  let value = raw;
+  if (typeof raw === "string") {
+    try {
+      value = JSON.parse(raw);
+    } catch {
+      return { ok: false, error: "皮肤文件不是合法 JSON。", warnings: [] };
+    }
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { ok: false, error: "皮肤文件必须是 JSON 对象。", warnings: [] };
+  }
+  const record = value;
+  if (record.kind !== "atlas-map-skin") {
+    return { ok: false, error: "kind 必须是 \"atlas-map-skin\"（这不是阿特拉斯地图皮肤文件）。", warnings: [] };
+  }
+  if (record.schemaVersion !== 1 || record.skinApiVersion !== 1) {
+    return { ok: false, error: `不支持的皮肤协议版本（schemaVersion=${JSON.stringify(record.schemaVersion)}，skinApiVersion=${JSON.stringify(record.skinApiVersion)}）——本插件支持版本 1。`, warnings: [] };
+  }
+  const meta = {
+    id: String(record.id ?? "user.custom").trim().slice(0, 64) || "user.custom",
+    name: String(record.name ?? "未命名地图皮肤").trim().slice(0, 40) || "未命名地图皮肤",
+    version: String(record.version ?? "1.0.0").trim().slice(0, 16),
+    author: String(record.author ?? "").trim().slice(0, 40),
+    baseTheme: record.baseTheme === "dark" ? "dark" : record.baseTheme === "paper" ? "paper" : "",
+  };
+  const warnings = [];
+  const rawTokens = record.tokens && typeof record.tokens === "object" && !Array.isArray(record.tokens) ? record.tokens : {};
+  const tokenKeys = Object.keys(rawTokens);
+  if (tokenKeys.length > ATLAS_MAP_SKIN_TOKENS_MAX) {
+    return { ok: false, error: `令牌条数超过上限（${tokenKeys.length} > ${ATLAS_MAP_SKIN_TOKENS_MAX}）。`, warnings: [] };
+  }
+  const tokens = {};
+  for (const key of tokenKeys) {
+    // 原型危险键：白名单查找查不到 → 落入 unknownKeys 提示，绝不进结果对象
+    const spec = Object.prototype.hasOwnProperty.call(ATLAS_MAP_SKIN_TOKENS, key) ? ATLAS_MAP_SKIN_TOKENS[key] : null;
+    if (!spec) {
+      warnings.push(`未知令牌「${String(key).slice(0, 40)}」已忽略。`);
+      continue;
+    }
+    const rawValue = rawTokens[key];
+    if (spec.type === "color") {
+      if (typeof rawValue !== "string" || !ATLAS_MAP_SKIN_COLOR_RE.test(rawValue.trim())) {
+        warnings.push(`令牌「${key}」颜色值非法（只支持 #hex），已忽略。`);
+        continue;
+      }
+      tokens[key] = rawValue.trim().toLowerCase();
+    } else if (spec.type === "number") {
+      const num = typeof rawValue === "number" ? rawValue : Number(rawValue);
+      if (typeof rawValue !== "number" || !Number.isFinite(num)) {
+        warnings.push(`令牌「${key}」必须是有限数字，已忽略。`);
+        continue;
+      }
+      tokens[key] = Math.min(spec.max, Math.max(spec.min, num));
+    } else {
+      if (!spec.enum.includes(rawValue)) {
+        warnings.push(`令牌「${key}」必须是 ${spec.enum.map((v) => `"${v}"`).join(" / ")} 之一，已忽略。`);
+        continue;
+      }
+      tokens[key] = rawValue;
+    }
+  }
+  return { ok: true, skin: { ...meta, tokens, unknownKeys: warnings.length, warnings } };
+}
+
+/** 已校验皮肤 → --am-* CSS 变量声明文本（枚举经转换层供值；未提供令牌不注入 = 跟随工作台）。 */
+export function atlasMapSkinToCssVars(skin) {
+  if (!skin || typeof skin !== "object") return "";
+  const tokens = skin.tokens && typeof skin.tokens === "object" ? skin.tokens : {};
+  const lines = [];
+  for (const [key, value] of Object.entries(tokens)) {
+    const spec = Object.prototype.hasOwnProperty.call(ATLAS_MAP_SKIN_TOKENS, key) ? ATLAS_MAP_SKIN_TOKENS[key] : null;
+    if (!spec) continue;
+    const cssValue = spec.type === "enum" ? ATLAS_MAP_SKIN_CSS_VALUES[spec.css]?.[value] : value;
+    if (cssValue === undefined || cssValue === null || cssValue === "") continue;
+    lines.push(`${spec.css}: ${cssValue};`);
+  }
+  return lines.join("\n    ");
+}
+
+/**
+ * 应用地图皮肤：--am-* 变量注入 <style data-atlas-map-skin>（作用域 .atlas-workbench）。
+ * skin = null → 移除注入（恢复跟随工作台主题）。幂等；系统减少动画时强制 0s。
+ */
+export function applyAtlasMapSkin(root, skin) {
+  if (typeof document === "undefined") return skin ?? null;
+  let styleTag = document.querySelector("style[data-atlas-map-skin]");
+  const vars = atlasMapSkinToCssVars(skin);
+  if (!vars) {
+    styleTag?.remove();
+    if (root) delete root.dataset.atlasMapSkin;
+    return null;
+  }
+  if (!styleTag) {
+    styleTag = document.createElement("style");
+    styleTag.setAttribute("data-atlas-map-skin", "");
+    (document.head ?? document.body ?? root)?.append(styleTag);
+  }
+  styleTag.textContent =
+    `.atlas-workbench {\n    ${vars}\n  }\n` +
+    `@media (prefers-reduced-motion: reduce) {\n    .atlas-workbench { --am-motion: 0s !important; }\n  }`;
+  if (root) root.dataset.atlasMapSkin = String(skin.id ?? "custom");
+  return skin;
+}
+
+/** 导出皮肤：只含主题元数据与允许的令牌（绝不包含聊天 / API 配置 / 密钥）。 */
+export function exportAtlasMapSkin(skin) {
+  const tokens = skin?.tokens && typeof skin.tokens === "object" ? skin.tokens : {};
+  return JSON.stringify(
+    {
+      kind: "atlas-map-skin",
+      schemaVersion: 1,
+      skinApiVersion: 1,
+      id: String(skin?.id ?? "user.custom"),
+      name: String(skin?.name ?? "未命名地图皮肤"),
+      version: String(skin?.version ?? "1.0.0"),
+      author: String(skin?.author ?? ""),
+      baseTheme: skin?.baseTheme === "dark" ? "dark" : skin?.baseTheme === "paper" ? "paper" : undefined,
+      tokens,
+    },
+    null,
+    2,
+  );
+}
+
+/** 内置样例（M08 要求至少两个真实可导入样例）：深色战术风 / 浅色纸面风。 */
+export const ATLAS_MAP_SKIN_PRESETS = [
+  {
+    kind: "atlas-map-skin",
+    schemaVersion: 1,
+    skinApiVersion: 1,
+    id: "builtin.midnight-map",
+    name: "夜色地图",
+    version: "1.0.0",
+    author: "Atlas 内置",
+    baseTheme: "dark",
+    tokens: {
+      "colors.canvas": "#0d1017",
+      "colors.gridMinor": "#202634",
+      "colors.text": "#e6e8ee",
+      "colors.textMuted": "#a5aec0",
+      "colors.border": "#39445a",
+      "colors.focusRing": "#92b5ff",
+      "colors.location": "#5b8def",
+      "colors.person": "#e8a757",
+      "colors.item": "#b482c8",
+      "colors.popoverBg": "#161a24",
+      "colors.popoverHeaderBg": "#1d2230",
+      "colors.rowHover": "#293248",
+      "colors.buttonBg": "#1d2230",
+      "colors.buttonText": "#e6e8ee",
+      "colors.buttonHover": "#34415c",
+      "colors.scaleText": "#e6e8ee",
+      "colors.scaleBg": "#161a24",
+      "colors.error": "#f08c8c",
+      "colors.estimated": "#e8c27a",
+      "metrics.popoverRadiusPx": 10,
+      "metrics.controlRadiusPx": 6,
+      "effects.shadow": "medium",
+      "effects.motion": "subtle",
+      "markers.locationShape": "rounded-square",
+      "markers.itemShape": "diamond",
+    },
+  },
+  {
+    kind: "atlas-map-skin",
+    schemaVersion: 1,
+    skinApiVersion: 1,
+    id: "builtin.parchment-map",
+    name: "羊皮纸地图",
+    version: "1.0.0",
+    author: "Atlas 内置",
+    baseTheme: "paper",
+    tokens: {
+      "colors.canvas": "#f6f0e0",
+      "colors.gridMinor": "#e0d4b4",
+      "colors.text": "#4a3d24",
+      "colors.textMuted": "#8a7a55",
+      "colors.border": "#c9b98a",
+      "colors.focusRing": "#b8860b",
+      "colors.location": "#fdfaf2",
+      "colors.person": "#c9962a",
+      "colors.item": "#8a5fa8",
+      "colors.popoverBg": "#fffdf6",
+      "colors.popoverHeaderBg": "#f3ecd8",
+      "colors.rowHover": "#f0e8d0",
+      "colors.scaleBg": "#fffdf6",
+      "colors.scaleText": "#6b5a32",
+      "colors.error": "#a83c3c",
+      "colors.estimated": "#a8842c",
+      "metrics.popoverRadiusPx": 4,
+      "effects.shadow": "soft",
+      "effects.motion": "subtle",
+      "fonts.family": "serif",
+      "markers.locationShape": "rounded-square",
+      "markers.personShape": "circle",
+    },
+  },
+];
+
 const NPC_REASON_LABELS = {
   samePoint: "同地点",
   nearbyPoint: "附近地点",
@@ -788,6 +1063,18 @@ function formatDistanceMeters(meters) {
   return `${Number.isInteger(km) ? km : km.toFixed(1)} 公里`;
 }
 
+/**
+ * 0.9.51（M06）旅行预览物理距离（纯函数，可测）：
+ * 有标定时把格程换算为物理距离（估计口径——schematic 布局 + AI/人工标定）。
+ * 纪律：只换算距离，绝不自动把米换算成小时 / 天——旅行耗时沿用当前世界规则
+ * （lib/ 快照 buildTravelHint 的按格每时段语义一行不动，旧世界策略原样保留）。
+ */
+function formatTravelDistance(cells, metersPerCell) {
+  if (typeof cells !== "number" || typeof metersPerCell !== "number") return "";
+  if (!Number.isFinite(cells) || cells <= 0 || !Number.isFinite(metersPerCell) || metersPerCell <= 0) return "";
+  return `≈ ${formatDistanceMeters(cells * metersPerCell)}`;
+}
+
 
 function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
   root.className = "atlas-workbench";
@@ -810,6 +1097,17 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     customCss: typeof skinPort?.read?.("skinCustomCss") === "string" ? skinPort.read("skinCustomCss") : "",
   };
   applyAtlasSkin(root, skinState);
+  // 0.9.51（M08）地图皮肤：挂载恢复上次应用的皮肤；损坏 / 缺失回退跟随工作台
+  let mapSkin = null;
+  let mapSkinPrev = null; // 「撤销上次应用」= 应用前的上一份
+  try {
+    const savedSkin = skinPort?.read?.("atlasMapSkin");
+    if (savedSkin) {
+      const parsed = parseAtlasMapSkin(savedSkin);
+      if (parsed.ok) mapSkin = parsed.skin;
+    }
+  } catch { /* 损坏回退 */ }
+  applyAtlasMapSkin(root, mapSkin);
 
   const state = () => core.getState();
   const data = () => state().stateData ?? {};
@@ -2321,7 +2619,13 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     travelBar.innerHTML = "";
     if (preview) {
       travelBar.append(el("span", "aw-travel__title", `前往：${preview.destinationName}`));
-      travelBar.append(el("span", "aw-travel__meta", `距离 ${preview.distance} 格 · 预计 ${preview.estimatedDuration} 时段`));
+      // 0.9.51（M06）：有标定时格程旁附物理距离（估计口径）；耗时语义一行不动——
+      // 比例尺用于空间参考，旅行耗时沿用当前世界规则（lib/ 快照零改动，不重算已提交时间线）
+      const metersPerCell = scaleCtx?.calibration?.metersPerCell ?? null;
+      const distanceLabel = formatTravelDistance(preview.distance, metersPerCell);
+      travelBar.append(el("span", "aw-travel__meta", distanceLabel
+        ? `距离 ${preview.distance} 格（${distanceLabel}，按标定估计） · 预计 ${preview.estimatedDuration} 时段（旅行耗时沿用世界规则）`
+        : `距离 ${preview.distance} 格 · 预计 ${preview.estimatedDuration} 时段`));
       const actions = el("span", "aw-travel__actions");
       const confirm = el("button", "aw-btn aw-btn--primary", "填入行动");
       confirm.type = "button";
@@ -4070,6 +4374,170 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     vars.append(el("p", "aw-panel__text", ATLAS_SKIN_VARIABLES.join("、")));
     panel.append(vars);
 
+    panel.append(buildMapSkinPanel());
+    return panel;
+  }
+
+  /**
+   * 0.9.51（M08）地图皮肤管理：导入 .atlas-map-skin.json → 校验 → 预览（立即生效可取消）
+   * → 应用（持久化）；导出当前 / 撤销上次应用 / 恢复跟随工作台；两个内置样例一键预览。
+   * 预览只影响当前界面（applyAtlasMapSkin 内存注入），点「应用」才写 extensionSettings。
+   */
+  function buildMapSkinPanel() {
+    const panel = el("section", "aw-panel");
+    panel.append(el("span", "aw-eyebrow", "地图皮肤"));
+    panel.append(el("p", "aw-panel__meta", `导入 .atlas-map-skin.json 换地图外观（≤${String(Math.round(ATLAS_MAP_SKIN_BYTES_MAX / 1024))} KiB 纯令牌文件）。皮肤只改颜色 / 尺寸 / 形状——坐标、距离、标定与操作完全不变。`));
+
+    const statusText = mapSkin
+      ? `当前：${mapSkin.name}${mapSkin.unknownKeys ? `（${String(mapSkin.unknownKeys)} 个未知令牌被忽略）` : ""}`
+      : "当前：跟随工作台主题";
+    panel.append(el("p", "aw-panel__text", statusText));
+
+    const fileInput = document.createElement("input");
+    fileInput.type = "file";
+    fileInput.accept = ".json,application/json";
+    fileInput.className = "aw-input";
+    fileInput.setAttribute("aria-label", "选择地图皮肤 JSON 文件");
+    const previewNote = el("p", "aw-panel__meta", "");
+    const btnRow = el("div", "aw-actions");
+
+    /** 预览：内存注入 + 刷新地图页可见效果；不持久化。 */
+    const previewSkin = (skin) => {
+      applyAtlasMapSkin(root, skin);
+      previewNote.textContent = `预览中：${skin.name}（${String(Object.keys(skin.tokens).length)} 个令牌${skin.unknownKeys ? `，${String(skin.unknownKeys)} 个未知令牌已忽略` : ""}）。满意就「应用」，不满意「取消」恢复原状。`;
+      applyBtn.disabled = false;
+      cancelBtn.disabled = false;
+    };
+    const persist = async (skin) => {
+      try {
+        skinPort?.write?.("atlasMapSkin", skin);
+      } catch {
+        // 保存失败不显示成功：回滚内存态并如实报错
+        applyAtlasMapSkin(root, mapSkinPrev);
+        setStatus("皮肤保存失败——已恢复上一份皮肤。", "error");
+        return;
+      }
+      mapSkin = skin;
+      applyAtlasMapSkin(root, mapSkin);
+      previewNote.textContent = "";
+      applyBtn.disabled = true;
+      cancelBtn.disabled = true;
+      setStatus(`地图皮肤已应用：${skin.name}。`, "ok");
+      renderCenter();
+    };
+    const applyBtn = el("button", "aw-btn aw-btn--primary", "应用");
+    applyBtn.type = "button";
+    applyBtn.disabled = true;
+    // 闭包持有当前预览的 skin（预览 = 内存注入；应用 = 持久化到 extensionSettings）
+    let pendingSkin = null;
+    const realPreview = (skin) => {
+      pendingSkin = skin;
+      previewSkin(skin);
+    };
+    applyBtn.addEventListener("click", () => {
+      if (pendingSkin) void persist(pendingSkin);
+    });
+    const cancelBtn = el("button", "aw-btn", "取消");
+    cancelBtn.type = "button";
+    cancelBtn.disabled = true;
+    cancelBtn.addEventListener("click", () => {
+      pendingSkin = null;
+      applyAtlasMapSkin(root, mapSkin); // 回滚到已应用的皮肤（可能为 null = 跟随工作台）
+      previewNote.textContent = "";
+      applyBtn.disabled = true;
+      cancelBtn.disabled = true;
+    });
+    fileInput.addEventListener("change", () => {
+      const file = fileInput.files?.[0];
+      fileInput.value = "";
+      if (!file) return;
+      if (file.size > ATLAS_MAP_SKIN_BYTES_MAX) {
+        setStatus(`皮肤文件超过 ${String(Math.round(ATLAS_MAP_SKIN_BYTES_MAX / 1024))} KiB 上限，已拒绝。`, "error");
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = parseAtlasMapSkin(String(reader.result ?? ""));
+        if (!result.ok) {
+          setStatus(`皮肤校验失败：${result.error}`, "error");
+          return;
+        }
+        realPreview(result.skin);
+      };
+      reader.onerror = () => setStatus("皮肤文件读取失败。", "error");
+      reader.readAsText(file);
+    });
+
+    const exportBtn = el("button", "aw-btn", "导出当前皮肤");
+    exportBtn.type = "button";
+    exportBtn.addEventListener("click", () => {
+      if (!mapSkin) {
+        setStatus("当前跟随工作台主题，没有可导出的地图皮肤——先导入或选一个样例。", "error");
+        return;
+      }
+      try {
+        const blob = new Blob([exportAtlasMapSkin(mapSkin)], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `${String(mapSkin.id || "atlas-map-skin").replace(/[^a-zA-Z0-9._-]/g, "_")}.atlas-map-skin.json`;
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        setStatus("皮肤已导出（只含主题元数据与令牌）。", "ok");
+      } catch {
+        setStatus("皮肤导出失败。", "error");
+      }
+    });
+    const undoBtn = el("button", "aw-btn", "撤销上次应用");
+    undoBtn.type = "button";
+    undoBtn.addEventListener("click", () => {
+      pendingSkin = null;
+      const restore = mapSkinPrev;
+      mapSkinPrev = mapSkin;
+      mapSkin = restore;
+      applyAtlasMapSkin(root, mapSkin);
+      try { skinPort?.write?.("atlasMapSkin", mapSkin); } catch { setStatus("撤销已生效但保存失败——刷新后可能回到撤销前状态。", "warn"); }
+      previewNote.textContent = "";
+      applyBtn.disabled = true;
+      cancelBtn.disabled = true;
+      renderCenter();
+    });
+    const resetBtn2 = el("button", "aw-btn", "恢复跟随工作台");
+    resetBtn2.type = "button";
+    resetBtn2.addEventListener("click", () => {
+      pendingSkin = null;
+      mapSkinPrev = mapSkin;
+      mapSkin = null;
+      applyAtlasMapSkin(root, null);
+      try { skinPort?.write?.("atlasMapSkin", null); } catch { setStatus("恢复已生效但保存失败——刷新后可能回到之前状态。", "warn"); }
+      previewNote.textContent = "";
+      applyBtn.disabled = true;
+      cancelBtn.disabled = true;
+      setStatus("已恢复跟随工作台主题。", "ok");
+      renderCenter();
+    });
+
+    // 内置样例（M08：至少两个真实可导入样例）
+    const presetRow = el("div", "aw-actions");
+    for (const preset of ATLAS_MAP_SKIN_PRESETS) {
+      const presetBtn = el("button", "aw-btn", `样例：${preset.name}`);
+      presetBtn.type = "button";
+      presetBtn.addEventListener("click", () => {
+        const result = parseAtlasMapSkin(preset);
+        if (!result.ok) {
+          setStatus(`内置样例校验失败（不应发生）：${result.error}`, "error");
+          return;
+        }
+        realPreview(result.skin);
+      });
+      presetRow.append(presetBtn);
+    }
+
+    btnRow.append(applyBtn, cancelBtn);
+    panel.append(fileInput, previewNote, btnRow, presetRow);
+    const manageRow = el("div", "aw-actions");
+    manageRow.append(exportBtn, undoBtn, resetBtn2);
+    panel.append(manageRow);
     return panel;
   }
 

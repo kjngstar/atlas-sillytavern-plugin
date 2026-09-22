@@ -822,9 +822,9 @@
   border-radius: 10px;
   overflow: hidden;
   background:
-    repeating-linear-gradient(0deg, transparent, transparent 27px, var(--aw-teal-wash) 27px, var(--aw-teal-wash) 28px),
-    repeating-linear-gradient(90deg, transparent, transparent 27px, var(--aw-teal-wash) 27px, var(--aw-teal-wash) 28px),
-    var(--aw-paper);
+    repeating-linear-gradient(0deg, transparent, transparent 27px, var(--am-grid-minor, var(--aw-teal-wash)) 27px, var(--am-grid-minor, var(--aw-teal-wash)) 28px),
+    repeating-linear-gradient(90deg, transparent, transparent 27px, var(--am-grid-minor, var(--aw-teal-wash)) 27px, var(--am-grid-minor, var(--aw-teal-wash)) 28px),
+    var(--am-canvas, var(--aw-paper));
 }
 
 .aw-maparea__hint {
@@ -834,9 +834,9 @@
   /* 0.9.20：空地理提示放底部——居中会压住起点标记；
      0.9.38：geobar 收纳为底部工具条，提示抬到工具条上方避免重叠 */
   place-items: end center;
-  color: var(--aw-muted);
-  font-family: var(--aw-sans);
-  font-size: 12px;
+  color: var(--am-error, var(--aw-muted));
+  font-family: var(--am-font-family, var(--aw-sans));
+  font-size: var(--am-body-font-size-px, 12px);
   padding: 0 24px 56px;
   text-align: center;
 }
@@ -850,15 +850,15 @@
   position: absolute;
   inset: 12px;
   overflow: hidden;
-  border: 1px solid #d8d2c2;
+  border: 1px solid var(--am-border, #d8d2c2);
   border-radius: 8px;
-  box-shadow: inset 0 0 60px rgba(16, 27, 29, 0.07);
+  box-shadow: var(--am-shadow, inset 0 0 60px rgba(16, 27, 29, 0.07));
   /* 0.9.38 网格纸回归：0.9.32 起不透明纸面盖死了 .aw-maparea 的网格纹理，
      地图变成一张空白纸——网格搬进 viewport 本体（has-image 时被图层图片覆盖，无冲突） */
   background:
-    repeating-linear-gradient(0deg, transparent, transparent 27px, var(--aw-teal-wash) 27px, var(--aw-teal-wash) 28px),
-    repeating-linear-gradient(90deg, transparent, transparent 27px, var(--aw-teal-wash) 27px, var(--aw-teal-wash) 28px),
-    var(--aw-paper);
+    repeating-linear-gradient(0deg, transparent, transparent 27px, var(--am-grid-minor, var(--aw-teal-wash)) 27px, var(--am-grid-minor, var(--aw-teal-wash)) 28px),
+    repeating-linear-gradient(90deg, transparent, transparent 27px, var(--am-grid-minor, var(--aw-teal-wash)) 27px, var(--am-grid-minor, var(--aw-teal-wash)) 28px),
+    var(--am-canvas, var(--aw-paper));
 }
 
 .aw-layer {
@@ -934,12 +934,12 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  background: var(--aw-veil);
-  border: 1px solid rgba(138, 106, 28, 0.35);
+  background: var(--am-scale-bg, var(--aw-veil));
+  border: 1px solid var(--am-border, rgba(138, 106, 28, 0.35));
   border-radius: 4px;
   padding: 3px 8px;
   cursor: pointer;
-  color: inherit;
+  color: var(--am-scale-text, var(--aw-gold-deep));
   font: inherit;
 }
 
@@ -947,7 +947,7 @@
   display: inline-block;
   height: 6px;
   min-width: 24px;
-  border: 1px solid var(--aw-gold-deep);
+  border: 1px solid var(--am-scale-text, var(--aw-gold-deep));
   border-top: none;
   position: relative;
   background: transparent;
@@ -961,15 +961,16 @@
   top: 0;
   width: 1px;
   height: 9px;
-  background: var(--aw-gold-deep);
+  background: var(--am-scale-text, var(--aw-gold-deep));
 }
 .aw-scale__bar::before { left: 0; }
 .aw-scale__bar::after { right: 0; }
 
-/* 未标定 / 旧式单位：桩线（不是米制标尺，不能伪物理） */
+/* 未标定 / 旧式单位：桩线（不是米制标尺，不能伪物理）；用 estimated 状态色 */
 .aw-scale__bar.is-stub {
   width: 24px !important;
   border-style: dashed;
+  border-color: var(--am-estimated, var(--aw-gold-deep));
   opacity: 0.55;
 }
 
@@ -990,7 +991,7 @@
 
 .aw-scale__row { line-height: 1.7; color: var(--aw-ink-soft); }
 .aw-scale__row--head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
-.aw-scale__row--muted { color: var(--aw-ink-soft); opacity: 0.75; font-size: 9px; }
+.aw-scale__row--muted { color: var(--am-estimated, var(--aw-ink-soft)); opacity: 0.75; font-size: 9px; }
 .aw-scale__cell { font-weight: 600; color: var(--aw-ink-strong); }
 .aw-scale__src { font-size: 9px; color: var(--aw-gold-deep); white-space: nowrap; }
 
@@ -1018,14 +1019,14 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
-  padding: 3px 12px;
-  border-radius: 3px;
-  border: 1px solid #b3ab92;
-  background: var(--aw-panel);
-  color: var(--aw-ink-soft);
+  font-size: var(--am-body-font-size-px, 12px);
+  padding: calc(var(--am-spacing-px, 8px) / 2) 12px;
+  border-radius: var(--am-marker-radius-location, 3px);
+  border: 1px solid var(--am-border, #b3ab92);
+  background: var(--am-location, var(--aw-panel));
+  color: var(--am-text, var(--aw-ink-soft));
   white-space: nowrap;
-  font-family: var(--aw-serif);
+  font-family: var(--am-font-family, var(--aw-serif));
   z-index: 3;
   box-shadow: 0 1px 2px rgba(16, 27, 29, 0.12);
 }
@@ -1074,9 +1075,9 @@
   width: 22px;
   height: 22px;
   padding: 0;
-  border-radius: 50%;
-  background: linear-gradient(135deg, #d8b26a 0%, #b9924a 100%);
-  border: 2px solid #fff8df;
+  border-radius: var(--am-marker-radius-person, 50%);
+  background: var(--am-person, linear-gradient(135deg, #d8b26a 0%, #b9924a 100%));
+  border: 2px solid var(--am-border, #fff8df);
   box-shadow: 0 0 0 2px var(--aw-gold-line), 0 2px 6px rgba(25, 48, 45, 0.3);
   z-index: 4;
   cursor: pointer;
@@ -1127,8 +1128,9 @@
   width: 13px;
   height: 13px;
   padding: 0;
-  background: #ece4f6;
-  border: 1.5px solid #7a5fb8;
+  border-radius: var(--am-marker-radius-item, 2px);
+  background: var(--am-item, #ece4f6);
+  border: 1.5px solid var(--am-item, #7a5fb8);
   box-shadow: 0 1px 4px rgba(25, 48, 45, 0.25);
   z-index: 3;
   cursor: pointer;
@@ -1176,11 +1178,11 @@
   display: flex;
   gap: 10px;
   align-items: center;
-  font-family: var(--aw-sans);
+  font-family: var(--am-font-family, var(--aw-sans));
   font-size: 10px;
-  color: var(--aw-gold-deep);
-  background: var(--aw-veil);
-  border: 1px solid rgba(138, 106, 28, 0.35);
+  color: var(--am-scale-text, var(--aw-gold-deep));
+  background: var(--am-scale-bg, var(--aw-veil));
+  border: 1px solid var(--am-border, rgba(138, 106, 28, 0.35));
   border-radius: 4px;
   padding: 3px 8px;
   z-index: 3;
@@ -1257,18 +1259,18 @@
 }
 
 .aw-zoom__btn {
-  width: 28px;
-  height: 28px;
+  width: var(--am-control-height-px, 28px);
+  height: var(--am-control-height-px, 28px);
   display: grid;
   place-items: center;
-  border: 1px solid #cfc9b8;
-  border-radius: 6px;
-  background: var(--aw-panel);
-  color: var(--aw-ink-soft);
+  border: 1px solid var(--am-border, #cfc9b8);
+  border-radius: var(--am-control-radius-px, 6px);
+  background: var(--am-button-bg, var(--aw-panel));
+  color: var(--am-button-text, var(--aw-ink-soft));
   font-size: 13px;
 }
 
-.aw-zoom__btn:hover { border-color: var(--aw-teal); color: var(--aw-teal); }
+.aw-zoom__btn:hover { border-color: var(--am-focus-ring, var(--aw-teal)); color: var(--am-button-hover, var(--aw-teal)); }
 .aw-zoom__label { font-size: 11px; color: var(--aw-muted); min-width: 36px; text-align: right; }
 
 /* 旅行预览条 */
@@ -1793,8 +1795,8 @@
   gap: 4px;
   padding: 2px 8px;
   border-radius: 6px;
-  border: 1px solid var(--aw-gold-line);
-  background: var(--aw-veil-strong);
+  border: 1px solid var(--am-border, var(--aw-gold-line));
+  background: var(--am-popover-bg, var(--aw-veil-strong));
   white-space: nowrap;
 }
 
@@ -1804,7 +1806,7 @@
   border: none;
   border-radius: 4px;
   background: transparent;
-  color: #59472c;
+  color: var(--am-text-muted, #59472c);
   font: inherit;
   cursor: pointer;
 }
@@ -1830,14 +1832,15 @@
   position: absolute;
   top: 64px; /* 避开 mapTools 行（zoom 控件 top:22） */
   right: 14px;
-  width: min(280px, 62%);
+  width: min(var(--am-popover-width-px, 280px), 62%);
   z-index: 8;
-  padding: 12px 14px;
-  border-radius: 8px;
-  border: 1px solid var(--aw-gold-line);
-  background: var(--aw-veil-strong);
-  box-shadow: 0 10px 28px rgba(8, 20, 22, 0.18);
-  font-family: var(--aw-sans);
+  padding: var(--am-spacing-px, 12px) calc(var(--am-spacing-px, 12px) + 2px);
+  border-radius: var(--am-popover-radius-px, 8px);
+  border: 1px solid var(--am-border, var(--aw-gold-line));
+  background: var(--am-popover-bg, var(--aw-veil-strong));
+  box-shadow: var(--am-shadow, 0 10px 28px rgba(8, 20, 22, 0.18));
+  font-family: var(--am-font-family, var(--aw-sans));
+  transition: opacity var(--am-motion, 0.18s) ease;
 }
 
 .aw-mappanel__head {
@@ -1845,12 +1848,16 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  background: var(--am-popover-header-bg, transparent);
+  border-radius: var(--am-popover-radius-px, 8px) var(--am-popover-radius-px, 8px) 0 0;
+  margin: calc(-1 * var(--am-spacing-px, 12px)) calc(-1 * var(--am-spacing-px, 12px) - 2px) 0;
+  padding: var(--am-spacing-px, 12px) calc(var(--am-spacing-px, 12px) + 2px) calc(var(--am-spacing-px, 12px) / 2);
 }
 
 .aw-mappanel__name {
-  font-family: var(--aw-serif);
-  font-size: 15px;
-  color: var(--aw-ink);
+  font-family: var(--am-font-family, var(--aw-serif));
+  font-size: var(--am-title-font-size-px, 15px);
+  color: var(--am-text, var(--aw-ink));
 }
 
 .aw-mappanel__close {
@@ -1867,7 +1874,7 @@
 .aw-mappanel__meta {
   margin-top: 6px;
   font-size: 11px;
-  color: var(--aw-muted);
+  color: var(--am-text-muted, var(--aw-muted));
 }
 
 .aw-mappanel__desc {
@@ -1974,7 +1981,8 @@
 
 .aw-mappanel__person:hover,
 .aw-mappanel__person:focus-visible {
-  border-color: var(--aw-teal, var(--aw-ink-soft));
+  border-color: var(--am-focus-ring, var(--aw-teal, var(--aw-ink-soft)));
+  background: var(--am-row-hover, transparent);
   transform: translateY(-1px);
 }
 
