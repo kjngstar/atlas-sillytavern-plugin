@@ -100,14 +100,31 @@ if (existsSync(rootLicense)) {
   console.log("copied LICENSE -> release/atlas-ui-extension/, release/atlas-server-plugin/");
 }
 
-// 4) 同步仓库根安装单元：SillyTavern「Install extension」要求 manifest.json
-//    位于仓库根，且 index.js 加载 ./dist/atlas-ui-core.mjs。发布仓库根 = 安装单元。
-const uiRelease = join(releaseDir, "atlas-ui-extension");
-const ROOT_INSTALL_FILES = ["manifest.json", "index.js", "style.css", "settings.html"];
-for (const file of ROOT_INSTALL_FILES) {
-  copyFileSync(join(uiRelease, file), join(root, file));
+// 4) 根安装单元同步（0.9.46 方向修正——真实事故修复）：
+//    历史版本在这里把 release/atlas-ui-extension 的文件**反向覆盖**仓库根，而
+//    release 副本来自 atlas-extension/ 镜像——镜像里的 style.css / settings.html
+//    是过期拷贝时，根上的新改动会在「测试通过 → pack → 提交」之间被静默回滚
+//    （0.9.43 图例修复、0.9.45 皮肤令牌两次丢失的根因，commit message 全在撒谎）。
+//    现在：根 = 权威源 → 正向同步镜像；根文件本身永不被 pack 触碰。
+//    index.js 镜像维持人工同步（唯一有意差异 = dev 回退行），此处断言一致。
+const MIRROR_SYNC_FILES = ["style.css", "settings.html", "manifest.json"];
+for (const file of MIRROR_SYNC_FILES) {
+  copyFileSync(join(root, file), join(root, "atlas-extension", file));
 }
+const stripFallbackLine = (content) =>
+  content.replace(
+    'const attempts = ["./dist/atlas-ui-core.mjs", "../src/atlas-ui-core.ts"];',
+    'const attempts = ["./dist/atlas-ui-core.mjs"];',
+  );
+const rootIndexSource = readFileSync(join(root, "index.js"), "utf8");
+const mirrorIndexSource = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
+if (stripFallbackLine(mirrorIndexSource) !== rootIndexSource) {
+  throw new Error(
+    "atlas-extension/index.js 镜像与根 index.js 不一致——先同步镜像（cp index.js atlas-extension/index.js 后恢复 dev 回退行）再 pack。",
+  );
+}
+const uiRelease = join(releaseDir, "atlas-ui-extension");
 copyTree(join(uiRelease, "dist"), join(root, "dist"));
-console.log("synced root install unit (manifest.json / index.js / style.css / settings.html / dist/)");
+console.log("mirror synced root -> atlas-extension (style.css / settings.html / manifest.json); index.js mirror in sync; root dist refreshed");
 
 console.log("ATLAS-FIX-01 pack complete（自包含安装包）.");

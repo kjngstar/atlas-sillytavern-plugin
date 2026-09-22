@@ -20,6 +20,29 @@
   --aw-rail-bg: #14272a;
   --aw-rail-text: #a8b8ad;
   --aw-rail-dim: #79908d;
+
+  /* 0.9.45 皮肤令牌（收敛自历史硬编码色；清单见 index.js 的 ATLAS_SKIN_VARIABLES）。
+   * 0.9.46 重打：0.9.45 的本块改动被 pack 反向同步回滚（tools/pack.mjs 步骤 4 已修）。 */
+  --aw-ink-strong: #1e383a;
+  --aw-ink-soft: #25484a;
+  --aw-danger: #a3543c;
+  --aw-danger-deep: #7c3a26;
+  --aw-gold-busy: #856830;
+  --aw-teal-wash: rgba(37, 95, 91, 0.06);
+  --aw-teal-wash-strong: rgba(37, 95, 91, 0.1);
+  --aw-teal-line: rgba(37, 95, 91, 0.35);
+  --aw-gold-wash: rgba(196, 163, 99, 0.1);
+  --aw-gold-wash-strong: rgba(196, 163, 99, 0.15);
+  --aw-gold-line: rgba(196, 163, 99, 0.45);
+  --aw-gold-hairline: rgba(196, 163, 99, 0.16);
+  --aw-veil: rgba(251, 250, 246, 0.88);
+  --aw-veil-strong: rgba(251, 250, 246, 0.96);
+  --aw-veil-soft: rgba(251, 250, 246, 0.7);
+  --aw-veil-line: rgba(251, 250, 246, 0.6);
+  --aw-input-bg: #ffffff;
+  --aw-input-dim: #6f7c78;
+  --aw-input-disabled-bg: #f2efe7;
+
   --aw-serif: Georgia, "Songti SC", "SimSun", serif;
   --aw-sans: system-ui, "Microsoft YaHei", sans-serif;
 
@@ -33,7 +56,7 @@
   display: flex;
   overflow: hidden;
   border-radius: 14px;
-  border: 1px solid rgba(196, 163, 99, 0.42);
+  border: 1px solid var(--aw-gold-line);
   background: var(--aw-paper);
   color: var(--aw-ink);
   font-family: var(--aw-serif);
@@ -115,7 +138,7 @@
   display: grid;
   gap: 3px;
   padding: 6px 10px 10px;
-  border-bottom: 1px solid rgba(196, 163, 99, 0.16);
+  border-bottom: 1px solid var(--aw-gold-hairline);
 }
 
 .aw-nav__btn {
@@ -133,11 +156,11 @@
   text-align: left;
 }
 
-.aw-nav__btn:hover { color: var(--aw-gold-soft); background: rgba(196, 163, 99, 0.1); }
+.aw-nav__btn:hover { color: var(--aw-gold-soft); background: var(--aw-gold-wash); }
 
 .aw-nav__btn.is-active {
   color: var(--aw-gold-soft);
-  background: rgba(196, 163, 99, 0.14);
+  background: var(--aw-gold-wash-strong);
   box-shadow: inset 2px 0 0 var(--aw-gold);
 }
 
@@ -206,7 +229,7 @@
   align-items: center;
   gap: 8px;
   padding: 12px 14px;
-  border-top: 1px solid rgba(196, 163, 99, 0.16);
+  border-top: 1px solid var(--aw-gold-hairline);
   font-family: var(--aw-sans);
   font-size: 12px;
 }
@@ -224,7 +247,7 @@
 .aw-foot__text { flex: 1; min-width: 0; color: var(--aw-rail-text); }
 
 .aw-foot__exit {
-  border: 1px solid rgba(196, 163, 99, 0.4);
+  border: 1px solid var(--aw-gold-line);
   border-radius: 6px;
   background: transparent;
   color: var(--aw-gold-soft);
@@ -232,7 +255,7 @@
   font-size: 12px;
 }
 
-.aw-foot__exit:hover { background: rgba(196, 163, 99, 0.14); }
+.aw-foot__exit:hover { background: var(--aw-gold-wash-strong); }
 
 /* ------------------------------------------------------------------ *
  * 中央：顶栏（拖拽把手）+ 页面区
@@ -254,7 +277,7 @@
   justify-content: space-between;
   gap: 12px;
   padding: 6px 16px;
-  background: rgba(251, 250, 246, 0.96);
+  background: var(--aw-veil-strong);
   border-bottom: 1px solid var(--aw-line);
 }
 
@@ -266,7 +289,7 @@
 .aw-topbar__world {
   font-size: 15px;
   font-weight: 700;
-  color: #1e383a;
+  color: var(--aw-ink-strong);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -307,16 +330,16 @@
   font-family: var(--aw-sans);
   font-size: 17px;
   line-height: 1;
-  color: #1e383a;
+  color: var(--aw-ink-strong);
   background: transparent;
   border: 1px solid var(--aw-line);
   border-radius: 8px;
   cursor: pointer;
 }
 
-.aw-topbar__close:hover { background: #255f5b; border-color: #255f5b; color: #f3ecd9; }
+.aw-topbar__close:hover { background: var(--aw-teal); border-color: var(--aw-teal); color: #f3ecd9; }
 
-.aw-topbar__close:focus-visible { outline: 2px solid #255f5b; outline-offset: 2px; }
+.aw-topbar__close:focus-visible { outline: 2px solid var(--aw-teal); outline-offset: 2px; }
 
 .aw-chip {
   font-family: var(--aw-sans);
@@ -330,8 +353,8 @@
 }
 
 .aw-chip--teal { color: #f2dfad; background: var(--aw-teal); border-color: var(--aw-teal); }
-.aw-chip--gold { color: var(--aw-gold-deep); background: rgba(196, 163, 99, 0.16); border-color: var(--aw-gold); }
-.aw-chip--busy { color: #856830; border-color: var(--aw-gold); background: rgba(196, 163, 99, 0.14); }
+.aw-chip--gold { color: var(--aw-gold-deep); background: var(--aw-gold-wash-strong); border-color: var(--aw-gold); }
+.aw-chip--busy { color: var(--aw-gold-busy); border-color: var(--aw-gold); background: var(--aw-gold-wash-strong); }
 
 /* 页面区（随左栏栏位切换内容；地图页时为铺满的地图画布） */
 
@@ -354,7 +377,7 @@
   margin: 0;
   font-size: 19px;
   font-weight: 700;
-  color: #1e383a;
+  color: var(--aw-ink-strong);
   letter-spacing: 0.04em;
 }
 
@@ -375,7 +398,7 @@
   padding: 40px 20px;
   border: 1px dashed #d5cfbe;
   border-radius: 12px;
-  background: rgba(251, 250, 246, 0.7);
+  background: var(--aw-veil-soft);
 }
 
 .aw-emptybox__mark {
@@ -453,7 +476,7 @@
 .aw-panel__text {
   margin: 0;
   font-size: 13px;
-  color: #25484a;
+  color: var(--aw-ink-soft);
   line-height: 1.7;
   overflow-wrap: anywhere;
 }
@@ -487,7 +510,7 @@
 
 .aw-guide__item {
   font-size: 13px;
-  color: #25484a;
+  color: var(--aw-ink-soft);
   line-height: 1.7;
 }
 
@@ -516,7 +539,7 @@
   margin: 0;
   font-size: 14px;
   font-weight: 700;
-  color: #1e383a;
+  color: var(--aw-ink-strong);
   overflow-wrap: anywhere;
 }
 
@@ -542,7 +565,7 @@
   font-family: var(--aw-sans);
   font-size: 11px;
   color: var(--aw-teal);
-  border: 1px solid rgba(37, 95, 91, 0.35);
+  border: 1px solid var(--aw-teal-line);
   border-radius: 999px;
   padding: 1px 8px;
   white-space: nowrap;
@@ -576,8 +599,8 @@
 .aw-timeline__item.is-committed { border-left: 3px solid var(--aw-teal); }
 .aw-timeline__item.is-duplicate { border-left: 3px solid #9aa39c; }
 .aw-timeline__item.is-pending-review { border-left: 3px solid var(--aw-gold); }
-.aw-timeline__item.is-failed { border-left: 3px solid #a3543c; }
-.aw-timeline__item.is-live { border-left: 3px solid var(--aw-gold); background: rgba(196, 163, 99, 0.08); }
+.aw-timeline__item.is-failed { border-left: 3px solid var(--aw-danger); }
+.aw-timeline__item.is-live { border-left: 3px solid var(--aw-gold); background: var(--aw-gold-wash); }
 
 .aw-timeline__time {
   font-family: var(--aw-sans);
@@ -604,15 +627,15 @@
   white-space: nowrap;
 }
 
-.aw-btn:hover { background: rgba(37, 95, 91, 0.08); }
+.aw-btn:hover { background: var(--aw-teal-wash); }
 .aw-btn--primary { background: var(--aw-teal); color: var(--aw-gold-soft); }
 .aw-btn--primary:hover { background: var(--aw-teal-deep); }
 
 .aw-btn--ghost { border-color: var(--aw-line); color: #3b5b5d; background: transparent; }
-.aw-btn--ghost:hover { border-color: var(--aw-teal); color: var(--aw-teal); background: rgba(37, 95, 91, 0.06); }
-.aw-btn--ghost.is-active { border-color: var(--aw-teal); color: var(--aw-teal); background: rgba(37, 95, 91, 0.12); }
+.aw-btn--ghost:hover { border-color: var(--aw-teal); color: var(--aw-teal); background: var(--aw-teal-wash); }
+.aw-btn--ghost.is-active { border-color: var(--aw-teal); color: var(--aw-teal); background: var(--aw-teal-wash-strong); }
 
-.aw-btn--danger { border-color: #a3543c; color: #a3543c; }
+.aw-btn--danger { border-color: var(--aw-danger); color: var(--aw-danger); }
 .aw-btn--danger:hover { background: rgba(163, 84, 60, 0.08); }
 
 /* 0.9.11 shujuku 式表单语言：紧凑图标按钮 / 禁用态 / 预设选择行 / 灰色 hint */
@@ -641,7 +664,7 @@
 .aw-mode-btn.is-active {
   border-color: var(--aw-teal);
   color: var(--aw-teal);
-  background: rgba(37, 95, 91, 0.12);
+  background: var(--aw-teal-wash-strong);
 }
 
 /* 0.9.16 替换页规则行：名称 / 开始词 / 结束词 / 开关 / 保存 / 删除 */
@@ -670,17 +693,17 @@
   border: 1px solid var(--aw-line);
   border-radius: 8px;
   background: var(--aw-panel);
-  color: #25484a;
+  color: var(--aw-ink-soft);
   font-size: 13px;
   padding: 8px 11px;
   overflow-wrap: anywhere;
 }
 
-.aw-list__item:hover { border-color: var(--aw-teal); color: var(--aw-teal); background: rgba(37, 95, 91, 0.05); }
+.aw-list__item:hover { border-color: var(--aw-teal); color: var(--aw-teal); background: var(--aw-teal-wash); }
 
 .aw-list__item.is-current {
   border-color: var(--aw-teal);
-  background: rgba(37, 95, 91, 0.1);
+  background: var(--aw-teal-wash-strong);
   color: var(--aw-teal);
   font-weight: 700;
 }
@@ -708,7 +731,7 @@
   box-sizing: border-box;
   border: 1px solid #cfc9b8;
   border-radius: 7px;
-  background: #fff;
+  background: var(--aw-veil-strong);
   color: var(--aw-ink);
   font-family: var(--aw-sans);
   font-size: 13px;
@@ -777,7 +800,7 @@
   border-left: 3px solid var(--aw-teal);
   border-radius: 8px;
   background: var(--aw-panel);
-  color: #25484a;
+  color: var(--aw-ink-soft);
   padding: 10px 12px;
   font-family: var(--aw-sans);
   font-size: 12px;
@@ -785,7 +808,7 @@
   overflow-wrap: anywhere;
 }
 
-.aw-note--error { border-left-color: #a3543c; color: #7c3a26; }
+.aw-note--error { border-left-color: var(--aw-danger); color: var(--aw-danger-deep); }
 
 /* ------------------------------------------------------------------ *
  * 地图（「地图」页专用；其余页面不渲染它）
@@ -799,8 +822,8 @@
   border-radius: 10px;
   overflow: hidden;
   background:
-    repeating-linear-gradient(0deg, transparent, transparent 27px, rgba(37, 95, 91, 0.06) 27px, rgba(37, 95, 91, 0.06) 28px),
-    repeating-linear-gradient(90deg, transparent, transparent 27px, rgba(37, 95, 91, 0.06) 27px, rgba(37, 95, 91, 0.06) 28px),
+    repeating-linear-gradient(0deg, transparent, transparent 27px, var(--aw-teal-wash) 27px, var(--aw-teal-wash) 28px),
+    repeating-linear-gradient(90deg, transparent, transparent 27px, var(--aw-teal-wash) 27px, var(--aw-teal-wash) 28px),
     var(--aw-paper);
 }
 
@@ -819,9 +842,9 @@
 }
 
 /* 0.9.20 变化页失败回执标红 */
-.aw-move.is-failed { border-left-color: #a3543c; }
+.aw-move.is-failed { border-left-color: var(--aw-danger); }
 .aw-move.is-failed .aw-move__title,
-.aw-move.is-failed .aw-move__text { color: #a3543c; }
+.aw-move.is-failed .aw-move__text { color: var(--aw-danger); }
 
 .aw-viewport {
   position: absolute;
@@ -833,8 +856,8 @@
   /* 0.9.38 网格纸回归：0.9.32 起不透明纸面盖死了 .aw-maparea 的网格纹理，
      地图变成一张空白纸——网格搬进 viewport 本体（has-image 时被图层图片覆盖，无冲突） */
   background:
-    repeating-linear-gradient(0deg, transparent, transparent 27px, rgba(37, 95, 91, 0.06) 27px, rgba(37, 95, 91, 0.06) 28px),
-    repeating-linear-gradient(90deg, transparent, transparent 27px, rgba(37, 95, 91, 0.06) 27px, rgba(37, 95, 91, 0.06) 28px),
+    repeating-linear-gradient(0deg, transparent, transparent 27px, var(--aw-teal-wash) 27px, var(--aw-teal-wash) 28px),
+    repeating-linear-gradient(90deg, transparent, transparent 27px, var(--aw-teal-wash) 27px, var(--aw-teal-wash) 28px),
     var(--aw-paper);
 }
 
@@ -875,7 +898,7 @@
   place-items: center;
   border: 1px solid rgba(138, 106, 28, 0.5);
   border-radius: 50%;
-  background: rgba(251, 250, 246, 0.88);
+  background: var(--aw-veil);
   z-index: 3;
   pointer-events: none;
 }
@@ -891,18 +914,18 @@
 .aw-compass__needle {
   width: 1px;
   height: 11px;
-  background: linear-gradient(to bottom, #a3543c 0 50%, var(--aw-teal) 50% 100%);
+  background: linear-gradient(to bottom, var(--aw-danger) 0 50%, var(--aw-teal) 50% 100%);
   margin-top: 1px;
 }
 
 .aw-scale {
   position: absolute;
   left: 12px;
-  bottom: 12px;
+  bottom: 36px;
   font-family: var(--aw-sans);
   font-size: 10px;
   color: var(--aw-gold-deep);
-  background: rgba(251, 250, 246, 0.88);
+  background: var(--aw-veil);
   border: 1px solid rgba(138, 106, 28, 0.35);
   border-radius: 4px;
   padding: 1px 7px;
@@ -925,7 +948,7 @@
   border-radius: 3px;
   border: 1px solid #b3ab92;
   background: var(--aw-panel);
-  color: #25484a;
+  color: var(--aw-ink-soft);
   white-space: nowrap;
   font-family: var(--aw-serif);
   z-index: 3;
@@ -961,7 +984,7 @@
 
 .aw-point.is-current::before {
   background: var(--aw-gold-soft);
-  border-color: rgba(251, 250, 246, 0.6);
+  border-color: var(--aw-veil-line);
 }
 
 /* 0.9.41 人物 = 金圆字头像 + hover 名牌；物品 = 紫色小方块 + hover 名牌。
@@ -979,7 +1002,7 @@
   border-radius: 50%;
   background: linear-gradient(135deg, #d8b26a 0%, #b9924a 100%);
   border: 2px solid #fff8df;
-  box-shadow: 0 0 0 2px rgba(196, 163, 99, 0.4), 0 2px 6px rgba(25, 48, 45, 0.3);
+  box-shadow: 0 0 0 2px var(--aw-gold-line), 0 2px 6px rgba(25, 48, 45, 0.3);
   z-index: 4;
   cursor: pointer;
   transition: left 0.9s ease, top 0.9s ease, box-shadow 0.2s ease;
@@ -988,7 +1011,7 @@
 
 .aw-npc:hover,
 .aw-npc:focus-visible {
-  box-shadow: 0 0 0 3px rgba(196, 163, 99, 0.55), 0 4px 10px rgba(25, 48, 45, 0.35);
+  box-shadow: 0 0 0 3px var(--aw-gold-line), 0 4px 10px rgba(25, 48, 45, 0.35);
 }
 
 .aw-npc__avatar {
@@ -1007,10 +1030,10 @@
   font-size: 11px;
   padding: 1px 6px;
   border-radius: 3px;
-  background: rgba(251, 250, 246, 0.94);
+  background: var(--aw-veil-strong);
   color: #59472c;
   white-space: nowrap;
-  border: 1px solid rgba(196, 163, 99, 0.5);
+  border: 1px solid var(--aw-gold-line);
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.15s ease;
@@ -1056,7 +1079,7 @@
   font-size: 11px;
   padding: 1px 6px;
   border-radius: 3px;
-  background: rgba(251, 250, 246, 0.94);
+  background: var(--aw-veil-strong);
   color: #4b3a6e;
   white-space: nowrap;
   border: 1px solid rgba(122, 95, 184, 0.5);
@@ -1074,14 +1097,14 @@
 .aw-maplegend {
   position: absolute;
   left: 12px;
-  bottom: 34px;
+  bottom: 58px;
   display: flex;
   gap: 10px;
   align-items: center;
   font-family: var(--aw-sans);
   font-size: 10px;
   color: var(--aw-gold-deep);
-  background: rgba(251, 250, 246, 0.88);
+  background: var(--aw-veil);
   border: 1px solid rgba(138, 106, 28, 0.35);
   border-radius: 4px;
   padding: 3px 8px;
@@ -1111,7 +1134,7 @@
   border-radius: 50%;
   background: #c8a45c;
   border: 1.5px solid #fff8df;
-  box-shadow: 0 0 0 1px rgba(196, 163, 99, 0.5);
+  box-shadow: 0 0 0 1px var(--aw-gold-line);
 }
 
 .aw-maplegend__dot--obj {
@@ -1145,7 +1168,7 @@
   border: 1px solid #cfc9b8;
   border-radius: 6px;
   background: var(--aw-panel);
-  color: #25484a;
+  color: var(--aw-ink-soft);
   font-family: var(--aw-sans);
   font-size: 12px;
   padding: 5px 8px;
@@ -1166,7 +1189,7 @@
   border: 1px solid #cfc9b8;
   border-radius: 6px;
   background: var(--aw-panel);
-  color: #25484a;
+  color: var(--aw-ink-soft);
   font-size: 13px;
 }
 
@@ -1187,13 +1210,13 @@
   padding: 8px 14px;
   border: 1px solid var(--aw-gold);
   border-radius: 10px;
-  background: rgba(251, 250, 246, 0.97);
+  background: var(--aw-veil-strong);
   box-shadow: 0 8px 24px rgba(16, 27, 29, 0.16);
   z-index: 7;
 }
 
 .aw-travel:empty { display: none; }
-.aw-travel__title { font-weight: 700; color: #1e383a; white-space: nowrap; }
+.aw-travel__title { font-weight: 700; color: var(--aw-ink-strong); white-space: nowrap; }
 .aw-travel__meta { font-family: var(--aw-sans); font-size: 12px; color: var(--aw-muted); white-space: nowrap; }
 .aw-travel__actions { display: flex; gap: 6px; }
 
@@ -1247,7 +1270,7 @@
 .aw-changes__dot.is-committed { background: var(--aw-teal); }
 .aw-changes__dot.is-duplicate { background: #9aa39c; }
 .aw-changes__dot.is-pending-review { background: var(--aw-gold); }
-.aw-changes__dot.is-failed { background: #a3543c; }
+.aw-changes__dot.is-failed { background: var(--aw-danger); }
 .aw-changes__row.is-live .aw-changes__dot { background: var(--aw-gold); }
 
 .aw-changes__text {
@@ -1258,7 +1281,7 @@
   font-size: 12px;
 }
 
-.aw-changes__span { color: #1e383a; font-size: 12px; overflow-wrap: anywhere; }
+.aw-changes__span { color: var(--aw-ink-strong); font-size: 12px; overflow-wrap: anywhere; }
 .aw-changes__summary { color: var(--aw-muted); overflow-wrap: anywhere; }
 .aw-changes__row.is-live .aw-changes__summary { color: var(--aw-gold-deep); }
 
@@ -1277,7 +1300,7 @@
 .aw-dev__box {
   border: 1px dashed var(--aw-gold);
   border-radius: 10px;
-  background: rgba(196, 163, 99, 0.08);
+  background: var(--aw-gold-wash);
   padding: 10px 11px;
   display: grid;
   gap: 7px;
@@ -1285,7 +1308,7 @@
 }
 
 .aw-dev__box .aw-btn { width: 100%; }
-.aw-dev__box .aw-note { background: #fff; }
+.aw-dev__box .aw-note { background: var(--aw-veil-strong); }
 
 /* ------------------------------------------------------------------ *
  * 窄屏：收窄左栏（仅图标）、右栏移到下行
@@ -1334,39 +1357,39 @@
 .atlas-workbench.atlas-workbench input.aw-input:not([type="checkbox"]):not([type="radio"]),
 .atlas-workbench.atlas-workbench select.aw-input,
 .atlas-workbench.atlas-workbench textarea.aw-input {
-  background-color: #fff !important;
-  color: #1e383a !important;
-  -webkit-text-fill-color: #1e383a !important;
-  caret-color: #1e383a;
+  background-color: var(--aw-input-bg) !important;
+  color: var(--aw-ink-strong) !important;
+  -webkit-text-fill-color: var(--aw-ink-strong) !important;
+  caret-color: var(--aw-ink-strong);
   color-scheme: light;
 }
 
 .atlas-workbench.atlas-workbench select.aw-input option {
-  background-color: #fff !important;
-  color: #1e383a !important;
+  background-color: var(--aw-input-bg) !important;
+  color: var(--aw-ink-strong) !important;
 }
 
 .atlas-workbench.atlas-workbench .aw-input::placeholder {
-  color: #6f7c78 !important;
-  -webkit-text-fill-color: #6f7c78 !important;
+  color: var(--aw-input-dim) !important;
+  -webkit-text-fill-color: var(--aw-input-dim) !important;
   opacity: 1;
 }
 
 .atlas-workbench.atlas-workbench input.aw-input:-webkit-autofill {
-  -webkit-box-shadow: 0 0 0 1000px #fff inset !important;
-  -webkit-text-fill-color: #1e383a !important;
+  -webkit-box-shadow: 0 0 0 1000px var(--aw-input-bg) inset !important;
+  -webkit-text-fill-color: var(--aw-ink-strong) !important;
 }
 
 .atlas-workbench.atlas-workbench .aw-input:disabled,
 .atlas-workbench.atlas-workbench .aw-input[readonly] {
-  background-color: #f2efe7 !important;
-  color: #6f7c78 !important;
-  -webkit-text-fill-color: #6f7c78 !important;
+  background-color: var(--aw-input-disabled-bg) !important;
+  color: var(--aw-input-dim) !important;
+  -webkit-text-fill-color: var(--aw-input-dim) !important;
 }
 
 .atlas-workbench.atlas-workbench .aw-input:focus,
 .atlas-workbench.atlas-workbench .aw-input:focus-visible {
-  outline: 2px solid #255f5b;
+  outline: 2px solid var(--aw-teal);
   outline-offset: 1px;
 }
 
@@ -1515,13 +1538,13 @@
 /* 日志页：报错条目高亮 */
 .aw-log__row.is-error {
   padding: 4px 6px;
-  border-left: 3px solid #a3543c;
+  border-left: 3px solid var(--aw-danger);
   background: rgba(163, 84, 60, 0.08);
   border-radius: 0 6px 6px 0;
 }
 
 .aw-log__row.is-error .aw-log__text {
-  color: #a3543c;
+  color: var(--aw-danger);
   font-weight: 700;
 }
 
@@ -1544,7 +1567,7 @@
 .aw-seg-head__title {
   font-size: 13px;
   font-weight: 700;
-  color: #25484a;
+  color: var(--aw-ink-soft);
   font-family: var(--aw-sans);
 }
 
@@ -1625,7 +1648,7 @@
 .aw-seg-item__roletag {
   font-size: 12px;
   font-weight: 600;
-  color: #25484a;
+  color: var(--aw-ink-soft);
   font-family: var(--aw-sans);
   padding: 3px 8px;
   border: 1px solid var(--aw-line);
@@ -1684,7 +1707,7 @@
   border-radius: 6px;
   border: 1px solid #cfc9b8;
   background: var(--aw-panel);
-  color: #25484a;
+  color: var(--aw-ink-soft);
 }
 
 .aw-mapcrumb__back:hover { border-color: var(--aw-teal); color: var(--aw-teal); }
@@ -1692,8 +1715,8 @@
 .aw-mapcrumb__title {
   padding: 3px 10px;
   border-radius: 6px;
-  border: 1px solid rgba(196, 163, 99, 0.5);
-  background: rgba(251, 250, 246, 0.94);
+  border: 1px solid var(--aw-gold-line);
+  background: var(--aw-veil-strong);
   color: #59472c;
   white-space: nowrap;
 }
@@ -1706,8 +1729,8 @@
   z-index: 8;
   padding: 12px 14px;
   border-radius: 8px;
-  border: 1px solid rgba(196, 163, 99, 0.55);
-  background: rgba(251, 250, 246, 0.97);
+  border: 1px solid var(--aw-gold-line);
+  background: var(--aw-veil-strong);
   box-shadow: 0 10px 28px rgba(8, 20, 22, 0.18);
   font-family: var(--aw-sans);
 }
@@ -1746,7 +1769,7 @@
   margin-top: 8px;
   font-size: 12px;
   line-height: 1.6;
-  color: #25484a;
+  color: var(--aw-ink-soft);
 }
 
 .aw-mappanel__actions {
@@ -1807,7 +1830,7 @@
 .aw-mappanel__section-text {
   font-size: 12px;
   line-height: 1.6;
-  color: #25484a;
+  color: var(--aw-ink-soft);
   margin-bottom: 4px;
   word-break: break-word;
 }
@@ -1846,7 +1869,7 @@
 
 .aw-mappanel__person:hover,
 .aw-mappanel__person:focus-visible {
-  border-color: var(--aw-teal, #25484a);
+  border-color: var(--aw-teal, var(--aw-ink-soft));
   transform: translateY(-1px);
 }
 
@@ -1874,7 +1897,7 @@
 
 .aw-mappanel__person-name {
   font-size: 12px;
-  color: #25484a;
+  color: var(--aw-ink-soft);
   white-space: nowrap;
 }
 
@@ -1887,4 +1910,51 @@
   margin-left: 6px;
   transform: rotate(45deg);
   background: var(--aw-gold);
+}
+
+/* ===========================================================================
+ * 0.9.45 皮肤系统 — 深色战术主题（0.9.46 重打：0.9.45 该块被 pack 反向同步回滚）
+ * 机制 = data-atlas-theme 属性覆盖皮肤令牌（清单见 index.js 的 ATLAS_SKIN_VARIABLES）。
+ * 原则 = 只换令牌，不写新选择器——所有 --aw-* 之外的色值均为语义色（物品紫 / 成功绿等），
+ *        浅深主题下都可读。自定义皮肤照抄本块结构，覆盖任意令牌子集即可。
+ * =========================================================================== */
+
+.atlas-workbench[data-atlas-theme="dark"] {
+  --aw-paper: #16211f;
+  --aw-panel: #1d2b29;
+  --aw-ink: #dde7e1;
+  --aw-ink-strong: #eef4ef;
+  --aw-ink-soft: #b8ccc5;
+  --aw-muted: #8ba19b;
+  --aw-line: #31463f;
+  --aw-teal: #5fa89f;
+  --aw-teal-deep: #477f77;
+  --aw-teal-wash: rgba(95, 168, 159, 0.08);
+  --aw-teal-wash-strong: rgba(95, 168, 159, 0.16);
+  --aw-teal-line: rgba(95, 168, 159, 0.4);
+  --aw-gold: #c9a961;
+  --aw-gold-soft: #4d4126;
+  --aw-gold-deep: #d8b26a;
+  --aw-gold-busy: #d8b26a;
+  --aw-gold-wash: rgba(201, 169, 97, 0.12);
+  --aw-gold-wash-strong: rgba(201, 169, 97, 0.2);
+  --aw-gold-line: rgba(201, 169, 97, 0.45);
+  --aw-gold-hairline: rgba(201, 169, 97, 0.2);
+  --aw-danger: #d0745a;
+  --aw-danger-deep: #e08d72;
+  --aw-veil: rgba(22, 33, 31, 0.9);
+  --aw-veil-strong: rgba(29, 43, 41, 0.97);
+  --aw-veil-soft: rgba(22, 33, 31, 0.72);
+  --aw-veil-line: rgba(221, 231, 225, 0.16);
+  --aw-rail-bg: #101a18;
+  --aw-rail-text: #a8b8ad;
+  --aw-rail-dim: #6b837f;
+  --aw-input-bg: #243734;
+  --aw-input-dim: #7d938d;
+  --aw-input-disabled-bg: #1b2927;
+}
+
+/* 深色主题下宿主（酒馆）暗色控件的 autofill / 原生外观接管：跟随令牌而非强制白底 */
+.atlas-workbench[data-atlas-theme="dark"] {
+  color-scheme: dark;
 }

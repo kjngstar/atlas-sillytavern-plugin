@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.45";
+export const ATLAS_EXTENSION_VERSION = "0.9.46";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -553,7 +553,7 @@ const PAGES = [
 ];
 
 // ---------------------------------------------------------------------------
-// 0.9.45 皮肤系统
+// 0.9.46 皮肤系统
 // 机制 = style.css 的 .atlas-workbench 全部走 --aw-* 令牌；主题 = data-atlas-theme
 // 属性切换令牌覆盖块；自定义皮肤 = 用户 CSS 覆盖任意令牌子集（注入 <style>）。
 // 完整性由 tests/atlas-skin.test.mjs 门禁：style.css 定义的每个 --aw-* 必须在册。
@@ -561,7 +561,7 @@ const PAGES = [
 
 /** 皮肤令牌注册清单（与 style.css .atlas-workbench 基座一一对应）。 */
 export const ATLAS_SKIN_VARIABLES = [
-  // 基座（0.9.45 之前既有）
+  // 基座（0.9.46 之前既有）
   "--aw-paper",
   "--aw-panel",
   "--aw-ink",
@@ -575,7 +575,7 @@ export const ATLAS_SKIN_VARIABLES = [
   "--aw-rail-bg",
   "--aw-rail-text",
   "--aw-rail-dim",
-  // 0.9.45 收敛新增（历史硬编码色 → 令牌）
+  // 0.9.46 收敛新增（历史硬编码色 → 令牌）
   "--aw-ink-strong",
   "--aw-ink-soft",
   "--aw-danger",
@@ -693,7 +693,7 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
   let modelOptions = [];
   let settingsLoadedOnce = false;
 
-  // 0.9.45 皮肤：挂载即恢复上次保存的主题 / 自定义 CSS（键在 extensionSettings.atlas 下）
+  // 0.9.46 皮肤：挂载即恢复上次保存的主题 / 自定义 CSS（键在 extensionSettings.atlas 下）
   const skinState = {
     theme: normalizeAtlasSkinTheme(skinPort?.read?.("skinTheme") ?? "paper"),
     customCss: typeof skinPort?.read?.("skinCustomCss") === "string" ? skinPort.read("skinCustomCss") : "",
@@ -1142,7 +1142,7 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     }
 
     if (s.page === "map") {
-      center.append(pageHeader("世界地图", "点击地点预览路线；左上可切换地区，右下可缩放。"));
+      center.append(pageHeader("世界地图", "点击地点预览路线；左上可切换地区，右下可缩放。地图随剧情生长：重名地点自动跳过，绝不删改已有地理。"));
       if (!ready) {
         center.append(emptyBox("绑定世界后可查看地图。"));
         return;
@@ -1412,7 +1412,7 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       }
     });
     geoBar.append(geoBtn, storyGeoBtn);
-    geoBar.append(el("span", "aw-hint", "地图随剧情生长：重名地点自动跳过，绝不删改已有地理。"));
+    // 0.9.43 底部堆叠修复（0.9.46 补提交）：长提示挪页头，工具条只留按钮
     // 0.9.35 子图面包屑 + 标记点信息面板
     mapCrumb = el("div", "aw-mapcrumb");
     mapCrumb.style.display = "none";
@@ -1420,11 +1420,18 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     mapPanel.style.display = "none";
     viewport.append(mapPanel);
     // 0.9.41 图例：地点 / 人物 / 物品三型标点（原型 mapview 同款信息架构）
+    // 0.9.43 真修（0.9.46 补提交）：el() 第三参只吃文本——DOM 节点会被 textContent
+    // 强转成 "[object HTMLElement]"，标签文字（第 4 参）则被静默丢弃。
+    const legendItem = (dotClass, label) => {
+      const item = el("span", "aw-maplegend__item");
+      item.append(el("i", dotClass), document.createTextNode(label));
+      return item;
+    };
     const legend = el("div", "aw-maplegend");
     legend.append(
-      el("span", "aw-maplegend__item", el("i", "aw-maplegend__dot aw-maplegend__dot--loc"), "地点"),
-      el("span", "aw-maplegend__item", el("i", "aw-maplegend__dot aw-maplegend__dot--npc"), "人物"),
-      el("span", "aw-maplegend__item", el("i", "aw-maplegend__dot aw-maplegend__dot--obj"), "物品"),
+      legendItem("aw-maplegend__dot aw-maplegend__dot--loc", "地点"),
+      legendItem("aw-maplegend__dot aw-maplegend__dot--npc", "人物"),
+      legendItem("aw-maplegend__dot aw-maplegend__dot--obj", "物品"),
     );
     viewport.append(legend);
     mapCanvas.append(mapCrumb, mapTools, viewport, mapHint, geoBar, travelBar);
@@ -3503,7 +3510,7 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     return panel;
   }
 
-  /** 0.9.45 皮肤页：主题下拉（即时生效）+ 自定义 CSS（保存生效）+ 令牌清单。 */
+  /** 0.9.46 皮肤页：主题下拉（即时生效）+ 自定义 CSS（保存生效）+ 令牌清单。 */
   function buildSkinPanel() {
     const panel = el("section", "aw-panel");
 
@@ -4215,7 +4222,7 @@ async function connectOnce() {
     const adaptEvent = createEventAdapter(context);
     /** 0.8.2 首条消息自动建世；core 由下方 const 赋值后回填（调用只发生在初始化完成之后）。 */
     let coreRef = null;
-    /** 0.9.45 皮肤持久化端口：host 建一次，core 与皮肤页共用（readData/writeData）。 */
+    /** 0.9.46 皮肤持久化端口：host 建一次，core 与皮肤页共用（readData/writeData）。 */
     let hostRef = null;
     const core = mod.createAtlasUiCore({
       api,
