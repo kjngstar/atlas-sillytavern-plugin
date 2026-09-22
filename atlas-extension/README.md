@@ -23,8 +23,29 @@ SillyTavern UI 扩展：**世界工作台（悬浮窗）** + 聊天绑定 + 生�
 - 点扩展按钮打开**世界工作台**：居中悬浮窗，按住顶栏可拖动，随时「退出」回聊天。
 - 左栏（导航 + 世界动向），固定六项：**概览 / 地图 / 附近 / 变化 / 推进 / API**。
   - **概览**：当前世界卡（未绑定说明、自动初始化状态与「重试初始化」、启用 / 停用本聊天推演）+ 世界状态统计 + 底部默认折叠的「高级：迁移或恢复已有世界」（世界列表 / 导入 JSON / 解绑）。
-  - **地图**：地区筛选、NPC 金色圆点、物件菱形标记、路线预览（确认后只填入输入框，绝不自动发送）、缩放。
-  - **附近**：相关 NPC 与命中原因（同地点 / 附近 / 同地区 / 路线 / 日程等）。
+  - **地图**：地区筛选、NPC 金色圆点、物件菱形标记、路线预览（确认后只填入输入框，绝不自动发送）、缩放。R09 起：图层与底图叠加、相机光标缩放（fit 无下限 20px 限制）、反向缩放（标记尺寸恒定）、子图多层导航（world → building → room）、`aw-point.is-selected` 选中态钩子（CSS outline + 外阴影）。
+  - **附近**：相关 NPC 与命中原因（同地点 / 附近 / 同地区 / 路线 / 日程等）。R04 起：账本投影覆盖 CharacterState 基线、注册表关联 `entityRecords[type=npc]`，NPC 跨地区移动后附近列表立即更新。
+
+## 已实现能力索引（与主计划 R00–R15 对齐）
+
+为方便作者查阅各阶段落地情况，详细进度见仓库根目录 `IMPLEMENTATION_STATUS.md`。当前完成：
+
+- **R00 基线审计**：7 缺陷（D03/D04/D05/D07/D08/D10/D12）实测复现，门禁 391/391
+- **R01 地图可见性**：图层拆分 + 工具显示 + hint 修复
+- **R02 推进编辑器状态模型**：kind 状态机 + 新建可编辑 + 另存为字段保真 + 连接级 systemPrompt 警告
+- **R03 提示词实际输入**：默认 6 段 + 全部占位符实际注入 + `POST /turns/preview` 预览
+- **R04 统一人物位置投影**：账本投影 + 注册表关联 + 附近列表单读路径（D05 修复）
+- **R05 协议 v2 + 同轮临时引用**：baseRevision 回显 + 引文包含校验 + 未知引用整单拒收（D04 修复）
+- **R06 场景定位 + 起点迁移**：场景独立于旅行 + bootstrap 识别 + 占位 fingerprint 退役 + v2 封套 + lastConfirmed 分离 + `worldTurnProtocol` 设置；R06 补充：新世界空地理（彻底告别「起点」占位点）
+- **R07 身份消歧与持续跟踪**：ambiguous 整单拒绝 + identityUpdates 不重建实体 + presence 落账 + 附近卡片详情
+- **R08 地图相机与手势**：fit 无下限 20px 限制 + 光标缩放 + 反缩放（标记尺寸恒定）+ pan / 拖拽 / pinch + 相机持久化
+- **R08 热修**：marker inverse scale 1/k + 仅空白/双指 setPointerCapture（不再吞点击）
+- **R09 子图层级与 frame 持久化**（后端）：SubMap schema 升级加 `frame: { cols, rows, frameRevision }` + `validateSubmapDepth` + `handleScaleCalibrate` 真实 frame；UI 弹窗与子图三层级渲染留实机阶段
+- **R10 v2 mapScaleHints 接入提交链路**：`applyScaleHintsToDoc` 纯函数（人工锁定 / frame 不匹配 / unknown-conflict 跳过纪律）+ executeCommit 应用到 maps sidecar + 日志分流
+- **R11 增量皮肤令牌**：17 项 `--am-*` 令牌（选中态 / 面包屑 / 状态三态 / 头像 / section-label）+ mappanel 写死色全替换 + `.aw-point.is-selected` / `.aw-breadcrumb` / `.aw-status--info/warn/error` UI 钩子
+- **R12 原子事务收口**：`pending.remove` best-effort（失败记日志不抛错）+ `reconcilePendingCommits` 启动清理 orphan + `createAtlasServerCore.reconcilePending()` 暴露给 UI 启动钩子
+
+待集成：UI 子图三层级渲染 + 子图导航面包屑、皮肤导入 UI、实机验收（详见 `docs/VERIFICATION.md`）。
   - **变化**：每轮世界推演回执时间轴 + 失败重试 + **世界书条目面板**（Atlas 动向 / 近期可触发事件）。
   - **推进**：只管理推进行为与提示词——启用 / 停用、自动提交开关、**提示词多预设**（新建 / 保存 / 另存为 / 设为当前使用 / 删除 / 复制内置默认）、只读的「当前生效提示词」。**这里不配置 API 地址**。
   - **API**：只管理连接资料——多连接预设（新建 / 保存 / 另存为 / 设为当前使用 / 测试连接 / 删除）、端点 / 密钥 / 模型 / 参数、从端点读到的模型列表。**这里不编辑提示词**。

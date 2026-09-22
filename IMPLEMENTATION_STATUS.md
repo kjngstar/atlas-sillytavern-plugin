@@ -49,6 +49,7 @@
 | R10 | ✅ 完成 | v2 mapScaleHints 接入提交链路：`applyScaleHintsToDoc` 纯函数（人工锁定 / frame 不匹配 / unknown-conflict 跳过纪律）+ executeCommit 应用到 maps sidecar + 日志分流；471/471 |
 | R09 | ✅ 完成（后端） | SubMap schema 升级加 `frame: { cols, rows, frameRevision }` 字段 + `validateSubmapDepth` 深度校验 + `handleScaleCalibrate` 使用真实 frame；UI 弹窗与子图三层级留实机阶段；481/481 |
 | R11 | ✅ 完成（令牌） | 增量 `--am-*` 令牌 17 项（选中态 / 面包屑 / 状态三态 / 头像 / section-label）+ mappanel 写死色全替换 + `.aw-point.is-selected` 钩子 + `.aw-breadcrumb` 占位类；488/488 |
+| R13-R15 | ✅ 完成（集成测试 + 文档） | 集成层跨 R04/R05/R07/R10/R12 不变量测试 7 项 + `docs/VERIFICATION.md` 实机验收清单（10 节 ≥ 30 项）+ atlas-extension/README 已实现能力索引；495/495 |
 | R09 | 未开始 | |
 | R10 | 未开始 | |
 | R11 | 未开始 | |
@@ -340,3 +341,29 @@
 残留：
 - 完整皮肤导入 UI（导入 .atlas-map-skin.json 文件 / 预览 / 应用 / 撤销）未做——主计划留作后续，需要 Atlas UI 改造范围更大（设计时间评估 1-2 个 commit），本轮先把令牌与钩子落地。
 - 实机命中、皮肤切换后交互一致性、窄屏适配：纳入 R13 实机验收阶段。
+
+## R13-R15 — 集成层回归 + 实机验收清单 + 文档收口（2026-09-23）
+
+- [x] 新增 `tests/atlas-r13-r15-integration.test.mjs` 7 项集成层契约：
+  - `createAtlasServerCore.reconcilePending()` 暴露可调 + 报告字段齐全
+  - scaleHints 写入 maps sidecar 跨 serialize/deserialize 不丢失
+  - orphan pending + applied calibration 共存不互相影响
+  - 锁定值跨 session 序列化后仍拒绝 AI 覆盖
+  - 单条 pending 的 read 失败不阻断整体 reconcile
+  - settings 默认创建契约（v2 形状）
+- [x] 新增 `docs/VERIFICATION.md`（10 节 ≥ 30 项实机验收清单）：环境基线 / 启动与首用 / 地图 DOM 命中 / 推演链路 / 事务与持久化 / 标定与地图尺度 / 旧档迁移 / 推进编辑器 / 皮肤与令牌 / 渲染与兼容性 / 性能与限额——任何一项失败需回写到对应 Rxx commit
+- [x] `atlas-extension/README.md` 增量「已实现能力索引」：R00-R12 各阶段一句话状态 + R09-R11 / R13-R15 待集成项明示，避免作者误以为未开始
+
+证据：
+- 新增 `tests/atlas-r13-r15-integration.test.mjs` 7 项通过
+- 门禁：typecheck 0 errors；pack 通过（CSS / settings.html / manifest.json 镜像同步；root dist 重建）；test **495/495**（488 → 495）
+
+完成定义（计划 §完成定义）：
+- ✅ P0 零未修复（R04 附近一致性 / R05 同轮新引用 / R06 起点迁移 / R12 原子事务全部落地）
+- ✅ P1 每项有可观察行为和验收证据（R09 SubMap frame / R10 scaleHints / R11 令牌均带测试）
+- ⚠️ UI 弹窗与子图三层级渲染 / 完整皮肤导入 UI：当前会话未做（无真实酒馆实例，留实机阶段）
+- ✅ 旧档可恢复（reconcilePending 清 orphan）
+- ✅ 比例尺有可追溯依据（R10 applyScaleHintsToDoc 记录 source / basis / confidence / evidence）
+- ✅ 推演可编辑且请求生效（R02/R03 落地 + `POST /turns/preview`）
+- ✅ 当前位置来自已确认剧情（R06 bootstrap + scene / lastConfirmed 分离）
+- ✅ 发布包与源码一致（pack 镜像同步）
