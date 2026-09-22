@@ -3003,8 +3003,29 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     };
   }
 
+  /**
+   * R02 草稿状态模型：kind 显式区分「内置只读展示 / 未保存新草稿 / 已保存预设的工作副本」，
+   * 不再用 `!id => 内置只读` 推断（旧推断把新建草稿错当内置，名称只读、无插入按钮——D07 根因）。
+   */
   function newPromptDraft() {
-    return { id: null, name: "", systemPrompt: "", segments: [], contextTurnCount: 3 };
+    return { id: null, kind: "new", name: "", systemPrompt: "", segments: [], contextTurnCount: 3 };
+  }
+
+  /** 内置默认在编辑器中的只读展示形态（原件保护在存储层，UI 只读展示）。 */
+  function builtinPromptDraft() {
+    return { id: null, kind: "builtin", name: "内置默认", systemPrompt: "", segments: [], contextTurnCount: 3 };
+  }
+
+  /** 把已保存预设载入为工作副本（kind=saved；可编辑，保存语义 = 覆盖回该 id）。 */
+  function savedPromptDraft(preset) {
+    return {
+      id: preset.id,
+      kind: "saved",
+      name: preset.name,
+      systemPrompt: preset.systemPrompt,
+      segments: cloneSegments(preset.segments),
+      contextTurnCount: Number.isFinite(preset.contextTurnCount) ? preset.contextTurnCount : 3,
+    };
   }
 
   /** 0.9.25 shujuku 栏位段克隆：保留名称 / 主槽位（丢字段 = 编辑一轮就退化）。 */
@@ -3067,6 +3088,29 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       rows.append(row);
     }
     panel.append(rows);
+
+    // R02（D16）：连接级 systemPrompt 覆盖推进预设时必须显式提示——这是「改了预设没生效」
+    // 的直接原因；提供一键恢复（清空连接级提示词，回到推进预设生效）
+    const overrideApi = apiLibrary.find((p) => p.id === settingsV2?.activeApiPresetId);
+    if (overrideApi && String(overrideApi.systemPrompt ?? "").trim()) {
+      const overrideNote = el("div", "aw-note aw-note--error");
+      overrideNote.append(el("span", {}, "当前 API 连接「" + String(overrideApi.name) + "」带有连接级系统提示词——发送时它会覆盖这里的推进预设。"));
+      const clearOverride = el("button", "aw-btn aw-btn--ghost", "清空连接级提示词（恢复推进预设生效）");
+      clearOverride.type = "button";
+      clearOverride.setAttribute("aria-label", "清空当前 API 连接的系统提示词，让推进预设重新生效");
+      clearOverride.addEventListener("click", async () => {
+        clearOverride.disabled = true;
+        try {
+          const ok = await sendSettingsCommand({ action: "api.save", preset: { ...apiPayloadFromDraft(overrideApi), systemPrompt: "" } });
+          setStatus(ok ? "连接级提示词已清空，推进预设恢复生效。" : "清空失败。", ok ? "ok" : "error");
+          renderCenter();
+        } finally {
+          clearOverride.disabled = false;
+        }
+      });
+      overrideNote.append(clearOverride);
+      panel.append(overrideNote);
+    }
 
     const runtimeActions = el("div", "aw-actions");
     const toggle = el("button", "aw-btn", s.binding?.enabled ? "停用本聊天推演" : "启用本聊天推演");
@@ -3141,15 +3185,8 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
         return;
       }
       const preset = promptLibrary.find((p) => p.id === promptSelect.value);
-      promptDraft = preset
-        ? {
-            id: preset.id,
-            name: preset.name,
-            systemPrompt: preset.systemPrompt,
-            segments: cloneSegments(preset.segments),
-            contextTurnCount: Number.isFinite(preset.contextTurnCount) ? preset.contextTurnCount : 3,
-          }
-        : newPromptDraft();
+      // R02：载入显式 kind——选中已存预设 = saved 工作副本；选内置 = builtin 只读展示
+      promptDraft = preset ? savedPromptDraft(preset) : builtinPromptDraft();
       promptDraftDirty = false;
       setStatus("", "ok");
       // shujuku 语义：选中即设为当前使用（内置默认 = activate null）
@@ -3195,7 +3232,8 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     selectField.append(el("span", "aw-hint", "选中预设会立即设为当前使用并载入下方编辑器；「新建」开新草稿，「删除」删当前选中的预设。"));
     promptPanel.append(selectField);
 
-    const isBuiltinDraft = !promptDraft?.id;
+    // R02：内置只读 = kind 显式标记，不再是「没有 id 就当内置」的推断
+    const isBuiltinDraft = promptDraft?.kind === "builtin";
     let promptSaveButton = null;
 
     const nameField = el("div", "aw-field");
@@ -3219,6 +3257,12 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       if (syncPromptDirty) syncPromptDirty();
     });
     nameField.append(nameInput);
+    // R02：草稿状态显式化——编辑器里现在是什么、保存语义是什么，不再靠猜
+    nameField.append(el("span", "aw-hint", isBuiltinDraft
+      ? "内置默认（只读展示）——点「复制内置默认为新预设」或「另存为」获得可编辑副本。"
+      : promptDraft?.kind === "new"
+        ? "未保存的新预设：可命名、可写正文、可插入栏目；点「保存新预设」落盘。"
+        : "正在编辑已保存预设：保存 = 覆盖回该预设；「另存为」可存成副本。"));
     promptPanel.append(nameField);
 
     const bodyField = el("div", "aw-field");
@@ -3463,15 +3507,10 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     discardButton.setAttribute("aria-label", "放弃未保存的提示词修改");
     discardButton.addEventListener("click", () => {
       const preset = promptLibrary.find((p) => p.id === promptDraft?.id);
+      // R02：放弃修改回到来源——saved 载回原预设；new/builtin 回到各自初始形态
       promptDraft = preset
-        ? {
-            id: preset.id,
-            name: preset.name,
-            systemPrompt: preset.systemPrompt,
-            segments: cloneSegments(preset.segments),
-            contextTurnCount: Number.isFinite(preset.contextTurnCount) ? preset.contextTurnCount : 3,
-          }
-        : newPromptDraft();
+        ? savedPromptDraft(preset)
+        : (promptDraft?.kind === "new" ? newPromptDraft() : builtinPromptDraft());
       promptDraftDirty = false;
       setStatus("", "ok");
       renderCenter();
@@ -3493,6 +3532,7 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
           }))
           .filter((s) => s.content.length > 0)
           .slice(0, 16);
+        const idsBeforeCopy = new Set(promptLibrary.map((p) => p.id));
         const ok = await sendSettingsCommand({
           action: "prompt.save",
           preset: {
@@ -3502,15 +3542,9 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
           },
         });
         if (ok) {
-          const created = promptLibrary[promptLibrary.length - 1];
-          promptDraft = created
-            ? {
-                id: created.id,
-                name: created.name,
-                systemPrompt: created.systemPrompt,
-                segments: cloneSegments(created.segments),
-              }
-            : newPromptDraft();
+          // R02：createdId 用差集定位，不再假设「预设列表最后一项」是刚创建的
+          const created = promptLibrary.find((p) => !idsBeforeCopy.has(p.id));
+          promptDraft = created ? savedPromptDraft(created) : newPromptDraft();
           promptDraftDirty = false;
           setStatus("已复制为新预设，可继续编辑。");
         }
@@ -3544,6 +3578,8 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
           return;
         }
         const turnCount = Math.min(Math.max(Number.parseInt(String(promptDraft.contextTurnCount ?? 3), 10) || 3, 1), 10);
+        // R02：保存前记录已有 id，保存后用差集定位新建预设（不再「猜列表最后一项」）
+        const idsBefore = new Set(promptLibrary.map((p) => p.id));
         const ok = await sendSettingsCommand({
           action: "prompt.save",
           preset: {
@@ -3554,7 +3590,19 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
             contextTurnCount: turnCount,
           },
         });
-        if (ok) { promptDraftDirty = false; setStatus(useSegments ? `栏位提示词已保存（${draftSegments.length} 段）。` : "提示词已保存。"); }
+        if (ok) {
+          promptDraftDirty = false;
+          // 新建保存 → 绑定 createdId，后续编辑走覆盖语义而不是重复新建
+          if (!promptDraft.id) {
+            const created = promptLibrary.find((p) => !idsBefore.has(p.id));
+            if (created) {
+              promptDraft.id = created.id;
+              promptDraft.kind = "saved";
+              promptDraft.name = created.name;
+            }
+          }
+          setStatus(useSegments ? `栏位提示词已保存（${draftSegments.length} 段）。` : "提示词已保存。");
+        }
         renderCenter();
       });
     }
@@ -3567,20 +3615,42 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
         ? window.prompt("新提示词预设名称", promptDraft?.name ? `${promptDraft.name} 副本` : "新提示词")
         : null;
       if (!name || !name.trim()) return;
-      const draftSegmentsForCopy = (Array.isArray(promptDraft?.segments) ? promptDraft.segments : [])
-        .map((s) => ({ role: PROMPT_SEGMENT_ROLES.includes(s?.role) ? s.role : "system", content: String(s?.content ?? "").trim() }))
+      // R02（D15 修复）：另存为完整保留 role/name/mainSlot/content 与 contextTurnCount，
+      // 不再只拷 role/content 导致副本降级；内置默认另存为也复制全套分段
+      const sourceSegments = Array.isArray(promptDraft?.segments) && promptDraft.segments.length > 0
+        ? promptDraft.segments
+        : (isBuiltinDraft ? (settingsV2?.builtInPrompt?.segments ?? []) : []);
+      const draftSegmentsForCopy = sourceSegments
+        .map((s) => ({
+          role: PROMPT_SEGMENT_ROLES.includes(s?.role) ? s.role : "system",
+          ...(typeof s?.name === "string" && s.name.trim() ? { name: s.name.trim().slice(0, 64) } : {}),
+          ...(s?.mainSlot === "A" || s?.mainSlot === "B" ? { mainSlot: s.mainSlot } : {}),
+          content: String(s?.content ?? "").trim(),
+        }))
         .filter((s) => s.content.length > 0)
         .slice(0, 16);
       const useSegmentsForCopy = draftSegmentsForCopy.length > 0;
+      const idsBeforeAs = new Set(promptLibrary.map((p) => p.id));
       const ok = await sendSettingsCommand({
         action: "prompt.save",
         preset: {
           name: name.trim(),
-          systemPrompt: useSegmentsForCopy ? "" : (promptDraft?.systemPrompt || settingsV2?.builtInPrompt?.systemPrompt || ""),
+          systemPrompt: useSegmentsForCopy
+            ? ""
+            : (promptDraft?.systemPrompt || (isBuiltinDraft ? String(settingsV2?.builtInPrompt?.systemPrompt ?? "") : "")),
           ...(useSegmentsForCopy ? { segments: draftSegmentsForCopy } : {}),
+          ...(promptDraft?.contextTurnCount != null
+            ? { contextTurnCount: Math.min(Math.max(Number.parseInt(String(promptDraft.contextTurnCount), 10) || 3, 1), 10) }
+            : {}),
         },
       });
-      if (ok) { promptDraftDirty = false; setStatus("已另存为新的提示词预设。"); }
+      if (ok) {
+        promptDraftDirty = false;
+        // R02：另存为后直接载入新预设为工作副本（createdId 用差集定位）
+        const created = promptLibrary.find((p) => !idsBeforeAs.has(p.id));
+        promptDraft = created ? savedPromptDraft(created) : newPromptDraft();
+        setStatus("已另存为新的提示词预设，可直接继续编辑。");
+      }
       renderCenter();
     });
     promptActions.append(promptSaveAsButton);
