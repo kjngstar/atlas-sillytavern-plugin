@@ -43,6 +43,7 @@ import {
 import { computeAtlasRelevance, atlasTravelPreview } from "./atlas-relevance.ts";
 import { prepareAtlasTurn, commitAtlasTurn, provisionReferencedCharacters } from "./atlas-turn.ts";
 import { buildSubMapFromDraft, sanitizeMapDoc } from "./atlas-geo-apply.ts";
+import { validateScaleResponse } from "./atlas-scale.ts";
 import { buildLorebookPlans } from "./atlas-lorebook.ts";
 import {
   callAtlasWorldTurnApi,
@@ -368,6 +369,7 @@ export const ATLAS_ROUTE_MANIFEST = [
   { method: "POST", path: "/worlds/ensure-starter" },
   { method: "POST", path: "/worlds/geo/adopt" },
   { method: "POST", path: "/worlds/move-author" },
+  { method: "POST", path: "/worlds/scale/calibrate" },
   { method: "POST", path: "/bindings" },
   { method: "POST", path: "/state" },
   { method: "POST", path: "/map/image" },
@@ -391,6 +393,7 @@ const ATLAS_SESSION_ROUTES = new Set<string>([
   "POST /worlds/ensure-starter",
   "POST /worlds/geo/adopt",
   "POST /worlds/move-author",
+  "POST /worlds/scale/calibrate",
   "POST /bindings",
   "POST /state",
   "POST /map/image",
@@ -650,7 +653,7 @@ function createCoreInstance(
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.49",
+      version: "0.9.50",
       protocolVersion: 1,
       time: now(),
     });
@@ -1000,6 +1003,163 @@ function createCoreInstance(
     };
   }
 
+  /**
+   * POST /worlds/scale/calibrate — 0.9.50 地图尺度标定（外部 AI 计划 M04）。
+   * 两种模式：
+   * - 人工模式：body.userMetersPerCell（正有限数字）→ source="user"、locked=true。
+   *   人工标定默认锁定；锁定值只有再走人工模式才能改。
+   * - AI 模式（恰 1 条推演请求，复用推演预设与救场）：给模型图名 / 层级 /
+   *   点位与描述 / 已有尺度 / 世界书摘录，模型只回「整张图的实际宽高」，
+   *   每格距离由程序从 frame（100×100 等距方格）推导存储规范值。
+   *   unknown / conflict / 数值校验不过 → 不落标定（ok 回执附状态说明），
+   *   绝不静默取平均、不套用按类型写死的尺寸。
+   * mapId：世界图 = "world"；子图 = 宿主点位 id（String(pointId)）。
+   */
+  async function handleScaleCalibrate(body: unknown): Promise<AtlasRouteResult> {
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "标定请求必须是对象");
+    }
+    const record = body as Record<string, unknown>;
+    const chatId = typeof record.chatId === "string" ? record.chatId : "";
+    if (!chatId || chatId.length > ATLAS_LIMITS.ID_CHARS) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "chatId 非法");
+    }
+    const mapId = typeof record.mapId === "string" ? record.mapId.trim().slice(0, 64) : "";
+    if (!mapId) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "mapId 非法（世界图用 \"world\"，子图用宿主点位 id）");
+    }
+    const binding = requireBoundBinding(await getBinding(chatId));
+    const world = await requireWorld(binding);
+
+    const docKey = `maps:${world.id}`;
+    const doc = sanitizeMapDoc(await store.read(docKey).catch(() => null));
+    const existing = doc.calibrations[mapId] ?? null;
+
+    // 人工模式：程序不做任何语义判断，数值校验后直接落盘。
+    // 人工覆盖锁定值允许（UI 明示「重新填写并保存即可更新」）；锁只挡 AI 语义估计。
+    const userMeters = record.userMetersPerCell;
+    if (userMeters !== undefined) {
+      if (typeof userMeters !== "number" || !Number.isFinite(userMeters) || userMeters <= 0) {
+        throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "userMetersPerCell 必须是正的有限数字（米 / 格）");
+      }
+      const calibration = {
+        revision: (existing?.revision ?? 0) + 1,
+        metersPerCell: Math.round(userMeters * 100) / 100,
+        source: "user" as const,
+        locked: true,
+        basis: typeof record.basis === "string" ? record.basis.trim().slice(0, 300) : "人工标定",
+        coverage: existing?.coverage ?? "",
+        confidence: "",
+        at: now(),
+      };
+      doc.calibrations[mapId] = calibration;
+      await store.write(docKey, doc);
+      pushLog({ at: now(), kind: "world-scale-calibrate", worldId: world.id, mapId, source: "user", metersPerCell: calibration.metersPerCell });
+      return okResult({ status: "grounded", calibration, message: `已按人工值标定：1 格 ≈ ${calibration.metersPerCell} 米（已锁定）。` });
+    }
+
+    // AI 模式：组装有界材料（图名 / 层级 / 点位与描述 / 已有尺度 / 世界书摘录）。
+    // 人工锁定值永不自动覆盖（计划 8.4：人工锁定优先于 AI 语义估计）
+    if (existing?.locked) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "该图已有人工锁定标定——AI 估计不会覆盖；重新填写并保存人工标定即可更新。");
+    }
+    const lore = typeof record.loreSupplement === "string" ? record.loreSupplement.trim() : "";
+    const isWorldMap = mapId === "world";
+    const hostPoint = isWorldMap ? null : (world.points ?? []).find((p) => String(p.id) === mapId) ?? null;
+    if (!isWorldMap && !hostPoint) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "子图标定的宿主点位不存在（世界图请用 mapId=\"world\"）");
+    }
+    const submap = isWorldMap ? null : doc.submaps[mapId] ?? null;
+    const pointList = (isWorldMap ? (world.points ?? []).slice(0, 40) : submap?.points.slice(0, 40) ?? []).map((p) => {
+      const description = isWorldMap ? doc.pointMeta[String(p.id)]?.description ?? "" : (p as { description?: string }).description ?? "";
+      return `${String(p.name)}${description ? `（${description.slice(0, 60)}）` : ""}`;
+    });
+    const mapLabel = isWorldMap ? `世界全图「${String(world.name)}」` : `地点「${hostPoint ? String(hostPoint.name) : mapId}」的内部地图`;
+    const existingNote = existing
+      ? `当前已有标定：1 格 ≈ ${existing.metersPerCell} 米（来源 ${existing.source}${existing.locked ? "、已锁定" : ""}）。`
+      : submap?.scale
+        ? `当前只有旧式比例尺：1 格 ≈ ${submap.scale.distancePerCell}${submap.scale.unit ? ` ${submap.scale.unit}` : ""}（单位换算未知，仅供参考）。`
+        : "当前没有尺度标定。";
+
+    const current = await loadSettings();
+    const preset = resolveWorldTurnPreset(current);
+    if (!preset) {
+      throw new AtlasError(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "未配置推演 API，无法让 AI 判断地图大小。");
+    }
+    checkRpm();
+    rpmTimestamps.push(now());
+
+    const contractRule =
+      '只输出一个 JSON 对象：{"status":"estimated|grounded|unknown|conflict","coverage":"...","extentMeters":{"width":<米数>,"height":<米数>},"basis":"...","confidence":"low|medium|high"}';
+    const commonRules = [
+      "规则：这张图的内部网格为 100×100 且横纵一格等距；extentMeters 是覆盖整张图（网格 0-100 全范围、含点位分布之外的区域）的实际宽高（单位：米），width 与 height 应相等或非常接近（等距方格）。",
+      "先判断这张图表示的实际范围（整个城镇？镇中心一小块？一间房？一片大陆？），再按实际语义估计宽高——地点数量与图上分布只是辅助信息。",
+      "有材料中的明确尺寸 / 距离证据时用 status=\"grounded\"；只能语义估计时用 \"estimated\"；材料不足以判断时用 \"unknown\" 且 extentMeters 为 null；材料与图上布局明显冲突时用 \"conflict\" 且 extentMeters 为 null。",
+      "basis 用一句话说明依据；宁可用 unknown 也不要编造数字。",
+    ].join("\n");
+    const userContent = [
+      `判断${mapLabel}的实际地理范围（尺度标定）。`,
+      contractRule,
+      commonRules,
+      existingNote,
+      ...(pointList.length > 0 ? [`图上的${isWorldMap ? "地点" : "内部场所"}（名字 + 描述）：`, ...pointList] : []),
+      ...(hostPoint && doc.pointMeta[String(hostPoint.id)]?.description
+        ? [`宿主地点描述：${doc.pointMeta[String(hostPoint.id)].description?.slice(0, 200)}`]
+        : []),
+      ...(lore ? ["【世界书摘录（可能包含明确距离 / 尺寸证据）】", lore.slice(0, ATLAS_LIMITS.LORE_SUPPLEMENT_CHARS)] : []),
+    ].join("\n");
+    const calibrationSegments = [
+      { role: "system", content: "你是地理尺度估计器。只输出一个 JSON 对象，不输出任何其它文字、解释或代码围栏。" },
+      { role: "user", content: userContent },
+    ];
+    const call = await callAtlasWorldTurnApi(
+      { ...preset, promptSegments: calibrationSegments },
+      { injectionText: "", userText: "", assistantText: "" },
+      { fetchFn: deps.fetchFn, now },
+    );
+    pushLog({ at: now(), kind: "world-scale-extract", presetName: preset.name, model: preset.model, ok: call.ok, status: call.status, durationMs: call.durationMs });
+    if (!call.ok) {
+      throw new AtlasError(call.code, call.message, { retryable: call.retryable });
+    }
+    const spec = extractJsonObject(call.text);
+    if (!spec) {
+      pushLog({ at: now(), kind: "world-scale-extract-fallback", worldId: world.id, mapId, excerpt: call.text.slice(0, 1500) });
+      return okResult({
+        status: "unknown",
+        calibrated: false,
+        message: "模型回复无法解析为标定结果——保持未标定状态，可重试或改用人工标定。",
+      });
+    }
+    // 数值与空间校验（frame = 100×100 等距方格；1% 相对容差）
+    const validation = validateScaleResponse(spec, { cols: 100, rows: 100 });
+    if (!validation.ok) {
+      pushLog({ at: now(), kind: "world-scale-reject", worldId: world.id, mapId, status: validation.status, reason: validation.reason });
+      return okResult({
+        status: validation.status,
+        calibrated: false,
+        coverage: validation.coverage,
+        basis: validation.basis,
+        message: validation.status === "conflict"
+          ? `未采用：${validation.reason}`
+          : validation.reason || "模型未能给出可用的范围估计——保持未标定状态。",
+      });
+    }
+    const calibration = {
+      revision: (existing?.revision ?? 0) + 1,
+      ...validation.calibration,
+      at: now(),
+    };
+    doc.calibrations[mapId] = calibration;
+    await store.write(docKey, doc);
+    pushLog({ at: now(), kind: "world-scale-calibrate", worldId: world.id, mapId, source: "ai-estimated", metersPerCell: calibration.metersPerCell });
+    return okResult({
+      status: "calibrated",
+      calibrated: true,
+      calibration,
+      message: `已采用 AI 估计：1 格 ≈ ${calibration.metersPerCell} 米。`,
+    });
+  }
+
   async function handleBindings(body: unknown): Promise<AtlasRouteResult> {
     if (!body || typeof body !== "object" || Array.isArray(body)) {
       throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "绑定请求必须是对象");
@@ -1134,14 +1294,23 @@ function createCoreInstance(
       ? { at: lastEvent.at, summary: lastEvent.narrativeSummary.slice(0, 200), source: lastEvent.source }
       : null;
     // 0.9.32 地图 sidecar（点位描述 + 点挂子图）：独立文档，有界随 /state 下发
+    // 0.9.50（M01 子集）：宿主点位已不存在的损坏子图引用直接过滤（可恢复状态，
+    // 不让幽灵子图进 UI）；标定摘要随 map 下发（键与 /worlds/scale/calibrate 对齐）
     const mapDoc = sanitizeMapDoc(await store.read(`maps:${world.id}`).catch(() => null));
     const pointMetaEntries = Object.entries(mapDoc.pointMeta).slice(0, 80);
-    const submapEntries = Object.entries(mapDoc.submaps).slice(0, 40).map(([key, sub]) => ({
-      pointId: key,
-      scale: sub.scale ?? null,
-      points: sub.points.slice(0, 40),
-      pointCount: sub.points.length,
-    }));
+    const worldPointIds = new Set((world.points ?? []).map((p) => String(p.id)));
+    const submapEntries = Object.entries(mapDoc.submaps)
+      .filter(([key]) => worldPointIds.has(key))
+      .slice(0, 40)
+      .map(([key, sub]) => ({
+        pointId: key,
+        scale: sub.scale ?? null,
+        points: sub.points.slice(0, 40),
+        pointCount: sub.points.length,
+      }));
+    const calibrationEntries = Object.entries(mapDoc.calibrations)
+      .filter(([key]) => key === "world" || worldPointIds.has(key))
+      .slice(0, 40);
     return okResult({
       chatId,
       worldId: world.id,
@@ -1160,6 +1329,7 @@ function createCoreInstance(
         pointMeta: Object.fromEntries(pointMetaEntries),
         submaps: Object.fromEntries(submapEntries.map((entry) => [entry.pointId, { scale: entry.scale, points: entry.points }])),
         submapCount: submapEntries.length,
+        calibrations: Object.fromEntries(calibrationEntries),
       },
       npcDirectory,
       regions,
@@ -1934,6 +2104,7 @@ function createCoreInstance(
       if (method === "POST" && route === "/worlds/ensure-starter") return await handleEnsureStarter(body, ctx);
       if (method === "POST" && route === "/worlds/geo/adopt") return await handleGeoAdopt(body);
       if (method === "POST" && route === "/worlds/move-author") return await handleMoveAuthor(body);
+      if (method === "POST" && route === "/worlds/scale/calibrate") return await handleScaleCalibrate(body);
       if (method === "POST" && route === "/bindings") return await handleBindings(body);
       if (method === "POST" && route === "/state") return await handleState(body);
       if (method === "POST" && route === "/map/image") return await handleMapImage(body);

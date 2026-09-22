@@ -199,8 +199,8 @@ async function setup(fetchScripts, overrides = {}) {
 // 路由清单与健康检查
 // ---------------------------------------------------------------------------
 
-test("路由清单：19 条且全部在 /api/plugins/atlas 前缀下", () => {
-  equal(ATLAS_ROUTE_MANIFEST.length, 19, "dispatch 核心路由数（0.9.42 会话承载改排 + 0.9.44 /worlds/move-author）");
+test("路由清单：20 条且全部在 /api/plugins/atlas 前缀下", () => {
+  equal(ATLAS_ROUTE_MANIFEST.length, 20, "dispatch 核心路由数（0.9.42 会话承载改排 + 0.9.44 /worlds/move-author + 0.9.50 /worlds/scale/calibrate）");
   equal(ATLAS_PLUGIN_ROUTES.length, ATLAS_ROUTE_MANIFEST.length, "index.mjs 与核心路由清单一致");
   const plugin = createAtlasServerPlugin();
   for (const route of plugin.routes) {
@@ -1409,6 +1409,120 @@ test("node store：原子写 + 半截文件容错 + list 前缀", async () => {
   ok(existsSync(join(dir, settingsFile)), "settings 文件仍在");
   await store.remove("settings");
   equal(await store.read("settings"), null, "删除生效");
+});
+
+// ---------------------------------------------------------------------------
+// 0.9.50 地图尺度标定（外部 AI 计划 M04/M05：AI 判断地图实际范围 + sidecar 持久化）
+// ---------------------------------------------------------------------------
+
+test("0.9.50 标定：AI 估计世界图范围 → 程序推导每格米数落 sidecar 并随 /state 下发", async () => {
+  const spec = {
+    status: "estimated",
+    coverage: "白塔王都主城及城墙内街区",
+    extentMeters: { width: 6000, height: 6000 },
+    basis: "参照城墙描述估计为步行一日的城区",
+    confidence: "medium",
+  };
+  const { core, world, carrier } = await setup([() => openAiResponse(spec)]);
+  const result = await core.handle(
+    "POST",
+    "/worlds/scale/calibrate",
+    { chatId: "chat-a", mapId: "world", loreSupplement: "城墙周长约二十四里。〔有界材料〕" },
+    { local: true },
+  );
+  equal(result.status, 200, "标定请求成功");
+  ok(result.body.ok);
+  equal(result.body.data.status, "calibrated");
+  ok(result.body.data.calibrated === true);
+  // 100×100 等距方格：6000 米 / 100 格 = 60 米每格（程序推导，模型不自报每格距离）
+  equal(result.body.data.calibration.metersPerCell, 60);
+  equal(result.body.data.calibration.source, "ai-estimated");
+  equal(result.body.data.calibration.locked, false);
+  equal(result.body.data.calibration.coverage, "白塔王都主城及城墙内街区");
+  // sidecar 落在会话覆盖层（maps 文档），不落全局 store
+  ok(carrier.session.maps?.calibrations?.world?.metersPerCell === 60, "会话 sidecar 持久化标定");
+  const state = await core.handle("POST", "/state", { chatId: "chat-a" }, { local: true });
+  equal(state.body.data.map.calibrations.world.metersPerCell, 60, "/state 下发标定摘要");
+  void world;
+});
+
+test("0.9.50 标定：unknown / conflict / 伪数值均不落标定", async () => {
+  // unknown：材料不足
+  const { core } = await setup([() => openAiResponse({ status: "unknown", coverage: "", basis: "材料不足" })]);
+  const r1 = await core.handle("POST", "/worlds/scale/calibrate", { chatId: "chat-a", mapId: "world" }, { local: true });
+  equal(r1.body.data.status, "unknown");
+  ok(r1.body.data.calibrated === false, "unknown 不落标定");
+  const s1 = await core.handle("POST", "/state", { chatId: "chat-a" }, { local: true });
+  ok(!("world" in (s1.body.data.map.calibrations ?? {})), "state 无 world 标定");
+
+  // conflict：横纵每格距离超差（6000 宽 / 3000 高 → 60 vs 30 米每格）不静默取平均
+  const { core: core2 } = await setup([() => openAiResponse({ status: "estimated", extentMeters: { width: 6000, height: 3000 }, basis: "" })]);
+  const r2 = await core2.handle("POST", "/worlds/scale/calibrate", { chatId: "chat-a", mapId: "world" }, { local: true });
+  equal(r2.body.data.status, "conflict");
+  ok(r2.body.data.calibrated === false, "宽高不一致按 conflict 拒收");
+  ok(String(r2.body.data.message).includes("1% 容差"), "拒收原因可读");
+
+  // 字符串伪数值：拒绝（不 Number() 强转）
+  const { core: core3 } = await setup([() => openAiResponse({ status: "estimated", extentMeters: { width: "6000", height: "6000" } })]);
+  const r3 = await core3.handle("POST", "/worlds/scale/calibrate", { chatId: "chat-a", mapId: "world" }, { local: true });
+  equal(r3.body.data.status, "invalid", "字符串伪数值拒绝");
+});
+
+test("0.9.50 标定：人工标定锁定 → AI 覆盖被拒 → 人工可更新（revision 递增）", async () => {
+  const { core } = await setup(null);
+  const r1 = await core.handle(
+    "POST",
+    "/worlds/scale/calibrate",
+    { chatId: "chat-a", mapId: "world", userMetersPerCell: 25, basis: "作者按设定填的" },
+    { local: true },
+  );
+  equal(r1.body.data.calibration.source, "user");
+  ok(r1.body.data.calibration.locked === true, "人工标定默认锁定");
+  equal(r1.body.data.calibration.metersPerCell, 25);
+  // AI 模式撞锁定：400（INVALID_PAYLOAD），不发模型请求
+  const r2 = await core.handle("POST", "/worlds/scale/calibrate", { chatId: "chat-a", mapId: "world" }, { local: true });
+  equal(r2.status, 400, "锁定图拒绝 AI 重估");
+  ok(String(r2.body.error.message).includes("锁定"));
+  // 人工覆盖允许：revision +1
+  const r3 = await core.handle(
+    "POST",
+    "/worlds/scale/calibrate",
+    { chatId: "chat-a", mapId: "world", userMetersPerCell: 30 },
+    { local: true },
+  );
+  equal(r3.body.data.calibration.metersPerCell, 30);
+  equal(r3.body.data.calibration.revision, 2, "覆写 revision 递增");
+  // 非法人工值拒绝
+  const r4 = await core.handle(
+    "POST",
+    "/worlds/scale/calibrate",
+    { chatId: "chat-a", mapId: "world", userMetersPerCell: -5 },
+    { local: true },
+  );
+  equal(r4.status, 400, "负数人工值拒绝");
+});
+
+test("0.9.50 标定：子图宿主点位不存在 → 400；损坏子图引用被 /state 过滤（M01 子集）", async () => {
+  const { core, carrier, world } = await setup(null);
+  const r1 = await core.handle("POST", "/worlds/scale/calibrate", { chatId: "chat-a", mapId: "ghost-point" }, { local: true });
+  equal(r1.status, 400, "幽灵子图宿主点拒绝");
+  // M01 子集：sidecar 里的损坏子图引用（宿主点位已不存在）随 /state 被过滤
+  carrier.session.maps = {
+    schemaVersion: 2,
+    pointMeta: {},
+    submaps: {
+      // 真实点位（binding.currentLocationId）
+      "4103": { points: [{ id: "s1", name: "门厅", x: 50, y: 50 }] },
+      // 幽灵引用
+      "ghost-point": { points: [{ id: "s2", name: "不存在", x: 10, y: 10 }] },
+    },
+    calibrations: { "ghost-point": { revision: 1, metersPerCell: 5, source: "user", locked: true, basis: "", coverage: "", confidence: "", at: 1 } },
+  };
+  const state = await core.handle("POST", "/state", { chatId: "chat-a" }, { local: true });
+  ok("4103" in state.body.data.map.submaps, "真实子图保留");
+  ok(!("ghost-point" in state.body.data.map.submaps), "幽灵子图被过滤");
+  ok(!("ghost-point" in (state.body.data.map.calibrations ?? {})), "幽灵标定被过滤");
+  void world;
 });
 
 test(`本轮累计断言已记录（计数见报告）`, () => {

@@ -918,6 +918,8 @@
   margin-top: 1px;
 }
 
+/* 0.9.50 动态标尺条：条长按候选标尺距离真实绘制；可展开标定详情 */
+
 .aw-scale {
   position: absolute;
   left: 12px;
@@ -925,13 +927,86 @@
   font-family: var(--aw-sans);
   font-size: 10px;
   color: var(--aw-gold-deep);
+  z-index: 3;
+}
+
+.aw-scale__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   background: var(--aw-veil);
   border: 1px solid rgba(138, 106, 28, 0.35);
   border-radius: 4px;
-  padding: 1px 7px;
-  z-index: 3;
-  pointer-events: none;
+  padding: 3px 8px;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
 }
+
+.aw-scale__bar {
+  display: inline-block;
+  height: 6px;
+  min-width: 24px;
+  border: 1px solid var(--aw-gold-deep);
+  border-top: none;
+  position: relative;
+  background: transparent;
+}
+
+/* 标尺条两端刻度针 */
+.aw-scale__bar::before,
+.aw-scale__bar::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  width: 1px;
+  height: 9px;
+  background: var(--aw-gold-deep);
+}
+.aw-scale__bar::before { left: 0; }
+.aw-scale__bar::after { right: 0; }
+
+/* 未标定 / 旧式单位：桩线（不是米制标尺，不能伪物理） */
+.aw-scale__bar.is-stub {
+  width: 24px !important;
+  border-style: dashed;
+  opacity: 0.55;
+}
+
+.aw-scale__label { white-space: nowrap; }
+
+.aw-scale__detail {
+  display: none;
+  margin-top: 4px;
+  width: 230px;
+  background: var(--aw-panel);
+  border: 1px solid rgba(138, 106, 28, 0.35);
+  border-radius: 4px;
+  padding: 7px 9px;
+  box-shadow: 0 4px 14px rgba(31, 42, 51, 0.18);
+  pointer-events: auto;
+}
+.aw-scale.is-detail-open .aw-scale__detail { display: block; }
+
+.aw-scale__row { line-height: 1.7; color: var(--aw-ink-soft); }
+.aw-scale__row--head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+.aw-scale__row--muted { color: var(--aw-ink-soft); opacity: 0.75; font-size: 9px; }
+.aw-scale__cell { font-weight: 600; color: var(--aw-ink-strong); }
+.aw-scale__src { font-size: 9px; color: var(--aw-gold-deep); white-space: nowrap; }
+
+.aw-scale__action { margin-top: 6px; font-size: 10px; padding: 3px 8px; }
+.aw-scale__action:disabled { opacity: 0.5; cursor: not-allowed; }
+.aw-scale__input {
+  width: 86px;
+  font: inherit;
+  padding: 3px 6px;
+  border: 1px solid rgba(138, 106, 28, 0.35);
+  border-radius: 3px;
+  background: var(--aw-input-bg, var(--aw-panel));
+  color: var(--aw-ink-strong);
+}
+.aw-scale__row--actions { display: flex; gap: 6px; align-items: center; margin-top: 6px; }
+.aw-scale__row--actions .aw-scale__action { margin-top: 0; }
 
 .aw-route { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
 

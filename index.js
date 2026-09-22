@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.49";
+export const ATLAS_EXTENSION_VERSION = "0.9.50";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -25,6 +25,8 @@ export const ATLAS_SESSION_SCHEMA_VERSION = 1;
 export { atlasSessionWriteGuard };
 /** 0.9.49（M03）：地图等比显示布局纯函数（导出供测试）。 */
 export { computeMapLayout };
+/** 0.9.50（M05）：动态比例尺条纯函数（导出供测试）。 */
+export { computeScaleBar, formatDistanceMeters };
 export const ATLAS_SETTINGS_KEY = "atlas_world_sim";
 /** 生成拦截器注入键（setExtensionPrompt 用；临时上下文，不写入可见聊天历史）。 */
 export const ATLAS_INJECTION_KEY = "atlas_world_context";
@@ -723,6 +725,70 @@ function computeMapLayout(points, viewW, viewH) {
   return { bounds, spanX, spanY, cellPx, widthPx, heightPx, offsetX, offsetY, toPixel, viewW: w, viewH: h };
 }
 
+/**
+ * 0.9.50（M05 动态比例尺条，纯函数，可测）：
+ * 「1 格 = N 米」是地图数据（标定）；左下角标尺条是随相机变化的显示——
+ * 两者关联但不互相修改。S = metersPerCell，P = 当前每格 CSS 像素（cellPx × zoom），
+ * metersPerPixel = S / P；候选标尺距离 D 取 1、2、5 × 10^n 米，
+ * 优先选使标尺条约 80-160 CSS 像素宽的 D（窗口内取最接近 120px 的候选；
+ * 全部候选都在窗外时取与窗口最近的一条）；选定后按真实值绘制，
+ * 不把条长硬截到像素值而保留原标签。
+ */
+const SCALE_BAR_MIN_PX = 80;
+const SCALE_BAR_MAX_PX = 160;
+const SCALE_BAR_PREFERRED_PX = 120;
+
+function computeScaleBar({ metersPerCell, cellPx, zoom }) {
+  const s = Number(metersPerCell);
+  const p = Number(cellPx);
+  const z = Number(zoom);
+  if (!Number.isFinite(s) || s <= 0 || !Number.isFinite(p) || p <= 0 || !Number.isFinite(z) || z <= 0) return null;
+  const metersPerPixel = s / (p * z);
+  if (!Number.isFinite(metersPerPixel) || metersPerPixel <= 0) return null;
+  let bestInWindow = null;
+  let bestBelow = null;
+  let bestAbove = null;
+  let best = null;
+  for (let exp = -2; exp <= 7; exp++) {
+    for (const mult of [1, 2, 5]) {
+      const distance = mult * 10 ** exp;
+      const barWidthPx = distance / metersPerPixel;
+      if (!Number.isFinite(barWidthPx) || barWidthPx <= 0) continue;
+      const candidate = { distanceMeters: distance, barWidthPx };
+      if (!best) best = candidate;
+      if (barWidthPx >= SCALE_BAR_MIN_PX && barWidthPx <= SCALE_BAR_MAX_PX) {
+        const gap = Math.abs(barWidthPx - SCALE_BAR_PREFERRED_PX);
+        if (!bestInWindow || gap < bestInWindow.gap) bestInWindow = { ...candidate, gap };
+      } else if (barWidthPx < SCALE_BAR_MIN_PX) {
+        if (!bestBelow || barWidthPx > bestBelow.barWidthPx) bestBelow = candidate;
+      } else if (!bestAbove || barWidthPx < bestAbove.barWidthPx) {
+        bestAbove = candidate;
+      }
+    }
+  }
+  if (bestInWindow) return { distanceMeters: bestInWindow.distanceMeters, barWidthPx: bestInWindow.barWidthPx };
+  if (bestBelow && bestAbove) {
+    const belowGap = SCALE_BAR_MIN_PX - bestBelow.barWidthPx;
+    const aboveGap = bestAbove.barWidthPx - SCALE_BAR_MAX_PX;
+    return belowGap <= aboveGap ? bestBelow : bestAbove;
+  }
+  return bestBelow ?? bestAbove ?? best;
+}
+
+/** 0.9.50 距离显示：内部统一米，显示米 / 公里自动（极小图到厘米）。 */
+function formatDistanceMeters(meters) {
+  const value = Number(meters);
+  if (!Number.isFinite(value) || value <= 0) return "";
+  if (value < 1) return `${Math.round(value * 100)} 厘米`;
+  if (value < 1000) {
+    const rounded = Math.round(value * 10) / 10;
+    return `${Number.isInteger(rounded) ? rounded : rounded.toFixed(1)} 米`;
+  }
+  const km = Math.round((value / 1000) * 10) / 10;
+  return `${Number.isInteger(km) ? km : km.toFixed(1)} 公里`;
+}
+
+
 function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
   root.className = "atlas-workbench";
   root.id = "atlas-extension-panel-root";
@@ -1332,6 +1398,14 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
   const mapCanvas = el("div", "aw-maparea");
   let mapBuilt = false;
   let mapScaleEl = null;
+  // 0.9.50 标尺条：条 / 标签 / 详情元素与展开态（重建 renderMap 时保持展开）
+  let scaleBarEl = null;
+  let scaleLabelEl = null;
+  let scaleDetailEl = null;
+  let scaleDetailOpen = false;
+  let scaleCalibrating = false;
+  // 当前标尺条上下文（renderMap 时更新；setZoom 联动只重算条长，不动 detail）
+  let scaleCtx = null;
   // 0.9.35 子图视图栈：空 = 世界图；每层 = {pointId, name}（点挂子图，递归）
   let mapStack = [];
   let mapStackKey = "";
@@ -1350,7 +1424,126 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       panY = 0;
     }
     applyTransform();
+    // 0.9.50（M05）：缩放后条长按同一标尺距离真实重算（连续缩放都重算）
+    updateScaleBarVisual();
   };
+
+  /** 0.9.50 标尺条视觉更新：标定图按候选距离画真实条长；未标定/旧式单位画桩线 + 文字。 */
+  function updateScaleBarVisual() {
+    if (!scaleBarEl || !scaleLabelEl || !scaleCtx) return;
+    const { calibration, legacyScale, cellPx } = scaleCtx;
+    if (!calibration) {
+      scaleBarEl.classList.add("is-stub");
+      scaleBarEl.style.width = "";
+      scaleLabelEl.textContent = legacyScale
+        ? `1 格 ≈ ${legacyScale.distancePerCell}${legacyScale.unit ? ` ${legacyScale.unit}` : ""}`
+        : "未标定（按格程计算）";
+      return;
+    }
+    const bar = computeScaleBar({ metersPerCell: calibration.metersPerCell, cellPx, zoom });
+    if (!bar) return;
+    scaleBarEl.classList.remove("is-stub");
+    scaleBarEl.style.width = `${Math.round(bar.barWidthPx * 10) / 10}px`;
+    scaleLabelEl.textContent = formatDistanceMeters(bar.distanceMeters);
+  }
+
+  /** 0.9.50 标定请求（AI 模式 / 人工模式共用一条路由；成功后 refresh 走 renderMap 重建详情）。 */
+  async function runScaleCalibrate(payload, label) {
+    if (scaleCalibrating) return;
+    scaleCalibrating = true;
+    try {
+      const result = await api.request("POST", "/worlds/scale/calibrate", payload);
+      const body = result.body ?? {};
+      if (result.status === 200 && body.ok) {
+        const status = String(body.data?.status ?? "");
+        atlasLog("地图", `${label}：${body.data?.message ?? "完成"}`);
+        setStatus(String(body.data?.message ?? `${label}完成`), status === "calibrated" || status === "grounded" ? "ok" : "warn");
+        await core.refresh();
+      } else {
+        atlasLog("地图", `${label}失败 → ${body.error?.message ?? `HTTP ${result.status}`}`);
+        setStatus(body.error?.message ?? `${label}失败（HTTP ${result.status}）`, "error");
+      }
+    } finally {
+      scaleCalibrating = false;
+    }
+  }
+
+  /**
+   * 0.9.50（M04）：标尺详情面板——每格距离 / 来源 / 依据 + AI 判断按钮 +
+   * 人工标定输入（人工值默认锁定）。renderMap 时重建；缩放不重建（输入焦点安全）。
+   */
+  function rebuildScaleDetail(d, mapId, calibration, legacyScale) {
+    if (!scaleDetailEl) return;
+    scaleDetailEl.innerHTML = "";
+    const chatId = String(state().chatId ?? "");
+    const sourceLabel = calibration
+      ? calibration.source === "user"
+        ? "人工标定 · 已锁定"
+        : calibration.source === "legacy"
+          ? "旧式标定"
+          : "AI 估计"
+      : "";
+    const headRow = el("div", "aw-scale__row aw-scale__row--head");
+    if (calibration) {
+      headRow.append(el("span", "aw-scale__cell", `每格 ≈ ${formatDistanceMeters(calibration.metersPerCell)}`));
+      headRow.append(el("span", "aw-scale__src", sourceLabel));
+      scaleDetailEl.append(headRow);
+      if (calibration.coverage) scaleDetailEl.append(el("div", "aw-scale__row", `覆盖范围：${calibration.coverage}`));
+      if (calibration.basis) scaleDetailEl.append(el("div", "aw-scale__row", `依据：${calibration.basis}`));
+      if (calibration.source === "user" && calibration.locked) {
+        scaleDetailEl.append(el("div", "aw-scale__row aw-scale__row--muted", "已锁定：AI 估计不会覆盖人工标定；重新填写并保存即可更新。"));
+      }
+    } else {
+      headRow.append(el("span", "aw-scale__cell", legacyScale ? "旧式比例尺（单位换算未知）" : "未标定"));
+      scaleDetailEl.append(headRow);
+      scaleDetailEl.append(el("div", "aw-scale__row aw-scale__row--muted", legacyScale
+        ? `旧值「1 格 ≈ ${legacyScale.distancePerCell}${legacyScale.unit ? ` ${legacyScale.unit}` : ""}」没有标准单位换算，不能画成米制标尺。可让 AI 按世界书与剧情重新判断，或直接填入每格米数。`
+        : "让 AI 按世界书与剧情判断这张图的实际范围，或直接填入每格米数（人工标定后锁定）。"));
+    }
+    // AI 按钮：人工锁定值不可被 AI 覆盖（服务端同样拒绝，双保险）
+    const aiBtn = el("button", "aw-btn aw-btn--ghost aw-scale__action", calibration?.locked ? "AI 重新判断（已锁定）" : calibration ? "AI 重新判断地图大小" : "AI 判断地图大小");
+    aiBtn.type = "button";
+    aiBtn.disabled = Boolean(calibration?.locked);
+    aiBtn.setAttribute("aria-label", "用 1 次推演请求让 AI 判断当前地图的实际范围并换算每格米数");
+    aiBtn.addEventListener("click", async () => {
+      if (scaleCalibrating || !chatId) return;
+      aiBtn.disabled = true;
+      try {
+        const lore = await readCardLoreSupplement();
+        await runScaleCalibrate({ chatId, mapId, ...(lore ? { loreSupplement: lore } : {}) }, "AI 尺度标定");
+      } finally {
+        aiBtn.disabled = false;
+      }
+    });
+    // 人工标定：每格米数（程序同步派生整图宽高，不存在第二份独立宽高）
+    const manualInput = document.createElement("input");
+    manualInput.type = "number";
+    manualInput.min = "0";
+    manualInput.step = "any";
+    manualInput.placeholder = "每格米数";
+    manualInput.className = "aw-scale__input";
+    manualInput.setAttribute("aria-label", "每格实际距离（米）");
+    if (calibration) manualInput.value = String(calibration.metersPerCell);
+    const manualBtn = el("button", "aw-btn aw-btn--ghost aw-scale__action", "人工标定（锁定）");
+    manualBtn.type = "button";
+    manualBtn.addEventListener("click", async () => {
+      if (scaleCalibrating || !chatId) return;
+      const meters = Number(manualInput.value);
+      if (!Number.isFinite(meters) || meters <= 0) {
+        setStatus("人工标定需要正的每格米数。", "error");
+        return;
+      }
+      manualBtn.disabled = true;
+      try {
+        await runScaleCalibrate({ chatId, mapId, userMetersPerCell: meters, basis: "人工标定" }, "人工尺度标定");
+      } finally {
+        manualBtn.disabled = false;
+      }
+    });
+    const manualRow = el("div", "aw-scale__row aw-scale__row--actions");
+    manualRow.append(manualInput, manualBtn);
+    scaleDetailEl.append(aiBtn, manualRow);
+  }
 
   function buildMap() {
     if (mapBuilt) return mapCanvas;
@@ -1379,7 +1572,22 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     for (const corner of ["tl", "tr", "bl", "br"]) viewport.append(el("span", `aw-corner aw-corner--${corner}`));
     const compass = el("div", "aw-compass");
     compass.append(el("span", "aw-compass__n", "N"), el("i", "aw-compass__needle"));
-    mapScaleEl = el("div", "aw-scale", "1 格 ≈ 一日路程");
+    // 0.9.50（M05）：比例尺元素升级为动态标尺条 + 可展开详情。
+    // 条长 = 真实标尺距离 ÷ metersPerPixel（按候选 1-2-5×10^n 选取），随 zoom / resize 重算；
+    // 详情 = 每格距离 / 来源 / 依据 + AI 判断按钮 + 人工标定（锁定）。
+    mapScaleEl = el("div", "aw-scale");
+    scaleBarEl = el("span", "aw-scale__bar");
+    scaleLabelEl = el("span", "aw-scale__label", "");
+    const scaleToggle = el("button", "aw-scale__toggle");
+    scaleToggle.type = "button";
+    scaleToggle.setAttribute("aria-label", "标尺详情：点击展开每格距离、来源与标定操作");
+    scaleToggle.append(scaleBarEl, scaleLabelEl);
+    scaleDetailEl = el("div", "aw-scale__detail");
+    scaleToggle.addEventListener("click", () => {
+      scaleDetailOpen = !scaleDetailOpen;
+      mapScaleEl.classList.toggle("is-detail-open", scaleDetailOpen);
+    });
+    mapScaleEl.append(scaleToggle, scaleDetailEl);
     viewport.append(compass, mapScaleEl);
     for (const [label, delta, aria] of [["＋", 0.25, "放大地图"], ["－", -0.25, "缩小地图"], ["⌂", 0, "重置地图缩放"]]) {
       const btn = el("button", "aw-zoom__btn", label);
@@ -1929,19 +2137,6 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     if (travelBar) travelBar.style.display = inSub ? "none" : "";
 
     const regions = Array.isArray(d.regions) ? d.regions : [];
-    // 刻度尺：子图优先用自身比例尺；世界图沿用原口径（多于一个地点或地区才显示）
-    if (mapScaleEl) {
-      if (inSub) {
-        const scale = currentSub.scale ?? null;
-        mapScaleEl.textContent = scale
-          ? `1 格 ≈ ${scale.distancePerCell}${scale.unit ? ` ${scale.unit}` : ""}`
-          : "未标定（按格程计算）";
-        mapScaleEl.style.display = "";
-      } else {
-        mapScaleEl.textContent = "1 格 ≈ 一日路程";
-        mapScaleEl.style.display = pointsAll.length > 1 || regions.length > 1 ? "" : "none";
-      }
-    }
     // 0.9.20 空地理诚实提示；0.9.26 地图抢救后文案更新——单点地图不是渲染坏了，
     // 是世界里真的只有一个地点；提炼按钮（世界书 / 近期剧情）现在常显可随时生长地图
     if (mapHint) {
@@ -1966,6 +2161,24 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     // 0.9.49（M03）：等比 fit 布局——单一 cellPx 同时用于 x/y，屏幕格子 = 真实格子
     const layout = computeMapLayout(points, viewport.clientWidth || 0, viewport.clientHeight || 0);
     const toPixel = layout.toPixel;
+    // 0.9.50（M04/M05）动态标尺条：标定（calibrations[mapId]）优先画米制条；
+    // 旧式自由单位比例尺只做文字说明（换算未知，不画伪物理条）；世界图沿用
+    // 「多于一个地点或地区才显示」的显隐口径。缩放 / resize 经 updateScaleBarVisual 重算。
+    if (mapScaleEl) {
+      const showScale = !inSub ? pointsAll.length > 1 || regions.length > 1 : true;
+      mapScaleEl.style.display = showScale ? "" : "none";
+      if (showScale) {
+        const calibrations = mapData.calibrations && typeof mapData.calibrations === "object" ? mapData.calibrations : {};
+        const mapId = inSub ? String(view.pointId) : "world";
+        const calibration = calibrations[mapId] ?? null;
+        const legacyScale = inSub ? currentSub?.scale ?? null : null;
+        scaleCtx = { calibration, legacyScale, mapId, cellPx: layout.cellPx };
+        updateScaleBarVisual();
+        rebuildScaleDetail(d, mapId, calibration, legacyScale);
+      } else {
+        scaleCtx = null;
+      }
+    }
     // 真实格网挂 mapLayer（与标点共用 zoom/平移 transform，缩放后格线仍是格子）；
     // viewport 的静态装饰纹理关闭——固定背景格不能冒充可测量网格
     viewport.style.backgroundImage = "none";

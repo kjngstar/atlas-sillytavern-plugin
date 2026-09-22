@@ -11,6 +11,7 @@
 import type { World } from "../lib/world-schema.ts";
 import { appendDefinitionRevision } from "../lib/world-definition.ts";
 import { hashString } from "../lib/world-cards.ts";
+import { sanitizeCalibration, type MapScaleCalibration } from "./atlas-scale.ts";
 
 /** 单轮新地点上限（与 geo 提炼口径一致：宁缺毋滥）。 */
 export const NEW_LOCATIONS_MAX = 12;
@@ -237,15 +238,20 @@ export interface SubMap {
   points: SubMapPoint[];
 }
 
-/** 地图 sidecar 文档：点位描述 + 点挂子图（pointId 键）。 */
+/**
+ * 地图 sidecar 文档：点位描述 + 点挂子图（pointId 键）+ 地图尺度标定（0.9.50）。
+ * schemaVersion 2：+calibrations（键 = mapId：世界图 "world"、子图 = 宿主点位 id）。
+ * 0.9.50 起sanitizeMapDoc 同时接受 v1（缺 calibrations 视为空）与 v2。
+ */
 export interface AtlasMapDoc {
-  schemaVersion: 1;
+  schemaVersion: 2;
   pointMeta: Record<string, { description?: string }>;
   submaps: Record<string, SubMap>;
+  calibrations: Record<string, MapScaleCalibration>;
 }
 
 export function emptyMapDoc(): AtlasMapDoc {
-  return { schemaVersion: 1, pointMeta: {}, submaps: {} };
+  return { schemaVersion: 2, pointMeta: {}, submaps: {}, calibrations: {} };
 }
 
 /** sidecar 文档形状不可信（兼容旧 / 手改）：宽容清洗，绝不炸面板。 */
@@ -295,6 +301,14 @@ export function sanitizeMapDoc(raw: unknown): AtlasMapDoc {
         }
       }
       if (points.length > 0) doc.submaps[key] = { ...(scale ? { scale } : {}), points };
+    }
+  }
+  // 0.9.50 标定清洗：每格距离必须正有限；来源白名单外按 legacy 处理；封顶 40 张图
+  const calibrations = record.calibrations;
+  if (calibrations && typeof calibrations === "object" && !Array.isArray(calibrations)) {
+    for (const [key, value] of Object.entries(calibrations as Record<string, unknown>).slice(0, 40)) {
+      const calibration = sanitizeCalibration(value);
+      if (calibration) doc.calibrations[key] = calibration;
     }
   }
   return doc;

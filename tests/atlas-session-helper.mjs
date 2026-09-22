@@ -16,7 +16,8 @@ const SESSION_ROUTE_METHODS = (method, path) =>
     path === "/worlds/import" ||
     path === "/worlds/ensure-starter" ||
     path === "/worlds/geo/adopt" ||
-    path === "/worlds/move-author");
+    path === "/worlds/move-author" ||
+    path === "/worlds/scale/calibrate");
 
 export function createSessionCarrier(core, { world = null, binding = null, maps = null, session: initial = null } = {}) {
   let session = initial
