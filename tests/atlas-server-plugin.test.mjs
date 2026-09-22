@@ -199,8 +199,8 @@ async function setup(fetchScripts, overrides = {}) {
 // 路由清单与健康检查
 // ---------------------------------------------------------------------------
 
-test("路由清单：20 条且全部在 /api/plugins/atlas 前缀下", () => {
-  equal(ATLAS_ROUTE_MANIFEST.length, 20, "dispatch 核心路由数（0.9.42 会话承载改排 + 0.9.44 /worlds/move-author + 0.9.50 /worlds/scale/calibrate）");
+test("路由清单：21 条且全部在 /api/plugins/atlas 前缀下", () => {
+  equal(ATLAS_ROUTE_MANIFEST.length, 21, "dispatch 核心路由数（0.9.42 会话承载改排 + 0.9.44 /worlds/move-author + 0.9.50 /worlds/scale/calibrate + R03 /turns/preview）");
   equal(ATLAS_PLUGIN_ROUTES.length, ATLAS_ROUTE_MANIFEST.length, "index.mjs 与核心路由清单一致");
   const plugin = createAtlasServerPlugin();
   for (const route of plugin.routes) {
@@ -1270,14 +1270,15 @@ test("systemPrompt：自定义系统提示词生效，留空回退内置默认�
     equal(calls[0].body.messages[1].role, "user", "自定义 systemPrompt：第二条是 user（素材段）");
     ok(calls[0].body.messages[1].content.includes("用户"), "素材段含本轮用户行动");
   }
-  // 留空 → 整套内置默认分段（8 段多轮结构）
+  // 留空 → 整套内置默认分段（R03 六段结构：无 assistant 应答与 { 预填）
   {
     const { fetchFn, calls } = makeFetch([() => openAiResponse(GOOD_DRAFT)]);
     await callAtlasWorldTurnApi(preset(), { injectionText: "注入", userText: "用户", assistantText: "助手" }, { fetchFn, now: () => NOW });
-    equal(calls[0].body.messages.length, 8, "留空：整套内置默认 8 段");
-    equal(calls[0].body.messages[1].role, "assistant", "第二段是 assistant 确认（shujuku 剧情推进同款）");
+    equal(calls[0].body.messages.length, 6, "留空：整套内置默认 6 段");
+    equal(calls[0].body.messages[1].role, "user", "第二段是 user（世界状态 $5）");
+    ok(calls[0].body.messages[1].content.includes("注入"), "世界状态段已插入 $5 注入内容（D03 修复）");
     ok(calls[0].body.messages[calls[0].body.messages.length - 2].content.includes("用户"), "触发段含本轮素材");
-    equal(calls[0].body.messages[calls[0].body.messages.length - 1].content, "{", "末段输出引导（JSON prefill）");
+    ok(calls[0].body.messages[calls[0].body.messages.length - 1].content.includes("只输出完整 JSON 对象"), "末段为提交前核对（无 { 预填）");
   }
 });
 

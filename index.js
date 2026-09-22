@@ -3500,6 +3500,65 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     details.append(summary, visible);
     promptPanel.append(details);
 
+    // R03（A10）：最终请求预览——走服务端与真实提交完全相同的装配路径，
+    // 展示模型实际收到的每段消息、生效来源与缺失块哨兵
+    const previewDetails = document.createElement("details");
+    previewDetails.className = "aw-details";
+    const previewSummary = document.createElement("summary");
+    previewSummary.className = "aw-details__summary";
+    previewSummary.textContent = "最终请求预览（与实际发送逐字一致）";
+    const previewBody = el("div", "aw-request-preview");
+    previewBody.append(el("p", "aw-panel__meta", "展开后点击下方按钮，按当前世界状态装配一次真实请求（不调用模型、不计费）。"));
+    const previewBtn = el("button", "aw-btn", "生成最终请求预览");
+    previewBtn.type = "button";
+    previewBtn.setAttribute("aria-label", "用当前世界状态生成一次推演请求预览（不调用模型）");
+    previewBtn.addEventListener("click", async () => {
+      const chatId = String(state().chatId ?? "");
+      if (!chatId) { setStatus("当前没有活动聊天。", "error"); renderCenter(); return; }
+      previewBtn.disabled = true;
+      try {
+        const result = await api.request("POST", "/turns/preview", { chatId });
+        previewBody.innerHTML = "";
+        if (result.status !== 200 || !result.body?.ok) {
+          previewBody.append(el("p", "aw-note aw-note--error", result.body?.error?.message ?? `预览失败（HTTP ${result.status}）`));
+          return;
+        }
+        const data = result.body.data ?? {};
+        const sourceLabel = { preset: "推进预设分段", connection: "连接级系统提示词（覆盖推进预设）", builtin: "内置默认分段" }[String(data.promptSource)] ?? String(data.promptSource);
+        previewBody.append(el("p", "aw-panel__meta", `生效来源：${sourceLabel} · 共 ${String(data.messages?.length ?? 0)} 段`));
+        if (String(data.promptSource) === "connection") {
+          previewBody.append(el("p", "aw-note aw-note--error", "连接级系统提示词正在覆盖推进预设——可在上方点击「清空连接级提示词」恢复。"));
+        }
+        const missing = data.missing ?? {};
+        const missingLines = [];
+        if (!missing.worldState) missingLines.push("世界状态（$5）为空——未绑定世界或世界无内容");
+        if (!missing.lastTurn) missingLines.push("上轮结果（$6）为空——尚无已提交推演");
+        if (!missing.recentContext) missingLines.push("前文剧情（$7）为空——本轮提交时将按上下文条数注入");
+        if (missingLines.length > 0) previewBody.append(el("p", "aw-panel__meta", `缺失块：${missingLines.join("；")}`));
+        for (const message of Array.isArray(data.messages) ? data.messages : []) {
+          const item = el("div", "aw-seg-item");
+          const head = el("div", "aw-seg-item__head");
+          head.append(el("span", "aw-seg-item__index", `${String(message.role)} · ${String(message.chars)} 字`));
+          item.append(head);
+          const area = document.createElement("textarea");
+          area.className = "aw-input aw-input--area aw-seg-item__area";
+          area.rows = 4;
+          area.readOnly = true;
+          area.value = String(message.content ?? "");
+          area.setAttribute("aria-label", `预览消息 ${message.role}`);
+          item.append(area);
+          previewBody.append(item);
+        }
+      } catch (error) {
+        previewBody.append(el("p", "aw-note aw-note--error", `预览失败：${error instanceof Error ? error.message : String(error)}`));
+      } finally {
+        previewBtn.disabled = false;
+      }
+    });
+    previewBody.append(previewBtn);
+    previewDetails.append(previewSummary, previewBody);
+    promptPanel.append(previewDetails);
+
     // dirty 操作条（shujuku 式：未修改时「放弃修改 / 保存」禁用）
     const promptActions = el("div", "aw-actions");
     const discardButton = el("button", "aw-btn aw-btn--ghost", "放弃修改");

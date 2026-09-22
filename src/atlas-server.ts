@@ -46,10 +46,12 @@ import { buildSubMapFromDraft, sanitizeMapDoc } from "./atlas-geo-apply.ts";
 import { validateScaleResponse } from "./atlas-scale.ts";
 import { buildLorebookPlans } from "./atlas-lorebook.ts";
 import {
+  buildWorldTurnMessages,
   callAtlasWorldTurnApi,
   extractJsonObject,
   parseAtlasWorldTurnDraft,
   type AtlasApiPreset,
+  type AtlasWorldTurnPromptInput,
 } from "./atlas-api-client.ts";
 import {
   ATLAS_SETTINGS_SCHEMA_VERSION,
@@ -374,6 +376,7 @@ export const ATLAS_ROUTE_MANIFEST = [
   { method: "POST", path: "/state" },
   { method: "POST", path: "/map/image" },
   { method: "POST", path: "/turns/prepare" },
+  { method: "POST", path: "/turns/preview" },
   { method: "POST", path: "/turns/commit" },
   { method: "POST", path: "/turns/retry" },
   { method: "POST", path: "/turns/restore" },
@@ -398,6 +401,7 @@ const ATLAS_SESSION_ROUTES = new Set<string>([
   "POST /state",
   "POST /map/image",
   "POST /turns/prepare",
+  "POST /turns/preview",
   "POST /turns/commit",
   "POST /turns/retry",
   "POST /turns/restore",
@@ -1381,6 +1385,114 @@ function createCoreInstance(
     });
   }
 
+  /**
+   * R03（A10）：最终请求预览——用与 executeCommit 完全相同的装配路径
+   * （resolveWorldTurnPreset → prepareWorldTurnInputs → buildWorldTurnMessages）
+   * 生成模型将看到的 messages，零 API 调用。展示每段 role / 内容 / 长度、
+   * 生效提示词来源与缺失块哨兵；素材（userText / assistantText / 前文）缺省为空。
+   */
+  async function handleTurnPreview(body: unknown): Promise<AtlasRouteResult> {
+    const payload = (body ?? {}) as {
+      chatId?: unknown;
+      userText?: unknown;
+      assistantText?: unknown;
+      recentAssistantTexts?: unknown;
+    };
+    const chatId = typeof payload.chatId === "string" ? payload.chatId : "";
+    if (!chatId || chatId.length > ATLAS_LIMITS.ID_CHARS) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "chatId 非法");
+    }
+    const binding = requireBoundBinding(await getBinding(chatId));
+    const current = await loadSettings();
+    const preset = resolveWorldTurnPreset(current);
+    if (!preset) {
+      throw new AtlasError(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "未配置独立推演 API，无法生成请求预览。");
+    }
+    const prepared = await prepareWorldTurnInputs(binding, preset, {
+      chatId,
+      userMessageId: "preview",
+      userText: typeof payload.userText === "string" ? payload.userText : "",
+      assistantText: typeof payload.assistantText === "string" ? payload.assistantText : "",
+      recentAssistantTexts: Array.isArray(payload.recentAssistantTexts)
+        ? payload.recentAssistantTexts.filter((t): t is string => typeof t === "string")
+        : [],
+    });
+    const messages = buildWorldTurnMessages(preset, prepared.input).map((m) => ({
+      role: m.role,
+      content: m.content,
+      chars: m.content.length,
+    }));
+    // 生效来源判定（与 buildWorldTurnMessages 的分支一致）
+    const hasSegments = Array.isArray(preset.promptSegments) && preset.promptSegments.length > 0;
+    const promptSource = hasSegments ? "preset" : preset.systemPrompt ? "connection" : "builtin";
+    const missing = {
+      worldState: prepared.input.injectionText.trim().length > 0,
+      lastTurn: (prepared.input.lastTurnSummary ?? "").length > 0,
+      recentContext: (prepared.input.recentContextText ?? "").length > 0,
+    };
+    return okResult({
+      messages,
+      promptSource,
+      promptPresetName: preset.name,
+      contextTurnCount: Math.min(Math.max(typeof preset.contextTurnCount === "number" ? preset.contextTurnCount : 3, 1), 10),
+      missing,
+    });
+  }
+
+  /**
+   * R03：回合输入装配的单一来源——commit / retry / 请求预览共用同一条路径，
+   * 保证「预览看到的 = 模型实际收到的」（A10）。零 API、零存储写入。
+   * 0.9.25 shujuku 占位符体系上下文装配：
+   * $6 上轮推演结果 = 绑定分支内、游标前最后一条账本摘要；$7 前文 = 最近 N 条 AI 楼层。
+   */
+  async function prepareWorldTurnInputs(
+    binding: AtlasChatBinding,
+    preset: NonNullable<ReturnType<typeof resolveWorldTurnPreset>>,
+    request: Pick<AtlasTurnCommitRequest, "chatId" | "userMessageId" | "userText" | "assistantText" | "recentAssistantTexts" | "loreSupplement" | "personaDescription" | "charDescription">,
+  ) {
+    const world = await requireWorld(binding);
+    const currentPointId = binding.currentLocationId ?? null;
+    const currentRegionId = pointRegionId(world, currentPointId);
+    const flags = flagsFor(world, binding.branchId, binding.worldTimeCursor);
+    const prepareOutput = prepareAtlasTurn(world, {
+      request: {
+        chatId: request.chatId,
+        messageId: request.userMessageId,
+        worldId: binding.worldId,
+        branchId: binding.branchId,
+        userText: request.userText,
+        recentMessageRefs: [],
+      },
+      currentTime: binding.worldTimeCursor,
+      currentPointId,
+      currentRegionId,
+      flags,
+    });
+    const branchEvents = ledgerForBranch(world, binding.branchId).filter((e) => e.at <= binding.worldTimeCursor);
+    const lastLedgerEvent = branchEvents.at(-1) ?? null;
+    const lastTurnSummary = lastLedgerEvent ? lastLedgerEvent.narrativeSummary.slice(0, 500) : "";
+    // $7 前文条数 = 活动提示词预设的 contextTurnCount（shujuku plotSettings 同名设置；缺省 3，上限 10）
+    const turnCount = Math.min(Math.max(typeof preset.contextTurnCount === "number" ? preset.contextTurnCount : 3, 1), 10);
+    const recentAssistantTexts = (Array.isArray(request.recentAssistantTexts) ? request.recentAssistantTexts : []).slice(-turnCount);
+    const recentContextText = recentAssistantTexts.length > 0
+      ? `以下是前文的故事发展（AI输出）：\n${recentAssistantTexts
+          .map((text) => `assistant："${String(text).replace(/<br\s*\/?>/gi, "\n").replace(/<\/?[^>]+(>|$)/g, "").trim()}"`)
+          .join(" \n ")}`
+      : "";
+    const input: AtlasWorldTurnPromptInput = {
+      injectionText: prepareOutput.response.injectionText,
+      userText: request.userText,
+      assistantText: request.assistantText,
+      // 0.9.21 世界书资料块：宿主侧卡书条目（有界），只进推演请求
+      ...(request.loreSupplement ? { loreSupplement: request.loreSupplement } : {}),
+      ...(lastTurnSummary ? { lastTurnSummary } : {}),
+      ...(recentContextText ? { recentContextText } : {}),
+      ...(request.personaDescription ? { personaDescription: request.personaDescription } : {}),
+      ...(request.charDescription ? { charDescription: request.charDescription } : {}),
+    };
+    return { world, prepareOutput, currentPointId, currentRegionId, input, recentAssistantTexts };
+  }
+
   /** commit / retry 共享的执行体：恰好 1 条 API 请求 + 原子提交。 */
   async function executeCommit(
     binding: AtlasChatBinding,
@@ -1416,30 +1528,15 @@ function createCoreInstance(
     checkRpm();
 
     // 4. 本地重算 prepare（零 API）并保存 pending（供 retry 沿用原请求）
-    const currentPointId = binding.currentLocationId ?? null;
-    const currentRegionId = pointRegionId(world, currentPointId);
-    const flags = flagsFor(world, binding.branchId, binding.worldTimeCursor);
-    const prepareOutput = prepareAtlasTurn(world, {
-      request: {
-        chatId: request.chatId,
-        messageId: request.userMessageId,
-        worldId: binding.worldId,
-        branchId: binding.branchId,
-        userText: request.userText,
-        recentMessageRefs: [],
-      },
-      currentTime: binding.worldTimeCursor,
-      currentPointId,
-      currentRegionId,
-      flags,
-    });
+    const prepared = await prepareWorldTurnInputs(binding, preset, request);
+    const prepareOutput = prepared.prepareOutput;
 
     const pending: StoredPendingCommit = {
       request,
       binding: {
         branchId: binding.branchId,
-        currentPointId,
-        currentRegionId,
+        currentPointId: prepared.currentPointId,
+        currentRegionId: prepared.currentRegionId,
         worldTimeCursor: binding.worldTimeCursor,
       },
       savedAt: now(),
@@ -1448,30 +1545,7 @@ function createCoreInstance(
 
     // 5. 恰好 1 条推演请求
     rpmTimestamps.push(now());
-    // 0.9.25 shujuku 占位符体系上下文装配：
-    // $6 上轮推演结果 = 绑定分支内、游标前最后一条账本摘要；$7 前文 = 最近 N 条 AI 楼层（shujuku 同款叙述格式）
-    const branchEvents = ledgerForBranch(world, binding.branchId).filter((e) => e.at <= binding.worldTimeCursor);
-    const lastLedgerEvent = branchEvents.at(-1) ?? null;
-    const lastTurnSummary = lastLedgerEvent ? lastLedgerEvent.narrativeSummary.slice(0, 500) : "";
-    // $7 前文条数 = 活动提示词预设的 contextTurnCount（shujuku plotSettings 同名设置；缺省 3，上限 10）
-    const turnCount = Math.min(Math.max(typeof preset.contextTurnCount === "number" ? preset.contextTurnCount : 3, 1), 10);
-    const recentAssistantTexts = (Array.isArray(request.recentAssistantTexts) ? request.recentAssistantTexts : []).slice(-turnCount);
-    const recentContextText = recentAssistantTexts.length > 0
-      ? `以下是前文的故事发展（AI输出）：\n${recentAssistantTexts
-          .map((text) => `assistant："${String(text).replace(/<br\s*\/?>/gi, "\n").replace(/<\/?[^>]+(>|$)/g, "").trim()}"`)
-          .join(" \n ")}`
-      : "";
-    const call = await callAtlasWorldTurnApi(preset, {
-      injectionText: prepareOutput.response.injectionText,
-      userText: request.userText,
-      assistantText: request.assistantText,
-      // 0.9.21 世界书资料块：宿主侧卡书条目（有界），只进推演请求
-      ...(request.loreSupplement ? { loreSupplement: request.loreSupplement } : {}),
-      ...(lastTurnSummary ? { lastTurnSummary } : {}),
-      ...(recentContextText ? { recentContextText } : {}),
-      ...(request.personaDescription ? { personaDescription: request.personaDescription } : {}),
-      ...(request.charDescription ? { charDescription: request.charDescription } : {}),
-    }, { fetchFn: deps.fetchFn, now });
+    const call = await callAtlasWorldTurnApi(preset, prepared.input, { fetchFn: deps.fetchFn, now });
     pushLog({
       at: now(),
       kind: "world-turn",
@@ -1706,7 +1780,7 @@ function createCoreInstance(
       const GEO_AUTO_ATTEMPTS_MAX = 3;
       const currentFloorText = typeof request.assistantText === "string" ? request.assistantText.trim() : "";
       const autoTexts = [
-        ...recentAssistantTexts,
+        ...prepared.recentAssistantTexts,
         ...(currentFloorText ? [currentFloorText.slice(0, 2000)] : []),
       ];
       const autoLore = typeof request.loreSupplement === "string" ? request.loreSupplement.trim() : "";
@@ -2111,6 +2185,7 @@ function createCoreInstance(
       if (method === "POST" && route === "/state") return await handleState(body);
       if (method === "POST" && route === "/map/image") return await handleMapImage(body);
       if (method === "POST" && route === "/turns/prepare") return await handlePrepare(body);
+      if (method === "POST" && route === "/turns/preview") return await handleTurnPreview(body);
       if (method === "POST" && route === "/turns/commit") return await handleCommit(body);
       if (method === "POST" && route === "/turns/retry") return await handleRetry(body);
       if (method === "POST" && route === "/turns/restore") return await handleRestore(body);
