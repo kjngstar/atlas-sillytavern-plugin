@@ -257,6 +257,14 @@ export function createAtlasUiCore(deps: {
    * commit 成功且引擎给出条目规划时调用；失败只记 lorebookHint，绝不影响回合成功。
    */
   onLorebookSync?: (plans: AtlasLorebookPlans) => Promise<unknown>;
+  /**
+   * 0.9.47 世界书聊天级生命周期钩子：CHAT_CHANGED 且数据隔离清理完成后触发。
+   * bound = 新聊天已绑定世界：壳层应按会话世界状态重建「Atlas 动向」；
+   * !bound = 新聊天未绑定（开场白阶段）：壳层应清理书里残留的 Atlas 条目
+   * （学 shujuku 新对话抑制——旧聊天的动向不给新聊天看）。
+   * 失败静默：世界书只影响注入，绝不影响聊天与推演。
+   */
+  onLorebookChatSwitch?: (info: { chatId: string | null; bound: boolean }) => Promise<unknown>;
   /** 酒馆事件载荷适配（ST 事件数据形状不统一；返回 null = 无法适配，忽略该事件） */
   adaptEvent?: (event: string, payload: unknown) => AtlasAdaptedEvent | null;
   /**
@@ -608,6 +616,19 @@ export function createAtlasUiCore(deps: {
         lastError: null,
       });
       restoreReceiptsForChat(host.getChatId());
+      // 0.9.47 世界书聊天级生命周期（学 shujuku 的开场清理 + 隔离）：
+      // 切到新聊天（未绑定世界）→ 清掉书里上一聊天留下的 Atlas 条目；
+      // 切回已绑定的聊天 → 由壳层按会话世界状态重建「Atlas 动向」。
+      // 世界数据在 chatMetadata.atlas 会话里零丢失，书里只留当前聊天的动向。
+      if (deps.onLorebookChatSwitch) {
+        const chatId = host.getChatId();
+        void track(
+          Promise.resolve()
+            .then(() => host.readBinding())
+            .then((raw) => deps.onLorebookChatSwitch!({ chatId, bound: parseAtlasChatBinding(raw).ok }))
+            .catch(() => {}),
+        );
+      }
       void track(refresh());
       return;
     }

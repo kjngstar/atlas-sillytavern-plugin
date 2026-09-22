@@ -1721,6 +1721,12 @@
   white-space: nowrap;
 }
 
+/* 0.9.47 拖拽纠偏 + 标点选中高亮（mapview 同款交互） */
+.aw-npc { cursor: grab; }
+.aw-npc:active { cursor: grabbing; }
+.aw-npc.is-dragging { z-index: 9; opacity: 0.9; box-shadow: 0 6px 16px rgba(8, 20, 22, 0.35); }
+.aw-maparea .is-active-marker { outline: 2px solid var(--aw-gold); outline-offset: 2px; }
+
 .aw-mappanel {
   position: absolute;
   top: 64px; /* 避开 mapTools 行（zoom 控件 top:22） */

@@ -431,6 +431,43 @@ export function createAtlasLorebookWriter(port: AtlasLorebookPort, opts: { now?:
       };
     },
 
+    /**
+     * 0.9.47 聊天级生命周期（学 shujuku 的开场清理）：把目标书里**全部** Atlas
+     * 前缀条目清掉（含当前滚动条目）。用于切到未绑定世界的新聊天——旧聊天的
+     * 动向不该留在随卡激活的书里给新聊天看。切回旧聊天时由调用方按会话世界
+     * 状态重建条目，数据本身在 chatMetadata.atlas 会话里，零丢失。
+     * 目标书解析与 syncTurn 同口径（角色卡主书优先）；书不存在 = 没什么可清。
+     */
+    async purgeAll(): Promise<{ bookName: string | null; pruned: number }> {
+      let targetName: string | null = null;
+      if (typeof port.resolvePreferredBook === "function") {
+        try {
+          const preferred = await port.resolvePreferredBook();
+          if (typeof preferred === "string" && preferred.trim()) targetName = preferred;
+        } catch {
+          return { bookName: null, pruned: 0 };
+        }
+      }
+      if (!targetName) return { bookName: null, pruned: 0 };
+      const loaded = await port.loadBook(targetName);
+      const data = asEntriesRecord(loaded);
+      if (!data) return { bookName: targetName, pruned: 0 };
+      const entriesRecord = data.entries as Record<string, unknown>;
+      const atlasPrefixes = Object.values(ATLAS_LOREBOOK_PREFIX);
+      let pruned = 0;
+      for (const [uid, raw] of Object.entries(entriesRecord)) {
+        const comment = raw && typeof raw === "object" && typeof (raw as Record<string, unknown>).comment === "string"
+          ? (raw as Record<string, unknown>).comment as string
+          : "";
+        if (atlasPrefixes.some((prefix) => comment.startsWith(prefix))) {
+          port.deleteEntry(data, uid);
+          pruned += 1;
+        }
+      }
+      if (pruned > 0) await port.saveBook(targetName, data);
+      return { bookName: targetName, pruned };
+    },
+
     /** 面板可见性快照（调用方持久化到 store 的 "lorebook" 文档）。 */
     snapshot(plans: AtlasLorebookPlans, result: AtlasLorebookSyncResult) {
       return {

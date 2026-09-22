@@ -56,8 +56,10 @@ test("CSS 合约：scoped 覆盖 input / select / textarea / option / placeholde
   for (const [needle, label] of required) {
     assert.ok(css.includes(needle), `CSS 必须覆盖${label}（缺 ${needle}）`);
   }
-  assert.ok(/background-color:\s*#fff\s*!important/i.test(css), "浅底必须用 !important 压过宿主主题");
-  assert.ok(/color:\s*#1e383a\s*!important/i.test(css), "深字必须用 !important");
+  // 0.9.45 皮肤令牌化后，浅底/深字走 --aw-input-* / --aw-ink-* 令牌（深色主题可整体覆盖），
+  // 但 !important 压过宿主主题的合约不变——断言令牌 + !important 组合而非硬编码色值。
+  assert.ok(/background-color:\s*var\(--aw-input-bg\)\s*!important/i.test(css), "浅底（--aw-input-bg）必须用 !important 压过宿主主题");
+  assert.ok(/color:\s*var\(--aw-ink-strong\)\s*!important/i.test(css), "深字（--aw-ink-strong）必须用 !important");
   assert.ok(/-webkit-text-fill-color/.test(css), "必须处理 -webkit-text-fill-color（密码框/自动填充）");
   assert.ok(/caret-color/.test(css), "光标颜色需明确");
   assert.ok(/color-scheme:\s*light/.test(css), "强制浅色控件配色方案");

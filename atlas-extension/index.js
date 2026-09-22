@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.46";
+export const ATLAS_EXTENSION_VERSION = "0.9.47";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -771,6 +771,11 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
 
   root.append(rail, main, side);
 
+  // 0.9.47 mapview 同款：ESC 关闭地图信息面板
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && mapPanel && mapPanel.style.display !== "none") closeMapPanel();
+  });
+
   // 浮动窗拖拽（顶栏按住拖动；不记忆位置，避免跨主题/分辨率错位）
   const applyOffset = () => {
     root.style.translate = `${dragOffsetX}px ${dragOffsetY}px`;
@@ -1418,6 +1423,9 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     mapCrumb.style.display = "none";
     mapPanel = el("div", "aw-mappanel");
     mapPanel.style.display = "none";
+    // 0.9.47 mapview 同款交互：点地图空白处 / 按 ESC 关面板；面板内点击不冒泡
+    viewport.addEventListener("click", () => closeMapPanel());
+    mapPanel.addEventListener("click", (e) => e.stopPropagation());
     viewport.append(mapPanel);
     // 0.9.41 图例：地点 / 人物 / 物品三型标点（原型 mapview 同款信息架构）
     // 0.9.43 真修（0.9.46 补提交）：el() 第三参只吃文本——DOM 节点会被 textContent
@@ -1452,6 +1460,7 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       mapPanel.style.display = "none";
       mapPanel.innerHTML = "";
     }
+    mapLayer?.querySelectorAll(".is-active-marker").forEach((n) => n.classList.remove("is-active-marker"));
   }
 
   /** 0.9.35 面包屑：子图层级 + 返回按钮。 */
@@ -1472,7 +1481,104 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
   }
 
   /** 0.9.35 标记点简略信息面板：名称 / 地区 / 描述 / 路线预览 / 进入子图。 */
-  function openMapPanel(point, { inSub, currentSub }) {
+  /** 0.9.47 锚定弹出（mapview 同款交互）：面板贴着标点弹，越界翻边，标点高亮。 */
+  function anchorPanelToMarker(anchorEl) {
+    if (!mapPanel) return;
+    mapLayer?.querySelectorAll(".is-active-marker").forEach((n) => n.classList.remove("is-active-marker"));
+    if (!anchorEl) {
+      mapPanel.style.left = "";
+      mapPanel.style.top = "";
+      return;
+    }
+    anchorEl.classList.add("is-active-marker");
+    const vr = viewport.getBoundingClientRect();
+    const mr = anchorEl.getBoundingClientRect();
+    const panelW = mapPanel.offsetWidth || 280;
+    const panelH = mapPanel.offsetHeight || 240;
+    let left = mr.right - vr.left + 10;
+    if (left + panelW > vr.width - 10) left = mr.left - vr.left - panelW - 10;
+    if (left < 10) left = Math.max(10, (vr.width - panelW) / 2);
+    let top = mr.top - vr.top;
+    top = Math.min(Math.max(8, top), Math.max(8, vr.height - panelH - 10));
+    mapPanel.style.left = `${Math.round(left)}px`;
+    mapPanel.style.top = `${Math.round(top)}px`;
+    mapPanel.style.right = "auto";
+  }
+
+  /** 0.9.47 人物拖拽纠偏（0.9.44 UI 半边被 pack 回滚，本版补回）：拖到地点标点上松手 → 确认 → move-author。 */
+  function attachNpcDrag(dot, npc, onClick) {
+    let startX = 0;
+    let startY = 0;
+    let tracking = false;
+    let suppressClick = false;
+    dot.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      startX = e.clientX;
+      startY = e.clientY;
+      tracking = true;
+      suppressClick = false;
+      dot.setPointerCapture?.(e.pointerId);
+    });
+    dot.addEventListener("pointermove", (e) => {
+      if (!tracking || suppressClick) return;
+      if (Math.hypot(e.clientX - startX, e.clientY - startY) > 6) {
+        suppressClick = true;
+        dot.classList.add("is-dragging");
+      }
+    });
+    const endDrag = (e) => {
+      if (!tracking) return;
+      tracking = false;
+      dot.classList.remove("is-dragging");
+      if (!suppressClick) return; // 原地松手 = 点击，交给 onClick
+      suppressClick = false;
+      const hit = document.elementFromPoint(e.clientX, e.clientY)?.closest?.(".aw-point");
+      const toPointId = hit?.dataset?.pointId ?? null;
+      if (!toPointId) {
+        setStatus("拖动取消：请把人物拖到目标地点标点上。", "error");
+        renderCenter();
+        return;
+      }
+      const chatId = String(state().chatId ?? "");
+      const entityId = String(npc.id ?? "");
+      if (!chatId || !entityId) return;
+      const label = String(hit.textContent ?? "目标地点").trim();
+      const ok = globalThis.confirm?.(`把「${String(npc.name)}」拖到「${label}」？作者纠偏会写入世界（账本留痕）。`) ?? false;
+      if (!ok) return;
+      void api
+        .request("POST", "/worlds/move-author", { chatId, entityId, toPointId })
+        .then((result) => {
+          if (result.status === 200 && result.body?.ok) {
+            setStatus(`已把「${String(npc.name)}」拖到「${label}」。`, "ok");
+            void core.refresh();
+          } else {
+            setStatus(result.body?.error?.message ?? `纠偏失败（HTTP ${result.status}）`, "error");
+          }
+          renderCenter();
+        })
+        .catch((error) => {
+          setStatus(`纠偏失败：${error instanceof Error ? error.message : String(error)}`, "error");
+          renderCenter();
+        });
+    };
+    dot.addEventListener("pointerup", endDrag);
+    dot.addEventListener("pointercancel", () => {
+      tracking = false;
+      suppressClick = false;
+      dot.classList.remove("is-dragging");
+    });
+    // 点击（未被拖拽吞掉时）
+    dot.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (suppressClick) {
+        suppressClick = false;
+        return;
+      }
+      onClick(dot);
+    });
+  }
+
+  function openMapPanel(point, { inSub, currentSub }, anchorEl = null) {
     const d = lastMapData;
     if (!mapPanel || !d) return;
     mapPanel.innerHTML = "";
@@ -1518,7 +1624,10 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       row.type = "button";
       row.append(el("span", "aw-mappanel__person-avatar", String(npc.name ?? "?").slice(0, 1)));
       row.append(el("span", "aw-mappanel__person-name", String(npc.name)));
-      row.addEventListener("click", () => openNpcPanel(npc));
+      row.addEventListener("click", () => {
+        const anchorDot = mapLayer?.querySelector(`[data-entity-id="${String(npc.id ?? "")}"]`) ?? null;
+        openNpcPanel(npc, anchorDot);
+      });
       here.append(row);
     }
     for (const obj of hereObjects) {
@@ -1526,7 +1635,10 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       row.type = "button";
       row.append(el("span", "aw-mappanel__person-avatar", "◆"));
       row.append(el("span", "aw-mappanel__person-name", String(obj.name)));
-      row.addEventListener("click", () => openObjectPanel(obj));
+      row.addEventListener("click", () => {
+        const anchorDot = mapLayer?.querySelector(`[data-obj-id="${String(obj.id ?? "")}"]`) ?? null;
+        openObjectPanel(obj, anchorDot);
+      });
       here.append(row);
     }
     mapPanel.append(here);
@@ -1558,10 +1670,11 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     }
     if (actions.childElementCount > 0) mapPanel.append(actions);
     mapPanel.style.display = "";
+    anchorPanelToMarker(anchorEl);
   }
 
   /** 0.9.41 人物面板：想法（最近涉及叙事）+ 动向（状态摘要 / 在场原因）。 */
-  function openNpcPanel(npc) {
+  function openNpcPanel(npc, anchorEl = null) {
     if (!mapPanel) return;
     mapPanel.innerHTML = "";
     const head = el("div", "aw-mappanel__head");
@@ -1602,10 +1715,11 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       mapPanel.append(el("div", "aw-mappanel__here-empty", "暂无动向记录——推演推进后这里会出现该角色的想法与动向。"));
     }
     mapPanel.style.display = "";
+    anchorPanelToMarker(anchorEl);
   }
 
   /** 0.9.41 物品面板：描述 + 所在。 */
-  function openObjectPanel(object) {
+  function openObjectPanel(object, anchorEl = null) {
     if (!mapPanel) return;
     mapPanel.innerHTML = "";
     const head = el("div", "aw-mappanel__head");
@@ -1631,6 +1745,7 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       mapPanel.append(desc);
     }
     mapPanel.style.display = "";
+    anchorPanelToMarker(anchorEl);
   }
 
   function renderMap(d) {
@@ -1726,7 +1841,11 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       } else {
         marker.setAttribute("aria-label", `地点 ${point.name}，点击查看详情`);
       }
-      marker.addEventListener("click", () => openMapPanel(point, { inSub, currentSub }));
+      marker.dataset.pointId = String(point.id); // 0.9.47 拖拽命中测试用（0.9.44 UI 半边被 pack 回滚，本版补回）
+      marker.addEventListener("click", (e) => {
+        e.stopPropagation();
+        openMapPanel(point, { inSub, currentSub }, marker);
+      });
       mapLayer.append(marker);
     }
 
@@ -1735,18 +1854,16 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       // 0.9.41 人物标点 = 金圆字头像（原型 mapview 同款信息架构）：点击出人物 popover
       const dot = el("button", "aw-npc");
       dot.type = "button";
+      dot.dataset.entityId = String(npc.id ?? "");
       const pos = toPercent(Number(npc.x), Number(npc.y));
       dot.style.left = pos.left;
       dot.style.top = pos.top;
       const reasonLabel = npc.reason ? (NPC_REASON_LABELS[String(npc.reason)] ?? String(npc.reason)) : "";
       dot.title = `${String(npc.name)}${reasonLabel ? `（${reasonLabel}）` : ""}`;
-      dot.setAttribute("aria-label", `人物 ${npc.name}，点击查看想法与动向`);
+      dot.setAttribute("aria-label", `人物 ${npc.name}，点击查看想法与动向；按住拖到地点上可纠偏位置`);
       dot.append(el("span", "aw-npc__avatar", String(npc.name ?? "?").slice(0, 1)));
       dot.append(el("span", "aw-npc__name", String(npc.name)));
-      dot.addEventListener("click", (e) => {
-        e.stopPropagation();
-        openNpcPanel(npc);
-      });
+      attachNpcDrag(dot, npc, (anchor) => openNpcPanel(npc, anchor));
       mapLayer.append(dot);
     }
 
@@ -1755,6 +1872,7 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       // 0.9.41 物品标点 = 紫色小方块：点击出物品 popover
       const dot = el("button", "aw-object");
       dot.type = "button";
+      dot.dataset.objId = String(object.id ?? "");
       const pos = toPercent(Number(object.x), Number(object.y));
       dot.style.left = pos.left;
       dot.style.top = pos.top;
@@ -1764,7 +1882,7 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       dot.append(el("span", "aw-object__name", String(object.name)));
       dot.addEventListener("click", (e) => {
         e.stopPropagation();
-        openObjectPanel(object);
+        openObjectPanel(object, dot);
       });
       mapLayer.append(dot);
     }
@@ -4178,6 +4296,7 @@ async function connectOnce() {
       "/worlds/import",
       "/worlds/ensure-starter",
       "/worlds/geo/adopt",
+      "/worlds/move-author",
       "/session/",
     ];
     const pathWantsSession = (path) =>
@@ -4286,6 +4405,34 @@ async function connectOnce() {
       ...(lorebookWriter
         ? {
             onLorebookSync: async (plans) => {
+              const result = await lorebookWriter.syncTurn(plans);
+              await engineStore.write("lorebook", lorebookWriter.snapshot(plans, result));
+              rerender();
+              return result;
+            },
+            // 0.9.47 世界书聊天级生命周期（学 shujuku：新对话清理 + 按聊天隔离）：
+            // 切到未绑定聊天 → 清掉书里上一聊天的 Atlas 条目（开场白阶段不写不建）；
+            // 切回已绑定聊天 → 用该聊天会话里的世界状态立即重建「Atlas 动向」，
+            // 不等下一轮推演。数据本体在 chatMetadata.atlas 会话里，零丢失。
+            onLorebookChatSwitch: async ({ bound }) => {
+              if (!bound) {
+                await lorebookWriter.purgeAll();
+                await engineStore.write("lorebook", null);
+                rerender();
+                return { purged: true };
+              }
+              const binding = await hostRef.readBinding();
+              const worldId = String(binding?.worldId ?? "");
+              if (!worldId) return { skipped: true };
+              const world = await engineStore.read(`world:${worldId}`);
+              if (!world) return { skipped: true };
+              // 合成回执形状：buildLorebookPlans 只消费 status/currentTime/currentLocationId
+              const plans = mod.buildLorebookPlans(world, {
+                status: "committed",
+                currentTime: Number(binding?.worldTimeCursor ?? 0),
+                currentLocationId: binding?.currentLocationId ?? null,
+              });
+              if (!plans) return { skipped: true };
               const result = await lorebookWriter.syncTurn(plans);
               await engineStore.write("lorebook", lorebookWriter.snapshot(plans, result));
               rerender();
