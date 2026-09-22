@@ -776,7 +776,7 @@ function errorMessageForStatus(status) {
 async function callAtlasWorldTurnApi(preset, input, deps = {}) {
   const now = deps.now ?? Date.now;
   const startedAt = now();
-  const fail4 = (code, message, retryable, status) => ({
+  const fail5 = (code, message, retryable, status) => ({
     ok: false,
     code,
     message,
@@ -786,8 +786,8 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
   });
   const mode = preset.connectionMode ?? "custom";
   const url = mode === "custom" ? buildAtlasChatUrl(preset.endpoint) : "atlas://host";
-  if (!url) return fail4(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "推演 API 地址无效，无法构造请求。", false);
-  if (mode === "custom" && !preset.model.trim()) return fail4(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "推演预设未填写模型名称。", false);
+  if (!url) return fail5(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "推演 API 地址无效，无法构造请求。", false);
+  if (mode === "custom" && !preset.model.trim()) return fail5(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "推演预设未填写模型名称。", false);
   const bodyMessages = buildWorldTurnMessages(preset, input).map((m) => ({ ...m, role: m.role.toLowerCase() }));
   const bodyModel = preset.model.trim().replace(/^models\//, "") || "host";
   const maxTokens = typeof preset.maxTokens === "number" && preset.maxTokens > 0 ? preset.maxTokens : 2e4;
@@ -845,8 +845,8 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
         signal: controller.signal
       });
     } catch {
-      if (controller.signal.aborted) return fail4(ATLAS_ERROR_CODES.API_TIMEOUT, `推演请求超过 ${timeoutMs}ms 超时。`, true);
-      return fail4(ATLAS_ERROR_CODES.SERVICE_OFFLINE, "无法连接推演服务，请检查网络或服务状态。", true);
+      if (controller.signal.aborted) return fail5(ATLAS_ERROR_CODES.API_TIMEOUT, `推演请求超过 ${timeoutMs}ms 超时。`, true);
+      return fail5(ATLAS_ERROR_CODES.SERVICE_OFFLINE, "无法连接推演服务，请检查网络或服务状态。", true);
     }
     const parseCall = async (resp) => {
       let rawText = "";
@@ -892,12 +892,12 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
     }
     if (!response.ok && !rescueAttempted) {
       const mapped = errorMessageForStatus(status);
-      return fail4(mapped.code, mapped.message, mapped.retryable, status);
+      return fail5(mapped.code, mapped.message, mapped.retryable, status);
     }
     const text = parsed.text;
     if (text === null || text.length === 0) {
       if (parsed.emptyChoices) {
-        return fail4(
+        return fail5(
           ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
           "模型返回了空回复（choices 为空、0 补全 token）——通常是供应商安全过滤静默拦截了本次输入（Gemini 系常见），也可能是上游网关故障。可选：在「推进」页关闭「世界书资料」缩小输入，或换模型 / 供应商。",
           false
@@ -908,21 +908,21 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
         const moderationLike = /sensitive|unprocessable|敏感|审核/i.test(gatewayError) || /unprocessable_entity_error|new_sensitive/i.test(parsed.rawText);
         if (moderationLike) {
           const snippet2 = parsed.rawText.replace(/\s+/g, " ").trim().slice(0, 200);
-          return fail4(
+          return fail5(
             ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
             `推演被模型服务商内容审核拦截（HTTP 200 包 422 unprocessable / sensitive）——本次推演的输入触发了供应商的敏感内容检测，重试同样会被拦。可选：换模型 / 换供应商，或调整涉及的卡书条目与行动文本。原始错误：${snippet2}`,
             false
           );
         }
         const minimaxHint = minimaxNotFoundHint(url, gatewayError, preset.apiKey);
-        return fail4(
+        return fail5(
           ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
           `推演服务返回错误：${gatewayError}（HTTP 200，但响应体是错误 JSON）——通常是模型名在网关上不存在 / 无可用渠道，或端点路径不完整（一般应为 http(s)://地址/v1，Atlas 会自动补 /chat/completions）。请到「日志」页核对实际发送的目标与模型名。${minimaxHint}`,
           false
         );
       }
       const snippet = parsed.rawText.replace(/\s+/g, " ").trim().slice(0, 200);
-      return fail4(
+      return fail5(
         ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
         `推演服务返回为空或不支持的格式${snippet ? `（响应开头：${snippet}）` : "（响应体为空）"}。`,
         false
@@ -6919,6 +6919,719 @@ function commitAtlasTurn(world, input) {
   };
 }
 
+// src/atlas-turn-v2.ts
+function fail3(message) {
+  throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, message);
+}
+function resolveRefsAndBuildCandidate(world, draft, turnId) {
+  const warnings = [];
+  const knownRegionIds = new Set((world.regions ?? []).map((r) => String(r.id)));
+  const pointByStringId = new Map((world.points ?? []).map((p) => [String(p.id), p]));
+  const knownEntityIds2 = /* @__PURE__ */ new Set([
+    ...(world.characters ?? []).map((c) => String(c.id)),
+    ...(world.entityRecords ?? []).map((e) => String(e.id))
+  ]);
+  for (const loc of draft.discoveries.locations) {
+    if (loc.regionRef !== null && !knownRegionIds.has(loc.regionRef)) {
+      fail3(`discoveries.locations[${loc.ref}].regionRef 引用未知地区：${loc.regionRef}`);
+    }
+  }
+  const points = /* @__PURE__ */ new Map();
+  const newPoints = [];
+  const basePointId = (world.points ?? []).reduce((max, p) => Math.max(max, Number(p.id) || 0), 0);
+  const spreadIndex = (world.points ?? []).length;
+  const parentRefs = [];
+  for (const loc of draft.discoveries.locations) {
+    if (loc.parentLocationRef !== null) parentRefs.push({ ref: loc.ref, parentLocationRef: loc.parentLocationRef });
+    if (loc.ref.startsWith("new:")) {
+      const index = newPoints.length;
+      const angle = (spreadIndex + index) * 2.39996;
+      const radius = 14 + 3.4 * Math.sqrt(index + 1);
+      const pointId = basePointId + index + 1;
+      points.set(loc.ref, pointId);
+      newPoints.push({
+        id: pointId,
+        name: loc.name,
+        x: Math.round(Math.min(96, Math.max(4, 50 + radius * Math.cos(angle)))),
+        y: Math.round(Math.min(96, Math.max(4, 50 + radius * Math.sin(angle)))),
+        // regionRef 为 null → 不归属（MapPoint.regionId 可空）；未知地区已被上面的校验拒绝
+        ...loc.regionRef !== null ? { regionId: loc.regionRef } : { regionId: null }
+      });
+    } else if (pointByStringId.has(loc.ref)) {
+      points.set(loc.ref, Number(loc.ref));
+    } else {
+      fail3(`discoveries.locations.ref 引用未知地点：${loc.ref}`);
+    }
+  }
+  const allLocationRefs = [
+    ...draft.scene.locationRef !== null ? [draft.scene.locationRef] : [],
+    ...draft.npcUpdates.map((u) => u.location.locationRef !== null ? u.location.locationRef : "").filter((s) => s.length > 0)
+  ];
+  for (const ref of allLocationRefs) {
+    if (points.has(ref)) continue;
+    if (pointByStringId.has(ref)) {
+      points.set(ref, Number(ref));
+      continue;
+    }
+    fail3(`locationRef 引用未知地点（既非已知 id 也非本响应声明的 new:loc）：${ref}`);
+  }
+  const entities = /* @__PURE__ */ new Map();
+  const newCharacters = [];
+  const newRecords = [];
+  const usedIds = new Set(knownEntityIds2);
+  const charNameSet = new Set((world.characters ?? []).map((c) => String(c.name ?? "").trim()));
+  for (const char of draft.discoveries.characters) {
+    if (char.ref.startsWith("new:")) {
+      let entityId = `npc-${hashString(`${turnId}|${char.ref}`)}`;
+      for (let n = 2; usedIds.has(entityId); n += 1) entityId = `npc-${hashString(`${turnId}|${char.ref}|${n}`)}`;
+      usedIds.add(entityId);
+      entities.set(char.ref, entityId);
+      newCharacters.push({
+        id: entityId,
+        worldId: world.id,
+        name: char.displayName,
+        role: "配角",
+        description: char.description,
+        currentRegionId: null,
+        ...char.aliases.length > 0 ? { tags: [...char.aliases] } : {}
+      });
+      newRecords.push({
+        id: entityId,
+        worldId: world.id,
+        type: "npc",
+        name: char.displayName,
+        baseline: {},
+        // 预声明 status：npcUpdates 的 setTemporalField("status") 必须有字段契约
+        temporalSchema: [{ key: "status", kind: "temporal", valueType: "string" }]
+      });
+      if (charNameSet.has(char.displayName)) {
+        warnings.push(`新人物「${char.displayName}」(${entityId}) 与既有角色同名——身份消歧在 R07 处理，本轮按新实体建档。`);
+      }
+    }
+  }
+  const allEntityRefs = [
+    ...draft.discoveries.characters.filter((c) => !c.ref.startsWith("new:")).map((c) => c.ref),
+    ...draft.npcUpdates.map((u) => u.entityRef),
+    ...draft.relationUpdates.flatMap((r) => [r.fromRef, r.toRef]),
+    ...draft.memories.map((m) => m.entityRef),
+    ...draft.identityUpdates.map((i) => i.entityRef),
+    ...draft.events.flatMap((e) => e.entityRefs)
+  ];
+  for (const ref of allEntityRefs) {
+    if (entities.has(ref)) continue;
+    if (knownEntityIds2.has(ref)) {
+      entities.set(ref, ref);
+      continue;
+    }
+    fail3(`entityRef 引用未知实体（既非已知 id 也非本响应声明的 new:npc）：${ref}`);
+  }
+  const candidate = {
+    ...world,
+    ...newPoints.length > 0 ? { points: [...world.points ?? [], ...newPoints] } : {},
+    ...newCharacters.length > 0 ? { characters: [...world.characters ?? [], ...newCharacters] } : {},
+    ...newRecords.length > 0 ? { entityRecords: [...world.entityRecords ?? [], ...newRecords] } : {}
+  };
+  return { candidate, tables: { points, entities }, createdPointIds: newPoints.map((p) => p.id), createdEntityIds: newCharacters.map((c) => c.id), warnings, parentRefs };
+}
+function resolveLocation(tables, ref) {
+  const pointId = tables.points.get(ref);
+  if (pointId === void 0) fail3(`locationRef 引用未知地点：${ref}`);
+  return pointId;
+}
+function resolveEntity(tables, ref) {
+  const entityId = tables.entities.get(ref);
+  if (entityId === void 0) fail3(`entityRef 引用未知实体：${ref}`);
+  return entityId;
+}
+function pointRegionId(candidate, pointId) {
+  const point = (candidate.points ?? []).find((p) => p.id === pointId);
+  return point?.regionId ?? null;
+}
+function foldToV1Draft(candidate, draft, tables, warnings) {
+  const rawEffects = [];
+  const memoryDrafts = [];
+  for (const update of draft.npcUpdates) {
+    const entityId = resolveEntity(tables, update.entityRef);
+    if (update.location.op === "set" && update.location.locationRef !== null) {
+      const pointId = resolveLocation(tables, update.location.locationRef);
+      const regionId = pointRegionId(candidate, pointId);
+      rawEffects.push({ kind: "moveEntity", entityId, ...regionId !== null ? { regionId } : {}, pointId: String(pointId) });
+    } else if (update.location.op === "clear") {
+      warnings.push(`npcUpdates[${update.entityRef}].location.op=clear 暂无 v1 对应 effect，本轮未落账。`);
+    }
+    if (update.status !== null) {
+      rawEffects.push({ kind: "setTemporalField", entityId, key: "status", value: update.status });
+    }
+  }
+  for (const rel of draft.relationUpdates) {
+    const value = typeof rel.value === "string" || typeof rel.value === "number" ? rel.value : JSON.stringify(rel.value);
+    rawEffects.push({
+      kind: "adjustRelation",
+      entityId: resolveEntity(tables, rel.fromRef),
+      targetEntityId: resolveEntity(tables, rel.toRef),
+      key: rel.key,
+      value
+    });
+  }
+  for (const flag of draft.worldFlags) {
+    rawEffects.push({
+      kind: "setFlag",
+      key: flag.key,
+      ...flag.value !== void 0 && flag.value !== null ? { value: String(flag.value) } : {}
+    });
+  }
+  for (const memory of draft.memories) {
+    memoryDrafts.push({ entityId: resolveEntity(tables, memory.entityRef), text: memory.text });
+  }
+  const locationChange = draft.scene.locationRef !== null && (draft.scene.resolution === "confirmed" || draft.scene.resolution === "estimated") ? (() => {
+    const pointId = resolveLocation(tables, draft.scene.locationRef);
+    const regionId = pointRegionId(candidate, pointId);
+    return { toPointId: String(pointId), ...regionId !== null ? { toRegionId: regionId } : { toRegionId: null } };
+  })() : null;
+  const identityUpdatedIds = [];
+  const createdByName = new Map(
+    (draft.discoveries.characters ?? []).filter((c) => c.ref.startsWith("new:")).map((c) => [c.ref, c])
+  );
+  let characters = candidate.characters ?? [];
+  for (const update of draft.identityUpdates) {
+    if (tables.entities.has(update.entityRef) && createdByName.has(update.entityRef)) {
+      const entityId = tables.entities.get(update.entityRef);
+      characters = characters.map((c) => {
+        if (String(c.id) !== entityId) return c;
+        const mergedTags = [...c.tags ?? []];
+        for (const alias of update.addAliases) if (!mergedTags.includes(alias)) mergedTags.push(alias);
+        return { ...c, name: update.displayName, ...mergedTags.length > 0 ? { tags: mergedTags } : {} };
+      });
+      identityUpdatedIds.push(entityId);
+    } else {
+      warnings.push(`identityUpdates[${update.entityRef}] 针对已知实体——身份消歧在 R07 实现，本轮跳过。`);
+    }
+  }
+  const withIdentity = identityUpdatedIds.length > 0 ? { ...candidate, characters } : candidate;
+  let summary = draft.summary;
+  if (draft.events.length > 0) {
+    const joined = `${summary}；事件：${draft.events.map((e) => e.summary).join("；")}`;
+    if (joined.length <= W0_LIMITS.maxStateEventSummary) summary = joined;
+    else warnings.push(`事件明细超出摘要上限，仅保留主摘要（${draft.events.length} 条事件未并入 summary）。`);
+  }
+  return {
+    v1: {
+      duration: draft.duration,
+      ...locationChange ? { locationChange } : {},
+      rawEffects,
+      memoryDrafts,
+      summary: summary.slice(0, W0_LIMITS.maxStateEventSummary)
+    },
+    identityUpdatedIds
+  };
+}
+function applyAtlasV2Turn(world, input) {
+  const turnId = atlasCommitIdempotencyKey(input.request);
+  const turnMarker = `atlas::${turnId}`;
+  if ((world.stateEvents ?? []).some((e) => e.sessionId === turnMarker)) {
+    const dup = commitAtlasTurn(world, {
+      request: input.request,
+      branchId: input.branchId,
+      currentTime: input.currentTime,
+      currentPointId: input.currentPointId,
+      currentRegionId: input.currentRegionId,
+      draft: { duration: 0, summary: "(duplicate 预检占位)" },
+      now: input.now
+    });
+    return {
+      receipt: dup.receipt,
+      world: dup.world,
+      refResolution: { locations: [], characters: [], warnings: [] },
+      createdPointIds: [],
+      createdEntityIds: []
+    };
+  }
+  const { candidate, tables, createdPointIds, createdEntityIds, warnings, parentRefs } = resolveRefsAndBuildCandidate(world, input.draft, turnId);
+  if (parentRefs.length > 0) {
+    warnings.push(`${parentRefs.length} 条 parentLocationRef 暂存未落账（子图层级在 R09 接线）：${parentRefs.map((p) => `${p.ref}←${p.parentLocationRef}`).join("、")}`);
+  }
+  const { v1 } = foldToV1Draft(candidate, input.draft, tables, warnings);
+  const output = commitAtlasTurn(candidate, {
+    request: input.request,
+    branchId: input.branchId,
+    currentTime: input.currentTime,
+    currentPointId: input.currentPointId,
+    currentRegionId: input.currentRegionId,
+    draft: v1,
+    now: input.now
+  });
+  return {
+    receipt: output.receipt,
+    world: output.world,
+    refResolution: {
+      locations: input.draft.discoveries.locations.map((loc) => ({
+        ref: loc.ref,
+        pointId: tables.points.get(loc.ref) ?? Number(loc.ref),
+        created: loc.ref.startsWith("new:")
+      })),
+      characters: input.draft.discoveries.characters.map((char) => ({
+        ref: char.ref,
+        entityId: tables.entities.get(char.ref) ?? char.ref,
+        created: char.ref.startsWith("new:")
+      })),
+      warnings
+    },
+    createdPointIds,
+    createdEntityIds
+  };
+}
+
+// src/atlas-contract-v2.ts
+var LOC_REF = /^new:loc:[a-z0-9_-]{1,40}$/;
+var NPC_REF = /^new:npc:[a-z0-9_-]{1,40}$/;
+var MAX = { aliases: 8, aliasChars: 64, locations: 12, characters: 12, updates: 64, evidence: 64, summary: 500, memory: 500, quote: 240, status: 160 };
+var V2Errors = class {
+  list = [];
+  push(path, message) {
+    if (this.list.length < 40) this.list.push({ path, message });
+  }
+};
+function isObj(v) {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+function isStr(v) {
+  return typeof v === "string";
+}
+function isInt(v) {
+  return typeof v === "number" && Number.isFinite(v) && Number.isInteger(v);
+}
+function strArray(v, path, err) {
+  if (!Array.isArray(v)) {
+    err.push(path, "必须是字符串数组");
+    return [];
+  }
+  return v.filter((item) => {
+    if (!isStr(item)) {
+      err.push(path, "含非字符串元素");
+      return false;
+    }
+    return true;
+  });
+}
+function evidenceIds(v, path, err, evidenceIds2) {
+  const ids = strArray(v, path, err);
+  for (const id of ids) {
+    if (!evidenceIds2.has(id)) err.push(`${path}.${id}`, "引用了不存在的 evidence id");
+  }
+  return ids;
+}
+function parseAtlasWorldTurnDraftV2(text, ctx) {
+  const err = new V2Errors();
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return { ok: false, errors: [{ path: "$", message: "输出不是合法 JSON" }] };
+  }
+  if (!isObj(raw)) return { ok: false, errors: [{ path: "$", message: "顶层必须是 JSON 对象" }] };
+  const version = raw.schemaVersion;
+  if (version === void 0) {
+    return { ok: false, errors: [{ path: "$.schemaVersion", message: "缺少 schemaVersion（v1 输出应走 v1 解析器）" }] };
+  }
+  if (version !== 2) {
+    return { ok: false, errors: [{ path: "$.schemaVersion", message: `协议版本不匹配：期望 2，收到 ${String(version)}` }] };
+  }
+  if (!isInt(raw.baseRevision) || raw.baseRevision !== ctx.baseRevision) {
+    err.push("$.baseRevision", `必须逐字复用请求值 ${ctx.baseRevision}（收到 ${JSON.stringify(raw.baseRevision)}；过期提交拒绝）`);
+  }
+  const duration = raw.duration;
+  if (!isInt(duration) || duration < 0 || duration > 1e4) {
+    err.push("$.duration", "必须是 0..10000 的整数");
+  }
+  const evidenceIdsSet = /* @__PURE__ */ new Set();
+  const evidenceOut = [];
+  if (!Array.isArray(raw.evidence)) {
+    err.push("$.evidence", "必须是数组");
+  } else if (raw.evidence.length > MAX.evidence) {
+    err.push("$.evidence", `超过上限 ${MAX.evidence} 条`);
+  } else {
+    raw.evidence.forEach((item, i) => {
+      const path = `$.evidence[${i}]`;
+      if (!isObj(item)) {
+        err.push(path, "必须是对象");
+        return;
+      }
+      const id = isStr(item.id) ? item.id : "";
+      const sourceId = isStr(item.sourceId) ? item.sourceId : "";
+      const quote = isStr(item.quote) ? item.quote : "";
+      if (!id) err.push(`${path}.id`, "缺少 id");
+      if (!sourceId) {
+        err.push(`${path}.sourceId`, "缺少 sourceId");
+      } else if (!(sourceId in ctx.sources)) {
+        err.push(`${path}.sourceId`, `来源不存在：${sourceId}`);
+      }
+      if (!quote) {
+        err.push(`${path}.quote`, "缺少 quote");
+      } else {
+        if (quote.length > MAX.quote) err.push(`${path}.quote`, `引文超过 ${MAX.quote} 字`);
+        const sourceText = ctx.sources[sourceId] ?? "";
+        if (sourceId in ctx.sources && !sourceText.includes(quote)) {
+          err.push(`${path}.quote`, "引文不是来源原文片段（包含校验失败）");
+        }
+      }
+      if (id) {
+        if (evidenceIdsSet.has(id)) err.push(`${path}.id`, `evidence id 重复：${id}`);
+        evidenceIdsSet.add(id);
+      }
+      evidenceOut.push({ id, sourceId, quote });
+    });
+  }
+  const locRefs = /* @__PURE__ */ new Set();
+  const npcRefs = /* @__PURE__ */ new Set();
+  const locationsOut = [];
+  const charactersOut = [];
+  if (!isObj(raw.discoveries)) {
+    err.push("$.discoveries", "必须是对象 {locations, characters}");
+  } else {
+    const disc = raw.discoveries;
+    if (!Array.isArray(disc.locations)) err.push("$.discoveries.locations", "必须是数组");
+    else if (disc.locations.length > MAX.locations) err.push("$.discoveries.locations", `超过上限 ${MAX.locations}`);
+    else {
+      disc.locations.forEach((item, i) => {
+        const path = `$.discoveries.locations[${i}]`;
+        if (!isObj(item)) {
+          err.push(path, "必须是对象");
+          return;
+        }
+        const ref = isStr(item.ref) ? item.ref : "";
+        if (!LOC_REF.test(ref)) {
+          err.push(`${path}.ref`, `ref 必须匹配 new:loc:<短名>（收到 ${ref || "空"}）`);
+        } else if (locRefs.has(ref)) {
+          err.push(`${path}.ref`, `临时引用重复：${ref}`);
+        } else {
+          locRefs.add(ref);
+        }
+        const name = isStr(item.name) ? item.name.trim() : "";
+        if (!name || name.length > 64) err.push(`${path}.name`, "地点名必填且 ≤64 字");
+        const aliases = strArray(item.aliases, `${path}.aliases`, err);
+        if (aliases.length > MAX.aliases) err.push(`${path}.aliases`, `超过上限 ${MAX.aliases}`);
+        for (const alias of aliases) {
+          if (alias.length > MAX.aliasChars) err.push(`${path}.aliases`, `别名超过 ${MAX.aliasChars} 字`);
+        }
+        const regionRef = item.regionRef === void 0 || item.regionRef === null ? null : isStr(item.regionRef) ? item.regionRef : false;
+        if (regionRef === false) err.push(`${path}.regionRef`, "必须是已知地区 ID 或 null");
+        const parentRef = item.parentLocationRef === void 0 || item.parentLocationRef === null ? null : isStr(item.parentLocationRef) ? item.parentLocationRef : false;
+        if (parentRef === false) err.push(`${path}.parentLocationRef`, "必须是已知地点 ID、new:loc: 引用或 null");
+        locationsOut.push({
+          ref,
+          name,
+          aliases: aliases.slice(0, MAX.aliases),
+          regionRef: regionRef === false ? null : regionRef,
+          parentLocationRef: parentRef === false ? null : parentRef,
+          evidenceIds: evidenceIds(item.evidenceIds, `${path}.evidenceIds`, err, evidenceIdsSet)
+        });
+      });
+    }
+    if (!Array.isArray(disc.characters)) err.push("$.discoveries.characters", "必须是数组");
+    else if (disc.characters.length > MAX.characters) err.push("$.discoveries.characters", `超过上限 ${MAX.characters}`);
+    else {
+      disc.characters.forEach((item, i) => {
+        const path = `$.discoveries.characters[${i}]`;
+        if (!isObj(item)) {
+          err.push(path, "必须是对象");
+          return;
+        }
+        const ref = isStr(item.ref) ? item.ref : "";
+        if (!NPC_REF.test(ref)) {
+          err.push(`${path}.ref`, `ref 必须匹配 new:npc:<短名>（收到 ${ref || "空"}）`);
+        } else if (npcRefs.has(ref)) {
+          err.push(`${path}.ref`, `临时引用重复：${ref}`);
+        } else {
+          npcRefs.add(ref);
+        }
+        const displayName = isStr(item.displayName) ? item.displayName.trim() : "";
+        if (!displayName || displayName.length > 64) err.push(`${path}.displayName`, "displayName 必填且 ≤64 字");
+        const aliases = strArray(item.aliases, `${path}.aliases`, err);
+        if (aliases.length > MAX.aliases) err.push(`${path}.aliases`, `超过上限 ${MAX.aliases}`);
+        const description = isStr(item.description) ? item.description : "";
+        charactersOut.push({
+          ref,
+          displayName,
+          aliases: aliases.slice(0, MAX.aliases),
+          description: description.slice(0, MAX.memory),
+          evidenceIds: evidenceIds(item.evidenceIds, `${path}.evidenceIds`, err, evidenceIdsSet)
+        });
+      });
+    }
+  }
+  const scene = parseScene(raw.scene, err, evidenceIdsSet);
+  const identityUpdates = parseIdentityUpdates(raw.identityUpdates, err, evidenceIdsSet);
+  const npcUpdates = parseNpcUpdates(raw.npcUpdates, err, evidenceIdsSet);
+  const relationUpdates = parseRelationUpdates(raw.relationUpdates, err, evidenceIdsSet);
+  const memories = parseMemories(raw.memories, err, evidenceIdsSet);
+  const worldFlags = parseWorldFlags(raw.worldFlags, err, evidenceIdsSet);
+  const events = parseEvents(raw.events, err, evidenceIdsSet);
+  const mapScaleHints = parseMapScaleHints(raw.mapScaleHints, err, evidenceIdsSet);
+  const summary = isStr(raw.summary) ? raw.summary.trim() : "";
+  if (!summary) err.push("$.summary", "缺少摘要");
+  if (summary.length > MAX.summary) err.push("$.summary", `摘要超过 ${MAX.summary} 字`);
+  if (err.list.length > 0) return { ok: false, errors: err.list };
+  return {
+    ok: true,
+    draft: {
+      schemaVersion: 2,
+      baseRevision: raw.baseRevision,
+      duration,
+      evidence: evidenceOut,
+      discoveries: { locations: locationsOut, characters: charactersOut },
+      scene,
+      identityUpdates,
+      npcUpdates,
+      relationUpdates,
+      memories,
+      worldFlags,
+      events,
+      mapScaleHints,
+      summary
+    }
+  };
+}
+function parseScene(raw, err, evIds) {
+  const fallback = { resolution: "unknown", locationRef: null, transition: "unknown", evidenceIds: [] };
+  if (!isObj(raw)) {
+    err.push("$.scene", "必须是对象");
+    return fallback;
+  }
+  const resolutions = ["confirmed", "estimated", "unknown", "conflict"];
+  const transitions = ["stay", "arrive", "initial", "unknown"];
+  if (!resolutions.includes(String(raw.resolution))) err.push("$.scene.resolution", `必须是 ${resolutions.join("/")}`);
+  if (!transitions.includes(String(raw.transition))) err.push("$.scene.transition", `必须是 ${transitions.join("/")}`);
+  const locationRef = raw.locationRef === void 0 || raw.locationRef === null ? null : isStr(raw.locationRef) ? raw.locationRef : false;
+  if (locationRef === false) err.push("$.scene.locationRef", "必须是地点 ID、new:loc: 引用或 null");
+  if (locationRef === null && (raw.resolution === "confirmed" || raw.resolution === "estimated")) {
+    err.push("$.scene.locationRef", "resolution 为 confirmed/estimated 时必须提供 locationRef");
+  }
+  return {
+    resolution: resolutions.includes(String(raw.resolution)) ? String(raw.resolution) : "unknown",
+    locationRef: locationRef === false ? null : locationRef,
+    transition: transitions.includes(String(raw.transition)) ? String(raw.transition) : "unknown",
+    evidenceIds: evidenceIds(raw.evidenceIds, "$.scene.evidenceIds", err, evIds)
+  };
+}
+function parseIdentityUpdates(raw, err, evIds) {
+  const out = [];
+  if (!Array.isArray(raw)) {
+    err.push("$.identityUpdates", "必须是数组");
+    return out;
+  }
+  if (raw.length > MAX.updates) err.push("$.identityUpdates", `超过上限 ${MAX.updates}`);
+  raw.slice(0, MAX.updates).forEach((item, i) => {
+    const path = `$.identityUpdates[${i}]`;
+    if (!isObj(item)) {
+      err.push(path, "必须是对象");
+      return;
+    }
+    const entityRef = isStr(item.entityRef) ? item.entityRef : "";
+    if (!entityRef) err.push(`${path}.entityRef`, "缺少 entityRef");
+    const displayName = isStr(item.displayName) ? item.displayName.trim() : "";
+    if (!displayName || displayName.length > 64) err.push(`${path}.displayName`, "displayName 必填且 ≤64 字（不得为空名）");
+    const addAliases = strArray(item.addAliases, `${path}.addAliases`, err);
+    if (addAliases.length > MAX.aliases) err.push(`${path}.addAliases`, `超过上限 ${MAX.aliases}`);
+    out.push({
+      entityRef,
+      displayName,
+      addAliases,
+      evidenceIds: evidenceIds(item.evidenceIds, `${path}.evidenceIds`, err, evIds)
+    });
+  });
+  return out;
+}
+function parseNpcUpdates(raw, err, evIds) {
+  const out = [];
+  if (!Array.isArray(raw)) {
+    err.push("$.npcUpdates", "必须是数组");
+    return out;
+  }
+  if (raw.length > MAX.updates) err.push("$.npcUpdates", `超过上限 ${MAX.updates}`);
+  const ops = ["keep", "set", "clear"];
+  const presences = ["present", "left", "unknown"];
+  raw.slice(0, MAX.updates).forEach((item, i) => {
+    const path = `$.npcUpdates[${i}]`;
+    if (!isObj(item)) {
+      err.push(path, "必须是对象");
+      return;
+    }
+    const entityRef = isStr(item.entityRef) ? item.entityRef : "";
+    if (!entityRef) err.push(`${path}.entityRef`, "缺少 entityRef");
+    let op = "keep";
+    let locationRef = null;
+    if (isObj(item.location)) {
+      if (!ops.includes(String(item.location.op))) {
+        err.push(`${path}.location.op`, `必须是 ${ops.join("/")}`);
+      } else {
+        op = String(item.location.op);
+      }
+      const ref = item.location.locationRef === void 0 || item.location.locationRef === null ? null : isStr(item.location.locationRef) ? item.location.locationRef : false;
+      if (ref === false) {
+        err.push(`${path}.location.locationRef`, "必须是地点 ID、new:loc: 引用或 null");
+      } else if (op === "set" && (ref === null || ref === "")) {
+        err.push(`${path}.location.locationRef`, "op=set 必须提供有效地点引用");
+      } else if ((op === "keep" || op === "clear") && ref !== null) {
+        err.push(`${path}.location.locationRef`, `op=${op} 时 locationRef 必须为 null`);
+      } else {
+        locationRef = ref;
+      }
+    } else {
+      err.push(`${path}.location`, "必须是对象 {op, locationRef}");
+    }
+    if (!presences.includes(String(item.presence))) err.push(`${path}.presence`, `必须是 ${presences.join("/")}`);
+    let status = null;
+    if (item.status !== void 0 && item.status !== null) {
+      if (!isStr(item.status)) err.push(`${path}.status`, "必须是字符串或 null");
+      else {
+        if (item.status.length > MAX.status) err.push(`${path}.status`, `超过 ${MAX.status} 字`);
+        status = item.status;
+      }
+    }
+    out.push({
+      entityRef,
+      location: { op, locationRef },
+      presence: presences.includes(String(item.presence)) ? String(item.presence) : "unknown",
+      status,
+      evidenceIds: evidenceIds(item.evidenceIds, `${path}.evidenceIds`, err, evIds)
+    });
+  });
+  return out;
+}
+function parseRelationUpdates(raw, err, evIds) {
+  const out = [];
+  if (!Array.isArray(raw)) {
+    err.push("$.relationUpdates", "必须是数组");
+    return out;
+  }
+  if (raw.length > MAX.updates) err.push("$.relationUpdates", `超过上限 ${MAX.updates}`);
+  raw.slice(0, MAX.updates).forEach((item, i) => {
+    const path = `$.relationUpdates[${i}]`;
+    if (!isObj(item)) {
+      err.push(path, "必须是对象");
+      return;
+    }
+    const fromRef = isStr(item.fromRef) ? item.fromRef : "";
+    const toRef = isStr(item.toRef) ? item.toRef : "";
+    if (!fromRef) err.push(`${path}.fromRef`, "缺少 fromRef");
+    if (!toRef) err.push(`${path}.toRef`, "缺少 toRef");
+    const key = isStr(item.key) ? item.key.trim() : "";
+    if (!key) err.push(`${path}.key`, "缺少关系字段 key");
+    if (item.value === void 0) err.push(`${path}.value`, "缺少 value");
+    out.push({
+      fromRef,
+      toRef,
+      key,
+      value: item.value,
+      evidenceIds: evidenceIds(item.evidenceIds, `${path}.evidenceIds`, err, evIds)
+    });
+  });
+  return out;
+}
+function parseMemories(raw, err, evIds) {
+  const out = [];
+  if (!Array.isArray(raw)) {
+    err.push("$.memories", "必须是数组");
+    return out;
+  }
+  if (raw.length > MAX.updates) err.push("$.memories", `超过上限 ${MAX.updates}`);
+  raw.slice(0, MAX.updates).forEach((item, i) => {
+    const path = `$.memories[${i}]`;
+    if (!isObj(item)) {
+      err.push(path, "必须是对象");
+      return;
+    }
+    const entityRef = isStr(item.entityRef) ? item.entityRef : "";
+    if (!entityRef) err.push(`${path}.entityRef`, "缺少 entityRef");
+    const text = isStr(item.text) ? item.text.trim() : "";
+    if (!text) err.push(`${path}.text`, "缺少记忆正文");
+    if (text.length > MAX.memory) err.push(`${path}.text`, `超过 ${MAX.memory} 字`);
+    out.push({ entityRef, text, evidenceIds: evidenceIds(item.evidenceIds, `${path}.evidenceIds`, err, evIds) });
+  });
+  return out;
+}
+function parseWorldFlags(raw, err, evIds) {
+  const out = [];
+  if (!Array.isArray(raw)) {
+    err.push("$.worldFlags", "必须是数组");
+    return out;
+  }
+  if (raw.length > MAX.updates) err.push("$.worldFlags", `超过上限 ${MAX.updates}`);
+  raw.slice(0, MAX.updates).forEach((item, i) => {
+    const path = `$.worldFlags[${i}]`;
+    if (!isObj(item)) {
+      err.push(path, "必须是对象");
+      return;
+    }
+    const key = isStr(item.key) ? item.key.trim() : "";
+    if (!key) err.push(`${path}.key`, "缺少标记 key");
+    out.push({ key, value: item.value, evidenceIds: evidenceIds(item.evidenceIds, `${path}.evidenceIds`, err, evIds) });
+  });
+  return out;
+}
+function parseEvents(raw, err, evIds) {
+  const out = [];
+  if (!Array.isArray(raw)) {
+    err.push("$.events", "必须是数组");
+    return out;
+  }
+  if (raw.length > MAX.updates) err.push("$.events", `超过上限 ${MAX.updates}`);
+  raw.slice(0, MAX.updates).forEach((item, i) => {
+    const path = `$.events[${i}]`;
+    if (!isObj(item)) {
+      err.push(path, "必须是对象");
+      return;
+    }
+    const summary = isStr(item.summary) ? item.summary.trim() : "";
+    if (!summary) err.push(`${path}.summary`, "缺少事件摘要");
+    if (summary.length > MAX.summary) err.push(`${path}.summary`, `超过 ${MAX.summary} 字`);
+    const entityRefs = strArray(item.entityRefs, `${path}.entityRefs`, err);
+    out.push({ summary, entityRefs, evidenceIds: evidenceIds(item.evidenceIds, `${path}.evidenceIds`, err, evIds) });
+  });
+  return out;
+}
+function parseMapScaleHints(raw, err, evIds) {
+  const out = [];
+  if (!Array.isArray(raw)) {
+    err.push("$.mapScaleHints", "必须是数组");
+    return out;
+  }
+  if (raw.length > MAX.updates) err.push("$.mapScaleHints", `超过上限 ${MAX.updates}`);
+  const statuses = ["estimated", "grounded", "unknown", "conflict"];
+  const confidences = ["low", "medium", "high"];
+  raw.slice(0, MAX.updates).forEach((item, i) => {
+    const path = `$.mapScaleHints[${i}]`;
+    if (!isObj(item)) {
+      err.push(path, "必须是对象");
+      return;
+    }
+    const mapRef = isStr(item.mapRef) ? item.mapRef : "";
+    if (!mapRef) err.push(`${path}.mapRef`, "缺少 mapRef");
+    if (!statuses.includes(String(item.status))) err.push(`${path}.status`, `必须是 ${statuses.join("/")}`);
+    let extentMeters = null;
+    if (item.extentMeters !== void 0 && item.extentMeters !== null) {
+      if (isObj(item.extentMeters) && typeof item.extentMeters.width === "number" && item.extentMeters.width > 0 && typeof item.extentMeters.height === "number" && item.extentMeters.height > 0) {
+        extentMeters = { width: item.extentMeters.width, height: item.extentMeters.height };
+      } else {
+        err.push(`${path}.extentMeters`, "必须是 {width>0, height>0} 或 null");
+      }
+    }
+    if (!confidences.includes(String(item.confidence))) err.push(`${path}.confidence`, `必须是 ${confidences.join("/")}`);
+    const frameRevision = item.frameRevision === void 0 || item.frameRevision === null ? null : isInt(item.frameRevision) ? item.frameRevision : false;
+    if (frameRevision === false) err.push(`${path}.frameRevision`, "必须是整数或 null");
+    out.push({
+      mapRef,
+      frameRevision: frameRevision === false ? null : frameRevision,
+      status: statuses.includes(String(item.status)) ? String(item.status) : "unknown",
+      extentMeters,
+      basis: isStr(item.basis) ? item.basis.slice(0, MAX.summary) : "",
+      confidence: confidences.includes(String(item.confidence)) ? String(item.confidence) : "low",
+      evidenceIds: evidenceIds(item.evidenceIds, `${path}.evidenceIds`, err, evIds)
+    });
+  });
+  return out;
+}
+
 // src/atlas-settings.ts
 var ATLAS_SETTINGS_SCHEMA_VERSION = 2;
 var BUILTIN_PROMPT_PRESET_ID = "builtin-default";
@@ -7264,7 +7977,7 @@ function migrateAtlasSettings(raw, deps = {}) {
   if (typeof record.loreSupplementEnabled === "boolean") settings.loreSupplementEnabled = record.loreSupplementEnabled;
   return { settings, diagnostics };
 }
-function fail3(settings, code, message) {
+function fail4(settings, code, message) {
   return { ok: false, settings, code, message };
 }
 function applySettingsCommand(settings, command, deps = {}) {
@@ -7274,65 +7987,65 @@ function applySettingsCommand(settings, command, deps = {}) {
       const preset = command.preset;
       const connectionMode = normalizeConnectionMode(preset.connectionMode);
       if (typeof preset.name !== "string" || !preset.name.trim() || preset.name.length > MAX_NAME_CHARS) {
-        return fail3(settings, "INVALID_PAYLOAD", "连接名称必填且不超过 64 字。");
+        return fail4(settings, "INVALID_PAYLOAD", "连接名称必填且不超过 64 字。");
       }
       if (connectionMode === "custom") {
         if (typeof preset.endpoint !== "string" || preset.endpoint.length > MAX_ENDPOINT_CHARS || !isHttpUrl(preset.endpoint)) {
-          return fail3(settings, "INVALID_PAYLOAD", "端点必须是 http(s) 绝对地址。");
+          return fail4(settings, "INVALID_PAYLOAD", "端点必须是 http(s) 绝对地址。");
         }
         if (typeof preset.model !== "string" || !preset.model.trim() || preset.model.length > MAX_MODEL_CHARS) {
-          return fail3(settings, "INVALID_PAYLOAD", "模型名必填且不超过 128 字。");
+          return fail4(settings, "INVALID_PAYLOAD", "模型名必填且不超过 128 字。");
         }
       } else if (connectionMode === "profile" && !(typeof preset.profileId === "string" && !!preset.profileId.trim())) {
-        return fail3(settings, "INVALID_PAYLOAD", "酒馆连接预设模式需要选择连接预设。");
+        return fail4(settings, "INVALID_PAYLOAD", "酒馆连接预设模式需要选择连接预设。");
       }
       if (typeof preset.bodyParams === "string" && preset.bodyParams.length > 4e3) {
-        return fail3(settings, "INVALID_PAYLOAD", "附加请求体参数不超过 4000 字。");
+        return fail4(settings, "INVALID_PAYLOAD", "附加请求体参数不超过 4000 字。");
       }
       if (typeof preset.excludeBodyParams === "string" && preset.excludeBodyParams.length > 2e3) {
-        return fail3(settings, "INVALID_PAYLOAD", "排除请求体字段不超过 2000 字。");
+        return fail4(settings, "INVALID_PAYLOAD", "排除请求体字段不超过 2000 字。");
       }
       if (typeof preset.requestHeaders === "string" && preset.requestHeaders.length > 2e3) {
-        return fail3(settings, "INVALID_PAYLOAD", "附加请求标头不超过 2000 字。");
+        return fail4(settings, "INVALID_PAYLOAD", "附加请求标头不超过 2000 字。");
       }
       if (typeof preset.systemPrompt === "string" && preset.systemPrompt.length > MAX_PROMPT_CHARS) {
-        return fail3(settings, "INVALID_PAYLOAD", `System Prompt 不超过 ${MAX_PROMPT_CHARS} 字。`);
+        return fail4(settings, "INVALID_PAYLOAD", `System Prompt 不超过 ${MAX_PROMPT_CHARS} 字。`);
       }
       if (!isFiniteIntIn(preset.maxTokens, MIN_MAX_TOKENS, MAX_MAX_TOKENS)) {
-        return fail3(settings, "INVALID_PAYLOAD", `最大回复长度必须是 ${MIN_MAX_TOKENS}..${MAX_MAX_TOKENS} 的整数。`);
+        return fail4(settings, "INVALID_PAYLOAD", `最大回复长度必须是 ${MIN_MAX_TOKENS}..${MAX_MAX_TOKENS} 的整数。`);
       }
       if (!isFiniteIn(preset.temperature, MIN_TEMPERATURE, MAX_TEMPERATURE)) {
-        return fail3(settings, "INVALID_PAYLOAD", `温度必须在 ${MIN_TEMPERATURE}..${MAX_TEMPERATURE}。`);
+        return fail4(settings, "INVALID_PAYLOAD", `温度必须在 ${MIN_TEMPERATURE}..${MAX_TEMPERATURE}。`);
       }
       if (!isFiniteIn(preset.topP, MIN_TOP_P, MAX_TOP_P)) {
-        return fail3(settings, "INVALID_PAYLOAD", `top_p 必须在 ${MIN_TOP_P}..${MAX_TOP_P}。`);
+        return fail4(settings, "INVALID_PAYLOAD", `top_p 必须在 ${MIN_TOP_P}..${MAX_TOP_P}。`);
       }
       if (!isFiniteIntIn(preset.timeoutMs, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS)) {
-        return fail3(settings, "INVALID_PAYLOAD", `超时必须是 ${MIN_TIMEOUT_MS}..${MAX_TIMEOUT_MS} 毫秒。`);
+        return fail4(settings, "INVALID_PAYLOAD", `超时必须是 ${MIN_TIMEOUT_MS}..${MAX_TIMEOUT_MS} 毫秒。`);
       }
       const targetId = preset.id === void 0 ? null : normalizeId(preset.id);
       if (preset.id !== void 0 && targetId === null) {
-        return fail3(settings, "INVALID_PAYLOAD", "预设 ID 形状非法。");
+        return fail4(settings, "INVALID_PAYLOAD", "预设 ID 形状非法。");
       }
       const existingIndex = targetId ? settings.apiPresets.findIndex((p) => p.id === targetId) : -1;
       if (targetId && existingIndex < 0) {
-        return fail3(settings, "INVALID_PAYLOAD", "要更新的连接不存在（另存为请省略 id）。");
+        return fail4(settings, "INVALID_PAYLOAD", "要更新的连接不存在（另存为请省略 id）。");
       }
       let apiKey;
       if (command.apiKeyMode === "keep") {
-        if (existingIndex < 0) return fail3(settings, "INVALID_PAYLOAD", "新建连接必须提供密钥（可用空字符串表示无需密钥）。");
+        if (existingIndex < 0) return fail4(settings, "INVALID_PAYLOAD", "新建连接必须提供密钥（可用空字符串表示无需密钥）。");
         apiKey = settings.apiPresets[existingIndex].apiKey;
       } else if (command.apiKeyMode === "clear") {
         apiKey = "";
       } else {
         const rawKey = command.apiKey ?? "";
         if (typeof rawKey !== "string" || rawKey.length > MAX_API_KEY_CHARS) {
-          return fail3(settings, "INVALID_PAYLOAD", "密钥必须是字符串且不超过 4096 字。");
+          return fail4(settings, "INVALID_PAYLOAD", "密钥必须是字符串且不超过 4096 字。");
         }
         apiKey = rawKey;
       }
       if (existingIndex < 0 && settings.apiPresets.length >= MAX_PRESETS_PER_LIBRARY) {
-        return fail3(settings, "FIELD_LIMIT_EXCEEDED", `最多保存 ${MAX_PRESETS_PER_LIBRARY} 条 API 连接。`);
+        return fail4(settings, "FIELD_LIMIT_EXCEEDED", `最多保存 ${MAX_PRESETS_PER_LIBRARY} 条 API 连接。`);
       }
       const usedApiNames = new Set(settings.apiPresets.filter((_, i) => i !== existingIndex).map((p) => p.name));
       const entry = {
@@ -7368,9 +8081,9 @@ function applySettingsCommand(settings, command, deps = {}) {
     }
     case "api.delete": {
       const id = normalizeId(command.id);
-      if (!id) return fail3(settings, "INVALID_PAYLOAD", "预设 ID 形状非法。");
+      if (!id) return fail4(settings, "INVALID_PAYLOAD", "预设 ID 形状非法。");
       if (!settings.apiPresets.some((p) => p.id === id)) {
-        return fail3(settings, "INVALID_PAYLOAD", "要删除的连接不存在。");
+        return fail4(settings, "INVALID_PAYLOAD", "要删除的连接不存在。");
       }
       return {
         ok: true,
@@ -7386,28 +8099,28 @@ function applySettingsCommand(settings, command, deps = {}) {
       if (command.id === null) return { ok: true, settings: { ...settings, activeApiPresetId: null } };
       const id = normalizeId(command.id);
       if (!id || !settings.apiPresets.some((p) => p.id === id)) {
-        return fail3(settings, "INVALID_PAYLOAD", "要启用的连接不存在。");
+        return fail4(settings, "INVALID_PAYLOAD", "要启用的连接不存在。");
       }
       return { ok: true, settings: { ...settings, activeApiPresetId: id } };
     }
     case "prompt.save": {
       const preset = command.preset;
       if (preset.id !== void 0 && normalizeId(preset.id) === BUILTIN_PROMPT_PRESET_ID) {
-        return fail3(settings, "INVALID_PAYLOAD", "内置默认提示词不可覆盖，请另存为新预设。");
+        return fail4(settings, "INVALID_PAYLOAD", "内置默认提示词不可覆盖，请另存为新预设。");
       }
       if (typeof preset.name !== "string" || !preset.name.trim() || preset.name.length > MAX_NAME_CHARS) {
-        return fail3(settings, "INVALID_PAYLOAD", "提示词名称必填且不超过 64 字。");
+        return fail4(settings, "INVALID_PAYLOAD", "提示词名称必填且不超过 64 字。");
       }
       const text = typeof preset.systemPrompt === "string" ? preset.systemPrompt.trim() : "";
       const segments = normalizePromptSegments(preset.segments);
-      if (!text && segments.length === 0) return fail3(settings, "INVALID_PAYLOAD", "提示词正文不能为空（空 = 内置默认，无需保存；分段预设请至少给出 1 段）。");
-      if (text.length > MAX_PROMPT_CHARS) return fail3(settings, "FIELD_LIMIT_EXCEEDED", `提示词不超过 ${MAX_PROMPT_CHARS} 字。`);
+      if (!text && segments.length === 0) return fail4(settings, "INVALID_PAYLOAD", "提示词正文不能为空（空 = 内置默认，无需保存；分段预设请至少给出 1 段）。");
+      if (text.length > MAX_PROMPT_CHARS) return fail4(settings, "FIELD_LIMIT_EXCEEDED", `提示词不超过 ${MAX_PROMPT_CHARS} 字。`);
       const targetId = preset.id === void 0 ? null : normalizeId(preset.id);
-      if (preset.id !== void 0 && targetId === null) return fail3(settings, "INVALID_PAYLOAD", "预设 ID 形状非法。");
+      if (preset.id !== void 0 && targetId === null) return fail4(settings, "INVALID_PAYLOAD", "预设 ID 形状非法。");
       const existingIndex = targetId ? settings.promptPresets.findIndex((p) => p.id === targetId) : -1;
-      if (targetId && existingIndex < 0) return fail3(settings, "INVALID_PAYLOAD", "要更新的提示词预设不存在（另存为请省略 id）。");
+      if (targetId && existingIndex < 0) return fail4(settings, "INVALID_PAYLOAD", "要更新的提示词预设不存在（另存为请省略 id）。");
       if (existingIndex < 0 && settings.promptPresets.length >= MAX_PRESETS_PER_LIBRARY) {
-        return fail3(settings, "FIELD_LIMIT_EXCEEDED", `最多保存 ${MAX_PRESETS_PER_LIBRARY} 条提示词预设。`);
+        return fail4(settings, "FIELD_LIMIT_EXCEEDED", `最多保存 ${MAX_PRESETS_PER_LIBRARY} 条提示词预设。`);
       }
       const usedNames = new Set(settings.promptPresets.filter((_, i) => i !== existingIndex).map((p) => p.name));
       const entry = {
@@ -7423,9 +8136,9 @@ function applySettingsCommand(settings, command, deps = {}) {
     }
     case "prompt.delete": {
       const id = normalizeId(command.id);
-      if (!id) return fail3(settings, "INVALID_PAYLOAD", "预设 ID 形状非法。");
-      if (id === BUILTIN_PROMPT_PRESET_ID) return fail3(settings, "INVALID_PAYLOAD", "内置默认提示词不可删除。");
-      if (!settings.promptPresets.some((p) => p.id === id)) return fail3(settings, "INVALID_PAYLOAD", "要删除的提示词预设不存在。");
+      if (!id) return fail4(settings, "INVALID_PAYLOAD", "预设 ID 形状非法。");
+      if (id === BUILTIN_PROMPT_PRESET_ID) return fail4(settings, "INVALID_PAYLOAD", "内置默认提示词不可删除。");
+      if (!settings.promptPresets.some((p) => p.id === id)) return fail4(settings, "INVALID_PAYLOAD", "要删除的提示词预设不存在。");
       return {
         ok: true,
         settings: {
@@ -7439,23 +8152,23 @@ function applySettingsCommand(settings, command, deps = {}) {
       if (command.id === null) return { ok: true, settings: { ...settings, activePromptPresetId: null } };
       const id = normalizeId(command.id);
       if (!id || !settings.promptPresets.some((p) => p.id === id)) {
-        return fail3(settings, "INVALID_PAYLOAD", "要启用的提示词预设不存在。");
+        return fail4(settings, "INVALID_PAYLOAD", "要启用的提示词预设不存在。");
       }
       return { ok: true, settings: { ...settings, activePromptPresetId: id } };
     }
     case "runtime.update": {
       const next = { ...settings };
       if (command.autoCommit !== void 0) {
-        if (typeof command.autoCommit !== "boolean") return fail3(settings, "INVALID_PAYLOAD", "自动提交必须是布尔值。");
+        if (typeof command.autoCommit !== "boolean") return fail4(settings, "INVALID_PAYLOAD", "自动提交必须是布尔值。");
         next.autoCommit = command.autoCommit;
       }
       if (command.loreSupplementEnabled !== void 0) {
-        if (typeof command.loreSupplementEnabled !== "boolean") return fail3(settings, "INVALID_PAYLOAD", "世界书资料开关必须是布尔值。");
+        if (typeof command.loreSupplementEnabled !== "boolean") return fail4(settings, "INVALID_PAYLOAD", "世界书资料开关必须是布尔值。");
         next.loreSupplementEnabled = command.loreSupplementEnabled;
       }
       if (command.rpmLimit !== void 0) {
         if (!isFiniteIntIn(command.rpmLimit, MIN_RPM, MAX_RPM)) {
-          return fail3(settings, "INVALID_PAYLOAD", `RPM 上限必须是 ${MIN_RPM}..${MAX_RPM} 的整数。`);
+          return fail4(settings, "INVALID_PAYLOAD", `RPM 上限必须是 ${MIN_RPM}..${MAX_RPM} 的整数。`);
         }
         next.rpmLimit = command.rpmLimit;
       }
@@ -7467,20 +8180,20 @@ function applySettingsCommand(settings, command, deps = {}) {
       const start = typeof preset.start === "string" ? preset.start.trim().slice(0, 256) : "";
       const end = typeof preset.end === "string" ? preset.end.trim().slice(0, 256) : "";
       if (!name || !start || !end) {
-        return fail3(settings, "INVALID_PAYLOAD", "规则名称、开始词、结束词都不能为空。");
+        return fail4(settings, "INVALID_PAYLOAD", "规则名称、开始词、结束词都不能为空。");
       }
       const enabled = preset.enabled !== false;
       const rules = [...settings.contentReplaceRules ?? []];
       const targetId = preset.id === void 0 ? null : normalizeId(preset.id);
       if (preset.id !== void 0 && targetId === null) {
-        return fail3(settings, "INVALID_PAYLOAD", "规则 ID 形状非法。");
+        return fail4(settings, "INVALID_PAYLOAD", "规则 ID 形状非法。");
       }
       const existingIndex = targetId ? rules.findIndex((r) => r.id === targetId) : -1;
       if (preset.id !== void 0 && existingIndex < 0) {
-        return fail3(settings, "INVALID_PAYLOAD", "要编辑的规则不存在（另存请省略 id）。");
+        return fail4(settings, "INVALID_PAYLOAD", "要编辑的规则不存在（另存请省略 id）。");
       }
       if (existingIndex < 0 && rules.length >= MAX_REPLACE_RULES) {
-        return fail3(settings, "FIELD_LIMIT_EXCEEDED", `最多保存 ${MAX_REPLACE_RULES} 条替换规则。`);
+        return fail4(settings, "FIELD_LIMIT_EXCEEDED", `最多保存 ${MAX_REPLACE_RULES} 条替换规则。`);
       }
       const rule = { id: targetId ?? generateId(), name, start, end, enabled };
       if (existingIndex >= 0) rules[existingIndex] = rule;
@@ -7489,10 +8202,10 @@ function applySettingsCommand(settings, command, deps = {}) {
     }
     case "replace.delete": {
       const targetId = normalizeId(command.id);
-      if (!targetId) return fail3(settings, "INVALID_PAYLOAD", "规则 ID 形状非法。");
+      if (!targetId) return fail4(settings, "INVALID_PAYLOAD", "规则 ID 形状非法。");
       const rules = (settings.contentReplaceRules ?? []).filter((r) => r.id !== targetId);
       if (rules.length === (settings.contentReplaceRules ?? []).length) {
-        return fail3(settings, "INVALID_PAYLOAD", "要删除的规则不存在。");
+        return fail4(settings, "INVALID_PAYLOAD", "要删除的规则不存在。");
       }
       return { ok: true, settings: { ...settings, contentReplaceRules: rules } };
     }
@@ -7500,12 +8213,12 @@ function applySettingsCommand(settings, command, deps = {}) {
       return { ok: true, settings: { ...settings, contentReplaceRules: createDefaultSettingsV2().contentReplaceRules } };
     }
     default:
-      return fail3(settings, "INVALID_PAYLOAD", "未知的设置命令。");
+      return fail4(settings, "INVALID_PAYLOAD", "未知的设置命令。");
   }
 }
 function applyLegacySettingsPatch(settings, body, deps = {}) {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
-    return fail3(settings, "INVALID_PAYLOAD", "设置必须是对象");
+    return fail4(settings, "INVALID_PAYLOAD", "设置必须是对象");
   }
   const record = body;
   const now = nowOf(deps);
@@ -7567,7 +8280,7 @@ function applyLegacySettingsPatch(settings, body, deps = {}) {
   if (library && Array.isArray(library.worldTurn)) {
     for (const entry of library.worldTurn) {
       const legacy = parseLegacyPreset(entry);
-      if (!legacy) return fail3(settings, "INVALID_PAYLOAD", "presetLibrary.worldTurn 存在非法预设（name / endpoint / model / apiKey 或数值超限）");
+      if (!legacy) return fail4(settings, "INVALID_PAYLOAD", "presetLibrary.worldTurn 存在非法预设（name / endpoint / model / apiKey 或数值超限）");
       upsertConnection(legacy);
       upsertPrompt(legacy);
     }
@@ -7583,23 +8296,23 @@ function applyLegacySettingsPatch(settings, body, deps = {}) {
       next = { ...next, activeApiPresetId: null, activePromptPresetId: null };
     } else {
       const legacy = parseLegacyPreset(record.worldTurn);
-      if (!legacy) return fail3(settings, "INVALID_PAYLOAD", "worldTurn 预设字段非法（name / endpoint / model / apiKey 或数值超限）");
+      if (!legacy) return fail4(settings, "INVALID_PAYLOAD", "worldTurn 预设字段非法（name / endpoint / model / apiKey 或数值超限）");
       const apiId = upsertConnection(legacy);
-      if (!apiId) return fail3(settings, "FIELD_LIMIT_EXCEEDED", `最多保存 ${MAX_PRESETS_PER_LIBRARY} 条 API 连接。`);
+      if (!apiId) return fail4(settings, "FIELD_LIMIT_EXCEEDED", `最多保存 ${MAX_PRESETS_PER_LIBRARY} 条 API 连接。`);
       const promptId = upsertPrompt(legacy);
       next = { ...next, activeApiPresetId: apiId, activePromptPresetId: promptId };
     }
   }
   if (record.autoCommit !== void 0) {
-    if (typeof record.autoCommit !== "boolean") return fail3(settings, "INVALID_PAYLOAD", "autoCommit 必须是布尔值");
+    if (typeof record.autoCommit !== "boolean") return fail4(settings, "INVALID_PAYLOAD", "autoCommit 必须是布尔值");
     next = { ...next, autoCommit: record.autoCommit };
   }
   if (record.loreSupplementEnabled !== void 0) {
-    if (typeof record.loreSupplementEnabled !== "boolean") return fail3(settings, "INVALID_PAYLOAD", "loreSupplementEnabled 必须是布尔值");
+    if (typeof record.loreSupplementEnabled !== "boolean") return fail4(settings, "INVALID_PAYLOAD", "loreSupplementEnabled 必须是布尔值");
     next = { ...next, loreSupplementEnabled: record.loreSupplementEnabled };
   }
   if (record.rpmLimit !== void 0) {
-    if (!isFiniteIntIn(record.rpmLimit, MIN_RPM, MAX_RPM)) return fail3(settings, "INVALID_PAYLOAD", "rpmLimit 必须是 1..600 的数字");
+    if (!isFiniteIntIn(record.rpmLimit, MIN_RPM, MAX_RPM)) return fail4(settings, "INVALID_PAYLOAD", "rpmLimit 必须是 1..600 的数字");
     next = { ...next, rpmLimit: record.rpmLimit };
   }
   return { ok: true, settings: next };
@@ -8047,7 +8760,7 @@ function createCoreInstance(store, deps, shared) {
     if (!world) throw new AtlasError(ATLAS_ERROR_CODES.WORLD_NOT_FOUND, `绑定的世界不存在：${binding.worldId}`);
     return world;
   }
-  function pointRegionId(world, pointId) {
+  function pointRegionId2(world, pointId) {
     if (!pointId) return null;
     return (world.points ?? []).find((p) => String(p.id) === String(pointId))?.regionId ?? null;
   }
@@ -8510,7 +9223,7 @@ function createCoreInstance(store, deps, shared) {
       chatId,
       messageId: `state-view-${binding.worldTimeCursor}`,
       currentPointId: binding.currentLocationId ?? null,
-      currentRegionId: pointRegionId(world, binding.currentLocationId ?? null),
+      currentRegionId: pointRegionId2(world, binding.currentLocationId ?? null),
       flags: flagsFor(world, binding.branchId, binding.worldTimeCursor)
     });
     const mapPoints = (world.points ?? []).slice(0, MAP_POINTS_MAX).map((p) => ({
@@ -8637,7 +9350,7 @@ function createCoreInstance(store, deps, shared) {
       request,
       currentTime: binding.worldTimeCursor,
       currentPointId: binding.currentLocationId ?? null,
-      currentRegionId: pointRegionId(world, binding.currentLocationId ?? null),
+      currentRegionId: pointRegionId2(world, binding.currentLocationId ?? null),
       flags: flagsFor(world, binding.branchId, binding.worldTimeCursor),
       ...destinationPointId ? { destinationPointId } : {}
     });
@@ -8688,7 +9401,7 @@ function createCoreInstance(store, deps, shared) {
   async function prepareWorldTurnInputs(binding, preset, request) {
     const world = await requireWorld(binding);
     const currentPointId = binding.currentLocationId ?? null;
-    const currentRegionId = pointRegionId(world, currentPointId);
+    const currentRegionId = pointRegionId2(world, currentPointId);
     const flags = flagsFor(world, binding.branchId, binding.worldTimeCursor);
     const prepareOutput = prepareAtlasTurn(world, {
       request: {
@@ -8793,51 +9506,99 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
     }
     try {
       const cleanedText = applyContentReplaceRules(call.text, current.contentReplaceRules ?? []);
-      try {
-        draft = parseAtlasWorldTurnDraft(cleanedText);
-      } catch {
-        try {
-          draft = parseAtlasWorldTurnDraft(call.text);
-        } catch {
+      const looksV2 = /"schemaVersion"\s*:\s*2/.test(cleanedText) || /"schemaVersion"\s*:\s*2/.test(call.text);
+      if (looksV2) {
+        const v2Sources = {
+          "msg:u": request.userText,
+          "msg:a": request.assistantText,
+          ...request.loreSupplement ? { lore: request.loreSupplement } : {}
+        };
+        const v2Ctx = { baseRevision: pending.binding.worldTimeCursor, sources: v2Sources };
+        let v2result = parseAtlasWorldTurnDraftV2(cleanedText, v2Ctx);
+        if (!v2result.ok && cleanedText !== call.text) {
+          v2result = parseAtlasWorldTurnDraftV2(call.text, v2Ctx);
+        }
+        if (!v2result.ok) {
           pushLog({
             at: now(),
-            kind: "world-turn-parse-fallback",
+            kind: "world-turn-v2-rejected",
             chatId: request.chatId,
             presetName: preset.name,
             model: preset.model,
+            errorCount: v2result.errors.length,
+            errors: v2result.errors.slice(0, 10),
             excerpt: call.text.slice(0, 1500)
           });
           throw new AtlasError(
             ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
-            "推演输出无法解析为 JSON（已尝试剥 think 与原文回退）。本轮未提交，世界与时间未变化；原文前 1500 字见日志页，可重试推演。",
+            `v2 协议校验失败（${v2result.errors.length} 处）：${v2result.errors.slice(0, 3).map((e) => `${e.path} ${e.message}`).join("；")}。本轮未提交，世界与时间未变化；可重试推演。`,
             { retryable: true }
           );
         }
-      }
-      const adjudication = adjudicateAtlasDraft(baseWorld, {
-        branchId: pending.binding.branchId,
-        currentPointId: pending.binding.currentPointId,
-        userText: request.userText,
-        draft
-      });
-      if (adjudication.notes.length > 0) {
-        pushLog({
-          at: now(),
-          kind: "world-turn-adjudication",
-          chatId: request.chatId,
-          notes: adjudication.notes
+        output = applyAtlasV2Turn(baseWorld, {
+          draft: v2result.draft,
+          request,
+          branchId: pending.binding.branchId,
+          currentTime: pending.binding.worldTimeCursor,
+          currentPointId: pending.binding.currentPointId,
+          currentRegionId: pending.binding.currentRegionId,
+          now: now()
+        });
+        if (output.refResolution.warnings.length > 0) {
+          pushLog({
+            at: now(),
+            kind: "world-turn-v2-warnings",
+            chatId: request.chatId,
+            warnings: output.refResolution.warnings.slice(0, 10)
+          });
+        }
+      } else {
+        try {
+          draft = parseAtlasWorldTurnDraft(cleanedText);
+        } catch {
+          try {
+            draft = parseAtlasWorldTurnDraft(call.text);
+          } catch {
+            pushLog({
+              at: now(),
+              kind: "world-turn-parse-fallback",
+              chatId: request.chatId,
+              presetName: preset.name,
+              model: preset.model,
+              excerpt: call.text.slice(0, 1500)
+            });
+            throw new AtlasError(
+              ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
+              "推演输出无法解析为 JSON（已尝试剥 think 与原文回退）。本轮未提交，世界与时间未变化；原文前 1500 字见日志页，可重试推演。",
+              { retryable: true }
+            );
+          }
+        }
+        const adjudication = adjudicateAtlasDraft(baseWorld, {
+          branchId: pending.binding.branchId,
+          currentPointId: pending.binding.currentPointId,
+          userText: request.userText,
+          draft
+        });
+        if (adjudication.notes.length > 0) {
+          pushLog({
+            at: now(),
+            kind: "world-turn-adjudication",
+            chatId: request.chatId,
+            notes: adjudication.notes
+          });
+        }
+        draft = adjudication.draft;
+        output = commitAtlasTurn(baseWorld, {
+          request,
+          branchId: pending.binding.branchId,
+          currentTime: pending.binding.worldTimeCursor,
+          currentPointId: pending.binding.currentPointId,
+          currentRegionId: pending.binding.currentRegionId,
+          draft,
+          now: now()
         });
       }
-      draft = adjudication.draft;
-      output = commitAtlasTurn(baseWorld, {
-        request,
-        branchId: pending.binding.branchId,
-        currentTime: pending.binding.worldTimeCursor,
-        currentPointId: pending.binding.currentPointId,
-        currentRegionId: pending.binding.currentRegionId,
-        draft,
-        now: now()
-      });
     } catch (thrown) {
       if (thrown instanceof AtlasError && thrown.details.retryable === void 0) {
         throw new AtlasError(thrown.code, thrown.message, { ...thrown.details, retryable: true });
@@ -8912,7 +9673,7 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
     });
     const lorebook = buildLorebookPlans(output.world, receipt);
     try {
-      if (output.geo && output.geo.createdPoints.length > 0) {
+      if ("geo" in output && output.geo && output.geo.createdPoints.length > 0) {
         const docKey = `maps:${binding.worldId}`;
         const doc = sanitizeMapDoc(await store.read(docKey).catch(() => null));
         let changed = false;

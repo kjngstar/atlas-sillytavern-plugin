@@ -43,6 +43,8 @@ import {
 } from "./atlas-contract.ts";
 import { computeAtlasRelevance, atlasTravelPreview } from "./atlas-relevance.ts";
 import { prepareAtlasTurn, commitAtlasTurn, provisionReferencedCharacters } from "./atlas-turn.ts";
+import { applyAtlasV2Turn } from "./atlas-turn-v2.ts";
+import { parseAtlasWorldTurnDraftV2 } from "./atlas-contract-v2.ts";
 import { buildSubMapFromDraft, sanitizeMapDoc } from "./atlas-geo-apply.ts";
 import { validateScaleResponse } from "./atlas-scale.ts";
 import { buildLorebookPlans } from "./atlas-lorebook.ts";
@@ -1585,57 +1587,107 @@ function createCoreInstance(
       // 0.9.16 内容替换规则库（照抄 shujuku + 开关增强）：推演输出先过启用的词对规则
       // （剥 think / 推理段 / 杂段），再进草稿解析。
       const cleanedText = applyContentReplaceRules(call.text, current.contentReplaceRules ?? []);
-      // 0.9.30 放宽格式校验：推理模型（MiniMax-M3 等）会把 JSON 写进 <think> 里——
-      // 剥 think 后可能什么都不剩。解析失败先退回原文再试一次（保留有限格式修复）。
-      // 0.9.48（T05）：两连败 = 明确失败，不再伪装成「无结构变化」成功提交——
-      // 已付费但世界未更新的事实必须如实呈现：不推进游标、不写账本、不标记已提交。
-      try {
-        draft = parseAtlasWorldTurnDraft(cleanedText);
-      } catch {
-        try {
-          draft = parseAtlasWorldTurnDraft(call.text);
-        } catch {
+      // R05 协议分流：v2 草稿（schemaVersion:2）走独立契约与应用管线（临时引用 /
+      // baseRevision 回显 / 证据包含校验）；无版本字段的输出仍走 v1 解析 + 裁定层。
+      const looksV2 = /"schemaVersion"\s*:\s*2/.test(cleanedText) || /"schemaVersion"\s*:\s*2/.test(call.text);
+      if (looksV2) {
+        const v2Sources: Record<string, string> = {
+          "msg:u": request.userText,
+          "msg:a": request.assistantText,
+          ...(request.loreSupplement ? { lore: request.loreSupplement } : {}),
+        };
+        const v2Ctx = { baseRevision: pending.binding.worldTimeCursor, sources: v2Sources };
+        let v2result = parseAtlasWorldTurnDraftV2(cleanedText, v2Ctx);
+        if (!v2result.ok && cleanedText !== call.text) {
+          v2result = parseAtlasWorldTurnDraftV2(call.text, v2Ctx);
+        }
+        if (!v2result.ok) {
           pushLog({
             at: now(),
-            kind: "world-turn-parse-fallback",
+            kind: "world-turn-v2-rejected",
             chatId: request.chatId,
             presetName: preset.name,
             model: preset.model,
+            errorCount: v2result.errors.length,
+            errors: v2result.errors.slice(0, 10),
             excerpt: call.text.slice(0, 1500),
           });
           throw new AtlasError(
             ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
-            "推演输出无法解析为 JSON（已尝试剥 think 与原文回退）。本轮未提交，世界与时间未变化；原文前 1500 字见日志页，可重试推演。",
+            `v2 协议校验失败（${v2result.errors.length} 处）：${v2result.errors.slice(0, 3).map((e) => `${e.path} ${e.message}`).join("；")}。本轮未提交，世界与时间未变化；可重试推演。`,
             { retryable: true },
           );
         }
-      }
-      // 0.9.0 算法裁决层：网格旅行算法裁定移动耗时、实体白名单强制、未知地点降级丢弃。
-      // 裁定说明合入 summary（可审计），独立 notes 记入日志。
-      const adjudication = adjudicateAtlasDraft(baseWorld, {
-        branchId: pending.binding.branchId,
-        currentPointId: pending.binding.currentPointId,
-        userText: request.userText,
-        draft,
-      });
-      if (adjudication.notes.length > 0) {
-        pushLog({
-          at: now(),
-          kind: "world-turn-adjudication",
-          chatId: request.chatId,
-          notes: adjudication.notes,
+        output = applyAtlasV2Turn(baseWorld, {
+          draft: v2result.draft,
+          request,
+          branchId: pending.binding.branchId,
+          currentTime: pending.binding.worldTimeCursor,
+          currentPointId: pending.binding.currentPointId,
+          currentRegionId: pending.binding.currentRegionId,
+          now: now(),
+        });
+        if (output.refResolution.warnings.length > 0) {
+          pushLog({
+            at: now(),
+            kind: "world-turn-v2-warnings",
+            chatId: request.chatId,
+            warnings: output.refResolution.warnings.slice(0, 10),
+          });
+        }
+      } else {
+        // 0.9.30 放宽格式校验：推理模型（MiniMax-M3 等）会把 JSON 写进 <think> 里——
+        // 剥 think 后可能什么都不剩。解析失败先退回原文再试一次（保留有限格式修复）。
+        // 0.9.48（T05）：两连败 = 明确失败，不再伪装成「无结构变化」成功提交——
+        // 已付费但世界未更新的事实必须如实呈现：不推进游标、不写账本、不标记已提交。
+        try {
+          draft = parseAtlasWorldTurnDraft(cleanedText);
+        } catch {
+          try {
+            draft = parseAtlasWorldTurnDraft(call.text);
+          } catch {
+            pushLog({
+              at: now(),
+              kind: "world-turn-parse-fallback",
+              chatId: request.chatId,
+              presetName: preset.name,
+              model: preset.model,
+              excerpt: call.text.slice(0, 1500),
+            });
+            throw new AtlasError(
+              ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
+              "推演输出无法解析为 JSON（已尝试剥 think 与原文回退）。本轮未提交，世界与时间未变化；原文前 1500 字见日志页，可重试推演。",
+              { retryable: true },
+            );
+          }
+        }
+        // 0.9.0 算法裁决层：网格旅行算法裁定移动耗时、实体白名单强制、未知地点降级丢弃。
+        // 裁定说明合入 summary（可审计），独立 notes 记入日志。
+        const adjudication = adjudicateAtlasDraft(baseWorld, {
+          branchId: pending.binding.branchId,
+          currentPointId: pending.binding.currentPointId,
+          userText: request.userText,
+          draft,
+        });
+        if (adjudication.notes.length > 0) {
+          pushLog({
+            at: now(),
+            kind: "world-turn-adjudication",
+            chatId: request.chatId,
+            notes: adjudication.notes,
+          });
+        }
+        draft = adjudication.draft;
+        output = commitAtlasTurn(baseWorld, {
+          request,
+          branchId: pending.binding.branchId,
+          currentTime: pending.binding.worldTimeCursor,
+          currentPointId: pending.binding.currentPointId,
+          currentRegionId: pending.binding.currentRegionId,
+          draft,
+          now: now(),
         });
       }
-      draft = adjudication.draft;
-      output = commitAtlasTurn(baseWorld, {
-        request,
-        branchId: pending.binding.branchId,
-        currentTime: pending.binding.worldTimeCursor,
-        currentPointId: pending.binding.currentPointId,
-        currentRegionId: pending.binding.currentRegionId,
-        draft,
-        now: now(),
-      });
     } catch (thrown) {
       if (thrown instanceof AtlasError && thrown.details.retryable === undefined) {
         throw new AtlasError(thrown.code, thrown.message, { ...thrown.details, retryable: true });
@@ -1730,7 +1782,9 @@ function createCoreInstance(
     //     整段容错：世界已在步骤 7 提交，sidecar 只是增强数据——写失败记日志不阻断
     //     （否则回执已缓存、世界已落盘，API 却报 500，作者会以为回合失败去重试）。
     try {
-      if (output.geo && output.geo.createdPoints.length > 0) {
+      // R05：v2 草稿的 discoveries 不携带 submap/description（子图层级 R09 接线），
+      // geo 增量只存在于 v1 commitAtlasTurn 的输出。
+      if ("geo" in output && output.geo && output.geo.createdPoints.length > 0) {
         const docKey = `maps:${binding.worldId}`;
         const doc = sanitizeMapDoc(await store.read(docKey).catch(() => null));
         let changed = false;

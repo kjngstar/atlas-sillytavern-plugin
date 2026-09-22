@@ -132,3 +132,36 @@
 - nearby DTO（地点名称 / 理由数组 / 精度）增强与 atlas-relevance 消费改造 → 与 R07 附近列表一起收口
 - 物品持有者关系解析（location 指向人物）→ R09 物品详情
 - 游标回退 / 兄弟分支隔离已在 projectEntityState 分支谱系中保证；端到端回归归 R12/R14
+
+## R05 — 推进协议 v2 契约与同轮临时引用（2026-09-23）
+
+- [x] 新建 `src/atlas-contract-v2.ts`：v2 草稿解析 + 语法校验（纯函数零副作用）
+  - 顶层字段全必在（缺数组 = 错误，不是缺省）；schemaVersion 必须 = 2
+  - baseRevision 必须逐字回显请求值（过期提交在语法层即拒绝）
+  - evidence.quote 包含校验：必须是指定 sourceId 的原文片段（msg:u / msg:a / lore）
+  - 临时引用形状：`new:loc:<短名>` / `new:npc:<短名>`，本响应内唯一；npcUpdates op 语义（set 必带引用、keep/clear 必空引用）
+  - 上限封顶：别名 8×64、新地点/人物 12、变化数组 64、证据 64、摘要/记忆 500、引文 240；错误返回 JSON 路径列表（封顶 40 条），不静默裁剪
+- [x] 新建 `src/atlas-turn-v2.ts`：v2 应用管线（复用 commitAtlasTurn，不另起直写路径）
+  - 语义校验在候选世界构建时完成：已知实体用原 ID、未知地点 / 未知地区 / 未声明的未知引用 → 整单拒绝（AtlasError，零写入）
+  - 临时引用 → 持久 ID 确定性分配：地点 = 现有数字 id 顺延（黄金角螺旋散点、regionRef null 则不归属）；人物 = `npc-<hash8(turnId|ref)>`（撞 id 换盐重派）
+  - 候选世界只增不改：新地点进 points；新人物同时进 characters + entityRecords[type=npc]，temporalSchema 预声明 status:string
+  - 折叠为 v1 形草稿：scene→locationChange（confirmed/estimated 才动游标）；npcUpdates set→moveEntity（regionId 随地点归属）+ status→setTemporalField；relationUpdates→adjustRelation；worldFlags→setFlag；memories→memoryDrafts；events→summary 附加行（超限保留主摘要 + 警告）
+  - identityUpdates：本轮新建实体直接改候选世界（名 / 别名）；已知实体留给 R07，降级为显式警告不静默丢
+  - clear 位置 / parentLocationRef 暂无 v1 对应：显式警告（R07 / R09 接手），不静默丢弃
+  - 幂等预检：同幂等键已在账本 → 跳过候选世界构建（避免幽灵增量）直接走 duplicate 路径
+- [x] executeCommit 协议分流：`schemaVersion:2` 检测在 v1 解析**之前**（v1 解析器宽松，v2 JSON 会被当 v1 静默吃成 0 effect）；v2 分支不走旅行耗时裁定层（时长模型申报，0 合法）
+- [x] v2 校验失败落日志（world-turn-v2-rejected，含错误路径前 10 条 + 原文摘录）+ retryable 报错；应用警告落 world-turn-v2-warnings
+
+证据：
+- 新增 `tests/atlas-r05-turn-v2.test.mjs` 14 项通过：
+  - L07 / §5.3 首场戏：new:loc:ruins + new:npc:girl + 场景锚定 + NPC 更新单次提交全落地（D04 修复断言：少女位置 = 同轮新建废墟深处；基线 = 引用被裁定丢弃）
+  - baseRevision 过期 / 引文包含失败 / 来源不存在 / 重复引用 / 缺顶层数组 / op 语义违规全拒绝
+  - T07：v1 草稿进 v2 解析器 → 明确版本错误
+  - 未知地点 / 未知地区 → 零写入拒绝；T01 同键重试 → duplicate 不重复建点建人；duration=0 合法不推进时间；已知实体原 ID 引用同管线可用
+- 门禁：typecheck 0 errors；pack 通过；test 418/418（404 + 14）
+
+残留：
+- v2 提示词封套（注入 v2 JSON 模板 + 使用说明）默认仍关闭，等 R06 场景锚定迁移 + R07 身份跟踪齐后再切（计划 §4.5）
+- 事件明细超摘要上限时只保留主摘要 + 警告（不做独立事件存储，等 R12 原子提交一起收口）
+- mapScaleHints 解析已支持，应用（地图尺度接线）在 R10
+- v2 分支的端到端服务级测试（含 store / 日志）依赖真实酒馆链路 → R14 交互验收
