@@ -1,0 +1,79 @@
+{
+  "defaultPromptInputs": {
+    "injectionText": false,
+    "lastTurnSummary": false,
+    "recentContextText": false,
+    "userText": true,
+    "assistantText": true
+  },
+  "npcProjection": {
+    "receiptStatus": "committed",
+    "ledgerProjection": {
+      "_regionId": "start",
+      "_pointId": "2",
+      "status": "正在交谈"
+    },
+    "directoryPosition": {
+      "characterId": "char-main",
+      "regionId": "start",
+      "pointId": null,
+      "source": "legacy",
+      "scope": "legacy",
+      "branchId": null
+    },
+    "characterStates": []
+  },
+  "newPlaceMovement": {
+    "draft": {
+      "duration": 1,
+      "locationChange": null,
+      "rawEffects": [],
+      "memoryDrafts": [],
+      "summary": "来到新废墟；〔裁定〕忽略未知地点「new-ruins」的移动",
+      "newLocations": [
+        {
+          "name": "新废墟",
+          "regionName": "起点"
+        }
+      ]
+    },
+    "notes": [
+      "〔裁定〕忽略未知地点「new-ruins」的移动"
+    ]
+  },
+  "mapDom": {
+    "toolsClass": "aw-maptools",
+    "toolsDisplay": "none",
+    "hintPointerEvents": "auto",
+    "hintPosition": "absolute",
+    "gridRepeat": "no-repeat",
+    "gridSize": "20px 20px",
+    "viewportBackgroundImage": "none"
+  },
+  "programmaticMarkerClick": {
+    "panelDisplay": "",
+    "hasContent": true
+  },
+  "newPresetDom": {
+    "nameReadOnly": true,
+    "insertButtons": 0,
+    "readOnlySegments": 8
+  },
+  "fit": {
+    "cellPx": 20,
+    "width": 2320,
+    "viewport": 640,
+    "first": {
+      "left": -680,
+      "top": 240
+    },
+    "last": {
+      "left": 1320,
+      "top": 240
+    }
+  },
+  "limitations": [
+    "jsdom does not perform browser layout/hit testing. Pointer occlusion is a source/CSS finding, not a real browser hit-test result.",
+    "All API calls in DOM checks are stubbed. This script diagnoses the fetched commit, not the user installation."
+  ]
+}
