@@ -58,7 +58,7 @@ test("挂载冒烟：connectAtlas 真实执行，面板六页全部渲染，骨�
   assert.ok(root.querySelector(".aw-moves__list"), "左栏动向列表必须在 DOM 里");
 
   // 六页全部走一遍：每页中区都必须有内容（renderPage 任一分支抛错都会在这里暴露）
-  for (const page of ["overview", "map", "nearby", "changes", "progression", "api"]) {
+  for (const page of ["overview", "map", "nearby", "changes", "progression", "api", "skin"]) {
     conn.core.setPage(page);
     conn.core.__renderPage();
     const center = root.querySelector(".aw-center");

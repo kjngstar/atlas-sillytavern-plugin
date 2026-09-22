@@ -650,7 +650,7 @@ function createCoreInstance(
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.44",
+      version: "0.9.45",
       protocolVersion: 1,
       time: now(),
     });
@@ -1730,7 +1730,7 @@ function createCoreInstance(
 
 
   /**
-   * POST /worlds/move-author — 0.9.44 地图拖动纠偏（作者手动修位置）。
+   * POST /worlds/move-author — 0.9.45 地图拖动纠偏（作者手动修位置）。
    * 作者在地图上把人物标点拖到目标地点：落账本事件（source="author"，可审计可回滚）
    * + CharacterState 权威位置（与日程结算同款 moveCharacterTo 校验：地点存在、地点归属地区一致）。
    * 主角（role ∈ 主角/玩家/观察者类）：额外推进绑定位置游标（游标端点）；

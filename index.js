@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.44";
+export const ATLAS_EXTENSION_VERSION = "0.9.45";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -548,8 +548,92 @@ const PAGES = [
   { id: "progression", label: "推进" },
   { id: "api", label: "API" },
   { id: "replace", label: "替换" },
+  { id: "skin", label: "皮肤" },
   { id: "logs", label: "日志" },
 ];
+
+// ---------------------------------------------------------------------------
+// 0.9.45 皮肤系统
+// 机制 = style.css 的 .atlas-workbench 全部走 --aw-* 令牌；主题 = data-atlas-theme
+// 属性切换令牌覆盖块；自定义皮肤 = 用户 CSS 覆盖任意令牌子集（注入 <style>）。
+// 完整性由 tests/atlas-skin.test.mjs 门禁：style.css 定义的每个 --aw-* 必须在册。
+// ---------------------------------------------------------------------------
+
+/** 皮肤令牌注册清单（与 style.css .atlas-workbench 基座一一对应）。 */
+export const ATLAS_SKIN_VARIABLES = [
+  // 基座（0.9.45 之前既有）
+  "--aw-paper",
+  "--aw-panel",
+  "--aw-ink",
+  "--aw-teal",
+  "--aw-teal-deep",
+  "--aw-gold",
+  "--aw-gold-soft",
+  "--aw-gold-deep",
+  "--aw-muted",
+  "--aw-line",
+  "--aw-rail-bg",
+  "--aw-rail-text",
+  "--aw-rail-dim",
+  // 0.9.45 收敛新增（历史硬编码色 → 令牌）
+  "--aw-ink-strong",
+  "--aw-ink-soft",
+  "--aw-danger",
+  "--aw-danger-deep",
+  "--aw-gold-busy",
+  "--aw-teal-wash",
+  "--aw-teal-wash-strong",
+  "--aw-teal-line",
+  "--aw-gold-wash",
+  "--aw-gold-wash-strong",
+  "--aw-gold-line",
+  "--aw-gold-hairline",
+  "--aw-veil",
+  "--aw-veil-strong",
+  "--aw-veil-soft",
+  "--aw-veil-line",
+  "--aw-input-bg",
+  "--aw-input-dim",
+  "--aw-input-disabled-bg",
+  // 字体
+  "--aw-serif",
+  "--aw-sans",
+];
+
+/** 内置主题（id ↔ style.css 的 data-atlas-theme 值；"paper" 为缺省 = 无属性）。 */
+export const ATLAS_SKIN_THEMES = [
+  { id: "paper", label: "纸面（默认）" },
+  { id: "dark", label: "深色战术" },
+];
+
+const ATLAS_CUSTOM_SKIN_LIMIT = 20000;
+
+/** 规范化主题 id：未知值一律回退 "paper"。 */
+export function normalizeAtlasSkinTheme(value) {
+  return ATLAS_SKIN_THEMES.some((theme) => theme.id === value) ? value : "paper";
+}
+
+/**
+ * 应用皮肤：主题属性挂根节点 + 自定义 CSS 注入 <style data-atlas-custom-skin>。
+ * 幂等——重复调用只更新内容，不重复建节点。customCss 有界（≤20000 字符，超出截断）。
+ */
+export function applyAtlasSkin(root, { theme, customCss } = {}) {
+  const normalized = normalizeAtlasSkinTheme(theme);
+  if (root) {
+    if (normalized === "paper") delete root.dataset.atlasTheme;
+    else root.dataset.atlasTheme = normalized;
+  }
+  const css = typeof customCss === "string" ? customCss.slice(0, ATLAS_CUSTOM_SKIN_LIMIT) : "";
+  if (typeof document === "undefined") return { theme: normalized, customCss: css };
+  let styleTag = document.querySelector("style[data-atlas-custom-skin]");
+  if (!styleTag) {
+    styleTag = document.createElement("style");
+    styleTag.setAttribute("data-atlas-custom-skin", "");
+    (document.head ?? document.body ?? root)?.append(styleTag);
+  }
+  styleTag.textContent = css;
+  return { theme: normalized, customCss: css };
+}
 
 const NPC_REASON_LABELS = {
   samePoint: "同地点",
@@ -594,7 +678,7 @@ function computeMapBounds(points) {
   };
 }
 
-function renderPanel(core, root, clampZoom, api, store, mod) {
+function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
   root.className = "atlas-workbench";
   root.id = "atlas-extension-panel-root";
   root.setAttribute("role", "application");
@@ -609,6 +693,13 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
   let modelOptions = [];
   let settingsLoadedOnce = false;
 
+  // 0.9.45 皮肤：挂载即恢复上次保存的主题 / 自定义 CSS（键在 extensionSettings.atlas 下）
+  const skinState = {
+    theme: normalizeAtlasSkinTheme(skinPort?.read?.("skinTheme") ?? "paper"),
+    customCss: typeof skinPort?.read?.("skinCustomCss") === "string" ? skinPort.read("skinCustomCss") : "",
+  };
+  applyAtlasSkin(root, skinState);
+
   const state = () => core.getState();
   const data = () => state().stateData ?? {};
 
@@ -622,7 +713,7 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
   const brandText = el("span", "aw-brand__text", "ATLAS");
   brand.append(brandMark, brandText);
 
-  const PAGE_ICONS = { overview: "◈", map: "▣", nearby: "◉", changes: "≋", progression: "➤", api: "✳", logs: "⚑" };
+  const PAGE_ICONS = { overview: "◈", map: "▣", nearby: "◉", changes: "≋", progression: "➤", api: "✳", skin: "◐", logs: "⚑" };
   const nav = el("nav", "aw-nav");
   nav.setAttribute("aria-label", "工作台分区导航");
   nav.append(el("span", "aw-rail__label", "导航"));
@@ -1160,6 +1251,12 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
       if (s.lastError) center.append(el("div", "aw-note aw-note--error", s.lastError));
       ensureSettingsLoaded();
       center.append(buildReplacePanel());
+      return;
+    }
+
+    if (s.page === "skin") {
+      center.append(pageHeader("皮肤", "主题切换即时生效；自定义 CSS 覆盖 --aw-* 皮肤令牌，改外观不用改源码。"));
+      center.append(buildSkinPanel());
       return;
     }
 
@@ -3406,6 +3503,67 @@ function renderPanel(core, root, clampZoom, api, store, mod) {
     return panel;
   }
 
+  /** 0.9.45 皮肤页：主题下拉（即时生效）+ 自定义 CSS（保存生效）+ 令牌清单。 */
+  function buildSkinPanel() {
+    const panel = el("section", "aw-panel");
+
+    panel.append(el("span", "aw-field__label", "主题"));
+    const themeSelect = document.createElement("select");
+    themeSelect.className = "aw-input";
+    themeSelect.setAttribute("aria-label", "工作台主题");
+    for (const theme of ATLAS_SKIN_THEMES) {
+      const option = document.createElement("option");
+      option.value = theme.id;
+      option.textContent = theme.label;
+      if (theme.id === skinState.theme) option.selected = true;
+      themeSelect.append(option);
+    }
+    themeSelect.addEventListener("change", () => {
+      skinState.theme = normalizeAtlasSkinTheme(themeSelect.value);
+      applyAtlasSkin(root, skinState);
+      skinPort?.write?.("skinTheme", skinState.theme);
+      setStatus("主题已切换并保存。", "ok");
+      renderCenter();
+    });
+    panel.append(themeSelect);
+
+    panel.append(el("span", "aw-field__label", "自定义 CSS（覆盖皮肤令牌）"));
+    const cssBox = document.createElement("textarea");
+    cssBox.className = "aw-input";
+    cssBox.rows = 8;
+    cssBox.spellcheck = false;
+    cssBox.setAttribute("aria-label", "自定义皮肤 CSS");
+    cssBox.placeholder = ".atlas-workbench {\n  --aw-paper: #f2efe7;\n  --aw-gold: #c4a363;\n}";
+    cssBox.value = skinState.customCss;
+    panel.append(cssBox);
+
+    const saveBtn = el("button", "aw-btn", "保存皮肤");
+    saveBtn.type = "button";
+    saveBtn.addEventListener("click", () => {
+      if (cssBox.value.length > ATLAS_CUSTOM_SKIN_LIMIT) {
+        setStatus(`自定义 CSS 过长（${String(cssBox.value.length)} > ${String(ATLAS_CUSTOM_SKIN_LIMIT)} 字符），未保存。`, "error");
+        return;
+      }
+      skinState.customCss = cssBox.value;
+      applyAtlasSkin(root, skinState);
+      skinPort?.write?.("skinCustomCss", skinState.customCss);
+      setStatus("皮肤已保存。", "ok");
+      renderCenter();
+    });
+    const actions = el("div", "aw-actions");
+    actions.append(saveBtn);
+    panel.append(actions);
+    if (statusLine()) panel.append(statusLine());
+
+    // 状态行（setStatus → statusLine，与推进 / API 页同款反馈）
+    const vars = el("details", "aw-skin__vars");
+    vars.append(el("summary", "aw-field__label", `可用皮肤令牌（${String(ATLAS_SKIN_VARIABLES.length)} 个）`));
+    vars.append(el("p", "aw-panel__text", ATLAS_SKIN_VARIABLES.join("、")));
+    panel.append(vars);
+
+    return panel;
+  }
+
   /** 首次进入需要设置的页面时拉取一次 v2 设置（失败不重复轰炸）。 */
   function ensureSettingsLoaded() {
     if (settingsLoadedOnce) return;
@@ -4057,9 +4215,11 @@ async function connectOnce() {
     const adaptEvent = createEventAdapter(context);
     /** 0.8.2 首条消息自动建世；core 由下方 const 赋值后回填（调用只发生在初始化完成之后）。 */
     let coreRef = null;
+    /** 0.9.45 皮肤持久化端口：host 建一次，core 与皮肤页共用（readData/writeData）。 */
+    let hostRef = null;
     const core = mod.createAtlasUiCore({
       api,
-      host: createHost(context),
+      host: (hostRef ??= createHost(context)),
       emitter: createEmitter(context),
       adaptEvent,
       resolveAssistantFloor: createAssistantFloorResolver(context),
@@ -4138,7 +4298,10 @@ async function connectOnce() {
       root.id = "atlas-extension-panel-root";
       document.body.append(root);
     }
-    rerender = renderPanel(core, root, mod.atlasClampZoom, api, engineStore, mod);
+    rerender = renderPanel(core, root, mod.atlasClampZoom, api, engineStore, mod, {
+      read: (key) => hostRef.readData(key),
+      write: (key, value) => hostRef.writeData(key, value),
+    });
     installMenuButton(core);
     core.init();
     connected = { core, rerender };
