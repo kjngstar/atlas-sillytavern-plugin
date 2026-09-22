@@ -11640,7 +11640,7 @@ function cameraZoomPercent(cam) {
   return Number.isFinite(cam.fitK) && cam.fitK > 0 ? cam.k / cam.fitK * 100 : 100;
 }
 function markerInverseScale(cam) {
-  return Number.isFinite(cam.k) && cam.k > 0 && Number.isFinite(cam.fitK) && cam.fitK > 0 ? cam.fitK / cam.k : 1;
+  return Number.isFinite(cam.k) && cam.k > 0 ? 1 / cam.k : 1;
 }
 
 // src/atlas-map-interactions.ts

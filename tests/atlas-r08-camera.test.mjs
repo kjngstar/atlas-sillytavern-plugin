@@ -117,7 +117,10 @@ test("相机：缩放百分比与标记反缩放（100% = fit 基准）", () => 
   assert.ok(Math.abs(cameraZoomPercent(cam) - 100) < EPS, "fitAll = 100%");
   cam = setCameraZoom(cam, cam.fitK * 2);
   assert.ok(Math.abs(cameraZoomPercent(cam) - 200) < EPS);
-  assert.ok(Math.abs(markerInverseScale(cam) - 0.5) < EPS, "2× 时标记反缩放 0.5");
+  // R08 修正：反缩放 = 1/k → 标记视觉尺寸恒定（k × inv = 1，任何缩放档都如此）
+  assert.ok(Math.abs(cam.k * markerInverseScale(cam) - 1) < EPS, "2× 时标记视觉恒定");
+  const fitted = fitCamera(frame, 800, 600);
+  assert.ok(Math.abs(fitted.k * markerInverseScale(fitted) - 1) < EPS, "fit 档标记视觉恒定（巨大化 bug 回归门禁）");
   // stage transform：screen = t + world*k
   const t = cameraStageTransform(cam, 800, 600);
   const w = { x: 37, y: 91 };

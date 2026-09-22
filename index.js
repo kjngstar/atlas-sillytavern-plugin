@@ -2103,15 +2103,17 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     viewport.addEventListener("pointerdown", (e) => {
       if (!camera) return;
       if (e.pointerType === "mouse" && e.button !== 0) return;
+      const interactive = Boolean(e.target?.closest?.(GESTURE_BLOCK_SELECTOR));
       activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-      viewport.setPointerCapture?.(e.pointerId);
       if (activePointers.size >= 2) {
         panGesture.cancel(); // 进入双指：终止单指平移
         pinch.down(e.pointerId, e.clientX, e.clientY);
+        viewport.setPointerCapture?.(e.pointerId);
         return;
       }
-      const interactive = Boolean(e.target?.closest?.(GESTURE_BLOCK_SELECTOR));
-      panGesture.down(e.clientX, e.clientY, { interactive });
+      if (interactive) return; // 按钮 / 输入框 / 弹层起手：不启动手势，也不抢 pointer capture（capture 会把合成 click 重定向给 viewport，按钮点击就废了）
+      panGesture.down(e.clientX, e.clientY);
+      viewport.setPointerCapture?.(e.pointerId);
     });
     viewport.addEventListener("pointermove", (e) => {
       if (!camera) return;

@@ -208,10 +208,11 @@ export function cameraZoomPercent(cam: MapCamera): number {
 
 /**
  * 标记反缩放：stage 被 scale(k) 拉伸时，标记挂 `scale(var(--aw-marker-inv))`
- * 抵消，视觉尺寸 / 命中区域保持屏幕像素（与世界每格像素数分离）。
+ * 抵消到**原始 CSS 像素尺寸**（k × inv = 1），视觉尺寸 / 命中区域恒定、与世界
+ * 每格像素数分离——放大不再撑大按钮，缩小不再糊成一团。
+ * （旧公式 fitK/k 是错的：fit 时 =1 等于没抵消，单点世界 fitK≈58 → 标记放大
+ * 58 倍成全屏色块，还吃掉所有指针事件让手势失灵。）
  */
 export function markerInverseScale(cam: MapCamera): number {
-  return Number.isFinite(cam.k) && cam.k > 0 && Number.isFinite(cam.fitK) && cam.fitK > 0
-    ? cam.fitK / cam.k
-    : 1;
+  return Number.isFinite(cam.k) && cam.k > 0 ? 1 / cam.k : 1;
 }
