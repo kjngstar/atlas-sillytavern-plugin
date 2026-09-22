@@ -224,18 +224,26 @@ test("health：无敏感字段；版本与 ATLAS_PLUGIN_VERSION 一致（0.9.18 
 // settings：脱敏与权限
 // ---------------------------------------------------------------------------
 
-test("settings：GET 永不返回明文 Key，PUT 仅限本机会话", async () => {
+test("settings：GET/PUT 同一道 local 门（0.9.48 T07），本机视图带回填明文 + 尾号", async () => {
   const { core } = await setup(null);
-  const denied = await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: false });
-  equal(denied.status, 403, "非本机会话 PUT 被拒");
-  equal(denied.body.error.code, ATLAS_ERROR_CODES.FORBIDDEN, "FORBIDDEN 错误码");
+  const putDenied = await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: false });
+  equal(putDenied.status, 403, "非本机会话 PUT 被拒");
+  equal(putDenied.body.error.code, ATLAS_ERROR_CODES.FORBIDDEN, "FORBIDDEN 错误码");
 
-  const view = await core.handle("GET", "/settings");
+  // 0.9.48（T07）：读取与写入同一道门——远程匿名 / 普通用户连配置结构都读不到
+  const getDenied = await core.handle("GET", "/settings", null, { local: false });
+  equal(getDenied.status, 403, "非本机会话 GET 被拒");
+  equal(getDenied.body.error.code, ATLAS_ERROR_CODES.FORBIDDEN, "FORBIDDEN 错误码");
+
+  const view = await core.handle("GET", "/settings", null, { local: true });
   const serialized = JSON.stringify(view.body);
   equal(view.body.data.schemaVersion, 2, "GET 出 schemaVersion 2");
   equal(view.body.data.apiPresets.length, 1, "旧载荷已被迁移成 v2 连接库");
-  // 0.9.12（作者令，照抄 shujuku）：GET 回传明文 Key 供编辑器回填 / 测试连接复用
-  equal(view.body.data.apiPresets[0].apiKey, SECRET, "GET 回明文 Key（本机浏览器存储，编辑器要回填）");
+  // 0.9.12（作者令，照抄 shujuku）：本机会话 GET 回传明文 Key 供编辑器回填 / 测试连接复用
+  // （0.9.48 T07 起以 local 闸为前提——远程用户根本到不了这一行）
+  equal(view.body.data.apiPresets[0].apiKey, SECRET, "本机 GET 回明文 Key（编辑器回填）");
+  equal(view.body.data.apiPresets[0].hasApiKey, true, "hasApiKey=true");
+  equal(view.body.data.apiPresets[0].apiKeyLast4, SECRET.slice(-4), "尾号正确");
   equal(typeof view.body.data.builtInPrompt.systemPrompt, "string", "内置默认提示词只读可见");
   equal(view.body.data.builtInPrompt.readOnly, true, "内置默认只读");
 
@@ -304,7 +312,7 @@ test("settings v2：两库命令——入库 / 指纹去重 / 脱敏 / 两库独
 
   // 持久化：换一个 core 读同一 store
   const { core: fresh } = sessionCore(store);
-  const again = await fresh.handle("GET", "/settings");
+  const again = await fresh.handle("GET", "/settings", null, { local: true });
   equal(again.body.data.apiPresets.length, 2, "刷新后连接库仍在");
   equal(again.body.data.promptPresets.length, 1, "刷新后提示词库仍在");
   equal(again.body.data.activeApiPresetId, apiId, "刷新后活动 API 仍在");
@@ -323,7 +331,7 @@ test("settings v2：两库命令——入库 / 指纹去重 / 脱敏 / 两库独
   // 悬挂引用：激活不存在的 ID 必须失败且存储不变
   const ghost = await core.handle("PUT", "/settings", { action: "api.activate", id: "ghost-id" }, { local: true });
   equal(ghost.status, 400, "激活不存在的连接被拒");
-  const after = await core.handle("GET", "/settings");
+  const after = await core.handle("GET", "/settings", null, { local: true });
   equal(after.body.data.activeApiPresetId, apiId, "失败不改变活动引用");
 });
 
@@ -339,7 +347,7 @@ test("settings v2：v1 旧数据在读取路径迁移，首个写入落库 v2（
     rpmLimit: 42,
   });
   const { core } = sessionCore(store);
-  const first = await core.handle("GET", "/settings");
+  const first = await core.handle("GET", "/settings", null, { local: true });
   equal(first.body.data.schemaVersion, 2, "GET 已是 v2 视图");
   equal(first.body.data.runtime === undefined ? first.body.data.rpmLimit : first.body.data.rpmLimit, 42, "runtime 字段迁移保留");
   equal(first.body.data.autoCommit, false, "autoCommit 迁移保留");
@@ -676,7 +684,7 @@ test("settings v2 运行时组合：commit 用「活动 API + 活动提示词」
 test("settings v2：store 写入失败时缓存保持旧设置（不留半更新状态）", async () => {
   const store = createMemoryDocumentStore();
   const { core } = sessionCore(store);
-  const before = (await core.handle("GET", "/settings")).body.data;
+  const before = (await core.handle("GET", "/settings", null, { local: true })).body.data;
   equal(before.rpmLimit, 30, "初始 rpmLimit");
 
   const originalWrite = store.write.bind(store);
@@ -687,7 +695,7 @@ test("settings v2：store 写入失败时缓存保持旧设置（不留半更新
   const failed = await core.handle("PUT", "/settings", { action: "runtime.update", rpmLimit: 60 }, { local: true });
   equal(failed.body.ok, false, "写入失败被上报");
   store.write = originalWrite;
-  const after = (await core.handle("GET", "/settings")).body.data;
+  const after = (await core.handle("GET", "/settings", null, { local: true })).body.data;
   equal(after.rpmLimit, 30, "失败后缓存仍是旧设置");
 });
 
@@ -779,7 +787,7 @@ test("0.9.30 放宽：JSON 被写进 <think> 里 → 剥除失败后从原文救
   equal(fetcher.calls.length, 1, "仍恰好 1 条推演请求");
 });
 
-test("0.9.30 放宽：完全无法解析 → 不拒单，按无结构变化处理，原文记日志", async () => {
+test("0.9.48 T05：完全无法解析 → 明确失败（RESPONSE_MALFORMED 可重试），世界零写入，原文记日志", async () => {
   const pureProse = `<think>Let me analyze this turn carefully.\n角色们聊了聊天，没有任何事件发生。</think>`;
   const fetcher = makeFetch([() => jsonResponse(200, { choices: [{ message: { content: pureProse } }] })]);
   const store = createMemoryDocumentStore();
@@ -790,12 +798,12 @@ test("0.9.30 放宽：完全无法解析 → 不拒单，按无结构变化处�
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
 
+  // 0.9.48 语义变更（外部 AI 计划 T05，作者拍板全包）：解析两连败 = 错误，不再伪装
+  // 「无结构变化」成功——已付费但世界未更新必须如实呈现，可重试（重推演重新调模型）。
   const result = await core.handle("POST", "/turns/commit", commitRequest(world));
-  equal(result.body.ok, true, "不再 502 拒单");
-  const receipt = result.body.data.receipt;
-  equal(receipt.status, "committed", "按无结构变化提交");
-  equal(receipt.currentTime, CURRENT_TIME, "时间不推进");
-  equal(receipt.adoptedEventIds.length, 0, "账本零事件");
+  equal(result.body.ok, false, "解析失败 = 提交失败");
+  equal(result.body.error.code, ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "RESPONSE_MALFORMED 错误码");
+  equal(result.body.error.details.retryable, true, "标记可重试");
   equal(JSON.stringify(JSON.parse(worldSnapshot)), JSON.stringify(world), "世界零写入");
   const fallbackLogs = core.logs().filter((l) => l.kind === "world-turn-parse-fallback");
   equal(fallbackLogs.length, 1, "解析降级日志恰好一条");
@@ -820,9 +828,11 @@ test("0.9.31 首轮自动建图：≤1 点世界首次 commit 后自动提炼一
       { name: String(world.points[0].name), regionName: "旧城区" },
     ],
   };
+  // 0.9.48 T05：解析失败不再降级为成功——给第二次 commit 单独备一段合法草稿
   const fetcher = makeFetch([
     () => openAiResponse(GOOD_DRAFT),
     () => openAiResponse(geoSpec),
+    () => openAiResponse(GOOD_DRAFT),
   ]);
   const store = createMemoryDocumentStore();
   const { core } = sessionCore(store, { fetchFn: fetcher.fetchFn });

@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.47";
+export const ATLAS_EXTENSION_VERSION = "0.9.48";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -21,6 +21,8 @@ export const ATLAS_BINDING_KEY = "atlas_binding";
 /** 0.9.42 会话承载：世界文档（world/maps/turns/geoAuto/binding/rev）挂在 chatMetadata.atlas。 */
 export const ATLAS_SESSION_KEY = "atlas";
 export const ATLAS_SESSION_SCHEMA_VERSION = 1;
+/** 0.9.48（T01）：会话写回守卫纯函数（导出供测试；sessionApi 写回前调用）。 */
+export { atlasSessionWriteGuard };
 export const ATLAS_SETTINGS_KEY = "atlas_world_sim";
 /** 生成拦截器注入键（setExtensionPrompt 用；临时上下文，不写入可见聊天历史）。 */
 export const ATLAS_INJECTION_KEY = "atlas_world_context";
@@ -60,6 +62,20 @@ async function writeAtlasSession(context, session) {
   if (!metadata || typeof metadata !== "object") return;
   metadata[ATLAS_SESSION_KEY] = session;
   if (typeof ctx.saveMetadata === "function") await ctx.saveMetadata();
+}
+
+/**
+ * 0.9.48（T01）会话写回守卫（纯函数，可测）：响应会话能否写回当前聊天。
+ * - 发起请求时的聊天身份（requestChatId）必须仍是当前聊天（currentChatId）；
+ * - 会话归属（sessionChatId，来自 binding.chatId）必须与当前聊天一致；
+ *   归属未知（null）放行——保守仅按发起=当前判定。
+ * - 任一条件不满足 → false：旧聊天的响应绝不能落进新聊天的 chatMetadata。
+ */
+function atlasSessionWriteGuard(requestChatId, currentChatId, sessionChatId) {
+  if (currentChatId === null || currentChatId === undefined || currentChatId === "") return false;
+  if (requestChatId !== currentChatId) return false;
+  if (sessionChatId !== null && sessionChatId !== undefined && sessionChatId !== "" && sessionChatId !== currentChatId) return false;
+  return true;
 }
 
 /**
@@ -3082,7 +3098,7 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       panel.append(formatField);
 
       panel.append(appendField(textField("endpoint", "端点（http(s) 绝对地址）", "text", 2048, "http://localhost:8317/v1", "API 端点"), "Claude / Gemini 协议填协议根，OpenAI 协议填到 /v1。"));
-      panel.append(appendField(textField("apiKey", "API 密钥", "password", 4096, active?.apiKey ? `已保存（尾号 ${String(active.apiKey).slice(-4)}），可直接修改` : "sk-…", "API 密钥"), "密钥保存在本浏览器的扩展设置里，载入预设时自动回填——加载模型与推演直接用它，不用每次重输。"));
+      panel.append(appendField(textField("apiKey", "API 密钥", "password", 4096, active?.apiKey ? `已保存（尾号 ${String(active.apiKey).slice(-4)}），可直接修改` : "sk-…", "API 密钥"), "密钥保存在本机酒馆设置里，载入预设时自动回填——加载模型与推演直接用它，不用每次重输。0.9.48 起读取设置需要本机会话：酒馆服务器的远程匿名 / 普通用户读不到这份配置（含密钥）。"));
 
       const loadModelsRow = el("div", "aw-actions");
       const loadModelsBtn = el("button", "aw-btn", "加载模型列表");
@@ -4303,6 +4319,10 @@ async function connectOnce() {
       SESSION_ROUTE_PREFIXES.some((prefix) => path === prefix || path.startsWith(prefix));
     const sessionApi = {
       async request(method, path, body) {
+        // 0.9.48 竞态守卫（T01 轻量版）：请求发起时固定发起聊天身份，写回前比对。
+        // A 聊天推演等待回复期间切到 B —— A 的响应会话绝不能写进 B 的 chatMetadata。
+        // 0.9.28 的守卫只保护 UI 回执层，这里补上底层写回路径。
+        const requestChatId = context().chatId ?? null;
         let payload = body;
         if (method === "POST" && pathWantsSession(path)) {
           const session = readAtlasSession(context);
@@ -4312,7 +4332,21 @@ async function connectOnce() {
         try {
           const responseSession = result?.body?.session;
           if (responseSession && responseSession.schemaVersion === ATLAS_SESSION_SCHEMA_VERSION) {
-            await writeAtlasSession(context, responseSession);
+            const currentChatId = context().chatId ?? null;
+            const sessionChatId =
+              responseSession?.binding && typeof responseSession.binding.chatId === "string"
+                ? responseSession.binding.chatId
+                : null;
+            if (atlasSessionWriteGuard(requestChatId, currentChatId, sessionChatId)) {
+              await writeAtlasSession(context, responseSession);
+            } else {
+              // 发起聊天 ≠ 当前聊天（切卡 / 换聊天 / 会话归属不一致）：丢弃写回。
+              // 引擎侧已提交；回到原聊天时该会话由 chatMetadata 持久层自然恢复。
+              atlasLog(
+                "引擎",
+                `会话写回已丢弃：发起聊天 ${requestChatId ?? "?"} ≠ 当前聊天 ${currentChatId ?? "?"}（会话归属 ${sessionChatId ?? "?"}），旧结果不写入新聊天。`,
+              );
+            }
           }
         } catch (error) {
           // 写回失败（聊天正被切换等）：引擎侧已提交，本侧会话等下次响应覆盖；记日志排查

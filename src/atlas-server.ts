@@ -650,15 +650,21 @@ function createCoreInstance(
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.47",
+      version: "0.9.48",
       protocolVersion: 1,
       time: now(),
     });
   }
 
-  async function handleGetSettings(): Promise<AtlasRouteResult> {
+  async function handleGetSettings(ctx: AtlasRequestContext): Promise<AtlasRouteResult> {
+    // 0.9.48（T07 权限闸）：读取与写入同一道门——配置含连接端点与密钥信息，
+    // 只有本机会话（浏览器默认模式恒 local=true）或部署方授权的 admin（server plugin）可读。
+    // 远程匿名 / 普通用户 403，不再存在「改设置要登录、读配置公网可扫」的不对称。
+    if (!ctx.local) throw new AtlasError(ATLAS_ERROR_CODES.FORBIDDEN, "只有本机已登录会话可以读取 Atlas 设置。");
     const current = await loadSettings();
-    // ATLAS-18：唯一脱敏视图（两库 + 两个活动引用 + 内置提示词只读全文）；绝不含明文 Key。
+    // 视图语义（0.9.12 作者令，照抄 shujuku）：本机会话回填明文 Key（编辑器免重输）；
+    // 该语义以 local 闸为前提——远程非本机用户根本到不了这一行。
+    // 0.9.48 补 hasApiKey / apiKeyLast4 供 UI 展示尾号；响应体绝不含密钥以外的敏感头原文。
     return okResult(settingsViewV2(current));
   }
 
@@ -1336,9 +1342,10 @@ function createCoreInstance(
       // 0.9.16 内容替换规则库（照抄 shujuku + 开关增强）：推演输出先过启用的词对规则
       // （剥 think / 推理段 / 杂段），再进草稿解析。
       const cleanedText = applyContentReplaceRules(call.text, current.contentReplaceRules ?? []);
-      // 0.9.30 放宽格式校验（作者拍板「先把回复格式的校验去掉」）：
-      // 推理模型（MiniMax-M3 等）会把 JSON 写进 <think> 里——剥 think 后可能什么都不剩。
-      // 解析失败先退回原文再试一次；仍失败则不拒单，按「无结构变化」处理，原文记入日志供诊断。
+      // 0.9.30 放宽格式校验：推理模型（MiniMax-M3 等）会把 JSON 写进 <think> 里——
+      // 剥 think 后可能什么都不剩。解析失败先退回原文再试一次（保留有限格式修复）。
+      // 0.9.48（T05）：两连败 = 明确失败，不再伪装成「无结构变化」成功提交——
+      // 已付费但世界未更新的事实必须如实呈现：不推进游标、不写账本、不标记已提交。
       try {
         draft = parseAtlasWorldTurnDraft(cleanedText);
       } catch {
@@ -1353,13 +1360,11 @@ function createCoreInstance(
             model: preset.model,
             excerpt: call.text.slice(0, 1500),
           });
-          draft = {
-            duration: 0,
-            locationChange: null,
-            rawEffects: [],
-            memoryDrafts: [],
-            summary: "推演输出无法解析为 JSON，本轮按无结构变化处理（原文前 1500 字见日志页）。",
-          };
+          throw new AtlasError(
+            ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
+            "推演输出无法解析为 JSON（已尝试剥 think 与原文回退）。本轮未提交，世界与时间未变化；原文前 1500 字见日志页，可重试推演。",
+            { retryable: true },
+          );
         }
       }
       // 0.9.0 算法裁决层：网格旅行算法裁定移动耗时、实体白名单强制、未知地点降级丢弃。
@@ -1453,26 +1458,26 @@ function createCoreInstance(
     await store.remove(`pending:${idempotencyKey}`);
     receiptCache.set(idempotencyKey, receipt);
     // ATLAS-06：楼层 ↔ 检查点稳定映射（swipe / 编辑 / 删除回退的依据）。
-    // 只在有检查点时写；回滚时标记 rolledBack 保留历史，文档永不删除。
-    if (checkpointId) {
-      await store.write(`turn:${binding.chatId}:${idempotencyKey}`, {
-        schemaVersion: 1,
-        chatId: binding.chatId,
-        idempotencyKey,
-        userMessageId: request.userMessageId,
-        assistantMessageId: request.assistantMessageId,
-        swipeId: request.swipeId,
-        checkpointId,
-        committedAt: now(),
-        // 0.9.42 会话承载：回执进回合映射文档（幂等判定不再依赖进程内存）
-        receipt,
-        previousBinding: {
-          worldTimeCursor: binding.worldTimeCursor,
-          currentLocationId: binding.currentLocationId,
-          lastCommittedMessageId: binding.lastCommittedMessageId,
-        },
-      });
-    }
+    // 0.9.48（T04 去重解耦）：回合记录不再以检查点存在为条件——检查点耗尽（200 上限）后
+    // 幂等判定（turn: 文档 = 去重依据）依然有效，重复事件零新增模型调用。
+    // checkpointId = null 表示该回合无回退点（UI 回退能力如实呈现，不假装可回退）。
+    await store.write(`turn:${binding.chatId}:${idempotencyKey}`, {
+      schemaVersion: 1,
+      chatId: binding.chatId,
+      idempotencyKey,
+      userMessageId: request.userMessageId,
+      assistantMessageId: request.assistantMessageId,
+      swipeId: request.swipeId,
+      checkpointId,
+      committedAt: now(),
+      // 0.9.42 会话承载：回执进回合映射文档（幂等判定不再依赖进程内存）
+      receipt,
+      previousBinding: {
+        worldTimeCursor: binding.worldTimeCursor,
+        currentLocationId: binding.currentLocationId,
+        lastCommittedMessageId: binding.lastCommittedMessageId,
+      },
+    });
     // 8. 世界书条目规划（纯派生，零 IO；写入由 UI 扩展经酒馆 world-info API 完成）。
     //    duplicate / failed 不产出规划：duplicate 本就写过了，failed 零部分写入。
     const lorebook = buildLorebookPlans(output.world, receipt);
@@ -1922,7 +1927,7 @@ function createCoreInstance(
       const [, cleanPath = ""] = path.match(/^\/api\/plugins\/atlas(\/.*)$/) ?? [null, path];
       const route = (cleanPath ?? path).replace(/\/+$/, "") || "/";
       if (method === "GET" && route === "/health") return await handleHealth();
-      if (method === "GET" && route === "/settings") return await handleGetSettings();
+      if (method === "GET" && route === "/settings") return await handleGetSettings(ctx);
       if (method === "PUT" && route === "/settings") return await handlePutSettings(body, ctx);
       if (method === "GET" && route === "/worlds") return await handleListWorlds();
       if (method === "POST" && route === "/worlds/import") return await handleImportWorld(body, ctx);

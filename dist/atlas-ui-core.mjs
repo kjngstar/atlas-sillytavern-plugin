@@ -7462,7 +7462,10 @@ function settingsViewV2(settings) {
         promptPostProcessing: normalizePromptPostProcessing(p.promptPostProcessing),
         systemPrompt: p.systemPrompt ?? "",
         // 0.9.12（作者令，照抄 shujuku）：GET 返回明文密钥，编辑器回填 / 测试连接复用，不再每次重输
-        apiKey: key
+        // （0.9.48 起以 GET local 闸为前提；hasApiKey/apiKeyLast4 供 UI 尾号展示）
+        apiKey: key,
+        hasApiKey: key.length > 0,
+        apiKeyLast4: key.slice(-4)
       };
     }),
     promptPresets: settings.promptPresets.map((p) => ({ ...p })),
@@ -7902,12 +7905,13 @@ function createCoreInstance(store, deps, shared) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.47",
+      version: "0.9.48",
       protocolVersion: 1,
       time: now()
     });
   }
-  async function handleGetSettings() {
+  async function handleGetSettings(ctx) {
+    if (!ctx.local) throw new AtlasError(ATLAS_ERROR_CODES.FORBIDDEN, "只有本机已登录会话可以读取 Atlas 设置。");
     const current = await loadSettings();
     return okResult(settingsViewV2(current));
   }
@@ -8455,13 +8459,11 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
             model: preset.model,
             excerpt: call.text.slice(0, 1500)
           });
-          draft = {
-            duration: 0,
-            locationChange: null,
-            rawEffects: [],
-            memoryDrafts: [],
-            summary: "推演输出无法解析为 JSON，本轮按无结构变化处理（原文前 1500 字见日志页）。"
-          };
+          throw new AtlasError(
+            ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
+            "推演输出无法解析为 JSON（已尝试剥 think 与原文回退）。本轮未提交，世界与时间未变化；原文前 1500 字见日志页，可重试推演。",
+            { retryable: true }
+          );
         }
       }
       const adjudication = adjudicateAtlasDraft(baseWorld, {
@@ -8543,25 +8545,23 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
     bindingCache.set(binding.chatId, nextBinding);
     await store.remove(`pending:${idempotencyKey}`);
     receiptCache.set(idempotencyKey, receipt);
-    if (checkpointId) {
-      await store.write(`turn:${binding.chatId}:${idempotencyKey}`, {
-        schemaVersion: 1,
-        chatId: binding.chatId,
-        idempotencyKey,
-        userMessageId: request.userMessageId,
-        assistantMessageId: request.assistantMessageId,
-        swipeId: request.swipeId,
-        checkpointId,
-        committedAt: now(),
-        // 0.9.42 会话承载：回执进回合映射文档（幂等判定不再依赖进程内存）
-        receipt,
-        previousBinding: {
-          worldTimeCursor: binding.worldTimeCursor,
-          currentLocationId: binding.currentLocationId,
-          lastCommittedMessageId: binding.lastCommittedMessageId
-        }
-      });
-    }
+    await store.write(`turn:${binding.chatId}:${idempotencyKey}`, {
+      schemaVersion: 1,
+      chatId: binding.chatId,
+      idempotencyKey,
+      userMessageId: request.userMessageId,
+      assistantMessageId: request.assistantMessageId,
+      swipeId: request.swipeId,
+      checkpointId,
+      committedAt: now(),
+      // 0.9.42 会话承载：回执进回合映射文档（幂等判定不再依赖进程内存）
+      receipt,
+      previousBinding: {
+        worldTimeCursor: binding.worldTimeCursor,
+        currentLocationId: binding.currentLocationId,
+        lastCommittedMessageId: binding.lastCommittedMessageId
+      }
+    });
     const lorebook = buildLorebookPlans(output.world, receipt);
     try {
       if (output.geo && output.geo.createdPoints.length > 0) {
@@ -8930,7 +8930,7 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
       const [, cleanPath = ""] = path.match(/^\/api\/plugins\/atlas(\/.*)$/) ?? [null, path];
       const route = (cleanPath ?? path).replace(/\/+$/, "") || "/";
       if (method === "GET" && route === "/health") return await handleHealth();
-      if (method === "GET" && route === "/settings") return await handleGetSettings();
+      if (method === "GET" && route === "/settings") return await handleGetSettings(ctx);
       if (method === "PUT" && route === "/settings") return await handlePutSettings(body, ctx);
       if (method === "GET" && route === "/worlds") return await handleListWorlds();
       if (method === "POST" && route === "/worlds/import") return await handleImportWorld(body, ctx);

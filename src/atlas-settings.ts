@@ -1012,8 +1012,15 @@ export interface AtlasSettingsView {
     requestHeaders: string;
     promptPostProcessing: string;
     systemPrompt: string;
-    /** 0.9.12（作者令，照抄 shujuku）：GET 返回明文密钥供编辑器回填与测试连接复用——密钥本就存在作者自己的浏览器存储里。 */
+    /**
+     * 0.9.12（作者令，照抄 shujuku）：GET 返回明文密钥供编辑器回填与测试连接复用——
+     * 密钥本就存在作者自己的浏览器存储里。
+     * 0.9.48（T07）：该语义以 GET /settings 的 local 闸为前提（非本机/非 admin 403）；
+     * hasApiKey / apiKeyLast4 为 UI 尾号展示而设，未保存时 hasApiKey=false 且 apiKey=""。
+     */
     apiKey: string;
+    hasApiKey: boolean;
+    apiKeyLast4: string;
   }>;
   promptPresets: AtlasPromptPreset[];
   activeApiPresetId: string | null;
@@ -1064,7 +1071,10 @@ export function settingsViewV2(settings: AtlasServerSettingsV2): AtlasSettingsVi
         promptPostProcessing: normalizePromptPostProcessing(p.promptPostProcessing),
         systemPrompt: p.systemPrompt ?? "",
         // 0.9.12（作者令，照抄 shujuku）：GET 返回明文密钥，编辑器回填 / 测试连接复用，不再每次重输
+        // （0.9.48 起以 GET local 闸为前提；hasApiKey/apiKeyLast4 供 UI 尾号展示）
         apiKey: key,
+        hasApiKey: key.length > 0,
+        apiKeyLast4: key.slice(-4),
       };
     }),
     promptPresets: settings.promptPresets.map((p) => ({ ...p })),
