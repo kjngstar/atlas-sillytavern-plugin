@@ -19,18 +19,40 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const imp = (p) => import(pathToFileURL(resolve(root, p)).href);
 const { buildStarterWorld } = await imp("src/atlas-starter-world.ts");
+const { legacyStartWorld } = await imp("tests/atlas-legacy-start-world.mjs");
 const { detectStartPlaceholder, retireStartPlaceholder, sanitizeSceneDoc, emptySceneDoc, resolveSceneStatus, sceneDocKey } = await imp("src/atlas-scene.ts");
+const { parseWorld } = await imp("lib/world-schema.ts");
 const { DEFAULT_PROMPT_SEGMENTS_V2, substitutePromptPlaceholders } = await imp("src/atlas-api-client.ts");
 const { createAtlasServerCore, createMemoryDocumentStore } = await imp("src/atlas-server.ts");
 
 const NOW = 1_700_000_000_000;
 
 // ---------------------------------------------------------------------------
+// 空地理（R06：新世界不再预置「起点」占位）
+// ---------------------------------------------------------------------------
+
+test("R06 空地理：新世界 0 地区 / 0 地点 / currentRegionId=null，不再生成「起点」", () => {
+  const world = buildStarterWorld({ id: "w-new", now: 1, name: "测试卡" });
+  assert.deepEqual(world.regions ?? [], [], "新世界无地区");
+  assert.deepEqual(world.points ?? [], [], "新世界无地点——第一轮推演的场景识别产出真实地点");
+  assert.equal(world.currentRegionId, null, "未知地区 = null，不归入不存在的「起点」");
+  assert.equal(world.characters.length, 1, "主角实体仍在");
+  assert.equal(world.characters[0].currentRegionId, null, "主角不挂在虚构地区上");
+  assert.equal(detectStartPlaceholder(world).isPlaceholder, false, "空世界不存在系统占位");
+  const names = [...(world.regions ?? []), ...(world.points ?? [])].map((x) => String(x.name));
+  assert.equal(names.includes("起点"), false, "产物里不再出现「起点」");
+});
+
+test("R06 空地理：产物仍通过 parseWorld（核心 schema 允许空地图）", () => {
+  assert.ok(parseWorld(buildStarterWorld({ id: "w-parse", now: 1, name: "爱丽丝" })), "空地理 parseWorld 必过");
+});
+
+// ---------------------------------------------------------------------------
 // 占位指纹
 // ---------------------------------------------------------------------------
 
 test("R06 指纹：全新起始世界 → 系统占位成立", () => {
-  const info = detectStartPlaceholder(buildStarterWorld({ id: "w1", now: 1, name: "测试卡" }));
+  const info = detectStartPlaceholder(legacyStartWorld({ id: "w1", now: 1, name: "测试卡" }));
   assert.equal(info.isPlaceholder, true);
   assert.equal(info.pointId, "1");
   assert.equal(info.regionId, "start");
@@ -38,7 +60,7 @@ test("R06 指纹：全新起始世界 → 系统占位成立", () => {
 });
 
 test("R06 指纹：用户创建且真正名叫「起点」的地点 → 不是占位（名字不是唯一依据）", () => {
-  const world = buildStarterWorld({ id: "w2", now: 1, name: "测试卡" });
+  const world = legacyStartWorld({ id: "w2", now: 1, name: "测试卡" });
   world.points.push({ id: 2, name: "起点", x: 12, y: 34, regionId: "start" });
   const info = detectStartPlaceholder(world);
   assert.equal(info.isPlaceholder, false, "两个地点 → 指纹破裂");
@@ -46,23 +68,23 @@ test("R06 指纹：用户创建且真正名叫「起点」的地点 → 不是�
 });
 
 test("R06 指纹：用户编辑过占位（坐标改动）→ 不是占位", () => {
-  const world = buildStarterWorld({ id: "w3", now: 1, name: "测试卡" });
+  const world = legacyStartWorld({ id: "w3", now: 1, name: "测试卡" });
   world.points[0].x = 51;
   assert.equal(detectStartPlaceholder(world).isPlaceholder, false);
 });
 
 test("R06 指纹：推演发生（账本事件）或定义修订过 → 不是占位", () => {
-  const played = buildStarterWorld({ id: "w4", now: 1, name: "测试卡" });
+  const played = legacyStartWorld({ id: "w4", now: 1, name: "测试卡" });
   played.stateEvents = [{ id: "e1", worldId: played.id, branchId: null, at: 1, sequence: 0, source: "author", narrativeSummary: "x", entityRefs: [], effects: [] }];
   assert.equal(detectStartPlaceholder(played).isPlaceholder, false, "有账本事件");
-  const revised = buildStarterWorld({ id: "w5", now: 1, name: "测试卡" });
+  const revised = legacyStartWorld({ id: "w5", now: 1, name: "测试卡" });
   revised.definitionRevisions = [{ id: "r1", worldId: revised.id, createdAt: 1, authorNote: "用户改过" }];
   assert.equal(detectStartPlaceholder(revised).isPlaceholder, false, "有定义修订");
 });
 
 test("R06 指纹：只改名字的世界（唯一地点仍叫起点但换了坐标等）→ 不是占位", () => {
   // 名字匹配单独不足：结构指纹其余项也必须吻合
-  const world = buildStarterWorld({ id: "w6", now: 1, name: "测试卡" });
+  const world = legacyStartWorld({ id: "w6", now: 1, name: "测试卡" });
   world.characters.push({ id: "npc-1", worldId: world.id, name: "少女", role: "配角", description: "", currentRegionId: "start" });
   assert.equal(detectStartPlaceholder(world).isPlaceholder, false, "多了一个人物");
 });
@@ -72,7 +94,7 @@ test("R06 指纹：只改名字的世界（唯一地点仍叫起点但换了坐�
 // ---------------------------------------------------------------------------
 
 test("R06 retired：修订审计 + sidecar 记录；重复运行幂等", () => {
-  const world = buildStarterWorld({ id: "w7", now: 1, name: "测试卡" });
+  const world = legacyStartWorld({ id: "w7", now: 1, name: "测试卡" });
   const doc = emptySceneDoc();
   const first = retireStartPlaceholder(world, doc, { now: 5 });
   assert.equal(first.changed, true);
@@ -84,7 +106,7 @@ test("R06 retired：修订审计 + sidecar 记录；重复运行幂等", () => {
 });
 
 test("R06 retired：非占位世界调用 → 零改动", () => {
-  const world = buildStarterWorld({ id: "w8", now: 1, name: "测试卡" });
+  const world = legacyStartWorld({ id: "w8", now: 1, name: "测试卡" });
   world.points.push({ id: 2, name: "客栈", x: 20, y: 20, regionId: "start" });
   const result = retireStartPlaceholder(world, emptySceneDoc(), { now: 5 });
   assert.equal(result.changed, false);
@@ -96,7 +118,7 @@ test("R06 retired：非占位世界调用 → 零改动", () => {
 // ---------------------------------------------------------------------------
 
 test("R06 场景状态：未知 ≠ 无上次确认；resolveSceneStatus 两者分开表达", () => {
-  const world = buildStarterWorld({ id: "w9", now: 1, name: "测试卡" });
+  const world = legacyStartWorld({ id: "w9", now: 1, name: "测试卡" });
   world.points.push({ id: 2, name: "废墟深处", x: 70, y: 50, regionId: "start" });
   const doc = { ...emptySceneDoc(), lastConfirmed: { branchId: null, pointId: "2", at: 9 } };
   const status = resolveSceneStatus(world, doc, null);
@@ -150,7 +172,7 @@ function jsonResponse(status, payload) {
   return { ok: status >= 200 && status < 300, status, json: async () => payload };
 }
 
-async function bootstrapSetup(responseDraft) {
+async function bootstrapSetup(responseDraft, worldFactory = legacyStartWorld) {
   const store = createMemoryDocumentStore();
   const calls = [];
   const fetchFn = async (url, init) => {
@@ -162,7 +184,7 @@ async function bootstrapSetup(responseDraft) {
   const { createSessionCarrier, carrierAsCore } = await imp("tests/atlas-session-helper.mjs");
   const carrier = createSessionCarrier(rawCore);
   const core = carrierAsCore(carrier);
-  const world = buildStarterWorld({ id: "w-boot", now: 1, name: "测试卡" });
+  const world = worldFactory({ id: "w-boot", now: 1, name: "测试卡" });
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", {
     action: "bind",
@@ -239,6 +261,21 @@ test("R06 bootstrap 应用：duration=0 时间不动、场景锚定、占位退�
   assert.equal(calls.length, 2, "每次调用各 1 条请求（预览/应用各算一次）");
 });
 
+test("R06 空地理 + bootstrap：第一轮场景识别直接产出真实地点，无占位可退役", async () => {
+  const { core, store, carrier } = await bootstrapSetup(BOOTSTRAP_DRAFT, () => buildStarterWorld({ id: "w-empty", now: 1, name: "测试卡" }));
+  const result = await core.handle("POST", "/scene/bootstrap", { chatId: "chat-boot", apply: true, assistantText: GREETING }, { local: true });
+  assert.equal(result.status, 200, `应成功：${JSON.stringify(result.body?.error ?? {})}`);
+  assert.equal(result.body.data.status, "committed");
+  assert.equal(result.body.data.placeholderRetired, false, "空世界没有占位可退役");
+  const world = carrier.session.world;
+  assert.deepEqual(world.regions ?? [], [], "没造虚构地区");
+  assert.equal((world.points ?? []).length, 1, "只有剧情产出的那一个真实地点");
+  assert.equal((world.points ?? [])[0].name, "废墟深处");
+  const sceneDoc = sanitizeSceneDoc(await store.read(sceneDocKey("w-empty")));
+  assert.deepEqual(sceneDoc.retiredPointIds, [], "无占位 → 无 retired 记录");
+  assert.equal(sceneDoc.lastConfirmed?.pointId, result.body.data.receipt.currentLocationId, "lastConfirmed 指向真实地点");
+});
+
 test("R06 bootstrap：无有效证据时诚实未知（unknown 场景 → 零地点写入）", async () => {
   const unknownDraft = {
     ...JSON.parse(JSON.stringify(BOOTSTRAP_DRAFT)),
@@ -271,6 +308,19 @@ test("R06 /state：scene 块分开表达未知 / lastConfirmed，retired 点从�
   const mapPointIds = state.body.data.map.points.map((p) => p.id);
   assert.ok(!mapPointIds.includes("1"), "retired 占位点不再进地图点列");
   assert.equal(mapPointIds.length, 1, "只展示真实地点（废墟深处）");
+});
+
+test("R06 /state：旧存档的纯占位「起点」默认不显示为真实地点（零写入）", async () => {
+  const { core, carrier } = await bootstrapSetup(BOOTSTRAP_DRAFT);
+  const state = await core.handle("POST", "/state", { chatId: "chat-boot" }, { local: true });
+  assert.equal(state.status, 200);
+  assert.equal(state.body.data.scene.placeholder.isPlaceholder, true, "指纹吻合 = 系统占位");
+  assert.deepEqual(state.body.data.map.points.map((p) => p.id), [], "占位不是地理事实，默认不进地图点列");
+  assert.deepEqual(
+    (carrier.session.world.points ?? []).map((p) => p.name),
+    ["起点"],
+    "结构保留：只是不展示，没删数据、引用不悬空",
+  );
 });
 
 test("R06 协议设置：v1 逃生门生效（runtime.update + 设置往返）", async () => {

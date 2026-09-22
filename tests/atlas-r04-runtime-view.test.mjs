@@ -16,14 +16,15 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const imp = (p) => import(pathToFileURL(resolve(root, p)).href);
-const { buildStarterWorld } = await imp("src/atlas-starter-world.ts");
+// R06 起新世界是空地理；这些用例需要一个已存在的地理基线（旧存档形状）
+const { legacyStartWorld } = await imp("tests/atlas-legacy-start-world.mjs");
 const { commitAtlasTurn } = await imp("src/atlas-turn.ts");
 const { projectEntityState } = await imp("lib/world-ledger.ts");
 const { resolveAtlasRuntimeView } = await imp("src/atlas-runtime-view.ts");
 const { parseAtlasWorldTurnDraft } = await imp("src/atlas-api-client.ts");
 
 function committedWorld() {
-  const world = buildStarterWorld({ id: "r04-world", now: 1, name: "R04 场景" });
+  const world = legacyStartWorld({ id: "r04-world", now: 1, name: "R04 场景" });
   world.points.push({ id: 2, name: "废墟深处", x: 70, y: 50, regionId: "start" });
   const draft = parseAtlasWorldTurnDraft(
     JSON.stringify({
@@ -62,7 +63,7 @@ test("N04: 提交后统一视图与账本投影一致（D05 修复）", () => {
 });
 
 test("R04: 无账本事件时回退 CharacterState / 旧角色字段（兼容基线）", () => {
-  const world = buildStarterWorld({ id: "r04-base", now: 1, name: "基线" });
+  const world = legacyStartWorld({ id: "r04-base", now: 1, name: "基线" });
   world.characterStates = [
     { characterId: "char-main", currentRegionId: "start", currentPointId: "1", status: "休息中", updatedAt: 5 },
   ];
@@ -75,7 +76,7 @@ test("R04: 无账本事件时回退 CharacterState / 旧角色字段（兼容基
 });
 
 test("N09: entityRecords 有 NPC 而 characters 无 → 注册表关联后可见且无重复", () => {
-  const world = buildStarterWorld({ id: "r04-reg", now: 1, name: "注册表" });
+  const world = legacyStartWorld({ id: "r04-reg", now: 1, name: "注册表" });
   world.characters = (world.characters ?? []).filter((c) => c.id !== "char-only");
   world.entityRecords = [
     ...(world.entityRecords ?? []),
@@ -99,7 +100,7 @@ test("N09: entityRecords 有 NPC 而 characters 无 → 注册表关联后可见
 });
 
 test("R04: 规则 3——pointId 变更而 regionId 未随事件更新时，按地点归属重解析地区", () => {
-  const world = buildStarterWorld({ id: "r04-region", now: 1, name: "地区一致性" });
+  const world = legacyStartWorld({ id: "r04-region", now: 1, name: "地区一致性" });
   world.regions.push({ id: "r2", worldId: world.id, name: "新地区", type: "other", description: "", coordinates: { x: 1, y: 1 } });
   world.points.push({ id: 2, name: "新地点", x: 20, y: 20, regionId: "r2" });
   world.entityRecords = [

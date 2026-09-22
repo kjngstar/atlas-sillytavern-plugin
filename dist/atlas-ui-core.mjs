@@ -9284,7 +9284,8 @@ function createCoreInstance(store, deps, shared) {
         continue;
       }
       const regionName = cleanName(raw?.regionName);
-      const regionId = (regionName ? regionIdByName.get(norm(regionName)) : null) ?? "start";
+      const fallbackRegionId = (world.regions ?? []).some((r) => String(r.id) === "start") ? "start" : null;
+      const regionId = (regionName ? regionIdByName.get(norm(regionName)) ?? null : null) ?? fallbackRegionId;
       const index = newPoints.length;
       const angle = index * 2.39996;
       const radius = 14 + 3.4 * Math.sqrt(index + 1);
@@ -9508,8 +9509,10 @@ function createCoreInstance(store, deps, shared) {
       flags: flagsFor(world, binding.branchId, binding.worldTimeCursor)
     });
     const sceneDoc = sanitizeSceneDoc(await store.read(sceneDocKey(world.id)).catch(() => null));
-    const retiredPointIds = new Set(sceneDoc.retiredPointIds);
-    const mapPoints = (world.points ?? []).filter((p) => !retiredPointIds.has(String(p.id))).slice(0, MAP_POINTS_MAX).map((p) => ({
+    const placeholder = detectStartPlaceholder(world);
+    const hiddenPointIds = new Set(sceneDoc.retiredPointIds);
+    if (placeholder.isPlaceholder && placeholder.pointId) hiddenPointIds.add(placeholder.pointId);
+    const mapPoints = (world.points ?? []).filter((p) => !hiddenPointIds.has(String(p.id))).slice(0, MAP_POINTS_MAX).map((p) => ({
       id: String(p.id),
       name: String(p.name).slice(0, MAP_POINT_NAME_CHARS),
       x: p.x,
@@ -11500,21 +11503,13 @@ function buildStarterWorld(options) {
     id: options.id,
     name: worldName,
     description,
-    currentRegionId: "start",
+    // R06：未知地区用 null，不造「起点」兜底地点。地点由推演的场景识别产出。
+    currentRegionId: null,
     currentYear: 1,
     createdAt: options.now,
     updatedAt: options.now,
-    regions: [
-      {
-        id: "start",
-        worldId: options.id,
-        name: "起点",
-        type: "other",
-        description: description ? description.slice(0, 500) : "故事开始的地方。",
-        coordinates: { x: 0, y: 0 }
-      }
-    ],
-    points: [{ id: 1, name: "起点", x: 50, y: 50, regionId: "start" }],
+    regions: [],
+    points: [],
     characters: [
       {
         id: "char-main",
@@ -11522,7 +11517,7 @@ function buildStarterWorld(options) {
         name: cardName || "主角",
         role: "主角",
         description: description.slice(0, 1e3),
-        currentRegionId: "start"
+        currentRegionId: null
       }
     ]
   };

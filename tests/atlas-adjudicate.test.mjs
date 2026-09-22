@@ -8,7 +8,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { adjudicateAtlasDraft } from "../src/atlas-adjudicate.ts";
-import { buildStarterWorld } from "../src/atlas-starter-world.ts";
+// R06 起新世界是空地理；这些用例需要一个已存在的地理基线（旧存档形状）
+import { legacyStartWorld } from "./atlas-legacy-start-world.mjs";
 import { buildTravelHint } from "../lib/world-engine.ts";
 import { parseWorld } from "../lib/world-schema.ts";
 
@@ -16,7 +17,7 @@ const NOW = 1_700_000_000_000;
 
 /** 夹具世界：starter world + 远处第二个地点 B(80,50)（起点 A 在 50,50）。 */
 function fixtureWorld() {
-  const world = buildStarterWorld({ id: `adj-${NOW}`, now: NOW, name: "裁决测试", description: "" });
+  const world = legacyStartWorld({ id: `adj-${NOW}`, now: NOW, name: "裁决测试", description: "" });
   world.points.push({ id: 2, name: "远镇", x: 80, y: 50, regionId: "start" });
   const parsed = parseWorld(JSON.parse(JSON.stringify(world)));
   assert.ok(parsed, "夹具世界可解析");

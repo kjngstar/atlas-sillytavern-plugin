@@ -4,7 +4,9 @@
  * 作者 2026-09-19 反馈：「导入世界 JSON 很多余——打开角色卡、第一次发消息时
  * 就该开始建立世界观。」本模块提供**最小合法世界**的构造器：
  * - 世界名取自当前角色卡；角色卡描述存为世界描述与主角档案；
- * - 1 个地区（起点）+ 1 个地点（起点）+ 1 个主角实体；
+ * - **空地理**：0 地区 + 0 地点（R06：核心 schema 的 regions / points 均为可选，
+ *   空数组合法；旧实现的「起点」地点是系统占位而不是地理事实）。
+ *   第一轮推演的场景识别会产出真实地点，地图由剧情生长，不需要占位兜底。
  * - 世界观随回合推演逐步生长（每轮 commit 的 lorebook 规划会往 Atlas 世界书写条目）。
  *
  * 产出必须能通过 lib/world-schema.ts 的 parseWorld（/worlds/import 服务端校验同款），
@@ -59,21 +61,13 @@ export function buildStarterWorld(options: StarterWorldOptions): World {
     id: options.id,
     name: worldName,
     description,
-    currentRegionId: "start",
+    // R06：未知地区用 null，不造「起点」兜底地点。地点由推演的场景识别产出。
+    currentRegionId: null,
     currentYear: 1,
     createdAt: options.now,
     updatedAt: options.now,
-    regions: [
-      {
-        id: "start",
-        worldId: options.id,
-        name: "起点",
-        type: "other",
-        description: description ? description.slice(0, 500) : "故事开始的地方。",
-        coordinates: { x: 0, y: 0 },
-      },
-    ],
-    points: [{ id: 1, name: "起点", x: 50, y: 50, regionId: "start" }],
+    regions: [],
+    points: [],
     characters: [
       {
         id: "char-main",
@@ -81,7 +75,7 @@ export function buildStarterWorld(options: StarterWorldOptions): World {
         name: cardName || "主角",
         role: "主角",
         description: description.slice(0, 1000),
-        currentRegionId: "start",
+        currentRegionId: null,
       },
     ],
   };

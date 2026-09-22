@@ -17,7 +17,8 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const imp = (p) => import(pathToFileURL(resolve(root, p)).href);
-const { buildStarterWorld } = await imp("src/atlas-starter-world.ts");
+// R06 起新世界是空地理；这些用例需要一个已存在的地理基线（旧存档形状）
+const { legacyStartWorld } = await imp("tests/atlas-legacy-start-world.mjs");
 const { parseAtlasWorldTurnDraftV2 } = await imp("src/atlas-contract-v2.ts");
 const { applyAtlasV2Turn } = await imp("src/atlas-turn-v2.ts");
 const { resolveEntityByRef, applyIdentityUpdates, mergeAliases } = await imp("src/atlas-identity.ts");
@@ -41,7 +42,7 @@ function makeRequest(overrides = {}) {
 
 function worldWithGirl() {
   // 首轮：少女建档于地点 1
-  const world = buildStarterWorld({ id: "r07-world", now: 1, name: "R07" });
+  const world = legacyStartWorld({ id: "r07-world", now: 1, name: "R07" });
   world.points.push({ id: 2, name: "废墟深处", x: 70, y: 50, regionId: "start" });
   return world;
 }
@@ -76,7 +77,7 @@ async function commitFirstTurn(world) {
 // ---------------------------------------------------------------------------
 
 test("R07 引用解析：精确 id / 唯一名 / 别名可解析", () => {
-  const world = buildStarterWorld({ id: "r07-a", now: 1, name: "T" });
+  const world = legacyStartWorld({ id: "r07-a", now: 1, name: "T" });
   world.characters.push({ id: "npc-g", worldId: world.id, name: "未具名少女", role: "配角", description: "", currentRegionId: "start", tags: ["少女"] });
   assert.equal(resolveEntityByRef(world, "npc-g").id, "npc-g", "精确 id");
   assert.equal(resolveEntityByRef(world, "未具名少女").id, "npc-g", "唯一 displayName");
@@ -85,7 +86,7 @@ test("R07 引用解析：精确 id / 唯一名 / 别名可解析", () => {
 });
 
 test("R07 同名不误合并：两个同名实体 → ambiguous，调用方拒绝", () => {
-  const world = buildStarterWorld({ id: "r07-b", now: 1, name: "T" });
+  const world = legacyStartWorld({ id: "r07-b", now: 1, name: "T" });
   world.characters.push(
     { id: "npc-g1", worldId: world.id, name: "少女", role: "配角", description: "", currentRegionId: "start" },
     { id: "npc-g2", worldId: world.id, name: "少女", role: "配角", description: "", currentRegionId: "start" },
@@ -186,7 +187,7 @@ test("R07 identityUpdates：已知实体获得真名 → 名字更新 + 别名�
 });
 
 test("R07 identityUpdates：无变化 → 不写修订也不炸", async () => {
-  const world = buildStarterWorld({ id: "r07-c", now: 1, name: "T" });
+  const world = legacyStartWorld({ id: "r07-c", now: 1, name: "T" });
   const result = applyIdentityUpdates(world, [{ entityId: "char-main", displayName: "", addAliases: [] }]);
   assert.equal(result.updatedIds.length, 0);
   assert.equal(result.world, world, "零变化返回原世界");

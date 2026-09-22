@@ -57,6 +57,9 @@ const smokeWorld = buildStarterWorld({
   name: "Aria",
   description: "mount smoke world",
 });
+// R06：新世界是空地理（0 地点）；本冒烟锁的是「有地点时地图真的渲染出标点 / 图例」，
+// 因此补一个真实地点（不是「起点」占位）当作已绑世界的当前位置。
+smokeWorld.points.push({ id: 1, name: "烟雾港", x: 50, y: 50, regionId: null });
 hostContext.chatMetadata.atlas = {
   schemaVersion: 1,
   rev: 1,

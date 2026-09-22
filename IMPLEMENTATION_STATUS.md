@@ -229,3 +229,25 @@
 - 真实浏览器手势验收（拖拽跟手 / 触摸双指 / 长中文标签遮挡）→ R14 交互验收
 - 相机「销毁时移除监听」：扩展卸载路径 disconnectAtlas 移除整个面板 DOM，监听随节点销毁；ResizeObserver 随 panel 移除后不再触发——无独立 teardown 钩子，未单独实现
 - 弹窗随 pan / zoom / resize 重新定位（anchorPanelToMarker 仅开面板时计算）→ R09 selectedEntityId 弹窗刷新一起收口
+
+## R06 补充 — 新世界空地理，不再生成「起点」（2026-09-23）
+
+- [x] `buildStarterWorld()` 改为**空地理**：`regions=[]` / `points=[]` / `currentRegionId=null` / 主角 `currentRegionId=null`（核心 schema 的 regions、points 均为可选，currentRegionId 允许 null）——第一轮推演的场景识别产出真实地点，不再有占位兜底
+- [x] 旧「起点」世界照旧走指纹 + retired 迁移：退役只在**真的锚定到地点**时执行；用户真正创建且名叫「起点」的地点不删不迁
+- [x] 纯占位**默认不显示为真实地点**：/state 地图点列同时过滤「已退役」与「指纹吻合但未退役」的占位——结构保留、引用不悬空、零写入
+- [x] geo/adopt 不再写死 `start`：无 regionName / 未知地区 → `regionId=null`（旧世界里真有 start 地区时沿用原口径，行为不变）
+- [x] 空地理提示文案更新（不再声称「自动建世只创建起点」）
+- [x] 测试基线分离：新增 `tests/atlas-legacy-start-world.mjs`（旧存档形状夹具），依赖「已有地理」的用例改走夹具，不再反向依赖新世界形状
+
+证据：
+- 新增 / 改写用例 5 项：空地理形状 + parseWorld 必过、空地理 + bootstrap 端到端（无占位可退役 / 只有剧情产出的真实地点）、/state 占位不进地图点列、geo/adopt 空地理不写悬空 `start`
+- 门禁：typecheck 0 errors；pack 通过（镜像同步）；test **452/452**（447 → 452）
+
+残留：
+- 已推演过的旧存档：指纹必然破裂（有账本事件 / 多人物）→ 不能自动退役，否则会误删用户真叫「起点」的地点；这类存档需作者手动处理或重开新聊天
+- 计划 R06 末条「旧存档重新识别当前场景与在场人物（预览变更、不自动推进时间）」的 UI 入口未做
+
+## R08 热修 — 标记巨型化与手势失灵（2026-09-23）
+
+- [x] `markerInverseScale` 修正为 `1/k`（旧公式 `fitK/k`：fit 时 =1 等于没抵消，单点世界 k≈58 → 标记放大 58 倍铺满视口，并吃掉全部指针事件导致拖不动、缩不小）
+- [x] viewport 只在**空白起手 / 双指**时 `setPointerCapture`（旧实现每次 pointerdown 都捕获 → 抢走标记的点击）

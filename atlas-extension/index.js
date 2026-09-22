@@ -2628,7 +2628,7 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       const hasRealGeo = pointsAll.length > 1 || regions.length > 1;
       mapHint.textContent = hasRealGeo
         ? ""
-        : "这个世界还没有地理数据：自动建世只创建「起点」。点下方「从世界书提炼地理」导入卡书里的地点；之后随着剧情推进，可用「从近期剧情提炼新地点」让地图继续生长。";
+        : "这个世界还没有地理数据：新世界不再预置「起点」占位地点。点下方「从世界书提炼地理」导入卡书里的地点；推演有场景后，可用「从近期剧情提炼新地点」让地图继续生长。";
       // R01：空提示不渲染占位覆盖层（旧实现空文字仍是 inset:0 的 absolute 层，挡住点击）
       mapHint.style.display = mapHint.textContent ? "" : "none";
     }

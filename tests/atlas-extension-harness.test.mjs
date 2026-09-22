@@ -1123,13 +1123,14 @@ test("starter world：buildStarterWorld 产物必须通过 parseWorld；角色�
   const parsed = parseWorld(world);
   ok(parsed !== null, "parseWorld 通过（/worlds/import 服务端同款校验）");
   equal(parsed.name, "爱丽丝 的世界", "世界名取自角色卡");
-  equal(parsed.currentRegionId, "start", "初始地区 start");
+  // R06：新世界空地理——不再预置「起点」地区/地点，未知地区 = null
+  equal(parsed.currentRegionId, null, "未知地区 = null（不预置 start）");
+  equal(parsed.regions.length, 0, "0 地区（空地理）");
+  equal(parsed.points.length, 0, "0 地点（不生成起点占位）");
   equal(parsed.characters.length, 1, "一个主角实体");
   equal(parsed.characters[0].name, "爱丽丝", "主角名 = 角色卡名");
+  equal(parsed.characters[0].currentRegionId, null, "主角不挂在虚构地区上");
   ok(parsed.description.length <= 2000, "描述有界（≤2000）");
-  equal(parsed.regions.length, 1, "一个地区");
-  equal(parsed.points.length, 1, "一个地点");
-  equal(parsed.points[0].regionId, "start", "地点归属 start");
   // 缺省回退：无名无描述也能过 schema
   const fallback = parseWorld(buildStarterWorld({ id: "world-test-2", now: NOW_BASE }));
   ok(fallback !== null, "无名无描述也通过 parseWorld");

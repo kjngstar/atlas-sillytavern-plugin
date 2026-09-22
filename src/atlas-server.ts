@@ -953,7 +953,7 @@ function createCoreInstance(
     }
 
     let nextPointId = (world.points ?? []).reduce((max, p) => Math.max(max, Number(p.id) || 0), 0) + 1;
-    const newPoints: Array<{ id: number; name: string; x: number; y: number; regionId?: string }> = [];
+    const newPoints: Array<{ id: number; name: string; x: number; y: number; regionId?: string | null }> = [];
     for (const raw of (Array.isArray(spec.points) ? spec.points : []).slice(0, GEO_LIMITS.POINTS_MAX + 8)) {
       if (newPoints.length >= GEO_LIMITS.POINTS_MAX) break;
       const name = cleanName((raw as { name?: unknown })?.name);
@@ -962,7 +962,10 @@ function createCoreInstance(
         continue;
       }
       const regionName = cleanName((raw as { regionName?: unknown })?.regionName);
-      const regionId = (regionName ? regionIdByName.get(norm(regionName)) : null) ?? "start";
+      // R06：未知地区回退 null，不自动归入「起点」——新世界是空地理，写死 "start"
+      // 会造出指向不存在地区的悬空引用；旧世界里真有 start 地区时沿用原口径。
+      const fallbackRegionId = (world.regions ?? []).some((r) => String(r.id) === "start") ? "start" : null;
+      const regionId = (regionName ? regionIdByName.get(norm(regionName)) ?? null : null) ?? fallbackRegionId;
       // 黄金角螺旋布点：绕「起点」外圈散开，绝不与已有点重叠坐标
       const index = newPoints.length;
       const angle = index * 2.39996;
@@ -1228,9 +1231,13 @@ function createCoreInstance(
     // R06 场景状态：占位指纹 + retired 列表 + lastConfirmed（与「当前未知」分开表达）
     // retired 占位点在真实地点语境（地图点列 / 附近）默认过滤，结构保留（引用不悬空）
     const sceneDoc = sanitizeSceneDoc(await store.read(sceneDocKey(world.id)).catch(() => null));
-    const retiredPointIds = new Set(sceneDoc.retiredPointIds);
+    // R06：系统占位默认不显示为真实地点——已退役的（retired 列表）与指纹吻合但尚未
+    // 退役的「起点」都不进真实地点语境。结构保留、引用不悬空，只是不冒充地理事实。
+    const placeholder = detectStartPlaceholder(world);
+    const hiddenPointIds = new Set(sceneDoc.retiredPointIds);
+    if (placeholder.isPlaceholder && placeholder.pointId) hiddenPointIds.add(placeholder.pointId);
     // 有界地图数据：静态世界结构（地点列表），不含世界书 / 记忆 / 账本
-    const mapPoints = (world.points ?? []).filter((p) => !retiredPointIds.has(String(p.id))).slice(0, MAP_POINTS_MAX).map((p) => ({
+    const mapPoints = (world.points ?? []).filter((p) => !hiddenPointIds.has(String(p.id))).slice(0, MAP_POINTS_MAX).map((p) => ({
       id: String(p.id),
       name: String(p.name).slice(0, MAP_POINT_NAME_CHARS),
       x: p.x,

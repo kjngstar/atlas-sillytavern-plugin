@@ -15,7 +15,8 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const imp = (p) => import(pathToFileURL(resolve(root, p)).href);
-const { buildStarterWorld } = await imp("src/atlas-starter-world.ts");
+// R06 起新世界是空地理；这些用例需要一个已存在的地理基线（旧存档形状）
+const { legacyStartWorld } = await imp("tests/atlas-legacy-start-world.mjs");
 const { parseAtlasWorldTurnDraftV2 } = await imp("src/atlas-contract-v2.ts");
 const { applyAtlasV2Turn } = await imp("src/atlas-turn-v2.ts");
 const { parseAtlasWorldTurnDraft } = await imp("src/atlas-api-client.ts");
@@ -65,7 +66,7 @@ function makeRequest(overrides = {}) {
 }
 
 function baseWorld() {
-  return buildStarterWorld({ id: "r05-world", now: 1, name: "R05 场景" });
+  return legacyStartWorld({ id: "r05-world", now: 1, name: "R05 场景" });
 }
 
 // ---------------------------------------------------------------------------

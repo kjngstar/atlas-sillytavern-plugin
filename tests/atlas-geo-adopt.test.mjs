@@ -13,6 +13,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { buildStarterWorld } from "../src/atlas-starter-world.ts";
+// 提炼去重 / 归属回退的基线需要「已有地理」的旧存档形状（新世界是空地理，见文末用例）
+import { legacyStartWorld } from "./atlas-legacy-start-world.mjs";
 import { createAtlasServerCore, createMemoryDocumentStore } from "../src/atlas-server.ts";
 import { ATLAS_ERROR_CODES } from "../src/atlas-contract.ts";
 import { createSessionCarrier, carrierAsCore } from "./atlas-session-helper.mjs";
@@ -58,7 +60,7 @@ async function makeCore({ fetchScripts, configurePreset = true } = {}) {
   await core.handle(
     "POST",
     "/worlds/ensure-starter",
-    { world: JSON.parse(JSON.stringify(buildStarterWorld({ id: WORLD_ID, now: 1_700_000_000_000, name: "测试角色" }))) },
+    { world: JSON.parse(JSON.stringify(legacyStartWorld({ id: WORLD_ID, now: 1_700_000_000_000, name: "测试角色" }))) },
     { local: true },
   );
   await core.handle("POST", "/bindings", {
@@ -266,4 +268,23 @@ test("geo/adopt 剧情模式：形状不对的 recentTexts 宽容丢弃；两者
   assert.equal(garbage.body.ok, false);
   assert.equal(garbage.body.error.code, ATLAS_ERROR_CODES.INVALID_PAYLOAD, "有效条目为 0 → 拒绝");
   assert.equal(fetchCalls.length, 0, "零请求");
+});
+
+// ---------------------------------------------------------------------------
+// R06 空地理：提炼不得造出指向不存在地区的悬空引用
+// ---------------------------------------------------------------------------
+
+test("geo/adopt 空地理：无 regionName 的地点回退 null，绝不写死不存在的 start 地区", async () => {
+  const { core, carrier } = await makeCore({
+    fetchScripts: [() => openAiResponse(JSON.stringify({ regions: [], points: [{ name: "无名石碑" }] }))],
+  });
+  // 换成 R06 空地理新世界（ensure-starter 之后再覆盖会话文档形状）
+  carrier.session.world = JSON.parse(JSON.stringify(buildStarterWorld({ id: WORLD_ID, now: 1, name: "空地理" })));
+  const result = await adopt(core);
+  assert.equal(result.body.ok, true);
+  assert.equal(result.body.data.pointsAdded, 1);
+  const world = carrier.session.world;
+  const stele = (world.points ?? []).find((p) => p.name === "无名石碑");
+  assert.ok(stele, "地点已入库");
+  assert.ok(!stele.regionId, `regionId 必须是空 / null，不能是悬空的 "start"（实际 ${String(stele.regionId)}）`);
 });

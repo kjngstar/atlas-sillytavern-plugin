@@ -90,16 +90,14 @@ test("ensure-starter：世界已存在 → created=false 且绝不覆盖已有�
   await ensure(core, world);
 
   // 模拟用户/推演已经改动过这个世界（改名 + 加地点）——0.9.42 起直接改会话文档
+  // R06：新世界是空地理，既有改动 = 用户后加的那 1 个地点
   carrier.session.world.name = "被改过的世界名";
-  carrier.session.world.points = [
-    ...carrier.session.world.points,
-    { id: 2, name: "后来加的地点", x: 20, y: 20, regionId: "start" },
-  ];
+  carrier.session.world.points = [{ id: 2, name: "后来加的地点", x: 20, y: 20, regionId: null }];
 
   const again = await ensure(core, starterWorld("world-auto-aaaaaaaaaaaaaaaa", "新角色名"));
   assert.equal(again.body.data.created, false, "第二次 = created:false");
   assert.equal(carrier.session.world.name, "被改过的世界名", "既有世界名未被覆盖");
-  assert.equal(carrier.session.world.points.length, 2, "既有地点未被覆盖");
+  assert.equal(carrier.session.world.points.length, 1, "既有地点未被覆盖");
 });
 
 test("ensure-starter：非法世界被拒且零写入", async () => {
