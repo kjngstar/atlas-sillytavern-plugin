@@ -124,7 +124,7 @@ function fakeRouter() {
   const routes = [];
   // 0.9.42 会话承载：模拟浏览器——会话文档随请求往返，200 ok 响应带回的新会话覆盖本地
   const SESSION_ROUTES = new Set([
-    "POST /worlds/import", "POST /worlds/ensure-starter", "POST /worlds/geo/adopt", "POST /bindings",
+    "POST /worlds/import", "POST /worlds/ensure-starter", "POST /worlds/geo/adopt", "POST /worlds/move-author", "POST /bindings",
     "POST /state", "POST /map/image", "POST /turns/prepare", "POST /turns/commit", "POST /turns/retry",
     "POST /turns/restore", "POST /turns/rollback", "POST /map/travel-preview",
   ]);

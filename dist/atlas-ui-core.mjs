@@ -7680,6 +7680,7 @@ var ATLAS_SESSION_ROUTES = /* @__PURE__ */ new Set([
   "POST /worlds/import",
   "POST /worlds/ensure-starter",
   "POST /worlds/geo/adopt",
+  "POST /worlds/move-author",
   "POST /bindings",
   "POST /state",
   "POST /map/image",
@@ -7860,7 +7861,7 @@ function createCoreInstance(store, deps, shared) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.43",
+      version: "0.9.44",
       protocolVersion: 1,
       time: now()
     });
@@ -8731,6 +8732,89 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
       restored: restored.restored ?? null
     });
   }
+  async function handleMoveAuthor(body) {
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "move-author 请求必须是对象");
+    }
+    const record = body;
+    const chatId = typeof record.chatId === "string" ? record.chatId.trim() : "";
+    const entityId = typeof record.entityId === "string" ? record.entityId.trim().slice(0, ATLAS_LIMITS.ID_CHARS) : "";
+    const toPointId = typeof record.toPointId === "string" ? record.toPointId.trim().slice(0, ATLAS_LIMITS.ID_CHARS) : "";
+    if (!chatId || !entityId || !toPointId) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "move-author 需要 chatId、entityId 与 toPointId。");
+    }
+    const binding = requireBoundBinding(await getBinding(chatId));
+    const world = await requireWorld(binding);
+    const character = (world.characters ?? []).find((c) => String(c.id) === entityId);
+    if (!character) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, `人物不存在：${entityId}`);
+    }
+    const point = (world.points ?? []).find((p) => String(p.id) === toPointId);
+    if (!point) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, `目标地点不存在：${toPointId}`);
+    }
+    const regionId = point.regionId ?? null;
+    const moved = moveCharacterTo(world, entityId, regionId, toPointId, now(), { branchId: binding.branchId });
+    if (!moved.ok) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, moved.reason);
+    }
+    const effect = parseStateEffect({
+      kind: "moveEntity",
+      entityId,
+      ...regionId ? { regionId } : {},
+      pointId: toPointId
+    });
+    if (!effect) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "moveEntity effect 形状非法");
+    }
+    const provisioned = provisionReferencedCharacters(moved.world, [effect], now());
+    const pointName2 = String(point.name ?? toPointId);
+    const characterName = String(character.name ?? entityId);
+    const appended = appendStateEvent(
+      provisioned,
+      {
+        branchId: binding.branchId,
+        at: binding.worldTimeCursor,
+        source: "author",
+        narrativeSummary: `作者纠偏：${characterName} 移动到 ${pointName2}`.slice(0, 300),
+        effects: [effect],
+        entityRefs: [entityId]
+      },
+      { now: now() }
+    );
+    if (!appended.ok) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, appended.error);
+    }
+    const nextWorld = appended.value;
+    const ledgerEventId = nextWorld.stateEvents?.[nextWorld.stateEvents.length - 1]?.id ?? "";
+    await store.write(`world:${binding.worldId}`, nextWorld);
+    worldCache.set(binding.worldId, nextWorld);
+    let cursorMoved = false;
+    if (isProtagonistRole(character.role)) {
+      const nextBinding = {
+        ...binding,
+        currentLocationId: toPointId
+      };
+      await store.write(`binding:${binding.chatId}`, nextBinding);
+      bindingCache.set(binding.chatId, nextBinding);
+      cursorMoved = true;
+    }
+    pushLog({
+      at: now(),
+      kind: "world-move-author",
+      chatId: binding.chatId,
+      worldId: binding.worldId,
+      entityId,
+      toPointId,
+      protagonist: cursorMoved
+    });
+    return okResult({
+      moved: { entityId, characterName, pointId: toPointId, pointName: pointName2, regionId },
+      ledgerEventId,
+      cursorMoved,
+      summary: `作者纠偏：${characterName} 移动到 ${pointName2}`
+    });
+  }
   async function handleTravelPreview(body) {
     if (!body || typeof body !== "object" || Array.isArray(body)) {
       throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "travel-preview 请求必须是对象");
@@ -8811,6 +8895,7 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
       if (method === "POST" && route === "/worlds/import") return await handleImportWorld(body, ctx);
       if (method === "POST" && route === "/worlds/ensure-starter") return await handleEnsureStarter(body, ctx);
       if (method === "POST" && route === "/worlds/geo/adopt") return await handleGeoAdopt(body);
+      if (method === "POST" && route === "/worlds/move-author") return await handleMoveAuthor(body);
       if (method === "POST" && route === "/bindings") return await handleBindings(body);
       if (method === "POST" && route === "/state") return await handleState(body);
       if (method === "POST" && route === "/map/image") return await handleMapImage(body);

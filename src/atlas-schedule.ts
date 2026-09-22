@@ -134,7 +134,7 @@ export interface AtlasSettlementResult {
  */
 const PROTAGONIST_ROLES = new Set(["protagonist", "主角", "player", "玩家", "user", "observer", "观察者"]);
 
-function isProtagonistRole(role: unknown): boolean {
+export function isProtagonistRole(role: unknown): boolean {
   if (typeof role !== "string") return false;
   return PROTAGONIST_ROLES.has(role.trim().toLowerCase()) || PROTAGONIST_ROLES.has(role.trim());
 }

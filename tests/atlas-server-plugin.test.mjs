@@ -199,8 +199,8 @@ async function setup(fetchScripts, overrides = {}) {
 // 路由清单与健康检查
 // ---------------------------------------------------------------------------
 
-test("路由清单：18 条且全部在 /api/plugins/atlas 前缀下", () => {
-  equal(ATLAS_ROUTE_MANIFEST.length, 18, "dispatch 核心路由数（0.9.42：/state 与 /map/image 改 POST、新增 /session/export + /session/purge）");
+test("路由清单：19 条且全部在 /api/plugins/atlas 前缀下", () => {
+  equal(ATLAS_ROUTE_MANIFEST.length, 19, "dispatch 核心路由数（0.9.42 会话承载改排 + 0.9.44 /worlds/move-author）");
   equal(ATLAS_PLUGIN_ROUTES.length, ATLAS_ROUTE_MANIFEST.length, "index.mjs 与核心路由清单一致");
   const plugin = createAtlasServerPlugin();
   for (const route of plugin.routes) {
@@ -525,6 +525,112 @@ test("commit：恰好 1 请求、原子落账、绑定游标推进", async () =>
   const logSerialized = JSON.stringify(fresh.logs());
   ok(!logSerialized.includes(SECRET), "日志无明文 Key");
   ok(!logSerialized.includes("mock.example.invalid"), "日志无 endpoint");
+});
+
+// ---------------------------------------------------------------------------
+// 0.9.44 拖动纠偏：POST /worlds/move-author（作者 moveEntity source="author"）
+// ---------------------------------------------------------------------------
+
+test("move-author：NPC 纠偏 → CharacterState 权威位置 + author 账本事件，游标不动", async () => {
+  const fetcher = makeFetch([]);
+  const store = createMemoryDocumentStore();
+  const world = buildWorld();
+  const { core, carrier } = sessionCore(store, { fetchFn: fetcher.fetchFn });
+  await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
+  await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
+
+  const result = await core.handle("POST", "/worlds/move-author", {
+    chatId: "chat-a",
+    entityId: "chronicle-c1",
+    toPointId: "4104",
+  });
+  equal(result.status, 200, "纠偏 200");
+  equal(result.body.data.moved.pointId, "4104", "回执指向目标地点");
+  ok(result.body.data.ledgerEventId, "返回账本事件 id");
+
+  // 权威位置：CharacterState 已写（绑定分支作用域行——resolveCharacterPosition 同款口径）
+  const state = carrier.session.world.characterStates?.find(
+    (st) => st.characterId === "chronicle-c1" && (st.branchId ?? null) === CANON,
+  );
+  ok(state, "CharacterState 已写（绑定分支作用域）");
+  equal(state.currentPointId, "4104", "位置 = 目标地点");
+  equal(state.currentRegionId, "capital", "地区 = 目标地点所属地区");
+
+  // 账本：source="author" 的 moveEntity 事件，at = 当前游标（纠偏不推进时间）
+  const events = carrier.session.world.stateEvents ?? [];
+  const last = events[events.length - 1];
+  equal(last.source, "author", "账本来源 = author（可审计）");
+  equal(last.at, CURRENT_TIME, "纠偏不推进时间游标");
+  equal(last.effects[0].kind, "moveEntity", "effect = moveEntity");
+  equal(last.effects[0].pointId, "4104", "effect 指向目标地点");
+  ok(JSON.stringify(last.narrativeSummary).includes("作者纠偏"), "叙事摘要可读");
+
+  // 非主角：绑定位置游标不动
+  equal(carrier.session.binding.currentLocationId, "4103", "非主角不推绑定游标");
+  equal(fetcher.calls.length, 0, "纠偏零模型请求");
+});
+
+test("move-author：主角纠偏 → 绑定游标端点同步 + characters-only 主角自动建档", async () => {
+  const fetcher = makeFetch([]);
+  const store = createMemoryDocumentStore();
+  let world = buildWorld();
+  // 注入主角（自动建世同款：role="主角"，且只在 characters、无 entityRecord）
+  world.characters = [
+    ...world.characters,
+    { id: "char-main", worldId: world.id, name: "林拾", role: "主角", description: "测试主角" },
+  ];
+  world = parseWorld(JSON.parse(JSON.stringify(world)));
+  const { core, carrier } = sessionCore(store, { fetchFn: fetcher.fetchFn });
+  await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
+  await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
+
+  const result = await core.handle("POST", "/worlds/move-author", {
+    chatId: "chat-a",
+    entityId: "char-main",
+    toPointId: "4104",
+  });
+  equal(result.status, 200, "主角纠偏 200");
+  equal(result.body.data.cursorMoved, true, "回执标明游标已同步");
+
+  // 游标端点：主角拖动 = 玩家事实位置迁移
+  equal(carrier.session.binding.currentLocationId, "4104", "绑定位置游标已到目标地点");
+
+  // characters-only 主角：账本建档（0.9.37 同款）后事件成功落账
+  const record = (carrier.session.world.entityRecords ?? []).find((e) => String(e.id) === "char-main");
+  ok(record, "主角已确定性建档进 entityRecords");
+  const events = carrier.session.world.stateEvents ?? [];
+  const last = events[events.length - 1];
+  equal(last.source, "author", "账本来源 = author");
+  ok((last.entityRefs ?? []).includes("char-main"), "事件 entityRefs 含主角");
+
+  // 主角 CharacterState 也已写（地图标点 / 遭遇判定同源）
+  const state = carrier.session.world.characterStates?.find(
+    (st) => st.characterId === "char-main" && (st.branchId ?? null) === CANON,
+  );
+  equal(state?.currentPointId, "4104", "主角 CharacterState 位置一致");
+});
+
+test("move-author：未知实体 / 未知地点 / 未绑定 → 拒绝且零写入", async () => {
+  const fetcher = makeFetch([]);
+  const store = createMemoryDocumentStore();
+  const world = buildWorld();
+  const { core, carrier } = sessionCore(store, { fetchFn: fetcher.fetchFn });
+  await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
+  await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
+  const eventsBefore = (carrier.session.world.stateEvents ?? []).length;
+
+  const badEntity = await core.handle("POST", "/worlds/move-author", { chatId: "chat-a", entityId: "no-such", toPointId: "4104" });
+  equal(badEntity.body.error.code, ATLAS_ERROR_CODES.INVALID_PAYLOAD, "未知实体拒绝");
+  ok(badEntity.body.error.message.includes("人物不存在"), "拒绝原因可读");
+
+  const badPoint = await core.handle("POST", "/worlds/move-author", { chatId: "chat-a", entityId: "chronicle-c1", toPointId: "4999" });
+  equal(badPoint.body.error.code, ATLAS_ERROR_CODES.INVALID_PAYLOAD, "未知地点拒绝");
+
+  const unbound = await core.handle("POST", "/worlds/move-author", { chatId: "chat-none", entityId: "chronicle-c1", toPointId: "4104" });
+  equal(unbound.body.error.code, ATLAS_ERROR_CODES.NOT_BOUND, "未绑定拒绝");
+
+  equal((carrier.session.world.stateEvents ?? []).length, eventsBefore, "拒绝路径零账本写入");
+  equal(carrier.session.binding.currentLocationId, "4103", "拒绝路径游标不动");
 });
 
 test("settings v2 运行时组合：commit 用「活动 API + 活动提示词」，两库独立切换", async () => {

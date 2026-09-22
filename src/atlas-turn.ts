@@ -319,7 +319,7 @@ function inferValueType(value: unknown): "string" | "number" | "boolean" | "stri
  * 建档经 appendDefinitionRevision 留审计；建档失败不打断（该实体相关 effect 交由
  * 账本给出明确报错），失败路径返回原世界，零部分写入语义不变。
  */
-function provisionReferencedCharacters(world: World, effects: StateEffect[], now: number): World {
+export function provisionReferencedCharacters(world: World, effects: StateEffect[], now: number): World {
   const referenced = referencedEntityIdsOf(effects);
   if (referenced.size === 0) return world;
   const knownRecords = new Set((world.entityRecords ?? []).map((e) => String(e.id)));

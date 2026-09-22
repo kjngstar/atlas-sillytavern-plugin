@@ -15,7 +15,8 @@ const SESSION_ROUTE_METHODS = (method, path) =>
     path === "/bindings" ||
     path === "/worlds/import" ||
     path === "/worlds/ensure-starter" ||
-    path === "/worlds/geo/adopt");
+    path === "/worlds/geo/adopt" ||
+    path === "/worlds/move-author");
 
 export function createSessionCarrier(core, { world = null, binding = null, maps = null, session: initial = null } = {}) {
   let session = initial
