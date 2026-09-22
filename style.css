@@ -43,6 +43,28 @@
   --aw-input-dim: #6f7c78;
   --aw-input-disabled-bg: #f2efe7;
 
+  /* R11：增量令牌——选中态 / 子图面包屑 / 状态提示 / 头像
+   * 设计纪律：仅扩展 `--am-*` 白名单（用户可覆盖），不引入新前缀；值与现有
+   * `--aw-*` 收口令牌共享（如 --aw-gold-soft / --aw-ink），保证一致换肤。 */
+  --am-selected-outline: 2px solid var(--aw-gold);
+  --am-selected-shadow: 0 0 0 4px rgba(196, 163, 99, 0.18);
+  --am-breadcrumb-text: var(--aw-muted);
+  --am-breadcrumb-sep: #b8b1a0;
+  --am-breadcrumb-active: var(--aw-gold-deep);
+  --am-status-info-bg: var(--aw-teal-wash);
+  --am-status-info-text: var(--aw-teal-deep);
+  --am-status-warn-bg: var(--aw-gold-wash);
+  --am-status-warn-text: var(--aw-gold-deep);
+  --am-status-error-bg: rgba(163, 84, 60, 0.12);
+  --am-status-error-text: var(--aw-danger);
+  --am-avatar-npc-bg: linear-gradient(135deg, #d8b26a 0%, #b9924a 100%);
+  --am-avatar-npc-text: #42320f;
+  --am-avatar-npc-border: #fff8df;
+  --am-avatar-obj-bg: #ece4f6;
+  --am-avatar-obj-text: #4b3a6e;
+  --am-avatar-obj-border: #7a5fb8;
+  --am-section-label-color: var(--aw-gold-deep);
+
   --aw-serif: Georgia, "Songti SC", "SimSun", serif;
   --aw-sans: system-ui, "Microsoft YaHei", sans-serif;
 
@@ -1118,9 +1140,50 @@
   font-weight: 700;
 }
 
+/* R11：选中态——弹窗关联的 marker 用 outline + 外阴影表达，跨皮肤一致。 */
+.aw-point.is-selected {
+  outline: var(--am-selected-outline);
+  outline-offset: 2px;
+  box-shadow: var(--am-selected-shadow);
+  z-index: 4;
+}
+
 .aw-point.is-current::before {
   background: var(--aw-gold-soft);
   border-color: var(--aw-veil-line);
+}
+
+/* R11：子图面包屑（R09 三层级导航用，UI 渲染时挂上 .aw-breadcrumb / .aw-breadcrumb__item）。
+ * 当前为占位样式——UI 接入点预留。 */
+.aw-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--am-breadcrumb-text);
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: var(--aw-veil);
+  border: 1px solid var(--aw-line);
+}
+.aw-breadcrumb__item {
+  cursor: pointer;
+  color: var(--am-breadcrumb-text);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+.aw-breadcrumb__item:hover {
+  color: var(--am-breadcrumb-active);
+  background: var(--aw-gold-wash);
+}
+.aw-breadcrumb__item.is-current {
+  color: var(--am-breadcrumb-active);
+  font-weight: 700;
+  cursor: default;
+}
+.aw-breadcrumb__sep {
+  color: var(--am-breadcrumb-sep);
+  user-select: none;
 }
 
 /* 0.9.41 人物 = 金圆字头像 + hover 名牌；物品 = 紫色小方块 + hover 名牌。
@@ -1561,7 +1624,32 @@
 }
 
 .aw-status--error {
-  color: #a2453c;
+  color: var(--aw-danger);
+}
+
+/* R11：状态提示三态（info / warn / error），均使用令牌；UI 可挂在 .aw-status 或独立 .aw-banner */
+.aw-status--info,
+.aw-banner--info {
+  color: var(--am-status-info-text);
+  background: var(--am-status-info-bg);
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+.aw-status--warn,
+.aw-banner--warn {
+  color: var(--am-status-warn-text);
+  background: var(--am-status-warn-bg);
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+.aw-status--error,
+.aw-banner--error {
+  color: var(--am-status-error-text);
+  background: var(--am-status-error-bg);
+  padding: 4px 8px;
+  border-radius: 4px;
 }
 
 .aw-world-card .aw-actions {
@@ -1993,15 +2081,15 @@
 }
 
 .aw-mappanel__avatar--npc {
-  background: linear-gradient(135deg, #d8b26a 0%, #b9924a 100%);
-  color: #42320f;
-  border: 2px solid #fff8df;
+  background: var(--am-avatar-npc-bg);
+  color: var(--am-avatar-npc-text);
+  border: 2px solid var(--am-avatar-npc-border);
 }
 
 .aw-mappanel__avatar--obj {
-  background: #ece4f6;
-  color: #4b3a6e;
-  border: 1.5px solid #7a5fb8;
+  background: var(--am-avatar-obj-bg);
+  color: var(--am-avatar-obj-text);
+  border: 1.5px solid var(--am-avatar-obj-border);
   border-radius: 4px;
 }
 
@@ -2013,7 +2101,7 @@
 .aw-mappanel__section-label {
   font-size: 11px;
   font-weight: 700;
-  color: #8a6a1c;
+  color: var(--am-section-label-color);
   letter-spacing: 0.04em;
   margin-bottom: 4px;
 }
@@ -2034,7 +2122,7 @@
 .aw-mappanel__here-label {
   font-size: 11px;
   font-weight: 700;
-  color: #8a6a1c;
+  color: var(--am-section-label-color);
   letter-spacing: 0.04em;
   margin-bottom: 4px;
 }

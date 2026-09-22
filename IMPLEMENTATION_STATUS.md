@@ -48,6 +48,7 @@
 | R12 | ✅ 完成 | 原子事务收口：`pending.remove` best-effort（失败记日志不抛错）+ `reconcilePendingCommits` 启动清理 orphan；460/460 |
 | R10 | ✅ 完成 | v2 mapScaleHints 接入提交链路：`applyScaleHintsToDoc` 纯函数（人工锁定 / frame 不匹配 / unknown-conflict 跳过纪律）+ executeCommit 应用到 maps sidecar + 日志分流；471/471 |
 | R09 | ✅ 完成（后端） | SubMap schema 升级加 `frame: { cols, rows, frameRevision }` 字段 + `validateSubmapDepth` 深度校验 + `handleScaleCalibrate` 使用真实 frame；UI 弹窗与子图三层级留实机阶段；481/481 |
+| R11 | ✅ 完成（令牌） | 增量 `--am-*` 令牌 17 项（选中态 / 面包屑 / 状态三态 / 头像 / section-label）+ mappanel 写死色全替换 + `.aw-point.is-selected` 钩子 + `.aw-breadcrumb` 占位类；488/488 |
 | R09 | 未开始 | |
 | R10 | 未开始 | |
 | R11 | 未开始 | |
@@ -318,3 +319,24 @@
 - UI 弹窗跟随选中态刷新（pan / zoom / resize）+ 子图导航渲染（atlas-ui-core.ts 改造）— **未做**。需要真实 SillyTavern 环境验证 JS 命中 / DOM 重建 / 焦点切换；本环境无酒馆实例，纳入 R13 实机验收阶段。
 - 子图三级（world → building → room）真实三层结构需要 schema v4（SubMap 携带子 submaps）；当前 `mapsDoc.submaps[pointId]` 单层，`validateSubmapDepth` 已埋好接口，UI 接入即可。
 - `/worlds/scale/calibrate` 提示词仍写死 100×100；调用方应改为读 `doc.submaps[mapId].frame` 真实值动态拼提示。R11 集成阶段一起改。
+
+## R11 — 增量皮肤令牌 + UI 钩子占位（2026-09-23）
+
+- [x] 17 项 `--am-*` 增量令牌（沿用既有 `--aw-*` 收口令牌派生，不引入新前缀）：
+  - 选中态：`--am-selected-outline`（实线 2px gold）、`--am-selected-shadow`（外阴影）
+  - 子图面包屑：`--am-breadcrumb-text/sep/active`
+  - 状态提示三态：`--am-status-{info,warn,error}-{bg,text}`
+  - 头像：`--am-avatar-{npc,obj}-{bg,text,border}`（替换 mappanel 写死渐变色）
+  - section-label：`--am-section-label-color`（替换 `#8a6a1c` 写死色）
+- [x] mappanel 写死色全替换：`.aw-mappanel__avatar--npc / --obj / __section-label / __here-label` 全部走令牌
+- [x] `.aw-point.is-selected` 钩子（outline + outline-offset:2px + 外阴影 + z-index:4）：UI 选中 marker 时挂上即可，不影响命中与位置
+- [x] `.aw-breadcrumb / .aw-breadcrumb__item / __sep / .is-current` 占位类：R09 子图三层级 UI 接入点
+- [x] `.aw-status--info / --warn / --error` 与 `.aw-banner--info / --warn / --error` 状态三态
+
+证据：
+- 新增 `tests/atlas-r11-skin-tokens.test.mjs` 7 项通过：令牌定义 / 类规则 / mappanel 替换验证 / 面包屑类齐全 / 状态三态齐全 / `is-selected` 钩子契约 / index.js 引用白名单
+- 门禁：typecheck 0 errors；pack 通过（CSS 同步）；test **488/488**（481 → 488）
+
+残留：
+- 完整皮肤导入 UI（导入 .atlas-map-skin.json 文件 / 预览 / 应用 / 撤销）未做——主计划留作后续，需要 Atlas UI 改造范围更大（设计时间评估 1-2 个 commit），本轮先把令牌与钩子落地。
+- 实机命中、皮肤切换后交互一致性、窄屏适配：纳入 R13 实机验收阶段。
