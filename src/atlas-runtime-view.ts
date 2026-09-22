@@ -28,6 +28,8 @@ export interface RuntimeNpcView {
   x: number | null;
   y: number | null;
   status: string | null;
+  /** R07 在场状态：ledger presence 时态字段（present/left）；缺省 null = 未记录（不猜离场） */
+  presence: "present" | "left" | null;
   /** 位置来源：ledger = 账本投影（最新事实）/ state = CharacterState 基线 / legacy = 旧角色字段 */
   source: "ledger" | "state" | "legacy" | "none";
   /** 状态来源：ledger = 账本时态字段 / state = CharacterState.status */
@@ -98,6 +100,9 @@ export function resolveAtlasRuntimeView(
       status = projStatus.trim();
       statusSource = "ledger";
     }
+    // R07 presence：账本时态字段（present/left）；未记录 = null（不自动判离场）
+    const projPresence = projected?.presence;
+    const presence = projPresence === "present" || projPresence === "left" ? projPresence : null;
 
     const anchorPoint = pointId !== null ? pointById.get(String(pointId)) : undefined;
     const resolvedRegion =
@@ -114,6 +119,7 @@ export function resolveAtlasRuntimeView(
       x: anchorPoint ? anchorPoint.x : null,
       y: anchorPoint ? anchorPoint.y : null,
       status,
+      presence,
       source,
       statusSource,
     };

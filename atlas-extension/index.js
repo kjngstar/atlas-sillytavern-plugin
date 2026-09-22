@@ -1585,7 +1585,33 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
           const reason = npc.reason ? (NPC_REASON_LABELS[String(npc.reason)] ?? String(npc.reason)) : "相关人物";
           card.append(el("span", "aw-tag", reason));
           const pointId = npc.pointId ?? npc.regionId;
-          if (pointId) card.append(el("p", "aw-card__text", `位置：${String(pointId)}`));
+          if (pointId) card.append(el("p", "aw-card__text", `位置：${npc.pointName ? String(npc.pointName) : String(pointId)}（${String(npc.positionSource) === "ledger" ? "账本确认" : String(npc.positionSource) === "state" ? "基线记录" : "旧档案"}）`));
+          // R07：点击展开统一人物详情——位置来源 / presence / 最后确认时刻 / 真实已知动向
+          const detail = el("div", "aw-npc-detail");
+          detail.hidden = true;
+          const presenceLabel = npc.presence === "present" ? "在场" : npc.presence === "left" ? "已离场" : "未记录（不猜离场）";
+          detail.append(el("p", "aw-card__text", `在场状态：${presenceLabel}`));
+          detail.append(el("p", "aw-card__text", `状态：${npc.status ? String(npc.status) : "未记录"}`));
+          detail.append(el("p", "aw-card__text", `最后确认时刻：${npc.lastConfirmedAt != null ? `第 ${String(npc.lastConfirmedAt)} 时段` : "尚无账本记录"}`));
+          const moves = Array.isArray(npc.recentNarratives) ? npc.recentNarratives.filter((t) => String(t).trim()) : [];
+          if (moves.length > 0) {
+            const list = el("ul", "aw-npc-detail__list");
+            for (const text of moves) list.append(el("li", "aw-card__text", String(text)));
+            detail.append(el("p", "aw-card__text", "最近涉及叙事（账本摘要，非实时心声）："));
+            detail.append(list);
+          } else {
+            detail.append(el("p", "aw-card__text", "动向：未记录"));
+          }
+          card.append(detail);
+          card.style.cursor = "pointer";
+          card.setAttribute("role", "button");
+          card.setAttribute("aria-label", `查看 ${String(npc.name)} 的详情（位置来源、状态与已知动向）`);
+          card.tabIndex = 0;
+          const toggleDetail = () => { detail.hidden = !detail.hidden; };
+          card.addEventListener("click", toggleDetail);
+          card.addEventListener("keydown", (event) => {
+            if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggleDetail(); }
+          });
           grid.append(card);
         }
         center.append(grid);

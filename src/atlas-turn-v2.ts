@@ -18,8 +18,10 @@
 
 import type { Character, EntityRecord, MapPoint, World } from "../lib/world-schema.ts";
 import { W0_LIMITS } from "../lib/world-schema.ts";
+import { appendDefinitionRevision } from "../lib/world-definition.ts";
 import { hashString } from "../lib/world-cards.ts";
 import { commitAtlasTurn, type AtlasWorldChangeDraft } from "./atlas-turn.ts";
+import { applyIdentityUpdates, resolveEntityByRef } from "./atlas-identity.ts";
 import { ATLAS_ERROR_CODES, AtlasError, atlasCommitIdempotencyKey, type AtlasTurnCommitRequest, type AtlasTurnReceipt } from "./atlas-contract.ts";
 import type { AtlasV2Draft } from "./atlas-contract-v2.ts";
 
@@ -163,8 +165,11 @@ function resolveRefsAndBuildCandidate(
         type: "npc",
         name: char.displayName,
         baseline: {},
-        // 预声明 status：npcUpdates 的 setTemporalField("status") 必须有字段契约
-        temporalSchema: [{ key: "status", kind: "temporal", valueType: "string" }],
+        // 预声明 status + presence：npcUpdates 的 setTemporalField 必须有字段契约
+        temporalSchema: [
+          { key: "status", kind: "temporal", valueType: "string" },
+          { key: "presence", kind: "temporal", valueType: "string" },
+        ],
       });
       if (charNameSet.has(char.displayName)) {
         warnings.push(`新人物「${char.displayName}」(${entityId}) 与既有角色同名——身份消歧在 R07 处理，本轮按新实体建档。`);
@@ -188,7 +193,18 @@ function resolveRefsAndBuildCandidate(
       entities.set(ref, ref);
       continue;
     }
-    fail(`entityRef 引用未知实体（既非已知 id 也非本响应声明的 new:npc）：${ref}`);
+    // R07 身份消歧：非 ID 引用按 displayName / 别名**精确**名字解析；
+    // 歧义（同场多个女性 / 同名）不强行合并——整单拒绝并给出候选
+    const resolution = resolveEntityByRef(world, ref);
+    if (resolution.ambiguous) {
+      fail(`entityRef「${ref}」同时匹配多个实体（${resolution.candidates.join("、")}）——同名/别名歧义不强行合并，请改用明确 ID`);
+    }
+    if (resolution.id) {
+      entities.set(ref, resolution.id);
+      warnings.push(`entityRef「${ref}」按名字解析为 ${resolution.id}（临时称呼不是临时身份，仅精确匹配）`);
+      continue;
+    }
+    fail(`entityRef 引用未知实体（既非已知 id、已知称呼，也非本响应声明的 new:npc）：${ref}`);
   }
 
   const candidate: World = {
@@ -227,22 +243,37 @@ function foldToV1Draft(
   draft: AtlasV2Draft,
   tables: RefTables,
   warnings: string[],
-): { v1: AtlasWorldChangeDraft; identityUpdatedIds: string[] } {
+): { v1: AtlasWorldChangeDraft; withIdentity: World; identityUpdatedIds: string[] } {
   const rawEffects: unknown[] = [];
   const memoryDrafts: Array<{ entityId: string; text: string }> = [];
 
   for (const update of draft.npcUpdates) {
     const entityId = resolveEntity(tables, update.entityRef);
+    const record = (candidate.entityRecords ?? []).find((e) => e.id === entityId);
+    const presenceDeclared = Boolean(record?.temporalSchema.some((f) => f.key === "presence"));
     if (update.location.op === "set" && update.location.locationRef !== null) {
       const pointId = resolveLocation(tables, update.location.locationRef);
       const regionId = pointRegionId(candidate, pointId);
       rawEffects.push({ kind: "moveEntity", entityId, ...(regionId !== null ? { regionId } : {}), pointId: String(pointId) });
     } else if (update.location.op === "clear") {
-      // v1 effect 白名单没有「清除位置」：降级为警告，不静默丢位（R07 接手离场语义）
-      warnings.push(`npcUpdates[${update.entityRef}].location.op=clear 暂无 v1 对应 effect，本轮未落账。`);
+      // R07 离场语义：目的地未知可 clear——账本 effect 无「清位置」，落 presence=left
+      // （有声明才写，未声明的已知实体不整单炸提案）
+      if (presenceDeclared) {
+        rawEffects.push({ kind: "setTemporalField", entityId, key: "presence", value: "left" });
+      } else {
+        warnings.push(`npcUpdates[${update.entityRef}].location.op=clear：实体未声明 presence 字段，离场暂未落账。`);
+      }
     }
     if (update.status !== null) {
       rawEffects.push({ kind: "setTemporalField", entityId, key: "status", value: update.status });
+    }
+    // presence：没有提到 = 保持（unknown 不写）；present/left 只在字段声明过时落账
+    if (update.presence !== "unknown" && !(update.location.op === "clear" && update.presence === "left")) {
+      if (presenceDeclared) {
+        rawEffects.push({ kind: "setTemporalField", entityId, key: "presence", value: update.presence });
+      } else if (update.presence === "left") {
+        warnings.push(`npcUpdates[${update.entityRef}].presence=left：实体未声明 presence 字段，未落账。`);
+      }
     }
   }
 
@@ -279,29 +310,22 @@ function foldToV1Draft(
         })()
       : null;
 
-  // identityUpdates：本轮新建实体直接改候选世界（名字 / 别名）；已知实体留给 R07
-  const identityUpdatedIds: string[] = [];
-  const createdByName = new Map(
-    (draft.discoveries.characters ?? [])
-      .filter((c) => c.ref.startsWith("new:"))
-      .map((c) => [c.ref, c] as const),
-  );
-  let characters = candidate.characters ?? [];
+  // identityUpdates（R07）：不重建实体——已知 / 本轮新建实体统一走 applyIdentityUpdates
+  // 更新 displayName 与别名；已知实体的名字修订在提交成功后追加定义修订审计
+  const identityUpdatesResolved: Array<{ entityId: string; displayName: string; addAliases: string[] }> = [];
   for (const update of draft.identityUpdates) {
-    if (tables.entities.has(update.entityRef) && createdByName.has(update.entityRef)) {
-      const entityId = tables.entities.get(update.entityRef)!;
-      characters = characters.map((c) => {
-        if (String(c.id) !== entityId) return c;
-        const mergedTags = [...(c.tags ?? [])];
-        for (const alias of update.addAliases) if (!mergedTags.includes(alias)) mergedTags.push(alias);
-        return { ...c, name: update.displayName, ...(mergedTags.length > 0 ? { tags: mergedTags } : {}) };
-      });
-      identityUpdatedIds.push(entityId);
-    } else {
-      warnings.push(`identityUpdates[${update.entityRef}] 针对已知实体——身份消歧在 R07 实现，本轮跳过。`);
+    const entityId = resolveEntity(tables, update.entityRef);
+    identityUpdatesResolved.push({ entityId, displayName: update.displayName, addAliases: update.addAliases });
+  }
+  const identity = applyIdentityUpdates(candidate, identityUpdatesResolved);
+  const withIdentity: World = identity.world;
+  const identityUpdatedIds = identity.updatedIds;
+  for (const update of draft.identityUpdates) {
+    const entityId = resolveEntity(tables, update.entityRef);
+    if (!identityUpdatedIds.includes(entityId)) {
+      warnings.push(`identityUpdates[${update.entityRef}]：displayName 与别名均无实际变化，未写定义。`);
     }
   }
-  const withIdentity: World = identityUpdatedIds.length > 0 ? { ...candidate, characters } : candidate;
 
   // events → summary 附加行（W0 摘要上限内；放不下则只保留主摘要，事件明细不静默丢失——回执里仍可审计）
   let summary = draft.summary;
@@ -319,6 +343,7 @@ function foldToV1Draft(
       memoryDrafts,
       summary: summary.slice(0, W0_LIMITS.maxStateEventSummary),
     },
+    withIdentity,
     identityUpdatedIds,
   };
 }
@@ -358,9 +383,9 @@ export function applyAtlasV2Turn(world: World, input: AtlasV2TurnInput): AtlasV2
     warnings.push(`${parentRefs.length} 条 parentLocationRef 暂存未落账（子图层级在 R09 接线）：${parentRefs.map((p) => `${p.ref}←${p.parentLocationRef}`).join("、")}`);
   }
 
-  const { v1 } = foldToV1Draft(candidate, input.draft, tables, warnings);
+  const { v1, withIdentity, identityUpdatedIds } = foldToV1Draft(candidate, input.draft, tables, warnings);
 
-  const output = commitAtlasTurn(candidate, {
+  const output = commitAtlasTurn(withIdentity, {
     request: input.request,
     branchId: input.branchId,
     currentTime: input.currentTime,
@@ -370,9 +395,41 @@ export function applyAtlasV2Turn(world: World, input: AtlasV2TurnInput): AtlasV2
     now: input.now,
   });
 
+  // 零写入契约（收口）：failed / duplicate 时返回原世界（commitAtlasTurn 的失败路径
+  // 返回传入的候选世界，候选增量不能外泄）
+  if (output.receipt.status !== "committed") {
+    return {
+      receipt: output.receipt,
+      world,
+      refResolution: {
+        locations: input.draft.discoveries.locations.map((loc) => ({ ref: loc.ref, pointId: tables.points.get(loc.ref) ?? Number(loc.ref), created: loc.ref.startsWith("new:") })),
+        characters: input.draft.discoveries.characters.map((char) => ({ ref: char.ref, entityId: tables.entities.get(char.ref) ?? char.ref, created: char.ref.startsWith("new:") })),
+        warnings,
+      },
+      createdPointIds: [],
+      createdEntityIds: [],
+    };
+  }
+
+  // R07 身份修订审计：已知实体（非本轮新建）的 displayName / 别名变更追加定义修订
+  let finalWorld = output.world;
+  const auditIds = identityUpdatedIds.filter((id) => !createdEntityIds.includes(id));
+  if (auditIds.length > 0) {
+    const names = auditIds
+      .map((id) => (finalWorld.characters ?? []).find((c) => String(c.id) === id))
+      .filter(Boolean)
+      .map((c) => `${c!.name}(${c!.id})`);
+    const revision = appendDefinitionRevision(finalWorld, {
+      authorNote: `R07 身份更新（identityUpdates）：${names.join("、") || auditIds.join("、")}`,
+      now: input.now ?? 0,
+      changedEntityIds: auditIds,
+    });
+    if (revision.ok) finalWorld = revision.value;
+  }
+
   return {
     receipt: output.receipt,
-    world: output.world,
+    world: finalWorld,
     refResolution: {
       locations: input.draft.discoveries.locations.map((loc) => ({
         ref: loc.ref,

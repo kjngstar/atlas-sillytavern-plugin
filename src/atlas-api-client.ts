@@ -194,11 +194,12 @@ export const DEFAULT_PROMPT_SEGMENTS_V2: Array<{ role: string; name: string; mai
       "- discoveries.locations 每项 {ref,name,aliases,regionRef,parentLocationRef,evidenceIds}：ref 形如 new:loc:短名（小写字母数字-下划线）；本轮实际出现且未建档的具体地点才登记。\n" +
       "- discoveries.characters 每项 {ref,displayName,aliases,description,evidenceIds}：ref 形如 new:npc:短名。已有 ID 的人物不要重复登记。\n" +
       "- scene：resolution=confirmed/estimated/unknown/conflict；locationRef=已知地点ID 或本响应声明的 new:loc: 引用（confirmed/estimated 必填）；transition=stay/arrive/initial/unknown。场景表示玩家当前实际所在；不确定就 unknown，不要猜。\n" +
-      "- npcUpdates 每项 {entityRef,location,presence,status,evidenceIds}：entityRef=已知实体ID 或 new:npc: 引用；location={op,locationRef}，op=set 必须给 locationRef（已知ID或 new:loc:），keep/clear 时 locationRef=null；presence=present/left/unknown（没提到=保持，不要写 left）；status≤160 字或 null。\n" +
-      "- identityUpdates 每项 {entityRef,displayName,addAliases,evidenceIds}：人物获得真名或新称呼时更新显示名 / 别名，不重建实体。不确定是同一个人就不要合并。\n" +
+      "- npcUpdates 每项 {entityRef,location,presence,status,evidenceIds}：entityRef=已知实体ID 或 new:npc: 引用；location={op,locationRef}，op=set 必须给 locationRef（已知ID或 new:loc:），keep/clear 时 locationRef=null；presence=present/left/unknown（没提到=保持 unknown，不要写 left；「离开了房间」才写 left，目的地未知用 op=clear）；status≤160 字或 null。\n" +
+      "- identityUpdates 每项 {entityRef,displayName,addAliases,evidenceIds}：人物获得真名或新称呼时更新显示名 / 别名，不重建实体。不确定是同一个人就不要合并；同场有多个相似人物时更要谨慎。\n" +
+      "- 同行关系与同地点分开：adjustRelation 记关系，location 只写本轮实际同处一地；不要让熟人自动跟随玩家移动。\n" +
       "- relationUpdates 每项 {fromRef,toRef,key,value,evidenceIds}；memories 每项 {entityRef,text,evidenceIds}（≤500 字，只记实际经历）；worldFlags 每项 {key,value,evidenceIds}；events 每项 {summary,entityRefs,evidenceIds}。\n" +
       "- duration 是有限非负整数 0..10000；开场识别 / 对账类请求给 0。\n" +
-      "角色卡标题可能是场景标题，不一定代表玩家或一个人物；不要把已知 ID 仅凭名字相似就套用。宁可输出空数组，也不要虚构事实。",
+      "角色卡标题可能是场景标题，不一定代表玩家或一个人物；不要把已知 ID 仅凭名字相似就套用。不从叙事推断人物内心：不知道就留空，事件摘要不是实时心声。宁可输出空数组，也不要虚构事实。",
   },
   {
     role: "user",

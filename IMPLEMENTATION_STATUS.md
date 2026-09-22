@@ -185,3 +185,22 @@
 - 首轮普通推进同轮场景识别 = v2 封套场景锚定路径本身（已可用）；真实模型行为抽样 → R14
 - 地图上占位点的「占位」视觉标注（非过滤式隐藏）→ R08/R11 地图改造一起收
 - bootstrap 提交未建 ATLAS-06 技术检查点（duration=0 无回退需求；如需归 R12 事务化）
+
+## R07 — 人物持续跟踪与身份消歧（2026-09-23）
+
+- [x] 新建 `src/atlas-identity.ts`：canonical ID + displayName + 别名（tags 复用，封顶 16）解析——精确 ID 优先，displayName / 别名**精确**名字匹配；多实体命中同一称呼 = ambiguous 整单拒绝（同场多个女性 / 同名不强行合并），绝不挑第一个
+- [x] 临时称呼应用：v2 引用解析支持「已知 ID → 名字 / 别名」回退（解析成功留警告审计）；临时称呼不是临时身份（不因称呼新建实体）
+- [x] identityUpdates 全量落地：已知 / 本轮新建实体统一 `applyIdentityUpdates`——更新 displayName 与别名，**不重建实体**（id 不变）；已知实体的名字变更在提交成功后追加定义修订审计（changedEntityIds 留痕）；无实际变化不写
+- [x] presence 落账：新建 NPC 的 temporalSchema 预声明 status + presence；「离开了房间」（presence=left，含 op=clear 目的地未知）写 presence=left；「没有提到」= unknown 不写（保持上次状态）；未声明 presence 的旧实体降级为显式警告，不炸提案
+- [x] 运行时视图 + /state 透出：RuntimeNpcView 增加 presence（present/left/null=未记录，不猜离场）；npcDirectory 增加 presence + lastConfirmedAt（分支内最后一条涉及该实体的账本事件时刻）
+- [x] v2 封套纪律补齐：同行关系与同地点分开（不让熟人自动跟随传送）、「离开了房间才写 left」、不从叙事推断人物内心（事件摘要 ≠ 实时心声）
+- [x] 零写入收口：applyAtlasV2Turn 在 failed / duplicate 回执时返回**原世界**（候选世界增量不外泄）
+- [x] 附近人物卡片：位置带来源标记（账本确认 / 基线记录 / 旧档案）+ 点击 / 键盘展开人物详情（在场状态 / 状态文字 / 最后确认时刻 / 最近涉及叙事=账本摘要，明确标注非实时心声）
+
+证据：
+- 新增 `tests/atlas-r07-identity.test.mjs` 10 项通过：引用解析（id/名/别名/歧义）+ 应用层歧义拒绝 + 真名更新（id 不变 + 旧别名保留 + 修订审计）+ 无变化零写 + mergeAliases 封顶 + presence left 落账与视图 + 「没有提到=保持、不跟随传送」+ failed 零写入 + 封套纪律
+- 门禁：typecheck 0 errors；pack 通过；test 442/442（432 + 10）
+
+残留：
+- 合并两个已存在实体（引用重定向 + 撤销记录）需要账本「转移事件」能力，lib/ 快照无对应 effect——按计划不破坏快照，列为协议 v3 残项（本阶段用「拒绝歧义 + identityUpdates 改名」覆盖验收路径）
+- 人物详情页的持有物列表 / 所在地链接跳转 → R09 弹窗与跳转一起收口

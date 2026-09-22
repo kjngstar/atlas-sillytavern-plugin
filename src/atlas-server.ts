@@ -1255,6 +1255,8 @@ function createCoreInstance(
         .reverse()
         .map((e) => e.narrativeSummary.slice(0, 140));
       const anchorName = anchorPoint ? String(anchorPoint.name ?? "") : null;
+      // R07：最后确认时刻 = 分支内涉及该实体的最后一条账本事件时间（真实已知动向，不猜）
+      const lastConfirmedAt = [...branchEvents].reverse().find((e) => (e.entityRefs ?? []).map(String).includes(view.id))?.at ?? null;
       return {
         id: view.id,
         name: String(view.name).slice(0, MAP_POINT_NAME_CHARS),
@@ -1264,6 +1266,8 @@ function createCoreInstance(
         y: view.y,
         reason: relevance.npcReasons[view.id] ?? null,
         status: view.status ? view.status.slice(0, 160) : null,
+        presence: view.presence,
+        lastConfirmedAt,
         recentNarratives,
         pointName: anchorName ? anchorName.slice(0, MAP_POINT_NAME_CHARS) : null,
         positionSource: view.source,
