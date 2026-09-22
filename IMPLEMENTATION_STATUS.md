@@ -46,6 +46,7 @@
 | R08 | ✅ 完成 | 地图相机（fit 无下限 / 光标缩放 / 反缩放）+ 手势状态机（pan / 拖拽 / pinch）+ suppressClick 不提前清 + 相机持久化；447/447 |
 | R08 热修 | ✅ 完成 | marker `inverseScale = 1/k`（旧公式 fit 时撑满视口吞点击）+ 仅空白/双指 setPointerCapture；452/452 |
 | R12 | ✅ 完成 | 原子事务收口：`pending.remove` best-effort（失败记日志不抛错）+ `reconcilePendingCommits` 启动清理 orphan；460/460 |
+| R10 | ✅ 完成 | v2 mapScaleHints 接入提交链路：`applyScaleHintsToDoc` 纯函数（人工锁定 / frame 不匹配 / unknown-conflict 跳过纪律）+ executeCommit 应用到 maps sidecar + 日志分流；471/471 |
 | R09 | 未开始 | |
 | R10 | 未开始 | |
 | R11 | 未开始 | |
@@ -275,3 +276,27 @@
 残留：
 - 是否把 `pending:*` 也搬进 session 改掉根上 IO 分离：判断为"可演进但非 P0"。现状已满足计划"失败零 root 写入 + 0 条新 API 调 + pending 留熟"的底线；如有实测发现连续 orphan 堆积（不太可能） → R15 集成期决定。
 - 实际启动钩子：`reconcilePending()` 还没在任何 Atlasia chatMetadata 提交流程里被自动调用——UI 层接入留给 R15 集成阶段。
+
+## R10 — v2 mapScaleHints 接入提交链路（2026-09-23）
+
+- [x] 新增 `src/atlas-scale.ts:applyScaleHintsToDoc(hints, doc, options)` 纯函数：把 v2 `mapScaleHints` 数组应用到 `mapsDoc.calibrations[mapId]`。纪律：
+  - 人工锁定（`calibrations[mapId].locked === true`） → `skipped-locked`，永不被 AI 覆盖
+  - 未注册 frame 的 mapId → `skipped-frame-mismatch`（防幽灵子图）
+  - `hint.frameRevision !== null && !== frame.frameRevision` → `skipped-frame-mismatch`
+  - `hint.status === "unknown" | "conflict"` → `skipped-unknown`
+  - `validateScaleResponse` 数值校验不过（负值/零/字符串/横纵不等距）→ `skipped-invalid` / `skipped-unknown`
+  - 通过校验 → 写入新 calibration，`revision = (existing?.revision ?? 0) + 1`，`source = "ai-estimated"`，`locked = false`
+- [x] `atlas-turn-v2.ts`：在 `AtlasV2TurnOutput` 新增 `scaleHints` 字段（draft.mapScaleHints 透传），三处 return 路径同步填充。turn-v2 不写 sidecar——遵守 R12"事务原子性"约束。
+- [x] `atlas-server.ts executeCommit`：在 sidecar 处理之后加 v2 mapScaleHints 应用段
+  - 默认 frame = `{ cols: 100, rows: 100, frameRevision: 1 }`（0.9.51 SubMap 未持久化 cols/rows；hint frameRevision=null 时跳过匹配校验，向前兼容）
+  - 应用结果分流日志：`applied` → `world-scale-hint-applied`，`skipped` → `world-scale-hint-skipped`（warn），异常 → `world-scale-hint-failed`（error，不阻断 commit）
+  - 仅当存在 applied 结果时 `store.write("maps:<worldId>")`（写入经会话覆盖层 → 自动 rev+1 整体带回）
+
+证据：
+- 新增 `tests/atlas-r10-scale-hints.test.mjs` 11 项通过：applied / unknown-conflict / locked / frameRevision mismatch / frameRevision=null 兼容 / 未注册 mapId / 横纵超容差 / revision 自增 / validateScaleResponse 数值契约 / computeScaleBar 窗口 / formatDistanceMeters 单位
+- 门禁：typecheck 0 errors；pack 通过（镜像同步）；test **471/471**（460 → 471）
+
+残留：
+- SubMap / AtlasMapDoc 未持久化 `cols/rows/frameRevision`——目前默认 100×100 是写死兜底；待 R09 子图层级改造时给 SubMap 加 `frame` 字段（schema 升 v3），届时按真实 frame 校验。
+- `/worlds/scale/calibrate` 路由仍写死 100×100 提示词；同上等 R09 一起改。
+- 标定 UI（R10 子任务"标定 UI"）未做——前端需要读 `stateData.maps.calibrations[mapId]` 渲染当前标定 + 锁定切换 + 重新估计按钮；纳入 R11 皮肤工作附近做。

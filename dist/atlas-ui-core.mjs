@@ -6398,6 +6398,77 @@ function sanitizeCalibration(raw) {
     at: Number.isFinite(atRaw) && atRaw > 0 ? Math.floor(atRaw) : 0
   };
 }
+function applyScaleHintsToDoc(hints, doc, options) {
+  const results = [];
+  for (const hint of hints) {
+    const mapId = hint.mapRef;
+    if (!mapId) {
+      results.push({ mapId: "", outcome: "skipped-invalid", reason: "mapRef 为空", calibration: null });
+      continue;
+    }
+    const existing = options.existing[mapId] ?? null;
+    if (existing?.locked) {
+      results.push({
+        mapId,
+        outcome: "skipped-locked",
+        reason: `该图已人工锁定（${existing.metersPerCell} 米/格，source=${existing.source}）；AI 估计不覆盖`,
+        calibration: existing
+      });
+      continue;
+    }
+    const frame = options.framesByMapId[mapId];
+    if (!frame || frame.cols <= 0 || frame.rows <= 0) {
+      results.push({
+        mapId,
+        outcome: "skipped-frame-mismatch",
+        reason: "该图未注册 frame（cols/rows 不可得），不写 calibrations",
+        calibration: existing
+      });
+      continue;
+    }
+    if (hint.frameRevision !== null && hint.frameRevision !== frame.frameRevision) {
+      results.push({
+        mapId,
+        outcome: "skipped-frame-mismatch",
+        reason: `frameRevision 不匹配：hint=${hint.frameRevision} vs doc=${frame.frameRevision}`,
+        calibration: existing
+      });
+      continue;
+    }
+    if (hint.status === "unknown" || hint.status === "conflict") {
+      results.push({
+        mapId,
+        outcome: "skipped-unknown",
+        reason: hint.status === "unknown" ? "模型标记 unknown，extent 缺失" : "模型标记 conflict，extent 与网格冲突",
+        calibration: existing
+      });
+      continue;
+    }
+    const validated = validateScaleResponse(hint, { cols: frame.cols, rows: frame.rows });
+    if (!validated.ok) {
+      results.push({
+        mapId,
+        outcome: validated.status === "invalid" ? "skipped-invalid" : "skipped-unknown",
+        reason: validated.reason,
+        calibration: existing
+      });
+      continue;
+    }
+    const next = {
+      revision: (existing?.revision ?? 0) + 1,
+      metersPerCell: validated.calibration.metersPerCell,
+      source: "ai-estimated",
+      locked: false,
+      basis: validated.calibration.basis,
+      coverage: validated.calibration.coverage,
+      confidence: validated.calibration.confidence,
+      at: options.now
+    };
+    doc.calibrations[mapId] = next;
+    results.push({ mapId, outcome: "applied", reason: `已落标定：1 格 ≈ ${next.metersPerCell} 米（ai-estimated）`, calibration: next });
+  }
+  return results;
+}
 
 // src/atlas-geo-apply.ts
 var NEW_LOCATIONS_MAX = 12;
@@ -7283,7 +7354,8 @@ function applyAtlasV2Turn(world, input) {
       world: dup.world,
       refResolution: { locations: [], characters: [], warnings: [] },
       createdPointIds: [],
-      createdEntityIds: []
+      createdEntityIds: [],
+      scaleHints: input.draft.mapScaleHints
     };
   }
   const { candidate, tables, createdPointIds, createdEntityIds, warnings, parentRefs } = resolveRefsAndBuildCandidate(world, input.draft, turnId);
@@ -7310,7 +7382,8 @@ function applyAtlasV2Turn(world, input) {
         warnings
       },
       createdPointIds: [],
-      createdEntityIds: []
+      createdEntityIds: [],
+      scaleHints: input.draft.mapScaleHints
     };
   }
   let finalWorld = output.world;
@@ -7341,7 +7414,8 @@ function applyAtlasV2Turn(world, input) {
       warnings
     },
     createdPointIds,
-    createdEntityIds
+    createdEntityIds,
+    scaleHints: input.draft.mapScaleHints
   };
 }
 
@@ -10269,6 +10343,55 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
         worldId: binding.worldId,
         summary: `子图 / 点位描述落库失败（回合本身已提交成功，无需重试推演）：${thrown instanceof Error ? thrown.message : String(thrown)}`.slice(0, 300)
       });
+    }
+    if ("scaleHints" in output && output.scaleHints && output.scaleHints.length > 0) {
+      try {
+        const docKey = `maps:${binding.worldId}`;
+        const doc = sanitizeMapDoc(await store.read(docKey).catch(() => null));
+        const DEFAULT_FRAME = { cols: 100, rows: 100, frameRevision: 1 };
+        const framesByMapId = { world: DEFAULT_FRAME };
+        for (const submapKey of Object.keys(doc.submaps)) {
+          framesByMapId[submapKey] = DEFAULT_FRAME;
+        }
+        const results = applyScaleHintsToDoc(output.scaleHints, doc, {
+          existing: doc.calibrations,
+          framesByMapId,
+          now: now()
+        });
+        const applied = results.filter((r) => r.outcome === "applied");
+        if (applied.length > 0) {
+          await store.write(docKey, doc);
+        }
+        const skipped = results.filter((r) => r.outcome !== "applied");
+        if (skipped.length > 0) {
+          pushLog({
+            at: now(),
+            level: "warn",
+            kind: "world-scale-hint-skipped",
+            chatId: request.chatId,
+            worldId: binding.worldId,
+            skipped: skipped.map((s) => ({ mapId: s.mapId, outcome: s.outcome, reason: s.reason }))
+          });
+        }
+        if (applied.length > 0) {
+          pushLog({
+            at: now(),
+            kind: "world-scale-hint-applied",
+            chatId: request.chatId,
+            worldId: binding.worldId,
+            applied: applied.map((a) => ({ mapId: a.mapId, metersPerCell: a.calibration?.metersPerCell }))
+          });
+        }
+      } catch (thrown) {
+        pushLog({
+          at: now(),
+          level: "error",
+          kind: "world-scale-hint-failed",
+          chatId: request.chatId,
+          worldId: binding.worldId,
+          summary: `v2 mapScaleHints 应用失败（回合本身已提交成功）：${thrown instanceof Error ? thrown.message : String(thrown)}`.slice(0, 300)
+        });
+      }
     }
     if (receipt.status === "committed" && (settledWorld.points ?? []).length <= 1) {
       const markerKey = `geo-auto:${binding.worldId}`;

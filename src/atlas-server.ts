@@ -47,7 +47,7 @@ import { applyAtlasV2Turn } from "./atlas-turn-v2.ts";
 import { parseAtlasWorldTurnDraftV2 } from "./atlas-contract-v2.ts";
 import { buildSubMapFromDraft, sanitizeMapDoc } from "./atlas-geo-apply.ts";
 import { detectStartPlaceholder, resolveSceneStatus, retireStartPlaceholder, sanitizeSceneDoc, sceneDocKey, type SceneDoc } from "./atlas-scene.ts";
-import { validateScaleResponse } from "./atlas-scale.ts";
+import { validateScaleResponse, applyScaleHintsToDoc, type V2ScaleHintInput, type FrameRef } from "./atlas-scale.ts";
 import { buildLorebookPlans } from "./atlas-lorebook.ts";
 import { reconcilePendingCommits, type ReconcileReport } from "./atlas-pending-reconcile.ts";
 import {
@@ -2064,6 +2064,63 @@ function createCoreInstance(
         worldId: binding.worldId,
         summary: `子图 / 点位描述落库失败（回合本身已提交成功，无需重试推演）：${thrown instanceof Error ? thrown.message : String(thrown)}`.slice(0, 300),
       });
+    }
+
+    // R10：v2 mapScaleHints 落地。0.9.50 起标定存 maps sidecar 的 calibrations[mapId]；
+    // 此前 v2 协议已解析 hints 但未应用。应用纪律：
+    // - 走与 sidecar 同一容错通道（try/catch + 日志）——回合本身已 commit 成功，标定
+    //   是增强数据，写失败不应阻断响应。
+    // - frame 暂取默认 100×100（0.9.51 子图 schema 未持久化 cols/rows/frameRevision；hint
+    //   frameRevision=null 时不校验；非 null 但默认不匹配 → skipped-frame-mismatch）。
+    // - 人工锁定 / unknown / conflict / 数值校验不过 → 应用函数内部跳过，warn 入日志。
+    if ("scaleHints" in output && output.scaleHints && output.scaleHints.length > 0) {
+      try {
+        const docKey = `maps:${binding.worldId}`;
+        const doc = sanitizeMapDoc(await store.read(docKey).catch(() => null));
+        const DEFAULT_FRAME: FrameRef = { cols: 100, rows: 100, frameRevision: 1 };
+        const framesByMapId: Record<string, FrameRef> = { world: DEFAULT_FRAME };
+        for (const submapKey of Object.keys(doc.submaps)) {
+          framesByMapId[submapKey] = DEFAULT_FRAME;
+        }
+        const results = applyScaleHintsToDoc(output.scaleHints, doc, {
+          existing: doc.calibrations,
+          framesByMapId,
+          now: now(),
+        });
+        const applied = results.filter((r) => r.outcome === "applied");
+        if (applied.length > 0) {
+          await store.write(docKey, doc);
+        }
+        const skipped = results.filter((r) => r.outcome !== "applied");
+        if (skipped.length > 0) {
+          pushLog({
+            at: now(),
+            level: "warn",
+            kind: "world-scale-hint-skipped",
+            chatId: request.chatId,
+            worldId: binding.worldId,
+            skipped: skipped.map((s) => ({ mapId: s.mapId, outcome: s.outcome, reason: s.reason })),
+          });
+        }
+        if (applied.length > 0) {
+          pushLog({
+            at: now(),
+            kind: "world-scale-hint-applied",
+            chatId: request.chatId,
+            worldId: binding.worldId,
+            applied: applied.map((a) => ({ mapId: a.mapId, metersPerCell: a.calibration?.metersPerCell })),
+          });
+        }
+      } catch (thrown) {
+        pushLog({
+          at: now(),
+          level: "error",
+          kind: "world-scale-hint-failed",
+          chatId: request.chatId,
+          worldId: binding.worldId,
+          summary: `v2 mapScaleHints 应用失败（回合本身已提交成功）：${thrown instanceof Error ? thrown.message : String(thrown)}`.slice(0, 300),
+        });
+      }
     }
 
     // 9. 0.9.31 首轮自动建图（作者需求：第一次推演生成当前地图，之后地图有了就不再重复）。

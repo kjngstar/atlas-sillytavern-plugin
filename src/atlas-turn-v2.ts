@@ -51,6 +51,20 @@ export interface AtlasV2TurnOutput {
   refResolution: AtlasV2RefResolution;
   createdPointIds: number[];
   createdEntityIds: string[];
+  /**
+   * v2 mapScaleHints 转发（R10）：由 atlas-server 接到 maps sidecar 的 calibrations
+   * （不在本模块内写 sidecar——避免再次引入全局 IO 路径，遵守 R12 的"事务原子性"约束）。
+   * duplicate / failed 时也透传，便于 caller 记日志 / 警告。
+   */
+  scaleHints: Array<{
+    mapRef: string;
+    frameRevision: number | null;
+    status: "estimated" | "grounded" | "unknown" | "conflict";
+    extentMeters: { width: number; height: number } | null;
+    basis: string;
+    confidence: "low" | "medium" | "high";
+    evidenceIds: string[];
+  }>;
 }
 
 function fail(message: string): never {
@@ -375,6 +389,7 @@ export function applyAtlasV2Turn(world: World, input: AtlasV2TurnInput): AtlasV2
       refResolution: { locations: [], characters: [], warnings: [] },
       createdPointIds: [],
       createdEntityIds: [],
+      scaleHints: input.draft.mapScaleHints,
     };
   }
 
@@ -408,6 +423,7 @@ export function applyAtlasV2Turn(world: World, input: AtlasV2TurnInput): AtlasV2
       },
       createdPointIds: [],
       createdEntityIds: [],
+      scaleHints: input.draft.mapScaleHints,
     };
   }
 
@@ -445,5 +461,6 @@ export function applyAtlasV2Turn(world: World, input: AtlasV2TurnInput): AtlasV2
     },
     createdPointIds,
     createdEntityIds,
+    scaleHints: input.draft.mapScaleHints,
   };
 }
