@@ -63,6 +63,12 @@ test("挂载冒烟：connectAtlas 真实执行，面板六页全部渲染，骨�
     conn.core.__renderPage();
     const center = root.querySelector(".aw-center");
     assert.ok(center.children.length > 0, `页面 ${page} 的中区必须渲染出内容`);
+    // 0.9.43 回归锁：el() 只接受文本，DOM 节点被当文字传进去会渲染成 "[object HTMLElement]"
+    // （0.9.41 图例真实翻车：三个图例项全部变成 [object HTMLElement]）
+    assert.ok(
+      !center.textContent.includes("[object HTMLElement"),
+      `页面 ${page} 不得出现 "[object HTMLElement]"（有 DOM 节点被当字符串塞进 el()）`,
+    );
   }
 
   // 打开可见性消费正常
