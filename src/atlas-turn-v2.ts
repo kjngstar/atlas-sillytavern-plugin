@@ -37,6 +37,15 @@ export interface AtlasV2TurnInput {
   now?: number;
 }
 
+/**
+ * S3（0.9.55）：v2 子图深度与宽度上限。
+ * DEPTH_MAX 表示**最多四张连续的子图**（世界图不算子图）：世界 → L1 → L2 → L3 → L4，
+ * 即某地点沿 parentPointId 上溯最多 4 跳。
+ * SIBLINGS_MAX 与 SUBMAP_POINTS_MAX（40）同口径，按「同一父下的直接子地点数」计。
+ */
+export const V2_SUBMAP_DEPTH_MAX = 4;
+export const V2_SUBMAP_SIBLINGS_MAX = 40;
+
 export interface AtlasV2RefResolution {
   locations: Array<{ ref: string; pointId: number; created: boolean }>;
   characters: Array<{ ref: string; entityId: string; created: boolean }>;
@@ -93,7 +102,7 @@ function resolveRefsAndBuildCandidate(
   world: World,
   draft: AtlasV2Draft,
   turnId: string,
-): { candidate: World; tables: RefTables; createdPointIds: number[]; createdEntityIds: string[]; warnings: string[]; parentRefs: Array<{ ref: string; parentLocationRef: string }> } {
+): { candidate: World; tables: RefTables; createdPointIds: number[]; createdEntityIds: string[]; warnings: string[] } {
   const warnings: string[] = [];
   const knownRegionIds = new Set((world.regions ?? []).map((r) => String(r.id)));
   const pointByStringId = new Map((world.points ?? []).map((p) => [String(p.id), p] as const));
@@ -138,6 +147,83 @@ function resolveRefsAndBuildCandidate(
       fail(`discoveries.locations.ref 引用未知地点：${loc.ref}`);
     }
   }
+
+  // --- S3（0.9.55）：父引用真正落到候选世界 -------------------------------------
+  // 所有新地点的 numeric id 分配完之后才解析父引用：
+  // · 已知父从当前可见 world.points 查（被当前分支隐藏的父视为不存在）；
+  // · 本轮父从 points 引用表查（支持父在子之后声明，顺序无关）。
+  // 任一约束不满足即整轮拒绝（fail 抛 AtlasError → 零写入），绝不静默截断或丢弃第 41 个。
+  const parentPointIdOf = new Map<number, number>(); // 新地点 id → 父 id
+  const knownPointIds = new Set((world.points ?? []).map((p) => Number(p.id)));
+  if (parentRefs.length > 0) {
+    for (const { ref, parentLocationRef } of parentRefs) {
+      const childId = points.get(ref);
+      if (childId === undefined) continue; // 已知地点重新挂靠不在此处理（见施工单：拒绝隐式迁移）
+      let parentId: number | undefined;
+      const parentFromDraft = points.get(parentLocationRef);
+      if (parentFromDraft !== undefined) {
+        parentId = parentFromDraft;
+      } else if (/^\d+$/.test(parentLocationRef) && knownPointIds.has(Number(parentLocationRef))) {
+        parentId = Number(parentLocationRef);
+      } else {
+        fail(`discoveries.locations[${ref}].parentLocationRef 引用未知地点（既非已知 id 也非本响应声明的 new:loc）：${parentLocationRef}`);
+      }
+      if (parentId === childId) {
+        fail(`discoveries.locations[${ref}].parentLocationRef 不能以自身为父`);
+      }
+      parentPointIdOf.set(childId, parentId);
+    }
+
+    // 深度与宽度：祖先链既可能落在新点之间，也可能落到已知点，合并两种映射后统一上溯
+    const knownParentById = new Map<number, number>();
+    for (const p of world.points ?? []) {
+      const pid = Number(p.parentPointId);
+      if (Number.isInteger(pid) && pid > 0) knownParentById.set(Number(p.id), pid);
+    }
+    const parentOfId = (id: number): number | undefined =>
+      parentPointIdOf.get(id) ?? knownParentById.get(id);
+
+    const depthOf = (id: number): number => {
+      let hops = 0;
+      let cursor = parentOfId(id);
+      const seen = new Set<number>([id]);
+      while (cursor !== undefined) {
+        if (seen.has(cursor)) {
+          fail(`discoveries.locations.parentLocationRef 父链成环（地图点 ${id}）`);
+        }
+        seen.add(cursor);
+        hops += 1;
+        if (hops > V2_SUBMAP_DEPTH_MAX) {
+          fail(`discoveries.locations.parentLocationRef 父链超出 ${V2_SUBMAP_DEPTH_MAX} 层子图上限（地图点 ${id}）`);
+        }
+        cursor = parentOfId(cursor);
+      }
+      return hops;
+    };
+
+    const childCount = new Map<number, number>();
+    for (const p of world.points ?? []) {
+      const pid = parentOfId(Number(p.id));
+      if (pid !== undefined) childCount.set(pid, (childCount.get(pid) ?? 0) + 1);
+    }
+    for (const [childId, parentId] of parentPointIdOf) {
+      depthOf(childId);
+      const count = childCount.get(parentId) ?? 0;
+      if (count > V2_SUBMAP_SIBLINGS_MAX) {
+        const childName = newPoints.find((p) => p.id === childId)?.name ?? String(childId);
+        const parentName = (world.points ?? []).find((p) => Number(p.id) === parentId)?.name
+          ?? newPoints.find((p) => p.id === parentId)?.name
+          ?? String(parentId);
+        fail(`discoveries.locations[${childName}].parentLocationRef 「${parentName}」下子地点超过 ${V2_SUBMAP_SIBLINGS_MAX} 个上限`);
+      }
+    }
+    // 新地点的父字段落进候选世界（已知地点的父链不因本轮改动，不做迁移）
+    for (const p of newPoints) {
+      const pid = parentPointIdOf.get(p.id);
+      if (pid !== undefined) p.parentPointId = pid;
+    }
+  }
+
   // 场景 / 更新里的地点引用：已知 id 或 new:loc
   const allLocationRefs = [
     ...(draft.scene.locationRef !== null ? [draft.scene.locationRef] : []),
@@ -228,7 +314,7 @@ function resolveRefsAndBuildCandidate(
     ...(newRecords.length > 0 ? { entityRecords: [...(world.entityRecords ?? []), ...newRecords] } : {}),
   };
 
-  return { candidate, tables: { points, entities }, createdPointIds: newPoints.map((p) => p.id), createdEntityIds: newCharacters.map((c) => c.id), warnings, parentRefs };
+  return { candidate, tables: { points, entities }, createdPointIds: newPoints.map((p) => p.id), createdEntityIds: newCharacters.map((c) => c.id), warnings };
 }
 
 // ---------------------------------------------------------------------------
@@ -393,10 +479,9 @@ export function applyAtlasV2Turn(world: World, input: AtlasV2TurnInput): AtlasV2
     };
   }
 
-  const { candidate, tables, createdPointIds, createdEntityIds, warnings, parentRefs } = resolveRefsAndBuildCandidate(world, input.draft, turnId);
-  if (parentRefs.length > 0) {
-    warnings.push(`${parentRefs.length} 条 parentLocationRef 暂存未落账（子图层级在 R09 接线）：${parentRefs.map((p) => `${p.ref}←${p.parentLocationRef}`).join("、")}`);
-  }
+  const { candidate, tables, createdPointIds, createdEntityIds, warnings } = resolveRefsAndBuildCandidate(world, input.draft, turnId);
+  // S3（0.9.55）：parentLocationRef 已真正落到候选世界（MapPoint.parentPointId），
+  // 「暂存未落账」警告随之删除——不再存在只报警不接线的情况。
 
   const { v1, withIdentity, identityUpdatedIds } = foldToV1Draft(candidate, input.draft, tables, warnings);
 
