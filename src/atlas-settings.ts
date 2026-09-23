@@ -397,9 +397,10 @@ function parsePromptPreset(raw: unknown): { id: string; name: string; systemProm
   const id = normalizeId(record.id);
   if (!id || id === BUILTIN_PROMPT_PRESET_ID) return null;
   if (typeof record.name !== "string" || !record.name.trim() || record.name.length > MAX_NAME_CHARS) return null;
-  if (typeof record.systemPrompt !== "string") return null;
-  const prompt = record.systemPrompt.trim();
-  // 0.9.18：单提示词（systemPrompt 非空）或分段预设（segments 非空）二选一即可合法
+  // Older segment-only presets did not always persist a systemPrompt field.
+  // Accept the missing field when there are valid segments, preserving the text.
+  if (record.systemPrompt != null && typeof record.systemPrompt !== "string") return null;
+  const prompt = typeof record.systemPrompt === "string" ? record.systemPrompt.trim() : "";
   const segments = normalizePromptSegments(record.segments);
   if ((!prompt || prompt.length > MAX_PROMPT_CHARS) && segments.length === 0) return null;
   return {

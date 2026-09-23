@@ -992,6 +992,52 @@
   margin-top: 1px;
 }
 
+.aw-interior-roster {
+  position: absolute;
+  top: 52px;
+  right: 10px;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: min(240px, 48%);
+  max-height: 45%;
+  overflow: auto;
+  padding: 7px;
+  border: 1px solid var(--am-border, #b3ab92);
+  border-radius: 4px;
+  background: var(--aw-veil);
+  box-shadow: 0 2px 12px rgba(16, 27, 29, 0.15);
+}
+.aw-interior-roster__title {
+  color: var(--aw-ink-soft);
+  font: 10px var(--aw-sans);
+}
+.aw-interior-roster__item {
+  text-align: left;
+  border: 1px solid var(--am-border, #b3ab92);
+  border-radius: 3px;
+  background: var(--aw-panel);
+  color: var(--aw-ink-strong);
+  font: 11px var(--aw-sans);
+  padding: 3px 6px;
+  cursor: pointer;
+}
+
+.aw-grid-stride {
+  position: absolute;
+  left: 12px;
+  bottom: 10px;
+  z-index: 3;
+  padding: 2px 6px;
+  border: 1px solid var(--am-border, #b3ab92);
+  border-radius: 3px;
+  background: var(--aw-veil);
+  color: var(--aw-ink-soft);
+  font: 10px var(--aw-sans);
+  pointer-events: none;
+}
+
 /* 0.9.50 动态标尺条：条长按候选标尺距离真实绘制；可展开标定详情 */
 
 .aw-scale {
@@ -2237,4 +2283,19 @@
 /* 深色主题下宿主（酒馆）暗色控件的 autofill / 原生外观接管：跟随令牌而非强制白底 */
 .atlas-workbench[data-atlas-theme="dark"] {
   color-scheme: dark;
+}
+
+.aw-log__timeline {
+  border: 1px solid var(--aw-border, rgba(255,255,255,.14));
+  border-radius: 8px;
+  margin: 8px 0;
+  padding: 6px 10px;
+}
+.aw-log__timeline > summary {
+  cursor: pointer;
+  font-weight: 600;
+  padding: 5px 0;
+}
+.aw-log__timeline .aw-log__row {
+  margin-top: 6px;
 }

@@ -807,7 +807,8 @@ test("0.9.48 T05：完全无法解析 → 明确失败（RESPONSE_MALFORMED 可�
   equal(JSON.stringify(JSON.parse(worldSnapshot)), JSON.stringify(world), "世界零写入");
   const fallbackLogs = core.logs().filter((l) => l.kind === "world-turn-parse-fallback");
   equal(fallbackLogs.length, 1, "解析降级日志恰好一条");
-  ok(fallbackLogs[0].excerpt.includes("Let me analyze"), "原文摘录进日志（供作者查看模型回复）");
+  ok(fallbackLogs[0].responseChars > 0, "只记录响应长度");
+  ok(!JSON.stringify(fallbackLogs).includes("Let me analyze"), "日志不保留模型原文");
   ok(!JSON.stringify(core.logs()).includes("sk-runtime-test"), "日志无明文 Key");
 });
 
@@ -1041,6 +1042,44 @@ test("0.9.32 点挂子图：commit 落 sidecar（maps:<worldId>），/state 带�
   ok(worldNow.map.submaps && worldNow.map.submaps[String(newPoint.id)], "/state 带出子图");
   equal(worldNow.map.submaps[String(newPoint.id)].points.length, 2, "/state 子图点位");
   equal(worldNow.map.pointMeta[String(newPoint.id)].description, "潮门旁的旧钟楼。", "/state 带出点位描述");
+});
+
+test("state exposes reachable nested submaps with parent links and frame", async () => {
+  const { core, carrier } = await setup(null);
+  carrier.session.maps = {
+    schemaVersion: 2, pointMeta: {}, calibrations: {},
+    submaps: {
+      "4103": {
+        parentMapId: "world", ownerLocationId: "4103",
+        frame: { cols: 20, rows: 10, frameRevision: 2 },
+        points: [{ id: "sub-room", name: "里间", x: 50, y: 50 }],
+      },
+      "sub-room": {
+        parentMapId: "4103", ownerLocationId: "sub-room",
+        frame: { cols: 8, rows: 6, frameRevision: 3 },
+        points: [{ id: "sub-cabinet", name: "柜内", x: 50, y: 50 }],
+      },
+      "sub-cabinet": {
+        parentMapId: "sub-room", ownerLocationId: "sub-cabinet",
+        points: [{ id: "box", name: "盒子", x: 50, y: 50 }],
+      },
+      "orphan": { parentMapId: "missing", points: [{ id: "ghost", name: "幽灵", x: 5, y: 5 }] },
+    },
+  };
+  const result = await core.handle("GET", "/state/chat-a");
+  equal(result.body.ok, true, "state 可读");
+  const maps = result.body.data.map.submaps;
+  equal(maps["4103"].frame.cols, 20, "顶层 frame");
+  equal(maps["sub-room"].parentMapId, "4103", "房间父链");
+  equal(maps["sub-room"].frame.rows, 6, "房间 frame");
+  equal(maps["sub-cabinet"].parentMapId, "sub-room", "三层地图可达");
+  equal(maps.orphan, undefined, "孤儿地图不公开");
+  const calibrated = await core.handle("POST", "/worlds/scale/calibrate", {
+    chatId: "chat-a", mapId: "sub-room", userMetersPerCell: 0.0004,
+  }, { local: true });
+  equal(calibrated.body.data.status, "grounded", "嵌套房间可人工标定");
+  const after = await core.handle("GET", "/state/chat-a");
+  equal(after.body.data.map.calibrations["sub-room"].metersPerCell, 0.0004, "微小正标定保留");
 });
 
 test("0.9.41 地图三型标点：/state 带人物动向字段（status / recentNarratives / pointName）与物品描述", async () => {
@@ -1528,4 +1567,27 @@ test("0.9.50 标定：子图宿主点位不存在 → 400；损坏子图引用�
 
 test(`本轮累计断言已记录（计数见报告）`, () => {
   ok(assertionCount > 60, "断言数量达到覆盖要求");
+});
+
+test("invalid old prompt entry blocks settings writes and preserves the raw document", async () => {
+  const store = createMemoryDocumentStore();
+  const raw = {
+    schemaVersion: 2, apiPresets: [], activeApiPresetId: null,
+    promptPresets: [
+      { id: "valid", name: "有效", systemPrompt: "已保存的提示词", updatedAt: NOW },
+      { id: "old-invalid", name: "待恢复", systemPrompt: { legacy: "内容" }, updatedAt: NOW },
+    ],
+    activePromptPresetId: "valid", autoCommit: true, rpmLimit: 30,
+  };
+  await store.write("settings", raw);
+  const { core } = sessionCore(store);
+  const view = await core.handle("GET", "/settings", null, { local: true });
+  assert.equal(view.status, 200);
+  assert.equal(view.body.data.recoveryPromptCount, 1);
+  assert.equal(view.body.data.promptPresets.length, 1);
+  const result = await core.handle("PUT", "/settings",
+    { action: "runtime.update", rpmLimit: 40 }, { local: true });
+  assert.notEqual(result.status, 200);
+  assert.match(result.body.error.message, /备份原始设置/);
+  assert.deepEqual(await store.read("settings"), raw);
 });

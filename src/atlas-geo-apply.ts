@@ -11,7 +11,7 @@
 import type { World } from "../lib/world-schema.ts";
 import { appendDefinitionRevision } from "../lib/world-definition.ts";
 import { hashString } from "../lib/world-cards.ts";
-import { sanitizeCalibration, type MapScaleCalibration } from "./atlas-scale.ts";
+import { roundPositiveScale, sanitizeCalibration, type MapScaleCalibration } from "./atlas-scale.ts";
 
 /** 单轮新地点上限（与 geo 提炼口径一致：宁缺毋滥）。 */
 export const NEW_LOCATIONS_MAX = 12;
@@ -41,38 +41,22 @@ export interface SubMapFrame {
 /** 子图 frame 默认值（0.9.51 兼容档）。 */
 export const SUBMAP_FRAME_DEFAULT: SubMapFrame = { cols: 100, rows: 100, frameRevision: 1 };
 
-/**
- * R09：检查给定点挂 submap 的嵌套深度是否在 SUBMAP_DEPTH_MAX 范围内。
- * 当前 schema 单层（mapsDoc.submaps[pointId]）；递归结构待 schema v4 升级。
- * 本函数先实现**前置校验**——UI 层在允许进入子图前调，确认未超过深度上限。
- *
- * 返回 { ok, depth, maxReached }：
- * - depth = 1 表示世界图；depth = 2 表示建筑层；...
- * - ok = true 当 depth <= SUBMAP_DEPTH_MAX
- */
+/** 返回一张子图的父链深度；循环或超限时拒绝。旧图缺 parentMapId 视为世界图子图。 */
 export function validateSubmapDepth(doc: AtlasMapDoc, pointId: string): { ok: boolean; depth: number; maxReached: boolean } {
   const seen = new Set<string>();
   let depth = 0;
-  let current: string | null = pointId;
-  while (current !== null) {
-    if (seen.has(current)) {
-      // 循环引用：递归结构最坏情况，UI 应回退到最近有效祖先。
-      return { ok: false, depth, maxReached: depth >= SUBMAP_DEPTH_MAX };
-    }
+  let current = pointId;
+  while (doc.submaps[current]) {
+    if (seen.has(current)) return { ok: false, depth, maxReached: depth >= SUBMAP_DEPTH_MAX };
     seen.add(current);
-    if (!(current in doc.submaps)) {
-      break;
-    }
     depth += 1;
-    if (depth > SUBMAP_DEPTH_MAX) {
-      return { ok: false, depth, maxReached: true };
-    }
-    // 当前 schema 单层：submaps 不嵌套子图，所以一旦找到一层就停。
-    // 待 schema v4 升级 SubMap 携带 submaps 时改成递归遍历。
-    break;
+    if (depth > SUBMAP_DEPTH_MAX) return { ok: false, depth, maxReached: true };
+    const parent = doc.submaps[current].parentMapId ?? "world";
+    if (parent === "world") break;
+    if (!doc.submaps[parent]) return { ok: false, depth, maxReached: false };
+    current = parent;
   }
-  // depth = 0 表示未找到任何 submap；depth = 1 表示该 pointId 是直接宿主
-  return { ok: depth <= SUBMAP_DEPTH_MAX, depth, maxReached: depth > SUBMAP_DEPTH_MAX };
+  return { ok: true, depth, maxReached: false };
 }
 
 /** 点挂子图（0.9.32）：与父图同构——网格 + 标记点 + 可选比例尺；递归结构。 */
@@ -80,7 +64,7 @@ export interface SubMapDraft {
   scale?: SubMapScale;
   /** R09：可选 frame；缺省 = 100×100 default。 */
   frame?: SubMapFrame;
-  points: Array<{ name: string; description?: string }>;
+  points: Array<{ name: string; description?: string; submap?: SubMapDraft }>;
 }
 
 export interface NewLocationDraft {
@@ -110,7 +94,7 @@ export interface GeoAdoptOutcome {
 }
 
 /** 子图清洗（不可信）：点名单必须；比例尺数字必须为正；frame cols/rows 走宽容默认。 */
-export function sanitizeSubMap(raw: unknown): SubMapDraft | undefined {
+export function sanitizeSubMap(raw: unknown, depth = 1): SubMapDraft | undefined {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
   const record = raw as Record<string, unknown>;
   let scale: SubMapScale | undefined;
@@ -119,7 +103,7 @@ export function sanitizeSubMap(raw: unknown): SubMapDraft | undefined {
     const distance = Number((scaleRaw as Record<string, unknown>).distancePerCell);
     if (Number.isFinite(distance) && distance > 0) {
       const unit = String((scaleRaw as Record<string, unknown>).unit ?? "").trim().slice(0, 12);
-      scale = { distancePerCell: Math.round(distance * 100) / 100, ...(unit ? { unit } : {}) };
+      scale = { distancePerCell: roundPositiveScale(distance), ...(unit ? { unit } : {}) };
     }
   }
   // R09：frame 清洗——cols/rows 正整数，frameRevision 非负整数；坏值丢弃走默认。
@@ -144,7 +128,10 @@ export function sanitizeSubMap(raw: unknown): SubMapDraft | undefined {
     const name = String((item as Record<string, unknown>).name ?? "").trim().replace(/\s+/g, " ").slice(0, NAME_CHARS);
     if (!name) continue;
     const description = String((item as Record<string, unknown>).description ?? "").trim().replace(/\s+/g, " ").slice(0, DESC_CHARS);
-    points.push({ name, ...(description ? { description } : {}) });
+    const child = depth < SUBMAP_DEPTH_MAX
+      ? sanitizeSubMap((item as Record<string, unknown>).submap, depth + 1)
+      : undefined;
+    points.push({ name, ...(description ? { description } : {}), ...(child ? { submap: child } : {}) });
     if (points.length >= SUBMAP_POINTS_MAX) break;
   }
   if (points.length === 0) return undefined;
@@ -300,6 +287,10 @@ export interface SubMapPoint {
 
 /** 子图：与父图同构——网格 + 标记点 + 可选比例尺 + R09 frame 字段。 */
 export interface SubMap {
+  /** world for direct submaps; otherwise the parent submap key. */
+  parentMapId?: string;
+  /** Point ID in the parent map that owns this submap. */
+  ownerLocationId?: string;
   scale?: SubMapScale;
   /** R09：子图 frame（cols/rows/frameRevision）。sanitize 缺省 = SUBMAP_FRAME_DEFAULT。 */
   frame?: SubMapFrame;
@@ -346,7 +337,7 @@ export function sanitizeMapDoc(raw: unknown): AtlasMapDoc {
         const distance = Number((scaleRaw as Record<string, unknown>).distancePerCell);
         if (Number.isFinite(distance) && distance > 0) {
           const unit = String((scaleRaw as Record<string, unknown>).unit ?? "").trim().slice(0, 12);
-          scale = { distancePerCell: Math.round(distance * 100) / 100, ...(unit ? { unit } : {}) };
+          scale = { distancePerCell: roundPositiveScale(distance), ...(unit ? { unit } : {}) };
         }
       }
       const points: SubMapPoint[] = [];
@@ -384,7 +375,12 @@ export function sanitizeMapDoc(raw: unknown): AtlasMapDoc {
           frame = { cols: Math.floor(colsRaw), rows: Math.floor(rowsRaw), frameRevision: Math.floor(revisionRaw) };
         }
       }
+      const parentMapId = typeof subRecord.parentMapId === "string"
+        && subRecord.parentMapId.length <= 64 && subRecord.parentMapId !== key
+        ? subRecord.parentMapId : "world";
       doc.submaps[key] = {
+        parentMapId,
+        ownerLocationId: key,
         ...(scale ? { scale } : {}),
         ...(frame ? { frame } : { frame: { ...SUBMAP_FRAME_DEFAULT } }),
         points,
@@ -392,6 +388,14 @@ export function sanitizeMapDoc(raw: unknown): AtlasMapDoc {
     }
   }
   }
+  // 旧文档没有父链：若宿主点确实属于另一子图，按点位 ID 推断父图。
+  for (const [mapId, submap] of Object.entries(doc.submaps)) {
+    if (submap.parentMapId !== "world" || !mapId.startsWith("sub-")) continue;
+    const parent = Object.entries(doc.submaps).find(([candidateId, candidate]) =>
+      candidateId !== mapId && candidate.points.some((point) => point.id === mapId));
+    if (parent) submap.parentMapId = parent[0];
+  }
+  // 循环或超限的旧数据保留文档但不提供嵌套入口，避免误删原始资料。
   // 0.9.50 标定清洗：每格距离必须正有限；来源白名单外按 legacy 处理；封顶 40 张图
   const calibrations = record.calibrations;
   if (calibrations && typeof calibrations === "object" && !Array.isArray(calibrations)) {
@@ -423,5 +427,33 @@ export function buildSubMapFromDraft(
       ...(item.description ? { description: item.description } : {}),
     });
   }
-  return { ...(draft.scale ? { scale: draft.scale } : {}), points };
+  return {
+    parentMapId: "world",
+    ownerLocationId: context.pointId,
+    ...(draft.scale ? { scale: draft.scale } : {}),
+    frame: draft.frame ? { ...draft.frame } : { ...SUBMAP_FRAME_DEFAULT },
+    points,
+  };
+}
+
+/** Flat registry with explicit parent links; nested drafts become real maps. */
+export function buildSubMapTreeFromDraft(
+  draft: SubMapDraft,
+  context: { worldId: string; pointId: string; now: number },
+  parentMapId = "world",
+  depth = 1,
+): Record<string, SubMap> {
+  const root = buildSubMapFromDraft(draft, context);
+  root.parentMapId = parentMapId;
+  const maps: Record<string, SubMap> = { [context.pointId]: root };
+  if (depth >= SUBMAP_DEPTH_MAX) return maps;
+  for (let index = 0; index < root.points.length; index++) {
+    const childDraft = draft.points[index]?.submap;
+    const childPoint = root.points[index];
+    if (!childDraft || !childPoint) continue;
+    Object.assign(maps, buildSubMapTreeFromDraft(childDraft, {
+      worldId: context.worldId, pointId: childPoint.id, now: context.now,
+    }, context.pointId, depth + 1));
+  }
+  return maps;
 }

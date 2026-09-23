@@ -193,7 +193,8 @@ test("0.9.34 geo/adopt：模型输出非法 JSON → 不再 502，按 +0 降级�
   assert.equal(fetchCalls.length, 1);
   const logs = core.logs().filter((l) => l.kind === "world-geo-extract-fallback");
   assert.equal(logs.length, 1, "降级日志恰好一条");
-  assert.ok(logs[0].excerpt.includes("自由发挥"), "原文摘录进日志（供作者查看模型回复）");
+  assert.ok(logs[0].responseChars > 0, "只记录响应长度");
+  assert.ok(!JSON.stringify(logs).includes("自由发挥"), "日志不保留模型原文");
 });
 
 test("geo/adopt：代码围栏包裹的 JSON 也能解析；未绑定聊天 → 绑定错误", async () => {

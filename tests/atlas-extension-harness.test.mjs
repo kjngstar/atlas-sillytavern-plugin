@@ -674,7 +674,7 @@ function makeAdaptEvent() {
   };
 }
 
-async function readyCore(turnBehavior = {}, bindingOverrides = {}) {
+async function readyCore(turnBehavior = {}, bindingOverrides = {}, diagnosticEvents = []) {
   const api = makeApi({ stateByChat: { "chat-a": STATE_PAYLOAD }, turnBehavior });
   const hostWrap = makeHost();
   hostWrap.setChat("chat-a");
@@ -684,6 +684,7 @@ async function readyCore(turnBehavior = {}, bindingOverrides = {}) {
     host: hostWrap.host,
     emitter: makeEmitter(),
     adaptEvent: makeAdaptEvent(),
+    onDiagnostic: (entry) => diagnosticEvents.push(entry),
     now: () => NOW_BASE,
     // ATLAS-06：ENDED 走防抖重解析；测试里 0ms + flush 让计时器立刻落定
     endedDebounceMs: 0,
@@ -758,6 +759,31 @@ test("回合：GENERATION_STOPPED / 空回复 → 放弃 pending，不推进世�
   await flush(); // ATLAS-06：ENDED 防抖落定
   equal(empty.api.calls.filter((c) => c.path === "/turns/commit").length, 0, "空回复 → 零 commit");
   equal(empty.core.getState().pendingTurn, null, "空回复放弃 pending");
+});
+
+test("回合：停止后菜单重新生成重新 prepare，单独尝试且只提交一次", async () => {
+  const events = [];
+  const { api, core } = await readyCore({}, {}, events);
+  await core.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "继续。" });
+  await core.handleEvent("GENERATION_STOPPED");
+  equal(core.getState().pendingTurn, null, "停止清除原 pending");
+  ok(events.some((entry) => entry.code === "GENERATION_STOPPED"), "停止进入诊断");
+  await core.handleEvent("MESSAGE_RECEIVED", { assistantMessageId: "m-1", assistantText: "被截断的回复。" });
+  await flush();
+  equal(api.calls.filter((call) => call.path === "/turns/commit").length, 0, "停止后的迟到完成通知不提交");
+
+  await core.handleEvent("GENERATION_STARTED", { gated: false });
+  equal(api.calls.filter((call) => call.path === "/turns/prepare").length, 2, "菜单重新生成重新 prepare");
+  ok(core.getState().pendingTurn, "新的 pending 已建立");
+  await core.handleEvent("MESSAGE_RECEIVED", { assistantMessageId: "m-1", assistantText: "新的回复。" });
+  await flush();
+  const commits = api.calls.filter((call) => call.path === "/turns/commit");
+  equal(commits.length, 1, "重新生成只提交一次");
+  ok(commits[0].body.swipeId, "新尝试有独立 swipe 幂等键");
+  const starts = events.filter((entry) => entry.code === "TURN_STARTED");
+  equal(starts.length, 2, "两次尝试分别可追踪");
+  equal(starts[0].traceId, starts[1].traceId, "同一用户回合共用 trace");
+  assert.notEqual(starts[0].attemptId, starts[1].attemptId, "两次生成各有 attempt");
 });
 
 test("回合：prepare 失败不阻断（提示用户可见），无注入不建 pending", async () => {

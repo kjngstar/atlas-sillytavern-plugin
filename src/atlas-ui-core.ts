@@ -25,6 +25,7 @@ import {
   type AtlasTurnReceipt,
 } from "./atlas-contract.ts";
 import { parseAtlasLorebookPlans, type AtlasLorebookPlans } from "./atlas-lorebook.ts";
+import type { AtlasDiagnosticInput } from "./atlas-diagnostics.ts";
 
 /** 内置默认推演提示词（API 页「查看内置默认提示词」用；开发态 src 直载时也必须可见）。 */
 export { DEFAULT_WORLD_TURN_SYSTEM_PROMPT } from "./atlas-api-client.ts";
@@ -249,6 +250,7 @@ export function createAtlasUiCore(deps: {
   api: AtlasUiApi;
   host: AtlasUiHost;
   emitter: AtlasUiEmitter;
+  onDiagnostic?: (event: AtlasDiagnosticInput) => void;
   now?: () => number;
   /** 任意状态变化后的回调（UI 层重绘用；同步调用，不等待异步刷新完成） */
   onStateChange?: () => void;
@@ -307,6 +309,20 @@ export function createAtlasUiCore(deps: {
 }): AtlasUiCore {
   const { api, host, emitter } = deps;
   const now = deps.now ?? Date.now;
+  const traces = new Map<string, string>();
+  const attempts = new Map<string, number>();
+  let activeTraceId: string | null = null;
+  let activeAttemptId: string | null = null;
+  let traceSequence = 0;
+  function diagnostic(event: AtlasDiagnosticInput): void {
+    try {
+      deps.onDiagnostic?.({
+        ...event,
+        ...(activeTraceId && !event.traceId ? { traceId: activeTraceId } : {}),
+        ...(activeAttemptId && !event.attemptId ? { attemptId: activeAttemptId } : {}),
+      });
+    } catch { /* diagnostics must not affect the turn */ }
+  }
 
   let state: AtlasUiState = {
     mode: "unbound",
@@ -334,6 +350,8 @@ export function createAtlasUiCore(deps: {
   let disposed = false;
   let healthCheckedAt = -Infinity;
   let commitInFlight = false;
+  let generationRevision = 0;
+  let stoppedGeneration = false;
   /** 最近一次 MESSAGE_SENT 触发的 prepare 任务（waitPendingTurn 等它落定）。 */
   let lastPrepareTask: Promise<void> | null = null;
   /** ATLAS-06：当前生成是否被门控（quiet / dryRun / automatic_trigger → 事件全部忽略）。 */
@@ -462,13 +480,22 @@ export function createAtlasUiCore(deps: {
     if (!lorebookRaw) return;
     const parsed = parseAtlasLorebookPlans(lorebookRaw);
     if (!parsed.ok) {
+      diagnostic({ level: "warn", source: "lorebook", code: "LOREBOOK_PLAN_INVALID",
+        operation: "lorebook", phase: "validation", outcome: "failed",
+        details: { coreCommitted: true } });
       setState({ lorebookHint: "世界书条目载荷异常，本轮跳过写入。" });
       return;
     }
     try {
       const result = await deps.onLorebookSync(parsed.value);
+      diagnostic({ level: "info", source: "lorebook", code: "LOREBOOK_SYNC_COMPLETE",
+        operation: "lorebook", phase: "write", outcome: "success",
+        details: { coreCommitted: true } });
       setState({ lorebookHint: lorebookHintFromResult(result) });
     } catch (error) {
+      diagnostic({ level: "warn", source: "lorebook", code: "LOREBOOK_SYNC_FAILED",
+        operation: "lorebook", phase: "write", outcome: "failed",
+        details: { coreCommitted: true } });
       setState({ lorebookHint: `世界书写入失败：${error instanceof Error ? error.message : String(error)}` });
     }
   }
@@ -488,11 +515,19 @@ export function createAtlasUiCore(deps: {
       const payload = body?.data;
       const version = payload && typeof payload.protocolVersion === "number" ? payload.protocolVersion : null;
       if (version !== ATLAS_PROTOCOL_VERSION) {
+        diagnostic({ level: "error", source: "engine", code: "ENGINE_PROTOCOL_MISMATCH",
+          operation: "health", phase: "response", outcome: "failed",
+          httpStatus: result.status });
         setState({ serviceStatus: "incompatible", serviceProtocolVersion: version, mode: "protocol-incompatible" });
         return;
       }
+      diagnostic({ level: "debug", source: "engine", code: "ENGINE_HEALTH_OK",
+        operation: "health", phase: "response", outcome: "success",
+        httpStatus: result.status });
       setState({ serviceStatus: "online", serviceProtocolVersion: version });
     } catch {
+      diagnostic({ level: "error", source: "engine", code: "ENGINE_HEALTH_FAILED",
+        operation: "health", phase: "request", outcome: "failed", retryable: true });
       setState({ serviceStatus: "offline", serviceProtocolVersion: null, mode: "offline" });
     }
   }
@@ -546,12 +581,23 @@ export function createAtlasUiCore(deps: {
       const result = await api.request("POST", "/state", { chatId: binding.chatId });
       const body = result.body as { ok?: boolean; error?: { code?: string; message?: string }; data?: Record<string, unknown> };
       // 等待期间聊天已切换 → 响应属于旧聊天，丢弃（stateData 绝不跨聊天存活）
-      if (state.chatId === null || binding.chatId !== state.chatId) return;
+      if (state.chatId === null || binding.chatId !== state.chatId) {
+        diagnostic({ level: "debug", source: "ui", code: "STALE_CHAT_RESPONSE_DROPPED",
+          operation: "state", phase: "response", outcome: "skipped" });
+        return;
+      }
       if (result.status === 200 && body.ok && body.data) {
         const responseChatId = typeof (body.data as Record<string, unknown>).chatId === "string"
           ? (body.data as Record<string, unknown>).chatId as string
           : binding.chatId;
-        if (responseChatId !== state.chatId) return;
+        if (responseChatId !== state.chatId) {
+          diagnostic({ level: "warn", source: "ui", code: "STALE_CHAT_RESPONSE_DROPPED",
+            operation: "state", phase: "response", outcome: "skipped" });
+          return;
+        }
+        diagnostic({ level: "debug", source: "ui", code: "STATE_REFRESH_COMPLETE",
+          operation: "state", phase: "response", outcome: "success",
+          httpStatus: result.status });
         setState({ mode: "ready", stateData: body.data, lastError: null });
         return;
       }
@@ -564,8 +610,13 @@ export function createAtlasUiCore(deps: {
         setState({ mode: "unbound", stateData: null });
         return;
       }
+      diagnostic({ level: "warn", source: "ui", code: "STATE_REFRESH_FAILED",
+        operation: "state", phase: "response", outcome: "failed",
+        httpStatus: result.status, errorCode: body.error?.code, retryable: true });
       setState({ lastError: body.error?.message ?? `状态读取失败（HTTP ${result.status}）` });
     } catch {
+      diagnostic({ level: "warn", source: "ui", code: "STATE_REFRESH_FAILED",
+        operation: "state", phase: "request", outcome: "failed", retryable: true });
       setState({ serviceStatus: "offline", mode: "offline", stateData: null });
     }
   }
@@ -581,6 +632,11 @@ export function createAtlasUiCore(deps: {
   /** 在途异步工作登记（handleEvent 测试入口等待用）。 */
   let asyncWork: Promise<unknown>[] = [];
   function track<T>(task: Promise<T>): Promise<T> {
+    // Attach a rejection handler immediately; flushAsyncWork may run later.
+    void task.catch(() => diagnostic({
+      level: "error", source: "ui", code: "UNEXPECTED_ERROR",
+      operation: "event", phase: "async", outcome: "failed",
+    }));
     asyncWork.push(task);
     return task;
   }
@@ -598,7 +654,13 @@ export function createAtlasUiCore(deps: {
       healthCheckedAt = -Infinity; // 事件驱动时强制重新检查服务
       // 切聊天：清回合/门控/防抖状态（rearm 属于旧聊天的楼层，绝不能带过去）
       generationGate = false;
+      stoppedGeneration = false;
+      generationRevision += 1;
       swipeIdForNextCommit = null;
+      activeTraceId = null;
+      activeAttemptId = null;
+      traces.clear();
+      attempts.clear();
       clearTimers();
       rolledBackFloors.clear();
       setState({ rearmTurn: null });
@@ -636,17 +698,41 @@ export function createAtlasUiCore(deps: {
     const adapted = deps.adaptEvent?.(event, payload) ?? null;
     if (!adapted) return;
     if (adapted.kind === "message-sent") {
-      if (generationGate) return; // shujuku 门控：quiet / dryRun / automatic_trigger 不触发 prepare
+      if (generationGate) {
+        diagnostic({ level: "debug", source: "host", code: "GENERATION_GATED",
+          operation: "generation", phase: "message", outcome: "skipped",
+          details: { reasonCode: "QUIET_OR_AUTOMATIC" } });
+        return;
+      } // quiet / dryRun / automatic_trigger
+      stoppedGeneration = false;
       setState({ rearmTurn: null }); // 真实用户回合优先于 swipe rearm
+      swipeIdForNextCommit = null;
       const task = onMessageSent(adapted.messageId, adapted.userText);
       lastPrepareTask = task;
       void track(task);
     } else if (adapted.kind === "generation-started") {
       generationGate = adapted.gated;
+      stoppedGeneration = false;
+      // Menu regeneration has no MESSAGE_SENT event. Reprepare the stopped turn.
+      if (!adapted.gated && state.rearmTurn && !state.pendingTurn) {
+        const rearm = state.rearmTurn;
+        swipeIdForNextCommit = rearm.swipeId;
+        const task = onMessageSent(rearm.userMessageId, rearm.userText);
+        lastPrepareTask = task;
+        void track(task);
+      }
     } else if (adapted.kind === "generation-ended") {
+      if (stoppedGeneration) {
+        diagnostic({ level: "info", source: "host", code: "GENERATION_STOPPED",
+          operation: "generation", phase: "ended", outcome: "skipped" });
+        return;
+      }
       // shujuku 门控：被门控生成（总结 / 向量索引等酒馆内部 quiet 请求）的 ENDED 不推演。
       // 闸门在消费后复位——真实生成随后会有自己的 STARTED / ENDED。
       if (generationGate) {
+        diagnostic({ level: "debug", source: "host", code: "GENERATION_GATED",
+          operation: "generation", phase: "ended", outcome: "skipped",
+          details: { reasonCode: "QUIET_OR_AUTOMATIC" } });
         generationGate = false;
         return;
       }
@@ -691,7 +777,11 @@ export function createAtlasUiCore(deps: {
         ? fromHost
         : lastEndedEvent;
     lastEndedEvent = null;
-    if (!resolved || !resolved.assistantMessageId) return;
+    if (!resolved || !resolved.assistantMessageId) {
+      diagnostic({ level: "warn", source: "host", code: "AI_FLOOR_UNRESOLVED",
+        operation: "generation", phase: "ended", outcome: "skipped" });
+      return;
+    }
     await onGenerationEnded(resolved.assistantMessageId, String(resolved.assistantText ?? ""));
   }
 
@@ -727,9 +817,27 @@ export function createAtlasUiCore(deps: {
   /** MESSAGE_SENT：建 pending turn 并调用 prepare（失败不阻断酒馆生成，只提示）。 */
   async function onMessageSent(messageId: string, userText: string): Promise<void> {
     if (disposed || !messageId) return;
+    const revision = generationRevision;
+    if (!traces.has(messageId)) traces.set(messageId, "turn-" + now().toString(36) + "-" + (++traceSequence));
+    activeTraceId = traces.get(messageId) ?? null;
+    const attempt = (attempts.get(messageId) ?? 0) + 1;
+    attempts.set(messageId, attempt);
+    activeAttemptId = "attempt-" + attempt;
+    diagnostic({ level: "info", source: "host", code: "TURN_STARTED",
+      operation: "generation", phase: "message", outcome: "started" });
     const chatId = state.chatId;
-    if (!chatId || state.serviceStatus !== "online") return;
-    if (state.pendingTurn) return; // 同一时刻只允许一条在途回合
+    if (!chatId || state.serviceStatus !== "online") {
+      diagnostic({ level: "warn", source: "ui", code: "TURN_SKIPPED_NOT_READY",
+        operation: "prepare", phase: "skipped", outcome: "skipped",
+        details: { reasonCode: "SERVICE_NOT_READY" } });
+      return;
+    }
+    if (state.pendingTurn) {
+      diagnostic({ level: "info", source: "ui", code: "TURN_SKIPPED_PENDING",
+        operation: "prepare", phase: "skipped", outcome: "skipped",
+        details: { reasonCode: "PENDING_EXISTS" } });
+      return;
+    }
     // 0.8.2 自动建世：未绑定（且未手动停用）时先经宿主钩子建最小世界并绑定；
     // 失败绝不阻断酒馆生成，只是本条消息不推演（与未绑定行为一致）。
     let binding = state.binding;
@@ -744,6 +852,8 @@ export function createAtlasUiCore(deps: {
       if (disposed) return;
       binding = state.binding;
       if (!ensured || !binding) {
+        diagnostic({ level: "error", source: "ui", code: "WORLD_ENSURE_FAILED",
+          operation: "prepare", phase: "world", outcome: "failed", retryable: true });
         // 失败绝不阻断酒馆生成：本条消息不推演，下一条消息或「重试初始化」可再试
         setState({
           worldInitialization: "failed",
@@ -753,7 +863,12 @@ export function createAtlasUiCore(deps: {
       }
       setState({ worldInitialization: "ready", worldInitializationError: null });
     }
-    if (!binding?.enabled) return;
+    if (!binding?.enabled) {
+      diagnostic({ level: "info", source: "ui", code: "GENERATION_GATED",
+        operation: "prepare", phase: "binding", outcome: "skipped",
+        details: { reasonCode: "BINDING_DISABLED" } });
+      return;
+    }
     const request = {
       chatId,
       messageId: messageId.slice(0, ATLAS_LIMITS.ID_CHARS),
@@ -763,17 +878,30 @@ export function createAtlasUiCore(deps: {
       recentMessageRefs: [],
     };
     const parsed = parseAtlasTurnPrepareRequest(request);
-    if (!parsed.ok) return;
+    if (!parsed.ok) {
+      diagnostic({ level: "error", source: "ui", code: "PREPARE_REQUEST_INVALID",
+        operation: "prepare", phase: "validation", outcome: "failed" });
+      return;
+    }
     try {
       const result = await api.request("POST", "/turns/prepare", parsed.value);
       const body = result.body as { ok?: boolean; data?: { response?: unknown }; error?: { message?: string } };
+      if (revision !== generationRevision || state.chatId !== chatId) {
+        diagnostic({ level: "debug", source: "ui", code: "STALE_PREPARE_DROPPED",
+          operation: "prepare", phase: "response", outcome: "skipped" });
+        return;
+      }
       if (result.status === 200 && body.ok && body.data?.response) {
         const parsedResponse = parseAtlasTurnPrepareResponse(body.data.response);
         if (!parsedResponse.ok) {
+          diagnostic({ level: "error", source: "ui", code: "PREPARE_RESPONSE_INVALID",
+            operation: "prepare", phase: "parsed", outcome: "failed" });
           setState({ lastError: "prepare 响应形状异常，本轮不注入。" });
           return;
         }
         const response: AtlasTurnPrepareResponse = parsedResponse.value;
+        diagnostic({ level: "info", source: "ui", code: "PREPARE_COMPLETE",
+          operation: "prepare", phase: "prepared", outcome: "success" });
         setState({
           pendingTurn: {
             turnId: response.turnId,
@@ -791,6 +919,8 @@ export function createAtlasUiCore(deps: {
       }
       setState({ lastError: body.error?.message ?? `本轮未注入阿特拉斯上下文（HTTP ${result.status}）` });
     } catch {
+      diagnostic({ level: "error", source: "ui", code: "PREPARE_FAILED",
+        operation: "prepare", phase: "request", outcome: "failed", retryable: true });
       setState({ lastError: "本轮未注入阿特拉斯上下文：服务不可用。" });
     }
   }
@@ -831,7 +961,9 @@ export function createAtlasUiCore(deps: {
   }
 
   /** 最终回复完成：commit（至多 1 次请求；重复通知 / 空回复 / 停止不推进世界）。 */
-  async function onGenerationEnded(assistantMessageId: string, assistantText: string): Promise<void> {    if (disposed) return;
+  async function onGenerationEnded(assistantMessageId: string, assistantText: string): Promise<void> {
+    if (disposed) return;
+    await waitPendingTurn();
     let pending = state.pendingTurn;
     // ATLAS-06 swipe 同级重推演：回退后没有 pending；用 rearm 暂存的用户楼层重建回合。
     // swipeId 换成唯一新值（swipe-<ts>）——同键重提交会被账本幂等判 duplicate，永远推不动。
@@ -842,14 +974,30 @@ export function createAtlasUiCore(deps: {
       if (pending) {
         swipeIdForNextCommit = rearm.swipeId;
       } else {
-        setState({ rearmTurn: null }); // prepare 失败：放弃重推演，不悄悄推进世界
+        diagnostic({ level: "warn", source: "ui", code: "TURN_SKIPPED_NO_PENDING",
+          operation: "commit", phase: "rearm", outcome: "skipped",
+          details: { reasonCode: "REARM_PREPARE_FAILED" } });
+        setState({ rearmTurn: null });
         return;
       }
     }
-    if (!pending) return;
-    if (commitInFlight) return; // 同一条回复的重复事件通知只 commit 一次
+    if (!pending) {
+      const gated = !state.binding?.enabled || state.serviceStatus !== "online" || !state.chatId;
+      diagnostic({ level: gated ? "info" : "warn", source: "ui",
+        code: gated ? "GENERATION_GATED" : "TURN_SKIPPED_NO_PENDING",
+        operation: "commit", phase: "ended", outcome: "skipped",
+        details: { reasonCode: gated ? "BINDING_OR_SERVICE_DISABLED" : "NO_PENDING" } });
+      return;
+    }
+    if (commitInFlight) {
+      diagnostic({ level: "debug", source: "ui", code: "DUPLICATE_EVENT",
+        operation: "commit", phase: "ended", outcome: "skipped" });
+      return;
+    }
     if (!assistantMessageId || !assistantText || assistantText.trim().length === 0) {
-      setState({ pendingTurn: null }); // 空回复：放弃 pending，不推进世界
+      diagnostic({ level: "info", source: "ui", code: "EMPTY_REPLY",
+        operation: "commit", phase: "ended", outcome: "skipped" });
+      setState({ pendingTurn: null });
       return;
     }
     const commitSwipeId = swipeIdForNextCommit;
@@ -882,6 +1030,8 @@ export function createAtlasUiCore(deps: {
     };
     const parsed = parseAtlasTurnCommitRequest(request);
     if (!parsed.ok) {
+      diagnostic({ level: "error", source: "ui", code: "COMMIT_REQUEST_INVALID",
+        operation: "commit", phase: "validation", outcome: "failed" });
       setState({ pendingTurn: null, rearmTurn: null });
       return;
     }
@@ -894,6 +1044,8 @@ export function createAtlasUiCore(deps: {
    */
   async function executeCommitRequest(value: AtlasTurnCommitRequest, swipeId: string | null): Promise<void> {
     commitInFlight = true;
+    diagnostic({ level: "info", source: "ui", code: "COMMIT_STARTED",
+      operation: "commit", phase: "request", outcome: "started" });
     try {
       const result = await api.request("POST", "/turns/commit", value);
       const body = result.body as { ok?: boolean; data?: { receipt?: unknown }; error?: { message?: string; code?: string } };
@@ -901,6 +1053,19 @@ export function createAtlasUiCore(deps: {
       // 0.9.28 归属守卫：请求在途时用户可能已切聊天——过期回执 / 失败挂单绝不写进新聊天
       const stale = state.chatId !== value.chatId;
       if (result.status === 200 && body.ok && receiptParsed?.ok) {
+        const receiptStatus = receiptParsed.value.status;
+        diagnostic({
+          level: receiptStatus === "failed" ? "error" : "info", source: "ui",
+          code: receiptStatus === "committed" ? "COMMIT_SUCCEEDED" :
+            receiptStatus === "duplicate" ? "TURN_DUPLICATE" : "COMMIT_FAILED",
+          operation: "commit", phase: "receipt",
+          outcome: receiptStatus === "committed" ? "success" :
+            receiptStatus === "duplicate" ? "skipped" : "failed",
+          httpStatus: result.status, retryable: receiptParsed.value.retryable,
+          details: { coreCommitted: receiptStatus === "committed" || receiptStatus === "duplicate" },
+        });
+        if (stale) diagnostic({ level: "warn", source: "ui", code: "STALE_CHAT_RESPONSE_DROPPED",
+          operation: "commit", phase: "receipt", outcome: "skipped" });
         addReceipt(receiptParsed.value, value.chatId);
         setState({ pendingTurn: null, rearmTurn: null, ...(stale ? {} : { lastError: null }) });
         if (receiptParsed.value.status === "committed" || receiptParsed.value.status === "duplicate") {
@@ -910,6 +1075,9 @@ export function createAtlasUiCore(deps: {
         await syncLorebookAfterCommit(body);
         return;
       }
+      diagnostic({ level: "error", source: "ui", code: "COMMIT_FAILED",
+        operation: "commit", phase: "response", outcome: "failed",
+        httpStatus: result.status, errorCode: body.error?.code, retryable: true });
       // commit 失败：保留可重试信息，清 pending；零部分写入由服务端保证
       setState({
         pendingTurn: null,
@@ -925,6 +1093,8 @@ export function createAtlasUiCore(deps: {
         }),
       });
     } catch {
+      diagnostic({ level: "error", source: "ui", code: "COMMIT_FAILED",
+        operation: "commit", phase: "request", outcome: "failed", retryable: true });
       const stale = state.chatId !== value.chatId;
       setState({
         pendingTurn: null,
@@ -1011,7 +1181,23 @@ export function createAtlasUiCore(deps: {
   /** 停止 / 生成失败：放弃 pending，不推进世界。 */
   function onGenerationStopped(): void {
     if (disposed) return;
-    if (state.pendingTurn) setState({ pendingTurn: null });
+    stoppedGeneration = true;
+    generationRevision += 1;
+    swipeIdForNextCommit = null;
+    diagnostic({ level: "info", source: "host", code: "GENERATION_STOPPED",
+      operation: "generation", phase: "stopped", outcome: "skipped",
+      details: { coreCommitted: false } });
+    if (state.pendingTurn) {
+      const pending = state.pendingTurn;
+      setState({
+        pendingTurn: null,
+        rearmTurn: {
+          userMessageId: pending.messageId,
+          userText: pending.userText,
+          swipeId: "swipe-" + now(),
+        },
+      });
+    }
   }
 
   // -------------------------------------------------------------------------

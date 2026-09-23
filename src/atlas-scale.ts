@@ -58,6 +58,12 @@ function finitePositiveNumber(value: unknown): number | null {
   return value;
 }
 
+/** Preserve tiny positive scales that would round to zero at centimeter precision. */
+export function roundPositiveScale(value: number): number {
+  const rounded = Math.round(value * 100) / 100;
+  return rounded > 0 && Number.isFinite(rounded) ? rounded : Number(value.toPrecision(12));
+}
+
 /**
  * 校验 AI 标定响应（不可信输入）并推导规范 metersPerCell。
  * - unknown / conflict / 缺 extent → 不落标定，返回可解释状态；
@@ -111,7 +117,7 @@ export function validateScaleResponse(
   return {
     ok: true,
     calibration: {
-      metersPerCell: Math.round(perCellX * 100) / 100,
+      metersPerCell: roundPositiveScale(perCellX),
       source: "ai-estimated",
       locked: false,
       basis,
@@ -134,7 +140,7 @@ export function sanitizeCalibration(raw: unknown): MapScaleCalibration | null {
   const atRaw = Number(record.at);
   return {
     revision: Number.isFinite(revisionRaw) && revisionRaw >= 0 ? Math.floor(revisionRaw) : 0,
-    metersPerCell: Math.round(metersPerCell * 100) / 100,
+    metersPerCell: roundPositiveScale(metersPerCell),
     source,
     locked: record.locked === true,
     basis: clampText(record.basis, 300),
@@ -196,6 +202,8 @@ export function computeScaleBar(input: {
 /** 距离显示：内部统一米，显示米 / 公里自动（极小图到厘米）。 */
 export function formatDistanceMeters(meters: number): string {
   if (!Number.isFinite(meters) || meters <= 0) return "";
+  if (meters < 0.00001) return meters.toPrecision(3) + " 米";
+  if (meters < 0.01) return Number((meters * 1000).toPrecision(3)) + " 毫米";
   if (meters < 1) return `${Math.round(meters * 100)} 厘米`;
   if (meters < 1000) {
     const value = Math.round(meters * 10) / 10;

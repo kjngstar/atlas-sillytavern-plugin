@@ -145,3 +145,16 @@ test("UI 与 server 两侧标尺算法零漂移（同名纯函数断言一致）
   assert.equal(uiFormatDistanceMeters(62.5), formatDistanceMeters(62.5));
   assert.equal(uiFormatDistanceMeters(3000000), formatDistanceMeters(3000000));
 });
+
+
+test("tiny positive calibration values remain positive and render without zero centimeters", () => {
+  const result = validateScaleResponse(
+    { status: "estimated", coverage: "微型图", extentMeters: { width: 0.1, height: 0.1 }, basis: "明确长度", confidence: "low" },
+    FRAME,
+  );
+  assert.ok(result.ok);
+  assert.equal(result.calibration.metersPerCell, 0.001);
+  assert.equal(sanitizeCalibration({ metersPerCell: 0.001 }).metersPerCell, 0.001);
+  assert.match(formatDistanceMeters(0.001), /毫米/);
+  assert.match(uiFormatDistanceMeters(0.001), /毫米/);
+});

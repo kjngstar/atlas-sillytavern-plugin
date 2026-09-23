@@ -824,3 +824,15 @@ test("loreSupplementEnabled：缺省 true / runtime.update 切换 / 非法值拒
   const explicitOff = sanitizeSettingsV2({ ...JSON.parse(JSON.stringify(base)), loreSupplementEnabled: false }, testDeps());
   assert.equal(explicitOff.settings.loreSupplementEnabled, false, "显式 false 保留");
 });
+
+test("segment-only legacy preset remains readable without systemPrompt", () => {
+  const rawSettings = { ...createDefaultSettingsV2(),
+    promptPresets: [{ id: "segment-only", name: "旧分段", updatedAt: NOW,
+      segments: [{ role: "assistant", content: "旧正文" }] }],
+    activePromptPresetId: "segment-only" };
+  const result = sanitizeSettingsV2(rawSettings, testDeps());
+  assert.equal(result.diagnostics.promptSkipped, 0);
+  assert.equal(result.settings.activePromptPresetId, "segment-only");
+  assert.equal(result.settings.promptPresets[0].systemPrompt, "");
+  assert.equal(result.settings.promptPresets[0].segments[0].content, "旧正文");
+});

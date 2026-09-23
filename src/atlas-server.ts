@@ -13,6 +13,7 @@
  *   共享 adoptPendingProposals 与 commitAtlasTurn 保证。
  */
 
+import { sanitizeDiagnostic, type AtlasDiagnostic } from "./atlas-diagnostics.ts";
 import type { EntityRecord, World } from "../lib/world-schema.ts";
 import { parseWorld } from "../lib/world-schema.ts";
 import { adjudicateAtlasDraft } from "./atlas-adjudicate.ts";
@@ -45,9 +46,9 @@ import { computeAtlasRelevance, atlasTravelPreview } from "./atlas-relevance.ts"
 import { prepareAtlasTurn, commitAtlasTurn, provisionReferencedCharacters } from "./atlas-turn.ts";
 import { applyAtlasV2Turn } from "./atlas-turn-v2.ts";
 import { parseAtlasWorldTurnDraftV2 } from "./atlas-contract-v2.ts";
-import { buildSubMapFromDraft, sanitizeMapDoc, SUBMAP_FRAME_DEFAULT, validateSubmapDepth } from "./atlas-geo-apply.ts";
+import { buildSubMapTreeFromDraft, sanitizeMapDoc, SUBMAP_FRAME_DEFAULT, validateSubmapDepth } from "./atlas-geo-apply.ts";
 import { detectStartPlaceholder, resolveSceneStatus, retireStartPlaceholder, sanitizeSceneDoc, sceneDocKey, type SceneDoc } from "./atlas-scene.ts";
-import { validateScaleResponse, applyScaleHintsToDoc, type V2ScaleHintInput, type FrameRef } from "./atlas-scale.ts";
+import { validateScaleResponse, applyScaleHintsToDoc, type V2ScaleHintInput, type FrameRef, roundPositiveScale } from "./atlas-scale.ts";
 import { buildLorebookPlans } from "./atlas-lorebook.ts";
 import { reconcilePendingCommits, type ReconcileReport } from "./atlas-pending-reconcile.ts";
 import {
@@ -480,6 +481,8 @@ export interface AtlasServerCoreDeps {
   fetchFn?: typeof fetch;
   /** 毫秒时钟（默认 Date.now；测试注入固定时钟） */
   now?: () => number;
+  /** Safe metadata events; subscriber failures never change route results. */
+  onDiagnostic?: (event: AtlasDiagnostic) => void;
 }
 
 export interface AtlasRequestContext {
@@ -523,13 +526,14 @@ interface AtlasSharedRuntime {
 /** 单实例核心：store 决定数据从哪来（全局文档库，或 0.9.42 的会话覆盖层）。 */
 function createCoreInstance(
   store: AtlasDocumentStore,
-  deps: { fetchFn?: typeof fetch; now?: () => number },
+  deps: Pick<AtlasServerCoreDeps, "fetchFn" | "now" | "onDiagnostic">,
   shared: AtlasSharedRuntime,
 ) {
   const now = deps.now ?? Date.now;
 
   let settings: AtlasServerSettingsV2 = createDefaultSettingsV2();
   let settingsLoaded = false;
+  let settingsPromptRecoveryCount = 0;
   /** 迁移发生在读取路径上：不写 store；第一次成功设置写入时才持久化 v2（规格 0.5）。 */
   const worldCache = new Map<string, World | null>();
   const bindingCache = new Map<string, AtlasChatBinding | null>();
@@ -537,10 +541,45 @@ function createCoreInstance(
   const queues = new Map<string, Promise<unknown>>();
   const rpmTimestamps = shared.rpmTimestamps;
 
+  const errorKinds = new Set([
+    "pending-remove-failed", "scene-bootstrap-failed", "scene-bootstrap-rejected",
+    "world-scale-hint-failed", "world-turn-commit-failed", "world-turn-sidecar-failed",
+    "world-turn-v2-rejected",
+  ]);
+  const warnKinds = new Set([
+    "settings-sanitize", "world-geo-extract-fallback", "world-scale-extract-fallback",
+    "world-scale-hint-skipped", "world-scale-reject", "world-turn-parse-fallback",
+    "world-turn-v2-warnings", "scene-bootstrap-warnings",
+  ]);
   function pushLog(entry: Record<string, unknown>): void {
     const logs = shared.logs;
-    logs.push(entry);
+    const kind = typeof entry.kind === "string" ? entry.kind : "engine-event";
+    const level = errorKinds.has(kind) ? "error" : warnKinds.has(kind) ? "warn" : "info";
+    // Legacy logs() remains available, but stores metadata only. Model excerpts,
+    // free-form summaries and identifiers must never be retained in this ring.
+    const safeLog: Record<string, unknown> = { at: new Date(now()).toISOString(), kind, level };
+    if (entry.source === "auto" || entry.source === "user") safeLog.source = entry.source;
+    for (const key of ["pointsAdded", "regionsAdded", "skipped", "scanned", "cleaned", "durationMs"]) {
+      const value = entry[key];
+      if (typeof value === "number" && Number.isFinite(value)) safeLog[key] = value;
+    }
+    if (typeof entry.excerpt === "string") safeLog.responseChars = entry.excerpt.length;
+    logs.push(safeLog);
     if (logs.length > 200) logs.shift();
+    const diagnostic = sanitizeDiagnostic({
+      level, source: "engine", code: kind.toUpperCase().replace(/-/g, "_"),
+      operation: "engine", phase: kind, outcome: level === "error" ? "failed" : level === "warn" ? "skipped" : "success",
+      errorCode: typeof entry.errorCode === "string" ? entry.errorCode : undefined,
+      durationMs: typeof entry.durationMs === "number" ? entry.durationMs : undefined,
+      details: {
+        ...(typeof entry.skipped === "number" ? { count: entry.skipped } : {}),
+        ...(typeof entry.scanned === "number" ? { scanned: entry.scanned } : {}),
+        ...(typeof entry.excerpt === "string" ? { responseChars: entry.excerpt.length } : {}),
+      },
+    }, now);
+    if (diagnostic) {
+      try { deps.onDiagnostic?.(diagnostic); } catch { /* diagnostics do not affect commit */ }
+    }
   }
 
   /**
@@ -557,12 +596,14 @@ function createCoreInstance(
       if (record.schemaVersion === ATLAS_SETTINGS_SCHEMA_VERSION) {
         const sanitized = sanitizeSettingsV2(record, { now });
         settings = sanitized.settings;
+        settingsPromptRecoveryCount = sanitized.diagnostics.promptSkipped;
         if (sanitized.diagnostics.skipped > 0) {
           pushLog({ at: now(), kind: "settings-sanitize", skipped: sanitized.diagnostics.skipped });
         }
       } else {
         const migrated = migrateAtlasSettings(record, { now });
         settings = migrated.settings;
+        settingsPromptRecoveryCount = migrated.diagnostics.promptSkipped;
         pushLog({
           at: now(),
           kind: "settings-migrate",
@@ -682,7 +723,7 @@ function createCoreInstance(
     // 视图语义（0.9.12 作者令，照抄 shujuku）：本机会话回填明文 Key（编辑器免重输）；
     // 该语义以 local 闸为前提——远程非本机用户根本到不了这一行。
     // 0.9.48 补 hasApiKey / apiKeyLast4 供 UI 展示尾号；响应体绝不含密钥以外的敏感头原文。
-    return okResult(settingsViewV2(current));
+    return okResult({ ...settingsViewV2(current), recoveryPromptCount: settingsPromptRecoveryCount });
   }
 
   /**
@@ -694,6 +735,13 @@ function createCoreInstance(
   async function handlePutSettings(body: unknown, ctx: AtlasRequestContext): Promise<AtlasRouteResult> {
     if (!ctx.local) throw new AtlasError(ATLAS_ERROR_CODES.FORBIDDEN, "只有本机已登录会话可以修改 Atlas 设置。");
     const current = await loadSettings();
+    // A sanitized snapshot would irreversibly omit rejected legacy presets.
+    if (settingsPromptRecoveryCount > 0) {
+      throw new AtlasError(
+        ATLAS_ERROR_CODES.INVALID_PAYLOAD,
+        "原始设置中有 " + settingsPromptRecoveryCount + " 条提示词预设无法读取。设置写入已暂停，请先备份原始设置并恢复这些预设。",
+      );
+    }
     const isCommand = Boolean(body) && typeof body === "object" && !Array.isArray(body) &&
       typeof (body as { action?: unknown }).action === "string";
     const result = isCommand
@@ -1051,6 +1099,27 @@ function createCoreInstance(
     const docKey = `maps:${world.id}`;
     const doc = sanitizeMapDoc(await store.read(docKey).catch(() => null));
     const existing = doc.calibrations[mapId] ?? null;
+    const isWorldMap = mapId === "world";
+    const submap = isWorldMap ? null : doc.submaps[mapId] ?? null;
+    let hostPoint: { id: string | number; name: string } | null = null;
+    if (!isWorldMap) {
+      let cursor = mapId;
+      let valid = Boolean(submap) && validateSubmapDepth(doc, mapId).ok;
+      for (let depth = 0; valid && depth < 4; depth++) {
+        const current = doc.submaps[cursor];
+        const parent = current?.parentMapId ?? "world";
+        const candidate = parent === "world"
+          ? (world.points ?? []).find((point) => String(point.id) === cursor)
+          : doc.submaps[parent]?.points.find((point) => point.id === cursor);
+        if (!candidate) { valid = false; break; }
+        if (cursor === mapId) hostPoint = candidate;
+        if (parent === "world") break;
+        cursor = parent;
+      }
+      if (!valid || !hostPoint) {
+        throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "子图标定的宿主点位或父图不存在");
+      }
+    }
 
     // 人工模式：程序不做任何语义判断，数值校验后直接落盘。
     // 人工覆盖锁定值允许（UI 明示「重新填写并保存即可更新」）；锁只挡 AI 语义估计。
@@ -1061,7 +1130,7 @@ function createCoreInstance(
       }
       const calibration = {
         revision: (existing?.revision ?? 0) + 1,
-        metersPerCell: Math.round(userMeters * 100) / 100,
+        metersPerCell: roundPositiveScale(userMeters),
         source: "user" as const,
         locked: true,
         basis: typeof record.basis === "string" ? record.basis.trim().slice(0, 300) : "人工标定",
@@ -1081,12 +1150,6 @@ function createCoreInstance(
       throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "该图已有人工锁定标定——AI 估计不会覆盖；重新填写并保存人工标定即可更新。");
     }
     const lore = typeof record.loreSupplement === "string" ? record.loreSupplement.trim() : "";
-    const isWorldMap = mapId === "world";
-    const hostPoint = isWorldMap ? null : (world.points ?? []).find((p) => String(p.id) === mapId) ?? null;
-    if (!isWorldMap && !hostPoint) {
-      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "子图标定的宿主点位不存在（世界图请用 mapId=\"world\"）");
-    }
-    const submap = isWorldMap ? null : doc.submaps[mapId] ?? null;
     const pointList = (isWorldMap ? (world.points ?? []).slice(0, 40) : submap?.points.slice(0, 40) ?? []).map((p) => {
       const description = isWorldMap ? doc.pointMeta[String(p.id)]?.description ?? "" : (p as { description?: string }).description ?? "";
       return `${String(p.name)}${description ? `（${description.slice(0, 60)}）` : ""}`;
@@ -1106,13 +1169,15 @@ function createCoreInstance(
     checkRpm();
     rpmTimestamps.push(now());
 
+    const frame = (isWorldMap ? SUBMAP_FRAME_DEFAULT : submap?.frame) ?? SUBMAP_FRAME_DEFAULT;
     const contractRule =
-      '只输出一个 JSON 对象：{"status":"estimated|grounded|unknown|conflict","coverage":"...","extentMeters":{"width":<米数>,"height":<米数>},"basis":"...","confidence":"low|medium|high"}';
+      '只输出一个完整 JSON 对象：{"mapRef":"给定 mapId","frameRevision":给定 frameRevision,"status":"estimated|grounded|unknown|conflict","extentMeters":{"width":<正数米>,"height":<正数米>}或null,"coverage":"...","basis":"...","confidence":"low|medium|high","evidence":[{"sourceId":"来源ID","quote":"原文片段"}]}';
     const commonRules = [
-      "规则：这张图的内部网格为 100×100 且横纵一格等距；extentMeters 是覆盖整张图（网格 0-100 全范围、含点位分布之外的区域）的实际宽高（单位：米），width 与 height 应相等或非常接近（等距方格）。",
-      "先判断这张图表示的实际范围（整个城镇？镇中心一小块？一间房？一片大陆？），再按实际语义估计宽高——地点数量与图上分布只是辅助信息。",
-      "有材料中的明确尺寸 / 距离证据时用 status=\"grounded\"；只能语义估计时用 \"estimated\"；材料不足以判断时用 \"unknown\" 且 extentMeters 为 null；材料与图上布局明显冲突时用 \"conflict\" 且 extentMeters 为 null。",
-      "basis 用一句话说明依据；宁可用 unknown 也不要编造数字。",
+      "输入地图：mapId=" + JSON.stringify(mapId) + "，frameRevision=" + frame.frameRevision + "，cols=" + frame.cols + "，rows=" + frame.rows + "，coordinateMode=等距方格。",
+      "范围是固定 MapFrame 全图，不是当前屏幕、地点最小包围盒或视觉排版。宽对应 cols，高对应 rows；width/cols 与 height/rows 必须在容差内相等。非方形 frame 不必是正方形。",
+      "先判断地图语义范围，再结合有来源的尺寸、距离与父子层级；屏幕像素、缩放倍率、地点数量及随机排版都不是物理尺度证据。",
+      "有整图明确尺度或可验证映射才用 grounded；仅有语义范围用 estimated；材料不足用 unknown；证据矛盾或等距 frame 不兼容用 conflict。unknown/conflict 的 extentMeters 必须为 null。",
+      "mapRef 与 frameRevision 原样回显。basis 说明依据及局限；宁可 unknown，不编造测绘精度、旅行时间或数值。",
     ].join("\n");
     const userContent = [
       `判断${mapLabel}的实际地理范围（尺度标定）。`,
@@ -1126,7 +1191,7 @@ function createCoreInstance(
       ...(lore ? ["【世界书摘录（可能包含明确距离 / 尺寸证据）】", lore.slice(0, ATLAS_LIMITS.LORE_SUPPLEMENT_CHARS)] : []),
     ].join("\n");
     const calibrationSegments = [
-      { role: "system", content: "你是地理尺度估计器。只输出一个 JSON 对象，不输出任何其它文字、解释或代码围栏。" },
+      { role: "system", content: "你是 Atlas 地图范围估计器。只根据有来源的地图语义、地点描述、明确距离和父子层级判断整图物理范围。只输出一个完整 JSON 对象，不输出其它文字、解释或代码围栏。" },
       { role: "user", content: userContent },
     ];
     const call = await callAtlasWorldTurnApi(
@@ -1147,8 +1212,11 @@ function createCoreInstance(
         message: "模型回复无法解析为标定结果——保持未标定状态，可重试或改用人工标定。",
       });
     }
-    // 数值与空间校验：使用真实 frame（0.9.51 子图自带 frame 字段；旧子图 100×100 兜底）
-    const frame = (isWorldMap ? SUBMAP_FRAME_DEFAULT : doc.submaps[mapId]?.frame) ?? SUBMAP_FRAME_DEFAULT;
+    // 数值与空间校验：使用请求时的真实 frame，拒绝模型回显其它地图或旧 frame。
+    if ((spec.mapRef !== undefined && spec.mapRef !== mapId) ||
+        (spec.frameRevision !== undefined && spec.frameRevision !== frame.frameRevision)) {
+      return okResult({ status: "conflict", calibrated: false, message: "模型返回的地图或 frameRevision 与请求不一致；保持原标定。" });
+    }
     const validation = validateScaleResponse(spec, { cols: frame.cols, rows: frame.rows });
     if (!validation.ok) {
       pushLog({ at: now(), kind: "world-scale-reject", worldId: world.id, mapId, status: validation.status, reason: validation.reason });
@@ -1325,17 +1393,33 @@ function createCoreInstance(
     const mapDoc = sanitizeMapDoc(await store.read(`maps:${world.id}`).catch(() => null));
     const pointMetaEntries = Object.entries(mapDoc.pointMeta).slice(0, 80);
     const worldPointIds = new Set((world.points ?? []).map((p) => String(p.id)));
+    // Publish only maps reachable from a real world point. Nested maps use the
+    // child point ID as their key, so filtering on worldPointIds alone loses them.
+    const visibleSubmapIds = new Set<string>();
+    for (let depth = 0; depth < 4; depth++) {
+      for (const [key, sub] of Object.entries(mapDoc.submaps)) {
+        if (visibleSubmapIds.has(key) || !validateSubmapDepth(mapDoc, key).ok) continue;
+        const parent = sub.parentMapId ?? "world";
+        const reachable = parent === "world"
+          ? worldPointIds.has(key)
+          : visibleSubmapIds.has(parent) &&
+            mapDoc.submaps[parent]?.points.some((point) => point.id === key);
+        if (reachable) visibleSubmapIds.add(key);
+      }
+    }
     const submapEntries = Object.entries(mapDoc.submaps)
-      .filter(([key]) => worldPointIds.has(key))
+      .filter(([key]) => visibleSubmapIds.has(key))
       .slice(0, 40)
       .map(([key, sub]) => ({
         pointId: key,
+        parentMapId: sub.parentMapId ?? "world",
+        ownerLocationId: sub.ownerLocationId ?? key,
+        frame: sub.frame ?? SUBMAP_FRAME_DEFAULT,
         scale: sub.scale ?? null,
         points: sub.points.slice(0, 40),
-        pointCount: sub.points.length,
       }));
     const calibrationEntries = Object.entries(mapDoc.calibrations)
-      .filter(([key]) => key === "world" || worldPointIds.has(key))
+      .filter(([key]) => key === "world" || visibleSubmapIds.has(key))
       .slice(0, 40);
     // R06 场景状态：占位指纹 + retired 列表 + lastConfirmed（与「当前未知」分开表达）
     const scene = resolveSceneStatus(world, sceneDoc, binding.currentLocationId ?? null);
@@ -1373,7 +1457,7 @@ function createCoreInstance(
         // R01：底图版本（世界更新时间）——前端缓存键的失效依据，换图 / 删图必换键
         mapImageRevision: world.updatedAt ?? 0,
         pointMeta: Object.fromEntries(pointMetaEntries),
-        submaps: Object.fromEntries(submapEntries.map((entry) => [entry.pointId, { scale: entry.scale, points: entry.points }])),
+        submaps: Object.fromEntries(submapEntries.map((entry) => [entry.pointId, { parentMapId: entry.parentMapId, ownerLocationId: entry.ownerLocationId, frame: entry.frame, scale: entry.scale, points: entry.points }])),
         submapCount: submapEntries.length,
         calibrations: Object.fromEntries(calibrationEntries),
       },
@@ -2046,12 +2130,17 @@ function createCoreInstance(
             changed = true;
           }
           if (created.submap && !doc.submaps[key]) {
-            doc.submaps[key] = buildSubMapFromDraft(created.submap, {
+            const tree = buildSubMapTreeFromDraft(created.submap, {
               worldId: binding.worldId,
               pointId: key,
               now: now(),
             });
-            changed = true;
+            for (const [mapId, submap] of Object.entries(tree)) {
+              if (!doc.submaps[mapId]) {
+                doc.submaps[mapId] = submap;
+                changed = true;
+              }
+            }
           }
         }
         if (changed) await store.write(docKey, doc);
@@ -2080,8 +2169,8 @@ function createCoreInstance(
         const doc = sanitizeMapDoc(await store.read(docKey).catch(() => null));
         const DEFAULT_FRAME: FrameRef = { cols: 100, rows: 100, frameRevision: 1 };
         const framesByMapId: Record<string, FrameRef> = { world: DEFAULT_FRAME };
-        for (const submapKey of Object.keys(doc.submaps)) {
-          framesByMapId[submapKey] = DEFAULT_FRAME;
+        for (const [submapKey, submap] of Object.entries(doc.submaps)) {
+          framesByMapId[submapKey] = submap.frame ?? DEFAULT_FRAME;
         }
         const results = applyScaleHintsToDoc(output.scaleHints, doc, {
           existing: doc.calibrations,

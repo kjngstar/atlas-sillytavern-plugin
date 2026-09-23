@@ -23,6 +23,7 @@ const {
   SUBMAP_FRAME_DEFAULT,
   SUBMAP_DEPTH_MAX,
   validateSubmapDepth,
+  buildSubMapTreeFromDraft,
   sanitizeNewLocations,
 } = await imp("src/atlas-geo-apply.ts");
 
@@ -149,4 +150,46 @@ test("R09-T9: SUBMAP_DEPTH_MAX is 4 (world → region → building → room)", (
 // ---- T10：SUBMAP_FRAME_DEFAULT 形状 ----
 test("R09-T10: SUBMAP_FRAME_DEFAULT is 100x100 revision 1", () => {
   assert.deepEqual(SUBMAP_FRAME_DEFAULT, { cols: 100, rows: 100, frameRevision: 1 });
+});
+
+test("R09 nested map draft becomes parent-linked building and room maps", () => {
+  const draft = sanitizeSubMap({
+    frame: { cols: 20, rows: 12, frameRevision: 3 },
+    points: [{
+      name: "内厅",
+      submap: {
+        frame: { cols: 8, rows: 6, frameRevision: 2 },
+        points: [{ name: "卧室" }],
+      },
+    }],
+  });
+  assert.ok(draft);
+  const tree = buildSubMapTreeFromDraft(draft, { worldId: "w", pointId: "1", now: 1 });
+  const roomId = tree["1"].points[0].id;
+  assert.equal(tree["1"].parentMapId, "world");
+  assert.equal(tree["1"].frame.cols, 20);
+  assert.equal(tree[roomId].parentMapId, "1");
+  assert.equal(tree[roomId].frame.rows, 6);
+  assert.equal(tree[roomId].points[0].name, "卧室");
+  const doc = sanitizeMapDoc({ submaps: tree });
+  assert.equal(validateSubmapDepth(doc, roomId).depth, 2);
+  assert.equal(doc.submaps[roomId].ownerLocationId, roomId);
+});
+
+test("R09 nested map cycles and orphan parents are rejected without recursion", () => {
+  const doc = emptyMapDoc();
+  doc.submaps.a = { parentMapId: "b", points: [] };
+  doc.submaps.b = { parentMapId: "a", points: [] };
+  assert.equal(validateSubmapDepth(doc, "a").ok, false);
+  doc.submaps.b.parentMapId = "missing";
+  assert.equal(validateSubmapDepth(doc, "a").ok, false);
+});
+
+test("legacy submap scale preserves tiny positive distance", () => {
+  const draft = sanitizeSubMap({ scale: { distancePerCell: 0.0004 }, points: [{ name: "柜子" }] });
+  assert.equal(draft.scale.distancePerCell, 0.0004);
+  const doc = sanitizeMapDoc({ submaps: {
+    room: { scale: { distancePerCell: 0.0004 }, points: [{ id: "cabinet", name: "柜子", x: 50, y: 50 }] },
+  } });
+  assert.equal(doc.submaps.room.scale.distancePerCell, 0.0004);
 });

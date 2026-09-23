@@ -199,7 +199,7 @@ export const DEFAULT_PROMPT_SEGMENTS_V2: Array<{ role: string; name: string; mai
       "- 同行关系与同地点分开：adjustRelation 记关系，location 只写本轮实际同处一地；不要让熟人自动跟随玩家移动。\n" +
       "- relationUpdates 每项 {fromRef,toRef,key,value,evidenceIds}；memories 每项 {entityRef,text,evidenceIds}（≤500 字，只记实际经历）；worldFlags 每项 {key,value,evidenceIds}；events 每项 {summary,entityRefs,evidenceIds}。\n" +
       "- duration 是有限非负整数 0..10000；开场识别 / 对账类请求给 0。\n" +
-      "角色卡标题可能是场景标题，不一定代表玩家或一个人物；不要把已知 ID 仅凭名字相似就套用。不从叙事推断人物内心：不知道就留空，事件摘要不是实时心声。宁可输出空数组，也不要虚构事实。",
+      "角色卡标题可能是场景标题，不一定代表玩家或一个人物；不要把已知 ID 仅凭名字相似就套用。不从叙事推断人物内心：不知道就留空，事件摘要不是实时心声。宁可输出空数组，也不要虚构事实。\n已有状态本轮未提到时沿用：没提人物不等于离场、死亡或消失；角色卡和世界书不等于当前在场名单。证据矛盾标 conflict，证据不足标 unknown，不用猜测掩盖缺失。\n未知地区用 null，不能自动归入起点或新建通用起点。相同名字的地点要结合地区与父场景；未具名人物用稳定描述称呼，不编造真名。\n所有新增、移动、修改都关联本轮 evidenceIds；quote 只能是 msg:u 或 msg:a 的原文片段且不超过 240 字。别名最多 8 个，每个不超过 64 字；每轮新地点和人物各最多 12，证据最多 64，变化数组各最多 64。\nmapScaleHints 只引用确有有效 frame 的地图；status=estimated/grounded/unknown/conflict，unknown/conflict 的 extentMeters 为 null。人工锁定不建议覆盖；窗口大小、缩放和随机排版不是距离证据。只输出本轮必要变化，不重写全世界。",
   },
   {
     role: "user",
@@ -220,13 +220,12 @@ export const DEFAULT_PROMPT_SEGMENTS_V2: Array<{ role: string; name: string; mai
     role: "user",
     name: "本轮行动与实际结果",
     mainSlot: "B",
-    content: "【本轮用户行动】\n$8\n【本轮助手回复】\n{{assistantReply}}\n先判断当前实际场景（主语、否定、愿望、回忆、传闻都不到场），再登记新实体、声明证据并输出 v2 JSON。",
+    content: "【本轮用户行动；证据来源 msg:u】\n$8\n【本轮助手回复；证据来源 msg:a】\n{{assistantReply}}\n先确定玩家现在实际在哪里：开场可用 initial；确实抵达才用 arrive；只是想去、在途、被阻止、回忆、梦境或远处镜头都不能当抵达。若本轮未改动且既有场景可靠，用 stay；确实无法定位用 unknown。\n再识别当前同场人物：剧情新出现且参与场景者先建档，再用 npcUpdates 锚定位置与在场；背景提及者不自动在场。共指不明确时不强行合并；明确离场而去向未知时用 clear/left，本轮未提到则保持原状态。\n只提取有证据的身份、状态、关系与记忆变化。duration 依据实际过程，单次场景定位不算旅行；不要从示意坐标推算时间。地图尺度只依有效 frame 和有来源的语义或距离；无依据就不新增建议。最后只返回完整 v2 JSON。",
   },
   {
     role: "user",
     name: "提交前核对",
-    content:
-      "核对：schemaVersion=2；baseRevision=$B 逐字一致；每个 quote 都是来源原文片段；new: 引用都已在本响应 discoveries 里声明且全响应内唯一；scene 与 npcUpdates 引用的地点/人物可解析；没有变化的数组输出 []。最后只输出完整 JSON 对象。",
+    content: "核对：schemaVersion=2；baseRevision=$B 逐字一致；每个 quote 是 msg:u/msg:a 的来源原文片段；每个 new: 引用都已在本响应 discoveries 里声明且类型相符；scene 与 npcUpdates 引用的地点/人物可解析。\n当前位置未被愿望、回忆、否定句或远方镜头误改；没有因角色卡标题或世界书名字推断玩家身份与当前在场；keep/set/clear 和 present/left/unknown 含义一致；没有无证据的关系、记忆、时间或地图大小。\nevents 与 summary 没有代替 scene、discoveries 或 npcUpdates，也没有声称候选已入库。全部顶层字段与数组齐全；最后只输出一个可解析 JSON 对象。",
   },
 ];
 

@@ -105,3 +105,5 @@ export {
   ATLAS_LOREBOOK_PREFIX,
   type AtlasLorebookPort,
 } from "./atlas-lorebook.ts";
+
+export { createAtlasDiagnosticsSink, sanitizeDiagnostic } from "./atlas-diagnostics.ts";

@@ -186,30 +186,26 @@ let connected = null;
 let connecting = null;
 
 // ---------------------------------------------------------------------------
-// 运行日志（诊断用，作者 2026-09-20 反馈「增加一个日志区」）：
-// 环形缓冲只留最近 ATLAS_LOG_LIMIT 条，仅内存不落盘；**任何明细先过 redactSecrets，
-// 密钥绝不入日志**（纪律同 AR-ATLAS-07 / 规格 0.7.2）。
-// ---------------------------------------------------------------------------
-const ATLAS_LOG_LIMIT = 80;
-const atlasLogEntries = [];
+// 安全诊断：仅白名单元信息进入本页、复制和导出。
+const pendingDiagnostics = [];
+let atlasDiagnostics = null;
+const chatRefs = new Map();
 
-function redactSecrets(text) {
-  return String(text)
-    .replace(/Bearer\s+[^\s"',}】]+/gi, "Bearer [REDACTED]")
-    .replace(/("apiKey"\s*:\s*)"[^"]*"/g, '$1"[REDACTED]"');
+function currentChatRef() {
+  try {
+    const chatId = SillyTavern.getContext()?.chatId;
+    if (typeof chatId !== "string" || !chatId) return undefined;
+    if (!chatRefs.has(chatId)) chatRefs.set(chatId, "chat-" + Math.random().toString(36).slice(2, 10));
+    return chatRefs.get(chatId);
+  } catch { return undefined; }
 }
 
-function atlasLog(tag, text, detail = null) {
-  const clean = redactSecrets(text);
-  atlasLogEntries.push({
-    at: new Date(),
-    tag: String(tag),
-    text: clean,
-    // 报错分级：失败 / 错误 / 异常 / 4xx·5xx 一律标 error，日志页高亮 + 可筛选
-    level: /失败|错误|异常|HTTP [45]\d\d|网络失败/.test(clean) ? "error" : "info",
-    ...(detail ? { detail: redactSecrets(detail).replace(/\s+/g, " ").slice(0, 400) } : {}),
-  });
-  if (atlasLogEntries.length > ATLAS_LOG_LIMIT) atlasLogEntries.shift();
+function emitAtlasDiagnostic(event) {
+  const entry = { ...event, ...(event.chatRef ? {} : { chatRef: currentChatRef() }) };
+  if (atlasDiagnostics) return atlasDiagnostics.emit(entry);
+  pendingDiagnostics.push(entry);
+  if (pendingDiagnostics.length > 100) pendingDiagnostics.shift();
+  return null;
 }
 
 async function loadUiCore() {
@@ -368,6 +364,11 @@ function createEmitter(context) {
       try {
         mapped = nameFor(event);
       } catch (error) {
+        emitAtlasDiagnostic({
+          level: "warn", source: "host", code: "HOST_EVENT_UNAVAILABLE",
+          operation: "events", phase: "register", outcome: "skipped",
+          details: { event },
+        });
         console.warn("[atlas]", error instanceof Error ? error.message : String(error));
         return;
       }
@@ -484,6 +485,9 @@ function defaultSetExtensionPrompt(key, value, position, depth) {
   if (typeof SillyTavern === "undefined") return;
   const ctx = SillyTavern.getContext();
   if (typeof ctx?.setExtensionPrompt !== "function") {
+    emitAtlasDiagnostic({ level: "warn", source: "host", code: "INJECTION_UNAVAILABLE",
+      operation: "injection", phase: "capability", outcome: "failed",
+      details: { capability: "setExtensionPrompt" } });
     console.warn("[atlas] 酒馆未提供 setExtensionPrompt，本轮无法注入阿特拉斯上下文。");
     return;
   }
@@ -518,11 +522,18 @@ export function createGenerateInterceptor(core, io = {}) {
       await core.waitPendingTurn(waitMs);
       const pending = core.getState().pendingTurn;
       if (!pending) {
+        emitAtlasDiagnostic({ level: "info", source: "host", code: "PROMPT_INJECTION_SKIPPED",
+          operation: "injection", phase: "pending", outcome: "skipped",
+          details: { reasonCode: "NO_PENDING" } });
         setPrompt(ATLAS_INJECTION_KEY, "", 2, 4);
         return;
       }
       setPrompt(ATLAS_INJECTION_KEY, String(pending.injectionText ?? ""), 2, 4);
+      emitAtlasDiagnostic({ level: "info", source: "host", code: "PROMPT_INJECTION_COMPLETE",
+        operation: "injection", phase: "applied", outcome: "success" });
     } catch (error) {
+      emitAtlasDiagnostic({ level: "error", source: "host", code: "INJECTION_FAILED",
+        operation: "injection", phase: "applied", outcome: "failed", retryable: true });
       console.warn("[atlas] 注入失败（酒馆生成不受影响）：", error instanceof Error ? error.message : String(error));
     }
   };
@@ -1133,6 +1144,8 @@ function computeScaleBar({ metersPerCell, cellPx, zoom }) {
 function formatDistanceMeters(meters) {
   const value = Number(meters);
   if (!Number.isFinite(value) || value <= 0) return "";
+  if (value < 0.00001) return value.toPrecision(3) + " 米";
+  if (value < 0.01) return Number((value * 1000).toPrecision(3)) + " 毫米";
   if (value < 1) return `${Math.round(value * 100)} 厘米`;
   if (value < 1000) {
     const rounded = Math.round(value * 10) / 10;
@@ -1513,91 +1526,203 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     return panel;
   }
 
-  /** 日志页筛选器状态（仅页面内使用；0 = 全部）。 */
+  /** Diagnostics displayed and exported from the same sanitized snapshot. */
   let logFilter = "all";
+  let logQuery = "";
+  let logAllChats = false;
+  let logCurrentTrace = false;
+  const diagnosticAdvice = {
+    TURN_SKIPPED_NO_PENDING: "本次没有可提交回合；请检查准备阶段，必要时重新生成。",
+    PREPARE_FAILED: "本次未准备好上下文；可检查引擎状态后重新生成。",
+    MODEL_HTTP_FAILED: "模型请求失败；请在 API 页检查连接后重试。",
+    MODEL_NETWORK_FAILED: "模型网络请求失败；检查连接后重试。",
+    TURN_CONTRACT_REJECTED: "模型输出未通过协议校验，世界未变；检查提示词和请求预览。",
+    SESSION_WRITE_FAILED: "检查当前聊天是否已切换；已提交的回合不要直接重跑模型。",
+    LOREBOOK_SYNC_FAILED: "核心回合已提交；请检查世界书写入或稍后单独同步。",
+    WORLD_ENSURE_FAILED: "本次未自动建世；可在概览页重试初始化。",
+    INJECTION_UNAVAILABLE: "酒馆缺少扩展提示词接口；请检查版本及扩展加载状态。",
+    HOST_EVENT_UNAVAILABLE: "酒馆缺少所需事件；请检查版本及扩展加载状态。",
+    STATE_REFRESH_FAILED: "世界状态读取失败；刷新工作台后重试。",
+  };
 
-  function atlasLogAsText() {
-    return atlasLogEntries
-      .map((entry) => `${entry.at.toLocaleTimeString()} [${entry.level === "error" ? "报错" : entry.tag}] ${entry.text}${entry.detail ? `\n  ${entry.detail}` : ""}`)
-      .join("\n");
+  function diagnosticEntries() {
+    return atlasDiagnostics?.getSnapshot() ?? pendingDiagnostics;
   }
 
-  /** 日志页（侧边栏「日志」）：报错高亮 + 筛选 + 复制 / 清空。 */
+  function atlasLogAsText(entries) {
+    return "Atlas " + ATLAS_EXTENSION_VERSION + " · 安全诊断摘要\n" + entries.map((entry) =>
+      entry.at + " [" + entry.level + "/" + entry.source + "] " + entry.code +
+      " " + entry.phase + " " + entry.outcome +
+      (entry.traceId ? " trace=" + entry.traceId : "") +
+      (entry.httpStatus ? " HTTP=" + entry.httpStatus : "") +
+      (entry.errorCode ? " error=" + entry.errorCode : "") +
+      (entry.count ? " count=" + entry.count : "")
+    ).join("\n");
+  }
+
   function buildLogPage() {
     const wrap = el("div", "aw-panel");
+    const all = diagnosticEntries();
+    const chatRef = currentChatRef();
+    const scoped = all.filter((entry) => logAllChats || (chatRef ? entry.chatRef === chatRef : !entry.chatRef));
+    const latestTrace = [...scoped].reverse().find((entry) => entry.traceId)?.traceId;
+    const visible = logCurrentTrace && latestTrace
+      ? scoped.filter((entry) => entry.traceId === latestTrace) : scoped;
+    const errorCount = visible.filter((entry) => entry.level === "error").length;
+    const latest = visible.at(-1);
+    wrap.append(el("p", "aw-panel__meta",
+      "Atlas " + ATLAS_EXTENSION_VERSION + " · 浏览器模式 · 当前聊天 " + (chatRef ?? "未知") +
+      " · 安全元信息 " + visible.length + " 条 · 报错 " + errorCount +
+      (latest ? " · 最近 " + latest.code : "")));
 
     const controls = el("div", "aw-actions");
     const filterSelect = document.createElement("select");
     filterSelect.className = "aw-input";
-    filterSelect.setAttribute("aria-label", "筛选日志");
-    const options = [
-      ["all", `全部（${atlasLogEntries.length} 条）`],
-      ["error", `仅报错（${atlasLogEntries.filter((entry) => entry.level === "error").length} 条）`],
-      ["推演", "仅推演请求"],
-      ["引擎", "仅引擎操作"],
-      ["设置", "仅设置命令"],
-    ];
-    for (const [value, label] of options) {
+    filterSelect.setAttribute("aria-label", "筛选诊断");
+    for (const [value, label] of [
+      ["all", "全部"], ["error", "报错"], ["warn", "警告"],
+      ["host", "宿主"], ["ui", "界面"], ["engine", "引擎"],
+      ["model", "模型"], ["storage", "存储"], ["lorebook", "世界书"], ["map", "地图"],
+    ]) {
       const option = document.createElement("option");
       option.value = value;
       option.textContent = label;
       filterSelect.append(option);
     }
     filterSelect.value = logFilter;
-    filterSelect.addEventListener("change", () => {
-      logFilter = filterSelect.value;
-      renderCenter();
-    });
+    filterSelect.addEventListener("change", () => { logFilter = filterSelect.value; renderCenter(); });
     controls.append(filterSelect);
 
-    const copy = el("button", "aw-btn aw-btn--ghost", "复制全部日志");
-    copy.type = "button";
-    copy.setAttribute("aria-label", "复制运行日志到剪贴板");
-    copy.addEventListener("click", async () => {
+    const search = document.createElement("input");
+    search.type = "search";
+    search.className = "aw-input";
+    search.placeholder = "搜索错误码 / 阶段 / trace";
+    search.value = logQuery;
+    search.setAttribute("aria-label", "搜索诊断");
+    search.addEventListener("change", () => { logQuery = search.value.trim().toLowerCase().slice(0, 80); renderCenter(); });
+    controls.append(search);
+
+    const allChats = el("button", "aw-btn aw-btn--ghost", logAllChats ? "全部聊天" : "当前聊天");
+    allChats.type = "button";
+    allChats.addEventListener("click", () => { logAllChats = !logAllChats; renderCenter(); });
+    controls.append(allChats);
+
+    const currentTurn = el("button", "aw-btn aw-btn--ghost", logCurrentTrace ? "仅本轮" : "全部回合");
+    currentTurn.type = "button";
+    currentTurn.addEventListener("click", () => { logCurrentTrace = !logCurrentTrace; renderCenter(); });
+    controls.append(currentTurn);
+
+    const archive = el("button", "aw-btn aw-btn--ghost",
+      atlasDiagnostics?.getArchiveEnabled() ? "关闭持久归档" : "开启持久归档");
+    archive.type = "button";
+    archive.setAttribute("aria-pressed", String(atlasDiagnostics?.getArchiveEnabled() === true));
+    archive.title = "仅保存脱敏后的警告和错误，最多 200 条，保留 7 天。关闭时清除归档。";
+    archive.addEventListener("click", () => {
+      const enabled = !atlasDiagnostics?.getArchiveEnabled();
+      atlasDiagnostics?.setArchiveEnabled(enabled);
       try {
-        await navigator.clipboard.writeText(atlasLogAsText() || "（日志为空）");
-        setStatus("日志已复制到剪贴板。", "ok");
+        if (enabled) globalThis.localStorage?.setItem("atlas:safe-diagnostics-archive-enabled:v1", "true");
+        else globalThis.localStorage?.removeItem("atlas:safe-diagnostics-archive-enabled:v1");
       } catch {
-        setStatus("复制被浏览器拦截，请手动选择文本复制。", "error");
+        emitAtlasDiagnostic({ level: "warn", source: "storage",
+          code: "DIAGNOSTICS_STORAGE_UNAVAILABLE", operation: "diagnostics",
+          phase: "archive-preference", outcome: "failed" });
       }
       renderCenter();
     });
+    controls.append(archive);
+
+    const copy = el("button", "aw-btn aw-btn--ghost", "复制诊断摘要");
+    copy.type = "button";
+    copy.addEventListener("click", async () => {
+      const value = atlasLogAsText(visible) || "（诊断为空）";
+      try {
+        await navigator.clipboard.writeText(value);
+        setStatus("安全诊断摘要已复制。");
+        renderCenter();
+      } catch {
+        const manual = el("pre", "aw-log__detail", value);
+        manual.setAttribute("aria-label", "手动复制诊断摘要");
+        wrap.append(manual);
+      }
+    });
     controls.append(copy);
 
-    const clear = el("button", "aw-btn aw-btn--danger", "清空日志");
+    const exportButton = el("button", "aw-btn aw-btn--ghost", "导出安全 JSONL");
+    exportButton.type = "button";
+    exportButton.addEventListener("click", () => {
+      const payload = visible.map((entry) => JSON.stringify(entry)).join("\n");
+      const url = URL.createObjectURL(new Blob([payload], { type: "application/x-ndjson;charset=utf-8" }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "atlas-diagnostics.jsonl";
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    });
+    controls.append(exportButton);
+
+    const clear = el("button", "aw-btn aw-btn--danger", "清空本地诊断");
     clear.type = "button";
-    clear.setAttribute("aria-label", "清空运行日志");
     clear.addEventListener("click", () => {
-      atlasLogEntries.length = 0;
-      logFilter = "all";
+      atlasDiagnostics?.clear();
+      pendingDiagnostics.length = 0;
       renderCenter();
     });
     controls.append(clear);
     wrap.append(controls);
 
-    const filtered = atlasLogEntries.filter((entry) => {
-      if (logFilter === "all") return true;
-      if (logFilter === "error") return entry.level === "error";
-      return entry.tag === logFilter;
+    const filtered = visible.filter((entry) => {
+      if (logFilter === "error" || logFilter === "warn") {
+        if (entry.level !== logFilter) return false;
+      } else if (logFilter !== "all" && entry.source !== logFilter) return false;
+      const haystack = [entry.code, entry.phase, entry.traceId, entry.errorCode].join(" ").toLowerCase();
+      return !logQuery || haystack.includes(logQuery);
     });
-
     if (filtered.length === 0) {
-      wrap.append(el("p", "aw-panel__text", atlasLogEntries.length === 0
-        ? "暂无日志。跑一轮对话或点「加载模型列表」后，这里会记录每条推演请求的状态、耗时与响应开头（密钥已脱敏）。"
-        : "当前筛选下没有日志条目。"));
+      wrap.append(el("p", "aw-panel__text", "当前范围没有诊断事件。"));
       return wrap;
     }
-
     const list = el("div", "aw-log");
-    for (const entry of [...filtered].reverse()) {
-      const row = el("div", `aw-log__row${entry.level === "error" ? " is-error" : ""}`);
-      row.append(
-        el("span", "aw-log__time", entry.at.toLocaleTimeString()),
-        el("span", "aw-log__tag", entry.tag),
-        el("span", "aw-log__text", entry.text),
-      );
-      if (entry.detail) row.append(el("pre", "aw-log__detail", entry.detail));
-      list.append(row);
+    const groups = new Map();
+    for (const entry of filtered) {
+      const key = entry.traceId ?? "background";
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(entry);
+    }
+    const ordered = [...groups.entries()].reverse();
+    for (let groupIndex = 0; groupIndex < ordered.length; groupIndex++) {
+      const [trace, events] = ordered[groupIndex];
+      const timeline = document.createElement("details");
+      timeline.className = "aw-log__timeline";
+      timeline.open = groupIndex === 0;
+      const summary = document.createElement("summary");
+      summary.textContent = (trace === "background" ? "后台事件" : trace) +
+        " · " + events.length + " 条 · " + events.at(-1).at;
+      timeline.append(summary);
+      for (const entry of events) {
+        const row = el("div", "aw-log__row" + (entry.level === "error" ? " is-error" : ""));
+        row.append(
+          el("span", "aw-log__time", entry.at),
+          el("span", "aw-log__tag", entry.level + " · " + entry.source),
+          el("span", "aw-log__text", entry.code + " · " + entry.phase + " · " + entry.outcome),
+        );
+        if (entry.traceId || entry.errorCode || entry.httpStatus || entry.details || entry.count) {
+          row.append(el("pre", "aw-log__detail", JSON.stringify({
+            ...(entry.traceId ? { traceId: entry.traceId } : {}),
+            ...(entry.attemptId ? { attemptId: entry.attemptId } : {}),
+            ...(entry.httpStatus ? { httpStatus: entry.httpStatus } : {}),
+            ...(entry.errorCode ? { errorCode: entry.errorCode } : {}),
+            ...(entry.durationMs != null ? { durationMs: entry.durationMs } : {}),
+            ...(entry.count ? { count: entry.count } : {}),
+            ...(entry.details ? { details: entry.details } : {}),
+          })));
+        }
+        if (diagnosticAdvice[entry.code]) {
+          row.append(el("span", "aw-log__detail", diagnosticAdvice[entry.code]));
+        }
+        timeline.append(row);
+      }
+      list.append(timeline);
     }
     wrap.append(list);
     return wrap;
@@ -1807,7 +1932,7 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     }
 
     if (s.page === "logs") {
-      center.append(pageHeader("运行日志", "最近 " + String(ATLAS_LOG_LIMIT) + " 条引擎与推演记录；报错红色高亮，可复制给作者排障。密钥自动脱敏。"));
+      center.append(pageHeader("运行日志", "结构化安全诊断；可按聊天筛选、复制摘要并导出 JSONL。"));
       center.append(buildLogPage());
       return;
     }
@@ -1818,6 +1943,8 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
   // ---------------------------------------------------------------------------
 
   const viewport = el("div", "aw-viewport");
+  const interiorRoster = el("div", "aw-interior-roster");
+  interiorRoster.setAttribute("aria-label", "建筑内位置未细分的人物与物品");
   // R01 图层拆分：底图（aw-image）/ 网格（aw-grid）/ 标点路线（aw-layer）各占一个
   // 独立元素——底图与网格不再抢同一个 backgroundImage 属性（旧实现两者复用 mapLayer，
   // 后赋值覆盖前者，有底图时网格必然消失）。zoom/pan 变换作用在 aw-stage 包装层，
@@ -1837,6 +1964,7 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
   let mapViewMode = "overlay";
   let mapBuilt = false;
   let mapScaleEl = null;
+  let gridStrideEl = null;
   // 0.9.50 标尺条：条 / 标签 / 详情元素与展开态（重建 renderMap 时保持展开）
   let scaleBarEl = null;
   let scaleLabelEl = null;
@@ -1900,29 +2028,26 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     applyCamera();
   };
 
-  /**
-   * R08 网格视觉：格线画在 stage 空间（周期 1 世界单位），线宽 = 1/k stage px
-   * → 屏幕恒 1px；background-position 吸附世界整数格，格线与标点共用同一
-   * 相机变换永远对齐。k < 4（格距 < 4 屏幕像素）时格线糊成色块，诚实隐藏。
-   */
+  /** 缩小时合并世界格，主网格线与真实整数坐标保持对齐。 */
   function updateGridVisual() {
     if (!gridLayer || !camera) return;
     const cell = camera.k;
-    if (!Number.isFinite(cell) || cell < 4) {
-      gridLayer.style.display = "none";
-      return;
-    }
+    if (!Number.isFinite(cell) || cell <= 0) return;
+    let stride = 1;
+    while (cell * stride < 8 && stride < 625) stride *= 5;
     gridLayer.style.display = "";
-    const line = `var(--am-grid-minor, var(--aw-teal-wash))`;
+    const line = "var(--am-grid-minor, var(--aw-teal-wash))";
     const lineW = 1 / cell;
-    const gap = Math.max(0, 1 - lineW);
+    const gap = Math.max(0, stride - lineW);
     gridLayer.style.backgroundImage =
-      `repeating-linear-gradient(0deg, transparent, transparent ${gap}px, ${line} ${gap}px, ${line} 1px), ` +
-      `repeating-linear-gradient(90deg, transparent, transparent ${gap}px, ${line} ${gap}px, ${line} 1px)`;
+      "repeating-linear-gradient(0deg, transparent, transparent " + gap + "px, " + line + " " + gap + "px, " + line + " " + stride + "px), " +
+      "repeating-linear-gradient(90deg, transparent, transparent " + gap + "px, " + line + " " + gap + "px, " + line + " " + stride + "px)";
     gridLayer.style.backgroundSize = "100% 100%";
     gridLayer.style.backgroundRepeat = "repeat";
-    const frac = (v) => v - Math.floor(v);
-    gridLayer.style.backgroundPosition = `${-frac(gridBoxOrigin.x)}px ${-frac(gridBoxOrigin.y)}px`;
+    const mod = (value) => ((value % stride) + stride) % stride;
+    gridLayer.style.backgroundPosition = -mod(gridBoxOrigin.x) + "px " + -mod(gridBoxOrigin.y) + "px";
+    gridLayer.dataset.gridStride = String(stride);
+    if (gridStrideEl) gridStrideEl.textContent = stride === 1 ? "网格：1 格/线" : "主网格：" + stride + " 格/线";
   }
 
   /** 0.9.50 标尺条视觉更新：标定图按候选距离画真实条长；未标定/旧式单位画桩线 + 文字。 */
@@ -1954,13 +2079,23 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       const body = result.body ?? {};
       if (result.status === 200 && body.ok) {
         const status = String(body.data?.status ?? "");
-        atlasLog("地图", `${label}：${body.data?.message ?? "完成"}`);
+        emitAtlasDiagnostic({ level: "info", source: "map", code: "SCALE_CALIBRATE_COMPLETE",
+          operation: "scale", phase: "response", outcome: "success",
+          httpStatus: result.status, details: { route: "/worlds/scale/calibrate" } });
         setStatus(String(body.data?.message ?? `${label}完成`), status === "calibrated" || status === "grounded" ? "ok" : "warn");
         await core.refresh();
       } else {
-        atlasLog("地图", `${label}失败 → ${body.error?.message ?? `HTTP ${result.status}`}`);
+        emitAtlasDiagnostic({ level: "error", source: "map", code: "SCALE_CALIBRATE_FAILED",
+          operation: "scale", phase: "response", outcome: "failed",
+          httpStatus: result.status, errorCode: body.error?.code,
+          details: { route: "/worlds/scale/calibrate" } });
         setStatus(body.error?.message ?? `${label}失败（HTTP ${result.status}）`, "error");
       }
+    } catch {
+      emitAtlasDiagnostic({ level: "error", source: "map", code: "SCALE_CALIBRATE_FAILED",
+        operation: "scale", phase: "request", outcome: "failed",
+        retryable: true, details: { route: "/worlds/scale/calibrate" } });
+      setStatus("地图标定请求失败；请检查连接后重试。", "error");
     } finally {
       scaleCalibrating = false;
     }
@@ -2091,7 +2226,8 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       mapScaleEl.classList.toggle("is-detail-open", scaleDetailOpen);
     });
     mapScaleEl.append(scaleToggle, scaleDetailEl);
-    viewport.append(compass, mapScaleEl);
+    gridStrideEl = el("span", "aw-grid-stride", "网格：1 格/线");
+    viewport.append(compass, mapScaleEl, gridStrideEl);
     // R08：＋/－ 以视口中心为锚缩放；⌂ = fitAll 全图适配（重置是单独操作，
     // 回到 100% 不再连带清空平移——旧 setZoom(1) 清 pan 的行为删除）；
     // ⌖ = 定位当前位置（保持比例，视口中心对准玩家）。
@@ -2171,11 +2307,17 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       const result = await api.request("POST", "/worlds/geo/adopt", payload);
       const data = result.body?.data ?? {};
       if (result.status === 200 && result.body?.ok) {
-        atlasLog("地图", `${label}完成：+${data.regionsAdded ?? 0} 地区 +${data.pointsAdded ?? 0} 地点（跳过 ${data.skipped ?? 0}）`);
+        emitAtlasDiagnostic({ level: "info", source: "map", code: "GEO_ADOPT_COMPLETE",
+          operation: "geo", phase: "response", outcome: "success",
+          httpStatus: result.status, details: { route: "/worlds/geo/adopt",
+            count: Number(data.pointsAdded ?? 0) } });
         setStatus(`提炼完成：新增 ${data.regionsAdded ?? 0} 地区 / ${data.pointsAdded ?? 0} 地点${data.skipped ? `（重名跳过 ${data.skipped}）` : ""}。`, "ok");
         await core.refresh();
       } else {
-        atlasLog("地图", `${label}失败 → ${result.body?.error?.message ?? `HTTP ${result.status}`}`);
+        emitAtlasDiagnostic({ level: "error", source: "map", code: "GEO_ADOPT_FAILED",
+          operation: "geo", phase: "response", outcome: "failed",
+          httpStatus: result.status, errorCode: result.body?.error?.code,
+          details: { route: "/worlds/geo/adopt" } });
         setStatus(result.body?.error?.message ?? `提炼失败（HTTP ${result.status}）`, "error");
       }
     };
@@ -2308,7 +2450,7 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       closeMapPanel();
     });
     mapPanel.addEventListener("click", (e) => e.stopPropagation());
-    viewport.append(mapPanel);
+    viewport.append(interiorRoster, mapPanel);
     // 0.9.41 图例：地点 / 人物 / 物品三型标点（原型 mapview 同款信息架构）
     // 0.9.43 真修（0.9.46 补提交）：el() 第三参只吃文本——DOM 节点会被 textContent
     // 强转成 "[object HTMLElement]"，标签文字（第 4 参）则被静默丢弃。
@@ -2534,13 +2676,21 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     openMapPanel(target, { inSub: false, currentSub: null }, marker);
   }
 
+  function hasChildSubmap(submaps, pointId) {
+    const id = String(pointId);
+    const child = submaps[id];
+    if (!child || mapStack.length >= 3 || mapStack.some((item) => item.pointId === id)) return false;
+    const parentId = mapStack.length ? String(mapStack[mapStack.length - 1].pointId) : "world";
+    return String(child.parentMapId ?? "world") === parentId;
+  }
+
   function openMapPanel(point, { inSub, currentSub }, anchorEl = null) {
     const d = lastMapData;
     if (!mapPanel || !d) return;
     mapPanel.innerHTML = "";
     const submaps = (d.map?.submaps ?? {});
     const pointMeta = (d.map?.pointMeta ?? {});
-    const hasSub = !inSub && Boolean(submaps[String(point.id)]);
+    const hasSub = hasChildSubmap(submaps, point.id);
     const regions = Array.isArray(d.regions) ? d.regions : [];
     const region = regions.find((r) => String(r.id) === String(point.regionId ?? ""));
     const description = inSub
@@ -2743,6 +2893,14 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     const mapData = d.map ?? {};
     const submaps = mapData.submaps && typeof mapData.submaps === "object" ? mapData.submaps : {};
     const pointMeta = mapData.pointMeta && typeof mapData.pointMeta === "object" ? mapData.pointMeta : {};
+    while (mapStack.length > 0) {
+      const top = mapStack[mapStack.length - 1];
+      const expectedParent = mapStack.length > 1 ? mapStack[mapStack.length - 2].pointId : "world";
+      const submap = submaps[String(top.pointId)];
+      if (submap && String(submap.parentMapId ?? "world") === String(expectedParent)) break;
+      mapStack.pop();
+      closeMapPanel();
+    }
     // 0.9.35 子图视图：栈顶决定当前渲染哪张图（世界图或任意点挂子图，递归）
     const view = mapStack[mapStack.length - 1] ?? null;
     const currentSub = view ? submaps[String(view.pointId)] ?? null : null;
@@ -2771,12 +2929,35 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     }
     if (regionSelect) regionSelect.style.display = inSub ? "none" : "";
     if (travelBar) travelBar.style.display = inSub ? "none" : "";
+    interiorRoster.innerHTML = "";
+    interiorRoster.style.display = inSub && (npcs.length > 0 || objects.length > 0) ? "" : "none";
+    if (inSub && (npcs.length > 0 || objects.length > 0)) {
+      interiorRoster.append(el("div", "aw-interior-roster__title", "建筑内 · 具体房间未知"));
+      for (const npc of npcs) {
+        const button = el("button", "aw-interior-roster__item", String(npc.name ?? "未具名人物"));
+        button.type = "button";
+        button.addEventListener("click", (event) => {
+          event.stopPropagation();
+          openNpcPanel(npc);
+        });
+        interiorRoster.append(button);
+      }
+      for (const object of objects) {
+        const button = el("button", "aw-interior-roster__item", String(object.name ?? "物品"));
+        button.type = "button";
+        button.addEventListener("click", (event) => {
+          event.stopPropagation();
+          openObjectPanel(object);
+        });
+        interiorRoster.append(button);
+      }
+    }
 
     const regions = Array.isArray(d.regions) ? d.regions : [];
     // 0.9.20 空地理诚实提示；0.9.26 地图抢救后文案更新——单点地图不是渲染坏了，
     // 是世界里真的只有一个地点；提炼按钮（世界书 / 近期剧情）现在常显可随时生长地图
     if (mapHint) {
-      const hasRealGeo = pointsAll.length > 1 || regions.length > 1;
+      const hasRealGeo = pointsAll.length > 0 || regions.length > 0;
       mapHint.textContent = hasRealGeo
         ? ""
         : "这个世界还没有地理数据：新世界不再预置「起点」占位地点。点下方「从世界书提炼地理」导入卡书里的地点；推演有场景后，可用「从近期剧情提炼新地点」让地图继续生长。";
@@ -2836,7 +3017,7 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     // 旧式自由单位比例尺只做文字说明（换算未知，不画伪物理条）；世界图沿用
     // 「多于一个地点或地区才显示」的显隐口径。缩放 / resize 经 updateScaleBarVisual 重算。
     if (mapScaleEl) {
-      const showScale = !inSub ? pointsAll.length > 1 || regions.length > 1 : true;
+      const showScale = !inSub ? pointsAll.length > 0 || regions.length > 0 : true;
       mapScaleEl.style.display = showScale ? "" : "none";
       if (showScale) {
         const calibrations = mapData.calibrations && typeof mapData.calibrations === "object" ? mapData.calibrations : {};
@@ -2858,7 +3039,7 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     for (const point of points) {
       const marker = el("button", "aw-point");
       marker.type = "button";
-      const hasSub = Boolean(inSub ? false : submaps[String(point.id)]);
+      const hasSub = hasChildSubmap(submaps, point.id);
       marker.textContent = String(point.name);
       marker.title = String(point.name);
       // R08：标记直接按世界单位定位（screen = v + (world - c) * k 由相机统一给出）
@@ -2880,26 +3061,14 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       mapLayer.append(marker);
     }
 
-    // 子图投影标点的显示位：世界状态只给「在宿主点内」，子图内无精确坐标——
-    // 用黄金角螺旋在子图中心附近确定性散布（同一实体永远同一位置，纯排版数据不回写世界）
-    let projectionSlot = 0;
-    const projectionPos = () => {
-      const idx = projectionSlot;
-      projectionSlot += 1;
-      const angle = idx * 2.399963;
-      const radius = Math.min(cameraFrame.spanX, cameraFrame.spanY) * 0.12 * Math.sqrt(idx + 1);
-      const cx = cameraFrame.minX + cameraFrame.spanX / 2;
-      const cy = cameraFrame.minY + cameraFrame.spanY / 2;
-      return { x: cx + Math.cos(angle) * radius, y: cy + Math.sin(angle) * radius };
-    };
-
+    // 子图只有宿主地点级位置：名单展示，不伪造房间坐标。
     for (const npc of npcs) {
-      if (!inSub && (npc.x === null || npc.y === null)) continue;
+      if (inSub || npc.x === null || npc.y === null) continue;
       // 0.9.41 人物标点 = 金圆字头像（原型 mapview 同款信息架构）：点击出人物 popover
       const dot = el("button", "aw-npc");
       dot.type = "button";
       dot.dataset.entityId = String(npc.id ?? "");
-      const worldPos = inSub ? projectionPos() : { x: npc.x, y: npc.y };
+      const worldPos = { x: npc.x, y: npc.y };
       dot.style.left = `${Number(worldPos.x)}px`;
       dot.style.top = `${Number(worldPos.y)}px`;
       const reasonLabel = npc.reason ? (NPC_REASON_LABELS[String(npc.reason)] ?? String(npc.reason)) : "";
@@ -2914,12 +3083,12 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     }
 
     for (const object of objects) {
-      if (!inSub && (object.x === null || object.y === null)) continue;
+      if (inSub || object.x === null || object.y === null) continue;
       // 0.9.41 物品标点 = 紫色小方块：点击出物品 popover
       const dot = el("button", "aw-object");
       dot.type = "button";
       dot.dataset.objId = String(object.id ?? "");
-      const worldPos = inSub ? projectionPos() : { x: object.x, y: object.y };
+      const worldPos = { x: object.x, y: object.y };
       dot.style.left = `${Number(worldPos.x)}px`;
       dot.style.top = `${Number(worldPos.y)}px`;
       dot.title = `${String(object.name)}（${String(object.type)}）`;
@@ -2973,9 +3142,22 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
         mapImageCache.set(cacheKey, null);
         void api.request("POST", "/map/image", { chatId: String(state().chatId ?? "") }).then((result) => {
           const payload = result.body?.data?.dataUrl;
-          mapImageCache.set(cacheKey, typeof payload === "string" ? payload : null);
+          if (result.status !== 200 || !result.body?.ok || typeof payload !== "string") {
+            emitAtlasDiagnostic({ level: "warn", source: "map",
+              code: "MAP_IMAGE_LOAD_FAILED", operation: "map-image",
+              phase: "response", outcome: "failed", httpStatus: result.status,
+              details: { route: "/map/image" } });
+            mapImageCache.delete(cacheKey);
+            return;
+          }
+          mapImageCache.set(cacheKey, payload);
           if (state().page === "map") renderMap(data());
-        }).catch(() => mapImageCache.delete(cacheKey));
+        }).catch(() => {
+          emitAtlasDiagnostic({ level: "warn", source: "map",
+            code: "MAP_IMAGE_LOAD_FAILED", operation: "map-image",
+            phase: "request", outcome: "failed", details: { route: "/map/image" } });
+          mapImageCache.delete(cacheKey);
+        });
       }
       const imageUrl = mapImageCache.get(cacheKey);
       if (imageUrl) {
@@ -3214,6 +3396,7 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
   let promptLibrary = [];
   let promptDraft = null;
   let promptDraftDirty = false;
+  let settingsLoadState = "loading";
   let settingsStatus = "";
   let settingsStatusKind = "";
 
@@ -3231,27 +3414,62 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
 
   async function loadSettingsV2(force = false) {
     if (settingsV2 && !force) return settingsV2;
-    const result = await api.request("GET", "/settings");
-    if (result.status !== 200 || !result.body?.ok) {
-      setStatus(`读取设置失败：${result.body?.error?.message ?? `HTTP ${result.status}`}`, "error");
+    settingsLoadState = "loading";
+    try {
+      const result = await api.request("GET", "/settings");
+      if (result.status !== 200 || !result.body?.ok || !result.body.data) {
+        setStatus("读取设置失败：" + (result.body?.error?.message ?? ("HTTP " + result.status)), "error");
+        settingsLoadState = "error";
+        return settingsV2;
+      }
+      settingsV2 = result.body.data;
+      apiLibrary = Array.isArray(settingsV2.apiPresets) ? settingsV2.apiPresets : [];
+      promptLibrary = Array.isArray(settingsV2.promptPresets) ? settingsV2.promptPresets : [];
+      if (Number(settingsV2.recoveryPromptCount) > 0) {
+        setStatus("发现 " + Number(settingsV2.recoveryPromptCount) + " 条旧提示词预设无法读取。原始设置已保护为只读，请先备份和恢复。", "error");
+      }
+      // Initialize only after a successful first load. A refresh preserves edits.
+      if (promptDraft === null) {
+        const activeId = settingsV2.activePromptPresetId;
+        const active = promptLibrary.find((preset) => preset.id === activeId);
+        if (activeId == null) promptDraft = builtinPromptDraft();
+        else if (active) promptDraft = savedPromptDraft(active);
+        else setStatus("当前提示词预设 " + String(activeId) + " 未找到；请先检查或恢复预设数据。", "error");
+      }
+      settingsLoadState = "loaded";
+      return settingsV2;
+    } catch (error) {
+      setStatus("读取设置失败：" + (error instanceof Error ? error.message : String(error)), "error");
+      settingsLoadState = "error";
       return settingsV2;
     }
-    settingsV2 = result.body.data;
-    apiLibrary = Array.isArray(settingsV2.apiPresets) ? settingsV2.apiPresets : [];
-    promptLibrary = Array.isArray(settingsV2.promptPresets) ? settingsV2.promptPresets : [];
-    return settingsV2;
   }
 
   async function sendSettingsCommand(command) {
-    const result = await api.request("PUT", "/settings", command);
+    let result;
+    try {
+      result = await api.request("PUT", "/settings", command);
+    } catch {
+      emitAtlasDiagnostic({ level: "error", source: "ui", code: "SETTINGS_SAVE_FAILED",
+        operation: "settings", phase: "request", outcome: "failed",
+        retryable: true, details: { route: "/settings" } });
+      setStatus("设置未保存：连接失败。草稿仍保留，可重试。", "error");
+      return false;
+    }
     if (result.status !== 200 || !result.body?.ok) {
+      emitAtlasDiagnostic({ level: "error", source: "ui", code: "SETTINGS_SAVE_FAILED",
+        operation: "settings", phase: "response", outcome: "failed",
+        httpStatus: result.status, errorCode: result.body?.error?.code,
+        details: { route: "/settings" } });
       setStatus(`设置未保存：${result.body?.error?.message ?? `HTTP ${result.status}`}`, "error");
       return false;
     }
     settingsV2 = result.body.data;
     apiLibrary = Array.isArray(settingsV2.apiPresets) ? settingsV2.apiPresets : [];
     promptLibrary = Array.isArray(settingsV2.promptPresets) ? settingsV2.promptPresets : [];
-    atlasLog("设置", `命令 ${command.action} → 成功（连接 ${apiLibrary.length} 条 / 提示词 ${promptLibrary.length} 条）`);
+    emitAtlasDiagnostic({ level: "info", source: "ui", code: "SETTINGS_SAVE_COMPLETE",
+      operation: "settings", phase: "response", outcome: "success",
+      httpStatus: result.status, details: { route: "/settings" } });
     return true;
   }
 
@@ -3397,6 +3615,36 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     const panel = el("section", "aw-panel");
     panel.append(el("span", "aw-eyebrow", "推进状态"));
     const s = state();
+    if (!settingsV2) {
+      panel.append(el("p", settingsLoadState === "error" ? "aw-note aw-note--error" : "aw-panel__meta",
+        settingsLoadState === "error" ? settingsStatus : "正在读取提示词与设置…"));
+      if (settingsLoadState === "error") {
+        const retry = el("button", "aw-btn", "重试读取设置");
+        retry.type = "button";
+        retry.addEventListener("click", async () => { await loadSettingsV2(true); renderCenter(); });
+        panel.append(retry);
+      }
+      return panel;
+    }
+    if (Number(settingsV2.recoveryPromptCount) > 0) {
+      panel.append(el("p", "aw-note aw-note--error",
+        "发现 " + Number(settingsV2.recoveryPromptCount) + " 条旧提示词预设无法读取。为防止覆盖原始内容，设置写入已暂停；请先备份原始设置并恢复预设。"));
+    }
+    if (!promptDraft && settingsV2.activePromptPresetId != null) {
+      panel.append(el("p", "aw-note aw-note--error", settingsStatus || "当前提示词预设未找到。"));
+      const useBuiltin = el("button", "aw-btn", "明确改用内置默认");
+      useBuiltin.type = "button";
+      useBuiltin.addEventListener("click", async () => {
+        if (await sendSettingsCommand({ action: "prompt.activate", id: null })) {
+          promptDraft = builtinPromptDraft();
+          promptDraftDirty = false;
+          setStatus("已改用内置默认。");
+        }
+        renderCenter();
+      });
+      panel.append(useBuiltin);
+      return panel;
+    }
 
     // 状态行内联（shujuku 式：label + 值一行一条），不再用统计卡阵
     const rows = el("div", "aw-rows");
@@ -3616,18 +3864,19 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       promptSelect.append(option);
     }
     promptSelect.value = promptDraft?.id ?? (settingsV2?.activePromptPresetId ?? BUILTIN_PROMPT_ID);
-    promptSelect.addEventListener("change", () => {
+    promptSelect.addEventListener("change", async () => {
       if (promptDraftDirty && !confirmDiscard("提示词")) {
         promptSelect.value = promptDraft?.id ?? (settingsV2?.activePromptPresetId ?? BUILTIN_PROMPT_ID);
         return;
       }
       const preset = promptLibrary.find((p) => p.id === promptSelect.value);
-      // R02：载入显式 kind——选中已存预设 = saved 工作副本；选内置 = builtin 只读展示
-      promptDraft = preset ? savedPromptDraft(preset) : builtinPromptDraft();
-      promptDraftDirty = false;
-      setStatus("", "ok");
-      // shujuku 语义：选中即设为当前使用（内置默认 = activate null）
-      void sendSettingsCommand({ action: "prompt.activate", id: preset ? preset.id : null });
+      promptSelect.disabled = true;
+      // Keep the current draft until activation succeeds.
+      if (await sendSettingsCommand({ action: "prompt.activate", id: preset ? preset.id : null })) {
+        promptDraft = preset ? savedPromptDraft(preset) : builtinPromptDraft();
+        promptDraftDirty = false;
+        setStatus("", "ok");
+      }
       renderCenter();
     });
     selectRow.append(promptSelect);
@@ -4809,11 +5058,14 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
             custom_include_headers: atlasCustomIncludeHeaders(apiKeyInput ? `Bearer ${apiKeyInput}` : ""),
           }),
         });
-        let probeSnippet = "";
-        try {
-          probeSnippet = redactSecrets(await probeResponse.clone().text()).replace(/\s+/g, " ").slice(0, 300);
-        } catch { /* 片段读不到不影响判定 */ }
-        atlasLog("推演", `POST /api/backends/chat-completions/generate（${apiFormatValue0} 真实探测） → ${endpoint} · 模型=${String(preset.model).trim()} → HTTP ${probeResponse.status}，${Date.now() - startedProbeAt}ms`, probeSnippet);
+        emitAtlasDiagnostic({
+          level: probeResponse.ok ? "info" : "error", source: "model",
+          code: probeResponse.ok ? "MODEL_PROBE_COMPLETE" : "MODEL_PROBE_FAILED",
+          operation: "probe", phase: "response",
+          outcome: probeResponse.ok ? "success" : "failed",
+          httpStatus: probeResponse.status, durationMs: Date.now() - startedProbeAt,
+          details: { route: "model-proxy", mode: apiFormatValue0 },
+        });
         const probePayload = await probeResponse.json().catch(() => null);
         const probeError = probePayload && typeof probePayload === "object" ? probePayload.error : null;
         const probeErrorText = typeof probeError === "string" ? probeError : probeError && typeof probeError === "object" ? String(probeError.message ?? "") : "";
@@ -4855,19 +5107,16 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
           custom_include_headers: atlasCustomIncludeHeaders(keyValue),
         }),
       });
-      let statusSnippet = "";
-      try {
-        statusSnippet = redactSecrets(await response.clone().text()).replace(/\s+/g, " ").slice(0, 300);
-      } catch { /* 片段读不到不影响判定 */ }
-      atlasLog("推演", `POST /api/backends/chat-completions/status → ${endpoint} · 模型列表 → HTTP ${response.status}，${Date.now() - startedStatusAt}ms`, statusSnippet);
+      emitAtlasDiagnostic({
+        level: response.ok ? "info" : "error", source: "model",
+        code: response.ok ? "MODEL_LIST_COMPLETE" : "MODEL_LIST_FAILED",
+        operation: "model-list", phase: "response",
+        outcome: response.ok ? "success" : "failed",
+        httpStatus: response.status, durationMs: Date.now() - startedStatusAt,
+        details: { route: "model-status", mode: apiFormatValue },
+      });
       if (!response.ok) {
-        const errorText = await response.text().catch(() => "");
-        let detail = errorText.slice(0, 200);
-        try {
-          const errorJson = JSON.parse(errorText);
-          detail = String(errorJson.error ?? errorJson.message ?? detail);
-        } catch { /* 保留原文 */ }
-        setStatus(`加载模型失败（HTTP ${response.status}）：${detail || "无详情"}`, "error");
+        setStatus("加载模型失败（HTTP " + response.status + "）。请检查 API 连接；详情见日志页。", "error");
         renderCenter();
         return;
       }
@@ -5608,6 +5857,9 @@ async function ensureStarterWorld() {
       });
       const result = await api.request("POST", "/worlds/ensure-starter", { world });
       if (result.status !== 200 || !result.body?.ok) {
+        emitAtlasDiagnostic({ level: "error", source: "engine", code: "WORLD_ENSURE_FAILED",
+          operation: "world", phase: "response", outcome: "failed",
+          httpStatus: result.status, errorCode: result.body?.error?.code, retryable: true });
         console.warn("[atlas] 自动建世被拒绝：", result.body?.error?.message ?? `HTTP ${result.status}`);
         return false;
       }
@@ -5618,6 +5870,8 @@ async function ensureStarterWorld() {
       await core.bindToWorld(String(world.id));
       return Boolean(core.getState().binding);
     } catch (error) {
+      emitAtlasDiagnostic({ level: "error", source: "engine", code: "WORLD_ENSURE_FAILED",
+        operation: "world", phase: "request", outcome: "failed", retryable: true });
       console.warn("[atlas] 自动建世失败（聊天不受影响）：", error instanceof Error ? error.message : String(error));
       return false;
     }
@@ -5703,6 +5957,7 @@ async function readCardLoreSupplement() {
     const atlasPrefixes = prefixList && typeof prefixList === "object" ? Object.values(prefixList) : ["Atlas 动向 ·", "Atlas 事件 ·"];
     const lines = [];
     let total = 0;
+    let failedBooks = 0;
     for (const bookName of bookNames) {
       let rawEntries = [];
       try {
@@ -5711,6 +5966,7 @@ async function readCardLoreSupplement() {
           ? Object.values(data.entries)
           : [];
       } catch {
+        failedBooks += 1;
         continue; // 单本书不存在 / 读取失败 → 跳过该本
       }
       for (const entry of rawEntries) {
@@ -5732,41 +5988,60 @@ async function readCardLoreSupplement() {
       }
       if (lines.length >= LORE_SUPPLEMENT_LIMITS.ENTRIES_MAX) break;
     }
+    if (failedBooks > 0) {
+      emitAtlasDiagnostic({ level: "warn", source: "lorebook",
+        code: "LORE_CONTEXT_UNAVAILABLE", operation: "lore-context",
+        phase: "read", outcome: "failed", details: { count: failedBooks } });
+    }
     const text = lines.join("\n");
     loreSupplementCache = { bookName: cacheKey, at: Date.now(), text };
     return text;
   } catch {
-    return ""; // 任何失败（书不存在 / API 不可用）都静默降级：无资料照常推演
+    emitAtlasDiagnostic({ level: "warn", source: "lorebook",
+      code: "LORE_CONTEXT_UNAVAILABLE", operation: "lore-context",
+      phase: "read", outcome: "failed" });
+    return ""; // 读取失败不阻断推演
   }
 }
 
 async function connectOnce() {
   try {
     const mod = await loadUiCore();
+    let diagnosticStorage = null;
+    let diagnosticArchive = null;
+    let archiveEnabled = false;
+    try { diagnosticStorage = globalThis.sessionStorage; } catch { /* private mode */ }
+    try {
+      diagnosticArchive = globalThis.localStorage;
+      archiveEnabled = diagnosticArchive?.getItem("atlas:safe-diagnostics-archive-enabled:v1") === "true";
+    } catch { /* private mode */ }
+    atlasDiagnostics = mod.createAtlasDiagnosticsSink({
+      persist: diagnosticStorage, archive: diagnosticArchive, archiveEnabled,
+    });
+    for (const event of pendingDiagnostics) atlasDiagnostics.emit(event);
+    pendingDiagnostics.length = 0;
 
     /** 模型请求日志包装：记录每条推演 HTTP 的状态 / 耗时 / 响应片段（脱敏）。 */
     const loggingModelFetch = async (input, init) => {
       const startedAt = Date.now();
-      const path = typeof input === "string" ? input : (input && typeof input.url === "string" ? input.url : String(input));
-      // 从代理请求体提取「真实上游地址 + 模型名」（绝不含密钥字段）
-      let target = "";
-      try {
-        const parsed = JSON.parse(init && typeof init.body === "string" ? init.body : "{}");
-        if (parsed && typeof parsed === "object" && parsed.custom_url) {
-          target = `${String(parsed.custom_url)} · 模型=${String(parsed.model ?? "?")}`;
-        }
-      } catch { /* 非代理载荷按原样记路径 */ }
-      const label = target ? `${path} → ${target}` : path;
       try {
         const response = await globalThis.fetch(input, init);
-        let snippet = "";
-        try {
-          snippet = redactSecrets(await response.clone().text());
-        } catch { /* 片段读不到不影响请求本身 */ }
-        atlasLog("推演", `POST ${label} → HTTP ${response.status}，${Date.now() - startedAt}ms`, snippet);
+        emitAtlasDiagnostic({
+          level: response.ok ? "info" : "error", source: "model",
+          code: response.ok ? "MODEL_HTTP_COMPLETE" : "MODEL_HTTP_FAILED",
+          operation: "generation", phase: "response",
+          outcome: response.ok ? "success" : "failed",
+          httpStatus: response.status, durationMs: Date.now() - startedAt,
+          details: { route: "model-proxy", mode: "custom" },
+        });
         return response;
       } catch (error) {
-        atlasLog("推演", `POST ${label} → 网络失败，${Date.now() - startedAt}ms`, error instanceof Error ? error.message : String(error));
+        emitAtlasDiagnostic({
+          level: "error", source: "model", code: "MODEL_NETWORK_FAILED",
+          operation: "generation", phase: "request", outcome: "failed",
+          durationMs: Date.now() - startedAt, retryable: true,
+          details: { route: "model-proxy", mode: "custom" },
+        });
         throw error;
       }
     };
@@ -5807,20 +6082,29 @@ async function connectOnce() {
       const startedAt = Date.now();
       try {
         const response = await adapter(input, init);
-        let snippet = "";
-        try {
-          snippet = redactSecrets(await response.clone().text()).replace(/\s+/g, " ").slice(0, 200);
-        } catch { /* 片段读不到不影响请求本身 */ }
-        atlasLog("推演", `POST atlas://host（${mode === "main" ? "酒馆主API" : "酒馆连接预设"}） → HTTP ${response.status}，${Date.now() - startedAt}ms`, snippet);
+        emitAtlasDiagnostic({
+          level: response.ok ? "info" : "error", source: "model",
+          code: response.ok ? "MODEL_HTTP_COMPLETE" : "MODEL_HTTP_FAILED",
+          operation: "generation", phase: "response",
+          outcome: response.ok ? "success" : "failed",
+          httpStatus: response.status, durationMs: Date.now() - startedAt,
+          details: { route: "host-model", mode },
+        });
         return response;
       } catch (error) {
-        atlasLog("推演", `POST atlas://host（${mode === "main" ? "酒馆主API" : "酒馆连接预设"}） → 异常，${Date.now() - startedAt}ms`, error instanceof Error ? error.message : String(error));
+        emitAtlasDiagnostic({
+          level: "error", source: "model", code: "MODEL_HOST_FAILED",
+          operation: "generation", phase: "request", outcome: "failed",
+          durationMs: Date.now() - startedAt, retryable: true,
+          details: { route: "host-model", mode },
+        });
         throw error;
       }
     };
     const engine = mod.createAtlasServerCore({
       store: engineStore,
       fetchFn: hostDispatchFetch,
+      onDiagnostic: emitAtlasDiagnostic,
     });
     // R15 集成：启动时清扫 orphan pending（R12 收口的最后一块——reconcilePending
     // 此前只有实现与单测，没有任何调用方）。带当前聊天会话调用：turn: 文档在
@@ -5833,35 +6117,51 @@ async function connectOnce() {
         .reconcilePending(startupSession)
         .then((report) => {
           if (report.cleaned > 0 || report.malformed > 0 || report.errors.length > 0) {
-            atlasLog(
-              "引擎",
-              `启动清理 orphan 挂单：扫 ${report.scanned} / 清 ${report.cleaned} / 留 ${report.kept} / 坏 ${report.malformed}` +
-                (report.errors.length > 0 ? ` / 错误 ${report.errors.length} 条` : ""),
-            );
+            emitAtlasDiagnostic({
+              level: report.errors.length > 0 ? "warn" : "info", source: "engine",
+              code: report.errors.length > 0 ? "PENDING_RECONCILE_FAILED" : "PENDING_RECONCILE_COMPLETE",
+              operation: "reconcile", phase: "startup",
+              outcome: report.errors.length > 0 ? "failed" : "success",
+              details: { scanned: report.scanned, cleaned: report.cleaned,
+                kept: report.kept, malformed: report.malformed, count: report.errors.length },
+            });
           }
         })
-        .catch((error) => {
-          atlasLog("引擎", `启动清理 orphan 挂单失败（不影响使用）：${error instanceof Error ? error.message : String(error)}`);
+        .catch(() => {
+          emitAtlasDiagnostic({ level: "warn", source: "engine", code: "PENDING_RECONCILE_FAILED",
+            operation: "reconcile", phase: "startup", outcome: "failed" });
         });
-    } catch { /* 会话读取失败照常启动：挂单清理是收尾优化，不是启动前提 */ }
+    } catch {
+      emitAtlasDiagnostic({ level: "warn", source: "storage", code: "PENDING_RECONCILE_FAILED",
+        operation: "reconcile", phase: "session-read", outcome: "failed" });
+    }
     // 引擎请求包装：每个 dispatch 记一条日志（方法 + 路径 + 结果码，绝不记请求体）
     const logApiCall = async (method, path, call) => {
       const startedAt = Date.now();
       try {
         const result = await call();
-        const ok = result && typeof result === "object" && "ok" in result ? result.ok : undefined;
-        const status = result && typeof result === "object" && "status" in result ? result.status : "";
-        const errCode = result && typeof result === "object" && result.body?.ok === false ? result.body?.error?.code : null;
-        atlasLog("引擎", `${method} ${path} → ${ok === false ? `失败（${errCode ?? "ERR"}）` : String(status) || "完成"}，${Date.now() - startedAt}ms`);
-        // 0.9.20：200 信封里也可能装着失败回执——「校验失败」必须进日志页，
-        // 否则作者只能看到一行 200，具体原因永远查无可查（2026-09-20 反馈）
-        const receipt = result && typeof result === "object" ? result.body?.data?.receipt : null;
-        if (receipt && receipt.status === "failed") {
-          atlasLog("推演", `回合提交失败 → ${String(receipt.summary ?? "未知原因").slice(0, 300)}`);
-        }
+        const status = typeof result?.status === "number" ? result.status : undefined;
+        const receipt = result?.body?.data?.receipt;
+        const failed = result?.body?.ok === false || receipt?.status === "failed" ||
+          (status !== undefined && status >= 400);
+        const duplicate = receipt?.status === "duplicate";
+        emitAtlasDiagnostic({
+          level: failed ? "error" : "info", source: "engine",
+          code: failed ? "API_CALL_FAILED" : duplicate ? "TURN_DUPLICATE" : "API_CALL_COMPLETE",
+          operation: "api", phase: "response",
+          outcome: failed ? "failed" : duplicate ? "skipped" : "success",
+          httpStatus: status,
+          errorCode: result?.body?.error?.code ?? receipt?.errorCode,
+          durationMs: Date.now() - startedAt,
+          details: { route: path },
+        });
         return result;
       } catch (error) {
-        atlasLog("引擎", `${method} ${path} → 异常，${Date.now() - startedAt}ms`, error instanceof Error ? error.message : String(error));
+        emitAtlasDiagnostic({
+          level: "error", source: "engine", code: "API_DISPATCH_EXCEPTION",
+          operation: "api", phase: "request", outcome: "failed",
+          durationMs: Date.now() - startedAt, details: { route: path },
+        });
         throw error;
       }
     };
@@ -5907,15 +6207,18 @@ async function connectOnce() {
             } else {
               // 发起聊天 ≠ 当前聊天（切卡 / 换聊天 / 会话归属不一致）：丢弃写回。
               // 引擎侧已提交；回到原聊天时该会话由 chatMetadata 持久层自然恢复。
-              atlasLog(
-                "引擎",
-                `会话写回已丢弃：发起聊天 ${requestChatId ?? "?"} ≠ 当前聊天 ${currentChatId ?? "?"}（会话归属 ${sessionChatId ?? "?"}），旧结果不写入新聊天。`,
-              );
+              emitAtlasDiagnostic({ level: "info", source: "storage",
+                code: "STALE_CHAT_RESPONSE_DROPPED", operation: "session",
+                phase: "write", outcome: "skipped",
+                details: { coreCommitted: result?.body?.data?.receipt?.status === "committed" } });
             }
           }
         } catch (error) {
           // 写回失败（聊天正被切换等）：引擎侧已提交，本侧会话等下次响应覆盖；记日志排查
-          atlasLog("引擎", "会话写回失败（引擎侧已提交，稍后自动覆盖）：", error instanceof Error ? error.message : String(error));
+          emitAtlasDiagnostic({ level: "error", source: "storage",
+            code: "SESSION_WRITE_FAILED", operation: "session",
+            phase: "write", outcome: "failed", retryable: true,
+            details: { coreCommitted: result?.body?.data?.receipt?.status === "committed" } });
         }
         return result;
       },
@@ -5933,6 +6236,9 @@ async function connectOnce() {
       const worldInfo = await loadStWorldInfo();
       lorebookWriter = mod.createAtlasLorebookWriter(createLorebookPort(context, worldInfo));
     } catch (error) {
+      emitAtlasDiagnostic({ level: "warn", source: "lorebook",
+        code: "LOREBOOK_SYNC_UNAVAILABLE", operation: "lorebook",
+        phase: "initialize", outcome: "skipped" });
       console.warn("[atlas] 世界书模块不可用，推演结果不写世界书：", error instanceof Error ? error.message : String(error));
     }
 
@@ -5944,6 +6250,7 @@ async function connectOnce() {
     let hostRef = null;
     const core = mod.createAtlasUiCore({
       api,
+      onDiagnostic: emitAtlasDiagnostic,
       host: (hostRef ??= createHost(context)),
       emitter: createEmitter(context),
       adaptEvent,
@@ -6055,11 +6362,21 @@ async function connectOnce() {
       read: (key) => hostRef.readData(key),
       write: (key, value) => hostRef.writeData(key, value),
     });
+    let diagnosticRenderTimer = null;
+    atlasDiagnostics.subscribe(() => {
+      if (core.getState().page !== "logs" || diagnosticRenderTimer) return;
+      diagnosticRenderTimer = setTimeout(() => {
+        diagnosticRenderTimer = null;
+        if (core.getState().page === "logs") rerender();
+      }, 150);
+    });
     installMenuButton(core);
     core.init();
     connected = { core, rerender };
     return connected;
   } catch (error) {
+    emitAtlasDiagnostic({ level: "error", source: "ui", code: "UI_CORE_LOAD_FAILED",
+      operation: "initialize", phase: "startup", outcome: "failed" });
     console.warn("[atlas] UI 扩展初始化失败（酒馆聊天不受影响）：", error instanceof Error ? error.message : String(error));
     return null;
   }
