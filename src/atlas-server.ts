@@ -601,7 +601,7 @@ function createCoreInstance(
       if (typeof value === "number" && Number.isFinite(value)) safeLog[key] = value;
     }
     if (typeof entry.excerpt === "string") safeLog.responseChars = entry.excerpt.length;
-    // 0.9.53 A9：真实响应长度优先。旧实现一律用 `excerpt`（= call.text.slice(0,1500)）
+    // 0.9.54 A9：真实响应长度优先。旧实现一律用 `excerpt`（= call.text.slice(0,1500)）
     // 的长度充当 responseChars，正文一长就恒定 1500，完全无法判断是否被截断。
     const realResponseChars = typeof entry.responseChars === "number" && Number.isFinite(entry.responseChars)
       ? entry.responseChars
@@ -770,7 +770,7 @@ function createCoreInstance(
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.53",
+      version: "0.9.54",
       protocolVersion: 1,
       time: now(),
     });
@@ -2188,7 +2188,7 @@ function createCoreInstance(
             errorCount: v2result.errors.length,
             errors: v2result.errors.slice(0, 10),
             excerpt: call.text.slice(0, 1500),
-            // 0.9.53 A10：真实响应字符数（excerpt 只是截到 1500 的片段，长度不代表响应长度）
+            // 0.9.54 A10：真实响应字符数（excerpt 只是截到 1500 的片段，长度不代表响应长度）
             responseChars: call.text.length,
           });
           throw new AtlasError(
@@ -2283,7 +2283,7 @@ function createCoreInstance(
         chatId: request.chatId,
         worldId: binding.worldId,
         summary: receipt.summary,
-        // 0.9.53 A9：持久诊断只留安全代码；真实中文原因仍由失败 receipt.summary 呈现。
+        // 0.9.54 A9：持久诊断只留安全代码；真实中文原因仍由失败 receipt.summary 呈现。
         reasonCode: "LEDGER_VALIDATION_FAILED",
         coreCommitted: false,
       });
