@@ -3446,9 +3446,28 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     return el("p", `aw-status${settingsStatusKind === "error" ? " aw-status--error" : ""}`, settingsStatus);
   }
 
+  /**
+   * S8 补刀（S10 实测暴露）：状态提示只写变量时，点击后要等**下一次重渲染**才可见——
+   * 「定位当前位置」的子地点提示、地图页提炼失败提示都因此看起来像没反应；
+   * 子图视图下点击还会先看到上一条旧提示。
+   * 这里就地更新已挂载的状态行；首次提示尚无节点时补挂一条（位置与各页渲染时一致，
+   * 都是 center 末尾）。只动状态行，不整页重渲染——不打扰相机 / 草稿 / 输入焦点。
+   */
+  function refreshStatusLine() {
+    const existing = center.querySelector(".aw-status");
+    if (existing) {
+      existing.textContent = settingsStatus;
+      existing.className = `aw-status${settingsStatusKind === "error" ? " aw-status--error" : ""}`;
+      return;
+    }
+    const line = statusLine();
+    if (line) center.append(line);
+  }
+
   function setStatus(text, kind = "ok") {
     settingsStatus = text;
     settingsStatusKind = kind;
+    refreshStatusLine();
   }
 
   async function loadSettingsV2(force = false) {
