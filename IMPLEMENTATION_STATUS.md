@@ -92,7 +92,7 @@
 - 门禁：typecheck 0 errors；pack 通过；test 395/395
 
 残留：
-- 导入导出提示词 JSON 包（独立文件、不含 key）→ 并入 R15 交付；shujuku 适配器暂缓（计划允许）
+- 导入导出提示词 JSON 包（独立文件、不含 key）→ **R15 已交付（2026-09-23）**：`buildAtlasPromptPack` / `parseAtlasPromptPack` / `uniquePromptPresetName`（根 index.js 导出，11 条测试）+ 推进页「导出 / 导入」按钮（`<preset>.atlas-prompt-pack.json`；协议 `atlas-prompt-pack@1`；白名单构造无密钥面；导入重名追加「（导入）」，不自动启用）；shujuku 适配器暂缓（计划允许）
 - 未保存切换保护已有 confirmDiscard；异步 settings 加载覆盖输入的回归测试归 R03 预览链路
 
 ## R03 — 提示词实际输入与请求预览（2026-09-23）

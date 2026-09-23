@@ -855,6 +855,126 @@ export function exportAtlasMapSkin(skin) {
   );
 }
 
+/**
+ * R15：推演提示词预设导入导出（R02 残留「JSON 包」交付）。
+ * - 只含预设语义字段（name / segments / contextTurnCount），**绝不含 API 连接与密钥**
+ *   （promptPresets 本来就不持有密钥；此处显式白名单构造，杜绝将来误加字段）。
+ * - 导入是预校验：通过后仍由服务端 prompt.save 的 normalizePromptSegments 权威归一。
+ */
+export const ATLAS_PROMPT_PACK_PROTOCOL = "atlas-prompt-pack@1";
+export const ATLAS_PROMPT_PACK_BYTES_MAX = 64 * 1024;
+const ATLAS_PROMPT_PACK_NAME_MAX = 80;
+const ATLAS_PROMPT_PACK_SEGMENT_CHARS_MAX = 8000;
+const ATLAS_PROMPT_PACK_SEGMENTS_MAX = 16;
+
+/** 与 src/atlas-settings.ts normalizePromptSegments 同规则（角色白名单 / trim / 丢空段 / 上限）。 */
+function normalizePromptPackSegments(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const entry of raw.slice(0, ATLAS_PROMPT_PACK_SEGMENTS_MAX * 2)) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const role = typeof entry.role === "string" ? entry.role.trim().toLowerCase() : "";
+    if (!["system", "user", "assistant"].includes(role)) continue;
+    const content = typeof entry.content === "string" ? entry.content.trim() : "";
+    if (!content) continue;
+    if (out.length >= ATLAS_PROMPT_PACK_SEGMENTS_MAX) break;
+    const segment = { role, content: content.slice(0, ATLAS_PROMPT_PACK_SEGMENT_CHARS_MAX) };
+    if (typeof entry.name === "string" && entry.name.trim()) segment.name = entry.name.trim().slice(0, 64);
+    if (entry.mainSlot === "A" || entry.mainSlot === "B" || entry.mainSlot === "") segment.mainSlot = entry.mainSlot;
+    if (entry.deletable === false) segment.deletable = false;
+    out.push(segment);
+  }
+  return out;
+}
+
+/** 导出预设为 JSON 包字符串（单提示词预设自动包成一段 system 段）。 */
+export function buildAtlasPromptPack(preset, now = Date.now()) {
+  const name = String(preset?.name ?? "").trim().slice(0, ATLAS_PROMPT_PACK_NAME_MAX) || "未命名预设";
+  const segments = normalizePromptPackSegments(preset?.segments);
+  if (segments.length === 0) {
+    const single = typeof preset?.systemPrompt === "string" ? preset.systemPrompt.trim() : "";
+    if (!single) return null; // 空预设无导出价值：不产出空包（调用方如实报错）
+    segments.push({ role: "system", content: single.slice(0, ATLAS_PROMPT_PACK_SEGMENT_CHARS_MAX) });
+  }
+  // 同样只收真数字（字符串伪数值不导出，避免把本地脏数据带进包）
+  const count = preset?.contextTurnCount;
+  const contextTurnCount =
+    typeof count === "number" && Number.isInteger(count) && count >= 1 && count <= 10 ? count : undefined;
+  return JSON.stringify(
+    {
+      protocol: ATLAS_PROMPT_PACK_PROTOCOL,
+      exportedAt: new Date(now).toISOString(),
+      preset: {
+        name,
+        segments,
+        ...(contextTurnCount === undefined ? {} : { contextTurnCount }),
+      },
+    },
+    null,
+    2,
+  );
+}
+
+/** 解析导入包：严格预校验，任何不合规都返回可读原因（绝不半信半疑地落库）。 */
+export function parseAtlasPromptPack(raw) {
+  const text = typeof raw === "string" ? raw : "";
+  if (!text.trim()) return { ok: false, error: "文件为空。" };
+  if (text.length > ATLAS_PROMPT_PACK_BYTES_MAX) {
+    return { ok: false, error: `文件超过 ${String(Math.round(ATLAS_PROMPT_PACK_BYTES_MAX / 1024))} KiB 上限。` };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { ok: false, error: "不是合法 JSON。" };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { ok: false, error: "包根节点必须是对象。" };
+  }
+  if (parsed.protocol !== ATLAS_PROMPT_PACK_PROTOCOL) {
+    return { ok: false, error: `协议不匹配（需要 ${ATLAS_PROMPT_PACK_PROTOCOL}）。` };
+  }
+  const preset = parsed.preset;
+  if (!preset || typeof preset !== "object" || Array.isArray(preset)) {
+    return { ok: false, error: "缺少 preset 字段。" };
+  }
+  const name = typeof preset.name === "string" ? preset.name.trim() : "";
+  if (!name) return { ok: false, error: "预设名缺失。" };
+  if (name.length > ATLAS_PROMPT_PACK_NAME_MAX) {
+    return { ok: false, error: `预设名超过 ${ATLAS_PROMPT_PACK_NAME_MAX} 字上限。` };
+  }
+  const segments = normalizePromptPackSegments(preset.segments);
+  if (segments.length === 0) {
+    return { ok: false, error: "没有有效分段（role 必须是 system/user/assistant，且正文不得为空）。" };
+  }
+  let contextTurnCount;
+  if (preset.contextTurnCount !== undefined && preset.contextTurnCount !== null) {
+    // 只收真数字：字符串伪数值（"3"）与布尔一律拒绝，口径同标定校验（绝不静默强转）
+    const count = preset.contextTurnCount;
+    if (typeof count !== "number" || !Number.isInteger(count) || count < 1 || count > 10) {
+      return { ok: false, error: "contextTurnCount 必须是 1–10 的整数。" };
+    }
+    contextTurnCount = count;
+  }
+  return { ok: true, preset: { name, segments, ...(contextTurnCount === undefined ? {} : { contextTurnCount }) } };
+}
+
+/** 导入重名消解：不动既有预设，追加「（导入）」序号。纯函数便于测试。 */
+export function uniquePromptPresetName(name, existingNames) {
+  const base = String(name ?? "").trim().slice(0, ATLAS_PROMPT_PACK_NAME_MAX) || "导入的预设";
+  const taken = new Set(
+    (Array.isArray(existingNames) ? existingNames : []).map((item) => String(item ?? "").trim()),
+  );
+  if (!taken.has(base)) return base;
+  let candidate = `${base}（导入）`;
+  let index = 2;
+  while (taken.has(candidate)) {
+    candidate = `${base}（导入 ${String(index)}）`;
+    index += 1;
+  }
+  return candidate.slice(0, ATLAS_PROMPT_PACK_NAME_MAX);
+}
+
 /** 内置样例（M08 要求至少两个真实可导入样例）：深色战术风 / 浅色纸面风。 */
 export const ATLAS_MAP_SKIN_PRESETS = [
   {
@@ -3514,8 +3634,98 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       renderCenter();
     });
     selectRow.append(promptDeleteBtn);
+
+    // R15：预设导入导出（R02 残留的 JSON 包交付）。导入 = 新建预设（重名消解，绝不覆盖既有），
+    // 不自动启用（避免导入即改生效行为）；导出只含预设语义字段，白名单构造无密钥面。
+    const packInput = document.createElement("input");
+    packInput.type = "file";
+    packInput.accept = ".json,application/json";
+    packInput.style.display = "none";
+    packInput.addEventListener("change", () => {
+      const file = packInput.files?.[0];
+      packInput.value = "";
+      if (!file) return;
+      if (promptDraftDirty && !confirmDiscard("提示词")) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = parseAtlasPromptPack(String(reader.result ?? ""));
+        if (!result.ok) {
+          setStatus(`提示词包校验失败：${result.error}`, "error");
+          renderCenter();
+          return;
+        }
+        void (async () => {
+          const name = uniquePromptPresetName(result.preset.name, promptLibrary.map((preset) => preset.name));
+          const ok = await sendSettingsCommand({
+            action: "prompt.save",
+            preset: {
+              name,
+              systemPrompt: "",
+              segments: result.preset.segments,
+              ...(result.preset.contextTurnCount === undefined ? {} : { contextTurnCount: result.preset.contextTurnCount }),
+            },
+          });
+          if (ok) {
+            const saved = promptLibrary.find((preset) => preset.name === name);
+            promptDraft = saved ? savedPromptDraft(saved) : newPromptDraft();
+            promptDraftDirty = false;
+            setStatus(`已导入提示词预设「${name}」（未启用；需要时在下拉里选中即启用）。`);
+          }
+          renderCenter();
+        })();
+      };
+      reader.onerror = () => {
+        setStatus("提示词包读取失败。", "error");
+        renderCenter();
+      };
+      reader.readAsText(file);
+    });
+    selectRow.append(packInput);
+
+    const promptImportBtn = el("button", "aw-btn aw-btn--icon", "导入");
+    promptImportBtn.type = "button";
+    promptImportBtn.setAttribute("aria-label", "从 JSON 包导入提示词预设");
+    promptImportBtn.addEventListener("click", () => {
+      if (promptDraftDirty && !confirmDiscard("提示词")) return;
+      packInput.click();
+    });
+    selectRow.append(promptImportBtn);
+
+    const promptExportBtn = el("button", "aw-btn aw-btn--icon", "导出");
+    promptExportBtn.type = "button";
+    promptExportBtn.setAttribute("aria-label", "导出当前提示词预设为 JSON 包");
+    promptExportBtn.disabled = !promptDraft?.id;
+    promptExportBtn.addEventListener("click", () => {
+      const preset = promptLibrary.find((item) => item.id === promptDraft?.id);
+      if (!preset) {
+        setStatus("当前草稿尚未保存，先保存再导出。", "error");
+        renderCenter();
+        return;
+      }
+      try {
+        const pack = buildAtlasPromptPack(preset);
+        if (!pack) {
+          setStatus("该预设没有可导出的内容（分段与单条正文均为空）。", "error");
+          renderCenter();
+          return;
+        }
+        const blob = new Blob([pack], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `${String(preset.name || "atlas-prompt").replace(/[\\/:*?"<>|]/g, "_")}.atlas-prompt-pack.json`;
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        setStatus("提示词预设已导出（只含预设语义字段，不含任何 API 配置或密钥）。");
+        renderCenter();
+      } catch {
+        setStatus("提示词包导出失败。", "error");
+        renderCenter();
+      }
+    });
+    selectRow.append(promptExportBtn);
     selectField.append(selectRow);
-    selectField.append(el("span", "aw-hint", "选中预设会立即设为当前使用并载入下方编辑器；「新建」开新草稿，「删除」删当前选中的预设。"));
+    selectField.append(el("span", "aw-hint", "选中预设会立即设为当前使用并载入下方编辑器；「新建」开新草稿，「删除」删当前选中的预设，「导出 / 导入」走 JSON 包只交换预设内容（不含 API 配置与密钥）。"));
     promptPanel.append(selectField);
 
     // R02：内置只读 = kind 显式标记，不再是「没有 id 就当内置」的推断
