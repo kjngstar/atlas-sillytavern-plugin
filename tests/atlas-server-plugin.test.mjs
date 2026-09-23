@@ -1700,6 +1700,90 @@ test("invalid old prompt entry blocks settings writes and preserves the raw docu
   assert.deepEqual(await store.read("settings"), raw);
 });
 
+// ---------------------------------------------------------------------------
+// S0（0.9.55）：v2 父引用 → 子图现状夹具
+//
+// 现场：v2 的 discoveries.locations[].parentLocationRef 目前只在
+// src/atlas-turn-v2.ts 收集后推一条「暂存未落账」warning，MapPoint 上没有父字段，
+// 因此「世界图点开建筑 → 再点开房间」这条链路完全不存在。
+// 本用例锁定真正缺口：**在现版本预期失败**，以此作为 S1–S7 的红灯基线。
+// ---------------------------------------------------------------------------
+
+/** 造一个带已知地点“钟楼”的世界（v2 父引用需要一个可引用的既有地点）。 */
+async function setupWithTower() {
+  const store = createMemoryDocumentStore();
+  const base = buildWorld();
+  const regionId = String((base.regions ?? [])[0]?.id ?? "");
+  const world = {
+    ...base,
+    points: [
+      ...(base.points ?? []),
+      { id: 9001, name: "钟楼", x: 10, y: 10, regionId },
+    ],
+  };
+  const parsed = parseWorld(JSON.parse(JSON.stringify(world)));
+  ok(parsed !== null, "带钟楼的世界可解析");
+  const draft = {
+    schemaVersion: 2,
+    baseRevision: CURRENT_TIME,
+    duration: 1,
+    evidence: [{ id: "ev1", sourceId: "msg:a", quote: "大堂" }],
+    discoveries: {
+      locations: [
+        // 已知父（钟楼 9001）→ 本轮新建“大堂”
+        { ref: "new:loc:hall", name: "大堂", aliases: [], regionRef: regionId || null, parentLocationRef: "9001", evidenceIds: ["ev1"] },
+        // 本轮父（new:loc:hall）→ 本轮新建“档案室”（父子同轮、顺序在父之后）
+        { ref: "new:loc:archive", name: "档案室", aliases: [], regionRef: regionId || null, parentLocationRef: "new:loc:hall", evidenceIds: ["ev1"] },
+      ],
+      characters: [],
+    },
+    // 场景锚定到最内层房间：当前位置应是档案室
+    scene: { resolution: "confirmed", locationRef: "new:loc:archive", transition: "arrive", evidenceIds: ["ev1"] },
+    identityUpdates: [], npcUpdates: [], relationUpdates: [], memories: [], worldFlags: [], events: [], mapScaleHints: [],
+    summary: "进入钟楼大堂，再进档案室。",
+  };
+  const rawCore = createAtlasServerCore({
+    store,
+    fetchFn: makeFetch([() => openAiResponse(draft)]).fetchFn,
+    now: () => NOW,
+  });
+  const carrier = createSessionCarrier(rawCore);
+  const core = carrierAsCore(carrier);
+  await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(parsed)) }, { local: true });
+  await core.handle("POST", "/bindings", { action: "bind", binding: binding(parsed) });
+  await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+  return { store, core, world: parsed, carrier };
+}
+
+test("S0：v2 parentLocationRef 应生成两级子图（现版本预期失败——红灯基线）", async () => {
+  const { core, world } = await setupWithTower();
+  const committed = await core.handle("POST", "/turns/commit",
+    commitRequest(world, { userText: "我进钟楼。", assistantText: "你走进钟楼大堂，再推开档案室的门。" }));
+  equal(committed.body.data?.receipt?.status, "committed", "本轮提交成功");
+
+  const state = (await core.handle("GET", "/state/chat-a")).body.data;
+
+  // 找到持久 ID：钟楼是已知点，大堂与档案室是本轮新建
+  const tower = (state.map.points ?? []).find((p) => p.name === "钟楼");
+  ok(tower, "钟楼仍在世界图（根地点）");
+
+  const hall = state.map.submaps?.[String(tower.id)]?.points?.find((p) => p.name === "大堂");
+  ok(hall, "钟楼子图里应有“大堂”");
+
+  const archive = state.map.submaps?.[String(hall?.id)]?.points?.find((p) => p.name === "档案室");
+  ok(archive, "大堂子图里应有“档案室”（两级父子）");
+
+  // 世界图只下发根地点：大堂/档案室不得出现在 map.points
+  ok(!(state.map.points ?? []).some((p) => p.name === "大堂"), "世界图不含子地点“大堂”");
+  ok(!(state.map.points ?? []).some((p) => p.name === "档案室"), "世界图不含子地点“档案室”");
+
+  equal(String(state.currentLocationId ?? ""), String(archive?.id ?? ""), "当前位置 = 档案室");
+  ok(
+    typeof state.pointCount === "number" && state.pointCount >= (world.points ?? []).length,
+    "pointCount 报告全部可见地点数，不误算成世界图标记数",
+  );
+});
+
 test("v2 discoveries disappear from state, nearby and map after rollback", async () => {
   const assistantText = "你抵达新塔，见到少女。";
   const draft = {
