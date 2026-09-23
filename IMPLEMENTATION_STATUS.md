@@ -5,11 +5,32 @@
 ## 当前版本
 
 - Atlas 插件版本已从 0.9.51 更新为 0.9.52；真实 SillyTavern 验收仍未完成，因此暂不创建发布标签。
-- **0.9.53（2026-09-23 推送）**：按《Atlas 0.9.52 世界推进与地图更新修复施工单》完成 A0–A16 全量修复。
+- **0.9.53**：按《Atlas 0.9.52 世界推进与地图更新修复施工单》完成 A0–A16 全量修复。
   0.9.52 保留原样（真机验收未完成、未打标签），本批修复以 0.9.53 发布到 `main`。
-  自动化门禁：typecheck 0 errors；全量测试 **564/564**；build / pack 通过；`git diff --check` 干净。
+  自动化门禁：typecheck 0 errors；全量测试 564/564；build / pack 通过；`git diff --check` 干净。
   交付物见 `docs/DIAGNOSTIC_SUMMARY-0.9.52.md`（脱敏诊断摘要）。
   **真实 SillyTavern 验收（施工单第 4 节 5 步流程）仍未执行**，R14 保持「未验证」。
+- **0.9.54（开发遗留代码清理 C0–C8，分支 `codex/deadcode-cleanup`）**：
+  目的不是新增功能，而是让接手方能从正式入口一路跟到唯一业务实现，消除「旧方案与新方案
+  同时存在」造成的误判。全量 563/563；typecheck 0 errors；`noUnusedLocals` /
+  `noUnusedParameters` 已启用且 TS6133 为 0。
+
+### 0.9.54 已移除项与替代实现（C1–C7）
+
+| 已移除 | 替代实现 / 判定依据 |
+| --- | --- |
+| `escapeRegExp`（`src/atlas-api-client.ts`） | 占位符替换已改为单次扫描，不再构造正则；零调用者 |
+| `blocked`（`src/atlas-map-interactions.ts` 的 `createPanGesture`） | 只赋值不读取；interactive 起手由 `downOpts.interactive` 提前返回承担，拖拽态由 `active`/`panned`/`consumeClick` 承担 |
+| `atlasClampZoom` 旧缩放链（`index.js` 形参 + `atlas-browser-entry` 导出 + `atlas-ui-core` 实现 + 2 处旧测试） | 地图缩放由 `src/atlas-map-camera.ts` 相机体系承担（fit 无像素下限、0.2×~8× 相对缩放）；产物已确认不再导出旧入口 |
+| `renderMap` 子图人物标记死分支（`subTag` 与 `inSub` else） | 循环首行已 `continue`，该分支不可达；人物点击/拖拽仍走世界图层 `attachNpcDrag` |
+| `index.js` 的比例尺/距离算法副本（`computeScaleBar` / `formatDistanceMeters` / `formatTravelDistance` 与 `SCALE_BAR_*`） | `src/atlas-scale.ts` 为唯一权威（严格拒绝非数字；`index.js` 版曾用 `Number()` 宽松转换）；`formatTravelDistance` 已上移该模块 |
+| `index.js` 的导航页清单副本 `PAGES`（9 页） | `src/atlas-ui-core.ts` 的 `ATLAS_UI_PAGES` 为唯一权威，并补上此前缺失的 `skin`（权威清单原为 8 页） |
+| 7 处未使用声明（`atlas-server` 3 import + 1 局部、`atlas-turn` import + `world` 形参、`atlas-lorebook` `plans` 形参） | 前六项直接删除；`snapshot` 的 `plans` 属对外形状、跨文件调用者按两参调用，故保留并改名 `_plans` 加注释，快照功能未动 |
+
+**保留的兼容路径（明确不是死代码）**：v1 子图 `sub-*` 虚拟点、`scene`/`maps`/`turn` 的
+历史兼容读取、`char-main` 主角建档、`World.characters` / `entityRecords` /
+`characterStates` 与账本的分层用途 —— 这些服务于旧聊天与故障恢复，须待独立的数据版本
+盘点与迁移方案后才可清理，不得以本次「局部未使用检查」为据删除。
 
 ## 2026-09-23 本轮交付补记
 

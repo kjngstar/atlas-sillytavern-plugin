@@ -9,7 +9,12 @@
     "noEmit": true,
     "skipLibCheck": true,
     "isolatedModules": true,
-    "noFallthroughCasesInSwitch": true
+    "noFallthroughCasesInSwitch": true,
+    // C8（0.9.54）：C1-C7 清完未使用声明后启用，防止旧路线再次累积。
+    // 注意：本配置只覆盖 src/**/*.ts —— index.js 的死分支与动态调用不在检查范围，
+    // JS 侧仍依赖代码审查与行为测试，不能据此宣称已覆盖。
+    "noUnusedLocals": true,
+    "noUnusedParameters": true
   },
   "include": ["src/**/*.ts"]
 }
