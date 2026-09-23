@@ -4901,14 +4901,17 @@ function resolveRefsAndBuildCandidate(world, draft, turnId) {
       }
       return hops;
     };
-    const childCount = /* @__PURE__ */ new Map();
+    const finalChildCount = /* @__PURE__ */ new Map();
     for (const p of world.points ?? []) {
       const pid = parentOfId(Number(p.id));
-      if (pid !== void 0) childCount.set(pid, (childCount.get(pid) ?? 0) + 1);
+      if (pid !== void 0) finalChildCount.set(pid, (finalChildCount.get(pid) ?? 0) + 1);
+    }
+    for (const parentId of parentPointIdOf.values()) {
+      finalChildCount.set(parentId, (finalChildCount.get(parentId) ?? 0) + 1);
     }
     for (const [childId, parentId] of parentPointIdOf) {
       depthOf(childId);
-      const count = childCount.get(parentId) ?? 0;
+      const count = finalChildCount.get(parentId) ?? 0;
       if (count > V2_SUBMAP_SIBLINGS_MAX) {
         const childName = newPoints.find((p) => p.id === childId)?.name ?? String(childId);
         const parentName = (world.points ?? []).find((p) => Number(p.id) === parentId)?.name ?? newPoints.find((p) => p.id === parentId)?.name ?? String(parentId);
@@ -10287,7 +10290,11 @@ function createCoreInstance(store, deps, shared) {
     "world-scale-reject",
     "world-turn-parse-fallback",
     "world-turn-v2-warnings",
-    "scene-bootstrap-warnings"
+    "scene-bootstrap-warnings",
+    // S6 补刀（0.9.55）：投影期的可恢复异常——读取失败 / 视图侧点位超限被裁，
+    // 都要能在「日志」页看见，不能静默当成「这个世界没有子图」。
+    "map-projection-sidecar-read-failed",
+    "map-projection-points-truncated"
   ]);
   function pushLog(entry) {
     const logs = shared.logs;
@@ -11159,7 +11166,13 @@ function createCoreInstance(store, deps, shared) {
     });
     const lastEvent = branchEvents.at(-1) ?? null;
     const lastAdvance = lastEvent ? { at: lastEvent.at, summary: lastEvent.narrativeSummary.slice(0, 200), source: lastEvent.source } : null;
-    const mapDoc = sanitizeMapDoc(await store.read(`maps:${world.id}`).catch(() => null));
+    let mapDocRaw = null;
+    try {
+      mapDocRaw = await store.read(`maps:${world.id}`);
+    } catch {
+      pushLog({ kind: "map-projection-sidecar-read-failed" });
+    }
+    const mapDoc = sanitizeMapDoc(mapDocRaw);
     const projection = projectWorldSubmaps(world.points ?? [], mapDoc);
     const projected = projection.doc;
     const pointMetaEntries = Object.entries(projected.pointMeta).slice(0, 80);
@@ -11181,6 +11194,10 @@ function createCoreInstance(store, deps, shared) {
       scale: sub.scale ?? null,
       points: sub.points.slice(0, 40)
     }));
+    const truncatedSubmapPoints = Object.entries(projected.submaps).filter(([key]) => visibleSubmapIds.has(key)).reduce((sum, [, sub]) => sum + Math.max(0, sub.points.length - 40), 0);
+    if (truncatedSubmapPoints > 0) {
+      pushLog({ kind: "map-projection-points-truncated", skipped: truncatedSubmapPoints });
+    }
     const calibrationEntries = Object.entries(projected.calibrations).filter(([key]) => key === "world" || visibleSubmapIds.has(key)).slice(0, 40);
     const scene = resolveSceneStatus(world, sceneDoc, binding.currentLocationId ?? null);
     const legacyRepair = legacyStartReport(world, binding, sceneDoc, mapDoc);

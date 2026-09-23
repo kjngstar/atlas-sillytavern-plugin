@@ -587,6 +587,9 @@ function createCoreInstance(
     "settings-sanitize", "world-geo-extract-fallback", "world-scale-extract-fallback",
     "world-scale-hint-skipped", "world-scale-reject", "world-turn-parse-fallback",
     "world-turn-v2-warnings", "scene-bootstrap-warnings",
+    // S6 补刀（0.9.55）：投影期的可恢复异常——读取失败 / 视图侧点位超限被裁，
+    // 都要能在「日志」页看见，不能静默当成「这个世界没有子图」。
+    "map-projection-sidecar-read-failed", "map-projection-points-truncated",
   ]);
   function pushLog(entry: Record<string, unknown>): void {
     const logs = shared.logs;
@@ -1653,7 +1656,16 @@ function createCoreInstance(
     // 0.9.32 地图 sidecar（点位描述 + 点挂子图）：独立文档，有界随 /state 下发
     // 0.9.50（M01 子集）：宿主点位已不存在的损坏子图引用直接过滤（可恢复状态，
     // 不让幽灵子图进 UI）；标定摘要随 map 下发（键与 /worlds/scale/calibrate 对齐）
-    const mapDoc = sanitizeMapDoc(await store.read(`maps:${world.id}`).catch(() => null));
+    // S6 补刀（0.9.55）：读取失败**不再静默吞掉**——旧实现 `.catch(() => null)` 把一次
+    // 读取失败伪装成「这个世界的子图从来不存在」，施工单要求记具名诊断后再用空 sidecar
+    // 继续投影（v2 层级来自 world.points[].parentPointId，仍然可见、可在下次写入时重建）。
+    let mapDocRaw: unknown = null;
+    try {
+      mapDocRaw = await store.read(`maps:${world.id}`);
+    } catch {
+      pushLog({ kind: "map-projection-sidecar-read-failed" });
+    }
+    const mapDoc = sanitizeMapDoc(mapDocRaw);
     // S6（0.9.55）：先按 v2 的 World.points[].parentPointId 派生父子地图，与 sidecar 合并。
     // sidecar 写入失败 / 为空时仍能从世界结构展示层级（施工单：不可把一次 sidecar
     // 写入失败伪装成「世界已提交但子图永远丢失」）。
@@ -1686,6 +1698,15 @@ function createCoreInstance(
         scale: sub.scale ?? null,
         points: sub.points.slice(0, 40),
       }));
+    // S6 补刀（0.9.55）：视图侧每个子图仍下发最多 40 个点（施工单优先「限制单世界上限」，
+    // 超限提交已在 S3 整轮拒绝）。万一既有存档已超限，绝不能静默裁掉——记一条只含数量的
+    // 具名诊断，让「点不见了」有据可查，而不是看起来像地图坏了。
+    const truncatedSubmapPoints = Object.entries(projected.submaps)
+      .filter(([key]) => visibleSubmapIds.has(key))
+      .reduce((sum, [, sub]) => sum + Math.max(0, sub.points.length - 40), 0);
+    if (truncatedSubmapPoints > 0) {
+      pushLog({ kind: "map-projection-points-truncated", skipped: truncatedSubmapPoints });
+    }
     const calibrationEntries = Object.entries(projected.calibrations)
       .filter(([key]) => key === "world" || visibleSubmapIds.has(key))
       .slice(0, 40);

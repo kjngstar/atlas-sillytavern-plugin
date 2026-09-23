@@ -201,16 +201,22 @@ function resolveRefsAndBuildCandidate(
       return hops;
     };
 
-    const childCount = new Map<number, number>();
+    // 同一父下的**最终**直接子地点数 = 已存子地点数 + 本轮新挂到该父的子地点数。
+    // S10 实测修正：旧实现只数 `world.points`（本轮新点不在其中），于是「已存 40 个、
+    // 本轮再添第 41 个」漏判——世界真的落了第 41 个子点，随后被 /state 的子图 40 上限
+    // 裁掉，正是施工单禁止的「靠截断静默丢弃第 41 个地点」。上限语义不变：最多 40 个。
+    const finalChildCount = new Map<number, number>();
     for (const p of world.points ?? []) {
       const pid = parentOfId(Number(p.id));
-      if (pid !== undefined) childCount.set(pid, (childCount.get(pid) ?? 0) + 1);
+      if (pid !== undefined) finalChildCount.set(pid, (finalChildCount.get(pid) ?? 0) + 1);
+    }
+    for (const parentId of parentPointIdOf.values()) {
+      finalChildCount.set(parentId, (finalChildCount.get(parentId) ?? 0) + 1);
     }
     for (const [childId, parentId] of parentPointIdOf) {
       depthOf(childId);
-      const count = childCount.get(parentId) ?? 0;
-      // S4 修正（off-by-one）：childCount 已把**本轮的这一个**孩子算在内，
-      // 因此「第 41 个」对应 count=41 → 必须用 > 上限，而 40 个恰好合法。
+      const count = finalChildCount.get(parentId) ?? 0;
+      // 计数含本轮的这一个孩子，故「第 41 个」正好对应 count=41 → 用 > 上限判定
       if (count > V2_SUBMAP_SIBLINGS_MAX) {
         const childName = newPoints.find((p) => p.id === childId)?.name ?? String(childId);
         const parentName = (world.points ?? []).find((p) => Number(p.id) === parentId)?.name
