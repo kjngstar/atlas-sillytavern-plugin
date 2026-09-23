@@ -36,7 +36,6 @@ export function createPanGesture(opts: { threshold?: number } = {}): PanGesture 
     ? (opts.threshold as number)
     : MAP_GESTURE_THRESHOLD_PX;
   let active = false;
-  let blocked = false;
   let startX = 0;
   let startY = 0;
   let lastX = 0;
@@ -47,11 +46,9 @@ export function createPanGesture(opts: { threshold?: number } = {}): PanGesture 
     down(screenX, screenY, downOpts = {}) {
       // 按钮 / 输入框 / 弹窗起手：不启动地图拖拽
       if (downOpts.interactive) {
-        blocked = true;
         return false;
       }
       active = true;
-      blocked = false;
       startX = Number(screenX) || 0;
       startY = Number(screenY) || 0;
       lastX = startX;
@@ -87,7 +84,6 @@ export function createPanGesture(opts: { threshold?: number } = {}): PanGesture 
     },
     cancel() {
       active = false;
-      blocked = false;
       panning = false;
       panned = false;
     },
