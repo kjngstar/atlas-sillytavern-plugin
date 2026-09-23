@@ -275,10 +275,6 @@ function wrapWorldbookContext(content: string): string {
   return text ? `\n<worldbook_context>\n${text}\n</worldbook_context>\n` : "";
 }
 
-function escapeRegExp(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 /**
  * 0.9.25 shujuku 占位符替换引擎（R03 单次扫描版）：
  * $1 世界书资料（<worldbook_context> 包裹）/ $9 排除库资料（Atlas 无表格库，恒空）/ $5 世界状态 /
