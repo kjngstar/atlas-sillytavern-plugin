@@ -7515,7 +7515,7 @@ function sanitizeDiagnostic(raw, now = Date.now) {
         else if (key === "mode" && SAFE_MODES.has(token)) details[key] = token;
         else if (key === "capability" && SAFE_CAPABILITIES.has(token)) details[key] = token;
         else if (key === "reasonCode" && /^[A-Z][A-Z0-9_]{0,63}$/.test(token)) details[key] = token;
-        else if (key === "schemaPath" && /^\$(?:\.[A-Za-z0-9_]+|\[\d+\])+(?:\.[A-Za-z0-9_]+|\[\d+\])*$/.test(token)) details[key] = token;
+        else if (key === "schemaPath" && (token === "$" || /^\$(?:\.[A-Za-z0-9_]+|\[\d+\])+(?:\.[A-Za-z0-9_]+|\[\d+\])*$/.test(token))) details[key] = token;
         else if (key === "protocolVersion" && /^v?[0-9.]{1,16}$/.test(token)) details[key] = token;
         else if (key === "event" && /^[A-Z][A-Z0-9_]{0,63}$/.test(token)) details[key] = token;
         else if (key === "stage" && /^[a-z][a-z0-9_-]{0,63}$/.test(token)) details[key] = token;
@@ -8539,13 +8539,48 @@ function evidenceIds(v, path, err, evidenceIds2) {
   }
   return ids;
 }
+function unwrapV2Response(text) {
+  let value = text.trim();
+  for (let section = 0; section < 4; section++) {
+    const leading = /^<(think|thinking)(?:\s[^>]*)?>/i.exec(value);
+    if (!leading) break;
+    const tag = leading[1].toLowerCase();
+    const boundary = new RegExp(`<\\/?${tag}(?:\\s[^>]*)?>`, "gi");
+    let depth = 0;
+    let end = -1;
+    for (const match of value.matchAll(boundary)) {
+      if (match.index === 0 || depth > 0) {
+        depth += match[0].startsWith("</") ? -1 : 1;
+        if (depth === 0) {
+          end = match.index + match[0].length;
+          break;
+        }
+      }
+    }
+    if (end < 0) return value;
+    value = value.slice(end).trim();
+  }
+  const fence = /^```(?:json)?[ \t]*\r?\n/i.exec(value);
+  if (fence && /\r?\n```\s*$/.test(value)) {
+    value = value.slice(fence[0].length).replace(/\r?\n```\s*$/, "").trim();
+  }
+  return value;
+}
 function parseAtlasWorldTurnDraftV2(text, ctx) {
   const err = new V2Errors();
   let raw;
+  const payload = unwrapV2Response(text);
   try {
-    raw = JSON.parse(text);
+    raw = JSON.parse(payload);
   } catch {
-    return { ok: false, errors: [{ path: "$", message: "输出不是合法 JSON" }] };
+    if (!payload.endsWith('"}')) {
+      return { ok: false, errors: [{ path: "$", message: "输出不是合法 JSON" }] };
+    }
+    try {
+      raw = JSON.parse(payload.slice(0, -2));
+    } catch {
+      return { ok: false, errors: [{ path: "$", message: "输出不是合法 JSON" }] };
+    }
   }
   if (!isObj(raw)) return { ok: false, errors: [{ path: "$", message: "顶层必须是 JSON 对象" }] };
   const version = raw.schemaVersion;

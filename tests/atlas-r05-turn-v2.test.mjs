@@ -80,6 +80,34 @@ test("R05 解析器：首场戏示例全字段合法（baseRevision 回显 / 证
   assert.equal(result.ok && result.draft.npcUpdates[0].status, "警戒");
 });
 
+test("v2 模型前置已闭合思考段可剥离；思考里的伪 JSON 不作为草稿", () => {
+  const final = JSON.stringify(firstSceneDraft());
+  const wrapped = '<think>推理稿：{"schemaVersion":2,"scene":{"locationRef":"fake"}}</think>\n'
+    + '```json\n' + final + '\n```';
+  const parsed = parseAtlasWorldTurnDraftV2(wrapped, { baseRevision: 0, sources: SOURCES });
+  assert.equal(parsed.ok, true, `完整最终 JSON 应通过：${JSON.stringify(parsed.ok ? {} : parsed.errors)}`);
+  assert.equal(parsed.draft.scene.locationRef, "new:loc:ruins");
+});
+
+test("v2 未闭合思考段、多份最终 JSON 都拒绝，不能挑一份猜测", () => {
+  const final = JSON.stringify(firstSceneDraft());
+  for (const text of [`<think>草稿 {"schemaVersion":2}\n${final}`, `<think>思考</think>\n${final}\n${final}`]) {
+    const parsed = parseAtlasWorldTurnDraftV2(text, { baseRevision: 0, sources: SOURCES });
+    assert.equal(parsed.ok, false);
+    assert.equal(parsed.errors[0].path, "$", "拒绝原因须定位到顶层 JSON");
+  }
+});
+
+test('v2 模型多写精确尾巴 "} 可修复，截断 JSON 和第二份对象仍拒绝', () => {
+  const final = JSON.stringify(firstSceneDraft());
+  const repaired = parseAtlasWorldTurnDraftV2(`<think>仅思考</think>\n${final}"}`, { baseRevision: 0, sources: SOURCES });
+  assert.equal(repaired.ok, true, `尾巴是唯一明确修复：${JSON.stringify(repaired.ok ? {} : repaired.errors)}`);
+  for (const text of [final.slice(0, Math.floor(final.length / 2)) + '"}', final + final, final + ' extra']) {
+    const result = parseAtlasWorldTurnDraftV2(text, { baseRevision: 0, sources: SOURCES });
+    assert.equal(result.ok, false, "截断、双对象和任意尾巴均不得猜测为成功");
+  }
+});
+
 test("R05 解析器：baseRevision 过期回显拒绝（T07 家族）", () => {
   const result = parseAtlasWorldTurnDraftV2(JSON.stringify(firstSceneDraft()), { baseRevision: 7, sources: SOURCES });
   assert.equal(result.ok, false);
@@ -569,4 +597,3 @@ test("S2：旧 v2 草稿无 parentLocationRef 字段仍按 null 接受", () => {
   assert.equal(parsed.ok, true, `缺省字段应接受：${JSON.stringify(parsed.errors ?? [])}`);
   assert.equal(parsed.draft.discoveries.locations[0].parentLocationRef, null, "缺省规范化成 null");
 });
-

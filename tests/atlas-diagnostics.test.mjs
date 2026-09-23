@@ -208,6 +208,17 @@ test("A11 非法 schemaPath（带引文 / URL）被丢弃，不因新字段放�
   }
 });
 
+test("v2 JSON 顶层解析错误保留根路径 $，不吞掉唯一诊断线索", () => {
+  const entry = sanitizeDiagnostic({
+    ...base,
+    code: "WORLD_TURN_V2_REJECTED",
+    details: { schemaPath: "$", responseChars: 41232, count: 1 },
+  }, () => 1000);
+  assert.ok(entry);
+  assert.equal(entry.details.schemaPath, "$", "JSON 解析错误的真实路径必须出现在安全诊断中");
+  assert.equal(entry.details.responseChars, 41232);
+});
+
 test("A11 单条诊断体积上限：即便字段全拉满也远低于 2048 字节安全阀", () => {
   // 实测各键上限后确认：字符串型 details 键中，只有 stage 接受任意串（≤64），
   // route/mode/capability/event/protocolVersion/reasonCode 都是精确白名单/定点形状，

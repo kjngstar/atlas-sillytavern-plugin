@@ -108,12 +108,13 @@ export function sanitizeDiagnostic(raw: unknown, now: () => number = Date.now): 
         else if (key === "mode" && SAFE_MODES.has(token)) details[key] = token;
         else if (key === "capability" && SAFE_CAPABILITIES.has(token)) details[key] = token;
         else if (key === "reasonCode" && /^[A-Z][A-Z0-9_]{0,63}$/.test(token)) details[key] = token;
-        // 0.9.54 A9/A11：schemaPath 必须是真正的 JSONPath —— 强制以 `$.` 或 `$[` 开头，
+        // 根路径 `$` 也是真实的 JSONPath：JSON 无法解析或顶层不是对象时解析器只返回 `$`。
+        // 0.9.54 A9/A11：其余路径必须以 `$.` 或 `$[` 开头，
         // 否则任意「字母数字下划线点」字符串（例如一段裸密钥）都能冒充 schemaPath 混进诊断。
         // 旧字符集还缺 `[`、`]`，导致真正的数组下标路径（$.relationUpdates[0].value）
         // 反而被丢弃——「记录真实拒绝原因位置」形同虚设。此处两个方向一起收口：
         // 允许下标，但要求根记号，并继续拒绝引号 / 空格 / 中文 / 冒号。
-        else if (key === "schemaPath" && /^\$(?:\.[A-Za-z0-9_]+|\[\d+\])+(?:\.[A-Za-z0-9_]+|\[\d+\])*$/.test(token)) details[key] = token;
+        else if (key === "schemaPath" && (token === "$" || /^\$(?:\.[A-Za-z0-9_]+|\[\d+\])+(?:\.[A-Za-z0-9_]+|\[\d+\])*$/.test(token))) details[key] = token;
         else if (key === "protocolVersion" && /^v?[0-9.]{1,16}$/.test(token)) details[key] = token;
         else if (key === "event" && /^[A-Z][A-Z0-9_]{0,63}$/.test(token)) details[key] = token;
         else if (key === "stage" && /^[a-z][a-z0-9_-]{0,63}$/.test(token)) details[key] = token;

@@ -97,14 +97,56 @@ function evidenceIds(v: unknown, path: string, err: V2Errors, evidenceIds: Set<s
   return ids;
 }
 
+/** Remove only complete, leading reasoning tags. Never extract JSON from inside them. */
+function unwrapV2Response(text: string): string {
+  let value = text.trim();
+  for (let section = 0; section < 4; section++) {
+    const leading = /^<(think|thinking)(?:\s[^>]*)?>/i.exec(value);
+    if (!leading) break;
+    const tag = leading[1]!.toLowerCase();
+    const boundary = new RegExp(`<\\/?${tag}(?:\\s[^>]*)?>`, "gi");
+    let depth = 0;
+    let end = -1;
+    for (const match of value.matchAll(boundary)) {
+      if (match.index === 0 || depth > 0) {
+        depth += match[0].startsWith("</") ? -1 : 1;
+        if (depth === 0) {
+          end = match.index + match[0].length;
+          break;
+        }
+      }
+    }
+    // An unfinished reasoning segment may contain drafts; never rescue one.
+    if (end < 0) return value;
+    value = value.slice(end).trim();
+  }
+  const fence = /^```(?:json)?[ \t]*\r?\n/i.exec(value);
+  if (fence && /\r?\n```\s*$/.test(value)) {
+    value = value.slice(fence[0].length).replace(/\r?\n```\s*$/, "").trim();
+  }
+  return value;
+}
+
 /** 解析并校验 v2 草稿；任何失败返回结构化错误路径列表。 */
 export function parseAtlasWorldTurnDraftV2(text: string, ctx: AtlasV2ParseContext): AtlasV2ParseResult {
   const err = new V2Errors();
   let raw: unknown;
+  const payload = unwrapV2Response(text);
   try {
-    raw = JSON.parse(text);
+    raw = JSON.parse(payload);
   } catch {
-    return { ok: false, errors: [{ path: "$", message: "输出不是合法 JSON" }] };
+    // A captured MiniMax response ended with an otherwise complete object plus
+    // the exact stray suffix `"}`. Only accept that one unambiguous typo when
+    // the entire remaining prefix parses as JSON; never rescue partial JSON,
+    // a second object, or a draft hidden inside an unclosed think section.
+    if (!payload.endsWith('"}')) {
+      return { ok: false, errors: [{ path: "$", message: "输出不是合法 JSON" }] };
+    }
+    try {
+      raw = JSON.parse(payload.slice(0, -2));
+    } catch {
+      return { ok: false, errors: [{ path: "$", message: "输出不是合法 JSON" }] };
+    }
   }
   if (!isObj(raw)) return { ok: false, errors: [{ path: "$", message: "顶层必须是 JSON 对象" }] };
 
@@ -574,4 +616,3 @@ function parseMapScaleHints(raw: unknown, err: V2Errors, evIds: Set<string>): At
   });
   return out;
 }
-

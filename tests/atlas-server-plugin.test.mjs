@@ -920,8 +920,8 @@ test("A12 端到端：截断失败后同键 retry 成功 → 世界只推进一�
   const fetcher = makeFetch([
     // 第一次：被长度截断
     () => jsonResponse(200, { choices: [{ finish_reason: "length", message: { content: "<think>先试一版：{\"schemaVersion\":2}</think>" } }] }),
-    // retry：完整 v2 JSON
-    () => jsonResponse(200, { choices: [{ finish_reason: "stop", message: { content: JSON.stringify(goodDraft) } }] }),
+    // retry：真实问题形状，已闭合的思考段 + 最终 JSON + 精确多余尾巴
+    () => jsonResponse(200, { choices: [{ finish_reason: "stop", message: { content: `<think>先推理：{"schemaVersion":2}</think>\n${JSON.stringify(goodDraft)}"}` } }] }),
   ]);
   const store = createMemoryDocumentStore();
   const world = buildWorld();
