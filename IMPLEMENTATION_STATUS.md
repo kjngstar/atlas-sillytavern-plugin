@@ -15,6 +15,57 @@
   同时存在」造成的误判。全量 563/563；typecheck 0 errors；`noUnusedLocals` /
   `noUnusedParameters` 已启用且 TS6133 为 0。
 
+## 0.9.55（施工单 S0–S12：v2 父引用 → 子图）— 2026-09-24
+
+基线 0.9.54 / `ff3c720`，分支 `codex/submap-v2`。对应《Atlas 0.9.52 世界推进与地图更新
+修复施工单》第三段 S0–S12（子地图、二级地图与冗余收口）；该段此前**只做到 S8**，本轮补完
+S9–S12，并补上施工单未覆盖的触发缺口（S8.5）。以下状态均以自动化门禁为准，**实机仍待作者**。
+
+| 步骤 | 状态 | 说明 |
+|---|---|---|
+| S0 | ✅ | 现状失败夹具（钟楼→大堂→档案室 两级父子）作为红灯基线，现全绿 |
+| S1 | ✅ | `MapPoint.parentPointId` 为父子关系唯一权威；`parseMapPoint` 只收 null / 有限正整数 |
+| S2 | ✅ | 解析期拦自引用、未声明 `new:loc:`、成环，错误路径指向 `$.discoveries.locations[i].parentLocationRef` |
+| S3 | ✅ | 父引用落到候选世界（已知父 / 同轮父 / 顺序无关）；未知父·自引用·成环·超 4 层子图·同父超 40 个 → 整轮拒绝零写入 |
+| S4 | ✅ | 纯函数验收 8 例；**残留两项改由服务层结清**（S10⑧ 同键 duplicate、S10⑨a/⑨b 跨轮 40 上限） |
+| S5 | ✅ | `projectWorldSubmaps`：按 `parentPointId` 派生、与 sidecar 合并、确定性散布、v1 `sub-*` 兼容合并 |
+| S6 | ✅ | 世界图只下发根地点；`pointCount` 口径修正；sidecar 读取失败 / 视图截断**不再静默** |
+| S7 | ✅ | committed 记 `world-turn-hierarchy`（父新增点数 + 最大层级，不含原文） |
+| S8 | ✅ | UI 允许第四层子图 + 按 `parentMapId` 校验父链 + 「定位当前位置」回溯最近根祖先 |
+| S8.5 | ✅ | **施工单未覆盖的触发缺口**：父子层级纪律接进 v2 提示词（上限数字取自执行层常量）+ 地点 id 对照表标注父 ID |
+| S9 | ✅ | 人物从地图重叠标记移入地点菜单；纠偏入口改为**长按头像拖动**；`presence=left` 不入名单；图例说实话 |
+| S10 | ✅ | 后端 13 条 + 前端 6 条真实 DOM 回归与异常注入（分两个提交） |
+| S11 | ✅ | 附近页只展示 `relevantNpcIds` 命中人物；`/state` 新增只读 `isProtagonist`，主角不冒充附近 |
+| S12 | ✅ | 本文档 + 两份 README + 发布包镜像校验（编译产物确实含 `parentPointId` 解析与 UI 导航） |
+
+**S10 实测暴露并已修复的三处真实缺陷**（施工单要求「任何一项失败需回写」）：
+
+1. **S3 同父上限漏判第 41 个**（`src/atlas-turn-v2.ts`）：子地点计数只遍历 `world.points`，
+   本轮新点尚未进世界，因此「已存 40 + 本轮第 41 个」放行——世界真的落到 41 个子点，
+   随后被 `/state` 的 40 上限**静默裁掉**（`pointCount` / `pointParents` 仍含它）。
+   已改为按「已存 + 本轮新挂到该父」的**最终**数量判定；S4 当时那句「childCount 已含本轮孩子」
+   的注释是错的（当年只加注释、没改条件），已连同用例口径一并更正。
+2. **S6 投影期异常静默**（`src/atlas-server.ts`）：sidecar 读取失败被 `.catch(() => null)`
+   吞成「这个世界没有子图」，施工单要求的具名诊断一条都没有。现记
+   `MAP_PROJECTION_SIDECAR_READ_FAILED`（warn）后仍用空 sidecar 投影；视图侧截断记
+   `MAP_PROJECTION_POINTS_TRUNCATED`（带被裁数量）。
+3. **S8 状态提示点击不可见**（`index.js`）：`setStatus` 只写状态变量，⌖ 定位与地图页提炼
+   提示都要等下一次重渲染才出现（子图视图下还会先看到旧提示）。现 `setStatus` 就地刷新 /
+   补挂状态行，一处修好九个站点。
+
+**门禁**：typecheck 0 errors；全量 **619/619**（0.9.54 基线 563 → S 系列新增用例）；`pack`
+通过（根 `index.js` 为权威源，镜像一致性断言）；`git diff --check` 干净。
+**发布产物核对**：`release/atlas-ui-extension/index.js` 与 `dist/atlas-ui-core.mjs`、
+`release/atlas-server-plugin/dist/atlas-server.mjs` 均含 `parentPointId` / `pointParents` /
+`isProtagonist` / `V2_SUBMAP_SIBLINGS_MAX` / `world-turn-hierarchy` /
+`map-projection-sidecar-read-failed` 等本轮实现，且不含已删除的地图人物标点生成代码。
+**保留的 v1 兼容路径**（明确未清理）：`sub-*` 虚拟子图的读取 / 展示 / 进入、v1 协议逃生门
+（`worldTurnProtocol=v1`）、`scene` / `maps` / `turn` 的历史兼容读取——它们的退役需要独立的
+数据版本盘点与迁移方案。
+**仍未完成（人工项）**：R14 实机验收（`docs/VERIFICATION.md` 10 节 ≥30 项）未执行；
+S10 的两条真实交互证据（长按拖拽的 `elementFromPoint` 落点命中、像素级居中）需作者在真实
+SillyTavern 里截图 / 录屏补，自动化侧无法模拟真实布局与指针捕获。
+
 ### 0.9.54 已移除项与替代实现（C1–C7）
 
 | 已移除 | 替代实现 / 判定依据 |
@@ -97,6 +148,7 @@
 | R13-R15 | ✅ 完成（集成测试 + 文档） | 集成层跨 R04/R05/R07/R10/R12 不变量测试 7 项 + `docs/VERIFICATION.md` 实机验收清单（10 节 ≥ 30 项）+ atlas-extension/README 已实现能力索引；495/495 |
 | R14 实机验收 | ⬜ 待作者 | 按 `docs/VERIFICATION.md` 10 节清单在真实酒馆执行（≥30 项）；通过后才允许版本 bump + tag 发布 |
 | R15 收尾 | ⬜ 待作者验收后 | 实机验收问题回修（如有）+ 版本号 bump 六处 + tag |
+| S0–S12 子图（0.9.55） | ✅ 自动化侧完成 | 见上方「0.9.55（施工单 S0–S12）」小节；S9–S12 本轮补完，S10 暴露的三处缺陷已回修；实机验收并入 R14 |
 
 > 纪律：每阶段记录「做了什么 + 证据 + 残留」。未实际验证的写「未验证」。
 

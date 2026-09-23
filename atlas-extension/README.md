@@ -23,8 +23,9 @@ SillyTavern UI 扩展：**世界工作台（悬浮窗）** + 聊天绑定 + 生�
 - 点扩展按钮打开**世界工作台**：居中悬浮窗，按住顶栏可拖动，随时「退出」回聊天。
 - 左栏（导航 + 世界动向），固定六项：**概览 / 地图 / 附近 / 变化 / 推进 / API**。
   - **概览**：当前世界卡（未绑定说明、自动初始化状态与「重试初始化」、启用 / 停用本聊天推演）+ 世界状态统计 + 底部默认折叠的「高级：迁移或恢复已有世界」（世界列表 / 导入 JSON / 解绑）。
-  - **地图**：地区筛选、NPC 金色圆点、物件菱形标记、路线预览（确认后只填入输入框，绝不自动发送）、缩放。R09 起：图层与底图叠加、相机光标缩放（fit 无下限 20px 限制）、反向缩放（标记尺寸恒定）、子图多层导航（world → building → room）、`aw-point.is-selected` 选中态钩子（CSS outline + 外阴影）。
-  - **附近**：相关 NPC 与命中原因（同地点 / 附近 / 同地区 / 路线 / 日程等）。R04 起：账本投影覆盖 CharacterState 基线、注册表关联 `entityRecords[type=npc]`，NPC 跨地区移动后附近列表立即更新。
+  - **地图**：地区筛选、物件菱形标记、路线预览（确认后只填入输入框，绝不自动发送）、缩放。R09 起：图层与底图叠加、相机光标缩放（fit 无下限 20px 限制）、反向缩放（标记尺寸恒定）、子图导航（**最多四层**：world → 建筑 → 房间 → 更深一层，层级由 `parentPointId` 派生）、`aw-point.is-selected` 选中态钩子（CSS outline + 外阴影）。S9 起：**不再画人物标点**——人物由「地点名单」承载（理由见下条），地图标点只剩 地点 / 物件 两类。
+  - **附近**：相关 NPC 与命中原因（同地点 / 附近 / 同地区 / 路线 / 日程等）。R04 起：账本投影覆盖 CharacterState 基线、注册表关联 `entityRecords[type=npc]`，NPC 跨地区移动后附近列表立即更新。S11 起：**只展示引擎判定的相关人物**（按 `relevantNpcIds` 的命中顺序），不再把整张人物目录当「附近」；主角（`isProtagonist`）不在附近卡片里冒充 NPC，但仍留在其所在地点的名单中。
+  - **人物怎么找**（S9 起）：点开地点标点 → 「当前在这里」名单（在场者，含 `presence=left` 过滤）；**长按人物头像拖到另一个地点标点上松手**即可纠偏（确认后写 `source=author` 账本，等同 0.9.44 的拖拽纠偏，只是入口从地图标点搬进了名单）。进入建筑内部地图时，只知道人在建筑、不知道具体房间的人列在「建筑内 · 具体房间未知」名单，不伪造房间坐标。
 
 ## 已实现能力索引（与主计划 R00–R15 对齐）
 
@@ -40,12 +41,24 @@ SillyTavern UI 扩展：**世界工作台（悬浮窗）** + 聊天绑定 + 生�
 - **R07 身份消歧与持续跟踪**：ambiguous 整单拒绝 + identityUpdates 不重建实体 + presence 落账 + 附近卡片详情
 - **R08 地图相机与手势**：fit 无下限 20px 限制 + 光标缩放 + 反缩放（标记尺寸恒定）+ pan / 拖拽 / pinch + 相机持久化
 - **R08 热修**：marker inverse scale 1/k + 仅空白/双指 setPointerCapture（不再吞点击）
-- **R09 子图层级与 frame 持久化**（后端）：SubMap schema 升级加 `frame: { cols, rows, frameRevision }` + `validateSubmapDepth` + `handleScaleCalibrate` 真实 frame；UI 弹窗与子图三层级渲染留实机阶段
+- **R09 子图层级与 frame 持久化**：SubMap schema 升级加 `frame: { cols, rows, frameRevision }` + `validateSubmapDepth` + `handleScaleCalibrate` 真实 frame。**后端与 UI 都已落地**：0.9.49 起子图渲染不再清空人物物品、面包屑改为可点击祖先链；0.9.55（S8）起 UI 放开到与后端一致的**四层**（旧实现写死三层，第 4 张永远进不去），并按 `parentMapId` 校验父链。
 - **R10 v2 mapScaleHints 接入提交链路**：`applyScaleHintsToDoc` 纯函数（人工锁定 / frame 不匹配 / unknown-conflict 跳过纪律）+ executeCommit 应用到 maps sidecar + 日志分流
 - **R11 增量皮肤令牌**：17 项 `--am-*` 令牌（选中态 / 面包屑 / 状态三态 / 头像 / section-label）+ mappanel 写死色全替换 + `.aw-point.is-selected` / `.aw-breadcrumb` / `.aw-status--info/warn/error` UI 钩子
 - **R12 原子事务收口**：`pending.remove` best-effort（失败记日志不抛错）+ `reconcilePendingCommits` 启动清理 orphan + `createAtlasServerCore.reconcilePending()` 暴露给 UI 启动钩子
 
-待集成：UI 子图三层级渲染 + 子图导航面包屑、皮肤导入 UI、实机验收（详见 `docs/VERIFICATION.md`）。
+## 已实现能力索引（施工单 S0–S12：v2 父引用 → 子图，0.9.55）
+
+对照《Atlas 0.9.52 世界推进与地图更新修复施工单》第三段：把 v2 的 `discoveries.locations[].parentLocationRef` 真正变成可进入的二级 / 三级地图。
+
+- **S1–S3 数据落地**：`MapPoint.parentPointId` 是父子关系的**唯一权威**（sidecar 只是布局缓存）；解析期拦自引用 / 未声明 `new:loc:` / 成环，应用期拦未知父 / 自引用 / 成环 / 父链超 4 层 / 同一父下超 40 个直接子地点——一律整轮拒绝、零写入，绝不静默截断。
+- **S5–S6 /state 投影**：`projectWorldSubmaps` 由可见世界的 `parentPointId` 派生父子地图并与 sidecar 合并；世界图只下发**根地点**，子地点归其父的子图；`pointCount` 报全部可见地点数；`pointParents` 供 UI 回溯。sidecar 读取失败会记 `MAP_PROJECTION_SIDECAR_READ_FAILED` 后用空 sidecar 继续投影（v2 层级不丢），视图侧截断记 `MAP_PROJECTION_POINTS_TRUNCATED`。
+- **S7 日志**：committed 回合记 `world-turn-hierarchy`（带父新增点数 + 最大层级，不含故事原文）。
+- **S8 UI**：四层子图导航 + 面包屑逐层返回 + 「定位当前位置」在玩家位于建筑内时回溯**最近的根祖先**并提示；状态提示点击当时即可见。
+- **S8.5 提示词接线**：父子层级纪律写进 v2 契约（何时给父 / 父能填什么 / 4 层与 40 个上限，数字直接取自执行层常量）、任务段与核对段同步、地点 id 对照表标注已有子地点的父 ID——否则模型没有理由产出内层地点。
+- **S9–S11 展示归位**：人物从地图重叠标记移入地点菜单（长按头像拖动纠偏）、附近页只展示引擎判定的相关人物（主角不冒充附近）、图例说实话。
+- **保留的 v1 兼容路径**：旧 `sub-*` 虚拟子图照旧读取 / 展示 / 进入；v1 协议逃生门（`worldTurnProtocol=v1`）与 `scene` / `maps` / `turn` 历史读取都保留，未做数据迁移。
+
+**尚未完成的仍是人工项**：实机验收（`docs/VERIFICATION.md`）未执行；真实长按拖拽的落点命中、像素级居中和真机四层点击需要作者在真实 SillyTavern 里留证据（自动化侧无法模拟 `elementFromPoint` 与真实布局）。
   - **变化**：每轮世界推演回执时间轴 + 失败重试 + **世界书条目面板**（Atlas 动向 / 近期可触发事件）。
   - **推进**：只管理推进行为与提示词——启用 / 停用、自动提交开关、**提示词多预设**（新建 / 保存 / 另存为 / 设为当前使用 / 删除 / 复制内置默认）、只读的「当前生效提示词」。**这里不配置 API 地址**。
   - **API**：只管理连接资料——多连接预设（新建 / 保存 / 另存为 / 设为当前使用 / 测试连接 / 删除）、端点 / 密钥 / 模型 / 参数、从端点读到的模型列表。**这里不编辑提示词**。
