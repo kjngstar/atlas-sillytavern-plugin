@@ -7475,6 +7475,87 @@ function applyNewLocations(world, locations, options) {
 function emptyMapDoc() {
   return { schemaVersion: 2, pointMeta: {}, submaps: {}, calibrations: {} };
 }
+function projectWorldSubmaps(points, sidecar) {
+  const byId = /* @__PURE__ */ new Map();
+  for (const point of points) {
+    const id = Number(point.id);
+    if (Number.isInteger(id) && id > 0) byId.set(id, point);
+  }
+  const childrenOf = /* @__PURE__ */ new Map();
+  let dropped = 0;
+  for (const point of byId.values()) {
+    const pid = Number(point.parentPointId);
+    if (!Number.isInteger(pid) || pid <= 0) continue;
+    if (pid === Number(point.id)) {
+      dropped += 1;
+      continue;
+    }
+    if (!byId.has(pid)) {
+      dropped += 1;
+      continue;
+    }
+    const bucket = childrenOf.get(pid) ?? [];
+    bucket.push(point);
+    childrenOf.set(pid, bucket);
+  }
+  const doc = {
+    schemaVersion: 2,
+    pointMeta: { ...sidecar.pointMeta },
+    submaps: { ...sidecar.submaps },
+    calibrations: { ...sidecar.calibrations }
+  };
+  const depthById = /* @__PURE__ */ new Map();
+  const resolveDepth = (id, guard = 0) => {
+    const cached = depthById.get(id);
+    if (cached !== void 0) return cached;
+    if (guard > SUBMAP_DEPTH_MAX + 1) return SUBMAP_DEPTH_MAX + 2;
+    const point = byId.get(id);
+    const pid = Number(point?.parentPointId);
+    const depth = Number.isInteger(pid) && pid > 0 && byId.has(pid) ? resolveDepth(pid, guard + 1) + 1 : 0;
+    depthById.set(id, depth);
+    return depth;
+  };
+  for (const [parentId, children] of childrenOf) {
+    const depth = resolveDepth(parentId);
+    if (depth + 1 > SUBMAP_DEPTH_MAX) {
+      dropped += children.length;
+      continue;
+    }
+    const key = String(parentId);
+    const existing = sidecar.submaps[key];
+    const kept = Array.isArray(existing?.points) ? existing.points.map((p) => ({ ...p })) : [];
+    const knownIds = new Set(kept.map((p) => p.id));
+    const newOnes = [...children].sort((a, b) => Number(a.id) - Number(b.id));
+    newOnes.forEach((child, index) => {
+      const childKey = String(child.id);
+      const disk = kept.find((p) => p.id === childKey);
+      if (disk) {
+        if (!disk.name) disk.name = child.name;
+        return;
+      }
+      const seed = Number.parseInt(hashString(`${parentId}:${childKey}`), 16) || 0;
+      const angle = seed % 3600 / 3600 * Math.PI * 2;
+      const radius = 12 + 3.2 * Math.sqrt(index + 1);
+      kept.push({
+        id: childKey,
+        name: child.name,
+        x: Math.round(Math.min(96, Math.max(4, 50 + radius * Math.cos(angle)))),
+        y: Math.round(Math.min(96, Math.max(4, 50 + radius * Math.sin(angle)))),
+        ...typeof doc.pointMeta[childKey]?.description === "string" ? { description: doc.pointMeta[childKey].description } : {}
+      });
+      knownIds.add(childKey);
+    });
+    doc.submaps[key] = {
+      // 父所在的图：父是根（depth 0）→ 世界图；否则 → 父的父 ID
+      parentMapId: depth === 0 ? "world" : String(byId.get(parentId).parentPointId),
+      ownerLocationId: key,
+      points: kept,
+      ...existing?.scale ? { scale: existing.scale } : {},
+      ...existing?.frame ? { frame: existing.frame } : {}
+    };
+  }
+  return { doc, dropped };
+}
 function sanitizeMapDoc(raw) {
   const doc = emptyMapDoc();
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return doc;
@@ -10982,7 +11063,10 @@ function createCoreInstance(store, deps, shared) {
     const placeholder = detectStartPlaceholder(world);
     const hiddenPointIds = new Set(sceneDoc.retiredPointIds);
     if (placeholder.isPlaceholder && placeholder.pointId) hiddenPointIds.add(placeholder.pointId);
-    const mapPoints = (world.points ?? []).filter((p) => !hiddenPointIds.has(String(p.id))).slice(0, MAP_POINTS_MAX).map((p) => ({
+    const mapPoints = (world.points ?? []).filter((p) => !hiddenPointIds.has(String(p.id))).filter((p) => {
+      const parentId = Number(p.parentPointId);
+      return !Number.isInteger(parentId) || parentId <= 0;
+    }).slice(0, MAP_POINTS_MAX).map((p) => ({
       id: String(p.id),
       name: String(p.name).slice(0, MAP_POINT_NAME_CHARS),
       x: p.x,
@@ -11050,18 +11134,20 @@ function createCoreInstance(store, deps, shared) {
     const lastEvent = branchEvents.at(-1) ?? null;
     const lastAdvance = lastEvent ? { at: lastEvent.at, summary: lastEvent.narrativeSummary.slice(0, 200), source: lastEvent.source } : null;
     const mapDoc = sanitizeMapDoc(await store.read(`maps:${world.id}`).catch(() => null));
-    const pointMetaEntries = Object.entries(mapDoc.pointMeta).slice(0, 80);
+    const projection = projectWorldSubmaps(world.points ?? [], mapDoc);
+    const projected = projection.doc;
+    const pointMetaEntries = Object.entries(projected.pointMeta).slice(0, 80);
     const worldPointIds = new Set((world.points ?? []).map((p) => String(p.id)));
     const visibleSubmapIds = /* @__PURE__ */ new Set();
     for (let depth = 0; depth < 4; depth++) {
-      for (const [key, sub] of Object.entries(mapDoc.submaps)) {
-        if (visibleSubmapIds.has(key) || !validateSubmapDepth(mapDoc, key).ok) continue;
+      for (const [key, sub] of Object.entries(projected.submaps)) {
+        if (visibleSubmapIds.has(key) || !validateSubmapDepth(projected, key).ok) continue;
         const parent = sub.parentMapId ?? "world";
-        const reachable = parent === "world" ? worldPointIds.has(key) : visibleSubmapIds.has(parent) && mapDoc.submaps[parent]?.points.some((point) => point.id === key);
+        const reachable = parent === "world" ? worldPointIds.has(key) : visibleSubmapIds.has(parent) && projected.submaps[parent]?.points.some((point) => point.id === key);
         if (reachable) visibleSubmapIds.add(key);
       }
     }
-    const submapEntries = Object.entries(mapDoc.submaps).filter(([key]) => visibleSubmapIds.has(key)).slice(0, 40).map(([key, sub]) => ({
+    const submapEntries = Object.entries(projected.submaps).filter(([key]) => visibleSubmapIds.has(key)).slice(0, 40).map(([key, sub]) => ({
       pointId: key,
       parentMapId: sub.parentMapId ?? "world",
       ownerLocationId: sub.ownerLocationId ?? key,
@@ -11069,7 +11155,7 @@ function createCoreInstance(store, deps, shared) {
       scale: sub.scale ?? null,
       points: sub.points.slice(0, 40)
     }));
-    const calibrationEntries = Object.entries(mapDoc.calibrations).filter(([key]) => key === "world" || visibleSubmapIds.has(key)).slice(0, 40);
+    const calibrationEntries = Object.entries(projected.calibrations).filter(([key]) => key === "world" || visibleSubmapIds.has(key)).slice(0, 40);
     const scene = resolveSceneStatus(world, sceneDoc, binding.currentLocationId ?? null);
     const legacyRepair = legacyStartReport(world, binding, sceneDoc, mapDoc);
     const lastConfirmedPointName = scene.lastConfirmed ? (world.points ?? []).find((p) => String(p.id) === scene.lastConfirmed.pointId)?.name ?? null : null;
@@ -11098,7 +11184,9 @@ function createCoreInstance(store, deps, shared) {
       triggerIds: relevance.triggerIds,
       map: {
         points: mapPoints,
-        pointCount: (world.points ?? []).length,
+        // S6（0.9.55）：全部可见、非占位地点数（含子地点）；mapPoints 只含根地点，
+        // 因此本值可大于 points.length —— 前端据此知道世界图外还有内层地点。
+        pointCount: (world.points ?? []).filter((p) => !hiddenPointIds.has(String(p.id))).length,
         mapImagePresent: Boolean(world.mapImage),
         // R01：底图版本（世界更新时间）——前端缓存键的失效依据，换图 / 删图必换键
         mapImageRevision: world.updatedAt ?? 0,

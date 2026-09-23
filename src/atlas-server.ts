@@ -47,7 +47,7 @@ import { computeAtlasRelevance, atlasTravelPreview } from "./atlas-relevance.ts"
 import { prepareAtlasTurn, commitAtlasTurn, provisionReferencedCharacters } from "./atlas-turn.ts";
 import { applyAtlasV2Turn } from "./atlas-turn-v2.ts";
 import { parseAtlasWorldTurnDraftV2, type AtlasV2Draft } from "./atlas-contract-v2.ts";
-import { buildSubMapTreeFromDraft, sanitizeMapDoc, SUBMAP_FRAME_DEFAULT, validateSubmapDepth } from "./atlas-geo-apply.ts";
+import { buildSubMapTreeFromDraft, projectWorldSubmaps, sanitizeMapDoc, SUBMAP_FRAME_DEFAULT, validateSubmapDepth } from "./atlas-geo-apply.ts";
 import { detectStartPlaceholder, resolveSceneStatus, retireStartPlaceholder, sanitizeSceneDoc, sceneDocKey, type SceneDoc } from "./atlas-scene.ts";
 import { validateScaleResponse, applyScaleHintsToDoc, type FrameRef, roundPositiveScale } from "./atlas-scale.ts";
 import { buildLorebookPlans } from "./atlas-lorebook.ts";
@@ -1555,13 +1555,22 @@ function createCoreInstance(
     const hiddenPointIds = new Set(sceneDoc.retiredPointIds);
     if (placeholder.isPlaceholder && placeholder.pointId) hiddenPointIds.add(placeholder.pointId);
     // 有界地图数据：静态世界结构（地点列表），不含世界书 / 记忆 / 账本
-    const mapPoints = (world.points ?? []).filter((p) => !hiddenPointIds.has(String(p.id))).slice(0, MAP_POINTS_MAX).map((p) => ({
-      id: String(p.id),
-      name: String(p.name).slice(0, MAP_POINT_NAME_CHARS),
-      x: p.x,
-      y: p.y,
-      regionId: p.regionId ?? null,
-    }));
+    // S6（0.9.55）：世界图**只下发根地点**（parentPointId 缺省 / null）；
+    // 子地点归其父的子图，避免世界图重复标出内层房间。
+    const mapPoints = (world.points ?? [])
+      .filter((p) => !hiddenPointIds.has(String(p.id)))
+      .filter((p) => {
+        const parentId = Number(p.parentPointId);
+        return !Number.isInteger(parentId) || parentId <= 0;
+      })
+      .slice(0, MAP_POINTS_MAX)
+      .map((p) => ({
+        id: String(p.id),
+        name: String(p.name).slice(0, MAP_POINT_NAME_CHARS),
+        x: p.x,
+        y: p.y,
+        regionId: p.regionId ?? null,
+      }));
     // 相关 NPC 位置目录（ATLAS-09 地图标记）：R04 统一运行时视图——
     // 账本投影（最新事实）覆盖 CharacterState 基线 / 旧档案，单点读取口径（D05 修复）
     const pointById = new Map((world.points ?? []).map((p) => [String(p.id), p]));
@@ -1645,23 +1654,28 @@ function createCoreInstance(
     // 0.9.50（M01 子集）：宿主点位已不存在的损坏子图引用直接过滤（可恢复状态，
     // 不让幽灵子图进 UI）；标定摘要随 map 下发（键与 /worlds/scale/calibrate 对齐）
     const mapDoc = sanitizeMapDoc(await store.read(`maps:${world.id}`).catch(() => null));
-    const pointMetaEntries = Object.entries(mapDoc.pointMeta).slice(0, 80);
+    // S6（0.9.55）：先按 v2 的 World.points[].parentPointId 派生父子地图，与 sidecar 合并。
+    // sidecar 写入失败 / 为空时仍能从世界结构展示层级（施工单：不可把一次 sidecar
+    // 写入失败伪装成「世界已提交但子图永远丢失」）。
+    const projection = projectWorldSubmaps(world.points ?? [], mapDoc);
+    const projected = projection.doc;
+    const pointMetaEntries = Object.entries(projected.pointMeta).slice(0, 80);
     const worldPointIds = new Set((world.points ?? []).map((p) => String(p.id)));
     // Publish only maps reachable from a real world point. Nested maps use the
     // child point ID as their key, so filtering on worldPointIds alone loses them.
     const visibleSubmapIds = new Set<string>();
     for (let depth = 0; depth < 4; depth++) {
-      for (const [key, sub] of Object.entries(mapDoc.submaps)) {
-        if (visibleSubmapIds.has(key) || !validateSubmapDepth(mapDoc, key).ok) continue;
+      for (const [key, sub] of Object.entries(projected.submaps)) {
+        if (visibleSubmapIds.has(key) || !validateSubmapDepth(projected, key).ok) continue;
         const parent = sub.parentMapId ?? "world";
         const reachable = parent === "world"
           ? worldPointIds.has(key)
           : visibleSubmapIds.has(parent) &&
-            mapDoc.submaps[parent]?.points.some((point) => point.id === key);
+            projected.submaps[parent]?.points.some((point) => point.id === key);
         if (reachable) visibleSubmapIds.add(key);
       }
     }
-    const submapEntries = Object.entries(mapDoc.submaps)
+    const submapEntries = Object.entries(projected.submaps)
       .filter(([key]) => visibleSubmapIds.has(key))
       .slice(0, 40)
       .map(([key, sub]) => ({
@@ -1672,7 +1686,7 @@ function createCoreInstance(
         scale: sub.scale ?? null,
         points: sub.points.slice(0, 40),
       }));
-    const calibrationEntries = Object.entries(mapDoc.calibrations)
+    const calibrationEntries = Object.entries(projected.calibrations)
       .filter(([key]) => key === "world" || visibleSubmapIds.has(key))
       .slice(0, 40);
     // R06 场景状态：占位指纹 + retired 列表 + lastConfirmed（与「当前未知」分开表达）
@@ -1708,7 +1722,9 @@ function createCoreInstance(
       triggerIds: relevance.triggerIds,
       map: {
         points: mapPoints,
-        pointCount: (world.points ?? []).length,
+        // S6（0.9.55）：全部可见、非占位地点数（含子地点）；mapPoints 只含根地点，
+        // 因此本值可大于 points.length —— 前端据此知道世界图外还有内层地点。
+        pointCount: (world.points ?? []).filter((p) => !hiddenPointIds.has(String(p.id))).length,
         mapImagePresent: Boolean(world.mapImage),
         // R01：底图版本（世界更新时间）——前端缓存键的失效依据，换图 / 删图必换键
         mapImageRevision: world.updatedAt ?? 0,

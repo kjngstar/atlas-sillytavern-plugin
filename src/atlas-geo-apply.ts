@@ -8,7 +8,7 @@
  * 不发任何请求：地名来自推演 JSON，归属与坐标全部本地确定性计算。
  */
 
-import type { World } from "../lib/world-schema.ts";
+import type { MapPoint, World } from "../lib/world-schema.ts";
 import { appendDefinitionRevision } from "../lib/world-definition.ts";
 import { hashString } from "../lib/world-cards.ts";
 import { roundPositiveScale, sanitizeCalibration, type MapScaleCalibration } from "./atlas-scale.ts";
@@ -311,6 +311,116 @@ export interface AtlasMapDoc {
 
 export function emptyMapDoc(): AtlasMapDoc {
   return { schemaVersion: 2, pointMeta: {}, submaps: {}, calibrations: {} };
+}
+
+/**
+ * S5（0.9.55）：由 `World.points[].parentPointId` 派生 v2 父子地图，与已清洗的
+ * sidecar 合并，产出**只给 `/state` 使用**的地图 doc。纯函数：不修改入参。
+ *
+ * 口径（施工单「先固定数据契约」）：
+ * - 唯一地点身份仍是 `World.points[].id`（数字 ID）；子图内 marker 的 id 用该数字的字符串。
+ * - `submaps[父ID]` 装其直接子地点；子图 `parentMapId` 指向父所在图（"world" 或父的父 ID）。
+ * - sidecar 已有的同 ID 布局坐标 / frame / 比例尺 / 描述**优先保留**；新点按父 ID 与
+ *   子 ID 确定性散布（不依赖时间戳或数组顺序），同一孩子二次投影结果深相等。
+ * - 兼容 v1 sidecar 的虚拟 `sub-*` 点：合并且不改 ID；与 v2 新点同名时两者都保留，
+ *   绝不按名字偷偷合并或搬走旧手工布局。
+ * - 超过 SUBMAP_DEPTH_MAX 层可达的地点不再下钻（其子图不生成），并计入 dropped 供日志。
+ * - 坏 sidecar 引用（同名但不存在的父）丢弃于视图并计数。
+ */
+export function projectWorldSubmaps(
+  points: readonly MapPoint[],
+  sidecar: AtlasMapDoc,
+): { doc: AtlasMapDoc; dropped: number } {
+  // 只认有限正整数的 parentPointId；其余（含自引用）视为根，避免脏数据造环
+  const byId = new Map<number, MapPoint>();
+  for (const point of points) {
+    const id = Number(point.id);
+    if (Number.isInteger(id) && id > 0) byId.set(id, point);
+  }
+  const childrenOf = new Map<number, MapPoint[]>();
+  let dropped = 0;
+  for (const point of byId.values()) {
+    const pid = Number(point.parentPointId);
+    if (!Number.isInteger(pid) || pid <= 0) continue;      // 根地点
+    if (pid === Number(point.id)) { dropped += 1; continue; } // 自引用：脏数据
+    if (!byId.has(pid)) { dropped += 1; continue; }           // 父不在当前可见世界
+    const bucket = childrenOf.get(pid) ?? [];
+    bucket.push(point);
+    childrenOf.set(pid, bucket);
+  }
+
+  const doc: AtlasMapDoc = {
+    schemaVersion: 2,
+    pointMeta: { ...sidecar.pointMeta },
+    submaps: { ...sidecar.submaps },
+    calibrations: { ...sidecar.calibrations },
+  };
+
+  // 深度：从根地点向下走，超过 SUBMAP_DEPTH_MAX 层的地点不下钻（其子图不生成）
+  const depthById = new Map<number, number>();
+  const resolveDepth = (id: number, guard = 0): number => {
+    const cached = depthById.get(id);
+    if (cached !== undefined) return cached;
+    if (guard > SUBMAP_DEPTH_MAX + 1) return SUBMAP_DEPTH_MAX + 2; // 防御：环
+    const point = byId.get(id);
+    const pid = Number(point?.parentPointId);
+    const depth = Number.isInteger(pid) && pid > 0 && byId.has(pid) ? resolveDepth(pid, guard + 1) + 1 : 0;
+    depthById.set(id, depth);
+    return depth;
+  };
+
+  for (const [parentId, children] of childrenOf) {
+    const depth = resolveDepth(parentId);
+    // parentId 本身是第 depth 层；其子图为第 depth+1 张 → 超过上限则不下钻
+    if (depth + 1 > SUBMAP_DEPTH_MAX) {
+      dropped += children.length;
+      continue;
+    }
+    const key = String(parentId);
+    const existing = sidecar.submaps[key];
+    // v1 虚拟点先入列（保留其 id 与手工坐标），v2 子点按数字 ID 追加
+    const kept: SubMapPoint[] = Array.isArray(existing?.points)
+      ? existing.points.map((p) => ({ ...p }))
+      : [];
+    const knownIds = new Set(kept.map((p) => p.id));
+    const newOnes = [...children].sort((a, b) => Number(a.id) - Number(b.id));
+
+    newOnes.forEach((child, index) => {
+      const childKey = String(child.id);
+      const disk = kept.find((p) => p.id === childKey);
+      if (disk) {
+        // sidecar 已有该点的布局/描述：优先保留坐标与描述，只补名称
+        if (!disk.name) disk.name = child.name;
+        return;
+      }
+      // 确定性散布：仅由 父ID 与 子ID 决定，与调用顺序 / 时间戳无关
+      // （hashString 返回 8 位十六进制串，转回整数用作散列种子）
+      const seed = Number.parseInt(hashString(`${parentId}:${childKey}`), 16) || 0;
+      const angle = ((seed % 3600) / 3600) * Math.PI * 2;
+      const radius = 12 + 3.2 * Math.sqrt(index + 1);
+      kept.push({
+        id: childKey,
+        name: child.name,
+        x: Math.round(Math.min(96, Math.max(4, 50 + radius * Math.cos(angle)))),
+        y: Math.round(Math.min(96, Math.max(4, 50 + radius * Math.sin(angle)))),
+        ...(typeof doc.pointMeta[childKey]?.description === "string"
+          ? { description: doc.pointMeta[childKey]!.description as string }
+          : {}),
+      });
+      knownIds.add(childKey);
+    });
+
+    doc.submaps[key] = {
+      // 父所在的图：父是根（depth 0）→ 世界图；否则 → 父的父 ID
+      parentMapId: depth === 0 ? "world" : String(byId.get(parentId)!.parentPointId),
+      ownerLocationId: key,
+      points: kept,
+      ...(existing?.scale ? { scale: existing.scale } : {}),
+      ...(existing?.frame ? { frame: existing.frame } : {}),
+    };
+  }
+
+  return { doc, dropped };
 }
 
 /** sidecar 文档形状不可信（兼容旧 / 手改）：宽容清洗，绝不炸面板。 */
