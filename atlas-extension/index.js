@@ -3080,13 +3080,13 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       dot.style.left = `${Number(worldPos.x)}px`;
       dot.style.top = `${Number(worldPos.y)}px`;
       const reasonLabel = npc.reason ? (NPC_REASON_LABELS[String(npc.reason)] ?? String(npc.reason)) : "";
-      const subTag = inSub ? `（${String(currentSub?.name ?? view?.name ?? "")} 内）` : "";
-      dot.title = `${String(npc.name)}${reasonLabel ? `（${reasonLabel}）` : ""}${subTag}`;
-      dot.setAttribute("aria-label", `人物 ${npc.name}${subTag}，点击查看想法与动向；按住拖到地点上可纠偏位置`);
+      // C4：本循环开头已 `if (inSub || …) continue`，故此处恒为世界图层——
+      // 旧 `subTag` 与 `inSub ? … : …` 全部不可达，已删除。
+      dot.title = `${String(npc.name)}${reasonLabel ? `（${reasonLabel}）` : ""}`;
+      dot.setAttribute("aria-label", `人物 ${npc.name}，点击查看想法与动向；按住拖到地点上可纠偏位置`);
       dot.append(el("span", "aw-npc__avatar", String(npc.name ?? "?").slice(0, 1)));
       dot.append(el("span", "aw-npc__name", String(npc.name)));
-      if (!inSub) attachNpcDrag(dot, npc, (anchor) => openNpcPanel(npc, anchor)); // 拖拽纠偏只在世界图层有意义（子图点位非世界点位）
-      else dot.addEventListener("click", (e) => { e.stopPropagation(); openNpcPanel(npc, dot); });
+      attachNpcDrag(dot, npc, (anchor) => openNpcPanel(npc, anchor)); // 拖拽纠偏只在世界图层有意义（子图点位非世界点位）
       mapLayer.append(dot);
     }
 
