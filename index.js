@@ -1850,6 +1850,9 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
   let mapStackKey = "";
   let mapCrumb = null;
   let mapPanel = null;
+  /** R15 补（R08 残留）：当前面板锚点身份 {kind:"point"|"entity", id, el}——相机变更 /
+   *  重新渲染后按身份找回新标记续锚；对象真消失则关闭面板。 */
+  let mapPanelAnchor = null;
   let lastMapData = null;
 
   /** R08 网格盒原点（stage 空间；renderMap 按固定 frame 外扩设置）。 */
@@ -1866,7 +1869,28 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     mapLayer.style.setProperty("--aw-marker-inv", String(markerInverseScale(camera)));
     updateGridVisual();
     updateScaleBarVisual();
+    // R15 补（R08 残留「弹窗随 pan / zoom / resize 重新定位」）：面板开着就跟着锚点走。
+    // - 锚点元素仍在 DOM（同一次渲染内 pan / zoom）：直接重算贴边位置；
+    // - 元素已被重新渲染替换：按身份（data-point-id / data-entity-id）找回新标记续锚；
+    // - 身份也找不到（对象真的消失，如提交后账本里没了）：关闭面板，不留孤儿浮层。
+    if (mapPanel && mapPanelAnchor && mapPanel.style.display !== "none") {
+      const live = mapPanelAnchor.el?.isConnected
+        ? mapPanelAnchor.el
+        : (mapLayer?.querySelector(anchorSelector(mapPanelAnchor)) ?? null);
+      if (live) {
+        mapPanelAnchor.el = live;
+        anchorPanelToMarker(live);
+      } else {
+        closeMapPanel();
+      }
+    }
   };
+
+  /** 锚点身份 → 选择器（属性值里的引号 / 反斜杠转义掉，避免选择器注入）。 */
+  function anchorSelector(anchor) {
+    const safe = String(anchor.id).replace(/["\\]/g, "\\$&");
+    return anchor.kind === "point" ? `[data-point-id="${safe}"]` : `[data-entity-id="${safe}"]`;
+  }
 
   /** 相机变更统一出口：写回视图相机表（返回父层 / 重渲染可恢复），再施加 DOM。 */
   const commitCamera = (next) => {
@@ -2334,6 +2358,7 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       mapPanel.style.display = "none";
       mapPanel.innerHTML = "";
     }
+    mapPanelAnchor = null;
     mapLayer?.querySelectorAll(".is-active-marker").forEach((n) => n.classList.remove("is-active-marker"));
   }
 
@@ -2388,10 +2413,16 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     if (!mapPanel) return;
     mapLayer?.querySelectorAll(".is-active-marker").forEach((n) => n.classList.remove("is-active-marker"));
     if (!anchorEl) {
+      mapPanelAnchor = null;
       mapPanel.style.left = "";
       mapPanel.style.top = "";
       return;
     }
+    // R15：记录锚点身份，供相机变更 / 重新渲染后续锚（身份取不到则退回「不续锚」的老行为）
+    const rawId = anchorEl.dataset?.pointId ?? anchorEl.dataset?.entityId ?? null;
+    mapPanelAnchor = rawId === null
+      ? null
+      : { kind: anchorEl.dataset?.pointId !== undefined ? "point" : "entity", id: String(rawId), el: anchorEl };
     anchorEl.classList.add("is-active-marker");
     const vr = viewport.getBoundingClientRect();
     const mr = anchorEl.getBoundingClientRect();

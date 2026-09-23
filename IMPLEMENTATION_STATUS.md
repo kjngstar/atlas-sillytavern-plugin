@@ -229,6 +229,7 @@
 
 残留：
 - 真实浏览器手势验收（拖拽跟手 / 触摸双指 / 长中文标签遮挡）→ R14 交互验收
+- ~~弹窗随 pan / zoom / resize 重新定位（anchorPanelToMarker 仅开面板时计算）→ R09 selectedEntityId 弹窗刷新一起收口~~ → **R15 已收口（2026-09-23）**：面板锚点身份（`data-point-id` / `data-entity-id`）随开面板记录，`applyCamera` 统一出口在相机变更 / 重新渲染后按身份续锚（新标记元素自动高亮），对象真消失则关闭面板；覆盖 pan / zoom / resize 三路径（resize 经 renderMap → applyCamera）。测试 tests/atlas-r15-panel-anchor.test.mjs 2 条固化「续锚 + 消失关闭 + 不复活」。
 - 相机「销毁时移除监听」：扩展卸载路径 disconnectAtlas 移除整个面板 DOM，监听随节点销毁；ResizeObserver 随 panel 移除后不再触发——无独立 teardown 钩子，未单独实现
 - 弹窗随 pan / zoom / resize 重新定位（anchorPanelToMarker 仅开面板时计算）→ R09 selectedEntityId 弹窗刷新一起收口
 
