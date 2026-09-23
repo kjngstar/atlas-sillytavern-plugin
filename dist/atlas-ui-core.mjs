@@ -638,8 +638,16 @@ function createAtlasLorebookWriter(port, opts = {}) {
       if (pruned > 0) await port.saveBook(targetName, data);
       return { bookName: targetName, pruned };
     },
-    /** 面板可见性快照（调用方持久化到 store 的 "lorebook" 文档）。 */
-    snapshot(plans, result) {
+    /**
+     * 面板可见性快照（调用方持久化到 store 的 "lorebook" 文档）。
+     *
+     * C7（0.9.54）：`plans` 保留但下划线标注——快照内容完全来自 `result`
+     * （bookName / created / written / pruned / binding / entries），plans 不影响输出。
+     * 它是 writer 对外形状的一部分，调用方（index.js 两处会话钩子、atlas-lorebook 测试）
+     * 均按 `snapshot(plans, result)` 调用；为消警而改签名会波及跨文件调用点，
+     * 故按施工单 C7 的处置保留参数并注明。快照功能本身不动。
+     */
+    snapshot(_plans, result) {
       return {
         schemaVersion: 1,
         bookName: result.bookName,
@@ -7678,7 +7686,7 @@ function requireKnownRegion(world, regionId, label) {
   if (!found) fail2(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, `${label} 引用未知地区：${String(regionId)}`);
   return String(regionId);
 }
-function draftToEffects(world, draft) {
+function draftToEffects(draft) {
   const duration = draft.duration ?? 0;
   if (typeof duration !== "number" || !Number.isFinite(duration) || duration < 0) {
     fail2(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, `草稿 duration 非法：${String(duration)}`);
@@ -7811,7 +7819,7 @@ function commitAtlasTurn(world, input) {
       }
     };
   }
-  const { effects, at: duration } = draftToEffects(world, input.draft);
+  const { effects, at: duration } = draftToEffects(input.draft);
   const effectiveWorld = provisionReferencedCharacters(world, effects, input.now ?? 0);
   const at = input.currentTime + duration;
   const locationChange = input.draft.locationChange ?? null;
@@ -11300,7 +11308,6 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
     }
     checkRpm();
     const prepared = await prepareWorldTurnInputs(binding, preset, request);
-    const prepareOutput = prepared.prepareOutput;
     const pending = {
       request,
       binding: {

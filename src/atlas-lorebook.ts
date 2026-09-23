@@ -468,8 +468,16 @@ export function createAtlasLorebookWriter(port: AtlasLorebookPort, opts: { now?:
       return { bookName: targetName, pruned };
     },
 
-    /** 面板可见性快照（调用方持久化到 store 的 "lorebook" 文档）。 */
-    snapshot(plans: AtlasLorebookPlans, result: AtlasLorebookSyncResult) {
+    /**
+     * 面板可见性快照（调用方持久化到 store 的 "lorebook" 文档）。
+     *
+     * C7（0.9.54）：`plans` 保留但下划线标注——快照内容完全来自 `result`
+     * （bookName / created / written / pruned / binding / entries），plans 不影响输出。
+     * 它是 writer 对外形状的一部分，调用方（index.js 两处会话钩子、atlas-lorebook 测试）
+     * 均按 `snapshot(plans, result)` 调用；为消警而改签名会波及跨文件调用点，
+     * 故按施工单 C7 的处置保留参数并注明。快照功能本身不动。
+     */
+    snapshot(_plans: AtlasLorebookPlans, result: AtlasLorebookSyncResult) {
       return {
         schemaVersion: 1 as const,
         bookName: result.bookName,

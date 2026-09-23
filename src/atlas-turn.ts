@@ -19,7 +19,7 @@ import { appendDefinitionRevision, latestDefinitionRevision, upsertEntityRecord 
 import { adoptPendingProposals, type PendingChangeProposal } from "../lib/world-ledger.ts";
 import { buildContextPlan, renderContextPlan } from "../lib/context-plan.ts";
 import { hashString } from "../lib/world-cards.ts";
-import { applyNewLocations, sanitizeNewLocations, type NewLocationDraft } from "./atlas-geo-apply.ts";
+import { applyNewLocations, sanitizeNewLocations } from "./atlas-geo-apply.ts";
 import type {
   AtlasTravelPreview,
   AtlasTurnCommitRequest,
@@ -239,7 +239,7 @@ function requireKnownRegion(world: World, regionId: string | null | undefined, l
 }
 
 /** 把不可信草稿折叠为白名单 effect 列表；任何非法引用直接拒绝（零写入）。 */
-function draftToEffects(world: World, draft: AtlasWorldChangeDraft): { effects: StateEffect[]; at: number } {
+function draftToEffects(draft: AtlasWorldChangeDraft): { effects: StateEffect[]; at: number } {
   const duration = draft.duration ?? 0;
   if (typeof duration !== "number" || !Number.isFinite(duration) || duration < 0) {
     fail(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, `草稿 duration 非法：${String(duration)}`);
@@ -413,7 +413,7 @@ export function commitAtlasTurn(world: World, input: AtlasTurnCommitInput): Atla
   }
 
   // 2. 草稿校验（不可信数据）：全部通过才开始写
-  const { effects, at: duration } = draftToEffects(world, input.draft);
+  const { effects, at: duration } = draftToEffects(input.draft);
   // 2.5 0.9.37 角色实体自动建档：草稿引用到、且只存在于 characters 的角色
   //     （自动建世主角 char-main 等）先确定性建档 + 声明本轮用到的时态字段，
   //     否则裁定白名单放行的引用会被账本「实体不存在」整单拒收。

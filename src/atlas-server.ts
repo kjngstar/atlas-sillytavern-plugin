@@ -25,7 +25,7 @@ import { parseStateEffect } from "../lib/world-schema.ts";
 import { appendDefinitionRevision } from "../lib/world-definition.ts";
 import { hashString } from "../lib/world-cards.ts";
 import { createCheckpoint, previewRestore, restoreAsPlayhead } from "../lib/world-checkpoint.ts";
-import { resolveCharacterPosition, moveCharacterTo } from "../lib/world-npc.ts";
+import { moveCharacterTo } from "../lib/world-npc.ts";
 import { resolveAtlasRuntimeView } from "./atlas-runtime-view.ts";
 import type {
   AtlasChatBinding,
@@ -49,7 +49,7 @@ import { applyAtlasV2Turn } from "./atlas-turn-v2.ts";
 import { parseAtlasWorldTurnDraftV2, type AtlasV2Draft } from "./atlas-contract-v2.ts";
 import { buildSubMapTreeFromDraft, sanitizeMapDoc, SUBMAP_FRAME_DEFAULT, validateSubmapDepth } from "./atlas-geo-apply.ts";
 import { detectStartPlaceholder, resolveSceneStatus, retireStartPlaceholder, sanitizeSceneDoc, sceneDocKey, type SceneDoc } from "./atlas-scene.ts";
-import { validateScaleResponse, applyScaleHintsToDoc, type V2ScaleHintInput, type FrameRef, roundPositiveScale } from "./atlas-scale.ts";
+import { validateScaleResponse, applyScaleHintsToDoc, type FrameRef, roundPositiveScale } from "./atlas-scale.ts";
 import { buildLorebookPlans } from "./atlas-lorebook.ts";
 import { reconcilePendingCommits, type ReconcileReport } from "./atlas-pending-reconcile.ts";
 import {
@@ -60,7 +60,6 @@ import {
   DEFAULT_PROMPT_SEGMENTS_V2,
   V2_BOOTSTRAP_TASK_CONTENT,
   isV2ProtocolEnabled,
-  type AtlasApiPreset,
   type AtlasWorldTurnPromptInput,
 } from "./atlas-api-client.ts";
 import {
@@ -2104,8 +2103,9 @@ function createCoreInstance(
     checkRpm();
 
     // 4. 本地重算 prepare（零 API）并保存 pending（供 retry 沿用原请求）
+    // C7：prepareWorldTurnInputs 有副作用（装配注入文本与 pending 素材），必须保留调用；
+    // 其返回的 prepareOutput 在本路径未被读取，原先的无用局部变量已删除。
     const prepared = await prepareWorldTurnInputs(binding, preset, request);
-    const prepareOutput = prepared.prepareOutput;
 
     const pending: StoredPendingCommit = {
       request,
