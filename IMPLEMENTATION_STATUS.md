@@ -274,7 +274,7 @@
 
 残留：
 - 是否把 `pending:*` 也搬进 session 改掉根上 IO 分离：判断为"可演进但非 P0"。现状已满足计划"失败零 root 写入 + 0 条新 API 调 + pending 留熟"的底线；如有实测发现连续 orphan 堆积（不太可能） → R15 集成期决定。
-- 实际启动钩子：`reconcilePending()` 还没在任何 Atlasia chatMetadata 提交流程里被自动调用——UI 层接入留给 R15 集成阶段。
+- 实际启动钩子：~~`reconcilePending()` 还没在任何启动流程里被自动调用~~ → **R15 已接线（2026-09-23）**：`reconcilePending(session?)` 加可选会话参数（0.9.42 起 turn 文档在会话覆盖层，裸 store 查不到已提交回合——不带 session 在浏览器里一条 orphan 都清不了，此坑由集成审查发现）；UI 启动钩子在 connectOnce 建 engine 后带当前聊天会话 fire-and-forget 调用（.catch 防静默失效），有清理动作才记日志。其他聊天的孤儿留待各自聊天启动时清（宁留勿删）。测试 T3b/T3c 固化「带/不带 session」双路径。
 
 ## R10 — v2 mapScaleHints 接入提交链路（2026-09-23）
 

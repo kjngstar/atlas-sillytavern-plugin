@@ -214,7 +214,7 @@ function atlasLog(tag, text, detail = null) {
 
 async function loadUiCore() {
   // 先组件内构建产物（发布形态），再上级 src（开发形态，工程内运行才可用）
-  const attempts = ["./dist/atlas-ui-core.mjs"];
+  const attempts = ["./dist/atlas-ui-core.mjs", "../src/atlas-ui-core.ts"];
   let lastError = null;
   for (const specifier of attempts) {
     try {
@@ -5581,6 +5581,28 @@ async function connectOnce() {
       store: engineStore,
       fetchFn: hostDispatchFetch,
     });
+    // R15 集成：启动时清扫 orphan pending（R12 收口的最后一块——reconcilePending
+    // 此前只有实现与单测，没有任何调用方）。带当前聊天会话调用：turn: 文档在
+    // 会话覆盖层（0.9.42 起），不带 session 读裸 store 永远查不到已提交回合。
+    // fire-and-forget：绝不阻塞启动；.catch 防止异步失败逃出 connectOnce 被外层
+    // catch 吞掉成静默失效（0.9.2 教训）。其他聊天的孤儿留待各自聊天启动时清。
+    try {
+      const startupSession = readAtlasSession(context);
+      void engine
+        .reconcilePending(startupSession)
+        .then((report) => {
+          if (report.cleaned > 0 || report.malformed > 0 || report.errors.length > 0) {
+            atlasLog(
+              "引擎",
+              `启动清理 orphan 挂单：扫 ${report.scanned} / 清 ${report.cleaned} / 留 ${report.kept} / 坏 ${report.malformed}` +
+                (report.errors.length > 0 ? ` / 错误 ${report.errors.length} 条` : ""),
+            );
+          }
+        })
+        .catch((error) => {
+          atlasLog("引擎", `启动清理 orphan 挂单失败（不影响使用）：${error instanceof Error ? error.message : String(error)}`);
+        });
+    } catch { /* 会话读取失败照常启动：挂单清理是收尾优化，不是启动前提 */ }
     // 引擎请求包装：每个 dispatch 记一条日志（方法 + 路径 + 结果码，绝不记请求体）
     const logApiCall = async (method, path, call) => {
       const startedAt = Date.now();

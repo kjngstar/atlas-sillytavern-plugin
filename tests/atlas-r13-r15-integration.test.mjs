@@ -96,6 +96,78 @@ test("R13-T3: reconcilePending cleans orphan pending created by best-effort remo
   assert.equal(remaining.length, 0, "orphan pending 已被清");
 });
 
+// ---- T3b：reconcilePending(session) —— turn 在会话覆盖层的 orphan（浏览器 0.9.42+ 主路径） ----
+// 背景（R15 集成发现）：0.9.42 起 turn: 文档只落会话（chatMetadata.atlas.turns），
+// 裸 store 永远查不到——不带 session 的 reconcile 在浏览器里一条 orphan 都清不掉，
+// 这正是 R12 残留「UI 启动钩子未接线」必须以带会话方式接的原因。
+test("R13-T3b: reconcilePending(session) cleans orphan whose turn doc lives only in session overlay", async () => {
+  const { core, store } = makeCore();
+  await store.write("pending:orphan-session", {
+    binding: { chatId: "chat-r13b" },
+    savedAt: 1,
+    request: { chatId: "chat-r13b" },
+  });
+  await store.write("pending:legit-session", {
+    binding: { chatId: "chat-r13b" },
+    savedAt: 2,
+    request: { chatId: "chat-r13b" },
+  });
+  const session = {
+    schemaVersion: 1,
+    rev: 1,
+    world: null,
+    binding: null,
+    maps: null,
+    geoAuto: {},
+    turns: {
+      "turn:chat-r13b:orphan-session": {
+        schemaVersion: 1,
+        receipt: { receiptId: "r1", status: "committed", retryable: false },
+      },
+    },
+  };
+
+  const report = await core.reconcilePending(session);
+  assert.equal(report.scanned, 2);
+  assert.equal(report.cleaned, 1, "会话内已提交回合对应的 pending 被清");
+  assert.equal(report.kept, 1, "未提交回合的 pending 必须保留");
+  const remaining = await store.list("pending:");
+  assert.deepEqual(remaining, ["pending:legit-session"], "只删 orphan，合法挂单原样保留");
+});
+
+// ---- T3c：不带 session 的同夹具 → 全保留（文档化「必须带会话调用」的理由） ----
+test("R13-T3c: reconcilePending() without session cannot see session turns, keeps everything", async () => {
+  const { core, store } = makeCore();
+  await store.write("pending:orphan-nosession", {
+    binding: { chatId: "chat-r13c" },
+    savedAt: 1,
+    request: { chatId: "chat-r13c" },
+  });
+  const session = {
+    schemaVersion: 1,
+    rev: 1,
+    world: null,
+    binding: null,
+    maps: null,
+    geoAuto: {},
+    turns: {
+      "turn:chat-r13c:orphan-nosession": {
+        schemaVersion: 1,
+        receipt: { receiptId: "r2", status: "committed", retryable: false },
+      },
+    },
+  };
+
+  const noSessionReport = await core.reconcilePending();
+  assert.equal(noSessionReport.cleaned, 0, "裸 store 查不到会话内的 turn，宁留勿删");
+  assert.equal(noSessionReport.kept, 1);
+  assert.equal(await store.list("pending:").then((n) => n.length), 1);
+
+  // 带上同一会话后即可判定 orphan（对照 T3b 语义）
+  const withSessionReport = await core.reconcilePending(session);
+  assert.equal(withSessionReport.cleaned, 1);
+});
+
 // ---- T4：集成 — locks + scale + frame 三层契约在文档流转中不丢 ----
 test("R13-T4: locked calibration survives scale hint round-trip via serialize/deserialize", () => {
   const doc = { calibrations: {} };

@@ -2643,9 +2643,16 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
     logs(): Record<string, unknown>[] {
       return shared.logs.map((entry) => ({ ...entry }));
     },
-    /** R12：清理 orphan pending（commit 已成功但 pending 没删）。UI 启动钩子 / 调试用。 */
-    async reconcilePending(): Promise<ReconcileReport> {
-      const report = await reconcilePendingCommits(deps.store);
+    /**
+     * R12/R15：清理 orphan pending（commit 已成功但 pending 没删）。UI 启动钩子 / 调试用。
+     * - 不带 session：对照裸 store（服务端模式 / 旧档迁移场景，turn 文档还在全局 store）。
+     * - 带 session：turn: 文档在会话覆盖层（0.9.42 起），必须经 createSessionOverlayStore
+     *   读当前会话的 turns 才能判定 orphan——裸 store 永远查不到，清了等于没清。
+     *   只能覆盖当前聊天：其他聊天的 turn 在各自 chatMetadata 里，不可见 → 保留（宁留勿删）。
+     */
+    async reconcilePending(session?: AtlasSessionDoc | null): Promise<ReconcileReport> {
+      const view = session ? createSessionOverlayStore(session, deps.store) : deps.store;
+      const report = await reconcilePendingCommits(view);
       if (report.cleaned > 0 || report.errors.length > 0) {
         shared.logs.push({
           at: deps.now ? deps.now() : Date.now(),
