@@ -3287,6 +3287,10 @@ function parseMapPoint(raw) {
   if (!isString(raw.name)) return null;
   if (!isNumber(raw.x) || !isNumber(raw.y)) return null;
   if (raw.regionId !== void 0 && raw.regionId !== null && !isString(raw.regionId)) return null;
+  if (raw.parentPointId !== void 0 && raw.parentPointId !== null) {
+    if (!isNumber(raw.parentPointId)) return null;
+    if (!Number.isInteger(raw.parentPointId) || raw.parentPointId <= 0) return null;
+  }
   if (raw.worldBook !== void 0) {
     if (!Array.isArray(raw.worldBook) || raw.worldBook.length > WORLD_BIBLE_MAX_ENTRIES) return null;
     for (const entry of raw.worldBook) {
@@ -3299,6 +3303,7 @@ function parseMapPoint(raw) {
     x: raw.x,
     y: raw.y,
     ...raw.regionId !== void 0 ? { regionId: raw.regionId } : {},
+    ...raw.parentPointId !== void 0 ? { parentPointId: raw.parentPointId } : {},
     ...Array.isArray(raw.worldBook) ? { worldBook: raw.worldBook.map((entry) => parseWorldBibleEntry(entry)).filter((entry) => entry !== null) } : {}
   };
 }
@@ -8466,6 +8471,37 @@ function parseAtlasWorldTurnDraftV2(text, ctx) {
           evidenceIds: evidenceIds(item.evidenceIds, `${path}.evidenceIds`, err, evidenceIdsSet)
         });
       });
+      const declaredRefs = new Set(locationsOut.map((l) => l.ref).filter((ref) => LOC_REF.test(ref)));
+      const parentOf = /* @__PURE__ */ new Map();
+      locationsOut.forEach((loc, i) => {
+        const parent = loc.parentLocationRef;
+        if (parent === null || !LOC_REF.test(loc.ref)) return;
+        if (!LOC_REF.test(parent)) return;
+        if (parent === loc.ref) {
+          err.push(`$.discoveries.locations[${i}].parentLocationRef`, `地点不能以自身为父：${loc.ref}`);
+          return;
+        }
+        if (!declaredRefs.has(parent)) {
+          err.push(`$.discoveries.locations[${i}].parentLocationRef`, `父引用未在本响应声明：${parent}`);
+          return;
+        }
+        parentOf.set(loc.ref, parent);
+      });
+      for (const start of parentOf.keys()) {
+        const seen = /* @__PURE__ */ new Set([start]);
+        let cursor = parentOf.get(start);
+        let hops = 0;
+        while (cursor && hops <= parentOf.size) {
+          if (seen.has(cursor)) {
+            const index = locationsOut.findIndex((l) => l.ref === start);
+            err.push(`$.discoveries.locations[${index}].parentLocationRef`, `父引用成环：${[...seen].join(" → ")} → ${cursor}`);
+            break;
+          }
+          seen.add(cursor);
+          cursor = parentOf.get(cursor);
+          hops += 1;
+        }
+      }
     }
     if (!Array.isArray(disc.characters)) err.push("$.discoveries.characters", "必须是数组");
     else if (disc.characters.length > MAX.characters) err.push("$.discoveries.characters", `超过上限 ${MAX.characters}`);

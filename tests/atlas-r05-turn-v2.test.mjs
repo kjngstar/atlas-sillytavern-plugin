@@ -464,3 +464,109 @@ test("A5 集成：同幂等键重复提交 → duplicate，地图不重建重复
   assert.equal((second.world.points ?? []).length, pointsAfterFirst, "不重复建点");
   assert.equal((second.world.characters ?? []).length, (first.world.characters ?? []).length, "不重复建人");
 });
+
+// ---------------------------------------------------------------------------
+// S2（0.9.55）：parentLocationRef 的草稿内结构校验
+//
+// 只查语法层能定论的三件事：自身父引用、父引用未在本响应声明、草稿内成环。
+// 已知 ID 是否存在属世界视图判断（S3），本层不判。
+// ---------------------------------------------------------------------------
+
+/** 把 locations 塞进首场戏草稿（其余字段保持合法）。 */
+function draftWithLocations(locations) {
+  const draft = firstSceneDraft();
+  draft.discoveries.locations = locations;
+  draft.scene = { resolution: "confirmed", locationRef: locations[0]?.ref ?? null, transition: "arrive", evidenceIds: ["ev1"] };
+  draft.npcUpdates = [];
+  draft.memories = [];
+  draft.events = [];
+  return draft;
+}
+
+test("S2：parentLocationRef 合法形态通过——null / 已知 ID / 本响应 new:loc / 缺省", () => {
+  const draft = draftWithLocations([
+    { ref: "new:loc:tower", name: "钟楼", aliases: [], regionRef: null, parentLocationRef: null, evidenceIds: ["ev1"] },
+    { ref: "new:loc:hall", name: "大堂", aliases: [], regionRef: null, parentLocationRef: "new:loc:tower", evidenceIds: ["ev1"] },
+    { ref: "new:loc:archive", name: "档案室", aliases: [], regionRef: null, parentLocationRef: "new:loc:hall", evidenceIds: ["ev1"] },
+    { ref: "new:loc:court", name: "庭院", aliases: [], regionRef: null, parentLocationRef: "9001", evidenceIds: ["ev1"] },
+    { ref: "new:loc:cellar", name: "地窖", aliases: [], regionRef: null, evidenceIds: ["ev1"] },
+  ]);
+  const parsed = parseAtlasWorldTurnDraftV2(JSON.stringify(draft), { baseRevision: 0, sources: SOURCES });
+  assert.equal(parsed.ok, true, `合法父引用应通过：${JSON.stringify(parsed.errors ?? [])}`);
+  const byRef = Object.fromEntries(parsed.draft.discoveries.locations.map((l) => [l.ref, l.parentLocationRef]));
+  assert.equal(byRef["new:loc:hall"], "new:loc:tower", "本响应 new:loc 父保留");
+  assert.equal(byRef["new:loc:archive"], "new:loc:hall", "两级父链保留");
+  assert.equal(byRef["new:loc:court"], "9001", "已知 ID 父在语法层放行（存在性交给 S3）");
+  assert.equal(byRef["new:loc:cellar"], null, "缺省父按 null 接受");
+});
+
+test("S2：自身父引用被拒绝并指向 $.discoveries.locations[i].parentLocationRef", () => {
+  const draft = draftWithLocations([
+    { ref: "new:loc:tower", name: "钟楼", aliases: [], regionRef: null, parentLocationRef: "new:loc:tower", evidenceIds: ["ev1"] },
+  ]);
+  const parsed = parseAtlasWorldTurnDraftV2(JSON.stringify(draft), { baseRevision: 0, sources: SOURCES });
+  assert.equal(parsed.ok, false, "自身父引用必须拒绝");
+  const paths = (parsed.errors ?? []).map((e) => e.path);
+  assert.ok(paths.includes("$.discoveries.locations[0].parentLocationRef"), `路径应精确，实际：${JSON.stringify(paths)}`);
+});
+
+test("S2：父引用未在本响应声明被拒绝", () => {
+  const draft = draftWithLocations([
+    { ref: "new:loc:hall", name: "大堂", aliases: [], regionRef: null, parentLocationRef: "new:loc:ghost", evidenceIds: ["ev1"] },
+  ]);
+  const parsed = parseAtlasWorldTurnDraftV2(JSON.stringify(draft), { baseRevision: 0, sources: SOURCES });
+  assert.equal(parsed.ok, false, "未声明的 new:loc 父必须拒绝");
+  const hit = (parsed.errors ?? []).find((e) => e.path === "$.discoveries.locations[0].parentLocationRef");
+  assert.ok(hit, "错误路径指向 parentLocationRef");
+  assert.match(String(hit.message), /未在本响应声明/, "说明是未声明而非不存在");
+});
+
+test("S2：草稿内两点互为父（成环）被拒绝", () => {
+  const draft = draftWithLocations([
+    { ref: "new:loc:a", name: "甲", aliases: [], regionRef: null, parentLocationRef: "new:loc:b", evidenceIds: ["ev1"] },
+    { ref: "new:loc:b", name: "乙", aliases: [], regionRef: null, parentLocationRef: "new:loc:a", evidenceIds: ["ev1"] },
+  ]);
+  const parsed = parseAtlasWorldTurnDraftV2(JSON.stringify(draft), { baseRevision: 0, sources: SOURCES });
+  assert.equal(parsed.ok, false, "两点互为父必须拒绝");
+  assert.ok(
+    (parsed.errors ?? []).some((e) => e.path.endsWith(".parentLocationRef") && /成环/.test(String(e.message))),
+    "报告成环",
+  );
+});
+
+test("S2：三点环被拒绝", () => {
+  const three = draftWithLocations([
+    { ref: "new:loc:a", name: "甲", aliases: [], regionRef: null, parentLocationRef: "new:loc:c", evidenceIds: ["ev1"] },
+    { ref: "new:loc:b", name: "乙", aliases: [], regionRef: null, parentLocationRef: "new:loc:a", evidenceIds: ["ev1"] },
+    { ref: "new:loc:c", name: "丙", aliases: [], regionRef: null, parentLocationRef: "new:loc:b", evidenceIds: ["ev1"] },
+  ]);
+  const parsed = parseAtlasWorldTurnDraftV2(JSON.stringify(three), { baseRevision: 0, sources: SOURCES });
+  assert.equal(parsed.ok, false, "三点环必须拒绝");
+  assert.ok(
+    (parsed.errors ?? []).some((e) => e.path.endsWith(".parentLocationRef") && /成环/.test(String(e.message))),
+    "报告成环",
+  );
+});
+
+test("S2：父引用形状非法（数字 / 对象 / 布尔）仍按原规则拒绝", () => {
+  for (const [label, bad] of [["数字", 9001], ["对象", {}], ["布尔", true]]) {
+    const draft = draftWithLocations([
+      { ref: "new:loc:hall", name: "大堂", aliases: [], regionRef: null, parentLocationRef: bad, evidenceIds: ["ev1"] },
+    ]);
+    const parsed = parseAtlasWorldTurnDraftV2(JSON.stringify(draft), { baseRevision: 0, sources: SOURCES });
+    assert.equal(parsed.ok, false, `父引用为${label}时必须拒绝`);
+    assert.ok(
+      (parsed.errors ?? []).some((e) => e.path === "$.discoveries.locations[0].parentLocationRef"),
+      `${label}：错误路径指向 parentLocationRef`,
+    );
+  }
+});
+
+test("S2：旧 v2 草稿无 parentLocationRef 字段仍按 null 接受", () => {
+  const draft = firstSceneDraft();
+  delete draft.discoveries.locations[0].parentLocationRef;
+  const parsed = parseAtlasWorldTurnDraftV2(JSON.stringify(draft), { baseRevision: 0, sources: SOURCES });
+  assert.equal(parsed.ok, true, `缺省字段应接受：${JSON.stringify(parsed.errors ?? [])}`);
+  assert.equal(parsed.draft.discoveries.locations[0].parentLocationRef, null, "缺省规范化成 null");
+});
+

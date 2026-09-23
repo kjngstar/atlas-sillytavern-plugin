@@ -212,6 +212,43 @@ export function parseAtlasWorldTurnDraftV2(text: string, ctx: AtlasV2ParseContex
           evidenceIds: evidenceIds(item.evidenceIds, `${path}.evidenceIds`, err, evidenceIdsSet),
         });
       });
+
+      // 0.9.55 S2：父引用的**草稿内**结构校验（已知 ID 是否存在由 S3 在世界视图判断）。
+      // 只查三件在语法层就能定论的事，避免把必然失败的本轮放进候选世界：
+      // 自身父引用、同一 new:loc 被重复声明、草稿内两点或多点互为父（环）。
+      const declaredRefs = new Set(locationsOut.map((l) => l.ref).filter((ref) => LOC_REF.test(ref)));
+      const parentOf = new Map<string, string>();
+      locationsOut.forEach((loc, i) => {
+        const parent = loc.parentLocationRef;
+        if (parent === null || !LOC_REF.test(loc.ref)) return;
+        // 已知 ID（数字串）不参与草稿内环检测：它指向已存在的地点，其父链不在本响应内。
+        if (!LOC_REF.test(parent)) return;
+        if (parent === loc.ref) {
+          err.push(`$.discoveries.locations[${i}].parentLocationRef`, `地点不能以自身为父：${loc.ref}`);
+          return;
+        }
+        if (!declaredRefs.has(parent)) {
+          err.push(`$.discoveries.locations[${i}].parentLocationRef`, `父引用未在本响应声明：${parent}`);
+          return;
+        }
+        parentOf.set(loc.ref, parent);
+      });
+      // 环检测：沿 parentOf 向上走，超过声明总数即说明有成环
+      for (const start of parentOf.keys()) {
+        const seen = new Set([start]);
+        let cursor = parentOf.get(start);
+        let hops = 0;
+        while (cursor && hops <= parentOf.size) {
+          if (seen.has(cursor)) {
+            const index = locationsOut.findIndex((l) => l.ref === start);
+            err.push(`$.discoveries.locations[${index}].parentLocationRef`, `父引用成环：${[...seen].join(" → ")} → ${cursor}`);
+            break;
+          }
+          seen.add(cursor);
+          cursor = parentOf.get(cursor);
+          hops += 1;
+        }
+      }
     }
     if (!Array.isArray(disc.characters)) err.push("$.discoveries.characters", "必须是数组");
     else if (disc.characters.length > MAX.characters) err.push("$.discoveries.characters", `超过上限 ${MAX.characters}`);
