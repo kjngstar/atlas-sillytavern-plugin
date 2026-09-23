@@ -410,12 +410,21 @@ function parseRelationUpdates(raw: unknown, err: V2Errors, evIds: Set<string>): 
     if (!toRef) err.push(`${path}.toRef`, "缺少 toRef");
     const key = isStr(item.key) ? item.key.trim() : "";
     if (!key) err.push(`${path}.key`, "缺少关系字段 key");
-    if (item.value === undefined) err.push(`${path}.value`, "缺少 value");
+    // 关系值语义（0.9.52 A3）：与账本 validateEffect 同一条判定规则——非空字符串或
+    // 有限数字。旧实现只查 `!== undefined`，会把 null / 布尔 / 对象 / 数组直接送进
+    // 应用层；空白字符串到账本才被拒。此处不擅自把非法对象 JSON.stringify 成字符串，
+    // 仍由 V2Errors 汇总拒绝整份草稿。
+    const value = item.value;
+    const validValue = typeof value === "number"
+      ? Number.isFinite(value)
+      : typeof value === "string" && value.trim().length > 0;
+    if (value === undefined) err.push(`${path}.value`, "缺少 value");
+    else if (!validValue) err.push(`${path}.value`, "必须是非空字符串或有限数字");
     out.push({
       fromRef,
       toRef,
       key,
-      value: item.value,
+      value,
       evidenceIds: evidenceIds(item.evidenceIds, `${path}.evidenceIds`, err, evIds),
     });
   });

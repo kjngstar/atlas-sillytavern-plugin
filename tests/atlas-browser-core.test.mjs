@@ -1033,3 +1033,109 @@ test("callAtlasWorldTurnApi：promptSegments 装配消息数组，占位符替�
   );
   assert.ok(!capturedBody.messages.some((m) => m.content.includes("【世界书资料（当前角色卡")), "无 supplement 不出现资料块");
 });
+
+// ---------------------------------------------------------------------------
+// A7（0.9.52）：长度截断识别与超时分类
+//
+// 现场：maxTokens 调大后模型 HTTP 200 返回约 68 秒，正文只有 <think>…</think>，
+// 里面若干互相矛盾的 JSON 草稿。插件当时无法区分「截断」与「格式错误」，
+// 只能报 RESPONSE_MALFORMED，用户看不出该调上限还是该改提示词。
+// ---------------------------------------------------------------------------
+
+/** 造一个返回固定 JSON 正文的假 fetch，并记录调用次数。 */
+function makeJsonFetch(payload, { onCall } = {}) {
+  let calls = 0;
+  const fetchFn = async (_url, init) => {
+    calls += 1;
+    if (onCall) onCall(init);
+    return {
+      ok: true,
+      status: 200,
+      json: async () => payload,
+      text: async () => JSON.stringify(payload),
+    };
+  };
+  return { fetchFn, callCount: () => calls };
+}
+
+const TRUNCATION_PRESET = { name: "t", endpoint: "https://api.example.com/v1/chat/completions", model: "m1", apiKey: "" };
+const TRUNCATION_INPUT = { injectionText: "世界上下文", userText: "我出发了。", assistantText: "马车驶向枫叶城。" };
+
+test("A7 截断：finish_reason=length + <think> 两份矛盾草稿 → RESPONSE_MALFORMED 可重试、一次 fetch、不抢救草稿", async () => {
+  const reasoning = `<think>先试一版：{"schemaVersion":2,"baseRevision":0}</think><think>再试一版：{"schemaVersion":2,"scene":{"locationRef":"999"}}</think>`;
+  const { fetchFn, callCount } = makeJsonFetch({
+    choices: [{ finish_reason: "length", message: { content: reasoning } }],
+  });
+
+  const result = await callAtlasWorldTurnApi(TRUNCATION_PRESET, TRUNCATION_INPUT, { fetchFn });
+
+  assert.equal(result.ok, false, "截断必须判失败");
+  assert.equal(result.code, ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "复用现有错误码，不新增公共码");
+  assert.equal(result.retryable, true, "截断可重试（调上限 / 换模型后）");
+  assert.match(String(result.message), /截断/, "报错文字点明截断");
+  assert.equal(callCount(), 1, "恰好一次 fetch（不自动重试）");
+  assert.ok(!String(result.message).includes("schemaVersion"), "报错不得泄露推理草稿正文");
+});
+
+test("A7 截断优先：即使正文里含完整合法 JSON，finish_reason=length 仍不提交", async () => {
+  const complete = JSON.stringify({ schemaVersion: 2, baseRevision: 0, summary: "看似完整" });
+  const { fetchFn } = makeJsonFetch({
+    choices: [{ finish_reason: "length", message: { content: complete } }],
+  });
+
+  const result = await callAtlasWorldTurnApi(TRUNCATION_PRESET, TRUNCATION_INPUT, { fetchFn });
+  assert.equal(result.ok, false, "截断即使正文像完整 JSON 也不得当成成功");
+  assert.equal(result.code, ATLAS_ERROR_CODES.RESPONSE_MALFORMED);
+  assert.match(String(result.message), /截断/);
+});
+
+test("A7 兼容：finish_reason=stop + 合法 JSON → 成功；缺失 finish_reason 保持旧行为", async () => {
+  const body = JSON.stringify({ schemaVersion: 2, baseRevision: 0, summary: "正常回合" });
+
+  const stopped = await callAtlasWorldTurnApi(TRUNCATION_PRESET, TRUNCATION_INPUT, {
+    fetchFn: makeJsonFetch({ choices: [{ finish_reason: "stop", message: { content: body } }] }).fetchFn,
+  });
+  assert.equal(stopped.ok, true, `stop + 合法 JSON 应成功：${stopped.ok ? "" : stopped.message}`);
+  assert.equal(stopped.text, body, "正文原样返回");
+
+  const missing = await callAtlasWorldTurnApi(TRUNCATION_PRESET, TRUNCATION_INPUT, {
+    fetchFn: makeJsonFetch({ choices: [{ message: { content: body } }] }).fetchFn,
+  });
+  assert.equal(missing.ok, true, "无 finish_reason 的兼容提供商按旧规则放行");
+
+  const nullReason = await callAtlasWorldTurnApi(TRUNCATION_PRESET, TRUNCATION_INPUT, {
+    fetchFn: makeJsonFetch({ choices: [{ finish_reason: null, message: { content: body } }] }).fetchFn,
+  });
+  assert.equal(nullReason.ok, true, "finish_reason=null 不作为截断依据");
+
+  // 不猜测其他厂商停止码
+  const other = await callAtlasWorldTurnApi(TRUNCATION_PRESET, TRUNCATION_INPUT, {
+    fetchFn: makeJsonFetch({ choices: [{ finish_reason: "max_tokens", message: { content: body } }] }).fetchFn,
+  });
+  assert.equal(other.ok, true, "非 length 的停止码不由本规则判定");
+});
+
+test("A7 超时：fake fetch 尊重 AbortSignal 且人为超时 → API_TIMEOUT，与截断可区分", async () => {
+  // 不真的等待：fetch 收到 abort 立即 reject，超时阈值压到最小合法值以上一点
+  const fetchFn = async (_url, init) => {
+    return new Promise((_resolve, reject) => {
+      const signal = init?.signal;
+      if (!signal) return; // 永不 resolve：由外层超时兜底
+      signal.addEventListener("abort", () => {
+        const err = new Error("aborted");
+        err.name = "AbortError";
+        reject(err);
+      });
+    });
+  };
+
+  const result = await callAtlasWorldTurnApi(
+    { ...TRUNCATION_PRESET, timeoutMs: 60 },
+    TRUNCATION_INPUT,
+    { fetchFn },
+  );
+
+  assert.equal(result.ok, false, "超时必须失败");
+  assert.equal(result.code, ATLAS_ERROR_CODES.API_TIMEOUT, `应为 API_TIMEOUT，实际 ${result.code}`);
+  assert.notEqual(result.code, ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "超时不得混成格式错误");
+});

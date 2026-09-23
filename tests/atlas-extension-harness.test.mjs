@@ -829,6 +829,151 @@ test("回合：commit 失败 → retryableCommit；retry 沿用原键且成功�
 });
 
 // ---------------------------------------------------------------------------
+// A15（0.9.52）：HTTP 200 + receipt.status="failed" 的 UI 状态
+//
+// 现场：11:33 的 /turns/retry 返回 HTTP 200，但回执是 status:"failed"、世界时间 0→0。
+// 旧实现只看 HTTP 200 与 body.ok 就当成功：清 lastError、清挂单、刷新界面、
+// 同步世界书——用户看到「重试成功」，实际世界一步没动。
+// ---------------------------------------------------------------------------
+
+/**
+ * 构造回执夹具（A15）。字段形状对齐 makeApi 内部的 defaultReceipt，
+ * 但定义在模块级以便测试直接使用；makeApi 的 turnBehavior.receipt /
+ * retryReceipt 支持整个对象覆盖，因此无需改动既有 mock。
+ */
+function receiptFixture(overrides = {}) {
+  return {
+    receiptId: "receipt-1",
+    status: "committed",
+    branchId: null,
+    previousTime: 12,
+    currentTime: 13,
+    triggeredNpcIds: ["npc-1"],
+    adoptedEventIds: ["evt-1"],
+    summary: "时间推进一个时段；林拾在集市有了新见闻。",
+    retryable: false,
+    ...overrides,
+  };
+}
+
+/** 构造失败回执（HTTP 200 包着 status:"failed" 的现场形状）。 */
+function failedReceipt(summary, retryable = true) {
+  return receiptFixture({
+    status: "failed",
+    retryable,
+    summary,
+    previousTime: 0,
+    currentTime: 0,
+    adoptedEventIds: [],
+    triggeredNpcIds: [],
+  });
+}
+
+test("A15 commit：HTTP 200 + receipt failed → 展示失败摘要、保留挂单、不刷新界面", async () => {
+  const { api, core } = await readyCore({
+    receipt: failedReceipt("关系值必须是非空字符串或有限数字"),
+  });
+
+  await core.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "推进剧情。" });
+  await core.handleEvent("MESSAGE_RECEIVED", { assistantMessageId: "m-1", assistantText: "剧情推进了。" });
+  const refreshesBefore = api.calls.filter((c) => c.path === "/state").length;
+  await flush();
+
+  equal(core.getState().lastError, "关系值必须是非空字符串或有限数字", "失败摘要进入 lastError");
+  ok(core.getState().retryableCommit !== null, "retryable=true 时保留挂单");
+  equal(core.getState().retryableCommit.chatId, "chat-a", "挂单归属当前聊天");
+  equal(core.getState().receipts.length, 1, "失败回执仍入列（用户能看到摘要）");
+  equal(core.getState().receipts[0].status, "failed", "回执状态记为 failed");
+  equal(
+    api.calls.filter((c) => c.path === "/state").length,
+    refreshesBefore,
+    "失败不得刷新（地图与附近列表不误显示成功）",
+  );
+});
+
+test("A15 commit：失败且 retryable=false → 不保留挂单（避免无效重试）", async () => {
+  const { core } = await readyCore({ receipt: failedReceipt("被内容审核拦截", false) });
+  await core.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "推进剧情。" });
+  await core.handleEvent("MESSAGE_RECEIVED", { assistantMessageId: "m-1", assistantText: "剧情推进了。" });
+  await flush();
+
+  equal(core.getState().lastError, "被内容审核拦截", "失败摘要可见");
+  equal(core.getState().retryableCommit, null, "不可重试时不保留挂单");
+});
+
+test("A15 retry：HTTP 200 + receipt failed → 挂单仍在、不刷新、不误报成功", async () => {
+  const { api, core } = await readyCore({
+    commitError: "首次失败",
+    retryReceipt: failedReceipt("关系值必须是非空字符串或有限数字"),
+  });
+  await core.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "推进剧情。" });
+  await core.handleEvent("MESSAGE_RECEIVED", { assistantMessageId: "m-1", assistantText: "剧情推进了。" });
+  await flush();
+  ok(core.getState().retryableCommit !== null, "前置：首次 commit 失败留下挂单");
+
+  const refreshesBefore = api.calls.filter((c) => c.path === "/state").length;
+  await core.retryLastCommit();
+
+  equal(core.getState().lastError, "关系值必须是非空字符串或有限数字", "retry 失败摘要可见");
+  ok(core.getState().retryableCommit !== null, "失败回执仍可再试（按钮仍可用）");
+  equal(core.getState().retryableCommit.userMessageId, "m-0", "挂单键未被破坏");
+  equal(
+    api.calls.filter((c) => c.path === "/state").length,
+    refreshesBefore,
+    "失败不得触发刷新（地图/附近不误显示成功）",
+  );
+});
+
+test("A15 retry：连续失败持续保留挂单；随后成功一次即清空", async () => {
+  // 两次失败：挂单始终在，且每次都展示真实摘要
+  const failing = await readyCore({
+    commitError: "首次失败",
+    retryReceipt: failedReceipt("关系值必须是非空字符串或有限数字"),
+  });
+  await failing.core.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "推进剧情。" });
+  await failing.core.handleEvent("MESSAGE_RECEIVED", { assistantMessageId: "m-1", assistantText: "剧情推进了。" });
+  await flush();
+
+  await failing.core.retryLastCommit();
+  ok(failing.core.getState().retryableCommit !== null, "第一次 retry 失败后仍可再试");
+  await failing.core.retryLastCommit();
+  ok(failing.core.getState().retryableCommit !== null, "第二次 retry 失败后仍可再试");
+  equal(failing.api.calls.filter((c) => c.path === "/turns/retry").length, 2, "两次 retry 请求");
+
+  // 成功路径：挂单清空、错误清空（与既有用例同口径，此处锁定 A14 未破坏成功分支）
+  const good = await readyCore({ commitError: "首次失败" });
+  await good.core.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "推进剧情。" });
+  await good.core.handleEvent("MESSAGE_RECEIVED", { assistantMessageId: "m-1", assistantText: "剧情推进了。" });
+  await flush();
+  ok(good.core.getState().retryableCommit !== null, "前置：有挂单");
+  await good.core.retryLastCommit();
+  equal(good.core.getState().retryableCommit, null, "成功后清空挂单");
+  equal(good.core.getState().lastError, null, "成功后清空 lastError");
+});
+
+test("A15 归属：切到另一聊天后，该聊天的失败回执只属于它自己", async () => {
+  // 归属守卫（state.chatId !== 请求聊天）在 A13 分支里同样是写入门。此处用两次独立
+  // 回合验证：chat-a 的失败状态不会因为后续操作泄漏给别的聊天状态。
+  const { api, core } = await readyCore({
+    receipt: failedReceipt("chat-a 的关系值非法"),
+  });
+  await core.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "推进剧情。" });
+  await core.handleEvent("MESSAGE_RECEIVED", { assistantMessageId: "m-1", assistantText: "剧情推进了。" });
+  await flush();
+
+  equal(core.getState().chatId, "chat-a", "仍在 chat-a");
+  equal(core.getState().lastError, "chat-a 的关系值非法", "失败摘要归属 chat-a");
+  equal(core.getState().receipts.length, 1, "失败回执记在 chat-a 桶");
+  equal(core.getState().receipts[0].chatId, "chat-a", "回执记录的 chatId 归属明确");
+
+  // 回执列表按聊天归属，不得混入其它聊天条目
+  ok(
+    core.getState().receipts.every((r) => r.chatId === "chat-a"),
+    "回执列表中没有混入其它聊天的条目",
+  );
+});
+
+// ---------------------------------------------------------------------------
 // ATLAS-06：生成门控 + 楼层变动回退
 // ---------------------------------------------------------------------------
 

@@ -272,3 +272,195 @@ test("v2 baseRevision accepts the exact fractional world cursor", () => {
   const stale = parseAtlasWorldTurnDraftV2(JSON.stringify(draft), { baseRevision: 418.08, sources: SOURCES });
   assert.equal(stale.ok, false);
 });
+
+// ---------------------------------------------------------------------------
+// A4（0.9.52）：v2 关系字段入口——值必须是非空字符串或有限数字
+//
+// 旧实现只查 `item.value === undefined`，null / false / {} / [] / "  " 全都能进
+// 应用层。本组用例固化新边界；判定规则与账本 validateEffect 完全同一条。
+// ---------------------------------------------------------------------------
+
+/** 把 relationUpdates 塞进首场戏草稿（其余字段保持合法，避免被别的校验提前挡住）。 */
+function draftWithRelation(value, overrides = {}) {
+  const draft = firstSceneDraft();
+  draft.relationUpdates = [
+    { fromRef: "new:npc:girl", toRef: "new:npc:girl", key: "stance", value, evidenceIds: ["ev1"] },
+  ];
+  return { ...draft, ...overrides };
+}
+
+test("A4 解析器：关系值 \"依赖\" 与数字 3 合法", () => {
+  for (const [label, value] of [["文字", "依赖"], ["数字", 3]]) {
+    const parsed = parseAtlasWorldTurnDraftV2(JSON.stringify(draftWithRelation(value)), { baseRevision: 0, sources: SOURCES });
+    assert.equal(parsed.ok, true, `${label}关系值应合法：${JSON.stringify(parsed.errors ?? [])}`);
+    assert.equal(parsed.draft.relationUpdates.length, 1, `${label} 关系条目已保留`);
+    assert.equal(parsed.draft.relationUpdates[0].value, value, `${label} 关系值原样保留（不转换）`);
+  }
+});
+
+test("A4 解析器：null / false / {} / [] / \"  \" 全部报告 $.relationUpdates[0].value", () => {
+  for (const [label, value] of [
+    ["null", null],
+    ["false", false],
+    ["true", true],
+    ["对象", {}],
+    ["数组", []],
+    ["纯空白字符串", "  "],
+    ["空字符串", ""],
+  ]) {
+    const parsed = parseAtlasWorldTurnDraftV2(JSON.stringify(draftWithRelation(value)), { baseRevision: 0, sources: SOURCES });
+    assert.equal(parsed.ok, false, `${label} 必须被拒绝`);
+    const paths = (parsed.errors ?? []).map((e) => e.path ?? e.schemaPath ?? String(e));
+    assert.ok(
+      paths.includes("$.relationUpdates[0].value"),
+      `${label} 错误路径应含 $.relationUpdates[0].value，实际：${JSON.stringify(paths)}`,
+    );
+  }
+});
+
+test("A4 解析器：缺少 value 仍报告「缺少 value」（与非法值区分）", () => {
+  const draft = firstSceneDraft();
+  draft.relationUpdates = [{ fromRef: "new:npc:girl", toRef: "new:npc:girl", key: "stance", evidenceIds: ["ev1"] }];
+  const parsed = parseAtlasWorldTurnDraftV2(JSON.stringify(draft), { baseRevision: 0, sources: SOURCES });
+  assert.equal(parsed.ok, false);
+  const hit = (parsed.errors ?? []).find((e) => (e.path ?? e.schemaPath) === "$.relationUpdates[0].value");
+  assert.ok(hit, "必须报告 value 路径");
+  assert.match(String(hit.message ?? hit), /缺少/, "缺省与非法值给出不同说明");
+});
+
+test("A4 解析器：scene unknown + locationRef:null + 非空 discoveries.locations 可解析（发现 ≠ 定位）", () => {
+  const draft = firstSceneDraft({
+    scene: { resolution: "unknown", locationRef: null, transition: "stay", evidenceIds: ["ev1"] },
+  });
+  assert.ok(draft.discoveries.locations.length > 0, "前置：确有发现地点");
+  const parsed = parseAtlasWorldTurnDraftV2(JSON.stringify(draft), { baseRevision: 0, sources: SOURCES });
+  assert.equal(parsed.ok, true, `未知场景 + 有发现地点必须可解析：${JSON.stringify(parsed.errors ?? [])}`);
+  assert.equal(parsed.draft.scene.resolution, "unknown");
+  assert.equal(parsed.draft.scene.locationRef, null);
+});
+
+// ---------------------------------------------------------------------------
+// A5（0.9.52）：关系 + 地图 + 原子提交集成（合法一次提交 / 非法零写入 / 途中不假装到达）
+// ---------------------------------------------------------------------------
+
+/** 途中场景草稿：有发现地点与文字关系，但玩家仍在路上（不得锚定到目的地）。 */
+function travelDraft(overrides = {}) {
+  return {
+    schemaVersion: 2,
+    baseRevision: 0,
+    duration: 6,
+    evidence: [{ id: "ev1", sourceId: "msg:a", quote: "废墟深处" }],
+    discoveries: {
+      locations: [{ ref: "new:loc:maple", name: "枫叶城", aliases: [], regionRef: null, parentLocationRef: null, evidenceIds: ["ev1"] }],
+      characters: [{ ref: "new:npc:girl", displayName: "未具名少女", aliases: [], description: "同行者", evidenceIds: ["ev1"] }],
+    },
+    // 关键：车还在路上 → 场景未知、不锚定玩家
+    scene: { resolution: "unknown", locationRef: null, transition: "stay", evidenceIds: ["ev1"] },
+    identityUpdates: [],
+    npcUpdates: [],
+    // 关键：文字关系值（旧账本会以 Number("依赖")=NaN 整单拒绝）
+    relationUpdates: [
+      { fromRef: "char-main", toRef: "new:npc:girl", key: "stance", value: "依赖", evidenceIds: ["ev1"] },
+    ],
+    memories: [],
+    worldFlags: [],
+    events: [{ summary: "马车驶向枫叶城，尚未抵达", entityRefs: [], evidenceIds: ["ev1"] }],
+    mapScaleHints: [],
+    summary: "途中：已知目的地枫叶城，同行关系转为依赖",
+    ...overrides,
+  };
+}
+
+function applyTravel(parsed, world, request, extra = {}) {
+  return applyAtlasV2Turn(world, {
+    draft: parsed.draft,
+    request,
+    branchId: null,
+    currentTime: 0,
+    currentPointId: "1",
+    currentRegionId: "start",
+    now: 2,
+    ...extra,
+  });
+}
+
+test("A5 集成：文字关系 + 新地点一次提交——关系可读、地点上图、玩家未被标到目的地", () => {
+  const world = baseWorld();
+  const pointsBefore = (world.points ?? []).length;
+  const parsed = parseAtlasWorldTurnDraftV2(JSON.stringify(travelDraft()), { baseRevision: 0, sources: SOURCES });
+  assert.equal(parsed.ok, true, `草稿应可解析：${JSON.stringify(parsed.errors ?? [])}`);
+
+  const output = applyTravel(parsed, world, makeRequest());
+  assert.equal(output.receipt.status, "committed", `应提交成功：${output.receipt.summary}`);
+
+  // 新地点确实入库并为地图所见
+  const mapleId = output.refResolution.locations.find((l) => l.ref === "new:loc:maple")?.pointId;
+  assert.ok(mapleId !== undefined && mapleId !== null, "枫叶城分配到持久 ID");
+  const maple = (output.world.points ?? []).find((p) => String(p.id) === String(mapleId));
+  assert.ok(maple, "枫叶城在 world.points（地图可见）");
+  assert.equal(maple.name, "枫叶城");
+  assert.equal((output.world.points ?? []).length, pointsBefore + 1, "恰好新增 1 个地点");
+
+  // 文字关系入账且可读（原字符串，未数值化）
+  const girlId = output.refResolution.characters.find((c) => c.ref === "new:npc:girl")?.entityId;
+  const relationEffect = (output.world.stateEvents ?? [])
+    .flatMap((e) => e.effects)
+    .find((f) => f.kind === "adjustRelation");
+  assert.ok(relationEffect, "关系 effect 已入账本");
+  assert.equal(relationEffect.value, "依赖", "账本保留原文字");
+  const view = resolveAtlasRuntimeView(output.world, { branchId: null, at: output.receipt.currentTime });
+  assert.ok(view.npcs.some((n) => n.id === girlId), "同行者进入统一视图");
+
+  // 途中不假装到达：游标不得被改成枫叶城
+  assert.notEqual(String(output.receipt.currentLocationId ?? ""), String(mapleId), "玩家未被锚定到目的地枫叶城");
+  assert.equal(output.receipt.currentLocationId ?? null, null, "未知场景不写当前位置游标");
+});
+
+test("A5 集成：合法地点 + 非法关系值 {} → 入口拦下，世界零变化", () => {
+  const world = baseWorld();
+  const before = JSON.stringify(world);
+  const draft = travelDraft();
+  draft.relationUpdates = [
+    { fromRef: "char-main", toRef: "new:npc:girl", key: "stance", value: {}, evidenceIds: ["ev1"] },
+  ];
+  const parsed = parseAtlasWorldTurnDraftV2(JSON.stringify(draft), { baseRevision: 0, sources: SOURCES });
+  assert.equal(parsed.ok, false, "非法的关系值对象必须在入口被拦下");
+  const paths = (parsed.errors ?? []).map((e) => e.path ?? e.schemaPath ?? String(e));
+  assert.ok(paths.includes("$.relationUpdates[0].value"), `错误路径应指向 value，实际：${JSON.stringify(paths)}`);
+  assert.equal(JSON.stringify(world), before, "解析失败不得改动世界");
+});
+
+test("A5 集成：应用阶段拒绝也零写入（未知地点引用走账本/应用层错路径）", () => {
+  const world = baseWorld();
+  const before = JSON.stringify(world);
+  const draft = travelDraft();
+  draft.relationUpdates[0].toRef = "new:npc:girl";
+  draft.discoveries.characters = []; // 未声明的 new:npc:girl → 应用层拒绝
+  const parsed = parseAtlasWorldTurnDraftV2(JSON.stringify(draft), { baseRevision: 0, sources: SOURCES });
+  assert.equal(parsed.ok, true, "语法层放行（语义校验在应用层）");
+  assert.throws(
+    () => applyTravel(parsed, world, makeRequest()),
+    (err) => err instanceof AtlasError,
+    "应用层必须拒绝未声明引用",
+  );
+  assert.equal(JSON.stringify(world), before, "应用层拒绝后原世界零变化");
+});
+
+test("A5 集成：同幂等键重复提交 → duplicate，地图不重建重复点", () => {
+  const world = baseWorld();
+  const request = makeRequest();
+  const parsed = parseAtlasWorldTurnDraftV2(JSON.stringify(travelDraft()), { baseRevision: 0, sources: SOURCES });
+  assert.equal(parsed.ok, true);
+
+  const first = applyTravel(parsed, world, request);
+  assert.equal(first.receipt.status, "committed");
+  const pointsAfterFirst = (first.world.points ?? []).length;
+
+  const second = applyTravel(parsed, first.world, request, {
+    currentTime: first.receipt.currentTime,
+    currentPointId: first.receipt.currentLocationId ?? "1",
+  });
+  assert.equal(second.receipt.status, "duplicate", "同键重试返回 duplicate");
+  assert.equal((second.world.points ?? []).length, pointsAfterFirst, "不重复建点");
+  assert.equal((second.world.characters ?? []).length, (first.world.characters ?? []).length, "不重复建人");
+});

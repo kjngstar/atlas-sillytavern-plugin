@@ -1546,6 +1546,11 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
     INJECTION_UNAVAILABLE: "酒馆缺少扩展提示词接口；请检查版本及扩展加载状态。",
     HOST_EVENT_UNAVAILABLE: "酒馆缺少所需事件；请检查版本及扩展加载状态。",
     STATE_REFRESH_FAILED: "世界状态读取失败；刷新工作台后重试。",
+    // 0.9.52 A16：HTTP 200 只说明模型接口处理成功，不代表世界已更新。这三种代码
+    // 都表示「模型接口通了但世界没动」，必须引导去看失败回执并重试。
+    WORLD_TURN_V2_REJECTED: "模型输出未通过 v2 协议校验（格式/证据/关系字段），世界未更新；到变化页查看失败回执与具体字段路径后重试。",
+    WORLD_TURN_COMMIT_FAILED: "模型输出可解析但账本拒绝（例如关系值非法），世界未更新；到变化页查看失败回执后重试。",
+    COMMIT_FAILED: "回合提交失败，世界未更新；到变化页查看失败回执后重试。",
   };
 
   function diagnosticEntries() {

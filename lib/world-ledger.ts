@@ -109,7 +109,16 @@ function validateEffect(world: World, effect: StateEffect, entityIds: Set<string
       if (issue) return issue;
       const issue2 = requireEntity(effect.targetEntityId);
       if (issue2) return issue2;
-      if (!isFinite(Number(effect.value))) return `关系值必须是有限数字或字符串`;
+      // 关系值语义（0.9.52 A2）：非空字符串或有限数字，原样落账。
+      // 旧实现 `!isFinite(Number(effect.value))` 有两个方向都错的后果：
+      // - `Number("依赖")` = NaN → 合法文字关系被整单拒绝，而错误文字却自称接受字符串；
+      // - `Number("")` / `Number("   ")` = 0（有限）→ 空关系值反被放过。
+      // applyEffectToState 本来就按原值写 state[relation:...]，此处只做形状判定。
+      const value = effect.value;
+      const valid = typeof value === "number"
+        ? Number.isFinite(value)
+        : typeof value === "string" && value.trim().length > 0;
+      if (!valid) return `关系值必须是非空字符串或有限数字`;
       return null;
     }
     case "addTag": {

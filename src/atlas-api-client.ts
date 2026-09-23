@@ -197,7 +197,8 @@ export const DEFAULT_PROMPT_SEGMENTS_V2: Array<{ role: string; name: string; mai
       "- npcUpdates 每项 {entityRef,location,presence,status,evidenceIds}：entityRef=已知实体ID 或 new:npc: 引用；location={op,locationRef}，op=set 必须给 locationRef（已知ID或 new:loc:），keep/clear 时 locationRef=null；presence=present/left/unknown（没提到=保持 unknown，不要写 left；「离开了房间」才写 left，目的地未知用 op=clear）；status≤160 字或 null。\n" +
       "- identityUpdates 每项 {entityRef,displayName,addAliases,evidenceIds}：人物获得真名或新称呼时更新显示名 / 别名，不重建实体。不确定是同一个人就不要合并；同场有多个相似人物时更要谨慎。\n" +
       "- 同行关系与同地点分开：adjustRelation 记关系，location 只写本轮实际同处一地；不要让熟人自动跟随玩家移动。\n" +
-      "- relationUpdates 每项 {fromRef,toRef,key,value,evidenceIds}；memories 每项 {entityRef,text,evidenceIds}（≤500 字，只记实际经历）；worldFlags 每项 {key,value,evidenceIds}；events 每项 {summary,entityRefs,evidenceIds}。\n" +
+      "- relationUpdates 每项 {fromRef,toRef,key,value,evidenceIds}：value 只填非空文字或有限数字（例如 \"依赖\" 或 3）；没有可证实的关系变化就给 []，不要输出 null、对象、数组或空串。memories 每项 {entityRef,text,evidenceIds}（≤500 字，只记实际经历）；worldFlags 每项 {key,value,evidenceIds}；events 每项 {summary,entityRefs,evidenceIds}。\n" +
+      "- 途中示例：剧情提到出发地与目的地（如「从圣罗兰乘马车前往枫叶城」）且有引文时，可把目的地登记为 discoveries.locations；但车辆仍在路上、无法确认玩家当前固定地点时，scene 必须给 resolution=unknown、locationRef=null、transition=stay。NPC 去向不明用 location={op:\"keep\",locationRef:null}；确实离开旧地点且必须清空时才用 op=clear。绝不用 op=set 配 locationRef=null，也绝不把目的地当成玩家当前位置。\n" +
       "- duration 是有限非负整数 0..10000；开场识别 / 对账类请求给 0。\n" +
       "角色卡标题可能是场景标题，不一定代表玩家或一个人物；不要把已知 ID 仅凭名字相似就套用。不从叙事推断人物内心：不知道就留空，事件摘要不是实时心声。宁可输出空数组，也不要虚构事实。\n已有状态本轮未提到时沿用：没提人物不等于离场、死亡或消失；角色卡和世界书不等于当前在场名单。证据矛盾标 conflict，证据不足标 unknown，不用猜测掩盖缺失。\n未知地区用 null，不能自动归入起点或新建通用起点。相同名字的地点要结合地区与父场景；未具名人物用稳定描述称呼，不编造真名。\n所有新增、移动、修改都关联本轮 evidenceIds；quote 只能是 msg:u 或 msg:a 的原文片段且不超过 240 字。别名最多 8 个，每个不超过 64 字；每轮新地点和人物各最多 12，证据最多 64，变化数组各最多 64。\nmapScaleHints 只引用确有有效 frame 的地图；status=estimated/grounded/unknown/conflict，unknown/conflict 的 extentMeters 为 null。人工锁定不建议覆盖；窗口大小、缩放和随机排版不是距离证据。只输出本轮必要变化，不重写全世界。",
   },
@@ -462,7 +463,7 @@ export async function callAtlasWorldTurnApi(
       return fail(ATLAS_ERROR_CODES.SERVICE_OFFLINE, "无法连接推演服务，请检查网络或服务状态。", true);
     }
 
-    const parseCall = async (resp: Response): Promise<{ text: string | null; gatewayError: string | null; rawText: string; emptyChoices: boolean }> => {
+    const parseCall = async (resp: Response): Promise<{ text: string | null; gatewayError: string | null; rawText: string; emptyChoices: boolean; truncated: boolean }> => {
       let rawText = "";
       try {
         rawText = typeof resp.text === "function" ? await resp.text() : JSON.stringify(await resp.json());
@@ -475,6 +476,10 @@ export async function callAtlasWorldTurnApi(
       } catch {
         payload = firstSsePayload(rawText);
       }
+      // 0.9.52 A6：长度截断判定只认 finish_reason 恰好等于 "length"。
+      // stop / 缺失 / null 一律 false——不猜测其他厂商停止码，也不因为「正文里刚好
+      // 有完整 JSON」就当成没截断（截断优先，见下面的检查顺序）。
+      const truncated = choiceFinishReason(payload) === "length";
       const text = extractAssistantText(payload);
       if (text === null || text.trim().length === 0) {
         // 0.9.24 空回复专项：choices 数组存在且为空（Gemini 系安全过滤静默拦截的典型形状）
@@ -483,9 +488,9 @@ export async function callAtlasWorldTurnApi(
           Array.isArray((payload as { choices?: unknown }).choices) &&
           (payload as { choices: unknown[] }).choices.length === 0,
         );
-        return { text: null, gatewayError: gatewayErrorMessage(payload), rawText, emptyChoices };
+        return { text: null, gatewayError: gatewayErrorMessage(payload), rawText, emptyChoices, truncated };
       }
-      return { text: text.trim(), gatewayError: null, rawText, emptyChoices: false };
+      return { text: text.trim(), gatewayError: null, rawText, emptyChoices: false, truncated };
     };
 
     let parsed = await parseCall(response);
@@ -522,6 +527,18 @@ export async function callAtlasWorldTurnApi(
     if (!response.ok && !rescueAttempted) {
       const mapped = errorMessageForStatus(status);
       return fail(mapped.code, mapped.message, mapped.retryable, status);
+    }
+
+    // 0.9.52 A6：长度截断优先于任何正文抢救。finish_reason:"length" 说明模型是被输出
+    // 上限截断的，<think> 里可能残留若干互相矛盾的 JSON 草稿——绝不从中挑一个提交。
+    // 位置刻意放在 HTTP 失败判定之后、按 text 判空之前：HTTP 错误仍报它自己的错误码。
+    if (parsed.truncated) {
+      return fail(
+        ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
+        "模型输出被长度截断，本轮未提交；减少推理/调整模型可用上限后重试。",
+        true,
+        status,
+      );
     }
 
     const text = parsed.text;
@@ -672,6 +689,21 @@ function pickFirstNonEmpty(values: Array<string | null>): string | null {
     if (value !== null) return value;
   }
   return null;
+}
+
+/**
+ * 读取 OpenAI 兼容响应的 `choices[0].finish_reason`（0.9.52 A6）。
+ * 只做「原样取出字符串」——判定交给调用方，避免在此处猜测厂商停止码语义。
+ * 经宿主代理转成该形状的 Claude / Gemini 响应同样适用；取不到返回 null。
+ */
+function choiceFinishReason(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object") return null;
+  const choices = (payload as { choices?: unknown }).choices;
+  if (!Array.isArray(choices) || choices.length === 0) return null;
+  const first = choices[0];
+  if (!first || typeof first !== "object") return null;
+  const reason = (first as { finish_reason?: unknown }).finish_reason;
+  return typeof reason === "string" ? reason : null;
 }
 
 /** 从 OpenAI 风格或兼容响应中取助手正文。 */

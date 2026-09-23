@@ -812,6 +812,114 @@ test("0.9.48 T05：完全无法解析 → 明确失败（RESPONSE_MALFORMED 可�
   ok(!JSON.stringify(core.logs()).includes("sk-runtime-test"), "日志无明文 Key");
 });
 
+// ---------------------------------------------------------------------------
+// A12（0.9.52）：长度截断的服务层端到端——模型 HTTP 200 + finish_reason:"length"
+//
+// 现场：maxTokens 调大后模型约 68 秒返回 HTTP 200，message.content 只有一段
+// <think>…</think>，里面若干互相矛盾的 JSON 草稿，无最终可提交 JSON。
+// 本用例锁定：服务层必须把它判成「被长度截断」而不是「格式不合法」，
+// 且世界零写入（尤其不得从推理稿里抢地点）。
+// ---------------------------------------------------------------------------
+
+test("A12 端到端：finish_reason=length + 仅 <think> 推理稿 → RESPONSE_MALFORMED、零地图点、游标不动、pending 保留", async () => {
+  // 推理稿里故意塞进两个互相矛盾的地点名：旧实现若从 think 抢救，会凭空建点
+  const truncatedBody =
+    `<think>先试一版：{"schemaVersion":2,"discoveries":{"locations":[{"name":"枫叶城"}]}}\n` +
+    `再想一下：{"schemaVersion":2,"scene":{"locationRef":"999"}}\n` +
+    `地图上应该加圣罗兰和枫叶城两个点……</think>`;
+
+  const fetcher = makeFetch([
+    () => jsonResponse(200, { choices: [{ finish_reason: "length", message: { content: truncatedBody } }] }),
+  ]);
+  const store = createMemoryDocumentStore();
+  const world = buildWorld();
+  const pointsBefore = (world.points ?? []).length;
+  const charactersBefore = (world.characters ?? []).length;
+  const cursorBefore = binding(world).worldTimeCursor;
+  const { core, carrier } = sessionCore(store, { fetchFn: fetcher.fetchFn });
+
+  await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
+  await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
+  await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+
+  const result = await core.handle("POST", "/turns/commit", commitRequest(world));
+
+  equal(result.body.ok, false, "截断 = 提交失败");
+  equal(result.body.error.code, ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "沿用 RESPONSE_MALFORMED，不新增错误码");
+  equal(result.body.error.details.retryable, true, "标记可重试（调上限/换模型后可再试）");
+  ok(/截断/.test(String(result.body.error.message)), `报错点明「截断」，实际：${result.body.error.message}`);
+  equal(fetcher.calls.length, 1, "恰好 1 条模型请求");
+
+  // 世界零写入：地点/人物/游标全不动
+  const afterPoints = (carrier.session.world.points ?? []).length;
+  equal(afterPoints, pointsBefore, "零新增地图点（不从推理稿抢地点）");
+  equal((carrier.session.world.characters ?? []).length, charactersBefore, "零新增人物");
+  equal(carrier.session.binding.worldTimeCursor, cursorBefore, "时间游标未推进");
+  const state = (await core.handle("POST", "/state", { chatId: "chat-a" })).body.data;
+  ok(!state.map.points.some((p) => p.name === "枫叶城"), "/state 地图不含推理稿里的枫叶城");
+  ok(!state.map.points.some((p) => p.name === "圣罗兰"), "/state 地图不含推理稿里的圣罗兰");
+
+  // 日志：点明截断，且不泄露推理稿原文
+  const logs = JSON.stringify(core.logs());
+  ok(!logs.includes("枫叶城") && !logs.includes("先试一版"), "日志不保留推理稿原文");
+  ok(!logs.includes("sk-runtime-test"), "日志无明文 Key");
+
+  // pending 保留：供 retry 沿用原幂等键
+  const pendingKeys = await store.list("pending:");
+  equal(pendingKeys.length, 1, "pending 保留一条，供 retry 复用");
+});
+
+test("A12 端到端：截断失败后同键 retry 成功 → 世界只推进一次，再次 retry 为 duplicate", async () => {
+  const goodDraft = {
+    schemaVersion: 2,
+    baseRevision: binding(buildWorld()).worldTimeCursor,
+    duration: 6,
+    evidence: [{ id: "ev1", sourceId: "msg:a", quote: "潮门" }],
+    discoveries: {
+      locations: [{ ref: "new:loc:chaomen", name: "潮门", aliases: [], regionRef: null, parentLocationRef: null, evidenceIds: ["ev1"] }],
+      characters: [],
+    },
+    scene: { resolution: "unknown", locationRef: null, transition: "stay", evidenceIds: ["ev1"] },
+    identityUpdates: [], npcUpdates: [], relationUpdates: [], memories: [], worldFlags: [],
+    events: [], mapScaleHints: [], summary: "抵达潮门附近，位置待确认",
+  };
+
+  const fetcher = makeFetch([
+    // 第一次：被长度截断
+    () => jsonResponse(200, { choices: [{ finish_reason: "length", message: { content: "<think>先试一版：{\"schemaVersion\":2}</think>" } }] }),
+    // retry：完整 v2 JSON
+    () => jsonResponse(200, { choices: [{ finish_reason: "stop", message: { content: JSON.stringify(goodDraft) } }] }),
+  ]);
+  const store = createMemoryDocumentStore();
+  const world = buildWorld();
+  const pointsBefore = (world.points ?? []).length;
+  const { core, carrier } = sessionCore(store, { fetchFn: fetcher.fetchFn });
+
+  await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
+  await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
+  await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+
+  const request = commitRequest(world);
+  const first = await core.handle("POST", "/turns/commit", request);
+  equal(first.body.ok, false, "首次截断失败");
+  equal(fetcher.calls.length, 1, "首次恰好 1 条请求");
+
+  // 同键 retry：沿用原幂等键
+  const retried = await core.handle("POST", "/turns/retry", request);
+  equal(retried.body.ok, true, `retry 应成功：${JSON.stringify(retried.body.error ?? "")}`);
+  equal(retried.body.data.receipt.status, "committed", "retry 后回执 committed");
+  equal(fetcher.calls.length, 2, "总计 2 条请求（1 截断 + 1 成功）");
+
+  const afterPoints = (carrier.session.world.points ?? []).length;
+  equal(afterPoints, pointsBefore + 1, "世界只推进一次：恰好新增 1 个地点");
+
+  // 再次同键 retry → duplicate，且不再发模型请求
+  const again = await core.handle("POST", "/turns/retry", request);
+  equal(again.body.data.receipt.status, "duplicate", "同键再次 retry 为 duplicate");
+  equal(fetcher.calls.length, 2, "duplicate 不产生新模型请求");
+  equal((carrier.session.world.points ?? []).length, afterPoints, "地图不重建重复点");
+});
+
 test("0.9.31 首轮自动建图：≤1 点世界首次 commit 后自动提炼一次，之后不再跑", async () => {
   // 单点世界：把夹具世界裁到只剩绑定游标所在点
   const full = buildWorld();

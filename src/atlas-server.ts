@@ -602,8 +602,29 @@ function createCoreInstance(
       if (typeof value === "number" && Number.isFinite(value)) safeLog[key] = value;
     }
     if (typeof entry.excerpt === "string") safeLog.responseChars = entry.excerpt.length;
+    // 0.9.52 A9：真实响应长度优先。旧实现一律用 `excerpt`（= call.text.slice(0,1500)）
+    // 的长度充当 responseChars，正文一长就恒定 1500，完全无法判断是否被截断。
+    const realResponseChars = typeof entry.responseChars === "number" && Number.isFinite(entry.responseChars)
+      ? entry.responseChars
+      : typeof entry.excerpt === "string" ? entry.excerpt.length : undefined;
+    if (typeof realResponseChars === "number") safeLog.responseChars = realResponseChars;
     logs.push(safeLog);
     if (logs.length > 200) logs.shift();
+    // v2 拒绝时的首个校验失败路径：只取结构化 path，绝不带 errors[].message
+    //（message 可能夹带模型原文 / 引文，属于禁止进持久诊断的内容）。
+    const firstSchemaPath = Array.isArray(entry.errors)
+      ? (() => {
+          for (const item of entry.errors) {
+            if (item && typeof item === "object" && typeof (item as { path?: unknown }).path === "string") {
+              return (item as { path: string }).path;
+            }
+          }
+          return undefined;
+        })()
+      : undefined;
+    const errorCount = typeof entry.errorCount === "number" && Number.isInteger(entry.errorCount)
+      ? entry.errorCount
+      : undefined;
     const diagnostic = sanitizeDiagnostic({
       level, source: "engine", code: kind.toUpperCase().replace(/-/g, "_"),
       operation: "engine", phase: kind, outcome: level === "error" ? "failed" : level === "warn" ? "skipped" : "success",
@@ -612,7 +633,11 @@ function createCoreInstance(
       details: {
         ...(typeof entry.skipped === "number" ? { count: entry.skipped } : {}),
         ...(typeof entry.scanned === "number" ? { scanned: entry.scanned } : {}),
-        ...(typeof entry.excerpt === "string" ? { responseChars: entry.excerpt.length } : {}),
+        ...(typeof realResponseChars === "number" ? { responseChars: realResponseChars } : {}),
+        ...(firstSchemaPath !== undefined ? { schemaPath: firstSchemaPath } : {}),
+        ...(errorCount !== undefined ? { count: errorCount } : {}),
+        ...(typeof entry.reasonCode === "string" ? { reasonCode: entry.reasonCode } : {}),
+        ...(typeof entry.coreCommitted === "boolean" ? { coreCommitted: entry.coreCommitted } : {}),
       },
     }, now);
     if (diagnostic) {
@@ -2163,6 +2188,8 @@ function createCoreInstance(
             errorCount: v2result.errors.length,
             errors: v2result.errors.slice(0, 10),
             excerpt: call.text.slice(0, 1500),
+            // 0.9.52 A10：真实响应字符数（excerpt 只是截到 1500 的片段，长度不代表响应长度）
+            responseChars: call.text.length,
           });
           throw new AtlasError(
             ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
@@ -2256,6 +2283,9 @@ function createCoreInstance(
         chatId: request.chatId,
         worldId: binding.worldId,
         summary: receipt.summary,
+        // 0.9.52 A9：持久诊断只留安全代码；真实中文原因仍由失败 receipt.summary 呈现。
+        reasonCode: "LEDGER_VALIDATION_FAILED",
+        coreCommitted: false,
       });
       // commitAtlasTurn 保证零部分写入；保留 pending 供 retry
       return okResult({ receipt });

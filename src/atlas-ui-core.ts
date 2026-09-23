@@ -1067,6 +1067,27 @@ export function createAtlasUiCore(deps: {
         if (stale) diagnostic({ level: "warn", source: "ui", code: "STALE_CHAT_RESPONSE_DROPPED",
           operation: "commit", phase: "receipt", outcome: "skipped" });
         addReceipt(receiptParsed.value, value.chatId);
+        // 0.9.52 A13：HTTP 200 + body.ok 只说明接口处理成功，不代表世界已提交。
+        // 必须按 receipt.status 分流：failed 要展示失败摘要、置 lastError、按 retryable
+        // 保留或清空挂单，并且**不得**刷新地图 / 同步世界书（世界确实没变）。
+        if (receiptParsed.value.status === "failed") {
+          setState({
+            pendingTurn: null,
+            rearmTurn: null,
+            ...(stale ? {} : {
+              lastError: receiptParsed.value.summary,
+              retryableCommit: receiptParsed.value.retryable
+                ? {
+                    chatId: value.chatId,
+                    userMessageId: value.userMessageId,
+                    assistantMessageId: value.assistantMessageId,
+                    swipeId,
+                  }
+                : null,
+            }),
+          });
+          return;
+        }
         setState({ pendingTurn: null, rearmTurn: null, ...(stale ? {} : { lastError: null }) });
         if (receiptParsed.value.status === "committed" || receiptParsed.value.status === "duplicate") {
           healthCheckedAt = -Infinity;
@@ -1281,6 +1302,17 @@ export function createAtlasUiCore(deps: {
       const receiptParsed = body.data?.receipt ? parseAtlasTurnReceipt(body.data.receipt) : null;
       if (result.status === 200 && body.ok && receiptParsed?.ok) {
         addReceipt(receiptParsed.value, failed.chatId);
+        // 0.9.52 A14：HTTP 200 不等于提交成功。failed 回执要展示真实摘要、
+        // 按 retryable 保留或清除挂单，并且不刷新、不写世界书、不提示「重试成功」。
+        if (receiptParsed.value.status === "failed") {
+          if (state.chatId === failed.chatId) {
+            setState({
+              lastError: receiptParsed.value.summary,
+              retryableCommit: receiptParsed.value.retryable ? failed : null,
+            });
+          }
+          return;
+        }
         setState({ retryableCommit: null, lastError: null });
         if (receiptParsed.value.status === "committed" || receiptParsed.value.status === "duplicate") {
           healthCheckedAt = -Infinity;

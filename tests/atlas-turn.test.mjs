@@ -13,7 +13,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { buildWorldFromTemplate, getDemoTemplate } from "../lib/demo-events.ts";
 import { parseWorld } from "../lib/world-schema.ts";
-import { appendStateEvent, ledgerForBranch } from "../lib/world-ledger.ts";
+import { appendStateEvent, ledgerForBranch, projectEntityState } from "../lib/world-ledger.ts";
 import { upsertEntityRecord } from "../lib/world-definition.ts";
 import { gridDistance } from "../lib/world-engine.ts";
 import { computeAtlasRelevance, atlasTravelPreview, deriveAtlasTurnSeed } from "../src/atlas-relevance.ts";
@@ -622,6 +622,119 @@ test("commit：容量失败整单拒绝、零部分写入（复用共享预检�
     },
   })), (err) => err instanceof AtlasError && err.code === ATLAS_ERROR_CODES.FIELD_LIMIT_EXCEEDED);
   assertionCount += 1;
+});
+
+// ---------------------------------------------------------------------------
+// A1（0.9.52）：账本 adjustRelation 关系值——文字关系不得被判为非法
+//
+// 缺陷：lib/world-ledger.ts 的 validateEffect 用 `!isFinite(Number(effect.value))`
+// 判定，而 StateEffect 类型声明 value 为 `string | number`、错误文字也写「有限数字
+// 或字符串」。`Number("依赖")` 是 NaN → 合法文字关系被整单拒绝，世界零写入，用户
+// 只能看到一句自相矛盾的报错。applyEffectToState 本身是按原值写入的，不受影响。
+// ---------------------------------------------------------------------------
+
+/** 取实体某状态键的当前值（重放账本投影；relation: 键落在投影层而非 CharacterState）。 */
+function entityStateValue(world, entityId, stateKey) {
+  const projected = projectEntityState(world, entityId, CANON, Number.POSITIVE_INFINITY);
+  return projected?.[stateKey];
+}
+
+/** 带一个 adjustRelation effect 的提交输入。 */
+function relationCommitInput(world, value, overrides = {}) {
+  return commitInput(world, {
+    draft: {
+      duration: 1,
+      rawEffects: [
+        { kind: "adjustRelation", entityId: "entity-npc", targetEntityId: "entity-city", key: "stance", value },
+      ],
+      summary: "关系发生变化。",
+    },
+    ...overrides,
+  });
+}
+
+test("A1 账本关系值：普通文字关系（\"依赖\"）成功入账并保留原字符串", () => {
+  const world = buildFixture();
+  const before = JSON.stringify(world);
+  const output = commitAtlasTurn(world, relationCommitInput(world, "依赖"));
+
+  equal(output.receipt.status, "committed", "文字关系不应导致整单失败");
+  equal(
+    entityStateValue(output.world, "entity-npc", "relation:entity-city:stance"),
+    "依赖",
+    "关系状态保留原文字，不做 Number() 转换",
+  );
+  equal(JSON.stringify(world), before, "输入世界对象未被就地修改");
+});
+
+test("A1 账本关系值：有限数字 3 照常通过并按数字存储", () => {
+  const world = buildFixture();
+  const output = commitAtlasTurn(world, relationCommitInput(world, 3));
+  equal(output.receipt.status, "committed", "有限数字合法");
+  equal(entityStateValue(output.world, "entity-npc", "relation:entity-city:stance"), 3, "数字原样存储");
+});
+
+test("A1 账本关系值：空字符串 / 纯空白字符串被账本拒绝且零部分写入", () => {
+  for (const [label, value] of [["空字符串", ""], ["纯空白字符串", "   "]]) {
+    const world = buildFixture();
+    const eventsBefore = (world.stateEvents ?? []).length;
+    const before = JSON.stringify(world);
+    const output = commitAtlasTurn(world, relationCommitInput(world, value));
+
+    equal(output.receipt.status, "failed", `${label} 必须拒绝`);
+    equal(output.receipt.retryable, true, `${label} 拒绝后可重试`);
+    equal((output.world.stateEvents ?? []).length, eventsBefore, `${label} 拒绝后账本长度不变`);
+    equal(JSON.stringify(world), before, `${label} 拒绝后原世界对象未被就地修改`);
+    equal(JSON.stringify(output.world), before, `${label} 拒绝后返回世界与原世界一致（零写入）`);
+    ok(
+      String(output.receipt.summary ?? "").includes("关系值"),
+      `${label} 失败回执摘要指向关系值（实际：${output.receipt.summary}）`,
+    );
+  }
+});
+
+test("A1 账本关系值：NaN / Infinity 在账本层被拒（不经 commit 草稿解析）", () => {
+  // JSON 本身不支持 NaN / Infinity，模型不可能产出；draftToEffects 的「非白名单形状」
+  // 解析会在更早一层把它们拦掉。因此这里按要求直接构造账本层输入。
+  for (const [label, value] of [["NaN", NaN], ["Infinity", Infinity]]) {
+    const world = buildFixture();
+    const eventsBefore = (world.stateEvents ?? []).length;
+    const before = JSON.stringify(world);
+
+    const appended = appendStateEvent(world, {
+      branchId: CANON,
+      at: CURRENT_TIME + 1,
+      source: "ai-adopted",
+      narrativeSummary: `${label} 关系值。`,
+      effects: [{ kind: "adjustRelation", entityId: "entity-npc", targetEntityId: "entity-city", key: "stance", value }],
+    }, { now: NOW });
+
+    equal(appended.ok, false, `${label} 必须被账本拒绝`);
+    equal((world.stateEvents ?? []).length, eventsBefore, `${label} 拒绝后账本长度不变`);
+    equal(JSON.stringify(world), before, `${label} 拒绝后世界序列化不变`);
+    ok(
+      String(appended.error?.message ?? appended.error ?? "").includes("关系值"),
+      `${label} 拒绝原因指向关系值（实际：${JSON.stringify(appended.error)}）`,
+    );
+  }
+});
+
+test("A1 账本关系值：NaN / Infinity 在 commit 草稿层即被拦下，世界零写入", () => {
+  // 记录真实分层：这两个值到不了账本，draftToEffects 就以 RESPONSE_MALFORMED 拒绝整单。
+  for (const [label, value] of [["NaN", NaN], ["Infinity", Infinity]]) {
+    const world = buildFixture();
+    const eventsBefore = (world.stateEvents ?? []).length;
+    const before = JSON.stringify(world);
+
+    assert.throws(
+      () => commitAtlasTurn(world, relationCommitInput(world, value)),
+      (err) => err instanceof AtlasError && err.code === ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
+      `${label} 应在草稿解析层被拒绝`,
+    );
+    assertionCount += 1;
+    equal((world.stateEvents ?? []).length, eventsBefore, `${label} 抛错后账本长度不变`);
+    equal(JSON.stringify(world), before, `${label} 抛错后世界序列化不变`);
+  }
 });
 
 test("本轮累计断言已记录（计数见报告）", () => {
