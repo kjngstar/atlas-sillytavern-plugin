@@ -395,6 +395,13 @@ export interface MapPoint {
   x: number;
   y: number;
   regionId?: string | null;
+  /**
+   * 直接父地点（0.9.55 S1）：v2 子图的权威来源。
+   * 缺省 / null = 世界图根地点；非 null = 该地点所在的内层地点。
+   * 旧存档无此字段照常读取；v1 的 `sub-*` 虚拟点不参与 v2 父链。
+   * 注意：本字段是 lib/ 快照的第 2 处蓄意偏差，见 lib/VENDORED.md。
+   */
+  parentPointId?: number | null;
   /** 地点独有的世界书条目；与 World.worldBible 同形、随地点一起持久化。 */
   worldBook?: WorldBibleEntry[];
 }
@@ -1090,6 +1097,13 @@ export function parseMapPoint(raw: unknown): MapPoint | null {
   if (!isString(raw.name)) return null;
   if (!isNumber(raw.x) || !isNumber(raw.y)) return null;
   if (raw.regionId !== undefined && raw.regionId !== null && !isString(raw.regionId)) return null;
+  // 0.9.55 S1：父地点只接受 null / 缺省，或**有限正整数**。
+  // 明确拒绝字符串（含 "9001"）、负数、0、小数、NaN、Infinity —— 父链是结构化标识，
+  // 不做宽松转换（否则 "abc" 会静默变成断链）。
+  if (raw.parentPointId !== undefined && raw.parentPointId !== null) {
+    if (!isNumber(raw.parentPointId)) return null;
+    if (!Number.isInteger(raw.parentPointId) || raw.parentPointId <= 0) return null;
+  }
   if (raw.worldBook !== undefined) {
     if (!Array.isArray(raw.worldBook) || raw.worldBook.length > WORLD_BIBLE_MAX_ENTRIES) return null;
     for (const entry of raw.worldBook) {
@@ -1102,6 +1116,7 @@ export function parseMapPoint(raw: unknown): MapPoint | null {
     x: raw.x,
     y: raw.y,
     ...(raw.regionId !== undefined ? { regionId: raw.regionId as string | null } : {}),
+    ...(raw.parentPointId !== undefined ? { parentPointId: raw.parentPointId as number | null } : {}),
     ...(Array.isArray(raw.worldBook) ? { worldBook: (raw.worldBook as unknown[]).map((entry) => parseWorldBibleEntry(entry)!).filter((entry): entry is WorldBibleEntry => entry !== null) } : {}),
   };
 }
