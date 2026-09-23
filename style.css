@@ -1232,61 +1232,10 @@
   user-select: none;
 }
 
-/* 0.9.41 人物 = 金圆字头像 + hover 名牌；物品 = 紫色小方块 + hover 名牌。
-   button 语义可点（开人物 / 物品面板）；left/top 过渡 = 后台 moveEntity 落账后标点平滑走位 */
-
-.aw-npc {
-  position: absolute;
-  transform: translate(-50%, -50%) scale(var(--aw-marker-inv, 1));
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  border-radius: var(--am-marker-radius-person, 50%);
-  background: var(--am-person, linear-gradient(135deg, #d8b26a 0%, #b9924a 100%));
-  border: 2px solid var(--am-border, #fff8df);
-  box-shadow: 0 0 0 2px var(--aw-gold-line), 0 2px 6px rgba(25, 48, 45, 0.3);
-  z-index: 4;
-  cursor: pointer;
-  transition: left 0.9s ease, top 0.9s ease, box-shadow 0.2s ease;
-  font-family: var(--aw-serif);
-}
-
-.aw-npc:hover,
-.aw-npc:focus-visible {
-  box-shadow: 0 0 0 3px var(--aw-gold-line), 0 4px 10px rgba(25, 48, 45, 0.35);
-}
-
-.aw-npc__avatar {
-  font-size: 11px;
-  line-height: 1;
-  color: #42320f;
-  font-weight: 700;
-  pointer-events: none;
-}
-
-.aw-npc__name {
-  position: absolute;
-  left: 24px;
-  top: -4px;
-  font-family: var(--aw-sans);
-  font-size: 11px;
-  padding: 1px 6px;
-  border-radius: 3px;
-  background: var(--aw-veil-strong);
-  color: #59472c;
-  white-space: nowrap;
-  border: 1px solid var(--aw-gold-line);
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.15s ease;
-  z-index: 5;
-}
-
-.aw-npc:hover .aw-npc__name,
-.aw-npc:focus-visible .aw-npc__name { opacity: 1; }
+/* S9（0.9.55）：地图上不再渲染人物标点（.aw-npc 已无人生成），人物改由地点面板名单承载，
+   故整块 .aw-npc 规则删除；肤色令牌 --am-person / --am-marker-radius-person 的消费点
+   搬到名单里的头像（见 .aw-mappanel__person--npc .aw-mappanel__person-avatar）。
+   物品仍是紫色小方块标点（路径未变）。 */
 
 .aw-object {
   position: absolute;
@@ -2016,12 +1965,25 @@
 .aw-mapcrumb__sep { color: var(--aw-gold-line); }
 }
 
-/* 0.9.47 拖拽纠偏 + 标点选中高亮（mapview 同款交互） */
-.aw-npc { cursor: grab; }
-.aw-npc:active { cursor: grabbing; }
-.aw-npc.is-dragging { z-index: 9; opacity: 0.45; box-shadow: 0 6px 16px rgba(8, 20, 22, 0.35); }
+/* S9（0.9.55）人物纠偏手柄：面板名单 / 人物卡片里的头像，长按起拖（旧入口是地图人物标点）。
+   touch-action:none = 长按期间不把手指位移交给页面滚动；user-select:none = 不选中名字。 */
+.aw-person-drag {
+  cursor: grab;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.aw-person-drag:active { cursor: grabbing; }
+/* 长按已就绪（还没开始拖）：给出确定的视觉状态，否则用户不知道长按成功了没有 */
+.aw-person-drag.is-armed {
+  box-shadow: 0 0 0 3px var(--am-focus-ring, var(--aw-gold-line)), 0 4px 12px rgba(8, 20, 22, 0.35);
+  transform: scale(1.15);
+}
+.aw-person-drag.is-dragging { opacity: 0.45; }
+/* 起拖期间地图面板让出命中：面板压在地图上时，落点标点永远命不中（elementFromPoint 命中面板） */
+.aw-mappanel.is-drag-source { opacity: 0.3; pointer-events: none; }
 /* R08 拖拽影子：跟随光标的视觉反馈；pointer-events:none 保证 elementFromPoint
-   命中检测不受影子遮挡（命中只认 .aw-point，天然排除人物标记本身） */
+   命中检测不受影子遮挡（命中只认 .aw-point，天然排除拖拽来源本身） */
 .aw-dragghost {
   position: absolute;
   width: 26px;
@@ -2178,6 +2140,13 @@
   color: var(--aw-muted, #6b7c7d);
 }
 
+/* S9（0.9.55）纠偏入口说明：拖拽从地图头像搬进名单后，能力必须自己说明怎么用 */
+.aw-mappanel__here-hint {
+  font-size: 11px;
+  color: var(--aw-muted, #6b7c7d);
+  margin-bottom: 4px;
+}
+
 .aw-mappanel__person {
   display: inline-flex;
   align-items: center;
@@ -2211,7 +2180,10 @@
 }
 
 .aw-mappanel__person--npc .aw-mappanel__person-avatar {
-  background: linear-gradient(135deg, #d8b26a 0%, #b9924a 100%);
+  /* S9（0.9.55）：地图不再画人物标点，皮肤里的「人物」配色/形状改由此处承担——
+     --am-person 与 --am-marker-radius-person 的消费点搬到这里，注册表契约不变 */
+  background: var(--am-person, linear-gradient(135deg, #d8b26a 0%, #b9924a 100%));
+  border-radius: var(--am-marker-radius-person, 50%);
   color: #42320f;
 }
 

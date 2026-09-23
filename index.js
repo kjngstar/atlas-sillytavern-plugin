@@ -1117,7 +1117,11 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     cameraZoomPercent,
     markerInverseScale,
     createPanGesture,
-    createDragGesture,
+    // S9（0.9.55）：人物纠偏改为「长按头像拖动」——起拖状态机与等待时长同源于纯逻辑模块。
+    // （旧的位移阈值拖拽 createDragGesture 不再被本文件使用：地图上已无人物标点。
+    //   该原语仍由浏览器入口导出并有 R08 用例，是否退役留给清理批次评估。）
+    createHoldDragGesture,
+    MAP_LONGPRESS_HOLD_MS,
     createPinchTracker,
     // C5（0.9.54）：比例尺 / 距离格式化唯一权威实现在 src/atlas-scale.ts，
     // 经 atlas-browser-entry 导出后从这里解构；index.js 不再自带副本。
@@ -2403,6 +2407,8 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     // 0.9.41 图例：地点 / 人物 / 物品三型标点（原型 mapview 同款信息架构）
     // 0.9.43 真修（0.9.46 补提交）：el() 第三参只吃文本——DOM 节点会被 textContent
     // 强转成 "[object HTMLElement]"，标签文字（第 4 参）则被静默丢弃。
+    // S9（0.9.55）：地图上不再有人物标点，人物改由地点面板名单承载——图例必须说实话，
+    // 否则用户按图例找金色圆点会一无所获。金色小圆仍与名单里的头像同色，图例继续对应得上。
     const legendItem = (dotClass, label) => {
       const item = el("span", "aw-maplegend__item");
       item.append(el("i", dotClass), document.createTextNode(label));
@@ -2411,7 +2417,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     const legend = el("div", "aw-maplegend");
     legend.append(
       legendItem("aw-maplegend__dot aw-maplegend__dot--loc", "地点"),
-      legendItem("aw-maplegend__dot aw-maplegend__dot--npc", "人物"),
+      legendItem("aw-maplegend__dot aw-maplegend__dot--npc", "人物：在地点名单"),
       legendItem("aw-maplegend__dot aw-maplegend__dot--obj", "物品"),
     );
     viewport.append(legend);
@@ -2553,32 +2559,77 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
   }
 
   /**
-   * R08 人物拖拽纠偏（手势状态机：src/atlas-map-interactions.ts createDragGesture）：
-   * - 阈值起拖；拖拽中显示跟随光标的影子（视觉反馈，pointer-events:none 不挡命中）；
-   * - 拖到地点标点上松手 → 确认 → move-author；非目标处松手不写世界；
-   * - 命中检测天然排除拖拽影子（pointer-events:none）与人物标记本身（只认 .aw-point）；
-   * - suppressClick 不在 pointerup 提前清除——由 click 事件 consumeClick() 吞掉
-   *   合成 click（旧实现 pointerup 清掉后拖完松手仍会打开人物面板）。
+   * S9（0.9.55）人物纠偏：拖拽入口从地图上的 NPC 头像搬到**人物头像本身**
+   * （地点面板「当前在这里」名单 / 人物卡片头部）。手势状态机同源
+   * （src/atlas-map-interactions.ts createHoldDragGesture），差别只在起拖门槛 = 长按：
+   * - 短按（未达 MAP_LONGPRESS_HOLD_MS）= 点击 → 打开人物详情；长按未成立前的移动
+   *   视为列表滚动 / 选择文字，本次按下作废，绝不误起拖；
+   * - 长按成立后头像进入 is-armed 态，位移即起拖，影子跟随光标；
+   * - 起拖期间地图面板让出命中（is-drag-source：pointer-events:none），
+   *   否则面板压在地图上，落点标点永远命不中；
+   * - 松手命中 .aw-point → confirm → move-author（账本 source=author）；非标点处松手不写世界；
+   * - 命中检测只认 .aw-point，天然排除影子（pointer-events:none）；
+   * - suppressClick（长按成立过 / 拖拽过）不在 pointerup 提前清除，由 click 事件
+   *   consumeClick() 吞掉合成 click——否则长按松手会顺手把详情面板打开。
    */
-  function attachNpcDrag(dot, npc, onClick) {
-    const gesture = createDragGesture();
+  /**
+   * S9（0.9.55）：这个标点是不是**真实世界地点**——世界图根地点（/state map.points），
+   * 或 v2 子地点（S8 的 map.pointParents 里有父链，说明它带 parentPointId 落进了 world.points）。
+   * 旧版 v1 子图的 sub-* 只在布局 sidecar 里，账本无此地点。
+   */
+  function isRealWorldPoint(pointId) {
+    const d = lastMapData;
+    if (!d) return false;
+    const id = String(pointId);
+    const roots = Array.isArray(d.map?.points) ? d.map.points : [];
+    if (roots.some((p) => String(p.id) === id)) return true;
+    const parents = d.map?.pointParents;
+    return Boolean(parents && typeof parents === "object" && Object.prototype.hasOwnProperty.call(parents, id));
+  }
+
+  function attachPersonDrag(handleEl, npc, onClick = null) {
+    if (typeof createHoldDragGesture !== "function") return; // 旧 dist 兜底：保留点击，不假装能拖
+    // 常量缺失（旧 dist）时给安全回退：绝不能退化成 0ms —— 那会让轻轻一按就起拖、点击全被吞。
+    const holdMs = Number.isFinite(MAP_LONGPRESS_HOLD_MS) && MAP_LONGPRESS_HOLD_MS > 0 ? MAP_LONGPRESS_HOLD_MS : 350;
+    const gesture = createHoldDragGesture();
     let ghost = null;
+    let holdTimer = null;
+    const clearHoldTimer = () => {
+      if (holdTimer !== null) {
+        globalThis.clearTimeout(holdTimer);
+        holdTimer = null;
+      }
+    };
     const removeGhost = () => {
       if (ghost) {
         ghost.remove();
         ghost = null;
       }
     };
-    dot.addEventListener("pointerdown", (e) => {
+    const endVisual = () => {
+      clearHoldTimer();
+      handleEl.classList.remove("is-armed", "is-dragging");
+      mapPanel?.classList.remove("is-drag-source");
+      removeGhost();
+    };
+    handleEl.addEventListener("pointerdown", (e) => {
       if (e.button !== 0) return;
       gesture.down(e.clientX, e.clientY);
-      dot.setPointerCapture?.(e.pointerId);
+      handleEl.setPointerCapture?.(e.pointerId);
+      clearHoldTimer();
+      holdTimer = globalThis.setTimeout(() => {
+        holdTimer = null;
+        if (!gesture.hold()) return; // 期间移动过 / 已松手：本次按下作废
+        handleEl.classList.add("is-armed");
+        mapPanel?.classList.add("is-drag-source");
+        setStatus(`长按已就绪：把「${String(npc.name)}」拖到地图上的地点标点后松手。`, "info");
+      }, holdMs);
     });
-    dot.addEventListener("pointermove", (e) => {
+    handleEl.addEventListener("pointermove", (e) => {
       const step = gesture.move(e.clientX, e.clientY);
       if (!step) return;
       if (step.dragging && !ghost) {
-        dot.classList.add("is-dragging");
+        handleEl.classList.add("is-dragging");
         ghost = el("div", "aw-dragghost", String(npc.name ?? "?").slice(0, 1));
         ghost.setAttribute("aria-hidden", "true");
         viewport.append(ghost);
@@ -2591,14 +2642,21 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     });
     const finishDrag = (e, cancelled) => {
       const wasDragging = gesture.isDragging;
-      const result = cancelled ? gesture.cancel() : gesture.up();
-      dot.classList.remove("is-dragging");
-      removeGhost();
-      if (cancelled || !wasDragging || !result.dragged) return; // 原地松手 = 点击，交给 click
+      if (cancelled) gesture.cancel();
+      else gesture.up();
+      endVisual();
+      if (cancelled || !wasDragging) return; // 原地松手 = 点击（长按成立过的 click 由 consumeClick 吞掉）
       const hit = document.elementFromPoint(e.clientX, e.clientY)?.closest?.(".aw-point");
       const toPointId = hit?.dataset?.pointId ?? null;
       if (!toPointId) {
         setStatus("拖动取消：请把人物拖到目标地点标点上。", "error");
+        return;
+      }
+      // S9：落点必须是**真实世界地点**——世界图根地点，或 v2 的子地点（S8 的 pointParents
+      // 里有父链）。旧版 v1 子图的 sub-* 是布局虚拟点，账本里不存在该地点，move-author
+      // 必然拒绝；与其让用户吃一次服务端错误，不如在落点处就说清楚。
+      if (!isRealWorldPoint(toPointId)) {
+        setStatus(`「${String(hit.textContent ?? "该点").trim()}」不是世界地点（旧版子图的虚拟内层点），不能作为纠偏落点。`, "error");
         return;
       }
       const chatId = String(state().chatId ?? "");
@@ -2623,13 +2681,13 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
           renderCenter();
         });
     };
-    dot.addEventListener("pointerup", (e) => finishDrag(e, false));
-    dot.addEventListener("pointercancel", (e) => finishDrag(e, true));
-    // 点击（未被拖拽吞掉时）
-    dot.addEventListener("click", (e) => {
+    handleEl.addEventListener("pointerup", (e) => finishDrag(e, false));
+    handleEl.addEventListener("pointercancel", (e) => finishDrag(e, true));
+    // 点击（未被长按 / 拖拽吞掉时）
+    handleEl.addEventListener("click", (e) => {
       e.stopPropagation();
-      if (gesture.consumeClick()) return; // 拖拽结束的合成 click：吞掉
-      onClick(dot);
+      if (gesture.consumeClick()) return; // 长按或拖拽结束的合成 click：吞掉，不打开详情
+      onClick?.(handleEl);
     });
   }
 
@@ -2698,23 +2756,36 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     const actions = el("div", "aw-mappanel__actions");
     // 0.9.41 在场名单：当前地点上的人物 / 物品（npcDirectory / objectDirectory 按 pointId 分组）
     const d0 = lastMapData;
-    const hereNpcs = Array.isArray(d0?.npcDirectory) ? d0.npcDirectory.filter((n) => String(n.pointId ?? "") === String(point.id)) : [];
+    const hereNpcs = Array.isArray(d0?.npcDirectory)
+      // S9（0.9.55）：账本 presence=left 的人已经离场——「当前在这里」必须只列真在场的人
+      ? d0.npcDirectory.filter((n) => String(n.pointId ?? "") === String(point.id) && n.presence !== "left")
+      : [];
     const hereObjects = Array.isArray(d0?.objectDirectory) ? d0.objectDirectory.filter((o) => String(o.pointId ?? "") === String(point.id)) : [];
     const here = el("div", "aw-mappanel__here");
     const hereLabel = el("div", "aw-mappanel__here-label", `当前在这里（${hereNpcs.length + hereObjects.length}）`);
     here.append(hereLabel);
+    if (hereNpcs.length > 0) {
+      // S9（0.9.55）：纠偏入口搬进名单后必须说明怎么用——否则「拖拽」这个能力对用户不可见。
+      here.append(el("div", "aw-mappanel__here-hint", "按住人物头像拖到地图上的地点标点，可纠偏其位置"));
+    }
     if (hereNpcs.length === 0 && hereObjects.length === 0) {
       here.append(el("div", "aw-mappanel__here-empty", "无人"));
     }
     for (const npc of hereNpcs) {
       const row = el("button", "aw-mappanel__person aw-mappanel__person--npc");
       row.type = "button";
-      row.append(el("span", "aw-mappanel__person-avatar", String(npc.name ?? "?").slice(0, 1)));
+      const avatar = el("span", "aw-mappanel__person-avatar aw-person-drag", String(npc.name ?? "?").slice(0, 1));
+      // S9（0.9.55）：头像本身是纠偏拖拽手柄——长按拖到地点标点上松手 = move-author。
+      // 短按头像 / 点整行仍是打开详情，故 0.9.44 的纠偏能力不因移除地图标点而丢失。
+      avatar.title = "长按拖到目标地点可纠偏位置";
+      avatar.setAttribute("aria-label", `长按拖动「${String(npc.name)}」可纠偏其位置`);
+      row.append(avatar);
       row.append(el("span", "aw-mappanel__person-name", String(npc.name)));
-      row.addEventListener("click", () => {
-        const anchorDot = mapLayer?.querySelector(`[data-entity-id="${String(npc.id ?? "")}"]`) ?? null;
-        openNpcPanel(npc, anchorDot);
-      });
+      // 人物面板锚到**地点标点**（不是已消失的人物标点）：面板原地替换、标点保持高亮，
+      // R15 的续锚身份继续有效；R15 之后人物面板也不再依赖 data-entity-id 标点。
+      const openDetail = () => openNpcPanel(npc, mapPanelAnchor?.el ?? null);
+      row.addEventListener("click", openDetail);
+      attachPersonDrag(avatar, npc, openDetail);
       here.append(row);
     }
     for (const obj of hereObjects) {
@@ -2765,7 +2836,12 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     mapPanel.innerHTML = "";
     const head = el("div", "aw-mappanel__head");
     const headRow = el("div", "aw-mappanel__headrow");
-    headRow.append(el("span", "aw-mappanel__avatar aw-mappanel__avatar--npc", String(npc.name ?? "?").slice(0, 1)));
+    const headAvatar = el("span", "aw-mappanel__avatar aw-mappanel__avatar--npc aw-person-drag", String(npc.name ?? "?").slice(0, 1));
+    // S9（0.9.55）：人物卡片头部的头像同样可长按拖动纠偏——从名单点进来后不必退回上一层。
+    headAvatar.title = "长按拖到目标地点可纠偏位置";
+    headAvatar.setAttribute("aria-label", `长按拖动「${String(npc.name)}」可纠偏其位置`);
+    headRow.append(headAvatar);
+    attachPersonDrag(headAvatar, npc);
     headRow.append(el("strong", "aw-mappanel__name", String(npc.name)));
     head.append(headRow);
     const close = el("button", "aw-mappanel__close", "×");
@@ -2894,27 +2970,29 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       : regionFilter
         ? pointsAll.filter((p) => String(p.regionId ?? "") === regionFilter)
         : pointsAll;
-    // 0.9.49（M02 子图投影）：进子图不再清空人物与物品——按 pointId === 子图宿主点
-    // 从权威实体目录投影（NPC/物品显示在所在子图内部，确定性散布；不建立第二套位置数据）
+    // S9（0.9.55）人物不再画地图标点：世界图上的人物头像与地点同坐标（同一点叠两枚标记，
+    // 命中与人读都在打架），而且「人在这个地点里」只到地点级，标点等于伪造更细的坐标。
+    // 人物一律由地点承载——地点面板「当前在这里」名单（含长按纠偏）、子图
+    // 「建筑内 · 具体房间未知」名单。故这里只保留子图名单所需的人物集合。
     const npcsAll = Array.isArray(d.npcDirectory) ? d.npcDirectory : [];
     const objectsAll = Array.isArray(d.objectDirectory) ? d.objectDirectory : [];
-    let npcs;
+    let rosterNpcs = [];
     let objects;
     if (inSub) {
       const ownerId = String(view.pointId);
-      npcs = npcsAll.filter((n) => String(n.pointId ?? "") === ownerId);
+      // 账本 presence=left 的人已经离场，不能出现在「建筑内」名单里冒充在场
+      rosterNpcs = npcsAll.filter((n) => String(n.pointId ?? "") === ownerId && n.presence !== "left");
       objects = objectsAll.filter((o) => String(o.pointId ?? "") === ownerId);
     } else {
-      npcs = regionFilter ? npcsAll.filter((n) => String(n.regionId ?? "") === regionFilter) : npcsAll;
       objects = regionFilter ? objectsAll.filter((o) => String(o.regionId ?? "") === regionFilter) : objectsAll;
     }
     if (regionSelect) regionSelect.style.display = inSub ? "none" : "";
     if (travelBar) travelBar.style.display = inSub ? "none" : "";
     interiorRoster.innerHTML = "";
-    interiorRoster.style.display = inSub && (npcs.length > 0 || objects.length > 0) ? "" : "none";
-    if (inSub && (npcs.length > 0 || objects.length > 0)) {
+    interiorRoster.style.display = inSub && (rosterNpcs.length > 0 || objects.length > 0) ? "" : "none";
+    if (inSub && (rosterNpcs.length > 0 || objects.length > 0)) {
       interiorRoster.append(el("div", "aw-interior-roster__title", "建筑内 · 具体房间未知"));
-      for (const npc of npcs) {
+      for (const npc of rosterNpcs) {
         const button = el("button", "aw-interior-roster__item", String(npc.name ?? "未具名人物"));
         button.type = "button";
         button.addEventListener("click", (event) => {
@@ -3042,27 +3120,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       mapLayer.append(marker);
     }
 
-    // 子图只有宿主地点级位置：名单展示，不伪造房间坐标。
-    for (const npc of npcs) {
-      if (inSub || npc.x === null || npc.y === null) continue;
-      // 0.9.41 人物标点 = 金圆字头像（原型 mapview 同款信息架构）：点击出人物 popover
-      const dot = el("button", "aw-npc");
-      dot.type = "button";
-      dot.dataset.entityId = String(npc.id ?? "");
-      const worldPos = { x: npc.x, y: npc.y };
-      dot.style.left = `${Number(worldPos.x)}px`;
-      dot.style.top = `${Number(worldPos.y)}px`;
-      const reasonLabel = npc.reason ? (NPC_REASON_LABELS[String(npc.reason)] ?? String(npc.reason)) : "";
-      // C4：本循环开头已 `if (inSub || …) continue`，故此处恒为世界图层——
-      // 旧 `subTag` 与 `inSub ? … : …` 全部不可达，已删除。
-      dot.title = `${String(npc.name)}${reasonLabel ? `（${reasonLabel}）` : ""}`;
-      dot.setAttribute("aria-label", `人物 ${npc.name}，点击查看想法与动向；按住拖到地点上可纠偏位置`);
-      dot.append(el("span", "aw-npc__avatar", String(npc.name ?? "?").slice(0, 1)));
-      dot.append(el("span", "aw-npc__name", String(npc.name)));
-      attachNpcDrag(dot, npc, (anchor) => openNpcPanel(npc, anchor)); // 拖拽纠偏只在世界图层有意义（子图点位非世界点位）
-      mapLayer.append(dot);
-    }
-
+    // S9（0.9.55）人物标点已删除（见上方 npcsAll 处说明）——此处只剩物品标点。
     for (const object of objects) {
       if (inSub || object.x === null || object.y === null) continue;
       // 0.9.41 物品标点 = 紫色小方块：点击出物品 popover

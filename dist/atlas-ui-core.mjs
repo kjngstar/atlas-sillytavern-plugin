@@ -13519,6 +13519,91 @@ function createDragGesture(opts = {}) {
     }
   };
 }
+var MAP_LONGPRESS_HOLD_MS = 350;
+function createHoldDragGesture(opts = {}) {
+  const threshold = Number.isFinite(opts.threshold) && opts.threshold > 0 ? opts.threshold : MAP_GESTURE_THRESHOLD_PX;
+  let active = false;
+  let aborted = false;
+  let armed = false;
+  let dragging = false;
+  let swallow = false;
+  let startX = 0;
+  let startY = 0;
+  let lastX = 0;
+  let lastY = 0;
+  return {
+    down(screenX, screenY) {
+      active = true;
+      aborted = false;
+      armed = false;
+      dragging = false;
+      swallow = false;
+      startX = Number(screenX) || 0;
+      startY = Number(screenY) || 0;
+      lastX = startX;
+      lastY = startY;
+      return true;
+    },
+    hold() {
+      if (!active || aborted || armed) return false;
+      armed = true;
+      swallow = true;
+      lastX = startX;
+      lastY = startY;
+      return true;
+    },
+    move(screenX, screenY) {
+      if (!active) return null;
+      const x = Number(screenX) || 0;
+      const y = Number(screenY) || 0;
+      if (!armed) {
+        if (Math.hypot(x - startX, y - startY) > threshold) {
+          active = false;
+          aborted = true;
+        }
+        return null;
+      }
+      if (!dragging) {
+        dragging = true;
+        swallow = true;
+      }
+      const result = {
+        dragging: true,
+        dx: x - lastX,
+        dy: y - lastY,
+        totalDx: x - startX,
+        totalDy: y - startY
+      };
+      lastX = x;
+      lastY = y;
+      return result;
+    },
+    up() {
+      const result = { dragged: dragging, armed };
+      active = false;
+      dragging = false;
+      return result;
+    },
+    cancel() {
+      active = false;
+      aborted = false;
+      armed = false;
+      dragging = false;
+      swallow = false;
+    },
+    get armed() {
+      return armed;
+    },
+    get isDragging() {
+      return dragging;
+    },
+    consumeClick() {
+      const value = swallow;
+      swallow = false;
+      return value;
+    }
+  };
+}
 function createPinchTracker() {
   const pointers = /* @__PURE__ */ new Map();
   let lastDistance = 0;
@@ -13585,6 +13670,7 @@ export {
   DEFAULT_WORLD_TURN_SYSTEM_PROMPT,
   DEMO_TEMPLATES,
   MAP_GESTURE_THRESHOLD_PX,
+  MAP_LONGPRESS_HOLD_MS,
   MAP_ZOOM_MAX_FACTOR,
   MAP_ZOOM_MIN_FACTOR,
   atlasCustomIncludeHeaders,
@@ -13601,6 +13687,7 @@ export {
   createAtlasUiCore,
   createBrowserDocumentStore,
   createDragGesture,
+  createHoldDragGesture,
   createLocalAtlasApi,
   createPanGesture,
   createPinchTracker,

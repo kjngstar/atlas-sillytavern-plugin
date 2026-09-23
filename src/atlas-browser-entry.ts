@@ -106,8 +106,10 @@ export {
 export {
   createPanGesture,
   createDragGesture,
+  createHoldDragGesture,
   createPinchTracker,
   MAP_GESTURE_THRESHOLD_PX,
+  MAP_LONGPRESS_HOLD_MS,
 } from "./atlas-map-interactions.ts";
 
 export {

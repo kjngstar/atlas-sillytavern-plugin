@@ -188,6 +188,121 @@ export function createDragGesture(opts: { threshold?: number } = {}): DragGestur
   };
 }
 
+/** S9（0.9.55）人物纠偏：长按起拖的等待时长。 */
+export const MAP_LONGPRESS_HOLD_MS = 350;
+
+export interface HoldDragGesture {
+  down(screenX: number, screenY: number): boolean;
+  /** 长按计时到点（由调用方的定时器驱动）：首次成立返回 true 并进入可拖状态。 */
+  hold(): boolean;
+  move(screenX: number, screenY: number): DragMoveResult | null;
+  up(): { dragged: boolean; armed: boolean };
+  cancel(): void;
+  readonly armed: boolean;
+  readonly isDragging: boolean;
+  /** 长按成立过 或 拖拽发生过 → 吞掉一次合成 click（消费后复位）。 */
+  consumeClick(): boolean;
+}
+
+/**
+ * S9（0.9.55）长按拖拽手势：短按 = 点击（打开详情），长按 = 起拖（人物纠偏）。
+ *
+ * 与 createDragGesture 的唯一差别是起拖门槛——从「位移超阈值」改为「先长按、再位移」：
+ * - 长按未成立就移动超过阈值 → 视为列表滚动 / 选择文字，本次按下作废（不再 arm）；
+ * - arm 之后的第一段位移立即进入拖拽（长按本身已是明确意图，不再要求第二次阈值）；
+ * - 长按成立后即使原地松手也算拖拽意图 → 吞掉 click，不误开详情面板。
+ *
+ * 时间由调用方注入（hold() 由定时器触发），本模块保持纯逻辑：无 DOM、无计时器。
+ */
+export function createHoldDragGesture(opts: { threshold?: number } = {}): HoldDragGesture {
+  const threshold = Number.isFinite(opts.threshold) && (opts.threshold as number) > 0
+    ? (opts.threshold as number)
+    : MAP_GESTURE_THRESHOLD_PX;
+  let active = false;
+  let aborted = false;
+  let armed = false;
+  let dragging = false;
+  let swallow = false;
+  let startX = 0;
+  let startY = 0;
+  let lastX = 0;
+  let lastY = 0;
+  return {
+    down(screenX, screenY) {
+      active = true;
+      aborted = false;
+      armed = false;
+      dragging = false;
+      swallow = false;
+      startX = Number(screenX) || 0;
+      startY = Number(screenY) || 0;
+      lastX = startX;
+      lastY = startY;
+      return true;
+    },
+    hold() {
+      if (!active || aborted || armed) return false;
+      armed = true;
+      swallow = true; // 长按已是明确意图：原地松手不当作点击
+      lastX = startX;
+      lastY = startY;
+      return true;
+    },
+    move(screenX, screenY) {
+      if (!active) return null;
+      const x = Number(screenX) || 0;
+      const y = Number(screenY) || 0;
+      if (!armed) {
+        // 长按未成立就动了：本次按下作废（滚动 / 选择），绝不误起拖
+        if (Math.hypot(x - startX, y - startY) > threshold) {
+          active = false;
+          aborted = true;
+        }
+        return null;
+      }
+      if (!dragging) {
+        dragging = true;
+        swallow = true;
+      }
+      const result = {
+        dragging: true,
+        dx: x - lastX,
+        dy: y - lastY,
+        totalDx: x - startX,
+        totalDy: y - startY,
+      };
+      lastX = x;
+      lastY = y;
+      return result;
+    },
+    up() {
+      const result = { dragged: dragging, armed };
+      // suppress（swallow）保留给 consumeClick——pointerup 提前清除是旧 bug
+      active = false;
+      dragging = false;
+      return result;
+    },
+    cancel() {
+      active = false;
+      aborted = false;
+      armed = false;
+      dragging = false;
+      swallow = false;
+    },
+    get armed() {
+      return armed;
+    },
+    get isDragging() {
+      return dragging;
+    },
+    consumeClick() {
+      const value = swallow;
+      swallow = false;
+      return value;
+    },
+  };
+}
+
 export interface PinchUpdate {
   /** 相对上一帧的缩放因子（当前距离 / 上一帧距离）。 */
   factor: number;
