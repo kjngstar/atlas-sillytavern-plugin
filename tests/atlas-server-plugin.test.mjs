@@ -1709,8 +1709,15 @@ test("invalid old prompt entry blocks settings writes and preserves the raw docu
 // 本用例锁定真正缺口：**在现版本预期失败**，以此作为 S1–S7 的红灯基线。
 // ---------------------------------------------------------------------------
 
-/** 造一个带已知地点“钟楼”的世界（v2 父引用需要一个可引用的既有地点）。 */
-async function setupWithTower() {
+/**
+ * 造一个带已知地点“钟楼”的世界（v2 父引用需要一个可引用的既有地点）。
+ * - scripts：省略时沿用 S0 的单轮父引用草稿；S10 用例传入自己的脚本序列（每轮一个脚本）。
+ * - options.deps：透传给核心（例如 `{ onDiagnostic }`：logs() 里只有 kind/level，
+ *   规定诊断码与 details.count 只经 onDiagnostic 回调暴露）。
+ * - options.extraPoints：追加既有存档点（例如造「某父下已有 41 个子点」的超限存档）。
+ */
+async function setupWithTower(scripts = null, options = {}) {
+  const { deps = {}, extraPoints = [] } = options;
   const store = createMemoryDocumentStore();
   const base = buildWorld();
   const regionId = String((base.regions ?? [])[0]?.id ?? "");
@@ -1719,6 +1726,7 @@ async function setupWithTower() {
     points: [
       ...(base.points ?? []),
       { id: 9001, name: "钟楼", x: 10, y: 10, regionId },
+      ...extraPoints,
     ],
   };
   const parsed = parseWorld(JSON.parse(JSON.stringify(world)));
@@ -1742,17 +1750,19 @@ async function setupWithTower() {
     identityUpdates: [], npcUpdates: [], relationUpdates: [], memories: [], worldFlags: [], events: [], mapScaleHints: [],
     summary: "进入钟楼大堂，再进档案室。",
   };
+  const fetcher = makeFetch(scripts ?? [() => openAiResponse(draft)]);
   const rawCore = createAtlasServerCore({
     store,
-    fetchFn: makeFetch([() => openAiResponse(draft)]).fetchFn,
+    fetchFn: fetcher.fetchFn,
     now: () => NOW,
+    ...deps,
   });
   const carrier = createSessionCarrier(rawCore);
   const core = carrierAsCore(carrier);
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(parsed)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(parsed) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
-  return { store, core, world: parsed, carrier };
+  return { store, core, world: parsed, carrier, fetcher };
 }
 
 test("S0：v2 parentLocationRef 应生成两级子图（现版本预期失败——红灯基线）", async () => {
@@ -1851,4 +1861,659 @@ test("v2 discoveries disappear from state, nearby and map after rollback", async
   ok(!after.map.points.some((point) => point.name === "新塔"), "旧游标地图不泄露新地点");
   ok(!after.npcDirectory.some((npc) => npc.name === "少女"), "旧游标附近不泄露新人");
   ok(carrier.session.world.points.some((point) => point.name === "新塔"), "历史定义保留可追溯");
+});
+
+// ---------------------------------------------------------------------------
+// S10（0.9.53 增补施工单 §S10 后端部分）：v2 子图真实回归与异常注入
+//
+// 已实现口径（S1–S9，本段只做回归、不重新实现）：
+// · 唯一地点身份 = World.points[].id（子地点同样是真实地点，不造虚拟 sub-* 身份）；
+// · 父链权威来源 = MapPoint.parentPointId；maps:<worldId> 只是布局缓存；
+// · /state 的 map 由 projectWorldSubmaps 从**可见世界**的 parentPointId 派生并与 sidecar 合并，
+//   map.points 只下发根地点、map.submaps[父ID].points 是子地点、pointCount 计全部可见非占位点；
+// · 解析期（atlas-contract-v2）拦自身/成环/未声明的 new:loc，应用期（atlas-turn-v2）
+//   拦未知父、自引用、成环、父链 > 4 层、同一父 > 40 个直接子地点 → 整轮拒绝且零写入。
+// ---------------------------------------------------------------------------
+
+const S10_QUOTE = "你走进钟楼大堂";
+/** setupWithTower 造出的已知世界点“钟楼”的 ID（v2 父引用需要一个可引用的既有地点）。 */
+const S10_TOWER = "9001";
+
+/** v2 草稿最小骨架；引文必须是 request.assistantText 的原文片段（解析期做包含校验）。 */
+function s10Draft(overrides = {}) {
+  const {
+    baseRevision = CURRENT_TIME,
+    duration = 0,
+    locations = [],
+    sceneRef = S10_TOWER,
+    transition = "stay",
+    quote = S10_QUOTE,
+    summary = "进入钟楼内部。",
+  } = overrides;
+  return {
+    schemaVersion: 2,
+    baseRevision,
+    duration,
+    evidence: [{ id: "ev1", sourceId: "msg:a", quote }],
+    discoveries: { locations, characters: [] },
+    scene: { resolution: "confirmed", locationRef: sceneRef, transition, evidenceIds: ["ev1"] },
+    identityUpdates: [],
+    npcUpdates: [],
+    relationUpdates: [],
+    memories: [],
+    worldFlags: [],
+    events: [],
+    mapScaleHints: [],
+    summary,
+  };
+}
+
+/** v2 发现地点条目：parentLocationRef 为 null 即世界图根地点。 */
+function s10Loc(ref, name, parentLocationRef = null) {
+  return { ref, name, aliases: [], regionRef: null, parentLocationRef, evidenceIds: ["ev1"] };
+}
+
+/** 第 index 个回合的提交请求：幂等键由 user/assistantMessageId 决定，逐回合唯一。 */
+function s10Commit(world, index, overrides = {}) {
+  return commitRequest(world, {
+    turnId: `turn-${index}`,
+    userMessageId: `msg-u${index}`,
+    assistantMessageId: `msg-a${index}`,
+    userText: "我继续往里走。",
+    assistantText: "你走进钟楼大堂。",
+    ...overrides,
+  });
+}
+
+/** 读 /state 并断言可读。 */
+async function s10State(core) {
+  const result = await core.handle("GET", "/state/chat-a");
+  equal(result.body.ok, true, "/state 可读");
+  return result.body.data;
+}
+
+/** 全部子图点位（用于「祖先图里不得出现某子点」这类否定断言）。 */
+function s10AllSubPoints(state) {
+  return Object.values(state.map.submaps ?? {}).flatMap((sub) => sub.points ?? []);
+}
+
+/** 某父地点的子图里按名字找一个子点。 */
+function s10SubPoint(state, parentId, name) {
+  return (state.map.submaps?.[String(parentId)]?.points ?? []).find((point) => point.name === name) ?? null;
+}
+
+/** 世界点里按名字找点（用于核对子图 marker id = 世界点数字 ID）。 */
+function s10WorldPoint(carrier, name) {
+  return (carrier.session.world.points ?? []).find((point) => point.name === name) ?? null;
+}
+
+/**
+ * 注入 sidecar 读取失败：把会话里的 maps 值换成一个「读取即抛」的 thenable。
+ *
+ * 0.9.42 起 maps:<worldId> 存在会话文档里，覆盖层 store.read() 只做属性取值、
+ * 不会查后备 store，所以无法让 store.read 本身同步抛错；但 read() 是 async 函数，
+ * 返回这个 thenable 时会访问其 then → promise 变为 rejected，正好命中
+ * handleState 的 `.catch(() => null)` 失败分支（= 生产里 maps 读取失败的同一路径）。
+ * 返回的 touched 计数用于证明注入确实生效（读取真的 await 了它并抛错），
+ * 而不是「读取成功但内容为空」——后者不会访问 then。
+ */
+function s10UnreadableSidecar() {
+  const probe = { touched: 0 };
+  probe.value = {
+    then() {
+      probe.touched += 1;
+      throw new Error("sidecar storage read failed（测试注入）");
+    },
+  };
+  return probe;
+}
+
+/** 跨轮累计同父子地点：每轮一段 v2 草稿（单响应最多 12 个新地点）。 */
+function s10SiblingScripts(counts) {
+  return counts.map((count, turn) => () => openAiResponse(s10Draft({
+    locations: Array.from({ length: count }, (_, i) => s10Loc(`new:loc:t${turn}c${i}`, `房间-${turn}-${i}`, S10_TOWER)),
+    sceneRef: S10_TOWER,
+    summary: `第 ${turn} 轮补房间。`,
+  })));
+}
+
+function s10ChildrenOfTower(carrier) {
+  return (carrier.session.world.points ?? []).filter((point) => Number(point.parentPointId) === Number(S10_TOWER));
+}
+
+/**
+ * 安全诊断采集器：`logs()` 只保留 kind/level（白名单字段），
+ * 规定诊断码（MAP_PROJECTION_*）与 details.count 只经 `onDiagnostic` 回调暴露，
+ * 因此断言诊断必须把回调注入核心（与 atlas-extension-harness 的采集方式一致）。
+ */
+function s10DiagnosticSink() {
+  const events = [];
+  return { events, deps: { onDiagnostic: (entry) => events.push(entry) } };
+}
+
+test("S10① 旧 v1 子图不消失：sidecar 的 sub-* 虚拟点与 v2 新子点合并随 /state 下发", async () => {
+  const draft = s10Draft({
+    locations: [s10Loc("new:loc:crypt", "地窖", "4103")],
+    sceneRef: "new:loc:crypt",
+    transition: "arrive",
+  });
+  const { core, carrier, world } = await setupWithTower([() => openAiResponse(draft)]);
+  // v1 时代的手工布局：父地点 4103（白塔钟座）下已有两个 sub-* 虚拟点
+  carrier.session.maps = {
+    schemaVersion: 2,
+    pointMeta: { "4103": { description: "白塔钟座内部。" } },
+    submaps: {
+      "4103": {
+        parentMapId: "world",
+        ownerLocationId: "4103",
+        frame: { cols: 20, rows: 10, frameRevision: 2 },
+        points: [
+          { id: "sub-room", name: "里间", x: 31, y: 17 },
+          { id: "sub-cellar", name: "旧地窖", x: 62, y: 44 },
+        ],
+      },
+    },
+    calibrations: {},
+  };
+
+  const before = await s10State(core);
+  equal(before.map.submaps["4103"].points.length, 2, "v1 子图两点位随 /state 下发");
+  equal(s10SubPoint(before, "4103", "里间").id, "sub-room", "v1 虚拟点 id 保留（不按名字重造）");
+  equal(before.map.submaps["4103"].frame.cols, 20, "v1 手工 frame 保留");
+
+  const committed = await core.handle("POST", "/turns/commit", s10Commit(world, 1));
+  equal(committed.body.data?.receipt?.status, "committed", "v2 回合提交成功");
+
+  const after = await s10State(core);
+  ok(after.map.submaps["4103"], "v1 子图没有被 v2 投影吞掉");
+  const v1Room = s10SubPoint(after, "4103", "里间");
+  equal(v1Room?.id, "sub-room", "v1 虚拟点仍在（id 不变）");
+  equal(`${v1Room?.x},${v1Room?.y}`, "31,17", "v1 手工坐标不被搬动");
+  equal(s10SubPoint(after, "4103", "旧地窖")?.id, "sub-cellar", "第二个 v1 虚拟点也在");
+  equal(after.map.submaps["4103"].frame.cols, 20, "v1 frame 仍保留");
+  equal(after.map.submaps["4103"].points.length, 3, "v1 两点 + v2 子点合并展示，不互相覆盖");
+  equal(after.map.submaps["4103"].parentMapId, "world", "v1 子图的父图仍是世界图");
+
+  const crypt = s10SubPoint(after, "4103", "地窖");
+  ok(crypt, "v2 新子点并入同一子图");
+  const cryptPoint = s10WorldPoint(carrier, "地窖");
+  ok(cryptPoint, "v2 子点是真实世界点");
+  equal(crypt?.id, String(cryptPoint?.id), "子图 marker id = 世界点数字 ID");
+  equal(after.map.pointParents[String(cryptPoint?.id)], 4103, "父链落 pointParents（子 → 直接父）");
+  equal(after.map.points.some((point) => point.name === "地窖"), false, "子地点不上世界图");
+  equal(after.map.pointMeta?.["4103"]?.description, "白塔钟座内部。", "sidecar 点位描述随 /state 保留");
+});
+
+test("S10② v2 同轮父子深两层：submaps[钟楼] 含大堂、submaps[大堂] 含档案室，世界图只下发根地点", async () => {
+  const draft = s10Draft({
+    locations: [
+      s10Loc("new:loc:hall", "大堂", S10_TOWER),
+      s10Loc("new:loc:archive", "档案室", "new:loc:hall"),
+    ],
+    sceneRef: "new:loc:archive",
+    transition: "arrive",
+    summary: "进入钟楼大堂，再进档案室。",
+  });
+  const { core, world } = await setupWithTower([() => openAiResponse(draft)]);
+  const committed = await core.handle("POST", "/turns/commit", s10Commit(world, 1, {
+    userText: "我进钟楼。",
+    assistantText: "你走进钟楼大堂，再推开档案室的门。",
+  }));
+  equal(committed.body.data?.receipt?.status, "committed", "本轮提交成功");
+
+  const state = await s10State(core);
+  const tower = state.map.points.find((point) => point.name === "钟楼");
+  ok(tower, "钟楼仍是世界图根地点");
+  const hall = s10SubPoint(state, tower.id, "大堂");
+  ok(hall, "钟楼子图里应有「大堂」");
+  const archive = s10SubPoint(state, hall?.id, "档案室");
+  ok(archive, "大堂子图里应有「档案室」（同轮父子两层）");
+
+  equal(state.map.submaps[String(tower.id)].parentMapId, "world", "钟楼子图的父图 = 世界图");
+  equal(state.map.submaps[String(hall?.id)].parentMapId, String(tower.id), "大堂子图的父图 = 钟楼");
+  equal(state.map.submaps[String(hall?.id)].ownerLocationId, String(hall?.id), "子图宿主 = 父地点 ID");
+  equal(state.map.points.some((point) => ["大堂", "档案室"].includes(point.name)), false, "世界图只下发根地点");
+  equal(String(state.currentLocationId), String(archive?.id), "当前位置 = 档案室（最内层房间）");
+  equal(state.map.pointParents[String(hall?.id)], Number(tower.id), "pointParents：大堂 → 钟楼");
+  equal(state.map.pointParents[String(archive?.id)], Number(hall?.id), "pointParents：档案室 → 大堂");
+  ok(Number.isFinite(hall?.x) && Number.isFinite(hall?.y) && Number.isFinite(archive?.x), "子图点位有网格坐标");
+  ok(
+    state.map.pointCount > state.map.points.length,
+    `pointCount(${state.map.pointCount}) 计全部可见非占位点（含子地点），可大于世界图标记数(${state.map.points.length})`,
+  );
+
+  // S7：committed 时按最终世界记一条子图增量日志（不记故事原文）
+  const hierarchy = core.logs().filter((log) => log.kind === "world-turn-hierarchy");
+  equal(hierarchy.length, 1, "committed 恰好一条子图增量日志");
+  equal(hierarchy[0].pointsAdded, 2, "本轮新增两个带父地点（大堂 + 档案室）");
+  equal(hierarchy[0].scanned, 2, "最大层级 2（钟楼 → 大堂 → 档案室）");
+  const logText = JSON.stringify(core.logs());
+  ok(!logText.includes("推开档案室的门"), "子图日志不含故事原文");
+});
+
+test("S10③ 跨轮给已有父添子：第二轮以已知数字 ID 为父，仍挂到同一父下", async () => {
+  const first = s10Draft({
+    locations: [
+      s10Loc("new:loc:hall", "大堂", S10_TOWER),
+      s10Loc("new:loc:archive", "档案室", "new:loc:hall"),
+    ],
+    sceneRef: "new:loc:archive",
+    transition: "arrive",
+  });
+  let second = null;
+  const { core, world } = await setupWithTower([() => openAiResponse(first), () => openAiResponse(second)]);
+  const c1 = await core.handle("POST", "/turns/commit", s10Commit(world, 1, {
+    userText: "我进钟楼。",
+    assistantText: "你走进钟楼大堂，再推开档案室的门。",
+  }));
+  equal(c1.body.data?.receipt?.status, "committed", "第一轮提交成功");
+
+  const afterFirst = await s10State(core);
+  const tower = afterFirst.map.points.find((point) => point.name === "钟楼");
+  const hall = s10SubPoint(afterFirst, tower.id, "大堂");
+  ok(hall, "第一轮后「大堂」挂在钟楼下");
+
+  // 第二轮：父引用 = 大堂的**已知数字 ID**（跨轮，不再是 new:loc:）
+  second = s10Draft({
+    locations: [s10Loc("new:loc:inner", "内室", String(hall.id))],
+    sceneRef: String(hall.id),
+    transition: "arrive",
+    quote: "你走进大堂的内室",
+    summary: "进入大堂内室。",
+  });
+  const c2 = await core.handle("POST", "/turns/commit", s10Commit(world, 2, {
+    userText: "我走进内室。",
+    assistantText: "你走进大堂的内室。",
+  }));
+  equal(c2.body.data?.receipt?.status, "committed", "第二轮（父 = 大堂已知 ID）提交成功");
+
+  const afterSecond = await s10State(core);
+  const hallKids = (afterSecond.map.submaps[String(hall.id)]?.points ?? []).map((point) => point.name).sort();
+  deepEqual(hallKids, ["内室", "档案室"].sort(), "第二轮子点挂到同一父（大堂）下");
+  const inner = s10SubPoint(afterSecond, hall.id, "内室");
+  ok(inner, "「内室」出现在大堂子图");
+  equal(afterSecond.map.pointParents[String(inner?.id)], Number(hall.id), "pointParents：内室 → 大堂");
+  deepEqual(
+    (afterSecond.map.submaps[String(tower.id)]?.points ?? []).map((point) => point.name),
+    ["大堂"],
+    "钟楼这一层没有被第二轮改动",
+  );
+  equal(String(afterSecond.currentLocationId), String(hall.id), "当前位置 = 大堂");
+  equal(afterSecond.map.points.some((point) => point.name === "内室"), false, "内室不上世界图");
+
+  const hierarchy = core.logs().filter((log) => log.kind === "world-turn-hierarchy");
+  equal(hierarchy.length, 2, "两个 committed 回合各一条子图增量日志");
+  equal(hierarchy[1].pointsAdded, 1, "第二轮只新增 1 个带父地点");
+  equal(hierarchy[1].scanned, 2, "第二轮最大层级 = 2（内室 → 大堂 → 钟楼：按最终世界的完整祖先链计）");
+});
+
+test("S10④ 刷新后 sidecar 为空仍重建：/state 从世界结构给出完整父子层级", async () => {
+  const draft = s10Draft({
+    locations: [
+      s10Loc("new:loc:hall", "大堂", S10_TOWER),
+      s10Loc("new:loc:archive", "档案室", "new:loc:hall"),
+    ],
+    sceneRef: "new:loc:archive",
+    transition: "arrive",
+  });
+  const { core, carrier, world } = await setupWithTower([() => openAiResponse(draft)]);
+  const committed = await core.handle("POST", "/turns/commit", s10Commit(world, 1, {
+    userText: "我进钟楼。",
+    assistantText: "你走进钟楼大堂，再推开档案室的门。",
+  }));
+  equal(committed.body.data?.receipt?.status, "committed", "提交成功");
+
+  // 模拟刷新后 sidecar 丢失（maps:<worldId> 被清空 / 读不到）
+  carrier.session.maps = null;
+  const state = await s10State(core);
+  const tower = state.map.points.find((point) => point.name === "钟楼");
+  const hall = s10SubPoint(state, tower.id, "大堂");
+  ok(hall, "sidecar 为空时仍从 parentPointId 重建出钟楼子图");
+  const archive = s10SubPoint(state, hall?.id, "档案室");
+  ok(archive, "两层子图都能重建（不把 sidecar 缺失伪装成层级永久丢失）");
+  ok(Number.isFinite(hall?.x) && Number.isFinite(archive?.x), "重建的点位有确定性坐标");
+  equal(state.map.pointParents[String(hall?.id)], Number(tower.id), "父链不依赖 sidecar");
+  ok(state.map.submapCount >= 2, `至少重建两张子图（实际 ${state.map.submapCount}）`);
+
+  // 二次读取幂等：同一世界二次投影深相等（刷新不应改变层级或坐标）
+  const again = await s10State(core);
+  const shape = (snapshot) => Object.fromEntries(Object.entries(snapshot.map.submaps)
+    .map(([key, sub]) => [key, sub.points.map((point) => `${point.id}:${point.name}:${point.x},${point.y}`)]));
+  deepEqual(shape(again), shape(state), "同一世界二次 /state 投影深相等");
+});
+
+test("S10⑤ sidecar 读取异常：/state 不报错，v2 层级仍从世界结构重建并留具名诊断", async () => {
+  const draft = s10Draft({
+    locations: [s10Loc("new:loc:crypt", "地窖", "4103")],
+    sceneRef: "new:loc:crypt",
+    transition: "arrive",
+  });
+  const sink = s10DiagnosticSink();
+  const { core, carrier, world } = await setupWithTower([() => openAiResponse(draft)], { deps: sink.deps });
+  carrier.session.maps = {
+    schemaVersion: 2,
+    pointMeta: {},
+    submaps: { "4103": { parentMapId: "world", ownerLocationId: "4103", points: [{ id: "sub-room", name: "里间", x: 31, y: 17 }] } },
+    calibrations: {},
+  };
+  const committed = await core.handle("POST", "/turns/commit", s10Commit(world, 1));
+  equal(committed.body.data?.receipt?.status, "committed", "提交成功");
+
+  // 注入读取失败：maps 读取 reject（等价于存储层读不到 sidecar）
+  const failing = s10UnreadableSidecar();
+  carrier.session.maps = failing.value;
+  const result = await core.handle("GET", "/state/chat-a");
+  equal(result.status, 200, "sidecar 读取异常不得让 /state 报错");
+  equal(result.body.ok, true, "/state 返回 ok");
+  ok(failing.touched >= 1, "注入生效：maps 读取 await 时访问 then 并抛出（读取以 rejected 结束，走失败分支）");
+  const state = result.body.data;
+  const crypt = s10SubPoint(state, "4103", "地窖");
+  ok(crypt, "一次 sidecar 读取失败不得伪装成「世界已提交但子图永久丢失」：v2 层级仍可见");
+  equal(crypt?.id, String(s10WorldPoint(carrier, "地窖")?.id ?? ""), "重建出的 marker id 仍是世界点数字 ID");
+  ok(state.map.points.some((point) => String(point.id) === "4103"), "根地点仍在世界图");
+  equal(state.map.points.some((point) => point.name === "地窖"), false, "子地点仍不上世界图");
+
+  // 施工单 S6：读取失败要记具名诊断（不能静默当成「这个世界没有子图」）
+  const readFailedLogs = core.logs().filter((log) => log.kind === "map-projection-sidecar-read-failed");
+  equal(readFailedLogs.length, 1, "读取失败恰好记一条具名日志");
+  equal(readFailedLogs[0].level, "warn", "读取失败日志 level = warn");
+  const readFailedDiagnostics = sink.events.filter((entry) => entry.code === "MAP_PROJECTION_SIDECAR_READ_FAILED");
+  equal(readFailedDiagnostics.length, 1, "诊断码 MAP_PROJECTION_SIDECAR_READ_FAILED 出现一次");
+  equal(readFailedDiagnostics[0].level, "warn", "诊断 level = warn");
+  equal(readFailedDiagnostics[0].source, "engine", "诊断 source = engine");
+  equal(readFailedDiagnostics[0].phase, "map-projection-sidecar-read-failed", "诊断 phase 指向投影读取失败");
+  equal(readFailedDiagnostics[0].outcome, "skipped", "warn 级诊断 outcome = skipped（可恢复）");
+
+  carrier.session.maps = null;
+  const restored = await s10State(core);
+  ok(s10SubPoint(restored, "4103", "地窖"), "恢复 sidecar 通道后子图照常展示");
+  equal(
+    core.logs().filter((log) => log.kind === "map-projection-sidecar-read-failed").length,
+    1,
+    "读取恢复正常后不再重复记失败诊断",
+  );
+});
+
+test("S10⑥a 时间游标回退到提交前：祖先图里不得出现未来子点", async () => {
+  const draft = s10Draft({
+    duration: 1,
+    locations: [
+      s10Loc("new:loc:hall", "大堂", S10_TOWER),
+      s10Loc("new:loc:archive", "档案室", "new:loc:hall"),
+    ],
+    sceneRef: "new:loc:archive",
+    transition: "arrive",
+  });
+  const { core, carrier, world } = await setupWithTower([() => openAiResponse(draft)]);
+  const committed = await core.handle("POST", "/turns/commit", s10Commit(world, 1, {
+    userText: "我进钟楼。",
+    assistantText: "你走进钟楼大堂，再推开档案室的门。",
+  }));
+  equal(committed.body.data?.receipt?.status, "committed", "提交成功");
+  equal(committed.body.data.receipt.currentTime, CURRENT_TIME + 1, "游标推进 1");
+
+  // 查看时刻退回提交前（同一分支、旧游标）
+  carrier.session.binding.worldTimeCursor = CURRENT_TIME;
+  const state = await s10State(core);
+  equal(state.currentTime, CURRENT_TIME, "视图游标回到提交前");
+  ok(state.map.points.some((point) => point.name === "钟楼"), "提交前就存在的根地点仍可见");
+  equal(state.map.points.some((point) => point.name === "大堂"), false, "未来子点不上世界图");
+  equal(
+    s10AllSubPoints(state).some((point) => ["大堂", "档案室"].includes(point.name)),
+    false,
+    "祖先子图里不得出现时间游标之后的子点",
+  );
+  equal(Object.keys(state.map.pointParents ?? {}).length, 0, "pointParents 不下发未来点");
+  ok(s10WorldPoint(carrier, "大堂"), "世界定义仍保留（视图回退不删数据）");
+});
+
+test("S10⑥b 未来分支（fork 在提交前）：祖先图里不得出现分支外的子点", async () => {
+  const draft = s10Draft({
+    duration: 1,
+    locations: [
+      s10Loc("new:loc:hall", "大堂", S10_TOWER),
+      s10Loc("new:loc:archive", "档案室", "new:loc:hall"),
+    ],
+    sceneRef: "new:loc:archive",
+    transition: "arrive",
+  });
+  const { core, carrier, world } = await setupWithTower([() => openAiResponse(draft)]);
+  const committed = await core.handle("POST", "/turns/commit", s10Commit(world, 1, {
+    userText: "我进钟楼。",
+    assistantText: "你走进钟楼大堂，再推开档案室的门。",
+  }));
+  equal(committed.body.data?.receipt?.status, "committed", "提交成功（正史线）");
+
+  const canonView = await s10State(core);
+  const tower = canonView.map.points.find((point) => point.name === "钟楼");
+  ok(s10SubPoint(canonView, tower.id, "大堂"), "正史视图能看到子点");
+
+  // 分歧线 fork 在提交之前：正史线上后建的子点属于「未来」
+  carrier.session.world.stories.push({
+    id: "if-before-tower",
+    worldId: world.id,
+    mode: "if",
+    title: "分歧线",
+    steps: [],
+    parentStoryId: CANON,
+    ifOrigin: { rootStoryId: CANON, sourceStoryId: CANON, anchorAt: CURRENT_TIME },
+  });
+  carrier.session.binding.branchId = "if-before-tower";
+
+  const branchView = await s10State(core);
+  equal(branchView.currentTime, CURRENT_TIME + 1, "分支视图游标不变");
+  ok(branchView.map.points.some((point) => point.name === "钟楼"), "钟楼在分歧前就存在 → 分支视图仍可见");
+  equal(
+    branchView.map.points.some((point) => ["大堂", "档案室"].includes(point.name)),
+    false,
+    "分歧之后创建的子点不得出现在分支视图的世界图",
+  );
+  equal(
+    s10AllSubPoints(branchView).some((point) => ["大堂", "档案室"].includes(point.name)),
+    false,
+    "祖先图里不得泄露分支外的子点",
+  );
+  equal(Object.keys(branchView.map.pointParents ?? {}).length, 0, "pointParents 不泄露不可见分支的父链");
+
+  carrier.session.binding.branchId = CANON;
+  const back = await s10State(core);
+  ok(s10SubPoint(back, tower.id, "大堂"), "切回正史后子图恢复（换分支不销毁数据）");
+});
+
+test("S10⑦a 模型校验失败（父引用成环）：RESPONSE_MALFORMED、世界零变化、游标不动", async () => {
+  const cyclic = s10Draft({
+    locations: [s10Loc("new:loc:a", "甲室", "new:loc:b"), s10Loc("new:loc:b", "乙室", "new:loc:a")],
+  });
+  const { core, carrier, world, fetcher } = await setupWithTower([() => openAiResponse(cyclic)]);
+  const pointsBefore = (carrier.session.world.points ?? []).length;
+
+  const result = await core.handle("POST", "/turns/commit", s10Commit(world, 1));
+  ok(result.status !== 200, "成环草稿必须明确失败（不得静默接受）");
+  equal(result.body.error.code, ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "失败码 RESPONSE_MALFORMED");
+  ok(/成环/.test(result.body.error.message), `失败原因指向父引用成环（实际：${String(result.body.error.message).slice(0, 60)}）`);
+
+  equal((carrier.session.world.points ?? []).length, pointsBefore, "世界零变化（没有新地点）");
+  const state = await s10State(core);
+  equal(state.currentTime, CURRENT_TIME, "时间游标不动");
+  equal(Object.keys(state.map.submaps ?? {}).length, 0, "没有新子图");
+  equal(Object.keys(state.map.pointParents ?? {}).length, 0, "没有新父链");
+  equal(core.logs().some((log) => log.kind === "world-turn-hierarchy"), false, "失败回合不写子图增量日志");
+  ok(core.logs().some((log) => log.kind === "world-turn-v2-rejected"), "拒绝走规定的 v2 校验日志路径");
+  equal(fetcher.calls.length, 1, "失败发生在模型调用之后：恰好 1 次模型请求");
+});
+
+test("S10⑦b 模型校验失败（未知父引用）：RESPONSE_MALFORMED、零写入", async () => {
+  const orphan = s10Draft({ locations: [s10Loc("new:loc:orphan", "无父室", "999999")] });
+  const { core, carrier, world, fetcher } = await setupWithTower([() => openAiResponse(orphan)]);
+  const pointsBefore = (carrier.session.world.points ?? []).length;
+
+  const result = await core.handle("POST", "/turns/commit", s10Commit(world, 1));
+  ok(result.status !== 200, "未知父引用必须明确失败");
+  equal(result.body.error.code, ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "失败码 RESPONSE_MALFORMED");
+  ok(
+    /未知地点/.test(result.body.error.message) && /parentLocationRef/.test(result.body.error.message),
+    `失败原因指向 parentLocationRef 的未知父（实际：${String(result.body.error.message).slice(0, 80)}）`,
+  );
+
+  equal((carrier.session.world.points ?? []).length, pointsBefore, "世界零变化（没有新地点）");
+  const state = await s10State(core);
+  equal(state.currentTime, CURRENT_TIME, "时间游标不动");
+  equal(state.map.points.some((point) => point.name === "无父室"), false, "没有新地图点");
+  equal(Object.keys(state.map.submaps ?? {}).length, 0, "没有新子图");
+  equal(core.logs().some((log) => log.kind === "world-turn-hierarchy"), false, "失败回合不写子图增量日志");
+  equal(fetcher.calls.length, 1, "恰好 1 次模型请求（失败在应用期，不在解析期）");
+});
+
+test("S10⑧ 重复回合（同幂等键）：duplicate、地图不重复添点、零额外模型调用", async () => {
+  const draft = s10Draft({
+    locations: [s10Loc("new:loc:hall", "大堂", S10_TOWER)],
+    sceneRef: "new:loc:hall",
+    transition: "arrive",
+  });
+  const { core, carrier, world, fetcher } = await setupWithTower([() => openAiResponse(draft)]);
+  const request = s10Commit(world, 1);
+
+  const first = await core.handle("POST", "/turns/commit", request);
+  equal(first.body.data?.receipt?.status, "committed", "首次提交 committed");
+  const pointsAfterFirst = (carrier.session.world.points ?? []).length;
+  const stateFirst = await s10State(core);
+  const tower = stateFirst.map.points.find((point) => point.name === "钟楼");
+  equal(
+    (stateFirst.map.submaps[String(tower.id)]?.points ?? []).filter((point) => point.name === "大堂").length,
+    1,
+    "首轮子图恰有一个「大堂」",
+  );
+
+  // 同键重试（同回合、同消息 ID）→ 服务层幂等：duplicate，不再添点
+  const second = await core.handle("POST", "/turns/commit", request);
+  equal(second.status, 200, "重复回合不是错误响应");
+  equal(second.body.data?.duplicate, true, "回执标记 duplicate");
+  equal(second.body.data?.receipt?.status, "duplicate", "回执状态 duplicate");
+  equal(fetcher.calls.length, 1, "重复回合零额外模型调用");
+  equal((carrier.session.world.points ?? []).length, pointsAfterFirst, "世界点不重复增加");
+
+  const stateSecond = await s10State(core);
+  equal(
+    (stateSecond.map.submaps[String(tower.id)]?.points ?? []).filter((point) => point.name === "大堂").length,
+    1,
+    "地图不重复添点",
+  );
+  equal(stateSecond.currentTime, stateFirst.currentTime, "游标不二次推进");
+  equal(
+    core.logs().filter((log) => log.kind === "world-turn-hierarchy").length,
+    1,
+    "duplicate 不报告创建成功（只有首轮一条子图增量日志）",
+  );
+});
+
+test("S10⑨a 同一父下 40 上限的跨轮累计：恰好 40 个合法通过", async () => {
+  // 单响应最多 12 个新地点（atlas-contract-v2 MAX.locations），故 40 只能跨轮累加
+  const counts = [12, 12, 12, 4];
+  const { core, carrier, world } = await setupWithTower(s10SiblingScripts(counts));
+  let turn = 0;
+  for (const count of counts) {
+    const result = await core.handle("POST", "/turns/commit", s10Commit(world, turn + 1));
+    turn += 1;
+    equal(result.body.data?.receipt?.status, "committed", `第 ${turn} 轮（+${count}）committed`);
+  }
+
+  equal(s10ChildrenOfTower(carrier).length, 40, "跨轮累计后钟楼下恰好 40 个直接子地点");
+  const state = await s10State(core);
+  const shown = (state.map.submaps[S10_TOWER]?.points ?? []).filter((point) => /^房间-/.test(point.name));
+  equal(shown.length, 40, "40 个子点全部随 /state 下发");
+  equal(new Set(shown.map((point) => point.name)).size, 40, "40 个名字互不相同：没有被静默截断丢弃");
+  equal(state.map.pointCount, state.map.points.length + 40, "pointCount 计入 40 个子地点");
+  equal(
+    core.logs().filter((log) => log.kind === "world-turn-hierarchy").length,
+    4,
+    "四个 committed 回合各一条子图增量日志",
+  );
+});
+
+test("S10⑨b 同一父下第 41 个子地点必须被整轮拒绝、零写入（S4 残留①）", async () => {
+  const counts = [12, 12, 12, 4, 1]; // 第 5 轮声明的就是第 41 个
+  const { core, carrier, world, fetcher } = await setupWithTower(s10SiblingScripts(counts));
+  let turn = 0;
+  let fifth = null;
+  let childrenAfterFourth = null;
+  for (const count of counts) {
+    const result = await core.handle("POST", "/turns/commit", s10Commit(world, turn + 1));
+    turn += 1;
+    if (turn < counts.length) {
+      equal(result.body.data?.receipt?.status, "committed", `第 ${turn} 轮（+${count}）committed`);
+      childrenAfterFourth = s10ChildrenOfTower(carrier).length;
+    } else {
+      fifth = result;
+    }
+  }
+  equal(childrenAfterFourth, 40, "前四轮恰好累计到 40 个同父子地点（这一层符合规定）");
+  const childrenAfterFifth = s10ChildrenOfTower(carrier).length;
+  const stateAfterFifth = await s10State(core);
+  const shownAfterFifth = (stateAfterFifth.map.submaps[S10_TOWER]?.points ?? [])
+    .filter((point) => /^房间-/.test(point.name)).length;
+  const parentsAfterFifth = Object.keys(stateAfterFifth.map.pointParents ?? {}).length;
+
+  ok(
+    fifth.status !== 200 && fifth.body?.data?.receipt?.status !== "committed",
+    `第 41 个同父孩子必须被整轮拒绝（预期 502 / ${ATLAS_ERROR_CODES.RESPONSE_MALFORMED}）；`
+      + `实际 status=${fifth.status}、receipt=${fifth.body?.data?.receipt?.status ?? fifth.body?.error?.code}，`
+      + `世界子地点从 ${childrenAfterFourth} 变成 ${childrenAfterFifth}，`
+      + `/state 子图只显示 ${shownAfterFifth} 个、pointParents 已含 ${parentsAfterFifth} 条父链`
+      + `（第 41 个被 slice(0, SUBMAP_POINTS_MAX) 静默吞掉）`,
+  );
+  equal(fifth.body?.error?.code, ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "拒绝码 RESPONSE_MALFORMED");
+  equal(childrenAfterFifth, 40, "被拒回合零写入：世界仍停在 40 个子地点");
+  const state = await s10State(core);
+  equal(state.currentTime, CURRENT_TIME, "被拒回合不推进游标");
+  equal(
+    (state.map.submaps[S10_TOWER]?.points ?? []).filter((point) => /^房间-/.test(point.name)).length,
+    40,
+    "被拒回合不新增子图点位（也不得靠 slice(0,40) 静默吞掉第 41 个）",
+  );
+  equal(
+    core.logs().filter((log) => log.kind === "world-turn-hierarchy").length,
+    4,
+    "被拒回合不写子图增量日志",
+  );
+  equal(fetcher.calls.length, 5, "5 轮各 1 次模型请求（拒绝发生在应用期）");
+});
+
+test("S10⑩ 既有存档已超限（41 个子点）：视图侧截断必须留 MAP_PROJECTION_POINTS_TRUNCATED 痕迹", async () => {
+  const sink = s10DiagnosticSink();
+  // 既有存档：钟楼下已经有 41 个 parentPointId 直接子点（schema 不查同父数量，import 应接受）
+  const legacyChildren = Array.from({ length: 41 }, (_, i) => ({
+    id: 9100 + i,
+    name: `旧储藏室-${i}`,
+    x: 20 + (i % 5),
+    y: 30 + (i % 7),
+    regionId: null,
+    parentPointId: 9001,
+  }));
+  const { core, carrier } = await setupWithTower(null, { deps: sink.deps, extraPoints: legacyChildren });
+  equal(s10ChildrenOfTower(carrier).length, 41, "既有存档的 41 个子点被 import 原样接受");
+
+  const result = await core.handle("GET", "/state/chat-a");
+  equal(result.status, 200, "超限存档的 /state 仍返回 200（不炸面板）");
+  equal(result.body.ok, true, "/state 返回 ok");
+  const state = result.body.data;
+  const sub = state.map.submaps[S10_TOWER];
+  ok(sub, "超限存档仍下发该子图");
+  equal(sub.points.length, 40, "视图侧按 40 上限下发子图点位");
+  equal(sub.points[0]?.id, "9100", "留下的 40 个是确定性子集（按子点 ID 升序）");
+  equal(
+    state.map.pointCount,
+    state.map.points.length + 41,
+    "pointCount 仍如实报告全部 41 个子地点（不跟着视图截断变少）",
+  );
+  equal(Object.keys(state.map.pointParents ?? {}).length, 41, "pointParents 也保留全部 41 条父链");
+
+  // 施工单 S6：不得靠截断静默丢弃第 41 个地点——被裁必须留痕
+  const truncatedLogs = core.logs().filter((log) => log.kind === "map-projection-points-truncated");
+  equal(truncatedLogs.length, 1, "视图侧截断恰好记一条具名日志（不再静默）");
+  equal(truncatedLogs[0].level, "warn", "截断日志 level = warn");
+  equal(truncatedLogs[0].skipped, 1, "截断日志 skipped = 1（被裁的子点数量）");
+  const truncatedDiagnostics = sink.events.filter((entry) => entry.code === "MAP_PROJECTION_POINTS_TRUNCATED");
+  equal(truncatedDiagnostics.length, 1, "诊断码 MAP_PROJECTION_POINTS_TRUNCATED 出现一次");
+  equal(truncatedDiagnostics[0].level, "warn", "诊断 level = warn");
+  equal(truncatedDiagnostics[0].details?.count, 1, "诊断 details.count = 1（被裁的子点数量）");
 });
