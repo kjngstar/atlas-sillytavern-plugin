@@ -590,6 +590,9 @@ function createCoreInstance(
     // S6 补刀（0.9.55）：投影期的可恢复异常——读取失败 / 视图侧点位超限被裁，
     // 都要能在「日志」页看见，不能静默当成「这个世界没有子图」。
     "map-projection-sidecar-read-failed", "map-projection-points-truncated",
+    // S5/S6 补刀：坏 sidecar 引用（幽灵子图）/ 超出 40 张地图上限 / v1 与 v2 同名。
+    "map-projection-ghost-submaps-dropped", "map-projection-maps-truncated",
+    "map-projection-name-collisions-kept",
   ]);
   function pushLog(entry: Record<string, unknown>): void {
     const logs = shared.logs;
@@ -1707,6 +1710,22 @@ function createCoreInstance(
         scale: sub.scale ?? null,
         points: sub.points.slice(0, 40),
       }));
+    // S5/S6 补刀（0.9.55）：投影把三样东西挡在视图外——坏 sidecar 引用（宿主地点已不存在 /
+    // 父链不可达 / 超深度的幽灵子图）、超过 40 张地图上限的可见子图、v1 虚拟点与 v2 新点同名。
+    // 施工单 S5 要求「丢弃于视图并记录数目」、S6 要求「不得静默吞掉」：三样都记只含数量的
+    // 具名诊断（kind → code 由 pushLog 统一转换），让「东西不见了」有据可查。
+    const ghostSubmapCount = Object.keys(projected.submaps).filter((key) => !visibleSubmapIds.has(key)).length;
+    if (ghostSubmapCount > 0) {
+      pushLog({ kind: "map-projection-ghost-submaps-dropped", skipped: ghostSubmapCount });
+    }
+    const visibleSubmapCount = Object.keys(projected.submaps).filter((key) => visibleSubmapIds.has(key)).length;
+    const mapsOverCap = Math.max(0, visibleSubmapCount - submapEntries.length);
+    if (mapsOverCap > 0) {
+      pushLog({ kind: "map-projection-maps-truncated", skipped: mapsOverCap });
+    }
+    if (projection.nameCollisions > 0) {
+      pushLog({ kind: "map-projection-name-collisions-kept", skipped: projection.nameCollisions });
+    }
     // S6 补刀（0.9.55）：视图侧每个子图仍下发最多 40 个点（施工单优先「限制单世界上限」，
     // 超限提交已在 S3 整轮拒绝）。万一既有存档已超限，绝不能静默裁掉——记一条只含数量的
     // 具名诊断，让「点不见了」有据可查，而不是看起来像地图坏了。

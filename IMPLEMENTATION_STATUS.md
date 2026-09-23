@@ -28,7 +28,7 @@ S9–S12，并补上施工单未覆盖的触发缺口（S8.5）。以下状态�
 | S2 | ✅ | 解析期拦自引用、未声明 `new:loc:`、成环，错误路径指向 `$.discoveries.locations[i].parentLocationRef` |
 | S3 | ✅ | 父引用落到候选世界（已知父 / 同轮父 / 顺序无关）；未知父·自引用·成环·超 4 层子图·同父超 40 个 → 整轮拒绝零写入 |
 | S4 | ✅ | 纯函数验收 8 例；**残留两项改由服务层结清**（S10⑧ 同键 duplicate、S10⑨a/⑨b 跨轮 40 上限） |
-| S5 | ✅ | `projectWorldSubmaps`：按 `parentPointId` 派生、与 sidecar 合并、确定性散布、v1 `sub-*` 兼容合并 |
+| S5 | ✅ | `projectWorldSubmaps`：按 `parentPointId` 派生、与 sidecar 合并、确定性散布、v1 `sub-*` 兼容合并；**纯函数验收 8 条已补**（`tests/atlas-r09-submap-frame.test.mjs` 的 S5-P1..P8：二次投影深相等 / 空档 / v1 档 / 标定保留 / 兄弟地点 / 不可见点 / 四层上限 / 同名计数），幽灵子图·超 40 张地图·v1-v2 同名三处不再静默 |
 | S6 | ✅ | 世界图只下发根地点；`pointCount` 口径修正；sidecar 读取失败 / 视图截断**不再静默** |
 | S7 | ✅ | committed 记 `world-turn-hierarchy`（父新增点数 + 最大层级，不含原文） |
 | S8 | ✅ | UI 允许第四层子图 + 按 `parentMapId` 校验父链 + 「定位当前位置」回溯最近根祖先 |
@@ -53,8 +53,18 @@ S9–S12，并补上施工单未覆盖的触发缺口（S8.5）。以下状态�
    提示都要等下一次重渲染才出现（子图视图下还会先看到旧提示）。现 `setStatus` 就地刷新 /
    补挂状态行，一处修好九个站点。
 
-**门禁**：typecheck 0 errors；全量 **619/619**（0.9.54 基线 563 → S 系列新增用例）；`pack`
-通过（根 `index.js` 为权威源，镜像一致性断言）；`git diff --check` 干净。
+**S5 补刀（本轮逐条核对施工单时发现）**：S5 原文点名 `tests/atlas-r09-submap-frame.test.mjs`
+并要求「坏 sidecar 引用丢弃于视图**并记录数目**」「v1 旧点与 v2 新点同名时保留两个不同 ID
+**并给日志提示**」，但当时（2d6b69e）只往服务端测试文件加了 7 行 S0 夹具调整，本文件一条
+投影断言都没有，且幽灵子图在 `/state` 被静默过滤、同名并存无任何提示。现已补：
+纯函数验收 8 条（二次投影深相等 / 不修改入参 / 空档 sidecar / v1 虚拟点保真 / 标定保留 /
+兄弟地点 / 不可见点与脏引用计数 / 四层下钻上限 / 同名并存计数），并把三处静默改为具名诊断
+（`map-projection-ghost-submaps-dropped` / `map-projection-maps-truncated` /
+`map-projection-name-collisions-kept`，均 warn 级、只含数量）；服务层用例断言 41 张可达
+子图 + 1 张幽灵 + 1 处同名时，`/state` 下发 40 张且三条诊断各出现一次。
+
+**门禁**：typecheck 0 errors；全量 **628/628**（0.9.54 基线 563 → S 系列累计新增 65 条）；
+`pack` 通过（根 `index.js` 为权威源，镜像一致性断言）；`git diff --check` 干净。
 **发布产物核对**：`release/atlas-ui-extension/index.js` 与 `dist/atlas-ui-core.mjs`、
 `release/atlas-server-plugin/dist/atlas-server.mjs` 均含 `parentPointId` / `pointParents` /
 `isProtagonist` / `V2_SUBMAP_SIBLINGS_MAX` / `world-turn-hierarchy` /

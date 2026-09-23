@@ -2550,3 +2550,61 @@ test("S10⑩ 既有存档已超限（41 个子点）：视图侧截断必须留 
   equal(truncatedDiagnostics[0].level, "warn", "诊断 level = warn");
   equal(truncatedDiagnostics[0].details?.count, 1, "诊断 details.count = 1（被裁的子点数量）");
 });
+
+test("S5/S6 补刀：被挡在视图外的子图也留具名诊断（幽灵引用 / 超 40 张地图 / v1-v2 同名）", async () => {
+  const sink = s10DiagnosticSink();
+  // 41 个根地点（夹具自带钟楼 9001 + 追加 40 个）：造出 41 张**可达**子图，逼到 40 张上限
+  const extraPoints = Array.from({ length: 40 }, (_, i) => ({
+    id: 9100 + i,
+    name: `附楼${i + 1}`,
+    x: 20,
+    y: 20,
+    regionId: null,
+  }));
+  // v2 子地点挂在钟楼下，且与 sidecar 里的 v1 虚拟点同名 → 触发「同名并存」计数
+  extraPoints.push({ id: 9140, name: "大堂", x: 30, y: 30, regionId: null, parentPointId: 9001 });
+  const { core, carrier } = await setupWithTower(null, { deps: sink.deps, extraPoints });
+
+  const submaps = {};
+  for (let i = 0; i < 40; i += 1) {
+    const id = String(9100 + i);
+    submaps[id] = { parentMapId: "world", ownerLocationId: id, points: [{ id: `p${i}`, name: `点位${i}`, x: 50, y: 50 }] };
+  }
+  // v1 虚拟点（同名于 v2 的「大堂」）
+  submaps[S10_TOWER] = { parentMapId: "world", ownerLocationId: S10_TOWER, points: [{ id: "sub-hall", name: "大堂", x: 22, y: 33 }] };
+  // 宿主地点已不存在的幽灵子图
+  submaps["ghost-point"] = { parentMapId: "world", ownerLocationId: "ghost-point", points: [{ id: "s2", name: "不存在", x: 10, y: 10 }] };
+  carrier.session.maps = { schemaVersion: 2, pointMeta: {}, submaps, calibrations: {} };
+
+  const state = (await core.handle("GET", "/state/chat-a")).body.data;
+  equal(Object.keys(state.map.submaps).length, 40, "可见子图下发上限 40 张（41 张可达 → 下发 40）");
+  equal("ghost-point" in state.map.submaps, false, "幽灵子图（宿主地点不存在）不进视图");
+
+  // 施工单 S5：坏 sidecar 引用「丢弃于视图并记录数目」
+  const ghostLogs = core.logs().filter((log) => log.kind === "map-projection-ghost-submaps-dropped");
+  equal(ghostLogs.length, 1, "幽灵子图丢弃恰好记一条具名日志");
+  equal(ghostLogs[0].level, "warn", "幽灵子图日志 level = warn");
+  equal(ghostLogs[0].skipped, 1, "幽灵子图数量 1");
+  const ghostDiagnostics = sink.events.filter((entry) => entry.code === "MAP_PROJECTION_GHOST_SUBMAPS_DROPPED");
+  equal(ghostDiagnostics.length, 1, "诊断码 MAP_PROJECTION_GHOST_SUBMAPS_DROPPED 出现一次");
+  equal(ghostDiagnostics[0].details?.count, 1, "诊断 details.count = 1");
+
+  // 施工单 S6：40 张地图上限同样不得静默吞掉
+  const mapsLogs = core.logs().filter((log) => log.kind === "map-projection-maps-truncated");
+  equal(mapsLogs.length, 1, "超 40 张地图上限被裁记一条日志");
+  equal(mapsLogs[0].skipped, 1, "被裁地图数 1");
+  const mapsDiagnostics = sink.events.filter((entry) => entry.code === "MAP_PROJECTION_MAPS_TRUNCATED");
+  equal(mapsDiagnostics.length, 1, "诊断码 MAP_PROJECTION_MAPS_TRUNCATED 出现一次");
+  equal(mapsDiagnostics[0].details?.count, 1, "诊断 details.count = 1");
+
+  // 施工单 S5：v1 旧点与 v2 新点同名时两者都留，并给日志提示
+  const towerSub = state.map.submaps[S10_TOWER];
+  const names = (towerSub?.points ?? []).map((point) => point.name);
+  equal(names.filter((name) => name === "大堂").length, 2, "同名两个点都在（绝不按名字合并）");
+  const collisionLogs = core.logs().filter((log) => log.kind === "map-projection-name-collisions-kept");
+  equal(collisionLogs.length, 1, "同名并存记一条具名日志");
+  equal(collisionLogs[0].skipped, 1, "同名并存数 1");
+  const collisionDiagnostics = sink.events.filter((entry) => entry.code === "MAP_PROJECTION_NAME_COLLISIONS_KEPT");
+  equal(collisionDiagnostics.length, 1, "诊断码 MAP_PROJECTION_NAME_COLLISIONS_KEPT 出现一次");
+  equal(collisionDiagnostics[0].details?.count, 1, "诊断 details.count = 1");
+});

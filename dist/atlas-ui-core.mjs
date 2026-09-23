@@ -3607,6 +3607,7 @@ function projectWorldSubmaps(points, sidecar) {
   }
   const childrenOf = /* @__PURE__ */ new Map();
   let dropped = 0;
+  let nameCollisions = 0;
   for (const point of byId.values()) {
     const pid = Number(point.parentPointId);
     if (!Number.isInteger(pid) || pid <= 0) continue;
@@ -3649,6 +3650,7 @@ function projectWorldSubmaps(points, sidecar) {
     const existing = sidecar.submaps[key];
     const kept = Array.isArray(existing?.points) ? existing.points.map((p) => ({ ...p })) : [];
     const knownIds = new Set(kept.map((p) => p.id));
+    const keptNames = new Set(kept.map((p) => String(p.name ?? "")));
     const newOnes = [...children].sort((a, b) => Number(a.id) - Number(b.id));
     newOnes.forEach((child, index) => {
       const childKey = String(child.id);
@@ -3657,6 +3659,7 @@ function projectWorldSubmaps(points, sidecar) {
         if (!disk.name) disk.name = child.name;
         return;
       }
+      if (keptNames.has(String(child.name ?? ""))) nameCollisions += 1;
       const seed = Number.parseInt(hashString(`${parentId}:${childKey}`), 16) || 0;
       const angle = seed % 3600 / 3600 * Math.PI * 2;
       const radius = 12 + 3.2 * Math.sqrt(index + 1);
@@ -3678,7 +3681,7 @@ function projectWorldSubmaps(points, sidecar) {
       ...existing?.frame ? { frame: existing.frame } : {}
     };
   }
-  return { doc, dropped };
+  return { doc, dropped, nameCollisions };
 }
 function sanitizeMapDoc(raw) {
   const doc = emptyMapDoc();
@@ -10294,7 +10297,11 @@ function createCoreInstance(store, deps, shared) {
     // S6 补刀（0.9.55）：投影期的可恢复异常——读取失败 / 视图侧点位超限被裁，
     // 都要能在「日志」页看见，不能静默当成「这个世界没有子图」。
     "map-projection-sidecar-read-failed",
-    "map-projection-points-truncated"
+    "map-projection-points-truncated",
+    // S5/S6 补刀：坏 sidecar 引用（幽灵子图）/ 超出 40 张地图上限 / v1 与 v2 同名。
+    "map-projection-ghost-submaps-dropped",
+    "map-projection-maps-truncated",
+    "map-projection-name-collisions-kept"
   ]);
   function pushLog(entry) {
     const logs = shared.logs;
@@ -11198,6 +11205,18 @@ function createCoreInstance(store, deps, shared) {
       scale: sub.scale ?? null,
       points: sub.points.slice(0, 40)
     }));
+    const ghostSubmapCount = Object.keys(projected.submaps).filter((key) => !visibleSubmapIds.has(key)).length;
+    if (ghostSubmapCount > 0) {
+      pushLog({ kind: "map-projection-ghost-submaps-dropped", skipped: ghostSubmapCount });
+    }
+    const visibleSubmapCount = Object.keys(projected.submaps).filter((key) => visibleSubmapIds.has(key)).length;
+    const mapsOverCap = Math.max(0, visibleSubmapCount - submapEntries.length);
+    if (mapsOverCap > 0) {
+      pushLog({ kind: "map-projection-maps-truncated", skipped: mapsOverCap });
+    }
+    if (projection.nameCollisions > 0) {
+      pushLog({ kind: "map-projection-name-collisions-kept", skipped: projection.nameCollisions });
+    }
     const truncatedSubmapPoints = Object.entries(projected.submaps).filter(([key]) => visibleSubmapIds.has(key)).reduce((sum, [, sub]) => sum + Math.max(0, sub.points.length - 40), 0);
     if (truncatedSubmapPoints > 0) {
       pushLog({ kind: "map-projection-points-truncated", skipped: truncatedSubmapPoints });

@@ -51,7 +51,7 @@ SillyTavern UI 扩展：**世界工作台（悬浮窗）** + 聊天绑定 + 生�
 对照《Atlas 0.9.52 世界推进与地图更新修复施工单》第三段：把 v2 的 `discoveries.locations[].parentLocationRef` 真正变成可进入的二级 / 三级地图。
 
 - **S1–S3 数据落地**：`MapPoint.parentPointId` 是父子关系的**唯一权威**（sidecar 只是布局缓存）；解析期拦自引用 / 未声明 `new:loc:` / 成环，应用期拦未知父 / 自引用 / 成环 / 父链超 4 层 / 同一父下超 40 个直接子地点——一律整轮拒绝、零写入，绝不静默截断。
-- **S5–S6 /state 投影**：`projectWorldSubmaps` 由可见世界的 `parentPointId` 派生父子地图并与 sidecar 合并；世界图只下发**根地点**，子地点归其父的子图；`pointCount` 报全部可见地点数；`pointParents` 供 UI 回溯。sidecar 读取失败会记 `MAP_PROJECTION_SIDECAR_READ_FAILED` 后用空 sidecar 继续投影（v2 层级不丢），视图侧截断记 `MAP_PROJECTION_POINTS_TRUNCATED`。
+- **S5–S6 /state 投影**：`projectWorldSubmaps` 由可见世界的 `parentPointId` 派生父子地图并与 sidecar 合并；世界图只下发**根地点**，子地点归其父的子图；`pointCount` 报全部可见地点数；`pointParents` 供 UI 回溯。投影被挡在视图外的三样东西都留具名诊断：sidecar 读取失败 `MAP_PROJECTION_SIDECAR_READ_FAILED`（用空 sidecar 继续投影，v2 层级不丢）、幽灵子图 / 父链不可达 `MAP_PROJECTION_GHOST_SUBMAPS_DROPPED`、超出 40 张地图上限 `MAP_PROJECTION_MAPS_TRUNCATED`、单张子图点位超 40 `MAP_PROJECTION_POINTS_TRUNCATED`、旧版与新子图同名并存 `MAP_PROJECTION_NAME_COLLISIONS_KEPT`。
 - **S7 日志**：committed 回合记 `world-turn-hierarchy`（带父新增点数 + 最大层级，不含故事原文）。
 - **S8 UI**：四层子图导航 + 面包屑逐层返回 + 「定位当前位置」在玩家位于建筑内时回溯**最近的根祖先**并提示；状态提示点击当时即可见。
 - **S8.5 提示词接线**：父子层级纪律写进 v2 契约（何时给父 / 父能填什么 / 4 层与 40 个上限，数字直接取自执行层常量）、任务段与核对段同步、地点 id 对照表标注已有子地点的父 ID——否则模型没有理由产出内层地点。

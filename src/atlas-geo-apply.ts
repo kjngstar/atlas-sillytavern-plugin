@@ -323,14 +323,15 @@ export function emptyMapDoc(): AtlasMapDoc {
  * - sidecar 已有的同 ID 布局坐标 / frame / 比例尺 / 描述**优先保留**；新点按父 ID 与
  *   子 ID 确定性散布（不依赖时间戳或数组顺序），同一孩子二次投影结果深相等。
  * - 兼容 v1 sidecar 的虚拟 `sub-*` 点：合并且不改 ID；与 v2 新点同名时两者都保留，
- *   绝不按名字偷偷合并或搬走旧手工布局。
+ *   绝不按名字偷偷合并或搬走旧手工布局（同名并存计数经 nameCollisions 返回，由调用方记日志）。
  * - 超过 SUBMAP_DEPTH_MAX 层可达的地点不再下钻（其子图不生成），并计入 dropped 供日志。
- * - 坏 sidecar 引用（同名但不存在的父）丢弃于视图并计数。
+ * - **坏 sidecar 引用不在本层丢弃**：本层照原样并入 doc（含宿主地点已消失的幽灵子图），
+ *   由 `/state` 的可达性过滤负责丢弃并计数（`map-projection-ghost-submaps-dropped`）。
  */
 export function projectWorldSubmaps(
   points: readonly MapPoint[],
   sidecar: AtlasMapDoc,
-): { doc: AtlasMapDoc; dropped: number } {
+): { doc: AtlasMapDoc; dropped: number; nameCollisions: number } {
   // 只认有限正整数的 parentPointId；其余（含自引用）视为根，避免脏数据造环
   const byId = new Map<number, MapPoint>();
   for (const point of points) {
@@ -339,6 +340,7 @@ export function projectWorldSubmaps(
   }
   const childrenOf = new Map<number, MapPoint[]>();
   let dropped = 0;
+  let nameCollisions = 0;
   for (const point of byId.values()) {
     const pid = Number(point.parentPointId);
     if (!Number.isInteger(pid) || pid <= 0) continue;      // 根地点
@@ -383,6 +385,7 @@ export function projectWorldSubmaps(
       ? existing.points.map((p) => ({ ...p }))
       : [];
     const knownIds = new Set(kept.map((p) => p.id));
+    const keptNames = new Set(kept.map((p) => String(p.name ?? "")));
     const newOnes = [...children].sort((a, b) => Number(a.id) - Number(b.id));
 
     newOnes.forEach((child, index) => {
@@ -393,6 +396,8 @@ export function projectWorldSubmaps(
         if (!disk.name) disk.name = child.name;
         return;
       }
+      // v1 虚拟点与 v2 新点同名：两者都留（绝不按名字合并），只把次数交回调用方记日志
+      if (keptNames.has(String(child.name ?? ""))) nameCollisions += 1;
       // 确定性散布：仅由 父ID 与 子ID 决定，与调用顺序 / 时间戳无关
       // （hashString 返回 8 位十六进制串，转回整数用作散列种子）
       const seed = Number.parseInt(hashString(`${parentId}:${childKey}`), 16) || 0;
@@ -420,7 +425,7 @@ export function projectWorldSubmaps(
     };
   }
 
-  return { doc, dropped };
+  return { doc, dropped, nameCollisions };
 }
 
 /** sidecar 文档形状不可信（兼容旧 / 手改）：宽容清洗，绝不炸面板。 */

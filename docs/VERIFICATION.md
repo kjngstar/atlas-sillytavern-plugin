@@ -139,3 +139,4 @@
 - [ ] 图例只有「地点 / 人物：在地点名单 / 物品」三项，且与实际标点一致。
 - [ ] committed 一轮后「日志」页出现子图增量条目（新增内层地点数 + 最大层级，**不含**故事原文）；换聊天后日志与子图都不串档。
 - [ ] 人为制造 sidecar 读取失败（例：把 `maps:<worldId>` 文档写坏后读取抛错）→ `/state` 仍返回地图与层级，且日志出现 `MAP_PROJECTION_SIDECAR_READ_FAILED`；既有存档同一父下超过 40 个子点时，视图裁到 40 并出现 `MAP_PROJECTION_POINTS_TRUNCATED`。
+- [ ] 制造一张「宿主地点已不存在」的幽灵子图 → 地图上不出现它，且日志出现 `MAP_PROJECTION_GHOST_SUBMAPS_DROPPED`（带数量）；世界可见子图超过 40 张时，多出的不下发并出现 `MAP_PROJECTION_MAPS_TRUNCATED`；旧版子图与新子图同名时两个点都在（不被合并），并出现 `MAP_PROJECTION_NAME_COLLISIONS_KEPT`。
