@@ -15,7 +15,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { JSDOM } from "jsdom";
 
 import { createAtlasUiCore, ATLAS_UI_EVENTS } from "../src/atlas-ui-core.ts";
 import {
@@ -1492,4 +1493,461 @@ test("数据隔离：旧聊天的迟到 /state 响应被丢弃（跨聊天竞态
   equal(state.chatId, "chat-c", "当前聊天是 chat-c");
   ok(state.stateData === null, "chat-b 的迟到响应被丢弃（stateData 不跨聊天存活）");
   equal(state.mode, "unbound", "chat-c 无绑定 → 未绑定态");
+});
+
+// ---------------------------------------------------------------------------
+// S10 前端回归（0.9.55 子地图 / 二级地图）：
+// - 根点、子点分别定位；子图视图拒绝定位
+// - 同地点人物只在地点菜单（离场者不出现、头像可长按纠偏）
+// - 四层子图导航（第 5 张被拒）与面包屑逐层返回
+// - 历史存档 v1 子图（sub-* 虚拟点）能进能退
+// - 切聊天清空子图视图栈
+//
+// 挂载方式沿用仓库既有做法（tests/atlas-r01-map-visibility.test.mjs）：jsdom 里把
+// index.js 源码追加 `export {renderPanel}` 后经 data: URL 导入，用真实 renderPanel
+// 挂到真实 DOM；core 用本文件既有的 makeApi / makeHost / bindingFor 造真身，并经
+// onStateChange 触发真实重渲染（与酒馆里 connectAtlas 的接线一致）。
+// 断言沿用本文件的 ok() / equal() / deepEqual() 风格。jsdom 没有真实布局与
+// document.elementFromPoint，也没有 setPointerCapture：点击用 element.click()，
+// 长按用派发 MouseEvent；真实拖拽落点由施工单 S10 的人工验收覆盖。
+// ---------------------------------------------------------------------------
+
+const S10_INDEX_SOURCE = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
+
+/** S10 /state 夹具：世界图只含根地点；`submaps[父地点ID]` = 该地点的内部地图。 */
+function s10State({ chatId, worldId, currentLocationId, points, submaps = {}, pointParents = {}, npcDirectory = [], objectDirectory = [], regions = [] }) {
+  return {
+    chatId,
+    worldId,
+    worldName: "S10 世界",
+    branchId: null,
+    currentTime: 12,
+    currentLocationId,
+    map: {
+      points,
+      // 服务端口径：全部可见（含子地点）地点数，世界图标记数可以小于它
+      pointCount: points.length + Object.keys(pointParents).length,
+      pointParents,
+      submaps,
+      submapCount: Object.keys(submaps).length,
+      calibrations: {},
+      pointMeta: {},
+      mapImagePresent: false,
+      mapImageRevision: 0,
+    },
+    npcDirectory,
+    objectDirectory,
+    nearbyPointIds: [],
+    relevantNpcIds: [],
+    npcReasons: {},
+    triggerIds: [],
+    regions,
+  };
+}
+
+/** 挂载真实 index.js 地图页：真 core（makeApi / makeHost）+ jsdom + renderPanel。 */
+async function mountAtlasMap({ stateByChat, chatId = "chat-a", travelPreview = null }) {
+  const dom = new JSDOM("<!doctype html><head></head><body></body>", { url: "http://localhost/", pretendToBeVisual: true });
+  globalThis.window = dom.window;
+  globalThis.document = dom.window.document;
+  globalThis.HTMLElement = dom.window.HTMLElement;
+  const style = document.createElement("style");
+  style.textContent = readFileSync(join(root, "atlas-extension", "style.css"), "utf8");
+  document.head.append(style);
+
+  const { renderPanel } = await import(
+    "data:text/javascript;base64," + Buffer.from(`${S10_INDEX_SOURCE}\nexport { renderPanel };`).toString("base64")
+  );
+  const cameraMod = await import(pathToFileURL(join(root, "src", "atlas-map-camera.ts")).href);
+  const mapMod = {
+    ...cameraMod,
+    ...(await import(pathToFileURL(join(root, "src", "atlas-map-interactions.ts")).href)),
+    ...(await import(pathToFileURL(join(root, "src", "atlas-scale.ts")).href)),
+    ATLAS_UI_PAGES: (await import(pathToFileURL(join(root, "src", "atlas-ui-core.ts")).href)).ATLAS_UI_PAGES,
+  };
+
+  const api = makeApi({ stateByChat, travelPreview });
+  const hostWrap = makeHost();
+  hostWrap.setChat(chatId);
+  hostWrap.setBinding(chatId, bindingFor(chatId, String(stateByChat[chatId]?.worldId ?? "w-s10")));
+  let rerender = () => {};
+  const core = createAtlasUiCore({
+    api,
+    host: hostWrap.host,
+    emitter: makeEmitter(),
+    onStateChange: () => rerender(),
+    now: () => NOW_BASE,
+  });
+  const container = document.createElement("div");
+  document.body.append(container);
+  rerender = renderPanel(core, container, api, { read: async () => null }, mapMod);
+  await core.handleEvent("APP_READY");
+  core.setPage("map");
+  await flush();
+  return { dom, api, hostWrap, core, container, cameraMod, rerender };
+}
+
+/** 当前渲染出来的地点标点名字（按 DOM 顺序）。 */
+function mapPointNames(container) {
+  return [...container.querySelectorAll(".aw-point")].map((node) => node.textContent);
+}
+
+/** 面包屑：可见性 + 去掉空白后的层级文字（世界图上 display 为 none；层级文字取 trail，不含返回钮）。 */
+function crumbSnapshot(container) {
+  const crumb = container.querySelector(".aw-mapcrumb");
+  const trail = container.querySelector(".aw-mapcrumb__trail");
+  return { display: crumb?.style.display ?? "missing", text: (trail?.textContent ?? "").replace(/\s+/g, "") };
+}
+
+/** 点开某个地点标点的信息面板，返回面板元素。 */
+function openPointPanel(container, name) {
+  const marker = [...container.querySelectorAll(".aw-point")].find((node) => node.textContent === name) ?? null;
+  ok(marker !== null, `地图上有「${name}」标点`);
+  marker?.click();
+  const panel = container.querySelector(".aw-mappanel");
+  ok(panel?.style.display === "", `「${name}」的信息面板已打开`);
+  return panel;
+}
+
+/** 面板里的「进入内部地图」入口（不存在返回 null）。 */
+function enterSubmapButton(container, name) {
+  return container.querySelector(`.aw-mappanel [aria-label="进入 ${name} 的内部地图"]`);
+}
+
+/** 工具条上的「定位当前位置」。 */
+function locateButton(container) {
+  return container.querySelector('.aw-zoom__btn[aria-label="定位当前位置"]');
+}
+
+/** jsdom 无布局 → 相机用核心模块的回退视口（320×240）；由 stage 变换反解视口中心对准的世界点。 */
+function cameraCenter(container, cameraMod) {
+  const transform = container.querySelector(".aw-stage")?.style.transform ?? "";
+  const matched = /translate\((-?[\d.e+]+)px,\s*(-?[\d.e+]+)px\)\s*scale\((-?[\d.e+]+)\)/.exec(transform);
+  ok(matched !== null, `stage 有相机变换（实际「${transform}」）`);
+  if (!matched) return { cx: Number.NaN, cy: Number.NaN, k: Number.NaN };
+  const k = Number(matched[3]);
+  return {
+    cx: (cameraMod.MAP_VIEW_FALLBACK_W / 2 - Number(matched[1])) / k,
+    cy: (cameraMod.MAP_VIEW_FALLBACK_H / 2 - Number(matched[2])) / k,
+    k,
+  };
+}
+
+/** 文本出现次数（「每人只出现一次」类断言用）。 */
+function occurrences(text, needle) {
+  return String(text).split(needle).length - 1;
+}
+
+const S10_SUBMAPS = {
+  "1": { parentMapId: "world", points: [{ id: "11", name: "大堂", x: 10, y: 10 }] },
+  "11": { parentMapId: "1", points: [{ id: "111", name: "档案室", x: 12, y: 12 }] },
+  "111": { parentMapId: "11", points: [{ id: "1111", name: "暗格", x: 14, y: 14 }] },
+  "1111": { parentMapId: "111", points: [{ id: "11111", name: "密室", x: 16, y: 16 }] },
+  "11111": { parentMapId: "1111", points: [{ id: "111111", name: "最深处", x: 18, y: 18 }] },
+};
+const S10_ROOT_POINTS = [
+  { id: "1", name: "钟楼", x: 40, y: 40, regionId: null },
+  { id: "2", name: "集市", x: 80, y: 60, regionId: null },
+];
+const S10_POINT_PARENTS = { "11": 1, "111": 11, "1111": 111, "11111": 1111, "111111": 11111 };
+
+test("S10 前端：定位当前位置——根地点直接命中、子地点回溯最近根祖先、子图拒绝", async () => {
+  const base = s10State({
+    chatId: "chat-a",
+    worldId: "w-s10",
+    currentLocationId: "2",
+    points: S10_ROOT_POINTS,
+    submaps: { "1": S10_SUBMAPS["1"] },
+    pointParents: { "11": 1 },
+  });
+  const stateByChat = { "chat-a": base };
+  const { container, core, cameraMod, rerender } = await mountAtlasMap({ stateByChat });
+  deepEqual(mapPointNames(container), ["钟楼", "集市"], "前置：世界图渲染根地点");
+
+  // 1) 玩家在根地点「集市」：直接命中
+  const beforeK = cameraCenter(container, cameraMod).k;
+  locateButton(container).click();
+  const atRoot = cameraCenter(container, cameraMod);
+  ok(Math.abs(atRoot.cx - 80) < 0.01 && Math.abs(atRoot.cy - 60) < 0.01,
+    `根地点定位把视口中心对准「集市」（80,60），实际（${atRoot.cx},${atRoot.cy}）`);
+  equal(atRoot.k, beforeK, "定位保持比例（只改中心）");
+
+  // 2) 玩家在子地点「大堂」（父链 11 → 1）：世界图上没有 11，必须回溯到最近的根祖先「钟楼」
+  stateByChat["chat-a"] = { ...base, currentLocationId: "11" };
+  await core.refresh();
+  await flush();
+  locateButton(container).click();
+  const atAncestor = cameraCenter(container, cameraMod);
+  ok(Math.abs(atAncestor.cx - 40) < 0.01 && Math.abs(atAncestor.cy - 40) < 0.01,
+    `子地点定位回溯到最近根祖先「钟楼」（40,40），实际（${atAncestor.cx},${atAncestor.cy}）`);
+  // S8 补刀后：提示必须在**点击当时**就可见。旧实现 setStatus 只改状态变量、点击不重渲染，
+  // 这条提示要等下一次渲染才出现（子图视图下更会先看到上一条旧提示）——S10 实测抓到，
+  // 已改为 setStatus 就地刷新 / 补挂状态行；此处按修好后的行为锁死，防回归。
+  const ancestorTip = container.querySelector(".aw-status")?.textContent ?? "";
+  ok(ancestorTip.includes("当前位置在「钟楼」内"), `点击当时即给出最近根祖先提示：实际「${ancestorTip}」`);
+  ok(ancestorTip.includes("进入该地点可查看内层地图"), "提示说明可进入该地点查看内层地图");
+  ok(!ancestorTip.includes("当前位置不在地图上"), "提示不是「当前位置不在地图上」");
+
+  // 3) 子图视图：定位只在世界图可用
+  openPointPanel(container, "钟楼");
+  const enter = enterSubmapButton(container, "钟楼");
+  ok(enter !== null, "前置：钟楼有内部地图入口");
+  enter.click();
+  deepEqual(mapPointNames(container), ["大堂"], "前置：已进入钟楼内部地图");
+  const inSubBefore = cameraCenter(container, cameraMod);
+  locateButton(container).click();
+  const inSubAfter = cameraCenter(container, cameraMod);
+  const subTip = container.querySelector(".aw-status")?.textContent ?? "";
+  ok(subTip.includes("定位当前位置只在世界图可用"),
+    `子图视图点击当时即给出「只在世界图可用」提示（不得停在旧提示）：实际「${subTip}」`);
+  equal(inSubAfter.k, inSubBefore.k, "子图视图下定位不改比例");
+  ok(Math.abs(inSubAfter.cx - inSubBefore.cx) < 0.01 && Math.abs(inSubAfter.cy - inSubBefore.cy) < 0.01,
+    "子图视图下定位不动相机（不跨图混淆）");
+});
+
+test("S10 前端：同地点人物只在地点名单（离场者不出现、头像可长按纠偏）", async () => {
+  const stateByChat = {
+    "chat-a": s10State({
+      chatId: "chat-a",
+      worldId: "w-s10",
+      currentLocationId: "1",
+      points: [{ id: "1", name: "钟楼", x: 40, y: 40, regionId: null }],
+      npcDirectory: [
+        { id: "npc-1", name: "林拾", pointId: "1", presence: "present" },
+        { id: "npc-2", name: "阿澈", pointId: "1", presence: "left" },
+      ],
+    }),
+  };
+  const { container, dom } = await mountAtlasMap({ stateByChat });
+
+  // S9：世界图上不再有人物标点（人物只由地点名单承载）
+  equal(container.querySelectorAll(".aw-npc").length, 0, "世界图上 0 个人物标点（.aw-npc 已不再生成）");
+  equal(container.querySelectorAll(".aw-point").length, 1, "世界图只按地点出标点，人物不额外叠标记");
+  const legend = container.querySelector(".aw-maplegend")?.textContent ?? "";
+  ok(legend.includes("地点") && legend.includes("人物：在地点名单") && legend.includes("物品"),
+    `图例说实话（地点 / 人物：在地点名单 / 物品）：实际「${legend}」`);
+
+  // 地点面板「当前在这里」：在场者恰好一次，离场者不出现
+  const panel = openPointPanel(container, "钟楼");
+  const rows = panel.querySelectorAll(".aw-mappanel__person--npc");
+  equal(rows.length, 1, "「当前在这里」恰好一位在场人物");
+  equal(rows[0].querySelector(".aw-mappanel__person-name")?.textContent, "林拾", "名单里的人名正确");
+  ok(rows[0].querySelector(".aw-mappanel__person-avatar.aw-person-drag") !== null,
+    "人物头像带 .aw-person-drag（长按纠偏手柄）");
+  ok(!String(panel.textContent).includes("阿澈"), "presence=left 的人不出现在地点名单");
+  equal(occurrences(container.querySelector(".aw-maparea").textContent, "林拾"), 1,
+    "同一位人物在地图上只出现一次（无标点与头像重叠）");
+
+  // S9：头像长按 350ms 后进入 is-armed（起拖就绪）。jsdom 无 setPointerCapture /
+  // elementFromPoint，故只验证「长按成立」这一段；真实拖到标点纠偏走人工验收。
+  const avatar = rows[0].querySelector(".aw-mappanel__person-avatar.aw-person-drag");
+  avatar.dispatchEvent(new dom.window.MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 12, clientY: 12 }));
+  await new Promise((resolve) => setTimeout(resolve, 450));
+  ok(avatar.classList.contains("is-armed"), "长按 350ms 后头像进入 is-armed（纠偏可起拖）");
+  avatar.dispatchEvent(new dom.window.MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 12, clientY: 12 }));
+  ok(!avatar.classList.contains("is-armed"), "长按松手后 is-armed 清理");
+});
+
+test("S10 前端：四层子图导航（第 5 张被拒）与面包屑逐层返回", async () => {
+  ok(S10_INDEX_SOURCE.includes("const MAP_SUBMAP_DEPTH_MAX = 4;"),
+    "UI 深度上限 = 4 张连续子图（世界图不算，与后端 SUBMAP_DEPTH_MAX 一致）");
+  const stateByChat = {
+    "chat-a": s10State({
+      chatId: "chat-a",
+      worldId: "w-s10",
+      currentLocationId: "1",
+      points: [...S10_ROOT_POINTS, { id: "9", name: "孤塔", x: 60, y: 20, regionId: null }],
+      submaps: {
+        ...S10_SUBMAPS,
+        // 第 2 层图里再放一个父链写错的点（大堂的子图却声称父是「world」）→ 该层不得给出入口
+        "11": { parentMapId: "1", points: [...S10_SUBMAPS["11"].points, { id: "112", name: "偏厅", x: 22, y: 22 }] },
+        "112": { parentMapId: "world", points: [{ id: "1121", name: "错层内点", x: 24, y: 24 }] },
+        // 父链写错（孤塔在世界图，子图却声称父是「1」）→ 世界图不得给出进入入口
+        "9": { parentMapId: "1", points: [{ id: "91", name: "伪内层", x: 20, y: 20 }] },
+      },
+      pointParents: S10_POINT_PARENTS,
+    }),
+  };
+  const { container } = await mountAtlasMap({ stateByChat });
+  deepEqual(mapPointNames(container), ["钟楼", "集市", "孤塔"], "前置：世界图只渲染根地点");
+
+  // 父链按 parentMapId 校验：parentMapId 不是 world 的点不给入口
+  openPointPanel(container, "孤塔");
+  equal(enterSubmapButton(container, "孤塔"), null,
+    "submaps[9].parentMapId 不是 «world» → 世界图不给「进入内部地图」入口");
+  equal(crumbSnapshot(container).display, "none", "世界图上面包屑隐藏");
+
+  // 世界 → 第 1 → 第 2 → 第 3 → 第 4 张子图逐层进入
+  const ladder = [
+    { enter: "钟楼", inside: ["大堂"], trail: "世界图›钟楼" },
+    { enter: "大堂", inside: ["档案室", "偏厅"], trail: "世界图›钟楼›大堂", decoy: "偏厅" },
+    { enter: "档案室", inside: ["暗格"], trail: "世界图›钟楼›大堂›档案室" },
+    { enter: "暗格", inside: ["密室"], trail: "世界图›钟楼›大堂›档案室›暗格" },
+  ];
+  for (const [index, step] of ladder.entries()) {
+    openPointPanel(container, step.enter);
+    const enter = enterSubmapButton(container, step.enter);
+    ok(enter !== null, `第 ${index + 1} 张子图入口存在（${step.enter}）`);
+    enter.click();
+    deepEqual(mapPointNames(container), step.inside, `进入「${step.enter}」后渲染的是它自己的内部地图`);
+    if (step.decoy) {
+      openPointPanel(container, step.decoy);
+      equal(enterSubmapButton(container, step.decoy), null,
+        `第 ${index + 1} 层：${step.decoy} 的子图 parentMapId 与当前图不符 → 不给入口（父链校验）`);
+    }
+    const crumb = crumbSnapshot(container);
+    equal(crumb.display, "", "子图上面包屑可见");
+    equal(crumb.text, step.trail, "面包屑按 parentMapId 逐层累加");
+  }
+  equal(container.querySelector(".aw-mapcrumb__back")?.textContent, "← 返回上一层", "第 4 层返回按钮指向上一层");
+
+  // 第 5 张：submaps["11111"] 存在，但已进 4 层 → 不再给入口
+  ok(Object.prototype.hasOwnProperty.call(stateByChat["chat-a"].map.submaps, "11111"),
+    "夹具里第 5 张子图确实存在（submaps[11111]）");
+  openPointPanel(container, "密室");
+  equal(enterSubmapButton(container, "密室"), null, "已进 4 层 → 第 5 张子图没有进入入口（深度上限 4）");
+  deepEqual(mapPointNames(container), ["密室"], "被拒后仍停留在第 4 张子图");
+
+  // 逐层返回：第 4 → 第 3 → 第 2 → 第 1 → 世界图
+  for (const [index, expected] of [["暗格"], ["档案室", "偏厅"], ["大堂"]].entries()) {
+    const back = container.querySelector(".aw-mapcrumb__back");
+    ok(back !== null, `第 ${index + 1} 次返回：有「返回上一层」按钮`);
+    back.click();
+    deepEqual(mapPointNames(container), expected, `返回上一层后渲染「${expected[0]}」所在地图`);
+  }
+  equal(container.querySelector(".aw-mapcrumb__back")?.textContent, "← 返回世界图", "只剩一层时返回按钮指向世界图");
+  container.querySelector(".aw-mapcrumb__back").click();
+  deepEqual(mapPointNames(container), ["钟楼", "集市", "孤塔"], "第 1 张 → 世界图（根地点全部回来）");
+  equal(crumbSnapshot(container).display, "none", "回到世界图后面包屑隐藏");
+
+  // 祖先链可点击逐层返回：进两层后点「钟楼」→ 第 1 张子图；再点「世界图」→ 世界图
+  openPointPanel(container, "钟楼");
+  enterSubmapButton(container, "钟楼").click();
+  openPointPanel(container, "大堂");
+  enterSubmapButton(container, "大堂").click();
+  deepEqual(mapPointNames(container), ["档案室", "偏厅"], "前置：重新进到第 2 张子图");
+  const ancestorLink = [...container.querySelectorAll(".aw-mapcrumb__link")].find((node) => node.textContent === "钟楼") ?? null;
+  ok(ancestorLink !== null, "面包屑里有可点的祖先「钟楼」");
+  ancestorLink.click();
+  deepEqual(mapPointNames(container), ["大堂"], "点面包屑祖先「钟楼」跳回第 1 张子图");
+  equal(crumbSnapshot(container).text, "世界图›钟楼", "跳回祖先后面包屑截断到该层");
+  const rootLink = [...container.querySelectorAll(".aw-mapcrumb__link")].find((node) => node.textContent === "世界图") ?? null;
+  ok(rootLink !== null, "面包屑里有可点的「世界图」");
+  rootLink.click();
+  deepEqual(mapPointNames(container), ["钟楼", "集市", "孤塔"], "点面包屑「世界图」一步跳回世界图");
+  equal(crumbSnapshot(container).display, "none", "跳回世界图后面包屑隐藏");
+});
+
+test("S10 前端：历史存档 v1 子图（sub-* 虚拟点）仍能进入并退回世界图", async () => {
+  // v1 存档的子图没有 parentMapId，内层是 sub-* 虚拟点（不是世界地点 ID）
+  const legacySubmap = { points: [{ id: "sub-hall", name: "旧版大堂", x: 30, y: 30 }] };
+  const stateByChat = {
+    "chat-a": s10State({
+      chatId: "chat-a",
+      worldId: "w-legacy",
+      currentLocationId: "1",
+      points: [{ id: "1", name: "钟楼", x: 40, y: 40, regionId: null }],
+      submaps: { "1": legacySubmap },
+    }),
+  };
+  const { container } = await mountAtlasMap({ stateByChat });
+  equal(legacySubmap.parentMapId, undefined, "v1 夹具确实没有 parentMapId（缺省按 world 处理）");
+  deepEqual(mapPointNames(container), ["钟楼"], "前置：世界图");
+
+  openPointPanel(container, "钟楼");
+  const enter = enterSubmapButton(container, "钟楼");
+  ok(enter !== null, "v1 子图仍给出进入入口（parentMapId 缺省按 world）");
+  enter.click();
+  deepEqual(mapPointNames(container), ["旧版大堂"], "进入 v1 子图后渲染它的虚拟内层点");
+  const crumb = crumbSnapshot(container);
+  equal(crumb.display, "", "v1 子图同样显示面包屑");
+  equal(crumb.text, "世界图›钟楼", "v1 子图面包屑指向 世界图 › 钟楼");
+
+  container.querySelector(".aw-mapcrumb__back").click();
+  deepEqual(mapPointNames(container), ["钟楼"], "从 v1 子图退回世界图");
+  equal(crumbSnapshot(container).display, "none", "退回世界图后面包屑隐藏");
+});
+
+test("S10 前端：切聊天清空子图视图栈（旧子图不带进新卡）", async () => {
+  const worldPoint = [{ id: "1", name: "钟楼", x: 40, y: 40, regionId: null }];
+  const stateByChat = {
+    "chat-a": s10State({
+      chatId: "chat-a", worldId: "w-1", currentLocationId: "1",
+      points: worldPoint, submaps: S10_SUBMAPS, pointParents: S10_POINT_PARENTS,
+    }),
+    "chat-c": s10State({
+      chatId: "chat-c", worldId: "w-1", currentLocationId: "1",
+      points: worldPoint, submaps: S10_SUBMAPS, pointParents: S10_POINT_PARENTS,
+    }),
+    "chat-b": s10State({
+      chatId: "chat-b", worldId: "w-2", currentLocationId: "b-1",
+      points: [{ id: "b-1", name: "另一张卡的首都", x: 20, y: 20, regionId: null }],
+    }),
+  };
+  const { container, core, hostWrap } = await mountAtlasMap({ stateByChat });
+  hostWrap.setBinding("chat-c", bindingFor("chat-c", "w-1"));
+  hostWrap.setBinding("chat-b", bindingFor("chat-b", "w-2"));
+
+  // chat-a：进到第 2 张子图
+  openPointPanel(container, "钟楼");
+  enterSubmapButton(container, "钟楼").click();
+  openPointPanel(container, "大堂");
+  enterSubmapButton(container, "大堂").click();
+  deepEqual(mapPointNames(container), ["档案室"], "前置：chat-a 已在第 2 张子图");
+  ok(crumbSnapshot(container).text.includes("大堂"), "前置：面包屑里带着旧子图层级");
+
+  // 切到 chat-c：worldId 相同、chatId 不同 → 也必须清栈
+  hostWrap.setChat("chat-c");
+  await core.handleEvent("CHAT_CHANGED");
+  await flush();
+  deepEqual(mapPointNames(container), ["钟楼"], "chat-c（同 worldId / 新 chatId）渲染自己的世界图");
+  equal(crumbSnapshot(container).display, "none", "切聊天（仅 chatId 变）后子图栈清空、面包屑隐藏");
+  ok(!String(container.querySelector(".aw-maparea").textContent).includes("档案室"), "旧子图的点不残留在新聊天");
+
+  // 在 chat-c 里再次进入两层，然后切到 chat-b（chatId + worldId 都不同）
+  openPointPanel(container, "钟楼");
+  enterSubmapButton(container, "钟楼").click();
+  openPointPanel(container, "大堂");
+  enterSubmapButton(container, "大堂").click();
+  deepEqual(mapPointNames(container), ["档案室"], "前置：chat-c 已在第 2 张子图");
+  hostWrap.setChat("chat-b");
+  await core.handleEvent("CHAT_CHANGED");
+  await flush();
+  deepEqual(mapPointNames(container), ["另一张卡的首都"], "chat-b（新 chatId + 新 worldId）渲染自己的世界图");
+  equal(crumbSnapshot(container).display, "none", "切聊天（chatId + worldId 都变）后子图栈清空");
+  ok(!String(container.querySelector(".aw-maparea").textContent).includes("档案室"), "上一张卡的子图不残留");
+
+  // 新聊天里导航仍然可用（栈按新的 chatId|worldId 重新建立）
+  openPointPanel(container, "另一张卡的首都");
+  equal(enterSubmapButton(container, "另一张卡的首都"), null, "chat-b 没有子图数据 → 不给进入入口");
+});
+
+test("S10 前端：路线预览只在世界图（子图视图不画跨图虚假直线）", async () => {
+  const stateByChat = {
+    "chat-a": s10State({
+      chatId: "chat-a",
+      worldId: "w-route",
+      currentLocationId: "1",
+      points: S10_ROOT_POINTS,
+      submaps: { "1": { parentMapId: "world", points: [{ id: "11", name: "大堂", x: 10, y: 10 }] } },
+      pointParents: { "11": 1 },
+    }),
+  };
+  const { container, core, rerender } = await mountAtlasMap({
+    stateByChat,
+    travelPreview: { destinationId: "2", distance: 14, estimatedDuration: 3, factors: ["baseline"] },
+  });
+
+  // 世界图：当前在「钟楼」、目标「集市」两个根地点 → 路线画得出来
+  await core.selectDestination("2");
+  rerender();
+  equal(container.querySelectorAll(".aw-route").length, 1, "世界图上根地点之间的路线预览画得出来");
+  ok((container.querySelector(".aw-travel")?.textContent ?? "").includes("前往：集市"), "旅行条给出目的地");
+
+  // 带着同一条预览进子图：不得留下跨图直线，旅行条隐藏
+  openPointPanel(container, "钟楼");
+  enterSubmapButton(container, "钟楼").click();
+  deepEqual(mapPointNames(container), ["大堂"], "前置：已进入子图");
+  equal(container.querySelectorAll(".aw-route").length, 0, "子图视图不画跨图路线（不给虚假直线）");
+  equal(container.querySelector(".aw-travel")?.style.display, "none", "子图视图隐藏旅行条");
 });
