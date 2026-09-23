@@ -1785,6 +1785,15 @@ test("S0：v2 parentLocationRef 应生成两级子图（现版本预期失败—
     typeof state.map.pointCount === "number" && state.map.pointCount > (state.map.points ?? []).length,
     `map.pointCount(${state.map.pointCount}) 应大于世界图标记数(${(state.map.points ?? []).length})——子地点计入总数但不上世界图`,
   );
+
+  // S7（0.9.55）：只在真正 committed 时报告子图增量（数量 + 最大层级），且不记故事原文
+  const hierarchyLogs = core.logs().filter((l) => l.kind === "world-turn-hierarchy");
+  equal(hierarchyLogs.length, 1, "committed 恰好一条子图增量日志");
+  equal(hierarchyLogs[0].pointsAdded, 2, "本轮新增两个带父的地点（大堂 + 档案室）");
+  equal(hierarchyLogs[0].scanned, 2, "最大层级 = 2（钟楼 → 大堂 → 档案室）");
+  const logText = JSON.stringify(core.logs());
+  ok(!logText.includes("大堂") && !logText.includes("档案室"), "子图日志不含地点名以外的原文");
+  ok(!logText.includes("推开档案室的门"), "子图日志不含故事原文");
 });
 
 test("v2 discoveries disappear from state, nearby and map after rollback", async () => {

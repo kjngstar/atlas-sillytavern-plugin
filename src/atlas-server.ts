@@ -2336,6 +2336,44 @@ function createCoreInstance(
           notes: settlement.notes,
         });
       }
+
+      // S7（0.9.55）：按**最终世界**的 parentPointId 与 createdPointIds 报告子图增量。
+      // 只在真正 committed 时记（duplicate / failed 不报告创建成功）；
+      // 只记数量、父子 ID 与最大层级，绝不记故事原文或地点名以外的自由文本。
+      const parentById = new Map<number, number>();
+      for (const point of settledWorld.points ?? []) {
+        const pid = Number(point.parentPointId);
+        if (Number.isInteger(pid) && pid > 0) parentById.set(Number(point.id), pid);
+      }
+      const createdWithParent = Array.from(parentById.keys()).filter((id) => {
+        // 只统计本轮真正新增的点：提交前世界没有该 id
+        const existedBefore = (world.points ?? []).some((p) => Number(p.id) === id);
+        return !existedBefore;
+      });
+      if (createdWithParent.length > 0) {
+        let maxDepth = 0;
+        for (const id of createdWithParent) {
+          let hops = 0;
+          let cursor = parentById.get(Number(id));
+          const seen = new Set<number>([Number(id)]);
+          while (cursor !== undefined && !seen.has(cursor)) {
+            seen.add(cursor);
+            hops += 1;
+            cursor = parentById.get(cursor);
+          }
+          maxDepth = Math.max(maxDepth, hops);
+        }
+        pushLog({
+          at: now(),
+          kind: "world-turn-hierarchy",
+          chatId: request.chatId,
+          worldId: binding.worldId,
+          // pushLog 的数值白名单只放行 pointsAdded/pointsRemoved/skipped/scanned 等；
+          // 这里用 pointsAdded=带父新增数、scanned=最大层级，不新增未登记字段。
+          pointsAdded: createdWithParent.length,
+          scanned: maxDepth,
+        });
+      }
     }
 
     // 7. 成功：原子保存新世界 + 更新绑定游标 + 清理 pending + 缓存回执
