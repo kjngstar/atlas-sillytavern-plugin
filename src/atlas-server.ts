@@ -1590,6 +1590,14 @@ function createCoreInstance(
     }
     // 0.9.41 人物 popover：分支作用域账本（游标前）供「最近涉及叙事」提取
     const branchEvents = ledgerForBranch(world, binding.branchId).filter((e) => e.at <= binding.worldTimeCursor);
+    // S11（0.9.55）：主角只读标记。主角判定的唯一权威是 world.characters[].role
+    // （atlas-schedule 的 isProtagonistRole，与 move-author、日程安全网同一口径）。
+    // 附近人物页改为按 relevantNpcIds 过滤后，主角会被上面「同地点补入相关」那条算进来
+    //（玩家确实在该地点），但主角不能显示为「附近 NPC」——故由服务端给出标记，
+    // UI 不必去猜 id（写死 char-main 会在用户自建世界上出错）。
+    const protagonistById = new Map(
+      (world.characters ?? []).map((c) => [String(c.id), isProtagonistRole(c.role)] as const),
+    );
     const npcDirectory = runtimeView.npcs.slice(0, 48).map((view) => {
       const anchorPoint = view.pointId !== null ? pointById.get(String(view.pointId)) : undefined;
       const recentNarratives = branchEvents
@@ -1610,6 +1618,7 @@ function createCoreInstance(
         reason: relevance.npcReasons[view.id] ?? null,
         status: view.status ? view.status.slice(0, 160) : null,
         presence: view.presence,
+        isProtagonist: protagonistById.get(String(view.id)) === true,
         lastConfirmedAt,
         recentNarratives,
         pointName: anchorName ? anchorName.slice(0, MAP_POINT_NAME_CHARS) : null,

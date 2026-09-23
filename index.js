@@ -1755,11 +1755,20 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         return;
       }
       const npcs = Array.isArray(d.npcDirectory) ? d.npcDirectory : [];
-      if (npcs.length === 0) {
-        center.append(emptyBox("附近没有相关人物。"));
+      // S11（0.9.55）：附近页只展示**引擎判定的相关人物**，按 relevantNpcIds 的命中顺序，
+      // 不再把整张 npcDirectory 当「附近」——旧实现把远在别处的目录成员也列成附近人物。
+      // 目录本身不变：非相关成员仍在地点菜单（「当前在这里」）里可查、可纠偏。
+      // 主角（服务端 isProtagonist，口径同 move-author）不在附近卡片里冒充 NPC；
+      // 已离场者保留展示（卡片如实标「已离场」，不伪装在场）。
+      const npcById = new Map(npcs.map((n) => [String(n.id ?? ""), n]));
+      const relevant = (Array.isArray(d.relevantNpcIds) ? d.relevantNpcIds : [])
+        .map((id) => npcById.get(String(id)))
+        .filter((npc) => Boolean(npc) && npc.isProtagonist !== true);
+      if (relevant.length === 0) {
+        center.append(emptyBox("附近暂无已确认人物。"));
       } else {
         const grid = el("div", "aw-cards");
-        for (const npc of npcs) {
+        for (const npc of relevant) {
           const card = el("article", "aw-card aw-card--npc");
           card.append(el("h2", "aw-card__title", String(npc.name)));
           const reason = npc.reason ? (NPC_REASON_LABELS[String(npc.reason)] ?? String(npc.reason)) : "相关人物";

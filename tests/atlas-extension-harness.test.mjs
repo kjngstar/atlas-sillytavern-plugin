@@ -1515,7 +1515,7 @@ test("数据隔离：旧聊天的迟到 /state 响应被丢弃（跨聊天竞态
 const S10_INDEX_SOURCE = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
 
 /** S10 /state 夹具：世界图只含根地点；`submaps[父地点ID]` = 该地点的内部地图。 */
-function s10State({ chatId, worldId, currentLocationId, points, submaps = {}, pointParents = {}, npcDirectory = [], objectDirectory = [], regions = [] }) {
+function s10State({ chatId, worldId, currentLocationId, points, submaps = {}, pointParents = {}, npcDirectory = [], objectDirectory = [], regions = [], relevantNpcIds = [], npcReasons = {} }) {
   return {
     chatId,
     worldId,
@@ -1538,8 +1538,8 @@ function s10State({ chatId, worldId, currentLocationId, points, submaps = {}, po
     npcDirectory,
     objectDirectory,
     nearbyPointIds: [],
-    relevantNpcIds: [],
-    npcReasons: {},
+    relevantNpcIds,
+    npcReasons,
     triggerIds: [],
     regions,
   };
@@ -1950,4 +1950,54 @@ test("S10 前端：路线预览只在世界图（子图视图不画跨图虚假�
   deepEqual(mapPointNames(container), ["大堂"], "前置：已进入子图");
   equal(container.querySelectorAll(".aw-route").length, 0, "子图视图不画跨图路线（不给虚假直线）");
   equal(container.querySelector(".aw-travel")?.style.display, "none", "子图视图隐藏旅行条");
+});
+
+test("S11 前端：附近页只展示相关人物（主角与远处目录成员不冒充「附近」）", async () => {
+  const base = s10State({
+    chatId: "chat-a",
+    worldId: "w-s11",
+    currentLocationId: "1",
+    points: [
+      { id: "1", name: "钟楼", x: 40, y: 40, regionId: null },
+      { id: "2", name: "集市", x: 80, y: 60, regionId: null },
+    ],
+    npcDirectory: [
+      { id: "npc-a", name: "林拾", pointId: "1", presence: "present", isProtagonist: false },
+      { id: "npc-b", name: "阿澈", pointId: "1", presence: "present", isProtagonist: false },
+      { id: "npc-far", name: "远方的铁匠", pointId: "2", presence: "present", isProtagonist: false },
+      { id: "char-main", name: "主角", pointId: "1", presence: "present", isProtagonist: true },
+    ],
+    // 服务端口径：同地点且在场的人会被补进 relevantNpcIds（主角也在其中——
+    // 玩家确实在该地点），故 UI 必须自己按 isProtagonist 把主角摘掉。
+    relevantNpcIds: ["npc-b", "char-main", "npc-a"],
+    npcReasons: { "npc-a": ["samePoint"], "npc-b": ["nearbyPoint"] },
+  });
+  const stateByChat = { "chat-a": base };
+  const { container, core } = await mountAtlasMap({ stateByChat });
+
+  // 附近页：只按 relevantNpcIds 命中顺序展示，目录里的远处成员与主角都不出现
+  core.setPage("nearby");
+  await flush();
+  const titles = [...container.querySelectorAll(".aw-card--npc .aw-card__title")].map((n) => n.textContent);
+  deepEqual(titles, ["阿澈", "林拾"], "附近页按 relevantNpcIds 命中顺序展示相关人物（不是目录顺序）");
+  ok(!titles.includes("远方的铁匠"), "目录里的远处成员不显示为「附近」");
+  ok(!titles.includes("主角"), "主角不在附近卡片里冒充 NPC");
+
+  // 目录本身没被删：非相关成员仍留在地点菜单里可查（地点「集市」的在场名单）
+  core.setPage("map");
+  await flush();
+  const panel = openPointPanel(container, "集市");
+  ok(String(panel.textContent).includes("远方的铁匠"), "非相关目录成员仍留在地点菜单，可供查找");
+  // 主角同理：他确实在钟楼，地点名单里应当有他——只是不当「附近 NPC」
+  const herePanel = openPointPanel(container, "钟楼");
+  ok(String(herePanel.textContent).includes("主角"), "主角仍出现在所在的地点名单里（不在场才算离场）");
+
+  // 关联为空 → 明确文案，不把整张目录当兜底
+  stateByChat["chat-a"] = { ...base, relevantNpcIds: ["char-main"] };
+  core.setPage("nearby");
+  await core.refresh();
+  await flush();
+  const text = container.querySelector(".aw-center")?.textContent ?? "";
+  ok(text.includes("附近暂无已确认人物"), `空关联给出明确文案：实际「${text.slice(0, 80)}」`);
+  equal(container.querySelectorAll(".aw-card--npc").length, 0, "空关联时不渲染人物卡片");
 });

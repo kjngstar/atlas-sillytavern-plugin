@@ -11118,6 +11118,9 @@ function createCoreInstance(store, deps, shared) {
       }
     }
     const branchEvents = ledgerForBranch(world, binding.branchId).filter((e) => e.at <= binding.worldTimeCursor);
+    const protagonistById = new Map(
+      (world.characters ?? []).map((c) => [String(c.id), isProtagonistRole(c.role)])
+    );
     const npcDirectory = runtimeView.npcs.slice(0, 48).map((view) => {
       const anchorPoint = view.pointId !== null ? pointById2.get(String(view.pointId)) : void 0;
       const recentNarratives = branchEvents.filter((e) => (e.entityRefs ?? []).map(String).includes(view.id)).slice(-2).reverse().map((e) => e.narrativeSummary.slice(0, 140));
@@ -11133,6 +11136,7 @@ function createCoreInstance(store, deps, shared) {
         reason: relevance.npcReasons[view.id] ?? null,
         status: view.status ? view.status.slice(0, 160) : null,
         presence: view.presence,
+        isProtagonist: protagonistById.get(String(view.id)) === true,
         lastConfirmedAt,
         recentNarratives,
         pointName: anchorName ? anchorName.slice(0, MAP_POINT_NAME_CHARS) : null,

@@ -618,6 +618,39 @@ test("move-author：主角纠偏 → 绑定游标端点同步 + characters-only 
   equal(state?.currentPointId, "4104", "主角 CharacterState 位置一致");
 });
 
+test("S11：/state 的 npcDirectory 带 isProtagonist 只读标记（口径同 move-author 的主角判定）", async () => {
+  const fetcher = makeFetch([]);
+  const store = createMemoryDocumentStore();
+  let world = buildWorld();
+  // 主角只在 characters（自动建世同款 role="主角"），另加两个对照角色：
+  // 「观察者」也在 atlas-schedule 的 PROTAGONIST_ROLES 里，普通 npc 才是真 NPC。
+  world.characters = [
+    ...world.characters,
+    { id: "char-main", worldId: world.id, name: "林拾", role: "主角", description: "测试主角" },
+    { id: "char-observer", worldId: world.id, name: "旁观者", role: "观察者", description: "" },
+    { id: "char-friend", worldId: world.id, name: "同行者", role: "npc", description: "" },
+  ];
+  world = parseWorld(JSON.parse(JSON.stringify(world)));
+  const { core } = sessionCore(store, { fetchFn: fetcher.fetchFn });
+  await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
+  await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
+
+  const state = await core.handle("POST", "/state", { chatId: "chat-a" });
+  equal(state.status, 200, "/state 200");
+  const directory = state.body.data.npcDirectory;
+  ok(Array.isArray(directory) && directory.length >= 3, "目录含注入的角色");
+  const byId = new Map(directory.map((n) => [String(n.id), n]));
+  equal(byId.get("char-main")?.isProtagonist, true, "role=主角 → isProtagonist true");
+  equal(byId.get("char-observer")?.isProtagonist, true, "「观察者」与主角同口径（PROTAGONIST_ROLES）");
+  equal(byId.get("char-friend")?.isProtagonist, false, "普通 npc 角色 → false");
+  ok(
+    directory.every((n) => typeof n.isProtagonist === "boolean"),
+    "每个目录成员都带明确布尔标记——附近页不必去猜 id（写死 char-main 在用户自建世界会出错）",
+  );
+  // 主角仍留在目录里：地点菜单需要他（他确实在某个地点），摘掉只发生在「附近」的展示层
+  ok(byId.has("char-main"), "主角不从 npcDirectory 里删除，只是带标记");
+});
+
 test("move-author：未知实体 / 未知地点 / 未绑定 → 拒绝且零写入", async () => {
   const fetcher = makeFetch([]);
   const store = createMemoryDocumentStore();
