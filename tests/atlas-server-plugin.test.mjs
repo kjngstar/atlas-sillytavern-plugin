@@ -1779,11 +1779,11 @@ test("S0：v2 parentLocationRef 应生成两级子图（现版本预期失败—
 
   equal(String(state.currentLocationId ?? ""), String(archive?.id ?? ""), "当前位置 = 档案室");
   // pointCount 报告「全部可见、非占位」地点数（含子地点），不误算成世界图标记数。
-  // 注意：world.points 里可能含已退役的「起点」占位，故 pointCount 未必 ≥ points.length；
-  // 正确口径是「等于可见地点数」且**大于**世界图标记数（子地点被计入）。
+  // 注意：world.points 里可能含已退役的「起点」占位，故 pointCount 未必等于 points.length；
+  // 正确口径是「大于世界图标记数」——子地点计入总数但不上世界图。
   ok(
-    typeof state.pointCount === "number" && state.pointCount > (state.map.points ?? []).length,
-    `pointCount(${state.pointCount}) 应大于世界图标记数(${(state.map.points ?? []).length})——子地点计入总数但不上世界图`,
+    typeof state.map.pointCount === "number" && state.map.pointCount > (state.map.points ?? []).length,
+    `map.pointCount(${state.map.pointCount}) 应大于世界图标记数(${(state.map.points ?? []).length})——子地点计入总数但不上世界图`,
   );
 });
 
