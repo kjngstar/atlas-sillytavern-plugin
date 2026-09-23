@@ -19,6 +19,9 @@ import {
   AtlasError,
   type AtlasErrorCode,
 } from "./atlas-contract.ts";
+// S9（0.9.55）：父子层级的上限只维护一份权威——提示词里出现的数字直接取自 v2 执行层常量，
+// 杜绝「提示词说 4 层、校验按别的数」的漂移（与 C5/C6 的单一权威纪律同口径）。
+import { V2_SUBMAP_DEPTH_MAX, V2_SUBMAP_SIBLINGS_MAX } from "./atlas-turn-v2.ts";
 
 /** 独立推演预设（服务端保存；apiKey 永不出本模块的 Authorization 头）。 */
 export interface AtlasApiPreset {
@@ -116,7 +119,7 @@ export const DEFAULT_PROMPT_SEGMENTS: Array<{ role: string; name: string; mainSl
       'locationChange 为 null 或 {"toPointId":"已知地点ID","toRegionId":"该地点所属的已知地区ID或null"}。ID 必须原样来自世界状态对照表。当前位置未知但本轮明确处于一个已知地点时，也可用 locationChange 锚定该地点。\n' +
       "npcChanges 仅使用已知实体 ID，支持 {entityId,key,value} 状态更新、{entityId,toPointId,toRegionId} 已知目的地移动、{entityId,tag}、{entityId,removeTag}。状态 key 优先使用 status；移动用 ID，不用名字。没有变化则不输出重复更新。\n" +
       "memoryDrafts 每项 {entityId,text}，text 不超过 500 字，只记录人物实际经历或有理由获知的事情。\n" +
-      "newLocations 每项 {name,regionName,description}，只提取本轮实际出现且未建档的具体地点，regionName 仅在已知时提供，未知可省略。不得使用不存在的顶层 regions 字段。暂不生成子图布局。\n" +
+      "newLocations 每项 {name,regionName,description}，只提取本轮实际出现且未建档的具体地点，regionName 仅在已知时提供，未知可省略。不得使用不存在的顶层 regions 字段。本协议（v1）不支持地点父子层级——内层地图请改用 v2 协议；此处不要为地点编造内部结构。\n" +
       "summary 不超过 500 字，概述剧情与候选变化；若本轮新人物没有已知 ID，或当前地点只在 newLocations 中新增，明确说明当前协议无法完成其建档或同轮位置引用，不得声称已入库成功。\n" +
       "当前协议不能声明新人物或引用本轮新建地点的 ID。不要编造 ID，也不要把未知人物的变化套给主角。不能将新人物或新地点的信息只写摘要就认为结构已更新。\n" +
       "角色卡标题可能是场景标题；它不一定代表玩家或一个人物。已知 ID 不能仅凭名字相似就复用。\n" +
@@ -192,6 +195,7 @@ export const DEFAULT_PROMPT_SEGMENTS_V2: Array<{ role: string; name: string; mai
       "- baseRevision 必须逐字使用本请求给定的值 $B；不一致的提交会被整体拒绝。\n" +
       "- evidence 每项 {id,sourceId,quote}：quote 必须逐字复制 msg:u（用户行动）或 msg:a（本轮回复）原文片段；每条变化都用 evidenceIds 挂上依据。没有证据的变化不要输出。\n" +
       "- discoveries.locations 每项 {ref,name,aliases,regionRef,parentLocationRef,evidenceIds}：ref 形如 new:loc:短名（小写字母数字-下划线）；本轮实际出现且未建档的具体地点才登记。\n" +
+      `- 地点层级 parentLocationRef：**只给本轮新建的内层地点**——剧情真的走进某个地点的内部（楼层 / 房间 / 院落 / 地窖等具体内层）且有本轮证据时才填；只是路过门口、在附近、窗外看到、回忆或传闻里的都不填。父只能填已知地点 ID 或本响应声明的 new:loc: 引用；不能填自己、不能互相成环；整条父链最多 ${V2_SUBMAP_DEPTH_MAX} 层（世界图不算层）；同一父地点下的直接子地点不超过 ${V2_SUBMAP_SIBLINGS_MAX} 个。已在地点 id 对照表里的地点直接用它的 ID，**不要**再用 new:loc: 登记同名地点（会真的多出一个点）；已知地点的父链本轮不改挂靠。层级拿不准就填 null 当平级地点——宁可平级也不要猜父：父引用不合法会让整轮提交被整体拒绝，时间与全部变化一起丢。\n` +
       "- discoveries.characters 每项 {ref,displayName,aliases,description,evidenceIds}：ref 形如 new:npc:短名。已有 ID 的人物不要重复登记。\n" +
       "- scene：resolution=confirmed/estimated/unknown/conflict；locationRef=已知地点ID 或本响应声明的 new:loc: 引用（confirmed/estimated 必填）；transition=stay/arrive/initial/unknown。场景表示玩家当前实际所在；不确定就 unknown，不要猜。\n" +
       "- npcUpdates 每项 {entityRef,location,presence,status,evidenceIds}：entityRef=已知实体ID 或 new:npc: 引用；location={op,locationRef}，op=set 必须给 locationRef（已知ID或 new:loc:），keep/clear 时 locationRef=null；presence=present/left/unknown（没提到=保持 unknown，不要写 left；「离开了房间」才写 left，目的地未知用 op=clear）；status≤160 字或 null。\n" +
@@ -221,12 +225,12 @@ export const DEFAULT_PROMPT_SEGMENTS_V2: Array<{ role: string; name: string; mai
     role: "user",
     name: "本轮行动与实际结果",
     mainSlot: "B",
-    content: "【本轮用户行动；证据来源 msg:u】\n$8\n【本轮助手回复；证据来源 msg:a】\n{{assistantReply}}\n先确定玩家现在实际在哪里：开场可用 initial；确实抵达才用 arrive；只是想去、在途、被阻止、回忆、梦境或远处镜头都不能当抵达。若本轮未改动且既有场景可靠，用 stay；确实无法定位用 unknown。\n再识别当前同场人物：剧情新出现且参与场景者先建档，再用 npcUpdates 锚定位置与在场；背景提及者不自动在场。共指不明确时不强行合并；明确离场而去向未知时用 clear/left，本轮未提到则保持原状态。\n只提取有证据的身份、状态、关系与记忆变化。duration 依据实际过程，单次场景定位不算旅行；不要从示意坐标推算时间。地图尺度只依有效 frame 和有来源的语义或距离；无依据就不新增建议。最后只返回完整 v2 JSON。",
+    content: "【本轮用户行动；证据来源 msg:u】\n$8\n【本轮助手回复；证据来源 msg:a】\n{{assistantReply}}\n先确定玩家现在实际在哪里：开场可用 initial；确实抵达才用 arrive；只是想去、在途、被阻止、回忆、梦境或远处镜头都不能当抵达。若本轮未改动且既有场景可靠，用 stay；确实无法定位用 unknown。\n再识别当前同场人物：剧情新出现且参与场景者先建档，再用 npcUpdates 锚定位置与在场；背景提及者不自动在场。共指不明确时不强行合并；明确离场而去向未知时用 clear/left，本轮未提到则保持原状态。\n只提取有证据的身份、状态、关系与记忆变化。duration 依据实际过程，单次场景定位不算旅行；不要从示意坐标推算时间。地图尺度只依有效 frame 和有来源的语义或距离；无依据就不新增建议。剧情确实走进某个地点的内部时，登记这些内层地点并用 parentLocationRef 挂到外层地点；没走进去就不要凭想象补内层，也不要为对照表里已有的地点再登记一次。最后只返回完整 v2 JSON。",
   },
   {
     role: "user",
     name: "提交前核对",
-    content: "核对：schemaVersion=2；baseRevision=$B 逐字一致；每个 quote 是 msg:u/msg:a 的来源原文片段；每个 new: 引用都已在本响应 discoveries 里声明且类型相符；scene 与 npcUpdates 引用的地点/人物可解析。\n当前位置未被愿望、回忆、否定句或远方镜头误改；没有因角色卡标题或世界书名字推断玩家身份与当前在场；keep/set/clear 和 present/left/unknown 含义一致；没有无证据的关系、记忆、时间或地图大小。\nevents 与 summary 没有代替 scene、discoveries 或 npcUpdates，也没有声称候选已入库。全部顶层字段与数组齐全；最后只输出一个可解析 JSON 对象。",
+    content: "核对：schemaVersion=2；baseRevision=$B 逐字一致；每个 quote 是 msg:u/msg:a 的来源原文片段；每个 new: 引用都已在本响应 discoveries 里声明且类型相符；scene 与 npcUpdates 引用的地点/人物可解析。\n当前位置未被愿望、回忆、否定句或远方镜头误改；没有因角色卡标题或世界书名字推断玩家身份与当前在场；keep/set/clear 和 present/left/unknown 含义一致；没有无证据的关系、记忆、时间或地图大小。\nevents 与 summary 没有代替 scene、discoveries 或 npcUpdates，也没有声称候选已入库。parentLocationRef 逐个可解析（已知 ID 或本响应 new:loc:）、无自引用与环、层数与同一父下的直接子地点数都在上限内，且内层地点只在本轮确实走进去时才登记。全部顶层字段与数组齐全；最后只输出一个可解析 JSON 对象。",
   },
 ];
 

@@ -130,9 +130,15 @@ export function prepareAtlasTurn(world: World, input: AtlasTurnPrepareInput): At
     .map((item) => `${item.id}=${item.name}`)
     .join("；");
   if (entityRoster) headerLines.push(`人物 id 对照：${entityRoster}`);
+  // S9（0.9.55）：已有子地点标注直接父 ID——/state 的世界图只下发根地点（S6），
+  // 但模型仍需要知道「这个点在某地点内部」才能续接层级，也才不会为同一地点重复登记。
   const pointRoster = (world.points ?? [])
     .slice(0, 60)
-    .map((p) => `${String(p.id)}=${p.name}`)
+    .map((p) => {
+      const pid = Number(p.parentPointId);
+      const parent = Number.isInteger(pid) && pid > 0 ? `（在 ${pid} 内）` : "";
+      return `${String(p.id)}=${p.name}${parent}`;
+    })
     .join("；");
   if (pointRoster) headerLines.push(`地点 id 对照：${pointRoster}`);
   const regionRoster = (world.regions ?? [])
