@@ -73,7 +73,7 @@ async function mountPanel() {
   const api = { request: async () => ({ status: 200, body: { ok: true, data: settings } }) };
   const container = document.createElement("div");
   document.body.append(container);
-  const rerender = renderPanel(core, container, (x) => x, api, { read: async () => null }, mapMod);
+  const rerender = renderPanel(core, container, api, { read: async () => null }, mapMod);
   return { container, rerender, state };
 }
 

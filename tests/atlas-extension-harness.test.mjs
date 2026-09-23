@@ -17,7 +17,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { createAtlasUiCore, atlasClampZoom, ATLAS_UI_EVENTS } from "../src/atlas-ui-core.ts";
+import { createAtlasUiCore, ATLAS_UI_EVENTS } from "../src/atlas-ui-core.ts";
 import {
   createAtlasExtension,
   connectAtlas,
@@ -585,14 +585,6 @@ const MAP_STATE_PAYLOAD = {
     mapImagePresent: false,
   },
 };
-
-test("atlasClampZoom：1x..3x 钳制，底图不会被推出视口", () => {
-  equal(atlasClampZoom(0.5), 1, "低于 1x 钳到 1x");
-  equal(atlasClampZoom(1), 1, "1x 原样");
-  equal(atlasClampZoom(2.5), 2.5, "中间值原样");
-  equal(atlasClampZoom(5), 3, "高于 3x 钳到 3x");
-  equal(atlasClampZoom(Number.NaN), 1, "NaN 回退 1x");
-});
 
 test("地图：点击目的地 → 预览；确认只填输入框；取消关闭；切聊天清空预览", async () => {
   const api = makeApi({

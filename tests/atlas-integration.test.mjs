@@ -201,7 +201,11 @@ test("P0-01：pack 产出两个自包含安装包（构建产物在组件目录�
 
   const uiDist = await import(pathToFileURL(join(uiDir, "dist", "atlas-ui-core.mjs")).href);
   ok(typeof uiDist.createAtlasUiCore === "function", "UI dist 导出 createAtlasUiCore");
-  ok(typeof uiDist.atlasClampZoom === "function", "UI dist 导出 atlasClampZoom");
+  // C3（0.9.54）：旧 1x..3x 钳制接口 atlasClampZoom 已删除，改为断言真实相机 API 随包导出
+  ok(typeof uiDist.atlasClampZoom === "undefined", "旧缩放入口 atlasClampZoom 不再进产物");
+  for (const api of ["fitCamera", "zoomCameraAtPoint", "panCameraBy", "worldToScreen", "screenToWorld"]) {
+    ok(typeof uiDist[api] === "function", `UI dist 导出相机 API ${api}`);
+  }
 
   const serverDist = await import(pathToFileURL(join(serverDir, "dist", "atlas-server.mjs")).href);
   ok(typeof serverDist.createAtlasServerCore === "function", "Server dist 导出 createAtlasServerCore");

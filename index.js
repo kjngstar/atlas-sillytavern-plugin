@@ -1171,7 +1171,7 @@ function formatTravelDistance(cells, metersPerCell) {
 }
 
 
-function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
+function renderPanel(core, root, api, store, mod, skinPort = null) {
   root.className = "atlas-workbench";
   root.id = "atlas-extension-panel-root";
   root.setAttribute("role", "application");
@@ -6482,7 +6482,7 @@ async function connectOnce() {
       root.id = "atlas-extension-panel-root";
       document.body.append(root);
     }
-    rerender = renderPanel(core, root, mod.atlasClampZoom, api, engineStore, mod, {
+    rerender = renderPanel(core, root, api, engineStore, mod, {
       read: (key) => hostRef.readData(key),
       write: (key, value) => hostRef.writeData(key, value),
     });

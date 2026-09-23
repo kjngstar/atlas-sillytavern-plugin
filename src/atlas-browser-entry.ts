@@ -3,7 +3,7 @@
  *
  * esbuild 以本文件为 entry 打成 atlas-extension/dist/atlas-ui-core.mjs：
  * 一个产物同时携带
- * - UI 核心（createAtlasUiCore / atlasClampZoom / ATLAS_UI_EVENTS / ATLAS_PROTOCOL_VERSION）
+ * - UI 核心（createAtlasUiCore / ATLAS_UI_EVENTS / ATLAS_PROTOCOL_VERSION）
  * - 世界引擎核心（createAtlasServerCore：prepare / commit / 相关性 / 账本事务，纯 dispatch 零 Node 依赖）
  * - 浏览器三件套（createBrowserDocumentStore / createLocalAtlasApi / createStProxyFetch）
  *
@@ -13,7 +13,6 @@
 
 export {
   createAtlasUiCore,
-  atlasClampZoom,
   ATLAS_UI_EVENTS,
 } from "./atlas-ui-core.ts";
 

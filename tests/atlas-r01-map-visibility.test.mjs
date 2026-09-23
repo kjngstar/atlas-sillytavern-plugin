@@ -79,7 +79,7 @@ test("R01: 地图工具显示、hint 不遮挡、网格平铺、底图网格分�
   const api = { request: async () => ({ status: 200, body: { ok: true, data: settings } }) };
   const container = document.createElement("div");
   document.body.append(container);
-  renderPanel(core, container, (x) => x, api, { read: async () => null }, mapMod);
+  renderPanel(core, container, api, { read: async () => null }, mapMod);
 
   const css = (n) => window.getComputedStyle(n);
 
@@ -191,7 +191,7 @@ test("R01: 有底图时网格仍被绘制（叠加默认）且缓存键含底图
   };
   const container = document.createElement("div");
   document.body.append(container);
-  renderPanel(core, container, (x) => x, api, { read: async () => null }, mapMod);
+  renderPanel(core, container, api, { read: async () => null }, mapMod);
   await new Promise((r) => setTimeout(r, 20));
 
   const grid = container.querySelector(".aw-grid");

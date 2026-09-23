@@ -1542,10 +1542,6 @@ function createStProxyFetch(deps) {
 }
 
 // src/atlas-ui-core.ts
-function atlasClampZoom(value) {
-  if (!Number.isFinite(value)) return 1;
-  return Math.min(3, Math.max(1, value));
-}
 var ATLAS_UI_EVENTS = [
   "APP_READY",
   "CHAT_CHANGED",
@@ -13074,7 +13070,6 @@ var MAP_GESTURE_THRESHOLD_PX = 6;
 function createPanGesture(opts = {}) {
   const threshold = Number.isFinite(opts.threshold) && opts.threshold > 0 ? opts.threshold : MAP_GESTURE_THRESHOLD_PX;
   let active = false;
-  let blocked = false;
   let startX = 0;
   let startY = 0;
   let lastX = 0;
@@ -13084,11 +13079,9 @@ function createPanGesture(opts = {}) {
   return {
     down(screenX, screenY, downOpts = {}) {
       if (downOpts.interactive) {
-        blocked = true;
         return false;
       }
       active = true;
-      blocked = false;
       startX = Number(screenX) || 0;
       startY = Number(screenY) || 0;
       lastX = startX;
@@ -13123,7 +13116,6 @@ function createPanGesture(opts = {}) {
     },
     cancel() {
       active = false;
-      blocked = false;
       panning = false;
       panned = false;
     },
@@ -13268,7 +13260,6 @@ export {
   MAP_GESTURE_THRESHOLD_PX,
   MAP_ZOOM_MAX_FACTOR,
   MAP_ZOOM_MIN_FACTOR,
-  atlasClampZoom,
   atlasCustomIncludeHeaders,
   buildStarterWorld,
   buildWorldFromTemplate,

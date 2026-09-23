@@ -75,7 +75,7 @@ test("R02: 新建草稿立即可编辑；保存后 createdId 绑定，再存为�
   settingsV2 = { ...settingsV2, promptPresets: view.promptPresets ?? [] };
   const container = document.createElement("div");
   document.body.append(container);
-  renderPanel(core, container, (x) => x, api, { read: async () => null }, { ...view, builtInPrompt: { segments: DEFAULT_PROMPT_SEGMENTS, systemPrompt: DEFAULT_PROMPT_SEGMENTS[0].content } });
+  renderPanel(core, container, api, { read: async () => null }, { ...view, builtInPrompt: { segments: DEFAULT_PROMPT_SEGMENTS, systemPrompt: DEFAULT_PROMPT_SEGMENTS[0].content } });
   await tick();
 
   // 新建 → 立即可编辑（D07 修复）
@@ -156,7 +156,7 @@ test("R02: 另存为完整保留段字段与上下文条数（D15）", async () 
   const view = settingsViewV2(settingsV2);
   const container = document.createElement("div");
   document.body.append(container);
-  renderPanel(core, container, (x) => x, api, { read: async () => null }, { ...view, builtInPrompt: { segments: DEFAULT_PROMPT_SEGMENTS, systemPrompt: DEFAULT_PROMPT_SEGMENTS[0].content } });
+  renderPanel(core, container, api, { read: async () => null }, { ...view, builtInPrompt: { segments: DEFAULT_PROMPT_SEGMENTS, systemPrompt: DEFAULT_PROMPT_SEGMENTS[0].content } });
   await tick();
 
   // 选中已存预设 → saved 工作副本；另存为
@@ -196,7 +196,7 @@ test("R02: first successful settings load shows the full read-only builtin prese
   const core = { getState: () => state, setPage: () => {}, setPanelOpen: () => {}, refresh: async () => {} };
   const container = document.createElement("div");
   document.body.append(container);
-  renderPanel(core, container, (x) => x, api, { read: async () => null }, settings);
+  renderPanel(core, container, api, { read: async () => null }, settings);
   assert.match(container.textContent, /正在读取提示词与设置/);
   assert.equal(container.querySelectorAll(".aw-seg-rows--readonly textarea").length, 0);
   finishGet({ status: 200, body: { ok: true, data: settings } });
@@ -220,7 +220,7 @@ test("R02: first load selects the saved preset and a failed activation restores 
     : { status: 500, body: { ok: false, error: { message: "保存失败" } } } };
   const container = document.createElement("div");
   document.body.append(container);
-  renderPanel(core, container, (x) => x, api, { read: async () => null }, settings);
+  renderPanel(core, container, api, { read: async () => null }, settings);
   await tick();
   assert.equal(container.querySelector('[aria-label="提示词名称"]').value, saved.name);
   assert.equal(container.querySelector('[aria-label="第 1 段正文"]').value, saved.segments[0].content);
@@ -244,7 +244,7 @@ test("R02: failed initial settings load offers retry without showing a false bui
   const core = { getState: () => state, setPage: () => {}, setPanelOpen: () => {}, refresh: async () => {} };
   const container = document.createElement("div");
   document.body.append(container);
-  renderPanel(core, container, (x) => x, api, { read: async () => null }, settings);
+  renderPanel(core, container, api, { read: async () => null }, settings);
   await tick();
   assert.match(container.textContent, /暂不可用/);
   assert.equal(container.querySelectorAll(".aw-seg-rows--readonly textarea").length, 0);
@@ -266,7 +266,7 @@ test("R02: network failure while saving leaves the editable prompt draft intact"
   } };
   const container = document.createElement("div");
   document.body.append(container);
-  renderPanel(core, container, (x) => x, api, { read: async () => null }, settings);
+  renderPanel(core, container, api, { read: async () => null }, settings);
   await tick();
   container.querySelector('[aria-label="新建提示词预设"]').click();
   await tick();
@@ -302,7 +302,7 @@ test("R06: current-world inspection renders the read-only repair report without 
   const core = { getState: () => state, setPage: () => {}, setPanelOpen: () => {}, refresh: async () => {} };
   const container = document.createElement("div");
   document.body.append(container);
-  renderPanel(core, container, (x) => x, api, { read: async () => null }, settings);
+  renderPanel(core, container, api, { read: async () => null }, settings);
   await tick();
   container.querySelector('[aria-label="只读检查旧起点、账本位置、人物与孤立子图"]').click();
   await tick();

@@ -123,12 +123,6 @@ export interface AtlasDestinationPreview {
   factors: string[];
 }
 
-/** 地图缩放钳制：1x..3x，防止把底图推出视口。 */
-export function atlasClampZoom(value: number): number {
-  if (!Number.isFinite(value)) return 1;
-  return Math.min(3, Math.max(1, value));
-}
-
 /** Server Plugin HTTP 客户端（index.js 提供同源 fetch 实现）。 */
 export interface AtlasUiApi {
   request(method: string, path: string, body?: unknown): Promise<{ status: number; body: unknown }>;
