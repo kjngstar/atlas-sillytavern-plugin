@@ -11187,6 +11187,12 @@ function createCoreInstance(store, deps, shared) {
         // S6（0.9.55）：全部可见、非占位地点数（含子地点）；mapPoints 只含根地点，
         // 因此本值可大于 points.length —— 前端据此知道世界图外还有内层地点。
         pointCount: (world.points ?? []).filter((p) => !hiddenPointIds.has(String(p.id))).length,
+        // S8（0.9.55）：子地点 → 直接父地点的**有界**映射。世界图只下发根地点，
+        // 前端无法自行上溯祖先；「定位当前位置」需要它把玩家所在的房间回溯到最近的
+        // 根祖先并在世界图标出。只下发有父的点，避免重复整份点列。
+        pointParents: Object.fromEntries(
+          (world.points ?? []).filter((p) => !hiddenPointIds.has(String(p.id))).map((p) => [String(p.id), Number(p.parentPointId)]).filter(([, parentId]) => Number.isInteger(parentId) && parentId > 0).slice(0, MAP_POINTS_MAX)
+        ),
         mapImagePresent: Boolean(world.mapImage),
         // R01：底图版本（世界更新时间）——前端缓存键的失效依据，换图 / 删图必换键
         mapImageRevision: world.updatedAt ?? 0,
@@ -11680,6 +11686,39 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
           moves: settlement.moves.length,
           encounters: settlement.encounters.length,
           notes: settlement.notes
+        });
+      }
+      const parentById = /* @__PURE__ */ new Map();
+      for (const point of settledWorld.points ?? []) {
+        const pid = Number(point.parentPointId);
+        if (Number.isInteger(pid) && pid > 0) parentById.set(Number(point.id), pid);
+      }
+      const createdWithParent = Array.from(parentById.keys()).filter((id) => {
+        const existedBefore = (world.points ?? []).some((p) => Number(p.id) === id);
+        return !existedBefore;
+      });
+      if (createdWithParent.length > 0) {
+        let maxDepth = 0;
+        for (const id of createdWithParent) {
+          let hops = 0;
+          let cursor = parentById.get(Number(id));
+          const seen = /* @__PURE__ */ new Set([Number(id)]);
+          while (cursor !== void 0 && !seen.has(cursor)) {
+            seen.add(cursor);
+            hops += 1;
+            cursor = parentById.get(cursor);
+          }
+          maxDepth = Math.max(maxDepth, hops);
+        }
+        pushLog({
+          at: now(),
+          kind: "world-turn-hierarchy",
+          chatId: request.chatId,
+          worldId: binding.worldId,
+          // pushLog 的数值白名单只放行 pointsAdded/pointsRemoved/skipped/scanned 等；
+          // 这里用 pointsAdded=带父新增数、scanned=最大层级，不新增未登记字段。
+          pointsAdded: createdWithParent.length,
+          scanned: maxDepth
         });
       }
     }

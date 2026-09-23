@@ -1725,6 +1725,16 @@ function createCoreInstance(
         // S6（0.9.55）：全部可见、非占位地点数（含子地点）；mapPoints 只含根地点，
         // 因此本值可大于 points.length —— 前端据此知道世界图外还有内层地点。
         pointCount: (world.points ?? []).filter((p) => !hiddenPointIds.has(String(p.id))).length,
+        // S8（0.9.55）：子地点 → 直接父地点的**有界**映射。世界图只下发根地点，
+        // 前端无法自行上溯祖先；「定位当前位置」需要它把玩家所在的房间回溯到最近的
+        // 根祖先并在世界图标出。只下发有父的点，避免重复整份点列。
+        pointParents: Object.fromEntries(
+          (world.points ?? [])
+            .filter((p) => !hiddenPointIds.has(String(p.id)))
+            .map((p) => [String(p.id), Number(p.parentPointId)] as const)
+            .filter(([, parentId]) => Number.isInteger(parentId) && parentId > 0)
+            .slice(0, MAP_POINTS_MAX),
+        ),
         mapImagePresent: Boolean(world.mapImage),
         // R01：底图版本（世界更新时间）——前端缓存键的失效依据，换图 / 删图必换键
         mapImageRevision: world.updatedAt ?? 0,

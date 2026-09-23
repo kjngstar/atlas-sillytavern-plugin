@@ -2419,7 +2419,12 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     return mapCanvas;
   }
 
-  /** R08 定位当前位置：保持比例，视口中心对准玩家所在地点（子图视图不可用）。 */
+  /**
+   * R08 定位当前位置：保持比例，视口中心对准玩家所在地点。
+   * S8（0.9.55）：玩家在子地点（建筑内的房间）时，世界图看不到该点——
+   * 此时沿 pointParents 上溯到**最近的根祖先**并在世界图标出，同时提示「在某建筑内」。
+   * 仍只允许世界图使用（子图视图下不定位，避免跨图混淆）。
+   */
   function locatePlayerCamera() {
     if (!camera || !cameraFrame) return;
     if (mapStack.length > 0) {
@@ -2427,14 +2432,32 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       return;
     }
     const d = lastMapData;
-    const target = (Array.isArray(d?.map?.points) ? d.map.points : []).find(
-      (p) => String(p.id) === String(d?.currentLocationId ?? ""),
-    );
-    if (!target) {
-      setStatus("当前位置不在地图上。", "warn");
+    const worldPoints = Array.isArray(d?.map?.points) ? d.map.points : [];
+    const currentId = String(d?.currentLocationId ?? "");
+    const direct = worldPoints.find((p) => String(p.id) === currentId);
+    if (direct) {
+      commitCamera(centerCameraOn(camera, Number(direct.x), Number(direct.y)));
       return;
     }
-    commitCamera(centerCameraOn(camera, Number(target.x), Number(target.y)));
+    // 当前是子地点：沿父链上溯到最近的根地点（世界图上存在的那个）
+    const parents = d?.map?.pointParents && typeof d.map.pointParents === "object" ? d.map.pointParents : {};
+    const seen = new Set([currentId]);
+    let cursor = currentId;
+    let hops = 0;
+    while (hops < MAP_SUBMAP_DEPTH_MAX + 1) {
+      const parentId = String(parents[cursor] ?? "");
+      if (!parentId || seen.has(parentId)) break;
+      seen.add(parentId);
+      hops += 1;
+      const ancestor = worldPoints.find((p) => String(p.id) === parentId);
+      if (ancestor) {
+        commitCamera(centerCameraOn(camera, Number(ancestor.x), Number(ancestor.y)));
+        setStatus(`当前位置在「${String(ancestor.name)}」内（子地点未显示在世界图）——进入该地点可查看内层地图。`, "info");
+        return;
+      }
+      cursor = parentId;
+    }
+    setStatus("当前位置不在地图上。", "warn");
   }
 
   /** 0.9.35 返回上一层子图（世界图 = 栈空）。R08：相机按视图持久化，返回恢复原相机。 */
@@ -2625,10 +2648,19 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     openMapPanel(target, { inSub: false, currentSub: null }, marker);
   }
 
+  /**
+   * S8（0.9.55）：能否进入某个子图。
+   * 深度上限与后端一致——SUBMAP_DEPTH_MAX = 4 表示**最多四张连续子图**
+   * （世界图不算）：世界 → 第1 → 第2 → 第3 → 第4。mapStack.length 即已进入的层数，
+   * 故「已进 4 层」时不再下钻（第 5 张被拒绝）。旧实现写死 `>= 3`，与后端不一致，
+   * 导致第 4 张子图在 UI 侧永远进不去。
+   * 同时按 parentMapId 校验父链，避免跨图误挂。
+   */
+  const MAP_SUBMAP_DEPTH_MAX = 4;
   function hasChildSubmap(submaps, pointId) {
     const id = String(pointId);
     const child = submaps[id];
-    if (!child || mapStack.length >= 3 || mapStack.some((item) => item.pointId === id)) return false;
+    if (!child || mapStack.length >= MAP_SUBMAP_DEPTH_MAX || mapStack.some((item) => item.pointId === id)) return false;
     const parentId = mapStack.length ? String(mapStack[mapStack.length - 1].pointId) : "world";
     return String(child.parentMapId ?? "world") === parentId;
   }
