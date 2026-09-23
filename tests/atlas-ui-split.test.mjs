@@ -17,15 +17,15 @@ import { ATLAS_UI_PAGES } from "../src/atlas-ui-core.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-test("侧边栏八栏：顺序固定为 概览/地图/附近/变化/推进/API/替换/日志，且不存在「设置」", () => {
+test("侧边栏九栏：顺序固定为 概览/地图/附近/变化/推进/API/替换/皮肤/日志，且不存在「设置」", () => {
   assert.deepEqual(
     ATLAS_UI_PAGES.map((p) => p.id),
-    ["overview", "map", "nearby", "changes", "progression", "api", "replace", "logs"],
+    ["overview", "map", "nearby", "changes", "progression", "api", "replace", "skin", "logs"],
     "页面 id 顺序固定",
   );
   assert.deepEqual(
     ATLAS_UI_PAGES.map((p) => p.label),
-    ["概览", "地图", "附近", "变化", "推进", "API", "替换", "日志"],
+    ["概览", "地图", "附近", "变化", "推进", "API", "替换", "皮肤", "日志"],
     "用户标签固定",
   );
   assert.ok(
@@ -40,7 +40,11 @@ test("源码中不再存在 settings 页面残留（page id / 导航 / 渲染分
   assert.ok(!/page\s*[:=]\s*"settings"/.test(uiCore), "ui-core 不再出现 settings 页状态");
   assert.ok(!/id:\s*"settings",\s*label/.test(indexJs), "导航不再渲染「设置」项");
   assert.ok(!/settingsSlot/.test(indexJs), "settingsSlot 死代码已删除");
-  assert.ok(/id:\s*"progression",\s*label:\s*"推进"/.test(indexJs), "导航出现「推进」项");
+  // C6：index.js 不再自带页面清单字面量，改为消费权威 ATLAS_UI_PAGES；
+  // 「推进」项由上面第一条用例对权威清单的顺序断言覆盖。
+  assert.ok(!/const PAGES = \[/.test(indexJs), "index.js 不再自带页面清单副本");
+  assert.ok(/^\s+ATLAS_UI_PAGES,$/m.test(indexJs), "index.js 从 mod 解构权威清单");
+  assert.ok(/for \(const page of uiPages\)/.test(indexJs), "导航遍历权威清单");
 });
 
 test("CSS 合约：scoped 覆盖 input / select / textarea / option / placeholder / autofill", () => {

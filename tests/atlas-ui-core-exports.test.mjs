@@ -40,14 +40,33 @@ test("dist/atlas-ui-core.mjs 覆盖 index.js 全部 loadUiCore 解构需求 + �
   assert.equal(dist.ATLAS_ST_GENERATE_PATH, "/api/backends/chat-completions/generate");
 });
 
-test("index.js PAGES 与 ui-core ATLAS_UI_PAGES 双源一致（防导航漂移）", async () => {
+test("C6：导航页清单只有一份权威（ui-core），index.js 不再自带副本", async () => {
   const { ATLAS_UI_PAGES } = await import("../src/atlas-ui-core.ts");
   const js = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
-  const block = js.match(/const PAGES = \[[\s\S]*?\];/);
-  assert.ok(block, "index.js 应有 PAGES 数组");
-  for (const page of ATLAS_UI_PAGES) {
-    assert.ok(block[0].includes(`id: "${page.id}"`), `index.js PAGES 缺少页面 ${page.id}`);
-    assert.ok(block[0].includes(`label: "${page.label}"`), `index.js PAGES 缺少标签 ${page.label}`);
+
+  // 权威清单必须包含实际支持的全部页面（含 skin——旧清单漏了它，
+  // 而旧测试只检查「权威是 index.js 副本的子集」，因此永远测不出缺失）
+  const ids = ATLAS_UI_PAGES.map((p) => p.id);
+  for (const expected of ["overview", "map", "nearby", "changes", "progression", "api", "replace", "skin", "logs"]) {
+    assert.ok(ids.includes(expected), `权威清单必须包含页面 ${expected}`);
   }
-  assert.ok(!block[0].includes("settings"), "不得回流 settings 页");
+  assert.equal(ids.length, 9, "权威清单为 9 页");
+  assert.equal(new Set(ids).size, ids.length, "页面 id 不重复");
+  assert.ok(!ids.includes("settings"), "不得回流 settings 页");
+
+  // 每个权威页面都要有真实渲染分支，否则「清单里有、界面点不开」
+  for (const id of ids) {
+    assert.ok(
+      new RegExp(`s\\.page === "${id}"`).test(js),
+      `index.js 必须有页面 ${id} 的渲染分支`,
+    );
+  }
+
+  // index.js 不再保留硬编码副本，改为消费权威清单
+  assert.ok(!/const PAGES = \[/.test(js), "index.js 不得再带 PAGES 副本");
+  assert.ok(/^\s+ATLAS_UI_PAGES,$/m.test(js), "index.js 从 mod 解构 ATLAS_UI_PAGES");
+  assert.ok(
+    /const uiPages = Array\.isArray\(ATLAS_UI_PAGES\)/.test(js),
+    "导航消费权威清单（缺失时退化为空列表而非抛错）",
+  );
 });

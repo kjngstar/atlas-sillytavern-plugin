@@ -575,18 +575,10 @@ export function atlasUninstallGlobals() {
 // 面板 DOM（五页；地图 = 查看 / 定位 / 目的地预览）
 // ---------------------------------------------------------------------------
 
-// 注意：必须与 ui-core 的 ATLAS_UI_PAGES 逐一对应（导出守卫测试把关双源漂移）
-const PAGES = [
-  { id: "overview", label: "概览" },
-  { id: "map", label: "地图" },
-  { id: "nearby", label: "附近" },
-  { id: "changes", label: "变化" },
-  { id: "progression", label: "推进" },
-  { id: "api", label: "API" },
-  { id: "replace", label: "替换" },
-  { id: "skin", label: "皮肤" },
-  { id: "logs", label: "日志" },
-];
+// C6（0.9.54）：导航页清单唯一权威在 src/atlas-ui-core.ts 的 ATLAS_UI_PAGES，
+// 经 atlas-browser-entry 导出后由 renderPanel 从 mod 解构（见下方 const { ATLAS_UI_PAGES }）。
+// 此前此处另有一份 PAGES 副本，两处漂移（副本有 9 页含 skin，权威清单只有 8 页），
+// 而旧一致性测试只检查「权威清单是本副本的子集」，故 skin 缺失从未被发现。
 
 // ---------------------------------------------------------------------------
 // 0.9.46 皮肤系统
@@ -1132,6 +1124,8 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     computeScaleBar,
     formatDistanceMeters,
     formatTravelDistance,
+    // C6（0.9.54）：导航页清单唯一权威（src/atlas-ui-core.ts 的 ATLAS_UI_PAGES）
+    ATLAS_UI_PAGES,
   } = mod;
   const cameraApiMissing =
     typeof computeMapFrame !== "function" ||
@@ -1141,6 +1135,10 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     typeof computeScaleBar !== "function" ||
     typeof formatDistanceMeters !== "function" ||
     typeof formatTravelDistance !== "function";
+  // C6：核心模块未导出清单时退化为空列表（导航为空好过挂载即抛错）。
+  // 真实发布形态 dist 必导出它；缺失只可能出现在测试注入的假 mod 上。
+  const uiPages = Array.isArray(ATLAS_UI_PAGES) ? ATLAS_UI_PAGES : [];
+  const pagesApiMissing = uiPages.length === 0;
   let camera = null; // 当前视图相机（MapCamera）
   let cameraViewKey = "";
   let cameraFrame = null;
@@ -1188,7 +1186,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
   nav.setAttribute("aria-label", "工作台分区导航");
   nav.append(el("span", "aw-rail__label", "导航"));
   const navButtons = new Map();
-  for (const page of PAGES) {
+  for (const page of uiPages) {
     const btn = el("button", "aw-nav__btn");
     btn.type = "button";
     btn.dataset.page = page.id;

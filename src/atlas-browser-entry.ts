@@ -14,6 +14,9 @@
 export {
   createAtlasUiCore,
   ATLAS_UI_EVENTS,
+  // C6（0.9.54）：导航页清单唯一权威在 atlas-ui-core；index.js 不再自带 PAGES 副本。
+  ATLAS_UI_PAGES,
+  type AtlasUiPage,
 } from "./atlas-ui-core.ts";
 
 export {

@@ -1542,6 +1542,17 @@ function createStProxyFetch(deps) {
 }
 
 // src/atlas-ui-core.ts
+var ATLAS_UI_PAGES = [
+  { id: "overview", label: "概览" },
+  { id: "map", label: "地图" },
+  { id: "nearby", label: "附近" },
+  { id: "changes", label: "变化" },
+  { id: "progression", label: "推进" },
+  { id: "api", label: "API" },
+  { id: "replace", label: "替换" },
+  { id: "skin", label: "皮肤" },
+  { id: "logs", label: "日志" }
+];
 var ATLAS_UI_EVENTS = [
   "APP_READY",
   "CHAT_CHANGED",
@@ -13312,6 +13323,7 @@ export {
   ATLAS_PROTOCOL_VERSION,
   ATLAS_ST_GENERATE_PATH,
   ATLAS_UI_EVENTS,
+  ATLAS_UI_PAGES,
   AtlasError,
   DEFAULT_WORLD_TURN_SYSTEM_PROMPT,
   DEMO_TEMPLATES,

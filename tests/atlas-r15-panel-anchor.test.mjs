@@ -41,6 +41,16 @@ async function mountPanel() {
   const cameraMod = await import(pathToFileURL(resolve(root, "src/atlas-map-camera.ts")).href);
   const interactionMod = await import(pathToFileURL(resolve(root, "src/atlas-map-interactions.ts")).href);
   const mapMod = { ...cameraMod, ...interactionMod };
+// C5/C6：renderPanel 需要核心模块导出的比例尺纯函数与页面清单（发布形态由
+  // atlas-browser-entry 提供）。夹具按真实表面补齐，避免退化到空导航/无比例尺。
+  const __coreMod = await import(pathToFileURL(resolve(root, "src/atlas-scale.ts")).href);
+  const __uiMod = await import(pathToFileURL(resolve(root, "src/atlas-ui-core.ts")).href);
+  Object.assign(mapMod, {
+    computeScaleBar: __coreMod.computeScaleBar,
+    formatDistanceMeters: __coreMod.formatDistanceMeters,
+    formatTravelDistance: __coreMod.formatTravelDistance,
+    ATLAS_UI_PAGES: __uiMod.ATLAS_UI_PAGES,
+  });
 
   const points = [
     { id: 1, name: "起点", x: 50, y: 50, regionId: "start" },
