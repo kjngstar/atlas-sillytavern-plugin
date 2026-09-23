@@ -7065,6 +7065,9 @@ function renderContextPlan(plan) {
 
 // src/atlas-scale.ts
 var SCALE_EXTENT_TOLERANCE = 0.01;
+var SCALE_BAR_MIN_PX = 80;
+var SCALE_BAR_MAX_PX = 160;
+var SCALE_BAR_PREFERRED_PX = 120;
 var clampText = (value, max) => String(value ?? "").trim().replace(/\s+/g, " ").slice(0, max);
 function finitePositiveNumber(value) {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return null;
@@ -7145,6 +7148,61 @@ function sanitizeCalibration(raw) {
     confidence: ["low", "medium", "high"].includes(String(record.confidence)) ? String(record.confidence) : "",
     at: Number.isFinite(atRaw) && atRaw > 0 ? Math.floor(atRaw) : 0
   };
+}
+function computeScaleBar(input) {
+  const metersPerCell = finitePositiveNumber(input.metersPerCell);
+  const cellPx = finitePositiveNumber(input.cellPx);
+  const zoom = finitePositiveNumber(input.zoom);
+  if (metersPerCell === null || cellPx === null || zoom === null) return null;
+  const metersPerPixel = metersPerCell / (cellPx * zoom);
+  if (!Number.isFinite(metersPerPixel) || metersPerPixel <= 0) return null;
+  let best = null;
+  let bestInWindow = null;
+  let bestBelow = null;
+  let bestAbove = null;
+  for (let exp = -2; exp <= 7; exp++) {
+    for (const mult of [1, 2, 5]) {
+      const distance = mult * 10 ** exp;
+      const barWidthPx = distance / metersPerPixel;
+      if (!Number.isFinite(barWidthPx) || barWidthPx <= 0) continue;
+      const candidate = { distanceMeters: distance, barWidthPx };
+      if (barWidthPx >= SCALE_BAR_MIN_PX && barWidthPx <= SCALE_BAR_MAX_PX) {
+        const gap = Math.abs(barWidthPx - SCALE_BAR_PREFERRED_PX);
+        if (!bestInWindow || gap < bestInWindow.gap) bestInWindow = { ...candidate, gap };
+      } else if (barWidthPx < SCALE_BAR_MIN_PX) {
+        if (!bestBelow || barWidthPx > bestBelow.barWidthPx) bestBelow = candidate;
+      } else if (!bestAbove || barWidthPx < bestAbove.barWidthPx) {
+        bestAbove = candidate;
+      }
+      best = best ?? candidate;
+    }
+  }
+  if (bestInWindow) return { distanceMeters: bestInWindow.distanceMeters, barWidthPx: bestInWindow.barWidthPx };
+  if (bestBelow && bestAbove) {
+    const belowGap = SCALE_BAR_MIN_PX - bestBelow.barWidthPx;
+    const aboveGap = bestAbove.barWidthPx - SCALE_BAR_MAX_PX;
+    return belowGap <= aboveGap ? bestBelow : bestAbove;
+  }
+  return bestBelow ?? bestAbove ?? best;
+}
+function formatDistanceMeters(meters) {
+  if (!Number.isFinite(meters) || meters <= 0) return "";
+  if (meters < 1e-5) return meters.toPrecision(3) + " 米";
+  if (meters < 0.01) return Number((meters * 1e3).toPrecision(3)) + " 毫米";
+  if (meters < 1) return `${Math.round(meters * 100)} 厘米`;
+  if (meters < 1e3) {
+    const value2 = Math.round(meters * 10) / 10;
+    return `${Number.isInteger(value2) ? value2 : value2.toFixed(1)} 米`;
+  }
+  const km = meters / 1e3;
+  const value = Math.round(km * 10) / 10;
+  return `${Number.isInteger(value) ? value : value.toFixed(1)} 公里`;
+}
+function formatTravelDistance(cells, metersPerCell) {
+  if (typeof cells !== "number" || typeof metersPerCell !== "number") return "";
+  if (!Number.isFinite(cells) || cells <= 0) return "";
+  if (!Number.isFinite(metersPerCell) || metersPerCell <= 0) return "";
+  return `≈ ${formatDistanceMeters(cells * metersPerCell)}`;
 }
 function applyScaleHintsToDoc(hints, doc, options) {
   const results = [];
@@ -13267,6 +13325,7 @@ export {
   cameraZoomPercent,
   centerCameraOn,
   computeMapFrame,
+  computeScaleBar,
   createAtlasDiagnosticsSink,
   createAtlasLorebookWriter,
   createAtlasServerCore,
@@ -13281,6 +13340,8 @@ export {
   createTavernProfileFetch,
   emptyMapFrame,
   fitCamera,
+  formatDistanceMeters,
+  formatTravelDistance,
   getConnectionManagerProfiles,
   getDemoTemplate,
   getDemoTemplateByName,
@@ -13294,10 +13355,12 @@ export {
   normalizeAtlasPromptPostProcessing,
   panCameraBy,
   parseAtlasChatBinding,
+  sanitizeCalibration,
   sanitizeDiagnostic,
   screenToWorld,
   setCameraZoom,
   starterWorldIdForChat,
+  validateScaleResponse,
   worldToScreen,
   zoomCameraAtPoint
 };

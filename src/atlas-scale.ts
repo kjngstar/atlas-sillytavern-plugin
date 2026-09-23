@@ -214,6 +214,18 @@ export function formatDistanceMeters(meters: number): string {
   return `${Number.isInteger(value) ? value : value.toFixed(1)} 公里`;
 }
 
+/**
+ * M06 旅行预览物理距离（纯函数）：有标定时把格程换算为物理距离。
+ * 纪律：只换算距离，绝不自动把米换算成小时 / 天——旅行耗时沿用世界规则。
+ * C5（0.9.54）：自 index.js 上移，成为唯一权威实现；index.js 不再保留副本。
+ */
+export function formatTravelDistance(cells: number, metersPerCell: number): string {
+  if (typeof cells !== "number" || typeof metersPerCell !== "number") return "";
+  if (!Number.isFinite(cells) || cells <= 0) return "";
+  if (!Number.isFinite(metersPerCell) || metersPerCell <= 0) return "";
+  return `≈ ${formatDistanceMeters(cells * metersPerCell)}`;
+}
+
 // ---------------------------------------------------------------------------
 // R10：把 v2 mapScaleHints 应用到 maps sidecar 的 calibrations。
 //

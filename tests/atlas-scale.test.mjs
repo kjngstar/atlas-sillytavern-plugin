@@ -12,8 +12,20 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { validateScaleResponse, computeScaleBar, formatDistanceMeters, sanitizeCalibration } from "../src/atlas-scale.ts";
-import { computeScaleBar as uiComputeScaleBar, formatDistanceMeters as uiFormatDistanceMeters } from "../index.js";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+// C5：权威实现只有这一处（src/atlas-scale.ts）。旧用例另外从 ../index.js 导入副本
+// 做「双实现一致」断言，等于把重复实现固化成契约；副本已删除。
+import {
+  validateScaleResponse,
+  computeScaleBar,
+  formatDistanceMeters,
+  formatTravelDistance,
+  sanitizeCalibration,
+} from "../src/atlas-scale.ts";
+
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 const FRAME = { cols: 100, rows: 100 };
 
@@ -133,17 +145,25 @@ test("sidecar 标定清洗：坏形状拒绝、非法来源降 legacy、revision
   assert.equal(cleaned.metersPerCell, 60.12);
 });
 
-test("UI 与 server 两侧标尺算法零漂移（同名纯函数断言一致）", () => {
-  for (const input of [
-    { metersPerCell: 50, cellPx: 40, zoom: 1 },
-    { metersPerCell: 60, cellPx: 33, zoom: 1.5 },
-    { metersPerCell: 0.05, cellPx: 60, zoom: 2 },
-    { metersPerCell: 3000000, cellPx: 25, zoom: 0.5 },
-  ]) {
-    assert.deepEqual(uiComputeScaleBar(input), computeScaleBar(input), JSON.stringify(input));
+test("C5：比例尺只有一份权威实现，浏览器入口确实接线到它", async () => {
+  // 旧用例维护「index.js 副本 === atlas-scale.ts」的双实现对比，等于把重复实现
+  // 固化成契约；C5 已删除 index.js 的副本，这里改为验证接线：
+  // 浏览器入口暴露的就是权威实现本身（引用相等），且产物不含第二套算法。
+  const entry = await import("../src/atlas-browser-entry.ts");
+  assert.equal(typeof entry.computeScaleBar, "function", "入口导出 computeScaleBar");
+  assert.equal(typeof entry.formatDistanceMeters, "function", "入口导出 formatDistanceMeters");
+  assert.equal(typeof entry.formatTravelDistance, "function", "入口导出 formatTravelDistance");
+  assert.equal(entry.computeScaleBar, computeScaleBar, "入口导出的是同一函数引用（无第二套实现）");
+  assert.equal(entry.formatDistanceMeters, formatDistanceMeters, "同一函数引用");
+  assert.equal(entry.formatTravelDistance, formatTravelDistance, "同一函数引用");
+
+  // index.js 不再自带副本：源码内不应再出现函数定义
+  const indexSource = readFileSync(join(root, "index.js"), "utf8");
+  for (const fn of ["function computeScaleBar", "function formatDistanceMeters", "function formatTravelDistance"]) {
+    assert.ok(!indexSource.includes(fn), `index.js 不得再定义 ${fn}`);
   }
-  assert.equal(uiFormatDistanceMeters(62.5), formatDistanceMeters(62.5));
-  assert.equal(uiFormatDistanceMeters(3000000), formatDistanceMeters(3000000));
+  assert.ok(indexSource.includes("computeScaleBar,"), "index.js 从 mod 解构 computeScaleBar");
+  assert.ok(!/export \{ computeScaleBar/.test(indexSource), "index.js 不再转出该算法");
 });
 
 
@@ -156,5 +176,4 @@ test("tiny positive calibration values remain positive and render without zero c
   assert.equal(result.calibration.metersPerCell, 0.001);
   assert.equal(sanitizeCalibration({ metersPerCell: 0.001 }).metersPerCell, 0.001);
   assert.match(formatDistanceMeters(0.001), /毫米/);
-  assert.match(uiFormatDistanceMeters(0.001), /毫米/);
 });

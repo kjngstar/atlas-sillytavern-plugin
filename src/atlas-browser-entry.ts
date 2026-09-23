@@ -69,6 +69,16 @@ export {
 
 export { buildStarterWorld, starterWorldIdForChat } from "./atlas-starter-world.ts";
 
+// C5（0.9.54）：比例尺 / 距离格式化只保留 src/atlas-scale.ts 这一份权威实现。
+// index.js 的地图渲染与旅行预览从 mod 解构使用，不再自带副本。
+export {
+  computeScaleBar,
+  formatDistanceMeters,
+  formatTravelDistance,
+  validateScaleResponse,
+  sanitizeCalibration,
+} from "./atlas-scale.ts";
+
 // R08 地图相机与手势：index.js renderPanel 从 mod 解构使用（dist 必须导出，
 // atlas-r08-camera.test.mjs 显式把关）。
 export {

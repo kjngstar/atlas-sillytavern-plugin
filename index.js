@@ -25,10 +25,10 @@ export const ATLAS_SESSION_SCHEMA_VERSION = 1;
 export { atlasSessionWriteGuard };
 /** R08：地图相机纯数学已迁至 src/atlas-map-camera.ts（dist 经 atlas-browser-entry 导出，
  *  renderPanel 从 mod 解构使用；旧 computeMapLayout 的 20px fit 下限一并删除）。 */
-/** 0.9.50（M05）：动态比例尺条纯函数（导出供测试）。 */
-export { computeScaleBar, formatDistanceMeters };
-/** 0.9.51（M06）：旅行距离换算纯函数（定义处无需 export——此行集中导出供测试）。 */
-export { formatTravelDistance };
+/**
+ * C5（0.9.54）：动态比例尺条与距离格式化已统一到 src/atlas-scale.ts 唯一实现。
+ * index.js 不再保留副本，renderPanel 从 mod 解构（见下方 const { computeScaleBar, … }）。
+ */
 export const ATLAS_SETTINGS_KEY = "atlas_world_sim";
 /** 生成拦截器注入键（setExtensionPrompt 用；临时上下文，不写入可见聊天历史）。 */
 export const ATLAS_INJECTION_KEY = "atlas_world_context";
@@ -1102,73 +1102,6 @@ function el(tag, className, text) {
  * 全部候选都在窗外时取与窗口最近的一条）；选定后按真实值绘制，
  * 不把条长硬截到像素值而保留原标签。
  */
-const SCALE_BAR_MIN_PX = 80;
-const SCALE_BAR_MAX_PX = 160;
-const SCALE_BAR_PREFERRED_PX = 120;
-
-function computeScaleBar({ metersPerCell, cellPx, zoom }) {
-  const s = Number(metersPerCell);
-  const p = Number(cellPx);
-  const z = Number(zoom);
-  if (!Number.isFinite(s) || s <= 0 || !Number.isFinite(p) || p <= 0 || !Number.isFinite(z) || z <= 0) return null;
-  const metersPerPixel = s / (p * z);
-  if (!Number.isFinite(metersPerPixel) || metersPerPixel <= 0) return null;
-  let bestInWindow = null;
-  let bestBelow = null;
-  let bestAbove = null;
-  let best = null;
-  for (let exp = -2; exp <= 7; exp++) {
-    for (const mult of [1, 2, 5]) {
-      const distance = mult * 10 ** exp;
-      const barWidthPx = distance / metersPerPixel;
-      if (!Number.isFinite(barWidthPx) || barWidthPx <= 0) continue;
-      const candidate = { distanceMeters: distance, barWidthPx };
-      if (!best) best = candidate;
-      if (barWidthPx >= SCALE_BAR_MIN_PX && barWidthPx <= SCALE_BAR_MAX_PX) {
-        const gap = Math.abs(barWidthPx - SCALE_BAR_PREFERRED_PX);
-        if (!bestInWindow || gap < bestInWindow.gap) bestInWindow = { ...candidate, gap };
-      } else if (barWidthPx < SCALE_BAR_MIN_PX) {
-        if (!bestBelow || barWidthPx > bestBelow.barWidthPx) bestBelow = candidate;
-      } else if (!bestAbove || barWidthPx < bestAbove.barWidthPx) {
-        bestAbove = candidate;
-      }
-    }
-  }
-  if (bestInWindow) return { distanceMeters: bestInWindow.distanceMeters, barWidthPx: bestInWindow.barWidthPx };
-  if (bestBelow && bestAbove) {
-    const belowGap = SCALE_BAR_MIN_PX - bestBelow.barWidthPx;
-    const aboveGap = bestAbove.barWidthPx - SCALE_BAR_MAX_PX;
-    return belowGap <= aboveGap ? bestBelow : bestAbove;
-  }
-  return bestBelow ?? bestAbove ?? best;
-}
-
-/** 0.9.50 距离显示：内部统一米，显示米 / 公里自动（极小图到厘米）。 */
-function formatDistanceMeters(meters) {
-  const value = Number(meters);
-  if (!Number.isFinite(value) || value <= 0) return "";
-  if (value < 0.00001) return value.toPrecision(3) + " 米";
-  if (value < 0.01) return Number((value * 1000).toPrecision(3)) + " 毫米";
-  if (value < 1) return `${Math.round(value * 100)} 厘米`;
-  if (value < 1000) {
-    const rounded = Math.round(value * 10) / 10;
-    return `${Number.isInteger(rounded) ? rounded : rounded.toFixed(1)} 米`;
-  }
-  const km = Math.round((value / 1000) * 10) / 10;
-  return `${Number.isInteger(km) ? km : km.toFixed(1)} 公里`;
-}
-
-/**
- * 0.9.51（M06）旅行预览物理距离（纯函数，可测）：
- * 有标定时把格程换算为物理距离（估计口径——schematic 布局 + AI/人工标定）。
- * 纪律：只换算距离，绝不自动把米换算成小时 / 天——旅行耗时沿用当前世界规则
- * （lib/ 快照 buildTravelHint 的按格每时段语义一行不动，旧世界策略原样保留）。
- */
-function formatTravelDistance(cells, metersPerCell) {
-  if (typeof cells !== "number" || typeof metersPerCell !== "number") return "";
-  if (!Number.isFinite(cells) || cells <= 0 || !Number.isFinite(metersPerCell) || metersPerCell <= 0) return "";
-  return `≈ ${formatDistanceMeters(cells * metersPerCell)}`;
-}
 
 
 function renderPanel(core, root, api, store, mod, skinPort = null) {
@@ -1194,11 +1127,20 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     createPanGesture,
     createDragGesture,
     createPinchTracker,
+    // C5（0.9.54）：比例尺 / 距离格式化唯一权威实现在 src/atlas-scale.ts，
+    // 经 atlas-browser-entry 导出后从这里解构；index.js 不再自带副本。
+    computeScaleBar,
+    formatDistanceMeters,
+    formatTravelDistance,
   } = mod;
   const cameraApiMissing =
     typeof computeMapFrame !== "function" ||
     typeof fitCamera !== "function" ||
     typeof createPanGesture !== "function";
+  const scaleApiMissing =
+    typeof computeScaleBar !== "function" ||
+    typeof formatDistanceMeters !== "function" ||
+    typeof formatTravelDistance !== "function";
   let camera = null; // 当前视图相机（MapCamera）
   let cameraViewKey = "";
   let cameraFrame = null;
@@ -2071,7 +2013,8 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       return;
     }
     // R08：每格屏幕像素 = 相机比例 k（zoom 已并入 k，比例尺恒按 zoom:1 计算）
-    const bar = computeScaleBar({ metersPerCell: calibration.metersPerCell, cellPx: camera?.k ?? 0, zoom: 1 });
+    // C5：权威实现缺失时静默跳过比例尺（不抛错、不显示假刻度）
+    const bar = scaleApiMissing ? null : computeScaleBar({ metersPerCell: calibration.metersPerCell, cellPx: camera?.k ?? 0, zoom: 1 });
     if (!bar) return;
     scaleBarEl.classList.remove("is-stub");
     scaleBarEl.style.width = `${Math.round(bar.barWidthPx * 10) / 10}px`;
@@ -3188,7 +3131,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       // 0.9.51（M06）：有标定时格程旁附物理距离（估计口径）；耗时语义一行不动——
       // 比例尺用于空间参考，旅行耗时沿用当前世界规则（lib/ 快照零改动，不重算已提交时间线）
       const metersPerCell = scaleCtx?.calibration?.metersPerCell ?? null;
-      const distanceLabel = formatTravelDistance(preview.distance, metersPerCell);
+      const distanceLabel = scaleApiMissing ? "" : formatTravelDistance(preview.distance, metersPerCell);
       travelBar.append(el("span", "aw-travel__meta", distanceLabel
         ? `距离 ${preview.distance} 格（${distanceLabel}，按标定估计） · 预计 ${preview.estimatedDuration} 时段（旅行耗时沿用世界规则）`
         : `距离 ${preview.distance} 格 · 预计 ${preview.estimatedDuration} 时段`));

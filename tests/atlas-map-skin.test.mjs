@@ -34,8 +34,11 @@ const {
   atlasMapSkinToCssVars,
   applyAtlasMapSkin,
   exportAtlasMapSkin,
-  formatTravelDistance,
 } = await import("../index.js");
+
+// C5（0.9.54）：距离换算已统一到 src/atlas-scale.ts 唯一权威实现，
+// index.js 不再转出该算法（旧实现为 index.js 内的重复副本）。
+const { formatTravelDistance } = await import("../src/atlas-scale.ts");
 
 const cssText = readFileSync(fileURLToPath(new URL("../style.css", import.meta.url)), "utf8");
 
