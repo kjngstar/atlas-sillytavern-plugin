@@ -26,7 +26,7 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const imp = (p) => import(pathToFileURL(resolve(root, p)).href);
 
-const { createMemoryDocumentStore } = await imp("src/atlas-server.ts");
+const { createMemoryDocumentStore, createSessionOverlayStore, parseAtlasSessionDoc } = await imp("src/atlas-server.ts");
 const { reconcilePendingCommits, scanPendingEntries } = await imp("src/atlas-pending-reconcile.ts");
 
 function newStore() {
@@ -173,4 +173,21 @@ test("R12-T8: reconcilePendingCommits honors limit option", async () => {
   assert.equal(report.cleaned, 3, "limit 应限制处理量");
   const remaining = await store.list("pending:");
   assert.equal(remaining.length, 2, "未处理的 orphan pending 仍留着");
+});
+test("scene sidecar joins one session snapshot and legacy scene remains readable", async () => {
+  const fallback = createMemoryDocumentStore();
+  await fallback.write("scene:w1", { schemaVersion: 1, retiredPointIds: ["1"], lastConfirmed: null, bootstrap: null });
+  const session = parseAtlasSessionDoc({
+    schemaVersion: 1, rev: 4, world: { id: "w1" }, binding: { chatId: "c1" },
+    maps: null, turns: {}, geoAuto: {},
+  });
+  const overlay = createSessionOverlayStore(session, fallback);
+  const old = await overlay.read("scene:w1");
+  assert.deepEqual(old.retiredPointIds, ["1"], "旧独立文档可只读回退");
+  assert.equal(overlay.changed(), false, "读取不写会话");
+  await overlay.write("scene:w1", { ...old, lastConfirmed: { branchId: null, pointId: "2", at: 9 } });
+  assert.equal(overlay.changed(), true);
+  assert.equal(session.scene.lastConfirmed.pointId, "2", "场景进入单会话快照");
+  assert.equal((await fallback.read("scene:w1")).lastConfirmed, null, "旧文档不被顺手改写");
+  await assert.rejects(() => overlay.write("scene:other", old), /场景文档与当前会话世界不一致/);
 });

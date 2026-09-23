@@ -115,7 +115,8 @@ export function parseAtlasWorldTurnDraftV2(text: string, ctx: AtlasV2ParseContex
   if (version !== 2) {
     return { ok: false, errors: [{ path: "$.schemaVersion", message: `协议版本不匹配：期望 2，收到 ${String(version)}` }] };
   }
-  if (!isInt(raw.baseRevision) || raw.baseRevision !== ctx.baseRevision) {
+  if (typeof raw.baseRevision !== "number" || !Number.isFinite(raw.baseRevision) ||
+      raw.baseRevision < 0 || raw.baseRevision !== ctx.baseRevision) {
     err.push("$.baseRevision", `必须逐字复用请求值 ${ctx.baseRevision}（收到 ${JSON.stringify(raw.baseRevision)}；过期提交拒绝）`);
   }
 

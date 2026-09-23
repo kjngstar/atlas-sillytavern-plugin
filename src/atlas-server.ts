@@ -20,6 +20,7 @@ import { adjudicateAtlasDraft } from "./atlas-adjudicate.ts";
 import { settleNpcSchedules, mergeSettlementNotes, isProtagonistRole } from "./atlas-schedule.ts";
 import { applyContentReplaceRules } from "./atlas-content-replace.ts";
 import { ledgerForBranch, appendStateEvent } from "../lib/world-ledger.ts";
+import { branchLineage } from "../lib/world-lineage.ts";
 import { parseStateEffect } from "../lib/world-schema.ts";
 import { appendDefinitionRevision } from "../lib/world-definition.ts";
 import { hashString } from "../lib/world-cards.ts";
@@ -45,7 +46,7 @@ import {
 import { computeAtlasRelevance, atlasTravelPreview } from "./atlas-relevance.ts";
 import { prepareAtlasTurn, commitAtlasTurn, provisionReferencedCharacters } from "./atlas-turn.ts";
 import { applyAtlasV2Turn } from "./atlas-turn-v2.ts";
-import { parseAtlasWorldTurnDraftV2 } from "./atlas-contract-v2.ts";
+import { parseAtlasWorldTurnDraftV2, type AtlasV2Draft } from "./atlas-contract-v2.ts";
 import { buildSubMapTreeFromDraft, sanitizeMapDoc, SUBMAP_FRAME_DEFAULT, validateSubmapDepth } from "./atlas-geo-apply.ts";
 import { detectStartPlaceholder, resolveSceneStatus, retireStartPlaceholder, sanitizeSceneDoc, sceneDocKey, type SceneDoc } from "./atlas-scene.ts";
 import { validateScaleResponse, applyScaleHintsToDoc, type V2ScaleHintInput, type FrameRef, roundPositiveScale } from "./atlas-scale.ts";
@@ -127,6 +128,7 @@ export interface AtlasSessionDoc {
   binding: unknown | null;
   world: unknown | null;
   maps: unknown | null;
+  scene: unknown | null;
   turns: Record<string, unknown>;
   geoAuto: Record<string, unknown>;
 }
@@ -138,6 +140,7 @@ export function createEmptySessionDoc(): AtlasSessionDoc {
     binding: null,
     world: null,
     maps: null,
+    scene: null,
     turns: {},
     geoAuto: {},
   };
@@ -165,6 +168,7 @@ export function parseAtlasSessionDoc(raw: unknown): AtlasSessionDoc {
   session.binding = raw.binding ?? null;
   session.world = raw.world ?? null;
   session.maps = raw.maps ?? null;
+  session.scene = raw.scene ?? null;
   return session;
 }
 
@@ -199,7 +203,7 @@ export function createSessionOverlayStore(
   fallback: AtlasDocumentStore,
 ): AtlasDocumentStore & { changed(): boolean } {
   let mutated = false;
-  const OWNED_PREFIXES = ["world:", "binding:", "maps:", "geo-auto:", "turn:"];
+  const OWNED_PREFIXES = ["world:", "binding:", "maps:", "scene:", "geo-auto:", "turn:"];
 
   function worldName(): string | null {
     return session.world !== null ? `world:${idOfDoc(session.world)}` : null;
@@ -211,6 +215,12 @@ export function createSessionOverlayStore(
     if (session.maps === null) return null;
     const worldId = idOfDoc(session.world);
     return worldId ? `maps:${worldId}` : null;
+  }
+
+  function sceneName(): string | null {
+    if (session.scene === null) return null;
+    const worldId = idOfDoc(session.world);
+    return worldId ? "scene:" + worldId : null;
   }
 
   return {
@@ -231,6 +241,21 @@ export function createSessionOverlayStore(
       if (name.startsWith("maps:")) {
         const current = mapsName();
         return current === name ? session.maps : null;
+      }
+      if (name.startsWith("scene:")) {
+        const current = sceneName();
+        if (current === name) return session.scene;
+        // Existing 0.9.51 sessions had no scene field; retain a read-only
+        // fallback until the next scene write folds it into the session.
+        return session.scene === null && idOfDoc(session.world) === name.slice("scene:".length)
+          ? fallback.read(name) : null;
+      }
+      if (name.startsWith("scene:")) {
+        if (sceneName() === name) {
+          session.scene = null;
+          mutated = true;
+        }
+        return;
       }
       if (name.startsWith("geo-auto:")) {
         const worldId = name.slice("geo-auto:".length);
@@ -269,6 +294,15 @@ export function createSessionOverlayStore(
           throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "地图文档与当前会话世界不一致，拒绝写入。");
         }
         session.maps = value;
+        mutated = true;
+        return;
+      }
+      if (name.startsWith("scene:")) {
+        const worldId = name.slice("scene:".length);
+        if (idOfDoc(session.world) !== worldId) {
+          throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "场景文档与当前会话世界不一致，拒绝写入。");
+        }
+        session.scene = value;
         mutated = true;
         return;
       }
@@ -342,6 +376,8 @@ export function createSessionOverlayStore(
         if (binding && binding.startsWith(prefix)) names.push(binding);
         const maps = mapsName();
         if (maps && maps.startsWith(prefix)) names.push(maps);
+        const scene = sceneName();
+        if (scene && scene.startsWith(prefix)) names.push(scene);
         for (const worldId of Object.keys(session.geoAuto)) {
           const name = `geo-auto:${worldId}`;
           if (name.startsWith(prefix)) names.push(name);
@@ -387,6 +423,7 @@ export const ATLAS_ROUTE_MANIFEST = [
   { method: "POST", path: "/turns/prepare" },
   { method: "POST", path: "/turns/preview" },
   { method: "POST", path: "/scene/bootstrap" },
+  { method: "POST", path: "/scene/repair-start" },
   { method: "POST", path: "/turns/commit" },
   { method: "POST", path: "/turns/retry" },
   { method: "POST", path: "/turns/restore" },
@@ -413,6 +450,7 @@ const ATLAS_SESSION_ROUTES = new Set<string>([
   "POST /turns/prepare",
   "POST /turns/preview",
   "POST /scene/bootstrap",
+  "POST /scene/repair-start",
   "POST /turns/commit",
   "POST /turns/retry",
   "POST /turns/restore",
@@ -1282,13 +1320,194 @@ function createCoreInstance(
     return "";
   }
 
+  async function visibleWorldForBinding(world: World, binding: AtlasChatBinding): Promise<World> {
+    const keys = await store.list("turn:" + binding.chatId + ":");
+    if (keys.length === 0) return world;
+    const lineage = branchLineage(world, binding.branchId, binding.worldTimeCursor);
+    const cutoffs = new Map(lineage.segments.map((segment) => [segment.branchId, segment.cutoffAt]));
+    const trackedPoints = new Set<string>();
+    const trackedRegions = new Set<string>();
+    const trackedEntities = new Set<string>();
+    const visiblePoints = new Set<string>();
+    const visibleRegions = new Set<string>();
+    const visibleEntities = new Set<string>();
+    for (const key of keys) {
+      const doc = await store.read(key);
+      if (!isPlainRecord(doc)) continue;
+      const points = Array.isArray(doc.createdPointIds) ? doc.createdPointIds.map(String) : [];
+      const regions = Array.isArray(doc.createdRegionIds) ? doc.createdRegionIds.map(String) : [];
+      const entities = Array.isArray(doc.createdEntityIds) ? doc.createdEntityIds.map(String) : [];
+      for (const id of points) trackedPoints.add(id);
+      for (const id of regions) trackedRegions.add(id);
+      for (const id of entities) trackedEntities.add(id);
+      const recordedBranch = typeof doc.branchId === "string" ? doc.branchId : null;
+      const branch = (world.stories ?? []).find((story) => story.id === recordedBranch)?.mode === "canon"
+        ? null : recordedBranch;
+      const cutoff = cutoffs.get(branch);
+      const time = typeof doc.effectiveAt === "number" ? doc.effectiveAt : Infinity;
+      if (doc.rolledBack === true || cutoff == null || time > cutoff) continue;
+      for (const id of points) visiblePoints.add(id);
+      for (const id of regions) visibleRegions.add(id);
+      for (const id of entities) visibleEntities.add(id);
+    }
+    if (trackedPoints.size + trackedRegions.size + trackedEntities.size === 0) return world;
+    const showPoint = (id: string | number) => !trackedPoints.has(String(id)) || visiblePoints.has(String(id));
+    const showRegion = (id: string) => !trackedRegions.has(String(id)) || visibleRegions.has(String(id));
+    const showEntity = (id: string) => !trackedEntities.has(String(id)) || visibleEntities.has(String(id));
+    return {
+      ...world,
+      points: (world.points ?? []).filter((point) => showPoint(point.id)),
+      regions: (world.regions ?? []).filter((region) => showRegion(region.id)),
+      characters: (world.characters ?? []).filter((character) => showEntity(character.id)),
+      entityRecords: (world.entityRecords ?? []).filter((entity) => showEntity(entity.id)),
+      characterStates: (world.characterStates ?? []).filter((item) => showEntity(item.characterId)),
+    };
+  }
+
+  function rejectHiddenV2Refs(raw: World, visible: World, draft: AtlasV2Draft): void {
+    const hidden = (rawIds: string[], visibleIds: string[]) => {
+      const shown = new Set(visibleIds);
+      return new Set(rawIds.filter((id) => !shown.has(id)));
+    };
+    const points = hidden((raw.points ?? []).map((item) => String(item.id)),
+      (visible.points ?? []).map((item) => String(item.id)));
+    const regions = hidden((raw.regions ?? []).map((item) => String(item.id)),
+      (visible.regions ?? []).map((item) => String(item.id)));
+    const entityIds = (world: World) => [
+      ...(world.characters ?? []).map((item) => String(item.id)),
+      ...(world.entityRecords ?? []).map((item) => String(item.id)),
+    ];
+    const entities = hidden(entityIds(raw), entityIds(visible));
+    const references: Array<[string, string | null | undefined, Set<string>]> = [];
+    for (const item of draft.discoveries.locations) {
+      references.push(["地区", item.regionRef, regions], ["父地点", item.parentLocationRef, points]);
+    }
+    references.push(["当前场景", draft.scene.locationRef, points]);
+    for (const item of draft.identityUpdates) references.push(["身份", item.entityRef, entities]);
+    for (const item of draft.npcUpdates) {
+      references.push(["人物", item.entityRef, entities], ["人物位置", item.location.locationRef, points]);
+    }
+    for (const item of draft.relationUpdates) {
+      references.push(["关系源", item.fromRef, entities], ["关系目标", item.toRef, entities]);
+    }
+    for (const item of draft.memories) references.push(["记忆主体", item.entityRef, entities]);
+    for (const item of draft.events) {
+      for (const ref of item.entityRefs) references.push(["事件人物", ref, entities]);
+    }
+    for (const item of draft.mapScaleHints) references.push(["标定地图", item.mapRef, points]);
+    for (const [kind, ref, hiddenIds] of references) {
+      if (ref && hiddenIds.has(ref)) {
+        throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
+          kind + "引用了当前分支或游标不可见的 ID：" + ref + "。本轮未提交。", { retryable: true });
+      }
+    }
+  }
+  function legacyStartReport(
+    world: World,
+    binding: AtlasChatBinding,
+    sceneDoc: SceneDoc,
+    mapDoc: ReturnType<typeof sanitizeMapDoc>,
+  ) {
+    const start = (world.points ?? []).find((point) => String(point.id) === "1");
+    const region = (world.regions ?? []).find((item) => String(item.id) === "start");
+    const structuralFingerprint = Boolean(start && region &&
+      start.name === "起点" && start.x === 50 && start.y === 50 &&
+      start.regionId === "start" && region.name === "起点");
+    const fullFingerprint = detectStartPlaceholder(world);
+    const branchEvents = ledgerForBranch(world, binding.branchId)
+      .filter((event) => event.at <= binding.worldTimeCursor);
+    let ledgerPointId: string | null = null;
+    for (const event of branchEvents) {
+      for (const effect of event.effects) {
+        if (effect.kind === "moveEntity" && effect.entityId === "char-main" && effect.pointId) {
+          ledgerPointId = String(effect.pointId);
+        }
+      }
+    }
+    const knownPointIds = new Set((world.points ?? []).map((point) => String(point.id)));
+    const currentPointId = binding.currentLocationId ?? null;
+    const confirmedPointId = sceneDoc.lastConfirmed?.branchId === binding.branchId
+      ? sceneDoc.lastConfirmed.pointId : null;
+    const evidencePointId = ledgerPointId && ledgerPointId !== "1" && knownPointIds.has(ledgerPointId)
+      ? ledgerPointId
+      : currentPointId && currentPointId !== "1" && knownPointIds.has(currentPointId)
+        ? currentPointId
+        : confirmedPointId && confirmedPointId !== "1" && knownPointIds.has(confirmedPointId)
+          ? confirmedPointId : null;
+    const conflictingLedger = Boolean(ledgerPointId && ledgerPointId !== evidencePointId);
+    const retired = sceneDoc.retiredPointIds.includes("1");
+    const orphanPointIds = (world.points ?? [])
+      .filter((point) => point.regionId && !(world.regions ?? []).some((item) => item.id === point.regionId))
+      .map((point) => String(point.id)).slice(0, 40);
+    const orphanSubmapIds = Object.entries(mapDoc.submaps)
+      .filter(([id, sub]) => {
+        const parent = sub.parentMapId ?? "world";
+        return parent === "world"
+          ? !knownPointIds.has(id)
+          : !mapDoc.submaps[parent]?.points.some((point) => point.id === id);
+      })
+      .map(([id]) => id).slice(0, 40);
+    const characterPositions = (world.characterStates ?? [])
+      .slice(0, 32)
+      .map((item) => ({ entityId: String(item.characterId ?? ""),
+        pointId: item.currentPointId == null ? null : String(item.currentPointId) }));
+    const canApply = structuralFingerprint && !retired && Boolean(evidencePointId) && !conflictingLedger;
+    const reportToken = [
+      world.id, world.updatedAt ?? 0, binding.branchId ?? "",
+      binding.worldTimeCursor, currentPointId ?? "", ledgerPointId ?? "",
+      sceneDoc.retiredPointIds.join(","),
+    ].join("|");
+    return {
+      structuralFingerprint, fullFingerprint: fullFingerprint.isPlaceholder,
+      fingerprintReasons: fullFingerprint.reasons.slice(0, 8),
+      retired, bindingPointId: currentPointId, ledgerPointId,
+      confirmedPointId, proposedPointId: evidencePointId,
+      characterPositions, orphanPointIds, orphanSubmapIds,
+      legacySubmapIds: Object.keys(mapDoc.submaps).slice(0, 40),
+      eventCount: branchEvents.length, canApply,
+      reason: retired ? "已退役" : !structuralFingerprint ? "起点结构指纹不匹配" :
+        conflictingLedger ? "账本位置与候选位置冲突" :
+        !evidencePointId ? "没有可确认的非起点位置；请先识别当前场景" :
+        "可在下载备份后显式退役系统占位",
+      reportToken,
+    };
+  }
+
+  async function handleLegacyStartRepair(body: unknown): Promise<AtlasRouteResult> {
+    if (!isPlainRecord(body)) throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "修复请求必须是对象");
+    const chatId = typeof body.chatId === "string" ? body.chatId : "";
+    const binding = requireBoundBinding(await getBinding(chatId));
+    const world = await requireWorld(binding);
+    const sceneDoc = sanitizeSceneDoc(await store.read(sceneDocKey(world.id)).catch(() => null));
+    const mapDoc = sanitizeMapDoc(await store.read("maps:" + world.id).catch(() => null));
+    const report = legacyStartReport(world, binding, sceneDoc, mapDoc);
+    if (body.apply !== true) return okResult({ status: "preview", report });
+    if (report.retired) return okResult({ status: "unchanged", report });
+    if (!report.canApply || body.reportToken !== report.reportToken) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "检查报告已过期或缺少可信位置；请重新检查当前世界。");
+    }
+    const pointId = report.proposedPointId;
+    if (!pointId) throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "修复目标位置缺失");
+    const nextDoc: SceneDoc = {
+      ...sceneDoc,
+      retiredPointIds: [...sceneDoc.retiredPointIds, "1"],
+      lastConfirmed: { branchId: binding.branchId, pointId, at: binding.worldTimeCursor },
+    };
+    const nextBinding = { ...binding, currentLocationId: pointId };
+    await store.write(sceneDocKey(world.id), nextDoc);
+    await store.write("binding:" + chatId, nextBinding);
+    bindingCache.set(chatId, nextBinding);
+    pushLog({ at: now(), kind: "legacy-start-repaired" });
+    return okResult({ status: "repaired", pointId, report: { ...report, retired: true, canApply: false } });
+  }
+
   async function handleState(body: unknown): Promise<AtlasRouteResult> {
     const chatId = chatIdFromRequest(body);
     if (!chatId || chatId.length > ATLAS_LIMITS.ID_CHARS) {
       throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "chatId 非法");
     }
     const binding = requireBoundBinding(await getBinding(chatId));
-    const world = await requireWorld(binding);
+    const world = await visibleWorldForBinding(await requireWorld(binding), binding);
     const relevance = computeAtlasRelevance(world, {
       at: binding.worldTimeCursor,
       branchId: binding.branchId,
@@ -1301,6 +1520,11 @@ function createCoreInstance(
     // R06 场景状态：占位指纹 + retired 列表 + lastConfirmed（与「当前未知」分开表达）
     // retired 占位点在真实地点语境（地图点列 / 附近）默认过滤，结构保留（引用不悬空）
     const sceneDoc = sanitizeSceneDoc(await store.read(sceneDocKey(world.id)).catch(() => null));
+    if (sceneDoc.lastConfirmed &&
+        (sceneDoc.lastConfirmed.at > binding.worldTimeCursor ||
+         !(world.points ?? []).some((point) => String(point.id) === sceneDoc.lastConfirmed?.pointId))) {
+      sceneDoc.lastConfirmed = null;
+    }
     // R06：系统占位默认不显示为真实地点——已退役的（retired 列表）与指纹吻合但尚未
     // 退役的「起点」都不进真实地点语境。结构保留、引用不悬空，只是不冒充地理事实。
     const placeholder = detectStartPlaceholder(world);
@@ -1320,8 +1544,14 @@ function createCoreInstance(
     const runtimeView = resolveAtlasRuntimeView(world, {
       branchId: binding.branchId,
       at: binding.worldTimeCursor,
-      entityIds: relevance.relevantNpcIds,
     });
+    for (const npc of runtimeView.npcs) {
+      if (npc.pointId !== null && String(npc.pointId) === String(binding.currentLocationId ?? "") &&
+          npc.presence !== "left" && !relevance.relevantNpcIds.includes(npc.id)) {
+        relevance.relevantNpcIds.push(npc.id);
+        relevance.npcReasons[npc.id] = ["samePoint"];
+      }
+    }
     // 0.9.41 人物 popover：分支作用域账本（游标前）供「最近涉及叙事」提取
     const branchEvents = ledgerForBranch(world, binding.branchId).filter((e) => e.at <= binding.worldTimeCursor);
     const npcDirectory = runtimeView.npcs.slice(0, 48).map((view) => {
@@ -1423,6 +1653,7 @@ function createCoreInstance(
       .slice(0, 40);
     // R06 场景状态：占位指纹 + retired 列表 + lastConfirmed（与「当前未知」分开表达）
     const scene = resolveSceneStatus(world, sceneDoc, binding.currentLocationId ?? null);
+    const legacyRepair = legacyStartReport(world, binding, sceneDoc, mapDoc);
     const lastConfirmedPointName = scene.lastConfirmed
       ? (world.points ?? []).find((p) => String(p.id) === scene.lastConfirmed!.pointId)?.name ?? null
       : null;
@@ -1445,6 +1676,7 @@ function createCoreInstance(
           ? { pointId: scene.lastConfirmed.pointId, pointName: lastConfirmedPointName, at: scene.lastConfirmed.at }
           : null,
         bootstrap: sceneDoc.bootstrap,
+        legacyRepair,
       },
       nearbyPointIds: relevance.nearbyPointIds,
       relevantNpcIds: relevance.relevantNpcIds,
@@ -1490,7 +1722,7 @@ function createCoreInstance(
     if (request.branchId !== binding.branchId) {
       throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "请求分支与绑定分支不一致，拒绝注入。");
     }
-    const world = await requireWorld(binding);
+    const world = await visibleWorldForBinding(await requireWorld(binding), binding);
     const record = body as Record<string, unknown>;
     const destinationPointId = typeof record.destinationPointId === "string" && record.destinationPointId.trim()
       ? record.destinationPointId.trim().slice(0, ATLAS_LIMITS.ID_CHARS)
@@ -1754,7 +1986,7 @@ function createCoreInstance(
     request: Pick<AtlasTurnCommitRequest, "chatId" | "userMessageId" | "userText" | "assistantText" | "recentAssistantTexts" | "loreSupplement" | "personaDescription" | "charDescription">,
     options?: { mode?: "turn" | "bootstrap" },
   ) {
-    const world = await requireWorld(binding);
+    const world = await visibleWorldForBinding(await requireWorld(binding), binding);
     const currentPointId = binding.currentLocationId ?? null;
     const currentRegionId = pointRegionId(world, currentPointId);
     const flags = flagsFor(world, binding.branchId, binding.worldTimeCursor);
@@ -1938,6 +2170,7 @@ function createCoreInstance(
             { retryable: true },
           );
         }
+        rejectHiddenV2Refs(baseWorld, await visibleWorldForBinding(baseWorld, binding), v2result.draft);
         output = applyAtlasV2Turn(baseWorld, {
           draft: v2result.draft,
           request,
@@ -1976,7 +2209,7 @@ function createCoreInstance(
             });
             throw new AtlasError(
               ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
-              "推演输出无法解析为 JSON（已尝试剥 think 与原文回退）。本轮未提交，世界与时间未变化；原文前 1500 字见日志页，可重试推演。",
+              "推演输出无法解析为 JSON（已尝试剥 think 与原文回退）。本轮未提交，世界与时间未变化；安全诊断代码见日志页，可重试推演。",
               { retryable: true },
             );
           }
@@ -2075,8 +2308,22 @@ function createCoreInstance(
     // 0.9.48（T04 去重解耦）：回合记录不再以检查点存在为条件——检查点耗尽（200 上限）后
     // 幂等判定（turn: 文档 = 去重依据）依然有效，重复事件零新增模型调用。
     // checkpointId = null 表示该回合无回退点（UI 回退能力如实呈现，不假装可回退）。
+    const priorPoints = new Set((world.points ?? []).map((point) => String(point.id)));
+    const priorRegions = new Set((world.regions ?? []).map((region) => String(region.id)));
+    const priorEntities = new Set([
+      ...(world.characters ?? []).map((item) => String(item.id)),
+      ...(world.entityRecords ?? []).map((item) => String(item.id)),
+    ]);
     await store.write(`turn:${binding.chatId}:${idempotencyKey}`, {
       schemaVersion: 1,
+      branchId: pending.binding.branchId,
+      effectiveAt: receipt.currentTime,
+      createdPointIds: (settledWorld.points ?? []).filter((item) => !priorPoints.has(String(item.id))).map((item) => String(item.id)),
+      createdRegionIds: (settledWorld.regions ?? []).filter((item) => !priorRegions.has(String(item.id))).map((item) => String(item.id)),
+      createdEntityIds: [
+        ...(settledWorld.characters ?? []).map((item) => String(item.id)),
+        ...(settledWorld.entityRecords ?? []).map((item) => String(item.id)),
+      ].filter((id, index, all) => !priorEntities.has(id) && all.indexOf(id) === index),
       chatId: binding.chatId,
       idempotencyKey,
       userMessageId: request.userMessageId,
@@ -2569,6 +2816,7 @@ function createCoreInstance(
     const binding = await store.read(`binding:${chatId}`);
     const world = await store.read(`world:${worldId}`);
     const maps = await store.read(`maps:${worldId}`);
+    const scene = await store.read(sceneDocKey(worldId));
     const geoAuto = await store.read(`geo-auto:${worldId}`);
     const turns: Record<string, unknown> = {};
     for (const key of await store.list(`turn:${chatId}:`)) {
@@ -2579,6 +2827,7 @@ function createCoreInstance(
       ...(binding ? { binding } : {}),
       ...(world ? { world } : {}),
       ...(maps ? { maps } : {}),
+      ...(scene ? { scene } : {}),
       turns,
       ...(geoAuto ? { geoAuto: { [worldId]: geoAuto } } : {}),
     };
@@ -2599,6 +2848,7 @@ function createCoreInstance(
     await store.remove(`binding:${chatId}`);
     await store.remove(`world:${worldId}`);
     await store.remove(`maps:${worldId}`);
+    await store.remove(sceneDocKey(worldId));
     await store.remove(`geo-auto:${worldId}`);
     const turnKeys = await store.list(`turn:${chatId}:`);
     for (const key of turnKeys) await store.remove(key);
@@ -2635,6 +2885,7 @@ function createCoreInstance(
       if (method === "POST" && route === "/turns/prepare") return await handlePrepare(body);
       if (method === "POST" && route === "/turns/preview") return await handleTurnPreview(body);
       if (method === "POST" && route === "/scene/bootstrap") return await handleSceneBootstrap(body);
+      if (method === "POST" && route === "/scene/repair-start") return await handleLegacyStartRepair(body);
       if (method === "POST" && route === "/turns/commit") return await handleCommit(body);
       if (method === "POST" && route === "/turns/retry") return await handleRetry(body);
       if (method === "POST" && route === "/turns/restore") return await handleRestore(body);

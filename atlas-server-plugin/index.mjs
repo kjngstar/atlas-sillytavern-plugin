@@ -37,6 +37,7 @@ export const ATLAS_PLUGIN_ROUTES = [
   { method: "POST", path: "/turns/prepare" },
   { method: "POST", path: "/turns/preview" },
   { method: "POST", path: "/scene/bootstrap" },
+  { method: "POST", path: "/scene/repair-start" },
   { method: "POST", path: "/turns/commit" },
   { method: "POST", path: "/turns/retry" },
   { method: "POST", path: "/turns/restore" },
@@ -290,6 +291,7 @@ export async function init(router, options = {}) {
   post({ path: "/turns/prepare" });
   post({ path: "/turns/preview" });
   post({ path: "/scene/bootstrap" });
+  post({ path: "/scene/repair-start" });
   post({ path: "/turns/commit" });
   post({ path: "/turns/retry" });
   post({ path: "/turns/restore" });

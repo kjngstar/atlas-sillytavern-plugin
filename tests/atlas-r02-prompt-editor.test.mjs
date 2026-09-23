@@ -282,3 +282,34 @@ test("R02: network failure while saving leaves the editable prompt draft intact"
   assert.equal(container.querySelector('[aria-label="系统提示词正文"]').value, "草稿正文");
   assert.match(container.textContent, /草稿仍保留/);
 });
+test("R06: current-world inspection renders the read-only repair report without applying changes", async () => {
+  const { renderPanel, createDefaultSettingsV2, settingsViewV2 } = await mount();
+  const settings = settingsViewV2(createDefaultSettingsV2());
+  const state = progressionState("legacy-chat");
+  state.stateData.worldId = "legacy-world";
+  const calls = [];
+  const report = {
+    structuralFingerprint: true, fullFingerprint: false, reason: "坐标已编辑",
+    bindingPointId: "1", ledgerPointId: "2", confirmedPointId: "2", eventCount: 3,
+    characterPositions: [], orphanPointIds: ["old-point"], orphanSubmapIds: [],
+    fingerprintReasons: ["起点坐标不同"], canApply: false,
+  };
+  const api = { request: async (method, path, body) => {
+    calls.push({ method, path, body });
+    if (path === "/scene/repair-start") return { status: 200, body: { ok: true, data: { status: "preview", report } } };
+    return { status: 200, body: { ok: true, data: settings } };
+  } };
+  const core = { getState: () => state, setPage: () => {}, setPanelOpen: () => {}, refresh: async () => {} };
+  const container = document.createElement("div");
+  document.body.append(container);
+  renderPanel(core, container, (x) => x, api, { read: async () => null }, settings);
+  await tick();
+  container.querySelector('[aria-label="只读检查旧起点、账本位置、人物与孤立子图"]').click();
+  await tick();
+  assert.deepEqual(calls.filter((call) => call.path === "/scene/repair-start"), [
+    { method: "POST", path: "/scene/repair-start", body: { chatId: "legacy-chat", apply: false } },
+  ]);
+  assert.match(container.textContent, /坐标已编辑/);
+  assert.match(container.textContent, /old-point/);
+  assert.equal([...container.querySelectorAll("button")].some((button) => button.textContent === "下载备份并退役旧起点"), false);
+});

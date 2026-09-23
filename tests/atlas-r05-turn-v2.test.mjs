@@ -263,3 +263,12 @@ test("R05：已知实体按原 ID 引用（char-main 移动 + 状态）同管线
   assert.equal(main.status, "休整中", "已知实体状态更新走同一管线");
   assert.equal(output.refResolution.warnings.length, 0, "无身份消歧警告（未涉及 identityUpdates）");
 });
+
+
+test("v2 baseRevision accepts the exact fractional world cursor", () => {
+  const draft = firstSceneDraft({ baseRevision: 418.07 });
+  const parsed = parseAtlasWorldTurnDraftV2(JSON.stringify(draft), { baseRevision: 418.07, sources: SOURCES });
+  assert.equal(parsed.ok, true);
+  const stale = parseAtlasWorldTurnDraftV2(JSON.stringify(draft), { baseRevision: 418.08, sources: SOURCES });
+  assert.equal(stale.ok, false);
+});

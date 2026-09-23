@@ -51,7 +51,7 @@ export function isValidAtlasSession(value) {
 }
 
 export function createEmptyAtlasSession() {
-  return { schemaVersion: ATLAS_SESSION_SCHEMA_VERSION, rev: 0, binding: null, world: null, maps: null, turns: {}, geoAuto: {} };
+  return { schemaVersion: ATLAS_SESSION_SCHEMA_VERSION, rev: 0, binding: null, world: null, maps: null, scene: null, turns: {}, geoAuto: {} };
 }
 
 /** 读取当前聊天会话文档（无则 null；绝不创建半截对象）。 */
@@ -109,6 +109,7 @@ function migrateChatSession(context) {
       if (store && worldId) {
         session.world = (await store.read(`world:${worldId}`)) ?? null;
         session.maps = (await store.read(`maps:${worldId}`)) ?? null;
+        session.scene = (await store.read(`scene:${worldId}`)) ?? null;
         const geo = await store.read(`geo-auto:${worldId}`);
         if (geo) session.geoAuto[worldId] = geo;
       }
@@ -125,6 +126,7 @@ function migrateChatSession(context) {
           if (exported && exported.schemaVersion === ATLAS_SESSION_SCHEMA_VERSION) {
             session.world = exported.world ?? null;
             session.maps = exported.maps ?? null;
+            session.scene = exported.scene ?? null;
             session.turns = exported.turns ?? {};
             session.geoAuto = exported.geoAuto ?? {};
           }
@@ -139,6 +141,7 @@ function migrateChatSession(context) {
         try {
           await store.remove(`world:${worldId}`);
           await store.remove(`maps:${worldId}`);
+          await store.remove(`scene:${worldId}`);
           await store.remove(`geo-auto:${worldId}`);
         } catch { /* 清理失败不影响会话 */ }
       }
@@ -3834,9 +3837,125 @@ function renderPanel(core, root, clampZoom, api, store, mod, skinPort = null) {
       renderCenter();
     });
     sceneActions.append(sceneBtn, protocolBtn);
+
+    const checkWorldBtn = el("button", "aw-btn aw-btn--ghost", "检查当前世界");
+    checkWorldBtn.type = "button";
+    checkWorldBtn.setAttribute("aria-label", "只读检查旧起点、账本位置、人物与孤立子图");
+    const repairBox = el("div", "aw-request-preview");
+    checkWorldBtn.addEventListener("click", async () => {
+      const chatId = String(state().chatId ?? "");
+      if (!chatId) { setStatus("当前没有活动聊天。", "error"); return; }
+      checkWorldBtn.disabled = true;
+      try {
+        const response = await api.request("POST", "/scene/repair-start", { chatId, apply: false });
+        repairBox.innerHTML = "";
+        if (response.status !== 200 || !response.body?.ok) {
+          repairBox.append(el("p", "aw-note aw-note--error", response.body?.error?.message ?? "检查失败"));
+          return;
+        }
+        const report = response.body.data?.report;
+        if (!report) return;
+        repairBox.append(el("p", "aw-panel__meta", "只读检查：系统起点结构 " +
+          (report.structuralFingerprint ? "吻合" : "不吻合") + "；完整占位指纹 " +
+          (report.fullFingerprint ? "吻合" : "不吻合") + "；" + report.reason));
+        repairBox.append(el("p", "aw-panel__meta", "绑定位置 " + (report.bindingPointId ?? "未知") +
+          " · 账本位置 " + (report.ledgerPointId ?? "未知") +
+          " · 上次确认 " + (report.confirmedPointId ?? "无") +
+          " · 本分支账本事件 " + report.eventCount));
+        repairBox.append(el("p", "aw-panel__meta", "人物位置 " + report.characterPositions.length +
+          " 条 · 孤立地点 " + report.orphanPointIds.length +
+          " 条 · 孤立子图 " + report.orphanSubmapIds.length + " 条"));
+        if (report.fingerprintReasons?.length) {
+          repairBox.append(el("p", "aw-panel__meta", "指纹差异：" + report.fingerprintReasons.join("；")));
+        }
+        if (report.orphanPointIds?.length || report.orphanSubmapIds?.length) {
+          repairBox.append(el("p", "aw-panel__meta",
+            "孤立 ID：" + [...report.orphanPointIds, ...report.orphanSubmapIds].join("、")));
+        }
+        if (!report.canApply) return;
+        const applyRepair = el("button", "aw-btn aw-btn--primary", "下载备份并退役旧起点");
+        applyRepair.type = "button";
+        applyRepair.addEventListener("click", async () => {
+          applyRepair.disabled = true;
+          try {
+            const snapshot = readAtlasSession(context);
+            if (!snapshot || snapshot.binding?.chatId !== chatId ||
+                snapshot.world?.id !== state().worldId) {
+              throw new Error("当前聊天的 Atlas 会话备份不可读取，修复已取消。");
+            }
+            const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: "application/json;charset=utf-8" });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement("a");
+            link.href = url;
+            link.download = "atlas-before-start-repair.json";
+            link.click();
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+            const confirmed = typeof window === "undefined" || typeof window.confirm !== "function"
+              ? true : window.confirm("已下载当前 Atlas 会话备份。将保留历史地点与地图资料，只把系统占位「起点」标为退役，并按检查报告修正当前位置。继续？");
+            if (!confirmed) return;
+            const applied = await api.request("POST", "/scene/repair-start", {
+              chatId, apply: true, reportToken: report.reportToken,
+            });
+            if (applied.status !== 200 || !applied.body?.ok) {
+              throw new Error(applied.body?.error?.message ?? "修复失败");
+            }
+            setStatus(applied.body.data?.status === "repaired" ? "旧起点已退役，备份已下载。" : "旧起点已处理，无需重复修复。", "ok");
+            await core.refresh();
+            renderCenter();
+          } catch (error) {
+            setStatus(error instanceof Error ? error.message : String(error), "error");
+          } finally {
+            applyRepair.disabled = false;
+          }
+        });
+        repairBox.append(applyRepair);
+      } catch (error) {
+        repairBox.append(el("p", "aw-note aw-note--error", error instanceof Error ? error.message : String(error)));
+      } finally {
+        checkWorldBtn.disabled = false;
+      }
+    });
+    sceneActions.append(checkWorldBtn);
+    const restoreBackupInput = document.createElement("input");
+    restoreBackupInput.type = "file";
+    restoreBackupInput.accept = ".json,application/json";
+    restoreBackupInput.hidden = true;
+    const restoreBackupBtn = el("button", "aw-btn aw-btn--ghost", "恢复 Atlas 会话备份");
+    restoreBackupBtn.type = "button";
+    restoreBackupBtn.addEventListener("click", () => restoreBackupInput.click());
+    restoreBackupInput.addEventListener("change", async () => {
+      const file = restoreBackupInput.files?.[0];
+      if (!file) return;
+      try {
+        if (file.size > 50 * 1024 * 1024) throw new Error("备份文件过大，拒绝导入。");
+        const parsed = JSON.parse(await file.text());
+        const current = readAtlasSession(context);
+        const chatId = String(state().chatId ?? "");
+        if (!current || !isValidAtlasSession(parsed) ||
+            parsed.binding?.chatId !== chatId ||
+            parsed.world?.id !== current.world?.id ||
+            parsed.binding?.worldId !== parsed.world?.id) {
+          throw new Error("备份与当前聊天或世界不匹配，未恢复。");
+        }
+        const confirmed = typeof window === "undefined" || typeof window.confirm !== "function"
+          ? true : window.confirm("恢复备份会把当前聊天的 Atlas 世界、地图、场景与回合记录恢复到备份时刻。继续？");
+        if (!confirmed) return;
+        const restored = { ...parsed, rev: Math.max(Number(parsed.rev) || 0, Number(current.rev) || 0) + 1 };
+        await writeAtlasSession(context, restored);
+        await core.refresh();
+        setStatus("Atlas 会话备份已恢复。", "ok");
+        renderCenter();
+      } catch (error) {
+        setStatus(error instanceof Error ? error.message : String(error), "error");
+      } finally {
+        restoreBackupInput.value = "";
+      }
+    });
+    sceneActions.append(restoreBackupBtn, restoreBackupInput);
     panel.append(sceneSection);
     panel.append(sceneActions);
     panel.append(scenePreviewBox);
+    panel.append(repairBox);
     panel.append(el("p", "aw-panel__meta", "「推进」只管推进行为与提示词；API 地址、密钥与模型请在「API」页配置。"));
     panel.append(el("div", "aw-divider"));
 

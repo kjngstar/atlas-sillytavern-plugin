@@ -8258,7 +8258,7 @@ function parseAtlasWorldTurnDraftV2(text, ctx) {
   if (version !== 2) {
     return { ok: false, errors: [{ path: "$.schemaVersion", message: `协议版本不匹配：期望 2，收到 ${String(version)}` }] };
   }
-  if (!isInt(raw.baseRevision) || raw.baseRevision !== ctx.baseRevision) {
+  if (typeof raw.baseRevision !== "number" || !Number.isFinite(raw.baseRevision) || raw.baseRevision < 0 || raw.baseRevision !== ctx.baseRevision) {
     err.push("$.baseRevision", `必须逐字复用请求值 ${ctx.baseRevision}（收到 ${JSON.stringify(raw.baseRevision)}；过期提交拒绝）`);
   }
   const duration = raw.duration;
@@ -9638,6 +9638,7 @@ function createEmptySessionDoc() {
     binding: null,
     world: null,
     maps: null,
+    scene: null,
     turns: {},
     geoAuto: {}
   };
@@ -9662,6 +9663,7 @@ function parseAtlasSessionDoc(raw) {
   session.binding = raw.binding ?? null;
   session.world = raw.world ?? null;
   session.maps = raw.maps ?? null;
+  session.scene = raw.scene ?? null;
   return session;
 }
 function cloneSessionDoc(session) {
@@ -9683,7 +9685,7 @@ function chatIdOfBinding(binding) {
 }
 function createSessionOverlayStore(session, fallback) {
   let mutated = false;
-  const OWNED_PREFIXES = ["world:", "binding:", "maps:", "geo-auto:", "turn:"];
+  const OWNED_PREFIXES = ["world:", "binding:", "maps:", "scene:", "geo-auto:", "turn:"];
   function worldName() {
     return session.world !== null ? `world:${idOfDoc(session.world)}` : null;
   }
@@ -9694,6 +9696,11 @@ function createSessionOverlayStore(session, fallback) {
     if (session.maps === null) return null;
     const worldId = idOfDoc(session.world);
     return worldId ? `maps:${worldId}` : null;
+  }
+  function sceneName() {
+    if (session.scene === null) return null;
+    const worldId = idOfDoc(session.world);
+    return worldId ? "scene:" + worldId : null;
   }
   return {
     changed() {
@@ -9712,6 +9719,18 @@ function createSessionOverlayStore(session, fallback) {
       if (name.startsWith("maps:")) {
         const current = mapsName();
         return current === name ? session.maps : null;
+      }
+      if (name.startsWith("scene:")) {
+        const current = sceneName();
+        if (current === name) return session.scene;
+        return session.scene === null && idOfDoc(session.world) === name.slice("scene:".length) ? fallback.read(name) : null;
+      }
+      if (name.startsWith("scene:")) {
+        if (sceneName() === name) {
+          session.scene = null;
+          mutated = true;
+        }
+        return;
       }
       if (name.startsWith("geo-auto:")) {
         const worldId = name.slice("geo-auto:".length);
@@ -9749,6 +9768,15 @@ function createSessionOverlayStore(session, fallback) {
           throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "地图文档与当前会话世界不一致，拒绝写入。");
         }
         session.maps = value;
+        mutated = true;
+        return;
+      }
+      if (name.startsWith("scene:")) {
+        const worldId = name.slice("scene:".length);
+        if (idOfDoc(session.world) !== worldId) {
+          throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "场景文档与当前会话世界不一致，拒绝写入。");
+        }
+        session.scene = value;
         mutated = true;
         return;
       }
@@ -9820,6 +9848,8 @@ function createSessionOverlayStore(session, fallback) {
         if (binding && binding.startsWith(prefix)) names.push(binding);
         const maps = mapsName();
         if (maps && maps.startsWith(prefix)) names.push(maps);
+        const scene = sceneName();
+        if (scene && scene.startsWith(prefix)) names.push(scene);
         for (const worldId of Object.keys(session.geoAuto)) {
           const name = `geo-auto:${worldId}`;
           if (name.startsWith(prefix)) names.push(name);
@@ -9844,6 +9874,7 @@ var ATLAS_SESSION_ROUTES = /* @__PURE__ */ new Set([
   "POST /turns/prepare",
   "POST /turns/preview",
   "POST /scene/bootstrap",
+  "POST /scene/repair-start",
   "POST /turns/commit",
   "POST /turns/retry",
   "POST /turns/restore",
@@ -10523,13 +10554,185 @@ function createCoreInstance(store, deps, shared) {
     }
     return "";
   }
+  async function visibleWorldForBinding(world, binding) {
+    const keys = await store.list("turn:" + binding.chatId + ":");
+    if (keys.length === 0) return world;
+    const lineage = branchLineage(world, binding.branchId, binding.worldTimeCursor);
+    const cutoffs = new Map(lineage.segments.map((segment) => [segment.branchId, segment.cutoffAt]));
+    const trackedPoints = /* @__PURE__ */ new Set();
+    const trackedRegions = /* @__PURE__ */ new Set();
+    const trackedEntities = /* @__PURE__ */ new Set();
+    const visiblePoints = /* @__PURE__ */ new Set();
+    const visibleRegions = /* @__PURE__ */ new Set();
+    const visibleEntities = /* @__PURE__ */ new Set();
+    for (const key of keys) {
+      const doc = await store.read(key);
+      if (!isPlainRecord(doc)) continue;
+      const points = Array.isArray(doc.createdPointIds) ? doc.createdPointIds.map(String) : [];
+      const regions = Array.isArray(doc.createdRegionIds) ? doc.createdRegionIds.map(String) : [];
+      const entities = Array.isArray(doc.createdEntityIds) ? doc.createdEntityIds.map(String) : [];
+      for (const id of points) trackedPoints.add(id);
+      for (const id of regions) trackedRegions.add(id);
+      for (const id of entities) trackedEntities.add(id);
+      const recordedBranch = typeof doc.branchId === "string" ? doc.branchId : null;
+      const branch = (world.stories ?? []).find((story) => story.id === recordedBranch)?.mode === "canon" ? null : recordedBranch;
+      const cutoff = cutoffs.get(branch);
+      const time = typeof doc.effectiveAt === "number" ? doc.effectiveAt : Infinity;
+      if (doc.rolledBack === true || cutoff == null || time > cutoff) continue;
+      for (const id of points) visiblePoints.add(id);
+      for (const id of regions) visibleRegions.add(id);
+      for (const id of entities) visibleEntities.add(id);
+    }
+    if (trackedPoints.size + trackedRegions.size + trackedEntities.size === 0) return world;
+    const showPoint = (id) => !trackedPoints.has(String(id)) || visiblePoints.has(String(id));
+    const showRegion = (id) => !trackedRegions.has(String(id)) || visibleRegions.has(String(id));
+    const showEntity = (id) => !trackedEntities.has(String(id)) || visibleEntities.has(String(id));
+    return {
+      ...world,
+      points: (world.points ?? []).filter((point) => showPoint(point.id)),
+      regions: (world.regions ?? []).filter((region) => showRegion(region.id)),
+      characters: (world.characters ?? []).filter((character) => showEntity(character.id)),
+      entityRecords: (world.entityRecords ?? []).filter((entity) => showEntity(entity.id)),
+      characterStates: (world.characterStates ?? []).filter((item) => showEntity(item.characterId))
+    };
+  }
+  function rejectHiddenV2Refs(raw, visible, draft) {
+    const hidden = (rawIds, visibleIds) => {
+      const shown = new Set(visibleIds);
+      return new Set(rawIds.filter((id) => !shown.has(id)));
+    };
+    const points = hidden(
+      (raw.points ?? []).map((item) => String(item.id)),
+      (visible.points ?? []).map((item) => String(item.id))
+    );
+    const regions = hidden(
+      (raw.regions ?? []).map((item) => String(item.id)),
+      (visible.regions ?? []).map((item) => String(item.id))
+    );
+    const entityIds = (world) => [
+      ...(world.characters ?? []).map((item) => String(item.id)),
+      ...(world.entityRecords ?? []).map((item) => String(item.id))
+    ];
+    const entities = hidden(entityIds(raw), entityIds(visible));
+    const references = [];
+    for (const item of draft.discoveries.locations) {
+      references.push(["地区", item.regionRef, regions], ["父地点", item.parentLocationRef, points]);
+    }
+    references.push(["当前场景", draft.scene.locationRef, points]);
+    for (const item of draft.identityUpdates) references.push(["身份", item.entityRef, entities]);
+    for (const item of draft.npcUpdates) {
+      references.push(["人物", item.entityRef, entities], ["人物位置", item.location.locationRef, points]);
+    }
+    for (const item of draft.relationUpdates) {
+      references.push(["关系源", item.fromRef, entities], ["关系目标", item.toRef, entities]);
+    }
+    for (const item of draft.memories) references.push(["记忆主体", item.entityRef, entities]);
+    for (const item of draft.events) {
+      for (const ref of item.entityRefs) references.push(["事件人物", ref, entities]);
+    }
+    for (const item of draft.mapScaleHints) references.push(["标定地图", item.mapRef, points]);
+    for (const [kind, ref, hiddenIds] of references) {
+      if (ref && hiddenIds.has(ref)) {
+        throw new AtlasError(
+          ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
+          kind + "引用了当前分支或游标不可见的 ID：" + ref + "。本轮未提交。",
+          { retryable: true }
+        );
+      }
+    }
+  }
+  function legacyStartReport(world, binding, sceneDoc, mapDoc) {
+    const start = (world.points ?? []).find((point) => String(point.id) === "1");
+    const region = (world.regions ?? []).find((item) => String(item.id) === "start");
+    const structuralFingerprint = Boolean(start && region && start.name === "起点" && start.x === 50 && start.y === 50 && start.regionId === "start" && region.name === "起点");
+    const fullFingerprint = detectStartPlaceholder(world);
+    const branchEvents = ledgerForBranch(world, binding.branchId).filter((event) => event.at <= binding.worldTimeCursor);
+    let ledgerPointId = null;
+    for (const event of branchEvents) {
+      for (const effect of event.effects) {
+        if (effect.kind === "moveEntity" && effect.entityId === "char-main" && effect.pointId) {
+          ledgerPointId = String(effect.pointId);
+        }
+      }
+    }
+    const knownPointIds = new Set((world.points ?? []).map((point) => String(point.id)));
+    const currentPointId = binding.currentLocationId ?? null;
+    const confirmedPointId = sceneDoc.lastConfirmed?.branchId === binding.branchId ? sceneDoc.lastConfirmed.pointId : null;
+    const evidencePointId = ledgerPointId && ledgerPointId !== "1" && knownPointIds.has(ledgerPointId) ? ledgerPointId : currentPointId && currentPointId !== "1" && knownPointIds.has(currentPointId) ? currentPointId : confirmedPointId && confirmedPointId !== "1" && knownPointIds.has(confirmedPointId) ? confirmedPointId : null;
+    const conflictingLedger = Boolean(ledgerPointId && ledgerPointId !== evidencePointId);
+    const retired = sceneDoc.retiredPointIds.includes("1");
+    const orphanPointIds = (world.points ?? []).filter((point) => point.regionId && !(world.regions ?? []).some((item) => item.id === point.regionId)).map((point) => String(point.id)).slice(0, 40);
+    const orphanSubmapIds = Object.entries(mapDoc.submaps).filter(([id, sub]) => {
+      const parent = sub.parentMapId ?? "world";
+      return parent === "world" ? !knownPointIds.has(id) : !mapDoc.submaps[parent]?.points.some((point) => point.id === id);
+    }).map(([id]) => id).slice(0, 40);
+    const characterPositions = (world.characterStates ?? []).slice(0, 32).map((item) => ({
+      entityId: String(item.characterId ?? ""),
+      pointId: item.currentPointId == null ? null : String(item.currentPointId)
+    }));
+    const canApply = structuralFingerprint && !retired && Boolean(evidencePointId) && !conflictingLedger;
+    const reportToken = [
+      world.id,
+      world.updatedAt ?? 0,
+      binding.branchId ?? "",
+      binding.worldTimeCursor,
+      currentPointId ?? "",
+      ledgerPointId ?? "",
+      sceneDoc.retiredPointIds.join(",")
+    ].join("|");
+    return {
+      structuralFingerprint,
+      fullFingerprint: fullFingerprint.isPlaceholder,
+      fingerprintReasons: fullFingerprint.reasons.slice(0, 8),
+      retired,
+      bindingPointId: currentPointId,
+      ledgerPointId,
+      confirmedPointId,
+      proposedPointId: evidencePointId,
+      characterPositions,
+      orphanPointIds,
+      orphanSubmapIds,
+      legacySubmapIds: Object.keys(mapDoc.submaps).slice(0, 40),
+      eventCount: branchEvents.length,
+      canApply,
+      reason: retired ? "已退役" : !structuralFingerprint ? "起点结构指纹不匹配" : conflictingLedger ? "账本位置与候选位置冲突" : !evidencePointId ? "没有可确认的非起点位置；请先识别当前场景" : "可在下载备份后显式退役系统占位",
+      reportToken
+    };
+  }
+  async function handleLegacyStartRepair(body) {
+    if (!isPlainRecord(body)) throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "修复请求必须是对象");
+    const chatId = typeof body.chatId === "string" ? body.chatId : "";
+    const binding = requireBoundBinding(await getBinding(chatId));
+    const world = await requireWorld(binding);
+    const sceneDoc = sanitizeSceneDoc(await store.read(sceneDocKey(world.id)).catch(() => null));
+    const mapDoc = sanitizeMapDoc(await store.read("maps:" + world.id).catch(() => null));
+    const report = legacyStartReport(world, binding, sceneDoc, mapDoc);
+    if (body.apply !== true) return okResult({ status: "preview", report });
+    if (report.retired) return okResult({ status: "unchanged", report });
+    if (!report.canApply || body.reportToken !== report.reportToken) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "检查报告已过期或缺少可信位置；请重新检查当前世界。");
+    }
+    const pointId = report.proposedPointId;
+    if (!pointId) throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "修复目标位置缺失");
+    const nextDoc = {
+      ...sceneDoc,
+      retiredPointIds: [...sceneDoc.retiredPointIds, "1"],
+      lastConfirmed: { branchId: binding.branchId, pointId, at: binding.worldTimeCursor }
+    };
+    const nextBinding = { ...binding, currentLocationId: pointId };
+    await store.write(sceneDocKey(world.id), nextDoc);
+    await store.write("binding:" + chatId, nextBinding);
+    bindingCache.set(chatId, nextBinding);
+    pushLog({ at: now(), kind: "legacy-start-repaired" });
+    return okResult({ status: "repaired", pointId, report: { ...report, retired: true, canApply: false } });
+  }
   async function handleState(body) {
     const chatId = chatIdFromRequest(body);
     if (!chatId || chatId.length > ATLAS_LIMITS.ID_CHARS) {
       throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "chatId 非法");
     }
     const binding = requireBoundBinding(await getBinding(chatId));
-    const world = await requireWorld(binding);
+    const world = await visibleWorldForBinding(await requireWorld(binding), binding);
     const relevance = computeAtlasRelevance(world, {
       at: binding.worldTimeCursor,
       branchId: binding.branchId,
@@ -10540,6 +10743,9 @@ function createCoreInstance(store, deps, shared) {
       flags: flagsFor(world, binding.branchId, binding.worldTimeCursor)
     });
     const sceneDoc = sanitizeSceneDoc(await store.read(sceneDocKey(world.id)).catch(() => null));
+    if (sceneDoc.lastConfirmed && (sceneDoc.lastConfirmed.at > binding.worldTimeCursor || !(world.points ?? []).some((point) => String(point.id) === sceneDoc.lastConfirmed?.pointId))) {
+      sceneDoc.lastConfirmed = null;
+    }
     const placeholder = detectStartPlaceholder(world);
     const hiddenPointIds = new Set(sceneDoc.retiredPointIds);
     if (placeholder.isPlaceholder && placeholder.pointId) hiddenPointIds.add(placeholder.pointId);
@@ -10553,9 +10759,14 @@ function createCoreInstance(store, deps, shared) {
     const pointById2 = new Map((world.points ?? []).map((p) => [String(p.id), p]));
     const runtimeView = resolveAtlasRuntimeView(world, {
       branchId: binding.branchId,
-      at: binding.worldTimeCursor,
-      entityIds: relevance.relevantNpcIds
+      at: binding.worldTimeCursor
     });
+    for (const npc of runtimeView.npcs) {
+      if (npc.pointId !== null && String(npc.pointId) === String(binding.currentLocationId ?? "") && npc.presence !== "left" && !relevance.relevantNpcIds.includes(npc.id)) {
+        relevance.relevantNpcIds.push(npc.id);
+        relevance.npcReasons[npc.id] = ["samePoint"];
+      }
+    }
     const branchEvents = ledgerForBranch(world, binding.branchId).filter((e) => e.at <= binding.worldTimeCursor);
     const npcDirectory = runtimeView.npcs.slice(0, 48).map((view) => {
       const anchorPoint = view.pointId !== null ? pointById2.get(String(view.pointId)) : void 0;
@@ -10627,6 +10838,7 @@ function createCoreInstance(store, deps, shared) {
     }));
     const calibrationEntries = Object.entries(mapDoc.calibrations).filter(([key]) => key === "world" || visibleSubmapIds.has(key)).slice(0, 40);
     const scene = resolveSceneStatus(world, sceneDoc, binding.currentLocationId ?? null);
+    const legacyRepair = legacyStartReport(world, binding, sceneDoc, mapDoc);
     const lastConfirmedPointName = scene.lastConfirmed ? (world.points ?? []).find((p) => String(p.id) === scene.lastConfirmed.pointId)?.name ?? null : null;
     return okResult({
       chatId,
@@ -10644,7 +10856,8 @@ function createCoreInstance(store, deps, shared) {
           reasons: scene.placeholder.reasons.slice(0, 5)
         },
         lastConfirmed: scene.lastConfirmed ? { pointId: scene.lastConfirmed.pointId, pointName: lastConfirmedPointName, at: scene.lastConfirmed.at } : null,
-        bootstrap: sceneDoc.bootstrap
+        bootstrap: sceneDoc.bootstrap,
+        legacyRepair
       },
       nearbyPointIds: relevance.nearbyPointIds,
       relevantNpcIds: relevance.relevantNpcIds,
@@ -10687,7 +10900,7 @@ function createCoreInstance(store, deps, shared) {
     if (request.branchId !== binding.branchId) {
       throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "请求分支与绑定分支不一致，拒绝注入。");
     }
-    const world = await requireWorld(binding);
+    const world = await visibleWorldForBinding(await requireWorld(binding), binding);
     const record = body;
     const destinationPointId = typeof record.destinationPointId === "string" && record.destinationPointId.trim() ? record.destinationPointId.trim().slice(0, ATLAS_LIMITS.ID_CHARS) : null;
     const output = prepareAtlasTurn(world, {
@@ -10892,7 +11105,7 @@ function createCoreInstance(store, deps, shared) {
     });
   }
   async function prepareWorldTurnInputs(binding, preset, request, options) {
-    const world = await requireWorld(binding);
+    const world = await visibleWorldForBinding(await requireWorld(binding), binding);
     const currentPointId = binding.currentLocationId ?? null;
     const currentRegionId = pointRegionId2(world, currentPointId);
     const flags = flagsFor(world, binding.branchId, binding.worldTimeCursor);
@@ -11037,6 +11250,7 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
             { retryable: true }
           );
         }
+        rejectHiddenV2Refs(baseWorld, await visibleWorldForBinding(baseWorld, binding), v2result.draft);
         output = applyAtlasV2Turn(baseWorld, {
           draft: v2result.draft,
           request,
@@ -11071,7 +11285,7 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
             });
             throw new AtlasError(
               ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
-              "推演输出无法解析为 JSON（已尝试剥 think 与原文回退）。本轮未提交，世界与时间未变化；原文前 1500 字见日志页，可重试推演。",
+              "推演输出无法解析为 JSON（已尝试剥 think 与原文回退）。本轮未提交，世界与时间未变化；安全诊断代码见日志页，可重试推演。",
               { retryable: true }
             );
           }
@@ -11155,8 +11369,22 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
     await store.write(`binding:${binding.chatId}`, nextBinding);
     bindingCache.set(binding.chatId, nextBinding);
     receiptCache.set(idempotencyKey, receipt);
+    const priorPoints = new Set((world.points ?? []).map((point) => String(point.id)));
+    const priorRegions = new Set((world.regions ?? []).map((region) => String(region.id)));
+    const priorEntities = /* @__PURE__ */ new Set([
+      ...(world.characters ?? []).map((item) => String(item.id)),
+      ...(world.entityRecords ?? []).map((item) => String(item.id))
+    ]);
     await store.write(`turn:${binding.chatId}:${idempotencyKey}`, {
       schemaVersion: 1,
+      branchId: pending.binding.branchId,
+      effectiveAt: receipt.currentTime,
+      createdPointIds: (settledWorld.points ?? []).filter((item) => !priorPoints.has(String(item.id))).map((item) => String(item.id)),
+      createdRegionIds: (settledWorld.regions ?? []).filter((item) => !priorRegions.has(String(item.id))).map((item) => String(item.id)),
+      createdEntityIds: [
+        ...(settledWorld.characters ?? []).map((item) => String(item.id)),
+        ...(settledWorld.entityRecords ?? []).map((item) => String(item.id))
+      ].filter((id, index, all) => !priorEntities.has(id) && all.indexOf(id) === index),
       chatId: binding.chatId,
       idempotencyKey,
       userMessageId: request.userMessageId,
@@ -11567,6 +11795,7 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
     const binding = await store.read(`binding:${chatId}`);
     const world = await store.read(`world:${worldId}`);
     const maps = await store.read(`maps:${worldId}`);
+    const scene = await store.read(sceneDocKey(worldId));
     const geoAuto = await store.read(`geo-auto:${worldId}`);
     const turns = {};
     for (const key of await store.list(`turn:${chatId}:`)) {
@@ -11577,6 +11806,7 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
       ...binding ? { binding } : {},
       ...world ? { world } : {},
       ...maps ? { maps } : {},
+      ...scene ? { scene } : {},
       turns,
       ...geoAuto ? { geoAuto: { [worldId]: geoAuto } } : {}
     };
@@ -11595,6 +11825,7 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
     await store.remove(`binding:${chatId}`);
     await store.remove(`world:${worldId}`);
     await store.remove(`maps:${worldId}`);
+    await store.remove(sceneDocKey(worldId));
     await store.remove(`geo-auto:${worldId}`);
     const turnKeys = await store.list(`turn:${chatId}:`);
     for (const key of turnKeys) await store.remove(key);
@@ -11621,6 +11852,7 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
       if (method === "POST" && route === "/turns/prepare") return await handlePrepare(body);
       if (method === "POST" && route === "/turns/preview") return await handleTurnPreview(body);
       if (method === "POST" && route === "/scene/bootstrap") return await handleSceneBootstrap(body);
+      if (method === "POST" && route === "/scene/repair-start") return await handleLegacyStartRepair(body);
       if (method === "POST" && route === "/turns/commit") return await handleCommit(body);
       if (method === "POST" && route === "/turns/retry") return await handleRetry(body);
       if (method === "POST" && route === "/turns/restore") return await handleRestore(body);

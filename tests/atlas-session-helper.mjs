@@ -13,6 +13,7 @@ const SESSION_ROUTE_METHODS = (method, path) =>
     path === "/map/travel-preview" ||
     path.startsWith("/turns/") ||
     path === "/scene/bootstrap" ||
+    path === "/scene/repair-start" ||
     path === "/bindings" ||
     path === "/worlds/import" ||
     path === "/worlds/ensure-starter" ||
@@ -29,6 +30,7 @@ export function createSessionCarrier(core, { world = null, binding = null, maps 
     binding,
     world,
     maps,
+    scene: null,
     turns: {},
     geoAuto: {},
   };

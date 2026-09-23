@@ -242,7 +242,7 @@ test("R06 bootstrap 应用：duration=0 时间不动、场景锚定、占位退�
   assert.equal(result.body.data.placeholderRetired, true, "起始占位自动退役");
 
   const world = carrier.session.world;
-  const sceneDoc = sanitizeSceneDoc(await store.read(sceneDocKey("w-boot")));
+  const sceneDoc = sanitizeSceneDoc(carrier.session.scene);
   assert.deepEqual(sceneDoc.retiredPointIds, ["1"], "占位 retired 记录");
   assert.equal(sceneDoc.lastConfirmed?.pointId, result.body.data.receipt.currentLocationId, "lastConfirmed 落档");
   assert.equal(sceneDoc.bootstrap?.attempts, 1, "bootstrap 簿记 1 次");
@@ -271,7 +271,7 @@ test("R06 空地理 + bootstrap：第一轮场景识别直接产出真实地点�
   assert.deepEqual(world.regions ?? [], [], "没造虚构地区");
   assert.equal((world.points ?? []).length, 1, "只有剧情产出的那一个真实地点");
   assert.equal((world.points ?? [])[0].name, "废墟深处");
-  const sceneDoc = sanitizeSceneDoc(await store.read(sceneDocKey("w-empty")));
+  const sceneDoc = sanitizeSceneDoc(carrier.session.scene);
   assert.deepEqual(sceneDoc.retiredPointIds, [], "无占位 → 无 retired 记录");
   assert.equal(sceneDoc.lastConfirmed?.pointId, result.body.data.receipt.currentLocationId, "lastConfirmed 指向真实地点");
 });
@@ -290,7 +290,7 @@ test("R06 bootstrap：无有效证据时诚实未知（unknown 场景 → 零地
   assert.equal(result.status, 200);
   assert.equal(result.body.data.status, "committed");
   assert.equal((carrier.session.world?.points ?? []).length, 1, "无证据 → 不造地点");
-  const sceneDoc = sanitizeSceneDoc(await store.read(sceneDocKey("w-boot")));
+  const sceneDoc = sanitizeSceneDoc(carrier.session.scene);
   assert.equal(sceneDoc.lastConfirmed, null, "无锚点不写 lastConfirmed");
   // 占位未退役（识别未成功定位）
   assert.deepEqual(sceneDoc.retiredPointIds, []);
@@ -335,4 +335,62 @@ test("R06 协议设置：v1 逃生门生效（runtime.update + 设置往返）",
   assert.equal(updated2.body.data.worldTurnProtocol, "v1");
   const bad = await core.handle("PUT", "/settings", { action: "runtime.update", worldTurnProtocol: "v9" }, { local: true });
   assert.equal(bad.status, 400, "非法协议拒绝");
+});
+
+test("legacy start inspection is read only; explicit repair is backed by session state and idempotent", async () => {
+  const worldFactory = (options) => {
+    const world = legacyStartWorld(options);
+    world.points.push({ id: 2, name: "废墟深处", x: 70, y: 60, regionId: "start" });
+    return world;
+  };
+  const { core, carrier, calls } = await bootstrapSetup(BOOTSTRAP_DRAFT, worldFactory);
+  carrier.session.binding.currentLocationId = "2";
+  const originalWorld = JSON.stringify(carrier.session.world);
+  const originalRev = carrier.session.rev;
+  const preview = await core.handle("POST", "/scene/repair-start", { chatId: "chat-boot", apply: false });
+  assert.equal(preview.body.data.status, "preview");
+  const report = preview.body.data.report;
+  assert.equal(report.structuralFingerprint, true);
+  assert.equal(report.fullFingerprint, false, "世界已生长，完整空档指纹不再吻合");
+  assert.equal(report.proposedPointId, "2");
+  assert.equal(report.canApply, true);
+  assert.equal(carrier.session.rev, originalRev, "只读检查不写会话");
+  assert.equal(calls.length, 0, "账本和绑定足够时零 AI");
+  const stale = await core.handle("POST", "/scene/repair-start", {
+    chatId: "chat-boot", apply: true, reportToken: "stale",
+  });
+  assert.equal(stale.body.ok, false, "过期报告拒绝写入");
+  const applied = await core.handle("POST", "/scene/repair-start", {
+    chatId: "chat-boot", apply: true, reportToken: report.reportToken,
+  });
+  assert.equal(applied.body.data.status, "repaired");
+  assert.deepEqual(carrier.session.scene.retiredPointIds, ["1"]);
+  assert.equal(carrier.session.binding.currentLocationId, "2");
+  assert.equal(JSON.stringify(carrier.session.world), originalWorld, "地点、皮肤和账本均不改写");
+  const state = await core.handle("GET", "/state/chat-boot");
+  assert.deepEqual(state.body.data.map.points.map((point) => point.id), ["2"], "系统占位不再作为真实地点展示");
+  const again = await core.handle("POST", "/scene/repair-start", {
+    chatId: "chat-boot", apply: true, reportToken: report.reportToken,
+  });
+  assert.equal(again.body.data.status, "unchanged");
+  assert.deepEqual(carrier.session.scene.retiredPointIds, ["1"], "重复执行不增加退役记录");
+});
+
+test("legacy start repair refuses a genuine edited point named 起点", async () => {
+  const worldFactory = (options) => {
+    const world = legacyStartWorld(options);
+    world.points[0].x = 12;
+    world.points.push({ id: 2, name: "客栈", x: 40, y: 40, regionId: "start" });
+    return world;
+  };
+  const { core, carrier } = await bootstrapSetup(BOOTSTRAP_DRAFT, worldFactory);
+  carrier.session.binding.currentLocationId = "2";
+  const preview = await core.handle("POST", "/scene/repair-start", { chatId: "chat-boot", apply: false });
+  assert.equal(preview.body.data.report.structuralFingerprint, false);
+  assert.equal(preview.body.data.report.canApply, false);
+  const applied = await core.handle("POST", "/scene/repair-start", {
+    chatId: "chat-boot", apply: true, reportToken: preview.body.data.report.reportToken,
+  });
+  assert.equal(applied.body.ok, false);
+  assert.equal(carrier.session.scene, null);
 });

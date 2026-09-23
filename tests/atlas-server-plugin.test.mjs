@@ -199,8 +199,8 @@ async function setup(fetchScripts, overrides = {}) {
 // 路由清单与健康检查
 // ---------------------------------------------------------------------------
 
-test("路由清单：22 条且全部在 /api/plugins/atlas 前缀下", () => {
-  equal(ATLAS_ROUTE_MANIFEST.length, 22, "dispatch 核心路由数（… + R03 /turns/preview + R06 /scene/bootstrap）");
+test("路由清单：23 条且全部在 /api/plugins/atlas 前缀下", () => {
+  equal(ATLAS_ROUTE_MANIFEST.length, 23, "dispatch 核心路由数（… + R03 /turns/preview + R06 /scene/bootstrap）");
   equal(ATLAS_PLUGIN_ROUTES.length, ATLAS_ROUTE_MANIFEST.length, "index.mjs 与核心路由清单一致");
   const plugin = createAtlasServerPlugin();
   for (const route of plugin.routes) {
@@ -1590,4 +1590,61 @@ test("invalid old prompt entry blocks settings writes and preserves the raw docu
   assert.notEqual(result.status, 200);
   assert.match(result.body.error.message, /备份原始设置/);
   assert.deepEqual(await store.read("settings"), raw);
+});
+
+test("v2 discoveries disappear from state, nearby and map after rollback", async () => {
+  const assistantText = "你抵达新塔，见到少女。";
+  const draft = {
+    schemaVersion: 2, baseRevision: CURRENT_TIME, duration: 1,
+    evidence: [{ id: "ev1", sourceId: "msg:a", quote: "新塔" }],
+    discoveries: {
+      locations: [{ ref: "new:loc:tower", name: "新塔", aliases: [], regionRef: null, parentLocationRef: null, evidenceIds: ["ev1"] }],
+      characters: [{ ref: "new:npc:girl", displayName: "少女", aliases: [], description: "塔边的人", evidenceIds: ["ev1"] }],
+    },
+    scene: { resolution: "confirmed", locationRef: "new:loc:tower", transition: "arrive", evidenceIds: ["ev1"] },
+    identityUpdates: [],
+    npcUpdates: [{ entityRef: "new:npc:girl", location: { op: "set", locationRef: "new:loc:tower" }, presence: "present", status: "在场", evidenceIds: ["ev1"] }],
+    relationUpdates: [], memories: [], worldFlags: [], events: [], mapScaleHints: [],
+    summary: "抵达新塔。",
+  };
+  let hiddenRefDraft;
+  const { core, world, carrier } = await setup([() => openAiResponse(draft), () => openAiResponse(hiddenRefDraft)]);
+  const request = commitRequest(world, { userText: "我去新塔。", assistantText });
+  const committed = await core.handle("POST", "/turns/commit", request);
+  equal(committed.body.ok, true, "v2 提交成功");
+  equal(committed.body.data.receipt.status, "committed", "回执 committed");
+  const during = (await core.handle("GET", "/state/chat-a")).body.data;
+  ok(during.map.points.some((point) => point.name === "新塔"), "新地点当前可见");
+  ok(during.npcDirectory.some((npc) => npc.name === "少女"), "新人当前可见");
+  ok(during.relevantNpcIds.some((id) => during.npcDirectory.some((npc) => npc.id === id && npc.name === "少女")), "同地点新人进入附近候选");
+  carrier.session.world.stories.push({
+    id: "if-before-tower", worldId: world.id, mode: "if", title: "分歧线",
+    steps: [], parentStoryId: CANON,
+    ifOrigin: { rootStoryId: CANON, sourceStoryId: CANON, anchorAt: CURRENT_TIME },
+  });
+  carrier.session.binding.branchId = "if-before-tower";
+  const siblingResult = await core.handle("GET", "/state/chat-a");
+  const sibling = siblingResult.body.data;
+  ok(!sibling.map.points.some((point) => point.name === "新塔"), "分歧前兄弟线看不到未来地点");
+  ok(!sibling.npcDirectory.some((npc) => npc.name === "少女"), "分歧前兄弟线看不到未来人物");
+  hiddenRefDraft = {
+    ...draft, baseRevision: sibling.currentTime, duration: 0,
+    discoveries: { locations: [], characters: [] },
+    scene: { resolution: "confirmed", locationRef: String(during.map.points.find((point) => point.name === "新塔").id),
+      transition: "stay", evidenceIds: ["ev1"] },
+    npcUpdates: [], summary: "尝试引用兄弟分支的地点。",
+  };
+  const hiddenCommit = await core.handle("POST", "/turns/commit", commitRequest(world, {
+    turnId: "hidden-ref", userMessageId: "msg-12", assistantMessageId: "msg-13", assistantText,
+  }));
+  ok(hiddenCommit.status !== 200, "兄弟分支不可见地点不得提交");
+  ok(/不可见/.test(hiddenCommit.body.error.message), "拒收原因指出分支不可见引用");  carrier.session.binding.branchId = CANON;
+  const turn = Object.values(carrier.session.turns).find((item) => item.assistantMessageId === "msg-11");
+  ok(turn.createdPointIds.length === 1 && turn.createdEntityIds.length === 1, "回合记录出生来源");
+  const rolled = await core.handle("POST", "/turns/rollback", { chatId: "chat-a", assistantMessageId: "msg-11" });
+  equal(rolled.body.ok, true, "回退成功");
+  const after = (await core.handle("GET", "/state/chat-a")).body.data;
+  ok(!after.map.points.some((point) => point.name === "新塔"), "旧游标地图不泄露新地点");
+  ok(!after.npcDirectory.some((npc) => npc.name === "少女"), "旧游标附近不泄露新人");
+  ok(carrier.session.world.points.some((point) => point.name === "新塔"), "历史定义保留可追溯");
 });
