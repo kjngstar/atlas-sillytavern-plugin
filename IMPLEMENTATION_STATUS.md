@@ -50,12 +50,8 @@
 | R09 | ✅ 完成（后端） | SubMap schema 升级加 `frame: { cols, rows, frameRevision }` 字段 + `validateSubmapDepth` 深度校验 + `handleScaleCalibrate` 使用真实 frame；UI 弹窗与子图三层级留实机阶段；481/481 |
 | R11 | ✅ 完成（令牌） | 增量 `--am-*` 令牌 17 项（选中态 / 面包屑 / 状态三态 / 头像 / section-label）+ mappanel 写死色全替换 + `.aw-point.is-selected` 钩子 + `.aw-breadcrumb` 占位类；488/488 |
 | R13-R15 | ✅ 完成（集成测试 + 文档） | 集成层跨 R04/R05/R07/R10/R12 不变量测试 7 项 + `docs/VERIFICATION.md` 实机验收清单（10 节 ≥ 30 项）+ atlas-extension/README 已实现能力索引；495/495 |
-| R09 | 未开始 | |
-| R10 | 未开始 | |
-| R11 | 未开始 | |
-| R13 | 未开始 | |
-| R14 | 未开始 | |
-| R15 | 未开始 | |
+| R14 实机验收 | ⬜ 待作者 | 按 `docs/VERIFICATION.md` 10 节清单在真实酒馆执行（≥30 项）；通过后才允许版本 bump + tag 发布 |
+| R15 收尾 | ⬜ 待作者验收后 | 实机验收问题回修（如有）+ 版本号 bump 六处 + tag |
 
 > 纪律：每阶段记录「做了什么 + 证据 + 残留」。未实际验证的写「未验证」。
 
