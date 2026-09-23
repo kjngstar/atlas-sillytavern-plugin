@@ -209,6 +209,8 @@ function resolveRefsAndBuildCandidate(
     for (const [childId, parentId] of parentPointIdOf) {
       depthOf(childId);
       const count = childCount.get(parentId) ?? 0;
+      // S4 修正（off-by-one）：childCount 已把**本轮的这一个**孩子算在内，
+      // 因此「第 41 个」对应 count=41 → 必须用 > 上限，而 40 个恰好合法。
       if (count > V2_SUBMAP_SIBLINGS_MAX) {
         const childName = newPoints.find((p) => p.id === childId)?.name ?? String(childId);
         const parentName = (world.points ?? []).find((p) => Number(p.id) === parentId)?.name

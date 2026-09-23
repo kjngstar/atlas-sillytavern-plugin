@@ -8018,6 +8018,8 @@ function applyIdentityUpdates(world, updates) {
 }
 
 // src/atlas-turn-v2.ts
+var V2_SUBMAP_DEPTH_MAX = 4;
+var V2_SUBMAP_SIBLINGS_MAX = 40;
 function fail3(message) {
   throw new AtlasError(ATLAS_ERROR_CODES.RESPONSE_MALFORMED, message);
 }
@@ -8059,6 +8061,68 @@ function resolveRefsAndBuildCandidate(world, draft, turnId) {
       points.set(loc.ref, Number(loc.ref));
     } else {
       fail3(`discoveries.locations.ref 引用未知地点：${loc.ref}`);
+    }
+  }
+  const parentPointIdOf = /* @__PURE__ */ new Map();
+  const knownPointIds = new Set((world.points ?? []).map((p) => Number(p.id)));
+  if (parentRefs.length > 0) {
+    for (const { ref, parentLocationRef } of parentRefs) {
+      const childId = points.get(ref);
+      if (childId === void 0) continue;
+      let parentId;
+      const parentFromDraft = points.get(parentLocationRef);
+      if (parentFromDraft !== void 0) {
+        parentId = parentFromDraft;
+      } else if (/^\d+$/.test(parentLocationRef) && knownPointIds.has(Number(parentLocationRef))) {
+        parentId = Number(parentLocationRef);
+      } else {
+        fail3(`discoveries.locations[${ref}].parentLocationRef 引用未知地点（既非已知 id 也非本响应声明的 new:loc）：${parentLocationRef}`);
+      }
+      if (parentId === childId) {
+        fail3(`discoveries.locations[${ref}].parentLocationRef 不能以自身为父`);
+      }
+      parentPointIdOf.set(childId, parentId);
+    }
+    const knownParentById = /* @__PURE__ */ new Map();
+    for (const p of world.points ?? []) {
+      const pid = Number(p.parentPointId);
+      if (Number.isInteger(pid) && pid > 0) knownParentById.set(Number(p.id), pid);
+    }
+    const parentOfId = (id) => parentPointIdOf.get(id) ?? knownParentById.get(id);
+    const depthOf = (id) => {
+      let hops = 0;
+      let cursor = parentOfId(id);
+      const seen = /* @__PURE__ */ new Set([id]);
+      while (cursor !== void 0) {
+        if (seen.has(cursor)) {
+          fail3(`discoveries.locations.parentLocationRef 父链成环（地图点 ${id}）`);
+        }
+        seen.add(cursor);
+        hops += 1;
+        if (hops > V2_SUBMAP_DEPTH_MAX) {
+          fail3(`discoveries.locations.parentLocationRef 父链超出 ${V2_SUBMAP_DEPTH_MAX} 层子图上限（地图点 ${id}）`);
+        }
+        cursor = parentOfId(cursor);
+      }
+      return hops;
+    };
+    const childCount = /* @__PURE__ */ new Map();
+    for (const p of world.points ?? []) {
+      const pid = parentOfId(Number(p.id));
+      if (pid !== void 0) childCount.set(pid, (childCount.get(pid) ?? 0) + 1);
+    }
+    for (const [childId, parentId] of parentPointIdOf) {
+      depthOf(childId);
+      const count = childCount.get(parentId) ?? 0;
+      if (count > V2_SUBMAP_SIBLINGS_MAX) {
+        const childName = newPoints.find((p) => p.id === childId)?.name ?? String(childId);
+        const parentName = (world.points ?? []).find((p) => Number(p.id) === parentId)?.name ?? newPoints.find((p) => p.id === parentId)?.name ?? String(parentId);
+        fail3(`discoveries.locations[${childName}].parentLocationRef 「${parentName}」下子地点超过 ${V2_SUBMAP_SIBLINGS_MAX} 个上限`);
+      }
+    }
+    for (const p of newPoints) {
+      const pid = parentPointIdOf.get(p.id);
+      if (pid !== void 0) p.parentPointId = pid;
     }
   }
   const allLocationRefs = [
@@ -8141,7 +8205,7 @@ function resolveRefsAndBuildCandidate(world, draft, turnId) {
     ...newCharacters.length > 0 ? { characters: [...world.characters ?? [], ...newCharacters] } : {},
     ...newRecords.length > 0 ? { entityRecords: [...world.entityRecords ?? [], ...newRecords] } : {}
   };
-  return { candidate, tables: { points, entities }, createdPointIds: newPoints.map((p) => p.id), createdEntityIds: newCharacters.map((c) => c.id), warnings, parentRefs };
+  return { candidate, tables: { points, entities }, createdPointIds: newPoints.map((p) => p.id), createdEntityIds: newCharacters.map((c) => c.id), warnings };
 }
 function resolveLocation(tables, ref) {
   const pointId = tables.points.get(ref);
@@ -8265,10 +8329,7 @@ function applyAtlasV2Turn(world, input) {
       scaleHints: input.draft.mapScaleHints
     };
   }
-  const { candidate, tables, createdPointIds, createdEntityIds, warnings, parentRefs } = resolveRefsAndBuildCandidate(world, input.draft, turnId);
-  if (parentRefs.length > 0) {
-    warnings.push(`${parentRefs.length} 条 parentLocationRef 暂存未落账（子图层级在 R09 接线）：${parentRefs.map((p) => `${p.ref}←${p.parentLocationRef}`).join("、")}`);
-  }
+  const { candidate, tables, createdPointIds, createdEntityIds, warnings } = resolveRefsAndBuildCandidate(world, input.draft, turnId);
   const { v1, withIdentity, identityUpdatedIds } = foldToV1Draft(candidate, input.draft, tables, warnings);
   const output = commitAtlasTurn(withIdentity, {
     request: input.request,
