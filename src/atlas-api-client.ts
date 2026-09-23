@@ -476,7 +476,7 @@ export async function callAtlasWorldTurnApi(
       } catch {
         payload = firstSsePayload(rawText);
       }
-      // 0.9.52 A6：长度截断判定只认 finish_reason 恰好等于 "length"。
+      // 0.9.53 A6：长度截断判定只认 finish_reason 恰好等于 "length"。
       // stop / 缺失 / null 一律 false——不猜测其他厂商停止码，也不因为「正文里刚好
       // 有完整 JSON」就当成没截断（截断优先，见下面的检查顺序）。
       const truncated = choiceFinishReason(payload) === "length";
@@ -529,7 +529,7 @@ export async function callAtlasWorldTurnApi(
       return fail(mapped.code, mapped.message, mapped.retryable, status);
     }
 
-    // 0.9.52 A6：长度截断优先于任何正文抢救。finish_reason:"length" 说明模型是被输出
+    // 0.9.53 A6：长度截断优先于任何正文抢救。finish_reason:"length" 说明模型是被输出
     // 上限截断的，<think> 里可能残留若干互相矛盾的 JSON 草稿——绝不从中挑一个提交。
     // 位置刻意放在 HTTP 失败判定之后、按 text 判空之前：HTTP 错误仍报它自己的错误码。
     if (parsed.truncated) {
@@ -692,7 +692,7 @@ function pickFirstNonEmpty(values: Array<string | null>): string | null {
 }
 
 /**
- * 读取 OpenAI 兼容响应的 `choices[0].finish_reason`（0.9.52 A6）。
+ * 读取 OpenAI 兼容响应的 `choices[0].finish_reason`（0.9.53 A6）。
  * 只做「原样取出字符串」——判定交给调用方，避免在此处猜测厂商停止码语义。
  * 经宿主代理转成该形状的 Claude / Gemini 响应同样适用；取不到返回 null。
  */

@@ -41,7 +41,7 @@ const DETAIL_KEYS = new Set([
   "responseChars", "capability", "event", "build", "coreCommitted",
   "count", "stage", "attempt", "scanned", "cleaned", "kept", "malformed",
 ]);
-// 0.9.52 A9/A11：允许 `$` `[` `]`，否则 JSON 路径（$.relationUpdates[0].value）永远过不了
+// 0.9.53 A9/A11：允许 `$` `[` `]`，否则 JSON 路径（$.relationUpdates[0].value）永远过不了
 // safeToken —— `$` 是 JSONPath 的根记号，缺它整条 schemaPath 都进不了诊断。
 // URL 仍由调用处的 `://` 检查挡住（该类含 `:` 与 `/`，故该检查不可省略）。
 const SAFE_ATOM = /^[a-zA-Z0-9_.$:\[\]-]{1,120}$/;
@@ -108,7 +108,7 @@ export function sanitizeDiagnostic(raw: unknown, now: () => number = Date.now): 
         else if (key === "mode" && SAFE_MODES.has(token)) details[key] = token;
         else if (key === "capability" && SAFE_CAPABILITIES.has(token)) details[key] = token;
         else if (key === "reasonCode" && /^[A-Z][A-Z0-9_]{0,63}$/.test(token)) details[key] = token;
-        // 0.9.52 A9/A11：schemaPath 必须是真正的 JSONPath —— 强制以 `$.` 或 `$[` 开头，
+        // 0.9.53 A9/A11：schemaPath 必须是真正的 JSONPath —— 强制以 `$.` 或 `$[` 开头，
         // 否则任意「字母数字下划线点」字符串（例如一段裸密钥）都能冒充 schemaPath 混进诊断。
         // 旧字符集还缺 `[`、`]`，导致真正的数组下标路径（$.relationUpdates[0].value）
         // 反而被丢弃——「记录真实拒绝原因位置」形同虚设。此处两个方向一起收口：
