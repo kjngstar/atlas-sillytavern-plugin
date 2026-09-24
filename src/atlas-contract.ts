@@ -46,6 +46,11 @@ export const ATLAS_ERROR_CODES = {
   WRITE_FAILED: "WRITE_FAILED",
   /** 0.9.42 会话承载：携带的世界文档落后于最新已接受版本（双开同聊天等场景），拒绝提交 */
   SESSION_STALE: "SESSION_STALE",
+  /**
+   * C04（§2）：模型输出的形态与 `settings.worldTurnProtocol` 不符。
+   * 不猜、不偷偷换管线——指明当前选项让作者自己切（推进页协议下拉）。
+   */
+  PROTOCOL_MISMATCH: "PROTOCOL_MISMATCH",
 } as const;
 
 export type AtlasErrorCode = (typeof ATLAS_ERROR_CODES)[keyof typeof ATLAS_ERROR_CODES];

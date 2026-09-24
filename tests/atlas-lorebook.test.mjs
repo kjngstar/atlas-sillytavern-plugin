@@ -94,6 +94,68 @@ function committedReceipt(overrides = {}) {
 // 条目规划
 // ---------------------------------------------------------------------------
 
+test("E08：行增量回合把三表上下文（位置链 / 身边人物 / 地面物品）注入滚动条目", () => {
+  const tables = {
+    locations: [
+      { id: "loc:pt-1", name: "集市广场", parentLocationId: "loc:pt-9", description: "", rumors: [], factions: [], mapId: "world", gridX: 10, gridY: 10 },
+      { id: "loc:pt-9", name: "旧城区", parentLocationId: null, description: "", rumors: [], factions: [], mapId: "world", gridX: 5, gridY: 5 },
+    ],
+    characters: [
+      { id: "npc-1", name: "艾莉娅", locationId: "loc:pt-1", thought: "别让人看出破绽", actionTendency: "尽快把货转手",
+        currentAction: "清点香料", targetLocationId: null, presence: "present", positionSource: "narrative", mapId: "world", gridX: null, gridY: null },
+      { id: "npc-2", name: "巴罗", locationId: "loc:pt-1", thought: "", actionTendency: "",
+        currentAction: "望风", targetLocationId: null, presence: "present", positionSource: "narrative", mapId: "world", gridX: null, gridY: null },
+      // 已离场 / 在别处的人不得进条目
+      { id: "npc-3", name: "离场的人", locationId: "loc:pt-1", thought: "我不该出现", actionTendency: "",
+        currentAction: "", targetLocationId: null, presence: "left", positionSource: "narrative", mapId: "world", gridX: null, gridY: null },
+    ],
+    items: [
+      { id: "item:crate", name: "香料箱", description: "", locationId: "loc:pt-1", holderCharacterId: null, status: "在地上", mapId: "world", gridX: 12, gridY: 12 },
+      // 持有物与已销毁物不列（持有关系在人物那一行）
+      { id: "item:key", name: "钥匙", description: "", locationId: null, holderCharacterId: "npc-1", status: "随身", mapId: null, gridX: null, gridY: null },
+      { id: "item:ash", name: "灰烬", description: "", locationId: "loc:pt-1", holderCharacterId: null, status: "已销毁", mapId: "world", gridX: null, gridY: null },
+    ],
+  };
+  const plans = buildLorebookPlans(WORLD, committedReceipt(), {
+    tables, branchKey: "canon", currentLocationId: "pt-1",
+  });
+  ok(plans, "应产出规划");
+  const content = plans.entries[0].content;
+  ok(content.includes("位置链：旧城区 → 集市广场"), `位置链含上级地点：实际「${content}」`);
+  ok(content.includes("在场：艾莉娅（想法：别让人看出破绽；行动倾向：尽快把货转手）"), "身边人物带想法与行动倾向");
+  ok(content.includes("在场：巴罗"), "没有想法的人也在场列出");
+  ok(!content.includes("离场的人"), "已离场的人不进条目");
+  ok(content.includes("地面物品：香料箱"), "地面物品列出");
+  ok(!content.includes("钥匙"), "持有物不列为地面物品");
+  ok(!content.includes("灰烬"), "已销毁物不列为地面物品");
+  ok(content.indexOf("位置链") < content.indexOf("近期动向："), "三表上下文在「近期动向」之前（顺序固定，可逐字节重放）");
+
+  // 分支隔离：只读传入的那一份快照——传另一分支的表就得到另一份内容
+  const otherBranch = buildLorebookPlans(WORLD, committedReceipt(), {
+    tables: { ...tables, locations: [tables.locations[1]] }, branchKey: "if-x", currentLocationId: "pt-1",
+  });
+  ok(!otherBranch.entries[0].content.includes("位置链：旧城区 → 集市广场"), "另一个分支的快照不含该地点 → 不编造位置链");
+});
+
+test("E08：三表上下文有界——超量人物 / 物品如实写「还有 N 位」，不静默截断", () => {
+  const characters = [];
+  for (let i = 0; i < 10; i += 1) {
+    characters.push({
+      id: `npc-${i}`, name: `路人${i}`, locationId: "loc:1", thought: "", actionTendency: "",
+      currentAction: "", targetLocationId: null, presence: "present", positionSource: "narrative", mapId: "world", gridX: null, gridY: null,
+    });
+  }
+  const tables = {
+    locations: [{ id: "loc:1", name: "广场", parentLocationId: null, description: "", rumors: [], factions: [], mapId: "world", gridX: 0, gridY: 0 }],
+    characters,
+    items: [],
+  };
+  const plans = buildLorebookPlans(WORLD, committedReceipt(), { tables, branchKey: "canon", currentLocationId: "1" });
+  const content = plans.entries[0].content;
+  ok(content.includes("另有"), `超量时如实说明剩余人数：实际「${content}」`);
+  ok(content.length <= 480, "条目仍然受 CONTENT_CHARS 上限约束");
+});
+
 test("规划：committed 回执产出唯一滚动条目「Atlas 动向」（固定 comment、constant、标题不带时段）", () => {
   const plans = buildLorebookPlans(WORLD, committedReceipt());
   ok(plans, "应产出规划");

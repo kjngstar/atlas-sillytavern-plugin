@@ -18,10 +18,43 @@
 
 import {
   DEFAULT_PROMPT_SEGMENTS,
+  DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA,
   DEFAULT_PROMPT_SEGMENTS_V2,
   DEFAULT_WORLD_TURN_SYSTEM_PROMPT,
   type AtlasApiPreset,
 } from "./atlas-api-client.ts";
+
+/**
+ * C02：推进输出协议的唯一联合类型。
+ * - `table-delta-v1`：三表行增量（**新装默认**，0.9.57 起；里程碑 4 验收通过后启用）；
+ * - `v2`：完整封套（历史默认，0.9.55 起含地点层级）——既有存档保持不动；
+ * - `v1`：旧契约逃生门。
+ */
+export type AtlasWorldTurnProtocol = "v1" | "v2" | "table-delta-v1";
+
+/**
+ * 新安装 / 缺字段时的缺省协议（D-16 → 里程碑 4 切换）。
+ *
+ * 注意与 `normalizeWorldTurnProtocol` 的区别：那个函数是**读取既有存档**的归一化，
+ * 非法值仍归 `v2`（旧行为，不动老档）；新装默认由这里单独决定。
+ */
+export const DEFAULT_WORLD_TURN_PROTOCOL: AtlasWorldTurnProtocol = "table-delta-v1";
+
+/** 非法 / 缺失值一律归 `v2`（读取既有存档用；不改写用户已保存的合法值）。 */
+export function normalizeWorldTurnProtocol(value: unknown): AtlasWorldTurnProtocol {
+  if (value === "v1") return "v1";
+  if (value === "table-delta-v1") return "table-delta-v1";
+  return "v2";
+}
+
+/** C02：按协议取内置提示词分段（新建预设时快照用）。 */
+export function defaultSegmentsForProtocol(
+  protocol: AtlasWorldTurnProtocol,
+): Array<{ role: string; name: string; mainSlot?: string; content: string }> {
+  if (protocol === "v1") return DEFAULT_PROMPT_SEGMENTS;
+  if (protocol === "table-delta-v1") return DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA;
+  return DEFAULT_PROMPT_SEGMENTS_V2;
+}
 import {
   DEFAULT_CONTENT_REPLACE_RULES,
   MAX_REPLACE_RULES,
@@ -180,7 +213,7 @@ export interface AtlasServerSettingsV2 {
   /** 0.9.22 推演是否附带世界书资料块（被供应商审核拦截时的逃生门；缺省 true）。 */
   loreSupplementEnabled?: boolean;
   /** R06 推进输出协议："v2"（新封套，缺省）或 "v1"（旧契约逃生门）。 */
-  worldTurnProtocol?: "v1" | "v2";
+  worldTurnProtocol?: AtlasWorldTurnProtocol;
   /** 0.9.16 内容替换规则库（照抄 shujuku + 开关增强；字段缺失时补预制库）。 */
   contentReplaceRules?: AtlasContentReplaceRule[];
   /** v1 的 majorEvent 旧数据：只兼容保留，不执行、不展示。 */
@@ -239,7 +272,7 @@ export type AtlasSettingsCommand =
   | { action: "replace.save"; preset: { id?: string; name: string; start: string; end: string; enabled?: boolean } }
   | { action: "replace.delete"; id: string }
   | { action: "replace.reset" }
-  | { action: "runtime.update"; autoCommit?: boolean; rpmLimit?: number; loreSupplementEnabled?: boolean; worldTurnProtocol?: "v1" | "v2" };
+  | { action: "runtime.update"; autoCommit?: boolean; rpmLimit?: number; loreSupplementEnabled?: boolean; worldTurnProtocol?: AtlasWorldTurnProtocol };
 
 // ---------------------------------------------------------------------------
 // 基础工具
@@ -336,8 +369,9 @@ export function createDefaultSettingsV2(): AtlasServerSettingsV2 {
     autoCommit: true,
     rpmLimit: 30,
     loreSupplementEnabled: true,
-    // R06：推进输出协议（v2 = 新封套 + 临时引用；v1 = 旧契约逃生门）。缺省 v2。
-    worldTurnProtocol: "v2",
+    // R06 / D-16：推进输出协议。0.9.57 起**新装默认 = table-delta-v1**（三表行增量）；
+    // 既有存档里的合法值原样保留（读取走 normalizeWorldTurnProtocol，非法值仍归 v2）。
+    worldTurnProtocol: DEFAULT_WORLD_TURN_PROTOCOL,
     contentReplaceRules: DEFAULT_CONTENT_REPLACE_RULES.map((rule, index) => ({
       ...rule,
       id: `cr-builtin-${index + 1}`,
@@ -486,7 +520,7 @@ export function sanitizeSettingsV2(raw: unknown, deps: AtlasSettingsDeps = {}): 
     rpmLimit: isFiniteIntIn(record.rpmLimit, MIN_RPM, MAX_RPM) ? record.rpmLimit : 30,
     loreSupplementEnabled: typeof record.loreSupplementEnabled === "boolean" ? record.loreSupplementEnabled : true,
     // R06：推进协议（非法值 → 缺省 v2）
-    worldTurnProtocol: record.worldTurnProtocol === "v1" ? "v1" : "v2",
+    worldTurnProtocol: normalizeWorldTurnProtocol(record.worldTurnProtocol),
   };
   // 0.9.16 内容替换规则：字段缺失（旧存档）→ 预制库兜底；显式空数组 = 用户全删，尊重
   if (record.contentReplaceRules === undefined) {
@@ -829,8 +863,8 @@ export function applySettingsCommand(
         next.loreSupplementEnabled = command.loreSupplementEnabled;
       }
       if (command.worldTurnProtocol !== undefined) {
-        if (command.worldTurnProtocol !== "v1" && command.worldTurnProtocol !== "v2") {
-          return fail(settings, "INVALID_PAYLOAD", "推进协议只能是 v1 或 v2。");
+        if (command.worldTurnProtocol !== "v1" && command.worldTurnProtocol !== "v2" && command.worldTurnProtocol !== "table-delta-v1") {
+          return fail(settings, "INVALID_PAYLOAD", "推进协议只能是 v1、v2 或 table-delta-v1。");
         }
         next.worldTurnProtocol = command.worldTurnProtocol;
       }
@@ -1050,8 +1084,8 @@ export interface AtlasSettingsView {
   autoCommit: boolean;
   /** 0.9.22 推演是否附带世界书资料块（审核拦截逃生门）。 */
   loreSupplementEnabled: boolean;
-  /** R06 推进输出协议（v2 缺省）。 */
-  worldTurnProtocol: "v1" | "v2";
+  /** R06 推进输出协议（v2 缺省；table-delta-v1 = 三表行增量）。 */
+  worldTurnProtocol: AtlasWorldTurnProtocol;
   rpmLimit: number;
   /** 0.9.16 内容替换规则库（含预制 + 手动，同库平等）。 */
   contentReplaceRules: AtlasContentReplaceRule[];
@@ -1101,12 +1135,12 @@ export function settingsViewV2(settings: AtlasServerSettingsV2): AtlasSettingsVi
       name: "内置默认",
       readOnly: true,
       systemPrompt: DEFAULT_WORLD_TURN_SYSTEM_PROMPT,
-      // R06：内置默认按当前协议展示对应封套（v2 = 临时引用 / 证据 / scene；v1 = 旧契约逃生门）
-      segments: ((settings.worldTurnProtocol ?? "v2") === "v1" ? DEFAULT_PROMPT_SEGMENTS : DEFAULT_PROMPT_SEGMENTS_V2).map((s) => ({ ...s })),
+      // R06：内置默认按当前协议展示对应分段（v2 = 封套 / table-delta-v1 = 行增量 / v1 = 旧契约逃生门）
+      segments: defaultSegmentsForProtocol(normalizeWorldTurnProtocol(settings.worldTurnProtocol)).map((s) => ({ ...s })),
     },
     autoCommit: settings.autoCommit,
     loreSupplementEnabled: settings.loreSupplementEnabled ?? true,
-    worldTurnProtocol: settings.worldTurnProtocol === "v1" ? "v1" : "v2",
+    worldTurnProtocol: normalizeWorldTurnProtocol(settings.worldTurnProtocol),
     rpmLimit: settings.rpmLimit,
     contentReplaceRules: settings.contentReplaceRules ?? [],
   };

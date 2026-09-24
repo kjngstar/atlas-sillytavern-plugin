@@ -2001,3 +2001,166 @@ test("S11 前端：附近页只展示相关人物（主角与远处目录成员�
   ok(text.includes("附近暂无已确认人物"), `空关联给出明确文案：实际「${text.slice(0, 80)}」`);
   equal(container.querySelectorAll(".aw-card--npc").length, 0, "空关联时不渲染人物卡片");
 });
+
+test("D04/D05 前端：有 tableMap 时位置与在场性以三表为准（目录不得反向覆盖）", async () => {
+  // 场景：三表说阿澈已被日程带到「集市」，目录（它的投影路径滞后）还说他在「钟楼」。
+  // 行增量回合只改三表，所以面板必须信三表——否则"人还在这儿"是撒谎。
+  const base = s10State({
+    chatId: "chat-a",
+    worldId: "w-d05",
+    currentLocationId: "1",
+    points: [
+      { id: "1", name: "钟楼", x: 40, y: 40, regionId: null },
+      { id: "2", name: "集市", x: 60, y: 40, regionId: null },
+    ],
+    npcDirectory: [
+      { id: "npc-a", name: "林拾", pointId: "1", presence: "present", isProtagonist: false, status: "在钟楼下张望" },
+      { id: "npc-b", name: "阿澈", pointId: "1", presence: "present", isProtagonist: false },
+      { id: "npc-c", name: "刚到场的新人", pointId: "1", presence: "present", isProtagonist: false },
+    ],
+    relevantNpcIds: ["npc-a", "npc-b"],
+    npcReasons: { "npc-a": ["samePoint"], "npc-b": ["samePoint"] },
+  });
+  base.tableMap = {
+    branchKey: "canon",
+    world: {
+      mapId: "world",
+      total: 2,
+      truncated: 0,
+      points: [
+        { id: "1", name: "钟楼", x: 40, y: 40, regionId: null, kind: "location", rowId: "loc:1" },
+        { id: "2", name: "集市", x: 60, y: 40, regionId: null, kind: "location", rowId: "loc:2" },
+      ],
+    },
+    submaps: {},
+    unknownPosition: [],
+    nearby: {
+      total: 4,
+      truncated: 0,
+      entries: [
+        { id: "npc-a", name: "林拾", locationId: "loc:1", locationName: "钟楼", presence: "present",
+          thought: "等他开口", actionTendency: "留在钟楼", currentAction: "在钟楼下张望",
+          isProtagonist: false, positionSource: "narrative", mapId: "world", gridX: null, gridY: null },
+        // 三表：阿澈已经在集市（日程移动），目录却还说他在钟楼
+        { id: "npc-b", name: "阿澈", locationId: "loc:2", locationName: "集市", presence: "present",
+          thought: "去集市打听", actionTendency: "跟着人流走", currentAction: "在集市挑货",
+          isProtagonist: false, positionSource: "routine", mapId: "world", gridX: null, gridY: null },
+        // 三表里有、目录里还没有的新人：不能因为目录滞后就从名单消失
+        { id: "npc-c", name: "刚到场的新人", locationId: "loc:1", locationName: "钟楼", presence: "present",
+          thought: "找林拾", actionTendency: "等在门口", currentAction: "在门口等",
+          isProtagonist: false, positionSource: "narrative", mapId: "world", gridX: null, gridY: null },
+      ],
+    },
+    objects: { total: 0, truncated: 0, entries: [] },
+    current: { locationId: "loc:1", chain: [{ id: "loc:1", name: "钟楼" }] },
+    totals: { locations: 2, characters: 3, items: 0, submaps: 0 },
+    dropped: { locations: 0 },
+  };
+  const { container, core } = await mountAtlasMap({ stateByChat: { "chat-a": base } });
+
+  // 地点菜单「当前在这里」：按三表的位置，阿澈不在这里；新人必须在
+  const panel = openPointPanel(container, "钟楼");
+  const panelText = String(panel.textContent);
+  ok(panelText.includes("林拾"), "三表与目录一致的人照常显示");
+  ok(panelText.includes("刚到场的新人"), "三表里有、目录滞后的人仍出现在地点名单");
+  ok(!panelText.includes("阿澈"), "三表说人已离开 → 目录的旧位置不得反向覆盖（不再显示在钟楼）");
+
+  // 人物面板：三表的想法 / 行动倾向 / 位置来源各归各位
+  const npcRow = [...panel.querySelectorAll(".aw-mappanel__person--npc")]
+    .find((row) => row.textContent.includes("林拾"));
+  ok(npcRow, "林拾的名单行存在");
+  npcRow.click();
+  const npcPanelText = String(container.querySelector(".aw-mappanel").textContent);
+  ok(npcPanelText.includes("想法：等他开口"), `人物面板显示三表想法：实际「${npcPanelText.slice(0, 120)}」`);
+  ok(npcPanelText.includes("行动倾向：留在钟楼"), "人物面板显示三表行动倾向");
+  ok(npcPanelText.includes("位置来源：正文观察"), "人物面板显示位置来源标签");
+
+  // 远处地点的人仍可通过地点菜单查到（不冒充「附近」但也没被删）
+  const marketPanel = openPointPanel(container, "集市");
+  ok(String(marketPanel.textContent).includes("阿澈"), "三表把他记在集市 → 集市名单里有他");
+
+  // 附近页：三表字段直接进卡片详情，位置来源用人类可读标签
+  core.setPage("nearby");
+  await flush();
+  const titles = [...container.querySelectorAll(".aw-card--npc .aw-card__title")].map((n) => n.textContent);
+  ok(titles.includes("林拾"), "附近页仍按 relevantNpcIds 命中顺序展示");
+  const card = [...container.querySelectorAll(".aw-card--npc")]
+    .find((node) => node.textContent.includes("林拾"));
+  card.click();
+  const cardText = String(card.textContent);
+  ok(cardText.includes("想法：等他开口"), "附近卡片详情带三表想法");
+  ok(cardText.includes("位置来源：正文观察"), "附近卡片详情带位置来源标签");
+  ok(!cardText.includes("routine") && !cardText.includes("ledger"), "不把内部枚举值直接甩给用户");
+});
+
+test("D03 前端：物品图钉按三表口径画（持有物与已销毁物不落地，子图也能画）", async () => {
+  const base = s10State({
+    chatId: "chat-a",
+    worldId: "w-d03",
+    currentLocationId: "1",
+    points: [{ id: "1", name: "钟楼", x: 40, y: 40, regionId: null }],
+    submaps: { "1": { parentMapId: "world", points: [{ id: "11", name: "档案室", x: 30, y: 30 }] } },
+    objectDirectory: [],
+    npcDirectory: [],
+  });
+  base.tableMap = {
+    branchKey: "canon",
+    world: {
+      mapId: "world",
+      total: 1,
+      truncated: 0,
+      points: [{ id: "1", name: "钟楼", x: 40, y: 40, regionId: null, kind: "location", rowId: "loc:1" }],
+    },
+    submaps: {
+      "1": {
+        mapId: "1",
+        parentMapId: "world",
+        frame: { cols: 100, rows: 100, frameRevision: 1 },
+        total: 1,
+        truncated: 0,
+        points: [{ id: "11", name: "档案室", x: 30, y: 30, regionId: null, kind: "location", rowId: "loc:11" }],
+      },
+    },
+    unknownPosition: [],
+    nearby: { total: 0, truncated: 0, entries: [] },
+    objects: {
+      total: 4,
+      truncated: 0,
+      entries: [
+        // 地面物品：有精细格坐标 → 世界图上要有图钉
+        { id: "item:lamp", name: "铜灯", description: "一盏铜灯", status: "在地上", locationId: "loc:1",
+          locationName: "钟楼", holderCharacterId: null, holderName: null, mapId: "world", gridX: 52, gridY: 46 },
+        // 持有物：随身物品不地面化（D-02 持有关系只存在于三表）
+        { id: "item:key", name: "铜钥匙", description: "小钥匙", status: "随身", locationId: null,
+          locationName: null, holderCharacterId: "npc:a", holderName: "林拾", mapId: null, gridX: null, gridY: null },
+        // 已销毁：软删除不落地
+        { id: "item:ash", name: "灰烬", description: "烧尽的信", status: "已销毁", locationId: null,
+          locationName: null, holderCharacterId: null, holderName: null, mapId: null, gridX: null, gridY: null },
+        // 子图里的物品：进入子图才画
+        { id: "item:file", name: "卷宗", description: "旧卷宗", status: "在地上", locationId: "loc:11",
+          locationName: "档案室", holderCharacterId: null, holderName: null, mapId: "1", gridX: 34, gridY: 28 },
+      ],
+    },
+    current: { locationId: "loc:1", chain: [{ id: "loc:1", name: "钟楼" }] },
+    totals: { locations: 2, characters: 0, items: 4, submaps: 1 },
+    dropped: { locations: 0 },
+  };
+  const { container } = await mountAtlasMap({ stateByChat: { "chat-a": base } });
+
+  // 世界图：只有「铜灯」有图钉；持有物、已销毁物、别层物品都不上世界图
+  const worldItems = [...container.querySelectorAll(".aw-object")].map((n) => n.textContent);
+  ok(worldItems.some((text) => text.includes("铜灯")), `世界图有「铜灯」图钉：实际 ${JSON.stringify(worldItems)}`);
+  ok(!worldItems.some((text) => text.includes("铜钥匙")), "持有物不画地面图钉");
+  ok(!worldItems.some((text) => text.includes("灰烬")), "已销毁物不画图钉");
+  ok(!worldItems.some((text) => text.includes("卷宗")), "子图物品不上世界图");
+
+  // 进入子图：该层的物品图钉出现（旧实现 `if (inSub) continue` 会整层漏掉）
+  const panel = openPointPanel(container, "钟楼");
+  const enter = enterSubmapButton(container, "钟楼");
+  ok(enter !== null, "钟楼有内部地图入口");
+  enter.click();
+  const subItems = [...container.querySelectorAll(".aw-object")].map((n) => n.textContent);
+  ok(subItems.some((text) => text.includes("卷宗")), `子图有「卷宗」图钉：实际 ${JSON.stringify(subItems)}`);
+  ok(!subItems.some((text) => text.includes("铜灯")), "世界图物品不带进子图");
+  void panel;
+});

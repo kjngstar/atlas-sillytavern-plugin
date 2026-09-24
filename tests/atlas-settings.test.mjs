@@ -13,8 +13,11 @@ import {
   ATLAS_SETTINGS_SCHEMA_VERSION,
   BUILTIN_PROMPT_PRESET_ID,
   createDefaultSettingsV2,
+  DEFAULT_WORLD_TURN_PROTOCOL,
+  defaultSegmentsForProtocol,
   migrateAtlasSettings,
   applySettingsCommand,
+  normalizeWorldTurnProtocol,
   settingsViewV2,
   sanitizeSettingsV2,
   resolveWorldTurnPreset,
@@ -22,7 +25,13 @@ import {
   normalizeApiFormat,
   normalizePromptPostProcessing,
 } from "../src/atlas-settings.ts";
-import { DEFAULT_WORLD_TURN_SYSTEM_PROMPT } from "../src/atlas-api-client.ts";
+import {
+  DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA,
+  DEFAULT_WORLD_TURN_SYSTEM_PROMPT,
+  TABLE_DELTA_BOOTSTRAP_TASK_CONTENT,
+  isTableDeltaProtocolEnabled,
+  isV2ProtocolEnabled,
+} from "../src/atlas-api-client.ts";
 
 const NOW = 1_700_000_000_000;
 const TEST_KEY = "sk-test-super-secret-1234";
@@ -835,4 +844,74 @@ test("segment-only legacy preset remains readable without systemPrompt", () => {
   assert.equal(result.settings.activePromptPresetId, "segment-only");
   assert.equal(result.settings.promptPresets[0].systemPrompt, "");
   assert.equal(result.settings.promptPresets[0].segments[0].content, "旧正文");
+});
+
+/* ---------------------------------------------------------------------------
+ * C01 / C02：table-delta-v1（三表行增量协议）
+ * --------------------------------------------------------------------------- */
+test("C02/D-16 协议枚举：新装默认 = table-delta-v1；可保存并回显，非法值仍拒绝", () => {
+  const defaults = createDefaultSettingsV2();
+  assert.equal(defaults.worldTurnProtocol, "table-delta-v1", "0.9.57 起新装默认切到三表行增量（里程碑 4）");
+  assert.equal(DEFAULT_WORLD_TURN_PROTOCOL, "table-delta-v1", "默认值有唯一出处");
+
+  const applied = applySettingsCommand(defaults, { action: "runtime.update", worldTurnProtocol: "table-delta-v1" }, testDeps());
+  assert.equal(applied.ok, true, applied.ok ? "" : applied.message);
+  assert.equal(settingsViewV2(applied.settings).worldTurnProtocol, "table-delta-v1");
+  assert.equal(applied.settings.worldTurnProtocol, "table-delta-v1", "旧 v1/v2 值也照旧保留");
+
+  const bad = applySettingsCommand(defaults, { action: "runtime.update", worldTurnProtocol: "v9" }, testDeps());
+  assert.equal(bad.ok, false, "非法协议仍必须拒绝");
+
+  assert.equal(normalizeWorldTurnProtocol("table-delta-v1"), "table-delta-v1");
+  assert.equal(normalizeWorldTurnProtocol("v1"), "v1");
+  assert.equal(normalizeWorldTurnProtocol("v2"), "v2");
+  // 读取既有存档的归一化**不变**：非法 / 缺失仍归 v2（不动老档；新装默认由常量单独决定）
+  assert.equal(normalizeWorldTurnProtocol("junk"), "v2");
+  assert.equal(normalizeWorldTurnProtocol(undefined), "v2");
+});
+
+test("C02 内置默认分段随协议切换，且不会把 v2 封套混进行增量", () => {
+  const base = createDefaultSettingsV2();
+  const v1 = settingsViewV2({ ...base, worldTurnProtocol: "v1" }).builtInPrompt.segments;
+  const v2 = settingsViewV2({ ...base, worldTurnProtocol: "v2" }).builtInPrompt.segments;
+  const delta = settingsViewV2({ ...base, worldTurnProtocol: "table-delta-v1" }).builtInPrompt.segments;
+
+  assert.ok(delta.some((segment) => segment.content.includes("<atlasEdit>")), "行增量协议必须展示块格式");
+  assert.equal(delta.some((segment) => segment.content.includes('"schemaVersion":2')), false, "不能混进 v2 封套");
+  assert.equal(v2.some((segment) => segment.content.includes("<atlasEdit>")), false);
+  assert.notDeepEqual(v1, delta);
+  assert.deepEqual(defaultSegmentsForProtocol("table-delta-v1"), DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA);
+  assert.equal(defaultSegmentsForProtocol("v1").length, 6, "v1/v2/行增量段位一致，bootstrap 才能按索引替换第 5 段");
+  assert.equal(defaultSegmentsForProtocol("v2").length, 6);
+});
+
+test("C01 协议判定收紧：table-delta-v1 不再被当成 v2（避免装错提示词）", () => {
+  assert.equal(isV2ProtocolEnabled("v2"), true);
+  assert.equal(isV2ProtocolEnabled("v1"), false);
+  assert.equal(isV2ProtocolEnabled("table-delta-v1"), false);
+  assert.equal(isTableDeltaProtocolEnabled("table-delta-v1"), true);
+  assert.equal(isTableDeltaProtocolEnabled("v2"), false);
+  assert.equal(isTableDeltaProtocolEnabled(undefined), false);
+});
+
+test("C01 行增量分段结构：段位与 v2 对齐，契约写明格式与禁止项", () => {
+  const segments = DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA;
+  assert.equal(segments.length, 6, "与 v2 同段位，bootstrap 才能按索引替换「本轮行动」段");
+  assert.equal(segments[0].role, "system");
+  assert.equal(segments[0].mainSlot, "A");
+  assert.equal(segments[4].mainSlot, "B");
+  assert.equal(segments[5].role, "user");
+
+  const contract = segments[0].content;
+  for (const needle of ["<atlasEdit>", "noop", "new:loc:", "new:npc:", "new:item:", "quote", "inferred", "16 KiB", "64 行"]) {
+    assert.ok(contract.includes(needle), `契约段缺少 ${needle}`);
+  }
+  for (const forbidden of ["格序号", "mapId", "时间", "距离"]) {
+    assert.ok(contract.includes(forbidden), `契约段应明确提到禁止项 ${forbidden}`);
+  }
+  assert.ok(segments[4].content.includes("不要填任何数字"), "时间与距离不由模型决定");
+  assert.ok(segments[5].content.includes("new:loc:"), "核对段覆盖引用形态");
+
+  assert.ok(TABLE_DELTA_BOOTSTRAP_TASK_CONTENT.includes("{{assistantReply}}"));
+  assert.ok(TABLE_DELTA_BOOTSTRAP_TASK_CONTENT.includes("不推进时间"), "开场识别只定位");
 });

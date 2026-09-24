@@ -211,6 +211,9 @@ async function bootstrapSetup(responseDraft, worldFactory = legacyStartWorld) {
   const view = await core.handle("GET", "/settings", null, { local: true });
   const apiId = view.body?.data?.apiPresets?.[0]?.id;
   if (apiId) await core.handle("PUT", "/settings", { action: "api.activate", id: apiId }, { local: true });
+  // 本文件的开场识别草稿是 v2 封套（BOOTSTRAP_DRAFT.schemaVersion=2）：
+  // 0.9.57 起新装默认是 table-delta-v1，协议严格按设置分派（C04 → D-30），故这里显式声明 v2。
+  await core.handle("PUT", "/settings", { action: "runtime.update", worldTurnProtocol: "v2" }, { local: true });
   return { store, core, calls, world, carrier };
 }
 
@@ -323,16 +326,23 @@ test("R06 /state：旧存档的纯占位「起点」默认不显示为真实地�
   );
 });
 
-test("R06 协议设置：v1 逃生门生效（runtime.update + 设置往返）", async () => {
+test("R06 协议设置：三值往返（新装默认 table-delta-v1、v2、v1 逃生门）", async () => {
   const { core } = await bootstrapSetup(BOOTSTRAP_DRAFT);
   const view = await core.handle("GET", "/settings", null, { local: true });
-  assert.equal(view.body.data.worldTurnProtocol, "v2", "缺省 v2");
+  assert.equal(view.body.data.worldTurnProtocol, "v2", "本夹具显式声明了 v2（与开场识别草稿一致）");
   assert.equal(view.body.data.builtInPrompt.segments.length, 6, "内置默认展示 v2 封套");
   const updated = await core.handle("PUT", "/settings", { action: "runtime.update", worldTurnProtocol: "v1" }, { local: true });
   assert.equal(updated.status, 200);
   assert.equal(updated.body.data.worldTurnProtocol, "v1");
   const updated2 = await core.handle("GET", "/settings", null, { local: true });
   assert.equal(updated2.body.data.worldTurnProtocol, "v1");
+  // 0.9.57：新装默认 = table-delta-v1（另见 tests/atlas-settings.test.mjs 的默认值断言）
+  const delta = await core.handle("PUT", "/settings", { action: "runtime.update", worldTurnProtocol: "table-delta-v1" }, { local: true });
+  assert.equal(delta.body.data.worldTurnProtocol, "table-delta-v1");
+  assert.ok(
+    delta.body.data.builtInPrompt.segments.some((segment) => String(segment.content).includes("<atlasEdit>")),
+    "行增量协议展示块格式内置分段",
+  );
   const bad = await core.handle("PUT", "/settings", { action: "runtime.update", worldTurnProtocol: "v9" }, { local: true });
   assert.equal(bad.status, 400, "非法协议拒绝");
 });
@@ -369,6 +379,13 @@ test("legacy start inspection is read only; explicit repair is backed by session
   assert.equal(JSON.stringify(carrier.session.world), originalWorld, "地点、皮肤和账本均不改写");
   const state = await core.handle("GET", "/state/chat-boot");
   assert.deepEqual(state.body.data.map.points.map((point) => point.id), ["2"], "系统占位不再作为真实地点展示");
+  // E04a：三表投影（tableMap）必须与旧字段路径同一口径——已退役的「起点」不能从新通道冒回来
+  const tableMapPoints = (state.body.data.tableMap?.world?.points ?? []).map((point) => point.id);
+  assert.deepEqual(tableMapPoints, ["2"], "tableMap 世界图同样不显示已退役的系统占位");
+  assert.ok(
+    !JSON.stringify(state.body.data.tableMap ?? {}).includes("起点"),
+    "tableMap 的任何字段都不再出现「起点」",
+  );
   const again = await core.handle("POST", "/scene/repair-start", {
     chatId: "chat-boot", apply: true, reportToken: report.reportToken,
   });

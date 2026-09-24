@@ -99,6 +99,14 @@ function binding(world, overrides = {}) {
   };
 }
 
+/**
+ * 推演连接。
+ *
+ * C04（§2）起协议**严格按设置分派**：v1 设置只走 v1 草稿解析、v2 只走 v2 封套、
+ * `table-delta-v1` 只走行增量块。本文件的历史用例用的都是 v1 形态草稿（`GOOD_DRAFT` 等），
+ * 因此它们必须显式把 `settings.worldTurnProtocol` 设成 `"v1"`（见 `putV1Settings` /
+ * `V1_PROTOCOL_COMMAND`）——协议是**设置级**字段，不能塞进连接预设里。
+ */
 function preset(overrides = {}) {
   return {
     name: "模拟推演",
@@ -108,6 +116,16 @@ function preset(overrides = {}) {
     timeoutMs: 5000,
     ...overrides,
   };
+}
+
+/** v1 形态草稿用例共用的设置载荷（连接走 worldTurn；协议必须走 runtime.update，见下）。 */
+const V1_SETTINGS = { worldTurn: preset() };
+const V1_PROTOCOL_COMMAND = { action: "runtime.update", worldTurnProtocol: "v1" };
+
+/** 设置连接 + 协议（协议只能经 runtime.update 写；legacy 补丁会静默忽略顶层协议字段）。 */
+async function putV1Settings(core) {
+  await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+  await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
 }
 
 function prepareRequest(world, overrides = {}) {
@@ -168,6 +186,11 @@ function openAiResponse(draft) {
   return jsonResponse(200, { choices: [{ message: { content: JSON.stringify(draft) } }] });
 }
 
+/** 纯文本助手回复（行增量块 `<atlasEdit>…</atlasEdit>` 用；不能再套 JSON.stringify）。 */
+function openAiTextResponse(text) {
+  return jsonResponse(200, { choices: [{ message: { content: text } }] });
+}
+
 /** 0.9.42 会话承载：内联核心统一包会话载体（世界 / 绑定 / 回合映射随请求往返，不落全局 store）。 */
 function sessionCore(store, deps = {}) {
   const rawCore = createAtlasServerCore({ store, now: () => NOW, ...deps });
@@ -191,6 +214,7 @@ async function setup(fetchScripts, overrides = {}) {
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   if (overrides.skipSettings !== true) {
     await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+    await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
   }
   return { store, core, world, carrier };
 }
@@ -505,6 +529,7 @@ test("commit：恰好 1 请求、原子落账、绑定游标推进", async () =>
   await fresh.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await fresh.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await fresh.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+  await fresh.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
 
   const result = await fresh.handle("POST", "/turns/commit", commitRequest(world));
   equal(result.status, 200, "commit 200");
@@ -695,6 +720,8 @@ test("settings v2 运行时组合：commit 用「活动 API + 活动提示词」
   // 活动 API = A，活动提示词 = P2
   await core.handle("PUT", "/settings", { action: "api.activate", id: apiA }, { local: true });
   await core.handle("PUT", "/settings", { action: "prompt.activate", id: promptP2 }, { local: true });
+  // 本用例的草稿是 v1 形态：协议显式声明 v1（C04 严格按设置分派）
+  await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
 
   const commit1 = await core.handle("POST", "/turns/commit", commitRequest(world), { local: true });
   equal(commit1.body.ok, true, "组合提交成功");
@@ -773,6 +800,7 @@ for (const failure of FAILURE_CASES) {
     await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
     await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
     await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+  await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
 
     const result = await core.handle("POST", "/turns/commit", commitRequest(world));
     equal(result.body.error.code, failure.code, `错误码 ${failure.code}`);
@@ -793,6 +821,7 @@ test("裁决（0.9.0）：未知地点草稿降级——移动被忽略，其余
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+  await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
 
   const result = await core.handle("POST", "/turns/commit", commitRequest(world));
   const receipt = result.body.data.receipt;
@@ -812,6 +841,7 @@ test("0.9.30 放宽：JSON 被写进 <think> 里 → 剥除失败后从原文救
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+  await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
 
   const result = await core.handle("POST", "/turns/commit", commitRequest(world));
   const receipt = result.body.data.receipt;
@@ -830,6 +860,7 @@ test("0.9.48 T05：完全无法解析 → 明确失败（RESPONSE_MALFORMED 可�
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+  await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
 
   // 0.9.48 语义变更（外部 AI 计划 T05，作者拍板全包）：解析两连败 = 错误，不再伪装
   // 「无结构变化」成功——已付费但世界未更新必须如实呈现，可重试（重推演重新调模型）。
@@ -874,6 +905,7 @@ test("A12 端到端：finish_reason=length + 仅 <think> 推理稿 → RESPONSE_
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+  await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
 
   const result = await core.handle("POST", "/turns/commit", commitRequest(world));
 
@@ -931,6 +963,8 @@ test("A12 端到端：截断失败后同键 retry 成功 → 世界只推进一�
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+  // 本用例的草稿是 v2 封套（goodDraft.schemaVersion=2）：协议显式声明 v2
+  await core.handle("PUT", "/settings", { action: "runtime.update", worldTurnProtocol: "v2" }, { local: true });
 
   const request = commitRequest(world);
   const first = await core.handle("POST", "/turns/commit", request);
@@ -981,6 +1015,7 @@ test("0.9.31 首轮自动建图：≤1 点世界首次 commit 后自动提炼一
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+  await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
 
   const result = await core.handle("POST", "/turns/commit", commitRequest(world));
   equal(result.body.ok, true, "提交成功");
@@ -1017,6 +1052,7 @@ test("0.9.36 自动建图①：本轮 assistantText 进提炼素材（首回合�
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+  await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
 
   const result = await core.handle("POST", "/turns/commit", commitRequest(world));
   equal(result.body.ok, true, "提交成功");
@@ -1047,6 +1083,7 @@ test("0.9.36 自动建图②：素材全空 → 零提炼请求、不烧标记�
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+  await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
 
   const first = await core.handle("POST", "/turns/commit", commitRequest(world, { assistantText: "  " }));
   equal(first.body.ok, true, "首回合提交成功");
@@ -1079,6 +1116,7 @@ test("0.9.36 自动建图③：0.9.35 烧掉的旧标记（无 done）升级后�
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+  await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
   // 模拟 0.9.31~0.9.35 留下的旧标记：提炼前就写、无 done / attempts 字段（0.9.42 起标记住会话）
   carrier.session.geoAuto[world.id] = { at: NOW };
 
@@ -1102,6 +1140,7 @@ test("0.9.36 自动建图④：尝试达上限（3 次）→ 不再发提炼请�
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+  await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
   carrier.session.geoAuto[world.id] = { at: NOW, attempts: 3 };
 
   const result = await core.handle("POST", "/turns/commit", commitRequest(world));
@@ -1130,6 +1169,7 @@ test("0.9.36 自动建图⑤：提炼响应 content 为空、JSON 在 reasoning_
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+  await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
 
   const result = await core.handle("POST", "/turns/commit", commitRequest(world));
   equal(result.body.ok, true, "提交成功");
@@ -1161,6 +1201,7 @@ test("0.9.32 点挂子图：commit 落 sidecar（maps:<worldId>），/state 带�
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+  await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
 
   const result = await core.handle("POST", "/turns/commit", commitRequest(world));
   equal(result.body.ok, true, "提交成功");
@@ -1246,6 +1287,7 @@ test("0.9.41 地图三型标点：/state 带人物动向字段（status / recent
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+  await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
   const committed = await core.handle("POST", "/turns/commit", commitRequest(world));
   equal(committed.body.ok, true, "提交成功");
 
@@ -1271,6 +1313,7 @@ test("retry：沿用原幂等键，成功后世界恰好推进一次", async () 
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+  await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
 
   const first = await core.handle("POST", "/turns/commit", commitRequest(world));
   equal(first.body.error.code, ATLAS_ERROR_CODES.API_RATE_LIMITED, "首次 429");
@@ -1348,6 +1391,7 @@ test("队列：同聊天并发 commit 串行执行，不并发冲击", async () 
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset(), rpmLimit: 50 }, { local: true });
+  await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
 
   const first = core.handle("POST", "/turns/commit", commitRequest(world));
   const second = core.handle("POST", "/turns/commit", commitRequest(world));
@@ -1489,6 +1533,7 @@ test("ATLAS-06 rollback：回退世界与绑定游标，账本保留，变体重
   await fresh.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await fresh.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await fresh.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+  await fresh.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
 
   // 回合 A：swipeId null 首次提交 → 时间 418.07 → 430.07
   const first = await fresh.handle("POST", "/turns/commit", commitRequest(world));
@@ -1539,6 +1584,7 @@ test("ATLAS-06 rollback：只允许回退最近一条未回退回合；未知楼
   await fresh.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await fresh.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await fresh.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+  await fresh.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
 
   // 两个连续回合：A（msg-10/msg-11）→ B（msg-14/msg-15）
   tick += 1;
@@ -1795,6 +1841,8 @@ async function setupWithTower(scripts = null, options = {}) {
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(parsed)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(parsed) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+  // S0/S10 用 v2 封套草稿：协议严格按设置分派（C04），这里显式声明 v2
+  await core.handle("PUT", "/settings", { action: "runtime.update", worldTurnProtocol: "v2" }, { local: true });
   return { store, core, world: parsed, carrier, fetcher };
 }
 
@@ -1856,6 +1904,9 @@ test("v2 discoveries disappear from state, nearby and map after rollback", async
   };
   let hiddenRefDraft;
   const { core, world, carrier } = await setup([() => openAiResponse(draft), () => openAiResponse(hiddenRefDraft)]);
+  // 本用例的草稿是 v2 封套（schemaVersion=2）：协议显式声明 v2
+  const protocolSet = await core.handle("PUT", "/settings", { action: "runtime.update", worldTurnProtocol: "v2" }, { local: true });
+  equal(protocolSet.body.data?.worldTurnProtocol, "v2", "前置：协议已切到 v2");
   const request = commitRequest(world, { userText: "我去新塔。", assistantText });
   const committed = await core.handle("POST", "/turns/commit", request);
   equal(committed.body.ok, true, "v2 提交成功");
@@ -2608,3 +2659,353 @@ test("S5/S6 补刀：被挡在视图外的子图也留具名诊断（幽灵引�
   equal(collisionDiagnostics.length, 1, "诊断码 MAP_PROJECTION_NAME_COLLISIONS_KEPT 出现一次");
   equal(collisionDiagnostics[0].details?.count, 1, "诊断 details.count = 1");
 });
+
+// ---------------------------------------------------------------------------
+// C04（§2，作者已裁决）：协议严格按设置分派 —— 不猜、不偷偷换管线
+// ---------------------------------------------------------------------------
+
+test("C04：设置 v1 收到 v2 封套 → PROTOCOL_MISMATCH，世界零写入、游标不动", async () => {
+  const v2Draft = {
+    schemaVersion: 2, baseRevision: CURRENT_TIME, duration: 1,
+    evidence: [{ id: "ev1", sourceId: "msg:a", quote: "潮门" }],
+    discoveries: { locations: [], characters: [] },
+    scene: { resolution: "unknown", locationRef: null, transition: "stay", evidenceIds: ["ev1"] },
+    identityUpdates: [], npcUpdates: [], relationUpdates: [], memories: [], worldFlags: [],
+    events: [], mapScaleHints: [], summary: "没有变化。",
+  };
+  const fetcher = makeFetch([() => openAiResponse(v2Draft)]);
+  const store = createMemoryDocumentStore();
+  const world = buildWorld();
+  const { core, carrier } = sessionCore(store, { fetchFn: fetcher.fetchFn });
+  const pointsBefore = (world.points ?? []).length;
+  await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
+  await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
+  await putV1Settings(core);
+
+  const result = await core.handle("POST", "/turns/commit", commitRequest(world));
+  equal(result.status, 409, "协议不符 → 409（设置冲突，不是模型格式错）");
+  equal(result.body.error.code, ATLAS_ERROR_CODES.PROTOCOL_MISMATCH, "具名错误码 PROTOCOL_MISMATCH");
+  // 严格分派 = **不再**把 v2 文本偷偷交给 v1 管线（旧「混合模式」会这么干并成功提交）
+  equal(carrier.session.world.points.length, pointsBefore, "世界零写入");
+  equal(carrier.session.binding.worldTimeCursor, CURRENT_TIME, "时间游标不动");
+  equal(Object.keys(carrier.session.turns).length, 0, "不落回合映射");
+  const mismatchLogs = core.logs().filter((log) => log.kind === "world-turn-protocol-mismatch");
+  equal(mismatchLogs.length, 1, "留一条具名诊断（不再无声无息）");
+});
+
+test("C04：设置 v2 收到行增量块 → PROTOCOL_MISMATCH；切到 table-delta-v1 后同一响应即可提交", async () => {
+  const assistantText = "你推门进了花房。";
+  const editReply = [
+    "<atlasEdit>",
+    JSON.stringify({ table: "location", op: "add", ref: "new:loc:greenhouse", name: "花房", parentRef: "loc:9001", description: "玻璃房", quote: "你推门进了花房" }),
+    "</atlasEdit>",
+  ].join("\n");
+  const fetcher = makeFetch([() => openAiTextResponse(editReply), () => openAiTextResponse(editReply)]);
+  const store = createMemoryDocumentStore();
+  const base = buildWorld();
+  const regionId = String((base.regions ?? [])[0]?.id ?? "");
+  const parsed = parseWorld(JSON.parse(JSON.stringify({
+    ...base,
+    points: [...(base.points ?? []), { id: 9001, name: "钟楼", x: 10, y: 10, regionId }],
+  })));
+  ok(parsed !== null, "带钟楼的世界可解析");
+  const rawCore = createAtlasServerCore({ store, fetchFn: fetcher.fetchFn, now: () => NOW });
+  const carrier = createSessionCarrier(rawCore);
+  const core = carrierAsCore(carrier);
+  await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(parsed)) }, { local: true });
+  await core.handle("POST", "/bindings", { action: "bind", binding: binding(parsed) });
+  await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+  await core.handle("PUT", "/settings", { action: "runtime.update", worldTurnProtocol: "v2" }, { local: true });
+
+  const refused = await core.handle("POST", "/turns/commit",
+    commitRequest(parsed, { userText: "我进花房。", assistantText }));
+  equal(refused.status, 409, "v2 设置 + 行增量块 → 拒绝");
+  equal(refused.body.error.code, ATLAS_ERROR_CODES.PROTOCOL_MISMATCH, "具名错误码");
+  ok(/表格增量|table-delta/.test(String(refused.body.error.message)), "错误信息指出该切到哪个协议");
+
+  // 切到新协议后，同一形状的响应立刻可提交（协议是设置级开关，不需要改提示词里的封套）
+  await core.handle("PUT", "/settings", { action: "runtime.update", worldTurnProtocol: "table-delta-v1" }, { local: true });
+  const accepted = await core.handle("POST", "/turns/commit",
+    commitRequest(parsed, { userText: "我进花房。", assistantText }));
+  equal(accepted.body.data?.receipt?.status, "committed", "切协议后提交成功");
+  const names = carrier.session.tables.branches.canon.locations.map((row) => row.name);
+  ok(names.includes("花房"), "新地点进了三表");
+});
+
+// ---------------------------------------------------------------------------
+// E01/E03/E05：三表与既有写入口 / 回退的对账
+// ---------------------------------------------------------------------------
+
+/**
+ * 取该分支的三表行数（读**会话文档**——0.9.42 起 world / binding / maps / tables 全住会话，
+ * 全局 store 里只剩 settings / pending）；没有三表时返回 null。
+ */
+function tableRows(session, worldId, branchKey = "canon") {
+  const doc = session.tables;
+  if (!doc || doc.worldId !== worldId) return null;
+  const branch = doc.branches ? doc.branches[branchKey] : null;
+  if (!branch) return null;
+  return {
+    locations: (branch.locations ?? []).length,
+    characters: (branch.characters ?? []).length,
+    items: (branch.items ?? []).length,
+    names: (branch.locations ?? []).map((row) => row.name),
+  };
+}
+
+/** 行增量协议的设置（连接 + 协议；迁移由第一次请求的懒迁移完成）。 */
+async function putTableDeltaSettings(core) {
+  await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+  await core.handle("PUT", "/settings", { action: "runtime.update", worldTurnProtocol: "table-delta-v1" }, { local: true });
+}
+
+/** 带钟楼（9001）的世界：行增量块的合法父引用。 */
+function worldWithTower() {
+  const base = buildWorld();
+  const regionId = String((base.regions ?? [])[0]?.id ?? "");
+  const parsed = parseWorld(JSON.parse(JSON.stringify({
+    ...base,
+    points: [...(base.points ?? []), { id: 9001, name: "钟楼", x: 10, y: 10, regionId }],
+  })));
+  ok(parsed !== null, "带钟楼的世界可解析");
+  return parsed;
+}
+
+test("E05 rollback：三表随世界一起回退到回合前（不重复提交、不残留未来事实）", async () => {
+  const sink = { events: [] };
+  const store = createMemoryDocumentStore();
+  const parsed = worldWithTower();
+  const assistantText = "你推门进了花房，看门人抱着一盏铜灯。";
+  const editReply = [
+    "<atlasEdit>",
+    JSON.stringify({ table: "location", op: "add", ref: "new:loc:greenhouse", name: "花房", parentRef: "loc:9001", description: "钟楼侧面的玻璃房", quote: "你推门进了花房" }),
+    JSON.stringify({ table: "character", op: "add", ref: "new:npc:keeper", name: "看门人", locationRef: "new:loc:greenhouse", thought: "防着生人", actionTendency: "守在花房", quote: "看门人" }),
+    JSON.stringify({ table: "item", op: "add", ref: "new:item:lamp", name: "铜灯", locationRef: "new:loc:greenhouse", description: "一盏铜灯", quote: "一盏铜灯" }),
+    "</atlasEdit>",
+  ].join("\n");
+  const rawCore = createAtlasServerCore({
+    store,
+    // 行增量块**本身就是纯文本**（不是 JSON 草稿）：不能再套一层 JSON.stringify
+    fetchFn: makeFetch([() => openAiTextResponse(editReply)]).fetchFn,
+    now: () => NOW,
+    onDiagnostic: (event) => sink.events.push(event),
+  });
+  const carrier = createSessionCarrier(rawCore);
+  const core = carrierAsCore(carrier);
+  await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(parsed)) }, { local: true });
+  await core.handle("POST", "/bindings", { action: "bind", binding: binding(parsed) });
+  await putTableDeltaSettings(core);
+
+  // ① 只读 /state 触发懒迁移（不落盘），提交后三表随同一次会话响应落盘
+  const stateBefore = (await core.handle("GET", "/state/chat-a")).body.data;
+  equal(tableRows(carrier.session, parsed.id), null, "只读 /state 不把三表写进会话（懒迁移只挂内存）");
+  ok(!(stateBefore.tableMap?.world?.points ?? []).some((point) => point.name === "花房"), "迁移后的世界图还没有花房");
+  const first = await core.handle("POST", "/turns/commit",
+    commitRequest(parsed, { userText: "我进钟楼侧面的花房。", assistantText }));
+  equal(first.status, 200, "行增量提交返回 200");
+  equal(first.body.data?.receipt?.status, "committed", "回执 committed");
+  const afterCommit = tableRows(carrier.session, parsed.id);
+  ok(afterCommit !== null, "提交后该分支的三表随同一次会话响应落盘");
+  ok(afterCommit.names.includes("花房"), "地点表里有新地点");
+  equal(afterCommit.items, 1, "物品表 1 行");
+  const stateCommitted = (await core.handle("GET", "/state/chat-a")).body.data;
+  ok((stateCommitted.tableMap?.submaps?.["9001"]?.points ?? []).some((point) => point.name === "花房"),
+    "花房挂在钟楼子图（parentLocationId → 子图）");
+  ok((stateCommitted.tableMap?.nearby?.entries ?? []).some((entry) => entry.name === "看门人"),
+    "附近目录里能看到新人物");
+  const turnBeforeRollback = Object.values(carrier.session.turns).find((item) => item.assistantMessageId === "msg-11");
+  ok(turnBeforeRollback?.tablesBefore?.tables, "回合映射冻结了回合前三表快照（E05）");
+
+  // ② 回退：三表与 tableMap 都必须回到回合前
+  const rolled = await core.handle("POST", "/turns/rollback", { chatId: "chat-a", assistantMessageId: "msg-11" });
+  equal(rolled.status, 200, "回退返回 200");
+  equal(rolled.body.data?.tables?.reasonCode, "TABLES_ROLLED_BACK", "回退走快照路径（不是重建兜底）");
+  const afterRollback = tableRows(carrier.session, parsed.id);
+  ok(afterRollback !== null, "回退后三表仍在（不是被删掉）");
+  equal(afterRollback.items, 0, "回退后物品表回到 0 行（铜灯不再存在）");
+  ok(!afterRollback.names.includes("花房"), "回退后地点表不含花房");
+  const stateRolled = (await core.handle("GET", "/state/chat-a")).body.data;
+  ok(!(stateRolled.tableMap?.submaps?.["9001"]?.points ?? []).some((point) => point.name === "花房"),
+    "回退后子图不再显示花房");
+  ok(!(stateRolled.tableMap?.nearby?.entries ?? []).some((entry) => entry.name === "看门人"),
+    "回退后附近不再显示看门人");
+  equal(String(stateRolled.currentTime ?? ""), String(CURRENT_TIME), "回退后时间游标回到回合前");
+
+  // ③ 同一消息重新提交：不累加物品、不重复建地点
+  const retry = await core.handle("POST", "/turns/commit",
+    commitRequest(parsed, { userText: "我进钟楼侧面的花房。", assistantText }));
+  equal(retry.body.data?.receipt?.status, "committed", "重试提交再次成功");
+  const afterRetry = tableRows(carrier.session, parsed.id);
+  equal(afterRetry.names.filter((name) => name === "花房").length, 1, "重试后花房只有一行（不重复建点）");
+  equal(afterRetry.items, 1, "重试后物品仍 1 行（不累加）");
+
+  // ④ 回退必须留痕：不能静默把三表留在「未来」
+  const rollbackDiagnostics = sink.events.filter((entry) => entry.code === "WORLD_TURN_TABLE_ROLLBACK");
+  ok(rollbackDiagnostics.length >= 1, "三表回退记具名诊断（E05）");
+  ok(rollbackDiagnostics.some((entry) => entry.details?.reasonCode === "TABLES_ROLLED_BACK"),
+    "诊断里带回退来源（快照 / 重建）");
+});
+
+test("E01：新导入的世界懒迁移出三表，且不伪造「起点」与当前位置", async () => {
+  const store = createMemoryDocumentStore();
+  const world = buildWorld();
+  const { core, carrier } = await sessionCore(store, { fetchFn: makeFetch([]).fetchFn });
+  await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
+  await core.handle("POST", "/bindings", { action: "bind", binding: binding(world, { currentLocationId: null }) });
+  const state = (await core.handle("GET", "/state/chat-a")).body.data;
+  ok(state.tableMap, "首次读取就有三表投影通道（A08 懒迁移）");
+  const names = (state.tableMap?.world?.points ?? []).map((point) => point.name);
+  ok(names.includes("雪线驿站"), "真实地点进了世界图");
+  ok(!names.includes("起点"), "初始世界不伪造「起点」占位");
+  equal(state.tableMap?.current?.locationId ?? null, null, "没有位置游标 → 当前地点为空");
+  equal(state.currentLocationId ?? null, null, "旧字段同样不假装有位置");
+  equal(carrier.session.tables ?? null, null, "只读 /state 不把三表写进会话");
+  await core.handle("POST", "/worlds/move-author", { chatId: "chat-a", entityId: "chronicle-c1", toPointId: "4104" });
+  equal(carrier.session.tables.worldId, world.id, "三表 worldId 与会话世界一致");
+  equal(carrier.session.binding.worldId, world.id, "绑定世界未被覆盖");
+});
+
+test("E07：行增量回合之后，有目标的 NPC 由后台行动真的走了（且逐轮推进，不瞬移）", async () => {
+  const store = createMemoryDocumentStore();
+  const parsed = worldWithTower();
+  /**
+   * 目标点必须**在同一个 0..100 格空间里、且离出发地不超过 60 格**才会真的走
+   * （计划 §3-E06：太远只更新行动、不瞬移）。`A03` 的迁移把根地点坐标直接当格序号
+   * （D-03：1 画布单位 = 1 格），所以这里挑一个坐标靠近钟楼 (10,10) 的既有根地点当目标。
+   */
+  const targetPoint = (parsed.points ?? []).find((point) => {
+    if (String(point.id) === "9001") return false;
+    const dx = Number(point.x) - 10;
+    const dy = Number(point.y) - 10;
+    return Number.isFinite(dx) && Number.isFinite(dy) && Math.hypot(dx, dy) <= 60;
+  });
+  ok(targetPoint, "夹具里存在离钟楼不超过 60 格的既有地点（后台行动的前提）");
+  const targetName = String(targetPoint.name);
+  // 先定位（observed：引文取自助手正文），再给"他打算去哪"（inferred：只改推测字段）
+  const editReply = [
+    "<atlasEdit>",
+    JSON.stringify({
+      table: "character", op: "set", ref: "npc:chronicle-c1",
+      patch: { locationRef: "loc:9001" },
+      basis: "observed", quote: "钟楼",
+    }),
+    JSON.stringify({
+      table: "character", op: "set", ref: "npc:chronicle-c1",
+      patch: { targetLocationRef: `loc:${String(targetPoint.id)}`, actionTendency: `去${targetName}` },
+      basis: "inferred",
+    }),
+    "</atlasEdit>",
+  ].join("\n");
+  const rawCore = createAtlasServerCore({
+    store,
+    fetchFn: makeFetch([() => openAiTextResponse(editReply)]).fetchFn,
+    now: () => NOW,
+  });
+  const carrier = createSessionCarrier(rawCore);
+  const core = carrierAsCore(carrier);
+  await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(parsed)) }, { local: true });
+  await core.handle("POST", "/bindings", { action: "bind", binding: binding(parsed) });
+  await putTableDeltaSettings(core);
+
+  // "半天" = 3 段，留出旅行预算
+  const committed = await core.handle("POST", "/turns/commit",
+    commitRequest(parsed, { userText: "我在钟楼里待了半天。", assistantText: "你环顾钟楼内部。" }));
+  equal(committed.body.data?.receipt?.status, "committed", "行增量提交成功");
+
+  const rows = carrier.session.tables.branches.canon;
+  const npc = rows.characters.find((row) => row.id === "npc:chronicle-c1");
+  ok(npc, "人物行存在");
+  const targetRow = rows.locations.find((row) => row.name === targetName);
+  ok(targetRow, "目标地点在表里");
+  // 后台行动在**同一回合内**执行：位置来源是程序推演（不是模型写的那次 inferred=unknown）
+  equal(npc.positionSource, "simulation", "位置来源 = 程序推演（后台行动真的跑了）");
+  const notes = String(committed.body.data?.receipt?.summary ?? "");
+  ok(/后台行动|在途|在路上|到位/.test(notes), `回执注记如实报告后台移动：实际「${notes}」`);
+  if (npc.targetLocationId === null) {
+    equal(npc.locationId, targetRow.id, "到位后落在目标地点");
+  } else {
+    equal(npc.locationId, null, "在途时位置未知（不假装还在出发地）");
+    ok(typeof npc.gridX === "number" && typeof npc.gridY === "number", "在途时有格坐标（地图上看得见他在路上）");
+    // 逐轮推进：下一回合继续走，不会被拉回出发点
+    const second = await core.handle("POST", "/turns/commit",
+      commitRequest(parsed, { userMessageId: "msg-20", assistantMessageId: "msg-21", userText: "又过了半天。", assistantText: "钟楼外传来脚步声。" }));
+    equal(second.body.data?.receipt?.status, "committed", "第二回合提交成功");
+    const after = carrier.session.tables.branches.canon.characters.find((row) => row.id === "npc:chronicle-c1");
+    equal(after.positionSource, "simulation", "第二回合仍在后台推进");
+    ok(
+      after.targetLocationId === null || (typeof after.gridX === "number" && after.gridX !== npc.gridX) || after.gridY !== npc.gridY,
+      "第二回合位置继续变化（没有被拉回出发点重新起步）",
+    );
+  }
+});
+
+test("E03 move-author：拖动纠偏同时改三表（否则下一回合被三表静默回退）", async () => {
+  const store = createMemoryDocumentStore();
+  const parsed = worldWithTower();
+  const editReply = [
+    "<atlasEdit>",
+    JSON.stringify({ table: "location", op: "add", ref: "new:loc:greenhouse", name: "花房", parentRef: "loc:9001", description: "钟楼侧面的玻璃房", quote: "你推门进了花房" }),
+    "</atlasEdit>",
+  ].join("\n");
+  const rawCore = createAtlasServerCore({
+    store,
+    fetchFn: makeFetch([() => openAiTextResponse(editReply)]).fetchFn,
+    now: () => NOW,
+  });
+  const carrier = createSessionCarrier(rawCore);
+  const core = carrierAsCore(carrier);
+  await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(parsed)) }, { local: true });
+  await core.handle("POST", "/bindings", { action: "bind", binding: binding(parsed) });
+  await putTableDeltaSettings(core);
+
+  const committed = await core.handle("POST", "/turns/commit",
+    commitRequest(parsed, { userText: "我进钟楼侧面的花房。", assistantText: "你推门进了花房。" }));
+  equal(committed.body.data?.receipt?.status, "committed", "行增量提交成功（三表已建立）");
+  const row = carrier.session.tables.branches.canon.characters.find((item) => item.id === "npc:chronicle-c1");
+  ok(row, "迁移后人物表里有 chronicle-c1");
+  ok(typeof row.locationId === "string", "人物行有位置");
+  const fromPointId = String(row.locationId).replace(/^loc:/, "");
+  ok(fromPointId !== "4104", "初始位置不是目标地点（否则测不到变化）");
+
+  const moved = await core.handle("POST", "/worlds/move-author", {
+    chatId: "chat-a", entityId: "chronicle-c1", toPointId: "4104",
+  });
+  equal(moved.status, 200, "纠偏 200");
+  equal(moved.body.data?.tables?.status, "synced", "纠偏同步了三表（不是 skipped）");
+  const rowAfter = carrier.session.tables.branches.canon.characters.find((item) => item.id === "npc:chronicle-c1");
+  equal(rowAfter.locationId, "loc:4104", "人物表位置已跟到目标地点");
+  equal(rowAfter.mapId, "world", "地图归属跟着位置走");
+  const tableMap = (await core.handle("GET", "/state/chat-a")).body.data.tableMap;
+  ok((tableMap?.nearby?.entries ?? []).some((entry) => entry.name === "薇尔·星环"),
+    "拖动后「附近」按三表口径反映新位置");
+  ok(core.logs().filter((log) => log.kind === "world-move-author").length >= 1, "纠偏日志仍在");
+});
+
+test("E03 move-author：新聊天（懒迁移后）拖动也同步三表，且不凭空造实体", async () => {
+  const fetcher = makeFetch([]);
+  const store = createMemoryDocumentStore();
+  const world = buildWorld();
+  const { core, carrier } = await sessionCore(store, { fetchFn: fetcher.fetchFn });
+  await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
+  await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
+  await core.handle("GET", "/state/chat-a");
+  ok(tableRows(carrier.session, world.id) === null, "只读 /state 不落盘三表（只在内存）");
+
+  const result = await core.handle("POST", "/worlds/move-author", {
+    chatId: "chat-a", entityId: "chronicle-c1", toPointId: "4104",
+  });
+  equal(result.status, 200, "纠偏照常成功");
+  equal(result.body.data?.tables?.status, "synced", "本次请求内的三表按新世界补齐");
+  equal(
+    carrier.session.world.characterStates.find((st) => st.characterId === "chronicle-c1" && (st.branchId ?? null) === CANON)?.currentPointId,
+    "4104",
+    "世界侧纠偏生效",
+  );
+  const rowsAfter = tableRows(carrier.session, world.id);
+  ok(rowsAfter !== null, "拖动后三表随响应落盘（写请求本来就带会话）");
+  const moved = carrier.session.tables.branches.canon.characters.find((item) => item.id === "npc:chronicle-c1");
+  equal(moved.locationId, "loc:4104", "三表位置跟到目标地点");
+  ok(!carrier.session.tables.branches.canon.locations.some((item) => item.name === "起点"),
+    "三表里没有伪造的「起点」占位");
+});
+

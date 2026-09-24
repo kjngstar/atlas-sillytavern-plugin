@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
 
-import { atlasSessionWriteGuard } from "../index.js";
+import { atlasSessionWriteGuard, createEmptyAtlasSession, isValidAtlasSession, writeAtlasSession } from "../index.js";
 import { buildWorldFromTemplate, getDemoTemplate } from "../lib/demo-events.ts";
 import { parseWorld } from "../lib/world-schema.ts";
 import { upsertEntityRecord } from "../lib/world-definition.ts";
@@ -136,6 +136,11 @@ async function setup(fetchScripts, overrides = {}) {
   assert.equal(bindResult.status, 200, "绑定成功");
   const settingsResult = await core.handle("PUT", "/settings", { worldTurn: presetFixture() }, { local: true });
   assert.equal(settingsResult.status, 200, "推演预设配置成功");
+  // C04（§2）：协议严格按设置分派。本文件的草稿是 v1 形态（GOOD_DRAFT），协议必须显式声明 v1。
+  const protocolResult = await core.handle(
+    "PUT", "/settings", { action: "runtime.update", worldTurnProtocol: "v1" }, { local: true },
+  );
+  assert.equal(protocolResult.status, 200, "推进协议设为 v1");
   return { store, core, world, fetcher, carrier };
 }
 
@@ -168,6 +173,62 @@ test("T01 守卫：当前聊天身份缺失（切换瞬间 metadata 尚未就位
   assert.equal(atlasSessionWriteGuard("chat-a", null, "chat-a"), false);
   assert.equal(atlasSessionWriteGuard("chat-a", undefined, "chat-a"), false);
   assert.equal(atlasSessionWriteGuard("chat-a", "", "chat-a"), false);
+});
+
+// ---------------------------------------------------------------------------
+// A07 会话写回：三表随同一份 chatMetadata 落盘 + 写失败明确报错
+// ---------------------------------------------------------------------------
+
+/** 假酒馆上下文：记录 saveMetadata 次数，可注入失败。 */
+function fakeContext(options = {}) {
+  const ctx = {
+    chatMetadata: options.chatMetadata === undefined ? {} : options.chatMetadata,
+    saveCalls: 0,
+    async saveMetadata() {
+      ctx.saveCalls += 1;
+      if (options.saveFails) throw new Error("存档失败（磁盘满）");
+    },
+  };
+  return { ctx, get: () => ctx };
+}
+
+test("A07 空会话含 tables 字段，且旧会话（无 tables）仍被判定合法", () => {
+  const empty = createEmptyAtlasSession();
+  assert.equal(empty.tables, null);
+  assert.equal(empty.schemaVersion, 1);
+  const legacy = { schemaVersion: 1, rev: 2, binding: null, world: { id: "w1" }, maps: null, scene: null, turns: {}, geoAuto: {} };
+  assert.equal(isValidAtlasSession(legacy), true, "未迁移聊天必须继续可用");
+});
+
+test("A07 写回：三表与其余会话字段一次落盘，只调一次 saveMetadata", async () => {
+  const { ctx, get } = fakeContext();
+  const session = {
+    ...createEmptyAtlasSession(),
+    rev: 5,
+    world: { id: "w1" },
+    binding: { chatId: "c1", worldId: "w1" },
+    tables: {
+      schemaVersion: 1, worldId: "w1",
+      branches: { canon: { locations: [{ id: "loc:1", name: "钟楼" }], characters: [], items: [] } },
+    },
+  };
+  assert.equal(await writeAtlasSession(get, session), true);
+  assert.equal(ctx.saveCalls, 1, "只触发一次存档");
+  assert.equal(ctx.chatMetadata.atlas.tables.branches.canon.locations[0].name, "钟楼");
+  assert.equal(ctx.chatMetadata.atlas.binding.chatId, "c1", "三表与绑定在同一份会话里");
+});
+
+test("A07 写回失败必须抛错，不静默假装成功", async () => {
+  const noMetadata = fakeContext({ chatMetadata: null });
+  await assert.rejects(() => writeAtlasSession(noMetadata.get, createEmptyAtlasSession()), /chatMetadata/);
+
+  const saveFails = fakeContext({ saveFails: true });
+  await assert.rejects(() => writeAtlasSession(saveFails.get, createEmptyAtlasSession()), /存档失败/);
+
+  const badShape = fakeContext();
+  await assert.rejects(() => writeAtlasSession(badShape.get, { schemaVersion: 99 }), /会话形状非法/);
+  await assert.rejects(() => writeAtlasSession(badShape.get, null), /会话形状非法/);
+  assert.equal(badShape.ctx.chatMetadata.atlas, undefined, "被拒的写入不得留下半截文档");
 });
 
 // ---------------------------------------------------------------------------

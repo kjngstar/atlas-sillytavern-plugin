@@ -165,6 +165,8 @@ test("ATLAS-07 场景 B + swipe + 多聊天：完整旅程一条龙", async () =
   const store = createMemoryDocumentStore();
   const { core, world, carrier } = await setup(store, fetcher.fetchFn);
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
+  // C04（§2）：协议严格按设置分派。旅程用 v1 形态草稿（GOOD_DRAFT），协议显式声明 v1。
+  await core.handle("PUT", "/settings", { action: "runtime.update", worldTurnProtocol: "v1" }, { local: true });
 
   // --- 场景 B：正常回合 ---
   const prepared = await core.handle("POST", "/turns/prepare", {

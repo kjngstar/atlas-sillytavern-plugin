@@ -147,6 +147,34 @@ test("geo/adopt：成功提炼 → 加地区加点、修订追加、只增不改
   );
 });
 
+test("E02 geo/adopt：提炼出的地点必须同时进三表（否则地图不长、模型引用不到）", async () => {
+  const { carrier, core, fetchCalls } = await makeCore({
+    fetchScripts: [() => openAiResponse(EXTRACTION_JSON)],
+  });
+  // 先懒迁移出三表（A08 在请求路径上挂到会话）
+  await core.handle("GET", "/state/chat-1");
+  const result = await adopt(core);
+  assert.equal(result.status, 200, "提炼成功");
+  assert.equal(result.body.data.pointsAdded, 2);
+  assert.equal(result.body.data.tables?.status, "synced", "回执如实报告三表已补齐");
+  assert.equal(result.body.data.tables?.added?.locations, 2, "两个新地点补进地点表");
+
+  // 第二次请求（本次提炼是写请求，三表随响应落盘）
+  const tables = carrier.session.tables?.branches?.canon;
+  assert.ok(tables, "该分支有三表");
+  const names = tables.locations.map((row) => row.name);
+  assert.ok(names.includes("避风树洞"), "新地点进了地点表");
+  assert.ok(names.includes("无名石碑"), "第二个新地点也进了地点表");
+  // 三表行 id 用旧点 id（D-05 方案），与地图视图口径一致
+  const treeHole = carrier.session.world.points.find((p) => p.name === "避风树洞");
+  assert.ok(names.length === tables.locations.length, "地点表行数与提取结果一致");
+  assert.ok(
+    tables.locations.some((row) => row.id === `loc:${treeHole.id}`),
+    "行 id 与旧世界点 id 对齐（loc:<pointId>）",
+  );
+  assert.equal(fetchCalls.length, 1, "仍然只发一次模型请求（补三表零额外请求）");
+});
+
 test("geo/adopt：第二次提炼同名 → 0 增量，全部跳过", async () => {
   const { core, fetchCalls } = await makeCore({
     fetchScripts: [() => openAiResponse(EXTRACTION_JSON), () => openAiResponse(EXTRACTION_JSON)],

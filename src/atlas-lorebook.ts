@@ -24,6 +24,12 @@
 
 import type { World } from "../lib/world-schema.ts";
 import { ATLAS_ERROR_CODES, AtlasError, type AtlasTurnReceipt } from "./atlas-contract.ts";
+import {
+  ATLAS_ITEM_DESTROYED_STATUS,
+  type AtlasCharacterRow,
+  type AtlasLocationRow,
+  type AtlasThreeTablesV1,
+} from "./atlas-tables.ts";
 
 // ---------------------------------------------------------------------------
 // 有界上限
@@ -44,6 +50,12 @@ export const ATLAS_LOREBOOK_LIMITS = {
   COMMENT_CHARS: 96,
   /** 书名最大字符（含前缀） */
   BOOK_NAME_CHARS: 72,
+  /** E08：三表上下文里最多列几位身边人物 */
+  TABLE_CHARACTERS_MAX: 6,
+  /** E08：三表上下文里最多列几件地面物品 */
+  TABLE_ITEMS_MAX: 4,
+  /** E08：三表上下文单行最大字符 */
+  TABLE_LINE_CHARS: 160,
 } as const;
 
 /** Atlas 条目 comment 前缀（识别 / 回喂排除 / 存量清理都按前缀）。 */
@@ -123,14 +135,84 @@ function stripEngineNotes(text: string): string {
 }
 
 /**
+ * E08：三表派生的一小段上下文（纯函数、有界、可重放）。
+ *
+ * 只取「玩家此刻真正相关」的三样东西，顺序固定（便于逐字节重放与人工核对）：
+ *   1. 当前位置链（含上级：在钟楼二楼的房间里，也要知道自己在钟楼）；
+ *   2. 当前地点在场人物的想法 / 行动倾向（这正是"下一轮这个人会怎么动"的依据）；
+ *   3. 当前地点的**地面**物品（持有物与已销毁物不列——持有关系在人物那一行上）。
+ * 条数超限时**如实写出还有多少**，不静默截断（与 D-02x 系列同一条纪律）。
+ */
+function buildTableContextLines(
+  tableDelta?: { tables: AtlasThreeTablesV1; branchKey: string; currentLocationId: string | null } | null,
+): string[] {
+  if (!tableDelta) return [];
+  const tables = tableDelta.tables;
+  const locationById = new Map(tables.locations.map((row) => [row.id, row]));
+  const currentRowId = tableDelta.currentLocationId === null || tableDelta.currentLocationId === undefined
+    ? null
+    : (String(tableDelta.currentLocationId).startsWith("loc:")
+        ? String(tableDelta.currentLocationId)
+        : `loc:${String(tableDelta.currentLocationId)}`);
+  const current = currentRowId === null ? null : locationById.get(currentRowId) ?? null;
+  if (!current) return [];
+  // 1) 位置链（自下而上，有界到 4 层——与子图深度上限同量级）
+  const chain: string[] = [];
+  let cursor: AtlasLocationRow | undefined = current;
+  const seen = new Set<string>();
+  while (cursor && chain.length < 4 && !seen.has(cursor.id)) {
+    seen.add(cursor.id);
+    chain.push(cursor.name);
+    cursor = cursor.parentLocationId === null ? undefined : locationById.get(cursor.parentLocationId);
+  }
+  const lines: string[] = [`位置链：${chain.reverse().join(" → ")}`];
+  // 2) 身边人物
+  const here = tables.characters.filter(
+    (row: AtlasCharacterRow) => row.locationId === current.id && row.presence === "present",
+  );
+  const shown = here.slice(0, ATLAS_LOREBOOK_LIMITS.TABLE_CHARACTERS_MAX);
+  for (const row of shown) {
+    const bits = [row.thought.trim() ? `想法：${row.thought.trim()}` : "", row.actionTendency.trim() ? `行动倾向：${row.actionTendency.trim()}` : ""]
+      .filter(Boolean)
+      .join("；");
+    lines.push(clip(`在场：${row.name}${bits ? `（${bits}）` : ""}`, ATLAS_LOREBOOK_LIMITS.TABLE_LINE_CHARS));
+  }
+  if (here.length > shown.length) lines.push(`在场：另有 ${here.length - shown.length} 位未列出`);
+  // 3) 地面物品
+  const groundItems = tables.items.filter(
+    (row) => row.locationId === current.id && row.holderCharacterId === null && row.status !== ATLAS_ITEM_DESTROYED_STATUS,
+  );
+  const shownItems = groundItems.slice(0, ATLAS_LOREBOOK_LIMITS.TABLE_ITEMS_MAX);
+  if (shownItems.length > 0) {
+    lines.push(clip(
+      `地面物品：${shownItems.map((row) => row.name).join("、")}${groundItems.length > shownItems.length ? ` 等 ${groundItems.length} 件` : ""}`,
+      ATLAS_LOREBOOK_LIMITS.TABLE_LINE_CHARS,
+    ));
+  }
+  return lines;
+}
+
+/**
  * commit 成功后，从世界状态派生滚动条目规划（0.9.40）。
  * - committed 才有条目；duplicate / failed → null（调用方跳过）。
  * - 每个 committed 回合（含零 effect——仅时间 / 位置推进）都产出同一条规划：
  *   writer 按 comment upsert 整体重写，「当前时间」永远最新（修复 0.9.39 及之前
  *   零 effect 回合不重写总览导致条目时间停在旧时段的矛盾）。
  * - 确定性：同世界状态 + 同回执 → 逐字节相同（可重放）。
+ *
+ * E08（可选第三参数）：`tableDelta` 存在时，条目**追加**三表派生的一小段上下文——
+ * 当前位置链、身边人物的想法与行动倾向、当前地点的地面物品。
+ * 纪律（计划 §3-E08「不要把所有三表写进酒馆正文，聊天分支隔离」）：
+ * 1. 只送**有限**条数（常量在 `ATLAS_LOREBOOK_LIMITS`，越界就截断并如实写"还有 N 位"）；
+ * 2. 只送与本轮相关的：当前地点链、该地点里的人、该地点的地面物品——
+ *    不做全库导出，也不是"把三张表贴进世界书"；
+ * 3. 分支隔离：只读 `branches[branchKey]` 这一份快照，绝不跨分支借未来事实。
  */
-export function buildLorebookPlans(world: World, receipt: AtlasTurnReceipt): AtlasLorebookPlans | null {
+export function buildLorebookPlans(
+  world: World,
+  receipt: AtlasTurnReceipt,
+  tableDelta?: { tables: AtlasThreeTablesV1; branchKey: string; currentLocationId: string | null } | null,
+): AtlasLorebookPlans | null {
   if (receipt.status !== "committed") return null;
   const index = buildNameIndex(world);
   const locationName = receipt.currentLocationId !== undefined && receipt.currentLocationId !== null
@@ -144,6 +226,7 @@ export function buildLorebookPlans(world: World, receipt: AtlasTurnReceipt): Atl
     "【世界动向】本条目由 Atlas 每轮推演后自动更新：以下是当前时间点的权威世界动向，进行剧情分析时以此最新数据为准，优先级高于其他背景设定。",
     `当前时间：第 ${String(receipt.currentTime)} 时段`,
     ...(locationName ? [`当前位置：${locationName}`] : []),
+    ...buildTableContextLines(tableDelta),
     "近期动向：",
     ...(recent.length > 0 ? recent : ["· （暂无已归档的世界变化）"]),
   ];

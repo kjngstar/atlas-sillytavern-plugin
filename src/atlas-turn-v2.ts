@@ -24,6 +24,7 @@ import { commitAtlasTurn, type AtlasWorldChangeDraft } from "./atlas-turn.ts";
 import { applyIdentityUpdates, resolveEntityByRef } from "./atlas-identity.ts";
 import { ATLAS_ERROR_CODES, AtlasError, atlasCommitIdempotencyKey, type AtlasTurnCommitRequest, type AtlasTurnReceipt } from "./atlas-contract.ts";
 import type { AtlasV2Draft } from "./atlas-contract-v2.ts";
+import { SUBMAP_DEPTH_MAX, SUBMAP_POINTS_MAX } from "./atlas-geo-apply.ts";
 
 export interface AtlasV2TurnInput {
   /** 已通过 parseAtlasWorldTurnDraftV2 的 v2 草稿 */
@@ -41,10 +42,14 @@ export interface AtlasV2TurnInput {
  * S3（0.9.55）：v2 子图深度与宽度上限。
  * DEPTH_MAX 表示**最多四张连续的子图**（世界图不算子图）：世界 → L1 → L2 → L3 → L4，
  * 即某地点沿 parentPointId 上溯最多 4 跳。
- * SIBLINGS_MAX 与 SUBMAP_POINTS_MAX（40）同口径，按「同一父下的直接子地点数」计。
+ * SIBLINGS_MAX 与 SUBMAP_POINTS_MAX 同口径，按「同一父下的直接子地点数」计。
+ *
+ * 单一权威（Round 15 收口）：这两个数字**只能有一处定义**——地图侧 `atlas-geo-apply.ts`
+ * 的 `SUBMAP_DEPTH_MAX` / `SUBMAP_POINTS_MAX`。这里改为别名导出，避免"提示词说 4 层、
+ * 校验按另一个数"的漂移（B01 的地点编辑也复用同一份）。
  */
-export const V2_SUBMAP_DEPTH_MAX = 4;
-export const V2_SUBMAP_SIBLINGS_MAX = 40;
+export const V2_SUBMAP_DEPTH_MAX = SUBMAP_DEPTH_MAX;
+export const V2_SUBMAP_SIBLINGS_MAX = SUBMAP_POINTS_MAX;
 
 export interface AtlasV2RefResolution {
   locations: Array<{ ref: string; pointId: number; created: boolean }>;

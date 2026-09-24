@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.56";
+export const ATLAS_EXTENSION_VERSION = "0.9.57";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -51,7 +51,7 @@ export function isValidAtlasSession(value) {
 }
 
 export function createEmptyAtlasSession() {
-  return { schemaVersion: ATLAS_SESSION_SCHEMA_VERSION, rev: 0, binding: null, world: null, maps: null, scene: null, turns: {}, geoAuto: {} };
+  return { schemaVersion: ATLAS_SESSION_SCHEMA_VERSION, rev: 0, binding: null, world: null, maps: null, scene: null, turns: {}, geoAuto: {}, tables: null };
 }
 
 /** 读取当前聊天会话文档（无则 null；绝不创建半截对象）。 */
@@ -61,13 +61,26 @@ function readAtlasSession(context) {
   return isValidAtlasSession(metadata[ATLAS_SESSION_KEY]) ? metadata[ATLAS_SESSION_KEY] : null;
 }
 
-/** 写回会话文档并触发酒馆存档（世界数据的唯一落盘路径）。 */
-async function writeAtlasSession(context, session) {
+/**
+ * 写回会话文档并触发酒馆存档（世界数据的唯一落盘路径）。
+ *
+ * A07：三表随同 `chatMetadata.atlas` **一次写回**（不另开存储、不额外 saveMetadata）；
+ * 旧会话没有 `tables` 字段照样合法（未迁移聊天兼容）；写失败必须明确抛错，
+ * 由调用方按 `SESSION_WRITE_FAILED` 记账——绝不静默返回假装写成功。
+ * 导出供测试（与 `atlasSessionWriteGuard` 同口径）。
+ */
+export async function writeAtlasSession(context, session) {
+  if (!isValidAtlasSession(session)) {
+    throw new Error("Atlas 会话写回被拒绝：会话形状非法（schemaVersion 不匹配）。");
+  }
   const ctx = context();
-  const metadata = ctx.chatMetadata;
-  if (!metadata || typeof metadata !== "object") return;
+  const metadata = ctx?.chatMetadata;
+  if (!metadata || typeof metadata !== "object") {
+    throw new Error("Atlas 会话写回失败：当前聊天没有可写的 chatMetadata。");
+  }
   metadata[ATLAS_SESSION_KEY] = session;
   if (typeof ctx.saveMetadata === "function") await ctx.saveMetadata();
+  return true;
 }
 
 /**
@@ -1067,6 +1080,74 @@ const NPC_REASON_LABELS = {
   random: "随机事件",
 };
 
+/**
+ * D04：位置来源 → 用户可读标签（口径 = `AtlasCharacterRow.positionSource`）。
+ * 「这条位置是怎么来的」是作者纠偏时最需要知道的一件事：正文观察 / 日程 / 程序模拟 / 你手动拖的。
+ */
+const POSITION_SOURCE_LABELS = {
+  narrative: "正文观察",
+  simulation: "程序推演",
+  manual: "作者手动",
+  routine: "日程",
+  unknown: "来源未知",
+};
+
+/**
+ * D05：`tableMap.nearby` 的人物索引（键 = 去掉 `npc:` 前缀的实体 id）。
+ *
+ * `nearby` 是**全量人物表**（含远方，按"是否在身边"排序），所以除了建索引还要标出
+ * `__isNear`：位置 = 当前地点，或当前地点的**子地点**（与 `projectTablesToMapView` 同一口径；
+ * 根地点之间不算相邻——两座城相距几十格）。`__` 前缀字段只在 UI 内部用，不落任何数据。
+ */
+function buildTableMapNpcIndex(d) {
+  const index = new Map();
+  const tableMap = d?.tableMap;
+  const entries = tableMap?.nearby?.entries;
+  if (!Array.isArray(entries) || entries.length === 0) return index;
+  const currentRowId = String(tableMap?.current?.locationId ?? d?.currentLocationId ?? "");
+  const chainIds = new Set((tableMap?.current?.chain ?? []).map((row) => String(row.id ?? "")));
+  const nearRowIds = new Set();
+  for (const row of chainIds) nearRowIds.add(row);
+  for (const row of entries) {
+    const locationId = String(row.locationId ?? "");
+    if (!locationId) continue;
+    if (locationId === currentRowId || chainIds.has(locationId)) nearRowIds.add(locationId);
+  }
+  for (const row of entries) {
+    const id = String(row.id ?? "").replace(/^npc:/, "");
+    if (!id) continue;
+    const locationId = row.locationId === null || row.locationId === undefined ? null : String(row.locationId);
+    const pointId = locationId === null ? null : locationId.replace(/^loc:/, "");
+    index.set(id, {
+      id,
+      name: String(row.name ?? ""),
+      pointId,
+      pointName: row.locationName ?? null,
+      presence: row.presence,
+      thought: row.thought ?? "",
+      actionTendency: row.actionTendency ?? "",
+      currentAction: row.currentAction ?? "",
+      positionSource: row.positionSource ?? null,
+      isProtagonist: row.isProtagonist === true,
+      fromTables: true,
+      __isNear: locationId !== null && nearRowIds.has(locationId),
+    });
+  }
+  return index;
+}
+
+/** D05：目录人物 + 三表人物合并（三表字段最后展开 —— 位置 / 在场 / 想法以三表为准）。 */
+function mergeNearbyNpc(npc, table) {
+  if (!table) return npc;
+  return {
+    ...npc,
+    ...table,
+    reason: npc.reason,
+    recentNarratives: npc.recentNarratives,
+    isProtagonist: npc.isProtagonist === true || table.isProtagonist === true,
+  };
+}
+
 /** 回执状态 → 用户可读标签（与 core 的 AtlasTurnReceiptStatus 对齐）。 */
 const STATUS_LABELS = {
   committed: "已提交",
@@ -1761,9 +1842,24 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       // 主角（服务端 isProtagonist，口径同 move-author）不在附近卡片里冒充 NPC；
       // 已离场者保留展示（卡片如实标「已离场」，不伪装在场）。
       const npcById = new Map(npcs.map((n) => [String(n.id ?? ""), n]));
+      /**
+       * D05：有 `tableMap` 时，**人物字段以三表为准**（想法 / 行动倾向 / 在场性 / 位置来源），
+       * 目录只补它独有的最近叙事与关联原因。三表里有、目录里还没有的人物也要出现
+       * （本轮刚被行增量记下的人不能因为目录投影滞后而消失）；已离场者不进"附近"。
+       */
+      const nearbyTableEntries = buildTableMapNpcIndex(d);
       const relevant = (Array.isArray(d.relevantNpcIds) ? d.relevantNpcIds : [])
         .map((id) => npcById.get(String(id)))
-        .filter((npc) => Boolean(npc) && npc.isProtagonist !== true);
+        .filter((npc) => Boolean(npc))
+        .map((npc) => mergeNearbyNpc(npc, nearbyTableEntries.get(String(npc.id ?? ""))))
+        .filter((npc) => npc.isProtagonist !== true && npc.presence !== "left");
+      // 三表里有、但既不在相关名单、也不在当前地点的人：不冒充"附近"，留给地点菜单全量查询
+      for (const [id, view] of nearbyTableEntries) {
+        if (npcById.has(id)) continue;
+        if (view.presence === "left" || view.isProtagonist) continue;
+        if (!view.__isNear) continue;
+        relevant.push(view);
+      }
       if (relevant.length === 0) {
         center.append(emptyBox("附近暂无已确认人物。"));
       } else {
@@ -1790,6 +1886,14 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
             detail.append(list);
           } else {
             detail.append(el("p", "aw-card__text", "动向：未记录"));
+          }
+          // D05：三表口径的想法 / 行动倾向 / 位置来源（有 tableMap 时才有；它们是"下一轮会怎么动"的依据）
+          const tableThought = String(npc.thought ?? "").trim();
+          const tableTendency = String(npc.actionTendency ?? "").trim();
+          if (tableThought) detail.append(el("p", "aw-card__text", `想法：${tableThought}`));
+          if (tableTendency) detail.append(el("p", "aw-card__text", `行动倾向：${tableTendency}`));
+          if (npc.positionSource && POSITION_SOURCE_LABELS[String(npc.positionSource)]) {
+            detail.append(el("p", "aw-card__text", `位置来源：${POSITION_SOURCE_LABELS[String(npc.positionSource)]}`));
           }
           card.append(detail);
           card.style.cursor = "pointer";
@@ -2089,11 +2193,12 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         scaleDetailEl.append(el("div", "aw-scale__row aw-scale__row--muted", "已锁定：AI 估计不会覆盖人工标定；重新填写并保存即可更新。"));
       }
     } else {
-      headRow.append(el("span", "aw-scale__cell", legacyScale ? "旧式比例尺（单位换算未知）" : "未标定"));
+      // D06：未标定时如实说明「按格计算」——距离标签与标尺都不假装有米制含义
+      headRow.append(el("span", "aw-scale__cell", legacyScale ? "未标定（按格计算）· 旧式比例尺" : "未标定（按格计算）"));
       scaleDetailEl.append(headRow);
       scaleDetailEl.append(el("div", "aw-scale__row aw-scale__row--muted", legacyScale
-        ? `旧值「1 格 ≈ ${legacyScale.distancePerCell}${legacyScale.unit ? ` ${legacyScale.unit}` : ""}」没有标准单位换算，不能画成米制标尺。可让 AI 按世界书与剧情重新判断，或直接填入每格米数。`
-        : "让 AI 按世界书与剧情判断这张图的实际范围，或直接填入每格米数（人工标定后锁定）。"));
+        ? `旧值「1 格 ≈ ${legacyScale.distancePerCell}${legacyScale.unit ? ` ${legacyScale.unit}` : ""}」没有标准单位换算，不能画成米制标尺；此前的距离一律按格数计算。可让 AI 按世界书与剧情重新判断，或直接填入每格米数。`
+        : "当前距离一律按格数计算（不假装知道一米有多远）。可让 AI 按世界书与剧情判断这张图的实际范围，或直接填入每格米数（人工标定后锁定）。"));
     }
     // AI 按钮：人工锁定值不可被 AI 覆盖（服务端同样拒绝，双保险）
     const aiBtn = el("button", "aw-btn aw-btn--ghost aw-scale__action", calibration?.locked ? "AI 重新判断（已锁定）" : calibration ? "AI 重新判断地图大小" : "AI 判断地图大小");
@@ -2732,6 +2837,89 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     return String(child.parentMapId ?? "world") === parentId;
   }
 
+  /**
+   * D04：三表行的取用口径（只在 `/state` 带 `tableMap` 时可用）。
+   *
+   * 为什么不能直接信 `npcDirectory.pointId`：行增量回合只改三表；目录字段有自己的投影路径，
+   * 两者口径不一致时面板会显示"人还在这儿"或"这儿没人"。位置以三表为准，目录只补它的独有字段
+   * （最近叙事 / reason / status），这样面板既不空、也不会撒谎。
+   */
+  function tableRowIdOf(entityId) {
+    const raw = String(entityId ?? "").trim();
+    if (!raw) return "";
+    return raw.startsWith("npc:") ? raw : `npc:${raw}`;
+  }
+
+  function tableMapNpcById(tableMap) {
+    const map = new Map();
+    for (const entry of tableMap?.nearby?.entries ?? []) {
+      const id = String(entry.id ?? "").replace(/^npc:/, "");
+      if (id) map.set(id, entry);
+    }
+    return map;
+  }
+
+  function tableMapObjectById(tableMap) {
+    const map = new Map();
+    for (const entry of tableMap?.objects?.entries ?? []) {
+      if (entry?.id) map.set(String(entry.id), entry);
+    }
+    return map;
+  }
+
+  /** 该地点在三表口径下的在场人物（`tableMap.nearby` 是全量人物表，含远方；这里按位置过滤）。 */
+  function tableNpcsAtLocation(tableMap, pointId) {
+    const rowId = String(pointId ?? "");
+    if (!rowId) return [];
+    return (tableMap?.nearby?.entries ?? []).filter(
+      (entry) => entry.presence !== "left" && String(entry.locationId ?? "").replace(/^loc:/, "") === rowId,
+    );
+  }
+
+  function tableObjectsAtLocation(tableMap, pointId) {
+    const rowId = String(pointId ?? "");
+    if (!rowId) return [];
+    return (tableMap?.objects?.entries ?? []).filter(
+      (entry) => String(entry.locationId ?? "").replace(/^loc:/, "") === rowId,
+    );
+  }
+
+  /** 三表行 → 面板读的目录形状（保留三表独有的想法 / 行动倾向 / 位置来源）。 */
+  function npcViewFromTableRow(entry, { pointName = null } = {}) {
+    return {
+      id: String(entry.id ?? "").replace(/^npc:/, ""),
+      name: String(entry.name ?? ""),
+      pointId: entry.locationId === null || entry.locationId === undefined
+        ? null
+        : String(entry.locationId).replace(/^loc:/, ""),
+      pointName: entry.locationName ?? pointName,
+      presence: entry.presence,
+      // D04：三表的三个文本字段各归各位，不再挤进 status 一个槽位
+      thought: entry.thought ?? "",
+      actionTendency: entry.actionTendency ?? "",
+      currentAction: entry.currentAction ?? "",
+      positionSource: entry.positionSource ?? null,
+      /** 目录独有字段（最近叙事 / reason / status）由调用方合并进来。 */
+      fromTables: true,
+    };
+  }
+
+  function objectViewFromTableRow(entry, { pointName = null } = {}) {
+    return {
+      id: String(entry.id ?? ""),
+      name: String(entry.name ?? ""),
+      type: "物品",
+      description: entry.description ?? "",
+      status: entry.status ?? "",
+      pointId: entry.locationId === null || entry.locationId === undefined
+        ? null
+        : String(entry.locationId).replace(/^loc:/, ""),
+      pointName: entry.locationName ?? pointName,
+      holderName: entry.holderName ?? null,
+      fromTables: true,
+    };
+  }
+
   function openMapPanel(point, { inSub, currentSub }, anchorEl = null) {
     const d = lastMapData;
     if (!mapPanel || !d) return;
@@ -2765,11 +2953,31 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     const actions = el("div", "aw-mappanel__actions");
     // 0.9.41 在场名单：当前地点上的人物 / 物品（npcDirectory / objectDirectory 按 pointId 分组）
     const d0 = lastMapData;
-    const hereNpcs = Array.isArray(d0?.npcDirectory)
-      // S9（0.9.55）：账本 presence=left 的人已经离场——「当前在这里」必须只列真在场的人
-      ? d0.npcDirectory.filter((n) => String(n.pointId ?? "") === String(point.id) && n.presence !== "left")
-      : [];
-    const hereObjects = Array.isArray(d0?.objectDirectory) ? d0.objectDirectory.filter((o) => String(o.pointId ?? "") === String(point.id)) : [];
+    // D04：有 `tableMap` 时，**位置与在场性以三表为准**（行增量回合只改三表）；
+    // 目录只补它独有的字段（最近叙事 / reason / status），避免"面板说人在、三表说人走"。
+    const panelTableMap = d0?.tableMap ?? null;
+    const tableNpcsHere = panelTableMap ? tableNpcsAtLocation(panelTableMap, point.id) : [];
+    const directoryNpcs = Array.isArray(d0?.npcDirectory) ? d0.npcDirectory : [];
+    const directoryById = new Map(directoryNpcs.map((n) => [String(n.id ?? ""), n]));
+    const hereNpcs = panelTableMap
+      ? tableNpcsHere.map((entry) => {
+          const view = npcViewFromTableRow(entry);
+          const rich = directoryById.get(view.id);
+          // 合并顺序很重要：三表字段**最后展开**（位置 / 在场性 / 想法以三表为准），
+          // 只从目录里取它独有的最近叙事与关联原因。
+          return rich ? { ...rich, ...view, recentNarratives: rich.recentNarratives, reason: rich.reason } : view;
+        })
+      : directoryNpcs.filter((n) => String(n.pointId ?? "") === String(point.id) && n.presence !== "left");
+    const tableObjectsHere = panelTableMap ? tableObjectsAtLocation(panelTableMap, point.id) : [];
+    const directoryObjects = Array.isArray(d0?.objectDirectory) ? d0.objectDirectory : [];
+    const objectById = new Map(directoryObjects.map((o) => [String(o.id ?? ""), o]));
+    const hereObjects = panelTableMap
+      ? tableObjectsHere.map((entry) => {
+          const view = objectViewFromTableRow(entry);
+          const rich = objectById.get(view.id);
+          return rich ? { ...rich, ...view } : view;
+        })
+      : directoryObjects.filter((o) => String(o.pointId ?? "") === String(point.id));
     const here = el("div", "aw-mappanel__here");
     const hereLabel = el("div", "aw-mappanel__here-label", `当前在这里（${hereNpcs.length + hereObjects.length}）`);
     here.append(hereLabel);
@@ -2863,6 +3071,12 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     const metaLines = [];
     if (npc.pointName) metaLines.push(`所在：${npc.pointName}`);
     if (npc.reason) metaLines.push(NPC_REASON_LABELS[String(npc.reason)] ?? String(npc.reason));
+    // D04：位置来源必须让人看见——作者纠偏 / 日程移动 / 正文观察，可信度不一样
+    if (npc.positionSource) {
+      metaLines.push(`位置来源：${POSITION_SOURCE_LABELS[String(npc.positionSource)] ?? String(npc.positionSource)}`);
+    }
+    if (npc.presence === "left") metaLines.push("已离场");
+    if (npc.presence === "unknown") metaLines.push("在场情况未知");
     if (metaLines.length > 0) mapPanel.append(el("div", "aw-mappanel__meta", metaLines.join(" · ")));
 
     // 0.9.49（M02 跨层定位）：人物在别的地图层时（无锚点标点），一键跳回世界图并打开所在地点
@@ -2878,12 +3092,24 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       mapPanel.append(locate);
     }
 
-    // 动向：CharacterState 状态摘要
-    if (npc.status) {
+    // 动向：三表的 currentAction（模型观察到的即时动作）优先，退回 CharacterState 状态摘要
+    const actionText = String(npc.currentAction ?? "").trim();
+    if (actionText || npc.status) {
       const status = el("div", "aw-mappanel__section");
       status.append(el("div", "aw-mappanel__section-label", "动向"));
-      status.append(el("div", "aw-mappanel__section-text", String(npc.status)));
+      status.append(el("div", "aw-mappanel__section-text", actionText || String(npc.status)));
       mapPanel.append(status);
+    }
+    // D04：想法与行动倾向是三表的独立字段（旧实现把它们挤进 status 一个槽位）；
+    // 它们正是「下一轮这个人会怎么动」的依据，必须能单独读到。
+    const thoughtText = String(npc.thought ?? "").trim();
+    const tendencyText = String(npc.actionTendency ?? "").trim();
+    if (thoughtText || tendencyText) {
+      const inner = el("div", "aw-mappanel__section");
+      inner.append(el("div", "aw-mappanel__section-label", "心思"));
+      if (thoughtText) inner.append(el("div", "aw-mappanel__section-text", `想法：${thoughtText}`));
+      if (tendencyText) inner.append(el("div", "aw-mappanel__section-text", `行动倾向：${tendencyText}`));
+      mapPanel.append(inner);
     }
     // 想法：最近涉及该 NPC 的账本叙事
     const narratives = Array.isArray(npc.recentNarratives) ? npc.recentNarratives.filter(Boolean) : [];
@@ -2895,7 +3121,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       }
       mapPanel.append(thoughts);
     }
-    if (!npc.status && narratives.length === 0) {
+    if (!actionText && !npc.status && !thoughtText && !tendencyText && narratives.length === 0) {
       mapPanel.append(el("div", "aw-mappanel__here-empty", "暂无动向记录——推演推进后这里会出现该角色的想法与动向。"));
     }
     mapPanel.style.display = "";
@@ -2921,6 +3147,9 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     const metaLines = [];
     metaLines.push(`类型：${String(object.type)}`);
     if (object.pointName) metaLines.push(`所在：${object.pointName}`);
+    // D04：持有关系只存在于三表（D-02）——随身物品必须显示持有人，否则看起来像"凭空消失"
+    if (object.holderName) metaLines.push(`持有人：${String(object.holderName)}`);
+    if (object.status) metaLines.push(`状态：${String(object.status)}`);
     mapPanel.append(el("div", "aw-mappanel__meta", metaLines.join(" · ")));
 
     // 0.9.49（M02 跨层定位）：物品在别的地图层时（无锚点标点），一键跳回世界图并打开所在地点
@@ -2950,14 +3179,27 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     // 0.9.35 换聊天 / 换世界 → 子图视图栈立即作废（数据隔离，绝不让旧子图带进新卡）
     const viewKey = `${String(d.chatId ?? "")}|${String(d.worldId ?? "")}`;
     if (mapStackKey !== viewKey) {
+      // D05：切聊天清理不只作废子图栈——地点弹窗、建筑内名单、锚点与上一条 /state 也必须一起清，
+      // 否则新聊天的地图渲染出来之前，旧聊天的弹窗与名单还挂在界面上（跨聊天串档最直观的一种）。
       mapStack = [];
       mapStackKey = viewKey;
+      lastMapData = null;
       closeMapPanel();
+      if (interiorRoster) {
+        interiorRoster.innerHTML = "";
+        interiorRoster.style.display = "none";
+      }
     }
     lastMapData = d;
     mapLayer.innerHTML = "";
     const mapData = d.map ?? {};
-    const submaps = mapData.submaps && typeof mapData.submaps === "object" ? mapData.submaps : {};
+    // D03：已经懒迁移过的分支，`/state` 会带 `tableMap`（三表投影）。
+    // 世界图与子图都优先用它——世界图只含根地点、子图按父地点键挂载，与 A03/A04/D-20 的口径一致。
+    // 没有 `tableMap` 的旧会话（或 projection 为空）**完全走原来的逻辑**，行为一字不变。
+    const tableMap = d.tableMap && typeof d.tableMap === "object" ? d.tableMap : null;
+    const tableSubmaps = tableMap && tableMap.submaps && typeof tableMap.submaps === "object" ? tableMap.submaps : null;
+    const submapSource = tableSubmaps ?? (mapData.submaps && typeof mapData.submaps === "object" ? mapData.submaps : {});
+    const submaps = submapSource;
     const pointMeta = mapData.pointMeta && typeof mapData.pointMeta === "object" ? mapData.pointMeta : {};
     while (mapStack.length > 0) {
       const top = mapStack[mapStack.length - 1];
@@ -2973,9 +3215,18 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     const inSub = Boolean(currentSub);
     renderMapCrumb(d, view, currentSub);
 
-    const pointsAll = Array.isArray(mapData.points) ? mapData.points : [];
+    const legacyPointsAll = Array.isArray(mapData.points) ? mapData.points : [];
+    const tableWorldPoints = tableMap && Array.isArray(tableMap.world?.points)
+      ? tableMap.world.points
+        .filter((point) => !point.kind || point.kind === "location")
+        .map((point) => ({ id: point.id, name: point.name, x: point.x, y: point.y, regionId: point.regionId ?? null }))
+      : null;
+    const pointsAll = tableWorldPoints ?? legacyPointsAll;
+    const subPoints = inSub && Array.isArray(currentSub.points)
+      ? (tableMap ? currentSub.points.filter((point) => !point.kind || point.kind === "location") : currentSub.points)
+      : null;
     const points = inSub
-      ? currentSub.points
+      ? subPoints
       : regionFilter
         ? pointsAll.filter((p) => String(p.regionId ?? "") === regionFilter)
         : pointsAll;
@@ -2992,6 +3243,27 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       // 账本 presence=left 的人已经离场，不能出现在「建筑内」名单里冒充在场
       rosterNpcs = npcsAll.filter((n) => String(n.pointId ?? "") === ownerId && n.presence !== "left");
       objects = objectsAll.filter((o) => String(o.pointId ?? "") === ownerId);
+      if (tableMap) {
+        // D03：子图名单同样以三表为准——三表里有、目录里还没有的人 / 物品**照样列出**
+        // （行增量回合刚记下的人不能因为目录投影滞后就从名单消失），并按三表补
+        // 位置未知（只有建筑级归属、没有房间坐标）的那一份。
+        const knownNpcKeys = new Set();
+        for (const npc of rosterNpcs) {
+          knownNpcKeys.add(tableRowIdOf(npc.id));
+          knownNpcKeys.add(String(npc.id ?? ""));
+        }
+        const knownObjectIds = new Set(objects.map((o) => String(o.id ?? "")));
+        for (const entry of tableNpcsAtLocation(tableMap, ownerId)) {
+          const rowId = String(entry.id ?? "").startsWith("npc:") ? String(entry.id) : `npc:${String(entry.id ?? "")}`;
+          if (knownNpcKeys.has(rowId)) continue;
+          rosterNpcs = [...rosterNpcs, npcViewFromTableRow(entry)];
+        }
+        for (const entry of tableObjectsAtLocation(tableMap, ownerId)) {
+          if (entry.holderCharacterId !== null) continue;
+          if (knownObjectIds.has(String(entry.id ?? ""))) continue;
+          objects = [...objects, objectViewFromTableRow(entry)];
+        }
+      }
     } else {
       objects = regionFilter ? objectsAll.filter((o) => String(o.regionId ?? "") === regionFilter) : objectsAll;
     }
@@ -3130,7 +3402,37 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     }
 
     // S9（0.9.55）人物标点已删除（见上方 npcsAll 处说明）——此处只剩物品标点。
-    for (const object of objects) {
+    // D03：有 `tableMap` 时物品标点按三表口径画（世界图 + 子图都能画，持有物不地面化），
+    // 没有时完全走原来的目录路径（旧会话行为一字不变）。
+    // 注意 `已销毁` 与服务端 ATLAS_ITEM_DESTROYED_STATUS（src/atlas-tables.ts）是同一个字面量：
+    // 软删除的物品不该有地图图钉，但**必须**在物品面板里能看到它的状态。
+    if (tableMap && Array.isArray(tableMap.objects?.entries)) {
+      const viewMapId = inSub ? String(view.pointId) : "world";
+      const tableObjects = tableMap.objects.entries
+        // 三表口径：持有物（随身）与已销毁物不落地；没有精细格坐标的只进名单不画钉
+        .filter((entry) => entry.holderCharacterId === null)
+        .filter((entry) => !entry.status || entry.status !== "已销毁")
+        .filter((entry) => String(entry.mapId ?? "") === viewMapId)
+        .filter((entry) => typeof entry.gridX === "number" && typeof entry.gridY === "number");
+      for (const entry of tableObjects) {
+        const object = objectViewFromTableRow(entry);
+        const dot = el("button", "aw-object");
+        dot.type = "button";
+        dot.dataset.objId = String(object.id ?? "");
+        dot.style.left = `${Number(entry.gridX)}px`;
+        dot.style.top = `${Number(entry.gridY)}px`;
+        dot.title = `${String(object.name)}（${String(object.type)}）`;
+        dot.setAttribute("aria-label", `物品 ${object.name}，点击查看详情`);
+        dot.append(el("span", "aw-object__gem"));
+        dot.append(el("span", "aw-object__name", String(object.name)));
+        dot.addEventListener("click", (e) => {
+          e.stopPropagation();
+          openObjectPanel(object, dot);
+        });
+        mapLayer.append(dot);
+      }
+    }
+    for (const object of tableMap ? [] : objects) {
       if (inSub || object.x === null || object.y === null) continue;
       // 0.9.41 物品标点 = 紫色小方块：点击出物品 popover
       const dot = el("button", "aw-object");
@@ -3808,7 +4110,11 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       ],
       [
         "推进协议",
-        `v${String(settingsV2?.worldTurnProtocol ?? "v2").replace(/^v/, "")}`,
+        // C07：当前值要写清是哪一个（表格增量不能显示成 "vtable-delta-v1"）
+        // 0.9.57：新装默认已是 table-delta-v1，缺省显示也必须跟它一致
+        String(settingsV2?.worldTurnProtocol ?? "table-delta-v1") === "table-delta-v1"
+          ? "表格增量（table-delta-v1）"
+          : `v${String(settingsV2?.worldTurnProtocol ?? "table-delta-v1").replace(/^v/, "")}`,
       ],
     ];
     for (const [label, value] of sceneStatusRows) {
@@ -3891,16 +4197,47 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         sceneBtn.disabled = false;
       }
     });
-    const protocolBtn = el("button", "aw-btn aw-btn--ghost", String(settingsV2?.worldTurnProtocol ?? "v2") === "v1" ? "切换到 v2 协议" : "回退 v1 协议（逃生门）");
-    protocolBtn.type = "button";
-    protocolBtn.setAttribute("aria-label", "切换推进输出协议（v2 为默认新封套；v1 为旧契约逃生门）");
-    protocolBtn.addEventListener("click", async () => {
-      const next = String(settingsV2?.worldTurnProtocol ?? "v2") === "v1" ? "v2" : "v1";
+    // C07：协议三选项（v1 旧契约逃生门 / v2 完整封套 / table-delta-v1 三表行增量）。
+    // 显示当前值；切到行增量时，如果活动提示词预设是作者自定义的旧模板，必须**明确提示**
+    // 输出协议可能与选择不符（§2：不能默默切）。
+    const PROTOCOL_OPTIONS = [
+      { value: "table-delta-v1", label: "表格增量（三表行增量，缺省）" },
+      { value: "v2", label: "v2 完整封套" },
+      { value: "v1", label: "v1 旧契约（逃生门）" },
+    ];
+    const currentProtocol = ["v1", "v2", "table-delta-v1"].includes(String(settingsV2?.worldTurnProtocol))
+      ? String(settingsV2?.worldTurnProtocol) : "table-delta-v1";
+    const protocolSelect = el("select", "aw-input aw-input--select");
+    protocolSelect.setAttribute("aria-label", "推进输出协议");
+    for (const option of PROTOCOL_OPTIONS) {
+      const node = el("option", "", option.label);
+      node.value = option.value;
+      if (option.value === currentProtocol) node.selected = true;
+      protocolSelect.append(node);
+    }
+    protocolSelect.addEventListener("change", async () => {
+      const next = protocolSelect.value;
+      if (next === currentProtocol) return;
+      const activeSegments = Array.isArray(settingsV2?.promptPresets)
+        ? settingsV2.promptPresets.find((preset) => preset.id === settingsV2?.activePromptPresetId)
+        : null;
+      const customPrompt = Boolean(activeSegments && Array.isArray(activeSegments.segments) && activeSegments.segments.length > 0);
+      if (next === "table-delta-v1" && customPrompt) {
+        const confirmed = typeof window === "undefined" || typeof window.confirm !== "function"
+          ? true
+          : window.confirm("当前活动的提示词预设是你自己保存的模板，它可能不是「三表行增量」的输出格式。\n切换后如果模型仍按旧格式输出，本轮会被判为协议不符并拒绝提交。\n\n继续切换？（建议切到「表格增量」后把该预设重写为行增量格式，或改用内置默认）");
+        if (!confirmed) {
+          protocolSelect.value = currentProtocol;
+          return;
+        }
+      }
       const ok = await sendSettingsCommand({ action: "runtime.update", worldTurnProtocol: next });
-      setStatus(ok ? `推进协议已切换为 ${next}。` : settingsStatus, ok ? "ok" : "error");
+      setStatus(ok
+        ? `推进协议已切换为 ${next}${next === "table-delta-v1" ? "（内置提示词与三表上下文已按新协议装配）" : ""}。`
+        : settingsStatus, ok ? "ok" : "error");
       renderCenter();
     });
-    sceneActions.append(sceneBtn, protocolBtn);
+    sceneActions.append(sceneBtn, protocolSelect);
 
     const checkWorldBtn = el("button", "aw-btn aw-btn--ghost", "检查当前世界");
     checkWorldBtn.type = "button";

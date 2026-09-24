@@ -15,9 +15,10 @@
 
 import { sanitizeDiagnostic, type AtlasDiagnostic } from "./atlas-diagnostics.ts";
 import type { EntityRecord, World } from "../lib/world-schema.ts";
-import { parseWorld } from "../lib/world-schema.ts";
+import { parseWorld, branchScopeForStory } from "../lib/world-schema.ts";
 import { adjudicateAtlasDraft } from "./atlas-adjudicate.ts";
 import { settleNpcSchedules, mergeSettlementNotes, isProtagonistRole } from "./atlas-schedule.ts";
+import { planBackgroundMoves } from "./atlas-background.ts";
 import { applyContentReplaceRules } from "./atlas-content-replace.ts";
 import { ledgerForBranch, appendStateEvent } from "../lib/world-ledger.ts";
 import { branchLineage } from "../lib/world-lineage.ts";
@@ -47,7 +48,7 @@ import { computeAtlasRelevance, atlasTravelPreview } from "./atlas-relevance.ts"
 import { prepareAtlasTurn, commitAtlasTurn, provisionReferencedCharacters } from "./atlas-turn.ts";
 import { applyAtlasV2Turn } from "./atlas-turn-v2.ts";
 import { parseAtlasWorldTurnDraftV2, type AtlasV2Draft } from "./atlas-contract-v2.ts";
-import { buildSubMapTreeFromDraft, projectWorldSubmaps, sanitizeMapDoc, SUBMAP_FRAME_DEFAULT, validateSubmapDepth } from "./atlas-geo-apply.ts";
+import { buildSubMapTreeFromDraft, projectWorldSubmaps, sanitizeMapDoc, SUBMAP_FRAME_DEFAULT, validateSubmapDepth, type AtlasMapDoc } from "./atlas-geo-apply.ts";
 import { detectStartPlaceholder, resolveSceneStatus, retireStartPlaceholder, sanitizeSceneDoc, sceneDocKey, type SceneDoc } from "./atlas-scene.ts";
 import { validateScaleResponse, applyScaleHintsToDoc, type FrameRef, roundPositiveScale } from "./atlas-scale.ts";
 import { buildLorebookPlans } from "./atlas-lorebook.ts";
@@ -57,7 +58,9 @@ import {
   callAtlasWorldTurnApi,
   extractJsonObject,
   parseAtlasWorldTurnDraft,
+  DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA,
   DEFAULT_PROMPT_SEGMENTS_V2,
+  TABLE_DELTA_BOOTSTRAP_TASK_CONTENT,
   V2_BOOTSTRAP_TASK_CONTENT,
   isV2ProtocolEnabled,
   type AtlasWorldTurnPromptInput,
@@ -68,12 +71,18 @@ import {
   applySettingsCommand,
   createDefaultSettingsV2,
   migrateAtlasSettings,
+  normalizeWorldTurnProtocol,
   resolveWorldTurnPreset,
   sanitizeSettingsV2,
   settingsViewV2,
   type AtlasServerSettingsV2,
   type AtlasSettingsCommand,
 } from "./atlas-settings.ts";
+import { validateAtlasTables, validateAtlasTablesStore, cloneAtlasTables, characterRowId, locationRowId, pointIdFromLocationRowId, ATLAS_ITEM_DESTROYED_STATUS, type AtlasCharacterRow, type AtlasLocationRow, type AtlasTablesStoreV1, type AtlasThreeTablesV1 } from "./atlas-tables.ts";
+import { migrateLegacyToTables, tablesToLegacyWorld } from "./atlas-table-migration.ts";
+import { applyAtlasEditText } from "./atlas-table-delta.ts";
+import { projectTablesToMapView } from "./atlas-table-map-view.ts";
+import { extractAtlasTimeIntent } from "./atlas-time-intent.ts";
 
 // ---------------------------------------------------------------------------
 // 存储契约
@@ -130,6 +139,12 @@ export interface AtlasSessionDoc {
   scene: unknown | null;
   turns: Record<string, unknown>;
   geoAuto: Record<string, unknown>;
+  /**
+   * A05：三表快照（按分支，见 `src/atlas-tables.ts`）。
+   * null = 旧会话（尚未迁移）或 tables 校验未通过——两种情况的处理完全不同，
+   * 因此解析结果另带 `tablesError`，调用方不得用 `tables === null` 推断「需要迁移」。
+   */
+  tables: AtlasTablesStoreV1 | null;
 }
 
 export function createEmptySessionDoc(): AtlasSessionDoc {
@@ -142,17 +157,45 @@ export function createEmptySessionDoc(): AtlasSessionDoc {
     scene: null,
     turns: {},
     geoAuto: {},
+    tables: null,
   };
+}
+
+/** A05：tables 的具名迁移错误（拒绝使用损坏数据，但绝不改写旧会话原文）。 */
+export type AtlasSessionTablesErrorCode =
+  | "TABLE_SESSION_CORRUPT"
+  | "TABLE_SESSION_WORLD_MISMATCH"
+  | "TABLE_SESSION_NO_WORLD";
+
+export interface AtlasSessionTablesError {
+  code: AtlasSessionTablesErrorCode;
+  path: string;
+}
+
+export interface AtlasSessionParseResult {
+  session: AtlasSessionDoc;
+  /** 会话原文（未解析）：tables 损坏时调用方必须原样保留它，不得回写空会话。 */
+  raw: unknown;
+  /** 未通过校验的原始 tables（不存在时为 undefined）；仅供导出 / 排障，绝不进引擎。 */
+  rawTables: unknown;
+  /** 具名错误；null = 没有 tables（旧会话）或 tables 合法。 */
+  tablesError: AtlasSessionTablesError | null;
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** 宽容解析：任何损坏形状按空会话处理（绝不抛错、绝不破坏浏览器侧数据）。 */
-export function parseAtlasSessionDoc(raw: unknown): AtlasSessionDoc {
+/**
+ * 宽容解析：任何损坏形状按空会话处理（绝不抛错、绝不破坏浏览器侧数据）。
+ * A05：三表单独校验——损坏时 session.tables 保持 null，并把具名错误交给调用方，
+ * 附带原文与原始 tables，供「保留旧数据 + 明确提示」的路径使用。
+ */
+export function parseAtlasSessionDocDetailed(raw: unknown): AtlasSessionParseResult {
   const session = createEmptySessionDoc();
-  if (!isPlainRecord(raw) || raw.schemaVersion !== ATLAS_SESSION_SCHEMA_VERSION) return session;
+  const rawTables = isPlainRecord(raw) ? raw.tables : undefined;
+  const result: AtlasSessionParseResult = { session, raw, rawTables, tablesError: null };
+  if (!isPlainRecord(raw) || raw.schemaVersion !== ATLAS_SESSION_SCHEMA_VERSION) return result;
   session.rev = typeof raw.rev === "number" && Number.isFinite(raw.rev) && raw.rev >= 0 ? Math.floor(raw.rev) : 0;
   if (isPlainRecord(raw.turns)) {
     for (const [key, value] of Object.entries(raw.turns).slice(0, SESSION_TURNS_MAX)) {
@@ -168,10 +211,33 @@ export function parseAtlasSessionDoc(raw: unknown): AtlasSessionDoc {
   session.world = raw.world ?? null;
   session.maps = raw.maps ?? null;
   session.scene = raw.scene ?? null;
-  return session;
+
+  // tables 校验必须在 world 解析之后：跨世界判定要用会话绑定的世界 ID
+  if (rawTables !== undefined && rawTables !== null) {
+    const worldId = idOfDoc(session.world);
+    if (worldId.length === 0) {
+      result.tablesError = { code: "TABLE_SESSION_NO_WORLD", path: "$.tables" };
+    } else {
+      const validation = validateAtlasTablesStore(rawTables, { expectedWorldId: worldId });
+      if (validation.ok) {
+        session.tables = rawTables as AtlasTablesStoreV1;
+      } else {
+        const first = validation.errors[0]!;
+        result.tablesError = {
+          code: first.code === "CROSS_WORLD" ? "TABLE_SESSION_WORLD_MISMATCH" : "TABLE_SESSION_CORRUPT",
+          path: first.path,
+        };
+      }
+    }
+  }
+  return result;
 }
 
-/** 深拷贝（JSON 口径；响应本来就要过 JSON，不可序列化值按 undefined 丢弃）。 */
+export function parseAtlasSessionDoc(raw: unknown): AtlasSessionDoc {
+  return parseAtlasSessionDocDetailed(raw).session;
+}
+
+/** 深拷贝（JSON 口径；响应本来就要过 JSON，不可序列化值按 undefined 丢弃）。tables 随会话一起拷贝。 */
 export function cloneSessionDoc(session: AtlasSessionDoc): AtlasSessionDoc {
   try {
     return JSON.parse(JSON.stringify(session)) as AtlasSessionDoc;
@@ -202,7 +268,7 @@ export function createSessionOverlayStore(
   fallback: AtlasDocumentStore,
 ): AtlasDocumentStore & { changed(): boolean } {
   let mutated = false;
-  const OWNED_PREFIXES = ["world:", "binding:", "maps:", "scene:", "geo-auto:", "turn:"];
+  const OWNED_PREFIXES = ["world:", "binding:", "maps:", "scene:", "tables:", "geo-auto:", "turn:"];
 
   function worldName(): string | null {
     return session.world !== null ? `world:${idOfDoc(session.world)}` : null;
@@ -220,6 +286,13 @@ export function createSessionOverlayStore(
     if (session.scene === null) return null;
     const worldId = idOfDoc(session.world);
     return worldId ? "scene:" + worldId : null;
+  }
+
+  /** A06：三表快照的会话键（与 world / maps / scene 同一把世界锁）。 */
+  function tablesName(): string | null {
+    if (session.tables === null) return null;
+    const worldId = idOfDoc(session.world);
+    return worldId ? "tables:" + worldId : null;
   }
 
   return {
@@ -249,12 +322,10 @@ export function createSessionOverlayStore(
         return session.scene === null && idOfDoc(session.world) === name.slice("scene:".length)
           ? fallback.read(name) : null;
       }
-      if (name.startsWith("scene:")) {
-        if (sceneName() === name) {
-          session.scene = null;
-          mutated = true;
-        }
-        return;
+      if (name.startsWith("tables:")) {
+        // A06：三表没有旧独立文档可回退——会话里没有就是没有（旧会话由 A08 懒迁移）
+        const current = tablesName();
+        return current === name ? session.tables : null;
       }
       if (name.startsWith("geo-auto:")) {
         const worldId = name.slice("geo-auto:".length);
@@ -305,6 +376,20 @@ export function createSessionOverlayStore(
         mutated = true;
         return;
       }
+      if (name.startsWith("tables:")) {
+        const worldId = name.slice("tables:".length);
+        if (idOfDoc(session.world) !== worldId) {
+          throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "三表快照与当前会话世界不一致，拒绝写入。");
+        }
+        // 键与快照自带的 worldId 也必须一致，否则同一个会话里会同时存在两个世界身份
+        const valueWorldId = isPlainRecord(value) ? value.worldId : undefined;
+        if (typeof valueWorldId === "string" && valueWorldId !== worldId) {
+          throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "三表快照的 worldId 与会话世界不一致，拒绝写入。");
+        }
+        session.tables = value as AtlasTablesStoreV1 | null;
+        mutated = true;
+        return;
+      }
       if (name.startsWith("geo-auto:")) {
         session.geoAuto[name.slice("geo-auto:".length)] = value;
         mutated = true;
@@ -338,6 +423,13 @@ export function createSessionOverlayStore(
       if (name.startsWith("maps:")) {
         if (mapsName() === name) {
           session.maps = null;
+          mutated = true;
+        }
+        return;
+      }
+      if (name.startsWith("tables:")) {
+        if (tablesName() === name) {
+          session.tables = null;
           mutated = true;
         }
         return;
@@ -377,6 +469,8 @@ export function createSessionOverlayStore(
         if (maps && maps.startsWith(prefix)) names.push(maps);
         const scene = sceneName();
         if (scene && scene.startsWith(prefix)) names.push(scene);
+        const tables = tablesName();
+        if (tables && tables.startsWith(prefix)) names.push(tables);
         for (const worldId of Object.keys(session.geoAuto)) {
           const name = `geo-auto:${worldId}`;
           if (name.startsWith(prefix)) names.push(name);
@@ -388,10 +482,691 @@ export function createSessionOverlayStore(
   };
 }
 
+/**
+ * 该分支可见的世界：账本里由其他分支 / 未来回合创建的实体，按分支血缘与游标过滤掉。
+ * （原为 `createCoreInstance` 内的闭包，A08 抽到模块级，供懒迁移复用同一份口径。）
+ */
+async function visibleWorldForBindingWith(
+  store: AtlasDocumentStore,
+  world: World,
+  binding: AtlasChatBinding,
+): Promise<World> {
+  const keys = await store.list("turn:" + binding.chatId + ":");
+  if (keys.length === 0) return world;
+  const lineage = branchLineage(world, binding.branchId, binding.worldTimeCursor);
+  const cutoffs = new Map(lineage.segments.map((segment) => [segment.branchId, segment.cutoffAt]));
+  const trackedPoints = new Set<string>();
+  const trackedRegions = new Set<string>();
+  const trackedEntities = new Set<string>();
+  const visiblePoints = new Set<string>();
+  const visibleRegions = new Set<string>();
+  const visibleEntities = new Set<string>();
+  for (const key of keys) {
+    const doc = await store.read(key);
+    if (!isPlainRecord(doc)) continue;
+    const points = Array.isArray(doc.createdPointIds) ? doc.createdPointIds.map(String) : [];
+    const regions = Array.isArray(doc.createdRegionIds) ? doc.createdRegionIds.map(String) : [];
+    const entities = Array.isArray(doc.createdEntityIds) ? doc.createdEntityIds.map(String) : [];
+    for (const id of points) trackedPoints.add(id);
+    for (const id of regions) trackedRegions.add(id);
+    for (const id of entities) trackedEntities.add(id);
+    const recordedBranch = typeof doc.branchId === "string" ? doc.branchId : null;
+    const branch = (world.stories ?? []).find((story) => story.id === recordedBranch)?.mode === "canon"
+      ? null : recordedBranch;
+    const cutoff = cutoffs.get(branch);
+    const time = typeof doc.effectiveAt === "number" ? doc.effectiveAt : Infinity;
+    if (doc.rolledBack === true || cutoff == null || time > cutoff) continue;
+    for (const id of points) visiblePoints.add(id);
+    for (const id of regions) visibleRegions.add(id);
+    for (const id of entities) visibleEntities.add(id);
+  }
+  if (trackedPoints.size + trackedRegions.size + trackedEntities.size === 0) return world;
+  const showPoint = (id: string | number) => !trackedPoints.has(String(id)) || visiblePoints.has(String(id));
+  const showRegion = (id: string) => !trackedRegions.has(String(id)) || visibleRegions.has(String(id));
+  const showEntity = (id: string) => !trackedEntities.has(String(id)) || visibleEntities.has(String(id));
+  return {
+    ...world,
+    points: (world.points ?? []).filter((point) => showPoint(point.id)),
+    regions: (world.regions ?? []).filter((region) => showRegion(region.id)),
+    characters: (world.characters ?? []).filter((character) => showEntity(character.id)),
+    entityRecords: (world.entityRecords ?? []).filter((entity) => showEntity(entity.id)),
+    characterStates: (world.characterStates ?? []).filter((item) => showEntity(item.characterId)),
+  };
+}
+
+/**
+ * A08：真实旧会话的懒迁移入口（每个聊天只成功一次）。
+ *
+ * 纪律：
+ * - 只在「`session.tables === null` 且解析无 tables 错误」时迁移；**损坏的 tables 绝不迁移、
+ *   也绝不清空会话**（返回 `failed`，由 UI 提示用户导出 / 修复）。
+ * - 只有合法世界 + 合法绑定 + 能确定分支作用域才生成三表；否则 `skipped`。
+ * - 迁移输入是**该分支可见世界**（`visibleWorldForBindingWith`）+ 该分支游标，
+ *   因此新分支拿到的是分叉基线，不会偷取另一分支的未来事实。
+ * - 结果必须通过 A01 校验才写入；迁移结果**先挂到会话对象**（`session.tables`），
+ *   由本次请求正常使用；是否落盘交给调用方原有的 `overlay.changed()` 判定——
+ *   纯读请求（如 GET /state、只读检查）不得因此推 rev / 写 chatMetadata，
+ *   而任何真正的写请求都会把带三表的会话随响应带回浏览器持久化。
+ * - 重复运行不会新增行 / 改 ID：A03 是确定性纯函数，且首次成功后 `session.tables` 已存在。
+ */
+export type AtlasSessionTablesEnsureStatus = "migrated" | "skipped" | "failed";
+
+export interface AtlasSessionTablesEnsureOutcome {
+  status: AtlasSessionTablesEnsureStatus;
+  reasonCode: string;
+  branchKey?: string;
+  rows?: { locations: number; characters: number; items: number };
+  warnings?: number;
+}
+
+export async function ensureSessionTables(options: {
+  session: AtlasSessionDoc;
+  parse: AtlasSessionParseResult;
+  overlay: AtlasDocumentStore & { changed(): boolean };
+  store: AtlasDocumentStore;
+  now: () => number;
+  onDiagnostic?: (event: AtlasDiagnostic) => void;
+}): Promise<AtlasSessionTablesEnsureOutcome> {
+  const { session, parse } = options;
+  const emit = (
+    level: "debug" | "info" | "warn",
+    outcome: "success" | "skipped" | "failed",
+    code: string,
+    reasonCode: string,
+    count?: number,
+  ): void => {
+    try {
+      const diagnostic = sanitizeDiagnostic({
+        level, source: "storage", code, operation: "migration", phase: "session", outcome,
+        details: { reasonCode, ...(count !== undefined ? { count } : {}) },
+      }, options.now);
+      if (diagnostic) options.onDiagnostic?.(diagnostic);
+    } catch { /* 诊断绝不影响迁移本身 */ }
+  };
+  const skip = (reasonCode: string): AtlasSessionTablesEnsureOutcome => {
+    emit("debug", "skipped", "TABLE_MIGRATION_SKIPPED", reasonCode);
+    return { status: "skipped", reasonCode };
+  };
+  const fail = (reasonCode: string): AtlasSessionTablesEnsureOutcome => {
+    emit("warn", "failed", "TABLE_MIGRATION_FAILED", reasonCode);
+    return { status: "failed", reasonCode };
+  };
+
+  if (session.tables !== null) return skip("TABLE_ALREADY_PRESENT");
+  if (parse.tablesError !== null) return fail(parse.tablesError.code);
+  if (!isPlainRecord(session.world)) return skip("TABLE_NO_WORLD");
+  const world = parseWorld(session.world);
+  if (!world) return fail("TABLE_WORLD_UNPARSEABLE");
+  const bindingParsed = parseAtlasChatBinding(session.binding);
+  if (!bindingParsed.ok) return skip("TABLE_NO_BINDING");
+  const binding = bindingParsed.value;
+  if (String(world.id) !== binding.worldId) return fail("TABLE_WORLD_MISMATCH");
+  // 分支作用域：正史线 → null（基线）；IF → 该 IF 的 story id；"canon" 是基线保留键，不允许被 IF 占用
+  const scope = branchScopeForStory(world, binding.branchId);
+  if (scope === "canon") return fail("TABLE_BRANCH_KEY_RESERVED");
+  const branchKey = scope ?? "canon";
+
+  const visible = await visibleWorldForBindingWith(options.store, world, binding);
+  const mapsDoc = sanitizeMapDoc(await options.overlay.read(`maps:${binding.worldId}`).catch(() => null));
+  const migrated = migrateLegacyToTables({
+    world: visible,
+    maps: mapsDoc,
+    branchId: scope,
+    at: binding.worldTimeCursor,
+  });
+  const validation = validateAtlasTables(migrated.tables);
+  if (!validation.ok) {
+    emit("warn", "failed", "TABLE_MIGRATION_FAILED", "TABLE_MIGRATION_INVALID", validation.errors.length);
+    return { status: "failed", reasonCode: "TABLE_MIGRATION_INVALID" };
+  }
+  // 直接挂到会话对象（不调 overlay.write）：只读请求因此不会推 rev / 写 chatMetadata，
+  // engine 侧经覆盖层 `tables:<worldId>` 正常读到；任何写请求都会把这棵会话树带回浏览器落盘。
+  session.tables = {
+    schemaVersion: 1,
+    worldId: binding.worldId,
+    branches: { [branchKey]: migrated.tables },
+  };
+  const rows = {
+    locations: migrated.tables.locations.length,
+    characters: migrated.tables.characters.length,
+    items: migrated.tables.items.length,
+  };
+  emit("info", "success", "TABLE_MIGRATION_COMPLETE", "TABLE_MIGRATED", rows.locations + rows.characters + rows.items);
+  return { status: "migrated", reasonCode: "TABLE_MIGRATED", branchKey, rows, warnings: migrated.warnings.length };
+}
+
+/**
+ * E05：把三表重建到「回退后的世界」状态（纯函数 + 两次只读）。
+ *
+ * 用途：旧回合映射没有 `tablesBefore` 快照（行增量协议之前提交的回合）时，
+ * `/turns/rollback` 只能按**回退后可见的世界**重新迁移一次——不借用其他分支、
+ * 不制造空世界。与 A08 的懒迁移同一套口径（可见世界 + maps sidecar + 分支作用域）。
+ */
+async function rebuildBranchTablesFromWorld(options: {
+  store: AtlasDocumentStore;
+  binding: AtlasChatBinding;
+  world: World;
+  branchKey: string;
+}): Promise<{ ok: true; tables: AtlasThreeTablesV1 } | { ok: false; reasonCode: string }> {
+  // 分支作用域口径与 A08 完全一致：正史线 / 未知故事 → null（落保留键 "canon"）；
+  // 只有 IF 的 story id 恰好叫 "canon" 时才冲突（D-08）。注意 `branchKey === "canon"`
+  // 本身是**正常**情况（正史线就落在这个键上），不是错误。
+  const scope = branchScopeForStory(options.world, options.binding.branchId);
+  if (scope === "canon") return { ok: false, reasonCode: "TABLE_BRANCH_KEY_RESERVED" };
+  const mapsDoc = sanitizeMapDoc(await options.store.read(`maps:${options.binding.worldId}`).catch(() => null));
+  const visible = await visibleWorldForBindingWith(options.store, options.world, options.binding);
+  const migrated = migrateLegacyToTables({
+    world: visible,
+    maps: mapsDoc,
+    branchId: scope,
+    at: options.binding.worldTimeCursor,
+  });
+  const validation = validateAtlasTables(migrated.tables);
+  if (!validation.ok) return { ok: false, reasonCode: "TABLE_MIGRATION_INVALID" };
+  return { ok: true, tables: migrated.tables };
+}
+
+/**
+ * E03/E02/E01/E04：旧写入口（拖动纠偏 / 地理提炼 / 导入建世 / 场景定位）改完 `world` 之后，
+ * 把该分支的三表按**新世界**补齐一次。
+ *
+ * 为什么必须有这一步：计划 §1 定的唯一写入规则是「迁移完成后实体现值以三表为准」，
+ * 而 `table-delta` 回合只认三表。旧入口若只改世界镜像、不同步三表，下一次行增量回合
+ * 就会把作者的修正**静默回退**（拖动纠偏最典型：作者把 A 拖到 B，下一回合三表说 A 还在原地）。
+ *
+ * 合并纪律（**只增不覆盖**）：
+ * - 世界里**新出现**的地点行 / 人物行 → 追加进三表（地理提炼、纠偏顺手建档都靠这条）；
+ * - 已存在的行**只**在同一实体位置确实变了时更新位置四元组（locationId / mapId / gridX / gridY）；
+ * - 其余字段（想法 / 行动倾向 / 在场语义 / 持有人 / 物品状态）一律保留三表现值——
+ *   它们是三表独有的事实，重新推导会把它们抹成空，等于用镜像覆盖真值；
+ * - 不过 A01 校验就**不动三表**并记诊断，绝不让坏快照进会话；
+ * - 该分支本来没有三表时什么都不做（旧会话由 A08 懒迁移按同一份世界建立，语义一致）。
+ */
+async function syncBranchTablesFromWorld(options: {
+  store: AtlasDocumentStore;
+  binding: AtlasChatBinding;
+  world: World;
+  /** 诊断来源（`worlds/move-author`、`worlds/geo/adopt`…），只进日志不落业务数据。 */
+  source: string;
+}): Promise<{ status: "skipped" | "synced" | "failed"; reasonCode: string; added: { locations: number; characters: number }; moved: number }> {
+  const raw = await options.store.read(`tables:${options.binding.worldId}`).catch(() => null);
+  const doc = isPlainRecord(raw) ? (raw as unknown as AtlasTablesStoreV1) : null;
+  const branchKey = branchScopeForStory(options.world, options.binding.branchId) ?? "canon";
+  const existingRaw = doc?.branches?.[branchKey];
+  if (!isPlainRecord(existingRaw)) {
+    return { status: "skipped", reasonCode: "TABLE_BRANCH_MISSING", added: { locations: 0, characters: 0 }, moved: 0 };
+  }
+  const existing = existingRaw as unknown as AtlasThreeTablesV1;
+  const projected = await rebuildBranchTablesFromWorld({
+    store: options.store,
+    binding: options.binding,
+    world: options.world,
+    branchKey,
+  });
+  if (!projected.ok) {
+    return { status: "failed", reasonCode: projected.reasonCode, added: { locations: 0, characters: 0 }, moved: 0 };
+  }
+  const next = cloneAtlasTables(existing);
+  const locationIds = new Set(next.locations.map((row) => row.id));
+  const characterIds = new Set(next.characters.map((row) => row.id));
+  let addedLocations = 0;
+  let addedCharacters = 0;
+  let moved = 0;
+  for (const row of projected.tables.locations) {
+    if (locationIds.has(row.id)) continue;
+    next.locations.push(row);
+    addedLocations += 1;
+  }
+  for (const row of projected.tables.characters) {
+    if (characterIds.has(row.id)) continue;
+    next.characters.push(row);
+    addedCharacters += 1;
+  }
+  // 已有行：只认「同一实体、位置确实变了」（拖动纠偏的落点、日程未覆盖的移动）
+  const projectedCharacters = new Map(projected.tables.characters.map((row) => [row.id, row]));
+  for (const row of next.characters) {
+    const fresh = projectedCharacters.get(row.id);
+    if (!fresh) continue;
+    const changed = fresh.locationId !== row.locationId || fresh.mapId !== row.mapId
+      || fresh.gridX !== row.gridX || fresh.gridY !== row.gridY;
+    if (!changed) continue;
+    row.locationId = fresh.locationId;
+    row.mapId = fresh.mapId;
+    row.gridX = fresh.gridX;
+    row.gridY = fresh.gridY;
+    row.positionSource = fresh.positionSource;
+    moved += 1;
+  }
+  const validation = validateAtlasTables(next);
+  if (!validation.ok) {
+    return { status: "failed", reasonCode: "TABLE_SYNC_INVALID", added: { locations: 0, characters: 0 }, moved: 0 };
+  }
+  await options.store.write(`tables:${options.binding.worldId}`, {
+    schemaVersion: 1,
+    worldId: options.binding.worldId,
+    branches: { ...(doc?.branches ?? {}), [branchKey]: next },
+  });
+  return {
+    status: "synced",
+    reasonCode: "TABLE_SYNCED_FROM_WORLD",
+    added: { locations: addedLocations, characters: addedCharacters },
+    moved,
+  };
+}
+
+/**
+ * C03：`table-delta-v1` 的上下文装配（有界纯函数）。
+ *
+ * §2 要求每轮只送：当前位置与上级链、附近行简写、与本轮相关的人物及少量远方关键人物、
+ * 当前可见地图的 frame / 比例尺、上轮摘要（由 $6/$7 段负责）。
+ * 「5 张地图 / 50 人物不能每回合整库重发」——因此这里全部按常量截断，并把**实际截取数量**
+ * 返回给调用方记诊断，绝不静默裁掉。
+ */
+export const ATLAS_TABLE_CONTEXT_LIMITS = {
+  /** 整段文本上限（字符）；超出先裁远方背景，当前位置链与必要 ID 永不裁。 */
+  chars: 6000,
+  /** 当前位置周围列出多少个地点（子地点优先，其次同父兄弟）。 */
+  nearLocations: 24,
+  /** 同地点 / 附近人物上限。 */
+  characters: 30,
+  /** 远方关键人物（有行动倾向的）上限。 */
+  distantCharacters: 5,
+  /** 本轮可见物品上限。 */
+  items: 20,
+} as const;
+
+export interface AtlasTableContextInput {
+  tables: AtlasThreeTablesV1;
+  world: World;
+  binding: Pick<AtlasChatBinding, "currentLocationId" | "branchId" | "worldTimeCursor">;
+  maps?: AtlasMapDoc | null;
+}
+
+export interface AtlasTableContextResult {
+  text: string;
+  /** 实际被截掉的行数（记诊断用；不静默）。 */
+  truncated: { locations: number; characters: number; items: number };
+}
+
+/** 当前地点在表里的行（binding.currentLocationId 是旧世界点 id，需按行 id 方案换算）。 */
+function currentLocationRow(tables: AtlasThreeTablesV1, currentLocationId: string | null | undefined): AtlasLocationRow | null {
+  if (typeof currentLocationId !== "string" || currentLocationId.length === 0) return null;
+  const rowId = currentLocationId.startsWith("loc:") ? currentLocationId : locationRowId(currentLocationId);
+  return tables.locations.find((row) => row.id === rowId) ?? null;
+}
+
+/** 上级链：从根到当前地点（含自身）。 */
+function locationChain(tables: AtlasThreeTablesV1, row: AtlasLocationRow): AtlasLocationRow[] {
+  const byId = new Map(tables.locations.map((item) => [item.id, item]));
+  const chain: AtlasLocationRow[] = [];
+  const seen = new Set<string>();
+  let cursor: AtlasLocationRow | undefined = row;
+  while (cursor && !seen.has(cursor.id)) {
+    seen.add(cursor.id);
+    chain.unshift(cursor);
+    cursor = cursor.parentLocationId === null ? undefined : byId.get(cursor.parentLocationId);
+  }
+  return chain;
+}
+
+function characterLine(row: AtlasCharacterRow): string {
+  const bits = [`${row.id}=${row.name}`];
+  bits.push(`在场:${row.presence}`);
+  if (row.thought) bits.push(`想法:${row.thought}`);
+  if (row.actionTendency) bits.push(`倾向:${row.actionTendency}`);
+  if (row.currentAction) bits.push(`当前:${row.currentAction}`);
+  return bits.join("｜");
+}
+
+export function buildTableDeltaContext(input: AtlasTableContextInput): AtlasTableContextResult {
+  const tables = input.tables;
+  const current = currentLocationRow(tables, input.binding.currentLocationId);
+  const lines: string[] = [];
+  const truncated = { locations: 0, characters: 0, items: 0 };
+
+  // 1) 当前位置与上级链（永不被裁）
+  if (current) {
+    const chain = locationChain(tables, current);
+    lines.push(`【当前位置】${chain.map((row) => `${row.id}=${row.name}`).join(" > ")}`);
+    if (current.description) lines.push(`【当前地点描述】${current.description}`);
+  } else {
+    lines.push("【当前位置】未知（对照表里没有当前地点；不要猜，需要时先登记新地点）");
+  }
+
+  // 2) 附近行简写：子地点优先，其次同父兄弟
+  const currentId = current?.id ?? null;
+  const children = currentId === null ? [] : tables.locations.filter((row) => row.parentLocationId === currentId);
+  const siblings = currentId === null || current === null
+    ? []
+    : tables.locations.filter((row) => row.id !== currentId && row.parentLocationId === current.parentLocationId);
+  const near = [...children, ...siblings];
+  const nearShown = near.slice(0, ATLAS_TABLE_CONTEXT_LIMITS.nearLocations);
+  truncated.locations = Math.max(0, near.length - nearShown.length);
+  if (nearShown.length > 0) {
+    lines.push(`【附近地点】${nearShown.map((row) => `${row.id}=${row.name}${row.id === currentId ? "(当前)" : ""}`).join("；")}`);
+  }
+
+  // 3) 相关人物：当前位置及其子地点的人优先，再补少量有行动倾向的远方人物
+  const nearIds = new Set<string>([...(currentId === null ? [] : [currentId]), ...nearShown.map((row) => row.id)]);
+  const nearbyCharacters = tables.characters.filter((row) => row.locationId !== null && nearIds.has(row.locationId));
+  const distantCharacters = tables.characters.filter((row) =>
+    !nearbyCharacters.includes(row) && row.actionTendency.trim().length > 0);
+  const charactersShown = [
+    ...nearbyCharacters.slice(0, ATLAS_TABLE_CONTEXT_LIMITS.characters),
+    ...distantCharacters.slice(0, ATLAS_TABLE_CONTEXT_LIMITS.distantCharacters),
+  ];
+  truncated.characters = Math.max(0, tables.characters.length - charactersShown.length);
+  if (charactersShown.length > 0) {
+    lines.push(`【人物】\n${charactersShown.map(characterLine).join("\n")}`);
+  }
+
+  // 4) 本轮可见物品：附近地点上的地面物品 + 已列出人物手里的东西
+  const shownCharacterIds = new Set(charactersShown.map((row) => row.id));
+  const visibleItems = tables.items.filter((row) =>
+    row.status !== ATLAS_ITEM_DESTROYED_STATUS
+    && ((row.locationId !== null && nearIds.has(row.locationId))
+      || (row.holderCharacterId !== null && shownCharacterIds.has(row.holderCharacterId))));
+  const itemsShown = visibleItems.slice(0, ATLAS_TABLE_CONTEXT_LIMITS.items);
+  truncated.items = Math.max(0, visibleItems.length - itemsShown.length);
+  if (itemsShown.length > 0) {
+    lines.push(`【物品】${itemsShown.map((row) => row.holderCharacterId !== null
+      ? `${row.id}=${row.name}(由 ${row.holderCharacterId} 持有)`
+      : `${row.id}=${row.name}(在 ${row.locationId ?? "位置未知"})`).join("；")}`);
+  }
+
+  // 5) 当前地图的 frame 与比例尺（没有标定就写「未标定」，不编数字）
+  const mapId = current?.mapId ?? "world";
+  const frame = input.maps?.submaps?.[mapId]?.frame ?? { cols: 100, rows: 100, frameRevision: 1 };
+  const calibration = input.maps?.calibrations?.[mapId] ?? null;
+  lines.push(calibration
+    ? `【地图】${mapId}：${frame.cols}×${frame.rows} 格；每格 ${calibration.metersPerCell} 米（来源：${calibration.source}${calibration.locked ? "，人工锁定" : ""}）。不要自行换算距离或时间。`
+    : `【地图】${mapId}：${frame.cols}×${frame.rows} 格；未标定（按格计算）。不要自行编造距离或时间。`);
+
+  // 6) 可用 ID 对照（必要 ID 必须留下；其余按上限截断）
+  const locationRoster = tables.locations.slice(0, 80).map((row) => `${row.id}=${row.name}`).join("；");
+  const characterRoster = tables.characters.slice(0, 48).map((row) => `${row.id}=${row.name}`).join("；");
+  lines.push(`【地点 id 对照】${locationRoster || "（空）"}`);
+  lines.push(`【人物 id 对照】${characterRoster || "（空）"}`);
+  if (truncated.locations + truncated.characters + truncated.items > 0) {
+    lines.push(`【截断说明】地点 ${truncated.locations} 行、人物 ${truncated.characters} 行、物品 ${truncated.items} 行未随本轮下发（需要时用 ID 对照表里的正式 ID 引用）。`);
+  }
+
+  let text = lines.join("\n");
+  if (text.length > ATLAS_TABLE_CONTEXT_LIMITS.chars) {
+    // 超预算先裁远方背景（人物段之后的物品与截断说明），位置链与 ID 对照始终保留在最前面
+    const head = lines.slice(0, lines.findIndex((line) => line.startsWith("【人物】")) + 1).join("\n");
+    const rosterLines = lines.filter((line) => line.startsWith("【地点 id 对照】") || line.startsWith("【人物 id 对照】")).join("\n");
+    text = `${head}\n【预算提示】本轮上下文超限，已省略远处背景；请只依据上面的位置链与 ID 对照输出变化。\n${rosterLines}`;
+  }
+  return { text: text.slice(0, ATLAS_TABLE_CONTEXT_LIMITS.chars), truncated };
+}
+
+/**
+ * C05：`table-delta-v1` 的一次回合提交（纯函数，零 IO）。
+ *
+ * 顺序严格按计划 §3-C05：
+ *   候选三表（B06 应用行增量）
+ *   → 旧世界兼容镜像（A04）
+ *   → 旧 `settleNpcSchedules` **恰好一次**
+ *   → 把日程造成的 NPC 移动**回写三表**（否则"人物移动成功、附近不变"会重演）
+ *   → 最终候选再过一次 A01 校验（不过就整轮回退，调用方不会写任何东西）。
+ *
+ * 时间只由**用户文本里的显式时间词**决定（`extractAtlasTimeIntent`），绝不采信模型给的数字；
+ * 没有时间词就是 0 段（短对话默认不推进）。
+ */
+export interface AtlasTableDeltaCommitInput {
+  /** 该分支当前的三表快照（已通过 A01 校验）。 */
+  tables: AtlasThreeTablesV1;
+  /** 完整的 tables 文档（用于保留其他分支的快照）。 */
+  tablesDoc: AtlasTablesStoreV1 | null;
+  branchKey: string;
+  /** 镜像基底世界（已含回合前检查点）。 */
+  baseWorld: World;
+  binding: AtlasChatBinding;
+  request: { userText: string; assistantText: string };
+  /** 模型原始输出（内容替换规则由调用方先跑）。 */
+  text: string;
+  now: number;
+  protectedCharacterIds?: ReadonlySet<string>;
+}
+
+export interface AtlasTableDeltaCommitOk {
+  ok: true;
+  world: World;
+  receipt: AtlasTurnReceipt;
+  tablesDoc: AtlasTablesStoreV1;
+  branchKey: string;
+  applied: number;
+  rejected: number;
+  /** 日程结算已在本函数内完成——调用方**不要**再结算一次。 */
+  settled: true;
+  /** E07：后台自主行动的可播报摘要（人数口径；调用方转成 pushLog 事件）。 */
+  background: { at: number; kind: string; moves: number; skipped: number; scanned: number };
+}
+
+export interface AtlasTableDeltaCommitFailure {
+  ok: false;
+  code: "PARSE_REJECTED" | "DELTA_REJECTED";
+  message: string;
+  rejectedRows: Array<{ line: number; code: string; path?: string; ref?: string }>;
+}
+
+export function commitTableDeltaTurn(
+  input: AtlasTableDeltaCommitInput,
+): AtlasTableDeltaCommitOk | AtlasTableDeltaCommitFailure {
+  const parsed = applyAtlasEditText(
+    input.tables,
+    input.text,
+    { "msg:u": input.request.userText, "msg:a": input.request.assistantText },
+    input.protectedCharacterIds ? { protectedCharacterIds: input.protectedCharacterIds } : {},
+  );
+  if (parsed.parse.status === "rejected" || parsed.delta === null) {
+    return {
+      ok: false,
+      code: "PARSE_REJECTED",
+      message: `行增量块不可用（${parsed.parse.error?.code ?? "UNKNOWN"}）。本轮未提交，世界与时间未变化；可重试推演。`,
+      rejectedRows: parsed.parse.rejected.map((row) => ({ line: row.line, code: row.code, path: row.path, ...(row.ref === undefined ? {} : { ref: row.ref }) })),
+    };
+  }
+  const delta = parsed.delta;
+  if (!delta.ok) {
+    return {
+      ok: false,
+      code: "DELTA_REJECTED",
+      message: `候选三表未通过校验（${delta.error?.code ?? "UNKNOWN"} @ ${delta.error?.path ?? "$"}）。本轮未提交，可重试推演。`,
+      rejectedRows: delta.rejected.map((row) => ({ line: row.line, code: String(row.code ?? "REJECTED"), ...(row.path === undefined ? {} : { path: row.path }), ...(row.ref === undefined ? {} : { ref: row.ref }) })),
+    };
+  }
+  // §2 / T05：零条有效且不是 noop → 整轮失败，世界与时间都不变（哪怕只是引用错，也不"空提交"）
+  if (delta.applied.length === 0 && delta.rejected.length > 0) {
+    return {
+      ok: false,
+      code: "DELTA_REJECTED",
+      message: `行增量没有任何一行可应用（${delta.rejected.length} 行被拒）。本轮未提交，世界与时间未变化；可重试推演。`,
+      rejectedRows: delta.rejected.map((row) => ({ line: row.line, code: String(row.code ?? "REJECTED"), ...(row.path === undefined ? {} : { path: row.path }), ...(row.ref === undefined ? {} : { ref: row.ref }) })),
+    };
+  }
+
+  const previousTime = input.binding.worldTimeCursor;
+
+  // 兼容镜像（updatedAt 用回合前时间；真正的时间推进在下面算完再交给日程结算）
+  const mirrorForTravel = tablesToLegacyWorld({
+    tables: delta.tables,
+    world: input.baseWorld,
+    branchId: input.binding.branchId,
+    at: previousTime,
+  });
+  const playerRowId = input.binding.characterId ? characterRowId(String(input.binding.characterId)) : null;
+  const playerRow = playerRowId === null ? undefined : delta.tables.characters.find((row) => row.id === playerRowId);
+  const playerPointId = playerRow?.locationId ? pointIdFromLocationRowId(playerRow.locationId) : null;
+  const previousLocationId = input.binding.currentLocationId ?? null;
+  const currentLocationId = playerPointId !== null ? String(playerPointId) : previousLocationId;
+
+  // C06：时间只由「用户文本里的显式时间词」与「既有旅行规则」决定，模型给的数字一律忽略。
+  // 旅行估计复用共享 buildTravelHint（基线 + 地形 + 速度档），与裁定层同一条规则；
+  // 纪律也照抄裁定层：时间词是下限，旅程只加码不低估。
+  const timeIntent = extractAtlasTimeIntent(input.request.userText);
+  let travelPeriods = 0;
+  let travelNote = "";
+  // 地点归属守卫：同一次进入内部（父↔子 / 同父兄弟）不算旅行，不推进时间。
+  const locationAncestors = (pointId: string): Set<string> => {
+    const chain = new Set<string>();
+    const byPointId = new Map<string, AtlasLocationRow>();
+    for (const row of delta.tables.locations) {
+      const numeric = pointIdFromLocationRowId(row.id);
+      if (numeric !== null) byPointId.set(String(numeric), row);
+    }
+    let cursor = byPointId.get(pointId);
+    while (cursor && !chain.has(cursor.id)) {
+      chain.add(cursor.id);
+      cursor = cursor.parentLocationId === null ? undefined : delta.tables.locations.find((row) => row.id === cursor!.parentLocationId);
+    }
+    return chain;
+  };
+  const localMove = previousLocationId !== null && currentLocationId !== null
+    && (() => {
+      const from = locationRowId(previousLocationId);
+      const to = locationRowId(currentLocationId);
+      if (from === to) return true;
+      return locationAncestors(currentLocationId).has(from) || locationAncestors(previousLocationId).has(to);
+    })();
+  if (
+    previousLocationId !== null && currentLocationId !== null
+    && previousLocationId !== currentLocationId && !localMove
+  ) {
+    const preview = atlasTravelPreview(mirrorForTravel.world, {
+      fromPointId: previousLocationId,
+      toPointId: currentLocationId,
+    });
+    if (preview) {
+      travelPeriods = Math.max(0, Math.round(preview.estimatedDuration));
+      if (travelPeriods > 0) travelNote = `跨场景 ${preview.distance} 格 → 至少 ${travelPeriods} 时段`;
+    }
+  }
+  const duration = Math.max(0, Math.min(10_000, Math.max(timeIntent.suggestedPeriods ?? 0, travelPeriods)));
+  const currentTime = previousTime + duration;
+
+  // 日程结算一次 → 回写三表（用同一份镜像）
+  const mirror = { world: mirrorForTravel.world };
+  const settlement = settleNpcSchedules(mirror.world, {
+    branchId: input.binding.branchId,
+    prevTime: previousTime,
+    newTime: currentTime,
+    playerFromPointId: previousLocationId,
+    playerToPointId: currentLocationId,
+    now: input.now,
+  });
+  const settledWorld = settlement.world;
+
+  // 日程造成的移动必须回到三表：否则世界镜像走了、附近列表不动（D05 老问题重演）
+  let nextTables = cloneAtlasTables(delta.tables);
+  const locationByPointId = new Map<string, AtlasLocationRow>();
+  for (const row of nextTables.locations) {
+    const pointId = pointIdFromLocationRowId(row.id);
+    if (pointId !== null) locationByPointId.set(String(pointId), row);
+  }
+  const characterByRowId = new Map(nextTables.characters.map((row) => [row.id, row]));
+  for (const state of settledWorld.characterStates ?? []) {
+    const row = characterByRowId.get(characterRowId(String(state.characterId)));
+    if (!row) continue;
+    const pointId = state.currentPointId === null || state.currentPointId === undefined ? null : String(state.currentPointId);
+    const location = pointId === null ? undefined : locationByPointId.get(pointId);
+    const nextLocationId = location ? location.id : null;
+    if (row.locationId === nextLocationId) continue;
+    row.locationId = nextLocationId;
+    row.mapId = location ? location.mapId : null;
+    row.gridX = null;
+    row.gridY = null;
+    // 日程只改位置：离场语义不去动它，位置未知也不假装在场
+    if (nextLocationId === null && row.presence === "present") row.presence = "unknown";
+    row.positionSource = "routine";
+  }
+
+  /**
+   * E06 / E07：**在本轮故事事实之后**执行远方 NPC 的自主行动。
+   *
+   * 顺序是有意的：先让日程（作息表）说话，再让"有目标的人"朝目标走一步——
+   * 日程回答"作息表说他此刻在哪"，后台行动回答"他自己想动且时间够走多远"。
+   * 时间没推进（短对话 0 段）时 `planBackgroundMoves` 直接返回原表：远方宣战不会一轮传遍全图。
+   * 主角由 `protectedCharacterIds` 挡住（与 B02 的模型保护名单同一份）。
+   */
+  const background = planBackgroundMoves({
+    tables: nextTables,
+    prevTime: previousTime,
+    newTime: currentTime,
+    protectedCharacterIds: input.protectedCharacterIds,
+  });
+  nextTables = background.tables;
+  /** E07：后台行动必须留痕（有几个人真的动了 / 谁在途 / 谁因上限没排上）。 */
+  const backgroundDiagnostic = {
+    at: input.now,
+    kind: "world-turn-background-moves",
+    moves: background.moves.length,
+    // pushLog 的数值白名单只放行 pointsAdded/skipped/scanned 等；用 skipped 记"未排上的人数"
+    skipped: background.skipped,
+    scanned: background.blocked,
+  };
+
+  const validation = validateAtlasTables(nextTables);
+  if (!validation.ok) {
+    const first = validation.errors[0]!;
+    return {
+      ok: false,
+      code: "DELTA_REJECTED",
+      message: `日程回写后的候选三表未通过校验（${first.code} @ ${first.path}）。本轮未提交。`,
+      rejectedRows: [{ line: 0, code: first.code, path: first.path }],
+    };
+  }
+
+  const notes: string[] = [];
+  if (settlement.moves.length > 0) notes.push(`日程移动 ${settlement.moves.length} 人`);
+  if (settlement.encounters.length > 0) notes.push(`同地遭遇 ${settlement.encounters.length} 人`);
+  // E07：后台行动的注记与日程注记同一处合入（回执 summary 尾部，有界截断由调用方负责）
+  notes.push(...background.notes);
+  const parseRejected = parsed.parse.rejected.length;
+  const deltaRejected = delta.rejected.length;
+  const summary = [
+    `表格增量：应用 ${delta.applied.length} 行`,
+    deltaRejected + parseRejected > 0 ? `拒绝 ${deltaRejected + parseRejected} 行（可重试或修正提示词）` : "",
+    duration > 0 ? `时间推进 ${duration} 段` : "时间未推进",
+    travelNote,
+    notes.join("；"),
+  ].filter((part) => part.length > 0).join("；");
+
+  const receipt: AtlasTurnReceipt = {
+    receiptId: `rcpt-${hashString(`table-delta:${input.binding.chatId}:${input.now}:${delta.applied.length}`)}`,
+    status: "committed",
+    branchId: input.binding.branchId,
+    previousTime,
+    currentTime,
+    previousLocationId,
+    currentLocationId,
+    triggeredNpcIds: settlement.encounters.map((item) => item.characterId),
+    adoptedEventIds: [],
+    summary: settlement.notes.length > 0 ? mergeSettlementNotes(summary, settlement.notes) : summary,
+    retryable: false,
+  };
+
+  return {
+    ok: true,
+    world: settledWorld,
+    receipt,
+    branchKey: input.branchKey,
+    tablesDoc: {
+      schemaVersion: 1,
+      worldId: input.binding.worldId,
+      branches: { ...(input.tablesDoc?.branches ?? {}), [input.branchKey]: nextTables },
+    },
+    applied: delta.applied.length,
+    rejected: deltaRejected + parseRejected,
+    settled: true,
+    background: backgroundDiagnostic,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // 设置（独立 API 预设；服务端保存，GET 只出脱敏视图）
 // ---------------------------------------------------------------------------
-
 /**
  * ATLAS-18：设置类型已迁移到 `src/atlas-settings.ts`（schemaVersion 2）。
  * 这里保留旧名作为类型别名，避免一次性改动所有引用点；结构以 v2 为准。
@@ -476,6 +1251,9 @@ function httpStatusFor(code: string): number {
     case ATLAS_ERROR_CODES.API_NOT_CONFIGURED:
     case ATLAS_ERROR_CODES.DUPLICATE_COMMIT:
     case ATLAS_ERROR_CODES.SESSION_STALE:
+    // C04：协议不符 = 「设置与响应形态冲突」，不是格式错（400）也不是服务故障（502）——
+    // 作者要做的动作是回推进页切协议，409 与既有前端错误呈现一致。
+    case ATLAS_ERROR_CODES.PROTOCOL_MISMATCH:
       return 409;
     case ATLAS_ERROR_CODES.API_RATE_LIMITED:
       return 429;
@@ -582,17 +1360,29 @@ function createCoreInstance(
     "pending-remove-failed", "scene-bootstrap-failed", "scene-bootstrap-rejected",
     "world-scale-hint-failed", "world-turn-commit-failed", "world-turn-sidecar-failed",
     "world-turn-v2-rejected",
+    // C08：table-delta 的整轮拒绝（块缺失 / 行全被拒 / 候选校验不过 / 分支无三表）
+    // 必须与 v2 拒绝同级记 error——否则「世界没更新」在日志里看起来像一次正常回合。
+    "world-turn-delta-rejected",
   ]);
   const warnKinds = new Set([
     "settings-sanitize", "world-geo-extract-fallback", "world-scale-extract-fallback",
     "world-scale-hint-skipped", "world-scale-reject", "world-turn-parse-fallback",
     "world-turn-v2-warnings", "scene-bootstrap-warnings",
-    // S6 补刀（0.9.55）：投影期的可恢复异常——读取失败 / 视图侧点位超限被裁，
-    // 都要能在「日志」页看见，不能静默当成「这个世界没有子图」。
+    // 0.9.55 投影期可恢复异常
     "map-projection-sidecar-read-failed", "map-projection-points-truncated",
-    // S5/S6 补刀：坏 sidecar 引用（幽灵子图）/ 超出 40 张地图上限 / v1 与 v2 同名。
     "map-projection-ghost-submaps-dropped", "map-projection-maps-truncated",
     "map-projection-name-collisions-kept",
+    // C08：部分应用（有行被拒但世界确实变了）与协议不匹配（设置与输出形态不符）都是可恢复的
+    // 「要人看一眼」的状态，记 warn 而不是静默 info。
+    "world-turn-delta-partial", "world-turn-protocol-mismatch",
+    // E07：后台自主行动（有人真的动了 / 有人因上限没排上）——可恢复但要人看一眼，
+    // 否则"我没让他动他怎么走了"只能靠翻三表才发现。
+    "world-turn-background-moves",
+    // C08：懒迁移失败（损坏 tables / 世界不可解析 / 分支基线不可用）——旧会话没被改写，但作者要知道。
+    "table-migration-failed",
+    // E05：回退时三表跟着还原（或按回退后的世界重建）。info/warn 取决于是否走了重建兜底，
+    // 但两种都必须留痕——否则"地图回到过去、三表停在未来"这种错位只能靠肉眼发现。
+    "world-turn-table-rollback",
   ]);
   function pushLog(entry: Record<string, unknown>): void {
     const logs = shared.logs;
@@ -776,7 +1566,7 @@ function createCoreInstance(
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.56",
+      version: "0.9.57",
       protocolVersion: 1,
       time: now(),
     });
@@ -931,7 +1721,7 @@ function createCoreInstance(
     checkRpm();
     rpmTimestamps.push(now());
 
-    const outcome = await runGeoExtraction({ world, preset, lore, recentTexts, source: "manual" });
+    const outcome = await runGeoExtraction({ world, preset, lore, recentTexts, source: "manual", binding });
     if (outcome.regionsAdded === 0 && outcome.pointsAdded === 0) {
       return okResult({
         regionsAdded: 0,
@@ -947,6 +1737,8 @@ function createCoreInstance(
       revisionAppended: outcome.revisionAppended,
       regionNames: outcome.regionNames,
       pointNames: outcome.pointNames,
+      // E02：如实报告三表补齐结果（UI 可据此提示"地图已更新"，排障也能看到 skipped 原因）
+      tables: outcome.tables,
     });
   }
 
@@ -961,6 +1753,8 @@ function createCoreInstance(
     lore: string;
     recentTexts: string[];
     source: "manual" | "auto";
+    /** E02：提炼成功后要把新地点补进**这个绑定所在分支**的三表；没有绑定（纯导入场景）就不补。 */
+    binding: AtlasChatBinding | null;
   }): Promise<{
     regionsAdded: number;
     pointsAdded: number;
@@ -968,11 +1762,14 @@ function createCoreInstance(
     revisionAppended: boolean;
     regionNames: string[];
     pointNames: string[];
+    /** E02：三表补齐结果（没有绑定 / 该分支还没有三表时是 skipped，不算失败）。 */
+    tables: { status: "skipped" | "synced" | "failed"; reasonCode: string; added: { locations: number; characters: number }; moved: number };
   }> {
     const world = input.world;
     const preset = input.preset;
     const lore = input.lore;
     const recentTexts = input.recentTexts;
+    const binding = input.binding;
     const storyMode = recentTexts.length > 0;
     // 恰好 1 条推演请求：分段模式注入提炼指令（复用 callAtlasWorldTurnApi 的
     // 超时 / 救场 / 错误分类，不新开 fetch 路径）
@@ -1040,7 +1837,10 @@ function createCoreInstance(
         source: input.source,
         excerpt: call.text.slice(0, 1500),
       });
-      return { regionsAdded: 0, pointsAdded: 0, skipped: 0, revisionAppended: false, regionNames: [], pointNames: [] };
+      return {
+        regionsAdded: 0, pointsAdded: 0, skipped: 0, revisionAppended: false, regionNames: [], pointNames: [],
+        tables: { status: "skipped", reasonCode: "TABLE_GEO_NO_YIELD", added: { locations: 0, characters: 0 }, moved: 0 },
+      };
     }
 
     const cleanName = (value: unknown): string | null => {
@@ -1099,7 +1899,10 @@ function createCoreInstance(
 
     if (newRegions.length === 0 && newPoints.length === 0) {
       pushLog({ at: now(), kind: "world-geo-adopt", worldId: world.id, source: input.source, regionsAdded: 0, pointsAdded: 0, skipped });
-      return { regionsAdded: 0, pointsAdded: 0, skipped, revisionAppended: false, regionNames: [], pointNames: [] };
+      return {
+        regionsAdded: 0, pointsAdded: 0, skipped, revisionAppended: false, regionNames: [], pointNames: [],
+        tables: { status: "skipped", reasonCode: "TABLE_GEO_NO_YIELD", added: { locations: 0, characters: 0 }, moved: 0 },
+      };
     }
 
     let updated: World = {
@@ -1116,6 +1919,16 @@ function createCoreInstance(
 
     await store.write(`world:${world.id}`, updated);
     worldCache.set(world.id, updated);
+    /**
+     * E02：提炼出的地理必须同时进三表。
+     * 只加世界点的话，下一回合的行增量候选三表里根本没有这些新地点——
+     * 模型引用不到、地图视图（D01 直读三表）也看不到，等于"提炼成功但地图不长"。
+     */
+    const tableSync = binding === null
+      ? { status: "skipped" as const, reasonCode: "TABLE_NO_BINDING", added: { locations: 0, characters: 0 }, moved: 0 }
+      : await syncBranchTablesFromWorld({
+          store, binding, world: updated, source: "worlds/geo/adopt",
+        });
     pushLog({
       at: now(),
       kind: "world-geo-adopt",
@@ -1125,6 +1938,7 @@ function createCoreInstance(
       pointsAdded: newPoints.length,
       skipped,
       revisionAppended: revision.ok,
+      reasonCode: tableSync.reasonCode,
     });
     return {
       regionsAdded: newRegions.length,
@@ -1133,6 +1947,7 @@ function createCoreInstance(
       revisionAppended: revision.ok,
       regionNames: newRegions.map((r) => r.name),
       pointNames: newPoints.map((p) => p.name),
+      tables: tableSync,
     };
   }
 
@@ -1350,49 +2165,12 @@ function createCoreInstance(
     return "";
   }
 
-  async function visibleWorldForBinding(world: World, binding: AtlasChatBinding): Promise<World> {
-    const keys = await store.list("turn:" + binding.chatId + ":");
-    if (keys.length === 0) return world;
-    const lineage = branchLineage(world, binding.branchId, binding.worldTimeCursor);
-    const cutoffs = new Map(lineage.segments.map((segment) => [segment.branchId, segment.cutoffAt]));
-    const trackedPoints = new Set<string>();
-    const trackedRegions = new Set<string>();
-    const trackedEntities = new Set<string>();
-    const visiblePoints = new Set<string>();
-    const visibleRegions = new Set<string>();
-    const visibleEntities = new Set<string>();
-    for (const key of keys) {
-      const doc = await store.read(key);
-      if (!isPlainRecord(doc)) continue;
-      const points = Array.isArray(doc.createdPointIds) ? doc.createdPointIds.map(String) : [];
-      const regions = Array.isArray(doc.createdRegionIds) ? doc.createdRegionIds.map(String) : [];
-      const entities = Array.isArray(doc.createdEntityIds) ? doc.createdEntityIds.map(String) : [];
-      for (const id of points) trackedPoints.add(id);
-      for (const id of regions) trackedRegions.add(id);
-      for (const id of entities) trackedEntities.add(id);
-      const recordedBranch = typeof doc.branchId === "string" ? doc.branchId : null;
-      const branch = (world.stories ?? []).find((story) => story.id === recordedBranch)?.mode === "canon"
-        ? null : recordedBranch;
-      const cutoff = cutoffs.get(branch);
-      const time = typeof doc.effectiveAt === "number" ? doc.effectiveAt : Infinity;
-      if (doc.rolledBack === true || cutoff == null || time > cutoff) continue;
-      for (const id of points) visiblePoints.add(id);
-      for (const id of regions) visibleRegions.add(id);
-      for (const id of entities) visibleEntities.add(id);
-    }
-    if (trackedPoints.size + trackedRegions.size + trackedEntities.size === 0) return world;
-    const showPoint = (id: string | number) => !trackedPoints.has(String(id)) || visiblePoints.has(String(id));
-    const showRegion = (id: string) => !trackedRegions.has(String(id)) || visibleRegions.has(String(id));
-    const showEntity = (id: string) => !trackedEntities.has(String(id)) || visibleEntities.has(String(id));
-    return {
-      ...world,
-      points: (world.points ?? []).filter((point) => showPoint(point.id)),
-      regions: (world.regions ?? []).filter((region) => showRegion(region.id)),
-      characters: (world.characters ?? []).filter((character) => showEntity(character.id)),
-      entityRecords: (world.entityRecords ?? []).filter((entity) => showEntity(entity.id)),
-      characterStates: (world.characterStates ?? []).filter((item) => showEntity(item.characterId)),
-    };
-  }
+  /**
+   * 该分支可见世界：实现已抽到模块级 `visibleWorldForBindingWith`——A08 的懒迁移
+   * 必须与请求路径共用同一份可见性口径（否则迁移会把别的分支的未来事实偷进三表）。
+   */
+  const visibleWorldForBinding = (world: World, binding: AtlasChatBinding): Promise<World> =>
+    visibleWorldForBindingWith(store, world, binding);
 
   function rejectHiddenV2Refs(raw: World, visible: World, draft: AtlasV2Draft): void {
     const hidden = (rawIds: string[], visibleIds: string[]) => {
@@ -1601,7 +2379,20 @@ function createCoreInstance(
     const protagonistById = new Map(
       (world.characters ?? []).map((c) => [String(c.id), isProtagonistRole(c.role)] as const),
     );
-    const npcDirectory = runtimeView.npcs.slice(0, 48).map((view) => {
+    // D02：目录分页——旧实现硬编码 slice(0, 48) / slice(0, 32)，超过就**静默消失**。
+    // 现在接收可选分页（缺省仍是原来的 48 / 32，UI 行为不变），并把 total / truncated 一并下发，
+    // 让 UI 能分区加载到全部实体（§3-D02「不静默 slice」）。
+    const directoryPaging = isPlainRecord(body) && isPlainRecord(body.directory) ? body.directory : {};
+    const readPaging = (value: unknown, fallback: number, cap: number): number => {
+      const parsed = typeof value === "number" && Number.isFinite(value) ? Math.floor(value) : fallback;
+      return Math.max(0, Math.min(cap, parsed));
+    };
+    const npcOffset = readPaging((directoryPaging as Record<string, unknown>).npcOffset, 0, 10_000);
+    const npcLimit = Math.max(1, readPaging((directoryPaging as Record<string, unknown>).npcLimit, 48, 500));
+    const objectOffset = readPaging((directoryPaging as Record<string, unknown>).objectOffset, 0, 10_000);
+    const objectLimit = Math.max(1, readPaging((directoryPaging as Record<string, unknown>).objectLimit, 32, 500));
+    const npcDirectoryAll = runtimeView.npcs;
+    const npcDirectory = npcDirectoryAll.slice(npcOffset, npcOffset + npcLimit).map((view) => {
       const anchorPoint = view.pointId !== null ? pointById.get(String(view.pointId)) : undefined;
       const recentNarratives = branchEvents
         .filter((e) => (e.entityRefs ?? []).map(String).includes(view.id))
@@ -1639,7 +2430,7 @@ function createCoreInstance(
         const anchor = e.mapAnchor;
         return Boolean(anchor && (anchor.pointId || anchor.regionId));
       })
-      .slice(0, 32)
+      .slice(objectOffset, objectOffset + objectLimit)
       .map((e: EntityRecord) => {
         const anchor = e.mapAnchor!;
         const anchorPoint = anchor.pointId ? pointById.get(String(anchor.pointId)) : undefined;
@@ -1796,6 +2587,73 @@ function createCoreInstance(
       regions,
       objectDirectory,
       lastAdvance,
+      /**
+       * D02：目录的可达性信息——UI 据此分区加载，不再有"第 49 个人物永远看不见"。
+       * total 用**三表权威计数**（有 tables 时）或旧路径全量长度；truncated 是本次响应没放进来的条数。
+       */
+      directoryTotals: await (async () => {
+        const branchKey = branchScopeForStory(world, binding.branchId) ?? "canon";
+        const raw = await store.read(`tables:${binding.worldId}`).catch(() => null);
+        const branches = isPlainRecord(raw) && isPlainRecord(raw.branches)
+          ? (raw.branches as Record<string, unknown>)
+          : null;
+        const branchTables = branches === null ? undefined : branches[branchKey];
+        const tableCounts = isPlainRecord(branchTables)
+          ? {
+              characters: Array.isArray((branchTables as { characters?: unknown }).characters)
+                ? ((branchTables as { characters: unknown[] }).characters.length) : 0,
+              items: Array.isArray((branchTables as { items?: unknown }).items)
+                ? ((branchTables as { items: unknown[] }).items.length) : 0,
+            }
+          : null;
+        const objectTotalAll = (world.entityRecords ?? []).filter((e) => {
+          if (String(e.type).toLowerCase() === "npc") return false;
+          const anchor = e.mapAnchor;
+          return Boolean(anchor && (anchor.pointId || anchor.regionId));
+        }).length;
+        const npcTotal = tableCounts ? tableCounts.characters : npcDirectoryAll.length;
+        const objectTotal = tableCounts ? tableCounts.items : objectTotalAll;
+        return {
+          npc: { offset: npcOffset, limit: npcLimit, total: npcTotal, returned: npcDirectory.length,
+            truncated: Math.max(0, npcTotal - npcOffset - npcDirectory.length) },
+          object: { offset: objectOffset, limit: objectLimit, total: objectTotal, returned: objectDirectory.length,
+            truncated: Math.max(0, objectTotal - objectOffset - objectDirectory.length) },
+          source: tableCounts ? "tables" : "legacy",
+        };
+      })(),
+      /**
+       * D02：三表地图视图（D01 投影）。**只在已经迁移过的分支上出现**——
+       * 旧会话（还没有 tables）仍是上面那套世界派生的字段，行为一字不变。
+       * 新通道带 total/truncated，UI 可以分区加载；ID 口径与既有字段对齐（数字点 id）。
+       */
+      tableMap: await (async () => {
+        const branchKey = branchScopeForStory(world, binding.branchId) ?? "canon";
+        const raw = await store.read(`tables:${binding.worldId}`).catch(() => null);
+        const branches = isPlainRecord(raw) && isPlainRecord(raw.branches)
+          ? (raw.branches as Record<string, unknown>)
+          : null;
+        const branchTables = branches === null ? undefined : branches[branchKey];
+        if (!isPlainRecord(branchTables)) return null;
+        const view = projectTablesToMapView(
+          branchTables as unknown as AtlasThreeTablesV1,
+          projected,
+          world,
+          binding.currentLocationId ?? null,
+          // E04a：与旧字段路径同一口径——已退役 / 仍是占位的「起点」不冒充真实地点
+          hiddenPointIds,
+        );
+        return {
+          branchKey,
+          world: view.world,
+          submaps: view.submaps,
+          nearby: view.nearby,
+          objects: view.objects,
+          unknownPosition: view.unknownPosition,
+          current: view.current,
+          totals: view.totals,
+          dropped: view.dropped,
+        };
+      })(),
     });
   }
 
@@ -2051,6 +2909,13 @@ function createCoreInstance(
     }
     await store.write(`world:${binding.worldId}`, finalWorld);
     worldCache.set(binding.worldId, finalWorld);
+    /**
+     * E04：开场识别改的是世界（定位 / 建点 / 退役起点），三表必须跟着走一次。
+     * 否则第一次行增量回合会把开场识别建立的场景地点当作"不存在"。
+     */
+    const tableSync = await syncBranchTablesFromWorld({
+      store, binding, world: finalWorld, source: "scene/bootstrap",
+    });
     if (receipt.status === "committed") {
       const nextBinding: AtlasChatBinding = {
         ...binding,
@@ -2069,6 +2934,7 @@ function createCoreInstance(
       receipt,
       refResolution: output.refResolution,
       placeholderRetired: nextDoc.retiredPointIds.length > sceneDoc.retiredPointIds.length,
+      tables: tableSync,
       callCount: 1,
     });
   }
@@ -2129,18 +2995,44 @@ function createCoreInstance(
     };
     // R06 协议选择（提示词资产与输出协议分开版本）：
     // - v2（缺省）且作者未自定义提示词（无连接级 systemPrompt / 无预设分段）→ 内置 v2 封套；
-    // - bootstrap 模式：追加开场识别任务段（duration=0，只定位不推进）；
-    // - 作者自定义内容原样生效（混合模式：v1 输出仍由 v1 管线解析）。
-    const protocol = (await loadSettings()).worldTurnProtocol ?? "v2";
+    // - table-delta-v1 → 内置行增量分段 + **三表派生的有界上下文**（作者自定义提示词时，
+    //   分段用作者的，但 $5 素材仍换成三表上下文——素材属于协议，措辞属于作者）；
+    // - bootstrap 模式：换掉「本轮行动」段（索引 4）为开场识别任务，只定位不推进时间。
+    const protocol = normalizeWorldTurnProtocol((await loadSettings()).worldTurnProtocol);
     const authorOverridden = Boolean(preset.systemPrompt?.trim()) || (Array.isArray(preset.promptSegments) && preset.promptSegments.length > 0);
     let effectivePreset = preset;
-    if (isV2ProtocolEnabled(protocol) && !authorOverridden) {
+    let tableContextTruncated: AtlasTableContextResult["truncated"] | null = null;
+    if (protocol === "table-delta-v1") {
+      // A08 的懒迁移只挂内存；这里按分支取三表，取不到就退回世界状态文本（并记截断为 null 表示未用三表）
+      const branchKey = branchScopeForStory(world, binding.branchId) ?? "canon";
+      const doc = await store.read(`tables:${binding.worldId}`).catch(() => null);
+      const branchTables = isPlainRecord(doc) && isPlainRecord(doc.branches)
+        ? (doc.branches as Record<string, unknown>)[branchKey]
+        : undefined;
+      if (isPlainRecord(branchTables)) {
+        const mapsDoc = sanitizeMapDoc(await store.read(`maps:${binding.worldId}`).catch(() => null));
+        const built = buildTableDeltaContext({
+          tables: branchTables as unknown as AtlasThreeTablesV1,
+          world,
+          binding,
+          maps: mapsDoc,
+        });
+        input.injectionText = built.text;
+        tableContextTruncated = built.truncated;
+      }
+      if (!authorOverridden) {
+        const segments = options?.mode === "bootstrap"
+          ? [...DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA.slice(0, 4), { role: "user", name: "开场识别任务（mode=bootstrap）", mainSlot: "B", content: TABLE_DELTA_BOOTSTRAP_TASK_CONTENT }, DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA[5]!]
+          : DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA;
+        effectivePreset = { ...preset, promptSegments: segments.map((s) => ({ ...s })) };
+      }
+    } else if (isV2ProtocolEnabled(protocol) && !authorOverridden) {
       const v2Segments = options?.mode === "bootstrap"
         ? [...DEFAULT_PROMPT_SEGMENTS_V2.slice(0, 4), { role: "user", name: "开场识别任务（mode=bootstrap）", mainSlot: "B", content: V2_BOOTSTRAP_TASK_CONTENT }, DEFAULT_PROMPT_SEGMENTS_V2[5]!]
         : DEFAULT_PROMPT_SEGMENTS_V2;
       effectivePreset = { ...preset, promptSegments: v2Segments.map((s) => ({ ...s })) };
     }
-    return { world, prepareOutput, currentPointId, currentRegionId, input, recentAssistantTexts, effectivePreset, protocol };
+    return { world, prepareOutput, currentPointId, currentRegionId, input, recentAssistantTexts, effectivePreset, protocol, tableContextTruncated };
   }
 
   /** commit / retry 共享的执行体：恰好 1 条 API 请求 + 原子提交。 */
@@ -2219,6 +3111,23 @@ function createCoreInstance(
     //    统一补 retryable=true（重试 = 重新推演一次，可能产出合法草稿）。
     let draft;
     let output;
+    /** C05：table-delta 路径算好的整份三表文档（含本分支更新），与 world 同一次会话响应写回。 */
+    let nextTablesDoc: AtlasTablesStoreV1 | null = null;
+    /**
+     * E05：本回合**提交前**的三表快照（table-delta 路径才有）。
+     * swipe / 编辑 / 删除触发的 `/turns/rollback` 必须把三表一起还原到回合前——
+     * 否则世界回退了、三表还带着"未来"的地点/人物/物品，地图与附近列表会与正文错位。
+     * 只在本轮真的走行增量协议时记录；v1/v2 回合没有三表快照，回退时按回退后的世界重建（见 handleRollback）。
+     */
+    let tablesBeforeTurn: { branchKey: string; tables: AtlasThreeTablesV1 } | null = null;
+    /** C05：table-delta 路径已在本轮内做过日程结算——公共段不得重复结算。 */
+    let settledInTablePath = false;
+    /** C04：主人公等不可被模型改写身份的**三表行 id**（B02 的保护名单口径）。 */
+    const protectedCharacterIds = new Set(
+      (world.characters ?? [])
+        .filter((character) => isProtagonistRole(character.role))
+        .map((character) => characterRowId(String(character.id))),
+    );
     // ATLAS-06：提交前落一个「回合前」技术检查点（swipe / 编辑 / 删除的回退锚点）。
     // 失败（如数量达上限）不阻断推演——该回合只是没有回退点，不写映射。
     let baseWorld = world;
@@ -2238,11 +3147,121 @@ function createCoreInstance(
     try {
       // 0.9.16 内容替换规则库（照抄 shujuku + 开关增强）：推演输出先过启用的词对规则
       // （剥 think / 推理段 / 杂段），再进草稿解析。
+      // C04 协议分流：
+      // 0.9.16 内容替换规则库（照抄 shujuku + 开关增强）：推演输出先过启用的词对规则
+      // （剥 think / 推理段 / 杂段），再进草稿解析。
       const cleanedText = applyContentReplaceRules(call.text, current.contentReplaceRules ?? []);
-      // R05 协议分流：v2 草稿（schemaVersion:2）走独立契约与应用管线（临时引用 /
-      // baseRevision 回显 / 证据包含校验）；无版本字段的输出仍走 v1 解析 + 裁定层。
-      const looksV2 = /"schemaVersion"\s*:\s*2/.test(cleanedText) || /"schemaVersion"\s*:\s*2/.test(call.text);
-      if (looksV2) {
+      // C04 协议分流（作者已裁决 = 严格按设置）：
+      // 旧实现用 `/\"schemaVersion\"\s*:\s*2/` 扫全文猜走不走 v2（0.9.53–0.9.57 最脆弱的一处：
+      // 正文里只要出现这串字符就换管线），且设置与实际输出不符时静默落回 v1。
+      // 现在：
+      // - 设置 = `table-delta-v1` → 只认行增量块；不是块就明确失败；
+      // - 设置 = `v2` → 只走 v2 封套解析；没有封套是错误，不是"退回 v1"；
+      // - 设置 = `v1` → 只走 v1 草稿解析。
+      // 全文正则只剩一个用途：在**诊断里**说明"响应看起来是哪种形态"，不再参与分派。
+      const looksV2Text = /"schemaVersion"\s*:\s*2/.test(cleanedText) || /"schemaVersion"\s*:\s*2/.test(call.text);
+      const looksTableDeltaText = /<\/atlasEdit>/.test(cleanedText) || /<\/atlasEdit>/.test(call.text);
+      const protocol = prepared.protocol;
+      if (protocol !== "table-delta-v1" && ((protocol === "v2") !== looksV2Text)) {
+        // 响应形态只用于**诊断**（不再参与分派）：让作者一眼看出"模型给的是另一种协议"
+        const detected = looksTableDeltaText ? "table-delta" : looksV2Text ? "v2" : "v1";
+        pushLog({
+          at: now(),
+          kind: "world-turn-protocol-mismatch",
+          chatId: request.chatId,
+          reasonCode: `SETTING_${protocol.toUpperCase().replace(/-/g, "_")}_TEXT_${detected.toUpperCase().replace(/-/g, "_")}`,
+          coreCommitted: false,
+        });
+      }
+      if (protocol === "table-delta-v1") {
+        const branchKey = branchScopeForStory(prepared.world, binding.branchId) ?? "canon";
+        const tablesRaw = await store.read(`tables:${binding.worldId}`).catch(() => null);
+        const tablesDoc = isPlainRecord(tablesRaw) ? (tablesRaw as unknown as AtlasTablesStoreV1) : null;
+        const branchTables = tablesDoc && isPlainRecord(tablesDoc.branches)
+          ? (tablesDoc.branches as Record<string, unknown>)[branchKey]
+          : undefined;
+        if (!isPlainRecord(branchTables)) {
+          pushLog({
+            at: now(),
+            kind: "world-turn-delta-rejected",
+            chatId: request.chatId,
+            worldId: binding.worldId,
+            reasonCode: "TABLE_BRANCH_MISSING",
+            coreCommitted: false,
+          });
+          throw new AtlasError(
+            ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
+            "本分支还没有三表快照（懒迁移未完成或会话损坏）。本轮未提交；请刷新后重试，或到变化页查看迁移错误。",
+            { retryable: true },
+          );
+        }
+        const committed = commitTableDeltaTurn({
+          tables: branchTables as unknown as AtlasThreeTablesV1,
+          tablesDoc,
+          branchKey,
+          baseWorld,
+          binding,
+          request: { userText: request.userText, assistantText: request.assistantText },
+          text: cleanedText,
+          now: now(),
+          protectedCharacterIds,
+        });
+        if (!committed.ok) {
+          // C08：回执里带上**具体行号与字段路径**（可复制），而不是笼统的"格式错误"。
+          // 原始模型正文绝不进日志/回执（只留字符数与错误码）。
+          const first = committed.rejectedRows.slice(0, 3)
+            .map((row) => `第 ${row.line} 行 ${row.code}${row.path ? ` @ ${row.path}` : ""}${row.ref ? ` (${row.ref})` : ""}`)
+            .join("；");
+          pushLog({
+            at: now(),
+            kind: "world-turn-delta-rejected",
+            chatId: request.chatId,
+            worldId: binding.worldId,
+            reasonCode: committed.code,
+            errorCount: committed.rejectedRows.length,
+            responseChars: call.text.length,
+            coreCommitted: false,
+          });
+          throw new AtlasError(
+            ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
+            `${committed.message}${first ? ` 首个问题：${first}` : ""}`,
+            { retryable: true },
+          );
+        }
+        nextTablesDoc = committed.tablesDoc;
+        settledInTablePath = true;
+        // E05：冻结回合前的三表（深拷贝，避免后续任何原地修改污染回退基线）
+        tablesBeforeTurn = { branchKey, tables: cloneAtlasTables(branchTables as unknown as AtlasThreeTablesV1) };
+        if (committed.rejected > 0) {
+          pushLog({
+            at: now(),
+            kind: "world-turn-delta-partial",
+            chatId: request.chatId,
+            skipped: committed.rejected,
+            scanned: committed.applied,
+          });
+        }
+        output = { world: committed.world, receipt: committed.receipt };
+        // E07：后台自主行动记具名诊断（人数口径；上限与"只更新行动"的条数都如实报出）
+        pushLog({
+          at: now(),
+          kind: committed.background.kind,
+          chatId: request.chatId,
+          worldId: binding.worldId,
+          scanned: committed.background.moves,
+          skipped: committed.background.skipped,
+        });
+      } else if (protocol === "v2") {
+        // §2：设置是 v2，响应却是行增量块 → **明确报协议不符**，不把它塞进 v2 解析器
+        // （否则作者只会看到"v2 校验失败：输出不是合法 JSON"，完全看不出该切协议）。
+        if (looksTableDeltaText) {
+          throw new AtlasError(
+            ATLAS_ERROR_CODES.PROTOCOL_MISMATCH,
+            "当前推进协议是「v2」，响应里出现了行增量块（<atlasEdit>…</atlasEdit>）——两者不一致。"
+              + "本轮未提交。请到「推进」页把协议切到「表格增量（table-delta-v1）」，或把提示词预设的输出格式改回 v2 封套。",
+            { retryable: true },
+          );
+        }
         const v2Sources: Record<string, string> = {
           "msg:u": request.userText,
           "msg:a": request.assistantText,
@@ -2290,7 +3309,18 @@ function createCoreInstance(
             warnings: output.refResolution.warnings.slice(0, 10),
           });
         }
-      } else {
+      } else if (protocol === "v1") {
+        // §2：设置是 v1，响应却是 v2 封套 → 明确报协议不符。
+        // 旧实现会**静默交给 v1 管线**（v1 解析器对多余字段宽容，于是"能提交"，作者永远
+        // 不知道自己装错了协议，直到某天字段语义对不上）。这里不猜。
+        if (looksV2Text) {
+          throw new AtlasError(
+            ATLAS_ERROR_CODES.PROTOCOL_MISMATCH,
+            "当前推进协议是「v1」，响应里出现了 v2 封套（schemaVersion:2）——两者不一致。"
+              + "本轮未提交。请到「推进」页把协议切到「v2」，或把提示词预设的输出格式改回 v1 草稿。",
+            { retryable: true },
+          );
+        }
         // 0.9.30 放宽格式校验：推理模型（MiniMax-M3 等）会把 JSON 写进 <think> 里——
         // 剥 think 后可能什么都不剩。解析失败先退回原文再试一次（保留有限格式修复）。
         // 0.9.48（T05）：两连败 = 明确失败，不再伪装成「无结构变化」成功提交——
@@ -2342,6 +3372,13 @@ function createCoreInstance(
           draft,
           now: now(),
         });
+      } else {
+        throw new AtlasError(
+          ATLAS_ERROR_CODES.PROTOCOL_MISMATCH,
+          `当前推进协议是「${protocol}」，响应里出现了行增量块（<atlasEdit>…</atlasEdit>）——两者不一致。`
+            + "本轮未提交。请到「推进」页把协议切到「表格增量（table-delta-v1）」，或把提示词预设的输出格式改回 v1 / v2 封套。",
+          { retryable: true },
+        );
       }
     } catch (thrown) {
       if (thrown instanceof AtlasError && thrown.details.retryable === undefined) {
@@ -2371,7 +3408,7 @@ function createCoreInstance(
     //     玩家先提交的事实即现实；NPC 移动只写 NPC 自己的 CharacterState；
     //     同段同地遭遇进 triggeredNpcIds + 〔日程〕注记（可审计）。
     let settledWorld = output.world;
-    if (receipt.status === "committed") {
+    if (receipt.status === "committed" && !settledInTablePath) {
       const settlement = settleNpcSchedules(output.world, {
         branchId: pending.binding.branchId,
         prevTime: pending.binding.worldTimeCursor,
@@ -2437,6 +3474,10 @@ function createCoreInstance(
 
     // 7. 成功：原子保存新世界 + 更新绑定游标 + 清理 pending + 缓存回执
     await store.write(`world:${binding.worldId}`, settledWorld);
+    // C05：三表与镜像世界**同一次会话响应**写回（覆盖层保证二者落在同一个 session 对象里）
+    if (nextTablesDoc !== null) {
+      await store.write(`tables:${binding.worldId}`, nextTablesDoc);
+    }
     worldCache.set(binding.worldId, settledWorld);
     const nextBinding: AtlasChatBinding = {
       ...binding,
@@ -2474,6 +3515,12 @@ function createCoreInstance(
       swipeId: request.swipeId,
       checkpointId,
       committedAt: now(),
+      /**
+       * E05：回退用的三表基线（`{branchKey, tables}`）。缺这个字段的回合映射
+       * （table-delta 之前的旧回合）由 handleRollback 从**回退后的**可见世界重建，
+       * 不借用另一分支、也不凭空造空世界。
+       */
+      tablesBefore: tablesBeforeTurn,
       // 0.9.42 会话承载：回执进回合映射文档（幂等判定不再依赖进程内存）
       receipt,
       previousBinding: {
@@ -2500,7 +3547,18 @@ function createCoreInstance(
     }
     // 8. 世界书条目规划（纯派生，零 IO；写入由 UI 扩展经酒馆 world-info API 完成）。
     //    duplicate / failed 不产出规划：duplicate 本就写过了，failed 零部分写入。
-    const lorebook = buildLorebookPlans(output.world, receipt);
+    //    E08：行增量回合把该分支的三表上下文（位置链 / 身边人物的想法与行动倾向 / 地面物品）
+    //    一并注入条目——**只读本分支快照**（分支隔离），条数有界，绝不把三表整库写进世界书。
+    const lorebook = buildLorebookPlans(output.world, receipt, (() => {
+      if (nextTablesDoc === null || tablesBeforeTurn === null) return null;
+      const branch = nextTablesDoc.branches?.[tablesBeforeTurn.branchKey];
+      if (!branch) return null;
+      return {
+        tables: branch,
+        branchKey: tablesBeforeTurn.branchKey,
+        currentLocationId: receipt.currentLocationId ?? null,
+      };
+    })());
 
     // 9.5 0.9.32 点挂子图 sidecar：newLocations 携带的 submap / description 落到
     //     maps:<worldId> 独立文档（lib/ 点位 schema 不动；只增不改）。
@@ -2647,6 +3705,7 @@ function createCoreInstance(
               lore: autoLore,
               recentTexts: autoTexts,
               source: "auto",
+              binding,
             });
             if (geo.pointsAdded + geo.regionsAdded > 0) {
               await store.write(markerKey, { at: now(), done: true });
@@ -2791,6 +3850,52 @@ function createCoreInstance(
     if (!restored.ok) {
       throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, restored.error);
     }
+    /**
+     * E05（第一半）：三表必须跟着世界一起回退。
+     * 在此之前这里只回退 world + binding：世界回到了回合前，三表却还带着「未来」的
+     * 地点 / 人物 / 物品，于是地图、附近、地点面板与正文错位——正是计划 §5 停机线
+     * 「回退后地图不一致」的那一条。
+     * 1) 优先用回合映射里的 `tablesBefore` 快照（table-delta 提交时冻结的回合前状态）：瞬时、精确；
+     * 2) 老回合没有快照 → 用**回退后的**世界重建一次（A08 同口径），不借用其他分支、不造空世界。
+     * 重建失败时世界回退**照常生效**（数据不多不少地退回去了），但明确报错并留痕——
+     * 绝不静默留下「世界回去了、三表还在未来」的半状态。
+     */
+    const branchKey = branchScopeForStory(world, binding.branchId) ?? "canon";
+    const snapshotRaw = (target.doc as { tablesBefore?: unknown }).tablesBefore;
+    let rolledTables: AtlasThreeTablesV1 | null = null;
+    let rollbackReason = "";
+    if (
+      isPlainRecord(snapshotRaw)
+      && typeof snapshotRaw.branchKey === "string"
+      && snapshotRaw.branchKey === branchKey
+      && isPlainRecord(snapshotRaw.tables)
+      && validateAtlasTables(snapshotRaw.tables as unknown as AtlasThreeTablesV1).ok
+    ) {
+      rolledTables = snapshotRaw.tables as unknown as AtlasThreeTablesV1;
+      rollbackReason = "TABLES_ROLLED_BACK";
+    } else {
+      const rebuilt = await rebuildBranchTablesFromWorld({
+        store, binding, world: restored.value, branchKey,
+      });
+      if (rebuilt.ok) {
+        rolledTables = rebuilt.tables;
+        rollbackReason = "TABLES_REBUILT_FROM_WORLD";
+      } else {
+        pushLog({
+          at: now(),
+          kind: "world-turn-table-rollback",
+          chatId,
+          worldId: binding.worldId,
+          reasonCode: `TABLES_ROLLBACK_REBUILD_FAILED:${rebuilt.reasonCode}`,
+          coreCommitted: false,
+        });
+        throw new AtlasError(
+          ATLAS_ERROR_CODES.SESSION_STALE,
+          `世界已回退，但三表无法还原（${rebuilt.reasonCode}）。本轮回退未完成：请重新打开该聊天后再试，或到变化页查看迁移错误。`,
+          { retryable: true },
+        );
+      }
+    }
     // 世界写回游玩头状态（账本未来保留）；绑定游标照 previousBinding 快照还原
     await store.write(`world:${binding.worldId}`, restored.value);
     worldCache.set(binding.worldId, restored.value);
@@ -2807,6 +3912,30 @@ function createCoreInstance(
     };
     await store.write(`binding:${binding.chatId}`, nextBinding);
     bindingCache.set(binding.chatId, nextBinding);
+    /**
+     * E05：三表随世界一起落盘到该分支（其他分支的快照原样保留）。
+     * 写入位置在 world / binding 之后：任一步失败都是明确异常，不返回"回退成功"。
+     */
+    const tablesDocRaw = await store.read(`tables:${binding.worldId}`).catch(() => null);
+    const priorDoc = isPlainRecord(tablesDocRaw) ? (tablesDocRaw as unknown as AtlasTablesStoreV1) : null;
+    // 只在该分支本来就有三表时写回：没有三表的旧聊天不该因为一次回退凭空长出三表。
+    // 有快照却读不到文档（会话损坏）也写：让三表回到回退后的真值，而不是继续停在"未来"。
+    if (isPlainRecord(priorDoc?.branches?.[branchKey]) || snapshotRaw !== undefined) {
+      await store.write(`tables:${binding.worldId}`, {
+        schemaVersion: 1,
+        worldId: binding.worldId,
+        branches: { ...(priorDoc?.branches ?? {}), [branchKey]: rolledTables },
+      });
+      pushLog({
+        at: now(),
+        kind: "world-turn-table-rollback",
+        chatId: binding.chatId,
+        worldId: binding.worldId,
+        reasonCode: rollbackReason,
+        // 该分支回退后的行数（不记任何自由文本 / 地点名）
+        scanned: rolledTables.locations.length + rolledTables.characters.length + rolledTables.items.length,
+      });
+    }
     // 标记该回合已回退（文档保留 = 可审计的历史）；清幂等缓存让同变体之后的重提交能重新推进
     await store.write(target.key, { ...target.doc, rolledBack: true, rolledBackAt: now() });
     const oldKey = typeof target.doc.idempotencyKey === "string" ? target.doc.idempotencyKey : null;
@@ -2814,6 +3943,7 @@ function createCoreInstance(
     return okResult({
       rolledBack: { assistantMessageId, checkpointId },
       restored: restored.restored ?? null,
+      tables: rolledTables === null ? null : { branchKey, reasonCode: rollbackReason },
     });
   }
 
@@ -2902,6 +4032,14 @@ function createCoreInstance(
       bindingCache.set(binding.chatId, nextBinding);
       cursorMoved = true;
     }
+    /**
+     * E03：拖动纠偏必须同时改三表。
+     * 行增量回合只认三表：不同步的话，作者把谁拖到哪里，下一回合就会被三表里的旧位置**静默回退**
+     * （拖动看起来生效了、地图也确实动了一下，然后下一轮又回去）。
+     */
+    const tableSync = await syncBranchTablesFromWorld({
+      store, binding, world: nextWorld, source: "worlds/move-author",
+    });
     pushLog({
       at: now(),
       kind: "world-move-author",
@@ -2910,11 +4048,14 @@ function createCoreInstance(
       entityId,
       toPointId,
       protagonist: cursorMoved,
+      reasonCode: tableSync.reasonCode,
+      coreCommitted: tableSync.status === "synced",
     });
     return okResult({
       moved: { entityId, characterName, pointId: toPointId, pointName, regionId },
       ledgerEventId,
       cursorMoved,
+      tables: tableSync,
       summary: `作者纠偏：${characterName} 移动到 ${pointName}`,
     });
   }
@@ -3078,7 +4219,8 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
         return await globalCore.handle(method, path, body, ctx);
       }
       const record = isPlainRecord(body) ? body : {};
-      const session = parseAtlasSessionDoc(record.session);
+      const sessionParse = parseAtlasSessionDocDetailed(record.session);
+      const session = sessionParse.session;
       const chatId =
         (typeof record.chatId === "string" && record.chatId) || chatIdOfBinding(session.binding);
       const run = async (): Promise<AtlasRouteResult> => {
@@ -3093,6 +4235,16 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
           }
         }
         const overlay = createSessionOverlayStore(session, deps.store);
+        // A08：真实旧会话懒迁移——成功后经 overlay 写入并置 changed()，随本次响应带回浏览器落盘；
+        // 失败/跳过绝不动 session（旧世界数据原样保留）。
+        await ensureSessionTables({
+          session,
+          parse: sessionParse,
+          overlay,
+          store: deps.store,
+          now: () => (deps.now ?? Date.now)(),
+          onDiagnostic: deps.onDiagnostic,
+        });
         const instance = createCoreInstance(overlay, deps, shared);
         const result = await instance.handle(method, path, body, ctx);
         if (result.status === 200 && isPlainRecord(result.body) && result.body.ok === true && overlay.changed()) {
