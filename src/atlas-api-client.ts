@@ -22,6 +22,8 @@ import {
 // S9（0.9.55）：父子层级的上限只维护一份权威——提示词里出现的数字直接取自 v2 执行层常量，
 // 杜绝「提示词说 4 层、校验按别的数」的漂移（与 C5/C6 的单一权威纪律同口径）。
 import { V2_SUBMAP_DEPTH_MAX, V2_SUBMAP_SIBLINGS_MAX } from "./atlas-turn-v2.ts";
+// E03：表格增量契约的补充纪律段（§2.2 / §2.3）独立成文件，拼在「提交前核对」段尾部。
+import { TABLE_DELTA_DISCIPLINE_CONTENT } from "./atlas-prompt-discipline.ts";
 
 /** 独立推演预设（服务端保存；apiKey 永不出本模块的 Authorization 头）。 */
 export interface AtlasApiPreset {
@@ -274,7 +276,7 @@ export const DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA: Array<{ role: string; name: st
       '{"table":"item","op":"add","ref":"new:item:key","name":"铜钥匙","locationRef":"new:loc:tower","description":"小钥匙","quote":"桌上的铜钥匙"}\n' +
       "</atlasEdit>\n" +
       "规则：\n" +
-      "- table 只允许 location / character / item；op 只允许 add / set / remove。本轮没有任何变化时，块内只写一行 {\"kind\":\"noop\"}。\n" +
+      "- table 只允许 location / character / item / simulation；op 只允许 add / set / remove（simulation 只允许 propose）。本轮没有任何变化时，块内只写一行 {\"kind\":\"noop\"}。\n" +
       "- 只允许写这些字段（其余一律不许出现）：location = name / description / parentRef / rumors / factions；character = name / locationRef / thought / actionTendency / currentAction / targetLocationRef / presence（present|left|unknown）；item = name / description / status / locationRef / holderRef。用 set 改动时，字段放进 patch 里。\n" +
       "- 绝对不要输出 id、mapId、格序号、坐标、时间、时长、距离或比例尺数字——这些一律由程序推导，你写了也会被拒绝。\n" +
       "- 引用：新增行用本块局部引用 new:loc:短名 / new:npc:短名 / new:item:短名（小写字母、数字、- 或 _）；已有行必须用对照表里给出的正式 ID。名称不是 ID，不要拿名字当引用，也不要把同名地点合并。\n" +
@@ -321,9 +323,12 @@ export const DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA: Array<{ role: string; name: st
       "每个 new: 引用都已在本块**前面**声明且类型相符（地点用 new:loc:、人物用 new:npc:、物品用 new:item:）；已有实体用的是对照表里的正式 ID。\n" +
       "位置与归属的改动都有 observed 引文，且引文是 msg:u 或 msg:a 的连续原文；推测字段才用 inferred。\n" +
       "parentRef 无自引用、无环，且只为本轮确实走进去的内层地点登记；同名地点没有被合并。\n" +
-      "人物与物品不同时给 locationRef 和 holderRef。最后只输出一个可解析的 <atlasEdit> 块。",
+      "人物与物品不同时给 locationRef 和 holderRef。最后只输出一个可解析的 <atlasEdit> 块。\n" +
+      TABLE_DELTA_DISCIPLINE_CONTENT,
   },
 ];
+
+
 
 /**
  * C01：`table-delta-v1` 的开场识别段（mode=bootstrap）。

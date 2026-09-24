@@ -16,7 +16,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const ATLAS_PLUGIN_ID = "atlas";
-export const ATLAS_PLUGIN_VERSION = "0.9.58";
+export const ATLAS_PLUGIN_VERSION = "0.9.59";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_API_BASE = "/api/plugins/atlas";
 
@@ -31,6 +31,10 @@ export const ATLAS_PLUGIN_ROUTES = [
   { method: "POST", path: "/worlds/geo/adopt" },
   { method: "POST", path: "/worlds/move-author" },
   { method: "POST", path: "/worlds/scale/calibrate" },
+  // H07a：作者手动确认归属 / 邻接 / 载具 / 坐标（会话路由）
+  { method: "POST", path: "/maps/topology/confirm" },
+  // H15a：作者手动涂色范围（只写 evidence=manual）
+  { method: "POST", path: "/maps/areas/upsert" },
   { method: "POST", path: "/bindings" },
   { method: "POST", path: "/state" },
   { method: "POST", path: "/map/image" },

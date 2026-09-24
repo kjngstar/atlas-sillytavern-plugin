@@ -29,7 +29,43 @@ export const ATLAS_MAP_VIEW_LIMITS = {
   submaps: 40,
   nearby: 48,
   objects: 32,
+  unplacedLocations: 64,
+  /** F02：每个地点徽标名单里的明细条数上限（**计数**不受此限，始终是全量真值）。 */
+  occupantsPerLocation: 24,
 } as const;
+
+/**
+ * F02：一个地点的**在场成员索引**（地图徽标与地点面板的唯一数据源）。
+ *
+ * `characterCount` / `itemCount` 是**完整三表**分组的真实计数——绝不先截 48 再分组
+ * （那正是「第 49 个人物永远看不见」的成因）。`characters` / `items` 只是明细，
+ * 各自有界并由 UI 分页展示。
+ */
+export interface AtlasMapViewLocationOccupants {
+  locationId: string;
+  locationName: string;
+  locationPointId: string | null;
+  mapId: string | null;
+  gridX: number | null;
+  gridY: number | null;
+  characterCount: number;
+  itemCount: number;
+  characters: Array<{ id: string; name: string; presence: AtlasCharacterRow["presence"] }>;
+  items: Array<{ id: string; name: string; status: string }>;
+}
+
+/**
+ * F01：**没有真实坐标**的地点。
+ *
+ * 过去这类地点会被 `?? 0` 画到网格原点，让「未知位置」冒充成真实地理点（F7 / 停机线
+ * 「无坐标被画到 0,0」）。现在它们不进地图点集，只出现在「待定位地点」名单里，
+ * 由 UI 以列表 / 弱标记呈现，不再伪造坐标。
+ */
+export interface AtlasMapViewUnplacedLocation {
+  id: string;
+  name: string;
+  parentLocationId: string | null;
+}
 
 export interface AtlasMapViewPoint {
   /** 旧世界数字点 id（字符串），与既有 UI 字段一致。 */
@@ -95,7 +131,24 @@ export interface AtlasTableMapView {
   submaps: Record<string, AtlasMapViewSubmap>;
   /** 有地点但缺细坐标的实体：只列名单，不画点（§1「不得捏造房间坐标」）。 */
   unknownPosition: AtlasMapViewUnknownPosition[];
+  /**
+   * F01：缺真实坐标的地点（不进 `world.points`，也不当 0）。UI 用它渲染
+   * 「待定位地点」列表，绝不把未知位置画成原点。
+   */
+  unplacedLocations: { entries: AtlasMapViewUnplacedLocation[]; total: number; truncated: number };
   nearby: { entries: AtlasMapViewNpc[]; total: number; truncated: number };
+  /**
+   * F02：「附近」的**具名原因**。null = 真的算出了附近；
+   * `CURRENT_LOCATION_UNKNOWN` = 当前位置尚未确定（此时**不能**下「附近没人」的结论，
+   * 「不知道自己在哪」与「周围确实没人」是两件事，§2.4 / T09）。
+   */
+  nearReasonCode: "CURRENT_LOCATION_UNKNOWN" | "CURRENT_LOCATION_UNRESOLVED" | null;
+  /** F02：按地点聚合的在场成员与徽标人数（完整三表口径）。 */
+  locationOccupants: {
+    entries: AtlasMapViewLocationOccupants[];
+    total: number;
+    truncated: number;
+  };
   objects: { entries: AtlasMapViewObject[]; total: number; truncated: number };
   current: { locationId: string | null; chain: Array<{ id: string; name: string }> };
   totals: { locations: number; characters: number; items: number; submaps: number };
@@ -135,6 +188,8 @@ export function projectTablesToMapView(
   // 1) 地点 → 世界图 / 父图
   const worldPoints: AtlasMapViewPoint[] = [];
   const submapBuckets = new Map<string, AtlasMapViewPoint[]>();
+  const unplacedEntries: AtlasMapViewUnplacedLocation[] = [];
+  let unplacedTotal = 0;
   let droppedLocations = 0;
   let rootTotal = 0;
   for (const row of tables.locations) {
@@ -150,11 +205,20 @@ export function projectTablesToMapView(
       droppedLocations += 1;
       continue;
     }
+    // F01：缺真实坐标 → 只进「待定位」名单，不生成地图点（绝不落 (0,0)）
+    if (!isGrid(row.gridX) || !isGrid(row.gridY)) {
+      unplacedTotal += 1;
+      if (unplacedEntries.length < ATLAS_MAP_VIEW_LIMITS.unplacedLocations) {
+        unplacedEntries.push({ id: row.id, name: row.name, parentLocationId: row.parentLocationId });
+      }
+      continue;
+    }
     const view: AtlasMapViewPoint = {
       id: String(pointId),
       name: row.name,
-      x: row.gridX ?? 0,
-      y: row.gridY ?? 0,
+      // 走到这里两个坐标都已确认是真实格序号；不再用 `?? 0` 兜底（那是 F7 停机线）
+      x: row.gridX,
+      y: row.gridY,
       regionId: regionOfPoint(world, String(pointId)),
       kind: "location",
       rowId: row.id,
@@ -322,6 +386,52 @@ export function projectTablesToMapView(
     }))
     .sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
 
+  /**
+   * F02：按地点聚合在场成员（徽标人数）。
+   * 分组遍历的是**完整**人物 / 物品表——先截断再分组会让第 49 个人物从徽标里消失。
+   */
+  const occupantBuckets = new Map<string, AtlasMapViewLocationOccupants>();
+  const occupantOf = (locationId: string): AtlasMapViewLocationOccupants => {
+    const existing = occupantBuckets.get(locationId);
+    if (existing) return existing;
+    const row = byRowId.get(locationId);
+    const pointId = pointIdFromLocationRowId(locationId);
+    const created: AtlasMapViewLocationOccupants = {
+      locationId,
+      locationName: row?.name ?? "",
+      locationPointId: pointId === null ? null : String(pointId),
+      mapId: row?.mapId ?? null,
+      // 只有真实数值坐标才算地理点；未知就是 null，不落 (0,0)
+      gridX: row && isGrid(row.gridX) ? row.gridX : null,
+      gridY: row && isGrid(row.gridY) ? row.gridY : null,
+      characterCount: 0,
+      itemCount: 0,
+      characters: [],
+      items: [],
+    };
+    occupantBuckets.set(locationId, created);
+    return created;
+  };
+  for (const row of tables.characters) {
+    if (row.locationId === null || row.presence === "left") continue;
+    const bucket = occupantOf(row.locationId);
+    bucket.characterCount += 1;
+    if (bucket.characters.length < ATLAS_MAP_VIEW_LIMITS.occupantsPerLocation) {
+      bucket.characters.push({ id: row.id, name: row.name, presence: row.presence });
+    }
+  }
+  for (const row of tables.items) {
+    if (row.locationId === null || row.status === ATLAS_ITEM_DESTROYED_STATUS) continue;
+    const bucket = occupantOf(row.locationId);
+    bucket.itemCount += 1;
+    if (bucket.items.length < ATLAS_MAP_VIEW_LIMITS.occupantsPerLocation) {
+      bucket.items.push({ id: row.id, name: row.name, status: row.status });
+    }
+  }
+  const occupantEntries = [...occupantBuckets.values()]
+    .filter((entry) => entry.characterCount > 0 || entry.itemCount > 0)
+    .sort((left, right) => (left.locationId < right.locationId ? -1 : left.locationId > right.locationId ? 1 : 0));
+
   // 5) 当前位置链（含自身；父不可达就断在那里，不猜）
   const chain: Array<{ id: string; name: string }> = [];
   const seen = new Set<string>();
@@ -341,10 +451,24 @@ export function projectTablesToMapView(
     },
     submaps,
     unknownPosition: [...unknownPosition.values()].sort((left, right) => (left.locationId < right.locationId ? -1 : 1)),
+    unplacedLocations: {
+      entries: unplacedEntries,
+      total: unplacedTotal,
+      truncated: Math.max(0, unplacedTotal - unplacedEntries.length),
+    },
     nearby: {
       entries: nearbyEntries.slice(0, ATLAS_MAP_VIEW_LIMITS.nearby),
       total: nearbyEntries.length,
       truncated: Math.max(0, nearbyEntries.length - ATLAS_MAP_VIEW_LIMITS.nearby),
+    },
+    // F02：「当前位置未知」与「附近确实没人」必须分开表达
+    nearReasonCode: currentLocationId === null
+      ? "CURRENT_LOCATION_UNKNOWN"
+      : (currentRow === null ? "CURRENT_LOCATION_UNRESOLVED" : null),
+    locationOccupants: {
+      entries: occupantEntries,
+      total: occupantEntries.length,
+      truncated: 0,
     },
     objects: {
       entries: objectEntries.slice(0, ATLAS_MAP_VIEW_LIMITS.objects),

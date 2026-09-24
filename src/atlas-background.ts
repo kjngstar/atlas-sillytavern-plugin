@@ -30,6 +30,7 @@ import {
   type AtlasLocationRow,
   type AtlasThreeTablesV1,
 } from "./atlas-tables.ts";
+import { resolveGeoPath, type AtlasGeoTopology } from "./atlas-geo-topology.ts";
 
 /** 每回合最多让多少人自主移动（计划 §3-E06 定的硬上限）。 */
 export const ATLAS_BACKGROUND_MOVE_MAX = 20;
@@ -66,6 +67,11 @@ export interface AtlasBackgroundMove {
   status: "moved" | "enroute" | "blocked";
   /** 为什么只更新行动（`status !== "moved"` 时才有） */
   reasonCode?: "NO_ROUTE" | "TOO_FAR" | "NO_TIME" | "NO_PATH";
+  /**
+   * D01：沿**已确认边**分段前进时的完整地点路径（含起点与终点）。
+   * 只在真的有确认路线时出现——没有路线仍旧 blocked，绝不猜路径、绝不瞬移。
+   */
+  viaPath?: readonly string[];
 }
 
 export interface AtlasBackgroundPlanInput {
@@ -81,6 +87,13 @@ export interface AtlasBackgroundPlanInput {
   cellsPerPeriod?: number;
   /** 「太远就先不动」的阈值；缺省 `ATLAS_BACKGROUND_FAR_CELLS`。 */
   farCells?: number;
+  /**
+   * D01：本分支**已确认**的地理拓扑。提供它时，超距 / 跨图目标改为沿
+   * `resolveGeoPath` 的确认路线**逐段接近**（每时段推进一个路段），
+   * 取代 0.9.58 的「>60 格永久 TOO_FAR」；没有路线仍是 blocked(NO_PATH/NO_ROUTE)。
+   * 不提供时行为与 0.9.58 完全一致（既有测试不受影响）。
+   */
+  topology?: AtlasGeoTopology | null;
 }
 
 export interface AtlasBackgroundPlan {
@@ -231,23 +244,52 @@ export function planBackgroundMoves(input: AtlasBackgroundPlanInput): AtlasBackg
       continue;
     }
     const distance = enRoute ? distanceFromGrid(origin, target) : candidate.distance;
-    if (distance === null) {
+    /**
+     * D01：距离未知（跨图 / 无坐标）或超过阈值时，不再一律「永久不动」——
+     * 只要拓扑里有**已确认的边**，就沿路线走一个路段，逐段接近目标。
+     * 每时段推进一个路段（保守：不把一条跨州邻接当成 1 时段徒步到达）。
+     * 没有确认路线 ⇒ 保留原语义（NO_ROUTE / TOO_FAR），绝不猜路径、绝不瞬移。
+     */
+    if (distance === null || distance > farCells) {
+      const routed = (() => {
+        const topology = input.topology ?? null;
+        if (!topology || periods < 1 || row.locationId === null) return null;
+        const found = resolveGeoPath(topology, row.locationId, target.id, { mode: "walk" });
+        if (!found.ok || found.path.length < 2) return null;
+        return { nextLocationId: found.path[1]!, path: [...found.path] };
+      })();
+      if (routed) {
+        const nextRow = locationById.get(routed.nextLocationId) ?? null;
+        const atTarget = routed.nextLocationId === target.id;
+        row.locationId = routed.nextLocationId;
+        row.mapId = nextRow ? nextRow.mapId : null;
+        // 路段落点没有细坐标：宁可留空，也不编一个格坐标
+        row.gridX = null;
+        row.gridY = null;
+        row.positionSource = "simulation";
+        row.presence = "present";
+        row.currentAction = (atTarget ? `抵达${target.name}` : `正在赶往${target.name}`).slice(0, 120);
+        if (atTarget) row.targetLocationId = null;
+        plan.moves.push({
+          characterId: row.id, characterName: row.name,
+          fromLocationId: current ? current.id : null,
+          toLocationId: atTarget ? target.id : null,
+          targetLocationId: target.id,
+          travelledCells: 0,
+          remainingCells: Math.max(0, routed.path.length - 2),
+          status: atTarget ? "moved" : "enroute",
+          viaPath: routed.path,
+        });
+        continue;
+      }
+      const reason: "NO_ROUTE" | "TOO_FAR" = distance === null ? "NO_ROUTE" : "TOO_FAR";
+      if (reason === "TOO_FAR") row.actionTendency = row.actionTendency.trim() || `赶往${target.name}`;
       plan.blocked += 1;
       plan.moves.push({
         characterId: row.id, characterName: row.name, fromLocationId: row.locationId,
-        toLocationId: null, targetLocationId: target.id, travelledCells: 0, remainingCells: 0,
-        status: "blocked", reasonCode: "NO_ROUTE",
-      });
-      continue;
-    }
-    if (distance > farCells) {
-      // 太远：本回合只更新行动记录（"他在往那边赶"），不瞬移
-      row.actionTendency = row.actionTendency.trim() || `赶往${target.name}`;
-      plan.blocked += 1;
-      plan.moves.push({
-        characterId: row.id, characterName: row.name, fromLocationId: row.locationId,
-        toLocationId: null, targetLocationId: target.id, travelledCells: 0, remainingCells: distance,
-        status: "blocked", reasonCode: "TOO_FAR",
+        toLocationId: null, targetLocationId: target.id, travelledCells: 0,
+        remainingCells: distance ?? 0,
+        status: "blocked", reasonCode: reason,
       });
       continue;
     }

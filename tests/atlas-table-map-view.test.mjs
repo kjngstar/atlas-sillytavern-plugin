@@ -290,3 +290,109 @@ test("D02 目录分页：默认仍是 48/32，但 total/truncated 如实下发�
   const ids = new Set([...page1.body.data.npcDirectory, ...page2.body.data.npcDirectory].map((entry) => entry.id));
   assert.equal(ids.size, 64);
 });
+
+/* ------------------------------------------------------------------ *
+ * F08a：F01 / F02 定向验收（未知坐标不落 (0,0)、徽标人数、附近口径）
+ * ------------------------------------------------------------------ */
+
+test("F01 未知坐标的地点不生成地图点，也不落 (0,0)，而是进「待定位」名单", () => {
+  const view = projectTablesToMapView(
+    {
+      locations: [
+        location({ id: "loc:4103", name: "白塔钟座", gridX: 53, gridY: 42, mapId: "world" }),
+        // 缺真实坐标：确认在「三年二班」但不知道教室里的具体位置
+        location({ id: "loc:4104", name: "三年二班", gridX: null, gridY: null, mapId: null, parentLocationId: "loc:4103" }),
+      ],
+      characters: [],
+      items: [],
+    },
+    EMPTY_MAPS,
+    fakeWorld(),
+    null,
+  );
+
+  // ① 绝不出现坐标 (0,0) 的伪地点
+  assert.equal(view.world.points.some((point) => point.x === 0 && point.y === 0), false,
+    "未知位置不得被画到网格原点（F7 停机线）");
+  assert.equal(view.world.points.some((point) => point.id === "4104"), false, "缺坐标的地点不进世界图");
+
+  // ② 但必须能查到它，供 UI 出「待定位」列表
+  const unplaced = view.unplacedLocations;
+  assert.equal(unplaced.total, 1);
+  assert.equal(unplaced.truncated, 0);
+  assert.deepEqual(unplaced.entries.map((entry) => entry.id), ["loc:4104"]);
+  assert.equal(unplaced.entries[0].name, "三年二班");
+  assert.equal(unplaced.entries[0].parentLocationId, "loc:4103", "保留父级关系，便于人工确认归属");
+});
+
+test("F02 徽标人数按完整三表聚合：第 49 个人物也在计数里", () => {
+  const characters = [];
+  for (let index = 0; index < 49; index += 1) {
+    characters.push(character({
+      id: `npc:student-${String(index).padStart(2, "0")}`,
+      name: `学生${index}`,
+      locationId: "loc:4104",
+      gridX: null, gridY: null, mapId: null,
+    }));
+  }
+  const view = projectTablesToMapView(
+    {
+      locations: [
+        location({ id: "loc:4103", name: "白塔钟座", gridX: 53, gridY: 42, mapId: "world" }),
+        location({ id: "loc:4104", name: "三年二班", gridX: null, gridY: null, mapId: null, parentLocationId: "loc:4103" }),
+      ],
+      characters,
+      items: [],
+    },
+    EMPTY_MAPS,
+    fakeWorld(),
+    null,
+  );
+
+  const room = view.locationOccupants.entries.find((entry) => entry.locationId === "loc:4104");
+  assert.ok(room, "教室要有在场成员条目（徽标数据源）");
+  assert.equal(room.characterCount, 49, "计数是完整三表口径——第 49 个人物不能被截掉");
+  assert.equal(room.locationName, "三年二班");
+  assert.equal(room.gridX, null, "房间自己没有真实坐标，不得落 (0,0)");
+  // 明细有界，但**计数**是真值（UI 据此显示「49 人」并分页）
+  assert.ok(room.characters.length <= 24, "明细按上限截断");
+});
+
+test("F02 当前位置为空：报告 CURRENT_LOCATION_UNKNOWN，而不是「附近没人」", () => {
+  const view = projectTablesToMapView(
+    {
+      locations: [location({ id: "loc:4103", name: "白塔钟座", gridX: 53, gridY: 42, mapId: "world" })],
+      characters: [character({ id: "npc:someone", locationId: "loc:4103" })],
+      items: [],
+    },
+    EMPTY_MAPS,
+    fakeWorld(),
+    null,
+  );
+  assert.equal(view.nearReasonCode, "CURRENT_LOCATION_UNKNOWN",
+    "「不知道自己在哪」必须与「周围确实没人」分开表达（§2.4 / T09）");
+
+  // 但地点弹窗的数据仍在：远处/别处的地点照样能查出在场者
+  const occupants = view.locationOccupants.entries.find((entry) => entry.locationId === "loc:4103");
+  assert.equal(occupants.characterCount, 1, "地点在场人数与当前位置无关，照样可查");
+});
+
+test("F02 确认当前位置后 nearReasonCode 归 null（真的算出了附近）", () => {
+  const view = projectTablesToMapView(
+    {
+      locations: [
+        location({ id: "loc:4103", name: "白塔钟座", gridX: 53, gridY: 42, mapId: "world" }),
+        location({ id: "loc:4104", name: "钟楼二层", gridX: 50, gridY: 40, mapId: "world", parentLocationId: "loc:4103" }),
+      ],
+      characters: [character({ id: "npc:up", locationId: "loc:4104" })],
+      items: [],
+    },
+    EMPTY_MAPS,
+    fakeWorld(),
+    "4104",
+  );
+  assert.equal(view.nearReasonCode, null);
+  // nearby 沿既有口径：id 去掉 npc: 前缀（旧客户端契约不变）
+  assert.ok(view.nearby.entries.some((entry) => entry.id === "up"), "同地点/下级地点的人算附近");
+  assert.deepEqual(view.current.chain.map((item) => item.id), ["loc:4103", "loc:4104"], "位置链含上级");
+});

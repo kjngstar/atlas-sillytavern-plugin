@@ -215,3 +215,94 @@ test("E06：纯函数 —— 不改入参三表，返回的表通过 A01 校验"
   assert.equal(validation.ok, true, `后台行动后的表必须仍然合法：${JSON.stringify(validation.errors ?? [])}`);
   assert.equal(hasBackgroundIntent(plan.tables.characters.find((row) => row.id === "npc:a")), false, "到位后不再有意图");
 });
+
+/* ------------------------------------------------------------------ *
+ * D11a：超距逐段接近 / 0 时段不动（D01）
+ * ------------------------------------------------------------------ */
+
+/** 一条链：loc:0 → loc:1 → loc:2 → loc:3，全部是**已确认**的相邻边。 */
+function confirmedChain(ids) {
+  const edges = [];
+  for (let index = 0; index < ids.length - 1; index += 1) {
+    edges.push({
+      id: `edge:${ids[index]}->${ids[index + 1]}`,
+      fromLocationId: ids[index], toLocationId: ids[index + 1],
+      kind: "adjacent", evidence: "story", channel: "walk",
+    });
+  }
+  return { edges, areas: [], vehicles: [] };
+}
+
+function walkerTables() {
+  return {
+    locations: [
+      { id: "loc:0", name: "起点", parentLocationId: null, description: "", rumors: [], factions: [], mapId: "world", gridX: 0, gridY: 0 },
+      { id: "loc:1", name: "驿站", parentLocationId: null, description: "", rumors: [], factions: [], mapId: "world", gridX: 10, gridY: 0 },
+      { id: "loc:2", name: "关隘", parentLocationId: null, description: "", rumors: [], factions: [], mapId: "world", gridX: 20, gridY: 0 },
+      { id: "loc:3", name: "远城", parentLocationId: null, description: "", rumors: [], factions: [], mapId: "world", gridX: 30, gridY: 0 },
+    ],
+    characters: [{
+      id: "npc:walker", name: "信使", locationId: "loc:0", thought: "", actionTendency: "赶往远城",
+      currentAction: "", targetLocationId: "loc:3", presence: "present", positionSource: "narrative",
+      mapId: "world", gridX: 0, gridY: 0,
+    }],
+    items: [],
+  };
+}
+
+test("D01 超距目标沿已确认边逐段接近，不被标记已到，也不再永久 TOO_FAR", () => {
+  const topology = confirmedChain(["loc:0", "loc:1", "loc:2", "loc:3"]);
+
+  // 1 时段：只走一个路段，且**没有**到达终点
+  const first = planBackgroundMoves({ tables: walkerTables(), prevTime: 0, newTime: 1, farCells: 5, topology });
+  const move = first.moves.find((item) => item.characterId === "npc:walker");
+  assert.ok(move, "超距目标必须被处理，而不是静默跳过");
+  assert.equal(move.status, "enroute", "只走一个路段");
+  assert.equal(move.toLocationId, null, "没到终点就不能写 toLocationId");
+  assert.deepEqual(move.viaPath, ["loc:0", "loc:1", "loc:2", "loc:3"], "路径来自已确认边");
+  const moved = first.tables.characters.find((row) => row.id === "npc:walker");
+  assert.equal(moved.locationId, "loc:1", "前进一个路段");
+  assert.notEqual(moved.locationId, "loc:3", "绝不瞬移到终点");
+  assert.equal(moved.targetLocationId, "loc:3", "目标保留，下一轮继续接近");
+
+  // 继续推进：逐段接近，最终才到达并清空目标
+  const second = planBackgroundMoves({ tables: first.tables, prevTime: 1, newTime: 2, farCells: 5, topology });
+  assert.equal(second.tables.characters[0].locationId, "loc:2");
+  const third = planBackgroundMoves({ tables: second.tables, prevTime: 2, newTime: 3, farCells: 5, topology });
+  assert.equal(third.tables.characters[0].locationId, "loc:3", "第三段才到达");
+  assert.equal(third.tables.characters[0].targetLocationId, null, "到位后清空目标");
+  assert.equal(third.moves.find((item) => item.characterId === "npc:walker").status, "moved");
+});
+
+test("D01 没有已确认路线时仍旧 blocked，绝不猜路径", () => {
+  const noEdges = { edges: [], areas: [], vehicles: [] };
+
+  // ① 同图内已知距离但超过阈值 → TOO_FAR（原因如实，不是「没路」）
+  const tooFar = planBackgroundMoves({
+    tables: walkerTables(), prevTime: 0, newTime: 5, farCells: 5, topology: noEdges,
+  });
+  const farMove = tooFar.moves.find((item) => item.characterId === "npc:walker");
+  assert.equal(farMove.status, "blocked");
+  assert.equal(farMove.reasonCode, "TOO_FAR", "同图已知距离超阈值 = TOO_FAR");
+  assert.equal(tooFar.tables.characters[0].locationId, "loc:0", "一步都不走");
+
+  // ② 跨图 / 距离未知 → NO_ROUTE（连距离都算不出来，不许猜）
+  const crossMap = walkerTables();
+  crossMap.locations = crossMap.locations.map((row) =>
+    row.id === "loc:3" ? { ...row, mapId: "world-other" } : row);
+  const unknown = planBackgroundMoves({
+    tables: crossMap, prevTime: 0, newTime: 5, farCells: 5, topology: noEdges,
+  });
+  const unknownMove = unknown.moves.find((item) => item.characterId === "npc:walker");
+  assert.equal(unknownMove.status, "blocked");
+  assert.equal(unknownMove.reasonCode, "NO_ROUTE", "距离未知 = NO_ROUTE");
+  assert.equal(unknown.tables.characters[0].locationId, "loc:0", "跨图不得瞬移");
+});
+
+test("D01 0 时段：无论有没有已确认路线，谁都不动", () => {
+  const plan = planBackgroundMoves({
+    tables: walkerTables(), prevTime: 7, newTime: 7, topology: confirmedChain(["loc:0", "loc:1"]),
+  });
+  assert.equal(plan.moves.length, 0, "时间未推进连计划都不该产出");
+  assert.equal(plan.tables.characters[0].locationId, "loc:0");
+});

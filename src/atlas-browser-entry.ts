@@ -76,6 +76,12 @@ export { buildStarterWorld, starterWorldIdForChat } from "./atlas-starter-world.
 // index.js 的地图渲染与旅行预览从 mod 解构使用，不再自带副本。
 export {
   computeScaleBar,
+  // H17/H19a：左下角常驻的是**固定长度**标尺（96 CSS px），读数随 camera.k 变化
+  computeViewportScaleBar,
+  formatFixedScaleDistance,
+  formatScaleReading,
+  SCALE_BAR_FIXED_PX,
+  SCALE_BAR_FIXED_MIN_PX,
   formatDistanceMeters,
   formatTravelDistance,
   validateScaleResponse,
@@ -112,6 +118,45 @@ export {
   MAP_LONGPRESS_HOLD_MS,
 } from "./atlas-map-interactions.ts";
 
+/**
+ * H12/H13：视口对齐 SVG 网格的纯函数实现。
+ * index.js 的 updateGridVisual 从 mod 解构它——格线只由这一个权威实现算出，
+ * 不再用会被 stage 的 scale(k) 拉伸的 CSS 渐变。
+ */
+export {
+  getVisibleGridPaths,
+  gridCameraFromMapCamera,
+  gridScreenPosition,
+  gridMajorStepForScale,
+  MAP_GRID_MAX_LINES_PER_AXIS,
+  MAP_GRID_MINOR_MIN_PX,
+  MAP_GRID_MAJOR_STEPS,
+  MAP_GRID_STROKE_PX,
+} from "./atlas-map-grid.ts";
+
+/**
+ * H15/H16：已证实范围的填色投影。index.js 的 renderMap 从 mod 解构使用——
+ * 「只染有证据的格、没有 areas 就一格都不染」的判定只在这一处实现。
+ */
+export {
+  projectColorAreas,
+  type AtlasColorAreaProjection,
+} from "./atlas-map-areas.ts";
+
+/**
+ * H08（0.9.59）：缺坐标地点的**示意布局**。
+ *
+ * 这个模块早就实现并有完整单测，但一直**没有生产调用点**——于是「未定位地点」
+ * 在真实地图上根本不渲染（F01 只在数据层把它们挑出来了）。这里转出给 index.js 的
+ * renderMap 消费：`displayOnly` 的点只做渲染，绝不回写三表 / world，
+ * `collisionPoints` 也明确不含示意点（示意位置不是已知几何）。
+ */
+export {
+  layoutUnplacedMarkers,
+  ATLAS_MAP_LAYOUT_LIMITS,
+  type AtlasMapLayoutResult,
+} from "./atlas-map-layout.ts";
+
 export {
   createAtlasLorebookWriter,
   lorebookNameFor,
@@ -120,4 +165,31 @@ export {
   type AtlasLorebookPort,
 } from "./atlas-lorebook.ts";
 
-export { createAtlasDiagnosticsSink, sanitizeDiagnostic } from "./atlas-diagnostics.ts";
+/**
+ * A04（0.9.59）：安全诊断的**可公开面**补全。
+ *
+ * `createAtlasDiagnosticsSink` / `sanitizeDiagnostic` 早已转出；这里补上引用指纹与
+ * 具名诊断表——它们决定「什么能进日志、什么必须被抹掉」：
+ * - `atlasRefFingerprint` / `isAtlasRefFingerprint` / `chatFingerprintFromRef`：
+ *   只给**不可逆指纹**，原文（聊天名、角色名、正文）永不进诊断；
+ * - `ATLAS_NAMED_DIAGNOSTICS` / `namedDiagnosticSpec` / `isAllowedNamedDiagnosticDetail`：
+ *   具名诊断只放行登记过的字段，未登记字段一律丢弃（不静默透传自由文本）；
+ * - `namedDiagnosticInput`：按登记表构造诊断负载，非法输入 → null。
+ *
+ * 放在出口的意义：index.js 与预览页可以复用同一套口径，而不必各自再实现一份
+ * 「哪些字段算敏感」的判断——两份判断迟早会分叉。
+ */
+export {
+  createAtlasDiagnosticsSink,
+  sanitizeDiagnostic,
+  atlasRefFingerprint,
+  isAtlasRefFingerprint,
+  chatFingerprintFromRef,
+  ATLAS_NAMED_DIAGNOSTICS,
+  namedDiagnosticSpec,
+  isAllowedNamedDiagnosticDetail,
+  namedDiagnosticInput,
+  type AtlasDiagnostic,
+  type AtlasNamedDiagnosticCode,
+  type AtlasNamedDiagnosticSpec,
+} from "./atlas-diagnostics.ts";

@@ -101,41 +101,50 @@ async function setup(scripts, { protocol = "table-delta-v1" } = {}) {
   return { store, core, carrier, world, calls };
 }
 
-test("T01：v2 现场样例在 v2 协议下仍是原错误码；切到 table-delta-v1 后走新路径（不再进 v2 解析）", async () => {
+test("T01：旧 v2 现场样例 → 具名协议冲突（不再进 v2 解析）；无块长响应走行增量拒绝路径；夹块长响应可提交", async () => {
   const sample = malformedV2Sample();
   assert.ok(sample.length > 5000, "现场样例是长响应（T01 的原始症状：23321 字符）");
 
-  // ① 旧协议：仍然是 RESPONSE_MALFORMED，且留 v2 拒绝诊断
+  /**
+   * ① E07 等效：v2 协议已不可选（`runtime.update` 写 v2 会被明确拒绝），旧现场样例因此得到的
+   * 不再是「v2 校验失败」，而是**具名的协议冲突**：PROTOCOL_MISMATCH（409）+ 迁移入口，
+   * 且世界与游标零变化——既不静默成功，也不被偷偷交给别的管线抢救。
+   */
   {
-    const { core, carrier, world } = await setup([() => textResponse(200, sample)], { protocol: "v2" });
+    const { core, carrier, world } = await setup([() => textResponse(200, sample)]);
+    const protocolWrite = await core.handle("PUT", "/settings", { action: "runtime.update", worldTurnProtocol: "v2" }, { local: true });
+    assert.equal(protocolWrite.status, 400, "旧协议已不可写（前置）");
     const result = await core.handle("POST", "/turns/commit", commitRequest(world));
-    assert.equal(result.status, 502, `v2 协议下顶层封套错误仍是 RESPONSE_MALFORMED（502）：实际 ${result.status}`);
-    assert.equal(result.body.error.code, ATLAS_ERROR_CODES.RESPONSE_MALFORMED);
-    assert.match(String(result.body.error.message), /v2 协议校验失败/, "错误信息指出是 v2 校验失败");
-    assert.match(String(result.body.error.message), /\$/, "错误里带具体路径（$）");
+    assert.equal(result.status, 409, `旧 v2 封套 → 具名协议冲突 409：实际 ${result.status}`);
+    assert.equal(result.body.error.code, ATLAS_ERROR_CODES.PROTOCOL_MISMATCH);
+    assert.match(String(result.body.error.message), /旧「v2 世界封套」/, "错误信息指出是旧 v2 封套");
+    assert.match(String(result.body.error.message), /\$\.schemaVersion/, "错误里带具体路径（$.schemaVersion）");
+    assert.match(String(result.body.error.message), /迁移入口/, "错误里给出迁移入口");
     assert.equal(carrier.session.binding.worldTimeCursor, CURRENT_TIME, "失败不推进游标");
-    const logs = core.logs().filter((log) => log.kind === "world-turn-v2-rejected");
-    assert.equal(logs.length, 1, "留一条 v2 拒绝诊断（不静默）");
+    assert.equal(Object.keys(carrier.session.turns ?? {}).length, 0, "失败不落回合记录");
+    const logs = core.logs().filter((log) => log.kind === "world-turn-protocol-mismatch");
+    assert.equal(logs.length, 1, "留一条协议冲突诊断（不静默）");
     assert.ok(!JSON.stringify(core.logs()).includes(sample.slice(0, 40)), "诊断不含模型原文");
   }
 
-  // ② 新协议：同一份响应**根本不进 v2 解析**，按行增量协议判缺失块
+  // ② 既不是 v2 形状、也没有完整块的长响应 → 走行增量拒绝路径（不猜协议、不抢救半截 JSON）
   {
-    const { core, carrier, world } = await setup([() => textResponse(200, sample)], { protocol: "table-delta-v1" });
+    const plainProse = `（模型只写了一堆散文，没有块）\n${"这是一段没有结构的正文。".repeat(300)}`;
+    const { core, carrier, world } = await setup([() => textResponse(200, plainProse)]);
     const result = await core.handle("POST", "/turns/commit", commitRequest(world));
     assert.equal(result.status, 502, "没有完整 <atlasEdit> 块 → RESPONSE_MALFORMED（可重试）");
     assert.equal(result.body.error.code, ATLAS_ERROR_CODES.RESPONSE_MALFORMED);
     assert.match(String(result.body.error.message), /行增量块|atlasEdit/, "错误信息说的是行增量块缺失，不是 v2 封套");
-    assert.equal(core.logs().filter((log) => log.kind === "world-turn-v2-rejected").length, 0, "**没有**走 v2 解析路径");
+    assert.equal(core.logs().filter((log) => log.kind === "world-turn-protocol-mismatch").length, 0, "**没有**走协议冲突路径");
     assert.equal(core.logs().filter((log) => log.kind === "world-turn-delta-rejected").length, 1, "走的是行增量拒绝路径");
     assert.equal(carrier.session.binding.worldTimeCursor, CURRENT_TIME, "失败不推进游标");
     assert.equal((carrier.session.turns ?? {})[Object.keys(carrier.session.turns ?? {})[0] ?? ""] ?? null, null, "失败不落回合记录");
   }
 
-  // ③ 新协议 + 合法行增量块：同一份"长响应里夹一个块"的场景直接成功
+  // ③ 合法行增量块：同一份"长响应里夹一个块"的场景直接成功
   {
     const withBlock = `${sample}\n<atlasEdit>\n${JSON.stringify({ table: "location", op: "add", ref: "new:loc:hall", name: "钟楼大堂", parentRef: "loc:9001", description: "钟楼内部", quote: "你走进钟楼" })}\n</atlasEdit>`;
-    const { core, carrier, world } = await setup([() => textResponse(200, withBlock)], { protocol: "table-delta-v1" });
+    const { core, carrier, world } = await setup([() => textResponse(200, withBlock)]);
     const result = await core.handle("POST", "/turns/commit", commitRequest(world));
     assert.equal(result.body.data?.receipt?.status, "committed", `夹块的长响应应可提交：${JSON.stringify(result.body.error ?? {})}`);
     const names = carrier.session.tables.branches.canon.locations.map((row) => row.name);

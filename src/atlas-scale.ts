@@ -18,6 +18,50 @@
 /** 标定来源：ai-estimated = AI 语义估计；user = 人工标定（默认锁定）；legacy = 旧子图 scale 迁移。 */
 export type MapScaleSource = "ai-estimated" | "user" | "legacy";
 
+/** 正史分支键（与 `atlas-simulation.ts` 的 `DEFAULT_SIMULATION_BRANCH` 同一口径）。 */
+const CANON_BRANCH = "canon";
+
+/**
+ * H18e / H09（0.9.59）：标定在 `maps.calibrations` 里的**作用域键**。
+ *
+ * - 正史（`canon`）**沿用旧的 `mapId` 键**——0.9.58 存档里的 `calibrations[mapId]`
+ *   必须照读，用户已保存的真实标定一个字都不能丢（T29）；
+ * - 其他分支（IF）用 `branchKey|mapId`——**每张图各自标一次**，
+ *   IF 重标教室绝不能覆盖正史教室的数值（T12 / T27 / T28）。
+ *
+ * 这只是键的映射，不动任何数值：皮肤、相机、格距都不受影响。
+ */
+export function scaleCalibrationKey(branchKey: string, mapId: string): string {
+  const branch = typeof branchKey === "string" ? branchKey.trim() : "";
+  const map = typeof mapId === "string" ? mapId.trim() : "";
+  if (map.length === 0) return "";
+  return branch.length === 0 || branch === CANON_BRANCH ? map : `${branch}|${map}`;
+}
+
+/**
+ * H18e：按当前分支读取一张图的标定。
+ *
+ * 读不到的三种情况分开返回，调用方据此显示「未标定 · 按格」而不是假米数：
+ * - `missing`：这个分支这张图确实没有标定；
+ * - `corrupt`：键在、但记录没通过清洗（**保留原文**，不静默当空）。
+ */
+export function readScaleCalibration(
+  calibrations: Record<string, unknown> | null | undefined,
+  branchKey: string,
+  mapId: string,
+): { calibration: MapScaleCalibration | null; key: string; status: "ok" | "missing" | "corrupt" } {
+  const key = scaleCalibrationKey(branchKey, mapId);
+  if (key.length === 0 || !calibrations || typeof calibrations !== "object") {
+    return { calibration: null, key, status: "missing" };
+  }
+  const raw = (calibrations as Record<string, unknown>)[key];
+  if (raw === undefined || raw === null) return { calibration: null, key, status: "missing" };
+  const calibration = sanitizeCalibration(raw);
+  return calibration === null
+    ? { calibration: null, key, status: "corrupt" }
+    : { calibration, key, status: "ok" };
+}
+
 /** 地图尺度标定（持久化在 sidecar 文档 calibrations[mapId]）。 */
 export interface MapScaleCalibration {
   /** 标定记录版本（每次覆写 +1，便于回退审计）。 */
@@ -197,6 +241,104 @@ export function computeScaleBar(input: {
     return belowGap <= aboveGap ? bestBelow : bestAbove;
   }
   return bestBelow ?? bestAbove ?? best;
+}
+
+/**
+ * H17（§2.6）：左下角**唯一常驻控件**——固定长度比例尺。
+ *
+ * 与 `computeScaleBar` 的关键区别：那个函数挑「1/2/5 × 10^n」的**好看候选**，
+ * 相邻缩放步可能保留相同数字（放大一小段而读数不变）；本函数把线条长度**钉死**在
+ * 视口坐标系的 96 CSS px（狭窄视口降到 64），因此 `camera.k` 放大 2 倍，读数必然减半。
+ *
+ * 纪律：
+ * - 线条长度只由视口宽度决定，**绝不随地图 stage 的 CSS transform 一起放大**；
+ * - `metersPerCell` 必须是**正有限值**才给 `distanceMeters`——未标定就只报格数，
+ *   绝不静默填 1 米 / 格，也不显示假米数；
+ * - 只改 UI 读数，不写 `metersPerCell`，不碰任何已保存的格坐标。
+ */
+export const SCALE_BAR_FIXED_PX = 96;
+/** 窄视口的下限：低于这个宽度仍然要看得见一条可信的尺。 */
+export const SCALE_BAR_FIXED_MIN_PX = 64;
+/** 视口两侧留给控件与安全边距的宽度。 */
+export const SCALE_BAR_FIXED_INSET_PX = 48;
+
+export interface AtlasViewportScaleBar {
+  /** 线条固定长度（CSS px，视口坐标系）。 */
+  barWidthPx: number;
+  /** 已标定时的物理距离（米）；未标定为 null。 */
+  distanceMeters: number | null;
+  /** 固定长度对应多少地图格（未标定时它是唯一读数）。 */
+  distanceCells: number;
+  /** `meters` = 有可信标定；`cells` = 未标定 · 按格。 */
+  unitMode: "meters" | "cells";
+  /** 面板读数（3 位有效数字）。 */
+  label: string;
+  /** 可访问文案：「屏幕 96 像素约等于 X 米」。 */
+  ariaLabel: string;
+}
+
+/**
+ * 3 位有效数字，去掉尾随零：960 → "960"、9.6 → "9.6"、1.92 → "1.92"。
+ * 不能复用 `formatDistanceMeters`（它按 1 位小数取整，会把 1.92 千米写成 1.9 千米）。
+ */
+export function formatScaleReading(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "";
+  return String(Number(value.toPrecision(3)));
+}
+
+/** 固定尺读数的单位自动换算（毫米 / 米 / 千米），一律 3 位有效数字。 */
+export function formatFixedScaleDistance(meters: number): string {
+  if (!Number.isFinite(meters) || meters <= 0) return "";
+  if (meters < 0.001) return `${formatScaleReading(meters * 1000)} 毫米`;
+  if (meters < 1) return `${formatScaleReading(meters * 100)} 厘米`;
+  if (meters < 1000) return `${formatScaleReading(meters)} 米`;
+  return `${formatScaleReading(meters / 1000)} 千米`;
+}
+
+export function computeViewportScaleBar(input: {
+  /** 1 地图格在屏幕上的 CSS px（`camera.k`）。 */
+  cameraK: number;
+  /** 当前图的米 / 格；未标定 / 非法传 null。 */
+  metersPerCell: number | null | undefined;
+  /** 视口宽度（CSS px）；缺省按标准 96px 处理。 */
+  viewportWidth?: number | null;
+}): AtlasViewportScaleBar | null {
+  const cameraK = finitePositiveNumber(input.cameraK);
+  // k ≤ 0 / NaN：没有可用的缩放，返回 null（调用方隐藏标尺而不是显示 0）
+  if (cameraK === null) return null;
+
+  const width = typeof input.viewportWidth === "number" && Number.isFinite(input.viewportWidth) && input.viewportWidth > 0
+    ? input.viewportWidth : null;
+  const barWidthPx = width === null
+    ? SCALE_BAR_FIXED_PX
+    : Math.max(SCALE_BAR_FIXED_MIN_PX, Math.min(SCALE_BAR_FIXED_PX, width - SCALE_BAR_FIXED_INSET_PX));
+
+  // 未标定：只报格数（D 格 = L / k），绝不冒充米
+  const metersPerCell = finitePositiveNumber(input.metersPerCell ?? null);
+  if (metersPerCell === null) {
+    const distanceCells = barWidthPx / cameraK;
+    return {
+      barWidthPx,
+      distanceMeters: null,
+      distanceCells,
+      unitMode: "cells",
+      label: `约 ${formatScaleReading(distanceCells)} 格 · 未标定`,
+      ariaLabel: `屏幕 ${Math.round(barWidthPx)} 像素约等于 ${formatScaleReading(distanceCells)} 格（本图未标定比例尺）`,
+    };
+  }
+
+  // 已标定：D 米 = L × metersPerCell / k
+  const distanceMeters = (barWidthPx * metersPerCell) / cameraK;
+  const distanceCells = barWidthPx / cameraK;
+  const reading = formatFixedScaleDistance(distanceMeters);
+  return {
+    barWidthPx,
+    distanceMeters,
+    distanceCells,
+    unitMode: "meters",
+    label: reading,
+    ariaLabel: `屏幕 ${Math.round(barWidthPx)} 像素约等于 ${reading}`,
+  };
 }
 
 /** 距离显示：内部统一米，显示米 / 公里自动（极小图到厘米）。 */

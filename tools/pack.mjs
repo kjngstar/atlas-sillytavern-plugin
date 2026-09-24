@@ -14,7 +14,7 @@
  * 会拦截或终止，复制与删除均手写递归。
  */
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildAll } from "./build.mjs";
@@ -28,13 +28,39 @@ const PACK_TARGETS = [
   { name: "atlas-server-plugin", from: join(root, "atlas-server-plugin") },
 ];
 
+/**
+ * 原子写文件：先写同目录临时文件，再 rename 覆盖目标。
+ *
+ * 为什么必须这样（0.9.59 修的真实偶发红）：
+ * `atlas-integration` 与 `atlas-release-audit` 各自会 `execFileSync` 跑本脚本，
+ * 而本脚本会重建 `release/` 并把产物刷进仓库根的 `dist/`。两个测试文件在
+ * `node --test` 下是**并发进程**，另一边正在读 `dist/atlas-ui-core.mjs` 或
+ * `atlas-extension/index.js` 时，恰好读到 `writeFileSync` 写到一半的文件——
+ * 于是「模块解析失败 / 镜像不一致」这类与被测逻辑毫无关系的红，
+ * 且下一次成功的 pack 又会自愈，极难复现。
+ * rename 在同一卷上是原子的：读者要么看到旧的完整文件，要么看到新的完整文件，
+ * 永远不会看到半个。两次 pack 内容相同，因此两种状态都是合法的。
+ */
+function writeFileAtomic(to, content) {
+  const tmp = `${to}.pack-tmp-${process.pid}`;
+  writeFileSync(tmp, content);
+  try {
+    renameSync(tmp, to);
+  } catch (error) {
+    // rename 失败（极少数：目标被占用）时退回直接写，至少不留临时文件
+    try { unlinkSync(tmp); } catch { /* 忽略 */ }
+    writeFileSync(to, content);
+    if (process.env.ATLAS_PACK_DEBUG) console.error(`[pack] atomic rename failed for ${to}: ${String(error)}`);
+  }
+}
+
 function copyTree(fromDir, toDir) {
   mkdirSync(toDir, { recursive: true });
   for (const entry of readdirSync(fromDir)) {
     const from = join(fromDir, entry);
     const to = join(toDir, entry);
     if (statSync(from).isDirectory()) copyTree(from, to);
-    else copyFileSync(from, to);
+    else writeFileAtomic(to, readFileSync(from));
   }
 }
 
@@ -66,7 +92,7 @@ function stripDevFallback(content) {
 
 function copyReleaseFile(from, to) {
   const content = readFileSync(from, "utf8");
-  writeFileSync(to, stripDevFallback(content), "utf8");
+  writeFileAtomic(to, stripDevFallback(content));
 }
 
 // 3) 清空并重建 release/
@@ -109,7 +135,8 @@ if (existsSync(rootLicense)) {
 //    index.js 镜像维持人工同步（唯一有意差异 = dev 回退行），此处断言一致。
 const MIRROR_SYNC_FILES = ["style.css", "settings.html", "manifest.json"];
 for (const file of MIRROR_SYNC_FILES) {
-  copyFileSync(join(root, file), join(root, "atlas-extension", file));
+  // 原子写：并发跑的另一个 pack / 正在读镜像的测试都不会看到半个文件
+  writeFileAtomic(join(root, "atlas-extension", file), readFileSync(join(root, file)));
 }
 const stripFallbackLine = (content) =>
   content.replace(

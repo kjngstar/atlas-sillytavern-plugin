@@ -104,13 +104,27 @@ test("R01: 地图工具显示、hint 不遮挡、网格平铺、底图网格分�
   assert.ok(hint, "hint 存在");
   assert.equal(css(hint).pointerEvents, "none", "hint pointer-events:none");
 
-  // D08：网格独立图层 repeat 平铺（不再是 no-repeat 单块）
+  /**
+   * H13（0.9.59）：网格改为**视口对齐的 SVG overlay**。
+   *
+   * 旧断言（`grid.style.backgroundImage` 含 `repeating-linear-gradient`）钉住的正是
+   * F12 的缺陷实现：渐变画在会被 stage `scale(k)` 拉伸的层上，41% 看似密格、
+   * 放大后只剩几道粗大模糊断线。现在格线由 H12 纯函数按同一套 world→screen 变换算出，
+   * 并对 SVG 自身施加反变换，线宽恒为 1 CSS px。
+   */
   const grid = container.querySelector(".aw-grid");
-  assert.ok(grid, "独立网格层存在");
-  assert.equal(grid.style.backgroundRepeat, "repeat", "网格 repeat 平铺");
-  assert.equal(grid.style.backgroundSize, "100% 100%", "网格铺满元素而非单块");
-  assert.ok(grid.style.backgroundImage.includes("repeating-linear-gradient"), "网格用 repeating-gradient");
-  assert.ok(grid.style.backgroundImage.includes("--am-grid-minor"), "网格消费皮肤令牌 --am-grid-minor（R11 契约）");
+  assert.ok(grid, "独立网格层存在（图层显隐语义不变）");
+  const gridSvg = grid.querySelector(".aw-grid-svg");
+  assert.ok(gridSvg, "网格改画在 SVG overlay 上");
+  assert.equal(grid.style.backgroundImage, "", "旧的 CSS 渐变网格必须移除");
+  assert.ok(gridSvg.querySelector(".aw-grid-svg__minor"), "次格线是独立 path");
+  assert.ok(gridSvg.querySelector(".aw-grid-svg__major"), "主格线是独立 path");
+
+  // R11 契约不变：网格颜色仍走皮肤令牌（现在写在 CSS 类里，而不是内联渐变）
+  const gridCss = readFileSync(resolve(root, "style.css"), "utf8");
+  assert.ok(gridCss.includes("--am-grid-minor"), "网格消费皮肤令牌 --am-grid-minor（R11 契约）");
+  assert.ok(/\.aw-grid-svg\s*\{[^}]*pointer-events:\s*none/.test(gridCss),
+    "SVG 网格层不吃指针事件（不挡平移 / 缩放 / 点位点击）");
 
   // D09：底图与网格分层——image 层存在且默认叠加视图
   const image = container.querySelector(".aw-image");
@@ -215,7 +229,9 @@ test("R01: 有底图时网格仍被绘制（叠加默认）且缓存键含底图
   await new Promise((r) => setTimeout(r, 20));
 
   const grid = container.querySelector(".aw-grid");
-  assert.ok(grid.style.backgroundImage.includes("repeating-linear-gradient"), "有底图时网格仍然绘制（M02 叠加）");
+  // H13：有底图时网格层照旧共存（M02 叠加默认），只是格线现在画在 SVG overlay 上
+  assert.ok(grid.querySelector(".aw-grid-svg"), "有底图时网格仍然绘制（M02 叠加，改画在 SVG 上）");
+  assert.equal(grid.style.backgroundImage, "", "不再有 CSS 渐变网格与底图争同一个属性");
   const image = container.querySelector(".aw-image");
   assert.equal(image.style.backgroundRepeat, "no-repeat", "底图 no-repeat 铺满");
   assert.ok(image.style.backgroundImage.includes("data:image"), "底图挂在独立图层");

@@ -1563,6 +1563,10 @@ async function mountAtlasMap({ stateByChat, chatId = "chat-a", travelPreview = n
     ...cameraMod,
     ...(await import(pathToFileURL(join(root, "src", "atlas-map-interactions.ts")).href)),
     ...(await import(pathToFileURL(join(root, "src", "atlas-scale.ts")).href)),
+    // H13：网格纯函数由发布入口提供；夹具按真实表面补齐，SVG overlay 才会真的出线
+    ...(await import(pathToFileURL(join(root, "src", "atlas-map-grid.ts")).href)),
+    // H16：范围填色投影（只染有证据的格）
+    ...(await import(pathToFileURL(join(root, "src", "atlas-map-areas.ts")).href)),
     ATLAS_UI_PAGES: (await import(pathToFileURL(join(root, "src", "atlas-ui-core.ts")).href)).ATLAS_UI_PAGES,
   };
 
@@ -2251,4 +2255,1247 @@ test("D03 前端：物品图钉按三表口径画（持有物与已销毁物不�
   ok(subItems.some((text) => text.includes("卷宗")), `子图有「卷宗」图钉：实际 ${JSON.stringify(subItems)}`);
   ok(!subItems.some((text) => text.includes("铜灯")), "世界图物品不带进子图");
   void panel;
+});
+
+// ===========================================================================
+// 阶段 B：聊天隔离（B01 / B02a / B02b / B03 / B04 + A03 诊断夹具 / B06 回归）
+//
+// 接缝（沿用本文件既有做法）：
+// - 判定逻辑一律从**仓库根 index.js** 导入（`import(pathToFileURL(join(root,"index.js")))`，
+//   与 tests/atlas-stability.test.mjs 同口径）。index.js 不在 tsconfig 覆盖内，
+//   所以这里全部是真跑断言，不做源码字符串匹配。
+// - 需要真实 renderPanel 的场景沿用 S10 的 data:URL 源码注入（追加 `export { renderPanel }`），
+//   但读的是根 index.js（本阶段的施工文件），且**每次挂载换 URL**——mapImageCache /
+//   相机表都是模块级或面板级状态，用例之间必须拿到全新实例。
+// - A03 夹具只记录身份与结构字段（binding.chatId / world.id / branchKey / 当前地点 /
+//   人物 id 与 locationId），**绝不含任何聊天正文**，也不触碰真实聊天。
+// ===========================================================================
+
+/** 根 index.js 导出（纯函数判定 + 可测工厂）。 */
+const bIndex = await import(pathToFileURL(join(root, "index.js")).href);
+const { buildLorebookPlans, createAtlasLorebookWriter } = await import(
+  pathToFileURL(join(root, "src", "atlas-lorebook.ts")).href
+);
+
+/** 根 index.js 源码（DOM 用例经 data:URL 注入 `export { renderPanel }`）。 */
+const B_INDEX_SOURCE = readFileSync(join(root, "index.js"), "utf8");
+let bMountSeq = 0;
+
+/** 挂载**根 index.js** 的真实地图页（与 mountAtlasMap 同套路，只是源码换成根文件）。 */
+async function mountRootAtlasMap({ stateByChat, chatId = "chat-a", travelPreview = null }) {
+  const dom = new JSDOM("<!doctype html><head></head><body></body>", { url: "http://localhost/", pretendToBeVisual: true });
+  globalThis.window = dom.window;
+  globalThis.document = dom.window.document;
+  globalThis.HTMLElement = dom.window.HTMLElement;
+  const style = document.createElement("style");
+  style.textContent = readFileSync(join(root, "atlas-extension", "style.css"), "utf8");
+  document.head.append(style);
+
+  bMountSeq += 1;
+  const source = `${B_INDEX_SOURCE}\nexport { renderPanel };\n// b-mount-${bMountSeq}`;
+  const { renderPanel } = await import(
+    "data:text/javascript;base64," + Buffer.from(source).toString("base64")
+  );
+  const cameraMod = await import(pathToFileURL(join(root, "src", "atlas-map-camera.ts")).href);
+  const mapMod = {
+    ...cameraMod,
+    ...(await import(pathToFileURL(join(root, "src", "atlas-map-interactions.ts")).href)),
+    ...(await import(pathToFileURL(join(root, "src", "atlas-scale.ts")).href)),
+    // H13：网格纯函数由发布入口提供；夹具按真实表面补齐，SVG overlay 才会真的出线
+    ...(await import(pathToFileURL(join(root, "src", "atlas-map-grid.ts")).href)),
+    // H16：范围填色投影（只染有证据的格）
+    ...(await import(pathToFileURL(join(root, "src", "atlas-map-areas.ts")).href)),
+    ATLAS_UI_PAGES: (await import(pathToFileURL(join(root, "src", "atlas-ui-core.ts")).href)).ATLAS_UI_PAGES,
+  };
+
+  const api = makeApi({ stateByChat, travelPreview });
+  const hostWrap = makeHost();
+  hostWrap.setChat(chatId);
+  hostWrap.setBinding(chatId, bindingFor(chatId, String(stateByChat[chatId]?.worldId ?? "w-b")));
+  let rerender = () => {};
+  const core = createAtlasUiCore({
+    api,
+    host: hostWrap.host,
+    emitter: makeEmitter(),
+    onStateChange: () => rerender(),
+    now: () => NOW_BASE,
+  });
+  const container = document.createElement("div");
+  document.body.append(container);
+  rerender = renderPanel(core, container, api, { read: async () => null }, mapMod);
+  await core.handleEvent("APP_READY");
+  core.setPage("map");
+  await flush();
+  return { dom, api, hostWrap, core, container, cameraMod, rerender };
+}
+
+// ---------------------------------------------------------------------------
+// A03：诊断夹具（两个聊天的身份字段）+「附近为空」三档判定
+// ---------------------------------------------------------------------------
+
+/**
+ * A03 诊断夹具：只记录定位所需的**结构字段**——两个聊天各自的 binding.chatId、
+ * world.id、branchKey、当前地点、以及人物 `id`/`locationId`。
+ * 不含正文、不含 prompt、不含消息文本（A04 的脱敏纪律同口径）。
+ */
+function a03DiagnosticFixture({ chatId, binding, state }) {
+  const tableMap = state?.tableMap ?? null;
+  return {
+    bindingChatId: binding?.chatId ?? null,
+    worldId: state?.worldId ?? binding?.worldId ?? null,
+    branchKey: state?.tableMap?.branchKey ?? (binding?.branchId ?? "canon"),
+    currentLocationId: binding?.currentLocationId ?? state?.currentLocationId ?? null,
+    characters: (tableMap?.nearby?.entries ?? []).map((entry) => ({
+      id: String(entry.id ?? ""),
+      locationId: String(entry.locationId ?? entry.currentLocationId ?? ""),
+      presence: entry.presence ?? "present",
+    })),
+  };
+}
+
+test("A03 诊断夹具：附近为空能拆成「当前位置未知 / 当前地点有人 / 真正跨聊天」三档", async () => {
+  // 同一张角色卡的两个聊天：worldId 相同（跨聊天共享世界），chatId 不同。
+  const sharedWorldId = "w-a03";
+  const stateA = s10State({
+    chatId: "chat-a", worldId: sharedWorldId, currentLocationId: "2",
+    points: [{ id: "2", name: "蒸汽车厢", x: 30, y: 30, regionId: null }],
+  });
+  stateA.tableMap = {
+    branchKey: "canon",
+    nearby: {
+      total: 2, truncated: 0,
+      entries: [
+        { id: "npc:car-1", name: "车夫", locationId: "loc:2", presence: "present" },
+        { id: "npc:car-2", name: "乘客", locationId: "loc:2", presence: "present" },
+      ],
+    },
+    world: { points: [] }, objects: { entries: [] }, submaps: {},
+  };
+  const stateB = s10State({
+    chatId: "chat-b", worldId: sharedWorldId, currentLocationId: "9",
+    points: [{ id: "9", name: "B 的营地", x: 5, y: 5, regionId: null }],
+  });
+  stateB.tableMap = {
+    branchKey: "canon",
+    nearby: { total: 1, truncated: 0, entries: [{ id: "npc:b-1", name: "B 的人", locationId: "loc:9", presence: "present" }] },
+    world: { points: [] }, objects: { entries: [] }, submaps: {},
+  };
+  const bindingA = bindingFor("chat-a", sharedWorldId, { currentLocationId: "2" });
+  const bindingB = bindingFor("chat-b", sharedWorldId, { currentLocationId: "9" });
+  const fixtureA = a03DiagnosticFixture({ chatId: "chat-a", binding: bindingA, state: stateA });
+  const fixtureB = a03DiagnosticFixture({ chatId: "chat-b", binding: bindingB, state: stateB });
+
+  // 夹具可区分两个聊天（world.id 相同 → 只能靠 chatId 定位，正是 F8 要的口径）
+  equal(fixtureA.bindingChatId, "chat-a", "夹具记录 A 的 binding.chatId");
+  equal(fixtureB.bindingChatId, "chat-b", "夹具记录 B 的 binding.chatId");
+  equal(fixtureA.worldId, fixtureB.worldId, "两个聊天共用同一张角色卡的世界");
+  equal(fixtureA.currentLocationId, "2", "夹具记录 A 的当前地点");
+  deepEqual(fixtureA.characters.map((c) => `${c.id}@${c.locationId}`), ["npc:car-1@loc:2", "npc:car-2@loc:2"],
+    "夹具记录人物 id / locationId");
+
+  // 第 1 档：当前位置未知 → 不是"没人"，是没算过
+  const unknown = bIndex.atlasDiagnoseEmptyNearby({
+    currentLocationId: null, tableNearbyEntries: stateA.tableMap.nearby.entries, relevantNpcIds: [],
+  });
+  equal(unknown.case, "current-location-unknown", "当前位置未知单独成档");
+  ok(unknown.message.includes("尚未确定当前位置"), `文案直说位置未知：实际「${unknown.message}」`);
+
+  // 第 2 档：当前地点确实有人（附近页为空只是本轮没有相关性判定）→ 不是跨聊天
+  const samePlace = bIndex.atlasDiagnoseEmptyNearby({
+    currentLocationId: "2", tableNearbyEntries: stateA.tableMap.nearby.entries, relevantNpcIds: [],
+  });
+  equal(samePlace.case, "same-location-has-people", "同类地点有人单独成档");
+  equal(samePlace.persons, 2, "数出该地点在场人数");
+  ok(!samePlace.message.includes("附近暂无已确认人物"), "不把「引擎没判相关」说成「附近没人」");
+
+  // 第 3 档：真正跨聊天 —— 身份核验说不符，写回守卫必须拒绝
+  const metaA = { atlas: { schemaVersion: 1, binding: bindingA } };
+  const metaB = { atlas: { schemaVersion: 1, binding: bindingB } };
+  equal(bIndex.atlasSameChatIdentity(
+    { chatId: "chat-a", metadata: metaA }, { chatId: "chat-b", metadata: metaB },
+  ), false, "两个聊天不是同一身份");
+  equal(bIndex.atlasSameChatIdentity(
+    { chatId: "chat-a", metadata: metaA }, { chatId: "chat-a", metadata: metaB },
+  ), false, "同 chatId 但 metadata 对象不同 → 也不是同一身份（关聊天后重开）");
+  equal(bIndex.atlasSessionWriteGuard("chat-a", "chat-b", "chat-a", metaA.atlas), false,
+    "A 的会话在 B 里被拒绝写回（真正跨聊天）");
+  ok(!JSON.stringify(fixtureB.characters).includes("npc:car-1"), "B 的夹具里没有 A 的人物行");
+
+  // 真实 UI 文案：同一判定函数驱动附近页三档（A03 的落地接线）
+  const stateByChat = { "chat-a": { ...stateA, currentLocationId: null, relevantNpcIds: [] } };
+  const { container, core, hostWrap } = await mountRootAtlasMap({ stateByChat });
+  core.setPage("nearby");
+  await flush();
+  let text = container.querySelector(".aw-center")?.textContent ?? "";
+  ok(text.includes("尚未确定当前位置"), `附近页在位置未知时给出诚实文案：实际「${text.slice(0, 80)}」`);
+
+  stateByChat["chat-a"] = { ...stateA, relevantNpcIds: [] };
+  await core.refresh();
+  await flush();
+  text = container.querySelector(".aw-center")?.textContent ?? "";
+  ok(text.includes("当前地点已确认在场者"), `位置已知且地点有人时不说「没人」：实际「${text.slice(0, 80)}」`);
+  void hostWrap;
+});
+
+// ---------------------------------------------------------------------------
+// B01：存量迁移 —— Map<chatId> + 身份核验
+// ---------------------------------------------------------------------------
+
+/** B01 夹具：一个聊天的 chatMetadata（含旧绑定）与可注入的旧档 store/api。 */
+function b01LegacyChat(chatId, worldId) {
+  return {
+    chatId,
+    metadata: {
+      atlas_binding: {
+        schemaVersion: 1, enabled: true, chatId, characterId: null, worldId,
+        branchId: null, currentLocationId: "1", worldTimeCursor: 12,
+        lastCommittedMessageId: null, lastCheckpointId: null,
+      },
+    },
+  };
+}
+
+function b01Store(docs = {}, { poisonList = false } = {}) {
+  const removed = [];
+  const keys = Object.keys(docs);
+  return {
+    removed,
+    async read(key) { return key in docs ? docs[key] : null; },
+    async list(prefix) {
+      if (poisonList) return keys.slice(); // 恶意/有 bug 的宿主：把全部键都列出来
+      return keys.filter((key) => key.startsWith(prefix));
+    },
+    async remove(key) { removed.push(key); delete docs[key]; },
+    docs,
+  };
+}
+
+test("B01 迁移：A→B 切换发生在 await 中间 → 保留旧数据、不 saveMetadata、不 purge", async () => {
+  const legacyA = b01LegacyChat("chat-a", "w-a");
+  const legacyB = b01LegacyChat("chat-b", "w-b");
+  const store = b01Store({
+    "world:w-a": { id: "w-a", name: "A 的世界" },
+    "maps:w-a": { points: [{ id: "1", name: "A 钟楼" }] },
+    "turn:chat-a::1": { receipt: { status: "committed", summary: "A 的动向" } },
+    "turn:chat-b::1": { receipt: { status: "committed", summary: "B 的动向" } },
+  }, { poisonList: true });
+  const purge = [];
+  const api = { async request(method, path, body) { purge.push(path); return { status: 200, body: { ok: true, data: {} } }; } };
+  const events = [];
+  let saves = 0;
+
+  let current = { chatId: "chat-a", chatMetadata: legacyA.metadata, saveMetadata: async () => { saves += 1; } };
+  const context = () => current;
+
+  // 在第一个 await（读 world:w-a）返回时切到 chat-b
+  const originalRead = store.read.bind(store);
+  store.read = async (key) => {
+    const value = await originalRead(key);
+    if (key === "world:w-a") current = { chatId: "chat-b", chatMetadata: legacyB.metadata, saveMetadata: async () => { saves += 1; } };
+    return value;
+  };
+  const result = await bIndex.migrateChatSession(context, { store, api, emit: (event) => events.push(event) });
+
+  equal(result.stale, true, "迁移判定为过期");
+  equal(result.code, "STALE_MIGRATION_DROPPED", "结果带 STALE_MIGRATION_DROPPED");
+  const stale = events.find((event) => event.code === "STALE_MIGRATION_DROPPED");
+  ok(stale !== undefined, "记录了 STALE_MIGRATION_DROPPED 诊断");
+  equal(stale?.errorCode, "SESSION_IDENTITY_MISMATCH", "诊断带 A04 的具名码");
+  equal(stale?.details?.reasonCode, "SESSION_IDENTITY_MISMATCH", "reasonCode 同样具名");
+  equal(stale?.details?.stage, "after-world-read", "定位到具体核验点");
+
+  equal(saves, 0, "身份不符 → 一次 saveMetadata 都没有");
+  equal(purge.length, 0, "身份不符 → 一个服务端请求都不发");
+  deepEqual(store.removed, [], "身份不符 → 不移除任何旧 KV");
+  equal(legacyA.metadata.atlas, undefined, "A 的 chatMetadata 没有被写入半截会话");
+  ok(legacyA.metadata.atlas_binding !== undefined, "A 的旧绑定原样保留（下次事件再迁）");
+  equal(legacyB.metadata.atlas, undefined, "B 的 chatMetadata 完全没有被 A 的迁移碰到");
+  ok(!JSON.stringify(legacyB.metadata).includes("A 钟楼"), "B 里没有 A 的任何表行 / 地图");
+
+  // A→B→A：切回 A 后重新迁移成功，旧数据确实还在（失败没有损坏任何东西）
+  store.read = originalRead;
+  current = { chatId: "chat-a", chatMetadata: legacyA.metadata, saveMetadata: async () => { saves += 1; } };
+  const retried = await bIndex.migrateChatSession(context, { store, api, emit: (event) => events.push(event) });
+  equal(retried.migrated, true, "切回 A 后迁移成功");
+  equal(legacyA.metadata.atlas?.binding?.chatId, "chat-a", "A 会话绑定归属 A");
+  equal(legacyA.metadata.atlas?.world?.id, "w-a", "A 会话世界里是 A 的数据");
+  equal(legacyA.metadata.atlas?.maps?.points?.[0]?.name, "A 钟楼", "A 会话地图里是 A 的地图");
+  ok(!Object.keys(legacyA.metadata.atlas?.turns ?? {}).includes("turn:chat-b::1"), "A 的会话里没有 B 的回合（宿主乱列键也不收）");
+  deepEqual(Object.keys(legacyA.metadata.atlas?.turns ?? {}), ["turn:chat-a::1"], "A 只收自己的回合");
+  equal(saves, 1, "成功路径只存档一次");
+  deepEqual(store.removed, ["turn:chat-a::1"], "只清自己的回合旧档");
+  deepEqual(purge, [], "不调 /session/purge（它按 worldId 删共享旧档，会毁掉别的聊天的迁移源）");
+  ok(store.docs["world:w-a"] !== undefined && store.docs["maps:w-a"] !== undefined,
+    "世界级旧档保留：同一张卡的其他聊天仍能迁移");
+  ok(!store.removed.includes("turn:chat-b::1"), "绝不代删别的聊天的回合文档");
+});
+
+test("B01 迁移：在途表按 chatId 分桶（不同聊天不复用同一个 Promise）", async () => {
+  const legacyA = b01LegacyChat("chat-a", "w-a");
+  const legacyB = b01LegacyChat("chat-b", "w-b");
+  const store = b01Store({ "world:w-a": { id: "w-a" }, "world:w-b": { id: "w-b" } });
+  const ctxA = { chatId: "chat-a", chatMetadata: legacyA.metadata, saveMetadata: async () => {} };
+  const ctxB = { chatId: "chat-b", chatMetadata: legacyB.metadata, saveMetadata: async () => {} };
+  let current = ctxA;
+  const context = () => current;
+
+  const first = bIndex.migrateChatSession(context, { store, api: null, emit: () => {} });
+  const sameChat = bIndex.migrateChatSession(context, { store, api: null, emit: () => {} });
+  equal(bIndex.atlasSessionMigrationInFlight("chat-a"), true, "A 有在途迁移");
+  equal(bIndex.atlasSessionMigrationInFlight("chat-b"), false, "B 没有在途迁移（不再共用单例）");
+  equal(first, sameChat, "同一聊天复用同一次在途迁移");
+
+  current = ctxB;
+  const other = bIndex.migrateChatSession(context, { store, api: null, emit: () => {} });
+  equal(bIndex.atlasSessionMigrationInFlight("chat-b"), true, "两个聊天可以同时各有一条在途迁移");
+  ok(other !== first, "另一个聊天拿到的是自己的迁移 Promise");
+
+  const [resultA, resultB] = await Promise.all([first, other]);
+  equal(resultA.stale, true, "A 在切换后作废（B 的迁移不受它影响）");
+  equal(resultB.migrated, true, "B 正常迁移完成");
+  equal(legacyB.metadata.atlas?.world?.id, "w-b", "B 的会话写进 B");
+  equal(legacyA.metadata.atlas, undefined, "A 没有被写入半截会话");
+  equal(bIndex.atlasSessionMigrationInFlight("chat-a"), false, "完成后 A 的在途标记清除");
+  equal(bIndex.atlasSessionMigrationInFlight("chat-b"), false, "完成后 B 的在途标记清除");
+
+  // 切回 A（身份稳定）→ 自己的迁移照样能成功
+  current = ctxA;
+  const retried = await bIndex.migrateChatSession(context, { store, api: null, emit: () => {} });
+  equal(retried.migrated, true, "切回 A 后迁移成功");
+  equal(legacyA.metadata.atlas?.world?.id, "w-a", "A 的会话写进 A");
+});
+
+// ---------------------------------------------------------------------------
+// B02a：会话写回守卫（纯函数三情形 + 缺绑定带持久数据）
+// ---------------------------------------------------------------------------
+
+test("B02a 守卫：空身份 / 错聊天 / 三方相同的判定，缺绑定带 world|tables|simulation 一律拒绝", () => {
+  const session = (chatId, extra = {}) => ({
+    schemaVersion: 1, rev: 4,
+    binding: chatId === null ? null : { schemaVersion: 1, chatId, worldId: "w-1" },
+    ...extra,
+  });
+  const full = (chatId) => session(chatId, { world: { id: "w-1" }, tables: { branches: { canon: { locations: [] } } } });
+
+  // 三方相同 → 放行
+  equal(bIndex.atlasSessionWriteGuard("chat-a", "chat-a", "chat-a", full("chat-a")), true, "三方相同放行");
+  // 空身份 → 拒绝（切换瞬间 metadata 未就位 / 关聊天）
+  equal(bIndex.atlasSessionWriteGuard("chat-a", null, "chat-a", full("chat-a")), false, "当前身份缺失拒绝");
+  equal(bIndex.atlasSessionWriteGuard("chat-a", "", "chat-a", full("chat-a")), false, "当前身份空串拒绝");
+  equal(bIndex.atlasSessionWriteGuard("", "chat-a", "", full(null)), false, "发起身份缺失拒绝");
+  // 错聊天 → 拒绝（A 的迟到响应、A→B→A 的旧归属）
+  equal(bIndex.atlasSessionWriteGuard("chat-a", "chat-b", "chat-a", full("chat-a")), false, "发起≠当前拒绝");
+  equal(bIndex.atlasSessionWriteGuard("chat-b", "chat-a", "chat-b", full("chat-b")), false, "A→B→A 后旧归属拒绝");
+  equal(bIndex.atlasSessionWriteGuard("chat-a", "chat-a", "chat-b", full("chat-b")), false, "会话归属≠当前拒绝");
+  // 缺绑定但带持久数据 → 拒绝（B02a 的新增硬规则）
+  equal(bIndex.atlasSessionWriteGuard("chat-a", "chat-a", null, session(null, { world: { id: "w-1" } })), false, "缺绑定 + world 拒绝");
+  equal(bIndex.atlasSessionWriteGuard("chat-a", "chat-a", null, session(null, { tables: { branches: {} } })), false, "缺绑定 + tables 拒绝");
+  equal(bIndex.atlasSessionWriteGuard("chat-a", "chat-a", null, session(null, { simulation: { schemaVersion: 1 } })), false, "缺绑定 + simulation 拒绝");
+  equal(bIndex.atlasSessionWriteGuard("chat-a", "chat-a", null, { schemaVersion: 1, binding: { worldId: "w-1" }, world: { id: "w-1" } }), false, "缺 chatId 归属 + world 拒绝");
+  // 缺绑定且没有持久数据 → 放行（设置类响应 / 非持久会话不算错误）
+  equal(bIndex.atlasSessionWriteGuard("chat-a", "chat-a", null, session(null)), true, "空会话放行");
+  equal(bIndex.atlasSessionHasPersistentPayload(session(null)), false, "空会话没有持久数据");
+  equal(bIndex.atlasSessionHasPersistentPayload(session("chat-a")), false, "只有绑定没有数据块不算持久数据");
+  // 旧三方形态兼容（0.9.58 调用点：归属未知放行）
+  equal(bIndex.atlasSessionWriteGuard("chat-a", "chat-a", null), true, "旧三方形态保持原语义");
+  equal(bIndex.atlasSessionWriteGuard("chat-a", "chat-b", "chat-a"), false, "旧三方形态仍然拒绝错聊天");
+});
+
+// ---------------------------------------------------------------------------
+// B06 夹具：新聊天的四个可观察面（表行 / 地图 / 动向 / 提示词）
+// ---------------------------------------------------------------------------
+
+/**
+ * B06 会话夹具：一份完整会话文档（三表分支切片 + 地图 + 回合动向 + 绑定）。
+ * 三表只放在**自己的分支键**下——跨分支串档会立刻被断言抓到。
+ */
+function b06Session({ chatId, worldId, branchKey = "canon", locationId, locationName, characterId, characterName, mapPointId, mapPointName, turnKey }) {
+  const branchId = branchKey === "canon" ? null : branchKey;
+  return {
+    schemaVersion: 1,
+    rev: 3,
+    binding: {
+      schemaVersion: 1, enabled: true, chatId, characterId: null, worldId, branchId,
+      currentLocationId: locationId, worldTimeCursor: 12, lastCommittedMessageId: null, lastCheckpointId: null,
+    },
+    world: {
+      id: worldId, name: `世界 ${worldId}`,
+      points: [{ id: mapPointId, name: mapPointName }],
+      ...(branchId ? { stories: [{ id: branchId, mode: "if" }] } : {}),
+      stateEvents: [],
+    },
+    maps: { schemaVersion: 2, points: [{ id: mapPointId, name: mapPointName, x: 10, y: 10 }] },
+    scene: null,
+    turns: { [turnKey]: { receipt: { status: "committed", summary: `${turnKey} 的动向` } } },
+    geoAuto: {},
+    tables: {
+      schemaVersion: 1,
+      worldId,
+      branches: {
+        [branchKey]: {
+          locations: [{ id: `loc:${locationId}`, name: locationName, parentLocationId: null, gridX: null, gridY: null }],
+          characters: [{ id: `npc:${characterId}`, name: characterName, locationId: `loc:${locationId}`, presence: "present", thought: "", actionTendency: "" }],
+          items: [],
+        },
+      },
+    },
+  };
+}
+
+/**
+ * B06 把一份会话文档摊成四个可观察面，全部走**真实数据结构 / 真实纯函数**：
+ * - `locationRows` / `characterRows`：三表分支切片（表行）；
+ * - `mapPoints`：会话里的地图文档（地图）；
+ * - `moves`：回合记录与回执摘要（动向）；
+ * - `prompt`：真实 buildLorebookPlans 用**当前分支**三表算出的条目正文
+ *   （这段文字就是写进「Atlas 动向」并注入模型提示词的内容）。
+ */
+function b06Surface(session) {
+  const binding = session?.binding ?? {};
+  const branchKey = binding.branchId ?? "canon";
+  const branch = session?.tables?.branches?.[branchKey] ?? null;
+  const world = session?.world ?? {};
+  const currentLocationId = binding.currentLocationId ?? null;
+  const slice = bIndex.atlasBranchSliceOf(world, session?.tables ?? null, binding.branchId ?? null);
+  const plans = buildLorebookPlans(world, {
+    status: "committed",
+    currentTime: Number(binding.worldTimeCursor ?? 0),
+    currentLocationId,
+  }, slice ? { tables: slice.tables, branchKey: slice.branchKey, currentLocationId } : null);
+  return {
+    chatId: binding.chatId ?? null,
+    branchKey,
+    locationRows: (branch?.locations ?? []).map((row) => `${row.id}=${row.name}`),
+    characterRows: (branch?.characters ?? []).map((row) => `${row.id}@${row.locationId}`),
+    mapPoints: (session?.maps?.points ?? []).map((point) => `${point.id}=${point.name}`),
+    moves: Object.entries(session?.turns ?? {}).map(([key, turn]) => `${key}:${turn?.receipt?.summary ?? ""}`),
+    prompt: plans?.entries?.[0]?.content ?? "",
+  };
+}
+
+/** B06 断言：四个面都属于当前聊天，且一个字节都不含 `forbid` 里的旧聊天标记。 */
+function assertB06Surface(surface, { chatId, branchKey = null, forbid = [] }, label) {
+  equal(surface.chatId, chatId, `${label}：表行归属当前聊天`);
+  if (branchKey !== null) equal(surface.branchKey, branchKey, `${label}：三表分支键正确`);
+  ok(surface.locationRows.length > 0, `${label}：新聊天有自己的表行`);
+  ok(surface.characterRows.length > 0, `${label}：新聊天有自己的人物行`);
+  ok(surface.mapPoints.length > 0, `${label}：新聊天有自己的地图`);
+  ok(surface.moves.length > 0, `${label}：新聊天有自己的动向`);
+  ok(surface.prompt.length > 0, `${label}：新聊天有自己的提示词内容`);
+  for (const needle of forbid) {
+    for (const field of ["locationRows", "characterRows", "mapPoints", "moves", "prompt"]) {
+      ok(!JSON.stringify(surface[field]).includes(needle), `${label}：${field} 不含旧聊天的「${needle}」`);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// B06-1：A/B 快速切换（B02b sessionApi：A 的迟到响应不污染 B）
+// ---------------------------------------------------------------------------
+
+test("B06 A/B 快速切换：A 的迟到 commit 不写进 B，B 的表行 / 地图 / 动向 / 提示词不受影响", async () => {
+  const sessionA = b06Session({
+    chatId: "chat-a", worldId: "w-shared", locationId: "1", locationName: "A 钟楼",
+    characterId: "a1", characterName: "甲", mapPointId: "1", mapPointName: "A 钟楼", turnKey: "turn:chat-a::1",
+  });
+  const sessionB = b06Session({
+    chatId: "chat-b", worldId: "w-shared", locationId: "2", locationName: "B 集市",
+    characterId: "b1", characterName: "乙", mapPointId: "2", mapPointName: "B 集市", turnKey: "turn:chat-b::1",
+  });
+  const before = b06Surface(sessionB);
+
+  const metaA = { atlas: sessionA };
+  const metaB = { atlas: sessionB };
+  const saves = [];
+  const ctxA = { chatId: "chat-a", chatMetadata: metaA, saveMetadata: async () => { saves.push("chat-a"); } };
+  const ctxB = { chatId: "chat-b", chatMetadata: metaB, saveMetadata: async () => { saves.push("chat-b"); } };
+  let current = ctxA;
+  const context = () => current;
+
+  let releaseLate = () => {};
+  const gate = new Promise((resolve) => { releaseLate = resolve; });
+  const lateSession = { ...sessionA, rev: sessionA.rev + 1 };
+  const innerApi = {
+    async request(method, path) {
+      if (path === "/turns/commit") {
+        await gate;
+        return { status: 200, body: { ok: true, data: { receipt: { status: "committed" } }, session: lateSession } };
+      }
+      if (path === "/settings") return { status: 200, body: { ok: true, data: { settings: {} } } }; // 设置类：无会话
+      return { status: 200, body: { ok: true, data: {} } };
+    },
+  };
+  const events = [];
+  const notices = [];
+  const api = bIndex.createAtlasSessionApi({
+    context, innerApi,
+    emit: (event) => events.push(event),
+    notify: (text) => notices.push(text),
+    logCall: (method, path, run) => run(),
+  });
+
+  const late = api.request("POST", "/turns/commit", { chatId: "chat-a", userText: "" });
+  current = ctxB;                 // 请求在途时切到 B
+  releaseLate();
+  await late;
+
+  equal(metaB.atlas, sessionB, "B 的会话对象原样（没被 A 的 rev+1 覆盖）");
+  equal(bIndex.atlasSameChatIdentity({ chatId: "chat-a", metadata: metaA }, { chatId: "chat-b", metadata: metaB }), false,
+    "A 的响应与 B 不是同一身份");
+  equal(saves.length, 0, "丢弃路径不触发任何存档");
+  equal(metaA.atlas.rev, sessionA.rev, "A 的会话也没被写回（回执按计划丢弃）");
+  ok(events.some((event) => event.code === "STALE_COMMIT_RESPONSE_DROPPED"
+    && event.details?.reasonCode === "SESSION_IDENTITY_MISMATCH"), "记了具名的丢弃事件");
+  equal(notices.length, 1, "给用户一条可见提示");
+  ok(notices[0].includes("切聊天弃回执") && notices[0].includes("回到原聊天核对"),
+    `提示文案要求回原聊天核对：实际「${notices[0]}」`);
+
+  // 设置类响应不带会话：正常返回、不报错、不写回
+  const settings = await api.request("PUT", "/settings", {});
+  equal(settings.status, 200, "设置类响应照常返回");
+  ok(!events.some((event) => event.code === "SESSION_WRITE_FAILED"), "不因为没会话就报写回失败");
+  equal(saves.length, 0, "设置类响应不触发存档");
+
+  // B 的四个面一字节都没变
+  assertB06Surface(b06Surface(metaB.atlas), {
+    chatId: "chat-b", branchKey: "canon",
+    forbid: ["A 钟楼", "npc:a1", "turn:chat-a", "1=A 钟楼", "甲"],
+  }, "B（快速切换后）");
+  deepEqual(b06Surface(metaB.atlas), before, "B 的四个面逐字段不变");
+});
+
+// ---------------------------------------------------------------------------
+// B06-2：legacy 迁移（两个聊天各迁各的，B 不拿到 A 的任何行）
+// ---------------------------------------------------------------------------
+
+test("B06 legacy 迁移：两个聊天各迁各的，B 的表行 / 地图 / 动向 / 提示词都只属于 B", async () => {
+  const legacyA = b01LegacyChat("chat-a", "w-shared");
+  const legacyB = b01LegacyChat("chat-b", "w-shared");
+  const store = b01Store({
+    "world:w-shared": { id: "w-shared", name: "共享世界", points: [{ id: "1", name: "共享钟楼" }], stateEvents: [] },
+    "maps:w-shared": { points: [{ id: "1", name: "共享钟楼" }] },
+    "turn:chat-a::1": { receipt: { status: "committed", summary: "A 的动向" } },
+    "turn:chat-b::1": { receipt: { status: "committed", summary: "B 的动向" } },
+  }, { poisonList: true });
+  const events = [];
+  let current = { chatId: "chat-a", chatMetadata: legacyA.metadata, saveMetadata: async () => {} };
+  const context = () => current;
+
+  await bIndex.migrateChatSession(context, { store, api: null, emit: (event) => events.push(event) });
+  const removedByA = store.removed.slice();
+  current = { chatId: "chat-b", chatMetadata: legacyB.metadata, saveMetadata: async () => {} };
+  await bIndex.migrateChatSession(context, { store, api: null, emit: (event) => events.push(event) });
+  const removedByB = store.removed.slice();
+
+  const sessionA = legacyA.metadata.atlas;
+  const sessionB = legacyB.metadata.atlas;
+  equal(sessionA?.binding?.chatId, "chat-a", "A 迁移后的会话属于 A");
+  equal(sessionB?.binding?.chatId, "chat-b", "B 迁移后的会话属于 B");
+  deepEqual(Object.keys(sessionA?.turns ?? {}), ["turn:chat-a::1"], "A 只拿到自己的回合（宿主的脏 list 被过滤）");
+  deepEqual(Object.keys(sessionB?.turns ?? {}), ["turn:chat-b::1"], "B 只拿到自己的回合");
+  equal(sessionB?.tables ?? null, null, "0.9.58 旧档没有三表 → B 的表行为空（不是从 A 借来的）");
+  ok(!removedByA.includes("turn:chat-b::1"), "A 的迁移绝不代删 B 的回合文档");
+  deepEqual(removedByA, ["turn:chat-a::1"], "A 只清自己的回合旧档");
+  ok(removedByB.includes("turn:chat-b::1"), "B 迁移时清自己的旧档");
+  ok(!JSON.stringify(sessionB).includes("A 的动向"), "B 的会话里没有 A 的动向");
+  equal(sessionB?.world?.id, "w-shared", "B 仍能从共享旧档迁到世界（A 没有把它删掉）");
+  equal(sessionB?.maps?.points?.[0]?.name, "共享钟楼", "B 仍能迁到共享地图");
+
+  // B 自己的三表懒迁移到位后（引擎 A08 路径）：四个面只属于 B
+  sessionB.tables = b06Session({
+    chatId: "chat-b", worldId: "w-shared", locationId: "2", locationName: "B 集市",
+    characterId: "b1", characterName: "乙", mapPointId: "1", mapPointName: "共享钟楼", turnKey: "turn:chat-b::1",
+  }).tables;
+  sessionB.binding = { ...sessionB.binding, currentLocationId: "2" };
+  assertB06Surface(b06Surface(sessionB), {
+    chatId: "chat-b", branchKey: "canon", forbid: ["A 的动向", "turn:chat-a", "npc:a1"],
+  }, "B（legacy 迁移后）");
+  ok(b06Surface(sessionB).prompt.includes("B 集市"), "提示词里是 B 自己的当前地点");
+});
+
+// ---------------------------------------------------------------------------
+// B06-3：世界书写入迟到（B04 chatEpoch）
+// ---------------------------------------------------------------------------
+
+/** B04 假世界书：模拟酒馆 world-info（一本书 + 一条用户自建条目）。 */
+function makeB04Book() {
+  const name = "角色卡主书";
+  const books = new Map([[name, {
+    entries: {
+      "1": { uid: "1", key: ["世界观"], keysecondary: [], comment: "用户自建：世界观", content: "用户自己的设定", disable: false },
+    },
+  }]]);
+  let nextUid = 100;
+  const port = {
+    async resolvePreferredBook() { return name; },
+    async loadBook(book) { return books.get(book) ?? null; },
+    async createBook(book) { if (!books.has(book)) books.set(book, { entries: {} }); },
+    async saveBook(book, data) { books.set(book, data); },
+    createEntry(data, patch) {
+      const uid = String(++nextUid);
+      data.entries[uid] = {
+        uid, key: [...patch.keys], keysecondary: [], comment: patch.comment,
+        content: patch.content, disable: false, constant: patch.constant === true,
+      };
+      return data.entries[uid];
+    },
+    deleteEntry(data, uid) { delete data.entries[uid]; },
+    async getChatBookName() { return null; },
+    async bindChatBook() {},
+  };
+  return { port, entries: () => Object.values(books.get(name).entries), text: () => JSON.stringify(books.get(name)) };
+}
+
+test("B06 世界书写入迟到：切聊天后 A 的动向不落进共享主卡书（B04）", async () => {
+  const world = { id: "w-book", name: "共享世界", points: [{ id: "1", name: "A 钟楼" }, { id: "2", name: "B 集市" }], stateEvents: [] };
+  const sessionA = b06Session({
+    chatId: "chat-a", worldId: "w-book", locationId: "1", locationName: "A 钟楼",
+    characterId: "a1", characterName: "甲", mapPointId: "1", mapPointName: "A 钟楼", turnKey: "turn:chat-a::1",
+  });
+  const sessionB = b06Session({
+    chatId: "chat-b", worldId: "w-book", locationId: "2", locationName: "B 集市",
+    characterId: "b1", characterName: "乙", mapPointId: "2", mapPointName: "B 集市", turnKey: "turn:chat-b::1",
+  });
+  sessionA.world = world;
+  sessionB.world = world;
+  const book = makeB04Book();
+  const writer = createAtlasLorebookWriter(book.port);
+  const writes = [];
+  const store = {
+    async read(key) { return key === "world:w-book" ? world : null; },
+    async write(key, value) { writes.push({ key, value }); },
+  };
+  let currentChat = "chat-a";
+  const events = [];
+  let pendingB = null;
+  let plansBuiltFor = null;
+  const handler = bIndex.createLorebookChatSwitchHandler({
+    writer,
+    store,
+    readBinding: async () => (currentChat === "chat-a" ? sessionA.binding : sessionB.binding),
+    readSession: () => (currentChat === "chat-a" ? sessionA : sessionB),
+    readChatId: () => currentChat,
+    buildPlans: (target, receipt, delta) => {
+      const plans = buildLorebookPlans(target, receipt, delta);
+      plansBuiltFor = delta ? delta.branchKey : null;
+      // 规划完成的一刻用户切到 B（A 已过「加载书后」核验，尚未到「保存前」核验）
+      if (currentChat === "chat-a") {
+        currentChat = "chat-b";
+        pendingB = handler({ chatId: "chat-b", bound: true });
+      }
+      return plans;
+    },
+    rerender: () => {},
+    emit: (event) => events.push(event),
+  });
+
+  const resultA = await handler({ chatId: "chat-a", bound: true });
+  const doneB = await pendingB;
+
+  equal(resultA.dropped, true, "A 的迟到写入被丢弃");
+  equal(resultA.stage, "before-save", "在**保存前**核验点拦下（A 一行都没写进书）");
+  ok(events.some((event) => event.code === "LOREBOOK_STALE_CHAT_DROPPED"
+    && event.details?.stage === "before-save"
+    && event.details?.reasonCode === "SESSION_IDENTITY_MISMATCH"), "记了具名的 LOREBOOK_STALE_CHAT_DROPPED");
+  ok(doneB && !doneB.dropped, "B 的写入正常完成");
+  equal(doneB.bookName, "角色卡主书", "B 写的是角色卡主书（跨聊天共享的那本）");
+  equal(plansBuiltFor, "canon", "buildLorebookPlans 拿到了当前分支三表（F10 的接线）");
+
+  const entries = book.entries();
+  const movesEntries = entries.filter((entry) => String(entry.comment).startsWith("Atlas 动向"));
+  equal(movesEntries.length, 1, "书里只有一条 Atlas 动向条目（不会为每个聊天堆一条）");
+  ok(movesEntries[0].content.includes("B 集市"), "动向正文是 B 的当前地点");
+  ok(!movesEntries[0].content.includes("A 钟楼"), "动向正文里没有 A 的地点（A 的迟到写入没落书）");
+  ok(!movesEntries[0].content.includes("甲"), "动向正文里没有 A 的人物");
+  ok(book.text().includes("用户自建：世界观"), "用户自己的世界书条目原样保留（绝不删用户的书）");
+
+  // 动向 / 提示词 / 表行 / 地图四面：B 的写入用的就是 B 自己的会话
+  assertB06Surface(b06Surface(sessionB), {
+    chatId: "chat-b", branchKey: "canon", forbid: ["A 钟楼", "npc:a1", "turn:chat-a"],
+  }, "B（世界书写入后）");
+  ok(writes.some((entry) => entry.key === "lorebook"), "写入器快照照常落到 store");
+
+  // 在途窗口：A 的 syncTurn 已经开跑（epoch 核验挡不住**已经出发**的那一次写），
+  // 写入串行化保证当前聊天的写入最后落书 —— 书里不会留下 A 的动向。
+  const book2 = makeB04Book();
+  let releaseSync = () => {};
+  const syncGate = new Promise((resolve) => { releaseSync = resolve; });
+  const rawWriter = createAtlasLorebookWriter(book2.port);
+  let chat = "chat-a";
+  const handler2 = bIndex.createLorebookChatSwitchHandler({
+    writer: { ...rawWriter, async syncTurn(plans) { await syncGate; return rawWriter.syncTurn(plans); } },
+    store,
+    readBinding: async () => (chat === "chat-a" ? sessionA.binding : sessionB.binding),
+    readSession: () => (chat === "chat-a" ? sessionA : sessionB),
+    readChatId: () => chat,
+    buildPlans: buildLorebookPlans,
+    rerender: () => {},
+    emit: () => {},
+  });
+  const inFlightA = handler2({ chatId: "chat-a", bound: true });
+  await flush();                                   // A 走到 syncTurn 并卡在闸上
+  chat = "chat-b";
+  const waitingB = handler2({ chatId: "chat-b", bound: true });
+  releaseSync();
+  const droppedA = await inFlightA;
+  const wroteB = await waitingB;
+  equal(droppedA.dropped, true, "已在途的 A 写入在完成后被判定过期");
+  equal(droppedA.stage, "after-save", "在途写入只能事后丢弃（如实记录该窗口）");
+  ok(!wroteB.dropped, "B 的写入照常完成");
+  const moves2 = book2.entries().filter((entry) => String(entry.comment).startsWith("Atlas 动向"));
+  equal(moves2.length, 1, "共享书里仍然只有一条动向条目");
+  ok(moves2[0].content.includes("B 集市"), "最后落书的是 B 的动向（串行化保证当前聊天最后写）");
+  ok(!moves2[0].content.includes("A 钟楼"), "共享书里没有 A 的动向残留");
+  ok(book2.text().includes("用户自建：世界观"), "第二阶段里用户条目同样未被触碰");
+
+  // 切到未绑定聊天：只清 Atlas 自建条目
+  currentChat = "chat-c";
+  const purged = await handler({ chatId: "chat-c", bound: false });
+  equal(purged.purged, true, "未绑定聊天触发清理");
+  equal(book.entries().filter((entry) => String(entry.comment).startsWith("Atlas 动向")).length, 0, "Atlas 动向条目被清掉");
+  ok(book.text().includes("用户自建：世界观"), "用户自己的世界书条目仍然在（B04 的硬约束）");
+});
+
+// ---------------------------------------------------------------------------
+// B06-4：相同 worldId / 不同 branch（B03 地图作用域）
+// ---------------------------------------------------------------------------
+
+test("B06 相同 worldId 不同分支：地图作用域键分开，切分支不沿用上一分支的子图与相机", async () => {
+  const makeBranchState = (branchId, prefix) => {
+    const state = s10State({
+      chatId: "chat-a", worldId: "w-branch", currentLocationId: "1",
+      points: [{ id: "1", name: `${prefix}钟楼`, x: 40, y: 40, regionId: null }],
+      submaps: { "1": { parentMapId: "world", points: [{ id: "11", name: `${prefix}档案室`, x: 10, y: 10 }] } },
+      pointParents: { "11": 1 },
+    });
+    state.branchId = branchId;
+    return state;
+  };
+  const canonState = makeBranchState(null, "正史");
+  const ifState = makeBranchState("if-1", "IF ");
+  const stateByChat = { "chat-a": canonState };
+  const { container, core } = await mountRootAtlasMap({ stateByChat });
+
+  // 正史：进到子图（视图栈非空 + 面包屑可见）
+  openPointPanel(container, "正史钟楼");
+  enterSubmapButton(container, "正史钟楼").click();
+  deepEqual(mapPointNames(container), ["正史档案室"], "前置：正史已在子图");
+  ok(crumbSnapshot(container).text.includes("正史钟楼"), "前置：面包屑带着正史层级");
+
+  // 只换分支（chatId / worldId 都不变）
+  stateByChat["chat-a"] = ifState;
+  await core.refresh();
+  await flush();
+
+  deepEqual(mapPointNames(container), ["IF 钟楼"], "IF 分支渲染自己的世界图");
+  equal(crumbSnapshot(container).display, "none", "切分支清空子图视图栈（不沿用正史层级）");
+  ok(!String(container.querySelector(".aw-maparea").textContent).includes("正史档案室"), "上一分支的子图点不残留");
+  ok(!String(container.querySelector(".aw-mappanel")?.textContent ?? "").includes("正史钟楼"),
+    "上一分支的地点弹窗被关掉（不留孤儿浮层）");
+  ok(!String(container.querySelector(".aw-interior-roster")?.textContent ?? "").includes("正史"),
+    "建筑内名单被清空");
+
+  // 身份键必须含分支
+  const canonIdentity = bIndex.atlasMapIdentityOf(canonState, "chat-a");
+  const ifIdentity = bIndex.atlasMapIdentityOf(ifState, "chat-a");
+  equal(bIndex.atlasMapScopeKey(canonIdentity), "chat-a|w-branch|canon", "正史作用域键 = chatId|worldId|canon");
+  equal(bIndex.atlasMapScopeKey(ifIdentity), "chat-a|w-branch|if-1", "IF 作用域键 = chatId|worldId|分支");
+  ok(bIndex.atlasMapScopeKey(canonIdentity) !== bIndex.atlasMapScopeKey(ifIdentity), "同世界不同分支作用域键不同");
+  equal(bIndex.atlasSameMapIdentity(canonIdentity, ifIdentity), false, "不同分支不是同一张图");
+  ok(bIndex.atlasMapImageCacheKey(canonIdentity, 7) !== bIndex.atlasMapImageCacheKey(ifIdentity, 7),
+    "底图缓存键含分支（同版本不同分支不复用）");
+
+  // 四个面：两个分支各查各的
+  const canonSession = b06Session({
+    chatId: "chat-a", worldId: "w-branch", branchKey: "canon", locationId: "1", locationName: "正史钟楼",
+    characterId: "c1", characterName: "正史的人", mapPointId: "1", mapPointName: "正史钟楼", turnKey: "turn:chat-a::canon",
+  });
+  const ifSession = b06Session({
+    chatId: "chat-a", worldId: "w-branch", branchKey: "if-1", locationId: "11", locationName: "IF 档案室",
+    characterId: "i1", characterName: "IF 的人", mapPointId: "11", mapPointName: "IF 档案室", turnKey: "turn:chat-a::if",
+  });
+  assertB06Surface(b06Surface(ifSession), {
+    chatId: "chat-a", branchKey: "if-1", forbid: ["正史钟楼", "正史的人", "npc:c1", "turn:chat-a::canon"],
+  }, "IF 分支");
+  assertB06Surface(b06Surface(canonSession), {
+    chatId: "chat-a", branchKey: "canon", forbid: ["IF 档案室", "IF 的人", "npc:i1", "turn:chat-a::if"],
+  }, "正史分支");
+});
+
+// ---------------------------------------------------------------------------
+// B06-5：图片迟到（B03 底图回调身份复核）
+// ---------------------------------------------------------------------------
+
+test("B06 图片迟到：切聊天后旧底图回调不在新聊天重绘，也不换掉新聊天的底图", async () => {
+  const baseA = s10State({
+    chatId: "chat-a", worldId: "w-img", currentLocationId: "1",
+    points: [{ id: "1", name: "A 钟楼", x: 40, y: 40, regionId: null }],
+  });
+  baseA.map.mapImagePresent = true;
+  baseA.map.mapImageRevision = 7;
+  const baseB = s10State({
+    chatId: "chat-b", worldId: "w-img", currentLocationId: "9",
+    points: [{ id: "9", name: "B 营地", x: 5, y: 5, regionId: null }],
+  });
+  baseB.map.mapImagePresent = true;   // B 也有底图：迟到回调若真重绘，会多打一次请求
+  baseB.map.mapImageRevision = 7;
+  const stateByChat = { "chat-a": baseA, "chat-b": baseB };
+  const { container, core, hostWrap, api, dom } = await mountRootAtlasMap({ stateByChat });
+  hostWrap.setBinding("chat-b", bindingFor("chat-b", "w-img"));
+
+  let releaseFirst = () => {};
+  const firstGate = new Promise((resolve) => { releaseFirst = resolve; });
+  const original = api.request.bind(api);
+  let imageCalls = 0;
+  api.request = async (method, path, body) => {
+    if (path !== "/map/image") return original(method, path, body);
+    imageCalls += 1;
+    if (imageCalls === 1) {
+      await firstGate; // A 的底图：在途
+      return { status: 200, body: { ok: true, data: { dataUrl: "data:image/png;base64,AAAA" } } };
+    }
+    if (imageCalls === 2) {
+      return { status: 500, body: { ok: false, error: { code: "INTERNAL", message: "B 的底图这次失败" } } };
+    }
+    // 第 3 次只可能来自「旧回调触发的重绘」——永挂，用来抓回归
+    return new Promise(() => {});
+  };
+
+  await core.refresh();
+  await flush();
+  equal(imageCalls, 1, "A 的底图请求已发出并在途");
+
+  hostWrap.setChat("chat-b");
+  await core.handleEvent("CHAT_CHANGED");
+  await flush();
+  equal(imageCalls, 2, "切到 B 后 B 自己的底图请求发出（失败，不显示假图）");
+
+  releaseFirst();          // A 的底图迟到返回
+  await flush();
+  await flush();
+  equal(imageCalls, 2, "迟到的 A 底图没有触发新聊天重绘（否则会出现第 3 次请求）");
+  const imageLayer = container.querySelector(".aw-image");
+  equal(imageLayer.classList.contains("has-image"), false, "新聊天没有显示任何底图");
+  equal(imageLayer.style.backgroundImage, "", "新聊天底图层为空（旧 dataURL 未被套用）");
+  deepEqual(mapPointNames(container), ["B 营地"], "新聊天地图仍是自己的地点");
+
+  // 身份 / 缓存键：同 worldId、同 revision，不同聊天 → 不同键
+  const identityA = bIndex.atlasMapIdentityOf(baseA, "chat-a");
+  const identityB = bIndex.atlasMapIdentityOf(baseB, "chat-b");
+  ok(bIndex.atlasMapImageCacheKey(identityA, 7) !== bIndex.atlasMapImageCacheKey(identityB, 7),
+    "底图缓存键含 chatId（同世界两个聊天不复用）");
+  ok(bIndex.atlasMapImageCacheKey(identityA, 7) !== bIndex.atlasMapImageCacheKey(identityA, 8),
+    "底图缓存键含 revision（换图不复用旧图）");
+
+  // 四个面：B 的会话与 A 的分开
+  const sessionA = b06Session({
+    chatId: "chat-a", worldId: "w-img", locationId: "1", locationName: "A 钟楼",
+    characterId: "a1", characterName: "甲", mapPointId: "1", mapPointName: "A 钟楼", turnKey: "turn:chat-a::1",
+  });
+  const sessionB = b06Session({
+    chatId: "chat-b", worldId: "w-img", locationId: "9", locationName: "B 营地",
+    characterId: "b1", characterName: "乙", mapPointId: "9", mapPointName: "B 营地", turnKey: "turn:chat-b::1",
+  });
+  assertB06Surface(b06Surface(sessionB), {
+    chatId: "chat-b", branchKey: "canon", forbid: ["A 钟楼", "npc:a1", "turn:chat-a"],
+  }, "B（图片迟到后）");
+  ok(b06Surface(sessionA).prompt.includes("A 钟楼"), "A 自己的会话不受影响（各查各的）");
+  void dom;
+});
+
+// ---------------------------------------------------------------------------
+// D11c：左栏「幕后动向」（D07）—— blocked 明示原因；A 的动向不进 B 的左栏
+// ---------------------------------------------------------------------------
+
+/** 构造一份带 `simulationView` 的 /state 数据（A07/D05 的服务端形状）。 */
+function d07State({ chatId, worldId, events, counts, currentLocationKnown = false }) {
+  return {
+    chatId, worldId, worldName: "动向世界", branchId: "chronicle-canon",
+    currentTime: 12, currentLocationId: null,
+    simulationView: {
+      branchKey: "canon",
+      tasks: [], signals: [], deliveries: [],
+      recentEvents: events,
+      counts: {
+        tasks: counts?.tasks ?? 1, signals: counts?.signals ?? 1, deliveries: counts?.deliveries ?? 1,
+        events: events.length, activeTasks: counts?.activeTasks ?? 0, blockedTasks: counts?.blockedTasks ?? 0,
+      },
+      truncated: { tasks: 0, signals: 0, deliveries: 0, events: 0 },
+      currentLocationKnown, visibility: "known", corrupt: false,
+    },
+  };
+}
+
+/** 左栏（movesList）渲染出的全部文本。 */
+function movesText(container) {
+  return [...container.querySelectorAll(".aw-move")].map((node) => node.textContent).join("\n");
+}
+
+test("D11c 左栏幕后动向：区分想法 / 在路上 / 已抵达 / 已送达 / 暂不能行动，并写出阻塞原因", async () => {
+  const { dom, core, container } = await mountRootAtlasMap({
+    stateByChat: {
+      "chat-a": d07State({
+        chatId: "chat-a", worldId: "w-b",
+        events: [
+          {
+            id: "evt:1", simulationId: "task:1", kind: "travel", actorCharacterId: "npc:x",
+            fromLocationId: "loc:1", toLocationId: "loc:2", status: "blocked",
+            reasonCode: "NO_PATH", summary: "npc:x 暂不能行动：赶往远城",
+            visibility: "known", period: 12,
+          },
+          {
+            id: "evt:2", simulationId: "sig:1", kind: "signal", actorCharacterId: null,
+            fromLocationId: "loc:1", toLocationId: "loc:1", status: "published",
+            reasonCode: null, summary: "消息已公开：使者带出宣战文书",
+            visibility: "known", period: 12,
+          },
+          {
+            id: "evt:3", simulationId: "dlv:1", kind: "delivery", actorCharacterId: "npc:y",
+            fromLocationId: "loc:1", toLocationId: "loc:2", status: "delivered",
+            reasonCode: null, summary: "获知消息：使者带出宣战文书",
+            visibility: "known", period: 12,
+          },
+        ],
+        counts: { tasks: 1, signals: 1, deliveries: 2, activeTasks: 0, blockedTasks: 1 },
+      }),
+    },
+  });
+
+  const text = movesText(container);
+  // F1/F3 的核心诉求：左栏要能读到具体动作，而不是只有「应用 N 行」
+  ok(text.includes("暂不能行动"), `左栏要标出「暂不能行动」：实际 ${text}`);
+  ok(text.includes("NO_PATH"), `阻塞原因必须写明：实际 ${text}`);
+  ok(text.includes("新消息"), `消息类事件要单独标注：实际 ${text}`);
+  ok(text.includes("已送达"), `送达事件要单独标注：实际 ${text}`);
+  ok(text.includes("loc:1 → loc:2"), `要显示来源地 → 目标：实际 ${text}`);
+  ok(!/^表格增量：应用/m.test(text), "左栏不得再以「表格增量：应用 N 行」为主");
+  void core;
+  dom.window.close();
+});
+
+test("D11c 左栏隔离：A 的幕后动向不出现在 B 的左栏（无 simulationView 的聊天退回旧回执）", async () => {
+  const aState = d07State({
+    chatId: "chat-a", worldId: "w-b",
+    events: [{
+      id: "evt:1", simulationId: "sig:1", kind: "signal", actorCharacterId: null,
+      fromLocationId: "loc:secret", toLocationId: "loc:secret", status: "published",
+      reasonCode: null, summary: "A 聊天的秘密宣战消息",
+      visibility: "known", period: 12,
+    }],
+    counts: { tasks: 1, signals: 1, deliveries: 0, activeTasks: 0, blockedTasks: 0 },
+  });
+  // B 是旧会话形状：/state 不带 simulationView
+  const bState = { chatId: "chat-b", worldId: "w-b", worldName: "动向世界", currentTime: 12, currentLocationId: null };
+
+  const { dom, container, core } = await mountRootAtlasMap({
+    stateByChat: { "chat-a": aState, "chat-b": bState },
+    chatId: "chat-b",
+  });
+
+  const textB = movesText(container);
+  ok(!textB.includes("A 聊天的秘密宣战消息"), `B 的左栏不得出现 A 的动向：实际 ${textB}`);
+  ok(!textB.includes("幕后动向"), "B 没有 simulationView 时整段跳过（老聊天行为不变）");
+
+  // 切回 A：A 自己的动向必须回来
+  core.setPage("overview");
+  await flush();
+  void dom;
+});
+
+// ---------------------------------------------------------------------------
+// F08b：地图徽标（F03/F04）——真实细格、恰好重合、无坐标不落 (0,0)
+// ---------------------------------------------------------------------------
+
+test("F08b 地图：地点标点带在场人数徽标；与地点同坐标的人物计入徽标而不是消失", async () => {
+  const state = s10State({
+    chatId: "chat-a", worldId: "w-badge", currentLocationId: "1",
+    points: [
+      { id: "1", name: "钟楼", x: 10, y: 10, regionId: null },
+      { id: "2", name: "三年二班", x: 20, y: 20, regionId: null },
+    ],
+    submaps: { "1": { parentMapId: "world", frame: { cols: 40, rows: 40 }, points: [] } },
+  });
+  state.tableMap = {
+    branchKey: "canon",
+    world: {
+      points: [
+        { id: "1", name: "钟楼", x: 10, y: 10, regionId: null, kind: "location", rowId: "loc:1" },
+        { id: "2", name: "三年二班", x: 20, y: 20, regionId: null, kind: "location", rowId: "loc:2" },
+      ],
+      total: 2, truncated: 0,
+    },
+    submaps: {}, objects: { entries: [], total: 0, truncated: 0 },
+    nearby: { entries: [], total: 0, truncated: 0 },
+    current: { locationId: "loc:1", chain: [{ id: "loc:1", name: "钟楼" }] },
+    nearReasonCode: null,
+    /**
+     * 教室里有 2 人：一人有真实细格且**恰好与「三年二班」地点标点同坐标**，
+     * 一人只有房间 ID、没有细坐标。两人都必须仍然看得见（计入徽标），不得消失。
+     */
+    locationOccupants: {
+      total: 2, truncated: 0,
+      entries: [
+        {
+          locationId: "loc:2", locationName: "三年二班", locationPointId: "2",
+          mapId: "world", gridX: 20, gridY: 20, characterCount: 2, itemCount: 0,
+          characters: [{ id: "npc:s1", name: "学生甲", presence: "present" }], items: [],
+        },
+        {
+          locationId: "loc:1", locationName: "钟楼", locationPointId: "1",
+          mapId: "world", gridX: 10, gridY: 10, characterCount: 0, itemCount: 1,
+          characters: [], items: [{ id: "item:bell", name: "铜钟", status: "完好" }],
+        },
+      ],
+    },
+  };
+
+  const { dom, container } = await mountRootAtlasMap({
+    stateByChat: { "chat-a": state }, chatId: "chat-a",
+  });
+
+  const markers = [...container.querySelectorAll(".aw-point")];
+  const room = markers.find((node) => node.dataset.pointId === "2");
+  ok(room, `「三年二班」要有地点标点：实际 ${markers.map((n) => n.dataset.pointId).join(",")}`);
+  const badge = room.querySelector(".aw-point__badge");
+  ok(badge, "房间标点必须嵌人数徽标");
+  equal(badge.textContent, "2", "徽标人数来自完整三表口径（含与地点同坐标的人）");
+  ok(room.classList.contains("has-occupants"), "有人的地点带可识别样式");
+
+  // 没有人的地点不显示徽标（不虚报）
+  const tower = markers.find((node) => node.dataset.pointId === "1");
+  equal(tower.querySelector(".aw-point__badge"), null, "没人的地点不显示人数徽标");
+
+  // 无坐标地点不进地图点集 → 不可能出现在 (0,0)
+  const zeroZero = markers.filter((node) => node.style.left === "0px" && node.style.top === "0px");
+  equal(zeroZero.length, 0, "未知坐标不得被画到网格原点（F7 停机线）");
+
+  // 地图控件仍可点（徽标 pointer-events:none，不吃点击）
+  ok(markers.every((node) => node.tagName.toLowerCase() === "button"), "地点标点仍是按钮，可点");
+  dom.window.close();
+});
+
+test("F08b 地图：旧会话没有 locationOccupants 时一个徽标都不加（行为不变）", async () => {
+  const legacy = s10State({
+    chatId: "chat-a", worldId: "w-legacy", currentLocationId: "1",
+    points: [{ id: "1", name: "钟楼", x: 10, y: 10, regionId: null }],
+  });
+  // 刻意不带 tableMap.locationOccupants
+  const { dom, container } = await mountRootAtlasMap({
+    stateByChat: { "chat-a": legacy }, chatId: "chat-a",
+  });
+  equal(container.querySelectorAll(".aw-point__badge").length, 0, "旧会话不加徽标");
+  dom.window.close();
+});
+
+// ---------------------------------------------------------------------------
+// H23：左下角固定长度比例尺（H19a）与控件收口（H19b）
+// ---------------------------------------------------------------------------
+
+test("H19a/H19b 左下角只有固定长度比例尺：缩放改读数、线长不变、旧网格步长控件已移除", async () => {
+  const state = s10State({
+    chatId: "chat-a", worldId: "w-scale", currentLocationId: "1",
+    points: [
+      { id: "1", name: "钟楼", x: 10, y: 10, regionId: null },
+      { id: "2", name: "市场", x: 30, y: 30, regionId: null },
+    ],
+  });
+  state.map.calibrations = {
+    world: { metersPerCell: 100, source: "user", locked: true, coverage: "全图", basis: "人工标定", at: 1, revision: 1 },
+  };
+  const { dom, container } = await mountRootAtlasMap({ stateByChat: { "chat-a": state }, chatId: "chat-a" });
+
+  // H19b：左下角不再有「网格 N 格/线 / 未标定」叠加框
+  equal(container.querySelectorAll(".aw-grid-stride").length, 0,
+    "旧的左下角常驻网格步长控件必须移除（步长改挂网格按钮 tooltip）");
+
+  const bar = container.querySelector(".aw-scale__bar");
+  const label = container.querySelector(".aw-scale__label");
+  ok(bar, "左下角常驻比例尺仍在");
+  ok(label, "比例尺有读数");
+  const widthBefore = bar.style.width;
+  const readingBefore = String(label.textContent ?? "");
+  ok(readingBefore.length > 0, `已标定必须有读数：实际 "${readingBefore}"`);
+  ok(/米|千米|厘米|毫米/.test(readingBefore), `100 米/格 应给米制读数：实际 "${readingBefore}"`);
+
+  // 放大一档：固定长度尺的读数必须随之变化
+  const zoomIn = [...container.querySelectorAll("button")].find((node) => node.textContent === "＋");
+  ok(zoomIn, "有放大按钮");
+  zoomIn.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+  await flush();
+  const barAfter = container.querySelector(".aw-scale__bar");
+  const readingAfter = String(container.querySelector(".aw-scale__label")?.textContent ?? "");
+  equal(barAfter.style.width, widthBefore, "线长固定在视口坐标系，不随缩放变长");
+  ok(readingAfter !== readingBefore,
+    `缩放后读数必须变化（旧的 1/2/5 候选尺会在相邻步保留同一个数字）：${readingBefore} → ${readingAfter}`);
+  dom.window.close();
+});
+
+test("H19a 未标定：只报格数并写明「未标定」，绝不显示假米数", async () => {
+  const state = s10State({
+    chatId: "chat-a", worldId: "w-unscaled", currentLocationId: "1",
+    points: [{ id: "1", name: "钟楼", x: 10, y: 10, regionId: null }],
+  });
+  // calibrations 为空 = 未标定
+  const { dom, container } = await mountRootAtlasMap({ stateByChat: { "chat-a": state }, chatId: "chat-a" });
+  const label = container.querySelector(".aw-scale__label");
+  const text = String(label?.textContent ?? "");
+  ok(text.includes("格"), `未标定要报格数：实际 "${text}"`);
+  ok(text.includes("未标定"), `未标定要写明，不得冒充米制：实际 "${text}"`);
+  ok(!/米/.test(text.replace(/千米/g, "")), `未标定不得出现米数：实际 "${text}"`);
+  const aria = String(label?.getAttribute("aria-label") ?? "");
+  ok(aria.includes("约等于"), `可访问文案要说清「屏幕 N 像素约等于 X」：实际 "${aria}"`);
+  dom.window.close();
+});
+
+// ---------------------------------------------------------------------------
+// H13/H14：视口对齐 SVG 网格
+// ---------------------------------------------------------------------------
+
+test("H13 网格是视口对齐的 SVG：真的出线、线宽 1px、不吃指针事件，且不再有 CSS 渐变网格", async () => {
+  const state = s10State({
+    chatId: "chat-a", worldId: "w-grid", currentLocationId: "1",
+    points: [
+      { id: "1", name: "钟楼", x: 10, y: 10, regionId: null },
+      { id: "2", name: "市场", x: 18, y: 18, regionId: null },
+    ],
+  });
+  const mountedGrid = await mountRootAtlasMap({
+    stateByChat: { "chat-a": state }, chatId: "chat-a",
+  });
+  const { dom, container, rerender } = mountedGrid;
+  Object.defineProperty(dom.window.HTMLElement.prototype, "clientWidth", { get: () => 720, configurable: true });
+  Object.defineProperty(dom.window.HTMLElement.prototype, "clientHeight", { get: () => 480, configurable: true });
+  rerender();
+  await flush();
+
+  const grid = container.querySelector(".aw-grid");
+  ok(grid, "网格层仍在（图层显隐语义不变）");
+  equal(grid.style.backgroundImage, "", "旧的 CSS 渐变网格已移除（F12 的缺陷实现）");
+
+  const svg = grid.querySelector(".aw-grid-svg");
+  ok(svg, "网格改画在 SVG overlay 上");
+  const major = svg.querySelector(".aw-grid-svg__major");
+  const minor = svg.querySelector(".aw-grid-svg__minor");
+  ok(major && minor, "主 / 次格线各有独立 path");
+
+  // 真的画出了线（不是空壳）
+  const drawn = `${major.getAttribute("d") ?? ""}${minor.getAttribute("d") ?? ""}`;
+  ok(drawn.includes("M"), `网格必须真的产出路径：实际 "${drawn.slice(0, 60)}"`);
+
+  // 反变换：把 SVG 从 stage 的 scale(k) 里解出来，所以线宽不随缩放变粗
+  ok(/scale\(/.test(svg.style.transform), `SVG 带反变换（不跟随 stage 放大）：实际 "${svg.style.transform}"`);
+  ok(svg.style.width.endsWith("px") && svg.style.height.endsWith("px"), "SVG 覆盖整个视口");
+
+  // 吃指针事件会挡掉平移 / 缩放 / 点位点击——必须为 none（由 CSS 类保证）
+  const css = readFileSync(join(root, "style.css"), "utf8");
+  ok(/\.aw-grid-svg\s*\{[^}]*pointer-events:\s*none/.test(css), "SVG 网格层 pointer-events:none");
+
+  // 放大后仍然出线（旧实现放大后只剩几道粗大模糊线）
+  const zoomIn = [...container.querySelectorAll("button")].find((node) => node.textContent === "＋");
+  ok(zoomIn, "有放大按钮");
+  zoomIn.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+  await flush();
+  const afterZoom = `${svg.querySelector(".aw-grid-svg__major").getAttribute("d") ?? ""}`;
+  ok(afterZoom.includes("M"), "放大后网格仍然出线");
+  dom.window.close();
+});
+
+test("H14 视口底纹已删除：地图框不再铺静态 27px 重复渐变", async () => {
+  const css = readFileSync(join(root, "style.css"), "utf8");
+  // 只允许 .aw-grid-svg 相关的类规则存在；静态 27px 装饰网格必须消失
+  equal(/transparent 27px/.test(css), false, "静态 27px 视口底纹必须删除（F12）");
+  ok(css.includes(".aw-grid-svg__minor"), "次格线样式走皮肤 token");
+  ok(css.includes(".aw-grid-svg__major"), "主格线样式走皮肤 token");
+});
+
+// ---------------------------------------------------------------------------
+// H16 / H15：已证实范围的填色层
+// ---------------------------------------------------------------------------
+
+/** 世界图带一块人工范围（20 格）的 /state 数据。 */
+function h16State({ areas }) {
+  const state = s10State({
+    chatId: "chat-a", worldId: "w-areas", currentLocationId: "1",
+    points: [
+      { id: "1", name: "钟楼", x: 10, y: 10, regionId: null },
+      { id: "2", name: "市场", x: 30, y: 30, regionId: null },
+    ],
+  });
+  state.map.geoTopology = {
+    branchKey: "canon",
+    edges: [], areas, vehicleAnchors: [],
+    counts: { edges: 0, areas: areas.length, vehicles: 0 },
+    truncated: { edges: 0, areas: 0, vehicles: 0 },
+  };
+  return state;
+}
+
+function h16AreaCells(count) {
+  const cells = [];
+  for (let index = 0; index < count; index += 1) cells.push({ x: 12 + index, y: 12 });
+  return cells;
+}
+
+test("H16 填色层：只染有证据的格，透明度 ≤0.18；没有 areas 时一格都不染", async () => {
+  const withAreas = h16State({
+    areas: [{
+      id: "canon|world|loc:1", locationId: "loc:1", mapId: "world",
+      cells: h16AreaCells(20), evidence: "manual",
+    }],
+  });
+  const mounted = await mountRootAtlasMap({ stateByChat: { "chat-a": withAreas }, chatId: "chat-a" });
+  const { dom, container, rerender } = mounted;
+  // jsdom 没有布局：给个确定的视口尺寸，帧才有跨度可算
+  Object.defineProperty(dom.window.HTMLElement.prototype, "clientWidth", { get: () => 720, configurable: true });
+  Object.defineProperty(dom.window.HTMLElement.prototype, "clientHeight", { get: () => 480, configurable: true });
+  rerender();
+  await flush();
+
+  const areaLayer = container.querySelector(".aw-areas");
+  ok(areaLayer, "面积层存在（§2.5 图层序：底图 → 面积 → 网格）");
+  const paths = [...areaLayer.querySelectorAll(".aw-areas__area")];
+  ok(paths.length > 0, "有证据的范围必须被画出来");
+  for (const path of paths) {
+    ok((path.getAttribute("d") ?? "").includes("M"), "填区有真实路径");
+    ok(Number(path.style.opacity) <= 0.18, `透明度是硬上限 0.18：实际 ${path.style.opacity}`);
+    equal(path.dataset.evidence, "manual", "证据来源如实标注");
+  }
+  // 图层序：面积在网格之前、地图标点之前
+  const stage = container.querySelector(".aw-stage");
+  const order = [...stage.children].map((node) => node.className);
+  ok(order.indexOf("aw-areas") > order.indexOf("aw-image"), "面积在底图之上");
+  ok(order.indexOf("aw-areas") < order.indexOf("aw-grid"), "面积在网格之下（§2.5）");
+  ok(order.indexOf("aw-areas") < order.indexOf("aw-layer"), "面积在标点之下（§2.5）");
+  dom.window.close();
+
+  // 没有 areas：一格都不染
+  const noAreas = h16State({ areas: [] });
+  const bare = await mountRootAtlasMap({ stateByChat: { "chat-a": noAreas }, chatId: "chat-a" });
+  Object.defineProperty(bare.dom.window.HTMLElement.prototype, "clientWidth", { get: () => 720, configurable: true });
+  Object.defineProperty(bare.dom.window.HTMLElement.prototype, "clientHeight", { get: () => 480, configurable: true });
+  bare.rerender();
+  await flush();
+  const bareLayer = bare.container.querySelector(".aw-areas");
+  equal(bareLayer.querySelectorAll(".aw-areas__area").length, 0, "没有 areas 就一格都不假染");
+  equal(bareLayer.dataset.paintedCells, "0");
+  bare.dom.window.close();
+});
+
+test("H16 填色层：无证据来源的范围（非法 evidence）不进填色层", async () => {
+  // evidence 只能是 worldbook / story / manual —— 别的值由投影层跳过
+  const state = h16State({
+    areas: [{
+      id: "canon|world|loc:1", locationId: "loc:1", mapId: "world",
+      cells: h16AreaCells(4), evidence: "guess",
+    }],
+  });
+  const { dom, container, rerender } = await mountRootAtlasMap({ stateByChat: { "chat-a": state }, chatId: "chat-a" });
+  Object.defineProperty(dom.window.HTMLElement.prototype, "clientWidth", { get: () => 720, configurable: true });
+  Object.defineProperty(dom.window.HTMLElement.prototype, "clientHeight", { get: () => 480, configurable: true });
+  rerender();
+  await flush();
+  const areaLayer = container.querySelector(".aw-areas");
+  equal(areaLayer.querySelectorAll(".aw-areas__area").length, 0, "没有可靠证据就不许染色");
+  ok(Number(areaLayer.dataset.paintedCells) === 0, "paintedCells 必须是 0");
+  dom.window.close();
 });

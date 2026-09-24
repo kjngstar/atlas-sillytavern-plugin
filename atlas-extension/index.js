@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.58";
+export const ATLAS_EXTENSION_VERSION = "0.9.59";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -50,8 +50,20 @@ export function isValidAtlasSession(value) {
   );
 }
 
+/**
+ * 新建空会话文档。
+ *
+ * C07a（0.9.59）：必须显式带 `simulation: null`——推演模块属于会话级数据，
+ * 与 `world` / `maps` / `scene` 同级。旧聊天缺该字段仍按「合法空模块」读，
+ * 但**新写的会话一律写明**，避免客户端与服务端对空会话的定义分叉。
+ */
 export function createEmptyAtlasSession() {
-  return { schemaVersion: ATLAS_SESSION_SCHEMA_VERSION, rev: 0, binding: null, world: null, maps: null, scene: null, turns: {}, geoAuto: {}, tables: null };
+  return {
+    schemaVersion: ATLAS_SESSION_SCHEMA_VERSION,
+    rev: 0, binding: null, world: null, maps: null, scene: null,
+    turns: {}, geoAuto: {}, tables: null,
+    simulation: null,
+  };
 }
 
 /** 读取当前聊天会话文档（无则 null；绝不创建半截对象）。 */
@@ -68,8 +80,17 @@ function readAtlasSession(context) {
  * 旧会话没有 `tables` 字段照样合法（未迁移聊天兼容）；写失败必须明确抛错，
  * 由调用方按 `SESSION_WRITE_FAILED` 记账——绝不静默返回假装写成功。
  * 导出供测试（与 `atlasSessionWriteGuard` 同口径）。
+ *
+ * C07b（0.9.59）：新增**可选** `expectedChatId`。
+ * - 异步请求（commit / bootstrap / retry / geo 提炼）**必须**把「发起时捕获的 chatId」
+ *   传进来：写回前先核对当前聊天是否还是它，切过聊天就拒绝写——这是 B02b 的落点，
+ *   防止 A 的迟到响应把 B 的会话盖掉。
+ * - 同时校验 `session.world.id` 与 `session.binding.worldId` 是否自洽（同一份会话里
+ *   世界 id 不能自相矛盾），避免半截会话落盘。
+ * - **不传** `expectedChatId` 的现有人工导入调用保持原契约：只写「被显式选择的当前聊天」。
+ *   旧调用点语义一字不变。
  */
-export async function writeAtlasSession(context, session) {
+export async function writeAtlasSession(context, session, expectedChatId = null) {
   if (!isValidAtlasSession(session)) {
     throw new Error("Atlas 会话写回被拒绝：会话形状非法（schemaVersion 不匹配）。");
   }
@@ -78,63 +99,224 @@ export async function writeAtlasSession(context, session) {
   if (!metadata || typeof metadata !== "object") {
     throw new Error("Atlas 会话写回失败：当前聊天没有可写的 chatMetadata。");
   }
+  if (expectedChatId !== null && expectedChatId !== undefined && String(expectedChatId) !== "") {
+    const currentChatId = ctx?.chatId ?? null;
+    if (String(currentChatId ?? "") !== String(expectedChatId)) {
+      // 切聊天之后的迟到写入：宁可不写，也不把 A 的结果盖到 B 上
+      throw new Error(
+        `Atlas 会话写回被拒绝：请求发起于聊天 ${String(expectedChatId)}，当前聊天已是 ${String(currentChatId ?? "(无)")}。`,
+      );
+    }
+  }
+  // C07b：会话自洽性——世界 id 不能自相矛盾（半截会话不许落盘）
+  const sessionWorldId = session?.world && typeof session.world === "object" ? String(session.world.id ?? "") : "";
+  const bindingWorldId = session?.binding && typeof session.binding === "object" ? String(session.binding.worldId ?? "") : "";
+  if (sessionWorldId && bindingWorldId && sessionWorldId !== bindingWorldId) {
+    throw new Error(
+      `Atlas 会话写回被拒绝：会话内世界 id 不一致（world.id=${sessionWorldId}，binding.worldId=${bindingWorldId}）。`,
+    );
+  }
   metadata[ATLAS_SESSION_KEY] = session;
   if (typeof ctx.saveMetadata === "function") await ctx.saveMetadata();
   return true;
 }
 
 /**
- * 0.9.48（T01）会话写回守卫（纯函数，可测）：响应会话能否写回当前聊天。
- * - 发起请求时的聊天身份（requestChatId）必须仍是当前聊天（currentChatId）；
- * - 会话归属（sessionChatId，来自 binding.chatId）必须与当前聊天一致；
- *   归属未知（null）放行——保守仅按发起=当前判定。
- * - 任一条件不满足 → false：旧聊天的响应绝不能落进新聊天的 chatMetadata。
+ * 0.9.48（T01）+ B02a（0.9.59 聊天隔离）会话写回守卫（纯函数，可测）。
+ *
+ * 判定「这份响应会话能不能写回当前聊天」，三方身份必须**同时**成立：
+ * 1. 发起请求时的聊天身份（requestChatId）必须仍是当前聊天（currentChatId）；
+ * 2. 会话归属（sessionChatId，来自 responseSession.binding.chatId）必须与当前聊天一致；
+ * 3. 归属**缺席**（无 binding / binding 无 chatId）而响应里带着持久数据
+ *    （world / tables / simulation，见 §2.1 的三块业务数据）→ 拒绝写回：
+ *    宁可不写，也不把一份「无主会话」盖到当前聊天上。
+ *
+ * 只有既无绑定、又无持久数据的响应会话按非持久响应放行——这正是 B02b 的
+ * 「允许设置类响应不含会话 / 空会话」。缺会话本身永远不算错误。
+ *
+ * 兼容：不传第 4 参数时沿用 0.9.58 的三方判定（归属未知放行）；旧调用点
+ * （atlas-stability T01 用例等）语义一字不变，4 参形态是 sessionApi 的生产路径。
  */
-function atlasSessionWriteGuard(requestChatId, currentChatId, sessionChatId) {
+function atlasSessionWriteGuard(requestChatId, currentChatId, sessionChatId, responseSession) {
   if (currentChatId === null || currentChatId === undefined || currentChatId === "") return false;
   if (requestChatId !== currentChatId) return false;
-  if (sessionChatId !== null && sessionChatId !== undefined && sessionChatId !== "" && sessionChatId !== currentChatId) return false;
-  return true;
+  const claimed = sessionChatId === null || sessionChatId === undefined ? "" : String(sessionChatId);
+  if (claimed !== "") return claimed === currentChatId;
+  if (responseSession === undefined) return true; // 旧三方形态：归属未知 → 保守放行
+  if (responseSession === null || typeof responseSession !== "object") return true;
+  const binding = responseSession.binding;
+  const bindingChatId = binding && typeof binding === "object" && typeof binding.chatId === "string"
+    ? binding.chatId.trim() : "";
+  if (bindingChatId !== "") return bindingChatId === currentChatId;
+  // 缺绑定 / 缺归属：带持久数据的会话拒绝写回（B02a）；空会话（设置类响应）放行
+  return !atlasSessionHasPersistentPayload(responseSession);
 }
 
 /**
- * 存量迁移（一次性）：旧版把世界文档散在 extensionSettings 浏览器 KV（或 server data/）
- * 且绑定挂在 chatMetadata.atlas_binding —— 全部折叠进 chatMetadata.atlas 单文档。
- * 迁移完成即清理旧档（浏览器 KV 本地清；server data/ 由 /session/purge 清，HTTP 模式才用）。
+ * B02a 纯函数：响应会话是否带着**持久业务数据**。
+ * 只认计划 §2.1 点名的三块：world（兼容镜像）/ tables（三表权威）/ simulation（第四块）。
+ * maps / scene / turns 不在拒绝清单里——它们单独出现时不足以判定归属，宁可少拦不误拦。
+ */
+export function atlasSessionHasPersistentPayload(session) {
+  if (!session || typeof session !== "object") return false;
+  if (session.world) return true;
+  if (session.tables) return true;
+  if (session.simulation) return true;
+  return false;
+}
+
+/**
+ * B01：捕获「这一次异步工作属于哪个聊天」的身份快照。
+ *
+ * 两个字段都要抓，缺一不可：
+ * - `chatId`：聊天标识（人类可读的定位依据）；
+ * - `metadata`：`chatMetadata` 的**对象身份**——切聊天后酒馆会换成另一个对象，
+ *   只比 chatId 会在「同名 / 空 chatId / 关聊天」时误判，比对象身份才是硬证据。
+ */
+export function atlasChatIdentitySnapshot(context) {
+  let ctx = null;
+  try {
+    ctx = typeof context === "function" ? context() : context;
+  } catch { ctx = null; }
+  const record = ctx && typeof ctx === "object" ? ctx : {};
+  return {
+    chatId: record.chatId === null || record.chatId === undefined ? "" : String(record.chatId),
+    metadata: record.chatMetadata && typeof record.chatMetadata === "object" ? record.chatMetadata : null,
+  };
+}
+
+/**
+ * B01 纯函数：`captured` 是否仍是「当前上下文的同一身份」。
+ * 空身份一律判不符——身份不可核验时绝不写盘（这是 B01 的安全底线）。
+ */
+export function atlasSameChatIdentity(captured, current) {
+  if (!captured || !current) return false;
+  const left = captured.chatId === null || captured.chatId === undefined ? "" : String(captured.chatId);
+  const right = current.chatId === null || current.chatId === undefined ? "" : String(current.chatId);
+  if (!left || !right) return false;
+  if (left !== right) return false;
+  if (!captured.metadata || !current.metadata) return false;
+  return captured.metadata === current.metadata;
+}
+
+/**
+ * B02b 纯函数：写回被守卫拒绝时的诊断码 + 用户提示（只回文案，绝不带任何正文）。
+ *
+ * 引擎侧可能已经提交（committed / duplicate）——此时必须让用户知道「回执被丢了」，
+ * 而不是静默消失：回到原聊天核对动向，数据在那边，没有丢。
+ */
+export function atlasStaleWriteNotice(receiptStatus) {
+  if (receiptStatus !== "committed" && receiptStatus !== "duplicate") {
+    return { code: "STALE_CHAT_RESPONSE_DROPPED", reasonCode: "SESSION_IDENTITY_MISMATCH", notice: null };
+  }
+  return {
+    code: receiptStatus === "committed" ? "STALE_COMMIT_RESPONSE_DROPPED" : "STALE_CHAT_RESPONSE_DROPPED",
+    reasonCode: "SESSION_IDENTITY_MISMATCH",
+    notice: "切聊天弃回执：引擎侧这一轮可能已提交，但回执没有写回本窗口。请回到原聊天核对动向——数据仍在原聊天，没有丢。",
+  };
+}
+
+// ---------------------------------------------------------------------------
+// B01：存量迁移（一次性）——按 chatId 分桶的在途表 + 身份核验
+// ---------------------------------------------------------------------------
+
+/**
+ * 旧版把世界文档散在 extensionSettings 浏览器 KV（或 server data/）且绑定挂在
+ * `chatMetadata.atlas_binding` —— 全部折叠进 `chatMetadata.atlas` 单文档。
+ * 迁移成功后只清理**本聊天自己的**旧回合文档；世界级旧档按 worldId 共享，
+ * 一律保留给其他聊天继续迁移（详见迁移体末尾的说明）。
+ *
+ * B01（0.9.59 聊天隔离）修的是**跨聊天单例**：0.9.58 用一个模块级
+ * `sessionMigrationInFlight` 记住在途迁移，A 聊天迁移到一半切到 B 时，
+ * A 的异步续体会把 A 的世界写进 B 的 chatMetadata，还会顺手删掉 A 的旧 KV 与
+ * 服务端旧档。现在：
+ * - 在途表改成 `Map<chatId, Promise>` —— 每个聊天各自一条，互不阻塞、互不复用；
+ * - 开工时抓 `{ chatId, metadata }` 身份快照（`atlasChatIdentitySnapshot`）；
+ * - **每个 await 返回后 / `writeAtlasSession` 前 / 移除旧 KV 前**都用
+ *   `atlasSameChatIdentity` 核验「此刻的上下文仍是同一身份」；
+ * - 身份不符 → 立即收手：**保留旧数据**、记 `STALE_MIGRATION_DROPPED`
+ *   （errorCode / reasonCode = A04 的 `SESSION_IDENTITY_MISMATCH`），
+ *   绝不调用 `saveMetadata`，绝不删任何旧档 —— 切回来的 A 下次事件再迁。
  * 任何失败都静默降级：旧数据原样保留，下次再试。
  */
-let sessionMigrationInFlight = null;
-function migrateChatSession(context) {
-  const metadata = context().chatMetadata;
-  const chatId = context().chatId ?? "";
-  if (!metadata || typeof metadata !== "object") return Promise.resolve();
+const sessionMigrationsInFlight = new Map();
+
+/** B01：某聊天是否有在途迁移（诊断 / 测试用；不暴露 Promise 内容）。 */
+export function atlasSessionMigrationInFlight(chatId) {
+  return sessionMigrationsInFlight.has(chatId === null || chatId === undefined ? "" : String(chatId));
+}
+
+/**
+ * @param {() => object} context 酒馆上下文读取器（每次都重新取，绝不缓存聊天对象）
+ * @param {{ store?: object|null, api?: object|null, emit?: (event: object) => void }} [deps]
+ *   测试注入的旧档来源与诊断出口；缺省用 `atlasRuntime.engineStore` / `atlasRuntime.api`
+ *   与模块自身的 `emitAtlasDiagnostic`（与生产一致）
+ */
+export function migrateChatSession(context, deps = {}) {
+  const capture = atlasChatIdentitySnapshot(context);
+  const metadata = capture.metadata;
+  if (!metadata) return Promise.resolve();
   if (isValidAtlasSession(metadata[ATLAS_SESSION_KEY])) return Promise.resolve();
-  if (!metadata[ATLAS_BINDING_KEY]) return Promise.resolve(); // 没有旧绑定 = 新聊天，会话由首次写入创建
-  if (sessionMigrationInFlight) return sessionMigrationInFlight;
+  const legacyBinding = metadata[ATLAS_BINDING_KEY];
+  if (!legacyBinding) return Promise.resolve(); // 没有旧绑定 = 新聊天，会话由首次写入创建
+  if (!capture.chatId) return Promise.resolve(); // 身份不可核验 → 绝不盲写（B01）
+  const key = capture.chatId;
+  const inFlight = sessionMigrationsInFlight.get(key);
+  if (inFlight) return inFlight;
+  const emit = typeof deps.emit === "function" ? deps.emit : emitAtlasDiagnostic;
+
+  const staleNow = (stage) => {
+    emit({
+      level: "warn", source: "storage", code: "STALE_MIGRATION_DROPPED",
+      operation: "session", phase: "migrate", outcome: "skipped",
+      errorCode: "SESSION_IDENTITY_MISMATCH",
+      details: { stage, reasonCode: "SESSION_IDENTITY_MISMATCH" },
+    });
+    return { migrated: false, stale: true, code: "STALE_MIGRATION_DROPPED", stage, chatId: key };
+  };
+
+  // 门闸：保证「先登记在途 Promise，再跑迁移体」——否则同步跑完的迁移体会在
+  // finally 里删掉尚未登记的键，把一条已完成的 Promise 永久留在表里。
+  let releaseGate;
+  const gate = new Promise((resolve) => { releaseGate = resolve; });
   const task = (async () => {
+    await gate;
     try {
-      const legacyBinding = metadata[ATLAS_BINDING_KEY];
       const worldId = String(legacyBinding?.worldId ?? "");
-      const legacyChatId = String(legacyBinding?.chatId ?? chatId ?? "");
-      const store = atlasRuntime.engineStore ?? null;
+      const legacyChatId = String(legacyBinding?.chatId ?? key ?? "");
+      const store = deps.store ?? atlasRuntime.engineStore ?? null;
+      const api = deps.api ?? atlasRuntime.api ?? null;
       const session = createEmptyAtlasSession();
       session.binding = legacyBinding;
+      const stillCurrent = () => atlasSameChatIdentity(capture, atlasChatIdentitySnapshot(context));
+
       if (store && worldId) {
-        session.world = (await store.read(`world:${worldId}`)) ?? null;
-        session.maps = (await store.read(`maps:${worldId}`)) ?? null;
-        session.scene = (await store.read(`scene:${worldId}`)) ?? null;
+        for (const [field, docKey] of [["world", `world:${worldId}`], ["maps", `maps:${worldId}`], ["scene", `scene:${worldId}`]]) {
+          const value = (await store.read(docKey)) ?? null;
+          if (!stillCurrent()) return staleNow(`after-${field}-read`);
+          session[field] = value;
+        }
         const geo = await store.read(`geo-auto:${worldId}`);
+        if (!stillCurrent()) return staleNow("after-geo-read");
         if (geo) session.geoAuto[worldId] = geo;
       }
       if (store && legacyChatId) {
-        for (const key of await store.list(`turn:${legacyChatId}:`)) {
-          session.turns[key] = (await store.read(key)) ?? null;
+        const turnPrefix = `turn:${legacyChatId}:`;
+        const turnKeys = await store.list(turnPrefix);
+        if (!stillCurrent()) return staleNow("after-turn-list");
+        for (const turnKey of turnKeys ?? []) {
+          // 归属核验：宿主若把别的聊天的键也列进来，本聊天一条都不收（B01 的"B 无 A 表行"）
+          if (!String(turnKey).startsWith(turnPrefix)) continue;
+          const turn = (await store.read(turnKey)) ?? null;
+          if (!stillCurrent()) return staleNow("after-turn-read");
+          session.turns[turnKey] = turn;
         }
       }
       // 服务端（HTTP 模式）兜底：浏览器 KV 里没有就问 server 要
-      if (!session.world && atlasRuntime.api && worldId) {
+      if (!session.world && api && worldId) {
         try {
-          const result = await atlasRuntime.api.request("POST", "/session/export", { chatId: legacyChatId, worldId });
+          const result = await api.request("POST", "/session/export", { chatId: legacyChatId, worldId });
+          if (!stillCurrent()) return staleNow("after-server-export");
           const exported = result?.body?.data?.session;
           if (exported && exported.schemaVersion === ATLAS_SESSION_SCHEMA_VERSION) {
             session.world = exported.world ?? null;
@@ -145,36 +327,443 @@ function migrateChatSession(context) {
           }
         } catch { /* server 也没有 → 按空世界迁，绑定保住让 UI 引导重建 */ }
       }
-      metadata[ATLAS_SESSION_KEY] = session;
+      // B01：落盘前两道核验 —— writeAtlasSession 之前，以及存档（await）返回之后
+      if (!stillCurrent()) return staleNow("before-write");
       delete metadata[ATLAS_BINDING_KEY];
-      const ctx = context();
-      if (typeof ctx.saveMetadata === "function") await ctx.saveMetadata();
-      // 迁移成功 → 清理浏览器 KV 旧档（server data/ 由 /session/purge 处理，尽力而为）
-      if (store && worldId) {
-        try {
-          await store.remove(`world:${worldId}`);
-          await store.remove(`maps:${worldId}`);
-          await store.remove(`scene:${worldId}`);
-          await store.remove(`geo-auto:${worldId}`);
-        } catch { /* 清理失败不影响会话 */ }
-      }
+      // C07b：迁移是异步路径，落盘时身份必须仍是这次迁移的聊天
+      await writeAtlasSession(context, session, legacyChatId);
+      if (!stillCurrent()) return staleNow("after-save");
+      // 迁移成功 → 清理旧档。B01：**每一步之前都核验身份**。
+      //
+      // 只清**聊天自己的**回合文档（键含 chatId，归属无歧义）。世界级旧档
+      // （`world:` / `maps:` / `scene:` / `geo-auto:` 的键是 **worldId 作用域**，
+      // 同一张角色卡的多个聊天共用同一份）**一律保留**：A 聊天迁移完就把它们删掉，
+      // 等于让还没迁移的 B 永久失去自己的旧世界 —— 这是"用删用户数据冒充隔离"，
+      // 正是本阶段明令禁止的做法。旧档留着，其他聊天各自迁移时仍是它们的来源。
+      // 同理不调用 `/session/purge`（服务端按 worldId 删 world/maps/scene/geo 与绑定，
+      // 会连带清掉别的聊天还没迁的数据）。
       if (store && legacyChatId) {
         try {
-          for (const key of await store.list(`turn:${legacyChatId}:`)) await store.remove(key);
+          const turnPrefix = `turn:${legacyChatId}:`;
+          if (!stillCurrent()) return staleNow("before-turn-remove");
+          const turnKeys = await store.list(turnPrefix);
+          if (!stillCurrent()) return staleNow("before-turn-remove");
+          for (const turnKey of turnKeys ?? []) {
+            // 只删本聊天自己的回合文档：别的聊天的键绝不代删（隔离不等于清空用户存档）
+            if (!String(turnKey).startsWith(turnPrefix)) continue;
+            await store.remove(turnKey);
+            if (!stillCurrent()) return staleNow("after-turn-remove");
+          }
         } catch { /* 清理失败不影响会话 */ }
       }
-      if (atlasRuntime.api && worldId) {
-        try {
-          await atlasRuntime.api.request("POST", "/session/purge", { chatId: legacyChatId, worldId });
-        } catch { /* HTTP 模式外该端点不存在，忽略 */ }
-      }
-    } catch { /* 迁移失败静默降级：旧数据原样保留，下次事件再试 */ }
-    finally {
-      sessionMigrationInFlight = null;
+      return { migrated: true, chatId: key, worldId };
+    } catch {
+      return { migrated: false, failed: true, chatId: key };
+    } finally {
+      if (sessionMigrationsInFlight.get(key) === task) sessionMigrationsInFlight.delete(key);
     }
   })();
-  sessionMigrationInFlight = task;
+  sessionMigrationsInFlight.set(key, task);
+  releaseGate();
   return task;
+}
+
+// ---------------------------------------------------------------------------
+// B03：地图作用域身份（纯函数）——聊天 / 世界 / 分支三者共同构成一张图的作用域
+// ---------------------------------------------------------------------------
+
+/**
+ * B03 纯函数：当前地图作用域身份 `{ chatId, worldId, branchKey }`。
+ *
+ * 0.9.58 的地图视图键只有 `chatId|worldId`：同一聊天的**不同分支**（IF 与正史）
+ * 共用一套子图视图栈、相机与底图缓存 —— 切分支看到的是上一分支的视角与底图。
+ * 分支键优先取服务端 `/state` 下发的 `tableMap.branchKey`（三表真实分支键）；
+ * 旧响应没有 tableMap 时退回 `branchId`（IF 分支 id 本身也是有效判别式），
+ * 都没有才按 `canon`。绝不猜一个不存在的分支。
+ */
+export function atlasMapIdentityOf(stateData, chatIdOverride) {
+  const d = stateData && typeof stateData === "object" ? stateData : {};
+  const tableMap = d.tableMap && typeof d.tableMap === "object" ? d.tableMap : null;
+  const rawBranch = tableMap?.branchKey ?? d.branchKey ?? d.branchId ?? null;
+  const branchText = rawBranch === null || rawBranch === undefined ? "" : String(rawBranch).trim();
+  const rawChat = chatIdOverride === undefined || chatIdOverride === null ? d.chatId : chatIdOverride;
+  return {
+    chatId: rawChat === null || rawChat === undefined ? "" : String(rawChat),
+    worldId: d.worldId === null || d.worldId === undefined ? "" : String(d.worldId),
+    branchKey: branchText || "canon",
+  };
+}
+
+/** B03：作用域键 `chatId|worldId|branchKey`（地图视图栈 / 相机缓存 / 底图缓存的唯一键前缀）。 */
+export function atlasMapScopeKey(identity) {
+  const value = identity && typeof identity === "object" ? identity : {};
+  const branch = String(value.branchKey ?? "").trim() || "canon";
+  return `${String(value.chatId ?? "")}|${String(value.worldId ?? "")}|${branch}`;
+}
+
+/** B03：底图缓存键 `chatId|worldId|branchKey|mapImageRevision`（版本变了也不复用旧图）。 */
+export function atlasMapImageCacheKey(identity, imageRevision) {
+  return `${atlasMapScopeKey(identity)}|${String(imageRevision ?? 0)}`;
+}
+
+/** B03 纯函数：两次地图身份是否完全相同（底图回调重绘前必须先过这一关）。 */
+export function atlasSameMapIdentity(captured, current) {
+  if (!captured || !current) return false;
+  return atlasMapScopeKey(captured) === atlasMapScopeKey(current);
+}
+
+// ---------------------------------------------------------------------------
+// A03 / F8：诊断夹具的判定逻辑（纯函数）——「附近为空」不等于「跨聊天串档」
+// ---------------------------------------------------------------------------
+
+/**
+ * A03（F8）纯函数：把「附近页为空，但某个地点里有人」拆成三种互斥情形。
+ *
+ * F8 的教训：截图里「附近为空、蒸汽车厢有两人」**单独不足以**证明串档——
+ * 必须能区分下面三种，再决定是不是要动数据（绝不因为一次空页面就删用户存档）：
+ * - `current-location-unknown`：绑定里没有当前位置 → 根本没算过附近，不是"没人"；
+ * - `same-location-has-people`：当前位置已知且**该地点确实有人**，只是本轮
+ *   `relevantNpcIds` 为空（引擎相关性判定没给）→ 数据一致，不是跨聊天；
+ * - `no-confirmed-people`：当前位置已知、该地点也没人 → 如实"暂无已确认人物"。
+ *
+ * 输入只读 /state 与三表投影的**结构字段**（地点 id、在场人物 id/位置），不含任何正文。
+ */
+export function atlasDiagnoseEmptyNearby(input) {
+  const record = input && typeof input === "object" ? input : {};
+  const currentLocationId = record.currentLocationId === null || record.currentLocationId === undefined
+    ? "" : String(record.currentLocationId).trim();
+  /**
+   * F05（0.9.59）：优先信服务端给出的**具名原因**（F02 的 `nearReasonCode`）。
+   *
+   * 它是权威口径：`CURRENT_LOCATION_UNKNOWN` 表示「还不知道自己在哪」，
+   * 与「周围确实没人」是两件事（§2.4 / T09）。下面的启发式只在旧版 /state
+   * 不带该字段时兜底，行为与 0.9.58 一致。
+   */
+  const nearReasonCode = typeof record.nearReasonCode === "string" ? record.nearReasonCode : "";
+  if (nearReasonCode === "CURRENT_LOCATION_UNKNOWN") {
+    return {
+      case: "current-location-unknown",
+      persons: 0,
+      message: "尚未确定当前位置，无法计算附近。先在推演里确认主角所在地点，或在地图上点选所在地。",
+    };
+  }
+  if (!currentLocationId) {
+    return {
+      case: "current-location-unknown",
+      persons: 0,
+      message: "尚未确定当前位置，无法计算附近。先在推演里确认主角所在地点，或在地图上点选所在地。",
+    };
+  }
+  const wanted = currentLocationId.startsWith("loc:") ? currentLocationId : `loc:${currentLocationId}`;
+  const entries = Array.isArray(record.tableNearbyEntries) ? record.tableNearbyEntries : [];
+  const persons = entries.filter((entry) => {
+    if (!entry || typeof entry !== "object") return false;
+    const locationId = String(entry.locationId ?? "");
+    if (locationId !== wanted) return false;
+    if (entry.presence === "left") return false;
+    if (entry.isProtagonist === true) return false;
+    return true;
+  });
+  if (persons.length > 0) {
+    return {
+      case: "same-location-has-people",
+      persons: persons.length,
+      message: "本轮没有判定的附近人物；当前地点已确认在场者，可在「地点」弹窗或地图名单里查看。",
+    };
+  }
+  return { case: "no-confirmed-people", persons: 0, message: "附近暂无已确认人物。" };
+}
+
+// ---------------------------------------------------------------------------
+// B02b：会话路由请求包装（可测工厂）
+// ---------------------------------------------------------------------------
+
+/** 需要携带会话文档的引擎路由前缀（0.9.42 会话承载的既有清单，一字不改）。 */
+const SESSION_ROUTE_PREFIXES = [
+  "/state",
+  "/map/image",
+  "/map/travel-preview",
+  "/turns/",
+  "/bindings",
+  "/worlds/import",
+  "/worlds/ensure-starter",
+  "/worlds/geo/adopt",
+  "/worlds/move-author",
+  "/session/",
+];
+
+function pathWantsSession(path) {
+  return SESSION_ROUTE_PREFIXES.some((prefix) => path === prefix || path.startsWith(prefix));
+}
+
+/**
+ * B02b（聊天隔离）会话路由请求包装。
+ *
+ * - 请求发起时固定 `requestChatId`，并把**当前聊天**的会话文档随体带上（唯一往返路径）；
+ * - 响应带回会话时只经 `atlasSessionWriteGuard` 四方核对后才写回（B02a）；
+ * - 响应**不含会话**（设置类 / 只读类路由）是正常情况：不写回、不报错；
+ * - 发起聊天 ≠ 当前聊天（A 等待期间切到 B，A 的迟到 commit / bootstrap / retry 响应）
+ *   → 丢弃写回，记 `STALE_*_DROPPED`；若引擎侧已提交，额外给用户一条
+ *   「切聊天弃回执，回原聊天核对」的可见提示（绝不静默吞掉回执）。
+ *
+ * 抽成工厂是为了让 harness 能真跑这条路径（connectOnce 里的接线一字不改地调用它）。
+ */
+export function createAtlasSessionApi(deps) {
+  const context = deps.context;
+  const innerApi = deps.innerApi;
+  const emit = typeof deps.emit === "function" ? deps.emit : () => {};
+  const notify = typeof deps.notify === "function" ? deps.notify : () => {};
+  const logCall = typeof deps.logCall === "function" ? deps.logCall : (method, path, run) => run();
+  if (!context || !innerApi) throw new Error("createAtlasSessionApi 需要 context 与 innerApi。");
+  return {
+    async request(method, path, body) {
+      const requestChatId = context().chatId ?? null;
+      let payload = body;
+      if (method === "POST" && pathWantsSession(path)) {
+        const session = readAtlasSession(context);
+        if (session) payload = { ...(body ?? {}), session };
+      }
+      const result = await logCall(method, path, () => innerApi.request(method, path, payload));
+      try {
+        const responseSession = result?.body?.session;
+        // 设置类响应不带会话：正常路径，直接返回（B02b：不因为没会话就报错）
+        if (!isValidAtlasSession(responseSession)) return result;
+        const currentChatId = context().chatId ?? null;
+        const sessionChatId =
+          responseSession?.binding && typeof responseSession.binding.chatId === "string"
+            ? responseSession.binding.chatId
+            : null;
+        if (atlasSessionWriteGuard(requestChatId, currentChatId, sessionChatId, responseSession)) {
+          // C07b：把 B02b 捕获的 chatId 交给写回再做一次身份核对（守卫已过，这里是第二道锁，
+          // 覆盖「守卫通过之后、await 落盘之前又切了聊天」的极窄窗口）。
+          await writeAtlasSession(context, responseSession, requestChatId);
+          return result;
+        }
+        // 发起聊天 ≠ 当前聊天（切卡 / 换聊天 / 会话归属不一致）：丢弃写回。
+        // 引擎侧已提交；回到原聊天时该会话由 chatMetadata 持久层自然恢复。
+        const receiptStatus = result?.body?.data?.receipt?.status ?? null;
+        const decision = atlasStaleWriteNotice(receiptStatus);
+        emit({
+          level: "info", source: "storage", code: decision.code,
+          operation: "session", phase: "write", outcome: "skipped",
+          errorCode: decision.reasonCode,
+          details: { reasonCode: decision.reasonCode, coreCommitted: receiptStatus === "committed" },
+        });
+        if (decision.notice) notify(decision.notice);
+      } catch (error) {
+        // 写回失败（聊天正被切换等）：引擎侧已提交，本侧会话等下次响应覆盖；记日志排查
+        emit({
+          level: "error", source: "storage", code: "SESSION_WRITE_FAILED",
+          operation: "session", phase: "write", outcome: "failed", retryable: true,
+          details: { coreCommitted: result?.body?.data?.receipt?.status === "committed" },
+        });
+      }
+      return result;
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// B04：世界书聊天世代号（chatEpoch）+ 切聊天写入器
+// ---------------------------------------------------------------------------
+
+/** B04 纯逻辑：递增聊天世代号。每次开始新的异步写入都 `begin`，写回前用 `isCurrent` 复核。 */
+export function createChatEpochTracker() {
+  let epoch = 0;
+  let chatId = "";
+  return {
+    begin(nextChatId) {
+      epoch += 1;
+      chatId = nextChatId === null || nextChatId === undefined ? "" : String(nextChatId);
+      return { epoch, chatId };
+    },
+    isCurrent(token) {
+      return Boolean(token) && token.epoch === epoch && token.chatId === chatId;
+    },
+    snapshot() {
+      return { epoch, chatId };
+    },
+  };
+}
+
+/**
+ * B04 / F10 纯函数：按 lib/world-schema 的 `branchScopeForStory` 同口径取分支键
+ * （IF 分支 = 该 IF 故事 id；正史 = null）。找不到故事按正史处理，绝不猜。
+ */
+export function atlasBranchScopeForStory(world, storyId) {
+  const raw = storyId === null || storyId === undefined ? "" : String(storyId).trim();
+  if (!raw) return null;
+  const stories = Array.isArray(world?.stories) ? world.stories : [];
+  const story = stories.find((item) => String(item?.id ?? "") === raw);
+  if (!story) return null;
+  return String(story.mode ?? "") === "if" ? raw : null;
+}
+
+/**
+ * B04 / F10 纯函数：从会话三表文档里取**当前分支**的切片。
+ * 只读已存在的分支键（当前分支 → canon → 唯一键兜底），绝不新建、绝不跨分支借数据。
+ */
+export function atlasBranchSliceOf(world, tablesDoc, branchId) {
+  const doc = tablesDoc && typeof tablesDoc === "object" ? tablesDoc : null;
+  const branches = doc && doc.branches && typeof doc.branches === "object" ? doc.branches : null;
+  if (!branches) return null;
+  const scope = atlasBranchScopeForStory(world, branchId);
+  const candidates = scope ? [scope, "canon"] : ["canon"];
+  for (const key of candidates) {
+    const slice = branches[key];
+    if (slice && typeof slice === "object") return { branchKey: key, tables: slice };
+  }
+  const keys = Object.keys(branches);
+  if (keys.length === 1) {
+    const slice = branches[keys[0]];
+    if (slice && typeof slice === "object") return { branchKey: keys[0], tables: slice };
+  }
+  return null;
+}
+
+/**
+ * B04（聊天隔离）世界书聊天切换处理器。
+ *
+ * 0.9.58 的实现在切聊天时**无条件**继续跑旧聊天的异步写入：读绑定 / 读世界 / 写书
+ * 三步之间用户切走，旧三表上下文（F10：`buildLorebookPlans` 没拿到当前分支三表）
+ * 就会写进随卡激活的共享主卡书。现在：
+ * 1. 进入时 `begin(chatId)` 生成**递增 chatEpoch**，并捕获当时的聊天身份；
+ * 2. 三个核验点：**开始**（拿到 chatId 后）、**加载书后**（绑定 + 世界读完）、
+ *    **保存前**（`syncTurn` 真正落书之前）——任一处 epoch/身份不符即收手，
+ *    记 `LOREBOOK_STALE_CHAT_DROPPED`，绝不把别的聊天的动向写进书；
+ * 3. **写入串行化**：一次切换的落书可能已经在途（`syncTurn` 已开始），epoch 核验挡不住它。
+ *    因此世代号在**调用当时**就递增（旧写入立即作废），而实际读/写排成一条串行链——
+ *    迟到的旧写入排在前面，当前聊天的写入永远最后落书，书里不会留下旧聊天的动向；
+ * 4. 切到未绑定聊天只调 `purgeAll()`：它**只删 comment 带 Atlas 前缀的自建条目**，
+ *    用户自己的世界书条目（书名 / 内容 / 启停）一概不动；
+ * 5. 任何失败都只记事件并返回结构化结果，**绝不抛出**（不影响回合）。
+ */
+export function createLorebookChatSwitchHandler(deps) {
+  const tracker = deps.tracker ?? createChatEpochTracker();
+  const emit = typeof deps.emit === "function" ? deps.emit : () => {};
+  const readSession = typeof deps.readSession === "function" ? deps.readSession : () => null;
+  const buildPlans = typeof deps.buildPlans === "function" ? deps.buildPlans : null;
+  /** 串行链：上一次切换的读/写全部落定后，下一次才开始（保证最后落书的是当前聊天）。 */
+  let writeChain = Promise.resolve();
+  const runOnce = async function onLorebookChatSwitch(info, token) {
+    const dropped = (stage) => {
+      emit({
+        level: "warn", source: "lorebook", code: "LOREBOOK_STALE_CHAT_DROPPED",
+        operation: "lorebook", phase: "chat-switch", outcome: "skipped",
+        errorCode: "SESSION_IDENTITY_MISMATCH",
+        details: { stage, reasonCode: "SESSION_IDENTITY_MISMATCH" },
+      });
+      return { dropped: true, code: "LOREBOOK_STALE_CHAT_DROPPED", stage, chatId: token.chatId };
+    };
+    try {
+      if (!info.bound) {
+        // 未绑定聊天：只清 Atlas 自建条目（purgeAll 的语义在 src/atlas-lorebook.ts 里，
+        // 按 comment 前缀删除；用户自己的世界书条目恒不匹配，永不被删）
+        const purged = await deps.writer.purgeAll();
+        if (!tracker.isCurrent(token)) return dropped("after-purge");
+        await deps.store.write("lorebook", null);
+        if (typeof deps.rerender === "function") deps.rerender();
+        return { purged: true, bookName: purged?.bookName ?? null, pruned: purged?.pruned ?? 0 };
+      }
+      // 核验点 1：开始（拿到绑定之前先确认还是同一次切换）
+      if (!tracker.isCurrent(token)) return dropped("before-binding");
+      const binding = await deps.readBinding();
+      const worldId = String(binding?.worldId ?? "");
+      if (!worldId) return { skipped: true };
+      const world = await deps.store.read(`world:${worldId}`);
+      // 核验点 2：加载书（绑定 + 世界）之后
+      if (!tracker.isCurrent(token)) return dropped("after-load");
+      if (!world) return { skipped: true };
+      if (!buildPlans) return { skipped: true };
+      const session = readSession() ?? null;
+      const branchId = binding?.branchId ?? null;
+      const slice = atlasBranchSliceOf(world, session?.tables ?? null, branchId);
+      /**
+       * D10（0.9.59）：重建时把**当前分支的推演上下文**一起交给 buildLorebookPlans。
+       *
+       * 为什么必须传：三表人物位置与想法会变，而旧 `world.stateEvents` 在行增量回合里
+       * 根本不新增——只传三表的话，书里的「近期动向」会长期停在旧事件上，
+       * 甚至把**别的分支**的幕后内容读进来（A→B→A 串档）。
+       *
+       * 事件来源与 `/state` 完全同源：**本会话、本分支**的回合记录里的 `simulationEvents`；
+       * `rolledBack === true` 的回合按 C10 不再可见（文档保留可审计，但不进注入）。
+       * `authorOmniscient` 恒为 false——作者界面能看秘密，不代表主聊天注入可以带秘密。
+       */
+      const simulationDelta = (() => {
+        if (!slice) return null;
+        const turns = session?.turns && typeof session.turns === "object" ? Object.values(session.turns) : [];
+        const events = [];
+        for (const turn of turns) {
+          if (!turn || typeof turn !== "object") continue;
+          if (turn.branchId !== branchId) continue;
+          if (turn.rolledBack === true) continue;
+          for (const item of Array.isArray(turn.simulationEvents) ? turn.simulationEvents : []) {
+            if (item && typeof item === "object") events.push(item);
+          }
+        }
+        const branchRows = session?.simulation?.branches?.[slice.branchKey] ?? null;
+        return {
+          branchKey: slice.branchKey,
+          events,
+          deliveries: Array.isArray(branchRows?.deliveries) ? branchRows.deliveries : [],
+          protagonistLocationIds: binding?.currentLocationId ? [String(binding.currentLocationId)] : [],
+          authorOmniscient: false,
+        };
+      })();
+      // F10：把**当前分支**的三表一起交给 buildLorebookPlans（缺表时保持旧行为）
+      const plans = buildPlans(world, {
+        status: "committed",
+        currentTime: Number(binding?.worldTimeCursor ?? 0),
+        currentLocationId: binding?.currentLocationId ?? null,
+      }, slice ? { tables: slice.tables, branchKey: slice.branchKey, currentLocationId: binding?.currentLocationId ?? null } : null,
+        simulationDelta);
+      if (!plans) return { skipped: true };
+      // 核验点 3：保存前
+      if (!tracker.isCurrent(token)) return dropped("before-save");
+      const result = await deps.writer.syncTurn(plans);
+      if (!tracker.isCurrent(token)) return dropped("after-save");
+      await deps.store.write("lorebook", deps.writer.snapshot(plans, result));
+      if (typeof deps.rerender === "function") deps.rerender();
+      return result;
+    } catch (error) {
+      // 失败不影响回合，只记录事件（绝不抛出）
+      emit({
+        level: "warn", source: "lorebook", code: "LOREBOOK_SWITCH_SYNC_FAILED",
+        operation: "lorebook", phase: "chat-switch", outcome: "failed", retryable: true,
+      });
+      return { failed: true, chatId: token.chatId, message: error instanceof Error ? error.message : String(error) };
+    }
+  };
+  return function onLorebookChatSwitch(info = {}) {
+    const chatId = info.chatId === null || info.chatId === undefined
+      ? (typeof deps.readChatId === "function" ? deps.readChatId() : null)
+      : info.chatId;
+    // 世代号在**调用当时**递增：切走的那一刻，旧写入立即作废（不必等在途写入排到队首）
+    const token = tracker.begin(chatId);
+    const queued = writeChain.then(() => runOnce(info, token), () => runOnce(info, token));
+    writeChain = queued.then(() => {}, () => {});
+    return queued;
+  };
+}
+
+/**
+ * B02b 用户提示：切聊天丢弃回执时的可见一次性提示。
+ * 内联样式（index.js 不新增 style.css 规则）；任何失败都静默，绝不影响回合。
+ */
+function showAtlasNotice(text) {
+  try {
+    if (typeof document === "undefined" || !document.body || typeof text !== "string" || !text) return;
+    const node = document.createElement("div");
+    node.className = "atlas-notice";
+    node.setAttribute("role", "status");
+    node.setAttribute("aria-live", "polite");
+    node.style.cssText = "position:fixed;right:16px;bottom:16px;z-index:2147483000;max-width:340px;"
+      + "padding:10px 12px;border-radius:8px;background:rgba(24,28,36,.94);color:#f2f0ea;"
+      + "font-size:13px;line-height:1.5;box-shadow:0 6px 20px rgba(0,0,0,.35)";
+    node.textContent = text;
+    document.body.append(node);
+    setTimeout(() => node.remove(), 9000);
+  } catch { /* 提示失败绝不影响回合 */ }
 }
 
 /** 创建扩展身份实例（保持 ATLAS-00 兼容：harness 校验身份与生命周期占位）。 */
@@ -226,7 +815,7 @@ function emitAtlasDiagnostic(event) {
 
 async function loadUiCore() {
   // 先组件内构建产物（发布形态），再上级 src（开发形态，工程内运行才可用）
-  const attempts = ["./dist/atlas-ui-core.mjs", "../src/atlas-ui-core.ts"];
+  const attempts = ["./dist/atlas-ui-core.mjs"];
   let lastError = null;
   for (const specifier of attempts) {
     try {
@@ -1204,9 +1793,22 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     createHoldDragGesture,
     MAP_LONGPRESS_HOLD_MS,
     createPinchTracker,
+    // H13（0.9.59）：网格改画在**视口对齐**的 SVG overlay 上，格线由这一个纯函数
+    // 按与相机同一套 world→screen 变换算出（不再用会被 stage scale 拉伸的 CSS 渐变）。
+    getVisibleGridPaths,
+    // H16：已证实范围的填色投影（只染有证据的格；没有 areas 就一格不染）
+    projectColorAreas,
+  /**
+   * H08：缺坐标地点的示意布局（纯函数）。**只有这里调它**——显示用位置绝不回写三表。
+   */
+  layoutUnplacedMarkers,
     // C5（0.9.54）：比例尺 / 距离格式化唯一权威实现在 src/atlas-scale.ts，
     // 经 atlas-browser-entry 导出后从这里解构；index.js 不再自带副本。
     computeScaleBar,
+    // H19a（0.9.59）：左下角**常驻**比例尺用固定长度版本——线条钉死在视口坐标系的
+    // 96 CSS px，读数随 camera.k 变化（放大 2 倍读数减半）。旧的 computeScaleBar
+    // 挑「1/2/5 × 10^n」候选，相邻缩放步可能保留同一个数字，不再用于这条尺。
+    computeViewportScaleBar,
     formatDistanceMeters,
     formatTravelDistance,
     // C6（0.9.54）：导航页清单唯一权威（src/atlas-ui-core.ts 的 ATLAS_UI_PAGES）
@@ -1228,6 +1830,131 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
   let cameraViewKey = "";
   let cameraFrame = null;
   let cameraViewport = { w: 0, h: 0 };
+
+  /**
+   * H15b（0.9.59）：地图「编辑范围」绘制模式。
+   *
+   * 纪律（计划 §3-H15b 原文）：
+   * - **只有用户显式进入绘制模式**才捕获网格点击/拖动；平时地图照常平移与点选；
+   * - 屏幕坐标经**逆相机变换**换算到整数格 `(x,y)`——所以缩放 41% 与 400% 涂同一格，
+   *   落到同一个真实格坐标（这是本条最关键的验收点）；
+   * - 未提交的选区可**撤销**（整批清空），退出编辑立即恢复平移与点位点击；
+   * - 只有点「保存」才调用 H15a `/maps/areas/upsert`；**取消不产生任何数据**；
+   * - 标尺 / 尺度 / 人物位置**不由上色改写**（本模式只写 cells，不碰其它字段）。
+   */
+  const areaDraw = {
+    active: false,
+    locationId: null,
+    locationName: "",
+    mapId: "world",
+    cells: new Set(),
+  };
+  /** buildMap 建的 DOM 引用（绘制函数定义在 renderPanel 作用域，靠这里拿到元素）。 */
+  const areaDrawRefs = { viewport: null, layer: null, bar: null, count: null };
+
+  /** 屏幕坐标 → 整数格坐标（逆相机变换；缩放多少都不影响落格结果）。 */
+  function areaDrawCellAt(clientX, clientY) {
+    const vp = areaDrawRefs.viewport;
+    if (!vp || !camera || typeof cameraStageTransform !== "function") return null;
+    const k = Number(camera.k);
+    if (!Number.isFinite(k) || k <= 0) return null;
+    const rect = vp.getBoundingClientRect?.() ?? { left: 0, top: 0 };
+    const t = cameraStageTransform(camera, vp.clientWidth || 0, vp.clientHeight || 0);
+    const wx = (Number(clientX) - rect.left - t.tx) / k;
+    const wy = (Number(clientY) - rect.top - t.ty) / k;
+    if (!Number.isFinite(wx) || !Number.isFinite(wy)) return null;
+    return { x: Math.floor(wx), y: Math.floor(wy) };
+  }
+
+  /** 把未提交的选区画成预览层（蓝色描边方格），并刷新计数。 */
+  function renderAreaDraw() {
+    const layer = areaDrawRefs.layer;
+    if (!layer) return;
+    const existing = layer.querySelector?.(".aw-areas__draft");
+    if (existing) existing.remove();
+    if (!areaDraw.active || areaDraw.cells.size === 0) {
+      if (areaDrawRefs.count) areaDrawRefs.count.textContent = "0 格";
+      return;
+    }
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("class", "aw-areas__svg aw-areas__draft");
+    // 用格坐标当 viewBox：与世界坐标同尺度，所以 1 格 = 1 单位，缩放由 stage 负责
+    const xs = [...areaDraw.cells].map((key) => Number(key.split(",")[0]));
+    const ys = [...areaDraw.cells].map((key) => Number(key.split(",")[1]));
+    const minX = Math.min(...xs), minY = Math.min(...ys);
+    const maxX = Math.max(...xs), maxY = Math.max(...ys);
+    svg.setAttribute("viewBox", `${minX} ${minY} ${Math.max(1, maxX - minX + 1)} ${Math.max(1, maxY - minY + 1)}`);
+    svg.setAttribute("preserveAspectRatio", "none");
+    svg.style.left = `${minX}px`;
+    svg.style.top = `${minY}px`;
+    svg.style.width = `${Math.max(1, maxX - minX + 1)}px`;
+    svg.style.height = `${Math.max(1, maxY - minY + 1)}px`;
+    for (const key of areaDraw.cells) {
+      const [cx, cy] = key.split(",").map(Number);
+      const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      rect.setAttribute("x", String(cx));
+      rect.setAttribute("y", String(cy));
+      rect.setAttribute("width", "1");
+      rect.setAttribute("height", "1");
+      rect.setAttribute("class", "aw-areas__draft-cell");
+      svg.append(rect);
+    }
+    layer.append(svg);
+    if (areaDrawRefs.count) areaDrawRefs.count.textContent = `${areaDraw.cells.size} 格`;
+  }
+
+  function beginAreaDraw(locationId, locationName, mapId) {
+    areaDraw.active = true;
+    areaDraw.locationId = String(locationId);
+    areaDraw.locationName = String(locationName ?? "");
+    areaDraw.mapId = String(mapId ?? "world");
+    areaDraw.cells.clear();
+    if (areaDrawRefs.bar) {
+      areaDrawRefs.bar.style.display = "";
+      areaDrawRefs.bar.dataset.location = areaDraw.locationName;
+    }
+    renderAreaDraw();
+  }
+
+  /** 退出绘制模式：清掉未提交选区，恢复平移与点位点击（不产生任何数据）。 */
+  function endAreaDraw() {
+    areaDraw.active = false;
+    areaDraw.cells.clear();
+    areaDraw.locationId = null;
+    if (areaDrawRefs.bar) areaDrawRefs.bar.style.display = "none";
+    renderAreaDraw();
+  }
+
+  /** 保存：只有这一步会写数据，且只写 cells（不碰尺度/坐标/人物）。 */
+  async function saveAreaDraw() {
+    if (!areaDraw.active || !areaDraw.locationId) return;
+    const chatId = String(state().chatId ?? "");
+    if (!chatId) { setStatus("当前没有活动聊天。", "error"); return; }
+    const cells = [...areaDraw.cells].map((key) => {
+      const [x, y] = key.split(",").map(Number);
+      return { x, y };
+    });
+    if (cells.length === 0) { setStatus("没有选中任何格。", "error"); return; }
+    areaDrawRefs.bar?.querySelectorAll?.("button").forEach((b) => { b.disabled = true; });
+    try {
+      const response = await api.request("POST", "/maps/areas/upsert", {
+        chatId, mapId: areaDraw.mapId, locationId: areaDraw.locationId, cells,
+      });
+      if (response.status !== 200 || !response.body?.ok) {
+        // 失败要写字面原因与字段路径，绝不假装保存成功
+        const detail = response.body?.error?.details?.schemaPath
+          ? `（${String(response.body.error.details.schemaPath)}）` : "";
+        setStatus(`${response.body?.error?.message ?? "范围保存失败"}${detail}`, "error");
+        return;
+      }
+      setStatus(`已保存 ${cells.length} 格范围。`, "ok");
+      endAreaDraw();
+      await core.refresh();
+    } finally {
+      areaDrawRefs.bar?.querySelectorAll?.("button").forEach((b) => { b.disabled = false; });
+    }
+  }
+
   const mapCameras = new Map();
   let regionFilter = "";
   let dragOffsetX = 0;
@@ -1387,6 +2114,221 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     topbarRight.append(topbarClose);
   }
 
+  /**
+   * D07：左栏「幕后动向」——直接读 `/state` 的结构化 `simulationView`。
+   *
+   * F1/F3 的根因就是这里过去只显示 `receipt.summary` 的截断版：有「应用 5 行」的数字，
+   * 却看不到「谁想做什么、实际做了什么、为什么尚未移动」。现在按状态分成
+   * 想法 / 在路上 / 已抵达 / 消息已送达 / 暂不能行动，并显示来源地 → 目标与阻塞原因。
+   *
+   * 老聊天（0.9.58 以前的 /state 不带 simulationView）整段跳过，退回下面的旧回执列表——
+   * 旧行为一字不变。返回 true 表示确实渲染了内容（调用方据此决定是否显示空态）。
+   */
+  function renderSimulationMoves(s) {
+    const simulation = s.simulationView;
+    if (!simulation) return false;
+    const counts = simulation.counts;
+    const hasContent = simulation.recentEvents.length > 0 || counts.tasks > 0 || counts.signals > 0;
+    if (!hasContent) return false;
+
+    const LABELS = {
+      "intent-recorded": "想法", "started": "出发", "progressed": "在路上",
+      "arrived": "已抵达", "resolved": "已完成", "blocked": "暂不能行动",
+      "published": "新消息", "delivered": "已送达",
+    };
+    movesList.append(el("div", "aw-move__meta", "幕后动向（按已知范围显示）"));
+    // 最新在前，最多 8 条（服务端已经各自有界）
+    /**
+     * D07（0.9.59）：动向卡显示**姓名**而不是原始 ID，并且可点击跳到变化页
+     * 看这条消息的完整送达路线（计划原文：「点卡到变化页看消息路线」）。
+     */
+    const nameById = new Map();
+    const stateData = s.stateData ?? {};
+    for (const npc of Array.isArray(stateData.npcDirectory) ? stateData.npcDirectory : []) {
+      if (npc?.id) nameById.set(String(npc.id), String(npc.name ?? ""));
+    }
+    for (const entry of stateData.tableMap?.locationOccupants?.entries ?? []) {
+      const label = String(entry?.locationName ?? "");
+      if (!label) continue;
+      if (entry?.locationId) nameById.set(String(entry.locationId), label);
+      if (entry?.locationPointId) {
+        nameById.set(String(entry.locationPointId), label);
+        nameById.set(`loc:${String(entry.locationPointId)}`, label);
+      }
+    }
+    const displayName = (id) => {
+      const raw = String(id ?? "");
+      if (!raw) return "";
+      return nameById.get(raw) ?? raw;
+    };
+    for (const event of [...simulation.recentEvents].reverse().slice(0, 8)) {
+      const card = el("div", "aw-move");
+      if (event.status === "blocked") card.classList.add("is-failed");
+      const label = LABELS[event.status] ?? "动向";
+      card.append(el("div", "aw-move__title", `${label}：${String(event.summary ?? "").slice(0, 40)}`));
+      const name = displayName(event.actorCharacterId);
+      const where = [event.fromLocationId, event.toLocationId].filter(Boolean).map(displayName).join(" → ");
+      card.append(el("div", "aw-move__meta", [
+        `第 ${String(event.period)} 时段`,
+        name ? `人物：${name}` : "",
+        where,
+        event.reasonCode ? `原因：${String(event.reasonCode)}` : "",
+      ].filter(Boolean).join(" · ")));
+      // 点卡看路线：动向右栏与变化页同源，跳过去能看到完整送达对象与信度
+      card.setAttribute("role", "button");
+      card.tabIndex = 0;
+      card.setAttribute("aria-label", `查看这条动向的完整路线：${String(event.summary ?? "").slice(0, 30)}`);
+      const goToChanges = () => { core.setPage("changes"); renderPage(); };
+      card.addEventListener("click", goToChanges);
+      card.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); goToChanges(); }
+      });
+      movesList.append(card);
+    }
+    if (simulation.recentEvents.length === 0) {
+      // 第 0 段有任务但没有旅行：明确写「等待时间推进」，而不是只说「应用 N 行」
+      movesList.append(el("div", "aw-move__empty",
+        "已记录行动意图；时间未推进，人物不会移动、消息也不会传到远方。"));
+    }
+    movesList.append(el("div", "aw-move__meta",
+      `进行中 ${counts.activeTasks} · 受阻 ${counts.blockedTasks} · 消息 ${counts.signals} 条 · 送达 ${counts.deliveries} 处`));
+    if (simulation.truncated.events > 0) {
+      movesList.append(el("div", "aw-move__meta", `另有 ${simulation.truncated.events} 条更早的动向未显示`));
+    }
+    if (simulation.corrupt) {
+      movesList.append(el("div", "aw-move__meta",
+        "推演模块校验未通过：已保留原始数据，未做任何覆盖；请到变化页导出核对。"));
+    }
+    return true;
+  }
+
+  /**
+   * D08：变化页的「幕后推演」四分类。
+   *
+   * 与左栏「幕后动向」**同源**（都读 `/state` 的 `simulationView`），所以同一条信号
+   * 在左栏 / 变化页 / 人物知识状态上的含义一致——不会左栏说「未获知」而这里说「已送达」。
+   *
+   * 可见范围由作者开关控制：默认「仅已知」，显式切「全部」才会带上 hidden 与未送达内容，
+   * 并明确标注它包含角色秘密（它只是作者视图，不改变任何人的知识）。
+   */
+  function buildSimulationTimeline(s) {
+    const box = el("section", "aw-card");
+    const head = el("div", "aw-timeline__head");
+    head.append(el("h2", "aw-card__title", "幕后推演"));
+    head.append(el("span", "aw-tag", s.simulationVisibility === "all" ? "全部（含未被主角得知）" : "仅已知"));
+    box.append(head);
+
+    const toggle = el("button", "aw-btn aw-btn--ghost",
+      s.simulationVisibility === "all" ? "只看已知" : "查看全部幕后推演");
+    toggle.type = "button";
+    toggle.setAttribute("aria-label", "切换幕后推演可见范围");
+    toggle.addEventListener("click", () => {
+      void core.setSimulationVisibility(s.simulationVisibility === "all" ? "known" : "all");
+    });
+    box.append(toggle);
+    box.append(el("p", "aw-card__meta",
+      "「仅已知」只显示主角可知的；「全部」会包含角色秘密与尚未送达的消息——它只是作者视图，不改动任何数据，也不改变谁真的知道什么。"));
+
+    const simulation = s.simulationView;
+    if (!simulation) {
+      box.append(el("p", "aw-card__text", "这个聊天还没有推演数据（旧会话不显示该区块）。"));
+      return box;
+    }
+
+    const events = [...simulation.recentEvents].reverse();
+    const entityRows = (s.receipts ?? []).slice(0, 4);
+    const background = events.filter((event) => ["intent", "travel", "reaction"].includes(String(event.kind)));
+    const messages = events.filter((event) => event.kind === "signal" || event.kind === "delivery");
+    // 送达信度：按 simulationId 关联 deliveries（delivery 事件的 simulationId 就是送达 id）
+    const confidenceById = new Map(
+      (Array.isArray(simulation.deliveries) ? simulation.deliveries : []).map((row) => [String(row.id), String(row.confidence ?? "")]),
+    );
+
+    const eventRow = (event, extra) => {
+      const item = el("article", `aw-timeline__item${event.status === "blocked" ? " is-failed" : ""}`);
+      item.append(el("span", "aw-timeline__time", `第 ${String(event.period)} 时段`));
+      const body = el("div", "aw-timeline__body");
+      body.append(el("p", "aw-card__text", String(event.summary ?? "")));
+      body.append(el("p", "aw-card__meta", [
+        event.actorCharacterId ? `人物：${String(event.actorCharacterId)}` : "",
+        event.fromLocationId ? `来源：${String(event.fromLocationId)}` : "",
+        event.toLocationId ? `目标：${String(event.toLocationId)}` : "",
+        event.reasonCode ? `原因：${String(event.reasonCode)}` : "",
+        extra ?? "",
+      ].filter(Boolean).join(" · ")));
+      /**
+       * D08（0.9.59）：**点击定位**——把这条动向涉及的地点带到地图页去看。
+       * 计划原文要求「点击定位人物/地点」；这里给出可达的最短路径：
+       * 切到地图页，作者即可在地图上按同一份 geoTopology / 三表口径查看该地点。
+       */
+      const locateId = String(event.toLocationId ?? event.fromLocationId ?? "");
+      if (locateId) {
+        const locateBtn = el("button", "aw-btn aw-btn--ghost aw-timeline__locate", `在地图上查看 ${locateId}`);
+        locateBtn.type = "button";
+        locateBtn.setAttribute("aria-label", `在地图上查看地点 ${locateId}`);
+        locateBtn.addEventListener("click", () => { core.setPage("map"); renderPage(); });
+        body.append(locateBtn);
+      }
+      item.append(body);
+      return item;
+    };
+
+    const section = (title, count, build) => {
+      box.append(el("h3", "aw-card__title", `${title}（${count}）`));
+      if (count === 0) { box.append(el("p", "aw-card__meta", "无")); return; }
+      build();
+    };
+
+    // ① 实体改动（三表行增量的人类摘要；具体行号在失败时由下面「失败行」给）
+    section("实体改动", entityRows.length, () => {
+      const list = el("div", "aw-timeline");
+      for (const receipt of entityRows) {
+        const item = el("article", `aw-timeline__item is-${String(receipt.status ?? "")}`);
+        item.append(el("span", "aw-timeline__time", `第 ${String(receipt.currentTime)} 时段`));
+        const body = el("div", "aw-timeline__body");
+        body.append(el("p", "aw-card__text", String(receipt.summary ?? "")));
+        list.append(item);
+      }
+      box.append(list);
+    });
+
+    // ② 后台行动
+    section("后台行动", background.length, () => {
+      const list = el("div", "aw-timeline");
+      for (const event of background) list.append(eventRow(event));
+      box.append(list);
+    });
+
+    // ③ 消息传播（带公开 / 传递 / 传言 / 争议信度）
+    section("消息传播", messages.length, () => {
+      const list = el("div", "aw-timeline");
+      for (const event of messages) {
+        const confidence = confidenceById.get(String(event.simulationId)) ?? "";
+        const label = confidence === "confirmed" ? "已核实"
+          : confidence === "rumor" ? "传言"
+            : confidence === "disputed" ? "有争议" : "已公开";
+        list.append(eventRow(event, `信度：${label}`));
+      }
+      box.append(list);
+    });
+
+    // ④ 失败行：行号与字段路径在失败回执的正文里（引擎按「第 N 行 CODE @ path」如实回报）
+    const failed = (s.receipts ?? []).filter((receipt) => receipt.status === "failed");
+    section("失败行", failed.length, () => {
+      for (const receipt of failed) box.append(el("p", "aw-card__text", String(receipt.summary ?? "推演失败")));
+      if (s.lastError) box.append(el("p", "aw-note aw-note--error", String(s.lastError)));
+    });
+    if (failed.length === 0 && s.lastError) box.append(el("p", "aw-note aw-note--error", String(s.lastError)));
+
+    if (simulation.truncated && Number(simulation.truncated.events) > 0) {
+      box.append(el("p", "aw-card__meta", `另有 ${Number(simulation.truncated.events)} 条更早的动向未显示（服务端有界截断，不是没有）。`));
+    }
+    if (simulation.corrupt) {
+      box.append(el("p", "aw-note aw-note--error", "推演模块校验未通过：已保留原始数据，未做任何覆盖；请先导出核对。"));
+    }
+    return box;
+  }
+
   function renderMoves() {
     movesList.innerHTML = "";
     const s = state();
@@ -1397,7 +2339,9 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       live.append(el("div", "aw-move__meta", "回复完成后写入世界书"));
       movesList.append(live);
     }
-    if (receipts.length === 0 && !s.pendingTurn) {
+    // D07：幕后动向优先于旧回执摘要（老聊天没有 simulationView 时自动跳过）
+    const renderedSimulation = renderSimulationMoves(s);
+    if (receipts.length === 0 && !s.pendingTurn && !renderedSimulation) {
       movesList.append(el("div", "aw-move__empty", "绑定世界并对话后，每轮的 NPC 动向与可触发事件会出现在这里。"));
       return;
     }
@@ -1861,7 +2805,17 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         relevant.push(view);
       }
       if (relevant.length === 0) {
-        center.append(emptyBox("附近暂无已确认人物。"));
+        // A03 / F8 + §2.4：空关联**不等于**"没人"，更不等于串档。三种情形分开口径：
+        // 当前位置未知（还没算过附近）/ 当前地点确实有人（引擎没给相关性）/ 真的没确认的人。
+        // 诊断夹具（tests/atlas-extension-harness.test.mjs 的 A03）按同一纯函数断言这三档。
+        const triage = atlasDiagnoseEmptyNearby({
+          currentLocationId: d.currentLocationId ?? null,
+          // F05：优先用服务端的具名原因（权威），启发式只在旧 /state 上兜底
+          nearReasonCode: d.tableMap?.nearReasonCode ?? null,
+          tableNearbyEntries: d.tableMap?.nearby?.entries ?? null,
+          relevantNpcIds: d.relevantNpcIds ?? [],
+        });
+        center.append(emptyBox(triage.message));
       } else {
         const grid = el("div", "aw-cards");
         for (const npc of relevant) {
@@ -1959,6 +2913,8 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         timeline.append(item);
       }
       center.append(timeline);
+      // D08：按回合分组之外的「幕后推演」四分类（实体改动 / 后台行动 / 消息传播 / 失败行）
+      center.append(buildSimulationTimeline(s));
       // ATLAS-09 世界书注入层：条目面板（快照来自扩展端写入后的 store 文档）
       if (s.lorebookHint) center.append(el("div", "aw-note aw-note--error", s.lorebookHint));
       if (s.worldNotice) center.append(el("div", "aw-note", s.worldNotice));
@@ -2016,7 +2972,32 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
   // 三层同步缩放平移，格线与标点永远对齐。
   const stage = el("div", "aw-stage");
   const imageLayer = el("div", "aw-image");
+  /**
+   * H16（§2.5 图层序）：底图 → **有证据的区域格染色** → 网格 → 路线 → 地点/载具 → 徽标 → 控件。
+   * 所以面积层夹在底图与网格之间；没有 areas 时它一个格都不染。
+   */
+  const areaLayer = el("div", "aw-areas");
   const gridLayer = el("div", "aw-grid");
+  /**
+   * H13（§2.6 / F12）：网格改为**视口对齐的 SVG overlay**。
+   *
+   * 旧实现把 CSS `repeating-linear-gradient` 画在会被 `scale(k)` 拉伸的 stage 上：
+   * 41% 时看似密格，放大后渐变被拉成少量粗大模糊断线（F12 的现场症状）。
+   * 现在 SVG 用与相机**同一套** world→screen 变换算出格线，再对自己施加反变换
+   * （translate + scale(1/k)），使它的局部坐标 1:1 等于屏幕 CSS 像素——
+   * 线宽恒为 1 CSS px、主格线精确落在整数格坐标上，与图钉始终对齐。
+   * 它仍然放在 aw-grid 里，所以既有图层显隐（叠加/纯网格/纯底图）语义不变。
+   */
+  const SVG_NS = "http://www.w3.org/2000/svg";
+  const gridSvg = document.createElementNS(SVG_NS, "svg");
+  gridSvg.setAttribute("class", "aw-grid-svg");
+  gridSvg.setAttribute("aria-hidden", "true");
+  const gridMinorPath = document.createElementNS(SVG_NS, "path");
+  gridMinorPath.setAttribute("class", "aw-grid-svg__minor");
+  const gridMajorPath = document.createElementNS(SVG_NS, "path");
+  gridMajorPath.setAttribute("class", "aw-grid-svg__major");
+  gridSvg.append(gridMinorPath, gridMajorPath);
+  gridLayer.append(gridSvg);
   const mapLayer = el("div", "aw-layer");
   const mapHint = el("div", "aw-maparea__hint");
   const zoomBox = el("div", "aw-zoom");
@@ -2029,7 +3010,11 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
   let mapViewMode = "overlay";
   let mapBuilt = false;
   let mapScaleEl = null;
-  let gridStrideEl = null;
+  let gridToggleEl = null;
+  /** H16：在途 / 位置未确认的载具说明行（不画点，但必须让作者看得见）。 */
+  let vehicleNoteEl = null;
+  /** H16：着色图层是否可见（纯显示开关，绝不改数据）。 */
+  let areaLayerVisible = true;
   // 0.9.50 标尺条：条 / 标签 / 详情元素与展开态（重建 renderMap 时保持展开）
   let scaleBarEl = null;
   let scaleLabelEl = null;
@@ -2093,47 +3078,92 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     applyCamera();
   };
 
-  /** 缩小时合并世界格，主网格线与真实整数坐标保持对齐。 */
+  /**
+   * H13（§2.6 / F12）：重绘**视口对齐**的 SVG 网格。
+   *
+   * 变换同源：`screen = world * k + t`，与 stage 的 translate+scale、与 `worldToScreen`
+   * 完全一致；格线只由 H12 纯函数算出（次线 / 主线分开，次线在屏幕间距 <8px 时隐藏），
+   * 所以放大后不会出现「几道粗大模糊线」。
+   */
   function updateGridVisual() {
-    if (!gridLayer || !camera) return;
-    const cell = camera.k;
-    if (!Number.isFinite(cell) || cell <= 0) return;
-    let stride = 1;
-    while (cell * stride < 8 && stride < 625) stride *= 5;
+    if (!gridLayer || !camera || !gridSvg) return;
+    const k = camera.k;
+    if (!Number.isFinite(k) || k <= 0) return;
+    const viewW = cameraViewport.w;
+    const viewH = cameraViewport.h;
+    if (!(viewW > 0) || !(viewH > 0) || !cameraFrame || !gridBoxOrigin) return;
     gridLayer.style.display = "";
-    const line = "var(--am-grid-minor, var(--aw-teal-wash))";
-    const lineW = 1 / cell;
-    const gap = Math.max(0, stride - lineW);
-    gridLayer.style.backgroundImage =
-      "repeating-linear-gradient(0deg, transparent, transparent " + gap + "px, " + line + " " + gap + "px, " + line + " " + stride + "px), " +
-      "repeating-linear-gradient(90deg, transparent, transparent " + gap + "px, " + line + " " + gap + "px, " + line + " " + stride + "px)";
-    gridLayer.style.backgroundSize = "100% 100%";
-    gridLayer.style.backgroundRepeat = "repeat";
-    const mod = (value) => ((value % stride) + stride) % stride;
-    gridLayer.style.backgroundPosition = -mod(gridBoxOrigin.x) + "px " + -mod(gridBoxOrigin.y) + "px";
+    const stageTransform = typeof cameraStageTransform === "function"
+      ? cameraStageTransform(camera, viewW, viewH)
+      : { tx: viewW / 2 - camera.cx * k, ty: viewH / 2 - camera.cy * k, k };
+    // 反变换：把 SVG 从 stage 的 scale(k) 里解出来，使它的局部坐标 1:1 等于屏幕 CSS 像素
+    gridSvg.style.width = `${viewW}px`;
+    gridSvg.style.height = `${viewH}px`;
+    gridSvg.style.transform =
+      `translate(${-gridBoxOrigin.x - stageTransform.tx / k}px, ${-gridBoxOrigin.y - stageTransform.ty / k}px) scale(${1 / k})`;
+
+    const paths = typeof getVisibleGridPaths === "function"
+      ? getVisibleGridPaths({
+          viewport: { width: viewW, height: viewH },
+          // 格线纯函数按「帧内整数格 0..cols」编号，所以把帧原点折算进平移量
+          camera: {
+            k: stageTransform.k,
+            tx: stageTransform.tx + cameraFrame.minX * k,
+            ty: stageTransform.ty + cameraFrame.minY * k,
+          },
+          frame: { cols: cameraFrame.spanX, rows: cameraFrame.spanY },
+          devicePixelRatio: (typeof window !== "undefined" && window.devicePixelRatio) || 1,
+        })
+      : null;
+    gridMinorPath.setAttribute("d", paths && typeof paths.minorPath === "string" ? paths.minorPath : "");
+    gridMajorPath.setAttribute("d", paths && typeof paths.majorPath === "string" ? paths.majorPath : "");
+    const stride = paths && Number.isFinite(paths.majorStep) && paths.majorStep > 0 ? paths.majorStep : 1;
     gridLayer.dataset.gridStride = String(stride);
-    if (gridStrideEl) gridStrideEl.textContent = stride === 1 ? "网格：1 格/线" : "主网格：" + stride + " 格/线";
+    gridLayer.dataset.gridMinorHidden = paths && paths.minorHidden === true ? "1" : "0";
+    /**
+     * H19b（§2.6）：网格步长不再占用左下角常驻控件——它属于网格切换按钮的
+     * tooltip / 可访问名称（「网格：1 格/线」/「主网格：5 格/线」）。
+     * 左下角只留比例尺这一条常驻控件。
+     */
+    if (gridToggleEl) {
+      const strideText = stride === 1 ? "网格：1 格/线" : "主网格：" + stride + " 格/线";
+      gridToggleEl.title = strideText;
+      gridToggleEl.setAttribute("aria-label", `网格显示切换（${strideText}）`);
+    }
   }
 
   /** 0.9.50 标尺条视觉更新：标定图按候选距离画真实条长；未标定/旧式单位画桩线 + 文字。 */
   function updateScaleBarVisual() {
     if (!scaleBarEl || !scaleLabelEl || !scaleCtx) return;
-    const { calibration, legacyScale } = scaleCtx;
-    if (!calibration) {
+    const { calibration } = scaleCtx;
+    /**
+     * H19a（§2.6）：固定长度动态标尺。
+     *
+     * - 线条长度只由视口宽度决定（96 CSS px，窄屏降到 64），**不随地图 stage 的 CSS
+     *   transform 一起放大**，所以 camera.k 放大 2 倍，读数必然减半；
+     * - `metersPerCell` 必须是正有限值才给米数；未标定就只报格数并写「未标定」，
+     *   绝不静默填 1 米/格，也绝不把旧式未换算单位冒充成米（T25 / T29）；
+     * - 只改 UI 读数，不写 metersPerCell，不碰任何已保存的格坐标。
+     */
+    const bar = typeof computeViewportScaleBar === "function"
+      ? computeViewportScaleBar({
+          cameraK: camera?.k ?? 0,
+          metersPerCell: calibration ? calibration.metersPerCell : null,
+          viewportWidth: viewport?.clientWidth ?? null,
+        })
+      : null;
+    if (!bar) {
+      // k ≤ 0 / 相机未就绪：不显示假刻度
       scaleBarEl.classList.add("is-stub");
       scaleBarEl.style.width = "";
-      scaleLabelEl.textContent = legacyScale
-        ? `1 格 ≈ ${legacyScale.distancePerCell}${legacyScale.unit ? ` ${legacyScale.unit}` : ""}`
-        : "未标定（按格程计算）";
+      scaleLabelEl.textContent = "";
       return;
     }
-    // R08：每格屏幕像素 = 相机比例 k（zoom 已并入 k，比例尺恒按 zoom:1 计算）
-    // C5：权威实现缺失时静默跳过比例尺（不抛错、不显示假刻度）
-    const bar = scaleApiMissing ? null : computeScaleBar({ metersPerCell: calibration.metersPerCell, cellPx: camera?.k ?? 0, zoom: 1 });
-    if (!bar) return;
-    scaleBarEl.classList.remove("is-stub");
+    scaleBarEl.classList.toggle("is-stub", bar.unitMode === "cells");
     scaleBarEl.style.width = `${Math.round(bar.barWidthPx * 10) / 10}px`;
-    scaleLabelEl.textContent = formatDistanceMeters(bar.distanceMeters);
+    scaleLabelEl.textContent = bar.label;
+    // 可访问文案说清「屏幕 N 像素约等于 X」，不误说成「X 米/格」
+    scaleLabelEl.setAttribute("aria-label", bar.ariaLabel);
   }
 
   /** 0.9.50 标定请求（AI 模式 / 人工模式共用一条路由；成功后 refresh 走 renderMap 重建详情）。 */
@@ -2248,7 +3278,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
   function buildMap() {
     if (mapBuilt) return mapCanvas;
     mapBuilt = true;
-    stage.append(imageLayer, gridLayer, mapLayer);
+    stage.append(imageLayer, areaLayer, gridLayer, mapLayer);
     viewport.append(stage);
     // 0.9.49（M03）：视口尺寸变化 → 等比布局重算（cellPx / 留白 / 格网同步刷新）
     if (typeof ResizeObserver === "function") {
@@ -2293,8 +3323,10 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       mapScaleEl.classList.toggle("is-detail-open", scaleDetailOpen);
     });
     mapScaleEl.append(scaleToggle, scaleDetailEl);
-    gridStrideEl = el("span", "aw-grid-stride", "网格：1 格/线");
-    viewport.append(compass, mapScaleEl, gridStrideEl);
+    // H19b（§2.6）：左下角**只有**比例尺这一条常驻控件。
+    // 旧的 `aw-grid-stride`（「网格：1 格/线」/「未标定」叠加框）已删除——
+    // 网格步长改挂到右上角网格按钮的 tooltip / 可访问名称。
+    viewport.append(compass, mapScaleEl);
     // R08：＋/－ 以视口中心为锚缩放；⌂ = fitAll 全图适配（重置是单独操作，
     // 回到 100% 不再连带清空平移——旧 setZoom(1) 清 pan 的行为删除）；
     // ⌖ = 定位当前位置（保持比例，视口中心对准玩家）。
@@ -2345,9 +3377,48 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         viewSwitch.querySelectorAll(".aw-mapview__btn").forEach((n) => n.setAttribute("aria-pressed", String(n.dataset.mode === mode)));
         if (lastMapData) renderMap(data());
       });
+      // H19b：网格步长信息挂在网格按钮上（tooltip / 可访问名称），不再占左下角
+      if (mode === "grid") gridToggleEl = viewBtn;
       viewSwitch.append(viewBtn);
     }
     mapTools.append(viewSwitch, zoomBox);
+    /**
+     * H20（0.9.59）：图例搬进右上**可折叠**工具条。
+     *
+     * 常驻图例一直占着地图左下角，在小屏上压住标点、还挡拖拽；改成默认收起的「图例」
+     * 按钮（aria-expanded 如实反映状态），需要时再展开。网格步长已经挂在网格按钮的
+     * tooltip / 可访问名称上（H19b），所以这里只管图例，不再单列一行。
+     */
+    const legendToggle = el("button", "aw-btn aw-btn--ghost aw-maptools__toggle", "图例");
+    legendToggle.type = "button";
+    legendToggle.setAttribute("aria-expanded", "false");
+    legendToggle.setAttribute("aria-label", "展开或收起地图图例");
+    const legendPanel = el("div", "aw-maptools__more");
+    legendPanel.style.display = "none";
+    legendToggle.addEventListener("click", () => {
+      const open = legendToggle.getAttribute("aria-expanded") === "true";
+      legendToggle.setAttribute("aria-expanded", String(!open));
+      legendPanel.style.display = open ? "none" : "";
+    });
+    mapTools.append(legendToggle, legendPanel);
+    /**
+     * H16（0.9.59）：**已验证的着色图层**开关，放进右上角可收起区。
+     *
+     * 只管「有没有证据的格染不染色」这一件事：
+     * - 关掉只是不显示，**不动任何数据**（areas 仍在会话里，重开即回）；
+     * - 与视图切换（叠加/网格/底图）正交——那两个管底图与网格，这个管着色；
+     * - `aria-pressed` 如实反映状态，窄屏折叠后不占地图。
+     */
+    const areaToggle = el("button", "aw-btn aw-btn--ghost aw-maptools__toggle", "着色图层");
+    areaToggle.type = "button";
+    areaToggle.setAttribute("aria-pressed", "true");
+    areaToggle.setAttribute("aria-label", "显示或隐藏有证据的范围着色");
+    areaToggle.addEventListener("click", () => {
+      areaLayerVisible = !areaLayerVisible;
+      areaToggle.setAttribute("aria-pressed", String(areaLayerVisible));
+      areaLayer.style.display = areaLayerVisible ? "" : "none";
+    });
+    legendPanel.append(areaToggle);
     // 0.9.24 世界书提炼地理；0.9.26 地图抢救：geoBar 常显 + 新增「从近期剧情提炼新地点」
     // （复用同一条 adopt 管线：重名自动跳过，产出只增不改——地图跟着剧情长）
     const geoBar = el("div", "aw-geobar");
@@ -2457,6 +3528,19 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       if (!camera) return;
       if (e.pointerType === "mouse" && e.button !== 0) return;
       const interactive = Boolean(e.target?.closest?.(GESTURE_BLOCK_SELECTOR));
+      /**
+       * H15b：绘制模式**独占**网格点击——不启动平移，把这一下当成「选中/取消一个格」。
+       * 工具栏 / 弹层等交互元素仍然照常可点（interactive 优先）。
+       */
+      if (areaDraw.active && !interactive) {
+        const cell = areaDrawCellAt(e.clientX, e.clientY);
+        if (cell) {
+          const key = `${cell.x},${cell.y}`;
+          if (areaDraw.cells.has(key)) areaDraw.cells.delete(key); else areaDraw.cells.add(key);
+          renderAreaDraw();
+        }
+        return;
+      }
       activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (activePointers.size >= 2) {
         panGesture.cancel(); // 进入双指：终止单指平移
@@ -2534,7 +3618,41 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       legendItem("aw-maplegend__dot aw-maplegend__dot--npc", "人物：进内部地图后按房间显示"),
       legendItem("aw-maplegend__dot aw-maplegend__dot--obj", "物品"),
     );
-    viewport.append(legend);
+    legendPanel.append(legend);
+    /**
+     * H15b：绘制模式工具栏（默认隐藏）。出现时机只有一个——用户在地点详情里
+     * 显式点了「编辑范围」。它自己**不改任何数据**：保存才走 H15a，撤销只清未提交选区。
+     */
+    const areaDrawBar = el("div", "aw-areadraw");
+    areaDrawBar.style.display = "none";
+    areaDrawBar.setAttribute("role", "group");
+    areaDrawBar.setAttribute("aria-label", "范围绘制：保存、撤销或退出");
+    const areaDrawLabel = el("span", "aw-areadraw__label", "绘制范围");
+    const areaDrawCount = el("span", "aw-areadraw__count", "0 格");
+    const areaDrawSave = el("button", "aw-btn aw-btn--primary", "保存范围");
+    areaDrawSave.type = "button";
+    areaDrawSave.addEventListener("click", () => void saveAreaDraw());
+    const areaDrawUndo = el("button", "aw-btn aw-btn--ghost", "撤销选区");
+    areaDrawUndo.type = "button";
+    areaDrawUndo.setAttribute("aria-label", "清空本次未提交的选区");
+    areaDrawUndo.addEventListener("click", () => { areaDraw.cells.clear(); renderAreaDraw(); });
+    const areaDrawExit = el("button", "aw-btn aw-btn--ghost", "退出编辑");
+    areaDrawExit.type = "button";
+    areaDrawExit.setAttribute("aria-label", "退出范围绘制并恢复地图平移");
+    areaDrawExit.addEventListener("click", () => endAreaDraw());
+    areaDrawBar.append(areaDrawLabel, areaDrawCount, areaDrawSave, areaDrawUndo, areaDrawExit);
+    viewport.append(areaDrawBar);
+    areaDrawRefs.viewport = viewport;
+    areaDrawRefs.layer = areaLayer;
+    areaDrawRefs.bar = areaDrawBar;
+    areaDrawRefs.count = areaDrawCount;
+    /**
+     * H16：在途 / 锚点未知的载具**不画点**（没有确认坐标，画出来就是伪造），
+     * 但也不能就此消失——由这一行如实列出「它们还没停稳」。
+     */
+    vehicleNoteEl = el("div", "aw-note aw-mapvehicle-note");
+    vehicleNoteEl.style.display = "none";
+    viewport.append(vehicleNoteEl);
     mapCanvas.append(mapCrumb, mapTools, viewport, mapHint, geoBar, travelBar);
     return mapCanvas;
   }
@@ -2979,8 +4097,18 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         })
       : directoryObjects.filter((o) => String(o.pointId ?? "") === String(point.id));
     const here = el("div", "aw-mappanel__here");
-    const hereLabel = el("div", "aw-mappanel__here-label", `当前在这里（${hereNpcs.length + hereObjects.length}）`);
+    /**
+     * F05（§2.4）：地点弹窗是「你点开的那个地点**实际在场**的人」，不是「附近」。
+     * 即使玩家离得很远也能作为作者信息查看，所以标题据实区分，并明确说明这不是附近名单。
+     */
+    const atCurrentLocation = String(point.id) === String(d0?.currentLocationId ?? "");
+    const hereLabel = el("div", "aw-mappanel__here-label",
+      `${atCurrentLocation ? "当前在这里" : "该地点在场"}（${hereNpcs.length + hereObjects.length}）`);
     here.append(hereLabel);
+    if (!atCurrentLocation) {
+      here.append(el("div", "aw-mappanel__here-hint",
+        "你当前不在此地：这里列出的是该地点的实际在场者（作者信息），不是「附近」。"));
+    }
     if (hereNpcs.length > 0) {
       // S9（0.9.55）：纠偏入口搬进名单后必须说明怎么用——否则「拖拽」这个能力对用户不可见。
       here.append(el("div", "aw-mappanel__here-hint", "按住人物头像拖到地图上的地点标点，可纠偏其位置"));
@@ -3018,6 +4146,85 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     }
     mapPanel.append(here);
 
+    /**
+     * H16a（0.9.59）：作者确认控件——归属 / 邻接 / 载具 / 坐标。
+     *
+     * 纪律（计划 §3-H16a 原文）：
+     * - **只对作者开放**：入口收在「作者确认」折叠区里，默认收起，不干扰普通浏览；
+     * - 未确定的 parent / 邻接**列为待确认**，**绝不预选同名城市**——同名就自动认亲
+     *   是 H04 明令禁止的（「圣罗兰外城区」不能因为含城名就变成城市的子地点）；
+     * - 保存走 H07a `POST /maps/topology/confirm`，失败**显示字段路径**并带上当前
+     *   会话 / 分支标识，作者能对上号；
+     * - **标定锁不由此控件解开**（这里只写拓扑关系，不碰 metersPerCell / locked）。
+     */
+    {
+      const hereRowId = typeof point.rowId === "string" && point.rowId.length > 0
+        ? point.rowId
+        : `loc:${String(point.id)}`;
+      const confirmBox = el("details", "aw-confirm");
+      confirmBox.append(el("summary", "aw-confirm__summary", "作者确认（归属 / 邻接 / 载具 / 坐标）"));
+      confirmBox.append(el("p", "aw-confirm__ident",
+        `聊天 ${String(d0?.chatId ?? "(无)")} · 分支 ${String(panelTableMap?.branchKey ?? "canon")} · 地点行 ${hereRowId}`));
+      confirmBox.append(el("p", "aw-confirm__hint",
+        "关系只由证据或人工确认写入；未确认的留空，不会因为名字相近就自动认亲。"));
+
+      const candidateEntries = (Array.isArray(panelTableMap?.locationOccupants?.entries)
+        ? panelTableMap.locationOccupants.entries : [])
+        .filter((entry) => String(entry?.locationId ?? "") !== hereRowId);
+      const targetSelect = el("select", "aw-input aw-input--select");
+      targetSelect.setAttribute("aria-label", "选择要确认关联的地点");
+      const noneOption = el("option", "", "— 未确认（请显式选择目标地点）—");
+      noneOption.value = "";
+      noneOption.selected = true; // 不预选任何地点，包括同名城市
+      targetSelect.append(noneOption);
+      for (const entry of candidateEntries) {
+        const option = el("option", "", String(entry.locationName ?? entry.locationId ?? ""));
+        option.value = String(entry.locationId ?? "");
+        targetSelect.append(option);
+      }
+      confirmBox.append(targetSelect);
+
+      const confirmStatus = el("p", "aw-confirm__status");
+      const sendConfirm = async (operation, extra = {}) => {
+        const chatId = String(state().chatId ?? "");
+        if (!chatId) { confirmStatus.textContent = "当前没有活动聊天。"; confirmStatus.className = "aw-confirm__status is-error"; return; }
+        const targetLocationId = targetSelect.value ? String(targetSelect.value) : null;
+        const response = await api.request("POST", "/maps/topology/confirm", {
+          chatId,
+          operation,
+          locationId: hereRowId,
+          ...(operation === "set-parent" || operation === "set-adjacent" ? { targetLocationId } : {}),
+          ...extra,
+        });
+        if (response.status !== 200 || !response.body?.ok) {
+          const path = response.body?.error?.details?.schemaPath;
+          confirmStatus.textContent =
+            `${response.body?.error?.message ?? "确认失败"}${path ? `（字段：${String(path)}）` : ""}`;
+          confirmStatus.className = "aw-confirm__status is-error";
+          return;
+        }
+        confirmStatus.textContent = "已保存到当前分支。";
+        confirmStatus.className = "aw-confirm__status is-ok";
+        await core.refresh();
+      };
+
+      const confirmActions = el("div", "aw-confirm__actions");
+      const parentBtn = el("button", "aw-btn", "设为所选地点的子地点");
+      parentBtn.type = "button";
+      parentBtn.addEventListener("click", () => void sendConfirm("set-parent"));
+      const detachBtn = el("button", "aw-btn aw-btn--ghost", "解除包含");
+      detachBtn.type = "button";
+      detachBtn.setAttribute("aria-label", "解除与上级地点的包含关系");
+      detachBtn.addEventListener("click", () => void sendConfirm("set-parent", { targetLocationId: null }));
+      const adjacentBtn = el("button", "aw-btn aw-btn--ghost", "设为邻接（不改变归属）");
+      adjacentBtn.type = "button";
+      adjacentBtn.addEventListener("click", () => void sendConfirm("set-adjacent"));
+      confirmActions.append(parentBtn, detachBtn, adjacentBtn);
+      confirmBox.append(confirmActions);
+      confirmBox.append(confirmStatus);
+      mapPanel.append(confirmBox);
+    }
+
     if (!inSub && String(point.id) !== String(d.currentLocationId ?? "")) {
       const routeBtn = el("button", "aw-btn aw-btn--primary", "预览前往路线");
       routeBtn.type = "button";
@@ -3041,6 +4248,25 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     }
     if (inSub) {
       actions.append(el("span", "aw-hint", "内部点位暂不接入旅行推算。"));
+    }
+    /**
+     * H15b：进入「编辑范围」绘制模式。
+     *
+     * 入口只在这里——地图平时照常平移/点选，不进入绘制就绝不会捕获网格点击。
+     * locationId 用三表行 id（`loc:*`），不是地图点 id：H15a 按三表行写 areas。
+     */
+    if (!inSub) {
+      const rowId = typeof point.rowId === "string" && point.rowId.length > 0
+        ? point.rowId
+        : `loc:${String(point.id)}`;
+      const areaBtn = el("button", "aw-btn", "编辑范围");
+      areaBtn.type = "button";
+      areaBtn.setAttribute("aria-label", `在网格上绘制 ${String(point.name)} 的已证实范围`);
+      areaBtn.addEventListener("click", () => {
+        beginAreaDraw(rowId, String(point.name), "world");
+        closeMapPanel();
+      });
+      actions.append(areaBtn);
     }
     if (actions.childElementCount > 0) mapPanel.append(actions);
     mapPanel.style.display = "";
@@ -3177,18 +4403,26 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
   function renderMap(d) {
     if (!d.worldId) return;
     // 0.9.35 换聊天 / 换世界 → 子图视图栈立即作废（数据隔离，绝不让旧子图带进新卡）
-    const viewKey = `${String(d.chatId ?? "")}|${String(d.worldId ?? "")}`;
+    // B03（0.9.59）：作用域键补齐**分支**——同一聊天同一世界的正史 / IF 是两张图，
+    // 视图栈、相机与底图缓存都必须按 `chatId|worldId|branchKey` 分开，
+    // 否则切分支会沿用上一分支的子图层级与视角（计划 §3-B03）。
+    const mapIdentity = atlasMapIdentityOf(d, state().chatId);
+    const viewKey = atlasMapScopeKey(mapIdentity);
     if (mapStackKey !== viewKey) {
       // D05：切聊天清理不只作废子图栈——地点弹窗、建筑内名单、锚点与上一条 /state 也必须一起清，
       // 否则新聊天的地图渲染出来之前，旧聊天的弹窗与名单还挂在界面上（跨聊天串档最直观的一种）。
+      // B03 补：相机缓存（`mapCameras` 按 camKey = 作用域键 + 视图）与前一份 /state 派生数据
+      // （lastMapData）一并作废——新作用域从 fitCamera 重新起算，绝不沿用旧分支 / 旧聊天的视角。
       mapStack = [];
       mapStackKey = viewKey;
       lastMapData = null;
+      mapPanelAnchor = null;
       closeMapPanel();
       if (interiorRoster) {
         interiorRoster.innerHTML = "";
         interiorRoster.style.display = "none";
       }
+      mapCameras.clear();
     }
     lastMapData = d;
     mapLayer.innerHTML = "";
@@ -3397,16 +4631,116 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     viewport.style.backgroundImage = "none";
     stage.dataset.view = mapViewMode;
 
+    /**
+     * F03：地点标点上的「在场人数」徽标。
+     *
+     * 数据源是 `tableMap.locationOccupants` —— 服务端按**完整三表**分组的真实计数
+     * （不是先截 48 再分组），所以第 49 个人物也在数字里，不会「人从地图上消失」。
+     * 与地点同坐标的人物同样计入本人数：他们只是不额外画一枚图钉，
+     * 但**必须**仍然可被看见（F04 的「不准变成地图不可见」）。
+     * 老会话没有 locationOccupants 时整段跳过，行为不变。
+     */
+    const occupantByPointId = new Map();
+    const pointIdByLocationId = new Map();
+    for (const entry of tableMap?.locationOccupants?.entries ?? []) {
+      const pointId = entry.locationPointId === null || entry.locationPointId === undefined
+        ? null : String(entry.locationPointId);
+      if (pointId === null) continue;
+      occupantByPointId.set(pointId, entry);
+      if (typeof entry.locationId === "string") pointIdByLocationId.set(entry.locationId, pointId);
+    }
+
+    /**
+     * H16（§2.5）：载具**按真实停靠或路线**显示，绝不凭排版位置画点。
+     *
+     * - `stopped` 且锚点落在本图某个已知地点上 → 在该地点标点挂载具徽标（它真的停在那儿）；
+     * - `en-route` / `unknown` → **一个点都不画**（在途位置没有确认坐标，画出来就是伪造），
+     *   改由下面的「在途载具」说明行如实列出，作者知道它还没停稳。
+     * 数据源是 `/state` 的 `map.geoTopology.vehicleAnchors`（当前分支、服务端已限流）。
+     */
+    const vehicleByPointId = new Map();
+    const vehiclesWithoutPosition = [];
+    /**
+     * F06（§2.5）：相邻外城——由 geoTopology 里 `kind === "adjacent"` 的已证实边决定，
+     * **不靠坐标远近猜**（外城可以和城市挨着，但只有证据说相邻才算相邻）。
+     */
+    const adjacentPointIds = new Set();
+    for (const edge of tableMap?.geoTopology?.edges ?? d.map?.geoTopology?.edges ?? []) {
+      if (!edge || typeof edge !== "object" || edge.kind !== "adjacent") continue;
+      for (const endpoint of [edge.fromLocationId, edge.toLocationId]) {
+        const id = String(endpoint ?? "");
+        if (id.length === 0) continue;
+        adjacentPointIds.add(id.startsWith("loc:") ? id.slice(4) : id);
+        adjacentPointIds.add(id);
+      }
+    }
+    for (const anchor of tableMap?.geoTopology?.vehicleAnchors ?? d.map?.geoTopology?.vehicleAnchors ?? []) {
+      if (!anchor || typeof anchor !== "object") continue;
+      const anchorLocationId = String(anchor.atLocationId ?? "");
+      const stopped = anchor.status === "stopped";
+      if (!stopped || anchorLocationId.length === 0) {
+        vehiclesWithoutPosition.push(anchor);
+        continue;
+      }
+      // 停靠点 → 地图点：优先按三表地点 id 解析（loc:2 → 点 2），解析不到就退回裸点 id
+      const row = pointIdByLocationId.get(anchorLocationId)
+        ?? (anchorLocationId.startsWith("loc:") ? anchorLocationId.slice(4) : anchorLocationId);
+      const existing = vehicleByPointId.get(String(row)) ?? [];
+      existing.push(anchor);
+      vehicleByPointId.set(String(row), existing);
+    }
+    // 在途 / 锚点未知：只说事实，不给坐标
+    if (vehicleNoteEl) {
+      if (vehiclesWithoutPosition.length > 0) {
+        const enRoute = vehiclesWithoutPosition.filter((anchor) => anchor.status === "en-route").length;
+        const unknown = vehiclesWithoutPosition.length - enRoute;
+        vehicleNoteEl.textContent = [
+          enRoute > 0 ? `${enRoute} 辆载具在途（尚未停靠，地图上不标点）` : "",
+          unknown > 0 ? `${unknown} 辆载具锚点未确认` : "",
+        ].filter(Boolean).join(" · ");
+        vehicleNoteEl.style.display = "";
+      } else {
+        vehicleNoteEl.textContent = "";
+        vehicleNoteEl.style.display = "none";
+      }
+    }
+
     for (const point of points) {
       const marker = el("button", "aw-point");
       marker.type = "button";
       const hasSub = hasChildSubmap(submaps, point.id);
       marker.textContent = String(point.name);
       marker.title = String(point.name);
+      const occupants = occupantByPointId.get(String(point.id));
+      if (occupants && Number(occupants.characterCount) > 0) {
+        const badge = el("span", "aw-point__badge", String(occupants.characterCount));
+        badge.title = `${Number(occupants.characterCount)} 人在此`;
+        badge.setAttribute("aria-label", `${Number(occupants.characterCount)} 人在此`);
+        marker.append(badge);
+        marker.classList.add("has-occupants");
+      }
+      // H16：真的停靠在这里的载具——挂在**真实停靠点**上，而不是另算一个坐标
+      const parked = vehicleByPointId.get(String(point.id));
+      if (Array.isArray(parked) && parked.length > 0) {
+        const vehicleBadge = el("span", "aw-point__vehicle", "车");
+        vehicleBadge.title = `${parked.length} 辆载具停靠于此`;
+        vehicleBadge.setAttribute("aria-label", `${parked.length} 辆载具停靠于此`);
+        marker.append(vehicleBadge);
+        marker.classList.add("has-vehicle");
+      }
       // R08：标记直接按世界单位定位（screen = v + (world - c) * k 由相机统一给出）
       marker.style.left = `${Number(point.x)}px`;
       marker.style.top = `${Number(point.y)}px`;
       if (hasSub) marker.classList.add("aw-point--sub");
+      /**
+       * F06：四种视图角色必须一眼可分（城市入口 / 城市内部 / 相邻外城 / 普通地点）。
+       * 只加 class，不改坐标——样式绝不参与几何。
+       */
+      if (hasSub) marker.classList.add("aw-point--entrance");
+      if (inSub) marker.classList.add("aw-point--interior");
+      if (adjacentPointIds.has(String(point.id)) || adjacentPointIds.has(`loc:${String(point.id)}`)) {
+        marker.classList.add("aw-point--adjacent");
+      }
       // 0.9.35 点击 = 简略信息面板（路线 / 进入子图都在面板里），不再一键直接拉路线
       if (String(point.id) === String(d.currentLocationId ?? "")) {
         marker.classList.add("is-current");
@@ -3420,6 +4754,47 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         openMapPanel(point, { inSub, currentSub }, marker);
       });
       mapLayer.append(marker);
+    }
+
+    /**
+     * H08（0.9.59）：**缺坐标地点**的示意标点。
+     *
+     * 之前 `layoutUnplacedMarkers` 有实现、有单测，却**没有任何生产调用点**——
+     * 于是「未定位 / 旧来源不明」的地点在真实地图上完全不显示（F01 只在数据层
+     * 把它们挑进 `unplacedLocations`）。这里把它接上：
+     * - 位置由纯函数按 frame 环形排布算出，**只用于渲染**，绝不回写三表 / world；
+     * - 与真实坐标点视觉上明确可分（虚线 + 「待定位」角标），
+     *   作者不会把示意位置误当成已确认坐标；
+     * - 绝不落在 (0,0)：排布函数保证落在 frame 内的空位。
+     */
+    if (typeof layoutUnplacedMarkers === "function" && Array.isArray(tableMap?.unplacedLocations?.entries)) {
+      const unplacedEntries = tableMap.unplacedLocations.entries;
+      if (unplacedEntries.length > 0) {
+        const layout = layoutUnplacedMarkers({
+          branchKey: String(tableMap?.branchKey ?? "canon"),
+          mapId: inSub ? String(view.pointId) : "world",
+          frame: { cols: cameraFrame.spanX, rows: cameraFrame.spanY },
+          confirmed: points.map((point) => ({ id: String(point.id), x: Number(point.x), y: Number(point.y) })),
+          unplaced: unplacedEntries.map((entry) => ({
+            id: String(entry.id ?? entry.locationId ?? ""),
+            name: String(entry.name ?? ""),
+          })),
+          ...(Array.isArray(tableMap?.geoTopology?.vehicleAnchors) ? { vehicles: tableMap.geoTopology.vehicleAnchors } : {}),
+        });
+        for (const marker of layout?.displayOnly ?? []) {
+          const node = el("button", "aw-point aw-point--displayonly");
+          node.type = "button";
+          node.textContent = String(marker.name ?? marker.id ?? "");
+          node.title = `${String(marker.name ?? "")}（位置未确认，仅为示意）`;
+          node.setAttribute("aria-label", `地点 ${String(marker.name ?? "")}，位置未确认，仅为示意，点击查看详情`);
+          node.dataset.displayOnly = "true";
+          node.append(el("span", "aw-point__pending", "待定位"));
+          node.style.left = `${Number(marker.x)}px`;
+          node.style.top = `${Number(marker.y)}px`;
+          mapLayer.append(node);
+        }
+        mapLayer.dataset.pendingCount = String((layout?.pending ?? []).length);
+      }
     }
 
     // S9（0.9.55）人物标点已删除（见上方 npcsAll 处说明）——此处只剩物品标点。
@@ -3526,6 +4901,89 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       }
     }
 
+    // H16 / H15（§2.5）：把**已证实**的范围格染成填区。
+    // 数据源 = geoTopology.areas（只认 worldbook / story / manual 三种证据）；
+    // 没有 areas 时一个格都不染，只有中心点的退化为 displayOnly 弱光圈（boundary 恒为 null）。
+    // 图层顺序由 DOM 决定：底图 → 面积 → 网格 → 路线 → 地点/载具 → 徽标，与 §2.5 一致。
+    areaLayer.innerHTML = "";
+    if (typeof projectColorAreas === "function") {
+      const topology = tableMap?.geoTopology ?? d.map?.geoTopology ?? null;
+      const areaMapId = inSub ? String(view.pointId) : "world";
+      const projection = topology
+        ? projectColorAreas({
+            mapId: areaMapId,
+            frame: { cols: cameraFrame.spanX, rows: cameraFrame.spanY },
+            topology,
+            ...(tableMap?.branchKey ? { branchKey: String(tableMap.branchKey) } : {}),
+            layers: { area: true },
+          })
+        : null;
+      if (projection && projection.areas.length > 0) {
+        const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        svg.setAttribute("class", "aw-areas__svg");
+        // viewBox 直接用世界（格）坐标：路径的格子坐标本来就与世界坐标同尺度
+        svg.setAttribute("viewBox",
+          `${cameraFrame.minX} ${cameraFrame.minY} ${cameraFrame.spanX} ${cameraFrame.spanY}`);
+        svg.setAttribute("preserveAspectRatio", "none");
+        svg.style.left = `${cameraFrame.minX}px`;
+        svg.style.top = `${cameraFrame.minY}px`;
+        svg.style.width = `${cameraFrame.spanX}px`;
+        svg.style.height = `${cameraFrame.spanY}px`;
+        for (const area of projection.areas) {
+          const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+          path.setAttribute("d", String(area.path ?? ""));
+          path.setAttribute("class", `aw-areas__area is-${String(area.evidence ?? "manual")}`);
+          path.style.opacity = String(area.opacity ?? 0.18);
+          path.dataset.areaId = String(area.areaId ?? "");
+          path.dataset.evidence = String(area.evidence ?? "");
+          svg.append(path);
+        }
+        areaLayer.append(svg);
+        areaLayer.dataset.paintedCells = String(projection.counts?.paintedCells ?? 0);
+      } else {
+        areaLayer.dataset.paintedCells = "0";
+      }
+
+      /**
+       * H15（0.9.59）：`displayOnly` 弱光圈。
+       *
+       * 这些地点**没有已证实的格**，只有一个中心点，所以：
+       * - 画成圆形光圈，半径用 `radiusCells`（示意半径，不是测出来的边界）；
+       * - `boundary` 恒为 null，界面据此说明「范围未证实」，绝不假装成已勘定的区域；
+       * - `evidence` 为 null 时不编造来源，样式走默认「示意」。
+       * 与填区（areas）在同一个 SVG 里，但 class 分开，作者一眼能分辨「证实」与「示意」。
+       */
+      const halos = Array.isArray(projection?.halos) ? projection.halos : [];
+      if (halos.length > 0) {
+        const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        svg.setAttribute("class", "aw-areas__svg aw-areas__svg--halos");
+        svg.setAttribute("viewBox",
+          `${cameraFrame.minX} ${cameraFrame.minY} ${cameraFrame.spanX} ${cameraFrame.spanY}`);
+        svg.setAttribute("preserveAspectRatio", "none");
+        svg.style.left = `${cameraFrame.minX}px`;
+        svg.style.top = `${cameraFrame.minY}px`;
+        svg.style.width = `${cameraFrame.spanX}px`;
+        svg.style.height = `${cameraFrame.spanY}px`;
+        for (const halo of halos) {
+          const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+          circle.setAttribute("cx", String(Number(halo.x) || 0));
+          circle.setAttribute("cy", String(Number(halo.y) || 0));
+          circle.setAttribute("r", String(Math.max(0, Number(halo.radiusCells) || 0)));
+          circle.setAttribute("class",
+            `aw-areas__halo is-${String(halo.layer ?? "area")}${halo.evidence ? "" : " is-unconfirmed"}`);
+          circle.style.opacity = String(halo.opacity ?? 0.12);
+          circle.dataset.displayOnly = "true";
+          if (halo.areaId) circle.dataset.areaId = String(halo.areaId);
+          if (halo.locationId) circle.dataset.locationId = String(halo.locationId);
+          svg.append(circle);
+        }
+        areaLayer.append(svg);
+        areaLayer.dataset.halos = String(halos.length);
+      } else {
+        areaLayer.dataset.halos = "0";
+      }
+    }
+
     const preview = state().destinationPreview;
     // 0.9.35 子图视图跳过路线预览：子图点位非世界点位，画不出有意义路线
     if (preview && !inSub) {
@@ -3559,11 +5017,14 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     if (mapData.mapImagePresent) {
       // R01 缓存键含底图版本（world.updatedAt）：换图 / 删图 / 世界更新都会换键，
       // 旧缓存不会残留在新图上；拉取失败删键允许下次重试，不永久记住失败。
-      const worldId = String(d.worldId ?? "");
+      // B03：键再补上**作用域身份**（chatId|worldId|branchKey）——0.9.58 只有
+      // `worldId|revision`，同世界的两个聊天 / 正史与 IF 会互相复用同一张底图。
       const imageRevision = String(mapData.mapImageRevision ?? d.currentTime ?? 0);
-      const cacheKey = `${worldId}|${imageRevision}`;
+      const cacheKey = atlasMapImageCacheKey(mapIdentity, imageRevision);
       if (!mapImageCache.has(cacheKey)) {
         mapImageCache.set(cacheKey, null);
+        // B03：回调里要复核的是「加载发起时的身份」，故先冻结一份不可变快照。
+        const capturedIdentity = { ...mapIdentity };
         void api.request("POST", "/map/image", { chatId: String(state().chatId ?? "") }).then((result) => {
           const payload = result.body?.data?.dataUrl;
           if (result.status !== 200 || !result.body?.ok || typeof payload !== "string") {
@@ -3575,6 +5036,16 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
             return;
           }
           mapImageCache.set(cacheKey, payload);
+          // B03：**先复核身份再重绘**。晚到的旧底图（切聊天 / 切分支 / 换世界之后才回来）
+          // 只留在它自己那把缓存键下，绝不在新作用域触发一次重绘。
+          const current = atlasMapIdentityOf(data(), state().chatId);
+          if (!atlasSameMapIdentity(capturedIdentity, current) || atlasMapScopeKey(current) !== mapStackKey) {
+            emitAtlasDiagnostic({ level: "info", source: "map",
+              code: "STALE_MAP_IMAGE_DROPPED", operation: "map-image",
+              phase: "response", outcome: "skipped",
+              details: { reasonCode: "SESSION_IDENTITY_MISMATCH", route: "/map/image" } });
+            return;
+          }
           if (state().page === "map") renderMap(data());
         }).catch(() => {
           emitAtlasDiagnostic({ level: "warn", source: "map",
@@ -4271,47 +5742,28 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         sceneBtn.disabled = false;
       }
     });
-    // C07：协议三选项（v1 旧契约逃生门 / v2 完整封套 / table-delta-v1 三表行增量）。
-    // 显示当前值；切到行增量时，如果活动提示词预设是作者自定义的旧模板，必须**明确提示**
-    // 输出协议可能与选择不符（§2：不能默默切）。
-    const PROTOCOL_OPTIONS = [
-      { value: "table-delta-v1", label: "表格增量（三表行增量，缺省）" },
-      { value: "v2", label: "v2 完整封套" },
-      { value: "v1", label: "v1 旧契约（逃生门）" },
-    ];
-    const currentProtocol = ["v1", "v2", "table-delta-v1"].includes(String(settingsV2?.worldTurnProtocol))
-      ? String(settingsV2?.worldTurnProtocol) : "table-delta-v1";
-    const protocolSelect = el("select", "aw-input aw-input--select");
-    protocolSelect.setAttribute("aria-label", "推进输出协议");
-    for (const option of PROTOCOL_OPTIONS) {
-      const node = el("option", "", option.label);
-      node.value = option.value;
-      if (option.value === currentProtocol) node.selected = true;
-      protocolSelect.append(node);
+    /**
+     * E08（0.9.59）：协议控件收口——**删掉三选一**，改为固定的「表格增量」说明。
+     *
+     * E01 之后 `runtime.update` 只接受 `table-delta-v1`，再摆一个能选 v1/v2 的下拉
+     * 等于让作者点一个必然失败的按钮。这里改成只读说明；如果存档里原本是 v1/v2，
+     * 明确写出「历史设置已升级为表格增量」（设置读取视图的 `worldTurnProtocolLegacy`
+     * 给的就是这个信号），**不擅自改写**用户存档里的原值。
+     */
+    const legacyProtocolNotice = settingsV2?.legacyWorldTurnProtocol ?? null;
+    const protocolNote = el("div", "aw-note");
+    protocolNote.append(el("strong", "", "推进输出协议：表格增量（table-delta-v1）"));
+    protocolNote.append(document.createTextNode(
+      "模型回复只要求一块 <atlasEdit>，块内每行一个独立 JSON（地点 / 人物 / 物品 / 提案新消息）。"
+      + "旧的 v1 世界草稿与 v2 整份封套已停用；若模型仍按旧格式输出，本轮会被判为协议不符并拒绝提交。",
+    ));
+    if (legacyProtocolNotice && typeof legacyProtocolNotice === "object") {
+      // 原文一字不改，只如实告诉作者「存档里还是旧值、运行时已按增量解读」
+      protocolNote.append(el("p", "aw-note aw-note--warn",
+        String(legacyProtocolNotice.message
+          ?? `历史设置已升级为表格增量（存档里的原值是 ${String(legacyProtocolNotice.storedValue ?? "")}，未改动）。`)));
     }
-    protocolSelect.addEventListener("change", async () => {
-      const next = protocolSelect.value;
-      if (next === currentProtocol) return;
-      const activeSegments = Array.isArray(settingsV2?.promptPresets)
-        ? settingsV2.promptPresets.find((preset) => preset.id === settingsV2?.activePromptPresetId)
-        : null;
-      const customPrompt = Boolean(activeSegments && Array.isArray(activeSegments.segments) && activeSegments.segments.length > 0);
-      if (next === "table-delta-v1" && customPrompt) {
-        const confirmed = typeof window === "undefined" || typeof window.confirm !== "function"
-          ? true
-          : window.confirm("当前活动的提示词预设是你自己保存的模板，它可能不是「三表行增量」的输出格式。\n切换后如果模型仍按旧格式输出，本轮会被判为协议不符并拒绝提交。\n\n继续切换？（建议切到「表格增量」后把该预设重写为行增量格式，或改用内置默认）");
-        if (!confirmed) {
-          protocolSelect.value = currentProtocol;
-          return;
-        }
-      }
-      const ok = await sendSettingsCommand({ action: "runtime.update", worldTurnProtocol: next });
-      setStatus(ok
-        ? `推进协议已切换为 ${next}${next === "table-delta-v1" ? "（内置提示词与三表上下文已按新协议装配）" : ""}。`
-        : settingsStatus, ok ? "ok" : "error");
-      renderCenter();
-    });
-    sceneActions.append(sceneBtn, protocolSelect);
+    sceneActions.append(sceneBtn, protocolNote);
 
     const checkWorldBtn = el("button", "aw-btn aw-btn--ghost", "检查当前世界");
     checkWorldBtn.type = "button";
@@ -4416,7 +5868,8 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
           ? true : window.confirm("恢复备份会把当前聊天的 Atlas 世界、地图、场景与回合记录恢复到备份时刻。继续？");
         if (!confirmed) return;
         const restored = { ...parsed, rev: Math.max(Number(parsed.rev) || 0, Number(current.rev) || 0) + 1 };
-        await writeAtlasSession(context, restored);
+        // C07b：恢复也是异步写回——身份必须仍是刚才核对过的那个聊天
+        await writeAtlasSession(context, restored, chatId);
         await core.refresh();
         setStatus("Atlas 会话备份已恢复。", "ok");
         renderCenter();
@@ -6293,7 +7746,7 @@ async function loadStWorldInfo() {
 }
 
 /** 把酒馆 world-info 公开 API 适配成 AtlasLorebookPort（导出供测试与预览复用）。 */
-export function createLorebookPort(context, worldInfo) {
+export function createLorebookPort(context, worldInfo, readScopeBinding = null) {
   return {
     async loadBook(name) {
       try {
@@ -6308,6 +7761,61 @@ export function createLorebookPort(context, worldInfo) {
     },
     async saveBook(name, data) {
       await worldInfo.saveWorldInfo(name, data, true);
+    },
+    /**
+     * B05 适配点①：按**当前聊天**推导世界书作用域（chatId + worldId）。
+     *
+     * 这一段是模块文档里写明的适配语义，照抄不改口径：
+     * - `chatId` 取 `context().chatId`；为空 → null；
+     * - `worldId` 取**当前聊天绑定的世界**（`readScopeBinding` 迟读，避免与初始化顺序耦合）；
+     * - 两个都拿不到 → null，writer 回退 0.9.58 旧行为——**绝不拿半个身份硬凑作用域**，
+     *   因为凑错作用域比不隔离更糟（会把 A 聊天的动向写进 B 聊天专属书）。
+     *
+     * 接上之后：同一张角色卡的每个聊天各写各的专属世界书；共享主卡书只读只清。
+     */
+    /**
+     * B05 适配点①：按**当前聊天**推导世界书作用域（chatId + worldId）。
+     *
+     * 这一段是模块文档里写明的适配语义，照抄不改口径：
+     * - `chatId` 取 `context().chatId`；为空 → null；
+     * - `worldId` 取**当前聊天绑定的世界**（`readScopeBinding` 迟读，避免与初始化顺序耦合）；
+     * - 两个都拿不到 → null，writer 回退 0.9.58 旧行为——**绝不拿半个身份硬凑作用域**，
+     *   因为凑错作用域比不隔离更糟（会把 A 聊天的动向写进 B 聊天专属书）。
+     *
+     * 接上之后：同一张角色卡的每个聊天各写各的专属世界书；共享主卡书只读只清。
+     */
+    async resolveChatScope() {
+      try {
+        const ctx = context();
+        const chatId = typeof ctx?.chatId === "string" ? ctx.chatId.trim() : "";
+        if (!chatId) return null;
+        const binding = readScopeBinding ? await readScopeBinding() : null;
+        const worldId = String(binding?.worldId ?? "").trim();
+        if (!worldId) return null;
+        return { chatId, worldId };
+      } catch {
+        return null;
+      }
+    },
+    /**
+     * B05 适配点②（**首选通道**）：把动态会话内容注入**当前聊天**的一轮上下文。
+     *
+     * 为什么这是首选：`setExtensionPrompt` 是「这一轮的临时上下文」，只对当前聊天生效，
+     * 天然不跨聊天，也不占用世界书绑定槽。专属世界书是它的**回退**（注入不可用时）。
+     *
+     * 纪律：
+     * - 酒馆没提供 `setExtensionPrompt` → **必须 throw**（不能静默 return），
+     *   否则 writer 会以为注入成功而既不写专属书也不报错，动态内容等于凭空消失；
+     * - 档位与 `installGenerateInterceptor` 一致（IN_CHAT、深度 4），避免同一段内容
+     *   在两个注入点出现不同的可见性；
+     * - 清空传空串（酒馆语义即清除该 key 的注入）。
+     */
+    async injectTurn(key, value) {
+      const ctx = context();
+      if (typeof ctx?.setExtensionPrompt !== "function") {
+        throw new Error("setExtensionPrompt unavailable");
+      }
+      ctx.setExtensionPrompt(String(key), String(value ?? ""), 2, 4);
     },
     createEntry(data, patch) {
       const entry = worldInfo.createWorldInfoEntry("Atlas", data);
@@ -6762,61 +8270,16 @@ async function connectOnce() {
     const innerApi = mod.createLocalAtlasApi(engine);
     // 0.9.42 会话承载：会话路由请求自动带上 chatMetadata.atlas（世界文档），
     // 响应带回新会话（rev+1）自动写回聊天并触发存档——世界数据的往返只在此一处。
-    const SESSION_ROUTE_PREFIXES = [
-      "/state",
-      "/map/image",
-      "/map/travel-preview",
-      "/turns/",
-      "/bindings",
-      "/worlds/import",
-      "/worlds/ensure-starter",
-      "/worlds/geo/adopt",
-      "/worlds/move-author",
-      "/session/",
-    ];
-    const pathWantsSession = (path) =>
-      SESSION_ROUTE_PREFIXES.some((prefix) => path === prefix || path.startsWith(prefix));
-    const sessionApi = {
-      async request(method, path, body) {
-        // 0.9.48 竞态守卫（T01 轻量版）：请求发起时固定发起聊天身份，写回前比对。
-        // A 聊天推演等待回复期间切到 B —— A 的响应会话绝不能写进 B 的 chatMetadata。
-        // 0.9.28 的守卫只保护 UI 回执层，这里补上底层写回路径。
-        const requestChatId = context().chatId ?? null;
-        let payload = body;
-        if (method === "POST" && pathWantsSession(path)) {
-          const session = readAtlasSession(context);
-          if (session) payload = { ...(body ?? {}), session };
-        }
-        const result = await logApiCall(method, path, () => innerApi.request(method, path, payload));
-        try {
-          const responseSession = result?.body?.session;
-          if (responseSession && responseSession.schemaVersion === ATLAS_SESSION_SCHEMA_VERSION) {
-            const currentChatId = context().chatId ?? null;
-            const sessionChatId =
-              responseSession?.binding && typeof responseSession.binding.chatId === "string"
-                ? responseSession.binding.chatId
-                : null;
-            if (atlasSessionWriteGuard(requestChatId, currentChatId, sessionChatId)) {
-              await writeAtlasSession(context, responseSession);
-            } else {
-              // 发起聊天 ≠ 当前聊天（切卡 / 换聊天 / 会话归属不一致）：丢弃写回。
-              // 引擎侧已提交；回到原聊天时该会话由 chatMetadata 持久层自然恢复。
-              emitAtlasDiagnostic({ level: "info", source: "storage",
-                code: "STALE_CHAT_RESPONSE_DROPPED", operation: "session",
-                phase: "write", outcome: "skipped",
-                details: { coreCommitted: result?.body?.data?.receipt?.status === "committed" } });
-            }
-          }
-        } catch (error) {
-          // 写回失败（聊天正被切换等）：引擎侧已提交，本侧会话等下次响应覆盖；记日志排查
-          emitAtlasDiagnostic({ level: "error", source: "storage",
-            code: "SESSION_WRITE_FAILED", operation: "session",
-            phase: "write", outcome: "failed", retryable: true,
-            details: { coreCommitted: result?.body?.data?.receipt?.status === "committed" } });
-        }
-        return result;
-      },
-    };
+    // B02b（0.9.59 聊天隔离）：这段逻辑已抽成可测工厂 `createAtlasSessionApi`
+    // （纯函数守卫 atlasSessionWriteGuard + atlasStaleWriteNotice），
+    // harness 直接构造工厂验证「A 的迟到响应不写进 B」，接线一字不变。
+    const sessionApi = createAtlasSessionApi({
+      context,
+      innerApi,
+      emit: emitAtlasDiagnostic,
+      notify: showAtlasNotice,
+      logCall: logApiCall,
+    });
     const api = sessionApi;
     atlasRuntime.mod = mod;
     atlasRuntime.api = api;
@@ -6828,7 +8291,13 @@ async function connectOnce() {
     let lorebookWriter = null;
     try {
       const worldInfo = await loadStWorldInfo();
-      lorebookWriter = mod.createAtlasLorebookWriter(createLorebookPort(context, worldInfo));
+      // B05：把「当前聊天的绑定世界」交给世界书端口，让每个聊天写各自的专属世界书。
+      // 迟读（`hostRef` 在 createAtlasUiCore 之后才赋值）：这个闭包只在真正写入时才被调用。
+      lorebookWriter = mod.createAtlasLorebookWriter(createLorebookPort(
+        context,
+        worldInfo,
+        async () => hostRef?.readBinding?.() ?? null,
+      ));
     } catch (error) {
       emitAtlasDiagnostic({ level: "warn", source: "lorebook",
         code: "LOREBOOK_SYNC_UNAVAILABLE", operation: "lorebook",
@@ -6914,30 +8383,19 @@ async function connectOnce() {
             // 切到未绑定聊天 → 清掉书里上一聊天的 Atlas 条目（开场白阶段不写不建）；
             // 切回已绑定聊天 → 用该聊天会话里的世界状态立即重建「Atlas 动向」，
             // 不等下一轮推演。数据本体在 chatMetadata.atlas 会话里，零丢失。
-            onLorebookChatSwitch: async ({ bound }) => {
-              if (!bound) {
-                await lorebookWriter.purgeAll();
-                await engineStore.write("lorebook", null);
-                rerender();
-                return { purged: true };
-              }
-              const binding = await hostRef.readBinding();
-              const worldId = String(binding?.worldId ?? "");
-              if (!worldId) return { skipped: true };
-              const world = await engineStore.read(`world:${worldId}`);
-              if (!world) return { skipped: true };
-              // 合成回执形状：buildLorebookPlans 只消费 status/currentTime/currentLocationId
-              const plans = mod.buildLorebookPlans(world, {
-                status: "committed",
-                currentTime: Number(binding?.worldTimeCursor ?? 0),
-                currentLocationId: binding?.currentLocationId ?? null,
-              });
-              if (!plans) return { skipped: true };
-              const result = await lorebookWriter.syncTurn(plans);
-              await engineStore.write("lorebook", lorebookWriter.snapshot(plans, result));
-              rerender();
-              return result;
-            },
+            // B04（0.9.59）：异步写入改为带**递增 chatEpoch** 的处理器
+            // （createLorebookChatSwitchHandler：开始 / 加载书后 / 保存前三处核验；
+            //  只删 Atlas 自建条目；失败只记事件不影响回合）。
+            onLorebookChatSwitch: createLorebookChatSwitchHandler({
+              writer: lorebookWriter,
+              store: engineStore,
+              readBinding: () => hostRef.readBinding(),
+              readSession: () => readAtlasSession(context),
+              readChatId: () => context().chatId ?? null,
+              buildPlans: mod.buildLorebookPlans,
+              rerender: () => rerender(),
+              emit: emitAtlasDiagnostic,
+            }),
           }
         : {}),
     });

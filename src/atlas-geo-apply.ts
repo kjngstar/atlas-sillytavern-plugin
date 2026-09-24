@@ -17,7 +17,20 @@ import { roundPositiveScale, sanitizeCalibration, type MapScaleCalibration } fro
 export const NEW_LOCATIONS_MAX = 12;
 const NAME_CHARS = 40;
 const DESC_CHARS = 300;
-/** 子图内点数上限（一层内部结构足够；递归深度由点挂点自然形成）。 */
+/**
+ * 子图内点数上限（一层内部结构足够；递归深度由点挂点自然形成）。
+ *
+ * 0.9.59 决定（记录在此，避免以后被当成漏改）：
+ * 这是**视图上限，不是写入上限**。v2 时代另有一条「同一父下第 41 个直接子地点 →
+ * 整轮拒绝、零写入」的规则（`V2_SUBMAP_SIBLINGS_MAX`，住在 v2 应用期校验里）；
+ * E07 删除 v2 执行链后，行增量层**有意不恢复**那条整轮拒绝：
+ *  - 三表是实体现值的唯一来源，因为一座城有 41 个地点就把整轮剧情判为失败、
+ *    丢掉作者这一轮的全部改动，代价远大于收益；
+ *  - 真正要守的诉求是「不得**静默**丢弃」。现在第 41 个照常落库、三表保真，
+ *    只有**投影到界面**时按本上限截断，并且必须留下具名痕迹
+ *    （日志 `map-projection-points-truncated` + 诊断 `MAP_PROJECTION_POINTS_TRUNCATED`）。
+ * 提示词里也不再声明这条数量限制，以免模型以为自己会因此被拒。
+ */
 export const SUBMAP_POINTS_MAX = 40;
 /** R09：子图最大递归层级（世界→建筑→房间→细节）。超过的 parentLocationRef 不再下钻，记 warning。 */
 export const SUBMAP_DEPTH_MAX = 4;
@@ -91,6 +104,16 @@ export interface GeoAdoptOutcome {
   revisionAppended: boolean;
   /** 0.9.32 本次实际创建的地点（含带 submap 的），供 sidecar 子图落库 */
   createdPoints: CreatedPoint[];
+  /**
+   * H06b：本次创建的、**只有示意排版坐标**的点 ID 集合。
+   *
+   * 兼容镜像 `world.points[].x/y` 受旧 schema 约束必须是有限数字，因此新点仍然拿到
+   * 确定性螺旋坐标——但那**只是占位排版**，不是测绘结果。调用方必须：
+   * - 把这些点的 `maps.pointMeta[pointId].coordinateStatus` 标成 `schematic`；
+   * - 三表行的 `gridX/gridY` 置 `null`（`schematic` 不得参与精确距离 / 路径 / 传播）；
+   * - 只有人工确认过的坐标才是 `confirmed`（旧手工坐标一律不重排）。
+   */
+  schematicPointIds: number[];
 }
 
 /** 子图清洗（不可信）：点名单必须；比例尺数字必须为正；frame cols/rows 走宽容默认。 */
@@ -163,9 +186,14 @@ export function sanitizeNewLocations(raw: unknown): NewLocationDraft[] {
 
 /**
  * 把新地点 / 新地区并入世界（/worlds/geo/adopt 同款口径）：
- * 重名跳过；regionName 解析不到已有地区 → 归入起始地区（与 geo 提炼一致）；
+ * 重名跳过；regionName 解析不到已有地区 → **regionId 留空**（H06b：绝不写死 `"start"`——
+ * 那会在空地理世界里造出指向不存在地区的悬空引用，等于凭空发明归属）；
  * 黄金角螺旋布点绕中心散开，绝不与已有点重叠；成功后追加定义修订。
  * 没有新增 → 原世界原样返回（零写入）。
+ *
+ * 坐标纪律（H06b）：这里写出的 `x/y` 是**示意排版**，不是测绘坐标。返回的
+ * `schematicPointIds` 供调用方写 `maps.pointMeta[].coordinateStatus="schematic"`，
+ * 且**不得**赋到三表行的 `gridX/gridY`（那里必须是 null，见 H06c）。
  */
 export function applyNewLocations(
   world: World,
@@ -181,6 +209,7 @@ export function applyNewLocations(
     pointNames: [],
     revisionAppended: false,
     createdPoints: [],
+    schematicPointIds: [],
   };
   if (!Array.isArray(locations) || locations.length === 0) return empty;
 
@@ -199,7 +228,8 @@ export function applyNewLocations(
       skipped += 1;
       continue;
     }
-    const id = `turn-r-${hashString(`${world.id}|r|${item.name}|${options.now}`)}`;
+    // H06b 纪律 3：ID 必须确定性——不含 `now`，同一世界同一地区名永远得到同一个 id
+    const id = `turn-r-${hashString(`${world.id}|r|${item.name}`)}`;
     newRegions.push({
       id,
       worldId: world.id,
@@ -213,14 +243,15 @@ export function applyNewLocations(
   }
 
   const nextPointIdBase = (world.points ?? []).reduce((max, p) => Math.max(max, Number(p.id) || 0), 0) + 1;
-  const newPoints: Array<{ id: number; name: string; x: number; y: number; regionId?: string }> = [];
+  const newPoints: Array<{ id: number; name: string; x: number; y: number; regionId?: string | null }> = [];
   for (const item of locations) {
     if (newPoints.length >= NEW_LOCATIONS_MAX) break;
     if (existingPointNames.has(norm(item.name))) {
       skipped += 1;
       continue;
     }
-    const regionId = (item.regionName ? regionIdByName.get(norm(item.regionName)) : null) ?? "start";
+    // H06b：解析不到地区就留空——绝不写死 `"start"`（凭空发明归属 / 指向不存在的地区）
+    const regionId = item.regionName ? regionIdByName.get(norm(item.regionName)) ?? null : null;
     const index = newPoints.length;
     const angle = index * 2.39996;
     const radius = 14 + 3.4 * Math.sqrt(index + 1);
@@ -270,6 +301,8 @@ export function applyNewLocations(
     pointNames: newPoints.map((p) => p.name),
     revisionAppended: revision.ok,
     createdPoints,
+    // H06b：本次新建的点全部只有示意排版坐标，交给调用方写 coordinateStatus
+    schematicPointIds: newPoints.map((p) => p.id),
   };
 }
 
@@ -304,10 +337,28 @@ export interface SubMap {
  */
 export interface AtlasMapDoc {
   schemaVersion: 2;
-  pointMeta: Record<string, { description?: string }>;
+  pointMeta: Record<string, AtlasPointMeta>;
   submaps: Record<string, SubMap>;
   calibrations: Record<string, MapScaleCalibration>;
 }
+
+/**
+ * H06a：点位坐标的**来源状态**。
+ *
+ * - `confirmed`：人工确认过的真实坐标（作者拖动 / 手动填格号），可以参与精确距离；
+ * - `schematic`：兼容镜像里为了排版给的示意坐标，**不得**用来算物理路径与距离；
+ * - `legacy-unknown`：旧档没写这个字段时的解读（保留历史坐标供显示，但未经确认）。
+ *
+ * 旧档缺字段一律按 `legacy-unknown` 解读，绝不当成已确认。
+ */
+export type AtlasCoordinateStatus = "schematic" | "confirmed" | "legacy-unknown";
+
+export interface AtlasPointMeta {
+  description?: string;
+  coordinateStatus?: AtlasCoordinateStatus;
+}
+
+const COORDINATE_STATUSES = new Set<AtlasCoordinateStatus>(["schematic", "confirmed", "legacy-unknown"]);
 
 export function emptyMapDoc(): AtlasMapDoc {
   return { schemaVersion: 2, pointMeta: {}, submaps: {}, calibrations: {} };
@@ -428,6 +479,52 @@ export function projectWorldSubmaps(
   return { doc, dropped, nameCollisions };
 }
 
+/** H06a：`maps` 文档各类条目的清洗上限（唯一权威，sanitize 与截断上报共用）。 */
+export const MAP_DOC_LIMITS = {
+  pointMeta: 120,
+  submaps: 60,
+  calibrations: 80,
+  submapPoints: SUBMAP_POINTS_MAX,
+} as const;
+
+/** 兼容别名：标定清洗上限（H06a：40 → 80，容纳 IF 分支的 `branchKey|mapId` 键）。 */
+export const MAP_DOC_CALIBRATIONS_MAX = MAP_DOC_LIMITS.calibrations;
+
+/**
+ * H06a：**清洗会丢多少**——只统计「超上限」这类截断（坏行丢弃属于数据修复，不在此列）。
+ *
+ * `sanitizeMapDoc` 是纯函数、没有 logger，因此把「有没有东西被截掉」做成可查询的纯计算：
+ * 任何会把清洗结果写回存档的调用方（建图标定 / 地理提炼）都必须先跑一次，
+ * 发现非零就留下具名日志——**不允许静默把用户已保存的第 N+1 条截掉**。
+ */
+export function mapDocOverCapLosses(raw: unknown): {
+  pointMeta: number;
+  submaps: number;
+  calibrations: number;
+  submapPoints: number;
+} {
+  const losses = { pointMeta: 0, submaps: 0, calibrations: 0, submapPoints: 0 };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return losses;
+  const record = raw as Record<string, unknown>;
+  const countOf = (value: unknown): number =>
+    value && typeof value === "object" && !Array.isArray(value) ? Object.keys(value as object).length : 0;
+  losses.pointMeta = Math.max(0, countOf(record.pointMeta) - MAP_DOC_LIMITS.pointMeta);
+  losses.calibrations = Math.max(0, countOf(record.calibrations) - MAP_DOC_LIMITS.calibrations);
+  const submaps = record.submaps;
+  if (submaps && typeof submaps === "object" && !Array.isArray(submaps)) {
+    const entries = Object.entries(submaps as Record<string, unknown>);
+    losses.submaps = Math.max(0, entries.length - MAP_DOC_LIMITS.submaps);
+    for (const [, value] of entries.slice(0, MAP_DOC_LIMITS.submaps)) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+      const points = (value as Record<string, unknown>).points;
+      if (Array.isArray(points)) {
+        losses.submapPoints += Math.max(0, points.length - MAP_DOC_LIMITS.submapPoints);
+      }
+    }
+  }
+  return losses;
+}
+
 /** sidecar 文档形状不可信（兼容旧 / 手改）：宽容清洗，绝不炸面板。 */
 export function sanitizeMapDoc(raw: unknown): AtlasMapDoc {
   const doc = emptyMapDoc();
@@ -435,15 +532,26 @@ export function sanitizeMapDoc(raw: unknown): AtlasMapDoc {
   const record = raw as Record<string, unknown>;
   const meta = record.pointMeta;
   if (meta && typeof meta === "object" && !Array.isArray(meta)) {
-    for (const [key, value] of Object.entries(meta as Record<string, unknown>).slice(0, 120)) {
+    for (const [key, value] of Object.entries(meta as Record<string, unknown>).slice(0, MAP_DOC_LIMITS.pointMeta)) {
       if (!value || typeof value !== "object" || Array.isArray(value)) continue;
-      const description = String((value as Record<string, unknown>).description ?? "").trim().slice(0, 300);
-      if (description) doc.pointMeta[key] = { description };
+      const rawMeta = value as Record<string, unknown>;
+      const description = String(rawMeta.description ?? "").trim().slice(0, 300);
+      // H06a：coordinateStatus 原样保留（未知值丢弃 → 调用方按 legacy-unknown 解读），
+      // 坐标值本身不动：旧档的历史坐标保留显示，只是未经确认不参与精确距离。
+      const status = COORDINATE_STATUSES.has(rawMeta.coordinateStatus as AtlasCoordinateStatus)
+        ? rawMeta.coordinateStatus as AtlasCoordinateStatus
+        : undefined;
+      if (description || status) {
+        doc.pointMeta[key] = {
+          ...(description ? { description } : {}),
+          ...(status ? { coordinateStatus: status } : {}),
+        };
+      }
     }
   }
   const submaps = record.submaps;
   if (submaps && typeof submaps === "object" && !Array.isArray(submaps)) {
-    for (const [key, value] of Object.entries(submaps as Record<string, unknown>).slice(0, 60)) {
+    for (const [key, value] of Object.entries(submaps as Record<string, unknown>).slice(0, MAP_DOC_LIMITS.submaps)) {
       if (!value || typeof value !== "object" || Array.isArray(value)) continue;
       const subRecord = value as Record<string, unknown>;
       let scale: SubMapScale | undefined;
@@ -511,10 +619,13 @@ export function sanitizeMapDoc(raw: unknown): AtlasMapDoc {
     if (parent) submap.parentMapId = parent[0];
   }
   // 循环或超限的旧数据保留文档但不提供嵌套入口，避免误删原始资料。
-  // 0.9.50 标定清洗：每格距离必须正有限；来源白名单外按 legacy 处理；封顶 40 张图
+  // 0.9.50 标定清洗：每格距离必须正有限；来源白名单外按 legacy 处理；封顶 80 张图
+  // H06a：上限由 40 提到 80 —— IF 分支用 `branchKey|mapId` 作用域键，一张图在正史 + 若干 IF
+  // 下会各占一条；40 会让作者已保存的第 41 张标定在**下一次清洗写回**时被静默截掉。
+  // 截断仍然可能发生（>80），但调用方必须先跑 `mapDocOverCapLosses` 并留下具名痕迹。
   const calibrations = record.calibrations;
   if (calibrations && typeof calibrations === "object" && !Array.isArray(calibrations)) {
-    for (const [key, value] of Object.entries(calibrations as Record<string, unknown>).slice(0, 40)) {
+    for (const [key, value] of Object.entries(calibrations as Record<string, unknown>).slice(0, MAP_DOC_CALIBRATIONS_MAX)) {
       const calibration = sanitizeCalibration(value);
       if (calibration) doc.calibrations[key] = calibration;
     }

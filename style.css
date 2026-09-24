@@ -843,10 +843,8 @@
   min-width: 0;
   border-radius: 10px;
   overflow: hidden;
-  background:
-    repeating-linear-gradient(0deg, transparent, transparent 27px, var(--am-grid-minor, var(--aw-teal-wash)) 27px, var(--am-grid-minor, var(--aw-teal-wash)) 28px),
-    repeating-linear-gradient(90deg, transparent, transparent 27px, var(--am-grid-minor, var(--aw-teal-wash)) 27px, var(--am-grid-minor, var(--aw-teal-wash)) 28px),
-    var(--am-canvas, var(--aw-paper));
+  /* H14：地图框同样不再铺静态 27px 网格底纹——格线只来自 .aw-grid-svg */
+  background: var(--am-canvas, var(--aw-paper));
 }
 
 .aw-maparea__hint {
@@ -881,12 +879,11 @@
   box-shadow: var(--am-shadow, inset 0 0 60px rgba(16, 27, 29, 0.07));
   /* R08：触摸平移 / 双指缩放由指针事件接管，交给浏览器默认行为会滚动页面 */
   touch-action: none;
-  /* 0.9.38 网格纸回归：0.9.32 起不透明纸面盖死了 .aw-maparea 的网格纹理，
-     地图变成一张空白纸——网格搬进 viewport 本体（has-image 时被图层图片覆盖，无冲突） */
-  background:
-    repeating-linear-gradient(0deg, transparent, transparent 27px, var(--am-grid-minor, var(--aw-teal-wash)) 27px, var(--am-grid-minor, var(--aw-teal-wash)) 28px),
-    repeating-linear-gradient(90deg, transparent, transparent 27px, var(--am-grid-minor, var(--aw-teal-wash)) 27px, var(--am-grid-minor, var(--aw-teal-wash)) 28px),
-    var(--am-canvas, var(--aw-paper));
+  /* H14（0.9.59）：视口**底纹**（静态 27px 重复渐变）已删除。
+     它是一张不随相机缩放的装饰图案：41% 时看着像密格，放大后完全不跟着格线走，
+     与真实格距毫无关系（F12）。现在视口只铺画布底色，格线一律由 .aw-grid-svg
+     按 H12 的 world→screen 变换绘制。 */
+  background: var(--am-canvas, var(--aw-paper));
 }
 
 /* R01 图层栈：zoom/pan 变换作用于 stage，底图 / 网格 / 标点三层同步移动；
@@ -900,13 +897,250 @@
 }
 
 .aw-image,
+.aw-areas,
 .aw-grid {
   position: absolute;
   inset: 0;
   pointer-events: none;
 }
 
+/**
+ * H16 / H15（§2.5）：有证据的区域格染色层。
+ *
+ * 夹在底图与网格之间（DOM 顺序已在 .aw-stage 内保证）；只画 geoTopology.areas 里
+ * evidence ∈ worldbook|story|manual 的格子，未知格保持透明——**没有 areas 就一格都不染**。
+ * 透明度由投影给（硬上限 0.18），皮肤只能改颜色，不能改几何与证据判定。
+ */
+.aw-areas__svg {
+  position: absolute;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.aw-areas__area {
+  stroke: none;
+  fill: var(--am-area-fill, var(--aw-teal));
+}
+
+.aw-areas__area.is-worldbook { fill: var(--am-area-fill-worldbook, var(--aw-teal)); }
+.aw-areas__area.is-story { fill: var(--am-area-fill-story, var(--aw-gold-soft)); }
+.aw-areas__area.is-manual { fill: var(--am-area-fill-manual, var(--aw-teal-wash)); }
+
+/**
+ * H15（0.9.59）：`displayOnly` 弱光圈——只有中心点、没有已证实的格。
+ *
+ * 视觉上必须与「已证实填区」明确可分：
+ * - 只描边不填充：证实的范围是实心面，示意范围只是一圈虚线感的轮廓；
+ * - `is-unconfirmed`（连 evidence 都没有）再降一档，颜色更淡。
+ * 这样作者不会把「大概在这一带」误读成「边界已经查清」。
+ */
+.aw-areas__halo {
+  fill: none;
+  stroke: var(--am-area-fill, var(--aw-teal));
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  vector-effect: non-scaling-stroke;
+}
+
+.aw-areas__halo.is-story { stroke: var(--am-area-fill-story, var(--aw-gold-soft)); }
+.aw-areas__halo.is-unconfirmed {
+  stroke: var(--aw-muted, #8a8177);
+  stroke-dasharray: 1 4;
+}
+
+.aw-areas__svg--halos { pointer-events: none; }
+
+/**
+ * H08（0.9.59）：缺坐标地点的**示意标点**。
+ * 与已确认坐标的点必须一眼可分：虚线边框 + 「待定位」角标 + 略低不透明度。
+ * 它只是渲染位置，读屏与 title 都明说「位置未确认，仅为示意」。
+ */
+.aw-point--displayonly {
+  border-style: dashed;
+  opacity: 0.72;
+  font-style: italic;
+}
+
+.aw-point__pending {
+  display: inline-block;
+  margin-left: 3px;
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 9px;
+  font-style: normal;
+  background: var(--aw-muted-bg, rgba(255, 255, 255, 0.14));
+  opacity: 0.9;
+}
+
+/**
+ * H15b（0.9.59）：范围绘制模式的预览层与工具栏。
+ * 预览格用蓝色描边 + 半透明填充，与「已保存的着色」在视觉上明确分开——
+ * 作者一眼能看出哪些还没提交。
+ */
+.aw-areas__draft { pointer-events: none; }
+
+.aw-areas__draft-cell {
+  fill: var(--aw-teal, #3f8f8a);
+  fill-opacity: 0.25;
+  stroke: var(--aw-teal, #3f8f8a);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.aw-areadraw {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  background: var(--aw-panel-bg, rgba(24, 20, 16, 0.92));
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
+  z-index: 7;
+}
+
+.aw-areadraw__label { font-size: 12px; }
+.aw-areadraw__count { font-size: 12px; opacity: 0.75; min-width: 3em; }
+
+/**
+ * F06（0.9.59）：终态地图卡片的四种视图角色。
+ *
+ * 刻意**只改样式、不改几何**：坐标、半径、偏移全部由相机与标定决定，
+ * 皮肤不许参与物理量的计算。
+ * - 城市入口（有子图）：实心边框 + 前缀「▣」，表示「可以进去」；
+ * - 城市内部（子图视图）：更小的内层观感；
+ * - 相邻外城：虚线边框，明确「不是包含关系」；
+ * - 在途载具：不画点（见 .aw-mapvehicle-note），所以这里没有对应标点样式。
+ *
+ * 不虚构道路、边界与地形：这里没有任何连线/阴影/纹理去暗示未证实的道路。
+ */
+.aw-point--entrance {
+  border-width: 2px;
+  border-style: solid;
+  font-weight: 600;
+}
+
+.aw-point--entrance::before {
+  content: "▣ ";
+  opacity: 0.7;
+}
+
+.aw-point--interior {
+  font-size: 11px;
+  opacity: 0.94;
+}
+
+.aw-point--adjacent {
+  border-style: dashed;
+}
+
+.aw-point--adjacent::after {
+  content: "邻";
+  margin-left: 3px;
+  padding: 0 3px;
+  border-radius: 3px;
+  font-size: 9px;
+  opacity: 0.7;
+  background: var(--aw-gold-soft, rgba(200, 170, 90, 0.35));
+}
+
+/**
+ * F06 / H20：右上工具区折叠后不遮挡坐标读数，左下只留比例尺。
+ * 工具区收窄且不透明，避免与地图上的坐标标签叠字。
+ */
+.aw-maptools {
+  max-width: 62%;
+}
+
+.aw-maptools__more {
+  max-width: 320px;
+}
+
+@media (max-width: 480px) {
+  .aw-maptools {
+    max-width: 46%;
+  }
+  .aw-areadraw {
+    left: 8px;
+    right: 8px;
+    transform: none;
+    flex-wrap: wrap;
+  }
+}
+
+/**
+ * H16a：作者确认折叠区。默认收起，不干扰普通浏览；错误行用红色如实显示字段路径。
+ */
+.aw-confirm {
+  margin-top: 8px;
+  border-top: 1px solid var(--aw-line, rgba(255, 255, 255, 0.12));
+  padding-top: 6px;
+}
+
+.aw-confirm__summary {
+  cursor: pointer;
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+.aw-confirm__ident,
+.aw-confirm__hint {
+  margin: 4px 0;
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.aw-confirm__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0;
+}
+
+.aw-confirm__status { margin: 4px 0 0; font-size: 11px; }
+.aw-confirm__status.is-error { color: var(--aw-danger, #d97b6c); }
+.aw-confirm__status.is-ok { color: var(--aw-teal, #3f8f8a); }
+
 .aw-grid { background-repeat: repeat; }
+
+/**
+ * H13/H14（0.9.59）：视口对齐的 SVG 网格层。
+ *
+ * - `pointer-events: none`：它只画线，绝不吃掉地图的平移 / 缩放 / 点位点击；
+ * - 反变换（由 index.js 的 updateGridVisual 写入内联 transform）把这一层从 stage 的
+ *   `scale(k)` 里解出来，所以线宽恒为 1 CSS px，放大不会变成粗大模糊断线；
+ * - 层级：高于底图 / 面积填色，低于路线与图钉（DOM 顺序已在 .aw-grid 内保证）；
+ * - 颜色走既有皮肤变量，主题可以覆盖；几何（格距 / 线宽）不由皮肤决定。
+ */
+.aw-grid-svg {
+  position: absolute;
+  left: 0;
+  top: 0;
+  overflow: visible;
+  transform-origin: 0 0;
+  pointer-events: none;
+}
+
+.aw-grid-svg__minor,
+.aw-grid-svg__major {
+  fill: none;
+  stroke-linecap: square;
+}
+
+.aw-grid-svg__minor {
+  stroke: var(--am-grid-minor, var(--aw-teal-wash));
+  stroke-width: 1;
+  opacity: 0.55;
+}
+
+.aw-grid-svg__major {
+  stroke: var(--am-grid-major, var(--aw-teal));
+  stroke-width: 1;
+  opacity: 0.8;
+}
 
 .aw-image { background-repeat: no-repeat; background-size: 100% 100%; }
 .aw-image.has-image { background-color: transparent; }
@@ -1197,6 +1431,84 @@
 .aw-point.is-current::before {
   background: var(--aw-gold-soft);
   border-color: var(--aw-veil-line);
+}
+
+/* F03（0.9.59）：地点标点上的「在场人数」徽标。
+ * 数据来自 tableMap.locationOccupants（完整三表口径），与地点同坐标的人物也计入这里——
+ * 他们不再单独画图钉，但绝不会从地图上消失。颜色走既有皮肤 token，皮肤只改外观不改几何。 */
+.aw-point__badge {
+  display: inline-block;
+  margin-left: 4px;
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--aw-teal);
+  color: var(--aw-gold-soft);
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
+  vertical-align: middle;
+  pointer-events: none;
+}
+
+.aw-point.has-occupants {
+  border-color: var(--aw-teal);
+}
+
+/**
+ * H16（0.9.59）：停靠载具徽标。
+ * 只表示「这辆车真的停在这个地点」——在途 / 锚点未确认的载具不画点，
+ * 由 .aw-mapvehicle-note 如实列出。颜色走皮肤 token，几何不由皮肤决定。
+ */
+.aw-point__vehicle {
+  display: inline-block;
+  margin-left: 3px;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--am-vehicle, var(--aw-gold-soft));
+  color: var(--aw-ink, #2b2118);
+  font-size: 10px;
+  line-height: 15px;
+  vertical-align: middle;
+  pointer-events: none;
+}
+
+.aw-point.has-vehicle {
+  border-style: dashed;
+}
+
+.aw-mapvehicle-note {
+  position: absolute;
+  left: 12px;
+  bottom: 84px;
+  max-width: 60%;
+  font-size: 11px;
+  pointer-events: none;
+}
+
+/**
+ * H20（0.9.59）：右上工具条里的可折叠图例。
+ * 默认收起，展开时以浮层形式压在工具条下方——不挤占地图布局，也不拦拖拽。
+ */
+.aw-maptools__toggle[aria-expanded="true"] {
+  border-color: var(--aw-teal);
+}
+
+.aw-maptools__more {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--aw-panel-bg, rgba(24, 20, 16, 0.92));
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
+  z-index: 6;
+}
+
+.aw-maptools__more .aw-maplegend {
+  position: static;
+  margin: 0;
 }
 
 /* R11：子图面包屑（R09 三层级导航用，UI 渲染时挂上 .aw-breadcrumb / .aw-breadcrumb__item）。

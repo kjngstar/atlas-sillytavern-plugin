@@ -16,6 +16,29 @@ import {
   parseAtlasEditBlock,
 } from "../src/atlas-table-delta.ts";
 import { validateAtlasTables } from "../src/atlas-tables.ts";
+import {
+  collectFixtureIdentityIds,
+  fixtureDistantDeclaration,
+  fixtureIfBranch,
+  fixtureReplayCatalog,
+  fixtureSaintLaurentCity,
+  fixtureSaintLaurentPending,
+  fixtureScaleHundredMeters,
+  fixtureSchoolHierarchy,
+  fixtureSwipeVariant,
+  fixtureTurnZeroCarriage,
+  fixtureVehicleMove,
+} from "./fixtures/audit/atlas-fixtures.mjs";
+import {
+  SESSION_SIZE_LIMITS,
+  assertOversizedSessionWriteRejected,
+  buildLargeSession,
+  countSessionCollections,
+  createSessionCarrier,
+  measureSessionRoundTrip,
+  measureSessionSize,
+  writeSessionGuarded,
+} from "./atlas-session-helper.mjs";
 
 const SOURCES = {
   "msg:u": "我进钟楼，把铜钥匙留在桌上。",
@@ -504,4 +527,314 @@ test("C05 主人公保护：模型不能借行增量改写主角名字", () => {
   });
   assert.equal(result.ok, false, "唯一一行被拒 → 整轮拒绝");
   assert.ok(JSON.stringify(result.rejectedRows).includes("PROTAGONIST_PROTECTED"));
+});
+
+/* ================================================================== *
+ * A02 —— 现状固化回归（计划 §3 阶段 A02）
+ *
+ * 这里断言的是 **v0.9.58 当前的真实行为**（F1 / F2 的现场证据），不是期望行为：
+ * - 表格增量改了人物想法与位置，但世界的事件流水 `world.stateEvents` 一条都不新增，
+ *   `receipt.adoptedEventIds` 为空；
+ * - `receipt.summary` 只有人数式摘要（「表格增量：应用 N 行；…」），没有可读的幕后动向。
+ *
+ * 「将来应该怎样」只写在注释里（见每条用例末尾的「待改」标记），
+ * **不得**写成会持续红灯的占位断言。
+ * ================================================================== */
+
+/** A02 夹具：给演示世界补一条**已经发生过**的事件流水，用来观察表格增量是否追加事件。 */
+function seedStateEvent(world) {
+  world.stateEvents = [
+    {
+      id: "se-seed-1", worldId: world.id, branchId: null, at: 100, sequence: 0,
+      source: "author", actionId: null, sessionId: null,
+      narrativeSummary: "薇尔在白塔钟座守夜。", entityRefs: ["npc:chronicle-c1"], effects: [], createdAt: 1000,
+    },
+  ];
+  return world;
+}
+
+test("A02 现状：表格增量更新想法与位置后 world.stateEvents 不新增（F2 现场证据）", () => {
+  const base = seedStateEvent(demoWorld());
+  const seeded = JSON.parse(JSON.stringify(base.stateEvents));
+  const assistant = "你推开档案室的门，薇尔跟了进来。";
+  const text = block(line({
+    table: "character", op: "set", ref: "npc:chronicle-c1",
+    patch: { locationRef: "loc:4200", thought: "档案室里有旧账" }, basis: "observed", quote: "薇尔跟了进来",
+  }));
+  const result = commitTableDeltaTurn({
+    tables: tableFixture(), tablesDoc: null, branchKey: "canon",
+    baseWorld: base, binding: BASE_BINDING,
+    request: { userText: "我进档案室。", assistantText: assistant }, text, now: 1_700_000_000_000,
+  });
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  // 三表与兼容镜像**确实变了**——不是「什么都没发生」的假绿
+  const row = result.tablesDoc.branches.canon.characters.find((item) => item.id === "npc:chronicle-c1");
+  assert.equal(row.locationId, "loc:4200");
+  assert.equal(row.thought, "档案室里有旧账");
+  const state = result.world.characterStates.find((item) => String(item.characterId) === "chronicle-c1");
+  assert.equal(state.currentPointId, "4200");
+
+  // 现状：事件流水一条都不新增，回执也不采纳任何事件
+  assert.deepEqual(result.world.stateEvents, seeded, "现行表格增量路径不追加 stateEvents");
+  assert.equal(result.world.stateEvents.length, 1);
+  assert.equal(base.stateEvents.length, 1, "输入世界不被就地修改");
+  assert.deepEqual(result.receipt.adoptedEventIds, [], "adoptedEventIds 为空 → 世界书读不到新动向");
+
+  // 待改（D09）：近期动向应优先取当前分支的 simulationEvents（已知且已发生，最多 3 条），
+  // 旧 world.stateEvents 只作旧档兼容。届时本用例应追加：
+  // 「turns[turnKey].simulationEvents 有具名动向」+「stateEvents 仍不被表格增量追加」两条断言。
+});
+
+test("A02 现状：receipt.summary 只有人数式摘要，没有人类可读的幕后动向", () => {
+  const singleText = block(line({
+    table: "character", op: "set", ref: "npc:chronicle-c1", patch: { thought: "守着钟" }, basis: "observed", quote: "薇尔留在钟座",
+  }));
+  const single = commitTableDeltaTurn({
+    tables: tableFixture(), tablesDoc: null, branchKey: "canon",
+    baseWorld: demoWorld(), binding: BASE_BINDING,
+    request: { userText: "继续。", assistantText: "薇尔留在钟座。" }, text: singleText, now: 1,
+  });
+  assert.equal(single.ok, true, JSON.stringify(single));
+  // v0.9.58 实测原文：`表格增量：应用 1 行；时间未推进`
+  assert.match(single.receipt.summary, /^表格增量：应用 \d+ 行/, single.receipt.summary);
+  assert.ok(single.receipt.summary.includes("时间未推进"), single.receipt.summary);
+
+  const partialText = block(
+    line({ table: "character", op: "set", ref: "npc:chronicle-c1", patch: { thought: "守着钟" }, basis: "observed", quote: "薇尔留在钟座" }),
+    line({ table: "location", op: "set", ref: "loc:404", patch: { description: "不存在的地点" } }),
+  );
+  const partial = commitTableDeltaTurn({
+    tables: tableFixture(), tablesDoc: null, branchKey: "canon",
+    baseWorld: demoWorld(), binding: BASE_BINDING,
+    request: { userText: "继续。", assistantText: "薇尔留在钟座。" }, text: partialText, now: 1,
+  });
+  assert.equal(partial.ok, true, JSON.stringify(partial));
+  // v0.9.58 实测原文：`表格增量：应用 1 行；拒绝 1 行（可重试或修正提示词）；时间未推进`
+  assert.match(partial.receipt.summary, /^表格增量：应用 1 行；拒绝 1 行（可重试或修正提示词）/, partial.receipt.summary);
+  assert.ok(partial.receipt.summary.includes("时间未推进"), partial.receipt.summary);
+
+  // 回执当前**没有**结构化后台计数（D04 才加 bounded simulationCounts）
+  assert.equal(partial.receipt.simulationCounts, undefined);
+  assert.equal(partial.receipt.simulationEvents, undefined);
+
+  // 待改（D04 / D07 / D09）：summary 应改为人类摘要，例如
+  // 「记录 2 位人物意图；1 人在途；消息送达 1 处；远方待送」，并带 bounded simulationCounts
+  // （tasks/signals/deliveries/blocked）；UI 改用 simulationView.recentEvents 渲染「幕后动向」卡，
+  // 老聊天无数据时回退本条人数式回执。届时上面两条 regex 断言应整体替换为人类摘要断言。
+});
+
+/* ================================================================== *
+ * A01 夹具自检 + A05 体积实测（计划 §3 阶段 A01 / A05）
+ *
+ * A01：夹具必须能被 node 直接 import，且消息 ID / chatId / worldId / branchId / mapId 互相可区分。
+ * A05：T16 规模（5 图 / 50 人 / 200 物 / 120 tasks / 50 signals / 200 deliveries /
+ *      128 edges / 16 染色区 / 100 回合）的体积实测；越界只如实报告，绝不静默截断。
+ * ================================================================== */
+
+test("A01 夹具：可 import、三表可校验、身份 id 互相可区分", () => {
+  const catalog = fixtureReplayCatalog();
+  assert.deepEqual(Object.keys(catalog), [
+    "turnZeroCarriage", "sharedCardChats", "schoolHierarchy", "saintLaurentCity",
+    "saintLaurentPending", "vehicleMove", "distantDeclaration", "ifBranch",
+    "swipeVariant", "scaleHundredMeters",
+  ]);
+
+  // 每个夹具的三表都能过 validateAtlasTables（夹具不是「看着像」的假数据）
+  for (const [name, fixture] of Object.entries(catalog)) {
+    const docs = fixture.tables ? [fixture.tables] : (fixture.chats ?? []).map((chat) => chat.tables);
+    for (const doc of docs) {
+      for (const [branchKey, tables] of Object.entries(doc.branches)) {
+        const result = validateAtlasTables(tables);
+        assert.equal(result.ok, true, `${name}/${branchKey}: ${JSON.stringify(result.errors)}`);
+      }
+    }
+  }
+
+  // 身份 id 在同一类别内互不相同（mapKeys 是「worldId|mapId」复合键："world" 是约定的根图名）
+  const ids = collectFixtureIdentityIds(catalog);
+  assert.equal(ids.scenarios.length, 10);
+  for (const [bucket, list] of Object.entries(ids)) {
+    if (bucket === "scenarios") continue;
+    const duplicates = list.filter((value, index) => list.indexOf(value) !== index);
+    assert.deepEqual([...new Set(duplicates)], [], `${bucket} 出现重复 id`);
+  }
+  assert.equal(ids.chatIds.length, 11, "10 个场景 + A/B 两个聊天");
+  assert.equal(ids.branchIds.length, 2, "正史 story id 与 IF story id 各一个");
+  assert.ok(ids.mapKeys.includes("world-if|world") && ids.mapKeys.includes("world-scale|loc:7701"));
+});
+
+test("A01 场景：第 0 段 / 学校层级 / 城市与外城 / 载具 / 宣战 / IF / swipe / 标尺各自成立", () => {
+  const zero = fixtureTurnZeroCarriage();
+  assert.equal(zero.binding.currentLocationId, null, "玩家位置未知就是 null，不猜起点");
+  assert.equal(zero.binding.worldTimeCursor, 0, "第 0 段");
+  assert.deepEqual(zero.turns, {}, "第 0 段没有已提交回合");
+  assert.equal(zero.simulation, null, "simulation 缺失 = 合法空模块");
+  assert.deepEqual(zero.tables.branches.canon.characters.map((row) => row.locationId), ["loc:7002", "loc:7002"], "两个人都在车厢内部");
+
+  const school = fixtureSchoolHierarchy();
+  const classroom = school.tables.branches.canon.locations.find((row) => row.id === school.classroomLocationId);
+  assert.equal(classroom.parentLocationId, school.schoolLocationId, "学校 → 三年二班是包含关系");
+  assert.equal(classroom.mapId, school.schoolLocationId, "教室进父地点的子图");
+  assert.equal(classroom.gridX, null, "没有室内细坐标就保持 null，不落 (0,0)");
+  assert.equal(school.expectation.classroomOccupants, 3);
+
+  const city = fixtureSaintLaurentCity();
+  const rows = Object.fromEntries(city.tables.branches.canon.locations.map((row) => [row.id, row]));
+  assert.equal(rows[city.marketLocationId].parentLocationId, city.cityLocationId, "市场是城内的子地点");
+  assert.equal(rows[city.factoryLocationId].parentLocationId, city.cityLocationId, "工厂区是城内的子地点");
+  assert.equal(rows[city.outerLocationId].parentLocationId, null, "外城区只相邻，不写成城内");
+  const edges = city.simulation.branches.canon.geoTopology.edges;
+  assert.ok(edges.some((edge) => edge.kind === "adjacent"
+    && [edge.fromLocationId, edge.toLocationId].includes(city.outerLocationId)), "外城与城市之间有 adjacent 边");
+
+  const pending = fixtureSaintLaurentPending();
+  const pendingRow = pending.tables.branches.canon.locations[0];
+  assert.equal(pendingRow.parentLocationId, null, "只有地名就没有 parent");
+  assert.equal(pendingRow.gridX, null);
+  assert.equal(pending.simulation.branches.canon.geoTopology.areas.length, 0, "没有证据不染格");
+
+  const vehicle = fixtureVehicleMove();
+  const before = vehicle.before.simulation.branches.canon.geoTopology.vehicles[0];
+  const after = vehicle.after.simulation.branches.canon.geoTopology.vehicles[0];
+  assert.equal(before.status, "stopped");
+  assert.equal(before.atLocationId, vehicle.stationLocationId);
+  assert.equal(after.status, "en-route");
+  assert.equal(after.atLocationId, null, "在途没有停靠点");
+  assert.equal(after.routeEdgeId, "edge:7303:7304:route");
+  for (const crew of vehicle.crew) {
+    const row = vehicle.tables.branches.canon.characters.find((item) => item.id === crew);
+    assert.equal(row.locationId, vehicle.cabinLocationId, "乘员留在车厢子地点，不各自生成世界坐标");
+    assert.equal(row.gridX, null);
+  }
+
+  const signal = fixtureDistantDeclaration();
+  assert.equal(signal.periods[0].simulation.branches.canon.signals.length, 1, "一件消息只有一份 signal");
+  assert.equal(signal.periods[0].deliveries, 2, "第 0 段只有发起地 + 同地目击");
+  const distantDeliveries = signal.periods
+    .flatMap((item) => item.simulation.branches.canon.deliveries)
+    .filter((delivery) => delivery.recipientId === signal.distantCharacterId);
+  assert.equal(distantDeliveries.length, 0, "远方关系人没有 delivery 就是不知道");
+
+  const branch = fixtureIfBranch();
+  assert.equal(branch.ifBranchKey, branch.ifStoryId);
+  assert.equal(branch.simulation.branches[branch.ifBranchKey].signals.length, 0, "IF 没有正史的信号");
+  assert.equal(branch.simulation.branches[branch.ifBranchKey].deliveries.length, 0, "IF 没有正史的送达");
+  assert.equal(branch.simulation.branches.canon.signals.length, 1);
+
+  const swipe = fixtureSwipeVariant();
+  assert.notEqual(swipe.variants[0].turnKey, swipe.variants[1].turnKey, "同一回合的不同变体幂等键必须不同");
+  assert.equal(swipe.variants[0].turnKey, `${swipe.chatId}::${swipe.userMessageId}::${swipe.variants[0].assistantMessageId}::`);
+  assert.equal(swipe.variants[0].simulation.branches.canon.signals.length, 1);
+  assert.equal(swipe.variants[1].simulation.branches.canon.signals.length, 0, "回退到 B 变体后没有 A 的未来事实");
+  assert.equal(swipe.variants[1].turn.simulationEvents.length, 0);
+
+  const scale = fixtureScaleHundredMeters();
+  assert.equal(scale.maps.calibrations.world.metersPerCell, 100);
+  assert.equal(scale.maps.calibrations[scale.worldLocationId], undefined, "教室图不继承世界图尺度");
+  assert.deepEqual(scale.bar.calibrated.map((sample) => sample.meters), [960, 480, 1920]);
+  assert.deepEqual(scale.bar.uncalibrated.map((sample) => sample.cells), [9.6, 4.8]);
+});
+
+test("A05 大体积会话：T16 规模可确定性构造，分块体积与 payload 实测在案", (t) => {
+  const session = buildLargeSession();
+  const counts = countSessionCollections(session);
+  assert.equal(counts.maps, 5, "5 图（world + 4 张子图）");
+  assert.equal(counts.characters, 50);
+  assert.equal(counts.items, 200);
+  assert.equal(counts.tasks, 120);
+  assert.equal(counts.signals, 50);
+  assert.equal(counts.deliveries, 200);
+  assert.equal(counts.edges, 128);
+  assert.equal(counts.areas, 16);
+  assert.equal(counts.turns, 100);
+  assert.ok(counts.activeTasks <= 64, `非终态任务不得超 64：${counts.activeTasks}`);
+
+  // 同参数两次构造逐字节相同（夹具不含时间 / 随机）
+  assert.equal(JSON.stringify(buildLargeSession()), JSON.stringify(session), "构造必须确定性");
+
+  const size = measureSessionSize(session);
+  assert.equal(size.blocks.simulation, JSON.stringify(session.simulation).length);
+  assert.equal(size.blocks.turns, JSON.stringify(session.turns).length);
+  assert.equal(size.blocks.tables, JSON.stringify(session.tables).length);
+  assert.equal(size.blocks.maps, JSON.stringify(session.maps).length);
+  assert.equal(size.payload.chars, JSON.stringify({ chatId: session.binding.chatId, session }).length);
+  assert.ok(size.total > size.blocks.tables + size.blocks.simulation, "整体必须大于分块之和的主体部分");
+
+  // T16 规模实测在 §2.1 的 240000 字硬上限之内（越界只报告，绝不截断）
+  assert.deepEqual(size.violations, [], "T16 规模不得有越界项（越界时先修 §2.1 与测试，不许无声截断）");
+  t.diagnostic(`A05/T16 整体 ${size.total} 字；simulation ${size.blocks.simulation} 字（上限 240000）；`
+    + `tables ${size.blocks.tables}；turns ${size.blocks.turns}；maps ${size.blocks.maps}；world ${size.blocks.world}；`
+    + `单请求 payload ${size.payload.chars} 字`);
+
+  // 理论最坏组合（每个集合都打满上限 + 64 区 × 256 格 + 每回合 16 条事件）：如实报出越界，不假装成功
+  const worst = measureSessionSize(buildLargeSession({
+    locations: 140, childrenPerSubmap: 16, tasks: 128, signals: 64, deliveries: 256,
+    edges: 256, areas: 64, cellsPerArea: 256, vehicles: 64, eventsPerTurn: 16,
+  }));
+  const overflow = worst.violations.find((item) => item.code === "SIMULATION_TOO_LARGE");
+  assert.ok(overflow, "上限组合必须被如实标记为越界（而不是被悄悄截断）");
+  assert.equal(overflow.limit, SESSION_SIZE_LIMITS.simulationJsonChars);
+  assert.equal(worst.counts.tasks, 128, "实测越界时也不得降低有效规模");
+  assert.equal(worst.counts.deliveries, 256);
+  t.diagnostic(`A05 理论上限组合 simulation ${overflow.actual} 字 > ${overflow.limit} 字；`
+    + `其中 areas 64×256=16384 格；仅三组行+边+载具为 `
+    + `${measureSessionSize(buildLargeSession({ locations: 140, childrenPerSubmap: 16, tasks: 128, signals: 64, deliveries: 256, edges: 256, vehicles: 64, areas: 0, eventsPerTurn: 0 })).blocks.simulation} 字`);
+});
+
+test("A05 一次 handle 往返：payload 大小与耗时实测，会话不被写坏", async (t) => {
+  const { createAtlasServerCore, createMemoryDocumentStore } = await import("../src/atlas-server.ts");
+  const session = buildLargeSession();
+  const core = createAtlasServerCore({ store: createMemoryDocumentStore() });
+  const carrier = createSessionCarrier(core, { session });
+
+  const roundTrip = await measureSessionRoundTrip(carrier);
+  assert.equal(roundTrip.status, 200, `POST /state 应成功：${JSON.stringify(roundTrip.error)}`);
+  assert.equal(roundTrip.ok, true);
+  assert.equal(roundTrip.payloadChars, measureSessionSize(session).payload.chars, "payload 口径必须与实测一致");
+  assert.ok(Number.isFinite(roundTrip.elapsedMs) && roundTrip.elapsedMs >= 0);
+  assert.ok(roundTrip.sessionChars > 0);
+  t.diagnostic(`A05 往返：payload ${roundTrip.payloadChars} 字，耗时 ${roundTrip.elapsedMs.toFixed(2)} ms，`
+    + `响应 ${roundTrip.responseChars} 字，回写会话 ${roundTrip.sessionChars} 字`);
+});
+
+test("A05 越界输入被校验拒绝，且不损坏旧档", async () => {
+  const { createAtlasServerCore, createMemoryDocumentStore } = await import("../src/atlas-server.ts");
+  const small = () => buildLargeSession({
+    maps: 1, locations: 1, characters: 1, items: 1, tasks: 1, signals: 1, deliveries: 1,
+    edges: 0, areas: 0, vehicles: 0, turns: 1, eventsPerTurn: 1,
+  });
+  const core = createAtlasServerCore({ store: createMemoryDocumentStore() });
+  const carrier = createSessionCarrier(core, { session: small() });
+
+  // 合法候选：体积守卫放行，并且真的能沿载体路径写进服务端（200 + 回写会话）
+  const fine = measureSessionSize(small());
+  assert.equal(fine.ok, true, JSON.stringify(fine.violations));
+  const accepted = await writeSessionGuarded(carrier, small());
+  assert.equal(accepted.accepted, true, `合法候选应被接受：${JSON.stringify(accepted.code)}`);
+  assert.equal(accepted.wrote, true);
+  assert.equal(accepted.status, 200);
+  // 服务端只在会话确有改动（overlay.changed()）时才回写 session；只读往返不带 session 是合法契约
+  if (accepted.writtenSession) assert.equal(accepted.writtenSession.schemaVersion, 1);
+
+  const untouched = JSON.stringify(carrier.session);
+
+  // 越界 1：signals 80 > 64（集合上限）
+  const tooManySignals = await assertOversizedSessionWriteRejected(carrier, buildLargeSession({
+    maps: 1, locations: 1, characters: 1, items: 1, tasks: 1, signals: 80, deliveries: 1,
+    edges: 0, areas: 0, vehicles: 0, turns: 1, eventsPerTurn: 1,
+  }));
+  assert.ok(tooManySignals.measurement.violations.some((item) => item.code === "COLLECTION_LIMIT_REACHED"));
+
+  // 越界 2：整份 simulation 超 240000 字（体积上限）
+  const tooLarge = await assertOversizedSessionWriteRejected(carrier, buildLargeSession({
+    locations: 140, childrenPerSubmap: 16, tasks: 128, signals: 64, deliveries: 256,
+    edges: 256, areas: 64, cellsPerArea: 256, vehicles: 64, eventsPerTurn: 16,
+  }));
+  assert.ok(tooLarge.measurement.violations.some((item) => item.code === "SIMULATION_TOO_LARGE"));
+
+  // 旧档逐字节不变、rev 不推进
+  assert.equal(carrier.session.binding.chatId, "chat-large-a05");
+  assert.equal(JSON.stringify(carrier.session), untouched);
+  assert.equal(JSON.stringify(carrier.session), JSON.stringify(small()));
 });

@@ -38,6 +38,11 @@ function buildWorld() {
     assert.ok(result.ok, `实体 ${entity.id} 建档成功`);
     if (result.ok) world = result.value;
   }
+  // E11：绑定位置游标只随主角三表行变化 → 主角必须在世界人物表里
+  world.characters = [
+    ...(world.characters ?? []),
+    { id: "char-main", worldId: world.id, name: "林拾", role: "主角", description: "旅程主角" },
+  ];
   const parsed = parseWorld(JSON.parse(JSON.stringify(world)));
   assert.ok(parsed !== null, "夹具世界可解析");
   return parsed;
@@ -48,7 +53,7 @@ function binding(world, chatId, overrides = {}) {
     schemaVersion: 1,
     enabled: true,
     chatId,
-    characterId: null,
+    characterId: "char-main",
     worldId: world.id,
     branchId: CANON,
     currentLocationId: "4103",
@@ -82,15 +87,32 @@ function commitRequest(world, chatId, overrides = {}) {
   };
 }
 
-const GOOD_DRAFT = {
-  duration: 12,
-  locationChange: { toPointId: "4104", toRegionId: "capital" },
-  npcChanges: [{ entityId: "entity-npc", key: "whereabouts", value: "玻璃温室" }],
-  memoryDrafts: [{ entityId: "entity-npc", text: "在玻璃温室见到一位旅行者。" }],
-  eventDrafts: ["温室花房夜开放"],
-  triggerResults: [],
-  summary: "温室花房夜开放；旅行者抵达玻璃温室。",
-};
+/**
+ * E07（0.9.59）：回合推演的唯一输出契约是 `<atlasEdit>` 行增量块（**纯文本**），
+ * 而且**当前位置只随主角三表行的 `locationRef` 变化**——所以旅程夹具里
+ * 主角必须在世界人物表里（见 `buildWorld`），并用一行 `character set` 把他走到玻璃温室。
+ * 旧 v1 草稿夹具（GOOD_DRAFT / openAiResponse）已随草稿执行链一起删除。
+ */
+const JOURNEY_ASSISTANT_TEXT = "你沿小径走向玻璃温室。";
+const JOURNEY_USER_TEXT = "我一整天都在赶路，傍晚到了玻璃温室。";
+/** 用户显式时间词「一整天」= 4 时段下限（模型不再自报 duration）。 */
+const JOURNEY_PERIODS = 4;
+
+function journeyBlock() {
+  return [
+    "<atlasEdit>",
+    JSON.stringify({
+      table: "character", op: "set", ref: "npc:char-main",
+      patch: { locationRef: "loc:4104" }, basis: "observed", quote: "你沿小径走向玻璃温室",
+    }),
+    "</atlasEdit>",
+  ].join("\n");
+}
+
+/** 纯文本助手回复（行增量块用；不能再套 JSON.stringify）。 */
+function openAiTextResponse(text) {
+  return jsonResponse(200, { choices: [{ message: { content: text } }] });
+}
 
 function makeFetch(scripts) {
   const calls = [];
@@ -108,10 +130,6 @@ function jsonResponse(status, payload) {
     status,
     json: async () => payload,
   };
-}
-
-function openAiResponse(draft) {
-  return jsonResponse(200, { choices: [{ message: { content: JSON.stringify(draft) } }] });
 }
 
 /** 组装核心：导入世界 + 绑定指定聊天。时钟严格递增（回退「最近一条」守卫依赖 committedAt 可比）。 */
@@ -157,16 +175,17 @@ test("ATLAS-07 场景 A：零 API 基线——prepare / 地图 / 旅行预览可
 
 test("ATLAS-07 场景 B + swipe + 多聊天：完整旅程一条龙", async () => {
   const fetcher = makeFetch([
-    () => openAiResponse(GOOD_DRAFT), // 1. 回合 A commit
+    () => openAiTextResponse(journeyBlock()), // 1. 回合 A commit
     () => jsonResponse(401, { error: "bad key" }), // 2. 回合 B 首次 commit 失败
-    () => openAiResponse(GOOD_DRAFT), // 3. 回合 B retry 成功
-    () => openAiResponse(GOOD_DRAFT), // 4. 变体 B 重提交
+    () => openAiTextResponse(journeyBlock()), // 3. 回合 B retry 成功
+    () => openAiTextResponse(journeyBlock()), // 4. 变体 B 重提交
   ]);
   const store = createMemoryDocumentStore();
   const { core, world, carrier } = await setup(store, fetcher.fetchFn);
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
-  // C04（§2）：协议严格按设置分派。旅程用 v1 形态草稿（GOOD_DRAFT），协议显式声明 v1。
-  await core.handle("PUT", "/settings", { action: "runtime.update", worldTurnProtocol: "v1" }, { local: true });
+  // E01：运行时只有一个协议（table-delta-v1）；写 v1/v2 会被明确拒绝
+  const legacyProtocol = await core.handle("PUT", "/settings", { action: "runtime.update", worldTurnProtocol: "v1" }, { local: true });
+  assert.equal(legacyProtocol.status, 400, "旧协议不可写（旅程只走唯一的行增量契约）");
 
   // --- 场景 B：正常回合 ---
   const prepared = await core.handle("POST", "/turns/prepare", {
@@ -174,7 +193,7 @@ test("ATLAS-07 场景 B + swipe + 多聊天：完整旅程一条龙", async () =
     messageId: "msg-10",
     worldId: world.id,
     branchId: CANON,
-    userText: "我前往玻璃温室。",
+    userText: JOURNEY_USER_TEXT,
     recentMessageRefs: [],
   });
   assert.equal(prepared.status, 200, "B: prepare 200");
@@ -183,28 +202,39 @@ test("ATLAS-07 场景 B + swipe + 多聊天：完整旅程一条龙", async () =
   assert.equal(travel.status, 200, "旅行预览 200");
   assert.equal(travel.body.data.preview?.destinationId, "4104", "预览目的地正确");
   assert.ok(Number(travel.body.data.preview?.distance) >= 0, "预览含距离");
-  const commitA = await core.handle("POST", "/turns/commit", commitRequest(world, "chat-a"));
+  const commitA = await core.handle("POST", "/turns/commit", commitRequest(world, "chat-a", {
+    userText: JOURNEY_USER_TEXT, assistantText: JOURNEY_ASSISTANT_TEXT,
+  }));
   assert.equal(commitA.body.data.receipt.status, "committed", "B: 回合 A committed");
-  assert.equal(commitA.body.data.receipt.currentTime, 430.07, "B: 时间推进 12 时段");
-  assert.equal(commitA.body.data.receipt.currentLocationId, "4104", "B: 位置推进到玻璃温室");
+  assert.equal(
+    commitA.body.data.receipt.currentTime,
+    CURRENT_TIME + JOURNEY_PERIODS,
+    "B: 时间按用户显式时间词推进 4 段（模型不再自报 duration）",
+  );
+  assert.equal(commitA.body.data.receipt.currentLocationId, "4104", "B: 位置推进到玻璃温室（主角三表行）");
   assert.ok(fetcher.calls[0].headers.Authorization.includes(SECRET), "密钥只进 Authorization 头");
   assert.ok(!JSON.stringify(fetcher.calls[0].body).includes(SECRET), "请求体无密钥");
 
   // --- 刷新恢复：0.9.42 起世界住会话（chatMetadata），新核心实例播种同一会话快照 → 状态一致 + 同请求 duplicate（账本标记防重） ---
   const refreshed = carrierAsCore(createSessionCarrier(
-    createAtlasServerCore({ store, fetchFn: makeFetch([() => openAiResponse(GOOD_DRAFT)]).fetchFn, now: () => NOW }),
+    createAtlasServerCore({ store, fetchFn: makeFetch([() => openAiTextResponse(journeyBlock())]).fetchFn, now: () => NOW }),
     { session: carrier.session },
   ));
   const stateAfter = await refreshed.handle("GET", "/state/chat-a");
-  assert.equal(stateAfter.body.data.currentTime, 430.07, "刷新恢复：游标一致");
+  assert.equal(stateAfter.body.data.currentTime, CURRENT_TIME + JOURNEY_PERIODS, "刷新恢复：游标一致");
   assert.equal(stateAfter.body.data.currentLocationId, "4104", "刷新恢复：位置一致");
-  const duplicate = await refreshed.handle("POST", "/turns/commit", commitRequest(world, "chat-a"));
+  const duplicate = await refreshed.handle("POST", "/turns/commit", commitRequest(world, "chat-a", {
+    userText: JOURNEY_USER_TEXT, assistantText: JOURNEY_ASSISTANT_TEXT,
+  }));
   assert.equal(duplicate.body.data.receipt.status, "duplicate", "刷新后同请求幂等 duplicate（账本标记）");
   const stateAfterDuplicate = await refreshed.handle("GET", "/state/chat-a");
-  assert.equal(stateAfterDuplicate.body.data.currentTime, 430.07, "duplicate 零推进（时间不变）");
+  assert.equal(stateAfterDuplicate.body.data.currentTime, CURRENT_TIME + JOURNEY_PERIODS, "duplicate 零推进（时间不变）");
 
   // --- 失败 → retry 成功（原幂等键） ---
-  const failing = commitRequest(world, "chat-a", { turnId: "turn-b", userMessageId: "msg-14", assistantMessageId: "msg-15", userText: "second", assistantText: "second" });
+  const failing = commitRequest(world, "chat-a", {
+    turnId: "turn-b", userMessageId: "msg-14", assistantMessageId: "msg-15",
+    userText: JOURNEY_USER_TEXT, assistantText: JOURNEY_ASSISTANT_TEXT,
+  });
   const failed = await core.handle("POST", "/turns/commit", failing);
   assert.equal(failed.body.error.code, "API_AUTH_FAILED", "失败分类：401 → API_AUTH_FAILED");
   assert.ok(failed.body.error.retryable === true || failed.body.error.retryable === undefined, "401 不可重试也保留 pending 语义");
@@ -215,17 +245,24 @@ test("ATLAS-07 场景 B + swipe + 多聊天：完整旅程一条龙", async () =
   });
   assert.equal(retry.status, 200, "retry 200");
   assert.equal(retry.body.data.receipt.status, "committed", "retry 成功 committed");
-  assert.equal(retry.body.data.receipt.currentTime, 442.07, "retry 沿原游标推进");
+  assert.equal(retry.body.data.receipt.currentTime, CURRENT_TIME + JOURNEY_PERIODS * 2, "retry 沿原游标推进");
 
   // --- swipe：回退 → 变体同级重提交（时间不累计） ---
   const rolled = await core.handle("POST", "/turns/rollback", { chatId: "chat-a", assistantMessageId: "msg-15" });
   assert.equal(rolled.status, 200, "swipe 回退 200");
   const stateAfterRollback = await core.handle("GET", "/state/chat-a");
-  assert.equal(stateAfterRollback.body.data.currentTime, 430.07, "回退到回合 B 之前（430.07）");
-  const variant = commitRequest(world, "chat-a", { turnId: "turn-b2", userMessageId: "msg-14", assistantMessageId: "msg-15", swipeId: "swipe-2", userText: "second", assistantText: "second" });
+  assert.equal(stateAfterRollback.body.data.currentTime, CURRENT_TIME + JOURNEY_PERIODS, "回退到回合 B 之前");
+  const variant = commitRequest(world, "chat-a", {
+    turnId: "turn-b2", userMessageId: "msg-14", assistantMessageId: "msg-15", swipeId: "swipe-2",
+    userText: JOURNEY_USER_TEXT, assistantText: JOURNEY_ASSISTANT_TEXT,
+  });
   const variantCommit = await core.handle("POST", "/turns/commit", variant);
   assert.equal(variantCommit.body.data.receipt.status, "committed", "变体 committed（非 duplicate）");
-  assert.equal(variantCommit.body.data.receipt.currentTime, 442.07, "同级结果：时间不累计（442.07 而非 454.07）");
+  assert.equal(
+    variantCommit.body.data.receipt.currentTime,
+    CURRENT_TIME + JOURNEY_PERIODS * 2,
+    "同级结果：时间不累计（同一起点重新推进，而非再叠加一段）",
+  );
 
   // --- 多聊天隔离：0.9.42 会话承载 = 每聊天一个会话（一卡多聊 = 独立世界副本）---
   const coreB = carrierAsCore(createSessionCarrier(

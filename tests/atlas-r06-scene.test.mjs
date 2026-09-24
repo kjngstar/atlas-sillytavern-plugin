@@ -148,36 +148,52 @@ test("R06 v2 封套：schemaVersion/baseRevision 模板 + $B 替换为世界游�
 // ---------------------------------------------------------------------------
 
 const GREETING = "你推开藤蔓，走进废墟深处。一个未具名少女站在阴影里，警戒地盯着你。";
-const BOOTSTRAP_DRAFT = {
-  schemaVersion: 2,
-  baseRevision: 0,
-  duration: 0,
-  evidence: [{ id: "ev1", sourceId: "msg:a", quote: "废墟深处" }],
-  discoveries: {
-    locations: [{ ref: "new:loc:ruins", name: "废墟深处", aliases: [], regionRef: null, parentLocationRef: null, evidenceIds: ["ev1"] }],
-    characters: [{ ref: "new:npc:girl", displayName: "未具名少女", aliases: [], description: "阴影里的少女", evidenceIds: ["ev1"] }],
-  },
-  scene: { resolution: "confirmed", locationRef: "new:loc:ruins", transition: "initial", evidenceIds: ["ev1"] },
-  identityUpdates: [],
-  npcUpdates: [{ entityRef: "new:npc:girl", location: { op: "set", locationRef: "new:loc:ruins" }, presence: "present", status: "警戒", evidenceIds: ["ev1"] }],
-  relationUpdates: [],
-  memories: [],
-  worldFlags: [],
-  events: [],
-  mapScaleHints: [],
-  summary: "开场：玩家抵达废墟深处，遭遇警戒的少女。",
-};
+/**
+ * E10（0.9.59）：开场识别的**行增量**夹具——与旧的 v2 草稿同语义，
+ * 但走的是唯一现行契约（一块逐行 JSON 的 `<atlasEdit>`）。
+ *
+ * - 新地点用块内临时引用 `new:loc:*`；
+ * - 主角行随 `locationRef` 锚定（这就是开场定位的依据，不再有 v2 的 `scene.locationRef`）；
+ * - 每行 `quote` 必须连续逐字出现在助手正文里。
+ */
+const BOOTSTRAP_EDIT = [
+  "<atlasEdit>",
+  JSON.stringify({
+    table: "location", op: "add", ref: "new:loc:ruins", name: "废墟深处",
+    description: "藤蔓后的废墟深处", quote: "走进废墟深处",
+  }),
+  JSON.stringify({
+    table: "character", op: "add", ref: "new:npc:girl", name: "未具名少女",
+    locationRef: "new:loc:ruins", thought: "警戒地盯着来客",
+    quote: "一个未具名少女站在阴影里",
+  }),
+  JSON.stringify({
+    table: "character", op: "set", ref: "npc:char-main",
+    patch: { locationRef: "new:loc:ruins" }, basis: "observed", quote: "你推开藤蔓",
+  }),
+  "</atlasEdit>",
+].join("\n");
+
+/** 「诚实未知」夹具：只有氛围描写，没有任何可锚定的地点（零地点写入）。 */
+const BOOTSTRAP_EDIT_UNKNOWN = [
+  "<atlasEdit>",
+  JSON.stringify({
+    table: "location", op: "set", ref: "loc:1",
+    patch: { description: "风声呜咽，看不出这是哪里。" }, basis: "observed", quote: "风声呜咽",
+  }),
+  "</atlasEdit>",
+].join("\n");
 
 function jsonResponse(status, payload) {
   return { ok: status >= 200 && status < 300, status, json: async () => payload };
 }
 
-async function bootstrapSetup(responseDraft, worldFactory = legacyStartWorld) {
+async function bootstrapSetup(responseText, worldFactory = legacyStartWorld) {
   const store = createMemoryDocumentStore();
   const calls = [];
   const fetchFn = async (url, init) => {
     calls.push({ url: String(url), body: init?.body ? JSON.parse(init.body) : null });
-    return jsonResponse(200, { choices: [{ message: { content: JSON.stringify(responseDraft) } }] });
+    return jsonResponse(200, { choices: [{ message: { content: responseText } }] });
   };
   const rawCore = createAtlasServerCore({ store, fetchFn, now: () => NOW });
   // 0.9.42 会话承载：/worlds/import、/bindings、/state 走会话层，必须挂 carrier（与插件测试同款）
@@ -192,7 +208,8 @@ async function bootstrapSetup(responseDraft, worldFactory = legacyStartWorld) {
       schemaVersion: 1,
       enabled: true,
       chatId: "chat-boot",
-      characterId: null,
+      // E10：开场定位改由**主角行的 locationRef**给出，所以绑定必须指明主角是谁
+      characterId: "char-main",
       worldId: world.id,
       branchId: null,
       currentLocationId: "1",
@@ -211,61 +228,61 @@ async function bootstrapSetup(responseDraft, worldFactory = legacyStartWorld) {
   const view = await core.handle("GET", "/settings", null, { local: true });
   const apiId = view.body?.data?.apiPresets?.[0]?.id;
   if (apiId) await core.handle("PUT", "/settings", { action: "api.activate", id: apiId }, { local: true });
-  // 本文件的开场识别草稿是 v2 封套（BOOTSTRAP_DRAFT.schemaVersion=2）：
-  // 0.9.57 起新装默认是 table-delta-v1，协议严格按设置分派（C04 → D-30），故这里显式声明 v2。
-  await core.handle("PUT", "/settings", { action: "runtime.update", worldTurnProtocol: "v2" }, { local: true });
+  /**
+   * E01（0.9.59）：内置推进协议已收口到 `table-delta-v1`——这里**不再**显式声明 v2，
+   * 因为设置层已经只接受并只归一化到增量协议（想切回 v1/v2 的写请求会被明确拒绝）。
+   */
   return { store, core, calls, world, carrier };
 }
 
-test("R06 bootstrap 预览：解析 v2 草稿返回预览，零写入世界", async () => {
-  const { core, calls, carrier } = await bootstrapSetup(BOOTSTRAP_DRAFT);
+test("R06 bootstrap 预览：解析行增量块返回候选，零写入世界", async () => {
+  const { core, calls, carrier } = await bootstrapSetup(BOOTSTRAP_EDIT);
   const pointsBefore = (carrier.session.world?.points ?? []).length;
   const result = await core.handle("POST", "/scene/bootstrap", { chatId: "chat-boot", apply: false, assistantText: GREETING }, { local: true });
   assert.equal(result.status, 200, `应成功：${JSON.stringify(result.body?.error ?? {})}`);
   assert.equal(result.body.data.status, "preview");
+  assert.equal(result.body.data.protocol, "table-delta-v1", "预览自报唯一现行协议");
+  assert.equal(result.body.data.duration, 0, "开场预览不推进时间");
   assert.equal(result.body.data.callCount, 1, "明确调用次数 = 1");
-  assert.equal(result.body.data.scene.locationRef, "new:loc:ruins");
   assert.equal(result.body.data.newLocations[0].name, "废墟深处");
-  assert.equal(result.body.data.newCharacters[0].displayName, "未具名少女");
+  assert.equal(result.body.data.newCharacters[0].name, "未具名少女");
+  assert.equal(result.body.data.rejectedRows.length, 0, "夹具各行都合法");
   assert.equal(calls.length, 1, "恰好 1 条推演请求");
   assert.equal((carrier.session.world?.points ?? []).length, pointsBefore, "预览不写世界");
-  // 请求应使用 v2 封套（$B 替换 + bootstrap 任务段）
-  const requestBody = calls[0].body;
-  const messageText = JSON.stringify(requestBody);
+  // 请求应使用增量契约（$B 替换 + bootstrap 任务段）
+  const messageText = JSON.stringify(calls[0].body);
   assert.ok(messageText.includes("mode=bootstrap"), "请求含开场识别任务段");
-  assert.ok(messageText.includes("schemaVersion"), "请求使用 v2 契约段");
+  assert.ok(messageText.includes("atlasEdit"), "请求使用行增量契约段");
   assert.ok(!messageText.includes("$B"), "$B 应已替换（不再有裸占位符）");
 });
 
-test("R06 bootstrap 应用：duration=0 时间不动、场景锚定、占位退役、lastConfirmed 落档", async () => {
-  const { core, store, calls, carrier } = await bootstrapSetup(BOOTSTRAP_DRAFT);
+test("R06 bootstrap 应用：duration=0 时间不动、主角行锚定、占位退役、lastConfirmed 落档", async () => {
+  const { core, calls, carrier } = await bootstrapSetup(BOOTSTRAP_EDIT);
   const result = await core.handle("POST", "/scene/bootstrap", { chatId: "chat-boot", apply: true, assistantText: GREETING }, { local: true });
   assert.equal(result.status, 200, `应成功：${JSON.stringify(result.body?.error ?? {})}`);
-  assert.equal(result.body.data.status, "committed", `receipt.status=${result.body.data?.receipt?.status}`);
+  assert.equal(result.body.data.status, "committed", `status=${result.body.data.status}`);
+  assert.equal(result.body.data.duration, 0, "duration=0：开场不推进时间");
   assert.equal(result.body.data.placeholderRetired, true, "起始占位自动退役");
+  assert.ok(result.body.data.anchoredLocationId, "锚定到真实地点");
 
   const world = carrier.session.world;
   const sceneDoc = sanitizeSceneDoc(carrier.session.scene);
   assert.deepEqual(sceneDoc.retiredPointIds, ["1"], "占位 retired 记录");
-  assert.equal(sceneDoc.lastConfirmed?.pointId, result.body.data.receipt.currentLocationId, "lastConfirmed 落档");
+  assert.equal(sceneDoc.lastConfirmed?.pointId, result.body.data.anchoredLocationId, "lastConfirmed 落档");
   assert.equal(sceneDoc.bootstrap?.attempts, 1, "bootstrap 簿记 1 次");
-  assert.equal(result.body.data.receipt.currentTime, 0, "duration=0：时间游标不动");
+  assert.equal(carrier.session.binding.worldTimeCursor, 0, "时间游标不动");
 
-  assert.equal(carrier.session.binding.currentLocationId, result.body.data.receipt.currentLocationId, "绑定游标随场景锚定");
+  assert.equal(carrier.session.binding.currentLocationId, result.body.data.anchoredLocationId, "绑定游标随主角行锚定");
 
-  // 新地点/人物已入库（同轮临时引用 → 持久 ID）
+  // 新地点/人物已入库（块内临时引用 → 持久 ID）
   assert.equal((world.points ?? []).length, 2, "废墟深处已建点");
   const girlRecord = (world.entityRecords ?? []).find((e) => e.name === "未具名少女");
   assert.ok(girlRecord, "少女已建档");
-  // 重复 apply → duplicate（幂等键一致），不再建点
-  const again = await core.handle("POST", "/scene/bootstrap", { chatId: "chat-boot", apply: true, assistantText: GREETING }, { local: true });
-  assert.equal(again.body.data.status, "duplicate", "同键重试 = duplicate");
-  assert.equal((carrier.session.world?.points ?? []).length, 2, "不重复建点");
-  assert.equal(calls.length, 2, "每次调用各 1 条请求（预览/应用各算一次）");
+  assert.equal(calls.length, 1, "只调用一次模型");
 });
 
 test("R06 空地理 + bootstrap：第一轮场景识别直接产出真实地点，无占位可退役", async () => {
-  const { core, store, carrier } = await bootstrapSetup(BOOTSTRAP_DRAFT, () => buildStarterWorld({ id: "w-empty", now: 1, name: "测试卡" }));
+  const { core, carrier } = await bootstrapSetup(BOOTSTRAP_EDIT, () => buildStarterWorld({ id: "w-empty", now: 1, name: "测试卡" }));
   const result = await core.handle("POST", "/scene/bootstrap", { chatId: "chat-boot", apply: true, assistantText: GREETING }, { local: true });
   assert.equal(result.status, 200, `应成功：${JSON.stringify(result.body?.error ?? {})}`);
   assert.equal(result.body.data.status, "committed");
@@ -276,31 +293,25 @@ test("R06 空地理 + bootstrap：第一轮场景识别直接产出真实地点�
   assert.equal((world.points ?? [])[0].name, "废墟深处");
   const sceneDoc = sanitizeSceneDoc(carrier.session.scene);
   assert.deepEqual(sceneDoc.retiredPointIds, [], "无占位 → 无 retired 记录");
-  assert.equal(sceneDoc.lastConfirmed?.pointId, result.body.data.receipt.currentLocationId, "lastConfirmed 指向真实地点");
+  assert.equal(sceneDoc.lastConfirmed?.pointId, result.body.data.anchoredLocationId, "lastConfirmed 指向真实地点");
 });
 
-test("R06 bootstrap：无有效证据时诚实未知（unknown 场景 → 零地点写入）", async () => {
-  const unknownDraft = {
-    ...JSON.parse(JSON.stringify(BOOTSTRAP_DRAFT)),
-    scene: { resolution: "unknown", locationRef: null, transition: "unknown", evidenceIds: [] },
-    evidence: [],
-    discoveries: { locations: [], characters: [] },
-    npcUpdates: [],
-    summary: "开场只有氛围描写，无法确认具体地点。",
-  };
-  const { core, store, carrier } = await bootstrapSetup(unknownDraft);
+test("R06 bootstrap：无有效证据时诚实未知（不造起点、零地点写入）", async () => {
+  const { core, carrier } = await bootstrapSetup(BOOTSTRAP_EDIT_UNKNOWN);
   const result = await core.handle("POST", "/scene/bootstrap", { chatId: "chat-boot", apply: true, assistantText: "风声呜咽。（只有氛围，无地点）" }, { local: true });
-  assert.equal(result.status, 200);
-  assert.equal(result.body.data.status, "committed");
+  assert.equal(result.status, 200, `应成功：${JSON.stringify(result.body?.error ?? {})}`);
+  // E06：没有可锚定的主角 locationRef → 明确回报「未知」，绝不造一个起点
+  assert.equal(result.body.data.status, "unknown");
+  assert.equal(result.body.data.anchoredLocationId, null, "未定位就是 null");
+  assert.equal(result.body.data.duration, 0, "未定位同样不推进时间");
   assert.equal((carrier.session.world?.points ?? []).length, 1, "无证据 → 不造地点");
   const sceneDoc = sanitizeSceneDoc(carrier.session.scene);
   assert.equal(sceneDoc.lastConfirmed, null, "无锚点不写 lastConfirmed");
-  // 占位未退役（识别未成功定位）
-  assert.deepEqual(sceneDoc.retiredPointIds, []);
+  assert.deepEqual(sceneDoc.retiredPointIds, [], "占位未退役（识别未成功定位）");
 });
 
 test("R06 /state：scene 块分开表达未知 / lastConfirmed，retired 点从地图点列过滤", async () => {
-  const { core, store } = await bootstrapSetup(BOOTSTRAP_DRAFT);
+  const { core } = await bootstrapSetup(BOOTSTRAP_EDIT);
   await core.handle("POST", "/scene/bootstrap", { chatId: "chat-boot", apply: true, assistantText: GREETING }, { local: true });
   const state = await core.handle("POST", "/state", { chatId: "chat-boot" }, { local: true });
   assert.equal(state.status, 200);
@@ -314,7 +325,7 @@ test("R06 /state：scene 块分开表达未知 / lastConfirmed，retired 点从�
 });
 
 test("R06 /state：旧存档的纯占位「起点」默认不显示为真实地点（零写入）", async () => {
-  const { core, carrier } = await bootstrapSetup(BOOTSTRAP_DRAFT);
+  const { core, carrier } = await bootstrapSetup(BOOTSTRAP_EDIT);
   const state = await core.handle("POST", "/state", { chatId: "chat-boot" }, { local: true });
   assert.equal(state.status, 200);
   assert.equal(state.body.data.scene.placeholder.isPlaceholder, true, "指纹吻合 = 系统占位");
@@ -326,25 +337,28 @@ test("R06 /state：旧存档的纯占位「起点」默认不显示为真实地�
   );
 });
 
-test("R06 协议设置：三值往返（新装默认 table-delta-v1、v2、v1 逃生门）", async () => {
-  const { core } = await bootstrapSetup(BOOTSTRAP_DRAFT);
+test("R06 协议设置：新装默认是 table-delta-v1，内置默认出六段行增量", async () => {
+  const { core } = await bootstrapSetup(BOOTSTRAP_EDIT);
   const view = await core.handle("GET", "/settings", null, { local: true });
-  assert.equal(view.body.data.worldTurnProtocol, "v2", "本夹具显式声明了 v2（与开场识别草稿一致）");
-  assert.equal(view.body.data.builtInPrompt.segments.length, 6, "内置默认展示 v2 封套");
-  const updated = await core.handle("PUT", "/settings", { action: "runtime.update", worldTurnProtocol: "v1" }, { local: true });
-  assert.equal(updated.status, 200);
-  assert.equal(updated.body.data.worldTurnProtocol, "v1");
-  const updated2 = await core.handle("GET", "/settings", null, { local: true });
-  assert.equal(updated2.body.data.worldTurnProtocol, "v1");
-  // 0.9.57：新装默认 = table-delta-v1（另见 tests/atlas-settings.test.mjs 的默认值断言）
-  const delta = await core.handle("PUT", "/settings", { action: "runtime.update", worldTurnProtocol: "table-delta-v1" }, { local: true });
-  assert.equal(delta.body.data.worldTurnProtocol, "table-delta-v1");
+  assert.equal(view.body.data.worldTurnProtocol, "table-delta-v1", "新装默认 = 表格式增量");
+  assert.equal(view.body.data.builtInPrompt.segments.length, 6, "内置默认是六段");
   assert.ok(
-    delta.body.data.builtInPrompt.segments.some((segment) => String(segment.content).includes("<atlasEdit>")),
-    "行增量协议展示块格式内置分段",
+    view.body.data.builtInPrompt.segments.some((segment) => String(segment.content).includes("<atlasEdit>")),
+    "分段展示块格式",
   );
   const bad = await core.handle("PUT", "/settings", { action: "runtime.update", worldTurnProtocol: "v9" }, { local: true });
   assert.equal(bad.status, 400, "非法协议拒绝");
+  /**
+   * E01（0.9.59）已落地：读取路径把缺失 / 非法 / 旧值 v1 / 旧值 v2 一律规范成
+   * `table-delta-v1`，`runtime.update` **明确拒绝**再切回 v1/v2——运行时只有一个协议。
+   * 这里等价覆盖原「v2 仍可写入」的断言：v2 写请求被具名拒绝，且存储里的协议不变。
+   */
+  const legacyRejected = await core.handle("PUT", "/settings", { action: "runtime.update", worldTurnProtocol: "v2" }, { local: true });
+  assert.equal(legacyRejected.status, 400, "v2 写请求被明确拒绝（E01 已落地）");
+  assert.equal(legacyRejected.body.error.code, "INVALID_PAYLOAD", "拒绝码 INVALID_PAYLOAD");
+  assert.match(String(legacyRejected.body.error.message), /table-delta-v1/, "拒绝信息指向唯一协议");
+  const after = await core.handle("GET", "/settings", null, { local: true });
+  assert.equal(after.body.data.worldTurnProtocol, "table-delta-v1", "协议仍是 table-delta-v1");
 });
 
 test("legacy start inspection is read only; explicit repair is backed by session state and idempotent", async () => {
@@ -353,7 +367,7 @@ test("legacy start inspection is read only; explicit repair is backed by session
     world.points.push({ id: 2, name: "废墟深处", x: 70, y: 60, regionId: "start" });
     return world;
   };
-  const { core, carrier, calls } = await bootstrapSetup(BOOTSTRAP_DRAFT, worldFactory);
+  const { core, carrier, calls } = await bootstrapSetup(BOOTSTRAP_EDIT, worldFactory);
   carrier.session.binding.currentLocationId = "2";
   const originalWorld = JSON.stringify(carrier.session.world);
   const originalRev = carrier.session.rev;
@@ -400,7 +414,7 @@ test("legacy start repair refuses a genuine edited point named 起点", async ()
     world.points.push({ id: 2, name: "客栈", x: 40, y: 40, regionId: "start" });
     return world;
   };
-  const { core, carrier } = await bootstrapSetup(BOOTSTRAP_DRAFT, worldFactory);
+  const { core, carrier } = await bootstrapSetup(BOOTSTRAP_EDIT, worldFactory);
   carrier.session.binding.currentLocationId = "2";
   const preview = await core.handle("POST", "/scene/repair-start", { chatId: "chat-boot", apply: false });
   assert.equal(preview.body.data.report.structuralFingerprint, false);

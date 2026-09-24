@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 
 import {
   computeMapFrame,
+  emptyMapFrame,
   fitCamera,
   setCameraZoom,
   zoomCameraAtPoint,
@@ -209,4 +210,42 @@ test("dist/atlas-ui-core.mjs 必须导出 R08 相机 / 手势 API（index.js 从
   ]) {
     assert.equal(typeof dist[name], "function", `dist 必须导出 "${name}"`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// F07：地图框只按**真实坐标** fit，示意点不算已知几何
+// ---------------------------------------------------------------------------
+
+test("F07 全图只有示意点时按整张 frame fit，不把示意点当已知几何", () => {
+  /**
+   * 契约（§2.4 / F07）：`displayOnly`（示意 / 待定位）点不是已知几何。
+   * 调用方必须**先过滤**再喂给 `computeMapFrame`；一个真实点都没有时用 `emptyMapFrame()`，
+   * 于是相机围着整张 frame 而不是围着排版出来的位置转。
+   *
+   * 这里钉住的就是这条纯函数契约：空输入 → 整张默认 frame，而不是 0 跨度 /
+   * 被某个示意坐标拉偏的框。
+   */
+  const frame = computeMapFrame([]);
+  assert.deepEqual(frame, emptyMapFrame(), "没有真实坐标 → 整张默认 frame");
+  assert.equal(frame.spanX, 100);
+  assert.equal(frame.spanY, 100);
+
+  const cam = fitCamera(frame, 800, 600);
+  assert.ok(cam.k > 0, "整张 frame 也能 fit 出可用相机");
+  // 示意点若被当成真实点，会得到一个被拉偏的框——这正是要避免的
+  const polluted = computeMapFrame([{ x: 9999, y: -9999 }]);
+  assert.notDeepEqual(polluted, frame, "真实点确实会改变 frame（所以过滤必须发生在调用侧）");
+  assert.ok(polluted.maxX > 9999 - 1, "真实点参与计算");
+});
+
+test("F07 标记反缩放只是视觉系数：不改帧、不改比例尺几何", () => {
+  const frame = computeMapFrame([{ x: 0, y: 0 }, { x: 100, y: 100 }]);
+  const cam = fitCamera(frame, 800, 600);
+  const inv = markerInverseScale(cam);
+  // k × inv = 1：标记保持原始 CSS 像素尺寸，与世界每格像素数分离
+  assert.ok(Math.abs(cam.k * inv - 1) < 1e-9, "k × markerInverseScale = 1");
+  // 相机本身一个字段都没被它改过
+  const again = fitCamera(frame, 800, 600);
+  assert.deepEqual(cam, again, "反缩放是纯函数，不影响相机与格距");
+  assert.deepEqual(computeMapFrame([{ x: 0, y: 0 }, { x: 100, y: 100 }]), frame, "帧也不受影响");
 });

@@ -85,6 +85,84 @@ export interface AtlasReceiptRecord {
   recordedAt: number;
 }
 
+/**
+ * D06：`/state` 的后台推演只读视图（服务端投影见 atlas-server 的 simulationView）。
+ * 这里只做**有界校验**：形状不对就当没有（旧版 /state 不带该字段同样走这条路）。
+ */
+export interface AtlasSimulationView {
+  branchKey: string;
+  tasks: Array<Record<string, unknown>>;
+  signals: Array<Record<string, unknown>>;
+  deliveries: Array<Record<string, unknown>>;
+  recentEvents: Array<Record<string, unknown>>;
+  counts: {
+    tasks: number; signals: number; deliveries: number; events: number;
+    activeTasks: number; blockedTasks: number;
+  };
+  truncated: { tasks: number; signals: number; deliveries: number; events: number };
+  /** 当前位置是否已知：「尚未确定当前位置」与「附近没有人」是两件事（§2.4）。 */
+  currentLocationKnown: boolean;
+  visibility: "known" | "all";
+  /** 服务端明确报告模块损坏时为 true（数据已保留，绝不静默当成空表）。 */
+  corrupt: boolean;
+}
+
+/** 与 atlas-ui-core 的渲染上限对齐：解析期就截断，绝不把无界数组带进面板。 */
+const SIMULATION_VIEW_ROW_CAP = 64;
+
+function simulationRows(value: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(value)) return [];
+  const rows: Array<Record<string, unknown>> = [];
+  for (const row of value.slice(0, SIMULATION_VIEW_ROW_CAP)) {
+    if (row && typeof row === "object" && !Array.isArray(row)) rows.push(row as Record<string, unknown>);
+  }
+  return rows;
+}
+
+function boundedCount(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.min(Math.floor(value), 1_000_000) : 0;
+}
+
+/**
+ * D06：校验 `/state` 的 `simulationView`。
+ * 返回 null = 旧版响应 / 形状非法 —— 调用方保持既有行为（不回退成「空推演」结论）。
+ */
+export function parseAtlasSimulationView(raw: unknown): AtlasSimulationView | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const value = raw as Record<string, unknown>;
+  const branchKey = typeof value.branchKey === "string" ? value.branchKey : "";
+  if (branchKey.length === 0 || branchKey.length > 120) return null;
+  const counts = (value.counts && typeof value.counts === "object" && !Array.isArray(value.counts)
+    ? value.counts : {}) as Record<string, unknown>;
+  const truncated = (value.truncated && typeof value.truncated === "object" && !Array.isArray(value.truncated)
+    ? value.truncated : {}) as Record<string, unknown>;
+  return {
+    branchKey,
+    tasks: simulationRows(value.tasks),
+    signals: simulationRows(value.signals),
+    deliveries: simulationRows(value.deliveries),
+    recentEvents: simulationRows(value.recentEvents),
+    counts: {
+      tasks: boundedCount(counts.tasks),
+      signals: boundedCount(counts.signals),
+      deliveries: boundedCount(counts.deliveries),
+      events: boundedCount(counts.events),
+      activeTasks: boundedCount(counts.activeTasks),
+      blockedTasks: boundedCount(counts.blockedTasks),
+    },
+    truncated: {
+      tasks: boundedCount(truncated.tasks),
+      signals: boundedCount(truncated.signals),
+      deliveries: boundedCount(truncated.deliveries),
+      events: boundedCount(truncated.events),
+    },
+    currentLocationKnown: value.currentLocationKnown === true,
+    visibility: value.visibility === "all" ? "all" : "known",
+    corrupt: value.corrupt === true,
+  };
+}
+
 export interface AtlasUiState {
   mode: AtlasUiMode;
   page: AtlasUiPage;
@@ -104,6 +182,16 @@ export interface AtlasUiState {
   chatId: string | null;
   /** 就绪时的 /state 有界数据（世界名、位置、附近 NPC、地图点集、最近推进等） */
   stateData: Record<string, unknown> | null;
+  /**
+   * D06：后台推演模块的只读视图（`/state` 的 `simulationView`）。
+   * 校验失败或旧版 /state 不带该字段时为 null —— 旧客户端行为一字不变。
+   */
+  simulationView: AtlasSimulationView | null;
+  /**
+   * D08：幕后动向的可见范围。默认只显示「已知」；作者可显式切到「全部（含未被主角得知）」，
+   * 界面必须解释全量视图会包含角色秘密。切聊天即复位为 `known`。
+   */
+  simulationVisibility: "known" | "all";
   /** 旅行预览（地图点击目的地后暂存；确认 = 只填酒馆输入框，不自动发送） */
   destinationPreview: AtlasDestinationPreview | null;
   /** 在途回合（MESSAGE_SENT → prepare 成功；停止 / 失败即放弃） */
@@ -197,6 +285,12 @@ export interface AtlasUiCore {
   getState(): AtlasUiState;
   setPanelOpen(open: boolean): void;
   setPage(page: AtlasUiPage): void;
+  /**
+   * D08：作者的「查看全部幕后推演」开关。
+   * 默认 `known`（只给主角可知的）；切到 `all` 会带上 hidden 内容并**明确标注**。
+   * 它只影响读取视图，不改任何数据本体，也绝不跨聊天保留。
+   */
+  setSimulationVisibility(visibility: "known" | "all"): Promise<void>;
   /** ATLAS-18：手动重试首条消息自动建世（概览页按钮）。 */
   initializeWorld(): Promise<boolean>;
   bindToWorld(worldId: string): Promise<void>;
@@ -338,6 +432,8 @@ export function createAtlasUiCore(deps: {
     bindingInvalid: false,
     chatId: null,
     stateData: null,
+    simulationView: null,
+    simulationVisibility: "known",
     destinationPreview: null,
     pendingTurn: null,
     receipts: [],
@@ -580,7 +676,11 @@ export function createAtlasUiCore(deps: {
     }
     try {
       // 0.9.42 会话承载：/state 改 POST，chatId 随体携带（世界文档由 api 封装随请求带上）
-      const result = await api.request("POST", "/state", { chatId: binding.chatId });
+      const result = await api.request("POST", "/state", {
+        chatId: binding.chatId,
+        // D08：只有作者显式切到「全部」时才带上这个字段——默认请求形状与旧版一致
+        ...(state.simulationVisibility === "all" ? { simulationVisibility: "all" } : {}),
+      });
       const body = result.body as { ok?: boolean; error?: { code?: string; message?: string }; data?: Record<string, unknown> };
       // 等待期间聊天已切换 → 响应属于旧聊天，丢弃（stateData 绝不跨聊天存活）
       if (state.chatId === null || binding.chatId !== state.chatId) {
@@ -600,7 +700,18 @@ export function createAtlasUiCore(deps: {
         diagnostic({ level: "debug", source: "ui", code: "STATE_REFRESH_COMPLETE",
           operation: "state", phase: "response", outcome: "success",
           httpStatus: result.status });
-        setState({ mode: "ready", stateData: body.data, lastError: null });
+        /**
+         * D06：推演视图必须**校验后**才进面板（无界数组在解析期截断）。
+         * 跨聊天竞态由上面的 chatId 复核 + 切聊天清空共同保证；
+         * 旧版 /state 没有该字段时保持既有行为（simulationView = null，绝不回退成「空推演」结论）。
+         */
+        const simulationView = parseAtlasSimulationView((body.data as Record<string, unknown>).simulationView);
+        setState({
+          mode: "ready",
+          stateData: body.data,
+          simulationView,
+          lastError: null,
+        });
         return;
       }
       const code = body.error?.code ?? "";
@@ -673,6 +784,10 @@ export function createAtlasUiCore(deps: {
       setState({
         binding: null,
         stateData: null,
+        // D06：推演视图同属旧聊天——切聊天必须一起摘掉，绝不让上一聊天的幕后动向留在面板上
+        simulationView: null,
+        // D08：全量视图开关同样不跨聊天保留（作者在 A 打开的「含秘密」不该在 B 继续生效）
+        simulationVisibility: "known",
         mode: "unbound",
         modeHint: null,
         pendingTurn: null,
@@ -1403,6 +1518,21 @@ export function createAtlasUiCore(deps: {
 
     setPage(page: AtlasUiPage) {
       setState({ page });
+    },
+
+    /**
+     * D08：切换幕后动向的可见范围。
+     * 只改读取参数并刷新——**不写任何数据**，也不改变谁真的知道什么。
+     */
+    async setSimulationVisibility(visibility: "known" | "all") {
+      const next = visibility === "all" ? "all" : "known";
+      if (state.simulationVisibility === next) return;
+      setState({ simulationVisibility: next });
+      diagnostic({
+        level: "info", source: "ui", code: "SIMULATION_VISIBILITY_CHANGED",
+        operation: "state", phase: "simulation", outcome: "success",
+      });
+      await refresh();
     },
 
     async bindToWorld(worldId: string) {

@@ -66,7 +66,11 @@ export type AtlasEditParseCode =
   | "INFERRED_FIELD_NOT_ALLOWED"
   | "DEPENDENCY_FAILED"
   | "NO_VALID_EDIT_LINES"
-  | "TABLE_VALIDATION_FAILED";
+  | "TABLE_VALIDATION_FAILED"
+  | "SIGNAL_OP_INVALID"
+  | "SIGNAL_KIND_INVALID"
+  | "SIGNAL_ORIGIN_INVALID"
+  | "SIGNAL_TOPIC_INVALID";
 
 export interface AtlasEditRowRejection {
   /** 块内非空行号（1 起）；块级错误为 0。 */
@@ -74,6 +78,23 @@ export interface AtlasEditRowRejection {
   code: AtlasEditParseCode;
   path: string;
   ref?: string;
+}
+
+/**
+ * E04：通过校验的 `simulation.propose` 行（只登记**待传播事实**）。
+ *
+ * 模型能做的只有「提出一件已经公开的事」：
+ * - `originRef` 必须是本轮**已确认的实际发起地点**（不接受 `new:*` 临时引用）；
+ * - `sourceQuoteId` 由**程序**给定（引文必须连续逐字命中助手正文），不接受模型自报；
+ * - 到达时间、传播对象、收件人、人物移动一律不由模型决定（那是 D02 的算法职责）。
+ */
+export interface AtlasSignalProposalRow {
+  line: number;
+  originRef: string;
+  topic: string;
+  quote: string;
+  sourceQuoteId: string;
+  visibility: "known" | "hidden";
 }
 
 export interface AtlasEditBlockResult {
@@ -85,6 +106,8 @@ export interface AtlasEditBlockResult {
   noop: boolean;
   /** 块级失败的具名错误（status === "rejected" 时非 null）。 */
   error: AtlasEditRowRejection | null;
+  /** E04：本块中合法的 `simulation.propose` 候选（与三表行分流，绝不混进三表校验）。 */
+  signalProposals: AtlasSignalProposalRow[];
 }
 
 const OPEN_TAG = "<atlasEdit>";
@@ -102,6 +125,18 @@ const PATCH_FIELDS: Record<string, Set<string>> = {
   character: new Set(["name", "locationRef", "thought", "actionTendency", "currentAction", "targetLocationRef", "presence"]),
   item: new Set(["name", "description", "status", "locationRef", "holderRef"]),
 };
+
+/**
+ * E04：`simulation.propose` 的字段白名单 —— **只有这八个键**。
+ * 刻意不含 `status` / `duePeriod` / 任何坐标或时间数字：模型不许决定到达时间、
+ * 传播范围与人物真实移动（§2.2 原话）。
+ */
+const SIMULATION_PROPOSE_FIELDS = new Set([
+  "table", "op", "ref", "kind", "originRef", "topic", "quote", "basis",
+]);
+
+/** E04：topic 的长度上限与 §2.1 的 `ATLAS_SIMULATION_LIMITS.topicChars` 同一口径。 */
+const SIGNAL_TOPIC_CHARS = 160;
 
 /** 各表的局部引用前缀（§2：`new:loc:*` / `new:npc:*` / `new:item:*`）。 */
 const TEMP_REF_PREFIX: Record<string, string> = {
@@ -229,7 +264,7 @@ export function parseAtlasEditBlock(text: unknown, sources: AtlasEditSources = {
   const rejected: AtlasEditRowRejection[] = [];
   const fail = (code: AtlasEditParseCode, path: string, ref?: string): AtlasEditBlockResult => {
     const error: AtlasEditRowRejection = { line: 0, code, path, ...(ref === undefined ? {} : { ref }) };
-    return { status: "rejected", edits: [], rejected: [...rejected, error], noop: false, error };
+    return { status: "rejected", edits: [], rejected: [...rejected, error], noop: false, error, signalProposals: [] };
   };
   const raw = typeof text === "string" ? text : "";
   const prepared = stripLeadingReasoning(raw);
@@ -244,6 +279,7 @@ export function parseAtlasEditBlock(text: unknown, sources: AtlasEditSources = {
   if (lines.length === 0) return fail("BLOCK_EMPTY", "$.block");
 
   const edits: AtlasTableEdit[] = [];
+  const signalProposals: AtlasSignalProposalRow[] = [];
   const acceptedTempRefs = new Set<string>();
   let sawNoop = false;
 
@@ -272,6 +308,57 @@ export function parseAtlasEditBlock(text: unknown, sources: AtlasEditSources = {
       return;
     }
     const table = typeof record.table === "string" ? record.table : "";
+    /**
+     * E04：`simulation.propose` 走**独立分支**——它不是三表行，绝不进三表白名单与三表校验。
+     * 单行失败只丢这一行；块整体全错 / 未闭合仍按原逻辑拒绝。
+     */
+    if (table === "simulation") {
+      for (const key of Object.keys(record)) {
+        if (!SIMULATION_PROPOSE_FIELDS.has(key)) {
+          reject("FIELD_NOT_ALLOWED", `$.${key}`);
+          return;
+        }
+      }
+      if (record.op !== "propose") {
+        reject("SIGNAL_OP_INVALID", "$.op");
+        return;
+      }
+      if (record.kind !== "signal") {
+        reject("SIGNAL_KIND_INVALID", "$.kind");
+        return;
+      }
+      if (record.ref !== undefined && (typeof record.ref !== "string" || record.ref.length === 0)) {
+        reject("REF_INVALID", "$.ref");
+        return;
+      }
+      const originRef = typeof record.originRef === "string" ? record.originRef : "";
+      if (originRef.length === 0 || originRef.startsWith("new:")) {
+        // 发起地必须是**本轮已确认的实际发起地点**；临时引用不作数
+        reject("SIGNAL_ORIGIN_INVALID", "$.originRef", originRef.length > 0 ? originRef : undefined);
+        return;
+      }
+      const topic = typeof record.topic === "string" ? record.topic.trim() : "";
+      if (topic.length === 0 || topic.length > SIGNAL_TOPIC_CHARS) {
+        reject("SIGNAL_TOPIC_INVALID", "$.topic");
+        return;
+      }
+      const quote = typeof record.quote === "string" ? record.quote : "";
+      if (quote.length === 0) {
+        reject("QUOTE_REQUIRED", "$.quote");
+        return;
+      }
+      const quoteId = quoteSource(quote, sources);
+      // 只允许助手正文里的**已公布 / 已派出**事实；用户的一句「我要宣战」不能变成已发布新闻
+      if (quoteId !== "msg:a") {
+        reject("QUOTE_NOT_FOUND", "$.quote");
+        return;
+      }
+      signalProposals.push({
+        line: lineNo, originRef, topic, quote, sourceQuoteId: quoteId,
+        visibility: record.basis === "inferred" ? "hidden" : "known",
+      });
+      return;
+    }
     if (!(table in TABLE_FIELDS)) {
       reject("TABLE_INVALID", "$.table");
       return;
@@ -365,16 +452,21 @@ export function parseAtlasEditBlock(text: unknown, sources: AtlasEditSources = {
   });
 
   if (edits.length === 0) {
-    if (sawNoop) return { status: "noop", edits: [], rejected, noop: true, error: null };
+    // E04：只有 `simulation.propose` 的块**也是有有效行的块**（它登记一件待传播事实），
+    // 不属于「全部无效」；只有真的一行可用都没有时才整轮失败。
+    if (signalProposals.length > 0) {
+      return { status: "edits", edits: [], rejected, noop: false, error: null, signalProposals };
+    }
+    if (sawNoop) return { status: "noop", edits: [], rejected, noop: true, error: null, signalProposals };
     // 块级错误必须指出**第一条**真实原因（例如某行超长 / 引文不匹配），
     // 而不是笼统的「没有有效行」——否则回执会掩盖具体字段路径。
     const first = rejected[0] ?? { line: 0, code: "NO_VALID_EDIT_LINES" as AtlasEditParseCode, path: "$.block" };
     const rows = rejected.length > 0
       ? rejected
       : [{ line: 0, code: "NO_VALID_EDIT_LINES" as AtlasEditParseCode, path: "$.block" }];
-    return { status: "rejected", edits: [], rejected: rows, noop: false, error: first };
+    return { status: "rejected", edits: [], rejected: rows, noop: false, error: first, signalProposals };
   }
-  return { status: "edits", edits, rejected, noop: false, error: null };
+  return { status: "edits", edits, rejected, noop: false, error: null, signalProposals };
 }
 
 /* ------------------------------------------------------------------ *

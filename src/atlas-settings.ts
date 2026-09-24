@@ -17,44 +17,135 @@
  */
 
 import {
-  DEFAULT_PROMPT_SEGMENTS,
   DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA,
-  DEFAULT_PROMPT_SEGMENTS_V2,
   DEFAULT_WORLD_TURN_SYSTEM_PROMPT,
   type AtlasApiPreset,
 } from "./atlas-api-client.ts";
 
 /**
- * C02：推进输出协议的唯一联合类型。
- * - `table-delta-v1`：三表行增量（**新装默认**，0.9.57 起；里程碑 4 验收通过后启用）；
- * - `v2`：完整封套（历史默认，0.9.55 起含地点层级）——既有存档保持不动；
- * - `v1`：旧契约逃生门。
+ * C02 / E01：推进输出协议的类型。
+ *
+ * 计划 §2.2 明确保留 `table-delta-v1` 这个**已发布**的输出协议名称（v1 在这里表示增量协议
+ * 自身的版本，不等于旧 v1 世界草稿），因此联合类型保留 `"v1" | "v2"` 两个历史取值只为
+ * **读取旧存档与原样保留用户原始设置**；运行时分派、提示词选择、写入命令一律只认
+ * `table-delta-v1`（见 `normalizeWorldTurnProtocol` 与 `applySettingsCommand` 的 runtime.update）。
  */
 export type AtlasWorldTurnProtocol = "v1" | "v2" | "table-delta-v1";
 
 /**
- * 新安装 / 缺字段时的缺省协议（D-16 → 里程碑 4 切换）。
+ * 新安装 / 缺字段时的缺省协议。
  *
- * 注意与 `normalizeWorldTurnProtocol` 的区别：那个函数是**读取既有存档**的归一化，
- * 非法值仍归 `v2`（旧行为，不动老档）；新装默认由这里单独决定。
+ * E01（0.9.59）：`normalizeWorldTurnProtocol` 现在把**缺失 / 非法 / 旧值 v1 / 旧值 v2**
+ * 全部在**读取时**规范成 `table-delta-v1`；旧值本身不写回存储，作者的原始设置与旧预设
+ * 全文都原样保留（读取视图另附 `legacy` 诊断）。
  */
 export const DEFAULT_WORLD_TURN_PROTOCOL: AtlasWorldTurnProtocol = "table-delta-v1";
 
-/** 非法 / 缺失值一律归 `v2`（读取既有存档用；不改写用户已保存的合法值）。 */
+/**
+ * E01：读取既有存档时的协议归一化——运行时**只存在一种协议**。
+ *
+ * - `"table-delta-v1"` → 原样；
+ * - `"v1"` / `"v2"`（历史设置）→ `"table-delta-v1"`，并由 `settingsViewV2` 的
+ *   `legacyWorldTurnProtocol` 告诉作者「历史设置已升级为表格增量」；
+ * - 缺失 / 非法 → `"table-delta-v1"`。
+ *
+ * **注意**：本函数只影响**读取视图**与运行时行为；持久层里的原始值不被改写
+ * （见 `settingsViewV2` 与 `applySettingsCommand` 的注释）。
+ */
 export function normalizeWorldTurnProtocol(value: unknown): AtlasWorldTurnProtocol {
-  if (value === "v1") return "v1";
   if (value === "table-delta-v1") return "table-delta-v1";
-  return "v2";
+  // E01：v1 / v2 与任何非法值在读取时统一升级为唯一现行协议
+  return DEFAULT_WORLD_TURN_PROTOCOL;
 }
 
-/** C02：按协议取内置提示词分段（新建预设时快照用）。 */
-export function defaultSegmentsForProtocol(
-  protocol: AtlasWorldTurnProtocol,
-): Array<{ role: string; name: string; mainSlot?: string; content: string }> {
-  if (protocol === "v1") return DEFAULT_PROMPT_SEGMENTS;
-  if (protocol === "table-delta-v1") return DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA;
-  return DEFAULT_PROMPT_SEGMENTS_V2;
+/**
+ * E01：读取视图里的旧值诊断（null = 没有需要升级的历史值）。
+ * 作者能看到「历史设置已升级为表格增量」，且原始设置没有被悄悄覆盖。
+ */
+export interface AtlasLegacyWorldTurnProtocolNotice {
+  /** 持久层里实际保存的旧值（`"v1"` / `"v2"`）。 */
+  storedValue: "v1" | "v2";
+  /** 运行时实际使用的协议（恒为 `table-delta-v1`）。 */
+  effectiveValue: "table-delta-v1";
+  /** 面向作者的一句话说明。 */
+  message: string;
 }
+
+/**
+ * C02 / E02：内置提示词分段只按**唯一现行协议**给出。
+ *
+ * 旧实现按 v1/v2 返回旧契约分段——那正是「提示词资产与输出协议混淆」的根源。
+ * 现在无论传入什么（含历史 v1/v2 值），只输出六段 table-delta 默认段；
+ * **作者自己保存的旧协议预设全文仍原样保存在 `promptPresets` 里**，编辑器可查看、可复制，
+ * 另有「创建兼容增量草稿」命令生成一份新的兼容预设（不做静默字符串替换）。
+ */
+export function defaultSegmentsForProtocol(
+  _protocol?: AtlasWorldTurnProtocol | null,
+): Array<{ role: string; name: string; mainSlot?: string; content: string }> {
+  return DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA;
+}
+
+/**
+ * E02：把作者自己保存的旧协议提示词预设**复制**成一份兼容增量草稿的内容。
+ *
+ * 纪律（计划 §3-E02 原文）：**不做静默字符串替换**——旧预设原文一字不改，
+ * 这里只负责产出新预设的**初稿**：把已知的旧协议关键词替换成增量契约说明，
+ * 再把内置六段行增量协议接到最前面，让作者在新预设里继续自由编辑。
+ */
+export function buildTableDeltaCompatiblePrompt(oldPreset: AtlasPromptPreset): {
+  name: string;
+  systemPrompt: string;
+  segments: AtlasPromptSegment[];
+  replacedKeywords: string[];
+} {
+  /** 旧协议关键词 → 增量契约说法（只用于**新草稿**，不改旧预设）。 */
+  const KEYWORD_REWRITES: Array<[RegExp, string]> = [
+    // 覆盖 `"schemaVersion": 2` / `schemaVersion:2` / `schemaVersion 2` 三种实际写法
+    [/["']?schemaVersion["']?\s*[:：]?\s*2/gi, "table-delta-v1"],
+    [/narrativeSummary/gi, "表格增量行"],
+    [/mapScaleHints/gi, "（尺度改走建图标定接口）"],
+    [/identityUpdates/gi, "character/location 行"],
+    [/discoveries/gi, "location add 行"],
+    [/npcUpdates/gi, "character set 行"],
+    [/eventDrafts/gi, "simulation propose 行"],
+    [/locationChange/gi, "character set 行的 locationRef"],
+  ];
+  let body = typeof oldPreset.systemPrompt === "string" ? oldPreset.systemPrompt : "";
+  if (Array.isArray(oldPreset.segments) && oldPreset.segments.length > 0) {
+    body = oldPreset.segments.map((segment) => String(segment.content ?? "")).join("\n\n");
+  }
+  const replacedKeywords: string[] = [];
+  for (const [pattern, replacement] of KEYWORD_REWRITES) {
+    const matched = body.match(pattern);
+    if (matched) {
+      replacedKeywords.push(...matched.slice(0, 4));
+      body = body.replace(pattern, replacement);
+    }
+  }
+  const name = `${oldPreset.name}（增量兼容草稿）`.slice(0, 64);
+  const segments: AtlasPromptSegment[] = [
+    ...DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA.map((segment) => ({
+      role: segment.role as AtlasPromptSegmentRole,
+      content: segment.content,
+      ...(segment.name ? { name: segment.name } : {}),
+      ...(segment.mainSlot ? { mainSlot: segment.mainSlot as "A" | "B" } : {}),
+    })),
+  ];
+  if (body.trim().length > 0) {
+    segments.push({
+      role: "user",
+      name: "原预设摘录（旧协议关键词已在新草稿里改写）",
+      content: body.trim().slice(0, MAX_PROMPT_CHARS),
+    });
+  }
+  return {
+    name,
+    systemPrompt: body.trim().slice(0, MAX_PROMPT_CHARS),
+    segments: segments.slice(0, MAX_PROMPT_SEGMENTS),
+    replacedKeywords: Array.from(new Set(replacedKeywords)).slice(0, 16),
+  };
+}
+
 import {
   DEFAULT_CONTENT_REPLACE_RULES,
   MAX_REPLACE_RULES,
@@ -238,6 +329,11 @@ export interface AtlasSettingsCommandResult {
   settings: AtlasServerSettingsV2;
   code?: string;
   message?: string;
+  /** E02：`prompt.migrate-legacy` 新建的兼容增量草稿 id / 名称（供 UI 预览跳转）。 */
+  migratedPresetId?: string;
+  migratedPresetName?: string;
+  /** E02：新草稿里被改写的旧协议关键词（让作者看到改了什么；旧预设原文不受影响）。 */
+  replacedKeywords?: string[];
 }
 
 export type AtlasSettingsCommand =
@@ -267,6 +363,11 @@ export type AtlasSettingsCommand =
   | { action: "api.delete"; id: string }
   | { action: "api.activate"; id: string | null }
   | { action: "prompt.save"; preset: { id?: string; name: string; systemPrompt: string; segments?: AtlasPromptSegment[]; contextTurnCount?: number } }
+  /**
+   * E02：把作者自己保存的旧协议提示词预设**复制**成一份兼容增量草稿（新建预设 + 可选激活）。
+   * 旧预设原文一字不改；命令返回新建预设的 id 与改写的旧关键词清单供 UI 预览。
+   */
+  | { action: "prompt.migrate-legacy"; id: string; activate?: boolean }
   | { action: "prompt.delete"; id: string }
   | { action: "prompt.activate"; id: string | null }
   | { action: "replace.save"; preset: { id?: string; name: string; start: string; end: string; enabled?: boolean } }
@@ -830,6 +931,42 @@ export function applySettingsCommand(
         : [...settings.promptPresets, entry];
       return { ok: true, settings: { ...settings, promptPresets } };
     }
+    case "prompt.migrate-legacy": {
+      /**
+       * E02：为作者保存的旧协议预设**新建**一份兼容增量草稿。
+       * - 旧预设原样保留（不删、不改、不做静默字符串替换）；
+       * - 新预设 = 内置六段行增量协议 + 原预设摘录（旧关键词只在新草稿里改写）；
+       * - 名称为「原名（增量兼容草稿）」，重名自动加序号；
+       * - `activate=true` 时把新预设设为活动预设（作者显式选择才切，不擅自替换）。
+       */
+      const id = normalizeId(command.id);
+      if (!id) return fail(settings, "INVALID_PAYLOAD", "预设 ID 形状非法。");
+      const source = settings.promptPresets.find((p) => p.id === id);
+      if (!source) return fail(settings, "INVALID_PAYLOAD", "要迁移的提示词预设不存在。");
+      const built = buildTableDeltaCompatiblePrompt(source);
+      if (settings.promptPresets.length >= MAX_PRESETS_PER_LIBRARY) {
+        return fail(settings, "FIELD_LIMIT_EXCEEDED", `最多保存 ${MAX_PRESETS_PER_LIBRARY} 条提示词预设；请先删除一条再迁移。`);
+      }
+      const usedNames = new Set(settings.promptPresets.map((p) => p.name));
+      const entry: AtlasPromptPreset = {
+        id: resolveId("prompt", settings.promptPresets.length, `${built.name}:${built.systemPrompt}`, deps, new Set(settings.promptPresets.map((p) => p.id))),
+        name: uniqueName(built.name, usedNames),
+        systemPrompt: built.systemPrompt,
+        segments: built.segments,
+        updatedAt: now,
+      };
+      return {
+        ok: true,
+        settings: {
+          ...settings,
+          promptPresets: [...settings.promptPresets, entry],
+          ...(command.activate === true ? { activePromptPresetId: entry.id } : {}),
+        },
+        migratedPresetId: entry.id,
+        migratedPresetName: entry.name,
+        replacedKeywords: built.replacedKeywords,
+      };
+    }
     case "prompt.delete": {
       const id = normalizeId(command.id);
       if (!id) return fail(settings, "INVALID_PAYLOAD", "预设 ID 形状非法。");
@@ -863,8 +1000,13 @@ export function applySettingsCommand(
         next.loreSupplementEnabled = command.loreSupplementEnabled;
       }
       if (command.worldTurnProtocol !== undefined) {
-        if (command.worldTurnProtocol !== "v1" && command.worldTurnProtocol !== "v2" && command.worldTurnProtocol !== "table-delta-v1") {
-          return fail(settings, "INVALID_PAYLOAD", "推进协议只能是 v1、v2 或 table-delta-v1。");
+        /**
+         * E01：`runtime.update` **只接受** `table-delta-v1`——想切回 v1/v2 的写请求明确拒绝。
+         * 这不是把用户的旧设置「改掉」：存储里的旧值只有在下一次显式写入成功时才更新，
+         * 读取视图始终把旧值报告为 `legacyWorldTurnProtocol`（历史设置已升级为表格增量）。
+         */
+        if (command.worldTurnProtocol !== "table-delta-v1") {
+          return fail(settings, "INVALID_PAYLOAD", "推进协议只能是 table-delta-v1；旧 v1/v2 输出已在读取时自动升级为表格增量，请到「推进」页用「创建兼容增量草稿」迁移旧预设。");
         }
         next.worldTurnProtocol = command.worldTurnProtocol;
       }
@@ -1084,11 +1226,33 @@ export interface AtlasSettingsView {
   autoCommit: boolean;
   /** 0.9.22 推演是否附带世界书资料块（审核拦截逃生门）。 */
   loreSupplementEnabled: boolean;
-  /** R06 推进输出协议（v2 缺省；table-delta-v1 = 三表行增量）。 */
+  /** R06 推进输出协议（E01 起运行时恒为 `table-delta-v1`）。 */
   worldTurnProtocol: AtlasWorldTurnProtocol;
+  /**
+   * E01：持久层里保存的旧协议值（`"v1"` / `"v2"`）；null = 无需升级提示。
+   * UI 据此显示「历史设置已升级为表格增量」，且**不擅自覆盖**用户原始设置。
+   */
+  legacyWorldTurnProtocol: AtlasLegacyWorldTurnProtocolNotice | null;
   rpmLimit: number;
   /** 0.9.16 内容替换规则库（含预制 + 手动，同库平等）。 */
   contentReplaceRules: AtlasContentReplaceRule[];
+}
+
+/**
+ * E01：持久层原始协议值 → 读取视图的旧值诊断（null = 没有需要升级的历史值）。
+ * 只读，不改写：`settings.worldTurnProtocol` 原样留在存储里。
+ */
+export function legacyWorldTurnProtocolNotice(
+  stored: unknown,
+): AtlasLegacyWorldTurnProtocolNotice | null {
+  if (stored !== "v1" && stored !== "v2") return null;
+  return {
+    storedValue: stored,
+    effectiveValue: "table-delta-v1",
+    message: `历史设置已升级为表格增量：存储里保存的是旧「${stored}」协议，`
+      + "运行时只走 table-delta-v1（一个 <atlasEdit> 块、块内每行一个独立 JSON）。"
+      + "原始设置与旧提示词预设都未被改写；如需继续用旧预设，请到「推进」页点「创建兼容增量草稿」。",
+  };
 }
 
 /** GET /settings 的唯一视图：Key 只给 exists + 尾号；悬挂引用归一为 null。 */
@@ -1141,6 +1305,8 @@ export function settingsViewV2(settings: AtlasServerSettingsV2): AtlasSettingsVi
     autoCommit: settings.autoCommit,
     loreSupplementEnabled: settings.loreSupplementEnabled ?? true,
     worldTurnProtocol: normalizeWorldTurnProtocol(settings.worldTurnProtocol),
+    // E01：旧值诊断——让作者看到「历史设置已升级为表格增量」，且原始设置未被改写
+    legacyWorldTurnProtocol: legacyWorldTurnProtocolNotice(settings.worldTurnProtocol),
     rpmLimit: settings.rpmLimit,
     contentReplaceRules: settings.contentReplaceRules ?? [],
   };

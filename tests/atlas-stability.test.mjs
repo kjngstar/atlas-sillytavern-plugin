@@ -47,18 +47,20 @@ function makeFetch(scripts) {
   return { fetchFn, calls };
 }
 
-const GOOD_DRAFT = {
-  duration: 0,
-  locationChange: null,
-  npcChanges: [],
-  memoryDrafts: [],
-  eventDrafts: [],
-  triggerResults: [],
-  summary: "平静回合。",
-};
+/**
+ * E11（等效改写）：原夹具是 v1 世界草稿（`duration:0 / npcChanges:[] …`），
+ * 现在唯一模型输出契约是 `table-delta-v1`：一个 `<atlasEdit>` 块，块内每行独立 JSON。
+ * 本文件的用例只关心「提交成功 / 幂等 / 失败零写入 / 检查点」，与三表内容无关，
+ * 因此用**显式无变化行** `{"kind":"noop"}` 表达同一语义：本轮没有实体改动，但回合照常提交。
+ */
+const GOOD_EDIT = [
+  "<atlasEdit>",
+  '{"kind":"noop"}',
+  "</atlasEdit>",
+].join("\n");
 
-function openAiResponse(draft) {
-  return jsonResponse(200, { choices: [{ message: { content: JSON.stringify(draft) } }] });
+function openAiResponse(text) {
+  return jsonResponse(200, { choices: [{ message: { content: text } }] });
 }
 
 function worldFixture(id = "world-stab-1") {
@@ -136,11 +138,11 @@ async function setup(fetchScripts, overrides = {}) {
   assert.equal(bindResult.status, 200, "绑定成功");
   const settingsResult = await core.handle("PUT", "/settings", { worldTurn: presetFixture() }, { local: true });
   assert.equal(settingsResult.status, 200, "推演预设配置成功");
-  // C04（§2）：协议严格按设置分派。本文件的草稿是 v1 形态（GOOD_DRAFT），协议必须显式声明 v1。
-  const protocolResult = await core.handle(
-    "PUT", "/settings", { action: "runtime.update", worldTurnProtocol: "v1" }, { local: true },
-  );
-  assert.equal(protocolResult.status, 200, "推进协议设为 v1");
+  /**
+   * E01（0.9.59）：推进协议已收口——读取归一化与写入都只认 `table-delta-v1`，
+   * 想切回 v1/v2 的写请求会被明确拒绝。因此这里**不再**声明旧协议：
+   * 用例夹具本身已换成 `<atlasEdit>` 行增量块（见 GOOD_EDIT）。
+   */
   return { store, core, world, fetcher, carrier };
 }
 
@@ -236,7 +238,7 @@ test("A07 写回失败必须抛错，不静默假装成功", async () => {
 // ---------------------------------------------------------------------------
 
 test("T04：检查点耗尽（200 上限）后 commit 成功、回合记录仍写入（checkpointId=null）", async () => {
-  const { core, world, store, fetcher, carrier } = await setup([() => openAiResponse(GOOD_DRAFT)]);
+  const { core, world, store, fetcher, carrier } = await setup([() => openAiResponse(GOOD_EDIT)]);
   // 用真实 createCheckpoint 塞满 200 个（parseWorld 校验通过）→ 下一次创建失败 → checkpointId = null
   let exhausted = JSON.parse(JSON.stringify(world));
   for (let i = 0; i < 200; i += 1) {
@@ -262,7 +264,7 @@ test("T04：检查点耗尽（200 上限）后 commit 成功、回合记录仍�
 });
 
 test("T04：检查点耗尽后重复 commit 仍幂等（0 新模型调用，duplicate 回执）", async () => {
-  const { core, world, fetcher } = await setup([() => openAiResponse(GOOD_DRAFT)]);
+  const { core, world, fetcher } = await setup([() => openAiResponse(GOOD_EDIT)]);
   let exhausted = JSON.parse(JSON.stringify(world));
   for (let i = 0; i < 200; i += 1) {
     const created = createCheckpoint(exhausted, { branchId: "chronicle-canon", at: 418.07, kind: "technical", reason: `filler-${i}`, now: NOW });
@@ -285,7 +287,7 @@ test("T04：检查点耗尽后重复 commit 仍幂等（0 新模型调用，dupl
 test("T05：纯 prose（无 JSON、无 think）→ RESPONSE_MALFORMED 失败，游标不推进、回合不落记录", async () => {
   const { core, world, store, fetcher, carrier } = await setup([
     () => jsonResponse(200, { choices: [{ message: { content: "这不是 JSON，只是普通叙述文本。" } }] }),
-    () => openAiResponse(GOOD_DRAFT),
+    () => openAiResponse(GOOD_EDIT),
   ]);
   const result = await core.handle("POST", "/turns/commit", commitRequest(world));
   assert.equal(result.status, 502, "解析失败 = 502 错误信封（RESPONSE_MALFORMED 语义）");
@@ -302,9 +304,9 @@ test("T05：纯 prose（无 JSON、无 think）→ RESPONSE_MALFORMED 失败，�
   assert.equal(fetcher.calls.length, 2, "重试重新调用模型（同幂等键未锁定）");
 });
 
-test("T05：think 内合法 JSON 仍然救回（0.9.30 有限格式修复保留）", async () => {
+test("T05：think 内合法行增量块仍然救回（0.9.30 有限格式修复保留）", async () => {
   const { core, world, fetcher } = await setup([
-    () => jsonResponse(200, { choices: [{ message: { content: `<think>推理推理推理</think>${JSON.stringify(GOOD_DRAFT)}` } }] }),
+    () => jsonResponse(200, { choices: [{ message: { content: `<think>推理推理推理</think>${GOOD_EDIT}` } }] }),
   ]);
   const result = await core.handle("POST", "/turns/commit", commitRequest(world));
   assert.equal(result.body.data.receipt.status, "committed", "think 剥除后照常提交");

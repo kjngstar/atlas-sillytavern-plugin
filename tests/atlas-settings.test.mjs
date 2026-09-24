@@ -15,6 +15,7 @@ import {
   createDefaultSettingsV2,
   DEFAULT_WORLD_TURN_PROTOCOL,
   defaultSegmentsForProtocol,
+  legacyWorldTurnProtocolNotice,
   migrateAtlasSettings,
   applySettingsCommand,
   normalizeWorldTurnProtocol,
@@ -849,40 +850,111 @@ test("segment-only legacy preset remains readable without systemPrompt", () => {
 /* ---------------------------------------------------------------------------
  * C01 / C02：table-delta-v1（三表行增量协议）
  * --------------------------------------------------------------------------- */
-test("C02/D-16 协议枚举：新装默认 = table-delta-v1；可保存并回显，非法值仍拒绝", () => {
+test("E01 协议枚举：读取归一化只给 table-delta-v1，runtime.update 明确拒绝切回 v1/v2", () => {
   const defaults = createDefaultSettingsV2();
-  assert.equal(defaults.worldTurnProtocol, "table-delta-v1", "0.9.57 起新装默认切到三表行增量（里程碑 4）");
+  assert.equal(defaults.worldTurnProtocol, "table-delta-v1", "新装默认 = 三表行增量");
   assert.equal(DEFAULT_WORLD_TURN_PROTOCOL, "table-delta-v1", "默认值有唯一出处");
 
   const applied = applySettingsCommand(defaults, { action: "runtime.update", worldTurnProtocol: "table-delta-v1" }, testDeps());
   assert.equal(applied.ok, true, applied.ok ? "" : applied.message);
   assert.equal(settingsViewV2(applied.settings).worldTurnProtocol, "table-delta-v1");
-  assert.equal(applied.settings.worldTurnProtocol, "table-delta-v1", "旧 v1/v2 值也照旧保留");
+  assert.equal(applied.settings.worldTurnProtocol, "table-delta-v1");
 
   const bad = applySettingsCommand(defaults, { action: "runtime.update", worldTurnProtocol: "v9" }, testDeps());
   assert.equal(bad.ok, false, "非法协议仍必须拒绝");
 
+  // E01：想切回旧 v1 / v2 的写请求被**明确拒绝**（错误信息指向迁移入口）
+  for (const legacy of ["v1", "v2"]) {
+    const rejected = applySettingsCommand(defaults, { action: "runtime.update", worldTurnProtocol: legacy }, testDeps());
+    assert.equal(rejected.ok, false, `切回 ${legacy} 必须被拒绝`);
+    assert.equal(rejected.code, "INVALID_PAYLOAD", `${legacy}：错误码`);
+    assert.match(String(rejected.message), /table-delta-v1/, `${legacy}：错误信息说明唯一现行协议`);
+    assert.match(String(rejected.message), /兼容增量草稿|迁移/, `${legacy}：错误信息给出迁移入口`);
+    assert.equal(rejected.settings.worldTurnProtocol, "table-delta-v1", `${legacy}：被拒时不改动设置`);
+  }
+
+  /**
+   * 读取归一化：缺失 / 非法 / 旧值 v1 / 旧值 v2 **全部**在读取时规范成 table-delta-v1。
+   * 持久层里的旧值不被改写——诊断字段 `legacyWorldTurnProtocol` 如实报告原始值。
+   */
   assert.equal(normalizeWorldTurnProtocol("table-delta-v1"), "table-delta-v1");
-  assert.equal(normalizeWorldTurnProtocol("v1"), "v1");
-  assert.equal(normalizeWorldTurnProtocol("v2"), "v2");
-  // 读取既有存档的归一化**不变**：非法 / 缺失仍归 v2（不动老档；新装默认由常量单独决定）
-  assert.equal(normalizeWorldTurnProtocol("junk"), "v2");
-  assert.equal(normalizeWorldTurnProtocol(undefined), "v2");
+  assert.equal(normalizeWorldTurnProtocol("v1"), "table-delta-v1", "旧 v1 在读取时升级");
+  assert.equal(normalizeWorldTurnProtocol("v2"), "table-delta-v1", "旧 v2 在读取时升级");
+  assert.equal(normalizeWorldTurnProtocol("junk"), "table-delta-v1", "非法值归唯一现行协议");
+  assert.equal(normalizeWorldTurnProtocol(undefined), "table-delta-v1", "缺失值归唯一现行协议");
+
+  // 旧值诊断：作者能看到「历史设置已升级为表格增量」，且原始设置没有被覆盖
+  const legacyView = settingsViewV2({ ...defaults, worldTurnProtocol: "v2" });
+  assert.equal(legacyView.worldTurnProtocol, "table-delta-v1", "视图只给现行协议");
+  assert.equal(legacyView.legacyWorldTurnProtocol?.storedValue, "v2", "诊断带出存储里的原始旧值");
+  assert.equal(legacyView.legacyWorldTurnProtocol?.effectiveValue, "table-delta-v1");
+  assert.match(String(legacyView.legacyWorldTurnProtocol?.message), /历史设置已升级为表格增量/);
+  assert.equal(settingsViewV2(defaults).legacyWorldTurnProtocol, null, "没有旧值时不出诊断");
+  /**
+   * 持久层原样保留用户原始设置：`sanitizeSettingsV2`（读取路径）内部即用
+   * `normalizeWorldTurnProtocol` 归一，因此**归一化后的快照**只含现行协议——这正是
+   * 「读取时升级」的含义；而旧值本身从未被写回存储（写入只在作者显式命令时发生）。
+   */
+  const persisted = sanitizeSettingsV2({ ...defaults, worldTurnProtocol: "v1" }).settings;
+  assert.equal(persisted.worldTurnProtocol, "table-delta-v1", "读取路径在读取时升级为唯一现行协议");
+  assert.equal(settingsViewV2(persisted).worldTurnProtocol, "table-delta-v1", "视图与运行时只给现行协议");
+  // 原始载荷（未过读取路径）不受影响：归一化是纯函数，不产生写副作用
+  const rawPayload = { ...defaults, worldTurnProtocol: "v1" };
+  normalizeWorldTurnProtocol(rawPayload.worldTurnProtocol);
+  assert.equal(rawPayload.worldTurnProtocol, "v1", "归一化不改写用户原始载荷");
+  assert.equal(legacyWorldTurnProtocolNotice("v1")?.storedValue, "v1", "旧值诊断按原始值给出");
 });
 
-test("C02 内置默认分段随协议切换，且不会把 v2 封套混进行增量", () => {
+test("E02 内置默认分段只有增量六段；旧协议预设全文仍可查看与复制，另给兼容草稿", () => {
   const base = createDefaultSettingsV2();
-  const v1 = settingsViewV2({ ...base, worldTurnProtocol: "v1" }).builtInPrompt.segments;
-  const v2 = settingsViewV2({ ...base, worldTurnProtocol: "v2" }).builtInPrompt.segments;
+  const legacyView = settingsViewV2({ ...base, worldTurnProtocol: "v2" }).builtInPrompt.segments;
   const delta = settingsViewV2({ ...base, worldTurnProtocol: "table-delta-v1" }).builtInPrompt.segments;
 
   assert.ok(delta.some((segment) => segment.content.includes("<atlasEdit>")), "行增量协议必须展示块格式");
   assert.equal(delta.some((segment) => segment.content.includes('"schemaVersion":2')), false, "不能混进 v2 封套");
-  assert.equal(v2.some((segment) => segment.content.includes("<atlasEdit>")), false);
-  assert.notDeepEqual(v1, delta);
+  assert.equal(legacyView.some((segment) => segment.content.includes('"schemaVersion": 2')), false, "旧值也不再装 v2 封套");
+  assert.deepEqual(legacyView, delta, "无论传入什么协议，内置默认只出增量六段");
   assert.deepEqual(defaultSegmentsForProtocol("table-delta-v1"), DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA);
-  assert.equal(defaultSegmentsForProtocol("v1").length, 6, "v1/v2/行增量段位一致，bootstrap 才能按索引替换第 5 段");
+  assert.deepEqual(defaultSegmentsForProtocol("v1"), DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA, "旧 v1 也只出增量段");
+  assert.deepEqual(defaultSegmentsForProtocol("v2"), DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA);
+  assert.equal(defaultSegmentsForProtocol("v1").length, 6, "段位不变，bootstrap 才能按索引替换第 5 段");
   assert.equal(defaultSegmentsForProtocol("v2").length, 6);
+});
+
+test("E02 创建兼容增量草稿：旧预设原文一字不改，新草稿可预览、可显式启用", () => {
+  const base = createDefaultSettingsV2();
+  const legacyPrompt = {
+    id: "legacy-v2-prompt",
+    name: "作者的 v2 封套预设",
+    systemPrompt: '输出 {"schemaVersion": 2, "duration": 1, "summary": "..."} 这样的封套。',
+    updatedAt: 1,
+  };
+  const withLegacy = { ...base, promptPresets: [legacyPrompt], activePromptPresetId: legacyPrompt.id };
+  const NO_MIGRATION_NEEDED = { action: "runtime.update", autoCommit: true };
+
+  const migrated = applySettingsCommand(withLegacy, { action: "prompt.migrate-legacy", id: legacyPrompt.id }, testDeps());
+  assert.equal(migrated.ok, true, migrated.ok ? "" : migrated.message);
+  assert.ok(migrated.migratedPresetId, "命令返回新草稿 id（UI 据此预览）");
+  assert.notEqual(migrated.migratedPresetId, legacyPrompt.id, "新建而不是覆盖");
+  assert.match(String(migrated.migratedPresetName), /增量兼容草稿/);
+  assert.ok((migrated.replacedKeywords ?? []).length > 0, "报告新草稿里改写过的旧关键词");
+
+  // E02：`applySettingsCommand` 走的是**已 sanitize 的设置快照**（读取路径），
+  // 因此断言「旧预设正文一字不改」，而不是比较 updatedAt 之类的簿记字段。
+  const kept = migrated.settings.promptPresets.find((p) => p.id === legacyPrompt.id);
+  assert.ok(kept, "旧预设仍在预设库里（没有被删除或改名）");
+  assert.equal(kept.systemPrompt, legacyPrompt.systemPrompt, "旧预设正文一字不改（无静默字符串替换）");
+  assert.equal(kept.name, legacyPrompt.name, "旧预设名称不变");
+  // 新草稿是完整的增量契约：六段内置 + 原预设摘录
+  const created = migrated.settings.promptPresets.find((p) => p.id === migrated.migratedPresetId);
+  assert.ok(created, "新草稿已入库");
+  assert.ok(created.segments.some((segment) => segment.content.includes("<atlasEdit>")), "新草稿带增量块格式");
+  assert.equal(created.segments.some((segment) => String(segment.content).includes('"schemaVersion": 2')), false, "新草稿不含旧封套字样名称");
+  assert.equal(migrated.settings.activePromptPresetId, legacyPrompt.id, "不擅自切换活动预设");
+  assert.equal(applySettingsCommand(withLegacy, { ...NO_MIGRATION_NEEDED }).ok, true, "无关命令不受影响");
+
+  const activated = applySettingsCommand(withLegacy, { action: "prompt.migrate-legacy", id: legacyPrompt.id, activate: true }, testDeps());
+  assert.equal(activated.settings.activePromptPresetId, activated.migratedPresetId, "作者显式要求时才启用新草稿");
 });
 
 test("C01 协议判定收紧：table-delta-v1 不再被当成 v2（避免装错提示词）", () => {

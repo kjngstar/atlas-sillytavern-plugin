@@ -88,7 +88,11 @@ function binding(world, overrides = {}) {
     schemaVersion: 1,
     enabled: true,
     chatId: "chat-a",
-    characterId: null,
+    /**
+     * E11（0.9.59）：主角行 id 必须显式给绑定——旧 v1/v2 靠草稿里的 `locationChange`
+     * 推绑定游标，现在**当前位置只随主角三表行的 locationRef 变化**（三表是实体现值权威）。
+     */
+    characterId: "char-main",
     worldId: world.id,
     branchId: CANON,
     currentLocationId: "4103",
@@ -102,10 +106,11 @@ function binding(world, overrides = {}) {
 /**
  * 推演连接。
  *
- * C04（§2）起协议**严格按设置分派**：v1 设置只走 v1 草稿解析、v2 只走 v2 封套、
- * `table-delta-v1` 只走行增量块。本文件的历史用例用的都是 v1 形态草稿（`GOOD_DRAFT` 等），
- * 因此它们必须显式把 `settings.worldTurnProtocol` 设成 `"v1"`（见 `putV1Settings` /
- * `V1_PROTOCOL_COMMAND`）——协议是**设置级**字段，不能塞进连接预设里。
+ * E01（0.9.59）：推进输出协议**只剩一个** —— `table-delta-v1`（一个 `<atlasEdit>` 块、
+ * 块内每行一个独立 JSON）。缺失 / 非法 / 旧值 v1 / 旧值 v2 一律在读取时被
+ * `normalizeWorldTurnProtocol` 规范成它，`runtime.update` 也**明确拒绝**再切回 v1/v2。
+ * 夹具因此只需要把这唯一契约写实（见 `putTableDeltaSettings` / `TABLE_DELTA_PROTOCOL_COMMAND`）——
+ * 协议是**设置级**字段，不能塞进连接预设里。
  */
 function preset(overrides = {}) {
   return {
@@ -118,14 +123,65 @@ function preset(overrides = {}) {
   };
 }
 
-/** v1 形态草稿用例共用的设置载荷（连接走 worldTurn；协议必须走 runtime.update，见下）。 */
-const V1_SETTINGS = { worldTurn: preset() };
-const V1_PROTOCOL_COMMAND = { action: "runtime.update", worldTurnProtocol: "v1" };
+/** 唯一协议的设置载荷（连接走 worldTurn；协议必须走 runtime.update，见下）。 */
+const TABLE_DELTA_PROTOCOL_COMMAND = { action: "runtime.update", worldTurnProtocol: "table-delta-v1" };
 
 /** 设置连接 + 协议（协议只能经 runtime.update 写；legacy 补丁会静默忽略顶层协议字段）。 */
-async function putV1Settings(core) {
+async function putTableDeltaSettings(core) {
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
-  await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
+  await core.handle("PUT", "/settings", TABLE_DELTA_PROTOCOL_COMMAND, { local: true });
+}
+
+/** 行增量块夹具：`<atlasEdit>` + 每行一个独立 JSON（**块是纯文本**，不能再套 JSON.stringify）。 */
+function editReply(rows) {
+  return ["<atlasEdit>", ...rows.map((row) => JSON.stringify(row)), "</atlasEdit>"].join("\n");
+}
+
+/**
+ * 一个合法的最小行增量块内容：只改**推测性字段**（想法）。
+ * `basis="inferred"` + 非位置字段 → 按 §2 不需要引文；引用已存在的行 → 不新增实体。
+ */
+const DELTA_THOUGHT_ROW = {
+  table: "character",
+  op: "set",
+  ref: "npc:chronicle-c1",
+  patch: { thought: "在潮门见到一位旅行者。" },
+  basis: "inferred",
+};
+
+/**
+ * 一个合法行增量回合的默认请求体。
+ * E07/D03：模型不再自报 `duration`——时间只由「用户显式时间词」与既有旅行引擎决定，
+ * 所以夹具用显式时间词「一整天」（= 4 时段下限）拿到确定的时间推进。
+ */
+const DELTA_TURN = { userText: "我一整天都在赶路。", assistantText: "你沿主干道走向潮门。" };
+const DELTA_PERIODS = 4;
+
+/**
+ * 带主角（`char-main`）的夹具世界。
+ * E11（0.9.59）：绑定位置游标**只随主角三表行的 `locationRef` 变化**，
+ * 所以「位置推进 / 位置回退」类用例必须让主角真的在世界人物表里（否则没有 `npc:char-main` 行可改）。
+ */
+function withProtagonist(world) {
+  const parsed = parseWorld(JSON.parse(JSON.stringify({
+    ...world,
+    characters: [
+      ...(world.characters ?? []),
+      { id: "char-main", worldId: world.id, name: "林拾", role: "主角", description: "测试主角" },
+    ],
+  })));
+  ok(parsed !== null, "带主角的世界可解析");
+  return parsed;
+}
+
+/** 主角移动行（observed → 引文必须连续逐字出现在助手正文里）。 */
+function movePlayerRow(toRef, quote) {
+  return { table: "character", op: "set", ref: "npc:char-main", patch: { locationRef: toRef }, basis: "observed", quote };
+}
+
+/** 行增量回合的 fetch 脚本（纯文本助手回复）。 */
+function deltaScript(rows = [DELTA_THOUGHT_ROW]) {
+  return () => openAiTextResponse(editReply(rows));
 }
 
 function prepareRequest(world, overrides = {}) {
@@ -214,7 +270,7 @@ async function setup(fetchScripts, overrides = {}) {
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   if (overrides.skipSettings !== true) {
     await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
-    await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
+    await core.handle("PUT", "/settings", TABLE_DELTA_PROTOCOL_COMMAND, { local: true });
   }
   return { store, core, world, carrier };
 }
@@ -223,8 +279,8 @@ async function setup(fetchScripts, overrides = {}) {
 // 路由清单与健康检查
 // ---------------------------------------------------------------------------
 
-test("路由清单：23 条且全部在 /api/plugins/atlas 前缀下", () => {
-  equal(ATLAS_ROUTE_MANIFEST.length, 23, "dispatch 核心路由数（… + R03 /turns/preview + R06 /scene/bootstrap）");
+test("路由清单：25 条且全部在 /api/plugins/atlas 前缀下", () => {
+  equal(ATLAS_ROUTE_MANIFEST.length, 25, "dispatch 核心路由数（… + R03 /turns/preview + R06 /scene/bootstrap + H07a topology + H15a areas）");
   equal(ATLAS_PLUGIN_ROUTES.length, ATLAS_ROUTE_MANIFEST.length, "index.mjs 与核心路由清单一致");
   const plugin = createAtlasServerPlugin();
   for (const route of plugin.routes) {
@@ -522,21 +578,28 @@ async function setupWithCountingFetch(scripts) {
 // ---------------------------------------------------------------------------
 
 test("commit：恰好 1 请求、原子落账、绑定游标推进", async () => {
-  const fetcher = makeFetch([() => openAiResponse(GOOD_DRAFT)]);
+  /**
+   * E07/E11：回合推进只认行增量块 + 程序推时间。
+   * - 主角行 `locationRef` 改到玻璃温室（4104）→ 绑定位置游标随主角三表行走；
+   * - 用户显式时间词「一整天」= 4 时段下限，4103→4104 旅行估计 2 段 → 取最大 4（不叠加）。
+   */
+  const world = withProtagonist(buildWorld());
+  const assistantText = "你沿小径走进玻璃温室。";
+  const fetcher = makeFetch([deltaScript([movePlayerRow("loc:4104", "你沿小径走进玻璃温室")])]);
   const store = createMemoryDocumentStore();
-  const world = buildWorld();
   const { core: fresh } = sessionCore(store, { fetchFn: fetcher.fetchFn });
   await fresh.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await fresh.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
-  await fresh.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
-  await fresh.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
+  await putTableDeltaSettings(fresh);
 
-  const result = await fresh.handle("POST", "/turns/commit", commitRequest(world));
+  const request = commitRequest(world, { userText: "我一整天都在赶路，傍晚到了玻璃温室。", assistantText });
+  const result = await fresh.handle("POST", "/turns/commit", request);
   equal(result.status, 200, "commit 200");
   const receipt = result.body.data.receipt;
   equal(receipt.status, "committed", "committed 回执");
-  equal(receipt.currentTime, 430.07, "时间推进 12 时段");
-  equal(receipt.currentLocationId, "4104", "位置推进");
+  equal(receipt.previousTime, CURRENT_TIME, "回合前时间 = 绑定游标");
+  equal(receipt.currentTime, CURRENT_TIME + DELTA_PERIODS, "时间推进 4 时段（用户显式时间词下限）");
+  equal(receipt.currentLocationId, "4104", "位置推进到玻璃温室（主角三表行推动）");
   equal(fetcher.calls.length, 1, "恰好 1 条 API 请求");
 
   // Authorization 头携带密钥，但请求体不含密钥
@@ -545,12 +608,12 @@ test("commit：恰好 1 请求、原子落账、绑定游标推进", async () =>
 
   // 绑定游标持久化推进
   const state = await fresh.handle("GET", "/state/chat-a");
-  equal(state.body.data.currentTime, 430.07, "state 反映新游标");
+  equal(state.body.data.currentTime, CURRENT_TIME + DELTA_PERIODS, "state 反映新游标");
   equal(state.body.data.currentLocationId, "4104", "state 反映新位置");
   ok(!JSON.stringify(state).includes("msg-10"), "state 不回显消息 id 明细");
 
   // 重复 commit：0 新请求，duplicate 回执
-  const again = await fresh.handle("POST", "/turns/commit", commitRequest(world));
+  const again = await fresh.handle("POST", "/turns/commit", request);
   equal(again.body.data.receipt.status, "duplicate", "duplicate 回执");
   equal(fetcher.calls.length, 1, "重复 commit 总计仍 1 请求");
 
@@ -700,7 +763,7 @@ test("move-author：未知实体 / 未知地点 / 未绑定 → 拒绝且零写�
 });
 
 test("settings v2 运行时组合：commit 用「活动 API + 活动提示词」，两库独立切换", async () => {
-  const fetcher = makeFetch([() => openAiResponse(GOOD_DRAFT), () => openAiResponse(GOOD_DRAFT)]);
+  const fetcher = makeFetch([deltaScript(), deltaScript()]);
   const store = createMemoryDocumentStore();
   const world = buildWorld();
   const { core } = sessionCore(store, { fetchFn: fetcher.fetchFn });
@@ -720,8 +783,10 @@ test("settings v2 运行时组合：commit 用「活动 API + 活动提示词」
   // 活动 API = A，活动提示词 = P2
   await core.handle("PUT", "/settings", { action: "api.activate", id: apiA }, { local: true });
   await core.handle("PUT", "/settings", { action: "prompt.activate", id: promptP2 }, { local: true });
-  // 本用例的草稿是 v1 形态：协议显式声明 v1（C04 严格按设置分派）
-  await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
+  // E01：输出协议保持唯一的 table-delta-v1（运行时不再有 v1/v2 可选值）
+  const protocol = await core.handle("PUT", "/settings", TABLE_DELTA_PROTOCOL_COMMAND, { local: true });
+  equal(protocol.status, 200, "协议写请求被接受");
+  equal(protocol.body.data.worldTurnProtocol, "table-delta-v1", "运行时协议 = table-delta-v1");
 
   const commit1 = await core.handle("POST", "/turns/commit", commitRequest(world), { local: true });
   equal(commit1.body.ok, true, "组合提交成功");
@@ -800,7 +865,7 @@ for (const failure of FAILURE_CASES) {
     await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
     await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
     await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
-  await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
+  await core.handle("PUT", "/settings", TABLE_DELTA_PROTOCOL_COMMAND, { local: true });
 
     const result = await core.handle("POST", "/turns/commit", commitRequest(world));
     equal(result.body.error.code, failure.code, `错误码 ${failure.code}`);
@@ -813,41 +878,60 @@ for (const failure of FAILURE_CASES) {
   });
 }
 
-test("裁决（0.9.0）：未知地点草稿降级——移动被忽略，其余变化照常原子提交", async () => {
-  const fetcher = makeFetch([() => openAiResponse({ ...GOOD_DRAFT, locationChange: { toPointId: "pt-nowhere" } })]);
+test("裁决（0.9.0）：未知地点行被单独拒绝——移动被忽略，其余变化照常原子提交", async () => {
+  /**
+   * 等效改写（E07）：v1 的「未知地点草稿降级 + 〔裁定〕注记」已随草稿链路删除。
+   * 现行口径完全等价：**引用不存在的目标地点只让那一行被拒**（ROW_NOT_FOUND），
+   * 同一块里其余合法行照常原子提交，回执如实报出拒绝行数——绝不整单炸掉、也绝不静默。
+   */
+  const assistantText = "你沿主干道走向潮门，在街角停下。";
+  const fetcher = makeFetch([deltaScript([
+    { table: "character", op: "set", ref: "npc:chronicle-c1", patch: { locationRef: "loc:pt-nowhere" }, basis: "observed", quote: "你沿主干道走向潮门" },
+    DELTA_THOUGHT_ROW,
+  ])]);
   const store = createMemoryDocumentStore();
   const world = buildWorld();
-  const { core } = sessionCore(store, { fetchFn: fetcher.fetchFn });
+  const { core, carrier } = sessionCore(store, { fetchFn: fetcher.fetchFn });
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
-  await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
-  await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
+  await putTableDeltaSettings(core);
 
-  const result = await core.handle("POST", "/turns/commit", commitRequest(world));
+  const result = await core.handle("POST", "/turns/commit",
+    commitRequest(world, { userText: "我在潮门附近走走。", assistantText }));
   const receipt = result.body.data.receipt;
   equal(receipt.status, "committed", "未知地点不再炸整单");
-  equal(receipt.currentTime, 430.07, "非移动回合时间仍由 AI 推断（12 时段）");
+  equal(receipt.previousTime, CURRENT_TIME, "回合前时间 = 绑定游标");
+  equal(receipt.currentTime, CURRENT_TIME, "无时间依据 → 0 时段（不假装推进）");
   ok(!("currentLocationId" in receipt) || receipt.currentLocationId === "4103", "位置未移动");
-  ok(receipt.summary.includes("〔裁定〕") && receipt.summary.includes("未知地点"), "裁定说明可审计");
+  ok(receipt.summary.includes("拒绝 1 行"), `回执如实报出被拒行数（实际：${receipt.summary}）`);
+  // 其余变化照常原子提交：想法那一行真的落到三表
+  const row = carrier.session.tables.branches.canon.characters.find((item) => item.id === "npc:chronicle-c1");
+  equal(row.thought, "在潮门见到一位旅行者。", "同一块里的合法行照常落账");
+  equal(row.locationId, "loc:4103", "被拒的移动没有半途生效");
 });
 
-test("0.9.30 放宽：JSON 被写进 <think> 里 → 剥除失败后从原文救回，正常提交", async () => {
-  // MiniMax-M3 嫌疑行为：JSON 全在 think 段内，think 剥除后什么都不剩
-  const insideThink = `<think>Let me analyze.\n${JSON.stringify(GOOD_DRAFT)}</think>`;
-  const fetcher = makeFetch([() => jsonResponse(200, { choices: [{ message: { content: insideThink } }] })]);
+test("0.9.30 放宽 → E07 收敛：完整前置 <think> 段被剥掉后照常提交（推理段里的草稿不再抢救）", async () => {
+  /**
+   * 等效改写（E07）：0.9.30 的「think 里只有 JSON → 从原文救回」这条抢救路径已被
+   * `parseAtlasEditBlock` 明确取消（未闭合思考段里藏块 → BLOCK_MISSING，绝不抢救半截 JSON）。
+   * 仍然成立、也正是现场需要的放宽是：**完整闭合**的前置推理段会被剥掉，块本身照常提交。
+   */
+  const withThink = `<think>让我先分析这一轮。</think>\n${editReply([DELTA_THOUGHT_ROW])}`;
+  const fetcher = makeFetch([() => jsonResponse(200, { choices: [{ message: { content: withThink } }] })]);
   const store = createMemoryDocumentStore();
   const world = buildWorld();
-  const { core } = sessionCore(store, { fetchFn: fetcher.fetchFn });
+  const { core, carrier } = sessionCore(store, { fetchFn: fetcher.fetchFn });
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
-  await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
-  await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
+  await putTableDeltaSettings(core);
 
-  const result = await core.handle("POST", "/turns/commit", commitRequest(world));
+  const result = await core.handle("POST", "/turns/commit", commitRequest(world, DELTA_TURN));
   const receipt = result.body.data.receipt;
-  equal(receipt.status, "committed", "原文重试救回，正常提交");
-  equal(receipt.currentTime, 430.07, "草稿内容完整生效（12 时段）");
+  equal(receipt.status, "committed", "完整 think 段之后的块照常提交");
+  equal(receipt.currentTime, CURRENT_TIME + DELTA_PERIODS, "块内内容完整生效（4 时段）");
   equal(fetcher.calls.length, 1, "仍恰好 1 条推演请求");
+  const row = carrier.session.tables.branches.canon.characters.find((item) => item.id === "npc:chronicle-c1");
+  equal(row.thought, "在潮门见到一位旅行者。", "块里的行真的落账（不是被 think 吞掉）");
 });
 
 test("0.9.48 T05：完全无法解析 → 明确失败（RESPONSE_MALFORMED 可重试），世界零写入，原文记日志", async () => {
@@ -859,20 +943,21 @@ test("0.9.48 T05：完全无法解析 → 明确失败（RESPONSE_MALFORMED 可�
   const { core } = sessionCore(store, { fetchFn: fetcher.fetchFn });
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
-  await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
-  await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
+  await putTableDeltaSettings(core);
 
-  // 0.9.48 语义变更（外部 AI 计划 T05，作者拍板全包）：解析两连败 = 错误，不再伪装
+  // 0.9.48 语义变更（外部 AI 计划 T05，作者拍板全包）：解析失败 = 错误，不再伪装
   // 「无结构变化」成功——已付费但世界未更新必须如实呈现，可重试（重推演重新调模型）。
   const result = await core.handle("POST", "/turns/commit", commitRequest(world));
   equal(result.body.ok, false, "解析失败 = 提交失败");
   equal(result.body.error.code, ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "RESPONSE_MALFORMED 错误码");
   equal(result.body.error.details.retryable, true, "标记可重试");
+  ok(/行增量块|atlasEdit/.test(String(result.body.error.message)), "失败原因指出现行契约缺失块");
   equal(JSON.stringify(JSON.parse(worldSnapshot)), JSON.stringify(world), "世界零写入");
-  const fallbackLogs = core.logs().filter((l) => l.kind === "world-turn-parse-fallback");
-  equal(fallbackLogs.length, 1, "解析降级日志恰好一条");
-  ok(fallbackLogs[0].responseChars > 0, "只记录响应长度");
-  ok(!JSON.stringify(fallbackLogs).includes("Let me analyze"), "日志不保留模型原文");
+  // E07：降级/拒绝日志改走行增量拒绝路径（旧的 world-turn-parse-fallback 已随草稿链路删除）
+  const rejectedLogs = core.logs().filter((l) => l.kind === "world-turn-delta-rejected");
+  equal(rejectedLogs.length, 1, "行增量拒绝日志恰好一条");
+  ok(rejectedLogs[0].responseChars > 0, "只记录响应长度");
+  ok(!JSON.stringify(rejectedLogs).includes("Let me analyze"), "日志不保留模型原文");
   ok(!JSON.stringify(core.logs()).includes("sk-runtime-test"), "日志无明文 Key");
 });
 
@@ -905,7 +990,7 @@ test("A12 端到端：finish_reason=length + 仅 <think> 推理稿 → RESPONSE_
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
-  await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
+  await core.handle("PUT", "/settings", TABLE_DELTA_PROTOCOL_COMMAND, { local: true });
 
   const result = await core.handle("POST", "/turns/commit", commitRequest(world));
 
@@ -935,25 +1020,17 @@ test("A12 端到端：finish_reason=length + 仅 <think> 推理稿 → RESPONSE_
 });
 
 test("A12 端到端：截断失败后同键 retry 成功 → 世界只推进一次，再次 retry 为 duplicate", async () => {
-  const goodDraft = {
-    schemaVersion: 2,
-    baseRevision: binding(buildWorld()).worldTimeCursor,
-    duration: 6,
-    evidence: [{ id: "ev1", sourceId: "msg:a", quote: "潮门" }],
-    discoveries: {
-      locations: [{ ref: "new:loc:chaomen", name: "潮门", aliases: [], regionRef: null, parentLocationRef: null, evidenceIds: ["ev1"] }],
-      characters: [],
-    },
-    scene: { resolution: "unknown", locationRef: null, transition: "stay", evidenceIds: ["ev1"] },
-    identityUpdates: [], npcUpdates: [], relationUpdates: [], memories: [], worldFlags: [],
-    events: [], mapScaleHints: [], summary: "抵达潮门附近，位置待确认",
-  };
+  /** 现行行增量夹具：一个新根地点（潮门）+ 引文取自助手正文。 */
+  const goodBlock = editReply([
+    { table: "location", op: "add", ref: "new:loc:chaomen", name: "潮门", description: "潮门外的旧关城。", quote: "你抵达潮门" },
+  ]);
+  const assistantText = "你抵达潮门，城门在暮色里半掩着。";
 
   const fetcher = makeFetch([
     // 第一次：被长度截断
-    () => jsonResponse(200, { choices: [{ finish_reason: "length", message: { content: "<think>先试一版：{\"schemaVersion\":2}</think>" } }] }),
-    // retry：真实问题形状，已闭合的思考段 + 最终 JSON + 精确多余尾巴
-    () => jsonResponse(200, { choices: [{ finish_reason: "stop", message: { content: `<think>先推理：{"schemaVersion":2}</think>\n${JSON.stringify(goodDraft)}"}` } }] }),
+    () => jsonResponse(200, { choices: [{ finish_reason: "length", message: { content: "<think>先试一版：还没有最终块</think>" } }] }),
+    // retry：真实问题形状，已闭合的思考段 + 最终行增量块
+    () => jsonResponse(200, { choices: [{ finish_reason: "stop", message: { content: `<think>先推理一遍。</think>\n${goodBlock}` } }] }),
   ]);
   const store = createMemoryDocumentStore();
   const world = buildWorld();
@@ -962,11 +1039,9 @@ test("A12 端到端：截断失败后同键 retry 成功 → 世界只推进一�
 
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
-  await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
-  // 本用例的草稿是 v2 封套（goodDraft.schemaVersion=2）：协议显式声明 v2
-  await core.handle("PUT", "/settings", { action: "runtime.update", worldTurnProtocol: "v2" }, { local: true });
+  await putTableDeltaSettings(core);
 
-  const request = commitRequest(world);
+  const request = commitRequest(world, { userText: "我去潮门。", assistantText });
   const first = await core.handle("POST", "/turns/commit", request);
   equal(first.body.ok, false, "首次截断失败");
   equal(fetcher.calls.length, 1, "首次恰好 1 条请求");
@@ -979,6 +1054,11 @@ test("A12 端到端：截断失败后同键 retry 成功 → 世界只推进一�
 
   const afterPoints = (carrier.session.world.points ?? []).length;
   equal(afterPoints, pointsBefore + 1, "世界只推进一次：恰好新增 1 个地点");
+  equal(
+    (carrier.session.world.points ?? []).filter((point) => point.name === "潮门").length,
+    1,
+    "新地点就是块里声明的那一个",
+  );
 
   // 再次同键 retry → duplicate，且不再发模型请求
   const again = await core.handle("POST", "/turns/retry", request);
@@ -1006,16 +1086,16 @@ test("0.9.31 首轮自动建图：≤1 点世界首次 commit 后自动提炼一
   };
   // 0.9.48 T05：解析失败不再降级为成功——给第二次 commit 单独备一段合法草稿
   const fetcher = makeFetch([
-    () => openAiResponse(GOOD_DRAFT),
+    deltaScript(),
     () => openAiResponse(geoSpec),
-    () => openAiResponse(GOOD_DRAFT),
+    deltaScript(),
   ]);
   const store = createMemoryDocumentStore();
   const { core } = sessionCore(store, { fetchFn: fetcher.fetchFn });
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
-  await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
+  await core.handle("PUT", "/settings", TABLE_DELTA_PROTOCOL_COMMAND, { local: true });
 
   const result = await core.handle("POST", "/turns/commit", commitRequest(world));
   equal(result.body.ok, true, "提交成功");
@@ -1044,7 +1124,7 @@ test("0.9.36 自动建图①：本轮 assistantText 进提炼素材（首回合�
     points: [{ name: "钟楼", regionName: "旧城区" }],
   };
   const fetcher = makeFetch([
-    () => openAiResponse(GOOD_DRAFT),
+    deltaScript(),
     () => openAiResponse(geoSpec),
   ]);
   const store = createMemoryDocumentStore();
@@ -1052,7 +1132,7 @@ test("0.9.36 自动建图①：本轮 assistantText 进提炼素材（首回合�
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
-  await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
+  await core.handle("PUT", "/settings", TABLE_DELTA_PROTOCOL_COMMAND, { local: true });
 
   const result = await core.handle("POST", "/turns/commit", commitRequest(world));
   equal(result.body.ok, true, "提交成功");
@@ -1074,8 +1154,8 @@ test("0.9.36 自动建图②：素材全空 → 零提炼请求、不烧标记�
     points: [{ name: "钟楼", regionName: "旧城区" }],
   };
   const fetcher = makeFetch([
-    () => openAiResponse(GOOD_DRAFT),
-    () => openAiResponse(GOOD_DRAFT),
+    deltaScript(),
+    deltaScript(),
     () => openAiResponse(geoSpec),
   ]);
   const store = createMemoryDocumentStore();
@@ -1083,7 +1163,7 @@ test("0.9.36 自动建图②：素材全空 → 零提炼请求、不烧标记�
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
-  await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
+  await core.handle("PUT", "/settings", TABLE_DELTA_PROTOCOL_COMMAND, { local: true });
 
   const first = await core.handle("POST", "/turns/commit", commitRequest(world, { assistantText: "  " }));
   equal(first.body.ok, true, "首回合提交成功");
@@ -1108,7 +1188,7 @@ test("0.9.36 自动建图③：0.9.35 烧掉的旧标记（无 done）升级后�
     points: [{ name: "钟楼", regionName: "旧城区" }],
   };
   const fetcher = makeFetch([
-    () => openAiResponse(GOOD_DRAFT),
+    deltaScript(),
     () => openAiResponse(geoSpec),
   ]);
   const store = createMemoryDocumentStore();
@@ -1116,7 +1196,7 @@ test("0.9.36 自动建图③：0.9.35 烧掉的旧标记（无 done）升级后�
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
-  await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
+  await core.handle("PUT", "/settings", TABLE_DELTA_PROTOCOL_COMMAND, { local: true });
   // 模拟 0.9.31~0.9.35 留下的旧标记：提炼前就写、无 done / attempts 字段（0.9.42 起标记住会话）
   carrier.session.geoAuto[world.id] = { at: NOW };
 
@@ -1134,13 +1214,13 @@ test("0.9.36 自动建图④：尝试达上限（3 次）→ 不再发提炼请�
     ...JSON.parse(JSON.stringify(full)),
     points: full.points.filter((p) => String(p.id) === "4103"),
   });
-  const fetcher = makeFetch([() => openAiResponse(GOOD_DRAFT)]);
+  const fetcher = makeFetch([deltaScript()]);
   const store = createMemoryDocumentStore();
   const { core, carrier } = sessionCore(store, { fetchFn: fetcher.fetchFn });
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
-  await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
+  await core.handle("PUT", "/settings", TABLE_DELTA_PROTOCOL_COMMAND, { local: true });
   carrier.session.geoAuto[world.id] = { at: NOW, attempts: 3 };
 
   const result = await core.handle("POST", "/turns/commit", commitRequest(world));
@@ -1159,7 +1239,7 @@ test("0.9.36 自动建图⑤：提炼响应 content 为空、JSON 在 reasoning_
     points: [{ name: "钟楼", regionName: "旧城区" }],
   };
   const fetcher = makeFetch([
-    () => openAiResponse(GOOD_DRAFT),
+    deltaScript(),
     () => jsonResponse(200, {
       choices: [{ message: { content: "", reasoning_content: JSON.stringify(geoSpec), finish_reason: "tool_calls" } }],
     }),
@@ -1169,7 +1249,7 @@ test("0.9.36 自动建图⑤：提炼响应 content 为空、JSON 在 reasoning_
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
-  await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
+  await core.handle("PUT", "/settings", TABLE_DELTA_PROTOCOL_COMMAND, { local: true });
 
   const result = await core.handle("POST", "/turns/commit", commitRequest(world));
   equal(result.body.ok, true, "提交成功");
@@ -1179,51 +1259,66 @@ test("0.9.36 自动建图⑤：提炼响应 content 为空、JSON 在 reasoning_
   ok(result.body.data.receipt.summary.includes("首轮自动建图"), "回执注明自动建图");
 });
 
-test("0.9.32 点挂子图：commit 落 sidecar（maps:<worldId>），/state 带出 submaps 与点位描述", async () => {
-  const draftWithSub = {
-    ...GOOD_DRAFT,
-    npcChanges: [{ entityId: "entity-npc", key: "whereabouts", value: "潮门" }],
-    newLocations: [
-      {
-        name: "潮门钟楼",
-        description: "潮门旁的旧钟楼。",
-        submap: {
-          scale: { distancePerCell: 5, unit: "米" },
-          points: [{ name: "钟室" }, { name: "楼梯间" }],
-        },
-      },
-    ],
-  };
-  const fetcher = makeFetch([() => openAiResponse(draftWithSub)]);
+test("0.9.32 点挂子图（E07 等效）：行增量新地点落父地点子图，尺度只走标定接口", async () => {
+  /**
+   * 等效改写（E07/E09）：v1 草稿的 `newLocations[].submap`（自带 scale + 点位）已随草稿链路删除，
+   * 模型**不再**有机会在正文回合里自报子图布局与每格米数。现行等价契约是：
+   * - 子图 = 行增量地点行的 `parentRef` → `/state` 由世界结构（parentPointId）确定性投影出子图与点位；
+   * - 点位描述 = 三表 `location.description`（不再写 sidecar.pointMeta）；
+   * - 尺度 = 只经 `POST /worlds/scale/calibrate`（程序推导米/格），模型无法自报。
+   */
+  const block = editReply([
+    { table: "location", op: "add", ref: "new:loc:belltower", name: "潮门钟楼", parentRef: "loc:4105", description: "潮门旁的旧钟楼。", quote: "你推门进了潮门钟楼" },
+    { table: "character", op: "set", ref: "npc:chronicle-c1", patch: { thought: "潮门旁的旧钟楼里有人。" }, basis: "inferred" },
+  ]);
+  const fetcher = makeFetch([() => openAiTextResponse(block)]);
   const store = createMemoryDocumentStore();
   const world = buildWorld();
   const { core, carrier } = sessionCore(store, { fetchFn: fetcher.fetchFn });
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
-  await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
-  await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
+  await putTableDeltaSettings(core);
 
-  const result = await core.handle("POST", "/turns/commit", commitRequest(world));
-  equal(result.body.ok, true, "提交成功");
-  ok(result.body.data.receipt.summary.includes("新增地点"), "回执注明新增地点");
+  const result = await core.handle("POST", "/turns/commit",
+    commitRequest(world, { userText: "我去潮门港的钟楼。", assistantText: "你推门进了潮门钟楼。" }));
+  equal(result.body.ok, true, `提交成功：${JSON.stringify(result.body.error ?? "")}`);
+  // 两行都真的落账（回执 summary 只报后台摘要，行级结果以三表为准）
+  const branchRows = carrier.session.tables.branches.canon;
+  ok(branchRows.locations.some((row) => row.name === "潮门钟楼"), "地点行落账");
+  equal(
+    branchRows.characters.find((row) => row.id === "npc:chronicle-c1").thought,
+    "潮门旁的旧钟楼里有人。",
+    "同一块里的第二行也落账",
+  );
+  // 模型再也不能在回合里自报子图布局 / 每格米数
+  equal(carrier.session.maps ?? null, null, "正文回合不再写子图 sidecar（模型无权自报布局与尺度）");
 
-  // sidecar 文档：maps:<worldId> 写入且键 = 新点 id
-  const worldNow = (await core.handle("GET", "/state/chat-a")).body.data;
-  const newPoint = worldNow.map.points.find((p) => p.name === "潮门钟楼");
+  const stateAfter = (await core.handle("GET", "/state/chat-a")).body.data;
+  const newPoint = (carrier.session.world.points ?? []).find((p) => p.name === "潮门钟楼");
   ok(newPoint, "新地点已进世界点位");
-  const doc = carrier.session.maps;
-  ok(doc, "sidecar 文档已写入");
-  const sub = doc.submaps[String(newPoint.id)];
-  ok(sub, "子图键 = 点位 id");
-  equal(sub.points.length, 2, "子图两点位");
-  ok(sub.points.every((p) => Number.isFinite(p.x) && Number.isFinite(p.y)), "子图点位有网格坐标");
-  equal(sub.scale.distancePerCell, 5, "子图比例尺");
-  equal(doc.pointMeta[String(newPoint.id)].description, "潮门旁的旧钟楼。", "点位描述入 sidecar");
+  equal(String(newPoint.parentPointId), "4105", "父链来自行增量 parentRef（= 潮门港）");
+  equal(stateAfter.map.pointParents[String(newPoint.id)], 4105, "/state 下发父链");
 
-  // /state 带出 submap（UI 渲染数据源）
-  ok(worldNow.map.submaps && worldNow.map.submaps[String(newPoint.id)], "/state 带出子图");
-  equal(worldNow.map.submaps[String(newPoint.id)].points.length, 2, "/state 子图点位");
-  equal(worldNow.map.pointMeta[String(newPoint.id)].description, "潮门旁的旧钟楼。", "/state 带出点位描述");
+  // /state 带出子图（UI 渲染数据源）：点位由投影确定性生成，坐标有限
+  const sub = stateAfter.map.submaps?.["4105"];
+  ok(sub, "/state 带出父地点子图");
+  const subPoint = (sub.points ?? []).find((p) => p.name === "潮门钟楼");
+  ok(subPoint, "新地点出现在父地点子图里");
+  ok(Number.isFinite(subPoint.x) && Number.isFinite(subPoint.y), "子图点位有确定性网格坐标");
+  equal(sub.scale, null, "子图比例尺不再由模型自报（本轮为 null）");
+  equal(stateAfter.map.points.some((p) => p.name === "潮门钟楼"), false, "子地点不上世界图");
+
+  // 点位描述：进三表 location 行（现行权威）
+  const locationRow = carrier.session.tables.branches.canon.locations.find((row) => row.name === "潮门钟楼");
+  equal(locationRow.description, "潮门旁的旧钟楼。", "点位描述落在三表 location.description");
+
+  // 尺度：只走建图标定接口（程序按已确认材料推导，模型不自报）
+  const calibrated = await core.handle("POST", "/worlds/scale/calibrate", {
+    chatId: "chat-a", mapId: "world", userMetersPerCell: 5, basis: "作者按设定填的",
+  }, { local: true });
+  equal(calibrated.body.data.status, "grounded", "建图标定接口可写人工尺度");
+  const stateScaled = (await core.handle("GET", "/state/chat-a")).body.data;
+  equal(stateScaled.map.calibrations.world.metersPerCell, 5, "/state 下发人工标定的每格米数");
 });
 
 test("state exposes reachable nested submaps with parent links and frame", async () => {
@@ -1265,7 +1360,7 @@ test("state exposes reachable nested submaps with parent links and frame", async
 });
 
 test("0.9.41 地图三型标点：/state 带人物动向字段（status / recentNarratives / pointName）与物品描述", async () => {
-  const fetcher = makeFetch([() => openAiResponse(GOOD_DRAFT)]);
+  const fetcher = makeFetch([deltaScript()]);
   const store = createMemoryDocumentStore();
   const built = buildWorld();
   // 物品实体：挂起点 4103（白塔钟座），带 baseline 描述
@@ -1287,7 +1382,7 @@ test("0.9.41 地图三型标点：/state 带人物动向字段（status / recent
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
-  await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
+  await core.handle("PUT", "/settings", TABLE_DELTA_PROTOCOL_COMMAND, { local: true });
   const committed = await core.handle("POST", "/turns/commit", commitRequest(world));
   equal(committed.body.ok, true, "提交成功");
 
@@ -1306,16 +1401,15 @@ test("0.9.41 地图三型标点：/state 带人物动向字段（status / recent
 
 test("retry：沿用原幂等键，成功后世界恰好推进一次", async () => {
   // 第一次 429 失败，重试成功
-  const fetcher = makeFetch([() => jsonResponse(429, {}), () => openAiResponse(GOOD_DRAFT)]);
+  const fetcher = makeFetch([() => jsonResponse(429, {}), deltaScript()]);
   const store = createMemoryDocumentStore();
   const world = buildWorld();
   const { core } = sessionCore(store, { fetchFn: fetcher.fetchFn });
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
-  await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
-  await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
+  await putTableDeltaSettings(core);
 
-  const first = await core.handle("POST", "/turns/commit", commitRequest(world));
+  const first = await core.handle("POST", "/turns/commit", commitRequest(world, DELTA_TURN));
   equal(first.body.error.code, ATLAS_ERROR_CODES.API_RATE_LIMITED, "首次 429");
 
   const retry = await core.handle("POST", "/turns/retry", {
@@ -1327,7 +1421,7 @@ test("retry：沿用原幂等键，成功后世界恰好推进一次", async () 
   equal(retry.status, 200, "retry 成功");
   const receipt = retry.body.data.receipt;
   equal(receipt.status, "committed", "retry 后 committed");
-  equal(receipt.currentTime, 430.07, "时间只推进一次");
+  equal(receipt.currentTime, CURRENT_TIME + DELTA_PERIODS, "时间只推进一次");
   equal(fetcher.calls.length, 2, "总计 2 条请求（1 失败 + 1 成功）");
 
   // 再次 retry：pending 已清、回执已缓存 → duplicate，0 新请求
@@ -1376,14 +1470,8 @@ test("队列：同聊天并发 commit 串行执行，不并发冲击", async () 
     maxInFlight = Math.max(maxInFlight, inFlight);
     await new Promise((resolve) => setTimeout(resolve, 20));
     inFlight -= 1;
-    return openAiResponse({
-      ...GOOD_DRAFT,
-      duration: 1,
-      locationChange: null,
-      npcChanges: [{ entityId: "entity-npc", key: "whereabouts", value: "集市" }],
-      memoryDrafts: [],
-      summary: "旅行者在集市逗留。",
-    });
+    // 行增量块（纯文本）：一行合法编辑，串行性只关心请求是否并发冲击
+    return openAiTextResponse(editReply([DELTA_THOUGHT_ROW]));
   };
   const store = createMemoryDocumentStore();
   const world = buildWorld();
@@ -1391,7 +1479,7 @@ test("队列：同聊天并发 commit 串行执行，不并发冲击", async () 
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
   await core.handle("PUT", "/settings", { worldTurn: preset(), rpmLimit: 50 }, { local: true });
-  await core.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
+  await core.handle("PUT", "/settings", TABLE_DELTA_PROTOCOL_COMMAND, { local: true });
 
   const first = core.handle("POST", "/turns/commit", commitRequest(world));
   const second = core.handle("POST", "/turns/commit", commitRequest(world));
@@ -1526,19 +1614,25 @@ test("提示词预设：服务端校验（上限 8000 / 空拒绝 / 内置默认
 // ---------------------------------------------------------------------------
 
 test("ATLAS-06 rollback：回退世界与绑定游标，账本保留，变体重提交为同级结果", async () => {
-  const fetcher = makeFetch([() => openAiResponse(GOOD_DRAFT), () => openAiResponse(GOOD_DRAFT)]);
+  // 两个回合的块都让主角走到玻璃温室 → 回退必须把「位置 + 时间 + 三表」一起还原
+  const moveBlock = [movePlayerRow("loc:4104", "你沿小径走进玻璃温室")];
+  const fetcher = makeFetch([deltaScript(moveBlock), deltaScript(moveBlock)]);
   const store = createMemoryDocumentStore();
-  const world = buildWorld();
+  const world = withProtagonist(buildWorld());
   const { core: fresh, carrier } = sessionCore(store, { fetchFn: fetcher.fetchFn });
   await fresh.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await fresh.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
-  await fresh.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
-  await fresh.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
+  await putTableDeltaSettings(fresh);
+  const turnA = {
+    userText: "我一整天都在赶路，傍晚到了玻璃温室。",
+    assistantText: "你沿小径走进玻璃温室。",
+  };
 
-  // 回合 A：swipeId null 首次提交 → 时间 418.07 → 430.07
-  const first = await fresh.handle("POST", "/turns/commit", commitRequest(world));
+  // 回合 A：swipeId null 首次提交 → 时间 418.07 → 422.07、位置 4103 → 4104
+  const first = await fresh.handle("POST", "/turns/commit", commitRequest(world, turnA));
   equal(first.body.data.receipt.status, "committed", "变体 A committed");
-  equal(first.body.data.receipt.currentTime, 430.07, "变体 A 时间推进");
+  equal(first.body.data.receipt.currentTime, CURRENT_TIME + DELTA_PERIODS, "变体 A 时间推进");
+  equal(first.body.data.receipt.currentLocationId, "4104", "变体 A 位置推进");
 
   // 回合前检查点已随提交持久化 + 楼层映射已写（0.9.42 起世界与映射都住会话）
   const worldAfterCommit = carrier.session.world;
@@ -1561,15 +1655,16 @@ test("ATLAS-06 rollback：回退世界与绑定游标，账本保留，变体重
   );
   ok(isCheckpointIntact(ckpts[0]), "检查点 hash 完整（可追溯）");
 
-  // 变体 B 重提交（唯一 swipeId）：committed 同级结果——时间从回合前重新推进到 430.07，不累计
-  const variant = commitRequest(world, { swipeId: "swipe-2" });
+  // 变体 B 重提交（唯一 swipeId）：committed 同级结果——时间从回合前重新推进，不累计
+  const variant = commitRequest(world, { ...turnA, swipeId: "swipe-2" });
   const second = await fresh.handle("POST", "/turns/commit", variant);
   equal(second.body.data.receipt.status, "committed", "变体 B committed（非 duplicate）");
-  equal(second.body.data.receipt.currentTime, 430.07, "同级结果：时间不累计推进");
+  equal(second.body.data.receipt.currentTime, CURRENT_TIME + DELTA_PERIODS, "同级结果：时间不累计推进");
+  equal(second.body.data.receipt.currentLocationId, "4104", "同级结果：位置同样回到玻璃温室");
 
   // 回退后的映射标记 rolledBack（保留历史），变体 B 有自己的映射
   const rolledDoc = carrier.session.turns[turnKeys[0]];
-  equal(rolledDoc.rolledBack, true, "旧变体映射标记已回退");
+  equal(rolledDoc.rolledBack, true, "旧变体映射已回退");
   equal(Object.keys(carrier.session.turns).filter((k) => k.startsWith("turn:chat-a:")).length, 2, "变体 B 映射已写");
 });
 
@@ -1577,20 +1672,19 @@ test("ATLAS-06 rollback：只允许回退最近一条未回退回合；未知楼
   // 时钟递增：committedAt 必须可比较（回退守卫按提交时间找「最近一条」）
   let tick = NOW;
   const clock = () => tick;
-  const fetcher = makeFetch([() => openAiResponse(GOOD_DRAFT), () => openAiResponse(GOOD_DRAFT), () => openAiResponse(GOOD_DRAFT)]);
+  const fetcher = makeFetch([deltaScript(), deltaScript(), deltaScript()]);
   const store = createMemoryDocumentStore();
   const world = buildWorld();
   const fresh = sessionCore(store, { fetchFn: fetcher.fetchFn, now: clock }).core;
   await fresh.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await fresh.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
-  await fresh.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
-  await fresh.handle("PUT", "/settings", V1_PROTOCOL_COMMAND, { local: true });
+  await putTableDeltaSettings(fresh);
 
   // 两个连续回合：A（msg-10/msg-11）→ B（msg-14/msg-15）
   tick += 1;
-  await fresh.handle("POST", "/turns/commit", commitRequest(world));
+  await fresh.handle("POST", "/turns/commit", commitRequest(world, DELTA_TURN));
   tick += 1;
-  await fresh.handle("POST", "/turns/commit", commitRequest(world, { turnId: "turn-y", userMessageId: "msg-14", assistantMessageId: "msg-15" }));
+  await fresh.handle("POST", "/turns/commit", commitRequest(world, { ...DELTA_TURN, turnId: "turn-y", userMessageId: "msg-14", assistantMessageId: "msg-15" }));
 
   // 回退中间回合 A → 拒绝（会连带抹掉 B）
   const mid = await fresh.handle("POST", "/turns/rollback", { chatId: "chat-a", assistantMessageId: "msg-11" });
@@ -1780,17 +1874,35 @@ test("invalid old prompt entry blocks settings writes and preserves the raw docu
 });
 
 // ---------------------------------------------------------------------------
-// S0（0.9.55）：v2 父引用 → 子图现状夹具
+// S0 / S10（0.9.55 + E07）：子图层级的**现行**回归夹具
 //
-// 现场：v2 的 discoveries.locations[].parentLocationRef 目前只在
-// src/atlas-turn-v2.ts 收集后推一条「暂存未落账」warning，MapPoint 上没有父字段，
-// 因此「世界图点开建筑 → 再点开房间」这条链路完全不存在。
-// 本用例锁定真正缺口：**在现版本预期失败**，以此作为 S1–S7 的红灯基线。
+// E07（0.9.59）起，回合的唯一入口是 `<atlasEdit>` 行增量块，v2 封套执行链已删除。
+// 子图语义没有变，只是换了表达：
+// · 地点层级 = 行增量地点行的 `parentRef`（已知 `loc:<数字>` 或本块内 `new:loc:*`）；
+// · 世界点身份 = `World.points[].id`（子地点同样是真实地点，不造虚拟 sub-* 身份）；
+// · 父链权威 = MapPoint.parentPointId；maps:<worldId> 仍只是布局缓存；
+// · /state 的 map 由 projectWorldSubmaps 从**可见世界**的 parentPointId 派生并与 sidecar 合并，
+//   map.points 只下发根地点、map.submaps[父ID].points 是子地点、pointCount 计全部可见非占位点；
+// · 解析/应用期的父引用守卫改由行增量层承担：相互父引用 → `DEPENDENCY_FAILED`（整轮拒绝），
+//   未知父 → `ROW_NOT_FOUND @ $.parentRef`（该行被拒 / 整轮无可用行则整轮拒绝），
+//   父链深度沿用三表 `PARENT_DEPTH_EXCEEDED`（同 SUBMAP_DEPTH_MAX）。
 // ---------------------------------------------------------------------------
 
+/** S10 夹具的助手正文；块内每行的 quote 必须是它的连续逐字片段。 */
+const S10_ASSISTANT_TEXT = "你走进钟楼大堂，再推开档案室的门。";
+const S10_QUOTE = "你走进钟楼大堂";
+const S10_ARCHIVE_QUOTE = "再推开档案室的门";
+/** setupWithTower 造出的已知世界点“钟楼”的 ID（父引用需要一个可引用的既有地点）。 */
+const S10_TOWER = "9001";
+
+/** 一条地点行（`parentRef` 决定它挂到哪个父地点下）。 */
+function s10Room(ref, name, parentRef, quote = S10_QUOTE) {
+  return { table: "location", op: "add", ref, name, parentRef, quote };
+}
+
 /**
- * 造一个带已知地点“钟楼”的世界（v2 父引用需要一个可引用的既有地点）。
- * - scripts：省略时沿用 S0 的单轮父引用草稿；S10 用例传入自己的脚本序列（每轮一个脚本）。
+ * 造一个带已知地点“钟楼”（+ 主角 char-main）的世界。
+ * - scripts：省略时给一轮「钟楼 → 大堂 → 档案室」的默认行增量块；S10 用例传入自己的脚本序列。
  * - options.deps：透传给核心（例如 `{ onDiagnostic }`：logs() 里只有 kind/level，
  *   规定诊断码与 details.count 只经 onDiagnostic 回调暴露）。
  * - options.extraPoints：追加既有存档点（例如造「某父下已有 41 个子点」的超限存档）。
@@ -1802,34 +1914,25 @@ async function setupWithTower(scripts = null, options = {}) {
   const regionId = String((base.regions ?? [])[0]?.id ?? "");
   const world = {
     ...base,
+    // E11：绑定位置游标只随主角三表行的 locationRef 变化 → 主角必须在世界人物表里
+    characters: [
+      ...(base.characters ?? []),
+      { id: "char-main", worldId: base.id, name: "林拾", role: "主角", description: "测试主角" },
+    ],
     points: [
       ...(base.points ?? []),
-      { id: 9001, name: "钟楼", x: 10, y: 10, regionId },
+      { id: Number(S10_TOWER), name: "钟楼", x: 10, y: 10, regionId },
       ...extraPoints,
     ],
   };
   const parsed = parseWorld(JSON.parse(JSON.stringify(world)));
   ok(parsed !== null, "带钟楼的世界可解析");
-  const draft = {
-    schemaVersion: 2,
-    baseRevision: CURRENT_TIME,
-    duration: 1,
-    evidence: [{ id: "ev1", sourceId: "msg:a", quote: "大堂" }],
-    discoveries: {
-      locations: [
-        // 已知父（钟楼 9001）→ 本轮新建“大堂”
-        { ref: "new:loc:hall", name: "大堂", aliases: [], regionRef: regionId || null, parentLocationRef: "9001", evidenceIds: ["ev1"] },
-        // 本轮父（new:loc:hall）→ 本轮新建“档案室”（父子同轮、顺序在父之后）
-        { ref: "new:loc:archive", name: "档案室", aliases: [], regionRef: regionId || null, parentLocationRef: "new:loc:hall", evidenceIds: ["ev1"] },
-      ],
-      characters: [],
-    },
-    // 场景锚定到最内层房间：当前位置应是档案室
-    scene: { resolution: "confirmed", locationRef: "new:loc:archive", transition: "arrive", evidenceIds: ["ev1"] },
-    identityUpdates: [], npcUpdates: [], relationUpdates: [], memories: [], worldFlags: [], events: [], mapScaleHints: [],
-    summary: "进入钟楼大堂，再进档案室。",
-  };
-  const fetcher = makeFetch(scripts ?? [() => openAiResponse(draft)]);
+  const defaultBlock = editReply([
+    s10Room("new:loc:hall", "大堂", `loc:${S10_TOWER}`),
+    s10Room("new:loc:archive", "档案室", "new:loc:hall", S10_ARCHIVE_QUOTE),
+    movePlayerRow("new:loc:archive", S10_ARCHIVE_QUOTE),
+  ]);
+  const fetcher = makeFetch(scripts ?? [() => openAiTextResponse(defaultBlock)]);
   const rawCore = createAtlasServerCore({
     store,
     fetchFn: fetcher.fetchFn,
@@ -1840,16 +1943,14 @@ async function setupWithTower(scripts = null, options = {}) {
   const core = carrierAsCore(carrier);
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(parsed)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(parsed) });
-  await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
-  // S0/S10 用 v2 封套草稿：协议严格按设置分派（C04），这里显式声明 v2
-  await core.handle("PUT", "/settings", { action: "runtime.update", worldTurnProtocol: "v2" }, { local: true });
+  await putTableDeltaSettings(core);
   return { store, core, world: parsed, carrier, fetcher };
 }
 
-test("S0：v2 parentLocationRef 应生成两级子图（现版本预期失败——红灯基线）", async () => {
+test("S0：父引用应生成两级子图（S1–S9 落地后的绿灯回归）", async () => {
   const { core, world } = await setupWithTower();
   const committed = await core.handle("POST", "/turns/commit",
-    commitRequest(world, { userText: "我进钟楼。", assistantText: "你走进钟楼大堂，再推开档案室的门。" }));
+    commitRequest(world, { userText: "我进钟楼。", assistantText: S10_ASSISTANT_TEXT }));
   equal(committed.body.data?.receipt?.status, "committed", "本轮提交成功");
 
   const state = (await core.handle("GET", "/state/chat-a")).body.data;
@@ -1877,44 +1978,42 @@ test("S0：v2 parentLocationRef 应生成两级子图（现版本预期失败—
     `map.pointCount(${state.map.pointCount}) 应大于世界图标记数(${(state.map.points ?? []).length})——子地点计入总数但不上世界图`,
   );
 
-  // S7（0.9.55）：只在真正 committed 时报告子图增量（数量 + 最大层级），且不记故事原文
-  const hierarchyLogs = core.logs().filter((l) => l.kind === "world-turn-hierarchy");
-  equal(hierarchyLogs.length, 1, "committed 恰好一条子图增量日志");
-  equal(hierarchyLogs[0].pointsAdded, 2, "本轮新增两个带父的地点（大堂 + 档案室）");
-  equal(hierarchyLogs[0].scanned, 2, "最大层级 = 2（钟楼 → 大堂 → 档案室）");
+  // S7 等价数据断言：本轮新增两个带父地点，最深父链 2 层，且日志不含故事原文
+  equal(Object.keys(state.map.pointParents).length, 2, "本轮新增两个带父的地点（大堂 + 档案室）");
+  equal(s10Depth(state.map.pointParents, archive?.id), 2, "最大层级 = 2（钟楼 → 大堂 → 档案室）");
   const logText = JSON.stringify(core.logs());
-  ok(!logText.includes("大堂") && !logText.includes("档案室"), "子图日志不含地点名以外的原文");
-  ok(!logText.includes("推开档案室的门"), "子图日志不含故事原文");
+  ok(!logText.includes("大堂") && !logText.includes("档案室"), "日志不含地点名以外的原文");
+  ok(!logText.includes("推开档案室的门"), "日志不含故事原文");
 });
 
-test("v2 discoveries disappear from state, nearby and map after rollback", async () => {
+test("行增量发现的地点/人物在回退后从 state、nearby 与地图消失（定义保留）", async () => {
   const assistantText = "你抵达新塔，见到少女。";
-  const draft = {
-    schemaVersion: 2, baseRevision: CURRENT_TIME, duration: 1,
-    evidence: [{ id: "ev1", sourceId: "msg:a", quote: "新塔" }],
-    discoveries: {
-      locations: [{ ref: "new:loc:tower", name: "新塔", aliases: [], regionRef: null, parentLocationRef: null, evidenceIds: ["ev1"] }],
-      characters: [{ ref: "new:npc:girl", displayName: "少女", aliases: [], description: "塔边的人", evidenceIds: ["ev1"] }],
-    },
-    scene: { resolution: "confirmed", locationRef: "new:loc:tower", transition: "arrive", evidenceIds: ["ev1"] },
-    identityUpdates: [],
-    npcUpdates: [{ entityRef: "new:npc:girl", location: { op: "set", locationRef: "new:loc:tower" }, presence: "present", status: "在场", evidenceIds: ["ev1"] }],
-    relationUpdates: [], memories: [], worldFlags: [], events: [], mapScaleHints: [],
-    summary: "抵达新塔。",
-  };
-  let hiddenRefDraft;
-  const { core, world, carrier } = await setup([() => openAiResponse(draft), () => openAiResponse(hiddenRefDraft)]);
-  // 本用例的草稿是 v2 封套（schemaVersion=2）：协议显式声明 v2
-  const protocolSet = await core.handle("PUT", "/settings", { action: "runtime.update", worldTurnProtocol: "v2" }, { local: true });
-  equal(protocolSet.body.data?.worldTurnProtocol, "v2", "前置：协议已切到 v2");
+  /** 第一轮的块：新塔（根地点）+ 主角走到新塔 + 新人物「少女」挂在新塔。 */
+  const firstBlock = editReply([
+    { table: "location", op: "add", ref: "new:loc:newtower", name: "新塔", description: "塔边的地方。", quote: "你抵达新塔" },
+    movePlayerRow("new:loc:newtower", "你抵达新塔"),
+    { table: "character", op: "add", ref: "new:npc:girl", name: "少女", locationRef: "new:loc:newtower", currentAction: "在场", quote: "见到少女" },
+  ]);
+  /** 兄弟分支上引用**分支外不可见**地点的那一行（该地点不在该分支的三表里）。 */
+  let hiddenRefBlock = "";
+  const fetcher = makeFetch([() => openAiTextResponse(firstBlock), () => openAiTextResponse(hiddenRefBlock)]);
+  const store = createMemoryDocumentStore();
+  const world = withProtagonist(buildWorld());
+  const { core, carrier } = sessionCore(store, { fetchFn: fetcher.fetchFn });
+  await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
+  await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
+  await putTableDeltaSettings(core);
+  const protocol = await core.handle("GET", "/settings", null, { local: true });
+  equal(protocol.body.data?.worldTurnProtocol, "table-delta-v1", "前置：运行时协议 = table-delta-v1");
   const request = commitRequest(world, { userText: "我去新塔。", assistantText });
   const committed = await core.handle("POST", "/turns/commit", request);
-  equal(committed.body.ok, true, "v2 提交成功");
+  equal(committed.body.ok, true, `行增量提交成功：${JSON.stringify(committed.body.error ?? "")}`);
   equal(committed.body.data.receipt.status, "committed", "回执 committed");
   const during = (await core.handle("GET", "/state/chat-a")).body.data;
   ok(during.map.points.some((point) => point.name === "新塔"), "新地点当前可见");
   ok(during.npcDirectory.some((npc) => npc.name === "少女"), "新人当前可见");
   ok(during.relevantNpcIds.some((id) => during.npcDirectory.some((npc) => npc.id === id && npc.name === "少女")), "同地点新人进入附近候选");
+  const towerPointId = String(during.map.points.find((point) => point.name === "新塔").id);
   carrier.session.world.stories.push({
     id: "if-before-tower", worldId: world.id, mode: "if", title: "分歧线",
     steps: [], parentStoryId: CANON,
@@ -1925,18 +2024,31 @@ test("v2 discoveries disappear from state, nearby and map after rollback", async
   const sibling = siblingResult.body.data;
   ok(!sibling.map.points.some((point) => point.name === "新塔"), "分歧前兄弟线看不到未来地点");
   ok(!sibling.npcDirectory.some((npc) => npc.name === "少女"), "分歧前兄弟线看不到未来人物");
-  hiddenRefDraft = {
-    ...draft, baseRevision: sibling.currentTime, duration: 0,
-    discoveries: { locations: [], characters: [] },
-    scene: { resolution: "confirmed", locationRef: String(during.map.points.find((point) => point.name === "新塔").id),
-      transition: "stay", evidenceIds: ["ev1"] },
-    npcUpdates: [], summary: "尝试引用兄弟分支的地点。",
-  };
+  /**
+   * E07 等效：v2 的 `rejectHiddenV2Refs`（跨分支不可见引用守卫）已随 v2 执行链删除，
+   * 现行守卫是**结构性的**，而且更靠前：
+   * · 分叉分支自己还没有三表快照（懒迁移每个聊天只成功一次）→ 明确拒绝（RESPONSE_MALFORMED），
+   *   世界与游标零变化，绝不借用正史线的三表；
+   * · 即便该分支已有三表，正史线上后建的行也不在里面 → 引用它得到 `ROW_NOT_FOUND`。
+   * 两条路径都不会把别的分支的事实偷进本轮。
+   */
+  hiddenRefBlock = editReply([movePlayerRow(`loc:${towerPointId}`, "你抵达新塔")]);
+  const pointsBeforeHidden = (carrier.session.world.points ?? []).length;
   const hiddenCommit = await core.handle("POST", "/turns/commit", commitRequest(world, {
     turnId: "hidden-ref", userMessageId: "msg-12", assistantMessageId: "msg-13", assistantText,
   }));
   ok(hiddenCommit.status !== 200, "兄弟分支不可见地点不得提交");
-  ok(/不可见/.test(hiddenCommit.body.error.message), "拒收原因指出分支不可见引用");  carrier.session.binding.branchId = CANON;
+  ok(
+    /本分支还没有三表快照|ROW_NOT_FOUND/.test(String(hiddenCommit.body.error.message)),
+    `拒收原因指向该分支没有可引用的行（实际：${String(hiddenCommit.body.error.message).slice(0, 120)}）`,
+  );
+  equal((carrier.session.world.points ?? []).length, pointsBeforeHidden, "被拒回合零写入（不偷正史线的事实）");
+  equal(
+    Object.values(carrier.session.turns ?? {}).some((item) => item.assistantMessageId === "msg-13"),
+    false,
+    "被拒回合不落回合映射",
+  );
+  carrier.session.binding.branchId = CANON;
   const turn = Object.values(carrier.session.turns).find((item) => item.assistantMessageId === "msg-11");
   ok(turn.createdPointIds.length === 1 && turn.createdEntityIds.length === 1, "回合记录出生来源");
   const rolled = await core.handle("POST", "/turns/rollback", { chatId: "chat-a", assistantMessageId: "msg-11" });
@@ -1959,44 +2071,6 @@ test("v2 discoveries disappear from state, nearby and map after rollback", async
 //   拦未知父、自引用、成环、父链 > 4 层、同一父 > 40 个直接子地点 → 整轮拒绝且零写入。
 // ---------------------------------------------------------------------------
 
-const S10_QUOTE = "你走进钟楼大堂";
-/** setupWithTower 造出的已知世界点“钟楼”的 ID（v2 父引用需要一个可引用的既有地点）。 */
-const S10_TOWER = "9001";
-
-/** v2 草稿最小骨架；引文必须是 request.assistantText 的原文片段（解析期做包含校验）。 */
-function s10Draft(overrides = {}) {
-  const {
-    baseRevision = CURRENT_TIME,
-    duration = 0,
-    locations = [],
-    sceneRef = S10_TOWER,
-    transition = "stay",
-    quote = S10_QUOTE,
-    summary = "进入钟楼内部。",
-  } = overrides;
-  return {
-    schemaVersion: 2,
-    baseRevision,
-    duration,
-    evidence: [{ id: "ev1", sourceId: "msg:a", quote }],
-    discoveries: { locations, characters: [] },
-    scene: { resolution: "confirmed", locationRef: sceneRef, transition, evidenceIds: ["ev1"] },
-    identityUpdates: [],
-    npcUpdates: [],
-    relationUpdates: [],
-    memories: [],
-    worldFlags: [],
-    events: [],
-    mapScaleHints: [],
-    summary,
-  };
-}
-
-/** v2 发现地点条目：parentLocationRef 为 null 即世界图根地点。 */
-function s10Loc(ref, name, parentLocationRef = null) {
-  return { ref, name, aliases: [], regionRef: null, parentLocationRef, evidenceIds: ["ev1"] };
-}
-
 /** 第 index 个回合的提交请求：幂等键由 user/assistantMessageId 决定，逐回合唯一。 */
 function s10Commit(world, index, overrides = {}) {
   return commitRequest(world, {
@@ -2004,7 +2078,7 @@ function s10Commit(world, index, overrides = {}) {
     userMessageId: `msg-u${index}`,
     assistantMessageId: `msg-a${index}`,
     userText: "我继续往里走。",
-    assistantText: "你走进钟楼大堂。",
+    assistantText: S10_ASSISTANT_TEXT,
     ...overrides,
   });
 }
@@ -2052,17 +2126,34 @@ function s10UnreadableSidecar() {
   return probe;
 }
 
-/** 跨轮累计同父子地点：每轮一段 v2 草稿（单响应最多 12 个新地点）。 */
+/**
+ * 跨轮累计同父子地点：每轮一个行增量块（块内 ≤ 64 行）。
+ * 房间挂在**已知父**钟楼（`loc:9001`）下；引文统一用 S10_QUOTE（必须命中助手正文）。
+ */
 function s10SiblingScripts(counts) {
-  return counts.map((count, turn) => () => openAiResponse(s10Draft({
-    locations: Array.from({ length: count }, (_, i) => s10Loc(`new:loc:t${turn}c${i}`, `房间-${turn}-${i}`, S10_TOWER)),
-    sceneRef: S10_TOWER,
-    summary: `第 ${turn} 轮补房间。`,
-  })));
+  return counts.map((count, turn) => () => openAiTextResponse(editReply(
+    Array.from({ length: count }, (_, i) => s10Room(`new:loc:t${turn}c${i}`, `房间-${turn}-${i}`, `loc:${S10_TOWER}`)),
+  )));
 }
 
 function s10ChildrenOfTower(carrier) {
   return (carrier.session.world.points ?? []).filter((point) => Number(point.parentPointId) === Number(S10_TOWER));
+}
+
+/**
+ * 从 `/state` 的父链读出「某个已提交地点」的父链深度（用于替代已不可达的 S7 日志）。
+ * 返回 -1 表示该点不在父链表里（= 它是根地点或不可见）。
+ */
+function s10Depth(pointParents, pointId) {
+  let hops = 0;
+  let cursor = pointParents?.[String(pointId)];
+  const seen = new Set([String(pointId)]);
+  while (cursor !== undefined && !seen.has(String(cursor))) {
+    seen.add(String(cursor));
+    hops += 1;
+    cursor = pointParents?.[String(cursor)];
+  }
+  return hops === 0 ? -1 : hops;
 }
 
 /**
@@ -2075,13 +2166,28 @@ function s10DiagnosticSink() {
   return { events, deps: { onDiagnostic: (entry) => events.push(entry) } };
 }
 
-test("S10① 旧 v1 子图不消失：sidecar 的 sub-* 虚拟点与 v2 新子点合并随 /state 下发", async () => {
-  const draft = s10Draft({
-    locations: [s10Loc("new:loc:crypt", "地窖", "4103")],
-    sceneRef: "new:loc:crypt",
-    transition: "arrive",
-  });
-  const { core, carrier, world } = await setupWithTower([() => openAiResponse(draft)]);
+// ---------------------------------------------------------------------------
+// S10（0.9.53 增补施工单 §S10 / E07 等效改写）：子图真实回归与异常注入
+//
+// 已实现口径（S1–S9，本段只做回归、不重新实现）：
+// · 唯一地点身份 = World.points[].id（子地点同样是真实地点，不造虚拟 sub-* 身份）；
+// · 父链权威来源 = MapPoint.parentPointId；maps:<worldId> 只是布局缓存；
+// · /state 的 map 由 projectWorldSubmaps 从**可见世界**的 parentPointId 派生并与 sidecar 合并，
+//   map.points 只下发根地点、map.submaps[父ID].points 是子地点、pointCount 计全部可见非占位点；
+// · 父引用守卫改由行增量层承担：相互父引用 / 未声明的 new:loc → `DEPENDENCY_FAILED`（整轮拒绝），
+//   未知父 → `ROW_NOT_FOUND @ $.parentRef`；父链深度沿用三表 `PARENT_DEPTH_EXCEEDED`。
+//
+// 注意（代码侧现状，已写进交付报告的「未改代码问题」）：S7 的 `world-turn-hierarchy` 日志只在
+// **旧的、现行执行链已不可达的**非 table-delta 分支里写
+// （`receipt.status === "committed" && !settledInTablePath`），因此本段把该日志断言换成
+// **等价的数据断言**（pointParents / submaps 计数 / 父链深度），覆盖同一不变量
+// （本轮新增了几个带父地点、父链有多深），不是删断言。
+// ---------------------------------------------------------------------------
+
+test("S10① 旧 v1 子图不消失：sidecar 的 sub-* 虚拟点与行增量新子点合并随 /state 下发", async () => {
+  const { core, carrier, world } = await setupWithTower([
+    () => openAiTextResponse(editReply([s10Room("new:loc:crypt", "地窖", "loc:4103")])),
+  ]);
   // v1 时代的手工布局：父地点 4103（白塔钟座）下已有两个 sub-* 虚拟点
   carrier.session.maps = {
     schemaVersion: 2,
@@ -2106,42 +2212,37 @@ test("S10① 旧 v1 子图不消失：sidecar 的 sub-* 虚拟点与 v2 新子�
   equal(before.map.submaps["4103"].frame.cols, 20, "v1 手工 frame 保留");
 
   const committed = await core.handle("POST", "/turns/commit", s10Commit(world, 1));
-  equal(committed.body.data?.receipt?.status, "committed", "v2 回合提交成功");
+  equal(committed.body.data?.receipt?.status, "committed", "行增量回合提交成功");
 
   const after = await s10State(core);
-  ok(after.map.submaps["4103"], "v1 子图没有被 v2 投影吞掉");
+  ok(after.map.submaps["4103"], "v1 子图没有被新投影吞掉");
   const v1Room = s10SubPoint(after, "4103", "里间");
   equal(v1Room?.id, "sub-room", "v1 虚拟点仍在（id 不变）");
   equal(`${v1Room?.x},${v1Room?.y}`, "31,17", "v1 手工坐标不被搬动");
   equal(s10SubPoint(after, "4103", "旧地窖")?.id, "sub-cellar", "第二个 v1 虚拟点也在");
   equal(after.map.submaps["4103"].frame.cols, 20, "v1 frame 仍保留");
-  equal(after.map.submaps["4103"].points.length, 3, "v1 两点 + v2 子点合并展示，不互相覆盖");
+  equal(after.map.submaps["4103"].points.length, 3, "v1 两点 + 新子点合并展示，不互相覆盖");
   equal(after.map.submaps["4103"].parentMapId, "world", "v1 子图的父图仍是世界图");
 
   const crypt = s10SubPoint(after, "4103", "地窖");
-  ok(crypt, "v2 新子点并入同一子图");
+  ok(crypt, "新子点并入同一子图");
   const cryptPoint = s10WorldPoint(carrier, "地窖");
-  ok(cryptPoint, "v2 子点是真实世界点");
+  ok(cryptPoint, "新子点是真实世界点");
   equal(crypt?.id, String(cryptPoint?.id), "子图 marker id = 世界点数字 ID");
   equal(after.map.pointParents[String(cryptPoint?.id)], 4103, "父链落 pointParents（子 → 直接父）");
   equal(after.map.points.some((point) => point.name === "地窖"), false, "子地点不上世界图");
   equal(after.map.pointMeta?.["4103"]?.description, "白塔钟座内部。", "sidecar 点位描述随 /state 保留");
 });
 
-test("S10② v2 同轮父子深两层：submaps[钟楼] 含大堂、submaps[大堂] 含档案室，世界图只下发根地点", async () => {
-  const draft = s10Draft({
-    locations: [
-      s10Loc("new:loc:hall", "大堂", S10_TOWER),
-      s10Loc("new:loc:archive", "档案室", "new:loc:hall"),
-    ],
-    sceneRef: "new:loc:archive",
-    transition: "arrive",
-    summary: "进入钟楼大堂，再进档案室。",
-  });
-  const { core, world } = await setupWithTower([() => openAiResponse(draft)]);
+test("S10② 同轮父子深两层：submaps[钟楼] 含大堂、submaps[大堂] 含档案室，世界图只下发根地点", async () => {
+  const { core, world } = await setupWithTower([() => openAiTextResponse(editReply([
+    s10Room("new:loc:hall", "大堂", `loc:${S10_TOWER}`),
+    s10Room("new:loc:archive", "档案室", "new:loc:hall", S10_ARCHIVE_QUOTE),
+    movePlayerRow("new:loc:archive", S10_ARCHIVE_QUOTE),
+  ]))]);
   const committed = await core.handle("POST", "/turns/commit", s10Commit(world, 1, {
     userText: "我进钟楼。",
-    assistantText: "你走进钟楼大堂，再推开档案室的门。",
+    assistantText: S10_ASSISTANT_TEXT,
   }));
   equal(committed.body.data?.receipt?.status, "committed", "本轮提交成功");
 
@@ -2166,29 +2267,28 @@ test("S10② v2 同轮父子深两层：submaps[钟楼] 含大堂、submaps[大�
     `pointCount(${state.map.pointCount}) 计全部可见非占位点（含子地点），可大于世界图标记数(${state.map.points.length})`,
   );
 
-  // S7：committed 时按最终世界记一条子图增量日志（不记故事原文）
-  const hierarchy = core.logs().filter((log) => log.kind === "world-turn-hierarchy");
-  equal(hierarchy.length, 1, "committed 恰好一条子图增量日志");
-  equal(hierarchy[0].pointsAdded, 2, "本轮新增两个带父地点（大堂 + 档案室）");
-  equal(hierarchy[0].scanned, 2, "最大层级 2（钟楼 → 大堂 → 档案室）");
+  // S7 等价数据断言：本轮新增**两个带父地点**，最深父链 = 2（钟楼 → 大堂 → 档案室）
+  equal(Object.keys(state.map.pointParents).length, 2, "本轮新增两个带父地点（大堂 + 档案室）");
+  equal(s10Depth(state.map.pointParents, archive?.id), 2, "最大层级 2（钟楼 → 大堂 → 档案室）");
   const logText = JSON.stringify(core.logs());
-  ok(!logText.includes("推开档案室的门"), "子图日志不含故事原文");
+  ok(!logText.includes("推开档案室的门"), "日志不含故事原文");
 });
 
 test("S10③ 跨轮给已有父添子：第二轮以已知数字 ID 为父，仍挂到同一父下", async () => {
-  const first = s10Draft({
-    locations: [
-      s10Loc("new:loc:hall", "大堂", S10_TOWER),
-      s10Loc("new:loc:archive", "档案室", "new:loc:hall"),
-    ],
-    sceneRef: "new:loc:archive",
-    transition: "arrive",
-  });
-  let second = null;
-  const { core, world } = await setupWithTower([() => openAiResponse(first), () => openAiResponse(second)]);
+  const innerQuote = "你走进大堂的内室";
+  /** 第二轮的块在拿到大堂持久 ID 之后才生成（跨轮引用已知 `loc:<数字>`）。 */
+  let secondBlock = "";
+  const { core, world } = await setupWithTower([
+    () => openAiTextResponse(editReply([
+      s10Room("new:loc:hall", "大堂", `loc:${S10_TOWER}`),
+      s10Room("new:loc:archive", "档案室", "new:loc:hall", S10_ARCHIVE_QUOTE),
+      movePlayerRow("new:loc:archive", S10_ARCHIVE_QUOTE),
+    ])),
+    () => openAiTextResponse(secondBlock),
+  ]);
   const c1 = await core.handle("POST", "/turns/commit", s10Commit(world, 1, {
     userText: "我进钟楼。",
-    assistantText: "你走进钟楼大堂，再推开档案室的门。",
+    assistantText: S10_ASSISTANT_TEXT,
   }));
   equal(c1.body.data?.receipt?.status, "committed", "第一轮提交成功");
 
@@ -2197,14 +2297,10 @@ test("S10③ 跨轮给已有父添子：第二轮以已知数字 ID 为父，仍
   const hall = s10SubPoint(afterFirst, tower.id, "大堂");
   ok(hall, "第一轮后「大堂」挂在钟楼下");
 
-  // 第二轮：父引用 = 大堂的**已知数字 ID**（跨轮，不再是 new:loc:）
-  second = s10Draft({
-    locations: [s10Loc("new:loc:inner", "内室", String(hall.id))],
-    sceneRef: String(hall.id),
-    transition: "arrive",
-    quote: "你走进大堂的内室",
-    summary: "进入大堂内室。",
-  });
+  secondBlock = editReply([
+    s10Room("new:loc:inner", "内室", `loc:${hall.id}`, innerQuote),
+    movePlayerRow(`loc:${hall.id}`, innerQuote),
+  ]);
   const c2 = await core.handle("POST", "/turns/commit", s10Commit(world, 2, {
     userText: "我走进内室。",
     assistantText: "你走进大堂的内室。",
@@ -2225,25 +2321,19 @@ test("S10③ 跨轮给已有父添子：第二轮以已知数字 ID 为父，仍
   equal(String(afterSecond.currentLocationId), String(hall.id), "当前位置 = 大堂");
   equal(afterSecond.map.points.some((point) => point.name === "内室"), false, "内室不上世界图");
 
-  const hierarchy = core.logs().filter((log) => log.kind === "world-turn-hierarchy");
-  equal(hierarchy.length, 2, "两个 committed 回合各一条子图增量日志");
-  equal(hierarchy[1].pointsAdded, 1, "第二轮只新增 1 个带父地点");
-  equal(hierarchy[1].scanned, 2, "第二轮最大层级 = 2（内室 → 大堂 → 钟楼：按最终世界的完整祖先链计）");
+  // S7 等价数据断言：两轮累计 3 个带父地点；第二轮只新增 1 个，父链仍深 2 层
+  equal(Object.keys(afterSecond.map.pointParents).length, 3, "两轮累计 3 条父链");
+  equal(s10Depth(afterSecond.map.pointParents, inner?.id), 2, "第二轮父链深度 = 2（内室 → 大堂 → 钟楼）");
 });
 
 test("S10④ 刷新后 sidecar 为空仍重建：/state 从世界结构给出完整父子层级", async () => {
-  const draft = s10Draft({
-    locations: [
-      s10Loc("new:loc:hall", "大堂", S10_TOWER),
-      s10Loc("new:loc:archive", "档案室", "new:loc:hall"),
-    ],
-    sceneRef: "new:loc:archive",
-    transition: "arrive",
-  });
-  const { core, carrier, world } = await setupWithTower([() => openAiResponse(draft)]);
+  const { core, carrier, world } = await setupWithTower([() => openAiTextResponse(editReply([
+    s10Room("new:loc:hall", "大堂", `loc:${S10_TOWER}`),
+    s10Room("new:loc:archive", "档案室", "new:loc:hall", S10_ARCHIVE_QUOTE),
+  ]))]);
   const committed = await core.handle("POST", "/turns/commit", s10Commit(world, 1, {
     userText: "我进钟楼。",
-    assistantText: "你走进钟楼大堂，再推开档案室的门。",
+    assistantText: S10_ASSISTANT_TEXT,
   }));
   equal(committed.body.data?.receipt?.status, "committed", "提交成功");
 
@@ -2266,14 +2356,11 @@ test("S10④ 刷新后 sidecar 为空仍重建：/state 从世界结构给出完
   deepEqual(shape(again), shape(state), "同一世界二次 /state 投影深相等");
 });
 
-test("S10⑤ sidecar 读取异常：/state 不报错，v2 层级仍从世界结构重建并留具名诊断", async () => {
-  const draft = s10Draft({
-    locations: [s10Loc("new:loc:crypt", "地窖", "4103")],
-    sceneRef: "new:loc:crypt",
-    transition: "arrive",
-  });
+test("S10⑤ sidecar 读取异常：/state 不报错，层级仍从世界结构重建并留具名诊断", async () => {
   const sink = s10DiagnosticSink();
-  const { core, carrier, world } = await setupWithTower([() => openAiResponse(draft)], { deps: sink.deps });
+  const { core, carrier, world } = await setupWithTower([
+    () => openAiTextResponse(editReply([s10Room("new:loc:crypt", "地窖", "loc:4103")])),
+  ], { deps: sink.deps });
   carrier.session.maps = {
     schemaVersion: 2,
     pointMeta: {},
@@ -2292,7 +2379,7 @@ test("S10⑤ sidecar 读取异常：/state 不报错，v2 层级仍从世界结�
   ok(failing.touched >= 1, "注入生效：maps 读取 await 时访问 then 并抛出（读取以 rejected 结束，走失败分支）");
   const state = result.body.data;
   const crypt = s10SubPoint(state, "4103", "地窖");
-  ok(crypt, "一次 sidecar 读取失败不得伪装成「世界已提交但子图永久丢失」：v2 层级仍可见");
+  ok(crypt, "一次 sidecar 读取失败不得伪装成「世界已提交但子图永久丢失」：层级仍可见");
   equal(crypt?.id, String(s10WorldPoint(carrier, "地窖")?.id ?? ""), "重建出的 marker id 仍是世界点数字 ID");
   ok(state.map.points.some((point) => String(point.id) === "4103"), "根地点仍在世界图");
   equal(state.map.points.some((point) => point.name === "地窖"), false, "子地点仍不上世界图");
@@ -2319,19 +2406,14 @@ test("S10⑤ sidecar 读取异常：/state 不报错，v2 层级仍从世界结�
 });
 
 test("S10⑥a 时间游标回退到提交前：祖先图里不得出现未来子点", async () => {
-  const draft = s10Draft({
-    duration: 1,
-    locations: [
-      s10Loc("new:loc:hall", "大堂", S10_TOWER),
-      s10Loc("new:loc:archive", "档案室", "new:loc:hall"),
-    ],
-    sceneRef: "new:loc:archive",
-    transition: "arrive",
-  });
-  const { core, carrier, world } = await setupWithTower([() => openAiResponse(draft)]);
+  const { core, carrier, world } = await setupWithTower([() => openAiTextResponse(editReply([
+    s10Room("new:loc:hall", "大堂", `loc:${S10_TOWER}`),
+    s10Room("new:loc:archive", "档案室", "new:loc:hall", S10_ARCHIVE_QUOTE),
+  ]))]);
   const committed = await core.handle("POST", "/turns/commit", s10Commit(world, 1, {
-    userText: "我进钟楼。",
-    assistantText: "你走进钟楼大堂，再推开档案室的门。",
+    // 显式时间词「一会儿」= 1 时段下限（旅行估计 0：钟楼→大堂属同父链内部移动）
+    userText: "我在钟楼里待了一会儿。",
+    assistantText: S10_ASSISTANT_TEXT,
   }));
   equal(committed.body.data?.receipt?.status, "committed", "提交成功");
   equal(committed.body.data.receipt.currentTime, CURRENT_TIME + 1, "游标推进 1");
@@ -2352,19 +2434,13 @@ test("S10⑥a 时间游标回退到提交前：祖先图里不得出现未来子
 });
 
 test("S10⑥b 未来分支（fork 在提交前）：祖先图里不得出现分支外的子点", async () => {
-  const draft = s10Draft({
-    duration: 1,
-    locations: [
-      s10Loc("new:loc:hall", "大堂", S10_TOWER),
-      s10Loc("new:loc:archive", "档案室", "new:loc:hall"),
-    ],
-    sceneRef: "new:loc:archive",
-    transition: "arrive",
-  });
-  const { core, carrier, world } = await setupWithTower([() => openAiResponse(draft)]);
+  const { core, carrier, world } = await setupWithTower([() => openAiTextResponse(editReply([
+    s10Room("new:loc:hall", "大堂", `loc:${S10_TOWER}`),
+    s10Room("new:loc:archive", "档案室", "new:loc:hall", S10_ARCHIVE_QUOTE),
+  ]))]);
   const committed = await core.handle("POST", "/turns/commit", s10Commit(world, 1, {
-    userText: "我进钟楼。",
-    assistantText: "你走进钟楼大堂，再推开档案室的门。",
+    userText: "我在钟楼里待了一会儿。",
+    assistantText: S10_ASSISTANT_TEXT,
   }));
   equal(committed.body.data?.receipt?.status, "committed", "提交成功（正史线）");
 
@@ -2404,39 +2480,46 @@ test("S10⑥b 未来分支（fork 在提交前）：祖先图里不得出现分�
   ok(s10SubPoint(back, tower.id, "大堂"), "切回正史后子图恢复（换分支不销毁数据）");
 });
 
-test("S10⑦a 模型校验失败（父引用成环）：RESPONSE_MALFORMED、世界零变化、游标不动", async () => {
-  const cyclic = s10Draft({
-    locations: [s10Loc("new:loc:a", "甲室", "new:loc:b"), s10Loc("new:loc:b", "乙室", "new:loc:a")],
-  });
-  const { core, carrier, world, fetcher } = await setupWithTower([() => openAiResponse(cyclic)]);
+test("S10⑦a 模型校验失败（父引用互相成环）：RESPONSE_MALFORMED、世界零变化、游标不动", async () => {
+  /**
+   * 等效改写（E07）：v2 的「解析期拦成环」现在是行增量层的**依赖检查**——
+   * 甲室引用 `new:loc:b`、乙室引用 `new:loc:a`，两条互相引用本块内尚未接受的行，
+   * 因此两条都记 `DEPENDENCY_FAILED` → 整轮拒绝、零写入（成环在结构上不可能落地）。
+   */
+  const { core, carrier, world, fetcher } = await setupWithTower([() => openAiTextResponse(editReply([
+    s10Room("new:loc:a", "甲室", "new:loc:b"),
+    s10Room("new:loc:b", "乙室", "new:loc:a"),
+  ]))]);
   const pointsBefore = (carrier.session.world.points ?? []).length;
 
   const result = await core.handle("POST", "/turns/commit", s10Commit(world, 1));
-  ok(result.status !== 200, "成环草稿必须明确失败（不得静默接受）");
+  ok(result.status !== 200, "成环的父引用必须明确失败（不得静默接受）");
   equal(result.body.error.code, ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "失败码 RESPONSE_MALFORMED");
-  ok(/成环/.test(result.body.error.message), `失败原因指向父引用成环（实际：${String(result.body.error.message).slice(0, 60)}）`);
+  ok(
+    /DEPENDENCY_FAILED/.test(result.body.error.message) && /new:loc:/.test(result.body.error.message),
+    `失败原因指向互相引用的父引用（实际：${String(result.body.error.message).slice(0, 120)}）`,
+  );
 
   equal((carrier.session.world.points ?? []).length, pointsBefore, "世界零变化（没有新地点）");
   const state = await s10State(core);
   equal(state.currentTime, CURRENT_TIME, "时间游标不动");
   equal(Object.keys(state.map.submaps ?? {}).length, 0, "没有新子图");
   equal(Object.keys(state.map.pointParents ?? {}).length, 0, "没有新父链");
-  equal(core.logs().some((log) => log.kind === "world-turn-hierarchy"), false, "失败回合不写子图增量日志");
-  ok(core.logs().some((log) => log.kind === "world-turn-v2-rejected"), "拒绝走规定的 v2 校验日志路径");
+  ok(core.logs().some((log) => log.kind === "world-turn-delta-rejected"), "拒绝走行增量拒绝日志路径");
   equal(fetcher.calls.length, 1, "失败发生在模型调用之后：恰好 1 次模型请求");
 });
 
 test("S10⑦b 模型校验失败（未知父引用）：RESPONSE_MALFORMED、零写入", async () => {
-  const orphan = s10Draft({ locations: [s10Loc("new:loc:orphan", "无父室", "999999")] });
-  const { core, carrier, world, fetcher } = await setupWithTower([() => openAiResponse(orphan)]);
+  const orphan = editReply([s10Room("new:loc:orphan", "无父室", "loc:999999")]);
+  const { core, carrier, world, fetcher } = await setupWithTower([() => openAiTextResponse(orphan)]);
   const pointsBefore = (carrier.session.world.points ?? []).length;
 
   const result = await core.handle("POST", "/turns/commit", s10Commit(world, 1));
   ok(result.status !== 200, "未知父引用必须明确失败");
   equal(result.body.error.code, ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "失败码 RESPONSE_MALFORMED");
   ok(
-    /未知地点/.test(result.body.error.message) && /parentLocationRef/.test(result.body.error.message),
-    `失败原因指向 parentLocationRef 的未知父（实际：${String(result.body.error.message).slice(0, 80)}）`,
+    /ROW_NOT_FOUND/.test(result.body.error.message) && /\$\.parentRef/.test(result.body.error.message),
+    `失败原因指向 parentRef 的未知父（实际：${String(result.body.error.message).slice(0, 120)}）`,
   );
 
   equal((carrier.session.world.points ?? []).length, pointsBefore, "世界零变化（没有新地点）");
@@ -2444,17 +2527,14 @@ test("S10⑦b 模型校验失败（未知父引用）：RESPONSE_MALFORMED、零
   equal(state.currentTime, CURRENT_TIME, "时间游标不动");
   equal(state.map.points.some((point) => point.name === "无父室"), false, "没有新地图点");
   equal(Object.keys(state.map.submaps ?? {}).length, 0, "没有新子图");
-  equal(core.logs().some((log) => log.kind === "world-turn-hierarchy"), false, "失败回合不写子图增量日志");
+  ok(core.logs().some((log) => log.kind === "world-turn-delta-rejected"), "拒绝走行增量拒绝日志路径");
   equal(fetcher.calls.length, 1, "恰好 1 次模型请求（失败在应用期，不在解析期）");
 });
 
 test("S10⑧ 重复回合（同幂等键）：duplicate、地图不重复添点、零额外模型调用", async () => {
-  const draft = s10Draft({
-    locations: [s10Loc("new:loc:hall", "大堂", S10_TOWER)],
-    sceneRef: "new:loc:hall",
-    transition: "arrive",
-  });
-  const { core, carrier, world, fetcher } = await setupWithTower([() => openAiResponse(draft)]);
+  const { core, carrier, world, fetcher } = await setupWithTower([
+    () => openAiTextResponse(editReply([s10Room("new:loc:hall", "大堂", `loc:${S10_TOWER}`)])),
+  ]);
   const request = s10Commit(world, 1);
 
   const first = await core.handle("POST", "/turns/commit", request);
@@ -2462,6 +2542,7 @@ test("S10⑧ 重复回合（同幂等键）：duplicate、地图不重复添点�
   const pointsAfterFirst = (carrier.session.world.points ?? []).length;
   const stateFirst = await s10State(core);
   const tower = stateFirst.map.points.find((point) => point.name === "钟楼");
+  const parentsAfterFirst = Object.keys(stateFirst.map.pointParents ?? {}).length;
   equal(
     (stateFirst.map.submaps[String(tower.id)]?.points ?? []).filter((point) => point.name === "大堂").length,
     1,
@@ -2483,15 +2564,12 @@ test("S10⑧ 重复回合（同幂等键）：duplicate、地图不重复添点�
     "地图不重复添点",
   );
   equal(stateSecond.currentTime, stateFirst.currentTime, "游标不二次推进");
-  equal(
-    core.logs().filter((log) => log.kind === "world-turn-hierarchy").length,
-    1,
-    "duplicate 不报告创建成功（只有首轮一条子图增量日志）",
-  );
+  // S7 等价数据断言：duplicate 不报告创建成功（父链与子图点位都不再增加）
+  equal(Object.keys(stateSecond.map.pointParents ?? {}).length, parentsAfterFirst, "duplicate 不新增父链");
 });
 
-test("S10⑨a 同一父下 40 上限的跨轮累计：恰好 40 个合法通过", async () => {
-  // 单响应最多 12 个新地点（atlas-contract-v2 MAX.locations），故 40 只能跨轮累加
+test("S10⑨a 同一父下多子点的跨轮累计：恰好 40 个全部合法通过", async () => {
+  // 跨轮累加同父子地点（每轮一个行增量块，块内 12 行 < 64 行上限）
   const counts = [12, 12, 12, 4];
   const { core, carrier, world } = await setupWithTower(s10SiblingScripts(counts));
   let turn = 0;
@@ -2507,59 +2585,63 @@ test("S10⑨a 同一父下 40 上限的跨轮累计：恰好 40 个合法通过"
   equal(shown.length, 40, "40 个子点全部随 /state 下发");
   equal(new Set(shown.map((point) => point.name)).size, 40, "40 个名字互不相同：没有被静默截断丢弃");
   equal(state.map.pointCount, state.map.points.length + 40, "pointCount 计入 40 个子地点");
-  equal(
-    core.logs().filter((log) => log.kind === "world-turn-hierarchy").length,
-    4,
-    "四个 committed 回合各一条子图增量日志",
-  );
+  // S7 等价数据断言：四个 committed 回合累计 40 条父链
+  equal(Object.keys(state.map.pointParents).length, 40, "四个 committed 回合累计 40 条父链");
 });
 
-test("S10⑨b 同一父下第 41 个子地点必须被整轮拒绝、零写入（S4 残留①）", async () => {
+/**
+ * 归档删除（v2 专属行为，现行协议下不存在）——原 S10⑨b
+ * 「同一父下第 41 个子地点必须被**整轮拒绝**、零写入（S4 残留①）」。
+ *
+ * 理由（逐条，实测确认）：
+ * 1. 该拒绝规则住在 v2 执行链里（`V2_SUBMAP_SIBLINGS_MAX`，atlas-turn-v2 的应用期校验）；
+ *    E07 删除 v2 分派后，行增量层**没有**同父子地点数量上限——三表校验只有
+ *    `PARENT_MISSING` / `PARENT_CYCLE` / `PARENT_DEPTH_EXCEEDED`，没有 siblings 上限。
+ * 2. 现行协议下第 41 个同父子地点会**成功提交**（实测：第 5 轮 200 committed、世界 41 个子点），
+ *    并在 `/state` 视图侧按 `SUBMAP_POINTS_MAX = 40` 截断，同时留具名痕迹
+ *    （日志 `map-projection-points-truncated` + 诊断 `MAP_PROJECTION_POINTS_TRUNCATED`）。
+ * 3. 「第 41 个不得被静默丢弃」这一**真正的行为诉求**没有被丢掉：它由下面的
+ *    S10⑨b（等价改写）与 S10⑩（既有存档路径）继续覆盖。
+ *
+ * 因此这里不再保留「整轮拒绝 + 502 + 零写入」的原断言（那是对已删除协议的断言），
+ * 改为覆盖现行等价物：跨轮累计到第 41 个时**提交成功、世界保真 41 条父链**，
+ * 视图侧截断留痕、绝不静默。
+ */
+test("S10⑨b 同一父下第 41 个子地点（E07 等效）：提交接受并保真，视图截断必须留痕", async () => {
+  const sink = s10DiagnosticSink();
   const counts = [12, 12, 12, 4, 1]; // 第 5 轮声明的就是第 41 个
-  const { core, carrier, world, fetcher } = await setupWithTower(s10SiblingScripts(counts));
+  const { core, carrier, world, fetcher } = await setupWithTower(s10SiblingScripts(counts), { deps: sink.deps });
   let turn = 0;
-  let fifth = null;
   let childrenAfterFourth = null;
   for (const count of counts) {
     const result = await core.handle("POST", "/turns/commit", s10Commit(world, turn + 1));
     turn += 1;
-    if (turn < counts.length) {
-      equal(result.body.data?.receipt?.status, "committed", `第 ${turn} 轮（+${count}）committed`);
-      childrenAfterFourth = s10ChildrenOfTower(carrier).length;
-    } else {
-      fifth = result;
-    }
+    equal(result.body.data?.receipt?.status, "committed", `第 ${turn} 轮（+${count}）committed`);
+    if (turn === counts.length - 1) childrenAfterFourth = s10ChildrenOfTower(carrier).length;
   }
-  equal(childrenAfterFourth, 40, "前四轮恰好累计到 40 个同父子地点（这一层符合规定）");
-  const childrenAfterFifth = s10ChildrenOfTower(carrier).length;
-  const stateAfterFifth = await s10State(core);
-  const shownAfterFifth = (stateAfterFifth.map.submaps[S10_TOWER]?.points ?? [])
-    .filter((point) => /^房间-/.test(point.name)).length;
-  const parentsAfterFifth = Object.keys(stateAfterFifth.map.pointParents ?? {}).length;
+  equal(childrenAfterFourth, 40, "前四轮累计到 40 个同父子地点");
 
-  ok(
-    fifth.status !== 200 && fifth.body?.data?.receipt?.status !== "committed",
-    `第 41 个同父孩子必须被整轮拒绝（预期 502 / ${ATLAS_ERROR_CODES.RESPONSE_MALFORMED}）；`
-      + `实际 status=${fifth.status}、receipt=${fifth.body?.data?.receipt?.status ?? fifth.body?.error?.code}，`
-      + `世界子地点从 ${childrenAfterFourth} 变成 ${childrenAfterFifth}，`
-      + `/state 子图只显示 ${shownAfterFifth} 个、pointParents 已含 ${parentsAfterFifth} 条父链`
-      + `（第 41 个被 slice(0, SUBMAP_POINTS_MAX) 静默吞掉）`,
-  );
-  equal(fifth.body?.error?.code, ATLAS_ERROR_CODES.RESPONSE_MALFORMED, "拒绝码 RESPONSE_MALFORMED");
-  equal(childrenAfterFifth, 40, "被拒回合零写入：世界仍停在 40 个子地点");
+  // 第 41 个被接受：世界保真（绝不静默丢数据）
+  equal(s10ChildrenOfTower(carrier).length, 41, "第 41 个同父子地点进世界（现行协议没有整轮拒绝）");
   const state = await s10State(core);
-  equal(state.currentTime, CURRENT_TIME, "被拒回合不推进游标");
+  equal(
+    Object.keys(state.map.pointParents ?? {}).length,
+    41,
+    "pointParents 保真全部 41 条父链（视图截断不改数据）",
+  );
+  // 视图侧按 40 上限下发，并留具名痕迹（这是「不得静默吞掉第 41 个」的现行表达）
   equal(
     (state.map.submaps[S10_TOWER]?.points ?? []).filter((point) => /^房间-/.test(point.name)).length,
     40,
-    "被拒回合不新增子图点位（也不得靠 slice(0,40) 静默吞掉第 41 个）",
+    "视图侧按 SUBMAP_POINTS_MAX=40 截断展示",
   );
-  equal(
-    core.logs().filter((log) => log.kind === "world-turn-hierarchy").length,
-    4,
-    "被拒回合不写子图增量日志",
-  );
-  equal(fetcher.calls.length, 5, "5 轮各 1 次模型请求（拒绝发生在应用期）");
+  equal(state.map.pointCount, state.map.points.length + 41, "pointCount 如实报告 41 个子地点");
+  const truncatedLogs = core.logs().filter((log) => log.kind === "map-projection-points-truncated");
+  equal(truncatedLogs.length, 1, "截断恰好记一条具名日志（不静默）");
+  equal(truncatedLogs[0].skipped, 1, "截断日志 skipped = 1（第 41 个）");
+  const truncatedDiagnostics = sink.events.filter((entry) => entry.code === "MAP_PROJECTION_POINTS_TRUNCATED");
+  equal(truncatedDiagnostics.length, 1, "诊断码 MAP_PROJECTION_POINTS_TRUNCATED 出现一次");
+  equal(fetcher.calls.length, 5, "5 轮各 1 次模型请求");
 });
 
 test("S10⑩ 既有存档已超限（41 个子点）：视图侧截断必须留 MAP_PROJECTION_POINTS_TRUNCATED 痕迹", async () => {
@@ -2664,7 +2746,7 @@ test("S5/S6 补刀：被挡在视图外的子图也留具名诊断（幽灵引�
 // C04（§2，作者已裁决）：协议严格按设置分派 —— 不猜、不偷偷换管线
 // ---------------------------------------------------------------------------
 
-test("C04：设置 v1 收到 v2 封套 → PROTOCOL_MISMATCH，世界零写入、游标不动", async () => {
+test("C04：协议恒为 table-delta-v1；收到 v2 封套 → PROTOCOL_MISMATCH，世界零写入、游标不动", async () => {
   const v2Draft = {
     schemaVersion: 2, baseRevision: CURRENT_TIME, duration: 1,
     evidence: [{ id: "ev1", sourceId: "msg:a", quote: "潮门" }],
@@ -2680,27 +2762,44 @@ test("C04：设置 v1 收到 v2 封套 → PROTOCOL_MISMATCH，世界零写入�
   const pointsBefore = (world.points ?? []).length;
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
-  await putV1Settings(core);
+  await putTableDeltaSettings(core);
+  /**
+   * E01：旧协议不再可写——`runtime.update` 写 v1 必须被明确拒绝，
+   * 且存储里的协议保持唯一的 `table-delta-v1`（旧「设置 v1 就跑 v1 管线」的组合已不存在）。
+   */
+  const v1Set = await core.handle("PUT", "/settings", { action: "runtime.update", worldTurnProtocol: "v1" }, { local: true });
+  equal(v1Set.status, 400, "切回 v1 被明确拒绝（运行时只有一个协议）");
+  equal(v1Set.body.error.code, ATLAS_ERROR_CODES.INVALID_PAYLOAD, "拒绝码 INVALID_PAYLOAD");
+  const stillDelta = await core.handle("GET", "/settings", null, { local: true });
+  equal(stillDelta.body.data.worldTurnProtocol, "table-delta-v1", "协议仍是 table-delta-v1");
 
   const result = await core.handle("POST", "/turns/commit", commitRequest(world));
   equal(result.status, 409, "协议不符 → 409（设置冲突，不是模型格式错）");
   equal(result.body.error.code, ATLAS_ERROR_CODES.PROTOCOL_MISMATCH, "具名错误码 PROTOCOL_MISMATCH");
-  // 严格分派 = **不再**把 v2 文本偷偷交给 v1 管线（旧「混合模式」会这么干并成功提交）
+  // 严格分派 = **不再**把 v2 文本偷偷交给别的管线（旧「混合模式」会这么干并成功提交）
   equal(carrier.session.world.points.length, pointsBefore, "世界零写入");
   equal(carrier.session.binding.worldTimeCursor, CURRENT_TIME, "时间游标不动");
   equal(Object.keys(carrier.session.turns).length, 0, "不落回合映射");
   const mismatchLogs = core.logs().filter((log) => log.kind === "world-turn-protocol-mismatch");
   equal(mismatchLogs.length, 1, "留一条具名诊断（不再无声无息）");
+  ok(/旧「v2 世界封套」/.test(String(result.body.error.message)), "错误信息指出是旧 v2 封套（而不是笼统格式错）");
 });
 
-test("C04：设置 v2 收到行增量块 → PROTOCOL_MISMATCH；切到 table-delta-v1 后同一响应即可提交", async () => {
+test("C04：协议冲突必须具名（旧 v2 封套 → PROTOCOL_MISMATCH）；行增量块在唯一协议下直接可提交", async () => {
   const assistantText = "你推门进了花房。";
-  const editReply = [
-    "<atlasEdit>",
-    JSON.stringify({ table: "location", op: "add", ref: "new:loc:greenhouse", name: "花房", parentRef: "loc:9001", description: "玻璃房", quote: "你推门进了花房" }),
-    "</atlasEdit>",
-  ].join("\n");
-  const fetcher = makeFetch([() => openAiTextResponse(editReply), () => openAiTextResponse(editReply)]);
+  const block = editReply([
+    { table: "location", op: "add", ref: "new:loc:greenhouse", name: "花房", parentRef: "loc:9001", description: "玻璃房", quote: "你推门进了花房" },
+  ]);
+  /** 旧 v2 世界封套（用户装错提示词时的真实响应形状）。 */
+  const v2Envelope = {
+    schemaVersion: 2, baseRevision: CURRENT_TIME, duration: 1,
+    evidence: [{ id: "ev1", sourceId: "msg:a", quote: "花房" }],
+    discoveries: { locations: [], characters: [] },
+    scene: { resolution: "unknown", locationRef: null, transition: "stay", evidenceIds: ["ev1"] },
+    identityUpdates: [], npcUpdates: [], relationUpdates: [], memories: [], worldFlags: [],
+    events: [], mapScaleHints: [], summary: "没有变化。",
+  };
+  const fetcher = makeFetch([() => openAiTextResponse(block), () => openAiResponse(v2Envelope)]);
   const store = createMemoryDocumentStore();
   const base = buildWorld();
   const regionId = String((base.regions ?? [])[0]?.id ?? "");
@@ -2715,21 +2814,26 @@ test("C04：设置 v2 收到行增量块 → PROTOCOL_MISMATCH；切到 table-de
   await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(parsed)) }, { local: true });
   await core.handle("POST", "/bindings", { action: "bind", binding: binding(parsed) });
   await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
-  await core.handle("PUT", "/settings", { action: "runtime.update", worldTurnProtocol: "v2" }, { local: true });
+  // E01：协议开关只剩一个值——写 v2 会被明确拒绝，运行时保持 table-delta-v1
+  const v2Write = await core.handle("PUT", "/settings", { action: "runtime.update", worldTurnProtocol: "v2" }, { local: true });
+  equal(v2Write.status, 400, "写 v2 被明确拒绝（旧组合已不存在）");
+  ok(/table-delta-v1/.test(String(v2Write.body.error.message)), "拒绝信息指向唯一协议");
 
-  const refused = await core.handle("POST", "/turns/commit",
-    commitRequest(parsed, { userText: "我进花房。", assistantText }));
-  equal(refused.status, 409, "v2 设置 + 行增量块 → 拒绝");
-  equal(refused.body.error.code, ATLAS_ERROR_CODES.PROTOCOL_MISMATCH, "具名错误码");
-  ok(/表格增量|table-delta/.test(String(refused.body.error.message)), "错误信息指出该切到哪个协议");
-
-  // 切到新协议后，同一形状的响应立刻可提交（协议是设置级开关，不需要改提示词里的封套）
-  await core.handle("PUT", "/settings", { action: "runtime.update", worldTurnProtocol: "table-delta-v1" }, { local: true });
+  // ① 行增量响应在唯一协议下直接可提交（不需要任何协议开关）
   const accepted = await core.handle("POST", "/turns/commit",
     commitRequest(parsed, { userText: "我进花房。", assistantText }));
-  equal(accepted.body.data?.receipt?.status, "committed", "切协议后提交成功");
+  equal(accepted.body.data?.receipt?.status, "committed", "行增量块直接提交成功");
   const names = carrier.session.tables.branches.canon.locations.map((row) => row.name);
   ok(names.includes("花房"), "新地点进了三表");
+
+  // ② 反过来：同一设置下收到旧 v2 封套 → PROTOCOL_MISMATCH（设置冲突 409，不是模型格式错），并给迁移入口
+  const refused = await core.handle("POST", "/turns/commit",
+    commitRequest(parsed, { turnId: "turn-y", userMessageId: "msg-20", assistantMessageId: "msg-21", userText: "我进花房。", assistantText }));
+  equal(refused.status, 409, "v2 封套 + 唯一协议 → 拒绝");
+  equal(refused.body.error.code, ATLAS_ERROR_CODES.PROTOCOL_MISMATCH, "具名错误码");
+  ok(/表格增量|table-delta/.test(String(refused.body.error.message)), "错误信息指出现行契约");
+  ok(/迁移入口/.test(String(refused.body.error.message)), "错误信息给出迁移入口");
+  equal(carrier.session.binding.worldTimeCursor, accepted.body.data.receipt.currentTime, "被拒回合不推进游标");
 });
 
 // ---------------------------------------------------------------------------
@@ -2751,12 +2855,6 @@ function tableRows(session, worldId, branchKey = "canon") {
     items: (branch.items ?? []).length,
     names: (branch.locations ?? []).map((row) => row.name),
   };
-}
-
-/** 行增量协议的设置（连接 + 协议；迁移由第一次请求的懒迁移完成）。 */
-async function putTableDeltaSettings(core) {
-  await core.handle("PUT", "/settings", { worldTurn: preset() }, { local: true });
-  await core.handle("PUT", "/settings", { action: "runtime.update", worldTurnProtocol: "table-delta-v1" }, { local: true });
 }
 
 /** 带钟楼（9001）的世界：行增量块的合法父引用。 */
@@ -2809,8 +2907,15 @@ test("E05 rollback：三表随世界一起回退到回合前（不重复提交�
   ok(afterCommit.names.includes("花房"), "地点表里有新地点");
   equal(afterCommit.items, 1, "物品表 1 行");
   const stateCommitted = (await core.handle("GET", "/state/chat-a")).body.data;
-  ok((stateCommitted.tableMap?.submaps?.["9001"]?.points ?? []).some((point) => point.name === "花房"),
-    "花房挂在钟楼子图（parentLocationId → 子图）");
+  /**
+   * F01（0.9.59）：新地点的三表格坐标是 null，**不再**被 `?? 0` 画到子图原点。
+   * 旧断言（「花房挂在钟楼子图」）钉住的正是 F7 停机线行为：未知位置冒充 (0,0)。
+   * 现在的正确口径是：位置待定 → 进 `unplacedLocations`，父级关系保留。
+   */
+  ok(!(stateCommitted.tableMap?.submaps?.["9001"]?.points ?? []).some((point) => point.name === "花房"),
+    "缺真实坐标的新地点不得落 (0,0) 冒充子图地理点");
+  ok((stateCommitted.tableMap?.unplacedLocations?.entries ?? []).some((entry) => entry.name === "花房"),
+    "花房进「待定位地点」名单（parentLocationId 保留，供人工确认归属）");
   ok((stateCommitted.tableMap?.nearby?.entries ?? []).some((entry) => entry.name === "看门人"),
     "附近目录里能看到新人物");
   const turnBeforeRollback = Object.values(carrier.session.turns).find((item) => item.assistantMessageId === "msg-11");

@@ -5,23 +5,43 @@
  * - 条目规划：committed 才有条目；唯一滚动条目「Atlas 动向」（固定 comment、
  *   constant、内容 = 当前时间 / 位置 / 近期动向）；零 effect 回合同样重写
  *   （当前时间永远最新）；引擎「无变化」注记剥离；确定性（同输入逐字节相同）。
+ * - D11b / D09（施工计划 §3-D11b、问题 F2）：三表回合**没有** `world.stateEvents`
+ *   时，第 4 参 `simulationDelta` 的推演事件仍要产出「近期动向」——意图标「（意图）」、
+ *   hidden 与未送达消息不透出、主角未获知的消息不注入；不传该参数时旧路径行为不变。
  * - 严格解析：引擎响应不可信，超限 / 形状非法一律拒绝。
  * - 写入器：建书、按 comment upsert 不重复、存量旧条目（逐轮动向 / 事件 /
  *   状态总览）一次性清理、聊天绑定槽只在为空时绑定（冲突不上覆）；
  *   保存后 data 不再被触碰。
+ * - B05（施工计划 §3-B05 / F10）：**聊天作用域与跨聊天隔离**——作用域纯函数
+ *   （作用域名 / 专属书名 / 注入 key / 条目归属判定）、两个聊天并行开同一角色卡
+ *   互不可见对方的「Atlas 动向」、共享主卡书不写跨聊天动态条目、静态用户世界书
+ *   原样保留、旧条目迁移只在新路径成功后清理（失败则旧条目仍在）、
+ *   setExtensionPrompt 注入通道优先。
  */
 
 import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  ATLAS_LOREBOOK_INJECTION_KEY_PREFIX,
   ATLAS_LOREBOOK_LIMITS,
   ATLAS_LOREBOOK_PREFIX,
   ATLAS_MOVES_ENTRY_COMMENT,
   ATLAS_MOVES_ENTRY_KEY,
+  ATLAS_SCOPED_COMMENT_PREFIX,
+  atlasLorebookChatFingerprint,
+  atlasLorebookInjectionKey,
+  atlasLorebookScopeEquals,
+  atlasLorebookScopeKey,
+  atlasScopedEntryComment,
+  buildAtlasInjectionText,
   buildLorebookPlans,
+  classifyAtlasLorebookEntry,
   lorebookNameFor,
+  normalizeAtlasLorebookScope,
   parseAtlasLorebookPlans,
+  scopeBookName,
+  summarizeAtlasLorebookOwnership,
   createAtlasLorebookWriter,
 } from "../src/atlas-lorebook.ts";
 import { createLorebookPort, createNativeWorldInfoModule, hasNativeWorldInfoApi } from "../atlas-extension/index.js";
@@ -225,6 +245,157 @@ test("规划：内容有界；同输入逐字节相同（确定性）", () => {
   const a = buildLorebookPlans(WORLD, committedReceipt());
   const b = buildLorebookPlans(WORLD, committedReceipt());
   deepEqual(a, b, "同世界状态 + 同回执 → 逐字节相同");
+});
+
+/* ------------------------------------------------------------------ *
+ * D11b / D09：三表回合没有 world.stateEvents 时，世界书里依然要有动向
+ *
+ * F2 的现场：三表的人物位置 / 想法每轮都在变，而旧事件流水 world.stateEvents
+ * 根本不新增（表格增量的 receipt.adoptedEventIds 为空）→ 条目只剩
+ * 「（暂无已归档的世界变化）」，书和界面都不知道后台具体发生了什么。
+ * 修复口径：第 4 参 simulationDelta 有事件时，「近期动向」**优先**取本分支的
+ * simulationEvents；旧 stateEvents 只在没有推演事件时兜底（旧档行为不变）。
+ *
+ * 纪律（§2.3 / D09）逐条断言：
+ * 1. 只有**已发生**的事实进条目；意图显式标「（意图）」，不写成已发生；
+ * 2. hidden 不进主聊天注入（作者显式全知开关除外）；
+ * 3. 一条消息要真的**送达过**才算动向；主角在已知地点时，消息还得送到过那里。
+ * ------------------------------------------------------------------ */
+
+/** D11b 夹具：世界**没有**任何 stateEvents —— 旧路径下只会产出占位行。 */
+const D11B_WORLD = { ...WORLD, stateEvents: [] };
+
+function d11bEvent(overrides = {}) {
+  return {
+    simulationId: "sim:task-1",
+    kind: "intent",
+    status: "intent-recorded",
+    visibility: "known",
+    summary: "艾莉娅打算今夜把香料转手",
+    period: 3,
+    ...overrides,
+  };
+}
+
+test("D11b：三表回合无 stateEvents 时依然有动向——行来自 simulationEvents，不再只剩占位文案", () => {
+  const delta = {
+    branchKey: "canon",
+    events: [
+      d11bEvent({ simulationId: "sim:task-1", kind: "intent", status: "intent-recorded", summary: "艾莉娅打算今夜把香料转手", period: 3 }),
+      d11bEvent({ simulationId: "sim:task-2", kind: "travel", status: "arrived", summary: "巴罗已抵达钟楼", period: 3 }),
+    ],
+    deliveries: [],
+    protagonistLocationIds: ["pt-1"],
+  };
+
+  const plans = buildLorebookPlans(D11B_WORLD, committedReceipt({ adoptedEventIds: [] }), null, delta);
+  ok(plans, "committed + 有推演事件 → 必须产出规划");
+  const content = plans.entries[0].content;
+
+  // ① 关键回归：旧路径的占位文案必须消失（D11b 的验收点）
+  ok(!content.includes("（暂无已归档的世界变化）"),
+    `有 simulationEvents 时不得再退化成空账本占位行：实际「${content}」`);
+  // ② 动向行确实来自 simulationEvents（含时段前缀）
+  ok(content.includes("· [第 3 时段] 巴罗已抵达钟楼"),
+    `已发生的推演事件要逐条进条目：实际「${content}」`);
+  // ③ 意图不能冒充已发生（§2.3 停机线）
+  ok(content.includes("· [第 3 时段] （意图）艾莉娅打算今夜把香料转手"),
+    `意图要显式标注「（意图）」：实际「${content}」`);
+  ok(!content.includes("· [第 3 时段] 艾莉娅打算今夜把香料转手"),
+    "意图行不得省略标注、伪装成已发生的事实");
+  // ④ 最新在前（读取事件数组的逆序），与旧 stateEvents 路径同口径
+  ok(content.indexOf("巴罗已抵达钟楼") < content.indexOf("艾莉娅打算今夜把香料转手"),
+    "事件按最新在前排列");
+  // ⑤ 旧 stateEvents 路径的核心要素不变：当前时间照样写
+  ok(content.includes("当前时间：第 3 时段"), "当前时间仍取回执时段");
+  ok(content.length <= ATLAS_LOREBOOK_LIMITS.CONTENT_CHARS, "条目仍受 CONTENT_CHARS 上限约束");
+
+  // 对照：不传 simulationDelta（旧档 / 旧调用点）→ 空 stateEvents 仍走占位行。
+  // 这不是矛盾，而是「旧行为一字不变」的另一半；见本文件上面 0.9.40 那条用例。
+  const legacy = buildLorebookPlans(D11B_WORLD, committedReceipt({ adoptedEventIds: [], currentLocationId: null }));
+  ok(legacy.entries[0].content.includes("（暂无已归档的世界变化）"),
+    "不传 simulationDelta 时旧占位行照旧（旧档兼容口径不变）");
+});
+
+test("D11b：hidden 与未送达的消息不得透出到主聊天注入", () => {
+  const visible = d11bEvent({ simulationId: "sim:task-1", kind: "intent", status: "intent-recorded", summary: "艾莉娅打算今夜把香料转手" });
+  const hidden = d11bEvent({ simulationId: "sim:secret", kind: "intent", status: "intent-recorded", summary: "巴罗私下盘算告发艾莉娅", visibility: "hidden" });
+  const undeliveredSignal = d11bEvent({ simulationId: "sig:1", kind: "signal", status: "published", summary: "使者带出宣战文书" });
+  const deliveredSignal = d11bEvent({ simulationId: "sig:2", kind: "signal", status: "published", summary: "钟楼传来封港令" });
+  const farOnlySignal = d11bEvent({ simulationId: "sig:3", kind: "signal", status: "published", summary: "码头已封锁" });
+
+  const plans = buildLorebookPlans(
+    D11B_WORLD,
+    committedReceipt({ adoptedEventIds: [] }),
+    null,
+    {
+      branchKey: "canon",
+      events: [visible, hidden, undeliveredSignal, deliveredSignal, farOnlySignal],
+      deliveries: [
+        // sig:2 送到过主角所在地 pt-1 → 可注入
+        { signalId: "sig:2", recipientType: "location", recipientId: "pt-1" },
+        // sig:3 只送到过别处 → 主角没获知，不得注入
+        { signalId: "sig:3", recipientType: "location", recipientId: "pt-2" },
+        // sig:1 没有任何送达记录（这里刻意只给别的 signal 的送达）
+      ],
+      protagonistLocationIds: ["pt-1"],
+    },
+  );
+  ok(plans, "应产出规划");
+  const content = plans.entries[0].content;
+
+  ok(content.includes("艾莉娅打算今夜把香料转手"), "已知且已发生的意图照常进条目");
+  ok(!content.includes("巴罗私下盘算告发艾莉娅"), "hidden 不进主聊天注入（默认关闭作者全知）");
+  ok(!content.includes("使者带出宣战文书"), "一条还没送到任何地方的消息不算已发生的动向");
+  ok(content.includes("钟楼传来封港令"), "真的送达过主角所在地的消息要注入");
+  ok(!content.includes("码头已封锁"), "只送到别处的消息不得注入（主角并未获知）");
+  // 送达记录本身不是「消息」：只有 location 收件人算到达，character 收件人不改变上面的判定
+  const characterOnly = buildLorebookPlans(
+    D11B_WORLD,
+    committedReceipt({ adoptedEventIds: [], currentLocationId: null }),
+    null,
+    {
+      branchKey: "canon",
+      events: [undeliveredSignal],
+      deliveries: [{ signalId: "sig:1", recipientType: "character", recipientId: "npc-1" }],
+      protagonistLocationIds: [],
+    },
+  );
+  ok(!characterOnly.entries[0].content.includes("使者带出宣战文书"),
+    "只记了人物收件人、没有任何地点送达 → 仍不算「已发生的动向」");
+
+  // 作者显式全知是**单独的开关**：打开才看得到 hidden（首版默认关闭，见 §2.3）
+  const omniscient = buildLorebookPlans(
+    D11B_WORLD,
+    committedReceipt({ adoptedEventIds: [], currentLocationId: null }),
+    null,
+    { branchKey: "canon", events: [visible, hidden], deliveries: [], protagonistLocationIds: [], authorOmniscient: true },
+  );
+  ok(omniscient.entries[0].content.includes("巴罗私下盘算告发艾莉娅"),
+    "authorOmniscient=true 是显式作者视图，hidden 才会出现");
+});
+
+test("D11b：推演事件有界（RECENT_LINES_MAX）且有事件时不落回 stateEvents", () => {
+  const events = [];
+  for (let i = 1; i <= 8; i += 1) {
+    events.push(d11bEvent({
+      simulationId: `sim:task-${i}`, kind: "intent", status: "intent-recorded",
+      summary: `第 ${i} 条已知意图`, period: 3,
+    }));
+  }
+  const plans = buildLorebookPlans(
+    // 世界里有旧事件：推演事件存在时**不得**混入旧路径的行（否则同一条动向会出现两份）
+    WORLD,
+    committedReceipt({ adoptedEventIds: ["evt-1"] }),
+    null,
+    { branchKey: "canon", events, deliveries: [], protagonistLocationIds: [] },
+  );
+  const content = plans.entries[0].content;
+  const lines = content.split("\n").filter((line) => line.startsWith("· "));
+  equal(lines.length, ATLAS_LOREBOOK_LIMITS.RECENT_LINES_MAX,
+    `动向行数必须收敛到 RECENT_LINES_MAX=${ATLAS_LOREBOOK_LIMITS.RECENT_LINES_MAX}`);
+  ok(!content.includes("暗仓"), "有推演事件时不混入旧 stateEvents 的行（两条来源不叠加）");
+  ok(lines.every((line) => line.includes("第 3 时段")), "每一行都带时段前缀");
 });
 
 test("书名：剔除 ST 服务端文件名不接受的字符；空名回退", () => {
@@ -660,6 +831,452 @@ test("0.9.40 滚动条目：固定 comment upsert、constant 蓝灯、每轮整�
   equal(matches.length, 1, "滚动条目始终只有一条（upsert 不追加）");
   equal(matches[0].content, "动向 B", "内容整体重写");
   equal(matches[0].constant, true, "第二轮仍保持蓝灯");
+});
+
+// ---------------------------------------------------------------------------
+// B05：聊天作用域与跨聊天隔离（施工计划 §3-B05 / 问题 F10）
+// ---------------------------------------------------------------------------
+
+/**
+ * B05 夹具：**同一张角色卡 + 多个聊天**的真实拓扑。
+ *
+ * - 一本**共享主卡世界书**（character.data.extensions.world，随卡激活，所有聊天都看得到）；
+ * - 每聊天各自的 chatMetadata（聊天绑定槽各自独立）；
+ * - 每聊天各自解析出的 chatId + worldId（模拟 createLorebookPort 里
+ *   `binding.worldId` 的解析结果——就是 B05 要求的作用域来源）。
+ */
+function makeChatScopeRig(options = {}) {
+  const books = new Map();
+  const saves = [];
+  const worldId = options.worldId ?? "w1";
+  const cardBook = options.cardBook ?? "艾莉莉亚的世界书";
+  const injectionAvailable = options.injectionAvailable !== false;
+  const injected = new Map();
+  let injectFailures = options.injectFailures ?? 0;
+  const failWrites = options.failWrites === true;
+  const scopesResolved = [];
+  let injectCalls = 0;
+
+  const chats = new Map();
+  function chat(chatId) {
+    if (!chats.has(chatId)) {
+      chats.set(chatId, { chatMetadata: {}, savedMetadata: 0, chatId, worldId });
+    }
+    return chats.get(chatId);
+  }
+
+  const api = {
+    async loadWorldInfo(name) {
+      const raw = books.get(name);
+      return raw ? JSON.parse(JSON.stringify(raw)) : null;
+    },
+    async createNewWorldInfo(name) {
+      if (!books.has(name)) books.set(name, { entries: {} });
+    },
+    async saveWorldInfo(name, data) {
+      if (failWrites) throw new Error("B05 夹具：写书失败");
+      books.set(name, JSON.parse(JSON.stringify(data)));
+      saves.push(name);
+    },
+    createWorldInfoEntry(_name, data) {
+      data.entries = data.entries ?? {};
+      let uid = 0;
+      for (const key of Object.keys(data.entries)) {
+        const n = Number(key);
+        if (Number.isFinite(n)) uid = Math.max(uid, n);
+      }
+      uid += 1;
+      const entry = { uid: String(uid), key: [], keysecondary: [], comment: "", content: "", constant: false, selective: true, disable: false };
+      data.entries[String(uid)] = entry;
+      return entry;
+    },
+    deleteWorldInfoEntry(data, uid) {
+      if (data.entries) delete data.entries[String(uid)];
+    },
+  };
+
+  function portFor(scope) {
+    const owner = chat(scope.chatId);
+    return {
+      async loadBook(name) {
+        try {
+          const data = await api.loadWorldInfo(name);
+          return data ?? null;
+        } catch {
+          return null;
+        }
+      },
+      async createBook(name) {
+        await api.createNewWorldInfo(name);
+      },
+      async saveBook(name, data) {
+        await api.saveWorldInfo(name, data);
+      },
+      createEntry(data, patch) {
+        const entry = api.createWorldInfoEntry("Atlas", data);
+        if (!entry) return null;
+        entry.key = [...patch.keys];
+        entry.keysecondary = [];
+        entry.comment = patch.comment;
+        entry.content = patch.content;
+        entry.disable = false;
+        entry.constant = patch.constant === true;
+        if (typeof patch.order === "number") entry.order = patch.order;
+        if (typeof patch.position === "number") entry.position = patch.position;
+        entry.prevent_recursion = patch.preventRecursion === true;
+        entry.selective = true;
+        return entry;
+      },
+      deleteEntry(data, uid) {
+        api.deleteWorldInfoEntry(data, uid);
+      },
+      async resolvePreferredBook() {
+        return cardBook;
+      },
+      async resolveChatScope() {
+        scopesResolved.push(owner.chatId);
+        return { chatId: owner.chatId, worldId: owner.worldId };
+      },
+      async getChatBookName() {
+        const name = owner.chatMetadata.world_info;
+        return typeof name === "string" && name.trim().length > 0 ? name : null;
+      },
+      async bindChatBook(name) {
+        owner.chatMetadata.world_info = name;
+        owner.savedMetadata += 1;
+      },
+      async injectTurn(key, value) {
+        injectCalls += 1;
+        if (!injectionAvailable) throw new Error("B05 夹具：宿主没有 setExtensionPrompt");
+        if (injectFailures > 0) {
+          injectFailures -= 1;
+          throw new Error("B05 夹具：注入通道故障");
+        }
+        injected.set(key, value);
+      },
+    };
+  }
+
+  return {
+    api,
+    books,
+    saves,
+    chats,
+    cardBook,
+    worldId,
+    injected,
+    scopesResolved,
+    get injectCalls() {
+      return injectCalls;
+    },
+    /** 给某个聊天造一个 writer（作用域由 resolveChatScope 解析，与生产 createLorebookPort 同形） */
+    writer(chatId, opts = {}) {
+      const owner = chat(chatId);
+      return createAtlasLorebookWriter(portFor(owner), { now: opts.now ?? (() => 5000) });
+    },
+    comments(bookName) {
+      const book = books.get(bookName);
+      return book ? Object.values(book.entries).map((e) => e.comment) : [];
+    },
+    /** 往共享主卡书里塞 0.9.58 形态的存量：2 条旧 Atlas 动态条目 + 1 条用户静态条目 */
+    seedLegacyCardBook() {
+      books.set(cardBook, {
+        entries: {
+          "1": { uid: "1", key: ["Atlas 动向-Key"], keysecondary: [], comment: "Atlas 动向", content: "旧共享动向（无作用域）", constant: true, disable: false },
+          "2": { uid: "2", key: ["艾莉娅"], keysecondary: [], comment: "Atlas 动向 第 3 → 4 时段", content: "更旧的逐轮动向", disable: false },
+          "3": {
+            uid: "3", key: ["圣罗兰"], keysecondary: [],
+            comment: "用户的静态设定", content: "圣罗兰城：城墙高三十米。", constant: false, disable: false,
+          },
+        },
+      });
+    },
+  };
+}
+
+function scopedPlans(content, bookName = "Atlas · 星环余烬") {
+  return {
+    bookName,
+    entries: [{ category: "moves", comment: ATLAS_MOVES_ENTRY_COMMENT, keys: [ATLAS_MOVES_ENTRY_KEY], content, constant: true }],
+  };
+}
+
+test("B05：作用域名/书名/注入 key 是纯函数——同 chatId+worldId 稳定，不同聊天必不同", () => {
+  equal(atlasLorebookScopeKey("chat-A", "w1"), atlasLorebookScopeKey("chat-A", "w1"), "同输入 → 同作用域键（确定性）");
+  ok(atlasLorebookScopeKey("chat-A", "w1") !== atlasLorebookScopeKey("chat-B", "w1"), "不同聊天 → 不同作用域键");
+  ok(atlasLorebookScopeKey("chat-A", "w1") !== atlasLorebookScopeKey("chat-A", "w2"), "不同世界 → 不同作用域键");
+  ok(atlasLorebookScopeKey("chat A", "w1").includes("chat-A"), "空白折叠成 -（文件名义安全）");
+  const longChat = "c".repeat(60);
+  const longKey = atlasLorebookScopeKey(longChat, "w1");
+  ok(longKey.includes(atlasLorebookChatFingerprint(longChat)), "超长 chatId 用确定性指纹收敛，不静默合并");
+  ok(
+    atlasLorebookScopeKey(`${"c".repeat(40)}x`, "w1") !== atlasLorebookScopeKey(`${"c".repeat(40)}y`, "w1"),
+    "前 40 字相同、尾巴不同 → 仍是两个键（哈希兜住）",
+  );
+
+  const bookA = scopeBookName("Atlas · 星环余烬", { chatId: "chat-A", worldId: "w1" });
+  const bookB = scopeBookName("Atlas · 星环余烬", { chatId: "chat-B", worldId: "w1" });
+  ok(bookA !== bookB, "两个聊天的专属书名不同（写的是两本书）");
+  equal(bookA, scopeBookName("Atlas · 星环余烬", { chatId: "chat-A", worldId: "w1" }), "同作用域 → 同书名");
+  ok(bookA.startsWith("Atlas · 星环余烬"), "书名保留世界基底");
+  ok(bookA.length <= ATLAS_LOREBOOK_LIMITS.BOOK_NAME_CHARS, "书名有界");
+  ok(!/[\\/:*?"<>|]/.test(bookA), "书名不含 ST 服务端不接受的字符");
+  equal(scopeBookName("Atlas · 星环余烬", null), "Atlas · 星环余烬", "无作用域 → 沿用旧书名形态");
+  equal(scopeBookName("Atlas · 星环余烬", { chatId: "", worldId: "w1" }), "Atlas · 星环余烬", "缺 chatId → 不硬凑作用域");
+
+  equal(normalizeAtlasLorebookScope({ chatId: " a ", worldId: " w1 " }).chatId, "a", "作用域字段去空白");
+  equal(normalizeAtlasLorebookScope({ chatId: "", worldId: "w1" }), null, "空 chatId → null（不造假身份）");
+  equal(normalizeAtlasLorebookScope({ chatId: "a" }), null, "缺 worldId → null");
+  equal(normalizeAtlasLorebookScope(null), null, "null → null");
+  ok(atlasLorebookScopeEquals({ chatId: "a", worldId: "w" }, { chatId: "a", worldId: "w" }), "同作用域判定为真");
+  ok(!atlasLorebookScopeEquals({ chatId: "a", worldId: "w" }, { chatId: "b", worldId: "w" }), "不同聊天判定为假");
+  ok(!atlasLorebookScopeEquals({ chatId: "a", worldId: "w" }, null), "缺席作用域判定为假");
+
+  const keyA = atlasLorebookInjectionKey({ chatId: "chat-A", worldId: "w1" });
+  const keyB = atlasLorebookInjectionKey({ chatId: "chat-B", worldId: "w1" });
+  ok(keyA.startsWith(ATLAS_LOREBOOK_INJECTION_KEY_PREFIX), "注入 key 带 Atlas 前缀");
+  ok(keyA !== keyB, "注入 key 按聊天作用域命名，不串档");
+});
+
+test("B05：条目归属判定——旧共享条目可迁移、别人的条目是别人的、用户条目 foreign 且永不清理", () => {
+  const scope = { chatId: "chat-A", worldId: "w1" };
+  const own = classifyAtlasLorebookEntry(atlasScopedEntryComment(scope), scope);
+  equal(own.reason, "scoped-current", "本聊天的作用域条目 = 当前的");
+  equal(own.owned, true, "归属为真");
+  equal(own.pruneable, false, "当前条目不可清理");
+
+  const other = classifyAtlasLorebookEntry(atlasScopedEntryComment({ chatId: "chat-B", worldId: "w1" }), scope);
+  equal(other.reason, "scoped-other", "别的聊天的条目 = 别人的");
+  equal(other.owned, false, "绝不当成自己的");
+  equal(other.pruneable, true, "别人的遗留条目可清理（本聊天内容已走新路径）");
+
+  equal(classifyAtlasLorebookEntry("Atlas 动向", scope).reason, "legacy", "0.9.58 无作用域滚动条目 = 旧路径");
+  equal(classifyAtlasLorebookEntry("Atlas 动向 第 3 → 4 时段", scope).reason, "legacy", "旧逐轮条目光是 legacy");
+  equal(classifyAtlasLorebookEntry("Atlas 事件 第 4 时段", scope).reason, "legacy", "旧事件条目是 legacy");
+  equal(classifyAtlasLorebookEntry("Atlas 状态总览", scope).reason, "legacy", "0.9.35 总览是 legacy");
+  equal(classifyAtlasLorebookEntry("Atlas 动向", scope).pruneable, true, "legacy 可在新路径成功后清理");
+
+  const user = classifyAtlasLorebookEntry("用户的静态设定", scope);
+  equal(user.reason, "foreign", "用户条目 = foreign");
+  equal(user.atlas, false, "用户条目不是 Atlas 条目");
+  equal(user.pruneable, false, "用户条目必须原样保留（静态世界书不移动）");
+  equal(user.comment, "", "用户条目的原文不外泄进判定结果");
+  equal(classifyAtlasLorebookEntry("Atlas 动向", null).owned, false, "作用域缺席时任何条目都不归属当前聊天");
+  equal(classifyAtlasLorebookEntry(undefined, scope).reason, "foreign", "非法 comment 一律当用户条目（宁可不删）");
+
+  const summary = summarizeAtlasLorebookOwnership({
+    entries: {
+      "1": { comment: "Atlas 动向" },
+      "2": { comment: "用户的静态设定" },
+      "3": { comment: atlasScopedEntryComment(scope) },
+      "10": { comment: atlasScopedEntryComment({ chatId: "chat-B", worldId: "w1" }) },
+    },
+  }, scope);
+  equal(summary.current, 1, "当前作用域条目 1 条");
+  equal(summary.stale, 2, "旧路径 + 别的聊天共 2 条待清理");
+  deepEqual(summary.staleUids, ["1", "10"], "待清理 uid 按数值序确定");
+  equal(summary.foreign, 1, "用户条目 1 条（不算进待清理）");
+});
+
+test("B05：两个聊天并行开同一角色卡——互不可见对方的「Atlas 动向」，共享主卡书不被写动态条目", async () => {
+  // 注入通道缺席的宿主（老酒馆 / 未接 setExtensionPrompt）→ 必须走「按 chatId+worldId
+  // 独立的专属世界书」这条回退路径，这正是两聊天最容易互见的场景。
+  const rig = makeChatScopeRig({ injectionAvailable: false });
+  rig.seedLegacyCardBook();
+  const writerA = rig.writer("chat-A");
+  const writerB = rig.writer("chat-B");
+
+  // A 先跑一轮
+  const resultA = await writerA.syncTurn(scopedPlans("A 的动向：艾莉娅在集市广场"));
+  equal(resultA.contentTarget, "book", "无注入通道 → 动态内容落专属世界书");
+  equal(resultA.scopeKey, atlasLorebookScopeKey("chat-A", "w1"), "回执带当前作用域键");
+  equal(resultA.binding, "bound-by-atlas", "专属书模式绑定空槽");
+
+  // B 紧接着跑一轮（同一张卡、同一个 worldId、不同 chatId）
+  const resultB = await writerB.syncTurn(scopedPlans("B 的动向：巴罗在钟楼"));
+  ok(resultA.bookName !== resultB.bookName, "两个聊天写到两本不同的书");
+  equal(resultB.scopeKey, atlasLorebookScopeKey("chat-B", "w1"), "B 的作用域键与 A 不同");
+
+  // 互不可见：A 的书里没有 B 的动向，B 的书里没有 A 的动向
+  const bookA = rig.books.get(resultA.bookName);
+  const bookB = rig.books.get(resultB.bookName);
+  ok(bookA && bookB, "两本专属书都已落库");
+  const entriesA = Object.values(bookA.entries);
+  const entriesB = Object.values(bookB.entries);
+  equal(entriesA.length, 1, "A 的书里恰好一条");
+  equal(entriesB.length, 1, "B 的书里恰好一条");
+  equal(entriesA[0].content, "A 的动向：艾莉娅在集市广场", "A 只看到自己的动向");
+  equal(entriesB[0].content, "B 的动向：巴罗在钟楼", "B 只看到自己的动向");
+  ok(!JSON.stringify(bookB).includes("艾莉娅在集市广场"), "B 的书里搜不到 A 的内容（互不可见两个方向）");
+  ok(!JSON.stringify(bookA).includes("巴罗在钟楼"), "A 的书里搜不到 B 的内容");
+  equal(entriesA[0].comment, atlasScopedEntryComment({ chatId: "chat-A", worldId: "w1" }), "A 条目的 comment 带 A 的作用域");
+  equal(entriesB[0].comment, atlasScopedEntryComment({ chatId: "chat-B", worldId: "w1" }), "B 条目的 comment 带 B 的作用域");
+  ok(entriesA[0].comment !== entriesB[0].comment, "两条 comment 不同（面板/后续读取都分得清归属）");
+  deepEqual(resultA.ownedEntries.map((e) => e.content), ["A 的动向：艾莉娅在集市广场"], "回执的 ownedEntries 只含自己的条目");
+  deepEqual(resultB.ownedEntries.map((e) => e.content), ["B 的动向：巴罗在钟楼"], "B 同理");
+
+  // 共享主卡书：动态条目已被迁移清空，且**从未**被写入任一聊天的动态内容
+  const cardBook = rig.books.get(rig.cardBook);
+  ok(cardBook, "共享主卡书仍在");
+  ok(!JSON.stringify(cardBook).includes("A 的动向：艾莉娅在集市广场"), "共享主卡书没有 A 的动态条目");
+  ok(!JSON.stringify(cardBook).includes("B 的动向：巴罗在钟楼"), "共享主卡书没有 B 的动态条目");
+  for (const comment of rig.comments(rig.cardBook)) {
+    ok(!comment.startsWith(ATLAS_LOREBOOK_PREFIX.moves), `共享主卡书已无 Atlas 动向条目：实际「${comment}」`);
+    ok(!comment.startsWith(ATLAS_SCOPED_COMMENT_PREFIX), `共享主卡书已无作用域条目：实际「${comment}」`);
+  }
+  equal(resultA.cleanedShared, 2, "A 那次把共享书里的 2 条旧 Atlas 条目清掉（新路径成功之后）");
+  equal(resultA.sharedClean, true, "A 的回执报告共享书已无跨聊天动态条目");
+  equal(resultB.cleanedShared, 0, "B 那次已无需清理（A 已清空）；清理是幂等的 no-op");
+  equal(resultB.sharedClean, true, "B 的回执同样报告共享书干净");
+  equal(resultB.keptForeign, 0, "共享书里没有残留的跨聊天动态条目");
+
+  // 静态用户设定在任何一次同步后都原样保留
+  equal(rig.comments(rig.cardBook).filter((c) => c === "用户的静态设定").length, 1, "用户静态条目仍在共享书里");
+  const userEntry = Object.values(rig.books.get(rig.cardBook).entries).find((e) => e.comment === "用户的静态设定");
+  equal(userEntry.content, "圣罗兰城：城墙高三十米。", "用户条目的内容逐字未改");
+  equal(userEntry.disable, false, "用户条目的启停状态未改");
+
+  // 重复同步不产生重复条目（同作用域 upsert）
+  await writerA.syncTurn(scopedPlans("A 的动向：艾莉娅改在钟楼"));
+  const entriesA2 = Object.values(rig.books.get(resultA.bookName).entries);
+  equal(entriesA2.length, 1, "A 再同步仍只有一条");
+  equal(entriesA2[0].content, "A 的动向：艾莉娅改在钟楼", "内容整体重写");
+  ok(!JSON.stringify(rig.books.get(resultB.bookName)).includes("艾莉娅改在钟楼"), "A 的新内容不会出现在 B 的书里");
+});
+
+test("B05：迁移旧 Atlas 条目只在新路径成功后——成功才清共享书，失败则旧条目原样保留", async () => {
+  // --- 成功路径：专属书写成功后，共享书里的 legacy 条目才被清掉 ---
+  const rig = makeChatScopeRig({ injectionAvailable: false });
+  rig.seedLegacyCardBook();
+  const writer = rig.writer("chat-A");
+  const result = await writer.syncTurn(scopedPlans("A 的动向：新路径已成功"));
+  ok(rig.books.has(result.bookName), "新路径（专属书）已写成功");
+  equal(result.migrated, 2, "成功后迁移掉 2 条 legacy 条目");
+  equal(result.cleanedShared, 2, "其中共享书清理 2 条");
+  equal(result.keptForeign, 0, "没有残留的跨聊天动态条目");
+  equal(result.sharedClean, true, "共享书报告干净");
+  deepEqual(rig.comments(rig.cardBook), ["用户的静态设定"], "共享书只剩用户条目");
+  equal(result.pruned, 2, "回执 pruned 汇总迁移清理数");
+  const snapshot = writer.snapshot(scopedPlans("A 的动向：新路径已成功"), result);
+  equal(snapshot.migrated, 2, "快照带迁移数");
+  equal(snapshot.sharedClean, true, "快照带共享书干净标志");
+  equal(snapshot.scopeKey, atlasLorebookScopeKey("chat-A", "w1"), "快照带作用域键");
+
+  // --- 失败路径：新路径整条不通 → 旧条目必须原样保留（旧档无损） ---
+  const broken = makeChatScopeRig({ failWrites: true, injectionAvailable: false });
+  broken.seedLegacyCardBook();
+  const brokenWriter = broken.writer("chat-A");
+  await assert.rejects(
+    () => brokenWriter.syncTurn(scopedPlans("写不进去的动向")),
+    /写书失败/,
+    "两条路径都失败 → 向上抛错（调用方可重试）",
+  );
+  deepEqual(
+    broken.comments(broken.cardBook),
+    ["Atlas 动向", "Atlas 动向 第 3 → 4 时段", "用户的静态设定"],
+    "新路径失败 → 共享书里的旧 Atlas 条目与用户条目全部原样保留",
+  );
+  equal(broken.saves.length, 0, "失败路径没有产生任何一次成功保存");
+
+  // --- 注入失败但专属书成功：仍然只在新路径成功后清理 ---
+  const flash = makeChatScopeRig({ injectFailures: 1 });
+  flash.seedLegacyCardBook();
+  const flashWriter = flash.writer("chat-A");
+  const flashResult = await flashWriter.syncTurn(scopedPlans("注入挂了但书写成功"));
+  equal(flashResult.contentTarget, "book", "注入失败 → 落回专属世界书");
+  equal(flashResult.migrated, 2, "回退路径写成功后同样完成迁移");
+  deepEqual(flash.comments(flash.cardBook), ["用户的静态设定"], "共享书同样被清干净");
+});
+
+test("B05：注入通道可用时动态内容只走当前聊天（setExtensionPrompt 优先），旧条目在新路径成功后清理", async () => {
+  const rig = makeChatScopeRig();
+  rig.seedLegacyCardBook();
+  const writer = rig.writer("chat-A");
+  const result = await writer.syncTurn(scopedPlans("A 的动向：只注入给当前聊天"));
+
+  equal(result.contentTarget, "injection", "有注入通道 → 动态内容走注入，不写世界书");
+  equal(result.binding, "injected", "绑定状态如实标注 injected");
+  equal(result.injectionKey, atlasLorebookInjectionKey({ chatId: "chat-A", worldId: "w1" }), "注入 key 按作用域命名");
+  equal(rig.injectCalls, 1, "恰好调用一次注入");
+  ok(rig.injected.has(result.injectionKey), "注入内容落在当前聊天的 key 上");
+  const text = rig.injected.get(result.injectionKey);
+  ok(text.includes("A 的动向：只注入给当前聊天"), "注入文本含本轮动向");
+  ok(text.includes("仅限当前聊天"), "注入文本带边界说明（这一轮临时上下文，不属于共享书）");
+  equal(buildAtlasInjectionText(scopedPlans("x".repeat(1000))).length, ATLAS_LOREBOOK_LIMITS.INJECTION_CHARS, "注入文本有界");
+  equal(buildAtlasInjectionText(null), "", "空规划 → 空注入文本");
+  equal(buildAtlasInjectionText(null), buildAtlasInjectionText(undefined), "空输入确定性");
+
+  // 注入路径不写专属书（动态内容不落共享/专属世界书）
+  const scopedName = scopeBookName("Atlas · 星环余烬", { chatId: "chat-A", worldId: "w1" });
+  ok(!rig.books.has(scopedName), "注入路径不创建专属书（内容只在注入通道里）");
+  equal(result.written, 0, "注入路径没有写任何世界书（计数如实为 0，送达由 contentTarget 表达）");
+  // 新路径成功之后才清共享书
+  equal(result.migrated, 2, "注入成功后迁移旧条目");
+  deepEqual(rig.comments(rig.cardBook), ["用户的静态设定"], "共享书只剩用户静态条目");
+  equal(result.sharedClean, true, "回执报告共享书已干净");
+  equal(rig.chats.get("chat-A").savedMetadata, 0, "注入路径不触碰聊天绑定槽");
+});
+
+test("B05：专属书绑定槽冲突（共享书被别的聊天绑着）→ 绝不覆盖，只报 skipped-conflict", async () => {
+  const rig = makeChatScopeRig({ injectionAvailable: false });
+  // 别的聊天已经把共享主卡书绑进本聊天的槽（真实场景：用户手动绑 / 遗留绑定）
+  rig.chats.set("chat-A", { chatMetadata: { world_info: rig.cardBook }, savedMetadata: 0, chatId: "chat-A", worldId: rig.worldId });
+  const writer = rig.writer("chat-A");
+  const result = await writer.syncTurn(scopedPlans("A 的动向：专属书已写"));
+  equal(result.binding, "skipped-conflict", "已绑定别的书 → skipped-conflict（不覆盖）");
+  equal(result.existingBookName, rig.cardBook, "回执带回原绑定书名");
+  equal(rig.chats.get("chat-A").chatMetadata.world_info, rig.cardBook, "绑定槽逐字未改");
+  equal(rig.chats.get("chat-A").savedMetadata, 0, "没有发生任何绑定写");
+  ok(rig.books.has(result.bookName), "内容仍已写进本聊天的专属书（不丢）");
+});
+
+test("B05：未接作用域的旧调用点行为与 0.9.58 一致（回执如实标注未隔离）", async () => {
+  const mock = makeMockPort();
+  const writer = makeWriter(mock, { preferred: null });
+  const result = await writer.syncTurn(PLANS_A);
+  equal(result.contentTarget, "none", "无作用域 → 旧路径（contentTarget=none）");
+  equal(result.scopeKey, null, "没有作用域键");
+  equal(result.sharedClean, false, "未隔离时不谎报共享书干净");
+  equal(result.binding, "bound-by-atlas", "旧绑定语义不变");
+  equal(result.entries.length, 1, "旧条目视图不变");
+  equal(mock.books.get(PLANS_A.bookName).entries["1"].comment, ATLAS_MOVES_ENTRY_COMMENT, "旧调用点仍写固定 comment（不擅自加作用域）");
+  const snapshot = writer.snapshot(PLANS_A, result);
+  equal(snapshot.schemaVersion, 1, "快照版本不变");
+  equal(snapshot.scopeKey, null, "快照带作用域字段（旧行为下为 null）");
+});
+
+test("B05：两个聊天**同时**（Promise.all）开同一角色卡 → 仍互不可见、共享书无动态条目", async () => {
+  const rig = makeChatScopeRig({ injectionAvailable: false });
+  rig.seedLegacyCardBook();
+  const writerA = rig.writer("chat-A");
+  const writerB = rig.writer("chat-B");
+
+  // 真正并行：两轮同步的 await 交错，作用域与迁移顺序都必须扛得住
+  const [resultA, resultB] = await Promise.all([
+    writerA.syncTurn(scopedPlans("A 并行动向：艾莉娅守集市")),
+    writerB.syncTurn(scopedPlans("B 并行动向：巴罗登钟楼")),
+  ]);
+  ok(resultA.bookName !== resultB.bookName, "并行也各自写各自的书");
+  ok(!JSON.stringify(rig.books.get(resultA.bookName)).includes("B 并行动向"), "A 的书里没有 B 的动向");
+  ok(!JSON.stringify(rig.books.get(resultB.bookName)).includes("A 并行动向"), "B 的书里没有 A 的动向");
+  equal(Object.values(rig.books.get(resultA.bookName).entries).length, 1, "A 的书恰好一条");
+  equal(Object.values(rig.books.get(resultB.bookName).entries).length, 1, "B 的书恰好一条");
+
+  // 共享书：只有用户静态条目，动态条目一条不剩（A/B 谁先清都是幂等 no-op）
+  deepEqual(rig.comments(rig.cardBook), ["用户的静态设定"], "共享书并行跑完只剩用户条目");
+  ok(resultA.sharedClean && resultB.sharedClean, "两份回执都报告共享书干净");
+  equal(resultA.keptForeign + resultB.keptForeign, 0, "没有残留的跨聊天动态条目");
+  // 说明：并发下两次清理可能各自读到同一份旧快照（各报 migrated=2），也可能一先一后
+  // （2 + 0）——两者都合法。硬要求只有一条：**实际最终状态**里旧动态条目归零。
+  ok(
+    resultA.migrated + resultB.migrated >= 2 && resultA.migrated <= 2 && resultB.migrated <= 2,
+    `两次上报的迁移数都在合法区间（实际 ${resultA.migrated} + ${resultB.migrated}）`,
+  );
+  const leftover = rig
+    .comments(rig.cardBook)
+    .filter((c) => c.startsWith(ATLAS_LOREBOOK_PREFIX.moves) || c.startsWith(ATLAS_SCOPED_COMMENT_PREFIX));
+  deepEqual(leftover, [], "共享书最终状态：跨聊天动态条目归零");
+  ok(rig.comments(rig.cardBook).includes("用户的静态设定"), "用户静态条目在并发迁移后仍在");
 });
 
 test("本轮累计断言已记录（计数见报告）", () => {

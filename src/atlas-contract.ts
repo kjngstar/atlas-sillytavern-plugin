@@ -161,6 +161,16 @@ export interface AtlasTurnReceipt {
   adoptedEventIds: string[];
   summary: string;
   retryable: boolean;
+  /**
+   * D04：后台推演模块的**有界计数**（tasks / signals / deliveries 的当前规模 + 本回合受阻人数）。
+   * 可选：旧回执不带该字段仍然合法（前端不得据此判断回合是否成功）。
+   */
+  simulationCounts?: {
+    tasks: number;
+    signals: number;
+    deliveries: number;
+    blocked: number;
+  };
 }
 
 export type ParseResult<T> = { ok: true; value: T } | { ok: false; error: AtlasError };

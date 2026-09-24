@@ -50,6 +50,15 @@ globalThis.SillyTavern = { getContext: () => hostContext };
 // 0.9.46：在扩展导入（模块自初始化 connectAtlas）之前，把「已绑定世界」的会话
 // 文档种进 chatMetadata——地图页必须真实渲染（图例 / 标点 / 比例尺），否则
 // 防回归锁对 0.9.41 图例 bug 这类「只有绑世界后才出现」的问题永远失明。
+/**
+ * 测试卫生（0.9.59）：把原本**模块顶层**的断言收进一个 `test()`。
+ *
+ * 顶层 `assert` 一旦失败会中断整个文件的导入，node --test 只报「这个文件挂了」一条，
+ * 该文件里的用例全部从总数里消失——实测会让 100+ 条测试凭空不见，
+ * 失败计数因此失去意义（排查协议收口时被这个假象误导过一次）。
+ * 现在失败会以**一条具名用例**的形式暴露，其余文件的计数也不再被牵连。
+ */
+test("ATLAS-18 挂载冒烟：connectAtlas 真实跑通、六页可渲染、地图图例与标点齐全", async () => {
 const { buildStarterWorld } = await import("../src/atlas-starter-world.ts");
 const smokeWorld = buildStarterWorld({
   id: "w-smoke",
@@ -136,3 +145,4 @@ conn.core.__renderPage();
 assert.notEqual(root.style.display, "none", "panelOpen=true 时根节点必须可见");
 
 conn.core.dispose();
+});
