@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.57";
+export const ATLAS_EXTENSION_VERSION = "0.9.58";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -2531,7 +2531,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     const legend = el("div", "aw-maplegend");
     legend.append(
       legendItem("aw-maplegend__dot aw-maplegend__dot--loc", "地点"),
-      legendItem("aw-maplegend__dot aw-maplegend__dot--npc", "人物：在地点名单"),
+      legendItem("aw-maplegend__dot aw-maplegend__dot--npc", "人物：进内部地图后按房间显示"),
       legendItem("aw-maplegend__dot aw-maplegend__dot--obj", "物品"),
     );
     viewport.append(legend);
@@ -3244,22 +3244,43 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       rosterNpcs = npcsAll.filter((n) => String(n.pointId ?? "") === ownerId && n.presence !== "left");
       objects = objectsAll.filter((o) => String(o.pointId ?? "") === ownerId);
       if (tableMap) {
-        // D03：子图名单同样以三表为准——三表里有、目录里还没有的人 / 物品**照样列出**
-        // （行增量回合刚记下的人不能因为目录投影滞后就从名单消失），并按三表补
-        // 位置未知（只有建筑级归属、没有房间坐标）的那一份。
+        /**
+         * D03 / D-34：子图名单同样以三表为准，并且**口径与地图一致**——
+         * 当前层可见的房间 = 宿主 + `submaps` 里以宿主为父的那些房间（含再下一层），
+         * 名单里列的是"归属于这些房间、但**没有房间内细坐标**"的人 / 物品。
+         * 有细坐标的人已经在地图上画成图钉了，不该在名单里再出现一次。
+         *
+         * 旧实现按宿主 id 精确匹配位置，于是"位置=某个房间"的人一个都进不来——
+         * 名单与地图会同时为空，而人其实就在这层楼里。
+         */
+        /**
+         * 口径与地图上的图钉**完全一致**：可见房间 = 当前图层渲染出来的地点标点
+         * （子图里 = 宿主 + 同层房间）。名单只列"归属于这些房间、但没有房间内细坐标"的人 / 物品；
+         * 有细坐标的已经在地图上画成图钉，不在名单里重复出现。
+         */
+        const visibleRoomIds = new Set(points.map((point) => `loc:${String(point.id)}`));
+        const hasFinePosition = (row) => typeof row.gridX === "number" && typeof row.gridY === "number";
         const knownNpcKeys = new Set();
         for (const npc of rosterNpcs) {
           knownNpcKeys.add(tableRowIdOf(npc.id));
           knownNpcKeys.add(String(npc.id ?? ""));
         }
         const knownObjectIds = new Set(objects.map((o) => String(o.id ?? "")));
-        for (const entry of tableNpcsAtLocation(tableMap, ownerId)) {
+        for (const entry of tableMap.nearby?.entries ?? []) {
+          const locationId = String(entry.locationId ?? "");
+          if (!visibleRoomIds.has(locationId)) continue;
+          if (entry.presence === "left") continue;
+          if (entry.isProtagonist === true) continue;
+          if (hasFinePosition(entry)) continue;
           const rowId = String(entry.id ?? "").startsWith("npc:") ? String(entry.id) : `npc:${String(entry.id ?? "")}`;
           if (knownNpcKeys.has(rowId)) continue;
           rosterNpcs = [...rosterNpcs, npcViewFromTableRow(entry)];
         }
-        for (const entry of tableObjectsAtLocation(tableMap, ownerId)) {
+        for (const entry of tableMap.objects?.entries ?? []) {
+          const locationId = String(entry.locationId ?? "");
+          if (!visibleRoomIds.has(locationId)) continue;
           if (entry.holderCharacterId !== null) continue;
+          if (hasFinePosition(entry)) continue;
           if (knownObjectIds.has(String(entry.id ?? ""))) continue;
           objects = [...objects, objectViewFromTableRow(entry)];
         }
@@ -3450,6 +3471,59 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         openObjectPanel(object, dot);
       });
       mapLayer.append(dot);
+    }
+
+    /**
+     * D-34（0.9.58）：**子图里的**人物图钉。
+     *
+     * 世界图仍然不画人物（S9 的理由成立：人物坐标 = 地点坐标，两枚标记叠在一起，
+     * 而且"在某座城里"只到地点级）。但进到具体房间后，「谁在这个房间」正是地图该回答的问题，
+     * 所以子图里按三表格坐标画人物图钉。
+     * 只在坐标**不等于**所在子图的地点标点时才画：相等就说明只知道"在这个建筑里"，
+     * 那种情况只进「建筑内 · 位置未知」名单（不伪造房间坐标）。
+     */
+    if (tableMap && inSub && Array.isArray(tableMap.nearby?.entries)) {
+      /**
+       * 当前子图画的是「宿主地点内部」，图上可见的房间 = `points`（宿主 + 同层房间）。
+       * 所以能在图上落点的人 = 位置正好是这些房间之一的人。
+       *
+       * 反过来说：只知道"在这栋楼里"（位置 = 宿主地点本身）的人**不画点**——
+       * 那正是地点级信息，画出来等于伪造房间坐标；他们由「建筑内 · 位置未知」名单承载。
+       */
+      const ownerId = String(view.pointId);
+      const visibleRoomIds = new Set(points.map((point) => `loc:${String(point.id)}`));
+      /**
+       * 图上所有地点标点的坐标。人物坐标与之重合 = 那只是"地点级"信息
+       * （例如子地点继承父坐标），画出来会与地点标点叠成两枚标记 —— 不画。
+       * 用「全部可见标点」而不是只比宿主：子图里可见的是宿主 + 同层房间。
+       */
+      const pinCoords = new Set(points.map((point) => `${Number(point.x)}|${Number(point.y)}`));
+      for (const entry of tableMap.nearby.entries) {
+        const locationId = String(entry.locationId ?? "");
+        if (!visibleRoomIds.has(locationId)) continue;
+        if (entry.presence === "left") continue;
+        if (entry.isProtagonist === true) continue; // 主角由 topbar / 地点名单呈现，不在地图上冒充 NPC
+        // 只知道"在这栋楼里"（位置 = 宿主地点本身，没有房间级位置）→ 不画点：
+        // 那正是地点级信息，画出来等于伪造房间坐标。他们由「建筑内 · 位置未知」名单承载。
+        if (locationId === `loc:${ownerId}`) continue;
+        if (typeof entry.gridX !== "number" || typeof entry.gridY !== "number") continue;
+        if (pinCoords.has(`${Number(entry.gridX)}|${Number(entry.gridY)}`)) continue;
+        const npc = npcViewFromTableRow(entry, { pointName: entry.locationName ?? null });
+        const pin = el("button", "aw-object aw-object--npc");
+        pin.type = "button";
+        pin.dataset.npcId = npc.id;
+        pin.style.left = `${Number(entry.gridX)}px`;
+        pin.style.top = `${Number(entry.gridY)}px`;
+        pin.title = String(npc.name);
+        pin.setAttribute("aria-label", `人物 ${String(npc.name)}，点击查看详情`);
+        pin.append(el("span", "aw-object__gem", String(npc.name ?? "?").slice(0, 1)));
+        pin.append(el("span", "aw-object__name", String(npc.name)));
+        pin.addEventListener("click", (event) => {
+          event.stopPropagation();
+          openNpcPanel(npc, pin);
+        });
+        mapLayer.append(pin);
+      }
     }
 
     const preview = state().destinationPreview;
@@ -4111,7 +4185,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       [
         "推进协议",
         // C07：当前值要写清是哪一个（表格增量不能显示成 "vtable-delta-v1"）
-        // 0.9.57：新装默认已是 table-delta-v1，缺省显示也必须跟它一致
+        // 0.9.58：新装默认已是 table-delta-v1，缺省显示也必须跟它一致
         String(settingsV2?.worldTurnProtocol ?? "table-delta-v1") === "table-delta-v1"
           ? "表格增量（table-delta-v1）"
           : `v${String(settingsV2?.worldTurnProtocol ?? "table-delta-v1").replace(/^v/, "")}`,

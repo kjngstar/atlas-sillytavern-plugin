@@ -1566,7 +1566,7 @@ function createCoreInstance(
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.57",
+      version: "0.9.58",
       protocolVersion: 1,
       time: now(),
     });
@@ -3152,7 +3152,7 @@ function createCoreInstance(
       // （剥 think / 推理段 / 杂段），再进草稿解析。
       const cleanedText = applyContentReplaceRules(call.text, current.contentReplaceRules ?? []);
       // C04 协议分流（作者已裁决 = 严格按设置）：
-      // 旧实现用 `/\"schemaVersion\"\s*:\s*2/` 扫全文猜走不走 v2（0.9.53–0.9.57 最脆弱的一处：
+      // 旧实现用 `/\"schemaVersion\"\s*:\s*2/` 扫全文猜走不走 v2（0.9.53–0.9.58 最脆弱的一处：
       // 正文里只要出现这串字符就换管线），且设置与实际输出不符时静默落回 v1。
       // 现在：
       // - 设置 = `table-delta-v1` → 只认行增量块；不是块就明确失败；

@@ -1232,10 +1232,11 @@
   user-select: none;
 }
 
-/* S9（0.9.55）：地图上不再渲染人物标点（.aw-npc 已无人生成），人物改由地点面板名单承载，
+/* S9（0.9.55）：世界图上不再渲染人物标点（.aw-npc 已无人生成），人物改由地点面板名单承载，
    故整块 .aw-npc 规则删除；肤色令牌 --am-person / --am-marker-radius-person 的消费点
    搬到名单里的头像（见 .aw-mappanel__person--npc .aw-mappanel__person-avatar）。
-   物品仍是紫色小方块标点（路径未变）。 */
+   D-34（0.9.58）起**子图**里重新渲染人物图钉（.aw-object--npc，见下），
+   复用同一组「人物」令牌；世界图仍然不画。物品仍是紫色小方块标点（路径未变）。 */
 
 .aw-object {
   position: absolute;
@@ -1286,6 +1287,47 @@
 
 .aw-object:hover .aw-object__name,
 .aw-object:focus-visible .aw-object__name { opacity: 1; }
+
+/**
+ * D-34（0.9.58）：子图里的**人物图钉**。
+ *
+ * 世界图上仍然不画人物（同一地点坐标会叠两枚标记）；但进到具体房间里，
+ * 「谁在这个房间」正是地图该回答的问题——所以子图里给人物画头像图钉。
+ * 只在人物有精细格坐标、且该坐标**不等于**所在子图的地点标点时才画
+ * （相等就说明只知道"在这个建筑里"，那种情况只进「建筑内 · 位置未知」名单）。
+ * 配色沿用皮肤已有的「人物」令牌（--am-person / --am-marker-radius-person），
+ * 只扩展在注册表里已声明的派生令牌，不引入新前缀。
+ */
+.aw-object--npc {
+  width: 20px;
+  height: 20px;
+  border-radius: var(--am-marker-radius-person, 50%);
+  transform: translate(-50%, -50%) scale(var(--aw-marker-inv, 1));
+  background: var(--am-person, linear-gradient(135deg, #d8b26a 0%, #b9924a 100%));
+  border: 1.5px solid var(--am-avatar-npc-border, #fff8df);
+  color: var(--am-avatar-npc-text, #42320f);
+  font-family: var(--aw-sans);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  z-index: 4;
+}
+
+.aw-object--npc:hover,
+.aw-object--npc:focus-visible {
+  transform: translate(-50%, -50%) scale(calc(1.3 * var(--aw-marker-inv, 1)));
+}
+
+/* 物品小方块里不显示字符（紫色菱形本身就是标记）；人物图钉要显示名字首字。 */
+.aw-object--npc .aw-object__gem { display: inline; }
+
+.aw-object--npc .aw-object__name {
+  left: 13px;
+  top: 1px;
+  transform: none;
+  color: var(--am-avatar-npc-text, #42320f);
+  border-color: var(--am-avatar-npc-border, rgba(255, 248, 223, 0.6));
+}
 
 /* 0.9.41 图例：三型标点说明（地图左下、比例尺上方） */
 

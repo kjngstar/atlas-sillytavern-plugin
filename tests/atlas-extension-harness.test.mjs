@@ -1721,11 +1721,12 @@ test("S10 前端：同地点人物只在地点名单（离场者不出现、头�
   const { container, dom } = await mountAtlasMap({ stateByChat });
 
   // S9：世界图上不再有人物标点（人物只由地点名单承载）
-  equal(container.querySelectorAll(".aw-npc").length, 0, "世界图上 0 个人物标点（.aw-npc 已不再生成）");
+  // D-34（0.9.58）：**子图**里会按三表格坐标画人物图钉；世界图仍然一个都不画。
+  equal(container.querySelectorAll(".aw-object--npc").length, 0, "世界图上 0 个人物图钉");
   equal(container.querySelectorAll(".aw-point").length, 1, "世界图只按地点出标点，人物不额外叠标记");
   const legend = container.querySelector(".aw-maplegend")?.textContent ?? "";
-  ok(legend.includes("地点") && legend.includes("人物：在地点名单") && legend.includes("物品"),
-    `图例说实话（地点 / 人物：在地点名单 / 物品）：实际「${legend}」`);
+  ok(legend.includes("地点") && legend.includes("人物：进内部地图后按房间显示") && legend.includes("物品"),
+    `图例说实话（地点 / 人物：进内部地图后按房间显示 / 物品）：实际「${legend}」`);
 
   // 地点面板「当前在这里」：在场者恰好一次，离场者不出现
   const panel = openPointPanel(container, "钟楼");
@@ -2000,6 +2001,93 @@ test("S11 前端：附近页只展示相关人物（主角与远处目录成员�
   const text = container.querySelector(".aw-center")?.textContent ?? "";
   ok(text.includes("附近暂无已确认人物"), `空关联给出明确文案：实际「${text.slice(0, 80)}」`);
   equal(container.querySelectorAll(".aw-card--npc").length, 0, "空关联时不渲染人物卡片");
+});
+
+test("D-34 前端：子图按房间画人物图钉；只知建筑级的不画点（不伪造房间坐标）", async () => {
+  const base = s10State({
+    chatId: "chat-a",
+    worldId: "w-d34",
+    currentLocationId: "1",
+    points: [{ id: "1", name: "学校", x: 40, y: 40, regionId: null }],
+    submaps: { "1": { parentMapId: "world", points: [{ id: "11", name: "三年二班", x: 30, y: 30 }] } },
+    npcDirectory: [],
+    objectDirectory: [],
+  });
+  base.tableMap = {
+    branchKey: "canon",
+    world: {
+      mapId: "world",
+      total: 1,
+      truncated: 0,
+      points: [{ id: "1", name: "学校", x: 40, y: 40, regionId: null, kind: "location", rowId: "loc:1" }],
+    },
+    submaps: {
+      "1": {
+        mapId: "1",
+        parentMapId: "world",
+        frame: { cols: 100, rows: 100, frameRevision: 1 },
+        total: 1,
+        truncated: 0,
+        points: [{ id: "11", name: "三年二班", x: 30, y: 30, regionId: null, kind: "location", rowId: "loc:11" }],
+      },
+    },
+    unknownPosition: [],
+    nearby: {
+      total: 4,
+      truncated: 0,
+      entries: [
+        // ① 有房间内精细坐标 → 子图里要画图钉
+        { id: "npc-a", name: "林拾", locationId: "loc:11", locationName: "三年二班", presence: "present",
+          thought: "在想题", actionTendency: "留在教室", currentAction: "坐着", isProtagonist: false,
+          positionSource: "narrative", mapId: "1", gridX: 62, gridY: 44 },
+        // ② 坐标与地点标点完全重合 → 只知建筑级，不画点（避免两枚标记叠在一起）
+        { id: "npc-b", name: "老师", locationId: "loc:11", locationName: "三年二班", presence: "present",
+          thought: "", actionTendency: "", currentAction: "讲课", isProtagonist: false,
+          positionSource: "unknown", mapId: "1", gridX: 30, gridY: 30 },
+        // ③ 完全没有细坐标 → 只进名单
+        { id: "npc-c", name: "转校生", locationId: "loc:11", locationName: "三年二班", presence: "present",
+          thought: "", actionTendency: "", currentAction: "", isProtagonist: false,
+          positionSource: "unknown", mapId: "1", gridX: null, gridY: null },
+        // ④ 主角 → 不在地图上冒充 NPC
+        { id: "npc-hero", name: "我", locationId: "loc:11", locationName: "三年二班", presence: "present",
+          thought: "", actionTendency: "", currentAction: "", isProtagonist: true,
+          positionSource: "manual", mapId: "1", gridX: 70, gridY: 70 },
+      ],
+    },
+    objects: { total: 0, truncated: 0, entries: [] },
+    current: { locationId: "loc:1", chain: [{ id: "loc:1", name: "学校" }] },
+    totals: { locations: 2, characters: 4, items: 0, submaps: 1 },
+    dropped: { locations: 0 },
+  };
+  const { container } = await mountAtlasMap({ stateByChat: { "chat-a": base } });
+
+  // 世界图：学校一个点，人物一个都不画
+  equal(container.querySelectorAll(".aw-object--npc").length, 0, "世界图上不画人物");
+  // 进入学校 → 三年二班所在的那层子图
+  openPointPanel(container, "学校");
+  const enter = enterSubmapButton(container, "学校");
+  ok(enter !== null, "学校有内部地图入口");
+  enter.click();
+
+  const pins = [...container.querySelectorAll(".aw-object--npc")];
+  const pinNames = pins.map((pin) => pin.textContent);
+  ok(pinNames.some((text) => text.includes("林拾")), `房间里画出「林拾」图钉：实际 ${JSON.stringify(pinNames)}`);
+  ok(!pinNames.some((text) => text.includes("老师")), "坐标与地点标点重合（只知建筑级）→ 不画点");
+  ok(!pinNames.some((text) => text.includes("转校生")), "没有细坐标 → 不画点");
+  ok(!pinNames.some((text) => text.includes("我")), "主角不在地图上冒充 NPC");
+  // 位置：按格坐标落点（62 / 44），不是地点标点的 30 / 30
+  const lin = pins.find((pin) => pin.textContent.includes("林拾"));
+  equal(lin?.style.left, "62px", "图钉按格坐标落点（x）");
+  equal(lin?.style.top, "44px", "图钉按格坐标落点（y）");
+  equal(lin?.dataset.npcId, "npc-a", "带上实体 id（供排障与后续交互）");
+  // 只有建筑级信息的人仍在「建筑内 · 位置未知」名单里，没被弄丢
+  const rosterText = String(container.querySelector(".aw-interior-roster")?.textContent ?? "");
+  ok(rosterText.includes("转校生"), `建筑内名单保留无细坐标的人：实际「${rosterText}」`);
+  ok(!rosterText.includes("林拾"), "有房间内坐标的人只在图上画钉，不在名单里重复出现");
+  // 老师只知道"在三年二班"（坐标 = 房间标点）→ 既不是图钉，也不需要名单兜底：
+  // 房间标点本身就说明他在这儿。
+  const allMapText = String(container.querySelector(".aw-maparea")?.textContent ?? "");
+  ok(!allMapText.includes("老师"), "坐标与房间标点重合的人不重复画点");
 });
 
 test("D04/D05 前端：有 tableMap 时位置与在场性以三表为准（目录不得反向覆盖）", async () => {
