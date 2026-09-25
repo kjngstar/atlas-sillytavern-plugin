@@ -13,6 +13,8 @@ import assert from "node:assert/strict";
 
 import { buildStarterWorld, starterWorldIdForChat } from "../src/atlas-starter-world.ts";
 import { createAtlasServerCore, createMemoryDocumentStore } from "../src/atlas-server.ts";
+import { createLocalAtlasApi } from "../src/atlas-local-api.ts";
+import { createAtlasSessionApi, atlasSessionWriteGuard, atlasStarterWorldWriteGuard } from "../index.js";
 import { createSessionCarrier, carrierAsCore } from "./atlas-session-helper.mjs";
 
 const NOW = 1_700_000_000_000;
@@ -150,4 +152,77 @@ test("ensure-starter → bindings：建世后可直接绑定，无需 import", a
   const state = await core.handle("GET", "/state/chat-1");
   assert.equal(state.body.ok, true, "绑定后 state 可读");
   assert.equal(state.body.data.worldId, id, "state 指向同一个世界（无需 import 即可开玩）");
+});
+
+test("首次建世浏览器往返：未绑定的 world 仅在同一聊天写回，下一步绑定成功", async () => {
+  const chatId = "chat-first-floor";
+  const world = starterWorld(starterWorldIdForChat(chatId));
+  const rawCore = createAtlasServerCore({ store: createMemoryDocumentStore(), now: () => NOW });
+  const metadata = {};
+  let saved = 0;
+  const context = () => ({ chatId, chatMetadata: metadata, saveMetadata: async () => { saved += 1; } });
+  const api = createAtlasSessionApi({
+    context, innerApi: createLocalAtlasApi(rawCore), logCall: (_method, _path, run) => run(),
+  });
+
+  assert.equal(atlasSessionWriteGuard(chatId, chatId, null, { world, binding: null }), false,
+    "通用守卫仍拒绝无绑定世界");
+  const ensured = await api.request("POST", "/worlds/ensure-starter", { world });
+  assert.equal(ensured.status, 200);
+  assert.equal(ensured.body.data.created, true);
+  assert.equal(metadata.atlas?.world?.id, world.id, "首次建世写进本聊天 metadata");
+  assert.equal(metadata.atlas?.binding, null, "此时还未绑定");
+
+  const bound = await api.request("POST", "/bindings", { action: "bind", binding: {
+    schemaVersion: 1, enabled: true, chatId, worldId: world.id,
+    branchId: null, currentLocationId: null, worldTimeCursor: 0,
+  } });
+  assert.equal(bound.status, 200, JSON.stringify(bound.body.error ?? {}));
+  assert.equal(metadata.atlas?.binding?.worldId, world.id, "绑定看到刚才写入的世界");
+  assert.equal(saved, 2, "建世和绑定各保存一次");
+});
+
+test("首次建世例外仅限相同聊天与世界；切聊天、错世界都不能写回", async () => {
+  const chatId = "chat-first-floor";
+  const world = starterWorld(starterWorldIdForChat(chatId));
+  const response = { schemaVersion: 1, binding: null, world, tables: null, simulation: null };
+  const metadata = {};
+  assert.equal(atlasStarterWorldWriteGuard(chatId, chatId, metadata, metadata, world, response, null), true);
+  assert.equal(atlasStarterWorldWriteGuard(chatId, "chat-b", metadata, {}, world, response, null), false);
+  assert.equal(atlasStarterWorldWriteGuard(chatId, chatId, metadata, {}, world, response, null), false,
+    "A→B→A 的旧 metadata 不可复用");
+  assert.equal(atlasStarterWorldWriteGuard(chatId, chatId, metadata, metadata, world,
+    { ...response, world: { ...world, id: starterWorldIdForChat("other") } }, null), false);
+  assert.equal(atlasStarterWorldWriteGuard(chatId, chatId, metadata, metadata, world,
+    { ...response, tables: { branches: {} } }, null), false);
+
+  const ctxA = { chatId, chatMetadata: metadata };
+  const ctxB = { chatId: "chat-b", chatMetadata: {} };
+  let current = ctxA;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const rawCore = createAtlasServerCore({ store: createMemoryDocumentStore(), now: () => NOW });
+  const local = createLocalAtlasApi(rawCore);
+  const api = createAtlasSessionApi({ context: () => current,
+    innerApi: { request: async (...args) => { await gate; return local.request(...args); } },
+    logCall: (_method, _path, run) => run(),
+  });
+  const pending = api.request("POST", "/worlds/ensure-starter", { world });
+  current = ctxB;
+  release();
+  await pending;
+  assert.equal(ctxA.chatMetadata.atlas, undefined);
+  assert.equal(ctxB.chatMetadata.atlas, undefined, "迟到的首次建世不能写入 B");
+
+  const sameChatWrongWorld = createAtlasSessionApi({
+    context: () => ctxA,
+    innerApi: { request: async () => ({ status: 200, body: { ok: true,
+      session: { ...response, world: { ...world, id: starterWorldIdForChat("wrong-chat") } },
+    } }) },
+    logCall: (_method, _path, run) => run(),
+  });
+  const rejected = await sameChatWrongWorld.request("POST", "/worlds/ensure-starter", { world });
+  assert.equal(rejected.status, 409, "错世界不能伪装成成功建世");
+  assert.equal(rejected.body.error.code, "SESSION_IDENTITY_MISMATCH");
+  assert.equal(ctxA.chatMetadata.atlas, undefined);
 });

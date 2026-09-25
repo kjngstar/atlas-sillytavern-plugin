@@ -90,7 +90,7 @@ function readAtlasSession(context) {
  * - **不传** `expectedChatId` 的现有人工导入调用保持原契约：只写「被显式选择的当前聊天」。
  *   旧调用点语义一字不变。
  */
-export async function writeAtlasSession(context, session, expectedChatId = null) {
+export async function writeAtlasSession(context, session, expectedChatId = null, expectedMetadata = null) {
   if (!isValidAtlasSession(session)) {
     throw new Error("Atlas 会话写回被拒绝：会话形状非法（schemaVersion 不匹配）。");
   }
@@ -98,6 +98,9 @@ export async function writeAtlasSession(context, session, expectedChatId = null)
   const metadata = ctx?.chatMetadata;
   if (!metadata || typeof metadata !== "object") {
     throw new Error("Atlas 会话写回失败：当前聊天没有可写的 chatMetadata。");
+  }
+  if (expectedMetadata && metadata !== expectedMetadata) {
+    throw new Error("Atlas 会话写回被拒绝：聊天会话对象在请求期间已变更。");
   }
   if (expectedChatId !== null && expectedChatId !== undefined && String(expectedChatId) !== "") {
     const currentChatId = ctx?.chatId ?? null;
@@ -163,6 +166,22 @@ export function atlasSessionHasPersistentPayload(session) {
   if (session.tables) return true;
   if (session.simulation) return true;
   return false;
+}
+
+/**
+ * First-world bootstrap is the one intentional unbound write. Its response
+ * cannot carry a binding yet, so the general unbound-session guard must stay
+ * strict for every other route. Tie this exception to the request, chat
+ * metadata identity, starter ID and the returned world before saving it.
+ */
+export function atlasStarterWorldWriteGuard(requestChatId, currentChatId, requestMetadata, currentMetadata, requestWorld, responseSession, requestSession) {
+  if (!requestChatId || requestChatId !== currentChatId) return false;
+  if (!requestMetadata || requestMetadata !== currentMetadata) return false;
+  const worldId = typeof requestWorld?.id === "string" ? requestWorld.id : "";
+  if (!/^world-auto-[0-9a-f]{16}$/.test(worldId)) return false;
+  if (requestSession?.binding || (requestSession?.world && requestSession.world.id !== worldId)) return false;
+  if (!responseSession || responseSession.binding !== null || responseSession.tables || responseSession.simulation) return false;
+  return responseSession.world?.id === worldId;
 }
 
 /**
@@ -517,13 +536,18 @@ export function createAtlasSessionApi(deps) {
   if (!context || !innerApi) throw new Error("createAtlasSessionApi 需要 context 与 innerApi。");
   return {
     async request(method, path, body) {
-      const requestChatId = context().chatId ?? null;
+      const requestContext = context();
+      const requestChatId = requestContext.chatId ?? null;
+      const requestMetadata = requestContext.chatMetadata ?? null;
       let payload = body;
+      let requestSession = null;
       if (method === "POST" && pathWantsSession(path)) {
-        const session = readAtlasSession(context);
-        if (session) payload = { ...(body ?? {}), session };
+        requestSession = readAtlasSession(context);
+        if (requestSession) payload = { ...(body ?? {}), session: requestSession };
       }
       const result = await logCall(method, path, () => innerApi.request(method, path, payload));
+      const firstWorld = method === "POST" && path === "/worlds/ensure-starter" &&
+        !result?.body?.session?.binding;
       try {
         const responseSession = result?.body?.session;
         // 设置类响应不带会话：正常路径，直接返回（B02b：不因为没会话就报错）
@@ -533,10 +557,14 @@ export function createAtlasSessionApi(deps) {
           responseSession?.binding && typeof responseSession.binding.chatId === "string"
             ? responseSession.binding.chatId
             : null;
-        if (atlasSessionWriteGuard(requestChatId, currentChatId, sessionChatId, responseSession)) {
+        const starterAllowed = firstWorld && atlasStarterWorldWriteGuard(
+          requestChatId, currentChatId, requestMetadata, context().chatMetadata ?? null,
+          payload?.world, responseSession, requestSession,
+        );
+        if (atlasSessionWriteGuard(requestChatId, currentChatId, sessionChatId, responseSession) || starterAllowed) {
           // C07b：把 B02b 捕获的 chatId 交给写回再做一次身份核对（守卫已过，这里是第二道锁，
           // 覆盖「守卫通过之后、await 落盘之前又切了聊天」的极窄窗口）。
-          await writeAtlasSession(context, responseSession, requestChatId);
+          await writeAtlasSession(context, responseSession, requestChatId, starterAllowed ? requestMetadata : null);
           return result;
         }
         // 发起聊天 ≠ 当前聊天（切卡 / 换聊天 / 会话归属不一致）：丢弃写回。
@@ -550,6 +578,15 @@ export function createAtlasSessionApi(deps) {
           details: { reasonCode: decision.reasonCode, coreCommitted: receiptStatus === "committed" },
         });
         if (decision.notice) notify(decision.notice);
+        // A successful ensure response without a saved world must not be
+        // followed by /bindings: that would turn this write rejection into an
+        // opaque WORLD_NOT_FOUND error.
+        if (firstWorld && requestChatId === currentChatId) {
+          return { status: 409, body: { ok: false, error: {
+            code: "SESSION_IDENTITY_MISMATCH",
+            message: "自动建世结果未写入当前聊天：会话身份或世界 ID 不符，请在概览页重试初始化。",
+          } } };
+        }
       } catch (error) {
         // 写回失败（聊天正被切换等）：引擎侧已提交，本侧会话等下次响应覆盖；记日志排查
         emit({
@@ -557,6 +594,12 @@ export function createAtlasSessionApi(deps) {
           operation: "session", phase: "write", outcome: "failed", retryable: true,
           details: { coreCommitted: result?.body?.data?.receipt?.status === "committed" },
         });
+        if (firstWorld && requestChatId === (context().chatId ?? null)) {
+          return { status: 409, body: { ok: false, error: {
+            code: "SESSION_WRITE_FAILED",
+            message: "自动建世已返回，但写入当前聊天失败；请在概览页重试初始化。",
+          } } };
+        }
       }
       return result;
     },
