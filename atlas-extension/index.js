@@ -2546,6 +2546,17 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
   let logQuery = "";
   let logAllChats = false;
   let logCurrentTrace = false;
+  /**
+   * 日志页「详细模式」。需求（作者）：开发阶段成功了也要逐条写出来，才看得出哪里成功、
+   * 哪里失败；但每次 `/state` 都记一条的 `API_CALL_COMPLETE` 会在正常操作下持续刷屏，
+   * 因此默认关闭（精简），打开后**一条不筛**，成功链与噪声都如实列出。
+   * 关键点：精简只挡成功噪声——任何 warn / error 永不隐藏，否则就变成用筛选掩盖故障。
+   */
+  let logDetail = readLogDetailPreference();
+  /** 只有「信息级 + 明知高频」的条目会在精简模式下折叠；error / warn 不在此列（见上）。 */
+  const LOG_COMPACT_NOISE = new Set([
+    "API_CALL_COMPLETE", "API_CALL_STARTED", "TURN_DUPLICATE", "MODEL_HTTP_COMPLETE",
+  ]);
   const diagnosticAdvice = {
     TURN_SKIPPED_NO_PENDING: "本次没有可提交回合；请检查准备阶段，必要时重新生成。",
     PREPARE_FAILED: "本次未准备好上下文；可检查引擎状态后重新生成。",
@@ -2567,6 +2578,12 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     COMMIT_FAILED: "回合提交失败，世界未更新；检查同一时间段的引擎诊断。",
   };
 
+  /** 详细模式开关的持久化偏好：读写各自 try/catch，隐私模式下退化为「本次会话有效」。 */
+  function readLogDetailPreference() {
+    try { return globalThis.localStorage?.getItem("atlas:log-detail-mode:v1") === "true"; }
+    catch { return false; }
+  }
+
   function diagnosticEntries() {
     return atlasDiagnostics?.getSnapshot() ?? pendingDiagnostics;
   }
@@ -2586,12 +2603,20 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     const turnStartAt = latestStart ? Date.parse(latestStart.at) : null;
     const visible = logCurrentTrace && turnStartAt !== null
       ? scoped.filter((entry) => Date.parse(entry.at) >= turnStartAt) : scoped;
+    // 精简模式只挡「信息级 + 高频」的成功噪声：任何 warn / error 都不受模式影响，
+    // 因此不会出现「开了精简就看不到故障」的情况。折叠条数如实报出，不静默。
+    const display = logDetail ? visible : visible.filter((entry) =>
+      !(entry.level === "info" && LOG_COMPACT_NOISE.has(entry.code)));
+    const hiddenCount = visible.length - display.length;
     const errorCount = visible.filter((entry) => entry.level === "error").length;
     const latest = visible.at(-1);
     wrap.append(el("p", "aw-panel__meta",
       "Atlas " + ATLAS_EXTENSION_VERSION + " · 浏览器模式 · 当前聊天 " + (chatRef ?? "未知") +
-      " · 安全元信息 " + visible.length + " 条 · 报错 " + errorCount +
-      (latest ? " · 最近 " + latest.code : "")));
+      " · 安全元信息 " + display.length + " 条 · 报错 " + errorCount +
+      (latest ? " · 最近 " + latest.code : "") +
+      (hiddenCount > 0
+        ? " · 精简模式已折叠 " + hiddenCount + " 条成功噪声（开「详细模式」逐条看；警告与报错不会被折叠）"
+        : "")));
 
     const controls = el("div", "aw-actions");
     const filterSelect = document.createElement("select");
@@ -2650,6 +2675,25 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     });
     controls.append(archive);
 
+    const detail = el("button", "aw-btn aw-btn--ghost" + (logDetail ? " is-active" : ""),
+      logDetail ? "详细模式：开" : "详细模式：关");
+    detail.type = "button";
+    detail.setAttribute("aria-pressed", String(logDetail));
+    detail.title = "开启后不再折叠成功噪声：每次引擎请求（含 /state 轮询）、模型请求、重复回合都逐条列出，用来看清成功链。关闭只影响成功噪声的显示——警告与报错在任何模式下都不会被隐藏。";
+    detail.addEventListener("click", () => {
+      logDetail = !logDetail;
+      try {
+        if (logDetail) globalThis.localStorage?.setItem("atlas:log-detail-mode:v1", "true");
+        else globalThis.localStorage?.removeItem("atlas:log-detail-mode:v1");
+      } catch {
+        emitAtlasDiagnostic({ level: "warn", source: "storage",
+          code: "DIAGNOSTICS_STORAGE_UNAVAILABLE", operation: "diagnostics",
+          phase: "log-detail-preference", outcome: "failed" });
+      }
+      renderCenter();
+    });
+    controls.append(detail);
+
     const copy = el("button", "aw-btn aw-btn--ghost", "复制诊断摘要");
     copy.type = "button";
     copy.addEventListener("click", async () => {
@@ -2689,7 +2733,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     controls.append(clear);
     wrap.append(controls);
 
-    const filtered = visible.filter((entry) => {
+    const filtered = display.filter((entry) => {
       if (logFilter === "error" || logFilter === "warn") {
         if (entry.level !== logFilter) return false;
       } else if (logFilter !== "all" && entry.source !== logFilter) return false;

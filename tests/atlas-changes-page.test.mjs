@@ -31,10 +31,12 @@ async function mountChangesPage({ simulationView, receipts = [], visibility = "k
   document.head.append(style);
 
   const source = readFileSync(join(root, "index.js"), "utf8");
-  const { renderPanel, addTestDiagnostics } = await import(
-    "data:text/javascript;base64," + Buffer.from(`${source}\nexport { renderPanel }; export function addTestDiagnostics(entries) { pendingDiagnostics.push(...entries); }`).toString("base64")
+  const { renderPanel, resetTestDiagnostics } = await import(
+    "data:text/javascript;base64," + Buffer.from(`${source}\nexport { renderPanel }; export function resetTestDiagnostics(entries) { pendingDiagnostics.length = 0; atlasDiagnostics = null; pendingDiagnostics.push(...entries); }`).toString("base64")
   );
-  addTestDiagnostics(diagnostics);
+  // 每次挂载都从干净状态起步：诊断容器是模块级全局，累加会让「显示了几条」这类
+  // 条数断言依赖执行顺序（实测过：上一条用例的残留会把 4 条读成 10 条）。
+  resetTestDiagnostics(diagnostics);
 
   const cameraMod = await import(pathToFileURL(join(root, "src", "atlas-map-camera.ts")).href);
   const mapMod = {
@@ -208,4 +210,78 @@ test("日志页把本轮宿主与引擎拒绝行交错显示，并直接展示�
   assert.match(rows[3].textContent, /QUOTE_REQUIRED/);
   assert.match(rows[3].textContent, /"rowLine":1/);
   dom.window.close();
+});
+
+/**
+ * 作者需求：「开发阶段成功了每一条也要写，这样就知道哪里成功、哪里失败」。
+ *
+ * 取舍（已向作者确认）：默认**精简**——只折叠「信息级 + 明知高频」的成功噪声
+ * （引擎每次 dispatch、模型每次请求、重复回合），因为正常操作下 /state 轮询会把日志刷屏；
+ * 打开「详细模式」后一条不筛。**关键安全属性**：任何 warn / error 在任何模式下都不被折叠，
+ * 否则就变成用筛选掩盖故障。
+ */
+test("日志页详细模式：默认精简且如实报折叠数，警告与报错永不被折叠", async () => {
+  // 偏好存在 localStorage 里：先清干净，保证这条用例从「默认」起步（不依赖执行顺序）。
+  try { globalThis.localStorage?.clear(); } catch { /* 无 localStorage 的环境 */ }
+  const at = (seconds) => `2026-09-26T12:37:${String(seconds).padStart(2, "0")}.000Z`;
+  const { dom, container } = await mountChangesPage({
+    page: "logs", simulationView: null,
+    diagnostics: [
+      { at: at(1), level: "info", source: "host", code: "TURN_STARTED", phase: "message", outcome: "started" },
+      { at: at(2), level: "info", source: "engine", code: "API_CALL_COMPLETE",
+        phase: "response", outcome: "success", details: { route: "/state" } },
+      { at: at(3), level: "info", source: "engine", code: "API_CALL_COMPLETE",
+        phase: "response", outcome: "success", details: { route: "/turns/commit" } },
+      { at: at(4), level: "info", source: "model", code: "MODEL_HTTP_COMPLETE",
+        phase: "response", outcome: "success" },
+      { at: at(5), level: "warn", source: "engine", code: "WORLD_TURN_DELTA_PARTIAL",
+        phase: "world-turn-delta-partial", outcome: "skipped", details: { count: 1 } },
+      { at: at(6), level: "error", source: "ui", code: "COMMIT_FAILED", phase: "response",
+        outcome: "failed" },
+      { at: at(7), level: "error", source: "engine", code: "WORLD_TURN_DELTA_ROW_REJECTED",
+        phase: "world-turn-delta-row-rejected",
+        details: { rowLine: 1, reasonCode: "QUOTE_REQUIRED", schemaPath: "$.quote" } },
+    ],
+  });
+
+  const findDetailButton = () => [...container.querySelectorAll("button")]
+    .find((button) => (button.textContent ?? "").startsWith("详细模式"));
+  const rowCount = () => container.querySelectorAll(".aw-log__row").length;
+
+  // 默认精简：3 条高频成功噪声被折叠，其余（含 1 条警告 + 2 条报错）全部保留
+  assert.equal(findDetailButton()?.textContent, "详细模式：关", "默认是精简模式");
+  assert.equal(rowCount(), 4, "只折叠信息级高频噪声，警告与报错都还在");
+  assert.match(container.textContent, /已折叠 3 条成功噪声/, "折叠了几条要如实报出，不静默");
+  assert.match(container.textContent, /警告与报错不会被折叠/, "界面说明精简模式的边界");
+
+  // 安全属性：折叠的 3 条全是 info；任何 warn / error 都不在折叠集合里
+  const shownCodes = [...container.querySelectorAll(".aw-log__row")].map((row) => row.textContent ?? "");
+  assert.ok(shownCodes.some((text) => text.includes("WORLD_TURN_DELTA_PARTIAL")), "警告在精简模式下仍显示");
+  assert.ok(shownCodes.some((text) => text.includes("COMMIT_FAILED")), "报错在精简模式下仍显示");
+  assert.ok(shownCodes.some((text) => text.includes("QUOTE_REQUIRED")), "被拒行在精简模式下仍显示");
+  assert.equal(shownCodes.filter((text) => text.includes("API_CALL_COMPLETE")).length, 0, "成功噪声被折叠");
+
+  // 打开详细模式：一条不筛
+  findDetailButton().dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+  assert.equal(findDetailButton()?.textContent, "详细模式：开", "切换后按钮如实反映状态");
+  assert.equal(findDetailButton()?.getAttribute("aria-pressed"), "true", "按下态用 aria-pressed 表达");
+  assert.equal(rowCount(), 7, "详细模式下 7 条全在，成功链也逐条可见");
+  assert.doesNotMatch(container.textContent, /已折叠/, "没有折叠就不报折叠数");
+
+  // 偏好持久化：关掉再装一次，读回的是「已关闭」而不是被黏在详细模式
+  findDetailButton().dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+  assert.equal(findDetailButton()?.textContent, "详细模式：关", "再次点击回到精简");
+  const remount = await mountChangesPage({
+    page: "logs", simulationView: null,
+    diagnostics: [{ at: at(1), level: "info", source: "engine", code: "API_CALL_COMPLETE",
+      phase: "response", outcome: "success", details: { route: "/state" } }],
+  });
+  assert.equal(
+    [...remount.container.querySelectorAll("button")]
+      .find((button) => (button.textContent ?? "").startsWith("详细模式"))?.textContent,
+    "详细模式：关",
+    "关闭状态被持久化，新挂载仍是精简",
+  );
+  dom.window.close();
+  remount.dom.window.close();
 });
