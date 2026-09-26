@@ -44,6 +44,8 @@ desktop.ini
 开发规格README.md
 预览环境README.md
 人工验收清单.md
+# 窗口交接说明（含本机绝对路径与上一轮复盘，不入库；文件本身保留在本地）
+docs/交接说明-新窗口衔接.md
 
 # WorkBuddy 本地工作记忆（不提交）
 .workbuddy/
