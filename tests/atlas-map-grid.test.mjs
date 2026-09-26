@@ -456,3 +456,40 @@ test("H22 与既有相机模块同源：gridCameraFromMapCamera = cameraStageTra
     }
   }
 });
+
+/**
+ * extent="viewport"：网格铺满视口，修「中央一小片稀疏大方格」的真实观感问题。
+ *
+ * 世界图 frame 是 100×100，默认 zoom 约 69%（k≈0.69）时 1 格只有 0.69px，
+ * 远低于 MAP_GRID_MINOR_MIN_PX，于是次格线全隐、主格线只能挑到很大档位——
+ * 旧行为（frame 模式）在 720×480 视口里只画出 10 条主线：画面中央一小块、四周空白。
+ */
+test("H13/H22：extent=viewport 铺满视口，且线数仍然有界", () => {
+  const base = {
+    viewport: { width: 720, height: 480 },
+    camera: { k: 0.69, tx: 100, ty: 60 },
+    frame: { cols: 100, rows: 100 },
+    devicePixelRatio: 1,
+  };
+  const countMoves = (path) => (String(path ?? "").match(/M/g) ?? []).length;
+
+  const frameMode = getVisibleGridPaths({ ...base });
+  const viewportMode = getVisibleGridPaths({ ...base, extent: "viewport" });
+  assert.ok(countMoves(viewportMode.majorPath) > countMoves(frameMode.majorPath),
+    "铺满视口必须比只画 frame 矩形给出更多格线："
+    + `${countMoves(frameMode.majorPath)} → ${countMoves(viewportMode.majorPath)}`);
+
+  // 有界：viewport 模式靠「超限先隐次格、再逐级 ×5 放大主格距」兜底，任何缩放下都不放飞
+  for (const camera of [
+    { k: 0.02, tx: 0, ty: 0 },
+    { k: 0.05, tx: -5000, ty: -5000 },
+    { k: 0.69, tx: 100, ty: 60 },
+    { k: 10, tx: 0, ty: 0 },
+  ]) {
+    const paths = getVisibleGridPaths({ ...base, camera, extent: "viewport" });
+    assert.ok(countMoves(paths.majorPath) <= MAP_GRID_MAX_LINES_PER_AXIS * 2 + 8,
+      `k=${camera.k} 主线数必须有界：${countMoves(paths.majorPath)}`);
+    assert.ok(countMoves(paths.minorPath) <= MAP_GRID_MAX_LINES_PER_AXIS * 2 + 8,
+      `k=${camera.k} 次线数必须有界：${countMoves(paths.minorPath)}`);
+  }
+});

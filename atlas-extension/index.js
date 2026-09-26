@@ -3155,6 +3155,11 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
             ty: stageTransform.ty + cameraFrame.minY * k,
           },
           frame: { cols: cameraFrame.spanX, rows: cameraFrame.spanY },
+          // 网格铺满视口：世界图 frame 是 100×100，默认 zoom 约 69% 时 1 格只有 0.69px，
+          // 次格线因低于 MAP_GRID_MINOR_MIN_PX 全隐，主格线又只能挑到很大的档位，
+          // 结果是画面中央一小片稀疏大方格、四周大片空白。extent="viewport" 修这个观感，
+          // 同时由纯函数保证线数仍有界（超限先隐次格，再逐级放大主格距）。
+          extent: "viewport",
           devicePixelRatio: (typeof window !== "undefined" && window.devicePixelRatio) || 1,
         })
       : null;

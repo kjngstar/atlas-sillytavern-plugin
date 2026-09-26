@@ -69,6 +69,12 @@ export interface AtlasGridInput {
   frame: AtlasGridFrame;
   /** 设备像素比；缺省 / 非法按 1 处理（只影响对齐，不进入世界距离）。 */
   devicePixelRatio?: number;
+  /**
+   * 绘制范围。缺省 `"frame"`（只画 frame 的屏幕矩形，0.9.58 行为）；
+   * `"viewport"` 铺满整个视口——世界图默认缩放下 frame 只占屏幕一小块，
+   * 且次格线因低于 `MAP_GRID_MINOR_MIN_PX` 全隐，会退化成「中央一小片稀疏大方格」。
+   */
+  extent?: "frame" | "viewport";
 }
 
 /** 某一轴上实际绘制的整数格线范围。 */
@@ -258,8 +264,8 @@ function limitVisibleRange(
 export function getVisibleGridPaths(input: AtlasGridInput): AtlasGridPaths {
   const dpr = normalizeDevicePixelRatio(input?.devicePixelRatio);
   const k = finiteOr(input?.camera?.k, 0);
-  const majorStep = gridMajorStepForScale(k);
-  const minorHidden = !(k >= MAP_GRID_MINOR_MIN_PX);
+  let majorStep = gridMajorStepForScale(k);
+  let minorHidden = !(k >= MAP_GRID_MINOR_MIN_PX);
   if (majorStep <= 0) return emptyPaths(0, true, dpr);
 
   const cols = normalizeFrameSide(input?.frame?.cols);
@@ -271,24 +277,42 @@ export function getVisibleGridPaths(input: AtlasGridInput): AtlasGridPaths {
   const tx = finiteOr(input?.camera?.tx, 0);
   const ty = finiteOr(input?.camera?.ty, 0);
 
-  // 线段允许范围 = frame 屏幕矩形 ∩ 视口；任一方向为空则整帧无可见线。
-  const clipLeft = Math.max(0, tx);
-  const clipRight = Math.min(viewW, tx + cols * k);
-  const clipTop = Math.max(0, ty);
-  const clipBottom = Math.min(viewH, ty + rows * k);
+  /**
+   * extent="viewport"：网格铺满**整个视口**，而不是只画在 frame 的屏幕矩形里。
+   *
+   * 为什么需要（实测的真实观感问题）：世界图的 frame 是 100×100，默认 zoom 约 69%
+   * 时 1 格只有 0.69px，远低于 `MAP_GRID_MINOR_MIN_PX`，于是次格线全部隐藏；
+   * 主格线又要挑到「看得见」的档位（5/25/125），最终只剩每 125 格一条——
+   * 结果是画面中央一小块稀疏大方格、四周大片空白，既不像网格也不像地图。
+   *
+   * 铺满视口后：格线始终覆盖可见区域，观感均匀；同时**有界**——线数超上限时先隐次格，
+   * 仍超就逐级 ×5 放大主格距，绝不为了好看把线数放飞（H22 的「线数有界」仍成立）。
+   */
+  const viewportGrid = input?.extent === "viewport";
+  if (viewportGrid && Math.max(viewW, viewH) / k + 2 > MAP_GRID_MAX_LINES_PER_AXIS) minorHidden = true;
+  if (viewportGrid && minorHidden) {
+    while (Math.max(viewW, viewH) / (k * majorStep) + 2 > MAP_GRID_MAX_LINES_PER_AXIS) majorStep *= 5;
+  }
+
+  // 线段允许范围 = frame 屏幕矩形 ∩ 视口；viewport 模式直接取整个视口。
+  // 任一方向为空则整帧无可见线。
+  const clipLeft = viewportGrid ? 0 : Math.max(0, tx);
+  const clipRight = viewportGrid ? viewW : Math.min(viewW, tx + cols * k);
+  const clipTop = viewportGrid ? 0 : Math.max(0, ty);
+  const clipBottom = viewportGrid ? viewH : Math.min(viewH, ty + rows * k);
   if (!(clipRight > clipLeft) || !(clipBottom > clipTop)) return emptyPaths(majorStep, minorHidden, dpr);
 
-  // 整数格线：n 的屏幕坐标落在允许范围内才算可见；再夹进 frame 的 0..cols / 0..rows。
+  // 整数格线：n 的屏幕坐标落在允许范围内才算可见；frame 模式再夹进 0..cols / 0..rows。
   const columns = limitVisibleRange(
-    Math.max(0, Math.ceil((clipLeft - tx) / k - EPSILON)),
-    Math.min(cols, Math.floor((clipRight - tx) / k + EPSILON)),
+    viewportGrid ? Math.ceil((clipLeft - tx) / k - EPSILON) : Math.max(0, Math.ceil((clipLeft - tx) / k - EPSILON)),
+    viewportGrid ? Math.floor((clipRight - tx) / k + EPSILON) : Math.min(cols, Math.floor((clipRight - tx) / k + EPSILON)),
     (viewW / 2 - tx) / k,
     majorStep,
     minorHidden,
   );
   const rowsRange = limitVisibleRange(
-    Math.max(0, Math.ceil((clipTop - ty) / k - EPSILON)),
-    Math.min(rows, Math.floor((clipBottom - ty) / k + EPSILON)),
+    viewportGrid ? Math.ceil((clipTop - ty) / k - EPSILON) : Math.max(0, Math.ceil((clipTop - ty) / k - EPSILON)),
+    viewportGrid ? Math.floor((clipBottom - ty) / k + EPSILON) : Math.min(rows, Math.floor((clipBottom - ty) / k + EPSILON)),
     (viewH / 2 - ty) / k,
     majorStep,
     minorHidden,

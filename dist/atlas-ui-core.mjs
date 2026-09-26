@@ -19004,8 +19004,8 @@ function limitVisibleRange(first, last, center, majorStep, minorHidden) {
 function getVisibleGridPaths(input) {
   const dpr = normalizeDevicePixelRatio(input?.devicePixelRatio);
   const k = finiteOr(input?.camera?.k, 0);
-  const majorStep = gridMajorStepForScale(k);
-  const minorHidden = !(k >= MAP_GRID_MINOR_MIN_PX);
+  let majorStep = gridMajorStepForScale(k);
+  let minorHidden = !(k >= MAP_GRID_MINOR_MIN_PX);
   if (majorStep <= 0) return emptyPaths(0, true, dpr);
   const cols = normalizeFrameSide(input?.frame?.cols);
   const rows = normalizeFrameSide(input?.frame?.rows);
@@ -19014,21 +19014,26 @@ function getVisibleGridPaths(input) {
   const viewH = normalizeViewportSide(input?.viewport?.height);
   const tx = finiteOr(input?.camera?.tx, 0);
   const ty = finiteOr(input?.camera?.ty, 0);
-  const clipLeft = Math.max(0, tx);
-  const clipRight = Math.min(viewW, tx + cols * k);
-  const clipTop = Math.max(0, ty);
-  const clipBottom = Math.min(viewH, ty + rows * k);
+  const viewportGrid = input?.extent === "viewport";
+  if (viewportGrid && Math.max(viewW, viewH) / k + 2 > MAP_GRID_MAX_LINES_PER_AXIS) minorHidden = true;
+  if (viewportGrid && minorHidden) {
+    while (Math.max(viewW, viewH) / (k * majorStep) + 2 > MAP_GRID_MAX_LINES_PER_AXIS) majorStep *= 5;
+  }
+  const clipLeft = viewportGrid ? 0 : Math.max(0, tx);
+  const clipRight = viewportGrid ? viewW : Math.min(viewW, tx + cols * k);
+  const clipTop = viewportGrid ? 0 : Math.max(0, ty);
+  const clipBottom = viewportGrid ? viewH : Math.min(viewH, ty + rows * k);
   if (!(clipRight > clipLeft) || !(clipBottom > clipTop)) return emptyPaths(majorStep, minorHidden, dpr);
   const columns = limitVisibleRange(
-    Math.max(0, Math.ceil((clipLeft - tx) / k - EPSILON)),
-    Math.min(cols, Math.floor((clipRight - tx) / k + EPSILON)),
+    viewportGrid ? Math.ceil((clipLeft - tx) / k - EPSILON) : Math.max(0, Math.ceil((clipLeft - tx) / k - EPSILON)),
+    viewportGrid ? Math.floor((clipRight - tx) / k + EPSILON) : Math.min(cols, Math.floor((clipRight - tx) / k + EPSILON)),
     (viewW / 2 - tx) / k,
     majorStep,
     minorHidden
   );
   const rowsRange = limitVisibleRange(
-    Math.max(0, Math.ceil((clipTop - ty) / k - EPSILON)),
-    Math.min(rows, Math.floor((clipBottom - ty) / k + EPSILON)),
+    viewportGrid ? Math.ceil((clipTop - ty) / k - EPSILON) : Math.max(0, Math.ceil((clipTop - ty) / k - EPSILON)),
+    viewportGrid ? Math.floor((clipBottom - ty) / k + EPSILON) : Math.min(rows, Math.floor((clipBottom - ty) / k + EPSILON)),
     (viewH / 2 - ty) / k,
     majorStep,
     minorHidden
