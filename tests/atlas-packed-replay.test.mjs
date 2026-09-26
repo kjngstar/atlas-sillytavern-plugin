@@ -82,13 +82,13 @@ function commitBody(overrides = {}) {
 test("G03 离线重放：打包产物跑通 绑定 → 提交 → 协议不符 → 回退 → 任务推进 → 地图", async () => {
   assert.ok(existsSync(releasePlugin), "先跑 npm run pack（release/atlas-server-plugin/index.mjs 不存在）");
 
-  // 产物自证版本：三处发布物必须是同一个 0.9.59
+  // 产物自证版本：三处发布物必须是同一个 0.9.60
   const pluginMod = await import(`file://${releasePlugin.replace(/\\/g, "/")}`);
   const packedManifest = JSON.parse(readFileSync(join(releaseUi, "manifest.json"), "utf8"));
   const packedServerPkg = JSON.parse(readFileSync(join(root, "release", "atlas-server-plugin", "package.json"), "utf8"));
   assert.equal(packedManifest.version, pluginMod.ATLAS_PLUGIN_VERSION, "UI manifest 与插件常量版本一致");
   assert.equal(packedServerPkg.version, pluginMod.ATLAS_PLUGIN_VERSION, "Server package 与插件常量版本一致");
-  assert.equal(pluginMod.ATLAS_PLUGIN_VERSION, "0.9.59", "打包产物版本号");
+  assert.equal(pluginMod.ATLAS_PLUGIN_VERSION, "0.9.60", "打包产物版本号");
 
   const dir = mkdtempSync(join(tmpdir(), "atlas-packed-replay-"));
   const scripts = [
