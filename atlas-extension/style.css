@@ -954,11 +954,13 @@
  * H08（0.9.59）：缺坐标地点的**示意标点**。
  * 与已确认坐标的点必须一眼可分：虚线边框 + 「待定位」角标 + 略低不透明度。
  * 它只是渲染位置，读屏与 title 都明说「位置未确认，仅为示意」。
+ *
+ * 0.9.60：**去掉斜体**。虚线 + 0.72 透明度已经是足够的区分手段，斜体是多余的第三重强调；
+ * 而且中文没有真正的斜体字形，浏览器的合成伪斜体在 12px 小字号下明显发虚、拉低可读性。
  */
 .aw-point--displayonly {
   border-style: dashed;
   opacity: 0.72;
-  font-style: italic;
 }
 
 .aw-point__pending {
@@ -1151,6 +1153,7 @@
 
 .aw-mapview {
   display: inline-flex;
+  flex: 0 0 auto;
   border: 1px solid var(--am-border, rgba(138, 106, 28, 0.35));
   border-radius: 6px;
   overflow: hidden;
@@ -1163,7 +1166,11 @@
   color: var(--aw-ink-soft);
   font-family: var(--am-font-family, var(--aw-sans));
   font-size: 11px;
-  padding: 4px 10px;
+  /* 0.9.60：三个视图按钮是本就不该被压缩的固定标签——禁止收缩 + 禁止换行，
+     否则窄面板下会逐字竖排（「叠/加」「网/格」「底/图」），看着像糊成一团。 */
+  flex: 0 0 auto;
+  white-space: nowrap;
+  padding: 5px 12px;
   cursor: pointer;
 }
 
@@ -1694,6 +1701,15 @@
 
 /* 地图浮动工具：地区筛选（左上） + 缩放（右下） */
 
+/**
+ * 顶栏工具条。
+ *
+ * 过去是固定单行 + `justify-content: space-between`：面板窄 / 侧栏折叠时，
+ * flex 会把每个子项压到缩不下去为止——「叠加 / 网格 / 底图」被挤成竖排单字、
+ * 下拉框文字被 ellipsis 截断，看着就是「糊在一起」。
+ * 现在允许**换行**（内容放不下就换到第二行，而不是挤压），并禁止子项收缩；
+ * 窄屏的收窄交给 @media（见「窄屏」段）。
+ */
 .aw-maptools {
   position: absolute;
   top: 22px;
@@ -1702,13 +1718,16 @@
   display: none;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  flex-wrap: wrap;
+  gap: 8px 10px;
   z-index: 6;
   pointer-events: none;
 }
 
-.aw-maptools.is-visible { display: flex; }
-.aw-maptools > * { pointer-events: auto; }
+/* 子项按内容占位：宁可换行，也不把文字压成竖排或截断。
+   靠右排而不是 space-between：面板居中时左右留白对称，中间不必被硬拉开。 */
+.aw-maptools.is-visible { display: flex; justify-content: flex-end; }
+.aw-maptools > * { pointer-events: auto; flex: 0 0 auto; }
 
 .aw-region {
   width: auto;
