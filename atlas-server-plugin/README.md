@@ -20,14 +20,14 @@ SillyTavern Server Plugin：同源服务端，承载世界存储、聊天绑定�
 | `GET /state/:chatId` | 当前状态视图 | 位置 / 游标时间 / 附近 NPC（带命中原因）/ 触发器 / 有界 map 数据 |
 | `GET /map/image/:chatId` | 世界底图 dataURL | 无底图返回空 data；独立端点不撑爆 /state |
 | `POST /turns/prepare` | 生成前相关性筛选 | **零模型请求**；产出有界注入文本与来源清单 |
-| `POST /turns/commit` | 回复后世界推演 | 恰好 **1** 条推演请求；幂等；原子提交 |
+| `POST /turns/commit` | 回复后世界推演 | 正常 **1** 条推演请求；引文错误且零有效行时最多再请求一次；幂等；原子提交 |
 | `POST /turns/retry` | 重试失败回合 | 沿用原幂等键；已成功回合返回 `duplicate` |
 | `POST /turns/restore` | 恢复预览 | 显式 `checkpointId`；返回 `previewRestore` 有界预览 |
 | `POST /map/travel-preview` | 旅行预览 | 只读，不推进时间 |
 
 ## 回合纪律
 
-- **prepare 零 API**；一条最终回复的 `commit` 恰好 1 条请求；重复 commit 总计仍 1 条。
+- **prepare 零 API**；`commit` 正常 1 条请求，仅在 `QUOTE_REQUIRED`／`QUOTE_NOT_FOUND` 导致零有效行时最多追加一次纠错请求；重复成功回合不再调用模型。
 - 每聊天**串行队列**：同聊天并发 commit / retry 逐个执行。
 - **RPM 保护**：每分钟每预设限额（`settings.rpmLimit`，默认 30），超额直接 `API_RATE_LIMITED` 且 0 fetch。
 - 错误分类映射到契约稳定错误码（401/403→`API_AUTH_FAILED`、404→`API_NOT_FOUND`、429→`API_RATE_LIMITED`、超时→`API_TIMEOUT`、断网→`SERVICE_OFFLINE`、非 JSON/损坏草稿→`RESPONSE_MALFORMED`、5xx→`API_REQUEST_FAILED`）。

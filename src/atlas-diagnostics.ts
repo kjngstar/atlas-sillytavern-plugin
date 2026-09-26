@@ -46,7 +46,7 @@ const OUTCOMES = new Set(["started", "success", "skipped", "failed", "recovered"
 const DETAIL_KEYS = new Set([
   "route", "mode", "reasonCode", "schemaPath", "protocolVersion",
   "responseChars", "capability", "event", "build", "coreCommitted",
-  "count", "stage", "attempt", "scanned", "cleaned", "kept", "malformed",
+  "count", "stage", "attempt", "scanned", "cleaned", "kept", "malformed", "rowLine",
   // A04：具名诊断的安全定位字段。`*Ref` 只接受 atlasRefFingerprint 的形态
   // （原始 chatId / 分支名 / turnKey 一律丢弃）；collection 与计数字段见下方校验。
   // 聊天指纹只走顶层 `chatFingerprint`（注册表把它列为可传键，组装时镜像到顶层），
@@ -370,6 +370,10 @@ export function sanitizeDiagnostic(raw: unknown, now: () => number = Date.now): 
       } else if (isAtlasRefDetailKey(key)) {
         // A04：`*Ref` 是字符串型定位字段，boolean / null / 数字都不得冒充（原始 ID 更不行）。
         continue;
+      } else if (key === "rowLine") {
+        if (typeof detail === "number" && Number.isInteger(detail) && detail >= 0 && detail <= 100_000) {
+          details[key] = detail;
+        }
       } else if (SAFE_COUNT_KEYS.has(key)) {
         // A04：计数字段只接受有限非负整数，布尔 / null / 小数 / 负数一律丢弃，并钳到上界。
         if (typeof detail === "number" && Number.isInteger(detail) && detail >= 0) {
@@ -485,13 +489,14 @@ export function createAtlasDiagnosticsSink(options: {
         if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
           const stored = parsed as { entries?: unknown };
           if (Array.isArray(stored.entries)) {
-            const seen = new Set(entries.map((entry) =>
-              [entry.at, entry.code, entry.phase, entry.traceId ?? ""].join("|")));
+            const archiveIdentity = (entry: AtlasDiagnostic): string =>
+              JSON.stringify([entry.at, entry.code, entry.phase, entry.traceId ?? "", entry.errorCode, entry.details]);
+            const seen = new Set(entries.map(archiveIdentity));
             for (const value of stored.entries.slice(-200)) {
               const entry = sanitizeDiagnostic(value, now);
               if (!entry || (entry.level !== "warn" && entry.level !== "error") ||
                   Date.parse(entry.at) < now() - archiveTtlMs) continue;
-              const key = [entry.at, entry.code, entry.phase, entry.traceId ?? ""].join("|");
+              const key = archiveIdentity(entry);
               if (seen.has(key)) continue;
               seen.add(key);
               entries.push(entry);
@@ -512,6 +517,7 @@ export function createAtlasDiagnosticsSink(options: {
         const last = entries[entries.length - 1];
         if (last && last.code === entry.code && last.phase === entry.phase &&
             last.traceId === entry.traceId && last.source === entry.source &&
+            last.errorCode === entry.errorCode && JSON.stringify(last.details) === JSON.stringify(entry.details) &&
             Date.parse(entry.at) - Date.parse(last.at) < 2000) {
           last.count = (last.count ?? 1) + 1;
           last.at = entry.at;

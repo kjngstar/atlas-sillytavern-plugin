@@ -22,7 +22,7 @@ import { upsertEntityRecord } from "../lib/world-definition.ts";
 import { createAtlasServerCore, createMemoryDocumentStore, ATLAS_ROUTE_MANIFEST } from "../src/atlas-server.ts";
 import { createSessionCarrier, carrierAsCore } from "./atlas-session-helper.mjs";
 import { isCheckpointIntact } from "../lib/world-checkpoint.ts";
-import { parseAtlasWorldTurnDraft, buildAtlasChatUrl, callAtlasWorldTurnApi, DEFAULT_WORLD_TURN_SYSTEM_PROMPT } from "../src/atlas-api-client.ts";
+import { buildAtlasChatUrl, callAtlasWorldTurnApi, DEFAULT_WORLD_TURN_SYSTEM_PROMPT } from "../src/atlas-api-client.ts";
 import {
   ATLAS_ERROR_CODES,
   ATLAS_LIMITS,
@@ -209,15 +209,7 @@ function commitRequest(world, overrides = {}) {
   };
 }
 
-const GOOD_DRAFT = {
-  duration: 12,
-  locationChange: { toPointId: "4104", toRegionId: "capital" },
-  npcChanges: [{ entityId: "entity-npc", key: "whereabouts", value: "潮门" }],
-  memoryDrafts: [{ entityId: "entity-npc", text: "在潮门见到一位旅行者。" }],
-  eventDrafts: ["商会接管市政"],
-  triggerResults: [],
-  summary: "商会接管市政；旅行者抵达潮门。",
-};
+const GOOD_EDIT = '<atlasEdit>\n{"kind":"noop"}\n</atlasEdit>';
 
 /** 计数 mock fetch：按脚本逐次返回。 */
 function makeFetch(scripts) {
@@ -825,7 +817,7 @@ test("settings v2：store 写入失败时缓存保持旧设置（不留半更新
 });
 
 test("commit：未配置 API → API_NOT_CONFIGURED，0 fetch", async () => {
-  const fetcher = makeFetch([() => openAiResponse(GOOD_DRAFT)]);
+  const fetcher = makeFetch([() => openAiTextResponse(GOOD_EDIT)]);
   const store = createMemoryDocumentStore();
   const world = buildWorld();
   const { core } = sessionCore(store, { fetchFn: fetcher.fetchFn });
@@ -959,6 +951,72 @@ test("0.9.48 T05：完全无法解析 → 明确失败（RESPONSE_MALFORMED 可�
   ok(rejectedLogs[0].responseChars > 0, "只记录响应长度");
   ok(!JSON.stringify(rejectedLogs).includes("Let me analyze"), "日志不保留模型原文");
   ok(!JSON.stringify(core.logs()).includes("sk-runtime-test"), "日志无明文 Key");
+});
+
+test("缺引文地点导致后续依赖失败时，自动纠错一次并以修正后的完整块原子提交", async () => {
+  const story = "你走进枫城，艾伦在城门迎接你。";
+  const broken = editReply([
+    { table: "location", op: "add", ref: "new:loc:maple-city", name: "枫城" },
+    { table: "character", op: "add", ref: "new:npc:ellen", name: "艾伦", locationRef: "new:loc:maple-city", quote: "艾伦在城门迎接你" },
+  ]);
+  const corrected = editReply([
+    { table: "location", op: "add", ref: "new:loc:maple-city", name: "枫城", quote: "你走进枫城" },
+    { table: "character", op: "add", ref: "new:npc:ellen", name: "艾伦", locationRef: "new:loc:maple-city", quote: "艾伦在城门迎接你" },
+  ]);
+  const fetcher = makeFetch([() => openAiTextResponse(broken), () => openAiTextResponse(corrected)]);
+  const store = createMemoryDocumentStore();
+  const world = buildWorld();
+  const { core, carrier } = sessionCore(store, { fetchFn: fetcher.fetchFn });
+  await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
+  await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
+  await putTableDeltaSettings(core);
+  const result = await core.handle("POST", "/turns/commit", commitRequest(world, { assistantText: story }));
+  equal(result.body.data?.receipt?.status, "committed");
+  equal(fetcher.calls.length, 2, "一次普通推演 + 一次有界纠错");
+  ok(fetcher.calls[1].body.messages.at(-1).content.includes("QUOTE_REQUIRED"), "修正请求收到具体错误");
+  const table = carrier.session.tables.branches.canon;
+  const place = table.locations.find((row) => row.name === "枫城");
+  ok(place, "地点成功落表");
+  equal(table.characters.find((row) => row.name === "艾伦")?.locationId, place.id, "后续依赖按原顺序成功引用");
+  equal(core.logs().filter((log) => log.kind === "world-turn-quote-repair-complete").length, 1);
+  const replay = await core.handle("POST", "/turns/commit", commitRequest(world, { assistantText: story }));
+  equal(replay.body.data?.receipt?.status, "duplicate", "重复提交走幂等回执");
+  equal(fetcher.calls.length, 2, "重复提交不增加请求");
+});
+
+test("纠错仍无引文或 RPM 已满时保持失败，且世界与时间零写入", async () => {
+  for (const rpmLimit of [30, 1]) {
+    const diagnostics = [];
+    const broken = editReply([
+      { table: "location", op: "add", ref: "new:loc:maple-city", name: "枫城" },
+      { table: "character", op: "add", ref: "new:npc:ellen", name: "艾伦", locationRef: "new:loc:maple-city", quote: "艾伦在城门迎接你" },
+    ]);
+    const fetcher = makeFetch([() => openAiTextResponse(broken)]);
+    const store = createMemoryDocumentStore();
+    const world = buildWorld();
+    const { core, carrier } = sessionCore(store, {
+      fetchFn: fetcher.fetchFn, onDiagnostic: (event) => diagnostics.push(event),
+    });
+    await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
+    await core.handle("POST", "/bindings", { action: "bind", binding: binding(world) });
+    await putTableDeltaSettings(core);
+    await core.handle("PUT", "/settings", { action: "runtime.update", rpmLimit }, { local: true });
+    const before = JSON.stringify(carrier.session.world);
+    const result = await core.handle("POST", "/turns/commit", commitRequest(world,
+      { assistantText: "你走进枫城，艾伦在城门迎接你。" }));
+    equal(result.body.error.code, ATLAS_ERROR_CODES.RESPONSE_MALFORMED);
+    equal(fetcher.calls.length, rpmLimit === 1 ? 1 : 2);
+    equal(JSON.stringify(carrier.session.world), before, "失败不写世界");
+    equal(carrier.session.binding.worldTimeCursor, CURRENT_TIME, "失败不推进时间");
+    ok(!(carrier.session.tables?.branches?.canon?.locations ?? []).some((row) => row.name === "枫城"));
+    const rows = diagnostics.filter((event) => event.code === "WORLD_TURN_DELTA_ROW_REJECTED");
+    equal(rows.length, 2, "日志同时记录首行引文错误和后续依赖错误");
+    equal(rows[0].details.reasonCode, "QUOTE_REQUIRED");
+    equal(rows[0].details.schemaPath, "$.quote");
+    equal(rows[0].details.rowLine, 1);
+    equal(rows[1].details.reasonCode, "DEPENDENCY_FAILED");
+    ok(!JSON.stringify(rows).includes("枫城"), "诊断不包含原文、地点名称或引文");
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -1526,28 +1584,6 @@ test("未知路由返回 400 与稳定错误码", async () => {
 // 解析器与 URL 工具专项
 // ---------------------------------------------------------------------------
 
-test("parseAtlasWorldTurnDraft：围栏 JSON / 字符串 duration / 容错抢救（0.9.25 shujuku 口径）", () => {
-  const fenced = parseAtlasWorldTurnDraft("```json\n" + JSON.stringify(GOOD_DRAFT) + "\n```");
-  equal(fenced.duration, 12, "围栏 JSON 解析");
-  const stringDuration = parseAtlasWorldTurnDraft(JSON.stringify({ ...GOOD_DRAFT, duration: "3" }));
-  equal(stringDuration.duration, 3, "字符串 duration 转换");
-  assert.throws(() => parseAtlasWorldTurnDraft("这不是 JSON"), (err) => err.code === ATLAS_ERROR_CODES.RESPONSE_MALFORMED);
-  assert.throws(() => parseAtlasWorldTurnDraft(JSON.stringify({ ...GOOD_DRAFT, summary: "" })), (err) => err.code === ATLAS_ERROR_CODES.RESPONSE_MALFORMED);
-  assert.throws(() => parseAtlasWorldTurnDraft(JSON.stringify({ ...GOOD_DRAFT, duration: -1 })), (err) => err.code === ATLAS_ERROR_CODES.RESPONSE_MALFORMED);
-  // 0.9.25：坏条丢弃不整单炸（shujuku filter(Boolean) 同款）
-  const dropped = parseAtlasWorldTurnDraft(JSON.stringify({ ...GOOD_DRAFT, npcChanges: [{ foo: 1 }] }));
-  equal(dropped.rawEffects.length, 0, "无法识别的变化条目被丢弃");
-  ok(dropped.summary.includes("丢弃 1 条"), "丢弃计数并入摘要");
-  // 0.9.25：JSON 完全损坏（外层截断）时字段级抢救——summary / duration / npcChanges 从原文提取
-  const salvaged = parseAtlasWorldTurnDraft(
-    '前置说明 {"summary": "被说明文字包住的摘要", "duration": "7", "npcChanges": [{"entityId": "npc-1", "tag": "受伤"}, {"垃圾": true}]',
-  );
-  equal(salvaged.summary, "被说明文字包住的摘要", "字段级抢救出 summary");
-  equal(salvaged.duration, 7, "字段级抢救出 duration");
-  equal(salvaged.rawEffects.length, 1, "抢救出 1 条合法变化、坏条丢弃");
-  assertionCount += 9;
-});
-
 test("buildAtlasChatUrl：规范化与拒绝", () => {
   equal(buildAtlasChatUrl("https://api.example.com/v1"), "https://api.example.com/v1/chat/completions", "补全路径");
   equal(buildAtlasChatUrl("https://api.example.com/v1/chat/completions"), "https://api.example.com/v1/chat/completions", "幂等");
@@ -1568,29 +1604,29 @@ test("systemPrompt：自定义系统提示词生效，留空回退内置默认�
   ];
   for (const scenario of scenarios) {
     const presetValue = scenario.prompt === undefined ? preset() : preset({ systemPrompt: scenario.prompt });
-    const { fetchFn, calls } = makeFetch([() => openAiResponse(GOOD_DRAFT)]);
+    const { fetchFn, calls } = makeFetch([() => openAiTextResponse(GOOD_EDIT)]);
     const call = await callAtlasWorldTurnApi(presetValue, { injectionText: "注入", userText: "用户", assistantText: "助手" }, { fetchFn, now: () => NOW });
     ok(call.ok, `${scenario.label}：请求成功`);
     equal(calls[0].body.messages[0].role, "system", `${scenario.label}：第一条是 system`);
     equal(calls[0].body.messages[0].content, scenario.expected, `${scenario.label}：system 正文符合预期`);
   }
-  // 自定义 systemPrompt → 旧版单条任务模板（两条，0.9.17 语义保留）
+  // 自定义 systemPrompt 只覆盖首段，后续素材与核对段保持现行行增量契约。
   {
-    const { fetchFn, calls } = makeFetch([() => openAiResponse(GOOD_DRAFT)]);
+    const { fetchFn, calls } = makeFetch([() => openAiTextResponse(GOOD_EDIT)]);
     await callAtlasWorldTurnApi(preset({ systemPrompt: custom }), { injectionText: "注入", userText: "用户", assistantText: "助手" }, { fetchFn, now: () => NOW });
-    equal(calls[0].body.messages.length, 2, "自定义 systemPrompt：两条");
+    equal(calls[0].body.messages.length, 6, "自定义 systemPrompt：六段均保留");
     equal(calls[0].body.messages[1].role, "user", "自定义 systemPrompt：第二条是 user（素材段）");
-    ok(calls[0].body.messages[1].content.includes("用户"), "素材段含本轮用户行动");
+    ok(calls[0].body.messages[4].content.includes("用户"), "本轮行动段含用户正文");
   }
   // 留空 → 整套内置默认分段（R03 六段结构：无 assistant 应答与 { 预填）
   {
-    const { fetchFn, calls } = makeFetch([() => openAiResponse(GOOD_DRAFT)]);
+    const { fetchFn, calls } = makeFetch([() => openAiTextResponse(GOOD_EDIT)]);
     await callAtlasWorldTurnApi(preset(), { injectionText: "注入", userText: "用户", assistantText: "助手" }, { fetchFn, now: () => NOW });
     equal(calls[0].body.messages.length, 6, "留空：整套内置默认 6 段");
     equal(calls[0].body.messages[1].role, "user", "第二段是 user（世界状态 $5）");
     ok(calls[0].body.messages[1].content.includes("注入"), "世界状态段已插入 $5 注入内容（D03 修复）");
     ok(calls[0].body.messages[calls[0].body.messages.length - 2].content.includes("用户"), "触发段含本轮素材");
-    ok(calls[0].body.messages[calls[0].body.messages.length - 1].content.includes("只输出完整 JSON 对象"), "末段为提交前核对（无 { 预填）");
+    ok(calls[0].body.messages[calls[0].body.messages.length - 1].content.includes("<atlasEdit>"), "末段核对行增量输出");
   }
 });
 
@@ -3113,4 +3149,3 @@ test("E03 move-author：新聊天（懒迁移后）拖动也同步三表，且�
   ok(!carrier.session.tables.branches.canon.locations.some((item) => item.name === "起点"),
     "三表里没有伪造的「起点」占位");
 });
-

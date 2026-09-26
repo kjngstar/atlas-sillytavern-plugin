@@ -10,7 +10,6 @@
  *  - H05：端到端两趟 —— 重名复用、合法父子只落子图、具名 pending 落进回执与 geoAuto、
  *         绝不造第二个同名地点；成环 / 自指 / 未知父 / 超深的具名拒绝；输出形状；
  *  - H06a：标定清洗上限 80，第 41 张不被无提示截掉；
- *  - H06b：`applyNewLocations` 不再给新地点写死 `"start"` 地区默认值；
  *  - H06b / H06c：提炼新建行 schematic → 三表 `gridX/gridY = null` + `pointMeta` 标 schematic，
  *         人工已确认坐标保留，螺旋镜像坐标绝不进三表；
  *  - H18b：首次建出世界图后调用 `ensureMapScaleOnCreate`（成功 / 待定 / 复用 / 不重复请求）。
@@ -27,7 +26,6 @@ import { createAtlasServerCore, createMemoryDocumentStore, planGeoRelations } fr
 import {
   MAP_DOC_CALIBRATIONS_MAX,
   MAP_DOC_LIMITS,
-  applyNewLocations,
   mapDocOverCapLosses,
   sanitizeMapDoc,
 } from "../src/atlas-geo-apply.ts";
@@ -564,48 +562,6 @@ test("H05 端到端：合法父子只落子图、重名复用不造第二个同�
   assert.equal(anchors[0].status, "stopped");
   assert.equal(anchors[0].evidence, "story");
   assert.equal(anchors[0].routeEdgeId, null, "没有路线边就不许编一条");
-});
-
-/* ------------------------------------------------------------------ *
- * H06b：不再写死 "start" 地区默认值
- * ------------------------------------------------------------------ */
-
-test("H06b：applyNewLocations 不再给新地点写死 \"start\"，但显式 regionName 照旧解析", () => {
-  const empty = emptyWorld();
-  const outcome = applyNewLocations(
-    empty,
-    [{ name: "白桦教室" }, { name: "旧钟楼", regionName: "从未出现过的地区" }],
-    { now: NOW },
-  );
-  assert.equal(outcome.pointsAdded, 2);
-  const classroom = outcome.world.points.find((point) => point.name === "白桦教室");
-  assert.ok(classroom, "新地点落库");
-  assert.ok(
-    classroom.regionId === null || classroom.regionId === undefined,
-    `空地理世界不得回退到 "start"（实际 ${JSON.stringify(classroom.regionId)}）`,
-  );
-  const tower = outcome.world.points.find((point) => point.name === "旧钟楼");
-  assert.ok(
-    tower.regionId === null || tower.regionId === undefined,
-    `regionName 解析不到时也要留空，绝不写死不存在的地区（实际 ${JSON.stringify(tower.regionId)}）`,
-  );
-
-  // 旧世界里真有 start 地区：解析不到仍然留空（不是「找不到就塞 start」）
-  const legacy = legacyWorld();
-  const legacyOutcome = applyNewLocations(legacy, [{ name: "避风树洞" }], { now: NOW });
-  assert.ok(
-    !legacyOutcome.world.points.find((point) => point.name === "避风树洞").regionId,
-    "没有 regionName 的新地点保持无归属",
-  );
-  // 只去掉「写死的默认值」，没有误伤显式归属
-  const mapped = applyNewLocations(legacy, [{ name: "森林边缘", regionName: "起点" }], { now: NOW });
-  assert.equal(mapped.world.points.find((point) => point.name === "森林边缘").regionId, "start");
-
-  // H06b：返回新点 id 的 schematic 集合，供调用方原子写 maps.pointMeta
-  assert.deepEqual(outcome.schematicPointIds, outcome.createdPoints.map((point) => point.id));
-  assert.equal(outcome.schematicPointIds.length, 2);
-  assert.ok(outcome.createdPoints.every((point) => Number.isInteger(point.id)),
-    "schematic 集合是地图 sidecar 的键，必须是数字点位 id");
 });
 
 /* ------------------------------------------------------------------ *

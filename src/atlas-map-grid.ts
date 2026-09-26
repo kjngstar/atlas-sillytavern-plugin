@@ -15,10 +15,10 @@
  * - 次线 = 每 1 格；主线 = 每 majorStep 格，majorStep ∈ { 5, 25, 125 }；
  * - 次格屏幕间距 < 8 CSS px（k < 8）时隐藏次线，只保留主线；
  * - 主线永远精确落在格整数坐标（n % majorStep === 0）上，不落在半格；
- * - 只画 frame 内（整数格坐标 0..cols / 0..rows）与视口相交的线，
- *   超出 frame 或超出视口的部分都不画（线段两端按 frame ∩ 视口裁剪）；
- * - 每轴最多 200 根线（次线 + 主线合并计数），超限取视口中心附近的一段，
- *   并如实报 dropped —— 沿用仓库「超上限必须报 total / truncated」纪律，不静默裁剪；
+ * - 默认只画 frame ∩ 视口；背景视口模式把同一坐标系的视觉格线延伸到视口边缘，
+ *   地图 frame、实体坐标、点击边界及物理距离保持不变；
+ * - 每轴最多 200 根线（次线 + 主线合并计数）；视口背景模式先降低密度以免两侧露白，
+ *   其他模式超限取视口中心附近的一段，并如实报 dropped；
  * - 线宽 1 CSS px；垂直方向坐标对齐设备像素栅格（半像素 / DPR 对齐），
  *   线段两端取整到设备像素，避免 1px 线被拉成 2px 灰线（旧 CSS 渐变网格的病根）。
  */
@@ -67,14 +67,10 @@ export interface AtlasGridInput {
   viewport: AtlasGridViewport;
   camera: AtlasGridCamera;
   frame: AtlasGridFrame;
+  /** 仅控制格线的显示范围；viewport 不改变地图实体、可编辑范围或距离计算。 */
+  extent?: "frame" | "viewport";
   /** 设备像素比；缺省 / 非法按 1 处理（只影响对齐，不进入世界距离）。 */
   devicePixelRatio?: number;
-  /**
-   * 绘制范围。缺省 `"frame"`（只画 frame 的屏幕矩形，0.9.58 行为）；
-   * `"viewport"` 铺满整个视口——世界图默认缩放下 frame 只占屏幕一小块，
-   * 且次格线因低于 `MAP_GRID_MINOR_MIN_PX` 全隐，会退化成「中央一小片稀疏大方格」。
-   */
-  extent?: "frame" | "viewport";
 }
 
 /** 某一轴上实际绘制的整数格线范围。 */
@@ -277,32 +273,20 @@ export function getVisibleGridPaths(input: AtlasGridInput): AtlasGridPaths {
   const tx = finiteOr(input?.camera?.tx, 0);
   const ty = finiteOr(input?.camera?.ty, 0);
 
-  /**
-   * extent="viewport"：网格铺满**整个视口**，而不是只画在 frame 的屏幕矩形里。
-   *
-   * 为什么需要（实测的真实观感问题）：世界图的 frame 是 100×100，默认 zoom 约 69%
-   * 时 1 格只有 0.69px，远低于 `MAP_GRID_MINOR_MIN_PX`，于是次格线全部隐藏；
-   * 主格线又要挑到「看得见」的档位（5/25/125），最终只剩每 125 格一条——
-   * 结果是画面中央一小块稀疏大方格、四周大片空白，既不像网格也不像地图。
-   *
-   * 铺满视口后：格线始终覆盖可见区域，观感均匀；同时**有界**——线数超上限时先隐次格，
-   * 仍超就逐级 ×5 放大主格距，绝不为了好看把线数放飞（H22 的「线数有界」仍成立）。
-   */
-  const viewportGrid = input?.extent === "viewport";
+  // 视口模式只延伸视觉格线，不扩张地图 frame，也不使外部格子成为可定位实体。
+  const viewportGrid = input.extent === "viewport";
+  // 大视口缩小后隐藏细线，提升主线间距；否则每轴 200 根的保护上限会在两侧留下空白。
   if (viewportGrid && Math.max(viewW, viewH) / k + 2 > MAP_GRID_MAX_LINES_PER_AXIS) minorHidden = true;
   if (viewportGrid && minorHidden) {
     while (Math.max(viewW, viewH) / (k * majorStep) + 2 > MAP_GRID_MAX_LINES_PER_AXIS) majorStep *= 5;
   }
-
-  // 线段允许范围 = frame 屏幕矩形 ∩ 视口；viewport 模式直接取整个视口。
-  // 任一方向为空则整帧无可见线。
   const clipLeft = viewportGrid ? 0 : Math.max(0, tx);
   const clipRight = viewportGrid ? viewW : Math.min(viewW, tx + cols * k);
   const clipTop = viewportGrid ? 0 : Math.max(0, ty);
   const clipBottom = viewportGrid ? viewH : Math.min(viewH, ty + rows * k);
   if (!(clipRight > clipLeft) || !(clipBottom > clipTop)) return emptyPaths(majorStep, minorHidden, dpr);
 
-  // 整数格线：n 的屏幕坐标落在允许范围内才算可见；frame 模式再夹进 0..cols / 0..rows。
+  // 视口模式允许负格号与超出 frame 的格号；它们只是背景延长线。
   const columns = limitVisibleRange(
     viewportGrid ? Math.ceil((clipLeft - tx) / k - EPSILON) : Math.max(0, Math.ceil((clipLeft - tx) / k - EPSILON)),
     viewportGrid ? Math.floor((clipRight - tx) / k + EPSILON) : Math.min(cols, Math.floor((clipRight - tx) / k + EPSILON)),
@@ -319,7 +303,7 @@ export function getVisibleGridPaths(input: AtlasGridInput): AtlasGridPaths {
   );
   if (!columns && !rowsRange) return emptyPaths(majorStep, minorHidden, dpr);
 
-  // 线段端点：沿线轴方向取整设备像素并向内收，绝不越出 frame / 视口。
+  // 线段端点：沿线轴方向取整设备像素并向内收，绝不越出选定的显示范围。
   const segX0 = snapEdgeIn(clipLeft, dpr, "up");
   const segX1 = snapEdgeIn(clipRight, dpr, "down");
   const segY0 = snapEdgeIn(clipTop, dpr, "up");

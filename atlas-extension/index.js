@@ -2561,8 +2561,10 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     // 0.9.54 A16：HTTP 200 只说明模型接口处理成功，不代表世界已更新。这三种代码
     // 都表示「模型接口通了但世界没动」，必须引导去看失败回执并重试。
     WORLD_TURN_V2_REJECTED: "模型输出未通过 v2 协议校验（格式/证据/关系字段），世界未更新；到变化页查看失败回执与具体字段路径后重试。",
-    WORLD_TURN_COMMIT_FAILED: "模型输出可解析但账本拒绝（例如关系值非法），世界未更新；到变化页查看失败回执后重试。",
-    COMMIT_FAILED: "回合提交失败，世界未更新；到变化页查看失败回执后重试。",
+    WORLD_TURN_DELTA_REJECTED: "行增量未提交；下面列出每条被拒行的错误码、行号和字段路径。",
+    WORLD_TURN_DELTA_ROW_REJECTED: "该行未应用；核对错误码和字段路径后重试推演。",
+    WORLD_TURN_COMMIT_FAILED: "模型输出可解析但账本拒绝；检查同一时间段的引擎诊断。",
+    COMMIT_FAILED: "回合提交失败，世界未更新；检查同一时间段的引擎诊断。",
   };
 
   function diagnosticEntries() {
@@ -2570,14 +2572,8 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
   }
 
   function atlasLogAsText(entries) {
-    return "Atlas " + ATLAS_EXTENSION_VERSION + " · 安全诊断摘要\n" + entries.map((entry) =>
-      entry.at + " [" + entry.level + "/" + entry.source + "] " + entry.code +
-      " " + entry.phase + " " + entry.outcome +
-      (entry.traceId ? " trace=" + entry.traceId : "") +
-      (entry.httpStatus ? " HTTP=" + entry.httpStatus : "") +
-      (entry.errorCode ? " error=" + entry.errorCode : "") +
-      (entry.count ? " count=" + entry.count : "")
-    ).join("\n");
+    return "Atlas " + ATLAS_EXTENSION_VERSION + " · 安全诊断（含行号和字段路径）\n" +
+      entries.map((entry) => JSON.stringify(entry)).join("\n");
   }
 
   function buildLogPage() {
@@ -2585,9 +2581,11 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     const all = diagnosticEntries();
     const chatRef = currentChatRef();
     const scoped = all.filter((entry) => logAllChats || (chatRef ? entry.chatRef === chatRef : !entry.chatRef));
-    const latestTrace = [...scoped].reverse().find((entry) => entry.traceId)?.traceId;
-    const visible = logCurrentTrace && latestTrace
-      ? scoped.filter((entry) => entry.traceId === latestTrace) : scoped;
+    // 引擎没有宿主 traceId；按本轮起始时刻纳入其后台诊断，避免「仅本轮」隐藏实际拒绝原因。
+    const latestStart = [...scoped].reverse().find((entry) => entry.code === "TURN_STARTED");
+    const turnStartAt = latestStart ? Date.parse(latestStart.at) : null;
+    const visible = logCurrentTrace && turnStartAt !== null
+      ? scoped.filter((entry) => Date.parse(entry.at) >= turnStartAt) : scoped;
     const errorCount = visible.filter((entry) => entry.level === "error").length;
     const latest = visible.at(-1);
     wrap.append(el("p", "aw-panel__meta",
@@ -2616,7 +2614,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     const search = document.createElement("input");
     search.type = "search";
     search.className = "aw-input";
-    search.placeholder = "搜索错误码 / 阶段 / trace";
+    search.placeholder = "搜索错误码 / 行号 / 字段路径 / trace";
     search.value = logQuery;
     search.setAttribute("aria-label", "搜索诊断");
     search.addEventListener("change", () => { logQuery = search.value.trim().toLowerCase().slice(0, 80); renderCenter(); });
@@ -2627,7 +2625,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     allChats.addEventListener("click", () => { logAllChats = !logAllChats; renderCenter(); });
     controls.append(allChats);
 
-    const currentTurn = el("button", "aw-btn aw-btn--ghost", logCurrentTrace ? "仅本轮" : "全部回合");
+    const currentTurn = el("button", "aw-btn aw-btn--ghost", logCurrentTrace ? "本轮起的事件" : "全部回合");
     currentTurn.type = "button";
     currentTurn.addEventListener("click", () => { logCurrentTrace = !logCurrentTrace; renderCenter(); });
     controls.append(currentTurn);
@@ -2695,7 +2693,8 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       if (logFilter === "error" || logFilter === "warn") {
         if (entry.level !== logFilter) return false;
       } else if (logFilter !== "all" && entry.source !== logFilter) return false;
-      const haystack = [entry.code, entry.phase, entry.traceId, entry.errorCode].join(" ").toLowerCase();
+      const haystack = [entry.code, entry.phase, entry.traceId, entry.errorCode,
+        entry.details ? JSON.stringify(entry.details) : ""].join(" ").toLowerCase();
       return !logQuery || haystack.includes(logQuery);
     });
     if (filtered.length === 0) {
@@ -2703,23 +2702,8 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       return wrap;
     }
     const list = el("div", "aw-log");
-    const groups = new Map();
-    for (const entry of filtered) {
-      const key = entry.traceId ?? "background";
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push(entry);
-    }
-    const ordered = [...groups.entries()].reverse();
-    for (let groupIndex = 0; groupIndex < ordered.length; groupIndex++) {
-      const [trace, events] = ordered[groupIndex];
-      const timeline = document.createElement("details");
-      timeline.className = "aw-log__timeline";
-      timeline.open = groupIndex === 0;
-      const summary = document.createElement("summary");
-      summary.textContent = (trace === "background" ? "后台事件" : trace) +
-        " · " + events.length + " 条 · " + events.at(-1).at;
-      timeline.append(summary);
-      for (const entry of events) {
+    // 一条时间线同时显示宿主、模型和引擎；错误的结构化细节直接展开。
+    for (const entry of [...filtered].sort((a, b) => Date.parse(b.at) - Date.parse(a.at))) {
         const row = el("div", "aw-log__row" + (entry.level === "error" ? " is-error" : ""));
         row.append(
           el("span", "aw-log__time", entry.at),
@@ -2740,9 +2724,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         if (diagnosticAdvice[entry.code]) {
           row.append(el("span", "aw-log__detail", diagnosticAdvice[entry.code]));
         }
-        timeline.append(row);
-      }
-      list.append(timeline);
+      list.append(row);
     }
     wrap.append(list);
     return wrap;
@@ -2996,7 +2978,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     }
 
     if (s.page === "logs") {
-      center.append(pageHeader("运行日志", "结构化安全诊断；可按聊天筛选、复制摘要并导出 JSONL。"));
+      center.append(pageHeader("运行日志", "宿主、模型和引擎按时间排列；推进失败行在这里显示错误码、行号与字段路径。"));
       center.append(buildLogPage());
       return;
     }
@@ -3155,10 +3137,6 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
             ty: stageTransform.ty + cameraFrame.minY * k,
           },
           frame: { cols: cameraFrame.spanX, rows: cameraFrame.spanY },
-          // 网格铺满视口：世界图 frame 是 100×100，默认 zoom 约 69% 时 1 格只有 0.69px，
-          // 次格线因低于 MAP_GRID_MINOR_MIN_PX 全隐，主格线又只能挑到很大的档位，
-          // 结果是画面中央一小片稀疏大方格、四周大片空白。extent="viewport" 修这个观感，
-          // 同时由纯函数保证线数仍有界（超限先隐次格，再逐级放大主格距）。
           extent: "viewport",
           devicePixelRatio: (typeof window !== "undefined" && window.devicePixelRatio) || 1,
         })

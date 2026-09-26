@@ -24,7 +24,7 @@ import { createLocalAtlasApi } from "../src/atlas-local-api.ts";
 import { createStProxyFetch, atlasCustomIncludeHeaders, normalizeAtlasClaudeBase, normalizeAtlasGeminiBase, normalizeAtlasExcludeBody, normalizeAtlasPromptPostProcessing, ATLAS_ST_GENERATE_PATH } from "../src/atlas-proxy-fetch.ts";
 import { createAtlasServerCore, createMemoryDocumentStore } from "../src/atlas-server.ts";
 import { ATLAS_ERROR_CODES } from "../src/atlas-contract.ts";
-import { callAtlasWorldTurnApi, parseAtlasWorldTurnDraft } from "../src/atlas-api-client.ts";
+import { callAtlasWorldTurnApi } from "../src/atlas-api-client.ts";
 
 // ---------------------------------------------------------------------------
 // 测试辅助
@@ -849,104 +849,6 @@ test("callAtlasWorldTurnApi：非 MiniMax 域 / 非 sk-cp- 密钥 / claude 协�
 });
 
 // ---------------------------------------------------------------------------
-// 0.9.16 内容替换规则库接管 think 剥离（0.9.15 的解析层强制剥离已撤——预制规则可关才成立）
-// 引擎流程等价：applyContentReplaceRules(text, settings.contentReplaceRules) → parseAtlasWorldTurnDraft
-// ---------------------------------------------------------------------------
-
-const VALID_DRAFT = JSON.stringify({ summary: "捏了脸", duration: 1, npcChanges: [] });
-const { applyContentReplaceRules, DEFAULT_CONTENT_REPLACE_RULES } = await import("../src/atlas-content-replace.ts");
-const builtinRules = DEFAULT_CONTENT_REPLACE_RULES.map((rule, index) => ({ ...rule, id: `cr-builtin-${index + 1}` }));
-
-test("替换规则：<think>…</think> 包着的 JSON 经预制规则后正常解析（MiniMax-M3 实测形状）", () => {
-  const text = `<think>Let me analyze this turn carefully to produce the structured JSON output.\n\n**Context Summary:**\n- World time: Period 0</think>\n${VALID_DRAFT}`;
-  const draft = parseAtlasWorldTurnDraft(applyContentReplaceRules(text, builtinRules));
-  assert.equal(draft.summary, "捏了脸");
-});
-
-test("替换规则：<thinking> 变体 + json 围栏混合也剥", () => {
-  const text = `<thinking>推理中…</thinking>\n\`\`\`json\n${VALID_DRAFT}\n\`\`\``;
-  const draft = parseAtlasWorldTurnDraft(applyContentReplaceRules(text, builtinRules));
-  assert.equal(draft.summary, "捏了脸");
-});
-
-test("替换规则：规则可关——0.9.25 容错抢救下停用规则仍可解析，但 think 正文残留进摘要（预制与手动同库平等）", () => {
-  // 0.9.25 shujuku 容错口径：think 不再剥时括号配平仍能从杂讯里抢救 JSON——
-  // 但 think 里若含花括号杂讯会先被当成 JSON 候选，规则的「净化」价值体现在干净摘要上。
-  const thinkWithJunk = `<think>{"bad": true} 推理中</think>${VALID_DRAFT}`;
-  const text = `<think>推理中</think>${VALID_DRAFT}`;
-  const disabled = builtinRules.map((r) => (r.start === "<think" && r.end === "</think>" ? { ...r, enabled: false } : r));
-  const stillOn = builtinRules.map((r) => (r.start === "<think" && r.end === "</think>" ? { ...r, enabled: true } : r));
-  // 规则关：无花括号杂讯 → 抢救成功、摘要干净；有花括号杂讯 → 抢救失败（杂讯对象缺 summary）
-  const draftOff = parseAtlasWorldTurnDraft(applyContentReplaceRules(text, disabled));
-  assert.equal(draftOff.summary, "捏了脸", "关掉的规则不再剥，但配平抢救出干净 JSON");
-  assert.throws(() => parseAtlasWorldTurnDraft(applyContentReplaceRules(thinkWithJunk, disabled)), /缺少 summary/, "think 内花括号杂讯先被当成候选 → 缺摘要失败");
-  const draft = parseAtlasWorldTurnDraft(applyContentReplaceRules(thinkWithJunk, stillOn));
-  assert.equal(draft.summary, "捏了脸", "开着的规则正常剥——杂讯被规则清除后解析成功");
-});
-
-test("替换规则：未闭合 <think>（shujuku 同款：孤立开始词不删）→ 解析报错", () => {
-  const text = `<think>只有推理没有正文`;
-  assert.throws(() => parseAtlasWorldTurnDraft(applyContentReplaceRules(text, builtinRules)), /不是合法的 JSON 对象/);
-});
-
-test("替换规则：无 think 的普通输出不受影响；嵌套词对整体删除", () => {
-  const draft = parseAtlasWorldTurnDraft(applyContentReplaceRules(VALID_DRAFT, builtinRules));
-  assert.equal(draft.summary, "捏了脸");
-  const nested = applyContentReplaceRules(`A<think>B<think>C</think>D</think>E`, builtinRules.filter((r) => r.start === "<think" && r.end === "</think>"));
-  assert.equal(nested, "AE", "栈式配对：嵌套段整体删除");
-});
-
-test("0.9.29 动向扩展：npcChanges 支持 moveEntity / setFlag 映射（白名单二次校验仍把关）", () => {
-  const text = JSON.stringify({
-    duration: 2,
-    locationChange: null,
-    npcChanges: [
-      { entityId: "npc-1", toPointId: "point-9", toRegionId: "region-3" },
-      { entityId: "npc-2", pointId: "point-7" },
-      { flag: "storm-passed", value: "yes" },
-      { flag: "curse-lifted" },
-      { entityId: "npc-3", key: "mood", value: "放松" },
-      { entityId: "npc-4", tag: "负伤" },
-      { entityId: "npc-5", targetEntityId: "npc-6", key: "trust", value: 3 },
-    ],
-    memoryDrafts: [],
-    summary: "林拾移步远镇；商会风_flag。",
-  });
-  const draft = parseAtlasWorldTurnDraft(text);
-  assert.deepEqual(
-    draft.rawEffects,
-    [
-      { kind: "moveEntity", entityId: "npc-1", pointId: "point-9", regionId: "region-3" },
-      { kind: "moveEntity", entityId: "npc-2", pointId: "point-7" },
-      { kind: "setFlag", key: "storm-passed", value: "yes" },
-      { kind: "setFlag", key: "curse-lifted" },
-      { kind: "setTemporalField", entityId: "npc-3", key: "mood", value: "放松" },
-      { kind: "addTag", entityId: "npc-4", tag: "负伤" },
-      { kind: "adjustRelation", entityId: "npc-5", targetEntityId: "npc-6", key: "trust", value: 3 },
-    ],
-    "七种形状全部映射到白名单 effect",
-  );
-});
-
-test("0.9.31 解析：newLocations 名称制清单（坏条目丢弃计数，不整单炸）", () => {
-  const draft = parseAtlasWorldTurnDraft(JSON.stringify({
-    duration: 1,
-    npcChanges: [],
-    memoryDrafts: [],
-    newLocations: [
-      { name: "钟楼", regionName: "旧城区", description: "立在潮门旁。" },
-      { regionName: "没名字的不算" },
-      "junk",
-    ],
-    summary: "提到钟楼。",
-  }));
-  assert.equal(draft.newLocations.length, 1, "合法条目保留");
-  assert.equal(draft.newLocations[0].name, "钟楼");
-  assert.equal(draft.newLocations[0].regionName, "旧城区");
-  assert.ok(draft.summary.includes("2 条残缺新地点"), "坏条目丢弃计数进摘要");
-});
-
-// ---------------------------------------------------------------------------
 // 0.9.18 分段提示词：promptSegments 逐段装配 + 占位符替换；全非法回退旧两条
 // ---------------------------------------------------------------------------
 
@@ -998,8 +900,8 @@ test("callAtlasWorldTurnApi：promptSegments 装配消息数组，占位符替�
   );
   assert.equal(capturedBody.messages.length, 6, "无分段使用内置默认 6 段");
   assert.ok(
-    capturedBody.messages[capturedBody.messages.length - 1].content.includes("只输出完整 JSON 对象"),
-    "末段为提交前核对（无 { 预填）",
+    capturedBody.messages[capturedBody.messages.length - 1].content.includes("<atlasEdit>"),
+    "末段核对现行行增量契约",
   );
 
   // 0.9.21 世界书资料块：loreSupplement 非空 → 资料进「角色与世界背景」段（$1）；{{worldLore}} 可引用

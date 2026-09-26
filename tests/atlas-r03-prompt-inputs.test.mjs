@@ -15,7 +15,7 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const imp = (p) => import(pathToFileURL(resolve(root, p)).href);
-const { buildWorldTurnMessages, DEFAULT_PROMPT_SEGMENTS, substitutePromptPlaceholders, callAtlasWorldTurnApi } = await imp("src/atlas-api-client.ts");
+const { buildWorldTurnMessages, DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA, DEFAULT_WORLD_TURN_SYSTEM_PROMPT, substitutePromptPlaceholders, callAtlasWorldTurnApi } = await imp("src/atlas-api-client.ts");
 
 const SENTINELS = {
   injectionText: "AUDIT_WORLD_STATE_IDS",
@@ -37,13 +37,33 @@ test("A01: 默认分段装配包含全部 8 项素材哨兵", () => {
 });
 
 test("A01: 默认 6 段、无 assistant 应答、无 { 预填；$5 在世界状态段", () => {
-  assert.equal(DEFAULT_PROMPT_SEGMENTS.length, 6, "默认 6 段");
-  assert.ok(DEFAULT_PROMPT_SEGMENTS.every((s) => s.role !== "assistant"), "无 assistant 确认段");
-  assert.ok(DEFAULT_PROMPT_SEGMENTS.every((s) => s.content.trim() !== "{"), "无 { 预填段");
-  const stateSeg = DEFAULT_PROMPT_SEGMENTS.find((s) => s.content.includes("$5"));
+  assert.equal(DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA.length, 6, "默认 6 段");
+  assert.ok(DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA.every((s) => s.role !== "assistant"), "无 assistant 确认段");
+  assert.ok(DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA.every((s) => s.content.trim() !== "{"), "无 { 预填段");
+  const stateSeg = DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA.find((s) => s.content.includes("$5"));
   assert.ok(stateSeg, "存在含 $5 的世界状态段");
-  const contSeg = DEFAULT_PROMPT_SEGMENTS.find((s) => s.content.includes("$6") && s.content.includes("$7"));
+  const contSeg = DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA.find((s) => s.content.includes("$6") && s.content.includes("$7"));
   assert.ok(contSeg, "存在含 $6/$7 的连续性材料段");
+});
+
+test("旧回复协议清理：内置提示词与连接级覆写都只配行增量任务", () => {
+  assert.ok(DEFAULT_WORLD_TURN_SYSTEM_PROMPT.includes("<atlasEdit>"), "设置视图中的内置系统段也是现行协议");
+  const messages = buildWorldTurnMessages({ systemPrompt: "自定义系统指令" }, SENTINELS);
+  assert.equal(messages.length, 6, "覆盖首段后仍带五段素材与核对指令");
+  assert.equal(messages[0].content, "自定义系统指令");
+  assert.ok(messages[4].content.includes("<atlasEdit>"), "本轮任务要求行增量块");
+  assert.ok(messages[5].content.includes("<atlasEdit>"), "核对段不再要求旧整份 JSON");
+  assert.equal(messages.some((message) => message.content.includes('"schemaVersion":2')), false);
+});
+
+test("引文失败的单次纠错只在需要时追加一条用户消息，不覆盖原来的六段素材", () => {
+  const normal = buildWorldTurnMessages({}, SENTINELS);
+  const repaired = buildWorldTurnMessages({}, { ...SENTINELS, repairInstruction: "第 1 行 QUOTE_REQUIRED @ $.quote" });
+  assert.deepEqual(repaired.slice(0, normal.length), normal);
+  assert.equal(repaired.length, normal.length + 1);
+  assert.equal(repaired.at(-1).role, "user");
+  assert.match(repaired.at(-1).content, /QUOTE_REQUIRED/);
+  assert.match(normal.at(-1).content, /每一行 location add 都必须写 quote/);
 });
 
 test("A02: 素材原文包含占位符字面量时不二次替换", () => {

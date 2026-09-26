@@ -68,6 +68,24 @@ test("diagnostics ring keeps recent errors under info pressure and merges repeat
   assert.equal(sink.exportSafe("chat-other"), "");
 });
 
+test("distinct rejected row diagnostics keep their line and path instead of merging", () => {
+  const sink = createAtlasDiagnosticsSink({ now: () => 1000 });
+  for (const [rowLine, reasonCode, schemaPath] of [
+    [1, "QUOTE_REQUIRED", "$.quote"],
+    [2, "DEPENDENCY_FAILED", "$.locationRef"],
+    [3, "DEPENDENCY_FAILED", "$.patch.locationRef"],
+  ]) {
+    sink.emit({ ...base, source: "engine", code: "WORLD_TURN_DELTA_ROW_REJECTED",
+      details: { rowLine, reasonCode, schemaPath, quote: "故事里的秘密" } });
+  }
+  const entries = sink.getSnapshot();
+  assert.deepEqual(entries.map((entry) => entry.details.rowLine), [1, 2, 3]);
+  assert.deepEqual(entries.map((entry) => entry.details.reasonCode),
+    ["QUOTE_REQUIRED", "DEPENDENCY_FAILED", "DEPENDENCY_FAILED"]);
+  assert.equal(JSON.stringify(entries).includes("故事里的秘密"), false);
+  assert.equal(sanitizeDiagnostic({ ...base, details: { rowLine: -1 } }).details, undefined);
+});
+
 test("session storage restores only safe warning and error metadata", () => {
   const data = new Map();
   const persist = {

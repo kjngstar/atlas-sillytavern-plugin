@@ -263,6 +263,32 @@ test("H22 平移：frame 完全移出视口时两条 path 都为空", () => {
   assert.equal(result.majorStep, 5, "无可见线也要给出当前缩放对应的主线步长（供 UI 文案）");
 });
 
+test("视口背景网格跨过 frame 边界连续延伸，平移后仍铺满视口且不改变格线对齐", () => {
+  const viewport = { width: 640, height: 480 };
+  const frame = { cols: 20, rows: 20 };
+  const camera = { k: 20, tx: 120, ty: 40 };
+  const draw = (cam) => getVisibleGridPaths({ viewport, frame, camera: cam, extent: "viewport", devicePixelRatio: 1 });
+  const first = draw(camera);
+  assert.ok(first.columns.first < 0 && first.columns.last > frame.cols, "两侧的背景格线超出地图范围");
+  assert.ok(first.rows.first < 0 && first.rows.last > frame.rows, "上下的背景格线超出地图范围");
+  assert.ok(allVertical(first).every((line) => line.y0 === 0 && line.y1 === viewport.height));
+  assert.ok(allHorizontal(first).every((line) => line.x0 === 0 && line.x1 === viewport.width));
+  const moved = draw({ k: 20, tx: -2000, ty: 900 });
+  assert.ok(moved.counts.vertical > 0 && moved.counts.horizontal > 0, "图框离开视口也有视觉网格");
+  assert.ok(moved.counts.vertical <= MAP_GRID_MAX_LINES_PER_AXIS);
+  assert.ok(moved.counts.horizontal <= MAP_GRID_MAX_LINES_PER_AXIS);
+  const x = allVertical(first).find((line) => Math.abs(line.x - 120.5) < 0.01)?.x;
+  assert.equal(x, 120.5, "零号格线仍按相机变换和 DPR 像素对齐");
+
+  const wide = getVisibleGridPaths({
+    viewport: { width: 3840, height: 2160 }, frame, camera: { k: 8, tx: 0, ty: 0 }, extent: "viewport",
+  });
+  assert.equal(wide.minorHidden, true, "超宽视口隐藏次线，避免两侧露出空白带");
+  assert.equal(wide.columns?.dropped, 0);
+  assert.equal(wide.rows?.dropped, 0);
+  assert.ok(Math.max(...allVertical(wide).map((line) => line.x)) > 3800, "主线仍延伸到视口右侧");
+});
+
 test("H22 resize / DPR：320→3840 宽都不越界且线数有界；非法视口返回空路径不抛错", () => {
   const sizes = [[320, 240], [720, 480], [1200, 800], [1920, 1080], [3840, 2160]];
   for (const [viewW, viewH] of sizes) {

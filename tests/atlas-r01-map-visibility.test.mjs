@@ -34,7 +34,7 @@ test("R01: 地图工具显示、hint 不遮挡、网格平铺、底图网格分�
   const source = readFileSync(resolve(root, "index.js"), "utf8");
   const { renderPanel } = await import("data:text/javascript;base64," + Buffer.from(source + "\nexport {renderPanel};").toString("base64"));
   const { createDefaultSettingsV2, settingsViewV2 } = await import(pathToFileURL(resolve(root, "src/atlas-settings.ts")).href);
-  const { DEFAULT_PROMPT_SEGMENTS } = await import(pathToFileURL(resolve(root, "src/atlas-api-client.ts")).href);
+  const { DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA } = await import(pathToFileURL(resolve(root, "src/atlas-api-client.ts")).href);
   // R08：地图相机 / 手势 API 由 UI 核心模块（mod）提供，index.js 不再内联实现
   const cameraMod = await import(pathToFileURL(resolve(root, "src/atlas-map-camera.ts")).href);
   const interactionMod = await import(pathToFileURL(resolve(root, "src/atlas-map-interactions.ts")).href);
@@ -84,7 +84,7 @@ test("R01: 地图工具显示、hint 不遮挡、网格平铺、底图网格分�
   };
   const settings = {
     ...settingsViewV2(createDefaultSettingsV2()),
-    builtInPrompt: { segments: DEFAULT_PROMPT_SEGMENTS, systemPrompt: DEFAULT_PROMPT_SEGMENTS[0].content },
+    builtInPrompt: { segments: DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA, systemPrompt: DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA[0].content },
   };
   const api = { request: async () => ({ status: 200, body: { ok: true, data: settings } }) };
   const container = document.createElement("div");
@@ -165,7 +165,7 @@ test("R01: 有底图时网格仍被绘制（叠加默认）且缓存键含底图
   const source = readFileSync(resolve(root, "index.js"), "utf8");
   const { renderPanel } = await import("data:text/javascript;base64," + Buffer.from(source + "\nexport {renderPanel};").toString("base64"));
   const { createDefaultSettingsV2, settingsViewV2 } = await import(pathToFileURL(resolve(root, "src/atlas-settings.ts")).href);
-  const { DEFAULT_PROMPT_SEGMENTS } = await import(pathToFileURL(resolve(root, "src/atlas-api-client.ts")).href);
+  const { DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA } = await import(pathToFileURL(resolve(root, "src/atlas-api-client.ts")).href);
   // R08：地图相机 / 手势 API 由 UI 核心模块（mod）提供，index.js 不再内联实现
   const cameraMod = await import(pathToFileURL(resolve(root, "src/atlas-map-camera.ts")).href);
   const interactionMod = await import(pathToFileURL(resolve(root, "src/atlas-map-interactions.ts")).href);
@@ -184,7 +184,7 @@ test("R01: 有底图时网格仍被绘制（叠加默认）且缓存键含底图
   let imageRequests = 0;
   const settings = {
     ...settingsViewV2(createDefaultSettingsV2()),
-    builtInPrompt: { segments: DEFAULT_PROMPT_SEGMENTS, systemPrompt: DEFAULT_PROMPT_SEGMENTS[0].content },
+    builtInPrompt: { segments: DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA, systemPrompt: DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA[0].content },
   };
   const state = {
     page: "map",

@@ -23,7 +23,6 @@ const { createAtlasServerCore, createMemoryDocumentStore } = await imp("src/atla
 const { reconcilePendingCommits } = await imp("src/atlas-pending-reconcile.ts");
 const { createDefaultSettingsV2 } = await imp("src/atlas-settings.ts");
 const { buildStarterWorld } = await imp("src/atlas-starter-world.ts");
-const { applyScaleHintsToDoc } = await imp("src/atlas-scale.ts");
 
 function makeCore({ settings } = {}) {
   const store = createMemoryDocumentStore();
@@ -45,33 +44,6 @@ test("R13-T1: createAtlasServerCore.reconcilePending() is callable + returns rep
   assert.equal(report.kept, 0);
   assert.equal(report.malformed, 0);
   assert.ok(Array.isArray(report.errors));
-});
-
-// ---- T2：scaleHints 通过 applyScaleHintsToDoc 写入 maps session ----
-test("R13-T2: scaleHints applied to maps sidecar persist across session reads", () => {
-  const world = buildStarterWorld({ id: "w-r13", now: 1, name: "集成测试世界" });
-  const mapsDoc = { calibrations: {} };
-  const framesByMapId = { world: { cols: 100, rows: 100, frameRevision: 1 } };
-  const hint = {
-    mapRef: "world",
-    frameRevision: null,
-    status: "estimated",
-    extentMeters: { width: 1000, height: 1000 },
-    basis: "100m × 100m",
-    confidence: "medium",
-    evidenceIds: [],
-  };
-  const results = applyScaleHintsToDoc([hint], mapsDoc, {
-    existing: mapsDoc.calibrations,
-    framesByMapId,
-    now: 1700000000000,
-  });
-  assert.equal(results[0].outcome, "applied");
-  assert.equal(mapsDoc.calibrations.world.metersPerCell, 10);
-  // 模拟把 mapsDoc 写入 session.maps：session 序列化后 maps 部分仍可被反序列化读出
-  const serialized = JSON.stringify(mapsDoc);
-  const restored = JSON.parse(serialized);
-  assert.equal(restored.calibrations.world.metersPerCell, 10, "session 序列化后 calibrations 仍可读");
 });
 
 // ---- T3：reconcilePending 清 orphan pending（commit 已成功但 pending 没删） ----
@@ -166,42 +138,6 @@ test("R13-T3c: reconcilePending() without session cannot see session turns, keep
   // 带上同一会话后即可判定 orphan（对照 T3b 语义）
   const withSessionReport = await core.reconcilePending(session);
   assert.equal(withSessionReport.cleaned, 1);
-});
-
-// ---- T4：集成 — locks + scale + frame 三层契约在文档流转中不丢 ----
-test("R13-T4: locked calibration survives scale hint round-trip via serialize/deserialize", () => {
-  const doc = { calibrations: {} };
-  // 1) 人工锁定 1 格 = 25 米
-  doc.calibrations.world = {
-    revision: 1,
-    metersPerCell: 25,
-    source: "user",
-    locked: true,
-    basis: "人工标定",
-    coverage: "",
-    confidence: "",
-    at: 100,
-  };
-  // 2) 序列化（写入 session.maps）→ 反序列化（浏览器下次启动读）
-  const wire = JSON.stringify(doc);
-  const restored = JSON.parse(wire);
-  // 3) AI 估计试图覆盖
-  const aiHint = {
-    mapRef: "world",
-    frameRevision: null,
-    status: "estimated",
-    extentMeters: { width: 1000, height: 1000 },
-    basis: "AI 估计",
-    confidence: "low",
-    evidenceIds: [],
-  };
-  const results = applyScaleHintsToDoc([aiHint], restored, {
-    existing: restored.calibrations,
-    framesByMapId: { world: { cols: 100, rows: 100, frameRevision: 1 } },
-    now: 200,
-  });
-  assert.equal(results[0].outcome, "skipped-locked", "锁定值跨 session 写入后仍拒绝 AI 覆盖");
-  assert.equal(restored.calibrations.world.metersPerCell, 25, "锁定值不变");
 });
 
 // ---- T5：calibrations 跨 R12 + R10 集成（reconcile + scale hints 共存） ----

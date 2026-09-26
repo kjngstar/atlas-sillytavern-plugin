@@ -1133,13 +1133,13 @@
 .aw-grid-svg__minor {
   stroke: var(--am-grid-minor, var(--aw-teal-wash));
   stroke-width: 1;
-  opacity: 0.55;
+  opacity: 0.27;
 }
 
 .aw-grid-svg__major {
-  stroke: var(--am-grid-major, var(--aw-teal));
+  stroke: var(--am-grid-major, var(--am-grid-minor, var(--aw-teal-line)));
   stroke-width: 1;
-  opacity: 0.8;
+  opacity: 0.42;
 }
 
 .aw-image { background-repeat: no-repeat; background-size: 100% 100%; }
@@ -2060,7 +2060,7 @@
   flex-direction: column;
   gap: 4px;
   margin-top: 8px;
-  max-height: 260px;
+  max-height: min(68vh, 760px);
   overflow: auto;
 }
 
@@ -2072,6 +2072,8 @@
   font-family: var(--aw-sans);
   font-size: 12px;
   line-height: 1.5;
+  padding: 7px 6px;
+  border-bottom: 1px solid var(--aw-line);
 }
 
 .aw-log__time {
@@ -2609,19 +2611,4 @@
 /* 深色主题下宿主（酒馆）暗色控件的 autofill / 原生外观接管：跟随令牌而非强制白底 */
 .atlas-workbench[data-atlas-theme="dark"] {
   color-scheme: dark;
-}
-
-.aw-log__timeline {
-  border: 1px solid var(--aw-border, rgba(255,255,255,.14));
-  border-radius: 8px;
-  margin: 8px 0;
-  padding: 6px 10px;
-}
-.aw-log__timeline > summary {
-  cursor: pointer;
-  font-weight: 600;
-  padding: 5px 0;
-}
-.aw-log__timeline .aw-log__row {
-  margin-top: 6px;
 }

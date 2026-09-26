@@ -31,7 +31,6 @@ import {
   DEFAULT_WORLD_TURN_SYSTEM_PROMPT,
   TABLE_DELTA_BOOTSTRAP_TASK_CONTENT,
   isTableDeltaProtocolEnabled,
-  isV2ProtocolEnabled,
 } from "../src/atlas-api-client.ts";
 
 const NOW = 1_700_000_000_000;
@@ -958,9 +957,6 @@ test("E02 创建兼容增量草稿：旧预设原文一字不改，新草稿可�
 });
 
 test("C01 协议判定收紧：table-delta-v1 不再被当成 v2（避免装错提示词）", () => {
-  assert.equal(isV2ProtocolEnabled("v2"), true);
-  assert.equal(isV2ProtocolEnabled("v1"), false);
-  assert.equal(isV2ProtocolEnabled("table-delta-v1"), false);
   assert.equal(isTableDeltaProtocolEnabled("table-delta-v1"), true);
   assert.equal(isTableDeltaProtocolEnabled("v2"), false);
   assert.equal(isTableDeltaProtocolEnabled(undefined), false);

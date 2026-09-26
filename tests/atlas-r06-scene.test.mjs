@@ -22,7 +22,7 @@ const { buildStarterWorld } = await imp("src/atlas-starter-world.ts");
 const { legacyStartWorld } = await imp("tests/atlas-legacy-start-world.mjs");
 const { detectStartPlaceholder, retireStartPlaceholder, sanitizeSceneDoc, emptySceneDoc, resolveSceneStatus, sceneDocKey } = await imp("src/atlas-scene.ts");
 const { parseWorld } = await imp("lib/world-schema.ts");
-const { DEFAULT_PROMPT_SEGMENTS_V2, substitutePromptPlaceholders } = await imp("src/atlas-api-client.ts");
+const { substitutePromptPlaceholders } = await imp("src/atlas-api-client.ts");
 const { createAtlasServerCore, createMemoryDocumentStore } = await imp("src/atlas-server.ts");
 
 const NOW = 1_700_000_000_000;
@@ -132,16 +132,6 @@ test("R06 场景状态：未知 ≠ 无上次确认；resolveSceneStatus 两者�
 // ---------------------------------------------------------------------------
 // v2 封套与占位符
 // ---------------------------------------------------------------------------
-
-test("R06 v2 封套：schemaVersion/baseRevision 模板 + $B 替换为世界游标", () => {
-  const contract = DEFAULT_PROMPT_SEGMENTS_V2[0].content;
-  assert.ok(contract.includes('"schemaVersion":2'), "契约含 schemaVersion 2 模板");
-  assert.ok(contract.includes("baseRevision"), "契约要求 baseRevision 回显");
-  assert.ok(contract.includes("new:loc:"), "契约说明临时引用");
-  const out = substitutePromptPlaceholders("baseRevision=$B，回显 $B 一次即可", { injectionText: "", userText: "", assistantText: "", baseRevision: 42 });
-  assert.ok(out.includes("baseRevision=42"), `$B 应替换为 42：${out}`);
-  assert.equal(DEFAULT_PROMPT_SEGMENTS_V2.length, 6, "v2 封套 6 段（契约 + 世界状态 + 背景 + 连续性 + 行动 + 核对）");
-});
 
 // ---------------------------------------------------------------------------
 // 服务端开场识别（bootstrap preview / apply）

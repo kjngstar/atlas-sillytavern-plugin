@@ -20,7 +20,7 @@ import { JSDOM } from "jsdom";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 /** 挂载真实 index.js 的变化页（与 R01 同套路：data:URL 注入 `export { renderPanel }`）。 */
-async function mountChangesPage({ simulationView, receipts = [], visibility = "known" }) {
+async function mountChangesPage({ simulationView, receipts = [], visibility = "known", page = "changes", diagnostics = [] }) {
   const dom = new JSDOM("<!doctype html><head></head><body></body>", { url: "http://localhost/", pretendToBeVisual: true });
   globalThis.window = dom.window;
   globalThis.document = dom.window.document;
@@ -31,9 +31,10 @@ async function mountChangesPage({ simulationView, receipts = [], visibility = "k
   document.head.append(style);
 
   const source = readFileSync(join(root, "index.js"), "utf8");
-  const { renderPanel } = await import(
-    "data:text/javascript;base64," + Buffer.from(`${source}\nexport { renderPanel };`).toString("base64")
+  const { renderPanel, addTestDiagnostics } = await import(
+    "data:text/javascript;base64," + Buffer.from(`${source}\nexport { renderPanel }; export function addTestDiagnostics(entries) { pendingDiagnostics.push(...entries); }`).toString("base64")
   );
+  addTestDiagnostics(diagnostics);
 
   const cameraMod = await import(pathToFileURL(join(root, "src", "atlas-map-camera.ts")).href);
   const mapMod = {
@@ -46,7 +47,7 @@ async function mountChangesPage({ simulationView, receipts = [], visibility = "k
   };
 
   const state = {
-    page: "changes",
+    page,
     panelOpen: true,
     serviceStatus: "online",
     chatId: "chat-d08",
@@ -173,5 +174,38 @@ test("D08 旧会话：没有 simulationView 时给明确说明，不假装「没
   const text = container.textContent ?? "";
   assert.ok(text.includes("幕后推演"), "区块仍在（作者看得到开关与说明）");
   assert.ok(text.includes("还没有推演数据"), "明确说明是旧会话没有该数据，而不是断言「没有动向」");
+  dom.window.close();
+});
+
+test("日志页把本轮宿主与引擎拒绝行交错显示，并直接展示全部字段路径", async () => {
+  const at = (seconds) => `2026-09-26T12:37:${String(seconds).padStart(2, "0")}.000Z`;
+  const base = { level: "error", outcome: "failed", source: "engine" };
+  const { dom, container } = await mountChangesPage({
+    page: "logs", simulationView: null,
+    diagnostics: [
+      { at: at(1), level: "info", source: "host", code: "TURN_STARTED",
+        phase: "message", outcome: "started", traceId: "turn-abc-1" },
+      { ...base, at: at(2), code: "WORLD_TURN_DELTA_REJECTED", phase: "world-turn-delta-rejected",
+        details: { count: 3, reasonCode: "PARSE_REJECTED" } },
+      ...[
+        [3, 1, "QUOTE_REQUIRED", "$.quote"],
+        [4, 2, "DEPENDENCY_FAILED", "$.locationRef"],
+        [5, 3, "DEPENDENCY_FAILED", "$.patch.locationRef"],
+      ].map(([second, rowLine, reasonCode, schemaPath]) => ({
+        ...base, at: at(second), code: "WORLD_TURN_DELTA_ROW_REJECTED",
+        phase: "world-turn-delta-row-rejected", details: { rowLine, reasonCode, schemaPath },
+      })),
+      { ...base, source: "ui", at: at(6), code: "COMMIT_FAILED", phase: "response",
+        traceId: "turn-abc-1", errorCode: "RESPONSE_MALFORMED" },
+    ],
+  });
+  const rows = [...container.querySelectorAll(".aw-log__row")];
+  assert.equal(rows.length, 6, "一条展开的时间线包含 UI 与引擎事件");
+  assert.equal(container.querySelectorAll(".aw-log__timeline").length, 0, "不再把后台事件折叠成第二组");
+  assert.match(rows[0].textContent, /COMMIT_FAILED/);
+  assert.match(rows[1].textContent, /\$\.patch\.locationRef/);
+  assert.match(rows[2].textContent, /\$\.locationRef/);
+  assert.match(rows[3].textContent, /QUOTE_REQUIRED/);
+  assert.match(rows[3].textContent, /"rowLine":1/);
   dom.window.close();
 });

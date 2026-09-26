@@ -35,7 +35,7 @@ async function mountPanel() {
   const { createDefaultSettingsV2, settingsViewV2 } = await import(
     pathToFileURL(resolve(root, "src/atlas-settings.ts")).href
   );
-  const { DEFAULT_PROMPT_SEGMENTS } = await import(
+  const { DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA } = await import(
     pathToFileURL(resolve(root, "src/atlas-api-client.ts")).href
   );
   const cameraMod = await import(pathToFileURL(resolve(root, "src/atlas-map-camera.ts")).href);
@@ -78,7 +78,7 @@ async function mountPanel() {
   const core = { getState: () => state, setPage: () => {}, setPanelOpen: () => {}, refresh: async () => {} };
   const settings = {
     ...settingsViewV2(createDefaultSettingsV2()),
-    builtInPrompt: { segments: DEFAULT_PROMPT_SEGMENTS, systemPrompt: DEFAULT_PROMPT_SEGMENTS[0].content },
+    builtInPrompt: { segments: DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA, systemPrompt: DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA[0].content },
   };
   const api = { request: async () => ({ status: 200, body: { ok: true, data: settings } }) };
   const container = document.createElement("div");

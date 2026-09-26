@@ -39,8 +39,8 @@ async function mount() {
   const source = readFileSync(resolve(root, "index.js"), "utf8");
   const { renderPanel } = await import("data:text/javascript;base64," + Buffer.from(source + "\nexport {renderPanel};").toString("base64"));
   const { createDefaultSettingsV2, settingsViewV2 } = await import(pathToFileURL(resolve(root, "src/atlas-settings.ts")).href);
-  const { DEFAULT_PROMPT_SEGMENTS } = await import(pathToFileURL(resolve(root, "src/atlas-api-client.ts")).href);
-  return { dom, renderPanel, createDefaultSettingsV2, settingsViewV2, DEFAULT_PROMPT_SEGMENTS };
+  const { DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA } = await import(pathToFileURL(resolve(root, "src/atlas-api-client.ts")).href);
+  return { dom, renderPanel, createDefaultSettingsV2, settingsViewV2, DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA };
 }
 
 function tick(ms = 0) {
@@ -48,7 +48,7 @@ function tick(ms = 0) {
 }
 
 test("R02: 新建草稿立即可编辑；保存后 createdId 绑定，再存为覆盖", async () => {
-  const { dom, renderPanel, createDefaultSettingsV2, settingsViewV2, DEFAULT_PROMPT_SEGMENTS } = await mount();
+  const { dom, renderPanel, createDefaultSettingsV2, settingsViewV2, DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA } = await mount();
   const commands = [];
   let settingsV2 = createDefaultSettingsV2();
   const state = {
@@ -87,7 +87,7 @@ test("R02: 新建草稿立即可编辑；保存后 createdId 绑定，再存为�
   settingsV2 = { ...settingsV2, promptPresets: view.promptPresets ?? [] };
   const container = document.createElement("div");
   document.body.append(container);
-  renderPanel(core, container, api, { read: async () => null }, { ...CORE_MOD_KEYS, ...view, builtInPrompt: { segments: DEFAULT_PROMPT_SEGMENTS, systemPrompt: DEFAULT_PROMPT_SEGMENTS[0].content } });
+  renderPanel(core, container, api, { read: async () => null }, { ...CORE_MOD_KEYS, ...view, builtInPrompt: { segments: DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA, systemPrompt: DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA[0].content } });
   await tick();
 
   // 新建 → 立即可编辑（D07 修复）
@@ -130,7 +130,7 @@ test("R02: 新建草稿立即可编辑；保存后 createdId 绑定，再存为�
 });
 
 test("R02: 另存为完整保留段字段与上下文条数（D15）", async () => {
-  const { dom, renderPanel, createDefaultSettingsV2, settingsViewV2, DEFAULT_PROMPT_SEGMENTS } = await mount();
+  const { dom, renderPanel, createDefaultSettingsV2, settingsViewV2, DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA } = await mount();
   const commands = [];
   const savedPreset = {
     id: "prompt-src",
@@ -168,7 +168,7 @@ test("R02: 另存为完整保留段字段与上下文条数（D15）", async () 
   const view = settingsViewV2(settingsV2);
   const container = document.createElement("div");
   document.body.append(container);
-  renderPanel(core, container, api, { read: async () => null }, { ...CORE_MOD_KEYS, ...view, builtInPrompt: { segments: DEFAULT_PROMPT_SEGMENTS, systemPrompt: DEFAULT_PROMPT_SEGMENTS[0].content } });
+  renderPanel(core, container, api, { read: async () => null }, { ...CORE_MOD_KEYS, ...view, builtInPrompt: { segments: DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA, systemPrompt: DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA[0].content } });
   await tick();
 
   // 选中已存预设 → saved 工作副本；另存为

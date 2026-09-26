@@ -24,7 +24,6 @@ const {
   SUBMAP_DEPTH_MAX,
   validateSubmapDepth,
   buildSubMapTreeFromDraft,
-  sanitizeNewLocations,
   projectWorldSubmaps,
 } = await imp("src/atlas-geo-apply.ts");
 
@@ -95,22 +94,6 @@ test("R09-T4: sanitizeMapDoc preserves explicit frame", () => {
   };
   const doc = sanitizeMapDoc(newer);
   assert.deepEqual(doc.submaps.tavern.frame, { cols: 12, rows: 8, frameRevision: 3 });
-});
-
-// ---- T5：sanitizeNewLocations 透传 frame ----
-test("R09-T5: sanitizeNewLocations passes frame through to submap", () => {
-  const result = sanitizeNewLocations([
-    {
-      name: "旧酒馆",
-      submap: {
-        frame: { cols: 10, rows: 7, frameRevision: 1 },
-        points: [{ name: "吧台" }],
-      },
-    },
-  ]);
-  assert.equal(result.length, 1);
-  assert.ok(result[0].submap);
-  assert.deepEqual(result[0].submap.frame, { cols: 10, rows: 7, frameRevision: 1 });
 });
 
 // ---- T6：validateSubmapDepth — 单层 ----

@@ -6,11 +6,10 @@
  *   真实 Express 接线在 atlas-server-plugin/index.mjs（薄适配，不做业务）。
  * - 密钥只在 store 的 settings 文档与本模块的 Authorization 头中出现；
  *   任何响应 / 日志 / 错误只允许脱敏视图（maskPreset / serializeAtlasError）。
- * - prepare 零模型请求；一条最终回复的 commit 恰好 1 条请求；重复提交 0 条新请求。
+ * - prepare 零模型请求；commit 正常 1 条请求；引文错误导致零有效行时最多追加 1 次修正；重复提交 0 条新请求。
  * - 每聊天串行队列：同聊天同一时刻至多一个在途 commit / retry。
  * - RPM 保护：超过窗口限额直接 API_RATE_LIMITED，不发请求。
- * - 写入全部经 store（node 实现为临时文件 + 原子替换）；失败零部分写入由
- *   共享 adoptPendingProposals 与 commitAtlasTurn 保证。
+ * - 写入经 store；回合候选数据需通过校验后提交。
  */
 
 import { sanitizeDiagnostic, type AtlasDiagnostic } from "./atlas-diagnostics.ts";
@@ -74,6 +73,7 @@ import {
   extractJsonObject,
   DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA,
   TABLE_DELTA_BOOTSTRAP_TASK_CONTENT,
+  type AtlasApiPreset,
   type AtlasWorldTurnPromptInput,
 } from "./atlas-api-client.ts";
 import {
@@ -91,7 +91,7 @@ import {
 } from "./atlas-settings.ts";
 import { validateAtlasTables, validateAtlasTablesStore, cloneAtlasTables, characterRowId, locationRowId, pointIdFromLocationRowId, refKindOf, ATLAS_ITEM_DESTROYED_STATUS, type AtlasCharacterRow, type AtlasLocationRow, type AtlasTablesStoreV1, type AtlasThreeTablesV1 } from "./atlas-tables.ts";
 import { migrateLegacyToTables, tablesToLegacyWorld } from "./atlas-table-migration.ts";
-import { applyAtlasEditText, type AtlasSignalProposalRow } from "./atlas-table-delta.ts";
+import { applyAtlasEditText, parseAtlasEditBlock, type AtlasSignalProposalRow } from "./atlas-table-delta.ts";
 import { projectTablesToMapView } from "./atlas-table-map-view.ts";
 import { deriveElapsedPeriods } from "./atlas-time-intent.ts";
 import {
@@ -1506,6 +1506,8 @@ export interface AtlasTableDeltaCommitOk {
    * 只带 id 与操作，**不带任何正文**，因此可以安全地进 HTTP / UI 日志。
    */
   acceptedRows: AtlasAcceptedRowReceipt[];
+  /** Rejected rows also survive partial commits for complete, safe diagnostics. */
+  rejectedRows: Array<{ line: number; code: string; path?: string; ref?: string }>;
   /** C08：日程结算造成的具名移动（人物 + 地点），供推演侧与回执核对。 */
   scheduleMoves: AtlasScheduleMoveReceipt[];
   /** C08：后台自主行动的**全量具名动作**（不只人数），为阶段 D 提供 effect 输入。 */
@@ -1967,6 +1969,10 @@ export function commitTableDeltaTurn(
     },
     applied: delta.applied.length,
     rejected: deltaRejected + parseRejected,
+    rejectedRows: [
+      ...parsed.parse.rejected.map((row) => ({ line: row.line, code: row.code, path: row.path })),
+      ...delta.rejected.map((row) => ({ line: row.line, code: String(row.code ?? "REJECTED"), path: row.path })),
+    ],
     settled: true,
     background: backgroundDiagnostic,
     // C08：结构化动作输出——「应用 5 行 / 后台 1 人移动」这类数字之外，还能按人物 ID 逐条核对
@@ -2200,7 +2206,7 @@ function createCoreInstance(
     "world-turn-v2-rejected",
     // C08：table-delta 的整轮拒绝（块缺失 / 行全被拒 / 候选校验不过 / 分支无三表）
     // 必须与 v2 拒绝同级记 error——否则「世界没更新」在日志里看起来像一次正常回合。
-    "world-turn-delta-rejected",
+    "world-turn-delta-rejected", "world-turn-delta-row-rejected",
   ]);
   const warnKinds = new Set([
     "settings-sanitize", "world-geo-extract-fallback", "world-scale-extract-fallback",
@@ -2212,7 +2218,7 @@ function createCoreInstance(
     "map-projection-name-collisions-kept",
     // C08：部分应用（有行被拒但世界确实变了）与协议不匹配（设置与输出形态不符）都是可恢复的
     // 「要人看一眼」的状态，记 warn 而不是静默 info。
-    "world-turn-delta-partial", "world-turn-protocol-mismatch",
+    "world-turn-delta-partial", "world-turn-delta-row-skipped", "world-turn-protocol-mismatch",
     // E07：后台自主行动（有人真的动了 / 有人因上限没排上）——可恢复但要人看一眼，
     // 否则"我没让他动他怎么走了"只能靠翻三表才发现。
     "world-turn-background-moves",
@@ -2270,11 +2276,43 @@ function createCoreInstance(
         ...(firstSchemaPath !== undefined ? { schemaPath: firstSchemaPath } : {}),
         ...(errorCount !== undefined ? { count: errorCount } : {}),
         ...(typeof entry.reasonCode === "string" ? { reasonCode: entry.reasonCode } : {}),
+        ...(typeof entry.schemaPath === "string" ? { schemaPath: entry.schemaPath } : {}),
+        ...(typeof entry.rowLine === "number" ? { rowLine: entry.rowLine } : {}),
+        ...(typeof entry.droppedCount === "number" ? { droppedCount: entry.droppedCount } : {}),
         ...(typeof entry.coreCommitted === "boolean" ? { coreCommitted: entry.coreCommitted } : {}),
       },
     }, now);
     if (diagnostic) {
       try { deps.onDiagnostic?.(diagnostic); } catch { /* diagnostics do not affect commit */ }
+    }
+  }
+
+  /** Log each rejected field without storing model text, quotes, names, or raw entity IDs. */
+  function logRejectedDeltaRows(
+    rows: Array<{ line: number; code: string; path?: string; ref?: string }>,
+    chatId: string,
+    committed: boolean,
+  ): void {
+    const limit = 100;
+    for (const row of rows.slice(0, limit)) {
+      pushLog({
+        kind: committed ? "world-turn-delta-row-skipped" : "world-turn-delta-row-rejected",
+        chatId,
+        reasonCode: row.code,
+        schemaPath: row.path ?? "$",
+        rowLine: row.line,
+        coreCommitted: committed,
+      });
+    }
+    if (rows.length > limit) {
+      pushLog({
+        kind: committed ? "world-turn-delta-partial" : "world-turn-delta-rejected",
+        chatId,
+        reasonCode: "REJECTED_ROWS_TRUNCATED",
+        errorCount: rows.length,
+        droppedCount: rows.length - limit,
+        coreCommitted: committed,
+      });
     }
   }
 
@@ -2381,6 +2419,54 @@ function createCoreInstance(
     if (rpmTimestamps.length >= rpmLimit) {
       throw new AtlasError(ATLAS_ERROR_CODES.API_RATE_LIMITED, `推演请求超过每分钟 ${rpmLimit} 次限额，请稍后再试。`);
     }
+  }
+
+  /**
+   * 模型偶尔漏掉地点首行的 quote，导致本块所有 new: 引用一起失败。只在**零有效行**且
+   * 拒绝项完全由引文错误和依赖错误组成时追加一次纠错请求。第二次仍走原校验器；
+   * 无证据就应省略变更，不从人物名字或世界书中自动编引文。
+   */
+  async function repairQuoteOnlyReply(input: {
+    text: string;
+    preset: AtlasApiPreset;
+    prompt: AtlasWorldTurnPromptInput;
+    userText: string;
+    assistantText: string;
+    chatId: string;
+  }): Promise<string | null> {
+    const parsed = parseAtlasEditBlock(input.text, { "msg:u": input.userText, "msg:a": input.assistantText });
+    if (parsed.status !== "rejected" || parsed.rejected.length === 0) return null;
+    const quoteCodes = new Set(["QUOTE_REQUIRED", "QUOTE_NOT_FOUND"]);
+    if (!parsed.rejected.some((row) => quoteCodes.has(row.code))
+        || parsed.rejected.some((row) => !quoteCodes.has(row.code) && row.code !== "DEPENDENCY_FAILED")) return null;
+
+    try {
+      checkRpm();
+    } catch {
+      pushLog({ at: now(), kind: "world-turn-quote-repair-skipped", chatId: input.chatId,
+        reasonCode: "API_RATE_LIMITED", coreCommitted: false });
+      return null;
+    }
+    const blockStart = input.text.lastIndexOf("<atlasEdit>");
+    const rejectedBlock = blockStart >= 0 ? input.text.slice(blockStart, blockStart + 3_000) : "";
+    const issues = parsed.rejected.slice(0, 8)
+      .map((row) => `第 ${row.line} 行 ${row.code} @ ${row.path}`).join("；");
+    const instruction =
+      `上一次 <atlasEdit> 提交没有任何有效行：${issues}。请只输出一份修正后的完整 <atlasEdit> 块。\n`
+      + "新增地点和实际位置/归属变化必须有 quote，逐字复制本轮用户行动或助手正文里的连续原文。"
+      + "如果正文没有证据证明地点出现或人物抵达，就删除对应行及依赖行；全无变化就写 {\"kind\":\"noop\"}。"
+      + "不可从角色卡、世界书、旧剧情编造引文，不可把推测位置当作已到达。\n"
+      + (rejectedBlock ? `待修正的块（仅供定位错误）：\n${rejectedBlock}` : "");
+    rpmTimestamps.push(now());
+    const result = await callAtlasWorldTurnApi(
+      { ...input.preset, maxTokens: Math.min(input.preset.maxTokens ?? 4_096, 4_096), temperature: 0.2 },
+      { ...input.prompt, repairInstruction: instruction },
+      { fetchFn: deps.fetchFn, now },
+    );
+    pushLog({ at: now(), kind: result.ok ? "world-turn-quote-repair-complete" : "world-turn-quote-repair-failed",
+      chatId: input.chatId, reasonCode: result.ok ? "QUOTE_REPAIRED_RESPONSE" : result.code,
+      durationMs: result.durationMs, responseChars: result.ok ? result.text.length : 0, coreCommitted: false });
+    return result.ok ? result.text : null;
   }
 
   /** 每聊天串行队列：同聊天 commit / retry 逐个执行，不并发冲击。 */
@@ -4284,7 +4370,7 @@ function createCoreInstance(
       );
     }
 
-    // 恰好 1 条推演请求
+    // 首次推演请求；只有引文错误导致零有效行时才追加一次纠错请求。
     rpmTimestamps.push(now());
     const call = await callAtlasWorldTurnApi(prepared.effectivePreset, prepared.input, { fetchFn: deps.fetchFn, now });
     pushLog({
@@ -4303,7 +4389,12 @@ function createCoreInstance(
       throw new AtlasError(call.code, call.message, { retryable: call.retryable });
     }
 
-    const cleanedText = applyContentReplaceRules(call.text, current.contentReplaceRules ?? []);
+    let cleanedText = applyContentReplaceRules(call.text, current.contentReplaceRules ?? []);
+    const bootstrapRepair = await repairQuoteOnlyReply({
+      text: cleanedText, preset: prepared.effectivePreset, prompt: prepared.input,
+      userText, assistantText, chatId: binding.chatId,
+    });
+    if (bootstrapRepair !== null) cleanedText = applyContentReplaceRules(bootstrapRepair, current.contentReplaceRules ?? []);
     /**
      * E06（0.9.59）：开场识别走**与普通回合同一条**行增量契约。
      *
@@ -4560,7 +4651,7 @@ function createCoreInstance(
       ...(recentContextText ? { recentContextText } : {}),
       ...(request.personaDescription ? { personaDescription: request.personaDescription } : {}),
       ...(request.charDescription ? { charDescription: request.charDescription } : {}),
-      // R06 v2：baseRevision = 世界时间游标（$B，模型必须逐字回显）
+      // 为历史提示词预设的 $B 占位符提供世界时间游标。
       baseRevision: binding.worldTimeCursor,
     };
     /**
@@ -4685,7 +4776,7 @@ function createCoreInstance(
     };
     await store.write(`pending:${idempotencyKey}`, pending);
 
-    // 5. 恰好 1 条推演请求
+    // 5. 首次推演请求；只有引文错误导致零有效行时才追加一次纠错请求。
     rpmTimestamps.push(now());
     const call = await callAtlasWorldTurnApi(prepared.effectivePreset, prepared.input, { fetchFn: deps.fetchFn, now });
     pushLog({
@@ -4756,7 +4847,12 @@ function createCoreInstance(
     try {
       // 0.9.16 内容替换规则库（照抄 shujuku + 开关增强）：推演输出先过启用的词对规则
       // （剥 think / 推理段 / 杂段），再进草稿解析。
-      const cleanedText = applyContentReplaceRules(call.text, current.contentReplaceRules ?? []);
+      let cleanedText = applyContentReplaceRules(call.text, current.contentReplaceRules ?? []);
+      const repairedText = await repairQuoteOnlyReply({
+        text: cleanedText, preset: prepared.effectivePreset, prompt: prepared.input,
+        userText: request.userText, assistantText: request.assistantText, chatId: request.chatId,
+      });
+      if (repairedText !== null) cleanedText = applyContentReplaceRules(repairedText, current.contentReplaceRules ?? []);
       /**
        * E07（0.9.59）：**唯一入口只解析最后一个完整 `<atlasEdit>` 块**。
        *
@@ -4876,9 +4972,10 @@ function createCoreInstance(
             worldId: binding.worldId,
             reasonCode: committed.code,
             errorCount: committed.rejectedRows.length,
-            responseChars: call.text.length,
+            responseChars: repairedText !== null ? repairedText.length : call.text.length,
             coreCommitted: false,
           });
+          logRejectedDeltaRows(committed.rejectedRows, request.chatId, false);
           throw new AtlasError(
             ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
             `${committed.message}${first ? ` 首个问题：${first}` : ""}`,
@@ -5124,6 +5221,7 @@ function createCoreInstance(
             skipped: committed.rejected,
             scanned: committed.applied,
           });
+          logRejectedDeltaRows(committed.rejectedRows, request.chatId, true);
         }
         output = { world: committed.world, receipt: committed.receipt };
         // E07：后台自主行动记具名诊断（人数口径；上限与"只更新行动"的条数都如实报出）
@@ -5155,7 +5253,7 @@ function createCoreInstance(
         reasonCode: "LEDGER_VALIDATION_FAILED",
         coreCommitted: false,
       });
-      // commitAtlasTurn 保证零部分写入；保留 pending 供 retry
+      // 校验失败时保留 pending 供 retry。
       return okResult({ receipt });
     }
 
@@ -5415,18 +5513,7 @@ function createCoreInstance(
     })();
     const lorebook = buildLorebookPlans(output.world, receipt, lorebookTableDelta, lorebookSimulationDelta);
 
-    /**
-     * E07/E09（0.9.59）：这里原本有两段**只服务旧协议**的增强落地，已随运行分支一起删除：
-     *
-     * 1. 9.5 点挂子图 sidecar —— 读 `output.geo.createdPoints` 的 submap / description。
-     *    `geo` 只由 v1 `commitAtlasTurn` 产出，v1 执行链停用后恒为不可达。
-     * 2. R10 `mapScaleHints` 落地 —— 读 `output.scaleHints`（v2 封套字段）。
-     *    尺度现在只走**建图标定接口**（POST /worlds/scale/calibrate，见 ensureMapScaleOnCreate
-     *    与 §2.6），模型不再有机会在正文回合里自报每格米数。
-     *
-     * 两者的语义没有被丢弃：子图层级由三表 `parentLocationId` → maps 投影表达（H07），
-     * 尺度由标定接口表达（H18a）。删除只去掉不可达代码，不改变现行行为。
-     */
+    // 子地图由三表 parentLocationId 投影；比例尺由建图标定接口管理。
 
     // 9. 0.9.31 首轮自动建图（作者需求：第一次推演生成当前地图，之后地图有了就不再重复）。
     //    条件：committed + 地图还只有起点（≤1 点）。红线例外记档：本轮最多第 2 条请求

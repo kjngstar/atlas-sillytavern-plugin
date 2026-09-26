@@ -1,20 +1,9 @@
-/**
- * atlas-geo-apply.ts — 0.9.31 每轮新地点确定性并入（纯函数）。
- *
- * 作者需求：每轮推演时判断有没有新地点加入。账本 effect 白名单（lib/ 快照）没有
- * addPoint/addRegion，推演不能造点——本模块把模型在本轮 JSON 里顺带输出的
- * newLocations（{name, regionName?, description?}）在 commit 时直接并入世界：
- * 与 /worlds/geo/adopt 同款口径——重名跳过、黄金角螺旋布点、只增不改、定义修订。
- * 不发任何请求：地名来自推演 JSON，归属与坐标全部本地确定性计算。
- */
+/** 地图 sidecar、子地图层级与比例尺的清洗和投影。 */
 
-import type { MapPoint, World } from "../lib/world-schema.ts";
-import { appendDefinitionRevision } from "../lib/world-definition.ts";
+import type { MapPoint } from "../lib/world-schema.ts";
 import { hashString } from "../lib/world-cards.ts";
 import { roundPositiveScale, sanitizeCalibration, type MapScaleCalibration } from "./atlas-scale.ts";
 
-/** 单轮新地点上限（与 geo 提炼口径一致：宁缺毋滥）。 */
-export const NEW_LOCATIONS_MAX = 12;
 const NAME_CHARS = 40;
 const DESC_CHARS = 300;
 /**
@@ -80,42 +69,6 @@ export interface SubMapDraft {
   points: Array<{ name: string; description?: string; submap?: SubMapDraft }>;
 }
 
-export interface NewLocationDraft {
-  name: string;
-  regionName?: string;
-  description?: string;
-  submap?: SubMapDraft;
-}
-
-export interface CreatedPoint {
-  id: number;
-  name: string;
-  description?: string;
-  submap?: SubMapDraft;
-}
-
-export interface GeoAdoptOutcome {
-  world: World;
-  regionsAdded: number;
-  pointsAdded: number;
-  skipped: number;
-  regionNames: string[];
-  pointNames: string[];
-  revisionAppended: boolean;
-  /** 0.9.32 本次实际创建的地点（含带 submap 的），供 sidecar 子图落库 */
-  createdPoints: CreatedPoint[];
-  /**
-   * H06b：本次创建的、**只有示意排版坐标**的点 ID 集合。
-   *
-   * 兼容镜像 `world.points[].x/y` 受旧 schema 约束必须是有限数字，因此新点仍然拿到
-   * 确定性螺旋坐标——但那**只是占位排版**，不是测绘结果。调用方必须：
-   * - 把这些点的 `maps.pointMeta[pointId].coordinateStatus` 标成 `schematic`；
-   * - 三表行的 `gridX/gridY` 置 `null`（`schematic` 不得参与精确距离 / 路径 / 传播）；
-   * - 只有人工确认过的坐标才是 `confirmed`（旧手工坐标一律不重排）。
-   */
-  schematicPointIds: number[];
-}
-
 /** 子图清洗（不可信）：点名单必须；比例尺数字必须为正；frame cols/rows 走宽容默认。 */
 export function sanitizeSubMap(raw: unknown, depth = 1): SubMapDraft | undefined {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
@@ -159,151 +112,6 @@ export function sanitizeSubMap(raw: unknown, depth = 1): SubMapDraft | undefined
   }
   if (points.length === 0) return undefined;
   return { ...(scale ? { scale } : {}), ...(frame ? { frame } : {}), points };
-}
-
-/** 不可信 newLocations 清洗：坏条目丢弃（name 必填；字段截断；条目封顶）。 */
-export function sanitizeNewLocations(raw: unknown): NewLocationDraft[] {
-  if (!Array.isArray(raw)) return [];
-  const result: NewLocationDraft[] = [];
-  for (const item of raw.slice(0, NEW_LOCATIONS_MAX * 2)) {
-    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
-    const record = item as Record<string, unknown>;
-    const name = String(record.name ?? "").trim().replace(/\s+/g, " ").slice(0, NAME_CHARS);
-    if (!name) continue;
-    const regionName = String(record.regionName ?? "").trim().replace(/\s+/g, " ").slice(0, NAME_CHARS);
-    const description = String(record.description ?? "").trim().replace(/\s+/g, " ").slice(0, DESC_CHARS);
-    const submap = sanitizeSubMap(record.submap);
-    result.push({
-      name,
-      ...(regionName ? { regionName } : {}),
-      ...(description ? { description } : {}),
-      ...(submap ? { submap } : {}),
-    });
-    if (result.length >= NEW_LOCATIONS_MAX) break;
-  }
-  return result;
-}
-
-/**
- * 把新地点 / 新地区并入世界（/worlds/geo/adopt 同款口径）：
- * 重名跳过；regionName 解析不到已有地区 → **regionId 留空**（H06b：绝不写死 `"start"`——
- * 那会在空地理世界里造出指向不存在地区的悬空引用，等于凭空发明归属）；
- * 黄金角螺旋布点绕中心散开，绝不与已有点重叠；成功后追加定义修订。
- * 没有新增 → 原世界原样返回（零写入）。
- *
- * 坐标纪律（H06b）：这里写出的 `x/y` 是**示意排版**，不是测绘坐标。返回的
- * `schematicPointIds` 供调用方写 `maps.pointMeta[].coordinateStatus="schematic"`，
- * 且**不得**赋到三表行的 `gridX/gridY`（那里必须是 null，见 H06c）。
- */
-export function applyNewLocations(
-  world: World,
-  locations: NewLocationDraft[],
-  options: { now: number },
-): GeoAdoptOutcome {
-  const empty: GeoAdoptOutcome = {
-    world,
-    regionsAdded: 0,
-    pointsAdded: 0,
-    skipped: 0,
-    regionNames: [],
-    pointNames: [],
-    revisionAppended: false,
-    createdPoints: [],
-    schematicPointIds: [],
-  };
-  if (!Array.isArray(locations) || locations.length === 0) return empty;
-
-  const clean = (text: unknown): string => String(text ?? "").trim().replace(/\s+/g, " ");
-  const norm = (text: string) => text.toLowerCase();
-
-  const existingRegionNames = new Set((world.regions ?? []).map((r) => norm(clean(r.name))));
-  const existingPointNames = new Set((world.points ?? []).map((p) => norm(clean(p.name))));
-  const regionIdByName = new Map((world.regions ?? []).map((r) => [norm(clean(r.name)), String(r.id)]));
-
-  let skipped = 0;
-  const newRegions: Array<{ id: string; worldId: string; name: string; type: "other"; description: string; coordinates: { x: number; y: number } }> = [];
-  for (const item of locations) {
-    if (newRegions.length >= 6) break; // 单轮地区上限（地点为主，地区少量）
-    if (existingRegionNames.has(norm(item.name))) {
-      skipped += 1;
-      continue;
-    }
-    // H06b 纪律 3：ID 必须确定性——不含 `now`，同一世界同一地区名永远得到同一个 id
-    const id = `turn-r-${hashString(`${world.id}|r|${item.name}`)}`;
-    newRegions.push({
-      id,
-      worldId: world.id,
-      name: item.name,
-      type: "other",
-      description: item.description || "由剧情推演提炼。",
-      coordinates: { x: 0, y: 0 },
-    });
-    existingRegionNames.add(norm(item.name));
-    regionIdByName.set(norm(item.name), id);
-  }
-
-  const nextPointIdBase = (world.points ?? []).reduce((max, p) => Math.max(max, Number(p.id) || 0), 0) + 1;
-  const newPoints: Array<{ id: number; name: string; x: number; y: number; regionId?: string | null }> = [];
-  for (const item of locations) {
-    if (newPoints.length >= NEW_LOCATIONS_MAX) break;
-    if (existingPointNames.has(norm(item.name))) {
-      skipped += 1;
-      continue;
-    }
-    // H06b：解析不到地区就留空——绝不写死 `"start"`（凭空发明归属 / 指向不存在的地区）
-    const regionId = item.regionName ? regionIdByName.get(norm(item.regionName)) ?? null : null;
-    const index = newPoints.length;
-    const angle = index * 2.39996;
-    const radius = 14 + 3.4 * Math.sqrt(index + 1);
-    newPoints.push({
-      id: nextPointIdBase + newPoints.length,
-      name: item.name,
-      x: Math.round(Math.min(96, Math.max(4, 50 + radius * Math.cos(angle)))),
-      y: Math.round(Math.min(96, Math.max(4, 50 + radius * Math.sin(angle)))),
-      regionId,
-    });
-    existingPointNames.add(norm(item.name));
-  }
-
-  if (newRegions.length === 0 && newPoints.length === 0) {
-    return { ...empty, skipped };
-  }
-
-  let updated: World = {
-    ...world,
-    regions: [...(world.regions ?? []), ...newRegions],
-    points: [...(world.points ?? []), ...newPoints],
-    updatedAt: options.now,
-  };
-  const revision = appendDefinitionRevision(updated, {
-    authorNote: `剧情推演新地点：+${newRegions.length} 地区 +${newPoints.length} 地点`,
-    now: options.now,
-  });
-  if (revision.ok) updated = revision.value;
-
-  // createdPoints：本次真实创建的地点（name → id），带 submap / description 的交给 sidecar 落库
-  const createdPoints: CreatedPoint[] = newPoints.map((p) => {
-    const source = locations.find((item) => norm(item.name) === norm(p.name));
-    return {
-      id: p.id,
-      name: p.name,
-      ...(source?.description ? { description: source.description } : {}),
-      ...(source?.submap ? { submap: source.submap } : {}),
-    };
-  });
-
-  return {
-    world: updated,
-    regionsAdded: newRegions.length,
-    pointsAdded: newPoints.length,
-    skipped,
-    regionNames: newRegions.map((r) => r.name),
-    pointNames: newPoints.map((p) => p.name),
-    revisionAppended: revision.ok,
-    createdPoints,
-    // H06b：本次新建的点全部只有示意排版坐标，交给调用方写 coordinateStatus
-    schematicPointIds: newPoints.map((p) => p.id),
-  };
 }
 
 // ---------------------------------------------------------------------------
