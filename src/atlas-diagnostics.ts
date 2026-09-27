@@ -8,6 +8,7 @@
  * `ref-<16 位小写十六进制>`）与一组只接受该形态的 `*Ref` 详情键。指纹单向、与进程无关，
  * 同一输入永远同一指纹，跨会话比对同一聊天/分支/回合时不会泄漏原文。
  */
+import { ATLAS_RUNTIME_LIMITS } from "./atlas-runtime-limits.ts";
 export type AtlasDiagnosticLevel = "debug" | "info" | "warn" | "error";
 export type AtlasDiagnosticSource = "host" | "ui" | "engine" | "model" | "storage" | "lorebook" | "map";
 export type AtlasDiagnosticOutcome = "started" | "success" | "skipped" | "failed" | "recovered";
@@ -562,4 +563,322 @@ export function createAtlasDiagnosticsSink(options: {
         .map((entry) => JSON.stringify(entry)).join("\n");
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// G10（§16.8）：世界数据链路的统一诊断对象
+// ---------------------------------------------------------------------------
+//
+// §16.8 固定形状：
+//   {at,level,module,code,chatUid,branchId,turnId,attemptId,batchId,opId?,groupId?,line?,path?,message,details,coreSaved}
+//
+// 安全口径与本文件既有部分保持一致（不是另造一套）：
+// - `message` 给人读，但先过 `redactWorldSecrets`：`sk-…` / `Bearer …` / `api_key=…` /
+//   32 位以上十六进制串一律抹掉 —— **复制 Authorization / API key 到日志为零**；
+// - `chatUid` / `branchId` / `turnId` / `attemptId` / `batchId` 走 A04 的脱敏指纹
+//   （`atlasRefFingerprint`，确定性 `ref-<16 位小写十六进制>`）：日志能按指纹定位同一个聊天/分支/回合，
+//   却看不到原始标识；输入本身已是指纹时原样通过；
+// - `details` 只保留有限深度/长度的标量摘要：拒绝值、依赖 id、哈希摘要、耗时；
+//   正文型键（prompt/response/content/chatName…）只留长度，不进原文；
+// - `coreSaved` **只**取自显式输入：HTTP 200 或“看起来成功”都不推导成已保存（§7.3 / §16.8）。
+
+/** §16.8：世界数据链路统一诊断对象的输入。 */
+export interface AtlasWorldIssueInput {
+  /** 毫秒时间戳；缺省用当前时间（可注入 `now` 以便测试）。 */
+  at?: number;
+  level?: AtlasDiagnosticLevel;
+  module: string;
+  code: string;
+  chatUid?: string;
+  branchId?: string;
+  turnId?: string;
+  attemptId?: string;
+  batchId?: string;
+  opId?: string;
+  groupId?: string;
+  line?: number;
+  path?: string;
+  message: string;
+  details?: Record<string, unknown>;
+  coreSaved?: boolean;
+}
+
+const WORLD_TEXT_KEYS = new Set([
+  "prompt", "response", "content", "body", "text", "raw", "rawtext", "storytext",
+  "chatname", "charactername", "excerpt", "quote", "completion", "message", "assistanttext", "usertext",
+]);
+const WORLD_SECRET_KEYS = new Set([
+  "authorization", "apikey", "api_key", "access_token", "accesstoken", "auth_token", "authtoken",
+  "password", "passwd", "secret", "token", "bearertoken", "bearer_token", "cookie", "setcookie",
+  "x-api-key", "xapikey",
+]);
+const WORLD_MESSAGE_MAX_CHARS = 500;
+const WORLD_DETAIL_STRING_MAX_CHARS = 200;
+const WORLD_DETAIL_MAX_BYTES = 2048;
+const WORLD_DETAIL_DEPTH = 2;
+
+/**
+ * G10：抹掉密钥形态的片段（Authorization / API key 复制到日志为零）。
+ * 32 位以上的十六进制串同样抹掉：完整 64 位摘要是高熵串，日志只保留前缀 + 长度作为摘要。
+ */
+export function redactWorldSecrets(value: string): string {
+  let out = value;
+  // 替换标记里**不放** `[` `]`：否则后续「api_key=…」规则会把标记的方括号当成值的一部分，
+  // 留下半个密钥形态的残片。
+  out = out.replace(/\bsk-[A-Za-z0-9_-]{6,}/g, "sk-***");
+  out = out.replace(/\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/gi, "Bearer ***");
+  out = out.replace(
+    /((?:x-)?api[_-]?key|apikey|access[_-]?token|auth[_-]?token|authorization|password|passwd|secret|token)(\s*[:=]\s*)["']?[^\s"',;}\]]{4,}/gi,
+    "$1$2***",
+  );
+  out = out.replace(/\b[a-fA-F0-9]{32,}\b/g, (match) => `sha256:${match.slice(0, 12)}…(${match.length})`);
+  return out;
+}
+
+function worldRefFingerprint(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const token = safeToken(value);
+  if (!token) return null;
+  return isAtlasRefFingerprint(token) ? token : atlasRefFingerprint(token);
+}
+
+function worldToken(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const token = safeToken(value);
+  return token.length > 0 ? token : undefined;
+}
+
+function worldMessage(value: unknown): string {
+  const text = typeof value === "string" ? value : value === undefined || value === null ? "" : String(value);
+  const redacted = redactWorldSecrets(text).replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
+  return redacted.length > WORLD_MESSAGE_MAX_CHARS ? `${redacted.slice(0, WORLD_MESSAGE_MAX_CHARS)}…` : redacted;
+}
+
+function worldPath(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const token = safeToken(value);
+  if (token === "$") return token;
+  return /^\$(?:\.[A-Za-z0-9_]+|\[\d+\])+$/.test(token) ? token : undefined;
+}
+
+function sanitizeWorldDetails(details: Record<string, unknown> | undefined, depth = 0): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (!details || typeof details !== "object" || Array.isArray(details)) return out;
+  for (const [key, value] of Object.entries(details)) {
+    const lowered = key.toLowerCase();
+    // 密钥键直接丢弃；coreSaved 只能来自顶层显式输入，details 不得另造第二份。
+    if (WORLD_SECRET_KEYS.has(lowered) || lowered === "coresaved") continue;
+    const safeKey = safeToken(key);
+    if (!safeKey) continue;
+    if (WORLD_TEXT_KEYS.has(lowered)) {
+      out[safeKey] = typeof value === "string" ? `[text:${value.length}chars]` : "[text]";
+      continue;
+    }
+    out[safeKey] = sanitizeWorldDetailValue(value, depth);
+  }
+  return out;
+}
+
+function sanitizeWorldDetailValue(value: unknown, depth: number): unknown {
+  if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "string") {
+    const redacted = redactWorldSecrets(value);
+    return redacted.length > WORLD_DETAIL_STRING_MAX_CHARS
+      ? `${redacted.slice(0, WORLD_DETAIL_STRING_MAX_CHARS)}…(${redacted.length})`
+      : redacted;
+  }
+  if (Array.isArray(value)) {
+    if (depth >= WORLD_DETAIL_DEPTH) return `[array:${value.length}]`;
+    return value.slice(0, 16).map((item) => sanitizeWorldDetailValue(item, depth + 1));
+  }
+  if (typeof value === "object") {
+    if (depth >= WORLD_DETAIL_DEPTH) return "[object]";
+    const nested = sanitizeWorldDetails(value as Record<string, unknown>, depth + 1);
+    return Object.keys(nested).length > 0 ? nested : "[object]";
+  }
+  return null;
+}
+
+/**
+ * G10 normalizeWorldIssue：所有来源统一的 §16.8 诊断对象。
+ * 完成定义（§17G）：详细报错能在日志找到 —— 保留 group/op/path/line 与 details。
+ * `module` 为空/非法时**不静默**：details 里明确给出 `DIAGNOSTIC_MODULE_REQUIRED`。
+ */
+export function normalizeWorldIssue(
+  input: AtlasWorldIssueInput,
+  now: () => number = Date.now,
+): Record<string, unknown> {
+  const rawAt = typeof input?.at === "number" && Number.isFinite(input.at) ? input.at : now();
+  const level: AtlasDiagnosticLevel = LEVELS.has(input?.level as string) ? (input.level as AtlasDiagnosticLevel) : "error";
+  const moduleToken = worldToken(input?.module);
+  const codeToken = typeof input?.code === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(input.code) ? input.code : "UNEXPECTED_ERROR";
+
+  const details = sanitizeWorldDetails(input?.details);
+  // §16.8：诊断必须能按聊天/分支/回合/尝试/批次定位；原始标识只以脱敏指纹进入日志。
+  const chatUid = worldRefFingerprint(input?.chatUid);
+  const branchId = worldRefFingerprint(input?.branchId);
+  const turnId = worldRefFingerprint(input?.turnId);
+  const attemptId = worldRefFingerprint(input?.attemptId);
+  const batchId = worldRefFingerprint(input?.batchId);
+  const opId = worldToken(input?.opId);
+  const groupId = worldToken(input?.groupId);
+  const path = worldPath(input?.path);
+  const line = typeof input?.line === "number" && Number.isInteger(input.line) && input.line >= 0 && input.line <= 100_000
+    ? input.line
+    : undefined;
+
+  if (!moduleToken) {
+    details.diagnosticCode = "DIAGNOSTIC_MODULE_REQUIRED";
+    details.moduleRequired = true;
+  }
+  const detailBudget = new TextEncoder().encode(JSON.stringify(details)).length;
+  if (detailBudget > WORLD_DETAIL_MAX_BYTES) {
+    for (const key of Object.keys(details)) {
+      if (key === "diagnosticCode" || key === "moduleRequired") continue;
+      delete details[key];
+      if (new TextEncoder().encode(JSON.stringify(details)).length <= WORLD_DETAIL_MAX_BYTES) break;
+    }
+    details.detailsTruncated = true;
+    details.droppedDetailBytes = detailBudget;
+  }
+
+  const issue: Record<string, unknown> = {
+    at: new Date(rawAt).toISOString(),
+    level,
+    module: moduleToken ?? "",
+    code: codeToken,
+    chatUid,
+    branchId,
+    turnId,
+    attemptId,
+    batchId,
+  };
+  if (opId !== undefined) issue.opId = opId;
+  if (groupId !== undefined) issue.groupId = groupId;
+  if (line !== undefined) issue.line = line;
+  if (path !== undefined) issue.path = path;
+  issue.message = worldMessage(input?.message ?? input?.code ?? "");
+  issue.details = details;
+  // §7.3 / §16.8：只有显式 coreSaved=true 才是已保存；HTTP 200 不推导成功。
+  issue.coreSaved = input?.coreSaved === true;
+  return issue;
+}
+
+/** G10：统一 `Issue[]` → §16.8 诊断（保留 group/op/path/line/dependencyId 定位）。 */
+export function normalizeWorldIssueList(
+  issues: Array<{
+    code: string;
+    path?: string;
+    message: string;
+    severity?: string;
+    line?: number;
+    opId?: string;
+    groupId?: string;
+    dependencyId?: string;
+    retryable?: boolean;
+  }>,
+  base: {
+    module: string;
+    chatUid?: string;
+    branchId?: string;
+    turnId?: string;
+    attemptId?: string;
+    batchId?: string;
+    coreSaved?: boolean;
+  },
+  now: () => number = Date.now,
+): Array<Record<string, unknown>> {
+  const list = Array.isArray(issues) ? issues : [];
+  const at = now();
+  return list.map((issue) => {
+    const severity = typeof issue?.severity === "string" ? issue.severity : "error";
+    const level: AtlasDiagnosticLevel = severity === "warning" ? "warn" : LEVELS.has(severity) ? (severity as AtlasDiagnosticLevel) : "error";
+    const details: Record<string, unknown> = {};
+    if (issue?.severity !== undefined) details.severity = severity;
+    if (issue?.retryable !== undefined) details.retryable = issue.retryable === true;
+    if (issue?.dependencyId !== undefined) details.dependencyId = issue.dependencyId;
+    return normalizeWorldIssue(
+      {
+        at,
+        level,
+        module: base?.module ?? "",
+        code: issue?.code ?? "UNEXPECTED_ERROR",
+        chatUid: base?.chatUid,
+        branchId: base?.branchId,
+        turnId: base?.turnId,
+        attemptId: base?.attemptId,
+        batchId: base?.batchId,
+        opId: issue?.opId,
+        groupId: issue?.groupId,
+        line: issue?.line,
+        path: issue?.path,
+        message: issue?.message ?? "",
+        details,
+        coreSaved: base?.coreSaved,
+      },
+      () => at,
+    );
+  });
+}
+
+/**
+ * G10 diagnosticsExportPage：§16.8 的分页 ≠ 导出截断。
+ * - `items` 是当前页；`total` 是全部匹配记录数；翻到最后一页才算这一轮导出走完；
+ * - 留存范围之外被丢弃的记录由调用方以摘要条目表达（`details.droppedCount` + `details.droppedReason`），
+ *   导出如实给出 `droppedCount` 与原因：**有丢弃就不算 exportComplete**，不假装完整。
+ */
+export function diagnosticsExportPage(
+  entries: Array<Record<string, unknown>>,
+  cursor?: string | null,
+  pageSize?: number,
+): {
+  items: Array<Record<string, unknown>>;
+  nextCursor?: string;
+  total: number;
+  droppedCount: number;
+  exportComplete: boolean;
+  droppedReason?: string;
+} {
+  const all = Array.isArray(entries) ? entries : [];
+  const requested = Number(pageSize);
+  const size = Number.isFinite(requested) && requested >= 1
+    ? Math.min(500, Math.trunc(requested))
+    : ATLAS_RUNTIME_LIMITS.diagnosticPageSize;
+  const requestedOffset = Number(cursor ?? 0);
+  const offset = Number.isFinite(requestedOffset) && requestedOffset > 0 ? Math.trunc(requestedOffset) : 0;
+  const items = all.slice(offset, offset + size);
+  const nextOffset = offset + items.length;
+
+  let droppedCount = 0;
+  let droppedReason: string | undefined;
+  for (const entry of all) {
+    const details = entry && typeof entry === "object" && !Array.isArray(entry)
+      ? (entry.details as Record<string, unknown> | undefined)
+      : undefined;
+    const reported = Number(details?.droppedCount ?? (entry as Record<string, unknown> | undefined)?.droppedCount);
+    if (!Number.isFinite(reported) || reported <= 0) continue;
+    droppedCount += Math.trunc(reported);
+    if (!droppedReason) {
+      const reason = details?.droppedReason ?? details?.reason;
+      droppedReason = typeof reason === "string" && reason.length > 0 ? redactWorldSecrets(reason).slice(0, 120) : "retention";
+    }
+  }
+
+  const page: {
+    items: Array<Record<string, unknown>>;
+    nextCursor?: string;
+    total: number;
+    droppedCount: number;
+    exportComplete: boolean;
+    droppedReason?: string;
+  } = {
+    items,
+    total: all.length,
+    droppedCount,
+    exportComplete: nextOffset >= all.length && droppedCount === 0,
+  };
+  if (nextOffset < all.length) page.nextCursor = String(nextOffset);
+  if (droppedCount > 0) page.droppedReason = droppedReason ?? "retention";
+  return page;
 }

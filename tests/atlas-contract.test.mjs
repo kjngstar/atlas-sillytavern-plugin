@@ -449,7 +449,7 @@ test("Server Plugin：路由清单与 health 响应无敏感字段", () => {
   assert.equal(plugin.id, ATLAS_PLUGIN_ID, "插件 ID 固定为 atlas");
   // ATLAS-04 骨架 + ATLAS-06 rollback + ATLAS-18 ensure-starter；0.9.42 会话承载：/state 与 /map/image 改 POST + /session/export + /session/purge
   // 0.9.59：+ H07a /maps/topology/confirm + H15a /maps/areas/upsert（作者手动确认地理关系）
-  assert.equal(plugin.routes.length, 25, "注册 25 条路由（… + R03 /turns/preview + R06 /scene/bootstrap + H07a + H15a）");
+  assert.equal(plugin.routes.length, 31, "注册 31 条路由（… + R03 /turns/preview + R06 /scene/bootstrap + H07a + H15a + H01–H04 /sql/*）");
   assert.equal(plugin.routes[0].path, "/api/plugins/atlas/health", "路由路径固定");
   assert.equal(plugin.routes[0].method, "GET", "health 为 GET");
   for (const route of plugin.routes) {

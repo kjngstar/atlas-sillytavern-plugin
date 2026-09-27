@@ -13,5 +13,18 @@
     <div>
       独立推演 API 预设与密钥只保存在服务端插件设置中，浏览器端永远不会存储或回传密钥。
     </div>
+    <div class="atlas-settings-block">
+      <label for="atlas-sql-mode-toggle">
+        <input type="checkbox" id="atlas-sql-mode-toggle" />
+        <b>SQL 世界数据</b>（默认关闭）
+      </label>
+      <div>
+        开启后地图 / 附近 / 日志改从 SQL 世界库读取（同一时刻只有一个读权威，不再读旧三表投影）；
+        关闭时完全沿用旧路径。
+        设置键：<code>extensionSettings.atlas_world_sim.sqlWorldDataEnabled</code>（缺省 false）。
+        SQL 核心（dist/atlas-sql.mjs，含 sql.js + wasm）只在开启后才加载；加载失败会在面板上
+        显示具名诊断并退回旧路径，不会静默假装已启用。
+      </div>
+    </div>
   </div>
 </div>

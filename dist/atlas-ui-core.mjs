@@ -3606,11 +3606,11 @@ function parseAtlasLorebookPlans(raw) {
   }
   const keys = [];
   for (const key of entry.keys) {
-    const bounded = asBoundedString(key, ATLAS_LOREBOOK_LIMITS.KEY_CHARS);
-    if (!bounded || bounded.trim().length === 0) {
+    const bounded2 = asBoundedString(key, ATLAS_LOREBOOK_LIMITS.KEY_CHARS);
+    if (!bounded2 || bounded2.trim().length === 0) {
       return { ok: false, error: new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "lorebook 条目 key 非法") };
     }
-    keys.push(bounded);
+    keys.push(bounded2);
   }
   return {
     ok: true,
@@ -4693,7 +4693,7 @@ function createAtlasUiCore(deps) {
   let activeTraceId = null;
   let activeAttemptId = null;
   let traceSequence = 0;
-  function diagnostic2(event) {
+  function diagnostic3(event) {
     try {
       deps.onDiagnostic?.({
         ...event,
@@ -4831,7 +4831,7 @@ function createAtlasUiCore(deps) {
     if (!lorebookRaw) return;
     const parsed = parseAtlasLorebookPlans(lorebookRaw);
     if (!parsed.ok) {
-      diagnostic2({
+      diagnostic3({
         level: "warn",
         source: "lorebook",
         code: "LOREBOOK_PLAN_INVALID",
@@ -4845,7 +4845,7 @@ function createAtlasUiCore(deps) {
     }
     try {
       const result = await deps.onLorebookSync(parsed.value);
-      diagnostic2({
+      diagnostic3({
         level: "info",
         source: "lorebook",
         code: "LOREBOOK_SYNC_COMPLETE",
@@ -4856,7 +4856,7 @@ function createAtlasUiCore(deps) {
       });
       setState({ lorebookHint: lorebookHintFromResult(result) });
     } catch (error) {
-      diagnostic2({
+      diagnostic3({
         level: "warn",
         source: "lorebook",
         code: "LOREBOOK_SYNC_FAILED",
@@ -4881,7 +4881,7 @@ function createAtlasUiCore(deps) {
       const payload = body?.data;
       const version = payload && typeof payload.protocolVersion === "number" ? payload.protocolVersion : null;
       if (version !== ATLAS_PROTOCOL_VERSION) {
-        diagnostic2({
+        diagnostic3({
           level: "error",
           source: "engine",
           code: "ENGINE_PROTOCOL_MISMATCH",
@@ -4893,7 +4893,7 @@ function createAtlasUiCore(deps) {
         setState({ serviceStatus: "incompatible", serviceProtocolVersion: version, mode: "protocol-incompatible" });
         return;
       }
-      diagnostic2({
+      diagnostic3({
         level: "debug",
         source: "engine",
         code: "ENGINE_HEALTH_OK",
@@ -4904,7 +4904,7 @@ function createAtlasUiCore(deps) {
       });
       setState({ serviceStatus: "online", serviceProtocolVersion: version });
     } catch {
-      diagnostic2({
+      diagnostic3({
         level: "error",
         source: "engine",
         code: "ENGINE_HEALTH_FAILED",
@@ -4961,7 +4961,7 @@ function createAtlasUiCore(deps) {
       });
       const body = result.body;
       if (state.chatId === null || binding.chatId !== state.chatId) {
-        diagnostic2({
+        diagnostic3({
           level: "debug",
           source: "ui",
           code: "STALE_CHAT_RESPONSE_DROPPED",
@@ -4974,7 +4974,7 @@ function createAtlasUiCore(deps) {
       if (result.status === 200 && body.ok && body.data) {
         const responseChatId = typeof body.data.chatId === "string" ? body.data.chatId : binding.chatId;
         if (responseChatId !== state.chatId) {
-          diagnostic2({
+          diagnostic3({
             level: "warn",
             source: "ui",
             code: "STALE_CHAT_RESPONSE_DROPPED",
@@ -4984,7 +4984,7 @@ function createAtlasUiCore(deps) {
           });
           return;
         }
-        diagnostic2({
+        diagnostic3({
           level: "debug",
           source: "ui",
           code: "STATE_REFRESH_COMPLETE",
@@ -5011,7 +5011,7 @@ function createAtlasUiCore(deps) {
         setState({ mode: "unbound", stateData: null });
         return;
       }
-      diagnostic2({
+      diagnostic3({
         level: "warn",
         source: "ui",
         code: "STATE_REFRESH_FAILED",
@@ -5024,7 +5024,7 @@ function createAtlasUiCore(deps) {
       });
       setState({ lastError: body.error?.message ?? `状态读取失败（HTTP ${result.status}）` });
     } catch {
-      diagnostic2({
+      diagnostic3({
         level: "warn",
         source: "ui",
         code: "STATE_REFRESH_FAILED",
@@ -5045,7 +5045,7 @@ function createAtlasUiCore(deps) {
   }
   let asyncWork = [];
   function track(task) {
-    void task.catch(() => diagnostic2({
+    void task.catch(() => diagnostic3({
       level: "error",
       source: "ui",
       code: "UNEXPECTED_ERROR",
@@ -5106,7 +5106,7 @@ function createAtlasUiCore(deps) {
     if (!adapted) return;
     if (adapted.kind === "message-sent") {
       if (generationGate) {
-        diagnostic2({
+        diagnostic3({
           level: "debug",
           source: "host",
           code: "GENERATION_GATED",
@@ -5135,7 +5135,7 @@ function createAtlasUiCore(deps) {
       }
     } else if (adapted.kind === "generation-ended") {
       if (stoppedGeneration) {
-        diagnostic2({
+        diagnostic3({
           level: "info",
           source: "host",
           code: "GENERATION_STOPPED",
@@ -5146,7 +5146,7 @@ function createAtlasUiCore(deps) {
         return;
       }
       if (generationGate) {
-        diagnostic2({
+        diagnostic3({
           level: "debug",
           source: "host",
           code: "GENERATION_GATED",
@@ -5191,7 +5191,7 @@ function createAtlasUiCore(deps) {
     const resolved = fromHost && fromHost.assistantMessageId && fromHost.assistantText.trim() ? fromHost : lastEndedEvent;
     lastEndedEvent = null;
     if (!resolved || !resolved.assistantMessageId) {
-      diagnostic2({
+      diagnostic3({
         level: "warn",
         source: "host",
         code: "AI_FLOOR_UNRESOLVED",
@@ -5233,7 +5233,7 @@ function createAtlasUiCore(deps) {
     const attempt = (attempts.get(messageId) ?? 0) + 1;
     attempts.set(messageId, attempt);
     activeAttemptId = "attempt-" + attempt;
-    diagnostic2({
+    diagnostic3({
       level: "info",
       source: "host",
       code: "TURN_STARTED",
@@ -5243,7 +5243,7 @@ function createAtlasUiCore(deps) {
     });
     const chatId = state.chatId;
     if (!chatId || state.serviceStatus !== "online") {
-      diagnostic2({
+      diagnostic3({
         level: "warn",
         source: "ui",
         code: "TURN_SKIPPED_NOT_READY",
@@ -5255,7 +5255,7 @@ function createAtlasUiCore(deps) {
       return;
     }
     if (state.pendingTurn) {
-      diagnostic2({
+      diagnostic3({
         level: "info",
         source: "ui",
         code: "TURN_SKIPPED_PENDING",
@@ -5278,7 +5278,7 @@ function createAtlasUiCore(deps) {
       if (disposed) return;
       binding = state.binding;
       if (!ensured || !binding) {
-        diagnostic2({
+        diagnostic3({
           level: "error",
           source: "ui",
           code: "WORLD_ENSURE_FAILED",
@@ -5296,7 +5296,7 @@ function createAtlasUiCore(deps) {
       setState({ worldInitialization: "ready", worldInitializationError: null });
     }
     if (!binding?.enabled) {
-      diagnostic2({
+      diagnostic3({
         level: "info",
         source: "ui",
         code: "GENERATION_GATED",
@@ -5317,7 +5317,7 @@ function createAtlasUiCore(deps) {
     };
     const parsed = parseAtlasTurnPrepareRequest(request);
     if (!parsed.ok) {
-      diagnostic2({
+      diagnostic3({
         level: "error",
         source: "ui",
         code: "PREPARE_REQUEST_INVALID",
@@ -5331,7 +5331,7 @@ function createAtlasUiCore(deps) {
       const result = await api.request("POST", "/turns/prepare", parsed.value);
       const body = result.body;
       if (revision !== generationRevision || state.chatId !== chatId) {
-        diagnostic2({
+        diagnostic3({
           level: "debug",
           source: "ui",
           code: "STALE_PREPARE_DROPPED",
@@ -5344,7 +5344,7 @@ function createAtlasUiCore(deps) {
       if (result.status === 200 && body.ok && body.data?.response) {
         const parsedResponse = parseAtlasTurnPrepareResponse(body.data.response);
         if (!parsedResponse.ok) {
-          diagnostic2({
+          diagnostic3({
             level: "error",
             source: "ui",
             code: "PREPARE_RESPONSE_INVALID",
@@ -5356,7 +5356,7 @@ function createAtlasUiCore(deps) {
           return;
         }
         const response = parsedResponse.value;
-        diagnostic2({
+        diagnostic3({
           level: "info",
           source: "ui",
           code: "PREPARE_COMPLETE",
@@ -5381,7 +5381,7 @@ function createAtlasUiCore(deps) {
       }
       setState({ lastError: body.error?.message ?? `本轮未注入阿特拉斯上下文（HTTP ${result.status}）` });
     } catch {
-      diagnostic2({
+      diagnostic3({
         level: "error",
         source: "ui",
         code: "PREPARE_FAILED",
@@ -5418,7 +5418,7 @@ function createAtlasUiCore(deps) {
       if (pending) {
         swipeIdForNextCommit = rearm.swipeId;
       } else {
-        diagnostic2({
+        diagnostic3({
           level: "warn",
           source: "ui",
           code: "TURN_SKIPPED_NO_PENDING",
@@ -5433,7 +5433,7 @@ function createAtlasUiCore(deps) {
     }
     if (!pending) {
       const gated = !state.binding?.enabled || state.serviceStatus !== "online" || !state.chatId;
-      diagnostic2({
+      diagnostic3({
         level: gated ? "info" : "warn",
         source: "ui",
         code: gated ? "GENERATION_GATED" : "TURN_SKIPPED_NO_PENDING",
@@ -5445,7 +5445,7 @@ function createAtlasUiCore(deps) {
       return;
     }
     if (commitInFlight) {
-      diagnostic2({
+      diagnostic3({
         level: "debug",
         source: "ui",
         code: "DUPLICATE_EVENT",
@@ -5456,7 +5456,7 @@ function createAtlasUiCore(deps) {
       return;
     }
     if (!assistantMessageId || !assistantText || assistantText.trim().length === 0) {
-      diagnostic2({
+      diagnostic3({
         level: "info",
         source: "ui",
         code: "EMPTY_REPLY",
@@ -5495,7 +5495,7 @@ function createAtlasUiCore(deps) {
     };
     const parsed = parseAtlasTurnCommitRequest(request);
     if (!parsed.ok) {
-      diagnostic2({
+      diagnostic3({
         level: "error",
         source: "ui",
         code: "COMMIT_REQUEST_INVALID",
@@ -5510,7 +5510,7 @@ function createAtlasUiCore(deps) {
   }
   async function executeCommitRequest(value, swipeId) {
     commitInFlight = true;
-    diagnostic2({
+    diagnostic3({
       level: "info",
       source: "ui",
       code: "COMMIT_STARTED",
@@ -5525,7 +5525,7 @@ function createAtlasUiCore(deps) {
       const stale = state.chatId !== value.chatId;
       if (result.status === 200 && body.ok && receiptParsed?.ok) {
         const receiptStatus = receiptParsed.value.status;
-        diagnostic2({
+        diagnostic3({
           level: receiptStatus === "failed" ? "error" : "info",
           source: "ui",
           code: receiptStatus === "committed" ? "COMMIT_SUCCEEDED" : receiptStatus === "duplicate" ? "TURN_DUPLICATE" : "COMMIT_FAILED",
@@ -5536,7 +5536,7 @@ function createAtlasUiCore(deps) {
           retryable: receiptParsed.value.retryable,
           details: { coreCommitted: receiptStatus === "committed" || receiptStatus === "duplicate" }
         });
-        if (stale) diagnostic2({
+        if (stale) diagnostic3({
           level: "warn",
           source: "ui",
           code: "STALE_CHAT_RESPONSE_DROPPED",
@@ -5569,7 +5569,7 @@ function createAtlasUiCore(deps) {
         await syncLorebookAfterCommit(body);
         return;
       }
-      diagnostic2({
+      diagnostic3({
         level: "error",
         source: "ui",
         code: "COMMIT_FAILED",
@@ -5594,7 +5594,7 @@ function createAtlasUiCore(deps) {
         }
       });
     } catch {
-      diagnostic2({
+      diagnostic3({
         level: "error",
         source: "ui",
         code: "COMMIT_FAILED",
@@ -5683,7 +5683,7 @@ function createAtlasUiCore(deps) {
     stoppedGeneration = true;
     generationRevision += 1;
     swipeIdForNextCommit = null;
-    diagnostic2({
+    diagnostic3({
       level: "info",
       source: "host",
       code: "GENERATION_STOPPED",
@@ -5861,7 +5861,7 @@ function createAtlasUiCore(deps) {
       const next = visibility === "all" ? "all" : "known";
       if (state.simulationVisibility === next) return;
       setState({ simulationVisibility: next });
-      diagnostic2({
+      diagnostic3({
         level: "info",
         source: "ui",
         code: "SIMULATION_VISIBILITY_CHANGED",
@@ -5995,6 +5995,28 @@ function createAtlasUiCore(deps) {
     waitPendingTurn
   };
 }
+
+// src/atlas-runtime-limits.ts
+var ATLAS_RUNTIME_LIMITS = {
+  responseUtf8Bytes: 256 * 1024,
+  operationsPerResponse: 64,
+  operationUtf8Bytes: 8 * 1024,
+  responseJsonDepth: 16,
+  conditionDepth: 4,
+  repairAttemptsPerBatch: 1,
+  actorsPerDecisionBatch: 24,
+  foregroundModelBatchesPerTurn: 4,
+  pendingCandidateTtlMs: 10 * 60 * 1e3,
+  normalResponseTokens: 4096,
+  repairResponseTokens: 2048,
+  modelTimeoutMs: 12e4,
+  mentionCandidates: 256,
+  locationDepth: 4,
+  containerDepth: 4,
+  actionPlanDepth: 2,
+  detailedAttemptsPerTurn: 20,
+  diagnosticPageSize: 100
+};
 
 // src/atlas-diagnostics.ts
 var LEVELS = /* @__PURE__ */ new Set(["debug", "info", "warn", "error"]);
@@ -8017,8 +8039,8 @@ function branchLineage(world, branchId, at) {
   }
   const ancestorCutoff = (forkAt, basis) => {
     if (forkAt === null) return { cutoffAt: at, basis: "unknown" };
-    const bounded = Math.min(forkAt, at);
-    return { cutoffAt: bounded, basis: basis === "unknown" ? "unknown" : bounded < at ? "fork-anchor" : "projection-end" };
+    const bounded2 = Math.min(forkAt, at);
+    return { cutoffAt: bounded2, basis: basis === "unknown" ? "unknown" : bounded2 < at ? "fork-anchor" : "projection-end" };
   };
   const nearestCanonFork = chain.length > 0 ? chain[chain.length - 1] : null;
   if (nearestCanonFork) {
@@ -12597,6 +12619,503 @@ function applySimulationEffects(input) {
   return { next, events, undo, diagnostics, eventsTruncated, droppedEventCount };
 }
 
+// src/atlas-db-state-adapter.ts
+var LEGACY_ENTITY_CAP = 500;
+function asRecord2(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+function asArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+function str(value) {
+  return typeof value === "string" ? value : typeof value === "number" && Number.isFinite(value) ? String(value) : "";
+}
+function num(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+function jsonObject(value) {
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return asRecord2(parsed);
+    } catch {
+      return {};
+    }
+  }
+  return asRecord2(value);
+}
+function diagnostic2(code, message, details = {}) {
+  return { code, path: "$.metadata", message, severity: "warning", retryable: false, ...details };
+}
+function emptyCollected() {
+  return {
+    worldPoints: [],
+    tableWorldPoints: [],
+    npcs: [],
+    objects: [],
+    submaps: {},
+    pointParents: {},
+    calibrations: {},
+    routes: [],
+    coarseList: [],
+    positionQuality: {},
+    relevantNpcIds: [],
+    nearReasonCode: null,
+    currentLocationId: null,
+    currentTime: 0,
+    rootMapId: null,
+    mapCount: 0,
+    entities: [],
+    changes: [],
+    logs: [],
+    entity: null,
+    simulation: null
+  };
+}
+function legacyMapPoint(point, kind) {
+  const id = str(point.entityId ?? point.id);
+  return {
+    id,
+    name: str(point.name),
+    x: num(point.x) ?? 0,
+    y: num(point.y) ?? 0,
+    regionId: null,
+    kind,
+    rowId: id
+  };
+}
+function legacyNpc(entry, quality) {
+  const id = str(entry.entityId ?? entry.id);
+  return {
+    id,
+    name: str(entry.name),
+    pointId: entry.locationId ? null : str(entry.mapId) || null,
+    regionId: null,
+    x: num(entry.x),
+    y: num(entry.y),
+    reason: entry.relevance === void 0 ? "sameLocation" : String(entry.relevance),
+    status: null,
+    presence: "present",
+    isProtagonist: false,
+    lastConfirmedAt: null,
+    recentNarratives: [],
+    pointName: str(entry.locationName) || null,
+    positionSource: "sql",
+    locationId: entry.locationId ? str(entry.locationId) : null,
+    locationName: entry.locationName ? str(entry.locationName) : null,
+    positionQuality: quality
+  };
+}
+function legacyObject(entry, locationName) {
+  const id = str(entry.entityId ?? entry.id);
+  return {
+    id,
+    name: str(entry.name),
+    type: "item",
+    pointId: str(entry.mapId) || null,
+    regionId: null,
+    x: num(entry.x),
+    y: num(entry.y),
+    description: null,
+    pointName: locationName,
+    positionQuality: str(entry.precision) || "unknown"
+  };
+}
+function collectFromView(view, query, collected) {
+  for (const rawItem of view.items) {
+    const item = asRecord2(rawItem);
+    if (query.kind === "nearby") {
+      const entry = legacyNpc(item, str(item.positionQuality) || "coarse");
+      collected.npcs.push(entry);
+      collected.positionQuality[str(entry.id)] = str(entry.positionQuality);
+      collected.relevantNpcIds.push(str(entry.id));
+      continue;
+    }
+    if (query.kind === "entity") {
+      const kind = str(item.kind);
+      if (kind === "character") {
+        collected.entities.push(item);
+        collected.npcs.push(legacyNpc(item, "coarse"));
+      } else if (kind === "location") {
+        collected.entities.push(item);
+        const location = asRecord2(item.location);
+        const position = asRecord2(item.position);
+        const point = {
+          entityId: str(location.id),
+          name: str(location.name),
+          x: num(location.grid_x),
+          y: num(location.grid_y),
+          mapId: str(location.map_id),
+          precision: str(location.coord_precision)
+        };
+        collected.tableWorldPoints.push(legacyMapPoint(point, "location"));
+        collected.worldPoints.push({ id: str(location.id), name: str(location.name), x: num(location.grid_x) ?? 0, y: num(location.grid_y) ?? 0, regionId: null });
+        collected.positionQuality[str(location.id)] = str(position.kind ?? location.coord_precision ?? "unknown");
+      } else if (kind === "item") {
+        collected.entities.push(item);
+        const row = asRecord2(item.item);
+        collected.objects.push(legacyObject({ entityId: str(row.id), name: str(row.name), mapId: str(row.map_id), x: num(row.grid_x), y: num(row.grid_y), precision: str(row.coord_precision) }, null));
+      } else {
+        collected.entities.push(item);
+      }
+      continue;
+    }
+    const mapId = str(item.mapId);
+    const containerLocationId = item.containerLocationId === null || item.containerLocationId === void 0 ? null : str(item.containerLocationId);
+    if (collected.rootMapId === null && containerLocationId === null) collected.rootMapId = mapId;
+    collected.mapCount += 1;
+    const metersPerCell = num(item.metersPerCell);
+    collected.calibrations[mapId] = {
+      revision: num(item.calibrationRev) ?? 1,
+      metersPerCell,
+      source: "sql",
+      locked: item.scaleLocked === true,
+      basis: "",
+      coverage: "",
+      confidence: str(item.scaleQuality) || "uncalibrated",
+      at: view.revision
+    };
+    const pointsRaw = asArray(item.points).map(asRecord2);
+    const isRoot = containerLocationId === null;
+    for (const point of pointsRaw) {
+      const kind = str(point.kind) || "location";
+      const entityId = str(point.entityId);
+      const legacyPoint = { id: entityId, name: str(point.name), x: num(point.x) ?? 0, y: num(point.y) ?? 0, regionId: null };
+      if (kind === "location") {
+        collected.tableWorldPoints.push({ ...legacyPoint, kind, rowId: entityId });
+        if (isRoot) collected.worldPoints.push(legacyPoint);
+        collected.pointParents[entityId] = mapId;
+      } else if (kind === "character") {
+        collected.npcs.push(
+          legacyNpc(
+            { entityId, name: str(point.name), mapId, x: num(point.x), y: num(point.y) },
+            str(point.markerQuality ?? point.precision) || "exact"
+          )
+        );
+      } else {
+        collected.objects.push(legacyObject({ entityId, name: str(point.name), mapId, x: num(point.x), y: num(point.y), precision: str(point.precision) }, null));
+      }
+      collected.positionQuality[entityId] = str(point.markerQuality ?? point.precision) || "unknown";
+    }
+    const coarse = asArray(item.coarseList).map(asRecord2);
+    for (const entry of coarse) {
+      const entityId = str(entry.entityId);
+      const record = {
+        entityId,
+        name: str(entry.name),
+        locationId: str(entry.locationId),
+        locationName: entry.locationName === null || entry.locationName === void 0 ? null : str(entry.locationName),
+        mapId
+      };
+      collected.coarseList.push({ ...record, positionQuality: "coarse" });
+      collected.npcs.push(legacyNpc(record, "coarse"));
+      collected.positionQuality[entityId] = "coarse";
+    }
+    for (const route of asArray(item.routes).map(asRecord2)) {
+      collected.routes.push({
+        id: str(route.routeId),
+        routeId: str(route.routeId),
+        fromId: str(route.fromId),
+        toId: str(route.toId),
+        kind: str(route.kind),
+        geometryQuality: str(route.geometryQuality),
+        distanceM: num(route.distanceM),
+        dashed: route.dashed === true,
+        allowedModes: asArray(route.allowedModes).map(str)
+      });
+    }
+    collected.submaps[mapId] = {
+      mapId,
+      parentMapId: containerLocationId === null ? "world" : str(containerLocationId),
+      ownerLocationId: containerLocationId,
+      frame: jsonObject(item.frames ? asRecord2(item.frames).frame : {}),
+      scale: { metersPerCell, quality: str(item.scaleQuality) || "uncalibrated" },
+      points: pointsRaw.map((point) => legacyMapPoint(point, str(point.kind) || "location")),
+      total: pointsRaw.length,
+      truncated: 0
+    };
+  }
+}
+function collectOtherKinds(view, query, collected) {
+  if (query.kind === "simulation") {
+    const first = asRecord2(view.items[0]);
+    const clockS = num(first.clockS) ?? 0;
+    collected.currentTime = clockS;
+    collected.simulation = {
+      branchKey: view.branchId,
+      clockS,
+      clockMinS: num(first.clockMinS) ?? clockS,
+      clockMaxS: num(first.clockMaxS) ?? clockS,
+      calendarLabel: first.calendarLabel ?? null,
+      simulationCursorS: num(first.simulationCursorS) ?? clockS,
+      simulationStatus: str(first.simulationStatus) || "current",
+      pendingNotice: first.pendingNotice ?? null,
+      branchKeySource: "sql"
+    };
+    collected.entities = view.items;
+  } else if (query.kind === "changes") {
+    collected.changes = view.items.map((raw) => {
+      const row = asRecord2(raw);
+      return {
+        changeId: str(row.changeId),
+        turnId: str(row.turnId),
+        sequence: num(row.sequence) ?? 0,
+        groupId: str(row.groupId),
+        operationId: str(row.operationId),
+        table: str(row.table),
+        rowId: str(row.rowId),
+        operation: str(row.operation),
+        summary: str(row.summary),
+        turnKind: str(row.turnKind),
+        basis: asRecord2(row.basis)
+      };
+    });
+    collected.entities = view.items;
+  } else if (query.kind === "diagnostics") {
+    collected.logs = view.items;
+    collected.entities = view.items;
+  } else if (query.kind === "prompt") {
+    collected.entities = view.items;
+  }
+}
+function bounded(rows, limit) {
+  if (rows.length <= limit) return { kept: rows, dropped: 0 };
+  return { kept: rows.slice(0, limit), dropped: rows.length - limit };
+}
+function toLegacyStateDto(view, query, options = {}) {
+  const limit = Math.max(1, Math.floor(options.entityLimit ?? LEGACY_ENTITY_CAP));
+  const collected = emptyCollected();
+  if (query.kind === "map" || query.kind === "nearby" || query.kind === "entity") {
+    collectFromView(view, query, collected);
+  } else {
+    collectOtherKinds(view, query, collected);
+  }
+  let remaining = limit;
+  const keptPoints = bounded(collected.worldPoints, Math.max(0, remaining));
+  remaining -= keptPoints.kept.length;
+  const keptNpcs = bounded(collected.npcs, Math.max(0, remaining));
+  remaining -= keptNpcs.kept.length;
+  const keptObjects = bounded(collected.objects, Math.max(0, remaining));
+  const entityTotal = collected.worldPoints.length + collected.npcs.length + collected.objects.length;
+  const returned = keptPoints.kept.length + keptNpcs.kept.length + keptObjects.kept.length;
+  const droppedCount = entityTotal - returned;
+  const truncated = droppedCount > 0;
+  const dropped = {
+    locations: keptPoints.dropped,
+    characters: keptNpcs.dropped,
+    items: keptObjects.dropped
+  };
+  const diagnostics = [];
+  if (truncated) {
+    diagnostics.push(
+      diagnostic2(
+        "LEGACY_ENTITY_CAP_APPLIED",
+        `旧 ${limit} 实体上限是有界投影：本次未显示 ${droppedCount} 行（地点 ${dropped.locations} / 人物 ${dropped.characters} / 物品 ${dropped.items}），数据库未删除任何行`,
+        { droppedCount }
+      )
+    );
+  }
+  const metadata = {
+    kind: query.kind,
+    branchId: view.branchId,
+    revision: view.revision,
+    cap: limit,
+    total: entityTotal,
+    returned,
+    truncated,
+    droppedCount,
+    dropped,
+    diagnostics
+  };
+  const npcTotal = collected.npcs.length;
+  const objectTotal = collected.objects.length;
+  return {
+    // —— 旧字段名（renderMap / renderCenter 直接读）——
+    chatId: null,
+    worldId: null,
+    worldName: null,
+    branchId: view.branchId,
+    branchKey: view.branchId,
+    currentTime: collected.currentTime,
+    currentLocationId: collected.currentLocationId,
+    scene: null,
+    nearbyPointIds: [],
+    relevantNpcIds: collected.relevantNpcIds,
+    npcReasons: {},
+    triggerIds: [],
+    map: {
+      points: keptPoints.kept,
+      pointCount: collected.worldPoints.length,
+      pointParents: collected.pointParents,
+      mapImagePresent: false,
+      mapImageRevision: view.revision,
+      pointMeta: {},
+      submaps: collected.submaps,
+      submapCount: Object.keys(collected.submaps).length,
+      calibrations: collected.calibrations,
+      routes: collected.routes,
+      scaleQuality: Object.values(collected.calibrations).length > 0 ? asRecord2(Object.values(collected.calibrations)[0]).confidence : "uncalibrated",
+      geoTopology: {
+        branchKey: view.branchId,
+        edges: [],
+        areas: [],
+        vehicleAnchors: [],
+        counts: { edges: 0, areas: 0, vehicles: 0 },
+        truncated: { edges: 0, areas: 0, vehicles: 0 }
+      }
+    },
+    npcDirectory: keptNpcs.kept,
+    regions: [],
+    objectDirectory: keptObjects.kept,
+    lastAdvance: null,
+    directoryTotals: {
+      npc: { offset: 0, limit, total: npcTotal, returned: keptNpcs.kept.length, truncated: keptNpcs.dropped },
+      object: { offset: 0, limit, total: objectTotal, returned: keptObjects.kept.length, truncated: keptObjects.dropped },
+      source: "sql"
+    },
+    tableMap: {
+      branchKey: view.branchId,
+      world: {
+        mapId: collected.rootMapId ?? "world",
+        points: collected.tableWorldPoints,
+        total: collected.tableWorldPoints.length,
+        truncated: 0
+      },
+      submaps: collected.submaps,
+      nearby: {
+        entries: keptNpcs.kept,
+        total: npcTotal,
+        truncated: keptNpcs.dropped
+      },
+      objects: {
+        entries: keptObjects.kept,
+        total: objectTotal,
+        truncated: keptObjects.dropped
+      },
+      unknownPosition: [],
+      unplacedLocations: {
+        entries: collected.coarseList.map((entry) => ({
+          id: str(entry.entityId),
+          name: str(entry.name),
+          parentLocationId: str(entry.locationId) || null
+        })),
+        total: collected.coarseList.length,
+        truncated: 0
+      },
+      nearReasonCode: collected.nearReasonCode,
+      locationOccupants: { byLocation: {}, truncated: 0 },
+      current: { locationId: collected.currentLocationId, chain: [] },
+      totals: {
+        locations: collected.worldPoints.length,
+        characters: npcTotal,
+        items: objectTotal,
+        submaps: Object.keys(collected.submaps).length
+      },
+      dropped: { locations: keptPoints.dropped }
+    },
+    simulationView: collected.simulation,
+    changes: collected.changes,
+    logs: collected.logs,
+    entity: collected.entity,
+    // —— 新字段（H12：UI 不得用缺省 0 补未知坐标）——
+    revision: view.revision,
+    positionQuality: collected.positionQuality,
+    coarseList: collected.coarseList,
+    entities: collected.entities,
+    metadata
+  };
+}
+function toLegacyTurnReceipt(receipt, options = {}) {
+  const groups = Array.isArray(receipt.groups) ? receipt.groups : [];
+  const issues = Array.isArray(receipt.issues) ? receipt.issues : [];
+  const succeeded = groups.filter((group) => group.status === "applied" || group.status === "duplicate");
+  const rejected = groups.filter((group) => group.status === "rejected" || group.status === "blocked");
+  let status;
+  if (succeeded.length === 0 && !receipt.timeChanged && !receipt.worldChanged) {
+    status = receipt.status === "noop" ? "noop" : "failed";
+  } else if (receipt.status === "noop" && succeeded.length === 0) {
+    status = "noop";
+  } else {
+    status = "committed";
+  }
+  const warnings = issues.filter((item) => item.severity === "warning").map((item) => ({ code: item.code, path: item.path, message: item.message, retryable: item.retryable }));
+  return {
+    receiptId: receipt.turnId,
+    turnId: receipt.turnId,
+    status,
+    branchId: receipt.anchor.branchId,
+    rejectedGroups: rejected.map((group) => group.groupId),
+    warnings,
+    coreSaved: options.coreSaved ?? null,
+    previousTime: receipt.clockBeforeS,
+    currentTime: receipt.clockAfterS,
+    previousLocationId: null,
+    currentLocationId: null,
+    triggeredNpcIds: [],
+    adoptedEventIds: [],
+    summary: `统一回执：成功组 ${succeeded.length}，失败组 ${rejected.length}，时间 ${receipt.clockBeforeS}→${receipt.clockAfterS}`,
+    retryable: rejected.length > 0,
+    // 新接口读这里（完整分组与问题，不再另造一份 snake_case 回执）。
+    receipt: {
+      turnId: receipt.turnId,
+      anchor: receipt.anchor,
+      status: receipt.status,
+      groups,
+      issues,
+      clockBeforeS: receipt.clockBeforeS,
+      clockAfterS: receipt.clockAfterS,
+      simulatedUntilS: receipt.simulatedUntilS,
+      worldChanged: receipt.worldChanged,
+      timeChanged: receipt.timeChanged
+    },
+    groups,
+    issues,
+    groupCounts: {
+      applied: groups.filter((group) => group.status === "applied").length,
+      duplicate: groups.filter((group) => group.status === "duplicate").length,
+      rejected: rejected.length
+    }
+  };
+}
+function toPovStateDto(projection, options = {}) {
+  const viewMode = options.viewMode === "author" ? "author" : "pov";
+  const injectedScope = {
+    povId: projection.povId,
+    isPovRow: projection.isPovRow,
+    knownFacts: projection.knownFacts,
+    knownLocations: projection.knownLocations,
+    knownCharacters: projection.knownCharacters,
+    lastSeen: projection.lastSeen,
+    boundaries: projection.boundaries
+  };
+  const authorOnly = {
+    truthForAuthor: projection.knownFacts.map((fact) => ({ informationId: fact.informationId, truthStatus: fact.truthForAuthor })),
+    secretChannels: projection.knownChannels.filter((channel) => channel.kind === "surveillance"),
+    note: "作者视图只改 UI 过滤：以下内容不会因为切到作者图而进入正文注入范围（§10.4）"
+  };
+  return {
+    viewMode,
+    revision: null,
+    injectedScope,
+    promptScope: [...projection.boundaries],
+    knownFacts: projection.knownFacts,
+    knownLocations: projection.knownLocations,
+    knownCharacters: projection.knownCharacters,
+    lastSeen: projection.lastSeen,
+    ui: {
+      viewMode,
+      filter: viewMode === "author" ? "author" : "pov",
+      showAuthorTruth: viewMode === "author",
+      showSecretChannels: viewMode === "author",
+      showHiddenThoughts: viewMode === "author",
+      // 只影响显示；注入用上面的 injectedScope。
+      displayOnly: true,
+      authorOnly
+    },
+    injectionUnchangedByViewMode: true
+  };
+}
+
 // src/atlas-server.ts
 var ATLAS_SESSION_SCHEMA_VERSION = 1;
 var SESSION_TURNS_MAX = 2e3;
@@ -12996,7 +13515,7 @@ async function ensureSessionTables(options) {
   const { session, parse } = options;
   const emit = (level, outcome, code, reasonCode, count) => {
     try {
-      const diagnostic2 = sanitizeDiagnostic({
+      const diagnostic3 = sanitizeDiagnostic({
         level,
         source: "storage",
         code,
@@ -13005,7 +13524,7 @@ async function ensureSessionTables(options) {
         outcome,
         details: { reasonCode, ...count !== void 0 ? { count } : {} }
       }, options.now);
-      if (diagnostic2) options.onDiagnostic?.(diagnostic2);
+      if (diagnostic3) options.onDiagnostic?.(diagnostic3);
     } catch {
     }
   };
@@ -13953,7 +14472,7 @@ function createCoreInstance(store, deps, shared) {
       return void 0;
     })() : void 0;
     const errorCount = typeof entry.errorCount === "number" && Number.isInteger(entry.errorCount) ? entry.errorCount : void 0;
-    const diagnostic2 = sanitizeDiagnostic({
+    const diagnostic3 = sanitizeDiagnostic({
       level,
       source: "engine",
       code: kind.toUpperCase().replace(/-/g, "_"),
@@ -13975,9 +14494,9 @@ function createCoreInstance(store, deps, shared) {
         ...typeof entry.coreCommitted === "boolean" ? { coreCommitted: entry.coreCommitted } : {}
       }
     }, now);
-    if (diagnostic2) {
+    if (diagnostic3) {
       try {
-        deps.onDiagnostic?.(diagnostic2);
+        deps.onDiagnostic?.(diagnostic3);
       } catch {
       }
     }
@@ -14150,7 +14669,7 @@ ${rejectedBlock}` : "");
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.60.1",
+      version: "0.9.60.2",
       protocolVersion: 1,
       time: now()
     });
@@ -17495,6 +18014,378 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
   }
   return { handle };
 }
+async function loadSqlRuntime() {
+  const specifier = "./atlas-sql-session.ts";
+  try {
+    const mod = await import(specifier);
+    if (typeof mod.loadAtlasSqlRuntime !== "function") return null;
+    return await mod.loadAtlasSqlRuntime();
+  } catch {
+    return null;
+  }
+}
+function sqlIssue(code, message, severity = "error", retryable = false) {
+  return { code, path: "$", message, severity, retryable };
+}
+function sqlInt(value) {
+  return typeof value === "number" && Number.isFinite(value) ? Math.floor(value) : null;
+}
+function sqlText(value) {
+  return typeof value === "string" ? value : "";
+}
+function sqlErrorResult(thrown) {
+  const candidate = thrown;
+  if (candidate && typeof candidate.code === "string" && candidate.code.length > 0) {
+    const code = candidate.code;
+    const status = code === "STALE_BASE" || code === "CHAT_CHANGED" || code === "SESSION_STALE" || code === "CANDIDATE_UNKNOWN" ? 409 : code === "INVALID_PAYLOAD" ? 400 : 500;
+    return {
+      status,
+      body: {
+        ok: false,
+        error: {
+          code,
+          message: String(candidate.message ?? code),
+          details: isPlainRecord(candidate.detail) ? candidate.detail : {},
+          retryable: false
+        }
+      }
+    };
+  }
+  return errorResult(thrown);
+}
+function createAtlasSqlRouteGroup(deps) {
+  const sessions = /* @__PURE__ */ new Map();
+  const now = deps.now ?? (() => Date.now());
+  let runtimePromise = null;
+  function enabled() {
+    return deps.repository !== null && deps.repository !== void 0;
+  }
+  function sqlRuntime() {
+    if (deps.runtime) return Promise.resolve(deps.runtime);
+    if (!runtimePromise) runtimePromise = loadSqlRuntime();
+    return runtimePromise;
+  }
+  function hostFor(chatUid) {
+    if (!deps.host) return null;
+    return typeof deps.host === "function" ? deps.host(chatUid) : deps.host;
+  }
+  function requireChatUid(body) {
+    const chatUid = sqlText(body.chatUid);
+    if (chatUid.length === 0) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "SQL 路由需要宿主聊天身份 chatUid");
+    }
+    return chatUid;
+  }
+  function disabled(route) {
+    return okResult({
+      sqlMode: false,
+      code: "SQL_MODE_DISABLED",
+      route,
+      receipt: null,
+      coreSaved: false,
+      revision: null,
+      groups: [],
+      state: null,
+      issues: [
+        sqlIssue(
+          "SQL_MODE_DISABLED",
+          `SQL 世界数据未启用（未注入 Repository）：${route} 不做任何写入，也不创建空世界`,
+          "error",
+          false
+        )
+      ]
+    });
+  }
+  function unavailable(route) {
+    return okResult({
+      sqlMode: true,
+      code: "SQL_RUNTIME_UNAVAILABLE",
+      route,
+      receipt: null,
+      coreSaved: false,
+      revision: null,
+      groups: [],
+      state: null,
+      issues: [
+        sqlIssue(
+          "SQL_RUNTIME_UNAVAILABLE",
+          `SQL 模式已注入 Repository，但取不到 SQL 运行时（注入 sqlRuntime，或让加载器能解析 ${route} 需要的模块）：本路由不做任何写入`,
+          "error",
+          true
+        )
+      ]
+    });
+  }
+  async function sessionFor(chatUid, branchId, runtime) {
+    const existing = sessions.get(chatUid);
+    if (existing && !existing.closed) return existing;
+    const host = hostFor(chatUid);
+    if (!host || !isPlainRecord(host.chatMetadata)) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, `SQL 模式缺少聊天落点（chatMetadata）：${chatUid}`);
+    }
+    const opened = await runtime.openSqlSession({
+      chatUid,
+      branchId,
+      chatMetadata: host.chatMetadata,
+      // 宿主没有保存函数时不能伪造成功：宿主端口会返回失败并保持 coreSaved=false。
+      saveSession: typeof host.saveSession === "function" ? host.saveSession : async () => {
+        throw new Error("HOST_SAVE_UNAVAILABLE：宿主没有提供保存函数（sqlHost.saveSession）");
+      },
+      writeSession: host.writeSession ?? void 0,
+      modelPort: deps.modelPort ?? null,
+      now,
+      confirmSave: host.confirmSave,
+      repository: deps.repository,
+      lorebookPort: deps.lorebookPort ?? null,
+      buildProjection: deps.buildProjection
+    });
+    sessions.set(chatUid, opened);
+    return opened;
+  }
+  function headOf(session) {
+    try {
+      return session.repo.internal.currentHeadTurnId();
+    } catch {
+      return null;
+    }
+  }
+  function revisionOf(session) {
+    try {
+      return session.repo.internal.currentRevision();
+    } catch {
+      return 0;
+    }
+  }
+  function anchorFromBody(body, session, tag) {
+    return {
+      chatUid: session.chatUid,
+      branchId: session.branchId,
+      parentTurnId: headOf(session),
+      hostMessageUid: sqlText(body.hostMessageUid) || `${tag}:${session.chatUid}`,
+      variantKey: sqlText(body.variantKey) || tag,
+      baseRevision: sqlInt(body.baseRevision) ?? revisionOf(session),
+      baseStorageRevision: session.repo.storageRevision,
+      inputHash: sqlText(body.inputHash) || tag
+    };
+  }
+  async function handle(method, route, body, _ctx = {}) {
+    if (!enabled()) return disabled(route);
+    if (method !== "POST") {
+      return { status: 400, body: { ok: false, error: { code: "INVALID_PAYLOAD", message: `SQL 路由只接受 POST：${method} ${route}`, details: {}, retryable: false } } };
+    }
+    try {
+      const record = isPlainRecord(body) ? body : {};
+      const chatUid = requireChatUid(record);
+      const branchId = sqlText(record.branchId) || void 0;
+      const runtime = await sqlRuntime();
+      if (!runtime) return unavailable(route);
+      if (route === "/sql/turn") {
+        const session = await sessionFor(chatUid, branchId, runtime);
+        const input = {
+          anchor: {
+            chatUid,
+            branchId: session.branchId,
+            parentTurnId: headOf(session),
+            hostMessageUid: sqlText(record.hostMessageUid),
+            variantKey: sqlText(record.variantKey),
+            baseRevision: sqlInt(record.baseRevision) ?? revisionOf(session),
+            baseStorageRevision: session.repo.storageRevision,
+            inputHash: sqlText(record.inputHash)
+          },
+          userText: sqlText(record.userText),
+          assistantText: sqlText(record.assistantText),
+          sourceSnapshot: Array.isArray(record.sourceSnapshot) ? record.sourceSnapshot : [],
+          phaseBatches: Array.isArray(record.phaseBatches) && record.phaseBatches.length > 0 ? record.phaseBatches : ["observe"],
+          manual: record.manual === true,
+          operations: Array.isArray(record.operations) ? record.operations : void 0
+        };
+        const result = await runtime.runSqlTurn(session, input);
+        return okResult({
+          receipt: result.receipt,
+          coreSaved: result.coreSaved,
+          revision: revisionOf(session),
+          groups: result.receipt.groups,
+          issues: result.issues,
+          // §6.3：旧接口字段只在读取适配器里转换（partial → committed + rejectedGroups）。
+          legacyReceipt: toLegacyTurnReceipt(result.receipt, { coreSaved: result.coreSaved })
+        });
+      }
+      if (route === "/sql/retry") {
+        const session = await sessionFor(chatUid, branchId, runtime);
+        const turnId = sqlText(record.turnId);
+        const groups = Array.isArray(record.groups) ? record.groups : [];
+        const result = runtime.retryFailedGroups({
+          db: session.repo.db,
+          branchId: session.branchId,
+          chatUid,
+          turnId,
+          currentHeadTurnId: record.currentHeadTurnId === void 0 ? headOf(session) : record.currentHeadTurnId === null ? null : sqlText(record.currentHeadTurnId),
+          attemptId: sqlText(record.attemptId) || `retry_${turnId}`,
+          groups,
+          appliedKeys: new Set((Array.isArray(record.appliedKeys) ? record.appliedKeys : []).map(String)),
+          clockS: sqlInt(record.clockS) ?? 0
+        });
+        const issues = [...result.issues];
+        let coreSaved = false;
+        if (result.status === "applied" || result.status === "duplicate") {
+          const maintenance = await session.repo.prepareMaintenance({
+            anchor: anchorFromBody(record, session, `retry:${turnId}`)
+          });
+          const persisted = await runtime.persistSqlSession(session, { commit: maintenance });
+          issues.push(...persisted.issues);
+          coreSaved = persisted.saved;
+        }
+        return okResult({
+          status: result.status,
+          coreSaved,
+          revision: revisionOf(session),
+          groups: result.groups,
+          issues
+        });
+      }
+      if (route === "/sql/rollback") {
+        const session = await sessionFor(chatUid, branchId, runtime);
+        const result = await runtime.runSqlRollback(session, {
+          chatUid,
+          branchId: session.branchId,
+          targetParentTurnId: sqlText(record.targetParentTurnId),
+          expectedRevision: sqlInt(record.expectedRevision) ?? revisionOf(session)
+        });
+        return okResult({
+          receipt: result.receipt,
+          coreSaved: result.coreSaved,
+          revision: revisionOf(session),
+          groups: result.receipt.groups,
+          issues: result.issues,
+          legacyReceipt: toLegacyTurnReceipt(result.receipt, { coreSaved: result.coreSaved })
+        });
+      }
+      if (route === "/sql/state") {
+        const session = await sessionFor(chatUid, branchId, runtime);
+        const kind = sqlText(record.kind) || "map";
+        const viewMode = record.viewMode === "author" ? "author" : record.viewMode === "pov" ? "pov" : void 0;
+        const povId = sqlText(record.povId) || void 0;
+        const revision = sqlInt(record.revision) ?? void 0;
+        const entityLimit = sqlInt(record.entityLimit) ?? void 0;
+        if (kind === "prompt") {
+          const projection = runtime.projectPromptView(
+            { db: session.repo.db, branchId: session.branchId },
+            {
+              povId: povId ?? null,
+              sceneLocationId: sqlText(record.sceneLocationId) || null,
+              actorIds: (Array.isArray(record.actorIds) ? record.actorIds : []).map(String),
+              viewMode
+            }
+          );
+          return okResult({
+            kind,
+            branchId: session.branchId,
+            revision: revisionOf(session),
+            state: toPovStateDto(projection.pov, { viewMode }),
+            promptScope: projection.promptScope,
+            portrayal: projection.portrayal,
+            nextCursor: null,
+            metadata: { kind, viewMode: viewMode ?? "pov", injectionUnchangedByViewMode: true },
+            issues: []
+          });
+        }
+        const query = {
+          kind,
+          branchId: session.branchId,
+          revision,
+          mapId: sqlText(record.mapId) || void 0,
+          entityId: sqlText(record.entityId) || void 0,
+          povId,
+          viewMode,
+          cursor: sqlText(record.cursor) || void 0,
+          limit: sqlInt(record.limit) ?? void 0
+        };
+        const view = await session.repo.queryView(query);
+        const state = toLegacyStateDto(view, query, entityLimit === void 0 ? {} : { entityLimit });
+        return okResult({
+          kind,
+          branchId: view.branchId,
+          revision: view.revision,
+          state,
+          metadata: state.metadata ?? {},
+          nextCursor: view.nextCursor ?? null,
+          issues: []
+        });
+      }
+      if (route === "/sql/maintenance") {
+        const session = await sessionFor(chatUid, branchId, runtime);
+        const anchor = anchorFromBody(record, session, "maintenance");
+        const input = {
+          anchor,
+          outboxResults: Array.isArray(record.outboxResults) ? record.outboxResults : void 0,
+          failedAttempt: isPlainRecord(record.failedAttempt) ? record.failedAttempt : void 0
+        };
+        const maintenance = await session.repo.prepareMaintenance(input);
+        const persisted = await runtime.persistSqlSession(session, { commit: maintenance });
+        return okResult({
+          coreSaved: persisted.saved,
+          revision: revisionOf(session),
+          storageRevision: session.repo.storageRevision,
+          envelope: persisted.envelope ? { sha256: persisted.envelope.sha256, byte_length: persisted.envelope.byte_length, storage_revision: persisted.envelope.storage_revision } : null,
+          issues: persisted.issues
+        });
+      }
+      if (route === "/sql/migrate") {
+        const host = hostFor(chatUid);
+        if (!host || !isPlainRecord(host.chatMetadata)) {
+          throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, `SQL 迁移缺少聊天落点（chatMetadata）：${chatUid}`);
+        }
+        const result = await runtime.migrateSessionToSql({
+          chatUid,
+          branchId,
+          chatMetadata: host.chatMetadata,
+          saveSession: typeof host.saveSession === "function" ? host.saveSession : async () => {
+            throw new Error("HOST_SAVE_UNAVAILABLE：宿主没有提供保存函数（sqlHost.saveSession）");
+          },
+          writeSession: host.writeSession ?? void 0,
+          modelPort: deps.modelPort ?? null,
+          now,
+          confirmSave: host.confirmSave,
+          repository: deps.repository,
+          legacy: record.legacy ?? record.session ?? record
+        });
+        return okResult({
+          inspection: result.inspection,
+          mapped: result.mapped,
+          backup: result.backup,
+          counts: result.counts,
+          saved: result.saved,
+          coreSaved: result.saved,
+          issues: result.issues
+        });
+      }
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, `未知 SQL 路由：${method} ${route}`);
+    } catch (thrown) {
+      return sqlErrorResult(thrown);
+    }
+  }
+  return {
+    handle,
+    enabled,
+    sessionCount() {
+      return sessions.size;
+    },
+    async close() {
+      const runtime = await sqlRuntime();
+      if (!runtime) {
+        sessions.clear();
+        return;
+      }
+      for (const session of sessions.values()) {
+        try {
+          await runtime.closeSqlSession(session);
+        } catch {
+        }
+      }
+      sessions.clear();
+    }
+  };
+}
 function createAtlasServerCore(deps) {
   const shared = {
     rpmTimestamps: [],
@@ -17505,10 +18396,22 @@ function createAtlasServerCore(deps) {
     ensureMutex: /* @__PURE__ */ new Map()
   };
   const globalCore = createCoreInstance(deps.store, deps, shared);
+  const sqlRouteGroup = createAtlasSqlRouteGroup({
+    repository: deps.sqlRepository ?? null,
+    modelPort: deps.sqlModelPort ?? null,
+    host: deps.sqlHost ?? null,
+    lorebookPort: deps.sqlLorebookPort ?? null,
+    buildProjection: deps.sqlBuildProjection,
+    now: deps.now,
+    runtime: deps.sqlRuntime ?? null
+  });
   async function handle(method, path, body, ctx = {}) {
     try {
       const [, cleanPath = ""] = path.match(/^\/api\/plugins\/atlas(\/.*)$/) ?? [null, path];
       const route = (cleanPath ?? path).replace(/\/+$/, "") || "/";
+      if (route.startsWith("/sql/")) {
+        return await sqlRouteGroup.handle(method, route, body, ctx);
+      }
       if (!ATLAS_SESSION_ROUTES.has(`${method} ${route}`)) {
         return await globalCore.handle(method, path, body, ctx);
       }
@@ -17591,6 +18494,14 @@ function createAtlasServerCore(deps) {
     /** 测试辅助：注入设置（跳过 PUT 校验流程；仅供测试进程使用） */
     __setSettingsForTest(next) {
       shared.settingsOverride = { ...createDefaultSettingsV2(), ...next };
+    },
+    /** H13：SQL 世界数据模式的只读状态（注入 Repository 才算启用）。 */
+    sqlMode() {
+      return { enabled: sqlRouteGroup.enabled(), sessions: sqlRouteGroup.sessionCount() };
+    },
+    /** 关闭钩子：释放 SQL 会话与候选库（正式流程里会话由浏览器/宿主持有）。 */
+    async closeSqlSessions() {
+      await sqlRouteGroup.close();
     }
   };
 }
@@ -19102,7 +20013,7 @@ var LAYER_LABELS = {
   faction: "势力范围（已确证归属）",
   signal: "消息已达热区（已送达地点）"
 };
-function asRecord2(value) {
+function asRecord3(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;
 }
 function readText(value) {
@@ -19112,7 +20023,7 @@ function isAreaEvidence(value) {
   return value === "worldbook" || value === "story" || value === "manual";
 }
 function normalizeFrame2(raw) {
-  const record = asRecord2(raw);
+  const record = asRecord3(raw);
   const cols = Number(record?.cols);
   const rows = Number(record?.rows);
   return {
@@ -19126,7 +20037,7 @@ function clampAreaOpacity(value) {
   return Math.min(raw, COLOR_AREA_MAX_OPACITY);
 }
 function normalizeLayers(raw) {
-  const record = asRecord2(raw);
+  const record = asRecord3(raw);
   return {
     area: record?.area !== false,
     // 默认只开区块
@@ -19157,7 +20068,7 @@ function sanitizeAreaCells(rawCells, frame) {
   const seen = /* @__PURE__ */ new Set();
   const cells = [];
   for (const item of Array.isArray(rawCells) ? rawCells : []) {
-    const record = asRecord2(item);
+    const record = asRecord3(item);
     const x = Number(record?.x);
     const y = Number(record?.y);
     if (!Number.isInteger(x) || !Number.isInteger(y)) {
@@ -19252,7 +20163,7 @@ function projectColorAreas(input) {
   const halos = [];
   const centers = /* @__PURE__ */ new Map();
   for (const item of Array.isArray(source.locationCenters) ? source.locationCenters : []) {
-    const record = asRecord2(item);
+    const record = asRecord3(item);
     if (!record) continue;
     const locationId = readText(record.locationId);
     if (locationId === "" || centers.has(locationId)) continue;
@@ -19261,12 +20172,12 @@ function projectColorAreas(input) {
     const inFrame = Number.isFinite(x) && Number.isFinite(y) && x >= 0 && x < frame.cols && y >= 0 && y < frame.rows;
     centers.set(locationId, { x: Number.isFinite(x) ? x : 0, y: Number.isFinite(y) ? y : 0, inFrame });
   }
-  const topologyRecord = asRecord2(source.topology);
+  const topologyRecord = asRecord3(source.topology);
   const rawAreas = Array.isArray(topologyRecord?.areas) ? topologyRecord?.areas : [];
   const sanitized = [];
   const seenAreaIds = /* @__PURE__ */ new Set();
   for (const item of rawAreas) {
-    const record = asRecord2(item);
+    const record = asRecord3(item);
     if (!record) {
       skipped.push({ layer: null, areaId: "", locationId: "", reason: "INVALID_AREA", detail: "areas[i] 不是对象：不投影" });
       continue;
@@ -19469,14 +20380,14 @@ var ATLAS_MAP_LAYOUT_MIN_FRAME = 3;
 var ATLAS_MAP_LAYOUT_CONFIRMED_STATUS = "confirmed";
 var ATLAS_MAP_LAYOUT_SCHEMATIC_STATUS = "schematic";
 var compareText2 = (left, right) => left < right ? -1 : left > right ? 1 : 0;
-function asRecord3(value) {
+function asRecord4(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;
 }
 function readText2(value) {
   return typeof value === "string" ? value : "";
 }
 function normalizeFrame3(raw) {
-  const record = asRecord3(raw);
+  const record = asRecord4(raw);
   const cols = Number(record?.cols);
   const rows = Number(record?.rows);
   return {
@@ -19542,7 +20453,7 @@ function layoutUnplacedMarkers(input) {
   const occupied = /* @__PURE__ */ new Set();
   const confirmedCellById = /* @__PURE__ */ new Map();
   for (const entry of Array.isArray(source.confirmed) ? source.confirmed : []) {
-    const record = asRecord3(entry);
+    const record = asRecord4(entry);
     const id = readText2(record?.id);
     if (id === "") {
       droppedConfirmed.push({ id, reason: "INVALID_ID" });
@@ -19561,7 +20472,7 @@ function layoutUnplacedMarkers(input) {
   confirmed.sort((left, right) => compareText2(left.id, right.id) || left.x - right.x || left.y - right.y);
   const anchorByLocationId = /* @__PURE__ */ new Map();
   for (const item of Array.isArray(source.vehicles) ? source.vehicles : []) {
-    const record = asRecord3(item);
+    const record = asRecord4(item);
     if (!record) continue;
     const key = readText2(record.locationId) || readText2(record.id);
     if (key !== "" && !anchorByLocationId.has(key)) anchorByLocationId.set(key, record);
@@ -19570,7 +20481,7 @@ function layoutUnplacedMarkers(input) {
   const pending = [];
   const seenIds = /* @__PURE__ */ new Set();
   for (const entry of Array.isArray(source.unplaced) ? source.unplaced : []) {
-    const record = asRecord3(entry);
+    const record = asRecord4(entry);
     const id = readText2(record?.id);
     const name = readText2(record?.name) || id;
     if (id === "") {

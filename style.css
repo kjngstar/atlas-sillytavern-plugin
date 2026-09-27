@@ -1279,6 +1279,129 @@
   pointer-events: none;
 }
 
+/* ---------------------------------------------------------------------------
+   H05–H08 / H12（0.9.61）：SQL 世界数据模式的 UI
+   - 只在显式开启「SQL 世界数据」后出现；关闭时这些元素全部 display:none，
+     旧路径的观感与布局一字不变。
+   - 左下角仍然只有比例尺这一条常驻控件（H09–H11 不动）：粗名单 / 备注都在右上，
+     且不是常驻控件。
+   --------------------------------------------------------------------------- */
+
+/* H06（§10.2）：只知地点、位置未细分的人物名单（绝不放成叠在地点上的人物图标） */
+.aw-sql-roster {
+  position: absolute;
+  top: 52px;
+  left: 10px;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: min(260px, 52%);
+  max-height: 45%;
+  overflow: auto;
+  padding: 7px;
+  border: 1px solid var(--am-border, #b3ab92);
+  border-radius: 4px;
+  background: var(--aw-veil);
+  box-shadow: 0 2px 12px rgba(16, 27, 29, 0.15);
+}
+.aw-sql-roster__title {
+  color: var(--aw-ink-soft);
+  font: 10px var(--aw-sans);
+}
+.aw-sql-roster__row {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  font: 11px var(--aw-sans);
+  color: var(--aw-ink);
+}
+.aw-sql-roster__loc {
+  flex: 0 0 auto;
+  color: var(--aw-teal);
+  font-weight: 700;
+}
+.aw-sql-roster__names {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--aw-ink-strong);
+}
+.aw-sql-roster__hint {
+  color: var(--aw-muted);
+  font: 10px var(--aw-sans);
+}
+
+/* H06：SQL 核心 / 视图缺失的具名提示（fallback 时可见，绝不静默） */
+.aw-sql-note {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 5;
+  max-width: min(420px, 72%);
+  margin: 0;
+}
+
+/* H06（§10.2）：估计路线说明（虚线几何不是已确认真实位置） */
+.aw-route-note {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  z-index: 4;
+  max-width: min(320px, 60%);
+  margin: 0;
+  font: 10px var(--aw-sans);
+}
+
+/* H06：近似落点的人物标点（带范围 / 估计角标），与已确认点视觉可分 */
+.aw-object.is-estimated {
+  border-style: dashed;
+}
+.aw-object__range {
+  flex: 0 0 auto;
+  margin-left: 3px;
+  color: var(--aw-muted);
+  font: 10px var(--aw-sans);
+  font-variant-numeric: tabular-nums;
+}
+
+/* H07：SQL 附近卡片的位置质量标签 */
+.aw-tag--quality {
+  border-color: var(--aw-teal-line);
+  color: var(--aw-teal);
+}
+
+/* H08：SQL 单一时间线日志（回执错误与日志条目共用同一个 log ID） */
+.aw-sqllog .aw-log--sql .aw-log__row {
+  align-items: baseline;
+}
+.aw-log__row--issue {
+  padding-left: 22px;
+  border-left: 2px solid var(--aw-danger);
+}
+.aw-log__anchor,
+.aw-log__link {
+  flex: 0 0 auto;
+  color: var(--aw-teal);
+  font: 11px var(--aw-sans);
+  text-decoration: underline;
+}
+.aw-sqllog__export {
+  text-decoration: none;
+}
+
+/* 设置抽屉里的模式开关说明块（settings.html） */
+.atlas-settings-block {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--aw-line);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.atlas-settings-block code {
+  font-size: 12px;
+}
+
 /* 0.9.50 动态标尺条：条长按候选标尺距离真实绘制；可展开标定详情 */
 
 .aw-scale {

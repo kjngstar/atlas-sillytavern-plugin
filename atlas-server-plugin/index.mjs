@@ -16,7 +16,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const ATLAS_PLUGIN_ID = "atlas";
-export const ATLAS_PLUGIN_VERSION = "0.9.60.1";
+export const ATLAS_PLUGIN_VERSION = "0.9.60.2";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_API_BASE = "/api/plugins/atlas";
 
@@ -49,6 +49,14 @@ export const ATLAS_PLUGIN_ROUTES = [
   { method: "POST", path: "/map/travel-preview" },
   { method: "POST", path: "/session/export" },
   { method: "POST", path: "/session/purge" },
+  // H01–H04/H13：SQL 世界数据路由（opt-in）。未启用时核心回 SQL_MODE_DISABLED，
+  // 而不是 404 —— 缺口要在回执里可见，不能让 UI 以为接口不存在。
+  { method: "POST", path: "/sql/turn" },
+  { method: "POST", path: "/sql/retry" },
+  { method: "POST", path: "/sql/rollback" },
+  { method: "POST", path: "/sql/state" },
+  { method: "POST", path: "/sql/maintenance" },
+  { method: "POST", path: "/sql/migrate" },
 ];
 
 function isoNow() {
@@ -211,7 +219,14 @@ async function loadCore(dataDir, fetchFn) {
     try {
       const mod = await import(new URL(specifier, import.meta.url).href);
       if (typeof mod.createAtlasServerCore !== "function") throw new Error("模块缺少 createAtlasServerCore 导出");
-      return mod.createAtlasServerCore({ store, ...(fetchFn ? { fetchFn } : {}) });
+      /**
+       * H13：Node 模式注入 SQL 运行时（同一入口的另一平台产物）。
+       * 不注入的话，核心的运行期模块名解析在发布形态下找不到 `./atlas-sql-session.ts`，
+       * `/sql/*` 只能回 SQL_RUNTIME_UNAVAILABLE。注入失败时**不吞掉**：把原因记进
+       * 核心的具名诊断依赖（sqlRuntime: null），由 `/sql/*` 回执如实呈现。
+       */
+      const sqlRuntime = await loadSqlRuntimeForNode();
+      return mod.createAtlasServerCore({ store, ...(fetchFn ? { fetchFn } : {}), sqlRuntime });
     } catch (error) {
       lastError = error;
     }
@@ -246,6 +261,24 @@ function requestPathFor(req) {
       ? req.originalUrl
       : `${req?.baseUrl ?? ""}${req?.path ?? req?.url ?? ""}`;
   return raw.split("?")[0] || "/";
+}
+
+/**
+ * H13：为 Node 模式解析 SQL 运行时。
+ * 顺序：组件内 dist 产物（发布形态）→ 上级 src（开发形态）。
+ * 返回 null 时不是「静默降级」：`/sql/*` 会回 SQL_RUNTIME_UNAVAILABLE 并把原因写进回执。
+ */
+async function loadSqlRuntimeForNode() {
+  const attempts = ["./dist/atlas-sql.mjs", "../src/atlas-sql-browser-entry.ts"];
+  for (const specifier of attempts) {
+    try {
+      const mod = await import(new URL(specifier, import.meta.url).href);
+      if (typeof mod.loadAtlasSqlRuntime === "function") return await mod.loadAtlasSqlRuntime();
+    } catch {
+      // 下一个候选；两个都失败则返回 null（由回执如实报告）
+    }
+  }
+  return null;
 }
 
 /**
@@ -303,6 +336,14 @@ export async function init(router, options = {}) {
   post({ path: "/map/travel-preview" });
   post({ path: "/session/export" });
   post({ path: "/session/purge" });
+  // H01–H04/H13：SQL 世界数据路由（opt-in 模式；未启用时核心返回 SQL_MODE_DISABLED，
+  // 不是 404 —— 缺口必须在回执里可见，而不是让 UI 以为接口不存在）。
+  post({ path: "/sql/turn" });
+  post({ path: "/sql/retry" });
+  post({ path: "/sql/rollback" });
+  post({ path: "/sql/state" });
+  post({ path: "/sql/maintenance" });
+  post({ path: "/sql/migrate" });
 
   return { core };
 }
