@@ -180,6 +180,8 @@ test("D05：/state 的 simulationView 能读回已归档行动，并带真实 co
   assert.equal(typeof view.currentLocationKnown, "boolean");
   assert.equal(view.visibility, "known", "默认只出「已知」");
   assert.equal(view.corrupt, false);
+  assert.equal(view.latestTurn.receiptId, Object.values(carrier.session.turns)[0].receipt.receiptId);
+  assert.ok(view.latestTurn.events.length >= 1, "当前回合有单独可读的事件来源");
   // 有界截断：视图条数不超过服务端上限
   assert.ok(view.tasks.length <= 20 && view.signals.length <= 12
     && view.deliveries.length <= 24 && view.recentEvents.length <= 16, "视图各自有界");
@@ -204,6 +206,7 @@ test("C10：回退后推演模块跟着回退，回合事件从可见视图消�
   const state = await core.handle("POST", "/state", { chatId: "chat-a" });
   assert.equal(state.status, 200);
   assert.equal(state.body.data.simulationView.recentEvents.length, 0, "回退后不得再看到该回合的幕后事件");
+  assert.equal(state.body.data.simulationView.latestTurn, null, "删楼回退也必须清空这一轮简报");
 });
 
 test("C09 兼容：旧会话没有 simulation 字段时照常提交，并按合法空模块处理", async () => {

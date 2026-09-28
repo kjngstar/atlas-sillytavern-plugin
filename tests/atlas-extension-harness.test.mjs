@@ -1567,6 +1567,7 @@ async function mountAtlasMap({ stateByChat, chatId = "chat-a", travelPreview = n
     ...(await import(pathToFileURL(join(root, "src", "atlas-map-grid.ts")).href)),
     // H16：范围填色投影（只染有证据的格）
     ...(await import(pathToFileURL(join(root, "src", "atlas-map-areas.ts")).href)),
+    ...(await import(pathToFileURL(join(root, "src", "atlas-map-layout.ts")).href)),
     ATLAS_UI_PAGES: (await import(pathToFileURL(join(root, "src", "atlas-ui-core.ts")).href)).ATLAS_UI_PAGES,
   };
 
@@ -2305,6 +2306,7 @@ async function mountRootAtlasMap({ stateByChat, chatId = "chat-a", travelPreview
     ...(await import(pathToFileURL(join(root, "src", "atlas-map-grid.ts")).href)),
     // H16：范围填色投影（只染有证据的格）
     ...(await import(pathToFileURL(join(root, "src", "atlas-map-areas.ts")).href)),
+    ...(await import(pathToFileURL(join(root, "src", "atlas-map-layout.ts")).href)),
     ATLAS_UI_PAGES: (await import(pathToFileURL(join(root, "src", "atlas-ui-core.ts")).href)).ATLAS_UI_PAGES,
   };
 
@@ -3116,6 +3118,7 @@ function d07State({ chatId, worldId, events, counts, currentLocationKnown = fals
       branchKey: "canon",
       tasks: [], signals: [], deliveries: [],
       recentEvents: events,
+      latestTurn: { receiptId: `rcpt-${chatId}`, period: 12, highlights: [], events },
       counts: {
         tasks: counts?.tasks ?? 1, signals: counts?.signals ?? 1, deliveries: counts?.deliveries ?? 1,
         events: events.length, activeTasks: counts?.activeTasks ?? 0, blockedTasks: counts?.blockedTasks ?? 0,
@@ -3131,7 +3134,7 @@ function movesText(container) {
   return [...container.querySelectorAll(".aw-move")].map((node) => node.textContent).join("\n");
 }
 
-test("D11c 左栏幕后动向：区分想法 / 在路上 / 已抵达 / 已送达 / 暂不能行动，并写出阻塞原因", async () => {
+test("左栏只写本轮读者可读的动向，不出现 NO_TIME / NO_PATH / 表格数字", async () => {
   const { dom, core, container } = await mountRootAtlasMap({
     stateByChat: {
       "chat-a": d07State({
@@ -3163,11 +3166,9 @@ test("D11c 左栏幕后动向：区分想法 / 在路上 / 已抵达 / 已送达
 
   const text = movesText(container);
   // F1/F3 的核心诉求：左栏要能读到具体动作，而不是只有「应用 N 行」
-  ok(text.includes("暂不能行动"), `左栏要标出「暂不能行动」：实际 ${text}`);
-  ok(text.includes("NO_PATH"), `阻塞原因必须写明：实际 ${text}`);
-  ok(text.includes("新消息"), `消息类事件要单独标注：实际 ${text}`);
-  ok(text.includes("已送达"), `送达事件要单独标注：实际 ${text}`);
-  ok(text.includes("loc:1 → loc:2"), `要显示来源地 → 目标：实际 ${text}`);
+  ok(text.includes("传出消息：使者带出宣战文书"), `要写出消息内容：实际 ${text}`);
+  ok(text.includes("获知消息"), `要写出有人获知消息：实际 ${text}`);
+  ok(!text.includes("NO_PATH") && !text.includes("loc:1"), `技术码和原始 id 应在变化页：实际 ${text}`);
   ok(!/^表格增量：应用/m.test(text), "左栏不得再以「表格增量：应用 N 行」为主");
   void core;
   dom.window.close();
@@ -3344,6 +3345,44 @@ test("H19a 未标定：只报格数并写明「未标定」，绝不显示假米
   ok(!/米/.test(text.replace(/千米/g, "")), `未标定不得出现米数：实际 "${text}"`);
   const aria = String(label?.getAttribute("aria-label") ?? "");
   ok(aria.includes("约等于"), `可访问文案要说清「屏幕 N 像素约等于 X」：实际 "${aria}"`);
+  dom.window.close();
+});
+
+test("空真实地图：待定位地点可打开资料和名单，格数比例尺常驻且随放大变化", async () => {
+  const state = s10State({ chatId: "chat-a", worldId: "w-unplaced", currentLocationId: null, points: [],
+    npcDirectory: [{ id: "char-main", name: "主角", isProtagonist: true, presence: "unknown" }] });
+  state.tableMap = {
+    branchKey: "canon", world: { points: [], total: 0, truncated: 0 }, submaps: {},
+    unplacedLocations: { entries: [
+      { id: "loc:1", name: "枫叶城", parentLocationId: null },
+      { id: "loc:2", name: "丝薇娜的宅邸", parentLocationId: null },
+      { id: "loc:3", name: "卧室", parentLocationId: "loc:2" },
+    ], total: 3, truncated: 0 },
+    nearby: { entries: [{ id: "npc:person", name: "丝薇娜", locationId: "loc:2", locationName: "丝薇娜的宅邸", presence: "present", isProtagonist: false }], total: 1, truncated: 0 },
+    objects: { entries: [], total: 0, truncated: 0 },
+    locationOccupants: { entries: [], total: 0, truncated: 0 },
+    current: { locationId: null, chain: [] }, nearReasonCode: "CURRENT_LOCATION_UNKNOWN",
+  };
+  const { dom, core, container } = await mountRootAtlasMap({ stateByChat: { "chat-a": state } });
+  const markers = [...container.querySelectorAll(".aw-point--displayonly")];
+  equal(markers.length, 2, "世界图只显示根地点，不把卧室搬到世界图");
+  ok(!container.querySelector(".aw-maparea__hint").textContent.includes("没有地理数据"));
+  const label = container.querySelector(".aw-scale__label");
+  ok(label && label.textContent.includes("格"), "无真实坐标仍显示按格计算的比例尺");
+  equal(container.querySelector(".aw-scale").style.display, "", "比例尺不得因缺坐标隐藏");
+  const before = label.textContent;
+  [...container.querySelectorAll("button")].find((button) => button.textContent === "＋").click();
+  ok(label.textContent !== before, "缩放更新格数读数");
+  markers.find((marker) => marker.dataset.pointId === "2").click();
+  const panel = container.querySelector(".aw-mappanel");
+  ok(panel.style.display !== "none", "示意标记可点击打开信息框");
+  ok(panel.textContent.includes("丝薇娜"), "信息框读到三表地点在场人物");
+  ok(panel.textContent.includes("确认格坐标"), "缺坐标时有显式作者确认入口");
+  ok(!panel.textContent.includes("预览前往路线"), "示意位置不能用于路线推算");
+  core.setPage("nearby");
+  await flush();
+  ok(container.textContent.includes("已记录在其他地点的人物"), "当前位置未知时另列已记录人物，不冒充附近");
+  ok(container.textContent.includes("丝薇娜"));
   dom.window.close();
 });
 

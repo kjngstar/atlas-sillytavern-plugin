@@ -1133,15 +1133,15 @@
 }
 
 .aw-grid-svg__minor {
-  stroke: var(--am-grid-minor, var(--aw-teal-wash));
+  stroke: var(--am-grid-minor, var(--aw-teal-line));
   stroke-width: 1;
-  opacity: 0.27;
+  opacity: 0.26;
 }
 
 .aw-grid-svg__major {
   stroke: var(--am-grid-major, var(--am-grid-minor, var(--aw-teal-line)));
   stroke-width: 1;
-  opacity: 0.42;
+  opacity: 0.34;
 }
 
 .aw-image { background-repeat: no-repeat; background-size: 100% 100%; }
@@ -1452,10 +1452,9 @@
 
 /* 未标定 / 旧式单位：桩线（不是米制标尺，不能伪物理）；用 estimated 状态色 */
 .aw-scale__bar.is-stub {
-  width: 24px !important;
   border-style: dashed;
   border-color: var(--am-estimated, var(--aw-gold-deep));
-  opacity: 0.55;
+  opacity: 0.75;
 }
 
 .aw-scale__label { white-space: nowrap; }

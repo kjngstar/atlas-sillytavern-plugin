@@ -27,6 +27,8 @@ import { cameraStageTransform, type MapCamera } from "./atlas-map-camera.ts";
 
 /** 次线最小屏幕间距（CSS px）：k 低于此值时隐藏次线，只留主线。 */
 export const MAP_GRID_MINOR_MIN_PX = 8;
+/** 一格宽到 40px 时才细分成 5 份；细线仍至少相隔 8px。仅为视觉层，不产生新地点坐标。 */
+export const MAP_GRID_SUBDIVIDE_MIN_PX = 40;
 /** 主线允许的格步长（升序）；次线隐藏时取第一个满足最小间距的步长，都不满足取最大。 */
 export const MAP_GRID_MAJOR_STEPS: readonly number[] = [5, 25, 125];
 /** 每轴最多绘制的格线数（次线 + 主线合并计数）。 */
@@ -104,6 +106,8 @@ export interface AtlasGridPaths {
   majorPath: string;
   /** 本次使用的主线步长（5 / 25 / 125）；0 = 相机或 frame 非法，本帧无网格。 */
   majorStep: number;
+  /** 视觉细分倍率；5 表示次线每 1/5 格，主线每 1 格。 */
+  subdivision: number;
   /** 次线是否因过密被隐藏。 */
   minorHidden: boolean;
   /** 线宽（CSS px）。 */
@@ -158,6 +162,7 @@ function emptyPaths(majorStep: number, minorHidden: boolean, dpr: number): Atlas
     minorPath: "",
     majorPath: "",
     majorStep,
+    subdivision: 1,
     minorHidden,
     strokeWidth: MAP_GRID_STROKE_PX,
     devicePixelRatio: dpr,
@@ -194,6 +199,7 @@ export function gridScreenPosition(
 /** 主线步长：次线可见（k ≥ 8）时为 5；否则取第一个屏幕间距 ≥ 8px 的 5/25/125。 */
 export function gridMajorStepForScale(k: number): number {
   if (!Number.isFinite(k) || k <= 0) return 0;
+  if (k >= MAP_GRID_SUBDIVIDE_MIN_PX) return 1;
   for (const step of MAP_GRID_MAJOR_STEPS) {
     if (k * step >= MAP_GRID_MINOR_MIN_PX) return step;
   }
@@ -261,6 +267,9 @@ export function getVisibleGridPaths(input: AtlasGridInput): AtlasGridPaths {
   const dpr = normalizeDevicePixelRatio(input?.devicePixelRatio);
   const k = finiteOr(input?.camera?.k, 0);
   let majorStep = gridMajorStepForScale(k);
+  const subdivision = k >= MAP_GRID_SUBDIVIDE_MIN_PX ? 5 : 1;
+  const lineK = k / subdivision;
+  let logicalMajorStep = majorStep * subdivision;
   let minorHidden = !(k >= MAP_GRID_MINOR_MIN_PX);
   if (majorStep <= 0) return emptyPaths(0, true, dpr);
 
@@ -276,9 +285,12 @@ export function getVisibleGridPaths(input: AtlasGridInput): AtlasGridPaths {
   // 视口模式只延伸视觉格线，不扩张地图 frame，也不使外部格子成为可定位实体。
   const viewportGrid = input.extent === "viewport";
   // 大视口缩小后隐藏细线，提升主线间距；否则每轴 200 根的保护上限会在两侧留下空白。
-  if (viewportGrid && Math.max(viewW, viewH) / k + 2 > MAP_GRID_MAX_LINES_PER_AXIS) minorHidden = true;
+  if (viewportGrid && Math.max(viewW, viewH) / lineK + 2 > MAP_GRID_MAX_LINES_PER_AXIS) minorHidden = true;
   if (viewportGrid && minorHidden) {
-    while (Math.max(viewW, viewH) / (k * majorStep) + 2 > MAP_GRID_MAX_LINES_PER_AXIS) majorStep *= 5;
+    while (Math.max(viewW, viewH) / (lineK * logicalMajorStep) + 2 > MAP_GRID_MAX_LINES_PER_AXIS) {
+      majorStep *= 5;
+      logicalMajorStep *= 5;
+    }
   }
   const clipLeft = viewportGrid ? 0 : Math.max(0, tx);
   const clipRight = viewportGrid ? viewW : Math.min(viewW, tx + cols * k);
@@ -288,17 +300,17 @@ export function getVisibleGridPaths(input: AtlasGridInput): AtlasGridPaths {
 
   // 视口模式允许负格号与超出 frame 的格号；它们只是背景延长线。
   const columns = limitVisibleRange(
-    viewportGrid ? Math.ceil((clipLeft - tx) / k - EPSILON) : Math.max(0, Math.ceil((clipLeft - tx) / k - EPSILON)),
-    viewportGrid ? Math.floor((clipRight - tx) / k + EPSILON) : Math.min(cols, Math.floor((clipRight - tx) / k + EPSILON)),
-    (viewW / 2 - tx) / k,
-    majorStep,
+    viewportGrid ? Math.ceil((clipLeft - tx) / lineK - EPSILON) : Math.max(0, Math.ceil((clipLeft - tx) / lineK - EPSILON)),
+    viewportGrid ? Math.floor((clipRight - tx) / lineK + EPSILON) : Math.min(cols * subdivision, Math.floor((clipRight - tx) / lineK + EPSILON)),
+    (viewW / 2 - tx) / lineK,
+    logicalMajorStep,
     minorHidden,
   );
   const rowsRange = limitVisibleRange(
-    viewportGrid ? Math.ceil((clipTop - ty) / k - EPSILON) : Math.max(0, Math.ceil((clipTop - ty) / k - EPSILON)),
-    viewportGrid ? Math.floor((clipBottom - ty) / k + EPSILON) : Math.min(rows, Math.floor((clipBottom - ty) / k + EPSILON)),
-    (viewH / 2 - ty) / k,
-    majorStep,
+    viewportGrid ? Math.ceil((clipTop - ty) / lineK - EPSILON) : Math.max(0, Math.ceil((clipTop - ty) / lineK - EPSILON)),
+    viewportGrid ? Math.floor((clipBottom - ty) / lineK + EPSILON) : Math.min(rows * subdivision, Math.floor((clipBottom - ty) / lineK + EPSILON)),
+    (viewH / 2 - ty) / lineK,
+    logicalMajorStep,
     minorHidden,
   );
   if (!columns && !rowsRange) return emptyPaths(majorStep, minorHidden, dpr);
@@ -321,9 +333,9 @@ export function getVisibleGridPaths(input: AtlasGridInput): AtlasGridPaths {
 
   if (drawVertical && columns) {
     for (let n = columns.first; n <= columns.last; n += 1) {
-      const isMajor = n % majorStep === 0;
+      const isMajor = n % logicalMajorStep === 0;
       if (!isMajor && minorHidden) continue;
-      const x = fmt(snapLineCenter(n * k + tx, dpr));
+      const x = fmt(snapLineCenter(n * lineK + tx, dpr));
       (isMajor ? majorParts : minorParts).push(`M${x} ${lineY0}V${lineY1}`);
       counts.vertical += 1;
       if (isMajor) counts.majorVertical += 1;
@@ -333,9 +345,9 @@ export function getVisibleGridPaths(input: AtlasGridInput): AtlasGridPaths {
 
   if (drawHorizontal && rowsRange) {
     for (let n = rowsRange.first; n <= rowsRange.last; n += 1) {
-      const isMajor = n % majorStep === 0;
+      const isMajor = n % logicalMajorStep === 0;
       if (!isMajor && minorHidden) continue;
-      const y = fmt(snapLineCenter(n * k + ty, dpr));
+      const y = fmt(snapLineCenter(n * lineK + ty, dpr));
       (isMajor ? majorParts : minorParts).push(`M${lineX0} ${y}H${lineX1}`);
       counts.horizontal += 1;
       if (isMajor) counts.majorHorizontal += 1;
@@ -347,6 +359,7 @@ export function getVisibleGridPaths(input: AtlasGridInput): AtlasGridPaths {
     minorPath: minorParts.join(""),
     majorPath: majorParts.join(""),
     majorStep,
+    subdivision,
     minorHidden,
     strokeWidth: MAP_GRID_STROKE_PX,
     devicePixelRatio: dpr,

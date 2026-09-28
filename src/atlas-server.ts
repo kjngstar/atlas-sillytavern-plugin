@@ -93,6 +93,7 @@ import { validateAtlasTables, validateAtlasTablesStore, cloneAtlasTables, charac
 import { migrateLegacyToTables, tablesToLegacyWorld } from "./atlas-table-migration.ts";
 import { applyAtlasEditText, parseAtlasEditBlock, type AtlasSignalProposalRow } from "./atlas-table-delta.ts";
 import { projectTablesToMapView } from "./atlas-table-map-view.ts";
+import { summarizeAtlasTurnChanges } from "./atlas-turn-highlights.ts";
 import { deriveElapsedPeriods } from "./atlas-time-intent.ts";
 import {
   validateSimulationStore,
@@ -1361,6 +1362,13 @@ function currentLocationRow(tables: AtlasThreeTablesV1, currentLocationId: strin
   return tables.locations.find((row) => row.id === rowId) ?? null;
 }
 
+/** 旧绑定没有 characterId：仅当世界角色表里恰好一个主角时才能确定其三表行。 */
+function protagonistRowId(binding: Pick<AtlasChatBinding, "characterId">, world: World): string | null {
+  if (binding.characterId) return characterRowId(String(binding.characterId));
+  const candidates = (world.characters ?? []).filter((row) => isProtagonistRole(row.role));
+  return candidates.length === 1 ? characterRowId(String(candidates[0]!.id)) : null;
+}
+
 /** 上级链：从根到当前地点（含自身）。 */
 function locationChain(tables: AtlasThreeTablesV1, row: AtlasLocationRow): AtlasLocationRow[] {
   const byId = new Map(tables.locations.map((item) => [item.id, item]));
@@ -1787,7 +1795,7 @@ export function commitTableDeltaTurn(
     branchId: input.binding.branchId,
     at: previousTime,
   });
-  const playerRowId = input.binding.characterId ? characterRowId(String(input.binding.characterId)) : null;
+  const playerRowId = protagonistRowId(input.binding, input.baseWorld);
   const playerRow = playerRowId === null ? undefined : delta.tables.characters.find((row) => row.id === playerRowId);
   const playerPointId = playerRow?.locationId ? pointIdFromLocationRowId(playerRow.locationId) : null;
   const previousLocationId = input.binding.currentLocationId ?? null;
@@ -4207,16 +4215,33 @@ function createCoreInstance(
         // 事件只从**本 session、本分支**的回合记录里取；旧回合没有该字段视为空
         const turnNames = await store.list(`turn:${chatId}:`).catch(() => [] as string[]);
         const events: AtlasSimulationEvent[] = [];
+        let latestTurn: { at: number; receiptId: string; period: number; highlights: string[]; events: AtlasSimulationEvent[] } | null = null;
         for (const name of turnNames) {
           const turn = await store.read(name).catch(() => null);
           if (!isPlainRecord(turn) || turn.branchId !== binding.branchId) continue;
           // C10：已回退的回合，其 simulationEvents 不再可见（文档保留 = 可审计）
           if (turn.rolledBack === true) continue;
+          if (Number(turn.effectiveAt) > binding.worldTimeCursor) continue;
           const rows = Array.isArray(turn.simulationEvents) ? turn.simulationEvents : [];
+          const visibleEvents: AtlasSimulationEvent[] = [];
           for (const item of rows) {
             if (!isPlainRecord(item)) continue;
             if (!showHidden && item.visibility === "hidden") continue;
-            events.push(item as unknown as AtlasSimulationEvent);
+            const event = item as unknown as AtlasSimulationEvent;
+            events.push(event);
+            visibleEvents.push(event);
+          }
+          const receipt = isPlainRecord(turn.receipt) ? turn.receipt : null;
+          const at = typeof turn.committedAt === "number" && Number.isFinite(turn.committedAt) ? turn.committedAt : 0;
+          if (receipt && typeof receipt.receiptId === "string" && (!latestTurn || at > latestTurn.at)) {
+            latestTurn = {
+              at, receiptId: receipt.receiptId,
+              period: typeof turn.effectiveAt === "number" ? turn.effectiveAt : binding.worldTimeCursor,
+              highlights: Array.isArray(turn.highlights) ? turn.highlights
+                .filter((value): value is string => typeof value === "string")
+                .slice(0, 8).map((value) => value.slice(0, 140)) : [],
+              events: visibleEvents.slice(0, 8),
+            };
           }
         }
         const LIMIT = { tasks: 20, signals: 12, deliveries: 24, events: 16 } as const;
@@ -4226,6 +4251,10 @@ function createCoreInstance(
           signals: signalsAll.slice(-LIMIT.signals),
           deliveries: deliveriesAll.slice(-LIMIT.deliveries),
           recentEvents: events.slice(-LIMIT.events),
+          latestTurn: latestTurn === null ? null : {
+            receiptId: latestTurn.receiptId, period: latestTurn.period,
+            highlights: latestTurn.highlights, events: latestTurn.events,
+          },
           counts: {
             tasks: tasksAll.length,
             signals: signalsAll.length,
@@ -4559,7 +4588,7 @@ function createCoreInstance(
      * 当前位置只随**已接受的主角行**锚定；没有就诚实保持未知——
      * 绝不"造一个起点"（§2.4 / E06「未定位只返回未知」）。
      */
-    const bootstrapPlayerRowId = binding.characterId ? characterRowId(String(binding.characterId)) : null;
+    const bootstrapPlayerRowId = protagonistRowId(binding, world);
     const bootstrapPlayerRow = bootstrapPlayerRowId === null
       ? undefined : delta.tables.characters.find((row) => row.id === bootstrapPlayerRowId);
     const anchoredPointId = bootstrapPlayerRow?.locationId
@@ -4857,6 +4886,7 @@ function createCoreInstance(
      * 只在本轮真的走行增量协议时记录；v1/v2 回合没有三表快照，回退时按回退后的世界重建（见 handleRollback）。
      */
     let tablesBeforeTurn: { branchKey: string; tables: AtlasThreeTablesV1 } | null = null;
+    let acceptedTurnRefs: string[] = [];
     /** C05：table-delta 路径已在本轮内做过日程结算——公共段不得重复结算。 */
     let settledInTablePath = false;
     /**
@@ -5030,6 +5060,7 @@ function createCoreInstance(
           );
         }
         nextTablesDoc = committed.tablesDoc;
+        acceptedTurnRefs = committed.acceptedRows.map((row) => row.ref);
         settledInTablePath = true;
         // E05：冻结回合前的三表（深拷贝，避免后续任何原地修改污染回退基线）
         tablesBeforeTurn = { branchKey, tables: cloneAtlasTables(branchTables as unknown as AtlasThreeTablesV1) };
@@ -5435,6 +5466,11 @@ function createCoreInstance(
        * 不借用另一分支、也不凭空造空世界。
        */
       tablesBefore: tablesBeforeTurn,
+      highlights: tablesBeforeTurn === null ? [] : summarizeAtlasTurnChanges(
+        tablesBeforeTurn.tables,
+        nextTablesDoc?.branches?.[tablesBeforeTurn.branchKey] ?? null,
+        acceptedTurnRefs,
+      ),
       /**
        * C09 / C10：本轮的推演事件与**逐行**逆操作。
        * 旧回合没有这两个字段时视为空，不凭空迁移其他分支；回退按行恢复而不复制整模块。
@@ -5546,7 +5582,7 @@ function createCoreInstance(
         ?? (branchScopeForStory(output.world, binding.branchId) ?? "canon");
       const branch = nextSimulationDoc.branches[branchKey];
       if (!branch) return null;
-      const playerRowId = binding.characterId ? characterRowId(String(binding.characterId)) : null;
+      const playerRowId = protagonistRowId(binding, output.world);
       const playerLocationId = playerRowId === null
         ? null
         : (nextTablesDoc?.branches?.[branchKey]?.characters.find((row) => row.id === playerRowId)?.locationId ?? null);

@@ -19,6 +19,7 @@ import {
   MAP_GRID_MAJOR_STEPS,
   MAP_GRID_MAX_LINES_PER_AXIS,
   MAP_GRID_MINOR_MIN_PX,
+  MAP_GRID_SUBDIVIDE_MIN_PX,
   MAP_GRID_STROKE_PX,
   getVisibleGridPaths,
   gridCameraFromMapCamera,
@@ -108,15 +109,15 @@ function assertWithinFrameAndViewport(result, camera, viewW, viewH, frame, toler
 }
 
 /**
- * 每根线都必须对应 frame 内的整数格坐标，且位置与相机变换一致（误差 ≤ 半个设备像素）。
- * 返回每轴抽出的整数格坐标，供「不重复 / 主线在倍数上」继续断言。
+ * 每根线都必须对应 frame 内的整数格或其 1/5 视觉细分坐标。
  */
 function lanesFor(result, camera, viewW, viewH, frame, dpr, slack = 0) {
   const { tx, ty, k } = cameraStageTransform(camera, viewW, viewH);
   const tolerance = 0.5 / dpr + 1e-6;
+  const sub = result.subdivision;
   // 半像素对齐可能让 0 号线的推算值落在 -0.0001 → round 成 -0；统一成 0 再比较
   const cellIndex = (value, origin) => {
-    const n = Math.round((value - origin) / k);
+    const n = Math.round((value - origin) / (k / sub)) / sub;
     return Object.is(n, -0) ? 0 : n;
   };
   const readVertical = (path) => verticalLines(path).map((line) => {
@@ -149,7 +150,8 @@ function assertGridInvariants(result, camera, viewW, viewH, frame, dpr, options 
   const { strictLanes = true } = options;
   assert.equal(result.devicePixelRatio, dpr, "回执必须带上本次实际 DPR");
   assert.equal(result.strokeWidth, MAP_GRID_STROKE_PX, "线宽恒为 1 CSS px");
-  assert.ok(MAP_GRID_MAJOR_STEPS.includes(result.majorStep), `主线步长必须是 5/25/125，实为 ${result.majorStep}`);
+  assert.ok([1, ...MAP_GRID_MAJOR_STEPS].includes(result.majorStep), `主线步长必须是 1/5/25/125，实为 ${result.majorStep}`);
+  assert.equal(result.subdivision, camera.k >= MAP_GRID_SUBDIVIDE_MIN_PX ? 5 : 1);
   assert.match(result.minorPath + result.majorPath, /^(M-?[\d.]+ -?[\d.]+[VH]-?[\d.]+)*$/, "只能输出 M/V/H 路径");
   assert.ok(result.counts.vertical <= MAP_GRID_MAX_LINES_PER_AXIS, `竖线 ${result.counts.vertical} 根超过每轴上限`);
   assert.ok(result.counts.horizontal <= MAP_GRID_MAX_LINES_PER_AXIS, `横线 ${result.counts.horizontal} 根超过每轴上限`);
@@ -364,7 +366,7 @@ test("H12 次格间距 <8px 隐藏次线、主线仍在；主线步长 5/25/125 
   assert.deepEqual(sparse.columns, { first: 10, last: 90, dropped: 0 });
 
   // 步长表：次线隐藏时取第一个屏幕间距 ≥ 8px 的 5/25/125
-  assert.equal(gridMajorStepForScale(100), 5);
+  assert.equal(gridMajorStepForScale(100), 1);
   assert.equal(gridMajorStepForScale(8), 5);
   assert.equal(gridMajorStepForScale(2), 5);
   assert.equal(gridMajorStepForScale(1.5), 25, "1.5×5=7.5 < 8 → 升到 25");
@@ -374,6 +376,21 @@ test("H12 次格间距 <8px 隐藏次线、主线仍在；主线步长 5/25/125 
   assert.equal(gridMajorStepForScale(0), 0);
   assert.equal(gridMajorStepForScale(Number.NaN), 0);
   assert.equal(gridMajorStepForScale(-1), 0);
+});
+
+test("地图放大到一格至少 40px 后出现每格 1/5 的细网格，主格仍与坐标相同", () => {
+  const result = getVisibleGridPaths({
+    viewport: { width: 600, height: 420 }, camera: { k: 50, tx: -220, ty: -300 },
+    frame: FRAME, extent: "viewport", devicePixelRatio: 2,
+  });
+  assert.equal(result.subdivision, 5);
+  assert.equal(result.majorStep, 1);
+  assert.ok(result.counts.minorVertical > 0 && result.counts.majorVertical > 0);
+  const xs = verticalLines(result.minorPath).map((line) => line.x);
+  assert.ok(xs.some((x) => Math.abs((x + 220) / 50 - Math.round((x + 220) / 50)) > 0.1),
+    "至少一条细线应落在整格之间");
+  assert.ok(result.counts.vertical <= MAP_GRID_MAX_LINES_PER_AXIS);
+  assert.ok(result.counts.horizontal <= MAP_GRID_MAX_LINES_PER_AXIS);
 });
 
 test("H22 格整数线与图钉吻合：缩放到 800% 也不漂移；主线是 5/25 的倍数", () => {

@@ -95,6 +95,7 @@ export interface AtlasSimulationView {
   signals: Array<Record<string, unknown>>;
   deliveries: Array<Record<string, unknown>>;
   recentEvents: Array<Record<string, unknown>>;
+  latestTurn: { receiptId: string; period: number; highlights: string[]; events: Array<Record<string, unknown>> } | null;
   counts: {
     tasks: number; signals: number; deliveries: number; events: number;
     activeTasks: number; blockedTasks: number;
@@ -137,12 +138,24 @@ export function parseAtlasSimulationView(raw: unknown): AtlasSimulationView | nu
     ? value.counts : {}) as Record<string, unknown>;
   const truncated = (value.truncated && typeof value.truncated === "object" && !Array.isArray(value.truncated)
     ? value.truncated : {}) as Record<string, unknown>;
+  const latest = value.latestTurn && typeof value.latestTurn === "object" && !Array.isArray(value.latestTurn)
+    ? value.latestTurn as Record<string, unknown> : null;
   return {
     branchKey,
     tasks: simulationRows(value.tasks),
     signals: simulationRows(value.signals),
     deliveries: simulationRows(value.deliveries),
     recentEvents: simulationRows(value.recentEvents),
+    latestTurn: latest && typeof latest.receiptId === "string" && latest.receiptId.length <= 160
+      ? {
+          receiptId: latest.receiptId,
+          period: boundedCount(latest.period),
+          highlights: Array.isArray(latest.highlights) ? latest.highlights
+            .filter((item): item is string => typeof item === "string").slice(0, 8)
+            .map((item) => item.slice(0, 140)) : [],
+          events: simulationRows(latest.events).slice(0, 8),
+        }
+      : null,
     counts: {
       tasks: boundedCount(counts.tasks),
       signals: boundedCount(counts.signals),

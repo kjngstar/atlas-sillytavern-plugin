@@ -4631,12 +4631,19 @@ function parseAtlasSimulationView(raw) {
   if (branchKey.length === 0 || branchKey.length > 120) return null;
   const counts = value.counts && typeof value.counts === "object" && !Array.isArray(value.counts) ? value.counts : {};
   const truncated = value.truncated && typeof value.truncated === "object" && !Array.isArray(value.truncated) ? value.truncated : {};
+  const latest = value.latestTurn && typeof value.latestTurn === "object" && !Array.isArray(value.latestTurn) ? value.latestTurn : null;
   return {
     branchKey,
     tasks: simulationRows(value.tasks),
     signals: simulationRows(value.signals),
     deliveries: simulationRows(value.deliveries),
     recentEvents: simulationRows(value.recentEvents),
+    latestTurn: latest && typeof latest.receiptId === "string" && latest.receiptId.length <= 160 ? {
+      receiptId: latest.receiptId,
+      period: boundedCount(latest.period),
+      highlights: Array.isArray(latest.highlights) ? latest.highlights.filter((item) => typeof item === "string").slice(0, 8).map((item) => item.slice(0, 140)) : [],
+      events: simulationRows(latest.events).slice(0, 8)
+    } : null,
     counts: {
       tasks: boundedCount(counts.tasks),
       signals: boundedCount(counts.signals),
@@ -11914,6 +11921,47 @@ function projectTablesToMapView(tables, maps, world, currentLocationId, hiddenLo
   };
 }
 
+// src/atlas-turn-highlights.ts
+function summarizeAtlasTurnChanges(before, after, acceptedRefs) {
+  if (!before || !after) return [];
+  const locations = new Map(after.locations.map((row) => [row.id, row.name]));
+  const place = (id) => id === null ? "未知地点" : locations.get(id) ?? "未知地点";
+  const oldLocations = new Map(before.locations.map((row) => [row.id, row]));
+  const oldCharacters = new Map(before.characters.map((row) => [row.id, row]));
+  const oldItems = new Map(before.items.map((row) => [row.id, row]));
+  const newLocations = new Map(after.locations.map((row) => [row.id, row]));
+  const newCharacters = new Map(after.characters.map((row) => [row.id, row]));
+  const newItems = new Map(after.items.map((row) => [row.id, row]));
+  const highlights = [];
+  for (const id of new Set(acceptedRefs)) {
+    if (highlights.length >= 8) break;
+    const location = newLocations.get(id);
+    const oldLocation = oldLocations.get(id);
+    const character = newCharacters.get(id);
+    const oldCharacter = oldCharacters.get(id);
+    const item = newItems.get(id);
+    const oldItem = oldItems.get(id);
+    let text = "";
+    if (location && !oldLocation) text = `发现地点：${location.name}${location.gridX === null ? "（位置待确认）" : ""}`;
+    else if (location && oldLocation && location.parentLocationId !== oldLocation.parentLocationId)
+      text = `${location.name}归属更新：${location.parentLocationId ? place(location.parentLocationId) : "世界地图"}`;
+    else if (character && !oldCharacter && character.locationId)
+      text = `${character.name}出现在${place(character.locationId)}`;
+    else if (character && oldCharacter && character.locationId !== oldCharacter.locationId && character.locationId)
+      text = `${character.name}来到${place(character.locationId)}`;
+    else if (character && oldCharacter && character.presence === "left" && oldCharacter.presence !== "left")
+      text = `${character.name}离开了原来的场景`;
+    else if (character && oldCharacter && character.currentAction && character.currentAction !== oldCharacter.currentAction)
+      text = `${character.name}：${character.currentAction}`;
+    else if (item && !oldItem)
+      text = `出现物品：${item.name}${item.locationId ? `（${place(item.locationId)}）` : ""}`;
+    else if (item && oldItem && item.locationId && item.locationId !== oldItem.locationId)
+      text = `${item.name}出现在${place(item.locationId)}`;
+    if (text) highlights.push(text.slice(0, 140));
+  }
+  return highlights;
+}
+
 // src/atlas-simulation.ts
 var ATLAS_SIMULATION_SCHEMA_VERSION = 1;
 var DEFAULT_SIMULATION_BRANCH = "canon";
@@ -13905,6 +13953,11 @@ function currentLocationRow(tables, currentLocationId) {
   const rowId = currentLocationId.startsWith("loc:") ? currentLocationId : locationRowId(currentLocationId);
   return tables.locations.find((row) => row.id === rowId) ?? null;
 }
+function protagonistRowId(binding, world) {
+  if (binding.characterId) return characterRowId(String(binding.characterId));
+  const candidates = (world.characters ?? []).filter((row) => isProtagonistRole(row.role));
+  return candidates.length === 1 ? characterRowId(String(candidates[0].id)) : null;
+}
 function locationChain(tables, row) {
   const byId = new Map(tables.locations.map((item) => [item.id, item]));
   const chain = [];
@@ -14126,7 +14179,7 @@ function commitTableDeltaTurn(input) {
     branchId: input.binding.branchId,
     at: previousTime
   });
-  const playerRowId = input.binding.characterId ? characterRowId(String(input.binding.characterId)) : null;
+  const playerRowId = protagonistRowId(input.binding, input.baseWorld);
   const playerRow = playerRowId === null ? void 0 : delta.tables.characters.find((row) => row.id === playerRowId);
   const playerPointId = playerRow?.locationId ? pointIdFromLocationRowId(playerRow.locationId) : null;
   const previousLocationId = input.binding.currentLocationId ?? null;
@@ -16010,15 +16063,31 @@ ${rejectedBlock}` : "");
         const deliveriesAll = (branch?.deliveries ?? []).filter((row) => showHidden || signalIds.has(row.signalId));
         const turnNames = await store.list(`turn:${chatId}:`).catch(() => []);
         const events = [];
+        let latestTurn = null;
         for (const name of turnNames) {
           const turn = await store.read(name).catch(() => null);
           if (!isPlainRecord(turn) || turn.branchId !== binding.branchId) continue;
           if (turn.rolledBack === true) continue;
+          if (Number(turn.effectiveAt) > binding.worldTimeCursor) continue;
           const rows = Array.isArray(turn.simulationEvents) ? turn.simulationEvents : [];
+          const visibleEvents = [];
           for (const item of rows) {
             if (!isPlainRecord(item)) continue;
             if (!showHidden && item.visibility === "hidden") continue;
-            events.push(item);
+            const event = item;
+            events.push(event);
+            visibleEvents.push(event);
+          }
+          const receipt = isPlainRecord(turn.receipt) ? turn.receipt : null;
+          const at = typeof turn.committedAt === "number" && Number.isFinite(turn.committedAt) ? turn.committedAt : 0;
+          if (receipt && typeof receipt.receiptId === "string" && (!latestTurn || at > latestTurn.at)) {
+            latestTurn = {
+              at,
+              receiptId: receipt.receiptId,
+              period: typeof turn.effectiveAt === "number" ? turn.effectiveAt : binding.worldTimeCursor,
+              highlights: Array.isArray(turn.highlights) ? turn.highlights.filter((value) => typeof value === "string").slice(0, 8).map((value) => value.slice(0, 140)) : [],
+              events: visibleEvents.slice(0, 8)
+            };
           }
         }
         const LIMIT = { tasks: 20, signals: 12, deliveries: 24, events: 16 };
@@ -16028,6 +16097,12 @@ ${rejectedBlock}` : "");
           signals: signalsAll.slice(-LIMIT.signals),
           deliveries: deliveriesAll.slice(-LIMIT.deliveries),
           recentEvents: events.slice(-LIMIT.events),
+          latestTurn: latestTurn === null ? null : {
+            receiptId: latestTurn.receiptId,
+            period: latestTurn.period,
+            highlights: latestTurn.highlights,
+            events: latestTurn.events
+          },
           counts: {
             tasks: tasksAll.length,
             signals: signalsAll.length,
@@ -16301,7 +16376,7 @@ ${rejectedBlock}` : "");
     let finalWorld = mirrored.world;
     const placeholder = detectStartPlaceholder(world);
     const sceneDoc = sanitizeSceneDoc(await store.read(sceneDocKey(world.id)).catch(() => null));
-    const bootstrapPlayerRowId = binding.characterId ? characterRowId(String(binding.characterId)) : null;
+    const bootstrapPlayerRowId = protagonistRowId(binding, world);
     const bootstrapPlayerRow = bootstrapPlayerRowId === null ? void 0 : delta.tables.characters.find((row) => row.id === bootstrapPlayerRowId);
     const anchoredPointId = bootstrapPlayerRow?.locationId ? pointIdFromLocationRowId(bootstrapPlayerRow.locationId) : null;
     const anchored = anchoredPointId !== null;
@@ -16521,6 +16596,7 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
     let output;
     let nextTablesDoc = null;
     let tablesBeforeTurn = null;
+    let acceptedTurnRefs = [];
     let settledInTablePath = false;
     let nextSimulationDoc = null;
     let simulationEvents = [];
@@ -16653,6 +16729,7 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
           );
         }
         nextTablesDoc = committed.tablesDoc;
+        acceptedTurnRefs = committed.acceptedRows.map((row) => row.ref);
         settledInTablePath = true;
         tablesBeforeTurn = { branchKey, tables: cloneAtlasTables(branchTables) };
         const branchAfter = nextTablesDoc?.branches?.[branchKey];
@@ -16978,6 +17055,11 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
        * 不借用另一分支、也不凭空造空世界。
        */
       tablesBefore: tablesBeforeTurn,
+      highlights: tablesBeforeTurn === null ? [] : summarizeAtlasTurnChanges(
+        tablesBeforeTurn.tables,
+        nextTablesDoc?.branches?.[tablesBeforeTurn.branchKey] ?? null,
+        acceptedTurnRefs
+      ),
       /**
        * C09 / C10：本轮的推演事件与**逐行**逆操作。
        * 旧回合没有这两个字段时视为空，不凭空迁移其他分支；回退按行恢复而不复制整模块。
@@ -17063,7 +17145,7 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
       const branchKey = tablesBeforeTurn?.branchKey ?? (branchScopeForStory(output.world, binding.branchId) ?? "canon");
       const branch = nextSimulationDoc.branches[branchKey];
       if (!branch) return null;
-      const playerRowId = binding.characterId ? characterRowId(String(binding.characterId)) : null;
+      const playerRowId = protagonistRowId(binding, output.world);
       const playerLocationId = playerRowId === null ? null : nextTablesDoc?.branches?.[branchKey]?.characters.find((row) => row.id === playerRowId)?.locationId ?? null;
       return {
         branchKey,
@@ -19817,6 +19899,7 @@ function createPinchTracker() {
 
 // src/atlas-map-grid.ts
 var MAP_GRID_MINOR_MIN_PX = 8;
+var MAP_GRID_SUBDIVIDE_MIN_PX = 40;
 var MAP_GRID_MAJOR_STEPS = [5, 25, 125];
 var MAP_GRID_MAX_LINES_PER_AXIS = 200;
 var MAP_GRID_STROKE_PX = 1;
@@ -19854,6 +19937,7 @@ function emptyPaths(majorStep, minorHidden, dpr) {
     minorPath: "",
     majorPath: "",
     majorStep,
+    subdivision: 1,
     minorHidden,
     strokeWidth: MAP_GRID_STROKE_PX,
     devicePixelRatio: dpr,
@@ -19874,6 +19958,7 @@ function gridScreenPosition(camera, worldX, worldY) {
 }
 function gridMajorStepForScale(k) {
   if (!Number.isFinite(k) || k <= 0) return 0;
+  if (k >= MAP_GRID_SUBDIVIDE_MIN_PX) return 1;
   for (const step of MAP_GRID_MAJOR_STEPS) {
     if (k * step >= MAP_GRID_MINOR_MIN_PX) return step;
   }
@@ -19917,6 +20002,9 @@ function getVisibleGridPaths(input) {
   const dpr = normalizeDevicePixelRatio(input?.devicePixelRatio);
   const k = finiteOr(input?.camera?.k, 0);
   let majorStep = gridMajorStepForScale(k);
+  const subdivision = k >= MAP_GRID_SUBDIVIDE_MIN_PX ? 5 : 1;
+  const lineK = k / subdivision;
+  let logicalMajorStep = majorStep * subdivision;
   let minorHidden = !(k >= MAP_GRID_MINOR_MIN_PX);
   if (majorStep <= 0) return emptyPaths(0, true, dpr);
   const cols = normalizeFrameSide(input?.frame?.cols);
@@ -19927,9 +20015,12 @@ function getVisibleGridPaths(input) {
   const tx = finiteOr(input?.camera?.tx, 0);
   const ty = finiteOr(input?.camera?.ty, 0);
   const viewportGrid = input.extent === "viewport";
-  if (viewportGrid && Math.max(viewW, viewH) / k + 2 > MAP_GRID_MAX_LINES_PER_AXIS) minorHidden = true;
+  if (viewportGrid && Math.max(viewW, viewH) / lineK + 2 > MAP_GRID_MAX_LINES_PER_AXIS) minorHidden = true;
   if (viewportGrid && minorHidden) {
-    while (Math.max(viewW, viewH) / (k * majorStep) + 2 > MAP_GRID_MAX_LINES_PER_AXIS) majorStep *= 5;
+    while (Math.max(viewW, viewH) / (lineK * logicalMajorStep) + 2 > MAP_GRID_MAX_LINES_PER_AXIS) {
+      majorStep *= 5;
+      logicalMajorStep *= 5;
+    }
   }
   const clipLeft = viewportGrid ? 0 : Math.max(0, tx);
   const clipRight = viewportGrid ? viewW : Math.min(viewW, tx + cols * k);
@@ -19937,17 +20028,17 @@ function getVisibleGridPaths(input) {
   const clipBottom = viewportGrid ? viewH : Math.min(viewH, ty + rows * k);
   if (!(clipRight > clipLeft) || !(clipBottom > clipTop)) return emptyPaths(majorStep, minorHidden, dpr);
   const columns = limitVisibleRange(
-    viewportGrid ? Math.ceil((clipLeft - tx) / k - EPSILON) : Math.max(0, Math.ceil((clipLeft - tx) / k - EPSILON)),
-    viewportGrid ? Math.floor((clipRight - tx) / k + EPSILON) : Math.min(cols, Math.floor((clipRight - tx) / k + EPSILON)),
-    (viewW / 2 - tx) / k,
-    majorStep,
+    viewportGrid ? Math.ceil((clipLeft - tx) / lineK - EPSILON) : Math.max(0, Math.ceil((clipLeft - tx) / lineK - EPSILON)),
+    viewportGrid ? Math.floor((clipRight - tx) / lineK + EPSILON) : Math.min(cols * subdivision, Math.floor((clipRight - tx) / lineK + EPSILON)),
+    (viewW / 2 - tx) / lineK,
+    logicalMajorStep,
     minorHidden
   );
   const rowsRange = limitVisibleRange(
-    viewportGrid ? Math.ceil((clipTop - ty) / k - EPSILON) : Math.max(0, Math.ceil((clipTop - ty) / k - EPSILON)),
-    viewportGrid ? Math.floor((clipBottom - ty) / k + EPSILON) : Math.min(rows, Math.floor((clipBottom - ty) / k + EPSILON)),
-    (viewH / 2 - ty) / k,
-    majorStep,
+    viewportGrid ? Math.ceil((clipTop - ty) / lineK - EPSILON) : Math.max(0, Math.ceil((clipTop - ty) / lineK - EPSILON)),
+    viewportGrid ? Math.floor((clipBottom - ty) / lineK + EPSILON) : Math.min(rows * subdivision, Math.floor((clipBottom - ty) / lineK + EPSILON)),
+    (viewH / 2 - ty) / lineK,
+    logicalMajorStep,
     minorHidden
   );
   if (!columns && !rowsRange) return emptyPaths(majorStep, minorHidden, dpr);
@@ -19966,9 +20057,9 @@ function getVisibleGridPaths(input) {
   const lineX1 = fmt(segX1);
   if (drawVertical && columns) {
     for (let n = columns.first; n <= columns.last; n += 1) {
-      const isMajor = n % majorStep === 0;
+      const isMajor = n % logicalMajorStep === 0;
       if (!isMajor && minorHidden) continue;
-      const x = fmt(snapLineCenter(n * k + tx, dpr));
+      const x = fmt(snapLineCenter(n * lineK + tx, dpr));
       (isMajor ? majorParts : minorParts).push(`M${x} ${lineY0}V${lineY1}`);
       counts.vertical += 1;
       if (isMajor) counts.majorVertical += 1;
@@ -19977,9 +20068,9 @@ function getVisibleGridPaths(input) {
   }
   if (drawHorizontal && rowsRange) {
     for (let n = rowsRange.first; n <= rowsRange.last; n += 1) {
-      const isMajor = n % majorStep === 0;
+      const isMajor = n % logicalMajorStep === 0;
       if (!isMajor && minorHidden) continue;
-      const y = fmt(snapLineCenter(n * k + ty, dpr));
+      const y = fmt(snapLineCenter(n * lineK + ty, dpr));
       (isMajor ? majorParts : minorParts).push(`M${lineX0} ${y}H${lineX1}`);
       counts.horizontal += 1;
       if (isMajor) counts.majorHorizontal += 1;
@@ -19990,6 +20081,7 @@ function getVisibleGridPaths(input) {
     minorPath: minorParts.join(""),
     majorPath: majorParts.join(""),
     majorStep,
+    subdivision,
     minorHidden,
     strokeWidth: MAP_GRID_STROKE_PX,
     devicePixelRatio: dpr,

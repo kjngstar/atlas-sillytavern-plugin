@@ -431,6 +431,26 @@ test("C05 一次回合提交：人物移动落到三表与镜像，时间不推�
   assert.ok(result.receipt.summary.includes("应用 1 行"));
 });
 
+test("自动绑定 characterId=null 时仅在世界有唯一主角时同步主角地点；多人不猜", () => {
+  const assistant = "你推开档案室的门，薇尔跟了进来。";
+  const text = block(line({ table: "character", op: "set", ref: "npc:chronicle-c1",
+    patch: { locationRef: "loc:4200" }, basis: "observed", quote: "薇尔跟了进来" }));
+  const world = demoWorld();
+  world.characters.find((row) => row.id === "chronicle-c1").role = "主角";
+  const input = { tables: tableFixture(), tablesDoc: null, branchKey: "canon", baseWorld: world,
+    binding: { ...BASE_BINDING, characterId: null, currentLocationId: null },
+    request: { userText: "我进档案室。", assistantText: assistant }, text, now: 1_700_000_000_000 };
+  const unique = commitTableDeltaTurn(input);
+  assert.equal(unique.ok, true, JSON.stringify(unique));
+  assert.equal(unique.receipt.currentLocationId, "4200");
+  const ambiguous = demoWorld();
+  ambiguous.characters.find((row) => row.id === "chronicle-c1").role = "主角";
+  ambiguous.characters.find((row) => row.id === "chronicle-c2").role = "主角";
+  const multiple = commitTableDeltaTurn({ ...input, baseWorld: ambiguous });
+  assert.equal(multiple.ok, true, JSON.stringify(multiple));
+  assert.equal(multiple.receipt.currentLocationId, null, "两个主角时保持未知");
+});
+
 test("C05 时间只认用户文本里的显式时间词，不采信模型数字", () => {
   const text = block(line({ table: "character", op: "set", ref: "npc:chronicle-c1", patch: { thought: "待了一会儿" }, basis: "inferred" }));
   const result = commitTableDeltaTurn({

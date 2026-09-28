@@ -3218,7 +3218,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
   }
 
   const moves = el("div", "aw-moves");
-  moves.append(el("span", "aw-eyebrow", "世界动向 · 写入世界书"));
+  moves.append(el("span", "aw-eyebrow", "这一轮的世界动向"));
   const movesList = el("div", "aw-moves__list");
   moves.append(movesList);
 
@@ -3322,34 +3322,12 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     topbarRight.append(topbarClose);
   }
 
-  /**
-   * D07：左栏「幕后动向」——直接读 `/state` 的结构化 `simulationView`。
-   *
-   * F1/F3 的根因就是这里过去只显示 `receipt.summary` 的截断版：有「应用 5 行」的数字，
-   * 却看不到「谁想做什么、实际做了什么、为什么尚未移动」。现在按状态分成
-   * 想法 / 在路上 / 已抵达 / 消息已送达 / 暂不能行动，并显示来源地 → 目标与阻塞原因。
-   *
-   * 老聊天（0.9.58 以前的 /state 不带 simulationView）整段跳过，退回下面的旧回执列表——
-   * 旧行为一字不变。返回 true 表示确实渲染了内容（调用方据此决定是否显示空态）。
-   */
+  /** 左栏只显示本轮已提交的可读变化；机器回执和过往事件留给变化页。 */
   function renderSimulationMoves(s) {
     const simulation = s.simulationView;
-    if (!simulation) return false;
-    const counts = simulation.counts;
-    const hasContent = simulation.recentEvents.length > 0 || counts.tasks > 0 || counts.signals > 0;
-    if (!hasContent) return false;
-
-    const LABELS = {
-      "intent-recorded": "想法", "started": "出发", "progressed": "在路上",
-      "arrived": "已抵达", "resolved": "已完成", "blocked": "暂不能行动",
-      "published": "新消息", "delivered": "已送达",
-    };
-    movesList.append(el("div", "aw-move__meta", "幕后动向（按已知范围显示）"));
-    // 最新在前，最多 8 条（服务端已经各自有界）
-    /**
-     * D07（0.9.59）：动向卡显示**姓名**而不是原始 ID，并且可点击跳到变化页
-     * 看这条消息的完整送达路线（计划原文：「点卡到变化页看消息路线」）。
-     */
+    if (!simulation?.latestTurn) return false;
+    const latest = simulation.latestTurn;
+    movesList.append(el("div", "aw-move__meta", `第 ${latest.period} 时段 · ${s.simulationVisibility === "all" ? "作者视图" : "已知动向"}`));
     const nameById = new Map();
     const stateData = s.stateData ?? {};
     for (const npc of Array.isArray(stateData.npcDirectory) ? stateData.npcDirectory : []) {
@@ -3367,25 +3345,33 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     const displayName = (id) => {
       const raw = String(id ?? "");
       if (!raw) return "";
-      return nameById.get(raw) ?? raw;
+      return nameById.get(raw.replace(/^npc:/, "")) ?? nameById.get(raw) ?? "";
     };
-    for (const event of [...simulation.recentEvents].reverse().slice(0, 8)) {
+    const lines = [...latest.highlights];
+    for (const event of latest.events) {
+      if (lines.length >= 6) break;
+      const actor = displayName(event.actorCharacterId);
+      const destination = displayName(event.toLocationId);
+      const summary = String(event.summary ?? "");
+      const detail = summary.includes("：") ? summary.split("：").at(-1).trim()
+        : summary.replace(/^npc:[^\s]+\s*/, "").trim();
+      const action = detail && !/^(NO_TIME|NO_PATH)$/.test(detail) ? detail.slice(0, 65) : "";
+      const text = event.status === "intent-recorded" ? `${actor || "有人"}打算${action || "采取行动"}`
+        : event.status === "blocked" ? "" // 技术阻塞原因留在变化 / 日志页
+          : event.status === "started" || event.status === "progressed"
+            ? `${actor || "有人"}正前往${destination || "目的地"}`
+            : event.status === "arrived" ? `${actor || "有人"}抵达${destination || "目的地"}`
+              : event.status === "published" ? `传出消息：${action || "有新消息"}`
+                : event.status === "delivered" ? `${actor || "有人"}获知消息：${action || "消息已传到"}`
+                  : action;
+      if (text && !lines.includes(text)) lines.push(text);
+    }
+    for (const line of lines.slice(0, 6)) {
       const card = el("div", "aw-move");
-      if (event.status === "blocked") card.classList.add("is-failed");
-      const label = LABELS[event.status] ?? "动向";
-      card.append(el("div", "aw-move__title", `${label}：${String(event.summary ?? "").slice(0, 40)}`));
-      const name = displayName(event.actorCharacterId);
-      const where = [event.fromLocationId, event.toLocationId].filter(Boolean).map(displayName).join(" → ");
-      card.append(el("div", "aw-move__meta", [
-        `第 ${String(event.period)} 时段`,
-        name ? `人物：${name}` : "",
-        where,
-        event.reasonCode ? `原因：${String(event.reasonCode)}` : "",
-      ].filter(Boolean).join(" · ")));
-      // 点卡看路线：动向右栏与变化页同源，跳过去能看到完整送达对象与信度
+      card.append(el("div", "aw-move__title", line));
       card.setAttribute("role", "button");
       card.tabIndex = 0;
-      card.setAttribute("aria-label", `查看这条动向的完整路线：${String(event.summary ?? "").slice(0, 30)}`);
+      card.setAttribute("aria-label", `查看本轮变化：${line.slice(0, 30)}`);
       const goToChanges = () => { core.setPage("changes"); renderPage(); };
       card.addEventListener("click", goToChanges);
       card.addEventListener("keydown", (e) => {
@@ -3393,20 +3379,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       });
       movesList.append(card);
     }
-    if (simulation.recentEvents.length === 0) {
-      // 第 0 段有任务但没有旅行：明确写「等待时间推进」，而不是只说「应用 N 行」
-      movesList.append(el("div", "aw-move__empty",
-        "已记录行动意图；时间未推进，人物不会移动、消息也不会传到远方。"));
-    }
-    movesList.append(el("div", "aw-move__meta",
-      `进行中 ${counts.activeTasks} · 受阻 ${counts.blockedTasks} · 消息 ${counts.signals} 条 · 送达 ${counts.deliveries} 处`));
-    if (simulation.truncated.events > 0) {
-      movesList.append(el("div", "aw-move__meta", `另有 ${simulation.truncated.events} 条更早的动向未显示`));
-    }
-    if (simulation.corrupt) {
-      movesList.append(el("div", "aw-move__meta",
-        "推演模块校验未通过：已保留原始数据，未做任何覆盖；请到变化页导出核对。"));
-    }
+    if (lines.length === 0) movesList.append(el("div", "aw-move__empty", "这一轮没有可确认的新动向。"));
     return true;
   }
 
@@ -3547,13 +3520,17 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       live.append(el("div", "aw-move__meta", "回复完成后写入世界书"));
       movesList.append(live);
     }
-    // D07：幕后动向优先于旧回执摘要（老聊天没有 simulationView 时自动跳过）
-    const renderedSimulation = renderSimulationMoves(s);
+    // 回执的「应用 N 行 / NO_TIME」属于排障信息，留在变化与日志页。
+    const newest = receipts[0] ?? null;
+    const renderedSimulation = newest?.status === "failed" &&
+      newest.receiptId !== s.simulationView?.latestTurn?.receiptId
+      ? false : renderSimulationMoves(s);
     if (receipts.length === 0 && !s.pendingTurn && !renderedSimulation) {
       movesList.append(el("div", "aw-move__empty", "绑定世界并对话后，每轮的 NPC 动向与可触发事件会出现在这里。"));
       return;
     }
-    for (const receipt of receipts.slice(0, 10)) {
+    if (renderedSimulation) return;
+    for (const receipt of receipts.slice(0, 1).filter((item) => item.status === "failed")) {
       const card = el("div", "aw-move");
       // 0.9.20：失败回执标红（原因在 summary 第二句，之前截断后根本看不见）
       if (receipt.status === "failed") card.classList.add("is-failed");
@@ -3567,6 +3544,9 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       }
       card.append(el("div", "aw-move__meta", `第 ${String(receipt.previousTime)} → ${String(receipt.currentTime)} 时段`));
       movesList.append(card);
+    }
+    if (!renderedSimulation && receipts.length > 0 && !s.pendingTurn && !receipts.some((item) => item.status === "failed")) {
+      movesList.append(el("div", "aw-move__empty", "本轮尚无可展示的动向简报；详细回执在「变化」页。"));
     }
   }
 
@@ -4316,6 +4296,28 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
           relevantNpcIds: d.relevantNpcIds ?? [],
         });
         center.append(emptyBox(triage.message));
+        // 当前地点不明时不能称为「附近」，但已经入表的人也不该消失；单列作者可查的
+        // 地点名单，绝不由此推断主角与他们同地。
+        if (triage.case === "current-location-unknown") {
+          const known = (d.tableMap?.nearby?.entries ?? []).filter((entry) =>
+            entry && entry.locationId && entry.presence !== "left" && entry.isProtagonist !== true).slice(0, 24);
+          if (known.length > 0) {
+            const directory = el("section", "aw-card");
+            directory.append(el("h2", "aw-card__title", "已记录在其他地点的人物（作者信息）"));
+            directory.append(el("p", "aw-card__meta", "这些人不一定在主角附近；确认当前位置后才会计算附近人物。"));
+            for (const entry of known) {
+              const row = el("button", "aw-btn aw-btn--ghost", `${String(entry.name)} · ${String(entry.locationName ?? "位置未详")}`);
+              row.type = "button";
+              row.addEventListener("click", () => {
+                core.setPage("map");
+                renderPage();
+                locateToPointPanel(String(entry.locationId).replace(/^loc:/, ""));
+              });
+              directory.append(row);
+            }
+            center.append(directory);
+          }
+        }
       } else {
         const grid = el("div", "aw-cards");
         for (const npc of relevant) {
@@ -4650,6 +4652,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     gridMajorPath.setAttribute("d", paths && typeof paths.majorPath === "string" ? paths.majorPath : "");
     const stride = paths && Number.isFinite(paths.majorStep) && paths.majorStep > 0 ? paths.majorStep : 1;
     gridLayer.dataset.gridStride = String(stride);
+    gridLayer.dataset.subdivision = String(paths?.subdivision ?? 1);
     gridLayer.dataset.gridMinorHidden = paths && paths.minorHidden === true ? "1" : "0";
     /**
      * H19b（§2.6）：网格步长不再占用左下角常驻控件——它属于网格切换按钮的
@@ -4657,7 +4660,8 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
      * 左下角只留比例尺这一条常驻控件。
      */
     if (gridToggleEl) {
-      const strideText = stride === 1 ? "网格：1 格/线" : "主网格：" + stride + " 格/线";
+      const strideText = paths?.subdivision === 5 ? "细网格：1/5 格/线" :
+        stride === 1 ? "网格：1 格/线" : "主网格：" + stride + " 格/线";
       gridToggleEl.title = strideText;
       gridToggleEl.setAttribute("aria-label", `网格显示切换（${strideText}）`);
     }
@@ -5524,7 +5528,12 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     closeMapPanel();
     const d = lastMapData;
     if (!d) return;
-    const target = (Array.isArray(d.map?.points) ? d.map.points : []).find((p) => String(p.id) === String(pointId));
+    const placed = (d.tableMap?.world?.points ?? d.map?.points ?? []).find((p) => String(p.id) === String(pointId));
+    const unplaced = d.tableMap?.unplacedLocations?.entries?.find((entry) =>
+      String(entry.id) === `loc:${String(pointId)}` && entry.parentLocationId === null);
+    const target = placed ?? (unplaced
+      ? { id: String(pointId), rowId: String(unplaced.id), name: String(unplaced.name), unplaced: true }
+      : null);
     if (!target) return;
     if (mapStack.length > 0) {
       mapStack = [];
@@ -5706,8 +5715,36 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     if (scale) metaLines.push(`比例尺：1 格 ≈ ${scale.distancePerCell}${scale.unit ? ` ${scale.unit}` : ""}`);
     if (metaLines.length > 0) mapPanel.append(el("div", "aw-mappanel__meta", metaLines.join(" · ")));
     if (description) mapPanel.append(el("div", "aw-mappanel__desc", description));
+    if (point.unplaced === true) {
+      mapPanel.append(el("div", "aw-mappanel__meta", "尚无已确认格坐标；地图上的虚线标记只是目录入口，不代表此处的实际位置。"));
+    }
 
     const actions = el("div", "aw-mappanel__actions");
+    const protagonists = (Array.isArray(d.npcDirectory) ? d.npcDirectory : [])
+      .filter((npc) => npc.isProtagonist === true);
+    if (protagonists.length === 1 && !inSub && String(point.id) !== String(d.currentLocationId ?? "")) {
+      const locateBtn = el("button", "aw-btn aw-btn--ghost", "确认主角在这里");
+      locateBtn.type = "button";
+      locateBtn.setAttribute("aria-label", `作者确认主角当前位于 ${String(point.name)}`);
+      locateBtn.addEventListener("click", async () => {
+        if (!(globalThis.confirm?.(`确认主角当前位于「${String(point.name)}」？这将更新本聊天的位置记录。`) ?? false)) return;
+        try {
+          const response = await api.request("POST", "/worlds/move-author", {
+            chatId: String(state().chatId ?? ""), entityId: String(protagonists[0].id), toPointId: String(point.id),
+          });
+          if (response.status !== 200 || !response.body?.ok) {
+            setStatus(response.body?.error?.message ?? `当前位置确认失败（HTTP ${response.status}）`, "error");
+            return;
+          }
+          closeMapPanel();
+          await core.refresh();
+          setStatus(`主角位置已确认：${String(point.name)}。`, "ok");
+        } catch (error) {
+          setStatus(`当前位置确认失败：${error instanceof Error ? error.message : String(error)}`, "error");
+        }
+      });
+      actions.append(locateBtn);
+    }
     // 0.9.41 在场名单：当前地点上的人物 / 物品（npcDirectory / objectDirectory 按 pointId 分组）
     const d0 = lastMapData;
     // D04：有 `tableMap` 时，**位置与在场性以三表为准**（行增量回合只改三表）；
@@ -5756,7 +5793,8 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     here.append(hereLabel);
     if (!atCurrentLocation) {
       here.append(el("div", "aw-mappanel__here-hint",
-        "你当前不在此地：这里列出的是该地点的实际在场者（作者信息），不是「附近」。"));
+        d0?.currentLocationId ? "你当前不在此地：这里是该地点在场者（作者信息），不是「附近」。"
+          : "主角当前位置尚未确认；这里是该地点的在场记录（作者信息），不代表这些人在你附近。"));
     }
     if (hereNpcs.length > 0) {
       // S9（0.9.55）：纠偏入口搬进名单后必须说明怎么用——否则「拖拽」这个能力对用户不可见。
@@ -5838,23 +5876,28 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         const chatId = String(state().chatId ?? "");
         if (!chatId) { confirmStatus.textContent = "当前没有活动聊天。"; confirmStatus.className = "aw-confirm__status is-error"; return; }
         const targetLocationId = targetSelect.value ? String(targetSelect.value) : null;
-        const response = await api.request("POST", "/maps/topology/confirm", {
-          chatId,
-          operation,
-          locationId: hereRowId,
-          ...(operation === "set-parent" || operation === "set-adjacent" ? { targetLocationId } : {}),
-          ...extra,
-        });
-        if (response.status !== 200 || !response.body?.ok) {
-          const path = response.body?.error?.details?.schemaPath;
-          confirmStatus.textContent =
-            `${response.body?.error?.message ?? "确认失败"}${path ? `（字段：${String(path)}）` : ""}`;
+        try {
+          const response = await api.request("POST", "/maps/topology/confirm", {
+            chatId,
+            operation,
+            locationId: hereRowId,
+            ...(operation === "set-parent" || operation === "set-adjacent" ? { targetLocationId } : {}),
+            ...extra,
+          });
+          if (response.status !== 200 || !response.body?.ok) {
+            const path = response.body?.error?.details?.schemaPath;
+            confirmStatus.textContent =
+              `${response.body?.error?.message ?? "确认失败"}${path ? `（字段：${String(path)}）` : ""}`;
+            confirmStatus.className = "aw-confirm__status is-error";
+            return;
+          }
+          confirmStatus.textContent = "已保存到当前分支。";
+          confirmStatus.className = "aw-confirm__status is-ok";
+          await core.refresh();
+        } catch (error) {
+          confirmStatus.textContent = `确认失败：${error instanceof Error ? error.message : String(error)}`;
           confirmStatus.className = "aw-confirm__status is-error";
-          return;
         }
-        confirmStatus.textContent = "已保存到当前分支。";
-        confirmStatus.className = "aw-confirm__status is-ok";
-        await core.refresh();
       };
 
       const confirmActions = el("div", "aw-confirm__actions");
@@ -5870,11 +5913,38 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       adjacentBtn.addEventListener("click", () => void sendConfirm("set-adjacent"));
       confirmActions.append(parentBtn, detachBtn, adjacentBtn);
       confirmBox.append(confirmActions);
+      if (point.unplaced === true) {
+        const coordRow = el("div", "aw-confirm__actions");
+        const xInput = el("input", "aw-input");
+        const yInput = el("input", "aw-input");
+        for (const [input, label] of [[xInput, "格坐标 X"], [yInput, "格坐标 Y"]]) {
+          input.type = "number";
+          input.min = "0";
+          input.step = "1";
+          input.placeholder = label;
+          input.setAttribute("aria-label", label);
+        }
+        const coordinateBtn = el("button", "aw-btn aw-btn--ghost", "确认格坐标");
+        coordinateBtn.type = "button";
+        coordinateBtn.addEventListener("click", () => {
+          const x = Number(xInput.value);
+          const y = Number(yInput.value);
+          if (!xInput.value.trim() || !yInput.value.trim() || !Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0) {
+            confirmStatus.textContent = "请填写已确认的非负整数 X、Y 格坐标；示意标记的位置不能直接当作坐标。";
+            confirmStatus.className = "aw-confirm__status is-error";
+            return;
+          }
+          void sendConfirm("confirm-coordinate", { gridX: x, gridY: y,
+            mapId: inSub ? `loc:${String(mapStack[mapStack.length - 1]?.pointId)}` : "world" });
+        });
+        coordRow.append(xInput, yInput, coordinateBtn);
+        confirmBox.append(coordRow);
+      }
       confirmBox.append(confirmStatus);
       mapPanel.append(confirmBox);
     }
 
-    if (!inSub && String(point.id) !== String(d.currentLocationId ?? "")) {
+    if (!inSub && point.unplaced !== true && d.currentLocationId && String(point.id) !== String(d.currentLocationId)) {
       const routeBtn = el("button", "aw-btn aw-btn--primary", "预览前往路线");
       routeBtn.type = "button";
       routeBtn.setAttribute("aria-label", `预览前往 ${point.name} 的路线`);
@@ -5904,7 +5974,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
      * 入口只在这里——地图平时照常平移/点选，不进入绘制就绝不会捕获网格点击。
      * locationId 用三表行 id（`loc:*`），不是地图点 id：H15a 按三表行写 areas。
      */
-    if (!inSub) {
+    if (!inSub && point.unplaced !== true) {
       const rowId = typeof point.rowId === "string" && point.rowId.length > 0
         ? point.rowId
         : `loc:${String(point.id)}`;
@@ -6292,9 +6362,12 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     // 0.9.20 空地理诚实提示；0.9.26 地图抢救后文案更新——单点地图不是渲染坏了，
     // 是世界里真的只有一个地点；提炼按钮（世界书 / 近期剧情）现在常显可随时生长地图
     if (mapHint) {
-      const hasRealGeo = pointsAll.length > 0 || regions.length > 0;
+      const hasRealGeo = pointsAll.length > 0 || regions.length > 0
+        || (tableMap?.unplacedLocations?.total ?? 0) > 0;
       mapHint.textContent = hasRealGeo
-        ? ""
+        ? pointsAll.length === 0 && !inSub
+          ? "已记录地点，但尚无已确认格坐标。图中的虚线标记仅供打开地点资料；可在资料中确认位置。"
+          : ""
         : "这个世界还没有地理数据：新世界不再预置「起点」占位地点。点下方「从世界书提炼地理」导入卡书里的地点；推演有场景后，可用「从近期剧情提炼新地点」让地图继续生长。";
       // R01：空提示不渲染占位覆盖层（旧实现空文字仍是 inset:0 的 absolute 层，挡住点击）
       mapHint.style.display = mapHint.textContent ? "" : "none";
@@ -6350,11 +6423,10 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     imageLayer.style.height = `${cameraFrame.spanY}px`;
     // 0.9.50（M04/M05）动态标尺条：标定（calibrations[mapId]）优先画米制条；
     // 旧式自由单位比例尺只做文字说明（换算未知，不画伪物理条）；世界图沿用
-    // 「多于一个地点或地区才显示」的显隐口径。缩放 / resize 经 updateScaleBarVisual 重算。
+    // 即使只有待定位地点，视口也有格距离：常驻格数标尺，标定后才改为物理单位。
     if (mapScaleEl) {
-      const showScale = !inSub ? pointsAll.length > 0 || regions.length > 0 : true;
-      mapScaleEl.style.display = showScale ? "" : "none";
-      if (showScale) {
+      mapScaleEl.style.display = "";
+      {
         const calibrations = mapData.calibrations && typeof mapData.calibrations === "object" ? mapData.calibrations : {};
         let mapId = inSub ? String(view.pointId) : "world";
         let calibration = calibrations[mapId] ?? null;
@@ -6377,8 +6449,6 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         }
         scaleCtx = { calibration, legacyScale, mapId, sql: Boolean(sqlModel), metersPerCell: sqlModel ? sqlModel.metersPerCell : null };
         rebuildScaleDetail(d, mapId, calibration, legacyScale);
-      } else {
-        scaleCtx = null;
       }
     }
     // R01 图层接线：viewport 静态装饰纹理保持关闭（固定背景格不能冒充可测量网格）；
@@ -6538,13 +6608,17 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
      * - 绝不落在 (0,0)：排布函数保证落在 frame 内的空位。
      */
     if (typeof layoutUnplacedMarkers === "function" && Array.isArray(tableMap?.unplacedLocations?.entries)) {
-      const unplacedEntries = tableMap.unplacedLocations.entries;
+      // 未确认坐标也有父地图：子地点只在自己的父地图上作示意，不能在世界图重叠。
+      const parentRowId = inSub ? `loc:${String(view.pointId)}` : null;
+      const unplacedEntries = tableMap.unplacedLocations.entries.filter((entry) =>
+        (entry.parentLocationId ?? null) === parentRowId);
       if (unplacedEntries.length > 0) {
         const layout = layoutUnplacedMarkers({
           branchKey: String(tableMap?.branchKey ?? "canon"),
           mapId: inSub ? String(view.pointId) : "world",
           frame: { cols: cameraFrame.spanX, rows: cameraFrame.spanY },
-          confirmed: points.map((point) => ({ id: String(point.id), x: Number(point.x), y: Number(point.y) })),
+          confirmed: points.map((point) => ({ id: String(point.id),
+            x: Number(point.x) - cameraFrame.minX, y: Number(point.y) - cameraFrame.minY })),
           unplaced: unplacedEntries.map((entry) => ({
             id: String(entry.id ?? entry.locationId ?? ""),
             name: String(entry.name ?? ""),
@@ -6552,15 +6626,24 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
           ...(Array.isArray(tableMap?.geoTopology?.vehicleAnchors) ? { vehicles: tableMap.geoTopology.vehicleAnchors } : {}),
         });
         for (const marker of layout?.displayOnly ?? []) {
+          const entry = unplacedEntries.find((item) => String(item.id) === String(marker.id));
+          if (!entry) continue;
+          const pointId = String(entry.id).replace(/^loc:/, "");
           const node = el("button", "aw-point aw-point--displayonly");
           node.type = "button";
           node.textContent = String(marker.name ?? marker.id ?? "");
           node.title = `${String(marker.name ?? "")}（位置未确认，仅为示意）`;
           node.setAttribute("aria-label", `地点 ${String(marker.name ?? "")}，位置未确认，仅为示意，点击查看详情`);
           node.dataset.displayOnly = "true";
+          node.dataset.pointId = pointId;
           node.append(el("span", "aw-point__pending", "待定位"));
-          node.style.left = `${Number(marker.x)}px`;
-          node.style.top = `${Number(marker.y)}px`;
+          node.style.left = `${Number(marker.x) + cameraFrame.minX}px`;
+          node.style.top = `${Number(marker.y) + cameraFrame.minY}px`;
+          node.addEventListener("click", (event) => {
+            event.stopPropagation();
+            openMapPanel({ id: pointId, rowId: String(entry.id), name: String(entry.name), unplaced: true },
+              { inSub, currentSub }, node);
+          });
           mapLayer.append(node);
         }
         mapLayer.dataset.pendingCount = String((layout?.pending ?? []).length);

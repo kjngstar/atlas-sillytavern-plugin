@@ -396,6 +396,7 @@ function movesState({ chatId, simulationView, receipts }) {
 
 const SIMULATION_A = {
   branchKey: "canon",
+  latestTurn: { receiptId: "rcpt-a", period: 3, highlights: ["A 聊天的使者抵达城门"], events: [] },
   tasks: [], signals: [], deliveries: [],
   counts: { tasks: 1, activeTasks: 1, blockedTasks: 0, signals: 1, deliveries: 1 },
   truncated: { tasks: 0, signals: 0, deliveries: 0, events: 0 },
@@ -409,14 +410,14 @@ const SIMULATION_A = {
   }],
 };
 
-test("G03 回放：A/B 会话切换后左栏不含 A 的幕后动向；simulationView 缺席时退回旧回执", async () => {
+test("G03 回放：A/B 会话切换后左栏只显示本轮动向，不泄漏旧聊天或技术回执", async () => {
   const { dom, core, container, rerender } = await mountReplay(movesState({
     chatId: "chat-a", simulationView: SIMULATION_A, receipts: [],
   }));
   const movesText = () => String(container.querySelector(".aw-moves")?.textContent ?? "");
 
   assert.match(movesText(), /A 聊天的使者抵达城门/, "A 的左栏显示 A 的幕后动向");
-  assert.match(movesText(), /幕后动向/, "动向卡标题在");
+  assert.match(movesText(), /A 聊天的使者抵达城门/, "动向卡显示可读摘要");
 
   // 切到 B：另一份 /state（没有推演模块，只有本轮之前的旧回执）
   core.setState(movesState({
@@ -436,7 +437,8 @@ test("G03 回放：A/B 会话切换后左栏不含 A 的幕后动向；simulatio
     `切到 B 后左栏不得残留 A 的动向：实际 "${movesText()}"`);
   assert.ok(!movesText().includes("已送达"),
     "B 没有 simulationView，就不该出现推演态标签");
-  assert.match(movesText(), /B 聊天的旧回执摘要/, "simulationView 为 null 时退回旧回执摘要（旧行为不变）");
+  assert.match(movesText(), /本轮尚无可展示的动向简报/, "旧会话无结构化本轮动向时说明原因");
+  assert.ok(!movesText().includes("B 聊天的旧回执摘要"), "旧回执留在变化页，不占读者侧栏");
 
   // 切回 A：A 的动向完整恢复（不是被清空，而是按聊天作用域各归各的）
   core.setState(movesState({ chatId: "chat-a", simulationView: SIMULATION_A, receipts: [] }));
@@ -447,18 +449,25 @@ test("G03 回放：A/B 会话切换后左栏不含 A 的幕后动向；simulatio
   dom.window.close();
 });
 
-test("G03 回放：0 时段只有意图时，左栏明说「不会移动、不会传到远方」", async () => {
+test("G03 回放：0 时段只有意图时，左栏不把它写成已发生的移动", async () => {
   const zeroPeriod = {
     ...SIMULATION_A,
     recentEvents: [],
+    latestTurn: {
+      receiptId: "rcpt-a", period: 0, highlights: [], events: [{
+        id: "evt-intent", status: "intent-recorded", actorCharacterId: null,
+        toLocationId: "loc:2", summary: "npc:unknown 记下意图：前往城门",
+      }],
+    },
     counts: { tasks: 1, activeTasks: 1, blockedTasks: 0, signals: 0, deliveries: 0 },
   };
   const { dom, container } = await mountReplay(movesState({
     chatId: "chat-a", simulationView: zeroPeriod, receipts: [],
   }));
   const text = String(container.querySelector(".aw-moves")?.textContent ?? "");
-  assert.match(text, /已记录行动意图；时间未推进，人物不会移动、消息也不会传到远方。/,
-    `第 0 时段必须说清「意图 ≠ 已发生」：实际 "${text}"`);
+  assert.match(text, /有人打算前往城门/,
+    `第 0 时段只显示具体意图：实际 "${text}"`);
+  assert.ok(!/NO_TIME|记下意图/.test(text), "技术回执文字不出现在读者侧栏");
   assert.ok(!/已抵达|已送达/.test(text), "0 时段不得出现任何「已抵达 / 已送达」");
   dom.window.close();
 });
