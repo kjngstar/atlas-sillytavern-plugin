@@ -11,6 +11,7 @@ import { applyGroups } from './atlas-db-commit.ts';
 // E08：回退计划的唯一权威（逆因果序、中间楼定位、显式上限拒绝）。
 import { applyRollbackPlan, planRollback } from './atlas-db-rollback.ts';
 import { validateCandidate } from './atlas-db-invariants.ts';
+import { ATLAS_SEMANTIC_OPS } from './atlas-ops-contract.ts';
 import { buildAtomicGroups, orderGroups } from './atlas-ops-groups.ts';
 import { compileOperations, defaultMakeId } from './atlas-ops-compile.ts';
 import { extractPayload, looksLikeSql, parseOperations } from './atlas-ops-parser.ts';
@@ -720,16 +721,27 @@ export function createSqlRepository(options: RepositoryOptions) {
     }
 
     // 2) 编译（纯函数，不写正式库）
+    /**
+     * manual（作者手动编辑）与自动推演走的阶段不同：
+     * 自动推演只从正文「观察」，而作者手动编辑是**统一写入层**，必须能提交
+     * attention.propose / plan.propose 等非 observe 操作；把它们锁死在 observe
+     * 会让 manual 编辑收不到 UNKNOWN_OPERATION 之外的任何结果。
+     */
+    const compilePhase: Phase = 'observe';
     const compiled = compileOperations({
       operations: parsedOperations,
       anchor,
-      phase: input.manual ? 'observe' : 'observe',
+      phase: compilePhase,
       clockS: clockBefore,
       revision: rev,
       tables,
-      sources: { phase: 'observe', snapshot: sourceSnapshot, clockS: clockBefore },
+      sources: { phase: compilePhase, snapshot: sourceSnapshot, clockS: clockBefore },
       makeId,
       knownRefs: collectKnownRefs(tables, branchId),
+      // 审计列（created_turn_id/updated_turn_id/first_turn_id/last_turn_id）记本次新建的楼。
+      turnId,
+      // manual = 统一写入层：按操作本身判定允许集合，不受 observe 限制。
+      ...(input.manual ? { allowedOps: ATLAS_SEMANTIC_OPS } : {}),
     });
     allIssues.push(...compiled.issues);
 
@@ -1045,9 +1057,9 @@ export function createSqlRepository(options: RepositoryOptions) {
         attempts: [],
       });
 
-      // 行的恢复交给 E08（唯一权威：逆因果序、受影响后文定位、显式上限拒绝）。
-      // branches 的指针语义由本函数承担（见下），因此先摘掉计划里的 branches 步骤，
-      // 避免两套 head 语义互相覆盖。
+      // 行的恢复交给 E08（唯一权威：逆因果序、受影响后文定位、依赖排序、显式上限拒绝）。
+      // branches 的 head 指针语义与 E08 尚未统一（见 atlas-db-rollback.ts 的说明），
+      // 因此先摘掉计划里的 branches 步骤，由本函数按自己的契约写，避免两套语义互相覆盖。
       const rowPlan = { ...plan, steps: plan.steps.filter((step) => step.targetTable !== 'branches') };
       const appliedPlan = await applyRollbackPlan(candidateDb, rowPlan, { turnId: rollbackTurnId, attemptId: 'rollback' });
       for (const note of appliedPlan.issues) {
@@ -1060,7 +1072,6 @@ export function createSqlRepository(options: RepositoryOptions) {
       }
 
       const clockAfter = plan.clockTargetS;
-      // prepareRollback 的契约：目标楼本身仍为 head（撤销的是它之后的变化）。
       runBound(
         candidateDb,
         `UPDATE branches SET head_turn_id = ?, revision = ?, clock_s = ?, clock_min_s = ?, clock_max_s = ?, simulation_cursor_s = ?, simulation_status = 'current' WHERE id = ?`,

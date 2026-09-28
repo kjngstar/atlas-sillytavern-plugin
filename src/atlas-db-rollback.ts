@@ -21,6 +21,7 @@ import { isJournaledTable, readTurnChanges } from './atlas-db-journal.ts';
 import { collectDescendants } from './atlas-db-repository.ts';
 import { assertSafeIdentifier, AtlasDbError, foreignKeyCheck, queryBound, runBound } from './atlas-db-runtime.ts';
 import { isKnownTable, tableColumnNames } from './atlas-db-schema.ts';
+import { BUSINESS_TABLES, INTERNAL_TABLES } from './atlas-db-contract.ts';
 import type { SqlDatabase } from './atlas-db-runtime.ts';
 import type { Issue } from './atlas-ops-contract.ts';
 
@@ -303,6 +304,10 @@ export function planRollback(chain: RollbackChain, limits: RollbackLimits = {}):
   // 属于可回退字段，用**一条显式 step**表达（完整行 + 回退后的可回退字段）。
   const restoredCursorS = Math.min(finiteOr(branch.simulation_cursor_s, 0), clockTargetS);
   const branchRestore: Record<string, unknown> = { ...branch };
+  // 注意：此处 head = 目标楼的**父楼**（= 连目标楼一起撤销）。
+  // 仓库入口 prepareRollback 的 head 语义不同（head = 传入的 targetParentTurnId），两处**尚未统一**：
+  // 各自都被测试固定（T25-03 / T10-12 / T28-01 要父楼语义，T14-02 / T14-04 要目标楼语义），
+  // 强行合并会同时打破两边，属于语义未定而非实现缺陷。调用方需明确自己用的是哪一套。
   branchRestore.head_turn_id = parentOf.get(targetTurnId) ?? null;
   branchRestore.revision = revision + 1;
   branchRestore.clock_s = clockTargetS;
@@ -357,6 +362,85 @@ function normalizeValue(value: unknown): string | number | null {
  * - 应用完成后显式执行 `foreign_key_check`，非空则抛 `SQL_CONSTRAINT`（§7.3：不用 RELEASE 代替）。
  * - 非日志化表（turns / turn_changes / sync_outbox）与 turns 的「已回退」状态由调用方控制器负责。
  */
+
+/**
+ * 运行时读取「谁引用谁」（child → parents）。用 SQLite 自己的外键元数据，
+ * 不硬编码表关系，schema 改了也不会失真。
+ */
+function referenceGraph(db: SqlDatabase): Map<string, Set<string>> {
+  const graph = new Map<string, Set<string>>();
+  for (const table of [...BUSINESS_TABLES, ...INTERNAL_TABLES]) {
+    const parents = new Set<string>();
+    try {
+      for (const row of queryBound(db, `PRAGMA foreign_key_list(${assertSafeIdentifier(table)})`)) {
+        const parent = String(row.table ?? '');
+        if (parent !== '' && parent !== table) parents.add(parent);
+      }
+    } catch {
+      // 元数据读不到就不加约束；真正的失败仍由最终 foreign_key_check 拦住。
+    }
+    graph.set(table, parents);
+  }
+  return graph;
+}
+
+/** 一步实际会做的写动作（回退视角）。 */
+function effectiveAction(step: RollbackStep): 'insert' | 'update' | 'delete' {
+  if (step.restore === null) return 'delete';
+  return step.operation === 'delete' ? 'insert' : 'update';
+}
+
+/**
+ * 依赖排序：对 (子, 父) 两步，
+ * - 父行被删除 → 子步骤必须先跑（先摘掉引用再删被引用行）；
+ * - 父行被重建 → 父步骤必须先跑（先有父行再让子行指向它）。
+ * 成环时保持原相对顺序（不静默成功：最终 foreign_key_check 会拦住真正的不一致）。
+ */
+function orderStepsByDependencies(steps: RollbackStep[], graph: Map<string, Set<string>>): RollbackStep[] {
+  const n = steps.length;
+  const edges: Array<Set<number>> = Array.from({ length: n }, () => new Set<number>());
+  const indegree = new Array<number>(n).fill(0);
+  const addEdge = (from: number, to: number): void => {
+    if (from === to || edges[from].has(to)) return;
+    edges[from].add(to);
+    indegree[to] += 1;
+  };
+
+  for (let i = 0; i < n; i += 1) {
+    for (let j = 0; j < n; j += 1) {
+      if (i === j) continue;
+      const child = steps[i];
+      const parent = steps[j];
+      if (!(graph.get(child.targetTable)?.has(parent.targetTable) ?? false)) continue;
+      const parentAction = effectiveAction(parent);
+      if (parentAction === 'delete') addEdge(i, j); // 子先
+      else if (parentAction === 'insert') addEdge(j, i); // 父先
+    }
+  }
+
+  // 稳定拓扑：入度为 0 的按原索引升序取，保证结果确定性。
+  const ordered: RollbackStep[] = [];
+  const taken = new Array<boolean>(n).fill(false);
+  for (let count = 0; count < n; count += 1) {
+    let picked = -1;
+    for (let i = 0; i < n; i += 1) {
+      if (!taken[i] && indegree[i] === 0) {
+        picked = i;
+        break;
+      }
+    }
+    if (picked === -1) {
+      // 环：剩余按原顺序追加（由最终外键检查负责判定真伪，不假装成功）。
+      for (let i = 0; i < n; i += 1) if (!taken[i]) ordered.push(steps[i]);
+      break;
+    }
+    taken[picked] = true;
+    ordered.push(steps[picked]);
+    for (const next of edges[picked]) indegree[next] -= 1;
+  }
+  return ordered;
+}
+
 export async function applyRollbackPlan(
   db: SqlDatabase,
   plan: RollbackPlan,
@@ -365,7 +449,10 @@ export async function applyRollbackPlan(
   const issues: Issue[] = [...plan.issues];
   let restored = 0;
 
-  for (const step of plan.steps) {
+  // 依赖排序（§7.4：回退不能因为写入顺序而触发外键失败）。
+  const orderedSteps = orderStepsByDependencies(plan.steps, referenceGraph(db));
+
+  for (const step of orderedSteps) {
     const table = step.targetTable;
     if (!isKnownTable(table) || !isJournaledTable(table) || NON_JOURNALED_TABLES.has(table)) {
       throw new AtlasDbError('ROLLBACK_PLAN_INVALID', `回退步骤指向不可回退的表：${table}`, {

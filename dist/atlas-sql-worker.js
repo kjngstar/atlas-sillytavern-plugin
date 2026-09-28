@@ -4542,10 +4542,70 @@ END`;
     if (typeof value === "object") return JSON.stringify(value);
     return value;
   }
+  function referenceGraph(db) {
+    const graph = /* @__PURE__ */ new Map();
+    for (const table of [...BUSINESS_TABLES, ...INTERNAL_TABLES]) {
+      const parents = /* @__PURE__ */ new Set();
+      try {
+        for (const row2 of queryBound(db, `PRAGMA foreign_key_list(${assertSafeIdentifier(table)})`)) {
+          const parent = String(row2.table ?? "");
+          if (parent !== "" && parent !== table) parents.add(parent);
+        }
+      } catch {
+      }
+      graph.set(table, parents);
+    }
+    return graph;
+  }
+  function effectiveAction(step) {
+    if (step.restore === null) return "delete";
+    return step.operation === "delete" ? "insert" : "update";
+  }
+  function orderStepsByDependencies(steps, graph) {
+    const n = steps.length;
+    const edges = Array.from({ length: n }, () => /* @__PURE__ */ new Set());
+    const indegree = new Array(n).fill(0);
+    const addEdge = (from, to) => {
+      if (from === to || edges[from].has(to)) return;
+      edges[from].add(to);
+      indegree[to] += 1;
+    };
+    for (let i = 0; i < n; i += 1) {
+      for (let j = 0; j < n; j += 1) {
+        if (i === j) continue;
+        const child = steps[i];
+        const parent = steps[j];
+        if (!(graph.get(child.targetTable)?.has(parent.targetTable) ?? false)) continue;
+        const parentAction = effectiveAction(parent);
+        if (parentAction === "delete") addEdge(i, j);
+        else if (parentAction === "insert") addEdge(j, i);
+      }
+    }
+    const ordered = [];
+    const taken = new Array(n).fill(false);
+    for (let count = 0; count < n; count += 1) {
+      let picked = -1;
+      for (let i = 0; i < n; i += 1) {
+        if (!taken[i] && indegree[i] === 0) {
+          picked = i;
+          break;
+        }
+      }
+      if (picked === -1) {
+        for (let i = 0; i < n; i += 1) if (!taken[i]) ordered.push(steps[i]);
+        break;
+      }
+      taken[picked] = true;
+      ordered.push(steps[picked]);
+      for (const next of edges[picked]) indegree[next] -= 1;
+    }
+    return ordered;
+  }
   async function applyRollbackPlan(db, plan, ctx) {
     const issues = [...plan.issues];
     let restored = 0;
-    for (const step of plan.steps) {
+    const orderedSteps = orderStepsByDependencies(plan.steps, referenceGraph(db));
+    for (const step of orderedSteps) {
       const table = step.targetTable;
       if (!isKnownTable(table) || !isJournaledTable(table) || NON_JOURNALED_TABLES.has(table)) {
         throw new AtlasDbError("ROLLBACK_PLAN_INVALID", `回退步骤指向不可回退的表：${table}`, {
@@ -4610,6 +4670,105 @@ END`;
       });
     }
     return { restored, issues };
+  }
+
+  // src/atlas-ops-contract.ts
+  var ATLAS_SEMANTIC_OPS = [
+    "location.upsert",
+    "character.upsert",
+    "item.upsert",
+    "item.transfer",
+    "faction.upsert",
+    "relation.upsert",
+    "plan.propose",
+    "plan.revise",
+    "event.propose",
+    "information.propose",
+    "attention.propose",
+    "channel.upsert",
+    "map.estimate",
+    "route.propose"
+  ];
+  var ATLAS_NOOP = "noop";
+  function isSemanticOp(op) {
+    return ATLAS_SEMANTIC_OPS.includes(op);
+  }
+  var PHASE_ALLOWED_OPS = {
+    observe: [
+      "location.upsert",
+      "character.upsert",
+      "item.upsert",
+      "item.transfer",
+      "faction.upsert",
+      "relation.upsert",
+      "event.propose",
+      "information.propose"
+    ],
+    geography: ["location.upsert", "map.estimate", "route.propose"],
+    decision: [
+      "character.upsert",
+      "relation.upsert",
+      "plan.propose",
+      "plan.revise",
+      "attention.propose",
+      "channel.upsert"
+    ],
+    outcome: ["event.propose", "information.propose"],
+    repair: []
+    // 由 allowedOpsForPhase 用原失败组的允许集合填充
+  };
+  var SYSTEM_OWNED_FIELDS = [
+    "id",
+    "branch_id",
+    "branchId",
+    "row_rev",
+    "rowRev",
+    "created_turn_id",
+    "createdTurnId",
+    "updated_turn_id",
+    "updatedTurnId",
+    "created_at_s",
+    "createdAtS",
+    "updated_at_s",
+    "updatedAtS",
+    "revision",
+    "schema_version",
+    "schemaVersion",
+    "group_id",
+    "groupId",
+    "operation_id",
+    "operationId",
+    "basis_json",
+    "basis",
+    "target_table",
+    "turn_id",
+    "turnId",
+    "chat_uid",
+    "chatUid",
+    "world_uid",
+    "core_saved",
+    "coreSaved",
+    "row_id",
+    "rowId",
+    "rng_seed",
+    "rngSeed",
+    "clock_s",
+    "clockS",
+    "storage_revision",
+    "storageRevision"
+  ];
+  var OP_FIELD_ALIASES = {
+    locationRef: "location_ref",
+    parentRef: "parent_ref",
+    holderRef: "holder_ref",
+    targetLocationRef: "target_location_ref",
+    actionTendency: "action_tendency",
+    gridX: "position.x",
+    gridY: "position.y"
+  };
+  function allowedOpsForPhase(phase, repairAllow) {
+    if (phase === "repair") return repairAllow ?? [];
+    return PHASE_ALLOWED_OPS[phase] ?? [];
   }
 
   // src/atlas-ops-groups.ts
@@ -5436,105 +5595,6 @@ END`;
       }
     }
     return out;
-  }
-
-  // src/atlas-ops-contract.ts
-  var ATLAS_SEMANTIC_OPS = [
-    "location.upsert",
-    "character.upsert",
-    "item.upsert",
-    "item.transfer",
-    "faction.upsert",
-    "relation.upsert",
-    "plan.propose",
-    "plan.revise",
-    "event.propose",
-    "information.propose",
-    "attention.propose",
-    "channel.upsert",
-    "map.estimate",
-    "route.propose"
-  ];
-  var ATLAS_NOOP = "noop";
-  function isSemanticOp(op) {
-    return ATLAS_SEMANTIC_OPS.includes(op);
-  }
-  var PHASE_ALLOWED_OPS = {
-    observe: [
-      "location.upsert",
-      "character.upsert",
-      "item.upsert",
-      "item.transfer",
-      "faction.upsert",
-      "relation.upsert",
-      "event.propose",
-      "information.propose"
-    ],
-    geography: ["location.upsert", "map.estimate", "route.propose"],
-    decision: [
-      "character.upsert",
-      "relation.upsert",
-      "plan.propose",
-      "plan.revise",
-      "attention.propose",
-      "channel.upsert"
-    ],
-    outcome: ["event.propose", "information.propose"],
-    repair: []
-    // 由 allowedOpsForPhase 用原失败组的允许集合填充
-  };
-  var SYSTEM_OWNED_FIELDS = [
-    "id",
-    "branch_id",
-    "branchId",
-    "row_rev",
-    "rowRev",
-    "created_turn_id",
-    "createdTurnId",
-    "updated_turn_id",
-    "updatedTurnId",
-    "created_at_s",
-    "createdAtS",
-    "updated_at_s",
-    "updatedAtS",
-    "revision",
-    "schema_version",
-    "schemaVersion",
-    "group_id",
-    "groupId",
-    "operation_id",
-    "operationId",
-    "basis_json",
-    "basis",
-    "target_table",
-    "turn_id",
-    "turnId",
-    "chat_uid",
-    "chatUid",
-    "world_uid",
-    "core_saved",
-    "coreSaved",
-    "row_id",
-    "rowId",
-    "rng_seed",
-    "rngSeed",
-    "clock_s",
-    "clockS",
-    "storage_revision",
-    "storageRevision"
-  ];
-  var OP_FIELD_ALIASES = {
-    locationRef: "location_ref",
-    parentRef: "parent_ref",
-    holderRef: "holder_ref",
-    targetLocationRef: "target_location_ref",
-    actionTendency: "action_tendency",
-    gridX: "position.x",
-    gridY: "position.y"
-  };
-  function allowedOpsForPhase(phase, repairAllow) {
-    if (phase === "repair") return repairAllow ?? [];
-    return PHASE_ALLOWED_OPS[phase] ?? [];
   }
 
   // src/atlas-ops-errors.ts
@@ -7614,6 +7674,7 @@ END`;
     return { table, rowId, before, after, sourceOpIds: [op.opId], basis };
   }
   function turnIdOf(ctx) {
+    if (typeof ctx.turnId === "string" && ctx.turnId !== "") return ctx.turnId;
     return ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
   }
   function basisFor2(ctx, op, extra = {}) {
@@ -9979,7 +10040,7 @@ END`;
     const issues = [];
     const normalized = [];
     for (const op of input.operations) {
-      const norm = normalizeOperation(op.value, input.phase);
+      const norm = normalizeOperation(op.value, input.phase, input.allowedOps);
       issues.push(...norm.issues.map((i) => ({ ...i, opId: i.opId ?? op.opId, line: i.line ?? op.line })));
       if (!norm.op) continue;
       normalized.push({ opId: op.opId, line: op.line, rawHash: op.rawHash, value: norm.op });
@@ -10008,6 +10069,8 @@ END`;
       tables: input.tables,
       makeId,
       branchId: input.anchor.branchId,
+      // 审计列按「本次正在创建的楼」记账（见 CompileContext.turnId）。
+      ...input.turnId ? { turnId: input.turnId } : {},
       basisFor: (op, extra) => {
         const causes = (input.sources?.causes ?? []).map((cause) => {
           const id = typeof cause?.id === "string" ? cause.id : "";
@@ -12542,16 +12605,21 @@ END`;
           { base: anchor.baseRevision, current: revAfterModel }
         );
       }
+      const compilePhase = "observe";
       const compiled = compileOperations({
         operations: parsedOperations,
         anchor,
-        phase: input.manual ? "observe" : "observe",
+        phase: compilePhase,
         clockS: clockBefore,
         revision: rev,
         tables,
-        sources: { phase: "observe", snapshot: sourceSnapshot, clockS: clockBefore },
+        sources: { phase: compilePhase, snapshot: sourceSnapshot, clockS: clockBefore },
         makeId,
-        knownRefs: collectKnownRefs(tables, branchId)
+        knownRefs: collectKnownRefs(tables, branchId),
+        // 审计列（created_turn_id/updated_turn_id/first_turn_id/last_turn_id）记本次新建的楼。
+        turnId,
+        // manual = 统一写入层：按操作本身判定允许集合，不受 observe 限制。
+        ...input.manual ? { allowedOps: ATLAS_SEMANTIC_OPS } : {}
       });
       allIssues.push(...compiled.issues);
       const compileInputs = compiled.results.map((r) => ({

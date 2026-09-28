@@ -1,0 +1,31 @@
+fix(atlas): 审计列归属、回退外键顺序、manual 写入阶段
+
+三处真实缺陷（均由 §18.3 测试暴露）：
+
+1. 审计列归属错误（turnIdOf）
+   src/atlas-ops-entities.ts::turnIdOf 返回 ctx.anchor.parentTurnId，
+   导致 mention_candidates.first_turn_id/last_turn_id 与 createRow 的
+   created_turn_id/updated_turn_id 全部记成父楼，审计列系统性偏一楼。
+   修：CompileContext / CompileOperationsInput 增加 turnId（本次正在创建的楼），
+   仓库在 compileOperations 时传入真实 turnId；缺省仍退回父楼以兼容旧调用方。
+
+2. 回退计划的外键安全顺序
+   applyRollbackPlan 原按 turn_changes.sequence 全局逆序应用，而日志顺序不保证
+   「先清引用再删被引用行」：同一楼内「新建地点 + 人物引用它」会先删地点，
+   直接 FOREIGN KEY constraint failed。
+   修：用 SQLite 自身的 PRAGMA foreign_key_list 建引用图（不硬编码表关系），
+   做稳定拓扑排序——父行被删除时子步骤先走，父行被重建时父步骤先走；
+   成环保持原序，交由最终 foreign_key_check 判定。
+   注：该修复暂无直接复现的回归测试（夹具用法未跑通，未完成的测试文件已删除）。
+
+3. manual 写入被锁死在 observe 阶段
+   prepareTurnInner 硬编码 phase:'observe'，作者手动提交 attention.propose /
+   plan.propose 会得 UNKNOWN_OPERATION。
+   修：manual（统一写入层）以 allowedOps: ATLAS_SEMANTIC_OPS 按操作本身判定允许集合，
+   自动推演仍严格按 phase 门禁。
+
+另：回退后 head 语义（仓库入口 vs E08 计划）**未统一**——两者各自都有测试固定
+（T25-03/T10-12/T28-01 vs T14-02/T14-04），尝试统一会同时打破 5 个测试，
+属契约未定而非实现缺陷；已在两处源码写明差异并继续在仓库侧摘掉计划里的 branches 步骤。
+
+验收：typecheck 0 errors；npm test 1270/1270（0 fail，0 skip）；build / pack 通过。

@@ -38,6 +38,13 @@ export type CompileOperationsInput = {
   /** 已有的短引用（程序在上下文中提供 C1/L1 等）。 */
   knownRefs?: Array<{ alias: string; id: string; kind: RefKind; rowRev?: number | null }>;
   makeId?: (kind: string, opId: string, alias: string) => string;
+  /** 本次**正在创建**的楼层 ID：审计列按它记账，不用 anchor.parentTurnId。 */
+  turnId?: string;
+  /**
+   * 显式允许集合：作者手动编辑走**统一写入层**时，允许集合按提交的操作本身判定，
+   * 不受单个 phase 限制；自动推演不传，仍按 phase 严格门禁。
+   */
+  allowedOps?: readonly string[];
 };
 
 export type CompiledOperations = {
@@ -105,7 +112,7 @@ export function compileOperations(input: CompileOperationsInput): CompiledOperat
   // 步骤 1：规范化（词法/别名/枚举/数字），保持原 opId 与行号。
   const normalized: ParsedOperation[] = [];
   for (const op of input.operations) {
-    const norm = normalizeOperation(op.value, input.phase);
+    const norm = normalizeOperation(op.value, input.phase, input.allowedOps);
     issues.push(...norm.issues.map((i) => ({ ...i, opId: i.opId ?? op.opId, line: i.line ?? op.line })));
     if (!norm.op) continue;
     normalized.push({ opId: op.opId, line: op.line, rawHash: op.rawHash, value: norm.op });
@@ -142,6 +149,8 @@ export function compileOperations(input: CompileOperationsInput): CompiledOperat
     tables: input.tables,
     makeId,
     branchId: input.anchor.branchId,
+    // 审计列按「本次正在创建的楼」记账（见 CompileContext.turnId）。
+    ...(input.turnId ? { turnId: input.turnId } : {}),
     basisFor: (op, extra) => {
       // 前向引用是合法的：本批已声明的 new: 别名先解析成确定性 ID 再交给 bindSources，
       // 否则会对合法调用方误报 SOURCE_CAUSE_UNRESOLVED（真正的未解析别名仍会照常告警）。

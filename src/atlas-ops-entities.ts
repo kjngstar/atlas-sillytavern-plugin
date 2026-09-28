@@ -91,7 +91,13 @@ function mutation(
   return { table, rowId, before, after, sourceOpIds: [op.opId], basis };
 }
 
+/**
+ * 审计列归属的当前楼层。
+ * **必须**是本次提交正在创建的楼（ctx.turnId），不是父楼——
+ * 记成父楼会让 first_turn_id/last_turn_id/created_turn_id 系统性偏一楼。
+ */
 function turnIdOf(ctx: CompileContext): string {
+  if (typeof ctx.turnId === 'string' && ctx.turnId !== '') return ctx.turnId;
   return ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
 }
 

@@ -29,6 +29,12 @@ export type CompileContext = {
   makeId: (kind: string, opId: string, alias: string) => string;
   /** 当前分支 id（= anchor.branchId）。 */
   branchId: string;
+  /**
+   * 本次提交**正在创建**的楼层 ID（不是 anchor.parentTurnId）。
+   * 审计列（created_turn_id / updated_turn_id / first_turn_id / last_turn_id）必须记它；
+   * 缺省时退回 anchor.parentTurnId 只为兼容旧调用方，生产路径必须显式传。
+   */
+  turnId?: string;
   /** 程序生成来源依据的统一入口；编译器也可自行构造。 */
   basisFor?: (op: ParsedOperation, extra?: { causes?: Array<{ kind: string; id: string }>; certainty?: BasisObject['certainty'] }) => BasisObject;
 };
