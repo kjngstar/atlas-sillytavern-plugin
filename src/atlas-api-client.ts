@@ -47,7 +47,7 @@ export interface AtlasApiPreset {
   promptPostProcessing?: string;
   /** 0.9.18 分段提示词（shujuku prompt-builder 同款）：非空时取代固定 system+user 两条，逐段装配 + 占位符替换。
    *  0.9.25 升级为 shujuku promptGroup 栏位段：段可带 name / mainSlot("A"|"B"|"") / deletable（全部可选，旧形状兼容）。 */
-  promptSegments?: Array<{ role: string; name?: string; mainSlot?: string; deletable?: boolean; content: string }>;
+  promptSegments?: Array<{ role: string; name?: string; mainSlot?: string; deletable?: boolean; enabled?: boolean; content: string }>;
   /** 0.9.25 shujuku 占位符体系：前文上下文条数（$7 取最近 N 条 AI 楼层；宿主采集端使用，预设级设置）。 */
   contextTurnCount?: number;
 }
@@ -118,9 +118,9 @@ export const DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA: Array<{ role: string; name: st
       "- 只允许写这些字段（其余一律不许出现）：location = name / description / parentRef / rumors / factions；character = name / locationRef / thought / actionTendency / currentAction / targetLocationRef / presence（present|left|unknown）；item = name / description / status / locationRef / holderRef。用 set 改动时，字段放进 patch 里。\n" +
       "- 绝对不要输出 id、mapId、格序号、坐标、时间、时长、距离或比例尺数字——这些一律由程序推导，你写了也会被拒绝。\n" +
       "- 引用：新增行用本块局部引用 new:loc:短名 / new:npc:短名 / new:item:短名（小写字母、数字、- 或 _）；已有行必须用对照表里给出的正式 ID。名称不是 ID，不要拿名字当引用，也不要把同名地点合并。\n" +
-      "- 位置只写到「在哪个地点」：人物与物品给 locationRef 就够，具体格序号由程序按地图与距离算。不确定位置就省略 locationRef（人物/物品可以先位置未知），但不要猜。\n" +
+      "- 位置只写到「在哪个地点」：人物与物品给 locationRef 就够，具体格序号由程序按地图与距离算。正文虽未直说地名，但行动及其上下文足以唯一确定地点时也应登记；若有多个合理候选或只是打算前往，省略 locationRef。\n" +
       "- 新地点要挂到外层地点时用 parentRef（已知地点 ID 或本块内 new:loc: 引用）；只登记本轮确实走进去的内层地点，不要为对照表里已有的地点再登记一次，也不要造环。\n" +
-      "- 证据：basis=\"observed\"（默认）的位置与归属改动必须带 quote，且 quote 必须逐字复制 msg:u 或 msg:a 里的连续原文；来源由程序判断，不要写 sourceId，也不要编造证据编号。basis=\"inferred\" 只能改想法、行动倾向、目标地点与描述类字段，不能改位置与归属。\n" +
+      "- 证据：basis=\"observed\"（默认）的位置与归属改动必须带 quote，且 quote 必须逐字复制 msg:u 或 msg:a 里的连续原文；来源由程序判断，不要写 sourceId，也不要编造证据编号。basis=\"inferred\" 可改想法、行动倾向、目标地点、描述及人物 locationRef；上下文唯一确定已到达地点时不强制 quote。不能推断归属、持有人或销毁。\n" +
       "- remove 只用于正文明确消失或销毁：地点有子地点会被拒绝，人物按离场处理，物品标记销毁。\n" +
       "- 远处人物只写想法与行动倾向（basis=\"inferred\"）：真正的移动交给程序的旅行与日程规则，不要直接把远方人物挪到玩家身边。\n" +
       "- 上限：整块不超过 16 KiB、最多 64 行、单行不超过 2 KiB。",
@@ -148,7 +148,7 @@ export const DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA: Array<{ role: string; name: st
     mainSlot: "B",
     content:
       "【本轮用户行动；证据来源 msg:u】\n$8\n【本轮助手回复；证据来源 msg:a】\n{{assistantReply}}\n" +
-      "先确定玩家现在实际在哪里：剧情真的走进某个地点（含楼层、房间、院落、地窖等内层）才登记新地点并用 parentRef 挂到外层；只是想去、在途、被阻止、回忆、梦境或远处镜头都不算抵达，也不要凭想象补内层。\n" +
+      "先使用【主角人物 ID】确定玩家目前所在地点；若本轮剧情已抵达某个地点，即使正文用代词或承接上文，也要写主角 character set 的 locationRef（未入表先 add），正文有直接地点证据时用 basis=\"observed\" 并逐字摘录 quote；只有承接上文才唯一确定地点时用 basis=\"inferred\"，无需编造 quote。进入楼层、房间、院落、地窖等新的内层地点时再登记地点并用 parentRef 挂到外层；只是想去、在途、被阻止、回忆、梦境或远处镜头都不算抵达。多个地点都合理、意图与抵达混淆时不改变位置；远方 NPC 只记 targetLocationRef，不以推断让其瞬移。\n" +
       "再识别本轮实际参与的人物：已在对照表里的用它的正式 ID 改 locationRef / thought / actionTendency / presence；新出现的先 character add 再给 locationRef；背景提及者不算在场，没提到就什么都不要写。\n" +
       "物品只在正文真的出现时才登记：地上的给 locationRef，被人拿着的给 holderRef（两者只能选一个）；正文明确消失或销毁才用 remove。\n" +
       "只写有证据的变化行；没有变化就写 {\"kind\":\"noop\"}。时间和距离不要填任何数字。最后只输出一个完整 <atlasEdit> 块。",
@@ -159,8 +159,8 @@ export const DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA: Array<{ role: string; name: st
     content:
       "核对：块只有一行行独立 JSON；table / op / 字段名都在允许清单内；没有出现 id、mapId、坐标、格序号、时间、距离或比例尺数字。\n" +
       "每个 new: 引用都已在本块**前面**声明且类型相符（地点用 new:loc:、人物用 new:npc:、物品用 new:item:）；已有实体用的是对照表里的正式 ID。\n" +
-      "每一行 location add 都必须写 quote；人物/物品的 locationRef、holderRef 和地点 parentRef 变化也必须写 quote。引文须从本轮 msg:u 或 msg:a 逐字复制连续原文，没找到证据就删除该行及依赖它的行；不要造引文。\n" +
-      "位置与归属的改动都有 observed 引文；推测字段才用 inferred。\n" +
+      "每一行 location add 都必须写 quote；observed 的人物/物品 locationRef、holderRef 和地点 parentRef 变化也必须写 quote。引文须逐字复制本轮原文。上下文唯一确定的人物位置可用 basis=\"inferred\" 且省略 quote；推断不能改地点归属、物品位置、持有人或销毁。\n" +
+      "直接观察的位置与归属改动使用 observed 引文；仅上下文唯一确定的人物位置与推测字段使用 inferred。\n" +
       "parentRef 无自引用、无环，且只为本轮确实走进去的内层地点登记；同名地点没有被合并。\n" +
       "人物与物品不同时给 locationRef 和 holderRef。最后只输出一个可解析的 <atlasEdit> 块。\n" +
       TABLE_DELTA_DISCIPLINE_CONTENT,
@@ -181,7 +181,7 @@ export const TABLE_DELTA_BOOTSTRAP_TASK_CONTENT =
   "已有开场白但世界还没有锚定场景。本轮只做定位，不推进时间、不输出任何时间与距离：\n" +
   "1. 判断玩家当前实际所在的地点：材料里明确出现且未建档的，用 location add（parentRef 按材料给出或为 null）；已在对照表里的，用 character set 把当前场景人物或玩家的 locationRef 指向它；材料只是氛围、回忆或传闻时不要登记任何地点。\n" +
   "2. 登记开场实际在场的人物（character add）并用 locationRef 锚定其位置；角色卡标题不是人物，背景提及者不算在场。\n" +
-  "3. 拿不准的一律省略，不要猜、不要造环、不要补内层房间。\n" +
+  "3. 根据开场动作和上下文唯一确定场所时登记主角位置；多个候选时省略，不要造环、不要补不存在的内层房间。\n" +
   "【开场材料】\n{{assistantReply}}\n只输出一个完整 <atlasEdit> 块。";
 
 /** C01/C02：是否使用 `table-delta-v1`（三表行增量）协议。 */
@@ -269,6 +269,7 @@ const PROMPT_MESSAGE_ROLES: readonly string[] = ["system", "user", "assistant"];
 export function buildWorldTurnMessages(preset: AtlasApiPreset, input: AtlasWorldTurnPromptInput): Array<{ role: string; content: string }> {
   const rawSegments = Array.isArray(preset.promptSegments) ? preset.promptSegments : [];
   const messages = rawSegments
+    .filter((segment) => segment?.enabled !== false)
     .map((segment) => ({
       role: typeof segment?.role === "string" ? segment.role.trim().toLowerCase() : "",
       content: typeof segment?.content === "string" ? segment.content : "",
@@ -277,6 +278,8 @@ export function buildWorldTurnMessages(preset: AtlasApiPreset, input: AtlasWorld
     .map((segment) => ({ role: segment.role, content: substitutePromptPlaceholders(segment.content, input) }));
   const repair = typeof input.repairInstruction === "string" ? input.repairInstruction.trim().slice(0, 5_000) : "";
   if (messages.length > 0) return repair ? [...messages, { role: "user", content: repair }] : messages;
+  // 明确停用的自定义预设不能静默改发内置指令（旧非法角色回退仍兼容）。
+  if (rawSegments.some((segment) => segment?.enabled === false)) return [];
   // 保留连接级系统段覆写，但用户任务与事实纪律始终采用现行行增量协议。
   const connectionSystem = preset.systemPrompt?.trim() || "";
   const segments = DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA.map((segment, index) =>
@@ -335,6 +338,9 @@ export async function callAtlasWorldTurnApi(
   // role 归一小写、model 去 'models/' 前缀——与 shujuku 发出的请求逐字段同构。
   // 请求消息装配（0.9.18 分段模式优先，见 buildWorldTurnMessages）；role 归一小写与 shujuku 同款
   const bodyMessages = buildWorldTurnMessages(preset, input).map((m) => ({ ...m, role: m.role.toLowerCase() }));
+  if (bodyMessages.length === 0) {
+    return fail(ATLAS_ERROR_CODES.API_REQUEST_FAILED, "提示词预设没有启用的非空条目，请先编辑预设。", false);
+  }
   const bodyModel = preset.model.trim().replace(/^models\//, "") || "host";
   const maxTokens = typeof preset.maxTokens === "number" && preset.maxTokens > 0 ? preset.maxTokens : 20_000;
   const temperature = typeof preset.temperature === "number" ? preset.temperature : 1.0;

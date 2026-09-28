@@ -65,6 +65,7 @@ import { prepareAtlasTurn, provisionReferencedCharacters } from "./atlas-turn.ts
 import { projectWorldSubmaps, sanitizeMapDoc, mapDocOverCapLosses, SUBMAP_FRAME_DEFAULT, validateSubmapDepth, type AtlasMapDoc } from "./atlas-geo-apply.ts";
 import { detectStartPlaceholder, resolveSceneStatus, retireStartPlaceholder, sanitizeSceneDoc, sceneDocKey, type SceneDoc } from "./atlas-scene.ts";
 import { validateScaleResponse, roundPositiveScale, scaleCalibrationKey, type FrameRef, type MapScaleCalibration } from "./atlas-scale.ts";
+import { projectSceneLines, projectReceivedClues, renderSceneContext } from "./atlas-scene-context.ts";
 import { buildLorebookPlans } from "./atlas-lorebook.ts";
 import { reconcilePendingCommits, type ReconcileReport } from "./atlas-pending-reconcile.ts";
 import {
@@ -1310,7 +1311,7 @@ export const ATLAS_TABLE_CONTEXT_LIMITS = {
 export interface AtlasTableContextInput {
   tables: AtlasThreeTablesV1;
   world: World;
-  binding: Pick<AtlasChatBinding, "currentLocationId" | "branchId" | "worldTimeCursor">;
+  binding: Pick<AtlasChatBinding, "currentLocationId" | "branchId" | "worldTimeCursor"> & Partial<Pick<AtlasChatBinding, "characterId">>;
   maps?: AtlasMapDoc | null;
 }
 
@@ -1394,7 +1395,9 @@ function characterLine(row: AtlasCharacterRow): string {
 
 export function buildTableDeltaContext(input: AtlasTableContextInput): AtlasTableContextResult {
   const tables = input.tables;
-  const current = currentLocationRow(tables, input.binding.currentLocationId);
+  const playerId = protagonistRowId(input.binding, input.world);
+  const playerRow = playerId === null ? undefined : tables.characters.find((row) => row.id === playerId);
+  const current = currentLocationRow(tables, playerRow ? playerRow.locationId : input.binding.currentLocationId);
   const lines: string[] = [];
   const truncated = { locations: 0, characters: 0, items: 0 };
 
@@ -1404,7 +1407,10 @@ export function buildTableDeltaContext(input: AtlasTableContextInput): AtlasTabl
     lines.push(`【当前位置】${chain.map((row) => `${row.id}=${row.name}`).join(" > ")}`);
     if (current.description) lines.push(`【当前地点描述】${current.description}`);
   } else {
-    lines.push("【当前位置】未知（对照表里没有当前地点；不要猜，需要时先登记新地点）");
+    lines.push("【当前位置】尚未解析（先从本轮剧情和开场上下文识别主角所在地点；只记录能指向具体地点的依据）");
+  }
+  if (playerId !== null) {
+    lines.push(`【主角人物 ID】${playerId}${playerRow ? `=${playerRow.name}；三表位置=${playerRow.locationId ?? "未记录"}` : "（尚未入三表）"}`);
   }
 
   // 2) 附近行简写：子地点优先，其次同父兄弟
@@ -1757,7 +1763,7 @@ export function commitTableDeltaTurn(
     input.tables,
     input.text,
     { "msg:u": input.request.userText, "msg:a": input.request.assistantText },
-    input.protectedCharacterIds ? { protectedCharacterIds: input.protectedCharacterIds } : {},
+    { protectedCharacterIds: input.protectedCharacterIds, protagonistCharacterId: protagonistRowId(input.binding, input.baseWorld) },
   );
   if (parsed.parse.status === "rejected" || parsed.delta === null) {
     return {
@@ -1799,7 +1805,7 @@ export function commitTableDeltaTurn(
   const playerRow = playerRowId === null ? undefined : delta.tables.characters.find((row) => row.id === playerRowId);
   const playerPointId = playerRow?.locationId ? pointIdFromLocationRowId(playerRow.locationId) : null;
   const previousLocationId = input.binding.currentLocationId ?? null;
-  const currentLocationId = playerPointId !== null ? String(playerPointId) : previousLocationId;
+  const currentLocationId = playerRow ? (playerPointId !== null ? String(playerPointId) : null) : previousLocationId;
 
   // C06 / D03：时间由**三个来源取最大、不叠加**决定（§2.3）：
   //   ① 用户文本里的显式时间词；② 助手正文里**已完成**的行为；③ 既有旅行引擎的耗时。
@@ -2545,7 +2551,7 @@ function createCoreInstance(
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.61",
+      version: "0.9.64",
       protocolVersion: 1,
       time: now(),
     });
@@ -4313,6 +4319,26 @@ function createCoreInstance(
       flags: flagsFor(world, binding.branchId, binding.worldTimeCursor),
       ...(destinationPointId ? { destinationPointId } : {}),
     });
+    // Use this branch's semantic scene. No global ledger/author roster is sent to prose generation.
+    const branchKey = branchScopeForStory(world, binding.branchId) ?? "canon";
+    const rawTables = await store.read(`tables:${binding.worldId}`).catch(() => null);
+    const tablesDoc = validateAtlasTablesStore(rawTables).ok ? rawTables as AtlasTablesStoreV1 : null;
+    const tables = tablesDoc?.branches[branchKey] ?? null;
+    const playerId = protagonistRowId(binding, world);
+    const player = tables?.characters.find(row => row.id === playerId);
+    const locationId = player ? player.locationId : binding.currentLocationId ?? null;
+    if (player) {
+      const pointId = locationId ? pointIdFromLocationRowId(locationId) : null;
+      output.response.currentLocationId = pointId === null ? null : String(pointId);
+    }
+    const rawSimulation = await store.read(`simulation:${binding.worldId}`).catch(() => null);
+    const validation = validateSimulationStore(rawSimulation, { expectedWorldId: world.id, tablesByBranch: simulationTablesByBranch(tablesDoc) });
+    const branch = validation.ok ? (rawSimulation as AtlasSimulationStore).branches[branchKey] : null;
+    if (tables || branch) output.response.injectionText = renderSceneContext(
+      projectSceneLines(tables, locationId),
+      projectReceivedClues(branch ? { signals: branch.signals, deliveries: branch.deliveries, protagonistCharacterId: playerId } : null, locationId, binding.worldTimeCursor),
+      ATLAS_LIMITS.INJECTION_CHARS,
+    );
     return okResult({
       response: output.response,
       npcReasons: output.npcReasons,
@@ -4745,7 +4771,7 @@ function createCoreInstance(
     const authorOverridden = Boolean(preset.systemPrompt?.trim()) || (Array.isArray(preset.promptSegments) && preset.promptSegments.length > 0);
     const authorPromptText = [
       preset.systemPrompt ?? "",
-      ...(Array.isArray(preset.promptSegments) ? preset.promptSegments.map((segment) => String(segment.content ?? "")) : []),
+      ...(Array.isArray(preset.promptSegments) ? preset.promptSegments.filter((segment) => segment.enabled !== false).map((segment) => String(segment.content ?? "")) : []),
     ].join("\n");
     const customPromptShape = authorOverridden ? detectLegacyPromptShape(authorPromptText) : "none";
     let effectivePreset = preset;
@@ -5559,8 +5585,8 @@ function createCoreInstance(
     }
     // 8. 世界书条目规划（纯派生，零 IO；写入由 UI 扩展经酒馆 world-info API 完成）。
     //    duplicate / failed 不产出规划：duplicate 本就写过了，failed 零部分写入。
-    //    E08：行增量回合把该分支的三表上下文（位置链 / 身边人物的想法与行动倾向 / 地面物品）
-    //    一并注入条目——**只读本分支快照**（分支隔离），条数有界，绝不把三表整库写进世界书。
+    //    场景 v2：只读本分支的位置链、场景名单与地面物品，不输出私下想法或未来行动。
+    //    新规划仅用于临时注入，不将动态状态持久化到世界书。
     const lorebookTableDelta = (() => {
       if (nextTablesDoc === null || tablesBeforeTurn === null) return null;
       const branch = nextTablesDoc.branches?.[tablesBeforeTurn.branchKey];
@@ -5572,9 +5598,8 @@ function createCoreInstance(
       };
     })();
     /**
-     * D09：把本分支的推演事件与送达记录交给世界书规划——「近期动向」优先取它们，
-     * 旧 `world.stateEvents` 只在没有推演事件时兜底。可见性规则在 buildLorebookPlans 里：
-     * hidden 与尚未送达的消息不透出到主聊天注入。
+     * 当前分支的消息与送达记录交给场景投影；后台事件不使用账本摘要兜底注入。
+     * 地点送达只代表接触候选，人物送达只接受主角；hidden 与未送达消息均不输出。
      */
     const lorebookSimulationDelta = (() => {
       if (nextSimulationDoc === null) return null;
@@ -5590,6 +5615,8 @@ function createCoreInstance(
         branchKey,
         events: simulationEvents,
         deliveries: branch.deliveries,
+        signals: branch.signals,
+        protagonistCharacterId: playerRowId,
         protagonistLocationIds: playerLocationId === null ? [] : [playerLocationId],
         authorOmniscient: false,
       };

@@ -7,7 +7,7 @@
  * - 块 ≤ 16 KiB、≤ 64 行、单行 ≤ 2 KiB；逐行独立 `JSON.parse`。
  * - 每行先过语法，再过**字段白名单**（`table` / `op` 与各表允许的键），最后过**引文**：
  *   `basis="observed"` 的位置与归属改动必须带 `quote`，且必须是正文里的连续原文；
- *   `basis="inferred"` 只允许改推测性字段（想法 / 行动倾向 / 目标地点 / 描述类）。
+ *   `basis="inferred"` 允许推测性字段与人物语义地点，位置冲突与远方 NPC 移动另行校验。
  * - `add` 用本块局部 `new:loc:* / new:npc:* / new:item:*` 引用；已有行用服务端给的正式 ID。
  *   程序自己决定 `sourceId`，模型不需要（也不能）编证据 ID。
  *
@@ -151,7 +151,7 @@ const POSITION_FIELDS = new Set(["parentRef", "locationRef", "holderRef"]);
 /** `basis="inferred"` 允许触碰的字段（其余一律拒绝）。 */
 const INFERRED_ALLOWED: Record<string, Set<string>> = {
   location: new Set(["description", "rumors", "factions"]),
-  character: new Set(["thought", "actionTendency", "targetLocationRef"]),
+  character: new Set(["thought", "actionTendency", "targetLocationRef", "locationRef"]),
   item: new Set(["description"]),
 };
 
@@ -441,11 +441,12 @@ export function parseAtlasEditBlock(text: unknown, sources: AtlasEditSources = {
         return;
       }
     }
-    if (touchesPosition(table, op, record) && quote.length === 0) {
+    if (basis !== "inferred" && touchesPosition(table, op, record) && quote.length === 0) {
       reject("QUOTE_REQUIRED", "$.quote");
       return;
     }
     // 通过：保留原始行内容，补上程序决定的 line / sourceId
+    if (basis === "inferred" && sourceId === null) sourceId = sources["msg:a"] ? "msg:a" : sources["msg:u"] ? "msg:u" : null;
     const edit = { ...record, line: lineNo, ...(sourceId === null ? {} : { sourceId }) } as unknown as AtlasTableEdit;
     edits.push(edit);
     if (op === "add") acceptedTempRefs.add(record.ref);
@@ -542,6 +543,16 @@ export function applyAtlasTableDelta(
       continue;
     }
     rejected.push({ line, ok: false, code: result.error.code as AtlasEditParseCode, path: result.error.path, ref: result.error.ref, op: edit.op });
+    // Keep independent psychology/intent fields when only the inferred position fails.
+    if (edit.table === "character" && edit.op === "set" && edit.basis === "inferred"
+      && edit.patch?.locationRef !== undefined
+      && ["POSITION_CONFLICT", "TRAVEL_NOT_ELAPSED", "ROW_NOT_FOUND"].includes(result.error.code)) {
+      const { locationRef: _locationRef, ...rest } = edit.patch;
+      if (Object.keys(rest).length > 0) {
+        const partial = applyCharacterEdit(candidate, { ...edit, patch: rest }, scope, options);
+        if (partial.ok) applied.push({ line, ok: true, id: partial.id, op: partial.op });
+      }
+    }
     if (edit.op === "add") failedRefs.add(edit.ref);
   }
 

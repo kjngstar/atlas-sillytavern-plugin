@@ -112,7 +112,7 @@ export function buildTableDeltaCompatiblePrompt(oldPreset: AtlasPromptPreset): {
   ];
   let body = typeof oldPreset.systemPrompt === "string" ? oldPreset.systemPrompt : "";
   if (Array.isArray(oldPreset.segments) && oldPreset.segments.length > 0) {
-    body = oldPreset.segments.map((segment) => String(segment.content ?? "")).join("\n\n");
+    body = oldPreset.segments.filter((segment) => segment.enabled !== false).map((segment) => String(segment.content ?? "")).join("\n\n");
   }
   const replacedKeywords: string[] = [];
   for (const [pattern, replacement] of KEYWORD_REWRITES) {
@@ -251,6 +251,8 @@ export interface AtlasPromptSegment {
   /** 主槽位标记（shujuku mainSlot A/B；仅 UI 语义，发送顺序仍按数组序）。 */
   mainSlot?: "A" | "B" | "";
   deletable?: boolean;
+  /** 停用条目仍保存，但不进入模型请求；旧预设缺省启用。 */
+  enabled?: boolean;
 }
 
 export const MAX_PROMPT_SEGMENTS = 16;
@@ -274,6 +276,7 @@ export function normalizePromptSegments(raw: unknown): AtlasPromptSegment[] {
       segment.mainSlot = record.mainSlot;
     }
     if (record.deletable === false) segment.deletable = false;
+    if (record.enabled === false) segment.enabled = false;
     segments.push(segment);
   }
   return segments;
@@ -907,6 +910,9 @@ export function applySettingsCommand(
       // 0.9.18 分段模式：segments 非空时正文可为空（分段取代单提示词）；两者都空才拒绝
       const segments = normalizePromptSegments(preset.segments);
       if (!text && segments.length === 0) return fail(settings, "INVALID_PAYLOAD", "提示词正文不能为空（空 = 内置默认，无需保存；分段预设请至少给出 1 段）。");
+      if (segments.length > 0 && !segments.some((segment) => segment.enabled !== false)) {
+        return fail(settings, "INVALID_PAYLOAD", "请至少启用一个非空提示词条目，再保存预设。");
+      }
       if (text.length > MAX_PROMPT_CHARS) return fail(settings, "FIELD_LIMIT_EXCEEDED", `提示词不超过 ${MAX_PROMPT_CHARS} 字。`);
       const targetId = preset.id === undefined ? null : normalizeId(preset.id);
       if (preset.id !== undefined && targetId === null) return fail(settings, "INVALID_PAYLOAD", "预设 ID 形状非法。");

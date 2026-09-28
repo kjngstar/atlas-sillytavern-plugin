@@ -106,6 +106,8 @@ export interface AtlasMapViewNpc {
   actionTendency: string;
   currentAction: string;
   isProtagonist: boolean;
+  /** 与当前地点同处或在其直接子地点 / 同父内层地点；由投影层统一判定。 */
+  isNear: boolean;
   /** 有细坐标时才给（否则 UI 只列名单，不画点）。 */
   gridX: number | null;
   gridY: number | null;
@@ -357,6 +359,7 @@ export function projectTablesToMapView(
       actionTendency: row.actionTendency,
       currentAction: row.currentAction,
       isProtagonist: protagonistIds.has(row.id.startsWith("npc:") ? row.id.slice(4) : row.id),
+      isNear: row.locationId !== null && nearIds.has(row.locationId),
       gridX: row.gridX,
       gridY: row.gridY,
       mapId: row.mapId,

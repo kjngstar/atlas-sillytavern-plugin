@@ -367,6 +367,8 @@ export function createAtlasUiCore(deps: {
    * 世界书写入钩子（ATLAS-09；index.js 注入酒馆 world-info 适配）。
    * commit 成功且引擎给出条目规划时调用；失败只记 lorebookHint，绝不影响回合成功。
    */
+  /** null keeps the legacy scene; SQL failure returns empty text, never author data. */
+  getNarrativeContext?: () => Promise<string | null>;
   onLorebookSync?: (plans: AtlasLorebookPlans) => Promise<unknown>;
   /**
    * 0.9.47 世界书聊天级生命周期钩子：CHAT_CHANGED 且数据隔离清理完成后触发。
@@ -572,6 +574,8 @@ export function createAtlasUiCore(deps: {
   function lorebookHintFromResult(result: unknown): string | null {
     if (!result || typeof result !== "object" || Array.isArray(result)) return null;
     const record = result as Record<string, unknown>;
+    if (record.sharedClean === false) return "旧 Atlas 动态条目未能全部清理；可重试上下文同步。";
+    if (record.contentTarget === "none") return "宿主暂时无法注入场景上下文；本轮没有写入世界书作为替代。";
     if (record.binding === "conflict") {
       const existing = typeof record.existingBookName === "string" ? record.existingBookName : "";
       return `Atlas 条目已写入《${String(record.bookName ?? "")}》，但本聊天已绑定世界书《${existing}》——条目要生效需在酒馆世界书里切换或同时激活。`;
@@ -1030,6 +1034,13 @@ export function createAtlasUiCore(deps: {
           return;
         }
         const response: AtlasTurnPrepareResponse = parsedResponse.value;
+        if (deps.getNarrativeContext) {
+          try {
+            const text = await deps.getNarrativeContext();
+            if (typeof text === "string") response.injectionText = text.slice(0, ATLAS_LIMITS.INJECTION_CHARS);
+          } catch { response.injectionText = ""; }
+          if (revision !== generationRevision || state.chatId !== chatId || disposed) return;
+        }
         diagnostic({ level: "info", source: "ui", code: "PREPARE_COMPLETE",
           operation: "prepare", phase: "prepared", outcome: "success" });
         setState({
@@ -1223,7 +1234,7 @@ export function createAtlasUiCore(deps: {
           healthCheckedAt = -Infinity;
           if (!stale) await refresh();
         }
-        await syncLorebookAfterCommit(body);
+        if (state.chatId === value.chatId) await syncLorebookAfterCommit(body);
         return;
       }
       diagnostic({ level: "error", source: "ui", code: "COMMIT_FAILED",
@@ -1405,6 +1416,9 @@ export function createAtlasUiCore(deps: {
       if (result.status === 200) {
         healthCheckedAt = -Infinity;
         await refresh();
+        if (state.chatId === chatId && deps.onLorebookChatSwitch) {
+          try { await deps.onLorebookChatSwitch({ chatId, bound: Boolean(state.binding) }); } catch { /* generation stays available */ }
+        }
         return true;
       }
       const body = result.body as { error?: { message?: string } };
@@ -1448,7 +1462,7 @@ export function createAtlasUiCore(deps: {
           healthCheckedAt = -Infinity;
           await refresh();
         }
-        await syncLorebookAfterCommit(body);
+        if (state.chatId === failed.chatId) await syncLorebookAfterCommit(body);
         return;
       }
       if (state.chatId === failed.chatId) {

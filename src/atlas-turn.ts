@@ -5,12 +5,11 @@
 
 import type { StateEffect, World, EntityRecord } from "../lib/world-schema.ts";
 import { appendDefinitionRevision, upsertEntityRecord } from "../lib/world-definition.ts";
-import { buildContextPlan, renderContextPlan } from "../lib/context-plan.ts";
+import { renderSceneContext } from "./atlas-scene-context.ts";
 import { hashString } from "../lib/world-cards.ts";
 import type { AtlasTravelPreview, AtlasTurnPrepareRequest, AtlasTurnPrepareResponse } from "./atlas-contract.ts";
 import { ATLAS_ERROR_CODES, ATLAS_LIMITS, AtlasError } from "./atlas-contract.ts";
 import { type AtlasRelevanceResult, atlasTravelPreview, computeAtlasRelevance } from "./atlas-relevance.ts";
-import { renderAtlasTimeHint } from "./atlas-time-intent.ts";
 
 export interface AtlasTurnPrepareInput {
   /** 已通过契约严格解析的 prepare 请求 */
@@ -66,65 +65,26 @@ export function prepareAtlasTurn(world: World, input: AtlasTurnPrepareInput): At
     actorId: input.actorId ?? null,
   });
 
-  // 有界上下文：走共享装配单（分支 / 时间 / 私有字段 / 未来事实过滤都在共享核心内完成）
   const budgetChars = Math.min(input.budgetChars ?? ATLAS_LIMITS.INJECTION_CHARS, ATLAS_LIMITS.INJECTION_CHARS);
-  const plan = buildContextPlan(world, {
-    purpose: "atlas-turn",
-    branchId: request.branchId,
-    at: currentTime,
-    budgetChars,
-  });
-  const planText = renderContextPlan(plan);
-
-  const headerLines: string[] = [];
+  const scene: string[] = [];
   const locationName = pointName(world, input.currentPointId);
-  headerLines.push(`【阿特拉斯】当前位置：${locationName ?? "未知地点"}${input.currentRegionId ? `（地区 ${input.currentRegionId}）` : ""}`);
-  headerLines.push(`世界时间：第 ${currentTime} 时段`);
-  if (relevance.relevantNpcIds.length > 0) {
-    headerLines.push(`附近人物：${relevance.relevantNpcIds.join("、")}`);
+  if (locationName) {
+    scene.push(`当前位置：${locationName.replace(/[<>]/g, '').replace(/\s+/g, ' ').slice(0, 64)}`);
+    const chain: string[] = [];
+    const seen = new Set<string>();
+    let cursor = (world.points ?? []).find(point => String(point.id) === input.currentPointId);
+    while (cursor && !seen.has(String(cursor.id)) && chain.length < 8) {
+      seen.add(String(cursor.id));
+      chain.unshift(String(cursor.name).replace(/[<>]/g, '').slice(0, 64));
+      cursor = cursor.parentPointId == null ? undefined : (world.points ?? []).find(point => String(point.id) === String(cursor!.parentPointId));
+    }
+    if (chain.length > 1) scene.push(`位置链：${chain.join(' → ')}`);
   }
-  // 0.9.30 id 对照表：npcChanges / locationChange 只认 id，而共享装配单（lib/ 快照）渲染实体只给名字
-  // ——模型拿不到 id 只能编，「采纳 0 条（丢弃引用未知实体）」的根因。
-  // 0.9.34 修复：人物对照表改为与裁定校验集（adjudicate knownEntityIds）同口径的全集封顶 60——
-  // 此前沿用装配单过滤子集，名单比校验集窄：模型引用装配单外的真实角色（卡书认知到的）
-  // 必被裁定丢弃，MiniMax 实测 4 条变化 / 记忆全灭。id 只是引用键，账本 effect 仍受
-  // parseStateEffect 白名单与裁定实体校验双重把关，此处放宽不构成注入面。
-  const entityRoster = [
-    ...(world.characters ?? []).map((c) => ({ id: String(c.id), name: String(c.name ?? c.id) })),
-    ...(world.entityRecords ?? []).map((e) => ({ id: String(e.id), name: String(e.name ?? e.id) })),
-  ]
-    .slice(0, 60)
-    .map((item) => `${item.id}=${item.name}`)
-    .join("；");
-  if (entityRoster) headerLines.push(`人物 id 对照：${entityRoster}`);
-  // S9（0.9.55）：已有子地点标注直接父 ID——/state 的世界图只下发根地点（S6），
-  // 但模型仍需要知道「这个点在某地点内部」才能续接层级，也才不会为同一地点重复登记。
-  const pointRoster = (world.points ?? [])
-    .slice(0, 60)
-    .map((p) => {
-      const pid = Number(p.parentPointId);
-      const parent = Number.isInteger(pid) && pid > 0 ? `（在 ${pid} 内）` : "";
-      return `${String(p.id)}=${p.name}${parent}`;
-    })
-    .join("；");
-  if (pointRoster) headerLines.push(`地点 id 对照：${pointRoster}`);
-  const regionRoster = (world.regions ?? [])
-    .slice(0, 60)
-    .map((r) => `${r.id}=${r.name}`)
-    .join("；");
-  if (regionRoster) headerLines.push(`地区 id 对照：${regionRoster}`);
-  // 0.9.1 时间意图：用户行动含连贯动作 / 显式时间词时给 AI 软引导（硬下限在裁决层）
-  const timeHint = renderAtlasTimeHint(request.userText);
-  if (timeHint) headerLines.push(timeHint);
-  const full = `${headerLines.join("\n")}\n${planText}`;
-  const injectionText = full.length <= budgetChars
-    ? full
-    : `${full.slice(0, budgetChars)}\n【已截断：超出 ${budgetChars} 字符预算】`;
-
-  const sourceRefs: string[] = [];
-  for (const id of [...plan.sources.map((s) => s.id), ...relevance.triggerIds]) {
-    if (!sourceRefs.includes(id)) sourceRefs.push(id);
-  }
+  const presentIds = new Set(Object.entries(relevance.npcReasons).filter(([, reasons]) => reasons.includes("samePoint")).map(([id]) => id));
+  const presentNames = (world.characters ?? []).filter(row => presentIds.has(String(row.id))).slice(0, 12).map(row => String(row.name));
+  if (presentNames.length) scene.push(`在场：${presentNames.join("、")}`);
+  const injectionText = renderSceneContext(scene, [], budgetChars);
+  const sourceRefs = [...relevance.triggerIds];
 
   let travelPreview: AtlasTravelPreview | undefined;
   if (input.destinationPointId) {

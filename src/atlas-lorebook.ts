@@ -1,11 +1,11 @@
 /**
  * atlas-lorebook.ts — ATLAS-09 世界书注入层。
  *
- * 目标（作者拍板，0.9.40 收口）：commit 完成后，把世界的「当前动向」写成
- * Atlas 专属世界书条目，让主模型经酒馆正常世界书激活管线看到推演结果；
- * 当轮注入（setExtensionPrompt）仍只负责"本轮即时上下文"。
+ * 0.9.62：buildLorebookPlans 只投影当前场景与实际可接触的线索，标记 transientOnly。
+ * 新规划只走当前聊天临时注入；无内容清空，注入失败不回退写世界书。
+ * 同步时清理旧 Atlas 动态条目，保留用户静态内容；下面的旧写书路径仅兼容旧规划。
  *
- * 0.9.40 设计（作者 2026-09-21 拍板：世界书只要动向、不特意强调时段）：
+ * 历史 0.9.40 设计（旧规划的兼容行为）：
  * - 单条滚动条目「Atlas 动向」：固定 comment（不带时段）、constant 蓝灯常驻，
  *   每个 committed 回合后整体重写内容（含零 effect 回合——当前时间必须永远最新）。
  * - 内容只保留叙事与权威状态（当前时间 / 位置 / 近期动向），剥离引擎附加的
@@ -41,14 +41,10 @@
  * 与 `AtlasLorebookPort.injectTurn` 的注释。
  */
 
+import { projectSceneLines, projectReceivedClues, renderSceneContext, type SceneSimulationInput } from "./atlas-scene-context.ts";
 import type { World } from "../lib/world-schema.ts";
 import { ATLAS_ERROR_CODES, AtlasError, type AtlasTurnReceipt } from "./atlas-contract.ts";
-import {
-  ATLAS_ITEM_DESTROYED_STATUS,
-  type AtlasCharacterRow,
-  type AtlasLocationRow,
-  type AtlasThreeTablesV1,
-} from "./atlas-tables.ts";
+import type { AtlasThreeTablesV1 } from "./atlas-tables.ts";
 
 // ---------------------------------------------------------------------------
 // 有界上限
@@ -60,7 +56,7 @@ export const ATLAS_LOREBOOK_LIMITS = {
   /** 关键词单条最大字符 */
   KEY_CHARS: 64,
   /** 条目内容最大字符 */
-  CONTENT_CHARS: 480,
+  CONTENT_CHARS: 1800,
   /** 近期动向单行最大字符 */
   RECENT_LINE_CHARS: 160,
   /** 近期动向保留条数 */
@@ -74,7 +70,7 @@ export const ATLAS_LOREBOOK_LIMITS = {
   /** B05：作用域键（chatId|worldId）登记用最大字符 */
   SCOPE_KEY_CHARS: 240,
   /** B05：注入通道文本最大字符（条目内容 + 一行边界说明） */
-  INJECTION_CHARS: 560,
+  INJECTION_CHARS: 1840,
   /** E08：三表上下文里最多列几位身边人物 */
   TABLE_CHARACTERS_MAX: 6,
   /** E08：三表上下文里最多列几件地面物品 */
@@ -368,7 +364,8 @@ export function summarizeAtlasLorebookOwnership(data: unknown, scope: AtlasLoreb
 export function buildAtlasInjectionText(plans: AtlasLorebookPlans | null | undefined): string {
   if (!plans || !Array.isArray(plans.entries) || plans.entries.length === 0) return "";
   const body = plans.entries.map((entry) => String(entry.content ?? "")).join("\n");
-  return `【Atlas 本轮动向 · 仅限当前聊天】\n${body}`.slice(0, ATLAS_LOREBOOK_LIMITS.INJECTION_CHARS);
+  const prefix = plans.transientOnly ? "" : "【Atlas 临时上下文 · 仅限当前聊天】\n";
+  return `${prefix}${body}`.slice(0, ATLAS_LOREBOOK_LIMITS.INJECTION_CHARS);
 }
 
 
@@ -406,6 +403,8 @@ export interface AtlasLorebookPlanEntry {
 }
 
 export interface AtlasLorebookPlans {
+  /** Scene v2 is temporary context only; never persist it to a native lorebook. */
+  transientOnly?: true;
   bookName: string;
   entries: AtlasLorebookPlanEntry[];
 }
@@ -422,192 +421,31 @@ function buildNameIndex(world: World): NameIndex {
   return { points };
 }
 
-function clip(text: string, max: number): string {
-  const clean = String(text ?? "").trim();
-  if (clean.length <= max) return clean;
-  return `${clean.slice(0, Math.max(0, max - 1))}…`;
-}
-
-/**
- * 剥离引擎附加的「无变化」注记（作者 2026-09-21 反馈：世界书只保留叙事，
- * 「这里写时间没变化怎么还推进时段了」类引擎口径一律不进条目）。
- */
-function stripEngineNotes(text: string): string {
-  return String(text ?? "")
-    .replace(/（本轮无[^）]*）/g, "")
-    .replace(/本轮无世界变化。?/g, "")
-    .trim();
-}
-
-/**
- * E08：三表派生的一小段上下文（纯函数、有界、可重放）。
- *
- * 只取「玩家此刻真正相关」的三样东西，顺序固定（便于逐字节重放与人工核对）：
- *   1. 当前位置链（含上级：在钟楼二楼的房间里，也要知道自己在钟楼）；
- *   2. 当前地点在场人物的想法 / 行动倾向（这正是"下一轮这个人会怎么动"的依据）；
- *   3. 当前地点的**地面**物品（持有物与已销毁物不列——持有关系在人物那一行上）。
- * 条数超限时**如实写出还有多少**，不静默截断（与 D-02x 系列同一条纪律）。
- */
-function buildTableContextLines(
-  tableDelta?: { tables: AtlasThreeTablesV1; branchKey: string; currentLocationId: string | null } | null,
-): string[] {
-  if (!tableDelta) return [];
-  const tables = tableDelta.tables;
-  const locationById = new Map(tables.locations.map((row) => [row.id, row]));
-  const currentRowId = tableDelta.currentLocationId === null || tableDelta.currentLocationId === undefined
-    ? null
-    : (String(tableDelta.currentLocationId).startsWith("loc:")
-        ? String(tableDelta.currentLocationId)
-        : `loc:${String(tableDelta.currentLocationId)}`);
-  const current = currentRowId === null ? null : locationById.get(currentRowId) ?? null;
-  if (!current) return [];
-  // 1) 位置链（自下而上，有界到 4 层——与子图深度上限同量级）
-  const chain: string[] = [];
-  let cursor: AtlasLocationRow | undefined = current;
-  const seen = new Set<string>();
-  while (cursor && chain.length < 4 && !seen.has(cursor.id)) {
-    seen.add(cursor.id);
-    chain.push(cursor.name);
-    cursor = cursor.parentLocationId === null ? undefined : locationById.get(cursor.parentLocationId);
-  }
-  const lines: string[] = [`位置链：${chain.reverse().join(" → ")}`];
-  // 2) 身边人物
-  const here = tables.characters.filter(
-    (row: AtlasCharacterRow) => row.locationId === current.id && row.presence === "present",
-  );
-  const shown = here.slice(0, ATLAS_LOREBOOK_LIMITS.TABLE_CHARACTERS_MAX);
-  for (const row of shown) {
-    const bits = [row.thought.trim() ? `想法：${row.thought.trim()}` : "", row.actionTendency.trim() ? `行动倾向：${row.actionTendency.trim()}` : ""]
-      .filter(Boolean)
-      .join("；");
-    lines.push(clip(`在场：${row.name}${bits ? `（${bits}）` : ""}`, ATLAS_LOREBOOK_LIMITS.TABLE_LINE_CHARS));
-  }
-  if (here.length > shown.length) lines.push(`在场：另有 ${here.length - shown.length} 位未列出`);
-  // 3) 地面物品
-  const groundItems = tables.items.filter(
-    (row) => row.locationId === current.id && row.holderCharacterId === null && row.status !== ATLAS_ITEM_DESTROYED_STATUS,
-  );
-  const shownItems = groundItems.slice(0, ATLAS_LOREBOOK_LIMITS.TABLE_ITEMS_MAX);
-  if (shownItems.length > 0) {
-    lines.push(clip(
-      `地面物品：${shownItems.map((row) => row.name).join("、")}${groundItems.length > shownItems.length ? ` 等 ${groundItems.length} 件` : ""}`,
-      ATLAS_LOREBOOK_LIMITS.TABLE_LINE_CHARS,
-    ));
-  }
-  return lines;
-}
-
-/**
- * commit 成功后，从世界状态派生滚动条目规划（0.9.40）。
- * - committed 才有条目；duplicate / failed → null（调用方跳过）。
- * - 每个 committed 回合（含零 effect——仅时间 / 位置推进）都产出同一条规划：
- *   writer 按 comment upsert 整体重写，「当前时间」永远最新（修复 0.9.39 及之前
- *   零 effect 回合不重写总览导致条目时间停在旧时段的矛盾）。
- * - 确定性：同世界状态 + 同回执 → 逐字节相同（可重放）。
- *
- * E08（可选第三参数）：`tableDelta` 存在时，条目**追加**三表派生的一小段上下文——
- * 当前位置链、身边人物的想法与行动倾向、当前地点的地面物品。
- * 纪律（计划 §3-E08「不要把所有三表写进酒馆正文，聊天分支隔离」）：
- * 1. 只送**有限**条数（常量在 `ATLAS_LOREBOOK_LIMITS`，越界就截断并如实写"还有 N 位"）；
- * 2. 只送与本轮相关的：当前地点链、该地点里的人、该地点的地面物品——
- *    不做全库导出，也不是"把三张表贴进世界书"；
- * 3. 分支隔离：只读 `branches[branchKey]` 这一份快照，绝不跨分支借未来事实。
- */
 export function buildLorebookPlans(
   world: World,
   receipt: AtlasTurnReceipt,
   tableDelta?: { tables: AtlasThreeTablesV1; branchKey: string; currentLocationId: string | null } | null,
-  /**
-   * D09：本轮推演上下文。有 events 时「近期动向」**优先**取本分支的 `simulationEvents`——
-   * 这正是 F2 的修复点：三表人物位置/想法会变，而旧 `world.stateEvents` 根本不新增，
-   * 于是书和界面都不知道后台具体发生了什么。旧档不传该参数时退回旧路径，行为一字不变。
-   *
-   * 纪律（§2.3 / D09）：
-   * 1. 只有**已发生**的事实进「近期动向」；意图显式标注「（意图）」，不把可能发生写成已发生；
-   * 2. `hidden` 与**尚未送达**的消息不透出到主聊天注入（`authorOmniscient` 首版默认关闭）；
-   * 3. 主角在已知地点时，消息要真的传到过那里才注入。
-   */
-  simulationDelta?: {
-    branchKey: string;
-    events?: readonly {
-      simulationId: string; kind: string; status: string;
-      visibility: string; summary: string; period: number;
-    }[] | null;
-    deliveries?: readonly {
-      signalId: string; recipientType: string; recipientId: string;
-    }[] | null;
-    protagonistLocationIds?: readonly string[] | null;
-    authorOmniscient?: boolean;
-  } | null,
+  simulationDelta?: (SceneSimulationInput & {
+    branchKey: string; protagonistLocationIds?: readonly string[] | null; authorOmniscient?: boolean;
+  }) | null,
 ): AtlasLorebookPlans | null {
   if (receipt.status !== "committed") return null;
-  /**
-   * D09：把本分支的推演事件折成「近期动向」行。
-   *
-   * 只有**已发生**的事实能进来；意图显式标注「（意图）」，绝不把「可能发生」写成「已经发生」。
-   * 「谁知道了」只认 deliveries 这条证据链：signal 事件要真的送达过才算动向；
-   * 主角在已知地点时，消息还得真的传到过那里——作者界面能看到秘密，不等于远方人物自动知情。
-   */
-  function recentLinesFromSimulation(delta: typeof simulationDelta): string[] {
-    if (!delta) return [];
-    const omniscient = delta.authorOmniscient === true;
-    const reachedLocations = new Map<string, Set<string>>();
-    for (const delivery of delta.deliveries ?? []) {
-      if (delivery.recipientType !== "location") continue;
-      const set = reachedLocations.get(delivery.signalId) ?? new Set<string>();
-      set.add(delivery.recipientId);
-      reachedLocations.set(delivery.signalId, set);
-    }
-    const protagonistLocations = (delta.protagonistLocationIds ?? []).filter((id) => typeof id === "string");
-    const lines: string[] = [];
-    for (const event of [...(delta.events ?? [])].reverse()) {
-      if (lines.length >= ATLAS_LOREBOOK_LIMITS.RECENT_LINES_MAX) break;
-      // hidden 不进主聊天注入（作者显式全知开关除外）
-      if (!omniscient && event.visibility === "hidden") continue;
-      if (!omniscient && event.kind === "signal") {
-        const reached = reachedLocations.get(event.simulationId);
-        // 一条还没送到任何地方的消息，不算「已发生的动向」
-        if (!reached || reached.size === 0) continue;
-        if (protagonistLocations.length > 0 && !protagonistLocations.some((id) => reached.has(id))) continue;
-      }
-      const label = event.status === "intent-recorded" ? "（意图）" : "";
-      lines.push(`· [第 ${String(event.period)} 时段] ${label}${clip(event.summary, ATLAS_LOREBOOK_LIMITS.RECENT_LINE_CHARS)}`);
-    }
-    return lines;
+  const locationId = tableDelta ? tableDelta.currentLocationId : receipt.currentLocationId ?? null;
+  const scene = projectSceneLines(tableDelta?.tables, locationId);
+  if (!scene.length && locationId) {
+    const name = buildNameIndex(world).points.get(String(locationId).replace(/^loc:/, ""));
+    if (name) scene.push(`当前位置：${name}`);
   }
-  const index = buildNameIndex(world);
-  const locationName = receipt.currentLocationId !== undefined && receipt.currentLocationId !== null
-    ? index.points.get(String(receipt.currentLocationId)) ?? "未知地点"
-    : null;
-  const simulationRecent = recentLinesFromSimulation(simulationDelta);
-  const legacyRecent = (world.stateEvents ?? [])
-    .slice(-ATLAS_LOREBOOK_LIMITS.RECENT_LINES_MAX)
-    .reverse()
-    .map((e) => `· [第 ${String(e.at)} 时段] ${clip(stripEngineNotes(e.narrativeSummary ?? ""), ATLAS_LOREBOOK_LIMITS.RECENT_LINE_CHARS)}`);
-  // D09：推演事件优先；没有（旧档 / 本轮无事件）才退回 world.stateEvents 旧路径
-  const recent = simulationRecent.length > 0 ? simulationRecent : legacyRecent;
-  const lines = [
-    "【世界动向】本条目由 Atlas 每轮推演后自动更新：以下是当前时间点的权威世界动向，进行剧情分析时以此最新数据为准，优先级高于其他背景设定。",
-    `当前时间：第 ${String(receipt.currentTime)} 时段`,
-    ...(locationName ? [`当前位置：${locationName}`] : []),
-    ...buildTableContextLines(tableDelta),
-    "近期动向：",
-    ...(recent.length > 0 ? recent : ["· （暂无已归档的世界变化）"]),
-  ];
-  const entry: AtlasLorebookPlanEntry = {
-    category: "moves",
-    comment: ATLAS_MOVES_ENTRY_COMMENT,
-    keys: [ATLAS_MOVES_ENTRY_KEY],
-    content: lines.join("\n").slice(0, ATLAS_LOREBOOK_LIMITS.CONTENT_CHARS),
-    constant: true,
-  };
+  const clues = projectReceivedClues(simulationDelta, locationId, receipt.currentTime);
+  const content = renderSceneContext(scene, clues, ATLAS_LOREBOOK_LIMITS.CONTENT_CHARS);
   return {
     bookName: lorebookNameFor(String(world.name ?? "")),
-    entries: [entry],
+    transientOnly: true,
+    entries: content ? [{ category: "moves", comment: ATLAS_MOVES_ENTRY_COMMENT,
+      keys: [ATLAS_MOVES_ENTRY_KEY], content, constant: true }] : [],
   };
 }
 
-// ---------------------------------------------------------------------------
 // 严格解析（UI 核心侧；引擎响应不可信）
 // ---------------------------------------------------------------------------
 
@@ -626,8 +464,11 @@ export function parseAtlasLorebookPlans(raw: unknown): { ok: true; value: AtlasL
   if (!bookName || bookName.trim().length === 0) {
     return { ok: false, error: new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "lorebook.bookName 非法") };
   }
-  if (!Array.isArray(record.entries) || record.entries.length === 0 || record.entries.length > 1) {
+  if (!Array.isArray(record.entries) || (record.entries.length === 0 && record.transientOnly !== true) || record.entries.length > 1) {
     return { ok: false, error: new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "lorebook.entries 数量非法") };
+  }
+  if (record.transientOnly === true && record.entries.length === 0) {
+    return { ok: true, value: { bookName, entries: [], transientOnly: true } };
   }
   const item = record.entries[0];
   if (!item || typeof item !== "object" || Array.isArray(item)) {
@@ -655,6 +496,7 @@ export function parseAtlasLorebookPlans(raw: unknown): { ok: true; value: AtlasL
     ok: true,
     value: {
       bookName,
+      ...(record.transientOnly === true ? { transientOnly: true as const } : {}),
       entries: [{ category, comment, keys, content, ...(entry.constant === true ? { constant: true } : {}) }],
     },
   };
@@ -1098,8 +940,60 @@ export function createAtlasLorebookWriter(port: AtlasLorebookPort, opts: { now?:
      *    保留（旧档无损，caller 继续走旧读取路径）；
      * 5. 作用域路径**绝不覆盖**别人的聊天绑定：已绑定的是别的书 → `skipped-conflict`；
      * 6. 静态用户世界书内容（非 Atlas 前缀）在任何路径下都不移动、不删除。
+     * 0.9.62 transientOnly 在上述兼容路径之前处理：只注入、清旧条目、绝不新建/绑定书。
      */
     async syncTurn(plans: AtlasLorebookPlans, scopeInput?: AtlasLorebookScopeInput): Promise<AtlasLorebookSyncResult> {
+      if (plans?.transientOnly === true && Array.isArray(plans.entries)) {
+        let scopeValue = scopeInput;
+        if (scopeValue === undefined && port.resolveChatScope) {
+          try { scopeValue = await port.resolveChatScope(); } catch { scopeValue = null; }
+        }
+        const scope = normalizeAtlasLorebookScope(scopeValue);
+        const injectionKey = scope ? atlasLorebookInjectionKey(scope) : null;
+        let scopeCurrent = true;
+        if (scope && scopeInput !== undefined && port.resolveChatScope) {
+          try { scopeCurrent = atlasLorebookScopeEquals(scope, normalizeAtlasLorebookScope(await port.resolveChatScope())); } catch { scopeCurrent = false; }
+        }
+        let injected = false;
+        if (scopeCurrent && injectionKey && port.injectTurn) {
+          try { await port.injectTurn(injectionKey, buildAtlasInjectionText(plans)); injected = true; } catch { /* No native-book fallback. */ }
+        }
+        // Remove our obsolete dynamic entries even when the host has no injection API.
+        // User settings and other chats' scoped entries in their own books are preserved.
+        const names = new Set<string>();
+        let sharedName: string | null = null;
+        try { sharedName = await port.resolvePreferredBook?.() ?? null; } catch { /* absent */ }
+        if (sharedName) names.add(sharedName);
+        let chatBook: string | null = null;
+        try { chatBook = await port.getChatBookName(); } catch { /* Clean other known books. */ }
+        if (chatBook) names.add(chatBook);
+        names.add(plans.bookName);
+        if (scope) names.add(scopeBookName(plans.bookName, scope));
+        let pruned = 0;
+        let sharedClean = true;
+        for (const name of scopeCurrent ? names : []) {
+          try {
+            const data = asEntriesRecord(await port.loadBook(name));
+            if (!data) continue;
+            let changed = false;
+            for (const [uid, raw] of Object.entries(data.entries as Record<string, unknown>)) {
+              const comment = entryCommentOf(raw);
+              const ownership = classifyAtlasLorebookEntry(comment, scope);
+              const ours = ownership.reason === "legacy" || ownership.owned
+                || (name === sharedName && comment.startsWith(ATLAS_SCOPED_COMMENT_PREFIX));
+              if (!ours) continue;
+              port.deleteEntry(data, uid); pruned += 1; changed = true;
+            }
+            if (changed) await port.saveBook(name, data);
+          } catch { sharedClean = false; }
+        }
+        return { bookName: scope ? scopeBookName(plans.bookName, scope) : plans.bookName,
+          created: false, written: 0, pruned, binding: injected ? "injected" : "skipped-conflict",
+          existingBookName: chatBook, entries: [], scopeKey: scope ? atlasLorebookScopeKey(scope.chatId, scope.worldId) : null,
+          contentTarget: injected ? "injection" : "none", migrated: pruned, cleanedShared: pruned,
+          keptForeign: 0, sharedClean, scopedComment: scope ? atlasScopedEntryComment(scope) : null,
+          injectionKey, ownedEntries: [], ownedAtlasEntries: [] };
+      }
       if (!plans || !Array.isArray(plans.entries) || plans.entries.length === 0) {
         throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "lorebook 规划为空，跳过写入。");
       }
@@ -1267,9 +1161,10 @@ export function createAtlasLorebookWriter(port: AtlasLorebookPort, opts: { now?:
      * keptForeign / sharedClean / scopedComment / injectionKey / ownedEntries /
      * ownedAtlasEntries）。旧字段名与含义一个不改，旧读取方零影响。
      */
-    snapshot(_plans: AtlasLorebookPlans, result: AtlasLorebookSyncResult) {
+    snapshot(plans: AtlasLorebookPlans, result: AtlasLorebookSyncResult) {
       return {
         schemaVersion: 1 as const,
+        transientOnly: plans.transientOnly === true,
         bookName: result.bookName,
         updatedAt: now(),
         created: result.created,
@@ -1277,7 +1172,7 @@ export function createAtlasLorebookWriter(port: AtlasLorebookPort, opts: { now?:
         pruned: result.pruned,
         binding: result.binding,
         existingBookName: result.existingBookName,
-        entries: result.entries,
+        entries: plans.transientOnly ? plans.entries : result.entries,
         // B05：聊天作用域（chatId + worldId）与跨聊天隔离状态
         scopeKey: result.scopeKey,
         contentTarget: result.contentTarget,

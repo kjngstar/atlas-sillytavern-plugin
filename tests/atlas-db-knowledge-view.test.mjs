@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { makeSeedWith, IDS, insertRows } from './fixtures/atlas-sql/seed.mjs';
-import { projectForPov, projectPortrayal, projectPromptView } from '../src/atlas-db-knowledge-view.ts';
+import { projectForPov, projectPortrayal, projectPromptView, renderSqlSceneContext } from '../src/atlas-db-knowledge-view.ts';
 
 const SQL = await (await import('sql.js')).default();
 
@@ -105,6 +105,51 @@ async function worldWithKnowledge() {
   ]);
   return seed;
 }
+
+test('正文 SQL 投影：只提供主角已知内容，排除作者真值、载荷及他人知识', async () => {
+  const seed = await worldWithKnowledge();
+  const world = { db: seed.db, branchId: IDS.branchMain };
+  try {
+    let text = renderSqlSceneContext(world);
+    assert.doesNotMatch(text, /刺客|王宫动手|学校今天有外人/);
+    seed.db.run("UPDATE knowledge SET knower_character_id = ?, is_pov = 0, belief = 'verified' WHERE branch_id = ? AND id = 'K1'", [IDS.C1, IDS.branchMain]);
+    seed.db.run("UPDATE information SET payload_json = ? WHERE branch_id = ? AND id = 'INFO1'", [JSON.stringify({ author_secret: '隐秘幕后细节' }), IDS.branchMain]);
+    text = renderSqlSceneContext(world);
+    assert.match(text, /已核实的消息：学校今天有外人来访/);
+    assert.doesNotMatch(text, /隐秘幕后细节|truthForAuthor|payload|王宫动手/);
+    seed.db.run("UPDATE knowledge SET first_received_at_s = 10 WHERE branch_id = ? AND id = 'K1'", [IDS.branchMain]);
+    assert.doesNotMatch(renderSqlSceneContext(world), /学校今天有外人/);
+    seed.db.run("UPDATE knowledge SET first_received_at_s = 0 WHERE branch_id = ? AND id = 'K1'", [IDS.branchMain]);
+    seed.db.run("UPDATE information SET status = 'retracted' WHERE branch_id = ? AND id = 'INFO1'", [IDS.branchMain]);
+    assert.doesNotMatch(renderSqlSceneContext(world), /学校今天有外人/);
+    assert.doesNotMatch(renderSqlSceneContext({ db: seed.db, branchId: IDS.branchB }), /学校今天有外人/);
+  } finally { seed.close(); }
+});
+
+test('正文 SQL 投影：当地公开风声只在实际接触机会存在时提供，不自动写认知', async () => {
+  const seed = await worldWithKnowledge();
+  const world = { db: seed.db, branchId: IDS.branchMain };
+  try {
+    seed.db.run("UPDATE knowledge SET knower_character_id = ?, is_pov = 0 WHERE branch_id = ? AND id = 'K1'", [IDS.C2, IDS.branchMain]);
+    seed.db.run('UPDATE branches SET clock_s = 120, clock_max_s = 120 WHERE id = ?', [IDS.branchMain]);
+    seed.db.run(`INSERT INTO rumor_fronts (branch_id,id,row_rev,created_turn_id,updated_turn_id,information_id,location_id,first_available_at_s,last_reinforced_at_s)
+      VALUES (?,?,1,?,?,?, ?,0,0)`, [IDS.branchMain, 'FRONT1', IDS.seedTurn, IDS.seedTurn, 'INFO1', IDS.L2]);
+    assert.doesNotMatch(renderSqlSceneContext(world), /学校今天有外人/);
+    seed.db.run(`INSERT INTO actions (branch_id,id,row_rev,created_turn_id,updated_turn_id,actor_entity_id,kind,target_location_id,started_at_s,status)
+      VALUES (?,?,1,?,?,?,'wait',?,0,'active')`, [IDS.branchMain, 'WAIT1', IDS.seedTurn, IDS.seedTurn, IDS.C1, IDS.L2]);
+    assert.match(renderSqlSceneContext(world), /不代表已经注意或核实.*学校今天有外人/);
+    const count = seed.db.exec("SELECT COUNT(*) FROM knowledge WHERE knower_character_id = 'C1'")[0].values[0][0];
+    assert.equal(count, 0, '投影只读，候选不变成主角认知');
+    seed.db.run("UPDATE information SET secrecy = 'secret' WHERE branch_id = ? AND id = 'INFO1'", [IDS.branchMain]);
+    assert.doesNotMatch(renderSqlSceneContext(world), /学校今天有外人/);
+    seed.db.run("UPDATE information SET secrecy = 'public' WHERE branch_id = ? AND id = 'INFO1'", [IDS.branchMain]);
+    seed.db.run('UPDATE rumor_fronts SET audience_json = ? WHERE branch_id = ?', [JSON.stringify({ access: 'members' }), IDS.branchMain]);
+    assert.doesNotMatch(renderSqlSceneContext(world), /学校今天有外人/);
+    seed.db.run('UPDATE rumor_fronts SET audience_json = ? WHERE branch_id = ?', [JSON.stringify({ access: 'public' }), IDS.branchMain]);
+    seed.db.run('UPDATE characters SET location_id = ? WHERE branch_id = ? AND id = ?', [IDS.L3, IDS.branchMain, IDS.C1]);
+    assert.doesNotMatch(renderSqlSceneContext(world), /学校今天有外人/);
+  } finally { seed.close(); }
+});
 
 test('T22-01 主角视图只包含 is_pov 认知；他人认知不进主角投影', async () => {
   const seed = await worldWithKnowledge();

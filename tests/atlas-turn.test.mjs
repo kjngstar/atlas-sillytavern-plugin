@@ -181,16 +181,16 @@ test("旅行预览：只读、距离与耗时来自共享基线", () => {
 // prepare
 // ---------------------------------------------------------------------------
 
-test("prepare：注入文本有界、含位置与时间、逐字节可复现", () => {
+test("prepare：场景注入有界且确定，不发送时间与后台人物 ID", () => {
   const world = buildFixture();
   const first = prepareAtlasTurn(world, prepareInput(world));
   const second = prepareAtlasTurn(world, prepareInput(world));
   deepEqual(JSON.stringify(second.response), JSON.stringify(first.response), "同输入响应一致");
   const text = first.response.injectionText;
   ok(text.length <= ATLAS_LIMITS.INJECTION_CHARS, "注入文本不超预算");
-  ok(text.includes("【阿特拉斯】当前位置："), "注入含当前位置");
-  ok(text.includes(`第 ${CURRENT_TIME} 时段`), "注入含世界时间");
-  ok(text.includes("chronicle-c1"), "注入含同地点 NPC");
+  ok(text.includes("当前位置："), "注入含当前位置");
+  ok(!text.includes(`第 ${CURRENT_TIME} 时段`), "程序时段不占剧情上下文");
+  ok(!text.includes("chronicle-c1"), "内部 ID 留在引擎请求，不进入剧情注入");
   ok(first.response.triggerIds.includes("chronicle-trig-bell"), "响应携带命中触发器");
   equal(first.response.currentLocationId, "4103", "响应携带当前位置");
   ok(first.response.turnId.length > 0, "turnId 已生成");
@@ -229,17 +229,15 @@ test("prepare：非法 currentTime 被拒绝", () => {
   assertionCount += 1;
 });
 
-test("prepare：注入文本带人物 / 地点 / 地区 id 对照表（0.9.30，「采纳 0 条」根因修复）", () => {
+test("prepare：全世界对照表只供推演，不送给正文模型", () => {
   const world = buildFixture();
   const { response } = prepareAtlasTurn(world, prepareInput(world));
-  ok(response.injectionText.includes("人物 id 对照："), "有人物 id 对照");
-  ok(response.injectionText.includes("entity-city="), "实体 id=名字 形式（entity-city）");
-  ok(response.injectionText.includes("entity-npc="), "实体 id=名字 形式（entity-npc）");
-  ok(response.injectionText.includes("地点 id 对照："), "有地点 id 对照");
-  ok(response.injectionText.includes("4104="), "地点 id=名字 形式（4104）");
+  ok(!response.injectionText.includes("id 对照"));
+  ok(!response.injectionText.includes("上下文装配单"));
+  ok(!response.injectionText.includes("chronicle-c4"));
 });
 
-test("prepare：0.9.34 人物对照表 = 裁定校验集同口径全集——装配单外的角色也在名单里", () => {
+test("prepare：远方人物留在后台校验集，不进入正文上下文", () => {
   const world = buildFixture();
   // 装配单（plan.entities）按相关性过滤；直接往 world.characters 塞一个
   // 与当前场景无关的角色——0.9.33 之前它不会出现在对照表里，模型引用必被裁定丢弃
@@ -255,8 +253,8 @@ test("prepare：0.9.34 人物对照表 = 裁定校验集同口径全集——装
   };
   const { response } = prepareAtlasTurn(withFar, prepareInput(withFar));
   ok(
-    response.injectionText.includes("entity-far-npc=远方的铁匠"),
-    "world.characters 全集角色进对照表（id=名字）",
+    !response.injectionText.includes("远方的铁匠"),
+    "不注入与当前场景无关的人物",
   );
   // 裁定校验认这个 id：commit 不再「引用未知实体」整条丢弃
   const known = new Set((withFar.characters ?? []).map((c) => String(c.id)));
@@ -286,16 +284,16 @@ function commitInput(world, overrides = {}) {
   };
 }
 
-test("prepare：子地点 ID 对照包含父节点，根地点不伪造父节点", () => {
+test("prepare：只提供当前地点的位置链，不泄露全世界地点 ID", () => {
   const world = buildFixture();
   world.points = [
     { id: 9001, name: "钟楼", x: 10, y: 10, regionId: null },
     { id: 9002, name: "大堂", x: 12, y: 12, regionId: null, parentPointId: 9001 },
   ];
-  const text = prepareAtlasTurn(world, prepareInput(world)).response.injectionText;
-  ok(text.includes("9002=大堂（在 9001 内）"), "子地点带父 ID");
-  ok(text.includes("9001=钟楼"), "根地点存在");
-  ok(!text.includes("9001=钟楼（在 "), "根地点不带虚假父 ID");
+  const text = prepareAtlasTurn(world, { ...prepareInput(world), currentPointId: "9002" }).response.injectionText;
+  ok(text.includes("钟楼 → 大堂"));
+  ok(!text.includes("9001="));
+  ok(!text.includes("9002="));
 });
 
 test("角色建档工具：只为被引用的现存角色建档", () => {

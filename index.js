@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.61";
+export const ATLAS_EXTENSION_VERSION = "0.9.64";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -32,6 +32,7 @@ export { atlasSessionWriteGuard };
 export const ATLAS_SETTINGS_KEY = "atlas_world_sim";
 /** 生成拦截器注入键（setExtensionPrompt 用；临时上下文，不写入可见聊天历史）。 */
 export const ATLAS_INJECTION_KEY = "atlas_world_context";
+const atlasSceneInjectionKeys = new Set();
 /** 官方 generate_interceptor 在 globalThis 上的函数名（与 manifest.json 一致）。 */
 export const ATLAS_INTERCEPTOR_GLOBAL = "atlasGenerateInterceptor";
 /** 同源 Server Plugin 前缀（ST 自动挂载 /api/plugins/atlas）。 */
@@ -1082,14 +1083,14 @@ export function atlasDiagnoseEmptyNearby(input) {
     return {
       case: "current-location-unknown",
       persons: 0,
-      message: "尚未确定当前位置，无法计算附近。先在推演里确认主角所在地点，或在地图上点选所在地。",
+      message: "尚未确定当前位置：当前回合未推断出主角所在地点，无法计算附近。可查看下方的已记录人物；若推演位置有误，可在地点详情中手动纠偏。",
     };
   }
   if (!currentLocationId) {
     return {
       case: "current-location-unknown",
       persons: 0,
-      message: "尚未确定当前位置，无法计算附近。先在推演里确认主角所在地点，或在地图上点选所在地。",
+      message: "尚未确定当前位置：当前回合未推断出主角所在地点，无法计算附近。可查看下方的已记录人物；若推演位置有误，可在地点详情中手动纠偏。",
     };
   }
   const wanted = currentLocationId.startsWith("loc:") ? currentLocationId : `loc:${currentLocationId}`;
@@ -1368,6 +1369,8 @@ export function createLorebookChatSwitchHandler(deps) {
           branchKey: slice.branchKey,
           events,
           deliveries: Array.isArray(branchRows?.deliveries) ? branchRows.deliveries : [],
+          signals: Array.isArray(branchRows?.signals) ? branchRows.signals : [],
+          protagonistCharacterId: binding?.characterId ? `npc:${String(binding.characterId).replace(/^npc:/, "")}` : null,
           protagonistLocationIds: binding?.currentLocationId ? [String(binding.currentLocationId)] : [],
           authorOmniscient: false,
         };
@@ -1382,7 +1385,7 @@ export function createLorebookChatSwitchHandler(deps) {
       if (!plans) return { skipped: true };
       // 核验点 3：保存前
       if (!tracker.isCurrent(token)) return dropped("before-save");
-      const result = await deps.writer.syncTurn(plans);
+      const result = await deps.writer.syncTurn(plans, { chatId: token.chatId, worldId });
       if (!tracker.isCurrent(token)) return dropped("after-save");
       await deps.store.write("lorebook", deps.writer.snapshot(plans, result));
       if (typeof deps.rerender === "function") deps.rerender();
@@ -1747,6 +1750,7 @@ function createEmitter(context) {
        * SQL 模式关闭时该函数立刻返回（端口未注册），对旧路径零影响。
        */
       const wrapped = (payload) => {
+        if (event === "CHAT_CHANGED") clearInjection();
         atlasSqlNoteHostEvent(event, payload, context);
         return handler(payload);
       };
@@ -1769,6 +1773,8 @@ function createEmitter(context) {
 /** 清除生成拦截器注入（临时上下文；不写入可见聊天历史）。 */
 function clearInjection() {
   defaultSetExtensionPrompt(ATLAS_INJECTION_KEY, "", 2, 4);
+  for (const key of atlasSceneInjectionKeys) defaultSetExtensionPrompt(key, "", 2, 4);
+  atlasSceneInjectionKeys.clear();
 }
 
 /**
@@ -1911,6 +1917,8 @@ export function createGenerateInterceptor(core, io = {}) {
     void chat;
     void contextSize;
     void abort;
+    for (const key of atlasSceneInjectionKeys) setPrompt(key, "", 2, 4);
+    atlasSceneInjectionKeys.clear();
     if (type === "quiet") {
       setPrompt(ATLAS_INJECTION_KEY, "", 2, 4);
       return;
@@ -1931,6 +1939,7 @@ export function createGenerateInterceptor(core, io = {}) {
     } catch (error) {
       emitAtlasDiagnostic({ level: "error", source: "host", code: "INJECTION_FAILED",
         operation: "injection", phase: "applied", outcome: "failed", retryable: true });
+      setPrompt(ATLAS_INJECTION_KEY, "", 2, 4);
       console.warn("[atlas] 注入失败（酒馆生成不受影响）：", error instanceof Error ? error.message : String(error));
     }
   };
@@ -2262,7 +2271,7 @@ export function exportAtlasMapSkin(skin) {
  * - 导入是预校验：通过后仍由服务端 prompt.save 的 normalizePromptSegments 权威归一。
  */
 export const ATLAS_PROMPT_PACK_PROTOCOL = "atlas-prompt-pack@1";
-export const ATLAS_PROMPT_PACK_BYTES_MAX = 64 * 1024;
+export const ATLAS_PROMPT_PACK_BYTES_MAX = 512 * 1024;
 const ATLAS_PROMPT_PACK_NAME_MAX = 80;
 const ATLAS_PROMPT_PACK_SEGMENT_CHARS_MAX = 8000;
 const ATLAS_PROMPT_PACK_SEGMENTS_MAX = 16;
@@ -2282,6 +2291,7 @@ function normalizePromptPackSegments(raw) {
     if (typeof entry.name === "string" && entry.name.trim()) segment.name = entry.name.trim().slice(0, 64);
     if (entry.mainSlot === "A" || entry.mainSlot === "B" || entry.mainSlot === "") segment.mainSlot = entry.mainSlot;
     if (entry.deletable === false) segment.deletable = false;
+    if (entry.enabled === false) segment.enabled = false;
     out.push(segment);
   }
   return out;
@@ -2319,7 +2329,7 @@ export function buildAtlasPromptPack(preset, now = Date.now()) {
 export function parseAtlasPromptPack(raw) {
   const text = typeof raw === "string" ? raw : "";
   if (!text.trim()) return { ok: false, error: "文件为空。" };
-  if (text.length > ATLAS_PROMPT_PACK_BYTES_MAX) {
+  if (new TextEncoder().encode(text).byteLength > ATLAS_PROMPT_PACK_BYTES_MAX) {
     return { ok: false, error: `文件超过 ${String(Math.round(ATLAS_PROMPT_PACK_BYTES_MAX / 1024))} KiB 上限。` };
   }
   let parsed;
@@ -2361,18 +2371,80 @@ export function parseAtlasPromptPack(raw) {
 
 /** 导入重名消解：不动既有预设，追加「（导入）」序号。纯函数便于测试。 */
 export function uniquePromptPresetName(name, existingNames) {
-  const base = String(name ?? "").trim().slice(0, ATLAS_PROMPT_PACK_NAME_MAX) || "导入的预设";
+  const base = String(name ?? "").trim().slice(0, 64) || "导入的预设";
   const taken = new Set(
     (Array.isArray(existingNames) ? existingNames : []).map((item) => String(item ?? "").trim()),
   );
   if (!taken.has(base)) return base;
-  let candidate = `${base}（导入）`;
+  const withSuffix = (suffix) => `${base.slice(0, 64 - suffix.length)}${suffix}`;
+  let candidate = withSuffix("（导入）");
   let index = 2;
   while (taken.has(candidate)) {
-    candidate = `${base}（导入 ${String(index)}）`;
+    candidate = withSuffix(`（导入 ${String(index)}）`);
     index += 1;
   }
-  return candidate.slice(0, ATLAS_PROMPT_PACK_NAME_MAX);
+  return candidate;
+}
+
+/** Atlas 原生包或 shujuku 导出的预设数组。外部格式只取可编辑提示词字段。 */
+export function parseAtlasPromptImport(raw) {
+  const text = typeof raw === "string" ? raw : "";
+  if (!text.trim()) return { ok: false, error: "文件为空。" };
+  if (new TextEncoder().encode(text).byteLength > ATLAS_PROMPT_PACK_BYTES_MAX) {
+    return { ok: false, error: "文件超过 512 KiB 上限。" };
+  }
+  let source;
+  try { source = JSON.parse(text); }
+  catch { return { ok: false, error: "不是合法 JSON。" }; }
+  if (source?.protocol !== undefined) {
+    const native = parseAtlasPromptPack(text);
+    if (native.ok && (!Array.isArray(source.preset?.segments) || source.preset.segments.length > 16 || source.preset.segments.some((entry) =>
+      !["system", "user", "assistant"].includes(String(entry?.role ?? "").trim().toLowerCase()) ||
+      typeof entry?.content !== "string" || !entry.content.trim() || entry.content.length > 8000))) {
+      return { ok: false, error: "Atlas 包含无效或超限条目，请修正后导入；每份最多 16 个条目，每条最多 8000 字。" };
+    }
+    return native.ok ? { ok: true, format: "Atlas", presets: [native.preset], warnings: [] } : native;
+  }
+  const candidates = Array.isArray(source) ? source : [source];
+  if (candidates.length === 0 || candidates.length > 30) return { ok: false, error: "请选择包含 1–30 个预设的 JSON。" };
+  const presets = [];
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== "object" || typeof candidate.name !== "string" || !candidate.name.trim()) {
+      return { ok: false, error: "外部预设需要 name 和 promptGroup 字段。" };
+    }
+    // 新版任务可有各自 promptGroup；不拼接不同任务，不执行任务链。
+    const groups = Array.isArray(candidate.promptGroup) && candidate.promptGroup.length > 0
+      ? [{ ...candidate, atlasImportName: candidate.name }]
+      : Array.isArray(candidate.plotTasks)
+        ? candidate.plotTasks.map((task) => ({ ...candidate, ...task, atlasImportName: `${candidate.name} / ${task?.name || "任务"}` }))
+        : [];
+    if (groups.length === 0) return { ok: false, error: `「${candidate.name}」没有 promptGroup 分段。` };
+    for (const group of groups) {
+      if (!Array.isArray(group.promptGroup) || !group.promptGroup.length || group.promptGroup.length > 16) {
+        return { ok: false, error: "每份预设需要 1–16 个分段；请拆分过多的条目后导入。" };
+      }
+      const mapped = [];
+      for (const entry of group.promptGroup) {
+        const role = typeof entry?.role === "string" ? entry.role.trim().toLowerCase() : "";
+        if (!["system", "user", "assistant"].includes(role) || typeof entry?.content !== "string" || !entry.content.trim()) {
+          return { ok: false, error: `「${group.atlasImportName}」含无效分段：角色应为 system/user/assistant，正文不能为空。` };
+        }
+        if (entry.content.length > 8000) return { ok: false, error: "单个条目超过 8000 字，请拆分后导入。" };
+        mapped.push({ ...entry, mainSlot: entry.mainSlot ?? (entry.isMain ? "A" : entry.isMain2 ? "B" : "") });
+      }
+      const count = group.contextTurnCount;
+      if (count != null && (typeof count !== "number" || !Number.isInteger(count) || count < 1 || count > 10)) {
+        return { ok: false, error: "contextTurnCount 必须是 1–10 的整数。" };
+      }
+      presets.push({ name: group.atlasImportName.trim().slice(0, 64), segments: normalizePromptPackSegments(mapped),
+        ...(count == null ? {} : { contextTurnCount: count }) });
+      if (presets.length > 30) return { ok: false, error: "文件包含过多任务，请分别导入。" };
+    }
+  }
+  return { ok: true, format: "shujuku", presets, warnings: [
+    "仅导入分段角色、名称、正文、开关及上下文条数；任务链、召回规则、世界书选择与 API 设置不会迁入。",
+    "外部提示词需改为 Atlas 的 <atlasEdit> 行增量输出。$5 在 Atlas 中表示世界状态；其他专用占位符请自行改写。保存并启用后可用最终请求预览核对装配。",
+  ] };
 }
 
 /** 内置样例（M08 要求至少两个真实可导入样例）：深色战术风 / 浅色纸面风。 */
@@ -2467,6 +2539,7 @@ const NPC_REASON_LABELS = {
  */
 const POSITION_SOURCE_LABELS = {
   narrative: "正文观察",
+  inferred: "剧情推测",
   simulation: "程序推演",
   manual: "作者手动",
   routine: "日程",
@@ -2535,7 +2608,7 @@ function buildTableMapNpcIndex(d) {
       positionSource: row.positionSource ?? null,
       isProtagonist: row.isProtagonist === true,
       fromTables: true,
-      __isNear: locationId !== null && nearRowIds.has(locationId),
+      __isNear: row.isNear === true || (row.isNear !== false && locationId !== null && nearRowIds.has(locationId)),
     });
   }
   return index;
@@ -3637,23 +3710,26 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
 
   function buildLorebookPanel() {
     const panel = el("section", "aw-panel aw-lorebook-panel");
-    panel.append(el("span", "aw-eyebrow", "世界书条目"));
+    panel.append(el("span", "aw-eyebrow", "场景上下文"));
     const snap = lorebookSnapshot;
     if (!snap || typeof snap !== "object" || !Array.isArray(snap.entries)) {
       panel.append(el(
         "p",
         "aw-panel__text",
-        "本区显示的是 Atlas **写入**世界书的条目（每轮世界推进后自动写「NPC 动向 / 近期可触发」，采纳 0 条的回合也会写一条动向摘要）。注意与「推演时注入卡书资料」是两回事：注入是只读的，每轮推演都会把当前角色绑定的全部世界书（primary + additional）带给推演模型，不会在这里列条目。",
+        "这里预览本聊天的临时场景上下文：当前位置与能够接触的线索。后台事件和人物私下想法不进入正文上下文。推演仍可读取角色卡世界书资料；动态状态不再写入世界书。",
       ));
       return panel;
     }
     const meta = el("div", "aw-rows");
     const bookRow = el("div", "aw-row");
-    bookRow.append(el("span", "aw-row__label", "目标世界书"));
-    bookRow.append(el("span", "aw-row__value", String(snap.bookName ?? "")));
+    bookRow.append(el("span", "aw-row__label", snap.transientOnly ? "生效范围" : "目标世界书"));
+    bookRow.append(el("span", "aw-row__value", snap.transientOnly ? "当前聊天 · 临时上下文" : String(snap.bookName ?? "")));
     meta.append(bookRow);
     panel.append(meta);
-    if (snap.binding === "conflict") {
+    if (snap.transientOnly) {
+      panel.append(el("div", "aw-note", snap.entries.length ? "正文只获得场景与线索；传闻不等于已经核实。" : "当前没有可提供的场景或线索，注入为空。"));
+      if (snap.sharedClean === false) panel.append(el("div", "aw-note aw-note--error", "部分旧 Atlas 条目未能清理；请重试同步。"));
+    } else if (snap.binding === "conflict") {
       panel.append(el(
         "div",
         "aw-note aw-note--error",
@@ -3675,10 +3751,10 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     const list = el("div", "aw-lorebook__list");
     for (const entry of snap.entries.slice(0, 24)) {
       const card = el("article", "aw-card");
-      card.append(el("h2", "aw-card__title", String(entry.comment ?? "")));
+      card.append(el("h2", "aw-card__title", snap.transientOnly ? "场景与线索预览" : String(entry.comment ?? "")));
       const keys = Array.isArray(entry.keys) ? entry.keys.filter(Boolean) : [];
-      if (keys.length > 0) card.append(el("span", "aw-tag", `触发词：${keys.join("、")}`));
-      const text = el("p", "aw-card__text", String(entry.content ?? "").slice(0, 200));
+      if (!snap.transientOnly && keys.length > 0) card.append(el("span", "aw-tag", `触发词：${keys.join("、")}`));
+      const text = el("p", "aw-card__text", String(entry.content ?? "").slice(0, snap.transientOnly ? 1800 : 200));
       card.append(text);
       list.append(card);
     }
@@ -4272,17 +4348,22 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
        * （本轮刚被行增量记下的人不能因为目录投影滞后而消失）；已离场者不进"附近"。
        */
       const nearbyTableEntries = buildTableMapNpcIndex(d);
+      const hasTableNearby = Array.isArray(d.tableMap?.nearby?.entries);
       const relevant = (Array.isArray(d.relevantNpcIds) ? d.relevantNpcIds : [])
         .map((id) => npcById.get(String(id)))
         .filter((npc) => Boolean(npc))
         .map((npc) => mergeNearbyNpc(npc, nearbyTableEntries.get(String(npc.id ?? ""))))
-        .filter((npc) => npc.isProtagonist !== true && npc.presence !== "left");
-      // 三表里有、但既不在相关名单、也不在当前地点的人：不冒充"附近"，留给地点菜单全量查询
+        .filter((npc) => npc.isProtagonist !== true && npc.presence !== "left"
+          && (!hasTableNearby || nearbyTableEntries.get(String(npc.id ?? ""))?.__isNear === true));
+      // 旧相关名单可能漏掉本轮新建 / 同步的人物；同地点判断以三表投影为准，
+      // 即使旧目录已经有这个 ID，也必须出现在附近页，且只出现一次。
+      const displayedIds = new Set(relevant.map((npc) => String(npc.id ?? "")));
       for (const [id, view] of nearbyTableEntries) {
-        if (npcById.has(id)) continue;
         if (view.presence === "left" || view.isProtagonist) continue;
         if (!view.__isNear) continue;
-        relevant.push(view);
+        if (displayedIds.has(id)) continue;
+        relevant.push(mergeNearbyNpc(npcById.get(id) ?? view, view));
+        displayedIds.add(id);
       }
       if (relevant.length === 0) {
         // A03 / F8 + §2.4：空关联**不等于**"没人"，更不等于串档。三种情形分开口径：
@@ -4364,6 +4445,27 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
           grid.append(card);
         }
         center.append(grid);
+      }
+      // 三表已收录但与主角的空间关系还没推断出来时，也让作者能查到人物。
+      // 单列并明确标为「距离未定」；根地点之间不能凭目录相关性冒充已确认的附近。
+      const elsewhere = [...nearbyTableEntries.values()]
+        .filter((npc) => !npc.__isNear && npc.presence !== "left" && !npc.isProtagonist)
+        .slice(0, 12);
+      if (elsewhere.length > 0 && d.tableMap?.nearReasonCode !== "CURRENT_LOCATION_UNKNOWN") {
+        const elsewherePanel = el("section", "aw-panel");
+        elsewherePanel.append(el("h2", "aw-card__title", "其他地点已知人物 · 距离未定"));
+        elsewherePanel.append(el("p", "aw-card__meta", "这些人物已入档，但地点间的距离或归属尚未推断；此名单不表示他们在主角身边。"));
+        for (const npc of elsewhere) {
+          const row = el("button", "aw-btn aw-btn--ghost", `${npc.name} · ${npc.pointName ?? "位置未详"}`);
+          row.type = "button";
+          row.addEventListener("click", () => {
+            core.setPage("map");
+            renderPage();
+            if (npc.pointId) locateToPointPanel(String(npc.pointId));
+          });
+          elsewherePanel.append(row);
+        }
+        center.append(elsewherePanel);
       }
       const nearbyPoints = Array.isArray(d.nearbyPointIds) ? d.nearbyPointIds : [];
       if (nearbyPoints.length > 0) {
@@ -5681,6 +5783,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         : String(entry.locationId).replace(/^loc:/, ""),
       pointName: entry.locationName ?? pointName,
       holderName: entry.holderName ?? null,
+      holderCharacterId: entry.holderCharacterId ?? null,
       fromTables: true,
     };
   }
@@ -5722,29 +5825,6 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     const actions = el("div", "aw-mappanel__actions");
     const protagonists = (Array.isArray(d.npcDirectory) ? d.npcDirectory : [])
       .filter((npc) => npc.isProtagonist === true);
-    if (protagonists.length === 1 && !inSub && String(point.id) !== String(d.currentLocationId ?? "")) {
-      const locateBtn = el("button", "aw-btn aw-btn--ghost", "确认主角在这里");
-      locateBtn.type = "button";
-      locateBtn.setAttribute("aria-label", `作者确认主角当前位于 ${String(point.name)}`);
-      locateBtn.addEventListener("click", async () => {
-        if (!(globalThis.confirm?.(`确认主角当前位于「${String(point.name)}」？这将更新本聊天的位置记录。`) ?? false)) return;
-        try {
-          const response = await api.request("POST", "/worlds/move-author", {
-            chatId: String(state().chatId ?? ""), entityId: String(protagonists[0].id), toPointId: String(point.id),
-          });
-          if (response.status !== 200 || !response.body?.ok) {
-            setStatus(response.body?.error?.message ?? `当前位置确认失败（HTTP ${response.status}）`, "error");
-            return;
-          }
-          closeMapPanel();
-          await core.refresh();
-          setStatus(`主角位置已确认：${String(point.name)}。`, "ok");
-        } catch (error) {
-          setStatus(`当前位置确认失败：${error instanceof Error ? error.message : String(error)}`, "error");
-        }
-      });
-      actions.append(locateBtn);
-    }
     // 0.9.41 在场名单：当前地点上的人物 / 物品（npcDirectory / objectDirectory 按 pointId 分组）
     const d0 = lastMapData;
     // D04：有 `tableMap` 时，**位置与在场性以三表为准**（行增量回合只改三表）；
@@ -5850,6 +5930,30 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         : `loc:${String(point.id)}`;
       const confirmBox = el("details", "aw-confirm");
       confirmBox.append(el("summary", "aw-confirm__summary", "作者确认（归属 / 邻接 / 载具 / 坐标）"));
+      // 主角位置应由推演写入；此入口只作为作者发现误判后的纠偏工具。
+      if (protagonists.length === 1 && !inSub && String(point.id) !== String(d.currentLocationId ?? "")) {
+        const locateBtn = el("button", "aw-btn aw-btn--ghost", "手动纠偏主角位置");
+        locateBtn.type = "button";
+        locateBtn.setAttribute("aria-label", `手动将主角位置纠偏到 ${String(point.name)}`);
+        locateBtn.addEventListener("click", async () => {
+          if (!(globalThis.confirm?.(`将主角位置纠偏到「${String(point.name)}」？这会更新本聊天的位置记录。`) ?? false)) return;
+          try {
+            const response = await api.request("POST", "/worlds/move-author", {
+              chatId: String(state().chatId ?? ""), entityId: String(protagonists[0].id), toPointId: String(point.id),
+            });
+            if (response.status !== 200 || !response.body?.ok) {
+              setStatus(response.body?.error?.message ?? `位置纠偏失败（HTTP ${response.status}）`, "error");
+              return;
+            }
+            closeMapPanel();
+            await core.refresh();
+            setStatus(`主角位置已纠偏：${String(point.name)}。`, "ok");
+          } catch (error) {
+            setStatus(`位置纠偏失败：${error instanceof Error ? error.message : String(error)}`, "error");
+          }
+        });
+        confirmBox.append(locateBtn);
+      }
       confirmBox.append(el("p", "aw-confirm__ident",
         `聊天 ${String(d0?.chatId ?? "(无)")} · 分支 ${String(panelTableMap?.branchKey ?? "canon")} · 地点行 ${hereRowId}`));
       confirmBox.append(el("p", "aw-confirm__hint",
@@ -6069,6 +6173,19 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     if (!actionText && !npc.status && !thoughtText && !tendencyText && narratives.length === 0) {
       mapPanel.append(el("div", "aw-mappanel__here-empty", "暂无动向记录——推演推进后这里会出现该角色的想法与动向。"));
     }
+    const held = (Array.isArray(data()?.tableMap?.objects?.entries) ? data().tableMap.objects.entries : [])
+      .filter(item => String(item.holderCharacterId ?? "").replace(/^npc:/, "") === String(npc.id).replace(/^npc:/, "") && item.status !== "已销毁");
+    if (held.length) {
+      const inventory = el("div", "aw-mappanel__section");
+      inventory.append(el("div", "aw-mappanel__section-label", "携带物品"));
+      for (const item of held) {
+        const link = el("button", "aw-btn aw-btn--ghost", String(item.name));
+        link.type = "button";
+        link.addEventListener("click", () => openObjectPanel(objectViewFromTableRow(item), anchorEl));
+        inventory.append(link);
+      }
+      mapPanel.append(inventory);
+    }
     mapPanel.style.display = "";
     anchorPanelToMarker(anchorEl);
   }
@@ -6108,6 +6225,15 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       });
       locate.append(locateBtn);
       mapPanel.append(locate);
+    }
+    if (object.holderCharacterId) {
+      const holderId = String(object.holderCharacterId).replace(/^npc:/, "");
+      const holder = buildTableMapNpcIndex(lastMapData).get(holderId)
+        ?? (lastMapData?.npcDirectory ?? []).find(row => String(row.id).replace(/^npc:/, "") === holderId);
+      if (holder) {
+        const link = el("button", "aw-btn aw-btn--ghost", `查看持有人：${holder.name}`);
+        link.type = "button"; link.addEventListener("click", () => openNpcPanel(holder, anchorEl)); mapPanel.append(link);
+      }
     }
     if (object.description) {
       const desc = el("div", "aw-mappanel__section");
@@ -7268,6 +7394,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
   let promptLibrary = [];
   let promptDraft = null;
   let promptDraftDirty = false;
+  let promptImportOptions = null;
   let settingsLoadState = "loading";
   let settingsStatus = "";
   let settingsStatusKind = "";
@@ -7294,7 +7421,11 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       return;
     }
     const line = statusLine();
-    if (line) center.append(line);
+    if (line) {
+      const editor = state().page === "progression" ? center.querySelector(".aw-prompt-editor") : null;
+      if (editor) editor.insertBefore(line, editor.querySelector(".aw-field"));
+      else center.append(line);
+    }
   }
 
   function setStatus(text, kind = "ok") {
@@ -7470,8 +7601,20 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
           content: s.content,
           ...(typeof s.name === "string" && s.name ? { name: s.name } : {}),
           ...(s.mainSlot === "A" || s.mainSlot === "B" || s.mainSlot === "" ? { mainSlot: s.mainSlot } : {}),
+          ...(s.enabled === false ? { enabled: false } : {}),
+          ...(s.deletable === false ? { deletable: false } : {}),
         }))
       : [];
+  }
+
+  function loadImportedPrompt(index) {
+    const preset = promptImportOptions?.presets[index];
+    if (!preset) return;
+    promptImportOptions.selectedIndex = index;
+    promptDraft = { ...newPromptDraft(), ...preset, name: uniquePromptPresetName(preset.name, promptLibrary.map((p) => p.name)),
+      segments: cloneSegments(preset.segments) };
+    promptDraftDirty = true;
+    setStatus(`已载入「${promptDraft.name}」为待保存草稿；保存后再选择启用。`);
   }
 
   /** 分段角色白名单（0.9.18，与 src/atlas-settings.ts PROMPT_SEGMENT_ROLES 同口径）。 */
@@ -7482,7 +7625,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     const active = promptLibrary.find((p) => p.id === settingsV2.activePromptPresetId);
     // 0.9.18 分段模式：预览逐段 [role] 正文（占位符保持原样，发送时才替换）
     if (active && Array.isArray(active.segments) && active.segments.length > 0) {
-      return active.segments.map((s) => `[${s.role}] ${String(s.content ?? "")}`).join("\n\n");
+      return active.segments.filter((s) => s.enabled !== false).map((s) => `[${s.role}] ${String(s.content ?? "")}`).join("\n\n");
     }
     if (active) return String(active.systemPrompt ?? "");
     // 0.9.40 内置默认以分段形态预览（与发送时多轮组装一致）
@@ -7556,6 +7699,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     // R02（D16）：连接级 systemPrompt 覆盖推进预设时必须显式提示——这是「改了预设没生效」
     // 的直接原因；提供一键恢复（清空连接级提示词，回到推进预设生效）
     const overrideApi = apiLibrary.find((p) => p.id === settingsV2?.activeApiPresetId);
+    let promptOverrideNotice = null;
     if (overrideApi && String(overrideApi.systemPrompt ?? "").trim()) {
       const overrideNote = el("div", "aw-note aw-note--error");
       overrideNote.append(el("span", {}, "当前 API 连接「" + String(overrideApi.name) + "」带有连接级系统提示词——发送时它会覆盖这里的推进预设。"));
@@ -7573,7 +7717,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         }
       });
       overrideNote.append(clearOverride);
-      panel.append(overrideNote);
+      promptOverrideNotice = overrideNote;
     }
 
     const runtimeActions = el("div", "aw-actions");
@@ -7615,7 +7759,6 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     });
     runtimeActions.append(toggle, autoCommit, manualBtn, loreToggle, gotoApi);
     panel.append(runtimeActions);
-    if (statusLine()) panel.append(statusLine());
 
     // R06：场景定位——当前场景未知与「上次确认」分开表达；开场识别（mode=bootstrap，
     // duration=0，只定位不推进时间）；起始占位迁移状态显式化
@@ -7866,11 +8009,15 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
 
     // shujuku 式提示词区：顶部「当前预设」选择行（选中即激活）＋ 新建 / 删除，编辑器 + dirty 操作条
     const promptPanel = el("section", "aw-panel");
+    promptPanel.classList.add("aw-prompt-editor");
+    promptPanel.setAttribute("aria-label", "提示词条目编辑器");
     promptPanel.append(el("span", "aw-eyebrow", "推演提示词预设"));
+    if (promptOverrideNotice) promptPanel.append(promptOverrideNotice);
+    if (statusLine()) promptPanel.append(statusLine());
 
     const selectField = el("div", "aw-field");
     selectField.append(el("span", "aw-field__label", "当前提示词预设"));
-    const selectRow = el("div", "aw-select-row");
+    const selectRow = el("div", "aw-select-row aw-prompt-selector");
     const promptSelect = document.createElement("select");
     promptSelect.className = "aw-input";
     promptSelect.setAttribute("aria-label", "选择提示词预设（选中即设为当前使用）");
@@ -7887,7 +8034,13 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         : preset.name;
       promptSelect.append(option);
     }
+    if (promptDraft?.kind === "new") {
+      const draftOption = document.createElement("option");
+      draftOption.value = "unsaved-draft"; draftOption.textContent = "正在编辑新草稿（尚未保存／启用）"; draftOption.disabled = true;
+      promptSelect.append(draftOption);
+    }
     promptSelect.value = promptDraft?.id ?? (settingsV2?.activePromptPresetId ?? BUILTIN_PROMPT_ID);
+    if (promptDraft?.kind === "new") promptSelect.value = "unsaved-draft";
     promptSelect.addEventListener("change", async () => {
       if (promptDraftDirty && !confirmDiscard("提示词")) {
         promptSelect.value = promptDraft?.id ?? (settingsV2?.activePromptPresetId ?? BUILTIN_PROMPT_ID);
@@ -7899,6 +8052,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       if (await sendSettingsCommand({ action: "prompt.activate", id: preset ? preset.id : null })) {
         promptDraft = preset ? savedPromptDraft(preset) : builtinPromptDraft();
         promptDraftDirty = false;
+        promptImportOptions = null;
         setStatus("", "ok");
       }
       renderCenter();
@@ -7911,6 +8065,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       if (promptDraftDirty && !confirmDiscard("提示词")) return;
       promptDraft = newPromptDraft();
       promptDraftDirty = false;
+      promptImportOptions = null;
       setStatus("", "ok");
       renderCenter();
     });
@@ -7944,39 +8099,31 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     const packInput = document.createElement("input");
     packInput.type = "file";
     packInput.accept = ".json,application/json";
+    packInput.setAttribute("aria-label", "提示词预设 JSON 文件");
     packInput.style.display = "none";
     packInput.addEventListener("change", () => {
       const file = packInput.files?.[0];
       packInput.value = "";
       if (!file) return;
       if (promptDraftDirty && !confirmDiscard("提示词")) return;
+      if (file.size > ATLAS_PROMPT_PACK_BYTES_MAX) {
+        setStatus("提示词文件超过 512 KiB 上限。", "error"); renderCenter(); return;
+      }
+      const draftAtRead = JSON.stringify(promptDraft);
       const reader = new FileReader();
       reader.onload = () => {
-        const result = parseAtlasPromptPack(String(reader.result ?? ""));
+        if (JSON.stringify(promptDraft) !== draftAtRead) {
+          setStatus("读取期间编辑内容已变化，请重新导入以保留当前草稿。", "error"); renderCenter(); return;
+        }
+        const result = parseAtlasPromptImport(String(reader.result ?? ""));
         if (!result.ok) {
           setStatus(`提示词包校验失败：${result.error}`, "error");
           renderCenter();
           return;
         }
-        void (async () => {
-          const name = uniquePromptPresetName(result.preset.name, promptLibrary.map((preset) => preset.name));
-          const ok = await sendSettingsCommand({
-            action: "prompt.save",
-            preset: {
-              name,
-              systemPrompt: "",
-              segments: result.preset.segments,
-              ...(result.preset.contextTurnCount === undefined ? {} : { contextTurnCount: result.preset.contextTurnCount }),
-            },
-          });
-          if (ok) {
-            const saved = promptLibrary.find((preset) => preset.name === name);
-            promptDraft = saved ? savedPromptDraft(saved) : newPromptDraft();
-            promptDraftDirty = false;
-            setStatus(`已导入提示词预设「${name}」（未启用；需要时在下拉里选中即启用）。`);
-          }
-          renderCenter();
-        })();
+        promptImportOptions = result;
+        loadImportedPrompt(0);
+        renderCenter();
       };
       reader.onerror = () => {
         setStatus("提示词包读取失败。", "error");
@@ -7990,7 +8137,6 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     promptImportBtn.type = "button";
     promptImportBtn.setAttribute("aria-label", "从 JSON 包导入提示词预设");
     promptImportBtn.addEventListener("click", () => {
-      if (promptDraftDirty && !confirmDiscard("提示词")) return;
       packInput.click();
     });
     selectRow.append(promptImportBtn);
@@ -7998,14 +8144,10 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     const promptExportBtn = el("button", "aw-btn aw-btn--icon", "导出");
     promptExportBtn.type = "button";
     promptExportBtn.setAttribute("aria-label", "导出当前提示词预设为 JSON 包");
-    promptExportBtn.disabled = !promptDraft?.id;
     promptExportBtn.addEventListener("click", () => {
-      const preset = promptLibrary.find((item) => item.id === promptDraft?.id);
-      if (!preset) {
-        setStatus("当前草稿尚未保存，先保存再导出。", "error");
-        renderCenter();
-        return;
-      }
+      const preset = promptDraft?.kind === "builtin"
+        ? { name: "Atlas 内置默认", segments: settingsV2?.builtInPrompt?.segments, systemPrompt: settingsV2?.builtInPrompt?.systemPrompt }
+        : promptDraft;
       try {
         const pack = buildAtlasPromptPack(preset);
         if (!pack) {
@@ -8029,8 +8171,28 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     });
     selectRow.append(promptExportBtn);
     selectField.append(selectRow);
-    selectField.append(el("span", "aw-hint", "选中预设会立即设为当前使用并载入下方编辑器；「新建」开新草稿，「删除」删当前选中的预设，「导出 / 导入」走 JSON 包只交换预设内容（不含 API 配置与密钥）。"));
+    selectField.append(el("span", "aw-hint", "选中已保存预设即启用。「导入」支持 Atlas 包与 shujuku JSON，先载入草稿供修改，保存后再选择启用；「导出」包含当前编辑内容。"));
     promptPanel.append(selectField);
+    if (promptImportOptions) {
+      const importBox = el("div", "aw-field");
+      importBox.append(el("span", "aw-field__label", `导入来源：${promptImportOptions.format} · ${promptImportOptions.presets.length} 份可选预设`));
+      if (promptImportOptions.presets.length > 1) {
+        const importedSelect = document.createElement("select");
+        importedSelect.className = "aw-input";
+        importedSelect.setAttribute("aria-label", "选择文件中的待导入预设");
+        promptImportOptions.presets.forEach((preset, index) => {
+          const option = document.createElement("option"); option.value = String(index); option.textContent = preset.name; importedSelect.append(option);
+        });
+        importedSelect.value = String(promptImportOptions.selectedIndex ?? 0);
+        importedSelect.addEventListener("change", () => {
+          if (promptDraftDirty && !confirmDiscard("提示词")) { importedSelect.value = String(promptImportOptions.selectedIndex ?? 0); return; }
+          loadImportedPrompt(Number(importedSelect.value)); renderCenter();
+        });
+        importBox.append(importedSelect);
+      }
+      for (const warning of promptImportOptions.warnings) importBox.append(el("p", "aw-note", warning));
+      promptPanel.append(importBox);
+    }
 
     // R02：内置只读 = kind 显式标记，不再是「没有 id 就当内置」的推断
     const isBuiltinDraft = promptDraft?.kind === "builtin";
@@ -8087,19 +8249,37 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       : "留空 = 使用内置默认；用户行动、助手回复与世界上下文由系统自动组装，不在这里编辑。启用下方分段模式后本正文不发送。"));
     // 0.9.40 内置默认不再展示单条正文编辑器（作者反馈「怎么还是长这样」）：
     // 改在下方分段区以只读形态展示 8 段多轮结构
-    if (!isBuiltinDraft) promptPanel.append(bodyField);
+    if (!isBuiltinDraft) {
+      const legacyBody = document.createElement("details");
+      legacyBody.className = "aw-details";
+      legacyBody.open = !promptDraft?.segments?.length && Boolean(promptDraft?.systemPrompt?.trim());
+      const legacySummary = document.createElement("summary");
+      legacySummary.textContent = "旧式单条系统提示词（分段条目优先生效）";
+      legacyBody.append(legacySummary, bodyField);
+      const convertButton = el("button", "aw-btn", "把单条正文转为条目");
+      convertButton.type = "button";
+      convertButton.addEventListener("click", () => {
+        if (!promptDraft.systemPrompt.trim()) { setStatus("请先填写单条正文。", "error"); return; }
+        if (promptDraft.segments.length >= 16) { setStatus("分段最多 16 段。", "error"); return; }
+        promptDraft.segments.unshift({ role: "system", name: "系统提示词", content: promptDraft.systemPrompt });
+        promptDraft.systemPrompt = ""; promptDraftDirty = true; renderCenter();
+      });
+      legacyBody.append(convertButton);
+      promptPanel.append(legacyBody);
+    }
 
     // 0.9.19 分段模式（shujuku AcuPromptSegments 同款长段多角色预设）：≥1 段时取代上方单条正文
     const segSection = el("section", "aw-seg-section");
     const segHead = el("div", "aw-seg-head");
-    segHead.append(el("span", "aw-seg-head__title", "分段模式（长段多角色预设）"));
+    segHead.append(el("span", "aw-seg-head__title", "提示词条目 · 按列表顺序发送"));
     const segStatus = el("span", "aw-seg-head__status");
     segHead.append(segStatus);
     segSection.append(segHead);
     const segRows = el("div", "aw-seg-rows");
     const syncSegStatus = () => {
-      const count = Array.isArray(promptDraft?.segments) ? promptDraft.segments.filter((s) => String(s.content ?? "").trim()).length : 0;
-      segStatus.textContent = count > 0 ? `已启用 ${count} 段 · 发送时忽略上方正文` : "未启用";
+      const segments = Array.isArray(promptDraft?.segments) ? promptDraft.segments : [];
+      const count = segments.filter((s) => s.enabled !== false && String(s.content ?? "").trim()).length;
+      segStatus.textContent = `${segments.length} 个条目 · ${count} 个启用且有正文`;
     };
     const addSegment = (atTop) => {
       if (!promptDraft) promptDraft = newPromptDraft();
@@ -8131,8 +8311,19 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       const segments = Array.isArray(promptDraft?.segments) ? promptDraft.segments : [];
       segments.forEach((segment, index) => {
         const item = el("div", "aw-seg-item");
+        item.classList.toggle("aw-seg-item--disabled", segment.enabled === false);
         const head = el("div", "aw-seg-item__head");
         head.append(el("span", "aw-seg-item__index", `#${index + 1}`));
+        const enabledLabel = el("label", "aw-seg-item__enabled");
+        const enabledInput = document.createElement("input");
+        enabledInput.type = "checkbox"; enabledInput.checked = segment.enabled !== false;
+        enabledInput.setAttribute("aria-label", `启用第 ${index + 1} 段`);
+        enabledInput.addEventListener("change", () => {
+          segment.enabled = enabledInput.checked; promptDraftDirty = true;
+          item.classList.toggle("aw-seg-item--disabled", !enabledInput.checked);
+          syncSegStatus(); if (syncPromptDirty) syncPromptDirty();
+        });
+        enabledLabel.append(enabledInput, document.createTextNode("启用")); head.append(enabledLabel);
         const roleSelect = document.createElement("select");
         roleSelect.className = "aw-input aw-seg-item__role";
         roleSelect.setAttribute("aria-label", `第 ${index + 1} 段角色`);
@@ -8192,14 +8383,24 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         const delBtn = el("button", "aw-btn aw-btn--icon aw-btn--danger", "✕");
         delBtn.type = "button";
         delBtn.setAttribute("aria-label", `删除第 ${index + 1} 段`);
+        delBtn.disabled = segment.deletable === false;
+        if (delBtn.disabled) delBtn.title = "该条目受预设保护；可修改内容或停用。";
         delBtn.addEventListener("click", () => {
+          if (segment.deletable === false) return;
           if (!promptDraft || !Array.isArray(promptDraft.segments)) return;
           promptDraft.segments = promptDraft.segments.filter((_, i) => i !== index);
           promptDraftDirty = true;
           renderSegRows();
           if (syncPromptDirty) syncPromptDirty();
         });
-        head.append(upBtn, downBtn, delBtn);
+        const copyBtn = el("button", "aw-btn aw-btn--icon", "复制");
+        copyBtn.type = "button"; copyBtn.setAttribute("aria-label", `复制第 ${index + 1} 段`);
+        copyBtn.addEventListener("click", () => {
+          if (segments.length >= 16) { setStatus("分段最多 16 段。", "error"); return; }
+          segments.splice(index + 1, 0, { ...segment, name: `${segment.name || "条目"} 副本`.slice(0, 64), deletable: true });
+          promptDraftDirty = true; renderSegRows(); if (syncPromptDirty) syncPromptDirty();
+        });
+        head.append(upBtn, downBtn, copyBtn, delBtn);
         const area = document.createElement("textarea");
         area.className = "aw-input aw-input--area aw-seg-item__area";
         area.rows = 5;
@@ -8213,7 +8414,11 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
           syncSegStatus();
           if (syncPromptDirty) syncPromptDirty();
         });
-        item.append(head, area);
+        const contentDetails = document.createElement("details");
+        contentDetails.className = "aw-details"; contentDetails.open = true;
+        const contentSummary = document.createElement("summary"); contentSummary.textContent = "编辑条目内容";
+        contentDetails.append(contentSummary, area);
+        item.append(head, contentDetails);
         segRows.append(item);
       });
       if (segments.length === 0) {
@@ -8246,7 +8451,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
           readOnlyRows.append(item);
         });
         segSection.append(readOnlyRows);
-        segSection.append(el("span", "aw-hint", "内置默认（0.9.39 多轮结构，只读）：system 身份契约 → assistant 确认 → user 背景设定 → user 任务指令 → user 本轮素材 → assistant 输出引导，发送时按段序组装并替换占位符。点「复制内置默认为新预设」即可复制成可编辑预设。"));
+        segSection.append(el("span", "aw-hint", "内置默认使用当前行增量规则，包含世界状态、连续性素材、本轮行动与输出核对。发送时按列表顺序展开占位符。点上方「复制内置默认为新预设」即可修改消息角色、名称、正文与条目开关。"));
       } else {
         segSection.append(el("p", "aw-seg-empty", "内置默认不支持分段——先复制为新预设。"));
       }
@@ -8260,7 +8465,11 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       insertBottomBtn.setAttribute("aria-label", "在最下方插入一个提示词分段");
       insertBottomBtn.addEventListener("click", () => addSegment(false));
       segSection.append(insertTopBtn, segRows, insertBottomBtn);
-      segSection.append(el("span", "aw-hint", "0.9.25 shujuku 栏位段：占位符在发送时替换——$5=世界状态上下文，$1=世界书资料（worldbook_context 包裹），$6=上轮推演结果，$7=前文 AI 楼层（条数见下方设置），$8=本轮用户行动，$U=用户设定，$C=角色描述，$9=保留位（恒空）。旧 {{worldState}} / {{userAction}} / {{assistantReply}} / {{worldLore}} 写法继续兼容。主槽位 A / B 仅作栏位标注（shujuku mainSlot 同款），发送顺序按段序；输出契约不变——模型仍须只输出一个 JSON 对象。"));
+      segSection.append(el("span", "aw-hint", "每个条目可独立改名称、消息角色、正文、顺序与启用状态；停用条目仍保存在预设中，发送时跳过。槽位 A / B 是标注，发送按列表顺序。输出需遵循 Atlas 的 <atlasEdit> 行增量协议。"));
+      const placeholderHelp = document.createElement("details"); placeholderHelp.className = "aw-details";
+      const placeholderSummary = document.createElement("summary"); placeholderSummary.textContent = "可用占位符与素材含义";
+      placeholderHelp.append(placeholderSummary, el("p", "aw-hint", "$5 世界状态 · $1 世界书资料 · $6 上轮推演 · $7 前文 AI 楼层 · $8 用户行动 · $U 用户设定 · $C 角色描述 · {{assistantReply}} 本轮正文 · $9 恒空。占位符发送时展开；旧 {{worldState}} / {{userAction}} / {{worldLore}} 继续兼容。"));
+      segSection.append(placeholderHelp);
       renderSegRows();
     }
     promptPanel.append(segSection);
@@ -8279,6 +8488,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       turnSelect.append(opt);
     }
     turnSelect.value = String(Math.min(Math.max(Number.parseInt(String(promptDraft?.contextTurnCount ?? 3), 10) || 3, 1), 10));
+    turnSelect.disabled = isBuiltinDraft;
     turnSelect.addEventListener("change", () => {
       if (!promptDraft) promptDraft = newPromptDraft();
       promptDraft.contextTurnCount = Number.parseInt(turnSelect.value, 10) || 3;
@@ -8295,7 +8505,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     details.className = "aw-details";
     const summary = document.createElement("summary");
     summary.className = "aw-details__summary";
-    summary.textContent = "当前生效提示词（只读）";
+    summary.textContent = "当前已保存提示词文本（含占位符，只读）";
     const visible = el("pre", "aw-pre", activePromptText());
     details.append(summary, visible);
     promptPanel.append(details);
@@ -8308,7 +8518,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     previewSummary.className = "aw-details__summary";
     previewSummary.textContent = "最终请求预览（与实际发送逐字一致）";
     const previewBody = el("div", "aw-request-preview");
-    previewBody.append(el("p", "aw-panel__meta", "展开后点击下方按钮，按当前世界状态装配一次真实请求（不调用模型、不计费）。"));
+    previewBody.append(el("p", "aw-panel__meta", "按当前世界状态与已启用预设装配请求（不调用模型、不计费）。未保存或尚未启用的编辑草稿不进入此预览。"));
     const previewBtn = el("button", "aw-btn", "生成最终请求预览");
     previewBtn.type = "button";
     previewBtn.setAttribute("aria-label", "用当前世界状态生成一次推演请求预览（不调用模型）");
@@ -8387,6 +8597,8 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
             role: PROMPT_SEGMENT_ROLES.includes(s?.role) ? s.role : "system",
             ...(typeof s?.name === "string" && s.name.trim() ? { name: s.name.trim().slice(0, 64) } : {}),
             ...(s?.mainSlot === "A" || s?.mainSlot === "B" ? { mainSlot: s.mainSlot } : {}),
+            ...(s?.enabled === false ? { enabled: false } : {}),
+            ...(s?.deletable === false ? { deletable: false } : {}),
             content: String(s?.content ?? "").trim(),
           }))
           .filter((s) => s.content.length > 0)
@@ -8405,7 +8617,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
           const created = promptLibrary.find((p) => !idsBeforeCopy.has(p.id));
           promptDraft = created ? savedPromptDraft(created) : newPromptDraft();
           promptDraftDirty = false;
-          setStatus("已复制为新预设，可继续编辑。");
+          setStatus("已复制为可编辑预设；修改并保存后，在上方下拉中选中即可启用。");
         }
         renderCenter();
       });
@@ -8426,11 +8638,16 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
             role: PROMPT_SEGMENT_ROLES.includes(s?.role) ? s.role : "system",
             ...(typeof s?.name === "string" && s.name.trim() ? { name: s.name.trim().slice(0, 64) } : {}),
             ...(s?.mainSlot === "A" || s?.mainSlot === "B" ? { mainSlot: s.mainSlot } : {}),
+            ...(s?.enabled === false ? { enabled: false } : {}),
+            ...(s?.deletable === false ? { deletable: false } : {}),
             content: String(s?.content ?? "").trim(),
           }))
           .filter((s) => s.content.length > 0)
           .slice(0, 16);
         const useSegments = draftSegments.length > 0;
+        if (useSegments && !draftSegments.some((segment) => segment.enabled !== false)) {
+          setStatus("请至少启用一个非空提示词条目，再保存预设。", "error"); renderCenter(); return;
+        }
         if (!useSegments && !promptDraft.systemPrompt.trim()) {
           setStatus("提示词正文不能为空（或启用分段模式并至少写 1 段）。", "error");
           renderCenter();
@@ -8484,6 +8701,8 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
           role: PROMPT_SEGMENT_ROLES.includes(s?.role) ? s.role : "system",
           ...(typeof s?.name === "string" && s.name.trim() ? { name: s.name.trim().slice(0, 64) } : {}),
           ...(s?.mainSlot === "A" || s?.mainSlot === "B" ? { mainSlot: s.mainSlot } : {}),
+          ...(s?.enabled === false ? { enabled: false } : {}),
+          ...(s?.deletable === false ? { deletable: false } : {}),
           content: String(s?.content ?? "").trim(),
         }))
         .filter((s) => s.content.length > 0)
@@ -8513,8 +8732,11 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       renderCenter();
     });
     promptActions.append(promptSaveAsButton);
-    panel.append(promptPanel);
-    panel.append(promptActions);
+    // 编辑入口与操作条前置，避免作者必须先滚过诊断、备份和全部内置正文。
+    promptPanel.insertBefore(promptActions, nameField);
+    const promptActivation = el("p", "aw-panel__meta", `当前实际使用：${promptOverrideNotice ? `连接级系统提示词（${overrideApi.name}）` : promptLibrary.find((p) => p.id === settingsV2?.activePromptPresetId)?.name ?? "内置默认"}。草稿修改需保存后生效；新建或导入的预设保存后还需在下拉中选中启用。`);
+    promptPanel.insertBefore(promptActivation, selectField);
+    panel.prepend(promptPanel);
 
     let syncPromptDirty = () => {};
     syncPromptDirty = () => {
@@ -9793,6 +10015,7 @@ export function createLorebookPort(context, worldInfo, readScopeBinding = null) 
         throw new Error("setExtensionPrompt unavailable");
       }
       ctx.setExtensionPrompt(String(key), String(value ?? ""), 2, 4);
+      if (value) atlasSceneInjectionKeys.add(String(key)); else atlasSceneInjectionKeys.delete(String(key));
     },
     createEntry(data, patch) {
       const entry = worldInfo.createWorldInfoEntry("Atlas", data);
@@ -10295,6 +10518,24 @@ async function connectOnce() {
       emitter: createEmitter(context),
       adaptEvent,
       resolveAssistantFloor: createAssistantFloorResolver(context),
+      getNarrativeContext: async () => {
+        const captured = context();
+        if (captured?.extensionSettings?.[ATLAS_SETTINGS_KEY]?.[ATLAS_SQL_MODE_SETTING] !== true) return null;
+        // Read an existing snapshot only. This projection never creates/migrates/saves a world.
+        if (!captured?.chatMetadata?.atlas?.database) return "";
+        const branchId = captured.chatMetadata.atlas.binding?.branchId ?? captured.chatMetadata[ATLAS_BINDING_KEY]?.branchId ?? "main";
+        const sql = await loadSqlCore();
+        if (!sql?.renderSqlSceneContext) return "";
+        let session = null;
+        try {
+          session = await sql.openSqlSession({ chatUid: String(captured.chatId), chatMetadata: captured.chatMetadata,
+            branchId, persist: false, saveSession: async () => { throw new Error("Narrative projection is read-only"); } });
+          const live = context();
+          if (String(live?.chatId) !== String(captured.chatId) || live?.chatMetadata !== captured.chatMetadata) return "";
+          if ((live.chatMetadata.atlas.binding?.branchId ?? live.chatMetadata[ATLAS_BINDING_KEY]?.branchId ?? "main") !== branchId) return "";
+          return sql.renderSqlSceneContext({ db: session.repo.db, branchId: session.branchId });
+        } finally { if (session) await sql.closeSqlSession(session); }
+      },
       ensureWorld: () => ensureStarterWorld(),
       // 0.9.21 世界书资料块：commit 前读当前卡书启用条目（有界），喂给推演 AI；
       // 0.9.22 开关：被供应商审核拦截时可在推进页关闭（settingsV2.loreSupplementEnabled）
@@ -10351,7 +10592,11 @@ async function connectOnce() {
       ...(lorebookWriter
         ? {
             onLorebookSync: async (plans) => {
-              const result = await lorebookWriter.syncTurn(plans);
+              const captured = context();
+              const worldId = coreRef?.getState()?.binding?.worldId;
+              if (!worldId) return { contentTarget: "none" };
+              const result = await lorebookWriter.syncTurn(plans, { chatId: captured.chatId, worldId });
+              if (context()?.chatMetadata !== captured.chatMetadata || context()?.chatId !== captured.chatId) return result;
               await engineStore.write("lorebook", lorebookWriter.snapshot(plans, result));
               rerender();
               return result;

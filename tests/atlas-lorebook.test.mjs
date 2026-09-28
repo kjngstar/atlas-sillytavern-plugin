@@ -114,297 +114,52 @@ function committedReceipt(overrides = {}) {
 // 条目规划
 // ---------------------------------------------------------------------------
 
-test("E08：行增量回合把三表上下文（位置链 / 身边人物 / 地面物品）注入滚动条目", () => {
-  const tables = {
-    locations: [
-      { id: "loc:pt-1", name: "集市广场", parentLocationId: "loc:pt-9", description: "", rumors: [], factions: [], mapId: "world", gridX: 10, gridY: 10 },
-      { id: "loc:pt-9", name: "旧城区", parentLocationId: null, description: "", rumors: [], factions: [], mapId: "world", gridX: 5, gridY: 5 },
-    ],
-    characters: [
-      { id: "npc-1", name: "艾莉娅", locationId: "loc:pt-1", thought: "别让人看出破绽", actionTendency: "尽快把货转手",
-        currentAction: "清点香料", targetLocationId: null, presence: "present", positionSource: "narrative", mapId: "world", gridX: null, gridY: null },
-      { id: "npc-2", name: "巴罗", locationId: "loc:pt-1", thought: "", actionTendency: "",
-        currentAction: "望风", targetLocationId: null, presence: "present", positionSource: "narrative", mapId: "world", gridX: null, gridY: null },
-      // 已离场 / 在别处的人不得进条目
-      { id: "npc-3", name: "离场的人", locationId: "loc:pt-1", thought: "我不该出现", actionTendency: "",
-        currentAction: "", targetLocationId: null, presence: "left", positionSource: "narrative", mapId: "world", gridX: null, gridY: null },
-    ],
-    items: [
-      { id: "item:crate", name: "香料箱", description: "", locationId: "loc:pt-1", holderCharacterId: null, status: "在地上", mapId: "world", gridX: 12, gridY: 12 },
-      // 持有物与已销毁物不列（持有关系在人物那一行）
-      { id: "item:key", name: "钥匙", description: "", locationId: null, holderCharacterId: "npc-1", status: "随身", mapId: null, gridX: null, gridY: null },
-      { id: "item:ash", name: "灰烬", description: "", locationId: "loc:pt-1", holderCharacterId: null, status: "已销毁", mapId: "world", gridX: null, gridY: null },
-    ],
-  };
-  const plans = buildLorebookPlans(WORLD, committedReceipt(), {
-    tables, branchKey: "canon", currentLocationId: "pt-1",
-  });
-  ok(plans, "应产出规划");
-  const content = plans.entries[0].content;
-  ok(content.includes("位置链：旧城区 → 集市广场"), `位置链含上级地点：实际「${content}」`);
-  ok(content.includes("在场：艾莉娅（想法：别让人看出破绽；行动倾向：尽快把货转手）"), "身边人物带想法与行动倾向");
-  ok(content.includes("在场：巴罗"), "没有想法的人也在场列出");
-  ok(!content.includes("离场的人"), "已离场的人不进条目");
-  ok(content.includes("地面物品：香料箱"), "地面物品列出");
-  ok(!content.includes("钥匙"), "持有物不列为地面物品");
-  ok(!content.includes("灰烬"), "已销毁物不列为地面物品");
-  ok(content.indexOf("位置链") < content.indexOf("近期动向："), "三表上下文在「近期动向」之前（顺序固定，可逐字节重放）");
-
-  // 分支隔离：只读传入的那一份快照——传另一分支的表就得到另一份内容
-  const otherBranch = buildLorebookPlans(WORLD, committedReceipt(), {
-    tables: { ...tables, locations: [tables.locations[1]] }, branchKey: "if-x", currentLocationId: "pt-1",
-  });
-  ok(!otherBranch.entries[0].content.includes("位置链：旧城区 → 集市广场"), "另一个分支的快照不含该地点 → 不编造位置链");
-});
-
-test("E08：三表上下文有界——超量人物 / 物品如实写「还有 N 位」，不静默截断", () => {
-  const characters = [];
-  for (let i = 0; i < 10; i += 1) {
-    characters.push({
-      id: `npc-${i}`, name: `路人${i}`, locationId: "loc:1", thought: "", actionTendency: "",
-      currentAction: "", targetLocationId: null, presence: "present", positionSource: "narrative", mapId: "world", gridX: null, gridY: null,
-    });
-  }
-  const tables = {
-    locations: [{ id: "loc:1", name: "广场", parentLocationId: null, description: "", rumors: [], factions: [], mapId: "world", gridX: 0, gridY: 0 }],
-    characters,
-    items: [],
-  };
-  const plans = buildLorebookPlans(WORLD, committedReceipt(), { tables, branchKey: "canon", currentLocationId: "1" });
-  const content = plans.entries[0].content;
-  ok(content.includes("另有"), `超量时如实说明剩余人数：实际「${content}」`);
-  ok(content.length <= 480, "条目仍然受 CONTENT_CHARS 上限约束");
-});
-
-test("规划：committed 回执产出唯一滚动条目「Atlas 动向」（固定 comment、constant、标题不带时段）", () => {
+test("场景 v2：只注入位置，不回退世界账本或后台秘密", () => {
   const plans = buildLorebookPlans(WORLD, committedReceipt());
-  ok(plans, "应产出规划");
-  equal(plans.entries.length, 1, "0.9.40 只有一条滚动条目");
-  equal(plans.bookName, "Atlas · 星环余烬", "书名由世界名派生");
-
-  const entry = plans.entries[0];
-  equal(entry.category, "moves", "动向类目");
-  equal(entry.comment, ATLAS_MOVES_ENTRY_COMMENT, "固定 comment（= 前缀本身）");
-  ok(!entry.comment.includes("时段"), "标题不强调时段");
-  deepEqual(entry.keys, [ATLAS_MOVES_ENTRY_KEY], "占位 key（条目靠 constant 激活）");
-  equal(entry.constant, true, "constant 蓝灯常驻");
-  ok(entry.content.includes("当前时间：第 3 时段"), "当前时间 = 回执时段");
-  ok(entry.content.includes("当前位置：集市广场"), "当前位置 = 回执落点");
-  ok(entry.content.includes("近期动向"), "近期动向块存在");
-  ok(entry.content.includes("暗仓"), "内容含账本叙事");
-  ok(!entry.content.includes("回执"), "不再带回执来源行（0.9.40 去可追溯尾注）");
-  ok(entry.content.length <= ATLAS_LOREBOOK_LIMITS.CONTENT_CHARS, "内容有界");
+  equal(plans.transientOnly, true, "新规划只走临时注入");
+  const text = buildAtlasInjectionText(plans);
+  ok(text.includes("当前位置：集市广场"), "主角落点仍保留");
+  ok(text.includes('<atlas_scene_context version="2">'), "格式升级且闭合");
+  ok(!text.includes("暗仓") && !text.includes("优先级高于"), "后台事实与权威口号不再注入");
 });
 
-test("规划：duplicate / failed 不产出；零 effect 回合同样重写滚动条目（当前时间永远最新）", () => {
-  equal(buildLorebookPlans(WORLD, committedReceipt({ status: "duplicate" })), null, "duplicate 不产出");
-  equal(buildLorebookPlans(WORLD, committedReceipt({ status: "failed" })), null, "failed 不产出");
-
-  // 0.9.39 矛盾根因修复验证：采纳 0 条（仅时间 / 位置推进）也产出规划
-  const zeroEffect = buildLorebookPlans(
-    WORLD,
-    committedReceipt({ adoptedEventIds: [], summary: "艾莉娅在集市广场逗留。（本轮无实体变化：仅时间 / 位置推进，未写入账本）" }),
-  );
-  ok(zeroEffect, "零 effect 回合也产出");
-  equal(zeroEffect.entries[0].comment, ATLAS_MOVES_ENTRY_COMMENT, "同一固定 comment（writer upsert 整体重写）");
-  ok(zeroEffect.entries[0].content.includes("当前时间：第 3 时段"), "当前时间照样推进");
-  ok(!zeroEffect.entries[0].content.includes("本轮无实体变化"), "回执摘要的引擎注记不进条目（条目不取 receipt.summary）");
-
-  const emptyWorld = buildLorebookPlans(
-    { ...WORLD, stateEvents: [] },
-    committedReceipt({ adoptedEventIds: [], currentLocationId: null }),
-  );
-  ok(emptyWorld, "零 effect 且无落点也产出（时间推进也是世界变化）");
-  ok(emptyWorld.entries[0].content.includes("当前时间：第 3 时段"), "时间永远最新");
-  ok(emptyWorld.entries[0].content.includes("（暂无已归档的世界变化）"), "空账本回退占位行");
+test("场景 v2：未知位置且没有已送达线索时清空，不注入占位摘要", () => {
+  const plans = buildLorebookPlans(WORLD, committedReceipt({ currentLocationId: null }));
+  deepEqual(plans.entries, [], "空投影是清理指令");
+  equal(buildAtlasInjectionText(plans), "");
+  ok(parseAtlasLorebookPlans(plans).ok, "允许有标识的空投影");
 });
 
-test("规划：叙事里的引擎「无变化」注记被剥离，只留模型叙事", () => {
-  const suffixWorld = {
-    ...WORLD,
-    stateEvents: [
-      { ...WORLD.stateEvents[0], narrativeSummary: "艾莉娅在集市广场逗留。（本轮无实体变化：仅时间 / 位置推进，未写入账本）" },
-    ],
-  };
-  const plans = buildLorebookPlans(suffixWorld, committedReceipt());
-  ok(plans, "产出规划");
-  ok(plans.entries[0].content.includes("艾莉娅在集市广场逗留。"), "模型叙事保留");
-  ok(!plans.entries[0].content.includes("本轮无实体变化"), "引擎注记被剥离");
+test("场景 v2：失败与重复回执不产生新投影，零变化仍重算", () => {
+  equal(buildLorebookPlans(WORLD, committedReceipt({ status: "failed" })), null);
+  equal(buildLorebookPlans(WORLD, committedReceipt({ status: "duplicate" })), null);
+  deepEqual(buildLorebookPlans(WORLD, committedReceipt()), buildLorebookPlans(WORLD, committedReceipt({ adoptedEventIds: [] })));
 });
 
-test("规划：内容有界；同输入逐字节相同（确定性）", () => {
-  const longSummaryWorld = {
-    ...WORLD,
-    stateEvents: [{ ...WORLD.stateEvents[0], narrativeSummary: "很长".repeat(500) }],
-  };
-  const bounded = buildLorebookPlans(longSummaryWorld, committedReceipt());
-  for (const entry of bounded.entries) {
-    ok(entry.content.length <= ATLAS_LOREBOOK_LIMITS.CONTENT_CHARS, "超长摘会被截断");
-  }
-
-  const a = buildLorebookPlans(WORLD, committedReceipt());
-  const b = buildLorebookPlans(WORLD, committedReceipt());
-  deepEqual(a, b, "同世界状态 + 同回执 → 逐字节相同");
+test("场景 v2：没有抵达主角的消息不注入，作者全知开关也不扩大范围", () => {
+  const delta = { branchKey: "canon", protagonistCharacterId: "npc:player",
+    events: [{ simulationId: "sig", kind: "signal", status: "published", visibility: "known", summary: "仓库失窃", period: 2 }],
+    deliveries: [{ signalId: "sig", recipientType: "character", recipientId: "npc:other" }], authorOmniscient: true };
+  const plans = buildLorebookPlans(WORLD, committedReceipt(), null, delta);
+  ok(!buildAtlasInjectionText(plans).includes("仓库失窃"));
+  delta.deliveries[0].recipientId = "npc:player";
+  ok(buildAtlasInjectionText(buildLorebookPlans(WORLD, committedReceipt(), null, delta)).includes("仓库失窃"));
 });
 
-/* ------------------------------------------------------------------ *
- * D11b / D09：三表回合没有 world.stateEvents 时，世界书里依然要有动向
- *
- * F2 的现场：三表的人物位置 / 想法每轮都在变，而旧事件流水 world.stateEvents
- * 根本不新增（表格增量的 receipt.adoptedEventIds 为空）→ 条目只剩
- * 「（暂无已归档的世界变化）」，书和界面都不知道后台具体发生了什么。
- * 修复口径：第 4 参 simulationDelta 有事件时，「近期动向」**优先**取本分支的
- * simulationEvents；旧 stateEvents 只在没有推演事件时兜底（旧档行为不变）。
- *
- * 纪律（§2.3 / D09）逐条断言：
- * 1. 只有**已发生**的事实进条目；意图显式标「（意图）」，不写成已发生；
- * 2. hidden 不进主聊天注入（作者显式全知开关除外）；
- * 3. 一条消息要真的**送达过**才算动向；主角在已知地点时，消息还得送到过那里。
- * ------------------------------------------------------------------ */
-
-/** D11b 夹具：世界**没有**任何 stateEvents —— 旧路径下只会产出占位行。 */
-const D11B_WORLD = { ...WORLD, stateEvents: [] };
-
-function d11bEvent(overrides = {}) {
-  return {
-    simulationId: "sim:task-1",
-    kind: "intent",
-    status: "intent-recorded",
-    visibility: "known",
-    summary: "艾莉娅打算今夜把香料转手",
-    period: 3,
-    ...overrides,
-  };
-}
-
-test("D11b：三表回合无 stateEvents 时依然有动向——行来自 simulationEvents，不再只剩占位文案", () => {
-  const delta = {
-    branchKey: "canon",
-    events: [
-      d11bEvent({ simulationId: "sim:task-1", kind: "intent", status: "intent-recorded", summary: "艾莉娅打算今夜把香料转手", period: 3 }),
-      d11bEvent({ simulationId: "sim:task-2", kind: "travel", status: "arrived", summary: "巴罗已抵达钟楼", period: 3 }),
-    ],
-    deliveries: [],
-    protagonistLocationIds: ["pt-1"],
-  };
-
-  const plans = buildLorebookPlans(D11B_WORLD, committedReceipt({ adoptedEventIds: [] }), null, delta);
-  ok(plans, "committed + 有推演事件 → 必须产出规划");
-  const content = plans.entries[0].content;
-
-  // ① 关键回归：旧路径的占位文案必须消失（D11b 的验收点）
-  ok(!content.includes("（暂无已归档的世界变化）"),
-    `有 simulationEvents 时不得再退化成空账本占位行：实际「${content}」`);
-  // ② 动向行确实来自 simulationEvents（含时段前缀）
-  ok(content.includes("· [第 3 时段] 巴罗已抵达钟楼"),
-    `已发生的推演事件要逐条进条目：实际「${content}」`);
-  // ③ 意图不能冒充已发生（§2.3 停机线）
-  ok(content.includes("· [第 3 时段] （意图）艾莉娅打算今夜把香料转手"),
-    `意图要显式标注「（意图）」：实际「${content}」`);
-  ok(!content.includes("· [第 3 时段] 艾莉娅打算今夜把香料转手"),
-    "意图行不得省略标注、伪装成已发生的事实");
-  // ④ 最新在前（读取事件数组的逆序），与旧 stateEvents 路径同口径
-  ok(content.indexOf("巴罗已抵达钟楼") < content.indexOf("艾莉娅打算今夜把香料转手"),
-    "事件按最新在前排列");
-  // ⑤ 旧 stateEvents 路径的核心要素不变：当前时间照样写
-  ok(content.includes("当前时间：第 3 时段"), "当前时间仍取回执时段");
-  ok(content.length <= ATLAS_LOREBOOK_LIMITS.CONTENT_CHARS, "条目仍受 CONTENT_CHARS 上限约束");
-
-  // 对照：不传 simulationDelta（旧档 / 旧调用点）→ 空 stateEvents 仍走占位行。
-  // 这不是矛盾，而是「旧行为一字不变」的另一半；见本文件上面 0.9.40 那条用例。
-  const legacy = buildLorebookPlans(D11B_WORLD, committedReceipt({ adoptedEventIds: [], currentLocationId: null }));
-  ok(legacy.entries[0].content.includes("（暂无已归档的世界变化）"),
-    "不传 simulationDelta 时旧占位行照旧（旧档兼容口径不变）");
+test("场景 v2：全部线索被过滤时不拿旧账本兜底", () => {
+  const plans = buildLorebookPlans(WORLD, committedReceipt(), null, { branchKey: "canon",
+    events: [{ simulationId: "secret", kind: "travel", status: "arrived", visibility: "hidden", summary: "秘密密会", period: 2 }], deliveries: [] });
+  ok(!buildAtlasInjectionText(plans).includes("暗仓"));
+  ok(!buildAtlasInjectionText(plans).includes("秘密密会"));
 });
 
-test("D11b：hidden 与未送达的消息不得透出到主聊天注入", () => {
-  const visible = d11bEvent({ simulationId: "sim:task-1", kind: "intent", status: "intent-recorded", summary: "艾莉娅打算今夜把香料转手" });
-  const hidden = d11bEvent({ simulationId: "sim:secret", kind: "intent", status: "intent-recorded", summary: "巴罗私下盘算告发艾莉娅", visibility: "hidden" });
-  const undeliveredSignal = d11bEvent({ simulationId: "sig:1", kind: "signal", status: "published", summary: "使者带出宣战文书" });
-  const deliveredSignal = d11bEvent({ simulationId: "sig:2", kind: "signal", status: "published", summary: "钟楼传来封港令" });
-  const farOnlySignal = d11bEvent({ simulationId: "sig:3", kind: "signal", status: "published", summary: "码头已封锁" });
-
-  const plans = buildLorebookPlans(
-    D11B_WORLD,
-    committedReceipt({ adoptedEventIds: [] }),
-    null,
-    {
-      branchKey: "canon",
-      events: [visible, hidden, undeliveredSignal, deliveredSignal, farOnlySignal],
-      deliveries: [
-        // sig:2 送到过主角所在地 pt-1 → 可注入
-        { signalId: "sig:2", recipientType: "location", recipientId: "pt-1" },
-        // sig:3 只送到过别处 → 主角没获知，不得注入
-        { signalId: "sig:3", recipientType: "location", recipientId: "pt-2" },
-        // sig:1 没有任何送达记录（这里刻意只给别的 signal 的送达）
-      ],
-      protagonistLocationIds: ["pt-1"],
-    },
-  );
-  ok(plans, "应产出规划");
-  const content = plans.entries[0].content;
-
-  ok(content.includes("艾莉娅打算今夜把香料转手"), "已知且已发生的意图照常进条目");
-  ok(!content.includes("巴罗私下盘算告发艾莉娅"), "hidden 不进主聊天注入（默认关闭作者全知）");
-  ok(!content.includes("使者带出宣战文书"), "一条还没送到任何地方的消息不算已发生的动向");
-  ok(content.includes("钟楼传来封港令"), "真的送达过主角所在地的消息要注入");
-  ok(!content.includes("码头已封锁"), "只送到别处的消息不得注入（主角并未获知）");
-  // 送达记录本身不是「消息」：只有 location 收件人算到达，character 收件人不改变上面的判定
-  const characterOnly = buildLorebookPlans(
-    D11B_WORLD,
-    committedReceipt({ adoptedEventIds: [], currentLocationId: null }),
-    null,
-    {
-      branchKey: "canon",
-      events: [undeliveredSignal],
-      deliveries: [{ signalId: "sig:1", recipientType: "character", recipientId: "npc-1" }],
-      protagonistLocationIds: [],
-    },
-  );
-  ok(!characterOnly.entries[0].content.includes("使者带出宣战文书"),
-    "只记了人物收件人、没有任何地点送达 → 仍不算「已发生的动向」");
-
-  // 作者显式全知是**单独的开关**：打开才看得到 hidden（首版默认关闭，见 §2.3）
-  const omniscient = buildLorebookPlans(
-    D11B_WORLD,
-    committedReceipt({ adoptedEventIds: [], currentLocationId: null }),
-    null,
-    { branchKey: "canon", events: [visible, hidden], deliveries: [], protagonistLocationIds: [], authorOmniscient: true },
-  );
-  ok(omniscient.entries[0].content.includes("巴罗私下盘算告发艾莉娅"),
-    "authorOmniscient=true 是显式作者视图，hidden 才会出现");
+test("场景 v2：文本有界且确定，世界书名仍清理文件名字符", () => {
+  const first = buildLorebookPlans(WORLD, committedReceipt());
+  deepEqual(first, buildLorebookPlans(WORLD, committedReceipt()));
+  ok(first.entries.every(entry => entry.content.length <= ATLAS_LOREBOOK_LIMITS.CONTENT_CHARS));
+  ok(!lorebookNameFor('a/b:c').includes('/'));
 });
 
-test("D11b：推演事件有界（RECENT_LINES_MAX）且有事件时不落回 stateEvents", () => {
-  const events = [];
-  for (let i = 1; i <= 8; i += 1) {
-    events.push(d11bEvent({
-      simulationId: `sim:task-${i}`, kind: "intent", status: "intent-recorded",
-      summary: `第 ${i} 条已知意图`, period: 3,
-    }));
-  }
-  const plans = buildLorebookPlans(
-    // 世界里有旧事件：推演事件存在时**不得**混入旧路径的行（否则同一条动向会出现两份）
-    WORLD,
-    committedReceipt({ adoptedEventIds: ["evt-1"] }),
-    null,
-    { branchKey: "canon", events, deliveries: [], protagonistLocationIds: [] },
-  );
-  const content = plans.entries[0].content;
-  const lines = content.split("\n").filter((line) => line.startsWith("· "));
-  equal(lines.length, ATLAS_LOREBOOK_LIMITS.RECENT_LINES_MAX,
-    `动向行数必须收敛到 RECENT_LINES_MAX=${ATLAS_LOREBOOK_LIMITS.RECENT_LINES_MAX}`);
-  ok(!content.includes("暗仓"), "有推演事件时不混入旧 stateEvents 的行（两条来源不叠加）");
-  ok(lines.every((line) => line.includes("第 3 时段")), "每一行都带时段前缀");
-});
-
-test("书名：剔除 ST 服务端文件名不接受的字符；空名回退", () => {
-  equal(lorebookNameFor("A/B:C*D?"), "Atlas · ABCD", "非法字符被剔除");
-  equal(lorebookNameFor(""), "Atlas · 未命名世界", "空名回退");
-  equal(lorebookNameFor("   "), "Atlas · 未命名世界", "纯空白回退");
-});
-
-// ---------------------------------------------------------------------------
 // 严格解析
 // ---------------------------------------------------------------------------
 
@@ -1001,6 +756,36 @@ function scopedPlans(content, bookName = "Atlas · 星环余烬") {
   };
 }
 
+test("场景 v2：只写临时上下文，清理旧动态条目且保留静态设定", async () => {
+  const rig = makeChatScopeRig();
+  rig.seedLegacyCardBook();
+  const writer = rig.writer("chat-A");
+  const plans = { ...scopedPlans("<atlas_scene_context version=\"2\">大厅</atlas_scene_context>"), transientOnly: true };
+  const result = await writer.syncTurn(plans);
+  equal(result.contentTarget, "injection");
+  equal(result.written, 0);
+  equal(result.created, false);
+  equal(rig.books.has(result.bookName), false, "不新建动态世界书");
+  deepEqual(rig.comments(rig.cardBook), ["用户的静态设定"]);
+  equal(rig.injected.get(result.injectionKey), plans.entries[0].content);
+  const snapshot = writer.snapshot(plans, result);
+  equal(snapshot.transientOnly, true);
+  equal(snapshot.entries[0].content, plans.entries[0].content, "面板可预览，未声称写入世界书");
+});
+
+test("场景 v2：注入不可用也不退回世界书，空场景清除临时提示", async () => {
+  const rig = makeChatScopeRig({ injectionAvailable: false });
+  rig.seedLegacyCardBook();
+  const result = await rig.writer("chat-A").syncTurn({ ...scopedPlans("私密内容不能回退写书"), transientOnly: true });
+  equal(result.contentTarget, "none");
+  equal(rig.books.has(result.bookName), false);
+  deepEqual(rig.comments(rig.cardBook), ["用户的静态设定"]);
+  const live = makeChatScopeRig();
+  const empty = await live.writer("chat-A").syncTurn({ bookName: PLANS_A.bookName, transientOnly: true, entries: [] });
+  equal(live.injected.get(empty.injectionKey), "");
+  equal(live.books.size, 0, "无内容也不建书或绑定书");
+});
+
 test("B05：作用域名/书名/注入 key 是纯函数——同 chatId+worldId 稳定，不同聊天必不同", () => {
   equal(atlasLorebookScopeKey("chat-A", "w1"), atlasLorebookScopeKey("chat-A", "w1"), "同输入 → 同作用域键（确定性）");
   ok(atlasLorebookScopeKey("chat-A", "w1") !== atlasLorebookScopeKey("chat-B", "w1"), "不同聊天 → 不同作用域键");
@@ -1202,7 +987,7 @@ test("B05：注入通道可用时动态内容只走当前聊天（setExtensionPr
   const text = rig.injected.get(result.injectionKey);
   ok(text.includes("A 的动向：只注入给当前聊天"), "注入文本含本轮动向");
   ok(text.includes("仅限当前聊天"), "注入文本带边界说明（这一轮临时上下文，不属于共享书）");
-  equal(buildAtlasInjectionText(scopedPlans("x".repeat(1000))).length, ATLAS_LOREBOOK_LIMITS.INJECTION_CHARS, "注入文本有界");
+  equal(buildAtlasInjectionText(scopedPlans("x".repeat(ATLAS_LOREBOOK_LIMITS.INJECTION_CHARS * 2))).length, ATLAS_LOREBOOK_LIMITS.INJECTION_CHARS, "注入文本有界");
   equal(buildAtlasInjectionText(null), "", "空规划 → 空注入文本");
   equal(buildAtlasInjectionText(null), buildAtlasInjectionText(undefined), "空输入确定性");
 

@@ -10,9 +10,11 @@
  * - 作者地图开关只改变 UI，不自动改变剧情注入范围。
  */
 
+import { renderSceneContext } from './atlas-scene-context.ts';
 import { queryBound } from './atlas-db-runtime.ts';
 import { decodeRow } from './atlas-db-codec.ts';
 import { resolveEffectivePosition } from './atlas-sim-position.ts';
+import { collectOpportunities } from './atlas-sim-opportunities.ts';
 import type { SqlDatabase } from './atlas-db-runtime.ts';
 
 export type KnowledgeWorld = { db: SqlDatabase; branchId: string };
@@ -246,10 +248,15 @@ export function projectPromptView(
   world: KnowledgeWorld,
   query: { povId?: string | null; sceneLocationId?: string | null; actorIds?: string[]; viewMode?: 'pov' | 'author' },
 ): { pov: PovProjection; portrayal: NarratorPortrayal | null; promptScope: string[] } {
-  const pov = projectForPov(world, { characterId: query.povId ?? null });
+  const branch = queryBound(world.db, 'SELECT pov_character_id FROM branches WHERE id = ?', [world.branchId])[0];
+  const candidates = queryBound(world.db, "SELECT id, location_id FROM characters WHERE branch_id = ? AND role = 'protagonist' AND status = 'active'", [world.branchId]);
+  const povId = query.povId ?? (branch?.pov_character_id ? String(branch.pov_character_id) : candidates.length === 1 ? String(candidates[0].id) : null);
+  const player = povId ? queryBound(world.db, 'SELECT location_id FROM characters WHERE branch_id = ? AND id = ?', [world.branchId, povId])[0] : null;
+  const locationId = query.sceneLocationId ?? (player?.location_id ? String(player.location_id) : null);
+  const pov = projectForPov(world, { characterId: povId });
   // author 视图只影响 portrayal 是否附带；主角投影范围不变（§10.4）。
-  const portrayal = query.sceneLocationId || query.actorIds?.length
-    ? projectPortrayal(world, { locationId: query.sceneLocationId ?? null, actorIds: query.actorIds })
+  const portrayal = locationId || query.actorIds?.length
+    ? projectPortrayal(world, { locationId, actorIds: query.actorIds })
     : null;
   return {
     pov,
@@ -259,4 +266,49 @@ export function projectPromptView(
       portrayal ? `在场塑造 ${portrayal.entries.length} 人（narrator_only）` : '无在场塑造区',
     ],
   };
+}
+
+/** Serialize only what the POV knows. Author truth/payload and narrator thoughts are excluded. */
+export function renderSqlSceneContext(world: KnowledgeWorld): string {
+  const projection = projectPromptView(world, {});
+  const clockS = Number(queryBound(world.db, 'SELECT clock_s FROM branches WHERE id = ?', [world.branchId])[0]?.clock_s ?? 0);
+  const clean = (value: unknown): string => String(value ?? '').replace(/[<>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 160);
+  const scene: string[] = [];
+  if (projection.pov.povId) {
+    const position = resolveEffectivePosition(world, projection.pov.povId);
+    const location = position.kind === 'at_location' ? queryBound(world.db, 'SELECT name FROM locations WHERE branch_id = ? AND id = ?', [world.branchId, position.locationId])[0] : null;
+    if (location) scene.push(`当前位置：${clean(location.name)}`);
+    if (position.kind === 'in_transit') scene.push('当前位置：在途；不能把出发地或目的地当成已经抵达。');
+  }
+  const clues: string[] = [];
+  const included = new Set<string>();
+  // Knowledge is necessary but not sufficient: future, expired or inactive information is omitted.
+  const facts = projection.pov.knownFacts.filter(fact => {
+    const info = queryBound(world.db, 'SELECT status, created_at_s, expires_at_s FROM information WHERE branch_id = ? AND id = ?', [world.branchId, fact.informationId])[0];
+    const received = queryBound(world.db, 'SELECT first_received_at_s FROM knowledge WHERE branch_id = ? AND information_id = ? AND status = ? AND ' + (projection.pov.povId ? 'knower_character_id = ?' : 'is_pov = 1'),
+      projection.pov.povId ? [world.branchId, fact.informationId, 'active', projection.pov.povId] : [world.branchId, fact.informationId, 'active'])[0];
+    return info?.status === 'active' && Number(info.created_at_s) <= clockS && Number(received?.first_received_at_s ?? Infinity) <= clockS
+      && (info.expires_at_s == null || Number(info.expires_at_s) > clockS);
+  });
+  for (const fact of facts.slice(-5)) {
+    const label = fact.belief === 'verified' ? '已核实的消息' : fact.belief === 'rejected' ? '已否定的消息' : fact.belief === 'doubted' ? '有争议的消息' : '听到的消息（尚未核实）';
+    clues.push(`${label}：${clean(fact.content || fact.title)}`);
+    included.add(fact.informationId);
+  }
+  if (projection.pov.povId) {
+    // Existing contact logic requires recorded dwell/explicit sight or hearing. It never writes knowledge here.
+    for (const opportunity of collectOpportunities({ fromS: Math.max(0, clockS - 3600), untilS: clockS }, world)) {
+      if (opportunity.receiverEntityId !== projection.pov.povId || !opportunity.informationId || included.has(opportunity.informationId)) continue;
+      if (!['same_location', 'route_passage'].includes(opportunity.kind) || (opportunity.basis.access != null && opportunity.basis.access !== 'public')) continue;
+      const front = queryBound(world.db, 'SELECT audience_json FROM rumor_fronts WHERE branch_id = ? AND id = ?', [world.branchId, String(opportunity.basis.frontId ?? '')])[0];
+      if (!front) continue;
+      try { if (JSON.parse(String(front.audience_json)).access !== 'public') continue; } catch { continue; }
+      const info = queryBound(world.db, "SELECT content, title FROM information WHERE branch_id = ? AND id = ? AND status = 'active' AND secrecy = 'public' AND created_at_s <= ? AND (expires_at_s IS NULL OR expires_at_s > ?)", [world.branchId, opportunity.informationId, clockS, clockS])[0];
+      if (!info) continue;
+      clues.push(`此地可接触的风声（不代表已经注意或核实）：${clean(info.content || info.title)}`);
+      included.add(opportunity.informationId);
+      if (clues.length >= 8) break;
+    }
+  }
+  return renderSceneContext(scene, clues);
 }

@@ -217,7 +217,7 @@ test("B05 引文：位置/归属改动必须要 observed 原文；两处正文�
   assert.equal(description.status, "edits");
 });
 
-test("B05 inferred 只可改推测字段：想法可以，位置/销毁不行", () => {
+test("B05 inferred 可提议人物粗位置，销毁和归属仍必须有观察证据", () => {
   const thought = parseAtlasEditBlock(block(
     line({ table: "character", op: "set", ref: "npc:keeper", patch: { thought: "担心巡逻" }, basis: "inferred" }),
   ), SOURCES);
@@ -231,8 +231,9 @@ test("B05 inferred 只可改推测字段：想法可以，位置/销毁不行", 
   const move = parseAtlasEditBlock(block(
     line({ table: "character", op: "set", ref: "npc:keeper", patch: { locationRef: "loc:1" }, basis: "inferred" }),
   ), SOURCES);
-  assert.equal(move.rejected[0].code, "INFERRED_FIELD_NOT_ALLOWED");
-  assert.equal(move.rejected[0].path, "$.patch.locationRef");
+  assert.equal(move.status, "edits");
+  assert.equal(move.edits[0].basis, "inferred");
+  assert.equal(move.edits[0].sourceId, "msg:a");
 
   const destroy = parseAtlasEditBlock(block(
     line({ table: "item", op: "remove", ref: "item:1", basis: "inferred" }),
@@ -385,8 +386,13 @@ test("C03 上下文：比例尺来自标定；当前位置未知时不猜", () =
   assert.ok(built.text.includes("每格 12 米"), built.text);
   assert.ok(built.text.includes("人工锁定"));
 
-  const unknown = buildTableDeltaContext({ tables, world: demoWorld(), binding: { ...BASE_BINDING, currentLocationId: null }, maps });
-  assert.ok(unknown.text.includes("【当前位置】未知"), unknown.text);
+  const recovered = buildTableDeltaContext({ tables, world: demoWorld(), binding: { ...BASE_BINDING, currentLocationId: null }, maps });
+  assert.ok(recovered.text.includes("【当前位置】loc:4103=白塔钟座"), "绑定位置缺失但主角表行已知时恢复推演上下文");
+  const unresolved = { ...tables, characters: tables.characters.map((row) =>
+    row.id === "npc:chronicle-c1" ? { ...row, locationId: null } : row) };
+  const unknown = buildTableDeltaContext({ tables: unresolved, world: demoWorld(), binding: { ...BASE_BINDING, currentLocationId: null }, maps });
+  assert.ok(unknown.text.includes("【当前位置】尚未解析"), unknown.text);
+  assert.ok(unknown.text.includes("【主角人物 ID】"), "开场未知时仍明确告诉模型哪一个人物行是主角");
 });
 
 test("C03 上下文：人物超上限时如实报截断数（不静默裁）", () => {

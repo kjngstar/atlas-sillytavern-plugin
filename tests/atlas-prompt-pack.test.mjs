@@ -27,6 +27,7 @@ const {
   ATLAS_PROMPT_PACK_BYTES_MAX,
   buildAtlasPromptPack,
   parseAtlasPromptPack,
+  parseAtlasPromptImport,
   uniquePromptPresetName,
 } = await import("../index.js");
 
@@ -137,7 +138,7 @@ test("PP-08: 预设名缺失 / 超长 / 非字符串 拒绝", () => {
   }
 });
 
-test("PP-09: 超过 64KiB 上限的文件拒绝（不解析）", () => {
+test("PP-09: 超过 512KiB 上限的文件拒绝（不解析）", () => {
   const huge = `{"protocol":"${ATLAS_PROMPT_PACK_PROTOCOL}","preset":{"name":"t","segments":[]},"pad":"${"x".repeat(ATLAS_PROMPT_PACK_BYTES_MAX)}"}`;
   const result = parseAtlasPromptPack(huge);
   assert.equal(result.ok, false);
@@ -161,4 +162,73 @@ test("PP-11: 导出 → 导入 → 再导出：包内容稳定（导出时间戳
   const second = JSON.parse(buildAtlasPromptPack({ ...parsed.preset }, 1758500001000));
   assert.deepEqual(second.preset, first.preset, "语义字段 round-trip 稳定");
   assert.notEqual(second.exportedAt, first.exportedAt, "时间戳各自独立");
+});
+
+test("PP-12: 停用与不可删除字段经导出导入保留，启用缺省保持旧兼容", () => {
+  const segments = [...SEGMENTS, { role: "user", name: "备用", content: "不要发送", enabled: false, deletable: false }];
+  const result = parseAtlasPromptImport(buildAtlasPromptPack({ name: "可切换", segments }));
+  assert.equal(result.ok, true);
+  assert.equal(result.format, "Atlas");
+  assert.deepEqual(result.presets[0].segments.at(-1), segments.at(-1));
+  assert.equal(result.presets[0].segments[0].enabled, undefined);
+});
+
+test("PP-13: shujuku 导出数组保留多个预设与顺序、归一角色和旧主槽位，不导入密钥", () => {
+  const imported = [{ name: "剧情", contextTurnCount: 5, apiKey: "PRIVATE_KEY", selectedWorldbooks: ["PRIVATE_BOOK"],
+    promptGroup: [{ role: "SYSTEM", content: "规则 $5", isMain: true, deletable: false },
+      { role: "USER", content: "备用 $8", isMain2: true, enabled: false }] },
+    { name: "其他", promptGroup: [{ role: "assistant", content: "核对" }] }];
+  const result = parseAtlasPromptImport(JSON.stringify(imported));
+  assert.equal(result.ok, true, result.error);
+  assert.equal(result.format, "shujuku");
+  assert.equal(result.presets.length, 2);
+  assert.deepEqual(result.presets[0], { name: "剧情", contextTurnCount: 5, segments: [
+    { role: "system", content: "规则 $5", mainSlot: "A", deletable: false },
+    { role: "user", content: "备用 $8", mainSlot: "B", enabled: false }] });
+  assert.equal(JSON.stringify(result).includes("PRIVATE_"), false);
+  assert.ok(result.warnings.some((warning) => warning.includes("<atlasEdit>")));
+});
+
+test("PP-14: 仅任务格式逐任务供选择；顶层 promptGroup 优先，不重复或拼接任务", () => {
+  const source = { name: "任务预设", plotTasks: [{ name: "甲", promptGroup: [{ role: "USER", content: "甲" }] },
+    { name: "乙", promptGroup: [{ role: "SYSTEM", content: "乙" }] }] };
+  const tasks = parseAtlasPromptImport(JSON.stringify(source));
+  assert.equal(tasks.ok, true);
+  assert.deepEqual(tasks.presets.map((preset) => preset.name), ["任务预设 / 甲", "任务预设 / 乙"]);
+  const top = parseAtlasPromptImport(JSON.stringify({ ...source, promptGroup: [{ role: "user", content: "顶层" }] }));
+  assert.equal(top.presets.length, 1);
+  assert.equal(top.presets[0].segments[0].content, "顶层");
+});
+
+test("PP-15: 外部文件无效角色、过长段、多余段或部分坏预设整份拒绝，避免静默丢内容", () => {
+  const good = { name: "好预设", promptGroup: [{ role: "USER", content: "正文" }] };
+  for (const bad of [null, { name: "无段" }, { ...good, contextTurnCount: "3" },
+    { ...good, promptGroup: [...good.promptGroup, { role: "tool", content: "坏段" }] },
+    { ...good, promptGroup: [{ role: "user", content: "长".repeat(8001) }] },
+    { ...good, promptGroup: Array.from({ length: 17 }, () => good.promptGroup[0]) }]) {
+    assert.equal(parseAtlasPromptImport(JSON.stringify([good, bad])).ok, false);
+  }
+});
+
+test("PP-16: 按 UTF-8 字节限额验证，最大合法中文分段预设可以自己导回", () => {
+  const source = { name: "中文", segments: Array.from({ length: 16 }, () => ({ role: "user", content: "中".repeat(8000) })) };
+  assert.equal(parseAtlasPromptImport(buildAtlasPromptPack(source)).ok, true);
+  const oversized = JSON.stringify({ protocol: ATLAS_PROMPT_PACK_PROTOCOL, pad: "中".repeat(Math.ceil(ATLAS_PROMPT_PACK_BYTES_MAX / 3)), preset: source });
+  assert.equal(parseAtlasPromptPack(oversized).ok, false);
+  assert.equal(parseAtlasPromptImport(oversized).ok, false);
+});
+
+test("PP-17: 最长名称重名后仍在 64 字内且连续导入无冲突", () => {
+  const long = "长".repeat(64);
+  const second = uniquePromptPresetName(long, [long]);
+  const third = uniquePromptPresetName(long, [long, second]);
+  assert.notEqual(second, long); assert.notEqual(third, second);
+  assert.ok(second.length <= 64 && third.length <= 64);
+});
+
+test("PP-18: 编辑器导入原生包也拒绝部分非法或超限条目，旧纯解析兼容保留", () => {
+  const source = JSON.parse(buildAtlasPromptPack({ name: "原生", segments: SEGMENTS }));
+  for (const invalid of [{ role: "tool", content: "坏角色" }, { role: "user", content: "" }, { role: "user", content: "长".repeat(8001) }]) {
+    assert.equal(parseAtlasPromptImport(JSON.stringify({ ...source, preset: { ...source.preset, segments: [...SEGMENTS, invalid] } })).ok, false);
+  }
 });

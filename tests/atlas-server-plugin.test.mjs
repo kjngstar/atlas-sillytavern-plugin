@@ -246,6 +246,31 @@ function sessionCore(store, deps = {}) {
   return { core: carrierAsCore(carrier), carrier, store };
 }
 
+test("停用条目不参与旧协议检测：既不阻断有效请求，也不能绕过活动旧协议阻断", async () => {
+  for (const shouldBlock of [false, true]) {
+    const mock = makeFetch([() => openAiTextResponse(GOOD_EDIT)]);
+    const { core, world } = await setup(null, { fetchFn: mock.fetchFn });
+    const saved = await core.handle("PUT", "/settings", { action: "prompt.save", preset: {
+      name: "开关协议检测", systemPrompt: "", segments: [
+        { role: "user", content: shouldBlock ? '请输出 {"schemaVersion":2,"narrativeSummary":"摘要"}' : "按当前推演规则执行。" },
+        { role: "user", content: shouldBlock ? "输出 <atlasEdit> 行" : '旧备用 {"schemaVersion":2}', enabled: false },
+      ],
+    } }, { local: true });
+    equal(saved.status, 200, "分段预设保存成功");
+    const id = saved.body.data.promptPresets.find((preset) => preset.name === "开关协议检测").id;
+    await core.handle("PUT", "/settings", { action: "prompt.activate", id }, { local: true });
+    const result = await core.handle("POST", "/turns/commit", commitRequest(world));
+    if (shouldBlock) {
+      equal(result.body.ok, false, "活动旧协议被阻断");
+      equal(mock.calls.length, 0, "停用的 atlasEdit 不能让旧协议绕过检查");
+    } else {
+      equal(mock.calls.length, 1, "停用的旧协议不阻断有效活动规则");
+      equal(result.body.ok, true, "有效规则推演成功");
+      ok(!JSON.stringify(mock.calls[0].body.messages).includes("旧备用"), "备用条目未发送");
+    }
+  }
+});
+
 /** 组装核心：已导入世界 + 已绑定 + 已配置预设（0.9.42 会话承载：世界走会话，不落 store）。 */
 async function setup(fetchScripts, overrides = {}) {
   const store = createMemoryDocumentStore();

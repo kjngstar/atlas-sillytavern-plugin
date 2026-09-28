@@ -258,7 +258,7 @@ test("D04：回执写人类可读摘要 + bounded simulationCounts，不再只�
   assert.ok(receipt.summary.length <= 480, "摘要按既有口径有界");
 });
 
-test("D09：world.stateEvents 为空时，世界书「近期动向」仍来自 simulationEvents（F2 修复点）", async () => {
+test("场景 v2：后台推演保留事件，意图与私下想法不进入正文注入", async () => {
   const { core, carrier } = await setup({ scripts: [() => textResponse(200, characterEditBlock())] });
   const result = await core.handle("POST", "/turns/commit", commitBody());
   assert.equal(result.status, 200, `应提交成功：${JSON.stringify(result.body.error ?? {})}`);
@@ -272,11 +272,11 @@ test("D09：world.stateEvents 为空时，世界书「近期动向」仍来自 s
   assert.ok(entry && typeof entry.content === "string", "有可读条目内容");
   const content = entry.content;
 
-  assert.match(content, /近期动向：/, "条目带「近期动向」段");
-  // 这就是修复点：旧路径在这里只会写「（暂无已归档的世界变化）」
-  assert.ok(!content.includes("暂无已归档的世界变化"),
-    "三表回合没有 stateEvents 时，动向必须来自 simulationEvents 而不是空占位");
-  assert.match(content, /意图|赶往钟楼/, "动向里能读到本轮的推演事件摘要");
+  assert.equal(lorebook.transientOnly, true);
+  assert.match(content, /atlas_scene_context/);
+  assert.doesNotMatch(content, /近期动向：|赶往钟楼|等人散去再出发/);
+  const events = Object.values(carrier.session.turns).flatMap(turn => turn.simulationEvents ?? []);
+  assert.ok(events.length > 0, "后台事件留在账本，未因过滤丢失");
 });
 
 test("D09：hidden 的推演事件不透出到世界书（未送达 / 秘密不进主聊天注入）", async () => {

@@ -21,7 +21,7 @@ export interface AtlasTablePosition {
 }
 
 export type AtlasCharacterPresence = "present" | "left" | "unknown";
-export type AtlasCharacterPositionSource = "narrative" | "simulation" | "manual" | "routine" | "unknown";
+export type AtlasCharacterPositionSource = "narrative" | "inferred" | "simulation" | "manual" | "routine" | "unknown";
 
 /** 地点行：`parentLocationId` 是上级地点（用它派生子图，不另存 children 数组）。 */
 export interface AtlasLocationRow extends AtlasTablePosition {
@@ -87,7 +87,7 @@ export const ATLAS_TABLE_LIMITS = {
 
 export const ATLAS_CHARACTER_PRESENCES: readonly AtlasCharacterPresence[] = ["present", "left", "unknown"];
 export const ATLAS_CHARACTER_POSITION_SOURCES: readonly AtlasCharacterPositionSource[] =
-  ["narrative", "simulation", "manual", "routine", "unknown"];
+  ["narrative", "inferred", "simulation", "manual", "routine", "unknown"];
 
 /**
  * 校验错误码：只描述**结构性事实**，中文文案由调用方（回执 / 日志）自行映射，
@@ -680,6 +680,8 @@ export type AtlasTableEditErrorCode =
   | "HAS_CHILDREN"
   | "HOLDER_AND_LOCATION"
   | "PROTAGONIST_PROTECTED"
+  | "POSITION_CONFLICT"
+  | "TRAVEL_NOT_ELAPSED"
   | "ROW_LIMIT_EXCEEDED";
 
 export interface AtlasTableEditError {
@@ -694,6 +696,7 @@ export type AtlasTableEditResult =
   | { ok: false; error: AtlasTableEditError };
 
 export interface AtlasTableEditOptions {
+  protagonistCharacterId?: string | null;
   /** 主人公等**不可被模型改写身份**的人物行 id（由调用方依据 world.characters[].role 给出）。 */
   protectedCharacterIds?: ReadonlySet<string>;
   /** 地点父链深度上限（沿 parent 上溯的跳数）；缺省沿用地图侧 SUBMAP_DEPTH_MAX。 */
@@ -1151,6 +1154,16 @@ export function applyCharacterEdit(
       nextTargetId = targetResolved.id;
     }
   }
+  if (edit.basis === "inferred" && nextLocationId !== undefined) {
+    if (nextLocationId === null || row.presence === "left"
+      || (row.positionSource === "manual" && row.locationId !== nextLocationId)) {
+      return { ok: false, error: { code: "POSITION_CONFLICT", path: "$.patch.locationRef", ref: row.id } };
+    }
+    if (row.locationId !== null && row.locationId !== nextLocationId
+      && row.id !== options.protagonistCharacterId) {
+      return { ok: false, error: { code: "TRAVEL_NOT_ELAPSED", path: "$.patch.locationRef", ref: row.id } };
+    }
+  }
   if (patch.name !== undefined) row.name = patch.name;
   if (patch.thought !== undefined) row.thought = patch.thought;
   if (patch.actionTendency !== undefined) row.actionTendency = patch.actionTendency;
@@ -1158,16 +1171,21 @@ export function applyCharacterEdit(
   if (patch.presence !== undefined) row.presence = patch.presence;
   if (nextTargetId !== undefined) row.targetLocationId = nextTargetId;
   if (nextLocationId !== undefined) {
+    const locationChanged = row.locationId !== nextLocationId;
+    const preserveObserved = edit.basis === "inferred" && row.locationId === nextLocationId
+      && (row.positionSource === "narrative" || row.positionSource === "manual");
     row.locationId = nextLocationId;
     const location = locationRowOf(nextLocationId);
-    row.mapId = location ? location.mapId : null;
     // 地点粒度以下的坐标只能由程序推导：换地点即回到未知
-    row.gridX = null;
-    row.gridY = null;
+    if (locationChanged) {
+      row.mapId = location ? location.mapId : null;
+      row.gridX = null;
+      row.gridY = null;
+    }
     if (nextLocationId !== null && patch.presence === undefined && row.presence === "unknown") {
       row.presence = "present";
     }
-    row.positionSource = patch.locationRef === null ? "unknown" : (edit.basis === "inferred" ? "unknown" : "narrative");
+    if (!preserveObserved) row.positionSource = patch.locationRef === null ? "unknown" : (edit.basis === "inferred" ? "inferred" : "narrative");
   }
   return { ok: true, id: row.id, op: "set", created: false };
 }

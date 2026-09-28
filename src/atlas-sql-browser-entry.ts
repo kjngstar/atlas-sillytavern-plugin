@@ -55,7 +55,7 @@ export { buildAtomicGroups, orderGroups } from './atlas-ops-groups.ts';
 export { applyGroups } from './atlas-db-commit.ts';
 export { validateCandidate } from './atlas-db-invariants.ts';
 export { buildStagePrompt } from './atlas-ops-prompts.ts';
-export { projectForPov, projectPortrayal, projectPromptView } from './atlas-db-knowledge-view.ts';
+export { projectForPov, projectPortrayal, projectPromptView, renderSqlSceneContext } from './atlas-db-knowledge-view.ts';
 export { resolveEffectivePosition } from './atlas-sim-position.ts';
 export { enqueueProjectionSync, runNextSync, rebuildManagedLorebook } from './atlas-db-outbox.ts';
 export { forkBranch } from './atlas-db-branches.ts';

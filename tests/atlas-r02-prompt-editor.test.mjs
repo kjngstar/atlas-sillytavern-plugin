@@ -199,6 +199,86 @@ function progressionState(chatId) {
   };
 }
 
+async function promptEditorFixture(presets = []) {
+  const mounted = await mount();
+  const { applySettingsCommand } = await import("../src/atlas-settings.ts");
+  let settings = { ...mounted.createDefaultSettingsV2(), promptPresets: presets, activePromptPresetId: presets[0]?.id ?? null };
+  const commands = [];
+  const state = progressionState("prompt-structure-ui");
+  const core = { getState: () => state, setPage: () => {}, setPanelOpen: () => {}, refresh: async () => {} };
+  const api = { request: async (_method, _path, body) => {
+    if (body?.action) {
+      commands.push(body);
+      const result = applySettingsCommand(settings, body);
+      if (!result.ok) return { status: 400, body: result };
+      settings = result.settings;
+    }
+    return { status: 200, body: { ok: true, data: mounted.settingsViewV2(settings) } };
+  } };
+  const container = document.createElement("div"); document.body.append(container);
+  mounted.renderPanel(core, container, api, { read: async () => null }, { ...CORE_MOD_KEYS, ...mounted.settingsViewV2(settings) });
+  await tick();
+  return { ...mounted, container, commands, getSettings: () => settings };
+}
+
+test("条目编辑器前置，修改角色与正文、复制、排序和删除后保存保留停用及保护字段", async () => {
+  const { dom, container, getSettings } = await promptEditorFixture([{ id: "editable", name: "可编辑", systemPrompt: "", segments: [
+    { role: "system", name: "规则", content: "原规则", mainSlot: "A" },
+    { role: "user", name: "备用", content: "隐藏内容", enabled: false, deletable: false },
+  ] }]);
+  const query = (label) => container.querySelector(`[aria-label="${label}"]`);
+  const editor = query("提示词条目编辑器");
+  assert.equal(editor.parentElement.firstElementChild, editor);
+  assert.equal(query("启用第 2 段").checked, false);
+  assert.equal(query("删除第 2 段").disabled, true);
+  const role = query("第 1 段角色"); role.value = "assistant"; role.dispatchEvent(new dom.window.Event("change"));
+  const body = query("第 1 段正文"); body.value = "新规则 $8"; body.dispatchEvent(new dom.window.Event("input"));
+  const name = query("第 1 段栏位名称"); name.value = "已修改"; name.dispatchEvent(new dom.window.Event("input"));
+  query("复制第 1 段").click();
+  assert.equal(query("第 2 段正文").value, "新规则 $8");
+  query("上移第 2 段").click();
+  assert.equal(query("第 1 段栏位名称").value, "已修改 副本");
+  query("删除第 1 段").click();
+  query("保存当前提示词预设").click(); await tick();
+  assert.deepEqual(getSettings().promptPresets[0].segments, [
+    { role: "assistant", name: "已修改", content: "新规则 $8", mainSlot: "A" },
+    { role: "user", name: "备用", content: "隐藏内容", enabled: false, deletable: false },
+  ]);
+  // 保存重建编辑器之后开关仍正确；另存为不会把停用条目重新启用。
+  assert.equal(query("启用第 2 段").checked, false);
+  dom.window.prompt = () => "条目副本";
+  query("以新名称保存提示词副本").click(); await tick();
+  assert.equal(getSettings().promptPresets[1].segments[1].enabled, false);
+  assert.equal(getSettings().promptPresets[1].segments[1].deletable, false);
+});
+
+test("shujuku 多预设文件先载入可编辑草稿，选择并保存仅创建所选预设且不激活", async () => {
+  const { dom, container, commands, getSettings } = await promptEditorFixture();
+  const fileText = JSON.stringify([{ name: "外部甲", promptGroup: [{ role: "SYSTEM", content: "甲规则" }] },
+    { name: "外部乙", promptGroup: [{ role: "USER", content: "乙规则" }, { role: "assistant", content: "乙备用", enabled: false }] }]);
+  const previousReader = globalThis.FileReader;
+  globalThis.FileReader = class { readAsText() { this.result = fileText; this.onload(); } };
+  try {
+    dom.window.confirm = () => true;
+    const fileInput = container.querySelector('[aria-label="提示词预设 JSON 文件"]');
+    Object.defineProperty(fileInput, "files", { value: [{ size: Buffer.byteLength(fileText) }] });
+    fileInput.dispatchEvent(new dom.window.Event("change")); await tick();
+    assert.equal(commands.length, 0, "载入不写设置");
+    assert.equal(container.querySelector('[aria-label="提示词名称"]').readOnly, false);
+    const candidates = container.querySelector('[aria-label="选择文件中的待导入预设"]');
+    assert.equal(candidates.options.length, 2);
+    candidates.value = "1"; candidates.dispatchEvent(new dom.window.Event("change")); await tick();
+    assert.equal(container.querySelector('[aria-label="提示词名称"]').value, "外部乙");
+    assert.equal(container.querySelector('[aria-label="启用第 2 段"]').checked, false);
+    assert.match(container.textContent, /<atlasEdit>/);
+    container.querySelector('[aria-label="保存当前提示词预设"]').click(); await tick();
+    assert.equal(getSettings().promptPresets.length, 1);
+    assert.equal(getSettings().promptPresets[0].name, "外部乙");
+    assert.equal(getSettings().activePromptPresetId, null);
+    assert.equal(commands.some((command) => command.action === "prompt.activate"), false);
+  } finally { globalThis.FileReader = previousReader; }
+});
+
 test("R02: first successful settings load shows the full read-only builtin preset", async () => {
   const { renderPanel, createDefaultSettingsV2, settingsViewV2 } = await mount();
   const settings = settingsViewV2(createDefaultSettingsV2());

@@ -158,8 +158,8 @@ test("ATLAS-07 场景 A：零 API 基线——prepare / 地图 / 旅行预览可
   });
   assert.equal(prepared.status, 200, "prepare 200");
   const response = prepared.body.data.response;
-  assert.ok(response.injectionText.length > 0, "注入文本非空");
-  assert.ok(response.injectionText.includes("白塔钟座"), "注入含当前位置");
+  assert.equal(response.injectionText, "", "人物表位置未知时不借用旧绑定猜场景");
+  assert.equal(response.currentLocationId, null, "主角位置由人物表投影");
   assert.ok(Array.isArray(response.relevantNpcIds), "候选 NPC 清单");
   assert.equal(fetcher.calls.length, 0, "prepare 零模型请求");
   // 地图 / 附近：state 有界数据

@@ -606,7 +606,7 @@ export function toPovStateDto(
   const injectedScope = {
     povId: projection.povId,
     isPovRow: projection.isPovRow,
-    knownFacts: projection.knownFacts,
+    knownFacts: projection.knownFacts.map(({ informationId, title, content, belief }) => ({ informationId, title, content, belief })),
     knownLocations: projection.knownLocations,
     knownCharacters: projection.knownCharacters,
     lastSeen: projection.lastSeen,
@@ -622,7 +622,7 @@ export function toPovStateDto(
     revision: null,
     injectedScope,
     promptScope: [...projection.boundaries],
-    knownFacts: projection.knownFacts,
+    knownFacts: injectedScope.knownFacts,
     knownLocations: projection.knownLocations,
     knownCharacters: projection.knownCharacters,
     lastSeen: projection.lastSeen,

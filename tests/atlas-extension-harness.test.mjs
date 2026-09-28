@@ -667,7 +667,7 @@ function makeAdaptEvent() {
   };
 }
 
-async function readyCore(turnBehavior = {}, bindingOverrides = {}, diagnosticEvents = []) {
+async function readyCore(turnBehavior = {}, bindingOverrides = {}, diagnosticEvents = [], coreOverrides = {}) {
   const api = makeApi({ stateByChat: { "chat-a": STATE_PAYLOAD }, turnBehavior });
   const hostWrap = makeHost();
   hostWrap.setChat("chat-a");
@@ -682,10 +682,37 @@ async function readyCore(turnBehavior = {}, bindingOverrides = {}, diagnosticEve
     // ATLAS-06：ENDED 走防抖重解析；测试里 0ms + flush 让计时器立刻落定
     endedDebounceMs: 0,
     mutationDebounceMs: 0,
+    ...coreOverrides,
   });
   await core.handleEvent("APP_READY");
   return { api, hostWrap, core };
 }
+
+test("场景投影：SQL 覆盖旧上下文，投影失败时注入为空", async () => {
+  const safe = await readyCore({}, {}, [], { getNarrativeContext: async () => "只包含收到的信" });
+  await safe.core.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "继续。" });
+  equal(safe.core.getState().pendingTurn.injectionText, "只包含收到的信");
+  safe.core.dispose();
+  const failed = await readyCore({}, {}, [], { getNarrativeContext: async () => { throw new Error("坏快照"); } });
+  await failed.core.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "继续。" });
+  equal(failed.core.getState().pendingTurn.injectionText, "", "不会退回旧档全知内容");
+  failed.core.dispose();
+});
+
+test("场景投影：切换聊天后丢弃迟到的只读投影", async () => {
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const { core, hostWrap } = await readyCore({}, {}, [], { getNarrativeContext: () => gate });
+  const preparing = core.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "继续。" });
+  await flush();
+  hostWrap.setChat("chat-b");
+  await core.handleEvent("CHAT_CHANGED");
+  release("A 的秘密线索");
+  await preparing;
+  equal(core.getState().pendingTurn, null);
+  equal(core.getState().chatId, "chat-b");
+  core.dispose();
+});
 
 test("回合：未适配 / 未绑定 / 停用时不发 prepare 请求", async () => {
   const { api, core } = await readyCore();
@@ -2144,12 +2171,13 @@ test("D04/D05 前端：有 tableMap 时位置与在场性以三表为准（目�
           isProtagonist: false, positionSource: "narrative", mapId: "world", gridX: null, gridY: null },
       ],
     },
-    objects: { total: 0, truncated: 0, entries: [] },
+    objects: { total: 1, truncated: 0, entries: [{ id: "item:letter", name: "密封信", description: "未拆开的信", status: "完好", locationId: null, holderCharacterId: "npc:npc-a", holderName: "林拾" }] },
     current: { locationId: "loc:1", chain: [{ id: "loc:1", name: "钟楼" }] },
-    totals: { locations: 2, characters: 3, items: 0, submaps: 0 },
+    totals: { locations: 2, characters: 3, items: 1, submaps: 0 },
     dropped: { locations: 0 },
   };
-  const { container, core } = await mountAtlasMap({ stateByChat: { "chat-a": base } });
+  const stateByChat = { "chat-a": base };
+  const { container, core } = await mountAtlasMap({ stateByChat });
 
   // 地点菜单「当前在这里」：按三表的位置，阿澈不在这里；新人必须在
   const panel = openPointPanel(container, "钟楼");
@@ -2167,6 +2195,14 @@ test("D04/D05 前端：有 tableMap 时位置与在场性以三表为准（目�
   ok(npcPanelText.includes("想法：等他开口"), `人物面板显示三表想法：实际「${npcPanelText.slice(0, 120)}」`);
   ok(npcPanelText.includes("行动倾向：留在钟楼"), "人物面板显示三表行动倾向");
   ok(npcPanelText.includes("位置来源：正文观察"), "人物面板显示位置来源标签");
+  const letterButton = [...container.querySelectorAll(".aw-mappanel button")].find(node => node.textContent === "密封信");
+  ok(letterButton, "人物卡提供持有物品链接");
+  letterButton.click();
+  ok(container.querySelector(".aw-mappanel").textContent.includes("未拆开的信"), "打开物品卡");
+  const holderButton = [...container.querySelectorAll(".aw-mappanel button")].find(node => node.textContent === "查看持有人：林拾");
+  ok(holderButton, "物品卡提供持有人链接");
+  holderButton.click();
+  ok(container.querySelector(".aw-mappanel").textContent.includes("想法：等他开口"), "返回同一人物卡");
 
   // 远处地点的人仍可通过地点菜单查到（不冒充「附近」但也没被删）
   const marketPanel = openPointPanel(container, "集市");
@@ -2177,6 +2213,8 @@ test("D04/D05 前端：有 tableMap 时位置与在场性以三表为准（目�
   await flush();
   const titles = [...container.querySelectorAll(".aw-card--npc .aw-card__title")].map((n) => n.textContent);
   ok(titles.includes("林拾"), "附近页仍按 relevantNpcIds 命中顺序展示");
+  ok(titles.includes("刚到场的新人"), "已在同地点的新人即使不在旧相关名单里也必须出现在附近");
+  ok(!titles.includes("阿澈"), "三表已将人物移到另一个根地点，不再冒充附近");
   const card = [...container.querySelectorAll(".aw-card--npc")]
     .find((node) => node.textContent.includes("林拾"));
   card.click();
@@ -2184,6 +2222,13 @@ test("D04/D05 前端：有 tableMap 时位置与在场性以三表为准（目�
   ok(cardText.includes("想法：等他开口"), "附近卡片详情带三表想法");
   ok(cardText.includes("位置来源：正文观察"), "附近卡片详情带位置来源标签");
   ok(!cardText.includes("routine") && !cardText.includes("ledger"), "不把内部枚举值直接甩给用户");
+  stateByChat["chat-a"] = { ...base, relevantNpcIds: [] };
+  await core.refresh();
+  await flush();
+  const currentTitles = [...container.querySelectorAll(".aw-card--npc .aw-card__title")].map((n) => n.textContent);
+  deepEqual(currentTitles, ["林拾", "刚到场的新人"], "即使旧相关名单为空，同地的三表人物也显示一次");
+  ok(container.textContent.includes("其他地点已知人物 · 距离未定"), "另一根地点的人保留在作者查询区，而不冒充附近");
+  ok(container.textContent.includes("阿澈 · 集市"), "人物已入表但归属尚未推断时不再从附近页消失");
 });
 
 test("D03 前端：物品图钉按三表口径画（持有物与已销毁物不落地，子图也能画）", async () => {
@@ -2400,7 +2445,7 @@ test("A03 诊断夹具：附近为空能拆成「当前位置未知 / 当前地�
     currentLocationId: null, tableNearbyEntries: stateA.tableMap.nearby.entries, relevantNpcIds: [],
   });
   equal(unknown.case, "current-location-unknown", "当前位置未知单独成档");
-  ok(unknown.message.includes("尚未确定当前位置"), `文案直说位置未知：实际「${unknown.message}」`);
+  ok(unknown.message.includes("未推断出主角所在地点"), `文案直说位置未知：实际「${unknown.message}」`);
 
   // 第 2 档：当前地点确实有人（附近页为空只是本轮没有相关性判定）→ 不是跨聊天
   const samePlace = bIndex.atlasDiagnoseEmptyNearby({
@@ -2429,7 +2474,7 @@ test("A03 诊断夹具：附近为空能拆成「当前位置未知 / 当前地�
   core.setPage("nearby");
   await flush();
   let text = container.querySelector(".aw-center")?.textContent ?? "";
-  ok(text.includes("尚未确定当前位置"), `附近页在位置未知时给出诚实文案：实际「${text.slice(0, 80)}」`);
+  ok(text.includes("未推断出主角所在地点"), `附近页在位置未知时给出诚实文案：实际「${text.slice(0, 80)}」`);
 
   stateByChat["chat-a"] = { ...stateA, relevantNpcIds: [] };
   await core.refresh();
@@ -2822,6 +2867,7 @@ test("B06 legacy 迁移：两个聊天各迁各的，B 的表行 / 地图 / 动�
 /** B04 假世界书：模拟酒馆 world-info（一本书 + 一条用户自建条目）。 */
 function makeB04Book() {
   const name = "角色卡主书";
+  const injected = new Map();
   const books = new Map([[name, {
     entries: {
       "1": { uid: "1", key: ["世界观"], keysecondary: [], comment: "用户自建：世界观", content: "用户自己的设定", disable: false },
@@ -2844,8 +2890,9 @@ function makeB04Book() {
     deleteEntry(data, uid) { delete data.entries[uid]; },
     async getChatBookName() { return null; },
     async bindChatBook() {},
+    async injectTurn(key, value) { injected.set(key, value); },
   };
-  return { port, entries: () => Object.values(books.get(name).entries), text: () => JSON.stringify(books.get(name)) };
+  return { port, injected, entries: () => Object.values(books.get(name).entries), text: () => JSON.stringify(books.get(name)) };
 }
 
 test("B06 世界书写入迟到：切聊天后 A 的动向不落进共享主卡书（B04）", async () => {
@@ -2868,6 +2915,7 @@ test("B06 世界书写入迟到：切聊天后 A 的动向不落进共享主卡�
     async write(key, value) { writes.push({ key, value }); },
   };
   let currentChat = "chat-a";
+  book.port.resolveChatScope = async () => ({ chatId: currentChat, worldId: world.id });
   const events = [];
   let pendingB = null;
   let plansBuiltFor = null;
@@ -2900,15 +2948,16 @@ test("B06 世界书写入迟到：切聊天后 A 的动向不落进共享主卡�
     && event.details?.stage === "before-save"
     && event.details?.reasonCode === "SESSION_IDENTITY_MISMATCH"), "记了具名的 LOREBOOK_STALE_CHAT_DROPPED");
   ok(doneB && !doneB.dropped, "B 的写入正常完成");
-  equal(doneB.bookName, "角色卡主书", "B 写的是角色卡主书（跨聊天共享的那本）");
+  equal(doneB.contentTarget, "injection", "B 的内容仅注入当前聊天");
   equal(plansBuiltFor, "canon", "buildLorebookPlans 拿到了当前分支三表（F10 的接线）");
 
   const entries = book.entries();
   const movesEntries = entries.filter((entry) => String(entry.comment).startsWith("Atlas 动向"));
-  equal(movesEntries.length, 1, "书里只有一条 Atlas 动向条目（不会为每个聊天堆一条）");
-  ok(movesEntries[0].content.includes("B 集市"), "动向正文是 B 的当前地点");
-  ok(!movesEntries[0].content.includes("A 钟楼"), "动向正文里没有 A 的地点（A 的迟到写入没落书）");
-  ok(!movesEntries[0].content.includes("甲"), "动向正文里没有 A 的人物");
+  equal(movesEntries.length, 0, "世界书不再持久化动态条目");
+  const injected = book.injected.get(doneB.injectionKey);
+  ok(injected.includes("B 集市"), "上下文是 B 的当前地点");
+  ok(!injected.includes("A 钟楼"), "上下文里没有 A 的地点");
+  ok(!injected.includes("甲"), "上下文里没有 A 的人物");
   ok(book.text().includes("用户自建：世界观"), "用户自己的世界书条目原样保留（绝不删用户的书）");
 
   // 动向 / 提示词 / 表行 / 地图四面：B 的写入用的就是 B 自己的会话
@@ -2924,8 +2973,9 @@ test("B06 世界书写入迟到：切聊天后 A 的动向不落进共享主卡�
   const syncGate = new Promise((resolve) => { releaseSync = resolve; });
   const rawWriter = createAtlasLorebookWriter(book2.port);
   let chat = "chat-a";
+  book2.port.resolveChatScope = async () => ({ chatId: chat, worldId: world.id });
   const handler2 = bIndex.createLorebookChatSwitchHandler({
-    writer: { ...rawWriter, async syncTurn(plans) { await syncGate; return rawWriter.syncTurn(plans); } },
+    writer: { ...rawWriter, async syncTurn(plans, scope) { await syncGate; return rawWriter.syncTurn(plans, scope); } },
     store,
     readBinding: async () => (chat === "chat-a" ? sessionA.binding : sessionB.binding),
     readSession: () => (chat === "chat-a" ? sessionA : sessionB),
@@ -2945,9 +2995,9 @@ test("B06 世界书写入迟到：切聊天后 A 的动向不落进共享主卡�
   equal(droppedA.stage, "after-save", "在途写入只能事后丢弃（如实记录该窗口）");
   ok(!wroteB.dropped, "B 的写入照常完成");
   const moves2 = book2.entries().filter((entry) => String(entry.comment).startsWith("Atlas 动向"));
-  equal(moves2.length, 1, "共享书里仍然只有一条动向条目");
-  ok(moves2[0].content.includes("B 集市"), "最后落书的是 B 的动向（串行化保证当前聊天最后写）");
-  ok(!moves2[0].content.includes("A 钟楼"), "共享书里没有 A 的动向残留");
+  equal(moves2.length, 0, "共享书没有动态条目");
+  ok(book2.injected.get(wroteB.injectionKey).includes("B 集市"), "最后提供的是 B 的场景");
+  ok([...book2.injected.values()].every(text => !text.includes("A 钟楼")), "A 迟到时核对宿主作用域，不注入 A 的内容");
   ok(book2.text().includes("用户自建：世界观"), "第二阶段里用户条目同样未被触碰");
 
   // 切到未绑定聊天：只清 Atlas 自建条目

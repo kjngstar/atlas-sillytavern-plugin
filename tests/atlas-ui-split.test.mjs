@@ -103,7 +103,7 @@ test("职责隔离：API 页不出现提示词预设库编辑，推进页不出�
   assert.ok(/pages?.*「推进」|前往推进/.test(apiPanel), "API 页提供「前往推进」只读跳转");
   assert.ok(!/endpoint/.test(progression.replace(/当前 API[\s\S]*?api\)/, "")), "推进页不出现端点输入（只读摘要除外）");
   assert.ok(/前往 API/.test(progression), "推进页提供「前往 API」只读跳转");
-  assert.ok(/当前生效提示词/.test(progression), "推进页有只读的当前生效提示词");
+  assert.ok(/当前已保存提示词文本/.test(progression), "推进页有只读的已保存预设文本，并与最终请求预览区分");
 });
 
 test("majorEvent 已从生产 UI 隐藏（未接线功能不得露出）", () => {

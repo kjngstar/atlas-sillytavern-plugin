@@ -2314,6 +2314,7 @@
 .aw-seg-item__head {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
   min-width: 0;
 }
@@ -2348,6 +2349,41 @@
 .aw-seg-item__head .aw-btn--icon { padding: 5px 8px; font-size: 12px; }
 
 .aw-seg-item__area { width: 100%; min-width: 0; }
+
+.aw-seg-item__enabled {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--aw-ink-soft);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.aw-seg-item--disabled {
+  border-left: 3px solid var(--aw-muted);
+  padding-left: 10px;
+}
+
+.aw-seg-item--disabled textarea { color: var(--aw-muted); }
+
+.aw-prompt-selector { display: flex; flex-wrap: wrap; }
+.aw-prompt-selector > select { flex: 1 1 100%; min-width: 0; }
+.aw-prompt-selector > button { flex: 0 0 auto; }
+.aw-prompt-editor > .aw-actions {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 8px 0;
+  background: var(--aw-panel);
+}
+
+.aw-seg-item .aw-details { min-width: 0; }
+.aw-seg-item .aw-details summary { cursor: pointer; color: var(--aw-muted); font-size: 12px; }
+
+@media (max-width: 480px) {
+  .aw-seg-item__role, .aw-seg-item__slot { flex: 1 1 120px; width: auto; }
+  .aw-seg-item__name { flex: 1 1 100%; width: 100%; }
+}
 
 .aw-seg-insert { align-self: center; }
 

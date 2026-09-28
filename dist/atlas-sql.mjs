@@ -11473,6 +11473,7 @@ var init_atlas_ops_prompts = __esm({
       observe: [
         "任务：从本轮已完成正文提取实际变化。不要续写故事。",
         "识别有重要身份/实质世界书资料的人物，允许首楼建档；一闪而过的有名路人用character.upsert加registration=watch报告候选，完全无关无名群众不建档。",
+        "每轮主动判断唯一主角当前实际所在地点；正文代词承接上文且唯一指向已到达地点时也更新 location_ref。意图、梦境、回忆、远方镜头不算抵达。",
         "地点包含关系、人物粗位置与精确坐标分开处理。学校内但教室未知，就只给学校引用。",
         "心理/倾向可以依据人物设定合理更新，并保持简短。",
         "已完成行为或明确耗时可以放在 event.propose 的 activity/time_hint 中，未完成计划不算已经经过时间。"
@@ -13788,12 +13789,615 @@ var init_atlas_db_repository = __esm({
   }
 });
 
+// src/atlas-scene-context.ts
+function renderSceneContext(scene, clues, maxChars = 1800) {
+  if (!scene.length && !clues.length) return "";
+  const header = '<atlas_scene_context version="2">\n仅用于续写当前视角；传闻不等于事实，不能把人物私下意图写成主角已知。\n';
+  const footer = "\n</atlas_scene_context>";
+  if (maxChars < header.length + footer.length + 5) return "";
+  const lines = [];
+  let length = header.length + footer.length;
+  for (const section of [scene.length ? ["【当前场景】", ...scene] : [], clues.length ? ["【场景线索】", ...clues] : []]) {
+    for (const line of section) {
+      if (length + line.length + 1 > maxChars) break;
+      lines.push(line);
+      length += line.length + 1;
+    }
+  }
+  return header + lines.join("\n") + footer;
+}
+var init_atlas_scene_context = __esm({
+  "src/atlas-scene-context.ts"() {
+    "use strict";
+  }
+});
+
+// src/atlas-sim-actions.ts
+function isPlainObject9(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function asArray(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+function str2(value) {
+  return typeof value === "string" && value !== "" ? value : null;
+}
+function num2(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+function decodeOrNull(table, row2) {
+  const decoded = decodeRow(table, row2, { allowExtra: true });
+  return decoded.ok ? decoded.row : null;
+}
+function loadRow(world, table, id) {
+  const rows3 = queryBound(world.db, `SELECT * FROM ${table} WHERE branch_id = ? AND id = ? LIMIT 1`, [world.branchId, id]);
+  return rows3.length > 0 ? decodeOrNull(table, rows3[0]) : null;
+}
+function leafResult(ok, reason, atS) {
+  return { ok, reasons: ok || !reason ? [] : [reason], atS: ok ? atS : null };
+}
+function heldBy(world, actorId, itemId) {
+  let cursor = itemId;
+  const seen = /* @__PURE__ */ new Set();
+  for (let depth = 0; cursor && depth <= CONTAINER_DEPTH2; depth += 1) {
+    if (seen.has(cursor)) return false;
+    seen.add(cursor);
+    const item = loadRow(world, "items", cursor);
+    if (!item) return false;
+    if (str2(item.holder_character_id) === actorId) return true;
+    cursor = str2(item.container_item_id);
+  }
+  return false;
+}
+function actorLocation(world, actorId) {
+  const position = resolveEffectivePosition({ db: world.db, branchId: world.branchId }, actorId);
+  if (position.kind === "at_location") return position.locationId;
+  const row2 = loadRow(world, "characters", actorId) ?? loadRow(world, "locations", actorId);
+  return row2 ? str2(row2.location_id) : null;
+}
+function entityStatusMatches(world, entityId, expected) {
+  for (const table of ["characters", "locations", "items", "factions"]) {
+    const row2 = loadRow(world, table, entityId);
+    if (!row2) continue;
+    return String(row2.status ?? "") === expected || String(row2.physical_status ?? "") === expected;
+  }
+  return false;
+}
+function eventAtS(row2) {
+  if (!row2) return null;
+  return num2(row2.occurred_at_s) ?? num2(row2.scheduled_start_s) ?? num2(row2.ended_at_s);
+}
+function evaluateCondition(world, condition, opts) {
+  const clockS = num2(opts?.clockS) ?? 0;
+  const actorId = opts?.actorId ?? null;
+  const walk = (node, depth) => {
+    if (depth > CONDITION_DEPTH) return leafResult(false, "CONDITION_DEPTH_EXCEEDED", null);
+    if (node === null || node === void 0) return { ok: true, reasons: [], atS: null };
+    if (!isPlainObject9(node)) return leafResult(false, "CONDITION_INVALID", null);
+    const keys = Object.keys(node);
+    if (keys.length === 0) return { ok: true, reasons: [], atS: null };
+    if (Array.isArray(node.all)) {
+      const results = node.all.map((child) => walk(child, depth + 1));
+      const ok = results.every((r) => r.ok);
+      if (!ok) return { ok: false, reasons: results.flatMap((r) => r.reasons), atS: null };
+      const times = results.map((r) => r.atS).filter((t) => t !== null);
+      return { ok: true, reasons: [], atS: times.length > 0 ? Math.max(...times) : null };
+    }
+    if (Array.isArray(node.any)) {
+      const results = node.any.map((child) => walk(child, depth + 1));
+      const ok = results.some((r) => r.ok);
+      if (!ok) return { ok: false, reasons: results.flatMap((r) => r.reasons), atS: null };
+      const times = results.filter((r) => r.ok).map((r) => r.atS).filter((t) => t !== null);
+      return { ok: true, reasons: [], atS: times.length > 0 ? Math.min(...times) : null };
+    }
+    const kind = keys[0];
+    const body = isPlainObject9(node[kind]) ? node[kind] : {};
+    const actor = str2(body.actor_ref) ?? actorId;
+    switch (kind) {
+      case "time_at_or_after": {
+        const s = num2(body.s);
+        if (s === null) return leafResult(false, "CONDITION_FIELD_MISSING:time_at_or_after.s", null);
+        return leafResult(clockS >= s, `TIME_BEFORE:${s}`, s);
+      }
+      case "at_location": {
+        const locationId = str2(body.location_ref);
+        if (!actor || !locationId) return leafResult(false, "CONDITION_FIELD_MISSING:at_location", null);
+        return leafResult(actorLocation(world, actor) === locationId, `NOT_AT_LOCATION:${actor}->${locationId}`, null);
+      }
+      case "event_status": {
+        const eventId = str2(body.event_ref);
+        if (!eventId) return leafResult(false, "CONDITION_FIELD_MISSING:event_status.event_ref", null);
+        const event = loadRow(world, "events", eventId);
+        if (!event) return leafResult(false, `EVENT_UNKNOWN:${eventId}`, null);
+        const expected = Array.isArray(body.status) ? body.status.map(String) : [String(body.status ?? "")];
+        return leafResult(expected.includes(String(event.status)), `EVENT_STATUS:${eventId}=${String(event.status)}`, eventAtS(event));
+      }
+      case "knows": {
+        const informationId = str2(body.information_ref);
+        if (!actor || !informationId) return leafResult(false, "CONDITION_FIELD_MISSING:knows", null);
+        const rows3 = queryBound(
+          world.db,
+          `SELECT * FROM knowledge WHERE branch_id = ? AND information_id = ? AND status <> 'forgotten' AND (knower_character_id = ? OR is_pov = 1) LIMIT 1`,
+          [world.branchId, informationId, actor]
+        );
+        if (rows3.length === 0) return leafResult(false, `NOT_KNOWN:${actor}->${informationId}`, null);
+        const row2 = decodeOrNull("knowledge", rows3[0]) ?? {};
+        const minRank = BELIEF_RANK[String(body.min_belief ?? "heard")] ?? 1;
+        const actual = BELIEF_RANK[String(row2.belief ?? "heard")] ?? 1;
+        return leafResult(actual >= minRank, `BELIEF_TOO_LOW:${String(row2.belief)}`, num2(row2.first_received_at_s));
+      }
+      case "has_item": {
+        const itemId = str2(body.item_ref);
+        if (!actor || !itemId) return leafResult(false, "CONDITION_FIELD_MISSING:has_item", null);
+        return leafResult(heldBy(world, actor, itemId), `ITEM_NOT_HELD:${actor}->${itemId}`, null);
+      }
+      case "action_status": {
+        const actionId = str2(body.action_ref);
+        if (!actionId) return leafResult(false, "CONDITION_FIELD_MISSING:action_status.action_ref", null);
+        const row2 = loadRow(world, "actions", actionId);
+        if (!row2) return leafResult(false, `ACTION_UNKNOWN:${actionId}`, null);
+        const expected = Array.isArray(body.status) ? body.status.map(String) : [String(body.status ?? "")];
+        return leafResult(expected.includes(String(row2.status)), `ACTION_STATUS:${actionId}=${String(row2.status)}`, num2(row2.finished_at_s));
+      }
+      case "entity_status": {
+        const entityId = str2(body.entity_ref);
+        if (!entityId) return leafResult(false, "CONDITION_FIELD_MISSING:entity_status.entity_ref", null);
+        return leafResult(entityStatusMatches(world, entityId, String(body.status ?? "")), `ENTITY_STATUS:${entityId}`, null);
+      }
+      case "capability": {
+        const key = str2(body.key);
+        if (!actor || !key) return leafResult(false, "CONDITION_FIELD_MISSING:capability", null);
+        const row2 = loadRow(world, "characters", actor) ?? loadRow(world, "factions", actor);
+        const capabilities = asArray(row2?.capabilities_json).filter(isPlainObject9);
+        return leafResult(capabilities.some((c) => str2(c.key) === key), `CAPABILITY_MISSING:${key}`, null);
+      }
+      case "event_match": {
+        const eventKind = str2(body.kind);
+        if (!eventKind) return leafResult(false, "CONDITION_FIELD_MISSING:event_match.kind", null);
+        const params = [world.branchId, eventKind];
+        let sql = "SELECT * FROM events WHERE branch_id = ? AND kind = ? AND status IN ('ongoing','occurred')";
+        const subject = str2(body.subject_ref);
+        if (subject) {
+          sql += " AND subject_entity_id = ?";
+          params.push(subject);
+        }
+        const place = str2(body.place_ref);
+        if (place) {
+          sql += " AND location_id = ?";
+          params.push(place);
+        }
+        sql += " ORDER BY COALESCE(occurred_at_s, scheduled_start_s) LIMIT 1";
+        const rows3 = queryBound(world.db, sql, params);
+        if (rows3.length === 0) return leafResult(false, `EVENT_MATCH_NONE:${eventKind}`, null);
+        return leafResult(true, null, eventAtS(decodeOrNull("events", rows3[0])));
+      }
+      default:
+        return leafResult(false, `CONDITION_UNSUPPORTED:${kind}`, null);
+    }
+  };
+  const result = walk(condition, 0);
+  return { ok: result.ok, reasons: [...new Set(result.reasons)], atS: result.atS };
+}
+var CONDITION_DEPTH, CONTAINER_DEPTH2, BELIEF_RANK;
+var init_atlas_sim_actions = __esm({
+  "src/atlas-sim-actions.ts"() {
+    "use strict";
+    init_atlas_db_runtime();
+    init_atlas_db_codec();
+    init_atlas_db_schema();
+    init_atlas_runtime_limits();
+    init_atlas_sim_position();
+    CONDITION_DEPTH = ATLAS_RUNTIME_LIMITS.conditionDepth;
+    CONTAINER_DEPTH2 = ATLAS_RUNTIME_LIMITS.containerDepth;
+    BELIEF_RANK = { rejected: 0, heard: 1, doubted: 2, believed: 3, verified: 4 };
+  }
+});
+
+// src/atlas-sim-motion.ts
+function isPlainObject10(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function asObject(value) {
+  if (isPlainObject10(value)) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    try {
+      const parsed = JSON.parse(value);
+      return isPlainObject10(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+function asArray2(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+function str3(value) {
+  return typeof value === "string" && value !== "" ? value : null;
+}
+function num3(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+function positive(value) {
+  const n = num3(value);
+  return n !== null && n > 0 ? n : null;
+}
+function segField(segment, camel, snake) {
+  return segment[camel] !== void 0 ? segment[camel] : segment[snake];
+}
+function segmentBounds(segment) {
+  const override = asObject(segField(segment, "durationOverride", "duration_override"));
+  if (override) {
+    const minS = num3(override.min_s);
+    const nominalS = num3(override.nominal_s);
+    const maxS = num3(override.max_s);
+    if (minS !== null || nominalS !== null || maxS !== null) {
+      const min = minS ?? nominalS ?? maxS ?? 0;
+      const max = maxS ?? nominalS ?? minS ?? 0;
+      const nominal = nominalS ?? (min + max) / 2;
+      if (max > 0) return { min: Math.max(0, Math.min(min, nominal)), nominal: Math.max(0, nominal), max: Math.max(nominal, max) };
+    }
+  }
+  const quality = String(segField(segment, "quality", "quality") ?? "unknown");
+  const distanceNominal = num3(segField(segment, "distanceNominalM", "distance_nominal_m")) ?? 0;
+  const distanceMin = num3(segField(segment, "distanceMinM", "distance_min_m")) ?? distanceNominal;
+  const distanceMax = num3(segField(segment, "distanceMaxM", "distance_max_m")) ?? distanceNominal;
+  const speedNominal = positive(segField(segment, "speedNominalMps", "speed_nominal_mps"));
+  if (quality === "unknown" || speedNominal === null) return null;
+  const speedMin = positive(segField(segment, "speedMinMps", "speed_min_mps")) ?? speedNominal;
+  const speedMax = positive(segField(segment, "speedMaxMps", "speed_max_mps")) ?? speedNominal;
+  return {
+    min: distanceMin / speedMax,
+    nominal: distanceNominal / speedNominal,
+    max: distanceMax / speedMin
+  };
+}
+function nextNodeBoundary(journey) {
+  if (String(journey.status ?? "") !== "moving") return null;
+  const segments = asArray2(journey.segments_json).filter(isPlainObject10);
+  const index = Math.max(0, Math.trunc(num3(journey.segment_index) ?? 0));
+  if (index >= segments.length) return null;
+  const segment = segments[index];
+  const bounds = segmentBounds(segment);
+  if (!bounds) return null;
+  const timeDone = num3(journey.segment_time_done_s) ?? 0;
+  const atS = (num3(journey.last_advanced_at_s) ?? num3(journey.started_at_s) ?? 0) + Math.max(0, bounds.nominal - timeDone);
+  return { atS, toLocationId: str3(segField(segment, "toLocationId", "to_location_id")) ?? "", routeId: str3(segField(segment, "routeId", "route_id")) };
+}
+var JOURNEY_SEGMENT_LIMIT, GEOMETRY_VERTEX_LIMIT3;
+var init_atlas_sim_motion = __esm({
+  "src/atlas-sim-motion.ts"() {
+    "use strict";
+    init_atlas_db_runtime();
+    init_atlas_db_codec();
+    init_atlas_runtime_limits();
+    init_atlas_sim_position();
+    init_atlas_sim_actions();
+    JOURNEY_SEGMENT_LIMIT = ATLAS_FIELD_LIMITS.journeySegmentLimit;
+    GEOMETRY_VERTEX_LIMIT3 = ATLAS_FIELD_LIMITS.geometryVertexLimit;
+  }
+});
+
+// src/atlas-sim-opportunities.ts
+function isPlainObject11(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function asObject2(value) {
+  if (isPlainObject11(value)) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    try {
+      const parsed = JSON.parse(value);
+      return isPlainObject11(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+function asArray3(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+function str4(value) {
+  return typeof value === "string" && value !== "" ? value : null;
+}
+function num4(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+function decodeOrNull2(table, row2) {
+  const decoded = decodeRow(table, row2, { allowExtra: true });
+  return decoded.ok ? decoded.row : null;
+}
+function loadRows(world, table, where, params) {
+  const out = [];
+  for (const row2 of queryBound(world.db, `SELECT * FROM ${table} WHERE branch_id = ? AND ${where}`, [world.branchId, ...params])) {
+    const decoded = decodeOrNull2(table, row2);
+    if (decoded) out.push(decoded);
+  }
+  return out;
+}
+function opportunityId(parts) {
+  const bucket = Math.floor(Math.max(0, parts.anchorS) / OPPORTUNITY_BUCKET_S);
+  const material = [parts.kind, parts.subjectId ?? "-", parts.receiverEntityId ?? "-", parts.locationId ?? "-", `b${bucket}`].join("|");
+  let hash = 2166136261;
+  for (let i = 0; i < material.length; i += 1) {
+    hash ^= material.charCodeAt(i);
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  return `opp_${(hash >>> 0).toString(16).padStart(8, "0")}`;
+}
+function collectOpportunities(window2, world) {
+  const fromS = num4(window2?.fromS) ?? 0;
+  const untilS = num4(window2?.untilS) ?? fromS;
+  const opportunities = [];
+  const branchRows = queryBound(world.db, "SELECT pov_character_id FROM branches WHERE id = ? LIMIT 1", [world.branchId]);
+  const povCharacterId = branchRows.length > 0 ? str4(branchRows[0].pov_character_id) : null;
+  const knowers = /* @__PURE__ */ new Set();
+  for (const row2 of loadRows(world, "knowledge", "status <> 'forgotten'", [])) {
+    const informationId = str4(row2.information_id);
+    if (!informationId) continue;
+    const knower = str4(row2.knower_character_id) ?? (row2.is_pov === true || row2.is_pov === 1 ? povCharacterId : null);
+    if (knower) knowers.add(`${informationId}:${knower}`);
+  }
+  const alreadyKnows = (informationId, actorId) => informationId !== null && actorId !== null && knowers.has(`${informationId}:${actorId}`);
+  const dwell = /* @__PURE__ */ new Map();
+  const addDwell = (actorId, locationId, seconds) => {
+    if (seconds <= 0) return;
+    const key = `${actorId}|${locationId}`;
+    dwell.set(key, (dwell.get(key) ?? 0) + seconds);
+  };
+  for (const row2 of loadRows(world, "actions", "target_location_id IS NOT NULL AND status IN ('ready','active','paused','blocked','completed')", [])) {
+    const actorId = str4(row2.actor_entity_id);
+    const locationId = str4(row2.target_location_id);
+    if (!actorId || !locationId) continue;
+    const start = Math.max(fromS, num4(row2.started_at_s) ?? fromS);
+    const end = Math.min(untilS, num4(row2.finished_at_s) ?? untilS);
+    addDwell(actorId, locationId, end - start);
+  }
+  for (const row2 of loadRows(world, "journeys", "status IN ('moving','paused','arrived','blocked')", [])) {
+    const actorId = str4(row2.mover_entity_id);
+    if (!actorId) continue;
+    const stop = str4(row2.stop_location_id);
+    const status = String(row2.status ?? "");
+    if (stop && (status === "paused" || status === "blocked")) {
+      const start = Math.max(fromS, num4(row2.last_advanced_at_s) ?? fromS);
+      addDwell(actorId, stop, Math.min(untilS, num4(row2.arrived_at_s) ?? untilS) - start);
+    }
+    if (status === "arrived") {
+      const destination = str4(row2.destination_location_id);
+      if (destination) {
+        const start = Math.max(fromS, num4(row2.arrived_at_s) ?? fromS);
+        addDwell(actorId, destination, untilS - start);
+      }
+    }
+  }
+  const dwellAt = (actorId, locationId) => dwell.get(`${actorId}|${locationId}`) ?? 0;
+  const characters = loadRows(world, "characters", "status = 'active'", []);
+  const characterById = /* @__PURE__ */ new Map();
+  for (const character of characters) characterById.set(String(character.id), character);
+  const locationCache = /* @__PURE__ */ new Map();
+  const locationOf = (locationId) => {
+    if (!locationCache.has(locationId)) {
+      const rows3 = queryBound(world.db, "SELECT * FROM locations WHERE branch_id = ? AND id = ? LIMIT 1", [world.branchId, locationId]);
+      locationCache.set(locationId, rows3.length > 0 ? decodeOrNull2("locations", rows3[0]) : null);
+    }
+    return locationCache.get(locationId) ?? null;
+  };
+  const locationChain = (locationId) => {
+    const chain = [];
+    let cursor = locationId;
+    const seen = /* @__PURE__ */ new Set();
+    while (cursor && !seen.has(cursor)) {
+      seen.add(cursor);
+      chain.push(cursor);
+      const row2 = locationOf(cursor);
+      cursor = row2 ? str4(row2.parent_location_id) : null;
+    }
+    return chain;
+  };
+  const isAncestorOrSelf = (candidate, locationId) => locationChain(locationId).includes(candidate);
+  const factionMembers = /* @__PURE__ */ new Map();
+  const membersOf = (factionId) => {
+    if (!factionMembers.has(factionId)) {
+      const members = /* @__PURE__ */ new Set();
+      for (const row2 of loadRows(world, "relations", "status = 'active' AND object_entity_id = ?", [factionId])) {
+        const subject = str4(row2.subject_entity_id);
+        if (subject) members.add(subject);
+      }
+      factionMembers.set(factionId, members);
+    }
+    return factionMembers.get(factionId);
+  };
+  const explicitVisible = /* @__PURE__ */ new Set();
+  const channels = loadRows(world, "channels", "status = 'active' AND valid_from_s <= ? AND (valid_until_s IS NULL OR valid_until_s >= ?)", [untilS, fromS]);
+  for (const channel of channels) {
+    const channelId = String(channel.id);
+    const requirements = asObject2(channel.requirements_json);
+    const sourceEntity = str4(channel.source_entity_id);
+    const sourceLocation = str4(channel.source_location_id);
+    const scope = asObject2(channel.scope_json) ?? {};
+    const scopeLocations = asArray3(scope.location_refs).filter((v) => typeof v === "string");
+    const scopeEntities = asArray3(scope.entity_refs).filter((v) => typeof v === "string");
+    if (sourceEntity === null && sourceLocation === null && scopeEntities.length === 0 && scopeLocations.length === 0) continue;
+    const recipient = str4(channel.recipient_entity_id) ?? str4(channel.owner_entity_id);
+    if (requirements && !evaluateCondition(world, requirements, { clockS: untilS, actorId: recipient }).ok) continue;
+    const place = sourceLocation ?? scopeLocations[0] ?? null;
+    if (recipient && sourceEntity) explicitVisible.add(`${recipient}|${sourceEntity}`);
+    if (recipient && place) explicitVisible.add(`${recipient}|${place}`);
+    if (recipient && (sourceEntity || place)) {
+      const atS = Math.max(fromS, num4(channel.valid_from_s) ?? fromS);
+      opportunities.push({
+        id: opportunityId({ kind: "channel", subjectId: channelId, receiverEntityId: recipient, locationId: place, anchorS: atS }),
+        kind: "channel",
+        receiverEntityId: recipient,
+        informationId: null,
+        locationId: place,
+        atS,
+        requiresDwellS: 0,
+        basis: {
+          channelId,
+          channelKind: String(channel.kind ?? "other"),
+          sourceEntityId: sourceEntity,
+          sourceLocationId: sourceLocation,
+          scopeEntityRefs: scopeEntities,
+          scopeLocationRefs: scopeLocations,
+          transportModeKey: str4(channel.transport_mode_key),
+          reason: "channel_source_in_scope"
+        }
+      });
+    }
+    for (const entityId of scopeEntities) {
+      if (recipient && recipient !== entityId) explicitVisible.add(`${recipient}|${entityId}`);
+      const atS = Math.max(fromS, num4(channel.valid_from_s) ?? fromS);
+      opportunities.push({
+        id: opportunityId({ kind: "channel", subjectId: `${channelId}:${entityId}`, receiverEntityId: recipient, locationId: place, anchorS: atS }),
+        kind: "channel",
+        receiverEntityId: recipient,
+        informationId: null,
+        locationId: place,
+        atS,
+        requiresDwellS: 0,
+        basis: { channelId, channelKind: String(channel.kind ?? "other"), watchedEntityId: entityId, reason: "channel_scope" }
+      });
+    }
+  }
+  const fronts = loadRows(
+    world,
+    "rumor_fronts",
+    "status IN ('active','fading') AND first_available_at_s <= ? AND (expires_at_s IS NULL OR expires_at_s >= ?)",
+    [untilS, fromS]
+  );
+  const knownFront = /* @__PURE__ */ new Set();
+  for (const front of fronts) {
+    const frontId = String(front.id);
+    const informationId = str4(front.information_id);
+    const locationId = str4(front.location_id);
+    if (!informationId || !locationId || knownFront.has(`${informationId}|${locationId}`)) continue;
+    knownFront.add(`${informationId}|${locationId}`);
+    const firstAvailableAtS = num4(front.first_available_at_s) ?? fromS;
+    const audience = asObject2(front.audience_json) ?? {};
+    const access = String(audience.access ?? "public");
+    const audienceFaction = str4(audience.faction_id);
+    const reach = String(front.reach ?? "local");
+    if (firstAvailableAtS >= fromS && firstAvailableAtS <= untilS) {
+      opportunities.push({
+        id: opportunityId({ kind: "rumor_front", subjectId: informationId, receiverEntityId: null, locationId, anchorS: firstAvailableAtS }),
+        kind: "rumor_front",
+        receiverEntityId: null,
+        informationId,
+        locationId,
+        atS: firstAvailableAtS,
+        requiresDwellS: PUBLIC_CONTACT_DWELL_S,
+        basis: { frontId, reach, access, firstAvailableAtS, reason: "front_now_available" }
+      });
+    }
+    for (const character of characters) {
+      const actorId = String(character.id);
+      if (alreadyKnows(informationId, actorId)) continue;
+      if (actorId === str4(front.originator_entity_id)) continue;
+      if (access === "members" && audienceFaction && !membersOf(audienceFaction).has(actorId)) continue;
+      const position = resolveEffectivePosition({ db: world.db, branchId: world.branchId }, actorId);
+      const presenceLocation = position.kind === "at_location" ? position.locationId : position.kind === "in_transit" ? null : str4(character.location_id);
+      if (presenceLocation && presenceLocation !== locationId) {
+        const presenceRow = locationOf(presenceLocation);
+        const isRoom = presenceRow ? String(presenceRow.kind ?? "") === "room" : false;
+        const insideFront = isAncestorOrSelf(locationId, presenceLocation);
+        if (isRoom || !insideFront) continue;
+      }
+      const originator = str4(front.originator_entity_id);
+      const explicit = explicitVisible.has(`${actorId}|${locationId}`) || originator !== null && explicitVisible.has(`${actorId}|${originator}`);
+      const standing = dwellAt(actorId, locationId);
+      const here = presenceLocation === locationId;
+      const basisDwell = here ? standing : 0;
+      if (basisDwell < PUBLIC_CONTACT_DWELL_S && !explicit) continue;
+      const atS = Math.max(firstAvailableAtS, fromS);
+      opportunities.push({
+        id: opportunityId({ kind: "same_location", subjectId: informationId, receiverEntityId: actorId, locationId, anchorS: firstAvailableAtS }),
+        kind: "same_location",
+        receiverEntityId: actorId,
+        informationId,
+        locationId,
+        atS,
+        requiresDwellS: PUBLIC_CONTACT_DWELL_S,
+        basis: {
+          frontId,
+          reach,
+          access,
+          dwellS: basisDwell,
+          presenceLocation,
+          explicitVisibility: explicit,
+          reason: explicit && basisDwell < PUBLIC_CONTACT_DWELL_S ? "explicit_hear_or_see" : "stayed_at_location"
+        }
+      });
+    }
+    for (const journey of loadRows(world, "journeys", "status = 'moving'", [])) {
+      const mover = str4(journey.mover_entity_id);
+      if (!mover || !characterById.has(mover) || alreadyKnows(informationId, mover)) continue;
+      const boundary = nextNodeBoundary(journey);
+      if (!boundary || boundary.toLocationId !== locationId) continue;
+      if (boundary.atS < Math.max(fromS, firstAvailableAtS) || boundary.atS > untilS) continue;
+      opportunities.push({
+        id: opportunityId({ kind: "route_passage", subjectId: informationId, receiverEntityId: mover, locationId, anchorS: boundary.atS }),
+        kind: "route_passage",
+        receiverEntityId: mover,
+        informationId,
+        locationId,
+        atS: boundary.atS,
+        requiresDwellS: 0,
+        basis: { frontId, journeyId: String(journey.id), routeId: boundary.routeId, nodeAtS: boundary.atS, reach, reason: "passing_node_in_transit" }
+      });
+    }
+  }
+  opportunities.sort((a, b) => a.atS !== b.atS ? a.atS - b.atS : a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  return opportunities;
+}
+var PUBLIC_CONTACT_DWELL_S, OPPORTUNITY_BUCKET_S;
+var init_atlas_sim_opportunities = __esm({
+  "src/atlas-sim-opportunities.ts"() {
+    "use strict";
+    init_atlas_db_runtime();
+    init_atlas_db_codec();
+    init_atlas_sim_position();
+    init_atlas_sim_actions();
+    init_atlas_sim_motion();
+    PUBLIC_CONTACT_DWELL_S = 60;
+    OPPORTUNITY_BUCKET_S = 3600;
+  }
+});
+
 // src/atlas-db-knowledge-view.ts
 var atlas_db_knowledge_view_exports = {};
 __export(atlas_db_knowledge_view_exports, {
   projectForPov: () => projectForPov,
   projectPortrayal: () => projectPortrayal,
-  projectPromptView: () => projectPromptView
+  projectPromptView: () => projectPromptView,
+  renderSqlSceneContext: () => renderSqlSceneContext
 });
 function rows2(db, table, sql, params) {
   return queryBound(db, sql, params).map((raw) => {
@@ -13948,8 +14552,13 @@ function projectPortrayal(world, scene) {
   };
 }
 function projectPromptView(world, query) {
-  const pov = projectForPov(world, { characterId: query.povId ?? null });
-  const portrayal = query.sceneLocationId || query.actorIds?.length ? projectPortrayal(world, { locationId: query.sceneLocationId ?? null, actorIds: query.actorIds }) : null;
+  const branch = queryBound(world.db, "SELECT pov_character_id FROM branches WHERE id = ?", [world.branchId])[0];
+  const candidates = queryBound(world.db, "SELECT id, location_id FROM characters WHERE branch_id = ? AND role = 'protagonist' AND status = 'active'", [world.branchId]);
+  const povId = query.povId ?? (branch?.pov_character_id ? String(branch.pov_character_id) : candidates.length === 1 ? String(candidates[0].id) : null);
+  const player = povId ? queryBound(world.db, "SELECT location_id FROM characters WHERE branch_id = ? AND id = ?", [world.branchId, povId])[0] : null;
+  const locationId = query.sceneLocationId ?? (player?.location_id ? String(player.location_id) : null);
+  const pov = projectForPov(world, { characterId: povId });
+  const portrayal = locationId || query.actorIds?.length ? projectPortrayal(world, { locationId, actorIds: query.actorIds }) : null;
   return {
     pov,
     portrayal,
@@ -13959,13 +14568,62 @@ function projectPromptView(world, query) {
     ]
   };
 }
+function renderSqlSceneContext(world) {
+  const projection = projectPromptView(world, {});
+  const clockS = Number(queryBound(world.db, "SELECT clock_s FROM branches WHERE id = ?", [world.branchId])[0]?.clock_s ?? 0);
+  const clean = (value) => String(value ?? "").replace(/[<>]/g, "").replace(/\s+/g, " ").trim().slice(0, 160);
+  const scene = [];
+  if (projection.pov.povId) {
+    const position = resolveEffectivePosition(world, projection.pov.povId);
+    const location = position.kind === "at_location" ? queryBound(world.db, "SELECT name FROM locations WHERE branch_id = ? AND id = ?", [world.branchId, position.locationId])[0] : null;
+    if (location) scene.push(`当前位置：${clean(location.name)}`);
+    if (position.kind === "in_transit") scene.push("当前位置：在途；不能把出发地或目的地当成已经抵达。");
+  }
+  const clues = [];
+  const included = /* @__PURE__ */ new Set();
+  const facts = projection.pov.knownFacts.filter((fact) => {
+    const info = queryBound(world.db, "SELECT status, created_at_s, expires_at_s FROM information WHERE branch_id = ? AND id = ?", [world.branchId, fact.informationId])[0];
+    const received = queryBound(
+      world.db,
+      "SELECT first_received_at_s FROM knowledge WHERE branch_id = ? AND information_id = ? AND status = ? AND " + (projection.pov.povId ? "knower_character_id = ?" : "is_pov = 1"),
+      projection.pov.povId ? [world.branchId, fact.informationId, "active", projection.pov.povId] : [world.branchId, fact.informationId, "active"]
+    )[0];
+    return info?.status === "active" && Number(info.created_at_s) <= clockS && Number(received?.first_received_at_s ?? Infinity) <= clockS && (info.expires_at_s == null || Number(info.expires_at_s) > clockS);
+  });
+  for (const fact of facts.slice(-5)) {
+    const label = fact.belief === "verified" ? "已核实的消息" : fact.belief === "rejected" ? "已否定的消息" : fact.belief === "doubted" ? "有争议的消息" : "听到的消息（尚未核实）";
+    clues.push(`${label}：${clean(fact.content || fact.title)}`);
+    included.add(fact.informationId);
+  }
+  if (projection.pov.povId) {
+    for (const opportunity of collectOpportunities({ fromS: Math.max(0, clockS - 3600), untilS: clockS }, world)) {
+      if (opportunity.receiverEntityId !== projection.pov.povId || !opportunity.informationId || included.has(opportunity.informationId)) continue;
+      if (!["same_location", "route_passage"].includes(opportunity.kind) || opportunity.basis.access != null && opportunity.basis.access !== "public") continue;
+      const front = queryBound(world.db, "SELECT audience_json FROM rumor_fronts WHERE branch_id = ? AND id = ?", [world.branchId, String(opportunity.basis.frontId ?? "")])[0];
+      if (!front) continue;
+      try {
+        if (JSON.parse(String(front.audience_json)).access !== "public") continue;
+      } catch {
+        continue;
+      }
+      const info = queryBound(world.db, "SELECT content, title FROM information WHERE branch_id = ? AND id = ? AND status = 'active' AND secrecy = 'public' AND created_at_s <= ? AND (expires_at_s IS NULL OR expires_at_s > ?)", [world.branchId, opportunity.informationId, clockS, clockS])[0];
+      if (!info) continue;
+      clues.push(`此地可接触的风声（不代表已经注意或核实）：${clean(info.content || info.title)}`);
+      included.add(opportunity.informationId);
+      if (clues.length >= 8) break;
+    }
+  }
+  return renderSceneContext(scene, clues);
+}
 var BASE_BOUNDARIES;
 var init_atlas_db_knowledge_view = __esm({
   "src/atlas-db-knowledge-view.ts"() {
     "use strict";
+    init_atlas_scene_context();
     init_atlas_db_runtime();
     init_atlas_db_codec();
     init_atlas_sim_position();
+    init_atlas_sim_opportunities();
     BASE_BOUNDARIES = [
       "字段级投影：只包含 knowledge 指向的信息与主角已确认的位置/身份。",
       "知道名字不等于读到全档案：description/personality/关系图不随名字一起暴露。",
@@ -15208,18 +15866,18 @@ init_atlas_db_defaults();
 init_atlas_db_schema();
 var LEGACY_WORLD_MAP_ID = "world";
 var USER_TABLES = Object.keys(ATLAS_TABLE_COLUMNS);
-function isPlainObject9(value) {
+function isPlainObject12(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function hasOwn2(obj, key) {
   return Object.prototype.hasOwnProperty.call(obj, key);
 }
-function str2(value) {
+function str5(value) {
   if (typeof value === "string") return value.trim();
   if (typeof value === "number" && Number.isFinite(value)) return String(value);
   return "";
 }
-function num2(value) {
+function num5(value) {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string" && value.trim().length > 0) {
     const parsed = Number(value);
@@ -15231,7 +15889,7 @@ function strList(value, max = 8) {
   if (!Array.isArray(value)) return [];
   const out = [];
   for (const item of value) {
-    const text2 = str2(item);
+    const text2 = str5(item);
     if (text2.length > 0 && !out.includes(text2) && out.length < max) out.push(text2);
   }
   return out;
@@ -15255,15 +15913,15 @@ function bump(mapped, key, by = 1) {
 }
 function locateAtlas(raw) {
   const problems = [];
-  if (!isPlainObject9(raw)) return { atlas: null, problems: ["SESSION_NOT_OBJECT"] };
+  if (!isPlainObject12(raw)) return { atlas: null, problems: ["SESSION_NOT_OBJECT"] };
   const meta = raw.chatMetadata;
-  if (meta !== void 0 && meta !== null && !isPlainObject9(meta)) {
+  if (meta !== void 0 && meta !== null && !isPlainObject12(meta)) {
     problems.push("CHAT_METADATA_NOT_OBJECT");
   }
-  let atlas = isPlainObject9(meta) ? meta.atlas : void 0;
+  let atlas = isPlainObject12(meta) ? meta.atlas : void 0;
   if (atlas === void 0 || atlas === null) atlas = raw.atlas;
   if (atlas === void 0 || atlas === null) return { atlas: null, problems };
-  if (!isPlainObject9(atlas)) {
+  if (!isPlainObject12(atlas)) {
     problems.push("ATLAS_NOT_OBJECT");
     return { atlas: null, problems };
   }
@@ -15272,7 +15930,7 @@ function locateAtlas(raw) {
 function collectPeriodLabels(atlas) {
   const labels = [];
   const push = (value) => {
-    const text2 = str2(value);
+    const text2 = str5(value);
     if (text2.length > 0 && !labels.includes(text2)) labels.push(text2);
   };
   push(atlas.period);
@@ -15280,7 +15938,7 @@ function collectPeriodLabels(atlas) {
   push(atlas.calendarLabel);
   push(atlas.calendar_label);
   const world = atlas.world;
-  if (isPlainObject9(world)) {
+  if (isPlainObject12(world)) {
     push(world.period);
     push(world.periodLabel);
     push(world.calendarLabel);
@@ -15294,19 +15952,19 @@ function readLegacySources(atlas) {
   const tablesRaw = atlas.tables;
   if (tablesRaw !== void 0 && tablesRaw !== null) {
     tablesPresent = true;
-    if (!isPlainObject9(tablesRaw)) {
+    if (!isPlainObject12(tablesRaw)) {
       problems.push("TABLES_NOT_OBJECT");
     } else if (hasOwn2(tablesRaw, "locations") || hasOwn2(tablesRaw, "characters") || hasOwn2(tablesRaw, "items")) {
       for (const key of ["locations", "characters", "items"]) {
         if (hasOwn2(tablesRaw, key) && !Array.isArray(tablesRaw[key])) problems.push(`${key.toUpperCase()}_NOT_ARRAY`);
       }
       tables.push({ key: "flat", payload: tablesRaw });
-    } else if (isPlainObject9(tablesRaw.branches)) {
+    } else if (isPlainObject12(tablesRaw.branches)) {
       const branchIds = Object.keys(tablesRaw.branches).sort();
       if (branchIds.length === 0) problems.push("TABLES_BRANCHES_EMPTY");
       for (const branchKey of branchIds) {
         const payload = tablesRaw.branches[branchKey];
-        if (!isPlainObject9(payload)) {
+        if (!isPlainObject12(payload)) {
           problems.push(`TABLES_BRANCH_${branchKey}_NOT_OBJECT`);
           continue;
         }
@@ -15321,7 +15979,7 @@ function readLegacySources(atlas) {
   }
   let world = null;
   if (atlas.world !== void 0 && atlas.world !== null) {
-    if (!isPlainObject9(atlas.world)) {
+    if (!isPlainObject12(atlas.world)) {
       problems.push("WORLD_NOT_OBJECT");
     } else {
       world = atlas.world;
@@ -15332,16 +15990,16 @@ function readLegacySources(atlas) {
   }
   let maps = null;
   if (atlas.maps !== void 0 && atlas.maps !== null) {
-    if (!isPlainObject9(atlas.maps)) problems.push("MAPS_NOT_OBJECT");
+    if (!isPlainObject12(atlas.maps)) problems.push("MAPS_NOT_OBJECT");
     else maps = atlas.maps;
   }
   let simulation = null;
   if (atlas.simulation !== void 0 && atlas.simulation !== null) {
-    if (!isPlainObject9(atlas.simulation)) {
+    if (!isPlainObject12(atlas.simulation)) {
       problems.push("SIMULATION_NOT_OBJECT");
     } else {
       simulation = atlas.simulation;
-      if (hasOwn2(simulation, "branches") && !isPlainObject9(simulation.branches)) problems.push("SIMULATION_BRANCHES_NOT_OBJECT");
+      if (hasOwn2(simulation, "branches") && !isPlainObject12(simulation.branches)) problems.push("SIMULATION_BRANCHES_NOT_OBJECT");
       for (const key of ["tasks", "signals", "deliveries"]) {
         if (hasOwn2(simulation, key) && !Array.isArray(simulation[key])) problems.push(`SIMULATION_${key.toUpperCase()}_NOT_ARRAY`);
       }
@@ -15365,11 +16023,11 @@ function rowList(payload, key) {
 function toCandidates(rows3, kind, origin, skipped) {
   const out = [];
   rows3.forEach((row2, index) => {
-    if (!isPlainObject9(row2)) {
+    if (!isPlainObject12(row2)) {
       skipped.push({ kind, legacyId: "", reason: `ROW_NOT_OBJECT@${origin}[${index}]` });
       return;
     }
-    out.push({ kind, legacyId: str2(row2.id), index, raw: row2, origin: `${origin}[${index}]` });
+    out.push({ kind, legacyId: str5(row2.id), index, raw: row2, origin: `${origin}[${index}]` });
   });
   return out;
 }
@@ -15379,17 +16037,17 @@ function worldCandidates(world, skipped) {
   const items = [];
   const points = Array.isArray(world.points) ? world.points : [];
   points.forEach((point, index) => {
-    if (!isPlainObject9(point)) {
+    if (!isPlainObject12(point)) {
       skipped.push({ kind: "location", legacyId: "", reason: `WORLD_POINT_NOT_OBJECT[${index}]` });
       return;
     }
     const raw = point.id;
-    const pointId = str2(raw);
+    const pointId = str5(raw);
     if (pointId.length === 0) {
       skipped.push({ kind: "location", legacyId: "", reason: `WORLD_POINT_ID_MISSING[${index}]` });
       return;
     }
-    const parentId = str2(point.parentPointId);
+    const parentId = str5(point.parentPointId);
     locations.push({
       kind: "location",
       legacyId: `loc:${pointId}`,
@@ -15397,7 +16055,7 @@ function worldCandidates(world, skipped) {
       origin: `$.world.points[${index}]`,
       raw: {
         id: `loc:${pointId}`,
-        name: str2(point.name) || `地点 ${pointId}`,
+        name: str5(point.name) || `地点 ${pointId}`,
         mapId: LEGACY_WORLD_MAP_ID,
         gridX: point.x,
         gridY: point.y,
@@ -15411,37 +16069,37 @@ function worldCandidates(world, skipped) {
   });
   const archiveNames = /* @__PURE__ */ new Map();
   for (const entry of Array.isArray(world.characters) ? world.characters : []) {
-    if (!isPlainObject9(entry)) continue;
-    const id = str2(entry.id);
+    if (!isPlainObject12(entry)) continue;
+    const id = str5(entry.id);
     if (id.length === 0) continue;
-    archiveNames.set(id, { name: str2(entry.name), description: str2(entry.description) });
+    archiveNames.set(id, { name: str5(entry.name), description: str5(entry.description) });
   }
   const records = Array.isArray(world.entityRecords) ? world.entityRecords : [];
   for (const record of records) {
-    if (!isPlainObject9(record)) continue;
-    const id = str2(record.id);
+    if (!isPlainObject12(record)) continue;
+    const id = str5(record.id);
     if (id.length === 0) continue;
-    const type = str2(record.type).toLowerCase();
+    const type = str5(record.type).toLowerCase();
     if (isCharacterType(type)) {
-      const baseline = isPlainObject9(record.baseline) ? record.baseline : {};
-      archiveNames.set(id, { name: str2(record.name), description: str2(baseline.description ?? baseline.summary) });
+      const baseline = isPlainObject12(record.baseline) ? record.baseline : {};
+      archiveNames.set(id, { name: str5(record.name), description: str5(baseline.description ?? baseline.summary) });
     }
   }
   const states = Array.isArray(world.characterStates) ? world.characterStates : [];
   const seenCharacters = /* @__PURE__ */ new Set();
   states.forEach((state, index) => {
-    if (!isPlainObject9(state)) {
+    if (!isPlainObject12(state)) {
       skipped.push({ kind: "character", legacyId: "", reason: `WORLD_CHARACTER_STATE_NOT_OBJECT[${index}]` });
       return;
     }
-    const characterId = str2(state.characterId);
+    const characterId = str5(state.characterId);
     if (characterId.length === 0) {
       skipped.push({ kind: "character", legacyId: "", reason: `WORLD_CHARACTER_ID_MISSING[${index}]` });
       return;
     }
     seenCharacters.add(characterId);
     const archive = archiveNames.get(characterId);
-    const pointId = str2(state.currentPointId);
+    const pointId = str5(state.currentPointId);
     characters.push({
       kind: "character",
       legacyId: `npc:${characterId}`,
@@ -15452,7 +16110,7 @@ function worldCandidates(world, skipped) {
         name: archive?.name || characterId,
         description: archive?.description ?? "",
         locationId: pointId.length > 0 ? `loc:${pointId}` : null,
-        currentAction: str2(state.status),
+        currentAction: str5(state.status),
         presence: null
       }
     });
@@ -15471,20 +16129,20 @@ function worldCandidates(world, skipped) {
   }
   let itemIndex = 0;
   for (const record of records) {
-    if (!isPlainObject9(record)) {
+    if (!isPlainObject12(record)) {
       skipped.push({ kind: "item", legacyId: "", reason: "WORLD_ENTITY_NOT_OBJECT" });
       continue;
     }
-    const id = str2(record.id);
+    const id = str5(record.id);
     if (id.length === 0) {
       skipped.push({ kind: "item", legacyId: "", reason: "WORLD_ENTITY_ID_MISSING" });
       continue;
     }
-    const type = str2(record.type).toLowerCase();
+    const type = str5(record.type).toLowerCase();
     if (isCharacterType(type) || isFactionType(type) || isNonItemType(type)) continue;
-    const baseline = isPlainObject9(record.baseline) ? record.baseline : {};
-    const anchor = isPlainObject9(record.mapAnchor) ? record.mapAnchor : null;
-    const pointId = anchor ? str2(anchor.pointId) : "";
+    const baseline = isPlainObject12(record.baseline) ? record.baseline : {};
+    const anchor = isPlainObject12(record.mapAnchor) ? record.mapAnchor : null;
+    const pointId = anchor ? str5(anchor.pointId) : "";
     items.push({
       kind: "item",
       legacyId: `item:${id}`,
@@ -15492,10 +16150,10 @@ function worldCandidates(world, skipped) {
       origin: `$.world.entityRecords[${itemIndex}]`,
       raw: {
         id: `item:${id}`,
-        name: str2(record.name) || id,
-        description: str2(baseline.description ?? baseline.summary),
-        status: str2(baseline.status),
-        holderCharacterId: str2(baseline.holderCharacterId ?? baseline.holder ?? baseline.owner) || null,
+        name: str5(record.name) || id,
+        description: str5(baseline.description ?? baseline.summary),
+        status: str5(baseline.status),
+        holderCharacterId: str5(baseline.holderCharacterId ?? baseline.holder ?? baseline.owner) || null,
         locationId: pointId.length > 0 ? `loc:${pointId}` : null
       }
     });
@@ -15557,16 +16215,16 @@ function collectEntityCandidates(raw, branchId) {
   if (sources.world) {
     const records = Array.isArray(sources.world.entityRecords) ? sources.world.entityRecords : [];
     records.forEach((record, index) => {
-      if (!isPlainObject9(record)) return;
-      if (!isFactionType(str2(record.type).toLowerCase())) return;
-      const id = str2(record.id);
-      const baseline = isPlainObject9(record.baseline) ? record.baseline : {};
+      if (!isPlainObject12(record)) return;
+      if (!isFactionType(str5(record.type).toLowerCase())) return;
+      const id = str5(record.id);
+      const baseline = isPlainObject12(record.baseline) ? record.baseline : {};
       factions.push({
         kind: "faction",
         legacyId: id,
         index,
         origin: `$.world.entityRecords[${index}]`,
-        raw: { id, name: str2(record.name) || id, description: str2(baseline.description ?? baseline.summary) }
+        raw: { id, name: str5(record.name) || id, description: str5(baseline.description ?? baseline.summary) }
       });
     });
   }
@@ -15578,10 +16236,10 @@ function collectEntityCandidates(raw, branchId) {
     const list = character.raw.relations;
     if (!Array.isArray(list)) continue;
     list.forEach((entry, index) => {
-      const raw2 = isPlainObject9(entry) ? { subjectId: character.legacyId, ...entry } : { subjectId: character.legacyId, description: str2(entry) };
+      const raw2 = isPlainObject12(entry) ? { subjectId: character.legacyId, ...entry } : { subjectId: character.legacyId, description: str5(entry) };
       relations.push({
         kind: "relation",
-        legacyId: str2(raw2.id),
+        legacyId: str5(raw2.id),
         index,
         raw: raw2,
         origin: `${character.origin}.relations[${index}]`
@@ -15591,7 +16249,7 @@ function collectEntityCandidates(raw, branchId) {
   const rumors = [];
   for (const location of locations) {
     for (const text2 of strList(location.raw.rumors, 20)) {
-      rumors.push({ locationId: location.legacyId, locationName: str2(location.raw.name), text: text2, origin: `${location.origin}.rumors` });
+      rumors.push({ locationId: location.legacyId, locationName: str5(location.raw.name), text: text2, origin: `${location.origin}.rumors` });
     }
   }
   return { locations, characters, items, factions, relations, rumors, skipped, branchKey, others, problems };
@@ -15604,7 +16262,7 @@ function countMaps(sources) {
   if (sources.maps) {
     maps = 1;
     const submaps = sources.maps.submaps;
-    if (isPlainObject9(submaps)) maps += Object.keys(submaps).length;
+    if (isPlainObject12(submaps)) maps += Object.keys(submaps).length;
   }
   return maps;
 }
@@ -15613,11 +16271,11 @@ function countSimulationTasks(sources) {
   if (!simulation) return 0;
   if (Array.isArray(simulation.tasks)) return simulation.tasks.length;
   const branches = simulation.branches;
-  if (!isPlainObject9(branches)) return 0;
+  if (!isPlainObject12(branches)) return 0;
   let total = 0;
   for (const key of Object.keys(branches).sort()) {
     const branch = branches[key];
-    if (isPlainObject9(branch) && Array.isArray(branch.tasks)) total += branch.tasks.length;
+    if (isPlainObject12(branch) && Array.isArray(branch.tasks)) total += branch.tasks.length;
   }
   return total;
 }
@@ -15639,7 +16297,7 @@ function inspectLegacySession(raw) {
     }
   }
   if (raw === void 0 || raw === null) return empty("empty", "NO_SESSION_DOCUMENT");
-  if (!isPlainObject9(raw)) return empty("corrupt", `SESSION_NOT_OBJECT: ${typeof raw}`);
+  if (!isPlainObject12(raw)) return empty("corrupt", `SESSION_NOT_OBJECT: ${typeof raw}`);
   const located = locateAtlas(raw);
   if (located.problems.length > 0 && located.atlas === null) {
     return empty("corrupt", located.problems.join(", "));
@@ -15647,11 +16305,11 @@ function inspectLegacySession(raw) {
   if (located.atlas === null) return empty("empty", "NO_ATLAS_METADATA");
   const atlas = located.atlas;
   if (atlas.database !== void 0 && atlas.database !== null) {
-    if (!isPlainObject9(atlas.database)) return empty("corrupt", "DATABASE_ENVELOPE_NOT_OBJECT");
+    if (!isPlainObject12(atlas.database)) return empty("corrupt", "DATABASE_ENVELOPE_NOT_OBJECT");
     const envelope = atlas.database;
-    const format = str2(envelope.format);
+    const format = str5(envelope.format);
     const data = typeof envelope.data === "string" ? envelope.data : "";
-    const schemaVersion = num2(envelope.schema_version);
+    const schemaVersion = num5(envelope.schema_version);
     if (format !== "atlas-sqlite" || schemaVersion === null || data.length === 0) {
       return empty("corrupt", `DATABASE_ENVELOPE_INVALID: format=${format || "missing"}, data=${data.length}B, schema_version=${schemaVersion ?? "missing"}`);
     }
@@ -15682,34 +16340,34 @@ function inspectLegacySession(raw) {
   let items = 0;
   let factions = 0;
   for (const candidate of candidates.locations) {
-    if (str2(candidate.raw.name).length === 0) {
+    if (str5(candidate.raw.name).length === 0) {
       skipped.push({ kind: "location", legacyId: candidate.legacyId, reason: "NAME_MISSING" });
       continue;
     }
     locations += 1;
   }
   for (const candidate of candidates.characters) {
-    if (str2(candidate.raw.name).length === 0) {
+    if (str5(candidate.raw.name).length === 0) {
       skipped.push({ kind: "character", legacyId: candidate.legacyId, reason: "NAME_MISSING" });
       continue;
     }
     characters += 1;
   }
   for (const candidate of candidates.items) {
-    if (str2(candidate.raw.name).length === 0) {
+    if (str5(candidate.raw.name).length === 0) {
       skipped.push({ kind: "item", legacyId: candidate.legacyId, reason: "NAME_MISSING" });
       continue;
     }
     items += 1;
   }
   for (const candidate of candidates.factions) {
-    if (str2(candidate.raw.name).length === 0) {
+    if (str5(candidate.raw.name).length === 0) {
       skipped.push({ kind: "faction", legacyId: candidate.legacyId, reason: "NAME_MISSING" });
       continue;
     }
     factions += 1;
   }
-  const knownLocations = new Set(candidates.locations.filter((c) => str2(c.raw.name).length > 0).map((c) => c.legacyId));
+  const knownLocations = new Set(candidates.locations.filter((c) => str5(c.raw.name).length > 0).map((c) => c.legacyId));
   const fronts = candidates.rumors.filter((rumor) => knownLocations.has(rumor.locationId)).length;
   const plan = {
     entityKeys: locations + characters + items + factions,
@@ -15740,7 +16398,7 @@ var ITEM_STATUSES = /* @__PURE__ */ new Set(["active", "consumed", "destroyed", 
 var FACTION_KINDS2 = /* @__PURE__ */ new Set(["nation", "organization", "family", "team", "other"]);
 var RELATION_KINDS2 = /* @__PURE__ */ new Set(["member_of", "leads", "controls", "knows", "kinship", "ally", "hostile", "owes", "protects", "other"]);
 function mapLocationKind(value) {
-  const key = str2(value).toLowerCase();
+  const key = str5(value).toLowerCase();
   if (LOCATION_KINDS2.has(key)) return key;
   const aliases = {
     town: "city",
@@ -15783,7 +16441,7 @@ function containerMapKind(locationKind) {
   return "site";
 }
 function mapItemKind(value) {
-  const key = str2(value).toLowerCase();
+  const key = str5(value).toLowerCase();
   if (ITEM_KINDS2.has(key)) return key;
   if (["weapon", "armor", "tool", "equipment", "武器", "装备", "护甲"].includes(key)) return "equipment";
   if (["book", "letter", "document", "书籍", "信件", "文件"].includes(key)) return "document";
@@ -15792,7 +16450,7 @@ function mapItemKind(value) {
   return "other";
 }
 function mapItemStatus(value) {
-  const key = str2(value).toLowerCase();
+  const key = str5(value).toLowerCase();
   if (ITEM_STATUSES.has(key)) return key;
   if (["已销毁", "destroyed", "destroy"].includes(key)) return "destroyed";
   if (["已消耗", "consumed", "used"].includes(key)) return "consumed";
@@ -15802,7 +16460,7 @@ function mapItemStatus(value) {
   return "active";
 }
 function mapPhysicalStatus(value) {
-  const key = str2(value).toLowerCase();
+  const key = str5(value).toLowerCase();
   if (["alive", "incapacitated", "dead", "unknown"].includes(key)) return key;
   if (["存活", "活着", "alive"].includes(key)) return "alive";
   if (["死亡", "已死", "dead"].includes(key)) return "dead";
@@ -15810,21 +16468,21 @@ function mapPhysicalStatus(value) {
   return "unknown";
 }
 function mapImportance(value) {
-  const key = str2(value).toLowerCase();
+  const key = str5(value).toLowerCase();
   if (["core", "recurring", "supporting"].includes(key)) return key;
   if (["核心", "关键", "core", "main"].includes(key)) return "core";
   if (["常驻", "重要", "recurring"].includes(key)) return "recurring";
   return "supporting";
 }
 function mapRole(value) {
-  const key = str2(value).toLowerCase();
+  const key = str5(value).toLowerCase();
   if (["protagonist", "companion", "npc"].includes(key)) return key;
   if (["主角", "主人公", "protagonist"].includes(key)) return "protagonist";
   if (["同伴", "伙伴", "companion"].includes(key)) return "companion";
   return "npc";
 }
 function mapFactionKind(value) {
-  const key = str2(value).toLowerCase();
+  const key = str5(value).toLowerCase();
   if (FACTION_KINDS2.has(key)) return key;
   if (["国家", "王国", "nation", "country"].includes(key)) return "nation";
   if (["家族", "family", "clan"].includes(key)) return "family";
@@ -15833,7 +16491,7 @@ function mapFactionKind(value) {
   return "other";
 }
 function mapRelationKind(value) {
-  const key = str2(value).toLowerCase();
+  const key = str5(value).toLowerCase();
   if (RELATION_KINDS2.has(key)) return key;
   const aliases = {
     member: "member_of",
@@ -15907,7 +16565,7 @@ var PERIOD_FIELDS = ["period", "createdPeriod", "publishedPeriod", "receivedPeri
 function findPeriodLabel(raw) {
   for (const field of PERIOD_FIELDS) {
     if (hasOwn2(raw, field)) {
-      const value = str2(raw[field]);
+      const value = str5(raw[field]);
       if (value.length > 0) return `${field}=${value}`;
     }
   }
@@ -15948,7 +16606,7 @@ function resolveMapRef(db, ctx, state, legacyMapId, mapsDoc, locationById) {
         db,
         "maps",
         {
-          name: str2(mapsDoc?.name) || "世界图",
+          name: str5(mapsDoc?.name) || "世界图",
           kind: "world",
           frame_json: frame,
           meters_per_cell: calibration,
@@ -15973,7 +16631,7 @@ function resolveMapRef(db, ctx, state, legacyMapId, mapsDoc, locationById) {
     return LEGACY_WORLD_MAP_ID;
   }
   if (mapsDoc) {
-    const submaps = isPlainObject9(mapsDoc.submaps) ? mapsDoc.submaps : null;
+    const submaps = isPlainObject12(mapsDoc.submaps) ? mapsDoc.submaps : null;
     const pointKey = legacyMapId.startsWith("loc:") ? legacyMapId.slice(4) : legacyMapId;
     const described = submaps !== null && (hasOwn2(submaps, legacyMapId) || hasOwn2(submaps, pointKey));
     const host = locationById.get(legacyMapId);
@@ -16043,24 +16701,24 @@ function resolveMapRef(db, ctx, state, legacyMapId, mapsDoc, locationById) {
 function mapsFrame(mapsDoc) {
   const fallback = { origin_x: 0, origin_y: 0, reference_width_cells: 100, reference_height_cells: 100 };
   if (!mapsDoc) return fallback;
-  const frame = isPlainObject9(mapsDoc.frame) ? mapsDoc.frame : null;
+  const frame = isPlainObject12(mapsDoc.frame) ? mapsDoc.frame : null;
   if (!frame) return fallback;
-  const cols2 = num2(frame.cols) ?? num2(frame.reference_width_cells);
-  const rows3 = num2(frame.rows) ?? num2(frame.reference_height_cells);
+  const cols2 = num5(frame.cols) ?? num5(frame.reference_width_cells);
+  const rows3 = num5(frame.rows) ?? num5(frame.reference_height_cells);
   return {
-    origin_x: num2(frame.origin_x) ?? 0,
-    origin_y: num2(frame.origin_y) ?? 0,
+    origin_x: num5(frame.origin_x) ?? 0,
+    origin_y: num5(frame.origin_y) ?? 0,
     reference_width_cells: cols2 !== null && cols2 > 0 ? cols2 : fallback.reference_width_cells,
     reference_height_cells: rows3 !== null && rows3 > 0 ? rows3 : fallback.reference_height_cells
   };
 }
 function mapsCalibration(mapsDoc, mapId) {
   if (!mapsDoc) return null;
-  const calibrations = isPlainObject9(mapsDoc.calibrations) ? mapsDoc.calibrations : null;
+  const calibrations = isPlainObject12(mapsDoc.calibrations) ? mapsDoc.calibrations : null;
   if (!calibrations) return null;
   const entry = calibrations[mapId];
-  if (!isPlainObject9(entry)) return null;
-  const distancePerCell = num2(entry.distancePerCell) ?? num2(entry.metersPerCell) ?? num2(entry.meters_per_cell);
+  if (!isPlainObject12(entry)) return null;
+  const distancePerCell = num5(entry.distancePerCell) ?? num5(entry.metersPerCell) ?? num5(entry.meters_per_cell);
   return distancePerCell !== null && distancePerCell > 0 ? distancePerCell : null;
 }
 function migrateLegacyEntities(plan, raw, db, ctx) {
@@ -16164,7 +16822,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
     const locationById = /* @__PURE__ */ new Map();
     const legacyToSql = /* @__PURE__ */ new Map();
     for (const candidate of candidates.locations) {
-      const name = str2(candidate.raw.name);
+      const name = str5(candidate.raw.name);
       if (name.length === 0) {
         skipped.push({ kind: "location", legacyId: candidate.legacyId, reason: "NAME_MISSING" });
         issues.push(describeProblem(candidate.origin, `旧地点缺少名称：不编造地名，保留在 skipped`, "LEGACY_NAME_MISSING"));
@@ -16186,15 +16844,15 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
         issues.push(issue11("ENTITY_KEY_KIND_CONFLICT", candidate.origin, `entity_keys 里 ${id} 已是 ${keyKind}，不能同时是地点`, "error", false));
         continue;
       }
-      const parentLegacyId = str2(candidate.raw.parentLocationId ?? candidate.raw.parentRef ?? candidate.raw.parentId);
+      const parentLegacyId = str5(candidate.raw.parentLocationId ?? candidate.raw.parentRef ?? candidate.raw.parentId);
       const parentId = parentLegacyId.length > 0 ? legacyToSql.get(parentLegacyId) ?? (rowExists(db, "locations", ctx.branchId, parentLegacyId) ? parentLegacyId : null) : null;
       if (parentLegacyId.length > 0 && parentId === null) {
         issues.push(describeProblem(candidate.origin, `旧父地点 ${parentLegacyId} 未迁移/不存在：${name} 保留为根地点，不伪造父子关系`, "LEGACY_PARENT_UNRESOLVED"));
       }
-      const legacyMapId = str2(candidate.raw.mapId ?? candidate.raw.map_id);
+      const legacyMapId = str5(candidate.raw.mapId ?? candidate.raw.map_id);
       const mapId = resolveMapRef(db, ctx, mapState, legacyMapId, mapsDoc, locationById);
-      const gridX = num2(candidate.raw.gridX ?? candidate.raw.x);
-      const gridY = num2(candidate.raw.gridY ?? candidate.raw.y);
+      const gridX = num5(candidate.raw.gridX ?? candidate.raw.x);
+      const gridY = num5(candidate.raw.gridY ?? candidate.raw.y);
       const hasGrid = mapId !== null && gridX !== null && gridY !== null;
       const created = withSavepoint(db, () => {
         insertEntityKey(db, ctx.branchId, id, "location");
@@ -16205,14 +16863,14 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
             name,
             aliases_json: strList(candidate.raw.aliases ?? candidate.raw.aliases_json),
             kind,
-            description: str2(candidate.raw.description),
+            description: str5(candidate.raw.description),
             parent_location_id: parentId,
-            mobility: str2(candidate.raw.mobility) === "mobile" ? "mobile" : "fixed",
+            mobility: str5(candidate.raw.mobility) === "mobile" ? "mobile" : "fixed",
             map_id: hasGrid ? mapId : null,
             grid_x: hasGrid ? gridX : null,
             grid_y: hasGrid ? gridY : null,
-            coord_precision: hasGrid ? str2(candidate.raw.coordinateStatus) === "confirmed" ? "exact" : "approximate" : "unknown",
-            terrain: str2(candidate.raw.terrain) || "unknown",
+            coord_precision: hasGrid ? str5(candidate.raw.coordinateStatus) === "confirmed" ? "exact" : "approximate" : "unknown",
+            terrain: str5(candidate.raw.terrain) || "unknown",
             existence_quality: "confirmed",
             status: mapLocationStatus(candidate.raw.status)
           },
@@ -16240,7 +16898,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
     }
     const factionIds = /* @__PURE__ */ new Map();
     for (const candidate of candidates.factions) {
-      const name = str2(candidate.raw.name);
+      const name = str5(candidate.raw.name);
       if (name.length === 0) {
         skipped.push({ kind: "faction", legacyId: candidate.legacyId, reason: "NAME_MISSING" });
         continue;
@@ -16258,7 +16916,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
         skipped.push({ kind: "faction", legacyId: candidate.legacyId || name, reason: keyKind });
         continue;
       }
-      const headquartersRef = str2(candidate.raw.headquartersLocationId ?? candidate.raw.headquartersRef);
+      const headquartersRef = str5(candidate.raw.headquartersLocationId ?? candidate.raw.headquartersRef);
       const headquartersId = headquartersRef.length > 0 ? legacyToSql.get(headquartersRef) ?? null : null;
       const created = withSavepoint(db, () => {
         insertEntityKey(db, ctx.branchId, id, "faction");
@@ -16269,8 +16927,8 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
             name,
             aliases_json: strList(candidate.raw.aliases),
             kind: mapFactionKind(candidate.raw.kind ?? candidate.raw.type),
-            description: str2(candidate.raw.description),
-            goal: str2(candidate.raw.goal),
+            description: str5(candidate.raw.description),
+            goal: str5(candidate.raw.goal),
             headquarters_location_id: headquartersId
           },
           { ...rowCtx, id }
@@ -16286,7 +16944,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
       bump(mapped, "kind:entityKeys");
     }
     for (const candidate of candidates.characters) {
-      const name = str2(candidate.raw.name);
+      const name = str5(candidate.raw.name);
       if (name.length === 0) {
         skipped.push({ kind: "character", legacyId: candidate.legacyId, reason: "NAME_MISSING" });
         issues.push(describeProblem(candidate.origin, "旧人物缺少名称：不编造人名，保留在 skipped", "LEGACY_NAME_MISSING"));
@@ -16305,7 +16963,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
         issues.push(issue11("ENTITY_KEY_KIND_CONFLICT", candidate.origin, `entity_keys 里 ${id} 已是 ${keyKind}，不能同时是人物`, "error", false));
         continue;
       }
-      const locationLegacyId = str2(candidate.raw.locationId ?? candidate.raw.locationRef ?? candidate.raw.location_id);
+      const locationLegacyId = str5(candidate.raw.locationId ?? candidate.raw.locationRef ?? candidate.raw.location_id);
       const locationId = locationLegacyId.length > 0 ? legacyToSql.get(locationLegacyId) ?? (rowExists(db, "locations", ctx.branchId, locationLegacyId) ? locationLegacyId : null) : null;
       if (locationLegacyId.length > 0 && locationId === null) {
         issues.push(
@@ -16316,10 +16974,10 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
           )
         );
       }
-      const legacyMapId = str2(candidate.raw.mapId ?? candidate.raw.map_id);
+      const legacyMapId = str5(candidate.raw.mapId ?? candidate.raw.map_id);
       const mapId = resolveMapRef(db, ctx, mapState, legacyMapId, mapsDoc, locationById);
-      const gridX = num2(candidate.raw.gridX ?? candidate.raw.x);
-      const gridY = num2(candidate.raw.gridY ?? candidate.raw.y);
+      const gridX = num5(candidate.raw.gridX ?? candidate.raw.x);
+      const gridY = num5(candidate.raw.gridY ?? candidate.raw.y);
       const hasGrid = mapId !== null && gridX !== null && gridY !== null;
       const created = withSavepoint(db, () => {
         insertEntityKey(db, ctx.branchId, id, "character");
@@ -16330,20 +16988,20 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
             name,
             aliases_json: strList(candidate.raw.aliases),
             role: mapRole(candidate.raw.role),
-            identity: str2(candidate.raw.identity),
-            description: str2(candidate.raw.description),
-            personality: str2(candidate.raw.personality),
+            identity: str5(candidate.raw.identity),
+            description: str5(candidate.raw.description),
+            personality: str5(candidate.raw.personality),
             importance: mapImportance(candidate.raw.importance),
-            importance_reason: str2(candidate.raw.importanceReason) || "迁移自旧档",
-            thought: str2(candidate.raw.thought),
-            action_tendency: str2(candidate.raw.actionTendency ?? candidate.raw.action_tendency),
+            importance_reason: str5(candidate.raw.importanceReason) || "迁移自旧档",
+            thought: str5(candidate.raw.thought),
+            action_tendency: str5(candidate.raw.actionTendency ?? candidate.raw.action_tendency),
             physical_status: mapPhysicalStatus(candidate.raw.physicalStatus ?? candidate.raw.physical_status),
-            condition_note: str2(candidate.raw.conditionNote),
+            condition_note: str5(candidate.raw.conditionNote),
             location_id: locationId,
             map_id: hasGrid ? mapId : null,
             grid_x: hasGrid ? gridX : null,
             grid_y: hasGrid ? gridY : null,
-            coord_precision: hasGrid ? str2(candidate.raw.coordinateStatus) === "confirmed" ? "exact" : "approximate" : "unknown",
+            coord_precision: hasGrid ? str5(candidate.raw.coordinateStatus) === "confirmed" ? "exact" : "approximate" : "unknown",
             mobility_profiles_json: Array.isArray(candidate.raw.mobilityProfiles) ? candidate.raw.mobilityProfiles : [],
             capabilities_json: Array.isArray(candidate.raw.capabilities) ? candidate.raw.capabilities : [],
             status: "active"
@@ -16362,7 +17020,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
       mapped[`legacy:${candidate.legacyId || id}`] = mapped["kind:characters"] ?? 1;
     }
     for (const candidate of candidates.items) {
-      const name = str2(candidate.raw.name);
+      const name = str5(candidate.raw.name);
       if (name.length === 0) {
         skipped.push({ kind: "item", legacyId: candidate.legacyId, reason: "NAME_MISSING" });
         issues.push(describeProblem(candidate.origin, "旧物品缺少名称：不编造名称，保留在 skipped", "LEGACY_NAME_MISSING"));
@@ -16380,7 +17038,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
         skipped.push({ kind: "item", legacyId: candidate.legacyId, reason: keyKind });
         continue;
       }
-      const holderLegacyId = str2(candidate.raw.holderCharacterId ?? candidate.raw.holderRef ?? candidate.raw.holder);
+      const holderLegacyId = str5(candidate.raw.holderCharacterId ?? candidate.raw.holderRef ?? candidate.raw.holder);
       const holderId = holderLegacyId.length > 0 ? legacyToSql.get(holderLegacyId) ?? (rowExists(db, "characters", ctx.branchId, holderLegacyId) ? holderLegacyId : null) : null;
       if (holderLegacyId.length > 0 && holderId === null) {
         issues.push(
@@ -16391,7 +17049,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
           )
         );
       }
-      const locationLegacyId = str2(candidate.raw.locationId ?? candidate.raw.locationRef ?? candidate.raw.location_id);
+      const locationLegacyId = str5(candidate.raw.locationId ?? candidate.raw.locationRef ?? candidate.raw.location_id);
       const locationId = holderId !== null ? null : locationLegacyId.length > 0 ? legacyToSql.get(locationLegacyId) ?? (rowExists(db, "locations", ctx.branchId, locationLegacyId) ? locationLegacyId : null) : null;
       if (holderId === null && locationLegacyId.length > 0 && locationId === null) {
         issues.push(
@@ -16402,14 +17060,14 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
           )
         );
       }
-      const legacyMapId = str2(candidate.raw.mapId ?? candidate.raw.map_id);
+      const legacyMapId = str5(candidate.raw.mapId ?? candidate.raw.map_id);
       const mapId = holderId === null ? resolveMapRef(db, ctx, mapState, legacyMapId, mapsDoc, locationById) : null;
-      const gridX = num2(candidate.raw.gridX ?? candidate.raw.x);
-      const gridY = num2(candidate.raw.gridY ?? candidate.raw.y);
+      const gridX = num5(candidate.raw.gridX ?? candidate.raw.x);
+      const gridY = num5(candidate.raw.gridY ?? candidate.raw.y);
       const hasGrid = mapId !== null && gridX !== null && gridY !== null;
-      const ownerLegacyId = str2(candidate.raw.ownerEntityId ?? candidate.raw.ownerRef ?? candidate.raw.owner);
+      const ownerLegacyId = str5(candidate.raw.ownerEntityId ?? candidate.raw.ownerRef ?? candidate.raw.owner);
       const ownerId = ownerLegacyId.length > 0 ? legacyToSql.get(ownerLegacyId) ?? (entityKeyExists(db, ctx.branchId, ownerLegacyId) ? ownerLegacyId : null) : null;
-      const quantity = num2(candidate.raw.quantity);
+      const quantity = num5(candidate.raw.quantity);
       const created = withSavepoint(db, () => {
         insertEntityKey(db, ctx.branchId, id, "item");
         insertRow(
@@ -16419,17 +17077,17 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
             name,
             aliases_json: strList(candidate.raw.aliases),
             kind: mapItemKind(candidate.raw.kind ?? candidate.raw.type),
-            description: str2(candidate.raw.description),
+            description: str5(candidate.raw.description),
             quantity: quantity !== null && quantity >= 0 ? quantity : null,
-            unit: str2(candidate.raw.unit) || "件",
-            condition_note: str2(candidate.raw.conditionNote),
+            unit: str5(candidate.raw.unit) || "件",
+            condition_note: str5(candidate.raw.conditionNote),
             owner_entity_id: ownerId,
             holder_character_id: holderId,
             location_id: locationId,
             map_id: hasGrid ? mapId : null,
             grid_x: hasGrid ? gridX : null,
             grid_y: hasGrid ? gridY : null,
-            coord_precision: hasGrid ? str2(candidate.raw.coordinateStatus) === "confirmed" ? "exact" : "approximate" : "unknown",
+            coord_precision: hasGrid ? str5(candidate.raw.coordinateStatus) === "confirmed" ? "exact" : "approximate" : "unknown",
             properties_json: Array.isArray(candidate.raw.properties) ? candidate.raw.properties : [],
             status: mapItemStatus(candidate.raw.status)
           },
@@ -16511,13 +17169,13 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
       if (originLocationId !== null) bump(mapped, "kind:fronts");
     }
     for (const candidate of candidates.relations) {
-      const description = str2(candidate.raw.description ?? candidate.raw.text ?? candidate.raw.note);
-      const subjectRef = str2(candidate.raw.subjectId ?? candidate.raw.subjectEntityId ?? candidate.raw.subjectRef ?? candidate.raw.from ?? candidate.raw.subject);
-      const objectRef = str2(candidate.raw.objectId ?? candidate.raw.objectEntityId ?? candidate.raw.objectRef ?? candidate.raw.to ?? candidate.raw.object);
+      const description = str5(candidate.raw.description ?? candidate.raw.text ?? candidate.raw.note);
+      const subjectRef = str5(candidate.raw.subjectId ?? candidate.raw.subjectEntityId ?? candidate.raw.subjectRef ?? candidate.raw.from ?? candidate.raw.subject);
+      const objectRef = str5(candidate.raw.objectId ?? candidate.raw.objectEntityId ?? candidate.raw.objectRef ?? candidate.raw.to ?? candidate.raw.object);
       const subjectId = subjectRef.length > 0 ? legacyToSql.get(subjectRef) ?? (entityKeyExists(db, ctx.branchId, subjectRef) ? subjectRef : null) : null;
       const objectId = objectRef.length > 0 ? legacyToSql.get(objectRef) ?? (entityKeyExists(db, ctx.branchId, objectRef) ? objectRef : null) : null;
       if (subjectId === null || objectId === null) {
-        const reason = objectRef.length === 0 && subjectId !== null ? `RELATION_OBJECT_UNRESOLVED: ${clip(description || str2(candidate.raw.label) || "(无描述)", 120)}` : `RELATION_ENDPOINT_UNRESOLVED: subject=${subjectRef || "missing"} object=${objectRef || "missing"} description=${clip(description, 120)}`;
+        const reason = objectRef.length === 0 && subjectId !== null ? `RELATION_OBJECT_UNRESOLVED: ${clip(description || str5(candidate.raw.label) || "(无描述)", 120)}` : `RELATION_ENDPOINT_UNRESOLVED: subject=${subjectRef || "missing"} object=${objectRef || "missing"} description=${clip(description, 120)}`;
         skipped.push({ kind: "relation", legacyId: candidate.legacyId, reason });
         issues.push(
           describeProblem(
@@ -16533,7 +17191,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
         continue;
       }
       const kind = mapRelationKind(candidate.raw.kind);
-      const label = str2(candidate.raw.label);
+      const label = str5(candidate.raw.label);
       const duplicate = queryOne(
         db,
         "SELECT id FROM relations WHERE branch_id = ? AND subject_entity_id = ? AND object_entity_id = ? AND kind = ? AND label = ? LIMIT 1",
@@ -16594,13 +17252,13 @@ function checkEntityKey(db, branchId, id, kind) {
 function resolveCandidateId(candidate, ctx, issues, extraAlias = "") {
   const legacyId = candidate.legacyId;
   if (legacyId.length > 0) return legacyId;
-  const alias = `${candidate.kind}:${extraAlias || str2(candidate.raw.name)}#${candidate.index}`;
+  const alias = `${candidate.kind}:${extraAlias || str5(candidate.raw.name)}#${candidate.index}`;
   const minted = ctx.makeId(candidate.kind, `migration.${candidate.kind}`, alias);
   issues.push(
     issue11(
       "LEGACY_ID_MINTED",
       candidate.origin,
-      `旧${candidate.kind}「${str2(candidate.raw.name)}」缺少 id：按旧档内容铸造确定性 ID ${minted}（同输入必得同 ID，重复导入可识别）`,
+      `旧${candidate.kind}「${str5(candidate.raw.name)}」缺少 id：按旧档内容铸造确定性 ID ${minted}（同输入必得同 ID，重复导入可识别）`,
       "warning",
       false
     )
@@ -16608,7 +17266,7 @@ function resolveCandidateId(candidate, ctx, issues, extraAlias = "") {
   return minted;
 }
 function mapLocationStatus(value) {
-  const key = str2(value).toLowerCase();
+  const key = str5(value).toLowerCase();
   if (["active", "destroyed", "merged", "archived"].includes(key)) return key;
   if (["已毁灭", "destroyed"].includes(key)) return "destroyed";
   if (["已合并", "merged"].includes(key)) return "merged";
@@ -16616,11 +17274,11 @@ function mapLocationStatus(value) {
   return "active";
 }
 function simulationBranch(simulation, branchId) {
-  if (isPlainObject9(simulation.branches)) {
+  if (isPlainObject12(simulation.branches)) {
     const keys = Object.keys(simulation.branches).sort();
     const key = keys.includes(branchId) ? branchId : keys.includes("canon") ? "canon" : keys[0];
     const branch = key === void 0 ? void 0 : simulation.branches[key];
-    if (isPlainObject9(branch)) return { key, branch };
+    if (isPlainObject12(branch)) return { key, branch };
     return null;
   }
   if (Array.isArray(simulation.tasks) || Array.isArray(simulation.signals) || Array.isArray(simulation.deliveries)) {
@@ -16631,7 +17289,7 @@ function simulationBranch(simulation, branchId) {
 function simRows(branch, key) {
   const value = branch[key];
   if (!Array.isArray(value)) return [];
-  return value.filter((row2) => isPlainObject9(row2));
+  return value.filter((row2) => isPlainObject12(row2));
 }
 function mapActionKind(kind) {
   switch (kind) {
@@ -16728,10 +17386,10 @@ function migrateLegacySimulation(plan, raw, db, ctx) {
   const channelIds = /* @__PURE__ */ new Map();
   try {
     for (const task of simRows(selected.branch, "tasks")) {
-      const legacyId = str2(task.id);
-      const topic = str2(task.topic);
+      const legacyId = str5(task.id);
+      const topic = str5(task.topic);
       const title = clip(topic || legacyId || "旧推演任务", 60);
-      const actorRef = str2(task.actorCharacterId);
+      const actorRef = str5(task.actorCharacterId);
       const actorId = actorRef.length > 0 ? entityKeyExists(db, ctx.branchId, actorRef) ? actorRef : null : null;
       const periodLabel = findPeriodLabel(task);
       if (periodLabel !== null) {
@@ -16754,17 +17412,17 @@ function migrateLegacySimulation(plan, raw, db, ctx) {
         );
         continue;
       }
-      const actionId = legacyId.length > 0 ? legacyId : makeId("action", "migration.action", `${ctx.branchId}:${title}:${str2(task.createdTurnKey)}`);
+      const actionId = legacyId.length > 0 ? legacyId : makeId("action", "migration.action", `${ctx.branchId}:${title}:${str5(task.createdTurnKey)}`);
       if (rowExists(db, "actions", ctx.branchId, actionId)) {
         bump(mapped, "kind:alreadyImported");
         actionIds.set(legacyId, actionId);
         issues.push(describeProblem(`$.simulation.tasks.${legacyId}`, `旧任务 ${legacyId} 已导入，跳过`, "ALREADY_IMPORTED"));
         continue;
       }
-      const targetLocationRef = str2(task.targetLocationId);
-      const originLocationRef = str2(task.originLocationId);
+      const targetLocationRef = str5(task.targetLocationId);
+      const originLocationRef = str5(task.originLocationId);
       const targetLocationId = targetLocationRef.length > 0 && rowExists(db, "locations", ctx.branchId, targetLocationRef) ? targetLocationRef : null;
-      const kind = mapActionKind(str2(task.kind));
+      const kind = mapActionKind(str5(task.kind));
       const created = withSavepoint(db, () => {
         insertRow(
           db,
@@ -16775,14 +17433,14 @@ function migrateLegacySimulation(plan, raw, db, ctx) {
             title,
             intent: topic,
             target_location_id: kind === "travel" ? targetLocationId : null,
-            payload_json: { migration: { source: "legacy_simulation", legacyId, originLocationId: originLocationRef || null, visibility: str2(task.visibility) || null } },
+            payload_json: { migration: { source: "legacy_simulation", legacyId, originLocationId: originLocationRef || null, visibility: str5(task.visibility) || null } },
             progress_s: 0,
             // 旧 period 不写进任何 *_s 字段：时间轴从相对 0 开始。
             evaluated_until_s: 0,
-            secrecy: str2(task.visibility) === "hidden" ? "secret" : "restricted",
+            secrecy: str5(task.visibility) === "hidden" ? "secret" : "restricted",
             priority: "normal",
-            status: mapActionStatus(str2(task.status)),
-            reason_code: periodLabel !== null ? `PERIOD_NOT_CONVERTED:${periodLabel}` : str2(task.reasonCode) || null
+            status: mapActionStatus(str5(task.status)),
+            reason_code: periodLabel !== null ? `PERIOD_NOT_CONVERTED:${periodLabel}` : str5(task.reasonCode) || null
           },
           { ...rowCtx, id: actionId }
         );
@@ -16796,9 +17454,9 @@ function migrateLegacySimulation(plan, raw, db, ctx) {
       bump(mapped, "kind:actions");
     }
     for (const signal of simRows(selected.branch, "signals")) {
-      const legacyId = str2(signal.id);
-      const topic = str2(signal.topic);
-      const originRef = str2(signal.originLocationId);
+      const legacyId = str5(signal.id);
+      const topic = str5(signal.topic);
+      const originRef = str5(signal.originLocationId);
       const originLocationId = originRef.length > 0 && rowExists(db, "locations", ctx.branchId, originRef) ? originRef : null;
       if (originLocationId === null && originRef.length > 0) {
         issues.push(
@@ -16831,12 +17489,12 @@ function migrateLegacySimulation(plan, raw, db, ctx) {
             title: clip(topic, 24),
             content: topic,
             truth_status: "unknown",
-            secrecy: str2(signal.visibility) === "hidden" ? "secret" : "restricted",
+            secrecy: str5(signal.visibility) === "hidden" ? "secret" : "restricted",
             topic_key: `signal:${stableHash4(topic)}`,
             content_hash: contentHash,
             created_at_s: 0,
             origin_location_id: originLocationId,
-            status: str2(signal.status) === "cancelled" ? "retracted" : "active"
+            status: str5(signal.status) === "cancelled" ? "retracted" : "active"
           },
           { ...rowCtx, id: informationId }
         );
@@ -16849,10 +17507,10 @@ function migrateLegacySimulation(plan, raw, db, ctx) {
       bump(mapped, "kind:information");
     }
     for (const channel of simRows(selected.branch, "channels")) {
-      const name = str2(channel.name);
-      const ownerRef = str2(channel.ownerEntityId ?? channel.ownerId);
+      const name = str5(channel.name);
+      const ownerRef = str5(channel.ownerEntityId ?? channel.ownerId);
       const ownerId = ownerRef.length > 0 && entityKeyExists(db, ctx.branchId, ownerRef) ? ownerRef : null;
-      const legacyId = str2(channel.id);
+      const legacyId = str5(channel.id);
       if (name.length === 0 || ownerId === null) {
         blocked.push({ kind: "channel", legacyId, reason: `CHANNEL_OWNER_UNRESOLVED: owner=${ownerRef || "missing"}` });
         continue;
@@ -16869,12 +17527,12 @@ function migrateLegacySimulation(plan, raw, db, ctx) {
           "channels",
           {
             name,
-            kind: ["contact", "faction_network", "messenger", "surveillance", "broadcast", "magic", "other"].includes(str2(channel.kind)) ? str2(channel.kind) : "other",
+            kind: ["contact", "faction_network", "messenger", "surveillance", "broadcast", "magic", "other"].includes(str5(channel.kind)) ? str5(channel.kind) : "other",
             owner_entity_id: ownerId,
-            source_entity_id: entityKeyExists(db, ctx.branchId, str2(channel.sourceEntityId)) ? str2(channel.sourceEntityId) : null,
-            source_location_id: rowExists(db, "locations", ctx.branchId, str2(channel.sourceLocationId)) ? str2(channel.sourceLocationId) : null,
-            recipient_entity_id: entityKeyExists(db, ctx.branchId, str2(channel.recipientEntityId)) ? str2(channel.recipientEntityId) : null,
-            recipient_location_id: rowExists(db, "locations", ctx.branchId, str2(channel.recipientLocationId)) ? str2(channel.recipientLocationId) : null,
+            source_entity_id: entityKeyExists(db, ctx.branchId, str5(channel.sourceEntityId)) ? str5(channel.sourceEntityId) : null,
+            source_location_id: rowExists(db, "locations", ctx.branchId, str5(channel.sourceLocationId)) ? str5(channel.sourceLocationId) : null,
+            recipient_entity_id: entityKeyExists(db, ctx.branchId, str5(channel.recipientEntityId)) ? str5(channel.recipientEntityId) : null,
+            recipient_location_id: rowExists(db, "locations", ctx.branchId, str5(channel.recipientLocationId)) ? str5(channel.recipientLocationId) : null,
             scope_json: { location_refs: [], entity_refs: [], topics: strList(channel.topics) },
             latency_json: { quality: "unknown", basis_refs: [], note: "旧 period 不折算成秒" },
             reliability: "unknown",
@@ -16893,8 +17551,8 @@ function migrateLegacySimulation(plan, raw, db, ctx) {
       bump(mapped, "kind:channels");
     }
     for (const delivery of simRows(selected.branch, "deliveries")) {
-      const legacyId = str2(delivery.id);
-      const signalId = str2(delivery.signalId);
+      const legacyId = str5(delivery.id);
+      const signalId = str5(delivery.signalId);
       const informationId = informationIds.get(signalId) ?? (rowExists(db, "information", ctx.branchId, signalId) ? signalId : null);
       if (informationId === null) {
         blocked.push({ kind: "delivery", legacyId, reason: `SIGNAL_UNRESOLVED: signalId=${signalId || "missing"}` });
@@ -16907,9 +17565,9 @@ function migrateLegacySimulation(plan, raw, db, ctx) {
       if (periodLabel !== null) {
         issues.push(issue11("PERIOD_NOT_CONVERTED", `$.simulation.deliveries.${legacyId}`, `送达 ${legacyId} 的 ${periodLabel} 不折算成秒`, "warning", false));
       }
-      const recipientType = str2(delivery.recipientType);
-      const recipientRef = str2(delivery.recipientId);
-      const via = str2(delivery.via);
+      const recipientType = str5(delivery.recipientType);
+      const recipientRef = str5(delivery.recipientId);
+      const via = str5(delivery.via);
       if (recipientType === "character") {
         if (!rowExists(db, "characters", ctx.branchId, recipientRef)) {
           blocked.push({ kind: "delivery", legacyId, reason: `RECIPIENT_UNRESOLVED: character=${recipientRef || "missing"}` });
@@ -16928,10 +17586,10 @@ function migrateLegacySimulation(plan, raw, db, ctx) {
               knower_character_id: recipientRef,
               is_pov: 0,
               information_id: informationId,
-              source_entity_id: entityKeyExists(db, ctx.branchId, str2(delivery.fromLocationId)) ? str2(delivery.fromLocationId) : null,
+              source_entity_id: entityKeyExists(db, ctx.branchId, str5(delivery.fromLocationId)) ? str5(delivery.fromLocationId) : null,
               first_received_at_s: 0,
               // 旧 confidence：confirmed→believed、rumor→heard、disputed→doubted。
-              belief: str2(delivery.confidence) === "confirmed" ? "believed" : str2(delivery.confidence) === "disputed" ? "doubted" : "heard",
+              belief: str5(delivery.confidence) === "confirmed" ? "believed" : str5(delivery.confidence) === "disputed" ? "doubted" : "heard",
               attention: "normal",
               reaction_note: via.length > 0 ? `旧渠道：${via}` : "",
               status: "active"
@@ -16986,14 +17644,14 @@ function migrateLegacySimulation(plan, raw, db, ctx) {
       }
       bump(mapped, "kind:fronts");
     }
-    const topology = isPlainObject9(selected.branch.geoTopology) ? selected.branch.geoTopology : null;
+    const topology = isPlainObject12(selected.branch.geoTopology) ? selected.branch.geoTopology : null;
     if (topology) {
       const edges = Array.isArray(topology.edges) ? topology.edges : [];
       for (const edge of edges) {
-        if (!isPlainObject9(edge)) continue;
-        const legacyId = str2(edge.id);
-        const fromRef = str2(edge.fromPointId ?? edge.fromLocationId ?? edge.from);
-        const toRef = str2(edge.toPointId ?? edge.toLocationId ?? edge.to);
+        if (!isPlainObject12(edge)) continue;
+        const legacyId = str5(edge.id);
+        const fromRef = str5(edge.fromPointId ?? edge.fromLocationId ?? edge.from);
+        const toRef = str5(edge.toPointId ?? edge.toLocationId ?? edge.to);
         const fromId = rowExists(db, "locations", ctx.branchId, fromRef) ? fromRef : null;
         const toId = rowExists(db, "locations", ctx.branchId, toRef) ? toRef : null;
         if (fromId === null || toId === null || fromId === toId) {
@@ -17018,7 +17676,7 @@ function migrateLegacySimulation(plan, raw, db, ctx) {
               distance_basis: "unknown",
               geometry_quality: "unknown",
               allowed_modes_json: [],
-              status: str2(edge.status) === "blocked" ? "blocked" : "open"
+              status: str5(edge.status) === "blocked" ? "blocked" : "open"
             },
             { ...rowCtx, id: routeId }
           );
@@ -17032,10 +17690,10 @@ function migrateLegacySimulation(plan, raw, db, ctx) {
       for (const key of ["areas", "vehicles"]) {
         const rows3 = Array.isArray(topology[key]) ? topology[key] : [];
         for (const row2 of rows3) {
-          if (!isPlainObject9(row2)) continue;
+          if (!isPlainObject12(row2)) continue;
           blocked.push({
             kind: key === "areas" ? "area" : "vehicle",
-            legacyId: str2(row2.id),
+            legacyId: str5(row2.id),
             reason: `TOPOLOGY_${key.toUpperCase()}_UNMAPPED: 旧地块/载具没有等价的新表，保留在旧档备份待审`
           });
         }
@@ -17647,13 +18305,13 @@ var LEGACY_ENTITY_CAP = 500;
 function asRecord2(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
-function asArray(value) {
+function asArray4(value) {
   return Array.isArray(value) ? value : [];
 }
-function str3(value) {
+function str6(value) {
   return typeof value === "string" ? value : typeof value === "number" && Number.isFinite(value) ? String(value) : "";
 }
-function num3(value) {
+function num6(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 function jsonObject(value) {
@@ -17696,66 +18354,66 @@ function emptyCollected() {
   };
 }
 function legacyMapPoint(point, kind) {
-  const id = str3(point.entityId ?? point.id);
+  const id = str6(point.entityId ?? point.id);
   return {
     id,
-    name: str3(point.name),
-    x: num3(point.x) ?? 0,
-    y: num3(point.y) ?? 0,
+    name: str6(point.name),
+    x: num6(point.x) ?? 0,
+    y: num6(point.y) ?? 0,
     regionId: null,
     kind,
     rowId: id
   };
 }
 function legacyNpc(entry, quality) {
-  const id = str3(entry.entityId ?? entry.id);
+  const id = str6(entry.entityId ?? entry.id);
   return {
     id,
-    name: str3(entry.name),
-    pointId: entry.locationId ? null : str3(entry.mapId) || null,
+    name: str6(entry.name),
+    pointId: entry.locationId ? null : str6(entry.mapId) || null,
     regionId: null,
-    x: num3(entry.x),
-    y: num3(entry.y),
+    x: num6(entry.x),
+    y: num6(entry.y),
     reason: entry.relevance === void 0 ? "sameLocation" : String(entry.relevance),
     status: null,
     presence: "present",
     isProtagonist: false,
     lastConfirmedAt: null,
     recentNarratives: [],
-    pointName: str3(entry.locationName) || null,
+    pointName: str6(entry.locationName) || null,
     positionSource: "sql",
-    locationId: entry.locationId ? str3(entry.locationId) : null,
-    locationName: entry.locationName ? str3(entry.locationName) : null,
+    locationId: entry.locationId ? str6(entry.locationId) : null,
+    locationName: entry.locationName ? str6(entry.locationName) : null,
     positionQuality: quality
   };
 }
 function legacyObject(entry, locationName) {
-  const id = str3(entry.entityId ?? entry.id);
+  const id = str6(entry.entityId ?? entry.id);
   return {
     id,
-    name: str3(entry.name),
+    name: str6(entry.name),
     type: "item",
-    pointId: str3(entry.mapId) || null,
+    pointId: str6(entry.mapId) || null,
     regionId: null,
-    x: num3(entry.x),
-    y: num3(entry.y),
+    x: num6(entry.x),
+    y: num6(entry.y),
     description: null,
     pointName: locationName,
-    positionQuality: str3(entry.precision) || "unknown"
+    positionQuality: str6(entry.precision) || "unknown"
   };
 }
 function collectFromView(view, query, collected) {
   for (const rawItem of view.items) {
     const item = asRecord2(rawItem);
     if (query.kind === "nearby") {
-      const entry = legacyNpc(item, str3(item.positionQuality) || "coarse");
+      const entry = legacyNpc(item, str6(item.positionQuality) || "coarse");
       collected.npcs.push(entry);
-      collected.positionQuality[str3(entry.id)] = str3(entry.positionQuality);
-      collected.relevantNpcIds.push(str3(entry.id));
+      collected.positionQuality[str6(entry.id)] = str6(entry.positionQuality);
+      collected.relevantNpcIds.push(str6(entry.id));
       continue;
     }
     if (query.kind === "entity") {
-      const kind = str3(item.kind);
+      const kind = str6(item.kind);
       if (kind === "character") {
         collected.entities.push(item);
         collected.npcs.push(legacyNpc(item, "coarse"));
@@ -17764,46 +18422,46 @@ function collectFromView(view, query, collected) {
         const location = asRecord2(item.location);
         const position = asRecord2(item.position);
         const point = {
-          entityId: str3(location.id),
-          name: str3(location.name),
-          x: num3(location.grid_x),
-          y: num3(location.grid_y),
-          mapId: str3(location.map_id),
-          precision: str3(location.coord_precision)
+          entityId: str6(location.id),
+          name: str6(location.name),
+          x: num6(location.grid_x),
+          y: num6(location.grid_y),
+          mapId: str6(location.map_id),
+          precision: str6(location.coord_precision)
         };
         collected.tableWorldPoints.push(legacyMapPoint(point, "location"));
-        collected.worldPoints.push({ id: str3(location.id), name: str3(location.name), x: num3(location.grid_x) ?? 0, y: num3(location.grid_y) ?? 0, regionId: null });
-        collected.positionQuality[str3(location.id)] = str3(position.kind ?? location.coord_precision ?? "unknown");
+        collected.worldPoints.push({ id: str6(location.id), name: str6(location.name), x: num6(location.grid_x) ?? 0, y: num6(location.grid_y) ?? 0, regionId: null });
+        collected.positionQuality[str6(location.id)] = str6(position.kind ?? location.coord_precision ?? "unknown");
       } else if (kind === "item") {
         collected.entities.push(item);
         const row2 = asRecord2(item.item);
-        collected.objects.push(legacyObject({ entityId: str3(row2.id), name: str3(row2.name), mapId: str3(row2.map_id), x: num3(row2.grid_x), y: num3(row2.grid_y), precision: str3(row2.coord_precision) }, null));
+        collected.objects.push(legacyObject({ entityId: str6(row2.id), name: str6(row2.name), mapId: str6(row2.map_id), x: num6(row2.grid_x), y: num6(row2.grid_y), precision: str6(row2.coord_precision) }, null));
       } else {
         collected.entities.push(item);
       }
       continue;
     }
-    const mapId = str3(item.mapId);
-    const containerLocationId = item.containerLocationId === null || item.containerLocationId === void 0 ? null : str3(item.containerLocationId);
+    const mapId = str6(item.mapId);
+    const containerLocationId = item.containerLocationId === null || item.containerLocationId === void 0 ? null : str6(item.containerLocationId);
     if (collected.rootMapId === null && containerLocationId === null) collected.rootMapId = mapId;
     collected.mapCount += 1;
-    const metersPerCell = num3(item.metersPerCell);
+    const metersPerCell = num6(item.metersPerCell);
     collected.calibrations[mapId] = {
-      revision: num3(item.calibrationRev) ?? 1,
+      revision: num6(item.calibrationRev) ?? 1,
       metersPerCell,
       source: "sql",
       locked: item.scaleLocked === true,
       basis: "",
       coverage: "",
-      confidence: str3(item.scaleQuality) || "uncalibrated",
+      confidence: str6(item.scaleQuality) || "uncalibrated",
       at: view.revision
     };
-    const pointsRaw = asArray(item.points).map(asRecord2);
+    const pointsRaw = asArray4(item.points).map(asRecord2);
     const isRoot = containerLocationId === null;
     for (const point of pointsRaw) {
-      const kind = str3(point.kind) || "location";
-      const entityId = str3(point.entityId);
-      const legacyPoint = { id: entityId, name: str3(point.name), x: num3(point.x) ?? 0, y: num3(point.y) ?? 0, regionId: null };
+      const kind = str6(point.kind) || "location";
+      const entityId = str6(point.entityId);
+      const legacyPoint = { id: entityId, name: str6(point.name), x: num6(point.x) ?? 0, y: num6(point.y) ?? 0, regionId: null };
       if (kind === "location") {
         collected.tableWorldPoints.push({ ...legacyPoint, kind, rowId: entityId });
         if (isRoot) collected.worldPoints.push(legacyPoint);
@@ -17811,49 +18469,49 @@ function collectFromView(view, query, collected) {
       } else if (kind === "character") {
         collected.npcs.push(
           legacyNpc(
-            { entityId, name: str3(point.name), mapId, x: num3(point.x), y: num3(point.y) },
-            str3(point.markerQuality ?? point.precision) || "exact"
+            { entityId, name: str6(point.name), mapId, x: num6(point.x), y: num6(point.y) },
+            str6(point.markerQuality ?? point.precision) || "exact"
           )
         );
       } else {
-        collected.objects.push(legacyObject({ entityId, name: str3(point.name), mapId, x: num3(point.x), y: num3(point.y), precision: str3(point.precision) }, null));
+        collected.objects.push(legacyObject({ entityId, name: str6(point.name), mapId, x: num6(point.x), y: num6(point.y), precision: str6(point.precision) }, null));
       }
-      collected.positionQuality[entityId] = str3(point.markerQuality ?? point.precision) || "unknown";
+      collected.positionQuality[entityId] = str6(point.markerQuality ?? point.precision) || "unknown";
     }
-    const coarse = asArray(item.coarseList).map(asRecord2);
+    const coarse = asArray4(item.coarseList).map(asRecord2);
     for (const entry of coarse) {
-      const entityId = str3(entry.entityId);
+      const entityId = str6(entry.entityId);
       const record = {
         entityId,
-        name: str3(entry.name),
-        locationId: str3(entry.locationId),
-        locationName: entry.locationName === null || entry.locationName === void 0 ? null : str3(entry.locationName),
+        name: str6(entry.name),
+        locationId: str6(entry.locationId),
+        locationName: entry.locationName === null || entry.locationName === void 0 ? null : str6(entry.locationName),
         mapId
       };
       collected.coarseList.push({ ...record, positionQuality: "coarse" });
       collected.npcs.push(legacyNpc(record, "coarse"));
       collected.positionQuality[entityId] = "coarse";
     }
-    for (const route of asArray(item.routes).map(asRecord2)) {
+    for (const route of asArray4(item.routes).map(asRecord2)) {
       collected.routes.push({
-        id: str3(route.routeId),
-        routeId: str3(route.routeId),
-        fromId: str3(route.fromId),
-        toId: str3(route.toId),
-        kind: str3(route.kind),
-        geometryQuality: str3(route.geometryQuality),
-        distanceM: num3(route.distanceM),
+        id: str6(route.routeId),
+        routeId: str6(route.routeId),
+        fromId: str6(route.fromId),
+        toId: str6(route.toId),
+        kind: str6(route.kind),
+        geometryQuality: str6(route.geometryQuality),
+        distanceM: num6(route.distanceM),
         dashed: route.dashed === true,
-        allowedModes: asArray(route.allowedModes).map(str3)
+        allowedModes: asArray4(route.allowedModes).map(str6)
       });
     }
     collected.submaps[mapId] = {
       mapId,
-      parentMapId: containerLocationId === null ? "world" : str3(containerLocationId),
+      parentMapId: containerLocationId === null ? "world" : str6(containerLocationId),
       ownerLocationId: containerLocationId,
       frame: jsonObject(item.frames ? asRecord2(item.frames).frame : {}),
-      scale: { metersPerCell, quality: str3(item.scaleQuality) || "uncalibrated" },
-      points: pointsRaw.map((point) => legacyMapPoint(point, str3(point.kind) || "location")),
+      scale: { metersPerCell, quality: str6(item.scaleQuality) || "uncalibrated" },
+      points: pointsRaw.map((point) => legacyMapPoint(point, str6(point.kind) || "location")),
       total: pointsRaw.length,
       truncated: 0
     };
@@ -17862,16 +18520,16 @@ function collectFromView(view, query, collected) {
 function collectOtherKinds(view, query, collected) {
   if (query.kind === "simulation") {
     const first = asRecord2(view.items[0]);
-    const clockS = num3(first.clockS) ?? 0;
+    const clockS = num6(first.clockS) ?? 0;
     collected.currentTime = clockS;
     collected.simulation = {
       branchKey: view.branchId,
       clockS,
-      clockMinS: num3(first.clockMinS) ?? clockS,
-      clockMaxS: num3(first.clockMaxS) ?? clockS,
+      clockMinS: num6(first.clockMinS) ?? clockS,
+      clockMaxS: num6(first.clockMaxS) ?? clockS,
       calendarLabel: first.calendarLabel ?? null,
-      simulationCursorS: num3(first.simulationCursorS) ?? clockS,
-      simulationStatus: str3(first.simulationStatus) || "current",
+      simulationCursorS: num6(first.simulationCursorS) ?? clockS,
+      simulationStatus: str6(first.simulationStatus) || "current",
       pendingNotice: first.pendingNotice ?? null,
       branchKeySource: "sql"
     };
@@ -17880,16 +18538,16 @@ function collectOtherKinds(view, query, collected) {
     collected.changes = view.items.map((raw) => {
       const row2 = asRecord2(raw);
       return {
-        changeId: str3(row2.changeId),
-        turnId: str3(row2.turnId),
-        sequence: num3(row2.sequence) ?? 0,
-        groupId: str3(row2.groupId),
-        operationId: str3(row2.operationId),
-        table: str3(row2.table),
-        rowId: str3(row2.rowId),
-        operation: str3(row2.operation),
-        summary: str3(row2.summary),
-        turnKind: str3(row2.turnKind),
+        changeId: str6(row2.changeId),
+        turnId: str6(row2.turnId),
+        sequence: num6(row2.sequence) ?? 0,
+        groupId: str6(row2.groupId),
+        operationId: str6(row2.operationId),
+        table: str6(row2.table),
+        rowId: str6(row2.rowId),
+        operation: str6(row2.operation),
+        summary: str6(row2.summary),
+        turnKind: str6(row2.turnKind),
         basis: asRecord2(row2.basis)
       };
     });
@@ -18018,9 +18676,9 @@ function toLegacyStateDto(view, query, options = {}) {
       unknownPosition: [],
       unplacedLocations: {
         entries: collected.coarseList.map((entry) => ({
-          id: str3(entry.entityId),
-          name: str3(entry.name),
-          parentLocationId: str3(entry.locationId) || null
+          id: str6(entry.entityId),
+          name: str6(entry.name),
+          parentLocationId: str6(entry.locationId) || null
         })),
         total: collected.coarseList.length,
         truncated: 0
@@ -18105,7 +18763,7 @@ function toPovStateDto(projection, options = {}) {
   const injectedScope = {
     povId: projection.povId,
     isPovRow: projection.isPovRow,
-    knownFacts: projection.knownFacts,
+    knownFacts: projection.knownFacts.map(({ informationId, title, content, belief }) => ({ informationId, title, content, belief })),
     knownLocations: projection.knownLocations,
     knownCharacters: projection.knownCharacters,
     lastSeen: projection.lastSeen,
@@ -18121,7 +18779,7 @@ function toPovStateDto(projection, options = {}) {
     revision: null,
     injectedScope,
     promptScope: [...projection.boundaries],
-    knownFacts: projection.knownFacts,
+    knownFacts: injectedScope.knownFacts,
     knownLocations: projection.knownLocations,
     knownCharacters: projection.knownCharacters,
     lastSeen: projection.lastSeen,
@@ -18219,6 +18877,7 @@ export {
   rebuildManagedLorebook,
   reconcileUnknownSave,
   redactWorldSecrets,
+  renderSqlSceneContext,
   resetSqlModuleForTests,
   resolveEffectivePosition,
   resolveSqlAssetBase,

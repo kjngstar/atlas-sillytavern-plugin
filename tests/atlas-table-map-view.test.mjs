@@ -126,6 +126,8 @@ test("D01 附近目录与地图同一张人物表：过滤离场、标出主角�
   assert.equal(hero.isProtagonist, true, "主角标记来自 world.characters 的 role/tags");
   assert.equal(hero.locationName, "白塔钟座");
   assert.equal(view.nearby.entries.find((entry) => entry.id === "chronicle-c2").isProtagonist, false);
+  assert.equal(view.nearby.entries.find((entry) => entry.id === "chronicle-c2").isNear, true, "子地点按投影层认作附近");
+  assert.equal(view.nearby.entries.find((entry) => entry.id === "faraway").isNear, false, "远处根地点不冒充附近");
 
   // 换到内层地点：同父兄弟这时才算附近
   const inside = projectTablesToMapView(tables, EMPTY_MAPS, fakeWorld(), "4301");
