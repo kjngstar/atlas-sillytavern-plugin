@@ -45,7 +45,7 @@ const LEVELS = new Set(["debug", "info", "warn", "error"]);
 const SOURCES = new Set(["host", "ui", "engine", "model", "storage", "lorebook", "map"]);
 const OUTCOMES = new Set(["started", "success", "skipped", "failed", "recovered"]);
 const DETAIL_KEYS = new Set([
-  "route", "mode", "reasonCode", "schemaPath", "protocolVersion",
+  "route", "mode", "sourceMode", "activationMode", "reason", "reasonCode", "schemaPath", "protocolVersion",
   "responseChars", "capability", "event", "build", "coreCommitted",
   "count", "stage", "attempt", "scanned", "cleaned", "kept", "malformed", "rowLine",
   // A04：具名诊断的安全定位字段。`*Ref` 只接受 atlasRefFingerprint 的形态
@@ -55,6 +55,7 @@ const DETAIL_KEYS = new Set([
   "branchRef", "turnRef", "worldRef", "actorRef", "locationRef", "signalRef", "taskRef",
   "collection",
   "droppedCount", "limitCount", "keptCount", "truncatedCount", "scannedCount",
+  "candidateCount", "selectedCount", "outputChars", "chatMatch",
 ]);
 // 0.9.54 A9/A11：允许 `$` `[` `]`，否则 JSON 路径（$.relationUpdates[0].value）永远过不了
 // safeToken —— `$` 是 JSONPath 的根记号，缺它整条 schemaPath 都进不了诊断。
@@ -69,7 +70,9 @@ const SAFE_ROUTES = new Set([
   "/session/export", "/session/purge",
 ]);
 const SAFE_CAPABILITIES = new Set(["setExtensionPrompt", "eventSource", "getContext", "generateRaw"]);
-const SAFE_MODES = new Set(["main", "profile", "custom", "openai", "claude", "gemini", "v1", "v2"]);
+const SAFE_MODES = new Set(["main", "profile", "custom", "openai", "claude", "gemini", "v1", "v2", "turn", "geo", "bootstrap"]);
+const SAFE_LORE_ACTIVATION_MODES = new Set(["host-activated", "context-fallback", "disabled"]);
+const SAFE_LORE_REASONS = new Set(["settings_disabled", "host_api_unavailable", "no_matching_turn_event", "selector_undefined"]);
 // A04：simulationUndo.collection 的精确取值域（§2.1 的四个数组 + 地理拓扑三数组）。
 const SAFE_COLLECTIONS = new Set(["tasks", "signals", "deliveries", "edges", "areas", "vehicles"]);
 // A04：计数字段（有限非负整数 + 上界钳制）。键名不在集合内时沿用旧的通用数值分支。
@@ -345,7 +348,9 @@ export function sanitizeDiagnostic(raw: unknown, now: () => number = Date.now): 
       if (typeof detail === "string") {
         const token = safeToken(detail);
         if (key === "route" && SAFE_ROUTES.has(token)) details[key] = token;
-        else if (key === "mode" && SAFE_MODES.has(token)) details[key] = token;
+        else if ((key === "mode" || key === "sourceMode") && SAFE_MODES.has(token)) details[key] = token;
+        else if (key === "activationMode" && SAFE_LORE_ACTIVATION_MODES.has(token)) details[key] = token;
+        else if (key === "reason" && SAFE_LORE_REASONS.has(token)) details[key] = token;
         else if (key === "capability" && SAFE_CAPABILITIES.has(token)) details[key] = token;
         else if (key === "reasonCode" && /^[A-Z][A-Z0-9_]{0,63}$/.test(token)) details[key] = token;
         // 根路径 `$` 也是真实的 JSONPath：JSON 无法解析或顶层不是对象时解析器只返回 `$`。

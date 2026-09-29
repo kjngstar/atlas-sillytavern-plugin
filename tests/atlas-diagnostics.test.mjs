@@ -17,6 +17,17 @@ const base = {
   httpStatus: 401, details: { route: "model-proxy", mode: "custom" },
 };
 
+test("lore selection diagnostics retain bounded counts and modes without body text", () => {
+  const entry = sanitizeDiagnostic({ level: "info", source: "lorebook", code: "LORE_SELECTION_COMPLETE",
+    operation: "lore-context", phase: "select", outcome: "success",
+    details: { candidateCount: 238, selectedCount: 1, truncatedCount: 1, outputChars: 434,
+      mode: "turn", sourceMode: "turn", activationMode: "host-activated", content: "private lore text" } });
+  assert.deepEqual(entry?.details, { candidateCount: 238, selectedCount: 1, truncatedCount: 1,
+    outputChars: 434, mode: "turn", sourceMode: "turn", activationMode: "host-activated" });
+  assert.equal(sanitizeDiagnostic({ level: "info", source: "lorebook", code: "LORE_SELECTION_COMPLETE",
+    operation: "lore-context", phase: "select", outcome: "ok" }), null);
+});
+
 test("diagnostic sanitizer rejects all unlisted text and original identifiers", () => {
   const secret = "sk-secret-private";
   const raw = {

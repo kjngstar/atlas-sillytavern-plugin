@@ -10427,7 +10427,7 @@ export async function readCardLoreSupplementViaSelector(selectionContext, select
     if (activation) activation.consumed = true;
     else emit({ level: "info", source: "lorebook",
       code: hostLoreActivationApiAvailable ? "LORE_ACTIVATION_FALLBACK" : "LORE_ACTIVATION_UNAVAILABLE",
-      operation: "lore-context", phase: "select", outcome: "ok",
+      operation: "lore-context", phase: "select", outcome: "success",
       details: { reason: hostLoreActivationApiAvailable ? "no_matching_turn_event" : "host_api_unavailable", mode: selectionContext.mode } });
     const result = sel({
       entries: allEntries,
@@ -10444,7 +10444,7 @@ export async function readCardLoreSupplementViaSelector(selectionContext, select
     }
     emit({ level: "info", source: "lorebook",
       code: "LORE_SELECTION_COMPLETE", operation: "lore-context",
-      phase: "select", outcome: "ok", details: {
+      phase: "select", outcome: "success", details: {
         candidateCount: result.candidateCount,
         selectedCount: result.selectedUids.length,
         truncatedCount: result.truncatedCount,
