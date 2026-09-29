@@ -94,7 +94,7 @@ import { validateAtlasTables, validateAtlasTablesStore, cloneAtlasTables, charac
 import { migrateLegacyToTables, tablesToLegacyWorld } from "./atlas-table-migration.ts";
 import { applyAtlasEditText, parseAtlasEditBlock, type AtlasSignalProposalRow } from "./atlas-table-delta.ts";
 import { projectTablesToMapView } from "./atlas-table-map-view.ts";
-import { summarizeAtlasTurnChanges } from "./atlas-turn-highlights.ts";
+import { summarizeAtlasTurnChanges, type AtlasTurnHighlight } from "./atlas-turn-highlights.ts";
 import { deriveElapsedPeriods } from "./atlas-time-intent.ts";
 import {
   validateSimulationStore,
@@ -4221,7 +4221,7 @@ function createCoreInstance(
         // 事件只从**本 session、本分支**的回合记录里取；旧回合没有该字段视为空
         const turnNames = await store.list(`turn:${chatId}:`).catch(() => [] as string[]);
         const events: AtlasSimulationEvent[] = [];
-        let latestTurn: { at: number; receiptId: string; period: number; highlights: string[]; events: AtlasSimulationEvent[] } | null = null;
+        let latestTurn: { at: number; receiptId: string; period: number; highlights: AtlasTurnHighlight[]; events: AtlasSimulationEvent[] } | null = null;
         for (const name of turnNames) {
           const turn = await store.read(name).catch(() => null);
           if (!isPlainRecord(turn) || turn.branchId !== binding.branchId) continue;
@@ -4243,9 +4243,20 @@ function createCoreInstance(
             latestTurn = {
               at, receiptId: receipt.receiptId,
               period: typeof turn.effectiveAt === "number" ? turn.effectiveAt : binding.worldTimeCursor,
-              highlights: Array.isArray(turn.highlights) ? turn.highlights
-                .filter((value): value is string => typeof value === "string")
-                .slice(0, 8).map((value) => value.slice(0, 140)) : [],
+              highlights: Array.isArray(turn.highlights) ? (turn.highlights as unknown[]).map((value): AtlasTurnHighlight => {
+                if (typeof value === "string") {
+                  // 旧存档:无可见性证据,默认 hidden
+                  return { text: value.slice(0, 140), visibility: "hidden", sourceRef: undefined };
+                }
+                if (value && typeof value === "object") {
+                  const obj = value as { text?: unknown; visibility?: unknown; sourceRef?: unknown };
+                  const t = typeof obj.text === "string" ? obj.text.slice(0, 140) : "";
+                  const v = obj.visibility === "known" ? "known" : "hidden";
+                  const r = typeof obj.sourceRef === "string" ? obj.sourceRef : undefined;
+                  return { text: t, visibility: v, sourceRef: r };
+                }
+                return { text: "", visibility: "hidden", sourceRef: undefined };
+              }).filter((h) => h.text.length > 0).slice(0, 8) : [],
               events: visibleEvents.slice(0, 8),
             };
           }

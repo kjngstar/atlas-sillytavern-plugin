@@ -3400,7 +3400,8 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     const simulation = s.simulationView;
     if (!simulation?.latestTurn) return false;
     const latest = simulation.latestTurn;
-    movesList.append(el("div", "aw-move__meta", `第 ${latest.period} 时段 · ${s.simulationVisibility === "all" ? "作者视图" : "已知动向"}`));
+    const isAuthorView = s.simulationVisibility === "all";
+    movesList.append(el("div", "aw-move__meta", `第 ${latest.period} 时段 · ${isAuthorView ? "作者视图" : "已知动向"}`));
     const nameById = new Map();
     const stateData = s.stateData ?? {};
     for (const npc of Array.isArray(stateData.npcDirectory) ? stateData.npcDirectory : []) {
@@ -3420,7 +3421,15 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       if (!raw) return "";
       return nameById.get(raw.replace(/^npc:/, "")) ?? nameById.get(raw) ?? "";
     };
-    const lines = [...latest.highlights];
+    // P1-06:highlights 是结构化数组;按 visibility 过滤。
+    // 默认读者视图:仅 known;作者视图:known + hidden。
+    const highlightLines = [];
+    for (const h of latest.highlights) {
+      if (!h || typeof h.text !== "string" || h.text.length === 0) continue;
+      if (!isAuthorView && h.visibility !== "known") continue;
+      highlightLines.push(h.text);
+    }
+    const lines = [...highlightLines];
     for (const event of latest.events) {
       if (lines.length >= 6) break;
       const actor = displayName(event.actorCharacterId);

@@ -95,7 +95,7 @@ export interface AtlasSimulationView {
   signals: Array<Record<string, unknown>>;
   deliveries: Array<Record<string, unknown>>;
   recentEvents: Array<Record<string, unknown>>;
-  latestTurn: { receiptId: string; period: number; highlights: string[]; events: Array<Record<string, unknown>> } | null;
+  latestTurn: { receiptId: string; period: number; highlights: AtlasSimulationHighlight[]; events: Array<Record<string, unknown>> } | null;
   counts: {
     tasks: number; signals: number; deliveries: number; events: number;
     activeTasks: number; blockedTasks: number;
@@ -126,6 +126,41 @@ function boundedCount(value: unknown): number {
 }
 
 /**
+ * P1-05:从 `/state` 的 `latestTurn.highlights` 解析结构化高亮。
+ * 文本长度 ≤ 140,数量 ≤ 8;缺字段/乱序/非对象统一按 hidden 兼容。
+ */
+export interface AtlasSimulationHighlight {
+  text: string;
+  visibility: "known" | "hidden";
+  sourceRef?: string;
+}
+
+const SIMULATION_HIGHLIGHT_TEXT_CAP = 140;
+const SIMULATION_HIGHLIGHT_ROW_CAP = 8;
+
+function parseAtlasSimulationHighlights(raw: unknown): AtlasSimulationHighlight[] {
+  if (!Array.isArray(raw)) return [];
+  const out: AtlasSimulationHighlight[] = [];
+  for (const item of raw.slice(0, SIMULATION_HIGHLIGHT_ROW_CAP)) {
+    if (typeof item === "string") {
+      // 旧存档字符串:无可见性证据,默认 hidden
+      out.push({ text: item.slice(0, SIMULATION_HIGHLIGHT_TEXT_CAP), visibility: "hidden" });
+      continue;
+    }
+    if (item && typeof item === "object" && !Array.isArray(item)) {
+      const obj = item as { text?: unknown; visibility?: unknown; sourceRef?: unknown };
+      const t = typeof obj.text === "string" ? obj.text.slice(0, SIMULATION_HIGHLIGHT_TEXT_CAP) : "";
+      if (t.length === 0) continue;
+      const v = obj.visibility === "known" ? "known" : "hidden";
+      const r = typeof obj.sourceRef === "string" && obj.sourceRef.length > 0
+        ? obj.sourceRef.slice(0, 160) : undefined;
+      out.push({ text: t, visibility: v, sourceRef: r });
+    }
+  }
+  return out;
+}
+
+/**
  * D06：校验 `/state` 的 `simulationView`。
  * 返回 null = 旧版响应 / 形状非法 —— 调用方保持既有行为（不回退成「空推演」结论）。
  */
@@ -150,9 +185,7 @@ export function parseAtlasSimulationView(raw: unknown): AtlasSimulationView | nu
       ? {
           receiptId: latest.receiptId,
           period: boundedCount(latest.period),
-          highlights: Array.isArray(latest.highlights) ? latest.highlights
-            .filter((item): item is string => typeof item === "string").slice(0, 8)
-            .map((item) => item.slice(0, 140)) : [],
+          highlights: parseAtlasSimulationHighlights(latest.highlights),
           events: simulationRows(latest.events).slice(0, 8),
         }
       : null,

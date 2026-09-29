@@ -396,7 +396,7 @@ function movesState({ chatId, simulationView, receipts }) {
 
 const SIMULATION_A = {
   branchKey: "canon",
-  latestTurn: { receiptId: "rcpt-a", period: 3, highlights: ["A 聊天的使者抵达城门"], events: [] },
+  latestTurn: { receiptId: "rcpt-a", period: 3, highlights: [{ text: "A 聊天的使者抵达城门", visibility: "known" }], events: [] },
   tasks: [], signals: [], deliveries: [],
   counts: { tasks: 1, activeTasks: 1, blockedTasks: 0, signals: 1, deliveries: 1 },
   truncated: { tasks: 0, signals: 0, deliveries: 0, events: 0 },
