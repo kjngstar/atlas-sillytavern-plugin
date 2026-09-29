@@ -289,6 +289,7 @@ function classroomState() {
       points: [
         { id: "1", name: "星海学校", x: 5, y: 5, kind: "location", rowId: "loc:1" },
         { id: "2", name: "三年二班", x: 20, y: 20, kind: "location", rowId: "loc:2" },
+        { id: "npc:beyond-cap", name: "名单外的教师", x: 26, y: 27, kind: "character", rowId: "npc:beyond-cap", positionQuality: "confirmed" },
       ],
       total: 2, truncated: 0,
     },
@@ -347,13 +348,20 @@ test("G03 回放：教室子图只画可信细格的人物图钉，建筑级 / �
 
   const pins = [...container.querySelectorAll(".aw-object--npc")];
   // 注意：图钉的 data-npc-id 是三表投影后的裸 id（`npc:` 前缀由 index.js 的 npcViewFromTableRow 去掉）
-  assert.deepEqual(pins.map((node) => node.dataset.npcId), ["in-room"],
-    `子图里只应有 1 枚可信细格图钉：实际 ${JSON.stringify(pins.map((n) => [n.dataset.npcId, n.style.left, n.style.top]))}`);
-  const pin = pins[0];
+  assert.deepEqual(pins.map((node) => node.dataset.npcId).sort(), ["beyond-cap", "in-room"],
+    `子图里应保留 nearby 名单截断以外的可信图钉：实际 ${JSON.stringify(pins.map((n) => [n.dataset.npcId, n.style.left, n.style.top]))}`);
+  const pin = pins.find((node) => node.dataset.npcId === "in-room");
   assert.match(String(pin.textContent ?? ""), /教室里的学生/, "这枚图钉确实是「在房间里且知道房间细格」的那位");
   assert.equal(pin.style.left, "22px", "图钉画在真实格坐标 x 上");
   assert.equal(pin.style.top, "24px", "图钉画在真实格坐标 y 上");
   assert.equal(pin.style.left === "20px" && pin.style.top === "20px", false, "不与房间标点重合");
+  const cappedPin = pins.find((node) => node.dataset.npcId === "beyond-cap");
+  assert.equal(cappedPin.style.left, "26px");
+  assert.equal(cappedPin.style.top, "27px");
+  cappedPin.click();
+  await flush();
+  assert.match(String(container.querySelector(".aw-mappanel")?.textContent ?? ""), /名单外的教师/,
+    "名单截断外的人物仍可点击详情");
 
   // 只知道「在整栋楼里」的人不画点：那是地点级信息，画出来等于伪造房间坐标
   assert.equal(container.querySelector('.aw-object--npc[data-npc-id="building"]'), null,
@@ -469,6 +477,31 @@ test("G03 回放：0 时段只有意图时，左栏不把它写成已发生的�
     `第 0 时段只显示具体意图：实际 "${text}"`);
   assert.ok(!/NO_TIME|记下意图/.test(text), "技术回执文字不出现在读者侧栏");
   assert.ok(!/已抵达|已送达/.test(text), "0 时段不得出现任何「已抵达 / 已送达」");
+  dom.window.close();
+});
+
+test("M1-B07：已知视图空态与作者隐藏动向切换不残留", async () => {
+  const hidden = { ...SIMULATION_A, visibility: "known",
+    latestTurn: { receiptId: "rcpt-hidden", period: 4, highlights: [], events: [] }, recentEvents: [] };
+  const { dom, core, container, rerender } = await mountReplay(movesState({
+    chatId: "chat-a", simulationView: hidden, receipts: [],
+  }));
+  const movesText = () => String(container.querySelector(".aw-moves")?.textContent ?? "");
+  assert.match(movesText(), /本轮暂无主角已知的新动向/);
+  assert.ok(!movesText().includes("远方秘密行动"));
+  const author = movesState({ chatId: "chat-a", simulationView: {
+    ...hidden, visibility: "all",
+    latestTurn: { receiptId: "rcpt-hidden", period: 4,
+      highlights: [{ text: "远方秘密行动", visibility: "hidden", sourceRef: "npc:far" }], events: [] },
+  }, receipts: [] });
+  author.simulationVisibility = "all";
+  core.setState(author);
+  rerender();
+  assert.match(movesText(), /远方秘密行动/);
+  core.setState(movesState({ chatId: "chat-a", simulationView: hidden, receipts: [] }));
+  rerender();
+  assert.match(movesText(), /本轮暂无主角已知的新动向/);
+  assert.ok(!movesText().includes("远方秘密行动"), "切回默认视图不得残留隐藏卡片");
   dom.window.close();
 });
 

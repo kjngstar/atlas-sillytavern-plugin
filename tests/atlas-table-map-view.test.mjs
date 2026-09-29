@@ -325,6 +325,8 @@ test("F01 未知坐标的地点不生成地图点，也不落 (0,0)，而是进�
   assert.deepEqual(unplaced.entries.map((entry) => entry.id), ["loc:4104"]);
   assert.equal(unplaced.entries[0].name, "三年二班");
   assert.equal(unplaced.entries[0].parentLocationId, "loc:4103", "保留父级关系，便于人工确认归属");
+  assert.equal(unplaced.entries[0].mapId, "4103", "无坐标子地点仍归属父地点子图");
+  assert.equal(unplaced.entries[0].positionQuality, "unknown", "待定位不得伪装成已确认坐标");
 });
 
 test("F02 徽标人数按完整三表聚合：第 49 个人物也在计数里", () => {

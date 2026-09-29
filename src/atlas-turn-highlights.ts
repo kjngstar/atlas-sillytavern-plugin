@@ -21,6 +21,9 @@ export interface TurnHighlightEvidence {
   knownCharacterIds: ReadonlySet<string>;
   /** 本轮已送达的消息 ref 集合(物品/信息等) */
   deliveredRefIds: ReadonlySet<string>;
+  /** 本轮有逐字证据、且确在主角眼前的地点/物品。 */
+  observedLocationIds?: ReadonlySet<string>;
+  observedItemIds?: ReadonlySet<string>;
 }
 
 const MAX_HIGHLIGHTS = 8;
@@ -55,12 +58,12 @@ export function summarizeAtlasTurnChanges(
 
   function classify(refId: string, refKind: "location" | "character" | "item"): HighlightVisibility {
     if (refKind === "item") {
-      return ev.deliveredRefIds.has(refId) ? "known" : "hidden";
+      return ev.deliveredRefIds.has(refId) || ev.observedItemIds?.has(refId) ? "known" : "hidden";
     }
     if (refKind === "location") {
-      return povAt !== null && refId === povAt ? "known" : "hidden";
+      return povAt !== null && refId === povAt && ev.observedLocationIds?.has(refId) ? "known" : "hidden";
     }
-    if (ev.knownCharacterIds.has(refId)) return "known";
+    if (ev.knownCharacterIds.has(refId) && newCharacters.get(refId)?.locationId === povAt) return "known";
     return "hidden";
   }
 

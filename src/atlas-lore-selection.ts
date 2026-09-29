@@ -12,7 +12,7 @@
  * 注意:此模块不负责读取宿主世界书,只负责"已读到条目"的有界选取。
  */
 
-export type AtlasLorePurpose = "turn" | "geo";
+export type AtlasLorePurpose = "turn" | "geo" | "bootstrap";
 
 export interface AtlasLoreSelectionEntry {
   /** 条目稳定 id(可选) */
@@ -21,12 +21,12 @@ export interface AtlasLoreSelectionEntry {
   title?: string;
   /** 来源书名(便于追踪) */
   bookName?: string;
+  /** 宿主条目的明示触发词。 */
+  keys?: readonly string[];
   /** 条目正文 */
   content: string;
   /** 是否被宿主标为激活(activate=false 视为不激活) */
   enabled: boolean;
-  /** 是否被宿主标记为本轮已激活(可选) */
-  activated?: boolean;
 }
 
 export interface AtlasLoreSelectionInput {
@@ -68,8 +68,17 @@ const DEFAULT_GEO_PER_ENTRY_CHARS = 4_000;
 const DEFAULT_MAX_ENTRIES = 60;
 const GEO_TITLE_PREFIX = /(?:地图|地理|地点|地区|区域|领域|城镇|城市|城镇|关隘|道路|街道|聚落|场所|大陆|国家|地形|风土)/;
 
-function stableUid(entry: AtlasLoreSelectionEntry, idx: number): string {
-  return entry.uid && entry.uid.length > 0 ? entry.uid : `lore-${idx}`;
+function stableUid(entry: AtlasLoreSelectionEntry, _idx: number): string {
+  const fallback = `${entry.title ?? ""}:${entry.content.slice(0, 80)}`;
+  return `${entry.bookName ?? "?"}:${entry.uid && entry.uid.length > 0 ? entry.uid : fallback}`;
+}
+
+function matchingExcerpt(content: string, keywords: readonly string[], limit: number): string {
+  if (content.length <= limit) return content;
+  const hit = keywords.filter((word) => word.length > 0)
+    .map((word) => content.indexOf(word)).filter((at) => at >= 0).sort((a, b) => a - b)[0];
+  const start = hit === undefined ? 0 : Math.max(0, Math.min(content.length - limit, hit - Math.floor(limit / 3)));
+  return `${start > 0 ? "…" : ""}${content.slice(start, start + limit)}${start + limit < content.length ? "…" : ""}`;
 }
 
 function keywordScore(
@@ -78,7 +87,7 @@ function keywordScore(
   scene: ReadonlySet<string>,
 ): number {
   let score = 0;
-  const text = (entry.title ?? "") + "\n" + entry.content;
+  const text = (entry.title ?? "") + "\n" + (entry.keys ?? []).join("\n") + "\n" + entry.content;
   for (const k of chat) {
     if (k.length > 0 && text.includes(k)) score += 1;
   }
@@ -146,13 +155,14 @@ export function selectAtlasLoreSupplement(
   for (const e of filtered) {
     if (selectedUids.length >= maxEntries) break;
     const uid = stableUid(e, e.__idx);
+    const active = activatedUids?.has(uid) ?? false;
+    const relevant = keywordScore(e, chat, scene) > 0;
+    if (!active && !relevant && !(input.mode === "geo" && isGeographicTitle(e.title ?? ""))) continue;
     const title = (e.title ?? "").trim() || (e.bookName ?? "条目");
     const originalChars = e.content.length;
-    const clipped = e.content.length > perEntryChars
-      ? `${e.content.slice(0, perEntryChars)}…`
-      : e.content;
+    const clipped = matchingExcerpt(e.content, [...scene, ...chat], perEntryChars);
     const line = `- [${e.bookName ?? "?"}] ${title}：${clipped.replace(/\s+/g, " ")}`;
-    const lineLen = line.length;
+    const lineLen = line.length + (out.length > 0 ? 1 : 0);
     if (selectedOutputChars + lineLen > maxChars) {
       // 预算用尽:不再继续
       break;

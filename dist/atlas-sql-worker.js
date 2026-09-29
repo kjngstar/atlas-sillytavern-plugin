@@ -30,9 +30,9 @@
     mod
   ));
 
-  // ../../node_modules/sql.js/dist/sql-wasm-browser.js
+  // node_modules/sql.js/dist/sql-wasm-browser.js
   var require_sql_wasm_browser = __commonJS({
-    "../../node_modules/sql.js/dist/sql-wasm-browser.js"(exports, module) {
+    "node_modules/sql.js/dist/sql-wasm-browser.js"(exports, module) {
       var initSqlJsPromise = void 0;
       var initSqlJs2 = function(moduleConfig) {
         if (initSqlJsPromise) {

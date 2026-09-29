@@ -242,8 +242,38 @@ test("R06 bootstrap 预览：解析行增量块返回候选，零写入世界", 
   // 请求应使用增量契约（$B 替换 + bootstrap 任务段）
   const messageText = JSON.stringify(calls[0].body);
   assert.ok(messageText.includes("mode=bootstrap"), "请求含开场识别任务段");
+  assert.ok(messageText.includes("本条助手开场正文优先"), "开场提示明确正文优先的证据顺序");
+  assert.ok(messageText.includes("姓名尚未揭示"), "开场的重要未具名人物也应建档");
   assert.ok(messageText.includes("atlasEdit"), "请求使用行增量契约段");
   assert.ok(!messageText.includes("$B"), "$B 应已替换（不再有裸占位符）");
+});
+
+test("M2-C03：预览与应用复用同一候选，过期预览 409 且零写入", async () => {
+  const { core, calls, carrier } = await bootstrapSetup(BOOTSTRAP_EDIT);
+  const request = { chatId: "chat-boot", openingMessageId: "opening-a", assistantText: GREETING,
+    userText: "继续", loreSupplement: "测试背景" };
+  const preview = await core.handle("POST", "/scene/bootstrap", { ...request, apply: false }, { local: true });
+  assert.equal(preview.status, 200);
+  assert.equal(typeof preview.body.data.previewId, "string");
+  assert.equal(calls.length, 1);
+  const revision = carrier.session.rev;
+  const stale = await core.handle("POST", "/scene/bootstrap", { ...request, apply: true,
+    previewId: preview.body.data.previewId, baseRevision: revision + 1 }, { local: true });
+  assert.equal(stale.status, 409);
+  assert.equal(stale.body.error?.code, "PREVIEW_STALE");
+  assert.equal(calls.length, 1, "过期预览绝不重新请求模型");
+  assert.equal(carrier.session.rev, revision, "过期预览零写入");
+  const applied = await core.handle("POST", "/scene/bootstrap", { ...request, apply: true,
+    previewId: preview.body.data.previewId, baseRevision: preview.body.data.baseRevision }, { local: true });
+  assert.equal(applied.status, 200, JSON.stringify(applied.body.error ?? {}));
+  assert.equal(applied.body.data.callCount, 0, "应用不再请求模型");
+  assert.deepEqual(applied.body.data.newLocations, preview.body.data.newLocations);
+  assert.deepEqual(applied.body.data.newCharacters, preview.body.data.newCharacters);
+  assert.equal(calls.length, 1);
+  const duplicate = await core.handle("POST", "/scene/bootstrap", { ...request, apply: true }, { local: true });
+  assert.equal(duplicate.status, 200);
+  assert.equal(duplicate.body.data.duplicate, true);
+  assert.equal(calls.length, 1, "重复开场零新模型调用");
 });
 
 test("R06 bootstrap 应用：duration=0 时间不动、主角行锚定、占位退役、lastConfirmed 落档", async () => {

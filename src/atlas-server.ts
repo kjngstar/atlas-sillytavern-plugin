@@ -94,7 +94,7 @@ import { validateAtlasTables, validateAtlasTablesStore, cloneAtlasTables, charac
 import { migrateLegacyToTables, tablesToLegacyWorld } from "./atlas-table-migration.ts";
 import { applyAtlasEditText, parseAtlasEditBlock, type AtlasSignalProposalRow } from "./atlas-table-delta.ts";
 import { projectTablesToMapView } from "./atlas-table-map-view.ts";
-import { summarizeAtlasTurnChanges, type AtlasTurnHighlight } from "./atlas-turn-highlights.ts";
+import { summarizeAtlasTurnChanges, type AtlasTurnHighlight, type TurnHighlightEvidence } from "./atlas-turn-highlights.ts";
 import { deriveElapsedPeriods } from "./atlas-time-intent.ts";
 import {
   validateSimulationStore,
@@ -158,6 +158,54 @@ export function createMemoryDocumentStore(): AtlasDocumentStore & { dump(): Map<
       return docs;
     },
   };
+}
+
+/**
+ * B03 模块级 helper：算 evidence + 调 summarizeAtlasTurnChanges。
+ * 拆出来是因为 executeCommit 内部用 IIFE 时无法闭包访问 `committed` 变量
+ * (它在更深的 `{ }` 块里),而 highlights 的生成晚于该块结束。
+ */
+function summarizeHighlightsWithEvidence(
+  tablesBeforeTurn: { branchKey: string; tables: AtlasThreeTablesV1 },
+  nextTablesDoc: AtlasTablesStoreV1 | null,
+  acceptedTurnRefs: string[],
+  acceptedRows: AtlasAcceptedRowReceipt[],
+  protagonistId: string | null,
+  currentLocationId: string | number | null | undefined,
+  fallbackLocationId: string | number | null | undefined,
+): AtlasTurnHighlight[] {
+  const branchForEvidence = nextTablesDoc?.branches?.[tablesBeforeTurn.branchKey] ?? null;
+  const finalProtagonist = protagonistId === null ? null
+    : branchForEvidence?.characters.find((row) => row.id === protagonistId) ?? null;
+  const asLocationRef = (value: string | number | null | undefined): string | null =>
+    value === null || value === undefined ? null : String(value).startsWith("loc:") ? String(value) : `loc:${value}`;
+  const povLocationId = finalProtagonist ? finalProtagonist.locationId : asLocationRef(currentLocationId ?? fallbackLocationId);
+  const knownCharacterIds = new Set<string>();
+  const deliveredRefIds = new Set<string>();
+  const observedLocationIds = new Set<string>();
+  const observedItemIds = new Set<string>();
+  for (const row of acceptedRows) {
+    // 无逐字证据的模型推断不能成为主角已知；即使人物恰好同地也不例外。
+    if (row.basis !== "observed" || (row.sourceId !== "msg:a" && row.sourceId !== "msg:u")) continue;
+    if (row.table === "character") {
+      const post = branchForEvidence?.characters?.find((item) => item.id === row.ref) ?? null;
+      const at = post?.locationId ?? null;
+      if (at !== null && povLocationId !== null && at === povLocationId) {
+        knownCharacterIds.add(row.ref);
+      }
+    } else if (row.table === "location") {
+      if (row.ref === povLocationId) observedLocationIds.add(row.ref);
+    } else if (row.table === "item") {
+      const item = branchForEvidence?.items.find((value) => value.id === row.ref) ?? null;
+      if (item?.locationId !== null && item?.locationId === povLocationId) observedItemIds.add(row.ref);
+    }
+  }
+  return summarizeAtlasTurnChanges(
+    tablesBeforeTurn.tables,
+    branchForEvidence,
+    acceptedTurnRefs,
+    { povLocationId, knownCharacterIds, deliveredRefIds, observedLocationIds, observedItemIds } satisfies TurnHighlightEvidence,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1565,6 +1613,10 @@ export interface AtlasAcceptedRowReceipt {
   op: string;
   /** 正式行 id（`loc:*` / `npc:*` / `item:*`）。 */
   ref: string;
+  /** B02：服务端校验过的 evidence 标记(observed / inferred)。不带 quote 原文。 */
+  basis?: "observed" | "inferred";
+  /** B02：服务端校验过的证据来源 ID(`msg:a` / `msg:u` / 行号衍生)。 */
+  sourceId?: string;
 }
 
 export interface AtlasScheduleMoveReceipt {
@@ -2010,11 +2062,20 @@ export function commitTableDeltaTurn(
     acceptedRows: delta.applied.map((row) => {
       const ref = typeof row.id === "string" ? row.id : (row.ref ?? "");
       const kind = ref.length > 0 ? refKindOf(ref) : null;
+      // B02：acceptedRows 内部附已验证的 basis/sourceId 元数据；
+      // 不透出引文、未接受行或模型声称的 sourceId,只携带服务端校验过的 evidence。
+      const basis: "observed" | "inferred" | null =
+        row.basis === "observed" ? "observed"
+        : row.basis === "inferred" ? "inferred"
+        : null;
+      const sourceId = typeof row.sourceId === "string" ? row.sourceId : null;
       return {
         line: row.line,
         table: kind ?? ("unknown" as const),
         op: typeof row.op === "string" ? row.op : "set",
         ref,
+        ...(basis !== null ? { basis } : {}),
+        ...(sourceId !== null ? { sourceId } : {}),
       };
     }),
     scheduleMoves: settlement.moves.map((move) => ({
@@ -2136,6 +2197,7 @@ function httpStatusFor(code: string): number {
     case ATLAS_ERROR_CODES.API_NOT_CONFIGURED:
     case ATLAS_ERROR_CODES.DUPLICATE_COMMIT:
     case ATLAS_ERROR_CODES.SESSION_STALE:
+    case ATLAS_ERROR_CODES.PREVIEW_STALE:
     // C04：协议不符 = 「设置与响应形态冲突」，不是格式错（400）也不是服务故障（502）——
     // 作者要做的动作是回推进页切协议，409 与既有前端错误呈现一致。
     case ATLAS_ERROR_CODES.PROTOCOL_MISMATCH:
@@ -2241,6 +2303,8 @@ interface AtlasSharedRuntime {
   chatMutex: Map<string, Promise<void>>;
   /** worldId → 在途 ensure 链（并发首条消息只创建一个世界） */
   ensureMutex: Map<string, Promise<void>>;
+  bootstrapPreviews: Map<string, { chatId: string; worldId: string; branchId: string | null;
+    openingKey: string; baseRevision: number; inputFingerprint: string; cleanedText: string; expiresAt: number }>;
 }
 
 /** 单实例核心：store 决定数据从哪来（全局文档库，或 0.9.42 的会话覆盖层）。 */
@@ -4221,7 +4285,7 @@ function createCoreInstance(
         // 事件只从**本 session、本分支**的回合记录里取；旧回合没有该字段视为空
         const turnNames = await store.list(`turn:${chatId}:`).catch(() => [] as string[]);
         const events: AtlasSimulationEvent[] = [];
-        let latestTurn: { at: number; receiptId: string; period: number; highlights: AtlasTurnHighlight[]; events: AtlasSimulationEvent[] } | null = null;
+        let latestTurn: { at: number; key: string; receiptId: string; period: number; highlights: AtlasTurnHighlight[]; events: AtlasSimulationEvent[] } | null = null;
         for (const name of turnNames) {
           const turn = await store.read(name).catch(() => null);
           if (!isPlainRecord(turn) || turn.branchId !== binding.branchId) continue;
@@ -4239,14 +4303,14 @@ function createCoreInstance(
           }
           const receipt = isPlainRecord(turn.receipt) ? turn.receipt : null;
           const at = typeof turn.committedAt === "number" && Number.isFinite(turn.committedAt) ? turn.committedAt : 0;
-          if (receipt && typeof receipt.receiptId === "string" && (!latestTurn || at > latestTurn.at)) {
+          if (receipt && typeof receipt.receiptId === "string" && (!latestTurn || at > latestTurn.at || (at === latestTurn.at && name > latestTurn.key))) {
             latestTurn = {
-              at, receiptId: receipt.receiptId,
+              at, key: name, receiptId: receipt.receiptId,
               period: typeof turn.effectiveAt === "number" ? turn.effectiveAt : binding.worldTimeCursor,
               highlights: Array.isArray(turn.highlights) ? (turn.highlights as unknown[]).map((value): AtlasTurnHighlight => {
                 if (typeof value === "string") {
                   // 旧存档:无可见性证据,默认 hidden
-                  return { text: value.slice(0, 140), visibility: "hidden", sourceRef: undefined };
+                  return { text: value.slice(0, 140), visibility: "hidden", sourceRef: "legacy" };
                 }
                 if (value && typeof value === "object") {
                   const obj = value as { text?: unknown; visibility?: unknown; sourceRef?: unknown };
@@ -4256,7 +4320,7 @@ function createCoreInstance(
                   return { text: t, visibility: v, sourceRef: r };
                 }
                 return { text: "", visibility: "hidden", sourceRef: undefined };
-              }).filter((h) => h.text.length > 0).slice(0, 8) : [],
+              }).filter((h) => h.text.length > 0 && (showHidden || h.visibility === "known")).slice(0, 8) : [],
               events: visibleEvents.slice(0, 8),
             };
           }
@@ -4427,6 +4491,11 @@ function createCoreInstance(
       personaDescription?: unknown;
       charDescription?: unknown;
       loreSupplement?: unknown;
+      openingMessageId?: unknown;
+      auto?: unknown;
+      previewId?: unknown;
+      baseRevision?: unknown;
+      session?: unknown;
     };
     const chatId = typeof payload.chatId === "string" ? payload.chatId : "";
     if (!chatId || chatId.length > ATLAS_LIMITS.ID_CHARS) {
@@ -4439,13 +4508,54 @@ function createCoreInstance(
       throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "开场材料（assistantText）为空——开场识别至少需要一段开场白。");
     }
     const userText = typeof payload.userText === "string" ? payload.userText : "";
+    const openingMessageId = typeof payload.openingMessageId === "string" && payload.openingMessageId.trim()
+      ? payload.openingMessageId.slice(0, ATLAS_LIMITS.ID_CHARS) : "manual";
+    const openingWorld = await getWorld(binding.worldId);
+    if (!openingWorld) throw new AtlasError(ATLAS_ERROR_CODES.WORLD_NOT_FOUND, "绑定世界不存在");
+    const openingBranchKey = branchScopeForStory(openingWorld, binding.branchId) ?? "canon";
+    const openingKey = `opening:${hashString([chatId, binding.worldId, openingBranchKey,
+      openingMessageId, assistantText].join("|"))}`;
+    const sessionRecord = isPlainRecord(payload.session) ? payload.session : null;
+    const sessionRevision = typeof sessionRecord?.rev === "number" && Number.isSafeInteger(sessionRecord.rev)
+      ? sessionRecord.rev : 0;
+    const inputFingerprint = hashString(JSON.stringify({ userText, assistantText,
+      recentAssistantTexts: payload.recentAssistantTexts ?? [], loreSupplement: payload.loreSupplement ?? "",
+      personaDescription: payload.personaDescription ?? "", charDescription: payload.charDescription ?? "" }));
+    const existingSceneDoc = sanitizeSceneDoc(await store.read(sceneDocKey(binding.worldId)).catch(() => null));
+    const priorBootstrap = existingSceneDoc.bootstrapByBranch[openingBranchKey];
+    if (apply && typeof payload.previewId !== "string" && priorBootstrap?.chatId === chatId
+      && priorBootstrap.openingKey === openingKey) {
+      return okResult({ ...priorBootstrap.result, callCount: 0, duplicate: true });
+    }
+    if (payload.auto === true && apply) {
+      const turnNames = await store.list(`turn:${chatId}:`).catch(() => [] as string[]);
+      for (const name of turnNames) {
+        const turn = await store.read(name).catch(() => null);
+        if (isPlainRecord(turn) && turn.rolledBack !== true && isPlainRecord(turn.receipt)
+          && turn.receipt.status === "committed") {
+          return okResult({ status: "skipped", reasonCode: "NORMAL_TURN_EXISTS", duration: 0, callCount: 0 });
+        }
+      }
+    }
+    const previewId = typeof payload.previewId === "string" ? payload.previewId : null;
+    for (const [key, value] of shared.bootstrapPreviews) {
+      if (value.expiresAt <= now()) shared.bootstrapPreviews.delete(key);
+    }
+    const preview = apply && previewId !== null ? shared.bootstrapPreviews.get(previewId) : null;
+    if (apply && previewId !== null && (
+      !preview || payload.baseRevision !== sessionRevision || preview.baseRevision !== sessionRevision
+      || preview.chatId !== chatId || preview.worldId !== binding.worldId
+      || preview.branchId !== binding.branchId || preview.openingKey !== openingKey
+      || preview.inputFingerprint !== inputFingerprint
+    )) {
+      throw new AtlasError(ATLAS_ERROR_CODES.PREVIEW_STALE, "开场预览已过期或世界已变化，请重新预览。", { retryable: true });
+    }
     // 2. 未配置推演 API → 明确报错；RPM 保护
     const current = await loadSettings();
     const preset = resolveWorldTurnPreset(current);
     if (!preset) {
       throw new AtlasError(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "未配置独立推演 API，无法进行开场识别。");
     }
-    checkRpm();
 
     const prepared = await prepareWorldTurnInputs(
       binding,
@@ -4483,31 +4593,26 @@ function createCoreInstance(
       );
     }
 
-    // 首次推演请求；只有引文错误导致零有效行时才追加一次纠错请求。
-    rpmTimestamps.push(now());
-    const call = await callAtlasWorldTurnApi(prepared.effectivePreset, prepared.input, { fetchFn: deps.fetchFn, now });
-    pushLog({
-      at: now(),
-      kind: "scene-bootstrap",
-      chatId: binding.chatId,
-      presetName: preset.name,
-      model: preset.model,
-      ok: call.ok,
-      ...(call.ok ? {} : { code: call.code }),
-      status: call.status,
-      durationMs: call.durationMs,
-      apply,
-    });
-    if (!call.ok) {
-      throw new AtlasError(call.code, call.message, { retryable: call.retryable });
+    let cleanedText: string;
+    if (preview) {
+      // apply 与 preview 复用同一份已校验候选，零第二次模型调用。
+      cleanedText = preview.cleanedText;
+    } else {
+      checkRpm();
+      rpmTimestamps.push(now());
+      const call = await callAtlasWorldTurnApi(prepared.effectivePreset, prepared.input, { fetchFn: deps.fetchFn, now });
+      pushLog({ at: now(), kind: "scene-bootstrap", chatId: binding.chatId,
+        presetName: preset.name, model: preset.model, ok: call.ok,
+        ...(call.ok ? {} : { code: call.code }), status: call.status,
+        durationMs: call.durationMs, apply });
+      if (!call.ok) throw new AtlasError(call.code, call.message, { retryable: call.retryable });
+      cleanedText = applyContentReplaceRules(call.text, current.contentReplaceRules ?? []);
+      const bootstrapRepair = await repairQuoteOnlyReply({
+        text: cleanedText, preset: prepared.effectivePreset, prompt: prepared.input,
+        userText, assistantText, chatId: binding.chatId,
+      });
+      if (bootstrapRepair !== null) cleanedText = applyContentReplaceRules(bootstrapRepair, current.contentReplaceRules ?? []);
     }
-
-    let cleanedText = applyContentReplaceRules(call.text, current.contentReplaceRules ?? []);
-    const bootstrapRepair = await repairQuoteOnlyReply({
-      text: cleanedText, preset: prepared.effectivePreset, prompt: prepared.input,
-      userText, assistantText, chatId: binding.chatId,
-    });
-    if (bootstrapRepair !== null) cleanedText = applyContentReplaceRules(bootstrapRepair, current.contentReplaceRules ?? []);
     /**
      * E06（0.9.59）：开场识别走**与普通回合同一条**行增量契约。
      *
@@ -4595,11 +4700,20 @@ function createCoreInstance(
 
     if (!apply) {
       // preview 只返回**解析后的候选与拒绝行**，不做任何存储
+      const candidatePreviewId = `preview:${hashString(`${openingKey}|${sessionRevision}|${inputFingerprint}|${now()}`)}`;
+      if (shared.bootstrapPreviews.size >= 64) {
+        const oldest = shared.bootstrapPreviews.keys().next().value;
+        if (oldest) shared.bootstrapPreviews.delete(oldest);
+      }
+      shared.bootstrapPreviews.set(candidatePreviewId, { chatId, worldId: binding.worldId,
+        branchId: binding.branchId, openingKey, baseRevision: sessionRevision,
+        inputFingerprint, cleanedText, expiresAt: now() + 10 * 60_000 });
       return okResult({
         status: "preview",
         protocol: "table-delta-v1",
         callCount: 1,
-        baseRevision: binding.worldTimeCursor,
+        previewId: candidatePreviewId,
+        baseRevision: sessionRevision,
         duration: 0,
         newLocations: newLocationRows.map((row) => ({ id: row.id, name: row.name, parentLocationId: row.parentLocationId })),
         newCharacters: newCharacterRows.map((row) => ({ id: row.id, name: row.name, locationId: row.locationId })),
@@ -4620,7 +4734,7 @@ function createCoreInstance(
     });
     let finalWorld = mirrored.world;
     const placeholder = detectStartPlaceholder(world);
-    const sceneDoc = sanitizeSceneDoc(await store.read(sceneDocKey(world.id)).catch(() => null));
+    const sceneDoc = existingSceneDoc;
     /**
      * 当前位置只随**已接受的主角行**锚定；没有就诚实保持未知——
      * 绝不"造一个起点"（§2.4 / E06「未定位只返回未知」）。
@@ -4664,43 +4778,25 @@ function createCoreInstance(
       await store.write(`binding:${binding.chatId}`, nextBinding);
       bindingCache.set(binding.chatId, nextBinding);
     }
-    await store.write(sceneDocKey(world.id), nextDoc);
-    /**
-     * E06b / H18a：只为**本次实际创建**的内层地图尝试一次尺度标定。
-     *
-     * - 时段始终为零，也不启动任何背景旅行（上一段的 duration=0 不变）；
-     * - 已有有效尺度 → 零新模型请求；
-     * - 缺依据 / 缺 API / 模型 unknown → `scale-pending`：地图照常保留并标记待定，
-     *   界面显示「未标定 · 按格」，绝不继承世界图单位，也绝不走旧 v2 的比例尺提示。
-     * 标定失败**不影响开场本身**——世界与三表已经落盘。
-     */
+    // 开场总共只做一次模型识别；新内层地图没有尺度证据时按格待定。
     const newHostMapIds = newLocationRows
       .map((row) => pointIdFromLocationRowId(row.id))
       .filter((pointId): pointId is number => pointId !== null)
       .filter((pointId) => delta.tables.locations.some((child) => child.parentLocationId === `loc:${pointId}`));
-    const mapScale: Array<{ mapId: string; status: string; reasonCode?: string }> = [];
-    for (const hostPointId of newHostMapIds.slice(0, 4)) {
-      const hostRow = delta.tables.locations.find((row) => row.id === `loc:${hostPointId}`);
-      try {
-        const ensured = await ensureMapScaleOnCreate({
-          chatId: binding.chatId,
-          branchKey: bootstrapBranchKey,
-          mapId: String(hostPointId),
-          revision: 1,
-          frame: { ...SUBMAP_FRAME_DEFAULT },
-          ...(hostRow && hostRow.description ? { description: hostRow.description } : {}),
-        });
-        mapScale.push(ensured.status === "scale-pending"
-          ? { mapId: String(hostPointId), status: ensured.status, reasonCode: ensured.reasonCode }
-          : { mapId: String(hostPointId), status: ensured.status });
-      } catch {
-        mapScale.push({ mapId: String(hostPointId), status: "scale-pending", reasonCode: "INTERNAL" });
-      }
-    }
-    return okResult({
+    const bootstrapMapDoc = sanitizeMapDoc(await store.read(`maps:${binding.worldId}`).catch(() => null));
+    const mapScale: Array<{ mapId: string; status: string; reasonCode?: string }> = newHostMapIds.slice(0, 4)
+      .map((mapId) => {
+        const mapIdText = String(mapId);
+        const scopedKey = bootstrapBranchKey === "canon" ? mapIdText : `${bootstrapBranchKey}:${mapIdText}`;
+        const existing = bootstrapMapDoc.calibrations[scopedKey];
+        return existing && Number.isFinite(existing.metersPerCell) && existing.metersPerCell > 0
+          ? { mapId: mapIdText, status: "existing" }
+          : { mapId: mapIdText, status: "scale-pending", reasonCode: "NO_SCALE_EVIDENCE" };
+      });
+    const resultData = {
       status: anchored ? "committed" : "unknown",
       protocol: "table-delta-v1",
-      callCount: 1,
+      callCount: preview ? 0 : 1,
       duration: 0,
       anchoredLocationId: anchored ? String(anchoredPointId) : null,
       placeholderRetired: nextDoc.retiredPointIds.length > sceneDoc.retiredPointIds.length,
@@ -4710,7 +4806,12 @@ function createCoreInstance(
       rejectedRows,
       // H18a：新建内层地图的标定结果（scale-pending = 地图保留、按格显示）
       mapScale,
-    });
+    };
+    nextDoc.bootstrapByBranch[bootstrapBranchKey] = { chatId, openingKey,
+      messageId: openingMessageId, result: resultData };
+    await store.write(sceneDocKey(world.id), nextDoc);
+    if (previewId) shared.bootstrapPreviews.delete(previewId);
+    return okResult(resultData);
   }
 
   /**
@@ -4916,6 +5017,8 @@ function createCoreInstance(
     let output;
     /** C05：table-delta 路径算好的整份三表文档（含本分支更新），与 world 同一次会话响应写回。 */
     let nextTablesDoc: AtlasTablesStoreV1 | null = null;
+    /** B03：在 try 块内赋值的 highlights,捕获后写入回合映射;空数组兜底。 */
+    let turnHighlights: AtlasTurnHighlight[] = [];
     /**
      * E05：本回合**提交前**的三表快照（table-delta 路径才有）。
      * swipe / 编辑 / 删除触发的 `/turns/rollback` 必须把三表一起还原到回合前——
@@ -5099,6 +5202,7 @@ function createCoreInstance(
         nextTablesDoc = committed.tablesDoc;
         acceptedTurnRefs = committed.acceptedRows.map((row) => row.ref);
         settledInTablePath = true;
+
         // E05：冻结回合前的三表（深拷贝，避免后续任何原地修改污染回退基线）
         tablesBeforeTurn = { branchKey, tables: cloneAtlasTables(branchTables as unknown as AtlasThreeTablesV1) };
 
@@ -5107,6 +5211,13 @@ function createCoreInstance(
          * 这里只负责算效果——与 world / tables 同一份候选会话写回。
          */
         const branchAfter = nextTablesDoc?.branches?.[branchKey];
+        const finalPlayerRowId = protagonistRowId(binding, committed.world);
+        const finalPlayerRow = finalPlayerRowId === null ? null
+          : branchAfter?.characters.find((item) => item.id === finalPlayerRowId) ?? null;
+        const fallbackPlayerPoint = committed.receipt.currentLocationId ?? binding.currentLocationId;
+        const finalPlayerLocationId = finalPlayerRow ? finalPlayerRow.locationId
+          : fallbackPlayerPoint === null || fallbackPlayerPoint === undefined ? null
+          : String(fallbackPlayerPoint).startsWith("loc:") ? String(fallbackPlayerPoint) : `loc:${fallbackPlayerPoint}`;
         const simulationEdits: AtlasSimulationAcceptedEdit[] = [];
         for (const row of committed.acceptedRows) {
           if (row.table !== "location" && row.table !== "character" && row.table !== "item") continue;
@@ -5119,6 +5230,9 @@ function createCoreInstance(
             ref: row.ref,
             // 人物行的**新值**供推演侧判断意图与目标；其它表不需要正文
             row: post === null ? null : (post as unknown as Record<string, unknown>),
+            visibility: row.table === "character" && post !== null && finalPlayerLocationId !== null
+              && post.locationId === finalPlayerLocationId && row.basis === "observed"
+              && (row.sourceId === "msg:a" || row.sourceId === "msg:u") ? "known" : "hidden",
           });
         }
         const periodsThisTurn = Math.max(0, committed.receipt.currentTime - committed.receipt.previousTime);
@@ -5348,6 +5462,35 @@ function createCoreInstance(
           scanned: committed.background.moves,
           skipped: committed.background.skipped,
         });
+        // B03：在 try 块内捕获 highlights(后续写入回合映射用),闭包变量 committed 还在作用域。
+        turnHighlights = tablesBeforeTurn === null ? [] : summarizeHighlightsWithEvidence(
+          tablesBeforeTurn,
+          nextTablesDoc,
+          acceptedTurnRefs,
+          committed.acceptedRows,
+          protagonistRowId(binding, committed.world),
+          committed.receipt.currentLocationId,
+          binding.currentLocationId,
+        );
+        const simBranch = nextSimulationDoc?.branches?.[branchKey];
+        if (simBranch && turnHighlights.length < 8) {
+          for (const event of simulationEvents) {
+            if (event.kind !== "delivery" || event.status !== "delivered") continue;
+            const delivery = simBranch.deliveries.find((row) => row.id === event.simulationId);
+            if (!delivery) continue;
+            const receivedByPlayer = (delivery.recipientType === "character" && finalPlayerRowId !== null
+              && delivery.recipientId === finalPlayerRowId)
+              || (delivery.recipientType === "location" && finalPlayerLocationId !== null
+                && delivery.recipientId === finalPlayerLocationId);
+            if (!receivedByPlayer) continue;
+            const signal = simBranch.signals.find((row) => row.id === delivery.signalId);
+            if (!signal?.topic) continue;
+            const sourceRef = signal.id;
+            if (turnHighlights.some((row) => row.sourceRef === sourceRef)) continue;
+            turnHighlights.push({ text: `获知：${signal.topic}`.slice(0, 140), visibility: "known", sourceRef });
+            if (turnHighlights.length >= 8) break;
+          }
+        }
       }
     } catch (thrown) {
       if (thrown instanceof AtlasError && thrown.details.retryable === undefined) {
@@ -5503,11 +5646,7 @@ function createCoreInstance(
        * 不借用另一分支、也不凭空造空世界。
        */
       tablesBefore: tablesBeforeTurn,
-      highlights: tablesBeforeTurn === null ? [] : summarizeAtlasTurnChanges(
-        tablesBeforeTurn.tables,
-        nextTablesDoc?.branches?.[tablesBeforeTurn.branchKey] ?? null,
-        acceptedTurnRefs,
-      ),
+      highlights: turnHighlights,
       /**
        * C09 / C10：本轮的推演事件与**逐行**逆操作。
        * 旧回合没有这两个字段时视为空，不凭空迁移其他分支；回退按行恢复而不复制整模块。
@@ -7300,6 +7439,7 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
     revByChat: new Map(),
     chatMutex: new Map(),
     ensureMutex: new Map(),
+    bootstrapPreviews: new Map(),
   };
   const globalCore = createCoreInstance(deps.store, deps, shared);
   // H13：SQL 世界数据模式的路由组（未注入 Repository 时 enabled()=false，全部拒绝且不加载 sql.js）。

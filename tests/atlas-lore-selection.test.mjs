@@ -41,7 +41,7 @@ test('P2-02a 70 条无关条目排前,相关地点排末能选到', () => {
     mode: 'geo',
     maxChars: 6000,
   });
-  assert.ok(result.selectedUids.includes('relplace'), `期望选中 relplace,实际 ${JSON.stringify(result.selectedUids)}`);
+  assert.ok(result.selectedUids.includes('卡书:relplace'), `期望选中 relplace,实际 ${JSON.stringify(result.selectedUids)}`);
 });
 
 test('P2-02b 输入次序改变输出稳定(确定性)', () => {
@@ -76,9 +76,7 @@ test('P2-02c 正文或场景为空时不凭空激活', () => {
     mode: 'turn',
     maxChars: 6000,
   });
-  assert.ok(result.text.length > 0, '没有关键词也应给最少上下文');
-  // 没有 activatedUids → 不应把所有都标成激活(本测试只检查非空,不验证具体名单)
-  assert.equal(typeof result.text, 'string');
+  assert.equal(result.text, '', '没有正文相关性或已验证的激活条目时不注入背景');
 });
 
 test('P2-02d 中文长内容优先含关键词片段', () => {
@@ -94,8 +92,9 @@ test('P2-02d 中文长内容优先含关键词片段', () => {
     mode: 'turn',
     maxChars: 6000,
   });
-  assert.ok(result.selectedUids.includes('hit'), `关键词命中的短条目应被选中,实际 ${JSON.stringify(result.selectedUids)}`);
+  assert.ok(result.selectedUids.includes('默认书:hit'), `关键词命中的短条目应被选中,实际 ${JSON.stringify(result.selectedUids)}`);
   assert.ok(result.text.includes('短条目只有关键词命中段'), '短条目正文应在 text 里');
+  assert.ok(result.text.includes('关键词命中段应在中部'), '长条目须截取命中附近的正文');
 });
 
 test('P2-02e 不超过 6000 字(字符预算)', () => {
@@ -134,13 +133,13 @@ test('P2-02g disabled 条目不参与', () => {
   ];
   const result = selectAtlasLoreSupplement({
     entries,
-    chatKeywords: new Set(),
+    chatKeywords: new Set(['启用条目']),
     sceneKeywords: new Set(),
     mode: 'turn',
     maxChars: 6000,
   });
-  assert.ok(result.selectedUids.includes('on'));
-  assert.ok(!result.selectedUids.includes('off'));
+  assert.ok(result.selectedUids.includes('默认书:on'));
+  assert.ok(!result.selectedUids.includes('默认书:off'));
 });
 
 test('P2-02h 激活条目优先于未激活条目(同分时按书名/uid 稳定)', () => {
@@ -150,11 +149,19 @@ test('P2-02h 激活条目优先于未激活条目(同分时按书名/uid 稳定)
   ];
   const result = selectAtlasLoreSupplement({
     entries,
-    activatedUids: new Set(['B']),
+    activatedUids: new Set(['默认书:B']),
     chatKeywords: new Set(),
     sceneKeywords: new Set(),
     mode: 'turn',
     maxChars: 6000,
   });
-  assert.equal(result.selectedUids[0], 'B', '激活的应排在最前');
+  assert.equal(result.selectedUids[0], '默认书:B', '激活的应排在最前');
+});
+
+test('两本书同 UID 只激活指定书，且预算包含换行', () => {
+  const entries = [makeEntry('7', '甲书内容', { bookName: '甲书' }), makeEntry('7', '乙书内容', { bookName: '乙书' })];
+  const result = selectAtlasLoreSupplement({ entries, activatedUids: new Set(['乙书:7']),
+    chatKeywords: new Set(), sceneKeywords: new Set(), mode: 'turn', maxChars: 6000 });
+  assert.deepEqual(result.selectedUids, ['乙书:7']);
+  assert.equal(result.selectedOutputChars, result.text.length);
 });

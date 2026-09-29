@@ -178,9 +178,10 @@ export const DEFAULT_WORLD_TURN_SYSTEM_PROMPT = DEFAULT_PROMPT_SEGMENTS_TABLE_DE
  */
 export const TABLE_DELTA_BOOTSTRAP_TASK_CONTENT =
   "【任务模式：开场识别（mode=bootstrap）】\n" +
+  "当前场景的证据顺序：本条助手开场正文优先，其次是可信的当前状态摘要，最后才是世界书背景。世界书只能给候选地理与人物资料，不能单独证明主角或任何人物此刻在场。\n" +
   "已有开场白但世界还没有锚定场景。本轮只做定位，不推进时间、不输出任何时间与距离：\n" +
   "1. 判断玩家当前实际所在的地点：材料里明确出现且未建档的，用 location add（parentRef 按材料给出或为 null）；已在对照表里的，用 character set 把当前场景人物或玩家的 locationRef 指向它；材料只是氛围、回忆或传闻时不要登记任何地点。\n" +
-  "2. 登记开场实际在场的人物（character add）并用 locationRef 锚定其位置；角色卡标题不是人物，背景提及者不算在场。\n" +
+  "2. 登记开场实际在场且对后续剧情重要的人物（character add）并用 locationRef 锚定其位置；姓名尚未揭示时给稳定的临时引用和描述性称呼，后续再合并，不因缺名漏掉人物。一闪而过的路人不强行建档；角色卡标题和世界书背景提及者不算在场。\n" +
   "3. 根据开场动作和上下文唯一确定场所时登记主角位置；多个候选时省略，不要造环、不要补不存在的内层房间。\n" +
   "【开场材料】\n{{assistantReply}}\n只输出一个完整 <atlasEdit> 块。";
 

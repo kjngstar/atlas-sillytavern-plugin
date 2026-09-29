@@ -599,6 +599,8 @@ export interface AtlasSimulationAcceptedEdit {
   ref: string;
   /** 该行应用后的新值（人物行可含 `locationId` / `targetLocationId` / `actionTendency` / `currentAction`）。 */
   row?: Record<string, unknown> | null;
+  /** 已按本轮证据及主角最终地点校验的可见性。 */
+  visibility?: AtlasSimulationVisibility;
 }
 
 /** 日程 / 后台移动：由引擎（而非模型）算出的实际行动结果。 */
@@ -876,7 +878,7 @@ export function applySimulationEffects(input: AtlasSimulationEffectInput): Atlas
       targetLocationId,
       topic,
       signalId: null,
-      visibility: "known",
+      visibility: edit.visibility ?? "hidden",
       source: "character-intent",
       createdTurnKey: input.turnKey,
       lastAppliedTurnKey: input.turnKey,

@@ -41,7 +41,12 @@ function buildWorld() {
   const regionId = String((base.regions ?? [])[0]?.id ?? "");
   const parsed = parseWorld(JSON.parse(JSON.stringify({
     ...base,
-    points: [...(base.points ?? []), { id: 9001, name: "钟楼", x: 10, y: 10, regionId }],
+    points: [
+      ...(base.points ?? []),
+      { id: 9001, name: "钟楼", x: 10, y: 10, regionId },
+      // B01：远方地点,与 POV 当前地点不同区域
+      { id: 9999, name: "远方废墟", x: 90, y: 90, regionId },
+    ],
   })));
   assert.ok(parsed !== null, "夹具世界可解析");
   return parsed;
@@ -82,6 +87,31 @@ function signalBlock() {
       table: "simulation", op: "propose", ref: "new:sim:declaration", kind: "signal",
       originRef: "loc:9001", topic: "使者已带出宣战文书",
       quote: "使者带着宣战文书离开了钟楼", basis: "observed",
+    }),
+    "</atlasEdit>",
+  ].join("\n");
+}
+
+/**
+ * B01：同一回合两条既有「同地」也有「远方」的人物创建。
+ *  - npc:chronicle-c2 在 POV 当前地点 loc:4103,basis=observed → 已知可见
+ *  - npc:chronicle-c3 在远方地点 loc:4102,basis=observed → 主角看不到
+ * quote 必须连续逐字出现在助手正文里(observed 那条的硬约束)。
+ */
+function twoLocationCharacterBlock() {
+  // 主角 POV 在 binding.currentLocationId="4103"(白塔钟座)。
+  // 两条都有合法逐字引文；最终人物地点决定是否在主角视角内。
+  return [
+    "<atlasEdit>",
+    JSON.stringify({
+      table: "character", op: "set", ref: "npc:chronicle-c2",
+      patch: { currentAction: "在钟座上警戒" },
+      basis: "observed", quote: "伊莱恩在钟座上警戒",
+    }),
+    JSON.stringify({
+      table: "character", op: "set", ref: "npc:chronicle-c3",
+      patch: { currentAction: "在远方大厅设置机关" },
+      basis: "observed", quote: "塔尔在远方大厅设置机关",
     }),
     "</atlasEdit>",
   ].join("\n");
@@ -256,6 +286,56 @@ test("D04：回执写人类可读摘要 + bounded simulationCounts，不再只�
   }
   assert.ok(receipt.simulationCounts.tasks >= 1, "本回合至少一条推演任务");
   assert.ok(receipt.summary.length <= 480, "摘要按既有口径有界");
+});
+
+test("B01:同地观察行动 known / 远方行动 hidden,服务端 /state 按可见性过滤", async () => {
+  const { core, carrier, store } = await setup({ scripts: [() => textResponse(200, twoLocationCharacterBlock())] });
+  const committed = await core.handle("POST", "/turns/commit", commitBody({
+    assistantText: "伊莱恩在钟座上警戒。塔尔在远方大厅设置机关。",
+  }));
+  assert.equal(committed.status, 200, `应提交成功：${JSON.stringify(committed.body.error ?? {})}`);
+
+  const turnRow = Object.values(carrier.session.turns)[0];
+  assert.ok(Array.isArray(turnRow?.highlights), "回合记录要带 highlights");
+  const allHighlights = turnRow.highlights;
+  const knownHighlights = allHighlights.filter((h) => h.visibility === "known");
+  const hiddenHighlights = allHighlights.filter((h) => h.visibility === "hidden");
+
+  // 同地 observed 必须 known。
+  assert.ok(knownHighlights.length >= 1, `同地观察行动必须 known,不得全 hidden;got: ${JSON.stringify(turnRow.highlights)}`);
+  const knownHasLocal = knownHighlights.some((h) => /伊莱恩|钟座/.test(h.text));
+  assert.ok(knownHasLocal, "同地点的摘要应该出现伊莱恩 / 钟座字样");
+
+  const knownHasFar = knownHighlights.some((h) => /塔尔|远方大厅/.test(h.text));
+  assert.equal(knownHasFar, false, "远方行动不得伪装成 known 进默认视图");
+  assert.ok(hiddenHighlights.length >= 1, "远方行动留在 hidden bucket");
+  const hiddenHasFar = hiddenHighlights.some((h) => /塔尔|远方大厅/.test(h.text));
+  assert.ok(hiddenHasFar, "hidden 摘要要能找到远方人物");
+
+  // ④ 服务端 /state 在 visibility=known 时**不**返回 hidden 文本/sourceRef
+  const knownView = await core.handle("POST", "/state", { chatId: "chat-a", simulationVisibility: "known" });
+  assert.equal(knownView.status, 200);
+  const knownSimView = knownView.body.data.simulationView;
+  assert.ok(knownSimView, "/state 必须带 simulationView");
+  const knownJson = JSON.stringify(knownSimView);
+  assert.equal(/塔尔|远方大厅/.test(knownJson), false, "默认 known 视图不得包含 hidden 摘要文本");
+  assert.equal(
+    (knownSimView.latestTurn?.highlights ?? []).every((h) => h.visibility !== "hidden"),
+    true,
+    "latestTurn.highlights 在 known 视图下必须不含 hidden",
+  );
+
+  // ⑤ 服务端 /state 在 visibility=all 时**保留**所有 hidden,供作者视图
+  const allView = await core.handle("POST", "/state", { chatId: "chat-a", simulationVisibility: "all" });
+  assert.equal(allView.status, 200);
+  const allSimView = allView.body.data.simulationView;
+  assert.ok(allSimView, "all 视图必须存在");
+  const allJson = JSON.stringify(allSimView);
+  assert.ok(/塔尔|远方大厅/.test(allJson), "作者视图 all 能看到 hidden 摘要");
+  assert.ok(
+    (allSimView.latestTurn?.highlights ?? []).some((h) => h.visibility === "hidden"),
+    "all 视图的 latestTurn.highlights 保留 hidden 摘要",
+  );
 });
 
 test("场景 v2：后台推演保留事件，意图与私下想法不进入正文注入", async () => {
@@ -780,7 +860,7 @@ function bootstrapHostBlock() {
 
 const BOOTSTRAP_TEXT = "你推开望海楼的门，走进大堂。";
 
-test("H18a/E06b：新建内层地图会被尝试标定一次，结果按分支作用域落盘", async () => {
+test("H18a/E06b：开场只建内层地图，显式标定按分支作用域落盘", async () => {
   const scaleAnswer = JSON.stringify({
     status: "estimated",
     extentMeters: { width: 1000, height: 1000 },
@@ -811,7 +891,11 @@ test("H18a/E06b：新建内层地图会被尝试标定一次，结果按分支�
     + `rows=${JSON.stringify(rows.map((r) => [r.id, r.name, r.parentLocationId]))}`
     + ` rejected=${JSON.stringify(result.body.data.rejectedRows)}`);
   assert.equal(mapScale[0].mapId, towerPointId);
-  assert.equal(mapScale[0].status, "calibrated", `应标定成功：${JSON.stringify(mapScale[0])}`);
+  assert.equal(mapScale[0].status, "scale-pending", `开场只调用一次模型：${JSON.stringify(mapScale[0])}`);
+  assert.equal(mapScale[0].reasonCode, "NO_SCALE_EVIDENCE");
+
+  const calibrated = await core.handle("POST", "/worlds/scale/calibrate", { chatId: "chat-a", mapId: towerPointId });
+  assert.equal(calibrated.status, 200, JSON.stringify(calibrated.body.error ?? {}));
 
   // 键按分支作用域：正史 = 裸 mapId（0.9.58 存档形状）
   const calibration = carrier.session.maps.calibrations[towerPointId];
@@ -834,7 +918,7 @@ test("H18a：模型给 unknown 时地图保留、明确待定，绝不猜米数"
   const mapScale = result.body.data.mapScale;
   assert.equal(mapScale.length, 1);
   assert.equal(mapScale[0].status, "scale-pending", "unknown → 待定，而不是假标定");
-  assert.equal(mapScale[0].reasonCode, "UNKNOWN", "原因码如实回报");
+  assert.equal(mapScale[0].reasonCode, "NO_SCALE_EVIDENCE", "开场没有独立尺度证据");
 
   const rows = carrier.session.tables.branches[BRANCH_KEY].locations;
   assert.ok(rows.some((row) => row.name === "望海楼大堂"), "地图保留，不因为没标定就丢数据");
@@ -859,7 +943,7 @@ test("H18a：已有有效标定时不再发模型请求（零新请求），人�
   });
   assert.equal(probe.status, 200, `第一次开场应成功：${JSON.stringify(probe.body.error ?? {})}`);
   const mapId = probe.body.data.mapScale[0].mapId;
-  assert.equal(probe.body.data.mapScale[0].status, "calibrated");
+  assert.equal(probe.body.data.mapScale[0].status, "scale-pending");
 
   // 同一夹具下 id 分配是确定性的：换一个会话，预先给这张图放一份**人工锁定**标定。
   // 作者已手工标定过的图，建图流程绝不该再烧一次模型请求，也绝不该覆盖它。

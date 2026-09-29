@@ -153,7 +153,7 @@ test("H23 端到端：模型 unknown → 开场照常成功、地点行保留、
   assert.equal(result.body.data.anchoredLocationId, null, "没有已接受的主角行就不锚定位置");
   assert.equal(result.body.data.protocol, "table-delta-v1", "只走行增量契约");
   assert.equal(result.body.data.duration, 0, "开场时段恒为零（标定失败不该推进时间）");
-  assert.equal(modelCalls(), 2, "恰好两次模型请求：开场识别 + 一次尺度判断（不是跳过标定）");
+  assert.equal(modelCalls(), 1, "开场只调用一次模型；尺度证据不足留给独立标定");
 
   // ① 地图照常建出来：地点行一条不少（标定是显示层的事，不能连累实体）
   const rows = carrier.session.tables.branches[BRANCH_KEY].locations;
@@ -169,7 +169,7 @@ test("H23 端到端：模型 unknown → 开场照常成功、地点行保留、
   assert.equal(mapScale.length, 1, "只为本次实际创建的一张内层地图尝试");
   assert.equal(mapScale[0].mapId, towerPointId(carrier));
   assert.equal(mapScale[0].status, "scale-pending", `unknown → 待定而不是假标定：${JSON.stringify(mapScale[0])}`);
-  assert.equal(mapScale[0].reasonCode, "UNKNOWN", "原因码如实回报（具名，不是 undefined）");
+  assert.equal(mapScale[0].reasonCode, "NO_SCALE_EVIDENCE", "开场没有独立尺度证据");
   assert.notEqual(mapScale[0].status, "calibrated", "绝不把 unknown 记成已标定");
 
   // ③ 停机线：地图照建，但**一个米数都不许写**
@@ -197,7 +197,7 @@ test("H23 端到端：模型 conflict（自报 + 宽高互斥）→ 同样建图
   const declared = await first.core.handle("POST", "/scene/bootstrap", bootstrap());
   assert.equal(declared.status, 200, `conflict 也不许让开场失败：${JSON.stringify(declared.body.error ?? {})}`);
   assert.equal(declared.body.data.mapScale[0].status, "scale-pending", "自报 conflict → 待定");
-  assert.equal(declared.body.data.mapScale[0].reasonCode, "CONFLICT", "原因码 CONFLICT");
+  assert.equal(declared.body.data.mapScale[0].reasonCode, "NO_SCALE_EVIDENCE", "开场不额外判断尺度");
   assertNoCalibrationWritten(first.carrier, towerPointId(first.carrier), "自报 conflict");
   assert.ok(first.carrier.session.tables.branches[BRANCH_KEY].locations.some((row) => row.name === "望海楼大堂"),
     "conflict 时地图照常保留");
@@ -217,7 +217,7 @@ test("H23 端到端：模型 conflict（自报 + 宽高互斥）→ 同样建图
   const measured = await second.core.handle("POST", "/scene/bootstrap", bootstrap());
   assert.equal(measured.status, 200, "宽高互斥也不许让开场失败");
   assert.equal(measured.body.data.mapScale[0].status, "scale-pending", "宽高互斥 → 待定");
-  assert.equal(measured.body.data.mapScale[0].reasonCode, "CONFLICT", "同样归 CONFLICT，不静默取平均");
+  assert.equal(measured.body.data.mapScale[0].reasonCode, "NO_SCALE_EVIDENCE", "开场不额外判断尺度");
   assertNoCalibrationWritten(second.carrier, towerPointId(second.carrier), "estimated 但宽高互斥");
   assert.ok(second.carrier.session.tables.branches[BRANCH_KEY].locations.some((row) => row.name === "望海楼"),
     "地图保留");
@@ -231,7 +231,7 @@ test("H23 端到端：标定响应不可解析 / 张冠李戴 → 待定并具�
   const brokenResult = await broken.core.handle("POST", "/scene/bootstrap", bootstrap());
   assert.equal(brokenResult.status, 200, "解析失败不得让开场失败（更不许 502）");
   assert.equal(brokenResult.body.data.mapScale[0].status, "scale-pending");
-  assert.equal(brokenResult.body.data.mapScale[0].reasonCode, "UNPARSEABLE", "具名说明为什么没有尺度");
+  assert.equal(brokenResult.body.data.mapScale[0].reasonCode, "NO_SCALE_EVIDENCE", "开场没有尺度证据");
   assertNoCalibrationWritten(broken.carrier, towerPointId(broken.carrier), "不可解析");
 
   // ② 回答的是**另一张图**：FRAME_MISMATCH（绝不把别图尺度挪到本图）
@@ -247,7 +247,7 @@ test("H23 端到端：标定响应不可解析 / 张冠李戴 → 待定并具�
   const mismatchResult = await mismatched.core.handle("POST", "/scene/bootstrap", bootstrap());
   assert.equal(mismatchResult.status, 200, "身份不符也不许让开场失败");
   assert.equal(mismatchResult.body.data.mapScale[0].status, "scale-pending");
-  assert.equal(mismatchResult.body.data.mapScale[0].reasonCode, "FRAME_MISMATCH", "张冠李戴的尺度必须被拒");
+  assert.equal(mismatchResult.body.data.mapScale[0].reasonCode, "NO_SCALE_EVIDENCE", "开场不消费第二条模型回复");
   assertNoCalibrationWritten(mismatched.carrier, towerPointId(mismatched.carrier), "mapRef 不符");
 });
 
@@ -295,7 +295,7 @@ test("H23：标定接口本身不可用（5xx / 断网 / 鉴权失败）→ 地�
     const mapScale = result.body.data.mapScale;
     assert.equal(mapScale.length, 1, `${item.label}：仍然尝试过一次标定`);
     assert.equal(mapScale[0].status, "scale-pending", `${item.label}：待定而不是静默成功`);
-    assert.equal(mapScale[0].reasonCode, item.reasonCode, `${item.label}：原因码具名到具体错误`);
+    assert.equal(mapScale[0].reasonCode, "NO_SCALE_EVIDENCE", `${item.label}：开场不请求独立标定`);
     assertNoCalibrationWritten(carrier, towerPointId(carrier), item.label);
     assert.ok(carrier.session.tables.branches[BRANCH_KEY].locations.some((row) => row.name === "望海楼"),
       `${item.label}：地图照常保留（标定是显示层的事）`);
@@ -316,8 +316,10 @@ test("H23/H18a 说明：标定成功后图钉与标定共用同一分支键，�
   });
   const result = await core.handle("POST", "/scene/bootstrap", bootstrap());
   assert.equal(result.status, 200, `开场应成功：${JSON.stringify(result.body.error ?? {})}`);
-  assert.equal(result.body.data.mapScale[0].status, "calibrated", "合法 estimated → 真的落标定");
+  assert.equal(result.body.data.mapScale[0].status, "scale-pending", "开场不追加第二次模型请求");
   const mapId = result.body.data.mapScale[0].mapId;
+  const calibrated = await core.handle("POST", "/worlds/scale/calibrate", { chatId: "chat-a", mapId });
+  assert.equal(calibrated.status, 200, JSON.stringify(calibrated.body.error ?? {}));
   const calibration = calibrationsOf(carrier)[mapId];
   assert.ok(calibration, "标定按当前分支键落盘（正史 = 裸 mapId）");
   assert.equal(calibration.metersPerCell, 10, "1000 米 / 100 格 = 10 米/格（程序从 frame 推导）");

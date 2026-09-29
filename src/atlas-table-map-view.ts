@@ -65,6 +65,8 @@ export interface AtlasMapViewUnplacedLocation {
   id: string;
   name: string;
   parentLocationId: string | null;
+  mapId: string;
+  positionQuality: "unknown";
 }
 
 export type AtlasMapViewPositionQuality = "confirmed" | "estimated" | "unknown";
@@ -219,7 +221,9 @@ export function projectTablesToMapView(
     if (!isGrid(row.gridX) || !isGrid(row.gridY)) {
       unplacedTotal += 1;
       if (unplacedEntries.length < ATLAS_MAP_VIEW_LIMITS.unplacedLocations) {
-        unplacedEntries.push({ id: row.id, name: row.name, parentLocationId: row.parentLocationId });
+        unplacedEntries.push({ id: row.id, name: row.name, parentLocationId: row.parentLocationId,
+          mapId: parent === null ? "world" : String(pointIdFromLocationRowId(parent.id) ?? parent.id),
+          positionQuality: "unknown" });
       }
       continue;
     }

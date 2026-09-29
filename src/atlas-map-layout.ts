@@ -50,6 +50,7 @@ export type AtlasMapLayoutPendingReason =
   | "INVALID_ID"
   | "DUPLICATE_ID"
   | "WRONG_MAP"
+  | "WRONG_PARENT"
   | "NO_FRAME"
   | "NO_SLOT"
   | "OVER_PAGE_LIMIT"
@@ -78,6 +79,8 @@ export interface AtlasMapLayoutUnplacedInput {
   name?: string;
   /** 该地点行声明的宿主图（世界图 "world" / 子图宿主点 id）；与本图不符 → 不进本图示意。 */
   mapId?: string | null;
+  /** 真实父地点行 ID；给出后须与当前子图宿主一致。 */
+  parentLocationId?: string | null;
   /** 地点行 mobile：载具本体不随机成为固定点（§2.5）。 */
   mobile?: "vehicle" | "fixed" | null;
   /** 可选：把示意位置贴在一个**已有真实坐标**的锚点上（如停靠载具挂靠停靠点）。 */
@@ -309,7 +312,8 @@ export function layoutUnplacedMarkers(input: AtlasMapLayoutInput): AtlasMapLayou
   }
 
   // 3) 候选：去重 + 排序（排序使布局与输入数组顺序无关）。
-  const candidates: Array<{ id: string; name: string; mapId: string; mobile: string; anchorId: string }> = [];
+  const candidates: Array<{ id: string; name: string; mapId: string; parentLocationId: string;
+    parentDeclared: boolean; mobile: string; anchorId: string }> = [];
   const pending: AtlasMapLayoutPendingEntry[] = [];
   const seenIds = new Set<string>();
   for (const entry of Array.isArray(source.unplaced) ? source.unplaced : []) {
@@ -329,6 +333,8 @@ export function layoutUnplacedMarkers(input: AtlasMapLayoutInput): AtlasMapLayou
       id,
       name,
       mapId: readText(record?.mapId),
+      parentLocationId: readText(record?.parentLocationId),
+      parentDeclared: record !== null && Object.prototype.hasOwnProperty.call(record, "parentLocationId"),
       mobile: readText(record?.mobile),
       anchorId: readText(record?.anchorId),
     });
@@ -422,7 +428,7 @@ export function layoutUnplacedMarkers(input: AtlasMapLayoutInput): AtlasMapLayou
 
 /** 候选门禁：不属于本图的地点、在途/锚点未知的载具本体，一律不进示意排版。 */
 function gateCandidate(
-  candidate: { id: string; mapId: string; mobile: string },
+  candidate: { id: string; mapId: string; parentLocationId: string; parentDeclared: boolean; mobile: string },
   mapId: string,
   anchorByLocationId: ReadonlyMap<string, Record<string, unknown>>,
 ): { reason: AtlasMapLayoutPendingReason; detail: string } | null {
@@ -431,6 +437,12 @@ function gateCandidate(
       reason: "WRONG_MAP",
       detail: `地点声明的宿主图是 ${candidate.mapId}，不是本图 ${mapId}：房间不得被搬进世界图`,
     };
+  }
+  if (candidate.parentDeclared) {
+    const expectedParent = mapId === "world" ? "" : mapId.startsWith("loc:") ? mapId : `loc:${mapId}`;
+    if (candidate.parentLocationId !== expectedParent) {
+      return { reason: "WRONG_PARENT", detail: "地点的父地点与当前子图宿主不一致：只进正确子图" };
+    }
   }
   const anchor = anchorByLocationId.get(candidate.id) ?? null;
   const isVehicle = candidate.mobile === "vehicle" || anchor !== null;

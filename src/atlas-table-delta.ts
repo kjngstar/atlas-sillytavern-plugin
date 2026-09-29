@@ -447,7 +447,7 @@ export function parseAtlasEditBlock(text: unknown, sources: AtlasEditSources = {
     }
     // 通过：保留原始行内容，补上程序决定的 line / sourceId
     if (basis === "inferred" && sourceId === null) sourceId = sources["msg:a"] ? "msg:a" : sources["msg:u"] ? "msg:u" : null;
-    const edit = { ...record, line: lineNo, ...(sourceId === null ? {} : { sourceId }) } as unknown as AtlasTableEdit;
+    const edit = { ...record, basis, line: lineNo, ...(sourceId === null ? {} : { sourceId }) } as unknown as AtlasTableEdit;
     edits.push(edit);
     if (op === "add") acceptedTempRefs.add(record.ref);
   });
@@ -482,6 +482,10 @@ export interface AtlasDeltaRowReceipt {
   code?: AtlasEditParseCode;
   path?: string;
   ref?: string;
+  /** B02：服务端内部附的「已验证 basis」(observed / inferred)。HTTP/UI 可安全转发。 */
+  basis?: "observed" | "inferred";
+  /** B02：服务端内部附的「证据来源」(`msg:a` / `msg:u` / 行号衍生)。原文不存。 */
+  sourceId?: string | null;
 }
 
 export interface AtlasDeltaOutcome {
@@ -533,13 +537,25 @@ export function applyAtlasTableDelta(
       rejected.push({ line, ok: false, code: "DEPENDENCY_FAILED", ref: broken, op: edit.op });
       continue;
     }
+    // B02：保留服务端内部 evidence(basis + sourceId)。
+    // 校验阶段已经决定过 basis/sourceId(§ edit.basis / edit.sourceId),这里只搬运。
+    const basis: "observed" | "inferred" | undefined =
+      edit.basis === "observed" ? "observed"
+      : edit.basis === "inferred" ? "inferred"
+      : undefined;
+    const sourceId: string | null | undefined =
+      typeof edit.sourceId === "string" ? edit.sourceId : undefined;
     const result = edit.table === "location"
       ? applyLocationEdit(candidate, edit as AtlasLocationEdit, scope, options)
       : edit.table === "character"
         ? applyCharacterEdit(candidate, edit as AtlasCharacterEdit, scope, options)
         : applyItemEdit(candidate, edit as AtlasItemEdit, scope);
     if (result.ok) {
-      applied.push({ line, ok: true, id: result.id, op: result.op });
+      applied.push({
+        line, ok: true, id: result.id, op: result.op,
+        ...(basis !== undefined ? { basis } : {}),
+        ...(sourceId !== undefined ? { sourceId } : {}),
+      });
       continue;
     }
     rejected.push({ line, ok: false, code: result.error.code as AtlasEditParseCode, path: result.error.path, ref: result.error.ref, op: edit.op });

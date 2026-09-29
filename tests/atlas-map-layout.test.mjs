@@ -117,6 +117,18 @@ test("H08：重开地图 / 改窗口（乱序输入 + 额外 viewport）布局�
   assert.equal(JSON.stringify(shuffled), JSON.stringify(first), "调整窗口 / 输入顺序都不改变布局");
 });
 
+test("M2-C06：父地点与子图宿主不符时只进待定位名单", () => {
+  const row = unplaced("loc:room", { mapId: "4103", parentLocationId: "loc:4103" });
+  const correct = layoutUnplacedMarkers(layoutInput({ mapId: "4103", unplaced: [row] }));
+  assert.equal(correct.displayOnly.length, 1);
+  const wrong = layoutUnplacedMarkers(layoutInput({ mapId: "4103", unplaced: [
+    { ...row, parentLocationId: "loc:9999" },
+  ] }));
+  assert.equal(wrong.displayOnly.length, 0);
+  assert.equal(wrong.pending[0].reason, "WRONG_PARENT");
+  assert.deepEqual(wrong.collisionPoints, [], "示意点永不参加路径碰撞");
+});
+
 test("H08：已有真实坐标不被改写；视觉避让只挪示意点，碰撞检测仍只读真实坐标", () => {
   const target = "loc:9200";
   const before = layoutUnplacedMarkers(layoutInput({ unplaced: [unplaced(target)] }));

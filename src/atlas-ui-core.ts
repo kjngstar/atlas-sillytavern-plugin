@@ -429,12 +429,21 @@ export function createAtlasUiCore(deps: {
    * 返回 true = 绑定就绪，本条消息照常 prepare；false / 未注入 = 保持未绑定，跳过。
    */
   ensureWorld?: () => Promise<boolean>;
+  /** 当前聊天第一条已完成的助手开场白；无开场时返回 null。 */
+  getOpeningMessage?: () => Promise<{ messageId: string; text: string } | null>;
   /**
    * 0.9.21 世界书资料（可选）：宿主侧读当前角色卡世界书 → 有界文本。
    * commit 前调用；失败 / 未注入 → 无资料块，照常推演（绝不因资料失败阻断回合）。
    * 只进推演请求，不进主聊天注入（主聊天由酒馆世界书激活管线负责）。
    */
-  getLoreSupplement?: () => Promise<string>;
+  getLoreSupplement?: (context: {
+    chatId: string;
+    characterId: string | number | null;
+    mode: "turn" | "geo" | "bootstrap";
+    userText: string;
+    assistantText: string;
+    recentAssistantTexts: readonly string[];
+  }) => Promise<string>;
   /**
    * 0.9.22 立即推演（可选）：读最近一条助手楼层正文作为推演素材；
    * 未注入 / 失败 / 空 → 用占位正文（仅时间与日程流动）。
@@ -497,6 +506,8 @@ export function createAtlasUiCore(deps: {
   let healthCheckedAt = -Infinity;
   let commitInFlight = false;
   let generationRevision = 0;
+  const bootstrappedBranches = new Set<string>();
+  const openingAttemptedMessages = new Set<string>();
   let stoppedGeneration = false;
   /** 最近一次 MESSAGE_SENT 触发的 prepare 任务（waitPendingTurn 等它落定）。 */
   let lastPrepareTask: Promise<void> | null = null;
@@ -1036,6 +1047,44 @@ export function createAtlasUiCore(deps: {
         details: { reasonCode: "BINDING_DISABLED" } });
       return;
     }
+    // 首条用户消息送出后、普通 prepare 前，读取已经完成的开场白；失败不阻断酒馆正文。
+    const openingScope = `${chatId}|${binding.worldId}|${binding.branchId ?? "canon"}`;
+    if (deps.getOpeningMessage && !bootstrappedBranches.has(openingScope)
+      && !openingAttemptedMessages.has(`${openingScope}|${messageId}`)
+      && !state.receipts.some((row) => row.status === "committed")) {
+      openingAttemptedMessages.add(`${openingScope}|${messageId}`);
+      try {
+        const opening = await deps.getOpeningMessage();
+        if (opening?.messageId && opening.text.trim() && !disposed && state.chatId === chatId
+          && generationRevision === revision) {
+          let loreSupplement = "";
+          try {
+            loreSupplement = await deps.getLoreSupplement?.({ chatId, characterId: null,
+              mode: "bootstrap", userText: String(userText ?? ""), assistantText: opening.text,
+              recentAssistantTexts: [] }) ?? "";
+          } catch { loreSupplement = ""; }
+          if (disposed || state.chatId !== chatId || generationRevision !== revision) return;
+          const response = await api.request("POST", "/scene/bootstrap", {
+            chatId, apply: true, auto: true, openingMessageId: opening.messageId,
+            userText: String(userText ?? ""), assistantText: opening.text,
+            ...(loreSupplement ? { loreSupplement } : {}),
+          });
+          if (disposed || state.chatId !== chatId || generationRevision !== revision) return;
+          if (response.status === 200 && (response.body as { ok?: boolean })?.ok) {
+            bootstrappedBranches.add(openingScope);
+            diagnostic({ level: "info", source: "ui", code: "SCENE_BOOTSTRAP_COMPLETE",
+              operation: "bootstrap", phase: "response", outcome: "success" });
+            await refresh();
+          } else {
+            diagnostic({ level: "warn", source: "ui", code: "SCENE_BOOTSTRAP_RETRYABLE",
+              operation: "bootstrap", phase: "response", outcome: "failed", retryable: true });
+          }
+        }
+      } catch {
+        diagnostic({ level: "warn", source: "ui", code: "SCENE_BOOTSTRAP_RETRYABLE",
+          operation: "bootstrap", phase: "request", outcome: "failed", retryable: true });
+      }
+    }
     const request = {
       chatId,
       messageId: messageId.slice(0, ATLAS_LIMITS.ID_CHARS),
@@ -1174,21 +1223,27 @@ export function createAtlasUiCore(deps: {
       setState({ pendingTurn: null });
       return;
     }
+    const commitRevision = generationRevision;
     const commitSwipeId = swipeIdForNextCommit;
     swipeIdForNextCommit = null;
+    const commitContext = deps.getCommitContext ? await safeCommitContext(deps.getCommitContext, assistantText) : null;
+    if (disposed || state.chatId !== pending.chatId || generationRevision !== commitRevision) return;
     // 0.9.21 世界书资料（可选钩子）：失败 / 空一律当无资料，绝不阻断回合
     let loreSupplement: string | undefined;
     if (deps.getLoreSupplement) {
       try {
-        const text = await deps.getLoreSupplement();
-        if (disposed) return;
+        const text = await deps.getLoreSupplement({
+          chatId: pending.chatId, characterId: null, mode: "turn",
+          userText: pending.userText, assistantText,
+          recentAssistantTexts: commitContext?.recentAssistantTexts ?? [],
+        });
+        if (disposed || state.chatId !== pending.chatId || generationRevision !== commitRevision) return;
         if (typeof text === "string" && text.trim().length > 0) loreSupplement = text;
       } catch {
         loreSupplement = undefined;
       }
     }
     // 0.9.25 shujuku 占位符体系：$7 前文 / $U 用户设定 / $C 角色描述（可选钩子，失败即缺省）
-    const commitContext = deps.getCommitContext ? await safeCommitContext(deps.getCommitContext, assistantText) : null;
     const request = {
       turnId: pending.turnId,
       chatId: pending.chatId,
@@ -1316,6 +1371,7 @@ export function createAtlasUiCore(deps: {
    */
   async function manualAdvance(): Promise<void> {
     if (disposed || commitInFlight) return;
+    const manualRevision = generationRevision;
     const chatId = state.chatId;
     const binding = state.binding;
     if (!chatId || state.serviceStatus !== "online") {
@@ -1330,16 +1386,6 @@ export function createAtlasUiCore(deps: {
       setState({ lastError: "有回合正在推演，稍后再试。" });
       return;
     }
-    let loreSupplement: string | undefined;
-    if (deps.getLoreSupplement) {
-      try {
-        const text = await deps.getLoreSupplement();
-        if (disposed) return;
-        if (typeof text === "string" && text.trim().length > 0) loreSupplement = text;
-      } catch {
-        loreSupplement = undefined;
-      }
-    }
     const ts = now();
     let lastAssistant = "";
     try {
@@ -1352,6 +1398,19 @@ export function createAtlasUiCore(deps: {
     const manualAssistantText = (lastAssistant.trim().length > 0 ? lastAssistant : "（无新剧情，仅时间与日程流动。）")
       .slice(0, ATLAS_LIMITS.ASSISTANT_TEXT_CHARS);
     const commitContext = deps.getCommitContext ? await safeCommitContext(deps.getCommitContext, manualAssistantText) : null;
+    if (disposed || state.chatId !== chatId || generationRevision !== manualRevision) return;
+    let loreSupplement: string | undefined;
+    if (deps.getLoreSupplement) {
+      try {
+        const text = await deps.getLoreSupplement({
+          chatId, characterId: null, mode: "turn",
+          userText: "（手动推进，无新用户行动。）", assistantText: manualAssistantText,
+          recentAssistantTexts: commitContext?.recentAssistantTexts ?? [],
+        });
+        if (disposed || state.chatId !== chatId || generationRevision !== manualRevision) return;
+        if (typeof text === "string" && text.trim().length > 0) loreSupplement = text;
+      } catch { loreSupplement = undefined; }
+    }
     const request = {
       turnId: `turn-manual-${ts}`,
       chatId,

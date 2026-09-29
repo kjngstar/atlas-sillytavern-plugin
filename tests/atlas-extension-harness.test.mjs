@@ -22,9 +22,11 @@ import { createAtlasUiCore, ATLAS_UI_EVENTS } from "../src/atlas-ui-core.ts";
 import {
   createAtlasExtension,
   connectAtlas,
+  readCardLoreSupplementViaSelector,
   ATLAS_DISPLAY_NAME,
   ATLAS_EXTENSION_VERSION,
 } from "../atlas-extension/index.js";
+import { selectAtlasLoreSupplement as releaseLoreSelector } from "../atlas-extension/dist/atlas-ui-core.mjs";
 
 let assertionCount = 0;
 function ok(value, message) {
@@ -76,6 +78,11 @@ function makeApi({ health = { ok: true, data: { protocolVersion: 1 } }, stateByC
       if (path === "/health") {
         if (failHealth) throw new Error("network down");
         return { status: 200, body: health };
+      }
+      if (method === "POST" && path === "/scene/bootstrap") {
+        return turnBehavior.bootstrapError
+          ? { status: 502, body: { ok: false, error: { code: "API_REQUEST_FAILED" } } }
+          : { status: 200, body: { ok: true, data: { status: "committed", duration: 0 } } };
       }
       if (method === "POST" && path === "/turns/prepare") {
         if (turnBehavior.prepareError) return { status: 500, body: { ok: false, error: { code: "INTERNAL", message: turnBehavior.prepareError } } };
@@ -752,6 +759,79 @@ test("回合：GENERATION_ENDED → commit 一次 → 回执入列并持久化 �
   deepEqual(hostWrap.dataStore.get("receiptsByChat")?.["chat-a"], receipt, "回执按聊天分桶写入 extensionSettings");
   equal(hostWrap.dataStore.get("receipts"), null, "0.9.28 旧全局键已废弃（一次性清除）");
   equal(api.calls.filter((c) => c.path === "/state" && c.body?.chatId === "chat-a").length >= 2, true, "commit 成功后刷新世界状态");
+});
+
+test("M1-A03：真实宿主读书适配与 commit 钩子跨两本书选中末尾地点", async () => {
+  const previousWindow = globalThis.window;
+  const previousSt = globalThis.SillyTavern;
+  const previousHelper = globalThis.TavernHelper;
+  const chatMetadata = {};
+  const stContext = { chatId: "chat-a", characterId: 0, chatMetadata,
+    characters: [{ data: { extensions: { world: "甲书" } } }] };
+  const firstEntries = Object.fromEntries(Array.from({ length: 70 }, (_, i) =>
+    [String(i), { uid: i, comment: `无关条目${i}`, key: [`无关${i}`], content: "遥远背景。".repeat(90) }]));
+  const books = {
+    "甲书": { entries: firstEntries },
+    "乙书": { entries: {
+      1: { uid: 1, comment: "Atlas 动向 · 私密", key: ["白塔钟座"], content: "不应回喂" },
+      2: { uid: 2, comment: "白塔钟座", key: ["白塔钟座"], content: "普通背景。".repeat(90) + "白塔钟座的石门刻着星图。" + "普通背景。".repeat(90) },
+    } },
+  };
+  globalThis.window = { __atlasWorldInfoModule: { loadWorldInfo: async (name) => books[name] } };
+  globalThis.SillyTavern = { getContext: () => stContext };
+  globalThis.TavernHelper = { getCharWorldbookNames: async () => ({ primary: "甲书", additional: ["乙书"] }) };
+  const loreEvents = [];
+  let core;
+  try {
+    const ready = await readyCore({}, {}, [], { getLoreSupplement: (context) =>
+      readCardLoreSupplementViaSelector(context, releaseLoreSelector, (event) => loreEvents.push(event)) });
+    core = ready.core;
+    await core.handleEvent("MESSAGE_SENT", { messageId: "m-lore", userText: "我进入白塔钟座。" });
+    await core.handleEvent("MESSAGE_RECEIVED", { assistantMessageId: "a-lore", assistantText: "白塔钟座的石门出现在眼前。" });
+    await flush();
+    const commit = ready.api.calls.find((call) => call.path === "/turns/commit");
+    ok(commit, "真实回合应提交");
+    ok(commit.body.loreSupplement.includes("白塔钟座的石门刻着星图"), "第二本书末尾的正文中段应入 commit");
+    equal(commit.body.loreSupplement.includes("不应回喂"), false, "Atlas 自写条目不回喂");
+    equal(commit.body.loreSupplement.includes("无关条目"), false, "第一本无关条目不挤占预算");
+    ok(loreEvents.some((event) => event.code === "LORE_SELECTION_COMPLETE" && event.details?.selectedCount === 1), "记录实际筛选计数");
+    books["乙书"].entries[2].content = "白塔钟座的新石门已经开启。";
+    const updated = await readCardLoreSupplementViaSelector({ chatId: "chat-a", characterId: 0,
+      mode: "turn", userText: "白塔钟座", assistantText: "石门开启。", recentAssistantTexts: [] }, releaseLoreSelector, (event) => loreEvents.push(event));
+    ok(updated.includes("新石门已经开启"), "同名书编辑后下一次请求立即读取新内容");
+    equal(updated.includes("刻着星图"), false, "不沿用前一请求的成品缓存");
+    const geo = await readCardLoreSupplementViaSelector({ chatId: "chat-a", characterId: 0,
+      mode: "geo", userText: "", assistantText: "白塔钟座", recentAssistantTexts: [] }, releaseLoreSelector, (event) => loreEvents.push(event));
+    ok(geo.includes("白塔钟座"), "手动地理提炼使用 geo 预算与地理标题");
+    ok(loreEvents.some((event) => event.code === "LORE_SELECTION_COMPLETE" && event.details?.mode === "geo"), "诊断区分 geo 用途");
+  } finally {
+    core?.dispose();
+    globalThis.window = previousWindow;
+    globalThis.SillyTavern = previousSt;
+    globalThis.TavernHelper = previousHelper;
+  }
+});
+
+test("M2-C01：首楼在首次 prepare 前自动识别一次，失败可重试且不阻断普通生成", async () => {
+  const loreContexts = [];
+  const ready = await readyCore({}, {}, [], {
+    getOpeningMessage: async () => ({ messageId: "opening-1", text: "第一条助手开场白。" }),
+    getLoreSupplement: async (context) => { loreContexts.push(context); return "开场背景"; },
+  });
+  await ready.core.handleEvent("MESSAGE_SENT", { messageId: "u-first", userText: "开始。" });
+  const routes = ready.api.calls.filter((call) => call.path === "/scene/bootstrap" || call.path === "/turns/prepare");
+  deepEqual(routes.map((call) => call.path), ["/scene/bootstrap", "/turns/prepare"], "bootstrap 先于 prepare");
+  equal(routes[0].body.openingMessageId, "opening-1");
+  equal(routes[0].body.loreSupplement, "开场背景");
+  equal(loreContexts[0].mode, "bootstrap");
+  ready.core.dispose();
+
+  const failed = await readyCore({ bootstrapError: true }, {}, [], {
+    getOpeningMessage: async () => ({ messageId: "opening-2", text: "第二个开场。" }),
+  });
+  await failed.core.handleEvent("MESSAGE_SENT", { messageId: "u-fail", userText: "开始。" });
+  ok(failed.api.calls.some((call) => call.path === "/turns/prepare"), "bootstrap 失败仍运行普通 prepare");
+  failed.core.dispose();
 });
 
 test("回合：同一条回复的重复 GENERATION_ENDED 只 commit 一次", async () => {

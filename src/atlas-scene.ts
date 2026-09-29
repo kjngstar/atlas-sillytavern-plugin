@@ -80,10 +80,12 @@ export interface SceneDoc {
   lastConfirmed: { branchId: string | null; pointId: string; at: number } | null;
   /** 开场识别（mode=bootstrap）簿记：明确调用次数与状态 */
   bootstrap: { attempts: number; lastAt: number | null; lastStatus: string | null } | null;
+  /** 各聊天分支成功应用过的开场键与有界回执；重复请求无需再调用模型。 */
+  bootstrapByBranch: Record<string, { chatId: string; openingKey: string; messageId: string; result: Record<string, unknown> }>;
 }
 
 export function emptySceneDoc(): SceneDoc {
-  return { schemaVersion: 1, retiredPointIds: [], lastConfirmed: null, bootstrap: null };
+  return { schemaVersion: 1, retiredPointIds: [], lastConfirmed: null, bootstrap: null, bootstrapByBranch: {} };
 }
 
 /** sidecar 形状不可信：宽容清洗，绝不炸面板。 */
@@ -117,6 +119,19 @@ export function sanitizeSceneDoc(raw: unknown): SceneDoc {
         lastAt: typeof b.lastAt === "number" && Number.isFinite(b.lastAt) ? b.lastAt : null,
         lastStatus: typeof b.lastStatus === "string" ? b.lastStatus.slice(0, 32) : null,
       };
+    }
+  }
+  if (record.bootstrapByBranch && typeof record.bootstrapByBranch === "object" && !Array.isArray(record.bootstrapByBranch)) {
+    for (const [branch, raw] of Object.entries(record.bootstrapByBranch as Record<string, unknown>).slice(0, 32)) {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw) || branch.length > 160) continue;
+      const row = raw as Record<string, unknown>;
+      if (typeof row.chatId !== "string" || typeof row.openingKey !== "string"
+        || typeof row.messageId !== "string" || !row.result || typeof row.result !== "object"
+        || Array.isArray(row.result)) continue;
+      const result = row.result as Record<string, unknown>;
+      if (JSON.stringify(result).length > 12000) continue;
+      doc.bootstrapByBranch[branch] = { chatId: row.chatId.slice(0, 128),
+        openingKey: row.openingKey.slice(0, 128), messageId: row.messageId.slice(0, 128), result };
     }
   }
   return doc;

@@ -3461,7 +3461,8 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       });
       movesList.append(card);
     }
-    if (lines.length === 0) movesList.append(el("div", "aw-move__empty", "这一轮没有可确认的新动向。"));
+    if (lines.length === 0) movesList.append(el("div", "aw-move__empty", isAuthorView
+      ? "本轮暂无新动向。" : "本轮暂无主角已知的新动向；作者视图可查看幕后。"));
     return true;
   }
 
@@ -4916,7 +4917,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       if (scaleCalibrating || !chatId) return;
       aiBtn.disabled = true;
       try {
-        const lore = await readCardLoreSupplement();
+        const lore = await readCardLoreSupplementViaSelector(currentLoreSelectionContext("geo"));
         await runScaleCalibrate({ chatId, mapId, ...(lore ? { loreSupplement: lore } : {}) }, "AI 尺度标定");
       } finally {
         aiBtn.disabled = false;
@@ -5167,7 +5168,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       if (!confirmed) return;
       geoBusy = true;
       try {
-        const lore = await readCardLoreSupplement();
+        const lore = await readCardLoreSupplementViaSelector(currentLoreSelectionContext("geo"));
         if (!lore) {
           setStatus("没有可用的世界书资料——检查卡书是否有启用条目，或先在「推进」页开启「世界书资料」。", "error");
           return;
@@ -5200,7 +5201,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         const chatId = String(state().chatId ?? "");
         if (!chatId) { setStatus("当前没有活动聊天。", "error"); return; }
         let lore = "";
-        try { lore = (await readCardLoreSupplement()) ?? ""; } catch { lore = ""; }
+        try { lore = (await readCardLoreSupplementViaSelector(currentLoreSelectionContext("geo", recentTexts.join("\n")))) ?? ""; } catch { lore = ""; }
         await runGeoAdopt({ chatId, recentTexts, ...(lore ? { loreSupplement: lore } : {}) }, "剧情提炼");
       } catch (error) {
         setStatus(`提炼失败：${error instanceof Error ? error.message : String(error)}`, "error");
@@ -6373,10 +6374,8 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         : regionFilter
           ? pointsAll.filter((p) => String(p.regionId ?? "") === regionFilter)
           : pointsAll;
-    // S9（0.9.55）人物不再画地图标点：世界图上的人物头像与地点同坐标（同一点叠两枚标记，
-    // 命中与人读都在打架），而且「人在这个地点里」只到地点级，标点等于伪造更细的坐标。
-    // 人物一律由地点承载——地点面板「当前在这里」名单（含长按纠偏）、子图
-    // 「建筑内 · 具体房间未知」名单。故这里只保留子图名单所需的人物集合。
+    // 世界图以地点和人数徽标承载人物；子图只有真实细格坐标才画独立人物点，
+    // 建筑级与未知位置仍由地点面板名单承载。
     // H06：SQL 模式下目录 / 三表一律不参与（人物由 SQL 人物标点 + 粗定位名单承载）。
     const npcsAll = sqlMapItems ? [] : (Array.isArray(d.npcDirectory) ? d.npcDirectory : []);
     const objectsAll = sqlMapItems ? [] : (Array.isArray(d.objectDirectory) ? d.objectDirectory : []);
@@ -6757,6 +6756,8 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
           unplaced: unplacedEntries.map((entry) => ({
             id: String(entry.id ?? entry.locationId ?? ""),
             name: String(entry.name ?? ""),
+            mapId: String(entry.mapId ?? (inSub ? view.pointId : "world")),
+            parentLocationId: entry.parentLocationId ?? null,
           })),
           ...(Array.isArray(tableMap?.geoTopology?.vehicleAnchors) ? { vehicles: tableMap.geoTopology.vehicleAnchors } : {}),
         });
@@ -6985,8 +6986,37 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
        * 用「全部可见标点」而不是只比宿主：子图里可见的是宿主 + 同层房间。
        */
       const pinCoords = new Set(points.map((point) => `${Number(point.x)}|${Number(point.y)}`));
+      const drawnNpcIds = new Set();
+      // 三表子图的真实人物标点优先：nearby 是有界列表，不能让第 49 个人凭空消失。
+      for (const marker of Array.isArray(currentSub?.points) ? currentSub.points : []) {
+        if (marker?.kind !== "character" || marker.positionQuality !== "confirmed") continue;
+        const rowId = String(marker.rowId ?? marker.id ?? "");
+        if (!rowId || typeof marker.x !== "number" || typeof marker.y !== "number") continue;
+        if (pinCoords.has(`${marker.x}|${marker.y}`)) continue;
+        const entry = tableMap.nearby.entries.find((item) => String(item.id ?? item.rowId ?? "") === rowId
+          || `npc:${String(item.id ?? "")}` === rowId);
+        if (entry?.isProtagonist === true || entry?.presence === "left") continue;
+        const npc = entry ? npcViewFromTableRow(entry, { pointName: entry.locationName ?? null })
+          : { id: rowId.replace(/^npc:/, ""), name: String(marker.name ?? ""),
+            pointId: String(view.pointId), presence: "present" };
+        const pin = el("button", "aw-object aw-object--npc");
+        pin.type = "button";
+        pin.dataset.npcId = String(npc.id);
+        pin.dataset.positionQuality = "confirmed";
+        pin.style.left = `${marker.x}px`;
+        pin.style.top = `${marker.y}px`;
+        pin.title = String(npc.name);
+        pin.setAttribute("aria-label", `人物 ${String(npc.name)}，已确认细格位置，点击查看详情`);
+        pin.append(el("span", "aw-object__gem", String(npc.name ?? "?").slice(0, 1)));
+        pin.append(el("span", "aw-object__name", String(npc.name)));
+        pin.addEventListener("click", (event) => { event.stopPropagation(); openNpcPanel(npc, pin); });
+        mapLayer.append(pin);
+        drawnNpcIds.add(rowId);
+      }
       for (const entry of tableMap.nearby.entries) {
         const locationId = String(entry.locationId ?? "");
+        if (drawnNpcIds.has(String(entry.id ?? entry.rowId ?? ""))
+          || drawnNpcIds.has(`npc:${String(entry.id ?? "")}`)) continue;
         if (!visibleRoomIds.has(locationId)) continue;
         if (entry.presence === "left") continue;
         if (entry.isProtagonist === true) continue; // 主角由 topbar / 地点名单呈现，不在地图上冒充 NPC
@@ -7819,10 +7849,17 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       try {
         const ctx = typeof context === "function" ? context() : null;
         const chat = Array.isArray(ctx?.chat) ? ctx.chat : [];
-        const assistantText = [...chat].reverse().map((m) => String(m?.mes ?? "")).find((t) => t.trim().length > 0) ?? "";
+        const openingMessage = [...chat].reverse().find((m) => m?.is_user === false
+          && typeof m?.mes === "string" && m.mes.trim());
+        const assistantText = openingMessage?.mes ?? "";
+        const openingMessageId = String(openingMessage?.id ?? openingMessage?.mesid ?? openingMessage?.send_date ?? "manual");
         const userText = [...chat].reverse().map((m) => (!m?.is_user ? "" : String(m?.mes ?? ""))).find((t) => t.trim().length > 0) ?? "";
         const recentAssistantTexts = chat.filter((m) => !m?.is_user).slice(-3).map((m) => String(m?.mes ?? ""));
-        const result = await api.request("POST", "/scene/bootstrap", { chatId, apply: false, userText, assistantText, recentAssistantTexts });
+        const loreSupplement = settingsV2?.loreSupplementEnabled === false ? ""
+          : await readCardLoreSupplementViaSelector(currentLoreSelectionContext("bootstrap", assistantText));
+        const previewRequest = { chatId, openingMessageId, userText, assistantText, recentAssistantTexts,
+          ...(loreSupplement ? { loreSupplement } : {}) };
+        const result = await api.request("POST", "/scene/bootstrap", { ...previewRequest, apply: false });
         scenePreviewBox.innerHTML = "";
         if (result.status !== 200 || !result.body?.ok) {
           scenePreviewBox.append(el("p", "aw-note aw-note--error", result.body?.error?.message ?? `识别失败（HTTP ${result.status}）`));
@@ -7850,7 +7887,8 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         applyBtn.addEventListener("click", async () => {
           applyBtn.disabled = true;
           try {
-            const applyResult = await api.request("POST", "/scene/bootstrap", { chatId, apply: true, userText, assistantText, recentAssistantTexts });
+            const applyResult = await api.request("POST", "/scene/bootstrap", { ...previewRequest,
+              apply: true, previewId: scenePreview?.previewId, baseRevision: scenePreview?.baseRevision });
             if (applyResult.status !== 200 || !applyResult.body?.ok) {
               setStatus(applyResult.body?.error?.message ?? `应用失败（HTTP ${applyResult.status}）`, "error");
               return;
@@ -10217,142 +10255,32 @@ const LORE_SUPPLEMENT_LIMITS = {
   TOTAL_CHARS: 6000,
 };
 
-// A07：删除跨请求 60 秒成品缓存(loreSupplementCache + CACHE_TTL_MS)——
-// 同名书内容修改后下一轮立即体现;A/B 聊天不串;没有内容变化时也符合上限,
-// 不产生成品旧文本。本请求内对同一本书的重复读取共用 Promise(下方的 inFlightByBook)。
-
-/**
- * 读当前角色世界书 → 有界资料文本（失败 / 无书 / 空书 → 空串，绝不抛错）。
- * 0.9.35 多书合并（照抄 shujuku getCurrentCharacterWorldbookBinding 口径）：
- * TavernHelper.getCharWorldbookNames('current')（角色绑定 primary + additional 全部）
- * → 卡主世界书（data.extensions.world）→ 聊天绑定书，全部并入去重逐本读取。
- * 此前只读「卡主书 or 聊天书」一本——世界书挂载在 additional 槽的卡（本次验收的真实卡）
- * 完全读不到，静默空串。Atlas 自写条目（动向 / 事件）排除——回喂推演纯属复读。
- */
-async function readCardLoreSupplement() {
+/** 从当前绑定书中按本次请求的正文选取资料；宿主未提供可靠激活清单时只报告 context-fallback。 */
+export async function readCardLoreSupplementViaSelector(selectionContext, selectorOverride = null, emit = emitAtlasDiagnostic) {
   try {
     if (typeof SillyTavern === "undefined") return "";
     const ctx = SillyTavern.getContext();
     const character = ctx?.characters?.[ctx?.characterId] ?? null;
-
-    // 1) 收集候选书名(有序去重)
-    const bookNames = [];
-    const pushBook = (value) => {
-      const name = typeof value === "string" ? value.trim() : "";
-      if (name && !bookNames.includes(name)) bookNames.push(name);
+    const chatId = String(ctx?.chatId ?? "");
+    const characterId = ctx?.characterId ?? null;
+    if (chatId !== selectionContext?.chatId) return "";
+    if (selectionContext.characterId !== null && selectionContext.characterId !== characterId) return "";
+    const characterBook = character?.data?.extensions?.world ?? null;
+    const chatBook = ctx?.chatMetadata?.world_info ?? null;
+    const branchId = ctx?.chatMetadata?.atlas?.binding?.branchId ?? null;
+    const isCurrent = () => {
+      const live = SillyTavern.getContext();
+      return String(live?.chatId ?? "") === chatId && (live?.characterId ?? null) === characterId
+        && live?.chatMetadata === ctx?.chatMetadata
+        && (live?.characters?.[live?.characterId]?.data?.extensions?.world ?? null) === characterBook
+        && (live?.chatMetadata?.world_info ?? null) === chatBook
+        && (live?.chatMetadata?.atlas?.binding?.branchId ?? null) === branchId;
     };
-    try {
-      // TavernHelper.getCharWorldbookNames 返回结构随版本有差异：数组 / {primary, additional} / 字符串，全部防御兼容
-      const th = globalThis.TavernHelper ?? globalThis.getTavernHelper?.() ?? null;
-      if (th && typeof th.getCharWorldbookNames === "function") {
-        const bound = await th.getCharWorldbookNames("current");
-        if (Array.isArray(bound)) {
-          for (const item of bound) pushBook(typeof item === "string" ? item : item?.name);
-        } else if (bound && typeof bound === "object") {
-          pushBook(bound.primary);
-          if (Array.isArray(bound.additional)) {
-            for (const item of bound.additional) pushBook(typeof item === "string" ? item : item?.name);
-          }
-        } else {
-          pushBook(bound);
-        }
-      }
-    } catch { /* 酒馆助手不可用 → 原生路径兜底 */ }
-    pushBook(character?.data?.extensions?.world);
-    pushBook(ctx?.chatMetadata?.world_info);
-    if (bookNames.length === 0) return "";
-
-    // A07：本请求内对同一本书的重复读取共用 Promise
-    const inFlightByBook = new Map();
-
-    // 3) 逐本读取合并(单本失败跳过,不影响其余书)
-    const worldInfo = await loadStWorldInfo();
-    const prefixList = atlasRuntime.mod?.ATLAS_LOREBOOK_PREFIX;
-    const atlasPrefixes = prefixList && typeof prefixList === "object" ? Object.values(prefixList) : ["Atlas 动向 ·", "Atlas 事件 ·"];
-    const lines = [];
-    let total = 0;
-    let failedBooks = 0;
-    for (const bookName of bookNames) {
-      let rawEntries = [];
-      try {
-        // A07：同一本书的 in-flight Promise 复用(本请求内)
-        let dataPromise = inFlightByBook.get(bookName);
-        if (!dataPromise) {
-          dataPromise = (async () => worldInfo.loadWorldInfo(bookName))();
-          inFlightByBook.set(bookName, dataPromise);
-        }
-        const data = await dataPromise;
-        rawEntries = data && typeof data === "object" && data.entries && typeof data.entries === "object"
-          ? Object.values(data.entries)
-          : [];
-      } catch {
-        failedBooks += 1;
-        continue; // 单本书不存在 / 读取失败 → 跳过该本
-      }
-      for (const entry of rawEntries) {
-        if (lines.length >= LORE_SUPPLEMENT_LIMITS.ENTRIES_MAX) break;
-        if (!entry || typeof entry !== "object" || entry.disable === true) continue;
-        const content = typeof entry.content === "string" ? entry.content.trim() : "";
-        if (!content) continue;
-        const comment = typeof entry.comment === "string" ? entry.comment.trim() : "";
-        if (atlasPrefixes.some((prefix) => comment.startsWith(prefix))) continue; // Atlas 自写条目不回喂
-        const keys = Array.isArray(entry.key) ? entry.key.filter((k) => typeof k === "string" && k.trim()) : [];
-        const title = comment || (keys.length > 0 ? keys.slice(0, 4).join(" / ") : "条目");
-        const clipped = content.length > LORE_SUPPLEMENT_LIMITS.ENTRY_CONTENT_CHARS
-          ? `${content.slice(0, LORE_SUPPLEMENT_LIMITS.ENTRY_CONTENT_CHARS)}…`
-          : content;
-        const line = `- [${bookName}] ${title}：${clipped.replace(/\s+/g, " ")}`;
-        if (total + line.length > LORE_SUPPLEMENT_LIMITS.TOTAL_CHARS) break;
-        lines.push(line);
-        total += line.length;
-      }
-      if (lines.length >= LORE_SUPPLEMENT_LIMITS.ENTRIES_MAX) break;
-    }
-    if (failedBooks > 0) {
-      emitAtlasDiagnostic({ level: "warn", source: "lorebook",
-        code: "LORE_CONTEXT_UNAVAILABLE", operation: "lore-context",
-        phase: "read", outcome: "failed", details: { count: failedBooks } });
-    }
-    const text = lines.join("\n");
-    return text;
-  } catch {
-    emitAtlasDiagnostic({ level: "warn", source: "lorebook",
-      code: "LORE_CONTEXT_UNAVAILABLE", operation: "lore-context",
-      phase: "read", outcome: "failed" });
-    return ""; // 读取失败不阻断推演
-  }
-}
-
-/** P2-03:用 atlas-lore-selection 纯函数有界选取世界书资料。
- * 与 readCardLoreSupplement 不同:
- *  - 读入所有书的全部条目后交给 P2-01 排序/截断,而不是单本先到先得
- *  - 缓存键 = 书名 + 内容 hash + chatId,失效更快(不再 60 秒)
- *  - 失败一本书不影响其他书,但有诊断条目
- */
-/**
- * A09：探测宿主是否暴露「本轮绿灯(activated)条目列表」API。
- * - TavernHelper.getActivatedEntries / TavernHelper.getEntryActivation 之类:
- *   不同时存在的酒馆版本一律视为「不可用」,按 context-fallback 处理。
- * - 不准自己猜一个 TavernHelper API(施工单 §2-A09 注释)。
- */
-function detectHostActivationApi() {
-  try {
-    const th = globalThis.TavernHelper ?? globalThis.getTavernHelper?.() ?? null;
-    if (!th || typeof th !== "object") return false;
-    if (typeof th.getActivatedEntries === "function") return true;
-    if (typeof th.getEntryActivation === "function") return true;
-    return false;
-  } catch {
-    return false;
-  }
-}
-
-async function readCardLoreSupplementViaSelector() {
-  try {
-    if (typeof SillyTavern === "undefined") return "";
-    const ctx = SillyTavern.getContext();
-    const character = ctx?.characters?.[ctx?.characterId] ?? null;
-    const chatId = ctx?.chatId ?? null;
+    const dropStale = () => {
+      emit({ level: "info", source: "lorebook", code: "LORE_STALE_CONTEXT_DROPPED",
+        operation: "lore-context", phase: "read", outcome: "skipped" });
+      return "";
+    };
 
     // 1) 收集候选书名
     const bookNames = [];
@@ -10376,6 +10304,7 @@ async function readCardLoreSupplementViaSelector() {
         }
       }
     } catch { /* 兜底 */ }
+    if (!isCurrent()) return dropStale();
     pushBook(character?.data?.extensions?.world);
     pushBook(ctx?.chatMetadata?.world_info);
     if (bookNames.length === 0) return "";
@@ -10422,42 +10351,42 @@ async function readCardLoreSupplementViaSelector() {
           bookName,
           content,
           enabled: entry.disable !== true,
+          keys,
         });
       }
     }
+    if (!isCurrent()) return dropStale();
 
     // 4) 调用 P2-01 纯函数排序 + 截断
-    const sel = atlasRuntime.mod?.selectAtlasLoreSupplement;
+    const sel = selectorOverride ?? atlasRuntime.mod?.selectAtlasLoreSupplement;
     if (typeof sel !== "function") {
       // 模块未加载或旧版本不支持,明确发 LORE_SELECTOR_UNAVAILABLE(A04)
-      emitAtlasDiagnostic({ level: "warn", source: "lorebook",
+      emit({ level: "warn", source: "lorebook",
         code: "LORE_SELECTOR_UNAVAILABLE", operation: "lore-context",
         phase: "select", outcome: "skipped",
         details: { reason: "selector_undefined" } });
       return "";
     }
-    const sceneKeywords = extractSceneKeywords(ctx);
-    // A09：探测宿主是否提供「本轮绿灯列表」API；不存在时发 LORE_ACTIVATION_UNAVAILABLE
-    const activationMode = detectHostActivationApi() ? "host-activated" : "context-fallback";
-    if (activationMode === "context-fallback") {
-      emitAtlasDiagnostic({ level: "info", source: "lorebook",
-        code: "LORE_ACTIVATION_UNAVAILABLE", operation: "lore-context",
-        phase: "select", outcome: "ok",
-        details: { reason: "host_api_unavailable", mode: "turn" } });
-    }
+    const sceneKeywords = extractSceneKeywords(selectionContext, allEntries);
+    // 当前受测宿主没有已验证的逐回合激活清单；不按函数名猜测 API。
+    const activationMode = "context-fallback";
+    emit({ level: "info", source: "lorebook",
+      code: "LORE_ACTIVATION_UNAVAILABLE", operation: "lore-context",
+      phase: "select", outcome: "ok",
+      details: { reason: "host_api_unavailable", mode: selectionContext.mode } });
     const result = sel({
       entries: allEntries,
       chatKeywords: sceneKeywords,
       sceneKeywords: sceneKeywords,
-      mode: "turn",
+      mode: selectionContext.mode,
       maxChars: LORE_SUPPLEMENT_LIMITS.TOTAL_CHARS,
     });
     if (failedBooks > 0) {
-      emitAtlasDiagnostic({ level: "warn", source: "lorebook",
+      emit({ level: "warn", source: "lorebook",
         code: "LORE_CONTEXT_UNAVAILABLE", operation: "lore-context",
         phase: "read", outcome: "failed", details: { count: failedBooks, sourceMode: result.sourceMode } });
     }
-    emitAtlasDiagnostic({ level: "info", source: "lorebook",
+    emit({ level: "info", source: "lorebook",
       code: "LORE_SELECTION_COMPLETE", operation: "lore-context",
       phase: "select", outcome: "ok", details: {
         candidateCount: result.candidateCount,
@@ -10465,33 +10394,38 @@ async function readCardLoreSupplementViaSelector() {
         truncatedCount: result.truncatedCount,
         outputChars: result.selectedOutputChars,
         sourceMode: result.sourceMode,
-        mode: "turn",
+        mode: selectionContext.mode,
         activationMode,
       } });
     return result.text;
   } catch {
-    emitAtlasDiagnostic({ level: "warn", source: "lorebook",
+    emit({ level: "warn", source: "lorebook",
       code: "LORE_CONTEXT_UNAVAILABLE", operation: "lore-context",
       phase: "read", outcome: "failed" });
-    return await readCardLoreSupplement();
+    return "";
   }
 }
 
-/** 从 SillyTavern 上下文抽取场景关键词(角色名 + 地点名等)。 */
-function extractSceneKeywords(ctx) {
+/** 只从本次有效正文命中候选条目的明示词，不拿旧聊天尾部猜当前场景。 */
+function extractSceneKeywords(selectionContext, entries) {
   const out = new Set();
-  try {
-    const recent = Array.isArray(ctx?.chat) ? ctx.chat.slice(-6) : [];
-    for (const msg of recent) {
-      const text = typeof msg?.mes === "string" ? msg.mes : "";
-      // 简单抽取:CJK 连续 2-8 字 + 拉丁连续 3-20 字
-      const cjk = text.match(/[\u4e00-\u9fff]{2,8}/g) ?? [];
-      for (const k of cjk) out.add(k);
-      const latin = text.match(/[A-Za-z][A-Za-z0-9_-]{2,19}/g) ?? [];
-      for (const k of latin) out.add(k);
+  const text = [selectionContext.userText, selectionContext.assistantText,
+    ...(selectionContext.recentAssistantTexts ?? [])].filter((part) => typeof part === "string").join("\n");
+  for (const entry of entries) {
+    for (const word of [...(entry.keys ?? []), entry.title]) {
+      if (typeof word === "string" && word.length >= 2 && word.length <= 40 && text.includes(word)) out.add(word);
     }
-  } catch { /* 兜底 */ }
+  }
   return out;
+}
+
+function currentLoreSelectionContext(mode, assistantText = "") {
+  const ctx = SillyTavern.getContext();
+  const recentAssistantTexts = (Array.isArray(ctx?.chat) ? ctx.chat : [])
+    .filter((message) => message?.is_user === false && typeof message?.mes === "string" && message.mes.trim())
+    .slice(-10).map((message) => message.mes);
+  return { chatId: String(ctx?.chatId ?? ""), characterId: ctx?.characterId ?? null,
+    mode, userText: "", assistantText, recentAssistantTexts };
 }
 
 async function connectOnce() {
@@ -10725,11 +10659,32 @@ async function connectOnce() {
         } finally { if (session) await sql.closeSqlSession(session); }
       },
       ensureWorld: () => ensureStarterWorld(),
+      getOpeningMessage: async () => {
+        try {
+          const captured = SillyTavern.getContext();
+          const chatId = String(captured?.chatId ?? "");
+          const characterId = captured?.characterId ?? null;
+          const branchId = captured?.chatMetadata?.atlas?.binding?.branchId ?? null;
+          const chat = Array.isArray(captured?.chat) ? captured.chat : [];
+          const lastUserIndex = chat.findLastIndex((message) => message?.is_user === true);
+          if (!chatId || lastUserIndex < 1) return null;
+          const firstIndex = chat.findIndex((message, index) => index < lastUserIndex
+            && message?.is_user === false && message?.is_system !== true
+            && typeof message?.mes === "string" && message.mes.trim());
+          if (firstIndex < 0) return null;
+          const opening = chat[firstIndex];
+          const live = SillyTavern.getContext();
+          if (String(live?.chatId ?? "") !== chatId || (live?.characterId ?? null) !== characterId
+            || (live?.chatMetadata?.atlas?.binding?.branchId ?? null) !== branchId) return null;
+          return { messageId: String(opening.id ?? opening.mesid ?? opening.send_date ?? firstIndex),
+            text: opening.mes };
+        } catch { return null; }
+      },
       // 0.9.21 世界书资料块：commit 前读当前卡书启用条目（有界），喂给推演 AI；
       // 0.9.22 开关：被供应商审核拦截时可在推进页关闭（settingsV2.loreSupplementEnabled）
       // A09：关闭时发 LORE_SUPPLEMENT_DISABLED(reason=settings_disabled)，
       // 不要伪装成激活接口故障；只有宿主真的没提供激活条目列表时才发 LORE_ACTIVATION_UNAVAILABLE。
-      getLoreSupplement: () => {
+      getLoreSupplement: (selectionContext) => {
         if (settingsV2?.loreSupplementEnabled === false) {
           emitAtlasDiagnostic({ level: "info", source: "lorebook",
             code: "LORE_SUPPLEMENT_DISABLED", operation: "lore-context",
@@ -10737,8 +10692,8 @@ async function connectOnce() {
             details: { reason: "settings_disabled" } });
           return Promise.resolve("");
         }
-        if (settingsV2?.loreUseSelector === false) return readCardLoreSupplement();
-        return readCardLoreSupplementViaSelector();
+        return readCardLoreSupplementViaSelector({ ...selectionContext,
+          characterId: SillyTavern.getContext()?.characterId ?? null });
       },
       // 0.9.22 立即推演：读最近一条助手楼层正文作为推演素材（无楼层 → null，用占位）
       getLastAssistantText: async () => {

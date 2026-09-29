@@ -35,6 +35,8 @@ var ATLAS_ERROR_CODES = {
   WRITE_FAILED: "WRITE_FAILED",
   /** 0.9.42 会话承载：携带的世界文档落后于最新已接受版本（双开同聊天等场景），拒绝提交 */
   SESSION_STALE: "SESSION_STALE",
+  /** 开场预览已经过期或会话/世界修订变化；必须重新预览，不能重新调用模型暗中替换候选。 */
+  PREVIEW_STALE: "PREVIEW_STALE",
   /**
    * C04（§2）：模型输出的形态与 `settings.worldTurnProtocol` 不符。
    * 不猜、不偷偷换管线——指明当前选项让作者自己切（推进页协议下拉）。
@@ -1197,7 +1199,7 @@ var DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA = [
   }
 ];
 var DEFAULT_WORLD_TURN_SYSTEM_PROMPT = DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA[0].content;
-var TABLE_DELTA_BOOTSTRAP_TASK_CONTENT = "【任务模式：开场识别（mode=bootstrap）】\n已有开场白但世界还没有锚定场景。本轮只做定位，不推进时间、不输出任何时间与距离：\n1. 判断玩家当前实际所在的地点：材料里明确出现且未建档的，用 location add（parentRef 按材料给出或为 null）；已在对照表里的，用 character set 把当前场景人物或玩家的 locationRef 指向它；材料只是氛围、回忆或传闻时不要登记任何地点。\n2. 登记开场实际在场的人物（character add）并用 locationRef 锚定其位置；角色卡标题不是人物，背景提及者不算在场。\n3. 根据开场动作和上下文唯一确定场所时登记主角位置；多个候选时省略，不要造环、不要补不存在的内层房间。\n【开场材料】\n{{assistantReply}}\n只输出一个完整 <atlasEdit> 块。";
+var TABLE_DELTA_BOOTSTRAP_TASK_CONTENT = "【任务模式：开场识别（mode=bootstrap）】\n当前场景的证据顺序：本条助手开场正文优先，其次是可信的当前状态摘要，最后才是世界书背景。世界书只能给候选地理与人物资料，不能单独证明主角或任何人物此刻在场。\n已有开场白但世界还没有锚定场景。本轮只做定位，不推进时间、不输出任何时间与距离：\n1. 判断玩家当前实际所在的地点：材料里明确出现且未建档的，用 location add（parentRef 按材料给出或为 null）；已在对照表里的，用 character set 把当前场景人物或玩家的 locationRef 指向它；材料只是氛围、回忆或传闻时不要登记任何地点。\n2. 登记开场实际在场且对后续剧情重要的人物（character add）并用 locationRef 锚定其位置；姓名尚未揭示时给稳定的临时引用和描述性称呼，后续再合并，不因缺名漏掉人物。一闪而过的路人不强行建档；角色卡标题和世界书背景提及者不算在场。\n3. 根据开场动作和上下文唯一确定场所时登记主角位置；多个候选时省略，不要造环、不要补不存在的内层房间。\n【开场材料】\n{{assistantReply}}\n只输出一个完整 <atlasEdit> 块。";
 var LORE_SUPPLEMENT_HEADER = "【世界书资料（当前角色卡，可能有噪声，仅供理解世界）】";
 function wrapWorldbookContext(content) {
   const text = String(content ?? "");
@@ -1894,6 +1896,8 @@ function createAtlasUiCore(deps) {
   let healthCheckedAt = -Infinity;
   let commitInFlight = false;
   let generationRevision = 0;
+  const bootstrappedBranches = /* @__PURE__ */ new Set();
+  const openingAttemptedMessages = /* @__PURE__ */ new Set();
   let stoppedGeneration = false;
   let lastPrepareTask = null;
   let generationGate = false;
@@ -2471,6 +2475,71 @@ function createAtlasUiCore(deps) {
       });
       return;
     }
+    const openingScope = `${chatId}|${binding.worldId}|${binding.branchId ?? "canon"}`;
+    if (deps.getOpeningMessage && !bootstrappedBranches.has(openingScope) && !openingAttemptedMessages.has(`${openingScope}|${messageId}`) && !state.receipts.some((row) => row.status === "committed")) {
+      openingAttemptedMessages.add(`${openingScope}|${messageId}`);
+      try {
+        const opening = await deps.getOpeningMessage();
+        if (opening?.messageId && opening.text.trim() && !disposed && state.chatId === chatId && generationRevision === revision) {
+          let loreSupplement = "";
+          try {
+            loreSupplement = await deps.getLoreSupplement?.({
+              chatId,
+              characterId: null,
+              mode: "bootstrap",
+              userText: String(userText ?? ""),
+              assistantText: opening.text,
+              recentAssistantTexts: []
+            }) ?? "";
+          } catch {
+            loreSupplement = "";
+          }
+          if (disposed || state.chatId !== chatId || generationRevision !== revision) return;
+          const response = await api.request("POST", "/scene/bootstrap", {
+            chatId,
+            apply: true,
+            auto: true,
+            openingMessageId: opening.messageId,
+            userText: String(userText ?? ""),
+            assistantText: opening.text,
+            ...loreSupplement ? { loreSupplement } : {}
+          });
+          if (disposed || state.chatId !== chatId || generationRevision !== revision) return;
+          if (response.status === 200 && response.body?.ok) {
+            bootstrappedBranches.add(openingScope);
+            diagnostic3({
+              level: "info",
+              source: "ui",
+              code: "SCENE_BOOTSTRAP_COMPLETE",
+              operation: "bootstrap",
+              phase: "response",
+              outcome: "success"
+            });
+            await refresh();
+          } else {
+            diagnostic3({
+              level: "warn",
+              source: "ui",
+              code: "SCENE_BOOTSTRAP_RETRYABLE",
+              operation: "bootstrap",
+              phase: "response",
+              outcome: "failed",
+              retryable: true
+            });
+          }
+        }
+      } catch {
+        diagnostic3({
+          level: "warn",
+          source: "ui",
+          code: "SCENE_BOOTSTRAP_RETRYABLE",
+          operation: "bootstrap",
+          phase: "request",
+          outcome: "failed",
+          retryable: true
+        });
+      }
+    }
     const request = {
       chatId,
       messageId: messageId.slice(0, ATLAS_LIMITS.ID_CHARS),
@@ -2640,19 +2709,28 @@ function createAtlasUiCore(deps) {
       setState({ pendingTurn: null });
       return;
     }
+    const commitRevision = generationRevision;
     const commitSwipeId = swipeIdForNextCommit;
     swipeIdForNextCommit = null;
+    const commitContext = deps.getCommitContext ? await safeCommitContext(deps.getCommitContext, assistantText) : null;
+    if (disposed || state.chatId !== pending.chatId || generationRevision !== commitRevision) return;
     let loreSupplement;
     if (deps.getLoreSupplement) {
       try {
-        const text = await deps.getLoreSupplement();
-        if (disposed) return;
+        const text = await deps.getLoreSupplement({
+          chatId: pending.chatId,
+          characterId: null,
+          mode: "turn",
+          userText: pending.userText,
+          assistantText,
+          recentAssistantTexts: commitContext?.recentAssistantTexts ?? []
+        });
+        if (disposed || state.chatId !== pending.chatId || generationRevision !== commitRevision) return;
         if (typeof text === "string" && text.trim().length > 0) loreSupplement = text;
       } catch {
         loreSupplement = void 0;
       }
     }
-    const commitContext = deps.getCommitContext ? await safeCommitContext(deps.getCommitContext, assistantText) : null;
     const request = {
       turnId: pending.turnId,
       chatId: pending.chatId,
@@ -2796,6 +2874,7 @@ function createAtlasUiCore(deps) {
   }
   async function manualAdvance() {
     if (disposed || commitInFlight) return;
+    const manualRevision = generationRevision;
     const chatId = state.chatId;
     const binding = state.binding;
     if (!chatId || state.serviceStatus !== "online") {
@@ -2810,16 +2889,6 @@ function createAtlasUiCore(deps) {
       setState({ lastError: "有回合正在推演，稍后再试。" });
       return;
     }
-    let loreSupplement;
-    if (deps.getLoreSupplement) {
-      try {
-        const text = await deps.getLoreSupplement();
-        if (disposed) return;
-        if (typeof text === "string" && text.trim().length > 0) loreSupplement = text;
-      } catch {
-        loreSupplement = void 0;
-      }
-    }
     const ts = now();
     let lastAssistant = "";
     try {
@@ -2831,6 +2900,24 @@ function createAtlasUiCore(deps) {
     }
     const manualAssistantText = (lastAssistant.trim().length > 0 ? lastAssistant : "（无新剧情，仅时间与日程流动。）").slice(0, ATLAS_LIMITS.ASSISTANT_TEXT_CHARS);
     const commitContext = deps.getCommitContext ? await safeCommitContext(deps.getCommitContext, manualAssistantText) : null;
+    if (disposed || state.chatId !== chatId || generationRevision !== manualRevision) return;
+    let loreSupplement;
+    if (deps.getLoreSupplement) {
+      try {
+        const text = await deps.getLoreSupplement({
+          chatId,
+          characterId: null,
+          mode: "turn",
+          userText: "（手动推进，无新用户行动。）",
+          assistantText: manualAssistantText,
+          recentAssistantTexts: commitContext?.recentAssistantTexts ?? []
+        });
+        if (disposed || state.chatId !== chatId || generationRevision !== manualRevision) return;
+        if (typeof text === "string" && text.trim().length > 0) loreSupplement = text;
+      } catch {
+        loreSupplement = void 0;
+      }
+    }
     const request = {
       turnId: `turn-manual-${ts}`,
       chatId,
@@ -9621,7 +9708,7 @@ function detectStartPlaceholder(world) {
   };
 }
 function emptySceneDoc() {
-  return { schemaVersion: 1, retiredPointIds: [], lastConfirmed: null, bootstrap: null };
+  return { schemaVersion: 1, retiredPointIds: [], lastConfirmed: null, bootstrap: null, bootstrapByBranch: {} };
 }
 function sanitizeSceneDoc(raw) {
   const doc = emptySceneDoc();
@@ -9652,6 +9739,21 @@ function sanitizeSceneDoc(raw) {
         attempts: Math.min(attempts, 9999),
         lastAt: typeof b.lastAt === "number" && Number.isFinite(b.lastAt) ? b.lastAt : null,
         lastStatus: typeof b.lastStatus === "string" ? b.lastStatus.slice(0, 32) : null
+      };
+    }
+  }
+  if (record.bootstrapByBranch && typeof record.bootstrapByBranch === "object" && !Array.isArray(record.bootstrapByBranch)) {
+    for (const [branch, raw2] of Object.entries(record.bootstrapByBranch).slice(0, 32)) {
+      if (!raw2 || typeof raw2 !== "object" || Array.isArray(raw2) || branch.length > 160) continue;
+      const row = raw2;
+      if (typeof row.chatId !== "string" || typeof row.openingKey !== "string" || typeof row.messageId !== "string" || !row.result || typeof row.result !== "object" || Array.isArray(row.result)) continue;
+      const result = row.result;
+      if (JSON.stringify(result).length > 12e3) continue;
+      doc.bootstrapByBranch[branch] = {
+        chatId: row.chatId.slice(0, 128),
+        openingKey: row.openingKey.slice(0, 128),
+        messageId: row.messageId.slice(0, 128),
+        result
       };
     }
   }
@@ -11335,7 +11437,7 @@ function parseAtlasEditBlock(text, sources = {}) {
       return;
     }
     if (basis === "inferred" && sourceId === null) sourceId = sources["msg:a"] ? "msg:a" : sources["msg:u"] ? "msg:u" : null;
-    const edit = { ...record, line: lineNo, ...sourceId === null ? {} : { sourceId } };
+    const edit = { ...record, basis, line: lineNo, ...sourceId === null ? {} : { sourceId } };
     edits.push(edit);
     if (op === "add") acceptedTempRefs.add(record.ref);
   });
@@ -11377,9 +11479,18 @@ function applyAtlasTableDelta(base, edits, options = {}) {
       rejected.push({ line, ok: false, code: "DEPENDENCY_FAILED", ref: broken, op: edit.op });
       continue;
     }
+    const basis = edit.basis === "observed" ? "observed" : edit.basis === "inferred" ? "inferred" : void 0;
+    const sourceId = typeof edit.sourceId === "string" ? edit.sourceId : void 0;
     const result = edit.table === "location" ? applyLocationEdit(candidate, edit, scope, options) : edit.table === "character" ? applyCharacterEdit(candidate, edit, scope, options) : applyItemEdit(candidate, edit, scope);
     if (result.ok) {
-      applied.push({ line, ok: true, id: result.id, op: result.op });
+      applied.push({
+        line,
+        ok: true,
+        id: result.id,
+        op: result.op,
+        ...basis !== void 0 ? { basis } : {},
+        ...sourceId !== void 0 ? { sourceId } : {}
+      });
       continue;
     }
     rejected.push({ line, ok: false, code: result.error.code, path: result.error.path, ref: result.error.ref, op: edit.op });
@@ -11457,7 +11568,13 @@ function projectTablesToMapView(tables, maps, world, currentLocationId, hiddenLo
     if (!isGrid(row.gridX) || !isGrid(row.gridY)) {
       unplacedTotal += 1;
       if (unplacedEntries.length < ATLAS_MAP_VIEW_LIMITS.unplacedLocations) {
-        unplacedEntries.push({ id: row.id, name: row.name, parentLocationId: row.parentLocationId });
+        unplacedEntries.push({
+          id: row.id,
+          name: row.name,
+          parentLocationId: row.parentLocationId,
+          mapId: parent === null ? "world" : String(pointIdFromLocationRowId(parent.id) ?? parent.id),
+          positionQuality: "unknown"
+        });
       }
       continue;
     }
@@ -11720,12 +11837,12 @@ function summarizeAtlasTurnChanges(before, after, acceptedRefs, evidence) {
   const povAt = ev.povLocationId;
   function classify(refId, refKind) {
     if (refKind === "item") {
-      return ev.deliveredRefIds.has(refId) ? "known" : "hidden";
+      return ev.deliveredRefIds.has(refId) || ev.observedItemIds?.has(refId) ? "known" : "hidden";
     }
     if (refKind === "location") {
-      return povAt !== null && refId === povAt ? "known" : "hidden";
+      return povAt !== null && refId === povAt && ev.observedLocationIds?.has(refId) ? "known" : "hidden";
     }
-    if (ev.knownCharacterIds.has(refId)) return "known";
+    if (ev.knownCharacterIds.has(refId) && newCharacters.get(refId)?.locationId === povAt) return "known";
     return "hidden";
   }
   for (const refId of new Set(acceptedRefs)) {
@@ -12537,7 +12654,7 @@ function applySimulationEffects(input) {
       targetLocationId,
       topic,
       signalId: null,
-      visibility: "known",
+      visibility: edit.visibility ?? "hidden",
       source: "character-intent",
       createdTurnKey: input.turnKey,
       lastAppliedTurnKey: input.turnKey,
@@ -13173,6 +13290,37 @@ function toPovStateDto(projection, options = {}) {
 }
 
 // src/atlas-server.ts
+function summarizeHighlightsWithEvidence(tablesBeforeTurn, nextTablesDoc, acceptedTurnRefs, acceptedRows, protagonistId, currentLocationId, fallbackLocationId) {
+  const branchForEvidence = nextTablesDoc?.branches?.[tablesBeforeTurn.branchKey] ?? null;
+  const finalProtagonist = protagonistId === null ? null : branchForEvidence?.characters.find((row) => row.id === protagonistId) ?? null;
+  const asLocationRef = (value) => value === null || value === void 0 ? null : String(value).startsWith("loc:") ? String(value) : `loc:${value}`;
+  const povLocationId = finalProtagonist ? finalProtagonist.locationId : asLocationRef(currentLocationId ?? fallbackLocationId);
+  const knownCharacterIds = /* @__PURE__ */ new Set();
+  const deliveredRefIds = /* @__PURE__ */ new Set();
+  const observedLocationIds = /* @__PURE__ */ new Set();
+  const observedItemIds = /* @__PURE__ */ new Set();
+  for (const row of acceptedRows) {
+    if (row.basis !== "observed" || row.sourceId !== "msg:a" && row.sourceId !== "msg:u") continue;
+    if (row.table === "character") {
+      const post = branchForEvidence?.characters?.find((item) => item.id === row.ref) ?? null;
+      const at = post?.locationId ?? null;
+      if (at !== null && povLocationId !== null && at === povLocationId) {
+        knownCharacterIds.add(row.ref);
+      }
+    } else if (row.table === "location") {
+      if (row.ref === povLocationId) observedLocationIds.add(row.ref);
+    } else if (row.table === "item") {
+      const item = branchForEvidence?.items.find((value) => value.id === row.ref) ?? null;
+      if (item?.locationId !== null && item?.locationId === povLocationId) observedItemIds.add(row.ref);
+    }
+  }
+  return summarizeAtlasTurnChanges(
+    tablesBeforeTurn.tables,
+    branchForEvidence,
+    acceptedTurnRefs,
+    { povLocationId, knownCharacterIds, deliveredRefIds, observedLocationIds, observedItemIds }
+  );
+}
 var ATLAS_SESSION_SCHEMA_VERSION = 1;
 var SESSION_TURNS_MAX = 2e3;
 function createEmptySessionDoc() {
@@ -14358,11 +14506,15 @@ function commitTableDeltaTurn(input) {
     acceptedRows: delta.applied.map((row) => {
       const ref = typeof row.id === "string" ? row.id : row.ref ?? "";
       const kind = ref.length > 0 ? refKindOf(ref) : null;
+      const basis = row.basis === "observed" ? "observed" : row.basis === "inferred" ? "inferred" : null;
+      const sourceId = typeof row.sourceId === "string" ? row.sourceId : null;
       return {
         line: row.line,
         table: kind ?? "unknown",
         op: typeof row.op === "string" ? row.op : "set",
-        ref
+        ref,
+        ...basis !== null ? { basis } : {},
+        ...sourceId !== null ? { sourceId } : {}
       };
     }),
     scheduleMoves: settlement.moves.map((move) => ({
@@ -14422,6 +14574,7 @@ function httpStatusFor(code) {
     case ATLAS_ERROR_CODES.API_NOT_CONFIGURED:
     case ATLAS_ERROR_CODES.DUPLICATE_COMMIT:
     case ATLAS_ERROR_CODES.SESSION_STALE:
+    case ATLAS_ERROR_CODES.PREVIEW_STALE:
     // C04：协议不符 = 「设置与响应形态冲突」，不是格式错（400）也不是服务故障（502）——
     // 作者要做的动作是回推进页切协议，409 与既有前端错误呈现一致。
     case ATLAS_ERROR_CODES.PROTOCOL_MISMATCH:
@@ -16093,14 +16246,15 @@ ${rejectedBlock}` : "");
           }
           const receipt = isPlainRecord(turn.receipt) ? turn.receipt : null;
           const at = typeof turn.committedAt === "number" && Number.isFinite(turn.committedAt) ? turn.committedAt : 0;
-          if (receipt && typeof receipt.receiptId === "string" && (!latestTurn || at > latestTurn.at)) {
+          if (receipt && typeof receipt.receiptId === "string" && (!latestTurn || at > latestTurn.at || at === latestTurn.at && name > latestTurn.key)) {
             latestTurn = {
               at,
+              key: name,
               receiptId: receipt.receiptId,
               period: typeof turn.effectiveAt === "number" ? turn.effectiveAt : binding.worldTimeCursor,
               highlights: Array.isArray(turn.highlights) ? turn.highlights.map((value) => {
                 if (typeof value === "string") {
-                  return { text: value.slice(0, 140), visibility: "hidden", sourceRef: void 0 };
+                  return { text: value.slice(0, 140), visibility: "hidden", sourceRef: "legacy" };
                 }
                 if (value && typeof value === "object") {
                   const obj = value;
@@ -16110,7 +16264,7 @@ ${rejectedBlock}` : "");
                   return { text: t, visibility: v, sourceRef: r };
                 }
                 return { text: "", visibility: "hidden", sourceRef: void 0 };
-              }).filter((h) => h.text.length > 0).slice(0, 8) : [],
+              }).filter((h) => h.text.length > 0 && (showHidden || h.visibility === "known")).slice(0, 8) : [],
               events: visibleEvents.slice(0, 8)
             };
           }
@@ -16258,12 +16412,54 @@ ${rejectedBlock}` : "");
       throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "开场材料（assistantText）为空——开场识别至少需要一段开场白。");
     }
     const userText = typeof payload.userText === "string" ? payload.userText : "";
+    const openingMessageId = typeof payload.openingMessageId === "string" && payload.openingMessageId.trim() ? payload.openingMessageId.slice(0, ATLAS_LIMITS.ID_CHARS) : "manual";
+    const openingWorld = await getWorld(binding.worldId);
+    if (!openingWorld) throw new AtlasError(ATLAS_ERROR_CODES.WORLD_NOT_FOUND, "绑定世界不存在");
+    const openingBranchKey = branchScopeForStory(openingWorld, binding.branchId) ?? "canon";
+    const openingKey = `opening:${hashString([
+      chatId,
+      binding.worldId,
+      openingBranchKey,
+      openingMessageId,
+      assistantText
+    ].join("|"))}`;
+    const sessionRecord = isPlainRecord(payload.session) ? payload.session : null;
+    const sessionRevision = typeof sessionRecord?.rev === "number" && Number.isSafeInteger(sessionRecord.rev) ? sessionRecord.rev : 0;
+    const inputFingerprint = hashString(JSON.stringify({
+      userText,
+      assistantText,
+      recentAssistantTexts: payload.recentAssistantTexts ?? [],
+      loreSupplement: payload.loreSupplement ?? "",
+      personaDescription: payload.personaDescription ?? "",
+      charDescription: payload.charDescription ?? ""
+    }));
+    const existingSceneDoc = sanitizeSceneDoc(await store.read(sceneDocKey(binding.worldId)).catch(() => null));
+    const priorBootstrap = existingSceneDoc.bootstrapByBranch[openingBranchKey];
+    if (apply && typeof payload.previewId !== "string" && priorBootstrap?.chatId === chatId && priorBootstrap.openingKey === openingKey) {
+      return okResult({ ...priorBootstrap.result, callCount: 0, duplicate: true });
+    }
+    if (payload.auto === true && apply) {
+      const turnNames = await store.list(`turn:${chatId}:`).catch(() => []);
+      for (const name of turnNames) {
+        const turn = await store.read(name).catch(() => null);
+        if (isPlainRecord(turn) && turn.rolledBack !== true && isPlainRecord(turn.receipt) && turn.receipt.status === "committed") {
+          return okResult({ status: "skipped", reasonCode: "NORMAL_TURN_EXISTS", duration: 0, callCount: 0 });
+        }
+      }
+    }
+    const previewId = typeof payload.previewId === "string" ? payload.previewId : null;
+    for (const [key, value] of shared.bootstrapPreviews) {
+      if (value.expiresAt <= now()) shared.bootstrapPreviews.delete(key);
+    }
+    const preview = apply && previewId !== null ? shared.bootstrapPreviews.get(previewId) : null;
+    if (apply && previewId !== null && (!preview || payload.baseRevision !== sessionRevision || preview.baseRevision !== sessionRevision || preview.chatId !== chatId || preview.worldId !== binding.worldId || preview.branchId !== binding.branchId || preview.openingKey !== openingKey || preview.inputFingerprint !== inputFingerprint)) {
+      throw new AtlasError(ATLAS_ERROR_CODES.PREVIEW_STALE, "开场预览已过期或世界已变化，请重新预览。", { retryable: true });
+    }
     const current = await loadSettings();
     const preset = resolveWorldTurnPreset(current);
     if (!preset) {
       throw new AtlasError(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "未配置独立推演 API，无法进行开场识别。");
     }
-    checkRpm();
     const prepared = await prepareWorldTurnInputs(
       binding,
       preset,
@@ -16296,33 +16492,37 @@ ${rejectedBlock}` : "");
         { schemaPath: "$.promptPreset", retryable: false }
       );
     }
-    rpmTimestamps.push(now());
-    const call = await callAtlasWorldTurnApi(prepared.effectivePreset, prepared.input, { fetchFn: deps.fetchFn, now });
-    pushLog({
-      at: now(),
-      kind: "scene-bootstrap",
-      chatId: binding.chatId,
-      presetName: preset.name,
-      model: preset.model,
-      ok: call.ok,
-      ...call.ok ? {} : { code: call.code },
-      status: call.status,
-      durationMs: call.durationMs,
-      apply
-    });
-    if (!call.ok) {
-      throw new AtlasError(call.code, call.message, { retryable: call.retryable });
+    let cleanedText;
+    if (preview) {
+      cleanedText = preview.cleanedText;
+    } else {
+      checkRpm();
+      rpmTimestamps.push(now());
+      const call = await callAtlasWorldTurnApi(prepared.effectivePreset, prepared.input, { fetchFn: deps.fetchFn, now });
+      pushLog({
+        at: now(),
+        kind: "scene-bootstrap",
+        chatId: binding.chatId,
+        presetName: preset.name,
+        model: preset.model,
+        ok: call.ok,
+        ...call.ok ? {} : { code: call.code },
+        status: call.status,
+        durationMs: call.durationMs,
+        apply
+      });
+      if (!call.ok) throw new AtlasError(call.code, call.message, { retryable: call.retryable });
+      cleanedText = applyContentReplaceRules(call.text, current.contentReplaceRules ?? []);
+      const bootstrapRepair = await repairQuoteOnlyReply({
+        text: cleanedText,
+        preset: prepared.effectivePreset,
+        prompt: prepared.input,
+        userText,
+        assistantText,
+        chatId: binding.chatId
+      });
+      if (bootstrapRepair !== null) cleanedText = applyContentReplaceRules(bootstrapRepair, current.contentReplaceRules ?? []);
     }
-    let cleanedText = applyContentReplaceRules(call.text, current.contentReplaceRules ?? []);
-    const bootstrapRepair = await repairQuoteOnlyReply({
-      text: cleanedText,
-      preset: prepared.effectivePreset,
-      prompt: prepared.input,
-      userText,
-      assistantText,
-      chatId: binding.chatId
-    });
-    if (bootstrapRepair !== null) cleanedText = applyContentReplaceRules(bootstrapRepair, current.contentReplaceRules ?? []);
     const bootstrapBranchKey = branchScopeForStory(world, binding.branchId) ?? "canon";
     const bootstrapTablesRaw = await store.read(`tables:${binding.worldId}`).catch(() => null);
     const bootstrapTablesDoc = isPlainRecord(bootstrapTablesRaw) ? bootstrapTablesRaw : null;
@@ -16399,11 +16599,27 @@ ${rejectedBlock}` : "");
       }))
     ];
     if (!apply) {
+      const candidatePreviewId = `preview:${hashString(`${openingKey}|${sessionRevision}|${inputFingerprint}|${now()}`)}`;
+      if (shared.bootstrapPreviews.size >= 64) {
+        const oldest = shared.bootstrapPreviews.keys().next().value;
+        if (oldest) shared.bootstrapPreviews.delete(oldest);
+      }
+      shared.bootstrapPreviews.set(candidatePreviewId, {
+        chatId,
+        worldId: binding.worldId,
+        branchId: binding.branchId,
+        openingKey,
+        baseRevision: sessionRevision,
+        inputFingerprint,
+        cleanedText,
+        expiresAt: now() + 10 * 6e4
+      });
       return okResult({
         status: "preview",
         protocol: "table-delta-v1",
         callCount: 1,
-        baseRevision: binding.worldTimeCursor,
+        previewId: candidatePreviewId,
+        baseRevision: sessionRevision,
         duration: 0,
         newLocations: newLocationRows.map((row) => ({ id: row.id, name: row.name, parentLocationId: row.parentLocationId })),
         newCharacters: newCharacterRows.map((row) => ({ id: row.id, name: row.name, locationId: row.locationId })),
@@ -16419,7 +16635,7 @@ ${rejectedBlock}` : "");
     });
     let finalWorld = mirrored.world;
     const placeholder = detectStartPlaceholder(world);
-    const sceneDoc = sanitizeSceneDoc(await store.read(sceneDocKey(world.id)).catch(() => null));
+    const sceneDoc = existingSceneDoc;
     const bootstrapPlayerRowId = protagonistRowId(binding, world);
     const bootstrapPlayerRow = bootstrapPlayerRowId === null ? void 0 : delta.tables.characters.find((row) => row.id === bootstrapPlayerRowId);
     const anchoredPointId = bootstrapPlayerRow?.locationId ? pointIdFromLocationRowId(bootstrapPlayerRow.locationId) : null;
@@ -16455,29 +16671,18 @@ ${rejectedBlock}` : "");
       await store.write(`binding:${binding.chatId}`, nextBinding);
       bindingCache.set(binding.chatId, nextBinding);
     }
-    await store.write(sceneDocKey(world.id), nextDoc);
     const newHostMapIds = newLocationRows.map((row) => pointIdFromLocationRowId(row.id)).filter((pointId) => pointId !== null).filter((pointId) => delta.tables.locations.some((child) => child.parentLocationId === `loc:${pointId}`));
-    const mapScale = [];
-    for (const hostPointId of newHostMapIds.slice(0, 4)) {
-      const hostRow = delta.tables.locations.find((row) => row.id === `loc:${hostPointId}`);
-      try {
-        const ensured = await ensureMapScaleOnCreate({
-          chatId: binding.chatId,
-          branchKey: bootstrapBranchKey,
-          mapId: String(hostPointId),
-          revision: 1,
-          frame: { ...SUBMAP_FRAME_DEFAULT },
-          ...hostRow && hostRow.description ? { description: hostRow.description } : {}
-        });
-        mapScale.push(ensured.status === "scale-pending" ? { mapId: String(hostPointId), status: ensured.status, reasonCode: ensured.reasonCode } : { mapId: String(hostPointId), status: ensured.status });
-      } catch {
-        mapScale.push({ mapId: String(hostPointId), status: "scale-pending", reasonCode: "INTERNAL" });
-      }
-    }
-    return okResult({
+    const bootstrapMapDoc = sanitizeMapDoc(await store.read(`maps:${binding.worldId}`).catch(() => null));
+    const mapScale = newHostMapIds.slice(0, 4).map((mapId) => {
+      const mapIdText = String(mapId);
+      const scopedKey = bootstrapBranchKey === "canon" ? mapIdText : `${bootstrapBranchKey}:${mapIdText}`;
+      const existing = bootstrapMapDoc.calibrations[scopedKey];
+      return existing && Number.isFinite(existing.metersPerCell) && existing.metersPerCell > 0 ? { mapId: mapIdText, status: "existing" } : { mapId: mapIdText, status: "scale-pending", reasonCode: "NO_SCALE_EVIDENCE" };
+    });
+    const resultData = {
       status: anchored ? "committed" : "unknown",
       protocol: "table-delta-v1",
-      callCount: 1,
+      callCount: preview ? 0 : 1,
       duration: 0,
       anchoredLocationId: anchored ? String(anchoredPointId) : null,
       placeholderRetired: nextDoc.retiredPointIds.length > sceneDoc.retiredPointIds.length,
@@ -16487,7 +16692,16 @@ ${rejectedBlock}` : "");
       rejectedRows,
       // H18a：新建内层地图的标定结果（scale-pending = 地图保留、按格显示）
       mapScale
-    });
+    };
+    nextDoc.bootstrapByBranch[bootstrapBranchKey] = {
+      chatId,
+      openingKey,
+      messageId: openingMessageId,
+      result: resultData
+    };
+    await store.write(sceneDocKey(world.id), nextDoc);
+    if (previewId) shared.bootstrapPreviews.delete(previewId);
+    return okResult(resultData);
   }
   async function prepareWorldTurnInputs(binding, preset, request, options) {
     const world = await visibleWorldForBinding(await requireWorld(binding), binding);
@@ -16639,6 +16853,7 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
     }
     let output;
     let nextTablesDoc = null;
+    let turnHighlights = [];
     let tablesBeforeTurn = null;
     let acceptedTurnRefs = [];
     let settledInTablePath = false;
@@ -16777,6 +16992,10 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
         settledInTablePath = true;
         tablesBeforeTurn = { branchKey, tables: cloneAtlasTables(branchTables) };
         const branchAfter = nextTablesDoc?.branches?.[branchKey];
+        const finalPlayerRowId = protagonistRowId(binding, committed.world);
+        const finalPlayerRow = finalPlayerRowId === null ? null : branchAfter?.characters.find((item) => item.id === finalPlayerRowId) ?? null;
+        const fallbackPlayerPoint = committed.receipt.currentLocationId ?? binding.currentLocationId;
+        const finalPlayerLocationId = finalPlayerRow ? finalPlayerRow.locationId : fallbackPlayerPoint === null || fallbackPlayerPoint === void 0 ? null : String(fallbackPlayerPoint).startsWith("loc:") ? String(fallbackPlayerPoint) : `loc:${fallbackPlayerPoint}`;
         const simulationEdits = [];
         for (const row of committed.acceptedRows) {
           if (row.table !== "location" && row.table !== "character" && row.table !== "item") continue;
@@ -16786,7 +17005,8 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
             op: row.op === "add" || row.op === "remove" ? row.op : "set",
             ref: row.ref,
             // 人物行的**新值**供推演侧判断意图与目标；其它表不需要正文
-            row: post === null ? null : post
+            row: post === null ? null : post,
+            visibility: row.table === "character" && post !== null && finalPlayerLocationId !== null && post.locationId === finalPlayerLocationId && row.basis === "observed" && (row.sourceId === "msg:a" || row.sourceId === "msg:u") ? "known" : "hidden"
           });
         }
         const periodsThisTurn = Math.max(0, committed.receipt.currentTime - committed.receipt.previousTime);
@@ -16971,6 +17191,31 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
           scanned: committed.background.moves,
           skipped: committed.background.skipped
         });
+        turnHighlights = tablesBeforeTurn === null ? [] : summarizeHighlightsWithEvidence(
+          tablesBeforeTurn,
+          nextTablesDoc,
+          acceptedTurnRefs,
+          committed.acceptedRows,
+          protagonistRowId(binding, committed.world),
+          committed.receipt.currentLocationId,
+          binding.currentLocationId
+        );
+        const simBranch = nextSimulationDoc?.branches?.[branchKey];
+        if (simBranch && turnHighlights.length < 8) {
+          for (const event of simulationEvents) {
+            if (event.kind !== "delivery" || event.status !== "delivered") continue;
+            const delivery = simBranch.deliveries.find((row) => row.id === event.simulationId);
+            if (!delivery) continue;
+            const receivedByPlayer = delivery.recipientType === "character" && finalPlayerRowId !== null && delivery.recipientId === finalPlayerRowId || delivery.recipientType === "location" && finalPlayerLocationId !== null && delivery.recipientId === finalPlayerLocationId;
+            if (!receivedByPlayer) continue;
+            const signal = simBranch.signals.find((row) => row.id === delivery.signalId);
+            if (!signal?.topic) continue;
+            const sourceRef = signal.id;
+            if (turnHighlights.some((row) => row.sourceRef === sourceRef)) continue;
+            turnHighlights.push({ text: `获知：${signal.topic}`.slice(0, 140), visibility: "known", sourceRef });
+            if (turnHighlights.length >= 8) break;
+          }
+        }
       }
     } catch (thrown) {
       if (thrown instanceof AtlasError && thrown.details.retryable === void 0) {
@@ -17099,11 +17344,7 @@ ${recentAssistantTexts.map((text) => `assistant："${String(text).replace(/<br\s
        * 不借用另一分支、也不凭空造空世界。
        */
       tablesBefore: tablesBeforeTurn,
-      highlights: tablesBeforeTurn === null ? [] : summarizeAtlasTurnChanges(
-        tablesBeforeTurn.tables,
-        nextTablesDoc?.branches?.[tablesBeforeTurn.branchKey] ?? null,
-        acceptedTurnRefs
-      ),
+      highlights: turnHighlights,
       /**
        * C09 / C10：本轮的推演事件与**逐行**逆操作。
        * 旧回合没有这两个字段时视为空，不凭空迁移其他分支；回退按行恢复而不复制整模块。
@@ -18521,7 +18762,8 @@ function createAtlasServerCore(deps) {
     settingsOverride: null,
     revByChat: /* @__PURE__ */ new Map(),
     chatMutex: /* @__PURE__ */ new Map(),
-    ensureMutex: /* @__PURE__ */ new Map()
+    ensureMutex: /* @__PURE__ */ new Map(),
+    bootstrapPreviews: /* @__PURE__ */ new Map()
   };
   const globalCore = createCoreInstance(deps.store, deps, shared);
   const sqlRouteGroup = createAtlasSqlRouteGroup({
@@ -20635,6 +20877,8 @@ function layoutUnplacedMarkers(input) {
       id,
       name,
       mapId: readText2(record?.mapId),
+      parentLocationId: readText2(record?.parentLocationId),
+      parentDeclared: record !== null && Object.prototype.hasOwnProperty.call(record, "parentLocationId"),
       mobile: readText2(record?.mobile),
       anchorId: readText2(record?.anchorId)
     });
@@ -20721,6 +20965,12 @@ function gateCandidate(candidate, mapId, anchorByLocationId) {
       detail: `地点声明的宿主图是 ${candidate.mapId}，不是本图 ${mapId}：房间不得被搬进世界图`
     };
   }
+  if (candidate.parentDeclared) {
+    const expectedParent = mapId === "world" ? "" : mapId.startsWith("loc:") ? mapId : `loc:${mapId}`;
+    if (candidate.parentLocationId !== expectedParent) {
+      return { reason: "WRONG_PARENT", detail: "地点的父地点与当前子图宿主不一致：只进正确子图" };
+    }
+  }
   const anchor = anchorByLocationId.get(candidate.id) ?? null;
   const isVehicle = candidate.mobile === "vehicle" || anchor !== null;
   if (!isVehicle) return null;
@@ -20768,12 +21018,19 @@ var DEFAULT_PER_ENTRY_CHARS = 400;
 var DEFAULT_GEO_PER_ENTRY_CHARS = 4e3;
 var DEFAULT_MAX_ENTRIES = 60;
 var GEO_TITLE_PREFIX = /(?:地图|地理|地点|地区|区域|领域|城镇|城市|城镇|关隘|道路|街道|聚落|场所|大陆|国家|地形|风土)/;
-function stableUid(entry, idx) {
-  return entry.uid && entry.uid.length > 0 ? entry.uid : `lore-${idx}`;
+function stableUid(entry, _idx) {
+  const fallback = `${entry.title ?? ""}:${entry.content.slice(0, 80)}`;
+  return `${entry.bookName ?? "?"}:${entry.uid && entry.uid.length > 0 ? entry.uid : fallback}`;
+}
+function matchingExcerpt(content, keywords, limit) {
+  if (content.length <= limit) return content;
+  const hit = keywords.filter((word) => word.length > 0).map((word) => content.indexOf(word)).filter((at) => at >= 0).sort((a, b) => a - b)[0];
+  const start = hit === void 0 ? 0 : Math.max(0, Math.min(content.length - limit, hit - Math.floor(limit / 3)));
+  return `${start > 0 ? "…" : ""}${content.slice(start, start + limit)}${start + limit < content.length ? "…" : ""}`;
 }
 function keywordScore(entry, chat, scene) {
   let score = 0;
-  const text = (entry.title ?? "") + "\n" + entry.content;
+  const text = (entry.title ?? "") + "\n" + (entry.keys ?? []).join("\n") + "\n" + entry.content;
   for (const k of chat) {
     if (k.length > 0 && text.includes(k)) score += 1;
   }
@@ -20829,11 +21086,14 @@ function selectAtlasLoreSupplement(input) {
   for (const e of filtered) {
     if (selectedUids.length >= maxEntries) break;
     const uid = stableUid(e, e.__idx);
+    const active = activatedUids?.has(uid) ?? false;
+    const relevant = keywordScore(e, chat, scene) > 0;
+    if (!active && !relevant && !(input.mode === "geo" && isGeographicTitle(e.title ?? ""))) continue;
     const title = (e.title ?? "").trim() || (e.bookName ?? "条目");
     const originalChars = e.content.length;
-    const clipped = e.content.length > perEntryChars ? `${e.content.slice(0, perEntryChars)}…` : e.content;
+    const clipped = matchingExcerpt(e.content, [...scene, ...chat], perEntryChars);
     const line = `- [${e.bookName ?? "?"}] ${title}：${clipped.replace(/\s+/g, " ")}`;
-    const lineLen = line.length;
+    const lineLen = line.length + (out.length > 0 ? 1 : 0);
     if (selectedOutputChars + lineLen > maxChars) {
       break;
     }
