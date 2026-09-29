@@ -12,7 +12,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   ATLAS_SQL_VENDOR_FILES,
   ATLAS_SQL_WORKER_FILE,
@@ -88,4 +88,25 @@ test('T29-06 产物内的 vendor 路径是相对路径', () => {
   if (!existsSync(sqlBundle)) return;
   const source = readFileSync(sqlBundle, 'utf8');
   assert.equal(/vendor\/sql-wasm\.wasm/.test(source) || /sql-wasm\.wasm/.test(source), true, '必须引用本地 wasm');
+});
+
+/**
+ * M1-A01：发布包（release/atlas-ui-extension/dist/atlas-ui-core.mjs）
+ * 必须真实导出 selectAtlasLoreSupplement —— 之前 src 有实现但 atlas-browser-entry.ts
+ * 未转发,落到 UI bundle 后是 undefined,getLoreSupplement 因此走旧顺序截断路径。
+ *
+ * 测试只对真实构建产物做 dynamic import,不 import 源码(否则永远看不到这个 gap)。
+ */
+test('M1-A01 release bundle 真实导出 selectAtlasLoreSupplement', async () => {
+  const releaseBundle = join(root, 'release', 'atlas-ui-extension', 'dist', 'atlas-ui-core.mjs');
+  if (!existsSync(releaseBundle)) {
+    throw new Error(`发布产物缺失：${releaseBundle} — 请先运行 npm run pack`);
+  }
+  const mod = await import(pathToFileURL(releaseBundle).href);
+  assert.equal(
+    typeof mod.selectAtlasLoreSupplement,
+    'function',
+    '发布包必须把 src/atlas-lore-selection.ts 的 selectAtlasLoreSupplement 转发出去;'
+      + 'atlas-browser-entry.ts 当前未导出 → atlas-ui-core.mjs 是 undefined → index.js 走旧路径',
+  );
 });

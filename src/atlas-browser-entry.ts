@@ -166,6 +166,19 @@ export {
 } from "./atlas-lorebook.ts";
 
 /**
+ * M1-A02：世界书条目有界选取的纯函数(index.js 的 readCardLoreSupplementViaSelector
+ * 通过 mod?.selectAtlasLoreSupplement 取它)。之前 src 有实现但 atlas-browser-entry.ts
+ * 没转发,UI bundle 里是 undefined,getLoreSupplement 走旧顺序截断路径。
+ */
+export {
+  selectAtlasLoreSupplement,
+  type AtlasLorePurpose,
+  type AtlasLoreSelectionEntry,
+  type AtlasLoreSelectionInput,
+  type AtlasLoreSelectionResult,
+} from "./atlas-lore-selection.ts";
+
+/**
  * A04（0.9.59）：安全诊断的**可公开面**补全。
  *
  * `createAtlasDiagnosticsSink` / `sanitizeDiagnostic` 早已转出；这里补上引用指纹与
