@@ -217,6 +217,9 @@ export function projectTablesToMapView(
       droppedLocations += 1;
       continue;
     }
+    // 子图表示已确认的包含关系；即使孩子都缺格坐标，仍要保留空图容器，
+    // 让 UI 在相应父图列出待定位地点并允许逐层进入。空 points 不冒充确认点位。
+    if (parent !== null && !submapBuckets.has(parent.id)) submapBuckets.set(parent.id, []);
     // F01：缺真实坐标 → 只进「待定位」名单，不生成地图点（绝不落 (0,0)）
     if (!isGrid(row.gridX) || !isGrid(row.gridY)) {
       unplacedTotal += 1;

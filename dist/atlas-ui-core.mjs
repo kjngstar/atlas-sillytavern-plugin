@@ -11565,6 +11565,7 @@ function projectTablesToMapView(tables, maps, world, currentLocationId, hiddenLo
       droppedLocations += 1;
       continue;
     }
+    if (parent !== null && !submapBuckets.has(parent.id)) submapBuckets.set(parent.id, []);
     if (!isGrid(row.gridX) || !isGrid(row.gridY)) {
       unplacedTotal += 1;
       if (unplacedEntries.length < ATLAS_MAP_VIEW_LIMITS.unplacedLocations) {

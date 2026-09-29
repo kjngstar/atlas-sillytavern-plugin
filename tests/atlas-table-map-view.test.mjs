@@ -88,6 +88,24 @@ test("D01 世界图只放根地点，子地点进各自父图；同名不同父�
   assert.equal(region, "capital", "地区归属仍来自世界点");
 });
 
+test("M3 真实开场：全链无格坐标仍保留可进入的父子图，点位全部待定位", () => {
+  const tables = {
+    locations: [
+      location({ id: "loc:1", name: "学校", gridX: null, gridY: null }),
+      location({ id: "loc:2", name: "教学楼", parentLocationId: "loc:1", mapId: "loc:1", gridX: null, gridY: null }),
+      location({ id: "loc:3", name: "图书室", parentLocationId: "loc:2", mapId: "loc:2", gridX: null, gridY: null }),
+    ],
+    characters: [], items: [],
+  };
+  const view = projectTablesToMapView(tables, EMPTY_MAPS, fakeWorld(), "3");
+  assert.deepEqual(view.world.points, [], "未知格坐标不冒充确认点");
+  assert.deepEqual(Object.keys(view.submaps).sort(), ["1", "2"], "包含关系足以建立空子图入口");
+  assert.deepEqual(view.submaps["1"].points, []);
+  assert.deepEqual(view.submaps["2"].points, []);
+  assert.deepEqual(view.unplacedLocations.entries.map((row) => [row.id, row.mapId]),
+    [["loc:1", "world"], ["loc:2", "1"], ["loc:3", "2"]], "各层只在对应父图待定位");
+});
+
 test("D01 人物与物品按 mapId+格序号投影；缺细坐标进「位置未知」名单", () => {
   const view = projectTablesToMapView(fixture(), EMPTY_MAPS, fakeWorld(), "4103");
 

@@ -340,6 +340,39 @@ test("M3 实酒馆回归：当前位置在子图时概览与顶栏显示房间�
   dom.window.close();
 });
 
+test("M3 实酒馆回归：全链待定位的学校仍能逐层进入建筑与房间", async () => {
+  const submaps = {
+    "1": { mapId: "1", parentMapId: "world", frame: { cols: 100, rows: 100, frameRevision: 1 }, points: [], total: 0, truncated: 0 },
+    "2": { mapId: "2", parentMapId: "1", frame: { cols: 100, rows: 100, frameRevision: 1 }, points: [], total: 0, truncated: 0 },
+  };
+  const tableMap = {
+    branchKey: "canon", world: { points: [], total: 0, truncated: 0 }, submaps,
+    nearby: { entries: [], total: 0, truncated: 0 }, objects: { entries: [], total: 0, truncated: 0 },
+    current: { locationId: "loc:3", chain: [] }, nearReasonCode: null,
+    locationOccupants: { entries: [], total: 0, truncated: 0 },
+    unplacedLocations: { entries: [
+      { id: "loc:1", name: "学校", parentLocationId: null, mapId: "world", positionQuality: "unknown" },
+      { id: "loc:2", name: "教学楼", parentLocationId: "loc:1", mapId: "1", positionQuality: "unknown" },
+      { id: "loc:3", name: "图书室", parentLocationId: "loc:2", mapId: "2", positionQuality: "unknown" },
+    ], total: 3, truncated: 0 },
+  };
+  const { dom, container } = await mountReplay(mapState({ points: [], submaps, tableMap, currentLocationId: "3" }));
+  for (const [id, label] of [["1", "学校"], ["2", "教学楼"], ["3", "图书室"]]) {
+    const marker = container.querySelector(`.aw-point--displayonly[data-point-id="${id}"]`);
+    assert.ok(marker, `${label} 在自己的父图中有示意入口`);
+    assert.equal(marker.dataset.displayOnly, "true", "示意点不能冒充确认坐标");
+    marker.click();
+    await flush();
+    if (id !== "3") {
+      const enter = [...container.querySelectorAll(".aw-mappanel button")].find((button) => button.textContent === "进入内部地图");
+      assert.ok(enter, `${label} 的已确认包含关系可进入下一层`);
+      enter.click();
+      await flush();
+    }
+  }
+  dom.window.close();
+});
+
 test("G03 回放：教室子图只画可信细格的人物图钉，建筑级 / 无坐标 / 同格的人不伪造点位", async () => {
   const { dom, container } = await mountReplay(classroomState());
 
