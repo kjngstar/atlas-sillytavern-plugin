@@ -10555,7 +10555,11 @@ async function connectOnce() {
       ensureWorld: () => ensureStarterWorld(),
       // 0.9.21 世界书资料块：commit 前读当前卡书启用条目（有界），喂给推演 AI；
       // 0.9.22 开关：被供应商审核拦截时可在推进页关闭（settingsV2.loreSupplementEnabled）
-      getLoreSupplement: () => (settingsV2?.loreSupplementEnabled === false ? Promise.resolve("") : readCardLoreSupplement()),
+      getLoreSupplement: () => (settingsV2?.loreSupplementEnabled === false
+        ? Promise.resolve("")
+        : (settingsV2?.loreUseSelector === false
+          ? readCardLoreSupplement()
+          : readCardLoreSupplementViaSelector())),
       // 0.9.22 立即推演：读最近一条助手楼层正文作为推演素材（无楼层 → null，用占位）
       getLastAssistantText: async () => {
         try {
