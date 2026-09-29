@@ -10693,11 +10693,18 @@ async function connectOnce() {
       ensureWorld: () => ensureStarterWorld(),
       // 0.9.21 世界书资料块：commit 前读当前卡书启用条目（有界），喂给推演 AI；
       // 0.9.22 开关：被供应商审核拦截时可在推进页关闭（settingsV2.loreSupplementEnabled）
-      getLoreSupplement: () => (settingsV2?.loreSupplementEnabled === false
-        ? Promise.resolve("")
-        : (settingsV2?.loreUseSelector === false
-          ? readCardLoreSupplement()
-          : readCardLoreSupplementViaSelector())),
+      // P2-06：被关闭时也发一条诊断，避免「明明配了世界书却没生效」的黑盒排查。
+      getLoreSupplement: () => {
+        if (settingsV2?.loreSupplementEnabled === false) {
+          emitAtlasDiagnostic({ level: "info", source: "lorebook",
+            code: "LORE_ACTIVATION_UNAVAILABLE", operation: "lore-context",
+            phase: "read", outcome: "skipped",
+            details: { reason: "settings_disabled" } });
+          return Promise.resolve("");
+        }
+        if (settingsV2?.loreUseSelector === false) return readCardLoreSupplement();
+        return readCardLoreSupplementViaSelector();
+      },
       // 0.9.22 立即推演：读最近一条助手楼层正文作为推演素材（无楼层 → null，用占位）
       getLastAssistantText: async () => {
         try {
