@@ -1479,6 +1479,11 @@ function emitAtlasDiagnostic(event) {
   return null;
 }
 
+/** 供宿主验收读取已脱敏的运行诊断；不返回聊天正文或世界书内容。 */
+export function getAtlasSafeDiagnosticsSnapshot() {
+  return atlasDiagnostics?.getSnapshot() ?? [...pendingDiagnostics];
+}
+
 async function loadUiCore() {
   // 先组件内构建产物（发布形态），再上级 src（开发形态，工程内运行才可用）
   const attempts = ["./dist/atlas-ui-core.mjs"];
