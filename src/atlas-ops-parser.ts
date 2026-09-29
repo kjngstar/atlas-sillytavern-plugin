@@ -16,6 +16,13 @@
 // 跨平台稳定哈希：浏览器产物不能 import node:crypto（见 atlas-hash.ts）。
 import { stableHexHash } from './atlas-hash.ts';
 
+/** P0-02:跨平台 UTF-8 字节数。浏览器没有 Node `Buffer`,
+ * 用 TextEncoder 统一计算;Node 端也走这条路径,避免依赖全局 Buffer。 */
+const UTF8_ENCODER = new TextEncoder();
+function utf8ByteLength(text: string): number {
+  return UTF8_ENCODER.encode(text).byteLength;
+}
+
 import type { Issue, ModelOperation, ParseResult, ParsedOperation, Phase } from './atlas-ops-contract.ts';
 import { ATLAS_NOOP, SYSTEM_OWNED_FIELDS } from './atlas-ops-contract.ts';
 import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
@@ -453,7 +460,7 @@ export function parseOperations(payload: string, ctx: ParseContext): ParseResult
   let explicitNoop = false;
   let incomplete = false;
 
-  const byteLength = Buffer.byteLength(rawInput, 'utf8');
+  const byteLength = utf8ByteLength(rawInput);
   if (byteLength > ATLAS_RUNTIME_LIMITS.responseUtf8Bytes) {
     issues.push(
       issue(
@@ -515,7 +522,7 @@ export function parseOperations(payload: string, ctx: ParseContext): ParseResult
         issue(
           ATLAS_ERROR_CODES.JSON_SYNTAX,
           '$',
-          `JSON array is malformed (${Buffer.byteLength(arrayText, 'utf8')} bytes): ${detail}; excerpt: ${excerptOf(arrayText)}`,
+          `JSON array is malformed (${utf8ByteLength(arrayText)} bytes): ${detail}; excerpt: ${excerptOf(arrayText)}`,
           { line: lineIndex.lineAt(offset), retryable: true },
         ),
       );
@@ -575,7 +582,7 @@ export function parseOperations(payload: string, ctx: ParseContext): ParseResult
   let firstDroppedLine: number | undefined;
 
   for (const candidate of candidates) {
-    const bytes = Buffer.byteLength(candidate.raw, 'utf8');
+    const bytes = utf8ByteLength(candidate.raw);
     if (bytes > ATLAS_RUNTIME_LIMITS.operationUtf8Bytes) {
       issues.push(
         issue(

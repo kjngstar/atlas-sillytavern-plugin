@@ -21,13 +21,10 @@ export type SnapshotIdentity = {
 
 const B64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 
-function hasBuffer(): boolean {
-  return typeof (globalThis as { Buffer?: unknown }).Buffer !== 'undefined';
-}
-
 export function bytesToBase64(bytes: Uint8Array): string {
-  if (hasBuffer()) {
-    const B = (globalThis as { Buffer: { from(b: Uint8Array): { toString(enc: string): string } } }).Buffer;
+  // P0-03:在调用点用 typeof 收窄,不让 TS 把 Buffer 当必存在
+  const B = (globalThis as { Buffer?: { from(b: Uint8Array): { toString(enc: string): string } } }).Buffer;
+  if (typeof B !== 'undefined') {
     return B.from(bytes).toString('base64');
   }
   let out = '';
@@ -63,8 +60,9 @@ export function base64ToBytes(text: string): Uint8Array {
       { length: clean.length },
     );
   }
-  if (hasBuffer()) {
-    const B = (globalThis as { Buffer: { from(s: string, enc: string): Uint8Array } }).Buffer;
+  // P0-03:在调用点用 typeof 收窄,不让 TS 把 Buffer 当必存在
+  const B = (globalThis as { Buffer?: { from(s: string, enc: string): Uint8Array } }).Buffer;
+  if (typeof B !== 'undefined') {
     return new Uint8Array(B.from(clean, 'base64'));
   }
   const lookup = new Map<string, number>();
