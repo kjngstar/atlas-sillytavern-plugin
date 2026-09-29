@@ -10215,11 +10215,11 @@ const LORE_SUPPLEMENT_LIMITS = {
   ENTRIES_MAX: 60,
   /** 总字符上限（与引擎 ATLAS_LIMITS.LORE_SUPPLEMENT_CHARS 同口径，双保险） */
   TOTAL_CHARS: 6000,
-  /** 缓存 TTL（ms）：同一本书 1 分钟内复用，避免每回合都打 ST 内部接口 */
-  CACHE_TTL_MS: 60_000,
 };
 
-let loreSupplementCache = { bookName: null, at: 0, text: "" };
+// A07：删除跨请求 60 秒成品缓存(loreSupplementCache + CACHE_TTL_MS)——
+// 同名书内容修改后下一轮立即体现;A/B 聊天不串;没有内容变化时也符合上限,
+// 不产生成品旧文本。本请求内对同一本书的重复读取共用 Promise(下方的 inFlightByBook)。
 
 /**
  * 读当前角色世界书 → 有界资料文本（失败 / 无书 / 空书 → 空串，绝不抛错）。
@@ -10262,12 +10262,8 @@ async function readCardLoreSupplement() {
     pushBook(ctx?.chatMetadata?.world_info);
     if (bookNames.length === 0) return "";
 
-    // 2) 缓存键 = 全部书名(任一书变化即失效)
-    const cacheKey = bookNames.join("|");
-    const cached = loreSupplementCache;
-    if (cached.bookName === cacheKey && Date.now() - cached.at < LORE_SUPPLEMENT_LIMITS.CACHE_TTL_MS) {
-      return cached.text;
-    }
+    // A07：本请求内对同一本书的重复读取共用 Promise
+    const inFlightByBook = new Map();
 
     // 3) 逐本读取合并(单本失败跳过,不影响其余书)
     const worldInfo = await loadStWorldInfo();
@@ -10279,7 +10275,13 @@ async function readCardLoreSupplement() {
     for (const bookName of bookNames) {
       let rawEntries = [];
       try {
-        const data = await worldInfo.loadWorldInfo(bookName);
+        // A07：同一本书的 in-flight Promise 复用(本请求内)
+        let dataPromise = inFlightByBook.get(bookName);
+        if (!dataPromise) {
+          dataPromise = (async () => worldInfo.loadWorldInfo(bookName))();
+          inFlightByBook.set(bookName, dataPromise);
+        }
+        const data = await dataPromise;
         rawEntries = data && typeof data === "object" && data.entries && typeof data.entries === "object"
           ? Object.values(data.entries)
           : [];
@@ -10312,7 +10314,6 @@ async function readCardLoreSupplement() {
         phase: "read", outcome: "failed", details: { count: failedBooks } });
     }
     const text = lines.join("\n");
-    loreSupplementCache = { bookName: cacheKey, at: Date.now(), text };
     return text;
   } catch {
     emitAtlasDiagnostic({ level: "warn", source: "lorebook",
@@ -10361,12 +10362,8 @@ async function readCardLoreSupplementViaSelector() {
     pushBook(ctx?.chatMetadata?.world_info);
     if (bookNames.length === 0) return "";
 
-    // 2) 缓存键:书名 + chatId,失效更快(本请求内有效,世界书变更则失效)
-    const cacheKey = `${bookNames.join("|")}#${chatId ?? ""}`;
-    const cached = loreSupplementCache;
-    if (cached.bookName === cacheKey && Date.now() - cached.at < LORE_SUPPLEMENT_LIMITS.CACHE_TTL_MS) {
-      return cached.text;
-    }
+    // A07：本请求内对同一本书的重复读取共用 Promise(下文 inFlightByBook)
+    const inFlightByBook = new Map();
 
     // 3) 读入所有书的所有条目
     const worldInfo = await loadStWorldInfo();
@@ -10379,7 +10376,13 @@ async function readCardLoreSupplementViaSelector() {
     for (const bookName of bookNames) {
       let rawEntries = [];
       try {
-        const data = await worldInfo.loadWorldInfo(bookName);
+        // A07：同一本书的 in-flight Promise 复用(本请求内)
+        let dataPromise = inFlightByBook.get(bookName);
+        if (!dataPromise) {
+          dataPromise = (async () => worldInfo.loadWorldInfo(bookName))();
+          inFlightByBook.set(bookName, dataPromise);
+        }
+        const data = await dataPromise;
         rawEntries = data && typeof data === "object" && data.entries && typeof data.entries === "object"
           ? Object.values(data.entries)
           : [];
@@ -10433,7 +10436,6 @@ async function readCardLoreSupplementViaSelector() {
         outputChars: result.selectedOutputChars,
         sourceMode: result.sourceMode,
       } });
-    loreSupplementCache = { bookName: cacheKey, at: Date.now(), text: result.text };
     return result.text;
   } catch {
     emitAtlasDiagnostic({ level: "warn", source: "lorebook",
