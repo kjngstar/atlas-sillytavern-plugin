@@ -23,6 +23,7 @@ import {
   createAtlasExtension,
   connectAtlas,
   readCardLoreSupplementViaSelector,
+  recordAtlasHostLoreActivation,
   ATLAS_DISPLAY_NAME,
   ATLAS_EXTENSION_VERSION,
 } from "../atlas-extension/index.js";
@@ -767,6 +768,7 @@ test("M1-A03：真实宿主读书适配与 commit 钩子跨两本书选中末尾
   const previousHelper = globalThis.TavernHelper;
   const chatMetadata = {};
   const stContext = { chatId: "chat-a", characterId: 0, chatMetadata,
+    chat: [{ is_user: true, mes: "我进入白塔钟座。" }],
     characters: [{ data: { extensions: { world: "甲书" } } }] };
   const firstEntries = Object.fromEntries(Array.from({ length: 70 }, (_, i) =>
     [String(i), { uid: i, comment: `无关条目${i}`, key: [`无关${i}`], content: "遥远背景。".repeat(90) }]));
@@ -784,9 +786,13 @@ test("M1-A03：真实宿主读书适配与 commit 钩子跨两本书选中末尾
   let core;
   try {
     const ready = await readyCore({}, {}, [], { getLoreSupplement: (context) =>
-      readCardLoreSupplementViaSelector(context, releaseLoreSelector, (event) => loreEvents.push(event)) });
+      readCardLoreSupplementViaSelector(context, (input) => {
+        if (input.activatedUids) ok(input.activatedUids.has("乙书:2") && input.entries.some((entry) => entry.uid === "2"), "数值 UID 与宿主绿灯身份吻合");
+        return releaseLoreSelector(input);
+      }, (event) => loreEvents.push(event)) });
     core = ready.core;
     await core.handleEvent("MESSAGE_SENT", { messageId: "m-lore", userText: "我进入白塔钟座。" });
+    recordAtlasHostLoreActivation([{ world: "乙书", uid: 2 }], stContext);
     await core.handleEvent("MESSAGE_RECEIVED", { assistantMessageId: "a-lore", assistantText: "白塔钟座的石门出现在眼前。" });
     await flush();
     const commit = ready.api.calls.find((call) => call.path === "/turns/commit");
@@ -795,6 +801,7 @@ test("M1-A03：真实宿主读书适配与 commit 钩子跨两本书选中末尾
     equal(commit.body.loreSupplement.includes("不应回喂"), false, "Atlas 自写条目不回喂");
     equal(commit.body.loreSupplement.includes("无关条目"), false, "第一本无关条目不挤占预算");
     ok(loreEvents.some((event) => event.code === "LORE_SELECTION_COMPLETE" && event.details?.selectedCount === 1), "记录实际筛选计数");
+    ok(loreEvents.some((event) => event.code === "LORE_SELECTION_COMPLETE" && event.details?.activationMode === "host-activated"), "本轮真实绿灯 ID 被使用");
     books["乙书"].entries[2].content = "白塔钟座的新石门已经开启。";
     const updated = await readCardLoreSupplementViaSelector({ chatId: "chat-a", characterId: 0,
       mode: "turn", userText: "白塔钟座", assistantText: "石门开启。", recentAssistantTexts: [] }, releaseLoreSelector, (event) => loreEvents.push(event));

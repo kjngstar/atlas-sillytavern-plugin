@@ -10272,6 +10272,30 @@ const LORE_SUPPLEMENT_LIMITS = {
   TOTAL_CHARS: 6000,
 };
 
+/** 宿主在本轮生成时公布的绿灯 ID；仅保留身份，不缓存条目正文。 */
+let hostLoreActivation = null;
+let hostLoreActivationApiAvailable = false;
+
+export function recordAtlasHostLoreActivation(entries, ctx) {
+  const chat = Array.isArray(ctx?.chat) ? ctx.chat : [];
+  let userIndex = -1;
+  for (let i = chat.length - 1; i >= 0; i--) {
+    if (chat[i]?.is_user === true) { userIndex = i; break; }
+  }
+  if (userIndex < 0 || !ctx?.chatId || !Array.isArray(entries)) return;
+  const ids = new Set();
+  for (const entry of entries) {
+    if (typeof entry?.world !== "string") continue;
+    if (typeof entry?.uid !== "string" && typeof entry?.uid !== "number") continue;
+    ids.add(`${entry.world}:${entry.uid}`);
+  }
+  hostLoreActivation = {
+    chatId: String(ctx.chatId), characterId: ctx.characterId ?? null,
+    userMessageId: String(userIndex), userText: String(chat[userIndex]?.mes ?? ""),
+    ids, consumed: false,
+  };
+}
+
 /** 从当前绑定书中按本次请求的正文选取资料；宿主未提供可靠激活清单时只报告 context-fallback。 */
 export async function readCardLoreSupplementViaSelector(selectionContext, selectorOverride = null, emit = emitAtlasDiagnostic) {
   try {
@@ -10363,7 +10387,8 @@ export async function readCardLoreSupplementViaSelector(selectionContext, select
         const keys = Array.isArray(entry.key) ? entry.key.filter((k) => typeof k === "string" && k.trim()) : [];
         const title = comment || (keys.length > 0 ? keys.slice(0, 4).join(" / ") : "条目");
         allEntries.push({
-          uid: typeof entry.uid === "string" ? entry.uid : (typeof entry.id === "string" || typeof entry.id === "number" ? String(entry.id) : ""),
+          uid: typeof entry.uid === "string" || typeof entry.uid === "number" ? String(entry.uid)
+            : (typeof entry.id === "string" || typeof entry.id === "number" ? String(entry.id) : ""),
           title,
           bookName,
           content,
@@ -10385,14 +10410,23 @@ export async function readCardLoreSupplementViaSelector(selectionContext, select
       return "";
     }
     const sceneKeywords = extractSceneKeywords(selectionContext, allEntries);
-    // 当前受测宿主没有已验证的逐回合激活清单；不按函数名猜测 API。
-    const activationMode = "context-fallback";
-    emit({ level: "info", source: "lorebook",
-      code: "LORE_ACTIVATION_UNAVAILABLE", operation: "lore-context",
-      phase: "select", outcome: "ok",
-      details: { reason: "host_api_unavailable", mode: selectionContext.mode } });
+    const lastUserIndex = Array.isArray(ctx?.chat) ? ctx.chat.findLastIndex((message) => message?.is_user === true) : -1;
+    const activation = selectionContext.mode === "turn" && hostLoreActivation
+      && !hostLoreActivation.consumed
+      && hostLoreActivation.chatId === chatId
+      && hostLoreActivation.characterId === characterId
+      && hostLoreActivation.userMessageId === String(lastUserIndex)
+      && hostLoreActivation.userText === selectionContext.userText
+      ? hostLoreActivation : null;
+    const activationMode = activation ? "host-activated" : "context-fallback";
+    if (activation) activation.consumed = true;
+    else emit({ level: "info", source: "lorebook",
+      code: hostLoreActivationApiAvailable ? "LORE_ACTIVATION_FALLBACK" : "LORE_ACTIVATION_UNAVAILABLE",
+      operation: "lore-context", phase: "select", outcome: "ok",
+      details: { reason: hostLoreActivationApiAvailable ? "no_matching_turn_event" : "host_api_unavailable", mode: selectionContext.mode } });
     const result = sel({
       entries: allEntries,
+      ...(activation ? { activatedUids: activation.ids } : {}),
       chatKeywords: sceneKeywords,
       sceneKeywords: sceneKeywords,
       mode: selectionContext.mode,
@@ -10488,6 +10522,16 @@ async function connectOnce() {
     };
 
     const context = () => SillyTavern.getContext();
+    const loreHost = context();
+    if (loreHost?.eventSource && loreHost?.event_types?.WORLD_INFO_ACTIVATED) {
+      hostLoreActivationApiAvailable = true;
+      loreHost.eventSource.on(loreHost.event_types.WORLD_INFO_ACTIVATED,
+        (entries) => recordAtlasHostLoreActivation(entries, context()));
+      for (const eventName of ["GENERATION_STARTED", "CHAT_CHANGED", "MESSAGE_DELETED"]) {
+        const eventType = loreHost.event_types[eventName];
+        if (eventType) loreHost.eventSource.on(eventType, () => { hostLoreActivation = null; });
+      }
+    }
     // ATLAS-09 纯浏览器接线：引擎核心整体打进本扩展，进程内 dispatch，零网络。
     // 文档落 extensionSettings（酒馆设置持久化）；推演模型经酒馆后端代理转发。
     const engineStore = mod.createBrowserDocumentStore({
