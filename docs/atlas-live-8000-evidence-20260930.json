@@ -1,0 +1,26 @@
+{
+  "host": "SillyTavern on localhost:8000",
+  "install": "existing atlas-sillytavern-plugin Git checkout",
+  "fixture": "Atlas 自动化验收 20260930",
+  "opening": {
+    "committed": true,
+    "locationRows": 3,
+    "characterRows": 2,
+    "currentLocationName": "图书室"
+  },
+  "turn": {
+    "committed": true,
+    "lorebookSync": "success",
+    "rejectedRows": 2,
+    "rejectionCode": "INFERRED_FIELD_NOT_ALLOWED"
+  },
+  "map": {
+    "navigation": ["星河中学", "教学楼", "图书室"],
+    "eachPointPosition": "displayOnly",
+    "scale": "unconfirmed",
+    "nearbyHasCharacter": true
+  },
+  "limits": [
+    "Second genre, large worldbooks, rollback and cross-chat live cases remain untested."
+  ]
+}
