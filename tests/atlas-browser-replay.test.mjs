@@ -328,6 +328,18 @@ function classroomState() {
   return mapState({ points, submaps, tableMap, currentLocationId: "1" });
 }
 
+test("M3 实酒馆回归：当前位置在子图时概览与顶栏显示房间名", async () => {
+  const state = classroomState();
+  state.page = "overview";
+  state.binding.currentLocationId = "2";
+  state.stateData.currentLocationId = "2";
+  state.stateData.tableMap.current.locationId = "loc:2";
+  const { dom, container } = await mountReplay(state);
+  assert.match(String(container.querySelector(".aw-topbar")?.textContent ?? ""), /位置：三年二班/);
+  assert.match(String(container.querySelector(".aw-stats")?.textContent ?? ""), /所在位置三年二班/);
+  dom.window.close();
+});
+
 test("G03 回放：教室子图只画可信细格的人物图钉，建筑级 / 无坐标 / 同格的人不伪造点位", async () => {
   const { dom, container } = await mountReplay(classroomState());
 

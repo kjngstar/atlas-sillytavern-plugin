@@ -3379,6 +3379,22 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     engineText.textContent = s.serviceStatus === "checking" ? "引擎检测中" : ok ? "本地引擎" : "引擎未就绪";
   }
 
+  function currentLocationName(d) {
+    const id = String(d?.currentLocationId ?? "").replace(/^loc:/, "");
+    if (!id) return null;
+    const sources = [d?.map?.points, d?.tableMap?.world?.points];
+    for (const submaps of [d?.tableMap?.submaps, d?.map?.submaps]) {
+      if (submaps && typeof submaps === "object") {
+        for (const submap of Object.values(submaps)) sources.push(submap?.points);
+      }
+    }
+    for (const points of sources) {
+      const found = Array.isArray(points) ? points.find((point) => String(point?.id ?? "") === id) : null;
+      if (found?.name) return String(found.name);
+    }
+    return null;
+  }
+
   function renderTopbar(d) {
     topbarLeft.innerHTML = "";
     topbarRight.innerHTML = "";
@@ -3390,7 +3406,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     if (state().pendingTurn) topbarRight.append(el("span", "aw-chip aw-chip--busy", "世界推演中"));
     if (d.currentTime !== undefined) topbarRight.append(el("span", "aw-chip aw-chip--gold", `第 ${String(d.currentTime)} 时段`));
     if (d.currentLocationId) {
-      const pointName = (d.map?.points ?? []).find((p) => String(p.id) === String(d.currentLocationId))?.name;
+      const pointName = currentLocationName(d);
       topbarRight.append(el("span", "aw-chip aw-chip--teal", `位置：${pointName ?? String(d.currentLocationId)}`));
     }
     topbarRight.append(topbarClose);
@@ -4243,7 +4259,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       const stats = el("div", "aw-stats");
       const statsSpec = [
         ["世界时间", `第 ${String(d.currentTime ?? 0)} 时段`],
-        ["所在位置", String(d.map?.points?.find?.((p) => String(p.id) === String(d.currentLocationId))?.name ?? "未知")],
+        ["所在位置", currentLocationName(d) ?? (d.currentLocationId ? `地点 ${String(d.currentLocationId)}` : "未知")],
         ["地点总数", String(d.map?.pointCount ?? 0)],
         ["相关 NPC", String(Array.isArray(d.npcDirectory) ? d.npcDirectory.length : 0)],
       ];
