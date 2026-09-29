@@ -10329,6 +10329,24 @@ async function readCardLoreSupplement() {
  *  - 缓存键 = 书名 + 内容 hash + chatId,失效更快(不再 60 秒)
  *  - 失败一本书不影响其他书,但有诊断条目
  */
+/**
+ * A09：探测宿主是否暴露「本轮绿灯(activated)条目列表」API。
+ * - TavernHelper.getActivatedEntries / TavernHelper.getEntryActivation 之类:
+ *   不同时存在的酒馆版本一律视为「不可用」,按 context-fallback 处理。
+ * - 不准自己猜一个 TavernHelper API(施工单 §2-A09 注释)。
+ */
+function detectHostActivationApi() {
+  try {
+    const th = globalThis.TavernHelper ?? globalThis.getTavernHelper?.() ?? null;
+    if (!th || typeof th !== "object") return false;
+    if (typeof th.getActivatedEntries === "function") return true;
+    if (typeof th.getEntryActivation === "function") return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 async function readCardLoreSupplementViaSelector() {
   try {
     if (typeof SillyTavern === "undefined") return "";
@@ -10411,10 +10429,22 @@ async function readCardLoreSupplementViaSelector() {
     // 4) 调用 P2-01 纯函数排序 + 截断
     const sel = atlasRuntime.mod?.selectAtlasLoreSupplement;
     if (typeof sel !== "function") {
-      // 模块未加载或旧版本不支持,降级到传统实现
-      return await readCardLoreSupplement();
+      // 模块未加载或旧版本不支持,明确发 LORE_SELECTOR_UNAVAILABLE(A04)
+      emitAtlasDiagnostic({ level: "warn", source: "lorebook",
+        code: "LORE_SELECTOR_UNAVAILABLE", operation: "lore-context",
+        phase: "select", outcome: "skipped",
+        details: { reason: "selector_undefined" } });
+      return "";
     }
     const sceneKeywords = extractSceneKeywords(ctx);
+    // A09：探测宿主是否提供「本轮绿灯列表」API；不存在时发 LORE_ACTIVATION_UNAVAILABLE
+    const activationMode = detectHostActivationApi() ? "host-activated" : "context-fallback";
+    if (activationMode === "context-fallback") {
+      emitAtlasDiagnostic({ level: "info", source: "lorebook",
+        code: "LORE_ACTIVATION_UNAVAILABLE", operation: "lore-context",
+        phase: "select", outcome: "ok",
+        details: { reason: "host_api_unavailable", mode: "turn" } });
+    }
     const result = sel({
       entries: allEntries,
       chatKeywords: sceneKeywords,
@@ -10435,6 +10465,8 @@ async function readCardLoreSupplementViaSelector() {
         truncatedCount: result.truncatedCount,
         outputChars: result.selectedOutputChars,
         sourceMode: result.sourceMode,
+        mode: "turn",
+        activationMode,
       } });
     return result.text;
   } catch {
@@ -10695,11 +10727,12 @@ async function connectOnce() {
       ensureWorld: () => ensureStarterWorld(),
       // 0.9.21 世界书资料块：commit 前读当前卡书启用条目（有界），喂给推演 AI；
       // 0.9.22 开关：被供应商审核拦截时可在推进页关闭（settingsV2.loreSupplementEnabled）
-      // P2-06：被关闭时也发一条诊断，避免「明明配了世界书却没生效」的黑盒排查。
+      // A09：关闭时发 LORE_SUPPLEMENT_DISABLED(reason=settings_disabled)，
+      // 不要伪装成激活接口故障；只有宿主真的没提供激活条目列表时才发 LORE_ACTIVATION_UNAVAILABLE。
       getLoreSupplement: () => {
         if (settingsV2?.loreSupplementEnabled === false) {
           emitAtlasDiagnostic({ level: "info", source: "lorebook",
-            code: "LORE_ACTIVATION_UNAVAILABLE", operation: "lore-context",
+            code: "LORE_SUPPLEMENT_DISABLED", operation: "lore-context",
             phase: "read", outcome: "skipped",
             details: { reason: "settings_disabled" } });
           return Promise.resolve("");
