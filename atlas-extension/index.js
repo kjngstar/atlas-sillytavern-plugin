@@ -10750,16 +10750,24 @@ async function connectOnce() {
       // 0.9.22 开关：被供应商审核拦截时可在推进页关闭（settingsV2.loreSupplementEnabled）
       // A09：关闭时发 LORE_SUPPLEMENT_DISABLED(reason=settings_disabled)，
       // 不要伪装成激活接口故障；只有宿主真的没提供激活条目列表时才发 LORE_ACTIVATION_UNAVAILABLE。
-      getLoreSupplement: (selectionContext) => {
+      getLoreSupplement: async (selectionContext) => {
+        emitAtlasDiagnostic({ level: "info", source: "lorebook",
+          code: "LORE_READ_STARTED", operation: "lore-context", phase: "read", outcome: "started",
+          details: { mode: selectionContext.mode,
+            chatMatch: String(SillyTavern.getContext()?.chatId ?? "") === selectionContext.chatId } });
         if (settingsV2?.loreSupplementEnabled === false) {
           emitAtlasDiagnostic({ level: "info", source: "lorebook",
             code: "LORE_SUPPLEMENT_DISABLED", operation: "lore-context",
             phase: "read", outcome: "skipped",
             details: { reason: "settings_disabled" } });
-          return Promise.resolve("");
+          return "";
         }
-        return readCardLoreSupplementViaSelector({ ...selectionContext,
+        const result = await readCardLoreSupplementViaSelector({ ...selectionContext,
           characterId: SillyTavern.getContext()?.characterId ?? null });
+        emitAtlasDiagnostic({ level: "info", source: "lorebook",
+          code: "LORE_READ_COMPLETE", operation: "lore-context", phase: "read", outcome: "success",
+          details: { mode: selectionContext.mode, outputChars: result.length } });
+        return result;
       },
       // 0.9.22 立即推演：读最近一条助手楼层正文作为推演素材（无楼层 → null，用占位）
       getLastAssistantText: async () => {
