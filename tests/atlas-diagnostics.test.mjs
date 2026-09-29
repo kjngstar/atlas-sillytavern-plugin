@@ -176,7 +176,7 @@ test("A11 保留 schemaPath / reasonCode / responseChars / coreCommitted", () =>
 });
 
 test("A11 未列名字段一律丢弃（引文 / 姓名 / endpoint / 密钥不得进入诊断）", () => {
-  const quote = "废墟深处";
+  const quote = "<PLACE>";
   const name = "薇尔·星环";
   const endpoint = "https://api.example.invalid/v1/chat/completions";
   const key = "sk-live-abcdefghijklmnop";
@@ -213,7 +213,7 @@ test("A11 未列名字段一律丢弃（引文 / 姓名 / endpoint / 密钥不�
 
 test("A11 非法 schemaPath（带引文 / URL）被丢弃，不因新字段放宽形状校验", () => {
   for (const [label, bad] of [
-    ["带引文", '$.relationUpdates[0].value"废墟深处"'],
+    ["带引文", '$.relationUpdates[0].value"<PLACE>"'],
     ["带 URL", "$.https://api.example.invalid/v1"],
     ["带空格中文", "$.关系 值"],
     ["超长", "$." + "a".repeat(120)],

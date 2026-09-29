@@ -907,13 +907,13 @@ test("callAtlasWorldTurnApi：promptSegments 装配消息数组，占位符替�
   // 0.9.21 世界书资料块：loreSupplement 非空 → 资料进「角色与世界背景」段（$1）；{{worldLore}} 可引用
   await callAtlasWorldTurnApi(
     { name: "t", endpoint: "https://api.example.com/v1/chat/completions", model: "m1", apiKey: "" },
-    { ...input, loreSupplement: "- 低语森林：卡书里的地点描述" },
+    { ...input, loreSupplement: "- <REGION>：卡书里的地点描述" },
     { fetchFn },
   );
   assert.equal(capturedBody.messages.length, 6, "带资料仍是整套默认分段");
   const loreSegment = capturedBody.messages.find((m) => m.content.includes("【世界书资料（当前角色卡"));
   assert.ok(loreSegment, "资料块进入背景设定段");
-  assert.ok(loreSegment.content.includes("低语森林"), "资料内容进正文");
+  assert.ok(loreSegment.content.includes("<REGION>"), "资料内容进正文");
   assert.ok(loreSegment.content.includes("用户行动B") === false, "背景段不混入本轮素材（$8 在触发段）");
 
   await callAtlasWorldTurnApi(

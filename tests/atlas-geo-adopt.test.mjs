@@ -83,17 +83,17 @@ async function makeCore({ fetchScripts, configurePreset = true } = {}) {
 
 const EXTRACTION_JSON = JSON.stringify({
   regions: [
-    { name: "低语森林", description: "迷雾笼罩的古老森林" },
+    { name: "<REGION>", description: "迷雾笼罩的古老森林" },
     { name: "起点", description: "试图覆盖已有地区" },
   ],
   points: [
-    { name: "避风树洞", regionName: "低语森林" },
-    { name: "起点", regionName: "低语森林" },
+    { name: "<PLACE>", regionName: "<REGION>" },
+    { name: "起点", regionName: "<REGION>" },
     { name: "无名石碑" },
   ],
 });
 
-async function adopt(core, loreSupplement = "- 低语森林：迷雾笼罩的古老森林\n- 避风树洞：森林里的安全据点") {
+async function adopt(core, loreSupplement = "- <REGION>：迷雾笼罩的古老森林\n- <PLACE>：森林里的安全据点") {
   return core.handle("POST", "/worlds/geo/adopt", { chatId: "chat-1", loreSupplement });
 }
 
@@ -107,15 +107,15 @@ test("geo/adopt：成功提炼 → 加地区加点、修订追加、只增不改
 
   assert.equal(result.status, 200);
   assert.equal(result.body.ok, true);
-  assert.equal(result.body.data.regionsAdded, 1, "重名「起点」跳过，只加低语森林");
+  assert.equal(result.body.data.regionsAdded, 1, "重名「起点」跳过，只加<REGION>");
   assert.equal(result.body.data.pointsAdded, 2, "重名「起点」跳过，加树洞与石碑");
   assert.equal(result.body.data.skipped, 2);
   assert.equal(result.body.data.revisionAppended, true);
-  assert.deepEqual(result.body.data.regionNames, ["低语森林"]);
-  assert.ok(result.body.data.pointNames.includes("避风树洞"));
+  assert.deepEqual(result.body.data.regionNames, ["<REGION>"]);
+  assert.ok(result.body.data.pointNames.includes("<PLACE>"));
   assert.equal(fetchCalls.length, 1, "一次点击恰好 1 条模型请求");
   assert.ok(
-    JSON.stringify(fetchCalls[0].body).includes("低语森林"),
+    JSON.stringify(fetchCalls[0].body).includes("<REGION>"),
     "世界书资料进入提炼请求",
   );
   assert.ok(
@@ -126,12 +126,12 @@ test("geo/adopt：成功提炼 → 加地区加点、修订追加、只增不改
   const after = carrier.session.world;
   assert.equal(after.regions.length, 2, "1 起始地区 + 1 新地区");
   assert.equal(after.points.length, 3, "1 起始地点 + 2 新地点");
-  const newRegion = after.regions.find((r) => r.name === "低语森林");
+  const newRegion = after.regions.find((r) => r.name === "<REGION>");
   assert.ok(newRegion, "新地区落库");
   assert.match(newRegion.id, /^geo-r-/);
   assert.equal(after.regions.find((r) => r.id === "start").description, before.regions[0].description, "既有地区描述未被改写");
 
-  const treeHole = after.points.find((p) => p.name === "避风树洞");
+  const treeHole = after.points.find((p) => p.name === "<PLACE>");
   assert.ok(treeHole, "新地点落库");
   assert.equal(treeHole.id, 2, "地点 id 从最大值递增");
   assert.equal(treeHole.regionId, newRegion.id, "regionName 映射到新地区 id");
@@ -163,10 +163,10 @@ test("E02 geo/adopt：提炼出的地点必须同时进三表（否则地图不�
   const tables = carrier.session.tables?.branches?.canon;
   assert.ok(tables, "该分支有三表");
   const names = tables.locations.map((row) => row.name);
-  assert.ok(names.includes("避风树洞"), "新地点进了地点表");
+  assert.ok(names.includes("<PLACE>"), "新地点进了地点表");
   assert.ok(names.includes("无名石碑"), "第二个新地点也进了地点表");
   // 三表行 id 用旧点 id（D-05 方案），与地图视图口径一致
-  const treeHole = carrier.session.world.points.find((p) => p.name === "避风树洞");
+  const treeHole = carrier.session.world.points.find((p) => p.name === "<PLACE>");
   assert.ok(names.length === tables.locations.length, "地点表行数与提取结果一致");
   assert.ok(
     tables.locations.some((row) => row.id === `loc:${treeHole.id}`),
@@ -235,7 +235,7 @@ test("geo/adopt：代码围栏包裹的 JSON 也能解析；未绑定聊天 → 
   assert.equal(result.body.data.regionsAdded, 1);
   assert.equal(fetchCalls.length, 1);
 
-  const unbound = await core.handle("POST", "/worlds/geo/adopt", { chatId: "chat-none", loreSupplement: "低语森林" });
+  const unbound = await core.handle("POST", "/worlds/geo/adopt", { chatId: "chat-none", loreSupplement: "<REGION>" });
   assert.equal(unbound.body.ok, false, "未绑定聊天被拒");
   assert.equal(fetchCalls.length, 1, "绑定检查在模型请求之前");
 });
@@ -267,11 +267,11 @@ test("geo/adopt 剧情模式：已有地点不重复输出 → 全部跳过；�
   const { core, fetchCalls } = await makeCore({
     fetchScripts: [
       () => openAiResponse(JSON.stringify({
-        regions: [{ name: "低语森林" }],
-        points: [{ name: "避风树洞", regionName: "低语森林" }],
+        regions: [{ name: "<REGION>" }],
+        points: [{ name: "<PLACE>", regionName: "<REGION>" }],
       })),
       // 第二次：模型输出前后夹说明文字 + 只提炼出已有地点 → 抢救解析成功 + 全跳过
-      () => openAiResponse('好的，以下是提炼结果：{"regions":[],"points":[{"name":"避风树洞","regionName":"低语森林"}]} 请查收。'),
+      () => openAiResponse('好的，以下是提炼结果：{"regions":[],"points":[{"name":"<PLACE>","regionName":"<REGION>"}]} 请查收。'),
     ],
   });
   const first = await adopt(core);
@@ -279,7 +279,7 @@ test("geo/adopt 剧情模式：已有地点不重复输出 → 全部跳过；�
 
   const second = await core.handle("POST", "/worlds/geo/adopt", {
     chatId: "chat-1",
-    recentTexts: ["他们回到了避风树洞休整。"],
+    recentTexts: ["他们回到了<PLACE>休整。"],
   });
   assert.equal(second.body.ok, true, "夹带说明文字的响应经容错提取仍可解析");
   assert.equal(second.body.data.regionsAdded, 0);

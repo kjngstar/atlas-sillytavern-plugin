@@ -54,7 +54,7 @@ async function mountPanel() {
 
   const points = [
     { id: 1, name: "起点", x: 50, y: 50, regionId: "start" },
-    { id: 2, name: "废墟深处", x: 70, y: 50, regionId: "start" },
+    { id: 2, name: "<PLACE>", x: 70, y: 50, regionId: "start" },
   ];
   const state = {
     page: "map",
@@ -123,7 +123,7 @@ test("R15-PA2: 对象从数据消失 → 面板关闭且不复活", async () => 
   // 把地点加回来但**不再点击**：关闭态已清身份，不得凭旧身份自动复活面板
   state.stateData.map.points = [
     { id: 1, name: "起点", x: 50, y: 50, regionId: "start" },
-    { id: 2, name: "废墟深处", x: 70, y: 50, regionId: "start" },
+    { id: 2, name: "<PLACE>", x: 70, y: 50, regionId: "start" },
   ];
   await rerender();
   assert.equal(container.querySelector(".aw-mappanel").style.display, "none", "关闭后不自动复活（需用户再次点击）");

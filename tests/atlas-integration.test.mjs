@@ -600,7 +600,7 @@ test("0.9.22 立即推演：合成一回合 commit（manual id / 占位行动 / 
   const { createAtlasUiCore } = await import(pathToFileURL(join(root, "src", "atlas-ui-core.ts")).href);
   const core = createAtlasUiCore({
     api, host: turnHost(), emitter: realLikeEmitter(),
-    getLoreSupplement: async () => "- 卡书地点：低语森林",
+    getLoreSupplement: async () => "- 卡书地点：<REGION>",
     getLastAssistantText: async () => "她靠在树洞边警戒四周。",
   });
   core.init();
@@ -612,7 +612,7 @@ test("0.9.22 立即推演：合成一回合 commit（manual id / 占位行动 / 
   equal(commit.body.assistantMessageId.startsWith("manual-a-"), true, "合成助手消息 id");
   ok(commit.body.userText.includes("手动推进"), "固定占位行动");
   equal(commit.body.assistantText, "她靠在树洞边警戒四周。", "最近楼层正文作为素材");
-  equal(commit.body.loreSupplement, "- 卡书地点：低语森林", "带世界书资料块");
+  equal(commit.body.loreSupplement, "- 卡书地点：<REGION>", "带世界书资料块");
   ok(core.getState().receipts.some((r) => r.receiptId === "rcpt-manual-1"), "回执已记录");
 
   // 无宿主钩子 → 占位正文，仍然可推

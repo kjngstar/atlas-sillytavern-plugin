@@ -6762,7 +6762,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
           node.setAttribute("aria-label", `地点 ${String(marker.name ?? "")}，位置未确认，仅为示意，点击查看详情`);
           node.dataset.displayOnly = "true";
           node.dataset.pointId = pointId;
-          node.append(el("span", "aw-point__pending", "待定位"));
+          node.append(el("span", "aw-point__pending", "示意"));
           node.style.left = `${Number(marker.x) + cameraFrame.minX}px`;
           node.style.top = `${Number(marker.y) + cameraFrame.minY}px`;
           node.addEventListener("click", (event) => {
@@ -8281,7 +8281,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       const count = segments.filter((s) => s.enabled !== false && String(s.content ?? "").trim()).length;
       segStatus.textContent = `${segments.length} 个条目 · ${count} 个启用且有正文`;
     };
-    const addSegment = (atTop) => {
+    const insertSegmentAt = (index) => {
       if (!promptDraft) promptDraft = newPromptDraft();
       if (!Array.isArray(promptDraft.segments)) promptDraft.segments = [];
       if (promptDraft.segments.length >= 16) {
@@ -8290,8 +8290,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       }
       // 0.9.25 shujuku promptGroup 栏位段：段带名称与主槽位（A=主系统提示词位 / B=任务指令位）
       const segment = { role: "system", name: "", mainSlot: "", content: "" };
-      if (atTop) promptDraft.segments.unshift(segment);
-      else promptDraft.segments.push(segment);
+      promptDraft.segments.splice(index, 0, segment);
       promptDraftDirty = true;
       renderSegRows();
       if (syncPromptDirty) syncPromptDirty();
@@ -8400,7 +8399,15 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
           segments.splice(index + 1, 0, { ...segment, name: `${segment.name || "条目"} 副本`.slice(0, 64), deletable: true });
           promptDraftDirty = true; renderSegRows(); if (syncPromptDirty) syncPromptDirty();
         });
-        head.append(upBtn, downBtn, copyBtn, delBtn);
+        const beforeBtn = el("button", "aw-btn aw-btn--icon", "上方插入");
+        beforeBtn.type = "button";
+        beforeBtn.setAttribute("aria-label", `在第 ${index + 1} 段上方插入提示词`);
+        beforeBtn.addEventListener("click", () => insertSegmentAt(index));
+        const afterBtn = el("button", "aw-btn aw-btn--icon", "下方插入");
+        afterBtn.type = "button";
+        afterBtn.setAttribute("aria-label", `在第 ${index + 1} 段下方插入提示词`);
+        afterBtn.addEventListener("click", () => insertSegmentAt(index + 1));
+        head.append(upBtn, downBtn, beforeBtn, afterBtn, copyBtn, delBtn);
         const area = document.createElement("textarea");
         area.className = "aw-input aw-input--area aw-seg-item__area";
         area.rows = 5;
@@ -8459,11 +8466,11 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       const insertTopBtn = el("button", "aw-btn aw-btn--ghost aw-seg-insert", "在最上方插入一段");
       insertTopBtn.type = "button";
       insertTopBtn.setAttribute("aria-label", "在最上方插入一个提示词分段");
-      insertTopBtn.addEventListener("click", () => addSegment(true));
+      insertTopBtn.addEventListener("click", () => insertSegmentAt(0));
       const insertBottomBtn = el("button", "aw-btn aw-btn--ghost aw-seg-insert", "在最下方插入一段");
       insertBottomBtn.type = "button";
       insertBottomBtn.setAttribute("aria-label", "在最下方插入一个提示词分段");
-      insertBottomBtn.addEventListener("click", () => addSegment(false));
+      insertBottomBtn.addEventListener("click", () => insertSegmentAt(promptDraft?.segments?.length ?? 0));
       segSection.append(insertTopBtn, segRows, insertBottomBtn);
       segSection.append(el("span", "aw-hint", "每个条目可独立改名称、消息角色、正文、顺序与启用状态；停用条目仍保存在预设中，发送时跳过。槽位 A / B 是标注，发送按列表顺序。输出需遵循 Atlas 的 <atlasEdit> 行增量协议。"));
       const placeholderHelp = document.createElement("details"); placeholderHelp.className = "aw-details";

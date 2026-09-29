@@ -53,7 +53,7 @@ test("R01: 地图工具显示、hint 不遮挡、网格平铺、底图网格分�
   const world = {
     points: [
       { id: 1, name: "起点", x: 50, y: 50, regionId: "start" },
-      { id: 2, name: "废墟深处", x: 70, y: 50, regionId: "start" },
+      { id: 2, name: "<PLACE>", x: 70, y: 50, regionId: "start" },
     ],
     regions: [{ id: "start", name: "起点地区" }],
   };

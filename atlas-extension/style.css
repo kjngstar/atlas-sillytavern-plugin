@@ -952,7 +952,7 @@
 
 /**
  * H08（0.9.59）：缺坐标地点的**示意标点**。
- * 与已确认坐标的点必须一眼可分：虚线边框 + 「待定位」角标 + 略低不透明度。
+ * 与已确认坐标的点必须一眼可分：虚线边框 + 「示意」角标 + 略低不透明度。
  * 它只是渲染位置，读屏与 title 都明说「位置未确认，仅为示意」。
  *
  * 0.9.60：**去掉斜体**。虚线 + 0.72 透明度已经是足够的区分手段，斜体是多余的第三重强调；
@@ -1522,7 +1522,7 @@
   box-shadow: 0 1px 2px rgba(16, 27, 29, 0.12);
 }
 
-/* 0.9.38 标点可视交互：金色菱形针脚 + 悬停抬升——此前徽章与死文字无异，
+/* 标点可视交互：金色菱形针脚 + 悬停变色——保持命中区域位置稳定，
    用户以为标点不可点（点击本来就会开信息面板） */
 .aw-point::before {
   content: "";
@@ -1538,7 +1538,7 @@
 .aw-point:focus-visible {
   border-color: var(--aw-teal);
   color: var(--aw-teal);
-  transform: translate(-50%, -50%) translateY(-2px) scale(var(--aw-marker-inv, 1));
+  transform: translate(-50%, -50%) scale(var(--aw-marker-inv, 1));
   box-shadow: 0 3px 6px rgba(16, 27, 29, 0.16);
 }
 

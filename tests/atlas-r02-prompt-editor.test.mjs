@@ -252,6 +252,28 @@ test("条目编辑器前置，修改角色与正文、复制、排序和删除�
   assert.equal(getSettings().promptPresets[1].segments[1].deletable, false);
 });
 
+test("每段可上方或下方插入，角色和顺序在保存后保留", async () => {
+  const { dom, container, getSettings } = await promptEditorFixture([{ id: "editable", name: "可编辑", systemPrompt: "", segments: [
+    { role: "system", name: "规则", content: "系统规则" },
+    { role: "user", name: "行动", content: "用户行动" },
+  ] }]);
+  const query = (label) => container.querySelector(`[aria-label="${label}"]`);
+  query("在第 2 段上方插入提示词").click();
+  assert.equal(query("第 2 段角色").value, "system");
+  const role = query("第 2 段角色");
+  role.value = "assistant"; role.dispatchEvent(new dom.window.Event("change"));
+  const body = query("第 2 段正文");
+  body.value = "中间回执"; body.dispatchEvent(new dom.window.Event("input"));
+  query("在第 3 段下方插入提示词").click();
+  const tail = query("第 4 段正文");
+  tail.value = "收尾"; tail.dispatchEvent(new dom.window.Event("input"));
+  query("保存当前提示词预设").click(); await tick();
+  assert.deepEqual(getSettings().promptPresets[0].segments.map((s) => [s.role, s.content]), [
+    ["system", "系统规则"], ["assistant", "中间回执"], ["user", "用户行动"], ["system", "收尾"],
+  ]);
+  dom.window.close();
+});
+
 test("shujuku 多预设文件先载入可编辑草稿，选择并保存仅创建所选预设且不激活", async () => {
   const { dom, container, commands, getSettings } = await promptEditorFixture();
   const fileText = JSON.stringify([{ name: "外部甲", promptGroup: [{ role: "SYSTEM", content: "甲规则" }] },

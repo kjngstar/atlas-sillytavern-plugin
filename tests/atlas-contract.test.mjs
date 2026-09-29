@@ -320,10 +320,10 @@ test("commit 请求：swipeId 缺省 / null / 字符串均合法，非字符串�
 // 0.9.21 世界书资料补充：可选宽容字段——字符串截断保留，非字符串 / 空白丢弃，绝不拒整单
 test("commit 请求：loreSupplement 可选宽容处理", () => {
   const withLore = validCommitRequest();
-  withLore.loreSupplement = "- 低语森林：地点描述";
+  withLore.loreSupplement = "- <REGION>：地点描述";
   const parsedLore = parseAtlasTurnCommitRequest(withLore);
   assert.ok(parsedLore.ok, "带 loreSupplement 合法");
-  assert.equal(parsedLore.value.loreSupplement, "- 低语森林：地点描述", "loreSupplement 保留");
+  assert.equal(parsedLore.value.loreSupplement, "- <REGION>：地点描述", "loreSupplement 保留");
 
   const longLore = validCommitRequest();
   longLore.loreSupplement = "料".repeat(ATLAS_LIMITS.LORE_SUPPLEMENT_CHARS + 100);

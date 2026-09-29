@@ -3,7 +3,7 @@
  *
  * 计划书 §6 R00 要求的四套夹具：
  * 1. 空世界开局（starter world，无剧情）
- * 2. 截图式废墟相遇（开局文本「羽风站在废墟深处。一名未报姓名的少女正在他身旁。」）
+ * 2. 截图式废墟相遇（开局文本「<NPC>站在<PLACE>。一名未报姓名的少女正在他身旁。」）
  * 3. 已有多 NPC 世界（多人物多地点，含账本事件）
  * 4. 多层子图带底图（点 + 子图引用 + 底图 dataURL 占位）
  *
@@ -20,7 +20,7 @@ export function fixtureEmptyWorld() {
   return { world: buildStarterWorld({ id: "fx-empty", now: NOW, name: "空世界" }), now: NOW };
 }
 
-/** 2) 截图式废墟相遇：世界仍是起点，剧情文本已把玩家写在废墟深处。 */
+/** 2) 截图式废墟相遇：世界仍是起点，剧情文本已把玩家写在<PLACE>。 */
 export function fixtureRuinsEncounter() {
   const world = buildStarterWorld({ id: "fx-ruins", now: NOW, name: "废墟相遇" });
   return {
@@ -28,9 +28,9 @@ export function fixtureRuinsEncounter() {
     now: NOW,
     conversation: {
       userText: "环顾四周",
-      assistantText: "羽风站在废墟深处。一名未报姓名的少女正在他身旁。",
+      assistantText: "<NPC>站在<PLACE>。一名未报姓名的少女正在他身旁。",
       expected: {
-        newLocationName: "废墟深处",
+        newLocationName: "<PLACE>",
         newCharacterDisplayName: "未具名少女",
         sceneTransition: "initial",
       },
@@ -373,7 +373,7 @@ export function fixtureSchoolHierarchy() {
       fixtureLocation({ id: classroom, name: "三年二班", parentLocationId: school, description: "二楼的教室。", mapId: school }),
     ],
     characters: [
-      fixtureCharacter({ id: "npc:player", name: "羽风", locationId: classroom, thought: "先找自己的座位", actionTendency: "留在教室" }),
+      fixtureCharacter({ id: "npc:player", name: "<NPC>", locationId: classroom, thought: "先找自己的座位", actionTendency: "留在教室" }),
       fixtureCharacter({ id: "npc:teacher-lin", name: "林老师", locationId: classroom, thought: "点名", actionTendency: "上课" }),
       fixtureCharacter({ id: "npc:student-b", name: "同桌同学", locationId: classroom, thought: "偷偷看窗外", actionTendency: "发呆" }),
     ],
@@ -1015,7 +1015,7 @@ export function fixtureScaleHundredMeters() {
       fixtureLocation({ id: school, name: "圣罗兰学校", gridX: 34, gridY: 62 }),
       fixtureLocation({ id: classroom, name: "三年二班", parentLocationId: school, mapId: school }),
     ],
-    characters: [fixtureCharacter({ id: "npc:player", name: "羽风", locationId: classroom, thought: "先坐下", actionTendency: "留在教室" })],
+    characters: [fixtureCharacter({ id: "npc:player", name: "<NPC>", locationId: classroom, thought: "先坐下", actionTendency: "留在教室" })],
     items: [],
   });
   const maps = fixtureMapsDoc({

@@ -211,9 +211,9 @@ test("H04：契约把 parentName/relation/mobile/anchorName/evidenceQuote 列为
 
 test("H04：旧模型只回 {name, regionName} 照样解析——不因缺新字段整单失败", async () => {
   const legacyShape = JSON.stringify({
-    regions: [{ name: "低语森林", description: "迷雾笼罩的古老森林" }],
+    regions: [{ name: "<REGION>", description: "迷雾笼罩的古老森林" }],
     points: [
-      { name: "避风树洞", regionName: "低语森林" },
+      { name: "<PLACE>", regionName: "<REGION>" },
       { name: "无名石碑" },
     ],
   });
@@ -222,7 +222,7 @@ test("H04：旧模型只回 {name, regionName} 照样解析——不因缺新字
     entry: "ensure-starter",
     fetchScripts: [() => openAiResponse(legacyShape)],
   });
-  const result = await adopt(core, { loreSupplement: "- 低语森林：迷雾笼罩的古老森林" });
+  const result = await adopt(core, { loreSupplement: "- <REGION>：迷雾笼罩的古老森林" });
 
   assert.equal(result.status, 200, `旧形状必须照常成功：${JSON.stringify(result.body.error ?? {})}`);
   assert.equal(result.body.data.regionsAdded, 1);
@@ -246,9 +246,9 @@ test("H04：旧模型只回 {name, regionName} 照样解析——不因缺新字
   }
 
   // 世界与三表都真的长出来了；regionName 照旧映射到新地区
-  const treeHole = (carrier.session.world.points ?? []).find((point) => point.name === "避风树洞");
+  const treeHole = (carrier.session.world.points ?? []).find((point) => point.name === "<PLACE>");
   assert.ok(treeHole, "地点落库");
-  assert.equal(treeHole.regionId, (carrier.session.world.regions ?? []).find((r) => r.name === "低语森林").id);
+  assert.equal(treeHole.regionId, (carrier.session.world.regions ?? []).find((r) => r.name === "<REGION>").id);
   const steleRow = locationsOf(carrier).find((row) => row.name === "无名石碑");
   assert.ok(steleRow, "地点进三表");
   assert.equal(result.body.data.tables?.status, "synced");

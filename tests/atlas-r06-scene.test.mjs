@@ -119,12 +119,12 @@ test("R06 retired：非占位世界调用 → 零改动", () => {
 
 test("R06 场景状态：未知 ≠ 无上次确认；resolveSceneStatus 两者分开表达", () => {
   const world = legacyStartWorld({ id: "w9", now: 1, name: "测试卡" });
-  world.points.push({ id: 2, name: "废墟深处", x: 70, y: 50, regionId: "start" });
+  world.points.push({ id: 2, name: "<PLACE>", x: 70, y: 50, regionId: "start" });
   const doc = { ...emptySceneDoc(), lastConfirmed: { branchId: null, pointId: "2", at: 9 } };
   const status = resolveSceneStatus(world, doc, null);
   assert.equal(status.known, false, "当前游标未知");
   assert.equal(status.lastConfirmed?.pointId, "2", "上次确认仍可表达");
-  assert.equal(status.lastConfirmed?.pointName, "废墟深处");
+  assert.equal(status.lastConfirmed?.pointName, "<PLACE>");
   const known = resolveSceneStatus(world, doc, "2");
   assert.equal(known.known, true);
 });
@@ -137,7 +137,7 @@ test("R06 场景状态：未知 ≠ 无上次确认；resolveSceneStatus 两者�
 // 服务端开场识别（bootstrap preview / apply）
 // ---------------------------------------------------------------------------
 
-const GREETING = "你推开藤蔓，走进废墟深处。一个未具名少女站在阴影里，警戒地盯着你。";
+const GREETING = "你推开藤蔓，走进<PLACE>。一个未具名少女站在阴影里，警戒地盯着你。";
 /**
  * E10（0.9.59）：开场识别的**行增量**夹具——与旧的 v2 草稿同语义，
  * 但走的是唯一现行契约（一块逐行 JSON 的 `<atlasEdit>`）。
@@ -149,8 +149,8 @@ const GREETING = "你推开藤蔓，走进废墟深处。一个未具名少女�
 const BOOTSTRAP_EDIT = [
   "<atlasEdit>",
   JSON.stringify({
-    table: "location", op: "add", ref: "new:loc:ruins", name: "废墟深处",
-    description: "藤蔓后的废墟深处", quote: "走进废墟深处",
+    table: "location", op: "add", ref: "new:loc:ruins", name: "<PLACE>",
+    description: "藤蔓后的<PLACE>", quote: "走进<PLACE>",
   }),
   JSON.stringify({
     table: "character", op: "add", ref: "new:npc:girl", name: "未具名少女",
@@ -234,7 +234,7 @@ test("R06 bootstrap 预览：解析行增量块返回候选，零写入世界", 
   assert.equal(result.body.data.protocol, "table-delta-v1", "预览自报唯一现行协议");
   assert.equal(result.body.data.duration, 0, "开场预览不推进时间");
   assert.equal(result.body.data.callCount, 1, "明确调用次数 = 1");
-  assert.equal(result.body.data.newLocations[0].name, "废墟深处");
+  assert.equal(result.body.data.newLocations[0].name, "<PLACE>");
   assert.equal(result.body.data.newCharacters[0].name, "未具名少女");
   assert.equal(result.body.data.rejectedRows.length, 0, "夹具各行都合法");
   assert.equal(calls.length, 1, "恰好 1 条推演请求");
@@ -265,7 +265,7 @@ test("R06 bootstrap 应用：duration=0 时间不动、主角行锚定、占位�
   assert.equal(carrier.session.binding.currentLocationId, result.body.data.anchoredLocationId, "绑定游标随主角行锚定");
 
   // 新地点/人物已入库（块内临时引用 → 持久 ID）
-  assert.equal((world.points ?? []).length, 2, "废墟深处已建点");
+  assert.equal((world.points ?? []).length, 2, "<PLACE>已建点");
   const girlRecord = (world.entityRecords ?? []).find((e) => e.name === "未具名少女");
   assert.ok(girlRecord, "少女已建档");
   assert.equal(calls.length, 1, "只调用一次模型");
@@ -280,7 +280,7 @@ test("R06 空地理 + bootstrap：第一轮场景识别直接产出真实地点�
   const world = carrier.session.world;
   assert.deepEqual(world.regions ?? [], [], "没造虚构地区");
   assert.equal((world.points ?? []).length, 1, "只有剧情产出的那一个真实地点");
-  assert.equal((world.points ?? [])[0].name, "废墟深处");
+  assert.equal((world.points ?? [])[0].name, "<PLACE>");
   const sceneDoc = sanitizeSceneDoc(carrier.session.scene);
   assert.deepEqual(sceneDoc.retiredPointIds, [], "无占位 → 无 retired 记录");
   assert.equal(sceneDoc.lastConfirmed?.pointId, result.body.data.anchoredLocationId, "lastConfirmed 指向真实地点");
@@ -311,7 +311,7 @@ test("R06 /state：scene 块分开表达未知 / lastConfirmed，retired 点从�
   assert.ok(scene.lastConfirmed?.pointId, "lastConfirmed 存在");
   const mapPointIds = state.body.data.map.points.map((p) => p.id);
   assert.ok(!mapPointIds.includes("1"), "retired 占位点不再进地图点列");
-  assert.equal(mapPointIds.length, 1, "只展示真实地点（废墟深处）");
+  assert.equal(mapPointIds.length, 1, "只展示真实地点（<PLACE>）");
 });
 
 test("R06 /state：旧存档的纯占位「起点」默认不显示为真实地点（零写入）", async () => {
@@ -354,7 +354,7 @@ test("R06 协议设置：新装默认是 table-delta-v1，内置默认出六段�
 test("legacy start inspection is read only; explicit repair is backed by session state and idempotent", async () => {
   const worldFactory = (options) => {
     const world = legacyStartWorld(options);
-    world.points.push({ id: 2, name: "废墟深处", x: 70, y: 60, regionId: "start" });
+    world.points.push({ id: 2, name: "<PLACE>", x: 70, y: 60, regionId: "start" });
     return world;
   };
   const { core, carrier, calls } = await bootstrapSetup(BOOTSTRAP_EDIT, worldFactory);
