@@ -67,6 +67,8 @@ export interface AtlasMapViewUnplacedLocation {
   parentLocationId: string | null;
 }
 
+export type AtlasMapViewPositionQuality = "confirmed" | "estimated" | "unknown";
+
 export interface AtlasMapViewPoint {
   /** 旧世界数字点 id（字符串），与既有 UI 字段一致。 */
   id: string;
@@ -77,6 +79,12 @@ export interface AtlasMapViewPoint {
   kind: "location" | "character" | "item";
   /** 该标记来自哪张表行（回执 / 排障用）。 */
   rowId: string;
+  /** P3-01:位置质量。
+   *  confirmed:由表行可信坐标(gridX/gridY 都是有限数)直接定位;
+   *  estimated:UI 排版占位(仅展示,不能用于距离 / 时间);
+   *  unknown:无法归位,不进 world.points。
+   */
+  positionQuality: AtlasMapViewPositionQuality;
 }
 
 export interface AtlasMapViewSubmap {
@@ -224,6 +232,7 @@ export function projectTablesToMapView(
       regionId: regionOfPoint(world, String(pointId)),
       kind: "location",
       rowId: row.id,
+      positionQuality: "confirmed",
     };
     if (parent === null) {
       rootTotal += 1;
@@ -276,6 +285,7 @@ export function projectTablesToMapView(
       regionId: null,
       kind: "character",
       rowId: row.id,
+      positionQuality: "confirmed",
     }));
     if (!placed && row.locationId !== null) {
       const location = byRowId.get(row.locationId);
@@ -295,6 +305,7 @@ export function projectTablesToMapView(
       regionId: null,
       kind: "item",
       rowId: row.id,
+      positionQuality: "confirmed",
     }));
     if (!placed && row.locationId !== null) {
       const location = byRowId.get(row.locationId);
