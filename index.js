@@ -10762,12 +10762,19 @@ async function connectOnce() {
             details: { reason: "settings_disabled" } });
           return "";
         }
-        const result = await readCardLoreSupplementViaSelector({ ...selectionContext,
-          characterId: SillyTavern.getContext()?.characterId ?? null });
-        emitAtlasDiagnostic({ level: "info", source: "lorebook",
-          code: "LORE_READ_COMPLETE", operation: "lore-context", phase: "read", outcome: "success",
-          details: { mode: selectionContext.mode, outputChars: result.length } });
-        return result;
+        try {
+          const result = await readCardLoreSupplementViaSelector({ ...selectionContext,
+            characterId: SillyTavern.getContext()?.characterId ?? null });
+          emitAtlasDiagnostic({ level: "info", source: "lorebook",
+            code: "LORE_READ_COMPLETE", operation: "lore-context", phase: "read", outcome: "success",
+            details: { mode: selectionContext.mode, outputChars: result.length } });
+          return result;
+        } catch (error) {
+          emitAtlasDiagnostic({ level: "warn", source: "lorebook",
+            code: "LORE_READ_FAILED", operation: "lore-context", phase: "read", outcome: "failed",
+            details: { reasonCode: error instanceof Error ? error.name.toUpperCase() : "UNKNOWN" } });
+          return "";
+        }
       },
       // 0.9.22 立即推演：读最近一条助手楼层正文作为推演素材（无楼层 → null，用占位）
       getLastAssistantText: async () => {
