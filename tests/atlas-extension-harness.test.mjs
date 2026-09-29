@@ -2895,6 +2895,21 @@ test("B06 A/B 快速切换：A 的迟到 commit 不写进 B，B 的表行 / 地�
 // B06-2：legacy 迁移（两个聊天各迁各的，B 不拿到 A 的任何行）
 // ---------------------------------------------------------------------------
 
+test("M3 实酒馆回归：开场路由携带当前会话修订，避免建世后 SESSION_STALE", async () => {
+  const session = { ...bIndex.createEmptyAtlasSession(), rev: 3 };
+  const seen = [];
+  const api = bIndex.createAtlasSessionApi({
+    context: () => ({ chatId: "chat-opening", chatMetadata: { atlas: session } }),
+    innerApi: { request: async (method, path, body) => {
+      seen.push({ method, path, body });
+      return { status: 200, body: { ok: true, data: {} } };
+    } },
+  });
+  await api.request("POST", "/scene/bootstrap", { chatId: "chat-opening", apply: true, assistantText: "走进图书室" });
+  assert.equal(seen[0].body.session?.rev, 3, "bootstrap 必须随请求附带 ensureWorld 后的当前 rev");
+  assert.equal(seen[0].body.assistantText, "走进图书室");
+});
+
 test("B06 legacy 迁移：两个聊天各迁各的，B 的表行 / 地图 / 动向 / 提示词都只属于 B", async () => {
   const legacyA = b01LegacyChat("chat-a", "w-shared");
   const legacyB = b01LegacyChat("chat-b", "w-shared");

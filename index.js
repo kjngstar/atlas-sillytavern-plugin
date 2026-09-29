@@ -1128,6 +1128,7 @@ const SESSION_ROUTE_PREFIXES = [
   "/worlds/ensure-starter",
   "/worlds/geo/adopt",
   "/worlds/move-author",
+  "/scene/",
   "/session/",
 ];
 
