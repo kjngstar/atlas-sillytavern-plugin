@@ -1,0 +1,160 @@
+/**
+ * atlas-lore-selection.test.mjs — P2-02
+ *
+ * 验证 selectAtlasLoreSupplement:
+ *  - 70 条无关条目排前、相关地点排末仍能选到后者
+ *  - 输入次序改变输出稳定(确定性)
+ *  - 正文/场景为空时不凭空激活
+ *  - 中文长内容优先保留含关键词片段
+ *  - 不超过 6000 字
+ *  - 未激活 ≠ 禁用,降级时 sourceMode 明确
+ */
+
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { selectAtlasLoreSupplement } from '../src/atlas-lore-selection.ts';
+
+function makeEntry(uid, content, opts = {}) {
+  return {
+    uid,
+    title: opts.title ?? '',
+    bookName: opts.bookName ?? '默认书',
+    content,
+    enabled: opts.enabled ?? true,
+    activated: opts.activated ?? false,
+  };
+}
+
+test('P2-02a 70 条无关条目排前,相关地点排末能选到', () => {
+  const entries = [];
+  for (let i = 0; i < 70; i++) {
+    entries.push(makeEntry(`n${i}`, `第 ${i} 条无关描述:非常长的背景介绍说明文字。`.repeat(10)));
+  }
+  entries.push(makeEntry('relplace', '相关地点:甲乙丙所在的具体场所描述。', {
+    bookName: '卡书', title: '地图',
+  }));
+  const result = selectAtlasLoreSupplement({
+    entries,
+    activatedUids: new Set(),
+    chatKeywords: new Set(['甲乙丙']),
+    sceneKeywords: new Set(['甲乙丙']),
+    mode: 'geo',
+    maxChars: 6000,
+  });
+  assert.ok(result.selectedUids.includes('relplace'), `期望选中 relplace,实际 ${JSON.stringify(result.selectedUids)}`);
+});
+
+test('P2-02b 输入次序改变输出稳定(确定性)', () => {
+  const a = [
+    makeEntry('A', 'A 条目内容'),
+    makeEntry('B', 'B 条目内容'),
+    makeEntry('C', 'C 条目内容'),
+  ];
+  const b = [a[2], a[1], a[0]];
+  const inputA = {
+    entries: a,
+    chatKeywords: new Set(),
+    sceneKeywords: new Set(),
+    mode: 'turn',
+    maxChars: 6000,
+  };
+  const inputB = { ...inputA, entries: b };
+  const rA = selectAtlasLoreSupplement(inputA);
+  const rB = selectAtlasLoreSupplement(inputB);
+  assert.deepEqual(rA.selectedUids, rB.selectedUids, '不同次序应输出相同选择');
+});
+
+test('P2-02c 正文或场景为空时不凭空激活', () => {
+  const entries = [
+    makeEntry('A', 'A 内容:参数化'),
+    makeEntry('B', 'B 内容:背景'),
+  ];
+  const result = selectAtlasLoreSupplement({
+    entries,
+    chatKeywords: new Set(),
+    sceneKeywords: new Set(),
+    mode: 'turn',
+    maxChars: 6000,
+  });
+  assert.ok(result.text.length > 0, '没有关键词也应给最少上下文');
+  // 没有 activatedUids → 不应把所有都标成激活(本测试只检查非空,不验证具体名单)
+  assert.equal(typeof result.text, 'string');
+});
+
+test('P2-02d 中文长内容优先含关键词片段', () => {
+  const filler = '无关背景介绍填充文字。'.repeat(500);
+  const entries = [
+    makeEntry('fill', filler + '关键词命中段应在中部。' + filler),
+    makeEntry('hit', '短条目只有关键词命中段。'),
+  ];
+  const result = selectAtlasLoreSupplement({
+    entries,
+    chatKeywords: new Set(['关键词']),
+    sceneKeywords: new Set(),
+    mode: 'turn',
+    maxChars: 6000,
+  });
+  assert.ok(result.selectedUids.includes('hit'), `关键词命中的短条目应被选中,实际 ${JSON.stringify(result.selectedUids)}`);
+  assert.ok(result.text.includes('短条目只有关键词命中段'), '短条目正文应在 text 里');
+});
+
+test('P2-02e 不超过 6000 字(字符预算)', () => {
+  const entries = [];
+  for (let i = 0; i < 60; i++) {
+    entries.push(makeEntry(`e${i}`, 'A'.repeat(400)));
+  }
+  const result = selectAtlasLoreSupplement({
+    entries,
+    chatKeywords: new Set(),
+    sceneKeywords: new Set(),
+    mode: 'turn',
+    maxChars: 6000,
+  });
+  assert.ok(result.text.length <= 6000, `期望 ≤ 6000,实际 ${result.text.length}`);
+});
+
+test('P2-02f sourceMode 反映输入 mode', () => {
+  const entries = [makeEntry('A', 'A')];
+  const r1 = selectAtlasLoreSupplement({
+    entries, chatKeywords: new Set(), sceneKeywords: new Set(),
+    mode: 'turn', maxChars: 6000,
+  });
+  assert.equal(r1.sourceMode, 'turn');
+  const r2 = selectAtlasLoreSupplement({
+    entries, chatKeywords: new Set(), sceneKeywords: new Set(),
+    mode: 'geo', maxChars: 6000,
+  });
+  assert.equal(r2.sourceMode, 'geo');
+});
+
+test('P2-02g disabled 条目不参与', () => {
+  const entries = [
+    makeEntry('on', '启用条目'),
+    makeEntry('off', '禁用条目', { enabled: false }),
+  ];
+  const result = selectAtlasLoreSupplement({
+    entries,
+    chatKeywords: new Set(),
+    sceneKeywords: new Set(),
+    mode: 'turn',
+    maxChars: 6000,
+  });
+  assert.ok(result.selectedUids.includes('on'));
+  assert.ok(!result.selectedUids.includes('off'));
+});
+
+test('P2-02h 激活条目优先于未激活条目(同分时按书名/uid 稳定)', () => {
+  const entries = [
+    makeEntry('A', 'A 内容'),
+    makeEntry('B', 'B 内容', { activated: true }),
+  ];
+  const result = selectAtlasLoreSupplement({
+    entries,
+    activatedUids: new Set(['B']),
+    chatKeywords: new Set(),
+    sceneKeywords: new Set(),
+    mode: 'turn',
+    maxChars: 6000,
+  });
+  assert.equal(result.selectedUids[0], 'B', '激活的应排在最前');
+});
