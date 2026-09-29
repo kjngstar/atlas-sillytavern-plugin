@@ -40,9 +40,9 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 
-// node_modules/sql.js/dist/sql-wasm-browser.js
+// ../../node_modules/sql.js/dist/sql-wasm-browser.js
 var require_sql_wasm_browser = __commonJS({
-  "node_modules/sql.js/dist/sql-wasm-browser.js"(exports, module) {
+  "../../node_modules/sql.js/dist/sql-wasm-browser.js"(exports, module) {
     var initSqlJsPromise = void 0;
     var initSqlJs3 = function(moduleConfig) {
       if (initSqlJsPromise) {

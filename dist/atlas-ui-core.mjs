@@ -20762,6 +20762,97 @@ function pickSlot(candidate, context) {
   }
   return null;
 }
+
+// src/atlas-lore-selection.ts
+var DEFAULT_PER_ENTRY_CHARS = 400;
+var DEFAULT_GEO_PER_ENTRY_CHARS = 4e3;
+var DEFAULT_MAX_ENTRIES = 60;
+var GEO_TITLE_PREFIX = /(?:地图|地理|地点|地区|区域|领域|城镇|城市|城镇|关隘|道路|街道|聚落|场所|大陆|国家|地形|风土)/;
+function stableUid(entry, idx) {
+  return entry.uid && entry.uid.length > 0 ? entry.uid : `lore-${idx}`;
+}
+function keywordScore(entry, chat, scene) {
+  let score = 0;
+  const text = (entry.title ?? "") + "\n" + entry.content;
+  for (const k of chat) {
+    if (k.length > 0 && text.includes(k)) score += 1;
+  }
+  for (const k of scene) {
+    if (k.length > 0 && text.includes(k)) score += 5;
+  }
+  return score;
+}
+function isGeographicTitle(title) {
+  if (!title) return false;
+  return GEO_TITLE_PREFIX.test(title);
+}
+function selectAtlasLoreSupplement(input) {
+  const perEntryChars = input.perEntryChars ?? (input.mode === "geo" ? DEFAULT_GEO_PER_ENTRY_CHARS : DEFAULT_PER_ENTRY_CHARS);
+  const maxEntries = input.maxEntries ?? DEFAULT_MAX_ENTRIES;
+  const maxChars = Math.max(0, input.maxChars | 0);
+  const filtered = [];
+  for (let i = 0; i < input.entries.length; i++) {
+    const e = input.entries[i];
+    if (!e || e.enabled === false) continue;
+    if (typeof e.content !== "string" || e.content.trim().length === 0) continue;
+    filtered.push(Object.assign({}, e, { __idx: i }));
+  }
+  const activatedUids = input.activatedUids;
+  const chat = input.chatKeywords;
+  const scene = input.sceneKeywords;
+  filtered.sort((a, b) => {
+    const aAct = activatedUids?.has(stableUid(a, a.__idx)) ? 1 : 0;
+    const bAct = activatedUids?.has(stableUid(b, b.__idx)) ? 1 : 0;
+    if (aAct !== bAct) return bAct - aAct;
+    const aScore = keywordScore(a, chat, scene);
+    const bScore = keywordScore(b, chat, scene);
+    if (aScore !== bScore) return bScore - aScore;
+    const aGeo = isGeographicTitle(a.title ?? "") ? 1 : 0;
+    const bGeo = isGeographicTitle(b.title ?? "") ? 1 : 0;
+    if (input.mode === "geo" && aGeo !== bGeo) return bGeo - aGeo;
+    const aLen = a.content.length;
+    const bLen = b.content.length;
+    if (aLen !== bLen) return input.mode === "geo" ? bLen - aLen : aLen - bLen;
+    const aBook = a.bookName ?? "";
+    const bBook = b.bookName ?? "";
+    if (aBook !== bBook) return aBook < bBook ? -1 : 1;
+    const aUid = stableUid(a, a.__idx);
+    const bUid = stableUid(b, b.__idx);
+    if (aUid !== bUid) return aUid < bUid ? -1 : 1;
+    return 0;
+  });
+  const selectedUids = [];
+  const out = [];
+  let selectedOriginalChars = 0;
+  let selectedOutputChars = 0;
+  let truncatedCount = 0;
+  for (const e of filtered) {
+    if (selectedUids.length >= maxEntries) break;
+    const uid = stableUid(e, e.__idx);
+    const title = (e.title ?? "").trim() || (e.bookName ?? "条目");
+    const originalChars = e.content.length;
+    const clipped = e.content.length > perEntryChars ? `${e.content.slice(0, perEntryChars)}…` : e.content;
+    const line = `- [${e.bookName ?? "?"}] ${title}：${clipped.replace(/\s+/g, " ")}`;
+    const lineLen = line.length;
+    if (selectedOutputChars + lineLen > maxChars) {
+      break;
+    }
+    if (clipped.length < originalChars) truncatedCount += 1;
+    selectedUids.push(uid);
+    out.push(line);
+    selectedOriginalChars += originalChars;
+    selectedOutputChars += lineLen;
+  }
+  return {
+    text: out.join("\n"),
+    selectedUids,
+    selectedOriginalChars,
+    selectedOutputChars,
+    truncatedCount,
+    candidateCount: filtered.length,
+    sourceMode: input.mode
+  };
+}
 export {
   ATLAS_BROWSER_DOC_LIMITS,
   ATLAS_ERROR_CODES,
@@ -20843,6 +20934,7 @@ export {
   sanitizeCalibration,
   sanitizeDiagnostic,
   screenToWorld,
+  selectAtlasLoreSupplement,
   setCameraZoom,
   starterWorldIdForChat,
   validateScaleResponse,
