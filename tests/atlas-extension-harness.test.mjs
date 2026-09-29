@@ -24,6 +24,7 @@ import {
   connectAtlas,
   readCardLoreSupplementViaSelector,
   recordAtlasHostLoreActivation,
+  isAtlasLoreSupplementEnabled,
   ATLAS_DISPLAY_NAME,
   ATLAS_EXTENSION_VERSION,
 } from "../atlas-extension/index.js";
@@ -760,6 +761,16 @@ test("回合：GENERATION_ENDED → commit 一次 → 回执入列并持久化 �
   deepEqual(hostWrap.dataStore.get("receiptsByChat")?.["chat-a"], receipt, "回执按聊天分桶写入 extensionSettings");
   equal(hostWrap.dataStore.get("receipts"), null, "0.9.28 旧全局键已废弃（一次性清除）");
   equal(api.calls.filter((c) => c.path === "/state" && c.body?.chatId === "chat-a").length >= 2, true, "commit 成功后刷新世界状态");
+});
+
+test("M1-A09：宿主读书开关从当前引擎设置读取", async () => {
+  const fake = (enabled) => ({ request: async (method, path) => {
+    equal(method, "GET"); equal(path, "/settings");
+    return { status: 200, body: { ok: true, data: { loreSupplementEnabled: enabled } } };
+  } });
+  equal(await isAtlasLoreSupplementEnabled(fake(false)), false, "明确关闭时不读书");
+  equal(await isAtlasLoreSupplementEnabled(fake(true)), true, "明确开启时读书");
+  equal(await isAtlasLoreSupplementEnabled({ request: async () => { throw new Error("temporary"); } }), true, "设置暂不可读时保持可选资料默认语义");
 });
 
 test("M1-A03：真实宿主读书适配与 commit 钩子跨两本书选中末尾地点", async () => {

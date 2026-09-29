@@ -1484,6 +1484,15 @@ export function getAtlasSafeDiagnosticsSnapshot() {
   return atlasDiagnostics?.getSnapshot() ?? [...pendingDiagnostics];
 }
 
+/** 世界书开关以引擎当前设置为准；读取失败时沿用可选资料的默认开启语义。 */
+export async function isAtlasLoreSupplementEnabled(api) {
+  try {
+    const result = await api.request("GET", "/settings");
+    return !(result?.status === 200 && result?.body?.ok === true
+      && result?.body?.data?.loreSupplementEnabled === false);
+  } catch { return true; }
+}
+
 async function loadUiCore() {
   // 先组件内构建产物（发布形态），再上级 src（开发形态，工程内运行才可用）
   const attempts = ["./dist/atlas-ui-core.mjs", "../src/atlas-ui-core.ts"];
@@ -10755,7 +10764,7 @@ async function connectOnce() {
           code: "LORE_READ_STARTED", operation: "lore-context", phase: "read", outcome: "started",
           details: { mode: selectionContext.mode,
             chatMatch: String(SillyTavern.getContext()?.chatId ?? "") === selectionContext.chatId } });
-        if (settingsV2?.loreSupplementEnabled === false) {
+        if (!(await isAtlasLoreSupplementEnabled(api))) {
           emitAtlasDiagnostic({ level: "info", source: "lorebook",
             code: "LORE_SUPPLEMENT_DISABLED", operation: "lore-context",
             phase: "read", outcome: "skipped",
@@ -10770,9 +10779,11 @@ async function connectOnce() {
             details: { mode: selectionContext.mode, outputChars: result.length } });
           return result;
         } catch (error) {
+          const reasonCode = error && typeof error === "object" && typeof error.name === "string"
+            ? error.name.toUpperCase() : "UNKNOWN";
           emitAtlasDiagnostic({ level: "warn", source: "lorebook",
             code: "LORE_READ_FAILED", operation: "lore-context", phase: "read", outcome: "failed",
-            details: { reasonCode: error instanceof Error ? error.name.toUpperCase() : "UNKNOWN" } });
+            details: { reasonCode } });
           return "";
         }
       },
