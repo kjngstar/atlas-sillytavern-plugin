@@ -3291,6 +3291,9 @@ var OUTCOMES = /* @__PURE__ */ new Set(["started", "success", "skipped", "failed
 var DETAIL_KEYS = /* @__PURE__ */ new Set([
   "route",
   "mode",
+  "sourceMode",
+  "activationMode",
+  "reason",
   "reasonCode",
   "schemaPath",
   "protocolVersion",
@@ -3323,7 +3326,11 @@ var DETAIL_KEYS = /* @__PURE__ */ new Set([
   "limitCount",
   "keptCount",
   "truncatedCount",
-  "scannedCount"
+  "scannedCount",
+  "candidateCount",
+  "selectedCount",
+  "outputChars",
+  "chatMatch"
 ]);
 var SAFE_ATOM = /^[a-zA-Z0-9_.$:\[\]-]{1,120}$/;
 var SAFE_ROUTES = /* @__PURE__ */ new Set([
@@ -3353,7 +3360,9 @@ var SAFE_ROUTES = /* @__PURE__ */ new Set([
   "/session/purge"
 ]);
 var SAFE_CAPABILITIES = /* @__PURE__ */ new Set(["setExtensionPrompt", "eventSource", "getContext", "generateRaw"]);
-var SAFE_MODES = /* @__PURE__ */ new Set(["main", "profile", "custom", "openai", "claude", "gemini", "v1", "v2"]);
+var SAFE_MODES = /* @__PURE__ */ new Set(["main", "profile", "custom", "openai", "claude", "gemini", "v1", "v2", "turn", "geo", "bootstrap"]);
+var SAFE_LORE_ACTIVATION_MODES = /* @__PURE__ */ new Set(["host-activated", "context-fallback", "disabled"]);
+var SAFE_LORE_REASONS = /* @__PURE__ */ new Set(["settings_disabled", "host_api_unavailable", "no_matching_turn_event", "selector_undefined"]);
 var SAFE_COLLECTIONS = /* @__PURE__ */ new Set(["tasks", "signals", "deliveries", "edges", "areas", "vehicles"]);
 var SAFE_COUNT_KEYS = /* @__PURE__ */ new Set([
   "droppedCount",
@@ -3543,7 +3552,9 @@ function sanitizeDiagnostic(raw, now = Date.now) {
       if (typeof detail === "string") {
         const token = safeToken(detail);
         if (key === "route" && SAFE_ROUTES.has(token)) details[key] = token;
-        else if (key === "mode" && SAFE_MODES.has(token)) details[key] = token;
+        else if ((key === "mode" || key === "sourceMode") && SAFE_MODES.has(token)) details[key] = token;
+        else if (key === "activationMode" && SAFE_LORE_ACTIVATION_MODES.has(token)) details[key] = token;
+        else if (key === "reason" && SAFE_LORE_REASONS.has(token)) details[key] = token;
         else if (key === "capability" && SAFE_CAPABILITIES.has(token)) details[key] = token;
         else if (key === "reasonCode" && /^[A-Z][A-Z0-9_]{0,63}$/.test(token)) details[key] = token;
         else if (key === "schemaPath" && (token === "$" || /^\$(?:\.[A-Za-z0-9_]+|\[\d+\])+(?:\.[A-Za-z0-9_]+|\[\d+\])*$/.test(token))) details[key] = token;
