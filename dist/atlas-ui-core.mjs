@@ -1758,6 +1758,27 @@ function simulationRows(value) {
 function boundedCount(value) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.min(Math.floor(value), 1e6) : 0;
 }
+var SIMULATION_HIGHLIGHT_TEXT_CAP = 140;
+var SIMULATION_HIGHLIGHT_ROW_CAP = 8;
+function parseAtlasSimulationHighlights(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const item of raw.slice(0, SIMULATION_HIGHLIGHT_ROW_CAP)) {
+    if (typeof item === "string") {
+      out.push({ text: item.slice(0, SIMULATION_HIGHLIGHT_TEXT_CAP), visibility: "hidden" });
+      continue;
+    }
+    if (item && typeof item === "object" && !Array.isArray(item)) {
+      const obj = item;
+      const t = typeof obj.text === "string" ? obj.text.slice(0, SIMULATION_HIGHLIGHT_TEXT_CAP) : "";
+      if (t.length === 0) continue;
+      const v = obj.visibility === "known" ? "known" : "hidden";
+      const r = typeof obj.sourceRef === "string" && obj.sourceRef.length > 0 ? obj.sourceRef.slice(0, 160) : void 0;
+      out.push({ text: t, visibility: v, sourceRef: r });
+    }
+  }
+  return out;
+}
 function parseAtlasSimulationView(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const value = raw;
@@ -1775,7 +1796,7 @@ function parseAtlasSimulationView(raw) {
     latestTurn: latest && typeof latest.receiptId === "string" && latest.receiptId.length <= 160 ? {
       receiptId: latest.receiptId,
       period: boundedCount(latest.period),
-      highlights: Array.isArray(latest.highlights) ? latest.highlights.filter((item) => typeof item === "string").slice(0, 8).map((item) => item.slice(0, 140)) : [],
+      highlights: parseAtlasSimulationHighlights(latest.highlights),
       events: simulationRows(latest.events).slice(0, 8)
     } : null,
     counts: {
@@ -11448,7 +11469,8 @@ function projectTablesToMapView(tables, maps, world, currentLocationId, hiddenLo
       y: row.gridY,
       regionId: regionOfPoint(world, String(pointId)),
       kind: "location",
-      rowId: row.id
+      rowId: row.id,
+      positionQuality: "confirmed"
     };
     if (parent === null) {
       rootTotal += 1;
@@ -11491,7 +11513,8 @@ function projectTablesToMapView(tables, maps, world, currentLocationId, hiddenLo
       y,
       regionId: null,
       kind: "character",
-      rowId: row.id
+      rowId: row.id,
+      positionQuality: "confirmed"
     }));
     if (!placed && row.locationId !== null) {
       const location = byRowId.get(row.locationId);
@@ -11509,7 +11532,8 @@ function projectTablesToMapView(tables, maps, world, currentLocationId, hiddenLo
       y,
       regionId: null,
       kind: "item",
-      rowId: row.id
+      rowId: row.id,
+      positionQuality: "confirmed"
     }));
     if (!placed && row.locationId !== null) {
       const location = byRowId.get(row.locationId);
@@ -11674,7 +11698,14 @@ function projectTablesToMapView(tables, maps, world, currentLocationId, hiddenLo
 }
 
 // src/atlas-turn-highlights.ts
-function summarizeAtlasTurnChanges(before, after, acceptedRefs) {
+var MAX_HIGHLIGHTS = 8;
+var MAX_HIGHLIGHT_CHARS = 140;
+function summarizeAtlasTurnChanges(before, after, acceptedRefs, evidence) {
+  const ev = evidence ?? {
+    povLocationId: null,
+    knownCharacterIds: /* @__PURE__ */ new Set(),
+    deliveredRefIds: /* @__PURE__ */ new Set()
+  };
   if (!before || !after) return [];
   const locations = new Map(after.locations.map((row) => [row.id, row.name]));
   const place = (id) => id === null ? "未知地点" : locations.get(id) ?? "未知地点";
@@ -11684,34 +11715,62 @@ function summarizeAtlasTurnChanges(before, after, acceptedRefs) {
   const newLocations = new Map(after.locations.map((row) => [row.id, row]));
   const newCharacters = new Map(after.characters.map((row) => [row.id, row]));
   const newItems = new Map(after.items.map((row) => [row.id, row]));
-  const highlights = [];
-  for (const id of new Set(acceptedRefs)) {
-    if (highlights.length >= 8) break;
-    const location = newLocations.get(id);
-    const oldLocation = oldLocations.get(id);
-    const character = newCharacters.get(id);
-    const oldCharacter = oldCharacters.get(id);
-    const item = newItems.get(id);
-    const oldItem = oldItems.get(id);
-    let text = "";
-    if (location && !oldLocation) text = `发现地点：${location.name}${location.gridX === null ? "（位置待确认）" : ""}`;
-    else if (location && oldLocation && location.parentLocationId !== oldLocation.parentLocationId)
-      text = `${location.name}归属更新：${location.parentLocationId ? place(location.parentLocationId) : "世界地图"}`;
-    else if (character && !oldCharacter && character.locationId)
-      text = `${character.name}出现在${place(character.locationId)}`;
-    else if (character && oldCharacter && character.locationId !== oldCharacter.locationId && character.locationId)
-      text = `${character.name}来到${place(character.locationId)}`;
-    else if (character && oldCharacter && character.presence === "left" && oldCharacter.presence !== "left")
-      text = `${character.name}离开了原来的场景`;
-    else if (character && oldCharacter && character.currentAction && character.currentAction !== oldCharacter.currentAction)
-      text = `${character.name}：${character.currentAction}`;
-    else if (item && !oldItem)
-      text = `出现物品：${item.name}${item.locationId ? `（${place(item.locationId)}）` : ""}`;
-    else if (item && oldItem && item.locationId && item.locationId !== oldItem.locationId)
-      text = `${item.name}出现在${place(item.locationId)}`;
-    if (text) highlights.push(text.slice(0, 140));
+  const out = [];
+  const seenRefs = /* @__PURE__ */ new Set();
+  const povAt = ev.povLocationId;
+  function classify(refId, refKind) {
+    if (refKind === "item") {
+      return ev.deliveredRefIds.has(refId) ? "known" : "hidden";
+    }
+    if (refKind === "location") {
+      return povAt !== null && refId === povAt ? "known" : "hidden";
+    }
+    if (ev.knownCharacterIds.has(refId)) return "known";
+    return "hidden";
   }
-  return highlights;
+  for (const refId of new Set(acceptedRefs)) {
+    if (out.length >= MAX_HIGHLIGHTS) break;
+    if (seenRefs.has(refId)) continue;
+    seenRefs.add(refId);
+    const location = newLocations.get(refId);
+    const oldLocation = oldLocations.get(refId);
+    const character = newCharacters.get(refId);
+    const oldCharacter = oldCharacters.get(refId);
+    const item = newItems.get(refId);
+    const oldItem = oldItems.get(refId);
+    let text = "";
+    let kind = "location";
+    if (location && !oldLocation) {
+      text = `发现地点：${location.name}${location.gridX === null ? "（位置待确认）" : ""}`;
+    } else if (location && oldLocation && location.parentLocationId !== oldLocation.parentLocationId) {
+      text = `${location.name}归属更新：${location.parentLocationId ? place(location.parentLocationId) : "世界地图"}`;
+    } else if (character && !oldCharacter && character.locationId) {
+      text = `${character.name}出现在${place(character.locationId)}`;
+      kind = "character";
+    } else if (character && oldCharacter && character.locationId !== oldCharacter.locationId && character.locationId) {
+      text = `${character.name}来到${place(character.locationId)}`;
+      kind = "character";
+    } else if (character && oldCharacter && character.presence === "left" && oldCharacter.presence !== "left") {
+      text = `${character.name}离开了原来的场景`;
+      kind = "character";
+    } else if (character && oldCharacter && character.currentAction && character.currentAction !== oldCharacter.currentAction) {
+      text = `${character.name}：${character.currentAction}`;
+      kind = "character";
+    } else if (item && !oldItem) {
+      text = `出现物品：${item.name}${item.locationId ? `（${place(item.locationId)}）` : ""}`;
+      kind = "item";
+    } else if (item && oldItem && item.locationId && item.locationId !== oldItem.locationId) {
+      text = `${item.name}出现在${place(item.locationId)}`;
+      kind = "item";
+    }
+    if (!text) continue;
+    out.push({
+      text: text.slice(0, MAX_HIGHLIGHT_CHARS),
+      visibility: classify(refId, kind),
+      sourceRef: refId
+    });
+  }
+  return out;
 }
 
 // src/atlas-time-intent.ts
@@ -16039,7 +16098,19 @@ ${rejectedBlock}` : "");
               at,
               receiptId: receipt.receiptId,
               period: typeof turn.effectiveAt === "number" ? turn.effectiveAt : binding.worldTimeCursor,
-              highlights: Array.isArray(turn.highlights) ? turn.highlights.filter((value) => typeof value === "string").slice(0, 8).map((value) => value.slice(0, 140)) : [],
+              highlights: Array.isArray(turn.highlights) ? turn.highlights.map((value) => {
+                if (typeof value === "string") {
+                  return { text: value.slice(0, 140), visibility: "hidden", sourceRef: void 0 };
+                }
+                if (value && typeof value === "object") {
+                  const obj = value;
+                  const t = typeof obj.text === "string" ? obj.text.slice(0, 140) : "";
+                  const v = obj.visibility === "known" ? "known" : "hidden";
+                  const r = typeof obj.sourceRef === "string" ? obj.sourceRef : void 0;
+                  return { text: t, visibility: v, sourceRef: r };
+                }
+                return { text: "", visibility: "hidden", sourceRef: void 0 };
+              }).filter((h) => h.text.length > 0).slice(0, 8) : [],
               events: visibleEvents.slice(0, 8)
             };
           }

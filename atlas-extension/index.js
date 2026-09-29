@@ -10235,7 +10235,7 @@ async function readCardLoreSupplement() {
     const ctx = SillyTavern.getContext();
     const character = ctx?.characters?.[ctx?.characterId] ?? null;
 
-    // 1) 收集候选书名（有序去重）
+    // 1) 收集候选书名(有序去重)
     const bookNames = [];
     const pushBook = (value) => {
       const name = typeof value === "string" ? value.trim() : "";
@@ -10262,14 +10262,14 @@ async function readCardLoreSupplement() {
     pushBook(ctx?.chatMetadata?.world_info);
     if (bookNames.length === 0) return "";
 
-    // 2) 缓存键 = 全部书名（任一书变化即失效）
+    // 2) 缓存键 = 全部书名(任一书变化即失效)
     const cacheKey = bookNames.join("|");
     const cached = loreSupplementCache;
     if (cached.bookName === cacheKey && Date.now() - cached.at < LORE_SUPPLEMENT_LIMITS.CACHE_TTL_MS) {
       return cached.text;
     }
 
-    // 3) 逐本读取合并（单本失败跳过，不影响其余书）
+    // 3) 逐本读取合并(单本失败跳过,不影响其余书)
     const worldInfo = await loadStWorldInfo();
     const prefixList = atlasRuntime.mod?.ATLAS_LOREBOOK_PREFIX;
     const atlasPrefixes = prefixList && typeof prefixList === "object" ? Object.values(prefixList) : ["Atlas 动向 ·", "Atlas 事件 ·"];
@@ -10320,6 +10320,144 @@ async function readCardLoreSupplement() {
       phase: "read", outcome: "failed" });
     return ""; // 读取失败不阻断推演
   }
+}
+
+/** P2-03:用 atlas-lore-selection 纯函数有界选取世界书资料。
+ * 与 readCardLoreSupplement 不同:
+ *  - 读入所有书的全部条目后交给 P2-01 排序/截断,而不是单本先到先得
+ *  - 缓存键 = 书名 + 内容 hash + chatId,失效更快(不再 60 秒)
+ *  - 失败一本书不影响其他书,但有诊断条目
+ */
+async function readCardLoreSupplementViaSelector() {
+  try {
+    if (typeof SillyTavern === "undefined") return "";
+    const ctx = SillyTavern.getContext();
+    const character = ctx?.characters?.[ctx?.characterId] ?? null;
+    const chatId = ctx?.chatId ?? null;
+
+    // 1) 收集候选书名
+    const bookNames = [];
+    const pushBook = (value) => {
+      const name = typeof value === "string" ? value.trim() : "";
+      if (name && !bookNames.includes(name)) bookNames.push(name);
+    };
+    try {
+      const th = globalThis.TavernHelper ?? globalThis.getTavernHelper?.() ?? null;
+      if (th && typeof th.getCharWorldbookNames === "function") {
+        const bound = await th.getCharWorldbookNames("current");
+        if (Array.isArray(bound)) {
+          for (const item of bound) pushBook(typeof item === "string" ? item : item?.name);
+        } else if (bound && typeof bound === "object") {
+          pushBook(bound.primary);
+          if (Array.isArray(bound.additional)) {
+            for (const item of bound.additional) pushBook(typeof item === "string" ? item : item?.name);
+          }
+        } else {
+          pushBook(bound);
+        }
+      }
+    } catch { /* 兜底 */ }
+    pushBook(character?.data?.extensions?.world);
+    pushBook(ctx?.chatMetadata?.world_info);
+    if (bookNames.length === 0) return "";
+
+    // 2) 缓存键:书名 + chatId,失效更快(本请求内有效,世界书变更则失效)
+    const cacheKey = `${bookNames.join("|")}#${chatId ?? ""}`;
+    const cached = loreSupplementCache;
+    if (cached.bookName === cacheKey && Date.now() - cached.at < LORE_SUPPLEMENT_LIMITS.CACHE_TTL_MS) {
+      return cached.text;
+    }
+
+    // 3) 读入所有书的所有条目
+    const worldInfo = await loadStWorldInfo();
+    const prefixList = atlasRuntime.mod?.ATLAS_LOREBOOK_PREFIX;
+    const atlasPrefixes = prefixList && typeof prefixList === "object"
+      ? Object.values(prefixList)
+      : ["Atlas 动向 ·", "Atlas 事件 ·"];
+    const allEntries = [];
+    let failedBooks = 0;
+    for (const bookName of bookNames) {
+      let rawEntries = [];
+      try {
+        const data = await worldInfo.loadWorldInfo(bookName);
+        rawEntries = data && typeof data === "object" && data.entries && typeof data.entries === "object"
+          ? Object.values(data.entries)
+          : [];
+      } catch {
+        failedBooks += 1;
+        continue;
+      }
+      for (const entry of rawEntries) {
+        if (!entry || typeof entry !== "object") continue;
+        const content = typeof entry.content === "string" ? entry.content : "";
+        if (!content.trim()) continue;
+        const comment = typeof entry.comment === "string" ? entry.comment.trim() : "";
+        if (atlasPrefixes.some((prefix) => comment.startsWith(prefix))) continue;
+        const keys = Array.isArray(entry.key) ? entry.key.filter((k) => typeof k === "string" && k.trim()) : [];
+        const title = comment || (keys.length > 0 ? keys.slice(0, 4).join(" / ") : "条目");
+        allEntries.push({
+          uid: typeof entry.uid === "string" ? entry.uid : (typeof entry.id === "string" || typeof entry.id === "number" ? String(entry.id) : ""),
+          title,
+          bookName,
+          content,
+          enabled: entry.disable !== true,
+        });
+      }
+    }
+
+    // 4) 调用 P2-01 纯函数排序 + 截断
+    const sel = atlasRuntime.mod?.selectAtlasLoreSupplement;
+    if (typeof sel !== "function") {
+      // 模块未加载或旧版本不支持,降级到传统实现
+      return await readCardLoreSupplement();
+    }
+    const sceneKeywords = extractSceneKeywords(ctx);
+    const result = sel({
+      entries: allEntries,
+      chatKeywords: sceneKeywords,
+      sceneKeywords: sceneKeywords,
+      mode: "turn",
+      maxChars: LORE_SUPPLEMENT_LIMITS.TOTAL_CHARS,
+    });
+    if (failedBooks > 0) {
+      emitAtlasDiagnostic({ level: "warn", source: "lorebook",
+        code: "LORE_CONTEXT_UNAVAILABLE", operation: "lore-context",
+        phase: "read", outcome: "failed", details: { count: failedBooks, sourceMode: result.sourceMode } });
+    }
+    emitAtlasDiagnostic({ level: "info", source: "lorebook",
+      code: "LORE_SELECTION_COMPLETE", operation: "lore-context",
+      phase: "select", outcome: "ok", details: {
+        candidateCount: result.candidateCount,
+        selectedCount: result.selectedUids.length,
+        truncatedCount: result.truncatedCount,
+        outputChars: result.selectedOutputChars,
+        sourceMode: result.sourceMode,
+      } });
+    loreSupplementCache = { bookName: cacheKey, at: Date.now(), text: result.text };
+    return result.text;
+  } catch {
+    emitAtlasDiagnostic({ level: "warn", source: "lorebook",
+      code: "LORE_CONTEXT_UNAVAILABLE", operation: "lore-context",
+      phase: "read", outcome: "failed" });
+    return await readCardLoreSupplement();
+  }
+}
+
+/** 从 SillyTavern 上下文抽取场景关键词(角色名 + 地点名等)。 */
+function extractSceneKeywords(ctx) {
+  const out = new Set();
+  try {
+    const recent = Array.isArray(ctx?.chat) ? ctx.chat.slice(-6) : [];
+    for (const msg of recent) {
+      const text = typeof msg?.mes === "string" ? msg.mes : "";
+      // 简单抽取:CJK 连续 2-8 字 + 拉丁连续 3-20 字
+      const cjk = text.match(/[\u4e00-\u9fff]{2,8}/g) ?? [];
+      for (const k of cjk) out.add(k);
+      const latin = text.match(/[A-Za-z][A-Za-z0-9_-]{2,19}/g) ?? [];
+      for (const k of latin) out.add(k);
+    }
+  } catch { /* 兜底 */ }
+  return out;
 }
 
 async function connectOnce() {

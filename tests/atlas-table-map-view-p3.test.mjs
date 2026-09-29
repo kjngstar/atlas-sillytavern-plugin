@@ -56,8 +56,11 @@ test('P3-05b 缺坐标的地点不进 world.points', () => {
   const ids = view.world.points.map((p) => p.id);
   assert.ok(ids.includes('1'));
   assert.ok(!ids.includes('2'));
-  const u = view.unknownPosition.find((u) => u.locationId === 'loc:2');
-  assert.ok(u, '未知坐标地点应进 unknownPosition');
+  // 缺坐标的地点进 unplacedLocations(待定位地点名单),
+  // 不是 unknownPosition(后者是「在已知地点但无细坐标」的人物/物品名单)。
+  const u = view.unplacedLocations.entries.find((e) => e.id === 'loc:2');
+  assert.ok(u, '未知坐标地点应进 unplacedLocations');
+  assert.equal(u.name, '未知点');
 });
 
 test('P3-05c 角色有可信坐标 → confirmed 出现在父地图', () => {

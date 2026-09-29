@@ -10189,6 +10189,10 @@ END`;
   }
 
   // src/atlas-ops-parser.ts
+  var UTF8_ENCODER = new TextEncoder();
+  function utf8ByteLength(text) {
+    return UTF8_ENCODER.encode(text).byteLength;
+  }
   var REASONING_OPEN_RE = /<(think|thinking|analysis|reasoning)(?:\s[^>]*)?>/gi;
   var REASONING_ANY_CLOSE_RE = /<\/(?:think|thinking|analysis|reasoning)\s*>/gi;
   var FENCE_LINE_RE = /^\s{0,3}(`{3,}|~{3,})(.*)$/;
@@ -10530,7 +10534,7 @@ END`;
     const operations = [];
     let explicitNoop = false;
     let incomplete = false;
-    const byteLength = Buffer.byteLength(rawInput, "utf8");
+    const byteLength = utf8ByteLength(rawInput);
     if (byteLength > ATLAS_RUNTIME_LIMITS.responseUtf8Bytes) {
       issues.push(
         issue9(
@@ -10583,7 +10587,7 @@ END`;
           issue9(
             ATLAS_ERROR_CODES.JSON_SYNTAX,
             "$",
-            `JSON array is malformed (${Buffer.byteLength(arrayText, "utf8")} bytes): ${detail}; excerpt: ${excerptOf(arrayText)}`,
+            `JSON array is malformed (${utf8ByteLength(arrayText)} bytes): ${detail}; excerpt: ${excerptOf(arrayText)}`,
             { line: lineIndex.lineAt(offset), retryable: true }
           )
         );
@@ -10637,7 +10641,7 @@ END`;
     let validCount = 0;
     let firstDroppedLine;
     for (const candidate of candidates) {
-      const bytes = Buffer.byteLength(candidate.raw, "utf8");
+      const bytes = utf8ByteLength(candidate.raw);
       if (bytes > ATLAS_RUNTIME_LIMITS.operationUtf8Bytes) {
         issues.push(
           issue9(
@@ -11217,12 +11221,9 @@ END`;
 
   // src/atlas-db-envelope.ts
   var B64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  function hasBuffer() {
-    return typeof globalThis.Buffer !== "undefined";
-  }
   function bytesToBase64(bytes) {
-    if (hasBuffer()) {
-      const B = globalThis.Buffer;
+    const B = globalThis.Buffer;
+    if (typeof B !== "undefined") {
       return B.from(bytes).toString("base64");
     }
     let out = "";
