@@ -267,7 +267,8 @@ test("形态契约：工作台是悬浮窗而非全屏铺满", () => {
   const css = readFileSync(join(root, "atlas-extension", "style.css"), "utf8");
   ok(css.includes("width: min(1180px"), "有明确的最大宽度（全屏方案无此值）");
   ok(css.includes("height: min(780px"), "有明确的最大高度（全屏方案无此值）");
-  ok(css.includes("margin: auto"), "用 inset+margin:auto 居中，把 translate 让给拖拽");
+  ok(css.includes("top: 50vh") && css.includes("left: 50vw") && css.includes("transform: translate(-50%, -50%)"),
+    "酒馆主题可能令 html 高度为 0，工作台按视口尺寸居中");
   ok(css.includes("border-radius: 14px"), "悬浮窗圆角");
   // 全屏方案的判据：inset:0 之后再无宽度上限、且撑满视口
   ok(!/\.atlas-workbench\s*\{[^}]*width:\s*100vw/.test(css), "工作台不写 width:100vw（窄屏断点除外）");

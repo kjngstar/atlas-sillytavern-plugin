@@ -68,10 +68,14 @@
   --aw-serif: Georgia, "Songti SC", "SimSun", serif;
   --aw-sans: system-ui, "Microsoft YaHei", sans-serif;
 
-  /* 悬浮窗：inset + margin:auto 居中，把 translate 留给拖拽（JS 写 style.translate） */
+  /* ST themes can transform html while giving it height:0. Fixed inset+auto
+   * margins then center against that zero-height containing block. Viewport
+   * units keep the window visible; JS style.translate remains free for drag. */
   position: fixed;
-  inset: 0;
-  margin: auto;
+  top: 50vh;
+  left: 50vw;
+  transform: translate(-50%, -50%);
+  margin: 0;
   width: min(1180px, 94vw);
   height: min(780px, 88vh);
   z-index: 2000;
