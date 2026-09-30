@@ -1067,8 +1067,19 @@
 
 @media (max-width: 480px) {
   .aw-maptools {
-    max-width: 46%;
+    /* Let wrapped controls use the map width. A 46% cap pushes zoom buttons
+       under the left rail, where pointer clicks hit navigation instead. */
+    max-width: none;
   }
+  .aw-mapcrumb {
+    /* The wrapped tools take two rows; keep the child-map breadcrumb below them. */
+    top: 96px;
+    left: 14px;
+    flex-wrap: wrap;
+    max-width: calc(100% - 28px);
+    pointer-events: none;
+  }
+  .aw-mapcrumb > * { pointer-events: auto; }
   .aw-areadraw {
     left: 8px;
     right: 8px;
