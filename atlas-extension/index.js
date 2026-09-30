@@ -10305,7 +10305,7 @@ export function recordAtlasHostLoreActivation(entries, ctx) {
   }
   hostLoreActivation = {
     chatId: String(ctx.chatId), characterId: ctx.characterId ?? null,
-    userMessageId: String(userIndex), userText: String(chat[userIndex]?.mes ?? ""),
+    userMessageId: String(userIndex), userMessageRef: chat[userIndex],
     ids, consumed: false,
   };
   emitAtlasDiagnostic({ level: "info", source: "lorebook",
@@ -10433,16 +10433,16 @@ export async function readCardLoreSupplementViaSelector(selectionContext, select
       : hostLoreActivation.chatId !== chatId ? "CHAT_MISMATCH"
       : hostLoreActivation.characterId !== characterId ? "CHARACTER_MISMATCH"
       : hostLoreActivation.userMessageId !== String(lastUserIndex) ? "USER_INDEX_MISMATCH"
-      : hostLoreActivation.userText !== String(ctx?.chat?.[lastUserIndex]?.mes ?? "") ? "USER_TEXT_MISMATCH"
+      : hostLoreActivation.userMessageRef !== ctx?.chat?.[lastUserIndex] ? "USER_FLOOR_REPLACED"
       : "NONE";
     const activation = selectionContext.mode === "turn" && hostLoreActivation
       && !hostLoreActivation.consumed
       && hostLoreActivation.chatId === chatId
       && hostLoreActivation.characterId === characterId
       && hostLoreActivation.userMessageId === String(lastUserIndex)
-      // ST can transform the pending text before its world-info pass. The event and
-      // current host message must match; pending text is the model input, not its identity.
-      && hostLoreActivation.userText === String(ctx?.chat?.[lastUserIndex]?.mes ?? "")
+      // ST may transform the same floor's text between activation and commit.
+      // Object identity ties the activation to this host floor without using mutable text.
+      && hostLoreActivation.userMessageRef === ctx?.chat?.[lastUserIndex]
       ? hostLoreActivation : null;
     const activationMode = activation ? "host-activated" : "context-fallback";
     if (activation) activation.consumed = true;
@@ -10554,7 +10554,7 @@ async function connectOnce() {
       hostLoreActivationApiAvailable = true;
       loreHost.eventSource.on(loreHost.event_types.WORLD_INFO_ACTIVATED,
         (entries) => recordAtlasHostLoreActivation(entries, context()));
-      for (const eventName of ["GENERATION_STARTED", "CHAT_CHANGED", "MESSAGE_DELETED"]) {
+      for (const eventName of ["GENERATION_STARTED", "CHAT_CHANGED", "MESSAGE_EDITED", "MESSAGE_DELETED"]) {
         const eventType = loreHost.event_types[eventName];
         if (eventType) loreHost.eventSource.on(eventType, () => { hostLoreActivation = null; });
       }

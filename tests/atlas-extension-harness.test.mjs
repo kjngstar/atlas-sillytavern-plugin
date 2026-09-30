@@ -807,6 +807,7 @@ test("M1-A03：真实宿主读书适配与 commit 钩子跨两本书选中末尾
     // the original pending text. Match the activation to the live host floor.
     stContext.chat[0].mes = "我进入白塔钟座。灯光照亮门廊。";
     recordAtlasHostLoreActivation([{ world: "乙书", uid: 2 }], stContext);
+    stContext.chat[0].mes = "我进入白塔钟座。门廊的灯光改变了。";
     await core.handleEvent("MESSAGE_RECEIVED", { assistantMessageId: "a-lore", assistantText: "白塔钟座的石门出现在眼前。" });
     await flush();
     const commit = ready.api.calls.find((call) => call.path === "/turns/commit");
@@ -816,6 +817,12 @@ test("M1-A03：真实宿主读书适配与 commit 钩子跨两本书选中末尾
     equal(commit.body.loreSupplement.includes("无关条目"), false, "第一本无关条目不挤占预算");
     ok(loreEvents.some((event) => event.code === "LORE_SELECTION_COMPLETE" && event.details?.selectedCount === 1), "记录实际筛选计数");
     ok(loreEvents.some((event) => event.code === "LORE_SELECTION_COMPLETE" && event.details?.activationMode === "host-activated"), "本轮真实绿灯 ID 被使用");
+    recordAtlasHostLoreActivation([{ world: "乙书", uid: 2 }], stContext);
+    stContext.chat[0] = { ...stContext.chat[0] };
+    await readCardLoreSupplementViaSelector({ chatId: "chat-a", characterId: 0,
+      mode: "turn", userText: "我进入白塔钟座。", assistantText: "石门开启。", recentAssistantTexts: [] },
+    releaseLoreSelector, (event) => loreEvents.push(event));
+    ok(loreEvents.some((event) => event.code === "LORE_ACTIVATION_UNAVAILABLE" && event.details?.reasonCode === "USER_FLOOR_REPLACED"), "被替换的楼层不得复用旧激活清单");
     books["乙书"].entries[2].content = "白塔钟座的新石门已经开启。";
     const updated = await readCardLoreSupplementViaSelector({ chatId: "chat-a", characterId: 0,
       mode: "turn", userText: "白塔钟座", assistantText: "石门开启。", recentAssistantTexts: [] }, releaseLoreSelector, (event) => loreEvents.push(event));
