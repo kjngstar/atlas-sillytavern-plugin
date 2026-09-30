@@ -10433,14 +10433,16 @@ export async function readCardLoreSupplementViaSelector(selectionContext, select
       : hostLoreActivation.chatId !== chatId ? "CHAT_MISMATCH"
       : hostLoreActivation.characterId !== characterId ? "CHARACTER_MISMATCH"
       : hostLoreActivation.userMessageId !== String(lastUserIndex) ? "USER_INDEX_MISMATCH"
-      : hostLoreActivation.userText !== selectionContext.userText ? "USER_TEXT_MISMATCH"
+      : hostLoreActivation.userText !== String(ctx?.chat?.[lastUserIndex]?.mes ?? "") ? "USER_TEXT_MISMATCH"
       : "NONE";
     const activation = selectionContext.mode === "turn" && hostLoreActivation
       && !hostLoreActivation.consumed
       && hostLoreActivation.chatId === chatId
       && hostLoreActivation.characterId === characterId
       && hostLoreActivation.userMessageId === String(lastUserIndex)
-      && hostLoreActivation.userText === selectionContext.userText
+      // ST can transform the pending text before its world-info pass. The event and
+      // current host message must match; pending text is the model input, not its identity.
+      && hostLoreActivation.userText === String(ctx?.chat?.[lastUserIndex]?.mes ?? "")
       ? hostLoreActivation : null;
     const activationMode = activation ? "host-activated" : "context-fallback";
     if (activation) activation.consumed = true;

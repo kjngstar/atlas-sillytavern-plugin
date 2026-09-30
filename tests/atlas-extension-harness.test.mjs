@@ -803,6 +803,9 @@ test("M1-A03：真实宿主读书适配与 commit 钩子跨两本书选中末尾
       }, (event) => loreEvents.push(event)) });
     core = ready.core;
     await core.handleEvent("MESSAGE_SENT", { messageId: "m-lore", userText: "我进入白塔钟座。" });
+    // ST's world-info pass can see a transformed host message while Atlas retains
+    // the original pending text. Match the activation to the live host floor.
+    stContext.chat[0].mes = "我进入白塔钟座。灯光照亮门廊。";
     recordAtlasHostLoreActivation([{ world: "乙书", uid: 2 }], stContext);
     await core.handleEvent("MESSAGE_RECEIVED", { assistantMessageId: "a-lore", assistantText: "白塔钟座的石门出现在眼前。" });
     await flush();
