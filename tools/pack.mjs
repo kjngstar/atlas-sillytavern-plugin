@@ -14,8 +14,8 @@
  * 会拦截或终止，复制与删除均手写递归。
  */
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildAll } from "./build.mjs";
 
@@ -64,8 +64,10 @@ function copyTree(fromDir, toDir) {
   }
 }
 
-/** 逐文件清空目录（safe-delete 守卫拦截 rmSync recursive）。 */
+/** 只清理由旧发布包遗留的路径；目标必须位于 release/ 内。 */
 function removeTree(dir) {
+  const rel = relative(realpathSync(releaseDir), realpathSync(dir));
+  if (!rel || rel.startsWith("..") || isAbsolute(rel)) throw new Error(`拒绝删除 release/ 外路径：${dir}`);
   for (const entry of readdirSync(dir)) {
     const p = join(dir, entry);
     if (statSync(p).isDirectory()) removeTree(p);
@@ -95,47 +97,10 @@ function copyReleaseFile(from, to) {
   writeFileAtomic(to, stripDevFallback(content));
 }
 
-// 3) 清空并重建 release/
-if (existsSync(releaseDir)) removeTree(releaseDir);
-mkdirSync(releaseDir, { recursive: true });
-
-const ENTRY_FILES = new Set(["index.js", "index.mjs"]);
-
-for (const target of PACK_TARGETS) {
-  const to = join(releaseDir, target.name);
-  mkdirSync(to, { recursive: true });
-  for (const entry of readdirSync(target.from)) {
-    if (EXCLUDE_DIRS.has(entry)) continue;
-    const from = join(target.from, entry);
-    if (statSync(from).isDirectory()) copyTree(from, join(to, entry));
-    else if (ENTRY_FILES.has(entry)) copyReleaseFile(from, join(to, entry));
-    else copyFileSync(from, join(to, entry));
-  }
-  console.log(`packed ${basename(target.from)} -> release/${target.name}`);
-  for (const file of readdirSync(to)) {
-    console.log(`  - ${file}`);
-  }
-}
-
-// 3.5) 许可证：每个发布单元自带 LICENSE（自包含安装包的组成部分）。
-const rootLicense = join(root, "LICENSE");
-if (existsSync(rootLicense)) {
-  for (const target of PACK_TARGETS) {
-    copyFileSync(rootLicense, join(releaseDir, target.name, "LICENSE"));
-  }
-  console.log("copied LICENSE -> release/atlas-ui-extension/, release/atlas-server-plugin/");
-}
-
-// 4) 根安装单元同步（0.9.46 方向修正——真实事故修复）：
-//    历史版本在这里把 release/atlas-ui-extension 的文件**反向覆盖**仓库根，而
-//    release 副本来自 atlas-extension/ 镜像——镜像里的 style.css / settings.html
-//    是过期拷贝时，根上的新改动会在「测试通过 → pack → 提交」之间被静默回滚
-//    （0.9.43 图例修复、0.9.45 皮肤令牌两次丢失的根因，commit message 全在撒谎）。
-//    现在：根 = 权威源 → 正向同步镜像；根文件本身永不被 pack 触碰。
-//    index.js 镜像维持人工同步（唯一有意差异 = dev 回退行），此处断言一致。
+// 3) 根文件先同步到 UI 镜像，确保本次发布副本读到的就是当前版本。
+// 根 = 权威源；index.js 镜像只允许开发回退行这一处差异。
 const MIRROR_SYNC_FILES = ["style.css", "settings.html", "manifest.json"];
 for (const file of MIRROR_SYNC_FILES) {
-  // 原子写：并发跑的另一个 pack / 正在读镜像的测试都不会看到半个文件
   writeFileAtomic(join(root, "atlas-extension", file), readFileSync(join(root, file)));
 }
 const stripFallbackLine = (content) =>
@@ -150,6 +115,59 @@ if (stripFallbackLine(mirrorIndexSource) !== rootIndexSource) {
     "atlas-extension/index.js 镜像与根 index.js 不一致——先同步镜像（cp index.js atlas-extension/index.js 后恢复 dev 回退行）再 pack。",
   );
 }
+
+// 4) 原位原子覆盖 release/，并发测试读取时不出现目录被清空的窗口。
+mkdirSync(releaseDir, { recursive: true });
+
+const ENTRY_FILES = new Set(["index.js", "index.mjs"]);
+
+for (const target of PACK_TARGETS) {
+  const to = join(releaseDir, target.name);
+  mkdirSync(to, { recursive: true });
+  for (const entry of readdirSync(target.from)) {
+    if (EXCLUDE_DIRS.has(entry)) continue;
+    const from = join(target.from, entry);
+    if (statSync(from).isDirectory()) copyTree(from, join(to, entry));
+    else if (ENTRY_FILES.has(entry)) copyReleaseFile(from, join(to, entry));
+    else writeFileAtomic(join(to, entry), readFileSync(from));
+  }
+  console.log(`packed ${basename(target.from)} -> release/${target.name}`);
+  for (const file of readdirSync(to)) {
+    console.log(`  - ${file}`);
+  }
+}
+
+// 4.5) 许可证：每个发布单元自带 LICENSE（自包含安装包的组成部分）。
+const rootLicense = join(root, "LICENSE");
+if (existsSync(rootLicense)) {
+  for (const target of PACK_TARGETS) {
+    writeFileAtomic(join(releaseDir, target.name, "LICENSE"), readFileSync(rootLicense));
+  }
+  console.log("copied LICENSE -> release/atlas-ui-extension/, release/atlas-server-plugin/");
+}
+
+/** 覆盖完成后只删源目录已不存在的旧文件，保留并发 pack 的临时文件。 */
+function pruneStaleFiles(sourceDir, targetDir, topLevel = false) {
+  const desired = new Set(readdirSync(sourceDir).filter((entry) => !topLevel || !EXCLUDE_DIRS.has(entry)));
+  if (topLevel && existsSync(rootLicense)) desired.add("LICENSE");
+  for (const entry of readdirSync(targetDir)) {
+    if (entry.includes(".pack-tmp-")) continue;
+    const target = join(targetDir, entry);
+    const rel = relative(resolve(releaseDir), resolve(target));
+    if (!rel || rel.startsWith("..") || isAbsolute(rel)) throw new Error(`拒绝删除 release/ 外路径：${target}`);
+    if (!desired.has(entry)) {
+      if (statSync(target).isDirectory()) removeTree(target);
+      else unlinkSync(target);
+    } else if (statSync(target).isDirectory() && statSync(join(sourceDir, entry)).isDirectory()) {
+      pruneStaleFiles(join(sourceDir, entry), target);
+    }
+  }
+}
+for (const target of PACK_TARGETS) {
+  pruneStaleFiles(target.from, join(releaseDir, target.name), true);
+}
+
+// 5) 将打包时构建的 UI dist 同步到根安装单元。
 const uiRelease = join(releaseDir, "atlas-ui-extension");
 copyTree(join(uiRelease, "dist"), join(root, "dist"));
 console.log("mirror synced root -> atlas-extension (style.css / settings.html / manifest.json); index.js mirror in sync; root dist refreshed");

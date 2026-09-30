@@ -78,6 +78,19 @@
     "atlasReceiptUnchanged": true,
     "successfulSwipeRollbackRetestRequired": true
   },
+  "nativeSwipeAfterFix": {
+    "fixtureChat": "bell platform ordinary committed floor",
+    "hostFloorId": "6",
+    "eventSwipeIdBeforeCandidateSave": 2,
+    "eventSwipesLengthBeforeCandidateSave": 2,
+    "recognizedAsRegenerating": true,
+    "finalSwipeId": 2,
+    "finalSwipesLength": 3,
+    "newCandidateTextChars": 3223,
+    "worldTurnTableRollbackObserved": true,
+    "newCommitSucceeded": true,
+    "lastCommittedFloorId": "6"
+  },
   "farVisibilityAttempt": {
     "fixtureChatCreated": true,
     "openingBootstrapComplete": true,
@@ -106,7 +119,29 @@
     "messageDeliveryAcceptanceVerified": false,
     "remainingRejectedProposal": "SIGNAL_KIND_INVALID; prompt schema clarified afterward"
   },
+  "failureRetryAttempt": {
+    "fixture": "same chat, manual advance",
+    "controlledFirstModelResponse": 502,
+    "retryableCommitCreated": true,
+    "failedRequestCommitted": false,
+    "retryUsedSameUserAndAssistantIds": true,
+    "retryResult": "model request timed out after 120000 ms",
+    "retryableCommitRetained": true,
+    "successfulRetryVerified": false
+  },
+  "failureRetryShortFixture": {
+    "newFixtureChat": true,
+    "initialized": true,
+    "controlledFirstAtlasModelResponse": 502,
+    "receiptCountAfterFailure": 0,
+    "retryableCommitCreated": true,
+    "retryUsedOriginalIds": true,
+    "realModelResponseAfterRetry": 200,
+    "finalReceiptStatuses": ["committed"],
+    "lastErrorCleared": true,
+    "retryableCommitCleared": true
+  },
   "limits": [
-    "Far NPC visibility and message delivery, successful swipe and late-model final commit, and vehicle live cases remain untested."
+    "Far NPC visibility was verified through manual advance; message delivery, late-model final commit, and vehicle live cases remain untested. Earlier swipe attempts were invalid or failed; a later native swipe from matching committed floor passed."
   ]
 }
