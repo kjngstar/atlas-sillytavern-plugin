@@ -41,9 +41,24 @@
     "navigation": ["星河中学", "教学楼", "图书室"],
     "eachPointPosition": "displayOnly",
     "scale": "unconfirmed",
-    "nearbyHasCharacter": true
+    "nearbyHasCharacter": true,
+    "narrowViewport": [390, 844],
+    "narrowWorkbenchBounds": [8, 34, 374, 776],
+    "narrowScaleVisible": true,
+    "narrowScreenshotObscuredByOtherExtensionTour": true
+  },
+  "chatIsolation": {
+    "sequence": ["A", "B", "A", "B"],
+    "locationAndNpcStayedInOwnChat": true,
+    "distinctCommittedMessageIds": ["36", "2"]
+  },
+  "swipeAttempt": {
+    "newHostVariantEmpty": true,
+    "selectedVariantUnchanged": true,
+    "atlasReceiptUnchanged": true,
+    "successfulSwipeRollbackRetestRequired": true
   },
   "limits": [
-    "Far NPC visibility and message delivery, rollback/swipe/delete/cross-chat, narrow map and vehicle live cases remain untested."
+    "Far NPC visibility and message delivery, successful rollback/swipe/delete/late-model cross-chat, unobstructed narrow map and vehicle live cases remain untested."
   ]
 }
