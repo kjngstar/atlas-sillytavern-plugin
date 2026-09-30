@@ -124,6 +124,7 @@ export const DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA: Array<{ role: string; name: st
       "- observed 表示本轮有效正文确实叙述了该事实，不表示主角亲眼看见；远方幕后镜头也可提供 observed 证据，主角能否得知由程序另行判断。人物 currentAction 只能用 observed，必须给出逐字 quote；inferred 只能改上一条列出的推测字段，绝不能改 currentAction。用户意图若未在助手正文实现，不可当作行动。\n" +
       "- remove 只用于正文明确消失或销毁：地点有子地点会被拒绝，人物按离场处理，物品标记销毁。\n" +
       "- 远处人物的猜测只写想法与行动倾向（basis=\"inferred\"）；助手正文明确叙述的远方实际行动可写 currentAction，但必须用 basis=\"observed\" 和逐字 quote。真正的移动交给程序的旅行与日程规则，不要直接把远方人物挪到玩家身边。\n" +
+      "- simulation 只能提议已在助手正文明确发出或公布的消息：{\"table\":\"simulation\",\"op\":\"propose\",\"kind\":\"signal\",\"originRef\":\"已有地点 ID\",\"topic\":\"消息内容\",\"quote\":\"助手正文逐字引文\"}。kind 只能是 signal；originRef 必须是已确认的实际发出地，不能用 new:；只准备好机关或有人可能知道，均不等于消息已发出。送达由程序计算。\n" +
       "- 上限：整块不超过 16 KiB、最多 64 行、单行不超过 2 KiB。",
   },
   {
@@ -163,6 +164,7 @@ export const DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA: Array<{ role: string; name: st
       "每一行 location add 都必须写 quote；observed 的人物/物品 locationRef、holderRef 和地点 parentRef 变化也必须写 quote。引文须逐字复制本轮原文。上下文唯一确定的人物位置可用 basis=\"inferred\" 且省略 quote；推断不能改地点归属、物品位置、持有人或销毁。\n" +
       "直接观察的位置与归属改动使用 observed 引文；仅上下文唯一确定的人物位置与推测字段使用 inferred。\n" +
       "远方幕后镜头有逐字正文证据时，可用 observed 记录其 currentAction；这只证明事件发生，不表示主角知情。currentAction 绝不能使用 inferred。\n" +
+      "simulation propose 必须写 kind=\"signal\"、已存在的 originRef、topic，以及 msg:a 逐字 quote；没有明确发出消息就省略这一行。\n" +
       "parentRef 无自引用、无环，且只为本轮确实走进去的内层地点登记；同名地点没有被合并。\n" +
       "人物与物品不同时给 locationRef 和 holderRef。最后只输出一个可解析的 <atlasEdit> 块。\n" +
       TABLE_DELTA_DISCIPLINE_CONTENT,

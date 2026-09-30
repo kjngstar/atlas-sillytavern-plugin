@@ -97,6 +97,15 @@
     "farNpcActionAcceptanceVerified": false,
     "promptClarificationAddedAfterThisAttempt": true
   },
+  "farVisibilityManualAfterPrompt": {
+    "source": "existing fixture assistant text, manual advance in original port 8000 installation",
+    "turnCommitted": true,
+    "defaultHighlight": "Elaine visible in same bell platform",
+    "authorOnlyHiddenHighlight": "Tal returned to rest in distant hall",
+    "farNpcActionAcceptanceVerified": true,
+    "messageDeliveryAcceptanceVerified": false,
+    "remainingRejectedProposal": "SIGNAL_KIND_INVALID; prompt schema clarified afterward"
+  },
   "limits": [
     "Far NPC visibility and message delivery, successful swipe and late-model final commit, and vehicle live cases remain untested."
   ]
