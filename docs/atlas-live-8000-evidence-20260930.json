@@ -14,6 +14,20 @@
     "rejectedRows": 2,
     "rejectionCode": "INFERRED_FIELD_NOT_ALLOWED"
   },
+  "lorebook": {
+    "boundFixtureBooks": 2,
+    "entriesPerBook": 120,
+    "editedEntryUid": 119,
+    "sameNameEditReachedActualModelRequest": true,
+    "hostActivationEventObserved": true,
+    "hostActivationMode": "host-activated",
+    "candidateCount": 245,
+    "selectedCount": 8,
+    "outputChars": 2120,
+    "normalTurnCommitSucceeded": true,
+    "lastCommittedAssistantMessageId": "36",
+    "manualAdvanceAlsoSucceeded": true
+  },
   "map": {
     "navigation": ["星河中学", "教学楼", "图书室"],
     "eachPointPosition": "displayOnly",
@@ -21,6 +35,6 @@
     "nearbyHasCharacter": true
   },
   "limits": [
-    "Second genre, large worldbooks, rollback and cross-chat live cases remain untested."
+    "Second genre, far NPC visibility and message delivery, rollback/swipe/delete/cross-chat, narrow map and vehicle live cases remain untested."
   ]
 }
