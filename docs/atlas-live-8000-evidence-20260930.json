@@ -52,6 +52,15 @@
     "locationAndNpcStayedInOwnChat": true,
     "distinctCommittedMessageIdsBeforeDelete": ["36", "2"]
   },
+  "lateModelChatSwitch": {
+    "atlasModelRequestHeld": true,
+    "heldRequestIncludedEditedLore": true,
+    "switchedFromChatAtoBWhileHeld": true,
+    "chatBStateAndIdentityStayedB": true,
+    "chatBNpcAndLocationUnchanged": true,
+    "chatALastCommittedMessageIdAfterBrowserClose": "36",
+    "pendingOriginalCommitCompletionVerified": false
+  },
   "deleteRollback": {
     "fixtureChat": "B",
     "hostMessageCountBeforeAfter": [3, 2],
