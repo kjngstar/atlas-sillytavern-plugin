@@ -45,7 +45,11 @@
     "narrowViewport": [390, 844],
     "narrowWorkbenchBounds": [8, 34, 374, 776],
     "narrowScaleVisible": true,
-    "narrowScreenshotObscuredByOtherExtensionTour": true
+    "narrowTourHiddenOnlyInTestBrowser": true,
+    "narrowMarkerNavigationAndEscapeVerified": true,
+    "narrowZoomBeforeAfter": ["100%", "125%"],
+    "narrowScaleGridBeforeAfter": [37.2, 29.8],
+    "narrowBreadcrumbAndZoomHitTargetsVerified": true
   },
   "chatIsolation": {
     "sequence": ["A", "B", "A", "B"],
@@ -74,7 +78,26 @@
     "atlasReceiptUnchanged": true,
     "successfulSwipeRollbackRetestRequired": true
   },
+  "farVisibilityAttempt": {
+    "fixtureChatCreated": true,
+    "openingBootstrapComplete": true,
+    "hostAssistantGenerated": true,
+    "turnCommitSucceeded": false,
+    "failure": "WORLD_TURN_DELTA_REJECTED / PARSE_REJECTED; only generated row used inferred currentAction, which the contract rejects",
+    "knownAndAuthorHighlights": 0,
+    "visibilityAcceptanceVerified": false
+  },
+  "farVisibilityFollowup": {
+    "sameFixtureChat": true,
+    "turnCommitted": true,
+    "currentLocationChain": ["石塔", "钟座"],
+    "knownHighlights": ["main character observed Elaine", "Elaine changed action in bell platform"],
+    "authorOnlyHighlight": "dark crystal in distant hall",
+    "farNpcActionRejected": "INFERRED_FIELD_NOT_ALLOWED / currentAction",
+    "farNpcActionAcceptanceVerified": false,
+    "promptClarificationAddedAfterThisAttempt": true
+  },
   "limits": [
-    "Far NPC visibility and message delivery, successful swipe and late-model cross-chat, unobstructed narrow map and vehicle live cases remain untested."
+    "Far NPC visibility and message delivery, successful swipe and late-model final commit, and vehicle live cases remain untested."
   ]
 }

@@ -121,8 +121,9 @@ export const DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA: Array<{ role: string; name: st
       "- 位置只写到「在哪个地点」：人物与物品给 locationRef 就够，具体格序号由程序按地图与距离算。正文虽未直说地名，但行动及其上下文足以唯一确定地点时也应登记；若有多个合理候选或只是打算前往，省略 locationRef。\n" +
       "- 新地点要挂到外层地点时用 parentRef（已知地点 ID 或本块内 new:loc: 引用）；只登记本轮确实走进去的内层地点，不要为对照表里已有的地点再登记一次，也不要造环。\n" +
       "- 证据：basis=\"observed\"（默认）的位置与归属改动必须带 quote，且 quote 必须逐字复制 msg:u 或 msg:a 里的连续原文；来源由程序判断，不要写 sourceId，也不要编造证据编号。basis=\"inferred\" 可改想法、行动倾向、目标地点、描述及人物 locationRef；上下文唯一确定已到达地点时不强制 quote。不能推断归属、持有人或销毁。\n" +
+      "- observed 表示本轮有效正文确实叙述了该事实，不表示主角亲眼看见；远方幕后镜头也可提供 observed 证据，主角能否得知由程序另行判断。人物 currentAction 只能用 observed，必须给出逐字 quote；inferred 只能改上一条列出的推测字段，绝不能改 currentAction。用户意图若未在助手正文实现，不可当作行动。\n" +
       "- remove 只用于正文明确消失或销毁：地点有子地点会被拒绝，人物按离场处理，物品标记销毁。\n" +
-      "- 远处人物只写想法与行动倾向（basis=\"inferred\"）：真正的移动交给程序的旅行与日程规则，不要直接把远方人物挪到玩家身边。\n" +
+      "- 远处人物的猜测只写想法与行动倾向（basis=\"inferred\"）；助手正文明确叙述的远方实际行动可写 currentAction，但必须用 basis=\"observed\" 和逐字 quote。真正的移动交给程序的旅行与日程规则，不要直接把远方人物挪到玩家身边。\n" +
       "- 上限：整块不超过 16 KiB、最多 64 行、单行不超过 2 KiB。",
   },
   {
@@ -161,6 +162,7 @@ export const DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA: Array<{ role: string; name: st
       "每个 new: 引用都已在本块**前面**声明且类型相符（地点用 new:loc:、人物用 new:npc:、物品用 new:item:）；已有实体用的是对照表里的正式 ID。\n" +
       "每一行 location add 都必须写 quote；observed 的人物/物品 locationRef、holderRef 和地点 parentRef 变化也必须写 quote。引文须逐字复制本轮原文。上下文唯一确定的人物位置可用 basis=\"inferred\" 且省略 quote；推断不能改地点归属、物品位置、持有人或销毁。\n" +
       "直接观察的位置与归属改动使用 observed 引文；仅上下文唯一确定的人物位置与推测字段使用 inferred。\n" +
+      "远方幕后镜头有逐字正文证据时，可用 observed 记录其 currentAction；这只证明事件发生，不表示主角知情。currentAction 绝不能使用 inferred。\n" +
       "parentRef 无自引用、无环，且只为本轮确实走进去的内层地点登记；同名地点没有被合并。\n" +
       "人物与物品不同时给 locationRef 和 holderRef。最后只输出一个可解析的 <atlasEdit> 块。\n" +
       TABLE_DELTA_DISCIPLINE_CONTENT,
