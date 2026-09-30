@@ -1495,7 +1495,7 @@ export async function isAtlasLoreSupplementEnabled(api) {
 
 async function loadUiCore() {
   // 先组件内构建产物（发布形态），再上级 src（开发形态，工程内运行才可用）
-  const attempts = ["./dist/atlas-ui-core.mjs", "../src/atlas-ui-core.ts"];
+  const attempts = ["./dist/atlas-ui-core.mjs"];
   let lastError = null;
   for (const specifier of attempts) {
     try {
@@ -10308,6 +10308,9 @@ export function recordAtlasHostLoreActivation(entries, ctx) {
     userMessageId: String(userIndex), userText: String(chat[userIndex]?.mes ?? ""),
     ids, consumed: false,
   };
+  emitAtlasDiagnostic({ level: "info", source: "lorebook",
+    code: "LORE_HOST_ACTIVATION_CAPTURED", operation: "lore-context",
+    phase: "select", outcome: "success", details: { count: ids.size } });
 }
 
 /** 从当前绑定书中按本次请求的正文选取资料；宿主未提供可靠激活清单时只报告 context-fallback。 */
@@ -10425,6 +10428,13 @@ export async function readCardLoreSupplementViaSelector(selectionContext, select
     }
     const sceneKeywords = extractSceneKeywords(selectionContext, allEntries);
     const lastUserIndex = Array.isArray(ctx?.chat) ? ctx.chat.findLastIndex((message) => message?.is_user === true) : -1;
+    const activationMismatch = !hostLoreActivation ? "NO_HOST_RECORD"
+      : hostLoreActivation.consumed ? "ALREADY_CONSUMED"
+      : hostLoreActivation.chatId !== chatId ? "CHAT_MISMATCH"
+      : hostLoreActivation.characterId !== characterId ? "CHARACTER_MISMATCH"
+      : hostLoreActivation.userMessageId !== String(lastUserIndex) ? "USER_INDEX_MISMATCH"
+      : hostLoreActivation.userText !== selectionContext.userText ? "USER_TEXT_MISMATCH"
+      : "NONE";
     const activation = selectionContext.mode === "turn" && hostLoreActivation
       && !hostLoreActivation.consumed
       && hostLoreActivation.chatId === chatId
@@ -10437,7 +10447,8 @@ export async function readCardLoreSupplementViaSelector(selectionContext, select
     else emit({ level: "info", source: "lorebook",
       code: hostLoreActivationApiAvailable ? "LORE_ACTIVATION_FALLBACK" : "LORE_ACTIVATION_UNAVAILABLE",
       operation: "lore-context", phase: "select", outcome: "success",
-      details: { reason: hostLoreActivationApiAvailable ? "no_matching_turn_event" : "host_api_unavailable", mode: selectionContext.mode } });
+      details: { reason: hostLoreActivationApiAvailable ? "no_matching_turn_event" : "host_api_unavailable",
+        reasonCode: activationMismatch, mode: selectionContext.mode } });
     const result = sel({
       entries: allEntries,
       ...(activation ? { activatedUids: activation.ids } : {}),
