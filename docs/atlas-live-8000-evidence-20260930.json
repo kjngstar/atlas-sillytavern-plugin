@@ -28,6 +28,15 @@
     "lastCommittedAssistantMessageId": "36",
     "manualAdvanceAlsoSucceeded": true
   },
+  "secondGenre": {
+    "setting": "wilderness outpost fixture",
+    "newChat": true,
+    "bootstrapCompleteCount": 1,
+    "currentLocationChain": ["荒原", "风蚀驿站"],
+    "unnamedEncounterCharacterRecorded": true,
+    "normalTurnCommitted": true,
+    "currentTime": 0
+  },
   "map": {
     "navigation": ["星河中学", "教学楼", "图书室"],
     "eachPointPosition": "displayOnly",
@@ -35,6 +44,6 @@
     "nearbyHasCharacter": true
   },
   "limits": [
-    "Second genre, far NPC visibility and message delivery, rollback/swipe/delete/cross-chat, narrow map and vehicle live cases remain untested."
+    "Far NPC visibility and message delivery, rollback/swipe/delete/cross-chat, narrow map and vehicle live cases remain untested."
   ]
 }
