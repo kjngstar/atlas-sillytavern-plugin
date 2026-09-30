@@ -1936,9 +1936,9 @@ test("S10 前端：同地点人物只在地点名单（离场者不出现、头�
   ok(!avatar.classList.contains("is-armed"), "长按松手后 is-armed 清理");
 });
 
-test("S10 前端：四层子图导航（第 5 张被拒）与面包屑逐层返回", async () => {
-  ok(S10_INDEX_SOURCE.includes("const MAP_SUBMAP_DEPTH_MAX = 4;"),
-    "UI 深度上限 = 4 张连续子图（世界图不算，与后端 SUBMAP_DEPTH_MAX 一致）");
+test("S10 前端：五层子图导航与面包屑逐层返回", async () => {
+  ok(S10_INDEX_SOURCE.includes("const MAP_SUBMAP_DEPTH_MAX = 8;"),
+    "UI 深度上限 = 8 张连续子图（世界图不算，与后端 SUBMAP_DEPTH_MAX 一致）");
   const stateByChat = {
     "chat-a": s10State({
       chatId: "chat-a",
@@ -1989,12 +1989,16 @@ test("S10 前端：四层子图导航（第 5 张被拒）与面包屑逐层返�
   }
   equal(container.querySelector(".aw-mapcrumb__back")?.textContent, "← 返回上一层", "第 4 层返回按钮指向上一层");
 
-  // 第 5 张：submaps["11111"] 存在，但已进 4 层 → 不再给入口
+  // 第 5 张：房间内部还能继续下钻。
   ok(Object.prototype.hasOwnProperty.call(stateByChat["chat-a"].map.submaps, "11111"),
     "夹具里第 5 张子图确实存在（submaps[11111]）");
   openPointPanel(container, "密室");
-  equal(enterSubmapButton(container, "密室"), null, "已进 4 层 → 第 5 张子图没有进入入口（深度上限 4）");
-  deepEqual(mapPointNames(container), ["密室"], "被拒后仍停留在第 4 张子图");
+  const fifth = enterSubmapButton(container, "密室");
+  ok(fifth !== null, "已进 4 层仍可进入第 5 张子图");
+  fifth.click();
+  deepEqual(mapPointNames(container), ["最深处"], "第 5 张子图显示室内细节");
+  container.querySelector(".aw-mapcrumb__back").click();
+  deepEqual(mapPointNames(container), ["密室"], "返回第 4 张子图");
 
   // 逐层返回：第 4 → 第 3 → 第 2 → 第 1 → 世界图
   for (const [index, expected] of [["暗格"], ["档案室", "偏厅"], ["大堂"]].entries()) {

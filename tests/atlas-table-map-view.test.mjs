@@ -106,6 +106,38 @@ test("M3 真实开场：全链无格坐标仍保留可进入的父子图，点�
     [["loc:1", "world"], ["loc:2", "1"], ["loc:3", "2"]], "各层只在对应父图待定位");
 });
 
+test("只有粗定位人物的末端房间仍有可进入的室内图，人物不被伪造到格点", () => {
+  const tables = {
+    locations: [location({ id: "loc:1", name: "学校" }),
+      location({ id: "loc:2", name: "教室", parentLocationId: "loc:1", mapId: "loc:1", gridX: 4, gridY: 5 })],
+    characters: [character({ id: "npc:classmate", name: "同学", locationId: "loc:2", mapId: "loc:2" })],
+    items: [],
+  };
+  const view = projectTablesToMapView(tables, EMPTY_MAPS, fakeWorld(), "2");
+  assert.ok(view.submaps["2"], "末端房间有室内图入口");
+  assert.deepEqual(view.submaps["2"].points, [], "未知站位不画成具体图钉");
+  assert.equal(view.unknownPosition.find((row) => row.locationId === "loc:2")?.characters[0].name, "同学");
+});
+
+test("室内动作明确写出窗边时可画估计方位，未知站位仍不画", () => {
+  const tables = {
+    locations: [location({ id: "loc:1", name: "学校" }),
+      location({ id: "loc:2", name: "教室", parentLocationId: "loc:1", mapId: "loc:1", gridX: 4, gridY: 5 })],
+    characters: [character({ id: "npc:a", name: "甲", locationId: "loc:2", mapId: "loc:2", currentAction: "坐在窗边看书" }),
+      character({ id: "npc:b", name: "乙", locationId: "loc:2", mapId: "loc:2", currentAction: "上课" })],
+    items: [],
+  };
+  const view = projectTablesToMapView(tables, EMPTY_MAPS, fakeWorld(), "2");
+  const marker = view.submaps["2"].points.find((row) => row.id === "npc:a");
+  assert.equal(marker.positionQuality, "estimated");
+  assert.equal(marker.positionHint, "窗边");
+  assert.equal(view.submaps["2"].points.some((row) => row.id === "npc:b"), false);
+  assert.equal(view.unknownPosition.find((row) => row.locationId === "loc:2")?.characters[0].name, "乙");
+  tables.characters[0].currentAction = "离开窗边，走到门口";
+  const moved = projectTablesToMapView(tables, EMPTY_MAPS, fakeWorld(), "2");
+  assert.equal(moved.submaps["2"].points.find((row) => row.id === "npc:a").positionHint, "门旁");
+});
+
 test("D01 人物与物品按 mapId+格序号投影；缺细坐标进「位置未知」名单", () => {
   const view = projectTablesToMapView(fixture(), EMPTY_MAPS, fakeWorld(), "4103");
 

@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 const SESSION_ROUTE_METHODS = (method, path) =>
   method === "POST" &&
   (path === "/state" ||
+    path === "/characters/timeline" ||
     path === "/map/image" ||
     path === "/map/travel-preview" ||
     path.startsWith("/turns/") ||
@@ -25,6 +26,8 @@ const SESSION_ROUTE_METHODS = (method, path) =>
     path === "/worlds/ensure-starter" ||
     path === "/worlds/protagonist/sync" ||
     path === "/worlds/geo/adopt" ||
+    path === "/worlds/geo/suggest" ||
+    path === "/worlds/geo/suggest/accept" ||
     path === "/worlds/move-author" ||
     path === "/worlds/scale/calibrate" ||
     // H07a：作者手动确认地理关系的会话路由

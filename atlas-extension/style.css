@@ -2446,6 +2446,23 @@
   box-shadow: 0 1px 3px rgba(16, 27, 29, 0.14);
 }
 .aw-geobar .aw-hint { font-size: 11px; }
+.aw-geobar__feedback { pointer-events: auto; width: 100%; text-align: center; font-size: 12px; color: var(--aw-text, #263a3b); }
+.aw-geo-suggestions {
+  pointer-events: auto;
+  max-width: min(360px, 90vw);
+  max-height: 240px;
+  overflow: auto;
+  padding: 6px 9px;
+  border: 1px solid var(--aw-border, #d9d4c7);
+  border-radius: 7px;
+  background: var(--aw-surface, #f8f6ef);
+  box-shadow: 0 2px 8px rgba(16, 27, 29, 0.16);
+  font-size: 12px;
+}
+.aw-geo-suggestions__summary { cursor: pointer; font-weight: 600; }
+.aw-geo-suggestions__item { display: flex; align-items: center; gap: 8px; margin-top: 7px; line-height: 1.4; }
+.aw-geo-suggestions__item > span { flex: 1; }
+.aw-object--npc[data-position-quality="estimated"] { border-style: dashed; opacity: 0.85; }
 
 /* 0.9.32 点挂子图：面包屑（画布顶部） + 标记点信息面板（viewport 右上） + 子图角标 */
 

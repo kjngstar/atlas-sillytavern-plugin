@@ -294,6 +294,7 @@ test("H05：成环 / 自指 / 未知父 / 超过 4 层全部具名 pending，同
       planCand({ id: "loc:f", name: "F村", relation: "contained", counterpartName: "P4", evidenceQuote: "F村在P4里" }),
     ],
     quoteSource: (quote) => (quote.length > 0 ? "worldbook" : null),
+    maxDepth: 4,
   });
 
   const reasons = new Map(plan.pending.map((row) => [row.fromName, row.reasonCode]));

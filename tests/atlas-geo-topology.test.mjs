@@ -543,7 +543,7 @@ test("H02 vehicle：地点引用 / id=locationId / 停靠与在途字段 / route
   );
 });
 
-test("H02 parent 链：自指 / 环 / 悬空 / 超过 4 层一律拒绝，正好 4 层合法", () => {
+test("H02 parent 链：自指 / 环 / 悬空 / 超过 8 层一律拒绝，正好 8 层合法", () => {
   const chain = (levels) => {
     const rows = [loc("loc:l0", "根")];
     for (let i = 1; i <= levels; i += 1) {
@@ -552,18 +552,18 @@ test("H02 parent 链：自指 / 环 / 悬空 / 超过 4 层一律拒绝，正好
     return rows;
   };
 
-  const fourDeep = chain(4);
+  const fourDeep = chain(8);
   const okTopology = createEmptyTopology();
-  okTopology.edges.push(edge("adjacent", "loc:l4", "loc:l0", null));
+  okTopology.edges.push(edge("adjacent", "loc:l8", "loc:l0", null));
   assert.deepEqual(validateGeoTopology(okTopology, { branchKey: CANON, locations: fourDeep, frame: FRAME }), {
     ok: true,
     errors: [],
   });
-  assert.equal(ATLAS_GEO_PARENT_DEPTH_MAX, 4);
+  assert.equal(ATLAS_GEO_PARENT_DEPTH_MAX, 8);
 
-  const fiveDeep = chain(5);
+  const fiveDeep = chain(9);
   const tooDeep = createEmptyTopology();
-  tooDeep.edges.push(edge("adjacent", "loc:l5", "loc:l0", null));
+  tooDeep.edges.push(edge("adjacent", "loc:l9", "loc:l0", null));
   const tooDeepResult = validateGeoTopology(tooDeep, { branchKey: CANON, locations: fiveDeep, frame: FRAME });
   assert.equal(tooDeepResult.ok, false);
   assert.ok(

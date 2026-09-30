@@ -21,8 +21,8 @@ const DESC_CHARS = 300;
  * 提示词里也不再声明这条数量限制，以免模型以为自己会因此被拒。
  */
 export const SUBMAP_POINTS_MAX = 40;
-/** R09：子图最大递归层级（世界→建筑→房间→细节）。超过的 parentLocationRef 不再下钻，记 warning。 */
-export const SUBMAP_DEPTH_MAX = 4;
+/** 子图最大递归层级。容纳城市→街区→建筑→楼层→房间→室内区域等结构。 */
+export const SUBMAP_DEPTH_MAX = 8;
 
 /** 子图比例尺（可选；不标定就保持「格程」诚实表达）。 */
 export interface SubMapScale {

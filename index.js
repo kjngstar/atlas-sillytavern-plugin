@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.67";
+export const ATLAS_EXTENSION_VERSION = "0.9.68";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -1120,6 +1120,7 @@ export function atlasDiagnoseEmptyNearby(input) {
 /** 需要携带会话文档的引擎路由前缀（0.9.42 会话承载的既有清单，一字不改）。 */
 const SESSION_ROUTE_PREFIXES = [
   "/state",
+  "/characters/timeline",
   "/map/image",
   "/map/travel-preview",
   "/turns/",
@@ -1128,6 +1129,7 @@ const SESSION_ROUTE_PREFIXES = [
   "/worlds/ensure-starter",
   "/worlds/protagonist/sync",
   "/worlds/geo/adopt",
+  "/worlds/geo/suggest",
   "/worlds/move-author",
   "/scene/",
   "/session/",
@@ -4711,6 +4713,8 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
   let mapStackKey = "";
   let mapCrumb = null;
   let mapPanel = null;
+  let geoSuggestionPanel = null;
+  let geoFeedbackEl = null;
   /** R15 补（R08 残留）：当前面板锚点身份 {kind:"point"|"entity", id, el}——相机变更 /
    *  重新渲染后按身份找回新标记续锚；对象真消失则关闭面板。 */
   let mapPanelAnchor = null;
@@ -5164,6 +5168,9 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     // 0.9.24 世界书提炼地理；0.9.26 地图抢救：geoBar 常显 + 新增「从近期剧情提炼新地点」
     // （复用同一条 adopt 管线：重名自动跳过，产出只增不改——地图跟着剧情长）
     const geoBar = el("div", "aw-geobar");
+    const geoFeedback = el("span", "aw-geobar__feedback");
+    geoFeedback.style.display = "none";
+    geoFeedbackEl = geoFeedback;
     const geoBtn = el("button", "aw-btn aw-btn--primary", "从世界书提炼地理");
     geoBtn.type = "button";
     geoBtn.setAttribute("aria-label", "用一次推演请求从角色卡世界书提炼地区与地点并加入地图");
@@ -5254,7 +5261,45 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         geoBusy = false;
       }
     });
-    geoBar.append(geoBtn, storyGeoBtn);
+    const suggestBtn = el("button", "aw-btn", "按题材构想地点");
+    suggestBtn.type = "button";
+    suggestBtn.title = "使用一次推演请求生成候选地点；采纳前不会写入世界、地图或注入。";
+    suggestBtn.addEventListener("click", async () => {
+      if (geoBusy) return;
+      const chatId = String(state().chatId ?? "");
+      if (!chatId) { setStatus("当前没有活动聊天。", "error"); return; }
+      geoBusy = true;
+      suggestBtn.disabled = true;
+      geoFeedback.textContent = "正在构想候选地点…";
+      geoFeedback.style.display = "";
+      try {
+        const chunks = await readCardGeoLoreChunks(chatId);
+        const ctx = SillyTavern.getContext();
+        const card = ctx?.characters?.[ctx?.characterId] ?? {};
+        const cardSetting = [card.description, card.scenario, card.data?.description, card.data?.scenario]
+          .filter((value) => typeof value === "string" && value.trim()).join("\n");
+        const loreSupplement = [cardSetting, ...chunks].join("\n").slice(0, 45000);
+        const result = await api.request("POST", "/worlds/geo/suggest", {
+          chatId, loreSupplement, recentTexts: readRecentFloors(),
+        });
+        if (result.status !== 200 || !result.body?.ok) throw new Error(result.body?.error?.message ?? "生成候选失败");
+        await core.refresh();
+        if (geoSuggestionPanel) geoSuggestionPanel.open = true;
+        const message = `已提出 ${result.body.data?.suggestions?.length ?? 0} 个候选地点；请逐个审阅采纳。`;
+        geoFeedback.textContent = message;
+        setStatus(message, "ok");
+      } catch (error) {
+        const message = `构想地点失败：${error?.message ?? String(error)}`;
+        geoFeedback.textContent = message;
+        setStatus(message, "error");
+      } finally {
+        geoBusy = false;
+        suggestBtn.disabled = false;
+      }
+    });
+    geoSuggestionPanel = el("details", "aw-geo-suggestions");
+    geoSuggestionPanel.append(el("summary", "aw-geo-suggestions__summary", "候选地点"));
+    geoBar.append(geoBtn, storyGeoBtn, suggestBtn, geoFeedback, geoSuggestionPanel);
     // 0.9.43 底部堆叠修复（0.9.46 补提交）：长提示挪页头，工具条只留按钮
     // 0.9.35 子图面包屑 + 标记点信息面板
     mapCrumb = el("div", "aw-mapcrumb");
@@ -5741,13 +5786,11 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
 
   /**
    * S8（0.9.55）：能否进入某个子图。
-   * 深度上限与后端一致——SUBMAP_DEPTH_MAX = 4 表示**最多四张连续子图**
-   * （世界图不算）：世界 → 第1 → 第2 → 第3 → 第4。mapStack.length 即已进入的层数，
-   * 故「已进 4 层」时不再下钻（第 5 张被拒绝）。旧实现写死 `>= 3`，与后端不一致，
-   * 导致第 4 张子图在 UI 侧永远进不去。
+   * 深度上限与后端一致：世界图之外最多八张连续子图。
+   * mapStack.length 是已进入的层数；城市、街区、建筑、楼层、房间可继续往下细化。
    * 同时按 parentMapId 校验父链，避免跨图误挂。
    */
-  const MAP_SUBMAP_DEPTH_MAX = 4;
+  const MAP_SUBMAP_DEPTH_MAX = 8;
   function hasChildSubmap(submaps, pointId) {
     const id = String(pointId);
     const child = submaps[id];
@@ -5887,7 +5930,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     if (!mapPanel || !d) return;
     mapPanel.innerHTML = "";
     // H06：SQL 模式下子图层级来自 SQL 地图视图（`atlasSqlSubmaps`），不是旧 `maps.submaps`
-    const submaps = lastSqlSubmaps ?? (d.map?.submaps ?? {});
+    const submaps = lastSqlSubmaps ?? (d.tableMap?.submaps ?? d.map?.submaps ?? {});
     const pointMeta = (d.map?.pointMeta ?? {});
     const hasSub = hasChildSubmap(submaps, point.id);
     const regions = Array.isArray(d.regions) ? d.regions : [];
@@ -6264,6 +6307,59 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       }
       mapPanel.append(thoughts);
     }
+    const timelineChatId = String(state()?.chatId ?? "");
+    if (timelineChatId && npc.id) {
+      const timeline = el("div", "aw-mappanel__section");
+      timeline.append(el("div", "aw-mappanel__section-label", "角色时间线 · 作者档案"));
+      const list = el("div", "aw-mappanel__timeline");
+      const loadButton = el("button", "aw-btn aw-btn--ghost", "查看完整动向");
+      loadButton.type = "button";
+      let nextOffset = 0;
+      let loading = false;
+      loadButton.addEventListener("click", async () => {
+        if (loading || nextOffset === null) return;
+        loading = true;
+        loadButton.disabled = true;
+        loadButton.textContent = "读取中…";
+        try {
+          const response = await api.request("POST", "/characters/timeline", {
+            chatId: timelineChatId, characterId: String(npc.id), offset: nextOffset, limit: 25,
+          });
+          if (!mapPanel.contains(timeline)) return;
+          if (response.status !== 200 || !response.body?.ok) throw new Error(response.body?.error?.message ?? "读取失败");
+          const payload = response.body.data ?? {};
+          const entries = Array.isArray(payload.entries) ? payload.entries : [];
+          if (nextOffset === 0 && entries.length === 0) list.append(el("div", "aw-mappanel__section-text", "暂无逐轮记录；后续推演有变化时会写入。"));
+          for (const entry of entries) {
+            const place = entry.locationName ? ` · ${entry.locationName}` : " · 地点未定";
+            const formatDetail = value => {
+              let raw = String(value ?? "");
+              const displayName = String(npc.name || entry.name || "该角色");
+              for (const characterId of [entry.characterId, npc.id]) {
+                const id = String(characterId ?? "");
+                if (!id) continue;
+                const prefixedId = id.startsWith("npc:") ? id : `npc:${id}`;
+                raw = raw.split(prefixedId).join(displayName).split(id).join(displayName);
+              }
+              return raw.replace(/^npc:[\w:-]+\s*/, `${displayName} `);
+            };
+            const detail = [entry.experience, entry.action].filter(Boolean).map(formatDetail).join("；");
+            list.append(el("div", "aw-mappanel__section-text", `第 ${entry.period} 时段${place}：${detail || "状态记录"}`));
+          }
+          nextOffset = typeof payload.nextOffset === "number" ? payload.nextOffset : null;
+          loadButton.textContent = nextOffset === null ? "已显示全部记录" : "加载更早记录";
+          loadButton.style.display = nextOffset === null ? "none" : "";
+        } catch (error) {
+          if (mapPanel.contains(timeline)) list.append(el("div", "aw-mappanel__section-text", String(error?.message ?? error)));
+          loadButton.textContent = "重试读取时间线";
+        } finally {
+          loading = false;
+          loadButton.disabled = false;
+        }
+      });
+      timeline.append(loadButton, list);
+      mapPanel.append(timeline);
+    }
     if (!actionText && !npc.status && !thoughtText && !tendencyText && narratives.length === 0) {
       mapPanel.append(el("div", "aw-mappanel__here-empty", "暂无动向记录——推演推进后这里会出现该角色的想法与动向。"));
     }
@@ -6341,6 +6437,37 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
 
   function renderMap(d) {
     if (!d.worldId) return;
+    if (geoSuggestionPanel) {
+      const suggestions = Array.isArray(d.geoSuggestions) ? d.geoSuggestions : [];
+      geoSuggestionPanel.style.display = suggestions.length ? "" : "none";
+      geoSuggestionPanel.querySelector("summary").textContent = `候选地点 ${suggestions.length}`;
+      for (const old of [...geoSuggestionPanel.querySelectorAll(".aw-geo-suggestions__item")]) old.remove();
+      for (const item of suggestions) {
+        const row = el("div", "aw-geo-suggestions__item");
+        row.append(el("span", "", `${item.name}${item.parentName ? ` · 属于 ${item.parentName}` : ""}：${item.reason || "符合题材"}`));
+        const accept = el("button", "aw-btn aw-btn--ghost", "采纳");
+        accept.type = "button";
+        accept.addEventListener("click", async () => {
+          accept.disabled = true;
+          const result = await api.request("POST", "/worlds/geo/suggest/accept", {
+            chatId: String(state().chatId ?? ""), suggestionId: String(item.id),
+          });
+          if (result.status === 200 && result.body?.ok) {
+            const message = `已采纳地点：${item.name}。地图位置仍是示意，距离尚未确认。`;
+            if (geoFeedbackEl) { geoFeedbackEl.textContent = message; geoFeedbackEl.style.display = ""; }
+            setStatus(message, "ok");
+            await core.refresh();
+          } else {
+            const message = result.body?.error?.message ?? "采纳候选失败";
+            if (geoFeedbackEl) { geoFeedbackEl.textContent = message; geoFeedbackEl.style.display = ""; }
+            setStatus(message, "error");
+            accept.disabled = false;
+          }
+        });
+        row.append(accept);
+        geoSuggestionPanel.append(row);
+      }
+    }
     // 0.9.35 换聊天 / 换世界 → 子图视图栈立即作废（数据隔离，绝不让旧子图带进新卡）
     // B03（0.9.59）：作用域键补齐**分支**——同一聊天同一世界的正史 / IF 是两张图，
     // 视图栈、相机与底图缓存都必须按 `chatId|worldId|branchKey` 分开，
@@ -6471,6 +6598,10 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       const ownerId = String(view.pointId);
       // 账本 presence=left 的人已经离场，不能出现在「建筑内」名单里冒充在场
       rosterNpcs = npcsAll.filter((n) => String(n.pointId ?? "") === ownerId && n.presence !== "left");
+      const estimatedNpcIds = new Set((Array.isArray(currentSub?.points) ? currentSub.points : [])
+        .filter((point) => point?.kind === "character" && point.positionQuality === "estimated")
+        .map((point) => String(point.rowId ?? point.id ?? "")));
+      rosterNpcs = rosterNpcs.filter((npc) => !estimatedNpcIds.has(tableRowIdOf(npc.id)));
       objects = objectsAll.filter((o) => String(o.pointId ?? "") === ownerId);
       if (tableMap) {
         /**
@@ -6487,7 +6618,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
          * （子图里 = 宿主 + 同层房间）。名单只列"归属于这些房间、但没有房间内细坐标"的人 / 物品；
          * 有细坐标的已经在地图上画成图钉，不在名单里重复出现。
          */
-        const visibleRoomIds = new Set(points.map((point) => `loc:${String(point.id)}`));
+        const visibleRoomIds = new Set([`loc:${ownerId}`, ...points.map((point) => `loc:${String(point.id)}`)]);
         const hasFinePosition = (row) => typeof row.gridX === "number" && typeof row.gridY === "number";
         const knownNpcKeys = new Set();
         for (const npc of rosterNpcs) {
@@ -6500,8 +6631,8 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
           if (!visibleRoomIds.has(locationId)) continue;
           if (entry.presence === "left") continue;
           if (entry.isProtagonist === true) continue;
-          if (hasFinePosition(entry)) continue;
           const rowId = String(entry.id ?? "").startsWith("npc:") ? String(entry.id) : `npc:${String(entry.id ?? "")}`;
+          if (hasFinePosition(entry) || estimatedNpcIds.has(rowId)) continue;
           if (knownNpcKeys.has(rowId)) continue;
           rosterNpcs = [...rosterNpcs, npcViewFromTableRow(entry)];
         }
@@ -6522,7 +6653,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     interiorRoster.innerHTML = "";
     interiorRoster.style.display = inSub && (rosterNpcs.length > 0 || objects.length > 0) ? "" : "none";
     if (inSub && (rosterNpcs.length > 0 || objects.length > 0)) {
-      interiorRoster.append(el("div", "aw-interior-roster__title", "建筑内 · 具体房间未知"));
+      interiorRoster.append(el("div", "aw-interior-roster__title", `${String(view.name ?? "当前地点")}内 · 细部位置未定`));
       for (const npc of rosterNpcs) {
         const button = el("button", "aw-interior-roster__item", String(npc.name ?? "未具名人物"));
         button.type = "button";
@@ -6858,6 +6989,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
           node.setAttribute("aria-label", `地点 ${String(marker.name ?? "")}，位置未确认，仅为示意，点击查看详情`);
           node.dataset.displayOnly = "true";
           node.dataset.pointId = pointId;
+          if (hasChildSubmap(submaps, pointId)) node.classList.add("aw-point--sub", "aw-point--entrance");
           node.append(el("span", "aw-point__pending", "示意"));
           node.style.left = `${Number(marker.x) + cameraFrame.minX}px`;
           node.style.top = `${Number(marker.y) + cameraFrame.minY}px`;
@@ -7075,7 +7207,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       const drawnNpcIds = new Set();
       // 三表子图的真实人物标点优先：nearby 是有界列表，不能让第 49 个人凭空消失。
       for (const marker of Array.isArray(currentSub?.points) ? currentSub.points : []) {
-        if (marker?.kind !== "character" || marker.positionQuality !== "confirmed") continue;
+        if (marker?.kind !== "character" || !["confirmed", "estimated"].includes(marker.positionQuality)) continue;
         const rowId = String(marker.rowId ?? marker.id ?? "");
         if (!rowId || typeof marker.x !== "number" || typeof marker.y !== "number") continue;
         if (pinCoords.has(`${marker.x}|${marker.y}`)) continue;
@@ -7088,11 +7220,13 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         const pin = el("button", "aw-object aw-object--npc");
         pin.type = "button";
         pin.dataset.npcId = String(npc.id);
-        pin.dataset.positionQuality = "confirmed";
+        pin.dataset.positionQuality = marker.positionQuality;
         pin.style.left = `${marker.x}px`;
         pin.style.top = `${marker.y}px`;
-        pin.title = String(npc.name);
-        pin.setAttribute("aria-label", `人物 ${String(npc.name)}，已确认细格位置，点击查看详情`);
+        pin.title = marker.positionQuality === "estimated"
+          ? `${String(npc.name)}（${String(marker.positionHint ?? "室内方位")}，根据动作文字估计；不代表已确认距离）`
+          : String(npc.name);
+        pin.setAttribute("aria-label", `人物 ${String(npc.name)}，${marker.positionQuality === "estimated" ? "室内方位估计" : "已确认细格位置"}，点击查看详情`);
         pin.append(el("span", "aw-object__gem", String(npc.name ?? "?").slice(0, 1)));
         pin.append(el("span", "aw-object__name", String(npc.name)));
         pin.addEventListener("click", (event) => { event.stopPropagation(); openNpcPanel(npc, pin); });

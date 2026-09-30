@@ -154,7 +154,7 @@ test("R15 map hierarchy: world to building to room; unknown interior NPC is list
   enterBuilding.click();
   assert.ok(container.querySelector('.aw-point[data-point-id="sub-room"]'));
   assert.equal(container.querySelectorAll(".aw-npc").length, 0, "unknown room must not acquire a spatial NPC marker");
-  assert.match(container.querySelector(".aw-interior-roster").textContent, /具体房间未知.*守卫/);
+  assert.match(container.querySelector(".aw-interior-roster").textContent, /细部位置未定.*守卫/);
   container.querySelector('.aw-point[data-point-id="sub-room"]').click();
   const enterRoom = [...container.querySelectorAll(".aw-mappanel button")].find((button) =>
     button.textContent.includes("进入内部地图"));

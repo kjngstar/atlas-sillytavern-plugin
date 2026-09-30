@@ -85,9 +85,8 @@ export const ATLAS_GEO_LIMITS = {
 } as const;
 
 /**
- * `parentLocationId` 链最大层数（H02「parent 链最大 4 层」）。
- * 与子图递归深度 R09 是同一个口径，因此复用 `SUBMAP_DEPTH_MAX`，不另抄一个 4。
- * 语义：某地点之上最多 4 层祖先（根地点 0 层）。
+ * `parentLocationId` 链最大层数与子图递归深度相同，复用 `SUBMAP_DEPTH_MAX`。
+ * 语义：某地点之上最多八层祖先（根地点零层）。
  */
 export const ATLAS_GEO_PARENT_DEPTH_MAX = SUBMAP_DEPTH_MAX;
 
@@ -372,7 +371,7 @@ function buildCharacterIds(characters: unknown): Set<string> {
 }
 
 /**
- * parent 链结构检查：自指 / 环 / 悬空父 / 超过 4 层。
+ * parent 链结构检查：自指 / 环 / 悬空父 / 超过上限。
  * 只检查**被拓扑引用到**的地点（未被引用的地点行由三表校验负责），避免越权拒绝整轮。
  */
 function chainProblemOf(locationId: string, index: Map<string, LocationEntry>): GeoChainProblem | null {
@@ -425,7 +424,7 @@ function normalizeFrame(frame: unknown): AtlasGeoFrame | null {
  *
  * 覆盖计划点名的全部禁止项：
  * - 同分支三表引用：edge 两端、area.locationId、vehicle.locationId / atLocationId 必须存在于地点表；
- *   `parentLocationId` 链自指 / 成环 / 悬空 / 超过 4 层一律拒绝；
+ *   `parentLocationId` 链自指 / 成环 / 悬空 / 超过上限一律拒绝；
  * - `kind="communication"` 必须 `channel="message"`；`kind="route"` 必须有可信连通信息
  *   （channel 只能是 walk / vehicle，光有同图坐标不算）；`kind="adjacent"` 不得宣称传讯；
  * - 边去重：同 (kind, 两端) 只能一行，id 必须等于 `geoEdgeId` 的稳定结果（无向去重）；

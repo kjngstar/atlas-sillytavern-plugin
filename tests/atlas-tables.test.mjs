@@ -692,11 +692,11 @@ test("B01 地点 add：根 / 子、同父同名歧义、不同父同名放行、
   assert.deepEqual(validateAtlasTables(t), { ok: true, errors: [] });
 });
 
-test("B01 深度上限 4 跳与换父成环", () => {
+test("B01 深度上限 8 跳与换父成环", () => {
   const t = tables();
   const scope = createAtlasRefScope();
   let parentRef = null;
-  for (let depth = 0; depth <= 4; depth += 1) {
+  for (let depth = 0; depth <= 8; depth += 1) {
     const res = applyLocationEdit(t, {
       table: "location", op: "add", ref: `new:loc:${depth + 1}`, name: `L${depth}`,
       ...(parentRef === null ? {} : { parentRef }),
@@ -704,11 +704,11 @@ test("B01 深度上限 4 跳与换父成环", () => {
     assert.equal(res.ok, true, `第 ${depth} 层应可建：${JSON.stringify(res)}`);
     parentRef = `new:loc:${depth + 1}`;
   }
-  const tooDeep = applyLocationEdit(t, { table: "location", op: "add", ref: "new:loc:9", name: "L5", parentRef: "new:loc:5" }, scope);
+  const tooDeep = applyLocationEdit(t, { table: "location", op: "add", ref: "new:loc:10", name: "L9", parentRef: "new:loc:9" }, scope);
   assert.equal(tooDeep.ok, false);
-  assert.equal(tooDeep.error.code, "PARENT_DEPTH_EXCEEDED", "第 5 张子图必须拒绝");
+  assert.equal(tooDeep.error.code, "PARENT_DEPTH_EXCEEDED", "第 9 张子图必须拒绝");
 
-  const cycle = applyLocationEdit(t, { table: "location", op: "set", ref: "new:loc:1", patch: { parentRef: "new:loc:5" } }, scope);
+  const cycle = applyLocationEdit(t, { table: "location", op: "set", ref: "new:loc:1", patch: { parentRef: "new:loc:9" } }, scope);
   assert.equal(cycle.ok, false);
   assert.equal(cycle.error.code, "PARENT_CYCLE", "祖先不能挂到自己的后代下");
   assert.deepEqual(validateAtlasTables(t), { ok: true, errors: [] });

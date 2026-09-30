@@ -26,7 +26,7 @@ import {
 /** D01 输出的上限：超过就给 total/truncated，让调用方分页，不静默裁。 */
 export const ATLAS_MAP_VIEW_LIMITS = {
   pointsPerMap: 200,
-  submaps: 40,
+  submaps: 128,
   nearby: 48,
   objects: 32,
   unplacedLocations: 64,
@@ -87,6 +87,8 @@ export interface AtlasMapViewPoint {
    *  unknown:无法归位,不进 world.points。
    */
   positionQuality: AtlasMapViewPositionQuality;
+  /** 室内文字方位；estimated 标点只供展示，绝不用于旅行距离。 */
+  positionHint?: string;
 }
 
 export interface AtlasMapViewSubmap {
@@ -170,6 +172,25 @@ export interface AtlasTableMapView {
 
 function isGrid(value: number | null): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function interiorPositionHint(action: string, id: string): { x: number; y: number; label: string } | null {
+  const zones: Array<[RegExp, number, number, string]> = [
+    [/(窗边|窗旁|靠窗|window)/i, 80, 30, "窗边"],
+    [/(门口|门边|门旁|门前|door)/i, 18, 80, "门旁"],
+    [/(角落|墙角|corner)/i, 18, 18, "角落"],
+    [/(桌边|桌旁|讲台|desk|table)/i, 55, 55, "桌旁"],
+    [/(中央|中间|中心|center|middle)/i, 50, 45, "中央"],
+  ];
+  const zone = zones.map((entry) => {
+    const matches = [...action.matchAll(new RegExp(entry[0].source, "gi"))];
+    return { entry, index: matches.length ? matches[matches.length - 1]!.index : -1 };
+  }).sort((a, b) => b.index - a.index)[0];
+  if (!zone || zone.index < 0) return null;
+  let hash = 0;
+  for (const letter of id) hash = (Math.imul(hash, 31) + letter.charCodeAt(0)) | 0;
+  return { x: zone.entry[1] + ((hash >>> 0) % 11) - 5,
+    y: zone.entry[2] + (((hash >>> 4) % 11) - 5), label: zone.entry[3] };
 }
 
 function regionOfPoint(world: World, pointId: string): string | null {
@@ -298,7 +319,17 @@ export function projectTablesToMapView(
       const location = byRowId.get(row.locationId);
       // 藏在已退役地点里的实体不进"位置未知"名单：那里根本不是地理事实
       if (location && !hiddenLocationIds.has(String(pointIdFromLocationRowId(location.id) ?? ""))) {
-        unknownBucket(location).characters.push({ id: characterId, name: row.name, presence: row.presence });
+        // 只有粗定位的人也需要一张可进入的室内图；图上不伪造人物坐标。
+        if (!submapBuckets.has(location.id)) submapBuckets.set(location.id, []);
+        const interior = location.parentLocationId !== null && row.presence !== "left" && row.mapId === location.id
+          ? interiorPositionHint(row.currentAction, row.id) : null;
+        if (interior) {
+          submapBuckets.get(location.id)!.push({ id: row.id, name: row.name,
+            x: interior.x, y: interior.y, regionId: null, kind: "character", rowId: row.id,
+            positionQuality: "estimated", positionHint: interior.label });
+        } else {
+          unknownBucket(location).characters.push({ id: characterId, name: row.name, presence: row.presence });
+        }
       }
     }
   }
@@ -317,6 +348,7 @@ export function projectTablesToMapView(
     if (!placed && row.locationId !== null) {
       const location = byRowId.get(row.locationId);
       if (location && !hiddenLocationIds.has(String(pointIdFromLocationRowId(location.id) ?? ""))) {
+        if (!submapBuckets.has(location.id)) submapBuckets.set(location.id, []);
         unknownBucket(location).items.push({ id: row.id, name: row.name, status: row.status });
       }
     }

@@ -344,6 +344,7 @@ test("M3 实酒馆回归：全链待定位的学校仍能逐层进入建筑与�
   const submaps = {
     "1": { mapId: "1", parentMapId: "world", frame: { cols: 100, rows: 100, frameRevision: 1 }, points: [], total: 0, truncated: 0 },
     "2": { mapId: "2", parentMapId: "1", frame: { cols: 100, rows: 100, frameRevision: 1 }, points: [], total: 0, truncated: 0 },
+    "3": { mapId: "3", parentMapId: "2", frame: { cols: 100, rows: 100, frameRevision: 1 }, points: [], total: 0, truncated: 0 },
   };
   const tableMap = {
     branchKey: "canon", world: { points: [], total: 0, truncated: 0 }, submaps,
@@ -356,11 +357,12 @@ test("M3 实酒馆回归：全链待定位的学校仍能逐层进入建筑与�
       { id: "loc:3", name: "图书室", parentLocationId: "loc:2", mapId: "2", positionQuality: "unknown" },
     ], total: 3, truncated: 0 },
   };
-  const { dom, container } = await mountReplay(mapState({ points: [], submaps, tableMap, currentLocationId: "3" }));
+  const { dom, container } = await mountReplay(mapState({ points: [], submaps: {}, tableMap, currentLocationId: "3" }));
   for (const [id, label] of [["1", "学校"], ["2", "教学楼"], ["3", "图书室"]]) {
     const marker = container.querySelector(`.aw-point--displayonly[data-point-id="${id}"]`);
     assert.ok(marker, `${label} 在自己的父图中有示意入口`);
     assert.equal(marker.dataset.displayOnly, "true", "示意点不能冒充确认坐标");
+    assert.ok(marker.classList.contains("aw-point--entrance"), `${label} 的子图来自 tableMap，也应显示入口`);
     marker.click();
     await flush();
     if (id !== "3") {
@@ -419,7 +421,7 @@ test("G03 回放：教室子图只画可信细格的人物图钉，建筑级 / �
   const roster = container.querySelector(".aw-interior-roster");
   assert.ok(roster, "子图必须有「建筑内 · 具体房间未知」名单");
   assert.equal(roster.style.display, "", "有人位置未细分时名单必须显示");
-  assert.match(String(roster.querySelector(".aw-interior-roster__title")?.textContent ?? ""), /建筑内 · 具体房间未知/,
+  assert.match(String(roster.querySelector(".aw-interior-roster__title")?.textContent ?? ""), /星海学校内 · 细部位置未定/,
     "名单标题写明它承载的是「位置未细分」的人");
   assert.match(String(roster.textContent ?? ""), /没有细坐标/,
     `无细坐标的人必须仍可见：实际 "${roster.textContent}"`);

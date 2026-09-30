@@ -127,8 +127,8 @@ test("R09-T8: validateSubmapDepth defends against circular references", () => {
 });
 
 // ---- T9：SUBMAP_DEPTH_MAX 常量 ----
-test("R09-T9: SUBMAP_DEPTH_MAX is 4 (world → region → building → room)", () => {
-  assert.equal(SUBMAP_DEPTH_MAX, 4);
+test("R09-T9: SUBMAP_DEPTH_MAX supports eight nested place levels", () => {
+  assert.equal(SUBMAP_DEPTH_MAX, 8);
 });
 
 // ---- T10：SUBMAP_FRAME_DEFAULT 形状 ----
@@ -307,20 +307,14 @@ test("S5-P6: 不可见子点不凭空出现；脏父引用（不存在 / 自引�
     "脏引用点不进任何子图");
 });
 
-test("S5-P7: 超过四层子的地点不再下钻（其子图不生成并计入 dropped）", () => {
-  const points = [
-    worldPoint(901, "一层"),
-    worldPoint(902, "二层", 901),
-    worldPoint(903, "三层", 902),
-    worldPoint(904, "四层", 903),
-    worldPoint(905, "五层", 904),
-    worldPoint(906, "六层", 905),
-  ];
+test("S5-P7: 超过八层的地点不再下钻（其子图不生成并计入 dropped）", () => {
+  const points = Array.from({ length: 10 }, (_, index) =>
+    worldPoint(901 + index, `第${index + 1}层`, index === 0 ? undefined : 900 + index));
   const { doc, dropped } = projectWorldSubmaps(points, emptyMapDoc());
-  for (const id of ["901", "902", "903", "904"]) {
-    assert.ok(doc.submaps[id], `第 ${id} 张子图存在（最多四张连续子图）`);
+  for (let id = 901; id <= 908; id += 1) {
+    assert.ok(doc.submaps[String(id)], `第 ${id} 张子图存在`);
   }
-  assert.ok(!doc.submaps["905"], "第五张子图不下钻");
+  assert.ok(!doc.submaps["909"], "第九张子图不下钻");
   assert.equal(dropped, 1, "不下钻的子点计入 dropped（供日志）");
 });
 

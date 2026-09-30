@@ -246,6 +246,49 @@ function sessionCore(store, deps = {}) {
   return { core: carrierAsCore(carrier), carrier, store };
 }
 
+test("题材地点先为作者候选，采纳后才进入世界与地图", async () => {
+  let existingName = "";
+  const fetcher = makeFetch([() => openAiTextResponse(JSON.stringify({ places: [
+    { name: "冒险者工会", parentName: existingName, reason: "奇幻都市通常有任务与冒险者聚集处" },
+    { name: existingName, reason: "已有地点，不应重复" },
+  ] }))]);
+  const { core, carrier } = await setup(null, { fetchFn: fetcher.fetchFn });
+  existingName = carrier.session.world.points[0].name;
+  const originalCount = carrier.session.world.points.length;
+  const suggested = await core.handle("POST", "/worlds/geo/suggest", { chatId: "chat-a", loreSupplement: "奇幻冒险" });
+  equal(suggested.status, 200, "候选请求成功");
+  equal(suggested.body.data.suggestions.length, 1, "已有地点不会重复提议");
+  equal(carrier.session.world.points.length, originalCount, "生成候选不改世界事实");
+  const stateBefore = await core.handle("POST", "/state", { chatId: "chat-a" });
+  equal(stateBefore.body.data.geoSuggestions.length, 1, "候选只在作者地图资料中出现");
+  const id = suggested.body.data.suggestions[0].id;
+  const accepted = await core.handle("POST", "/worlds/geo/suggest/accept", { chatId: "chat-a", suggestionId: id });
+  equal(accepted.status, 200, `采纳成功：${JSON.stringify(accepted.body.error ?? "")}`);
+  equal(carrier.session.world.points.length, originalCount + 1, "采纳后新增地点");
+  equal(carrier.session.world.points.at(-1).name, "冒险者工会", "新增正确地点");
+  equal((await core.handle("POST", "/state", { chatId: "chat-a" })).body.data.geoSuggestions.length, 0, "已采纳候选移出待审列表");
+  equal((await core.handle("POST", "/worlds/geo/suggest/accept", { chatId: "chat-a", suggestionId: id })).body.ok, false, "同一候选不可重复采纳");
+});
+
+test("人物时间线按会话分支和游标分页，已回退回合不显示", async () => {
+  const { core, carrier } = await setup(null);
+  const entry = (period, experience) => ({ characterId: "npc:chronicle-c1", name: "薇尔", period,
+    kind: "event", locationId: "loc:4103", locationName: "王都", fromLocationId: null,
+    action: "调查", experience, positionSource: "simulation", visibility: "author" });
+  const base = { branchId: CANON, committedAt: NOW, effectiveAt: CURRENT_TIME, characterTimeline: [entry(CURRENT_TIME, "抵达王都")] };
+  carrier.session.turns["turn:chat-a:one"] = base;
+  carrier.session.turns["turn:chat-a:two"] = { ...base, committedAt: NOW + 1, characterTimeline: [entry(CURRENT_TIME, "调查线索")] };
+  carrier.session.turns["turn:chat-a:old"] = { ...base, rolledBack: true, characterTimeline: [entry(CURRENT_TIME, "已撤销")] };
+  carrier.session.turns["turn:chat-a:future"] = { ...base, effectiveAt: CURRENT_TIME + 1, characterTimeline: [entry(CURRENT_TIME + 1, "未来") ] };
+  const first = await core.handle("POST", "/characters/timeline", { chatId: "chat-a", characterId: "chronicle-c1", limit: 1 });
+  equal(first.body.data.total, 2, "只统计当前分支、游标内、未回退记录");
+  equal(first.body.data.entries[0].experience, "调查线索", "新记录在前");
+  equal(first.body.data.nextOffset, 1, "有下一页");
+  const second = await core.handle("POST", "/characters/timeline", { chatId: "chat-a", characterId: "chronicle-c1", offset: 1, limit: 1 });
+  equal(second.body.data.entries[0].experience, "抵达王都", "可读取更早记录");
+  equal(second.body.data.nextOffset, null, "已到末页");
+});
+
 test("停用条目不参与旧协议检测：既不阻断有效请求，也不能绕过活动旧协议阻断", async () => {
   for (const shouldBlock of [false, true]) {
     const mock = makeFetch([() => openAiTextResponse(GOOD_EDIT)]);
@@ -296,8 +339,8 @@ async function setup(fetchScripts, overrides = {}) {
 // 路由清单与健康检查
 // ---------------------------------------------------------------------------
 
-test("路由清单：32 条且全部在 /api/plugins/atlas 前缀下", () => {
-  equal(ATLAS_ROUTE_MANIFEST.length, 32, "dispatch 核心路由数（含旧自动世界主角身份同步）");
+test("路由清单：35 条且全部在 /api/plugins/atlas 前缀下", () => {
+  equal(ATLAS_ROUTE_MANIFEST.length, 35, "dispatch 核心路由数（含地理候选与人物时间线）");
   equal(ATLAS_PLUGIN_ROUTES.length, ATLAS_ROUTE_MANIFEST.length, "index.mjs 与核心路由清单一致");
   const plugin = createAtlasServerPlugin();
   for (const route of plugin.routes) {
