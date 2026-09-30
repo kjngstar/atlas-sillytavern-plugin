@@ -877,6 +877,8 @@
 .aw-viewport {
   position: absolute;
   inset: 12px;
+  /* Keep map markers below the shared toolbar and child-map breadcrumb. */
+  top: 138px;
   overflow: hidden;
   border: 1px solid var(--am-border, #d8d2c2);
   border-radius: 8px;
@@ -1058,7 +1060,7 @@
  * 工具区收窄且不透明，避免与地图上的坐标标签叠字。
  */
 .aw-maptools {
-  max-width: 62%;
+  max-width: min(540px, calc(100% - 44px));
 }
 
 .aw-maptools__more {
@@ -1066,11 +1068,16 @@
 }
 
 @media (max-width: 480px) {
-  .aw-maptools {
-    /* Let wrapped controls use the map width. A 46% cap pushes zoom buttons
-       under the left rail, where pointer clicks hit navigation instead. */
-    max-width: none;
+  .aw-maptools.is-visible {
+    grid-template-columns: minmax(0, 1fr) auto;
+    max-width: calc(100% - 28px);
+    justify-items: start;
   }
+  .aw-maptools > .aw-region,
+  .aw-maptools > .aw-mapview { grid-column: 1 / -1; justify-self: start; }
+  .aw-maptools > .aw-zoom { grid-column: 1; justify-self: start; }
+  .aw-maptools > .aw-maptools__toggle { grid-column: 2; justify-self: end; }
+  .aw-viewport { top: 166px; }
   .aw-areadraw {
     left: 8px;
     right: 8px;
@@ -1854,8 +1861,17 @@
 
 /* 子项按内容占位：宁可换行，也不把文字压成竖排或截断。
    靠右排而不是 space-between：面板居中时左右留白对称，中间不必被硬拉开。 */
-.aw-maptools.is-visible { display: flex; justify-content: flex-end; }
+.aw-maptools.is-visible {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  justify-items: end;
+  align-items: center;
+  max-width: min(540px, calc(100% - 44px));
+  margin-left: auto;
+}
 .aw-maptools > * { pointer-events: auto; flex: 0 0 auto; }
+.aw-maptools > .aw-region { justify-self: start; width: min(100%, 180px); }
+.aw-maptools > .aw-maptools__more { grid-column: 1 / -1; justify-self: end; }
 
 .aw-region {
   width: auto;
@@ -2052,6 +2068,7 @@
 
 .atlas-workbench.atlas-workbench input.aw-input:not([type="checkbox"]):not([type="radio"]),
 .atlas-workbench.atlas-workbench select.aw-input,
+.atlas-workbench.atlas-workbench select.aw-region,
 .atlas-workbench.atlas-workbench textarea.aw-input {
   background-color: var(--aw-input-bg) !important;
   color: var(--aw-ink-strong) !important;
@@ -2451,7 +2468,7 @@
 
 .aw-mapcrumb {
   position: absolute;
-  top: 64px;
+  top: 104px;
   left: 22px;
   z-index: 7;
   display: flex;
@@ -2505,8 +2522,8 @@
 
 @media (max-width: 480px) {
   .aw-mapcrumb {
-    /* Wrapped tools take two rows; keep child-map navigation below them. */
-    top: 96px;
+    /* The narrow toolbar uses three rows; keep navigation beneath the controls. */
+    top: 132px;
     left: 14px;
     flex-wrap: wrap;
     max-width: calc(100% - 28px);
@@ -2514,6 +2531,11 @@
   }
   .aw-mapcrumb > * { pointer-events: auto; }
 }
+.atlas-workbench.atlas-workbench select.aw-region option {
+  background-color: var(--aw-input-bg) !important;
+  color: var(--aw-ink-strong) !important;
+}
+.atlas-workbench.atlas-workbench select.aw-region:disabled { opacity: 1; }
 }
 
 /* S9（0.9.55）人物纠偏手柄：面板名单 / 人物卡片里的头像，长按起拖（旧入口是地图人物标点）。

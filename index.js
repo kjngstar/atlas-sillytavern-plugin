@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.65";
+export const ATLAS_EXTENSION_VERSION = "0.9.66";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -4714,6 +4714,8 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
    *  重新渲染后按身份找回新标记续锚；对象真消失则关闭面板。 */
   let mapPanelAnchor = null;
   let lastMapData = null;
+  let activeMapPoints = [];
+  let activeMapSubmaps = {};
 
   /** R08 网格盒原点（stage 空间；renderMap 按固定 frame 外扩设置）。 */
   let gridBoxOrigin = { x: 0, y: 0 };
@@ -5200,20 +5202,24 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     };
     geoBtn.addEventListener("click", async () => {
       if (geoBusy) return;
-      const confirmed = typeof window === "undefined" || typeof window.confirm !== "function"
-        ? true
-        : window.confirm("用 1 次推演请求从角色卡世界书提炼地区 / 地点并加入地图（重名自动跳过），继续？");
-      if (!confirmed) return;
       geoBusy = true;
       try {
-        const lore = await readCardLoreSupplementViaSelector(currentLoreSelectionContext("geo"));
-        if (!lore) {
-          setStatus("没有可用的世界书资料——检查卡书是否有启用条目，或先在「推进」页开启「世界书资料」。", "error");
-          return;
-        }
         const chatId = String(state().chatId ?? "");
         if (!chatId) { setStatus("当前没有活动聊天。", "error"); return; }
-        await runGeoAdopt({ chatId, loreSupplement: lore }, "世界书提炼");
+        const chunks = await readCardGeoLoreChunks(chatId);
+        if (chunks.length === 0) {
+          setStatus("没有可用的世界书条目；请检查角色卡与聊天绑定的世界书。", "error");
+          return;
+        }
+        const confirmed = typeof window === "undefined" || typeof window.confirm !== "function"
+          ? true
+          : window.confirm(`按 ${chunks.length} 批读取当前世界书的启用条目，逐批提炼地点（最多 ${chunks.length} 次模型请求；重名自动跳过）。继续？`);
+        if (!confirmed) return;
+        const result = await importWorldbookGeography(chatId, String(state().binding?.worldId ?? ""), (progress) => {
+          setStatus(`世界书地理导入 ${progress.completed}/${progress.total} 批：新增 ${progress.regionsAdded} 地区 / ${progress.pointsAdded} 地点。`, "info");
+        }, chunks);
+        setStatus(`世界书地理导入 ${result.completed}/${result.total} 批：新增 ${result.regionsAdded} 地区 / ${result.pointsAdded} 地点。${result.truncated ? "世界书超过本次 32 批上限，剩余条目尚未导入。" : ""}${result.capacityReached ? "地图已到 200 地点显示上限。" : ""}${result.failure ? `中断：${result.failure}` : ""}`,
+          result.completed === result.total && !result.truncated && !result.capacityReached && !result.failure ? "ok" : "warn");
       } catch (error) {
         setStatus(`提炼失败：${error instanceof Error ? error.message : String(error)}`, "error");
       } finally {
@@ -5407,45 +5413,84 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     return mapCanvas;
   }
 
-  /**
-   * R08 定位当前位置：保持比例，视口中心对准玩家所在地点。
-   * S8（0.9.55）：玩家在子地点（建筑内的房间）时，世界图看不到该点——
-   * 此时沿 pointParents 上溯到**最近的根祖先**并在世界图标出，同时提示「在某建筑内」。
-   * 仍只允许世界图使用（子图视图下不定位，避免跨图混淆）。
-   */
+  /** 按当前图层的实际标点定位；其他图层则沿已知父链进入当前位置所在的内部图。 */
   function locatePlayerCamera() {
     if (!camera || !cameraFrame) return;
-    if (mapStack.length > 0) {
-      setStatus("定位当前位置只在世界图可用。", "warn");
-      return;
-    }
     const d = lastMapData;
-    const worldPoints = Array.isArray(d?.map?.points) ? d.map.points : [];
-    const currentId = String(d?.currentLocationId ?? "");
-    const direct = worldPoints.find((p) => String(p.id) === currentId);
-    if (direct) {
-      commitCamera(centerCameraOn(camera, Number(direct.x), Number(direct.y)));
+    const currentId = String(d?.currentLocationId ?? "").replace(/^loc:/, "");
+    if (!currentId) {
+      setStatus("本轮尚未确定主角所在地点。", "warn");
       return;
     }
-    // 当前是子地点：沿父链上溯到最近的根地点（世界图上存在的那个）
     const parents = d?.map?.pointParents && typeof d.map.pointParents === "object" ? d.map.pointParents : {};
-    const seen = new Set([currentId]);
-    let cursor = currentId;
-    let hops = 0;
-    while (hops < MAP_SUBMAP_DEPTH_MAX + 1) {
-      const parentId = String(parents[cursor] ?? "");
-      if (!parentId || seen.has(parentId)) break;
-      seen.add(parentId);
-      hops += 1;
-      const ancestor = worldPoints.find((p) => String(p.id) === parentId);
-      if (ancestor) {
-        commitCamera(centerCameraOn(camera, Number(ancestor.x), Number(ancestor.y)));
-        setStatus(`当前位置在「${String(ancestor.name)}」内（子地点未显示在世界图）——进入该地点可查看内层地图。`, "info");
+    const chain = [currentId];
+    while (chain.length <= MAP_SUBMAP_DEPTH_MAX + 1) {
+      const parentId = String(parents[chain[chain.length - 1]] ?? "").replace(/^loc:/, "");
+      if (!parentId || chain.includes(parentId)) break;
+      chain.push(parentId);
+    }
+    const ownerId = mapStack.length ? String(mapStack[mapStack.length - 1].pointId) : "world";
+    const targetId = ownerId === "world" ? chain[chain.length - 1]
+      : chain[chain.indexOf(ownerId) - 1];
+    if (targetId) {
+      const point = activeMapPoints.find((p) => String(p.id) === targetId);
+      // 以当前图层真正渲染的标点为准：三表缺坐标时点是 H08 示意布局，
+      // 不能再拿世界镜像里的另一套 x/y 让相机“定位”到错误位置。
+      const marker = [...(mapLayer?.querySelectorAll(".aw-point[data-point-id]") ?? [])]
+        .find((node) => String(node.dataset.pointId) === targetId);
+      const x = Number.parseFloat(marker?.style.left ?? "");
+      const y = Number.parseFloat(marker?.style.top ?? "");
+      if (marker && Number.isFinite(x) && Number.isFinite(y)) {
+        commitCamera(centerCameraOn(camera, x, y));
+        const estimated = marker.dataset.displayOnly === "true"
+          || d?.map?.pointMeta?.[targetId]?.coordinateStatus === "schematic"
+          || point?.unplaced === true || point?.coordinateStatus === "schematic";
+        const name = String(point?.name ?? marker.title ?? targetId).replace(/（位置未确认.*$/, "");
+        if (targetId !== currentId || estimated) {
+          setStatus(estimated
+            ? `已定位到「${name}」的示意标点；实际格坐标尚未确认。`
+            : `当前位置在「${name}」内；进入内部地图可查看更细地点。`, "info");
+        }
         return;
       }
-      cursor = parentId;
     }
-    setStatus("当前位置不在地图上。", "warn");
+    if (ownerId === currentId) {
+      commitCamera(centerCameraOn(camera, (cameraFrame.minX + cameraFrame.maxX) / 2,
+        (cameraFrame.minY + cameraFrame.maxY) / 2));
+      setStatus("主角位于当前地点；尚无更细的室内格坐标。", "info");
+      return;
+    }
+    if (ownerId === "world" && regionFilter) {
+      regionFilter = "";
+      renderMap(data());
+      locatePlayerCamera();
+      return;
+    }
+    // 当前正在看别处：切到主角所在地点的父级地图，再在该图上定位。
+    const desiredOwner = chain.find((id) => activeMapSubmaps[id] && id !== currentId);
+    if (desiredOwner && !chain.includes(ownerId)) {
+      const owners = chain.slice(chain.indexOf(desiredOwner)).reverse();
+      const nextStack = [];
+      for (const id of owners) {
+        const sub = activeMapSubmaps[id];
+        const expected = nextStack.length ? nextStack[nextStack.length - 1].pointId : "world";
+        if (!sub || String(sub.parentMapId ?? "world") !== String(expected)) break;
+        nextStack.push({ pointId: id, name: String(sub.name ?? id) });
+      }
+      if (nextStack.length && nextStack[nextStack.length - 1].pointId === desiredOwner) {
+        mapStack = nextStack;
+        renderMap(data());
+        locatePlayerCamera();
+        return;
+      }
+    }
+    if (mapStack.length > 0 && !chain.includes(ownerId)) {
+      mapStack = [];
+      renderMap(data());
+      locatePlayerCamera();
+      return;
+    }
+    setStatus("当前位置已记录，但这张地图没有可确认的地点标点。", "warn");
   }
 
   /** 0.9.35 返回上一层子图（世界图 = 栈空）。R08：相机按视图持久化，返回恢复原相机。 */
@@ -5473,7 +5518,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       return;
     }
     mapCrumb.style.display = "";
-    const back = el("button", "aw-mapcrumb__back", `← 返回${mapStack.length > 1 ? "上一层" : "世界图"}`);
+    const back = el("button", "aw-mapcrumb__back", `← ${mapStack.length > 1 ? "上层" : "世界图"}`);
     back.type = "button";
     back.setAttribute("aria-label", "返回上一层地图");
     back.addEventListener("click", () => popMapStack());
@@ -6412,6 +6457,8 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         : regionFilter
           ? pointsAll.filter((p) => String(p.regionId ?? "") === regionFilter)
           : pointsAll;
+    activeMapPoints = points;
+    activeMapSubmaps = submaps;
     // 世界图以地点和人数徽标承载人物；子图只有真实细格坐标才画独立人物点，
     // 建筑级与未知位置仍由地点面板名单承载。
     // H06：SQL 模式下目录 / 三表一律不参与（人物由 SQL 人物标点 + 粗定位名单承载）。
@@ -6469,7 +6516,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     } else {
       objects = regionFilter ? objectsAll.filter((o) => String(o.regionId ?? "") === regionFilter) : objectsAll;
     }
-    if (regionSelect) regionSelect.style.display = inSub || sqlMapItems ? "none" : "";
+    if (regionSelect) regionSelect.disabled = inSub || Boolean(sqlMapItems);
     if (travelBar) travelBar.style.display = inSub ? "none" : "";
     interiorRoster.innerHTML = "";
     interiorRoster.style.display = inSub && (rosterNpcs.length > 0 || objects.length > 0) ? "" : "none";
@@ -6550,13 +6597,14 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     regionSelect.innerHTML = "";
     const allOption = document.createElement("option");
     allOption.value = "";
-    allOption.textContent = "全部地区";
+    allOption.textContent = inSub ? String(currentSub?.name ?? view?.name ?? "内部地图")
+      : sqlMapItems ? "世界图" : "全部地区";
     regionSelect.append(allOption);
     for (const region of regions) {
       const option = document.createElement("option");
       option.value = String(region.id);
       option.textContent = String(region.name);
-      if (String(region.id) === regionFilter) option.selected = true;
+      if (!inSub && !sqlMapItems && String(region.id) === regionFilter) option.selected = true;
       regionSelect.append(option);
     }
 
@@ -10262,6 +10310,14 @@ async function ensureStarterWorld() {
       if (nowChatId !== chatId) return false;
       if (!core) return false;
       await core.bindToWorld(String(world.id));
+      // 仅新建世界自动导入卡书地理；旧世界可在地图页手动补导。
+      if (result.body?.data?.created === true && core.getState().binding) {
+        void importWorldbookGeography(chatId, String(world.id)).catch((error) => {
+          emitAtlasDiagnostic({ level: "warn", source: "map", code: "GEO_ADOPT_FAILED",
+            operation: "geo", phase: "request", outcome: "failed",
+            details: { reasonCode: error instanceof Error ? error.name : "UNKNOWN" } });
+        });
+      }
       return Boolean(core.getState().binding);
     } catch (error) {
       emitAtlasDiagnostic({ level: "error", source: "engine", code: "WORLD_ENSURE_FAILED",
@@ -10318,6 +10374,110 @@ export function recordAtlasHostLoreActivation(entries, ctx) {
   emitAtlasDiagnostic({ level: "info", source: "lorebook",
     code: "LORE_HOST_ACTIVATION_CAPTURED", operation: "lore-context",
     phase: "select", outcome: "success", details: { count: ids.size } });
+}
+
+/** 地理建图读取完整启用条目，不受普通回合的激活/6000 字注入预算限制。 */
+export function buildAtlasGeoLoreChunks(entries, maxChars = 5500, maxChunks = 32) {
+  const geographic = /地图|地理|地点|地区|区域|领域|城镇|城市|关隘|道路|街道|聚落|场所|大陆|国家|地形|风土|学校|建筑|房间|遗迹|森林|村|镇/;
+  const rows = (Array.isArray(entries) ? entries : [])
+    .filter((entry) => entry && entry.enabled !== false && typeof entry.content === "string" && entry.content.trim())
+    .map((entry, index) => ({ ...entry, index }))
+    .sort((a, b) => Number(geographic.test(String(b.title ?? ""))) - Number(geographic.test(String(a.title ?? ""))) || a.index - b.index);
+  const chunks = [];
+  let chunk = "";
+  for (const row of rows) {
+    const line = `- [${String(row.bookName ?? "世界书")}] ${String(row.title ?? "条目")}：${row.content.slice(0, 2500).replace(/\s+/g, " ")}`;
+    if (line.length > maxChars) continue;
+    if (chunk && chunk.length + line.length + 1 > maxChars) {
+      chunks.push(chunk);
+      if (chunks.length >= maxChunks) {
+        chunks.truncated = true;
+        return chunks;
+      }
+      chunk = "";
+    }
+    chunk += `${chunk ? "\n" : ""}${line}`;
+  }
+  if (chunk && chunks.length < maxChunks) chunks.push(chunk);
+  chunks.truncated = false;
+  return chunks;
+}
+
+async function readCardGeoLoreChunks(chatId) {
+  const ctx = SillyTavern.getContext();
+  if (String(ctx?.chatId ?? "") !== chatId) return [];
+  const character = ctx?.characters?.[ctx?.characterId] ?? null;
+  const characterId = ctx?.characterId ?? null;
+  const bookNames = [];
+  const addBook = (raw) => {
+    const name = typeof raw === "string" ? raw.trim() : typeof raw?.name === "string" ? raw.name.trim() : "";
+    if (name && !bookNames.includes(name)) bookNames.push(name);
+  };
+  try {
+    const th = globalThis.TavernHelper ?? globalThis.getTavernHelper?.() ?? null;
+    const bound = await th?.getCharWorldbookNames?.("current");
+    if (Array.isArray(bound)) bound.forEach(addBook);
+    else if (bound && typeof bound === "object") {
+      addBook(bound.primary);
+      if (Array.isArray(bound.additional)) bound.additional.forEach(addBook);
+    } else addBook(bound);
+  } catch { /* 宿主助手不可用时仍读卡书与聊天书 */ }
+  addBook(character?.data?.extensions?.world);
+  addBook(ctx?.chatMetadata?.world_info);
+  const worldInfo = await loadStWorldInfo();
+  const prefixes = Object.values(atlasRuntime.mod?.ATLAS_LOREBOOK_PREFIX ?? { a: "Atlas 动向 ·", b: "Atlas 事件 ·" });
+  const entries = [];
+  for (const bookName of bookNames) {
+    let book;
+    try { book = await worldInfo.loadWorldInfo(bookName); } catch { continue; }
+    for (const entry of Object.values(book?.entries ?? {})) {
+      if (!entry || typeof entry !== "object" || entry.disable === true || !String(entry.content ?? "").trim()) continue;
+      const title = String(entry.comment ?? entry.key?.[0] ?? "条目");
+      if (prefixes.some((prefix) => title.startsWith(String(prefix)))) continue;
+      entries.push({ bookName, title, content: entry.content, enabled: true });
+    }
+  }
+  const live = SillyTavern.getContext();
+  if (String(live?.chatId ?? "") !== chatId || (live?.characterId ?? null) !== characterId
+    || live?.chatMetadata !== ctx?.chatMetadata) return [];
+  return buildAtlasGeoLoreChunks(entries);
+}
+
+const geoImportInFlight = new Map();
+async function importWorldbookGeography(chatId, worldId, onProgress = null, providedChunks = null) {
+  if (geoImportInFlight.has(chatId)) return geoImportInFlight.get(chatId);
+  const task = (async () => {
+    const chunks = providedChunks ?? await readCardGeoLoreChunks(chatId);
+    let regionsAdded = 0;
+    let pointsAdded = 0;
+    let completed = 0;
+    let capacityReached = false;
+    let failure = "";
+    for (const loreSupplement of chunks) {
+      if (String(SillyTavern.getContext()?.chatId ?? "") !== chatId) break;
+      if (String(atlasRuntime.core?.getState()?.binding?.worldId ?? "") !== worldId) break;
+      const result = await atlasRuntime.api.request("POST", "/worlds/geo/adopt", { chatId, loreSupplement });
+      if (result.status !== 200 || result.body?.ok !== true) {
+        failure = String(result.body?.error?.message ?? `HTTP ${result.status}`).slice(0, 160);
+        emitAtlasDiagnostic({ level: "warn", source: "map", code: "GEO_ADOPT_FAILED",
+          operation: "geo", phase: "response", outcome: "failed", httpStatus: result.status });
+        break;
+      }
+      completed += 1;
+      regionsAdded += Number(result.body.data?.regionsAdded ?? 0);
+      pointsAdded += Number(result.body.data?.pointsAdded ?? 0);
+      onProgress?.({ completed, total: chunks.length, regionsAdded, pointsAdded });
+      if (String(SillyTavern.getContext()?.chatId ?? "") === chatId) await atlasRuntime.core?.refresh();
+      if (result.body.data?.capacityReached === true) {
+        capacityReached = true;
+        break;
+      }
+    }
+    return { completed, total: chunks.length, regionsAdded, pointsAdded,
+      truncated: chunks.truncated === true, capacityReached, failure };
+  })();
+  geoImportInFlight.set(chatId, task);
+  try { return await task; } finally { geoImportInFlight.delete(chatId); }
 }
 
 /** 从当前绑定书中按本次请求的正文选取资料；宿主未提供可靠激活清单时只报告 context-fallback。 */

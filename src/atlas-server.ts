@@ -2615,7 +2615,7 @@ function createCoreInstance(
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.65",
+      version: "0.9.66",
       protocolVersion: 1,
       time: now(),
     });
@@ -2759,6 +2759,8 @@ function createCoreInstance(
     if (!chatId || chatId.length > ATLAS_LIMITS.ID_CHARS) {
       throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "chatId 非法");
     }
+    // 与本聊天的普通世界回合串行，避免首建批量导入和正文提交同时覆盖世界/三表快照。
+    return enqueue(chatId, async () => {
     const lore = typeof record.loreSupplement === "string" ? record.loreSupplement.trim() : "";
     // 0.9.26 剧情模式输入：宽容可选，形状不对 / 超界直接丢弃
     const recentTexts = Array.isArray(record.recentTexts)
@@ -2791,6 +2793,7 @@ function createCoreInstance(
         regionsAdded: 0,
         pointsAdded: 0,
         skipped: outcome.skipped,
+        capacityReached: (world.points ?? []).length >= MAP_POINTS_MAX,
         // H05：即使一个新地点都没有，也要把「待确认归属」如实带回（不静默丢掉提炼结果）
         preview: outcome.preview,
         pending: outcome.pending,
@@ -2808,6 +2811,7 @@ function createCoreInstance(
       regionsAdded: outcome.regionsAdded,
       pointsAdded: outcome.pointsAdded,
       skipped: outcome.skipped,
+      capacityReached: (world.points ?? []).length + outcome.pointsAdded >= MAP_POINTS_MAX,
       revisionAppended: outcome.revisionAppended,
       regionNames: outcome.regionNames,
       pointNames: outcome.pointNames,
@@ -2820,6 +2824,7 @@ function createCoreInstance(
       pendingTotal: outcome.pending.length,
       /** H18b：首次建出世界图时的尺度状态（null = 已有世界图，不额外发模型请求）。 */
       mapScale: outcome.mapScale,
+    });
     });
   }
 
@@ -3040,7 +3045,7 @@ function createCoreInstance(
     /** 同名歧义（同一名字对应多个正式 id）：既不新建也不猜归属，进 pending。 */
     const ambiguousNames: string[] = [];
     for (const raw of (Array.isArray(spec.points) ? spec.points : []).slice(0, GEO_LIMITS.POINTS_MAX + 8)) {
-      if (newPoints.length >= GEO_LIMITS.POINTS_MAX) break;
+      if (newPoints.length >= GEO_LIMITS.POINTS_MAX || (world.points ?? []).length + newPoints.length >= MAP_POINTS_MAX) break;
       const record = (raw ?? {}) as Record<string, unknown>;
       const name = cleanName(record.name);
       if (!name) {
@@ -4501,6 +4506,8 @@ function createCoreInstance(
     if (!chatId || chatId.length > ATLAS_LIMITS.ID_CHARS) {
       throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "chatId 非法");
     }
+    // 首次建世的世界书地理导入与开场定位都修改世界/三表，必须同聊天串行。
+    return enqueue(chatId, async () => {
     const binding = requireBoundBinding(await getBinding(chatId));
     const apply = payload.apply === true;
     const assistantText = typeof payload.assistantText === "string" ? payload.assistantText.trim() : "";
@@ -4812,6 +4819,7 @@ function createCoreInstance(
     await store.write(sceneDocKey(world.id), nextDoc);
     if (previewId) shared.bootstrapPreviews.delete(previewId);
     return okResult(resultData);
+    });
   }
 
   /**

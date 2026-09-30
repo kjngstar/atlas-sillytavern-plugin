@@ -26,6 +26,7 @@ import {
   recordAtlasHostLoreActivation,
   isAtlasLoreSupplementEnabled,
   atlasSwipeRegenerating,
+  buildAtlasGeoLoreChunks,
   ATLAS_DISPLAY_NAME,
   ATLAS_EXTENSION_VERSION,
 } from "../atlas-extension/index.js";
@@ -44,6 +45,26 @@ test("酒馆右滑事件：数组外的新槽会回退，已有非空候选只�
     "当前已完成候选无需回退");
   equal(atlasSwipeRegenerating({ swipe_id: 3, swipes: ["原候选"] }), null,
     "未知形状仍保守跳过");
+});
+
+test("世界书建图分批覆盖后部地点并跳过禁用条目", () => {
+  const entries = Array.from({ length: 18 }, (_, i) => ({
+    bookName: "角色世界书", title: i === 17 ? "偏远村镇" : `条目${i}`,
+    content: `第${i}处地点：${"山路".repeat(80)}`, enabled: i !== 8,
+  }));
+  const chunks = buildAtlasGeoLoreChunks(entries, 650, 16);
+  ok(chunks.length > 1, "超过单次预算时分批而非只取最前面的条目");
+  ok(chunks.join("\n").includes("偏远村镇"), "后部的地理条目仍进入建图素材");
+  ok(!chunks.join("\n").includes("第8处地点"), "禁用条目不进入建图素材");
+  ok(chunks.every((chunk) => chunk.length <= 650), "每批不超过模型素材预算");
+  const twoBooks = Array.from({ length: 240 }, (_, i) => ({
+    bookName: i < 120 ? "主世界书" : "附加世界书", title: `地点${i}`,
+    content: `第${i}处地点：${"山路".repeat(170)}`, enabled: true,
+  }));
+  const full = buildAtlasGeoLoreChunks(twoBooks);
+  ok(full.length > 1 && full.length <= 32, "两本各 120 条的世界书分成有界批次");
+  ok(full.join("\n").includes("第239处地点"), "第 240 条条目也被纳入首次建图素材");
+  equal(full.truncated, false, "本夹具未因批次上限丢掉后部条目");
 });
 function ok(value, message) {
   assertionCount += 1;
@@ -1806,7 +1827,7 @@ const S10_ROOT_POINTS = [
 ];
 const S10_POINT_PARENTS = { "11": 1, "111": 11, "1111": 111, "11111": 1111, "111111": 11111 };
 
-test("S10 前端：定位当前位置——根地点直接命中、子地点回溯最近根祖先、子图拒绝", async () => {
+test("S10 前端：定位当前位置——世界图回溯祖先，内部图定位房间", async () => {
   const base = s10State({
     chatId: "chat-a",
     worldId: "w-s10",
@@ -1840,10 +1861,10 @@ test("S10 前端：定位当前位置——根地点直接命中、子地点回�
   // 已改为 setStatus 就地刷新 / 补挂状态行；此处按修好后的行为锁死，防回归。
   const ancestorTip = container.querySelector(".aw-status")?.textContent ?? "";
   ok(ancestorTip.includes("当前位置在「钟楼」内"), `点击当时即给出最近根祖先提示：实际「${ancestorTip}」`);
-  ok(ancestorTip.includes("进入该地点可查看内层地图"), "提示说明可进入该地点查看内层地图");
+  ok(ancestorTip.includes("进入内部地图可查看更细地点"), "提示说明可进入该地点查看内层地图");
   ok(!ancestorTip.includes("当前位置不在地图上"), "提示不是「当前位置不在地图上」");
 
-  // 3) 子图视图：定位只在世界图可用
+  // 3) 子图视图：同一当前位置应定位到大堂的本层标点
   openPointPanel(container, "钟楼");
   const enter = enterSubmapButton(container, "钟楼");
   ok(enter !== null, "前置：钟楼有内部地图入口");
@@ -1853,11 +1874,20 @@ test("S10 前端：定位当前位置——根地点直接命中、子地点回�
   locateButton(container).click();
   const inSubAfter = cameraCenter(container, cameraMod);
   const subTip = container.querySelector(".aw-status")?.textContent ?? "";
-  ok(subTip.includes("定位当前位置只在世界图可用"),
-    `子图视图点击当时即给出「只在世界图可用」提示（不得停在旧提示）：实际「${subTip}」`);
-  equal(inSubAfter.k, inSubBefore.k, "子图视图下定位不改比例");
-  ok(Math.abs(inSubAfter.cx - inSubBefore.cx) < 0.01 && Math.abs(inSubAfter.cy - inSubBefore.cy) < 0.01,
-    "子图视图下定位不动相机（不跨图混淆）");
+  ok(!subTip.includes("只在世界图可用"), "内部图定位无需返回世界图");
+  equal(inSubAfter.k, inSubBefore.k, "内部图定位不改比例");
+  ok(Math.abs(inSubAfter.cx - 10) < 0.01 && Math.abs(inSubAfter.cy - 10) < 0.01,
+    "内部图定位到大堂在本层地图的标点");
+  equal(container.querySelector(".aw-region")?.disabled, true, "内部图保留工具栏占位并标明本层，地区筛选不可误操作");
+  equal(container.querySelector(".aw-region option")?.textContent, "钟楼", "内部图工具栏显示当前地图名称");
+  stateByChat["chat-a"] = { ...base, currentLocationId: "2" };
+  await core.refresh();
+  await flush();
+  locateButton(container).click();
+  equal(crumbSnapshot(container).display, "none", "在另一张内部图时定位会返回主角所在的世界图");
+  const backToRoot = cameraCenter(container, cameraMod);
+  ok(Math.abs(backToRoot.cx - 80) < 0.01 && Math.abs(backToRoot.cy - 60) < 0.01,
+    "跨图定位落在主角所在的集市，不停留在旧建筑");
 });
 
 test("S10 前端：同地点人物只在地点名单（离场者不出现、头像可长按纠偏）", async () => {
@@ -1955,7 +1985,7 @@ test("S10 前端：四层子图导航（第 5 张被拒）与面包屑逐层返�
     equal(crumb.display, "", "子图上面包屑可见");
     equal(crumb.text, step.trail, "面包屑按 parentMapId 逐层累加");
   }
-  equal(container.querySelector(".aw-mapcrumb__back")?.textContent, "← 返回上一层", "第 4 层返回按钮指向上一层");
+  equal(container.querySelector(".aw-mapcrumb__back")?.textContent, "← 上层", "第 4 层返回按钮指向上一层");
 
   // 第 5 张：submaps["11111"] 存在，但已进 4 层 → 不再给入口
   ok(Object.prototype.hasOwnProperty.call(stateByChat["chat-a"].map.submaps, "11111"),
@@ -1971,7 +2001,7 @@ test("S10 前端：四层子图导航（第 5 张被拒）与面包屑逐层返�
     back.click();
     deepEqual(mapPointNames(container), expected, `返回上一层后渲染「${expected[0]}」所在地图`);
   }
-  equal(container.querySelector(".aw-mapcrumb__back")?.textContent, "← 返回世界图", "只剩一层时返回按钮指向世界图");
+  equal(container.querySelector(".aw-mapcrumb__back")?.textContent, "← 世界图", "只剩一层时返回按钮指向世界图");
   container.querySelector(".aw-mapcrumb__back").click();
   deepEqual(mapPointNames(container), ["钟楼", "集市", "孤塔"], "第 1 张 → 世界图（根地点全部回来）");
   equal(crumbSnapshot(container).display, "none", "回到世界图后面包屑隐藏");

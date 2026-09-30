@@ -97,7 +97,7 @@ test("R01: 地图工具显示、hint 不遮挡、网格平铺、底图网格分�
   const tools = container.querySelector(".aw-maptools");
   assert.ok(tools, "maptools 存在");
   assert.ok(tools.classList.contains("is-visible"), "maptools 挂 is-visible");
-  assert.equal(css(tools).display, "flex", "maptools display:flex");
+  assert.equal(css(tools).display, "grid", "maptools 保持世界图与内部图一致的双行布局");
 
   // D11：hint 不拦截指针
   const hint = container.querySelector(".aw-maparea__hint");

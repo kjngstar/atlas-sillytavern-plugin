@@ -14900,7 +14900,7 @@ ${rejectedBlock}` : "");
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.65",
+      version: "0.9.66",
       protocolVersion: 1,
       time: now()
     });
@@ -15001,56 +15001,60 @@ ${rejectedBlock}` : "");
     if (!chatId || chatId.length > ATLAS_LIMITS.ID_CHARS) {
       throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "chatId 非法");
     }
-    const lore = typeof record.loreSupplement === "string" ? record.loreSupplement.trim() : "";
-    const recentTexts = Array.isArray(record.recentTexts) ? record.recentTexts.filter((item) => typeof item === "string" && item.trim().length > 0).slice(0, 10).map((item) => item.slice(0, 2e3)) : [];
-    const storyMode = recentTexts.length > 0;
-    if (!lore && !storyMode) {
-      throw new AtlasError(
-        ATLAS_ERROR_CODES.INVALID_PAYLOAD,
-        "没有可用的提炼素材——剧情模式需要近期 AI 楼层，世界书模式需要卡书启用条目（或「世界书资料」开关未关闭）。"
-      );
-    }
-    const binding = requireBoundBinding(await getBinding(chatId));
-    const world = await requireWorld(binding);
-    const current = await loadSettings();
-    const preset = resolveWorldTurnPreset(current);
-    if (!preset) {
-      throw new AtlasError(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "未配置推演 API，无法提炼地理。");
-    }
-    checkRpm();
-    rpmTimestamps.push(now());
-    const outcome = await runGeoExtraction({ world, preset, lore, recentTexts, source: "manual", binding });
-    if (outcome.regionsAdded === 0 && outcome.pointsAdded === 0) {
-      const aborted = outcome.tables.status === "failed";
+    return enqueue(chatId, async () => {
+      const lore = typeof record.loreSupplement === "string" ? record.loreSupplement.trim() : "";
+      const recentTexts = Array.isArray(record.recentTexts) ? record.recentTexts.filter((item) => typeof item === "string" && item.trim().length > 0).slice(0, 10).map((item) => item.slice(0, 2e3)) : [];
+      const storyMode = recentTexts.length > 0;
+      if (!lore && !storyMode) {
+        throw new AtlasError(
+          ATLAS_ERROR_CODES.INVALID_PAYLOAD,
+          "没有可用的提炼素材——剧情模式需要近期 AI 楼层，世界书模式需要卡书启用条目（或「世界书资料」开关未关闭）。"
+        );
+      }
+      const binding = requireBoundBinding(await getBinding(chatId));
+      const world = await requireWorld(binding);
+      const current = await loadSettings();
+      const preset = resolveWorldTurnPreset(current);
+      if (!preset) {
+        throw new AtlasError(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "未配置推演 API，无法提炼地理。");
+      }
+      checkRpm();
+      rpmTimestamps.push(now());
+      const outcome = await runGeoExtraction({ world, preset, lore, recentTexts, source: "manual", binding });
+      if (outcome.regionsAdded === 0 && outcome.pointsAdded === 0) {
+        const aborted = outcome.tables.status === "failed";
+        return okResult({
+          regionsAdded: 0,
+          pointsAdded: 0,
+          skipped: outcome.skipped,
+          capacityReached: (world.points ?? []).length >= MAP_POINTS_MAX,
+          // H05：即使一个新地点都没有，也要把「待确认归属」如实带回（不静默丢掉提炼结果）
+          preview: outcome.preview,
+          pending: outcome.pending,
+          pendingTotal: outcome.pending.length,
+          tables: outcome.tables,
+          aborted,
+          message: aborted ? `提炼结果没有写回：三表候选未通过校验（${outcome.tables.reasonCode}）。世界、三表、地图与推演模块都保持原样，可修正后重试。` : outcome.pending.length > 0 ? "没有新增地理实体，但有关系证据不足——已列入「待确认」，请到地图详情人工确认归属。" : "没有提炼出新的地理实体（可能都已存在，或资料里没有地理描述）。"
+        });
+      }
       return okResult({
-        regionsAdded: 0,
-        pointsAdded: 0,
+        regionsAdded: outcome.regionsAdded,
+        pointsAdded: outcome.pointsAdded,
         skipped: outcome.skipped,
-        // H05：即使一个新地点都没有，也要把「待确认归属」如实带回（不静默丢掉提炼结果）
+        capacityReached: (world.points ?? []).length + outcome.pointsAdded >= MAP_POINTS_MAX,
+        revisionAppended: outcome.revisionAppended,
+        regionNames: outcome.regionNames,
+        pointNames: outcome.pointNames,
+        // E02：如实报告三表补齐结果（UI 可据此提示"地图已更新"，排障也能看到 skipped 原因）
+        tables: outcome.tables,
+        /** H05：可预览的提炼结果 `{id,parent,adjacent,vehicle,pending,reasonCode}`。 */
         preview: outcome.preview,
+        /** H05：证据 / 引用不足、留待用户确认的关系（已存进会话 geoAuto，见 pending 键）。 */
         pending: outcome.pending,
         pendingTotal: outcome.pending.length,
-        tables: outcome.tables,
-        aborted,
-        message: aborted ? `提炼结果没有写回：三表候选未通过校验（${outcome.tables.reasonCode}）。世界、三表、地图与推演模块都保持原样，可修正后重试。` : outcome.pending.length > 0 ? "没有新增地理实体，但有关系证据不足——已列入「待确认」，请到地图详情人工确认归属。" : "没有提炼出新的地理实体（可能都已存在，或资料里没有地理描述）。"
+        /** H18b：首次建出世界图时的尺度状态（null = 已有世界图，不额外发模型请求）。 */
+        mapScale: outcome.mapScale
       });
-    }
-    return okResult({
-      regionsAdded: outcome.regionsAdded,
-      pointsAdded: outcome.pointsAdded,
-      skipped: outcome.skipped,
-      revisionAppended: outcome.revisionAppended,
-      regionNames: outcome.regionNames,
-      pointNames: outcome.pointNames,
-      // E02：如实报告三表补齐结果（UI 可据此提示"地图已更新"，排障也能看到 skipped 原因）
-      tables: outcome.tables,
-      /** H05：可预览的提炼结果 `{id,parent,adjacent,vehicle,pending,reasonCode}`。 */
-      preview: outcome.preview,
-      /** H05：证据 / 引用不足、留待用户确认的关系（已存进会话 geoAuto，见 pending 键）。 */
-      pending: outcome.pending,
-      pendingTotal: outcome.pending.length,
-      /** H18b：首次建出世界图时的尺度状态（null = 已有世界图，不额外发模型请求）。 */
-      mapScale: outcome.mapScale
     });
   }
   async function runGeoExtraction(input) {
@@ -15208,7 +15212,7 @@ ${rejectedBlock}` : "");
     const planCandidates = [];
     const ambiguousNames = [];
     for (const raw of (Array.isArray(spec.points) ? spec.points : []).slice(0, GEO_LIMITS.POINTS_MAX + 8)) {
-      if (newPoints.length >= GEO_LIMITS.POINTS_MAX) break;
+      if (newPoints.length >= GEO_LIMITS.POINTS_MAX || (world.points ?? []).length + newPoints.length >= MAP_POINTS_MAX) break;
       const record = raw ?? {};
       const name = cleanName(record.name);
       if (!name) {
@@ -16417,303 +16421,305 @@ ${rejectedBlock}` : "");
     if (!chatId || chatId.length > ATLAS_LIMITS.ID_CHARS) {
       throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "chatId 非法");
     }
-    const binding = requireBoundBinding(await getBinding(chatId));
-    const apply = payload.apply === true;
-    const assistantText = typeof payload.assistantText === "string" ? payload.assistantText.trim() : "";
-    if (!assistantText) {
-      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "开场材料（assistantText）为空——开场识别至少需要一段开场白。");
-    }
-    const userText = typeof payload.userText === "string" ? payload.userText : "";
-    const openingMessageId = typeof payload.openingMessageId === "string" && payload.openingMessageId.trim() ? payload.openingMessageId.slice(0, ATLAS_LIMITS.ID_CHARS) : "manual";
-    const openingWorld = await getWorld(binding.worldId);
-    if (!openingWorld) throw new AtlasError(ATLAS_ERROR_CODES.WORLD_NOT_FOUND, "绑定世界不存在");
-    const openingBranchKey = branchScopeForStory(openingWorld, binding.branchId) ?? "canon";
-    const openingKey = `opening:${hashString([
-      chatId,
-      binding.worldId,
-      openingBranchKey,
-      openingMessageId,
-      assistantText
-    ].join("|"))}`;
-    const sessionRecord = isPlainRecord(payload.session) ? payload.session : null;
-    const sessionRevision = typeof sessionRecord?.rev === "number" && Number.isSafeInteger(sessionRecord.rev) ? sessionRecord.rev : 0;
-    const inputFingerprint = hashString(JSON.stringify({
-      userText,
-      assistantText,
-      recentAssistantTexts: payload.recentAssistantTexts ?? [],
-      loreSupplement: payload.loreSupplement ?? "",
-      personaDescription: payload.personaDescription ?? "",
-      charDescription: payload.charDescription ?? ""
-    }));
-    const existingSceneDoc = sanitizeSceneDoc(await store.read(sceneDocKey(binding.worldId)).catch(() => null));
-    const priorBootstrap = existingSceneDoc.bootstrapByBranch[openingBranchKey];
-    if (apply && typeof payload.previewId !== "string" && priorBootstrap?.chatId === chatId && priorBootstrap.openingKey === openingKey) {
-      return okResult({ ...priorBootstrap.result, callCount: 0, duplicate: true });
-    }
-    if (payload.auto === true && apply) {
-      const turnNames = await store.list(`turn:${chatId}:`).catch(() => []);
-      for (const name of turnNames) {
-        const turn = await store.read(name).catch(() => null);
-        if (isPlainRecord(turn) && turn.rolledBack !== true && isPlainRecord(turn.receipt) && turn.receipt.status === "committed") {
-          return okResult({ status: "skipped", reasonCode: "NORMAL_TURN_EXISTS", duration: 0, callCount: 0 });
+    return enqueue(chatId, async () => {
+      const binding = requireBoundBinding(await getBinding(chatId));
+      const apply = payload.apply === true;
+      const assistantText = typeof payload.assistantText === "string" ? payload.assistantText.trim() : "";
+      if (!assistantText) {
+        throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "开场材料（assistantText）为空——开场识别至少需要一段开场白。");
+      }
+      const userText = typeof payload.userText === "string" ? payload.userText : "";
+      const openingMessageId = typeof payload.openingMessageId === "string" && payload.openingMessageId.trim() ? payload.openingMessageId.slice(0, ATLAS_LIMITS.ID_CHARS) : "manual";
+      const openingWorld = await getWorld(binding.worldId);
+      if (!openingWorld) throw new AtlasError(ATLAS_ERROR_CODES.WORLD_NOT_FOUND, "绑定世界不存在");
+      const openingBranchKey = branchScopeForStory(openingWorld, binding.branchId) ?? "canon";
+      const openingKey = `opening:${hashString([
+        chatId,
+        binding.worldId,
+        openingBranchKey,
+        openingMessageId,
+        assistantText
+      ].join("|"))}`;
+      const sessionRecord = isPlainRecord(payload.session) ? payload.session : null;
+      const sessionRevision = typeof sessionRecord?.rev === "number" && Number.isSafeInteger(sessionRecord.rev) ? sessionRecord.rev : 0;
+      const inputFingerprint = hashString(JSON.stringify({
+        userText,
+        assistantText,
+        recentAssistantTexts: payload.recentAssistantTexts ?? [],
+        loreSupplement: payload.loreSupplement ?? "",
+        personaDescription: payload.personaDescription ?? "",
+        charDescription: payload.charDescription ?? ""
+      }));
+      const existingSceneDoc = sanitizeSceneDoc(await store.read(sceneDocKey(binding.worldId)).catch(() => null));
+      const priorBootstrap = existingSceneDoc.bootstrapByBranch[openingBranchKey];
+      if (apply && typeof payload.previewId !== "string" && priorBootstrap?.chatId === chatId && priorBootstrap.openingKey === openingKey) {
+        return okResult({ ...priorBootstrap.result, callCount: 0, duplicate: true });
+      }
+      if (payload.auto === true && apply) {
+        const turnNames = await store.list(`turn:${chatId}:`).catch(() => []);
+        for (const name of turnNames) {
+          const turn = await store.read(name).catch(() => null);
+          if (isPlainRecord(turn) && turn.rolledBack !== true && isPlainRecord(turn.receipt) && turn.receipt.status === "committed") {
+            return okResult({ status: "skipped", reasonCode: "NORMAL_TURN_EXISTS", duration: 0, callCount: 0 });
+          }
         }
       }
-    }
-    const previewId = typeof payload.previewId === "string" ? payload.previewId : null;
-    for (const [key, value] of shared.bootstrapPreviews) {
-      if (value.expiresAt <= now()) shared.bootstrapPreviews.delete(key);
-    }
-    const preview = apply && previewId !== null ? shared.bootstrapPreviews.get(previewId) : null;
-    if (apply && previewId !== null && (!preview || payload.baseRevision !== sessionRevision || preview.baseRevision !== sessionRevision || preview.chatId !== chatId || preview.worldId !== binding.worldId || preview.branchId !== binding.branchId || preview.openingKey !== openingKey || preview.inputFingerprint !== inputFingerprint)) {
-      throw new AtlasError(ATLAS_ERROR_CODES.PREVIEW_STALE, "开场预览已过期或世界已变化，请重新预览。", { retryable: true });
-    }
-    const current = await loadSettings();
-    const preset = resolveWorldTurnPreset(current);
-    if (!preset) {
-      throw new AtlasError(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "未配置独立推演 API，无法进行开场识别。");
-    }
-    const prepared = await prepareWorldTurnInputs(
-      binding,
-      preset,
-      {
-        chatId: binding.chatId,
-        userMessageId: "bootstrap",
-        userText,
-        assistantText,
-        recentAssistantTexts: Array.isArray(payload.recentAssistantTexts) ? payload.recentAssistantTexts.filter((t) => typeof t === "string") : [],
-        ...typeof payload.loreSupplement === "string" ? { loreSupplement: payload.loreSupplement } : {},
-        ...typeof payload.personaDescription === "string" ? { personaDescription: payload.personaDescription } : {},
-        ...typeof payload.charDescription === "string" ? { charDescription: payload.charDescription } : {}
-      },
-      { mode: "bootstrap" }
-    );
-    const world = prepared.world;
-    if (prepared.customPromptShape === "legacy-v1" || prepared.customPromptShape === "legacy-v2") {
-      pushLog({
-        at: now(),
-        kind: "world-turn-protocol-mismatch",
-        chatId: binding.chatId,
-        presetName: preset.name,
-        model: preset.model,
-        reasonCode: prepared.customPromptShape === "legacy-v2" ? "LEGACY_V2_PROMPT_PRESET" : "LEGACY_V1_PROMPT_PRESET",
-        coreCommitted: false
-      });
-      throw new AtlasError(
-        ATLAS_ERROR_CODES.PROTOCOL_MISMATCH,
-        legacyPromptBlockMessage(prepared.customPromptShape),
-        { schemaPath: "$.promptPreset", retryable: false }
-      );
-    }
-    let cleanedText;
-    if (preview) {
-      cleanedText = preview.cleanedText;
-    } else {
-      checkRpm();
-      rpmTimestamps.push(now());
-      const call = await callAtlasWorldTurnApi(prepared.effectivePreset, prepared.input, { fetchFn: deps.fetchFn, now });
-      pushLog({
-        at: now(),
-        kind: "scene-bootstrap",
-        chatId: binding.chatId,
-        presetName: preset.name,
-        model: preset.model,
-        ok: call.ok,
-        ...call.ok ? {} : { code: call.code },
-        status: call.status,
-        durationMs: call.durationMs,
-        apply
-      });
-      if (!call.ok) throw new AtlasError(call.code, call.message, { retryable: call.retryable });
-      cleanedText = applyContentReplaceRules(call.text, current.contentReplaceRules ?? []);
-      const bootstrapRepair = await repairQuoteOnlyReply({
-        text: cleanedText,
-        preset: prepared.effectivePreset,
-        prompt: prepared.input,
-        userText,
-        assistantText,
-        chatId: binding.chatId
-      });
-      if (bootstrapRepair !== null) cleanedText = applyContentReplaceRules(bootstrapRepair, current.contentReplaceRules ?? []);
-    }
-    const bootstrapBranchKey = branchScopeForStory(world, binding.branchId) ?? "canon";
-    const bootstrapTablesRaw = await store.read(`tables:${binding.worldId}`).catch(() => null);
-    const bootstrapTablesDoc = isPlainRecord(bootstrapTablesRaw) ? bootstrapTablesRaw : null;
-    const bootstrapBranchTables = bootstrapTablesDoc?.branches?.[bootstrapBranchKey];
-    if (!bootstrapTablesDoc || !isPlainRecord(bootstrapBranchTables)) {
-      pushLog({
-        at: now(),
-        kind: "scene-bootstrap-rejected",
-        chatId: binding.chatId,
-        reasonCode: "TABLE_BRANCH_MISSING"
-      });
-      throw new AtlasError(
-        ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
-        "本分支还没有三表快照（懒迁移未完成或会话损坏）。开场未提交；请刷新后重试。",
-        { retryable: true }
-      );
-    }
-    const bootstrapBaseTables = bootstrapBranchTables;
-    const parsed = applyAtlasEditText(
-      bootstrapBaseTables,
-      cleanedText,
-      {
-        "msg:u": userText,
-        "msg:a": assistantText,
-        ...prepared.input.loreSupplement ? { lore: prepared.input.loreSupplement } : {}
+      const previewId = typeof payload.previewId === "string" ? payload.previewId : null;
+      for (const [key, value] of shared.bootstrapPreviews) {
+        if (value.expiresAt <= now()) shared.bootstrapPreviews.delete(key);
       }
-    );
-    if (parsed.parse.status === "rejected" || parsed.delta === null) {
-      const first = parsed.parse.error;
-      pushLog({
-        at: now(),
-        kind: "scene-bootstrap-rejected",
-        chatId: binding.chatId,
-        reasonCode: first?.code ?? "BLOCK_MISSING",
-        errorCount: parsed.parse.rejected.length
-      });
-      throw new AtlasError(
-        ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
-        `开场识别输出缺少可用的行增量块（${first?.code ?? "BLOCK_MISSING"} @ ${first?.path ?? "$.block"}）：开场未提交，可重试识别。`,
-        { retryable: true }
-      );
-    }
-    const delta = parsed.delta;
-    if (!delta.ok) {
-      const error = delta.error;
-      pushLog({
-        at: now(),
-        kind: "scene-bootstrap-rejected",
-        chatId: binding.chatId,
-        reasonCode: error?.code ?? "DELTA_REJECTED"
-      });
-      throw new AtlasError(
-        ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
-        `开场候选三表未通过校验（${error?.code ?? "UNKNOWN"} @ ${error?.path ?? "$"}）：开场未提交，可重试识别。`,
-        { retryable: true }
-      );
-    }
-    const baseLocationIds = new Set(bootstrapBaseTables.locations.map((row) => row.id));
-    const baseCharacterIds = new Set(bootstrapBaseTables.characters.map((row) => row.id));
-    const newLocationRows = delta.tables.locations.filter((row) => !baseLocationIds.has(row.id));
-    const newCharacterRows = delta.tables.characters.filter((row) => !baseCharacterIds.has(row.id));
-    const acceptedRows = delta.applied.map((row) => ({
-      line: row.line,
-      id: typeof row.id === "string" ? row.id : "",
-      op: typeof row.op === "string" ? row.op : "set"
-    }));
-    const rejectedRows = [
-      ...parsed.parse.rejected.map((row) => ({ line: row.line, code: String(row.code), path: row.path, ...row.ref === void 0 ? {} : { ref: row.ref } })),
-      ...delta.rejected.map((row) => ({
-        line: row.line,
-        code: String(row.code ?? "REJECTED"),
-        path: typeof row.path === "string" ? row.path : "$",
-        ...row.ref === void 0 ? {} : { ref: row.ref }
-      }))
-    ];
-    if (!apply) {
-      const candidatePreviewId = `preview:${hashString(`${openingKey}|${sessionRevision}|${inputFingerprint}|${now()}`)}`;
-      if (shared.bootstrapPreviews.size >= 64) {
-        const oldest = shared.bootstrapPreviews.keys().next().value;
-        if (oldest) shared.bootstrapPreviews.delete(oldest);
+      const preview = apply && previewId !== null ? shared.bootstrapPreviews.get(previewId) : null;
+      if (apply && previewId !== null && (!preview || payload.baseRevision !== sessionRevision || preview.baseRevision !== sessionRevision || preview.chatId !== chatId || preview.worldId !== binding.worldId || preview.branchId !== binding.branchId || preview.openingKey !== openingKey || preview.inputFingerprint !== inputFingerprint)) {
+        throw new AtlasError(ATLAS_ERROR_CODES.PREVIEW_STALE, "开场预览已过期或世界已变化，请重新预览。", { retryable: true });
       }
-      shared.bootstrapPreviews.set(candidatePreviewId, {
-        chatId,
-        worldId: binding.worldId,
-        branchId: binding.branchId,
-        openingKey,
-        baseRevision: sessionRevision,
-        inputFingerprint,
+      const current = await loadSettings();
+      const preset = resolveWorldTurnPreset(current);
+      if (!preset) {
+        throw new AtlasError(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "未配置独立推演 API，无法进行开场识别。");
+      }
+      const prepared = await prepareWorldTurnInputs(
+        binding,
+        preset,
+        {
+          chatId: binding.chatId,
+          userMessageId: "bootstrap",
+          userText,
+          assistantText,
+          recentAssistantTexts: Array.isArray(payload.recentAssistantTexts) ? payload.recentAssistantTexts.filter((t) => typeof t === "string") : [],
+          ...typeof payload.loreSupplement === "string" ? { loreSupplement: payload.loreSupplement } : {},
+          ...typeof payload.personaDescription === "string" ? { personaDescription: payload.personaDescription } : {},
+          ...typeof payload.charDescription === "string" ? { charDescription: payload.charDescription } : {}
+        },
+        { mode: "bootstrap" }
+      );
+      const world = prepared.world;
+      if (prepared.customPromptShape === "legacy-v1" || prepared.customPromptShape === "legacy-v2") {
+        pushLog({
+          at: now(),
+          kind: "world-turn-protocol-mismatch",
+          chatId: binding.chatId,
+          presetName: preset.name,
+          model: preset.model,
+          reasonCode: prepared.customPromptShape === "legacy-v2" ? "LEGACY_V2_PROMPT_PRESET" : "LEGACY_V1_PROMPT_PRESET",
+          coreCommitted: false
+        });
+        throw new AtlasError(
+          ATLAS_ERROR_CODES.PROTOCOL_MISMATCH,
+          legacyPromptBlockMessage(prepared.customPromptShape),
+          { schemaPath: "$.promptPreset", retryable: false }
+        );
+      }
+      let cleanedText;
+      if (preview) {
+        cleanedText = preview.cleanedText;
+      } else {
+        checkRpm();
+        rpmTimestamps.push(now());
+        const call = await callAtlasWorldTurnApi(prepared.effectivePreset, prepared.input, { fetchFn: deps.fetchFn, now });
+        pushLog({
+          at: now(),
+          kind: "scene-bootstrap",
+          chatId: binding.chatId,
+          presetName: preset.name,
+          model: preset.model,
+          ok: call.ok,
+          ...call.ok ? {} : { code: call.code },
+          status: call.status,
+          durationMs: call.durationMs,
+          apply
+        });
+        if (!call.ok) throw new AtlasError(call.code, call.message, { retryable: call.retryable });
+        cleanedText = applyContentReplaceRules(call.text, current.contentReplaceRules ?? []);
+        const bootstrapRepair = await repairQuoteOnlyReply({
+          text: cleanedText,
+          preset: prepared.effectivePreset,
+          prompt: prepared.input,
+          userText,
+          assistantText,
+          chatId: binding.chatId
+        });
+        if (bootstrapRepair !== null) cleanedText = applyContentReplaceRules(bootstrapRepair, current.contentReplaceRules ?? []);
+      }
+      const bootstrapBranchKey = branchScopeForStory(world, binding.branchId) ?? "canon";
+      const bootstrapTablesRaw = await store.read(`tables:${binding.worldId}`).catch(() => null);
+      const bootstrapTablesDoc = isPlainRecord(bootstrapTablesRaw) ? bootstrapTablesRaw : null;
+      const bootstrapBranchTables = bootstrapTablesDoc?.branches?.[bootstrapBranchKey];
+      if (!bootstrapTablesDoc || !isPlainRecord(bootstrapBranchTables)) {
+        pushLog({
+          at: now(),
+          kind: "scene-bootstrap-rejected",
+          chatId: binding.chatId,
+          reasonCode: "TABLE_BRANCH_MISSING"
+        });
+        throw new AtlasError(
+          ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
+          "本分支还没有三表快照（懒迁移未完成或会话损坏）。开场未提交；请刷新后重试。",
+          { retryable: true }
+        );
+      }
+      const bootstrapBaseTables = bootstrapBranchTables;
+      const parsed = applyAtlasEditText(
+        bootstrapBaseTables,
         cleanedText,
-        expiresAt: now() + 10 * 6e4
+        {
+          "msg:u": userText,
+          "msg:a": assistantText,
+          ...prepared.input.loreSupplement ? { lore: prepared.input.loreSupplement } : {}
+        }
+      );
+      if (parsed.parse.status === "rejected" || parsed.delta === null) {
+        const first = parsed.parse.error;
+        pushLog({
+          at: now(),
+          kind: "scene-bootstrap-rejected",
+          chatId: binding.chatId,
+          reasonCode: first?.code ?? "BLOCK_MISSING",
+          errorCount: parsed.parse.rejected.length
+        });
+        throw new AtlasError(
+          ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
+          `开场识别输出缺少可用的行增量块（${first?.code ?? "BLOCK_MISSING"} @ ${first?.path ?? "$.block"}）：开场未提交，可重试识别。`,
+          { retryable: true }
+        );
+      }
+      const delta = parsed.delta;
+      if (!delta.ok) {
+        const error = delta.error;
+        pushLog({
+          at: now(),
+          kind: "scene-bootstrap-rejected",
+          chatId: binding.chatId,
+          reasonCode: error?.code ?? "DELTA_REJECTED"
+        });
+        throw new AtlasError(
+          ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
+          `开场候选三表未通过校验（${error?.code ?? "UNKNOWN"} @ ${error?.path ?? "$"}）：开场未提交，可重试识别。`,
+          { retryable: true }
+        );
+      }
+      const baseLocationIds = new Set(bootstrapBaseTables.locations.map((row) => row.id));
+      const baseCharacterIds = new Set(bootstrapBaseTables.characters.map((row) => row.id));
+      const newLocationRows = delta.tables.locations.filter((row) => !baseLocationIds.has(row.id));
+      const newCharacterRows = delta.tables.characters.filter((row) => !baseCharacterIds.has(row.id));
+      const acceptedRows = delta.applied.map((row) => ({
+        line: row.line,
+        id: typeof row.id === "string" ? row.id : "",
+        op: typeof row.op === "string" ? row.op : "set"
+      }));
+      const rejectedRows = [
+        ...parsed.parse.rejected.map((row) => ({ line: row.line, code: String(row.code), path: row.path, ...row.ref === void 0 ? {} : { ref: row.ref } })),
+        ...delta.rejected.map((row) => ({
+          line: row.line,
+          code: String(row.code ?? "REJECTED"),
+          path: typeof row.path === "string" ? row.path : "$",
+          ...row.ref === void 0 ? {} : { ref: row.ref }
+        }))
+      ];
+      if (!apply) {
+        const candidatePreviewId = `preview:${hashString(`${openingKey}|${sessionRevision}|${inputFingerprint}|${now()}`)}`;
+        if (shared.bootstrapPreviews.size >= 64) {
+          const oldest = shared.bootstrapPreviews.keys().next().value;
+          if (oldest) shared.bootstrapPreviews.delete(oldest);
+        }
+        shared.bootstrapPreviews.set(candidatePreviewId, {
+          chatId,
+          worldId: binding.worldId,
+          branchId: binding.branchId,
+          openingKey,
+          baseRevision: sessionRevision,
+          inputFingerprint,
+          cleanedText,
+          expiresAt: now() + 10 * 6e4
+        });
+        return okResult({
+          status: "preview",
+          protocol: "table-delta-v1",
+          callCount: 1,
+          previewId: candidatePreviewId,
+          baseRevision: sessionRevision,
+          duration: 0,
+          newLocations: newLocationRows.map((row) => ({ id: row.id, name: row.name, parentLocationId: row.parentLocationId })),
+          newCharacters: newCharacterRows.map((row) => ({ id: row.id, name: row.name, locationId: row.locationId })),
+          acceptedRows,
+          rejectedRows
+        });
+      }
+      const mirrored = tablesToLegacyWorld({
+        tables: delta.tables,
+        world,
+        branchId: binding.branchId,
+        at: binding.worldTimeCursor
       });
-      return okResult({
-        status: "preview",
+      let finalWorld = mirrored.world;
+      const placeholder = detectStartPlaceholder(world);
+      const sceneDoc = existingSceneDoc;
+      const bootstrapPlayerRowId = protagonistRowId(binding, world);
+      const bootstrapPlayerRow = bootstrapPlayerRowId === null ? void 0 : delta.tables.characters.find((row) => row.id === bootstrapPlayerRowId);
+      const anchoredPointId = bootstrapPlayerRow?.locationId ? pointIdFromLocationRowId(bootstrapPlayerRow.locationId) : null;
+      const anchored = anchoredPointId !== null;
+      let nextDoc = {
+        ...sceneDoc,
+        bootstrap: {
+          attempts: (sceneDoc.bootstrap?.attempts ?? 0) + 1,
+          lastAt: now(),
+          lastStatus: anchored ? "committed" : "unknown"
+        }
+      };
+      if (anchored) {
+        const retire = retireStartPlaceholder(finalWorld, nextDoc, { now: now(), info: placeholder });
+        finalWorld = retire.world;
+        nextDoc = retire.doc;
+        nextDoc = { ...nextDoc, lastConfirmed: { branchId: binding.branchId, pointId: String(anchoredPointId), at: binding.worldTimeCursor } };
+      }
+      await store.write(`world:${binding.worldId}`, finalWorld);
+      worldCache.set(binding.worldId, finalWorld);
+      await store.write(`tables:${binding.worldId}`, {
+        schemaVersion: 1,
+        worldId: binding.worldId,
+        branches: { ...bootstrapTablesDoc.branches ?? {}, [bootstrapBranchKey]: delta.tables }
+      });
+      if (anchored) {
+        const nextBinding = {
+          ...binding,
+          currentLocationId: String(anchoredPointId),
+          // 开场不推进时间：游标原样保持
+          worldTimeCursor: binding.worldTimeCursor
+        };
+        await store.write(`binding:${binding.chatId}`, nextBinding);
+        bindingCache.set(binding.chatId, nextBinding);
+      }
+      const newHostMapIds = newLocationRows.map((row) => pointIdFromLocationRowId(row.id)).filter((pointId) => pointId !== null).filter((pointId) => delta.tables.locations.some((child) => child.parentLocationId === `loc:${pointId}`));
+      const bootstrapMapDoc = sanitizeMapDoc(await store.read(`maps:${binding.worldId}`).catch(() => null));
+      const mapScale = newHostMapIds.slice(0, 4).map((mapId) => {
+        const mapIdText = String(mapId);
+        const scopedKey = bootstrapBranchKey === "canon" ? mapIdText : `${bootstrapBranchKey}:${mapIdText}`;
+        const existing = bootstrapMapDoc.calibrations[scopedKey];
+        return existing && Number.isFinite(existing.metersPerCell) && existing.metersPerCell > 0 ? { mapId: mapIdText, status: "existing" } : { mapId: mapIdText, status: "scale-pending", reasonCode: "NO_SCALE_EVIDENCE" };
+      });
+      const resultData = {
+        status: anchored ? "committed" : "unknown",
         protocol: "table-delta-v1",
-        callCount: 1,
-        previewId: candidatePreviewId,
-        baseRevision: sessionRevision,
+        callCount: preview ? 0 : 1,
         duration: 0,
+        anchoredLocationId: anchored ? String(anchoredPointId) : null,
+        placeholderRetired: nextDoc.retiredPointIds.length > sceneDoc.retiredPointIds.length,
         newLocations: newLocationRows.map((row) => ({ id: row.id, name: row.name, parentLocationId: row.parentLocationId })),
         newCharacters: newCharacterRows.map((row) => ({ id: row.id, name: row.name, locationId: row.locationId })),
         acceptedRows,
-        rejectedRows
-      });
-    }
-    const mirrored = tablesToLegacyWorld({
-      tables: delta.tables,
-      world,
-      branchId: binding.branchId,
-      at: binding.worldTimeCursor
-    });
-    let finalWorld = mirrored.world;
-    const placeholder = detectStartPlaceholder(world);
-    const sceneDoc = existingSceneDoc;
-    const bootstrapPlayerRowId = protagonistRowId(binding, world);
-    const bootstrapPlayerRow = bootstrapPlayerRowId === null ? void 0 : delta.tables.characters.find((row) => row.id === bootstrapPlayerRowId);
-    const anchoredPointId = bootstrapPlayerRow?.locationId ? pointIdFromLocationRowId(bootstrapPlayerRow.locationId) : null;
-    const anchored = anchoredPointId !== null;
-    let nextDoc = {
-      ...sceneDoc,
-      bootstrap: {
-        attempts: (sceneDoc.bootstrap?.attempts ?? 0) + 1,
-        lastAt: now(),
-        lastStatus: anchored ? "committed" : "unknown"
-      }
-    };
-    if (anchored) {
-      const retire = retireStartPlaceholder(finalWorld, nextDoc, { now: now(), info: placeholder });
-      finalWorld = retire.world;
-      nextDoc = retire.doc;
-      nextDoc = { ...nextDoc, lastConfirmed: { branchId: binding.branchId, pointId: String(anchoredPointId), at: binding.worldTimeCursor } };
-    }
-    await store.write(`world:${binding.worldId}`, finalWorld);
-    worldCache.set(binding.worldId, finalWorld);
-    await store.write(`tables:${binding.worldId}`, {
-      schemaVersion: 1,
-      worldId: binding.worldId,
-      branches: { ...bootstrapTablesDoc.branches ?? {}, [bootstrapBranchKey]: delta.tables }
-    });
-    if (anchored) {
-      const nextBinding = {
-        ...binding,
-        currentLocationId: String(anchoredPointId),
-        // 开场不推进时间：游标原样保持
-        worldTimeCursor: binding.worldTimeCursor
+        rejectedRows,
+        // H18a：新建内层地图的标定结果（scale-pending = 地图保留、按格显示）
+        mapScale
       };
-      await store.write(`binding:${binding.chatId}`, nextBinding);
-      bindingCache.set(binding.chatId, nextBinding);
-    }
-    const newHostMapIds = newLocationRows.map((row) => pointIdFromLocationRowId(row.id)).filter((pointId) => pointId !== null).filter((pointId) => delta.tables.locations.some((child) => child.parentLocationId === `loc:${pointId}`));
-    const bootstrapMapDoc = sanitizeMapDoc(await store.read(`maps:${binding.worldId}`).catch(() => null));
-    const mapScale = newHostMapIds.slice(0, 4).map((mapId) => {
-      const mapIdText = String(mapId);
-      const scopedKey = bootstrapBranchKey === "canon" ? mapIdText : `${bootstrapBranchKey}:${mapIdText}`;
-      const existing = bootstrapMapDoc.calibrations[scopedKey];
-      return existing && Number.isFinite(existing.metersPerCell) && existing.metersPerCell > 0 ? { mapId: mapIdText, status: "existing" } : { mapId: mapIdText, status: "scale-pending", reasonCode: "NO_SCALE_EVIDENCE" };
+      nextDoc.bootstrapByBranch[bootstrapBranchKey] = {
+        chatId,
+        openingKey,
+        messageId: openingMessageId,
+        result: resultData
+      };
+      await store.write(sceneDocKey(world.id), nextDoc);
+      if (previewId) shared.bootstrapPreviews.delete(previewId);
+      return okResult(resultData);
     });
-    const resultData = {
-      status: anchored ? "committed" : "unknown",
-      protocol: "table-delta-v1",
-      callCount: preview ? 0 : 1,
-      duration: 0,
-      anchoredLocationId: anchored ? String(anchoredPointId) : null,
-      placeholderRetired: nextDoc.retiredPointIds.length > sceneDoc.retiredPointIds.length,
-      newLocations: newLocationRows.map((row) => ({ id: row.id, name: row.name, parentLocationId: row.parentLocationId })),
-      newCharacters: newCharacterRows.map((row) => ({ id: row.id, name: row.name, locationId: row.locationId })),
-      acceptedRows,
-      rejectedRows,
-      // H18a：新建内层地图的标定结果（scale-pending = 地图保留、按格显示）
-      mapScale
-    };
-    nextDoc.bootstrapByBranch[bootstrapBranchKey] = {
-      chatId,
-      openingKey,
-      messageId: openingMessageId,
-      result: resultData
-    };
-    await store.write(sceneDocKey(world.id), nextDoc);
-    if (previewId) shared.bootstrapPreviews.delete(previewId);
-    return okResult(resultData);
   }
   async function prepareWorldTurnInputs(binding, preset, request, options) {
     const world = await visibleWorldForBinding(await requireWorld(binding), binding);
