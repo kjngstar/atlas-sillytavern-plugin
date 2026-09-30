@@ -25,12 +25,26 @@ import {
   readCardLoreSupplementViaSelector,
   recordAtlasHostLoreActivation,
   isAtlasLoreSupplementEnabled,
+  atlasSwipeRegenerating,
   ATLAS_DISPLAY_NAME,
   ATLAS_EXTENSION_VERSION,
 } from "../atlas-extension/index.js";
 import { selectAtlasLoreSupplement as releaseLoreSelector } from "../atlas-extension/dist/atlas-ui-core.mjs";
 
 let assertionCount = 0;
+
+test("酒馆右滑事件：数组外的新槽会回退，已有非空候选只作浏览", () => {
+  equal(atlasSwipeRegenerating({ swipe_id: 1, swipes: ["原候选"] }), true,
+    "酒馆当前版本在 MESSAGE_SWIPED 时先前进 swipe_id，正文生成后才追加数组");
+  equal(atlasSwipeRegenerating({ swipe_id: 1, swipes: ["原候选", "新候选"] }), false,
+    "浏览已有末尾候选不能回退世界");
+  equal(atlasSwipeRegenerating({ swipe_id: 1, swipes: ["原候选", ""] }), true,
+    "部分宿主先追加空占位，同样属于新生成");
+  equal(atlasSwipeRegenerating({ swipe_id: 0, swipes: ["原候选"] }), false,
+    "当前已完成候选无需回退");
+  equal(atlasSwipeRegenerating({ swipe_id: 3, swipes: ["原候选"] }), null,
+    "未知形状仍保守跳过");
+});
 function ok(value, message) {
   assertionCount += 1;
   assert.ok(value, message);

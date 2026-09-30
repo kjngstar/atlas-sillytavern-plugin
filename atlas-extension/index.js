@@ -1495,7 +1495,7 @@ export async function isAtlasLoreSupplementEnabled(api) {
 
 async function loadUiCore() {
   // 先组件内构建产物（发布形态），再上级 src（开发形态，工程内运行才可用）
-  const attempts = ["./dist/atlas-ui-core.mjs"];
+  const attempts = ["./dist/atlas-ui-core.mjs", "../src/atlas-ui-core.ts"];
   let lastError = null;
   for (const specifier of attempts) {
     try {
@@ -1800,6 +1800,17 @@ function clearInjection() {
  * `contentHash`）——它们是 SQL 候选回合的锚点，不是数组下标：
  * 删楼 / 截断会让下标漂移，身份不会（见 `atlasFloorIdentity`）。
  */
+/** 酒馆右滑新生成时先把 swipe_id 设为 swipes.length，正文生成后才追加数组。 */
+export function atlasSwipeRegenerating(message) {
+  if (!message || !Array.isArray(message.swipes) || message.swipes.length === 0) return null;
+  const selected = Number(message.swipe_id ?? 0);
+  if (!Number.isInteger(selected) || selected < 0 || selected > message.swipes.length) return null;
+  if (selected === message.swipes.length) return true;
+  const candidate = message.swipes[selected];
+  if (typeof candidate !== "string") return null;
+  return candidate.length === 0;
+}
+
 function createEventAdapter(context) {
   return function adaptEvent(event, payload) {
     /**
@@ -1859,12 +1870,8 @@ function createEventAdapter(context) {
       const index = Number(payload);
       if (!Array.isArray(chat) || !Number.isInteger(index) || index < 0 || index >= chat.length) return null;
       const mes = chat[index];
-      // regenerating 判定：只有「滑到最右侧新变体（正在生成）」才回退世界；
-      // 切换查看旧变体不动世界。swipes 形状读不到 → null（UI 侧宁可漏回退，不可误回退）。
-      let regenerating = null;
-      if (mes && Array.isArray(mes.swipes) && mes.swipes.length > 0) {
-        regenerating = Number(mes.swipe_id ?? 0) === mes.swipes.length - 1;
-      }
+      // 新生成可为数组外的待填槽，也可为末尾空占位；已有非空变体不回退。
+      const regenerating = atlasSwipeRegenerating(mes);
       // H05：换 swipe = 换 variantKey（新变体必须是一次**新** prepare，绝不复用旧 token）
       return withIdentity(event, index, {
         kind: "message-swiped",
