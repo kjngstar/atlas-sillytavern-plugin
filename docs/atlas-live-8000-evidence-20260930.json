@@ -50,7 +50,14 @@
   "chatIsolation": {
     "sequence": ["A", "B", "A", "B"],
     "locationAndNpcStayedInOwnChat": true,
-    "distinctCommittedMessageIds": ["36", "2"]
+    "distinctCommittedMessageIdsBeforeDelete": ["36", "2"]
+  },
+  "deleteRollback": {
+    "fixtureChat": "B",
+    "hostMessageCountBeforeAfter": [3, 2],
+    "lastCommittedMessageIdCleared": true,
+    "worldTurnTableRollbackObserved": true,
+    "bootstrapLocationPreserved": true
   },
   "swipeAttempt": {
     "newHostVariantEmpty": true,
@@ -59,6 +66,6 @@
     "successfulSwipeRollbackRetestRequired": true
   },
   "limits": [
-    "Far NPC visibility and message delivery, successful rollback/swipe/delete/late-model cross-chat, unobstructed narrow map and vehicle live cases remain untested."
+    "Far NPC visibility and message delivery, successful swipe and late-model cross-chat, unobstructed narrow map and vehicle live cases remain untested."
   ]
 }
