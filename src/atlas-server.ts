@@ -2118,6 +2118,7 @@ export const ATLAS_ROUTE_MANIFEST = [
   { method: "GET", path: "/worlds" },
   { method: "POST", path: "/worlds/import" },
   { method: "POST", path: "/worlds/ensure-starter" },
+  { method: "POST", path: "/worlds/protagonist/sync" },
   { method: "POST", path: "/worlds/geo/adopt" },
   { method: "POST", path: "/worlds/move-author" },
   { method: "POST", path: "/maps/topology/confirm" },
@@ -2157,6 +2158,7 @@ export const ATLAS_ROUTE_MANIFEST = [
 const ATLAS_SESSION_ROUTES = new Set<string>([
   "POST /worlds/import",
   "POST /worlds/ensure-starter",
+  "POST /worlds/protagonist/sync",
   "POST /worlds/geo/adopt",
   "POST /worlds/move-author",
   "POST /worlds/scale/calibrate",
@@ -2615,7 +2617,7 @@ function createCoreInstance(
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.66",
+      version: "0.9.67",
       protocolVersion: 1,
       time: now(),
     });
@@ -2825,6 +2827,63 @@ function createCoreInstance(
       /** H18b：首次建出世界图时的尺度状态（null = 已有世界图，不额外发模型请求）。 */
       mapScale: outcome.mapScale,
     });
+    });
+  }
+
+  /** 仅修复早期自动建世把助手卡名写到 char-main 的旧会话；不碰作者自建人物。 */
+  async function handleSyncProtagonist(body: unknown, ctx: AtlasRequestContext): Promise<AtlasRouteResult> {
+    if (!ctx.local) throw new AtlasError(ATLAS_ERROR_CODES.FORBIDDEN, "只有本机已登录会话可以修正主角身份。");
+    if (!isPlainRecord(body)) throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "主角身份请求必须是对象。");
+    const chatId = typeof body.chatId === "string" ? body.chatId : "";
+    const worldId = typeof body.worldId === "string" ? body.worldId : "";
+    const cardName = typeof body.cardName === "string" ? body.cardName.trim() : "";
+    const playerName = typeof body.playerName === "string" ? body.playerName.trim().slice(0, 60) : "";
+    if (!chatId || chatId.length > ATLAS_LIMITS.ID_CHARS || !/^world-auto-[0-9a-f]{16}$/.test(worldId)
+      || !cardName || !playerName) {
+      throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "缺少有效的聊天、自动世界、卡名或用户人设名。");
+    }
+    return enqueue(chatId, async () => {
+      const binding = requireBoundBinding(await getBinding(chatId));
+      if (binding.worldId !== worldId || (binding.characterId && binding.characterId !== "char-main")) {
+        return okResult({ changed: false, reason: "not_auto_protagonist" });
+      }
+      const world = await requireWorld(binding);
+      const main = (world.characters ?? []).find((row) => row.id === "char-main" && isProtagonistRole(row.role));
+      if (!main || main.name !== cardName || cardName === playerName) {
+        return okResult({ changed: false, reason: "already_correct_or_customized" });
+      }
+      const cardDescription = typeof body.cardDescription === "string" ? body.cardDescription.trim().slice(0, 1000) : "";
+      const playerDescription = typeof body.playerDescription === "string" ? body.playerDescription.trim().slice(0, 1000) : "";
+      const nextWorld = {
+        ...world,
+        characters: (world.characters ?? []).map((row) => row.id === "char-main"
+          ? { ...row, name: playerName,
+              description: row.description === cardDescription ? playerDescription : row.description }
+          : row),
+        entityRecords: (world.entityRecords ?? []).map((row) => row.id === "char-main" && row.name === cardName
+          ? { ...row, name: playerName } : row),
+        updatedAt: now(),
+      };
+      if (!parseWorld(nextWorld)) throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "修正后世界未通过校验。");
+      const rawTables = await store.read(`tables:${worldId}`).catch(() => null);
+      let nextTables: AtlasTablesStoreV1 | null = null;
+      if (rawTables !== null) {
+        const valid = validateAtlasTablesStore(rawTables, { expectedWorldId: worldId });
+        if (!valid.ok) throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "现有三表损坏，已停止身份修正。");
+        const tables = rawTables as AtlasTablesStoreV1;
+        nextTables = { ...tables, branches: Object.fromEntries(Object.entries(tables.branches).map(([key, branch]) => [
+          key, { ...branch, characters: branch.characters.map((row) => row.id === "npc:char-main" && row.name === cardName
+            ? { ...row, name: playerName }
+            : row) },
+        ])) };
+        if (!validateAtlasTablesStore(nextTables, { expectedWorldId: worldId }).ok) {
+          throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "修正后三表未通过校验。");
+        }
+      }
+      await store.write(`world:${worldId}`, nextWorld);
+      worldCache.set(worldId, nextWorld);
+      if (nextTables) await store.write(`tables:${worldId}`, nextTables);
+      return okResult({ changed: true, characterId: "char-main", name: playerName });
     });
   }
 
@@ -6907,6 +6966,7 @@ function createCoreInstance(
       if (method === "GET" && route === "/worlds") return await handleListWorlds();
       if (method === "POST" && route === "/worlds/import") return await handleImportWorld(body, ctx);
       if (method === "POST" && route === "/worlds/ensure-starter") return await handleEnsureStarter(body, ctx);
+      if (method === "POST" && route === "/worlds/protagonist/sync") return await handleSyncProtagonist(body, ctx);
       if (method === "POST" && route === "/worlds/geo/adopt") return await handleGeoAdopt(body);
       if (method === "POST" && route === "/worlds/move-author") return await handleMoveAuthor(body);
       if (method === "POST" && route === "/maps/topology/confirm") return await handleTopologyConfirm(body);

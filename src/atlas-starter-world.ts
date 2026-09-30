@@ -3,7 +3,7 @@
  *
  * 作者 2026-09-19 反馈：「导入世界 JSON 很多余——打开角色卡、第一次发消息时
  * 就该开始建立世界观。」本模块提供**最小合法世界**的构造器：
- * - 世界名取自当前角色卡；角色卡描述存为世界描述与主角档案；
+ * - 世界名与世界描述取自当前角色卡；主角档案取自用户人设；
  * - **空地理**：0 地区 + 0 地点（R06：核心 schema 的 regions / points 均为可选，
  *   空数组合法；旧实现的「起点」地点是系统占位而不是地理事实）。
  *   第一轮推演的场景识别会产出真实地点，地图由剧情生长，不需要占位兜底。
@@ -24,6 +24,10 @@ export interface StarterWorldOptions {
   name?: string | null;
   /** 角色卡描述（character.description）；可为空。 */
   description?: string | null;
+  /** 酒馆当前用户/人设名（name1）；角色卡名和助手楼层名均不是主角名。 */
+  playerName?: string | null;
+  /** 酒馆当前用户人设描述；可为空。 */
+  playerDescription?: string | null;
 }
 
 const MAX_NAME_CHARS = 60;
@@ -56,6 +60,8 @@ export function buildStarterWorld(options: StarterWorldOptions): World {
   const cardName = (options.name ?? "").trim().slice(0, MAX_NAME_CHARS);
   const worldName = cardName ? `${cardName} 的世界` : "新世界";
   const description = (options.description ?? "").trim().slice(0, MAX_DESCRIPTION_CHARS);
+  const playerName = (options.playerName ?? "").trim().slice(0, MAX_NAME_CHARS) || "主角";
+  const playerDescription = (options.playerDescription ?? "").trim().slice(0, 1000);
   return {
     schemaVersion: 1,
     id: options.id,
@@ -72,9 +78,9 @@ export function buildStarterWorld(options: StarterWorldOptions): World {
       {
         id: "char-main",
         worldId: options.id,
-        name: cardName || "主角",
+        name: playerName,
         role: "主角",
-        description: description.slice(0, 1000),
+        description: playerDescription,
         currentRegionId: null,
       },
     ],

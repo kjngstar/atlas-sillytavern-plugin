@@ -12,6 +12,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { buildStarterWorld, starterWorldIdForChat } from "../src/atlas-starter-world.ts";
+import { migrateLegacyToTables } from "../src/atlas-table-migration.ts";
 import { createAtlasServerCore, createMemoryDocumentStore } from "../src/atlas-server.ts";
 import { createLocalAtlasApi } from "../src/atlas-local-api.ts";
 import { createAtlasSessionApi, atlasSessionWriteGuard, atlasStarterWorldWriteGuard } from "../index.js";
@@ -61,6 +62,45 @@ test("starterWorldIdForChat：不同 chatId 的分布不集中在同一 ID（抽
   const ids = new Set();
   for (let i = 0; i < 200; i += 1) ids.add(starterWorldIdForChat(`chat-${i}`));
   assert.equal(ids.size, 200, "200 个不同 chatId 全部映射到不同 ID");
+});
+
+test("自动建世：卡名只命名世界，主角取用户人设", () => {
+  const world = buildStarterWorld({ id: starterWorldIdForChat("persona"), now: NOW,
+    name: "魔法少女百撰计划", description: "角色卡说明", playerName: "林拾", playerDescription: "用户人设" });
+  assert.equal(world.name, "魔法少女百撰计划 的世界");
+  assert.equal(world.description, "角色卡说明");
+  assert.equal(world.characters[0].name, "林拾");
+  assert.equal(world.characters[0].description, "用户人设");
+});
+
+test("旧自动世界：只修复仍叫卡名的主角，三表同步；作者已改名的不覆盖", async () => {
+  const { core, carrier } = await makeCore();
+  const chatId = "chat-legacy-card-name";
+  const world = starterWorld(starterWorldIdForChat(chatId), "魔法少女百撰计划");
+  world.characters[0].name = "魔法少女百撰计划";
+  world.characters[0].description = "角色卡说明";
+  await ensure(core, world);
+  await core.handle("POST", "/bindings", { action: "bind", binding: {
+    schemaVersion: 1, enabled: true, chatId, worldId: world.id,
+    branchId: null, characterId: "char-main", currentLocationId: null, worldTimeCursor: 0,
+  } });
+  carrier.session.tables = { schemaVersion: 1, worldId: world.id,
+    branches: { canon: migrateLegacyToTables({ world }).tables } };
+  const payload = { chatId, worldId: world.id, cardName: "魔法少女百撰计划",
+    playerName: "林拾", cardDescription: "角色卡说明", playerDescription: "用户人设" };
+  const fixed = await core.handle("POST", "/worlds/protagonist/sync", payload, { local: true });
+  assert.equal(fixed.status, 200, JSON.stringify(fixed.body.error));
+  assert.equal(fixed.body.data.changed, true);
+  assert.equal(carrier.session.world.characters[0].name, "林拾");
+  assert.equal(carrier.session.world.characters[0].description, "用户人设");
+  assert.equal(carrier.session.tables.branches.canon.characters.find((row) => row.id === "npc:char-main").name, "林拾");
+  assert.equal(carrier.session.world.name, "魔法少女百撰计划 的世界");
+  const again = await core.handle("POST", "/worlds/protagonist/sync", payload, { local: true });
+  assert.equal(again.body.data.changed, false);
+  carrier.session.world.characters[0].name = "作者自定义名";
+  const custom = await core.handle("POST", "/worlds/protagonist/sync", payload, { local: true });
+  assert.equal(custom.body.data.changed, false);
+  assert.equal(carrier.session.world.characters[0].name, "作者自定义名");
 });
 
 // ---------------------------------------------------------------------------

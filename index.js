@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.66";
+export const ATLAS_EXTENSION_VERSION = "0.9.67";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -1126,6 +1126,7 @@ const SESSION_ROUTE_PREFIXES = [
   "/bindings",
   "/worlds/import",
   "/worlds/ensure-starter",
+  "/worlds/protagonist/sync",
   "/worlds/geo/adopt",
   "/worlds/move-author",
   "/scene/",
@@ -5518,7 +5519,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       return;
     }
     mapCrumb.style.display = "";
-    const back = el("button", "aw-mapcrumb__back", `← ${mapStack.length > 1 ? "上层" : "世界图"}`);
+    const back = el("button", "aw-mapcrumb__back", `← 返回${mapStack.length > 1 ? "上一层" : "世界图"}`);
     back.type = "button";
     back.setAttribute("aria-label", "返回上一层地图");
     back.addEventListener("click", () => popMapStack());
@@ -6516,7 +6517,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     } else {
       objects = regionFilter ? objectsAll.filter((o) => String(o.regionId ?? "") === regionFilter) : objectsAll;
     }
-    if (regionSelect) regionSelect.disabled = inSub || Boolean(sqlMapItems);
+    if (regionSelect) regionSelect.style.display = inSub || sqlMapItems ? "none" : "";
     if (travelBar) travelBar.style.display = inSub ? "none" : "";
     interiorRoster.innerHTML = "";
     interiorRoster.style.display = inSub && (rosterNpcs.length > 0 || objects.length > 0) ? "" : "none";
@@ -6597,14 +6598,13 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     regionSelect.innerHTML = "";
     const allOption = document.createElement("option");
     allOption.value = "";
-    allOption.textContent = inSub ? String(currentSub?.name ?? view?.name ?? "内部地图")
-      : sqlMapItems ? "世界图" : "全部地区";
+    allOption.textContent = "全部地区";
     regionSelect.append(allOption);
     for (const region of regions) {
       const option = document.createElement("option");
       option.value = String(region.id);
       option.textContent = String(region.name);
-      if (!inSub && !sqlMapItems && String(region.id) === regionFilter) option.selected = true;
+      if (String(region.id) === regionFilter) option.selected = true;
       regionSelect.append(option);
     }
 
@@ -10289,6 +10289,8 @@ async function ensureStarterWorld() {
         || (typeof ctx.characterName === "string" && ctx.characterName.trim())
         || null;
       const description = typeof card?.description === "string" ? card.description : "";
+      const playerName = typeof ctx.name1 === "string" ? ctx.name1.trim() : "";
+      const playerDescription = String(ctx?.powerUserSettings?.persona_description || ctx?.persona_description || "");
       const { mod, api, core } = atlasRuntime;
       if (!mod || !api) return false;
       const world = mod.buildStarterWorld({
@@ -10296,6 +10298,8 @@ async function ensureStarterWorld() {
         now: Date.now(),
         name: cardName,
         description,
+        playerName,
+        playerDescription,
       });
       const result = await api.request("POST", "/worlds/ensure-starter", { world });
       if (result.status !== 200 || !result.body?.ok) {
@@ -10914,6 +10918,20 @@ async function connectOnce() {
         } finally { if (session) await sql.closeSqlSession(session); }
       },
       ensureWorld: () => ensureStarterWorld(),
+      syncProtagonistIdentity: async (chatId, worldId) => {
+        const ctx = context();
+        if (String(ctx?.chatId ?? "") !== chatId || !worldId.startsWith("world-auto-")) return false;
+        const card = resolveCharacterCard(context);
+        const cardName = String(card?.name || ctx?.name2 || "").trim();
+        const playerName = String(ctx?.name1 || "").trim();
+        if (!cardName || !playerName || cardName === playerName) return true;
+        const result = await api.request("POST", "/worlds/protagonist/sync", {
+          chatId, worldId, cardName, playerName,
+          playerDescription: String(ctx?.powerUserSettings?.persona_description || ctx?.persona_description || ""),
+          cardDescription: String(card?.description || ""),
+        });
+        return result.status === 200 && result.body?.ok === true;
+      },
       getOpeningMessage: async () => {
         try {
           const captured = SillyTavern.getContext();

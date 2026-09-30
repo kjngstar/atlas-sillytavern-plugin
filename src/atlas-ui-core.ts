@@ -429,6 +429,8 @@ export function createAtlasUiCore(deps: {
    * 返回 true = 绑定就绪，本条消息照常 prepare；false / 未注入 = 保持未绑定，跳过。
    */
   ensureWorld?: () => Promise<boolean>;
+  /** 把早期自动建世误用的角色卡名纠正为当前用户人设名；失败留待下次刷新。 */
+  syncProtagonistIdentity?: (chatId: string, worldId: string) => Promise<boolean>;
   /** 当前聊天第一条已完成的助手开场白；无开场时返回 null。 */
   getOpeningMessage?: () => Promise<{ messageId: string; text: string } | null>;
   /**
@@ -464,6 +466,7 @@ export function createAtlasUiCore(deps: {
   const now = deps.now ?? Date.now;
   const traces = new Map<string, string>();
   const attempts = new Map<string, number>();
+  const syncedProtagonistChats = new Set<string>();
   let activeTraceId: string | null = null;
   let activeAttemptId: string | null = null;
   let traceSequence = 0;
@@ -799,6 +802,14 @@ export function createAtlasUiCore(deps: {
     await checkHealth();
     await syncFromHost();
     if (state.binding && state.serviceStatus === "online") {
+      const key = `${state.binding.chatId}|${state.binding.worldId}`;
+      if (deps.syncProtagonistIdentity && !syncedProtagonistChats.has(key)) {
+        try {
+          if (await deps.syncProtagonistIdentity(state.binding.chatId, state.binding.worldId)) {
+            syncedProtagonistChats.add(key);
+          }
+        } catch { /* 用户聊天和地图仍可正常读取，下一次刷新再试。 */ }
+      }
       await loadStateData();
     }
   }

@@ -1454,6 +1454,8 @@ test("starter world：buildStarterWorld 产物必须通过 parseWorld；角色�
     now: NOW_BASE,
     name: "爱丽丝",
     description: "x".repeat(3000),
+    playerName: "林拾",
+    playerDescription: "用户人设",
   });
   const parsed = parseWorld(world);
   ok(parsed !== null, "parseWorld 通过（/worlds/import 服务端同款校验）");
@@ -1463,7 +1465,8 @@ test("starter world：buildStarterWorld 产物必须通过 parseWorld；角色�
   equal(parsed.regions.length, 0, "0 地区（空地理）");
   equal(parsed.points.length, 0, "0 地点（不生成起点占位）");
   equal(parsed.characters.length, 1, "一个主角实体");
-  equal(parsed.characters[0].name, "爱丽丝", "主角名 = 角色卡名");
+  equal(parsed.characters[0].name, "林拾", "主角名 = 用户人设名");
+  equal(parsed.characters[0].description, "用户人设", "主角档案取自用户人设");
   equal(parsed.characters[0].currentRegionId, null, "主角不挂在虚构地区上");
   ok(parsed.description.length <= 2000, "描述有界（≤2000）");
   // 缺省回退：无名无描述也能过 schema
@@ -1878,8 +1881,7 @@ test("S10 前端：定位当前位置——世界图回溯祖先，内部图定�
   equal(inSubAfter.k, inSubBefore.k, "内部图定位不改比例");
   ok(Math.abs(inSubAfter.cx - 10) < 0.01 && Math.abs(inSubAfter.cy - 10) < 0.01,
     "内部图定位到大堂在本层地图的标点");
-  equal(container.querySelector(".aw-region")?.disabled, true, "内部图保留工具栏占位并标明本层，地区筛选不可误操作");
-  equal(container.querySelector(".aw-region option")?.textContent, "钟楼", "内部图工具栏显示当前地图名称");
+  equal(container.querySelector(".aw-region")?.style.display, "none", "内部图隐藏无关的地区筛选，保留紧凑地图工具栏");
   stateByChat["chat-a"] = { ...base, currentLocationId: "2" };
   await core.refresh();
   await flush();
@@ -1985,7 +1987,7 @@ test("S10 前端：四层子图导航（第 5 张被拒）与面包屑逐层返�
     equal(crumb.display, "", "子图上面包屑可见");
     equal(crumb.text, step.trail, "面包屑按 parentMapId 逐层累加");
   }
-  equal(container.querySelector(".aw-mapcrumb__back")?.textContent, "← 上层", "第 4 层返回按钮指向上一层");
+  equal(container.querySelector(".aw-mapcrumb__back")?.textContent, "← 返回上一层", "第 4 层返回按钮指向上一层");
 
   // 第 5 张：submaps["11111"] 存在，但已进 4 层 → 不再给入口
   ok(Object.prototype.hasOwnProperty.call(stateByChat["chat-a"].map.submaps, "11111"),
@@ -2001,7 +2003,7 @@ test("S10 前端：四层子图导航（第 5 张被拒）与面包屑逐层返�
     back.click();
     deepEqual(mapPointNames(container), expected, `返回上一层后渲染「${expected[0]}」所在地图`);
   }
-  equal(container.querySelector(".aw-mapcrumb__back")?.textContent, "← 世界图", "只剩一层时返回按钮指向世界图");
+  equal(container.querySelector(".aw-mapcrumb__back")?.textContent, "← 返回世界图", "只剩一层时返回按钮指向世界图");
   container.querySelector(".aw-mapcrumb__back").click();
   deepEqual(mapPointNames(container), ["钟楼", "集市", "孤塔"], "第 1 张 → 世界图（根地点全部回来）");
   equal(crumbSnapshot(container).display, "none", "回到世界图后面包屑隐藏");
