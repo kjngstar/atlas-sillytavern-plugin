@@ -1071,13 +1071,6 @@
        under the left rail, where pointer clicks hit navigation instead. */
     max-width: none;
   }
-  .aw-mapcrumb {
-    /* The wrapped tools take two rows; keep the child-map breadcrumb below them. */
-    top: 112px;
-    left: 14px;
-    right: 14px;
-    flex-wrap: wrap;
-  }
   .aw-areadraw {
     left: 8px;
     right: 8px;
@@ -2509,6 +2502,18 @@
 }
 
 .aw-mapcrumb__sep { color: var(--aw-gold-line); }
+
+@media (max-width: 480px) {
+  .aw-mapcrumb {
+    /* Wrapped tools take two rows; keep child-map navigation below them. */
+    top: 96px;
+    left: 14px;
+    flex-wrap: wrap;
+    max-width: calc(100% - 28px);
+    pointer-events: none;
+  }
+  .aw-mapcrumb > * { pointer-events: auto; }
+}
 }
 
 /* S9（0.9.55）人物纠偏手柄：面板名单 / 人物卡片里的头像，长按起拖（旧入口是地图人物标点）。
