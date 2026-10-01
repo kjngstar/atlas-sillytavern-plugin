@@ -15323,6 +15323,9 @@ ${rejectedBlock}` : "");
       const lore = typeof body.loreSupplement === "string" ? body.loreSupplement.slice(0, ATLAS_LIMITS.LORE_SUPPLEMENT_CHARS) : "";
       const recentTexts = Array.isArray(body.recentTexts) ? body.recentTexts.filter((x) => typeof x === "string").slice(-8).map((x) => x.slice(0, 1800)) : [];
       const existingNames = (world.points ?? []).map((point) => String(point.name)).slice(0, 200);
+      const sceneTables = await store.read(`tables:${world.id}`);
+      const sceneLocations = sceneTables !== null && validateAtlasTablesStore(sceneTables, { expectedWorldId: world.id }).ok ? sceneTables.branches[branchKey]?.locations ?? [] : [];
+      const currentScene = sceneLocations.find((row) => row.id === `loc:${String(binding.currentLocationId ?? "").replace(/^loc:/, "")}`);
       const prompt = [
         autoApply ? "根据当前世界观与剧情，自然补全少量可供后续剧情使用的常见场景。这些是世界结构推断，不是角色已经到访、看见或知道的事实。" : "根据题材、世界设定与已出现的地点，提出能使世界结构更完整的候选地点。它们只是可能存在的场所，并非剧情事实。",
         "现代校园可有城市、街区、图书馆、食堂、教室；异世界可有聚落、工会、拍卖行、迷宫。只选符合当前设定的地点，不机械套用例子，不把课桌等室内陈设当地点。",
@@ -15330,6 +15333,8 @@ ${rejectedBlock}` : "");
         `世界名称：${String(world.name).slice(0, 100)}`,
         `世界描述：${String(world.description ?? "").slice(0, 2500)}`,
         `已有地点：${existingNames.join("、")}`,
+        `当前所在场景：${currentScene ? `${currentScene.id}=${currentScene.name}；上级=${currentScene.parentLocationId ?? "world"}；描述=${currentScene.description.slice(0, 500)}` : "未确定"}`,
+        "先核对当前场景和已有地点的归属；正文里的简称、别名、班级号或更完整称呼可能仍指同一个场景，不能仅因称呼变化重复创建。补全用于增加缺失的功能场所与上级结构，不重建角色脚下已有的街道或房间；同名但不同归属的地点也不能随意合并。",
         `设定资料：${lore || "无"}`,
         `近期剧情：${recentTexts.join("\n---\n") || "无"}`
       ].join("\n");

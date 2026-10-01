@@ -291,6 +291,9 @@ test("自动场景扩展首轮直接入图、按父子层级连接且同回合�
   });
   const first = await run("turn-1");
   equal(first.status, 200, "自动扩展成功");
+  const expansionPrompt = JSON.stringify(fetcher.calls[0].body);
+  ok(expansionPrompt.includes("当前所在场景："), "补全提示词包含当前场景身份");
+  ok(expansionPrompt.includes("不能仅因称呼变化重复创建"), "补全也约束场景别名复用");
   equal(first.body.data.accepted, 2, "模型建议不需逐个手动采纳");
   equal(first.body.data.linked, 1, "已有根地点可归到推断的上级地点");
   equal(carrier.session.world.points.length, originalCount + 2, "新地点进入地图");
