@@ -2844,6 +2844,11 @@
 
 /* 子图角标：可深入内部的地点带金色小菱形（呼应 45° brand-mark） */
 .aw-current-position {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--aw-panel);
+  transform: translate(-50%, -50%) scale(var(--aw-marker-inv, 1));
   border-color: var(--aw-teal, #285f5e);
   color: var(--aw-teal, #285f5e);
   font-weight: 700;

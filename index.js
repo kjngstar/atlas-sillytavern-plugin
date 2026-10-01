@@ -7215,6 +7215,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       // 三表子图的真实人物标点优先：nearby 是有界列表，不能让第 49 个人凭空消失。
       for (const marker of Array.isArray(currentSub?.points) ? currentSub.points : []) {
         if (marker?.kind === "item") {
+          if (marker.positionQuality !== "estimated") continue; // 精细坐标物品已由三表物品层绘制。
           const entry = tableMap.objects?.entries?.find((item) => String(item.id) === String(marker.rowId ?? marker.id));
           if (!entry) continue;
           const dot = el("button", "aw-object");
@@ -7246,9 +7247,9 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         pin.style.left = `${marker.x}px`;
         pin.style.top = `${marker.y}px`;
         pin.title = marker.positionQuality === "estimated"
-          ? `${String(npc.name)}（${String(marker.positionHint ?? "室内方位")}，根据动作文字估计；不代表已确认距离）`
+          ? `${String(npc.name)}（${String(marker.positionHint ?? "场景内方位")}，位置为估计）`
           : String(npc.name);
-        pin.setAttribute("aria-label", `人物 ${String(npc.name)}，${marker.positionQuality === "estimated" ? "室内方位估计" : "已确认细格位置"}，点击查看详情`);
+        pin.setAttribute("aria-label", `人物 ${String(npc.name)}，${marker.positionQuality === "estimated" ? "场景内方位估计" : "已确认细格位置"}，点击查看详情`);
         pin.append(el("span", "aw-object__gem", String(npc.name ?? "?").slice(0, 1)));
         pin.append(el("span", "aw-object__name", String(npc.name)));
         pin.addEventListener("click", (event) => { event.stopPropagation(); openNpcPanel(npc, pin); });

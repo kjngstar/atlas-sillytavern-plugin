@@ -375,7 +375,8 @@ test("M3 实酒馆回归：全链待定位的学校仍能逐层进入建筑与�
   dom.window.close();
 });
 
-test("室内图显示估计人物、网格边界和示意课桌，同一物品只列一次", async () => {
+for (const quality of ["estimated", "confirmed"]) {
+test(`室内图显示估计人物、网格边界和示意课桌，${quality} 物品只列一次`, async () => {
   const frame = { cols: 100, rows: 100, frameRevision: 1 };
   const submaps = {
     "1": { mapId: "1", parentMapId: "world", frame,
@@ -383,7 +384,7 @@ test("室内图显示估计人物、网格边界和示意课桌，同一物品�
     "2": { mapId: "2", parentMapId: "1", frame,
       points: [{ id: "npc:student", name: "同学", x: 43, y: 51, kind: "character", rowId: "npc:student",
         positionQuality: "estimated", positionHint: "房间内，细部位置估计" },
-        { id: "item:table", name: "水笔", x: 62, y: 51, kind: "item", rowId: "item:table", positionQuality: "estimated" }], total: 2, truncated: 0 },
+        { id: "item:table", name: "水笔", x: 62, y: 51, kind: "item", rowId: "item:table", positionQuality: quality }], total: 2, truncated: 0 },
   };
   const tableMap = {
     branchKey: "canon", world: { points: [{ id: "1", name: "学校", x: 50, y: 50, kind: "location", rowId: "loc:1" }], total: 1, truncated: 0 },
@@ -393,7 +394,8 @@ test("室内图显示估计人物、网格边界和示意课桌，同一物品�
     nearby: { entries: [{ id: "npc:student", name: "同学", locationId: "loc:2", locationName: "教室",
       presence: "present", gridX: null, gridY: null, mapId: "loc:2" }], total: 1, truncated: 0 },
     objects: { entries: [{ id: "item:table", name: "水笔", description: "蓝色水笔", status: "完好",
-      locationId: "loc:2", holderCharacterId: null, mapId: "loc:2", gridX: null, gridY: null }], total: 1, truncated: 0 },
+      locationId: "loc:2", holderCharacterId: null, mapId: "2", gridX: quality === "confirmed" ? 62 : null,
+      gridY: quality === "confirmed" ? 51 : null }], total: 1, truncated: 0 },
   };
   const state = mapState({ points: [{ id: "1", name: "学校", x: 50, y: 50 }], submaps, tableMap, currentLocationId: "2" });
   state.stateData.objectDirectory = [{ id: "legacy-pen", name: "水笔", type: "item", description: "蓝色水笔", pointId: "2" }];
@@ -417,6 +419,7 @@ test("室内图显示估计人物、网格边界和示意课桌，同一物品�
   assert.match(container.querySelector(".aw-mappanel").textContent, /类型：物品/);
   dom.window.close();
 });
+}
 
 test("G03 回放：教室子图只画可信细格的人物图钉，建筑级 / 无坐标 / 同格的人不伪造点位", async () => {
   const { dom, container } = await mountReplay(classroomState());
