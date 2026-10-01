@@ -111,7 +111,9 @@ export const DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA: Array<{ role: string; name: st
       "输出格式：只输出一个完整块，块内每行一个独立 JSON 对象；不要根对象、不要数组、不要代码围栏、不要解释文字：\n" +
       "<atlasEdit>\n" +
       '{"table":"location","op":"add","ref":"new:loc:tower","name":"钟楼","parentRef":null,"description":"旧钟楼","quote":"走到了钟楼"}\n' +
-      '{"table":"character","op":"set","ref":"npc:keeper","patch":{"locationRef":"new:loc:tower","thought":"担心巡逻","actionTendency":"留在钟楼"},"basis":"observed","quote":"守卫留在钟楼"}\n' +
+      '{"table":"character","op":"add","ref":"new:npc:keeper","name":"守卫","locationRef":"new:loc:tower","basis":"observed","quote":"守卫留在钟楼"}\n' +
+      '{"table":"character","op":"set","ref":"new:npc:keeper","patch":{"positionHint":"入口附近"},"basis":"inferred"}\n' +
+      '{"table":"character","op":"set","ref":"new:npc:keeper","patch":{"thought":"担心巡逻","actionTendency":"留在钟楼"},"basis":"inferred"}\n' +
       '{"table":"item","op":"add","ref":"new:item:key","name":"铜钥匙","locationRef":"new:loc:tower","description":"小钥匙","quote":"桌上的铜钥匙"}\n' +
       "</atlasEdit>\n" +
       "规则：\n" +
@@ -155,7 +157,7 @@ export const DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA: Array<{ role: string; name: st
     content:
       "【本轮用户行动；证据来源 msg:u】\n$8\n【本轮助手回复；证据来源 msg:a】\n{{assistantReply}}\n" +
       "先使用【主角人物 ID】确定玩家目前所在地点；若本轮剧情已抵达某个地点，即使正文用代词或承接上文，也要写主角 character set 的 locationRef（未入表先 add），正文有直接地点证据时用 basis=\"observed\" 并逐字摘录 quote；只有承接上文才唯一确定地点时用 basis=\"inferred\"，无需编造 quote。进入街道、走廊、楼层、房间、院落、地窖等实际场景时登记地点，有上级证据再用 parentRef 挂到外层。在途仅表示尚未到目的地，不否定主角已经身处街道或走廊；只是想去、被阻止、回忆、梦境或远处镜头都不算抵达。多个地点都合理、意图与抵达混淆时不改变位置；远方 NPC 只记 targetLocationRef，不以推断让其瞬移。\n" +
-      "再识别本轮实际参与的人物：已在对照表里的用它的正式 ID 改 locationRef / thought / actionTendency / presence；新出现的先 character add 再给 locationRef；背景提及者不算在场，没提到就什么都不要写。\n" +
+      "再识别本轮实际参与的人物：已在对照表里的用它的正式 ID 改 locationRef / thought / actionTendency / presence；新出现的先用 character add、new:npc: 局部引用、basis=\"observed\" 和本轮连续原文 quote 登记，新增字段直接放在行上（不放进 patch），并给 locationRef。需要估计 positionHint 时，在成功声明之后另写一行 inferred set；不能用 inferred add 代替人物建档，也不能拿新名字当正式 ID。背景提及者不算在场，没提到就什么都不要写。\n" +
       "物品只在正文真的出现时才登记：地上的给 locationRef，被人拿着的给 holderRef（两者只能选一个）；正文明确消失或销毁才用 remove。\n" +
       "只写有证据的变化行；没有变化就写 {\"kind\":\"noop\"}。时间和距离不要填任何数字。最后只输出一个完整 <atlasEdit> 块。",
   },

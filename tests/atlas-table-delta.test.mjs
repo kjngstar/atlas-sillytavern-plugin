@@ -16,6 +16,7 @@ import {
   parseAtlasEditBlock,
 } from "../src/atlas-table-delta.ts";
 import { validateAtlasTables } from "../src/atlas-tables.ts";
+import { DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA } from "../src/atlas-api-client.ts";
 import {
   collectFixtureIdentityIds,
   fixtureDistantDeclaration,
@@ -44,6 +45,19 @@ const SOURCES = {
   "msg:u": "我进钟楼，把铜钥匙留在桌上。",
   "msg:a": "你走进钟楼，看见桌上的铜钥匙。守卫留在钟楼，担心夜里的巡逻。",
 };
+
+test("默认提示词的新人物示例可建档，再单独写入估计方位", () => {
+  const example = DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA[0].content.match(/<atlasEdit>[\s\S]*?<\/atlasEdit>/)[0];
+  const parsed = parseAtlasEditBlock(example, { "msg:a": "走到了钟楼。守卫留在钟楼，桌上的铜钥匙。" });
+  assert.equal(parsed.status, "edits");
+  assert.deepEqual(parsed.rejected, []);
+  const result = applyAtlasTableDelta(emptyTables(), parsed.edits);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.rejected, []);
+  assert.equal(result.tables.characters.length, 1);
+  assert.equal(result.tables.characters[0].positionHint, "入口附近");
+  assert.equal(result.tables.characters[0].locationId, result.tables.locations[0].id);
+});
 
 test("AI 可独立推测场景内相对方位；它不提供真实坐标或改写行动", () => {
   const parsed = parseAtlasEditBlock('<atlasEdit>\n{"table":"character","op":"set","ref":"npc:keeper","basis":"inferred","patch":{"positionHint":"街道左侧"}}\n</atlasEdit>', SOURCES);
