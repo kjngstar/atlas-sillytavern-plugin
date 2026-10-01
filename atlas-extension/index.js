@@ -6710,7 +6710,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       boundary.style.width = `${Math.round(roomCols * 0.76)}px`;
       boundary.style.height = `${Math.round(roomRows * 0.76)}px`;
       boundary.title = "室内示意范围；边界尚未实测";
-      boundary.append(el("span", "aw-scene-boundary__label", `📍 ${roomName} · 示意范围`));
+      boundary.append(el("span", "aw-scene-boundary__label", `📍 ${roomName}`));
       mapLayer.append(boundary);
       const classroom = /(教室|[一二三四五六七八九十\d]+班|classroom)/i.test(roomName);
       const library = /(图书室|图书馆|阅览室|library)/i.test(roomName);
@@ -6968,7 +6968,6 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
           node.dataset.displayOnly = "true";
           node.dataset.pointId = pointId;
           if (hasChildSubmap(submaps, pointId)) node.classList.add("aw-point--sub", "aw-point--entrance");
-          node.append(el("span", "aw-point__pending", "示意"));
           node.style.left = `${Number(marker.x) + cameraFrame.minX}px`;
           node.style.top = `${Number(marker.y) + cameraFrame.minY}px`;
           node.addEventListener("click", (event) => {

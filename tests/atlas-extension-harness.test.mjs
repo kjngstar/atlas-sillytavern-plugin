@@ -3686,8 +3686,10 @@ test("空真实地图：待定位地点可打开资料和名单，格数比例�
   const { dom, core, container } = await mountRootAtlasMap({ stateByChat: { "chat-a": state } });
   const markers = [...container.querySelectorAll(".aw-point--displayonly")];
   equal(markers.length, 2, "世界图只显示根地点，不把卧室搬到世界图");
-  ok(markers.every((marker) => marker.querySelector(".aw-point__pending")?.textContent === "示意"),
-    "已画出的示意标点不再写待定位；真实格坐标仍未确认");
+  ok(markers.every((marker) => !marker.querySelector(".aw-point__pending")),
+    "地点标点不再显示示意角标");
+  ok(markers.every((marker) => marker.title.includes("位置未确认")),
+    "位置是否已确认仍可从悬浮详情查看");
   ok(!container.querySelector(".aw-maparea__hint").textContent.includes("没有地理数据"));
   const label = container.querySelector(".aw-scale__label");
   ok(label && label.textContent.includes("格"), "无真实坐标仍显示按格计算的比例尺");
