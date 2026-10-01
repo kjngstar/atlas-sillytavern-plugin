@@ -1439,6 +1439,7 @@ function characterLine(row: AtlasCharacterRow): string {
   if (row.thought) bits.push(`想法:${row.thought}`);
   if (row.actionTendency) bits.push(`倾向:${row.actionTendency}`);
   if (row.currentAction) bits.push(`当前:${row.currentAction}`);
+  if (row.positionHint) bits.push(`场景内方位估计:${row.positionHint}`);
   return bits.join("｜");
 }
 
@@ -1512,7 +1513,7 @@ export function buildTableDeltaContext(input: AtlasTableContextInput): AtlasTabl
     : `【地图】${mapId}：${frame.cols}×${frame.rows} 格；未标定（按格计算）。不要自行编造距离或时间。`);
 
   // 6) 可用 ID 对照（必要 ID 必须留下；其余按上限截断）
-  const locationRoster = tables.locations.slice(0, 80).map((row) => `${row.id}=${row.name}`).join("；");
+  const locationRoster = tables.locations.slice(0, 80).map((row) => `${row.id}=${row.name}(上级:${row.parentLocationId ?? "world"})`).join("；");
   const characterRoster = tables.characters.slice(0, 48).map((row) => `${row.id}=${row.name}`).join("；");
   lines.push(`【地点 id 对照】${locationRoster || "（空）"}`);
   lines.push(`【人物 id 对照】${characterRoster || "（空）"}`);
@@ -2624,7 +2625,7 @@ function createCoreInstance(
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.70",
+      version: "0.9.71",
       protocolVersion: 1,
       time: now(),
     });
@@ -2853,6 +2854,24 @@ function createCoreInstance(
       let expansionSeen = 0;
       if (autoApply) {
         if (!triggerId) throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "自动扩展需要回合标识。");
+        // 补全属于触发楼层。先冻结兼容地图与计数基线，删楼时与三表一起还原。
+        const turnKeys = await store.list(`turn:${chatId}:`);
+        for (const key of turnKeys) {
+          const turn = await store.read(key);
+          if (!isPlainRecord(turn) || turn.turnId !== triggerId) continue;
+          if (turn.rolledBack || turn.assistantMessageId !== binding.lastCommittedMessageId) {
+            return okResult({ accepted: 0, linked: 0, skipped: "stale-turn", scope: "author" });
+          }
+          if (!turn.autoGeoUndo) {
+            await store.write(key, { ...turn, autoGeoUndo: {
+              points: JSON.parse(JSON.stringify(world.points ?? [])),
+              definitionRevisions: world.definitionRevisions ?? null,
+              maps: await store.read(`maps:${world.id}`),
+              markerKey: expansionKey, marker: await store.read(expansionKey),
+            } });
+          }
+          break;
+        }
         const oldMarker = await store.read(expansionKey);
         const marker = isPlainRecord(oldMarker) ? oldMarker : {};
         if (marker.lastTriggerId === triggerId) return okResult({ accepted: 0, linked: 0, skipped: "duplicate", scope: "author" });
@@ -2909,7 +2928,7 @@ function createCoreInstance(
         const tablesDoc = rawTables !== null && validateAtlasTablesStore(rawTables, { expectedWorldId: world.id }).ok
           ? rawTables as AtlasTablesStoreV1 : null;
         const branch = tablesDoc?.branches[branchKey] ? cloneAtlasTables(tablesDoc.branches[branchKey]) : null;
-        const points = [...(world.points ?? [])];
+        const points = (world.points ?? []).map((point) => ({ ...point }));
         const rawMaps = await store.read(`maps:${world.id}`);
         const mapsBase = isPlainRecord(rawMaps) ? rawMaps : {};
         const pointMeta: Record<string, unknown> = { ...(isPlainRecord(mapsBase.pointMeta) ? mapsBase.pointMeta : {}) };
@@ -6029,6 +6048,7 @@ function createCoreInstance(
       idempotencyKey,
       userMessageId: request.userMessageId,
       assistantMessageId: request.assistantMessageId,
+      turnId: request.turnId,
       swipeId: request.swipeId,
       checkpointId,
       committedAt: now(),
@@ -6358,7 +6378,13 @@ function createCoreInstance(
       throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "回合映射缺少检查点，无法回退。");
     }
     const world = await requireWorld(binding);
-    const restored = restoreAsPlayhead(world, checkpointId, { now: now() });
+    const autoGeoUndo = isPlainRecord(target.doc.autoGeoUndo) ? target.doc.autoGeoUndo : null;
+    const rollbackWorld: World = autoGeoUndo && Array.isArray(autoGeoUndo.points)
+      ? { ...world, points: autoGeoUndo.points as World["points"],
+          definitionRevisions: Array.isArray(autoGeoUndo.definitionRevisions)
+            ? autoGeoUndo.definitionRevisions as World["definitionRevisions"] : undefined }
+      : world;
+    const restored = restoreAsPlayhead(rollbackWorld, checkpointId, { now: now() });
     if (!restored.ok) {
       throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, restored.error);
     }
@@ -6411,6 +6437,15 @@ function createCoreInstance(
     // 世界写回游玩头状态（账本未来保留）；绑定游标照 previousBinding 快照还原
     await store.write(`world:${binding.worldId}`, restored.value);
     worldCache.set(binding.worldId, restored.value);
+    if (autoGeoUndo) {
+      if (autoGeoUndo.maps == null) await store.remove(`maps:${binding.worldId}`);
+      else await store.write(`maps:${binding.worldId}`, autoGeoUndo.maps);
+      const expectedMarkerKey = `geo-auto:expansion:${binding.worldId}:${branchKey}`;
+      if (autoGeoUndo.markerKey === expectedMarkerKey) {
+        if (autoGeoUndo.marker == null) await store.remove(expectedMarkerKey);
+        else await store.write(expectedMarkerKey, autoGeoUndo.marker);
+      }
+    }
     const previous = (target.doc.previousBinding ?? {}) as {
       worldTimeCursor?: number;
       currentLocationId?: string | null;

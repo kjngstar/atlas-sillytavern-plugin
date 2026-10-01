@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.70";
+export const ATLAS_EXTENSION_VERSION = "0.9.71";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -6613,28 +6613,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     if (regionSelect) regionSelect.style.display = inSub || sqlMapItems ? "none" : "";
     if (travelBar) travelBar.style.display = inSub ? "none" : "";
     interiorRoster.innerHTML = "";
-    interiorRoster.style.display = inSub && (rosterNpcs.length > 0 || objects.length > 0) ? "" : "none";
-    if (inSub && (rosterNpcs.length > 0 || objects.length > 0)) {
-      interiorRoster.append(el("div", "aw-interior-roster__title", `${String(view.name ?? "当前地点")}内 · 细部位置未定`));
-      for (const npc of rosterNpcs) {
-        const button = el("button", "aw-interior-roster__item", String(npc.name ?? "未具名人物"));
-        button.type = "button";
-        button.addEventListener("click", (event) => {
-          event.stopPropagation();
-          openNpcPanel(npc);
-        });
-        interiorRoster.append(button);
-      }
-      for (const object of objects) {
-        const button = el("button", "aw-interior-roster__item", String(object.name ?? "物品"));
-        button.type = "button";
-        button.addEventListener("click", (event) => {
-          event.stopPropagation();
-          openObjectPanel(object);
-        });
-        interiorRoster.append(button);
-      }
-    }
+    interiorRoster.style.display = "none";
 
     /**
      * H06（§10.2）：SQL **粗定位名单**。
@@ -6714,15 +6693,14 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     const camKey = `${mapStackKey}|${inSub ? String(view.pointId) : "world"}`;
     const framePoints = inSub ? (Array.isArray(currentSub.points) ? currentSub.points : []) : pointsAll;
     const roomName = String(view?.name ?? "");
-    const roomScene = inSub && /(教室|[一二三四五六七八九十\d]+班|寝室|卧室|办公室|会议室|实验室|图书室|房间|病房|客房|大厅|餐厅|食堂|车厢|classroom|room)/i.test(roomName);
+    const roomScene = inSub && (/(教室|[一二三四五六七八九十\d]+班|寝室|卧室|办公室|会议室|实验室|图书室|房间|病房|客房|大厅|餐厅|食堂|车厢|classroom|room)/i.test(roomName)
+      || !(currentSub?.points ?? []).some((point) => !point.kind || point.kind === "location")
+        && !(tableMap?.unplacedLocations?.entries ?? []).some((row) => row.parentLocationId === `loc:${view.pointId}`));
     const measuredFrame = computeMapFrame(framePoints);
     const roomCols = Number(currentSub?.frame?.cols) > 0 ? Number(currentSub.frame.cols) : 100;
     const roomRows = Number(currentSub?.frame?.rows) > 0 ? Number(currentSub.frame.rows) : 100;
     cameraFrame = roomScene
-      ? { minX: Math.min(0, measuredFrame.minX), minY: Math.min(0, measuredFrame.minY),
-          maxX: Math.max(roomCols, measuredFrame.maxX), maxY: Math.max(roomRows, measuredFrame.maxY),
-          spanX: Math.max(roomCols, measuredFrame.maxX) - Math.min(0, measuredFrame.minX),
-          spanY: Math.max(roomRows, measuredFrame.maxY) - Math.min(0, measuredFrame.minY) }
+      ? { minX: 0, minY: 0, maxX: roomCols, maxY: roomRows, spanX: roomCols, spanY: roomRows }
       : measuredFrame;
     if (roomScene) {
       // 室内图的粗线框落在真实网格整数线上；只表达示意空间，不作为地理证据。
@@ -6732,6 +6710,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       boundary.style.width = `${Math.round(roomCols * 0.76)}px`;
       boundary.style.height = `${Math.round(roomRows * 0.76)}px`;
       boundary.title = "室内示意范围；边界尚未实测";
+      boundary.append(el("span", "aw-scene-boundary__label", `📍 ${roomName} · 示意范围`));
       mapLayer.append(boundary);
       const classroom = /(教室|[一二三四五六七八九十\d]+班|classroom)/i.test(roomName);
       const library = /(图书室|图书馆|阅览室|library)/i.test(roomName);
@@ -7018,15 +6997,16 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     }
     if (currentId && ownerId === currentId && !sqlMapItems) {
       const position = tableMap?.current?.position;
-      const exact = position?.mapId === ownerId && Number.isFinite(position.x) && Number.isFinite(position.y);
+      const positioned = position?.mapId === ownerId && Number.isFinite(position.x) && Number.isFinite(position.y);
+      const exact = positioned && position.positionQuality !== "estimated";
       const player = el("button", "aw-object aw-current-position");
       player.type = "button";
       player.dataset.positionQuality = exact ? "confirmed" : "estimated";
-      player.style.left = `${exact ? position.x : (cameraFrame.minX + cameraFrame.maxX) / 2}px`;
-      player.style.top = `${exact ? position.y : (cameraFrame.minY + cameraFrame.maxY) / 2}px`;
+      player.style.left = `${positioned ? position.x : (cameraFrame.minX + cameraFrame.maxX) / 2}px`;
+      player.style.top = `${positioned ? position.y : (cameraFrame.minY + cameraFrame.maxY) / 2}px`;
       player.title = exact ? "主角在这里：已确认细格位置。" : "主角在当前场景内；图标方位为示意，细格位置尚未确认。";
       player.setAttribute("aria-label", player.title);
-      player.append(el("span", "aw-object__gem", "⌖"), el("span", "aw-object__name", exact ? "你在这里" : "你在这里 · 方位估计"));
+      player.append(el("span", "aw-object__gem", "📍"), el("span", "aw-object__name", exact ? "你在这里" : `你在这里 · ${position?.positionHint ?? "方位估计"}`));
       player.addEventListener("click", (event) => { event.stopPropagation(); locatePlayerCamera(); });
       mapLayer.append(player);
     }
@@ -7234,13 +7214,28 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       const drawnNpcIds = new Set();
       // 三表子图的真实人物标点优先：nearby 是有界列表，不能让第 49 个人凭空消失。
       for (const marker of Array.isArray(currentSub?.points) ? currentSub.points : []) {
+        if (marker?.kind === "item") {
+          const entry = tableMap.objects?.entries?.find((item) => String(item.id) === String(marker.rowId ?? marker.id));
+          if (!entry) continue;
+          const dot = el("button", "aw-object");
+          dot.type = "button";
+          dot.dataset.objId = String(entry.id);
+          dot.dataset.positionQuality = marker.positionQuality;
+          dot.style.left = `${marker.x}px`; dot.style.top = `${marker.y}px`;
+          dot.title = `${entry.name}${marker.positionQuality === "estimated" ? " · 场景内方位估计" : ""}`;
+          dot.setAttribute("aria-label", `物品 ${entry.name}，点击查看详情`);
+          dot.append(el("span", "aw-object__name", entry.name));
+          dot.addEventListener("click", (event) => { event.stopPropagation(); openObjectPanel(objectViewFromTableRow(entry), dot); });
+          mapLayer.append(dot);
+          continue;
+        }
         if (marker?.kind !== "character" || !["confirmed", "estimated"].includes(marker.positionQuality)) continue;
         const rowId = String(marker.rowId ?? marker.id ?? "");
         if (!rowId || typeof marker.x !== "number" || typeof marker.y !== "number") continue;
         if (pinCoords.has(`${marker.x}|${marker.y}`)) continue;
         const entry = tableMap.nearby.entries.find((item) => String(item.id ?? item.rowId ?? "") === rowId
           || `npc:${String(item.id ?? "")}` === rowId);
-        if (entry?.isProtagonist === true || entry?.presence === "left") continue;
+        if (marker.isProtagonist === true || entry?.isProtagonist === true || entry?.presence === "left") continue;
         const npc = entry ? npcViewFromTableRow(entry, { pointName: entry.locationName ?? null })
           : { id: rowId.replace(/^npc:/, ""), name: String(marker.name ?? ""),
             pointId: String(view.pointId), presence: "present" };

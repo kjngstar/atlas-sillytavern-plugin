@@ -89,6 +89,7 @@ export interface AtlasMapViewPoint {
   positionQuality: AtlasMapViewPositionQuality;
   /** 室内文字方位；estimated 标点只供展示，绝不用于旅行距离。 */
   positionHint?: string;
+  isProtagonist?: boolean;
 }
 
 export interface AtlasMapViewSubmap {
@@ -165,7 +166,7 @@ export interface AtlasTableMapView {
   };
   objects: { entries: AtlasMapViewObject[]; total: number; truncated: number };
   current: { locationId: string | null; chain: Array<{ id: string; name: string }>;
-    position: { mapId: string; x: number; y: number } | null };
+    position: { mapId: string; x: number; y: number; positionQuality?: "estimated"; positionHint?: string } | null };
   totals: { locations: number; characters: number; items: number; submaps: number };
   /** 未投影进任何地图的行数（id 非数字 / 父不可达等），必须让调用方看得见。 */
   dropped: { locations: number };
@@ -178,10 +179,12 @@ function isGrid(value: number | null): value is number {
 function interiorPositionHint(action: string, id: string): { x: number; y: number; label: string } | null {
   const zones: Array<[RegExp, number, number, string]> = [
     [/(窗边|窗旁|靠窗|window)/i, 80, 30, "窗边"],
-    [/(门口|门边|门旁|门前|door)/i, 18, 80, "门旁"],
+    [/(门口|门边|门旁|门前|入口|巷口|路口|door)/i, 18, 80, "入口附近"],
     [/(角落|墙角|corner)/i, 18, 18, "角落"],
     [/(桌边|桌旁|桌子|课桌|讲台|desk|table)/i, 55, 55, "桌旁"],
     [/(中央|中间|中心|center|middle)/i, 50, 45, "中央"],
+    [/(左侧|左边|left)/i, 22, 50, "左侧"],
+    [/(右侧|右边|right)/i, 78, 50, "右侧"],
   ];
   const zone = zones.map((entry) => {
     const matches = [...action.matchAll(new RegExp(entry[0].source, "gi"))];
@@ -200,9 +203,43 @@ function isInteriorRoom(location: AtlasLocationRow, locations: readonly AtlasLoc
     && !locations.some((row) => row.parentLocationId === location.id);
 }
 
-function schematicRoomPosition(index: number): { x: number; y: number; label: string } {
-  return { x: 28 + (index % 4) * 14, y: 35 + (Math.floor(index / 4) % 4) * 12,
-    label: "房间内，细部位置估计" };
+function scenePositions(rows: Array<{ id: string; currentAction?: string; positionHint?: string }>, frame: SubMapFrame): Map<string, { x: number; y: number; label: string }> {
+  const cols = Math.max(1, frame.cols), height = Math.max(1, frame.rows);
+  const width = Math.max(1, Math.ceil(Math.sqrt(rows.length * cols / height)));
+  const depth = Math.max(1, Math.ceil(rows.length / width));
+  const slots = Array.from({ length: width * depth }, (_, i) => ({
+    x: width === 1 ? 50 : 18 + (i % width) * 64 / (width - 1),
+    y: depth === 1 ? 50 : 18 + Math.floor(i / width) * 64 / (depth - 1),
+  }));
+  const result = new Map<string, { x: number; y: number; label: string }>();
+  const occupied: Array<{ x: number; y: number }> = [];
+  const gap = Math.min(12, 45 / Math.sqrt(Math.max(1, rows.length)));
+  const ordered = [...rows].sort((a, b) => Number(Boolean(b.positionHint || b.currentAction)) - Number(Boolean(a.positionHint || a.currentAction)) || a.id.localeCompare(b.id));
+  for (const row of ordered) {
+    const hint = interiorPositionHint(row.positionHint || row.currentAction || "", row.id);
+    let index = 0;
+    if (hint) {
+      let best = Infinity;
+      slots.forEach((slot, i) => { const score = (slot.x - hint.x) ** 2 + (slot.y - hint.y) ** 2;
+        if (score < best) { best = score; index = i; } });
+    }
+    let slot = slots.splice(index, 1)[0]!;
+    const desired = hint ?? slot;
+    for (let attempt = 0; attempt < 300; attempt++) {
+      const radius = attempt === 0 ? 0 : gap * Math.sqrt(attempt);
+      const angle = attempt * 2.399963;
+      const candidate = { x: Math.max(14, Math.min(86, desired.x + radius * Math.cos(angle))),
+        y: Math.max(14, Math.min(86, desired.y + radius * Math.sin(angle))) };
+      if (occupied.every((point) => Math.hypot(candidate.x - point.x, candidate.y - point.y) >= gap)) {
+        slot = candidate; break;
+      }
+    }
+    occupied.push(slot);
+    // 相对方位按本场景实际格数缩放；示意坐标绝不写回三表。
+    result.set(row.id, { x: slot.x * cols / 100, y: slot.y * height / 100,
+      label: row.positionHint || hint?.label || "场景内，细部位置估计" });
+  }
+  return result;
 }
 
 function regionOfPoint(world: World, pointId: string): string | null {
@@ -233,7 +270,7 @@ export function projectTablesToMapView(
     : byRowId.get(currentLocationId.startsWith("loc:") ? currentLocationId : `loc:${currentLocationId}`) ?? null;
   const currentPlayer = tables.characters.find((row) => protagonistIds.has(row.id.replace(/^npc:/, ""))
     && row.locationId === currentRow?.id && row.presence !== "left");
-  const currentPosition = currentPlayer?.mapId && isGrid(currentPlayer.gridX) && isGrid(currentPlayer.gridY)
+  let currentPosition: AtlasTableMapView["current"]["position"] = currentPlayer?.mapId && isGrid(currentPlayer.gridX) && isGrid(currentPlayer.gridY)
     ? { mapId: currentPlayer.mapId.replace(/^loc:/, ""), x: currentPlayer.gridX, y: currentPlayer.gridY } : null;
 
   // 1) 地点 → 世界图 / 父图
@@ -321,7 +358,19 @@ export function projectTablesToMapView(
   };
 
   const visibleLocationIds = new Set(tables.locations.map((row) => row.id));
+  const sceneLayouts = new Map<string, ReturnType<typeof scenePositions>>();
+  for (const location of tables.locations) {
+    if (!isInteriorRoom(location, tables.locations) && tables.locations.some((child) => child.parentLocationId === location.id)) continue;
+    const rows = [...tables.characters.filter((row) => row.locationId === location.id && row.presence !== "left"
+      && !(row.mapId !== null && isGrid(row.gridX) && isGrid(row.gridY))),
+      ...tables.items.filter((row) => row.locationId === location.id && row.holderCharacterId === null
+        && row.status !== ATLAS_ITEM_DESTROYED_STATUS && !(row.mapId !== null && isGrid(row.gridX) && isGrid(row.gridY)))
+        .map((row) => ({ id: row.id, currentAction: row.description }))];
+    if (rows.length) sceneLayouts.set(location.id, scenePositions(rows,
+      maps?.submaps?.[String(pointIdFromLocationRowId(location.id))]?.frame ?? SUBMAP_FRAME_DEFAULT));
+  }
   for (const row of tables.characters) {
+    if (row.presence === "left") continue;
     const characterId = row.id.startsWith("npc:") ? row.id.slice(4) : row.id;
     const placed = placeMarker(row.mapId, row.gridX, row.gridY, (x, y) => ({
       id: `npc:${characterId}`,
@@ -332,6 +381,7 @@ export function projectTablesToMapView(
       kind: "character",
       rowId: row.id,
       positionQuality: "confirmed",
+      isProtagonist: protagonistIds.has(characterId),
     }));
     if (!placed && row.locationId !== null) {
       const location = byRowId.get(row.locationId);
@@ -339,16 +389,14 @@ export function projectTablesToMapView(
       if (location && !hiddenLocationIds.has(String(pointIdFromLocationRowId(location.id) ?? ""))) {
         // 已知人在具体房间时给出示意图标；楼宇等粗定位仍留在名单中。
         if (!submapBuckets.has(location.id)) submapBuckets.set(location.id, []);
-        const room = isInteriorRoom(location, tables.locations) && row.presence === "present"
-          && !protagonistIds.has(characterId);
-        const interior = room
-          ? interiorPositionHint(row.currentAction, row.id)
-            ?? schematicRoomPosition(submapBuckets.get(location.id)!.filter((point) => point.kind === "character").length)
-          : null;
+        const interior = sceneLayouts.get(location.id)?.get(row.id) ?? null;
         if (interior) {
           submapBuckets.get(location.id)!.push({ id: row.id, name: row.name,
             x: interior.x, y: interior.y, regionId: null, kind: "character", rowId: row.id,
-            positionQuality: "estimated", positionHint: interior.label });
+            positionQuality: "estimated", positionHint: interior.label, isProtagonist: protagonistIds.has(characterId) });
+          if (row === currentPlayer && currentPosition === null) currentPosition = {
+            mapId: String(pointIdFromLocationRowId(location.id)), x: interior.x, y: interior.y,
+            positionQuality: "estimated", positionHint: interior.label };
         } else {
           unknownBucket(location).characters.push({ id: characterId, name: row.name, presence: row.presence });
         }
@@ -371,7 +419,10 @@ export function projectTablesToMapView(
       const location = byRowId.get(row.locationId);
       if (location && !hiddenLocationIds.has(String(pointIdFromLocationRowId(location.id) ?? ""))) {
         if (!submapBuckets.has(location.id)) submapBuckets.set(location.id, []);
-        unknownBucket(location).items.push({ id: row.id, name: row.name, status: row.status });
+        const interior = sceneLayouts.get(location.id)?.get(row.id);
+        if (interior) submapBuckets.get(location.id)!.push({ id: row.id, name: row.name, x: interior.x, y: interior.y,
+          regionId: null, kind: "item", rowId: row.id, positionQuality: "estimated", positionHint: interior.label });
+        else unknownBucket(location).items.push({ id: row.id, name: row.name, status: row.status });
       }
     }
   }

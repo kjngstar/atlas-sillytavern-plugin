@@ -116,13 +116,13 @@ const CLOSE_TAG = "</atlasEdit>";
 /** 每表允许的顶层键（`patch` 里的键另有一份白名单）。 */
 const TABLE_FIELDS: Record<string, Set<string>> = {
   location: new Set(["table", "op", "ref", "name", "description", "parentRef", "rumors", "factions", "patch", "quote", "basis", "kind"]),
-  character: new Set(["table", "op", "ref", "name", "locationRef", "thought", "actionTendency", "currentAction", "targetLocationRef", "presence", "patch", "quote", "basis", "kind"]),
+  character: new Set(["table", "op", "ref", "name", "locationRef", "thought", "actionTendency", "currentAction", "positionHint", "targetLocationRef", "presence", "patch", "quote", "basis", "kind"]),
   item: new Set(["table", "op", "ref", "name", "description", "status", "locationRef", "holderRef", "patch", "quote", "basis", "kind"]),
 };
 
 const PATCH_FIELDS: Record<string, Set<string>> = {
   location: new Set(["name", "description", "parentRef", "rumors", "factions"]),
-  character: new Set(["name", "locationRef", "thought", "actionTendency", "currentAction", "targetLocationRef", "presence"]),
+  character: new Set(["name", "locationRef", "thought", "actionTendency", "currentAction", "positionHint", "targetLocationRef", "presence"]),
   item: new Set(["name", "description", "status", "locationRef", "holderRef"]),
 };
 
@@ -151,7 +151,7 @@ const POSITION_FIELDS = new Set(["parentRef", "locationRef", "holderRef"]);
 /** `basis="inferred"` 允许触碰的字段（其余一律拒绝）。 */
 const INFERRED_ALLOWED: Record<string, Set<string>> = {
   location: new Set(["description", "rumors", "factions"]),
-  character: new Set(["thought", "actionTendency", "targetLocationRef", "locationRef"]),
+  character: new Set(["thought", "actionTendency", "positionHint", "targetLocationRef", "locationRef"]),
   item: new Set(["description"]),
 };
 

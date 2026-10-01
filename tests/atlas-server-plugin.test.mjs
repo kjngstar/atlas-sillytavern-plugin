@@ -306,6 +306,35 @@ test("自动场景扩展首轮直接入图、按父子层级连接且同回合�
   equal(fetcher.calls.length, 2, "只调用两次模型");
 });
 
+test("自动补全归属楼层：回退恢复世界、三表、地图元数据和计数，重生成可再补全", async () => {
+  let rootName;
+  const expansion = () => openAiTextResponse(JSON.stringify({ places: [
+    { name: "外层城市", reason: "合理上级" }, { name: "城市图书馆", parentName: "外层城市" },
+  ], links: [{ childName: rootName, parentName: "外层城市" }] }));
+  const fetcher = makeFetch([() => openAiTextResponse(GOOD_EDIT), expansion, () => openAiTextResponse(GOOD_EDIT), expansion]);
+  const { core, carrier } = await setup(null, { fetchFn: fetcher.fetchFn });
+  rootName = carrier.session.world.points.find(p => p.parentPointId == null).name;
+  const request = commitRequest(carrier.session.world, { turnId: "turn-undo" });
+  equal((await core.handle("POST", "/turns/commit", request)).body.data.receipt.status, "committed");
+  const pointsBefore = JSON.parse(JSON.stringify(carrier.session.world.points));
+  const mapsBefore = JSON.parse(JSON.stringify(carrier.session.maps));
+  const geoBefore = JSON.parse(JSON.stringify(carrier.session.geoAuto));
+  const expand = () => core.handle("POST", "/worlds/geo/suggest", { chatId: "chat-a", autoApply: true, triggerId: "turn-undo" });
+  equal((await expand()).body.data.accepted, 2);
+  ok(carrier.session.world.points.find(p => p.name === rootName).parentPointId != null);
+  equal((await core.handle("POST", "/turns/rollback", { chatId: "chat-a", assistantMessageId: "msg-11" })).status, 200);
+  deepEqual(carrier.session.world.points, pointsBefore, "新增点和父关系完整回退");
+  deepEqual(carrier.session.maps, mapsBefore, "地图元数据完整回退");
+  deepEqual(carrier.session.geoAuto, geoBefore, "扩展幂等与计数回退");
+  const state = (await core.handle("POST", "/state", { chatId: "chat-a" })).body.data;
+  ok(!state.tableMap.unplacedLocations.entries.some(p => p.name === "外层城市"));
+  equal((await expand()).body.data.skipped, "stale-turn", "已删楼层迟到的补全不再写入");
+  equal(fetcher.calls.length, 2);
+  equal((await core.handle("POST", "/turns/commit", request)).body.data.receipt.status, "committed");
+  equal((await expand()).body.data.accepted, 2, "同标识重生成后重新补全");
+  equal(fetcher.calls.length, 4);
+});
+
 test("人物时间线按会话分支和游标分页，已回退回合不显示", async () => {
   const { core, carrier } = await setup(null);
   const entry = (period, experience) => ({ characterId: "npc:chronicle-c1", name: "薇尔", period,

@@ -116,13 +116,15 @@ export const DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA: Array<{ role: string; name: st
       "</atlasEdit>\n" +
       "规则：\n" +
       "- table 只允许 location / character / item / simulation；op 只允许 add / set / remove（simulation 只允许 propose）。本轮没有任何变化时，块内只写一行 {\"kind\":\"noop\"}。\n" +
-      "- 只允许写这些字段（其余一律不许出现）：location = name / description / parentRef / rumors / factions；character = name / locationRef / thought / actionTendency / currentAction / targetLocationRef / presence（present|left|unknown）；item = name / description / status / locationRef / holderRef。用 set 改动时，字段放进 patch 里。\n" +
+      "- 只允许写这些字段（其余一律不许出现）：location = name / description / parentRef / rumors / factions；character = name / locationRef / thought / actionTendency / currentAction / positionHint / targetLocationRef / presence（present|left|unknown）；item = name / description / status / locationRef / holderRef。用 set 改动时，字段放进 patch 里。\n" +
       "- 绝对不要输出 id、mapId、格序号、坐标、时间、时长、距离或比例尺数字——这些一律由程序推导，你写了也会被拒绝。\n" +
       "- 引用：新增行用本块局部引用 new:loc:短名 / new:npc:短名 / new:item:短名（小写字母、数字、- 或 _）；已有行必须用对照表里给出的正式 ID。名称不是 ID，不要拿名字当引用，也不要把同名地点合并。\n" +
       "- 位置只写到「在哪个地点」：人物与物品给 locationRef 就够，具体格序号由程序按地图与距离算。正文虽未直说地名，但行动及其上下文足以唯一确定地点时也应登记；若有多个合理候选或只是打算前往，省略 locationRef。\n" +
       "- 当前所在场景与目的地分开判断：已经走在街上、穿过走廊、沿林间小路前行，即使还在前往别处，也已身处街道、走廊或小路，应记录脚下场景；尚未抵达的目的地只写 targetLocationRef。街道无需正式名称，正文明确出现但未入表时，用稳定的描述性名称 location add 并摘录原文，再把主角 locationRef 指向它；上级关系有证据才写 parentRef，不能确定就为 null。不要因为在途、地名简略或地图刚生成，就把主角留在已离开的房间或自动挪到新构想地点。\n" +
       "- 新地点要挂到外层地点时用 parentRef（已知地点 ID 或本块内 new:loc: 引用）；只登记本轮确实走进去的内层地点，不要为对照表里已有的地点再登记一次，也不要造环。\n" +
-      "- 证据：basis=\"observed\"（默认）的位置与归属改动必须带 quote，且 quote 必须逐字复制 msg:u 或 msg:a 里的连续原文；来源由程序判断，不要写 sourceId，也不要编造证据编号。basis=\"inferred\" 可改想法、行动倾向、目标地点、描述及人物 locationRef；上下文唯一确定已到达地点时不强制 quote。不能推断归属、持有人或销毁。\n" +
+      "- 地点复用：先核对当前位置、上级链、地点描述与已有 ID。正文简称街上、路口、这里或房内，只要仍对应原场景就沿用原 ID；人物在同一场景中走动只改场景内方位，不反复创建街道或房间。确实进入另一处地点才新增；相同场景的不同称呼不另建地点，不能把同名但不同上级的场所合并。\n" +
+      "- 场景内人物位置：对当前场景实际在场的人物（包括主角），根据正文、动作与上下文判断 positionHint，例如窗边、门旁、街道左侧、路口附近、中央。明确方位优先；未明确时也可按场景合理估计，单独使用 basis=\"inferred\" 的 character set；不要编造格坐标、距离或已经发生的行动。positionHint 只是地图示意，不把估计写成正文事实，不改变 locationRef；离开当前场景后旧方位失效。\n" +
+      "- 证据：basis=\"observed\"（默认）的位置与归属改动必须带 quote，且 quote 必须逐字复制 msg:u 或 msg:a 里的连续原文；来源由程序判断，不要写 sourceId，也不要编造证据编号。basis=\"inferred\" 可改想法、行动倾向、目标地点、描述、人物 positionHint 及 locationRef；上下文唯一确定已到达地点时不强制 quote。不能推断归属、持有人或销毁。\n" +
       "- observed 表示本轮有效正文确实叙述了该事实，不表示主角亲眼看见；远方幕后镜头也可提供 observed 证据，主角能否得知由程序另行判断。人物 currentAction 只能用 observed，必须给出逐字 quote；inferred 只能改上一条列出的推测字段，绝不能改 currentAction。用户意图若未在助手正文实现，不可当作行动。\n" +
       "- remove 只用于正文明确消失或销毁：地点有子地点会被拒绝，人物按离场处理，物品标记销毁。\n" +
       "- 远处人物的猜测只写想法与行动倾向（basis=\"inferred\"）；助手正文明确叙述的远方实际行动可写 currentAction，但必须用 basis=\"observed\" 和逐字 quote。真正的移动交给程序的旅行与日程规则，不要直接把远方人物挪到玩家身边。\n" +

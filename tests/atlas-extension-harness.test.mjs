@@ -1935,6 +1935,32 @@ test("街道定位：无坐标的上级入口持续高亮，当前街道内部�
   dom.window.close();
 });
 
+test("最内层街道：50 人均有可点击图标，附近列表截断不隐藏人物，无右侧悬浮框", async () => {
+  const { projectTablesToMapView } = await import("../src/atlas-table-map-view.ts");
+  const locations = [{ id: "loc:1", name: "商业街路口", parentLocationId: null, mapId: "world", gridX: 10, gridY: 10,
+    description: "", rumors: [], factions: [] }];
+  const characters = Array.from({ length: 50 }, (_, i) => ({ id: `npc:crowd-${i}`, name: `路人${i}`, locationId: "loc:1",
+    currentAction: "", thought: "", actionTendency: "", targetLocationId: null, presence: "present", positionSource: "narrative",
+    mapId: null, gridX: null, gridY: null }));
+  const tableMap = projectTablesToMapView({ locations, characters, items: [] }, null, { points: [], characters: [] }, "1");
+  const state = s10State({ chatId: "chat-a", worldId: "w-crowd", currentLocationId: "1", points: [] });
+  state.tableMap = tableMap;
+  const { container, dom } = await mountRootAtlasMap({ stateByChat: { "chat-a": state } });
+  openPointPanel(container, "商业街路口");
+  enterSubmapButton(container, "商业街路口").click();
+  ok(container.querySelector(".aw-room-boundary"), "街道有标明场景的范围线");
+  ok(container.querySelector(".aw-scene-boundary__label").textContent.includes("📍"));
+  equal(container.querySelector(".aw-interior-roster").style.display, "none");
+  const pins = [...container.querySelectorAll(".aw-object--npc")];
+  equal(pins.length, 50);
+  equal(new Set(pins.map(pin => `${pin.style.left}|${pin.style.top}`)).size, 50);
+  for (const pin of pins) {
+    pin.click();
+    ok(container.querySelector(".aw-mappanel").textContent.includes(pin.querySelector(".aw-object__name").textContent), "每个人都能访问资料");
+  }
+  dom.window.close();
+});
+
 test("S10 前端：同地点人物只在地点名单（离场者不出现、头像可长按纠偏）", async () => {
   const stateByChat = {
     "chat-a": s10State({
@@ -2316,12 +2342,14 @@ test("D-34 前端：子图按房间画人物图钉；只知建筑级的不画点
   equal(lin?.dataset.npcId, "npc-a", "带上实体 id（供排障与后续交互）");
   // 只有建筑级信息的人仍在「建筑内 · 位置未知」名单里，没被弄丢
   const rosterText = String(container.querySelector(".aw-interior-roster")?.textContent ?? "");
-  ok(rosterText.includes("转校生"), `建筑内名单保留无细坐标的人：实际「${rosterText}」`);
+  equal(container.querySelector(".aw-interior-roster").style.display, "none", "移除悬浮名单框");
   ok(!rosterText.includes("林拾"), "有房间内坐标的人只在图上画钉，不在名单里重复出现");
   // 老师只知道"在三年二班"（坐标 = 房间标点）→ 既不是图钉，也不需要名单兜底：
   // 房间标点本身就说明他在这儿。
   const allMapText = String(container.querySelector(".aw-maparea")?.textContent ?? "");
   ok(!allMapText.includes("老师"), "坐标与房间标点重合的人不重复画点");
+  openPointPanel(container, "三年二班");
+  ok(container.querySelector(".aw-mappanel").textContent.includes("转校生"), "粗定位人物仍可从所属地点资料访问");
 });
 
 test("D04/D05 前端：有 tableMap 时位置与在场性以三表为准（目录不得反向覆盖）", async () => {

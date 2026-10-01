@@ -131,7 +131,7 @@ test("R15-PA2: 对象从数据消失 → 面板关闭且不复活", async () => 
 });
 
 
-test("R15 map hierarchy: world to building to room; unknown interior NPC is listed without a fake room marker", async () => {
+test("R15 map hierarchy: coarse NPC stays in location details without a floating roster", async () => {
   const { container, state, rerender } = await mountPanel();
   state.stateData.map.submaps = {
     "1": {
@@ -148,13 +148,14 @@ test("R15 map hierarchy: world to building to room; unknown interior NPC is list
   const refresh = container.querySelector(".aw-point");
   assert.ok(refresh);
   refresh.click();
+  assert.match(container.querySelector(".aw-mappanel").textContent, /守卫/);
   const enterBuilding = [...container.querySelectorAll(".aw-mappanel button")].find((button) =>
     button.textContent.includes("进入内部地图"));
   assert.ok(enterBuilding);
   enterBuilding.click();
   assert.ok(container.querySelector('.aw-point[data-point-id="sub-room"]'));
   assert.equal(container.querySelectorAll(".aw-npc").length, 0, "unknown room must not acquire a spatial NPC marker");
-  assert.match(container.querySelector(".aw-interior-roster").textContent, /细部位置未定.*守卫/);
+  assert.equal(container.querySelector(".aw-interior-roster").style.display, "none");
   container.querySelector('.aw-point[data-point-id="sub-room"]').click();
   const enterRoom = [...container.querySelectorAll(".aw-mappanel button")].find((button) =>
     button.textContent.includes("进入内部地图"));

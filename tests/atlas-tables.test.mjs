@@ -32,6 +32,20 @@ import { migrateLegacyToTables, tablesToLegacyWorld } from "../src/atlas-table-m
 
 const POSITION = { mapId: "world", gridX: 0, gridY: 0 };
 
+test("presence left 规范化位置，保留人物档案；快照回退可恢复全部位置", () => {
+  const data = tables({ locations: [location()], characters: [character({ locationId: "loc:city", presence: "present",
+    mapId: "world", gridX: 3, gridY: 4, positionHint: "左侧", targetLocationId: "loc:city" })] });
+  const before = cloneAtlasTables(data);
+  assert.equal(applyCharacterEdit(data, { table: "character", op: "set", ref: "npc:keeper", patch: { presence: "left" } }, createAtlasRefScope()).ok, true);
+  const row = data.characters[0];
+  assert.equal(row.name, before.characters[0].name);
+  for (const field of ["locationId", "targetLocationId", "mapId", "gridX", "gridY"]) assert.equal(row[field], null);
+  assert.equal(row.positionHint, undefined);
+  assert.equal(validateAtlasTables(data).ok, true);
+  assert.equal(before.characters[0].gridX, 3);
+  assert.equal(before.characters[0].presence, "present");
+});
+
 function location(overrides = {}) {
   return {
     id: "loc:city", name: "临江城", parentLocationId: null, description: "城墙与码头",

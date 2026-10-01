@@ -41,6 +41,8 @@ export interface AtlasCharacterRow extends AtlasTablePosition {
   thought: string;
   actionTendency: string;
   currentAction: string;
+  /** 模型给出的场景内相对方位，仅用于示意排版。 */
+  positionHint?: string;
   targetLocationId: string | null;
   presence: AtlasCharacterPresence;
   positionSource: AtlasCharacterPositionSource;
@@ -412,6 +414,7 @@ export function validateAtlasTables(tables: unknown): AtlasTableValidation {
     checkText(row, "thought", path, err);
     checkText(row, "actionTendency", path, err);
     checkText(row, "currentAction", path, err);
+    if (row.positionHint !== undefined) checkText(row, "positionHint", path, err);
     checkPosition(row, path, err);
     checkNullableId(row, "locationId", path, err);
     checkNullableId(row, "targetLocationId", path, err);
@@ -621,6 +624,7 @@ export interface AtlasCharacterPatch {
   thought?: string;
   actionTendency?: string;
   currentAction?: string;
+  positionHint?: string;
   targetLocationRef?: string | null;
   presence?: AtlasCharacterPresence;
 }
@@ -634,6 +638,7 @@ export interface AtlasCharacterEdit extends AtlasEditCommon {
   thought?: string;
   actionTendency?: string;
   currentAction?: string;
+  positionHint?: string;
   targetLocationRef?: string | null;
   presence?: AtlasCharacterPresence;
   patch?: AtlasCharacterPatch;
@@ -1067,7 +1072,7 @@ export function applyCharacterEdit(
       return { ok: false, error: { code: "NAME_REQUIRED", path: "$.name" } };
     }
     for (const [key, value] of [["name", edit.name], ["thought", edit.thought],
-      ["actionTendency", edit.actionTendency], ["currentAction", edit.currentAction]] as const) {
+      ["actionTendency", edit.actionTendency], ["currentAction", edit.currentAction], ["positionHint", edit.positionHint]] as const) {
       const failure = textError(value, `$.${key}`);
       if (failure) return { ok: false, error: failure };
     }
@@ -1089,6 +1094,7 @@ export function applyCharacterEdit(
       thought: typeof edit.thought === "string" ? edit.thought : "",
       actionTendency: typeof edit.actionTendency === "string" ? edit.actionTendency : "",
       currentAction: typeof edit.currentAction === "string" ? edit.currentAction : "",
+      ...(edit.positionHint !== undefined ? { positionHint: edit.positionHint } : {}),
       targetLocationId: null,
       presence: edit.presence ?? (locationId === null ? "unknown" : "present"),
       positionSource: edit.basis === "inferred" ? "unknown" : "narrative",
@@ -1127,7 +1133,7 @@ export function applyCharacterEdit(
     if (patch.name.trim().length === 0) return { ok: false, error: { code: "NAME_REQUIRED", path: "$.patch.name" } };
   }
   for (const [key, value] of [["name", patch.name], ["thought", patch.thought],
-    ["actionTendency", patch.actionTendency], ["currentAction", patch.currentAction]] as const) {
+    ["actionTendency", patch.actionTendency], ["currentAction", patch.currentAction], ["positionHint", patch.positionHint]] as const) {
     const failure = textError(value, `$.patch.${key}`);
     if (failure) return { ok: false, error: failure };
   }
@@ -1168,6 +1174,7 @@ export function applyCharacterEdit(
   if (patch.thought !== undefined) row.thought = patch.thought;
   if (patch.actionTendency !== undefined) row.actionTendency = patch.actionTendency;
   if (patch.currentAction !== undefined) row.currentAction = patch.currentAction;
+  if (patch.positionHint !== undefined) row.positionHint = patch.positionHint;
   if (patch.presence !== undefined) row.presence = patch.presence;
   if (nextTargetId !== undefined) row.targetLocationId = nextTargetId;
   if (nextLocationId !== undefined) {
@@ -1178,6 +1185,7 @@ export function applyCharacterEdit(
     const location = locationRowOf(nextLocationId);
     // 地点粒度以下的坐标只能由程序推导：换地点即回到未知
     if (locationChanged) {
+      if (patch.positionHint === undefined) delete row.positionHint;
       row.mapId = location ? location.mapId : null;
       row.gridX = null;
       row.gridY = null;
@@ -1186,6 +1194,14 @@ export function applyCharacterEdit(
       row.presence = "present";
     }
     if (!preserveObserved) row.positionSource = patch.locationRef === null ? "unknown" : (edit.basis === "inferred" ? "inferred" : "narrative");
+  }
+  if (row.presence === "left") {
+    delete row.positionHint;
+    row.locationId = null;
+    row.targetLocationId = null;
+    row.mapId = null;
+    row.gridX = null;
+    row.gridY = null;
   }
   return { ok: true, id: row.id, op: "set", created: false };
 }
@@ -1380,7 +1396,7 @@ function canonicalRow(row: Record<string, unknown>, keys: readonly string[]): Re
 
 const LOCATION_KEYS = ["id", "name", "parentLocationId", "description", "rumors", "factions", "mapId", "gridX", "gridY"] as const;
 const CHARACTER_KEYS = [
-  "id", "name", "locationId", "thought", "actionTendency", "currentAction",
+  "id", "name", "locationId", "thought", "actionTendency", "currentAction", "positionHint",
   "targetLocationId", "presence", "positionSource", "mapId", "gridX", "gridY",
 ] as const;
 const ITEM_KEYS = ["id", "name", "description", "locationId", "holderCharacterId", "status", "mapId", "gridX", "gridY"] as const;

@@ -382,7 +382,8 @@ test("室内图显示估计人物、网格边界和示意课桌，同一物品�
       points: [{ id: "2", name: "教室", x: 50, y: 50, kind: "location", rowId: "loc:2", positionQuality: "confirmed" }], total: 1, truncated: 0 },
     "2": { mapId: "2", parentMapId: "1", frame,
       points: [{ id: "npc:student", name: "同学", x: 43, y: 51, kind: "character", rowId: "npc:student",
-        positionQuality: "estimated", positionHint: "房间内，细部位置估计" }], total: 1, truncated: 0 },
+        positionQuality: "estimated", positionHint: "房间内，细部位置估计" },
+        { id: "item:table", name: "水笔", x: 62, y: 51, kind: "item", rowId: "item:table", positionQuality: "estimated" }], total: 2, truncated: 0 },
   };
   const tableMap = {
     branchKey: "canon", world: { points: [{ id: "1", name: "学校", x: 50, y: 50, kind: "location", rowId: "loc:1" }], total: 1, truncated: 0 },
@@ -409,9 +410,10 @@ test("室内图显示估计人物、网格边界和示意课桌，同一物品�
   assert.equal(container.querySelectorAll('.aw-object--npc[data-position-quality="estimated"]').length, 1,
     "无细格坐标的人也有明确标记为估计的人物图标");
   const roster = container.querySelector(".aw-interior-roster");
-  assert.equal([...roster.querySelectorAll(".aw-interior-roster__item")].filter((node) => node.textContent === "水笔").length, 1,
+  assert.equal(roster.style.display, "none");
+  assert.equal(container.querySelectorAll('.aw-object[data-obj-id="item:table"]').length, 1,
     "旧目录镜像与三表只显示同一件水笔一次");
-  roster.querySelector(".aw-interior-roster__item").click(); await flush();
+  container.querySelector('.aw-object[data-obj-id="item:table"]').click(); await flush();
   assert.match(container.querySelector(".aw-mappanel").textContent, /类型：物品/);
   dom.window.close();
 });
@@ -461,11 +463,7 @@ test("G03 回放：教室子图只画可信细格的人物图钉，建筑级 / �
   // 没有细坐标的人进「建筑内 · 具体房间未知」名单，而不是被画到 (0,0)
   const roster = container.querySelector(".aw-interior-roster");
   assert.ok(roster, "子图必须有「建筑内 · 具体房间未知」名单");
-  assert.equal(roster.style.display, "", "有人位置未细分时名单必须显示");
-  assert.match(String(roster.querySelector(".aw-interior-roster__title")?.textContent ?? ""), /星海学校内 · 细部位置未定/,
-    "名单标题写明它承载的是「位置未细分」的人");
-  assert.match(String(roster.textContent ?? ""), /没有细坐标/,
-    `无细坐标的人必须仍可见：实际 "${roster.textContent}"`);
+  assert.equal(roster.style.display, "none", "地图移除悬浮名单，粗定位人物仍由地点面板承载");
   assert.ok(!String(roster.textContent ?? "").includes("教室里的学生"),
     "已经画成图钉的人不在名单里重复出现");
   // 细坐标恰好与房间标点同格的人：计入徽标，不从地图上消失，也不重复画点

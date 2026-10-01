@@ -1218,6 +1218,28 @@
   z-index: 2;
 }
 
+.aw-scene-boundary__label {
+  position: absolute;
+  left: 4px;
+  bottom: 100%;
+  padding: 2px 6px;
+  background: var(--aw-panel);
+  color: var(--aw-ink-soft);
+  font: 11px var(--aw-sans);
+  white-space: nowrap;
+  transform: scale(var(--aw-marker-inv, 1));
+  transform-origin: left bottom;
+}
+.aw-current-position {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  transform: translate(-50%, -50%) scale(var(--aw-marker-inv, 1));
+  background: var(--aw-panel);
+}
+.aw-current-position .aw-object__gem { display: inline; }
+.aw-current-position .aw-object__name { transform: none; }
+
 /* 装帧：四角标 + 指北针 + 比例尺 + 金色虚线路线 */
 
 .aw-corner {
@@ -1864,10 +1886,11 @@
  * 窄屏的收窄交给 @media（见「窄屏」段）。
  */
 .aw-maptools {
-  position: absolute;
-  top: 22px;
-  left: 22px;
-  right: 22px;
+  position: relative;
+  top: auto;
+  left: auto;
+  right: auto;
+  padding: 8px 12px;
   display: none;
   align-items: center;
   justify-content: space-between;
@@ -2496,9 +2519,13 @@
 /* 0.9.32 点挂子图：面包屑（画布顶部） + 标记点信息面板（viewport 右上） + 子图角标 */
 
 .aw-mapcrumb {
-  position: absolute;
-  top: 64px;
-  left: 22px;
+  position: relative;
+  top: auto;
+  left: auto;
+  padding: 4px 12px;
+  flex-wrap: wrap;
+  max-width: 100%;
+  box-sizing: border-box;
   z-index: 7;
   display: flex;
   align-items: center;
@@ -2525,7 +2552,10 @@
   border-radius: 6px;
   border: 1px solid var(--am-border, var(--aw-gold-line));
   background: var(--am-popover-bg, var(--aw-veil-strong));
-  white-space: nowrap;
+  flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 /* 0.9.49（M02）：面包屑祖先链可点击，当前层禁用高亮 */
@@ -2552,8 +2582,8 @@
 @media (max-width: 480px) {
   .aw-mapcrumb {
     /* Wrapped tools take two rows; keep child-map navigation below them. */
-    top: 96px;
-    left: 14px;
+    top: auto;
+    left: auto;
     flex-wrap: wrap;
     max-width: calc(100% - 28px);
     pointer-events: none;
@@ -2865,4 +2895,10 @@
 /* 深色主题下宿主（酒馆）暗色控件的 autofill / 原生外观接管：跟随令牌而非强制白底 */
 .atlas-workbench[data-atlas-theme="dark"] {
   color-scheme: dark;
+}
+
+/* 地图工具与面包屑按实际高度排布，窄屏也不覆盖画布或互相遮挡。 */
+.aw-maparea .aw-maptools, .aw-maparea .aw-mapcrumb { top: auto; left: auto; right: auto; }
+.aw-maparea .aw-current-position:hover, .aw-maparea .aw-current-position:focus-visible {
+  transform: translate(-50%, -50%) scale(calc(1.25 * var(--aw-marker-inv, 1)));
 }

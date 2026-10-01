@@ -132,11 +132,38 @@ test("室内动作明确写出窗边时优先放在窗边，其余人物也有�
   const marker = view.submaps["2"].points.find((row) => row.id === "npc:a");
   assert.equal(marker.positionQuality, "estimated");
   assert.equal(marker.positionHint, "窗边");
-  assert.equal(view.submaps["2"].points.find((row) => row.id === "npc:b").positionHint, "房间内，细部位置估计");
+  assert.equal(view.submaps["2"].points.find((row) => row.id === "npc:b").positionHint, "场景内，细部位置估计");
   assert.equal(view.unknownPosition.find((row) => row.locationId === "loc:2")?.characters.length ?? 0, 0);
   tables.characters[0].currentAction = "离开窗边，走到门口";
   const moved = projectTablesToMapView(tables, EMPTY_MAPS, fakeWorld(), "2");
-  assert.equal(moved.submaps["2"].points.find((row) => row.id === "npc:a").positionHint, "门旁");
+  assert.equal(moved.submaps["2"].points.find((row) => row.id === "npc:a").positionHint, "入口附近");
+});
+
+test("小场景相对方位适配实际尺寸，20/50 人布局不重叠，离场旧坐标不投影", () => {
+  for (const [cols, rows] of [[12, 8], [100, 100], [30, 60]]) {
+    for (const count of [20, 50]) {
+      const tables = { locations: [location({ id: "loc:2", name: "商业街路口" })],
+        characters: Array.from({ length: count }, (_, i) => character({ id: `npc:p${i}`, locationId: "loc:2",
+          currentAction: "", positionHint: i === 0 ? "窗边" : i === 1 ? "门口" : "" })), items: [] };
+      const maps = { ...EMPTY_MAPS, submaps: { "2": { frame: { cols, rows, frameRevision: 1 }, points: [] } } };
+      const projected = projectTablesToMapView(tables, maps, fakeWorld(), "2");
+      const points = projected.submaps["2"].points;
+      assert.equal(points.length, count);
+      assert.equal(new Set(points.map(p => `${p.x}|${p.y}`)).size, count);
+      assert.ok(points.every(p => p.x >= cols * .12 && p.x <= cols * .88 && p.y >= rows * .12 && p.y <= rows * .88));
+      const window = points.find(p => p.id === "npc:p0");
+      assert.ok(window.x > cols * .7 && window.y < rows * .4);
+      const door = points.find(p => p.id === "npc:p1");
+      assert.ok(door.x < cols * .3 && door.y > rows * .7);
+      tables.characters[0].presence = "left";
+      tables.characters[0].mapId = "loc:2";
+      tables.characters[0].gridX = 2; tables.characters[0].gridY = 2;
+      const left = projectTablesToMapView(tables, maps, fakeWorld(), "2");
+      assert.ok(!left.submaps["2"].points.some(p => p.id === "npc:p0"));
+      assert.ok(!left.nearby.entries.some(p => p.id === "p0"));
+      assert.ok(!left.locationOccupants.entries.flatMap(p => p.characters).some(p => p.id === "p0"));
+    }
+  }
 });
 
 test("D01 人物与物品按 mapId+格序号投影；缺细坐标进「位置未知」名单", () => {

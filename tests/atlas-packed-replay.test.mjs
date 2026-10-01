@@ -88,7 +88,7 @@ test("G03 离线重放：打包产物跑通 绑定 → 提交 → 协议不符 �
   const packedServerPkg = JSON.parse(readFileSync(join(root, "release", "atlas-server-plugin", "package.json"), "utf8"));
   assert.equal(packedManifest.version, pluginMod.ATLAS_PLUGIN_VERSION, "UI manifest 与插件常量版本一致");
   assert.equal(packedServerPkg.version, pluginMod.ATLAS_PLUGIN_VERSION, "Server package 与插件常量版本一致");
-  assert.equal(pluginMod.ATLAS_PLUGIN_VERSION, "0.9.70", "打包产物版本号");
+  assert.equal(pluginMod.ATLAS_PLUGIN_VERSION, "0.9.71", "打包产物版本号");
 
   const dir = mkdtempSync(join(tmpdir(), "atlas-packed-replay-"));
   const scripts = [

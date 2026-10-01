@@ -45,6 +45,13 @@ const SOURCES = {
   "msg:a": "你走进钟楼，看见桌上的铜钥匙。守卫留在钟楼，担心夜里的巡逻。",
 };
 
+test("AI 可独立推测场景内相对方位；它不提供真实坐标或改写行动", () => {
+  const parsed = parseAtlasEditBlock('<atlasEdit>\n{"table":"character","op":"set","ref":"npc:keeper","basis":"inferred","patch":{"positionHint":"街道左侧"}}\n</atlasEdit>', SOURCES);
+  assert.equal(parsed.status, "edits");
+  assert.equal(parsed.edits[0].patch.positionHint, "街道左侧");
+  assert.equal(parsed.rejected.length, 0);
+});
+
 function block(...lines) {
   return `<atlasEdit>\n${lines.join("\n")}\n</atlasEdit>`;
 }
