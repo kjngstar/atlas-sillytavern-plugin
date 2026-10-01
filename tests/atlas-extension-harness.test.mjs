@@ -2989,6 +2989,31 @@ test("M3 实酒馆回归：开场路由携带当前会话修订，避免建世�
   assert.equal(seen[0].body.assistantText, "走进图书室");
 });
 
+test("自动场景扩展写回后宿主旧存档迟到：下一状态请求恢复本聊天较新 rev", async () => {
+  const chatId = "chat-geo-race";
+  const initial = { ...bIndex.createEmptyAtlasSession(), rev: 4,
+    binding: { chatId, worldId: "world-geo-race" } };
+  const metadata = { atlas: initial };
+  const seen = [];
+  let saves = 0;
+  const api = bIndex.createAtlasSessionApi({
+    context: () => ({ chatId, chatMetadata: metadata, saveMetadata: async () => { saves += 1; } }),
+    innerApi: { request: async (method, path, body) => {
+      seen.push({ method, path, rev: body?.session?.rev });
+      if (path === "/worlds/geo/suggest") return { status: 200, body: { ok: true, data: { accepted: 1 },
+        session: { ...body.session, rev: 5, geoAuto: { expansion: { seen: 1 } } } } };
+      return { status: 200, body: { ok: true, data: {} } };
+    } },
+  });
+  await api.request("POST", "/worlds/geo/suggest", { chatId, autoApply: true });
+  assert.equal(metadata.atlas.rev, 5);
+  metadata.atlas = initial; // 酒馆另一笔较早发起的 saveMetadata 迟到
+  await api.request("POST", "/state", { chatId });
+  assert.deepEqual(seen.map((request) => request.rev), [4, 5]);
+  assert.equal(metadata.atlas.rev, 5);
+  assert.equal(saves, 2);
+});
+
 test("B06 legacy 迁移：两个聊天各迁各的，B 的表行 / 地图 / 动向 / 提示词都只属于 B", async () => {
   const legacyA = b01LegacyChat("chat-a", "w-shared");
   const legacyB = b01LegacyChat("chat-b", "w-shared");

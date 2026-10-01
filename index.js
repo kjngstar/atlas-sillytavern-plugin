@@ -1158,6 +1158,9 @@ export function createAtlasSessionApi(deps) {
   const notify = typeof deps.notify === "function" ? deps.notify : () => {};
   const logCall = typeof deps.logCall === "function" ? deps.logCall : (method, path, run) => run();
   if (!context || !innerApi) throw new Error("createAtlasSessionApi 需要 context 与 innerApi。");
+  // 酒馆生成结束时可能有一笔较早发起的 saveMetadata 迟到，短暂覆盖刚写回的 Atlas rev。
+  // 仅在同一聊天、同一 metadata 对象内记住本 API 成功写回的修订；下一请求先恢复它。
+  const latestByMetadata = new WeakMap();
   return {
     async request(method, path, body) {
       const requestContext = context();
@@ -1167,6 +1170,11 @@ export function createAtlasSessionApi(deps) {
       let requestSession = null;
       if (method === "POST" && pathWantsSession(path)) {
         requestSession = readAtlasSession(context);
+        const latest = requestMetadata && latestByMetadata.get(requestMetadata);
+        if (latest && latest.chatId === requestChatId && latest.session.rev > (requestSession?.rev ?? -1)) {
+          await writeAtlasSession(context, latest.session, requestChatId, requestMetadata);
+          requestSession = latest.session;
+        }
         if (requestSession) payload = { ...(body ?? {}), session: requestSession };
       }
       const result = await logCall(method, path, () => innerApi.request(method, path, payload));
@@ -1189,6 +1197,9 @@ export function createAtlasSessionApi(deps) {
           // C07b：把 B02b 捕获的 chatId 交给写回再做一次身份核对（守卫已过，这里是第二道锁，
           // 覆盖「守卫通过之后、await 落盘之前又切了聊天」的极窄窗口）。
           await writeAtlasSession(context, responseSession, requestChatId, starterAllowed ? requestMetadata : null);
+          if (requestMetadata && requestChatId === currentChatId) {
+            latestByMetadata.set(requestMetadata, { chatId: requestChatId, session: responseSession });
+          }
           return result;
         }
         // 发起聊天 ≠ 当前聊天（切卡 / 换聊天 / 会话归属不一致）：丢弃写回。
