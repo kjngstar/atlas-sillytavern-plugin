@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.69";
+export const ATLAS_EXTENSION_VERSION = "0.9.70";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -5428,20 +5428,31 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
   }
 
   /** 按当前图层的实际标点定位；其他图层则沿已知父链进入当前位置所在的内部图。 */
+  function currentLocationChain(d) {
+    const id = String(d?.tableMap?.current?.locationId ?? d?.currentLocationId ?? "").replace(/^loc:/, "");
+    if (!id) return [];
+    const declared = d?.tableMap?.current?.chain;
+    if (Array.isArray(declared) && String(declared.at(-1)?.id ?? "").replace(/^loc:/, "") === id) {
+      return declared.map((entry) => String(entry.id).replace(/^loc:/, "")).reverse();
+    }
+    const parents = d?.map?.pointParents ?? {};
+    const chain = [id];
+    while (chain.length <= MAP_SUBMAP_DEPTH_MAX + 1) {
+      const parent = String(parents[chain.at(-1)] ?? "").replace(/^loc:/, "");
+      if (!parent || chain.includes(parent)) break;
+      chain.push(parent);
+    }
+    return chain;
+  }
+
   function locatePlayerCamera() {
     if (!camera || !cameraFrame) return;
     const d = lastMapData;
-    const currentId = String(d?.currentLocationId ?? "").replace(/^loc:/, "");
+    const chain = currentLocationChain(d);
+    const currentId = chain[0];
     if (!currentId) {
       setStatus("本轮尚未确定主角所在地点。", "warn");
       return;
-    }
-    const parents = d?.map?.pointParents && typeof d.map.pointParents === "object" ? d.map.pointParents : {};
-    const chain = [currentId];
-    while (chain.length <= MAP_SUBMAP_DEPTH_MAX + 1) {
-      const parentId = String(parents[chain[chain.length - 1]] ?? "").replace(/^loc:/, "");
-      if (!parentId || chain.includes(parentId)) break;
-      chain.push(parentId);
     }
     const ownerId = mapStack.length ? String(mapStack[mapStack.length - 1].pointId) : "world";
     const targetId = ownerId === "world" ? chain[chain.length - 1]
@@ -5469,6 +5480,12 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       }
     }
     if (ownerId === currentId) {
+      const player = mapLayer?.querySelector(".aw-current-position");
+      if (player) {
+        commitCamera(centerCameraOn(camera, Number.parseFloat(player.style.left), Number.parseFloat(player.style.top)));
+        setStatus(player.title, "info");
+        return;
+      }
       commitCamera(centerCameraOn(camera, (cameraFrame.minX + cameraFrame.maxX) / 2,
         (cameraFrame.minY + cameraFrame.maxY) / 2));
       setStatus("主角位于当前地点；尚无更细的室内格坐标。", "info");
@@ -6984,6 +7001,34 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         }
         mapLayer.dataset.pendingCount = String((layout?.pending ?? []).length);
       }
+    }
+
+    // 在每层地图持续标明主角所在的入口；进入当前场景后显示独立的主角位置。
+    const locationChain = currentLocationChain(d);
+    const ownerId = inSub ? String(view.pointId) : "world";
+    const currentId = locationChain[0];
+    const visibleCurrentId = ownerId === "world" ? locationChain.at(-1)
+      : locationChain[locationChain.indexOf(ownerId) - 1];
+    const currentNode = [...mapLayer.querySelectorAll(".aw-point[data-point-id]")]
+      .find((node) => node.dataset.pointId === visibleCurrentId);
+    if (currentNode) {
+      currentNode.classList.add("is-current");
+      currentNode.append(el("span", "aw-point__pending", visibleCurrentId === currentId ? "你在这里" : "你在此处内部"));
+      currentNode.setAttribute("aria-label", `${currentNode.getAttribute("aria-label") ?? ""}，${visibleCurrentId === currentId ? "你在这里" : "主角在此处内部"}`);
+    }
+    if (currentId && ownerId === currentId && !sqlMapItems) {
+      const position = tableMap?.current?.position;
+      const exact = position?.mapId === ownerId && Number.isFinite(position.x) && Number.isFinite(position.y);
+      const player = el("button", "aw-object aw-current-position");
+      player.type = "button";
+      player.dataset.positionQuality = exact ? "confirmed" : "estimated";
+      player.style.left = `${exact ? position.x : (cameraFrame.minX + cameraFrame.maxX) / 2}px`;
+      player.style.top = `${exact ? position.y : (cameraFrame.minY + cameraFrame.maxY) / 2}px`;
+      player.title = exact ? "主角在这里：已确认细格位置。" : "主角在当前场景内；图标方位为示意，细格位置尚未确认。";
+      player.setAttribute("aria-label", player.title);
+      player.append(el("span", "aw-object__gem", "⌖"), el("span", "aw-object__name", exact ? "你在这里" : "你在这里 · 方位估计"));
+      player.addEventListener("click", (event) => { event.stopPropagation(); locatePlayerCamera(); });
+      mapLayer.append(player);
     }
 
     /**

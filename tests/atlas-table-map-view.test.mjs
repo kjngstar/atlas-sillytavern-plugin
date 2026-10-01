@@ -99,7 +99,7 @@ test("M3 真实开场：全链无格坐标仍保留可进入的父子图，点�
   };
   const view = projectTablesToMapView(tables, EMPTY_MAPS, fakeWorld(), "3");
   assert.deepEqual(view.world.points, [], "未知格坐标不冒充确认点");
-  assert.deepEqual(Object.keys(view.submaps).sort(), ["1", "2"], "包含关系足以建立空子图入口");
+  assert.deepEqual(Object.keys(view.submaps).sort(), ["1", "2", "3"], "包含关系和当前位置足以建立空子图入口");
   assert.deepEqual(view.submaps["1"].points, []);
   assert.deepEqual(view.submaps["2"].points, []);
   assert.deepEqual(view.unplacedLocations.entries.map((row) => [row.id, row.mapId]),
@@ -186,6 +186,20 @@ test("D01 附近目录与地图同一张人物表：过滤离场、标出主角�
   assert.deepEqual(inside.current.chain.map((entry) => entry.id), ["loc:4103", "loc:4301"], "当前位置链含上级");
 
   assert.deepEqual(view.totals, { locations: 4, characters: 4, items: 3, submaps: 2 });
+});
+
+test("街道当前位置即使没有任何人物行也有内部图；精确主角位置不从截断名单读取", () => {
+  const tables = { locations: [location({ id: "loc:1", name: "街道", gridX: null, gridY: null })], characters: [], items: [] };
+  const empty = projectTablesToMapView(tables, EMPTY_MAPS, fakeWorld(), "1");
+  assert.ok(empty.submaps["1"]);
+  assert.equal(empty.current.position, null);
+  assert.equal(empty.current.locationId, "loc:1");
+  for (let i = 0; i < 55; i++) tables.characters.push(character({ id: `npc:extra-${i}`, locationId: "loc:1" }));
+  tables.characters.push(character({ locationId: "loc:1", mapId: "loc:1", gridX: 31, gridY: 47 }));
+  const exact = projectTablesToMapView(tables, EMPTY_MAPS, fakeWorld(), "1");
+  assert.deepEqual(exact.current.position, { mapId: "1", x: 31, y: 47 });
+  tables.characters.at(-1).locationId = "loc:other";
+  assert.equal(projectTablesToMapView(tables, EMPTY_MAPS, fakeWorld(), "1").current.position, null, "旧位置不能冒充当前街道的细格坐标");
 });
 
 test("D01 超上限给 total/truncated，不静默裁剪；非数字 id 记 dropped", () => {

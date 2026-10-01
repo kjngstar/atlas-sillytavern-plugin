@@ -1768,7 +1768,7 @@ async function mountAtlasMap({ stateByChat, chatId = "chat-a", travelPreview = n
 
 /** 当前渲染出来的地点标点名字（按 DOM 顺序）。 */
 function mapPointNames(container) {
-  return [...container.querySelectorAll(".aw-point")].map((node) => node.textContent);
+  return [...container.querySelectorAll(".aw-point")].map((node) => node.firstChild?.textContent);
 }
 
 /** 面包屑：可见性 + 去掉空白后的层级文字（世界图上 display 为 none；层级文字取 trail，不含返回钮）。 */
@@ -1780,7 +1780,7 @@ function crumbSnapshot(container) {
 
 /** 点开某个地点标点的信息面板，返回面板元素。 */
 function openPointPanel(container, name) {
-  const marker = [...container.querySelectorAll(".aw-point")].find((node) => node.textContent === name) ?? null;
+  const marker = [...container.querySelectorAll(".aw-point")].find((node) => node.firstChild?.textContent === name) ?? null;
   ok(marker !== null, `地图上有「${name}」标点`);
   marker?.click();
   const panel = container.querySelector(".aw-mappanel");
@@ -1890,6 +1890,49 @@ test("S10 前端：定位当前位置——世界图回溯祖先，内部图定�
   const backToRoot = cameraCenter(container, cameraMod);
   ok(Math.abs(backToRoot.cx - 80) < 0.01 && Math.abs(backToRoot.cy - 60) < 0.01,
     "跨图定位落在主角所在的集市，不停留在旧建筑");
+});
+
+test("街道定位：无坐标的上级入口持续高亮，当前街道内部有主角示意图标并可定位", async () => {
+  const state = s10State({ chatId: "chat-a", worldId: "w-street", currentLocationId: "loc:2", points: [] });
+  state.tableMap = {
+    world: { points: [] },
+    submaps: { "1": { parentMapId: "world", points: [] }, "2": { parentMapId: "1", points: [] } },
+    unplacedLocations: { entries: [
+      { id: "loc:1", name: "城市", parentLocationId: null },
+      { id: "loc:2", name: "学校外的街道", parentLocationId: "loc:1" },
+    ] },
+    current: { locationId: "loc:2", chain: [{ id: "loc:1", name: "城市" }, { id: "loc:2", name: "学校外的街道" }], position: null },
+    nearby: { entries: [] }, objects: { entries: [] }, locationOccupants: { entries: [] },
+  };
+  const mounted = await mountRootAtlasMap({ stateByChat: { "chat-a": state } });
+  const { container, core, dom, cameraMod } = mounted;
+  equal(container.querySelector(".aw-point.is-current")?.dataset.pointId, "1", "世界图按三表父链标明城市，无需旧 pointParents");
+  ok(container.querySelector(".aw-point.is-current").textContent.includes("你在此处内部"));
+  openPointPanel(container, "城市");
+  enterSubmapButton(container, "城市").click();
+  equal(container.querySelector(".aw-point.is-current")?.dataset.pointId, "2");
+  openPointPanel(container, "学校外的街道");
+  enterSubmapButton(container, "学校外的街道").click();
+  let pin = container.querySelector(".aw-current-position");
+  ok(pin, "街道没有 NPC 和子地点也能看到自己");
+  equal(pin.dataset.positionQuality, "estimated");
+  locateButton(container).click();
+  const centered = cameraCenter(container, cameraMod);
+  ok(Math.abs(centered.cx - Number.parseFloat(pin.style.left)) < 0.01);
+  ok(Math.abs(centered.cy - Number.parseFloat(pin.style.top)) < 0.01);
+  state.tableMap.current.position = { mapId: "2", x: 31, y: 47 };
+  await core.refresh();
+  await flush();
+  pin = container.querySelector(".aw-current-position");
+  equal(pin.dataset.positionQuality, "confirmed");
+  equal(pin.style.left, "31px");
+  equal(pin.style.top, "47px");
+  state.currentLocationId = null;
+  state.tableMap.current = { locationId: null, chain: [], position: null };
+  await core.refresh();
+  await flush();
+  equal(container.querySelector(".aw-current-position"), null, "位置未知时不保留旧图标");
+  dom.window.close();
 });
 
 test("S10 前端：同地点人物只在地点名单（离场者不出现、头像可长按纠偏）", async () => {

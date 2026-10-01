@@ -164,7 +164,8 @@ export interface AtlasTableMapView {
     truncated: number;
   };
   objects: { entries: AtlasMapViewObject[]; total: number; truncated: number };
-  current: { locationId: string | null; chain: Array<{ id: string; name: string }> };
+  current: { locationId: string | null; chain: Array<{ id: string; name: string }>;
+    position: { mapId: string; x: number; y: number } | null };
   totals: { locations: number; characters: number; items: number; submaps: number };
   /** 未投影进任何地图的行数（id 非数字 / 父不可达等），必须让调用方看得见。 */
   dropped: { locations: number };
@@ -228,6 +229,12 @@ export function projectTablesToMapView(
       .filter((character) => String(character.role ?? "").toLowerCase().includes("主角") || character.tags?.includes("主角"))
       .map((character) => String(character.id)),
   );
+  const currentRow = currentLocationId === null ? null
+    : byRowId.get(currentLocationId.startsWith("loc:") ? currentLocationId : `loc:${currentLocationId}`) ?? null;
+  const currentPlayer = tables.characters.find((row) => protagonistIds.has(row.id.replace(/^npc:/, ""))
+    && row.locationId === currentRow?.id && row.presence !== "left");
+  const currentPosition = currentPlayer?.mapId && isGrid(currentPlayer.gridX) && isGrid(currentPlayer.gridY)
+    ? { mapId: currentPlayer.mapId.replace(/^loc:/, ""), x: currentPlayer.gridX, y: currentPlayer.gridY } : null;
 
   // 1) 地点 → 世界图 / 父图
   const worldPoints: AtlasMapViewPoint[] = [];
@@ -369,6 +376,10 @@ export function projectTablesToMapView(
     }
   }
 
+  // 当前位置即使没有孩子、人物细坐标，也必须有可进入的场景图（街道同样适用）。
+  if (currentRow && !hiddenLocationIds.has(String(pointIdFromLocationRowId(currentRow.id) ?? ""))
+    && !submapBuckets.has(currentRow.id)) submapBuckets.set(currentRow.id, []);
+
   // 3) 子图（超过上限的按 total/truncated 报，不静默丢）
   const submapKeys = [...submapBuckets.keys()]
     .filter((key) => visibleLocationIds.has(key))
@@ -398,9 +409,6 @@ export function projectTablesToMapView(
   }
 
   // 4) 附近目录与物品目录：与地图同一张人物表 / 物品表
-  const currentRow = currentLocationId === null
-    ? null
-    : byRowId.get(currentLocationId.startsWith("loc:") ? currentLocationId : `loc:${currentLocationId}`) ?? null;
   const nearIds = new Set<string>();
   if (currentRow) {
     nearIds.add(currentRow.id);
@@ -543,7 +551,7 @@ export function projectTablesToMapView(
       total: objectEntries.length,
       truncated: Math.max(0, objectEntries.length - ATLAS_MAP_VIEW_LIMITS.objects),
     },
-    current: { locationId: currentRow?.id ?? null, chain },
+    current: { locationId: currentRow?.id ?? null, chain, position: currentPosition },
     totals: {
       locations: tables.locations.length,
       characters: tables.characters.length,

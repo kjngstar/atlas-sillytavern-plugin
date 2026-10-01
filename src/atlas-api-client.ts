@@ -120,6 +120,7 @@ export const DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA: Array<{ role: string; name: st
       "- 绝对不要输出 id、mapId、格序号、坐标、时间、时长、距离或比例尺数字——这些一律由程序推导，你写了也会被拒绝。\n" +
       "- 引用：新增行用本块局部引用 new:loc:短名 / new:npc:短名 / new:item:短名（小写字母、数字、- 或 _）；已有行必须用对照表里给出的正式 ID。名称不是 ID，不要拿名字当引用，也不要把同名地点合并。\n" +
       "- 位置只写到「在哪个地点」：人物与物品给 locationRef 就够，具体格序号由程序按地图与距离算。正文虽未直说地名，但行动及其上下文足以唯一确定地点时也应登记；若有多个合理候选或只是打算前往，省略 locationRef。\n" +
+      "- 当前所在场景与目的地分开判断：已经走在街上、穿过走廊、沿林间小路前行，即使还在前往别处，也已身处街道、走廊或小路，应记录脚下场景；尚未抵达的目的地只写 targetLocationRef。街道无需正式名称，正文明确出现但未入表时，用稳定的描述性名称 location add 并摘录原文，再把主角 locationRef 指向它；上级关系有证据才写 parentRef，不能确定就为 null。不要因为在途、地名简略或地图刚生成，就把主角留在已离开的房间或自动挪到新构想地点。\n" +
       "- 新地点要挂到外层地点时用 parentRef（已知地点 ID 或本块内 new:loc: 引用）；只登记本轮确实走进去的内层地点，不要为对照表里已有的地点再登记一次，也不要造环。\n" +
       "- 证据：basis=\"observed\"（默认）的位置与归属改动必须带 quote，且 quote 必须逐字复制 msg:u 或 msg:a 里的连续原文；来源由程序判断，不要写 sourceId，也不要编造证据编号。basis=\"inferred\" 可改想法、行动倾向、目标地点、描述及人物 locationRef；上下文唯一确定已到达地点时不强制 quote。不能推断归属、持有人或销毁。\n" +
       "- observed 表示本轮有效正文确实叙述了该事实，不表示主角亲眼看见；远方幕后镜头也可提供 observed 证据，主角能否得知由程序另行判断。人物 currentAction 只能用 observed，必须给出逐字 quote；inferred 只能改上一条列出的推测字段，绝不能改 currentAction。用户意图若未在助手正文实现，不可当作行动。\n" +
@@ -151,7 +152,7 @@ export const DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA: Array<{ role: string; name: st
     mainSlot: "B",
     content:
       "【本轮用户行动；证据来源 msg:u】\n$8\n【本轮助手回复；证据来源 msg:a】\n{{assistantReply}}\n" +
-      "先使用【主角人物 ID】确定玩家目前所在地点；若本轮剧情已抵达某个地点，即使正文用代词或承接上文，也要写主角 character set 的 locationRef（未入表先 add），正文有直接地点证据时用 basis=\"observed\" 并逐字摘录 quote；只有承接上文才唯一确定地点时用 basis=\"inferred\"，无需编造 quote。进入楼层、房间、院落、地窖等新的内层地点时再登记地点并用 parentRef 挂到外层；只是想去、在途、被阻止、回忆、梦境或远处镜头都不算抵达。多个地点都合理、意图与抵达混淆时不改变位置；远方 NPC 只记 targetLocationRef，不以推断让其瞬移。\n" +
+      "先使用【主角人物 ID】确定玩家目前所在地点；若本轮剧情已抵达某个地点，即使正文用代词或承接上文，也要写主角 character set 的 locationRef（未入表先 add），正文有直接地点证据时用 basis=\"observed\" 并逐字摘录 quote；只有承接上文才唯一确定地点时用 basis=\"inferred\"，无需编造 quote。进入街道、走廊、楼层、房间、院落、地窖等实际场景时登记地点，有上级证据再用 parentRef 挂到外层。在途仅表示尚未到目的地，不否定主角已经身处街道或走廊；只是想去、被阻止、回忆、梦境或远处镜头都不算抵达。多个地点都合理、意图与抵达混淆时不改变位置；远方 NPC 只记 targetLocationRef，不以推断让其瞬移。\n" +
       "再识别本轮实际参与的人物：已在对照表里的用它的正式 ID 改 locationRef / thought / actionTendency / presence；新出现的先 character add 再给 locationRef；背景提及者不算在场，没提到就什么都不要写。\n" +
       "物品只在正文真的出现时才登记：地上的给 locationRef，被人拿着的给 holderRef（两者只能选一个）；正文明确消失或销毁才用 remove。\n" +
       "只写有证据的变化行；没有变化就写 {\"kind\":\"noop\"}。时间和距离不要填任何数字。最后只输出一个完整 <atlasEdit> 块。",
@@ -189,6 +190,7 @@ export const TABLE_DELTA_BOOTSTRAP_TASK_CONTENT =
   "1. 判断玩家当前实际所在的地点：材料里明确出现且未建档的，用 location add（parentRef 按材料给出或为 null）；已在对照表里的，用 character set 把当前场景人物或玩家的 locationRef 指向它；材料只是氛围、回忆或传闻时不要登记任何地点。\n" +
   "2. 登记开场实际在场且对后续剧情重要的人物（character add）并用 locationRef 锚定其位置；姓名尚未揭示时给稳定的临时引用和描述性称呼，后续再合并，不因缺名漏掉人物。一闪而过的路人不强行建档；角色卡标题和世界书背景提及者不算在场。\n" +
   "3. 根据开场动作和上下文唯一确定场所时登记主角位置；多个候选时省略，不要造环、不要补不存在的内层房间。\n" +
+      "4. 开场若是走在街上或沿路前行，街道或道路就是实际所在场景；没有正式地名也可按原文用描述性名称建档。目的地与当前脚下场景分开登记，未抵达的目的地不作为主角位置。\n" +
   "【开场材料】\n{{assistantReply}}\n只输出一个完整 <atlasEdit> 块。";
 
 /** C01/C02：是否使用 `table-delta-v1`（三表行增量）协议。 */

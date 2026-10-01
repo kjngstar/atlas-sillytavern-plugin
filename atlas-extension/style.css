@@ -2802,6 +2802,14 @@
 }
 
 /* 子图角标：可深入内部的地点带金色小菱形（呼应 45° brand-mark） */
+.aw-current-position {
+  border-color: var(--aw-teal, #285f5e);
+  color: var(--aw-teal, #285f5e);
+  font-weight: 700;
+  z-index: 5;
+}
+.aw-current-position[data-position-quality="estimated"] { border-style: dashed; }
+
 .aw-point--sub::after {
   content: "";
   display: inline-block;
