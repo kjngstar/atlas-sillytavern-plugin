@@ -2828,6 +2828,21 @@ function createAtlasUiCore(deps) {
           if (!stale) await refresh();
         }
         if (state.chatId === value.chatId) await syncLorebookAfterCommit(body);
+        if (receiptParsed.value.status === "committed" && state.chatId === value.chatId) {
+          try {
+            const expansion = await api.request("POST", "/worlds/geo/suggest", {
+              chatId: value.chatId,
+              triggerId: value.turnId,
+              autoApply: true,
+              loreSupplement: [value.charDescription, value.loreSupplement].filter(Boolean).join("\n").slice(0, ATLAS_LIMITS.LORE_SUPPLEMENT_CHARS),
+              recentTexts: [...value.recentAssistantTexts ?? [], value.assistantText].slice(-8)
+            });
+            if (expansion.status === 200 && expansion.body?.ok && state.chatId === value.chatId) {
+              await refresh();
+            }
+          } catch {
+          }
+        }
         return;
       }
       diagnostic3({
@@ -11564,7 +11579,7 @@ function interiorPositionHint(action, id) {
     [/(窗边|窗旁|靠窗|window)/i, 80, 30, "窗边"],
     [/(门口|门边|门旁|门前|door)/i, 18, 80, "门旁"],
     [/(角落|墙角|corner)/i, 18, 18, "角落"],
-    [/(桌边|桌旁|讲台|desk|table)/i, 55, 55, "桌旁"],
+    [/(桌边|桌旁|桌子|课桌|讲台|desk|table)/i, 55, 55, "桌旁"],
     [/(中央|中间|中心|center|middle)/i, 50, 45, "中央"]
   ];
   const zone = zones.map((entry) => {
@@ -11578,6 +11593,17 @@ function interiorPositionHint(action, id) {
     x: zone.entry[1] + (hash >>> 0) % 11 - 5,
     y: zone.entry[2] + ((hash >>> 4) % 11 - 5),
     label: zone.entry[3]
+  };
+}
+function isInteriorRoom(location, locations) {
+  if (/(教室|[一二三四五六七八九十\d]+班|寝室|卧室|办公室|会议室|实验室|图书室|房间|病房|客房|大厅|餐厅|车厢|room|classroom)/i.test(location.name)) return true;
+  return location.parentLocationId !== null && /(室|房|厅|馆|堂|铺|屋|舱|厢|店)/.test(location.name) && !locations.some((row) => row.parentLocationId === location.id);
+}
+function schematicRoomPosition(index) {
+  return {
+    x: 28 + index % 4 * 14,
+    y: 35 + Math.floor(index / 4) % 4 * 12,
+    label: "房间内，细部位置估计"
   };
 }
 function regionOfPoint(world, pointId) {
@@ -11680,7 +11706,8 @@ function projectTablesToMapView(tables, maps, world, currentLocationId, hiddenLo
       const location = byRowId.get(row.locationId);
       if (location && !hiddenLocationIds.has(String(pointIdFromLocationRowId(location.id) ?? ""))) {
         if (!submapBuckets.has(location.id)) submapBuckets.set(location.id, []);
-        const interior = location.parentLocationId !== null && row.presence !== "left" && row.mapId === location.id ? interiorPositionHint(row.currentAction, row.id) : null;
+        const room = isInteriorRoom(location, tables.locations) && row.presence === "present" && !protagonistIds.has(characterId);
+        const interior = room ? interiorPositionHint(row.currentAction, row.id) ?? schematicRoomPosition(submapBuckets.get(location.id).filter((point) => point.kind === "character").length) : null;
         if (interior) {
           submapBuckets.get(location.id).push({
             id: row.id,
@@ -14997,7 +15024,7 @@ ${rejectedBlock}` : "");
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.68",
+      version: "0.9.69",
       protocolVersion: 1,
       time: now()
     });
@@ -15163,16 +15190,32 @@ ${rejectedBlock}` : "");
       const binding = requireBoundBinding(await getBinding(chatId));
       const world = await requireWorld(binding);
       const branchKey = branchScopeForStory(world, binding.branchId) ?? "canon";
+      const autoApply = body.autoApply === true;
+      const triggerId = typeof body.triggerId === "string" ? body.triggerId.slice(0, ATLAS_LIMITS.ID_CHARS) : "";
+      const expansionKey = `geo-auto:expansion:${world.id}:${branchKey}`;
+      let expansionSeen = 0;
+      if (autoApply) {
+        if (!triggerId) throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "自动扩展需要回合标识。");
+        const oldMarker = await store.read(expansionKey);
+        const marker = isPlainRecord(oldMarker) ? oldMarker : {};
+        if (marker.lastTriggerId === triggerId) return okResult({ accepted: 0, linked: 0, skipped: "duplicate", scope: "author" });
+        expansionSeen = (typeof marker.seen === "number" && Number.isSafeInteger(marker.seen) ? marker.seen : 0) + 1;
+        if (expansionSeen !== 1 && expansionSeen % 4 !== 0) {
+          await store.write(expansionKey, { seen: expansionSeen, lastTriggerId: triggerId, at: now() });
+          return okResult({ accepted: 0, linked: 0, skipped: "interval", scope: "author" });
+        }
+      }
       const preset = resolveWorldTurnPreset(await loadSettings());
       if (!preset) throw new AtlasError(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "未配置推演 API，无法构想地点。");
       const lore = typeof body.loreSupplement === "string" ? body.loreSupplement.slice(0, ATLAS_LIMITS.LORE_SUPPLEMENT_CHARS) : "";
       const recentTexts = Array.isArray(body.recentTexts) ? body.recentTexts.filter((x) => typeof x === "string").slice(-8).map((x) => x.slice(0, 1800)) : [];
       const existingNames = (world.points ?? []).map((point) => String(point.name)).slice(0, 200);
       const prompt = [
-        "根据题材、世界设定与已出现的地点，提出能使世界结构更完整的候选地点。它们只是可能存在的场所，并非剧情事实。",
-        "现代校园可以构想城市、街区、校舍、楼层、教室；异世界可构想聚落、工会、拍卖行、迷宫。按当前设定选择，不要机械套用例子。",
-        '只输出 JSON：{"places":[{"name":"地点名","parentName":"可选的上级地点名","reason":"为什么符合设定"}]}。最多 8 个，不输出坐标、人物或事件。上级地点可以是已有地点或本批候选。不要重复已有名称。',
+        autoApply ? "根据当前世界观与剧情，自然补全少量可供后续剧情使用的常见场景。这些是世界结构推断，不是角色已经到访、看见或知道的事实。" : "根据题材、世界设定与已出现的地点，提出能使世界结构更完整的候选地点。它们只是可能存在的场所，并非剧情事实。",
+        "现代校园可有城市、街区、图书馆、食堂、教室；异世界可有聚落、工会、拍卖行、迷宫。只选符合当前设定的地点，不机械套用例子，不把课桌等室内陈设当地点。",
+        '只输出 JSON：{"places":[{"name":"地点名","parentName":"可选的上级地点名","reason":"为什么符合设定"}],"links":[{"childName":"已有根地点名","parentName":"新上级地点名"}]}。最多 8 个新地点；links 只用于现有无上级地点的合理归属。不要输出坐标、人物或事件，不要重复已有名称。',
         `世界名称：${String(world.name).slice(0, 100)}`,
+        `世界描述：${String(world.description ?? "").slice(0, 2500)}`,
         `已有地点：${existingNames.join("、")}`,
         `设定资料：${lore || "无"}`,
         `近期剧情：${recentTexts.join("\n---\n") || "无"}`
@@ -15204,6 +15247,118 @@ ${rejectedBlock}` : "");
           quality: "candidate"
         });
         if (suggestions.length >= 8) break;
+      }
+      if (autoApply) {
+        const rawTables = await store.read(`tables:${world.id}`);
+        const tablesDoc = rawTables !== null && validateAtlasTablesStore(rawTables, { expectedWorldId: world.id }).ok ? rawTables : null;
+        const branch = tablesDoc?.branches[branchKey] ? cloneAtlasTables(tablesDoc.branches[branchKey]) : null;
+        const points = [...world.points ?? []];
+        const rawMaps = await store.read(`maps:${world.id}`);
+        const mapsBase = isPlainRecord(rawMaps) ? rawMaps : {};
+        const pointMeta = { ...isPlainRecord(mapsBase.pointMeta) ? mapsBase.pointMeta : {} };
+        const accepted = [];
+        const pending = [...suggestions];
+        let nextId2 = points.reduce((max, point) => Math.max(max, Number(point.id) || 0), 0) + 1;
+        for (let pass = 0; pass < suggestions.length && pending.length > 0; pass += 1) {
+          let progressed = false;
+          for (let index = 0; index < pending.length; ) {
+            const item = pending[index];
+            const parents = item.parentName ? points.filter((point2) => String(point2.name).trim() === item.parentName) : [];
+            if (item.parentName && parents.length !== 1) {
+              index += 1;
+              continue;
+            }
+            const parent = parents[0] ?? null;
+            let depth = 0;
+            let cursor = parent;
+            const seen = /* @__PURE__ */ new Set();
+            while (cursor) {
+              if (seen.has(cursor.id)) {
+                depth = SUBMAP_DEPTH_MAX + 1;
+                break;
+              }
+              seen.add(cursor.id);
+              depth += 1;
+              cursor = points.find((point2) => point2.id === cursor?.parentPointId) ?? null;
+            }
+            pending.splice(index, 1);
+            if (depth > SUBMAP_DEPTH_MAX || points.length >= MAP_POINTS_MAX) continue;
+            const angle = nextId2 * 2.39996;
+            const point = {
+              id: nextId2,
+              name: item.name,
+              x: Math.round(50 + 20 * Math.cos(angle)),
+              y: Math.round(50 + 20 * Math.sin(angle)),
+              regionId: parent?.regionId ?? null,
+              ...parent ? { parentPointId: parent.id } : {}
+            };
+            points.push(point);
+            pointMeta[String(nextId2)] = { coordinateStatus: "schematic" };
+            branch?.locations.push({
+              id: `loc:${nextId2}`,
+              name: item.name,
+              parentLocationId: parent ? `loc:${parent.id}` : null,
+              mapId: parent ? `loc:${parent.id}` : "world",
+              gridX: null,
+              gridY: null,
+              description: "",
+              rumors: [],
+              factions: []
+            });
+            accepted.push(item.name);
+            nextId2 += 1;
+            progressed = true;
+          }
+          if (!progressed) break;
+        }
+        let linked = 0;
+        for (const item of (parsed && Array.isArray(parsed.links) ? parsed.links : []).slice(0, 8)) {
+          if (!isPlainRecord(item) || typeof item.childName !== "string" || typeof item.parentName !== "string") continue;
+          const childName = item.childName.trim();
+          const parentName = item.parentName.trim();
+          const children = points.filter((point) => point.name === childName && point.parentPointId == null);
+          const parents = points.filter((point) => point.name === parentName);
+          if (children.length !== 1 || parents.length !== 1 || children[0].id === parents[0].id) continue;
+          const child = children[0];
+          const parent = parents[0];
+          const childRow = branch?.locations.find((row) => row.id === `loc:${child.id}`);
+          if (branch && (!childRow || childRow.parentLocationId !== null)) continue;
+          let cursor = parent;
+          let depth = 0;
+          const seen = /* @__PURE__ */ new Set();
+          while (cursor && !seen.has(cursor.id)) {
+            if (cursor.id === child.id) {
+              depth = SUBMAP_DEPTH_MAX + 1;
+              break;
+            }
+            seen.add(cursor.id);
+            depth += 1;
+            cursor = points.find((point) => point.id === cursor?.parentPointId);
+          }
+          if (depth >= SUBMAP_DEPTH_MAX) continue;
+          child.parentPointId = parent.id;
+          if (childRow) {
+            childRow.parentLocationId = `loc:${parent.id}`;
+            childRow.mapId = `loc:${parent.id}`;
+          }
+          linked += 1;
+        }
+        if (accepted.length > 0 || linked > 0) {
+          let updated = { ...world, points, updatedAt: now() };
+          const revision = appendDefinitionRevision(updated, { authorNote: `推演自动补全题材场景：${accepted.join("、")}`.slice(0, 180), now: now() });
+          if (revision.ok) updated = revision.value;
+          if (!parseWorld(updated)) throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "自动补全后的世界结构无效。");
+          const nextTables = branch && tablesDoc ? { ...tablesDoc, branches: { ...tablesDoc.branches, [branchKey]: branch } } : null;
+          if (nextTables && !validateAtlasTablesStore(nextTables, { expectedWorldId: world.id }).ok) {
+            throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "自动补全后的地点表无效。");
+          }
+          await store.write(`world:${world.id}`, updated);
+          if (nextTables) await store.write(`tables:${world.id}`, nextTables);
+          await store.write(`maps:${world.id}`, { ...mapsBase, schemaVersion: 2, pointMeta });
+          worldCache.set(world.id, updated);
+        }
+        await store.write(expansionKey, { seen: expansionSeen, lastTriggerId: triggerId, at: now() });
+        return okResult({ accepted: accepted.length, linked, pointNames: accepted, skipped: pending.length, scope: "author" });
       }
       await store.write(`geo-auto:suggestions:${world.id}:${branchKey}`, { at: now(), branchKey, suggestions });
       return okResult({ suggestions, scope: "author", accepted: 0 });

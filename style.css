@@ -1189,6 +1189,35 @@
   inset: 0;
 }
 
+.aw-room-boundary {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2.5px solid var(--am-grid-major, var(--aw-teal-line));
+  border-radius: 3px;
+  background: rgba(49, 104, 99, 0.035);
+  pointer-events: none;
+  z-index: 1;
+}
+
+.aw-room-fixture {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  padding: 1px 2px;
+  min-width: 6px;
+  border: 1px solid var(--am-grid-major, var(--aw-teal-line));
+  border-radius: 2px;
+  background: var(--am-canvas, var(--aw-paper));
+  color: var(--aw-ink-soft);
+  font-family: var(--aw-sans);
+  font-size: 2.5px;
+  line-height: 1.15;
+  text-align: center;
+  white-space: nowrap;
+  opacity: 0.7;
+  pointer-events: none;
+  z-index: 2;
+}
+
 /* 装帧：四角标 + 指北针 + 比例尺 + 金色虚线路线 */
 
 .aw-corner {

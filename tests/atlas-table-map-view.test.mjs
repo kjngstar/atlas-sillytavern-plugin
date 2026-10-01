@@ -106,7 +106,7 @@ test("M3 真实开场：全链无格坐标仍保留可进入的父子图，点�
     [["loc:1", "world"], ["loc:2", "1"], ["loc:3", "2"]], "各层只在对应父图待定位");
 });
 
-test("只有粗定位人物的末端房间仍有可进入的室内图，人物不被伪造到格点", () => {
+test("只有房间级定位的人物有可进入的室内图，并以估计图标显示", () => {
   const tables = {
     locations: [location({ id: "loc:1", name: "学校" }),
       location({ id: "loc:2", name: "教室", parentLocationId: "loc:1", mapId: "loc:1", gridX: 4, gridY: 5 })],
@@ -115,11 +115,12 @@ test("只有粗定位人物的末端房间仍有可进入的室内图，人物�
   };
   const view = projectTablesToMapView(tables, EMPTY_MAPS, fakeWorld(), "2");
   assert.ok(view.submaps["2"], "末端房间有室内图入口");
-  assert.deepEqual(view.submaps["2"].points, [], "未知站位不画成具体图钉");
-  assert.equal(view.unknownPosition.find((row) => row.locationId === "loc:2")?.characters[0].name, "同学");
+  assert.equal(view.submaps["2"].points[0].name, "同学");
+  assert.equal(view.submaps["2"].points[0].positionQuality, "estimated", "示意图标不冒充精确坐标");
+  assert.equal(view.unknownPosition.find((row) => row.locationId === "loc:2")?.characters.length ?? 0, 0);
 });
 
-test("室内动作明确写出窗边时可画估计方位，未知站位仍不画", () => {
+test("室内动作明确写出窗边时优先放在窗边，其余人物也有估计图标", () => {
   const tables = {
     locations: [location({ id: "loc:1", name: "学校" }),
       location({ id: "loc:2", name: "教室", parentLocationId: "loc:1", mapId: "loc:1", gridX: 4, gridY: 5 })],
@@ -131,8 +132,8 @@ test("室内动作明确写出窗边时可画估计方位，未知站位仍不�
   const marker = view.submaps["2"].points.find((row) => row.id === "npc:a");
   assert.equal(marker.positionQuality, "estimated");
   assert.equal(marker.positionHint, "窗边");
-  assert.equal(view.submaps["2"].points.some((row) => row.id === "npc:b"), false);
-  assert.equal(view.unknownPosition.find((row) => row.locationId === "loc:2")?.characters[0].name, "乙");
+  assert.equal(view.submaps["2"].points.find((row) => row.id === "npc:b").positionHint, "房间内，细部位置估计");
+  assert.equal(view.unknownPosition.find((row) => row.locationId === "loc:2")?.characters.length ?? 0, 0);
   tables.characters[0].currentAction = "离开窗边，走到门口";
   const moved = projectTablesToMapView(tables, EMPTY_MAPS, fakeWorld(), "2");
   assert.equal(moved.submaps["2"].points.find((row) => row.id === "npc:a").positionHint, "门旁");

@@ -270,6 +270,42 @@ test("题材地点先为作者候选，采纳后才进入世界与地图", async
   equal((await core.handle("POST", "/worlds/geo/suggest/accept", { chatId: "chat-a", suggestionId: id })).body.ok, false, "同一候选不可重复采纳");
 });
 
+test("自动场景扩展首轮直接入图、按父子层级连接且同回合幂等", async () => {
+  let existingName = "";
+  const fetcher = makeFetch([
+    () => openAiTextResponse(JSON.stringify({ places: [
+      { name: "星河市", reason: "校园所在城市" },
+      { name: "图书馆", parentName: existingName, reason: "学校常见设施" },
+    ], links: [{ childName: existingName, parentName: "星河市" }] })),
+    () => openAiTextResponse(JSON.stringify({ places: [
+      { name: "食堂", parentName: existingName, reason: "校园日常设施" },
+    ] })),
+  ]);
+  const { core, carrier } = await setup(null, { fetchFn: fetcher.fetchFn });
+  const existing = carrier.session.world.points.find((point) => point.parentPointId == null);
+  existingName = existing.name;
+  const originalCount = carrier.session.world.points.length;
+  const run = (triggerId) => core.handle("POST", "/worlds/geo/suggest", {
+    chatId: "chat-a", autoApply: true, triggerId, loreSupplement: "现代学校日常",
+    recentTexts: ["学生正在上课。"],
+  });
+  const first = await run("turn-1");
+  equal(first.status, 200, "自动扩展成功");
+  equal(first.body.data.accepted, 2, "模型建议不需逐个手动采纳");
+  equal(first.body.data.linked, 1, "已有根地点可归到推断的上级地点");
+  equal(carrier.session.world.points.length, originalCount + 2, "新地点进入地图");
+  const city = carrier.session.world.points.find((point) => point.name === "星河市");
+  equal(carrier.session.world.points.find((point) => point.name === existingName).parentPointId, city.id);
+  equal(carrier.session.world.points.find((point) => point.name === "图书馆").parentPointId, existing.id);
+  equal((await core.handle("POST", "/state", { chatId: "chat-a" })).body.data.geoSuggestions.length, 0,
+    "自动扩展不留下待采纳列表");
+  equal((await run("turn-1")).body.data.skipped, "duplicate", "重复回调不重复写入或请求模型");
+  equal((await run("turn-2")).body.data.skipped, "interval", "后续普通楼层不额外消耗模型");
+  equal((await run("turn-3")).body.data.skipped, "interval");
+  equal((await run("turn-4")).body.data.accepted, 1, "每四个新回合扩展一次");
+  equal(fetcher.calls.length, 2, "只调用两次模型");
+});
+
 test("人物时间线按会话分支和游标分页，已回退回合不显示", async () => {
   const { core, carrier } = await setup(null);
   const entry = (period, experience) => ({ characterId: "npc:chronicle-c1", name: "薇尔", period,

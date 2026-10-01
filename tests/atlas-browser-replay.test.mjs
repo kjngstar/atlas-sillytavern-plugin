@@ -375,6 +375,47 @@ test("M3 实酒馆回归：全链待定位的学校仍能逐层进入建筑与�
   dom.window.close();
 });
 
+test("室内图显示估计人物、网格边界和示意课桌，同一物品只列一次", async () => {
+  const frame = { cols: 100, rows: 100, frameRevision: 1 };
+  const submaps = {
+    "1": { mapId: "1", parentMapId: "world", frame,
+      points: [{ id: "2", name: "教室", x: 50, y: 50, kind: "location", rowId: "loc:2", positionQuality: "confirmed" }], total: 1, truncated: 0 },
+    "2": { mapId: "2", parentMapId: "1", frame,
+      points: [{ id: "npc:student", name: "同学", x: 43, y: 51, kind: "character", rowId: "npc:student",
+        positionQuality: "estimated", positionHint: "房间内，细部位置估计" }], total: 1, truncated: 0 },
+  };
+  const tableMap = {
+    branchKey: "canon", world: { points: [{ id: "1", name: "学校", x: 50, y: 50, kind: "location", rowId: "loc:1" }], total: 1, truncated: 0 },
+    submaps, current: { locationId: "loc:2", chain: [] }, nearReasonCode: null,
+    unplacedLocations: { entries: [], total: 0, truncated: 0 },
+    locationOccupants: { entries: [], total: 0, truncated: 0 },
+    nearby: { entries: [{ id: "npc:student", name: "同学", locationId: "loc:2", locationName: "教室",
+      presence: "present", gridX: null, gridY: null, mapId: "loc:2" }], total: 1, truncated: 0 },
+    objects: { entries: [{ id: "item:table", name: "水笔", description: "蓝色水笔", status: "完好",
+      locationId: "loc:2", holderCharacterId: null, mapId: "loc:2", gridX: null, gridY: null }], total: 1, truncated: 0 },
+  };
+  const state = mapState({ points: [{ id: "1", name: "学校", x: 50, y: 50 }], submaps, tableMap, currentLocationId: "2" });
+  state.stateData.objectDirectory = [{ id: "legacy-pen", name: "水笔", type: "item", description: "蓝色水笔", pointId: "2" }];
+  const { dom, container } = await mountReplay(state);
+  for (const id of ["1", "2"]) {
+    const point = container.querySelector(`.aw-point[data-point-id="${id}"]`);
+    assert.ok(point);
+    point.click(); await flush();
+    const enter = [...container.querySelectorAll(".aw-mappanel button")].find((button) => button.textContent === "进入内部地图");
+    assert.ok(enter); enter.click(); await flush();
+  }
+  assert.ok(container.querySelector(".aw-room-boundary"), "室内图有沿网格的边界线");
+  assert.equal(container.querySelectorAll(".aw-room-fixture").length, 8, "教室有示意黑板、讲台和课桌");
+  assert.equal(container.querySelectorAll('.aw-object--npc[data-position-quality="estimated"]').length, 1,
+    "无细格坐标的人也有明确标记为估计的人物图标");
+  const roster = container.querySelector(".aw-interior-roster");
+  assert.equal([...roster.querySelectorAll(".aw-interior-roster__item")].filter((node) => node.textContent === "水笔").length, 1,
+    "旧目录镜像与三表只显示同一件水笔一次");
+  roster.querySelector(".aw-interior-roster__item").click(); await flush();
+  assert.match(container.querySelector(".aw-mappanel").textContent, /类型：物品/);
+  dom.window.close();
+});
+
 test("G03 回放：教室子图只画可信细格的人物图钉，建筑级 / 无坐标 / 同格的人不伪造点位", async () => {
   const { dom, container } = await mountReplay(classroomState());
 

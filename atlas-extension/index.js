@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.68";
+export const ATLAS_EXTENSION_VERSION = "0.9.69";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -4713,8 +4713,6 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
   let mapStackKey = "";
   let mapCrumb = null;
   let mapPanel = null;
-  let geoSuggestionPanel = null;
-  let geoFeedbackEl = null;
   /** R15 补（R08 残留）：当前面板锚点身份 {kind:"point"|"entity", id, el}——相机变更 /
    *  重新渲染后按身份找回新标记续锚；对象真消失则关闭面板。 */
   let mapPanelAnchor = null;
@@ -5168,9 +5166,6 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     // 0.9.24 世界书提炼地理；0.9.26 地图抢救：geoBar 常显 + 新增「从近期剧情提炼新地点」
     // （复用同一条 adopt 管线：重名自动跳过，产出只增不改——地图跟着剧情长）
     const geoBar = el("div", "aw-geobar");
-    const geoFeedback = el("span", "aw-geobar__feedback");
-    geoFeedback.style.display = "none";
-    geoFeedbackEl = geoFeedback;
     const geoBtn = el("button", "aw-btn aw-btn--primary", "从世界书提炼地理");
     geoBtn.type = "button";
     geoBtn.setAttribute("aria-label", "用一次推演请求从角色卡世界书提炼地区与地点并加入地图");
@@ -5261,45 +5256,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         geoBusy = false;
       }
     });
-    const suggestBtn = el("button", "aw-btn", "按题材构想地点");
-    suggestBtn.type = "button";
-    suggestBtn.title = "使用一次推演请求生成候选地点；采纳前不会写入世界、地图或注入。";
-    suggestBtn.addEventListener("click", async () => {
-      if (geoBusy) return;
-      const chatId = String(state().chatId ?? "");
-      if (!chatId) { setStatus("当前没有活动聊天。", "error"); return; }
-      geoBusy = true;
-      suggestBtn.disabled = true;
-      geoFeedback.textContent = "正在构想候选地点…";
-      geoFeedback.style.display = "";
-      try {
-        const chunks = await readCardGeoLoreChunks(chatId);
-        const ctx = SillyTavern.getContext();
-        const card = ctx?.characters?.[ctx?.characterId] ?? {};
-        const cardSetting = [card.description, card.scenario, card.data?.description, card.data?.scenario]
-          .filter((value) => typeof value === "string" && value.trim()).join("\n");
-        const loreSupplement = [cardSetting, ...chunks].join("\n").slice(0, 45000);
-        const result = await api.request("POST", "/worlds/geo/suggest", {
-          chatId, loreSupplement, recentTexts: readRecentFloors(),
-        });
-        if (result.status !== 200 || !result.body?.ok) throw new Error(result.body?.error?.message ?? "生成候选失败");
-        await core.refresh();
-        if (geoSuggestionPanel) geoSuggestionPanel.open = true;
-        const message = `已提出 ${result.body.data?.suggestions?.length ?? 0} 个候选地点；请逐个审阅采纳。`;
-        geoFeedback.textContent = message;
-        setStatus(message, "ok");
-      } catch (error) {
-        const message = `构想地点失败：${error?.message ?? String(error)}`;
-        geoFeedback.textContent = message;
-        setStatus(message, "error");
-      } finally {
-        geoBusy = false;
-        suggestBtn.disabled = false;
-      }
-    });
-    geoSuggestionPanel = el("details", "aw-geo-suggestions");
-    geoSuggestionPanel.append(el("summary", "aw-geo-suggestions__summary", "候选地点"));
-    geoBar.append(geoBtn, storyGeoBtn, suggestBtn, geoFeedback, geoSuggestionPanel);
+    geoBar.append(geoBtn, storyGeoBtn);
     // 0.9.43 底部堆叠修复（0.9.46 补提交）：长提示挪页头，工具条只留按钮
     // 0.9.35 子图面包屑 + 标记点信息面板
     mapCrumb = el("div", "aw-mapcrumb");
@@ -6397,7 +6354,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     mapPanel.append(head);
 
     const metaLines = [];
-    metaLines.push(`类型：${String(object.type)}`);
+    metaLines.push(`类型：${String(object.type) === "item" ? "物品" : String(object.type)}`);
     if (object.pointName) metaLines.push(`所在：${object.pointName}`);
     // D04：持有关系只存在于三表（D-02）——随身物品必须显示持有人，否则看起来像"凭空消失"
     if (object.holderName) metaLines.push(`持有人：${String(object.holderName)}`);
@@ -6437,37 +6394,6 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
 
   function renderMap(d) {
     if (!d.worldId) return;
-    if (geoSuggestionPanel) {
-      const suggestions = Array.isArray(d.geoSuggestions) ? d.geoSuggestions : [];
-      geoSuggestionPanel.style.display = suggestions.length ? "" : "none";
-      geoSuggestionPanel.querySelector("summary").textContent = `候选地点 ${suggestions.length}`;
-      for (const old of [...geoSuggestionPanel.querySelectorAll(".aw-geo-suggestions__item")]) old.remove();
-      for (const item of suggestions) {
-        const row = el("div", "aw-geo-suggestions__item");
-        row.append(el("span", "", `${item.name}${item.parentName ? ` · 属于 ${item.parentName}` : ""}：${item.reason || "符合题材"}`));
-        const accept = el("button", "aw-btn aw-btn--ghost", "采纳");
-        accept.type = "button";
-        accept.addEventListener("click", async () => {
-          accept.disabled = true;
-          const result = await api.request("POST", "/worlds/geo/suggest/accept", {
-            chatId: String(state().chatId ?? ""), suggestionId: String(item.id),
-          });
-          if (result.status === 200 && result.body?.ok) {
-            const message = `已采纳地点：${item.name}。地图位置仍是示意，距离尚未确认。`;
-            if (geoFeedbackEl) { geoFeedbackEl.textContent = message; geoFeedbackEl.style.display = ""; }
-            setStatus(message, "ok");
-            await core.refresh();
-          } else {
-            const message = result.body?.error?.message ?? "采纳候选失败";
-            if (geoFeedbackEl) { geoFeedbackEl.textContent = message; geoFeedbackEl.style.display = ""; }
-            setStatus(message, "error");
-            accept.disabled = false;
-          }
-        });
-        row.append(accept);
-        geoSuggestionPanel.append(row);
-      }
-    }
     // 0.9.35 换聊天 / 换世界 → 子图视图栈立即作废（数据隔离，绝不让旧子图带进新卡）
     // B03（0.9.59）：作用域键补齐**分支**——同一聊天同一世界的正史 / IF 是两张图，
     // 视图栈、相机与底图缓存都必须按 `chatId|worldId|branchKey` 分开，
@@ -6625,6 +6551,14 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
           knownNpcKeys.add(tableRowIdOf(npc.id));
           knownNpcKeys.add(String(npc.id ?? ""));
         }
+        const tableObjectsHere = (tableMap.objects?.entries ?? []).filter((entry) =>
+          visibleRoomIds.has(String(entry.locationId ?? "")) && entry.holderCharacterId === null);
+        // 三表是物品权威；旧目录镜像若另用了 id，也不能把同一支水笔列两次。
+        objects = objects.filter((object) => !tableObjectsHere.some((entry) =>
+          String(entry.id) === String(object.id) ||
+          (String(entry.name).trim() === String(object.name).trim()
+            && String(entry.description ?? "").trim() === String(object.description ?? "").trim()
+            && String(entry.locationId ?? "") === `loc:${String(object.pointId ?? ownerId)}`)));
         const knownObjectIds = new Set(objects.map((o) => String(o.id ?? "")));
         for (const entry of tableMap.nearby?.entries ?? []) {
           const locationId = String(entry.locationId ?? "");
@@ -6751,7 +6685,44 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     }
     const camKey = `${mapStackKey}|${inSub ? String(view.pointId) : "world"}`;
     const framePoints = inSub ? (Array.isArray(currentSub.points) ? currentSub.points : []) : pointsAll;
-    cameraFrame = computeMapFrame(framePoints);
+    const roomName = String(view?.name ?? "");
+    const roomScene = inSub && /(教室|[一二三四五六七八九十\d]+班|寝室|卧室|办公室|会议室|实验室|图书室|房间|病房|客房|大厅|餐厅|食堂|车厢|classroom|room)/i.test(roomName);
+    const measuredFrame = computeMapFrame(framePoints);
+    const roomCols = Number(currentSub?.frame?.cols) > 0 ? Number(currentSub.frame.cols) : 100;
+    const roomRows = Number(currentSub?.frame?.rows) > 0 ? Number(currentSub.frame.rows) : 100;
+    cameraFrame = roomScene
+      ? { minX: Math.min(0, measuredFrame.minX), minY: Math.min(0, measuredFrame.minY),
+          maxX: Math.max(roomCols, measuredFrame.maxX), maxY: Math.max(roomRows, measuredFrame.maxY),
+          spanX: Math.max(roomCols, measuredFrame.maxX) - Math.min(0, measuredFrame.minX),
+          spanY: Math.max(roomRows, measuredFrame.maxY) - Math.min(0, measuredFrame.minY) }
+      : measuredFrame;
+    if (roomScene) {
+      // 室内图的粗线框落在真实网格整数线上；只表达示意空间，不作为地理证据。
+      const boundary = el("div", "aw-room-boundary");
+      boundary.style.left = `${Math.round(roomCols * 0.12)}px`;
+      boundary.style.top = `${Math.round(roomRows * 0.12)}px`;
+      boundary.style.width = `${Math.round(roomCols * 0.76)}px`;
+      boundary.style.height = `${Math.round(roomRows * 0.76)}px`;
+      boundary.title = "室内示意范围；边界尚未实测";
+      mapLayer.append(boundary);
+      const classroom = /(教室|[一二三四五六七八九十\d]+班|classroom)/i.test(roomName);
+      const library = /(图书室|图书馆|阅览室|library)/i.test(roomName);
+      const fixtures = classroom
+        ? [{ name: "黑板", x: 50, y: 17 }, { name: "讲台", x: 50, y: 27 },
+            ...[36, 50, 64].flatMap((x) => [45, 63].map((y) => ({ name: "课桌", x, y })))]
+        : library
+          ? [{ name: "书架", x: 24, y: 31 }, { name: "书架", x: 24, y: 55 },
+              { name: "阅览桌", x: 52, y: 53 }, { name: "书架", x: 77, y: 43 }]
+          : [];
+      for (const fixture of fixtures) {
+        const marker = el("div", "aw-room-fixture", fixture.name);
+        marker.style.left = `${Math.round(roomCols * fixture.x / 100)}px`;
+        marker.style.top = `${Math.round(roomRows * fixture.y / 100)}px`;
+        marker.title = `${fixture.name} · 题材示意陈设，不是已确认物品`;
+        marker.dataset.schematic = "true";
+        mapLayer.append(marker);
+      }
+    }
     cameraViewKey = camKey;
     cameraViewport = { w: viewport.clientWidth || 0, h: viewport.clientHeight || 0 };
     let cam = mapCameras.get(camKey) ?? null;
@@ -7828,16 +7799,17 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
   }
 
   /**
-   * R02 草稿状态模型：kind 显式区分「内置只读展示 / 未保存新草稿 / 已保存预设的工作副本」，
-   * 不再用 `!id => 内置只读` 推断（旧推断把新建草稿错当内置，名称只读、无插入按钮——D07 根因）。
+   * 草稿状态模型：kind 区分「内置默认工作副本 / 未保存新草稿 / 已保存预设」。
+   * 不能用 `!id` 判断是否内置，因为新建草稿同样没有 id。
    */
   function newPromptDraft() {
     return { id: null, kind: "new", name: "", systemPrompt: "", segments: [], contextTurnCount: 3 };
   }
 
-  /** 内置默认在编辑器中的只读展示形态（原件保护在存储层，UI 只读展示）。 */
+  /** 内置默认作为可编辑草稿展示；保存时创建并启用作者预设，原版仍可从下拉切回。 */
   function builtinPromptDraft() {
-    return { id: null, kind: "builtin", name: "内置默认", systemPrompt: "", segments: [], contextTurnCount: 3 };
+    return { id: null, kind: "builtin", name: "默认提示词（自定义）", systemPrompt: "",
+      segments: cloneSegments(settingsV2?.builtInPrompt?.segments), contextTurnCount: 3 };
   }
 
   /** 把已保存预设载入为工作副本（kind=saved；可编辑，保存语义 = 覆盖回该 id）。 */
@@ -8290,7 +8262,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     promptSelect.setAttribute("aria-label", "选择提示词预设（选中即设为当前使用）");
     const builtinOption = document.createElement("option");
     builtinOption.value = BUILTIN_PROMPT_ID;
-    builtinOption.textContent = "内置默认（只读）";
+    builtinOption.textContent = "内置默认";
     promptSelect.append(builtinOption);
     for (const preset of promptLibrary) {
       const option = document.createElement("option");
@@ -8412,9 +8384,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     promptExportBtn.type = "button";
     promptExportBtn.setAttribute("aria-label", "导出当前提示词预设为 JSON 包");
     promptExportBtn.addEventListener("click", () => {
-      const preset = promptDraft?.kind === "builtin"
-        ? { name: "Atlas 内置默认", segments: settingsV2?.builtInPrompt?.segments, systemPrompt: settingsV2?.builtInPrompt?.systemPrompt }
-        : promptDraft;
+      const preset = promptDraft;
       try {
         const pack = buildAtlasPromptPack(preset);
         if (!pack) {
@@ -8461,7 +8431,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       promptPanel.append(importBox);
     }
 
-    // R02：内置只读 = kind 显式标记，不再是「没有 id 就当内置」的推断
+    // 内置默认仍是独立原版；编辑内容保存在新预设中。
     const isBuiltinDraft = promptDraft?.kind === "builtin";
     let promptSaveButton = null;
 
@@ -8472,8 +8442,8 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     nameInput.type = "text";
     nameInput.maxLength = 64;
     nameInput.value = promptDraft?.name ?? "";
-    nameInput.readOnly = Boolean(isBuiltinDraft);
-    nameInput.placeholder = isBuiltinDraft ? "内置默认不可改名" : "例如：严厉推演";
+    nameInput.readOnly = false;
+    nameInput.placeholder = "例如：严厉推演";
     nameInput.setAttribute("aria-label", "提示词名称");
     nameInput.addEventListener("input", () => {
       if (!promptDraft) promptDraft = newPromptDraft();
@@ -8488,7 +8458,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     nameField.append(nameInput);
     // R02：草稿状态显式化——编辑器里现在是什么、保存语义是什么，不再靠猜
     nameField.append(el("span", "aw-hint", isBuiltinDraft
-      ? "内置默认（只读展示）——点「复制内置默认为新预设」或「另存为」获得可编辑副本。"
+      ? "正在编辑内置默认的工作副本；保存后会自动创建并启用此预设，原版仍可从下拉切回。"
       : promptDraft?.kind === "new"
         ? "未保存的新预设：可命名、可写正文、可插入栏目；点「保存新预设」落盘。"
         : "正在编辑已保存预设：保存 = 覆盖回该预设；「另存为」可存成副本。"));
@@ -8500,8 +8470,8 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     bodyInput.className = "aw-input aw-input--area";
     bodyInput.rows = 6;
     bodyInput.maxLength = 8000;
-    bodyInput.readOnly = Boolean(isBuiltinDraft);
-    bodyInput.value = isBuiltinDraft ? String(settingsV2?.builtInPrompt?.systemPrompt ?? "") : (promptDraft?.systemPrompt ?? "");
+    bodyInput.readOnly = false;
+    bodyInput.value = promptDraft?.systemPrompt ?? "";
     bodyInput.placeholder = "留空 = 使用内置默认。";
     bodyInput.setAttribute("aria-label", "系统提示词正文");
     bodyInput.addEventListener("input", () => {
@@ -8512,10 +8482,9 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     });
     bodyField.append(bodyInput);
     bodyField.append(el("span", "aw-hint", isBuiltinDraft
-      ? "内置默认为只读——点「复制内置默认为新预设」或「另存为」后即可修改。"
+      ? "默认提示词已拆成下方条目；旧式单条正文仅供兼容。"
       : "留空 = 使用内置默认；用户行动、助手回复与世界上下文由系统自动组装，不在这里编辑。启用下方分段模式后本正文不发送。"));
-    // 0.9.40 内置默认不再展示单条正文编辑器（作者反馈「怎么还是长这样」）：
-    // 改在下方分段区以只读形态展示 8 段多轮结构
+    // 默认提示词直接在下方分段区编辑；旧式单条正文仅作兼容入口。
     if (!isBuiltinDraft) {
       const legacyBody = document.createElement("details");
       legacyBody.className = "aw-details";
@@ -8700,36 +8669,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       }
       syncSegStatus();
     };
-    if (isBuiltinDraft) {
-      // 0.9.40 内置默认以只读分段展示（作者反馈「怎么还是长这样」）：
-      // 0.9.39 起发送侧已是 8 段多轮结构，推进页必须直接可见、可对照
-      const builtinSegs = Array.isArray(settingsV2?.builtInPrompt?.segments) ? settingsV2.builtInPrompt.segments : [];
-      segStatus.textContent = builtinSegs.length > 0 ? `内置默认 ${builtinSegs.length} 段（只读）` : "未启用";
-      if (builtinSegs.length > 0) {
-        const readOnlyRows = el("div", "aw-seg-rows aw-seg-rows--readonly");
-        builtinSegs.forEach((segment, index) => {
-          const item = el("div", "aw-seg-item aw-seg-item--readonly");
-          const head = el("div", "aw-seg-item__head");
-          head.append(el("span", "aw-seg-item__index", `#${index + 1}`));
-          const slotLabel = segment?.mainSlot === "A" ? " · 槽位 A（主提示词）" : segment?.mainSlot === "B" ? " · 槽位 B（任务指令）" : "";
-          const nameLabel = typeof segment?.name === "string" && segment.name.trim() ? ` · ${segment.name.trim()}` : "";
-          head.append(el("span", "aw-seg-item__roletag", `${String(segment?.role ?? "system")}${nameLabel}${slotLabel}`));
-          item.append(head);
-          const area = document.createElement("textarea");
-          area.className = "aw-input aw-input--area aw-seg-item__area";
-          area.rows = 5;
-          area.readOnly = true;
-          area.value = String(segment?.content ?? "");
-          area.setAttribute("aria-label", `内置默认第 ${index + 1} 段正文（只读）`);
-          item.append(area);
-          readOnlyRows.append(item);
-        });
-        segSection.append(readOnlyRows);
-        segSection.append(el("span", "aw-hint", "内置默认使用当前行增量规则，包含世界状态、连续性素材、本轮行动与输出核对。发送时按列表顺序展开占位符。点上方「复制内置默认为新预设」即可修改消息角色、名称、正文与条目开关。"));
-      } else {
-        segSection.append(el("p", "aw-seg-empty", "内置默认不支持分段——先复制为新预设。"));
-      }
-    } else {
+    {
       const insertTopBtn = el("button", "aw-btn aw-btn--ghost aw-seg-insert", "在最上方插入一段");
       insertTopBtn.type = "button";
       insertTopBtn.setAttribute("aria-label", "在最上方插入一个提示词分段");
@@ -8762,7 +8702,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       turnSelect.append(opt);
     }
     turnSelect.value = String(Math.min(Math.max(Number.parseInt(String(promptDraft?.contextTurnCount ?? 3), 10) || 3, 1), 10));
-    turnSelect.disabled = isBuiltinDraft;
+    turnSelect.disabled = false;
     turnSelect.addEventListener("change", () => {
       if (!promptDraft) promptDraft = newPromptDraft();
       promptDraft.contextTurnCount = Number.parseInt(turnSelect.value, 10) || 3;
@@ -8859,44 +8799,10 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       renderCenter();
     });
     promptActions.append(discardButton);
-    if (isBuiltinDraft) {
-      promptSaveButton = el("button", "aw-btn aw-btn--primary", "复制内置默认为新预设");
-      promptSaveButton.type = "button";
-      promptSaveButton.setAttribute("aria-label", "把内置默认提示词复制成可编辑预设");
-      promptSaveButton.addEventListener("click", async () => {
-        // 0.9.40 复制内置默认 = 连 8 段多轮结构一起复制（不再是单条正文）
-        const builtinSegs = Array.isArray(settingsV2?.builtInPrompt?.segments) ? settingsV2.builtInPrompt.segments : [];
-        const copiedSegments = builtinSegs
-          .map((s) => ({
-            role: PROMPT_SEGMENT_ROLES.includes(s?.role) ? s.role : "system",
-            ...(typeof s?.name === "string" && s.name.trim() ? { name: s.name.trim().slice(0, 64) } : {}),
-            ...(s?.mainSlot === "A" || s?.mainSlot === "B" ? { mainSlot: s.mainSlot } : {}),
-            ...(s?.enabled === false ? { enabled: false } : {}),
-            ...(s?.deletable === false ? { deletable: false } : {}),
-            content: String(s?.content ?? "").trim(),
-          }))
-          .filter((s) => s.content.length > 0)
-          .slice(0, 16);
-        const idsBeforeCopy = new Set(promptLibrary.map((p) => p.id));
-        const ok = await sendSettingsCommand({
-          action: "prompt.save",
-          preset: {
-            name: "自定义提示词",
-            systemPrompt: copiedSegments.length > 0 ? "" : String(settingsV2?.builtInPrompt?.systemPrompt ?? ""),
-            ...(copiedSegments.length > 0 ? { segments: copiedSegments } : {}),
-          },
-        });
-        if (ok) {
-          // R02：createdId 用差集定位，不再假设「预设列表最后一项」是刚创建的
-          const created = promptLibrary.find((p) => !idsBeforeCopy.has(p.id));
-          promptDraft = created ? savedPromptDraft(created) : newPromptDraft();
-          promptDraftDirty = false;
-          setStatus("已复制为可编辑预设；修改并保存后，在上方下拉中选中即可启用。");
-        }
-        renderCenter();
-      });
-    } else {
-      promptSaveButton = el("button", "aw-btn aw-btn--primary", promptDraft?.id ? `保存修改到「${promptDraft.name}」` : "保存新预设");
+    {
+      promptSaveButton = el("button", "aw-btn aw-btn--primary", isBuiltinDraft
+        ? "保存并启用默认提示词修改"
+        : promptDraft?.id ? `保存修改到「${promptDraft.name}」` : "保存新预设");
       promptSaveButton.type = "button";
       promptSaveButton.setAttribute("aria-label", "保存当前提示词预设");
       promptSaveButton.addEventListener("click", async () => {
@@ -8951,7 +8857,12 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
               promptDraft.name = created.name;
             }
           }
-          setStatus(useSegments ? `栏位提示词已保存（${draftSegments.length} 段）。` : "提示词已保存。");
+          if (isBuiltinDraft && promptDraft.id) {
+            const activated = await sendSettingsCommand({ action: "prompt.activate", id: promptDraft.id });
+            setStatus(activated ? "默认提示词修改已保存并启用；内置原版仍可从下拉切回。" : "修改已保存，但启用失败；请在上方下拉选择刚创建的预设。", activated ? "ok" : "error");
+          } else {
+            setStatus(useSegments ? `栏位提示词已保存（${draftSegments.length} 段）。` : "提示词已保存。");
+          }
         }
         renderCenter();
       });
@@ -8967,9 +8878,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       if (!name || !name.trim()) return;
       // R02（D15 修复）：另存为完整保留 role/name/mainSlot/content 与 contextTurnCount，
       // 不再只拷 role/content 导致副本降级；内置默认另存为也复制全套分段
-      const sourceSegments = Array.isArray(promptDraft?.segments) && promptDraft.segments.length > 0
-        ? promptDraft.segments
-        : (isBuiltinDraft ? (settingsV2?.builtInPrompt?.segments ?? []) : []);
+      const sourceSegments = Array.isArray(promptDraft?.segments) ? promptDraft.segments : [];
       const draftSegmentsForCopy = sourceSegments
         .map((s) => ({
           role: PROMPT_SEGMENT_ROLES.includes(s?.role) ? s.role : "system",
@@ -8989,7 +8898,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
           name: name.trim(),
           systemPrompt: useSegmentsForCopy
             ? ""
-            : (promptDraft?.systemPrompt || (isBuiltinDraft ? String(settingsV2?.builtInPrompt?.systemPrompt ?? "") : "")),
+            : promptDraft?.systemPrompt,
           ...(useSegmentsForCopy ? { segments: draftSegmentsForCopy } : {}),
           ...(promptDraft?.contextTurnCount != null
             ? { contextTurnCount: Math.min(Math.max(Number.parseInt(String(promptDraft.contextTurnCount), 10) || 3, 1), 10) }
@@ -9008,14 +8917,14 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     promptActions.append(promptSaveAsButton);
     // 编辑入口与操作条前置，避免作者必须先滚过诊断、备份和全部内置正文。
     promptPanel.insertBefore(promptActions, nameField);
-    const promptActivation = el("p", "aw-panel__meta", `当前实际使用：${promptOverrideNotice ? `连接级系统提示词（${overrideApi.name}）` : promptLibrary.find((p) => p.id === settingsV2?.activePromptPresetId)?.name ?? "内置默认"}。草稿修改需保存后生效；新建或导入的预设保存后还需在下拉中选中启用。`);
+    const promptActivation = el("p", "aw-panel__meta", `当前实际使用：${promptOverrideNotice ? `连接级系统提示词（${overrideApi.name}）` : promptLibrary.find((p) => p.id === settingsV2?.activePromptPresetId)?.name ?? "内置默认"}。草稿修改需保存后生效；编辑内置默认并保存会自动启用你的版本。`);
     promptPanel.insertBefore(promptActivation, selectField);
     panel.prepend(promptPanel);
 
     let syncPromptDirty = () => {};
     syncPromptDirty = () => {
       discardButton.disabled = !promptDraftDirty;
-      if (!isBuiltinDraft && promptSaveButton) promptSaveButton.disabled = !promptDraftDirty;
+      if (promptSaveButton) promptSaveButton.disabled = !promptDraftDirty;
     };
     syncPromptDirty();
     panel.append(el("p", "aw-panel__meta", "修改后不会自动保存——改动只有点了保存按钮才会落盘。"));

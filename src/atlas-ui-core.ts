@@ -1334,6 +1334,20 @@ export function createAtlasUiCore(deps: {
           if (!stale) await refresh();
         }
         if (state.chatId === value.chatId) await syncLorebookAfterCommit(body);
+        if (receiptParsed.value.status === "committed" && state.chatId === value.chatId) {
+          try {
+            const expansion = await api.request("POST", "/worlds/geo/suggest", {
+              chatId: value.chatId, triggerId: value.turnId, autoApply: true,
+              loreSupplement: [value.charDescription, value.loreSupplement].filter(Boolean).join("\n").slice(0, ATLAS_LIMITS.LORE_SUPPLEMENT_CHARS),
+              recentTexts: [...(value.recentAssistantTexts ?? []), value.assistantText].slice(-8),
+            });
+            if (expansion.status === 200 && (expansion.body as { ok?: boolean })?.ok && state.chatId === value.chatId) {
+              await refresh();
+            }
+          } catch {
+            // 场景补全是已提交回合后的附加工作；失败绝不回退剧情或误报 commit 失败。
+          }
+        }
         return;
       }
       diagnostic({ level: "error", source: "ui", code: "COMMIT_FAILED",

@@ -301,24 +301,45 @@ test("shujuku 多预设文件先载入可编辑草稿，选择并保存仅创建
   } finally { globalThis.FileReader = previousReader; }
 });
 
-test("R02: first successful settings load shows the full read-only builtin preset", async () => {
-  const { renderPanel, createDefaultSettingsV2, settingsViewV2 } = await mount();
-  const settings = settingsViewV2(createDefaultSettingsV2());
+test("内置默认首次载入为可选条目；编辑后保存并自动启用副本", async () => {
+  const { dom, renderPanel, createDefaultSettingsV2, settingsViewV2 } = await mount();
+  let settings = settingsViewV2(createDefaultSettingsV2());
+  const commands = [];
   let finishGet;
-  const api = { request: () => new Promise((resolve) => { finishGet = resolve; }) };
+  const api = { request: (method, _path, body) => {
+    if (method === "GET") return new Promise((resolve) => { finishGet = resolve; });
+    commands.push(body);
+    if (body.action === "prompt.save") settings = { ...settings, promptPresets: [{ id: "custom-default", ...body.preset }] };
+    if (body.action === "prompt.activate") settings = { ...settings, activePromptPresetId: body.id };
+    return Promise.resolve({ status: 200, body: { ok: true, data: settings } });
+  } };
   const state = progressionState("first-load");
   const core = { getState: () => state, setPage: () => {}, setPanelOpen: () => {}, refresh: async () => {} };
   const container = document.createElement("div");
   document.body.append(container);
   renderPanel(core, container, api, { read: async () => null }, { ...CORE_MOD_KEYS, ...settings });
   assert.match(container.textContent, /正在读取提示词与设置/);
-  assert.equal(container.querySelectorAll(".aw-seg-rows--readonly textarea").length, 0);
+  assert.equal(container.querySelectorAll('[aria-label^="第 "][aria-label$=" 段正文"]').length, 0);
   finishGet({ status: 200, body: { ok: true, data: settings } });
   await tick();
-  const rows = container.querySelectorAll(".aw-seg-rows--readonly textarea");
+  const rows = container.querySelectorAll(".aw-seg-rows textarea");
   assert.equal(rows.length, settings.builtInPrompt.segments.length);
   assert.equal(rows[0].value, settings.builtInPrompt.segments[0].content);
+  assert.equal(rows[0].readOnly, false);
   assert.equal(container.querySelector('[aria-label="选择提示词预设（选中即设为当前使用）"]').value, "builtin-default");
+  const enabled = container.querySelector('[aria-label="启用第 3 段"]');
+  enabled.checked = false;
+  enabled.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+  const role = container.querySelector('[aria-label="第 2 段角色"]');
+  role.value = "system";
+  role.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+  container.querySelector('[aria-label="保存当前提示词预设"]').click();
+  await tick();
+  assert.deepEqual(commands.map((command) => command.action), ["prompt.save", "prompt.activate"]);
+  assert.equal(commands[0].preset.segments[2].enabled, false);
+  assert.equal(commands[0].preset.segments[1].role, "system");
+  assert.equal(settings.activePromptPresetId, "custom-default");
+  assert.equal(container.querySelector('[aria-label="选择提示词预设（选中即设为当前使用）"]').value, "custom-default");
 });
 
 test("R02: first load selects the saved preset and a failed activation restores the selection", async () => {
@@ -361,11 +382,11 @@ test("R02: failed initial settings load offers retry without showing a false bui
   renderPanel(core, container, api, { read: async () => null }, { ...CORE_MOD_KEYS, ...settings });
   await tick();
   assert.match(container.textContent, /暂不可用/);
-  assert.equal(container.querySelectorAll(".aw-seg-rows--readonly textarea").length, 0);
+  assert.equal(container.querySelectorAll(".aw-seg-rows textarea").length, 0);
   [...container.querySelectorAll("button")].find((button) => button.textContent === "重试读取设置").click();
   await tick();
   assert.equal(reads, 2);
-  assert.equal(container.querySelectorAll(".aw-seg-rows--readonly textarea").length, settings.builtInPrompt.segments.length);
+  assert.equal(container.querySelectorAll(".aw-seg-rows textarea").length, settings.builtInPrompt.segments.length);
 });
 
 

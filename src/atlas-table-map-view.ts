@@ -179,7 +179,7 @@ function interiorPositionHint(action: string, id: string): { x: number; y: numbe
     [/(窗边|窗旁|靠窗|window)/i, 80, 30, "窗边"],
     [/(门口|门边|门旁|门前|door)/i, 18, 80, "门旁"],
     [/(角落|墙角|corner)/i, 18, 18, "角落"],
-    [/(桌边|桌旁|讲台|desk|table)/i, 55, 55, "桌旁"],
+    [/(桌边|桌旁|桌子|课桌|讲台|desk|table)/i, 55, 55, "桌旁"],
     [/(中央|中间|中心|center|middle)/i, 50, 45, "中央"],
   ];
   const zone = zones.map((entry) => {
@@ -191,6 +191,17 @@ function interiorPositionHint(action: string, id: string): { x: number; y: numbe
   for (const letter of id) hash = (Math.imul(hash, 31) + letter.charCodeAt(0)) | 0;
   return { x: zone.entry[1] + ((hash >>> 0) % 11) - 5,
     y: zone.entry[2] + (((hash >>> 4) % 11) - 5), label: zone.entry[3] };
+}
+
+function isInteriorRoom(location: AtlasLocationRow, locations: readonly AtlasLocationRow[]): boolean {
+  if (/(教室|[一二三四五六七八九十\d]+班|寝室|卧室|办公室|会议室|实验室|图书室|房间|病房|客房|大厅|餐厅|车厢|room|classroom)/i.test(location.name)) return true;
+  return location.parentLocationId !== null && /(室|房|厅|馆|堂|铺|屋|舱|厢|店)/.test(location.name)
+    && !locations.some((row) => row.parentLocationId === location.id);
+}
+
+function schematicRoomPosition(index: number): { x: number; y: number; label: string } {
+  return { x: 28 + (index % 4) * 14, y: 35 + (Math.floor(index / 4) % 4) * 12,
+    label: "房间内，细部位置估计" };
 }
 
 function regionOfPoint(world: World, pointId: string): string | null {
@@ -319,10 +330,14 @@ export function projectTablesToMapView(
       const location = byRowId.get(row.locationId);
       // 藏在已退役地点里的实体不进"位置未知"名单：那里根本不是地理事实
       if (location && !hiddenLocationIds.has(String(pointIdFromLocationRowId(location.id) ?? ""))) {
-        // 只有粗定位的人也需要一张可进入的室内图；图上不伪造人物坐标。
+        // 已知人在具体房间时给出示意图标；楼宇等粗定位仍留在名单中。
         if (!submapBuckets.has(location.id)) submapBuckets.set(location.id, []);
-        const interior = location.parentLocationId !== null && row.presence !== "left" && row.mapId === location.id
-          ? interiorPositionHint(row.currentAction, row.id) : null;
+        const room = isInteriorRoom(location, tables.locations) && row.presence === "present"
+          && !protagonistIds.has(characterId);
+        const interior = room
+          ? interiorPositionHint(row.currentAction, row.id)
+            ?? schematicRoomPosition(submapBuckets.get(location.id)!.filter((point) => point.kind === "character").length)
+          : null;
         if (interior) {
           submapBuckets.get(location.id)!.push({ id: row.id, name: row.name,
             x: interior.x, y: interior.y, regionId: null, kind: "character", rowId: row.id,

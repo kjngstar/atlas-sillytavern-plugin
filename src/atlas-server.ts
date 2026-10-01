@@ -2624,7 +2624,7 @@ function createCoreInstance(
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.68",
+      version: "0.9.69",
       protocolVersion: 1,
       time: now(),
     });
@@ -2847,16 +2847,35 @@ function createCoreInstance(
       const binding = requireBoundBinding(await getBinding(chatId));
       const world = await requireWorld(binding);
       const branchKey = branchScopeForStory(world, binding.branchId) ?? "canon";
+      const autoApply = body.autoApply === true;
+      const triggerId = typeof body.triggerId === "string" ? body.triggerId.slice(0, ATLAS_LIMITS.ID_CHARS) : "";
+      const expansionKey = `geo-auto:expansion:${world.id}:${branchKey}`;
+      let expansionSeen = 0;
+      if (autoApply) {
+        if (!triggerId) throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "自动扩展需要回合标识。");
+        const oldMarker = await store.read(expansionKey);
+        const marker = isPlainRecord(oldMarker) ? oldMarker : {};
+        if (marker.lastTriggerId === triggerId) return okResult({ accepted: 0, linked: 0, skipped: "duplicate", scope: "author" });
+        expansionSeen = (typeof marker.seen === "number" && Number.isSafeInteger(marker.seen) ? marker.seen : 0) + 1;
+        // 首次成功推演建立场景，此后每四个新回合扩展一次，避免每楼额外消耗模型额度。
+        if (expansionSeen !== 1 && expansionSeen % 4 !== 0) {
+          await store.write(expansionKey, { seen: expansionSeen, lastTriggerId: triggerId, at: now() });
+          return okResult({ accepted: 0, linked: 0, skipped: "interval", scope: "author" });
+        }
+      }
       const preset = resolveWorldTurnPreset(await loadSettings());
       if (!preset) throw new AtlasError(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "未配置推演 API，无法构想地点。");
       const lore = typeof body.loreSupplement === "string" ? body.loreSupplement.slice(0, ATLAS_LIMITS.LORE_SUPPLEMENT_CHARS) : "";
       const recentTexts = Array.isArray(body.recentTexts) ? body.recentTexts.filter((x): x is string => typeof x === "string").slice(-8).map((x) => x.slice(0, 1800)) : [];
       const existingNames = (world.points ?? []).map((point) => String(point.name)).slice(0, 200);
       const prompt = [
-        "根据题材、世界设定与已出现的地点，提出能使世界结构更完整的候选地点。它们只是可能存在的场所，并非剧情事实。",
-        "现代校园可以构想城市、街区、校舍、楼层、教室；异世界可构想聚落、工会、拍卖行、迷宫。按当前设定选择，不要机械套用例子。",
-        "只输出 JSON：{\"places\":[{\"name\":\"地点名\",\"parentName\":\"可选的上级地点名\",\"reason\":\"为什么符合设定\"}]}。最多 8 个，不输出坐标、人物或事件。上级地点可以是已有地点或本批候选。不要重复已有名称。",
+        autoApply
+          ? "根据当前世界观与剧情，自然补全少量可供后续剧情使用的常见场景。这些是世界结构推断，不是角色已经到访、看见或知道的事实。"
+          : "根据题材、世界设定与已出现的地点，提出能使世界结构更完整的候选地点。它们只是可能存在的场所，并非剧情事实。",
+        "现代校园可有城市、街区、图书馆、食堂、教室；异世界可有聚落、工会、拍卖行、迷宫。只选符合当前设定的地点，不机械套用例子，不把课桌等室内陈设当地点。",
+        "只输出 JSON：{\"places\":[{\"name\":\"地点名\",\"parentName\":\"可选的上级地点名\",\"reason\":\"为什么符合设定\"}],\"links\":[{\"childName\":\"已有根地点名\",\"parentName\":\"新上级地点名\"}]}。最多 8 个新地点；links 只用于现有无上级地点的合理归属。不要输出坐标、人物或事件，不要重复已有名称。",
         `世界名称：${String(world.name).slice(0, 100)}`,
+        `世界描述：${String(world.description ?? "").slice(0, 2500)}`,
         `已有地点：${existingNames.join("、")}`,
         `设定资料：${lore || "无"}`,
         `近期剧情：${recentTexts.join("\n---\n") || "无"}`,
@@ -2884,6 +2903,94 @@ function createCoreInstance(
           name, parentName, reason: typeof item.reason === "string" ? item.reason.trim().slice(0, 180) : "符合当前世界设定",
           quality: "candidate" });
         if (suggestions.length >= 8) break;
+      }
+      if (autoApply) {
+        const rawTables = await store.read(`tables:${world.id}`);
+        const tablesDoc = rawTables !== null && validateAtlasTablesStore(rawTables, { expectedWorldId: world.id }).ok
+          ? rawTables as AtlasTablesStoreV1 : null;
+        const branch = tablesDoc?.branches[branchKey] ? cloneAtlasTables(tablesDoc.branches[branchKey]) : null;
+        const points = [...(world.points ?? [])];
+        const rawMaps = await store.read(`maps:${world.id}`);
+        const mapsBase = isPlainRecord(rawMaps) ? rawMaps : {};
+        const pointMeta: Record<string, unknown> = { ...(isPlainRecord(mapsBase.pointMeta) ? mapsBase.pointMeta : {}) };
+        const accepted: string[] = [];
+        const pending = [...suggestions];
+        let nextId = points.reduce((max, point) => Math.max(max, Number(point.id) || 0), 0) + 1;
+        for (let pass = 0; pass < suggestions.length && pending.length > 0; pass += 1) {
+          let progressed = false;
+          for (let index = 0; index < pending.length;) {
+            const item = pending[index]!;
+            const parents = item.parentName ? points.filter((point) => String(point.name).trim() === item.parentName) : [];
+            if (item.parentName && parents.length !== 1) { index += 1; continue; }
+            const parent = parents[0] ?? null;
+            let depth = 0;
+            let cursor: (typeof points)[number] | null = parent;
+            const seen = new Set<number>();
+            while (cursor) {
+              if (seen.has(cursor.id)) { depth = SUBMAP_DEPTH_MAX + 1; break; }
+              seen.add(cursor.id); depth += 1;
+              cursor = points.find((point) => point.id === cursor?.parentPointId) ?? null;
+            }
+            pending.splice(index, 1);
+            if (depth > SUBMAP_DEPTH_MAX || points.length >= MAP_POINTS_MAX) continue;
+            const angle = nextId * 2.39996;
+            const point = { id: nextId, name: item.name,
+              x: Math.round(50 + 20 * Math.cos(angle)), y: Math.round(50 + 20 * Math.sin(angle)),
+              regionId: parent?.regionId ?? null, ...(parent ? { parentPointId: parent.id } : {}) };
+            points.push(point);
+            pointMeta[String(nextId)] = { coordinateStatus: "schematic" };
+            branch?.locations.push({ id: `loc:${nextId}`, name: item.name,
+              parentLocationId: parent ? `loc:${parent.id}` : null,
+              mapId: parent ? `loc:${parent.id}` : "world", gridX: null, gridY: null,
+              description: "", rumors: [], factions: [] });
+            accepted.push(item.name);
+            nextId += 1;
+            progressed = true;
+          }
+          if (!progressed) break;
+        }
+        let linked = 0;
+        for (const item of (parsed && Array.isArray(parsed.links) ? parsed.links : []).slice(0, 8)) {
+          if (!isPlainRecord(item) || typeof item.childName !== "string" || typeof item.parentName !== "string") continue;
+          const childName = item.childName.trim();
+          const parentName = item.parentName.trim();
+          const children = points.filter((point) => point.name === childName && point.parentPointId == null);
+          const parents = points.filter((point) => point.name === parentName);
+          if (children.length !== 1 || parents.length !== 1 || children[0]!.id === parents[0]!.id) continue;
+          const child = children[0]!;
+          const parent = parents[0]!;
+          const childRow = branch?.locations.find((row) => row.id === `loc:${child.id}`);
+          if (branch && (!childRow || childRow.parentLocationId !== null)) continue;
+          let cursor: typeof parent | undefined = parent;
+          let depth = 0;
+          const seen = new Set<number>();
+          while (cursor && !seen.has(cursor.id)) {
+            if (cursor.id === child.id) { depth = SUBMAP_DEPTH_MAX + 1; break; }
+            seen.add(cursor.id); depth += 1;
+            cursor = points.find((point) => point.id === cursor?.parentPointId);
+          }
+          if (depth >= SUBMAP_DEPTH_MAX) continue;
+          child.parentPointId = parent.id;
+          if (childRow) { childRow.parentLocationId = `loc:${parent.id}`; childRow.mapId = `loc:${parent.id}`; }
+          linked += 1;
+        }
+        if (accepted.length > 0 || linked > 0) {
+          let updated: World = { ...world, points, updatedAt: now() };
+          const revision = appendDefinitionRevision(updated, { authorNote: `推演自动补全题材场景：${accepted.join("、")}`.slice(0, 180), now: now() });
+          if (revision.ok) updated = revision.value;
+          if (!parseWorld(updated)) throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "自动补全后的世界结构无效。");
+          const nextTables = branch && tablesDoc
+            ? { ...tablesDoc, branches: { ...tablesDoc.branches, [branchKey]: branch } } : null;
+          if (nextTables && !validateAtlasTablesStore(nextTables, { expectedWorldId: world.id }).ok) {
+            throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "自动补全后的地点表无效。");
+          }
+          await store.write(`world:${world.id}`, updated);
+          if (nextTables) await store.write(`tables:${world.id}`, nextTables);
+          await store.write(`maps:${world.id}`, { ...mapsBase, schemaVersion: 2, pointMeta });
+          worldCache.set(world.id, updated);
+        }
+        await store.write(expansionKey, { seen: expansionSeen, lastTriggerId: triggerId, at: now() });
+        return okResult({ accepted: accepted.length, linked, pointNames: accepted, skipped: pending.length, scope: "author" });
       }
       await store.write(`geo-auto:suggestions:${world.id}:${branchKey}`, { at: now(), branchKey, suggestions });
       return okResult({ suggestions, scope: "author", accepted: 0 });
