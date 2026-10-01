@@ -842,6 +842,10 @@
 
 .aw-maparea {
   position: relative;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  padding: 12px;
   flex: 1;
   min-height: 320px;
   min-width: 0;
@@ -875,8 +879,11 @@
 .aw-move.is-failed .aw-move__text { color: var(--aw-danger); }
 
 .aw-viewport {
-  position: absolute;
-  inset: 12px;
+  position: relative;
+  inset: auto;
+  order: 2;
+  flex: 1;
+  min-height: 160px;
   overflow: hidden;
   border: 1px solid var(--am-border, #d8d2c2);
   border-radius: 8px;
@@ -1058,7 +1065,7 @@
  * 工具区收窄且不透明，避免与地图上的坐标标签叠字。
  */
 .aw-maptools {
-  max-width: 62%;
+  max-width: none;
 }
 
 .aw-maptools__more {
@@ -1887,6 +1894,8 @@
  */
 .aw-maptools {
   position: relative;
+  order: 0;
+  flex: 0 0 auto;
   top: auto;
   left: auto;
   right: auto;
@@ -1904,7 +1913,7 @@
    靠右排而不是 space-between：面板居中时左右留白对称，中间不必被硬拉开。 */
 .aw-maptools.is-visible {
   display: flex;
-  justify-content: flex-end;
+  justify-content: flex-start;
 }
 .aw-maptools > * { pointer-events: auto; flex: 0 0 auto; }
 
@@ -2520,6 +2529,8 @@
 
 .aw-mapcrumb {
   position: relative;
+  order: 1;
+  flex: 0 0 auto;
   top: auto;
   left: auto;
   padding: 4px 12px;
