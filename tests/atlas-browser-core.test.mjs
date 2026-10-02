@@ -911,9 +911,10 @@ test("callAtlasWorldTurnApi：promptSegments 装配消息数组，占位符替�
     { fetchFn },
   );
   assert.equal(capturedBody.messages.length, 6, "带资料仍是整套默认分段");
-  const loreSegment = capturedBody.messages.find((m) => m.content.includes("【世界书资料（当前角色卡"));
+  const loreSegment = capturedBody.messages.find((m) => m.content.includes("【世界书资料】"));
   assert.ok(loreSegment, "资料块进入背景设定段");
   assert.ok(loreSegment.content.includes("<REGION>"), "资料内容进正文");
+  assert.ok(loreSegment.content.includes('JSON 字符串'), "原文按只读来源编码发送");
   assert.ok(loreSegment.content.includes("用户行动B") === false, "背景段不混入本轮素材（$8 在触发段）");
 
   await callAtlasWorldTurnApi(

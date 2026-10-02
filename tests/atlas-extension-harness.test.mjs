@@ -61,10 +61,30 @@ test("世界书建图分批覆盖后部地点并跳过禁用条目", () => {
     bookName: i < 120 ? "主世界书" : "附加世界书", title: `地点${i}`,
     content: `第${i}处地点：${"山路".repeat(170)}`, enabled: true,
   }));
-  const full = buildAtlasGeoLoreChunks(twoBooks);
+  const full = buildAtlasGeoLoreChunks(twoBooks, 5500, 32);
   ok(full.length > 1 && full.length <= 32, "两本各 120 条的世界书分成有界批次");
   ok(full.join("\n").includes("第239处地点"), "第 240 条条目也被纳入首次建图素材");
   equal(full.truncated, false, "本夹具未因批次上限丢掉后部条目");
+});
+
+test("首次建图批次保留文风与思维链原文，由提示词定义任务", () => {
+  const rules = [{ bookName: "卡书", title: "文风规则", content: "王宫背景必须使用指定写法。", enabled: true },
+    { bookName: "卡书", title: "DS写作思维链", content: "每次生成回复先检查内部步骤。", enabled: true }];
+  const chunks = buildAtlasGeoLoreChunks([...rules, { bookName: "卡书", title: "晨星王宫", content: "会客厅在王宫内部。", enabled: true }], 5500, 32);
+  equal(chunks.length, 1);
+  ok(chunks[0].includes("会客厅在王宫内部。"));
+  ok(chunks[0].includes("文风规则：王宫背景必须使用指定写法。"));
+  ok(chunks[0].includes("DS写作思维链：每次生成回复先检查内部步骤。"));
+  equal(buildAtlasGeoLoreChunks(rules).length, 1);
+});
+
+test('首次建图长条目按长度分批，超过 2500 字的后文和换行完整保留', () => {
+  const prefix = '- [卡书] 长资料：';
+  const raw = '第一段。\n' + '原文'.repeat(5000) + '\n后文仍在。';
+  const chunks = buildAtlasGeoLoreChunks([{bookName:'卡书',title:'长资料',content:raw,enabled:true}]);
+  equal(chunks.truncated,false);
+  equal(chunks.map(chunk => chunk.slice(prefix.length)).join(''),raw);
+  ok(chunks.every(chunk => chunk.length <= 5500));
 });
 function ok(value, message) {
   assertionCount += 1;
@@ -733,6 +753,97 @@ async function readyCore(turnBehavior = {}, bindingOverrides = {}, diagnosticEve
   return { api, hostWrap, core };
 }
 
+test('推演等待：资料钩子超时仍提交一次，重复完成通知不并发提交', async () => {
+  const phases = [];
+  let coreRef;
+  const { core, api } = await readyCore({}, {}, [], {
+    contextTimeoutMs: 5,
+    getCommitContext: () => new Promise(() => {}),
+    getLoreSupplement: () => new Promise(() => {}),
+    onStateChange: () => { if (coreRef) phases.push(coreRef.getState().turnPhase); },
+  });
+  coreRef = core;
+  await core.onMessageSent('m-0', '继续。');
+  equal(core.getState().turnPhase, 'awaiting-reply');
+  await Promise.all([core.onGenerationEnded('m-1', '他站在大厅。'), core.onGenerationEnded('m-1', '他站在大厅。')]);
+  equal(api.calls.filter(c => c.path === '/turns/commit').length, 1);
+  ok(phases.includes('reading-context'));
+  ok(phases.includes('committing'));
+  equal(core.getState().pendingTurn, null);
+  equal(core.getState().turnPhase, 'idle');
+  core.dispose();
+});
+
+test('推演等待：生成结束但没有本轮助手楼层，清理等待且不更新世界', async () => {
+  for (const floor of [null, { assistantMessageId: '2', assistantText: '上一轮旧正文。' }]) {
+    const { core, api } = await readyCore({}, {}, [], { resolveAssistantFloor: () => floor });
+    await core.onMessageSent('3', '继续。');
+    await core.handleEvent('MESSAGE_RECEIVED', { assistantMessageId: '', assistantText: '' });
+    await flush();
+    equal(core.getState().pendingTurn, null);
+    equal(core.getState().turnPhase, 'idle');
+    ok(core.getState().lastError.includes('没有取得'));
+    equal(api.calls.filter(c => c.path === '/turns/commit').length, 0);
+    core.dispose();
+  }
+});
+
+test('推演等待：被服务商拦截的失败回执退出忙碌，不自动重试', async () => {
+  const { core, api } = await readyCore({ receipt: { receiptId:'blocked',status:'failed',branchId:null,
+    previousTime:12,currentTime:12,triggeredNpcIds:[],adoptedEventIds:[],summary:'服务商拒绝本次输入。',retryable:false } });
+  await core.onMessageSent('m-0', '继续。');
+  await core.onGenerationEnded('m-1', '他站在大厅。');
+  equal(core.getState().turnPhase, 'idle');
+  equal(core.getState().pendingTurn, null);
+  equal(core.getState().retryableCommit, null);
+  equal(core.getState().lastError, '服务商拒绝本次输入。');
+  equal(api.calls.filter(c => c.path === '/turns/commit').length, 1);
+  core.dispose();
+});
+
+test('场景投影读取超时不注入旧版全知上下文', async () => {
+  const { core } = await readyCore({}, {}, [], { contextTimeoutMs:5, getNarrativeContext: () => new Promise(() => {}) });
+  await core.onMessageSent('m-0', '继续。');
+  equal(core.getState().pendingTurn.injectionText, '');
+  equal(core.getState().turnPhase, 'awaiting-reply');
+  core.dispose();
+});
+
+test('推演等待：上一轮场景补全未结束，下一轮完成通知排队保留且不重复提交', async () => {
+  const { core, api } = await readyCore();
+  const original = api.request.bind(api);
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  let prepareCount = 0;
+  let expansionCount = 0;
+  api.request = async (method, path, body) => {
+    const result = await original(method, path, body);
+    if (path === '/turns/prepare') result.body.data.response = { ...result.body.data.response, turnId:`turn-${++prepareCount}` };
+    if (path === '/worlds/geo/suggest' && ++expansionCount === 1) await gate;
+    return result;
+  };
+  await core.onMessageSent('1', '走到大厅。');
+  const first = core.onGenerationEnded('2', '他站在大厅。');
+  await flush();
+  equal(core.getState().pendingTurn, null);
+  equal(expansionCount, 1);
+  await core.onMessageSent('3', '走到街上。');
+  const second = core.onGenerationEnded('4', '他走上街道。');
+  const duplicate = core.onGenerationEnded('4', '他走上街道。');
+  await flush();
+  equal(core.getState().turnPhase, 'queued');
+  equal(api.calls.filter(c => c.path === '/turns/commit').length, 1);
+  release();
+  await Promise.all([first, second, duplicate]);
+  const calls = api.calls.filter(c => c.path === '/turns/commit');
+  equal(calls.length, 2);
+  equal(calls[1].body.assistantMessageId, '4');
+  equal(calls[1].body.assistantText, '他走上街道。');
+  equal(core.getState().pendingTurn, null);
+  equal(core.getState().turnPhase, 'idle');
+  core.dispose();
+});
+
 test("场景投影：SQL 覆盖旧上下文，投影失败时注入为空", async () => {
   const safe = await readyCore({}, {}, [], { getNarrativeContext: async () => "只包含收到的信" });
   await safe.core.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "继续。" });
@@ -818,7 +929,7 @@ test("M1-A03：真实宿主读书适配与 commit 钩子跨两本书选中末尾
     chat: [{ is_user: true, mes: "我进入白塔钟座。" }],
     characters: [{ data: { extensions: { world: "甲书" } } }] };
   const firstEntries = Object.fromEntries(Array.from({ length: 70 }, (_, i) =>
-    [String(i), { uid: i, comment: `无关条目${i}`, key: [`无关${i}`], content: "遥远背景。".repeat(90) }]));
+    [String(i), { uid: i, comment: `无关条目${i}`, key: [`无关${i}`], content: "遥远背景。" }]));
   const books = {
     "甲书": { entries: firstEntries },
     "乙书": { entries: {
@@ -850,9 +961,9 @@ test("M1-A03：真实宿主读书适配与 commit 钩子跨两本书选中末尾
     ok(commit, "真实回合应提交");
     ok(commit.body.loreSupplement.includes("白塔钟座的石门刻着星图"), "第二本书末尾的正文中段应入 commit");
     equal(commit.body.loreSupplement.includes("不应回喂"), false, "Atlas 自写条目不回喂");
-    equal(commit.body.loreSupplement.includes("无关条目"), false, "第一本无关条目不挤占预算");
-    ok(loreEvents.some((event) => event.code === "LORE_SELECTION_COMPLETE" && event.details?.selectedCount === 1), "记录实际筛选计数");
-    ok(loreEvents.some((event) => event.code === "LORE_SELECTION_COMPLETE" && event.details?.activationMode === "host-activated"), "本轮真实绿灯 ID 被使用");
+    equal(commit.body.loreSupplement.includes("无关条目"), true, "不按标题或关键词排除条目");
+    ok(loreEvents.some((event) => event.code === "LORE_SELECTION_COMPLETE" && event.details?.selectedCount === 71), "记录实际发送条目数");
+    ok(loreEvents.some((event) => event.code === "LORE_SELECTION_COMPLETE" && event.details?.activationMode === "all-enabled"), "绑定书启用条目按原序发送");
     recordAtlasHostLoreActivation([{ world: "乙书", uid: 2 }], stContext);
     stContext.chat[0] = { ...stContext.chat[0] };
     await readCardLoreSupplementViaSelector({ chatId: "chat-a", characterId: 0,

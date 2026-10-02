@@ -242,6 +242,7 @@ export interface AtlasUiState {
   destinationPreview: AtlasDestinationPreview | null;
   /** 在途回合（MESSAGE_SENT → prepare 成功；停止 / 失败即放弃） */
   pendingTurn: AtlasPendingTurn | null;
+  turnPhase: "idle" | "awaiting-reply" | "queued" | "reading-context" | "committing";
   /** 最近回执（当前聊天；去重 ≤10；按聊天分桶持久化于 extensionSettings，刷新 / 切回后仍在） */
   receipts: AtlasReceiptRecord[];
   /** commit 失败后的可重试回合（仅会话内；换聊天即弃——绝不带进新聊天） */
@@ -396,6 +397,8 @@ export function createAtlasUiCore(deps: {
   now?: () => number;
   /** 任意状态变化后的回调（UI 层重绘用；同步调用，不等待异步刷新完成） */
   onStateChange?: () => void;
+  /** Host-only context reads must not hold a completed prose turn indefinitely. */
+  contextTimeoutMs?: number;
   /**
    * 世界书写入钩子（ATLAS-09；index.js 注入酒馆 world-info 适配）。
    * commit 成功且引擎给出条目规划时调用；失败只记 lorebookHint，绝不影响回合成功。
@@ -496,6 +499,7 @@ export function createAtlasUiCore(deps: {
     simulationVisibility: "known",
     destinationPreview: null,
     pendingTurn: null,
+    turnPhase: "idle",
     receipts: [],
     retryableCommit: null,
     modeHint: modeHintFor("unbound", false, null, false),
@@ -507,7 +511,19 @@ export function createAtlasUiCore(deps: {
   let initialized = false;
   let disposed = false;
   let healthCheckedAt = -Infinity;
-  let commitInFlight = false;
+  type CommitFlight = { turnId: string; done: Promise<void>; finish: () => void };
+  let commitFlight: CommitFlight | null = null;
+  function claimCommit(turnId: string): CommitFlight {
+    let finish!: () => void;
+    const done = new Promise<void>(resolve => { finish = resolve; });
+    const flight = { turnId, done, finish };
+    commitFlight = flight;
+    return flight;
+  }
+  function releaseCommit(flight: CommitFlight): void {
+    if (commitFlight === flight) commitFlight = null;
+    flight.finish();
+  }
   let generationRevision = 0;
   const bootstrappedBranches = new Set<string>();
   const openingAttemptedMessages = new Set<string>();
@@ -529,10 +545,22 @@ export function createAtlasUiCore(deps: {
 
   function setState(patch: Partial<AtlasUiState>): void {
     state = { ...state, ...patch };
+    if (patch.pendingTurn === null) state.turnPhase = "idle";
+    else if (patch.pendingTurn && patch.turnPhase === undefined) state.turnPhase = "awaiting-reply";
     if (patch.mode !== undefined || patch.bindingInvalid !== undefined || patch.serviceProtocolVersion !== undefined) {
       state.modeHint = modeHintFor(state.mode, state.bindingInvalid, state.serviceProtocolVersion, state.binding !== null && !state.binding.enabled);
     }
     deps.onStateChange?.();
+  }
+
+  async function readContextWithDeadline<T>(work: Promise<T>): Promise<T | null> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([work, new Promise<null>(resolve => {
+        timer = setTimeout(() => resolve(null), Math.max(1, deps.contextTimeoutMs ?? 10_000));
+      })]);
+    } catch { return null; }
+    finally { if (timer) clearTimeout(timer); }
   }
 
   /** 回执记录：归属当前聊天、去重、摘要截断（≤300）、有界（每聊天 ≤10）并按聊天分桶持久化。 */
@@ -969,6 +997,9 @@ export function createAtlasUiCore(deps: {
     if (!resolved || !resolved.assistantMessageId) {
       diagnostic({ level: "warn", source: "host", code: "AI_FLOOR_UNRESOLVED",
         operation: "generation", phase: "ended", outcome: "skipped" });
+      if (!state.pendingTurn && !lastPrepareTask && !state.rearmTurn) return;
+      generationRevision += 1;
+      setState({ pendingTurn: null, rearmTurn: null, lastError: "正文生成已结束，但没有取得助手回复，本轮世界状态未更新。" });
       return;
     }
     await onGenerationEnded(resolved.assistantMessageId, String(resolved.assistantText ?? ""));
@@ -1065,14 +1096,14 @@ export function createAtlasUiCore(deps: {
       && !state.receipts.some((row) => row.status === "committed")) {
       openingAttemptedMessages.add(`${openingScope}|${messageId}`);
       try {
-        const opening = await deps.getOpeningMessage();
+        const opening = await readContextWithDeadline(deps.getOpeningMessage());
         if (opening?.messageId && opening.text.trim() && !disposed && state.chatId === chatId
           && generationRevision === revision) {
           let loreSupplement = "";
           try {
-            loreSupplement = await deps.getLoreSupplement?.({ chatId, characterId: null,
+            loreSupplement = deps.getLoreSupplement ? await readContextWithDeadline(deps.getLoreSupplement({ chatId, characterId: null,
               mode: "bootstrap", userText: String(userText ?? ""), assistantText: opening.text,
-              recentAssistantTexts: [] }) ?? "";
+              recentAssistantTexts: [] })) ?? "" : "";
           } catch { loreSupplement = ""; }
           if (disposed || state.chatId !== chatId || generationRevision !== revision) return;
           const response = await api.request("POST", "/scene/bootstrap", {
@@ -1129,8 +1160,8 @@ export function createAtlasUiCore(deps: {
         const response: AtlasTurnPrepareResponse = parsedResponse.value;
         if (deps.getNarrativeContext) {
           try {
-            const text = await deps.getNarrativeContext();
-            if (typeof text === "string") response.injectionText = text.slice(0, ATLAS_LIMITS.INJECTION_CHARS);
+            const text = await readContextWithDeadline(deps.getNarrativeContext());
+            response.injectionText = typeof text === "string" ? text.slice(0, ATLAS_LIMITS.INJECTION_CHARS) : "";
           } catch { response.injectionText = ""; }
           if (revision !== generationRevision || state.chatId !== chatId || disposed) return;
         }
@@ -1172,7 +1203,7 @@ export function createAtlasUiCore(deps: {
     assistantText: string,
   ): Promise<{ recentAssistantTexts?: string[]; personaDescription?: string; charDescription?: string } | null> {
     try {
-      const raw = await hook(assistantText);
+      const raw = await readContextWithDeadline(hook(assistantText));
       if (!raw || typeof raw !== "object") return null;
       const texts = Array.isArray(raw.recentAssistantTexts)
         ? raw.recentAssistantTexts
@@ -1223,7 +1254,17 @@ export function createAtlasUiCore(deps: {
         details: { reasonCode: gated ? "BINDING_OR_SERVICE_DISABLED" : "NO_PENDING" } });
       return;
     }
-    if (commitInFlight) {
+    if (commitFlight) {
+      if (commitFlight.turnId !== pending.turnId) {
+        const queuedRevision = generationRevision;
+        setState({ turnPhase: "queued" });
+        await commitFlight.done;
+        if (!disposed && state.chatId === pending.chatId && generationRevision === queuedRevision
+          && state.pendingTurn?.turnId === pending.turnId) {
+          await onGenerationEnded(assistantMessageId, assistantText);
+        }
+        return;
+      }
       diagnostic({ level: "debug", source: "ui", code: "DUPLICATE_EVENT",
         operation: "commit", phase: "ended", outcome: "skipped" });
       return;
@@ -1234,56 +1275,69 @@ export function createAtlasUiCore(deps: {
       setState({ pendingTurn: null });
       return;
     }
+    // A failed host generation may resolve the previous assistant floor. It is not this turn's reply.
+    if (/^\d+$/.test(pending.messageId) && /^\d+$/.test(assistantMessageId)
+      && Number(assistantMessageId) <= Number(pending.messageId)) {
+      diagnostic({ level: "warn", source: "host", code: "AI_FLOOR_UNRESOLVED",
+        operation: "generation", phase: "ended", outcome: "skipped" });
+      setState({ pendingTurn: null, rearmTurn: null, lastError: "正文生成已结束，但没有取得本轮助手回复，本轮世界状态未更新。" });
+      return;
+    }
     const commitRevision = generationRevision;
     const commitSwipeId = swipeIdForNextCommit;
     swipeIdForNextCommit = null;
-    const commitContext = deps.getCommitContext ? await safeCommitContext(deps.getCommitContext, assistantText) : null;
-    if (disposed || state.chatId !== pending.chatId || generationRevision !== commitRevision) return;
-    // 0.9.21 世界书资料（可选钩子）：失败 / 空一律当无资料，绝不阻断回合
-    let loreSupplement: string | undefined;
-    if (deps.getLoreSupplement) {
-      try {
-        const text = await deps.getLoreSupplement({
-          chatId: pending.chatId, characterId: null, mode: "turn",
-          userText: pending.userText, assistantText,
-          recentAssistantTexts: commitContext?.recentAssistantTexts ?? [],
-        });
-        if (disposed || state.chatId !== pending.chatId || generationRevision !== commitRevision) return;
-        if (typeof text === "string" && text.trim().length > 0) loreSupplement = text;
-      } catch {
-        loreSupplement = undefined;
+    const flight = claimCommit(pending.turnId);
+    setState({ turnPhase: "reading-context" });
+    try {
+      const commitContext = deps.getCommitContext ? await safeCommitContext(deps.getCommitContext, assistantText) : null;
+      if (disposed || state.chatId !== pending.chatId || generationRevision !== commitRevision) return;
+      // 0.9.21 世界书资料（可选钩子）：失败 / 空一律当无资料，绝不阻断回合
+      let loreSupplement: string | undefined;
+      if (deps.getLoreSupplement) {
+        try {
+          const text = await readContextWithDeadline(deps.getLoreSupplement({
+            chatId: pending.chatId, characterId: null, mode: "turn",
+            userText: pending.userText, assistantText,
+            recentAssistantTexts: commitContext?.recentAssistantTexts ?? [],
+          }));
+          if (disposed || state.chatId !== pending.chatId || generationRevision !== commitRevision) return;
+          if (typeof text === "string" && text.trim().length > 0) loreSupplement = text;
+        } catch {
+          loreSupplement = undefined;
+        }
       }
-    }
-    // 0.9.25 shujuku 占位符体系：$7 前文 / $U 用户设定 / $C 角色描述（可选钩子，失败即缺省）
-    const request = {
-      turnId: pending.turnId,
-      chatId: pending.chatId,
-      userMessageId: pending.messageId,
-      assistantMessageId: assistantMessageId.slice(0, ATLAS_LIMITS.ID_CHARS),
-      swipeId: commitSwipeId,
-      userText: pending.userText,
-      assistantText: assistantText.slice(0, ATLAS_LIMITS.ASSISTANT_TEXT_CHARS),
-      ...(loreSupplement ? { loreSupplement } : {}),
-      ...(commitContext?.recentAssistantTexts?.length ? { recentAssistantTexts: commitContext.recentAssistantTexts } : {}),
-      ...(commitContext?.personaDescription ? { personaDescription: commitContext.personaDescription } : {}),
-      ...(commitContext?.charDescription ? { charDescription: commitContext.charDescription } : {}),
-    };
-    const parsed = parseAtlasTurnCommitRequest(request);
-    if (!parsed.ok) {
-      diagnostic({ level: "error", source: "ui", code: "COMMIT_REQUEST_INVALID",
-        operation: "commit", phase: "validation", outcome: "failed" });
-      setState({ pendingTurn: null, rearmTurn: null });
-      return;
-    }
-    await executeCommitRequest(parsed.value, commitSwipeId);
+      // 0.9.25 shujuku 占位符体系：$7 前文 / $U 用户设定 / $C 角色描述（可选钩子，失败即缺省）
+      const request = {
+        turnId: pending.turnId,
+        chatId: pending.chatId,
+        userMessageId: pending.messageId,
+        assistantMessageId: assistantMessageId.slice(0, ATLAS_LIMITS.ID_CHARS),
+        swipeId: commitSwipeId,
+        userText: pending.userText,
+        assistantText: assistantText.slice(0, ATLAS_LIMITS.ASSISTANT_TEXT_CHARS),
+        ...(loreSupplement ? { loreSupplement } : {}),
+        ...(commitContext?.recentAssistantTexts?.length ? { recentAssistantTexts: commitContext.recentAssistantTexts } : {}),
+        ...(commitContext?.personaDescription ? { personaDescription: commitContext.personaDescription } : {}),
+        ...(commitContext?.charDescription ? { charDescription: commitContext.charDescription } : {}),
+      };
+      const parsed = parseAtlasTurnCommitRequest(request);
+      if (!parsed.ok) {
+        diagnostic({ level: "error", source: "ui", code: "COMMIT_REQUEST_INVALID",
+          operation: "commit", phase: "validation", outcome: "failed" });
+        setState({ pendingTurn: null, rearmTurn: null });
+        return;
+      }
+      await executeCommitRequest(parsed.value, commitSwipeId, flight);
+    } finally { releaseCommit(flight); }
   }
 
   /**
    * 共享 commit 执行器（正常回合 / 手动立即推演共用）：请求已过契约解析。
    * committed / duplicate → 记回执 + 刷新；failed / HTTP 错误 → 记可重试信息。
    */
-  async function executeCommitRequest(value: AtlasTurnCommitRequest, swipeId: string | null): Promise<void> {
-    commitInFlight = true;
+  async function executeCommitRequest(value: AtlasTurnCommitRequest, swipeId: string | null, reservedFlight?: CommitFlight): Promise<void> {
+    const flight = reservedFlight ?? claimCommit(value.turnId);
+    if (state.chatId === value.chatId) setState({ turnPhase: "committing" });
     diagnostic({ level: "info", source: "ui", code: "COMMIT_STARTED",
       operation: "commit", phase: "request", outcome: "started" });
     try {
@@ -1385,7 +1439,7 @@ export function createAtlasUiCore(deps: {
         }),
       });
     } finally {
-      commitInFlight = false;
+      releaseCommit(flight);
     }
   }
 
@@ -1395,7 +1449,7 @@ export function createAtlasUiCore(deps: {
    * 消息 id 用 manual-<ts> 合成，幂等键每次按下都不同 → 每按一次推进一回合。
    */
   async function manualAdvance(): Promise<void> {
-    if (disposed || commitInFlight) return;
+    if (disposed || commitFlight) return;
     const manualRevision = generationRevision;
     const chatId = state.chatId;
     const binding = state.binding;
@@ -1414,7 +1468,7 @@ export function createAtlasUiCore(deps: {
     const ts = now();
     let lastAssistant = "";
     try {
-      const text = await deps.getLastAssistantText?.();
+      const text = deps.getLastAssistantText ? await readContextWithDeadline(deps.getLastAssistantText()) : null;
       if (disposed) return;
       if (typeof text === "string") lastAssistant = text;
     } catch {
@@ -1427,11 +1481,11 @@ export function createAtlasUiCore(deps: {
     let loreSupplement: string | undefined;
     if (deps.getLoreSupplement) {
       try {
-        const text = await deps.getLoreSupplement({
+        const text = await readContextWithDeadline(deps.getLoreSupplement({
           chatId, characterId: null, mode: "turn",
           userText: "（手动推进，无新用户行动。）", assistantText: manualAssistantText,
           recentAssistantTexts: commitContext?.recentAssistantTexts ?? [],
-        });
+        }));
         if (disposed || state.chatId !== chatId || generationRevision !== manualRevision) return;
         if (typeof text === "string" && text.trim().length > 0) loreSupplement = text;
       } catch { loreSupplement = undefined; }

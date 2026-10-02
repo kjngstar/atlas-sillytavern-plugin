@@ -14,6 +14,25 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { selectAtlasLoreSupplement } from '../src/atlas-lore-selection.ts';
 
+test('原文模式不按标题、激活状态或关键词选择条目，不重排或摘录正文', () => {
+  const entries = ['文风规则', 'DS写作思维链', '角色背景', '学校地点'].map((title,i) =>
+    makeEntry(String(i), `第${i}条原文。\n这里保留全部内容。`, { title }));
+  entries.push(makeEntry('off', '作者禁用的内容', { enabled:false }));
+  const result = selectAtlasLoreSupplement({ entries, includeAllEnabled:true, mode:'turn', maxChars:6000,
+    activatedUids:new Set(['默认书:3']), chatKeywords:new Set(['学校']), sceneKeywords:new Set() });
+  assert.deepEqual(result.selectedUids, ['默认书:0','默认书:1','默认书:2','默认书:3']);
+  for (const entry of entries.slice(0,4)) assert.ok(result.text.includes(entry.content));
+  assert.equal(result.text.includes('作者禁用的内容'), false);
+});
+
+test('原文模式只受长度预算限制，过长条目不会因为标题开销被整条丢弃', () => {
+  const result = selectAtlasLoreSupplement({ entries:[makeEntry('long','原文'.repeat(4000), {title:'长资料'})],
+    includeAllEnabled:true, mode:'turn',maxChars:6000,chatKeywords:new Set(),sceneKeywords:new Set() });
+  assert.deepEqual(result.selectedUids, ['默认书:long']);
+  assert.equal(result.text.length,6000);
+  assert.equal(result.truncatedCount,1);
+});
+
 function makeEntry(uid, content, opts = {}) {
   return {
     uid,

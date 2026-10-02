@@ -135,9 +135,9 @@ function messagesOf(call) {
 }
 
 function userContentOf(call) {
-  const user = messagesOf(call).find((message) => message.role === "user");
-  assert.ok(user, "提炼请求必须带 user 段（否则模型看不到契约）");
-  return String(user.content ?? "");
+  const users = messagesOf(call).filter((message) => message.role === "user");
+  assert.ok(users.length > 0, "提炼请求必须带 user 段（否则模型看不到契约）");
+  return users.map(message => String(message.content ?? "")).join('\n');
 }
 
 /** 契约行就是那段 JSON 模板；解析得动才说明字段表是结构化的，而不是一句自然语言。 */

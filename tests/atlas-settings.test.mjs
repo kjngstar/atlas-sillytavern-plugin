@@ -980,6 +980,6 @@ test("C01 行增量分段结构：段位与 v2 对齐，契约写明格式与禁
   assert.ok(segments[4].content.includes("不要填任何数字"), "时间与距离不由模型决定");
   assert.ok(segments[5].content.includes("new:loc:"), "核对段覆盖引用形态");
 
-  assert.ok(TABLE_DELTA_BOOTSTRAP_TASK_CONTENT.includes("{{assistantReply}}"));
+  assert.ok(TABLE_DELTA_BOOTSTRAP_TASK_CONTENT.includes("{{source:assistantReply}}"));
   assert.ok(TABLE_DELTA_BOOTSTRAP_TASK_CONTENT.includes("不推进时间"), "开场识别只定位");
 });

@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.72";
+export const ATLAS_EXTENSION_VERSION = "0.9.73";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -3439,7 +3439,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     topbarLeft.append(el("span", "aw-topbar__branch", d.branchId ? `分支 ${String(d.branchId)}` : "正史"));
     const pointer = el("span", "aw-topbar__hint", "按住空白处可拖动窗口");
     topbarLeft.append(pointer);
-    if (state().pendingTurn) topbarRight.append(el("span", "aw-chip aw-chip--busy", "世界推演中"));
+    if (state().pendingTurn) topbarRight.append(el("span", "aw-chip aw-chip--busy", state().turnPhase === "committing" ? "世界推演中" : state().turnPhase === "reading-context" ? "读取资料中" : state().turnPhase === "queued" ? "推演排队中" : "等待正文"));
     if (d.currentTime !== undefined) topbarRight.append(el("span", "aw-chip aw-chip--gold", `第 ${String(d.currentTime)} 时段`));
     if (d.currentLocationId) {
       const pointName = currentLocationName(d);
@@ -3652,8 +3652,8 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     const receipts = [...s.receipts].reverse();
     if (s.pendingTurn) {
       const live = el("div", "aw-move is-live");
-      live.append(el("div", "aw-move__title", "本轮推演进行中…"));
-      live.append(el("div", "aw-move__meta", "回复完成后写入世界书"));
+      live.append(el("div", "aw-move__title", s.turnPhase === "reading-context" ? "正在读取推演资料…" : s.turnPhase === "committing" ? "本轮推演进行中…" : s.turnPhase === "queued" ? "等待上一轮处理完成…" : "等待正文完成…"));
+      live.append(el("div", "aw-move__meta", s.turnPhase === "committing" ? "依据本轮正文更新世界状态" : s.turnPhase === "queued" ? "上一轮结束后自动处理本轮正文" : "正文完成后开始世界推演"));
       movesList.append(live);
     }
     // 回执的「应用 N 行 / NO_TIME」属于排障信息，留在变化与日志页。
@@ -3694,7 +3694,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     const receipts = [...s.receipts].reverse().slice(0, 4);
     if (s.pendingTurn) {
       const row = el("div", "aw-changes__row is-live");
-      row.append(el("span", "aw-changes__dot"), el("span", "aw-changes__text", "本轮推演中：回复后写入世界"));
+      row.append(el("span", "aw-changes__dot"), el("span", "aw-changes__text", s.turnPhase === "committing" ? "依据本轮正文更新世界状态" : s.turnPhase === "reading-context" ? "正在读取本轮推演资料" : s.turnPhase === "queued" ? "等待上一轮结束后处理本轮正文" : "等待正文完成后开始世界推演"));
       compact.append(row);
     }
     if (receipts.length === 0 && !s.pendingTurn) {
@@ -8768,6 +8768,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       const placeholderHelp = document.createElement("details"); placeholderHelp.className = "aw-details";
       const placeholderSummary = document.createElement("summary"); placeholderSummary.textContent = "可用占位符与素材含义";
       placeholderHelp.append(placeholderSummary, el("p", "aw-hint", "$5 世界状态 · $1 世界书资料 · $6 上轮推演 · $7 前文 AI 楼层 · $8 用户行动 · $U 用户设定 · $C 角色描述 · {{assistantReply}} 本轮正文 · $9 恒空。占位符发送时展开；旧 {{worldState}} / {{userAction}} / {{worldLore}} 继续兼容。"));
+      placeholderHelp.append(el("p", "aw-hint", "{{source:$C}}、{{source:$1}}、{{source:assistantReply}} 等写法把原文作为只读来源发送，用可还原的 JSON 字符串区分资料与指令，不筛除其中的条目。引用时使用解码后的原文。旧占位符写法仍可使用。"));
       segSection.append(placeholderHelp);
       renderSegRows();
     }
@@ -10518,20 +10519,24 @@ export function buildAtlasGeoLoreChunks(entries, maxChars = 5500, maxChunks = 32
   const chunks = [];
   let chunk = "";
   for (const row of rows) {
-    const line = `- [${String(row.bookName ?? "世界书")}] ${String(row.title ?? "条目")}：${row.content.slice(0, 2500).replace(/\s+/g, " ")}`;
-    if (line.length > maxChars) continue;
-    if (chunk && chunk.length + line.length + 1 > maxChars) {
-      chunks.push(chunk);
-      if (chunks.length >= maxChunks) {
-        chunks.truncated = true;
-        return chunks;
+    const prefix = `- [${String(row.bookName ?? "世界书")}] ${String(row.title ?? "条目")}：`;
+    const partChars = maxChars - prefix.length;
+    if (partChars <= 0) { chunks.truncated = true; continue; }
+    for (let offset = 0; offset < row.content.length; offset += partChars) {
+      const line = prefix + row.content.slice(offset, offset + partChars);
+      if (chunk && chunk.length + line.length + 1 > maxChars) {
+        chunks.push(chunk);
+        if (chunks.length >= maxChunks) {
+          chunks.truncated = true;
+          return chunks;
+        }
+        chunk = "";
       }
-      chunk = "";
+      chunk += `${chunk ? "\n" : ""}${line}`;
     }
-    chunk += `${chunk ? "\n" : ""}${line}`;
   }
   if (chunk && chunks.length < maxChunks) chunks.push(chunk);
-  chunks.truncated = false;
+  chunks.truncated ??= false;
   return chunks;
 }
 
@@ -10743,7 +10748,7 @@ export async function readCardLoreSupplementViaSelector(selectionContext, select
       // Object identity ties the activation to this host floor without using mutable text.
       && hostLoreActivation.userMessageRef === ctx?.chat?.[lastUserIndex]
       ? hostLoreActivation : null;
-    const activationMode = activation ? "host-activated" : "context-fallback";
+    const activationMode = "all-enabled";
     if (activation) activation.consumed = true;
     else emit({ level: "info", source: "lorebook",
       code: hostLoreActivationApiAvailable ? "LORE_ACTIVATION_FALLBACK" : "LORE_ACTIVATION_UNAVAILABLE",
@@ -10756,6 +10761,7 @@ export async function readCardLoreSupplementViaSelector(selectionContext, select
       chatKeywords: sceneKeywords,
       sceneKeywords: sceneKeywords,
       mode: selectionContext.mode,
+      includeAllEnabled: true,
       maxChars: LORE_SUPPLEMENT_LIMITS.TOTAL_CHARS,
     });
     if (failedBooks > 0) {

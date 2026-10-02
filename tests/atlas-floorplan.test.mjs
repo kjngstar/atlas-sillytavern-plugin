@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildFloorplan, isBuildingScene } from '../src/atlas-floorplan.ts';
-import { selectTaskBackground } from '../src/atlas-task-context.ts';
 
 test('王宫已有寝殿时显示房间范围、通道与入口；布局不登记新地点', () => {
   const input = { name: '晨星王宫', cols: 100, rows: 100, children: [{ id: '2', name: '小公主寝殿' }] };
@@ -39,15 +38,4 @@ test('建筑里已确认的位置保持原坐标，范围包含它；房间与�
   assert.equal(buildFloorplan({ name: '小公主寝殿', cols: 100, rows: 100, children: [] }), null);
   assert.equal(isBuildingScene('商业街路口'), false);
   assert.equal(isBuildingScene('学校'), false);
-});
-
-test('背景摘录只选择任务事实，不改写连续原文，也不引入另一条模型调用', () => {
-  const text = '<think>世界在推理标签里。</think>\n姓名：艾琳。她是一名教师。\n这座王宫位于城市北侧。\n今天的晚餐做法很复杂。';
-  const selected = selectTaskBackground(text);
-  assert.ok(selected.includes('姓名：艾琳。'));
-  assert.ok(selected.includes('这座王宫位于城市北侧。'));
-  assert.equal(selected.includes('晚餐'), false);
-  assert.equal(selected.includes('推理标签'), false);
-  assert.ok(selectTaskBackground(text, 25).length <= 25);
-  assert.equal(selectTaskBackground('', 100), '');
 });

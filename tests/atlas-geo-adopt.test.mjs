@@ -97,6 +97,35 @@ async function adopt(core, loreSupplement = "- <REGION>：迷雾笼罩的古老�
   return core.handle("POST", "/worlds/geo/adopt", { chatId: "chat-1", loreSupplement });
 }
 
+test('地理提示词：只有文风与思维链仍按原文发送，模型可返回无地点', async () => {
+  const { core, carrier, fetchCalls } = await makeCore({ fetchScripts:[() => openAiResponse('{"regions":[],"points":[]}')] });
+  const before = JSON.stringify(carrier.session.world);
+  const result = await adopt(core, '- [卡书] 文风规则：要求描写王宫。\n继续执行写作步骤并描写房间。\n- [卡书] DS写作思维链：检查是否为某类场景。');
+  assert.equal(result.body.ok, true);
+  assert.equal(result.body.data.pointsAdded, 0);
+  assert.equal(fetchCalls.length, 1);
+  assert.ok(JSON.stringify(fetchCalls[0].body).includes('DS写作思维链'));
+  assert.equal(JSON.stringify(carrier.session.world), before);
+});
+
+test('地理提示词：来源独立分段并保留所有条目，JSON 编码可无损还原', async () => {
+  const { core, fetchCalls } = await makeCore({ fetchScripts:[() => openAiResponse('{"regions":[],"points":[]}')] });
+  await core.handle('PUT', '/settings', { worldTurn:preset({ maxTokens:51200 }) }, { local:true });
+  const raw = '- [卡书] 文风规则：要求描写王宫。\n- [卡书] 晨星王宫：会客厅在晨星王宫内部。\n这份甜点食谱写了很久。';
+  const result = await adopt(core, raw);
+  assert.equal(result.body.ok, true);
+  assert.equal(fetchCalls.length, 1);
+  const body = fetchCalls[0].body;
+  assert.equal(body.max_tokens, 8192);
+  assert.equal(body.messages.length, 3);
+  assert.ok(body.messages[2].content.includes('会客厅在晨星王宫内部。'));
+  assert.ok(body.messages[2].content.includes('JSON 字符串'));
+  const source = JSON.parse(body.messages[2].content.split('\n')[2]);
+  assert.equal(source, '【世界书资料】\n' + raw);
+  assert.equal(JSON.stringify(body).includes('要求描写王宫'), true);
+  assert.equal(JSON.stringify(body).includes('甜点食谱'), true);
+});
+
 test("geo/adopt：成功提炼 → 加地区加点、修订追加、只增不改、恰好 1 次请求", async () => {
   const { carrier, core, fetchCalls } = await makeCore({
     fetchScripts: [() => openAiResponse(EXTRACTION_JSON)],

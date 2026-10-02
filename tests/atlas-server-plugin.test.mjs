@@ -309,7 +309,7 @@ test("自动场景扩展首轮直接入图、按父子层级连接且同回合�
   equal(fetcher.calls.length, 2, "只调用两次模型");
 });
 
-test("新建筑立即补全内部，再次停留不增加请求；地理请求只传场景摘录", async () => {
+test("新建筑立即补全内部，再次停留不增加请求；地理请求保留背景原文", async () => {
   const fetcher = makeFetch([() => openAiTextResponse(GOOD_EDIT),
     () => openAiTextResponse(JSON.stringify({ places: [] })),
     () => openAiTextResponse(JSON.stringify({ places: [{ name: "王宫门厅", parentName: "晨星王宫" }] })),
@@ -328,13 +328,13 @@ test("新建筑立即补全内部，再次停留不增加请求；地理请求�
   const prompt = JSON.stringify(fetcher.calls.at(-1).body.messages);
   ok(prompt.includes("优先补全建筑：loc:4103=晨星王宫"));
   ok(prompt.includes("内部的功能布局"));
-  ok(!prompt.includes("食谱"), "地理规划不再带入无关背景原文");
-  ok(!prompt.includes("这首诗"), "地理规划不再发送整段剧情");
+  ok(prompt.includes("食谱"), "地理规划不按内容类别删减背景原文");
+  ok(prompt.includes("这首诗"), "保留已读取的剧情资料");
   equal((await run("third")).body.data.skipped, "interval", "相同建筑已补全，再次停留遵循间隔");
   equal(fetcher.calls.length, 3, "一次提交、两次补全，无重复模型请求");
 });
 
-test("默认请求背景摘录保持本轮证据原文，自定义预设仍可使用原始资料", async () => {
+test("默认请求与自定义预设均保留原始背景，不做关键词摘录", async () => {
   for (const custom of [false, true]) {
     const fetcher = makeFetch([() => openAiTextResponse(GOOD_EDIT)]);
     const { core, carrier } = await setup(null, { fetchFn: fetcher.fetchFn });
@@ -356,8 +356,8 @@ test("默认请求背景摘录保持本轮证据原文，自定义预设仍可�
     ok(messages.includes(evidence), "本轮逐字证据不裁剪或改写");
     ok(messages.includes("艾琳"));
     ok(messages.includes("王宫位于北侧"));
-    equal(messages.includes("烘焙配方"), custom, "自定义资料不会被默认筛选强制改写");
-    equal(messages.includes("点心的详细笔记"), custom);
+    equal(messages.includes("烘焙配方"), true, "默认与自定义均保留来源");
+    equal(messages.includes("点心的详细笔记"), true);
   }
 });
 
@@ -1034,6 +1034,17 @@ const FAILURE_CASES = [
   },
   { name: "非 JSON", script: () => jsonResponse(200, { notChoices: true }), code: ATLAS_ERROR_CODES.RESPONSE_MALFORMED, retryable: false },
 ];
+
+test('模型超时：适配器忽略 AbortSignal 和响应体一直不结束，都能退出', async () => {
+  const input = { injectionText:'', userText:'继续', assistantText:'他站在大厅。' };
+  const never = () => new Promise(() => {});
+  for (const fetchFn of [never, async () => ({ ok:true, status:200, text:never })]) {
+    const result = await callAtlasWorldTurnApi(preset({ timeoutMs:1000 }), input, { fetchFn });
+    equal(result.ok, false);
+    equal(result.code, ATLAS_ERROR_CODES.API_TIMEOUT);
+    equal(result.retryable, true);
+  }
+});
 
 for (const failure of FAILURE_CASES) {
   test(`commit 失败分类：${failure.name} → ${failure.code}，零写入`, async () => {

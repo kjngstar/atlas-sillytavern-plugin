@@ -46,6 +46,8 @@ export interface AtlasLoreSelectionInput {
   perEntryChars?: number;
   /** 最多条目数 */
   maxEntries?: number;
+  /** Full source mode: preserve enabled entries in source order, without activation/keyword selection. */
+  includeAllEnabled?: boolean;
 }
 
 export interface AtlasLoreSelectionResult {
@@ -106,8 +108,8 @@ export function selectAtlasLoreSupplement(
   input: AtlasLoreSelectionInput,
 ): AtlasLoreSelectionResult {
   const perEntryChars = input.perEntryChars
-    ?? (input.mode === "geo" ? DEFAULT_GEO_PER_ENTRY_CHARS : DEFAULT_PER_ENTRY_CHARS);
-  const maxEntries = input.maxEntries ?? DEFAULT_MAX_ENTRIES;
+    ?? (input.includeAllEnabled ? input.maxChars : input.mode === "geo" ? DEFAULT_GEO_PER_ENTRY_CHARS : DEFAULT_PER_ENTRY_CHARS);
+  const maxEntries = input.maxEntries ?? (input.includeAllEnabled ? input.entries.length : DEFAULT_MAX_ENTRIES);
   const maxChars = Math.max(0, input.maxChars | 0);
 
   const filtered: Array<AtlasLoreSelectionEntry & { __idx: number }> = [];
@@ -124,6 +126,7 @@ export function selectAtlasLoreSupplement(
 
   // 排序(确定性:不依赖输入次序,只用 bookName + uid 做 tiebreaker)
   filtered.sort((a, b) => {
+    if (input.includeAllEnabled) return a.__idx - b.__idx;
     const aAct = activatedUids?.has(stableUid(a, a.__idx)) ? 1 : 0;
     const bAct = activatedUids?.has(stableUid(b, b.__idx)) ? 1 : 0;
     if (aAct !== bAct) return bAct - aAct;
@@ -157,11 +160,14 @@ export function selectAtlasLoreSupplement(
     const uid = stableUid(e, e.__idx);
     const active = activatedUids?.has(uid) ?? false;
     const relevant = keywordScore(e, chat, scene) > 0;
-    if (!active && !relevant && !(input.mode === "geo" && isGeographicTitle(e.title ?? ""))) continue;
+    if (!input.includeAllEnabled && !active && !relevant && !(input.mode === "geo" && isGeographicTitle(e.title ?? ""))) continue;
     const title = (e.title ?? "").trim() || (e.bookName ?? "条目");
     const originalChars = e.content.length;
-    const clipped = matchingExcerpt(e.content, [...scene, ...chat], perEntryChars);
-    const line = `- [${e.bookName ?? "?"}] ${title}：${clipped.replace(/\s+/g, " ")}`;
+    const prefix = `- [${e.bookName ?? "?"}] ${title}：`;
+    const available = maxChars - selectedOutputChars - prefix.length - (out.length ? 1 : 0);
+    if (input.includeAllEnabled && available <= 0) break;
+    const clipped = input.includeAllEnabled ? e.content.slice(0, Math.min(perEntryChars, available)) : matchingExcerpt(e.content, [...scene, ...chat], perEntryChars);
+    const line = prefix + (input.includeAllEnabled ? clipped : clipped.replace(/\s+/g, " "));
     const lineLen = line.length + (out.length > 0 ? 1 : 0);
     if (selectedOutputChars + lineLen > maxChars) {
       // 预算用尽:不再继续
