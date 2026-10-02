@@ -67,4 +67,4 @@ Leaflet 的坐标、层级、区域与拥挤人物交互验证通过，值得继
 - [Indoor Map](https://github.com/arcataroger/openlayers_indoor_map)：借鉴区域交互和按缩放显示细节；项目已停止维护，没有复制其代码或 CC-BY-4.0 素材。
 - [Azgaar 架构文档](https://github.com/Azgaar/Fantasy-Map-Generator/blob/master/docs/architecture/architecture.md)：参考生成、数据、样式和渲染分工。该文档包含目标架构，不能全部当作已完成实现。
 
-本轮没有发布新 main 版本，也没有覆盖 8000 端口酒馆中的插件。
+2026-10-02 的初轮没有发布新 main 版本或更新本地酒馆。2026-10-03 已更新原插件并完成真实宿主测试，详见 [本地酒馆验收记录](atlas-map-local-host-validation.md)。

@@ -72,6 +72,22 @@ try {
     await close();
   }
   record('six-real-room-regions', { clicked: roomIds.length });
+  const beforePan = await geometry();
+  const panStart = await page.evaluate(() => {
+    const viewport = document.querySelector('.aw-viewport'), rect = viewport.getBoundingClientRect();
+    for (const [fx, fy] of [[.5, .5], [.5, .6], [.5, .7], [.95, .6]]) {
+      const x = rect.x + rect.width * fx, y = rect.y + rect.height * fy;
+      const hit = document.elementFromPoint(x, y);
+      if (viewport.contains(hit) && !hit.closest('button,input,select,.aw-mappanel,.aw-scale,.aw-maplegend')) return { x, y };
+    }
+    throw Error('No unobstructed blank point for panning');
+  });
+  await page.mouse.move(panStart.x, panStart.y); await page.mouse.down();
+  await page.mouse.move(panStart.x + 36, panStart.y + 15, { steps: 8 }); await page.mouse.up();
+  const afterPan = await geometry();
+  assert.ok(Math.abs(afterPan.camera.cx - beforePan.camera.cx) > 1);
+  assert.ok(Math.abs(afterPan.camera.cy - beforePan.camera.cy) > 1);
+  record('real-pan', { before: beforePan.camera, after: afterPan.camera });
   await page.getByRole('button', { name: '放大地图', exact: true }).click();
   await page.getByRole('button', { name: '放大地图', exact: true }).click();
   building = await geometry(); assert.ok(building.lines.every(width => Math.abs(width - 1.5) < .05));
