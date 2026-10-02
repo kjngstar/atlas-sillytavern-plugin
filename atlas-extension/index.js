@@ -2703,6 +2703,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     computeMapFrame,
     fitCamera,
     setCameraZoom,
+    resizeMapCamera,
     zoomCameraAtPoint,
     panCameraBy,
     centerCameraOn,
@@ -3274,6 +3275,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
   }
 
   const mapCameras = new Map();
+  const mapCameraViewports = new Map();
   let regionFilter = "";
   let dragOffsetX = 0;
   let dragOffsetY = 0;
@@ -4773,7 +4775,10 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
   const commitCamera = (next) => {
     if (!next) return;
     camera = next;
-    if (cameraViewKey) mapCameras.set(cameraViewKey, camera);
+    if (cameraViewKey) {
+      mapCameras.set(cameraViewKey, camera);
+      mapCameraViewports.set(cameraViewKey, { ...cameraViewport });
+    }
     applyCamera();
   };
 
@@ -5029,8 +5034,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         if (resizeTimer) clearTimeout(resizeTimer);
         resizeTimer = setTimeout(() => {
           if (state().page === "map" && lastMapData) {
-            // R08：视口尺寸变化 → 各视图相机按新视口重新 fitAll（等比布局重算）
-            mapCameras.clear();
+            // 仅适配当前图的视口，保留其他层的中心与缩放；面包屑换行也会触发 resize。
             renderMap(data());
           }
         }, 120);
@@ -6444,6 +6448,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         interiorRoster.style.display = "none";
       }
       mapCameras.clear();
+      mapCameraViewports.clear();
     }
     lastMapData = d;
     mapLayer.innerHTML = "";
@@ -6782,8 +6787,15 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     let cam = mapCameras.get(camKey) ?? null;
     if (!cam) {
       cam = fitCamera(cameraFrame, cameraViewport.w, cameraViewport.h);
-      mapCameras.set(camKey, cam);
+    } else {
+      const savedSize = mapCameraViewports.get(camKey);
+      if (savedSize && (savedSize.w !== cameraViewport.w || savedSize.h !== cameraViewport.h)
+          && typeof resizeMapCamera === "function") {
+        cam = resizeMapCamera(cam, cameraFrame, cameraViewport.w, cameraViewport.h);
+      }
     }
+    mapCameras.set(camKey, cam);
+    mapCameraViewports.set(camKey, { ...cameraViewport });
     camera = cam;
     // R08 图层盒：stage 子元素直接用世界单位 px 定位（负坐标合法），变换由相机统一给出。
     // 网格盒 = frame 外扩余量（平移出图仍见格线）；底图盒 = frame 精确框。

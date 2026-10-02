@@ -124,6 +124,13 @@ export function setCameraZoom(cam: MapCamera, nextK: number): MapCamera {
   return { ...cam, k: clampK(nextK, cam.fitK) };
 }
 
+/** Resize the viewport without discarding the user's world center or relative zoom. */
+export function resizeMapCamera(cam: MapCamera, frame: MapFrame, viewW: number, viewH: number): MapCamera {
+  const fit = fitCamera(frame, viewW, viewH);
+  const factor = Number.isFinite(cam.fitK) && cam.fitK > 0 ? cam.k / cam.fitK : 1;
+  return setCameraZoom({ ...cam, fitK: fit.fitK }, fit.fitK * factor);
+}
+
 /**
  * 光标缩放：缩放前后光标下的世界点保持在同一屏幕位置。
  * world = c + (s - v)/k 不变 → c' = world - (s - v)/k'。

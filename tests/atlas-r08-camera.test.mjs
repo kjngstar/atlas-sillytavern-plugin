@@ -17,6 +17,7 @@ import {
   emptyMapFrame,
   fitCamera,
   setCameraZoom,
+  resizeMapCamera,
   zoomCameraAtPoint,
   panCameraBy,
   centerCameraOn,
@@ -33,6 +34,29 @@ import {
 } from "../src/atlas-map-interactions.ts";
 
 const EPS = 1e-9;
+
+test('相机：桌面和窄屏往返保留平移中心和相对缩放，不修改旧相机', () => {
+  const frame = computeMapFrame([{ x: -20, y: -10 }, { x: 100, y: 70 }]);
+  const base = fitCamera(frame, 800, 500);
+  const camera = centerCameraOn(setCameraZoom(base, base.fitK * 2.5), 42, 33);
+  const before = structuredClone(camera);
+  const narrow = resizeMapCamera(camera, frame, 320, 450);
+  assert.equal(narrow.cx, 42); assert.equal(narrow.cy, 33);
+  assert.ok(Math.abs(cameraZoomPercent(narrow) - 250) < EPS);
+  assert.ok(Math.abs(narrow.fitK - fitCamera(frame, 320, 450).fitK) < EPS);
+  assert.deepEqual(resizeMapCamera(narrow, frame, 800, 500), before);
+  assert.deepEqual(camera, before);
+});
+
+test('相机：大型地图 resize 仍使用真实 fit 比例，零尺寸与异常旧比例保持有限数', () => {
+  const frame = computeMapFrame([{ x: 0, y: 0 }, { x: 100000, y: 100000 }]);
+  const base = fitCamera(frame, 800, 500);
+  const resized = resizeMapCamera(setCameraZoom(base, base.fitK * 3), frame, 320, 240);
+  assert.ok(resized.k < .01); assert.ok(Math.abs(cameraZoomPercent(resized) - 300) < EPS);
+  const fallback = resizeMapCamera({ ...base, fitK: 0 }, frame, 0, 0);
+  assert.ok(Number.isFinite(fallback.k) && fallback.k > 0);
+  assert.equal(cameraZoomPercent(fallback), 100);
+});
 
 test("相机：fitAll 无每格 20px 下限（大世界完整收入视口）", () => {
   // 旧实现 Math.max(20, …) → 20px/格下限把 10 万格世界撑出视口 200 万 px

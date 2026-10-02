@@ -20738,6 +20738,11 @@ function fitCamera(frame, viewW, viewH) {
 function setCameraZoom(cam, nextK) {
   return { ...cam, k: clampK(nextK, cam.fitK) };
 }
+function resizeMapCamera(cam, frame, viewW, viewH) {
+  const fit = fitCamera(frame, viewW, viewH);
+  const factor = Number.isFinite(cam.fitK) && cam.fitK > 0 ? cam.k / cam.fitK : 1;
+  return setCameraZoom({ ...cam, fitK: fit.fitK }, fit.fitK * factor);
+}
 function zoomCameraAtPoint(cam, screenX, screenY, viewW, viewH, factor) {
   const { vw, vh } = viewSize(viewW, viewH);
   const world = screenToWorld(cam, screenX, screenY, vw, vh);
@@ -22060,6 +22065,7 @@ export {
   panCameraBy,
   parseAtlasChatBinding,
   projectColorAreas,
+  resizeMapCamera,
   sanitizeCalibration,
   sanitizeDiagnostic,
   screenToWorld,

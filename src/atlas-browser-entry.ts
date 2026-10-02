@@ -95,6 +95,7 @@ export {
   emptyMapFrame,
   fitCamera,
   setCameraZoom,
+  resizeMapCamera,
   zoomCameraAtPoint,
   panCameraBy,
   centerCameraOn,
