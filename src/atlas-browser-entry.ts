@@ -178,6 +178,8 @@ export {
   type AtlasLoreSelectionResult,
 } from "./atlas-lore-selection.ts";
 
+export { buildFloorplan } from "./atlas-floorplan.ts";
+
 /**
  * A04（0.9.59）：安全诊断的**可公开面**补全。
  *

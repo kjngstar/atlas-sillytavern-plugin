@@ -1225,6 +1225,32 @@
   z-index: 2;
 }
 
+.aw-floorplan-room, .aw-floorplan-passage {
+  position: absolute;
+  box-sizing: border-box;
+  pointer-events: none;
+  z-index: 1;
+}
+.aw-floorplan-room {
+  border: 1.5px solid var(--am-grid-major, var(--aw-teal-line));
+  border-radius: 2px;
+  background: rgba(49, 104, 99, 0.06);
+}
+.aw-floorplan-passage {
+  border-left: 1px dashed var(--am-grid-major, var(--aw-teal-line));
+  border-right: 1px dashed var(--am-grid-major, var(--aw-teal-line));
+  background: rgba(159, 129, 65, 0.08);
+}
+.aw-floorplan-caption {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  font: 2.5px var(--aw-sans);
+  color: var(--aw-ink-soft);
+  white-space: nowrap;
+}
+
 .aw-scene-boundary__label {
   position: absolute;
   left: 4px;

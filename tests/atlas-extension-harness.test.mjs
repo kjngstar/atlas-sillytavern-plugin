@@ -1742,6 +1742,7 @@ async function mountAtlasMap({ stateByChat, chatId = "chat-a", travelPreview = n
     // H16：范围填色投影（只染有证据的格）
     ...(await import(pathToFileURL(join(root, "src", "atlas-map-areas.ts")).href)),
     ...(await import(pathToFileURL(join(root, "src", "atlas-map-layout.ts")).href)),
+    ...(await import(pathToFileURL(join(root, "src", "atlas-floorplan.ts")).href)),
     ATLAS_UI_PAGES: (await import(pathToFileURL(join(root, "src", "atlas-ui-core.ts")).href)).ATLAS_UI_PAGES,
   };
 
@@ -1932,6 +1933,35 @@ test("街道定位：无坐标的上级入口持续高亮，当前街道内部�
   await core.refresh();
   await flush();
   equal(container.querySelector(".aw-current-position"), null, "位置未知时不保留旧图标");
+  dom.window.close();
+});
+
+test("王宫内部：寝殿放在房间范围内，可打开资料和进入房间，不复写地点坐标", async () => {
+  const { projectTablesToMapView } = await import("../src/atlas-table-map-view.ts");
+  const locations = [
+    { id: "loc:1", name: "晨星王宫", parentLocationId: null, mapId: "world", gridX: 10, gridY: 10, description: "", rumors: [], factions: [] },
+    { id: "loc:2", name: "小公主寝殿", parentLocationId: "loc:1", mapId: "loc:1", gridX: null, gridY: null, description: "", rumors: [], factions: [] },
+  ];
+  const characters = [{ id: "npc:maid", name: "女仆", locationId: "loc:2", currentAction: "站在门口", thought: "", actionTendency: "", targetLocationId: null, presence: "present", positionSource: "narrative", mapId: null, gridX: null, gridY: null }];
+  const tableMap = projectTablesToMapView({ locations, characters, items: [] }, null, { points: [], characters: [] }, "2");
+  const original = JSON.stringify(tableMap);
+  const state = s10State({ chatId: "chat-a", worldId: "w-palace", currentLocationId: "2", points: [] });
+  state.tableMap = tableMap;
+  const { container, dom } = await mountRootAtlasMap({ stateByChat: { "chat-a": state } });
+  openPointPanel(container, "晨星王宫");
+  enterSubmapButton(container, "晨星王宫").click();
+  ok(container.querySelector(".aw-building-boundary"));
+  equal(container.querySelectorAll(".aw-floorplan-passage").length, 2);
+  const room = container.querySelector('.aw-floorplan-room[data-child-id="2"]');
+  const marker = container.querySelector('.aw-point[data-point-id="2"]');
+  const x = Number.parseFloat(marker.style.left), y = Number.parseFloat(marker.style.top);
+  ok(x > Number.parseFloat(room.style.left) && x < Number.parseFloat(room.style.left) + Number.parseFloat(room.style.width));
+  ok(y > Number.parseFloat(room.style.top) && y < Number.parseFloat(room.style.top) + Number.parseFloat(room.style.height));
+  marker.click();
+  enterSubmapButton(container, "小公主寝殿").click();
+  ok(container.querySelector(".aw-object--npc"), "寝殿内有人物标记");
+  ok([...container.querySelectorAll(".aw-room-fixture")].some(node => node.textContent === "床"), "寝殿有陈设布局");
+  equal(JSON.stringify(tableMap), original, "展示不改写地点坐标和关系");
   dom.window.close();
 });
 
@@ -2582,6 +2612,7 @@ async function mountRootAtlasMap({ stateByChat, chatId = "chat-a", travelPreview
     // H16：范围填色投影（只染有证据的格）
     ...(await import(pathToFileURL(join(root, "src", "atlas-map-areas.ts")).href)),
     ...(await import(pathToFileURL(join(root, "src", "atlas-map-layout.ts")).href)),
+    ...(await import(pathToFileURL(join(root, "src", "atlas-floorplan.ts")).href)),
     ATLAS_UI_PAGES: (await import(pathToFileURL(join(root, "src", "atlas-ui-core.ts")).href)).ATLAS_UI_PAGES,
   };
 

@@ -13,7 +13,7 @@
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.71";
+export const ATLAS_EXTENSION_VERSION = "0.9.72";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -2727,6 +2727,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
    * H08：缺坐标地点的示意布局（纯函数）。**只有这里调它**——显示用位置绝不回写三表。
    */
   layoutUnplacedMarkers,
+  buildFloorplan,
     // C5（0.9.54）：比例尺 / 距离格式化唯一权威实现在 src/atlas-scale.ts，
     // 经 atlas-browser-entry 导出后从这里解构；index.js 不再自带副本。
     computeScaleBar,
@@ -6699,10 +6700,38 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     const measuredFrame = computeMapFrame(framePoints);
     const roomCols = Number(currentSub?.frame?.cols) > 0 ? Number(currentSub.frame.cols) : 100;
     const roomRows = Number(currentSub?.frame?.rows) > 0 ? Number(currentSub.frame.rows) : 100;
-    cameraFrame = roomScene
+    const floorplan = !sqlMapItems && inSub && typeof buildFloorplan === "function" ? buildFloorplan({
+      name: roomName, cols: roomCols, rows: roomRows,
+      children: [...points.map((point) => ({ id: String(point.id), name: String(point.name), x: Number(point.x), y: Number(point.y) })),
+        ...(tableMap?.unplacedLocations?.entries ?? []).filter((row) => row.parentLocationId === `loc:${view.pointId}`)
+          .map((row) => ({ id: String(row.id).replace(/^loc:/, ""), name: String(row.name) }))],
+    }) : null;
+    cameraFrame = floorplan
+      ? { minX: Math.min(0, floorplan.bounds.x), minY: Math.min(0, floorplan.bounds.y),
+          maxX: Math.max(roomCols, floorplan.bounds.x + floorplan.bounds.width), maxY: Math.max(roomRows, floorplan.bounds.y + floorplan.bounds.height),
+          spanX: Math.max(roomCols, floorplan.bounds.x + floorplan.bounds.width) - Math.min(0, floorplan.bounds.x),
+          spanY: Math.max(roomRows, floorplan.bounds.y + floorplan.bounds.height) - Math.min(0, floorplan.bounds.y) }
+      : roomScene
       ? { minX: 0, minY: 0, maxX: roomCols, maxY: roomRows, spanX: roomCols, spanY: roomRows }
       : measuredFrame;
-    if (roomScene) {
+    if (floorplan) {
+      const drawArea = (area, className) => {
+        const node = el("div", className);
+        Object.assign(node.style, { left: `${area.x}px`, top: `${area.y}px`, width: `${area.width}px`, height: `${area.height}px` });
+        node.dataset.schematic = "true";
+        node.title = `${area.name || "内部区域"}；布局与边界按建筑结构估计`;
+        if (area.childId) node.dataset.childId = area.childId;
+        mapLayer.append(node);
+        return node;
+      };
+      const outline = drawArea(floorplan.bounds, "aw-room-boundary aw-building-boundary");
+      outline.append(el("span", "aw-scene-boundary__label", `📍 ${roomName}`));
+      for (const area of floorplan.regions) drawArea(area, "aw-floorplan-room");
+      for (const area of floorplan.passages) {
+        const passage = drawArea(area, "aw-floorplan-passage");
+        passage.append(el("span", "aw-floorplan-caption", area.name));
+      }
+    } else if (roomScene) {
       // 室内图的粗线框落在真实网格整数线上；只表达示意空间，不作为地理证据。
       const boundary = el("div", "aw-room-boundary");
       boundary.style.left = `${Math.round(roomCols * 0.12)}px`;
@@ -6720,7 +6749,11 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         : library
           ? [{ name: "书架", x: 24, y: 31 }, { name: "书架", x: 24, y: 55 },
               { name: "阅览桌", x: 52, y: 53 }, { name: "书架", x: 77, y: 43 }]
-          : [];
+          : /(寝殿|寝宫|寝室|卧室|客房|bedroom)/i.test(roomName)
+            ? [{ name: "床", x: 72, y: 30 }, { name: "衣柜", x: 27, y: 25 }, { name: "桌", x: 30, y: 56 }, { name: "入口", x: 50, y: 85 }]
+            : /(厅|殿|堂|hall)/i.test(roomName)
+              ? [{ name: "座席", x: 30, y: 46 }, { name: "座席", x: 70, y: 46 }, { name: "入口", x: 50, y: 85 }]
+              : [];
       for (const fixture of fixtures) {
         const marker = el("div", "aw-room-fixture", fixture.name);
         marker.style.left = `${Math.round(roomCols * fixture.x / 100)}px`;
@@ -6968,8 +7001,9 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
           node.dataset.displayOnly = "true";
           node.dataset.pointId = pointId;
           if (hasChildSubmap(submaps, pointId)) node.classList.add("aw-point--sub", "aw-point--entrance");
-          node.style.left = `${Number(marker.x) + cameraFrame.minX}px`;
-          node.style.top = `${Number(marker.y) + cameraFrame.minY}px`;
+          const roomPosition = floorplan?.markers.find((position) => position.id === pointId);
+          node.style.left = `${roomPosition?.x ?? Number(marker.x) + cameraFrame.minX}px`;
+          node.style.top = `${roomPosition?.y ?? Number(marker.y) + cameraFrame.minY}px`;
           node.addEventListener("click", (event) => {
             event.stopPropagation();
             openMapPanel({ id: pointId, rowId: String(entry.id), name: String(entry.name), unplaced: true },

@@ -66,6 +66,8 @@ import { projectWorldSubmaps, sanitizeMapDoc, mapDocOverCapLosses, SUBMAP_DEPTH_
 import { detectStartPlaceholder, resolveSceneStatus, retireStartPlaceholder, sanitizeSceneDoc, sceneDocKey, type SceneDoc } from "./atlas-scene.ts";
 import { validateScaleResponse, roundPositiveScale, scaleCalibrationKey, type FrameRef, type MapScaleCalibration } from "./atlas-scale.ts";
 import { projectSceneLines, projectReceivedClues, renderSceneContext } from "./atlas-scene-context.ts";
+import { selectTaskBackground } from "./atlas-task-context.ts";
+import { isBuildingScene } from "./atlas-floorplan.ts";
 import { buildLorebookPlans } from "./atlas-lorebook.ts";
 import { reconcilePendingCommits, type ReconcileReport } from "./atlas-pending-reconcile.ts";
 import {
@@ -2625,7 +2627,7 @@ function createCoreInstance(
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.71",
+      version: "0.9.72",
       protocolVersion: 1,
       time: now(),
     });
@@ -2851,6 +2853,18 @@ function createCoreInstance(
       const autoApply = body.autoApply === true;
       const triggerId = typeof body.triggerId === "string" ? body.triggerId.slice(0, ATLAS_LIMITS.ID_CHARS) : "";
       const expansionKey = `geo-auto:expansion:${world.id}:${branchKey}`;
+      const sceneTables = await store.read(`tables:${world.id}`);
+      const sceneLocations = sceneTables !== null && validateAtlasTablesStore(sceneTables, { expectedWorldId: world.id }).ok
+        ? (sceneTables as AtlasTablesStoreV1).branches[branchKey]?.locations ?? [] : [];
+      const currentScene = sceneLocations.find((row) => row.id === `loc:${String(binding.currentLocationId ?? "").replace(/^loc:/, "")}`);
+      let building = currentScene;
+      const ancestors = new Set<string>();
+      while (building && !isBuildingScene(building.name) && !ancestors.has(building.id)) {
+        ancestors.add(building.id);
+        building = sceneLocations.find(row => row.id === building?.parentLocationId);
+      }
+      const buildingId = building && isBuildingScene(building.name) ? building.id : null;
+      let expandedBuildingIds: string[] = [];
       let expansionSeen = 0;
       if (autoApply) {
         if (!triggerId) throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, "自动扩展需要回合标识。");
@@ -2874,11 +2888,14 @@ function createCoreInstance(
         }
         const oldMarker = await store.read(expansionKey);
         const marker = isPlainRecord(oldMarker) ? oldMarker : {};
+        expandedBuildingIds = Array.isArray(marker.expandedBuildingIds)
+          ? marker.expandedBuildingIds.filter((id): id is string => typeof id === "string") : [];
         if (marker.lastTriggerId === triggerId) return okResult({ accepted: 0, linked: 0, skipped: "duplicate", scope: "author" });
         expansionSeen = (typeof marker.seen === "number" && Number.isSafeInteger(marker.seen) ? marker.seen : 0) + 1;
-        // 首次成功推演建立场景，此后每四个新回合扩展一次，避免每楼额外消耗模型额度。
-        if (expansionSeen !== 1 && expansionSeen % 4 !== 0) {
-          await store.write(expansionKey, { seen: expansionSeen, lastTriggerId: triggerId, at: now() });
+        // A newly reached building gets its interior immediately. Repeated visits retain the
+        // four-turn cadence; the per-building marker is restored with the originating turn.
+        if (expansionSeen !== 1 && expansionSeen % 4 !== 0 && !(buildingId && !expandedBuildingIds.includes(buildingId))) {
+          await store.write(expansionKey, { ...marker, seen: expansionSeen, lastTriggerId: triggerId, at: now() });
           return okResult({ accepted: 0, linked: 0, skipped: "interval", scope: "author" });
         }
       }
@@ -2887,23 +2904,22 @@ function createCoreInstance(
       const lore = typeof body.loreSupplement === "string" ? body.loreSupplement.slice(0, ATLAS_LIMITS.LORE_SUPPLEMENT_CHARS) : "";
       const recentTexts = Array.isArray(body.recentTexts) ? body.recentTexts.filter((x): x is string => typeof x === "string").slice(-8).map((x) => x.slice(0, 1800)) : [];
       const existingNames = (world.points ?? []).map((point) => String(point.name)).slice(0, 200);
-      const sceneTables = await store.read(`tables:${world.id}`);
-      const sceneLocations = sceneTables !== null && validateAtlasTablesStore(sceneTables, { expectedWorldId: world.id }).ok
-        ? (sceneTables as AtlasTablesStoreV1).branches[branchKey]?.locations ?? [] : [];
-      const currentScene = sceneLocations.find((row) => row.id === `loc:${String(binding.currentLocationId ?? "").replace(/^loc:/, "")}`);
       const prompt = [
         autoApply
           ? "根据当前世界观与剧情，自然补全少量可供后续剧情使用的常见场景。这些是世界结构推断，不是角色已经到访、看见或知道的事实。"
           : "根据题材、世界设定与已出现的地点，提出能使世界结构更完整的候选地点。它们只是可能存在的场所，并非剧情事实。",
-        "现代校园可有城市、街区、图书馆、食堂、教室；异世界可有聚落、工会、拍卖行、迷宫。只选符合当前设定的地点，不机械套用例子，不把课桌等室内陈设当地点。",
+        "优先补全当前建筑内部的功能布局与房间归属，再补全外部世界。王宫可按设定补全门厅、走廊、会客厅、庭院；教学楼可有楼层、教室、办公室。已有寝殿等房间必须复用并保留归属。同一建筑缺少内部结构时，先补 3～5 个有明确功能的内层地点，而不是继续增加孤立的世界图地点。",
+        "现代校园可有城市、街区、图书馆、食堂、教室；异世界可有聚落、工会、拍卖行、迷宫。只选符合当前设定的地点，不机械套用例子，不把课桌等室内陈设当地点。资料为中性的设定摘录，只处理地理结构，不复述亲密描写、身体细节或血腥过程，遵守服务的内容要求。",
         "只输出 JSON：{\"places\":[{\"name\":\"地点名\",\"parentName\":\"可选的上级地点名\",\"reason\":\"为什么符合设定\"}],\"links\":[{\"childName\":\"已有根地点名\",\"parentName\":\"新上级地点名\"}]}。最多 8 个新地点；links 只用于现有无上级地点的合理归属。不要输出坐标、人物或事件，不要重复已有名称。",
         `世界名称：${String(world.name).slice(0, 100)}`,
-        `世界描述：${String(world.description ?? "").slice(0, 2500)}`,
+        `世界设定摘录：${selectTaskBackground(String(world.description ?? ""), 1500) || "未提供"}`,
         `已有地点：${existingNames.join("、")}`,
-        `当前所在场景：${currentScene ? `${currentScene.id}=${currentScene.name}；上级=${currentScene.parentLocationId ?? "world"}；描述=${currentScene.description.slice(0, 500)}` : "未确定"}`,
+        `当前所在场景：${currentScene ? `${currentScene.id}=${currentScene.name}；上级=${currentScene.parentLocationId ?? "world"}；描述=${selectTaskBackground(currentScene.description, 500)}` : "未确定"}`,
+        `优先补全建筑：${building ? `${building.id}=${building.name}` : "当前没有明确建筑，按现有场景补全"}`,
+        `已知包含关系：${sceneLocations.slice(0, 200).map(row => `${row.name} → ${sceneLocations.find(parent => parent.id === row.parentLocationId)?.name ?? "world"}`).join("；")}`,
         "先核对当前场景和已有地点的归属；正文里的简称、别名、班级号或更完整称呼可能仍指同一个场景，不能仅因称呼变化重复创建。补全用于增加缺失的功能场所与上级结构，不重建角色脚下已有的街道或房间；同名但不同归属的地点也不能随意合并。",
-        `设定资料：${lore || "无"}`,
-        `近期剧情：${recentTexts.join("\n---\n") || "无"}`,
+        `设定资料摘录：${selectTaskBackground(lore, 2400) || "无"}`,
+        `近期场景摘录：${recentTexts.map(text => selectTaskBackground(text, 600)).filter(Boolean).join("\n---\n") || "无"}`,
       ].join("\n");
       checkRpm();
       rpmTimestamps.push(now());
@@ -3014,7 +3030,8 @@ function createCoreInstance(
           await store.write(`maps:${world.id}`, { ...mapsBase, schemaVersion: 2, pointMeta });
           worldCache.set(world.id, updated);
         }
-        await store.write(expansionKey, { seen: expansionSeen, lastTriggerId: triggerId, at: now() });
+        await store.write(expansionKey, { seen: expansionSeen, lastTriggerId: triggerId,
+          expandedBuildingIds: buildingId ? [...new Set([...expandedBuildingIds, buildingId])].slice(-128) : expandedBuildingIds, at: now() });
         return okResult({ accepted: accepted.length, linked, pointNames: accepted, skipped: pending.length, scope: "author" });
       }
       await store.write(`geo-auto:suggestions:${world.id}:${branchKey}`, { at: now(), branchKey, suggestions });
@@ -5324,6 +5341,13 @@ function createCoreInstance(
         tableContextTruncated = built.truncated;
       }
       if (!authorOverridden) {
+        // Background is advisory, unlike this turn's verbatim evidence. Limit unrelated
+        // biography/prose while keeping current user/assistant text untouched for quote checks.
+        input.personaDescription = selectTaskBackground(input.personaDescription ?? "", 1200);
+        input.charDescription = selectTaskBackground(input.charDescription ?? "", 1800);
+        input.loreSupplement = selectTaskBackground(input.loreSupplement ?? "", 3000);
+        input.recentContextText = recentAssistantTexts.map(text => selectTaskBackground(text, 900,
+          (world.points ?? []).map(point => String(point.name)))).filter(Boolean).join("\n---\n");
         const segments = options?.mode === "bootstrap"
           ? [...DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA.slice(0, 4), { role: "user", name: "开场识别任务（mode=bootstrap）", mainSlot: "B", content: TABLE_DELTA_BOOTSTRAP_TASK_CONTENT }, DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA[5]!]
           : DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA;

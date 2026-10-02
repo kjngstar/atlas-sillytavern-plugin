@@ -309,6 +309,58 @@ test("自动场景扩展首轮直接入图、按父子层级连接且同回合�
   equal(fetcher.calls.length, 2, "只调用两次模型");
 });
 
+test("新建筑立即补全内部，再次停留不增加请求；地理请求只传场景摘录", async () => {
+  const fetcher = makeFetch([() => openAiTextResponse(GOOD_EDIT),
+    () => openAiTextResponse(JSON.stringify({ places: [] })),
+    () => openAiTextResponse(JSON.stringify({ places: [{ name: "王宫门厅", parentName: "晨星王宫" }] })),
+  ]);
+  const { core, carrier } = await setup(null, { fetchFn: fetcher.fetchFn });
+  equal((await core.handle("POST", "/turns/commit", commitRequest(carrier.session.world))).body.data.receipt.status, "committed");
+  const run = triggerId => core.handle("POST", "/worlds/geo/suggest", { chatId: "chat-a", autoApply: true, triggerId,
+    loreSupplement: "这座王宫位于北部。\n今天的食谱写了很长的做法。", recentTexts: ["小公主留在寝殿。\n这首诗写了很久。"] });
+  equal((await run("first")).body.data.accepted, 0);
+  const location = carrier.session.tables.branches.canon.locations.find(row => row.id === "loc:4103");
+  location.name = "晨星王宫";
+  carrier.session.world.points.find(point => point.id === 4103).name = "晨星王宫";
+  carrier.session.binding.currentLocationId = "4103";
+  const second = await run("second");
+  equal(second.body.data.accepted, 1, "第二轮首次到达建筑，不等待第四轮");
+  const prompt = JSON.stringify(fetcher.calls.at(-1).body.messages);
+  ok(prompt.includes("优先补全建筑：loc:4103=晨星王宫"));
+  ok(prompt.includes("内部的功能布局"));
+  ok(!prompt.includes("食谱"), "地理规划不再带入无关背景原文");
+  ok(!prompt.includes("这首诗"), "地理规划不再发送整段剧情");
+  equal((await run("third")).body.data.skipped, "interval", "相同建筑已补全，再次停留遵循间隔");
+  equal(fetcher.calls.length, 3, "一次提交、两次补全，无重复模型请求");
+});
+
+test("默认请求背景摘录保持本轮证据原文，自定义预设仍可使用原始资料", async () => {
+  for (const custom of [false, true]) {
+    const fetcher = makeFetch([() => openAiTextResponse(GOOD_EDIT)]);
+    const { core, carrier } = await setup(null, { fetchFn: fetcher.fetchFn });
+    if (custom) {
+      const saved = await core.handle("PUT", "/settings", { action: "prompt.save", preset: {
+        name: "作者原始资料预设", systemPrompt: "只输出 <atlasEdit> 块",
+        segments: [{ role: "system", content: "只输出 <atlasEdit> 块" }, { role: "user", content: "$C\n$1\n{{assistantReply}}" }],
+      } }, { local: true });
+      ok(saved.body.ok, "作者预设保存成功");
+      const id = saved.body.data.promptPresets.find(preset => preset.name === "作者原始资料预设").id;
+      ok((await core.handle("PUT", "/settings", { action: "prompt.activate", id }, { local: true })).body.ok, "作者预设启用成功");
+    }
+    const evidence = "你沿主干道走向潮门。然后停下来。";
+    await core.handle("POST", "/turns/commit", commitRequest(carrier.session.world, {
+      charDescription: "姓名：艾琳。\n一份非常复杂的烘焙配方。",
+      loreSupplement: "王宫位于北侧。\n关于点心的详细笔记。", assistantText: evidence,
+    }));
+    const messages = JSON.stringify(fetcher.calls[0].body.messages);
+    ok(messages.includes(evidence), "本轮逐字证据不裁剪或改写");
+    ok(messages.includes("艾琳"));
+    ok(messages.includes("王宫位于北侧"));
+    equal(messages.includes("烘焙配方"), custom, "自定义资料不会被默认筛选强制改写");
+    equal(messages.includes("点心的详细笔记"), custom);
+  }
+});
+
 test("自动补全归属楼层：回退恢复世界、三表、地图元数据和计数，重生成可再补全", async () => {
   let rootName;
   const expansion = () => openAiTextResponse(JSON.stringify({ places: [
