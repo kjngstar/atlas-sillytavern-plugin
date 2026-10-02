@@ -6716,11 +6716,25 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       : measuredFrame;
     if (floorplan) {
       const drawArea = (area, className) => {
-        const node = el("div", className);
+        const node = el(area.childId ? "button" : "div", className);
         Object.assign(node.style, { left: `${area.x}px`, top: `${area.y}px`, width: `${area.width}px`, height: `${area.height}px` });
         node.dataset.schematic = "true";
         node.title = `${area.name || "内部区域"}；布局与边界按建筑结构估计`;
-        if (area.childId) node.dataset.childId = area.childId;
+        if (area.childId) {
+          node.type = "button";
+          node.dataset.childId = area.childId;
+          node.setAttribute("aria-label", `${area.name || "房间"}，点击查看地点详情`);
+          node.title = `${area.name || "房间"}；点击查看地点详情`;
+          node.addEventListener("click", (event) => {
+            event.stopPropagation();
+            const point = points.find((entry) => String(entry.id) === String(area.childId));
+            const unplaced = tableMap?.unplacedLocations?.entries?.find((entry) =>
+              String(entry.id).replace(/^loc:/, "") === String(area.childId));
+            if (point) openMapPanel(point, { inSub, currentSub }, node);
+            else if (unplaced) openMapPanel({ id: String(area.childId), rowId: unplaced.id,
+              name: unplaced.name, unplaced: true }, { inSub, currentSub }, node);
+          });
+        }
         mapLayer.append(node);
         return node;
       };

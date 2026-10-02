@@ -1199,7 +1199,8 @@
 .aw-room-boundary {
   position: absolute;
   box-sizing: border-box;
-  border: 2.5px solid var(--am-grid-major, var(--aw-teal-line));
+  border: 0;
+  box-shadow: inset 0 0 0 calc(2.5px * var(--aw-marker-inv, 1)) var(--am-grid-major, var(--aw-teal-line));
   border-radius: 3px;
   background: rgba(49, 104, 99, 0.035);
   pointer-events: none;
@@ -1232,14 +1233,28 @@
   z-index: 1;
 }
 .aw-floorplan-room {
-  border: 1.5px solid var(--am-grid-major, var(--aw-teal-line));
+  --aw-room-line: var(--am-grid-major, var(--aw-teal-line));
+  border: 0;
+  box-shadow: inset 0 0 0 calc(1.5px * var(--aw-marker-inv, 1)) var(--aw-room-line);
   border-radius: 2px;
   background: rgba(49, 104, 99, 0.06);
 }
 .aw-floorplan-passage {
-  border-left: 1px dashed var(--am-grid-major, var(--aw-teal-line));
-  border-right: 1px dashed var(--am-grid-major, var(--aw-teal-line));
+  border: 0;
+  box-shadow: inset calc(1px * var(--aw-marker-inv, 1)) 0 0 var(--am-grid-major, var(--aw-teal-line)),
+    inset calc(-1px * var(--aw-marker-inv, 1)) 0 0 var(--am-grid-major, var(--aw-teal-line));
   background: rgba(159, 129, 65, 0.08);
+}
+.aw-floorplan-room[data-child-id] {
+  pointer-events: auto;
+  padding: 0;
+  cursor: pointer;
+}
+.aw-floorplan-room[data-child-id]:hover,
+.aw-floorplan-room[data-child-id]:focus-visible {
+  background: var(--aw-teal-soft, rgba(31, 122, 122, 0.16));
+  --aw-room-line: var(--aw-teal);
+  outline: none;
 }
 .aw-floorplan-caption {
   position: absolute;

@@ -8,7 +8,9 @@
     "test": "node --test --no-warnings=ExperimentalWarning --experimental-strip-types \"tests/*.test.mjs\"",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "pack": "node tools/pack.mjs",
-    "build": "node tools/build.mjs"
+    "build": "node tools/build.mjs",
+    "map:lab": "node tools/map-lab/build.mjs",
+    "map:verify": "node --experimental-strip-types tools/map-lab/verify.mjs"
   },
   "dependencies": {
     "sql.js": "1.14.1"
@@ -16,6 +18,9 @@
   "devDependencies": {
     "esbuild": "^0.28.0",
     "jsdom": "^30.1.0",
+    "leaflet": "1.9.4",
+    "leaflet.markercluster": "1.5.3",
+    "playwright": "1.63.0",
     "typescript": "^5.9.3"
   },
   "author": "kjngstar",

@@ -2068,6 +2068,9 @@ test("王宫内部：寝殿放在房间范围内，可打开资料和进入房�
   const x = Number.parseFloat(marker.style.left), y = Number.parseFloat(marker.style.top);
   ok(x > Number.parseFloat(room.style.left) && x < Number.parseFloat(room.style.left) + Number.parseFloat(room.style.width));
   ok(y > Number.parseFloat(room.style.top) && y < Number.parseFloat(room.style.top) + Number.parseFloat(room.style.height));
+  equal(room.tagName, "BUTTON", "房间区域可通过鼠标与键盘访问");
+  room.click();
+  ok(container.querySelector(".aw-mappanel").textContent.includes("小公主寝殿"), "点击区域直接打开同一地点资料");
   marker.click();
   enterSubmapButton(container, "小公主寝殿").click();
   ok(container.querySelector(".aw-object--npc"), "寝殿内有人物标记");

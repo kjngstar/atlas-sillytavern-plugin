@@ -6,6 +6,7 @@
 
 # 第三方参考代码（不发布）
 /tools/ref/
+/artifacts/map-lab/
 
 # Node / 包管理
 node_modules/
