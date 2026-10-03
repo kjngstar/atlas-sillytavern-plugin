@@ -97,6 +97,8 @@ export type SqlSessionOptions = {
   ) => Promise<unknown>;
   now?: () => number;
   confirmSave?: boolean;
+  /** Live host guard checked before publishing a candidate; never serialize this callback. */
+  isCurrentHost?: () => boolean;
   /** H13：宿主/服务端已持有的 Repository（同一核心，不新建第二份世界权威）。 */
   repository?: AtlasSqlRepositoryWithHelpers | null;
   /** 世界书端口；缺失即不做同步（核心数据照常保存）。 */
@@ -124,6 +126,7 @@ export type SqlSession = {
   modelPort: AtlasModelPort | null;
   now: () => number;
   confirmSave: boolean;
+  isCurrentHost?: () => boolean;
   hostPort: AtlasSqlHostPort;
   lorebookPort: LorebookPort | null;
   buildProjection: ((scope: 'pov' | 'scene_portrayal', revision: number) => ManagedLorebookEntry[]) | null;
@@ -407,6 +410,7 @@ export async function openSqlSession(options: SqlSessionOptions): Promise<OpenSq
     modelPort: options.modelPort ?? null,
     now,
     confirmSave: options.confirmSave ?? true,
+    isCurrentHost: options.isCurrentHost,
     hostPort,
     lorebookPort: options.lorebookPort ?? null,
     buildProjection: options.buildProjection ?? null,
@@ -533,6 +537,10 @@ export async function runSqlRollback(session: SqlSession, input: RollbackInput):
 
 async function commitPreparedTurn(session: SqlSession, commit: PreparedCommit): Promise<SqlTurnResult> {
   return await withChatCommitLock(session.chatUid, async () => {
+    if (session.isCurrentHost && !session.isCurrentHost()) {
+      await session.repo.discardPrepared(commit.token);
+      throw new AtlasDbError('SESSION_STALE', '提交前宿主聊天、分支或快照已变化，候选已丢弃', {});
+    }
     // §7.3：保存前再检查聊天身份、head、revision、单写者锁。
     const current = safeRevision(session.repo);
     if (commit.anchor.baseRevision !== current) {

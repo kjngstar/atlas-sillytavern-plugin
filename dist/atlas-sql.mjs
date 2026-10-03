@@ -18058,6 +18058,7 @@ async function openSqlSession(options) {
     modelPort: options.modelPort ?? null,
     now,
     confirmSave: options.confirmSave ?? true,
+    isCurrentHost: options.isCurrentHost,
     hostPort,
     lorebookPort: options.lorebookPort ?? null,
     buildProjection: options.buildProjection ?? null,
@@ -18147,6 +18148,10 @@ async function runSqlRollback(session, input) {
 }
 async function commitPreparedTurn(session, commit) {
   return await withChatCommitLock(session.chatUid, async () => {
+    if (session.isCurrentHost && !session.isCurrentHost()) {
+      await session.repo.discardPrepared(commit.token);
+      throw new AtlasDbError("SESSION_STALE", "提交前宿主聊天、分支或快照已变化，候选已丢弃", {});
+    }
     const current = safeRevision(session.repo);
     if (commit.anchor.baseRevision !== current) {
       await session.repo.discardPrepared(commit.token);

@@ -11,6 +11,8 @@
  *   extensionSettings → 浏览器文档存储 → 引擎核心 → 本地 API（零网络）。
  */
 
+export { createBrowserSqlHost } from './atlas-browser-sql-host.ts';
+
 export {
   createAtlasUiCore,
   ATLAS_UI_EVENTS,

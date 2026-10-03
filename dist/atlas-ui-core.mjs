@@ -1,3 +1,104 @@
+// src/atlas-browser-sql-host.ts
+function error(code, message) {
+  return Object.assign(new Error(message), { code });
+}
+function envelopeOf(metadata) {
+  const atlas = metadata.atlas;
+  return atlas?.database ?? null;
+}
+function snapshot(metadata) {
+  const raw = envelopeOf(metadata);
+  if (!raw || typeof raw !== "object") return { raw, revision: null, hash: null, data: null };
+  const envelope = raw;
+  return { raw: null, revision: envelope.storage_revision, hash: envelope.sha256, data: envelope.data };
+}
+function sameSnapshot(a, b) {
+  return a.raw === b.raw && a.revision === b.revision && a.hash === b.hash && a.data === b.data;
+}
+function createBrowserSqlHost(options) {
+  let current = null;
+  let pending = null;
+  let epoch = 0;
+  function capture(chatUid, branchId) {
+    if (!options.enabled()) throw error("SQL_MODE_DISABLED", "当前宿主未启用 SQL 世界数据");
+    const record = options.context();
+    if (!record || record.chatUid !== chatUid) throw error("CHAT_CHANGED", "SQL 请求不属于当前宿主聊天");
+    const envelope = envelopeOf(record.chatMetadata);
+    return { ...record, branchId: branchId || envelope?.active_branch_id || record.branchId || "main" };
+  }
+  function isCurrent(record, branchId) {
+    const live = options.context();
+    if (!options.enabled() || !live || live.chatUid !== record.chatUid || live.chatMetadata !== record.chatMetadata) return false;
+    const envelope = envelopeOf(live.chatMetadata);
+    return (envelope?.active_branch_id || live.branchId || "main") === branchId;
+  }
+  return {
+    enabled: options.enabled,
+    runtime: options.loadRuntime,
+    async session(chatUid, requestedBranch) {
+      const record = capture(chatUid, requestedBranch);
+      const branchId = record.branchId;
+      if (current && !current.session.closed && current.session.chatUid === chatUid && current.session.branchId === branchId && current.session.chatMetadata === record.chatMetadata && sameSnapshot(current.storedSnapshot, snapshot(record.chatMetadata))) return current.session;
+      if (pending && pending.chatUid === chatUid && pending.branchId === branchId && pending.metadata === record.chatMetadata) return pending.promise;
+      const openingEpoch = ++epoch;
+      const originalSnapshot = snapshot(record.chatMetadata);
+      const task = (async () => {
+        const runtime = await options.loadRuntime();
+        if (!isCurrent(record, branchId) || epoch !== openingEpoch) throw error("CHAT_CHANGED", "SQL 初始化期间宿主身份已变化");
+        if (current) {
+          await runtime.closeSqlSession(current.session);
+          current = null;
+        }
+        const atlas = record.chatMetadata.atlas;
+        if (envelopeOf(record.chatMetadata) === null && (atlas?.tables || atlas?.world || atlas?.maps || atlas?.session)) {
+          throw error("SQL_MIGRATION_REQUIRED", "当前聊天含旧世界数据，必须完成单向迁移后再使用 SQL，不能创建空库覆盖");
+        }
+        const opened = await runtime.openSqlSession({
+          chatUid,
+          branchId,
+          chatMetadata: record.chatMetadata,
+          modelPort: options.modelPort ?? null,
+          confirmSave: true,
+          isCurrentHost: () => isCurrent(record, branchId) && sameSnapshot(
+            current?.session.chatMetadata === record.chatMetadata ? current.storedSnapshot : originalSnapshot,
+            snapshot(record.chatMetadata)
+          ),
+          saveSession: async () => {
+            if (!isCurrent(record, branchId)) throw error("CHAT_CHANGED", "保存前聊天或分支已变化");
+            const result = await record.saveMetadata();
+            if (result === false) throw error("SESSION_WRITE_FAILED", "宿主拒绝保存 SQL 快照");
+            if (!isCurrent(record, branchId)) throw error("CHAT_CHANGED", "保存过程中聊天或分支已变化");
+            return result;
+          }
+        });
+        if (!isCurrent(record, branchId) || epoch !== openingEpoch || !sameSnapshot(snapshot(record.chatMetadata), originalSnapshot)) {
+          await runtime.closeSqlSession(opened);
+          throw error("CHAT_CHANGED", "SQL 初始化期间快照或宿主身份已变化");
+        }
+        current = { session: opened, storedSnapshot: originalSnapshot };
+        return opened;
+      })();
+      const opening = { chatUid, branchId, metadata: record.chatMetadata, promise: task };
+      pending = opening;
+      try {
+        return await task;
+      } finally {
+        if (pending === opening) pending = null;
+      }
+    },
+    saved(session) {
+      if (current?.session === session) current.storedSnapshot = snapshot(session.chatMetadata);
+    },
+    async close() {
+      epoch++;
+      pending = null;
+      const previous = current;
+      current = null;
+      if (previous) await (await options.loadRuntime()).closeSqlSession(previous.session);
+    }
+  };
+}
+
 // src/atlas-contract.ts
 var ATLAS_PROTOCOL_VERSION = 1;
 var ATLAS_ERROR_CODES = {
@@ -104,11 +205,11 @@ function sanitizeDetails(input) {
   }
   return output;
 }
-function serializeAtlasError(error) {
+function serializeAtlasError(error2) {
   return {
-    code: error.code,
-    message: scrubString(error.message),
-    details: sanitizeDetails(error.details)
+    code: error2.code,
+    message: scrubString(error2.message),
+    details: sanitizeDetails(error2.details)
   };
 }
 function toSerializedError(thrown) {
@@ -1159,9 +1260,9 @@ function awaitResponse(work, signal) {
     work.then((value) => {
       signal.removeEventListener("abort", abort);
       resolve(value);
-    }, (error) => {
+    }, (error2) => {
       signal.removeEventListener("abort", abort);
-      reject(error);
+      reject(error2);
     });
     if (signal.aborted) {
       abort();
@@ -1487,10 +1588,10 @@ function rescueAnthropicUrl(url) {
 }
 function gatewayErrorMessage(payload) {
   if (!payload || typeof payload !== "object") return null;
-  const error = payload.error;
-  if (typeof error === "string") return error.slice(0, 120) || null;
-  if (error && typeof error === "object") {
-    const message = error.message;
+  const error2 = payload.error;
+  if (typeof error2 === "string") return error2.slice(0, 120) || null;
+  if (error2 && typeof error2 === "object") {
+    const message = error2.message;
     if (typeof message === "string" && message.trim()) return message.slice(0, 120);
   }
   return null;
@@ -2081,7 +2182,7 @@ function createAtlasUiCore(deps) {
         details: { coreCommitted: true }
       });
       setState({ lorebookHint: lorebookHintFromResult(result) });
-    } catch (error) {
+    } catch (error2) {
       diagnostic3({
         level: "warn",
         source: "lorebook",
@@ -2091,7 +2192,7 @@ function createAtlasUiCore(deps) {
         outcome: "failed",
         details: { coreCommitted: true }
       });
-      setState({ lorebookHint: `世界书写入失败：${error instanceof Error ? error.message : String(error)}` });
+      setState({ lorebookHint: `世界书写入失败：${error2 instanceof Error ? error2.message : String(error2)}` });
     }
   }
   function register(event, handler) {
@@ -4228,10 +4329,10 @@ function parseRoleplayMessage(raw) {
   }
   const savedStoryId = parseOptionalId(raw.savedStoryId);
   if (savedStoryId === false) return null;
-  let error = null;
+  let error2 = null;
   if (raw.error !== void 0 && raw.error !== null) {
     if (!isString(raw.error) || raw.error.length > W0_LIMITS.maxReasonLength) return null;
-    error = raw.error;
+    error2 = raw.error;
   }
   if (raw.presetName !== void 0 && raw.presetName !== null && !isString(raw.presetName)) return null;
   if (raw.model !== void 0 && raw.model !== null && !isString(raw.model)) return null;
@@ -4244,7 +4345,7 @@ function parseRoleplayMessage(raw) {
     ...draft !== null ? { draft } : {},
     ...appliedChangeIndexes ? { appliedChangeIndexes } : {},
     ...savedStoryId !== void 0 ? { savedStoryId } : {},
-    ...error !== null ? { error } : {},
+    ...error2 !== null ? { error: error2 } : {},
     ...isString(raw.presetName) ? { presetName: raw.presetName } : {},
     ...isString(raw.model) ? { model: raw.model } : {}
   };
@@ -4714,7 +4815,7 @@ function parseDefinitionRevision(raw) {
   if (raw.effectiveAt !== void 0 && (!isNumber(raw.effectiveAt) || raw.effectiveAt < 0)) return null;
   const effectiveBranchId = parseOptionalId(raw.effectiveBranchId);
   if (effectiveBranchId === false) return null;
-  let snapshot;
+  let snapshot2;
   if (raw.snapshot !== void 0) {
     if (!isObject(raw.snapshot)) return null;
     const worldBible = parseOptionalArray(raw.snapshot.worldBible, WORLD_BIBLE_MAX_ENTRIES, parseWorldBibleEntry);
@@ -4730,7 +4831,7 @@ function parseDefinitionRevision(raw) {
     const globalPrompt = raw.snapshot.globalPrompt;
     if (globalPrompt !== void 0 && globalPrompt !== null && !isString(globalPrompt)) return null;
     if (!isString(raw.snapshot.contentHash) || raw.snapshot.contentHash.length === 0) return null;
-    snapshot = {
+    snapshot2 = {
       worldBible: worldBible ?? [],
       regions: regions ?? [],
       points: points ?? [],
@@ -4753,7 +4854,7 @@ function parseDefinitionRevision(raw) {
     ...typeof raw.isRetcon === "boolean" ? { isRetcon: raw.isRetcon } : {},
     ...isNumber(raw.effectiveAt) ? { effectiveAt: raw.effectiveAt } : {},
     ...effectiveBranchId !== void 0 ? { effectiveBranchId } : {},
-    ...snapshot ? { snapshot } : {}
+    ...snapshot2 ? { snapshot: snapshot2 } : {}
   };
 }
 function parseStateEffect(raw) {
@@ -4992,8 +5093,8 @@ function parseWorldCheckpoint(raw) {
   if (definitionRevisionId === false) return null;
   const parentCheckpointId = parseOptionalId(raw.parentCheckpointId);
   if (parentCheckpointId === false) return null;
-  const snapshot = parseCheckpointSnapshot(raw.snapshot);
-  if (snapshot === null) return null;
+  const snapshot2 = parseCheckpointSnapshot(raw.snapshot);
+  if (snapshot2 === null) return null;
   if (raw.createdAt !== void 0 && !isNumber(raw.createdAt)) return null;
   if (raw.runtime !== void 0 && raw.runtime !== null) {
     const runtime = parseCheckpointRuntime(raw.runtime);
@@ -5012,7 +5113,7 @@ function parseWorldCheckpoint(raw) {
       ...definitionRevisionId !== void 0 ? { definitionRevisionId } : {},
       ...parentCheckpointId !== void 0 ? { parentCheckpointId } : {},
       runtime,
-      snapshot,
+      snapshot: snapshot2,
       ...isNumber(raw.createdAt) ? { createdAt: raw.createdAt } : {}
     };
   }
@@ -5029,7 +5130,7 @@ function parseWorldCheckpoint(raw) {
     ledgerCount: raw.ledgerCount,
     ...definitionRevisionId !== void 0 ? { definitionRevisionId } : {},
     ...parentCheckpointId !== void 0 ? { parentCheckpointId } : {},
-    snapshot,
+    snapshot: snapshot2,
     ...isNumber(raw.createdAt) ? { createdAt: raw.createdAt } : {}
   };
 }
@@ -8241,7 +8342,7 @@ function latestRevision(world) {
   return list.length > 0 ? list[list.length - 1] : null;
 }
 function captureDefinitionSnapshot(world) {
-  const snapshot = {
+  const snapshot2 = {
     worldBible: JSON.parse(JSON.stringify(world.worldBible ?? [])),
     regions: JSON.parse(JSON.stringify(world.regions ?? [])),
     points: JSON.parse(JSON.stringify(world.points ?? [])),
@@ -8250,8 +8351,8 @@ function captureDefinitionSnapshot(world) {
     entities: JSON.parse(JSON.stringify(world.entityRecords ?? [])),
     contentHash: ""
   };
-  snapshot.contentHash = `defsnap-${hashString(JSON.stringify(snapshot))}`;
-  return snapshot;
+  snapshot2.contentHash = `defsnap-${hashString(JSON.stringify(snapshot2))}`;
+  return snapshot2;
 }
 function definitionRevisionFor(world, at, branchId = null) {
   const candidates = (world.definitionRevisions ?? []).filter((r) => (r.effectiveAt ?? 0) <= at).filter((r) => !r.effectiveBranchId || r.effectiveBranchId === branchId);
@@ -9003,8 +9104,8 @@ function projectCharacterPositionsAt(world, ctx) {
 }
 
 // lib/world-checkpoint.ts
-function checkpointSnapshotHash(snapshot) {
-  return `proj-${hashString(JSON.stringify({ e: snapshot.entityStates, f: snapshot.flags, m: snapshot.memoryRefs, n: snapshot.narrativeEntries, s: snapshot.sourceChain }))}`;
+function checkpointSnapshotHash(snapshot2) {
+  return `proj-${hashString(JSON.stringify({ e: snapshot2.entityStates, f: snapshot2.flags, m: snapshot2.memoryRefs, n: snapshot2.narrativeEntries, s: snapshot2.sourceChain }))}`;
 }
 function isCheckpointIntact(checkpoint) {
   return checkpointSnapshotHash(checkpoint.snapshot) === checkpoint.snapshot.stateHash;
@@ -11446,8 +11547,8 @@ function inferredViolation(table, op, record) {
 function parseAtlasEditBlock(text, sources = {}) {
   const rejected = [];
   const fail3 = (code, path, ref) => {
-    const error = { line: 0, code, path, ...ref === void 0 ? {} : { ref } };
-    return { status: "rejected", edits: [], rejected: [...rejected, error], noop: false, error, signalProposals: [] };
+    const error2 = { line: 0, code, path, ...ref === void 0 ? {} : { ref } };
+    return { status: "rejected", edits: [], rejected: [...rejected, error2], noop: false, error: error2, signalProposals: [] };
   };
   const raw = typeof text === "string" ? text : "";
   const prepared = stripLeadingReasoning(raw);
@@ -13072,7 +13173,7 @@ function applySimulationEffects(input) {
       createdThisTurn.add(taskId);
     }
     const task = branch.tasks.find((row) => row.id === taskId);
-    const snapshot = JSON.parse(JSON.stringify(task));
+    const snapshot2 = JSON.parse(JSON.stringify(task));
     const previousStatus = task.status;
     const previousReason = task.reasonCode;
     if (move.arrived && !noTime) {
@@ -13090,7 +13191,7 @@ function applySimulationEffects(input) {
     }
     if (task.status !== previousStatus || task.reasonCode !== previousReason) {
       if (!createdThisTurn.has(taskId)) {
-        undo.push({ collection: "tasks", id: taskId, before: snapshot });
+        undo.push({ collection: "tasks", id: taskId, before: snapshot2 });
       }
       const status = task.status === "resolved" ? "arrived" : task.status === "blocked" || task.status === "queued" ? "blocked" : "progressed";
       const kindForEvent = task.kind;
@@ -14960,8 +15061,8 @@ function okResult(data) {
   return { status: 200, body: { ok: true, data } };
 }
 function errorResult(thrown) {
-  const error = toSerializedError(thrown);
-  return { status: httpStatusFor(error.code), body: { ok: false, error } };
+  const error2 = toSerializedError(thrown);
+  return { status: httpStatusFor(error2.code), body: { ok: false, error: error2 } };
 }
 async function withSharedMutex(map, key, task) {
   const previous = map.get(key) ?? Promise.resolve();
@@ -17402,16 +17503,16 @@ ${rejectedBlock}` : "");
       }
       const delta = parsed.delta;
       if (!delta.ok) {
-        const error = delta.error;
+        const error2 = delta.error;
         pushLog({
           at: now(),
           kind: "scene-bootstrap-rejected",
           chatId: binding.chatId,
-          reasonCode: error?.code ?? "DELTA_REJECTED"
+          reasonCode: error2?.code ?? "DELTA_REJECTED"
         });
         throw new AtlasError(
           ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
-          `开场候选三表未通过校验（${error?.code ?? "UNKNOWN"} @ ${error?.path ?? "$"}）：开场未提交，可重试识别。`,
+          `开场候选三表未通过校验（${error2?.code ?? "UNKNOWN"} @ ${error2?.path ?? "$"}）：开场未提交，可重试识别。`,
           { retryable: true }
         );
       }
@@ -19289,9 +19390,11 @@ function createAtlasSqlRouteGroup(deps) {
   const now = deps.now ?? (() => Date.now());
   let runtimePromise = null;
   function enabled() {
+    if (deps.sessionProvider) return deps.sessionProvider.enabled();
     return deps.repository !== null && deps.repository !== void 0;
   }
   function sqlRuntime() {
+    if (deps.sessionProvider) return deps.sessionProvider.runtime();
     if (deps.runtime) return Promise.resolve(deps.runtime);
     if (!runtimePromise) runtimePromise = loadSqlRuntime();
     return runtimePromise;
@@ -19348,7 +19451,9 @@ function createAtlasSqlRouteGroup(deps) {
     });
   }
   async function sessionFor(chatUid, branchId, runtime) {
-    const existing = sessions.get(chatUid);
+    if (deps.sessionProvider) return deps.sessionProvider.session(chatUid, branchId);
+    const key = `${chatUid}|${branchId ?? "main"}`;
+    const existing = sessions.get(key);
     if (existing && !existing.closed) return existing;
     const host = hostFor(chatUid);
     if (!host || !isPlainRecord(host.chatMetadata)) {
@@ -19370,7 +19475,7 @@ function createAtlasSqlRouteGroup(deps) {
       lorebookPort: deps.lorebookPort ?? null,
       buildProjection: deps.buildProjection
     });
-    sessions.set(chatUid, opened);
+    sessions.set(key, opened);
     return opened;
   }
   function headOf(session) {
@@ -19431,6 +19536,7 @@ function createAtlasSqlRouteGroup(deps) {
           operations: Array.isArray(record.operations) ? record.operations : void 0
         };
         const result = await runtime.runSqlTurn(session, input);
+        if (result.coreSaved) deps.sessionProvider?.saved(session);
         return okResult({
           receipt: result.receipt,
           coreSaved: result.coreSaved,
@@ -19463,6 +19569,7 @@ function createAtlasSqlRouteGroup(deps) {
             anchor: anchorFromBody(record, session, `retry:${turnId}`)
           });
           const persisted = await runtime.persistSqlSession(session, { commit: maintenance });
+          if (persisted.saved) deps.sessionProvider?.saved(session);
           issues.push(...persisted.issues);
           coreSaved = persisted.saved;
         }
@@ -19482,6 +19589,7 @@ function createAtlasSqlRouteGroup(deps) {
           targetParentTurnId: sqlText(record.targetParentTurnId),
           expectedRevision: sqlInt(record.expectedRevision) ?? revisionOf(session)
         });
+        if (result.coreSaved) deps.sessionProvider?.saved(session);
         return okResult({
           receipt: result.receipt,
           coreSaved: result.coreSaved,
@@ -19553,6 +19661,7 @@ function createAtlasSqlRouteGroup(deps) {
         };
         const maintenance = await session.repo.prepareMaintenance(input);
         const persisted = await runtime.persistSqlSession(session, { commit: maintenance });
+        if (persisted.saved) deps.sessionProvider?.saved(session);
         return okResult({
           coreSaved: persisted.saved,
           revision: revisionOf(session),
@@ -19602,6 +19711,11 @@ function createAtlasSqlRouteGroup(deps) {
       return sessions.size;
     },
     async close() {
+      if (deps.sessionProvider) {
+        await deps.sessionProvider.close();
+        return;
+      }
+      if (sessions.size === 0) return;
       const runtime = await sqlRuntime();
       if (!runtime) {
         sessions.clear();
@@ -19630,6 +19744,7 @@ function createAtlasServerCore(deps) {
   const globalCore = createCoreInstance(deps.store, deps, shared);
   const sqlRouteGroup = createAtlasSqlRouteGroup({
     repository: deps.sqlRepository ?? null,
+    sessionProvider: deps.sqlSessionProvider ?? null,
     modelPort: deps.sqlModelPort ?? null,
     host: deps.sqlHost ?? null,
     lorebookPort: deps.sqlLorebookPort ?? null,
@@ -20562,8 +20677,8 @@ function createTavernMainFetch(deps) {
       const text = typeof response === "string" ? response : String(response ?? "");
       if (!text.trim()) return hostErrorJsonResponse("主API生成返回为空。");
       return textResponse(text.trim());
-    } catch (error) {
-      return hostErrorJsonResponse(`主API生成失败：${error instanceof Error ? error.message : String(error)}`);
+    } catch (error2) {
+      return hostErrorJsonResponse(`主API生成失败：${error2 instanceof Error ? error2.message : String(error2)}`);
     }
   };
 }
@@ -20602,8 +20717,8 @@ function createTavernProfileFetch(deps) {
         const text = typeof content === "string" ? content : "";
         if (!text.trim()) return hostErrorJsonResponse("酒馆连接预设返回为空或形状不支持。");
         return textResponse(text.trim());
-      } catch (error) {
-        return hostErrorJsonResponse(`酒馆连接预设调用失败：${error instanceof Error ? error.message : String(error)}`);
+      } catch (error2) {
+        return hostErrorJsonResponse(`酒馆连接预设调用失败：${error2 instanceof Error ? error2.message : String(error2)}`);
       } finally {
         if (needSwitch) {
           try {
@@ -22028,6 +22143,7 @@ export {
   createAtlasServerCore,
   createAtlasUiCore,
   createBrowserDocumentStore,
+  createBrowserSqlHost,
   createDragGesture,
   createHoldDragGesture,
   createLocalAtlasApi,

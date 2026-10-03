@@ -70,7 +70,44 @@ try {
   assert.ok(requests.filter(path => path === '/dist/vendor/sql-wasm.wasm').length >= 2);
   assert.equal(requests.some(path => path.includes('sql-wasm-browser.wasm')), false);
   assert.ok(outgoing.every(url => url.startsWith(origin)));
-  console.log(JSON.stringify({ passed: true, main, worker, wasmRequests: requests.filter(path => path.endsWith('.wasm')) }, null, 2));
+  const startupPage = await browser.newPage();
+  const startupRequests = [];
+  startupPage.on('request', req => startupRequests.push(req.url()));
+  await startupPage.goto(origin);
+  const off = await startupPage.evaluate(async () => {
+    let saves = 0;
+    const host = { chatId: 'release-startup', chatMetadata: {}, extensionSettings: {}, chat: [],
+      saveMetadata: async () => { saves++; return true; }, saveSettingsDebounced() {},
+      getRequestHeaders: () => ({}), eventSource: { on() {}, off() {}, removeListener() {} }, event_types: {} };
+    window.SillyTavern = { getContext: () => host };
+    window.releaseStartupHost = host;
+    window.releaseStartupSaves = () => saves;
+    const ext = await import('/index.js');
+    const mounted = await ext.connectAtlas();
+    if (!mounted) throw Error('Real release startup failed');
+    window.releaseStartup = mounted;
+    const result = await mounted.api.request('POST', '/sql/state', { chatUid: host.chatId });
+    return result.body.data;
+  });
+  assert.equal(off.sqlMode, false);
+  assert.equal(startupRequests.some(url => /atlas-sql|\.wasm/.test(url)), false, 'SQL off startup must not load SQL');
+  const started = await startupPage.evaluate(async () => {
+    const host = window.releaseStartupHost;
+    host.extensionSettings.atlas_world_sim = { sqlMode: true };
+    const api = window.releaseStartup.api;
+    const state = await api.request('POST', '/sql/state', { chatUid: host.chatId, branchId: 'main', query: { kind: 'map' } });
+    if (!state.body.ok) throw Error(JSON.stringify(state.body));
+    const turn = await api.request('POST', '/sql/turn', { chatUid: host.chatId, branchId: 'main', hostMessageUid: 'release-floor',
+      variantKey: 'v0', inputHash: 'release-first-turn', manual: true,
+      operations: [{ op: 'location.upsert', ref: 'new:release_room', data: { name: '发布启动验收房间', kind: 'room' } }] });
+    return { state: state.body.data, turn: turn.body.data, saves: window.releaseStartupSaves(),
+      stored: Boolean(host.chatMetadata.atlas?.database?.data) };
+  });
+  assert.equal(started.turn.coreSaved, true, JSON.stringify(started.turn));
+  assert.equal(started.saves, 1); assert.equal(started.stored, true);
+  console.log(JSON.stringify({ passed: true, main, worker,
+    startup: { offSqlMode: off.sqlMode, coreSaved: started.turn.coreSaved, saves: started.saves, stored: started.stored },
+    wasmRequests: requests.filter(path => path.endsWith('.wasm')) }, null, 2));
 } finally {
   await browser?.close();
   await new Promise(resolve => server.close(resolve));

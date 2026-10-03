@@ -10976,10 +10976,32 @@ async function connectOnce() {
         throw error;
       }
     };
+    const sqlSessionProvider = mod.createBrowserSqlHost({
+      enabled: () => context()?.extensionSettings?.[ATLAS_SETTINGS_KEY]?.[ATLAS_SQL_MODE_SETTING] === true,
+      context: () => {
+        const record = atlasContextRecord(context);
+        const live = context();
+        if (!record?.chatId || !record.chatMetadata || typeof live?.saveMetadata !== "function") return null;
+        return {
+          chatUid: String(record.chatId),
+          branchId: readAtlasSession(context)?.binding?.branchId ?? null,
+          chatMetadata: record.chatMetadata,
+          saveMetadata: () => live.saveMetadata(),
+        };
+      },
+      loadRuntime: async () => {
+        const sql = await loadSqlCore();
+        if (typeof sql?.loadAtlasSqlRuntime !== "function") {
+          throw Object.assign(new Error("SQL 运行时未加载，无法打开宿主数据库"), { code: "SQL_RUNTIME_UNAVAILABLE" });
+        }
+        return sql.loadAtlasSqlRuntime();
+      },
+    });
     const engine = mod.createAtlasServerCore({
       store: engineStore,
       fetchFn: hostDispatchFetch,
       onDiagnostic: emitAtlasDiagnostic,
+      sqlSessionProvider,
     });
     // R15 集成：启动时清扫 orphan pending（R12 收口的最后一块——reconcilePending
     // 此前只有实现与单测，没有任何调用方）。带当前聊天会话调用：turn: 文档在
@@ -11285,7 +11307,7 @@ async function connectOnce() {
     core.init();
     // H05/§17H：把 settings.html 的「SQL 世界数据」开关接上（默认关闭；抽屉不在则静默跳过）
     bindSqlModeToggle(context, () => rerender());
-    connected = { core, rerender };
+    connected = { core, rerender, api };
     return connected;
   } catch (error) {
     emitAtlasDiagnostic({ level: "error", source: "ui", code: "UI_CORE_LOAD_FAILED",

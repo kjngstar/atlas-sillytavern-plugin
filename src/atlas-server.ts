@@ -2261,6 +2261,8 @@ export interface AtlasServerCoreDeps {
    * 缺省 = 未启用 SQL：`/sql/*` 一律返回 `SQL_MODE_DISABLED`，既有路径一字不变。
    */
   sqlRepository?: AtlasSqlRepositoryWithHelpers | null;
+  /** Browser host owns a lazy repository per captured chat/branch instead of a global singleton. */
+  sqlSessionProvider?: AtlasSqlSessionProvider | null;
   /** SQL 模式的前台模型端口（阶段批量）。 */
   sqlModelPort?: AtlasModelPort | null;
   /** SQL 模式的宿主落点（chatMetadata + 保存函数）；可按 chatUid 决定。 */
@@ -7446,8 +7448,17 @@ export type AtlasSqlHostBinding = {
   confirmSave?: boolean;
 };
 
+export type AtlasSqlSessionProvider = {
+  enabled(): boolean;
+  runtime(): Promise<AtlasSqlRuntime>;
+  session(chatUid: string, branchId?: string): Promise<SqlSession>;
+  saved(session: SqlSession): void;
+  close(): Promise<void>;
+};
+
 export type AtlasSqlRouteGroupDeps = {
   repository: AtlasSqlRepositoryWithHelpers | null;
+  sessionProvider?: AtlasSqlSessionProvider | null;
   modelPort?: AtlasModelPort | null;
   host?: AtlasSqlHostBinding | ((chatUid: string) => AtlasSqlHostBinding | null) | null;
   lorebookPort?: LorebookPort | null;
@@ -7523,10 +7534,12 @@ export function createAtlasSqlRouteGroup(deps: AtlasSqlRouteGroupDeps) {
   let runtimePromise: Promise<AtlasSqlRuntime | null> | null = null;
 
   function enabled(): boolean {
+    if (deps.sessionProvider) return deps.sessionProvider.enabled();
     return deps.repository !== null && deps.repository !== undefined;
   }
 
   function sqlRuntime(): Promise<AtlasSqlRuntime | null> {
+    if (deps.sessionProvider) return deps.sessionProvider.runtime();
     if (deps.runtime) return Promise.resolve(deps.runtime);
     if (!runtimePromise) runtimePromise = loadSqlRuntime();
     return runtimePromise;
@@ -7588,7 +7601,9 @@ export function createAtlasSqlRouteGroup(deps: AtlasSqlRouteGroupDeps) {
   }
 
   async function sessionFor(chatUid: string, branchId: string | undefined, runtime: AtlasSqlRuntime): Promise<SqlSession> {
-    const existing = sessions.get(chatUid);
+    if (deps.sessionProvider) return deps.sessionProvider.session(chatUid, branchId);
+    const key = `${chatUid}|${branchId ?? 'main'}`;
+    const existing = sessions.get(key);
     if (existing && !existing.closed) return existing;
     const host = hostFor(chatUid);
     if (!host || !isPlainRecord(host.chatMetadata)) {
@@ -7613,7 +7628,7 @@ export function createAtlasSqlRouteGroup(deps: AtlasSqlRouteGroupDeps) {
       lorebookPort: deps.lorebookPort ?? null,
       buildProjection: deps.buildProjection,
     });
-    sessions.set(chatUid, opened);
+    sessions.set(key, opened);
     return opened;
   }
 
@@ -7686,6 +7701,7 @@ export function createAtlasSqlRouteGroup(deps: AtlasSqlRouteGroupDeps) {
           operations: Array.isArray(record.operations) ? (record.operations as TurnInput["operations"]) : undefined,
         };
         const result = await runtime.runSqlTurn(session, input);
+        if (result.coreSaved) deps.sessionProvider?.saved(session);
         return okResult({
           receipt: result.receipt,
           coreSaved: result.coreSaved,
@@ -7725,6 +7741,7 @@ export function createAtlasSqlRouteGroup(deps: AtlasSqlRouteGroupDeps) {
             anchor: anchorFromBody(record, session, `retry:${turnId}`),
           });
           const persisted = await runtime.persistSqlSession(session, { commit: maintenance });
+          if (persisted.saved) deps.sessionProvider?.saved(session);
           issues.push(...persisted.issues);
           coreSaved = persisted.saved;
         }
@@ -7745,6 +7762,7 @@ export function createAtlasSqlRouteGroup(deps: AtlasSqlRouteGroupDeps) {
           targetParentTurnId: sqlText(record.targetParentTurnId),
           expectedRevision: sqlInt(record.expectedRevision) ?? revisionOf(session),
         });
+        if (result.coreSaved) deps.sessionProvider?.saved(session);
         return okResult({
           receipt: result.receipt,
           coreSaved: result.coreSaved,
@@ -7823,6 +7841,7 @@ export function createAtlasSqlRouteGroup(deps: AtlasSqlRouteGroupDeps) {
         };
         const maintenance: PreparedMaintenance = await session.repo.prepareMaintenance(input);
         const persisted = await runtime.persistSqlSession(session, { commit: maintenance });
+        if (persisted.saved) deps.sessionProvider?.saved(session);
         return okResult({
           coreSaved: persisted.saved,
           revision: revisionOf(session),
@@ -7880,6 +7899,8 @@ export function createAtlasSqlRouteGroup(deps: AtlasSqlRouteGroupDeps) {
       return sessions.size;
     },
     async close(): Promise<void> {
+      if (deps.sessionProvider) { await deps.sessionProvider.close(); return; }
+      if (sessions.size === 0) return;
       const runtime = await sqlRuntime();
       if (!runtime) {
         sessions.clear();
@@ -7913,6 +7934,7 @@ export function createAtlasServerCore(deps: AtlasServerCoreDeps) {
   // H13：SQL 世界数据模式的路由组（未注入 Repository 时 enabled()=false，全部拒绝且不加载 sql.js）。
   const sqlRouteGroup = createAtlasSqlRouteGroup({
     repository: deps.sqlRepository ?? null,
+    sessionProvider: deps.sqlSessionProvider ?? null,
     modelPort: deps.sqlModelPort ?? null,
     host: deps.sqlHost ?? null,
     lorebookPort: deps.sqlLorebookPort ?? null,

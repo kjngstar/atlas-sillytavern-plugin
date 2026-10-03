@@ -306,7 +306,7 @@ export interface AtlasServerSettingsV2 {
   rpmLimit: number;
   /** 0.9.22 推演是否附带世界书资料块（被供应商审核拦截时的逃生门；缺省 true）。 */
   loreSupplementEnabled?: boolean;
-  /** R06 推进输出协议："v2"（新封套，缺省）或 "v1"（旧契约逃生门）。 */
+  /** 运行时为 table-delta-v1；v1/v2 仅兼容旧设置读取，schemaVersion:2 是设置存档版本。 */
   worldTurnProtocol?: AtlasWorldTurnProtocol;
   /** 0.9.16 内容替换规则库（照抄 shujuku + 开关增强；字段缺失时补预制库）。 */
   contentReplaceRules?: AtlasContentReplaceRule[];
