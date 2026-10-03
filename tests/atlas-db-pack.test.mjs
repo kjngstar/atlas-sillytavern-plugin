@@ -165,6 +165,8 @@ test('T29-03 禁 CDN 仍运行：产物无 CDN 主机，vendor 定位器只放�
   // vendor 定位器：只认白名单文件名，且无论如何都返回本地相对路径。
   const locate = sqlVendorLocator('https://host.example/ext/dist/');
   assert.equal(locate('sql-wasm.wasm'), 'https://host.example/ext/dist/vendor/sql-wasm.wasm');
+  assert.equal(locate('sql-wasm-browser.wasm'), 'https://host.example/ext/dist/vendor/sql-wasm.wasm');
+  assert.equal(locate('sql-wasm-browser.js'), 'https://host.example/ext/dist/vendor/sql-wasm.js');
   assert.equal(locate('/abs/path/sql-wasm.js'), 'https://host.example/ext/dist/vendor/sql-wasm.js');
   assert.equal(
     locate('https://cdn.jsdelivr.net/npm/sql.js@1.14.1/dist/sql-wasm.wasm'),

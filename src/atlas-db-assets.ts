@@ -46,6 +46,9 @@ export function resolveSqlAssetBase(assetBase?: string | null): string {
   } catch {
     /* 非 URL 环境（部分宿主打包器）：交给调用方显式传 assetBase */
   }
+  // 经典 Worker 打包为 IIFE，没有 import.meta.url；资源仍相对 Worker 脚本目录。
+  const location = (globalThis as { location?: { href?: string } }).location;
+  if (location?.href) return new URL('.', location.href).href;
   return './';
 }
 
@@ -56,6 +59,9 @@ export function resolveSqlAssetBase(assetBase?: string | null): string {
 export function sqlVendorLocator(assetBase?: string | null): (file: string) => string {
   const base = resolveSqlAssetBase(assetBase);
   const allowed = new Map(ATLAS_SQL_VENDOR_FILES.map((asset) => [asset.relative.replace('vendor/', ''), asset.relative]));
+  // sql.js 的 browser 条件导出请求这些名称；二进制仍使用同版本随包资源。
+  allowed.set('sql-wasm-browser.wasm', 'vendor/sql-wasm.wasm');
+  allowed.set('sql-wasm-browser.js', 'vendor/sql-wasm.js');
   return (file: string): string => {
     const normalized = String(file).replace(/^.*[\\/]/, '');
     const relative = allowed.get(normalized);

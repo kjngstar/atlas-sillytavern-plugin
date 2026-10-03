@@ -11,6 +11,7 @@
 import initSqlJs from 'sql.js';
 import type { Database, SqlJsStatic, Statement } from 'sql.js';
 import { ATLAS_SCHEMA_VERSION } from './atlas-db-schema.ts';
+import { sqlVendorLocator } from './atlas-db-assets.ts';
 import type { SqlValue } from './atlas-db-contract.ts';
 
 export type SqljsLocator = (file: string) => string;
@@ -53,7 +54,10 @@ export async function loadSqlModule(locateFile?: SqljsLocator): Promise<SqlModul
   if (!modulePromise) {
     modulePromise = (async () => {
       try {
-        const config = locateFile ? { locateFile } : {};
+        // Node 源码运行继续使用 sql.js 包内定位；发布浏览器与 Worker 必须走本地 vendor。
+        const isNode = Boolean((globalThis as { process?: { versions?: { node?: string } } }).process?.versions?.node);
+        const locator = locateFile ?? (isNode ? undefined : sqlVendorLocator());
+        const config = locator ? { locateFile: locator } : {};
         return await initSqlJs(config);
       } catch (err) {
         throw new AtlasDbError('DB_WASM_LOAD_FAILED', `sql.js 加载失败：${(err as Error).message}`, {

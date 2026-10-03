@@ -3003,6 +3003,53 @@ END`;
     db.run(`PRAGMA user_version = ${ATLAS_SCHEMA_VERSION}`);
   }
 
+  // src/atlas-db-assets.ts
+  var import_meta = {};
+  var ATLAS_SQL_VENDOR_FILES = [
+    {
+      relative: "vendor/sql-wasm.js",
+      source: "dist/sql-wasm.js",
+      purpose: "sql.js 1.14.1 的 JS 侧（Node/浏览器通用），随组件打包"
+    },
+    {
+      relative: "vendor/sql-wasm.wasm",
+      source: "dist/sql-wasm.wasm",
+      purpose: "同版本 wasm 二进制；与 JS 侧必须同版本"
+    }
+  ];
+  function resolveSqlAssetBase(assetBase) {
+    if (assetBase && assetBase.length > 0) {
+      return assetBase.endsWith("/") ? assetBase : `${assetBase}/`;
+    }
+    try {
+      const metaUrl = import_meta.url;
+      if (metaUrl) {
+        const url = new URL(".", metaUrl);
+        return url.href.endsWith("/") ? url.href : `${url.href}/`;
+      }
+    } catch {
+    }
+    const location = globalThis.location;
+    if (location?.href) return new URL(".", location.href).href;
+    return "./";
+  }
+  function sqlVendorLocator(assetBase) {
+    const base = resolveSqlAssetBase(assetBase);
+    const allowed = new Map(ATLAS_SQL_VENDOR_FILES.map((asset) => [asset.relative.replace("vendor/", ""), asset.relative]));
+    allowed.set("sql-wasm-browser.wasm", "vendor/sql-wasm.wasm");
+    allowed.set("sql-wasm-browser.js", "vendor/sql-wasm.js");
+    return (file) => {
+      const normalized = String(file).replace(/^.*[\\/]/, "");
+      const relative = allowed.get(normalized);
+      if (!relative) {
+        throw new Error(
+          `DB_WASM_LOAD_FAILED: sql.js 请求了白名单外的文件「${file}」；只允许 ${[...allowed.keys()].join(" / ")}（不从 CDN 加载）`
+        );
+      }
+      return `${base}${relative}`;
+    };
+  }
+
   // src/atlas-db-runtime.ts
   var modulePromise = null;
   var injectedModule = null;
@@ -3025,7 +3072,9 @@ END`;
     if (!modulePromise) {
       modulePromise = (async () => {
         try {
-          const config = locateFile ? { locateFile } : {};
+          const isNode = Boolean(globalThis.process?.versions?.node);
+          const locator = locateFile ?? (isNode ? void 0 : sqlVendorLocator());
+          const config = locator ? { locateFile: locator } : {};
           return await (0, import_sql.default)(config);
         } catch (err) {
           throw new AtlasDbError("DB_WASM_LOAD_FAILED", `sql.js 加载失败：${err.message}`, {

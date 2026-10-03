@@ -3022,6 +3022,65 @@ var init_atlas_db_schema = __esm({
   }
 });
 
+// src/atlas-db-assets.ts
+function resolveSqlAssetBase(assetBase) {
+  if (assetBase && assetBase.length > 0) {
+    return assetBase.endsWith("/") ? assetBase : `${assetBase}/`;
+  }
+  try {
+    const metaUrl = import.meta.url;
+    if (metaUrl) {
+      const url = new URL(".", metaUrl);
+      return url.href.endsWith("/") ? url.href : `${url.href}/`;
+    }
+  } catch {
+  }
+  const location = globalThis.location;
+  if (location?.href) return new URL(".", location.href).href;
+  return "./";
+}
+function sqlVendorLocator(assetBase) {
+  const base = resolveSqlAssetBase(assetBase);
+  const allowed = new Map(ATLAS_SQL_VENDOR_FILES.map((asset) => [asset.relative.replace("vendor/", ""), asset.relative]));
+  allowed.set("sql-wasm-browser.wasm", "vendor/sql-wasm.wasm");
+  allowed.set("sql-wasm-browser.js", "vendor/sql-wasm.js");
+  return (file) => {
+    const normalized = String(file).replace(/^.*[\\/]/, "");
+    const relative = allowed.get(normalized);
+    if (!relative) {
+      throw new Error(
+        `DB_WASM_LOAD_FAILED: sql.js 请求了白名单外的文件「${file}」；只允许 ${[...allowed.keys()].join(" / ")}（不从 CDN 加载）`
+      );
+    }
+    return `${base}${relative}`;
+  };
+}
+function verifySqlVendorAssets(available) {
+  const present = new Set(available);
+  const missing = ATLAS_SQL_VENDOR_FILES.map((a) => a.relative).filter((r) => !present.has(r));
+  const known = new Set(ATLAS_SQL_VENDOR_FILES.map((a) => a.relative));
+  const extra = [...present].filter((p) => !known.has(p) && p.startsWith("vendor/"));
+  return { ok: missing.length === 0, missing, extra };
+}
+var ATLAS_SQL_VENDOR_FILES;
+var init_atlas_db_assets = __esm({
+  "src/atlas-db-assets.ts"() {
+    "use strict";
+    ATLAS_SQL_VENDOR_FILES = [
+      {
+        relative: "vendor/sql-wasm.js",
+        source: "dist/sql-wasm.js",
+        purpose: "sql.js 1.14.1 的 JS 侧（Node/浏览器通用），随组件打包"
+      },
+      {
+        relative: "vendor/sql-wasm.wasm",
+        source: "dist/sql-wasm.wasm",
+        purpose: "同版本 wasm 二进制；与 JS 侧必须同版本"
+      }
+    ];
+  }
+});
+
 // src/atlas-db-runtime.ts
 function injectSqlModule(mod) {
   injectedModule = mod;
@@ -3036,7 +3095,9 @@ async function loadSqlModule(locateFile) {
   if (!modulePromise) {
     modulePromise = (async () => {
       try {
-        const config = locateFile ? { locateFile } : {};
+        const isNode = Boolean(globalThis.process?.versions?.node);
+        const locator = locateFile ?? (isNode ? void 0 : sqlVendorLocator());
+        const config = locator ? { locateFile: locator } : {};
         return await (0, import_sql.default)(config);
       } catch (err) {
         throw new AtlasDbError("DB_WASM_LOAD_FAILED", `sql.js 加载失败：${err.message}`, {
@@ -3191,6 +3252,7 @@ var init_atlas_db_runtime = __esm({
     "use strict";
     import_sql = __toESM(require_sql_wasm_browser(), 1);
     init_atlas_db_schema();
+    init_atlas_db_assets();
     modulePromise = null;
     injectedModule = null;
     AtlasDbError = class extends Error {
@@ -17807,54 +17869,8 @@ function legacyBackupPayload(raw, options = {}) {
   };
 }
 
-// src/atlas-db-assets.ts
-var ATLAS_SQL_VENDOR_FILES = [
-  {
-    relative: "vendor/sql-wasm.js",
-    source: "dist/sql-wasm.js",
-    purpose: "sql.js 1.14.1 的 JS 侧（Node/浏览器通用），随组件打包"
-  },
-  {
-    relative: "vendor/sql-wasm.wasm",
-    source: "dist/sql-wasm.wasm",
-    purpose: "同版本 wasm 二进制；与 JS 侧必须同版本"
-  }
-];
-function resolveSqlAssetBase(assetBase) {
-  if (assetBase && assetBase.length > 0) {
-    return assetBase.endsWith("/") ? assetBase : `${assetBase}/`;
-  }
-  try {
-    const metaUrl = import.meta.url;
-    if (metaUrl) {
-      const url = new URL(".", metaUrl);
-      return url.href.endsWith("/") ? url.href : `${url.href}/`;
-    }
-  } catch {
-  }
-  return "./";
-}
-function sqlVendorLocator(assetBase) {
-  const base = resolveSqlAssetBase(assetBase);
-  const allowed = new Map(ATLAS_SQL_VENDOR_FILES.map((asset) => [asset.relative.replace("vendor/", ""), asset.relative]));
-  return (file) => {
-    const normalized = String(file).replace(/^.*[\\/]/, "");
-    const relative = allowed.get(normalized);
-    if (!relative) {
-      throw new Error(
-        `DB_WASM_LOAD_FAILED: sql.js 请求了白名单外的文件「${file}」；只允许 ${[...allowed.keys()].join(" / ")}（不从 CDN 加载）`
-      );
-    }
-    return `${base}${relative}`;
-  };
-}
-function verifySqlVendorAssets(available) {
-  const present = new Set(available);
-  const missing = ATLAS_SQL_VENDOR_FILES.map((a) => a.relative).filter((r) => !present.has(r));
-  const known = new Set(ATLAS_SQL_VENDOR_FILES.map((a) => a.relative));
-  const extra = [...present].filter((p) => !known.has(p) && p.startsWith("vendor/"));
-  return { ok: missing.length === 0, missing, extra };
-}
+// src/atlas-sql-browser-entry.ts
+init_atlas_db_assets();
 
 // src/atlas-sql-session.ts
 init_atlas_db_envelope();

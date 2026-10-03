@@ -31,6 +31,19 @@ SQL 后台待接线模块显式登记；未知动态引用不判定为死代码�
 报告输出到忽略提交的 `.tmp/cleanup-b-reference-audit.json`。
 此批未改存储或 AI 输出协议。
 
+## Q02：真实发布资源加载
+
+`atlas-db-assets.ts` 显式映射 sql.js browser 条件导出的 WASM 名称；
+`atlas-db-runtime.ts` 在浏览器与经典 Worker 默认使用本地 vendor 定位器，Node 保留包内定位。
+Worker 的资源根从其脚本 URL 解析。两个 sql.js WASM 原文件的 SHA256 相同。
+新增 `node tools/verify-sql-release.mjs`：只服务真实 release 文件，不加载酒馆或模型，
+不注入 SQL 模块、不拦截资源请求。主线程真实打开 20 表数据库、读回外键为 1；
+经典 Worker 真实打开并导出 SQLite。两次 WASM 请求均命中 `/dist/vendor/sql-wasm.wasm`。
+打开只读会话没有保存元数据。
+
+typecheck、pack、完整 npm test 均退出 0，1385/1385，无跳过（包含 Q04 的新增用例）。
+Q02 的资源验收通过，尚不代表 Q01/Q03 正式回合接通。
+
 ## 后续前置条件
 
 Q 批的正式 SQL 初始化、真实 WASM、提交/保存/刷新/回退与后台结算尚待贯通。
