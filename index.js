@@ -1667,6 +1667,9 @@ function createHost(context) {
     async readBinding() {
       const metadata = context().chatMetadata;
       if (!metadata || typeof metadata !== "object") return null;
+      if (context().extensionSettings?.[ATLAS_SETTINGS_KEY]?.[ATLAS_SQL_MODE_SETTING] === true) {
+        return metadata.atlas?.binding ?? null;
+      }
       await migrateChatSession(context);
       const session = readAtlasSession(context);
       if (session) return session.binding ?? null;
@@ -1677,6 +1680,19 @@ function createHost(context) {
     async writeBinding(binding) {
       const metadata = context().chatMetadata;
       if (!metadata || typeof metadata !== "object") return;
+      if (context().extensionSettings?.[ATLAS_SETTINGS_KEY]?.[ATLAS_SQL_MODE_SETTING] === true) {
+        const atlas = metadata.atlas ??= {};
+        const previous = atlas.sqlChatEnabled;
+        atlas.sqlChatEnabled = binding.enabled;
+        try {
+          if (await context().saveMetadata() === false) throw new Error('SQL_CHAT_SETTINGS_SAVE_FAILED');
+        } catch (error) {
+          if (previous === undefined) delete atlas.sqlChatEnabled;
+          else atlas.sqlChatEnabled = previous;
+          throw error;
+        }
+        return;
+      }
       const session = isValidAtlasSession(metadata[ATLAS_SESSION_KEY])
         ? metadata[ATLAS_SESSION_KEY]
         : createEmptyAtlasSession();
@@ -1689,6 +1705,10 @@ function createHost(context) {
     async clearBinding() {
       const metadata = context().chatMetadata;
       if (!metadata || typeof metadata !== "object") return;
+      if (context().extensionSettings?.[ATLAS_SETTINGS_KEY]?.[ATLAS_SQL_MODE_SETTING] === true) {
+        await this.writeBinding({ enabled: false });
+        return;
+      }
       const session = isValidAtlasSession(metadata[ATLAS_SESSION_KEY])
         ? metadata[ATLAS_SESSION_KEY]
         : createEmptyAtlasSession();
@@ -11110,6 +11130,24 @@ async function connectOnce() {
     let hostRef = null;
     const core = mod.createAtlasUiCore({
       api,
+      sqlEnabled: () => context().extensionSettings?.[ATLAS_SETTINGS_KEY]?.[ATLAS_SQL_MODE_SETTING] === true,
+      getPlayerName: () => String(context()?.name1 ?? ""),
+      getCommitIdentity: (request) => {
+        if (request.turnId.startsWith('turn-manual-')) return null;
+        const chat = context()?.chat;
+        const index = Number(request.assistantMessageId);
+        const message = Array.isArray(chat) ? chat[index] : null;
+        if (!message) return null;
+        const identity = atlasFloorIdentity(message, index, { chatId: request.chatId });
+        return { messageUID: identity.messageUID, variantKey: identity.variantKey };
+      },
+      isCommitCurrent: (request) => {
+        if (request.turnId.startsWith('turn-manual-')) return true;
+        const chat = context()?.chat;
+        const message = Array.isArray(chat) ? chat[Number(request.assistantMessageId)] : null;
+        const user = Array.isArray(chat) ? chat[Number(request.userMessageId)] : null;
+        return message?.is_user === false && message.mes === request.assistantText && user?.is_user === true && user.mes === request.userText;
+      },
       onDiagnostic: emitAtlasDiagnostic,
       host: (hostRef ??= createHost(context)),
       emitter: createEmitter(context),
@@ -11120,7 +11158,7 @@ async function connectOnce() {
         if (captured?.extensionSettings?.[ATLAS_SETTINGS_KEY]?.[ATLAS_SQL_MODE_SETTING] !== true) return null;
         // Read an existing snapshot only. This projection never creates/migrates/saves a world.
         if (!captured?.chatMetadata?.atlas?.database) return "";
-        const branchId = captured.chatMetadata.atlas.binding?.branchId ?? captured.chatMetadata[ATLAS_BINDING_KEY]?.branchId ?? "main";
+        const branchId = captured.chatMetadata.atlas.database.active_branch_id ?? "main";
         const sql = await loadSqlCore();
         if (!sql?.renderSqlSceneContext) return "";
         let session = null;
@@ -11129,7 +11167,7 @@ async function connectOnce() {
             branchId, persist: false, saveSession: async () => { throw new Error("Narrative projection is read-only"); } });
           const live = context();
           if (String(live?.chatId) !== String(captured.chatId) || live?.chatMetadata !== captured.chatMetadata) return "";
-          if ((live.chatMetadata.atlas.binding?.branchId ?? live.chatMetadata[ATLAS_BINDING_KEY]?.branchId ?? "main") !== branchId) return "";
+          if ((live.chatMetadata.atlas.database?.active_branch_id ?? "main") !== branchId) return "";
           return sql.renderSqlSceneContext({ db: session.repo.db, branchId: session.branchId });
         } finally { if (session) await sql.closeSqlSession(session); }
       },

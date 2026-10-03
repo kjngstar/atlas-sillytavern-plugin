@@ -317,11 +317,16 @@ export type SourceSnapshotEntry = {
 
 export type TurnInput = {
   anchor: TurnAnchor;
+  /** Local host guard; never serialized into the database or model prompt. */
+  isCurrent?: () => boolean;
   userText: string;
   assistantText: string;
   sourceSnapshot: SourceSnapshotEntry[];
   phaseBatches: Phase[];
   manual: boolean;
+  narrativeKind?: 'narrative' | 'manual';
+  /** Display locator only; stable identity remains anchor.hostMessageUid. */
+  hostMessageIndex?: string;
   operations?: ModelOperation[];
 };
 

@@ -3077,6 +3077,8 @@ function createAtlasUiCore(deps) {
     flight.finish();
   }
   let generationRevision = 0;
+  const sqlEnabled = () => deps.sqlEnabled?.() === true;
+  let sqlRetryRequest = null;
   const bootstrappedBranches = /* @__PURE__ */ new Set();
   const openingAttemptedMessages = /* @__PURE__ */ new Set();
   let stoppedGeneration = false;
@@ -3160,7 +3162,8 @@ function createAtlasUiCore(deps) {
   }
   function addReceipt(receipt, chatId) {
     if (chatId !== state.chatId) return;
-    if (state.receipts.some((r) => r.receiptId === receipt.receiptId)) return;
+    const previous = state.receipts.find((r) => r.receiptId === receipt.receiptId);
+    if (previous && !(sqlEnabled() && previous.status === "failed" && receipt.status !== "failed")) return;
     const record = {
       receiptId: receipt.receiptId,
       chatId,
@@ -3172,7 +3175,7 @@ function createAtlasUiCore(deps) {
       adoptedEventCount: receipt.adoptedEventIds.length,
       recordedAt: now()
     };
-    const receipts = [record, ...state.receipts].slice(0, RECEIPTS_MAX);
+    const receipts = [record, ...state.receipts.filter((r) => r.receiptId !== receipt.receiptId)].slice(0, RECEIPTS_MAX);
     setState({ receipts });
     persistReceipts(chatId, receipts);
   }
@@ -3288,7 +3291,22 @@ function createAtlasUiCore(deps) {
       setState({ binding: null, bindingInvalid: false, mode: "unbound", stateData: null });
       return;
     }
-    const raw = await host.readBinding();
+    let raw;
+    if (sqlEnabled()) {
+      try {
+        const result = await api.request("POST", "/sql/chat/binding", { chatUid: chatId });
+        const body = result.body;
+        if (state.chatId !== chatId || !sqlEnabled()) return;
+        if (result.status !== 200 || !body.ok || !body.data?.binding) {
+          setState({ binding: null, stateData: null, mode: "unbound", lastError: body.error?.message ?? "SQL 聊天初始化未完成。" });
+          return;
+        }
+        raw = body.data.binding;
+      } catch {
+        setState({ binding: null, stateData: null, mode: "unbound", lastError: "SQL 聊天初始化失败。" });
+        return;
+      }
+    } else raw = await host.readBinding();
     if (raw === null || raw === void 0) {
       setState({ binding: null, bindingInvalid: false, mode: "unbound", stateData: null });
       return;
@@ -3317,13 +3335,15 @@ function createAtlasUiCore(deps) {
       return;
     }
     try {
-      const result = await api.request("POST", "/state", {
+      const useSql = sqlEnabled();
+      const result = await api.request("POST", useSql ? "/sql/chat/state" : "/state", {
         chatId: binding.chatId,
+        ...useSql ? { chatUid: binding.chatId } : {},
         // D08：只有作者显式切到「全部」时才带上这个字段——默认请求形状与旧版一致
         ...state.simulationVisibility === "all" ? { simulationVisibility: "all" } : {}
       });
       const body = result.body;
-      if (state.chatId === null || binding.chatId !== state.chatId) {
+      if (state.chatId === null || binding.chatId !== state.chatId || useSql !== sqlEnabled()) {
         diagnostic3({
           level: "debug",
           source: "ui",
@@ -3404,7 +3424,7 @@ function createAtlasUiCore(deps) {
     await syncFromHost();
     if (state.binding && state.serviceStatus === "online") {
       const key = `${state.binding.chatId}|${state.binding.worldId}`;
-      if (deps.syncProtagonistIdentity && !syncedProtagonistChats.has(key)) {
+      if (!sqlEnabled() && deps.syncProtagonistIdentity && !syncedProtagonistChats.has(key)) {
         try {
           if (await deps.syncProtagonistIdentity(state.binding.chatId, state.binding.worldId)) {
             syncedProtagonistChats.add(key);
@@ -3442,6 +3462,7 @@ function createAtlasUiCore(deps) {
       generationGate = false;
       stoppedGeneration = false;
       generationRevision += 1;
+      sqlRetryRequest = null;
       swipeIdForNextCommit = null;
       activeTraceId = null;
       activeAttemptId = null;
@@ -3464,7 +3485,7 @@ function createAtlasUiCore(deps) {
         lastError: null
       });
       restoreReceiptsForChat(host.getChatId());
-      if (deps.onLorebookChatSwitch) {
+      if (!sqlEnabled() && deps.onLorebookChatSwitch) {
         const chatId = host.getChatId();
         void track(
           Promise.resolve().then(() => host.readBinding()).then((raw) => deps.onLorebookChatSwitch({ chatId, bound: parseAtlasChatBinding(raw).ok })).catch(() => {
@@ -3579,6 +3600,10 @@ function createAtlasUiCore(deps) {
     await onGenerationEnded(resolved.assistantMessageId, String(resolved.assistantText ?? ""));
   }
   function scheduleMutation(adapted) {
+    if (sqlEnabled() && (adapted.kind !== "message-swiped" || adapted.regenerating === true)) {
+      generationRevision += 1;
+      sqlRetryRequest = null;
+    }
     mutationQueue.push(adapted);
     if (mutationTimer) clearTimeout(mutationTimer);
     mutationTimer = setTimeout(() => {
@@ -3603,6 +3628,7 @@ function createAtlasUiCore(deps) {
   async function onMessageSent(messageId, userText) {
     if (disposed || !messageId) return;
     const revision = generationRevision;
+    const useSql = sqlEnabled();
     if (!traces.has(messageId)) traces.set(messageId, "turn-" + now().toString(36) + "-" + ++traceSequence);
     activeTraceId = traces.get(messageId) ?? null;
     const attempt = (attempts.get(messageId) ?? 0) + 1;
@@ -3642,7 +3668,7 @@ function createAtlasUiCore(deps) {
       return;
     }
     let binding = state.binding;
-    if (!binding && deps.ensureWorld) {
+    if (!binding && !useSql && deps.ensureWorld) {
       setState({ worldInitialization: "initializing", worldInitializationError: null });
       let ensured = false;
       try {
@@ -3683,7 +3709,7 @@ function createAtlasUiCore(deps) {
       return;
     }
     const openingScope = `${chatId}|${binding.worldId}|${binding.branchId ?? "canon"}`;
-    if (deps.getOpeningMessage && !bootstrappedBranches.has(openingScope) && !openingAttemptedMessages.has(`${openingScope}|${messageId}`) && !state.receipts.some((row) => row.status === "committed")) {
+    if (!useSql && deps.getOpeningMessage && !bootstrappedBranches.has(openingScope) && !openingAttemptedMessages.has(`${openingScope}|${messageId}`) && !state.receipts.some((row) => row.status === "committed")) {
       openingAttemptedMessages.add(`${openingScope}|${messageId}`);
       try {
         const opening = await readContextWithDeadline(deps.getOpeningMessage());
@@ -3768,9 +3794,12 @@ function createAtlasUiCore(deps) {
       return;
     }
     try {
-      const result = await api.request("POST", "/turns/prepare", parsed.value);
+      const result = await api.request("POST", useSql ? "/sql/chat/prepare" : "/turns/prepare", {
+        ...parsed.value,
+        ...useSql ? { chatUid: chatId } : {}
+      });
       const body = result.body;
-      if (revision !== generationRevision || state.chatId !== chatId) {
+      if (revision !== generationRevision || state.chatId !== chatId || useSql !== sqlEnabled()) {
         diagnostic3({
           level: "debug",
           source: "ui",
@@ -3815,6 +3844,7 @@ function createAtlasUiCore(deps) {
         });
         setState({
           pendingTurn: {
+            sqlMode: useSql,
             turnId: response.turnId,
             chatId: parsed.value.chatId,
             messageId: parsed.value.messageId,
@@ -3891,6 +3921,10 @@ function createAtlasUiCore(deps) {
         outcome: "skipped",
         details: { reasonCode: gated ? "BINDING_OR_SERVICE_DISABLED" : "NO_PENDING" }
       });
+      return;
+    }
+    if (pending.sqlMode !== void 0 && pending.sqlMode !== sqlEnabled()) {
+      setState({ pendingTurn: null, rearmTurn: null, lastError: "存储模式已切换，本轮推演已取消，请重新生成。" });
       return;
     }
     if (commitFlight) {
@@ -3995,6 +4029,11 @@ function createAtlasUiCore(deps) {
   }
   async function executeCommitRequest(value, swipeId, reservedFlight) {
     const flight = reservedFlight ?? claimCommit(value.turnId);
+    const useSql = sqlEnabled();
+    const revision = generationRevision;
+    const identity = useSql ? deps.getCommitIdentity?.(value) : null;
+    const isCurrent = () => !disposed && host.getChatId() === value.chatId && state.chatId === value.chatId && generationRevision === revision && useSql === sqlEnabled() && (deps.isCommitCurrent?.(value) ?? true) && (!identity || JSON.stringify(deps.getCommitIdentity?.(value)) === JSON.stringify(identity));
+    if (useSql) sqlRetryRequest = value;
     if (state.chatId === value.chatId) setState({ turnPhase: "committing" });
     diagnostic3({
       level: "info",
@@ -4005,11 +4044,20 @@ function createAtlasUiCore(deps) {
       outcome: "started"
     });
     try {
-      const result = await api.request("POST", "/turns/commit", value);
+      const result = await api.request("POST", useSql ? "/sql/chat/commit" : "/turns/commit", {
+        ...value,
+        ...useSql ? {
+          chatUid: value.chatId,
+          playerName: deps.getPlayerName?.() ?? "",
+          isCurrent,
+          ...identity ? { hostMessageUid: identity.messageUID, variantKey: identity.variantKey } : {}
+        } : {}
+      });
       const body = result.body;
+      if (useSql && !isCurrent()) return;
       const receiptParsed = body.data?.receipt ? parseAtlasTurnReceipt(body.data.receipt) : null;
       const stale = state.chatId !== value.chatId;
-      if (result.status === 200 && body.ok && receiptParsed?.ok) {
+      if (result.status === 200 && body.ok && receiptParsed?.ok && (!useSql || body.data?.coreSaved === true || receiptParsed.value.status === "failed")) {
         const receiptStatus = receiptParsed.value.status;
         diagnostic3({
           level: receiptStatus === "failed" ? "error" : "info",
@@ -4041,19 +4089,24 @@ function createAtlasUiCore(deps) {
                 chatId: value.chatId,
                 userMessageId: value.userMessageId,
                 assistantMessageId: value.assistantMessageId,
-                swipeId
+                swipeId,
+                ...useSql ? { sqlMode: true } : {}
               } : null
             }
           });
           return;
         }
         setState({ pendingTurn: null, rearmTurn: null, ...stale ? {} : { lastError: null } });
+        if (useSql) {
+          sqlRetryRequest = null;
+          setState({ retryableCommit: null });
+        }
         if (receiptParsed.value.status === "committed" || receiptParsed.value.status === "duplicate") {
           healthCheckedAt = -Infinity;
           if (!stale) await refresh();
         }
-        if (state.chatId === value.chatId) await syncLorebookAfterCommit(body);
-        if (receiptParsed.value.status === "committed" && state.chatId === value.chatId) {
+        if (!useSql && state.chatId === value.chatId) await syncLorebookAfterCommit(body);
+        if (!useSql && receiptParsed.value.status === "committed" && state.chatId === value.chatId) {
           try {
             const expansion = await api.request("POST", "/worlds/geo/suggest", {
               chatId: value.chatId,
@@ -4085,11 +4138,12 @@ function createAtlasUiCore(deps) {
         pendingTurn: null,
         rearmTurn: null,
         ...stale ? {} : {
-          retryableCommit: {
+          retryableCommit: useSql && body.error?.retryable === false ? null : {
             chatId: value.chatId,
             userMessageId: value.userMessageId,
             assistantMessageId: value.assistantMessageId,
-            swipeId
+            swipeId,
+            ...useSql ? { sqlMode: true } : {}
           },
           lastError: body.error?.message ?? `世界推演失败（HTTP ${result.status}），可从「变化」页重试。`
         }
@@ -4104,7 +4158,7 @@ function createAtlasUiCore(deps) {
         outcome: "failed",
         retryable: true
       });
-      const stale = state.chatId !== value.chatId;
+      const stale = state.chatId !== value.chatId || useSql && !isCurrent();
       setState({
         pendingTurn: null,
         rearmTurn: null,
@@ -4113,12 +4167,14 @@ function createAtlasUiCore(deps) {
             chatId: value.chatId,
             userMessageId: value.userMessageId,
             assistantMessageId: value.assistantMessageId,
-            swipeId
+            swipeId,
+            ...useSql ? { sqlMode: true } : {}
           },
           lastError: "世界推演失败：服务不可用，可从「变化」页重试。"
         }
       });
     } finally {
+      if (useSql && !isCurrent() && state.chatId === value.chatId) setState({ pendingTurn: null, retryableCommit: null });
       releaseCommit(flight);
     }
   }
@@ -4192,6 +4248,7 @@ function createAtlasUiCore(deps) {
     if (disposed) return;
     stoppedGeneration = true;
     generationRevision += 1;
+    sqlRetryRequest = null;
     swipeIdForNextCommit = null;
     diagnostic3({
       level: "info",
@@ -4249,11 +4306,13 @@ function createAtlasUiCore(deps) {
     const chatId = state.chatId;
     if (!chatId) return false;
     try {
-      const result = await api.request("POST", "/turns/rollback", { chatId, assistantMessageId });
-      if (result.status === 200) {
+      const useSql = sqlEnabled();
+      const result = await api.request("POST", useSql ? "/sql/chat/rollback" : "/turns/rollback", { chatId, assistantMessageId, ...useSql ? { chatUid: chatId } : {} });
+      const response = result.body;
+      if (result.status === 200 && (!useSql || response.ok && response.data?.coreSaved === true)) {
         healthCheckedAt = -Infinity;
         await refresh();
-        if (state.chatId === chatId && deps.onLorebookChatSwitch) {
+        if (!useSql && state.chatId === chatId && deps.onLorebookChatSwitch) {
           try {
             await deps.onLorebookChatSwitch({ chatId, bound: Boolean(state.binding) });
           } catch {
@@ -4262,7 +4321,7 @@ function createAtlasUiCore(deps) {
         return true;
       }
       const body = result.body;
-      setState({ lastError: body.error?.message ?? `世界回退被拒绝（HTTP ${result.status}）。` });
+      setState({ lastError: body.error?.message ?? (response.data?.issues?.map((i) => i.message).join("；") || `世界回退被拒绝（HTTP ${result.status}）。`) });
       return false;
     } catch {
       setState({ lastError: "世界回退失败：服务不可用。" });
@@ -4275,6 +4334,16 @@ function createAtlasUiCore(deps) {
     if (!failed) return;
     if (failed.chatId !== state.chatId) {
       setState({ retryableCommit: null });
+      return;
+    }
+    if (failed.sqlMode === true !== sqlEnabled()) {
+      sqlRetryRequest = null;
+      setState({ retryableCommit: null, lastError: "存储模式已切换，旧重试请求已取消，请重新生成。" });
+      return;
+    }
+    if (sqlEnabled()) {
+      if (!sqlRetryRequest || commitFlight) return;
+      await executeCommitRequest(sqlRetryRequest, failed.swipeId);
       return;
     }
     try {
@@ -4350,6 +4419,10 @@ function createAtlasUiCore(deps) {
     /** ATLAS-18：概览页「重试初始化」按钮用（未注入 ensureWorld 时安全无操作）。 */
     async initializeWorld() {
       if (disposed) return false;
+      if (sqlEnabled()) {
+        await refresh();
+        return Boolean(state.binding);
+      }
       if (state.binding) {
         setState({ worldInitialization: "ready", worldInitializationError: null });
         return true;
@@ -4388,6 +4461,10 @@ function createAtlasUiCore(deps) {
       await refresh();
     },
     async bindToWorld(worldId) {
+      if (sqlEnabled()) {
+        setState({ lastError: "SQL 世界属于当前聊天；旧世界导入需完成单向迁移，不能在这里改写三表绑定。" });
+        return;
+      }
       const chatId = host.getChatId();
       if (!chatId) {
         setState({ lastError: "当前没有可绑定的聊天。" });
@@ -4418,6 +4495,14 @@ function createAtlasUiCore(deps) {
     async unbind() {
       const chatId = host.getChatId();
       if (!chatId) return;
+      if (sqlEnabled()) {
+        generationRevision += 1;
+        sqlRetryRequest = null;
+        await host.writeBinding({ ...state.binding, enabled: false });
+        setState({ pendingTurn: null, retryableCommit: null });
+        await refresh();
+        return;
+      }
       const result = await api.request("POST", "/bindings", { action: "unbind", chatId });
       const body = result.body;
       if (result.status !== 200 || !body.ok) {
@@ -4431,6 +4516,14 @@ function createAtlasUiCore(deps) {
       const binding = state.binding;
       if (!binding) return;
       const next = { ...binding, enabled };
+      if (sqlEnabled()) {
+        generationRevision += 1;
+        sqlRetryRequest = null;
+        await host.writeBinding(next);
+        setState({ pendingTurn: null, retryableCommit: null });
+        await refresh();
+        return;
+      }
       const result = await api.request("POST", "/bindings", { action: "bind", binding: next });
       const body = result.body;
       if (result.status !== 200 || !body.ok) {
@@ -19421,6 +19514,9 @@ function sqlErrorResult(thrown) {
   const candidate = thrown;
   if (candidate && typeof candidate.code === "string" && candidate.code.length > 0) {
     const code = candidate.code;
+    const failedReceipt = isPlainRecord(candidate.detail) && isPlainRecord(candidate.detail.receipt) ? candidate.detail.receipt : null;
+    const receiptIssues = failedReceipt && Array.isArray(failedReceipt.issues) ? failedReceipt.issues.filter(isPlainRecord) : [];
+    const retryable = code === "TURN_FAILED" && receiptIssues.some((i) => i.retryable === true);
     const status = code === "STALE_BASE" || code === "CHAT_CHANGED" || code === "SESSION_STALE" || code === "CANDIDATE_UNKNOWN" ? 409 : code === "INVALID_PAYLOAD" ? 400 : 500;
     return {
       status,
@@ -19428,9 +19524,9 @@ function sqlErrorResult(thrown) {
         ok: false,
         error: {
           code,
-          message: String(candidate.message ?? code),
+          message: receiptIssues.length ? receiptIssues.map((i) => String(i.message ?? i.code)).join("；") : String(candidate.message ?? code),
           details: isPlainRecord(candidate.detail) ? candidate.detail : {},
-          retryable: false
+          retryable
         }
       }
     };
@@ -19567,6 +19663,12 @@ function createAtlasSqlRouteGroup(deps) {
       const branchId = sqlText(record.branchId) || void 0;
       const runtime = await sqlRuntime();
       if (!runtime) return unavailable(route);
+      if (route.startsWith("/sql/chat/")) {
+        const session = await sessionFor(chatUid, branchId, runtime);
+        const data = await runtime.handleSqlChatRequest(session, route.slice("/sql/chat/".length), record);
+        if (data.coreSaved === true) deps.sessionProvider?.saved(session);
+        return okResult(data);
+      }
       if (route === "/sql/turn") {
         const session = await sessionFor(chatUid, branchId, runtime);
         const input = {

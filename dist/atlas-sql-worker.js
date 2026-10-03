@@ -12711,7 +12711,7 @@ END`;
         insertTurnRow(candidateDb, {
           turnId,
           anchor,
-          kind: input.manual ? "manual" : "narrative",
+          kind: input.manual || input.narrativeKind === "manual" ? "manual" : "narrative",
           clockBefore,
           clockAfter: clockBefore,
           storyHash: input.assistantText ? sha256HexSync(input.assistantText) : null,
@@ -12793,7 +12793,13 @@ END`;
           receipt.status === "failed" ? null : newRevision,
           JSON.stringify(receipt),
           JSON.stringify(attempts.slice(0, ATLAS_RUNTIME_LIMITS.detailedAttemptsPerTurn)),
-          JSON.stringify({ operations: parsedOperations.map((p) => p.value), attention_decisions: [], outcome_decisions: [], random_draws: [] }),
+          JSON.stringify({
+            operations: parsedOperations.map((p) => p.value),
+            host_message_index: input.hostMessageIndex,
+            attention_decisions: [],
+            outcome_decisions: [],
+            random_draws: []
+          }),
           turnId
         ]);
         runBound(

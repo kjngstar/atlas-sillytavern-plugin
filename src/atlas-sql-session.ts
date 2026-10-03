@@ -34,6 +34,7 @@ import {
 } from './atlas-db-migrate.ts';
 import { runNextSync, enqueueProjectionSync } from './atlas-db-outbox.ts';
 import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
+import { handleSqlChatRequest } from './atlas-sql-chat.ts';
 import type { AtlasEnvelope, AtlasModelPort } from './atlas-db-contract.ts';
 import type { SqlDatabase } from './atlas-db-runtime.ts';
 import type { FailedGroupRetryInput, FailedGroupRetryResult } from './atlas-db-retry.ts';
@@ -144,6 +145,7 @@ export type OpenSqlSessionResult = {
 } & SqlSession;
 
 export type PersistSqlOptions = {
+  isCurrent?: () => boolean;
   /** 无候选时强制导出当前正式库（默认也会导出）。 */
   force?: boolean;
   /** 待保存的候选（turn/rollback/maintenance）；缺省时导出当前正式库。 */
@@ -479,6 +481,11 @@ export async function persistSqlSession(session: SqlSession, options: PersistSql
     } satisfies PreparedMaintenance);
 
   const previousAtlas = snapshotAtlasForRestore(session.chatMetadata);
+  if (options.isCurrent && !options.isCurrent()) {
+    if (commit) await session.repo.discardPrepared(commit.token);
+    issues.push(issue('TURN_CANCELLED', '正文楼层或生成状态已变化，本轮候选已丢弃', 'error', false));
+    return { saved: false, issues };
+  }
   const submittedEnvelope = { ...envelope };
   const ack = await session.hostPort.saveCandidate({ capturedHostAnchor: captured, prepared, envelope });
 
@@ -548,6 +555,7 @@ export async function runSqlTurn(session: SqlSession, input: TurnInput): Promise
     throw new AtlasDbError('CHAT_CHANGED', '回合锚点不属于当前 SQL 会话', {});
   }
   if (session.isCurrentHost && !session.isCurrentHost()) throw new AtlasDbError('SESSION_STALE', '当前宿主快照已变化', {});
+  if (input.isCurrent && !input.isCurrent()) throw new AtlasDbError('TURN_CANCELLED', '当前正文楼层或生成状态已变化，本轮不发送模型请求', {});
   const key = JSON.stringify([input.anchor.hostMessageUid, input.anchor.variantKey, input.anchor.inputHash]);
   let flights = turnFlights.get(session);
   if (!flights) { flights = new Map(); turnFlights.set(session, flights); }
@@ -565,7 +573,7 @@ export async function runSqlTurn(session: SqlSession, input: TurnInput): Promise
       return { receipt, saved: true, coreSaved: true, commit: null, issues: [], duplicate: true };
     }
     const commit = await session.repo.prepareTurn(input);
-    return await commitPreparedTurn(session, commit);
+    return await commitPreparedTurn(session, commit, input.isCurrent);
   })();
   flights.set(key, task);
   try { return await task; }
@@ -631,7 +639,7 @@ export async function runSqlRollback(session: SqlSession, input: RollbackInput):
   return { receipt: result.receipt, saved: result.saved, issues: result.issues, coreSaved: result.coreSaved };
 }
 
-async function commitPreparedTurn(session: SqlSession, commit: PreparedCommit): Promise<SqlTurnResult> {
+async function commitPreparedTurn(session: SqlSession, commit: PreparedCommit, isCurrent?: () => boolean): Promise<SqlTurnResult> {
   return await withChatCommitLock(session.chatUid, async () => {
     if (session.isCurrentHost && !session.isCurrentHost()) {
       await session.repo.discardPrepared(commit.token);
@@ -647,7 +655,7 @@ async function commitPreparedTurn(session: SqlSession, commit: PreparedCommit): 
         { base: commit.anchor.baseRevision, current },
       );
     }
-    const persisted = await persistSqlSession(session, { commit });
+    const persisted = await persistSqlSession(session, { commit, isCurrent });
     const issues = [...persisted.issues];
     if (!persisted.saved) {
       if (persisted.ack?.result === 'failed') {
@@ -845,6 +853,7 @@ export async function closeSqlSession(session: SqlSession): Promise<void> {
  * Node 模式注入自己那份；**server 核心本身不静态引用任何 sql.js 模块**。
  */
 export type AtlasSqlRuntime = {
+  handleSqlChatRequest: typeof handleSqlChatRequest;
   openSqlSession: typeof openSqlSession;
   persistSqlSession: typeof persistSqlSession;
   runSqlTurn: typeof runSqlTurn;
@@ -870,6 +879,7 @@ export async function loadAtlasSqlRuntime(): Promise<AtlasSqlRuntime> {
     import('./atlas-db-knowledge-view.ts'),
   ]);
   return {
+    handleSqlChatRequest,
     openSqlSession,
     persistSqlSession,
     runSqlTurn,

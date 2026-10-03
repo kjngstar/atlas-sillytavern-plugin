@@ -7505,6 +7505,9 @@ function sqlErrorResult(thrown: unknown): AtlasRouteResult {
   const candidate = thrown as { code?: unknown; message?: unknown; detail?: unknown };
   if (candidate && typeof candidate.code === "string" && candidate.code.length > 0) {
     const code = candidate.code;
+    const failedReceipt = isPlainRecord(candidate.detail) && isPlainRecord(candidate.detail.receipt) ? candidate.detail.receipt : null;
+    const receiptIssues = failedReceipt && Array.isArray(failedReceipt.issues) ? failedReceipt.issues.filter(isPlainRecord) : [];
+    const retryable = code === 'TURN_FAILED' && receiptIssues.some(i => i.retryable === true);
     const status =
       code === "STALE_BASE" || code === "CHAT_CHANGED" || code === "SESSION_STALE" || code === "CANDIDATE_UNKNOWN"
         ? 409
@@ -7517,9 +7520,9 @@ function sqlErrorResult(thrown: unknown): AtlasRouteResult {
         ok: false,
         error: {
           code,
-          message: String(candidate.message ?? code),
+          message: receiptIssues.length ? receiptIssues.map(i => String(i.message ?? i.code)).join('；') : String(candidate.message ?? code),
           details: isPlainRecord(candidate.detail) ? candidate.detail : {},
-          retryable: false,
+          retryable,
         },
       },
     };
@@ -7676,6 +7679,13 @@ export function createAtlasSqlRouteGroup(deps: AtlasSqlRouteGroupDeps) {
       const branchId = sqlText(record.branchId) || undefined;
       const runtime = await sqlRuntime();
       if (!runtime) return unavailable(route);
+
+      if (route.startsWith('/sql/chat/')) {
+        const session = await sessionFor(chatUid, branchId, runtime);
+        const data = await runtime.handleSqlChatRequest(session, route.slice('/sql/chat/'.length), record);
+        if (data.coreSaved === true) deps.sessionProvider?.saved(session);
+        return okResult(data);
+      }
 
       if (route === "/sql/turn") {
         const session = await sessionFor(chatUid, branchId, runtime);

@@ -133,9 +133,46 @@ try {
   assert.equal(modelTurn.coreSaved, true); assert.equal(modelTurn.duplicate, true);
   assert.equal(modelTurn.calls, 1); assert.equal(modelTurn.saves, 2);
   assert.equal(modelTurn.tableWritten, false); assert.equal(modelTurn.mixedFormat, false);
+  const automaticChat = await startupPage.evaluate(async () => {
+    const { core } = window.releaseStartup, host = window.releaseStartupHost;
+    let calls = 0;
+    window.TavernHelper.generateRaw = async () => {
+      calls++;
+      return '{"op":"location.upsert","ref":"new:auto_archive","data":{"name":"自动聊天档案室","kind":"room"}}';
+    };
+    host.name1 = '发布用户主角';
+    host.chat.push({ is_user: true, mes: '进入档案室', send_date: 'release-user-1' });
+    await core.refresh();
+    const before = window.releaseStartupSaves();
+    await core.handleEvent('MESSAGE_SENT', 0);
+    const prepared = Boolean(core.getState().pendingTurn);
+    const prepareSaves = window.releaseStartupSaves() - before;
+    host.chat.push({ is_user: false, mes: '你走进档案室。', send_date: 'release-assistant-1' });
+    await core.handleEvent('GENERATION_ENDED', 1);
+    for (let n = 0; n < 150 && core.getState().pendingTurn; n++) await new Promise(resolve => setTimeout(resolve, 20));
+    const committed = core.getState();
+    if (committed.pendingTurn) throw Error('Published automatic completion timed out');
+    const commitSaves = window.releaseStartupSaves() - before;
+    // Use the actual published event adapter after the host removes the floor.
+    host.chat.splice(1, 1);
+    await core.handleEvent('MESSAGE_DELETED', 1);
+    for (let n = 0; n < 150 && core.getState().binding?.lastCommittedMessageId === '1'; n++) await new Promise(resolve => setTimeout(resolve, 20));
+    const rolledBack = core.getState();
+    return { prepared, prepareSaves, commitSaves, calls,
+      commitStatus: committed.receipts[0]?.status, floor: committed.binding?.lastCommittedMessageId,
+      rollbackFloor: rolledBack.binding?.lastCommittedMessageId,
+      rollbackSaves: window.releaseStartupSaves() - before - commitSaves,
+      tableWritten: Boolean(host.chatMetadata.atlas?.tables), error: rolledBack.lastError };
+  });
+  assert.equal(automaticChat.prepared, true, JSON.stringify(automaticChat));
+  assert.equal(automaticChat.prepareSaves, 0); assert.equal(automaticChat.commitSaves, 1);
+  assert.equal(automaticChat.calls, 1); assert.equal(automaticChat.commitStatus, 'committed');
+  assert.equal(automaticChat.floor, '1'); assert.notEqual(automaticChat.rollbackFloor, '1');
+  assert.equal(automaticChat.rollbackSaves, 1); assert.equal(automaticChat.tableWritten, false);
   console.log(JSON.stringify({ passed: true, main, worker,
     startup: { offSqlMode: off.sqlMode, coreSaved: started.turn.coreSaved, saves: started.saves, stored: started.stored },
     modelTurn,
+    automaticChat,
     wasmRequests: requests.filter(path => path.endsWith('.wasm')) }, null, 2));
 } finally {
   await browser?.close();

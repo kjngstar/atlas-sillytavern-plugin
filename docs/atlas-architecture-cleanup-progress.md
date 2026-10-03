@@ -3,6 +3,11 @@
 基线：0.9.74 / `1807e5e`。开发分支：`codex/architecture-cleanup`。
 依据：用户授权的架构清理顺序 A、B → Q → R → S。
 
+当前进度（2026-10-04）：A/B、Q02、Q04 已完成；Q01 已注入正式宿主和模型端口。
+Q03 的自动聊天 prepare/commit、未保存回合重试、最近楼层回退及迟到结果守卫已接通。
+Q03 仍需补齐已保存 partial 回合的 UI 定向补交、旧提示词兼容草稿/选择和真实酒馆验收。
+Q05–Q08、R、S 未完成；SQL 仍为显式开关、默认关闭，不能宣布全插件 SQL 切换或发布完成。
+
 ## A01–A08：死代码与快照清单
 
 删除 `src/atlas-identity.ts`、`src/atlas-ops-groups-types.ts`、`lib/context-plan.ts`，
@@ -114,3 +119,38 @@ UI 的 SQL 预热队列明确返回 view-prewarm/coreSaved:false，移除误导�
 完整测试 1405/1405，无跳过；相比上一检查点增加 15 项行为用例。
 测试覆盖并发/重复回合、回退重生、补交保存失败、定向纠错与对应回退、存档修订冲突、
 导出/保存期间外部更新、兼容/冲突/损坏提示词及原连接端口贯通。
+
+## Q03 第二段：自动聊天事件接线
+
+`atlas-ui-core` 在 SQL 模式调用显式 `/sql/chat/*` 接口，正式 server 路由通过懒加载
+运行时进入 `atlas-sql-chat`。没有拦截旧 `/turns/*` 后偷偷转换，也不返回旧 session 文档。
+读取 SQL 中的聊天逻辑绑定，无旧档时只建立内存 Repository；prepare 捕获 head/revision/
+storageRevision 并保留有界准备记录，不调用模型、不保存元数据。
+正文完成后收集用户、正文、前文、人设、卡描述与启用世界书原文，进入现有 SQL 模型端口。
+主角名字来自实际 name1；来源目录原顺序保留，不按条目内容筛除。
+正式宿主通过 atlasFloorIdentity 提供稳定 messageUID/variantKey；数组下标仅作显示定位，
+写进 decisions_json 的 host_message_index，不能冒充数据库的消息身份。
+
+自动提交、手动立即推演、未保存请求重试、最近助手楼层的删楼/编辑/swipe 回退走同一库。
+SQL 的宿主保存失败被适配为 failed；只有 coreSaved:true 才显示成功与刷新。
+已确认 noop 适配为有效旧 UI 回执；重试确认后更新原失败回执，避免界面仍显示失败。
+停止、编辑、删楼、切聊天、切存储模式使候选失效；模型前与保存前核验状态。
+存储模式变化后的失败挂单拒绝改走另一套写入链。
+SQL 的启停/解绑保留 database，只保存 sqlChatEnabled，不改旧 binding/world/tables。
+
+SQL 开启时不调用旧开场白 bootstrap、自动 geo suggest、主角身份三表修正及旧世界书写回。
+这些功能的 SQL 写入与统一投影是 Q06/Q07 的施工项；此处不能用旧写入偷偷补齐。
+既有旧世界而无 SQL 快照仍明确报迁移必需并保留原文，Q08 尚未实施。
+已保存 partial 回合的失败组仍可走原生 `/sql/retry`，自动 UI 定向模型补交待接线；
+未保存的失败请求在 UI 内保留原素材重试，刷新或离开聊天后不跨作用域复用。
+
+新增 14 项真实 UI core → 正式 server → browser provider → 实际 sql.js/WASM 测试。
+覆盖首次 prepare 零写入、一次提交、重复事件、失败后重试、回退保存失败与重生、
+停止/编辑/换聊天/换模式的迟到模型结果、noop、旧档保留、手动推演、启停解绑与稳定身份。
+发布浏览器验证直接加载 release 原入口与事件适配器：MESSAGE_SENT → GENERATION_ENDED
+保存一次 SQL，MESSAGE_DELETED 保存一次回退；没有旧 tables，prepare 保存次数为 0。
+宿主与 TavernHelper 回复是合成夹具，没有调用真实 API，也没有修改用户 8000 酒馆。
+
+typecheck、pack、源引用审查、真实发布浏览器验证、完整 npm test 均退出 0。
+完整测试 1419/1419，无跳过；相比上一检查点增加 14 项。
+本批仅在开发分支收口，尚未发布或推送 main。
