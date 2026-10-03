@@ -10,9 +10,9 @@
 - 快照日期：**2026-09-18**
 - 快照时的 Atlasia 状态：ATLAS-09 收口时的 `E:\地图\lib`（世界核心 P0/W0 主线已完成，
   与 Atlas 143 用例全绿对应）
-- 文件清单（14 个）：world-schema / world-cards / world-ledger / world-definition /
+- 文件清单（13 个）：world-schema / world-cards / world-ledger / world-definition /
   world-lineage / world-npc / world-engine / world-travel / world-checkpoint /
-  world-projection / world-timepoint / context-plan / demo-events / ai-connections
+  world-projection / world-timepoint / demo-events / ai-connections
 
 ## 与逐字节快照的偏差
 
@@ -38,6 +38,12 @@ Atlasia 上游位于 `E:\地图\`，**不是 git 仓库**，本次会话无法�
 **回灌要求（下次同步快照前必须处理）**：把上述两处改动以同样语义合入 Atlasia
 `lib/world-schema.ts`，再整体重新快照；否则本文件将成为「两套项目两套逻辑」的分叉点。
 回灌时保持：字段名 `parentPointId`、可选性、正整数校验、旧存档缺字段可读。
+
+### 偏差 3（未使用模块裁剪）
+
+2026-10-03，按架构清理施工单删除没有运行、类型、测试或构建引用的
+`context-plan.ts`。其余快照源码未修改，快照来源与日期不变；本次不是重新同步上游。
+后续同步时根据实际引用决定是否恢复该模块。
 
 ## 纪律（硬规则）
 

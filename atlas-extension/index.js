@@ -5802,23 +5802,6 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     return raw.startsWith("npc:") ? raw : `npc:${raw}`;
   }
 
-  function tableMapNpcById(tableMap) {
-    const map = new Map();
-    for (const entry of tableMap?.nearby?.entries ?? []) {
-      const id = String(entry.id ?? "").replace(/^npc:/, "");
-      if (id) map.set(id, entry);
-    }
-    return map;
-  }
-
-  function tableMapObjectById(tableMap) {
-    const map = new Map();
-    for (const entry of tableMap?.objects?.entries ?? []) {
-      if (entry?.id) map.set(String(entry.id), entry);
-    }
-    return map;
-  }
-
   /** H06（§10.2）：SQL 口径下「该地点已知在场」的人（粗定位名单 + 与该地点同坐标的人物点）。 */
   function sqlNpcsAtPoint(model, point) {
     if (!model || !point) return [];

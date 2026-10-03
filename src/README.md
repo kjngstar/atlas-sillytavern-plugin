@@ -47,7 +47,7 @@ atlas-extension/index.js ─→ dist/atlas-ui-core.mjs（browser-entry 打包产
 ```
 
 世界核心快照只 import、不复制：`lib/world-engine.ts`、`lib/world-npc.ts`、`lib/world-ledger.ts`、
-`lib/world-checkpoint.ts`、`lib/world-definition.ts`、`lib/world-schema.ts`、`lib/context-plan.ts`、`lib/world-cards.ts`。
+`lib/world-checkpoint.ts`、`lib/world-definition.ts`、`lib/world-schema.ts`、`lib/world-cards.ts`。
 
 ## 纪律
 
