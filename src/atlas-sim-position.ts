@@ -106,6 +106,10 @@ export function resolveEffectivePosition(
         vehicleVisited.delete(entityId);
         const nested = resolveVehicleChain(world, location, vehicleVisited, cache);
         if (nested) return nested;
+        // A fixed location is not a reason to discard the character's own valid
+        // fine position. Moving vehicle/journey resolution above remains prior.
+        const ownGrid=gridOf(character);
+        if(ownGrid)return ownGrid;
         return { kind: 'at_location', locationId: location, precision: 'coarse' };
       }
       const grid = gridOf(character);

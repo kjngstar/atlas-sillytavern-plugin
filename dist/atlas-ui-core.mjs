@@ -12041,19 +12041,7 @@ function applyAtlasEditText(base, text, sources, options = {}) {
   return { parse, delta: applyAtlasTableDelta(base, parse.edits, options) };
 }
 
-// src/atlas-table-map-view.ts
-var ATLAS_MAP_VIEW_LIMITS = {
-  pointsPerMap: 200,
-  submaps: 128,
-  nearby: 48,
-  objects: 32,
-  unplacedLocations: 64,
-  /** F02：每个地点徽标名单里的明细条数上限（**计数**不受此限，始终是全量真值）。 */
-  occupantsPerLocation: 24
-};
-function isGrid(value) {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0;
-}
+// src/atlas-scene-layout.ts
 function interiorPositionHint(action, id) {
   const zones = [
     [/(窗边|窗旁|靠窗|window)/i, 80, 30, "窗边"],
@@ -12076,10 +12064,6 @@ function interiorPositionHint(action, id) {
     y: zone.entry[2] + ((hash >>> 4) % 11 - 5),
     label: zone.entry[3]
   };
-}
-function isInteriorRoom(location, locations) {
-  if (/(教室|[一二三四五六七八九十\d]+班|寝室|卧室|办公室|会议室|实验室|图书室|房间|病房|客房|大厅|餐厅|车厢|room|classroom)/i.test(location.name)) return true;
-  return location.parentLocationId !== null && /(室|房|厅|馆|堂|铺|屋|舱|厢|店)/.test(location.name) && !locations.some((row) => row.parentLocationId === location.id);
 }
 function scenePositions(rows, frame) {
   const cols = Math.max(1, frame.cols), height = Math.max(1, frame.rows);
@@ -12128,6 +12112,24 @@ function scenePositions(rows, frame) {
     });
   }
   return result;
+}
+
+// src/atlas-table-map-view.ts
+var ATLAS_MAP_VIEW_LIMITS = {
+  pointsPerMap: 200,
+  submaps: 128,
+  nearby: 48,
+  objects: 32,
+  unplacedLocations: 64,
+  /** F02：每个地点徽标名单里的明细条数上限（**计数**不受此限，始终是全量真值）。 */
+  occupantsPerLocation: 24
+};
+function isGrid(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+function isInteriorRoom(location, locations) {
+  if (/(教室|[一二三四五六七八九十\d]+班|寝室|卧室|办公室|会议室|实验室|图书室|房间|病房|客房|大厅|餐厅|车厢|room|classroom)/i.test(location.name)) return true;
+  return location.parentLocationId !== null && /(室|房|厅|馆|堂|铺|屋|舱|厢|店)/.test(location.name) && !locations.some((row) => row.parentLocationId === location.id);
 }
 function regionOfPoint(world, pointId) {
   const point = (world.points ?? []).find((item) => String(item.id) === pointId);

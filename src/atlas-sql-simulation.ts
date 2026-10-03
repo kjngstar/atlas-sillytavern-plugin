@@ -71,6 +71,16 @@ export async function settleSqlTurn(input: Input) {
   const elapsed = deriveElapsedInterval({activities:activities.length?activities:[{kind:'dialogue',completed:true}]},{clockS:input.clockBefore});
   if (elapsed.quality==='unknown') issues.push({code:'TIME_UNRESOLVED',path:'$.elapsed',message:'已完成行为缺少可结算的耗时依据，时钟保持原值，未知不当成零耗时',severity:'warning',retryable:false});
   const clockAfter = input.clockBefore + (elapsed.quality==='unknown'?0:elapsed.nominalS);
+  // Observed changes describe the completed narrative's current state. Bind their
+  // event time to that end, or to an explicit in-window timestamp, in this journal.
+  for(const op of input.operations) {
+    if(!appliedIds.has(op.opId)||op.value.op!=='event.propose'||op.value.data?.phase!=='observed')continue;
+    const changes=queryBound(input.db,"SELECT target_row_id FROM turn_changes WHERE turn_id=? AND operation_id=? AND target_table='events'",[input.turnId,op.opId]);
+    const hint=op.value.data.time_hint as {at_s?:number}|undefined;
+    const at=typeof hint?.at_s==='number'&&hint.at_s>=input.clockBefore&&hint.at_s<=clockAfter?hint.at_s:clockAfter;
+    for(const change of changes){const row=queryBound(input.db,'SELECT * FROM events WHERE branch_id=? AND id=?',[input.branchId,String(change.target_row_id)])[0];
+      if(row&&row.occurred_at_s!==at)write(input,'events',{...row,occurred_at_s:at,row_rev:Number(row.row_rev)+1,updated_turn_id:input.turnId},row);}
+  }
   const branch = queryBound(input.db,'SELECT * FROM branches WHERE id=?',[input.branchId])[0];
   const seed=deriveSeed({chatUid:input.anchor.chatUid,branchId:input.branchId,forkTurnId:String(branch.fork_turn_id??''),variantKey:input.anchor.variantKey,inputHash:input.anchor.inputHash,rulesetVersion:ATLAS_SIM_RULESET_VERSION});
   const clockMin=Number(branch.clock_min_s)+elapsed.minS, clockMax=Number(branch.clock_max_s)+elapsed.maxS;

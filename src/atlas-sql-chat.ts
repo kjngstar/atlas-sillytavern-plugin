@@ -3,11 +3,14 @@ import { parseAtlasTurnCommitRequest, parseAtlasTurnPrepareRequest } from './atl
 import type { AtlasTurnCommitRequest } from './atlas-contract.ts';
 import { stableHexHash } from './atlas-hash.ts';
 import { AtlasDbError, queryBound } from './atlas-db-runtime.ts';
-import { toLegacyStateDto, toLegacyTurnReceipt } from './atlas-db-state-adapter.ts';
+import { querySqlSceneState } from './atlas-sql-view-state.ts';
+import { querySqlCharacterTimeline } from './atlas-sql-timeline.ts';
+import { toLegacyTurnReceipt } from './atlas-db-state-adapter.ts';
 import { runSqlTurn, runSqlRollback } from './atlas-sql-session.ts';
 import { runSqlModelRetry } from './atlas-sql-retry.ts';
 import type { SqlSession } from './atlas-sql-session.ts';
 import type { TurnAnchor, TurnInput } from './atlas-ops-contract.ts';
+import type { AtlasEnvelope } from './atlas-db-contract.ts';
 
 const preparations = new WeakMap<SqlSession, Map<string, { anchor: TurnAnchor; messageId: string; userText: string }>>();
 const text = (v: unknown): string => typeof v === 'string' ? v : '';
@@ -62,17 +65,12 @@ function chatSources(request: AtlasTurnCommitRequest, playerName: string): TurnI
 /** Called by the explicit /sql/chat/* routes; no old session document is returned. */
 export async function handleSqlChatRequest(session: SqlSession, action: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
   if (action === 'binding') return { binding: binding(session), coreSaved: false };
+  if (action === 'timeline') return querySqlCharacterTimeline({db:session.repo.db,branchId:session.branchId,revision:session.repo.internal.currentRevision(),viewMode:'author'},
+    {characterId:text(body.characterId),offset:typeof body.offset==='number'?body.offset:undefined,limit:typeof body.limit==='number'?body.limit:undefined});
   if (action === 'state') {
-    const query = { kind: 'map' as const, branchId: session.branchId, viewMode: 'author' as const };
-    const state = toLegacyStateDto(await session.repo.queryView(query), query);
-    const nearbyQuery = { kind: 'nearby' as const, branchId: session.branchId, povId: protagonist(session), viewMode: 'author' as const };
-    const near = toLegacyStateDto(await session.repo.queryView(nearbyQuery), nearbyQuery);
-    const logicalBinding = binding(session);
-    return { ...state, chatId: session.chatUid, worldId: session.worldUid, worldName: session.branchName,
-      currentTime: logicalBinding.worldTimeCursor, currentLocationId: logicalBinding.currentLocationId,
-      binding: logicalBinding, relevantNpcIds: near.relevantNpcIds,
-      tableMap: { ...(state.tableMap as object), nearby: (near.tableMap as Record<string, unknown>).nearby },
-      sqlMode: true, coreSaved: false };
+    const logicalBinding=binding(session);
+    return {...querySqlSceneState({db:session.repo.db,branchId:session.branchId,revision:session.repo.internal.currentRevision(),
+      povId:protagonist(session),viewMode:'author',assets:((session.chatMetadata.atlas as {database?:AtlasEnvelope}|undefined)?.database?.assets??[])}, {chatUid:session.chatUid,worldUid:session.worldUid,worldName:session.branchName}),binding:logicalBinding};
   }
   assertEnabled(session);
   if (action === 'retry') {

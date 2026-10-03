@@ -8,6 +8,7 @@ import {queryBound} from '../src/atlas-db-runtime.ts';
 import {openSqlSession,runSqlTurn,runSqlRollback} from '../src/atlas-sql-session.ts';
 import {BUSINESS_TABLES} from '../src/atlas-db-contract.ts';
 import {runSqlModelRetry} from '../src/atlas-sql-retry.ts';
+import {querySqlCharacterTimeline} from '../src/atlas-sql-timeline.ts';
 
 const SQL=await initSqlJs();
 const event=(kind,hint,completed=true)=>JSON.stringify({op:'event.propose',data:{title:'正文行为',phase:'observed',activity:{kind,completed},...(hint?{time_hint:hint}:{})}});
@@ -162,8 +163,13 @@ test('Q05 formal SQL: actual outcome operations change the candidate, all backgr
     const result=await f.turn(); assert.equal(result.coreSaved,true,JSON.stringify(result));
     assert.equal(f.rows('actions')[0].status,'completed'); assert.ok(f.rows('events').some(e=>e.title==='整理完成'));
     assert.ok(f.calls.some(r=>r.phase==='outcome')); assert.equal(result.receipt.clockAfterS,60);
+    const timeline=querySqlCharacterTimeline({db:f.session.repo.db,branchId:f.session.branchId,revision:f.session.repo.internal.currentRevision(),viewMode:'author'}, {characterId:IDS.C2,limit:1});
+    assert.equal(timeline.entries.length,1);assert.ok(timeline.total>=2);assert.equal(timeline.nextOffset,1);
+    const later=querySqlCharacterTimeline({db:f.session.repo.db,branchId:f.session.branchId,revision:f.session.repo.internal.currentRevision(),viewMode:'author'}, {characterId:IDS.C2,offset:1,limit:100});
+    assert.ok([...timeline.entries,...later.entries].some(entry=>entry.sourceTable==='events'&&entry.atS===30));
     const undone=await f.undo(result.receipt.turnId); assert.equal(undone.coreSaved,true,JSON.stringify(undone));
     for(const t of BUSINESS_TABLES) assert.deepEqual(f.rows(t),before[t],t);
+    assert.equal(querySqlCharacterTimeline({db:f.session.repo.db,branchId:f.session.branchId,revision:f.session.repo.internal.currentRevision(),viewMode:'author'}, {characterId:IDS.C2}).total,0);
   } finally {await f.session.repo.close();}
 });
 

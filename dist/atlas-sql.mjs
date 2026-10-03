@@ -12032,6 +12032,8 @@ function resolveEffectivePosition(world, entityId, _atTime, cache) {
         vehicleVisited.delete(entityId);
         const nested = resolveVehicleChain(world, location3, vehicleVisited, cache);
         if (nested) return nested;
+        const ownGrid = gridOf(character);
+        if (ownGrid) return ownGrid;
         return { kind: "at_location", locationId: location3, precision: "coarse" };
       }
       const grid = gridOf(character);
@@ -12227,780 +12229,104 @@ var init_atlas_scale = __esm({
   }
 });
 
-// src/atlas-db-views.ts
-function rows(ctx, table, where = "", params = [], limit = 500) {
-  const hasBranch = table !== "branches" && table !== "turns" && table !== "turn_changes" && table !== "sync_outbox";
-  const clauses = [];
-  const values = [];
-  if (hasBranch) {
-    clauses.push("branch_id = ?");
-    values.push(ctx.branchId);
-  }
-  if (where) {
-    clauses.push(where);
-    values.push(...params);
-  }
-  const sql = `SELECT * FROM ${table}${clauses.length ? ` WHERE ${clauses.join(" AND ")}` : ""} LIMIT ${Math.max(1, Math.min(2e3, limit))}`;
-  return queryBound(ctx.db, sql, values).map((raw) => {
-    const decoded = decodeRow(table, raw, { allowExtra: true });
-    return decoded.ok ? decoded.row : raw;
-  });
-}
-function clampRevision(ctx, requested) {
-  if (requested === void 0 || requested === null) return { ok: true, current: ctx.revision };
-  return { ok: requested === ctx.revision, requested, current: ctx.revision };
-}
-function staleResult(ctx, requested) {
-  const rev = clampRevision(ctx, requested);
-  if (rev.ok) return null;
+// src/atlas-scene-layout.ts
+function interiorPositionHint(action, id) {
+  const zones = [
+    [/(窗边|窗旁|靠窗|window)/i, 80, 30, "窗边"],
+    [/(门口|门边|门旁|门前|入口|巷口|路口|door)/i, 18, 80, "入口附近"],
+    [/(角落|墙角|corner)/i, 18, 18, "角落"],
+    [/(桌边|桌旁|桌子|课桌|讲台|desk|table)/i, 55, 55, "桌旁"],
+    [/(中央|中间|中心|center|middle)/i, 50, 45, "中央"],
+    [/(左侧|左边|left)/i, 22, 50, "左侧"],
+    [/(右侧|右边|right)/i, 78, 50, "右侧"]
+  ];
+  const zone = zones.map((entry) => {
+    const matches = [...action.matchAll(new RegExp(entry[0].source, "gi"))];
+    return { entry, index: matches.length ? matches[matches.length - 1].index : -1 };
+  }).sort((a, b) => b.index - a.index)[0];
+  if (!zone || zone.index < 0) return null;
+  let hash = 0;
+  for (const letter of id) hash = Math.imul(hash, 31) + letter.charCodeAt(0) | 0;
   return {
-    branchId: ctx.branchId,
-    revision: ctx.revision,
-    items: [],
-    metadata: { stale: true, requestedRevision: rev.requested, currentRevision: rev.current }
+    x: zone.entry[1] + (hash >>> 0) % 11 - 5,
+    y: zone.entry[2] + ((hash >>> 4) % 11 - 5),
+    label: zone.entry[3]
   };
 }
-function queryMapView(ctx, query) {
-  const stale = staleResult(ctx, query.revision);
-  if (stale) return stale;
-  const maps = rows(ctx, "maps", "", [], 200).filter((m) => String(m.status) === "active");
-  if (maps.length === 0) {
-    return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { empty: true, reason: "NO_MAP" } };
-  }
-  const selected = query.mapId ? maps.filter((m) => String(m.id) === query.mapId) : maps;
-  const mapIds = new Set(selected.map((m) => String(m.id)));
-  const locations = rows(ctx, "locations", "status = 'active'", [], 2e3);
-  const locationById = new Map(locations.map((l) => [String(l.id), l]));
-  const characters = rows(ctx, "characters", "status = 'active'", [], 2e3);
-  const itemRows = rows(ctx, "items", "status = 'active'", [], 2e3);
-  const routes = rows(ctx, "routes", "", [], 1e3);
-  const positionCache = buildPositionCache({ db: ctx.db, branchId: ctx.branchId });
-  const items = selected.map((map) => {
-    const mapId = String(map.id);
-    const points = [];
-    const coarseList = [];
-    for (const loc of locations) {
-      const locId = String(loc.id);
-      const locMap = loc.map_id ? String(loc.map_id) : null;
-      if (locMap !== mapId) continue;
-      const precision = String(loc.coord_precision ?? "unknown");
-      if (precision === "unknown" || typeof loc.grid_x !== "number" || typeof loc.grid_y !== "number") continue;
-      points.push({
-        entityId: locId,
-        kind: "location",
-        name: String(loc.name ?? ""),
-        mapId,
-        x: loc.grid_x,
-        y: loc.grid_y,
-        precision,
-        radius: typeof loc.uncertainty_radius_cells === "number" ? loc.uncertainty_radius_cells : null,
-        markerQuality: precision
-      });
-    }
-    for (const ch of characters) {
-      const chId = String(ch.id);
-      const position = resolveEffectivePosition({ db: ctx.db, branchId: ctx.branchId }, chId, void 0, positionCache);
-      if (position.kind === "at_grid" && position.mapId === mapId) {
-        points.push({
-          entityId: chId,
-          kind: "character",
-          name: String(ch.name ?? ""),
-          mapId,
-          x: position.x,
-          y: position.y,
-          precision: position.precision,
-          radius: position.radius ?? null,
-          markerQuality: position.precision
-        });
-      } else if (position.kind === "at_location") {
-        const loc = locationById.get(position.locationId);
-        const locMap = loc?.map_id ? String(loc.map_id) : null;
-        if (locMap === mapId && typeof ch.grid_x === "number" && typeof ch.grid_y === "number" && String(ch.coord_precision) !== "unknown") {
-          points.push({
-            entityId: chId,
-            kind: "character",
-            name: String(ch.name ?? ""),
-            mapId,
-            x: ch.grid_x,
-            y: ch.grid_y,
-            precision: String(ch.coord_precision),
-            radius: typeof ch.uncertainty_radius_cells === "number" ? ch.uncertainty_radius_cells : null,
-            markerQuality: String(ch.coord_precision)
-          });
-          continue;
-        }
-        if (locMap === mapId) {
-          coarseList.push({
-            entityId: chId,
-            name: String(ch.name ?? ""),
-            locationId: position.locationId,
-            locationName: loc ? String(loc.name ?? "") : null
-          });
-        }
-      }
-    }
-    for (const item of itemRows) {
-      const itemId = String(item.id);
-      if (item.holder_character_id || item.container_item_id) continue;
-      const position = resolveEffectivePosition({ db: ctx.db, branchId: ctx.branchId }, itemId, void 0, positionCache);
-      if (position.kind === "at_grid" && position.mapId === mapId) {
-        points.push({
-          entityId: itemId,
-          kind: "item",
-          name: String(item.name ?? ""),
-          mapId,
-          x: position.x,
-          y: position.y,
-          precision: position.precision,
-          radius: position.radius ?? null,
-          markerQuality: position.precision
-        });
-      }
-    }
-    const mapRoutes = routes.filter((r) => r.map_id ? String(r.map_id) === mapId : false).map((r) => ({
-      routeId: String(r.id),
-      fromId: String(r.from_location_id),
-      toId: String(r.to_location_id),
-      kind: String(r.kind),
-      geometryQuality: String(r.geometry_quality ?? "unknown"),
-      distanceM: typeof r.distance_m === "number" ? r.distance_m : null,
-      dashed: String(r.geometry_quality) !== "confirmed",
-      allowedModes: Array.isArray(r.allowed_modes_json) ? r.allowed_modes_json : []
-    }));
-    const metersPerCell = typeof map.meters_per_cell === "number" ? map.meters_per_cell : null;
-    return {
-      mapId,
-      name: String(map.name ?? ""),
-      kind: String(map.kind ?? "world"),
-      containerLocationId: map.container_location_id ? String(map.container_location_id) : null,
-      metersPerCell,
-      scaleQuality: String(map.scale_quality ?? "uncalibrated"),
-      scaleLocked: Number(map.scale_locked ?? 0) === 1,
-      calibrationRev: Number(map.calibration_rev ?? 1),
-      defaultTerrain: String(map.default_terrain ?? "unknown"),
-      points,
-      coarseList,
-      routes: mapRoutes,
-      frames: {
-        frame: map.frame_json ?? {},
-        scaleBar: metersPerCell === null ? null : computeViewportScaleBar({ cameraK: 40, metersPerCell })
-      }
-    };
-  });
-  return {
-    branchId: ctx.branchId,
-    revision: ctx.revision,
-    items,
-    metadata: {
-      mapCount: mapIds.size,
-      pointCount: items.reduce((n, m) => n + m.points.length, 0),
-      coarseCount: items.reduce((n, m) => n + m.coarseList.length, 0),
-      viewMode: ctx.viewMode ?? "author",
-      ...assetDiagnostics(ctx, selected)
-    }
-  };
-}
-function assetDiagnostics(ctx, maps) {
-  const present = new Set((ctx.assets ?? []).map((asset) => String(asset.key)));
-  const referenced = [
-    ...new Set(
-      maps.map(
-        (map) => map.background_asset_key === null || map.background_asset_key === void 0 ? "" : String(map.background_asset_key)
-      ).filter((key) => key !== "")
-    )
-  ].sort();
-  const missing = referenced.filter((key) => !present.has(key));
-  const unreferenced = [...present].filter((key) => !referenced.includes(key)).sort();
-  return {
-    assetCheck: "ok",
-    referencedAssetCount: referenced.length,
-    missingAssets: missing,
-    missingAssetCount: missing.length,
-    unreferencedAssets: unreferenced,
-    assetNotice: missing.length > 0 ? `缺底图：${missing.length} 张引用的底图未随存档带来（实体与坐标仍完整）` : null
-  };
-}
-function queryNearby(ctx, query) {
-  const stale = staleResult(ctx, query.revision);
-  if (stale) return stale;
-  const target = query.entityId ? resolveEffectivePosition({ db: ctx.db, branchId: ctx.branchId }, query.entityId) : { kind: "unknown" };
-  if (target.kind === "unknown") {
-    return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "POSITION_UNKNOWN" } };
-  }
-  const here = target.kind === "at_grid" ? target.mapId : target.kind === "at_location" ? target.locationId : null;
-  const characters = rows(ctx, "characters", "status = 'active'", [], 1e3);
-  const results = [];
-  for (const ch of characters) {
-    const id = String(ch.id);
-    if (query.entityId && id === query.entityId) continue;
-    const position = resolveEffectivePosition({ db: ctx.db, branchId: ctx.branchId }, id);
-    if (target.kind === "at_grid" && position.kind === "at_grid" && position.mapId === here) {
-      const dx = position.x - target.x;
-      const dy = position.y - target.y;
-      results.push({
-        entityId: id,
-        name: String(ch.name ?? ""),
-        relevance: "same_map",
-        positionQuality: position.precision,
-        gridDistance: Math.sqrt(dx * dx + dy * dy)
-      });
-    } else if (target.kind === "at_location" && position.kind === "at_location" && position.locationId === here) {
-      results.push({
-        entityId: id,
-        name: String(ch.name ?? ""),
-        relevance: "same_location",
-        positionQuality: "coarse"
-      });
-    }
-  }
-  const limit = query.limit ?? 50;
-  return {
-    branchId: ctx.branchId,
-    revision: ctx.revision,
-    items: results.slice(0, limit),
-    metadata: { anchor: target.kind, anchorId: here, total: results.length }
-  };
-}
-function queryEntityDetail(ctx, query) {
-  const stale = staleResult(ctx, query.revision);
-  if (stale) return stale;
-  const entityId = query.entityId;
-  if (!entityId) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "NO_ENTITY_ID" } };
-  const key = rows(ctx, "entity_keys", "id = ?", [entityId], 1)[0];
-  if (!key) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "ENTITY_UNKNOWN" } };
-  const kind = String(key.kind);
-  if (kind === "character") {
-    const character = rows(ctx, "characters", "id = ?", [entityId], 1)[0];
-    if (!character) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "ENTITY_UNKNOWN" } };
-    const relations2 = rows(ctx, "relations", "subject_entity_id = ? OR object_entity_id = ?", [entityId, entityId], 200);
-    const actions = rows(ctx, "actions", "actor_entity_id = ?", [entityId], 100);
-    const journeys = rows(ctx, "journeys", "mover_entity_id = ?", [entityId], 20);
-    const knowledge = rows(ctx, "knowledge", "knower_character_id = ?", [entityId], 200);
-    const position = resolveEffectivePosition({ db: ctx.db, branchId: ctx.branchId }, entityId);
-    return {
-      branchId: ctx.branchId,
-      revision: ctx.revision,
-      items: [{ kind, character, relations: relations2, actions, journeys, knowledge, position }],
-      metadata: { counts: { relations: relations2.length, actions: actions.length, knowledge: knowledge.length } }
-    };
-  }
-  if (kind === "location") {
-    const location2 = rows(ctx, "locations", "id = ?", [entityId], 1)[0];
-    if (!location2) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "ENTITY_UNKNOWN" } };
-    const children = rows(ctx, "locations", "parent_location_id = ?", [entityId], 200);
-    const present = rows(ctx, "characters", "location_id = ? AND status = ?", [entityId, "active"], 200);
-    const events = rows(ctx, "events", "location_id = ?", [entityId], 200);
-    const fronts = rows(ctx, "rumor_fronts", "location_id = ?", [entityId], 200);
-    const position = resolveEffectivePosition({ db: ctx.db, branchId: ctx.branchId }, entityId);
-    return {
-      branchId: ctx.branchId,
-      revision: ctx.revision,
-      items: [{ kind, location: location2, children, present, events, fronts, position }],
-      metadata: { counts: { children: children.length, present: present.length, events: events.length, fronts: fronts.length } }
-    };
-  }
-  if (kind === "item") {
-    const item = rows(ctx, "items", "id = ?", [entityId], 1)[0];
-    if (!item) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "ENTITY_UNKNOWN" } };
-    const contained = rows(ctx, "items", "container_item_id = ?", [entityId], 200);
-    const position = resolveEffectivePosition({ db: ctx.db, branchId: ctx.branchId }, entityId);
-    return { branchId: ctx.branchId, revision: ctx.revision, items: [{ kind, item, contained, position }], metadata: {} };
-  }
-  const faction = rows(ctx, "factions", "id = ?", [entityId], 1)[0];
-  const relations = rows(ctx, "relations", "subject_entity_id = ? OR object_entity_id = ?", [entityId, entityId], 200);
-  const channels = rows(ctx, "channels", "owner_entity_id = ?", [entityId], 100);
-  return {
-    branchId: ctx.branchId,
-    revision: ctx.revision,
-    items: [{ kind, faction, relations, channels }],
-    metadata: { counts: { relations: relations.length, channels: channels.length } }
-  };
-}
-function queryChanges(ctx, query) {
-  const stale = staleResult(ctx, query.revision);
-  if (stale) return stale;
-  const limit = Math.max(1, Math.min(500, query.limit ?? 100));
-  const changes = queryBound(
-    ctx.db,
-    `SELECT tc.id, tc.turn_id, tc.sequence, tc.group_id, tc.operation_id, tc.target_table, tc.target_row_id, tc.operation, tc.summary, tc.basis_json, t.kind AS turn_kind, t.created_wall_ms
-     FROM turn_changes tc JOIN turns t ON t.id = tc.turn_id
-     WHERE t.branch_id = ?
-     ORDER BY tc.turn_id DESC, tc.sequence DESC LIMIT ?`,
-    [ctx.branchId, limit]
-  );
-  const items = changes.map((c) => ({
-    changeId: String(c.id),
-    turnId: String(c.turn_id),
-    sequence: Number(c.sequence),
-    groupId: String(c.group_id),
-    operationId: String(c.operation_id),
-    table: String(c.target_table),
-    rowId: String(c.target_row_id),
-    operation: String(c.operation),
-    summary: String(c.summary ?? ""),
-    turnKind: String(c.turn_kind ?? ""),
-    basis: safeJson(c.basis_json)
+function scenePositions(rows3, frame) {
+  const cols2 = Math.max(1, frame.cols), height = Math.max(1, frame.rows);
+  const width = Math.max(1, Math.ceil(Math.sqrt(rows3.length * cols2 / height)));
+  const depth = Math.max(1, Math.ceil(rows3.length / width));
+  const slots = Array.from({ length: width * depth }, (_, i) => ({
+    x: width === 1 ? 50 : 18 + i % width * 64 / (width - 1),
+    y: depth === 1 ? 50 : 18 + Math.floor(i / width) * 64 / (depth - 1)
   }));
-  return {
-    branchId: ctx.branchId,
-    revision: ctx.revision,
-    items,
-    metadata: { count: items.length, cursor: query.cursor ?? null }
-  };
-}
-function safeJson(text3) {
-  if (typeof text3 !== "string") return {};
-  try {
-    const parsed = JSON.parse(text3);
-    return typeof parsed === "object" && parsed !== null ? parsed : {};
-  } catch {
-    return { parseError: true };
-  }
-}
-function queryDiagnostics(ctx, query) {
-  const stale = staleResult(ctx, query.revision);
-  if (stale) return stale;
-  const limit = Math.max(1, Math.min(500, query.limit ?? 100));
-  const offset = query.cursor ? Number(query.cursor) : 0;
-  const total = queryBound(
-    ctx.db,
-    `SELECT COUNT(*) AS n FROM turn_changes tc JOIN turns t ON t.id = tc.turn_id WHERE t.branch_id = ?`,
-    [ctx.branchId]
-  );
-  const totalCount = Number(total[0]?.n ?? 0);
-  const changes = queryBound(
-    ctx.db,
-    `SELECT tc.id, tc.turn_id, tc.group_id, tc.operation_id, tc.target_table, tc.target_row_id, tc.operation, tc.summary, tc.basis_json
-     FROM turn_changes tc JOIN turns t ON t.id = tc.turn_id
-     WHERE t.branch_id = ? ORDER BY tc.turn_id, tc.sequence LIMIT ? OFFSET ?`,
-    [ctx.branchId, limit, offset]
-  );
-  const failedTurns = queryBound(
-    ctx.db,
-    `SELECT id, status, receipt_json, attempts_json FROM turns WHERE branch_id = ? AND status IN ('failed','partial') ORDER BY created_wall_ms DESC LIMIT 50`,
-    [ctx.branchId]
-  );
-  const nextOffset = offset + changes.length;
-  return {
-    branchId: ctx.branchId,
-    revision: ctx.revision,
-    items: [
-      ...changes.map((c) => ({
-        logId: String(c.id),
-        kind: "change",
-        turnId: String(c.turn_id),
-        groupId: String(c.group_id),
-        operationId: String(c.operation_id),
-        table: String(c.target_table),
-        rowId: String(c.target_row_id),
-        operation: String(c.operation),
-        summary: String(c.summary ?? ""),
-        basis: safeJson(c.basis_json)
-      })),
-      ...failedTurns.map((t) => ({
-        logId: `turn_${String(t.id)}`,
-        kind: "failed_turn",
-        turnId: String(t.id),
-        status: String(t.status),
-        receipt: safeJson(t.receipt_json),
-        attempts: safeJson(t.attempts_json)
-      }))
-    ],
-    nextCursor: nextOffset < totalCount ? String(nextOffset) : void 0,
-    metadata: {
-      totalCount,
-      returned: changes.length,
-      droppedCount: 0,
-      pageSize: limit,
-      /** 导出全部匹配记录；分页不截断导出。 */
-      exportComplete: true
+  const result = /* @__PURE__ */ new Map();
+  const occupied = [];
+  const gap = Math.min(12, 45 / Math.sqrt(Math.max(1, rows3.length)));
+  const ordered = [...rows3].sort((a, b) => Number(Boolean(b.positionHint || b.currentAction)) - Number(Boolean(a.positionHint || a.currentAction)) || a.id.localeCompare(b.id));
+  for (const row2 of ordered) {
+    const hint = interiorPositionHint(row2.positionHint || row2.currentAction || "", row2.id);
+    let index = 0;
+    if (hint) {
+      let best = Infinity;
+      slots.forEach((slot2, i) => {
+        const score = (slot2.x - hint.x) ** 2 + (slot2.y - hint.y) ** 2;
+        if (score < best) {
+          best = score;
+          index = i;
+        }
+      });
     }
-  };
-}
-function querySimulationView(ctx, query) {
-  const stale = staleResult(ctx, query.revision);
-  if (stale) return stale;
-  const branch2 = queryBound(ctx.db, "SELECT * FROM branches WHERE id = ?", [ctx.branchId])[0];
-  if (!branch2) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "BRANCH_UNKNOWN" } };
-  const clock = Number(branch2.clock_s ?? 0);
-  const cursor = Number(branch2.simulation_cursor_s ?? 0);
-  const pending = cursor < clock;
-  return {
-    branchId: ctx.branchId,
-    revision: ctx.revision,
-    items: [
-      {
-        clockS: clock,
-        clockMinS: Number(branch2.clock_min_s ?? 0),
-        clockMaxS: Number(branch2.clock_max_s ?? 0),
-        calendarLabel: branch2.calendar_label ?? null,
-        simulationCursorS: cursor,
-        simulationStatus: String(branch2.simulation_status ?? "current"),
-        /** UI 必须显示「后台尚未结算到当前时间」。 */
-        pendingNotice: pending ? `正文时间已前进，部分后台尚在结算（未结算 ${Math.round(clock - cursor)} 秒）` : null
-      }
-    ],
-    metadata: { pending, viewMode: ctx.viewMode ?? "author", requestedCursor: query.cursor ?? null }
-  };
-}
-var init_atlas_db_views = __esm({
-  "src/atlas-db-views.ts"() {
-    "use strict";
-    init_atlas_db_codec();
-    init_atlas_db_runtime();
-    init_atlas_sim_position();
-    init_atlas_scale();
-  }
-});
-
-// src/atlas-sql-refs.ts
-function collectKnownRefs(tables, branchId) {
-  return CATALOG.flatMap(([table, prefix, kind, limit]) => tables.selectWhere(table, { branch_id: branchId }, limit).map((row2, i) => ({ alias: `${prefix}${i + 1}`, id: String(row2.id), kind, rowRev: typeof row2.row_rev === "number" ? row2.row_rev : null })));
-}
-function collectEntityRefs(tables, branchId, refs = collectKnownRefs(tables, branchId)) {
-  return refs.map((ref) => {
-    const table = CATALOG.find((entry) => entry[2] === ref.kind)?.[0];
-    const row2 = table ? tables.selectOne(table, branchId, ref.id) : null;
-    return `${ref.alias}=${String(row2?.name ?? row2?.title ?? ref.kind)}（${ref.kind}）`;
-  });
-}
-function inDecisionScope(op, ctx, tables, branchId) {
-  const d = op.value.data ?? {}, ids = new Map(ctx.knownRefs.map((ref) => [ref.alias, ref.id]));
-  const target = ids.get(String(op.value.ref ?? d.actor_ref ?? d.owner_ref ?? ""));
-  if (op.value.op === "noop" || op.value.op === "attention.propose") return true;
-  if (op.value.op === "character.upsert") return !!target && ctx.actorIds.includes(target) && Object.keys(d).every((k) => ["thought", "action_tendency"].includes(k));
-  if (op.value.op === "plan.propose") return !!target && ctx.actorIds.includes(target);
-  if (op.value.op === "plan.revise") {
-    const action = target ? tables.selectOne("actions", branchId, target) : null;
-    return !!action && ctx.actorIds.includes(String(action.actor_entity_id));
-  }
-  return false;
-}
-var CATALOG;
-var init_atlas_sql_refs = __esm({
-  "src/atlas-sql-refs.ts"() {
-    "use strict";
-    CATALOG = [
-      ["locations", "L", "location", 200],
-      ["characters", "C", "character", 200],
-      ["items", "I", "item", 100],
-      ["factions", "F", "faction", 100],
-      ["maps", "M", "map", 50],
-      ["actions", "A", "action", 200],
-      ["information", "N", "information", 200],
-      ["routes", "R", "route", 200],
-      ["events", "E", "event", 200],
-      ["journeys", "J", "journey", 200],
-      ["channels", "H", "channel", 100],
-      ["knowledge", "K", "knowledge", 200]
-    ];
-  }
-});
-
-// src/atlas-sim-time.ts
-function activityDefault(kind) {
-  const found = ACTIVITY_DEFAULTS[kind];
-  return found ? { ...found } : null;
-}
-function isPlainObject9(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function finite(value) {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-function nonNegative(value) {
-  const n = finite(value);
-  return n !== null && n >= 0 ? n : null;
-}
-function normalize(bound) {
-  const min = Math.max(0, bound.min);
-  const nominal = Math.max(min, bound.nominal);
-  const max = Math.max(nominal, bound.max);
-  return { min, nominal, max };
-}
-function add(a, b) {
-  return { min: a.min + b.min, nominal: a.nominal + b.nominal, max: a.max + b.max };
-}
-function maxBound(a, b) {
-  return { min: Math.max(a.min, b.min), nominal: Math.max(a.nominal, b.nominal), max: Math.max(a.max, b.max) };
-}
-function dedupe(values) {
-  const out = [];
-  for (const value of values) if (value !== "" && !out.includes(value)) out.push(value);
-  return out;
-}
-function explicitRef(activity) {
-  const raw = activity;
-  for (const key of ["ref", "id", "key"]) {
-    const value = raw[key];
-    if (typeof value === "string" && value.trim() !== "") return value;
-  }
-  return null;
-}
-function buildNode(activity, index, conflicts) {
-  const kind = typeof activity?.kind === "string" ? activity.kind : "other";
-  const label = `a${index}:${kind}`;
-  const hint = isPlainObject9(activity?.hint) ? activity.hint : {};
-  const afterRef = typeof hint.after_ref === "string" && hint.after_ref.trim() !== "" ? hint.after_ref : null;
-  const sameRef = typeof hint.same_interval_as === "string" && hint.same_interval_as.trim() !== "" ? hint.same_interval_as : null;
-  if (afterRef && sameRef) {
-    conflicts.push(`CONFLICT_AFTER_AND_SAME:${label}`);
-  }
-  const node = {
-    index,
-    label,
-    aliases: [label, `a${index}`],
-    interval: null,
-    quality: "unknown",
-    basis: [],
-    zero: false,
-    afterRef,
-    sameRef: afterRef ? null : sameRef
-  };
-  const ref = explicitRef(activity);
-  if (ref) node.aliases.push(ref);
-  if (!activity?.completed) {
-    node.interval = { ...ZERO };
-    node.quality = "explicit";
-    node.zero = true;
-    node.basis.push(`INCOMPLETE_ACTIVITY_ZERO:${kind}`);
-    return node;
-  }
-  const elapsed = nonNegative(hint.elapsed_s);
-  if (elapsed !== null) {
-    node.interval = { min: elapsed, nominal: elapsed, max: elapsed };
-    node.quality = "explicit";
-    node.zero = elapsed === 0;
-    node.basis.push(kind === "travel" ? "TRAVEL_COMPUTED" : "HINT_ELAPSED");
-    return node;
-  }
-  if (typeof hint.elapsed_s === "number" && Number.isFinite(hint.elapsed_s) && hint.elapsed_s < 0) {
-    conflicts.push(`HINT_ELAPSED_NEGATIVE:${label}`);
-  }
-  const hintNominal = nonNegative(hint.nominal_s);
-  const minS = nonNegative(hint.min_s);
-  const maxS = nonNegative(hint.max_s);
-  if (minS !== null || maxS !== null || hintNominal !== null) {
-    const min = minS ?? hintNominal ?? maxS ?? 0;
-    const max = maxS ?? hintNominal ?? minS ?? 0;
-    const nominal = hintNominal ?? (min + max) / 2;
-    node.interval = normalize({ min, nominal, max });
-    node.quality = "estimated";
-    node.basis.push(
-      minS !== null && maxS !== null ? "HINT_RANGE" : minS !== null ? "HINT_MIN_ONLY" : maxS !== null ? "HINT_MAX_ONLY" : "HINT_NOMINAL_ONLY"
-    );
-    return node;
-  }
-  const fallback = activityDefault(kind);
-  if (fallback) {
-    if (kind === "dialogue") {
-      node.interval = { ...ZERO };
-      node.quality = "explicit";
-      node.zero = true;
-      node.basis.push("ACTIVITY_DEFAULT:dialogue");
-      return node;
-    }
-    node.interval = normalize({ min: fallback.min_s, nominal: fallback.nominal_s, max: fallback.max_s });
-    node.quality = "estimated";
-    node.basis.push(`ACTIVITY_DEFAULT:${kind}`);
-    return node;
-  }
-  node.interval = null;
-  node.quality = "unknown";
-  node.basis.push(`TIME_UNRESOLVED:${kind}`);
-  return node;
-}
-function deriveElapsedInterval(facts, base) {
-  const conflicts = [];
-  const clockRef = `clock_s:${finite(base?.clockS) ?? 0}`;
-  const explicit = facts?.explicitElapsedS;
-  if (explicit !== null && explicit !== void 0) {
-    const value = nonNegative(explicit);
-    if (value === null) {
-      conflicts.push("EXPLICIT_ELAPSED_INVALID");
-    } else {
-      return {
-        minS: value,
-        nominalS: value,
-        maxS: value,
-        quality: "explicit",
-        basisRefs: ["EXPLICIT_ELAPSED", clockRef],
-        conflicts
+    let slot = slots.splice(index, 1)[0];
+    const desired = hint ?? slot;
+    for (let attempt = 0; attempt < 300; attempt++) {
+      const radius = attempt === 0 ? 0 : gap * Math.sqrt(attempt);
+      const angle = attempt * 2.399963;
+      const candidate = {
+        x: Math.max(14, Math.min(86, desired.x + radius * Math.cos(angle))),
+        y: Math.max(14, Math.min(86, desired.y + radius * Math.sin(angle)))
       };
-    }
-  }
-  const activities = Array.isArray(facts?.activities) ? facts.activities : [];
-  const nodes = activities.map((activity, index) => buildNode(activity, index, conflicts));
-  if (nodes.length === 0) {
-    return { minS: 0, nominalS: 0, maxS: 0, quality: "unknown", basisRefs: ["TIME_UNRESOLVED", clockRef], conflicts };
-  }
-  const unresolved = nodes.filter((n) => n.interval === null);
-  if (unresolved.length > 0) {
-    const basis2 = dedupe([...nodes.flatMap((n) => n.basis), "TIME_UNRESOLVED", clockRef]);
-    return { minS: 0, nominalS: 0, maxS: 0, quality: "unknown", basisRefs: basis2, conflicts };
-  }
-  const kindCount = /* @__PURE__ */ new Map();
-  for (const node of nodes) {
-    const kind = node.label.split(":")[1] ?? "";
-    kindCount.set(kind, (kindCount.get(kind) ?? 0) + 1);
-  }
-  const refMap = /* @__PURE__ */ new Map();
-  nodes.forEach((node) => {
-    const kind = node.label.split(":")[1] ?? "";
-    const aliases = [...node.aliases];
-    if ((kindCount.get(kind) ?? 0) === 1) aliases.push(kind);
-    for (const alias of aliases) if (!refMap.has(alias)) refMap.set(alias, node.index);
-  });
-  const resolve = (raw) => {
-    if (!raw) return null;
-    const hit = refMap.get(raw);
-    if (hit === void 0) {
-      conflicts.push(`UNRESOLVED_ACTIVITY_REF:${raw}`);
-      return null;
-    }
-    return hit;
-  };
-  const parent = nodes.map((_, i) => i);
-  const find = (i) => {
-    let cursor = i;
-    while (parent[cursor] !== cursor) {
-      parent[cursor] = parent[parent[cursor]];
-      cursor = parent[cursor];
-    }
-    return cursor;
-  };
-  const union = (a, b) => {
-    const ra = find(a);
-    const rb = find(b);
-    if (ra === rb) return;
-    if (ra < rb) parent[rb] = ra;
-    else parent[ra] = rb;
-  };
-  const afterEdges = [];
-  let implicitSameGroup = false;
-  for (const node of nodes) {
-    if (node.sameRef) {
-      if (node.sameRef === node.aliases[0] || node.sameRef === `a${node.index}`) {
-        conflicts.push(`SAME_INTERVAL_SELF:${node.label}`);
-        continue;
-      }
-      const target = resolve(node.sameRef);
-      if (target !== null && target !== node.index) union(node.index, target);
-    }
-    if (node.afterRef) {
-      const target = resolve(node.afterRef);
-      if (target !== null && target !== node.index) afterEdges.push({ from: target, to: node.index });
-      else if (target === node.index) conflicts.push(`AFTER_REF_SELF:${node.label}`);
-    }
-  }
-  const referenced = new Set(afterEdges.map((e) => e.to));
-  const unrelated = nodes.filter((n) => !n.afterRef && !referenced.has(n.index)).map((n) => n.index);
-  if (unrelated.length > 1) {
-    implicitSameGroup = true;
-    for (let i = 1; i < unrelated.length; i += 1) union(unrelated[0], unrelated[i]);
-  }
-  let groupOf = nodes.map((_, i) => find(i));
-  let groupIds = [...new Set(groupOf)];
-  let edges = afterEdges.map((e) => ({ from: find(e.from), to: find(e.to) })).filter((e) => {
-    if (e.from === e.to) {
-      conflicts.push("ORDER_INSIDE_SAME_INTERVAL");
-      return false;
-    }
-    return true;
-  });
-  const detectCycle = () => {
-    const indeg2 = /* @__PURE__ */ new Map();
-    for (const id of groupIds) indeg2.set(id, 0);
-    for (const e of edges) indeg2.set(e.to, (indeg2.get(e.to) ?? 0) + 1);
-    const queue = groupIds.filter((id) => (indeg2.get(id) ?? 0) === 0);
-    let seen = 0;
-    while (queue.length > 0) {
-      const id = queue.shift();
-      seen += 1;
-      for (const e of edges) {
-        if (e.from !== id) continue;
-        const next = (indeg2.get(e.to) ?? 0) - 1;
-        indeg2.set(e.to, next);
-        if (next === 0) queue.push(e.to);
+      if (occupied.every((point) => Math.hypot(candidate.x - point.x, candidate.y - point.y) >= gap)) {
+        slot = candidate;
+        break;
       }
     }
-    return seen < groupIds.length;
-  };
-  if (edges.length > 0 && detectCycle()) {
-    conflicts.push("CYCLE_AFTER_REF");
-    edges = [];
-    const root = groupOf[0];
-    for (const id of groupIds) union(root, id);
-    groupOf = nodes.map((_, i) => find(i));
-    groupIds = [...new Set(groupOf)];
-    implicitSameGroup = true;
+    occupied.push(slot);
+    result.set(row2.id, {
+      x: slot.x * cols2 / 100,
+      y: slot.y * height / 100,
+      label: row2.positionHint || hint?.label || "场景内，细部位置估计"
+    });
   }
-  const groupBounds = /* @__PURE__ */ new Map();
-  for (const node of nodes) {
-    const id = groupOf[node.index];
-    const bound = node.interval;
-    const previous = groupBounds.get(id);
-    groupBounds.set(id, previous ? maxBound(previous, bound) : bound);
-  }
-  const predecessorBounds = (id) => {
-    const preds = edges.filter((e) => e.to === id);
-    if (preds.length === 0) return { ...ZERO };
-    let acc = null;
-    for (const pred of preds) {
-      const bound = finish.get(pred.from);
-      if (!bound) continue;
-      acc = acc ? maxBound(acc, bound) : bound;
-    }
-    return acc ?? { ...ZERO };
-  };
-  const indeg = /* @__PURE__ */ new Map();
-  for (const id of groupIds) indeg.set(id, 0);
-  for (const e of edges) indeg.set(e.to, (indeg.get(e.to) ?? 0) + 1);
-  const ready = groupIds.filter((id) => (indeg.get(id) ?? 0) === 0);
-  const finish = /* @__PURE__ */ new Map();
-  while (ready.length > 0) {
-    const id = ready.shift();
-    const own = groupBounds.get(id) ?? { ...ZERO };
-    finish.set(id, add(predecessorBounds(id), own));
-    for (const e of edges) {
-      if (e.from !== id) continue;
-      const next = (indeg.get(e.to) ?? 0) - 1;
-      indeg.set(e.to, next);
-      if (next === 0) ready.push(e.to);
-    }
-  }
-  let total = null;
-  for (const id of groupIds) {
-    const bound = finish.get(id);
-    if (!bound) continue;
-    total = total ? maxBound(total, bound) : bound;
-  }
-  const resolved = normalize(total ?? { ...ZERO });
-  const allExplicit = nodes.every((n) => n.quality === "explicit");
-  const estimated = nodes.some((n) => n.quality === "estimated") || implicitSameGroup;
-  const quality = allExplicit && !estimated ? "explicit" : "estimated";
-  const basis = dedupe([...nodes.flatMap((n) => n.basis), ...implicitSameGroup ? ["SAME_INTERVAL_INFERRED"] : [], clockRef]);
-  return {
-    minS: resolved.min,
-    nominalS: resolved.nominal,
-    maxS: resolved.max,
-    quality,
-    basisRefs: basis,
-    conflicts
-  };
+  return result;
 }
-var ACTIVITY_DEFAULTS, ZERO;
-var init_atlas_sim_time = __esm({
-  "src/atlas-sim-time.ts"() {
+var init_atlas_scene_layout = __esm({
+  "src/atlas-scene-layout.ts"() {
     "use strict";
-    ACTIVITY_DEFAULTS = {
-      dialogue: { min_s: 0, nominal_s: 0, max_s: 0 },
-      meal: { min_s: 900, nominal_s: 1800, max_s: 3600 },
-      rest: { min_s: 300, nominal_s: 1200, max_s: 3600 },
-      sleep: { min_s: 14400, nominal_s: 28800, max_s: 36e3 },
-      combat: { min_s: 30, nominal_s: 120, max_s: 600 }
-    };
-    ZERO = { min: 0, nominal: 0, max: 0 };
+  }
+});
+
+// src/atlas-scene-context.ts
+function renderSceneContext(scene, clues, maxChars = 1800) {
+  if (!scene.length && !clues.length) return "";
+  const header = '<atlas_scene_context version="2">\n仅用于续写当前视角；传闻不等于事实，不能把人物私下意图写成主角已知。\n';
+  const footer = "\n</atlas_scene_context>";
+  if (maxChars < header.length + footer.length + 5) return "";
+  const lines = [];
+  let length = header.length + footer.length;
+  for (const section of [scene.length ? ["【当前场景】", ...scene] : [], clues.length ? ["【场景线索】", ...clues] : []]) {
+    for (const line of section) {
+      if (length + line.length + 1 > maxChars) break;
+      lines.push(line);
+      length += line.length + 1;
+    }
+  }
+  return header + lines.join("\n") + footer;
+}
+var init_atlas_scene_context = __esm({
+  "src/atlas-scene-context.ts"() {
+    "use strict";
   }
 });
 
@@ -13008,15 +12334,15 @@ var init_atlas_sim_time = __esm({
 function issue10(code, path, message, severity = "warning") {
   return { code, path, message, severity, retryable: false };
 }
-function isPlainObject10(value) {
+function isPlainObject9(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function asObject(value) {
-  if (isPlainObject10(value)) return value;
+  if (isPlainObject9(value)) return value;
   if (typeof value === "string" && value.trim() !== "") {
     try {
       const parsed = JSON.parse(value);
-      return isPlainObject10(parsed) ? parsed : null;
+      return isPlainObject9(parsed) ? parsed : null;
     } catch {
       return null;
     }
@@ -13089,7 +12415,7 @@ function evaluateCondition(world, condition, opts) {
   const walk = (node, depth) => {
     if (depth > CONDITION_DEPTH) return leafResult(false, "CONDITION_DEPTH_EXCEEDED", null);
     if (node === null || node === void 0) return { ok: true, reasons: [], atS: null };
-    if (!isPlainObject10(node)) return leafResult(false, "CONDITION_INVALID", null);
+    if (!isPlainObject9(node)) return leafResult(false, "CONDITION_INVALID", null);
     const keys = Object.keys(node);
     if (keys.length === 0) return { ok: true, reasons: [], atS: null };
     if (Array.isArray(node.all)) {
@@ -13107,7 +12433,7 @@ function evaluateCondition(world, condition, opts) {
       return { ok: true, reasons: [], atS: times.length > 0 ? Math.min(...times) : null };
     }
     const kind = keys[0];
-    const body = isPlainObject10(node[kind]) ? node[kind] : {};
+    const body = isPlainObject9(node[kind]) ? node[kind] : {};
     const actor = str2(body.actor_ref) ?? actorId;
     switch (kind) {
       case "time_at_or_after": {
@@ -13164,7 +12490,7 @@ function evaluateCondition(world, condition, opts) {
         const key = str2(body.key);
         if (!actor || !key) return leafResult(false, "CONDITION_FIELD_MISSING:capability", null);
         const row2 = loadRow(world, "characters", actor) ?? loadRow(world, "factions", actor);
-        const capabilities = asArray(row2?.capabilities_json).filter(isPlainObject10);
+        const capabilities = asArray(row2?.capabilities_json).filter(isPlainObject9);
         return leafResult(capabilities.some((c) => str2(c.key) === key), `CAPABILITY_MISSING:${key}`, null);
       }
       case "event_match": {
@@ -13195,15 +12521,15 @@ function evaluateCondition(world, condition, opts) {
   return { ok: result.ok, reasons: [...new Set(result.reasons)], atS: result.atS };
 }
 function nextTriggerTime(condition, afterS) {
-  if (!isPlainObject10(condition)) return null;
+  if (!isPlainObject9(condition)) return null;
   const times = [];
   const walk = (node, depth) => {
-    if (depth > CONDITION_DEPTH || !isPlainObject10(node)) return;
+    if (depth > CONDITION_DEPTH || !isPlainObject9(node)) return;
     if (Array.isArray(node.all) || Array.isArray(node.any)) {
       for (const child of node.all ?? node.any) walk(child, depth + 1);
       return;
     }
-    const body = isPlainObject10(node.time_at_or_after) ? node.time_at_or_after : null;
+    const body = isPlainObject9(node.time_at_or_after) ? node.time_at_or_after : null;
     if (body) {
       const s = num2(body.s);
       if (s !== null && s > afterS) times.push(s);
@@ -13514,15 +12840,15 @@ var init_atlas_sim_actions = __esm({
 function issue11(code, path, message, severity = "error") {
   return { code, path, message, severity, retryable: false };
 }
-function isPlainObject11(value) {
+function isPlainObject10(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function asObject2(value) {
-  if (isPlainObject11(value)) return value;
+  if (isPlainObject10(value)) return value;
   if (typeof value === "string" && value.trim() !== "") {
     try {
       const parsed = JSON.parse(value);
-      return isPlainObject11(parsed) ? parsed : null;
+      return isPlainObject10(parsed) ? parsed : null;
     } catch {
       return null;
     }
@@ -13556,7 +12882,7 @@ function normalizeTerrain(value) {
   return text3 === "" ? "unknown" : text3;
 }
 function parseProfiles(raw) {
-  return asArray2(raw).filter(isPlainObject11);
+  return asArray2(raw).filter(isPlainObject10);
 }
 function decodeOrNull2(table, row2) {
   const decoded = decodeRow(table, row2, { allowExtra: true });
@@ -14008,7 +13334,7 @@ function advanceJourney(journey, untilS, world) {
   const events = [];
   const row2 = { ...journey };
   const rawSegments = journey.segments_json;
-  const segmentsRaw = asArray2(rawSegments).filter(isPlainObject11);
+  const segmentsRaw = asArray2(rawSegments).filter(isPlainObject10);
   if (typeof rawSegments === "string" && rawSegments.trim() !== "" && segmentsRaw.length === 0) {
     issues.push(issue11("JOURNEY_SEGMENTS_INVALID", "journeys.segments_json", "segments_json 损坏，保持原状不推进"));
     return { journey: row2, events, remainingS: Math.max(0, untilS - (num3(journey.last_advanced_at_s) ?? 0)), issues };
@@ -14120,7 +13446,7 @@ function advanceJourney(journey, untilS, world) {
 }
 function nextNodeBoundary(journey) {
   if (String(journey.status ?? "") !== "moving") return null;
-  const segments = asArray2(journey.segments_json).filter(isPlainObject11);
+  const segments = asArray2(journey.segments_json).filter(isPlainObject10);
   const index = Math.max(0, Math.trunc(num3(journey.segment_index) ?? 0));
   if (index >= segments.length) return null;
   const segment = segments[index];
@@ -14131,7 +13457,7 @@ function nextNodeBoundary(journey) {
   return { atS, toLocationId: str3(segField(segment, "toLocationId", "to_location_id")) ?? "", routeId: str3(segField(segment, "routeId", "route_id")) };
 }
 function estimatedArrival(journey, clockS) {
-  const segments = asArray2(journey.segments_json).filter(isPlainObject11);
+  const segments = asArray2(journey.segments_json).filter(isPlainObject10);
   const status = String(journey.status ?? "moving");
   if (status === "arrived") {
     const arrived = num3(journey.arrived_at_s);
@@ -14191,15 +13517,15 @@ var init_atlas_sim_motion = __esm({
 });
 
 // src/atlas-sim-opportunities.ts
-function isPlainObject12(value) {
+function isPlainObject11(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function asObject3(value) {
-  if (isPlainObject12(value)) return value;
+  if (isPlainObject11(value)) return value;
   if (typeof value === "string" && value.trim() !== "") {
     try {
       const parsed = JSON.parse(value);
-      return isPlainObject12(parsed) ? parsed : null;
+      return isPlainObject11(parsed) ? parsed : null;
     } catch {
       return null;
     }
@@ -14483,6 +13809,1132 @@ var init_atlas_sim_opportunities = __esm({
     init_atlas_sim_motion();
     PUBLIC_CONTACT_DWELL_S = 60;
     OPPORTUNITY_BUCKET_S = 3600;
+  }
+});
+
+// src/atlas-db-knowledge-view.ts
+var atlas_db_knowledge_view_exports = {};
+__export(atlas_db_knowledge_view_exports, {
+  projectForPov: () => projectForPov,
+  projectPortrayal: () => projectPortrayal,
+  projectPromptView: () => projectPromptView,
+  renderSqlSceneContext: () => renderSqlSceneContext
+});
+function rows(db, table, sql, params) {
+  return queryBound(db, sql, params).map((raw) => {
+    const decoded = decodeRow(table, raw, { allowExtra: true });
+    return decoded.ok ? decoded.row : raw;
+  });
+}
+function projectForPov(world, pov) {
+  const povId = pov.characterId;
+  const knowledgeRows = povId ? rows(
+    world.db,
+    "knowledge",
+    "SELECT * FROM knowledge WHERE branch_id = ? AND knower_character_id = ? AND status = ?",
+    [world.branchId, povId, "active"]
+  ) : rows(
+    world.db,
+    "knowledge",
+    "SELECT * FROM knowledge WHERE branch_id = ? AND is_pov = 1 AND status = ?",
+    [world.branchId, "active"]
+  );
+  const informationIds = new Set(knowledgeRows.map((k) => String(k.information_id)));
+  const informations = /* @__PURE__ */ new Map();
+  for (const id of informationIds) {
+    const found = rows(world.db, "information", "SELECT * FROM information WHERE branch_id = ? AND id = ?", [world.branchId, id]);
+    if (found.length > 0) informations.set(id, found[0]);
+  }
+  const knownLocations = [];
+  const knownCharacters = [];
+  const knownFacts = [];
+  const lastSeen = [];
+  for (const k of knowledgeRows) {
+    const info = informations.get(String(k.information_id));
+    if (!info) continue;
+    const payload = info.payload_json ?? null;
+    const subjectId = info.subject_entity_id ? String(info.subject_entity_id) : null;
+    const firstReceived = Number(k.first_received_at_s ?? 0);
+    knownFacts.push({
+      informationId: String(info.id),
+      title: String(info.title ?? ""),
+      content: String(info.content ?? ""),
+      truthForAuthor: String(info.truth_status ?? "unknown"),
+      belief: String(k.belief ?? "heard"),
+      payload
+    });
+    if (subjectId) {
+      const key = rows(world.db, "entity_keys", "SELECT kind FROM entity_keys WHERE branch_id = ? AND id = ?", [world.branchId, subjectId]);
+      const kind = key.length > 0 ? String(key[0].kind) : "";
+      if (kind === "location") {
+        const loc = rows(world.db, "locations", "SELECT name FROM locations WHERE branch_id = ? AND id = ?", [world.branchId, subjectId]);
+        knownLocations.push({
+          locationId: subjectId,
+          name: loc.length > 0 ? String(loc[0].name ?? "") : "",
+          source: String(info.kind ?? ""),
+          firstReceivedAtS: firstReceived,
+          belief: String(k.belief ?? "heard")
+        });
+      } else if (kind === "character") {
+        const ch = rows(world.db, "characters", "SELECT name, identity FROM characters WHERE branch_id = ? AND id = ?", [world.branchId, subjectId]);
+        const identityKnown = Boolean(payload && String(payload.predicate ?? "") === "identity");
+        knownCharacters.push({
+          entityId: subjectId,
+          name: ch.length > 0 ? String(ch[0].name ?? "") : "",
+          belief: String(k.belief ?? "heard"),
+          attention: String(k.attention ?? "normal"),
+          reactionNote: String(k.reaction_note ?? ""),
+          identityKnown
+        });
+        if (payload && String(payload.predicate ?? "") === "located_at") {
+          const value = payload.value;
+          const locationId = typeof value === "string" ? value : value && typeof value === "object" ? String(value.entity_ref ?? "") : "";
+          lastSeen.push({
+            entityId: subjectId,
+            name: ch.length > 0 ? String(ch[0].name ?? "") : "",
+            locationId: locationId || null,
+            atS: typeof payload.as_of_s === "number" ? payload.as_of_s : firstReceived
+          });
+        }
+      }
+    }
+  }
+  const knownChannels = rows(
+    world.db,
+    "channels",
+    "SELECT * FROM channels WHERE branch_id = ? AND status = ? AND secrecy != ?",
+    [world.branchId, "active", "secret"]
+  ).filter((c) => povId ? String(c.owner_entity_id) === povId || String(c.recipient_entity_id ?? "") === povId : false).map((c) => ({ channelId: String(c.id), name: String(c.name ?? ""), kind: String(c.kind ?? "") }));
+  return {
+    povId,
+    isPovRow: Boolean(pov.isPovRow),
+    knownLocations,
+    knownCharacters,
+    lastSeen,
+    knownFacts,
+    knownChannels,
+    boundaries: [...BASE_BOUNDARIES]
+  };
+}
+function projectPortrayal(world, scene) {
+  const present = new Set(scene.actorIds ?? scene.entityIds ?? []);
+  const exclusions = [];
+  if (present.size === 0 && scene.locationId) {
+    const here = rows(
+      world.db,
+      "characters",
+      "SELECT id FROM characters WHERE branch_id = ? AND location_id = ? AND status = ?",
+      [world.branchId, scene.locationId, "active"]
+    );
+    for (const row2 of here) present.add(String(row2.id));
+  }
+  const entries = [];
+  for (const entityId of present) {
+    const found = rows(
+      world.db,
+      "characters",
+      "SELECT * FROM characters WHERE branch_id = ? AND id = ? AND status = ?",
+      [world.branchId, entityId, "active"]
+    );
+    if (found.length === 0) {
+      exclusions.push(`${entityId}: 不在本分支的在场人物中`);
+      continue;
+    }
+    const ch = found[0];
+    const position = resolveEffectivePosition({ db: world.db, branchId: world.branchId }, entityId);
+    if (scene.locationId && (position.kind === "at_location" ? position.locationId !== scene.locationId : position.kind === "at_grid" && ch.location_id !== scene.locationId)) {
+      exclusions.push(`${entityId}: 不在当前场景`);
+      continue;
+    }
+    if (position.kind === "unknown" || position.kind === "in_transit") {
+      exclusions.push(`${entityId}: 位置未知或仍在途中，不作为在场角色注入`);
+      continue;
+    }
+    entries.push({
+      entityId,
+      name: String(ch.name ?? ""),
+      identity: String(ch.identity ?? ""),
+      thought: String(ch.thought ?? ""),
+      actionTendency: String(ch.action_tendency ?? ""),
+      physicalStatus: String(ch.physical_status ?? "unknown"),
+      conditionNote: String(ch.condition_note ?? ""),
+      position: position.kind,
+      disclosure: "narrator_only"
+    });
+  }
+  return {
+    entries,
+    exclusions,
+    boundaries: [
+      "可指导言行，不等于主角已知；主角知识仍由 knowledge 决定。",
+      "只包含在场/实际接触的 NPC；远方角色的秘密计划不注入。",
+      "作者地图开关只改变 UI，不扩大本区范围。"
+    ]
+  };
+}
+function projectPromptView(world, query) {
+  const branch2 = queryBound(world.db, "SELECT pov_character_id FROM branches WHERE id = ?", [world.branchId])[0];
+  const candidates = queryBound(world.db, "SELECT id, location_id FROM characters WHERE branch_id = ? AND role = 'protagonist' AND status = 'active'", [world.branchId]);
+  const povId = query.povId ?? (branch2?.pov_character_id ? String(branch2.pov_character_id) : candidates.length === 1 ? String(candidates[0].id) : null);
+  const player = povId ? queryBound(world.db, "SELECT location_id FROM characters WHERE branch_id = ? AND id = ?", [world.branchId, povId])[0] : null;
+  const playerPosition = povId ? resolveEffectivePosition(world, povId) : null;
+  const locationId = query.sceneLocationId ?? (playerPosition?.kind === "at_location" ? playerPosition.locationId : playerPosition?.kind === "at_grid" && player?.location_id ? String(player.location_id) : null);
+  const pov = projectForPov(world, { characterId: povId });
+  const portrayal = locationId || query.actorIds?.length ? projectPortrayal(world, { locationId, actorIds: query.actorIds }) : null;
+  return {
+    pov,
+    portrayal,
+    promptScope: [
+      `主角已知信息 ${pov.knownFacts.length} 条、已知人物 ${pov.knownCharacters.length} 名、已知地点 ${pov.knownLocations.length} 处`,
+      portrayal ? `在场塑造 ${portrayal.entries.length} 人（narrator_only）` : "无在场塑造区"
+    ]
+  };
+}
+function renderSqlSceneContext(world) {
+  const projection = projectPromptView(world, {});
+  const clockS = Number(queryBound(world.db, "SELECT clock_s FROM branches WHERE id = ?", [world.branchId])[0]?.clock_s ?? 0);
+  const clean = (value) => String(value ?? "").replace(/[<>]/g, "").replace(/\s+/g, " ").trim().slice(0, 160);
+  const scene = [];
+  if (projection.pov.povId) {
+    const position = resolveEffectivePosition(world, projection.pov.povId);
+    const player = queryBound(world.db, "SELECT location_id FROM characters WHERE branch_id=? AND id=?", [world.branchId, projection.pov.povId])[0];
+    const locationId = position.kind === "at_location" ? position.locationId : position.kind === "at_grid" && player?.location_id ? String(player.location_id) : null;
+    const location2 = locationId ? queryBound(world.db, "SELECT name FROM locations WHERE branch_id = ? AND id = ?", [world.branchId, locationId])[0] : null;
+    if (location2) scene.push(`当前位置：${clean(location2.name)}`);
+    if (position.kind === "in_transit") scene.push("当前位置：在途；不能把出发地或目的地当成已经抵达。");
+  }
+  const clues = [];
+  const included = /* @__PURE__ */ new Set();
+  const facts = projection.pov.knownFacts.filter((fact) => {
+    const info = queryBound(world.db, "SELECT status, created_at_s, expires_at_s FROM information WHERE branch_id = ? AND id = ?", [world.branchId, fact.informationId])[0];
+    const received = queryBound(
+      world.db,
+      "SELECT first_received_at_s FROM knowledge WHERE branch_id = ? AND information_id = ? AND status = ? AND " + (projection.pov.povId ? "knower_character_id = ?" : "is_pov = 1"),
+      projection.pov.povId ? [world.branchId, fact.informationId, "active", projection.pov.povId] : [world.branchId, fact.informationId, "active"]
+    )[0];
+    return info?.status === "active" && Number(info.created_at_s) <= clockS && Number(received?.first_received_at_s ?? Infinity) <= clockS && (info.expires_at_s == null || Number(info.expires_at_s) > clockS);
+  });
+  for (const fact of facts.slice(-5)) {
+    const label = fact.belief === "verified" ? "已核实的消息" : fact.belief === "rejected" ? "已否定的消息" : fact.belief === "doubted" ? "有争议的消息" : "听到的消息（尚未核实）";
+    clues.push(`${label}：${clean(fact.content || fact.title)}`);
+    included.add(fact.informationId);
+  }
+  if (projection.pov.povId) {
+    for (const opportunity of collectOpportunities({ fromS: Math.max(0, clockS - 3600), untilS: clockS }, world)) {
+      if (opportunity.receiverEntityId !== projection.pov.povId || !opportunity.informationId || included.has(opportunity.informationId)) continue;
+      if (!["same_location", "route_passage"].includes(opportunity.kind) || opportunity.basis.access != null && opportunity.basis.access !== "public") continue;
+      const front = queryBound(world.db, "SELECT audience_json FROM rumor_fronts WHERE branch_id = ? AND id = ?", [world.branchId, String(opportunity.basis.frontId ?? "")])[0];
+      if (!front) continue;
+      try {
+        if (JSON.parse(String(front.audience_json)).access !== "public") continue;
+      } catch {
+        continue;
+      }
+      const info = queryBound(world.db, "SELECT content, title FROM information WHERE branch_id = ? AND id = ? AND status = 'active' AND secrecy = 'public' AND created_at_s <= ? AND (expires_at_s IS NULL OR expires_at_s > ?)", [world.branchId, opportunity.informationId, clockS, clockS])[0];
+      if (!info) continue;
+      clues.push(`此地可接触的风声（不代表已经注意或核实）：${clean(info.content || info.title)}`);
+      included.add(opportunity.informationId);
+      if (clues.length >= 8) break;
+    }
+  }
+  return renderSceneContext(scene, clues);
+}
+var BASE_BOUNDARIES;
+var init_atlas_db_knowledge_view = __esm({
+  "src/atlas-db-knowledge-view.ts"() {
+    "use strict";
+    init_atlas_scene_context();
+    init_atlas_db_runtime();
+    init_atlas_db_codec();
+    init_atlas_sim_position();
+    init_atlas_sim_opportunities();
+    BASE_BOUNDARIES = [
+      "字段级投影：只包含 knowledge 指向的信息与主角已确认的位置/身份。",
+      "知道名字不等于读到全档案：description/personality/关系图不随名字一起暴露。",
+      "上次见于…是历史信息，不是当前跟踪。",
+      "作者视图开关不改变本投影。"
+    ];
+  }
+});
+
+// src/atlas-sql-visibility.ts
+function sqlVisibility(ctx) {
+  const cache = buildPositionCache(ctx), branch2 = queryBound(ctx.db, "SELECT * FROM branches WHERE id=?", [ctx.branchId])[0];
+  const protagonists = [...cache.characters?.values() ?? []].filter((ch) => ch.status === "active" && ch.role === "protagonist");
+  const povId = ctx.povId ?? (branch2?.pov_character_id ? String(branch2.pov_character_id) : protagonists.length === 1 ? String(protagonists[0].id) : null);
+  const projection = projectForPov(ctx, { characterId: povId });
+  const clock = Number(branch2?.clock_s ?? 0);
+  const knownLocations = new Set(projection.knownLocations.filter((loc) => loc.firstReceivedAtS <= clock).map((loc) => loc.locationId));
+  const knownCharacters = new Set(projection.knownCharacters.map((ch) => ch.entityId));
+  const player = povId ? cache.characters?.get(povId) : null;
+  const p = povId ? resolveEffectivePosition(ctx, povId, void 0, cache) : null;
+  const here = p?.kind === "at_location" ? p.locationId : p?.kind === "at_grid" && player?.location_id ? String(player.location_id) : null;
+  const visibleCharacters = new Set(povId ? [povId] : []), visibleItems = /* @__PURE__ */ new Set();
+  if (here) {
+    const seen = /* @__PURE__ */ new Set();
+    let id = here;
+    while (id && !seen.has(id)) {
+      seen.add(id);
+      knownLocations.add(id);
+      const loc = cache.locations?.get(id);
+      id = loc?.parent_location_id ? String(loc.parent_location_id) : null;
+    }
+    for (const ch of cache.characters?.values() ?? []) {
+      if (ch.status !== "active") continue;
+      const position = resolveEffectivePosition(ctx, String(ch.id), void 0, cache);
+      if (position.kind === "at_location" && position.locationId === here || position.kind === "at_grid" && ch.location_id === here) visibleCharacters.add(String(ch.id));
+    }
+    for (const item of cache.items?.values() ?? []) {
+      if (item.status !== "active") continue;
+      if (item.holder_character_id === povId || !item.holder_character_id && !item.container_item_id && item.location_id === here) visibleItems.add(String(item.id));
+    }
+  }
+  return {
+    povId,
+    here,
+    projection,
+    knownLocations,
+    knownCharacters,
+    visibleCharacters,
+    visibleItems,
+    visible: (kind, id) => kind === "location" ? knownLocations.has(id) : kind === "character" ? visibleCharacters.has(id) : visibleItems.has(id)
+  };
+}
+var init_atlas_sql_visibility = __esm({
+  "src/atlas-sql-visibility.ts"() {
+    "use strict";
+    init_atlas_db_knowledge_view();
+    init_atlas_sim_position();
+    init_atlas_db_runtime();
+  }
+});
+
+// src/atlas-db-views.ts
+function rows2(ctx, table, where = "", params = [], limit = 500) {
+  const hasBranch = table !== "branches" && table !== "turns" && table !== "turn_changes" && table !== "sync_outbox";
+  const clauses = [];
+  const values = [];
+  if (hasBranch) {
+    clauses.push("branch_id = ?");
+    values.push(ctx.branchId);
+  }
+  if (where) {
+    clauses.push(where);
+    values.push(...params);
+  }
+  const sql = `SELECT * FROM ${table}${clauses.length ? ` WHERE ${clauses.join(" AND ")}` : ""} LIMIT ${Math.max(1, Math.min(2e3, limit))}`;
+  return queryBound(ctx.db, sql, values).map((raw) => {
+    const decoded = decodeRow(table, raw, { allowExtra: true });
+    return decoded.ok ? decoded.row : raw;
+  });
+}
+function clampRevision(ctx, requested) {
+  if (requested === void 0 || requested === null) return { ok: true, current: ctx.revision };
+  return { ok: requested === ctx.revision, requested, current: ctx.revision };
+}
+function staleResult(ctx, requested) {
+  const rev = clampRevision(ctx, requested);
+  if (rev.ok) return null;
+  return {
+    branchId: ctx.branchId,
+    revision: ctx.revision,
+    items: [],
+    metadata: { stale: true, requestedRevision: rev.requested, currentRevision: rev.current }
+  };
+}
+function queryMapView(ctx, query) {
+  const stale = staleResult(ctx, query.revision);
+  if (stale) return stale;
+  const maps = rows2(ctx, "maps", "", [], 200).filter((m) => String(m.status) === "active");
+  if (maps.length === 0) {
+    return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { empty: true, reason: "NO_MAP" } };
+  }
+  const selected = query.mapId ? maps.filter((m) => String(m.id) === query.mapId) : maps;
+  const mapIds = new Set(selected.map((m) => String(m.id)));
+  const locations = rows2(ctx, "locations", "status = 'active'", [], 2e3);
+  const locationById = new Map(locations.map((l) => [String(l.id), l]));
+  const characters = rows2(ctx, "characters", "status = 'active'", [], 2e3);
+  const itemRows = rows2(ctx, "items", "status = 'active'", [], 2e3);
+  const routes = rows2(ctx, "routes", "", [], 1e3);
+  const positionCache = buildPositionCache({ db: ctx.db, branchId: ctx.branchId });
+  const visibility = sqlVisibility(ctx);
+  const items = selected.map((map) => {
+    const mapId = String(map.id);
+    const points = [];
+    const coarseList = [];
+    const container = map.container_location_id ? locationById.get(String(map.container_location_id)) : null;
+    const leafScene = container && (container.kind === "room" || !locations.some((l) => l.parent_location_id === container.id)) && !["region", "city"].includes(String(container.kind));
+    const frame = map.frame_json ?? {};
+    const roomMembers = characters.filter((ch) => ch.location_id === container?.id && !["unknown", "in_transit"].includes(resolveEffectivePosition(ctx, String(ch.id), void 0, positionCache).kind));
+    const layout = leafScene ? scenePositions(
+      roomMembers.map((ch) => ({ id: String(ch.id), currentAction: String(ch.action_tendency ?? "") })),
+      { cols: typeof frame.cols === "number" ? frame.cols : 100, rows: typeof frame.rows === "number" ? frame.rows : 100 }
+    ) : /* @__PURE__ */ new Map();
+    for (const loc of locations) {
+      const locId = String(loc.id);
+      const locMap = loc.map_id ? String(loc.map_id) : null;
+      if (locMap !== mapId) continue;
+      const precision = String(loc.coord_precision ?? "unknown");
+      if (precision === "unknown" || typeof loc.grid_x !== "number" || typeof loc.grid_y !== "number") continue;
+      points.push({
+        entityId: locId,
+        kind: "location",
+        name: String(loc.name ?? ""),
+        mapId,
+        x: loc.grid_x,
+        y: loc.grid_y,
+        precision,
+        radius: typeof loc.uncertainty_radius_cells === "number" ? loc.uncertainty_radius_cells : null,
+        markerQuality: precision
+      });
+    }
+    for (const ch of characters) {
+      const chId = String(ch.id);
+      const position = resolveEffectivePosition({ db: ctx.db, branchId: ctx.branchId }, chId, void 0, positionCache);
+      const locationId = position.kind === "at_location" ? position.locationId : ch.location_id ? String(ch.location_id) : null;
+      if (position.kind === "in_transit" || position.kind === "unknown") continue;
+      const ownCoordinates = ch.map_id === mapId && ch.coord_precision !== "unknown" && typeof ch.grid_x === "number" && typeof ch.grid_y === "number";
+      if (leafScene && locationId === container?.id && !ownCoordinates) {
+        const pin = layout.get(chId);
+        points.push({ entityId: chId, kind: "character", name: String(ch.name), mapId, x: pin.x, y: pin.y, precision: "layout", radius: null, markerQuality: "layout", locationId, isProtagonist: ch.id === ctx.povId });
+      } else if (ownCoordinates || position.kind === "at_grid" && position.mapId === mapId) {
+        const grid = ownCoordinates ? { x: ch.grid_x, y: ch.grid_y, precision: String(ch.coord_precision) } : position.kind === "at_grid" ? position : null;
+        if (!grid) continue;
+        points.push({
+          entityId: chId,
+          kind: "character",
+          name: String(ch.name ?? ""),
+          mapId,
+          x: grid.x,
+          y: grid.y,
+          precision: grid.precision,
+          radius: typeof ch.uncertainty_radius_cells === "number" ? ch.uncertainty_radius_cells : null,
+          markerQuality: grid.precision,
+          locationId,
+          isProtagonist: ch.id === ctx.povId
+        });
+      } else if (locationId) {
+        const seen = /* @__PURE__ */ new Set();
+        let loc = locationById.get(locationId);
+        while (loc && !seen.has(String(loc.id))) {
+          seen.add(String(loc.id));
+          if (loc.map_id === mapId) {
+            coarseList.push({ entityId: chId, name: String(ch.name), locationId: String(loc.id), locationName: String(loc.name) });
+            break;
+          }
+          loc = loc.parent_location_id ? locationById.get(String(loc.parent_location_id)) : void 0;
+        }
+      }
+    }
+    for (const item of itemRows) {
+      const itemId = String(item.id);
+      if (item.holder_character_id || item.container_item_id) continue;
+      const position = resolveEffectivePosition({ db: ctx.db, branchId: ctx.branchId }, itemId, void 0, positionCache);
+      if (position.kind === "at_grid" && position.mapId === mapId) {
+        points.push({
+          entityId: itemId,
+          kind: "item",
+          name: String(item.name ?? ""),
+          mapId,
+          x: position.x,
+          y: position.y,
+          precision: position.precision,
+          radius: position.radius ?? null,
+          markerQuality: position.precision
+        });
+      }
+    }
+    const mapRoutes = routes.filter((r) => r.map_id ? String(r.map_id) === mapId : false).map((r) => ({
+      routeId: String(r.id),
+      fromId: String(r.from_location_id),
+      toId: String(r.to_location_id),
+      kind: String(r.kind),
+      geometryQuality: String(r.geometry_quality ?? "unknown"),
+      distanceM: typeof r.distance_m === "number" ? r.distance_m : null,
+      dashed: String(r.geometry_quality) !== "confirmed",
+      allowedModes: Array.isArray(r.allowed_modes_json) ? r.allowed_modes_json : []
+    }));
+    const metersPerCell = typeof map.meters_per_cell === "number" ? map.meters_per_cell : null;
+    for (const point of points) point.hidden = !visibility.visible(point.kind, point.entityId);
+    for (const entry of coarseList) entry.hidden = !visibility.visibleCharacters.has(entry.entityId);
+    return {
+      mapId,
+      name: String(map.name ?? ""),
+      kind: String(map.kind ?? "world"),
+      containerLocationId: map.container_location_id ? String(map.container_location_id) : null,
+      metersPerCell,
+      scaleQuality: String(map.scale_quality ?? "uncalibrated"),
+      scaleLocked: Number(map.scale_locked ?? 0) === 1,
+      calibrationRev: Number(map.calibration_rev ?? 1),
+      defaultTerrain: String(map.default_terrain ?? "unknown"),
+      points: ctx.viewMode === "pov" ? points.filter((point) => !point.hidden) : points,
+      coarseList: ctx.viewMode === "pov" ? coarseList.filter((entry) => !entry.hidden) : coarseList,
+      routes: mapRoutes,
+      frames: {
+        frame: map.frame_json ?? {},
+        scaleBar: metersPerCell === null ? null : computeViewportScaleBar({ cameraK: 40, metersPerCell })
+      }
+    };
+  });
+  return {
+    branchId: ctx.branchId,
+    revision: ctx.revision,
+    items,
+    metadata: {
+      mapCount: mapIds.size,
+      pointCount: items.reduce((n, m) => n + m.points.length, 0),
+      coarseCount: items.reduce((n, m) => n + m.coarseList.length, 0),
+      viewMode: ctx.viewMode ?? "author",
+      ...assetDiagnostics(ctx, selected)
+    }
+  };
+}
+function assetDiagnostics(ctx, maps) {
+  const present = new Set((ctx.assets ?? []).map((asset) => String(asset.key)));
+  const referenced = [
+    ...new Set(
+      maps.map(
+        (map) => map.background_asset_key === null || map.background_asset_key === void 0 ? "" : String(map.background_asset_key)
+      ).filter((key) => key !== "")
+    )
+  ].sort();
+  const missing = referenced.filter((key) => !present.has(key));
+  const unreferenced = [...present].filter((key) => !referenced.includes(key)).sort();
+  return {
+    assetCheck: "ok",
+    referencedAssetCount: referenced.length,
+    missingAssets: missing,
+    missingAssetCount: missing.length,
+    unreferencedAssets: unreferenced,
+    assetNotice: missing.length > 0 ? `缺底图：${missing.length} 张引用的底图未随存档带来（实体与坐标仍完整）` : null
+  };
+}
+function queryNearby(ctx, query) {
+  const stale = staleResult(ctx, query.revision);
+  if (stale) return stale;
+  const entityId = query.entityId ?? ctx.povId;
+  const cache = buildPositionCache(ctx);
+  const target = entityId ? resolveEffectivePosition(ctx, entityId, void 0, cache) : { kind: "unknown" };
+  if (target.kind === "unknown") {
+    return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "POSITION_UNKNOWN" } };
+  }
+  const here = target.kind === "at_grid" ? target.mapId : target.kind === "at_location" ? target.locationId : null;
+  const characters = rows2(ctx, "characters", "status = 'active'", [], 1e3);
+  const directLocation = (id, p) => {
+    if (p.kind === "in_transit" || p.kind === "unknown") return null;
+    if (p.kind === "at_location") return p.locationId;
+    if (cache.locations?.has(id)) return id;
+    const character = cache.characters?.get(id);
+    return character?.location_id ? String(character.location_id) : null;
+  };
+  const targetLocation = entityId ? directLocation(entityId, target) : null;
+  const results = [];
+  for (const ch of characters) {
+    const id = String(ch.id);
+    if (entityId && id === entityId) continue;
+    const position = resolveEffectivePosition(ctx, id, void 0, cache);
+    const locationId = directLocation(id, position);
+    if (targetLocation && locationId === targetLocation) {
+      results.push({
+        entityId: id,
+        name: String(ch.name ?? ""),
+        relevance: "same_location",
+        positionQuality: position.kind === "at_grid" ? position.precision : "coarse",
+        locationId,
+        locationName: String(cache.locations?.get(locationId)?.name ?? ""),
+        thought: ctx.viewMode === "author" ? ch.thought : void 0,
+        actionTendency: ctx.viewMode === "author" ? ch.action_tendency : void 0
+      });
+    } else if (target.kind === "at_grid" && position.kind === "at_grid" && position.mapId === here && !targetLocation && !locationId) {
+      const dx = position.x - target.x;
+      const dy = position.y - target.y;
+      if (Math.hypot(dx, dy) > 10) continue;
+      results.push({
+        entityId: id,
+        name: String(ch.name ?? ""),
+        relevance: "same_map",
+        positionQuality: position.precision,
+        gridDistance: Math.sqrt(dx * dx + dy * dy)
+      });
+    }
+  }
+  const limit = query.limit ?? 50;
+  return {
+    branchId: ctx.branchId,
+    revision: ctx.revision,
+    items: results.slice(0, limit),
+    metadata: { anchor: target.kind, anchorId: here, total: results.length }
+  };
+}
+function queryEntityDetail(ctx, query) {
+  const stale = staleResult(ctx, query.revision);
+  if (stale) return stale;
+  const entityId = query.entityId;
+  if (!entityId) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "NO_ENTITY_ID" } };
+  const key = rows2(ctx, "entity_keys", "id = ?", [entityId], 1)[0];
+  if (!key) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "ENTITY_UNKNOWN" } };
+  const kind = String(key.kind);
+  const visibility = ctx.viewMode === "pov" ? sqlVisibility(ctx) : null;
+  if (kind === "character") {
+    const character = rows2(ctx, "characters", "id = ?", [entityId], 1)[0];
+    if (!character) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "ENTITY_UNKNOWN" } };
+    if (visibility && entityId !== visibility.povId) {
+      if (!visibility.visibleCharacters.has(entityId) && !visibility.knownCharacters.has(entityId)) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "POV_UNKNOWN" } };
+      const seen = visibility.visibleCharacters.has(entityId);
+      return { branchId: ctx.branchId, revision: ctx.revision, items: [{
+        kind,
+        character: { id: entityId, name: character.name, ...seen ? { location_id: character.location_id, physical_status: character.physical_status } : {} },
+        relations: [],
+        actions: [],
+        journeys: [],
+        knowledge: [],
+        position: seen ? resolveEffectivePosition(ctx, entityId) : null,
+        lastSeen: visibility.projection.lastSeen.filter((item) => item.entityId === entityId)
+      }], metadata: { fieldLimited: true, currentPositionKnown: seen } };
+    }
+    const relations2 = rows2(ctx, "relations", "subject_entity_id = ? OR object_entity_id = ?", [entityId, entityId], 200);
+    const actions = rows2(ctx, "actions", "actor_entity_id = ?", [entityId], 100);
+    const journeys = rows2(ctx, "journeys", "mover_entity_id = ?", [entityId], 20);
+    const knowledge = rows2(ctx, "knowledge", "knower_character_id = ?", [entityId], 200);
+    const position = resolveEffectivePosition({ db: ctx.db, branchId: ctx.branchId }, entityId);
+    return {
+      branchId: ctx.branchId,
+      revision: ctx.revision,
+      items: [{ kind, character, relations: relations2, actions, journeys, knowledge, position }],
+      metadata: { counts: { relations: relations2.length, actions: actions.length, knowledge: knowledge.length } }
+    };
+  }
+  if (kind === "location") {
+    if (visibility && !visibility.knownLocations.has(entityId)) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "POV_UNKNOWN" } };
+    const location2 = rows2(ctx, "locations", "id = ?", [entityId], 1)[0];
+    if (!location2) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "ENTITY_UNKNOWN" } };
+    const children = rows2(ctx, "locations", "parent_location_id = ?", [entityId], 200).filter((loc) => !visibility || visibility.knownLocations.has(String(loc.id)));
+    const cache = buildPositionCache(ctx);
+    const present = rows2(ctx, "characters", "location_id = ? AND status = ?", [entityId, "active"], 200).filter((character) => !["in_transit", "unknown"].includes(resolveEffectivePosition(ctx, String(character.id), void 0, cache).kind)).filter((character) => !visibility || visibility.visibleCharacters.has(String(character.id))).map((character) => visibility ? { id: character.id, name: character.name, location_id: character.location_id, physical_status: character.physical_status } : character);
+    const events = rows2(ctx, "events", "location_id = ?", [entityId], 200).filter((event) => !visibility || event.secrecy === "public" && visibility.here === entityId && event.status === "occurred");
+    const fronts = visibility ? [] : rows2(ctx, "rumor_fronts", "location_id = ?", [entityId], 200);
+    const position = resolveEffectivePosition({ db: ctx.db, branchId: ctx.branchId }, entityId);
+    return {
+      branchId: ctx.branchId,
+      revision: ctx.revision,
+      items: [{
+        kind,
+        location: visibility ? { id: location2.id, name: location2.name, kind: location2.kind, parent_location_id: location2.parent_location_id } : location2,
+        children: visibility ? children.map((child) => ({ id: child.id, name: child.name, kind: child.kind })) : children,
+        present,
+        events: visibility ? events.map((event) => ({ id: event.id, title: event.title, occurred_at_s: event.occurred_at_s })) : events,
+        fronts,
+        position
+      }],
+      metadata: { counts: { children: children.length, present: present.length, events: events.length, fronts: fronts.length } }
+    };
+  }
+  if (kind === "item") {
+    if (visibility && !visibility.visibleItems.has(entityId)) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "POV_UNKNOWN" } };
+    const item = rows2(ctx, "items", "id = ?", [entityId], 1)[0];
+    if (!item) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "ENTITY_UNKNOWN" } };
+    const contained = rows2(ctx, "items", "container_item_id = ?", [entityId], 200);
+    const position = resolveEffectivePosition({ db: ctx.db, branchId: ctx.branchId }, entityId);
+    return { branchId: ctx.branchId, revision: ctx.revision, items: [{ kind, item: visibility ? { id: item.id, name: item.name, location_id: item.location_id, holder_character_id: item.holder_character_id } : item, contained: visibility ? [] : contained, position }], metadata: {} };
+  }
+  if (visibility) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "POV_UNKNOWN" } };
+  const faction = rows2(ctx, "factions", "id = ?", [entityId], 1)[0];
+  const relations = rows2(ctx, "relations", "subject_entity_id = ? OR object_entity_id = ?", [entityId, entityId], 200);
+  const channels = rows2(ctx, "channels", "owner_entity_id = ?", [entityId], 100);
+  return {
+    branchId: ctx.branchId,
+    revision: ctx.revision,
+    items: [{ kind, faction, relations, channels }],
+    metadata: { counts: { relations: relations.length, channels: channels.length } }
+  };
+}
+function queryChanges(ctx, query) {
+  const stale = staleResult(ctx, query.revision);
+  if (stale) return stale;
+  const limit = Math.max(1, Math.min(500, query.limit ?? 100));
+  const changes = queryBound(
+    ctx.db,
+    `SELECT tc.id, tc.turn_id, tc.sequence, tc.group_id, tc.operation_id, tc.target_table, tc.target_row_id, tc.operation, tc.summary, tc.basis_json, t.kind AS turn_kind, t.created_wall_ms
+     FROM turn_changes tc JOIN turns t ON t.id = tc.turn_id
+     WHERE t.branch_id = ? AND t.status IN ('committed','partial')
+     ORDER BY t.clock_after_s DESC, t.created_wall_ms DESC, tc.sequence DESC LIMIT ?`,
+    [ctx.branchId, limit]
+  );
+  const items = changes.map((c) => ({
+    changeId: String(c.id),
+    turnId: String(c.turn_id),
+    sequence: Number(c.sequence),
+    groupId: String(c.group_id),
+    operationId: String(c.operation_id),
+    table: String(c.target_table),
+    rowId: String(c.target_row_id),
+    operation: String(c.operation),
+    summary: String(c.summary ?? ""),
+    turnKind: String(c.turn_kind ?? ""),
+    basis: safeJson(c.basis_json)
+  }));
+  return {
+    branchId: ctx.branchId,
+    revision: ctx.revision,
+    items,
+    metadata: { count: items.length, cursor: query.cursor ?? null }
+  };
+}
+function safeJson(text3) {
+  if (typeof text3 !== "string") return {};
+  try {
+    const parsed = JSON.parse(text3);
+    return typeof parsed === "object" && parsed !== null ? parsed : {};
+  } catch {
+    return { parseError: true };
+  }
+}
+function queryDiagnostics(ctx, query) {
+  const stale = staleResult(ctx, query.revision);
+  if (stale) return stale;
+  const limit = Math.max(1, Math.min(500, query.limit ?? 100));
+  const offset = query.cursor ? Number(query.cursor) : 0;
+  const total = queryBound(
+    ctx.db,
+    `SELECT COUNT(*) AS n FROM turn_changes tc JOIN turns t ON t.id = tc.turn_id WHERE t.branch_id = ?`,
+    [ctx.branchId]
+  );
+  const totalCount = Number(total[0]?.n ?? 0);
+  const changes = queryBound(
+    ctx.db,
+    `SELECT tc.id, tc.turn_id, tc.group_id, tc.operation_id, tc.target_table, tc.target_row_id, tc.operation, tc.summary, tc.basis_json
+     FROM turn_changes tc JOIN turns t ON t.id = tc.turn_id
+     WHERE t.branch_id = ? ORDER BY tc.turn_id, tc.sequence LIMIT ? OFFSET ?`,
+    [ctx.branchId, limit, offset]
+  );
+  const failedTurns = queryBound(
+    ctx.db,
+    `SELECT id, status, receipt_json, attempts_json FROM turns WHERE branch_id = ? AND status IN ('failed','partial') ORDER BY created_wall_ms DESC LIMIT 50`,
+    [ctx.branchId]
+  );
+  const nextOffset = offset + changes.length;
+  return {
+    branchId: ctx.branchId,
+    revision: ctx.revision,
+    items: [
+      ...changes.map((c) => ({
+        logId: String(c.id),
+        kind: "change",
+        turnId: String(c.turn_id),
+        groupId: String(c.group_id),
+        operationId: String(c.operation_id),
+        table: String(c.target_table),
+        rowId: String(c.target_row_id),
+        operation: String(c.operation),
+        summary: String(c.summary ?? ""),
+        basis: safeJson(c.basis_json)
+      })),
+      ...failedTurns.map((t) => ({
+        logId: `turn_${String(t.id)}`,
+        kind: "failed_turn",
+        turnId: String(t.id),
+        status: String(t.status),
+        receipt: safeJson(t.receipt_json),
+        attempts: safeJson(t.attempts_json)
+      }))
+    ],
+    nextCursor: nextOffset < totalCount ? String(nextOffset) : void 0,
+    metadata: {
+      totalCount,
+      returned: changes.length,
+      droppedCount: 0,
+      pageSize: limit,
+      /** 导出全部匹配记录；分页不截断导出。 */
+      exportComplete: true
+    }
+  };
+}
+function querySimulationView(ctx, query) {
+  const stale = staleResult(ctx, query.revision);
+  if (stale) return stale;
+  const branch2 = queryBound(ctx.db, "SELECT * FROM branches WHERE id = ?", [ctx.branchId])[0];
+  if (!branch2) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "BRANCH_UNKNOWN" } };
+  const clock = Number(branch2.clock_s ?? 0);
+  const cursor = Number(branch2.simulation_cursor_s ?? 0);
+  const pending = cursor < clock;
+  return {
+    branchId: ctx.branchId,
+    revision: ctx.revision,
+    items: [
+      {
+        clockS: clock,
+        clockMinS: Number(branch2.clock_min_s ?? 0),
+        clockMaxS: Number(branch2.clock_max_s ?? 0),
+        calendarLabel: branch2.calendar_label ?? null,
+        simulationCursorS: cursor,
+        simulationStatus: String(branch2.simulation_status ?? "current"),
+        /** UI 必须显示「后台尚未结算到当前时间」。 */
+        pendingNotice: pending ? `正文时间已前进，部分后台尚在结算（未结算 ${Math.round(clock - cursor)} 秒）` : null
+      }
+    ],
+    metadata: { pending, viewMode: ctx.viewMode ?? "author", requestedCursor: query.cursor ?? null }
+  };
+}
+var init_atlas_db_views = __esm({
+  "src/atlas-db-views.ts"() {
+    "use strict";
+    init_atlas_db_codec();
+    init_atlas_db_runtime();
+    init_atlas_sim_position();
+    init_atlas_scale();
+    init_atlas_scene_layout();
+    init_atlas_sql_visibility();
+  }
+});
+
+// src/atlas-sql-refs.ts
+function collectKnownRefs(tables, branchId) {
+  return CATALOG.flatMap(([table, prefix, kind, limit]) => tables.selectWhere(table, { branch_id: branchId }, limit).map((row2, i) => ({ alias: `${prefix}${i + 1}`, id: String(row2.id), kind, rowRev: typeof row2.row_rev === "number" ? row2.row_rev : null })));
+}
+function collectEntityRefs(tables, branchId, refs = collectKnownRefs(tables, branchId)) {
+  return refs.map((ref) => {
+    const table = CATALOG.find((entry) => entry[2] === ref.kind)?.[0];
+    const row2 = table ? tables.selectOne(table, branchId, ref.id) : null;
+    return `${ref.alias}=${String(row2?.name ?? row2?.title ?? ref.kind)}（${ref.kind}）`;
+  });
+}
+function inDecisionScope(op, ctx, tables, branchId) {
+  const d = op.value.data ?? {}, ids = new Map(ctx.knownRefs.map((ref) => [ref.alias, ref.id]));
+  const target = ids.get(String(op.value.ref ?? d.actor_ref ?? d.owner_ref ?? ""));
+  if (op.value.op === "noop" || op.value.op === "attention.propose") return true;
+  if (op.value.op === "character.upsert") return !!target && ctx.actorIds.includes(target) && Object.keys(d).every((k) => ["thought", "action_tendency"].includes(k));
+  if (op.value.op === "plan.propose") return !!target && ctx.actorIds.includes(target);
+  if (op.value.op === "plan.revise") {
+    const action = target ? tables.selectOne("actions", branchId, target) : null;
+    return !!action && ctx.actorIds.includes(String(action.actor_entity_id));
+  }
+  return false;
+}
+var CATALOG;
+var init_atlas_sql_refs = __esm({
+  "src/atlas-sql-refs.ts"() {
+    "use strict";
+    CATALOG = [
+      ["locations", "L", "location", 200],
+      ["characters", "C", "character", 200],
+      ["items", "I", "item", 100],
+      ["factions", "F", "faction", 100],
+      ["maps", "M", "map", 50],
+      ["actions", "A", "action", 200],
+      ["information", "N", "information", 200],
+      ["routes", "R", "route", 200],
+      ["events", "E", "event", 200],
+      ["journeys", "J", "journey", 200],
+      ["channels", "H", "channel", 100],
+      ["knowledge", "K", "knowledge", 200]
+    ];
+  }
+});
+
+// src/atlas-sim-time.ts
+function activityDefault(kind) {
+  const found = ACTIVITY_DEFAULTS[kind];
+  return found ? { ...found } : null;
+}
+function isPlainObject12(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function finite(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+function nonNegative(value) {
+  const n = finite(value);
+  return n !== null && n >= 0 ? n : null;
+}
+function normalize(bound) {
+  const min = Math.max(0, bound.min);
+  const nominal = Math.max(min, bound.nominal);
+  const max = Math.max(nominal, bound.max);
+  return { min, nominal, max };
+}
+function add(a, b) {
+  return { min: a.min + b.min, nominal: a.nominal + b.nominal, max: a.max + b.max };
+}
+function maxBound(a, b) {
+  return { min: Math.max(a.min, b.min), nominal: Math.max(a.nominal, b.nominal), max: Math.max(a.max, b.max) };
+}
+function dedupe(values) {
+  const out = [];
+  for (const value of values) if (value !== "" && !out.includes(value)) out.push(value);
+  return out;
+}
+function explicitRef(activity) {
+  const raw = activity;
+  for (const key of ["ref", "id", "key"]) {
+    const value = raw[key];
+    if (typeof value === "string" && value.trim() !== "") return value;
+  }
+  return null;
+}
+function buildNode(activity, index, conflicts) {
+  const kind = typeof activity?.kind === "string" ? activity.kind : "other";
+  const label = `a${index}:${kind}`;
+  const hint = isPlainObject12(activity?.hint) ? activity.hint : {};
+  const afterRef = typeof hint.after_ref === "string" && hint.after_ref.trim() !== "" ? hint.after_ref : null;
+  const sameRef = typeof hint.same_interval_as === "string" && hint.same_interval_as.trim() !== "" ? hint.same_interval_as : null;
+  if (afterRef && sameRef) {
+    conflicts.push(`CONFLICT_AFTER_AND_SAME:${label}`);
+  }
+  const node = {
+    index,
+    label,
+    aliases: [label, `a${index}`],
+    interval: null,
+    quality: "unknown",
+    basis: [],
+    zero: false,
+    afterRef,
+    sameRef: afterRef ? null : sameRef
+  };
+  const ref = explicitRef(activity);
+  if (ref) node.aliases.push(ref);
+  if (!activity?.completed) {
+    node.interval = { ...ZERO };
+    node.quality = "explicit";
+    node.zero = true;
+    node.basis.push(`INCOMPLETE_ACTIVITY_ZERO:${kind}`);
+    return node;
+  }
+  const elapsed = nonNegative(hint.elapsed_s);
+  if (elapsed !== null) {
+    node.interval = { min: elapsed, nominal: elapsed, max: elapsed };
+    node.quality = "explicit";
+    node.zero = elapsed === 0;
+    node.basis.push(kind === "travel" ? "TRAVEL_COMPUTED" : "HINT_ELAPSED");
+    return node;
+  }
+  if (typeof hint.elapsed_s === "number" && Number.isFinite(hint.elapsed_s) && hint.elapsed_s < 0) {
+    conflicts.push(`HINT_ELAPSED_NEGATIVE:${label}`);
+  }
+  const hintNominal = nonNegative(hint.nominal_s);
+  const minS = nonNegative(hint.min_s);
+  const maxS = nonNegative(hint.max_s);
+  if (minS !== null || maxS !== null || hintNominal !== null) {
+    const min = minS ?? hintNominal ?? maxS ?? 0;
+    const max = maxS ?? hintNominal ?? minS ?? 0;
+    const nominal = hintNominal ?? (min + max) / 2;
+    node.interval = normalize({ min, nominal, max });
+    node.quality = "estimated";
+    node.basis.push(
+      minS !== null && maxS !== null ? "HINT_RANGE" : minS !== null ? "HINT_MIN_ONLY" : maxS !== null ? "HINT_MAX_ONLY" : "HINT_NOMINAL_ONLY"
+    );
+    return node;
+  }
+  const fallback = activityDefault(kind);
+  if (fallback) {
+    if (kind === "dialogue") {
+      node.interval = { ...ZERO };
+      node.quality = "explicit";
+      node.zero = true;
+      node.basis.push("ACTIVITY_DEFAULT:dialogue");
+      return node;
+    }
+    node.interval = normalize({ min: fallback.min_s, nominal: fallback.nominal_s, max: fallback.max_s });
+    node.quality = "estimated";
+    node.basis.push(`ACTIVITY_DEFAULT:${kind}`);
+    return node;
+  }
+  node.interval = null;
+  node.quality = "unknown";
+  node.basis.push(`TIME_UNRESOLVED:${kind}`);
+  return node;
+}
+function deriveElapsedInterval(facts, base) {
+  const conflicts = [];
+  const clockRef = `clock_s:${finite(base?.clockS) ?? 0}`;
+  const explicit = facts?.explicitElapsedS;
+  if (explicit !== null && explicit !== void 0) {
+    const value = nonNegative(explicit);
+    if (value === null) {
+      conflicts.push("EXPLICIT_ELAPSED_INVALID");
+    } else {
+      return {
+        minS: value,
+        nominalS: value,
+        maxS: value,
+        quality: "explicit",
+        basisRefs: ["EXPLICIT_ELAPSED", clockRef],
+        conflicts
+      };
+    }
+  }
+  const activities = Array.isArray(facts?.activities) ? facts.activities : [];
+  const nodes = activities.map((activity, index) => buildNode(activity, index, conflicts));
+  if (nodes.length === 0) {
+    return { minS: 0, nominalS: 0, maxS: 0, quality: "unknown", basisRefs: ["TIME_UNRESOLVED", clockRef], conflicts };
+  }
+  const unresolved = nodes.filter((n) => n.interval === null);
+  if (unresolved.length > 0) {
+    const basis2 = dedupe([...nodes.flatMap((n) => n.basis), "TIME_UNRESOLVED", clockRef]);
+    return { minS: 0, nominalS: 0, maxS: 0, quality: "unknown", basisRefs: basis2, conflicts };
+  }
+  const kindCount = /* @__PURE__ */ new Map();
+  for (const node of nodes) {
+    const kind = node.label.split(":")[1] ?? "";
+    kindCount.set(kind, (kindCount.get(kind) ?? 0) + 1);
+  }
+  const refMap = /* @__PURE__ */ new Map();
+  nodes.forEach((node) => {
+    const kind = node.label.split(":")[1] ?? "";
+    const aliases = [...node.aliases];
+    if ((kindCount.get(kind) ?? 0) === 1) aliases.push(kind);
+    for (const alias of aliases) if (!refMap.has(alias)) refMap.set(alias, node.index);
+  });
+  const resolve = (raw) => {
+    if (!raw) return null;
+    const hit = refMap.get(raw);
+    if (hit === void 0) {
+      conflicts.push(`UNRESOLVED_ACTIVITY_REF:${raw}`);
+      return null;
+    }
+    return hit;
+  };
+  const parent = nodes.map((_, i) => i);
+  const find = (i) => {
+    let cursor = i;
+    while (parent[cursor] !== cursor) {
+      parent[cursor] = parent[parent[cursor]];
+      cursor = parent[cursor];
+    }
+    return cursor;
+  };
+  const union = (a, b) => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra === rb) return;
+    if (ra < rb) parent[rb] = ra;
+    else parent[ra] = rb;
+  };
+  const afterEdges = [];
+  let implicitSameGroup = false;
+  for (const node of nodes) {
+    if (node.sameRef) {
+      if (node.sameRef === node.aliases[0] || node.sameRef === `a${node.index}`) {
+        conflicts.push(`SAME_INTERVAL_SELF:${node.label}`);
+        continue;
+      }
+      const target = resolve(node.sameRef);
+      if (target !== null && target !== node.index) union(node.index, target);
+    }
+    if (node.afterRef) {
+      const target = resolve(node.afterRef);
+      if (target !== null && target !== node.index) afterEdges.push({ from: target, to: node.index });
+      else if (target === node.index) conflicts.push(`AFTER_REF_SELF:${node.label}`);
+    }
+  }
+  const referenced = new Set(afterEdges.map((e) => e.to));
+  const unrelated = nodes.filter((n) => !n.afterRef && !referenced.has(n.index)).map((n) => n.index);
+  if (unrelated.length > 1) {
+    implicitSameGroup = true;
+    for (let i = 1; i < unrelated.length; i += 1) union(unrelated[0], unrelated[i]);
+  }
+  let groupOf = nodes.map((_, i) => find(i));
+  let groupIds = [...new Set(groupOf)];
+  let edges = afterEdges.map((e) => ({ from: find(e.from), to: find(e.to) })).filter((e) => {
+    if (e.from === e.to) {
+      conflicts.push("ORDER_INSIDE_SAME_INTERVAL");
+      return false;
+    }
+    return true;
+  });
+  const detectCycle = () => {
+    const indeg2 = /* @__PURE__ */ new Map();
+    for (const id of groupIds) indeg2.set(id, 0);
+    for (const e of edges) indeg2.set(e.to, (indeg2.get(e.to) ?? 0) + 1);
+    const queue = groupIds.filter((id) => (indeg2.get(id) ?? 0) === 0);
+    let seen = 0;
+    while (queue.length > 0) {
+      const id = queue.shift();
+      seen += 1;
+      for (const e of edges) {
+        if (e.from !== id) continue;
+        const next = (indeg2.get(e.to) ?? 0) - 1;
+        indeg2.set(e.to, next);
+        if (next === 0) queue.push(e.to);
+      }
+    }
+    return seen < groupIds.length;
+  };
+  if (edges.length > 0 && detectCycle()) {
+    conflicts.push("CYCLE_AFTER_REF");
+    edges = [];
+    const root = groupOf[0];
+    for (const id of groupIds) union(root, id);
+    groupOf = nodes.map((_, i) => find(i));
+    groupIds = [...new Set(groupOf)];
+    implicitSameGroup = true;
+  }
+  const groupBounds = /* @__PURE__ */ new Map();
+  for (const node of nodes) {
+    const id = groupOf[node.index];
+    const bound = node.interval;
+    const previous = groupBounds.get(id);
+    groupBounds.set(id, previous ? maxBound(previous, bound) : bound);
+  }
+  const predecessorBounds = (id) => {
+    const preds = edges.filter((e) => e.to === id);
+    if (preds.length === 0) return { ...ZERO };
+    let acc = null;
+    for (const pred of preds) {
+      const bound = finish.get(pred.from);
+      if (!bound) continue;
+      acc = acc ? maxBound(acc, bound) : bound;
+    }
+    return acc ?? { ...ZERO };
+  };
+  const indeg = /* @__PURE__ */ new Map();
+  for (const id of groupIds) indeg.set(id, 0);
+  for (const e of edges) indeg.set(e.to, (indeg.get(e.to) ?? 0) + 1);
+  const ready = groupIds.filter((id) => (indeg.get(id) ?? 0) === 0);
+  const finish = /* @__PURE__ */ new Map();
+  while (ready.length > 0) {
+    const id = ready.shift();
+    const own = groupBounds.get(id) ?? { ...ZERO };
+    finish.set(id, add(predecessorBounds(id), own));
+    for (const e of edges) {
+      if (e.from !== id) continue;
+      const next = (indeg.get(e.to) ?? 0) - 1;
+      indeg.set(e.to, next);
+      if (next === 0) ready.push(e.to);
+    }
+  }
+  let total = null;
+  for (const id of groupIds) {
+    const bound = finish.get(id);
+    if (!bound) continue;
+    total = total ? maxBound(total, bound) : bound;
+  }
+  const resolved = normalize(total ?? { ...ZERO });
+  const allExplicit = nodes.every((n) => n.quality === "explicit");
+  const estimated = nodes.some((n) => n.quality === "estimated") || implicitSameGroup;
+  const quality = allExplicit && !estimated ? "explicit" : "estimated";
+  const basis = dedupe([...nodes.flatMap((n) => n.basis), ...implicitSameGroup ? ["SAME_INTERVAL_INFERRED"] : [], clockRef]);
+  return {
+    minS: resolved.min,
+    nominalS: resolved.nominal,
+    maxS: resolved.max,
+    quality,
+    basisRefs: basis,
+    conflicts
+  };
+}
+var ACTIVITY_DEFAULTS, ZERO;
+var init_atlas_sim_time = __esm({
+  "src/atlas-sim-time.ts"() {
+    "use strict";
+    ACTIVITY_DEFAULTS = {
+      dialogue: { min_s: 0, nominal_s: 0, max_s: 0 },
+      meal: { min_s: 900, nominal_s: 1800, max_s: 3600 },
+      rest: { min_s: 300, nominal_s: 1200, max_s: 3600 },
+      sleep: { min_s: 14400, nominal_s: 28800, max_s: 36e3 },
+      combat: { min_s: 30, nominal_s: 120, max_s: 600 }
+    };
+    ZERO = { min: 0, nominal: 0, max: 0 };
   }
 });
 
@@ -15681,6 +16133,16 @@ async function settleSqlTurn(input) {
   const elapsed = deriveElapsedInterval({ activities: activities.length ? activities : [{ kind: "dialogue", completed: true }] }, { clockS: input.clockBefore });
   if (elapsed.quality === "unknown") issues.push({ code: "TIME_UNRESOLVED", path: "$.elapsed", message: "已完成行为缺少可结算的耗时依据，时钟保持原值，未知不当成零耗时", severity: "warning", retryable: false });
   const clockAfter = input.clockBefore + (elapsed.quality === "unknown" ? 0 : elapsed.nominalS);
+  for (const op of input.operations) {
+    if (!appliedIds.has(op.opId) || op.value.op !== "event.propose" || op.value.data?.phase !== "observed") continue;
+    const changes = queryBound(input.db, "SELECT target_row_id FROM turn_changes WHERE turn_id=? AND operation_id=? AND target_table='events'", [input.turnId, op.opId]);
+    const hint = op.value.data.time_hint;
+    const at = typeof hint?.at_s === "number" && hint.at_s >= input.clockBefore && hint.at_s <= clockAfter ? hint.at_s : clockAfter;
+    for (const change of changes) {
+      const row2 = queryBound(input.db, "SELECT * FROM events WHERE branch_id=? AND id=?", [input.branchId, String(change.target_row_id)])[0];
+      if (row2 && row2.occurred_at_s !== at) write(input, "events", { ...row2, occurred_at_s: at, row_rev: Number(row2.row_rev) + 1, updated_turn_id: input.turnId }, row2);
+    }
+  }
   const branch2 = queryBound(input.db, "SELECT * FROM branches WHERE id=?", [input.branchId])[0];
   const seed = deriveSeed({ chatUid: input.anchor.chatUid, branchId: input.branchId, forkTurnId: String(branch2.fork_turn_id ?? ""), variantKey: input.anchor.variantKey, inputHash: input.anchor.inputHash, rulesetVersion: ATLAS_SIM_RULESET_VERSION });
   const clockMin = Number(branch2.clock_min_s) + elapsed.minS, clockMax = Number(branch2.clock_max_s) + elapsed.maxS;
@@ -17118,271 +17580,6 @@ var init_atlas_db_repository = __esm({
       "mention_candidates",
       "sync_outbox"
     ]);
-  }
-});
-
-// src/atlas-scene-context.ts
-function renderSceneContext(scene, clues, maxChars = 1800) {
-  if (!scene.length && !clues.length) return "";
-  const header = '<atlas_scene_context version="2">\n仅用于续写当前视角；传闻不等于事实，不能把人物私下意图写成主角已知。\n';
-  const footer = "\n</atlas_scene_context>";
-  if (maxChars < header.length + footer.length + 5) return "";
-  const lines = [];
-  let length = header.length + footer.length;
-  for (const section of [scene.length ? ["【当前场景】", ...scene] : [], clues.length ? ["【场景线索】", ...clues] : []]) {
-    for (const line of section) {
-      if (length + line.length + 1 > maxChars) break;
-      lines.push(line);
-      length += line.length + 1;
-    }
-  }
-  return header + lines.join("\n") + footer;
-}
-var init_atlas_scene_context = __esm({
-  "src/atlas-scene-context.ts"() {
-    "use strict";
-  }
-});
-
-// src/atlas-db-knowledge-view.ts
-var atlas_db_knowledge_view_exports = {};
-__export(atlas_db_knowledge_view_exports, {
-  projectForPov: () => projectForPov,
-  projectPortrayal: () => projectPortrayal,
-  projectPromptView: () => projectPromptView,
-  renderSqlSceneContext: () => renderSqlSceneContext
-});
-function rows2(db, table, sql, params) {
-  return queryBound(db, sql, params).map((raw) => {
-    const decoded = decodeRow(table, raw, { allowExtra: true });
-    return decoded.ok ? decoded.row : raw;
-  });
-}
-function projectForPov(world, pov) {
-  const povId = pov.characterId;
-  const knowledgeRows = povId ? rows2(
-    world.db,
-    "knowledge",
-    "SELECT * FROM knowledge WHERE branch_id = ? AND knower_character_id = ? AND status = ?",
-    [world.branchId, povId, "active"]
-  ) : rows2(
-    world.db,
-    "knowledge",
-    "SELECT * FROM knowledge WHERE branch_id = ? AND is_pov = 1 AND status = ?",
-    [world.branchId, "active"]
-  );
-  const informationIds = new Set(knowledgeRows.map((k) => String(k.information_id)));
-  const informations = /* @__PURE__ */ new Map();
-  for (const id of informationIds) {
-    const found = rows2(world.db, "information", "SELECT * FROM information WHERE branch_id = ? AND id = ?", [world.branchId, id]);
-    if (found.length > 0) informations.set(id, found[0]);
-  }
-  const knownLocations = [];
-  const knownCharacters = [];
-  const knownFacts = [];
-  const lastSeen = [];
-  for (const k of knowledgeRows) {
-    const info = informations.get(String(k.information_id));
-    if (!info) continue;
-    const payload = info.payload_json ?? null;
-    const subjectId = info.subject_entity_id ? String(info.subject_entity_id) : null;
-    const firstReceived = Number(k.first_received_at_s ?? 0);
-    knownFacts.push({
-      informationId: String(info.id),
-      title: String(info.title ?? ""),
-      content: String(info.content ?? ""),
-      truthForAuthor: String(info.truth_status ?? "unknown"),
-      belief: String(k.belief ?? "heard"),
-      payload
-    });
-    if (subjectId) {
-      const key = rows2(world.db, "entity_keys", "SELECT kind FROM entity_keys WHERE branch_id = ? AND id = ?", [world.branchId, subjectId]);
-      const kind = key.length > 0 ? String(key[0].kind) : "";
-      if (kind === "location") {
-        const loc = rows2(world.db, "locations", "SELECT name FROM locations WHERE branch_id = ? AND id = ?", [world.branchId, subjectId]);
-        knownLocations.push({
-          locationId: subjectId,
-          name: loc.length > 0 ? String(loc[0].name ?? "") : "",
-          source: String(info.kind ?? ""),
-          firstReceivedAtS: firstReceived,
-          belief: String(k.belief ?? "heard")
-        });
-      } else if (kind === "character") {
-        const ch = rows2(world.db, "characters", "SELECT name, identity FROM characters WHERE branch_id = ? AND id = ?", [world.branchId, subjectId]);
-        const identityKnown = Boolean(payload && String(payload.predicate ?? "") === "identity");
-        knownCharacters.push({
-          entityId: subjectId,
-          name: ch.length > 0 ? String(ch[0].name ?? "") : "",
-          belief: String(k.belief ?? "heard"),
-          attention: String(k.attention ?? "normal"),
-          reactionNote: String(k.reaction_note ?? ""),
-          identityKnown
-        });
-        if (payload && String(payload.predicate ?? "") === "located_at") {
-          const value = payload.value;
-          const locationId = typeof value === "string" ? value : value && typeof value === "object" ? String(value.entity_ref ?? "") : "";
-          lastSeen.push({
-            entityId: subjectId,
-            name: ch.length > 0 ? String(ch[0].name ?? "") : "",
-            locationId: locationId || null,
-            atS: typeof payload.as_of_s === "number" ? payload.as_of_s : firstReceived
-          });
-        }
-      }
-    }
-  }
-  const knownChannels = rows2(
-    world.db,
-    "channels",
-    "SELECT * FROM channels WHERE branch_id = ? AND status = ? AND secrecy != ?",
-    [world.branchId, "active", "secret"]
-  ).filter((c) => povId ? String(c.owner_entity_id) === povId || String(c.recipient_entity_id ?? "") === povId : false).map((c) => ({ channelId: String(c.id), name: String(c.name ?? ""), kind: String(c.kind ?? "") }));
-  return {
-    povId,
-    isPovRow: Boolean(pov.isPovRow),
-    knownLocations,
-    knownCharacters,
-    lastSeen,
-    knownFacts,
-    knownChannels,
-    boundaries: [...BASE_BOUNDARIES]
-  };
-}
-function projectPortrayal(world, scene) {
-  const present = new Set(scene.actorIds ?? scene.entityIds ?? []);
-  const exclusions = [];
-  if (present.size === 0 && scene.locationId) {
-    const here = rows2(
-      world.db,
-      "characters",
-      "SELECT id FROM characters WHERE branch_id = ? AND location_id = ? AND status = ?",
-      [world.branchId, scene.locationId, "active"]
-    );
-    for (const row2 of here) present.add(String(row2.id));
-  }
-  const entries = [];
-  for (const entityId of present) {
-    const found = rows2(
-      world.db,
-      "characters",
-      "SELECT * FROM characters WHERE branch_id = ? AND id = ? AND status = ?",
-      [world.branchId, entityId, "active"]
-    );
-    if (found.length === 0) {
-      exclusions.push(`${entityId}: 不在本分支的在场人物中`);
-      continue;
-    }
-    const ch = found[0];
-    const position = resolveEffectivePosition({ db: world.db, branchId: world.branchId }, entityId);
-    if (scene.locationId && position.kind === "at_location" && position.locationId !== scene.locationId) {
-      exclusions.push(`${entityId}: 不在当前场景`);
-      continue;
-    }
-    if (position.kind === "unknown") {
-      exclusions.push(`${entityId}: 位置未知，不作为在场角色注入`);
-      continue;
-    }
-    entries.push({
-      entityId,
-      name: String(ch.name ?? ""),
-      identity: String(ch.identity ?? ""),
-      thought: String(ch.thought ?? ""),
-      actionTendency: String(ch.action_tendency ?? ""),
-      physicalStatus: String(ch.physical_status ?? "unknown"),
-      conditionNote: String(ch.condition_note ?? ""),
-      position: position.kind,
-      disclosure: "narrator_only"
-    });
-  }
-  return {
-    entries,
-    exclusions,
-    boundaries: [
-      "可指导言行，不等于主角已知；主角知识仍由 knowledge 决定。",
-      "只包含在场/实际接触的 NPC；远方角色的秘密计划不注入。",
-      "作者地图开关只改变 UI，不扩大本区范围。"
-    ]
-  };
-}
-function projectPromptView(world, query) {
-  const branch2 = queryBound(world.db, "SELECT pov_character_id FROM branches WHERE id = ?", [world.branchId])[0];
-  const candidates = queryBound(world.db, "SELECT id, location_id FROM characters WHERE branch_id = ? AND role = 'protagonist' AND status = 'active'", [world.branchId]);
-  const povId = query.povId ?? (branch2?.pov_character_id ? String(branch2.pov_character_id) : candidates.length === 1 ? String(candidates[0].id) : null);
-  const player = povId ? queryBound(world.db, "SELECT location_id FROM characters WHERE branch_id = ? AND id = ?", [world.branchId, povId])[0] : null;
-  const locationId = query.sceneLocationId ?? (player?.location_id ? String(player.location_id) : null);
-  const pov = projectForPov(world, { characterId: povId });
-  const portrayal = locationId || query.actorIds?.length ? projectPortrayal(world, { locationId, actorIds: query.actorIds }) : null;
-  return {
-    pov,
-    portrayal,
-    promptScope: [
-      `主角已知信息 ${pov.knownFacts.length} 条、已知人物 ${pov.knownCharacters.length} 名、已知地点 ${pov.knownLocations.length} 处`,
-      portrayal ? `在场塑造 ${portrayal.entries.length} 人（narrator_only）` : "无在场塑造区"
-    ]
-  };
-}
-function renderSqlSceneContext(world) {
-  const projection = projectPromptView(world, {});
-  const clockS = Number(queryBound(world.db, "SELECT clock_s FROM branches WHERE id = ?", [world.branchId])[0]?.clock_s ?? 0);
-  const clean = (value) => String(value ?? "").replace(/[<>]/g, "").replace(/\s+/g, " ").trim().slice(0, 160);
-  const scene = [];
-  if (projection.pov.povId) {
-    const position = resolveEffectivePosition(world, projection.pov.povId);
-    const location2 = position.kind === "at_location" ? queryBound(world.db, "SELECT name FROM locations WHERE branch_id = ? AND id = ?", [world.branchId, position.locationId])[0] : null;
-    if (location2) scene.push(`当前位置：${clean(location2.name)}`);
-    if (position.kind === "in_transit") scene.push("当前位置：在途；不能把出发地或目的地当成已经抵达。");
-  }
-  const clues = [];
-  const included = /* @__PURE__ */ new Set();
-  const facts = projection.pov.knownFacts.filter((fact) => {
-    const info = queryBound(world.db, "SELECT status, created_at_s, expires_at_s FROM information WHERE branch_id = ? AND id = ?", [world.branchId, fact.informationId])[0];
-    const received = queryBound(
-      world.db,
-      "SELECT first_received_at_s FROM knowledge WHERE branch_id = ? AND information_id = ? AND status = ? AND " + (projection.pov.povId ? "knower_character_id = ?" : "is_pov = 1"),
-      projection.pov.povId ? [world.branchId, fact.informationId, "active", projection.pov.povId] : [world.branchId, fact.informationId, "active"]
-    )[0];
-    return info?.status === "active" && Number(info.created_at_s) <= clockS && Number(received?.first_received_at_s ?? Infinity) <= clockS && (info.expires_at_s == null || Number(info.expires_at_s) > clockS);
-  });
-  for (const fact of facts.slice(-5)) {
-    const label = fact.belief === "verified" ? "已核实的消息" : fact.belief === "rejected" ? "已否定的消息" : fact.belief === "doubted" ? "有争议的消息" : "听到的消息（尚未核实）";
-    clues.push(`${label}：${clean(fact.content || fact.title)}`);
-    included.add(fact.informationId);
-  }
-  if (projection.pov.povId) {
-    for (const opportunity of collectOpportunities({ fromS: Math.max(0, clockS - 3600), untilS: clockS }, world)) {
-      if (opportunity.receiverEntityId !== projection.pov.povId || !opportunity.informationId || included.has(opportunity.informationId)) continue;
-      if (!["same_location", "route_passage"].includes(opportunity.kind) || opportunity.basis.access != null && opportunity.basis.access !== "public") continue;
-      const front = queryBound(world.db, "SELECT audience_json FROM rumor_fronts WHERE branch_id = ? AND id = ?", [world.branchId, String(opportunity.basis.frontId ?? "")])[0];
-      if (!front) continue;
-      try {
-        if (JSON.parse(String(front.audience_json)).access !== "public") continue;
-      } catch {
-        continue;
-      }
-      const info = queryBound(world.db, "SELECT content, title FROM information WHERE branch_id = ? AND id = ? AND status = 'active' AND secrecy = 'public' AND created_at_s <= ? AND (expires_at_s IS NULL OR expires_at_s > ?)", [world.branchId, opportunity.informationId, clockS, clockS])[0];
-      if (!info) continue;
-      clues.push(`此地可接触的风声（不代表已经注意或核实）：${clean(info.content || info.title)}`);
-      included.add(opportunity.informationId);
-      if (clues.length >= 8) break;
-    }
-  }
-  return renderSceneContext(scene, clues);
-}
-var BASE_BOUNDARIES;
-var init_atlas_db_knowledge_view = __esm({
-  "src/atlas-db-knowledge-view.ts"() {
-    "use strict";
-    init_atlas_scene_context();
-    init_atlas_db_runtime();
-    init_atlas_db_codec();
-    init_atlas_sim_position();
-    init_atlas_sim_opportunities();
-    BASE_BOUNDARIES = [
-      "字段级投影：只包含 knowledge 指向的信息与主角已确认的位置/身份。",
-      "知道名字不等于读到全档案：description/personality/关系图不随名字一起暴露。",
-      "上次见于…是历史信息，不是当前跟踪。",
-      "作者视图开关不改变本投影。"
-    ];
   }
 });
 
@@ -20800,6 +20997,12 @@ function parseAtlasTurnCommitRequest(raw) {
 init_atlas_hash();
 init_atlas_db_runtime();
 
+// src/atlas-sql-view-state.ts
+init_atlas_db_runtime();
+init_atlas_db_readport();
+init_atlas_db_views();
+init_atlas_sim_position();
+
 // src/atlas-db-state-adapter.ts
 var LEGACY_ENTITY_CAP = 500;
 function asRecord3(value) {
@@ -21297,6 +21500,172 @@ function toPovStateDto(projection, options = {}) {
   };
 }
 
+// src/atlas-sql-view-state.ts
+function querySqlSceneState(ctx, query) {
+  const table = createTableReadPort(ctx.db), branch2 = queryBound(ctx.db, "SELECT * FROM branches WHERE id=?", [ctx.branchId])[0];
+  const locations = table.selectWhere("locations", { branch_id: ctx.branchId, status: "active" }, 1e3);
+  const characters = table.selectWhere("characters", { branch_id: ctx.branchId, status: "active" }, 1e3);
+  const items = table.selectWhere("items", { branch_id: ctx.branchId, status: "active" }, 1e3);
+  const counts = Object.fromEntries(["locations", "characters", "items"].map((name) => [name, Number(queryBound(ctx.db, `SELECT COUNT(*) AS n FROM ${name} WHERE branch_id=? AND status='active'`, [ctx.branchId])[0].n)]));
+  const uniquePov = characters.filter((c) => c.role === "protagonist");
+  const povId = ctx.povId ?? (branch2?.pov_character_id ? String(branch2.pov_character_id) : uniquePov.length === 1 ? String(uniquePov[0].id) : void 0);
+  const cache = buildPositionCache(ctx), locationById = new Map(locations.map((l) => [String(l.id), l]));
+  const position = (id) => resolveEffectivePosition(ctx, id, void 0, cache);
+  const resolvedLocation = (row2) => {
+    const p = position(String(row2.id));
+    if (p.kind === "unknown" || p.kind === "in_transit") return null;
+    if (p.kind === "at_location") return p.locationId;
+    return row2.location_id ? String(row2.location_id) : null;
+  };
+  const player = characters.find((c) => c.id === povId), currentLocationId = player ? resolvedLocation(player) : null;
+  const chain = [], visited = /* @__PURE__ */ new Set();
+  for (let id = currentLocationId; id && !visited.has(id); ) {
+    visited.add(id);
+    const row2 = locationById.get(id);
+    if (!row2) break;
+    chain.push({ id, name: String(row2.name) });
+    id = row2.parent_location_id ? String(row2.parent_location_id) : null;
+  }
+  const viewContext = { ...ctx, povId }, base = { branchId: ctx.branchId, revision: ctx.revision, povId, viewMode: ctx.viewMode ?? "author" };
+  const mapQuery = { ...base, kind: "map" }, map = queryMapView(viewContext, mapQuery);
+  const nearby = queryNearby(viewContext, { ...base, kind: "nearby", entityId: povId, limit: 500 });
+  const changes = queryChanges(viewContext, { ...base, kind: "changes" }), diagnostics = queryDiagnostics(viewContext, { ...base, kind: "diagnostics" }), simulation = querySimulationView(viewContext, { ...base, kind: "simulation" });
+  const compatible = toLegacyStateDto(map, mapQuery);
+  const nearbyIds = new Set(nearby.items.map((raw) => String(raw.entityId)));
+  const npcs = characters.map((row2) => {
+    const id = String(row2.id), locationId = resolvedLocation(row2), p = position(id);
+    return {
+      id,
+      name: String(row2.name),
+      isProtagonist: id === povId,
+      presence: "present",
+      locationId,
+      pointId: locationId,
+      locationName: locationId ? String(locationById.get(locationId)?.name ?? "") : null,
+      pointName: locationId ? String(locationById.get(locationId)?.name ?? "") : null,
+      thought: String(row2.thought ?? ""),
+      actionTendency: String(row2.action_tendency ?? ""),
+      currentAction: String(row2.action_tendency ?? ""),
+      identity: String(row2.identity ?? ""),
+      description: String(row2.description ?? ""),
+      importance: row2.importance,
+      physicalStatus: row2.physical_status,
+      mapId: p.kind === "at_grid" ? p.mapId : null,
+      x: p.kind === "at_grid" ? p.x : null,
+      y: p.kind === "at_grid" ? p.y : null,
+      positionQuality: p.kind === "at_grid" ? p.precision : p.kind === "at_location" ? "coarse" : p.kind === "in_transit" ? p.quality : "unknown",
+      positionSource: "sql",
+      position: p,
+      isNear: nearbyIds.has(id),
+      reason: nearbyIds.has(id) ? "sameLocation" : "knownElsewhere",
+      recentNarratives: []
+    };
+  });
+  const objects = items.map((row2) => {
+    const id = String(row2.id), locationId = resolvedLocation(row2), p = position(id);
+    return {
+      id,
+      name: String(row2.name),
+      type: "item",
+      description: String(row2.description ?? ""),
+      locationId,
+      pointId: locationId,
+      pointName: locationId ? String(locationById.get(locationId)?.name ?? "") : null,
+      holderCharacterId: row2.holder_character_id,
+      containerItemId: row2.container_item_id,
+      x: p.kind === "at_grid" ? p.x : null,
+      y: p.kind === "at_grid" ? p.y : null,
+      positionQuality: p.kind === "at_grid" ? p.precision : p.kind === "at_location" ? "coarse" : "unknown",
+      positionSource: "sql"
+    };
+  });
+  const occupants = locations.map((row2) => ({
+    locationId: String(row2.id),
+    locationName: String(row2.name),
+    characterIds: npcs.filter((c) => c.locationId === row2.id).map((c) => c.id),
+    objectIds: objects.filter((i) => i.locationId === row2.id && !i.holderCharacterId && !i.containerItemId).map((i) => i.id)
+  })).map((row2) => ({ ...row2, characterCount: row2.characterIds.length, objectCount: row2.objectIds.length }));
+  const tableMap = compatible.tableMap, mapState = compatible.map;
+  const unplaced = locations.filter((row2) => row2.grid_x === null || row2.grid_y === null || row2.coord_precision === "unknown").map((row2) => ({ id: String(row2.id), name: String(row2.name), parentLocationId: row2.parent_location_id }));
+  const locationsDto = locations.map((row2) => ({ id: String(row2.id), name: String(row2.name), parentLocationId: row2.parent_location_id, kind: row2.kind, description: row2.description, mapId: row2.map_id }));
+  return {
+    ...compatible,
+    ...query,
+    chatId: query.chatUid,
+    worldId: query.worldUid,
+    revision: ctx.revision,
+    branchId: ctx.branchId,
+    currentTime: Number(branch2?.clock_s ?? 0),
+    currentLocationId,
+    npcDirectory: npcs,
+    objectDirectory: objects,
+    relevantNpcIds: [...nearbyIds],
+    map: { ...mapState, pointParents: Object.fromEntries(locations.map((row2) => [String(row2.id), row2.parent_location_id])) },
+    tableMap: {
+      ...tableMap,
+      nearby: { entries: npcs, total: counts.characters, truncated: counts.characters - npcs.length },
+      objects: { entries: objects, total: counts.items, truncated: counts.items - objects.length },
+      locations: { entries: locationsDto, total: counts.locations, truncated: counts.locations - locations.length },
+      unplacedLocations: { entries: unplaced, total: unplaced.length, truncated: counts.locations - locations.length },
+      locationOccupants: { entries: occupants, total: occupants.length, truncated: 0 },
+      current: { locationId: currentLocationId, chain, position: player ? position(String(player.id)) : null }
+    },
+    sqlViews: { map, nearby, changes, diagnostics, simulation },
+    changes: changes.items,
+    simulationView: simulation.items[0] ?? null,
+    sqlMode: true,
+    coreSaved: false,
+    readLimits: { limit: 1e3, counts, truncated: Object.fromEntries(Object.entries(counts).map(([key, total]) => [key, Math.max(0, total - 1e3)])) }
+  };
+}
+
+// src/atlas-sql-timeline.ts
+init_atlas_db_runtime();
+function querySqlCharacterTimeline(ctx, input) {
+  const id = input.characterId.replace(/^npc:/, ""), branchId = ctx.branchId;
+  const character = queryBound(ctx.db, "SELECT name FROM characters WHERE branch_id=? AND id=?", [branchId, id])[0];
+  if (!character) throw new AtlasDbError("REF_UNKNOWN", "人物档案不存在", {});
+  const offset = Number.isFinite(input.offset ?? 0) ? Math.max(0, Math.trunc(input.offset ?? 0)) : 0;
+  const limit = Number.isFinite(input.limit ?? 25) ? Math.max(1, Math.min(100, Math.trunc(input.limit ?? 25))) : 25;
+  const where = `t.branch_id=? AND t.status IN ('committed','partial')
+    AND NOT EXISTS(SELECT 1 FROM turn_changes later WHERE later.turn_id=tc.turn_id AND later.target_table=tc.target_table AND later.target_row_id=tc.target_row_id AND later.sequence>tc.sequence)
+    AND (
+    (tc.target_table='characters' AND tc.target_row_id=?) OR
+    json_extract(COALESCE(tc.after_json,tc.before_json),'$.actor_entity_id')=? OR
+    json_extract(COALESCE(tc.after_json,tc.before_json),'$.mover_entity_id')=? OR
+    json_extract(COALESCE(tc.after_json,tc.before_json),'$.knower_character_id')=? OR
+    (tc.target_table='events' AND (json_extract(COALESCE(tc.after_json,tc.before_json),'$.subject_entity_id')=? OR
+      json_extract(COALESCE(tc.after_json,tc.before_json),'$.cause_action_id') IN (SELECT id FROM actions WHERE branch_id=? AND actor_entity_id=?) OR
+      EXISTS(SELECT 1 FROM json_each(json_extract(COALESCE(tc.after_json,tc.before_json),'$.participants_json')) participant WHERE json_extract(participant.value,'$.entity_id')=?))))`;
+  const params = [branchId, id, id, id, id, id, branchId, id, id];
+  const total = Number(queryBound(ctx.db, `SELECT COUNT(*) AS n FROM turn_changes tc JOIN turns t ON t.id=tc.turn_id WHERE ${where}`, params)[0].n);
+  const records = queryBound(ctx.db, `SELECT tc.*,t.clock_before_s,t.clock_after_s FROM turn_changes tc JOIN turns t ON t.id=tc.turn_id WHERE ${where}
+    ORDER BY COALESCE(json_extract(COALESCE(tc.after_json,tc.before_json),'$.occurred_at_s'),json_extract(COALESCE(tc.after_json,tc.before_json),'$.last_advanced_at_s'),json_extract(COALESCE(tc.after_json,tc.before_json),'$.evaluated_until_s'),t.clock_after_s) DESC,t.created_wall_ms DESC,tc.sequence DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
+  const entries = records.map((record) => {
+    const row2 = JSON.parse(String(record.after_json ?? record.before_json ?? "{}"));
+    const locationId = row2.location_id ?? row2.stop_location_id ?? row2.target_location_id ?? null;
+    const location2 = locationId ? queryBound(ctx.db, "SELECT name FROM locations WHERE branch_id=? AND id=?", [branchId, String(locationId)])[0] : null;
+    const atS = row2.occurred_at_s ?? row2.last_advanced_at_s ?? row2.evaluated_until_s ?? record.clock_after_s;
+    return {
+      id: String(record.id),
+      characterId: id,
+      name: String(character.name),
+      period: Number(atS),
+      atS: Number(atS),
+      clockBeforeS: Number(record.clock_before_s),
+      clockAfterS: Number(record.clock_after_s),
+      locationId,
+      locationName: location2?.name ?? null,
+      action: String(row2.action_tendency ?? row2.title ?? ""),
+      experience: String(record.summary ?? ""),
+      turnId: record.turn_id,
+      sourceTable: record.target_table,
+      position: { mapId: row2.map_id ?? null, x: row2.grid_x ?? null, y: row2.grid_y ?? null }
+    };
+  });
+  return { branchId, revision: ctx.revision, entries, total, offset, limit, nextOffset: offset + entries.length < total ? offset + entries.length : null };
+}
+
 // src/atlas-sql-retry.ts
 init_atlas_db_runtime();
 init_atlas_db_readport();
@@ -21581,25 +21950,20 @@ function chatSources(request, playerName) {
 }
 async function handleSqlChatRequest(session, action, body) {
   if (action === "binding") return { binding: binding(session), coreSaved: false };
+  if (action === "timeline") return querySqlCharacterTimeline(
+    { db: session.repo.db, branchId: session.branchId, revision: session.repo.internal.currentRevision(), viewMode: "author" },
+    { characterId: text2(body.characterId), offset: typeof body.offset === "number" ? body.offset : void 0, limit: typeof body.limit === "number" ? body.limit : void 0 }
+  );
   if (action === "state") {
-    const query = { kind: "map", branchId: session.branchId, viewMode: "author" };
-    const state = toLegacyStateDto(await session.repo.queryView(query), query);
-    const nearbyQuery = { kind: "nearby", branchId: session.branchId, povId: protagonist(session), viewMode: "author" };
-    const near = toLegacyStateDto(await session.repo.queryView(nearbyQuery), nearbyQuery);
     const logicalBinding = binding(session);
-    return {
-      ...state,
-      chatId: session.chatUid,
-      worldId: session.worldUid,
-      worldName: session.branchName,
-      currentTime: logicalBinding.worldTimeCursor,
-      currentLocationId: logicalBinding.currentLocationId,
-      binding: logicalBinding,
-      relevantNpcIds: near.relevantNpcIds,
-      tableMap: { ...state.tableMap, nearby: near.tableMap.nearby },
-      sqlMode: true,
-      coreSaved: false
-    };
+    return { ...querySqlSceneState({
+      db: session.repo.db,
+      branchId: session.branchId,
+      revision: session.repo.internal.currentRevision(),
+      povId: protagonist(session),
+      viewMode: "author",
+      assets: session.chatMetadata.atlas?.database?.assets ?? []
+    }, { chatUid: session.chatUid, worldUid: session.worldUid, worldName: session.branchName }), binding: logicalBinding };
   }
   assertEnabled(session);
   if (action === "retry") {

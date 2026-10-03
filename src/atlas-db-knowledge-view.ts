@@ -211,12 +211,12 @@ export function projectPortrayal(
     const ch = found[0];
     const position = resolveEffectivePosition({ db: world.db, branchId: world.branchId }, entityId);
     // 只有在场/粗定位在同一场景才注入：in_transit 或位置未知的远方角色不进塑造区。
-    if (scene.locationId && position.kind === 'at_location' && position.locationId !== scene.locationId) {
+    if (scene.locationId && (position.kind === 'at_location' ? position.locationId !== scene.locationId : position.kind === 'at_grid' && ch.location_id !== scene.locationId)) {
       exclusions.push(`${entityId}: 不在当前场景`);
       continue;
     }
-    if (position.kind === 'unknown') {
-      exclusions.push(`${entityId}: 位置未知，不作为在场角色注入`);
+    if (position.kind === 'unknown' || position.kind==='in_transit') {
+      exclusions.push(`${entityId}: 位置未知或仍在途中，不作为在场角色注入`);
       continue;
     }
     entries.push({
@@ -252,7 +252,8 @@ export function projectPromptView(
   const candidates = queryBound(world.db, "SELECT id, location_id FROM characters WHERE branch_id = ? AND role = 'protagonist' AND status = 'active'", [world.branchId]);
   const povId = query.povId ?? (branch?.pov_character_id ? String(branch.pov_character_id) : candidates.length === 1 ? String(candidates[0].id) : null);
   const player = povId ? queryBound(world.db, 'SELECT location_id FROM characters WHERE branch_id = ? AND id = ?', [world.branchId, povId])[0] : null;
-  const locationId = query.sceneLocationId ?? (player?.location_id ? String(player.location_id) : null);
+  const playerPosition=povId?resolveEffectivePosition(world,povId):null;
+  const locationId = query.sceneLocationId ?? (playerPosition?.kind==='at_location'?playerPosition.locationId:playerPosition?.kind==='at_grid'&&player?.location_id?String(player.location_id):null);
   const pov = projectForPov(world, { characterId: povId });
   // author 视图只影响 portrayal 是否附带；主角投影范围不变（§10.4）。
   const portrayal = locationId || query.actorIds?.length
@@ -276,7 +277,9 @@ export function renderSqlSceneContext(world: KnowledgeWorld): string {
   const scene: string[] = [];
   if (projection.pov.povId) {
     const position = resolveEffectivePosition(world, projection.pov.povId);
-    const location = position.kind === 'at_location' ? queryBound(world.db, 'SELECT name FROM locations WHERE branch_id = ? AND id = ?', [world.branchId, position.locationId])[0] : null;
+    const player=queryBound(world.db,'SELECT location_id FROM characters WHERE branch_id=? AND id=?',[world.branchId,projection.pov.povId])[0];
+    const locationId=position.kind==='at_location'?position.locationId:position.kind==='at_grid'&&player?.location_id?String(player.location_id):null;
+    const location = locationId ? queryBound(world.db, 'SELECT name FROM locations WHERE branch_id = ? AND id = ?', [world.branchId, locationId])[0] : null;
     if (location) scene.push(`当前位置：${clean(location.name)}`);
     if (position.kind === 'in_transit') scene.push('当前位置：在途；不能把出发地或目的地当成已经抵达。');
   }

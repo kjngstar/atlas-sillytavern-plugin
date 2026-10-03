@@ -3156,12 +3156,12 @@ END`;
   }
   function queryBound(db, sql, params = []) {
     let stmt = null;
-    const rows2 = [];
+    const rows3 = [];
     try {
       stmt = db.prepare(sql);
       bindParams(stmt, params);
       while (stmt.step()) {
-        rows2.push(stmt.getAsObject());
+        rows3.push(stmt.getAsObject());
       }
     } catch (err) {
       throw new AtlasDbError("SQL_QUERY_FAILED", `SQL 查询失败：${err.message}`, {
@@ -3171,12 +3171,12 @@ END`;
     } finally {
       stmt?.free();
     }
-    return rows2;
+    return rows3;
   }
   function foreignKeyCheck(db, table) {
     const sql = table ? `PRAGMA foreign_key_check(${table})` : "PRAGMA foreign_key_check";
-    const rows2 = queryBound(db, sql);
-    return rows2.map((r) => ({
+    const rows3 = queryBound(db, sql);
+    return rows3.map((r) => ({
       table: String(r.table ?? ""),
       rowid: r.rowid === null || r.rowid === void 0 ? null : Number(r.rowid),
       parent: String(r.parent ?? ""),
@@ -3184,8 +3184,8 @@ END`;
     }));
   }
   function userTableNames(db) {
-    const rows2 = queryBound(db, "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name");
-    return rows2.map((r) => String(r.name));
+    const rows3 = queryBound(db, "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name");
+    return rows3.map((r) => String(r.name));
   }
   function beginTransaction(db) {
     db.run("BEGIN");
@@ -3542,22 +3542,22 @@ END`;
     return `${verb}${m.table}「${label}」`;
   }
   function operationAlreadyApplied(db, turnId, operationId, table, rowId) {
-    const rows2 = db.exec(
+    const rows3 = db.exec(
       `SELECT COUNT(*) AS n FROM turn_changes WHERE turn_id = ? AND operation_id = ? AND target_table = ? AND target_row_id = ?`,
       [turnId, operationId, table, rowId]
     );
-    const n = rows2?.[0]?.values?.[0]?.[0];
+    const n = rows3?.[0]?.values?.[0]?.[0];
     return Number(n ?? 0) > 0;
   }
   function readTurnChanges(db, turnId) {
-    const rows2 = db.exec(
+    const rows3 = db.exec(
       `SELECT id, turn_id, sequence, attempt_id, group_id, operation_id, target_table, target_row_id, operation, before_json, after_json, basis_json, summary
      FROM turn_changes WHERE turn_id = ? ORDER BY sequence ASC`,
       [turnId]
     );
-    if (!rows2 || rows2.length === 0) return [];
-    const cols2 = rows2[0].columns;
-    return rows2[0].values.map((v) => {
+    if (!rows3 || rows3.length === 0) return [];
+    const cols2 = rows3[0].columns;
+    return rows3[0].values.map((v) => {
       const rec = {};
       cols2.forEach((c, i) => {
         rec[c] = v[i];
@@ -3747,9 +3747,9 @@ END`;
     ];
     const detailIdsByKind = /* @__PURE__ */ new Map();
     for (const [table, kind] of detailTables) {
-      const rows2 = rowsOf(db, table, branchId);
+      const rows3 = rowsOf(db, table, branchId);
       const ids = /* @__PURE__ */ new Set();
-      for (const row2 of rows2) {
+      for (const row2 of rows3) {
         const id = rowIdOf(table, row2);
         ids.add(id);
         const keyKind = keyKindById.get(id);
@@ -3986,8 +3986,8 @@ END`;
     }
     validateJsonRefs(db, branchId, keyKindById, parentOf, violations);
     for (const table of ["maps", "locations", "characters", "items", "factions", "relations", "routes", "actions", "journeys", "events", "information", "rumor_fronts", "knowledge", "channels"]) {
-      const rows2 = rowsOf(db, table, branchId);
-      for (const row2 of rows2) {
+      const rows3 = rowsOf(db, table, branchId);
+      for (const row2 of rows3) {
         const id = String(row2.id);
         if (row2.row_rev !== void 0 && (typeof row2.row_rev !== "number" || row2.row_rev < 1)) {
           violations.push(violation("INVARIANT_ROW_REV", table, id, "row_rev", "row_rev 必须是正整数"));
@@ -7409,10 +7409,10 @@ END`;
     };
   }
   function readerFromPort(reads) {
-    const rows2 = (where, limit) => reads.selectWhere("mention_candidates", where, limit);
+    const rows3 = (where, limit) => reads.selectWhere("mention_candidates", where, limit);
     return {
-      candidatesByName: (branchId, normalizedName) => rows2({ branch_id: branchId, normalized_name: normalizedName }, 1e3),
-      watchingCandidates: (branchId) => rows2({ branch_id: branchId, status: "watching" }, 1e3),
+      candidatesByName: (branchId, normalizedName) => rows3({ branch_id: branchId, normalized_name: normalizedName }, 1e3),
+      watchingCandidates: (branchId) => rows3({ branch_id: branchId, status: "watching" }, 1e3),
       turnWallTimes: (branchId) => {
         const turns = reads.selectWhere("turns", { branch_id: branchId }, 5e3);
         const out = /* @__PURE__ */ new Map();
@@ -7425,12 +7425,12 @@ END`;
     };
   }
   function readCandidates(db, branchId, where = "", params = []) {
-    const rows2 = queryBound(
+    const rows3 = queryBound(
       db,
       `SELECT * FROM mention_candidates WHERE branch_id = ?${where ? ` AND ${where}` : ""} ORDER BY id ASC`,
       [branchId, ...params]
     );
-    return rows2.map(decodeMentionRow);
+    return rows3.map(decodeMentionRow);
   }
   function stringList(value) {
     if (!Array.isArray(value)) return [];
@@ -7527,9 +7527,9 @@ END`;
         );
       }
       if (!byName.has(normalized)) byName.set(normalized, reader.candidatesByName(branchId, normalized));
-      const rows2 = byName.get(normalized);
-      const exact = rows2.find((row2) => String(row2.context_key ?? "") === contextKey);
-      const compatible = rows2.filter((row2) => {
+      const rows3 = byName.get(normalized);
+      const exact = rows3.find((row2) => String(row2.context_key ?? "") === contextKey);
+      const compatible = rows3.filter((row2) => {
         const existingKey = String(row2.context_key ?? "");
         if (existingKey.length === 0 || contextKey.length === 0) return true;
         return existingKey === contextKey;
@@ -7666,9 +7666,9 @@ END`;
     return { mutations, created, updated, promoted, evicted, issues };
   }
   function turnWallTimes(db, branchId) {
-    const rows2 = queryBound(db, "SELECT id, created_wall_ms FROM turns WHERE branch_id = ?", [branchId]);
+    const rows3 = queryBound(db, "SELECT id, created_wall_ms FROM turns WHERE branch_id = ?", [branchId]);
     const out = /* @__PURE__ */ new Map();
-    for (const row2 of rows2) {
+    for (const row2 of rows3) {
       const wall = Number(row2.created_wall_ms);
       out.set(String(row2.id), Number.isFinite(wall) ? wall : 0);
     }
@@ -10968,8 +10968,8 @@ END`;
       ticketLines.push(renderTicketLine(ticket, entry?.op));
     });
     const relatedObjects = tickets.map((ticket) => {
-      const rows2 = ticket.originalReadSet.map((row2) => `${row2.table}:${row2.rowId}`);
-      return rows2.length > 0 ? `${ticket.ticket}=${rows2.join(",")}` : "";
+      const rows3 = ticket.originalReadSet.map((row2) => `${row2.table}:${row2.rowId}`);
+      return rows3.length > 0 ? `${ticket.ticket}=${rows3.join(",")}` : "";
     }).filter((text) => text.length > 0).join(" | ");
     const promptLines = [
       "上一次操作有以下局部问题。其它成功操作已经保留，禁止重复输出或修改它们。",
@@ -11407,9 +11407,9 @@ END`;
         const pks = pkColumns(table);
         const where = pks.map((c) => `${c} = ?`).join(" AND ");
         const params = pks.includes("branch_id") ? [branchId, id] : [id];
-        const rows2 = queryBound(db, `SELECT * FROM ${table} WHERE ${where} LIMIT 1`, params);
-        if (rows2.length === 0) return null;
-        const decoded = decodeRow(table, rows2[0], { allowExtra: true });
+        const rows3 = queryBound(db, `SELECT * FROM ${table} WHERE ${where} LIMIT 1`, params);
+        if (rows3.length === 0) return null;
+        const decoded = decodeRow(table, rows3[0], { allowExtra: true });
         if (!decoded.ok) throw new Error(`READ_DECODE_FAILED: ${table}: ${decoded.issues.map((i) => i.path).join(",")}`);
         const row2 = decoded.row;
         if (pks.includes("branch_id")) row2.branch_id = branchId;
@@ -11441,8 +11441,8 @@ END`;
           }
         }
         const sql = `SELECT * FROM ${table}${clauses.length ? ` WHERE ${clauses.join(" AND ")}` : ""} ORDER BY ${tableColumnNames(table).includes("branch_id") ? "branch_id, " : ""}id ASC LIMIT ${Math.max(1, Math.min(1e3, limit))}`;
-        const rows2 = queryBound(db, sql, params);
-        return rows2.map((row2) => {
+        const rows3 = queryBound(db, sql, params);
+        return rows3.map((row2) => {
           const decoded = decodeRow(table, row2, { allowExtra: true });
           if (!decoded.ok) throw new Error(`READ_DECODE_FAILED: ${table}: ${decoded.issues.map((i) => i.path).join(",")}`);
           return decoded.row;
@@ -11453,24 +11453,24 @@ END`;
 
   // src/atlas-sim-position.ts
   function row(db, table, branchId, id) {
-    const rows2 = queryBound(db, `SELECT * FROM ${table} WHERE branch_id = ? AND id = ? LIMIT 1`, [branchId, id]);
-    if (rows2.length === 0) return null;
-    const decoded = decodeRow(table, rows2[0], { allowExtra: true });
+    const rows3 = queryBound(db, `SELECT * FROM ${table} WHERE branch_id = ? AND id = ? LIMIT 1`, [branchId, id]);
+    if (rows3.length === 0) return null;
+    const decoded = decodeRow(table, rows3[0], { allowExtra: true });
     return decoded.ok ? decoded.row : null;
   }
   function openJourneyOf(world, entityId) {
-    const rows2 = queryBound(
+    const rows3 = queryBound(
       world.db,
       `SELECT * FROM journeys WHERE branch_id = ? AND mover_entity_id = ? AND status IN ('moving','paused','blocked') LIMIT 1`,
       [world.branchId, entityId]
     );
-    if (rows2.length === 0) return null;
-    const decoded = decodeRow("journeys", rows2[0], { allowExtra: true });
+    if (rows3.length === 0) return null;
+    const decoded = decodeRow("journeys", rows3[0], { allowExtra: true });
     return decoded.ok ? decoded.row : null;
   }
   function isKnownEntity(world, entityId) {
-    const rows2 = queryBound(world.db, "SELECT kind FROM entity_keys WHERE branch_id = ? AND id = ? LIMIT 1", [world.branchId, entityId]);
-    return rows2.length > 0;
+    const rows3 = queryBound(world.db, "SELECT kind FROM entity_keys WHERE branch_id = ? AND id = ? LIMIT 1", [world.branchId, entityId]);
+    return rows3.length > 0;
   }
   var MAX_CHAIN = ATLAS_RUNTIME_LIMITS.containerDepth;
   function resolveEffectivePosition(world, entityId, _atTime, cache) {
@@ -11517,6 +11517,8 @@ END`;
           vehicleVisited.delete(entityId);
           const nested = resolveVehicleChain(world, location2, vehicleVisited, cache);
           if (nested) return nested;
+          const ownGrid = gridOf(character);
+          if (ownGrid) return ownGrid;
           return { kind: "at_location", locationId: location2, precision: "coarse" };
         }
         const grid = gridOf(character);
@@ -11696,760 +11698,77 @@ END`;
     };
   }
 
-  // src/atlas-db-views.ts
-  function rows(ctx, table, where = "", params = [], limit = 500) {
-    const hasBranch = table !== "branches" && table !== "turns" && table !== "turn_changes" && table !== "sync_outbox";
-    const clauses = [];
-    const values = [];
-    if (hasBranch) {
-      clauses.push("branch_id = ?");
-      values.push(ctx.branchId);
-    }
-    if (where) {
-      clauses.push(where);
-      values.push(...params);
-    }
-    const sql = `SELECT * FROM ${table}${clauses.length ? ` WHERE ${clauses.join(" AND ")}` : ""} LIMIT ${Math.max(1, Math.min(2e3, limit))}`;
-    return queryBound(ctx.db, sql, values).map((raw) => {
-      const decoded = decodeRow(table, raw, { allowExtra: true });
-      return decoded.ok ? decoded.row : raw;
-    });
-  }
-  function clampRevision(ctx, requested) {
-    if (requested === void 0 || requested === null) return { ok: true, current: ctx.revision };
-    return { ok: requested === ctx.revision, requested, current: ctx.revision };
-  }
-  function staleResult(ctx, requested) {
-    const rev = clampRevision(ctx, requested);
-    if (rev.ok) return null;
+  // src/atlas-scene-layout.ts
+  function interiorPositionHint(action, id) {
+    const zones = [
+      [/(窗边|窗旁|靠窗|window)/i, 80, 30, "窗边"],
+      [/(门口|门边|门旁|门前|入口|巷口|路口|door)/i, 18, 80, "入口附近"],
+      [/(角落|墙角|corner)/i, 18, 18, "角落"],
+      [/(桌边|桌旁|桌子|课桌|讲台|desk|table)/i, 55, 55, "桌旁"],
+      [/(中央|中间|中心|center|middle)/i, 50, 45, "中央"],
+      [/(左侧|左边|left)/i, 22, 50, "左侧"],
+      [/(右侧|右边|right)/i, 78, 50, "右侧"]
+    ];
+    const zone = zones.map((entry) => {
+      const matches = [...action.matchAll(new RegExp(entry[0].source, "gi"))];
+      return { entry, index: matches.length ? matches[matches.length - 1].index : -1 };
+    }).sort((a, b) => b.index - a.index)[0];
+    if (!zone || zone.index < 0) return null;
+    let hash = 0;
+    for (const letter of id) hash = Math.imul(hash, 31) + letter.charCodeAt(0) | 0;
     return {
-      branchId: ctx.branchId,
-      revision: ctx.revision,
-      items: [],
-      metadata: { stale: true, requestedRevision: rev.requested, currentRevision: rev.current }
+      x: zone.entry[1] + (hash >>> 0) % 11 - 5,
+      y: zone.entry[2] + ((hash >>> 4) % 11 - 5),
+      label: zone.entry[3]
     };
   }
-  function queryMapView(ctx, query) {
-    const stale = staleResult(ctx, query.revision);
-    if (stale) return stale;
-    const maps = rows(ctx, "maps", "", [], 200).filter((m) => String(m.status) === "active");
-    if (maps.length === 0) {
-      return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { empty: true, reason: "NO_MAP" } };
-    }
-    const selected = query.mapId ? maps.filter((m) => String(m.id) === query.mapId) : maps;
-    const mapIds = new Set(selected.map((m) => String(m.id)));
-    const locations = rows(ctx, "locations", "status = 'active'", [], 2e3);
-    const locationById = new Map(locations.map((l) => [String(l.id), l]));
-    const characters = rows(ctx, "characters", "status = 'active'", [], 2e3);
-    const itemRows = rows(ctx, "items", "status = 'active'", [], 2e3);
-    const routes = rows(ctx, "routes", "", [], 1e3);
-    const positionCache = buildPositionCache({ db: ctx.db, branchId: ctx.branchId });
-    const items = selected.map((map) => {
-      const mapId = String(map.id);
-      const points = [];
-      const coarseList = [];
-      for (const loc of locations) {
-        const locId = String(loc.id);
-        const locMap = loc.map_id ? String(loc.map_id) : null;
-        if (locMap !== mapId) continue;
-        const precision = String(loc.coord_precision ?? "unknown");
-        if (precision === "unknown" || typeof loc.grid_x !== "number" || typeof loc.grid_y !== "number") continue;
-        points.push({
-          entityId: locId,
-          kind: "location",
-          name: String(loc.name ?? ""),
-          mapId,
-          x: loc.grid_x,
-          y: loc.grid_y,
-          precision,
-          radius: typeof loc.uncertainty_radius_cells === "number" ? loc.uncertainty_radius_cells : null,
-          markerQuality: precision
-        });
-      }
-      for (const ch of characters) {
-        const chId = String(ch.id);
-        const position = resolveEffectivePosition({ db: ctx.db, branchId: ctx.branchId }, chId, void 0, positionCache);
-        if (position.kind === "at_grid" && position.mapId === mapId) {
-          points.push({
-            entityId: chId,
-            kind: "character",
-            name: String(ch.name ?? ""),
-            mapId,
-            x: position.x,
-            y: position.y,
-            precision: position.precision,
-            radius: position.radius ?? null,
-            markerQuality: position.precision
-          });
-        } else if (position.kind === "at_location") {
-          const loc = locationById.get(position.locationId);
-          const locMap = loc?.map_id ? String(loc.map_id) : null;
-          if (locMap === mapId && typeof ch.grid_x === "number" && typeof ch.grid_y === "number" && String(ch.coord_precision) !== "unknown") {
-            points.push({
-              entityId: chId,
-              kind: "character",
-              name: String(ch.name ?? ""),
-              mapId,
-              x: ch.grid_x,
-              y: ch.grid_y,
-              precision: String(ch.coord_precision),
-              radius: typeof ch.uncertainty_radius_cells === "number" ? ch.uncertainty_radius_cells : null,
-              markerQuality: String(ch.coord_precision)
-            });
-            continue;
-          }
-          if (locMap === mapId) {
-            coarseList.push({
-              entityId: chId,
-              name: String(ch.name ?? ""),
-              locationId: position.locationId,
-              locationName: loc ? String(loc.name ?? "") : null
-            });
-          }
-        }
-      }
-      for (const item of itemRows) {
-        const itemId = String(item.id);
-        if (item.holder_character_id || item.container_item_id) continue;
-        const position = resolveEffectivePosition({ db: ctx.db, branchId: ctx.branchId }, itemId, void 0, positionCache);
-        if (position.kind === "at_grid" && position.mapId === mapId) {
-          points.push({
-            entityId: itemId,
-            kind: "item",
-            name: String(item.name ?? ""),
-            mapId,
-            x: position.x,
-            y: position.y,
-            precision: position.precision,
-            radius: position.radius ?? null,
-            markerQuality: position.precision
-          });
-        }
-      }
-      const mapRoutes = routes.filter((r) => r.map_id ? String(r.map_id) === mapId : false).map((r) => ({
-        routeId: String(r.id),
-        fromId: String(r.from_location_id),
-        toId: String(r.to_location_id),
-        kind: String(r.kind),
-        geometryQuality: String(r.geometry_quality ?? "unknown"),
-        distanceM: typeof r.distance_m === "number" ? r.distance_m : null,
-        dashed: String(r.geometry_quality) !== "confirmed",
-        allowedModes: Array.isArray(r.allowed_modes_json) ? r.allowed_modes_json : []
-      }));
-      const metersPerCell = typeof map.meters_per_cell === "number" ? map.meters_per_cell : null;
-      return {
-        mapId,
-        name: String(map.name ?? ""),
-        kind: String(map.kind ?? "world"),
-        containerLocationId: map.container_location_id ? String(map.container_location_id) : null,
-        metersPerCell,
-        scaleQuality: String(map.scale_quality ?? "uncalibrated"),
-        scaleLocked: Number(map.scale_locked ?? 0) === 1,
-        calibrationRev: Number(map.calibration_rev ?? 1),
-        defaultTerrain: String(map.default_terrain ?? "unknown"),
-        points,
-        coarseList,
-        routes: mapRoutes,
-        frames: {
-          frame: map.frame_json ?? {},
-          scaleBar: metersPerCell === null ? null : computeViewportScaleBar({ cameraK: 40, metersPerCell })
-        }
-      };
-    });
-    return {
-      branchId: ctx.branchId,
-      revision: ctx.revision,
-      items,
-      metadata: {
-        mapCount: mapIds.size,
-        pointCount: items.reduce((n, m) => n + m.points.length, 0),
-        coarseCount: items.reduce((n, m) => n + m.coarseList.length, 0),
-        viewMode: ctx.viewMode ?? "author",
-        ...assetDiagnostics(ctx, selected)
-      }
-    };
-  }
-  function assetDiagnostics(ctx, maps) {
-    const present = new Set((ctx.assets ?? []).map((asset) => String(asset.key)));
-    const referenced = [
-      ...new Set(
-        maps.map(
-          (map) => map.background_asset_key === null || map.background_asset_key === void 0 ? "" : String(map.background_asset_key)
-        ).filter((key) => key !== "")
-      )
-    ].sort();
-    const missing = referenced.filter((key) => !present.has(key));
-    const unreferenced = [...present].filter((key) => !referenced.includes(key)).sort();
-    return {
-      assetCheck: "ok",
-      referencedAssetCount: referenced.length,
-      missingAssets: missing,
-      missingAssetCount: missing.length,
-      unreferencedAssets: unreferenced,
-      assetNotice: missing.length > 0 ? `缺底图：${missing.length} 张引用的底图未随存档带来（实体与坐标仍完整）` : null
-    };
-  }
-  function queryNearby(ctx, query) {
-    const stale = staleResult(ctx, query.revision);
-    if (stale) return stale;
-    const target = query.entityId ? resolveEffectivePosition({ db: ctx.db, branchId: ctx.branchId }, query.entityId) : { kind: "unknown" };
-    if (target.kind === "unknown") {
-      return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "POSITION_UNKNOWN" } };
-    }
-    const here = target.kind === "at_grid" ? target.mapId : target.kind === "at_location" ? target.locationId : null;
-    const characters = rows(ctx, "characters", "status = 'active'", [], 1e3);
-    const results = [];
-    for (const ch of characters) {
-      const id = String(ch.id);
-      if (query.entityId && id === query.entityId) continue;
-      const position = resolveEffectivePosition({ db: ctx.db, branchId: ctx.branchId }, id);
-      if (target.kind === "at_grid" && position.kind === "at_grid" && position.mapId === here) {
-        const dx = position.x - target.x;
-        const dy = position.y - target.y;
-        results.push({
-          entityId: id,
-          name: String(ch.name ?? ""),
-          relevance: "same_map",
-          positionQuality: position.precision,
-          gridDistance: Math.sqrt(dx * dx + dy * dy)
-        });
-      } else if (target.kind === "at_location" && position.kind === "at_location" && position.locationId === here) {
-        results.push({
-          entityId: id,
-          name: String(ch.name ?? ""),
-          relevance: "same_location",
-          positionQuality: "coarse"
-        });
-      }
-    }
-    const limit = query.limit ?? 50;
-    return {
-      branchId: ctx.branchId,
-      revision: ctx.revision,
-      items: results.slice(0, limit),
-      metadata: { anchor: target.kind, anchorId: here, total: results.length }
-    };
-  }
-  function queryEntityDetail(ctx, query) {
-    const stale = staleResult(ctx, query.revision);
-    if (stale) return stale;
-    const entityId = query.entityId;
-    if (!entityId) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "NO_ENTITY_ID" } };
-    const key = rows(ctx, "entity_keys", "id = ?", [entityId], 1)[0];
-    if (!key) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "ENTITY_UNKNOWN" } };
-    const kind = String(key.kind);
-    if (kind === "character") {
-      const character = rows(ctx, "characters", "id = ?", [entityId], 1)[0];
-      if (!character) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "ENTITY_UNKNOWN" } };
-      const relations2 = rows(ctx, "relations", "subject_entity_id = ? OR object_entity_id = ?", [entityId, entityId], 200);
-      const actions = rows(ctx, "actions", "actor_entity_id = ?", [entityId], 100);
-      const journeys = rows(ctx, "journeys", "mover_entity_id = ?", [entityId], 20);
-      const knowledge = rows(ctx, "knowledge", "knower_character_id = ?", [entityId], 200);
-      const position = resolveEffectivePosition({ db: ctx.db, branchId: ctx.branchId }, entityId);
-      return {
-        branchId: ctx.branchId,
-        revision: ctx.revision,
-        items: [{ kind, character, relations: relations2, actions, journeys, knowledge, position }],
-        metadata: { counts: { relations: relations2.length, actions: actions.length, knowledge: knowledge.length } }
-      };
-    }
-    if (kind === "location") {
-      const location = rows(ctx, "locations", "id = ?", [entityId], 1)[0];
-      if (!location) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "ENTITY_UNKNOWN" } };
-      const children = rows(ctx, "locations", "parent_location_id = ?", [entityId], 200);
-      const present = rows(ctx, "characters", "location_id = ? AND status = ?", [entityId, "active"], 200);
-      const events = rows(ctx, "events", "location_id = ?", [entityId], 200);
-      const fronts = rows(ctx, "rumor_fronts", "location_id = ?", [entityId], 200);
-      const position = resolveEffectivePosition({ db: ctx.db, branchId: ctx.branchId }, entityId);
-      return {
-        branchId: ctx.branchId,
-        revision: ctx.revision,
-        items: [{ kind, location, children, present, events, fronts, position }],
-        metadata: { counts: { children: children.length, present: present.length, events: events.length, fronts: fronts.length } }
-      };
-    }
-    if (kind === "item") {
-      const item = rows(ctx, "items", "id = ?", [entityId], 1)[0];
-      if (!item) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "ENTITY_UNKNOWN" } };
-      const contained = rows(ctx, "items", "container_item_id = ?", [entityId], 200);
-      const position = resolveEffectivePosition({ db: ctx.db, branchId: ctx.branchId }, entityId);
-      return { branchId: ctx.branchId, revision: ctx.revision, items: [{ kind, item, contained, position }], metadata: {} };
-    }
-    const faction = rows(ctx, "factions", "id = ?", [entityId], 1)[0];
-    const relations = rows(ctx, "relations", "subject_entity_id = ? OR object_entity_id = ?", [entityId, entityId], 200);
-    const channels = rows(ctx, "channels", "owner_entity_id = ?", [entityId], 100);
-    return {
-      branchId: ctx.branchId,
-      revision: ctx.revision,
-      items: [{ kind, faction, relations, channels }],
-      metadata: { counts: { relations: relations.length, channels: channels.length } }
-    };
-  }
-  function queryChanges(ctx, query) {
-    const stale = staleResult(ctx, query.revision);
-    if (stale) return stale;
-    const limit = Math.max(1, Math.min(500, query.limit ?? 100));
-    const changes = queryBound(
-      ctx.db,
-      `SELECT tc.id, tc.turn_id, tc.sequence, tc.group_id, tc.operation_id, tc.target_table, tc.target_row_id, tc.operation, tc.summary, tc.basis_json, t.kind AS turn_kind, t.created_wall_ms
-     FROM turn_changes tc JOIN turns t ON t.id = tc.turn_id
-     WHERE t.branch_id = ?
-     ORDER BY tc.turn_id DESC, tc.sequence DESC LIMIT ?`,
-      [ctx.branchId, limit]
-    );
-    const items = changes.map((c) => ({
-      changeId: String(c.id),
-      turnId: String(c.turn_id),
-      sequence: Number(c.sequence),
-      groupId: String(c.group_id),
-      operationId: String(c.operation_id),
-      table: String(c.target_table),
-      rowId: String(c.target_row_id),
-      operation: String(c.operation),
-      summary: String(c.summary ?? ""),
-      turnKind: String(c.turn_kind ?? ""),
-      basis: safeJson(c.basis_json)
+  function scenePositions(rows3, frame) {
+    const cols2 = Math.max(1, frame.cols), height = Math.max(1, frame.rows);
+    const width = Math.max(1, Math.ceil(Math.sqrt(rows3.length * cols2 / height)));
+    const depth = Math.max(1, Math.ceil(rows3.length / width));
+    const slots = Array.from({ length: width * depth }, (_, i) => ({
+      x: width === 1 ? 50 : 18 + i % width * 64 / (width - 1),
+      y: depth === 1 ? 50 : 18 + Math.floor(i / width) * 64 / (depth - 1)
     }));
-    return {
-      branchId: ctx.branchId,
-      revision: ctx.revision,
-      items,
-      metadata: { count: items.length, cursor: query.cursor ?? null }
-    };
-  }
-  function safeJson(text) {
-    if (typeof text !== "string") return {};
-    try {
-      const parsed = JSON.parse(text);
-      return typeof parsed === "object" && parsed !== null ? parsed : {};
-    } catch {
-      return { parseError: true };
-    }
-  }
-  function queryDiagnostics(ctx, query) {
-    const stale = staleResult(ctx, query.revision);
-    if (stale) return stale;
-    const limit = Math.max(1, Math.min(500, query.limit ?? 100));
-    const offset = query.cursor ? Number(query.cursor) : 0;
-    const total = queryBound(
-      ctx.db,
-      `SELECT COUNT(*) AS n FROM turn_changes tc JOIN turns t ON t.id = tc.turn_id WHERE t.branch_id = ?`,
-      [ctx.branchId]
-    );
-    const totalCount = Number(total[0]?.n ?? 0);
-    const changes = queryBound(
-      ctx.db,
-      `SELECT tc.id, tc.turn_id, tc.group_id, tc.operation_id, tc.target_table, tc.target_row_id, tc.operation, tc.summary, tc.basis_json
-     FROM turn_changes tc JOIN turns t ON t.id = tc.turn_id
-     WHERE t.branch_id = ? ORDER BY tc.turn_id, tc.sequence LIMIT ? OFFSET ?`,
-      [ctx.branchId, limit, offset]
-    );
-    const failedTurns = queryBound(
-      ctx.db,
-      `SELECT id, status, receipt_json, attempts_json FROM turns WHERE branch_id = ? AND status IN ('failed','partial') ORDER BY created_wall_ms DESC LIMIT 50`,
-      [ctx.branchId]
-    );
-    const nextOffset = offset + changes.length;
-    return {
-      branchId: ctx.branchId,
-      revision: ctx.revision,
-      items: [
-        ...changes.map((c) => ({
-          logId: String(c.id),
-          kind: "change",
-          turnId: String(c.turn_id),
-          groupId: String(c.group_id),
-          operationId: String(c.operation_id),
-          table: String(c.target_table),
-          rowId: String(c.target_row_id),
-          operation: String(c.operation),
-          summary: String(c.summary ?? ""),
-          basis: safeJson(c.basis_json)
-        })),
-        ...failedTurns.map((t) => ({
-          logId: `turn_${String(t.id)}`,
-          kind: "failed_turn",
-          turnId: String(t.id),
-          status: String(t.status),
-          receipt: safeJson(t.receipt_json),
-          attempts: safeJson(t.attempts_json)
-        }))
-      ],
-      nextCursor: nextOffset < totalCount ? String(nextOffset) : void 0,
-      metadata: {
-        totalCount,
-        returned: changes.length,
-        droppedCount: 0,
-        pageSize: limit,
-        /** 导出全部匹配记录；分页不截断导出。 */
-        exportComplete: true
+    const result = /* @__PURE__ */ new Map();
+    const occupied = [];
+    const gap = Math.min(12, 45 / Math.sqrt(Math.max(1, rows3.length)));
+    const ordered = [...rows3].sort((a, b) => Number(Boolean(b.positionHint || b.currentAction)) - Number(Boolean(a.positionHint || a.currentAction)) || a.id.localeCompare(b.id));
+    for (const row2 of ordered) {
+      const hint = interiorPositionHint(row2.positionHint || row2.currentAction || "", row2.id);
+      let index = 0;
+      if (hint) {
+        let best = Infinity;
+        slots.forEach((slot2, i) => {
+          const score = (slot2.x - hint.x) ** 2 + (slot2.y - hint.y) ** 2;
+          if (score < best) {
+            best = score;
+            index = i;
+          }
+        });
       }
-    };
-  }
-  function querySimulationView(ctx, query) {
-    const stale = staleResult(ctx, query.revision);
-    if (stale) return stale;
-    const branch = queryBound(ctx.db, "SELECT * FROM branches WHERE id = ?", [ctx.branchId])[0];
-    if (!branch) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "BRANCH_UNKNOWN" } };
-    const clock = Number(branch.clock_s ?? 0);
-    const cursor = Number(branch.simulation_cursor_s ?? 0);
-    const pending = cursor < clock;
-    return {
-      branchId: ctx.branchId,
-      revision: ctx.revision,
-      items: [
-        {
-          clockS: clock,
-          clockMinS: Number(branch.clock_min_s ?? 0),
-          clockMaxS: Number(branch.clock_max_s ?? 0),
-          calendarLabel: branch.calendar_label ?? null,
-          simulationCursorS: cursor,
-          simulationStatus: String(branch.simulation_status ?? "current"),
-          /** UI 必须显示「后台尚未结算到当前时间」。 */
-          pendingNotice: pending ? `正文时间已前进，部分后台尚在结算（未结算 ${Math.round(clock - cursor)} 秒）` : null
-        }
-      ],
-      metadata: { pending, viewMode: ctx.viewMode ?? "author", requestedCursor: query.cursor ?? null }
-    };
-  }
-
-  // src/atlas-sql-refs.ts
-  var CATALOG = [
-    ["locations", "L", "location", 200],
-    ["characters", "C", "character", 200],
-    ["items", "I", "item", 100],
-    ["factions", "F", "faction", 100],
-    ["maps", "M", "map", 50],
-    ["actions", "A", "action", 200],
-    ["information", "N", "information", 200],
-    ["routes", "R", "route", 200],
-    ["events", "E", "event", 200],
-    ["journeys", "J", "journey", 200],
-    ["channels", "H", "channel", 100],
-    ["knowledge", "K", "knowledge", 200]
-  ];
-  function collectKnownRefs(tables, branchId) {
-    return CATALOG.flatMap(([table, prefix, kind, limit]) => tables.selectWhere(table, { branch_id: branchId }, limit).map((row2, i) => ({ alias: `${prefix}${i + 1}`, id: String(row2.id), kind, rowRev: typeof row2.row_rev === "number" ? row2.row_rev : null })));
-  }
-  function collectEntityRefs(tables, branchId, refs = collectKnownRefs(tables, branchId)) {
-    return refs.map((ref) => {
-      const table = CATALOG.find((entry) => entry[2] === ref.kind)?.[0];
-      const row2 = table ? tables.selectOne(table, branchId, ref.id) : null;
-      return `${ref.alias}=${String(row2?.name ?? row2?.title ?? ref.kind)}（${ref.kind}）`;
-    });
-  }
-  function inDecisionScope(op, ctx, tables, branchId) {
-    const d = op.value.data ?? {}, ids = new Map(ctx.knownRefs.map((ref) => [ref.alias, ref.id]));
-    const target = ids.get(String(op.value.ref ?? d.actor_ref ?? d.owner_ref ?? ""));
-    if (op.value.op === "noop" || op.value.op === "attention.propose") return true;
-    if (op.value.op === "character.upsert") return !!target && ctx.actorIds.includes(target) && Object.keys(d).every((k) => ["thought", "action_tendency"].includes(k));
-    if (op.value.op === "plan.propose") return !!target && ctx.actorIds.includes(target);
-    if (op.value.op === "plan.revise") {
-      const action = target ? tables.selectOne("actions", branchId, target) : null;
-      return !!action && ctx.actorIds.includes(String(action.actor_entity_id));
-    }
-    return false;
-  }
-
-  // src/atlas-sim-time.ts
-  var ACTIVITY_DEFAULTS = {
-    dialogue: { min_s: 0, nominal_s: 0, max_s: 0 },
-    meal: { min_s: 900, nominal_s: 1800, max_s: 3600 },
-    rest: { min_s: 300, nominal_s: 1200, max_s: 3600 },
-    sleep: { min_s: 14400, nominal_s: 28800, max_s: 36e3 },
-    combat: { min_s: 30, nominal_s: 120, max_s: 600 }
-  };
-  function activityDefault(kind) {
-    const found = ACTIVITY_DEFAULTS[kind];
-    return found ? { ...found } : null;
-  }
-  var ZERO = { min: 0, nominal: 0, max: 0 };
-  function isPlainObject9(value) {
-    return typeof value === "object" && value !== null && !Array.isArray(value);
-  }
-  function finite(value) {
-    return typeof value === "number" && Number.isFinite(value) ? value : null;
-  }
-  function nonNegative(value) {
-    const n = finite(value);
-    return n !== null && n >= 0 ? n : null;
-  }
-  function normalize(bound) {
-    const min = Math.max(0, bound.min);
-    const nominal = Math.max(min, bound.nominal);
-    const max = Math.max(nominal, bound.max);
-    return { min, nominal, max };
-  }
-  function add(a, b) {
-    return { min: a.min + b.min, nominal: a.nominal + b.nominal, max: a.max + b.max };
-  }
-  function maxBound(a, b) {
-    return { min: Math.max(a.min, b.min), nominal: Math.max(a.nominal, b.nominal), max: Math.max(a.max, b.max) };
-  }
-  function dedupe(values) {
-    const out = [];
-    for (const value of values) if (value !== "" && !out.includes(value)) out.push(value);
-    return out;
-  }
-  function explicitRef(activity) {
-    const raw = activity;
-    for (const key of ["ref", "id", "key"]) {
-      const value = raw[key];
-      if (typeof value === "string" && value.trim() !== "") return value;
-    }
-    return null;
-  }
-  function buildNode(activity, index, conflicts) {
-    const kind = typeof activity?.kind === "string" ? activity.kind : "other";
-    const label = `a${index}:${kind}`;
-    const hint = isPlainObject9(activity?.hint) ? activity.hint : {};
-    const afterRef = typeof hint.after_ref === "string" && hint.after_ref.trim() !== "" ? hint.after_ref : null;
-    const sameRef = typeof hint.same_interval_as === "string" && hint.same_interval_as.trim() !== "" ? hint.same_interval_as : null;
-    if (afterRef && sameRef) {
-      conflicts.push(`CONFLICT_AFTER_AND_SAME:${label}`);
-    }
-    const node = {
-      index,
-      label,
-      aliases: [label, `a${index}`],
-      interval: null,
-      quality: "unknown",
-      basis: [],
-      zero: false,
-      afterRef,
-      sameRef: afterRef ? null : sameRef
-    };
-    const ref = explicitRef(activity);
-    if (ref) node.aliases.push(ref);
-    if (!activity?.completed) {
-      node.interval = { ...ZERO };
-      node.quality = "explicit";
-      node.zero = true;
-      node.basis.push(`INCOMPLETE_ACTIVITY_ZERO:${kind}`);
-      return node;
-    }
-    const elapsed = nonNegative(hint.elapsed_s);
-    if (elapsed !== null) {
-      node.interval = { min: elapsed, nominal: elapsed, max: elapsed };
-      node.quality = "explicit";
-      node.zero = elapsed === 0;
-      node.basis.push(kind === "travel" ? "TRAVEL_COMPUTED" : "HINT_ELAPSED");
-      return node;
-    }
-    if (typeof hint.elapsed_s === "number" && Number.isFinite(hint.elapsed_s) && hint.elapsed_s < 0) {
-      conflicts.push(`HINT_ELAPSED_NEGATIVE:${label}`);
-    }
-    const hintNominal = nonNegative(hint.nominal_s);
-    const minS = nonNegative(hint.min_s);
-    const maxS = nonNegative(hint.max_s);
-    if (minS !== null || maxS !== null || hintNominal !== null) {
-      const min = minS ?? hintNominal ?? maxS ?? 0;
-      const max = maxS ?? hintNominal ?? minS ?? 0;
-      const nominal = hintNominal ?? (min + max) / 2;
-      node.interval = normalize({ min, nominal, max });
-      node.quality = "estimated";
-      node.basis.push(
-        minS !== null && maxS !== null ? "HINT_RANGE" : minS !== null ? "HINT_MIN_ONLY" : maxS !== null ? "HINT_MAX_ONLY" : "HINT_NOMINAL_ONLY"
-      );
-      return node;
-    }
-    const fallback = activityDefault(kind);
-    if (fallback) {
-      if (kind === "dialogue") {
-        node.interval = { ...ZERO };
-        node.quality = "explicit";
-        node.zero = true;
-        node.basis.push("ACTIVITY_DEFAULT:dialogue");
-        return node;
-      }
-      node.interval = normalize({ min: fallback.min_s, nominal: fallback.nominal_s, max: fallback.max_s });
-      node.quality = "estimated";
-      node.basis.push(`ACTIVITY_DEFAULT:${kind}`);
-      return node;
-    }
-    node.interval = null;
-    node.quality = "unknown";
-    node.basis.push(`TIME_UNRESOLVED:${kind}`);
-    return node;
-  }
-  function deriveElapsedInterval(facts, base) {
-    const conflicts = [];
-    const clockRef = `clock_s:${finite(base?.clockS) ?? 0}`;
-    const explicit = facts?.explicitElapsedS;
-    if (explicit !== null && explicit !== void 0) {
-      const value = nonNegative(explicit);
-      if (value === null) {
-        conflicts.push("EXPLICIT_ELAPSED_INVALID");
-      } else {
-        return {
-          minS: value,
-          nominalS: value,
-          maxS: value,
-          quality: "explicit",
-          basisRefs: ["EXPLICIT_ELAPSED", clockRef],
-          conflicts
+      let slot = slots.splice(index, 1)[0];
+      const desired = hint ?? slot;
+      for (let attempt = 0; attempt < 300; attempt++) {
+        const radius = attempt === 0 ? 0 : gap * Math.sqrt(attempt);
+        const angle = attempt * 2.399963;
+        const candidate = {
+          x: Math.max(14, Math.min(86, desired.x + radius * Math.cos(angle))),
+          y: Math.max(14, Math.min(86, desired.y + radius * Math.sin(angle)))
         };
-      }
-    }
-    const activities = Array.isArray(facts?.activities) ? facts.activities : [];
-    const nodes = activities.map((activity, index) => buildNode(activity, index, conflicts));
-    if (nodes.length === 0) {
-      return { minS: 0, nominalS: 0, maxS: 0, quality: "unknown", basisRefs: ["TIME_UNRESOLVED", clockRef], conflicts };
-    }
-    const unresolved = nodes.filter((n) => n.interval === null);
-    if (unresolved.length > 0) {
-      const basis2 = dedupe([...nodes.flatMap((n) => n.basis), "TIME_UNRESOLVED", clockRef]);
-      return { minS: 0, nominalS: 0, maxS: 0, quality: "unknown", basisRefs: basis2, conflicts };
-    }
-    const kindCount = /* @__PURE__ */ new Map();
-    for (const node of nodes) {
-      const kind = node.label.split(":")[1] ?? "";
-      kindCount.set(kind, (kindCount.get(kind) ?? 0) + 1);
-    }
-    const refMap = /* @__PURE__ */ new Map();
-    nodes.forEach((node) => {
-      const kind = node.label.split(":")[1] ?? "";
-      const aliases = [...node.aliases];
-      if ((kindCount.get(kind) ?? 0) === 1) aliases.push(kind);
-      for (const alias of aliases) if (!refMap.has(alias)) refMap.set(alias, node.index);
-    });
-    const resolve = (raw) => {
-      if (!raw) return null;
-      const hit = refMap.get(raw);
-      if (hit === void 0) {
-        conflicts.push(`UNRESOLVED_ACTIVITY_REF:${raw}`);
-        return null;
-      }
-      return hit;
-    };
-    const parent = nodes.map((_, i) => i);
-    const find = (i) => {
-      let cursor = i;
-      while (parent[cursor] !== cursor) {
-        parent[cursor] = parent[parent[cursor]];
-        cursor = parent[cursor];
-      }
-      return cursor;
-    };
-    const union = (a, b) => {
-      const ra = find(a);
-      const rb = find(b);
-      if (ra === rb) return;
-      if (ra < rb) parent[rb] = ra;
-      else parent[ra] = rb;
-    };
-    const afterEdges = [];
-    let implicitSameGroup = false;
-    for (const node of nodes) {
-      if (node.sameRef) {
-        if (node.sameRef === node.aliases[0] || node.sameRef === `a${node.index}`) {
-          conflicts.push(`SAME_INTERVAL_SELF:${node.label}`);
-          continue;
-        }
-        const target = resolve(node.sameRef);
-        if (target !== null && target !== node.index) union(node.index, target);
-      }
-      if (node.afterRef) {
-        const target = resolve(node.afterRef);
-        if (target !== null && target !== node.index) afterEdges.push({ from: target, to: node.index });
-        else if (target === node.index) conflicts.push(`AFTER_REF_SELF:${node.label}`);
-      }
-    }
-    const referenced = new Set(afterEdges.map((e) => e.to));
-    const unrelated = nodes.filter((n) => !n.afterRef && !referenced.has(n.index)).map((n) => n.index);
-    if (unrelated.length > 1) {
-      implicitSameGroup = true;
-      for (let i = 1; i < unrelated.length; i += 1) union(unrelated[0], unrelated[i]);
-    }
-    let groupOf = nodes.map((_, i) => find(i));
-    let groupIds = [...new Set(groupOf)];
-    let edges = afterEdges.map((e) => ({ from: find(e.from), to: find(e.to) })).filter((e) => {
-      if (e.from === e.to) {
-        conflicts.push("ORDER_INSIDE_SAME_INTERVAL");
-        return false;
-      }
-      return true;
-    });
-    const detectCycle = () => {
-      const indeg2 = /* @__PURE__ */ new Map();
-      for (const id of groupIds) indeg2.set(id, 0);
-      for (const e of edges) indeg2.set(e.to, (indeg2.get(e.to) ?? 0) + 1);
-      const queue = groupIds.filter((id) => (indeg2.get(id) ?? 0) === 0);
-      let seen = 0;
-      while (queue.length > 0) {
-        const id = queue.shift();
-        seen += 1;
-        for (const e of edges) {
-          if (e.from !== id) continue;
-          const next = (indeg2.get(e.to) ?? 0) - 1;
-          indeg2.set(e.to, next);
-          if (next === 0) queue.push(e.to);
+        if (occupied.every((point) => Math.hypot(candidate.x - point.x, candidate.y - point.y) >= gap)) {
+          slot = candidate;
+          break;
         }
       }
-      return seen < groupIds.length;
-    };
-    if (edges.length > 0 && detectCycle()) {
-      conflicts.push("CYCLE_AFTER_REF");
-      edges = [];
-      const root = groupOf[0];
-      for (const id of groupIds) union(root, id);
-      groupOf = nodes.map((_, i) => find(i));
-      groupIds = [...new Set(groupOf)];
-      implicitSameGroup = true;
+      occupied.push(slot);
+      result.set(row2.id, {
+        x: slot.x * cols2 / 100,
+        y: slot.y * height / 100,
+        label: row2.positionHint || hint?.label || "场景内，细部位置估计"
+      });
     }
-    const groupBounds = /* @__PURE__ */ new Map();
-    for (const node of nodes) {
-      const id = groupOf[node.index];
-      const bound = node.interval;
-      const previous = groupBounds.get(id);
-      groupBounds.set(id, previous ? maxBound(previous, bound) : bound);
-    }
-    const predecessorBounds = (id) => {
-      const preds = edges.filter((e) => e.to === id);
-      if (preds.length === 0) return { ...ZERO };
-      let acc = null;
-      for (const pred of preds) {
-        const bound = finish.get(pred.from);
-        if (!bound) continue;
-        acc = acc ? maxBound(acc, bound) : bound;
-      }
-      return acc ?? { ...ZERO };
-    };
-    const indeg = /* @__PURE__ */ new Map();
-    for (const id of groupIds) indeg.set(id, 0);
-    for (const e of edges) indeg.set(e.to, (indeg.get(e.to) ?? 0) + 1);
-    const ready = groupIds.filter((id) => (indeg.get(id) ?? 0) === 0);
-    const finish = /* @__PURE__ */ new Map();
-    while (ready.length > 0) {
-      const id = ready.shift();
-      const own = groupBounds.get(id) ?? { ...ZERO };
-      finish.set(id, add(predecessorBounds(id), own));
-      for (const e of edges) {
-        if (e.from !== id) continue;
-        const next = (indeg.get(e.to) ?? 0) - 1;
-        indeg.set(e.to, next);
-        if (next === 0) ready.push(e.to);
-      }
-    }
-    let total = null;
-    for (const id of groupIds) {
-      const bound = finish.get(id);
-      if (!bound) continue;
-      total = total ? maxBound(total, bound) : bound;
-    }
-    const resolved = normalize(total ?? { ...ZERO });
-    const allExplicit = nodes.every((n) => n.quality === "explicit");
-    const estimated = nodes.some((n) => n.quality === "estimated") || implicitSameGroup;
-    const quality = allExplicit && !estimated ? "explicit" : "estimated";
-    const basis = dedupe([...nodes.flatMap((n) => n.basis), ...implicitSameGroup ? ["SAME_INTERVAL_INFERRED"] : [], clockRef]);
-    return {
-      minS: resolved.min,
-      nominalS: resolved.nominal,
-      maxS: resolved.max,
-      quality,
-      basisRefs: basis,
-      conflicts
-    };
+    return result;
   }
 
   // src/atlas-sim-actions.ts
@@ -12469,15 +11788,15 @@ END`;
   function issue10(code, path, message, severity = "warning") {
     return { code, path, message, severity, retryable: false };
   }
-  function isPlainObject10(value) {
+  function isPlainObject9(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
   function asObject(value) {
-    if (isPlainObject10(value)) return value;
+    if (isPlainObject9(value)) return value;
     if (typeof value === "string" && value.trim() !== "") {
       try {
         const parsed = JSON.parse(value);
-        return isPlainObject10(parsed) ? parsed : null;
+        return isPlainObject9(parsed) ? parsed : null;
       } catch {
         return null;
       }
@@ -12507,8 +11826,8 @@ END`;
     return decoded.ok ? decoded.row : null;
   }
   function loadRow(world, table, id) {
-    const rows2 = queryBound(world.db, `SELECT * FROM ${table} WHERE branch_id = ? AND id = ? LIMIT 1`, [world.branchId, id]);
-    return rows2.length > 0 ? decodeOrNull(table, rows2[0]) : null;
+    const rows3 = queryBound(world.db, `SELECT * FROM ${table} WHERE branch_id = ? AND id = ? LIMIT 1`, [world.branchId, id]);
+    return rows3.length > 0 ? decodeOrNull(table, rows3[0]) : null;
   }
   function leafResult(ok, reason, atS) {
     return { ok, reasons: ok || !reason ? [] : [reason], atS: ok ? atS : null };
@@ -12550,7 +11869,7 @@ END`;
     const walk = (node, depth) => {
       if (depth > CONDITION_DEPTH) return leafResult(false, "CONDITION_DEPTH_EXCEEDED", null);
       if (node === null || node === void 0) return { ok: true, reasons: [], atS: null };
-      if (!isPlainObject10(node)) return leafResult(false, "CONDITION_INVALID", null);
+      if (!isPlainObject9(node)) return leafResult(false, "CONDITION_INVALID", null);
       const keys = Object.keys(node);
       if (keys.length === 0) return { ok: true, reasons: [], atS: null };
       if (Array.isArray(node.all)) {
@@ -12568,7 +11887,7 @@ END`;
         return { ok: true, reasons: [], atS: times.length > 0 ? Math.min(...times) : null };
       }
       const kind = keys[0];
-      const body = isPlainObject10(node[kind]) ? node[kind] : {};
+      const body = isPlainObject9(node[kind]) ? node[kind] : {};
       const actor = str2(body.actor_ref) ?? actorId;
       switch (kind) {
         case "time_at_or_after": {
@@ -12592,13 +11911,13 @@ END`;
         case "knows": {
           const informationId = str2(body.information_ref);
           if (!actor || !informationId) return leafResult(false, "CONDITION_FIELD_MISSING:knows", null);
-          const rows2 = queryBound(
+          const rows3 = queryBound(
             world.db,
             `SELECT * FROM knowledge WHERE branch_id = ? AND information_id = ? AND status <> 'forgotten' AND (knower_character_id = ? OR is_pov = 1) LIMIT 1`,
             [world.branchId, informationId, actor]
           );
-          if (rows2.length === 0) return leafResult(false, `NOT_KNOWN:${actor}->${informationId}`, null);
-          const row2 = decodeOrNull("knowledge", rows2[0]) ?? {};
+          if (rows3.length === 0) return leafResult(false, `NOT_KNOWN:${actor}->${informationId}`, null);
+          const row2 = decodeOrNull("knowledge", rows3[0]) ?? {};
           const minRank = BELIEF_RANK[String(body.min_belief ?? "heard")] ?? 1;
           const actual = BELIEF_RANK[String(row2.belief ?? "heard")] ?? 1;
           return leafResult(actual >= minRank, `BELIEF_TOO_LOW:${String(row2.belief)}`, num2(row2.first_received_at_s));
@@ -12625,7 +11944,7 @@ END`;
           const key = str2(body.key);
           if (!actor || !key) return leafResult(false, "CONDITION_FIELD_MISSING:capability", null);
           const row2 = loadRow(world, "characters", actor) ?? loadRow(world, "factions", actor);
-          const capabilities = asArray(row2?.capabilities_json).filter(isPlainObject10);
+          const capabilities = asArray(row2?.capabilities_json).filter(isPlainObject9);
           return leafResult(capabilities.some((c) => str2(c.key) === key), `CAPABILITY_MISSING:${key}`, null);
         }
         case "event_match": {
@@ -12644,9 +11963,9 @@ END`;
             params.push(place);
           }
           sql += " ORDER BY COALESCE(occurred_at_s, scheduled_start_s) LIMIT 1";
-          const rows2 = queryBound(world.db, sql, params);
-          if (rows2.length === 0) return leafResult(false, `EVENT_MATCH_NONE:${eventKind}`, null);
-          return leafResult(true, null, eventAtS(decodeOrNull("events", rows2[0])));
+          const rows3 = queryBound(world.db, sql, params);
+          if (rows3.length === 0) return leafResult(false, `EVENT_MATCH_NONE:${eventKind}`, null);
+          return leafResult(true, null, eventAtS(decodeOrNull("events", rows3[0])));
         }
         default:
           return leafResult(false, `CONDITION_UNSUPPORTED:${kind}`, null);
@@ -12656,15 +11975,15 @@ END`;
     return { ok: result.ok, reasons: [...new Set(result.reasons)], atS: result.atS };
   }
   function nextTriggerTime(condition, afterS) {
-    if (!isPlainObject10(condition)) return null;
+    if (!isPlainObject9(condition)) return null;
     const times = [];
     const walk = (node, depth) => {
-      if (depth > CONDITION_DEPTH || !isPlainObject10(node)) return;
+      if (depth > CONDITION_DEPTH || !isPlainObject9(node)) return;
       if (Array.isArray(node.all) || Array.isArray(node.any)) {
         for (const child of node.all ?? node.any) walk(child, depth + 1);
         return;
       }
-      const body = isPlainObject10(node.time_at_or_after) ? node.time_at_or_after : null;
+      const body = isPlainObject9(node.time_at_or_after) ? node.time_at_or_after : null;
       if (body) {
         const s = num2(body.s);
         if (s !== null && s > afterS) times.push(s);
@@ -12719,20 +12038,20 @@ END`;
     const issues = [];
     const events = [];
     const updated = [];
-    const rows2 = [];
+    const rows3 = [];
     for (const raw of queryBound(world.db, `SELECT * FROM actions WHERE branch_id = ? AND status IN ${OPEN_STATUSES}`, [world.branchId])) {
       const decoded = decodeOrNull("actions", raw);
-      if (decoded) rows2.push(decoded);
+      if (decoded) rows3.push(decoded);
     }
-    rows2.sort((a, b) => {
+    rows3.sort((a, b) => {
       const byStatus = statusRank(String(a.status)) - statusRank(String(b.status));
       if (byStatus !== 0) return byStatus;
       return String(a.id) < String(b.id) ? -1 : String(a.id) > String(b.id) ? 1 : 0;
     });
     const byId = /* @__PURE__ */ new Map();
-    for (const row2 of rows2) byId.set(String(row2.id), row2);
+    for (const row2 of rows3) byId.set(String(row2.id), row2);
     const mainAssigned = /* @__PURE__ */ new Map();
-    const activeRows = rows2.filter((r) => String(r.status) === "active" && String(r.kind) !== "goal");
+    const activeRows = rows3.filter((r) => String(r.status) === "active" && String(r.kind) !== "goal");
     const sortByPriority = (a, b) => {
       const byPriority = priorityRank(String(a.priority)) - priorityRank(String(b.priority));
       if (byPriority !== 0) return byPriority;
@@ -12751,7 +12070,7 @@ END`;
       if (!actorCache.has(actorId)) actorCache.set(actorId, loadRow(world, "characters", actorId));
       return actorCache.get(actorId) ?? null;
     };
-    for (const row2 of rows2) {
+    for (const row2 of rows3) {
       const actionId = String(row2.id);
       const actorId = String(row2.actor_entity_id ?? "");
       const kind = String(row2.kind ?? "");
@@ -12969,15 +12288,15 @@ END`;
   function issue11(code, path, message, severity = "error") {
     return { code, path, message, severity, retryable: false };
   }
-  function isPlainObject11(value) {
+  function isPlainObject10(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
   function asObject2(value) {
-    if (isPlainObject11(value)) return value;
+    if (isPlainObject10(value)) return value;
     if (typeof value === "string" && value.trim() !== "") {
       try {
         const parsed = JSON.parse(value);
-        return isPlainObject11(parsed) ? parsed : null;
+        return isPlainObject10(parsed) ? parsed : null;
       } catch {
         return null;
       }
@@ -13011,15 +12330,15 @@ END`;
     return text === "" ? "unknown" : text;
   }
   function parseProfiles(raw) {
-    return asArray2(raw).filter(isPlainObject11);
+    return asArray2(raw).filter(isPlainObject10);
   }
   function decodeOrNull2(table, row2) {
     const decoded = decodeRow(table, row2, { allowExtra: true });
     return decoded.ok ? decoded.row : null;
   }
   function loadRow2(world, table, id) {
-    const rows2 = queryBound(world.db, `SELECT * FROM ${table} WHERE branch_id = ? AND id = ? LIMIT 1`, [world.branchId, id]);
-    return rows2.length > 0 ? decodeOrNull2(table, rows2[0]) : null;
+    const rows3 = queryBound(world.db, `SELECT * FROM ${table} WHERE branch_id = ? AND id = ? LIMIT 1`, [world.branchId, id]);
+    return rows3.length > 0 ? decodeOrNull2(table, rows3[0]) : null;
   }
   function selectMobility(actor, route, evidence) {
     const profiles = parseProfiles(actor?.mobility_profiles_json).filter((p) => p.enabled !== false);
@@ -13110,13 +12429,13 @@ END`;
     };
   }
   function routesFrom(world, locationId) {
-    const rows2 = queryBound(
+    const rows3 = queryBound(
       world.db,
       `SELECT * FROM routes WHERE branch_id = ? AND status = 'open' AND (from_location_id = ? OR (bidirectional = 1 AND to_location_id = ?))`,
       [world.branchId, locationId, locationId]
     );
     const out = [];
-    for (const row2 of rows2) {
+    for (const row2 of rows3) {
       const decoded = decodeOrNull2("routes", row2);
       if (decoded) out.push(decoded);
     }
@@ -13463,7 +12782,7 @@ END`;
     const events = [];
     const row2 = { ...journey };
     const rawSegments = journey.segments_json;
-    const segmentsRaw = asArray2(rawSegments).filter(isPlainObject11);
+    const segmentsRaw = asArray2(rawSegments).filter(isPlainObject10);
     if (typeof rawSegments === "string" && rawSegments.trim() !== "" && segmentsRaw.length === 0) {
       issues.push(issue11("JOURNEY_SEGMENTS_INVALID", "journeys.segments_json", "segments_json 损坏，保持原状不推进"));
       return { journey: row2, events, remainingS: Math.max(0, untilS - (num3(journey.last_advanced_at_s) ?? 0)), issues };
@@ -13575,7 +12894,7 @@ END`;
   }
   function nextNodeBoundary(journey) {
     if (String(journey.status ?? "") !== "moving") return null;
-    const segments = asArray2(journey.segments_json).filter(isPlainObject11);
+    const segments = asArray2(journey.segments_json).filter(isPlainObject10);
     const index = Math.max(0, Math.trunc(num3(journey.segment_index) ?? 0));
     if (index >= segments.length) return null;
     const segment = segments[index];
@@ -13586,7 +12905,7 @@ END`;
     return { atS, toLocationId: str3(segField(segment, "toLocationId", "to_location_id")) ?? "", routeId: str3(segField(segment, "routeId", "route_id")) };
   }
   function estimatedArrival(journey, clockS) {
-    const segments = asArray2(journey.segments_json).filter(isPlainObject11);
+    const segments = asArray2(journey.segments_json).filter(isPlainObject10);
     const status = String(journey.status ?? "moving");
     if (status === "arrived") {
       const arrived = num3(journey.arrived_at_s);
@@ -13619,15 +12938,15 @@ END`;
   // src/atlas-sim-opportunities.ts
   var PUBLIC_CONTACT_DWELL_S = 60;
   var OPPORTUNITY_BUCKET_S = 3600;
-  function isPlainObject12(value) {
+  function isPlainObject11(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
   function asObject3(value) {
-    if (isPlainObject12(value)) return value;
+    if (isPlainObject11(value)) return value;
     if (typeof value === "string" && value.trim() !== "") {
       try {
         const parsed = JSON.parse(value);
-        return isPlainObject12(parsed) ? parsed : null;
+        return isPlainObject11(parsed) ? parsed : null;
       } catch {
         return null;
       }
@@ -13726,8 +13045,8 @@ END`;
     const locationCache = /* @__PURE__ */ new Map();
     const locationOf = (locationId) => {
       if (!locationCache.has(locationId)) {
-        const rows2 = queryBound(world.db, "SELECT * FROM locations WHERE branch_id = ? AND id = ? LIMIT 1", [world.branchId, locationId]);
-        locationCache.set(locationId, rows2.length > 0 ? decodeOrNull3("locations", rows2[0]) : null);
+        const rows3 = queryBound(world.db, "SELECT * FROM locations WHERE branch_id = ? AND id = ? LIMIT 1", [world.branchId, locationId]);
+        locationCache.set(locationId, rows3.length > 0 ? decodeOrNull3("locations", rows3[0]) : null);
       }
       return locationCache.get(locationId) ?? null;
     };
@@ -13901,6 +13220,960 @@ END`;
     return opportunities;
   }
 
+  // src/atlas-db-knowledge-view.ts
+  function rows(db, table, sql, params) {
+    return queryBound(db, sql, params).map((raw) => {
+      const decoded = decodeRow(table, raw, { allowExtra: true });
+      return decoded.ok ? decoded.row : raw;
+    });
+  }
+  var BASE_BOUNDARIES = [
+    "字段级投影：只包含 knowledge 指向的信息与主角已确认的位置/身份。",
+    "知道名字不等于读到全档案：description/personality/关系图不随名字一起暴露。",
+    "上次见于…是历史信息，不是当前跟踪。",
+    "作者视图开关不改变本投影。"
+  ];
+  function projectForPov(world, pov) {
+    const povId = pov.characterId;
+    const knowledgeRows = povId ? rows(
+      world.db,
+      "knowledge",
+      "SELECT * FROM knowledge WHERE branch_id = ? AND knower_character_id = ? AND status = ?",
+      [world.branchId, povId, "active"]
+    ) : rows(
+      world.db,
+      "knowledge",
+      "SELECT * FROM knowledge WHERE branch_id = ? AND is_pov = 1 AND status = ?",
+      [world.branchId, "active"]
+    );
+    const informationIds = new Set(knowledgeRows.map((k) => String(k.information_id)));
+    const informations = /* @__PURE__ */ new Map();
+    for (const id of informationIds) {
+      const found = rows(world.db, "information", "SELECT * FROM information WHERE branch_id = ? AND id = ?", [world.branchId, id]);
+      if (found.length > 0) informations.set(id, found[0]);
+    }
+    const knownLocations = [];
+    const knownCharacters = [];
+    const knownFacts = [];
+    const lastSeen = [];
+    for (const k of knowledgeRows) {
+      const info = informations.get(String(k.information_id));
+      if (!info) continue;
+      const payload = info.payload_json ?? null;
+      const subjectId = info.subject_entity_id ? String(info.subject_entity_id) : null;
+      const firstReceived = Number(k.first_received_at_s ?? 0);
+      knownFacts.push({
+        informationId: String(info.id),
+        title: String(info.title ?? ""),
+        content: String(info.content ?? ""),
+        truthForAuthor: String(info.truth_status ?? "unknown"),
+        belief: String(k.belief ?? "heard"),
+        payload
+      });
+      if (subjectId) {
+        const key = rows(world.db, "entity_keys", "SELECT kind FROM entity_keys WHERE branch_id = ? AND id = ?", [world.branchId, subjectId]);
+        const kind = key.length > 0 ? String(key[0].kind) : "";
+        if (kind === "location") {
+          const loc = rows(world.db, "locations", "SELECT name FROM locations WHERE branch_id = ? AND id = ?", [world.branchId, subjectId]);
+          knownLocations.push({
+            locationId: subjectId,
+            name: loc.length > 0 ? String(loc[0].name ?? "") : "",
+            source: String(info.kind ?? ""),
+            firstReceivedAtS: firstReceived,
+            belief: String(k.belief ?? "heard")
+          });
+        } else if (kind === "character") {
+          const ch = rows(world.db, "characters", "SELECT name, identity FROM characters WHERE branch_id = ? AND id = ?", [world.branchId, subjectId]);
+          const identityKnown = Boolean(payload && String(payload.predicate ?? "") === "identity");
+          knownCharacters.push({
+            entityId: subjectId,
+            name: ch.length > 0 ? String(ch[0].name ?? "") : "",
+            belief: String(k.belief ?? "heard"),
+            attention: String(k.attention ?? "normal"),
+            reactionNote: String(k.reaction_note ?? ""),
+            identityKnown
+          });
+          if (payload && String(payload.predicate ?? "") === "located_at") {
+            const value = payload.value;
+            const locationId = typeof value === "string" ? value : value && typeof value === "object" ? String(value.entity_ref ?? "") : "";
+            lastSeen.push({
+              entityId: subjectId,
+              name: ch.length > 0 ? String(ch[0].name ?? "") : "",
+              locationId: locationId || null,
+              atS: typeof payload.as_of_s === "number" ? payload.as_of_s : firstReceived
+            });
+          }
+        }
+      }
+    }
+    const knownChannels = rows(
+      world.db,
+      "channels",
+      "SELECT * FROM channels WHERE branch_id = ? AND status = ? AND secrecy != ?",
+      [world.branchId, "active", "secret"]
+    ).filter((c) => povId ? String(c.owner_entity_id) === povId || String(c.recipient_entity_id ?? "") === povId : false).map((c) => ({ channelId: String(c.id), name: String(c.name ?? ""), kind: String(c.kind ?? "") }));
+    return {
+      povId,
+      isPovRow: Boolean(pov.isPovRow),
+      knownLocations,
+      knownCharacters,
+      lastSeen,
+      knownFacts,
+      knownChannels,
+      boundaries: [...BASE_BOUNDARIES]
+    };
+  }
+
+  // src/atlas-sql-visibility.ts
+  function sqlVisibility(ctx) {
+    const cache = buildPositionCache(ctx), branch = queryBound(ctx.db, "SELECT * FROM branches WHERE id=?", [ctx.branchId])[0];
+    const protagonists = [...cache.characters?.values() ?? []].filter((ch) => ch.status === "active" && ch.role === "protagonist");
+    const povId = ctx.povId ?? (branch?.pov_character_id ? String(branch.pov_character_id) : protagonists.length === 1 ? String(protagonists[0].id) : null);
+    const projection = projectForPov(ctx, { characterId: povId });
+    const clock = Number(branch?.clock_s ?? 0);
+    const knownLocations = new Set(projection.knownLocations.filter((loc) => loc.firstReceivedAtS <= clock).map((loc) => loc.locationId));
+    const knownCharacters = new Set(projection.knownCharacters.map((ch) => ch.entityId));
+    const player = povId ? cache.characters?.get(povId) : null;
+    const p = povId ? resolveEffectivePosition(ctx, povId, void 0, cache) : null;
+    const here = p?.kind === "at_location" ? p.locationId : p?.kind === "at_grid" && player?.location_id ? String(player.location_id) : null;
+    const visibleCharacters = new Set(povId ? [povId] : []), visibleItems = /* @__PURE__ */ new Set();
+    if (here) {
+      const seen = /* @__PURE__ */ new Set();
+      let id = here;
+      while (id && !seen.has(id)) {
+        seen.add(id);
+        knownLocations.add(id);
+        const loc = cache.locations?.get(id);
+        id = loc?.parent_location_id ? String(loc.parent_location_id) : null;
+      }
+      for (const ch of cache.characters?.values() ?? []) {
+        if (ch.status !== "active") continue;
+        const position = resolveEffectivePosition(ctx, String(ch.id), void 0, cache);
+        if (position.kind === "at_location" && position.locationId === here || position.kind === "at_grid" && ch.location_id === here) visibleCharacters.add(String(ch.id));
+      }
+      for (const item of cache.items?.values() ?? []) {
+        if (item.status !== "active") continue;
+        if (item.holder_character_id === povId || !item.holder_character_id && !item.container_item_id && item.location_id === here) visibleItems.add(String(item.id));
+      }
+    }
+    return {
+      povId,
+      here,
+      projection,
+      knownLocations,
+      knownCharacters,
+      visibleCharacters,
+      visibleItems,
+      visible: (kind, id) => kind === "location" ? knownLocations.has(id) : kind === "character" ? visibleCharacters.has(id) : visibleItems.has(id)
+    };
+  }
+
+  // src/atlas-db-views.ts
+  function rows2(ctx, table, where = "", params = [], limit = 500) {
+    const hasBranch = table !== "branches" && table !== "turns" && table !== "turn_changes" && table !== "sync_outbox";
+    const clauses = [];
+    const values = [];
+    if (hasBranch) {
+      clauses.push("branch_id = ?");
+      values.push(ctx.branchId);
+    }
+    if (where) {
+      clauses.push(where);
+      values.push(...params);
+    }
+    const sql = `SELECT * FROM ${table}${clauses.length ? ` WHERE ${clauses.join(" AND ")}` : ""} LIMIT ${Math.max(1, Math.min(2e3, limit))}`;
+    return queryBound(ctx.db, sql, values).map((raw) => {
+      const decoded = decodeRow(table, raw, { allowExtra: true });
+      return decoded.ok ? decoded.row : raw;
+    });
+  }
+  function clampRevision(ctx, requested) {
+    if (requested === void 0 || requested === null) return { ok: true, current: ctx.revision };
+    return { ok: requested === ctx.revision, requested, current: ctx.revision };
+  }
+  function staleResult(ctx, requested) {
+    const rev = clampRevision(ctx, requested);
+    if (rev.ok) return null;
+    return {
+      branchId: ctx.branchId,
+      revision: ctx.revision,
+      items: [],
+      metadata: { stale: true, requestedRevision: rev.requested, currentRevision: rev.current }
+    };
+  }
+  function queryMapView(ctx, query) {
+    const stale = staleResult(ctx, query.revision);
+    if (stale) return stale;
+    const maps = rows2(ctx, "maps", "", [], 200).filter((m) => String(m.status) === "active");
+    if (maps.length === 0) {
+      return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { empty: true, reason: "NO_MAP" } };
+    }
+    const selected = query.mapId ? maps.filter((m) => String(m.id) === query.mapId) : maps;
+    const mapIds = new Set(selected.map((m) => String(m.id)));
+    const locations = rows2(ctx, "locations", "status = 'active'", [], 2e3);
+    const locationById = new Map(locations.map((l) => [String(l.id), l]));
+    const characters = rows2(ctx, "characters", "status = 'active'", [], 2e3);
+    const itemRows = rows2(ctx, "items", "status = 'active'", [], 2e3);
+    const routes = rows2(ctx, "routes", "", [], 1e3);
+    const positionCache = buildPositionCache({ db: ctx.db, branchId: ctx.branchId });
+    const visibility = sqlVisibility(ctx);
+    const items = selected.map((map) => {
+      const mapId = String(map.id);
+      const points = [];
+      const coarseList = [];
+      const container = map.container_location_id ? locationById.get(String(map.container_location_id)) : null;
+      const leafScene = container && (container.kind === "room" || !locations.some((l) => l.parent_location_id === container.id)) && !["region", "city"].includes(String(container.kind));
+      const frame = map.frame_json ?? {};
+      const roomMembers = characters.filter((ch) => ch.location_id === container?.id && !["unknown", "in_transit"].includes(resolveEffectivePosition(ctx, String(ch.id), void 0, positionCache).kind));
+      const layout = leafScene ? scenePositions(
+        roomMembers.map((ch) => ({ id: String(ch.id), currentAction: String(ch.action_tendency ?? "") })),
+        { cols: typeof frame.cols === "number" ? frame.cols : 100, rows: typeof frame.rows === "number" ? frame.rows : 100 }
+      ) : /* @__PURE__ */ new Map();
+      for (const loc of locations) {
+        const locId = String(loc.id);
+        const locMap = loc.map_id ? String(loc.map_id) : null;
+        if (locMap !== mapId) continue;
+        const precision = String(loc.coord_precision ?? "unknown");
+        if (precision === "unknown" || typeof loc.grid_x !== "number" || typeof loc.grid_y !== "number") continue;
+        points.push({
+          entityId: locId,
+          kind: "location",
+          name: String(loc.name ?? ""),
+          mapId,
+          x: loc.grid_x,
+          y: loc.grid_y,
+          precision,
+          radius: typeof loc.uncertainty_radius_cells === "number" ? loc.uncertainty_radius_cells : null,
+          markerQuality: precision
+        });
+      }
+      for (const ch of characters) {
+        const chId = String(ch.id);
+        const position = resolveEffectivePosition({ db: ctx.db, branchId: ctx.branchId }, chId, void 0, positionCache);
+        const locationId = position.kind === "at_location" ? position.locationId : ch.location_id ? String(ch.location_id) : null;
+        if (position.kind === "in_transit" || position.kind === "unknown") continue;
+        const ownCoordinates = ch.map_id === mapId && ch.coord_precision !== "unknown" && typeof ch.grid_x === "number" && typeof ch.grid_y === "number";
+        if (leafScene && locationId === container?.id && !ownCoordinates) {
+          const pin = layout.get(chId);
+          points.push({ entityId: chId, kind: "character", name: String(ch.name), mapId, x: pin.x, y: pin.y, precision: "layout", radius: null, markerQuality: "layout", locationId, isProtagonist: ch.id === ctx.povId });
+        } else if (ownCoordinates || position.kind === "at_grid" && position.mapId === mapId) {
+          const grid = ownCoordinates ? { x: ch.grid_x, y: ch.grid_y, precision: String(ch.coord_precision) } : position.kind === "at_grid" ? position : null;
+          if (!grid) continue;
+          points.push({
+            entityId: chId,
+            kind: "character",
+            name: String(ch.name ?? ""),
+            mapId,
+            x: grid.x,
+            y: grid.y,
+            precision: grid.precision,
+            radius: typeof ch.uncertainty_radius_cells === "number" ? ch.uncertainty_radius_cells : null,
+            markerQuality: grid.precision,
+            locationId,
+            isProtagonist: ch.id === ctx.povId
+          });
+        } else if (locationId) {
+          const seen = /* @__PURE__ */ new Set();
+          let loc = locationById.get(locationId);
+          while (loc && !seen.has(String(loc.id))) {
+            seen.add(String(loc.id));
+            if (loc.map_id === mapId) {
+              coarseList.push({ entityId: chId, name: String(ch.name), locationId: String(loc.id), locationName: String(loc.name) });
+              break;
+            }
+            loc = loc.parent_location_id ? locationById.get(String(loc.parent_location_id)) : void 0;
+          }
+        }
+      }
+      for (const item of itemRows) {
+        const itemId = String(item.id);
+        if (item.holder_character_id || item.container_item_id) continue;
+        const position = resolveEffectivePosition({ db: ctx.db, branchId: ctx.branchId }, itemId, void 0, positionCache);
+        if (position.kind === "at_grid" && position.mapId === mapId) {
+          points.push({
+            entityId: itemId,
+            kind: "item",
+            name: String(item.name ?? ""),
+            mapId,
+            x: position.x,
+            y: position.y,
+            precision: position.precision,
+            radius: position.radius ?? null,
+            markerQuality: position.precision
+          });
+        }
+      }
+      const mapRoutes = routes.filter((r) => r.map_id ? String(r.map_id) === mapId : false).map((r) => ({
+        routeId: String(r.id),
+        fromId: String(r.from_location_id),
+        toId: String(r.to_location_id),
+        kind: String(r.kind),
+        geometryQuality: String(r.geometry_quality ?? "unknown"),
+        distanceM: typeof r.distance_m === "number" ? r.distance_m : null,
+        dashed: String(r.geometry_quality) !== "confirmed",
+        allowedModes: Array.isArray(r.allowed_modes_json) ? r.allowed_modes_json : []
+      }));
+      const metersPerCell = typeof map.meters_per_cell === "number" ? map.meters_per_cell : null;
+      for (const point of points) point.hidden = !visibility.visible(point.kind, point.entityId);
+      for (const entry of coarseList) entry.hidden = !visibility.visibleCharacters.has(entry.entityId);
+      return {
+        mapId,
+        name: String(map.name ?? ""),
+        kind: String(map.kind ?? "world"),
+        containerLocationId: map.container_location_id ? String(map.container_location_id) : null,
+        metersPerCell,
+        scaleQuality: String(map.scale_quality ?? "uncalibrated"),
+        scaleLocked: Number(map.scale_locked ?? 0) === 1,
+        calibrationRev: Number(map.calibration_rev ?? 1),
+        defaultTerrain: String(map.default_terrain ?? "unknown"),
+        points: ctx.viewMode === "pov" ? points.filter((point) => !point.hidden) : points,
+        coarseList: ctx.viewMode === "pov" ? coarseList.filter((entry) => !entry.hidden) : coarseList,
+        routes: mapRoutes,
+        frames: {
+          frame: map.frame_json ?? {},
+          scaleBar: metersPerCell === null ? null : computeViewportScaleBar({ cameraK: 40, metersPerCell })
+        }
+      };
+    });
+    return {
+      branchId: ctx.branchId,
+      revision: ctx.revision,
+      items,
+      metadata: {
+        mapCount: mapIds.size,
+        pointCount: items.reduce((n, m) => n + m.points.length, 0),
+        coarseCount: items.reduce((n, m) => n + m.coarseList.length, 0),
+        viewMode: ctx.viewMode ?? "author",
+        ...assetDiagnostics(ctx, selected)
+      }
+    };
+  }
+  function assetDiagnostics(ctx, maps) {
+    const present = new Set((ctx.assets ?? []).map((asset) => String(asset.key)));
+    const referenced = [
+      ...new Set(
+        maps.map(
+          (map) => map.background_asset_key === null || map.background_asset_key === void 0 ? "" : String(map.background_asset_key)
+        ).filter((key) => key !== "")
+      )
+    ].sort();
+    const missing = referenced.filter((key) => !present.has(key));
+    const unreferenced = [...present].filter((key) => !referenced.includes(key)).sort();
+    return {
+      assetCheck: "ok",
+      referencedAssetCount: referenced.length,
+      missingAssets: missing,
+      missingAssetCount: missing.length,
+      unreferencedAssets: unreferenced,
+      assetNotice: missing.length > 0 ? `缺底图：${missing.length} 张引用的底图未随存档带来（实体与坐标仍完整）` : null
+    };
+  }
+  function queryNearby(ctx, query) {
+    const stale = staleResult(ctx, query.revision);
+    if (stale) return stale;
+    const entityId = query.entityId ?? ctx.povId;
+    const cache = buildPositionCache(ctx);
+    const target = entityId ? resolveEffectivePosition(ctx, entityId, void 0, cache) : { kind: "unknown" };
+    if (target.kind === "unknown") {
+      return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "POSITION_UNKNOWN" } };
+    }
+    const here = target.kind === "at_grid" ? target.mapId : target.kind === "at_location" ? target.locationId : null;
+    const characters = rows2(ctx, "characters", "status = 'active'", [], 1e3);
+    const directLocation = (id, p) => {
+      if (p.kind === "in_transit" || p.kind === "unknown") return null;
+      if (p.kind === "at_location") return p.locationId;
+      if (cache.locations?.has(id)) return id;
+      const character = cache.characters?.get(id);
+      return character?.location_id ? String(character.location_id) : null;
+    };
+    const targetLocation = entityId ? directLocation(entityId, target) : null;
+    const results = [];
+    for (const ch of characters) {
+      const id = String(ch.id);
+      if (entityId && id === entityId) continue;
+      const position = resolveEffectivePosition(ctx, id, void 0, cache);
+      const locationId = directLocation(id, position);
+      if (targetLocation && locationId === targetLocation) {
+        results.push({
+          entityId: id,
+          name: String(ch.name ?? ""),
+          relevance: "same_location",
+          positionQuality: position.kind === "at_grid" ? position.precision : "coarse",
+          locationId,
+          locationName: String(cache.locations?.get(locationId)?.name ?? ""),
+          thought: ctx.viewMode === "author" ? ch.thought : void 0,
+          actionTendency: ctx.viewMode === "author" ? ch.action_tendency : void 0
+        });
+      } else if (target.kind === "at_grid" && position.kind === "at_grid" && position.mapId === here && !targetLocation && !locationId) {
+        const dx = position.x - target.x;
+        const dy = position.y - target.y;
+        if (Math.hypot(dx, dy) > 10) continue;
+        results.push({
+          entityId: id,
+          name: String(ch.name ?? ""),
+          relevance: "same_map",
+          positionQuality: position.precision,
+          gridDistance: Math.sqrt(dx * dx + dy * dy)
+        });
+      }
+    }
+    const limit = query.limit ?? 50;
+    return {
+      branchId: ctx.branchId,
+      revision: ctx.revision,
+      items: results.slice(0, limit),
+      metadata: { anchor: target.kind, anchorId: here, total: results.length }
+    };
+  }
+  function queryEntityDetail(ctx, query) {
+    const stale = staleResult(ctx, query.revision);
+    if (stale) return stale;
+    const entityId = query.entityId;
+    if (!entityId) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "NO_ENTITY_ID" } };
+    const key = rows2(ctx, "entity_keys", "id = ?", [entityId], 1)[0];
+    if (!key) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "ENTITY_UNKNOWN" } };
+    const kind = String(key.kind);
+    const visibility = ctx.viewMode === "pov" ? sqlVisibility(ctx) : null;
+    if (kind === "character") {
+      const character = rows2(ctx, "characters", "id = ?", [entityId], 1)[0];
+      if (!character) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "ENTITY_UNKNOWN" } };
+      if (visibility && entityId !== visibility.povId) {
+        if (!visibility.visibleCharacters.has(entityId) && !visibility.knownCharacters.has(entityId)) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "POV_UNKNOWN" } };
+        const seen = visibility.visibleCharacters.has(entityId);
+        return { branchId: ctx.branchId, revision: ctx.revision, items: [{
+          kind,
+          character: { id: entityId, name: character.name, ...seen ? { location_id: character.location_id, physical_status: character.physical_status } : {} },
+          relations: [],
+          actions: [],
+          journeys: [],
+          knowledge: [],
+          position: seen ? resolveEffectivePosition(ctx, entityId) : null,
+          lastSeen: visibility.projection.lastSeen.filter((item) => item.entityId === entityId)
+        }], metadata: { fieldLimited: true, currentPositionKnown: seen } };
+      }
+      const relations2 = rows2(ctx, "relations", "subject_entity_id = ? OR object_entity_id = ?", [entityId, entityId], 200);
+      const actions = rows2(ctx, "actions", "actor_entity_id = ?", [entityId], 100);
+      const journeys = rows2(ctx, "journeys", "mover_entity_id = ?", [entityId], 20);
+      const knowledge = rows2(ctx, "knowledge", "knower_character_id = ?", [entityId], 200);
+      const position = resolveEffectivePosition({ db: ctx.db, branchId: ctx.branchId }, entityId);
+      return {
+        branchId: ctx.branchId,
+        revision: ctx.revision,
+        items: [{ kind, character, relations: relations2, actions, journeys, knowledge, position }],
+        metadata: { counts: { relations: relations2.length, actions: actions.length, knowledge: knowledge.length } }
+      };
+    }
+    if (kind === "location") {
+      if (visibility && !visibility.knownLocations.has(entityId)) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "POV_UNKNOWN" } };
+      const location = rows2(ctx, "locations", "id = ?", [entityId], 1)[0];
+      if (!location) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "ENTITY_UNKNOWN" } };
+      const children = rows2(ctx, "locations", "parent_location_id = ?", [entityId], 200).filter((loc) => !visibility || visibility.knownLocations.has(String(loc.id)));
+      const cache = buildPositionCache(ctx);
+      const present = rows2(ctx, "characters", "location_id = ? AND status = ?", [entityId, "active"], 200).filter((character) => !["in_transit", "unknown"].includes(resolveEffectivePosition(ctx, String(character.id), void 0, cache).kind)).filter((character) => !visibility || visibility.visibleCharacters.has(String(character.id))).map((character) => visibility ? { id: character.id, name: character.name, location_id: character.location_id, physical_status: character.physical_status } : character);
+      const events = rows2(ctx, "events", "location_id = ?", [entityId], 200).filter((event) => !visibility || event.secrecy === "public" && visibility.here === entityId && event.status === "occurred");
+      const fronts = visibility ? [] : rows2(ctx, "rumor_fronts", "location_id = ?", [entityId], 200);
+      const position = resolveEffectivePosition({ db: ctx.db, branchId: ctx.branchId }, entityId);
+      return {
+        branchId: ctx.branchId,
+        revision: ctx.revision,
+        items: [{
+          kind,
+          location: visibility ? { id: location.id, name: location.name, kind: location.kind, parent_location_id: location.parent_location_id } : location,
+          children: visibility ? children.map((child) => ({ id: child.id, name: child.name, kind: child.kind })) : children,
+          present,
+          events: visibility ? events.map((event) => ({ id: event.id, title: event.title, occurred_at_s: event.occurred_at_s })) : events,
+          fronts,
+          position
+        }],
+        metadata: { counts: { children: children.length, present: present.length, events: events.length, fronts: fronts.length } }
+      };
+    }
+    if (kind === "item") {
+      if (visibility && !visibility.visibleItems.has(entityId)) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "POV_UNKNOWN" } };
+      const item = rows2(ctx, "items", "id = ?", [entityId], 1)[0];
+      if (!item) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "ENTITY_UNKNOWN" } };
+      const contained = rows2(ctx, "items", "container_item_id = ?", [entityId], 200);
+      const position = resolveEffectivePosition({ db: ctx.db, branchId: ctx.branchId }, entityId);
+      return { branchId: ctx.branchId, revision: ctx.revision, items: [{ kind, item: visibility ? { id: item.id, name: item.name, location_id: item.location_id, holder_character_id: item.holder_character_id } : item, contained: visibility ? [] : contained, position }], metadata: {} };
+    }
+    if (visibility) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "POV_UNKNOWN" } };
+    const faction = rows2(ctx, "factions", "id = ?", [entityId], 1)[0];
+    const relations = rows2(ctx, "relations", "subject_entity_id = ? OR object_entity_id = ?", [entityId, entityId], 200);
+    const channels = rows2(ctx, "channels", "owner_entity_id = ?", [entityId], 100);
+    return {
+      branchId: ctx.branchId,
+      revision: ctx.revision,
+      items: [{ kind, faction, relations, channels }],
+      metadata: { counts: { relations: relations.length, channels: channels.length } }
+    };
+  }
+  function queryChanges(ctx, query) {
+    const stale = staleResult(ctx, query.revision);
+    if (stale) return stale;
+    const limit = Math.max(1, Math.min(500, query.limit ?? 100));
+    const changes = queryBound(
+      ctx.db,
+      `SELECT tc.id, tc.turn_id, tc.sequence, tc.group_id, tc.operation_id, tc.target_table, tc.target_row_id, tc.operation, tc.summary, tc.basis_json, t.kind AS turn_kind, t.created_wall_ms
+     FROM turn_changes tc JOIN turns t ON t.id = tc.turn_id
+     WHERE t.branch_id = ? AND t.status IN ('committed','partial')
+     ORDER BY t.clock_after_s DESC, t.created_wall_ms DESC, tc.sequence DESC LIMIT ?`,
+      [ctx.branchId, limit]
+    );
+    const items = changes.map((c) => ({
+      changeId: String(c.id),
+      turnId: String(c.turn_id),
+      sequence: Number(c.sequence),
+      groupId: String(c.group_id),
+      operationId: String(c.operation_id),
+      table: String(c.target_table),
+      rowId: String(c.target_row_id),
+      operation: String(c.operation),
+      summary: String(c.summary ?? ""),
+      turnKind: String(c.turn_kind ?? ""),
+      basis: safeJson(c.basis_json)
+    }));
+    return {
+      branchId: ctx.branchId,
+      revision: ctx.revision,
+      items,
+      metadata: { count: items.length, cursor: query.cursor ?? null }
+    };
+  }
+  function safeJson(text) {
+    if (typeof text !== "string") return {};
+    try {
+      const parsed = JSON.parse(text);
+      return typeof parsed === "object" && parsed !== null ? parsed : {};
+    } catch {
+      return { parseError: true };
+    }
+  }
+  function queryDiagnostics(ctx, query) {
+    const stale = staleResult(ctx, query.revision);
+    if (stale) return stale;
+    const limit = Math.max(1, Math.min(500, query.limit ?? 100));
+    const offset = query.cursor ? Number(query.cursor) : 0;
+    const total = queryBound(
+      ctx.db,
+      `SELECT COUNT(*) AS n FROM turn_changes tc JOIN turns t ON t.id = tc.turn_id WHERE t.branch_id = ?`,
+      [ctx.branchId]
+    );
+    const totalCount = Number(total[0]?.n ?? 0);
+    const changes = queryBound(
+      ctx.db,
+      `SELECT tc.id, tc.turn_id, tc.group_id, tc.operation_id, tc.target_table, tc.target_row_id, tc.operation, tc.summary, tc.basis_json
+     FROM turn_changes tc JOIN turns t ON t.id = tc.turn_id
+     WHERE t.branch_id = ? ORDER BY tc.turn_id, tc.sequence LIMIT ? OFFSET ?`,
+      [ctx.branchId, limit, offset]
+    );
+    const failedTurns = queryBound(
+      ctx.db,
+      `SELECT id, status, receipt_json, attempts_json FROM turns WHERE branch_id = ? AND status IN ('failed','partial') ORDER BY created_wall_ms DESC LIMIT 50`,
+      [ctx.branchId]
+    );
+    const nextOffset = offset + changes.length;
+    return {
+      branchId: ctx.branchId,
+      revision: ctx.revision,
+      items: [
+        ...changes.map((c) => ({
+          logId: String(c.id),
+          kind: "change",
+          turnId: String(c.turn_id),
+          groupId: String(c.group_id),
+          operationId: String(c.operation_id),
+          table: String(c.target_table),
+          rowId: String(c.target_row_id),
+          operation: String(c.operation),
+          summary: String(c.summary ?? ""),
+          basis: safeJson(c.basis_json)
+        })),
+        ...failedTurns.map((t) => ({
+          logId: `turn_${String(t.id)}`,
+          kind: "failed_turn",
+          turnId: String(t.id),
+          status: String(t.status),
+          receipt: safeJson(t.receipt_json),
+          attempts: safeJson(t.attempts_json)
+        }))
+      ],
+      nextCursor: nextOffset < totalCount ? String(nextOffset) : void 0,
+      metadata: {
+        totalCount,
+        returned: changes.length,
+        droppedCount: 0,
+        pageSize: limit,
+        /** 导出全部匹配记录；分页不截断导出。 */
+        exportComplete: true
+      }
+    };
+  }
+  function querySimulationView(ctx, query) {
+    const stale = staleResult(ctx, query.revision);
+    if (stale) return stale;
+    const branch = queryBound(ctx.db, "SELECT * FROM branches WHERE id = ?", [ctx.branchId])[0];
+    if (!branch) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "BRANCH_UNKNOWN" } };
+    const clock = Number(branch.clock_s ?? 0);
+    const cursor = Number(branch.simulation_cursor_s ?? 0);
+    const pending = cursor < clock;
+    return {
+      branchId: ctx.branchId,
+      revision: ctx.revision,
+      items: [
+        {
+          clockS: clock,
+          clockMinS: Number(branch.clock_min_s ?? 0),
+          clockMaxS: Number(branch.clock_max_s ?? 0),
+          calendarLabel: branch.calendar_label ?? null,
+          simulationCursorS: cursor,
+          simulationStatus: String(branch.simulation_status ?? "current"),
+          /** UI 必须显示「后台尚未结算到当前时间」。 */
+          pendingNotice: pending ? `正文时间已前进，部分后台尚在结算（未结算 ${Math.round(clock - cursor)} 秒）` : null
+        }
+      ],
+      metadata: { pending, viewMode: ctx.viewMode ?? "author", requestedCursor: query.cursor ?? null }
+    };
+  }
+
+  // src/atlas-sql-refs.ts
+  var CATALOG = [
+    ["locations", "L", "location", 200],
+    ["characters", "C", "character", 200],
+    ["items", "I", "item", 100],
+    ["factions", "F", "faction", 100],
+    ["maps", "M", "map", 50],
+    ["actions", "A", "action", 200],
+    ["information", "N", "information", 200],
+    ["routes", "R", "route", 200],
+    ["events", "E", "event", 200],
+    ["journeys", "J", "journey", 200],
+    ["channels", "H", "channel", 100],
+    ["knowledge", "K", "knowledge", 200]
+  ];
+  function collectKnownRefs(tables, branchId) {
+    return CATALOG.flatMap(([table, prefix, kind, limit]) => tables.selectWhere(table, { branch_id: branchId }, limit).map((row2, i) => ({ alias: `${prefix}${i + 1}`, id: String(row2.id), kind, rowRev: typeof row2.row_rev === "number" ? row2.row_rev : null })));
+  }
+  function collectEntityRefs(tables, branchId, refs = collectKnownRefs(tables, branchId)) {
+    return refs.map((ref) => {
+      const table = CATALOG.find((entry) => entry[2] === ref.kind)?.[0];
+      const row2 = table ? tables.selectOne(table, branchId, ref.id) : null;
+      return `${ref.alias}=${String(row2?.name ?? row2?.title ?? ref.kind)}（${ref.kind}）`;
+    });
+  }
+  function inDecisionScope(op, ctx, tables, branchId) {
+    const d = op.value.data ?? {}, ids = new Map(ctx.knownRefs.map((ref) => [ref.alias, ref.id]));
+    const target = ids.get(String(op.value.ref ?? d.actor_ref ?? d.owner_ref ?? ""));
+    if (op.value.op === "noop" || op.value.op === "attention.propose") return true;
+    if (op.value.op === "character.upsert") return !!target && ctx.actorIds.includes(target) && Object.keys(d).every((k) => ["thought", "action_tendency"].includes(k));
+    if (op.value.op === "plan.propose") return !!target && ctx.actorIds.includes(target);
+    if (op.value.op === "plan.revise") {
+      const action = target ? tables.selectOne("actions", branchId, target) : null;
+      return !!action && ctx.actorIds.includes(String(action.actor_entity_id));
+    }
+    return false;
+  }
+
+  // src/atlas-sim-time.ts
+  var ACTIVITY_DEFAULTS = {
+    dialogue: { min_s: 0, nominal_s: 0, max_s: 0 },
+    meal: { min_s: 900, nominal_s: 1800, max_s: 3600 },
+    rest: { min_s: 300, nominal_s: 1200, max_s: 3600 },
+    sleep: { min_s: 14400, nominal_s: 28800, max_s: 36e3 },
+    combat: { min_s: 30, nominal_s: 120, max_s: 600 }
+  };
+  function activityDefault(kind) {
+    const found = ACTIVITY_DEFAULTS[kind];
+    return found ? { ...found } : null;
+  }
+  var ZERO = { min: 0, nominal: 0, max: 0 };
+  function isPlainObject12(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function finite(value) {
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
+  }
+  function nonNegative(value) {
+    const n = finite(value);
+    return n !== null && n >= 0 ? n : null;
+  }
+  function normalize(bound) {
+    const min = Math.max(0, bound.min);
+    const nominal = Math.max(min, bound.nominal);
+    const max = Math.max(nominal, bound.max);
+    return { min, nominal, max };
+  }
+  function add(a, b) {
+    return { min: a.min + b.min, nominal: a.nominal + b.nominal, max: a.max + b.max };
+  }
+  function maxBound(a, b) {
+    return { min: Math.max(a.min, b.min), nominal: Math.max(a.nominal, b.nominal), max: Math.max(a.max, b.max) };
+  }
+  function dedupe(values) {
+    const out = [];
+    for (const value of values) if (value !== "" && !out.includes(value)) out.push(value);
+    return out;
+  }
+  function explicitRef(activity) {
+    const raw = activity;
+    for (const key of ["ref", "id", "key"]) {
+      const value = raw[key];
+      if (typeof value === "string" && value.trim() !== "") return value;
+    }
+    return null;
+  }
+  function buildNode(activity, index, conflicts) {
+    const kind = typeof activity?.kind === "string" ? activity.kind : "other";
+    const label = `a${index}:${kind}`;
+    const hint = isPlainObject12(activity?.hint) ? activity.hint : {};
+    const afterRef = typeof hint.after_ref === "string" && hint.after_ref.trim() !== "" ? hint.after_ref : null;
+    const sameRef = typeof hint.same_interval_as === "string" && hint.same_interval_as.trim() !== "" ? hint.same_interval_as : null;
+    if (afterRef && sameRef) {
+      conflicts.push(`CONFLICT_AFTER_AND_SAME:${label}`);
+    }
+    const node = {
+      index,
+      label,
+      aliases: [label, `a${index}`],
+      interval: null,
+      quality: "unknown",
+      basis: [],
+      zero: false,
+      afterRef,
+      sameRef: afterRef ? null : sameRef
+    };
+    const ref = explicitRef(activity);
+    if (ref) node.aliases.push(ref);
+    if (!activity?.completed) {
+      node.interval = { ...ZERO };
+      node.quality = "explicit";
+      node.zero = true;
+      node.basis.push(`INCOMPLETE_ACTIVITY_ZERO:${kind}`);
+      return node;
+    }
+    const elapsed = nonNegative(hint.elapsed_s);
+    if (elapsed !== null) {
+      node.interval = { min: elapsed, nominal: elapsed, max: elapsed };
+      node.quality = "explicit";
+      node.zero = elapsed === 0;
+      node.basis.push(kind === "travel" ? "TRAVEL_COMPUTED" : "HINT_ELAPSED");
+      return node;
+    }
+    if (typeof hint.elapsed_s === "number" && Number.isFinite(hint.elapsed_s) && hint.elapsed_s < 0) {
+      conflicts.push(`HINT_ELAPSED_NEGATIVE:${label}`);
+    }
+    const hintNominal = nonNegative(hint.nominal_s);
+    const minS = nonNegative(hint.min_s);
+    const maxS = nonNegative(hint.max_s);
+    if (minS !== null || maxS !== null || hintNominal !== null) {
+      const min = minS ?? hintNominal ?? maxS ?? 0;
+      const max = maxS ?? hintNominal ?? minS ?? 0;
+      const nominal = hintNominal ?? (min + max) / 2;
+      node.interval = normalize({ min, nominal, max });
+      node.quality = "estimated";
+      node.basis.push(
+        minS !== null && maxS !== null ? "HINT_RANGE" : minS !== null ? "HINT_MIN_ONLY" : maxS !== null ? "HINT_MAX_ONLY" : "HINT_NOMINAL_ONLY"
+      );
+      return node;
+    }
+    const fallback = activityDefault(kind);
+    if (fallback) {
+      if (kind === "dialogue") {
+        node.interval = { ...ZERO };
+        node.quality = "explicit";
+        node.zero = true;
+        node.basis.push("ACTIVITY_DEFAULT:dialogue");
+        return node;
+      }
+      node.interval = normalize({ min: fallback.min_s, nominal: fallback.nominal_s, max: fallback.max_s });
+      node.quality = "estimated";
+      node.basis.push(`ACTIVITY_DEFAULT:${kind}`);
+      return node;
+    }
+    node.interval = null;
+    node.quality = "unknown";
+    node.basis.push(`TIME_UNRESOLVED:${kind}`);
+    return node;
+  }
+  function deriveElapsedInterval(facts, base) {
+    const conflicts = [];
+    const clockRef = `clock_s:${finite(base?.clockS) ?? 0}`;
+    const explicit = facts?.explicitElapsedS;
+    if (explicit !== null && explicit !== void 0) {
+      const value = nonNegative(explicit);
+      if (value === null) {
+        conflicts.push("EXPLICIT_ELAPSED_INVALID");
+      } else {
+        return {
+          minS: value,
+          nominalS: value,
+          maxS: value,
+          quality: "explicit",
+          basisRefs: ["EXPLICIT_ELAPSED", clockRef],
+          conflicts
+        };
+      }
+    }
+    const activities = Array.isArray(facts?.activities) ? facts.activities : [];
+    const nodes = activities.map((activity, index) => buildNode(activity, index, conflicts));
+    if (nodes.length === 0) {
+      return { minS: 0, nominalS: 0, maxS: 0, quality: "unknown", basisRefs: ["TIME_UNRESOLVED", clockRef], conflicts };
+    }
+    const unresolved = nodes.filter((n) => n.interval === null);
+    if (unresolved.length > 0) {
+      const basis2 = dedupe([...nodes.flatMap((n) => n.basis), "TIME_UNRESOLVED", clockRef]);
+      return { minS: 0, nominalS: 0, maxS: 0, quality: "unknown", basisRefs: basis2, conflicts };
+    }
+    const kindCount = /* @__PURE__ */ new Map();
+    for (const node of nodes) {
+      const kind = node.label.split(":")[1] ?? "";
+      kindCount.set(kind, (kindCount.get(kind) ?? 0) + 1);
+    }
+    const refMap = /* @__PURE__ */ new Map();
+    nodes.forEach((node) => {
+      const kind = node.label.split(":")[1] ?? "";
+      const aliases = [...node.aliases];
+      if ((kindCount.get(kind) ?? 0) === 1) aliases.push(kind);
+      for (const alias of aliases) if (!refMap.has(alias)) refMap.set(alias, node.index);
+    });
+    const resolve = (raw) => {
+      if (!raw) return null;
+      const hit = refMap.get(raw);
+      if (hit === void 0) {
+        conflicts.push(`UNRESOLVED_ACTIVITY_REF:${raw}`);
+        return null;
+      }
+      return hit;
+    };
+    const parent = nodes.map((_, i) => i);
+    const find = (i) => {
+      let cursor = i;
+      while (parent[cursor] !== cursor) {
+        parent[cursor] = parent[parent[cursor]];
+        cursor = parent[cursor];
+      }
+      return cursor;
+    };
+    const union = (a, b) => {
+      const ra = find(a);
+      const rb = find(b);
+      if (ra === rb) return;
+      if (ra < rb) parent[rb] = ra;
+      else parent[ra] = rb;
+    };
+    const afterEdges = [];
+    let implicitSameGroup = false;
+    for (const node of nodes) {
+      if (node.sameRef) {
+        if (node.sameRef === node.aliases[0] || node.sameRef === `a${node.index}`) {
+          conflicts.push(`SAME_INTERVAL_SELF:${node.label}`);
+          continue;
+        }
+        const target = resolve(node.sameRef);
+        if (target !== null && target !== node.index) union(node.index, target);
+      }
+      if (node.afterRef) {
+        const target = resolve(node.afterRef);
+        if (target !== null && target !== node.index) afterEdges.push({ from: target, to: node.index });
+        else if (target === node.index) conflicts.push(`AFTER_REF_SELF:${node.label}`);
+      }
+    }
+    const referenced = new Set(afterEdges.map((e) => e.to));
+    const unrelated = nodes.filter((n) => !n.afterRef && !referenced.has(n.index)).map((n) => n.index);
+    if (unrelated.length > 1) {
+      implicitSameGroup = true;
+      for (let i = 1; i < unrelated.length; i += 1) union(unrelated[0], unrelated[i]);
+    }
+    let groupOf = nodes.map((_, i) => find(i));
+    let groupIds = [...new Set(groupOf)];
+    let edges = afterEdges.map((e) => ({ from: find(e.from), to: find(e.to) })).filter((e) => {
+      if (e.from === e.to) {
+        conflicts.push("ORDER_INSIDE_SAME_INTERVAL");
+        return false;
+      }
+      return true;
+    });
+    const detectCycle = () => {
+      const indeg2 = /* @__PURE__ */ new Map();
+      for (const id of groupIds) indeg2.set(id, 0);
+      for (const e of edges) indeg2.set(e.to, (indeg2.get(e.to) ?? 0) + 1);
+      const queue = groupIds.filter((id) => (indeg2.get(id) ?? 0) === 0);
+      let seen = 0;
+      while (queue.length > 0) {
+        const id = queue.shift();
+        seen += 1;
+        for (const e of edges) {
+          if (e.from !== id) continue;
+          const next = (indeg2.get(e.to) ?? 0) - 1;
+          indeg2.set(e.to, next);
+          if (next === 0) queue.push(e.to);
+        }
+      }
+      return seen < groupIds.length;
+    };
+    if (edges.length > 0 && detectCycle()) {
+      conflicts.push("CYCLE_AFTER_REF");
+      edges = [];
+      const root = groupOf[0];
+      for (const id of groupIds) union(root, id);
+      groupOf = nodes.map((_, i) => find(i));
+      groupIds = [...new Set(groupOf)];
+      implicitSameGroup = true;
+    }
+    const groupBounds = /* @__PURE__ */ new Map();
+    for (const node of nodes) {
+      const id = groupOf[node.index];
+      const bound = node.interval;
+      const previous = groupBounds.get(id);
+      groupBounds.set(id, previous ? maxBound(previous, bound) : bound);
+    }
+    const predecessorBounds = (id) => {
+      const preds = edges.filter((e) => e.to === id);
+      if (preds.length === 0) return { ...ZERO };
+      let acc = null;
+      for (const pred of preds) {
+        const bound = finish.get(pred.from);
+        if (!bound) continue;
+        acc = acc ? maxBound(acc, bound) : bound;
+      }
+      return acc ?? { ...ZERO };
+    };
+    const indeg = /* @__PURE__ */ new Map();
+    for (const id of groupIds) indeg.set(id, 0);
+    for (const e of edges) indeg.set(e.to, (indeg.get(e.to) ?? 0) + 1);
+    const ready = groupIds.filter((id) => (indeg.get(id) ?? 0) === 0);
+    const finish = /* @__PURE__ */ new Map();
+    while (ready.length > 0) {
+      const id = ready.shift();
+      const own = groupBounds.get(id) ?? { ...ZERO };
+      finish.set(id, add(predecessorBounds(id), own));
+      for (const e of edges) {
+        if (e.from !== id) continue;
+        const next = (indeg.get(e.to) ?? 0) - 1;
+        indeg.set(e.to, next);
+        if (next === 0) ready.push(e.to);
+      }
+    }
+    let total = null;
+    for (const id of groupIds) {
+      const bound = finish.get(id);
+      if (!bound) continue;
+      total = total ? maxBound(total, bound) : bound;
+    }
+    const resolved = normalize(total ?? { ...ZERO });
+    const allExplicit = nodes.every((n) => n.quality === "explicit");
+    const estimated = nodes.some((n) => n.quality === "estimated") || implicitSameGroup;
+    const quality = allExplicit && !estimated ? "explicit" : "estimated";
+    const basis = dedupe([...nodes.flatMap((n) => n.basis), ...implicitSameGroup ? ["SAME_INTERVAL_INFERRED"] : [], clockRef]);
+    return {
+      minS: resolved.min,
+      nominalS: resolved.nominal,
+      maxS: resolved.max,
+      quality,
+      basisRefs: basis,
+      conflicts
+    };
+  }
+
   // src/atlas-sim-propagation.ts
   var PROPAGATION_CHECK_INTERVAL_S = 3600;
   var CARRIER_PREFERENCE = ["walk", "ride", "ground_vehicle", "water", "flight", "flight_narrative_aircraft"];
@@ -13949,13 +14222,13 @@ END`;
     return `${prefix}_${(hash >>> 0).toString(16).padStart(8, "0")}`;
   }
   function openRoutesFrom(world, locationId) {
-    const rows2 = queryBound(
+    const rows3 = queryBound(
       world.db,
       `SELECT * FROM routes WHERE branch_id = ? AND status = 'open' AND (from_location_id = ? OR (bidirectional = 1 AND to_location_id = ?))`,
       [world.branchId, locationId, locationId]
     );
     const out = [];
-    for (const row2 of rows2) {
+    for (const row2 of rows3) {
       const decoded = decodeOrNull4("routes", row2);
       if (decoded) out.push(decoded);
     }
@@ -14027,8 +14300,8 @@ END`;
     return out;
   }
   function informationOf(world, informationId) {
-    const rows2 = queryBound(world.db, "SELECT * FROM information WHERE branch_id = ? AND id = ? LIMIT 1", [world.branchId, informationId]);
-    return rows2.length > 0 ? decodeOrNull4("information", rows2[0]) : null;
+    const rows3 = queryBound(world.db, "SELECT * FROM information WHERE branch_id = ? AND id = ? LIMIT 1", [world.branchId, informationId]);
+    return rows3.length > 0 ? decodeOrNull4("information", rows3[0]) : null;
   }
   function scheduleDeliveries(fronts, channels, world) {
     const tasks = [];
@@ -14414,8 +14687,8 @@ END`;
   }
   function stopPolicyOf2(world, actionId) {
     if (!actionId) return "review";
-    const rows2 = queryBound(world.db, "SELECT payload_json FROM actions WHERE branch_id = ? AND id = ? LIMIT 1", [world.branchId, actionId]);
-    const payload = rows2.length > 0 ? asObject5(rows2[0].payload_json) : null;
+    const rows3 = queryBound(world.db, "SELECT payload_json FROM actions WHERE branch_id = ? AND id = ? LIMIT 1", [world.branchId, actionId]);
+    const payload = rows3.length > 0 ? asObject5(rows3[0].payload_json) : null;
     const policy = payload ? String(payload.stop_policy ?? "") : "";
     return policy === "continue" || policy === "review" || policy === "stop" ? policy : "review";
   }
@@ -14707,9 +14980,9 @@ END`;
   }
 
   // src/atlas-sim-decision-context.ts
-  function decodeRows(table, rows2) {
+  function decodeRows(table, rows3) {
     const out = [];
-    for (const row2 of rows2) {
+    for (const row2 of rows3) {
       const decoded = decodeRow(table, row2, { allowExtra: true });
       if (decoded.ok) out.push(decoded.row);
     }
@@ -14814,8 +15087,8 @@ END`;
     return decoded.ok ? decoded.row : null;
   }
   function loadRow3(world, table, id) {
-    const rows2 = queryBound(world.db, `SELECT * FROM ${table} WHERE branch_id = ? AND id = ? LIMIT 1`, [world.branchId, id]);
-    return rows2.length > 0 ? decodeOrNull6(table, rows2[0]) : null;
+    const rows3 = queryBound(world.db, `SELECT * FROM ${table} WHERE branch_id = ? AND id = ? LIMIT 1`, [world.branchId, id]);
+    return rows3.length > 0 ? decodeOrNull6(table, rows3[0]) : null;
   }
   function heldBy2(world, actorId, itemId) {
     let cursor = itemId;
@@ -15048,6 +15321,16 @@ END`;
     const elapsed = deriveElapsedInterval({ activities: activities.length ? activities : [{ kind: "dialogue", completed: true }] }, { clockS: input.clockBefore });
     if (elapsed.quality === "unknown") issues.push({ code: "TIME_UNRESOLVED", path: "$.elapsed", message: "已完成行为缺少可结算的耗时依据，时钟保持原值，未知不当成零耗时", severity: "warning", retryable: false });
     const clockAfter = input.clockBefore + (elapsed.quality === "unknown" ? 0 : elapsed.nominalS);
+    for (const op of input.operations) {
+      if (!appliedIds.has(op.opId) || op.value.op !== "event.propose" || op.value.data?.phase !== "observed") continue;
+      const changes = queryBound(input.db, "SELECT target_row_id FROM turn_changes WHERE turn_id=? AND operation_id=? AND target_table='events'", [input.turnId, op.opId]);
+      const hint = op.value.data.time_hint;
+      const at = typeof hint?.at_s === "number" && hint.at_s >= input.clockBefore && hint.at_s <= clockAfter ? hint.at_s : clockAfter;
+      for (const change of changes) {
+        const row2 = queryBound(input.db, "SELECT * FROM events WHERE branch_id=? AND id=?", [input.branchId, String(change.target_row_id)])[0];
+        if (row2 && row2.occurred_at_s !== at) write(input, "events", { ...row2, occurred_at_s: at, row_rev: Number(row2.row_rev) + 1, updated_turn_id: input.turnId }, row2);
+      }
+    }
     const branch = queryBound(input.db, "SELECT * FROM branches WHERE id=?", [input.branchId])[0];
     const seed = deriveSeed({ chatUid: input.anchor.chatUid, branchId: input.branchId, forkTurnId: String(branch.fork_turn_id ?? ""), variantKey: input.anchor.variantKey, inputHash: input.anchor.inputHash, rulesetVersion: ATLAS_SIM_RULESET_VERSION });
     const clockMin = Number(branch.clock_min_s) + elapsed.minS, clockMax = Number(branch.clock_max_s) + elapsed.maxS;
@@ -15290,10 +15573,10 @@ END`;
       return db;
     }
     function branchRow() {
-      const rows2 = queryBound(requireDb(), "SELECT * FROM branches WHERE id = ? LIMIT 1", [branchId]);
-      if (rows2.length === 0) return null;
-      const decoded = decodeRow("branches", rows2[0], { allowExtra: true });
-      return decoded.ok ? decoded.row : rows2[0];
+      const rows3 = queryBound(requireDb(), "SELECT * FROM branches WHERE id = ? LIMIT 1", [branchId]);
+      if (rows3.length === 0) return null;
+      const decoded = decodeRow("branches", rows3[0], { allowExtra: true });
+      return decoded.ok ? decoded.row : rows3[0];
     }
     function currentRevision() {
       const row2 = branchRow();
@@ -16198,12 +16481,12 @@ END`;
       let committed = false;
       try {
         for (const update of input.outboxResults ?? []) {
-          const rows2 = queryBound(candidateDb, "SELECT status, attempt_count FROM sync_outbox WHERE id = ? LIMIT 1", [update.taskId]);
-          if (rows2.length === 0) {
+          const rows3 = queryBound(candidateDb, "SELECT status, attempt_count FROM sync_outbox WHERE id = ? LIMIT 1", [update.taskId]);
+          if (rows3.length === 0) {
             throw new AtlasDbError("REF_UNKNOWN", `维护更新指向不存在的同步任务：${update.taskId}`, { taskId: update.taskId });
           }
-          if (String(rows2[0].status) !== update.expectedStatus) {
-            throw new AtlasDbError("SESSION_STALE", `同步任务状态已变化：期望 ${update.expectedStatus}，实际 ${String(rows2[0].status)}`, {
+          if (String(rows3[0].status) !== update.expectedStatus) {
+            throw new AtlasDbError("SESSION_STALE", `同步任务状态已变化：期望 ${update.expectedStatus}，实际 ${String(rows3[0].status)}`, {
               taskId: update.taskId
             });
           }
@@ -16349,9 +16632,9 @@ END`;
     };
   }
   function collectDescendants(db, branchId, turnId) {
-    const rows2 = queryBound(db, "SELECT id, parent_turn_id, created_wall_ms FROM turns WHERE branch_id = ? ORDER BY created_wall_ms", [branchId]);
+    const rows3 = queryBound(db, "SELECT id, parent_turn_id, created_wall_ms FROM turns WHERE branch_id = ? ORDER BY created_wall_ms", [branchId]);
     const children = /* @__PURE__ */ new Map();
-    for (const row2 of rows2) {
+    for (const row2 of rows3) {
       const parent = row2.parent_turn_id === null || row2.parent_turn_id === void 0 ? null : String(row2.parent_turn_id);
       if (!parent) continue;
       const list = children.get(parent) ?? [];

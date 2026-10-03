@@ -12,6 +12,8 @@ import { decodeRow } from './atlas-db-codec.ts';
 import { queryBound } from './atlas-db-runtime.ts';
 import { buildPositionCache, resolveEffectivePosition } from './atlas-sim-position.ts';
 import { computeViewportScaleBar } from './atlas-scale.ts';
+import { scenePositions } from './atlas-scene-layout.ts';
+import { sqlVisibility } from './atlas-sql-visibility.ts';
 import type { SqlDatabase } from './atlas-db-runtime.ts';
 import type { ViewQuery, ViewResult } from './atlas-ops-contract.ts';
 import type { AtlasAssetRef, AtlasTableName } from './atlas-db-contract.ts';
@@ -89,9 +91,12 @@ export type MapViewItem = {
     radius: number | null;
     /** 渲染提示：近似点要带范围或明确估计标识。 */
     markerQuality: 'exact' | 'approximate' | 'layout' | 'coarse';
+    locationId?: string | null;
+    isProtagonist?: boolean;
+    hidden?: boolean;
   }>;
   /** 只知粗粒度地点的人物，不进 points（避免和地点叠图标）。 */
-  coarseList: Array<{ entityId: string; name: string; locationId: string; locationName: string | null }>;
+  coarseList: Array<{ entityId: string; name: string; locationId: string; locationName: string | null; hidden?:boolean }>;
   routes: Array<{
     routeId: string;
     fromId: string;
@@ -124,11 +129,19 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
   const routes = rows(ctx, 'routes', '', [], 1000);
   // 一次预取全部相关行：逐实体解析若各自查库会退化成本规模的 N+1（实测 500 人规模 24s）。
   const positionCache = buildPositionCache({ db: ctx.db, branchId: ctx.branchId });
+  const visibility=sqlVisibility(ctx);
 
   const items: MapViewItem[] = selected.map((map) => {
     const mapId = String(map.id);
     const points: MapViewItem['points'] = [];
     const coarseList: MapViewItem['coarseList'] = [];
+    const container=map.container_location_id?locationById.get(String(map.container_location_id)):null;
+    const leafScene=container && (container.kind==='room'||!locations.some(l=>l.parent_location_id===container.id))
+      && !['region','city'].includes(String(container.kind));
+    const frame=map.frame_json as {cols?:number;rows?:number} ?? {};
+    const roomMembers=characters.filter(ch=>ch.location_id===container?.id && !['unknown','in_transit'].includes(resolveEffectivePosition(ctx,String(ch.id),undefined,positionCache).kind));
+    const layout=leafScene?scenePositions(roomMembers.map(ch=>({id:String(ch.id),currentAction:String(ch.action_tendency??'')})),
+      {cols:typeof frame.cols==='number'?frame.cols:100,rows:typeof frame.rows==='number'?frame.rows:100}):new Map();
 
     for (const loc of locations) {
       const locId = String(loc.id);
@@ -152,44 +165,35 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
     for (const ch of characters) {
       const chId = String(ch.id);
       const position = resolveEffectivePosition({ db: ctx.db, branchId: ctx.branchId }, chId, undefined, positionCache);
-      if (position.kind === 'at_grid' && position.mapId === mapId) {
+      const locationId=position.kind==='at_location'?position.locationId:ch.location_id?String(ch.location_id):null;
+      if (position.kind==='in_transit'||position.kind==='unknown') continue;
+      const ownCoordinates=ch.map_id===mapId && ch.coord_precision!=='unknown' && typeof ch.grid_x==='number' && typeof ch.grid_y==='number';
+      if (leafScene && locationId===container?.id && !ownCoordinates) {
+        const pin=layout.get(chId)!;
+        points.push({entityId:chId,kind:'character',name:String(ch.name),mapId,x:pin.x,y:pin.y,precision:'layout',radius:null,markerQuality:'layout',locationId,isProtagonist:ch.id===ctx.povId});
+      } else if (ownCoordinates || position.kind === 'at_grid' && position.mapId === mapId) {
+        const grid=ownCoordinates?{x:ch.grid_x as number,y:ch.grid_y as number,precision:String(ch.coord_precision)}:position.kind==='at_grid'?position:null;
+        if(!grid)continue;
         points.push({
           entityId: chId,
           kind: 'character',
           name: String(ch.name ?? ''),
           mapId,
-          x: position.x,
-          y: position.y,
-          precision: position.precision,
-          radius: position.radius ?? null,
-          markerQuality: position.precision,
+          x: grid.x,
+          y: grid.y,
+          precision: grid.precision,
+          radius: typeof ch.uncertainty_radius_cells==='number'?ch.uncertainty_radius_cells:null,
+          markerQuality: grid.precision as 'exact'|'approximate'|'layout',
+          locationId,isProtagonist:ch.id===ctx.povId,
         });
-      } else if (position.kind === 'at_location') {
-        const loc = locationById.get(position.locationId);
-        const locMap = loc?.map_id ? String(loc.map_id) : null;
-        // 有精坐标但 map_id 未回填的人物：用所在地点的地图补足，按 approximate 显示。
-        if (locMap === mapId && typeof ch.grid_x === 'number' && typeof ch.grid_y === 'number' && String(ch.coord_precision) !== 'unknown') {
-          points.push({
-            entityId: chId,
-            kind: 'character',
-            name: String(ch.name ?? ''),
-            mapId,
-            x: ch.grid_x,
-            y: ch.grid_y,
-            precision: String(ch.coord_precision),
-            radius: typeof ch.uncertainty_radius_cells === 'number' ? ch.uncertainty_radius_cells : null,
-            markerQuality: String(ch.coord_precision) as 'exact' | 'approximate' | 'layout',
-          });
-          continue;
-        }
-        // 只知粗粒度地点的人物：列在「该地点」的地图名单，不叠加人物图标。
-        if (locMap === mapId) {
-          coarseList.push({
-            entityId: chId,
-            name: String(ch.name ?? ''),
-            locationId: position.locationId,
-            locationName: loc ? String(loc.name ?? '') : null,
-          });
+      } else if (locationId) {
+        // On broader maps aggregate at the nearest mapped ancestor, even when the
+        // character has fine coordinates on an inner map. Never copy inner coordinates.
+        const seen=new Set<string>();let loc=locationById.get(locationId);
+        while(loc && !seen.has(String(loc.id))) {
+          seen.add(String(loc.id));
+          if(loc.map_id===mapId){coarseList.push({entityId:chId,name:String(ch.name),locationId:String(loc.id),locationName:String(loc.name)});break;}
+          loc=loc.parent_location_id?locationById.get(String(loc.parent_location_id)):undefined;
         }
       }
     }
@@ -227,6 +231,8 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
       }));
 
     const metersPerCell = typeof map.meters_per_cell === 'number' ? map.meters_per_cell : null;
+    for(const point of points)point.hidden=!visibility.visible(point.kind,point.entityId);
+    for(const entry of coarseList)entry.hidden=!visibility.visibleCharacters.has(entry.entityId);
     return {
       mapId,
       name: String(map.name ?? ''),
@@ -237,8 +243,8 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
       scaleLocked: Number(map.scale_locked ?? 0) === 1,
       calibrationRev: Number(map.calibration_rev ?? 1),
       defaultTerrain: String(map.default_terrain ?? 'unknown'),
-      points,
-      coarseList,
+      points:ctx.viewMode==='pov'?points.filter(point=>!point.hidden):points,
+      coarseList:ctx.viewMode==='pov'?coarseList.filter(entry=>!entry.hidden):coarseList,
       routes: mapRoutes,
       frames: {
         frame: (map.frame_json as Record<string, unknown>) ?? {},
@@ -297,33 +303,43 @@ function assetDiagnostics(ctx: ViewContext, maps: Array<Record<string, unknown>>
 export function queryNearby(ctx: ViewContext, query: ViewQuery): ViewResult {
   const stale = staleResult(ctx, query.revision);
   if (stale) return stale;
-  const target = query.entityId ? resolveEffectivePosition({ db: ctx.db, branchId: ctx.branchId }, query.entityId) : { kind: 'unknown' as const };
+  const entityId=query.entityId ?? ctx.povId;
+  const cache=buildPositionCache(ctx);
+  const target = entityId ? resolveEffectivePosition(ctx, entityId,undefined,cache) : { kind: 'unknown' as const };
   if (target.kind === 'unknown') {
     return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: 'POSITION_UNKNOWN' } };
   }
   const here = target.kind === 'at_grid' ? target.mapId : target.kind === 'at_location' ? target.locationId : null;
   const characters = rows(ctx, 'characters', "status = 'active'", [], 1000);
+  const directLocation=(id:string,p:ReturnType<typeof resolveEffectivePosition>):string|null=>{
+    if(p.kind==='in_transit'||p.kind==='unknown')return null;
+    if(p.kind==='at_location')return p.locationId;
+    if(cache.locations?.has(id))return id;
+    const character=cache.characters?.get(id);
+    return character?.location_id?String(character.location_id):null;
+  };
+  const targetLocation=entityId?directLocation(entityId,target):null;
   const results: Array<Record<string, unknown>> = [];
   for (const ch of characters) {
     const id = String(ch.id);
-    if (query.entityId && id === query.entityId) continue;
-    const position = resolveEffectivePosition({ db: ctx.db, branchId: ctx.branchId }, id);
-    if (target.kind === 'at_grid' && position.kind === 'at_grid' && position.mapId === here) {
+    if (entityId && id === entityId) continue;
+    const position = resolveEffectivePosition(ctx,id,undefined,cache);
+    const locationId=directLocation(id,position);
+    if(targetLocation && locationId===targetLocation) {
+      results.push({entityId:id,name:String(ch.name??''),relevance:'same_location',positionQuality:position.kind==='at_grid'?position.precision:'coarse',
+        locationId,locationName:String(cache.locations?.get(locationId)?.name??''),thought:ctx.viewMode==='author'?ch.thought:undefined,actionTendency:ctx.viewMode==='author'?ch.action_tendency:undefined});
+    } else if (target.kind === 'at_grid' && position.kind === 'at_grid' && position.mapId === here && !targetLocation && !locationId) {
       const dx = position.x - target.x;
       const dy = position.y - target.y;
+      // Sharing a continent/city map is not proof of proximity. Only uncontained
+      // positions within this local grid radius qualify through coordinates.
+      if(Math.hypot(dx,dy)>10)continue;
       results.push({
         entityId: id,
         name: String(ch.name ?? ''),
         relevance: 'same_map',
         positionQuality: position.precision,
         gridDistance: Math.sqrt(dx * dx + dy * dy),
-      });
-    } else if (target.kind === 'at_location' && position.kind === 'at_location' && position.locationId === here) {
-      results.push({
-        entityId: id,
-        name: String(ch.name ?? ''),
-        relevance: 'same_location',
-        positionQuality: 'coarse',
       });
     }
   }
@@ -345,10 +361,17 @@ export function queryEntityDetail(ctx: ViewContext, query: ViewQuery): ViewResul
   const key = rows(ctx, 'entity_keys', 'id = ?', [entityId], 1)[0];
   if (!key) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: 'ENTITY_UNKNOWN' } };
   const kind = String(key.kind);
+  const visibility=ctx.viewMode==='pov'?sqlVisibility(ctx):null;
 
   if (kind === 'character') {
     const character = rows(ctx, 'characters', 'id = ?', [entityId], 1)[0];
     if (!character) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: 'ENTITY_UNKNOWN' } };
+    if(visibility && entityId!==visibility.povId){
+      if(!visibility.visibleCharacters.has(entityId)&&!visibility.knownCharacters.has(entityId))return {branchId:ctx.branchId,revision:ctx.revision,items:[],metadata:{reason:'POV_UNKNOWN'}};
+      const seen=visibility.visibleCharacters.has(entityId);
+      return {branchId:ctx.branchId,revision:ctx.revision,items:[{kind,character:{id:entityId,name:character.name,...(seen?{location_id:character.location_id,physical_status:character.physical_status}:{})},
+        relations:[],actions:[],journeys:[],knowledge:[],position:seen?resolveEffectivePosition(ctx,entityId):null,lastSeen:visibility.projection.lastSeen.filter(item=>item.entityId===entityId)}],metadata:{fieldLimited:true,currentPositionKnown:seen}};
+    }
     const relations = rows(ctx, 'relations', 'subject_entity_id = ? OR object_entity_id = ?', [entityId, entityId], 200);
     const actions = rows(ctx, 'actions', 'actor_entity_id = ?', [entityId], 100);
     const journeys = rows(ctx, 'journeys', 'mover_entity_id = ?', [entityId], 20);
@@ -363,29 +386,38 @@ export function queryEntityDetail(ctx: ViewContext, query: ViewQuery): ViewResul
   }
 
   if (kind === 'location') {
+    if(visibility&&!visibility.knownLocations.has(entityId))return {branchId:ctx.branchId,revision:ctx.revision,items:[],metadata:{reason:'POV_UNKNOWN'}};
     const location = rows(ctx, 'locations', 'id = ?', [entityId], 1)[0];
     if (!location) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: 'ENTITY_UNKNOWN' } };
-    const children = rows(ctx, 'locations', 'parent_location_id = ?', [entityId], 200);
-    const present = rows(ctx, 'characters', 'location_id = ? AND status = ?', [entityId, 'active'], 200);
-    const events = rows(ctx, 'events', 'location_id = ?', [entityId], 200);
-    const fronts = rows(ctx, 'rumor_fronts', 'location_id = ?', [entityId], 200);
+    const children = rows(ctx, 'locations', 'parent_location_id = ?', [entityId], 200).filter(loc=>!visibility||visibility.knownLocations.has(String(loc.id)));
+    const cache=buildPositionCache(ctx);
+    const present = rows(ctx, 'characters', 'location_id = ? AND status = ?', [entityId, 'active'], 200)
+      .filter(character=>!['in_transit','unknown'].includes(resolveEffectivePosition(ctx,String(character.id),undefined,cache).kind))
+      .filter(character=>!visibility||visibility.visibleCharacters.has(String(character.id)))
+      .map(character=>visibility?{id:character.id,name:character.name,location_id:character.location_id,physical_status:character.physical_status}:character);
+    const events = rows(ctx, 'events', 'location_id = ?', [entityId], 200).filter(event=>!visibility||event.secrecy==='public'&&visibility.here===entityId&&event.status==='occurred');
+    const fronts = visibility?[]:rows(ctx, 'rumor_fronts', 'location_id = ?', [entityId], 200);
     const position = resolveEffectivePosition({ db: ctx.db, branchId: ctx.branchId }, entityId);
     return {
       branchId: ctx.branchId,
       revision: ctx.revision,
-      items: [{ kind, location, children, present, events, fronts, position }],
+      items: [{ kind, location:visibility?{id:location.id,name:location.name,kind:location.kind,parent_location_id:location.parent_location_id}:location,
+        children:visibility?children.map(child=>({id:child.id,name:child.name,kind:child.kind})):children,
+        present, events:visibility?events.map(event=>({id:event.id,title:event.title,occurred_at_s:event.occurred_at_s})):events, fronts, position }],
       metadata: { counts: { children: children.length, present: present.length, events: events.length, fronts: fronts.length } },
     };
   }
 
   if (kind === 'item') {
+    if(visibility&&!visibility.visibleItems.has(entityId))return {branchId:ctx.branchId,revision:ctx.revision,items:[],metadata:{reason:'POV_UNKNOWN'}};
     const item = rows(ctx, 'items', 'id = ?', [entityId], 1)[0];
     if (!item) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: 'ENTITY_UNKNOWN' } };
     const contained = rows(ctx, 'items', 'container_item_id = ?', [entityId], 200);
     const position = resolveEffectivePosition({ db: ctx.db, branchId: ctx.branchId }, entityId);
-    return { branchId: ctx.branchId, revision: ctx.revision, items: [{ kind, item, contained, position }], metadata: {} };
+    return { branchId: ctx.branchId, revision: ctx.revision, items: [{ kind, item:visibility?{id:item.id,name:item.name,location_id:item.location_id,holder_character_id:item.holder_character_id}:item, contained:visibility?[]:contained, position }], metadata: {} };
   }
 
+  if(visibility)return {branchId:ctx.branchId,revision:ctx.revision,items:[],metadata:{reason:'POV_UNKNOWN'}};
   const faction = rows(ctx, 'factions', 'id = ?', [entityId], 1)[0];
   const relations = rows(ctx, 'relations', 'subject_entity_id = ? OR object_entity_id = ?', [entityId, entityId], 200);
   const channels = rows(ctx, 'channels', 'owner_entity_id = ?', [entityId], 100);
@@ -406,8 +438,8 @@ export function queryChanges(ctx: ViewContext, query: ViewQuery): ViewResult {
     ctx.db,
     `SELECT tc.id, tc.turn_id, tc.sequence, tc.group_id, tc.operation_id, tc.target_table, tc.target_row_id, tc.operation, tc.summary, tc.basis_json, t.kind AS turn_kind, t.created_wall_ms
      FROM turn_changes tc JOIN turns t ON t.id = tc.turn_id
-     WHERE t.branch_id = ?
-     ORDER BY tc.turn_id DESC, tc.sequence DESC LIMIT ?`,
+     WHERE t.branch_id = ? AND t.status IN ('committed','partial')
+     ORDER BY t.clock_after_s DESC, t.created_wall_ms DESC, tc.sequence DESC LIMIT ?`,
     [ctx.branchId, limit],
   );
   const items = changes.map((c) => ({

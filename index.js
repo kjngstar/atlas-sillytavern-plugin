@@ -687,6 +687,8 @@ export function atlasSqlMapModel(item, viewMode = "pov") {
       y,
       positionQuality: atlasPositionQuality(raw.markerQuality ?? raw.precision),
       radius: atlasKnownCoordinate(raw.radius),
+      locationId: raw.locationId == null ? null : String(raw.locationId),
+      isProtagonist: raw.isProtagonist === true,
     };
     const kind = String(raw.kind ?? "location");
     if (kind === "character") characterPins.push(entry);
@@ -709,7 +711,7 @@ export function atlasSqlMapModel(item, viewMode = "pov") {
   }
   for (const pin of characterPins) {
     // 人物与地点坐标重合 = 只知「在这个地点」（§10.2：不叠图标，但人数必须看得见）
-    const host = locations.find((location) => location.x === pin.x && location.y === pin.y);
+    const host = locations.find((location) => pin.locationId ? location.rowId === pin.locationId : location.x === pin.x && location.y === pin.y);
     if (host) occupantCounts.set(host.rowId, (occupantCounts.get(host.rowId) ?? 0) + 1);
   }
   const routes = (Array.isArray(record.routes) ? record.routes : [])
@@ -5900,7 +5902,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     const y = atlasKnownCoordinate(point.y);
     if (x !== null && y !== null) {
       for (const pin of model.characterPins) {
-        if (pin.x !== x || pin.y !== y) continue;
+        if (pin.locationId ? pin.locationId !== rowId : pin.x !== x || pin.y !== y) continue;
         push({
           id: String(pin.rowId),
           name: String(pin.name),
@@ -6278,6 +6280,9 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
 
   /** 0.9.41 人物面板：想法（最近涉及叙事）+ 动向（状态摘要 / 在场原因）。 */
   function openNpcPanel(npc, anchorEl = null) {
+    if (sqlMode.enabled && sqlViewMode === "pov" && npc?.isProtagonist !== true) {
+      npc = { ...npc, thought: "", actionTendency: "", currentAction: "", status: "", recentNarratives: [] };
+    }
     if (!mapPanel) return;
     mapPanel.innerHTML = "";
     const head = el("div", "aw-mappanel__head");
@@ -6351,7 +6356,8 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       mapPanel.append(thoughts);
     }
     const timelineChatId = String(state()?.chatId ?? "");
-    if (timelineChatId && npc.id) {
+    if (timelineChatId && npc.id && (!sqlMode.enabled || sqlViewMode === "author" || npc.isProtagonist === true)) {
+      const sqlTimelineMode = sqlMode.enabled;
       const timeline = el("div", "aw-mappanel__section");
       timeline.append(el("div", "aw-mappanel__section-label", "角色时间线 · 作者档案"));
       const list = el("div", "aw-mappanel__timeline");
@@ -6365,10 +6371,10 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         loadButton.disabled = true;
         loadButton.textContent = "读取中…";
         try {
-          const response = await api.request("POST", "/characters/timeline", {
+          const response = await api.request("POST", sqlTimelineMode ? "/sql/chat/timeline" : "/characters/timeline", {
             chatId: timelineChatId, characterId: String(npc.id), offset: nextOffset, limit: 25,
           });
-          if (!mapPanel.contains(timeline)) return;
+          if (!mapPanel.contains(timeline) || String(state()?.chatId ?? "") !== timelineChatId || sqlMode.enabled !== sqlTimelineMode) return;
           if (response.status !== 200 || !response.body?.ok) throw new Error(response.body?.error?.message ?? "读取失败");
           const payload = response.body.data ?? {};
           const entries = Array.isArray(payload.entries) ? payload.entries : [];
@@ -6387,7 +6393,9 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
               return raw.replace(/^npc:[\w:-]+\s*/, `${displayName} `);
             };
             const detail = [entry.experience, entry.action].filter(Boolean).map(formatDetail).join("；");
-            list.append(el("div", "aw-mappanel__section-text", `第 ${entry.period} 时段${place}：${detail || "状态记录"}`));
+            const elapsed = Math.max(0, Number(entry.atS ?? entry.clockAfterS ?? entry.period));
+            const sqlTime = `${Math.floor(elapsed / 86400)} 天 ${String(Math.floor(elapsed / 3600) % 24).padStart(2, "0")}:${String(Math.floor(elapsed / 60) % 60).padStart(2, "0")}:${String(Math.floor(elapsed) % 60).padStart(2, "0")}`;
+            list.append(el("div", "aw-mappanel__section-text", `${sqlTimelineMode ? `世界经过 ${sqlTime}` : `第 ${entry.period} 时段`}${place}：${detail || "状态记录"}`));
           }
           nextOffset = typeof payload.nextOffset === "number" ? payload.nextOffset : null;
           loadButton.textContent = nextOffset === null ? "已显示全部记录" : "加载更早记录";
@@ -6408,7 +6416,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     }
     const held = (Array.isArray(data()?.tableMap?.objects?.entries) ? data().tableMap.objects.entries : [])
       .filter(item => String(item.holderCharacterId ?? "").replace(/^npc:/, "") === String(npc.id).replace(/^npc:/, "") && item.status !== "已销毁");
-    if (held.length) {
+    if (held.length && (!sqlMode.enabled || sqlViewMode === "author" || npc.isProtagonist === true)) {
       const inventory = el("div", "aw-mappanel__section");
       inventory.append(el("div", "aw-mappanel__section-label", "携带物品"));
       for (const item of held) {
