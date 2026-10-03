@@ -20,6 +20,9 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { JSDOM } from "jsdom";
+import { makeSeedWith, IDS } from './fixtures/atlas-sql/seed.mjs';
+import { loadSqlModule, runBound } from '../src/atlas-db-runtime.ts';
+import { encodeSnapshot } from '../src/atlas-db-envelope.ts';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 /** 发布镜像 = 真实扩展入口（与 atlas-changes-page / atlas-extension-harness 同源）。 */
@@ -267,6 +270,94 @@ async function mountAtlas({
   const rerender = mod.renderPanel(core, container, api, { read: async () => null, write: async () => {} }, mapMod);
   return { dom, container, state, core, rerender, seam: mod.__atlasSqlTest, stContext, mod };
 }
+
+async function realSnapshot(revision, locationName, characterName) {
+  const seed = await makeSeedWith(await loadSqlModule());
+  try {
+    runBound(seed.db, 'UPDATE branches SET revision = ? WHERE id = ?', [revision, IDS.branchMain]);
+    runBound(seed.db, 'UPDATE locations SET name = ? WHERE branch_id = ? AND id = ?', [locationName, IDS.branchMain, IDS.L1]);
+    runBound(seed.db, 'UPDATE characters SET name = ? WHERE branch_id = ? AND id = ?', [characterName, IDS.branchMain, IDS.C2]);
+    runBound(seed.db, "UPDATE characters SET location_id = ?, map_id = NULL, grid_x = NULL, grid_y = NULL, coord_precision = 'unknown' WHERE branch_id = ? AND id = ?", [IDS.L2, IDS.branchMain, IDS.C2]);
+    return encodeSnapshot(seed.exportBytes(), { chatUid: IDS.chatA, worldUid: 'world-sql-test',
+      activeBranchId: IDS.branchMain, storageRevision: revision });
+  } finally { seed.close(); }
+}
+
+function realCoreUrl() {
+  const url = pathToFileURL(join(root, 'src/atlas-sql-browser-entry.ts')).href;
+  return 'data:text/javascript,' + encodeURIComponent(`
+    import * as real from ${JSON.stringify(url)};
+    export * from ${JSON.stringify(url)};
+    export const ATLAS_DATABASE_KEY = real.ATLAS_DATABASE_KEY;
+    export const closeSqlSession = real.closeSqlSession;
+    export async function openSqlSession(options) {
+      const store = globalThis.__atlasRealSqlTest;
+      store.opens++;
+      const session = await real.openSqlSession(options);
+      const original = session.repo.queryView.bind(session.repo);
+      session.repo.queryView = async query => {
+        const view = await original(query);
+        if (store.delay) await store.delay;
+        return view;
+      };
+      return session;
+    }
+  `);
+}
+
+test('Q04: real database snapshot revision refresh reopens the UI database and updates map and nearby', async () => {
+  const first = await realSnapshot(0, '旧快照城市', '旧快照信使');
+  const second = await realSnapshot(1, '新快照城市', '新快照信使');
+  globalThis.__atlasRealSqlTest = { opens: 0 };
+  const mounted = await mountAtlas({ chatId: IDS.chatA,
+    chatMetadata: { atlas: { database: first } }, sqlCandidates: [realCoreUrl()],
+    binding: { enabled: true, chatId: IDS.chatA, worldId: 'world-sql-test', branchId: IDS.branchMain },
+    stateData: { sqlModeEnabled: true, revision: 0, branchId: IDS.branchMain, protagonistId: IDS.C1 } });
+  try {
+    await flush(30);
+    assert.ok(mounted.container.textContent.includes('旧快照城市'), mounted.container.textContent.slice(0, 1500));
+    assert.equal(globalThis.__atlasRealSqlTest.opens, 1);
+    mounted.stContext.chatMetadata.atlas.database = second;
+    mounted.state.stateData.revision = 1;
+    mounted.rerender();
+    await flush(30);
+    assert.ok(mounted.container.textContent.includes('新快照城市'));
+    assert.equal(mounted.container.textContent.includes('旧快照城市'), false);
+    assert.equal(globalThis.__atlasRealSqlTest.opens, 2);
+    const contentChange = await realSnapshot(1, '同修订替换的城市', '新快照信使');
+    mounted.stContext.chatMetadata.atlas.database = contentChange;
+    mounted.rerender(); await flush(30);
+    assert.ok(mounted.container.textContent.includes('同修订替换的城市'));
+    assert.equal(mounted.container.textContent.includes('新快照城市'), false);
+    assert.equal(globalThis.__atlasRealSqlTest.opens, 3, '同修订但快照内容变化也必须重开');
+    mounted.state.page = 'nearby'; mounted.rerender(); await flush(20);
+    assert.ok(mounted.container.textContent.includes('新快照信使'));
+    assert.equal(mounted.container.textContent.includes('旧快照信使'), false);
+    assert.equal(globalThis.__atlasRealSqlTest.opens, 3);
+    assert.deepEqual(mounted.stContext.chatMetadata, { atlas: { database: contentChange } });
+  } finally { mounted.dom.window.close(); }
+});
+
+test('Q04: late real SQL queries cannot overwrite a switched chat with the same branch and revision', async () => {
+  const snapshot = await realSnapshot(0, '迟到的旧聊天城市', '信使');
+  let release;
+  globalThis.__atlasRealSqlTest = { opens: 0, delay: new Promise(resolve => { release = resolve; }) };
+  const mounted = await mountAtlas({ chatId: IDS.chatA, chatMetadata: { atlas: { database: snapshot } },
+    sqlCandidates: [realCoreUrl()], binding: { enabled: true, chatId: IDS.chatA, worldId: 'world-sql-test', branchId: IDS.branchMain },
+    stateData: { sqlModeEnabled: true, revision: 0, branchId: IDS.branchMain } });
+  try {
+    await flush(20);
+    assert.equal(globalThis.__atlasRealSqlTest.opens, 1, '旧聊天必须已打开真实数据库再测试迟到查询');
+    mounted.state.chatId = 'chat-switched'; mounted.stContext.chatId = 'chat-switched';
+    mounted.state.binding.chatId = 'chat-switched';
+    mounted.stContext.chatMetadata = {};
+    mounted.state.stateData.sqlModeEnabled = false;
+    mounted.rerender();
+    release(); await flush(15);
+    assert.equal(mounted.container.textContent.includes('迟到的旧聊天城市'), false);
+    assert.deepEqual(mounted.stContext.chatMetadata, {});
+  } finally { release(); mounted.dom.window.close(); }
+});
 
 /** 挂载 SQL 地图页并等视图就绪（模式开 + 桩核心 + 桩视图）。 */
 async function mountSqlMap(stateData = {}) {

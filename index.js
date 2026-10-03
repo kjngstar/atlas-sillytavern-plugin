@@ -2769,9 +2769,10 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
   const sqlMode = {
     enabled: false, core: "off", loadStarted: false, module: null, message: null,
     /** 本地只读会话（H01 `openSqlSession`；只在浏览器持有 SQL 快照信封时打开）。 */
-    session: null, sessionKey: "", sessionPending: null,
+    session: null, sessionKey: "", sessionData: null, sessionMetadata: null, sessionPending: null,
     /** 视图缓存（键含 kind/聊天/分支/修订/视图参数）；聊天或修订变化即整体作废。 */
     views: new Map(), viewPending: new Set(), viewFailed: new Set(), viewRevision: null, viewScopeKey: "",
+    viewSnapshotData: null, viewSnapshotMetadata: null, viewEpoch: 0,
   };
   /** SQL 地图面板缓存（openMapPanel / 标尺详情在同一次渲染后复用，避免重算）。 */
   let lastSqlModel = null;
@@ -2835,10 +2836,24 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
    * 关闭时**不加载核心**（sql.js + wasm 的成本只有开启模式的用户才付）。
    */
   function sqlModeSync(d) {
+    const wasEnabled = sqlMode.enabled;
     sqlMode.enabled = sqlModeFlag(d);
     if (!sqlMode.enabled) {
       // 关掉模式要立刻注销端口：绝不能留下一个「SQL 模式已关但仍在准备候选」的悬挂端口
       if (sqlMode.core !== "off") atlasSqlPrepareQueue().setPort(null);
+      if (wasEnabled) {
+        const previous = sqlMode.session;
+        sqlMode.session = null;
+        sqlMode.sessionKey = "";
+        sqlMode.sessionPending = null;
+        sqlMode.views.clear();
+        sqlMode.viewPending.clear();
+        sqlMode.viewFailed.clear();
+        sqlMode.viewEpoch++;
+        if (previous && typeof sqlMode.module?.closeSqlSession === "function") {
+          void Promise.resolve(sqlMode.module.closeSqlSession(previous)).catch(() => {});
+        }
+      }
       sqlMode.core = sqlMode.loadStarted ? sqlMode.core : "off";
       return;
     }
@@ -2929,15 +2944,35 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
    * UI 只用它查视图，世界写入仍然只有 `/sql/turn` 一个入口（§16.4「同一时刻一个写者」）。
    * 聊天 / 分支变化即整体作废并关闭旧会话。
    */
+  function sqlSnapshotScope(d) {
+    const record = typeof SillyTavern !== "undefined" ? atlasContextRecord(() => SillyTavern.getContext()) : null;
+    const metadata = record?.chatMetadata ?? null;
+    const envelope = metadata?.[ATLAS_SESSION_KEY]?.[String(sqlMode.module?.ATLAS_DATABASE_KEY ?? "database")];
+    return {
+      key: JSON.stringify([String(state().chatId ?? ""), String(record?.chatId ?? ""),
+        String(d?.branchId ?? state().binding?.branchId ?? "main"),
+        envelope?.storage_revision ?? null, envelope?.sha256 ?? null, d?.revision ?? null]),
+      // 比较实际快照内容，不能只信外部声明的 hash；不把正文/快照放进日志或缓存键。
+      snapshotData: envelope?.data ?? null,
+      metadata,
+    };
+  }
+
+  function sqlSameSnapshot(a, b) {
+    return a.key === b.key && a.snapshotData === b.snapshotData && a.metadata === b.metadata;
+  }
+
   async function sqlOpenSession(d) {
     const mod = sqlMode.module;
-    const key = `${String(state().chatId ?? "")}|${String(d?.branchId ?? state().binding?.branchId ?? "main")}`;
-    if (sqlMode.session && sqlMode.sessionKey === key) return sqlMode.session;
-    if (sqlMode.sessionPending) return sqlMode.sessionPending;
+    const captured = sqlSnapshotScope(d);
+    if (sqlMode.session && sqlMode.sessionKey === captured.key
+      && sqlMode.sessionData === captured.snapshotData && sqlMode.sessionMetadata === captured.metadata) return sqlMode.session;
+    if (sqlMode.sessionPending && sqlSameSnapshot(sqlMode.sessionPending, captured)) return sqlMode.sessionPending.task;
     if (typeof mod?.openSqlSession !== "function") {
       emitSqlBridgeMissing(["openSqlSession"]);
       return null;
     }
+    const pending = { ...captured, task: null };
     const task = (async () => {
       try {
         const ctx = () => SillyTavern.getContext();
@@ -2951,20 +2986,21 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         const session = await mod.openSqlSession({
           chatUid: String(record?.chatId ?? state().chatId ?? ""),
           branchId: d?.branchId ?? state().binding?.branchId ?? undefined,
-          chatMetadata: record?.chatMetadata ?? null,
+          chatMetadata: captured.metadata,
           saveSession: async () => {
-            const live = ctx();
-            if (typeof live?.saveMetadata !== "function") throw new Error("HOST_SAVE_UNAVAILABLE：宿主没有 saveMetadata");
-            return live.saveMetadata();
+            throw new Error("SQL_READ_ONLY：视图快照不能保存世界数据");
           },
           // 唯一会话写回路径（与 chatMetadata.atlas 同源），但 UI 只读时根本不会走到写
-          writeSession: writeAtlasSession,
           confirmSave: false,
         });
+        if (!sqlMode.enabled || !sqlSameSnapshot(captured, sqlSnapshotScope(data()))) {
+          if (typeof mod.closeSqlSession === "function") await mod.closeSqlSession(session);
+          return null;
+        }
         sqlMode.session = session;
-        sqlMode.sessionKey = key;
-        sqlMode.views.clear();
-        sqlMode.viewPending.clear();
+        sqlMode.sessionKey = captured.key;
+        sqlMode.sessionData = captured.snapshotData;
+        sqlMode.sessionMetadata = captured.metadata;
         return session;
       } catch (error) {
         const code = String(error?.code ?? "SQL_SESSION_OPEN_FAILED");
@@ -2976,10 +3012,11 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         });
         return null;
       } finally {
-        sqlMode.sessionPending = null;
+        if (sqlMode.sessionPending === pending) sqlMode.sessionPending = null;
       }
     })();
-    sqlMode.sessionPending = task;
+    pending.task = task;
+    sqlMode.sessionPending = pending;
     return task;
   }
 
@@ -2997,9 +3034,14 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
 
   /** 修订或聊天变化 → 旧视图整体失效（绝不让上一修订的卡片留在界面上）。 */
   function sqlSyncViewScope(d) {
-    const scopeKey = `${String(state().chatId ?? "")}|${String(d?.branchId ?? "")}|${String(d?.revision ?? d?.currentTime ?? "")}`;
-    if (sqlMode.viewScopeKey !== scopeKey) {
+    const snapshot = sqlSnapshotScope(d);
+    const scopeKey = snapshot.key;
+    if (sqlMode.viewScopeKey !== scopeKey || sqlMode.viewSnapshotData !== snapshot.snapshotData
+      || sqlMode.viewSnapshotMetadata !== snapshot.metadata) {
       sqlMode.viewScopeKey = scopeKey;
+      sqlMode.viewSnapshotData = snapshot.snapshotData;
+      sqlMode.viewSnapshotMetadata = snapshot.metadata;
+      sqlMode.viewEpoch++;
       sqlMode.views.clear();
       sqlMode.viewPending.clear();
       sqlMode.viewFailed.clear();
@@ -3009,7 +3051,9 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
 
   /** 只读查询一个视图（本地 SQL 快照路径）。失败即具名诊断，绝不返回假视图。 */
   async function sqlQueryView(kind, query, d) {
+    const captured = sqlSnapshotScope(d);
     const session = await sqlOpenSession(d);
+    if (!sqlMode.enabled || !sqlSameSnapshot(captured, sqlSnapshotScope(data()))) return null;
     const queryView = session?.repo?.queryView;
     if (typeof queryView !== "function") {
       emitSqlBridgeMissing(["repo.queryView"]);
@@ -3034,10 +3078,14 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
    */
   function sqlKickView(kind, d, query) {
     const key = sqlViewKey(kind, d, query);
+    const epoch = sqlMode.viewEpoch;
+    const snapshot = sqlSnapshotScope(d);
+    const isCurrent = () => sqlMode.enabled && epoch === sqlMode.viewEpoch && sqlSameSnapshot(snapshot, sqlSnapshotScope(data()));
     if (sqlMode.viewPending.has(key) || sqlMode.viewFailed.has(key)) return;
     sqlMode.viewPending.add(key);
     void sqlQueryView(kind, query, d)
       .then((view) => {
+        if (!isCurrent()) return;
         sqlMode.viewPending.delete(key);
         if (!view || typeof view !== "object") {
           sqlMode.viewFailed.add(key);
@@ -3061,6 +3109,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         renderPage();
       })
       .catch(() => {
+        if (!isCurrent()) return;
         sqlMode.viewPending.delete(key);
         sqlMode.viewFailed.add(key);
       });
