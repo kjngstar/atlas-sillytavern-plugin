@@ -47,6 +47,35 @@ function tick(ms = 0) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+test('Q03 SQL editor displays editable SQL defaults and explicitly copies a legacy preset without activating it', async () => {
+  const { dom, renderPanel, createDefaultSettingsV2, settingsViewV2 } = await mount();
+  const { applySettingsCommand } = await import('../src/atlas-settings.ts');
+  let settings = createDefaultSettingsV2();
+  const source = { id:'old', name:'旧作者预设', systemPrompt:'只输出 <atlasEdit>', updatedAt:1 };
+  settings = {...settings, promptPresets:[source]};
+  const snapshot = JSON.stringify(source);
+  const state = { page:'progression', panelOpen:true, receipts:[], serviceStatus:'online', mode:'online', chatId:'sql-editor',
+    stateData:{ chatId:'sql-editor', worldId:'sql-editor', sqlModeEnabled:true, currentTime:0, map:{points:[]}, regions:[], npcDirectory:[], objectDirectory:[] } };
+  const core = {getState:()=>state,setPanelOpen:()=>{},refresh:async()=>{}};
+  const api = {request:async(method,path,body)=>{
+    if (body?.action) {
+      const next = applySettingsCommand(settings,body,{now:()=>2,makeId:()=> 'sql-draft'});
+      assert.equal(next.ok,true); settings=next.settings;
+    }
+    return {status:200,body:{ok:true,data:settingsViewV2(settings)}};
+  }};
+  const container=document.createElement('div'); document.body.append(container);
+  renderPanel(core,container,api,{read:async()=>null},CORE_MOD_KEYS); await tick();
+  assert.ok(container.querySelector('[aria-label="第 1 段正文"]').value.includes('世界状态维护器'));
+  assert.equal(container.querySelector('[aria-label="第 1 段正文"]').readOnly,false);
+  const select=container.querySelector('.aw-prompt-selector select'); select.value='old';
+  select.dispatchEvent(new dom.window.Event('change',{bubbles:true})); await tick();
+  [...container.querySelectorAll('button')].find(b=>b.textContent==='创建 SQL 兼容草稿').click(); await tick();
+  assert.equal(settings.activePromptPresetId,'old'); assert.equal(JSON.stringify(settings.promptPresets[0]),snapshot);
+  assert.equal(settings.promptPresets[1].segments.at(-1).enabled,false);
+  assert.ok(container.textContent.includes('请检查条目后'));
+});
+
 test("R02: 新建草稿立即可编辑；保存后 createdId 绑定，再存为覆盖", async () => {
   const { dom, renderPanel, createDefaultSettingsV2, settingsViewV2, DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA } = await mount();
   const commands = [];

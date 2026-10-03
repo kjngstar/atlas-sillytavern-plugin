@@ -14,8 +14,8 @@ function fixture({ response = room, model, identity, lore = '全部世界书原�
   const current = { chatUid: 'chat-auto', branchId: 'main', chatMetadata: {}, saveMetadata: async () => { saves++; return saveOk; } };
   let live = current;
   const provider = createBrowserSqlHost({ enabled: () => enabled, context: () => live, loadRuntime: loadAtlasSqlRuntime,
-    modelPort: { request: async request => { calls++; batches.push(request); if (model) await model(request);
-      return { batchId: request.batchId, text: response, finishReason: 'stop', httpStatus: 200, durationMs: 1 }; } } });
+    modelPort: { request: async request => { calls++; batches.push(request); const generated = model ? await model(request) : null;
+      return { batchId: request.batchId, text: typeof generated === 'string' ? generated : response, finishReason: 'stop', httpStatus: 200, durationMs: 1 }; } } });
   const server = createAtlasServerCore({ store: { read: async () => null, write: async () => {} }, sqlSessionProvider: provider });
   const host = { getChatId: () => live.chatUid, readPanelOpen: () => false, writePanelOpen() {},
     readBinding: () => { throw Error('SQL must not read or migrate the old session'); }, writeBinding: async b => { current.chatMetadata.atlas.sqlChatEnabled = b.enabled; },
@@ -179,6 +179,36 @@ test('Q03 SQL stores the stable floor identity; UI locator and rollback still us
     assert.equal(JSON.parse(row.decisions_json).host_message_index, '1');
     assert.equal(f.ui.getState().binding.lastCommittedMessageId, '1');
     await f.mutate(); assert.equal(f.ui.getState().binding.lastCommittedMessageId, null);
+    assert.equal(queryBound(session.repo.db, 'SELECT COUNT(*) AS n FROM locations', [])[0].n, 0);
+  } finally { await f.close(); }
+});
+
+test('Q03 partial UI retry repairs failed operations only; host failure and repeated retry do not repeat successful quantities', async () => {
+  let repairs = 0;
+  const f = fixture({ model: async request => {
+    if (request.phase === 'repair') {
+      repairs++;
+      return repairs === 1 ? '{"ticket":"R1","op":"noop","why":"暂时无法修复"}'
+        : '{"ticket":"R1","op":"location.upsert","ref":"new:room","data":{"name":"补交教室","kind":"room"}}';
+    }
+    return '{"op":"item.upsert","ref":"new:pen","data":{"name":"水笔","quantity":5}}\n{"op":"location.upsert","ref":"new:room","data":{"name":"补交教室","kind":"invalid-kind"}}';
+  } });
+  try {
+    await f.ui.refresh(); await f.prepare(); await f.end();
+    const session = await f.provider.session('chat-auto');
+    assert.equal(f.ui.getState().receipts[0].status, 'committed'); assert.ok(f.ui.getState().retryableCommit);
+    const head = session.repo.internal.currentHeadTurnId(), revision = session.repo.internal.currentRevision();
+    const quantity = () => queryBound(session.repo.db, 'SELECT quantity FROM items', [])[0].quantity;
+    assert.equal(quantity(), 5);
+    f.setSave(false); await f.ui.retryLastCommit(); assert.ok(f.ui.getState().retryableCommit);
+    assert.equal(quantity(), 5); assert.equal(queryBound(session.repo.db, 'SELECT COUNT(*) AS n FROM locations', [])[0].n, 0);
+    f.setSave(true); await f.ui.retryLastCommit();
+    assert.equal(f.ui.getState().retryableCommit, null, f.ui.getState().lastError ?? '');
+    assert.equal(quantity(), 5); assert.equal(queryBound(session.repo.db, 'SELECT COUNT(*) AS n FROM locations', [])[0].n, 1);
+    assert.equal(session.repo.internal.currentHeadTurnId(), head); assert.equal(session.repo.internal.currentRevision(), revision);
+    assert.equal(session.repo.internal.currentClock(), 0);
+    await f.ui.retryLastCommit(); assert.equal(f.calls(), 4);
+    await f.mutate(); assert.equal(queryBound(session.repo.db, 'SELECT COUNT(*) AS n FROM items', [])[0].n, 0);
     assert.equal(queryBound(session.repo.db, 'SELECT COUNT(*) AS n FROM locations', [])[0].n, 0);
   } finally { await f.close(); }
 });

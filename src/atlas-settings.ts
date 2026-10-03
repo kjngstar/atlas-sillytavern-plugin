@@ -21,6 +21,7 @@ import {
   DEFAULT_WORLD_TURN_SYSTEM_PROMPT,
   type AtlasApiPreset,
 } from "./atlas-api-client.ts";
+import { DEFAULT_SQL_PROMPT_SEGMENTS, buildSqlCompatiblePrompt } from './atlas-sql-prompts.ts';
 
 /**
  * C02 / E01：推进输出协议的类型。
@@ -371,6 +372,7 @@ export type AtlasSettingsCommand =
    * 旧预设原文一字不改；命令返回新建预设的 id 与改写的旧关键词清单供 UI 预览。
    */
   | { action: "prompt.migrate-legacy"; id: string; activate?: boolean }
+  | { action: "prompt.migrate-sql"; id: string; activate?: boolean }
   | { action: "prompt.delete"; id: string }
   | { action: "prompt.activate"; id: string | null }
   | { action: "replace.save"; preset: { id?: string; name: string; start: string; end: string; enabled?: boolean } }
@@ -937,7 +939,8 @@ export function applySettingsCommand(
         : [...settings.promptPresets, entry];
       return { ok: true, settings: { ...settings, promptPresets } };
     }
-    case "prompt.migrate-legacy": {
+    case "prompt.migrate-legacy":
+    case "prompt.migrate-sql": {
       /**
        * E02：为作者保存的旧协议预设**新建**一份兼容增量草稿。
        * - 旧预设原样保留（不删、不改、不做静默字符串替换）；
@@ -949,7 +952,8 @@ export function applySettingsCommand(
       if (!id) return fail(settings, "INVALID_PAYLOAD", "预设 ID 形状非法。");
       const source = settings.promptPresets.find((p) => p.id === id);
       if (!source) return fail(settings, "INVALID_PAYLOAD", "要迁移的提示词预设不存在。");
-      const built = buildTableDeltaCompatiblePrompt(source);
+      const built = command.action === 'prompt.migrate-sql' ? buildSqlCompatiblePrompt(source) : buildTableDeltaCompatiblePrompt(source);
+      if (!built) return fail(settings, 'FIELD_LIMIT_EXCEEDED', '原预设已有 16 个条目，兼容草稿没有空间加入 SQL 策略；请先复制整理条目。原预设未改动。');
       if (settings.promptPresets.length >= MAX_PRESETS_PER_LIBRARY) {
         return fail(settings, "FIELD_LIMIT_EXCEEDED", `最多保存 ${MAX_PRESETS_PER_LIBRARY} 条提示词预设；请先删除一条再迁移。`);
       }
@@ -1229,6 +1233,7 @@ export interface AtlasSettingsView {
     systemPrompt: string;
     segments: Array<{ role: string; name: string; mainSlot?: string; content: string }>;
   };
+  builtInSqlPrompt: AtlasSettingsView['builtInPrompt'];
   autoCommit: boolean;
   /** 0.9.22 推演是否附带世界书资料块（审核拦截逃生门）。 */
   loreSupplementEnabled: boolean;
@@ -1307,6 +1312,10 @@ export function settingsViewV2(settings: AtlasServerSettingsV2): AtlasSettingsVi
       systemPrompt: DEFAULT_WORLD_TURN_SYSTEM_PROMPT,
       // 内置默认统一展示 table-delta-v1 六段；旧协议名称只用于兼容读取。
       segments: defaultSegmentsForProtocol(normalizeWorldTurnProtocol(settings.worldTurnProtocol)).map((s) => ({ ...s })),
+    },
+    builtInSqlPrompt: {
+      id: BUILTIN_PROMPT_PRESET_ID, name: '内置 SQL 世界维护策略', readOnly: true,
+      systemPrompt: '', segments: DEFAULT_SQL_PROMPT_SEGMENTS.map(s => ({ role: s.role, name: s.name!, content: s.content })),
     },
     autoCommit: settings.autoCommit,
     loreSupplementEnabled: settings.loreSupplementEnabled ?? true,

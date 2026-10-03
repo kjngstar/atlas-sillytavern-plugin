@@ -13332,6 +13332,7 @@ function createSqlRepository(options) {
         JSON.stringify(attempts.slice(0, ATLAS_RUNTIME_LIMITS.detailedAttemptsPerTurn)),
         JSON.stringify({
           operations: parsedOperations.map((p) => p.value),
+          operation_meta: parsedOperations.map(({ opId, line, rawHash }) => ({ opId, line, rawHash })),
           host_message_index: input.hostMessageIndex,
           attention_decisions: [],
           outcome_decisions: [],
@@ -18640,6 +18641,126 @@ function toPovStateDto(projection, options = {}) {
   };
 }
 
+// src/atlas-sql-retry.ts
+init_atlas_db_runtime();
+init_atlas_db_readport();
+init_atlas_db_repository();
+init_atlas_ops_compile();
+init_atlas_ops_groups();
+init_atlas_ops_repair();
+init_atlas_ops_parser();
+init_atlas_ops_prompts();
+init_atlas_ops_contract();
+var flights = /* @__PURE__ */ new WeakMap();
+async function runSqlModelRetry(session, input) {
+  let pending = flights.get(session);
+  if (!pending) {
+    pending = /* @__PURE__ */ new Map();
+    flights.set(session, pending);
+  }
+  const existing = pending.get(input.turnId);
+  if (existing) return existing;
+  const task = retry(session, input);
+  pending.set(input.turnId, task);
+  try {
+    return await task;
+  } finally {
+    if (pending.get(input.turnId) === task) pending.delete(input.turnId);
+  }
+}
+async function retry(session, input) {
+  const assertCurrent = () => {
+    if (session.closed || session.isCurrentHost && !session.isCurrentHost()) throw new AtlasDbError("SESSION_STALE", "补交宿主已变化", {});
+    if (input.isCurrent && !input.isCurrent()) throw new AtlasDbError("TURN_CANCELLED", "补交楼层或模式已变化", {});
+    if (session.repo.internal.currentHeadTurnId() !== input.turnId) throw new AtlasDbError("RETRY_BASE_CHANGED", "原回合已不是当前推演头，请从原楼层重演后文，不能把旧操作插入新状态", {});
+  };
+  assertCurrent();
+  const row2 = queryBound(session.repo.db, "SELECT receipt_json, decisions_json FROM turns WHERE id=? AND branch_id=?", [input.turnId, session.branchId])[0];
+  if (!row2) throw new AtlasDbError("REF_UNKNOWN", "原补交回合不存在", {});
+  const receipt = JSON.parse(String(row2.receipt_json));
+  const rejected = receipt.groups.filter((g) => g.status === "rejected" || g.status === "blocked");
+  if (!rejected.length) return { receipt, coreSaved: true, issues: [], duplicate: true };
+  const history = JSON.parse(String(row2.decisions_json));
+  if (!history.operation_meta || history.operation_meta.length !== history.operations.length) throw new AtlasDbError("SQL_RETRY_HISTORY_MISSING", "旧 SQL 回合缺少操作身份记录，不能安全补交；请回退后重新推演，原存档未修改", {});
+  if (!session.modelPort) throw new AtlasDbError("MODEL_PORT_MISSING", "补交没有活动模型端口", {});
+  const operations = history.operations.map((value, index) => ({ ...history.operation_meta[index], value }));
+  const failedIds = new Set(rejected.flatMap((g) => g.opIds));
+  const failed = operations.filter((op) => failedIds.has(op.opId));
+  if (failed.length !== failedIds.size) throw new AtlasDbError("SQL_RETRY_HISTORY_MISSING", "失败组的原操作记录不完整，拒绝补交", {});
+  const revision = session.repo.internal.currentRevision(), storageRevision = session.repo.storageRevision;
+  const anchor = { ...receipt.anchor, parentTurnId: input.turnId, baseRevision: revision, baseStorageRevision: storageRevision };
+  const tables = createTableReadPort(session.repo.db), sources = input.sourceSnapshot ?? [];
+  const original = compileOperations({
+    operations,
+    anchor,
+    phase: "observe",
+    allowedOps: ATLAS_SEMANTIC_OPS,
+    clockS: receipt.clockAfterS,
+    revision,
+    tables,
+    sources: { phase: "repair", snapshot: sources, clockS: receipt.clockAfterS },
+    turnId: input.turnId,
+    makeId: session.repo.internal.makeId,
+    knownRefs: collectKnownRefs(tables, session.branchId)
+  });
+  const allowedOps = [...new Set(failed.map((op) => op.value.op))];
+  const tickets = buildRepairBatch(failed.map((op) => ({
+    op,
+    issues: rejected.filter((g) => g.opIds.includes(op.opId)).flatMap((g) => g.issues),
+    readSet: original.results.find((r) => r.opId === op.opId)?.result.readSet ?? []
+  })), { phase: "repair", allowedOps });
+  const request = buildStagePrompt({
+    phase: "repair",
+    allowedOps,
+    entityRefs: collectEntityRefs(tables, session.branchId),
+    repairTickets: tickets.promptLines.join("\n"),
+    sourceSnapshot: sources,
+    batchId: "retry_" + tickets.batchId,
+    repairOfBatchId: tickets.batchId
+  });
+  request.anchor = anchor;
+  request.sourceSnapshot = sources;
+  const response = await session.modelPort.request(request);
+  assertCurrent();
+  if (revision !== session.repo.internal.currentRevision() || storageRevision !== session.repo.storageRevision) throw new AtlasDbError("STALE_BASE", "模型补交等待期间快照已变化，候选不发布", {});
+  const payload = extractPayload(response.text);
+  const parsed = parseOperations(payload.payload, { phase: "repair", allowedOps });
+  const corrected = mergeRepair(failed, parsed.operations, tickets.tickets, { phase: "repair", attemptsUsed: 0 });
+  const issues = [...tickets.issues, ...payload.issues, ...parsed.issues, ...corrected.issues];
+  if (!corrected.operations.length) return { receipt, coreSaved: false, issues };
+  const knownRefs = collectKnownRefs(tables, session.branchId);
+  for (const [alias, id] of original.aliasById) {
+    const ref = original.scope.get(alias);
+    if (ref && !failedIds.has(ref.declaredByOpId ?? "")) knownRefs.push({ alias, id, kind: ref.kind, rowRev: ref.rowRev });
+  }
+  const compiled = compileOperations({
+    operations: corrected.operations,
+    anchor,
+    phase: "repair",
+    allowedOps,
+    clockS: receipt.clockAfterS,
+    revision,
+    tables,
+    sources: { phase: "repair", snapshot: sources, clockS: receipt.clockAfterS },
+    turnId: input.turnId,
+    makeId: session.repo.internal.makeId,
+    knownRefs
+  });
+  const groups = buildAtomicGroups(compiled.results.map((r) => ({ opId: r.opId, ...r.result })));
+  const result = await runSqlRetry(session, {
+    branchId: session.branchId,
+    chatUid: session.chatUid,
+    turnId: input.turnId,
+    currentHeadTurnId: input.turnId,
+    attemptId: `retry_${storageRevision}`,
+    groups: groups.groups,
+    clockS: receipt.clockAfterS,
+    isCurrent: input.isCurrent
+  });
+  const updated = result.coreSaved ? JSON.parse(String(queryBound(session.repo.db, "SELECT receipt_json FROM turns WHERE id=?", [input.turnId])[0].receipt_json)) : receipt;
+  return { receipt: updated, coreSaved: result.coreSaved, issues: [...issues, ...compiled.issues, ...groups.issues, ...result.issues] };
+}
+
 // src/atlas-sql-chat.ts
 var preparations = /* @__PURE__ */ new WeakMap();
 var text2 = (v) => typeof v === "string" ? v : "";
@@ -18683,6 +18804,19 @@ function floorIndex(row2) {
 function assertEnabled(session) {
   if (!binding(session).enabled) throw new AtlasDbError("SQL_CHAT_DISABLED", "本聊天推演已停用", {});
 }
+function chatSources(request, playerName) {
+  const sources = [];
+  const add = (key, kind, value) => {
+    if (value) sources.push({ key, kind, text: value, hash: stableHexHash(value) });
+  };
+  add("user:" + request.userMessageId, "user", request.userText);
+  add("story:" + request.assistantMessageId, "story", request.assistantText);
+  (request.recentAssistantTexts ?? []).forEach((value, index) => add("recent:" + index, "story", value));
+  add("player", "user", JSON.stringify({ name: playerName, description: request.personaDescription ?? "" }));
+  add("card", "lorebook", request.charDescription ?? "");
+  add("lore", "lorebook", request.loreSupplement ?? "");
+  return sources;
+}
 async function handleSqlChatRequest(session, action, body) {
   if (action === "binding") return { binding: binding(session), coreSaved: false };
   if (action === "state") {
@@ -18706,6 +18840,22 @@ async function handleSqlChatRequest(session, action, body) {
     };
   }
   assertEnabled(session);
+  if (action === "retry") {
+    const parsed = parseAtlasTurnCommitRequest(body);
+    if (!parsed.ok || parsed.value.chatId !== session.chatUid) throw new AtlasDbError("INVALID_PAYLOAD", "SQL 补交素材不属于当前聊天", {});
+    const result = await runSqlModelRetry(session, {
+      turnId: text2(body.sqlTurnId),
+      sourceSnapshot: chatSources(parsed.value, text2(body.playerName)),
+      isCurrent: typeof body.isCurrent === "function" ? body.isCurrent : void 0
+    });
+    const receipt = toLegacyTurnReceipt(result.receipt, { coreSaved: result.coreSaved });
+    receipt.status = result.coreSaved ? "committed" : "failed";
+    if (!result.coreSaved) {
+      receipt.summary = result.issues.map((i) => i.message).join("；") || "失败组尚未补交，已保存结果保持原状。";
+      receipt.retryable = true;
+    }
+    return { receipt, nativeReceipt: result.receipt, coreSaved: result.coreSaved, issues: result.issues };
+  }
   if (action === "prepare") {
     const parsed = parseAtlasTurnPrepareRequest(body);
     if (!parsed.ok || parsed.value.chatId !== session.chatUid) throw new AtlasDbError("INVALID_PAYLOAD", "SQL prepare 请求形状或聊天身份不符", {});
@@ -18747,16 +18897,7 @@ async function handleSqlChatRequest(session, action, body) {
     if (!manual && (!prepared || prepared.messageId !== request.userMessageId || prepared.userText !== request.userText)) {
       throw new AtlasDbError("SQL_PREPARE_EXPIRED", "本轮 SQL prepare 已失效，请重新生成；不会回落到三表写入", {});
     }
-    const sources = [];
-    const add = (key, kind, value) => {
-      if (value) sources.push({ key, kind, text: value, hash: stableHexHash(value) });
-    };
-    add("user:" + request.userMessageId, "user", request.userText);
-    add("story:" + request.assistantMessageId, "story", request.assistantText);
-    (request.recentAssistantTexts ?? []).forEach((value, index) => add("recent:" + index, "story", value));
-    add("player", "user", JSON.stringify({ name: text2(body.playerName), description: request.personaDescription ?? "" }));
-    add("card", "lorebook", request.charDescription ?? "");
-    add("lore", "lorebook", request.loreSupplement ?? "");
+    const sources = chatSources(request, text2(body.playerName));
     const variantKey = text2(body.variantKey) || request.swipeId || "original";
     const input = {
       anchor: {
@@ -19091,12 +19232,12 @@ async function runSqlTurn(session, input) {
   if (session.isCurrentHost && !session.isCurrentHost()) throw new AtlasDbError("SESSION_STALE", "当前宿主快照已变化", {});
   if (input.isCurrent && !input.isCurrent()) throw new AtlasDbError("TURN_CANCELLED", "当前正文楼层或生成状态已变化，本轮不发送模型请求", {});
   const key = JSON.stringify([input.anchor.hostMessageUid, input.anchor.variantKey, input.anchor.inputHash]);
-  let flights = turnFlights.get(session);
-  if (!flights) {
-    flights = /* @__PURE__ */ new Map();
-    turnFlights.set(session, flights);
+  let flights2 = turnFlights.get(session);
+  if (!flights2) {
+    flights2 = /* @__PURE__ */ new Map();
+    turnFlights.set(session, flights2);
   }
-  const flight = flights.get(key);
+  const flight = flights2.get(key);
   if (flight) {
     const result = await flight;
     return result.coreSaved ? { ...result, duplicate: true } : result;
@@ -19114,17 +19255,18 @@ async function runSqlTurn(session, input) {
     const commit = await session.repo.prepareTurn(input);
     return await commitPreparedTurn(session, commit, input.isCurrent);
   })();
-  flights.set(key, task);
+  flights2.set(key, task);
   try {
     return await task;
   } finally {
-    if (flights.get(key) === task) flights.delete(key);
+    if (flights2.get(key) === task) flights2.delete(key);
   }
 }
 async function runSqlRetry(session, input) {
   if (input.chatUid !== session.chatUid || input.branchId !== session.branchId) throw new AtlasDbError("CHAT_CHANGED", "补交不属于当前 SQL 会话", {});
   return withChatCommitLock(session.chatUid, async () => {
     if (session.isCurrentHost && !session.isCurrentHost()) throw new AtlasDbError("SESSION_STALE", "补交前宿主快照已变化", {});
+    if (input.isCurrent && !input.isCurrent()) throw new AtlasDbError("TURN_CANCELLED", "补交楼层已变化", {});
     const anchor = maintenanceAnchor(session, `retry:${input.turnId}`);
     const candidate = await session.repo.createCandidate(anchor, "maintenance");
     try {
@@ -19163,7 +19305,7 @@ async function runSqlRetry(session, input) {
         });
       }
       const prepared = await session.repo.exportCandidate(candidate, receipt);
-      const persisted = await persistSqlSession(session, { commit: { ...prepared, kind: "maintenance", receipt: null } });
+      const persisted = await persistSqlSession(session, { commit: { ...prepared, kind: "maintenance", receipt: null }, isCurrent: input.isCurrent });
       return { ...result, issues: [...result.issues, ...persisted.issues], coreSaved: persisted.saved };
     } catch (err) {
       await session.repo.discardPrepared(candidate.token);
@@ -19344,12 +19486,13 @@ async function closeSqlSession(session) {
   await session.repo.close();
 }
 async function loadAtlasSqlRuntime() {
-  const [retry, knowledge] = await Promise.all([
+  const [retry2, knowledge] = await Promise.all([
     Promise.resolve().then(() => (init_atlas_db_retry(), atlas_db_retry_exports)),
     Promise.resolve().then(() => (init_atlas_db_knowledge_view(), atlas_db_knowledge_view_exports))
   ]);
   return {
     handleSqlChatRequest,
+    runSqlModelRetry,
     openSqlSession,
     persistSqlSession,
     runSqlTurn,
@@ -19358,7 +19501,7 @@ async function loadAtlasSqlRuntime() {
     runSqlRollback,
     migrateSessionToSql,
     closeSqlSession,
-    retryFailedGroups: retry.retryFailedGroups,
+    retryFailedGroups: retry2.retryFailedGroups,
     projectPromptView: knowledge.projectPromptView
   };
 }

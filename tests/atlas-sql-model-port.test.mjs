@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createSqlModelPort } from '../src/atlas-sql-model-port.ts';
-import { createDefaultSettingsV2 } from '../src/atlas-settings.ts';
+import { createDefaultSettingsV2, applySettingsCommand, settingsViewV2 } from '../src/atlas-settings.ts';
+import { DEFAULT_SQL_PROMPT_SEGMENTS } from '../src/atlas-sql-prompts.ts';
 import { buildStagePrompt } from '../src/atlas-ops-prompts.ts';
 import { createBrowserSqlHost } from '../src/atlas-browser-sql-host.ts';
 import { createAtlasServerCore } from '../src/atlas-server.ts';
@@ -38,6 +39,36 @@ test('Q03: SQL stage reuses the selected API connection and sends only semantic 
   assert.equal(f.calls[0].body.temperature, 0.4);
   assert.ok(f.calls[0].body.messages[0].content.includes('character.upsert'));
   assert.equal(JSON.stringify(f.calls[0].body.messages).includes('<atlasEdit>'), false);
+  assert.deepEqual(f.calls[0].body.messages.slice(1, 7), DEFAULT_SQL_PROMPT_SEGMENTS.map(({role,content}) => ({role,content})));
+  assert.deepEqual(settingsViewV2(f.settings).builtInSqlPrompt.segments.map(({role,content}) => ({role,content})), f.calls[0].body.messages.slice(1,7));
+});
+
+test('Q03: explicit SQL draft preserves the original and copied entries, only disables conflicting protocols in the new copy', async () => {
+  const f = fixture();
+  const old = { id: 'old', name: '作者预设', systemPrompt: '', updatedAt: 1,
+    segments: [{ role: 'system', name: '旧输出', content: '只输出 <atlasEdit>，table-delta-v1' },
+      { role: 'assistant', name: '自定义策略', content: '别名优先复用。', enabled: true }] };
+  f.settings.promptPresets = [old]; f.settings.activePromptPresetId = old.id;
+  const before = JSON.stringify(old);
+  const built = applySettingsCommand(f.settings, { action: 'prompt.migrate-sql', id: old.id }, { now: () => 2, makeId: () => 'draft' });
+  assert.equal(built.ok, true); assert.equal(built.settings.activePromptPresetId, 'old');
+  assert.equal(JSON.stringify(built.settings.promptPresets[0]), before);
+  const draft = built.settings.promptPresets[1];
+  assert.equal(draft.segments[6].content, old.segments[0].content); assert.equal(draft.segments[6].enabled, false);
+  assert.deepEqual(draft.segments[7], old.segments[1]);
+  Object.assign(f.settings, built.settings, { activePromptPresetId: draft.id });
+  await f.port.request(request()); assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0].body.messages.some(m => m.content.includes('<atlasEdit>')), false);
+  assert.equal(f.calls[0].body.messages[7].role, 'assistant');
+});
+
+test('Q03: full prompt entry capacity cannot silently truncate a compatibility draft', () => {
+  const f = fixture();
+  const old = { id: 'full', name: '完整预设', systemPrompt: '', updatedAt: 1, segments: Array.from({length:16}, (_,i) => ({role:'user',content:`条目 ${i}`})) };
+  f.settings.promptPresets = [old]; const before = JSON.stringify(f.settings);
+  const built = applySettingsCommand(f.settings, {action:'prompt.migrate-sql',id:old.id});
+  assert.equal(built.ok, false); assert.equal(built.code, 'FIELD_LIMIT_EXCEEDED');
+  assert.equal(JSON.stringify(f.settings), before);
 });
 
 test('Q03: enabled editable segments retain roles and order; disabled segments stay stored', async () => {

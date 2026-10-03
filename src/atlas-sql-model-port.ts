@@ -2,6 +2,7 @@ import { callAtlasWorldTurnApi, substitutePromptPlaceholders, type AtlasWorldTur
 import { migrateAtlasSettings, resolveWorldTurnPreset, sanitizeSettingsV2 } from './atlas-settings.ts';
 import type { AtlasModelPort } from './atlas-db-contract.ts';
 import type { ModelBatchRequest } from './atlas-ops-contract.ts';
+import { DEFAULT_SQL_PROMPT_SEGMENTS, hasLegacySqlPromptProtocol } from './atlas-sql-prompts.ts';
 
 type Options = {
   readSettings: () => Promise<unknown>;
@@ -38,13 +39,13 @@ export function createSqlModelPort(options: Options): AtlasModelPort {
       };
       const custom = Array.isArray(preset.promptSegments) && preset.promptSegments.length
         ? preset.promptSegments.filter(s => s.enabled !== false && s.content.trim())
-        : preset.systemPrompt?.trim() ? [{ role: 'system', content: preset.systemPrompt }] : [];
+        : preset.systemPrompt?.trim() ? [{ role: 'system', content: preset.systemPrompt }] : DEFAULT_SQL_PROMPT_SEGMENTS;
       if (preset.promptSegments?.length && custom.length === 0) {
         throw failure('SQL_PROMPT_EMPTY', '活动提示词没有启用条目；未发送 SQL 推演请求');
       }
       // Preserve user assets byte for byte. A conflicting old protocol must be
       // reported before spending tokens, never rewritten or silently discarded.
-      if (custom.some(s => /<\/?atlasEdit\b|table-delta-v1|"table"\s*:\s*"(?:location|character|item|simulation)"/.test(s.content))) {
+      if (custom.some(s => hasLegacySqlPromptProtocol(s.content))) {
         throw failure('SQL_PROMPT_INCOMPATIBLE', '活动提示词使用旧表格增量格式，与 SQL 语义操作不兼容。原预设已保留；请使用内置阶段提示词或另存兼容预设');
       }
       const messages = [request.messages[0], ...custom.map(s => ({

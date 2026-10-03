@@ -35,6 +35,7 @@ import {
 import { runNextSync, enqueueProjectionSync } from './atlas-db-outbox.ts';
 import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
 import { handleSqlChatRequest } from './atlas-sql-chat.ts';
+import { runSqlModelRetry } from './atlas-sql-retry.ts';
 import type { AtlasEnvelope, AtlasModelPort } from './atlas-db-contract.ts';
 import type { SqlDatabase } from './atlas-db-runtime.ts';
 import type { FailedGroupRetryInput, FailedGroupRetryResult } from './atlas-db-retry.ts';
@@ -581,10 +582,11 @@ export async function runSqlTurn(session: SqlSession, input: TurnInput): Promise
 }
 
 /** Retry changes live only in an isolated candidate until the host confirms its save. */
-export async function runSqlRetry(session: SqlSession, input: Omit<FailedGroupRetryInput, 'db'>): Promise<FailedGroupRetryResult & { coreSaved: boolean }> {
+export async function runSqlRetry(session: SqlSession, input: Omit<FailedGroupRetryInput, 'db'> & { isCurrent?: () => boolean }): Promise<FailedGroupRetryResult & { coreSaved: boolean }> {
   if (input.chatUid !== session.chatUid || input.branchId !== session.branchId) throw new AtlasDbError('CHAT_CHANGED', '补交不属于当前 SQL 会话', {});
   return withChatCommitLock(session.chatUid, async () => {
     if (session.isCurrentHost && !session.isCurrentHost()) throw new AtlasDbError('SESSION_STALE', '补交前宿主快照已变化', {});
+    if (input.isCurrent && !input.isCurrent()) throw new AtlasDbError('TURN_CANCELLED', '补交楼层已变化', {});
     const anchor = maintenanceAnchor(session, `retry:${input.turnId}`);
     const candidate = await session.repo.createCandidate(anchor, 'maintenance');
     try {
@@ -614,7 +616,7 @@ export async function runSqlRetry(session: SqlSession, input: Omit<FailedGroupRe
           makeId: key => session.repo.internal.makeId('outbox', input.attemptId, key) });
       }
       const prepared = await session.repo.exportCandidate(candidate, receipt);
-      const persisted = await persistSqlSession(session, { commit: { ...prepared, kind: 'maintenance', receipt: null } });
+      const persisted = await persistSqlSession(session, { commit: { ...prepared, kind: 'maintenance', receipt: null }, isCurrent: input.isCurrent });
       return { ...result, issues: [...result.issues, ...persisted.issues], coreSaved: persisted.saved };
     } catch (err) {
       await session.repo.discardPrepared(candidate.token);
@@ -854,6 +856,7 @@ export async function closeSqlSession(session: SqlSession): Promise<void> {
  */
 export type AtlasSqlRuntime = {
   handleSqlChatRequest: typeof handleSqlChatRequest;
+  runSqlModelRetry: typeof runSqlModelRetry;
   openSqlSession: typeof openSqlSession;
   persistSqlSession: typeof persistSqlSession;
   runSqlTurn: typeof runSqlTurn;
@@ -880,6 +883,7 @@ export async function loadAtlasSqlRuntime(): Promise<AtlasSqlRuntime> {
   ]);
   return {
     handleSqlChatRequest,
+    runSqlModelRetry,
     openSqlSession,
     persistSqlSession,
     runSqlTurn,

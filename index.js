@@ -7971,9 +7971,13 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
   }
 
   /** 内置默认作为可编辑草稿展示；保存时创建并启用作者预设，原版仍可从下拉切回。 */
+  function currentBuiltInPrompt() {
+    return sqlModeFlag(state().stateData) ? settingsV2?.builtInSqlPrompt : settingsV2?.builtInPrompt;
+  }
+
   function builtinPromptDraft() {
     return { id: null, kind: "builtin", name: "默认提示词（自定义）", systemPrompt: "",
-      segments: cloneSegments(settingsV2?.builtInPrompt?.segments), contextTurnCount: 3 };
+      segments: cloneSegments(currentBuiltInPrompt()?.segments), contextTurnCount: 3 };
   }
 
   /** 把已保存预设载入为工作副本（kind=saved；可编辑，保存语义 = 覆盖回该 id）。 */
@@ -8024,11 +8028,11 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     }
     if (active) return String(active.systemPrompt ?? "");
     // 0.9.40 内置默认以分段形态预览（与发送时多轮组装一致）
-    const builtinSegs = Array.isArray(settingsV2.builtInPrompt?.segments) ? settingsV2.builtInPrompt.segments : [];
+    const builtinSegs = Array.isArray(currentBuiltInPrompt()?.segments) ? currentBuiltInPrompt().segments : [];
     if (builtinSegs.length > 0) {
       return builtinSegs.map((s) => `[${String(s?.role ?? "system")}] ${String(s?.content ?? "")}`).join("\n\n");
     }
-    return String(settingsV2.builtInPrompt?.systemPrompt ?? "");
+    return String(currentBuiltInPrompt()?.systemPrompt ?? "");
   }
 
   function activeApiLabel() {
@@ -8473,6 +8477,23 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       renderCenter();
     });
     selectRow.append(promptNewBtn);
+    if (sqlModeFlag(state().stateData) && promptDraft?.id) {
+      const compatibilityBtn = el('button', 'aw-btn', '创建 SQL 兼容草稿');
+      compatibilityBtn.type = 'button';
+      compatibilityBtn.addEventListener('click', async () => {
+        if (promptDraftDirty && !confirmDiscard('提示词')) return;
+        const oldIds = new Set(promptLibrary.map(p => p.id));
+        if (await sendSettingsCommand({ action: 'prompt.migrate-sql', id: promptDraft.id })) {
+          const created = promptLibrary.find(p => !oldIds.has(p.id));
+          if (created) promptDraft = savedPromptDraft(created);
+          promptDraftDirty = false;
+          promptImportOptions = null;
+          setStatus('SQL 草稿已保存，原预设与当前选择保留。新草稿的旧输出协议条目已停用；请检查条目后从下拉框选择启用。');
+        }
+        renderCenter();
+      });
+      selectRow.append(compatibilityBtn);
+    }
     const promptDeleteBtn = el("button", "aw-btn aw-btn--danger aw-btn--icon", "删除");
     promptDeleteBtn.type = "button";
     promptDeleteBtn.setAttribute("aria-label", "删除当前选中的提示词预设");

@@ -870,7 +870,9 @@ export function createSqlRepository(options: RepositoryOptions) {
         receipt.status === 'failed' ? null : newRevision,
         JSON.stringify(receipt),
         JSON.stringify(attempts.slice(0, ATLAS_RUNTIME_LIMITS.detailedAttemptsPerTurn)),
-        JSON.stringify({ operations: parsedOperations.map((p) => p.value), host_message_index: input.hostMessageIndex,
+        JSON.stringify({ operations: parsedOperations.map((p) => p.value),
+          operation_meta: parsedOperations.map(({ opId, line, rawHash }) => ({ opId, line, rawHash })),
+          host_message_index: input.hostMessageIndex,
           attention_decisions: [], outcome_decisions: [], random_draws: [] }),
         turnId,
       ]);

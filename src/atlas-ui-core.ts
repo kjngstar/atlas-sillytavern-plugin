@@ -532,6 +532,7 @@ export function createAtlasUiCore(deps: {
   let generationRevision = 0;
   const sqlEnabled = () => deps.sqlEnabled?.() === true;
   let sqlRetryRequest: AtlasTurnCommitRequest | null = null;
+  let sqlPartialTurnId: string | null = null;
   const bootstrappedBranches = new Set<string>();
   const openingAttemptedMessages = new Set<string>();
   let stoppedGeneration = false;
@@ -636,7 +637,7 @@ export function createAtlasUiCore(deps: {
     // 0.9.28 归属守卫：跨聊天迟到的回执直接丢弃（服务端世界已一致，只是 UI 不显示过期回执）
     if (chatId !== state.chatId) return;
     const previous = state.receipts.find(r => r.receiptId === receipt.receiptId);
-    if (previous && !(sqlEnabled() && previous.status === 'failed' && receipt.status !== 'failed')) return;
+    if (previous && !(sqlEnabled() && (previous.status === 'failed' && receipt.status !== 'failed' || previous.summary !== receipt.summary))) return;
     const record: AtlasReceiptRecord = {
       receiptId: receipt.receiptId,
       chatId,
@@ -1381,7 +1382,7 @@ export function createAtlasUiCore(deps: {
     const isCurrent = () => !disposed && host.getChatId() === value.chatId && state.chatId === value.chatId
       && generationRevision === revision && useSql === sqlEnabled() && (deps.isCommitCurrent?.(value) ?? true)
       && (!identity || JSON.stringify(deps.getCommitIdentity?.(value)) === JSON.stringify(identity));
-    if (useSql) sqlRetryRequest = value;
+    if (useSql) { sqlPartialTurnId = null; sqlRetryRequest = value; }
     if (state.chatId === value.chatId) setState({ turnPhase: "committing" });
     diagnostic({ level: "info", source: "ui", code: "COMMIT_STARTED",
       operation: "commit", phase: "request", outcome: "started" });
@@ -1433,7 +1434,12 @@ export function createAtlasUiCore(deps: {
           return;
         }
         setState({ pendingTurn: null, rearmTurn: null, ...(stale ? {} : { lastError: null }) });
-        if (useSql) { sqlRetryRequest = null; setState({ retryableCommit: null }); }
+        if (useSql) {
+          sqlPartialTurnId = receiptParsed.value.retryable ? receiptParsed.value.receiptId : null;
+          if (!sqlPartialTurnId) sqlRetryRequest = null;
+          setState({ retryableCommit: sqlPartialTurnId ? { chatId: value.chatId, userMessageId: value.userMessageId,
+            assistantMessageId: value.assistantMessageId, swipeId, sqlMode: true } : null });
+        }
         if (receiptParsed.value.status === "committed" || receiptParsed.value.status === "duplicate") {
           healthCheckedAt = -Infinity;
           if (!stale) await refresh();
@@ -1675,6 +1681,31 @@ export function createAtlasUiCore(deps: {
     }
     if (sqlEnabled()) {
       if (!sqlRetryRequest || commitFlight) return;
+      if (sqlPartialTurnId) {
+        const original = sqlRetryRequest, turnId = sqlPartialTurnId, revision = generationRevision;
+        const flight = claimCommit(turnId);
+        const identity = deps.getCommitIdentity?.(original);
+        const isCurrent = () => !disposed && state.chatId === failed.chatId && host.getChatId() === failed.chatId && sqlEnabled()
+          && generationRevision === revision && (deps.isCommitCurrent?.(original) ?? true)
+          && (!identity || JSON.stringify(deps.getCommitIdentity?.(original)) === JSON.stringify(identity));
+        try {
+          const result = await api.request('POST', '/sql/chat/retry', { ...original, chatUid: failed.chatId,
+            sqlTurnId: turnId, playerName: deps.getPlayerName?.() ?? '', isCurrent });
+          if (!isCurrent()) return;
+          const body = result.body as { ok?: boolean; data?: { coreSaved?: boolean; receipt?: unknown }; error?: { message?: string; retryable?: boolean } };
+          const parsed = body.data?.receipt ? parseAtlasTurnReceipt(body.data.receipt) : null;
+          if (result.status === 200 && body.ok && parsed?.ok) {
+            addReceipt(parsed.value, failed.chatId);
+            setState({ lastError: parsed.value.status === 'failed' ? parsed.value.summary : null,
+              retryableCommit: parsed.value.retryable ? failed : null });
+            if (!parsed.value.retryable) { sqlPartialTurnId = null; sqlRetryRequest = null; }
+            if (body.data?.coreSaved === true) await refresh();
+          } else setState({ lastError: body.error?.message ?? '失败组补交未完成。',
+            ...(body.error?.retryable === false ? { retryableCommit: null } : {}) });
+        } catch { if (isCurrent()) setState({ lastError: '失败组补交请求失败，已保存结果保持原状。' }); }
+        finally { releaseCommit(flight); }
+        return;
+      }
       await executeCommitRequest(sqlRetryRequest, failed.swipeId);
       return;
     }

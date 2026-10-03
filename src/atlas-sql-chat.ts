@@ -1,9 +1,11 @@
 /** Automatic chat compatibility boundary. Business writes use the SQL session only. */
 import { parseAtlasTurnCommitRequest, parseAtlasTurnPrepareRequest } from './atlas-contract.ts';
+import type { AtlasTurnCommitRequest } from './atlas-contract.ts';
 import { stableHexHash } from './atlas-hash.ts';
 import { AtlasDbError, queryBound } from './atlas-db-runtime.ts';
 import { toLegacyStateDto, toLegacyTurnReceipt } from './atlas-db-state-adapter.ts';
 import { runSqlTurn, runSqlRollback } from './atlas-sql-session.ts';
+import { runSqlModelRetry } from './atlas-sql-retry.ts';
 import type { SqlSession } from './atlas-sql-session.ts';
 import type { TurnAnchor, TurnInput } from './atlas-ops-contract.ts';
 
@@ -43,6 +45,19 @@ function floorIndex(row: Record<string, unknown>): string {
 function assertEnabled(session: SqlSession): void {
   if (!binding(session).enabled) throw new AtlasDbError('SQL_CHAT_DISABLED', '本聊天推演已停用', {});
 }
+function chatSources(request: AtlasTurnCommitRequest, playerName: string): TurnInput['sourceSnapshot'] {
+  const sources: TurnInput['sourceSnapshot'] = [];
+  const add = (key: string, kind: TurnInput['sourceSnapshot'][number]['kind'], value: string) => {
+    if (value) sources.push({ key, kind, text: value, hash: stableHexHash(value) });
+  };
+  add('user:' + request.userMessageId, 'user', request.userText);
+  add('story:' + request.assistantMessageId, 'story', request.assistantText);
+  (request.recentAssistantTexts ?? []).forEach((value, index) => add('recent:' + index, 'story', value));
+  add('player', 'user', JSON.stringify({ name: playerName, description: request.personaDescription ?? '' }));
+  add('card', 'lorebook', request.charDescription ?? '');
+  add('lore', 'lorebook', request.loreSupplement ?? '');
+  return sources;
+}
 
 /** Called by the explicit /sql/chat/* routes; no old session document is returned. */
 export async function handleSqlChatRequest(session: SqlSession, action: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -60,6 +75,19 @@ export async function handleSqlChatRequest(session: SqlSession, action: string, 
       sqlMode: true, coreSaved: false };
   }
   assertEnabled(session);
+  if (action === 'retry') {
+    const parsed = parseAtlasTurnCommitRequest(body);
+    if (!parsed.ok || parsed.value.chatId !== session.chatUid) throw new AtlasDbError('INVALID_PAYLOAD', 'SQL 补交素材不属于当前聊天', {});
+    const result = await runSqlModelRetry(session, { turnId: text(body.sqlTurnId), sourceSnapshot: chatSources(parsed.value, text(body.playerName)),
+      isCurrent: typeof body.isCurrent === 'function' ? body.isCurrent as () => boolean : undefined });
+    const receipt = toLegacyTurnReceipt(result.receipt, { coreSaved: result.coreSaved });
+    receipt.status = result.coreSaved ? 'committed' : 'failed';
+    if (!result.coreSaved) {
+      receipt.summary = result.issues.map(i => i.message).join('；') || '失败组尚未补交，已保存结果保持原状。';
+      receipt.retryable = true;
+    }
+    return { receipt, nativeReceipt: result.receipt, coreSaved: result.coreSaved, issues: result.issues };
+  }
   if (action === 'prepare') {
     const parsed = parseAtlasTurnPrepareRequest(body);
     if (!parsed.ok || parsed.value.chatId !== session.chatUid) throw new AtlasDbError('INVALID_PAYLOAD', 'SQL prepare 请求形状或聊天身份不符', {});
@@ -84,16 +112,7 @@ export async function handleSqlChatRequest(session: SqlSession, action: string, 
     if (!manual && (!prepared || prepared.messageId !== request.userMessageId || prepared.userText !== request.userText)) {
       throw new AtlasDbError('SQL_PREPARE_EXPIRED', '本轮 SQL prepare 已失效，请重新生成；不会回落到三表写入', {});
     }
-    const sources: TurnInput['sourceSnapshot'] = [];
-    const add = (key: string, kind: TurnInput['sourceSnapshot'][number]['kind'], value: string) => {
-      if (value) sources.push({ key, kind, text: value, hash: stableHexHash(value) });
-    };
-    add('user:' + request.userMessageId, 'user', request.userText);
-    add('story:' + request.assistantMessageId, 'story', request.assistantText);
-    (request.recentAssistantTexts ?? []).forEach((value, index) => add('recent:' + index, 'story', value));
-    add('player', 'user', JSON.stringify({ name: text(body.playerName), description: request.personaDescription ?? '' }));
-    add('card', 'lorebook', request.charDescription ?? '');
-    add('lore', 'lorebook', request.loreSupplement ?? '');
+    const sources = chatSources(request, text(body.playerName));
     const variantKey = text(body.variantKey) || request.swipeId || 'original';
     const input: TurnInput = { anchor: { ...(prepared?.anchor ?? { chatUid: session.chatUid, branchId: session.branchId,
         parentTurnId: session.repo.internal.currentHeadTurnId(), baseRevision: session.repo.internal.currentRevision(), baseStorageRevision: session.repo.storageRevision }),
