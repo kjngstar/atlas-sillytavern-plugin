@@ -10257,7 +10257,7 @@ function createDefaultSettingsV2() {
     rpmLimit: 30,
     loreSupplementEnabled: true,
     // R06 / D-16：推进输出协议。0.9.57 起**新装默认 = table-delta-v1**（三表行增量）；
-    // 既有存档里的合法值原样保留（读取走 normalizeWorldTurnProtocol，非法值仍归 v2）。
+    // 旧 v1/v2 与非法值在读取时统一规范为 table-delta-v1；schemaVersion:2 是设置存档版本。
     worldTurnProtocol: DEFAULT_WORLD_TURN_PROTOCOL,
     contentReplaceRules: DEFAULT_CONTENT_REPLACE_RULES.map((rule, index) => ({
       ...rule,
@@ -10906,7 +10906,7 @@ function settingsViewV2(settings) {
       name: "内置默认",
       readOnly: true,
       systemPrompt: DEFAULT_WORLD_TURN_SYSTEM_PROMPT,
-      // R06：内置默认按当前协议展示对应分段（v2 = 封套 / table-delta-v1 = 行增量 / v1 = 旧契约逃生门）
+      // 内置默认统一展示 table-delta-v1 六段；旧协议名称只用于兼容读取。
       segments: defaultSegmentsForProtocol(normalizeWorldTurnProtocol(settings.worldTurnProtocol)).map((s) => ({ ...s }))
     },
     autoCommit: settings.autoCommit,

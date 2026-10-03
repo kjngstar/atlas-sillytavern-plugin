@@ -313,4 +313,4 @@ export function orderGroups(groups: AtomicGroup[]): { order: AtomicGroup[]; bloc
   return { order, blockedBy, issues };
 }
 
-/** 供分组层使用的最小输入形状；定义在 atlas-ops-groups-types.ts。 */
+/** 供分组层使用的最小输入形状；编译结果由调用者按此接口提供。 */

@@ -434,7 +434,6 @@ test("P0-05：UI HTTP 客户端每请求合并 getRequestHeaders()（CSRF）且�
     token = "csrf-token-2"; // 酒馆轮换 token
     await api.request("GET", "/health");
     equal(calls[1].options.headers["X-CSRF-Token"], "csrf-token-2", "每请求重新取 token（不缓存）");
-    ok(!JSON.stringify(calls).includes("csrf-token-1") || true, "token 只存在于请求头（不落日志 / 不持久化的义务在调用方）");
   } finally {
     globalThis.fetch = realFetch;
   }

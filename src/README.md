@@ -49,6 +49,20 @@ atlas-extension/index.js ─→ dist/atlas-ui-core.mjs（browser-entry 打包产
 世界核心快照只 import、不复制：`lib/world-engine.ts`、`lib/world-npc.ts`、`lib/world-ledger.ts`、
 `lib/world-checkpoint.ts`、`lib/world-definition.ts`、`lib/world-schema.ts`、`lib/world-cards.ts`。
 
+## 源码与生成文件
+
+只编辑根 `index.js`、`style.css`、`settings.html`、`manifest.json` 和 `src/` 源码。
+根入口修改后执行 `node tools/sync-mirror.mjs`；`npm run pack` 同步镜像、刷新根 `dist/`
+并生成 `release/`。不要手动修补生成文件；根 `dist/` 仍是仓库安装单元的一部分。
+
+## 生产、实验与待接线路径
+
+- 当前生产路径：浏览器入口启动核心，默认回合走三表增量，地图、附近与注入读取其投影。
+- SQL 路径：`atlas-sql-session`、Repository、SQL 路由和视图已实现；正式宿主注入、回合分流与快照缓存尚待贯通，不能用手工注入 Repository 的测试代替正式接线验收。
+- 实验路径：`atlas-map-render-model.ts` 当前供地图实验台和测试使用，Leaflet 尚未成为正式渲染器。
+- 待接线功能：`atlas-sim-time`、`atlas-sim-scheduler`、`atlas-sim-decision-context`、`atlas-sim-outcome-context` 等保留，用于 SQL 时间推进、后台行动与传播，尚未在每个正式回合完整运行。
+- 引用审查：`node tools/audit-source-references.mjs` 输出生产、类型、测试、实验入边与无法解析的动态引用；它不自动删除模块，也不代替行为验收。
+
 ## 纪律
 
 - 推演密钥只存浏览器侧、只经酒馆自带后端代理转发；响应与日志只出脱敏视图。
