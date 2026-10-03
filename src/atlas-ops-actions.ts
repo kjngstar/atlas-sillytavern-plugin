@@ -256,7 +256,7 @@ export function compilePlanPropose(op: ParsedOperation, ctx: CompileContext): Co
     secrecy = s;
   }
 
-  const turnId = ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
+  const turnId = ctx.turnId ?? ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
   const actorId = actor.entry.id;
   const planId = ctx.makeId('action', op.opId, `plan:${goal}`);
   const parentRow = createRow(
@@ -354,7 +354,7 @@ export function compilePlanRevise(op: ParsedOperation, ctx: CompileContext): Com
     return result;
   }
 
-  const turnId = ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
+  const turnId = ctx.turnId ?? ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
   const touches: Array<{ rowId: string; row: Record<string, unknown>; target: Record<string, unknown> }> = [];
   const children = ctx.tables.selectWhere('actions', { branch_id: ctx.branchId, parent_action_id: rowId }, 64).filter(
     (c) => !['completed', 'failed', 'cancelled'].includes(String(c.status)),

@@ -138,7 +138,7 @@ export function compileMapEstimate(op: ParsedOperation, ctx: CompileContext): Co
     ? String(data.scale_quality)
     : 'estimated';
 
-  const turnId = ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
+  const turnId = ctx.turnId ?? ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
   const after = applyPatch(before, {
     meters_per_cell: nominal,
     scale_min_meters_per_cell: lower,
@@ -344,7 +344,7 @@ export function compileRoutePropose(op: ParsedOperation, ctx: CompileContext): C
 
   if (result.issues.some((i) => i.severity === 'error')) return result;
 
-  const turnId = ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
+  const turnId = ctx.turnId ?? ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
   if (before) {
     const after = applyPatch(before, {
       from_location_id: fromId,
@@ -432,7 +432,7 @@ export function ensureContainerMap(
     return { mutations: [], mapId: String(existingMaps[0].id), created: false, issues };
   }
   const mapId = ctx.makeId('map', triggerOp?.opId ?? 'ensure', `container:${locationId}`);
-  const turnId = ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
+  const turnId = ctx.turnId ?? ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
   const row = createRow(
     'maps',
     {

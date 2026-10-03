@@ -89,9 +89,9 @@ function branchRow(repo) {
   return queryBound(repo.db, 'SELECT revision, head_turn_id, clock_s, clock_min_s, clock_max_s FROM branches WHERE id = ?', [IDS.branchMain])[0];
 }
 
-/** 直接改分支时钟：本实现 prepareTurn 不自行推进时钟，回退时钟断言需要非零起点。 */
+/** Coherent settled seed time for rollback assertions; backlog is tested separately. */
 function setBranchClock(repo, value) {
-  repo.db.run('UPDATE branches SET clock_s = ?, clock_min_s = ?, clock_max_s = ? WHERE id = ?', [value, value, value, IDS.branchMain]);
+  repo.db.run('UPDATE branches SET clock_s = ?, clock_min_s = ?, clock_max_s = ?, simulation_cursor_s = ? WHERE id = ?', [value, value, value, value, IDS.branchMain]);
 }
 
 const T1_OPS = [
@@ -159,7 +159,7 @@ test('T14-01 回退覆盖面：地点、人物位置与心理、物品数量、�
     assert.equal(branch.clock_s, Number(target.clock_before_s), 'branches.clock_s 必须回到目标楼的 clock_before_s');
     assert.equal(branch.clock_min_s, Number(target.clock_before_s), 'branches.clock_min_s 必须回到目标楼的 clock_before_s');
     assert.equal(branch.clock_max_s, Number(target.clock_before_s), 'branches.clock_max_s 必须回到目标楼的 clock_before_s');
-    assert.equal(branch.head_turn_id, t1.receipt.turnId, 'head_turn_id 必须指向目标楼本身');
+    assert.equal(branch.head_turn_id, IDS.seedTurn, '撤销目标楼后 head 必须指向仍有效的父楼');
     assert.equal(Number(branch.revision), 2, '回退本身是一次新发布');
     assert.equal(queryBound(repo.db, 'SELECT status FROM turns WHERE id = ?', [t1.receipt.turnId])[0].status, 'rolled_back');
   } finally {
@@ -223,7 +223,7 @@ test('T14-02 中间楼后继失效：回退到 T1 会同时撤销 T2/T3，plan.t
     assert.equal(branch.clock_s, 0);
     assert.equal(branch.clock_min_s, 0);
     assert.equal(branch.clock_max_s, 0);
-    assert.equal(branch.head_turn_id, t1.receipt.turnId, '回退中间楼后 head 指向目标楼');
+    assert.equal(branch.head_turn_id, IDS.seedTurn, '回退中间楼及后文后 head 指向其父楼');
     assert.equal(Number(branch.revision), 4);
 
     // turn_changes 里 T2/T3 的「after」不再等于当前行值（记录不再描述当前状态）
@@ -438,7 +438,7 @@ test('T14-04 manual 与后台续算归属：各记自己的 turn_id，并随该�
       '后台续算楼必须随触发楼标 rolled_back',
     );
     const branch = branchRow(repo);
-    assert.equal(branch.head_turn_id, manual.receipt.turnId, '回退后 head 指向目标楼本身');
+    assert.equal(branch.head_turn_id, IDS.seedTurn, '回退后 head 指向仍有效的父楼');
     assert.equal(branch.clock_s, 0);
   } finally {
     await repo.close();

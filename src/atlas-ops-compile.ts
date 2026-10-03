@@ -123,12 +123,12 @@ export function compileOperations(input: CompileOperationsInput): CompiledOperat
   const declared = declareRefs(normalized, {
     anchor: input.anchor,
     baseRevision: input.revision,
-    seed: input.seedRefs,
+    seed: [...(input.seedRefs ?? []), ...(input.knownRefs ?? []).map(ref=>({...ref,rowRev:ref.rowRev??null,declaredByOpId:null}))],
     makeId,
   });
   issues.push(...declared.issues);
 
-  const scope = createRefScope();
+  const scope = createRefScope(input.seedRefs ?? []);
   for (const ref of input.knownRefs ?? []) {
     scope.declare({ alias: ref.alias, id: ref.id, kind: ref.kind, rowRev: ref.rowRev ?? null, declaredByOpId: null });
   }

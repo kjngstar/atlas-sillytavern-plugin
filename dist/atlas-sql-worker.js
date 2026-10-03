@@ -3613,6 +3613,11 @@ END`;
     actionDependsLimit: 8,
     actionPayloadRefLimit: 8
   };
+  function decisionActorBudget(maxTokens) {
+    const raw = Math.floor((Number(maxTokens) - 512) / 256);
+    const bounded = Math.min(ATLAS_RUNTIME_LIMITS.actorsPerDecisionBatch, Math.max(1, raw));
+    return Number.isFinite(bounded) ? bounded : 1;
+  }
   var ACTION_PAYLOAD_REF_LIMIT = 8;
   var ACTION_DEPENDS_LIMIT = 8;
   var CAPABILITY_LIMIT = 16;
@@ -4350,8 +4355,8 @@ END`;
   var NON_JOURNALED_TABLES = /* @__PURE__ */ new Set(["turns", "turn_changes", "sync_outbox"]);
   var GLOBAL_PK_TABLES = /* @__PURE__ */ new Set(["branches", "turns", "turn_changes", "sync_outbox"]);
   function refuse(code, message, path, detail) {
-    const issue10 = { code, path, message, severity: "error", retryable: code !== "ROLLBACK_TOO_LARGE" };
-    return new AtlasDbError(code, message, { ...detail, issues: [issue10] });
+    const issue14 = { code, path, message, severity: "error", retryable: code !== "ROLLBACK_TOO_LARGE" };
+    return new AtlasDbError(code, message, { ...detail, issues: [issue14] });
   }
   function note(code, message, extra = {}) {
     const tail = [extra.turnId ? `turn=${extra.turnId}` : "", extra.changeId ? `change=${extra.changeId}` : ""].filter((part) => part.length > 0).join(" ");
@@ -4480,7 +4485,7 @@ END`;
       const wb = wallOf.get(b) ?? 0;
       if (wa !== wb) return wa - wb;
       return a < b ? -1 : a > b ? 1 : 0;
-    });
+    }).filter((id) => !(target.kind === "migration" && id === targetTurnId));
     const headTurnId = branch.head_turn_id === null || branch.head_turn_id === void 0 ? null : String(branch.head_turn_id);
     const chainSet = /* @__PURE__ */ new Set();
     let cursor = headTurnId;
@@ -4501,6 +4506,7 @@ END`;
     const steps = [];
     const tableCounts = {};
     let sequence = 1;
+    let restoredBranch = null;
     for (const turnId of turns) {
       const entries = readTurnChanges(db, turnId);
       for (let i = entries.length - 1; i >= 0; i -= 1) {
@@ -4515,6 +4521,7 @@ END`;
           continue;
         }
         if (entry.targetTable === "branches") {
+          restoredBranch = parseBefore(entry);
           issues.push(
             note("ROLLBACK_BRANCH_FIELDS_FOLDED", `分支可回退字段由一条显式 step 统一表达（日志行 ${entry.id} 折入）`, {
               turnId,
@@ -4546,14 +4553,14 @@ END`;
       }
     }
     const restoredCursorS = Math.min(finiteOr(branch.simulation_cursor_s, 0), clockTargetS);
-    const branchRestore = { ...branch };
-    branchRestore.head_turn_id = parentOf.get(targetTurnId) ?? null;
+    const branchRestore = { ...branch, ...restoredBranch ?? {} };
+    branchRestore.head_turn_id = target.kind === "migration" ? targetTurnId : parentOf.get(targetTurnId) ?? null;
     branchRestore.revision = revision + 1;
     branchRestore.clock_s = clockTargetS;
-    branchRestore.clock_min_s = clockTargetS;
-    branchRestore.clock_max_s = clockTargetS;
-    branchRestore.simulation_cursor_s = restoredCursorS;
-    branchRestore.simulation_status = "current";
+    branchRestore.clock_min_s = restoredBranch ? restoredBranch.clock_min_s : clockTargetS;
+    branchRestore.clock_max_s = restoredBranch ? restoredBranch.clock_max_s : clockTargetS;
+    branchRestore.simulation_cursor_s = restoredBranch ? restoredBranch.simulation_cursor_s : restoredCursorS;
+    branchRestore.simulation_status = restoredBranch ? restoredBranch.simulation_status : "current";
     steps.push({
       sequence,
       turnId: targetTurnId,
@@ -5384,12 +5391,12 @@ END`;
     return out;
   }
   function makeIssue(code, path, message, severity, retryable, where) {
-    const issue10 = { code, path, message, severity, retryable };
-    if (where && where.line !== void 0) issue10.line = where.line;
-    if (where && where.opId !== void 0) issue10.opId = where.opId;
-    if (where && where.groupId !== void 0) issue10.groupId = where.groupId;
-    if (where && where.dependencyId !== void 0) issue10.dependencyId = where.dependencyId;
-    return issue10;
+    const issue14 = { code, path, message, severity, retryable };
+    if (where && where.line !== void 0) issue14.line = where.line;
+    if (where && where.opId !== void 0) issue14.opId = where.opId;
+    if (where && where.groupId !== void 0) issue14.groupId = where.groupId;
+    if (where && where.dependencyId !== void 0) issue14.dependencyId = where.dependencyId;
+    return issue14;
   }
   function refPath(field) {
     if (!field) return "$.ref";
@@ -5741,18 +5748,18 @@ END`;
     const dependencyId = where.dependencyId ?? (rec ? str(rec["dependencyId"]) : void 0) ?? (hasEmbedded ? str(embedded["dependencyId"]) : void 0);
     const severity = where.severity ?? (rec?.["severity"] === "warning" || rec?.["severity"] === "error" ? rec["severity"] : void 0) ?? (hasEmbedded ? embedded["severity"] === "warning" ? "warning" : "error" : void 0) ?? "error";
     const retryable = where.retryable ?? (typeof rec?.["retryable"] === "boolean" ? rec["retryable"] : void 0) ?? (hasEmbedded && typeof embedded["retryable"] === "boolean" ? embedded["retryable"] : void 0) ?? false;
-    const issue10 = {
+    const issue14 = {
       code,
       path,
       message: redactSecrets(message),
       severity,
       retryable
     };
-    if (line !== void 0) issue10.line = line;
-    if (opId !== void 0) issue10.opId = opId;
-    if (groupId !== void 0) issue10.groupId = groupId;
-    if (dependencyId !== void 0) issue10.dependencyId = dependencyId;
-    return issue10;
+    if (line !== void 0) issue14.line = line;
+    if (opId !== void 0) issue14.opId = opId;
+    if (groupId !== void 0) issue14.groupId = groupId;
+    if (dependencyId !== void 0) issue14.dependencyId = dependencyId;
+    return issue14;
   }
 
   // src/atlas-ops-normalize.ts
@@ -5836,6 +5843,7 @@ END`;
       "location_ref",
       "route_ref",
       "actor_ref",
+      "subject_ref",
       "participants",
       "action_ref",
       "event_ref",
@@ -6589,10 +6597,10 @@ END`;
 
   // src/atlas-ops-sources.ts
   function makeIssue2(code, path, message, severity, retryable, opId, line) {
-    const issue10 = { code, path, message, severity, retryable };
-    if (opId !== void 0) issue10.opId = opId;
-    if (line !== void 0) issue10.line = line;
-    return issue10;
+    const issue14 = { code, path, message, severity, retryable };
+    if (opId !== void 0) issue14.opId = opId;
+    if (line !== void 0) issue14.line = line;
+    return issue14;
   }
   function truncateReason(text) {
     const value = typeof text === "string" ? text : "";
@@ -6781,9 +6789,9 @@ END`;
   function bindSources(op, ctx) {
     const issues = [];
     const keys = requestedSourceKeys(op?.source);
-    const snapshot = Array.isArray(ctx?.snapshot) ? ctx.snapshot : [];
+    const snapshot2 = Array.isArray(ctx?.snapshot) ? ctx.snapshot : [];
     const byKey = /* @__PURE__ */ new Map();
-    for (const entry of snapshot) {
+    for (const entry of snapshot2) {
       if (!entry || typeof entry.key !== "string") continue;
       const key = entry.key.trim();
       if (key.length > 0 && !byKey.has(key)) byKey.set(key, entry);
@@ -6794,7 +6802,7 @@ END`;
     );
     if (keys.length === 0) {
       if (ctx.phase === "observe" || ctx.phase === "geography") {
-        const bound = snapshot.filter((entry) => entry && (entry.kind === "story" || entry.kind === "user"));
+        const bound = snapshot2.filter((entry) => entry && (entry.kind === "story" || entry.kind === "user"));
         const kind = bound.some((entry) => entry.kind === "story") ? "story" : "user";
         if (bound.length === 0) {
           issues.push(
@@ -6843,7 +6851,7 @@ END`;
         makeIssue2(
           "SOURCE_UNKNOWN",
           "$.source",
-          `请求的来源 ${unknown.map((key) => `「${key}」`).join("、")} 不在本次来源快照中；可用来源：${snapshot.map((entry) => entry.key).join("、") || "（空）"}。不伪造引文。`,
+          `请求的来源 ${unknown.map((key) => `「${key}」`).join("、")} 不在本次来源快照中；可用来源：${snapshot2.map((entry) => entry.key).join("、") || "（空）"}。不伪造引文。`,
           "error",
           true,
           typeof op?.op === "string" ? op.op : void 0
@@ -7724,7 +7732,7 @@ END`;
   }
   function turnIdOf(ctx) {
     if (typeof ctx.turnId === "string" && ctx.turnId !== "") return ctx.turnId;
-    return ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
+    return ctx.turnId ?? ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
   }
   function basisFor2(ctx, op, extra = {}) {
     if (ctx.basisFor) return ctx.basisFor(op, extra);
@@ -8579,7 +8587,7 @@ END`;
       }
     }
     if (result.issues.some((i) => i.severity === "error")) return result;
-    const turnId = ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
+    const turnId = ctx.turnId ?? ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
     if (existingRow) {
       const merged = { ...existingRow, ...changes };
       merged.row_rev = Number(existingRow.row_rev ?? 1) + 1;
@@ -8808,7 +8816,7 @@ END`;
       }
       secrecy = s;
     }
-    const turnId = ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
+    const turnId = ctx.turnId ?? ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
     const actorId = actor.entry.id;
     const planId = ctx.makeId("action", op.opId, `plan:${goal}`);
     const parentRow = createRow(
@@ -8898,7 +8906,7 @@ END`;
       result.issues.push(issue5("REF_UNKNOWN", "$.ref", `行动引用存在但行不存在：${rowId}`, op));
       return result;
     }
-    const turnId = ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
+    const turnId = ctx.turnId ?? ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
     const touches = [];
     const children = ctx.tables.selectWhere("actions", { branch_id: ctx.branchId, parent_action_id: rowId }, 64).filter(
       (c) => !["completed", "failed", "cancelled"].includes(String(c.status))
@@ -9065,10 +9073,11 @@ END`;
     };
     const locationId = resolveOne(data.location_ref, ["location"], "location_ref");
     const routeId = resolveOne(data.route_ref, ["route"], "route_ref");
-    const subjectId = resolveOne(data.subject_ref, ["character", "faction", "item"], "subject_ref");
+    const subjectId = resolveOne(data.subject_ref ?? data.actor_ref, ["character", "faction", "item"], "subject_ref");
     const causeActionId = resolveOne(data.action_ref, ["action"], "action_ref");
     const parentEventId = resolveOne(data.event_ref, ["event"], "event_ref");
-    if (phase === "simulated" && !causeActionId) {
+    const scheduledCause = parentEventId && ctx.sources.dueEventIds?.includes(parentEventId);
+    if (phase === "simulated" && !causeActionId && !scheduledCause) {
       result.issues.push(
         issue6("SIMULATED_EVENT_UNBOUND", "$.data.action_ref", "simulated 事件必须绑定真实到期行动（action_ref）；不能凭标题落实结果", op)
       );
@@ -9109,8 +9118,9 @@ END`;
     const occurredAt = phase === "scheduled" ? null : ctx.clockS;
     const status = phase === "scheduled" ? "scheduled" : "occurred";
     const scheduledStart = phase === "scheduled" ? typeof data.time_hint === "object" && isPlainObject5(data.time_hint) && typeof data.time_hint.at_s === "number" ? data.time_hint.at_s : null : occurredAt;
-    const eventId = ctx.makeId("event", op.opId, `event:${title}`);
-    const turnId = ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
+    const previous = scheduledCause ? ctx.tables.selectOne("events", ctx.branchId, parentEventId) : null;
+    const eventId = previous ? String(previous.id) : ctx.makeId("event", op.opId, `event:${title}`);
+    const turnId = ctx.turnId ?? ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
     const summary = asString(data.result) ?? title;
     const row2 = createRow(
       "events",
@@ -9123,7 +9133,7 @@ END`;
         subject_entity_id: subjectId,
         participants_json: participants,
         cause_action_id: causeActionId,
-        parent_event_id: parentEventId,
+        parent_event_id: previous ? previous.parent_event_id : parentEventId,
         scheduled_start_s: scheduledStart,
         occurred_at_s: occurredAt,
         outcome: phase === "scheduled" ? "" : summary,
@@ -9132,7 +9142,12 @@ END`;
       },
       { branchId: ctx.branchId, id: eventId, turnId, clockS: ctx.clockS, nowWallMs: Date.now(), rulesetVersion: "atlas-1" }
     );
-    result.mutations.push(mutation3("events", eventId, null, row2, op, basisWith(ctx, op, causeActionId ? [{ kind: "action", id: causeActionId }] : [])));
+    if (previous) {
+      row2.created_turn_id = previous.created_turn_id;
+      row2.row_rev = Number(previous.row_rev) + 1;
+      row2.scheduled_start_s = previous.scheduled_start_s;
+    }
+    result.mutations.push(mutation3("events", eventId, previous, row2, op, basisWith(ctx, op, causeActionId ? [{ kind: "action", id: causeActionId }] : [])));
     result.effects = [{ kind: "event_time_estimate", eventId, elapsed, phase }];
     const effects = data.effects;
     if (effects !== void 0) {
@@ -9368,7 +9383,7 @@ END`;
     const topicKey = topicKeyOf(kind, subjectId, content);
     const duplicate = ctx.tables.selectOne("information", ctx.branchId, ctx.makeId("information", op.opId, `info:${topicKey}:${hash}`));
     const infoId = ctx.makeId("information", op.opId, `info:${topicKey}:${hash}`);
-    const turnId = ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
+    const turnId = ctx.turnId ?? ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
     if (duplicate) {
       result.effects = [{ kind: "information_reused", informationId: infoId, spreadAtLocationId, recipientId }];
       result.mutations.push(
@@ -9497,10 +9512,11 @@ END`;
       attention = a;
     }
     const row2 = ctx.tables.selectOne("knowledge", ctx.branchId, opportunity.entry.id);
-    const turnId = ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
+    const turnId = ctx.turnId ?? ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
+    const contact = ctx.sources.opportunities?.find((o) => o.id === opportunity.entry.id);
     if (!row2) {
-      const receiver = ctx.tables.selectOne("characters", ctx.branchId, opportunity.entry.id);
-      const informationId = ctx.tables.selectOne("information", ctx.branchId, opportunity.entry.id);
+      const receiver = contact?.receiverEntityId ? ctx.tables.selectOne("characters", ctx.branchId, contact.receiverEntityId) : null;
+      const informationId = contact?.informationId ? ctx.tables.selectOne("information", ctx.branchId, contact.informationId) : null;
       if (!receiver || !informationId) {
         result.issues.push(
           issue7(
@@ -9513,22 +9529,11 @@ END`;
         return result;
       }
     }
-    const target = row2 ?? {
-      branch_id: ctx.branchId,
-      id: opportunity.entry.id,
-      row_rev: 1,
-      created_turn_id: turnId,
-      updated_turn_id: turnId,
-      knower_character_id: opportunity.entry.id,
-      knower_faction_id: null,
-      is_pov: 0,
-      information_id: opportunity.entry.id,
-      first_received_at_s: ctx.clockS,
-      belief: "heard",
-      attention: "normal",
-      reaction_note: "",
-      status: "active"
-    };
+    const target = row2 ?? createRow("knowledge", {
+      knower_character_id: contact.receiverEntityId,
+      information_id: contact.informationId,
+      first_received_at_s: contact.atS
+    }, { branchId: ctx.branchId, id: opportunity.entry.id, turnId, clockS: ctx.clockS, nowWallMs: 0, rulesetVersion: "atlas-1" });
     const after = applyPatch(target, {
       belief,
       attention,
@@ -9665,7 +9670,7 @@ END`;
       result.issues.push(issue7("FIELD_TYPE_INVALID", "$.data.requirements", "requirements 必须是条件对象", op));
       return result;
     }
-    const turnId = ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
+    const turnId = ctx.turnId ?? ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
     const rowId = existing?.entry ? existing.entry.id : ctx.makeId("channel", op.opId, ref && ref.startsWith("new:") ? ref : `chan:${name}`);
     const before = existing?.entry ? ctx.tables.selectOne("channels", ctx.branchId, rowId) : null;
     const changes = {
@@ -9798,7 +9803,7 @@ END`;
       nominal = upper;
     }
     const quality = data.scale_quality !== void 0 && SCALE_QUALITY.includes(String(data.scale_quality)) ? String(data.scale_quality) : "estimated";
-    const turnId = ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
+    const turnId = ctx.turnId ?? ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
     const after = applyPatch(before, {
       meters_per_cell: nominal,
       scale_min_meters_per_cell: lower,
@@ -9992,7 +9997,7 @@ END`;
       return result;
     }
     if (result.issues.some((i) => i.severity === "error")) return result;
-    const turnId = ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
+    const turnId = ctx.turnId ?? ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
     if (before) {
       const after = applyPatch(before, {
         from_location_id: fromId,
@@ -10098,11 +10103,11 @@ END`;
     const declared = declareRefs(normalized, {
       anchor: input.anchor,
       baseRevision: input.revision,
-      seed: input.seedRefs,
+      seed: [...input.seedRefs ?? [], ...(input.knownRefs ?? []).map((ref) => ({ ...ref, rowRev: ref.rowRev ?? null, declaredByOpId: null }))],
       makeId
     });
     issues.push(...declared.issues);
-    const scope = createRefScope();
+    const scope = createRefScope(input.seedRefs ?? []);
     for (const ref of input.knownRefs ?? []) {
       scope.declare({ alias: ref.alias, id: ref.id, kind: ref.kind, rowRev: ref.rowRev ?? null, declaredByOpId: null });
     }
@@ -10135,7 +10140,7 @@ END`;
           // 前向引用合法：本批已声明的别名解析成确定性 ID，未声明的才告警。
           resolveAlias: (alias) => declared.aliasById.get(alias) ?? scope.get(alias)?.id ?? null
         });
-        for (const issue10 of bound.issues ?? []) sourceIssues.push(issue10);
+        for (const issue14 of bound.issues ?? []) sourceIssues.push(issue14);
         const basis = { ...bound.basis };
         if (extra?.causes?.length) basis.causes = [...basis.causes, ...extra.causes];
         if (extra?.certainty) basis.certainty = extra.certainty;
@@ -10152,7 +10157,7 @@ END`;
       }
       const compiler = compilerFor(op.value.op);
       if (!compiler) {
-        const issue10 = {
+        const issue14 = {
           code: "UNKNOWN_OPERATION",
           path: "$.op",
           message: `没有这个语义操作：${op.value.op}`,
@@ -10161,15 +10166,15 @@ END`;
           opId: op.opId,
           line: op.line
         };
-        issues.push(issue10);
-        results.push({ opId: op.opId, result: { ...emptyCompileResult(), issues: [issue10] } });
+        issues.push(issue14);
+        results.push({ opId: op.opId, result: { ...emptyCompileResult(), issues: [issue14] } });
         continue;
       }
       let compiled;
       try {
         compiled = compiler(op, ctx);
       } catch (err) {
-        const issue10 = {
+        const issue14 = {
           code: "INTERNAL_ERROR",
           path: "$",
           message: `编译 ${op.value.op} 时内部错误：${err.message}`,
@@ -10178,8 +10183,8 @@ END`;
           opId: op.opId,
           line: op.line
         };
-        issues.push(issue10);
-        results.push({ opId: op.opId, result: { ...emptyCompileResult(), issues: [issue10] } });
+        issues.push(issue14);
+        results.push({ opId: op.opId, result: { ...emptyCompileResult(), issues: [issue14] } });
         continue;
       }
       for (const ref of compiled.declaredRefs ?? []) {
@@ -10189,11 +10194,11 @@ END`;
       results.push({ opId: op.opId, result: { ...compiled, issues: compiled.issues } });
     }
     const seenSource = new Set(issues.map((i) => `${i.opId ?? ""}|${i.code}|${i.path}`));
-    for (const issue10 of sourceIssues) {
-      const key = `${issue10.opId ?? ""}|${issue10.code}|${issue10.path}`;
+    for (const issue14 of sourceIssues) {
+      const key = `${issue14.opId ?? ""}|${issue14.code}|${issue14.path}`;
       if (seenSource.has(key)) continue;
       seenSource.add(key);
-      issues.push(issue10);
+      issues.push(issue14);
     }
     const merged = mergeCompileResults(results.map((r) => r.result));
     return { results, merged, issues, scope, aliasById: declared.aliasById, normalized };
@@ -10910,16 +10915,16 @@ END`;
     return hex;
   }
   function makeIssue3(code, path, message, severity, retryable, where) {
-    const issue10 = { code, path, message, severity, retryable };
-    if (where?.line !== void 0) issue10.line = where.line;
-    if (where?.opId !== void 0) issue10.opId = where.opId;
-    return issue10;
+    const issue14 = { code, path, message, severity, retryable };
+    if (where?.line !== void 0) issue14.line = where.line;
+    if (where?.opId !== void 0) issue14.opId = where.opId;
+    return issue14;
   }
   function oneLine(text) {
     return typeof text === "string" ? text.replace(/\s+/g, " ").trim() : "";
   }
-  function cloneIssue(issue10) {
-    return { ...issue10 };
+  function cloneIssue(issue14) {
+    return { ...issue14 };
   }
   function renderTicketLine(ticket, op) {
     const value = { ticket: ticket.ticket };
@@ -10931,11 +10936,11 @@ END`;
       if (model.source !== void 0) value.source = model.source;
       if (model.why !== void 0) value.why = model.why;
     }
-    const errors = ticket.issues.map((issue10) => ({
-      code: issue10.code,
-      path: issue10.path,
-      message: oneLine(issue10.message),
-      line: issue10.line ?? op?.line ?? null
+    const errors = ticket.issues.map((issue14) => ({
+      code: issue14.code,
+      path: issue14.path,
+      message: oneLine(issue14.message),
+      line: issue14.line ?? op?.line ?? null
     }));
     return `${JSON.stringify(value)} ｜ ticket=${ticket.ticket} originalOpId=${ticket.originalOpId} ｜ 允许操作：${ticket.allowedOps.length > 0 ? ticket.allowedOps.join(", ") : "（无）"} ｜ 错误：${JSON.stringify(errors)}`;
   }
@@ -11184,7 +11189,7 @@ END`;
       "主角是用户人设；助手楼层显示名或角色卡标题只是宿主元数据，不能仅凭它建成主角或在场人物。",
       "地点包含关系、人物粗位置与精确坐标分开处理。学校内但教室未知，就只给学校引用。",
       "心理/倾向可以依据人物设定合理更新，并保持简短。",
-      "已完成行为或明确耗时可以放在 event.propose 的 activity/time_hint 中，未完成计划不算已经经过时间。"
+      "已完成行为用 event.propose 的 activity={kind:dialogue/meal/rest/sleep/travel/combat/other,completed:true} 和 time_hint={elapsed_s:明确秒数} 或 {min_s,nominal_s,max_s}。未完成计划用completed:false，不能推进时间。已完成赶路可引用真实subject_ref人物和route_ref路线，由程序按距离及人物能力计算耗时。"
     ],
     geography: [
       "任务：处理这一张地图的层级、范围标定或路线估计。",
@@ -12108,6 +12113,3119 @@ END`;
     };
   }
 
+  // src/atlas-sql-refs.ts
+  var CATALOG = [
+    ["locations", "L", "location", 200],
+    ["characters", "C", "character", 200],
+    ["items", "I", "item", 100],
+    ["factions", "F", "faction", 100],
+    ["maps", "M", "map", 50],
+    ["actions", "A", "action", 200],
+    ["information", "N", "information", 200],
+    ["routes", "R", "route", 200],
+    ["events", "E", "event", 200],
+    ["journeys", "J", "journey", 200],
+    ["channels", "H", "channel", 100],
+    ["knowledge", "K", "knowledge", 200]
+  ];
+  function collectKnownRefs(tables, branchId) {
+    return CATALOG.flatMap(([table, prefix, kind, limit]) => tables.selectWhere(table, { branch_id: branchId }, limit).map((row2, i) => ({ alias: `${prefix}${i + 1}`, id: String(row2.id), kind, rowRev: typeof row2.row_rev === "number" ? row2.row_rev : null })));
+  }
+  function collectEntityRefs(tables, branchId, refs = collectKnownRefs(tables, branchId)) {
+    return refs.map((ref) => {
+      const table = CATALOG.find((entry) => entry[2] === ref.kind)?.[0];
+      const row2 = table ? tables.selectOne(table, branchId, ref.id) : null;
+      return `${ref.alias}=${String(row2?.name ?? row2?.title ?? ref.kind)}（${ref.kind}）`;
+    });
+  }
+  function inDecisionScope(op, ctx, tables, branchId) {
+    const d = op.value.data ?? {}, ids = new Map(ctx.knownRefs.map((ref) => [ref.alias, ref.id]));
+    const target = ids.get(String(op.value.ref ?? d.actor_ref ?? d.owner_ref ?? ""));
+    if (op.value.op === "noop" || op.value.op === "attention.propose") return true;
+    if (op.value.op === "character.upsert") return !!target && ctx.actorIds.includes(target) && Object.keys(d).every((k) => ["thought", "action_tendency"].includes(k));
+    if (op.value.op === "plan.propose") return !!target && ctx.actorIds.includes(target);
+    if (op.value.op === "plan.revise") {
+      const action = target ? tables.selectOne("actions", branchId, target) : null;
+      return !!action && ctx.actorIds.includes(String(action.actor_entity_id));
+    }
+    return false;
+  }
+
+  // src/atlas-sim-time.ts
+  var ACTIVITY_DEFAULTS = {
+    dialogue: { min_s: 0, nominal_s: 0, max_s: 0 },
+    meal: { min_s: 900, nominal_s: 1800, max_s: 3600 },
+    rest: { min_s: 300, nominal_s: 1200, max_s: 3600 },
+    sleep: { min_s: 14400, nominal_s: 28800, max_s: 36e3 },
+    combat: { min_s: 30, nominal_s: 120, max_s: 600 }
+  };
+  function activityDefault(kind) {
+    const found = ACTIVITY_DEFAULTS[kind];
+    return found ? { ...found } : null;
+  }
+  var ZERO = { min: 0, nominal: 0, max: 0 };
+  function isPlainObject9(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function finite(value) {
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
+  }
+  function nonNegative(value) {
+    const n = finite(value);
+    return n !== null && n >= 0 ? n : null;
+  }
+  function normalize(bound) {
+    const min = Math.max(0, bound.min);
+    const nominal = Math.max(min, bound.nominal);
+    const max = Math.max(nominal, bound.max);
+    return { min, nominal, max };
+  }
+  function add(a, b) {
+    return { min: a.min + b.min, nominal: a.nominal + b.nominal, max: a.max + b.max };
+  }
+  function maxBound(a, b) {
+    return { min: Math.max(a.min, b.min), nominal: Math.max(a.nominal, b.nominal), max: Math.max(a.max, b.max) };
+  }
+  function dedupe(values) {
+    const out = [];
+    for (const value of values) if (value !== "" && !out.includes(value)) out.push(value);
+    return out;
+  }
+  function explicitRef(activity) {
+    const raw = activity;
+    for (const key of ["ref", "id", "key"]) {
+      const value = raw[key];
+      if (typeof value === "string" && value.trim() !== "") return value;
+    }
+    return null;
+  }
+  function buildNode(activity, index, conflicts) {
+    const kind = typeof activity?.kind === "string" ? activity.kind : "other";
+    const label = `a${index}:${kind}`;
+    const hint = isPlainObject9(activity?.hint) ? activity.hint : {};
+    const afterRef = typeof hint.after_ref === "string" && hint.after_ref.trim() !== "" ? hint.after_ref : null;
+    const sameRef = typeof hint.same_interval_as === "string" && hint.same_interval_as.trim() !== "" ? hint.same_interval_as : null;
+    if (afterRef && sameRef) {
+      conflicts.push(`CONFLICT_AFTER_AND_SAME:${label}`);
+    }
+    const node = {
+      index,
+      label,
+      aliases: [label, `a${index}`],
+      interval: null,
+      quality: "unknown",
+      basis: [],
+      zero: false,
+      afterRef,
+      sameRef: afterRef ? null : sameRef
+    };
+    const ref = explicitRef(activity);
+    if (ref) node.aliases.push(ref);
+    if (!activity?.completed) {
+      node.interval = { ...ZERO };
+      node.quality = "explicit";
+      node.zero = true;
+      node.basis.push(`INCOMPLETE_ACTIVITY_ZERO:${kind}`);
+      return node;
+    }
+    const elapsed = nonNegative(hint.elapsed_s);
+    if (elapsed !== null) {
+      node.interval = { min: elapsed, nominal: elapsed, max: elapsed };
+      node.quality = "explicit";
+      node.zero = elapsed === 0;
+      node.basis.push(kind === "travel" ? "TRAVEL_COMPUTED" : "HINT_ELAPSED");
+      return node;
+    }
+    if (typeof hint.elapsed_s === "number" && Number.isFinite(hint.elapsed_s) && hint.elapsed_s < 0) {
+      conflicts.push(`HINT_ELAPSED_NEGATIVE:${label}`);
+    }
+    const hintNominal = nonNegative(hint.nominal_s);
+    const minS = nonNegative(hint.min_s);
+    const maxS = nonNegative(hint.max_s);
+    if (minS !== null || maxS !== null || hintNominal !== null) {
+      const min = minS ?? hintNominal ?? maxS ?? 0;
+      const max = maxS ?? hintNominal ?? minS ?? 0;
+      const nominal = hintNominal ?? (min + max) / 2;
+      node.interval = normalize({ min, nominal, max });
+      node.quality = "estimated";
+      node.basis.push(
+        minS !== null && maxS !== null ? "HINT_RANGE" : minS !== null ? "HINT_MIN_ONLY" : maxS !== null ? "HINT_MAX_ONLY" : "HINT_NOMINAL_ONLY"
+      );
+      return node;
+    }
+    const fallback = activityDefault(kind);
+    if (fallback) {
+      if (kind === "dialogue") {
+        node.interval = { ...ZERO };
+        node.quality = "explicit";
+        node.zero = true;
+        node.basis.push("ACTIVITY_DEFAULT:dialogue");
+        return node;
+      }
+      node.interval = normalize({ min: fallback.min_s, nominal: fallback.nominal_s, max: fallback.max_s });
+      node.quality = "estimated";
+      node.basis.push(`ACTIVITY_DEFAULT:${kind}`);
+      return node;
+    }
+    node.interval = null;
+    node.quality = "unknown";
+    node.basis.push(`TIME_UNRESOLVED:${kind}`);
+    return node;
+  }
+  function deriveElapsedInterval(facts, base) {
+    const conflicts = [];
+    const clockRef = `clock_s:${finite(base?.clockS) ?? 0}`;
+    const explicit = facts?.explicitElapsedS;
+    if (explicit !== null && explicit !== void 0) {
+      const value = nonNegative(explicit);
+      if (value === null) {
+        conflicts.push("EXPLICIT_ELAPSED_INVALID");
+      } else {
+        return {
+          minS: value,
+          nominalS: value,
+          maxS: value,
+          quality: "explicit",
+          basisRefs: ["EXPLICIT_ELAPSED", clockRef],
+          conflicts
+        };
+      }
+    }
+    const activities = Array.isArray(facts?.activities) ? facts.activities : [];
+    const nodes = activities.map((activity, index) => buildNode(activity, index, conflicts));
+    if (nodes.length === 0) {
+      return { minS: 0, nominalS: 0, maxS: 0, quality: "unknown", basisRefs: ["TIME_UNRESOLVED", clockRef], conflicts };
+    }
+    const unresolved = nodes.filter((n) => n.interval === null);
+    if (unresolved.length > 0) {
+      const basis2 = dedupe([...nodes.flatMap((n) => n.basis), "TIME_UNRESOLVED", clockRef]);
+      return { minS: 0, nominalS: 0, maxS: 0, quality: "unknown", basisRefs: basis2, conflicts };
+    }
+    const kindCount = /* @__PURE__ */ new Map();
+    for (const node of nodes) {
+      const kind = node.label.split(":")[1] ?? "";
+      kindCount.set(kind, (kindCount.get(kind) ?? 0) + 1);
+    }
+    const refMap = /* @__PURE__ */ new Map();
+    nodes.forEach((node) => {
+      const kind = node.label.split(":")[1] ?? "";
+      const aliases = [...node.aliases];
+      if ((kindCount.get(kind) ?? 0) === 1) aliases.push(kind);
+      for (const alias of aliases) if (!refMap.has(alias)) refMap.set(alias, node.index);
+    });
+    const resolve = (raw) => {
+      if (!raw) return null;
+      const hit = refMap.get(raw);
+      if (hit === void 0) {
+        conflicts.push(`UNRESOLVED_ACTIVITY_REF:${raw}`);
+        return null;
+      }
+      return hit;
+    };
+    const parent = nodes.map((_, i) => i);
+    const find = (i) => {
+      let cursor = i;
+      while (parent[cursor] !== cursor) {
+        parent[cursor] = parent[parent[cursor]];
+        cursor = parent[cursor];
+      }
+      return cursor;
+    };
+    const union = (a, b) => {
+      const ra = find(a);
+      const rb = find(b);
+      if (ra === rb) return;
+      if (ra < rb) parent[rb] = ra;
+      else parent[ra] = rb;
+    };
+    const afterEdges = [];
+    let implicitSameGroup = false;
+    for (const node of nodes) {
+      if (node.sameRef) {
+        if (node.sameRef === node.aliases[0] || node.sameRef === `a${node.index}`) {
+          conflicts.push(`SAME_INTERVAL_SELF:${node.label}`);
+          continue;
+        }
+        const target = resolve(node.sameRef);
+        if (target !== null && target !== node.index) union(node.index, target);
+      }
+      if (node.afterRef) {
+        const target = resolve(node.afterRef);
+        if (target !== null && target !== node.index) afterEdges.push({ from: target, to: node.index });
+        else if (target === node.index) conflicts.push(`AFTER_REF_SELF:${node.label}`);
+      }
+    }
+    const referenced = new Set(afterEdges.map((e) => e.to));
+    const unrelated = nodes.filter((n) => !n.afterRef && !referenced.has(n.index)).map((n) => n.index);
+    if (unrelated.length > 1) {
+      implicitSameGroup = true;
+      for (let i = 1; i < unrelated.length; i += 1) union(unrelated[0], unrelated[i]);
+    }
+    let groupOf = nodes.map((_, i) => find(i));
+    let groupIds = [...new Set(groupOf)];
+    let edges = afterEdges.map((e) => ({ from: find(e.from), to: find(e.to) })).filter((e) => {
+      if (e.from === e.to) {
+        conflicts.push("ORDER_INSIDE_SAME_INTERVAL");
+        return false;
+      }
+      return true;
+    });
+    const detectCycle = () => {
+      const indeg2 = /* @__PURE__ */ new Map();
+      for (const id of groupIds) indeg2.set(id, 0);
+      for (const e of edges) indeg2.set(e.to, (indeg2.get(e.to) ?? 0) + 1);
+      const queue = groupIds.filter((id) => (indeg2.get(id) ?? 0) === 0);
+      let seen = 0;
+      while (queue.length > 0) {
+        const id = queue.shift();
+        seen += 1;
+        for (const e of edges) {
+          if (e.from !== id) continue;
+          const next = (indeg2.get(e.to) ?? 0) - 1;
+          indeg2.set(e.to, next);
+          if (next === 0) queue.push(e.to);
+        }
+      }
+      return seen < groupIds.length;
+    };
+    if (edges.length > 0 && detectCycle()) {
+      conflicts.push("CYCLE_AFTER_REF");
+      edges = [];
+      const root = groupOf[0];
+      for (const id of groupIds) union(root, id);
+      groupOf = nodes.map((_, i) => find(i));
+      groupIds = [...new Set(groupOf)];
+      implicitSameGroup = true;
+    }
+    const groupBounds = /* @__PURE__ */ new Map();
+    for (const node of nodes) {
+      const id = groupOf[node.index];
+      const bound = node.interval;
+      const previous = groupBounds.get(id);
+      groupBounds.set(id, previous ? maxBound(previous, bound) : bound);
+    }
+    const predecessorBounds = (id) => {
+      const preds = edges.filter((e) => e.to === id);
+      if (preds.length === 0) return { ...ZERO };
+      let acc = null;
+      for (const pred of preds) {
+        const bound = finish.get(pred.from);
+        if (!bound) continue;
+        acc = acc ? maxBound(acc, bound) : bound;
+      }
+      return acc ?? { ...ZERO };
+    };
+    const indeg = /* @__PURE__ */ new Map();
+    for (const id of groupIds) indeg.set(id, 0);
+    for (const e of edges) indeg.set(e.to, (indeg.get(e.to) ?? 0) + 1);
+    const ready = groupIds.filter((id) => (indeg.get(id) ?? 0) === 0);
+    const finish = /* @__PURE__ */ new Map();
+    while (ready.length > 0) {
+      const id = ready.shift();
+      const own = groupBounds.get(id) ?? { ...ZERO };
+      finish.set(id, add(predecessorBounds(id), own));
+      for (const e of edges) {
+        if (e.from !== id) continue;
+        const next = (indeg.get(e.to) ?? 0) - 1;
+        indeg.set(e.to, next);
+        if (next === 0) ready.push(e.to);
+      }
+    }
+    let total = null;
+    for (const id of groupIds) {
+      const bound = finish.get(id);
+      if (!bound) continue;
+      total = total ? maxBound(total, bound) : bound;
+    }
+    const resolved = normalize(total ?? { ...ZERO });
+    const allExplicit = nodes.every((n) => n.quality === "explicit");
+    const estimated = nodes.some((n) => n.quality === "estimated") || implicitSameGroup;
+    const quality = allExplicit && !estimated ? "explicit" : "estimated";
+    const basis = dedupe([...nodes.flatMap((n) => n.basis), ...implicitSameGroup ? ["SAME_INTERVAL_INFERRED"] : [], clockRef]);
+    return {
+      minS: resolved.min,
+      nominalS: resolved.nominal,
+      maxS: resolved.max,
+      quality,
+      basisRefs: basis,
+      conflicts
+    };
+  }
+
+  // src/atlas-sim-actions.ts
+  var CONDITION_DEPTH = ATLAS_RUNTIME_LIMITS.conditionDepth;
+  var CONTAINER_DEPTH2 = ATLAS_RUNTIME_LIMITS.containerDepth;
+  var EVENT_KIND_BY_ACTION = {
+    prepare: "other",
+    travel: "passage",
+    wait: "other",
+    interact: "incident",
+    transmit: "communication",
+    investigate: "discovery",
+    act: "incident",
+    goal: "other"
+  };
+  var BELIEF_RANK = { rejected: 0, heard: 1, doubted: 2, believed: 3, verified: 4 };
+  function issue10(code, path, message, severity = "warning") {
+    return { code, path, message, severity, retryable: false };
+  }
+  function isPlainObject10(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function asObject(value) {
+    if (isPlainObject10(value)) return value;
+    if (typeof value === "string" && value.trim() !== "") {
+      try {
+        const parsed = JSON.parse(value);
+        return isPlainObject10(parsed) ? parsed : null;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+  function asArray(value) {
+    if (Array.isArray(value)) return value;
+    if (typeof value === "string" && value.trim() !== "") {
+      try {
+        const parsed = JSON.parse(value);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    }
+    return [];
+  }
+  function str2(value) {
+    return typeof value === "string" && value !== "" ? value : null;
+  }
+  function num2(value) {
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
+  }
+  function decodeOrNull(table, row2) {
+    const decoded = decodeRow(table, row2, { allowExtra: true });
+    return decoded.ok ? decoded.row : null;
+  }
+  function loadRow(world, table, id) {
+    const rows2 = queryBound(world.db, `SELECT * FROM ${table} WHERE branch_id = ? AND id = ? LIMIT 1`, [world.branchId, id]);
+    return rows2.length > 0 ? decodeOrNull(table, rows2[0]) : null;
+  }
+  function leafResult(ok, reason, atS) {
+    return { ok, reasons: ok || !reason ? [] : [reason], atS: ok ? atS : null };
+  }
+  function heldBy(world, actorId, itemId) {
+    let cursor = itemId;
+    const seen = /* @__PURE__ */ new Set();
+    for (let depth = 0; cursor && depth <= CONTAINER_DEPTH2; depth += 1) {
+      if (seen.has(cursor)) return false;
+      seen.add(cursor);
+      const item = loadRow(world, "items", cursor);
+      if (!item) return false;
+      if (str2(item.holder_character_id) === actorId) return true;
+      cursor = str2(item.container_item_id);
+    }
+    return false;
+  }
+  function actorLocation(world, actorId) {
+    const position = resolveEffectivePosition({ db: world.db, branchId: world.branchId }, actorId);
+    if (position.kind === "at_location") return position.locationId;
+    const row2 = loadRow(world, "characters", actorId) ?? loadRow(world, "locations", actorId);
+    return row2 ? str2(row2.location_id) : null;
+  }
+  function entityStatusMatches(world, entityId, expected) {
+    for (const table of ["characters", "locations", "items", "factions"]) {
+      const row2 = loadRow(world, table, entityId);
+      if (!row2) continue;
+      return String(row2.status ?? "") === expected || String(row2.physical_status ?? "") === expected;
+    }
+    return false;
+  }
+  function eventAtS(row2) {
+    if (!row2) return null;
+    return num2(row2.occurred_at_s) ?? num2(row2.scheduled_start_s) ?? num2(row2.ended_at_s);
+  }
+  function evaluateCondition(world, condition, opts) {
+    const clockS = num2(opts?.clockS) ?? 0;
+    const actorId = opts?.actorId ?? null;
+    const walk = (node, depth) => {
+      if (depth > CONDITION_DEPTH) return leafResult(false, "CONDITION_DEPTH_EXCEEDED", null);
+      if (node === null || node === void 0) return { ok: true, reasons: [], atS: null };
+      if (!isPlainObject10(node)) return leafResult(false, "CONDITION_INVALID", null);
+      const keys = Object.keys(node);
+      if (keys.length === 0) return { ok: true, reasons: [], atS: null };
+      if (Array.isArray(node.all)) {
+        const results = node.all.map((child) => walk(child, depth + 1));
+        const ok = results.every((r) => r.ok);
+        if (!ok) return { ok: false, reasons: results.flatMap((r) => r.reasons), atS: null };
+        const times = results.map((r) => r.atS).filter((t) => t !== null);
+        return { ok: true, reasons: [], atS: times.length > 0 ? Math.max(...times) : null };
+      }
+      if (Array.isArray(node.any)) {
+        const results = node.any.map((child) => walk(child, depth + 1));
+        const ok = results.some((r) => r.ok);
+        if (!ok) return { ok: false, reasons: results.flatMap((r) => r.reasons), atS: null };
+        const times = results.filter((r) => r.ok).map((r) => r.atS).filter((t) => t !== null);
+        return { ok: true, reasons: [], atS: times.length > 0 ? Math.min(...times) : null };
+      }
+      const kind = keys[0];
+      const body = isPlainObject10(node[kind]) ? node[kind] : {};
+      const actor = str2(body.actor_ref) ?? actorId;
+      switch (kind) {
+        case "time_at_or_after": {
+          const s = num2(body.s);
+          if (s === null) return leafResult(false, "CONDITION_FIELD_MISSING:time_at_or_after.s", null);
+          return leafResult(clockS >= s, `TIME_BEFORE:${s}`, s);
+        }
+        case "at_location": {
+          const locationId = str2(body.location_ref);
+          if (!actor || !locationId) return leafResult(false, "CONDITION_FIELD_MISSING:at_location", null);
+          return leafResult(actorLocation(world, actor) === locationId, `NOT_AT_LOCATION:${actor}->${locationId}`, null);
+        }
+        case "event_status": {
+          const eventId = str2(body.event_ref);
+          if (!eventId) return leafResult(false, "CONDITION_FIELD_MISSING:event_status.event_ref", null);
+          const event = loadRow(world, "events", eventId);
+          if (!event) return leafResult(false, `EVENT_UNKNOWN:${eventId}`, null);
+          const expected = Array.isArray(body.status) ? body.status.map(String) : [String(body.status ?? "")];
+          return leafResult(expected.includes(String(event.status)), `EVENT_STATUS:${eventId}=${String(event.status)}`, eventAtS(event));
+        }
+        case "knows": {
+          const informationId = str2(body.information_ref);
+          if (!actor || !informationId) return leafResult(false, "CONDITION_FIELD_MISSING:knows", null);
+          const rows2 = queryBound(
+            world.db,
+            `SELECT * FROM knowledge WHERE branch_id = ? AND information_id = ? AND status <> 'forgotten' AND (knower_character_id = ? OR is_pov = 1) LIMIT 1`,
+            [world.branchId, informationId, actor]
+          );
+          if (rows2.length === 0) return leafResult(false, `NOT_KNOWN:${actor}->${informationId}`, null);
+          const row2 = decodeOrNull("knowledge", rows2[0]) ?? {};
+          const minRank = BELIEF_RANK[String(body.min_belief ?? "heard")] ?? 1;
+          const actual = BELIEF_RANK[String(row2.belief ?? "heard")] ?? 1;
+          return leafResult(actual >= minRank, `BELIEF_TOO_LOW:${String(row2.belief)}`, num2(row2.first_received_at_s));
+        }
+        case "has_item": {
+          const itemId = str2(body.item_ref);
+          if (!actor || !itemId) return leafResult(false, "CONDITION_FIELD_MISSING:has_item", null);
+          return leafResult(heldBy(world, actor, itemId), `ITEM_NOT_HELD:${actor}->${itemId}`, null);
+        }
+        case "action_status": {
+          const actionId = str2(body.action_ref);
+          if (!actionId) return leafResult(false, "CONDITION_FIELD_MISSING:action_status.action_ref", null);
+          const row2 = loadRow(world, "actions", actionId);
+          if (!row2) return leafResult(false, `ACTION_UNKNOWN:${actionId}`, null);
+          const expected = Array.isArray(body.status) ? body.status.map(String) : [String(body.status ?? "")];
+          return leafResult(expected.includes(String(row2.status)), `ACTION_STATUS:${actionId}=${String(row2.status)}`, num2(row2.finished_at_s));
+        }
+        case "entity_status": {
+          const entityId = str2(body.entity_ref);
+          if (!entityId) return leafResult(false, "CONDITION_FIELD_MISSING:entity_status.entity_ref", null);
+          return leafResult(entityStatusMatches(world, entityId, String(body.status ?? "")), `ENTITY_STATUS:${entityId}`, null);
+        }
+        case "capability": {
+          const key = str2(body.key);
+          if (!actor || !key) return leafResult(false, "CONDITION_FIELD_MISSING:capability", null);
+          const row2 = loadRow(world, "characters", actor) ?? loadRow(world, "factions", actor);
+          const capabilities = asArray(row2?.capabilities_json).filter(isPlainObject10);
+          return leafResult(capabilities.some((c) => str2(c.key) === key), `CAPABILITY_MISSING:${key}`, null);
+        }
+        case "event_match": {
+          const eventKind = str2(body.kind);
+          if (!eventKind) return leafResult(false, "CONDITION_FIELD_MISSING:event_match.kind", null);
+          const params = [world.branchId, eventKind];
+          let sql = "SELECT * FROM events WHERE branch_id = ? AND kind = ? AND status IN ('ongoing','occurred')";
+          const subject = str2(body.subject_ref);
+          if (subject) {
+            sql += " AND subject_entity_id = ?";
+            params.push(subject);
+          }
+          const place = str2(body.place_ref);
+          if (place) {
+            sql += " AND location_id = ?";
+            params.push(place);
+          }
+          sql += " ORDER BY COALESCE(occurred_at_s, scheduled_start_s) LIMIT 1";
+          const rows2 = queryBound(world.db, sql, params);
+          if (rows2.length === 0) return leafResult(false, `EVENT_MATCH_NONE:${eventKind}`, null);
+          return leafResult(true, null, eventAtS(decodeOrNull("events", rows2[0])));
+        }
+        default:
+          return leafResult(false, `CONDITION_UNSUPPORTED:${kind}`, null);
+      }
+    };
+    const result = walk(condition, 0);
+    return { ok: result.ok, reasons: [...new Set(result.reasons)], atS: result.atS };
+  }
+  function nextTriggerTime(condition, afterS) {
+    if (!isPlainObject10(condition)) return null;
+    const times = [];
+    const walk = (node, depth) => {
+      if (depth > CONDITION_DEPTH || !isPlainObject10(node)) return;
+      if (Array.isArray(node.all) || Array.isArray(node.any)) {
+        for (const child of node.all ?? node.any) walk(child, depth + 1);
+        return;
+      }
+      const body = isPlainObject10(node.time_at_or_after) ? node.time_at_or_after : null;
+      if (body) {
+        const s = num2(body.s);
+        if (s !== null && s > afterS) times.push(s);
+      }
+    };
+    walk(condition, 0);
+    return times.length > 0 ? Math.min(...times) : null;
+  }
+  var OPEN_STATUSES = "('planned','ready','active','paused','blocked')";
+  function statusRank(status) {
+    return { active: 0, ready: 1, paused: 2, blocked: 3, planned: 4 }[status] ?? 5;
+  }
+  function priorityRank(priority) {
+    return { high: 0, normal: 1, low: 2 }[priority] ?? 3;
+  }
+  function isPassive(action) {
+    const payload = asObject(action.payload_json);
+    return payload?.passive === true;
+  }
+  function completionEvent(world, action, atS, makeId) {
+    const actorId = String(action.actor_entity_id ?? "");
+    const title = str2(action.title) ?? "";
+    return {
+      branch_id: world.branchId,
+      id: makeId("event", String(action.id ?? ""), "action_done"),
+      row_rev: 1,
+      created_turn_id: world.turnId,
+      updated_turn_id: world.turnId,
+      title: title !== "" ? `${title}（完成）` : "行动完成",
+      kind: EVENT_KIND_BY_ACTION[String(action.kind ?? "")] ?? "other",
+      summary: str2(action.intent) ?? title,
+      location_id: str2(action.target_location_id),
+      route_id: null,
+      route_progress_m: null,
+      subject_entity_id: actorId !== "" ? actorId : null,
+      participants_json: JSON.stringify(actorId !== "" ? [{ entity_id: actorId, role: "actor" }] : []),
+      cause_action_id: str2(action.id),
+      parent_event_id: null,
+      scheduled_start_s: null,
+      trigger_json: null,
+      occurred_at_s: atS,
+      ended_at_s: null,
+      outcome: "",
+      secrecy: String(action.secrecy ?? "restricted"),
+      status: "occurred"
+    };
+  }
+  function advanceActions(window2, world) {
+    const fromS = num2(window2?.fromS) ?? 0;
+    const untilS = num2(window2?.untilS) ?? fromS;
+    const makeId = world.makeId;
+    const issues = [];
+    const events = [];
+    const updated = [];
+    const rows2 = [];
+    for (const raw of queryBound(world.db, `SELECT * FROM actions WHERE branch_id = ? AND status IN ${OPEN_STATUSES}`, [world.branchId])) {
+      const decoded = decodeOrNull("actions", raw);
+      if (decoded) rows2.push(decoded);
+    }
+    rows2.sort((a, b) => {
+      const byStatus = statusRank(String(a.status)) - statusRank(String(b.status));
+      if (byStatus !== 0) return byStatus;
+      return String(a.id) < String(b.id) ? -1 : String(a.id) > String(b.id) ? 1 : 0;
+    });
+    const byId = /* @__PURE__ */ new Map();
+    for (const row2 of rows2) byId.set(String(row2.id), row2);
+    const mainAssigned = /* @__PURE__ */ new Map();
+    const activeRows = rows2.filter((r) => String(r.status) === "active" && String(r.kind) !== "goal");
+    const sortByPriority = (a, b) => {
+      const byPriority = priorityRank(String(a.priority)) - priorityRank(String(b.priority));
+      if (byPriority !== 0) return byPriority;
+      return String(a.id) < String(b.id) ? -1 : 1;
+    };
+    for (const row2 of activeRows.filter((r) => String(r.kind) !== "travel" && !isPassive(r)).sort(sortByPriority)) {
+      const actor = String(row2.actor_entity_id);
+      if (!mainAssigned.has(actor)) mainAssigned.set(actor, String(row2.id));
+    }
+    for (const row2 of activeRows.filter((r) => String(r.kind) === "travel").sort(sortByPriority)) {
+      const actor = String(row2.actor_entity_id);
+      if (!mainAssigned.has(actor)) mainAssigned.set(actor, String(row2.id));
+    }
+    const actorCache = /* @__PURE__ */ new Map();
+    const actorRow = (actorId) => {
+      if (!actorCache.has(actorId)) actorCache.set(actorId, loadRow(world, "characters", actorId));
+      return actorCache.get(actorId) ?? null;
+    };
+    for (const row2 of rows2) {
+      const actionId = String(row2.id);
+      const actorId = String(row2.actor_entity_id ?? "");
+      const kind = String(row2.kind ?? "");
+      if (kind === "goal") continue;
+      const payload = asObject(row2.payload_json) ?? {};
+      if (payload.program_kind === "rumor_delivery") continue;
+      const trigger = asObject(row2.trigger_json);
+      const evaluated = num2(row2.evaluated_until_s) ?? 0;
+      const startFloor = Math.max(fromS, evaluated);
+      const condition = trigger ? evaluateCondition(world, trigger, { clockS: untilS, actorId }) : { ok: true, reasons: [], atS: null };
+      const dependencies = asArray(row2.depends_on_json).filter((d) => typeof d === "string");
+      const pendingDeps = dependencies.filter((dep) => String(byId.get(dep)?.status ?? "") !== "completed");
+      const actor = actorRow(actorId);
+      const physical = actor ? String(actor.physical_status ?? "unknown") : "unknown";
+      const able = physical !== "dead" && physical !== "incapacitated";
+      let status = String(row2.status ?? "planned");
+      let reasonCode = row2.reason_code === null || row2.reason_code === void 0 ? null : String(row2.reason_code);
+      let nextCheck = num2(row2.next_check_s);
+      let startedAt = num2(row2.started_at_s);
+      let finishedAt = num2(row2.finished_at_s);
+      let resultEventId = str2(row2.result_event_id);
+      let progress = num2(row2.progress_s) ?? 0;
+      if (status === "planned") {
+        if (pendingDeps.length > 0) {
+          reasonCode = "DEPENDENCY_PENDING";
+          nextCheck = null;
+        } else if (!condition.ok) {
+          reasonCode = "TRIGGER_PENDING";
+          nextCheck = nextTriggerTime(trigger, untilS);
+        } else {
+          const earliest = num2(row2.earliest_start_s);
+          if (earliest !== null && earliest > untilS) {
+            reasonCode = "EARLIEST_START_PENDING";
+            nextCheck = earliest;
+          } else {
+            status = "ready";
+            reasonCode = null;
+          }
+        }
+      }
+      if (status === "ready" && able && pendingDeps.length === 0 && condition.ok) {
+        const earliest = num2(row2.earliest_start_s);
+        const startAt = Math.min(untilS, Math.max(startFloor, earliest ?? startFloor, condition.atS ?? startFloor));
+        startedAt = startedAt ?? startAt;
+        status = "active";
+        reasonCode = null;
+        if (kind !== "travel" && !isPassive(row2) && !mainAssigned.has(actorId)) mainAssigned.set(actorId, actionId);
+      } else if (status === "ready" && (!able || pendingDeps.length > 0 || !condition.ok)) {
+        status = able ? "blocked" : "paused";
+        reasonCode = able ? pendingDeps.length > 0 ? "DEPENDENCY_PENDING" : "CONDITION_FAILED" : "ACTOR_UNABLE";
+      }
+      if ((status === "paused" || status === "blocked") && able && pendingDeps.length === 0 && condition.ok) {
+        status = "active";
+        reasonCode = null;
+        startedAt = startedAt ?? startFloor;
+        if (kind !== "travel" && !isPassive(row2) && !mainAssigned.has(actorId)) mainAssigned.set(actorId, actionId);
+      } else if (status === "blocked" && !able) {
+        status = "paused";
+        reasonCode = "ACTOR_UNABLE";
+      }
+      if (status === "active") {
+        if (!condition.ok && kind !== "wait") {
+          status = "blocked";
+          reasonCode = "CONDITION_FAILED";
+        } else if (!able) {
+          reasonCode = "ACTOR_UNABLE";
+          issues.push(issue10("ACTION_ACTOR_UNABLE", `actions.${actionId}`, `${actorId} 已死亡或失去行动能力，行动不再推进（应由 haltActorWork 取消）`, "warning"));
+        } else {
+          const accrualStart = Math.max(startFloor, startedAt ?? startFloor);
+          let start = accrualStart;
+          for (const dep of dependencies) {
+            const depFinish = num2(byId.get(dep)?.finished_at_s);
+            if (depFinish !== null) start = Math.max(start, depFinish);
+          }
+          const dt = Math.max(0, untilS - start);
+          if (kind === "travel") {
+            reasonCode = "JOURNEY_RUNNING";
+          } else if (kind === "wait") {
+            const until = asObject(payload.until);
+            const waitCondition = until ? evaluateCondition(world, until, { clockS: untilS, actorId }) : { ok: true, reasons: [], atS: null };
+            if (waitCondition.ok) {
+              const at = Math.min(untilS, Math.max(start, waitCondition.atS ?? untilS));
+              status = "completed";
+              finishedAt = at;
+              progress = Math.max(0, at - (startedAt ?? start));
+              reasonCode = null;
+            } else {
+              reasonCode = "WAIT_PENDING";
+              nextCheck = nextTriggerTime(until, untilS);
+            }
+          } else {
+            const isMain = mainAssigned.get(actorId) === actionId;
+            const passive = isPassive(row2);
+            if (isMain || passive) {
+              const duration = asObject(row2.duration_json);
+              const nominal = duration ? num2(duration.nominal_s) : null;
+              if (dt > 0) {
+                progress += dt;
+              }
+              if (nominal === null) {
+                reasonCode = "DURATION_UNKNOWN";
+                issues.push(
+                  issue10("ACTION_DURATION_UNKNOWN", `actions.${actionId}`, "有效执行时间未知：累计时间但不假装完成，也不当成本轮 0 秒", "warning")
+                );
+              } else if (nominal <= 0) {
+                status = "completed";
+                finishedAt = start;
+                reasonCode = null;
+              } else if (progress >= nominal) {
+                const consume = nominal - (num2(row2.progress_s) ?? 0);
+                finishedAt = Math.min(untilS, Math.max(start, start + Math.max(0, consume)));
+                status = "completed";
+                progress = nominal;
+                reasonCode = null;
+              }
+            } else if (dt > 0) {
+              reasonCode = "TIME_SHARED";
+              issues.push(
+                issue10(
+                  "ACTION_TIME_SHARED",
+                  `actions.${actionId}`,
+                  `${actorId} 的主要行动时间已被 ${mainAssigned.get(actorId)} 占用，本窗口不重复计进度`,
+                  "warning"
+                )
+              );
+            }
+          }
+        }
+      }
+      if (world.deferOutcome && status === "completed" && kind !== "wait" && kind !== "travel") {
+        status = "active";
+        finishedAt = null;
+        reasonCode = "OUTCOME_PENDING";
+      }
+      if (status === "completed" && finishedAt !== null && resultEventId === null) {
+        const event = completionEvent(world, row2, finishedAt, makeId);
+        events.push(event);
+        resultEventId = String(event.id);
+      }
+      const complete = status === "completed" || status === "cancelled";
+      const nextRow = {
+        ...row2,
+        status,
+        reason_code: reasonCode,
+        progress_s: progress,
+        started_at_s: startedAt,
+        finished_at_s: finishedAt,
+        next_check_s: complete ? null : nextCheck,
+        evaluated_until_s: untilS,
+        result_event_id: resultEventId
+      };
+      const dirtyFields = ["status", "reason_code", "progress_s", "started_at_s", "finished_at_s", "next_check_s", "evaluated_until_s", "result_event_id"];
+      const dirty = dirtyFields.some((field) => nextRow[field] !== row2[field]);
+      if (dirty) {
+        nextRow.row_rev = (num2(row2.row_rev) ?? 1) + 1;
+        nextRow.updated_turn_id = world.turnId;
+      }
+      updated.push(nextRow);
+    }
+    return { actions: updated, events, issues };
+  }
+  function assertColumns(table, columns) {
+    const known = new Set(tableColumnNames(table));
+    for (const column of columns) if (!known.has(column)) throw new Error(`haltActorWork 列名不在 schema：${table}.${column}`);
+    return columns;
+  }
+  function haltActorWork(db, branchId, entityId, clockS, reasonCode) {
+    const actionRows = queryBound(db, `SELECT id FROM actions WHERE branch_id = ? AND actor_entity_id = ? AND status IN ${OPEN_STATUSES}`, [
+      branchId,
+      entityId
+    ]);
+    const journeyRows = queryBound(
+      db,
+      `SELECT id FROM journeys WHERE branch_id = ? AND mover_entity_id = ? AND status IN ('moving','paused','blocked')`,
+      [branchId, entityId]
+    );
+    if (actionRows.length > 0) {
+      const columns = assertColumns("actions", ["status", "finished_at_s", "reason_code", "evaluated_until_s"]);
+      runBound(
+        db,
+        `UPDATE actions SET ${columns.map((c) => `${c} = ?`).join(", ")}, row_rev = row_rev + 1 WHERE branch_id = ? AND actor_entity_id = ? AND status IN ${OPEN_STATUSES}`,
+        ["cancelled", clockS, reasonCode, clockS, branchId, entityId]
+      );
+    }
+    if (journeyRows.length > 0) {
+      const columns = assertColumns("journeys", ["status", "stop_reason"]);
+      runBound(
+        db,
+        `UPDATE journeys SET ${columns.map((c) => `${c} = ?`).join(", ")}, row_rev = row_rev + 1 WHERE branch_id = ? AND mover_entity_id = ? AND status IN ('moving','paused','blocked')`,
+        ["cancelled", reasonCode, branchId, entityId]
+      );
+    }
+    return { actions: actionRows.length, journeys: journeyRows.length };
+  }
+
+  // src/atlas-sim-motion.ts
+  var MOVEMENT_SPEED_PRESETS = {
+    walk: { min_mps: 0.8, nominal_mps: 1.4, max_mps: 1.8 },
+    ride: { min_mps: 2, nominal_mps: 4, max_mps: 8 },
+    ground_vehicle: { min_mps: 1.5, nominal_mps: 3, max_mps: 5 },
+    water: { min_mps: 1, nominal_mps: 3, max_mps: 8 },
+    flight: { min_mps: 5, nominal_mps: 12, max_mps: 30 },
+    flight_narrative_aircraft: { min_mps: 60, nominal_mps: 150, max_mps: 250 },
+    teleport: null,
+    custom: null
+  };
+  var TERRAIN_MULTIPLIERS = { road: 1, flat: 1, plain: 1, forest: 0.6, mountain: 0.45, mud: 0.5 };
+  var TERRAIN_TABLE = TERRAIN_MULTIPLIERS;
+  var NODE_REVIEW_DWELL_S = 120;
+  var WATER_TERRAINS = /* @__PURE__ */ new Set(["water", "river", "sea", "lake", "ocean", "swamp_water"]);
+  var GROUND_MODES = /* @__PURE__ */ new Set(["walk", "ride", "ground_vehicle", "custom"]);
+  var SPEED_BASES = /* @__PURE__ */ new Set(["preset", "narrative", "worldbook", "estimate"]);
+  var JOURNEY_SEGMENT_LIMIT = ATLAS_FIELD_LIMITS.journeySegmentLimit;
+  var GEOMETRY_VERTEX_LIMIT3 = ATLAS_FIELD_LIMITS.geometryVertexLimit;
+  function issue11(code, path, message, severity = "error") {
+    return { code, path, message, severity, retryable: false };
+  }
+  function isPlainObject11(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function asObject2(value) {
+    if (isPlainObject11(value)) return value;
+    if (typeof value === "string" && value.trim() !== "") {
+      try {
+        const parsed = JSON.parse(value);
+        return isPlainObject11(parsed) ? parsed : null;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+  function asArray2(value) {
+    if (Array.isArray(value)) return value;
+    if (typeof value === "string" && value.trim() !== "") {
+      try {
+        const parsed = JSON.parse(value);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    }
+    return [];
+  }
+  function str3(value) {
+    return typeof value === "string" && value !== "" ? value : null;
+  }
+  function num3(value) {
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
+  }
+  function positive(value) {
+    const n = num3(value);
+    return n !== null && n > 0 ? n : null;
+  }
+  function normalizeTerrain(value) {
+    const text = typeof value === "string" ? value.trim().toLowerCase() : "";
+    return text === "" ? "unknown" : text;
+  }
+  function parseProfiles(raw) {
+    return asArray2(raw).filter(isPlainObject11);
+  }
+  function decodeOrNull2(table, row2) {
+    const decoded = decodeRow(table, row2, { allowExtra: true });
+    return decoded.ok ? decoded.row : null;
+  }
+  function loadRow2(world, table, id) {
+    const rows2 = queryBound(world.db, `SELECT * FROM ${table} WHERE branch_id = ? AND id = ? LIMIT 1`, [world.branchId, id]);
+    return rows2.length > 0 ? decodeOrNull2(table, rows2[0]) : null;
+  }
+  function selectMobility(actor, route, evidence) {
+    const profiles = parseProfiles(actor?.mobility_profiles_json).filter((p) => p.enabled !== false);
+    if (profiles.length === 0) return null;
+    const terrain = normalizeTerrain(route?.terrain);
+    const terrainMultiplier = TERRAIN_TABLE[terrain] ?? 1;
+    const allowedModes = asArray2(route?.allowed_modes_json).filter((m) => typeof m === "string");
+    const evidenceMode = typeof evidence?.mode === "string" && evidence.mode.trim() !== "" ? evidence.mode.trim() : null;
+    const candidates = profiles.map((profile) => {
+      const mode = str3(profile.mode) ?? "custom";
+      const key = str3(profile.key) ?? mode;
+      const issues2 = [];
+      const preferred = evidenceMode !== null && (key === evidenceMode || mode === evidenceMode);
+      if (evidenceMode !== null && !preferred && profiles.length === 1) {
+        issues2.push(
+          issue11(
+            "MOBILITY_MODE_UNAVAILABLE",
+            "mobility_profiles_json",
+            `人物不具备移动方式 ${evidenceMode}；现有方式只有 ${key}（不自动授予其它模式的预设速度）`,
+            "warning"
+          )
+        );
+      }
+      if (allowedModes.length > 0 && !allowedModes.includes(mode)) {
+        issues2.push(issue11("MOBILITY_MODE_NOT_ALLOWED_ON_ROUTE", "routes.allowed_modes_json", `该路段不允许移动方式 ${mode}`, "error"));
+      }
+      const constraints = asObject2(profile.constraints) ?? {};
+      const deny = asArray2(constraints.terrain_deny).filter((t) => typeof t === "string");
+      const allow = asArray2(constraints.terrain_allow).filter((t) => typeof t === "string");
+      if (deny.includes(terrain)) {
+        issues2.push(issue11("MOBILITY_TERRAIN_DENIED", "mobility_profile.constraints.terrain_deny", `该方式禁止地形 ${terrain}`, "error"));
+      }
+      if (allow.length > 0 && !allow.includes(terrain)) {
+        issues2.push(issue11("MOBILITY_TERRAIN_NOT_ALLOWED", "mobility_profile.constraints.terrain_allow", `该方式只允许地形 ${allow.join("/")}`, "error"));
+      }
+      if (WATER_TERRAINS.has(terrain) && GROUND_MODES.has(mode)) {
+        issues2.push(issue11("WATER_CROSSING_INFEASIBLE", "routes.terrain", `步行/地面方式不能越过水域（${terrain}）`, "error"));
+      }
+      const preset2 = MOVEMENT_SPEED_PRESETS[mode] ?? null;
+      const profileMin = positive(profile.speed_min_mps);
+      const profileNominal = positive(profile.speed_nominal_mps);
+      const profileMax = positive(profile.speed_max_mps);
+      const nominal = profileNominal ?? preset2?.nominal_mps ?? profileMin ?? profileMax ?? 0;
+      if (mode !== "teleport" && nominal === 0) {
+        issues2.push(issue11("MOBILITY_SPEED_UNKNOWN", "mobility_profiles_json", `移动方式 ${key} 没有速度依据，不能凭未知填一个默认速度`, "error"));
+      }
+      return { mode, key, profile, issues: issues2, preferred, nominal };
+    });
+    const usable = candidates.filter((c) => evidenceMode === null && c.mode !== "custom" || c.preferred || candidates.length === 1);
+    const pool = usable.length > 0 ? usable : candidates;
+    pool.sort((a, b) => {
+      const errorsA = a.issues.filter((i) => i.severity === "error").length;
+      const errorsB = b.issues.filter((i) => i.severity === "error").length;
+      if (errorsA !== errorsB) return errorsA - errorsB;
+      if (a.preferred !== b.preferred) return a.preferred ? -1 : 1;
+      if (a.nominal !== b.nominal) return b.nominal - a.nominal;
+      return a.key < b.key ? -1 : a.key > b.key ? 1 : 0;
+    });
+    const chosen = pool[0];
+    const issues = [...chosen.issues];
+    const preset = MOVEMENT_SPEED_PRESETS[chosen.mode] ?? null;
+    const declaredBasis = str3(chosen.profile.speed_basis);
+    const speedBasis = SPEED_BASES.has(String(evidence?.speed_basis)) ? String(evidence?.speed_basis) : SPEED_BASES.has(String(declaredBasis)) ? String(declaredBasis) : "preset";
+    if (chosen.mode === "teleport") {
+      issues.push(
+        issue11(
+          "TELEPORT_NO_SPEED",
+          "mobility_profiles_json",
+          "传送没有速度值：由条件、范围限制与准备/施法耗时控制，调用方必须用 duration_override/准备时间，不得除以零",
+          "warning"
+        )
+      );
+      return { mode: chosen.mode, minMps: 0, nominalMps: 0, maxMps: 0, speedBasis, terrainMultiplier: 1, issues };
+    }
+    const ignoreTerrain = chosen.mode === "flight" || chosen.mode === "flight_narrative_aircraft";
+    const factor = ignoreTerrain ? 1 : terrainMultiplier;
+    const rawMin = positive(chosen.profile.speed_min_mps) ?? preset?.min_mps ?? 0;
+    const rawNominal = positive(chosen.profile.speed_nominal_mps) ?? preset?.nominal_mps ?? 0;
+    const rawMax = positive(chosen.profile.speed_max_mps) ?? preset?.max_mps ?? 0;
+    return {
+      mode: chosen.mode,
+      minMps: rawMin * factor,
+      nominalMps: rawNominal * factor,
+      maxMps: rawMax * factor,
+      speedBasis,
+      terrainMultiplier: factor,
+      issues
+    };
+  }
+  function routesFrom(world, locationId) {
+    const rows2 = queryBound(
+      world.db,
+      `SELECT * FROM routes WHERE branch_id = ? AND status = 'open' AND (from_location_id = ? OR (bidirectional = 1 AND to_location_id = ?))`,
+      [world.branchId, locationId, locationId]
+    );
+    const out = [];
+    for (const row2 of rows2) {
+      const decoded = decodeOrNull2("routes", row2);
+      if (decoded) out.push(decoded);
+    }
+    return out;
+  }
+  function mapCalibration(world, mapId) {
+    if (!mapId) return { metersPerCell: null, min: null, max: null, rev: null, quality: "uncalibrated" };
+    const map = loadRow2(world, "maps", mapId);
+    if (!map) return { metersPerCell: null, min: null, max: null, rev: null, quality: "uncalibrated" };
+    return {
+      metersPerCell: positive(map.meters_per_cell),
+      min: positive(map.scale_min_meters_per_cell),
+      max: positive(map.scale_max_meters_per_cell),
+      rev: num3(map.calibration_rev),
+      quality: String(map.scale_quality ?? "uncalibrated")
+    };
+  }
+  function geometryDistance(world, route) {
+    const geometry = asObject2(route.geometry_json);
+    if (!geometry || String(geometry.kind ?? "") !== "line") return null;
+    const coords = asArray2(geometry.coordinates).slice(0, GEOMETRY_VERTEX_LIMIT3);
+    if (coords.length < 2) return null;
+    let cells = 0;
+    for (let i = 1; i < coords.length; i += 1) {
+      const a = coords[i - 1];
+      const b = coords[i];
+      if (!Array.isArray(a) || !Array.isArray(b)) return null;
+      const ax = num3(a[0]);
+      const ay = num3(a[1]);
+      const bx = num3(b[0]);
+      const by = num3(b[1]);
+      if (ax === null || ay === null || bx === null || by === null) return null;
+      cells += Math.hypot(bx - ax, by - ay);
+    }
+    const calibration = mapCalibration(world, str3(route.map_id));
+    if (calibration.metersPerCell === null || calibration.quality === "uncalibrated") return null;
+    const perCell = calibration.metersPerCell;
+    const lo = calibration.min ?? perCell;
+    const hi = calibration.max ?? perCell;
+    return { minM: cells * Math.min(lo, perCell), nominalM: cells * perCell, maxM: cells * Math.max(hi, perCell) };
+  }
+  function segmentDistance(world, route) {
+    const nominal = num3(route.distance_m);
+    const basis = String(route.distance_basis ?? "unknown");
+    if (nominal !== null && nominal >= 0) {
+      const min = num3(route.distance_min_m) ?? nominal;
+      const max = num3(route.distance_max_m) ?? nominal;
+      const single = min === nominal && nominal === max;
+      const quality = single && (basis === "measured" || basis === "calibrated" || basis === "narrative") ? "confirmed" : "estimated";
+      return { minM: Math.min(min, nominal), nominalM: nominal, maxM: Math.max(max, nominal), quality, basis };
+    }
+    const fromGeometry = geometryDistance(world, route);
+    if (fromGeometry) {
+      const single = fromGeometry.minM === fromGeometry.nominalM && fromGeometry.nominalM === fromGeometry.maxM;
+      return { ...fromGeometry, quality: single ? "confirmed" : "estimated", basis: "geometry_calibrated" };
+    }
+    return { minM: 0, nominalM: 0, maxM: 0, quality: "unknown", basis };
+  }
+  function computeTravelInterval(world, actor, route, mode) {
+    const selection = selectMobility(actor, route, { mode });
+    if (!selection || selection.issues.some((i) => i.severity === "error") || route.status !== "open") return null;
+    const distance = segmentDistance(world, route);
+    const segment = {
+      distanceMinM: distance.minM,
+      distanceNominalM: distance.nominalM,
+      distanceMaxM: distance.maxM,
+      speedMinMps: selection.minMps,
+      speedNominalMps: selection.nominalMps,
+      speedMaxMps: selection.maxMps,
+      durationOverride: asObject2(route.travel_time_override_json),
+      quality: distance.quality
+    };
+    if (distance.quality === "unknown" && !segment.durationOverride) return null;
+    const bounds = segmentBounds(segment);
+    return bounds ? { min_s: bounds.min, nominal_s: bounds.nominal, max_s: bounds.max } : null;
+  }
+  function segmentQuality(geometryQuality, distanceQuality) {
+    if (geometryQuality === "unknown" && distanceQuality === "unknown") return "unknown";
+    if (geometryQuality === "confirmed" && distanceQuality === "confirmed") return "confirmed";
+    return "estimated";
+  }
+  function routeUsable(world, route, actorId, clockS) {
+    const rules = route.access_rules_json;
+    const condition = asObject2(rules);
+    if (!condition) return true;
+    return evaluateCondition(world, condition, { clockS, actorId }).ok;
+  }
+  function bfsLeg(world, startId, goalId, actorId, clockS, maxLegs) {
+    if (startId === goalId) return [];
+    const queue = [{ id: startId, path: [] }];
+    const visited = /* @__PURE__ */ new Set([startId]);
+    while (queue.length > 0) {
+      const current = queue.shift();
+      if (current.path.length >= maxLegs) continue;
+      for (const route of routesFrom(world, current.id)) {
+        if (!routeUsable(world, route, actorId, clockS)) continue;
+        const fromId = String(route.from_location_id);
+        const toId = String(route.to_location_id);
+        const nextId = fromId === current.id ? toId : fromId;
+        if (nextId === current.id) continue;
+        const path = [...current.path, { route, fromId: current.id, toId: nextId }];
+        if (nextId === goalId) return path;
+        if (visited.has(nextId)) continue;
+        visited.add(nextId);
+        queue.push({ id: nextId, path });
+      }
+    }
+    return null;
+  }
+  function mobilitySource(world, actorId) {
+    const character = loadRow2(world, "characters", actorId);
+    if (character) return { mobility_profiles_json: character.mobility_profiles_json };
+    const location = loadRow2(world, "locations", actorId);
+    if (location) {
+      const vehicle = asObject2(location.vehicle_profile_json);
+      return { mobility_profiles_json: vehicle ? vehicle.mobility_profiles : [] };
+    }
+    return null;
+  }
+  function originLocationOf(world, actorId) {
+    const position = resolveEffectivePosition({ db: world.db, branchId: world.branchId }, actorId);
+    if (position.kind === "at_location") return position.locationId;
+    const openJourney = queryBound(
+      world.db,
+      `SELECT stop_location_id, last_reached_location_id FROM journeys WHERE branch_id = ? AND mover_entity_id = ? AND status IN ('moving','paused','blocked') LIMIT 1`,
+      [world.branchId, actorId]
+    );
+    if (openJourney.length > 0) {
+      const row2 = openJourney[0];
+      return str3(row2.stop_location_id) ?? str3(row2.last_reached_location_id);
+    }
+    const character = loadRow2(world, "characters", actorId);
+    if (character) return str3(character.location_id);
+    const location = loadRow2(world, "locations", actorId);
+    if (location) return str3(location.anchor_location_id) ?? String(location.id);
+    return null;
+  }
+  function startJourney(action, world) {
+    const issues = [];
+    const actionId = str3(action?.id);
+    const status = String(action?.status ?? "planned");
+    if (status !== "ready") {
+      issues.push(
+        issue11("JOURNEY_NOT_READY", "actions.status", `行动状态为 ${status}；只有 ready 且条件成立的行动才建立行程（「我想去 C」只是计划）`, "warning")
+      );
+      return { journey: null, issues };
+    }
+    const kind = String(action?.kind ?? "");
+    if (kind !== "travel") {
+      issues.push(issue11("JOURNEY_NOT_TRAVEL", "actions.kind", `行动类型 ${kind} 不是 travel，不建立行程`, "warning"));
+      return { journey: null, issues };
+    }
+    const actorId = str3(action?.actor_entity_id);
+    if (!actorId || !actionId) {
+      issues.push(issue11("JOURNEY_NO_ACTOR", "actions.actor_entity_id", "travel 行动缺少 actor_entity_id 或 id"));
+      return { journey: null, issues };
+    }
+    const payload = asObject2(action?.payload_json) ?? {};
+    const destination = str3(action?.target_location_id) ?? str3(payload.destination_ref);
+    if (!destination) {
+      issues.push(issue11("JOURNEY_NO_DESTINATION", "actions.target_location_id", "travel 行动没有目的地，不能建立行程"));
+      return { journey: null, issues };
+    }
+    const trigger = asObject2(action?.trigger_json);
+    if (trigger) {
+      const evaluated = evaluateCondition(world, trigger, { clockS: world.clockS, actorId });
+      if (!evaluated.ok) {
+        issues.push(
+          issue11("JOURNEY_CONDITION_UNMET", "actions.trigger_json", `行动条件未成立，不开始行程：${evaluated.reasons.join("; ") || "条件为假"}`, "warning")
+        );
+        return { journey: null, issues };
+      }
+    }
+    const existing = queryBound(
+      world.db,
+      `SELECT id FROM journeys WHERE branch_id = ? AND mover_entity_id = ? AND status IN ('moving','paused','blocked') LIMIT 1`,
+      [world.branchId, actorId]
+    );
+    if (existing.length > 0) {
+      issues.push(issue11("JOURNEY_ALREADY_OPEN", "journeys.mover_entity_id", `同一 mover 已有未结束行程 ${String(existing[0].id)}`, "warning"));
+      return { journey: null, issues };
+    }
+    const origin = originLocationOf(world, actorId);
+    if (!origin) {
+      issues.push(issue11("JOURNEY_ORIGIN_UNKNOWN", "characters.location_id", "出发地未知；保持未知而不是伪造一个起点", "warning"));
+      return { journey: null, issues };
+    }
+    if (origin === destination) {
+      issues.push(issue11("JOURNEY_ALREADY_THERE", "actions.target_location_id", "出发地与目的地相同，不建立行程", "warning"));
+      return { journey: null, issues };
+    }
+    const viaRefs = asArray2(payload.via_refs).filter((v) => typeof v === "string");
+    const waypoints = [origin, ...viaRefs.filter((v) => v !== origin && v !== destination), destination];
+    const maxLegs = JOURNEY_SEGMENT_LIMIT;
+    const legs = [];
+    for (let i = 1; i < waypoints.length; i += 1) {
+      const leg = bfsLeg(world, waypoints[i - 1], waypoints[i], actorId, world.clockS, maxLegs - legs.length);
+      if (!leg) {
+        issues.push(
+          issue11("JOURNEY_NO_ROUTE", "routes", `找不到从 ${waypoints[i - 1]} 到 ${waypoints[i]} 的可通行路线（不伪造道路）`, "warning")
+        );
+        return { journey: null, issues };
+      }
+      legs.push(...leg);
+    }
+    if (legs.length === 0) {
+      issues.push(issue11("JOURNEY_NO_ROUTE", "routes", "没有可用路段"));
+      return { journey: null, issues };
+    }
+    if (legs.length > JOURNEY_SEGMENT_LIMIT) {
+      issues.push(issue11("JOURNEY_TOO_MANY_SEGMENTS", "journeys.segments_json", `路段数超过上限 ${JOURNEY_SEGMENT_LIMIT}`, "warning"));
+      return { journey: null, issues };
+    }
+    const source = mobilitySource(world, actorId);
+    if (!source) {
+      issues.push(issue11("JOURNEY_ACTOR_UNKNOWN", "entity_keys", `找不到 mover ${actorId} 的能力配置`));
+      return { journey: null, issues };
+    }
+    const segments = [];
+    const requestedMode = str3(payload.mobility_key);
+    for (const leg of legs) {
+      const route = leg.route;
+      const selection = selectMobility(source, { terrain: String(route.terrain ?? "unknown"), allowed_modes_json: route.allowed_modes_json }, {
+        mode: requestedMode ?? void 0
+      });
+      if (!selection) {
+        issues.push(issue11("JOURNEY_MOBILITY_MISSING", "mobility_profiles_json", `${actorId} 没有任何可用移动方式，不能开始行程`, "warning"));
+        return { journey: null, issues };
+      }
+      const errors = selection.issues.filter((i) => i.severity === "error");
+      if (errors.length > 0) {
+        issues.push(...errors);
+        return { journey: null, issues };
+      }
+      issues.push(...selection.issues);
+      const distance = segmentDistance(world, route);
+      const calibration = mapCalibration(world, str3(route.map_id));
+      if (distance.quality === "unknown" && !asObject2(route.travel_time_override_json)) {
+        issues.push(
+          issue11("JOURNEY_ETA_UNKNOWN", "routes.distance_m", `路段 ${String(route.id)} 无距离依据且无通行耗时覆盖：保留在途状态，ETA 未知`, "warning")
+        );
+      }
+      segments.push({
+        routeId: String(route.id),
+        routeRowRev: num3(route.row_rev) ?? 1,
+        geometryRev: num3(route.geometry_rev) ?? 1,
+        fromLocationId: leg.fromId,
+        toLocationId: leg.toId,
+        mobilityKey: requestedMode ?? selection.mode,
+        speedMinMps: selection.minMps,
+        speedNominalMps: selection.nominalMps,
+        speedMaxMps: selection.maxMps,
+        distanceMinM: distance.minM,
+        distanceNominalM: distance.nominalM,
+        distanceMaxM: distance.maxM,
+        durationOverride: asObject2(route.travel_time_override_json),
+        calibrationRev: calibration.rev,
+        quality: segmentQuality(String(route.geometry_quality ?? "unknown"), distance.quality)
+      });
+    }
+    const journey = {
+      branch_id: world.branchId,
+      id: world.makeId("journey", actionId, "journey"),
+      row_rev: 1,
+      created_turn_id: world.turnId,
+      updated_turn_id: world.turnId,
+      action_id: actionId,
+      mover_entity_id: actorId,
+      origin_location_id: origin,
+      destination_location_id: destination,
+      segments_json: JSON.stringify(segments),
+      segment_index: 0,
+      segment_distance_done_m: 0,
+      segment_time_done_s: 0,
+      last_reached_location_id: origin,
+      stop_location_id: null,
+      started_at_s: world.clockS,
+      last_advanced_at_s: world.clockS,
+      estimated_arrival_min_s: null,
+      estimated_arrival_max_s: null,
+      arrived_at_s: null,
+      position_quality: positionQualityOf(segments, 0),
+      status: "moving",
+      stop_reason: null
+    };
+    const eta = estimatedArrival(journey, world.clockS);
+    journey.estimated_arrival_min_s = eta.minS;
+    journey.estimated_arrival_max_s = eta.maxS;
+    return { journey, issues };
+  }
+  function positionQualityOf(segments, index) {
+    const current = segments[Math.min(index, Math.max(0, segments.length - 1))];
+    if (!current) return "unlocated";
+    if (current.quality === "confirmed") return "route_confirmed";
+    if (current.quality === "estimated") return "route_estimated";
+    return "unlocated";
+  }
+  function segField(segment, camel, snake) {
+    return segment[camel] !== void 0 ? segment[camel] : segment[snake];
+  }
+  function segmentBounds(segment) {
+    const override = asObject2(segField(segment, "durationOverride", "duration_override"));
+    if (override) {
+      const minS = num3(override.min_s);
+      const nominalS = num3(override.nominal_s);
+      const maxS = num3(override.max_s);
+      if (minS !== null || nominalS !== null || maxS !== null) {
+        const min = minS ?? nominalS ?? maxS ?? 0;
+        const max = maxS ?? nominalS ?? minS ?? 0;
+        const nominal = nominalS ?? (min + max) / 2;
+        if (max > 0) return { min: Math.max(0, Math.min(min, nominal)), nominal: Math.max(0, nominal), max: Math.max(nominal, max) };
+      }
+    }
+    const quality = String(segField(segment, "quality", "quality") ?? "unknown");
+    const distanceNominal = num3(segField(segment, "distanceNominalM", "distance_nominal_m")) ?? 0;
+    const distanceMin = num3(segField(segment, "distanceMinM", "distance_min_m")) ?? distanceNominal;
+    const distanceMax = num3(segField(segment, "distanceMaxM", "distance_max_m")) ?? distanceNominal;
+    const speedNominal = positive(segField(segment, "speedNominalMps", "speed_nominal_mps"));
+    if (quality === "unknown" || speedNominal === null) return null;
+    const speedMin = positive(segField(segment, "speedMinMps", "speed_min_mps")) ?? speedNominal;
+    const speedMax = positive(segField(segment, "speedMaxMps", "speed_max_mps")) ?? speedNominal;
+    return {
+      min: distanceMin / speedMax,
+      nominal: distanceNominal / speedNominal,
+      max: distanceMax / speedMin
+    };
+  }
+  function stopPolicyOf(world, journey) {
+    const actionId = str3(journey.action_id);
+    if (!actionId) return "review";
+    const action = loadRow2(world, "actions", actionId);
+    const payload = action ? asObject2(action.payload_json) : null;
+    const policy = payload ? String(payload.stop_policy ?? "") : "";
+    return policy === "continue" || policy === "review" || policy === "stop" ? policy : "review";
+  }
+  function routeIsOpen(world, routeId) {
+    if (!routeId) return true;
+    const row2 = loadRow2(world, "routes", routeId);
+    if (!row2) return true;
+    return String(row2.status ?? "open") === "open";
+  }
+  function advanceJourney(journey, untilS, world) {
+    const issues = [];
+    const events = [];
+    const row2 = { ...journey };
+    const rawSegments = journey.segments_json;
+    const segmentsRaw = asArray2(rawSegments).filter(isPlainObject11);
+    if (typeof rawSegments === "string" && rawSegments.trim() !== "" && segmentsRaw.length === 0) {
+      issues.push(issue11("JOURNEY_SEGMENTS_INVALID", "journeys.segments_json", "segments_json 损坏，保持原状不推进"));
+      return { journey: row2, events, remainingS: Math.max(0, untilS - (num3(journey.last_advanced_at_s) ?? 0)), issues };
+    }
+    const segments = segmentsRaw;
+    const status = String(journey.status ?? "moving");
+    const lastAdvanced = num3(journey.last_advanced_at_s) ?? num3(journey.started_at_s) ?? 0;
+    if (status !== "moving") {
+      return { journey: row2, events, remainingS: Math.max(0, untilS - lastAdvanced), issues };
+    }
+    if (!Number.isFinite(untilS) || untilS <= lastAdvanced) {
+      return { journey: row2, events, remainingS: 0, issues };
+    }
+    const policy = stopPolicyOf(world, journey);
+    let cursor = lastAdvanced;
+    let index = Math.max(0, Math.trunc(num3(journey.segment_index) ?? 0));
+    let timeDone = num3(journey.segment_time_done_s) ?? 0;
+    let distanceDone = num3(journey.segment_distance_done_m);
+    let lastReached = str3(journey.last_reached_location_id) ?? str3(journey.origin_location_id);
+    let nextStatus = "moving";
+    let stopLocation = null;
+    let stopReason = null;
+    let arrivedAt = null;
+    while (index < segments.length && cursor < untilS) {
+      const segment = segments[index];
+      const routeId = str3(segField(segment, "routeId", "route_id"));
+      if (!routeIsOpen(world, routeId)) {
+        nextStatus = "blocked";
+        stopReason = "route_blocked";
+        events.push({ kind: "blocked", locationId: lastReached ?? void 0, atS: cursor, secondsUsed: 0 });
+        break;
+      }
+      const bounds = segmentBounds(segment);
+      if (!bounds || bounds.nominal <= 0) {
+        issues.push(
+          issue11("JOURNEY_PROGRESS_UNKNOWN", "journeys.segments_json", `路段 ${routeId ?? index} 没有可用距离/速度依据：只累计时间，不伪造精确进度与到达`, "warning")
+        );
+        timeDone += untilS - cursor;
+        cursor = untilS;
+        break;
+      }
+      const leftInSegment = Math.max(0, bounds.nominal - timeDone);
+      const arriveAt = cursor + leftInSegment;
+      if (arriveAt > untilS) {
+        const used = untilS - cursor;
+        const speedNominal = positive(segField(segment, "speedNominalMps", "speed_nominal_mps")) ?? 0;
+        const distanceNominal = num3(segField(segment, "distanceNominalM", "distance_nominal_m"));
+        if (distanceDone !== null || distanceNominal !== null) {
+          const advance = speedNominal * used;
+          distanceDone = Math.min(distanceNominal ?? 0, (distanceDone ?? 0) + advance);
+        }
+        timeDone += used;
+        cursor = untilS;
+        break;
+      }
+      const secondsUsed = leftInSegment;
+      cursor = arriveAt;
+      timeDone = 0;
+      distanceDone = null;
+      const toId = str3(segField(segment, "toLocationId", "to_location_id")) ?? lastReached ?? "unknown";
+      lastReached = toId;
+      index += 1;
+      const isDestination = index >= segments.length;
+      if (isDestination) {
+        nextStatus = "arrived";
+        arrivedAt = cursor;
+        stopLocation = toId;
+        events.push({ kind: "arrived", locationId: toId, atS: cursor, secondsUsed });
+      } else {
+        events.push({ kind: "node_reached", locationId: toId, atS: cursor, secondsUsed });
+      }
+      if (policy === "review") {
+        const budget = Math.max(0, untilS - cursor);
+        const dwell = Math.min(NODE_REVIEW_DWELL_S, budget);
+        events.push({ kind: "review_dwell", locationId: toId, atS: cursor, secondsUsed: dwell });
+        cursor += dwell;
+        if (dwell < NODE_REVIEW_DWELL_S) {
+          issues.push(
+            issue11("DWELL_TRUNCATED", "journeys.last_advanced_at_s", `本轮余额不足以完成 ${NODE_REVIEW_DWELL_S} 秒节点观察，只扣了 ${dwell} 秒`, "warning")
+          );
+        }
+        if (!isDestination) {
+          nextStatus = "paused";
+          stopLocation = toId;
+          stopReason = "review";
+          break;
+        }
+      } else if (policy === "stop" && !isDestination) {
+        nextStatus = "paused";
+        stopLocation = toId;
+        stopReason = "stop_policy";
+        break;
+      }
+    }
+    row2.segment_index = index;
+    row2.segment_time_done_s = timeDone;
+    row2.segment_distance_done_m = distanceDone;
+    row2.last_reached_location_id = lastReached;
+    row2.last_advanced_at_s = cursor;
+    row2.status = nextStatus;
+    row2.stop_location_id = nextStatus === "moving" ? null : stopLocation;
+    row2.stop_reason = nextStatus === "moving" ? null : stopReason;
+    if (arrivedAt !== null) row2.arrived_at_s = arrivedAt;
+    row2.position_quality = positionQualityOf(segments, index);
+    const eta = estimatedArrival(row2, cursor);
+    row2.estimated_arrival_min_s = eta.minS;
+    row2.estimated_arrival_max_s = eta.maxS;
+    return { journey: row2, events, remainingS: Math.max(0, untilS - cursor), issues };
+  }
+  function nextNodeBoundary(journey) {
+    if (String(journey.status ?? "") !== "moving") return null;
+    const segments = asArray2(journey.segments_json).filter(isPlainObject11);
+    const index = Math.max(0, Math.trunc(num3(journey.segment_index) ?? 0));
+    if (index >= segments.length) return null;
+    const segment = segments[index];
+    const bounds = segmentBounds(segment);
+    if (!bounds) return null;
+    const timeDone = num3(journey.segment_time_done_s) ?? 0;
+    const atS = (num3(journey.last_advanced_at_s) ?? num3(journey.started_at_s) ?? 0) + Math.max(0, bounds.nominal - timeDone);
+    return { atS, toLocationId: str3(segField(segment, "toLocationId", "to_location_id")) ?? "", routeId: str3(segField(segment, "routeId", "route_id")) };
+  }
+  function estimatedArrival(journey, clockS) {
+    const segments = asArray2(journey.segments_json).filter(isPlainObject11);
+    const status = String(journey.status ?? "moving");
+    if (status === "arrived") {
+      const arrived = num3(journey.arrived_at_s);
+      return { minS: arrived, maxS: arrived, quality: "confirmed" };
+    }
+    if (status === "cancelled" || status === "blocked") return { minS: null, maxS: null, quality: "unknown" };
+    const lastAdvanced = num3(journey.last_advanced_at_s) ?? num3(journey.started_at_s) ?? clockS;
+    const startAt = Math.max(clockS, lastAdvanced);
+    const index = Math.max(0, Math.trunc(num3(journey.segment_index) ?? 0));
+    const timeDone = num3(journey.segment_time_done_s) ?? 0;
+    if (index >= segments.length) return { minS: null, maxS: null, quality: "unknown" };
+    let min = 0;
+    let max = 0;
+    let quality = "confirmed";
+    for (let i = index; i < segments.length; i += 1) {
+      const segment = segments[i];
+      const bounds = segmentBounds(segment);
+      if (!bounds) return { minS: null, maxS: null, quality: "unknown" };
+      const already = i === index ? Math.min(timeDone, bounds.min) : 0;
+      min += Math.max(0, bounds.min - already);
+      max += Math.max(0, bounds.max - already);
+      const segmentQuality2 = String(segField(segment, "quality", "quality") ?? "unknown");
+      if (segmentQuality2 !== "confirmed") quality = segmentQuality2 === "unknown" ? "unknown" : "estimated";
+      if (bounds.min !== bounds.max && quality === "confirmed") quality = "estimated";
+    }
+    if (quality === "unknown") return { minS: null, maxS: null, quality: "unknown" };
+    return { minS: startAt + min, maxS: startAt + max, quality };
+  }
+
+  // src/atlas-sim-opportunities.ts
+  var PUBLIC_CONTACT_DWELL_S = 60;
+  var OPPORTUNITY_BUCKET_S = 3600;
+  function isPlainObject12(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function asObject3(value) {
+    if (isPlainObject12(value)) return value;
+    if (typeof value === "string" && value.trim() !== "") {
+      try {
+        const parsed = JSON.parse(value);
+        return isPlainObject12(parsed) ? parsed : null;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+  function asArray3(value) {
+    if (Array.isArray(value)) return value;
+    if (typeof value === "string" && value.trim() !== "") {
+      try {
+        const parsed = JSON.parse(value);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    }
+    return [];
+  }
+  function str4(value) {
+    return typeof value === "string" && value !== "" ? value : null;
+  }
+  function num4(value) {
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
+  }
+  function decodeOrNull3(table, row2) {
+    const decoded = decodeRow(table, row2, { allowExtra: true });
+    return decoded.ok ? decoded.row : null;
+  }
+  function loadRows(world, table, where, params) {
+    const out = [];
+    for (const row2 of queryBound(world.db, `SELECT * FROM ${table} WHERE branch_id = ? AND ${where}`, [world.branchId, ...params])) {
+      const decoded = decodeOrNull3(table, row2);
+      if (decoded) out.push(decoded);
+    }
+    return out;
+  }
+  function opportunityId(parts) {
+    const bucket = Math.floor(Math.max(0, parts.anchorS) / OPPORTUNITY_BUCKET_S);
+    const material = [parts.kind, parts.subjectId ?? "-", parts.receiverEntityId ?? "-", parts.locationId ?? "-", `b${bucket}`].join("|");
+    let hash = 2166136261;
+    for (let i = 0; i < material.length; i += 1) {
+      hash ^= material.charCodeAt(i);
+      hash = Math.imul(hash, 16777619) >>> 0;
+    }
+    return `opp_${(hash >>> 0).toString(16).padStart(8, "0")}`;
+  }
+  function collectOpportunities(window2, world) {
+    const fromS = num4(window2?.fromS) ?? 0;
+    const untilS = num4(window2?.untilS) ?? fromS;
+    const opportunities = [];
+    const branchRows = queryBound(world.db, "SELECT pov_character_id FROM branches WHERE id = ? LIMIT 1", [world.branchId]);
+    const povCharacterId = branchRows.length > 0 ? str4(branchRows[0].pov_character_id) : null;
+    const knowers = /* @__PURE__ */ new Set();
+    for (const row2 of loadRows(world, "knowledge", "status <> 'forgotten'", [])) {
+      const informationId = str4(row2.information_id);
+      if (!informationId) continue;
+      const knower = str4(row2.knower_character_id) ?? (row2.is_pov === true || row2.is_pov === 1 ? povCharacterId : null);
+      if (knower) knowers.add(`${informationId}:${knower}`);
+    }
+    const alreadyKnows = (informationId, actorId) => informationId !== null && actorId !== null && knowers.has(`${informationId}:${actorId}`);
+    const dwell = /* @__PURE__ */ new Map();
+    const addDwell = (actorId, locationId, seconds) => {
+      if (seconds <= 0) return;
+      const key = `${actorId}|${locationId}`;
+      dwell.set(key, (dwell.get(key) ?? 0) + seconds);
+    };
+    for (const row2 of loadRows(world, "actions", "target_location_id IS NOT NULL AND status IN ('ready','active','paused','blocked','completed')", [])) {
+      const actorId = str4(row2.actor_entity_id);
+      const locationId = str4(row2.target_location_id);
+      if (!actorId || !locationId) continue;
+      const start = Math.max(fromS, num4(row2.started_at_s) ?? fromS);
+      const end = Math.min(untilS, num4(row2.finished_at_s) ?? untilS);
+      addDwell(actorId, locationId, end - start);
+    }
+    for (const row2 of loadRows(world, "journeys", "status IN ('moving','paused','arrived','blocked')", [])) {
+      const actorId = str4(row2.mover_entity_id);
+      if (!actorId) continue;
+      const stop = str4(row2.stop_location_id);
+      const status = String(row2.status ?? "");
+      if (stop && (status === "paused" || status === "blocked")) {
+        const start = Math.max(fromS, num4(row2.last_advanced_at_s) ?? fromS);
+        addDwell(actorId, stop, Math.min(untilS, num4(row2.arrived_at_s) ?? untilS) - start);
+      }
+      if (status === "arrived") {
+        const destination = str4(row2.destination_location_id);
+        if (destination) {
+          const start = Math.max(fromS, num4(row2.arrived_at_s) ?? fromS);
+          addDwell(actorId, destination, untilS - start);
+        }
+      }
+    }
+    const dwellAt = (actorId, locationId) => dwell.get(`${actorId}|${locationId}`) ?? 0;
+    const characters = loadRows(world, "characters", "status = 'active'", []);
+    const characterById = /* @__PURE__ */ new Map();
+    for (const character of characters) characterById.set(String(character.id), character);
+    const locationCache = /* @__PURE__ */ new Map();
+    const locationOf = (locationId) => {
+      if (!locationCache.has(locationId)) {
+        const rows2 = queryBound(world.db, "SELECT * FROM locations WHERE branch_id = ? AND id = ? LIMIT 1", [world.branchId, locationId]);
+        locationCache.set(locationId, rows2.length > 0 ? decodeOrNull3("locations", rows2[0]) : null);
+      }
+      return locationCache.get(locationId) ?? null;
+    };
+    const locationChain = (locationId) => {
+      const chain = [];
+      let cursor = locationId;
+      const seen = /* @__PURE__ */ new Set();
+      while (cursor && !seen.has(cursor)) {
+        seen.add(cursor);
+        chain.push(cursor);
+        const row2 = locationOf(cursor);
+        cursor = row2 ? str4(row2.parent_location_id) : null;
+      }
+      return chain;
+    };
+    const isAncestorOrSelf = (candidate, locationId) => locationChain(locationId).includes(candidate);
+    const factionMembers = /* @__PURE__ */ new Map();
+    const membersOf = (factionId) => {
+      if (!factionMembers.has(factionId)) {
+        const members = /* @__PURE__ */ new Set();
+        for (const row2 of loadRows(world, "relations", "status = 'active' AND object_entity_id = ?", [factionId])) {
+          const subject = str4(row2.subject_entity_id);
+          if (subject) members.add(subject);
+        }
+        factionMembers.set(factionId, members);
+      }
+      return factionMembers.get(factionId);
+    };
+    const explicitVisible = /* @__PURE__ */ new Set();
+    const channels = loadRows(world, "channels", "status = 'active' AND valid_from_s <= ? AND (valid_until_s IS NULL OR valid_until_s >= ?)", [untilS, fromS]);
+    for (const channel of channels) {
+      const channelId = String(channel.id);
+      const requirements = asObject3(channel.requirements_json);
+      const sourceEntity = str4(channel.source_entity_id);
+      const sourceLocation = str4(channel.source_location_id);
+      const scope = asObject3(channel.scope_json) ?? {};
+      const scopeLocations = asArray3(scope.location_refs).filter((v) => typeof v === "string");
+      const scopeEntities = asArray3(scope.entity_refs).filter((v) => typeof v === "string");
+      if (sourceEntity === null && sourceLocation === null && scopeEntities.length === 0 && scopeLocations.length === 0) continue;
+      const recipient = str4(channel.recipient_entity_id) ?? str4(channel.owner_entity_id);
+      if (requirements && !evaluateCondition(world, requirements, { clockS: untilS, actorId: recipient }).ok) continue;
+      const place = sourceLocation ?? scopeLocations[0] ?? null;
+      if (recipient && sourceEntity) explicitVisible.add(`${recipient}|${sourceEntity}`);
+      if (recipient && place) explicitVisible.add(`${recipient}|${place}`);
+      if (recipient && (sourceEntity || place)) {
+        const atS = Math.max(fromS, num4(channel.valid_from_s) ?? fromS);
+        opportunities.push({
+          id: opportunityId({ kind: "channel", subjectId: channelId, receiverEntityId: recipient, locationId: place, anchorS: atS }),
+          kind: "channel",
+          receiverEntityId: recipient,
+          informationId: null,
+          locationId: place,
+          atS,
+          requiresDwellS: 0,
+          basis: {
+            channelId,
+            channelKind: String(channel.kind ?? "other"),
+            sourceEntityId: sourceEntity,
+            sourceLocationId: sourceLocation,
+            scopeEntityRefs: scopeEntities,
+            scopeLocationRefs: scopeLocations,
+            transportModeKey: str4(channel.transport_mode_key),
+            reason: "channel_source_in_scope"
+          }
+        });
+      }
+      for (const entityId of scopeEntities) {
+        if (recipient && recipient !== entityId) explicitVisible.add(`${recipient}|${entityId}`);
+        const atS = Math.max(fromS, num4(channel.valid_from_s) ?? fromS);
+        opportunities.push({
+          id: opportunityId({ kind: "channel", subjectId: `${channelId}:${entityId}`, receiverEntityId: recipient, locationId: place, anchorS: atS }),
+          kind: "channel",
+          receiverEntityId: recipient,
+          informationId: null,
+          locationId: place,
+          atS,
+          requiresDwellS: 0,
+          basis: { channelId, channelKind: String(channel.kind ?? "other"), watchedEntityId: entityId, reason: "channel_scope" }
+        });
+      }
+    }
+    const fronts = loadRows(
+      world,
+      "rumor_fronts",
+      "status IN ('active','fading') AND first_available_at_s <= ? AND (expires_at_s IS NULL OR expires_at_s >= ?)",
+      [untilS, fromS]
+    );
+    const knownFront = /* @__PURE__ */ new Set();
+    for (const front of fronts) {
+      const frontId = String(front.id);
+      const informationId = str4(front.information_id);
+      const locationId = str4(front.location_id);
+      if (!informationId || !locationId || knownFront.has(`${informationId}|${locationId}`)) continue;
+      knownFront.add(`${informationId}|${locationId}`);
+      const firstAvailableAtS = num4(front.first_available_at_s) ?? fromS;
+      const audience = asObject3(front.audience_json) ?? {};
+      const access = String(audience.access ?? "public");
+      const audienceFaction = str4(audience.faction_id);
+      const reach = String(front.reach ?? "local");
+      if (firstAvailableAtS >= fromS && firstAvailableAtS <= untilS) {
+        opportunities.push({
+          id: opportunityId({ kind: "rumor_front", subjectId: informationId, receiverEntityId: null, locationId, anchorS: firstAvailableAtS }),
+          kind: "rumor_front",
+          receiverEntityId: null,
+          informationId,
+          locationId,
+          atS: firstAvailableAtS,
+          requiresDwellS: PUBLIC_CONTACT_DWELL_S,
+          basis: { frontId, reach, access, firstAvailableAtS, reason: "front_now_available" }
+        });
+      }
+      for (const character of characters) {
+        const actorId = String(character.id);
+        if (alreadyKnows(informationId, actorId)) continue;
+        if (actorId === str4(front.originator_entity_id)) continue;
+        if (access === "members" && audienceFaction && !membersOf(audienceFaction).has(actorId)) continue;
+        if (access === "recipients" && !asArray3(audience.entity_ids).includes(actorId)) continue;
+        const position = resolveEffectivePosition({ db: world.db, branchId: world.branchId }, actorId);
+        const presenceLocation = position.kind === "at_location" ? position.locationId : position.kind === "in_transit" ? null : str4(character.location_id);
+        if (presenceLocation && presenceLocation !== locationId) {
+          const presenceRow = locationOf(presenceLocation);
+          const isRoom = presenceRow ? String(presenceRow.kind ?? "") === "room" : false;
+          const insideFront = isAncestorOrSelf(locationId, presenceLocation);
+          if (isRoom || !insideFront) continue;
+        }
+        const originator = str4(front.originator_entity_id);
+        const explicit = explicitVisible.has(`${actorId}|${locationId}`) || originator !== null && explicitVisible.has(`${actorId}|${originator}`);
+        const standing = dwellAt(actorId, locationId);
+        const here = presenceLocation === locationId;
+        const basisDwell = here ? standing : 0;
+        if (basisDwell < PUBLIC_CONTACT_DWELL_S && !explicit) continue;
+        const atS = Math.max(firstAvailableAtS, fromS);
+        opportunities.push({
+          id: opportunityId({ kind: "same_location", subjectId: informationId, receiverEntityId: actorId, locationId, anchorS: firstAvailableAtS }),
+          kind: "same_location",
+          receiverEntityId: actorId,
+          informationId,
+          locationId,
+          atS,
+          requiresDwellS: PUBLIC_CONTACT_DWELL_S,
+          basis: {
+            frontId,
+            reach,
+            access,
+            dwellS: basisDwell,
+            presenceLocation,
+            explicitVisibility: explicit,
+            reason: explicit && basisDwell < PUBLIC_CONTACT_DWELL_S ? "explicit_hear_or_see" : "stayed_at_location"
+          }
+        });
+      }
+      for (const journey of loadRows(world, "journeys", "status = 'moving'", [])) {
+        const mover = str4(journey.mover_entity_id);
+        if (!mover || !characterById.has(mover) || alreadyKnows(informationId, mover)) continue;
+        const boundary = nextNodeBoundary(journey);
+        if (!boundary || boundary.toLocationId !== locationId) continue;
+        if (boundary.atS < Math.max(fromS, firstAvailableAtS) || boundary.atS > untilS) continue;
+        opportunities.push({
+          id: opportunityId({ kind: "route_passage", subjectId: informationId, receiverEntityId: mover, locationId, anchorS: boundary.atS }),
+          kind: "route_passage",
+          receiverEntityId: mover,
+          informationId,
+          locationId,
+          atS: boundary.atS,
+          requiresDwellS: 0,
+          basis: { frontId, journeyId: String(journey.id), routeId: boundary.routeId, nodeAtS: boundary.atS, reach, reason: "passing_node_in_transit" }
+        });
+      }
+    }
+    opportunities.sort((a, b) => a.atS !== b.atS ? a.atS - b.atS : a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+    return opportunities;
+  }
+
+  // src/atlas-sim-propagation.ts
+  var PROPAGATION_CHECK_INTERVAL_S = 3600;
+  var CARRIER_PREFERENCE = ["walk", "ride", "ground_vehicle", "water", "flight", "flight_narrative_aircraft"];
+  var TERRAIN_TABLE2 = TERRAIN_MULTIPLIERS;
+  function issue12(code, path, message, severity = "warning") {
+    return { code, path, message, severity, retryable: false };
+  }
+  function asArray4(value) {
+    if (Array.isArray(value)) return value;
+    if (typeof value === "string" && value.trim() !== "") {
+      try {
+        const parsed = JSON.parse(value);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    }
+    return [];
+  }
+  function str5(value) {
+    return typeof value === "string" && value !== "" ? value : null;
+  }
+  function num5(value) {
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
+  }
+  function asObject4(value) {
+    if (typeof value === "string") {
+      try {
+        return asObject4(JSON.parse(value));
+      } catch {
+        return null;
+      }
+    }
+    return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+  }
+  function decodeOrNull4(table, row2) {
+    const decoded = decodeRow(table, row2, { allowExtra: true });
+    return decoded.ok ? decoded.row : null;
+  }
+  function hashId(prefix, material) {
+    let hash = 2166136261;
+    for (let i = 0; i < material.length; i += 1) {
+      hash ^= material.charCodeAt(i);
+      hash = Math.imul(hash, 16777619) >>> 0;
+    }
+    return `${prefix}_${(hash >>> 0).toString(16).padStart(8, "0")}`;
+  }
+  function openRoutesFrom(world, locationId) {
+    const rows2 = queryBound(
+      world.db,
+      `SELECT * FROM routes WHERE branch_id = ? AND status = 'open' AND (from_location_id = ? OR (bidirectional = 1 AND to_location_id = ?))`,
+      [world.branchId, locationId, locationId]
+    );
+    const out = [];
+    for (const row2 of rows2) {
+      const decoded = decodeOrNull4("routes", row2);
+      if (decoded) out.push(decoded);
+    }
+    return out;
+  }
+  function otherEnd(route, locationId) {
+    const from = str5(route.from_location_id);
+    const to = str5(route.to_location_id);
+    if (from === locationId) return to;
+    if (to === locationId && (route.bidirectional === true || route.bidirectional === 1)) return from;
+    if (to === locationId) return from;
+    return null;
+  }
+  function latencySeconds(raw) {
+    const parsed = typeof raw === "string" ? safeJson2(raw) : raw;
+    if (!parsed || typeof parsed !== "object") return null;
+    const estimate = parsed;
+    const nominal = num5(estimate.nominal_s);
+    if (nominal !== null && nominal >= 0) return nominal;
+    const min = num5(estimate.min_s);
+    if (min !== null && min >= 0) return min;
+    return null;
+  }
+  function safeJson2(text) {
+    try {
+      return JSON.parse(text);
+    } catch {
+      return null;
+    }
+  }
+  function pickCarrier(route, channel) {
+    const channelMode = channel ? str5(channel.transport_mode_key) : null;
+    if (channelMode && MOVEMENT_SPEED_PRESETS[channelMode] !== void 0) return channelMode;
+    const allowed = asArray4(route.allowed_modes_json).filter((m) => typeof m === "string");
+    const pool = allowed.length > 0 ? allowed : ["walk"];
+    for (const mode of CARRIER_PREFERENCE) if (pool.includes(mode)) return mode;
+    return pool[0];
+  }
+  function carrierSpeed(route, mode) {
+    const preset = MOVEMENT_SPEED_PRESETS[mode] ?? null;
+    if (!preset) return null;
+    const terrain = String(route.terrain ?? "unknown").trim().toLowerCase();
+    const factor = mode === "flight" || mode === "flight_narrative_aircraft" ? 1 : TERRAIN_TABLE2[terrain] ?? 1;
+    const speed = preset.nominal_mps * factor;
+    return speed > 0 ? speed : null;
+  }
+  function routeDistanceM(route) {
+    const nominal = num5(route.distance_m);
+    if (nominal !== null) return { value: nominal, quality: String(route.distance_basis ?? "unknown") === "unknown" ? "estimated" : "confirmed" };
+    const min = num5(route.distance_min_m);
+    const max = num5(route.distance_max_m);
+    if (min !== null && max !== null) return { value: (min + max) / 2, quality: "estimated" };
+    if (min !== null) return { value: min, quality: "estimated" };
+    if (max !== null) return { value: max, quality: "estimated" };
+    return { value: null, quality: "unknown" };
+  }
+  function findRoute(world, fromId, toId) {
+    if (fromId === toId) return null;
+    for (const route of openRoutesFrom(world, fromId)) {
+      if (otherEnd(route, fromId) === toId) return route;
+    }
+    return null;
+  }
+  function frontIndex(world) {
+    const out = /* @__PURE__ */ new Set();
+    for (const row2 of queryBound(world.db, "SELECT information_id, location_id FROM rumor_fronts WHERE branch_id = ?", [world.branchId])) {
+      out.add(`${String(row2.information_id)}|${String(row2.location_id)}`);
+    }
+    return out;
+  }
+  function informationOf(world, informationId) {
+    const rows2 = queryBound(world.db, "SELECT * FROM information WHERE branch_id = ? AND id = ? LIMIT 1", [world.branchId, informationId]);
+    return rows2.length > 0 ? decodeOrNull4("information", rows2[0]) : null;
+  }
+  function scheduleDeliveries(fronts, channels, world) {
+    const tasks = [];
+    const issues = [];
+    const clockS = num5(world.clockS) ?? 0;
+    const existing = frontIndex(world);
+    const scheduled = /* @__PURE__ */ new Set();
+    for (const front of fronts ?? []) {
+      const frontId = str5(front?.id);
+      const informationId = str5(front?.information_id);
+      const locationId = str5(front?.location_id);
+      if (!frontId || !informationId || !locationId) continue;
+      if (String(front.status ?? "active") !== "active") continue;
+      const nextCheck = num5(front.next_spread_check_s);
+      if (nextCheck !== null && nextCheck > clockS) continue;
+      const information = informationOf(world, informationId);
+      if (!information) {
+        issues.push(issue12("PROPAGATION_INFORMATION_UNKNOWN", "information", `风声 ${frontId} 引用的信息不存在，不能传播`));
+        continue;
+      }
+      const secrecy = String(information.secrecy ?? "restricted");
+      const isPublic = secrecy === "public";
+      const firstAvailable = num5(front.first_available_at_s) ?? clockS;
+      const firstCheck = firstAvailable + PROPAGATION_CHECK_INTERVAL_S;
+      const departAt = Math.max(firstCheck, 0);
+      tasks.push({
+        id: hashId("propchk", `${frontId}|${clockS}`),
+        task_kind: "spread_check",
+        front_id: frontId,
+        information_id: informationId,
+        from_location_id: locationId,
+        check_at_s: clockS,
+        next_check_s: clockS + PROPAGATION_CHECK_INTERVAL_S,
+        due_at_s: clockS + PROPAGATION_CHECK_INTERVAL_S,
+        dedupe_key: `${informationId}|check|${clockS}`
+      });
+      if (!isPublic) {
+        for (const channel of channels ?? []) {
+          const channelId = str5(channel?.id);
+          const sourceLocation = str5(channel?.source_location_id);
+          const recipientLocation = str5(channel?.recipient_location_id);
+          const mode = str5(channel?.transport_mode_key);
+          if (!channelId || !sourceLocation || !recipientLocation) continue;
+          if (String(channel?.status ?? "active") !== "active") continue;
+          if (sourceLocation !== locationId) continue;
+          if (existing.has(`${informationId}|${recipientLocation}`)) continue;
+          const channelDepart = Math.max(departAt, num5(channel.valid_from_s) ?? 0);
+          if (!mode) {
+            const latency = latencySeconds(channel?.latency_json);
+            if (latency === null) {
+              issues.push(
+                issue12("PROPAGATION_LATENCY_UNKNOWN", "channels", `渠道 ${channelId} 既没有信使方式也没有可用延迟依据，到达时间未知（不提前投递）`)
+              );
+              continue;
+            }
+            tasks.push({
+              id: hashId("prop", `${informationId}|${locationId}|${recipientLocation}|${channelId}`),
+              task_kind: "delivery",
+              front_id: frontId,
+              information_id: informationId,
+              via_channel_id: channelId,
+              from_location_id: sourceLocation,
+              to_location_id: recipientLocation,
+              route_id: null,
+              mobility_key: null,
+              transport: "latency",
+              depart_at_s: channelDepart,
+              arrive_at_s: channelDepart + latency,
+              flight_time_s: latency,
+              due_at_s: channelDepart + latency,
+              dedupe_key: `${informationId}|${recipientLocation}|${channelId}`
+            });
+            continue;
+          }
+          const route = findRoute(world, sourceLocation, recipientLocation);
+          if (!route) continue;
+          const speed = carrierSpeed(route, mode);
+          const distance = routeDistanceM(route);
+          if (speed === null || distance.value === null) {
+            issues.push(issue12("PROPAGATION_ETA_UNKNOWN", "routes", `渠道 ${channelId} 的路径缺少速度/距离依据，到达时间未知（不提前投递）`));
+            continue;
+          }
+          const arriveAt = channelDepart + distance.value / speed;
+          tasks.push({
+            id: hashId("prop", `${informationId}|${locationId}|${recipientLocation}|${channelId}`),
+            task_kind: "delivery",
+            front_id: frontId,
+            information_id: informationId,
+            via_channel_id: channelId,
+            from_location_id: sourceLocation,
+            to_location_id: recipientLocation,
+            route_id: str5(route.id),
+            mobility_key: mode,
+            speed_mps: speed,
+            distance_m: distance.value,
+            depart_at_s: channelDepart,
+            arrive_at_s: arriveAt,
+            due_at_s: arriveAt,
+            quality: distance.quality,
+            secrecy,
+            dedupe_key: `${informationId}|${recipientLocation}`
+          });
+        }
+        continue;
+      }
+      for (const route of openRoutesFrom(world, locationId)) {
+        const destination = otherEnd(route, locationId);
+        if (!destination) continue;
+        if (existing.has(`${informationId}|${destination}`) || scheduled.has(`${informationId}|${destination}`)) continue;
+        const mode = pickCarrier(route, null);
+        const speed = carrierSpeed(route, mode);
+        const distance = routeDistanceM(route);
+        if (speed === null || distance.value === null) {
+          issues.push(
+            issue12("PROPAGATION_ETA_UNKNOWN", "routes", `到 ${destination} 的路段缺少速度/距离依据：保留未知，不提前到达也不假装立刻送达`)
+          );
+          continue;
+        }
+        const departAtPublic = departAt;
+        const arriveAt = departAtPublic + distance.value / speed;
+        scheduled.add(`${informationId}|${destination}`);
+        tasks.push({
+          id: hashId("prop", `${informationId}|${locationId}|${destination}`),
+          task_kind: "delivery",
+          front_id: frontId,
+          information_id: informationId,
+          via_channel_id: null,
+          from_location_id: locationId,
+          to_location_id: destination,
+          route_id: str5(route.id),
+          mobility_key: mode,
+          speed_mps: speed,
+          distance_m: distance.value,
+          depart_at_s: departAtPublic,
+          arrive_at_s: arriveAt,
+          due_at_s: arriveAt,
+          quality: distance.quality,
+          secrecy,
+          dedupe_key: `${informationId}|${destination}`
+        });
+      }
+    }
+    return { tasks, issues };
+  }
+  function insertFront(world, row2) {
+    const columns = tableColumnNames("rumor_fronts").filter((column) => Object.prototype.hasOwnProperty.call(row2, column));
+    const values = columns.map((column) => {
+      const value = row2[column];
+      if (value === null || value === void 0) return null;
+      if (typeof value === "boolean") return value ? 1 : 0;
+      if (typeof value === "object") return JSON.stringify(value);
+      if (typeof value === "string" || typeof value === "number") return value;
+      throw new Error(`rumor_fronts.${column} 不可绑定的值类型：${typeof value}`);
+    });
+    runBound(
+      world.db,
+      `INSERT INTO rumor_fronts (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")}) ON CONFLICT DO NOTHING`,
+      values
+    );
+  }
+  function deliveryAudience(world, informationId, channelId, sourceFrontId) {
+    const info = queryBound(world.db, "SELECT secrecy FROM information WHERE branch_id=? AND id=?", [world.branchId, informationId])[0];
+    const original = sourceFrontId ? queryBound(world.db, "SELECT audience_json FROM rumor_fronts WHERE branch_id=? AND id=?", [world.branchId, sourceFrontId])[0] : null;
+    if (info?.secrecy === "public") return String(original?.audience_json ?? JSON.stringify({ access: "public", tags: [] }));
+    const channel = channelId ? queryBound(world.db, "SELECT recipient_entity_id FROM channels WHERE branch_id=? AND id=?", [world.branchId, channelId])[0] : null;
+    return JSON.stringify({ access: "recipients", entity_ids: channel?.recipient_entity_id ? [String(channel.recipient_entity_id)] : [] });
+  }
+  function deliverDueInformation(untilS, world) {
+    const issues = [];
+    const makeId = world.makeId;
+    let frontsCreated = 0;
+    let earliestArrival = null;
+    if (world.persistPending) {
+      for (const action of queryBound(world.db, "SELECT * FROM actions WHERE branch_id=? AND kind='transmit' AND status='active' AND deadline_s<=?", [world.branchId, untilS])) {
+        const task = asObject4(action.payload_json);
+        if (task?.program_kind !== "rumor_delivery") continue;
+        const arrived = num5(task.arrive_at_s), destination = str5(task.to_location_id), information = str5(task.information_id);
+        if (arrived === null || !destination || !information) continue;
+        const routeId = str5(task.route_id);
+        if (routeId && queryBound(world.db, "SELECT id FROM routes WHERE branch_id=? AND id=? AND status='open'", [world.branchId, routeId]).length === 0) {
+          runBound(world.db, "UPDATE actions SET status='blocked',reason_code='DELIVERY_ROUTE_BLOCKED',row_rev=row_rev+1,updated_turn_id=? WHERE branch_id=? AND id=?", [world.turnId, world.branchId, String(action.id)]);
+          continue;
+        }
+        insertFront(world, {
+          branch_id: world.branchId,
+          id: `delivery_front_${action.id}`,
+          row_rev: 1,
+          created_turn_id: world.turnId,
+          updated_turn_id: world.turnId,
+          information_id: information,
+          location_id: destination,
+          via_channel_id: str5(task.via_channel_id),
+          source_front_id: str5(task.front_id),
+          source_action_id: String(action.id),
+          first_available_at_s: arrived,
+          last_reinforced_at_s: arrived,
+          next_spread_check_s: arrived + PROPAGATION_CHECK_INTERVAL_S,
+          expires_at_s: null,
+          reach: "local",
+          audience_json: deliveryAudience(world, information, str5(task.via_channel_id), str5(task.front_id)),
+          status: "active"
+        });
+        runBound(world.db, "UPDATE actions SET status='completed',finished_at_s=?,evaluated_until_s=?,row_rev=row_rev+1,updated_turn_id=? WHERE branch_id=? AND id=?", [arrived, arrived, world.turnId, world.branchId, String(action.id)]);
+        frontsCreated++;
+        earliestArrival = earliestArrival === null ? arrived : Math.min(earliestArrival, arrived);
+      }
+    }
+    const dueFronts = [];
+    for (const raw of queryBound(
+      world.db,
+      `SELECT * FROM rumor_fronts WHERE branch_id = ? AND status = 'active' AND (next_spread_check_s IS NULL OR next_spread_check_s <= ?)`,
+      [world.branchId, untilS]
+    )) {
+      const decoded = decodeOrNull4("rumor_fronts", raw);
+      if (decoded) dueFronts.push(decoded);
+    }
+    const channels = [];
+    for (const raw of queryBound(world.db, `SELECT * FROM channels WHERE branch_id = ? AND status = 'active'`, [world.branchId])) {
+      const decoded = decodeOrNull4("channels", raw);
+      if (decoded) channels.push(decoded);
+    }
+    const seen = /* @__PURE__ */ new Set();
+    for (const front of dueFronts) {
+      const frontId = String(front.id);
+      const base = num5(front.next_spread_check_s) ?? (num5(front.first_available_at_s) ?? 0) + PROPAGATION_CHECK_INTERVAL_S;
+      const checkAt = Math.min(untilS, base);
+      const scheduled = scheduleDeliveries([{ ...front, next_spread_check_s: front.next_spread_check_s ?? checkAt }], channels, {
+        db: world.db,
+        branchId: world.branchId,
+        clockS: checkAt,
+        makeId,
+        turnId: world.turnId
+      });
+      issues.push(...scheduled.issues);
+      for (const task of scheduled.tasks) {
+        if (String(task.task_kind) !== "delivery") continue;
+        const arriveAt = num5(task.arrive_at_s);
+        const destination = str5(task.to_location_id);
+        const informationId = str5(task.information_id);
+        if (arriveAt === null || !destination || !informationId) continue;
+        const dedupeKey = `${informationId}|${destination}`;
+        if (seen.has(dedupeKey)) continue;
+        seen.add(dedupeKey);
+        if (arriveAt > untilS) {
+          if (world.persistPending) {
+            const id = `delivery_${String(task.id)}`;
+            if (!queryBound(world.db, "SELECT id FROM actions WHERE branch_id=? AND id=?", [world.branchId, id]).length) {
+              const row2 = createRow(
+                "actions",
+                {
+                  actor_entity_id: String(task.from_location_id),
+                  kind: "transmit",
+                  title: "信息在途",
+                  status: "active",
+                  target_location_id: destination,
+                  started_at_s: task.depart_at_s,
+                  deadline_s: arriveAt,
+                  next_check_s: arriveAt,
+                  evaluated_until_s: untilS,
+                  payload_json: { ...task, program_kind: "rumor_delivery" }
+                },
+                { branchId: world.branchId, id, turnId: world.turnId, clockS: untilS, nowWallMs: 0, rulesetVersion: "atlas-1" }
+              );
+              const columns = tableColumnNames("actions").filter((c) => c in row2);
+              runBound(world.db, `INSERT INTO actions (${columns.join(",")}) VALUES (${columns.map(() => "?").join(",")})`, columns.map((c) => {
+                const v = row2[c];
+                return v === null || v === void 0 ? null : typeof v === "object" ? JSON.stringify(v) : v;
+              }));
+            }
+          }
+          continue;
+        }
+        const viaChannel = str5(task.via_channel_id);
+        insertFront(world, {
+          branch_id: world.branchId,
+          id: makeId("rumor_front", informationId, destination),
+          row_rev: 1,
+          created_turn_id: world.turnId,
+          updated_turn_id: world.turnId,
+          information_id: informationId,
+          location_id: destination,
+          via_channel_id: viaChannel,
+          source_front_id: frontId,
+          source_action_id: null,
+          first_available_at_s: arriveAt,
+          last_reinforced_at_s: arriveAt,
+          next_spread_check_s: arriveAt + PROPAGATION_CHECK_INTERVAL_S,
+          expires_at_s: null,
+          reach: "local",
+          audience_json: deliveryAudience(world, informationId, viaChannel, frontId),
+          status: "active"
+        });
+        frontsCreated += 1;
+        earliestArrival = earliestArrival === null ? arriveAt : Math.min(earliestArrival, arriveAt);
+      }
+      runBound(
+        world.db,
+        "UPDATE rumor_fronts SET next_spread_check_s = ?, row_rev = row_rev + 1 WHERE branch_id = ? AND id = ?",
+        [checkAt + PROPAGATION_CHECK_INTERVAL_S, world.branchId, frontId]
+      );
+    }
+    const windowFrom = earliestArrival ?? untilS;
+    const opportunities = frontsCreated > 0 ? collectOpportunities({ fromS: windowFrom, untilS }, { db: world.db, branchId: world.branchId }) : [];
+    return { frontsCreated, opportunities, issues };
+  }
+
+  // src/atlas-sim-scheduler.ts
+  var SETTLE_MAX_STEPS = 512;
+  function issue13(code, path, message, severity = "warning") {
+    return { code, path, message, severity, retryable: ["MODEL_REQUEST_FAILED", "MODEL_BUDGET_EXHAUSTED", "SETTLE_STEP_LIMIT"].includes(code) };
+  }
+  function num6(value) {
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
+  }
+  function str6(value) {
+    return typeof value === "string" && value !== "" ? value : null;
+  }
+  function isPlainObject13(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function asObject5(value) {
+    if (isPlainObject13(value)) return value;
+    if (typeof value === "string" && value.trim() !== "") {
+      try {
+        const parsed = JSON.parse(value);
+        return isPlainObject13(parsed) ? parsed : null;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+  function decodeOrNull5(table, row2) {
+    const decoded = decodeRow(table, row2, { allowExtra: true });
+    return decoded.ok ? decoded.row : null;
+  }
+  function loadRows2(world, table, where, params) {
+    const out = [];
+    for (const row2 of queryBound(world.db, `SELECT * FROM ${table} WHERE branch_id = ? AND ${where}`, [world.branchId, ...params])) {
+      const decoded = decodeOrNull5(table, row2);
+      if (decoded) out.push(decoded);
+    }
+    return out;
+  }
+  function bindable(value) {
+    if (value === null || value === void 0) return null;
+    if (typeof value === "boolean") return value ? 1 : 0;
+    if (typeof value === "number") return Number.isFinite(value) ? value : null;
+    if (typeof value === "string") return value;
+    return JSON.stringify(value);
+  }
+  function writeRow(db, table, row2, mode) {
+    const all = tableColumnNames(table);
+    if (mode === "insert") {
+      const columns2 = all.filter((column) => Object.prototype.hasOwnProperty.call(row2, column));
+      runBound(
+        db,
+        `INSERT INTO ${table} (${columns2.join(", ")}) VALUES (${columns2.map(() => "?").join(", ")})`,
+        columns2.map((column) => bindable(row2[column]))
+      );
+      return;
+    }
+    const columns = all.filter((column) => column !== "branch_id" && column !== "id");
+    runBound(
+      db,
+      `UPDATE ${table} SET ${columns.map((column) => `${column} = ?`).join(", ")} WHERE branch_id = ? AND id = ?`,
+      [...columns.map((column) => bindable(row2[column])), bindable(row2.branch_id), bindable(row2.id)]
+    );
+  }
+  function nextBoundary(queue, untilS) {
+    let best = null;
+    for (const boundary of queue ?? []) {
+      if (!boundary || !Number.isFinite(boundary.atS)) continue;
+      if (boundary.atS > untilS) continue;
+      if (best === null) {
+        best = boundary;
+        continue;
+      }
+      if (boundary.atS < best.atS) best = boundary;
+      else if (boundary.atS === best.atS && boundary.stableId < best.stableId) best = boundary;
+    }
+    return best;
+  }
+  function stopPolicyOf2(world, actionId) {
+    if (!actionId) return "review";
+    const rows2 = queryBound(world.db, "SELECT payload_json FROM actions WHERE branch_id = ? AND id = ? LIMIT 1", [world.branchId, actionId]);
+    const payload = rows2.length > 0 ? asObject5(rows2[0].payload_json) : null;
+    const policy = payload ? String(payload.stop_policy ?? "") : "";
+    return policy === "continue" || policy === "review" || policy === "stop" ? policy : "review";
+  }
+  function actionCompletionAtS(action) {
+    const duration = asObject5(action.duration_json);
+    const nominal = duration ? num6(duration.nominal_s) : null;
+    if (nominal === null || nominal <= 0) return null;
+    const started = num6(action.started_at_s);
+    if (started === null) return null;
+    const progress = num6(action.progress_s) ?? 0;
+    return Math.max(started, num6(action.evaluated_until_s) ?? started) + Math.max(0, nominal - progress);
+  }
+  function buildBoundaries(input, cursor, untilS) {
+    const boundaries = [];
+    const world = { db: input.db, branchId: input.branchId };
+    for (const journey of loadRows2(world, "journeys", "status = 'moving'", [])) {
+      const next = nextNodeBoundary(journey);
+      if (!next || next.atS > untilS) continue;
+      const journeyId = String(journey.id);
+      const policy = stopPolicyOf2(world, str6(journey.action_id));
+      boundaries.push({
+        atS: next.atS,
+        kind: "journey_node",
+        stableId: `journey:${journeyId}:${String(journey.segment_index ?? 0)}`,
+        needsModel: policy !== "continue",
+        refId: journeyId,
+        payload: { toLocationId: next.toLocationId, routeId: next.routeId, stopPolicy: policy }
+      });
+    }
+    for (const action of loadRows2(world, "actions", "status IN ('planned','ready','active','paused','blocked')", [])) {
+      const actionId = String(action.id);
+      const kind = String(action.kind ?? "");
+      if (kind === "goal") continue;
+      if (asObject5(action.payload_json)?.program_kind === "rumor_delivery") {
+        const atS = num6(action.deadline_s);
+        if (atS !== null && String(action.status) === "active" && atS <= untilS) boundaries.push({ atS: Math.max(cursor, atS), kind: "information_delivery", stableId: `delivery:${String(action.id)}`, needsModel: false, refId: String(action.id) });
+        continue;
+      }
+      const status = String(action.status ?? "planned");
+      const earliest = num6(action.earliest_start_s);
+      const nextCheck = num6(action.next_check_s);
+      if (status !== "active") {
+        if (kind === "travel" && (status === "ready" || status === "planned")) {
+          const atS2 = Math.max(cursor, earliest ?? cursor);
+          if (atS2 <= untilS) {
+            boundaries.push({ atS: atS2, kind: "journey_start", stableId: `action:${actionId}:start`, needsModel: false, refId: actionId, payload: { status } });
+          }
+          continue;
+        }
+        const atS = Math.max(cursor, nextCheck ?? earliest ?? cursor);
+        if (atS <= untilS) {
+          boundaries.push({ atS, kind: "action_check", stableId: `action:${actionId}:check`, needsModel: false, refId: actionId, payload: { status } });
+        }
+        continue;
+      }
+      if (kind === "travel") continue;
+      const completion = actionCompletionAtS(action);
+      if (completion !== null && completion <= untilS) {
+        boundaries.push({
+          atS: Math.max(cursor, completion),
+          kind: "action_complete",
+          stableId: `action:${actionId}:complete`,
+          needsModel: true,
+          refId: actionId
+        });
+        continue;
+      }
+      if (nextCheck !== null && nextCheck <= untilS) {
+        boundaries.push({ atS: Math.max(cursor, nextCheck), kind: "action_check", stableId: `action:${actionId}:check`, needsModel: false, refId: actionId });
+      }
+    }
+    for (const event of loadRows2(world, "events", "status = 'scheduled' AND scheduled_start_s IS NOT NULL", [])) {
+      const atS = num6(event.scheduled_start_s);
+      if (atS === null || atS > untilS) continue;
+      boundaries.push({
+        atS: Math.max(cursor, atS),
+        kind: "event_start",
+        stableId: `event:${String(event.id)}`,
+        needsModel: true,
+        refId: String(event.id)
+      });
+    }
+    for (const front of loadRows2(world, "rumor_fronts", "status = 'active'", [])) {
+      const nextCheck = num6(front.next_spread_check_s) ?? (num6(front.first_available_at_s) ?? 0) + PROPAGATION_CHECK_INTERVAL_S;
+      if (nextCheck > untilS) continue;
+      boundaries.push({
+        atS: Math.max(cursor, nextCheck),
+        kind: "front_spread",
+        stableId: `front:${String(front.id)}:${nextCheck}`,
+        needsModel: false,
+        refId: String(front.id)
+      });
+    }
+    return boundaries;
+  }
+  function applyBoundary(input, boundary, cursor) {
+    const world = { db: input.db, branchId: input.branchId };
+    const issues = [];
+    const step = { boundaryId: boundary.stableId, kind: boundary.kind, atS: boundary.atS };
+    if (boundary.kind === "journey_node") {
+      const journey = boundary.refId ? loadRows2(world, "journeys", "id = ?", [boundary.refId])[0] : null;
+      if (!journey) {
+        issues.push(issue13("BOUNDARY_ROW_MISSING", "journeys", `边界 ${boundary.stableId} 引用的行程不存在`));
+        return { step, issues, opportunities: [] };
+      }
+      const policy = String(boundary.payload?.stopPolicy ?? "review");
+      const grantUntilS = policy === "review" ? Math.min(num6(input.untilS) ?? boundary.atS, boundary.atS + NODE_REVIEW_DWELL_S) : boundary.atS;
+      const result = advanceJourney(journey, grantUntilS, world);
+      writeRow(input.db, "journeys", result.journey, "update");
+      issues.push(...result.issues);
+      const opportunities = collectOpportunities({ fromS: cursor, untilS: boundary.atS }, world);
+      step.journeyId = String(journey.id);
+      step.events = result.events;
+      step.remainingS = result.remainingS;
+      step.opportunityIds = opportunities.map((o) => o.id);
+      const consumed = num6(result.journey.last_advanced_at_s);
+      return { step, issues, opportunities, cursorAfterS: consumed ?? boundary.atS };
+    }
+    if (boundary.kind === "journey_start") {
+      const action = boundary.refId ? loadRows2(world, "actions", "id = ?", [boundary.refId])[0] : null;
+      if (!action) {
+        issues.push(issue13("BOUNDARY_ROW_MISSING", "actions", `边界 ${boundary.stableId} 引用的行动不存在`));
+        return { step, issues, opportunities: [] };
+      }
+      const started = startJourney(action, {
+        db: input.db,
+        branchId: input.branchId,
+        clockS: boundary.atS,
+        makeId: input.makeId,
+        turnId: input.turnId
+      });
+      issues.push(...started.issues);
+      step.actionId = String(action.id);
+      if (!started.journey) {
+        step.started = false;
+        return { step, issues, opportunities: [] };
+      }
+      writeRow(input.db, "journeys", started.journey, "insert");
+      const nextAction = {
+        ...action,
+        status: "active",
+        started_at_s: boundary.atS,
+        reason_code: "JOURNEY_RUNNING",
+        evaluated_until_s: boundary.atS,
+        row_rev: (num6(action.row_rev) ?? 1) + 1,
+        updated_turn_id: input.turnId
+      };
+      writeRow(input.db, "actions", nextAction, "update");
+      step.started = true;
+      step.journeyId = String(started.journey.id);
+      return { step, issues, opportunities: [] };
+    }
+    if (boundary.kind === "action_check" || boundary.kind === "action_complete") {
+      const result = advanceActions({ fromS: cursor, untilS: boundary.atS }, {
+        db: input.db,
+        branchId: input.branchId,
+        makeId: input.makeId,
+        turnId: input.turnId,
+        deferOutcome: input.deferOutcome
+      });
+      issues.push(...result.issues);
+      for (const row2 of result.actions) writeRow(input.db, "actions", row2, "update");
+      for (const event of result.events) writeRow(input.db, "events", event, "insert");
+      step.advanced = result.actions.length;
+      step.events = result.events.map((event) => String(event.id));
+      return { step, issues, opportunities: [] };
+    }
+    if (boundary.kind === "front_spread" || boundary.kind === "information_delivery") {
+      const result = deliverDueInformation(boundary.atS, {
+        db: input.db,
+        branchId: input.branchId,
+        clockS: boundary.atS,
+        persistPending: input.deferOutcome === true,
+        makeId: input.makeId,
+        turnId: input.turnId
+      });
+      issues.push(...result.issues);
+      step.frontsCreated = result.frontsCreated;
+      step.opportunityIds = result.opportunities.map((o) => o.id);
+      return { step, issues, opportunities: result.opportunities };
+    }
+    step.skipped = true;
+    return { step, issues, opportunities: [] };
+  }
+  function modelRequestFor(input, boundary, cursor, batchesLeft) {
+    return {
+      kind: "boundary_decision",
+      phase: "outcome",
+      chatUid: input.chatUid,
+      branchId: input.branchId,
+      turnId: input.turnId,
+      atS: boundary.atS,
+      windowFromS: cursor,
+      boundary: { kind: boundary.kind, stableId: boundary.stableId, refId: boundary.refId ?? null, payload: boundary.payload ?? {} },
+      budgets: { modelBatchesLeft: batchesLeft },
+      allowedOps: ["event.propose", "information.propose"]
+    };
+  }
+  function responseHash(value) {
+    let text;
+    try {
+      text = JSON.stringify(value) ?? "";
+    } catch {
+      text = String(value);
+    }
+    let hash = 2166136261;
+    for (let i = 0; i < text.length; i += 1) {
+      hash ^= text.charCodeAt(i);
+      hash = Math.imul(hash, 16777619) >>> 0;
+    }
+    return `h${(hash >>> 0).toString(16).padStart(8, "0")}`;
+  }
+  async function settleWindow(input) {
+    const untilS = num6(input.untilS) ?? num6(input.clockS) ?? 0;
+    let cursor = Math.min(num6(input.clockS) ?? 0, untilS);
+    const steps = [];
+    const issues = [];
+    const processed = /* @__PURE__ */ new Set();
+    let batchesLeft = Math.max(0, Math.trunc(num6(input.budgets?.modelBatches) ?? 0));
+    let pending = null;
+    for (let guard = 0; guard < SETTLE_MAX_STEPS; guard += 1) {
+      const queue = buildBoundaries(input, cursor, untilS).filter((boundary2) => !processed.has(boundary2.stableId));
+      const boundary = nextBoundary(queue, untilS);
+      if (!boundary) break;
+      if (boundary.needsModel === true) {
+        if (!input.modelPort || batchesLeft <= 0) {
+          pending = boundary;
+          steps.push({
+            boundaryId: boundary.stableId,
+            kind: boundary.kind,
+            atS: boundary.atS,
+            deferred: true,
+            reason: input.modelPort ? "MODEL_BUDGET_EXHAUSTED" : "NO_MODEL_PORT"
+          });
+          issues.push(
+            issue13(
+              input.modelPort ? "MODEL_BUDGET_EXHAUSTED" : "NO_MODEL_PORT",
+              `boundary.${boundary.stableId}`,
+              input.modelPort ? `模型批次预算用尽，${boundary.kind} 停在 ${boundary.atS} 秒等待补算` : `没有模型端口：只完成确定性步骤，${boundary.kind} 停在 ${boundary.atS} 秒`,
+              "warning"
+            )
+          );
+          break;
+        }
+        const deterministic = boundary.kind === "event_start" ? { step: {}, issues: [], opportunities: [] } : applyBoundary(input, boundary, cursor);
+        batchesLeft -= 1;
+        let modelBatch;
+        try {
+          const response = await input.modelPort.request(modelRequestFor(input, boundary, cursor, batchesLeft));
+          modelBatch = { modelBatch: true, responseHash: responseHash(response), batchesLeft };
+        } catch (err) {
+          issues.push(...deterministic.issues);
+          steps.push({ ...deterministic.step, boundaryId: boundary.stableId, kind: boundary.kind, atS: boundary.atS, deferred: true, reason: "MODEL_REQUEST_FAILED" });
+          pending = boundary;
+          issues.push(
+            issue13(
+              "MODEL_REQUEST_FAILED",
+              `boundary.${boundary.stableId}`,
+              `边界 ${boundary.stableId} 的模型判断失败：${err.message}；停在最早未决边界，等待下次补算`,
+              "error"
+            )
+          );
+          break;
+        }
+        steps.push({ ...deterministic.step, boundaryId: boundary.stableId, kind: boundary.kind, atS: boundary.atS, ...modelBatch });
+        issues.push(...deterministic.issues);
+        processed.add(boundary.stableId);
+        cursor = Math.max(cursor, boundary.atS, deterministic.cursorAfterS ?? 0);
+        continue;
+      }
+      const outcome = applyBoundary(input, boundary, cursor);
+      steps.push(outcome.step);
+      issues.push(...outcome.issues);
+      processed.add(boundary.stableId);
+      cursor = Math.max(cursor, boundary.atS, outcome.cursorAfterS ?? 0);
+      if (guard === SETTLE_MAX_STEPS - 1) {
+        pending = boundary;
+        issues.push(issue13("SETTLE_STEP_LIMIT", "settleWindow", `单次结算达到 ${SETTLE_MAX_STEPS} 步上限，停在 ${boundary.atS} 秒`, "warning"));
+      }
+    }
+    const catchingUp = pending !== null;
+    return {
+      processedUntilS: cursor,
+      simulationCursorS: pending ? pending.atS : untilS,
+      catchingUp,
+      steps,
+      issues
+    };
+  }
+
+  // src/atlas-sim-decision-context.ts
+  function decodeRows(table, rows2) {
+    const out = [];
+    for (const row2 of rows2) {
+      const decoded = decodeRow(table, row2, { allowExtra: true });
+      if (decoded.ok) out.push(decoded.row);
+    }
+    return out;
+  }
+  function buildDecisionContext(batch, world) {
+    const branchRows = queryBound(world.db, "SELECT pov_character_id FROM branches WHERE id = ? LIMIT 1", [world.branchId]);
+    const povCharacterId = branchRows.length > 0 && typeof branchRows[0].pov_character_id === "string" ? String(branchRows[0].pov_character_id) : null;
+    const actorSlices = [];
+    const refs = /* @__PURE__ */ new Set();
+    const seenActors = /* @__PURE__ */ new Set();
+    for (const actor of batch?.actors ?? []) {
+      const entityId = typeof actor?.entityId === "string" ? actor.entityId : "";
+      if (entityId === "" || seenActors.has(entityId)) continue;
+      seenActors.add(entityId);
+      const knowledgeWhere = povCharacterId === entityId ? "status IN ('active','outdated') AND (knower_character_id = ? OR is_pov = 1)" : "status IN ('active','outdated') AND knower_character_id = ?";
+      const knowledge = decodeRows(
+        "knowledge",
+        queryBound(world.db, `SELECT * FROM knowledge WHERE branch_id = ? AND ${knowledgeWhere} ORDER BY first_received_at_s, id`, [
+          world.branchId,
+          entityId
+        ])
+      );
+      const activeActions = decodeRows(
+        "actions",
+        queryBound(
+          world.db,
+          `SELECT * FROM actions WHERE branch_id = ? AND actor_entity_id = ? AND status IN ('planned','ready','active','paused','blocked') ORDER BY id`,
+          [world.branchId, entityId]
+        )
+      );
+      const journeys = decodeRows(
+        "journeys",
+        queryBound(
+          world.db,
+          `SELECT * FROM journeys WHERE branch_id = ? AND mover_entity_id = ? AND status IN ('moving','paused','blocked') ORDER BY started_at_s, id`,
+          [world.branchId, entityId]
+        )
+      );
+      const opportunities = (batch?.opportunities ?? []).filter((o) => o.receiverEntityId === entityId);
+      for (const row2 of knowledge) refs.add(`knowledge:${String(row2.id)}`);
+      for (const row2 of knowledge) refs.add(`information:${String(row2.information_id)}`);
+      for (const row2 of activeActions) refs.add(`action:${String(row2.id)}`);
+      for (const row2 of journeys) refs.add(`journey:${String(row2.id)}`);
+      for (const opportunity of opportunities) {
+        refs.add(`opportunity:${opportunity.id}`);
+        if (opportunity.informationId) refs.add(`information:${opportunity.informationId}`);
+        if (opportunity.locationId) refs.add(`location:${opportunity.locationId}`);
+      }
+      const informationIds = /* @__PURE__ */ new Set([
+        ...knowledge.map((k) => String(k.information_id)),
+        ...opportunities.map((o) => o.informationId).filter((id) => typeof id === "string")
+      ]);
+      const information = [...informationIds].flatMap((id) => queryBound(
+        world.db,
+        "SELECT id,title,content,kind FROM information WHERE branch_id=? AND id=?",
+        [world.branchId, id]
+      ));
+      actorSlices.push({ entityId, knowledge, activeActions, journeys, opportunities, information });
+    }
+    actorSlices.sort((a, b) => a.entityId < b.entityId ? -1 : a.entityId > b.entityId ? 1 : 0);
+    return { actorSlices, refs: [...refs].sort() };
+  }
+
+  // src/atlas-sim-outcome-context.ts
+  var OUTCOME_ALLOWED_OPS = ["event.propose", "information.propose"];
+  function isPlainObject14(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function asObject6(value) {
+    if (isPlainObject14(value)) return value;
+    if (typeof value === "string" && value.trim() !== "") {
+      try {
+        const parsed = JSON.parse(value);
+        return isPlainObject14(parsed) ? parsed : null;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+  function asArray5(value) {
+    if (Array.isArray(value)) return value;
+    if (typeof value === "string" && value.trim() !== "") {
+      try {
+        const parsed = JSON.parse(value);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    }
+    return [];
+  }
+  function str7(value) {
+    return typeof value === "string" && value !== "" ? value : null;
+  }
+  function num7(value) {
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
+  }
+  function decodeOrNull6(table, row2) {
+    const decoded = decodeRow(table, row2, { allowExtra: true });
+    return decoded.ok ? decoded.row : null;
+  }
+  function loadRow3(world, table, id) {
+    const rows2 = queryBound(world.db, `SELECT * FROM ${table} WHERE branch_id = ? AND id = ? LIMIT 1`, [world.branchId, id]);
+    return rows2.length > 0 ? decodeOrNull6(table, rows2[0]) : null;
+  }
+  function heldBy2(world, actorId, itemId) {
+    let cursor = itemId;
+    const seen = /* @__PURE__ */ new Set();
+    for (let depth = 0; cursor && depth <= 4; depth += 1) {
+      if (seen.has(cursor)) return false;
+      seen.add(cursor);
+      const item = loadRow3(world, "items", cursor);
+      if (!item) return false;
+      if (str7(item.holder_character_id) === actorId) return true;
+      cursor = str7(item.container_item_id);
+    }
+    return false;
+  }
+  function normalizeAction(action) {
+    return {
+      ...action,
+      payload_json: asObject6(action.payload_json),
+      trigger_json: asObject6(action.trigger_json),
+      duration_json: asObject6(action.duration_json),
+      depends_on_json: asArray5(action.depends_on_json)
+    };
+  }
+  var PRESENCE_KINDS = /* @__PURE__ */ new Set(["act", "interact", "prepare", "investigate", "wait"]);
+  function buildOutcomeContext(batch, world) {
+    const branchRows = queryBound(world.db, "SELECT clock_s, simulation_cursor_s FROM branches WHERE id = ? LIMIT 1", [world.branchId]);
+    const clockS = branchRows.length > 0 ? num7(branchRows[0].clock_s) ?? 0 : 0;
+    const facts = [];
+    const eligibility = [];
+    if (branchRows.length === 0) {
+      facts.push({ kind: "branch_missing", branchId: world.branchId, note: "分支不存在，无法判定到期行动" });
+    }
+    facts.push({ kind: "time", clockS, simulationCursorS: branchRows.length > 0 ? num7(branchRows[0].simulation_cursor_s) ?? 0 : 0 });
+    for (const opportunity of batch?.opportunities ?? []) {
+      facts.push({
+        kind: "opportunity",
+        opportunityId: opportunity.id,
+        opportunityKind: opportunity.kind,
+        receiverEntityId: opportunity.receiverEntityId,
+        informationId: opportunity.informationId,
+        locationId: opportunity.locationId,
+        atS: opportunity.atS,
+        requiresDwellS: opportunity.requiresDwellS
+      });
+    }
+    const dueActions = [];
+    for (const raw of batch?.dueActions ?? []) {
+      const action = normalizeAction(raw);
+      dueActions.push(action);
+      const actionId = String(action.id ?? "");
+      const reasons = [];
+      const actorId = str7(action.actor_entity_id);
+      const kind = String(action.kind ?? "");
+      const payload = asObject6(action.payload_json) ?? {};
+      if (!actorId) {
+        reasons.push("ACTOR_MISSING");
+        eligibility.push({ actionId, ok: false, reasons });
+        continue;
+      }
+      const actor = loadRow3(world, "characters", actorId);
+      if (!actor) {
+        reasons.push(`ACTOR_UNKNOWN:${actorId}`);
+        eligibility.push({ actionId, ok: false, reasons });
+        continue;
+      }
+      const physical = String(actor.physical_status ?? "unknown");
+      facts.push({
+        kind: "actor_state",
+        actionId,
+        actorId,
+        physicalStatus: physical,
+        conditionNote: String(actor.condition_note ?? ""),
+        locationId: str7(actor.location_id)
+      });
+      if (physical === "dead") reasons.push("ACTOR_DEAD");
+      else if (physical === "incapacitated") reasons.push("ACTOR_INCAPACITATED");
+      const evaluated = num7(action.evaluated_until_s) ?? 0;
+      const deadline = num7(action.deadline_s);
+      const startedAt = num7(action.started_at_s);
+      const duration = asObject6(action.duration_json);
+      const nominal = duration ? num7(duration.nominal_s) : null;
+      const progress = num7(action.progress_s) ?? 0;
+      const remaining = nominal !== null ? Math.max(0, nominal - progress) : null;
+      facts.push({ kind: "time_window", actionId, clockS, evaluatedUntilS: evaluated, startedAtS: startedAt, deadlineS: deadline, nominalS: nominal, progressS: progress, remainingS: remaining });
+      if (deadline !== null && deadline < clockS) reasons.push(`DEADLINE_PASSED:${deadline}`);
+      if (evaluated > clockS) reasons.push(`NOT_DUE_YET:evaluated_until_s=${evaluated}`);
+      if (nominal === null) reasons.push("DURATION_UNKNOWN");
+      const position = resolveEffectivePosition({ db: world.db, branchId: world.branchId }, actorId);
+      facts.push({ kind: "position", actionId, actorId, position });
+      const openJourney = queryBound(
+        world.db,
+        `SELECT id, status FROM journeys WHERE branch_id = ? AND mover_entity_id = ? AND status IN ('moving','paused','blocked') LIMIT 1`,
+        [world.branchId, actorId]
+      );
+      const targetLocation = str7(action.target_location_id);
+      if (openJourney.length > 0 && PRESENCE_KINDS.has(kind)) {
+        reasons.push(`ACTOR_IN_TRANSIT:${String(openJourney[0].id)}`);
+      }
+      if (targetLocation && PRESENCE_KINDS.has(kind)) {
+        const here = position.kind === "at_location" ? position.locationId : str7(actor.location_id);
+        if (here !== targetLocation) reasons.push(`NOT_AT_TARGET:${here ?? "unknown"}!=${targetLocation}`);
+      }
+      const capabilityKey = str7(payload.capability_key);
+      if (capabilityKey) {
+        const capabilities = asArray5(actor.capabilities_json).filter(isPlainObject14);
+        const has = capabilities.some((c) => str7(c.key) === capabilityKey);
+        facts.push({ kind: "capability", actionId, actorId, capabilityKey, has });
+        if (!has) reasons.push(`CAPABILITY_MISSING:${capabilityKey}`);
+      }
+      const itemRefs = asArray5(payload.item_refs).filter((v) => typeof v === "string");
+      for (const itemId of itemRefs) {
+        const has = heldBy2(world, actorId, itemId);
+        facts.push({ kind: "item", actionId, actorId, itemId, held: has });
+        if (!has) reasons.push(`ITEM_NOT_HELD:${itemId}`);
+      }
+      const trigger = asObject6(action.trigger_json);
+      if (trigger) {
+        const evaluatedCondition = evaluateCondition(world, trigger, { clockS, actorId });
+        facts.push({ kind: "condition", actionId, ok: evaluatedCondition.ok, reasons: evaluatedCondition.reasons, atS: evaluatedCondition.atS });
+        if (!evaluatedCondition.ok) reasons.push(...evaluatedCondition.reasons.map((r) => `CONDITION_UNMET:${r}`));
+      }
+      const unique = [...new Set(reasons)];
+      eligibility.push({ actionId, ok: unique.length === 0, reasons: unique });
+    }
+    return { dueActions, facts, eligibility, allowedOps: OUTCOME_ALLOWED_OPS };
+  }
+
+  // src/atlas-sim-random.ts
+  var ATTENTION_PROBABILITIES = {
+    low: 0.2,
+    normal: 0.5,
+    high: 0.8
+  };
+  var ATLAS_SIM_RULESET_VERSION = "atlas-sim-1";
+  function fnv1a(text, seed = 2166136261) {
+    let hash = seed >>> 0;
+    for (let i = 0; i < text.length; i += 1) {
+      hash ^= text.charCodeAt(i);
+      hash = Math.imul(hash, 16777619) >>> 0;
+    }
+    return hash >>> 0;
+  }
+  function toHex32(value) {
+    return (value >>> 0).toString(16).padStart(8, "0");
+  }
+  function stableSubSeed(text) {
+    return fnv1a(text);
+  }
+  function mulberry32(seed) {
+    let state = seed >>> 0;
+    return () => {
+      state = state + 1831565813 >>> 0;
+      let t = state;
+      t = Math.imul(t ^ t >>> 15, t | 1);
+      t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
+  function deriveSeed(parts) {
+    const material = [
+      "atlas-seed-v1",
+      `chat:${parts?.chatUid ?? ""}`,
+      `branch:${parts?.branchId ?? ""}`,
+      `fork:${parts?.forkTurnId ?? ""}`,
+      `variant:${parts?.variantKey ?? ""}`,
+      `input:${parts?.inputHash ?? ""}`,
+      `rules:${parts?.rulesetVersion ?? ""}`
+    ].join("");
+    return `atlas-${toHex32(fnv1a(material))}${toHex32(fnv1a(`${material}`, 2654435769))}`;
+  }
+  function resolveProbability(p) {
+    if (typeof p === "number" && Number.isFinite(p)) return Math.min(1, Math.max(0, p));
+    if (typeof p === "string" && Object.prototype.hasOwnProperty.call(ATTENTION_PROBABILITIES, p)) {
+      return ATTENTION_PROBABILITIES[p];
+    }
+    return ATTENTION_PROBABILITIES.normal;
+  }
+  function drawForEvent(seed, eventKey, rule) {
+    const ruleKey = typeof rule?.key === "string" && rule.key !== "" ? rule.key : "default";
+    const distribution = rule?.distribution === "bernoulli" ? "bernoulli" : "uniform";
+    const subSeed = stableSubSeed(`${seed ?? ""}${eventKey ?? ""}${ruleKey}`);
+    const u = mulberry32(subSeed)();
+    const value = distribution === "bernoulli" ? u < resolveProbability(rule?.p) ? 1 : 0 : u;
+    return { key: `${eventKey ?? ""}#${ruleKey}`, value, distribution, ruleVersion: ATLAS_SIM_RULESET_VERSION };
+  }
+  function recordDraw(value) {
+    return {
+      key: String(value?.key ?? ""),
+      value: Number.isFinite(value?.value) ? Number(value.value) : 0,
+      distribution: String(value?.distribution ?? "uniform"),
+      rule_version: ATLAS_SIM_RULESET_VERSION
+    };
+  }
+
+  // src/atlas-sql-simulation.ts
+  function snapshot(input) {
+    const out = /* @__PURE__ */ new Map();
+    for (const table of JOURNALED_TABLES) {
+      const where = table === "branches" ? "id" : "branch_id";
+      for (const row2 of queryBound(input.db, `SELECT * FROM ${table} WHERE ${where}=?`, [input.branchId])) out.set(`${table}\0${row2.id}`, row2);
+    }
+    return out;
+  }
+  function write(input, table, row2, before) {
+    const groups = buildAtomicGroups([{ opId: `sim:${table}:${row2.id}`, mutations: [{ table, rowId: String(row2.id), before, after: row2, sourceOpIds: [`sim:${table}:${row2.id}`], basis: { kind: "simulation" } }], issues: [], readSet: [], dependencies: [] }]);
+    const result = applyGroups(input.db, groups.groups, { branchId: input.branchId, turnId: input.turnId, attemptId: "simulation", journal: false });
+    if (result.groups.some((g) => g.status === "rejected" || g.status === "blocked")) throw new AtlasDbError("SIMULATION_WRITE_FAILED", "后台行未通过统一写入检查", { groups: result.groups });
+  }
+  async function settleSqlTurn(input) {
+    const before = snapshot(input), issues = [], groups = [], modelOperations = [];
+    const appliedIds = new Set(queryBound(input.db, "SELECT operation_id FROM turn_changes WHERE turn_id=?", [input.turnId]).flatMap((r) => String(r.operation_id).split("+")));
+    const activities = [];
+    for (const op of input.operations) {
+      if (!appliedIds.has(op.opId) || op.value.op !== "event.propose" || op.value.data?.phase !== "observed") continue;
+      const d = op.value.data, a = d.activity;
+      if (!a && !d.time_hint) continue;
+      const activity = typeof a === "object" && a !== null ? a : { kind: typeof a === "string" ? a : "other" };
+      const kind = ["dialogue", "meal", "rest", "sleep", "travel", "combat", "other"].includes(String(activity.kind)) ? String(activity.kind) : "other";
+      let hint = d.time_hint;
+      if (kind === "travel" && activity.completed !== false && !hint) {
+        const change = queryBound(input.db, "SELECT after_json FROM turn_changes WHERE turn_id=? AND operation_id=? AND target_table='events'", [input.turnId, op.opId])[0];
+        const event = change ? JSON.parse(String(change.after_json)) : null;
+        const tables = createTableReadPort(input.db);
+        const actor = event?.subject_entity_id ? tables.selectOne("characters", input.branchId, event.subject_entity_id) : null;
+        const route = event?.route_id ? tables.selectOne("routes", input.branchId, event.route_id) : null;
+        if (actor && route) hint = computeTravelInterval(input, actor, route, typeof activity.mode === "string" ? activity.mode : void 0) ?? void 0;
+      }
+      activities.push({ kind, completed: activity.completed !== false, hint });
+    }
+    const elapsed = deriveElapsedInterval({ activities: activities.length ? activities : [{ kind: "dialogue", completed: true }] }, { clockS: input.clockBefore });
+    if (elapsed.quality === "unknown") issues.push({ code: "TIME_UNRESOLVED", path: "$.elapsed", message: "已完成行为缺少可结算的耗时依据，时钟保持原值，未知不当成零耗时", severity: "warning", retryable: false });
+    const clockAfter = input.clockBefore + (elapsed.quality === "unknown" ? 0 : elapsed.nominalS);
+    const branch = queryBound(input.db, "SELECT * FROM branches WHERE id=?", [input.branchId])[0];
+    const seed = deriveSeed({ chatUid: input.anchor.chatUid, branchId: input.branchId, forkTurnId: String(branch.fork_turn_id ?? ""), variantKey: input.anchor.variantKey, inputHash: input.anchor.inputHash, rulesetVersion: ATLAS_SIM_RULESET_VERSION });
+    const clockMin = Number(branch.clock_min_s) + elapsed.minS, clockMax = Number(branch.clock_max_s) + elapsed.maxS;
+    const randomDraws = [];
+    let cursor = Number(branch.simulation_cursor_s), catchingUp = false, batches = 0;
+    const steps = [];
+    const pendingActors = [];
+    const operationContexts = [];
+    const assertCurrent = () => {
+      if (input.isCurrent && !input.isCurrent()) throw new AtlasDbError("TURN_CANCELLED", "后台模型等待期间楼层已变化", {});
+    };
+    const ask = async (phase, fields, atS, opportunities = [], dueEventIds = []) => {
+      assertCurrent();
+      if (!input.modelPort || batches >= input.modelBudget) throw new AtlasDbError("MODEL_BUDGET_EXHAUSTED", "后台判断等待下一次结算", {});
+      const tables = createTableReadPort(input.db), knownRefs = collectKnownRefs(tables, input.branchId);
+      opportunities.forEach((o, i) => knownRefs.push({ alias: `O${i + 1}`, id: o.id, kind: "opportunity", rowRev: null }));
+      const byId = new Map(knownRefs.map((ref) => [ref.id, ref.alias]));
+      const request = buildStagePrompt({ phase, ...fields, batchId: `sim_${input.turnId}_${batches}`, entityRefs: collectEntityRefs(tables, input.branchId, knownRefs) });
+      request.anchor = input.anchor;
+      request.messages[1].content += "\n现有对象短引用：" + collectEntityRefs(tables, input.branchId, knownRefs).join("、");
+      for (const [id, alias] of byId) request.messages[1].content = request.messages[1].content.split(JSON.stringify(id)).join(JSON.stringify(alias));
+      request.sourceSnapshot = [];
+      batches++;
+      const response = await input.modelPort.request(request);
+      assertCurrent();
+      const payload = extractPayload(response.text), parsed = parseOperations(payload.payload, { phase });
+      issues.push(...payload.issues, ...parsed.issues);
+      let operations = parsed.operations.map((op) => ({ ...op, opId: `sim_${input.attemptKey ?? input.turnId}_${batches}_${op.opId}` }));
+      const context = {
+        opIds: [],
+        phase,
+        clockS: atS,
+        knownRefs,
+        opportunities,
+        dueEventIds,
+        actorIds: phase === "decision" ? JSON.parse(fields.actorSlices ?? "[]").map((a) => a.entityId) : []
+      };
+      if (phase === "decision") operations = operations.filter((op) => {
+        if (inDecisionScope(op, context, tables, input.branchId)) return true;
+        issues.push({ code: "ACTOR_SCOPE_VIOLATION", path: "$.decision", opId: op.opId, message: "决策仅能修改给定人物的心理、计划和有效接触认知，不能瞬移或改写其它人物", severity: "error", retryable: false });
+        return false;
+      });
+      context.opIds = operations.map((op) => op.opId);
+      operationContexts.push(context);
+      const compiled = compileOperations({
+        operations,
+        anchor: input.anchor,
+        phase,
+        clockS: atS,
+        revision: input.anchor.baseRevision,
+        tables,
+        sources: { phase, clockS: atS, snapshot: [], opportunities, dueEventIds },
+        knownRefs,
+        makeId: input.makeId,
+        turnId: input.turnId
+      });
+      const built = buildAtomicGroups(compiled.results.map((r) => ({ opId: r.opId, ...r.result }))), ordered = orderGroups(built.groups);
+      const result = applyGroups(input.db, ordered.order, { branchId: input.branchId, turnId: input.turnId, attemptId: "simulation", journal: false });
+      issues.push(...compiled.issues, ...built.issues, ...ordered.issues);
+      groups.push(...result.groups);
+      modelOperations.push(...operations);
+      return { changed: result.groups.some((g) => g.status === "applied" && g.changedRows > 0), noop: parsed.explicitNoop };
+    };
+    for (const actor of queryBound(input.db, "SELECT id,physical_status FROM characters WHERE branch_id=? AND physical_status IN ('dead','incapacitated')", [input.branchId])) {
+      haltActorWork(input.db, input.branchId, String(actor.id), input.clockBefore, String(actor.physical_status));
+    }
+    if (clockAfter > cursor || branch.simulation_status === "catching_up") {
+      const settled = await settleWindow({
+        ...input,
+        chatUid: input.anchor.chatUid,
+        clockS: cursor,
+        untilS: clockAfter,
+        deferOutcome: true,
+        budgets: { modelBatches: input.modelBudget },
+        modelPort: input.modelPort ? { request: async (raw) => {
+          const req = raw, atS = req.atS;
+          runBound(input.db, "UPDATE branches SET clock_s=?,clock_min_s=?,clock_max_s=?,simulation_cursor_s=? WHERE id=?", [atS, atS, atS, atS, input.branchId]);
+          const opportunities2 = collectOpportunities({ fromS: cursor, untilS: atS }, { db: input.db, branchId: input.branchId });
+          if (req.boundary.kind === "journey_node") {
+            const journey = queryBound(input.db, "SELECT * FROM journeys WHERE branch_id=? AND id=?", [input.branchId, req.boundary.refId])[0];
+            const context2 = buildDecisionContext({ actors: [{ entityId: String(journey.mover_entity_id) }], opportunities: opportunities2 }, { db: input.db, branchId: input.branchId });
+            return ask("decision", { timeWindow: JSON.stringify({ fromS: cursor, untilS: atS }), actorSlices: JSON.stringify(context2.actorSlices), opportunities: JSON.stringify(opportunities2) }, atS, opportunities2);
+          }
+          const due = queryBound(input.db, "SELECT * FROM actions WHERE branch_id=? AND id=?", [input.branchId, req.boundary.refId]);
+          const context = buildOutcomeContext({ dueActions: due, opportunities: opportunities2 }, { db: input.db, branchId: input.branchId });
+          for (const action of due) {
+            const payload = typeof action.payload_json === "string" ? JSON.parse(action.payload_json) : action.payload_json;
+            if (payload?.stakes === "major") {
+              const draw = recordDraw(drawForEvent(seed, String(action.id), { key: "outcome", distribution: "uniform" }));
+              randomDraws.push(draw);
+              context.facts.push({ kind: "reproducible_draw", actionId: action.id, draw });
+            }
+          }
+          const event = req.boundary.kind === "event_start" ? queryBound(input.db, "SELECT * FROM events WHERE branch_id=? AND id=?", [input.branchId, req.boundary.refId]) : [];
+          if (context.eligibility.some((e) => !e.ok)) throw new AtlasDbError("OUTCOME_INELIGIBLE", "到期行动不满足时空或能力约束，不能落实结果", { eligibility: context.eligibility });
+          const outcome = await ask("outcome", { dueActions: JSON.stringify(context.dueActions), relevantWorldFacts: JSON.stringify([...context.facts, ...event]), eligibility: JSON.stringify(context.eligibility) }, atS, opportunities2, event.map((e) => String(e.id)));
+          if (!outcome.changed) throw new AtlasDbError("OUTCOME_DEFERRED", "到期结果未落实，停在当前因果边界", {});
+          return { resolved: true };
+        } } : null
+      });
+      issues.push(...settled.issues);
+      steps.push(...settled.steps);
+      catchingUp = settled.catchingUp;
+      cursor = settled.simulationCursorS;
+      for (const row2 of queryBound(input.db, "SELECT * FROM journeys WHERE branch_id=? AND status='moving'", [input.branchId])) {
+        const advanced = advanceJourney(row2, cursor, { db: input.db, branchId: input.branchId });
+        issues.push(...advanced.issues);
+        if (JSON.stringify(advanced.journey) !== JSON.stringify(row2)) write(input, "journeys", { ...advanced.journey, row_rev: Number(row2.row_rev) + 1, updated_turn_id: input.turnId }, row2);
+      }
+      const actions = advanceActions({ fromS: Number(branch.simulation_cursor_s), untilS: cursor }, { db: input.db, branchId: input.branchId, makeId: input.makeId, turnId: input.turnId, deferOutcome: true });
+      issues.push(...actions.issues);
+      for (const row2 of actions.actions) write(input, "actions", row2, queryBound(input.db, "SELECT * FROM actions WHERE branch_id=? AND id=?", [input.branchId, String(row2.id)])[0]);
+      for (const row2 of actions.events) write(input, "events", row2, null);
+      for (const journey of queryBound(input.db, "SELECT * FROM journeys WHERE branch_id=? AND status IN ('arrived','paused','blocked')", [input.branchId])) {
+        if (JSON.stringify(before.get(`journeys\0${journey.id}`)) === JSON.stringify(journey)) continue;
+        if (!journey.stop_location_id) continue;
+        const actor = queryBound(input.db, "SELECT * FROM characters WHERE branch_id=? AND id=?", [input.branchId, String(journey.mover_entity_id)])[0];
+        if (actor && actor.location_id !== journey.stop_location_id) write(input, "characters", { ...actor, location_id: journey.stop_location_id, map_id: null, grid_x: null, grid_y: null, coord_precision: "unknown", uncertainty_radius_cells: null, row_rev: Number(actor.row_rev) + 1, updated_turn_id: input.turnId }, actor);
+        if (journey.status === "arrived") {
+          const action = queryBound(input.db, "SELECT * FROM actions WHERE branch_id=? AND id=?", [input.branchId, String(journey.action_id)])[0];
+          if (action && action.status !== "completed") write(input, "actions", { ...action, status: "completed", finished_at_s: journey.arrived_at_s, reason_code: null, row_rev: Number(action.row_rev) + 1, updated_turn_id: input.turnId }, action);
+        }
+      }
+      for (const goal of queryBound(input.db, "SELECT * FROM actions WHERE branch_id=? AND kind='goal' AND status IN ('planned','ready','active')", [input.branchId])) {
+        const children = queryBound(input.db, "SELECT status FROM actions WHERE branch_id=? AND parent_action_id=?", [input.branchId, String(goal.id)]);
+        if (children.length && children.every((c) => ["completed", "cancelled", "failed"].includes(String(c.status)))) write(input, "actions", { ...goal, status: children.some((c) => c.status === "failed") ? "failed" : "completed", finished_at_s: cursor, evaluated_until_s: cursor, row_rev: Number(goal.row_rev) + 1, updated_turn_id: input.turnId }, goal);
+      }
+      runBound(input.db, "UPDATE branches SET clock_s=?,clock_min_s=?,clock_max_s=?,simulation_cursor_s=? WHERE id=?", [clockAfter, clockMin, clockMax, cursor, input.branchId]);
+      const opportunities = collectOpportunities({ fromS: Number(branch.simulation_cursor_s), untilS: cursor }, { db: input.db, branchId: input.branchId });
+      let actors = queryBound(input.db, "SELECT id FROM characters WHERE branch_id=? AND status='active' AND physical_status='alive' AND role!='protagonist' ORDER BY importance,id", [input.branchId]);
+      if (clockAfter === input.clockBefore && branch.simulation_status === "catching_up") {
+        const prior = queryBound(input.db, "SELECT decisions_json FROM turns WHERE id=?", [String(branch.head_turn_id)])[0];
+        const waiting = prior ? JSON.parse(String(prior.decisions_json)).pending_actors : void 0;
+        if (waiting?.length) actors = actors.filter((a) => waiting.includes(String(a.id)));
+      }
+      if (!catchingUp && actors.length) {
+        let processed = 0;
+        const count = decisionActorBudget(ATLAS_RUNTIME_LIMITS.normalResponseTokens);
+        for (; processed < actors.length && input.modelPort && batches < input.modelBudget; processed += count) {
+          const actorIds = actors.slice(processed, processed + count).map((c) => ({ entityId: String(c.id) }));
+          const contacts = opportunities.filter((o) => actorIds.some((a) => a.entityId === o.receiverEntityId));
+          const context = buildDecisionContext({ actors: actorIds, opportunities: contacts }, { db: input.db, branchId: input.branchId });
+          try {
+            await ask("decision", { timeWindow: JSON.stringify({ fromS: input.clockBefore, untilS: cursor }), actorSlices: JSON.stringify(context.actorSlices), opportunities: JSON.stringify(contacts) }, cursor, contacts);
+          } catch (err) {
+            if (err.code === "TURN_CANCELLED") throw err;
+            issues.push({ code: "MODEL_REQUEST_FAILED", path: "$.decision", message: String(err.message), severity: "warning", retryable: true });
+            break;
+          }
+        }
+        if (processed < actors.length) {
+          pendingActors.push(...actors.slice(processed).map((a) => String(a.id)));
+          catchingUp = true;
+          issues.push({ code: "ACTOR_BUDGET_EXHAUSTED", path: "$.decision", message: "剩余人物判断已记录，等待后续批次", severity: "warning", retryable: true });
+        }
+      }
+    }
+    let after = snapshot(input);
+    for (const [key, row2] of after) {
+      const previous = before.get(key);
+      if (JSON.stringify(previous) === JSON.stringify(row2) || !("row_rev" in row2)) continue;
+      const [table] = key.split("\0");
+      runBound(input.db, `UPDATE ${table} SET row_rev=?,updated_turn_id=? WHERE branch_id=? AND id=?`, [Math.max(Number(row2.row_rev), Number(previous?.row_rev ?? 0) + 1), input.turnId, input.branchId, String(row2.id)]);
+    }
+    after = snapshot(input);
+    const mutations = [];
+    for (const key of /* @__PURE__ */ new Set([...before.keys(), ...after.keys()])) {
+      const prior = before.get(key) ?? null, next = after.get(key) ?? null;
+      if (JSON.stringify(prior) === JSON.stringify(next)) continue;
+      const [table, rowId] = key.split("\0");
+      mutations.push({ table, rowId, before: prior, after: next, sourceOpIds: [`simulation:${input.attemptKey ?? input.turnId}`], basis: { kind: "simulation", clock_before_s: input.clockBefore, clock_after_s: clockAfter } });
+    }
+    const seq = Number(queryBound(input.db, "SELECT COALESCE(MAX(sequence),0) AS n FROM turn_changes WHERE turn_id=?", [input.turnId])[0].n) + 1;
+    const journal = recordGroupChanges(input.db, { id: `simulation_${input.attemptKey ?? input.turnId}`, mutations, opIds: [`simulation:${input.attemptKey ?? input.turnId}`] }, { turnId: input.turnId, attemptId: input.attemptKey ?? "simulation", startSequence: seq });
+    if (journal.issues.length) throw new AtlasDbError("JOURNAL_WRITE_FAILED", `后台变化不能可靠回退，候选不发布：${journal.issues.join("；")}`, { issues: journal.issues });
+    return { elapsed, clockAfter, clockMin, clockMax, seed, randomDraws, simulatedUntil: cursor, catchingUp, pendingActors, steps, issues, groups, modelOperations, operationContexts, worldChanged: mutations.some((m) => m.table !== "branches") };
+  }
+
   // src/atlas-db-repository.ts
   var CANONICAL_TABLES = /* @__PURE__ */ new Set([
     "maps",
@@ -12226,8 +15344,8 @@ END`;
       }
     }
     async function createCandidateImpl(anchor, kind = "turn") {
-      const snapshot = requireDb().export();
-      const candidateDb = await openDatabase(snapshot);
+      const snapshot2 = requireDb().export();
+      const candidateDb = await openDatabase(snapshot2);
       enableForeignKeys(candidateDb);
       const token = `cand_${sha256HexSync(`${chatUid}\0${anchor.hostMessageUid}\0${anchor.variantKey}\0${now()}\0${candidates.size}`).slice(0, 24)}`;
       const info = {
@@ -12235,8 +15353,8 @@ END`;
         kind,
         anchor,
         db: candidateDb,
-        snapshot,
-        snapshotSha256: await sha256Hex4(snapshot),
+        snapshot: snapshot2,
+        snapshotSha256: await sha256Hex4(snapshot2),
         preparedWallMs: now(),
         expiresWallMs: now() + ATLAS_RUNTIME_LIMITS.pendingCandidateTtlMs,
         receipt: null,
@@ -12370,8 +15488,8 @@ END`;
       },
       /** B06 createCandidate：从当前库快照建隔离候选；候选改动不出现在正式 query 中。 */
       async createCandidate(anchor, kind = "turn") {
-        const snapshot = requireDb().export();
-        const candidateDb = await openDatabase(snapshot);
+        const snapshot2 = requireDb().export();
+        const candidateDb = await openDatabase(snapshot2);
         enableForeignKeys(candidateDb);
         const token = `cand_${sha256HexSync(`${chatUid}\0${anchor.hostMessageUid}\0${anchor.variantKey}\0${now()}\0${candidates.size}`).slice(0, 24)}`;
         const info = {
@@ -12379,8 +15497,8 @@ END`;
           kind,
           anchor,
           db: candidateDb,
-          snapshot,
-          snapshotSha256: await sha256Hex4(snapshot),
+          snapshot: snapshot2,
+          snapshotSha256: await sha256Hex4(snapshot2),
           preparedWallMs: now(),
           expiresWallMs: now() + ATLAS_RUNTIME_LIMITS.pendingCandidateTtlMs,
           receipt: null,
@@ -12536,6 +15654,7 @@ END`;
       const candidate = await createCandidateImpl(anchor, "turn");
       const candidateDb = candidates.get(candidate.token).db;
       const tables = createTableReadPort(candidateDb);
+      const foregroundKnownRefs = collectKnownRefs(tables, branchId);
       const clockBefore = currentClock();
       const turnId = `turn_${sha256HexSync(`${chatUid}\0${anchor.branchId}\0${anchor.hostMessageUid}\0${anchor.variantKey}\0${anchor.inputHash}\0${anchor.baseRevision}`).slice(0, 24)}`;
       const allIssues = [];
@@ -12547,6 +15666,7 @@ END`;
       let worldChanged = false;
       let timeChanged = false;
       let modelPhaseFailed = false;
+      let foregroundBatches = 0;
       const sourceSnapshot = input.sourceSnapshot ?? [];
       if (input.manual) {
         const manualOps = input.operations ?? [];
@@ -12574,6 +15694,7 @@ END`;
             break;
           }
           phaseIndex += 1;
+          foregroundBatches += 1;
           if (!options.modelPort) {
             modelPhaseFailed = true;
             allIssues.push({
@@ -12682,11 +15803,11 @@ END`;
         tables,
         sources: { phase: compilePhase, snapshot: sourceSnapshot, clockS: clockBefore },
         makeId,
-        knownRefs: collectKnownRefs(tables, branchId),
+        knownRefs: foregroundKnownRefs,
         // 审计列（created_turn_id/updated_turn_id/first_turn_id/last_turn_id）记本次新建的楼。
         turnId,
         // manual = 统一写入层：按操作本身判定允许集合，不受 observe 限制。
-        ...input.manual ? { allowedOps: ATLAS_SEMANTIC_OPS } : {}
+        ...input.manual || input.phaseBatches.length > 1 ? { allowedOps: ATLAS_SEMANTIC_OPS } : {}
       });
       allIssues.push(...compiled.issues);
       const compileInputs = compiled.results.map((r) => ({
@@ -12760,6 +15881,26 @@ END`;
             groupResults = reconcileRepairResults(groupResults, second.groups, rejectedSnapshot);
           }
         }
+        commitTransaction(candidateDb);
+        transactionOpen = false;
+        const simulation = await settleSqlTurn({
+          db: candidateDb,
+          branchId,
+          anchor,
+          turnId,
+          clockBefore,
+          operations: parsedOperations,
+          modelPort: input.manual ? null : options.modelPort,
+          modelBudget: Math.max(0, ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn - foregroundBatches - (repairAttempted ? 1 : 0)),
+          makeId,
+          isCurrent: input.isCurrent
+        });
+        beginTransaction(candidateDb);
+        transactionOpen = true;
+        allIssues.push(...simulation.issues);
+        groupResults.push(...simulation.groups);
+        parsedOperations.push(...simulation.modelOperations);
+        timeChanged = simulation.clockAfter !== clockBefore;
         const fkViolations = foreignKeyCheck(candidateDb);
         const finalCheck = validateCandidate(candidateDb, { branchId });
         const ok = fkViolations.length === 0 && finalCheck.ok;
@@ -12771,16 +15912,16 @@ END`;
           );
         }
         const appliedGroups = groupResults.filter((g) => g.status === "applied");
-        worldChanged = appliedGroups.some((g) => g.changedRows > 0);
-        const newRevision = rev + (worldChanged ? 1 : 0);
+        worldChanged = simulation.worldChanged || appliedGroups.some((g) => g.changedRows > 0);
+        const newRevision = rev + (worldChanged || timeChanged ? 1 : 0);
         const receipt = buildReceipt({
           turnId,
           anchor,
           groupResults,
           issues: allIssues,
           clockBefore,
-          clockAfter: clockBefore,
-          simulatedUntil: clockBefore,
+          clockAfter: simulation.clockAfter,
+          simulatedUntil: simulation.simulatedUntil,
           worldChanged,
           timeChanged,
           explicitNoop,
@@ -12788,6 +15929,7 @@ END`;
           incomplete: responseIncomplete,
           repairAttempted
         });
+        if ((simulation.catchingUp || simulation.elapsed.quality === "unknown") && receipt.status !== "failed") receipt.status = "partial";
         runBound(candidateDb, `UPDATE turns SET status = ?, committed_revision = ?, receipt_json = ?, attempts_json = ?, decisions_json = ? WHERE id = ?`, [
           receipt.status === "failed" ? "failed" : receipt.status === "partial" ? "partial" : "committed",
           receipt.status === "failed" ? null : newRevision,
@@ -12795,28 +15937,34 @@ END`;
           JSON.stringify(attempts.slice(0, ATLAS_RUNTIME_LIMITS.detailedAttemptsPerTurn)),
           JSON.stringify({
             operations: parsedOperations.map((p) => p.value),
+            operation_meta: parsedOperations.map(({ opId, line, rawHash }) => ({ opId, line, rawHash })),
+            known_refs: foregroundKnownRefs,
+            operation_context: simulation.operationContexts,
             host_message_index: input.hostMessageIndex,
-            attention_decisions: [],
-            outcome_decisions: [],
-            random_draws: []
+            simulation_steps: simulation.steps,
+            pending_actors: simulation.pendingActors,
+            attention_decisions: simulation.modelOperations.filter((op) => op.value.op === "attention.propose").map((op) => op.value),
+            outcome_decisions: simulation.modelOperations.filter((op) => op.value.op === "event.propose").map((op) => op.value),
+            random_draws: simulation.randomDraws
           }),
           turnId
         ]);
+        runBound(candidateDb, "UPDATE turns SET clock_after_s=?,elapsed_json=?,rng_seed=? WHERE id=?", [simulation.clockAfter, JSON.stringify(simulation.elapsed), simulation.seed, turnId]);
         runBound(
           candidateDb,
           `UPDATE branches SET head_turn_id = ?, revision = ?, clock_s = ?, clock_min_s = ?, clock_max_s = ?, simulation_cursor_s = ?, simulation_status = ? WHERE id = ?`,
           [
             receipt.status === "failed" ? currentHeadTurnId() : turnId,
             newRevision,
-            clockBefore,
-            clockBefore,
-            clockBefore,
-            clockBefore,
-            "current",
+            simulation.clockAfter,
+            simulation.clockMin,
+            simulation.clockMax,
+            simulation.simulatedUntil,
+            simulation.catchingUp ? "catching_up" : simulation.elapsed.quality === "unknown" ? "blocked" : "current",
             branchId
           ]
         );
-        if (worldChanged) {
+        if (worldChanged || timeChanged) {
           enqueueProjectionSync(candidateDb, {
             branchId,
             turnId,
@@ -12869,6 +16017,7 @@ END`;
         phase: "repair",
         allowedOps: [...allowedOps],
         repairTickets: repair.promptLines.join("\n"),
+        entityRefs: collectEntityRefs(createTableReadPort(args.candidateDb), branchId, args.compiled.scope.all()),
         batchId: `${repair.batchId}`,
         repairOfBatchId: repair.batchId,
         sourceSnapshot: args.sourceSnapshot
@@ -12920,7 +16069,7 @@ END`;
         makeId: args.makeId,
         turnId: args.turnId,
         allowedOps: [...allowedOps],
-        knownRefs: collectKnownRefs(tables, branchId)
+        seedRefs: args.compiled.scope.all()
       });
       args.allIssues.push(...recompiled.issues);
       const built = buildAtomicGroups(
@@ -12986,8 +16135,8 @@ END`;
           storyHash: null,
           attempts: []
         });
-        const rowPlan = { ...plan, steps: plan.steps.filter((step) => step.targetTable !== "branches") };
-        const appliedPlan = await applyRollbackPlan(candidateDb, rowPlan, { turnId: rollbackTurnId, attemptId: "rollback" });
+        runBound(candidateDb, "PRAGMA defer_foreign_keys = ON", []);
+        const appliedPlan = await applyRollbackPlan(candidateDb, plan, { turnId: rollbackTurnId, attemptId: "rollback" });
         for (const note2 of appliedPlan.issues) {
           result_issues_of_rollback.push(note2);
         }
@@ -12995,11 +16144,6 @@ END`;
           runBound(candidateDb, `UPDATE turns SET status = 'rolled_back' WHERE id = ?`, [turnId]);
         }
         const clockAfter = plan.clockTargetS;
-        runBound(
-          candidateDb,
-          `UPDATE branches SET head_turn_id = ?, revision = ?, clock_s = ?, clock_min_s = ?, clock_max_s = ?, simulation_cursor_s = ?, simulation_status = 'current' WHERE id = ?`,
-          [input.targetParentTurnId, rev + 1, clockAfter, clockAfter, clockAfter, clockAfter, branchId]
-        );
         const finalCheck = validateCandidate(candidateDb, { branchId });
         if (!finalCheck.ok) {
           throw new AtlasDbError("INVARIANT_FAILED", `回退后候选校验失败：${finalCheck.violations.slice(0, 5).map((v) => `${v.code}@${v.table}`).join("; ")}`, {
@@ -13160,34 +16304,6 @@ END`;
       );
     }
   }
-  function collectEntityRefs(tables, branchId) {
-    const refs = [];
-    const locations = tables.selectWhere("locations", { branch_id: branchId }, 200);
-    const characters = tables.selectWhere("characters", { branch_id: branchId }, 200);
-    const items = tables.selectWhere("items", { branch_id: branchId }, 100);
-    const factions = tables.selectWhere("factions", { branch_id: branchId }, 100);
-    const maps = tables.selectWhere("maps", { branch_id: branchId }, 50);
-    locations.forEach((l, i) => refs.push(`L${i + 1}=${String(l.name)}（地点）`));
-    characters.forEach((c, i) => refs.push(`C${i + 1}=${String(c.name)}（人物）`));
-    items.forEach((it, i) => refs.push(`I${i + 1}=${String(it.name)}（物品）`));
-    factions.forEach((f, i) => refs.push(`F${i + 1}=${String(f.name)}（势力）`));
-    maps.forEach((m, i) => refs.push(`M${i + 1}=${String(m.name)}（地图）`));
-    return refs;
-  }
-  function collectKnownRefs(tables, branchId) {
-    const out = [];
-    const push = (rows2, prefix, kind) => {
-      rows2.forEach((row2, i) => {
-        out.push({ alias: `${prefix}${i + 1}`, id: String(row2.id), kind, rowRev: typeof row2.row_rev === "number" ? row2.row_rev : null });
-      });
-    };
-    push(tables.selectWhere("locations", { branch_id: branchId }, 200), "L", "location");
-    push(tables.selectWhere("characters", { branch_id: branchId }, 200), "C", "character");
-    push(tables.selectWhere("items", { branch_id: branchId }, 100), "I", "item");
-    push(tables.selectWhere("factions", { branch_id: branchId }, 100), "F", "faction");
-    push(tables.selectWhere("maps", { branch_id: branchId }, 50), "M", "map");
-    return out;
-  }
   function reconcileRepairResults(first, second, rejected) {
     const merged = [...first];
     const rejectedIds = new Set(rejected.map((g) => g.groupId));
@@ -13207,7 +16323,7 @@ END`;
     const failed = args.groupResults.filter((g) => g.status === "rejected" || g.status === "blocked");
     let status;
     if (applied.length === 0 && failed.length === 0) {
-      status = args.modelPhaseFailed ? "failed" : args.explicitNoop || !args.worldChanged ? "noop" : "committed";
+      status = args.modelPhaseFailed ? args.worldChanged || args.timeChanged ? "partial" : "failed" : args.worldChanged || args.timeChanged ? "committed" : "noop";
     } else if (failed.length > 0 && applied.length > 0) {
       status = "partial";
     } else if (failed.length > 0 && applied.length === 0) {
@@ -13215,7 +16331,7 @@ END`;
     } else {
       status = "committed";
     }
-    if (args.explicitNoop && applied.length === 0 && failed.length === 0) status = "noop";
+    if (args.explicitNoop && applied.length === 0 && failed.length === 0 && !args.worldChanged && !args.timeChanged) status = "noop";
     if (args.incomplete && applied.length > 0) status = "partial";
     if (failed.length > 0 && applied.length > 0) status = "partial";
     if (args.repairAttempted && applied.length > 0) status = "partial";

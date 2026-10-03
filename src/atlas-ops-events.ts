@@ -107,12 +107,13 @@ export function compileEventPropose(op: ParsedOperation, ctx: CompileContext): C
 
   const locationId = resolveOne(data.location_ref, ['location'], 'location_ref');
   const routeId = resolveOne(data.route_ref, ['route'], 'route_ref');
-  const subjectId = resolveOne(data.subject_ref, ['character', 'faction', 'item'], 'subject_ref');
+  const subjectId = resolveOne(data.subject_ref ?? data.actor_ref, ['character', 'faction', 'item'], 'subject_ref');
   const causeActionId = resolveOne(data.action_ref, ['action'], 'action_ref');
   const parentEventId = resolveOne(data.event_ref, ['event'], 'event_ref');
 
   // simulated 结果必须绑定真实到期行动或程序生成的机会（§8.4）。
-  if (phase === 'simulated' && !causeActionId) {
+  const scheduledCause = parentEventId && ctx.sources.dueEventIds?.includes(parentEventId);
+  if (phase === 'simulated' && !causeActionId && !scheduledCause) {
     result.issues.push(
       issue('SIMULATED_EVENT_UNBOUND', '$.data.action_ref', 'simulated 事件必须绑定真实到期行动（action_ref）；不能凭标题落实结果', op),
     );
@@ -157,8 +158,9 @@ export function compileEventPropose(op: ParsedOperation, ctx: CompileContext): C
   const status = phase === 'scheduled' ? 'scheduled' : 'occurred';
   const scheduledStart = phase === 'scheduled' ? (typeof data.time_hint === 'object' && isPlainObject(data.time_hint) && typeof data.time_hint.at_s === 'number' ? data.time_hint.at_s : null) : occurredAt;
 
-  const eventId = ctx.makeId('event', op.opId, `event:${title}`);
-  const turnId = ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
+  const previous = scheduledCause ? ctx.tables.selectOne('events', ctx.branchId, parentEventId!) : null;
+  const eventId = previous ? String(previous.id) : ctx.makeId('event', op.opId, `event:${title}`);
+  const turnId = ctx.turnId ?? ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
   const summary = asString(data.result) ?? title;
   const row = createRow(
     'events',
@@ -171,7 +173,7 @@ export function compileEventPropose(op: ParsedOperation, ctx: CompileContext): C
       subject_entity_id: subjectId,
       participants_json: participants,
       cause_action_id: causeActionId,
-      parent_event_id: parentEventId,
+      parent_event_id: previous ? previous.parent_event_id : parentEventId,
       scheduled_start_s: scheduledStart,
       occurred_at_s: occurredAt,
       outcome: phase === 'scheduled' ? '' : summary,
@@ -180,7 +182,12 @@ export function compileEventPropose(op: ParsedOperation, ctx: CompileContext): C
     },
     { branchId: ctx.branchId, id: eventId, turnId, clockS: ctx.clockS, nowWallMs: Date.now(), rulesetVersion: 'atlas-1' },
   );
-  result.mutations.push(mutation('events', eventId, null, row, op, basisWith(ctx, op, causeActionId ? [{ kind: 'action', id: causeActionId }] : [])));
+  if (previous) {
+    row.created_turn_id = previous.created_turn_id;
+    row.row_rev = Number(previous.row_rev) + 1;
+    row.scheduled_start_s = previous.scheduled_start_s;
+  }
+  result.mutations.push(mutation('events', eventId, previous, row, op, basisWith(ctx, op, causeActionId ? [{ kind: 'action', id: causeActionId }] : [])));
   result.effects = [{ kind: 'event_time_estimate', eventId, elapsed, phase }];
 
   // —— effects：与事件同一原子组 ——

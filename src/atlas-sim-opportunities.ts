@@ -305,6 +305,7 @@ export function collectOpportunities(window: { fromS: number; untilS: number }, 
       if (alreadyKnows(informationId, actorId)) continue;
       if (actorId === str(front.originator_entity_id)) continue; // 造谣/目击者本来就知道，不需要再听一次
       if (access === 'members' && audienceFaction && !membersOf(audienceFaction).has(actorId)) continue;
+      if (access === 'recipients' && !asArray(audience.entity_ids).includes(actorId)) continue;
 
       const position = resolveEffectivePosition({ db: world.db, branchId: world.branchId }, actorId);
       const presenceLocation =

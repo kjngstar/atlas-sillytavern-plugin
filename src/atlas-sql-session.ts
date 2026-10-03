@@ -607,7 +607,8 @@ export async function runSqlRetry(session: SqlSession, input: Omit<FailedGroupRe
         receipt.groups.push(...result.groups);
         receipt.issues = receipt.issues.filter(i => !i.opId || !correctedOps.has(i.opId));
         receipt.worldChanged = receipt.worldChanged || result.groups.some(g => g.changedRows > 0);
-        receipt.status = receipt.groups.some(g => g.status === 'rejected' || g.status === 'blocked') ? 'partial' : 'committed';
+        const branchStatus=queryBound(candidate.db,'SELECT simulation_status FROM branches WHERE id=?',[session.branchId])[0]?.simulation_status;
+        receipt.status = branchStatus==='catching_up'||branchStatus==='blocked'||receipt.groups.some(g => g.status === 'rejected' || g.status === 'blocked') ? 'partial' : 'committed';
         runBound(candidate.db, 'UPDATE turns SET receipt_json=?, status=? WHERE id=?',
           [JSON.stringify(receipt), receipt.status, input.turnId]);
         const payloadHash = await sha256Hex(new TextEncoder().encode(JSON.stringify([input.turnId, input.attemptId, result.groups])));

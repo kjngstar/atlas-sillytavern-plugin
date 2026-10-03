@@ -114,6 +114,7 @@ export const OP_KNOWN_FIELDS: Record<string, readonly string[]> = {
     'location_ref',
     'route_ref',
     'actor_ref',
+    'subject_ref',
     'participants',
     'action_ref',
     'event_ref',

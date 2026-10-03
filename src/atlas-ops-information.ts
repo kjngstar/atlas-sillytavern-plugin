@@ -148,7 +148,7 @@ export function compileInformationPropose(op: ParsedOperation, ctx: CompileConte
   // 精确内容/结构哈希，防止重复生成同一条消息。
   const duplicate = ctx.tables.selectOne('information', ctx.branchId, ctx.makeId('information', op.opId, `info:${topicKey}:${hash}`));
   const infoId = ctx.makeId('information', op.opId, `info:${topicKey}:${hash}`);
-  const turnId = ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
+  const turnId = ctx.turnId ?? ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
 
   if (duplicate) {
     result.effects = [{ kind: 'information_reused', informationId: infoId, spreadAtLocationId, recipientId }];
@@ -291,10 +291,11 @@ export function compileAttentionPropose(op: ParsedOperation, ctx: CompileContext
 
   // 机会本身携带接收者与信息：模型不能换收信人。
   const row = ctx.tables.selectOne('knowledge', ctx.branchId, opportunity.entry.id);
-  const turnId = ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
+  const turnId = ctx.turnId ?? ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
+  const contact = ctx.sources.opportunities?.find(o => o.id === opportunity.entry!.id);
   if (!row) {
-    const receiver = ctx.tables.selectOne('characters', ctx.branchId, opportunity.entry.id);
-    const informationId = ctx.tables.selectOne('information', ctx.branchId, opportunity.entry.id);
+    const receiver = contact?.receiverEntityId ? ctx.tables.selectOne('characters', ctx.branchId, contact.receiverEntityId) : null;
+    const informationId = contact?.informationId ? ctx.tables.selectOne('information', ctx.branchId, contact.informationId) : null;
     if (!receiver || !informationId) {
       result.issues.push(
         issue(
@@ -308,22 +309,10 @@ export function compileAttentionPropose(op: ParsedOperation, ctx: CompileContext
     }
   }
 
-  const target = row ?? {
-    branch_id: ctx.branchId,
-    id: opportunity.entry.id,
-    row_rev: 1,
-    created_turn_id: turnId,
-    updated_turn_id: turnId,
-    knower_character_id: opportunity.entry.id,
-    knower_faction_id: null,
-    is_pov: 0,
-    information_id: opportunity.entry.id,
-    first_received_at_s: ctx.clockS,
-    belief: 'heard',
-    attention: 'normal',
-    reaction_note: '',
-    status: 'active',
-  };
+  const target = row ?? createRow('knowledge', {
+    knower_character_id: contact!.receiverEntityId, information_id: contact!.informationId,
+    first_received_at_s: contact!.atS,
+  }, { branchId: ctx.branchId, id: opportunity.entry.id, turnId, clockS: ctx.clockS, nowWallMs: 0, rulesetVersion: 'atlas-1' });
 
   const after = applyPatch(target, {
     belief,
@@ -464,7 +453,7 @@ export function compileChannelUpsert(op: ParsedOperation, ctx: CompileContext): 
     return result;
   }
 
-  const turnId = ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
+  const turnId = ctx.turnId ?? ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
   const rowId = existing?.entry ? existing.entry.id : ctx.makeId('channel', op.opId, ref && ref.startsWith('new:') ? ref : `chan:${name}`);
   const before = existing?.entry ? ctx.tables.selectOne('channels', ctx.branchId, rowId) : null;
   const changes: Record<string, unknown> = {

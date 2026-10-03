@@ -98,7 +98,7 @@ function mutation(
  */
 function turnIdOf(ctx: CompileContext): string {
   if (typeof ctx.turnId === 'string' && ctx.turnId !== '') return ctx.turnId;
-  return ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
+  return ctx.turnId ?? ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
 }
 
 function basisFor(

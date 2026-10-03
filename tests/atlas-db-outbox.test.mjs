@@ -476,10 +476,10 @@ test('T25-04 删楼重建（真实 Repository）：回退确认后 outbox 只剩
     });
     await repo.confirmSaved({ token: rollback.token, snapshotSha256: rollback.snapshotSha256, result: 'saved' });
 
-    // 现有 E09 语义：恢复目标楼及其后继的 before，head 指到该楼；本测试关注同步意图的重建。
+    // 删除第二楼：撤销该楼及后继，业务 head 必须恢复为仍有效的第一楼。
     assert.equal(countRows(repo.db, 'characters', IDS.branchMain), 5, '被回退那一楼建立的实体消失');
     const branch = queryBound(repo.db, 'SELECT head_turn_id, revision FROM branches WHERE id = ?', [IDS.branchMain])[0];
-    assert.equal(branch.head_turn_id, second.receipt.turnId);
+    assert.equal(branch.head_turn_id, first.receipt.turnId);
     assert.equal(Number(branch.revision), 3);
     assert.equal(
       queryBound(repo.db, "SELECT COUNT(*) AS n FROM characters WHERE name = ?", ['第一个'])[0].n,

@@ -32,6 +32,9 @@ export type SourceBindContext = {
   phase: Phase;
   snapshot: SourceSnapshotEntry[];
   clockS: number;
+  /** Ephemeral, program-generated contacts; not character knowledge until accepted. */
+  opportunities?: Array<{ id: string; receiverEntityId: string | null; informationId: string | null; atS: number }>;
+  dueEventIds?: string[];
   causes?: Array<{ kind: string; id: string }>;
   /** 当前操作的确定性 ID（如 op_0_xxxxxxxx）：诊断与 repair 票据都要靠它定位（§16.8/§18.4）。 */
   opId?: string;

@@ -352,7 +352,7 @@ function completionEvent(
  */
 export function advanceActions(
   window: { fromS: number; untilS: number },
-  world: ActionsWorld,
+  world: ActionsWorld & { deferOutcome?: boolean },
 ): { actions: Array<Record<string, unknown>>; events: Array<Record<string, unknown>>; issues: Issue[] } {
   const fromS = num(window?.fromS) ?? 0;
   const untilS = num(window?.untilS) ?? fromS;
@@ -378,7 +378,7 @@ export function advanceActions(
   // 每个 actor 只能有一个占用主要行动时间的 active 行动（§4.3）；travel 行动同样占用主时间
   // （它的进度由 journeys 推动，见下面的分支），因此也登记进主行动表。
   const mainAssigned = new Map<string, string>();
-  const activeRows = rows.filter((r) => String(r.status) === 'active');
+  const activeRows = rows.filter((r) => String(r.status) === 'active' && String(r.kind) !== 'goal');
   const sortByPriority = (a: Record<string, unknown>, b: Record<string, unknown>): number => {
     const byPriority = priorityRank(String(a.priority)) - priorityRank(String(b.priority));
     if (byPriority !== 0) return byPriority;
@@ -403,7 +403,9 @@ export function advanceActions(
     const actionId = String(row.id);
     const actorId = String(row.actor_entity_id ?? '');
     const kind = String(row.kind ?? '');
+    if (kind === 'goal') continue; // Goal containers never consume an actor's work time.
     const payload = asObject(row.payload_json) ?? {};
+    if (payload.program_kind === 'rumor_delivery') continue;
     const trigger = asObject(row.trigger_json);
     const evaluated = num(row.evaluated_until_s) ?? 0;
     const startFloor = Math.max(fromS, evaluated);
@@ -540,6 +542,9 @@ export function advanceActions(
       }
     }
 
+    if (world.deferOutcome && status === 'completed' && kind !== 'wait' && kind !== 'travel') {
+      status = 'active'; finishedAt = null; reasonCode = 'OUTCOME_PENDING';
+    }
     if (status === 'completed' && finishedAt !== null && resultEventId === null) {
       const event = completionEvent(world, row, finishedAt, makeId);
       events.push(event);

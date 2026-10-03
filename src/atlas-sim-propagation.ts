@@ -16,6 +16,7 @@
 import { queryBound, runBound } from './atlas-db-runtime.ts';
 import { decodeRow } from './atlas-db-codec.ts';
 import { tableColumnNames } from './atlas-db-schema.ts';
+import { createRow } from './atlas-db-defaults.ts';
 import { MOVEMENT_SPEED_PRESETS, TERRAIN_MULTIPLIERS } from './atlas-sim-motion.ts';
 import { collectOpportunities } from './atlas-sim-opportunities.ts';
 import type { SqlDatabase } from './atlas-db-runtime.ts';
@@ -46,6 +47,8 @@ export type DeliverWorld = {
   db: SqlDatabase;
   branchId: string;
   clockS: number;
+  /** Formal turn keeps in-flight messages as transmit actions, without adding a table. */
+  persistPending?: boolean;
   makeId: (...args: never[]) => string;
   turnId: string;
 };
@@ -73,6 +76,13 @@ function str(value: unknown): string | null {
 
 function num(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function asObject(value: unknown): Record<string, unknown> | null {
+  if (typeof value === 'string') {
+    try { return asObject(JSON.parse(value)); } catch { return null; }
+  }
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
 function decodeOrNull(table: string, row: Record<string, unknown>): Record<string, unknown> | null {
@@ -376,6 +386,14 @@ function insertFront(world: DeliverWorld, row: Record<string, unknown>): void {
   );
 }
 
+function deliveryAudience(world: DeliverWorld, informationId: string, channelId: string | null, sourceFrontId: string | null): string {
+  const info=queryBound(world.db,'SELECT secrecy FROM information WHERE branch_id=? AND id=?',[world.branchId,informationId])[0];
+  const original=sourceFrontId ? queryBound(world.db,'SELECT audience_json FROM rumor_fronts WHERE branch_id=? AND id=?',[world.branchId,sourceFrontId])[0] : null;
+  if (info?.secrecy === 'public') return String(original?.audience_json ?? JSON.stringify({access:'public',tags:[]}));
+  const channel=channelId ? queryBound(world.db,'SELECT recipient_entity_id FROM channels WHERE branch_id=? AND id=?',[world.branchId,channelId])[0] : null;
+  return JSON.stringify({access:'recipients',entity_ids:channel?.recipient_entity_id ? [String(channel.recipient_entity_id)] : []});
+}
+
 /**
  * F10：把**实际到期**的传播任务落实为 `rumor_fronts`。
  * 到达时刻之前绝不建立 front；同时推进来源 front 的下次检查时刻。
@@ -389,6 +407,25 @@ export function deliverDueInformation(
   const makeId = world.makeId as unknown as (kind: string, opId: string, alias: string) => string;
   let frontsCreated = 0;
   let earliestArrival: number | null = null;
+  if (world.persistPending) {
+    for (const action of queryBound(world.db,"SELECT * FROM actions WHERE branch_id=? AND kind='transmit' AND status='active' AND deadline_s<=?",[world.branchId,untilS])) {
+      const task=asObject(action.payload_json);
+      if (task?.program_kind!=='rumor_delivery') continue;
+      const arrived=num(task.arrive_at_s), destination=str(task.to_location_id), information=str(task.information_id);
+      if (arrived===null||!destination||!information) continue;
+      const routeId=str(task.route_id);
+      if (routeId && queryBound(world.db,"SELECT id FROM routes WHERE branch_id=? AND id=? AND status='open'",[world.branchId,routeId]).length===0) {
+        runBound(world.db,"UPDATE actions SET status='blocked',reason_code='DELIVERY_ROUTE_BLOCKED',row_rev=row_rev+1,updated_turn_id=? WHERE branch_id=? AND id=?",[world.turnId,world.branchId,String(action.id)]);
+        continue;
+      }
+      insertFront(world,{branch_id:world.branchId,id:`delivery_front_${action.id}`,row_rev:1,created_turn_id:world.turnId,updated_turn_id:world.turnId,
+        information_id:information,location_id:destination,via_channel_id:str(task.via_channel_id),source_front_id:str(task.front_id),source_action_id:String(action.id),
+        first_available_at_s:arrived,last_reinforced_at_s:arrived,next_spread_check_s:arrived+PROPAGATION_CHECK_INTERVAL_S,
+        expires_at_s:null,reach:'local',audience_json:deliveryAudience(world,information,str(task.via_channel_id),str(task.front_id)),status:'active'});
+      runBound(world.db,"UPDATE actions SET status='completed',finished_at_s=?,evaluated_until_s=?,row_rev=row_rev+1,updated_turn_id=? WHERE branch_id=? AND id=?",[arrived,arrived,world.turnId,world.branchId,String(action.id)]);
+      frontsCreated++; earliestArrival=earliestArrival===null?arrived:Math.min(earliestArrival,arrived);
+    }
+  }
 
   const dueFronts: Array<Record<string, unknown>> = [];
   for (const raw of queryBound(
@@ -429,7 +466,22 @@ export function deliverDueInformation(
       const dedupeKey = `${informationId}|${destination}`;
       if (seen.has(dedupeKey)) continue;
       seen.add(dedupeKey);
-      if (arriveAt > untilS) continue; // 还没到，绝不提前建立 front
+      if (arriveAt > untilS) {
+        if (world.persistPending) {
+          const id=`delivery_${String(task.id)}`;
+          if (!queryBound(world.db,'SELECT id FROM actions WHERE branch_id=? AND id=?',[world.branchId,id]).length) {
+            const row=createRow('actions',{actor_entity_id:String(task.from_location_id),kind:'transmit',title:'信息在途',status:'active',
+              target_location_id:destination,started_at_s:task.depart_at_s,deadline_s:arriveAt,next_check_s:arriveAt,
+              evaluated_until_s:untilS,payload_json:{...task,program_kind:'rumor_delivery'}},
+              {branchId:world.branchId,id,turnId:world.turnId,clockS:untilS,nowWallMs:0,rulesetVersion:'atlas-1'});
+            const columns=tableColumnNames('actions').filter(c=>c in row);
+            runBound(world.db,`INSERT INTO actions (${columns.join(',')}) VALUES (${columns.map(()=>'?').join(',')})`,columns.map(c=>{
+              const v=row[c]; return v===null||v===undefined?null:typeof v==='object'?JSON.stringify(v):v as SqlValue;
+            }));
+          }
+        }
+        continue; // still in flight, not knowledge or a destination front
+      }
       const viaChannel = str(task.via_channel_id);
       insertFront(world, {
         branch_id: world.branchId,
@@ -447,7 +499,7 @@ export function deliverDueInformation(
         next_spread_check_s: arriveAt + PROPAGATION_CHECK_INTERVAL_S,
         expires_at_s: null,
         reach: 'local',
-        audience_json: JSON.stringify({ access: 'public', tags: [] }),
+        audience_json: deliveryAudience(world, informationId, viaChannel, frontId),
         status: 'active',
       });
       frontsCreated += 1;

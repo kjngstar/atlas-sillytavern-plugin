@@ -52,6 +52,8 @@ export type SettleInput = {
   modelPort?: { request(req: unknown): Promise<unknown> } | null;
   makeId: (kind: string, opId: string, alias: string) => string;
   turnId: string;
+  /** Formal repository applies bounded model results before marking a boundary resolved. */
+  deferOutcome?: boolean;
 };
 
 export type SettleResult = {
@@ -66,7 +68,7 @@ export type SettleResult = {
 export const SETTLE_MAX_STEPS = 512;
 
 function issue(code: string, path: string, message: string, severity: 'warning' | 'error' = 'warning'): Issue {
-  return { code, path, message, severity, retryable: false };
+  return { code, path, message, severity, retryable: ['MODEL_REQUEST_FAILED','MODEL_BUDGET_EXHAUSTED','SETTLE_STEP_LIMIT'].includes(code) };
 }
 
 function num(value: unknown): number | null {
@@ -174,7 +176,7 @@ function actionCompletionAtS(action: Record<string, unknown>): number | null {
   const started = num(action.started_at_s);
   if (started === null) return null;
   const progress = num(action.progress_s) ?? 0;
-  return started + Math.max(0, nominal - progress);
+  return Math.max(started, num(action.evaluated_until_s) ?? started) + Math.max(0, nominal - progress);
 }
 
 /** 构造 `atS <= untilS` 的候选边界（调用方负责去掉已处理的稳定 ID）。 */
@@ -204,6 +206,12 @@ export function buildBoundaries(
   for (const action of loadRows(world, 'actions', "status IN ('planned','ready','active','paused','blocked')", [])) {
     const actionId = String(action.id);
     const kind = String(action.kind ?? '');
+    if (kind === 'goal') continue;
+    if (asObject(action.payload_json)?.program_kind==='rumor_delivery') {
+      const atS=num(action.deadline_s);
+      if (atS!==null && String(action.status)==='active' && atS<=untilS) boundaries.push({atS:Math.max(cursor,atS),kind:'information_delivery',stableId:`delivery:${String(action.id)}`,needsModel:false,refId:String(action.id)});
+      continue;
+    }
     const status = String(action.status ?? 'planned');
     const earliest = num(action.earliest_start_s);
     const nextCheck = num(action.next_check_s);
@@ -339,6 +347,7 @@ function applyBoundary(input: SettleInput, boundary: Boundary, cursor: number): 
       branchId: input.branchId,
       makeId: input.makeId as unknown as (...args: never[]) => string,
       turnId: input.turnId,
+      deferOutcome: input.deferOutcome,
     });
     issues.push(...result.issues);
     for (const row of result.actions) writeRow(input.db, 'actions', row, 'update');
@@ -348,11 +357,12 @@ function applyBoundary(input: SettleInput, boundary: Boundary, cursor: number): 
     return { step, issues, opportunities: [] };
   }
 
-  if (boundary.kind === 'front_spread') {
+  if (boundary.kind === 'front_spread' || boundary.kind === 'information_delivery') {
     const result = deliverDueInformation(boundary.atS, {
       db: input.db,
       branchId: input.branchId,
       clockS: boundary.atS,
+      persistPending: input.deferOutcome === true,
       makeId: input.makeId as unknown as (...args: never[]) => string,
       turnId: input.turnId,
     });

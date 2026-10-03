@@ -86,7 +86,7 @@ const PHASE_TASK: Record<Phase, string[]> = {
     '主角是用户人设；助手楼层显示名或角色卡标题只是宿主元数据，不能仅凭它建成主角或在场人物。',
     '地点包含关系、人物粗位置与精确坐标分开处理。学校内但教室未知，就只给学校引用。',
     '心理/倾向可以依据人物设定合理更新，并保持简短。',
-    '已完成行为或明确耗时可以放在 event.propose 的 activity/time_hint 中，未完成计划不算已经经过时间。',
+    '已完成行为用 event.propose 的 activity={kind:dialogue/meal/rest/sleep/travel/combat/other,completed:true} 和 time_hint={elapsed_s:明确秒数} 或 {min_s,nominal_s,max_s}。未完成计划用completed:false，不能推进时间。已完成赶路可引用真实subject_ref人物和route_ref路线，由程序按距离及人物能力计算耗时。',
   ],
   geography: [
     '任务：处理这一张地图的层级、范围标定或路线估计。',

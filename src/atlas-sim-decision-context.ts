@@ -23,6 +23,8 @@ export type DecisionActorSlice = {
   activeActions: Array<Record<string, unknown>>;
   journeys: Array<Record<string, unknown>>;
   opportunities: Opportunity[];
+  /** Only the contents this actor knows or can presently encounter; truth labels stay author-only. */
+  information: Array<Record<string, unknown>>;
 };
 
 export type DecisionContext = { actorSlices: DecisionActorSlice[]; refs: string[] };
@@ -98,7 +100,11 @@ export function buildDecisionContext(
       if (opportunity.locationId) refs.add(`location:${opportunity.locationId}`);
     }
 
-    actorSlices.push({ entityId, knowledge, activeActions, journeys, opportunities });
+    const informationIds = new Set([...knowledge.map(k => String(k.information_id)),
+      ...opportunities.map(o => o.informationId).filter((id): id is string => typeof id === 'string')]);
+    const information = [...informationIds].flatMap(id => queryBound(world.db,
+      'SELECT id,title,content,kind FROM information WHERE branch_id=? AND id=?', [world.branchId,id]));
+    actorSlices.push({ entityId, knowledge, activeActions, journeys, opportunities, information });
   }
 
   actorSlices.sort((a, b) => (a.entityId < b.entityId ? -1 : a.entityId > b.entityId ? 1 : 0));

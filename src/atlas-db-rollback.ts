@@ -230,7 +230,7 @@ export function planRollback(chain: RollbackChain, limits: RollbackLimits = {}):
     const wb = wallOf.get(b) ?? 0;
     if (wa !== wb) return wa - wb;
     return a < b ? -1 : a > b ? 1 : 0;
-  });
+  }).filter(id => !(target.kind === 'migration' && id === targetTurnId));
 
   // head 链提示：目标楼已不在当前有效故事历史里时如实说明（不静默）。
   const headTurnId = branch.head_turn_id === null || branch.head_turn_id === undefined ? null : String(branch.head_turn_id);
@@ -254,6 +254,7 @@ export function planRollback(chain: RollbackChain, limits: RollbackLimits = {}):
   const steps: RollbackStep[] = [];
   const tableCounts: Record<string, number> = {};
   let sequence = 1;
+  let restoredBranch: Record<string, unknown> | null = null;
 
   for (const turnId of turns) {
     const entries = readTurnChanges(db, turnId);
@@ -269,6 +270,7 @@ export function planRollback(chain: RollbackChain, limits: RollbackLimits = {}):
         continue;
       }
       if (entry.targetTable === 'branches') {
+        restoredBranch = parseBefore(entry);
         issues.push(
           note('ROLLBACK_BRANCH_FIELDS_FOLDED', `分支可回退字段由一条显式 step 统一表达（日志行 ${entry.id} 折入）`, {
             turnId,
@@ -303,18 +305,15 @@ export function planRollback(chain: RollbackChain, limits: RollbackLimits = {}):
   // §6.4 / §17E：branches 的 head 指针与提交计数不进变更日志，但 clock/head/revision/cursor
   // 属于可回退字段，用**一条显式 step**表达（完整行 + 回退后的可回退字段）。
   const restoredCursorS = Math.min(finiteOr(branch.simulation_cursor_s, 0), clockTargetS);
-  const branchRestore: Record<string, unknown> = { ...branch };
-  // 注意：此处 head = 目标楼的**父楼**（= 连目标楼一起撤销）。
-  // 仓库入口 prepareRollback 的 head 语义不同（head = 传入的 targetParentTurnId），两处**尚未统一**：
-  // 各自都被测试固定（T25-03 / T10-12 / T28-01 要父楼语义，T14-02 / T14-04 要目标楼语义），
-  // 强行合并会同时打破两边，属于语义未定而非实现缺陷。调用方需明确自己用的是哪一套。
-  branchRestore.head_turn_id = parentOf.get(targetTurnId) ?? null;
+  const branchRestore: Record<string, unknown> = { ...branch, ...(restoredBranch ?? {}) };
+  // Narrative/manual targets are inclusive. The migration seed remains a base.
+  branchRestore.head_turn_id = target.kind === 'migration' ? targetTurnId : parentOf.get(targetTurnId) ?? null;
   branchRestore.revision = revision + 1;
   branchRestore.clock_s = clockTargetS;
-  branchRestore.clock_min_s = clockTargetS;
-  branchRestore.clock_max_s = clockTargetS;
-  branchRestore.simulation_cursor_s = restoredCursorS;
-  branchRestore.simulation_status = 'current';
+  branchRestore.clock_min_s = restoredBranch ? restoredBranch.clock_min_s : clockTargetS;
+  branchRestore.clock_max_s = restoredBranch ? restoredBranch.clock_max_s : clockTargetS;
+  branchRestore.simulation_cursor_s = restoredBranch ? restoredBranch.simulation_cursor_s : restoredCursorS;
+  branchRestore.simulation_status = restoredBranch ? restoredBranch.simulation_status : 'current';
   steps.push({
     sequence,
     turnId: targetTurnId,

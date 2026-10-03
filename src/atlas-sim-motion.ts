@@ -364,6 +364,19 @@ function segmentDistance(
   return { minM: 0, nominalM: 0, maxM: 0, quality: 'unknown', basis };
 }
 
+/** Completed narrative travel may reuse a known route and actual mobility; no write. */
+export function computeTravelInterval(world: {db:SqlDatabase;branchId:string}, actor: Record<string,unknown>, route: Record<string,unknown>, mode?:string) {
+  const selection=selectMobility(actor,route,{mode});
+  if (!selection || selection.issues.some(i=>i.severity==='error') || route.status!=='open') return null;
+  const distance=segmentDistance(world,route);
+  const segment={distanceMinM:distance.minM,distanceNominalM:distance.nominalM,distanceMaxM:distance.maxM,
+    speedMinMps:selection.minMps,speedNominalMps:selection.nominalMps,speedMaxMps:selection.maxMps,
+    durationOverride:asObject(route.travel_time_override_json),quality:distance.quality};
+  if(distance.quality==='unknown'&&!segment.durationOverride) return null;
+  const bounds=segmentBounds(segment);
+  return bounds?{min_s:bounds.min,nominal_s:bounds.nominal,max_s:bounds.max}:null;
+}
+
 function segmentQuality(geometryQuality: string, distanceQuality: 'confirmed' | 'estimated' | 'unknown'): 'confirmed' | 'estimated' | 'unknown' {
   if (geometryQuality === 'unknown' && distanceQuality === 'unknown') return 'unknown';
   if (geometryQuality === 'confirmed' && distanceQuality === 'confirmed') return 'confirmed';

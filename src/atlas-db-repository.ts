@@ -36,6 +36,9 @@ import { ATLAS_SCHEMA_VERSION, installSchemaSafe } from './atlas-db-schema.ts';
 import { encodeSnapshot, sha256HexSync, sha256Hex } from './atlas-db-envelope.ts';
 import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
 import { queryChanges, queryDiagnostics, queryEntityDetail, queryMapView, queryNearby, querySimulationView } from './atlas-db-views.ts';
+import { collectKnownRefs, collectEntityRefs } from './atlas-sql-refs.ts';
+export { collectKnownRefs, collectEntityRefs } from './atlas-sql-refs.ts';
+import { settleSqlTurn } from './atlas-sql-simulation.ts';
 import type { SqlDatabase } from './atlas-db-runtime.ts';
 import type {
   AtlasAssetRef,
@@ -586,6 +589,7 @@ export function createSqlRepository(options: RepositoryOptions) {
     const candidate = await createCandidateImpl(anchor, 'turn');
     const candidateDb = (candidates.get(candidate.token) as StoredCandidate).db;
     const tables = createTableReadPort(candidateDb);
+    const foregroundKnownRefs = collectKnownRefs(tables, branchId);
     const clockBefore = currentClock();
     // A rolled-back floor may be regenerated with identical text; retain the old
     // audit turn and give its new commit generation a distinct identity.
@@ -600,6 +604,7 @@ export function createSqlRepository(options: RepositoryOptions) {
     let worldChanged = false;
     let timeChanged = false;
     let modelPhaseFailed = false;
+    let foregroundBatches = 0;
 
     const sourceSnapshot: SourceSnapshotEntry[] = input.sourceSnapshot ?? [];
 
@@ -629,6 +634,7 @@ export function createSqlRepository(options: RepositoryOptions) {
           break;
         }
         phaseIndex += 1;
+        foregroundBatches += 1;
         if (!options.modelPort) {
           modelPhaseFailed = true;
           allIssues.push({
@@ -746,11 +752,11 @@ export function createSqlRepository(options: RepositoryOptions) {
       tables,
       sources: { phase: compilePhase, snapshot: sourceSnapshot, clockS: clockBefore },
       makeId,
-      knownRefs: collectKnownRefs(tables, branchId),
+      knownRefs: foregroundKnownRefs,
       // 审计列（created_turn_id/updated_turn_id/first_turn_id/last_turn_id）记本次新建的楼。
       turnId,
       // manual = 统一写入层：按操作本身判定允许集合，不受 observe 限制。
-      ...(input.manual ? { allowedOps: ATLAS_SEMANTIC_OPS } : {}),
+      ...(input.manual || input.phaseBatches.length > 1 ? { allowedOps: ATLAS_SEMANTIC_OPS } : {}),
     });
     allIssues.push(...compiled.issues);
 
@@ -833,6 +839,21 @@ export function createSqlRepository(options: RepositoryOptions) {
         }
       }
 
+      // All program/model settlement belongs to this same isolated floor. No SQL
+      // transaction is held across its model requests; host publication remains later.
+      commitTransaction(candidateDb);
+      transactionOpen = false;
+      const simulation = await settleSqlTurn({ db: candidateDb, branchId, anchor, turnId, clockBefore,
+        operations: parsedOperations, modelPort: input.manual ? null : options.modelPort,
+        modelBudget: Math.max(0, ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn - foregroundBatches - (repairAttempted ? 1 : 0)),
+        makeId, isCurrent: input.isCurrent });
+      beginTransaction(candidateDb);
+      transactionOpen = true;
+      allIssues.push(...simulation.issues);
+      groupResults.push(...simulation.groups);
+      parsedOperations.push(...simulation.modelOperations);
+      timeChanged = simulation.clockAfter !== clockBefore;
+
       const fkViolations = foreignKeyCheck(candidateDb);
       const finalCheck = validateCandidate(candidateDb, { branchId });
       const ok = fkViolations.length === 0 && finalCheck.ok;
@@ -845,8 +866,8 @@ export function createSqlRepository(options: RepositoryOptions) {
       }
 
       const appliedGroups = groupResults.filter((g) => g.status === 'applied');
-      worldChanged = appliedGroups.some((g) => g.changedRows > 0);
-      const newRevision = rev + (worldChanged ? 1 : 0);
+      worldChanged = simulation.worldChanged || appliedGroups.some((g) => g.changedRows > 0);
+      const newRevision = rev + (worldChanged || timeChanged ? 1 : 0);
 
       const receipt = buildReceipt({
         turnId,
@@ -854,8 +875,8 @@ export function createSqlRepository(options: RepositoryOptions) {
         groupResults,
         issues: allIssues,
         clockBefore,
-        clockAfter: clockBefore,
-        simulatedUntil: clockBefore,
+        clockAfter: simulation.clockAfter,
+        simulatedUntil: simulation.simulatedUntil,
         worldChanged,
         timeChanged,
         explicitNoop,
@@ -863,6 +884,7 @@ export function createSqlRepository(options: RepositoryOptions) {
         incomplete: responseIncomplete,
         repairAttempted,
       });
+      if ((simulation.catchingUp || simulation.elapsed.quality === 'unknown') && receipt.status !== 'failed') receipt.status = 'partial';
 
       // 5) 记录回执、状态与同步任务（同一事务）
       runBound(candidateDb, `UPDATE turns SET status = ?, committed_revision = ?, receipt_json = ?, attempts_json = ?, decisions_json = ? WHERE id = ?`, [
@@ -872,26 +894,32 @@ export function createSqlRepository(options: RepositoryOptions) {
         JSON.stringify(attempts.slice(0, ATLAS_RUNTIME_LIMITS.detailedAttemptsPerTurn)),
         JSON.stringify({ operations: parsedOperations.map((p) => p.value),
           operation_meta: parsedOperations.map(({ opId, line, rawHash }) => ({ opId, line, rawHash })),
+          known_refs: foregroundKnownRefs,
+          operation_context: simulation.operationContexts,
           host_message_index: input.hostMessageIndex,
-          attention_decisions: [], outcome_decisions: [], random_draws: [] }),
+          simulation_steps: simulation.steps,
+          pending_actors: simulation.pendingActors,
+          attention_decisions: simulation.modelOperations.filter(op=>op.value.op==='attention.propose').map(op=>op.value),
+          outcome_decisions: simulation.modelOperations.filter(op=>op.value.op==='event.propose').map(op=>op.value), random_draws: simulation.randomDraws }),
         turnId,
       ]);
+      runBound(candidateDb, 'UPDATE turns SET clock_after_s=?,elapsed_json=?,rng_seed=? WHERE id=?', [simulation.clockAfter, JSON.stringify(simulation.elapsed), simulation.seed, turnId]);
       runBound(
         candidateDb,
         `UPDATE branches SET head_turn_id = ?, revision = ?, clock_s = ?, clock_min_s = ?, clock_max_s = ?, simulation_cursor_s = ?, simulation_status = ? WHERE id = ?`,
         [
           receipt.status === 'failed' ? currentHeadTurnId() : turnId,
           newRevision,
-          clockBefore,
-          clockBefore,
-          clockBefore,
-          clockBefore,
-          'current',
+          simulation.clockAfter,
+          simulation.clockMin,
+          simulation.clockMax,
+          simulation.simulatedUntil,
+          simulation.catchingUp ? 'catching_up' : simulation.elapsed.quality === 'unknown' ? 'blocked' : 'current',
           branchId,
         ],
       );
 
-      if (worldChanged) {
+      if (worldChanged || timeChanged) {
         enqueueProjectionSync(candidateDb, {
           branchId,
           turnId,
@@ -962,6 +990,7 @@ export function createSqlRepository(options: RepositoryOptions) {
       phase: 'repair',
       allowedOps: [...allowedOps],
       repairTickets: repair.promptLines.join('\n'),
+      entityRefs: collectEntityRefs(createTableReadPort(args.candidateDb), branchId, args.compiled.scope.all()),
       batchId: `${repair.batchId}`,
       repairOfBatchId: repair.batchId,
       sourceSnapshot: args.sourceSnapshot,
@@ -1014,7 +1043,7 @@ export function createSqlRepository(options: RepositoryOptions) {
       makeId: args.makeId,
       turnId: args.turnId,
       allowedOps: [...allowedOps],
-      knownRefs: collectKnownRefs(tables, branchId),
+      seedRefs: args.compiled.scope.all(),
     });
     args.allIssues.push(...recompiled.issues);
     const built = buildAtomicGroups(
@@ -1083,11 +1112,11 @@ export function createSqlRepository(options: RepositoryOptions) {
         attempts: [],
       });
 
-      // 行的恢复交给 E08（唯一权威：逆因果序、受影响后文定位、依赖排序、显式上限拒绝）。
-      // branches 的 head 指针语义与 E08 尚未统一（见 atlas-db-rollback.ts 的说明），
-      // 因此先摘掉计划里的 branches 步骤，由本函数按自己的契约写，避免两套语义互相覆盖。
-      const rowPlan = { ...plan, steps: plan.steps.filter((step) => step.targetTable !== 'branches') };
-      const appliedPlan = await applyRollbackPlan(candidateDb, rowPlan, { turnId: rollbackTurnId, attemptId: 'rollback' });
+      // E08 restores rows and branch state under one inclusive floor contract.
+      // Actions and their result events reference each other. Validate after the
+      // whole reverse transaction rather than rejecting its temporary midpoint.
+      runBound(candidateDb, 'PRAGMA defer_foreign_keys = ON', []);
+      const appliedPlan = await applyRollbackPlan(candidateDb, plan, { turnId: rollbackTurnId, attemptId: 'rollback' });
       for (const note of appliedPlan.issues) {
         result_issues_of_rollback.push(note);
       }
@@ -1098,11 +1127,6 @@ export function createSqlRepository(options: RepositoryOptions) {
       }
 
       const clockAfter = plan.clockTargetS;
-      runBound(
-        candidateDb,
-        `UPDATE branches SET head_turn_id = ?, revision = ?, clock_s = ?, clock_min_s = ?, clock_max_s = ?, simulation_cursor_s = ?, simulation_status = 'current' WHERE id = ?`,
-        [input.targetParentTurnId, rev + 1, clockAfter, clockAfter, clockAfter, clockAfter, branchId],
-      );
 
       const finalCheck = validateCandidate(candidateDb, { branchId });
       if (!finalCheck.ok) {
@@ -1282,41 +1306,6 @@ export function createSqlRepository(options: RepositoryOptions) {
 
 export type AtlasSqlRepositoryWithHelpers = ReturnType<typeof createSqlRepository>;
 
-/** 收集上下文短引用（C1/L1 等由程序提供，模型无需记数据库 ID）。 */
-export function collectEntityRefs(tables: ReturnType<typeof createTableReadPort>, branchId: string): string[] {
-  const refs: string[] = [];
-  const locations = tables.selectWhere('locations', { branch_id: branchId }, 200);
-  const characters = tables.selectWhere('characters', { branch_id: branchId }, 200);
-  const items = tables.selectWhere('items', { branch_id: branchId }, 100);
-  const factions = tables.selectWhere('factions', { branch_id: branchId }, 100);
-  const maps = tables.selectWhere('maps', { branch_id: branchId }, 50);
-  locations.forEach((l, i) => refs.push(`L${i + 1}=${String(l.name)}（地点）`));
-  characters.forEach((c, i) => refs.push(`C${i + 1}=${String(c.name)}（人物）`));
-  items.forEach((it, i) => refs.push(`I${i + 1}=${String(it.name)}（物品）`));
-  factions.forEach((f, i) => refs.push(`F${i + 1}=${String(f.name)}（势力）`));
-  maps.forEach((m, i) => refs.push(`M${i + 1}=${String(m.name)}（地图）`));
-  return refs;
-}
-
-/** 程序上下文短引用 → 真实 ID 的映射（模型只记短引用）。 */
-export function collectKnownRefs(
-  tables: ReturnType<typeof createTableReadPort>,
-  branchId: string,
-): Array<{ alias: string; id: string; kind: 'location' | 'character' | 'item' | 'faction' | 'map'; rowRev: number | null }> {
-  const out: Array<{ alias: string; id: string; kind: 'location' | 'character' | 'item' | 'faction' | 'map'; rowRev: number | null }> = [];
-  const push = (rows: Array<Record<string, unknown>>, prefix: string, kind: 'location' | 'character' | 'item' | 'faction' | 'map') => {
-    rows.forEach((row, i) => {
-      out.push({ alias: `${prefix}${i + 1}`, id: String(row.id), kind, rowRev: typeof row.row_rev === 'number' ? row.row_rev : null });
-    });
-  };
-  push(tables.selectWhere('locations', { branch_id: branchId }, 200), 'L', 'location');
-  push(tables.selectWhere('characters', { branch_id: branchId }, 200), 'C', 'character');
-  push(tables.selectWhere('items', { branch_id: branchId }, 100), 'I', 'item');
-  push(tables.selectWhere('factions', { branch_id: branchId }, 100), 'F', 'faction');
-  push(tables.selectWhere('maps', { branch_id: branchId }, 50), 'M', 'map');
-  return out;
-}
-
 /**
  * 纠错结果并回回执：
  * - 原失败组若因纠错出现同 id 的成功组，用成功组替换该条（世界确实被补上）；
@@ -1360,7 +1349,7 @@ function buildReceipt(args: {
   const failed = args.groupResults.filter((g) => g.status === 'rejected' || g.status === 'blocked');
   let status: TurnReceipt['status'];
   if (applied.length === 0 && failed.length === 0) {
-    status = args.modelPhaseFailed ? 'failed' : args.explicitNoop || !args.worldChanged ? 'noop' : 'committed';
+    status = args.modelPhaseFailed ? args.worldChanged || args.timeChanged ? 'partial' : 'failed' : args.worldChanged || args.timeChanged ? 'committed' : 'noop';
   } else if (failed.length > 0 && applied.length > 0) {
     status = 'partial';
   } else if (failed.length > 0 && applied.length === 0) {
@@ -1368,7 +1357,7 @@ function buildReceipt(args: {
   } else {
     status = 'committed';
   }
-  if (args.explicitNoop && applied.length === 0 && failed.length === 0) status = 'noop';
+  if (args.explicitNoop && applied.length === 0 && failed.length === 0 && !args.worldChanged && !args.timeChanged) status = 'noop';
   // 响应被截断/含坏行但仍有有效组：回执 partial（§8.3 P03、§16.2 finishReason=length）。
   if (args.incomplete && applied.length > 0) status = 'partial';
   // §8.5：局部失败不能被包装成「全成功」——发生过分组失败（即使随后被一次纠错补上）或

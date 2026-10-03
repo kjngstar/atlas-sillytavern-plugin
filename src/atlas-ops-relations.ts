@@ -131,7 +131,7 @@ export function compileRelationUpsert(op: ParsedOperation, ctx: CompileContext):
 
   if (result.issues.some((i) => i.severity === 'error')) return result;
 
-  const turnId = ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
+  const turnId = ctx.turnId ?? ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
   if (existingRow) {
     const merged: Record<string, unknown> = { ...existingRow, ...changes };
     merged.row_rev = Number(existingRow.row_rev ?? 1) + 1;
