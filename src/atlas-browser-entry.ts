@@ -12,6 +12,7 @@
  */
 
 export { createBrowserSqlHost } from './atlas-browser-sql-host.ts';
+export { createSqlModelPort } from './atlas-sql-model-port.ts';
 
 export {
   createAtlasUiCore,

@@ -2911,8 +2911,9 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         token: atlasSqlPrepareToken(identity),
         variantKey: String(identity?.variantKey ?? ""),
         messageUID: String(identity?.messageUID ?? ""),
-        /** 真正的世界写入由会话桥的 `/sql/turn`（H01）负责；这里绝不代写。 */
-        delegatedTo: "runSqlTurn",
+        /** This UI queue warms read views only; it has not submitted a model turn. */
+        kind: "view-prewarm",
+        coreSaved: false,
       };
     },
   };
@@ -10977,6 +10978,7 @@ async function connectOnce() {
       }
     };
     const sqlSessionProvider = mod.createBrowserSqlHost({
+      modelPort: mod.createSqlModelPort({ readSettings: () => engineStore.read("settings"), fetchFn: hostDispatchFetch }),
       enabled: () => context()?.extensionSettings?.[ATLAS_SETTINGS_KEY]?.[ATLAS_SQL_MODE_SETTING] === true,
       context: () => {
         const record = atlasContextRecord(context);

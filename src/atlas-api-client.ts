@@ -346,7 +346,7 @@ function errorMessageForStatus(status: number): { code: AtlasErrorCode; retryabl
 export async function callAtlasWorldTurnApi(
   preset: AtlasApiPreset,
   input: AtlasWorldTurnPromptInput,
-  deps: { fetchFn?: typeof fetch; now?: () => number } = {},
+  deps: { fetchFn?: typeof fetch; now?: () => number; messagesOverride?: Array<{ role: string; content: string }> } = {},
 ): Promise<AtlasApiCallResult | AtlasApiCallFailure> {
   const now = deps.now ?? Date.now;
   const startedAt = now();
@@ -370,7 +370,10 @@ export async function callAtlasWorldTurnApi(
   // / include_reasoning·enable_web_search·request_images 显式 false / group_names 空数组；
   // role 归一小写、model 去 'models/' 前缀——与 shujuku 发出的请求逐字段同构。
   // 请求消息装配（0.9.18 分段模式优先，见 buildWorldTurnMessages）；role 归一小写与 shujuku 同款
-  const bodyMessages = buildWorldTurnMessages(preset, input).map((m) => ({ ...m, role: m.role.toLowerCase() }));
+  // SQL stages supply their own single operation protocol; reuse the connection
+  // transport without silently attaching the legacy table-edit prompt.
+  const bodyMessages = (deps.messagesOverride ?? buildWorldTurnMessages(preset, input))
+    .map((m) => ({ ...m, role: m.role.toLowerCase() }));
   if (bodyMessages.length === 0) {
     return fail(ATLAS_ERROR_CODES.API_REQUEST_FAILED, "提示词预设没有启用的非空条目，请先编辑预设。", false);
   }

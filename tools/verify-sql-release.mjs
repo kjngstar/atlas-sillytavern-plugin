@@ -105,8 +105,37 @@ try {
   });
   assert.equal(started.turn.coreSaved, true, JSON.stringify(started.turn));
   assert.equal(started.saves, 1); assert.equal(started.stored, true);
+  const modelTurn = await startupPage.evaluate(async () => {
+    const api = window.releaseStartup.api, host = window.releaseStartupHost;
+    let calls = 0, prompts = [];
+    // Synthetic host generation avoids a real provider call. Initialization,
+    // connection dispatch, published JS, SQLite and WASM remain real.
+    window.TavernHelper = { generateRaw: async input => {
+      calls++; prompts = input.ordered_prompts;
+      return '{"op":"location.upsert","ref":"new:generated_library","data":{"name":"发布模型接线图书馆","kind":"building"}}';
+    } };
+    const saved = await api.request('PUT', '/settings', { action: 'api.save', apiKeyMode: 'replace', apiKey: '',
+      preset: { name: '发布主 API 验收', connectionMode: 'main', endpoint: '', model: 'host',
+        maxTokens: 6000, temperature: 0.4, topP: 0.95, timeoutMs: 30000 } });
+    if (!saved.body.ok) throw Error(JSON.stringify(saved.body));
+    const id = saved.body.data.apiPresets[0].id;
+    const active = await api.request('PUT', '/settings', { action: 'api.activate', id });
+    if (!active.body.ok) throw Error(JSON.stringify(active.body));
+    const body = { chatUid: host.chatId, branchId: 'main', hostMessageUid: 'release-model-floor',
+      variantKey: 'v0', inputHash: 'release-model-turn', userText: '进入图书馆', assistantText: '你已经进入图书馆。',
+      sourceSnapshot: [{ key: 'msg:a', text: '你已经进入图书馆。', kind: 'story', hash: 'fixture-story' }] };
+    const turn = await api.request('POST', '/sql/turn', body);
+    const repeated = await api.request('POST', '/sql/turn', body);
+    return { coreSaved: turn.body.data?.coreSaved, duplicate: repeated.body.data?.duplicate,
+      calls, saves: window.releaseStartupSaves(), tableWritten: Boolean(host.chatMetadata.atlas?.tables),
+      mixedFormat: prompts.some(p => String(p.content).includes('<atlasEdit>')) };
+  });
+  assert.equal(modelTurn.coreSaved, true); assert.equal(modelTurn.duplicate, true);
+  assert.equal(modelTurn.calls, 1); assert.equal(modelTurn.saves, 2);
+  assert.equal(modelTurn.tableWritten, false); assert.equal(modelTurn.mixedFormat, false);
   console.log(JSON.stringify({ passed: true, main, worker,
     startup: { offSqlMode: off.sqlMode, coreSaved: started.turn.coreSaved, saves: started.saves, stored: started.stored },
+    modelTurn,
     wasmRequests: requests.filter(path => path.endsWith('.wasm')) }, null, 2));
 } finally {
   await browser?.close();

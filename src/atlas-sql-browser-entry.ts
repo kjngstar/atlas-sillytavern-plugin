@@ -90,6 +90,8 @@ export {
   openSqlSession,
   persistSqlSession,
   runSqlTurn,
+  runSqlRetry,
+  runSqlMaintenance,
   runSqlRollback,
   migrateSessionToSql,
   closeSqlSession,

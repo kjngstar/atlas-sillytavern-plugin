@@ -587,7 +587,9 @@ export function createSqlRepository(options: RepositoryOptions) {
     const candidateDb = (candidates.get(candidate.token) as StoredCandidate).db;
     const tables = createTableReadPort(candidateDb);
     const clockBefore = currentClock();
-    const turnId = `turn_${sha256HexSync(`${chatUid}\u0000${anchor.branchId}\u0000${anchor.hostMessageUid}\u0000${anchor.variantKey}\u0000${anchor.inputHash}`).slice(0, 24)}`;
+    // A rolled-back floor may be regenerated with identical text; retain the old
+    // audit turn and give its new commit generation a distinct identity.
+    const turnId = `turn_${sha256HexSync(`${chatUid}\u0000${anchor.branchId}\u0000${anchor.hostMessageUid}\u0000${anchor.variantKey}\u0000${anchor.inputHash}\u0000${anchor.baseRevision}`).slice(0, 24)}`;
 
     const allIssues: Issue[] = [];
     const parsedOperations: ParsedOperation[] = [];
@@ -644,21 +646,28 @@ export function createSqlRepository(options: RepositoryOptions) {
           assistantSource: input.assistantText,
           userSource: input.userText,
           entityRefs: collectEntityRefs(tables, branchId),
+          sourceSnapshot,
           batchId: `${phase}_${turnId}`,
         });
         request.anchor = anchor;
+        request.sourceSnapshot = sourceSnapshot;
+        request.promptInput = { injectionText: collectEntityRefs(tables, branchId).join('\n'),
+          userText: input.userText, assistantText: input.assistantText,
+          loreSupplement: sourceSnapshot.filter(s => s.kind === 'lorebook').map(s => s.text).join('\n'),
+          baseRevision: anchor.baseRevision };
         const startedWall = now();
         let response: ModelBatchResponse;
         try {
           response = await options.modelPort.request(request);
         } catch (err) {
+          const modelError = err as { code?: string; retryable?: boolean; message?: string };
           modelPhaseFailed = true;
           allIssues.push({
-            code: 'MODEL_TIMEOUT',
+            code: modelError.code ?? 'MODEL_TIMEOUT',
             path: '$.modelPort',
             message: `模型请求失败：${(err as Error).message}`,
             severity: 'error',
-            retryable: true,
+            retryable: modelError.retryable ?? true,
           });
           attempts.push({ id: `att_${attempts.length}`, kind: 'initial', phase, error: (err as Error).message });
           break;
@@ -764,6 +773,7 @@ export function createSqlRepository(options: RepositoryOptions) {
     let sequencesUsed = 0;
     beginTransaction(candidateDb);
     let committed = false;
+    let transactionOpen = true;
     try {
       insertTurnRow(candidateDb, {
         turnId,
@@ -791,6 +801,10 @@ export function createSqlRepository(options: RepositoryOptions) {
       const rejectedSnapshot = [...rejected];
       // 4) 一次定向纠错（每个响应批次最多一次）
       if (rejected.length > 0 && !input.manual && options.modelPort) {
+        // The candidate is isolated; release its transaction before waiting for
+        // the repair model, then resume writing the same candidate afterward.
+        commitTransaction(candidateDb);
+        transactionOpen = false;
         const repairOutcome = await runRepair({
           candidateDb,
           rejected,
@@ -803,12 +817,15 @@ export function createSqlRepository(options: RepositoryOptions) {
           allIssues,
           modelPort: options.modelPort,
           makeId,
+          turnId,
         });
+        beginTransaction(candidateDb);
+        transactionOpen = true;
         repairAttempted = true;
         if (repairOutcome.applied.length > 0) {
           const second = applyGroups(candidateDb, repairOutcome.applied, {
             branchId,
-            turnId: `${turnId}_repair`,
+            turnId,
             attemptId: 'repair',
             validate: true,
           });
@@ -884,6 +901,7 @@ export function createSqlRepository(options: RepositoryOptions) {
       }
 
       commitTransaction(candidateDb);
+      transactionOpen = false;
       committed = true;
 
       if (receipt.status === 'failed') {
@@ -897,7 +915,7 @@ export function createSqlRepository(options: RepositoryOptions) {
       return await exportCandidateImpl(candidate, receipt);
     } catch (err) {
       if (!committed) {
-        rollbackTransaction(candidateDb);
+        if (transactionOpen) rollbackTransaction(candidateDb);
         await discardPreparedImpl(candidate.token);
       } else if (err instanceof AtlasDbError && err.code === 'TURN_FAILED') {
         throw err;
@@ -921,6 +939,7 @@ export function createSqlRepository(options: RepositoryOptions) {
     allIssues: Issue[];
     modelPort: AtlasModelPort;
     makeId: (kind: string, opId: string, alias: string) => string;
+    turnId: string;
   }): Promise<{ applied: AtomicGroup[] }> {
     const failedOps = args.rejected.flatMap((g) =>
       g.opIds.map((opId) => {
@@ -942,8 +961,10 @@ export function createSqlRepository(options: RepositoryOptions) {
       repairTickets: repair.promptLines.join('\n'),
       batchId: `${repair.batchId}`,
       repairOfBatchId: repair.batchId,
+      sourceSnapshot: args.sourceSnapshot,
     });
     request.anchor = args.anchor;
+    request.sourceSnapshot = args.sourceSnapshot;
     let response: ModelBatchResponse;
     try {
       response = await args.modelPort.request(request);
@@ -988,6 +1009,8 @@ export function createSqlRepository(options: RepositoryOptions) {
       tables,
       sources: { phase: 'repair', snapshot: args.sourceSnapshot, clockS: args.clockBefore },
       makeId: args.makeId,
+      turnId: args.turnId,
+      allowedOps: [...allowedOps],
       knownRefs: collectKnownRefs(tables, branchId),
     });
     args.allIssues.push(...recompiled.issues);

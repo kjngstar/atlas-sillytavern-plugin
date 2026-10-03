@@ -20,8 +20,9 @@
  */
 
 import { ATLAS_DATABASE_KEY, ATLAS_SESSION_KEY, createAtlasHostPort } from './atlas-host-port.ts';
-import { decodeSnapshot } from './atlas-db-envelope.ts';
-import { AtlasDbError } from './atlas-db-runtime.ts';
+import { decodeSnapshot, sha256Hex } from './atlas-db-envelope.ts';
+import { AtlasDbError, queryBound, runBound } from './atlas-db-runtime.ts';
+import { retryFailedGroups } from './atlas-db-retry.ts';
 import { withChatCommitLock } from './atlas-db-queue.ts';
 import {
   finalizeMigration,
@@ -31,7 +32,7 @@ import {
   migrateLegacySimulation,
   tableCounts,
 } from './atlas-db-migrate.ts';
-import { runNextSync } from './atlas-db-outbox.ts';
+import { runNextSync, enqueueProjectionSync } from './atlas-db-outbox.ts';
 import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
 import type { AtlasEnvelope, AtlasModelPort } from './atlas-db-contract.ts';
 import type { SqlDatabase } from './atlas-db-runtime.ts';
@@ -44,6 +45,7 @@ import type {
   Issue,
   PreparedCommit,
   PreparedMaintenance,
+  MaintenanceInput,
   RollbackInput,
   SaveAck,
   TurnAnchor,
@@ -160,7 +162,8 @@ export type PersistSqlResult = {
 export type SqlTurnResult = {
   receipt: TurnReceipt;
   saved: boolean;
-  commit: PreparedCommit;
+  commit: PreparedCommit | null;
+  duplicate?: boolean;
   issues: Issue[];
   /** 宿主确认字段（§16.3）：只有宿主 saved 才为 true，不在导出前伪造。 */
   coreSaved: boolean;
@@ -443,6 +446,20 @@ export async function persistSqlSession(session: SqlSession, options: PersistSql
   }
 
   const commit = options.commit ?? null;
+  if (session.isCurrentHost && !session.isCurrentHost()) {
+    if (commit) await session.repo.discardPrepared(commit.token);
+    issues.push(issue('SESSION_STALE', '保存前宿主聊天、分支或快照已变化，拒绝保存候选', 'error', false));
+    return { saved: false, issues };
+  }
+  if (commit && (commit.anchor.baseRevision !== safeRevision(session.repo)
+    || commit.anchor.baseStorageRevision !== session.repo.storageRevision)) {
+    await session.repo.discardPrepared(commit.token);
+    issues.push(issue('STALE_BASE', '保存前业务或存档修订已变化，候选已丢弃', 'error', false));
+    return { saved: false, issues };
+  }
+  // Capture before asynchronous export/hash work; a host update during export
+  // must not become the baseline that this older repository is allowed to overwrite.
+  const captured = session.hostPort.captureAnchor();
   let envelope = options.envelope ?? null;
   if (!envelope && commit) envelope = session.repo.getCandidate(commit.token)?.envelope ?? null;
   if (!envelope) envelope = await session.repo.currentEnvelope();
@@ -462,7 +479,7 @@ export async function persistSqlSession(session: SqlSession, options: PersistSql
     } satisfies PreparedMaintenance);
 
   const previousAtlas = snapshotAtlasForRestore(session.chatMetadata);
-  const captured = session.hostPort.captureAnchor();
+  const submittedEnvelope = { ...envelope };
   const ack = await session.hostPort.saveCandidate({ capturedHostAnchor: captured, prepared, envelope });
 
   if (ack.result === 'saved') {
@@ -496,6 +513,7 @@ export async function persistSqlSession(session: SqlSession, options: PersistSql
     chatUid: session.chatUid,
     expectedIdentity: session.chatMetadata,
     previous: previousAtlas,
+    expectedEnvelope: submittedEnvelope,
   });
   issues.push(
     ack.error ??
@@ -523,9 +541,87 @@ export async function persistSqlSession(session: SqlSession, options: PersistSql
  * - 世界书同步失败：核心数据已保存，回执明确「世界已更新，世界书待同步」（`WORLD_SYNC_FAILED`），
  *   绝不与 `COMMIT_FAILED` 混为一谈。
  */
+const turnFlights = new WeakMap<SqlSession, Map<string, Promise<SqlTurnResult>>>();
+
 export async function runSqlTurn(session: SqlSession, input: TurnInput): Promise<SqlTurnResult> {
-  const commit = await session.repo.prepareTurn(input);
-  return await commitPreparedTurn(session, commit);
+  if (input.anchor.chatUid !== session.chatUid || input.anchor.branchId !== session.branchId) {
+    throw new AtlasDbError('CHAT_CHANGED', '回合锚点不属于当前 SQL 会话', {});
+  }
+  if (session.isCurrentHost && !session.isCurrentHost()) throw new AtlasDbError('SESSION_STALE', '当前宿主快照已变化', {});
+  const key = JSON.stringify([input.anchor.hostMessageUid, input.anchor.variantKey, input.anchor.inputHash]);
+  let flights = turnFlights.get(session);
+  if (!flights) { flights = new Map(); turnFlights.set(session, flights); }
+  const flight = flights.get(key);
+  if (flight) {
+    const result = await flight;
+    return result.coreSaved ? { ...result, duplicate: true } : result;
+  }
+  const task = (async () => {
+    const rows = queryBound(session.repo.db,
+      `SELECT receipt_json FROM turns WHERE branch_id=? AND host_message_uid=? AND host_variant_key=? AND input_hash=? AND status IN ('committed','partial') ORDER BY committed_revision DESC LIMIT 1`,
+      [session.branchId, input.anchor.hostMessageUid, input.anchor.variantKey, input.anchor.inputHash]);
+    if (rows.length && typeof rows[0].receipt_json === 'string') {
+      const receipt = JSON.parse(rows[0].receipt_json) as TurnReceipt;
+      return { receipt, saved: true, coreSaved: true, commit: null, issues: [], duplicate: true };
+    }
+    const commit = await session.repo.prepareTurn(input);
+    return await commitPreparedTurn(session, commit);
+  })();
+  flights.set(key, task);
+  try { return await task; }
+  finally { if (flights.get(key) === task) flights.delete(key); }
+}
+
+/** Retry changes live only in an isolated candidate until the host confirms its save. */
+export async function runSqlRetry(session: SqlSession, input: Omit<FailedGroupRetryInput, 'db'>): Promise<FailedGroupRetryResult & { coreSaved: boolean }> {
+  if (input.chatUid !== session.chatUid || input.branchId !== session.branchId) throw new AtlasDbError('CHAT_CHANGED', '补交不属于当前 SQL 会话', {});
+  return withChatCommitLock(session.chatUid, async () => {
+    if (session.isCurrentHost && !session.isCurrentHost()) throw new AtlasDbError('SESSION_STALE', '补交前宿主快照已变化', {});
+    const anchor = maintenanceAnchor(session, `retry:${input.turnId}`);
+    const candidate = await session.repo.createCandidate(anchor, 'maintenance');
+    try {
+      const result = retryFailedGroups({ ...input, db: candidate.db });
+      if (result.status !== 'applied' && result.status !== 'duplicate') {
+        await session.repo.discardPrepared(candidate.token);
+        return { ...result, coreSaved: false };
+      }
+      const row = queryBound(candidate.db, 'SELECT receipt_json FROM turns WHERE id=?', [input.turnId])[0];
+      const receipt = JSON.parse(String(row.receipt_json)) as TurnReceipt;
+      if (result.status === 'applied') {
+        const correctedOps = new Set(result.groups.filter(g => g.status === 'applied' || g.status === 'duplicate').flatMap(g => g.opIds));
+        receipt.groups = receipt.groups.flatMap(g => {
+          if (g.status !== 'rejected' && g.status !== 'blocked') return [g];
+          const remaining = g.opIds.filter(id => !correctedOps.has(id));
+          return remaining.length ? [{ ...g, opIds: remaining }] : [];
+        });
+        receipt.groups.push(...result.groups);
+        receipt.issues = receipt.issues.filter(i => !i.opId || !correctedOps.has(i.opId));
+        receipt.worldChanged = receipt.worldChanged || result.groups.some(g => g.changedRows > 0);
+        receipt.status = receipt.groups.some(g => g.status === 'rejected' || g.status === 'blocked') ? 'partial' : 'committed';
+        runBound(candidate.db, 'UPDATE turns SET receipt_json=?, status=? WHERE id=?',
+          [JSON.stringify(receipt), receipt.status, input.turnId]);
+        const payloadHash = await sha256Hex(new TextEncoder().encode(JSON.stringify([input.turnId, input.attemptId, result.groups])));
+        enqueueProjectionSync(candidate.db, { branchId: session.branchId, turnId: input.turnId,
+          targetRevision: anchor.baseRevision, projectionScope: 'pov', payloadHash, nowWallMs: session.now(),
+          makeId: key => session.repo.internal.makeId('outbox', input.attemptId, key) });
+      }
+      const prepared = await session.repo.exportCandidate(candidate, receipt);
+      const persisted = await persistSqlSession(session, { commit: { ...prepared, kind: 'maintenance', receipt: null } });
+      return { ...result, issues: [...result.issues, ...persisted.issues], coreSaved: persisted.saved };
+    } catch (err) {
+      await session.repo.discardPrepared(candidate.token);
+      throw err;
+    }
+  });
+}
+
+/** Maintenance shares the writer lock, including its save confirmation window. */
+export async function runSqlMaintenance(session: SqlSession, input: MaintenanceInput): Promise<PersistSqlResult> {
+  return withChatCommitLock(session.chatUid, async () => {
+    if (session.isCurrentHost && !session.isCurrentHost()) throw new AtlasDbError('SESSION_STALE', '维护前宿主快照已变化', {});
+    const commit = await session.repo.prepareMaintenance(input);
+    return persistSqlSession(session, { commit });
+  });
 }
 
 /** H03：回退同样走「候选 → 提交锁复核 → 宿主确认」这一段。 */
@@ -752,6 +848,8 @@ export type AtlasSqlRuntime = {
   openSqlSession: typeof openSqlSession;
   persistSqlSession: typeof persistSqlSession;
   runSqlTurn: typeof runSqlTurn;
+  runSqlRetry: typeof runSqlRetry;
+  runSqlMaintenance: typeof runSqlMaintenance;
   runSqlRollback: typeof runSqlRollback;
   migrateSessionToSql: typeof migrateSessionToSql;
   closeSqlSession: typeof closeSqlSession;
@@ -775,6 +873,8 @@ export async function loadAtlasSqlRuntime(): Promise<AtlasSqlRuntime> {
     openSqlSession,
     persistSqlSession,
     runSqlTurn,
+    runSqlRetry,
+    runSqlMaintenance,
     runSqlRollback,
     migrateSessionToSql,
     closeSqlSession,

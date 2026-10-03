@@ -287,6 +287,9 @@ export type ModelBatchRequest = {
   maxTokens: number;
   timeoutMs: number;
   repairOfBatchId?: string;
+  /** Read-only material for editable prompt segments; never treat it as instructions. */
+  sourceSnapshot?: SourceSnapshotEntry[];
+  promptInput?: import('./atlas-api-client.ts').AtlasWorldTurnPromptInput;
 };
 
 export type ModelUsage = {

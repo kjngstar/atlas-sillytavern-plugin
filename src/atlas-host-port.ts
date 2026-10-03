@@ -67,6 +67,19 @@ function atlasOf(metadata: Record<string, unknown>): Record<string, unknown> {
   return created;
 }
 
+function envelopeSnapshot(value: unknown): unknown {
+  return value && typeof value === 'object' ? { ...value } : value;
+}
+
+function sameEnvelope(a: unknown, b: unknown): boolean {
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return a === b;
+  const left = a as Record<string, unknown>, right = b as Record<string, unknown>;
+  // The payload and its identity fields must agree, including in-place mutations.
+  const keys = ['format', 'chat_uid', 'world_uid', 'storage_revision', 'active_branch_id',
+    'schema_version', 'encoding', 'byte_length', 'sha256', 'data'];
+  return keys.every(key => left[key] === right[key]);
+}
+
 export function readEnvelope(options: HostPortOptions): AtlasEnvelope | null {
   const metadata = metadataOf(options.context() ?? {});
   if (!metadata) return null;
@@ -85,7 +98,7 @@ export function createAtlasHostPort(options: HostPortOptions): AtlasHostPort & {
   capabilities(): HostCapabilityReport;
   readEnvelope(): AtlasEnvelope | null;
   /** 明确失败时恢复本次尚未持久化的 metadata 值（仅在仍为同聊天/同对象时）。 */
-  restoreMetadata(input: { chatUid: string; expectedIdentity: unknown; previous: unknown }): boolean;
+  restoreMetadata(input: { chatUid: string; expectedIdentity: unknown; previous: unknown; expectedEnvelope?: unknown }): boolean;
 } {
   const now = options.now ?? (() => Date.now());
 
@@ -106,6 +119,7 @@ export function createAtlasHostPort(options: HostPortOptions): AtlasHostPort & {
         chatUid: String(ctx.chatId ?? ''),
         hostChatId: ctx.chatId === null || ctx.chatId === undefined ? null : String(ctx.chatId),
         metadataIdentity: metadata,
+        databaseSnapshot: envelopeSnapshot(readEnvelope(options)),
         branchId: state?.branchId ?? 'main',
         revision: state?.revision ?? 0,
         storageRevision: state?.storageRevision ?? 0,
@@ -118,6 +132,9 @@ export function createAtlasHostPort(options: HostPortOptions): AtlasHostPort & {
       if (metadata === null) return false;
       if (anchor.hostChatId !== null && String(ctx.chatId ?? '') !== anchor.hostChatId) return false;
       if (anchor.metadataIdentity && metadata !== anchor.metadataIdentity) return false;
+      const state = options.readBranchState?.(String(ctx.chatId ?? ''));
+      if (state && (state.branchId !== anchor.branchId || state.revision !== anchor.revision
+        || state.storageRevision !== anchor.storageRevision)) return false;
       return true;
     },
 
@@ -139,9 +156,14 @@ export function createAtlasHostPort(options: HostPortOptions): AtlasHostPort & {
       if (!this.isCurrent(input.capturedHostAnchor)) {
         return fail('CHAT_CHANGED', '保存前聊天身份/修订已变化：拒绝写入，不恢复、不覆盖当前聊天的 metadata');
       }
+      if ('databaseSnapshot' in input.capturedHostAnchor
+        && !sameEnvelope(input.capturedHostAnchor.databaseSnapshot, readEnvelope(options))) {
+        return fail('SESSION_STALE', '保存前数据库快照已变化：拒绝覆盖');
+      }
 
       const atlas = atlasOf(metadata);
       atlas[ATLAS_DATABASE_KEY] = input.envelope;
+      const submittedSnapshot = envelopeSnapshot(input.envelope);
 
       // 已有会话文档时走既有写回函数（保持三表/世界镜像与 envelope 同一次落盘）。
       const session = atlas.session ?? metadata.atlasSession ?? null;
@@ -160,6 +182,9 @@ export function createAtlasHostPort(options: HostPortOptions): AtlasHostPort & {
       // 保存后再核对一次身份：保存过程中切换聊天不能算成功。
       if (!this.isCurrent(input.capturedHostAnchor)) {
         return fail('CHAT_CHANGED', '保存过程中聊天身份发生变化：交由调用方核对耐久存档');
+      }
+      if (!sameEnvelope(submittedSnapshot, readEnvelope(options))) {
+        return fail('SESSION_STALE', '保存期间数据库快照已变化：本候选不能报告已保存');
       }
 
       if (options.canConfirm === false) {
@@ -183,14 +208,21 @@ export function createAtlasHostPort(options: HostPortOptions): AtlasHostPort & {
       /* 视图刷新由 UI 层承担（H06/H07）；端口本身不持有 DOM。 */
     },
 
-    restoreMetadata(input: { chatUid: string; expectedIdentity: unknown; previous: unknown }): boolean {
+    restoreMetadata(input: { chatUid: string; expectedIdentity: unknown; previous: unknown; expectedEnvelope?: unknown }): boolean {
       const ctx = options.context() ?? {};
       const metadata = metadataOf(ctx);
       if (!metadata) return false;
       if (input.expectedIdentity && metadata !== input.expectedIdentity) return false;
       if (String(ctx.chatId ?? '') !== input.chatUid) return false;
-      if (input.previous === undefined) delete metadata[ATLAS_SESSION_KEY];
-      else metadata[ATLAS_SESSION_KEY] = input.previous;
+      if ('expectedEnvelope' in input && !sameEnvelope(input.expectedEnvelope, readEnvelope(options))) return false;
+      const atlas = atlasOf(metadata);
+      const previous = input.previous as Record<string, unknown> | undefined;
+      if (previous && Object.prototype.hasOwnProperty.call(previous, ATLAS_DATABASE_KEY)) {
+        atlas[ATLAS_DATABASE_KEY] = previous[ATLAS_DATABASE_KEY];
+      } else {
+        delete atlas[ATLAS_DATABASE_KEY];
+        if (input.previous === undefined && Object.keys(atlas).length === 0) delete metadata[ATLAS_SESSION_KEY];
+      }
       return true;
     },
   };

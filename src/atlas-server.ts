@@ -122,7 +122,6 @@ import type {
   AtomicGroup,
   Issue,
   MaintenanceInput,
-  PreparedMaintenance,
   TurnAnchor,
   TurnInput,
   ViewQuery,
@@ -7705,6 +7704,7 @@ export function createAtlasSqlRouteGroup(deps: AtlasSqlRouteGroupDeps) {
         return okResult({
           receipt: result.receipt,
           coreSaved: result.coreSaved,
+          duplicate: result.duplicate === true,
           revision: revisionOf(session),
           groups: result.receipt.groups,
           issues: result.issues,
@@ -7717,8 +7717,7 @@ export function createAtlasSqlRouteGroup(deps: AtlasSqlRouteGroupDeps) {
         const session = await sessionFor(chatUid, branchId, runtime);
         const turnId = sqlText(record.turnId);
         const groups = (Array.isArray(record.groups) ? record.groups : []) as AtomicGroup[];
-        const result = runtime.retryFailedGroups({
-          db: session.repo.db,
+        const result = await runtime.runSqlRetry(session, {
           branchId: session.branchId,
           chatUid,
           turnId,
@@ -7734,17 +7733,8 @@ export function createAtlasSqlRouteGroup(deps: AtlasSqlRouteGroupDeps) {
           clockS: sqlInt(record.clockS) ?? 0,
         });
         const issues = [...result.issues];
-        let coreSaved = false;
-        if (result.status === "applied" || result.status === "duplicate") {
-          // 补交结果必须经维护入口串行保存：不改 head/revision/clock，也不会第二次推进时间。
-          const maintenance = await session.repo.prepareMaintenance({
-            anchor: anchorFromBody(record, session, `retry:${turnId}`),
-          });
-          const persisted = await runtime.persistSqlSession(session, { commit: maintenance });
-          if (persisted.saved) deps.sessionProvider?.saved(session);
-          issues.push(...persisted.issues);
-          coreSaved = persisted.saved;
-        }
+        const coreSaved = result.coreSaved;
+        if (coreSaved) deps.sessionProvider?.saved(session);
         return okResult({
           status: result.status,
           coreSaved,
@@ -7839,8 +7829,7 @@ export function createAtlasSqlRouteGroup(deps: AtlasSqlRouteGroupDeps) {
             ? (record.failedAttempt as MaintenanceInput["failedAttempt"])
             : undefined,
         };
-        const maintenance: PreparedMaintenance = await session.repo.prepareMaintenance(input);
-        const persisted = await runtime.persistSqlSession(session, { commit: maintenance });
+        const persisted = await runtime.runSqlMaintenance(session, input);
         if (persisted.saved) deps.sessionProvider?.saved(session);
         return okResult({
           coreSaved: persisted.saved,

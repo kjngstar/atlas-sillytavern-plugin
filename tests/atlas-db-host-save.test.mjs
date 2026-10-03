@@ -161,6 +161,7 @@ test('T11-02 明确失败 → SESSION_WRITE_FAILED；只有同聊天且同 metad
   const anchor = port.captureAnchor();
   const previous = snapshotAtlas(state.ctx.chatMetadata);
   const metadataBefore = structuredClone(state.ctx.chatMetadata);
+  const atlasIdentity = state.ctx.chatMetadata.atlas;
   assert.equal(anchor.chatUid, CHAT_A);
   assert.equal(previous.database, undefined, '保存前快照里不应有未持久化的 envelope');
 
@@ -182,7 +183,7 @@ test('T11-02 明确失败 → SESSION_WRITE_FAILED；只有同聊天且同 metad
   assert.ok(outcome.ack.error.message.includes('磁盘写满'), '必须保留宿主失败原因');
   // 同聊天 + 同 metadata 对象：明确失败后才恢复本次尚未持久化的值。
   assert.equal(outcome.restoredMetadata, true);
-  assert.equal(state.ctx.chatMetadata.atlas, previous, '恢复必须换回保存前的值');
+  assert.equal(state.ctx.chatMetadata.atlas, atlasIdentity, '恢复数据库字段时保留其它字段所在的对象');
   assert.equal(state.ctx.chatMetadata.atlas.database, undefined, '未落盘的 envelope 不得留在 metadata 里');
   assert.deepEqual(state.ctx.chatMetadata.atlas, snapshotAtlas(metadataBefore));
   assert.equal(state.ctx.chatMetadata.atlas.session.rev, 7, '同聊天其它 metadata 值逐字段不变');
@@ -201,7 +202,7 @@ test('T11-02 明确失败 → SESSION_WRITE_FAILED；只有同聊天且同 metad
     },
   );
   assert.equal(thrown.ack.error.code, 'SESSION_WRITE_FAILED');
-  assert.equal(state.ctx.chatMetadata.atlas, previous);
+  assert.equal(state.ctx.chatMetadata.atlas, atlasIdentity);
   assert.equal(state.ctx.chatMetadata.atlas.database, undefined);
 
   // metadata 对象已被替换：拒绝恢复，且新对象逐字段不变。

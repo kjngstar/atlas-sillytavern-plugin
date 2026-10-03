@@ -537,6 +537,8 @@ export type HostAnchor = {
   chatUid: string;
   hostChatId: string | null;
   metadataIdentity: unknown;
+  /** Immutable copy of the envelope fields captured before awaiting host work. */
+  databaseSnapshot?: unknown;
   branchId: string;
   revision: number;
   storageRevision: number;
