@@ -39,6 +39,8 @@ import { queryChanges, queryDiagnostics, queryEntityDetail, queryMapView, queryN
 import { collectKnownRefs, collectEntityRefs } from './atlas-sql-refs.ts';
 export { collectKnownRefs, collectEntityRefs } from './atlas-sql-refs.ts';
 import { settleSqlTurn } from './atlas-sql-simulation.ts';
+import { compileSqlSceneMaps } from './atlas-sql-scene-maps.ts';
+import { projectPromptView } from './atlas-db-knowledge-view.ts';
 import type { SqlDatabase } from './atlas-db-runtime.ts';
 import type {
   AtlasAssetRef,
@@ -276,6 +278,7 @@ export function createSqlRepository(options: RepositoryOptions) {
       storageRevision: storageRevision + 1,
       activeBranchId: candidate.anchor.branchId,
       schemaVersion: ATLAS_SCHEMA_VERSION,
+      assets: envelopeAssets,
     });
     stored.snapshot = bytes;
     stored.snapshotSha256 = snapshotSha256;
@@ -375,6 +378,8 @@ export function createSqlRepository(options: RepositoryOptions) {
           return queryDiagnostics(ctx, query);
         case 'simulation':
           return querySimulationView(ctx, query);
+        case 'prompt':
+          return {branchId:ctx.branchId,revision:ctx.revision,items:[projectPromptView(ctx,query)],metadata:{viewMode:ctx.viewMode??'pov'}};
         default:
           return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: 'VIEW_KIND_UNSUPPORTED', kind: query.kind } };
       }
@@ -393,6 +398,7 @@ export function createSqlRepository(options: RepositoryOptions) {
         storageRevision,
         activeBranchId: branchId,
         schemaVersion: ATLAS_SCHEMA_VERSION,
+      assets: envelopeAssets,
       });
     },
 
@@ -434,6 +440,7 @@ export function createSqlRepository(options: RepositoryOptions) {
         storageRevision: storageRevision + 1,
         activeBranchId: candidate.anchor.branchId,
         schemaVersion: ATLAS_SCHEMA_VERSION,
+      assets: envelopeAssets,
       });
       stored.snapshot = bytes;
       stored.snapshotSha256 = snapshotSha256;
@@ -652,6 +659,9 @@ export function createSqlRepository(options: RepositoryOptions) {
           assistantSource: input.assistantText,
           userSource: input.userText,
           entityRefs: collectEntityRefs(tables, branchId),
+          geoEntities:collectEntityRefs(tables,branchId).join('\n'),
+          mapScope:JSON.stringify(tables.selectWhere('maps',{branch_id:branchId,status:'active'},1000).map(map=>({ref:foregroundKnownRefs.find(r=>r.id===map.id)?.alias,name:map.name,frame:map.frame_json,scaleLocked:map.scale_locked}))),
+          geoSources:input.assistantText,
           sourceSnapshot,
           batchId: `${phase}_${turnId}`,
         });
@@ -840,11 +850,22 @@ export function createSqlRepository(options: RepositoryOptions) {
       }
 
       // All program/model settlement belongs to this same isolated floor. No SQL
+      if(input.sceneMaps||input.mapCalibration){
+        const mapGroup=compileSqlSceneMaps({db:candidateDb,branchId,turnId,clockS:clockBefore,makeId,ensureScenes:input.sceneMaps,calibration:input.mapCalibration,povName:input.povName});
+        if(mapGroup){
+          const mapResult=applyGroups(candidateDb,[mapGroup],{branchId,turnId,attemptId:'scene-maps',validate:true});
+          if(mapResult.journalIssues.length||mapResult.groups.some(group=>group.status==='rejected'||group.status==='blocked'))
+            throw new AtlasDbError('SCENE_MAP_WRITE_FAILED','地图结构候选未通过校验',{groups:mapResult.groups,journal:mapResult.journalIssues});
+          groupResults.push(...mapResult.groups);
+        }
+      }
+      // All program/model settlement belongs to this same isolated floor. No SQL
       // transaction is held across its model requests; host publication remains later.
       commitTransaction(candidateDb);
       transactionOpen = false;
       const simulation = await settleSqlTurn({ db: candidateDb, branchId, anchor, turnId, clockBefore,
-        operations: parsedOperations, modelPort: input.manual ? null : options.modelPort,
+        sceneOnly:input.sceneOnly,
+        operations: input.sceneOnly?[]:parsedOperations, modelPort: input.manual||input.sceneOnly ? null : options.modelPort,
         modelBudget: Math.max(0, ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn - foregroundBatches - (repairAttempted ? 1 : 0)),
         makeId, isCurrent: input.isCurrent });
       beginTransaction(candidateDb);
@@ -895,6 +916,7 @@ export function createSqlRepository(options: RepositoryOptions) {
         JSON.stringify({ operations: parsedOperations.map((p) => p.value),
           operation_meta: parsedOperations.map(({ opId, line, rawHash }) => ({ opId, line, rawHash })),
           known_refs: foregroundKnownRefs,
+          scene_maps: input.sceneMaps === true,
           operation_context: simulation.operationContexts,
           host_message_index: input.hostMessageIndex,
           simulation_steps: simulation.steps,
@@ -1242,6 +1264,7 @@ export function createSqlRepository(options: RepositoryOptions) {
         storageRevision: storageRevision + 1,
         activeBranchId: branchId,
         schemaVersion: ATLAS_SCHEMA_VERSION,
+      assets: envelopeAssets,
       });
       const stored = candidates.get(candidate.token) as StoredCandidate;
       stored.snapshot = bytes;

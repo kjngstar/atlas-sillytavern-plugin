@@ -1600,8 +1600,7 @@ export function createAtlasUiCore(deps: {
 
   /**
    * 防抖窗口结束后统一处理楼层变动（顺序重放，语义 = 最终状态）。
-   * 只有「最近一次已推演的回复楼层」会触发回退；更早的楼层拒绝
-   * （回退中间楼层会连带抹掉其后所有推演，必须显式拒绝而不是悄悄做）。
+   * SQL 的编辑/删楼撤销该楼及依赖后文；旧兼容流程仍只回退最近一次回复。
    */
   async function processMutations(
     queue: Extract<AtlasAdaptedEvent, { kind: "message-swiped" | "message-edited" | "message-deleted" }>[],
@@ -1610,7 +1609,12 @@ export function createAtlasUiCore(deps: {
       if (disposed) return;
       const binding = state.binding;
       if (!binding?.enabled || !state.chatId || state.serviceStatus !== "online") return;
-      if (binding.lastCommittedMessageId !== event.messageId) continue; // 非最近回合：不影响世界
+      if (binding.lastCommittedMessageId !== event.messageId) {
+        const sqlEarlier = sqlEnabled() && event.kind !== 'message-swiped'
+          && binding.lastCommittedMessageId !== null && Number.isFinite(Number(event.messageId))
+          && Number(event.messageId) < Number(binding.lastCommittedMessageId);
+        if(!sqlEarlier)continue;
+      }
       if (rolledBackFloors.has(`${state.chatId}:${event.messageId}`)) continue; // 本会话已回退过
       if (event.kind === "message-swiped") {
         if (event.regenerating === false) continue; // 仅切换查看旧变体：不动世界

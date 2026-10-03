@@ -5,6 +5,7 @@ import { stableHexHash } from './atlas-hash.ts';
 import { AtlasDbError, queryBound } from './atlas-db-runtime.ts';
 import { querySqlSceneState } from './atlas-sql-view-state.ts';
 import { querySqlCharacterTimeline } from './atlas-sql-timeline.ts';
+import { handleSqlMapAction } from './atlas-sql-map-actions.ts';
 import { toLegacyTurnReceipt } from './atlas-db-state-adapter.ts';
 import { runSqlTurn, runSqlRollback } from './atlas-sql-session.ts';
 import { runSqlModelRetry } from './atlas-sql-retry.ts';
@@ -73,6 +74,7 @@ export async function handleSqlChatRequest(session: SqlSession, action: string, 
       povId:protagonist(session),viewMode:'author',assets:((session.chatMetadata.atlas as {database?:AtlasEnvelope}|undefined)?.database?.assets??[])}, {chatUid:session.chatUid,worldUid:session.worldUid,worldName:session.branchName}),binding:logicalBinding};
   }
   assertEnabled(session);
+  if(action.startsWith('map/'))return handleSqlMapAction(session,action,body);
   if (action === 'retry') {
     const parsed = parseAtlasTurnCommitRequest(body);
     if (!parsed.ok || parsed.value.chatId !== session.chatUid) throw new AtlasDbError('INVALID_PAYLOAD', 'SQL 补交素材不属于当前聊天', {});
@@ -119,6 +121,7 @@ export async function handleSqlChatRequest(session: SqlSession, action: string, 
       userText: request.userText, assistantText: request.assistantText, sourceSnapshot: sources, phaseBatches: ['observe'], manual: false,
       narrativeKind: manual ? 'manual' : 'narrative',
       hostMessageIndex: request.assistantMessageId,
+      sceneMaps:true,
       isCurrent: typeof body.isCurrent === 'function' ? body.isCurrent as () => boolean : undefined };
     const result = await runSqlTurn(session, input);
     const receipt = toLegacyTurnReceipt(result.receipt, { coreSaved: result.coreSaved });
@@ -131,9 +134,10 @@ export async function handleSqlChatRequest(session: SqlSession, action: string, 
   }
   if (action === 'rollback') {
     const floor = text(body.assistantMessageId);
-    const row = latestFloor(session);
-    if (!row) return { coreSaved: true, duplicate: true, binding: binding(session) };
-    if (floorIndex(row) !== floor) throw new AtlasDbError('SQL_ROLLBACK_FLOOR_MISMATCH', '该楼层不是最近一次 SQL 推演楼层，不能隐式回退后续剧情', {});
+    const rows=queryBound(session.repo.db,"SELECT id,host_message_uid,decisions_json FROM turns WHERE branch_id=? AND kind='narrative' AND status IN ('committed','partial') ORDER BY committed_revision DESC,created_wall_ms DESC",[session.branchId]);
+    if (!rows.length) return { coreSaved: true, duplicate: true, binding: binding(session) };
+    const row=rows.find(row=>floorIndex(row)===floor);
+    if (!row) throw new AtlasDbError('SQL_ROLLBACK_FLOOR_MISMATCH', '目标楼层没有当前分支的有效 SQL 推演记录', {});
     const result = await runSqlRollback(session, { chatUid: session.chatUid, branchId: session.branchId,
       targetParentTurnId: String(row.id), expectedRevision: session.repo.internal.currentRevision() });
     return { coreSaved: result.coreSaved, receipt: toLegacyTurnReceipt(result.receipt, { coreSaved: result.coreSaved }), issues: result.issues };

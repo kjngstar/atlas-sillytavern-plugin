@@ -8,12 +8,12 @@ function envelopeOf(metadata) {
 }
 function snapshot(metadata) {
   const raw = envelopeOf(metadata);
-  if (!raw || typeof raw !== "object") return { raw, revision: null, hash: null, data: null };
+  if (!raw || typeof raw !== "object") return { raw, revision: null, hash: null, data: null, assets: null };
   const envelope = raw;
-  return { raw: null, revision: envelope.storage_revision, hash: envelope.sha256, data: envelope.data };
+  return { raw: null, revision: envelope.storage_revision, hash: envelope.sha256, data: envelope.data, assets: JSON.stringify(envelope.assets ?? []) };
 }
 function sameSnapshot(a, b) {
-  return a.raw === b.raw && a.revision === b.revision && a.hash === b.hash && a.data === b.data;
+  return a.raw === b.raw && a.revision === b.revision && a.hash === b.hash && a.data === b.data && a.assets === b.assets;
 }
 function createBrowserSqlHost(options) {
   let current = null;
@@ -42,6 +42,11 @@ function createBrowserSqlHost(options) {
       if (pending && pending.chatUid === chatUid && pending.branchId === branchId && pending.metadata === record.chatMetadata) return pending.promise;
       const openingEpoch = ++epoch;
       const originalSnapshot = snapshot(record.chatMetadata);
+      const legacyKeys = ["world", "tables", "maps", "simulation", "session", "binding"];
+      const legacySignature = () => JSON.stringify(Object.fromEntries(legacyKeys.map((key) => [key, record.chatMetadata.atlas?.[key]])));
+      const originalLegacy = legacySignature();
+      let openingSnapshot = originalSnapshot;
+      let migrating = false;
       const task = (async () => {
         const runtime = await options.loadRuntime();
         if (!isCurrent(record, branchId) || epoch !== openingEpoch) throw error("CHAT_CHANGED", "SQL 初始化期间宿主身份已变化");
@@ -50,32 +55,45 @@ function createBrowserSqlHost(options) {
           current = null;
         }
         const atlas = record.chatMetadata.atlas;
-        if (envelopeOf(record.chatMetadata) === null && (atlas?.tables || atlas?.world || atlas?.maps || atlas?.session)) {
-          throw error("SQL_MIGRATION_REQUIRED", "当前聊天含旧世界数据，必须完成单向迁移后再使用 SQL，不能创建空库覆盖");
-        }
-        const opened = await runtime.openSqlSession({
+        const openOptions = {
           chatUid,
           branchId,
           chatMetadata: record.chatMetadata,
           modelPort: options.modelPort ?? null,
           confirmSave: true,
           isCurrentHost: () => isCurrent(record, branchId) && sameSnapshot(
-            current?.session.chatMetadata === record.chatMetadata ? current.storedSnapshot : originalSnapshot,
+            current?.session.chatMetadata === record.chatMetadata ? current.storedSnapshot : openingSnapshot,
             snapshot(record.chatMetadata)
           ),
           saveSession: async () => {
             if (!isCurrent(record, branchId)) throw error("CHAT_CHANGED", "保存前聊天或分支已变化");
+            if (migrating && legacySignature() !== originalLegacy) throw error("SESSION_STALE", "保存前旧档已变化，拒绝发布迁移候选");
             const result = await record.saveMetadata();
+            if (migrating && legacySignature() !== originalLegacy) throw error("SESSION_STALE", "保存期间旧档已变化，拒绝发布迁移候选");
             if (result === false) throw error("SESSION_WRITE_FAILED", "宿主拒绝保存 SQL 快照");
             if (!isCurrent(record, branchId)) throw error("CHAT_CHANGED", "保存过程中聊天或分支已变化");
             return result;
           }
-        });
-        if (!isCurrent(record, branchId) || epoch !== openingEpoch || !sameSnapshot(snapshot(record.chatMetadata), originalSnapshot)) {
+        };
+        let opened;
+        if (envelopeOf(record.chatMetadata) === null && legacyKeys.slice(0, 5).some((key) => atlas?.[key] != null)) {
+          if (legacySignature() !== originalLegacy) throw error("SESSION_STALE", "初始化期间旧档已变化，拒绝迁移过期内容");
+          migrating = true;
+          const migration = await runtime.migrateSessionToSql({ ...openOptions, legacy: { atlas: JSON.parse(JSON.stringify(atlas)) }, persist: true });
+          if (!migration.session || migration.issues.some((issue) => issue.severity === "error") || !migration.saved && migration.inspection.kind !== "empty") {
+            if (migration.session) await runtime.closeSqlSession(migration.session);
+            const cause = migration.issues.find((issue) => issue.severity === "error");
+            throw error(cause?.code ?? "SQL_MIGRATION_FAILED", cause?.message ?? "旧档迁移未获得保存确认；旧数据保持原状");
+          }
+          migrating = false;
+          opened = migration.session;
+          openingSnapshot = snapshot(record.chatMetadata);
+        } else opened = await runtime.openSqlSession(openOptions);
+        if (!isCurrent(record, branchId) || epoch !== openingEpoch || !sameSnapshot(snapshot(record.chatMetadata), openingSnapshot)) {
           await runtime.closeSqlSession(opened);
           throw error("CHAT_CHANGED", "SQL 初始化期间快照或宿主身份已变化");
         }
-        current = { session: opened, storedSnapshot: originalSnapshot };
+        current = { session: opened, storedSnapshot: openingSnapshot };
         return opened;
       })();
       const opening = { chatUid, branchId, metadata: record.chatMetadata, promise: task };
@@ -4328,7 +4346,10 @@ function createAtlasUiCore(deps) {
       if (disposed) return;
       const binding = state.binding;
       if (!binding?.enabled || !state.chatId || state.serviceStatus !== "online") return;
-      if (binding.lastCommittedMessageId !== event.messageId) continue;
+      if (binding.lastCommittedMessageId !== event.messageId) {
+        const sqlEarlier = sqlEnabled() && event.kind !== "message-swiped" && binding.lastCommittedMessageId !== null && Number.isFinite(Number(event.messageId)) && Number(event.messageId) < Number(binding.lastCommittedMessageId);
+        if (!sqlEarlier) continue;
+      }
       if (rolledBackFloors.has(`${state.chatId}:${event.messageId}`)) continue;
       if (event.kind === "message-swiped") {
         if (event.regenerating === false) continue;
@@ -22338,6 +22359,40 @@ function selectAtlasLoreSupplement(input) {
     sourceMode: input.mode
   };
 }
+
+// src/atlas-sql-map-areas.ts
+function projectSqlMapAreas(areas, frame) {
+  const projected = [];
+  const skipped = [];
+  const finite = (p) => !!p && typeof p === "object" && Number.isFinite(p.x) && Number.isFinite(p.y);
+  for (const area of areas) {
+    const g = area.geometry;
+    let path = "", cells = 0;
+    if (g?.kind === "cells" && Array.isArray(g.cells) && g.cells.length <= 256) {
+      const seen = /* @__PURE__ */ new Set();
+      for (const cell of g.cells) {
+        if (!finite(cell) || !Number.isInteger(cell.x) || !Number.isInteger(cell.y) || cell.x < 0 || cell.y < 0 || cell.x >= frame.cols || cell.y >= frame.rows) {
+          path = "";
+          break;
+        }
+        const key = `${cell.x},${cell.y}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        path += `M${cell.x} ${cell.y}h1v1h-1Z`;
+        cells++;
+      }
+    } else if (g?.kind === "polygon" && Array.isArray(g.points) && g.points.length >= 3 && g.points.length <= 256) {
+      if (g.points.every((p) => finite(p) && p.x >= 0 && p.y >= 0 && p.x <= frame.cols && p.y <= frame.rows))
+        path = g.points.map((p, i) => `${i ? "L" : "M"}${p.x} ${p.y}`).join("") + "Z";
+    }
+    if (!path) {
+      skipped.push({ locationId: area.locationId, reason: "INVALID_OR_OUT_OF_FRAME_AREA" });
+      continue;
+    }
+    projected.push({ locationId: area.locationId, path, quality: g?.quality === "confirmed" ? "confirmed" : "estimated", source: String(g?.source ?? "estimate"), cells });
+  }
+  return { areas: projected, skipped };
+}
 export {
   ATLAS_BROWSER_DOC_LIMITS,
   ATLAS_ERROR_CODES,
@@ -22419,6 +22474,7 @@ export {
   panCameraBy,
   parseAtlasChatBinding,
   projectColorAreas,
+  projectSqlMapAreas,
   resizeMapCamera,
   sanitizeCalibration,
   sanitizeDiagnostic,

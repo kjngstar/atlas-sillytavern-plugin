@@ -27,12 +27,12 @@ function envelopeOf(metadata: Record<string, unknown>): unknown {
 
 function snapshot(metadata: Record<string, unknown>) {
   const raw = envelopeOf(metadata);
-  if (!raw || typeof raw !== 'object') return { raw, revision: null, hash: null, data: null };
+  if (!raw || typeof raw !== 'object') return { raw, revision: null, hash: null, data: null,assets:null };
   const envelope = raw as Record<string, unknown>;
-  return { raw: null, revision: envelope.storage_revision, hash: envelope.sha256, data: envelope.data };
+  return { raw: null, revision: envelope.storage_revision, hash: envelope.sha256, data: envelope.data,assets:JSON.stringify(envelope.assets??[]) };
 }
 function sameSnapshot(a: ReturnType<typeof snapshot>, b: ReturnType<typeof snapshot>) {
-  return a.raw === b.raw && a.revision === b.revision && a.hash === b.hash && a.data === b.data;
+  return a.raw === b.raw && a.revision === b.revision && a.hash === b.hash && a.data === b.data && a.assets === b.assets;
 }
 
 /** One write repository for the currently captured host identity. SQL code loads lazily. */
@@ -68,33 +68,51 @@ export function createBrowserSqlHost(options: BrowserSqlHostOptions): AtlasSqlSe
       if (pending && pending.chatUid === chatUid && pending.branchId === branchId && pending.metadata === record.chatMetadata) return pending.promise;
       const openingEpoch = ++epoch;
       const originalSnapshot = snapshot(record.chatMetadata);
+      const legacyKeys=['world','tables','maps','simulation','session','binding'];
+      const legacySignature=()=>JSON.stringify(Object.fromEntries(legacyKeys.map(key=>[key,(record.chatMetadata.atlas as Record<string,unknown>|undefined)?.[key]])));
+      const originalLegacy=legacySignature();
+      let openingSnapshot=originalSnapshot;
+      let migrating = false;
       const task = (async () => {
         const runtime = await options.loadRuntime();
         if (!isCurrent(record, branchId) || epoch !== openingEpoch) throw error('CHAT_CHANGED', 'SQL 初始化期间宿主身份已变化');
         if (current) { await runtime.closeSqlSession(current.session); current = null; }
         const atlas = record.chatMetadata.atlas as Record<string, unknown> | undefined;
-        if (envelopeOf(record.chatMetadata) === null && (atlas?.tables || atlas?.world || atlas?.maps || atlas?.session)) {
-          throw error('SQL_MIGRATION_REQUIRED', '当前聊天含旧世界数据，必须完成单向迁移后再使用 SQL，不能创建空库覆盖');
-        }
-        const opened = await runtime.openSqlSession({
+        const openOptions={
           chatUid, branchId, chatMetadata: record.chatMetadata, modelPort: options.modelPort ?? null,
           confirmSave: true,
           isCurrentHost: () => isCurrent(record, branchId)
-            && sameSnapshot(current?.session.chatMetadata === record.chatMetadata ? current.storedSnapshot : originalSnapshot,
+            && sameSnapshot(current?.session.chatMetadata === record.chatMetadata ? current.storedSnapshot : openingSnapshot,
               snapshot(record.chatMetadata)),
           saveSession: async () => {
             if (!isCurrent(record, branchId)) throw error('CHAT_CHANGED', '保存前聊天或分支已变化');
+            if(migrating && legacySignature()!==originalLegacy) throw error('SESSION_STALE','保存前旧档已变化，拒绝发布迁移候选');
             const result = await record.saveMetadata();
+            if(migrating && legacySignature()!==originalLegacy) throw error('SESSION_STALE','保存期间旧档已变化，拒绝发布迁移候选');
             if (result === false) throw error('SESSION_WRITE_FAILED', '宿主拒绝保存 SQL 快照');
             if (!isCurrent(record, branchId)) throw error('CHAT_CHANGED', '保存过程中聊天或分支已变化');
             return result;
           },
-        });
-        if (!isCurrent(record, branchId) || epoch !== openingEpoch || !sameSnapshot(snapshot(record.chatMetadata), originalSnapshot)) {
+        };
+        let opened:SqlSession;
+        if(envelopeOf(record.chatMetadata)===null&&legacyKeys.slice(0,5).some(key=>atlas?.[key]!=null)){
+          if(legacySignature()!==originalLegacy)throw error('SESSION_STALE','初始化期间旧档已变化，拒绝迁移过期内容');
+          migrating = true;
+          const migration=await runtime.migrateSessionToSql({...openOptions,legacy:{atlas:JSON.parse(JSON.stringify(atlas))},persist:true});
+          if(!migration.session||migration.issues.some(issue=>issue.severity==='error')||!migration.saved&&migration.inspection.kind!=='empty'){
+            if(migration.session)await runtime.closeSqlSession(migration.session);
+            const cause=migration.issues.find(issue=>issue.severity==='error');
+            throw error(cause?.code??'SQL_MIGRATION_FAILED',cause?.message??'旧档迁移未获得保存确认；旧数据保持原状');
+          }
+          migrating = false;
+          opened=migration.session;
+          openingSnapshot=snapshot(record.chatMetadata);
+        }else opened=await runtime.openSqlSession(openOptions);
+        if (!isCurrent(record, branchId) || epoch !== openingEpoch || !sameSnapshot(snapshot(record.chatMetadata), openingSnapshot)) {
           await runtime.closeSqlSession(opened);
           throw error('CHAT_CHANGED', 'SQL 初始化期间快照或宿主身份已变化');
         }
-        current = { session: opened, storedSnapshot: originalSnapshot };
+        current = { session: opened, storedSnapshot: openingSnapshot };
         return opened;
       })();
       const opening = { chatUid, branchId, metadata: record.chatMetadata, promise: task };

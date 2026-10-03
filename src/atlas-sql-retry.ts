@@ -38,7 +38,7 @@ async function retry(session: SqlSession, input: RetryInput): Promise<RetryResul
   const receipt = JSON.parse(String(row.receipt_json)) as TurnReceipt;
   const rejected = receipt.groups.filter(g => g.status === 'rejected' || g.status === 'blocked');
   if (!rejected.length) return runSqlResume(session,input);
-  const history = JSON.parse(String(row.decisions_json)) as { operations: ParsedOperation['value'][]; operation_meta?: Array<Omit<ParsedOperation, 'value'>>; known_refs?: KnownRef[]; operation_context?: OperationContext[] };
+  const history = JSON.parse(String(row.decisions_json)) as { scene_maps?:boolean; operations: ParsedOperation['value'][]; operation_meta?: Array<Omit<ParsedOperation, 'value'>>; known_refs?: KnownRef[]; operation_context?: OperationContext[] };
   if (!history.known_refs || !history.operation_meta || history.operation_meta.length !== history.operations.length) throw new AtlasDbError('SQL_RETRY_HISTORY_MISSING', '旧 SQL 回合缺少操作身份或原短引用记录，不能安全补交；请回退后重新推演，原存档未修改', {});
   if (!session.modelPort) throw new AtlasDbError('MODEL_PORT_MISSING', '补交没有活动模型端口', {});
   let operations = history.operations.map((value, index) => ({ ...history.operation_meta![index], value }));
@@ -87,7 +87,7 @@ async function retry(session: SqlSession, input: RetryInput): Promise<RetryResul
     seedRefs:original.scope.all().filter(ref=>!failedIds.has(ref.declaredByOpId ?? '')) });
   const groups = buildAtomicGroups(compiled.results.map(r => ({ opId: r.opId, ...r.result })));
   const result = await runSqlRetry(session, { branchId: session.branchId, chatUid: session.chatUid, turnId: input.turnId,
-    currentHeadTurnId: input.turnId, attemptId: `retry_${storageRevision}`, groups: groups.groups, clockS: receipt.clockAfterS, isCurrent: input.isCurrent });
+    currentHeadTurnId: input.turnId, attemptId: `retry_${storageRevision}`, groups: groups.groups, clockS: receipt.clockAfterS, sceneMaps:history.scene_maps, isCurrent: input.isCurrent });
   const updated = result.coreSaved ? JSON.parse(String(queryBound(session.repo.db, 'SELECT receipt_json FROM turns WHERE id=?', [input.turnId])[0].receipt_json)) as TurnReceipt : receipt;
   return { receipt: updated, coreSaved: result.coreSaved, issues: [...issues, ...compiled.issues, ...groups.issues, ...result.issues] };
 }

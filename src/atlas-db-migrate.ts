@@ -409,12 +409,12 @@ function worldCandidates(world: Record<string, unknown>, skipped: MigrationSkip[
     });
   });
 
-  const archiveNames = new Map<string, { name: string; description: string }>();
+  const archiveNames = new Map<string, { name: string; description: string; role: string }>();
   for (const entry of Array.isArray(world.characters) ? world.characters : []) {
     if (!isPlainObject(entry)) continue;
     const id = str(entry.id);
     if (id.length === 0) continue;
-    archiveNames.set(id, { name: str(entry.name), description: str(entry.description) });
+    archiveNames.set(id, { name: str(entry.name), description: str(entry.description), role: str(entry.role) });
   }
   const records = Array.isArray(world.entityRecords) ? world.entityRecords : [];
   for (const record of records) {
@@ -424,7 +424,7 @@ function worldCandidates(world: Record<string, unknown>, skipped: MigrationSkip[
     const type = str(record.type).toLowerCase();
     if (isCharacterType(type)) {
       const baseline = isPlainObject(record.baseline) ? record.baseline : {};
-      archiveNames.set(id, { name: str(record.name), description: str(baseline.description ?? baseline.summary) });
+      archiveNames.set(id, { name: str(record.name), description: str(baseline.description ?? baseline.summary), role: str(baseline.role ?? archiveNames.get(id)?.role) });
     }
   }
   const states = Array.isArray(world.characterStates) ? world.characterStates : [];
@@ -451,6 +451,7 @@ function worldCandidates(world: Record<string, unknown>, skipped: MigrationSkip[
         id: `npc:${characterId}`,
         name: archive?.name || characterId,
         description: archive?.description ?? '',
+        role: archive?.role ?? '',
         locationId: pointId.length > 0 ? `loc:${pointId}` : null,
         currentAction: str(state.status),
         presence: null,
@@ -465,7 +466,7 @@ function worldCandidates(world: Record<string, unknown>, skipped: MigrationSkip[
       legacyId: `npc:${id}`,
       index: archiveIndex,
       origin: '$.world.characters',
-      raw: { id: `npc:${id}`, name: archive.name || id, description: archive.description, locationId: null },
+      raw: { id: `npc:${id}`, name: archive.name || id, description: archive.description, role: archive.role, locationId: null },
     });
     archiveIndex += 1;
   }
@@ -538,6 +539,14 @@ function collectEntityCandidates(raw: unknown, branchId: string): EntityCandidat
     locations = toCandidates(rowList(selected.payload, 'locations'), 'location', `$.tables.${selected.key}.locations`, skipped);
     characters = toCandidates(rowList(selected.payload, 'characters'), 'character', `$.tables.${selected.key}.characters`, skipped);
     items = toCandidates(rowList(selected.payload, 'items'), 'item', `$.tables.${selected.key}.items`, skipped);
+    // Stable IDs supply archive-only identity fields; current table positions remain authoritative.
+    if (sources.world) {
+      const archives = new Map(worldCandidates(sources.world, []).characters.map(row => [row.legacyId, row.raw]));
+      characters = characters.map(row => {
+        const archive = archives.get(row.legacyId);
+        return archive && !str(row.raw.role) ? {...row, raw:{...row.raw, role:archive.role}} : row;
+      });
+    }
   } else if (sources.world) {
     const fromWorld = worldCandidates(sources.world, skipped);
     locations = fromWorld.locations;
@@ -1007,7 +1016,7 @@ function resolveMapRef(
     return id;
   }
 
-  const frame = mapsFrame(mapsDoc);
+  const frame = mapsFrame(mapsDoc,legacyMapId);
   const calibration = mapsCalibration(mapsDoc, legacyMapId);
 
   // 1) 旧根世界图：没有根图就按需建一张（这就是「旧 maps 文档确实描述过」的那张图）。
@@ -1129,16 +1138,20 @@ function resolveMapRef(
   return null;
 }
 
-function mapsFrame(mapsDoc: Record<string, unknown> | null): Record<string, number> {
-  const fallback = { origin_x: 0, origin_y: 0, reference_width_cells: 100, reference_height_cells: 100 };
+function mapsFrame(mapsDoc: Record<string, unknown> | null,mapId='world'): Record<string, number> {
+  const fallback = { origin_x: 0, origin_y: 0, cols:100,rows:100,reference_width_cells: 100, reference_height_cells: 100 };
   if (!mapsDoc) return fallback;
-  const frame = isPlainObject(mapsDoc.frame) ? mapsDoc.frame : null;
+  const submaps=isPlainObject(mapsDoc.submaps)?mapsDoc.submaps:{};
+  const sub=submaps[mapId]??submaps[mapId.replace(/^loc:/,'')];
+  const frame = mapId!=='world'&&isPlainObject(sub)&&isPlainObject(sub.frame)?sub.frame:isPlainObject(mapsDoc.frame) ? mapsDoc.frame : null;
   if (!frame) return fallback;
   const cols = num(frame.cols) ?? num(frame.reference_width_cells);
   const rows = num(frame.rows) ?? num(frame.reference_height_cells);
   return {
     origin_x: num(frame.origin_x) ?? 0,
     origin_y: num(frame.origin_y) ?? 0,
+    cols:cols!==null&&cols>0?cols:100,
+    rows:rows!==null&&rows>0?rows:100,
     reference_width_cells: cols !== null && cols > 0 ? cols : fallback.reference_width_cells,
     reference_height_cells: rows !== null && rows > 0 ? rows : fallback.reference_height_cells,
   };
@@ -1150,7 +1163,7 @@ function mapsCalibration(mapsDoc: Record<string, unknown> | null, mapId: string)
   if (!calibrations) return null;
   const entry = calibrations[mapId];
   if (!isPlainObject(entry)) return null;
-  const distancePerCell = num(entry.distancePerCell) ?? num(entry.metersPerCell) ?? num(entry.meters_per_cell);
+  const distancePerCell = num(entry.metersPerCell) ?? num(entry.meters_per_cell) ?? (str(entry.unit).toLowerCase()==='m'||str(entry.unit)==='米'?num(entry.distancePerCell):null);
   return distancePerCell !== null && distancePerCell > 0 ? distancePerCell : null;
 }
 
@@ -1158,6 +1171,46 @@ function mapsCalibration(mapsDoc: Record<string, unknown> | null, mapId: string)
  * E12 migrateLegacyEntities。
  * 完成定义：数量与稳定 ID 不减；持有人坐标正确；旧 rumors 不让人人知；旧 period 不编秒数。
  */
+/** Restore legacy map references only after real SQL container maps have been created. */
+export function restoreLegacySceneMaps(raw:unknown,db:SqlDatabase,ctx:{branchId:string}):Issue[]{
+  const issues:Issue[]=[],candidates=collectEntityCandidates(raw,ctx.branchId);
+  const sources=readLegacySources(locateAtlas(raw).atlas??{});
+  const maps=queryBound(db,"SELECT id,container_location_id,frame_json FROM maps WHERE branch_id=? AND status='active'",[ctx.branchId]);
+  const locations=new Set(queryBound(db,'SELECT id FROM locations WHERE branch_id=?',[ctx.branchId]).map(row=>String(row.id)));
+  const resolveMap=(legacyId:string)=>maps.find(map=>legacyId==='world'?!map.container_location_id:
+    map.container_location_id===legacyId||map.container_location_id===`loc:${legacyId}`);
+  for(const [table,rows] of [['locations',candidates.locations],['characters',candidates.characters],['items',candidates.items]] as const){
+    for(const candidate of rows){
+      const x=num(candidate.raw.gridX??candidate.raw.x),y=num(candidate.raw.gridY??candidate.raw.y),legacyMapId=str(candidate.raw.mapId??candidate.raw.map_id);
+      if(x===null||y===null||!legacyMapId)continue;
+      const row=queryOne(db,`SELECT * FROM ${table} WHERE branch_id=? AND id=?`,[ctx.branchId,candidate.legacyId]);
+      if(!row||row.status==='archived'||table==='items'&&(row.holder_character_id||row.container_item_id))continue;
+      const map=resolveMap(legacyMapId);if(!map)continue;
+      const expected=table==='locations'?row.parent_location_id:row.location_id;
+      if(table==='locations'?(map.container_location_id??null)!==(expected??null):!expected||map.container_location_id!==expected)continue;
+      const frame=JSON.parse(String(map.frame_json)) as {cols?:number;rows?:number};
+      if(x<0||y<0||x>(frame.cols??100)||y>(frame.rows??100)){
+        issues.push(describeProblem(candidate.origin,'旧坐标超出当前地图；原坐标保留在旧档，显示布局另行估计','LEGACY_COORDS_OUT_OF_FRAME'));continue;
+      }
+      runBound(db,`UPDATE ${table} SET map_id=?,grid_x=?,grid_y=?,coord_precision=? WHERE branch_id=? AND id=?`,
+        [String(map.id),x,y,candidate.raw.coordinateStatus==='confirmed'?'exact':'approximate',ctx.branchId,candidate.legacyId]);
+    }
+  }
+  const calibrations=isPlainObject(sources.maps?.calibrations)?sources.maps.calibrations:{};
+  for(const [legacyId,rawCalibration] of Object.entries(calibrations)){
+    if(!isPlainObject(rawCalibration))continue;
+    const locationId=legacyId.startsWith('loc:')?legacyId:`loc:${legacyId}`;
+    if(legacyId!=='world'&&!locations.has(locationId)&&!locations.has(legacyId))continue;
+    const map=resolveMap(legacyId),meters=num(rawCalibration.metersPerCell??rawCalibration.meters_per_cell);
+    // Legacy distances with an unknown unit are not re-labelled as metres.
+    if(!map||meters===null||meters<=0)continue;
+    const locked=rawCalibration.locked===true;
+    runBound(db,'UPDATE maps SET meters_per_cell=?,scale_min_meters_per_cell=?,scale_max_meters_per_cell=?,scale_quality=?,scale_locked=?,calibration_rev=? WHERE branch_id=? AND id=?',
+      [meters,meters,meters,locked?'confirmed':'estimated',locked?1:0,Math.max(1,num(rawCalibration.revision)??1),ctx.branchId,String(map.id)]);
+  }
+  return issues;
+}
+
 export function migrateLegacyEntities(
   plan: LegacyInspection,
   raw: unknown,
@@ -1272,6 +1325,7 @@ export function migrateLegacyEntities(
     // 1) 地点：entity_keys 先写，detail 后写（触发器要求同分支同 ID 的身份行已在）。
     const locationById = new Map<string, { name: string; kind: string }>();
     const legacyToSql = new Map<string, string>();
+    const parentLinks: Array<{id:string; parentLegacyId:string; origin:string; name:string}> = [];
     for (const candidate of candidates.locations) {
       const name = str(candidate.raw.name);
       if (name.length === 0) {
@@ -1298,10 +1352,6 @@ export function migrateLegacyEntities(
       }
 
       const parentLegacyId = str(candidate.raw.parentLocationId ?? candidate.raw.parentRef ?? candidate.raw.parentId);
-      const parentId = parentLegacyId.length > 0 ? (legacyToSql.get(parentLegacyId) ?? (rowExists(db, 'locations', ctx.branchId, parentLegacyId) ? parentLegacyId : null)) : null;
-      if (parentLegacyId.length > 0 && parentId === null) {
-        issues.push(describeProblem(candidate.origin, `旧父地点 ${parentLegacyId} 未迁移/不存在：${name} 保留为根地点，不伪造父子关系`, 'LEGACY_PARENT_UNRESOLVED'));
-      }
       const legacyMapId = str(candidate.raw.mapId ?? candidate.raw.map_id);
       const mapId = resolveMapRef(db, ctx, mapState, legacyMapId, mapsDoc, locationById);
       const gridX = num(candidate.raw.gridX ?? candidate.raw.x);
@@ -1318,7 +1368,7 @@ export function migrateLegacyEntities(
             aliases_json: strList(candidate.raw.aliases ?? candidate.raw.aliases_json),
             kind,
             description: str(candidate.raw.description),
-            parent_location_id: parentId,
+            parent_location_id: null,
             mobility: str(candidate.raw.mobility) === 'mobile' ? 'mobile' : 'fixed',
             map_id: hasGrid ? mapId : null,
             grid_x: hasGrid ? gridX : null,
@@ -1345,10 +1395,31 @@ export function migrateLegacyEntities(
           ),
         );
       }
+      parentLinks.push({id,parentLegacyId,origin:candidate.origin,name});
       legacyToSql.set(candidate.legacyId, id);
       bump(mapped, 'kind:locations');
       bump(mapped, 'kind:entityKeys');
       mapped[`legacy:${candidate.legacyId || id}`] = mapped['kind:locations'] ?? 1;
+    }
+
+    // Resolve after all locations exist: parents may appear later in the old array.
+    for (const link of parentLinks) {
+      if (!link.parentLegacyId) continue;
+      const parentId = legacyToSql.get(link.parentLegacyId)
+        ?? (rowExists(db, 'locations', ctx.branchId, link.parentLegacyId) ? link.parentLegacyId : null);
+      if (!parentId) {
+        issues.push(describeProblem(link.origin, `旧父地点 ${link.parentLegacyId} 不存在：${link.name} 保留为根地点`, 'LEGACY_PARENT_UNRESOLVED'));
+        continue;
+      }
+      runBound(db, 'UPDATE locations SET parent_location_id=? WHERE branch_id=? AND id=?', [parentId,ctx.branchId,link.id]);
+    }
+    const parents = new Map(queryBound(db,'SELECT id,parent_location_id FROM locations WHERE branch_id=?',[ctx.branchId]).map(row => [String(row.id),row.parent_location_id ? String(row.parent_location_id) : null]));
+    for (const id of parents.keys()) {
+      const seen = new Set<string>(); let cursor:string|null = id;
+      while(cursor) {
+        if(seen.has(cursor)) throw new AtlasDbError('MIGRATION_FAILED','旧地点包含关系存在循环，拒绝发布候选',{locationId:id});
+        seen.add(cursor); cursor=parents.get(cursor)??null;
+      }
     }
 
     // 2) 势力：地点行内嵌的 factions 名单与旧 factions 数组都要有稳定 ID。
@@ -1442,6 +1513,7 @@ export function migrateLegacyEntities(
       const hasGrid = mapId !== null && gridX !== null && gridY !== null;
       const created = withSavepoint(db, () => {
         insertEntityKey(db, ctx.branchId, id, 'character');
+        const absent=candidate.raw.presence==='left'||candidate.raw.status==='archived';
         insertRow(
           db,
           'characters',
@@ -1458,14 +1530,14 @@ export function migrateLegacyEntities(
             action_tendency: str(candidate.raw.actionTendency ?? candidate.raw.action_tendency),
             physical_status: mapPhysicalStatus(candidate.raw.physicalStatus ?? candidate.raw.physical_status),
             condition_note: str(candidate.raw.conditionNote),
-            location_id: locationId,
-            map_id: hasGrid ? mapId : null,
-            grid_x: hasGrid ? gridX : null,
-            grid_y: hasGrid ? gridY : null,
-            coord_precision: hasGrid ? (str(candidate.raw.coordinateStatus) === 'confirmed' ? 'exact' : 'approximate') : 'unknown',
+            location_id: absent?null:locationId,
+            map_id: !absent&&hasGrid ? mapId : null,
+            grid_x: !absent&&hasGrid ? gridX : null,
+            grid_y: !absent&&hasGrid ? gridY : null,
+            coord_precision: !absent&&hasGrid ? (str(candidate.raw.coordinateStatus) === 'confirmed' ? 'exact' : 'approximate') : 'unknown',
             mobility_profiles_json: Array.isArray(candidate.raw.mobilityProfiles) ? candidate.raw.mobilityProfiles : [],
             capabilities_json: Array.isArray(candidate.raw.capabilities) ? candidate.raw.capabilities : [],
-            status: 'active',
+            status: absent?'archived':'active',
           },
           { ...rowCtx, id },
         );
@@ -2221,10 +2293,24 @@ export function migrateLegacySimulation(
         const rows = Array.isArray(topology[key]) ? topology[key] : [];
         for (const row of rows) {
           if (!isPlainObject(row)) continue;
+          const id=str(row.locationId??row.id),location=queryOne(db,'SELECT id,map_id FROM locations WHERE branch_id=? AND id=?',[ctx.branchId,id]);
+          if(location&&key==='areas'&&Array.isArray(row.cells)&&row.cells.length<=256&&row.cells.every(cell=>isPlainObject(cell)&&Number.isInteger(cell.x)&&Number.isInteger(cell.y)&&Number(cell.x)>=0&&Number(cell.y)>=0)){
+            runBound(db,'UPDATE locations SET area_geometry_json=?,updated_turn_id=? WHERE branch_id=? AND id=?',
+              [JSON.stringify({kind:'cells',cells:row.cells,source:['manual','story','worldbook'].includes(str(row.evidence))?str(row.evidence):'migration',quality:'confirmed'}),ctx.turnId,ctx.branchId,id]);
+            bump(mapped,'kind:areas');continue;
+          }
+          if(location&&key==='vehicles'){
+            const anchor=str(row.atLocationId),resolved=anchor&&rowExists(db,'locations',ctx.branchId,anchor)?anchor:null;
+            runBound(db,'UPDATE locations SET mobility=?,anchor_location_id=?,vehicle_profile_json=?,updated_turn_id=? WHERE branch_id=? AND id=?',
+              ['mobile',str(row.status)==='stopped'?resolved:null,JSON.stringify({legacy_status:row.status,legacy_route_id:row.routeEdgeId??null}),ctx.turnId,ctx.branchId,id]);
+            // Abstract old periods cannot become a moving SQL journey. Preserve an explicit blocked diagnostic.
+            if(row.status==='en-route')issues.push(issue('LEGACY_VEHICLE_TRANSIT_BLOCKED','$.simulation.geoTopology.vehicles','旧载具在途记录缺少真实耗时；保留移动载具和旧行程，停靠地点未知','warning',false));
+            bump(mapped,'kind:vehicles');continue;
+          }
           blocked.push({
             kind: key === 'areas' ? 'area' : 'vehicle',
             legacyId: str(row.id),
-            reason: `TOPOLOGY_${key.toUpperCase()}_UNMAPPED: 旧地块/载具没有等价的新表，保留在旧档备份待审`,
+            reason: `TOPOLOGY_${key.toUpperCase()}_UNMAPPED: 旧地块/载具缺少有效地点或范围，保留在旧档备份待审`,
           });
         }
       }

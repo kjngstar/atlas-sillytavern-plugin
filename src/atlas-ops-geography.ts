@@ -107,7 +107,14 @@ export function compileMapEstimate(op: ParsedOperation, ctx: CompileContext): Co
     return result;
   }
 
-  const frame = isPlainObject(before.frame_json) ? (before.frame_json as Record<string, unknown>) : {};
+  let frame = isPlainObject(before.frame_json) ? (before.frame_json as Record<string, unknown>) : {};
+  if(data.frame!==undefined){
+    const f=isPlainObject(data.frame)?data.frame:null;
+    if(!f||!Number.isInteger(f.cols)||!Number.isInteger(f.rows)||Number(f.cols)<1||Number(f.rows)<1||Number(f.cols)>10000||Number(f.rows)>10000){
+      result.issues.push(issue('FRAME_INVALID','$.data.frame','frame.cols/rows 必须是 1～10000 的整数',op));return result;
+    }
+    frame={...frame,cols:f.cols,rows:f.rows,reference_width_cells:f.cols,reference_height_cells:f.rows};
+  }
   const refWidth = typeof frame.reference_width_cells === 'number' && frame.reference_width_cells > 0 ? frame.reference_width_cells : null;
   const refHeight = typeof frame.reference_height_cells === 'number' && frame.reference_height_cells > 0 ? frame.reference_height_cells : null;
 
@@ -141,6 +148,7 @@ export function compileMapEstimate(op: ParsedOperation, ctx: CompileContext): Co
   const turnId = ctx.turnId ?? ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
   const after = applyPatch(before, {
     meters_per_cell: nominal,
+    frame_json:frame,
     scale_min_meters_per_cell: lower,
     scale_max_meters_per_cell: upper,
     scale_quality: quality,

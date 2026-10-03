@@ -328,6 +328,11 @@ export type TurnInput = {
   /** Display locator only; stable identity remains anchor.hostMessageUid. */
   hostMessageIndex?: string;
   operations?: ModelOperation[];
+  /** Internal scene writer options, constructed by the host route, never from model text. */
+  sceneMaps?: boolean;
+  mapCalibration?: import('./atlas-sql-scene-maps.ts').SqlMapCalibration;
+  sceneOnly?: boolean;
+  povName?: string;
 };
 
 export type RollbackInput = {

@@ -8266,6 +8266,9 @@ function compileCharacterUpsert(op, ctx) {
     }
   }
   ensureLocationRef(data, "location_ref", op, result.issues, changes, "location_id", ["location"], ctx.scope);
+  if (before && Object.prototype.hasOwnProperty.call(changes, "location_id") && changes.location_id !== before.location_id && !Object.prototype.hasOwnProperty.call(data, "position")) {
+    Object.assign(changes, { map_id: null, grid_x: null, grid_y: null, coord_precision: "unknown", uncertainty_radius_cells: null });
+  }
   applyPosition(changes, data, op, result.issues, ctx.scope);
   if (result.issues.some((i) => i.severity === "error")) return result;
   if (creating) {
@@ -10024,7 +10027,15 @@ function compileMapEstimate(op, ctx) {
     result.issues.push(issue8("MAP_SCALE_ORDER_INVALID", "$.data", "meters_per_cell_min 不能大于 meters_per_cell_max", op));
     return result;
   }
-  const frame = isPlainObject7(before.frame_json) ? before.frame_json : {};
+  let frame = isPlainObject7(before.frame_json) ? before.frame_json : {};
+  if (data.frame !== void 0) {
+    const f = isPlainObject7(data.frame) ? data.frame : null;
+    if (!f || !Number.isInteger(f.cols) || !Number.isInteger(f.rows) || Number(f.cols) < 1 || Number(f.rows) < 1 || Number(f.cols) > 1e4 || Number(f.rows) > 1e4) {
+      result.issues.push(issue8("FRAME_INVALID", "$.data.frame", "frame.cols/rows 必须是 1～10000 的整数", op));
+      return result;
+    }
+    frame = { ...frame, cols: f.cols, rows: f.rows, reference_width_cells: f.cols, reference_height_cells: f.rows };
+  }
   const refWidth = typeof frame.reference_width_cells === "number" && frame.reference_width_cells > 0 ? frame.reference_width_cells : null;
   const refHeight = typeof frame.reference_height_cells === "number" && frame.reference_height_cells > 0 ? frame.reference_height_cells : null;
   let nominal = null;
@@ -10050,6 +10061,7 @@ function compileMapEstimate(op, ctx) {
   const turnId = ctx.turnId ?? ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
   const after = applyPatch(before, {
     meters_per_cell: nominal,
+    frame_json: frame,
     scale_min_meters_per_cell: lower,
     scale_max_meters_per_cell: upper,
     scale_quality: quality,
@@ -10291,6 +10303,11 @@ function compileRoutePropose(op, ctx) {
   }
   result.declaredRefs = ref?.startsWith("new:") ? [{ alias: ref, id: rowId, kind: "route", rowRev: null, declaredByOpId: op.opId }] : [];
   return result;
+}
+function containerMapKind(containerKind) {
+  if (["region", "city", "district"].includes(containerKind)) return "region";
+  if (["building", "natural", "other"].includes(containerKind)) return "site";
+  return "interior";
 }
 var ROUTE_KINDS, GEOMETRY_QUALITY, DISTANCE_BASIS, SCALE_QUALITY, MOBILITY_MODES;
 var init_atlas_ops_geography = __esm({
@@ -11529,7 +11546,7 @@ var init_atlas_ops_prompts = __esm({
       "{{allowedOperationHelp}}"
     ].join("\n");
     MINIMUM_HELP = {
-      "location.upsert": "新建 name；修改 ref + 至少一个变更字段",
+      "location.upsert": "新建 name；修改 ref + 至少一个变更字段；kind=region/city/district/building/room/natural/vehicle/other；parent_ref=所属地点，mobility=fixed/mobile，anchor_ref=载具锚点；推断新增地点用 existence_quality=inferred；area={kind:cells,cells:[{x,y}],quality:confirmed/estimated,source:manual/story/worldbook/estimate} 或 {kind:polygon,points:[{x,y}],quality,source}；范围坐标沿用所属地图尺度，推断布局不证明真实距离；有已提供 map_ref 才能给 position={x,y,precision:exact/approximate/layout}",
       "character.upsert": "新建 name + 身份/重要性线索之一；候选只需 name（registration=watch）；修改 ref",
       "item.upsert": "新建 name；修改 ref",
       "item.transfer": "ref + to（holder_ref / container_ref / location_ref / unknown 四选一）",
@@ -14145,7 +14162,7 @@ function staleResult(ctx, requested) {
 function queryMapView(ctx, query) {
   const stale = staleResult(ctx, query.revision);
   if (stale) return stale;
-  const maps = rows2(ctx, "maps", "", [], 200).filter((m) => String(m.status) === "active");
+  const maps = rows2(ctx, "maps", "", [], 1001).filter((m) => String(m.status) === "active");
   if (maps.length === 0) {
     return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { empty: true, reason: "NO_MAP" } };
   }
@@ -14166,8 +14183,9 @@ function queryMapView(ctx, query) {
     const leafScene = container && (container.kind === "room" || !locations.some((l) => l.parent_location_id === container.id)) && !["region", "city"].includes(String(container.kind));
     const frame = map.frame_json ?? {};
     const roomMembers = characters.filter((ch) => ch.location_id === container?.id && !["unknown", "in_transit"].includes(resolveEffectivePosition(ctx, String(ch.id), void 0, positionCache).kind));
+    const roomItems = itemRows.filter((item) => item.location_id === container?.id && !item.holder_character_id && !item.container_item_id);
     const layout = leafScene ? scenePositions(
-      roomMembers.map((ch) => ({ id: String(ch.id), currentAction: String(ch.action_tendency ?? "") })),
+      [...roomMembers.map((ch) => ({ id: String(ch.id), currentAction: String(ch.action_tendency ?? "") })), ...roomItems.map((item) => ({ id: String(item.id), currentAction: String(item.description ?? "") }))],
       { cols: typeof frame.cols === "number" ? frame.cols : 100, rows: typeof frame.rows === "number" ? frame.rows : 100 }
     ) : /* @__PURE__ */ new Map();
     for (const loc of locations) {
@@ -14185,7 +14203,8 @@ function queryMapView(ctx, query) {
         y: loc.grid_y,
         precision,
         radius: typeof loc.uncertainty_radius_cells === "number" ? loc.uncertainty_radius_cells : null,
-        markerQuality: precision
+        markerQuality: precision,
+        area: loc.area_geometry_json
       });
     }
     for (const ch of characters) {
@@ -14230,6 +14249,11 @@ function queryMapView(ctx, query) {
       const itemId = String(item.id);
       if (item.holder_character_id || item.container_item_id) continue;
       const position = resolveEffectivePosition({ db: ctx.db, branchId: ctx.branchId }, itemId, void 0, positionCache);
+      if (leafScene && item.location_id === container?.id && !(item.map_id === mapId && item.coord_precision !== "unknown" && item.grid_x != null)) {
+        const pin = layout.get(itemId);
+        points.push({ entityId: itemId, kind: "item", name: String(item.name), mapId, x: pin.x, y: pin.y, precision: "layout", radius: null, markerQuality: "layout", locationId: String(container.id) });
+        continue;
+      }
       if (position.kind === "at_grid" && position.mapId === mapId) {
         points.push({
           entityId: itemId,
@@ -14282,6 +14306,10 @@ function queryMapView(ctx, query) {
     items,
     metadata: {
       mapCount: mapIds.size,
+      readLimits: Object.fromEntries([["maps", 1001, maps.length], ["locations", 2e3, locations.length], ["characters", 2e3, characters.length], ["items", 2e3, itemRows.length], ["routes", 1e3, routes.length]].map(([table, limit, shown]) => {
+        const total = Number(queryBound(ctx.db, `SELECT COUNT(*) n FROM ${table} WHERE branch_id=? AND status='active'`, [ctx.branchId])[0].n);
+        return [table, { limit, total, shown, truncated: Math.max(0, total - Number(shown)) }];
+      })),
       pointCount: items.reduce((n, m) => n + m.points.length, 0),
       coarseCount: items.reduce((n, m) => n + m.coarseList.length, 0),
       viewMode: ctx.viewMode ?? "author",
@@ -16111,6 +16139,26 @@ function write(input, table, row2, before) {
 }
 async function settleSqlTurn(input) {
   const before = snapshot(input), issues = [], groups = [], modelOperations = [];
+  if (input.sceneOnly) {
+    const branch3 = queryBound(input.db, "SELECT * FROM branches WHERE id=?", [input.branchId])[0];
+    return {
+      elapsed: deriveElapsedInterval({ activities: [{ kind: "dialogue", completed: true }] }, { clockS: input.clockBefore }),
+      clockAfter: input.clockBefore,
+      clockMin: Number(branch3.clock_min_s),
+      clockMax: Number(branch3.clock_max_s),
+      seed: 0,
+      randomDraws: [],
+      simulatedUntil: Number(branch3.simulation_cursor_s),
+      catchingUp: branch3.simulation_status === "catching_up" || branch3.simulation_status === "blocked",
+      pendingActors: [],
+      steps: [],
+      issues,
+      groups,
+      modelOperations,
+      operationContexts: [],
+      worldChanged: false
+    };
+  }
   const appliedIds = new Set(queryBound(input.db, "SELECT operation_id FROM turn_changes WHERE turn_id=?", [input.turnId]).flatMap((r) => String(r.operation_id).split("+")));
   const activities = [];
   for (const op of input.operations) {
@@ -16345,6 +16393,113 @@ var init_atlas_sql_simulation = __esm({
   }
 });
 
+// src/atlas-sql-scene-maps.ts
+function compileSqlSceneMaps(input) {
+  const { db, branchId, turnId, clockS, makeId } = input, read = createTableReadPort(db);
+  const locations = read.selectWhere("locations", { branch_id: branchId, status: "active" }, 1e3);
+  if (input.ensureScenes && Number(queryBound(db, "SELECT COUNT(*) AS n FROM locations WHERE branch_id=? AND status='active'", [branchId])[0].n) > 1e3)
+    throw new AtlasDbError("SCENE_MAP_LIMIT", "地点超过单次地图结构处理上限 1000；保留原存档，需分批处理", {});
+  const maps = read.selectWhere("maps", { branch_id: branchId, status: "active" }, 1001);
+  const changes = [], opId = `scene_maps_${turnId}`;
+  const change = (table, before, after) => {
+    if (before && JSON.stringify(before) === JSON.stringify(after)) return;
+    changes.push({
+      table,
+      rowId: String(after.id),
+      before,
+      after: before && "row_rev" in before ? { ...after, row_rev: Number(before.row_rev) + 1, updated_turn_id: turnId } : after,
+      sourceOpIds: [opId],
+      basis: { kind: input.calibration ? "manual" : "estimate", reason: input.calibration ? "作者地图标定" : "按实际地点层级建立地图；布局坐标不证明真实距离", certainty: "inferred" }
+    });
+  };
+  const makeMap = (id, name, kind, container, frame) => createRow("maps", {
+    name,
+    kind,
+    container_location_id: container,
+    frame_json: { ...frame, origin_x: 0, origin_y: 0, reference_width_cells: frame.cols, reference_height_cells: frame.rows }
+  }, { branchId, id, turnId, clockS, nowWallMs: Date.now(), rulesetVersion: "atlas-1" });
+  const branch2 = read.selectOne("branches", branchId, branchId);
+  let root = maps.find((map) => map.id === branch2.root_map_id) ?? maps.find((map) => !map.container_location_id);
+  if (input.ensureScenes && locations.length) {
+    if (!root) {
+      root = makeMap(makeId("map", opId, "world"), "世界图", "world", null, { cols: 100, rows: 100 });
+      change("maps", null, root);
+      maps.push(root);
+    }
+    const byContainer = new Map(maps.filter((map) => map.container_location_id).map((map) => [String(map.container_location_id), map]));
+    for (const location2 of locations) {
+      const id = String(location2.id);
+      if (!byContainer.has(id)) {
+        const frame = location2.kind === "room" ? { cols: 12, rows: 8 } : { cols: 100, rows: 100 };
+        const map = makeMap(makeId("map", opId, `container:${id}`), String(location2.name), containerMapKind(String(location2.kind)), id, frame);
+        change("maps", null, map);
+        byContainer.set(id, map);
+        maps.push(map);
+      }
+    }
+    const childrenByMap = /* @__PURE__ */ new Map();
+    for (const location2 of locations) {
+      const parentMap = location2.parent_location_id ? byContainer.get(String(location2.parent_location_id)) : root;
+      if (!parentMap) throw new AtlasDbError("REF_UNKNOWN", "父地点没有对应地图", {});
+      const list = childrenByMap.get(String(parentMap.id)) ?? [];
+      list.push(location2);
+      childrenByMap.set(String(parentMap.id), list);
+    }
+    for (const [mapId, children] of childrenByMap) {
+      const map = maps.find((map2) => map2.id === mapId), frame = input.calibration?.mapId === mapId && input.calibration.frame ? input.calibration.frame : map.frame_json;
+      const pins = scenePositions(children.map((row2) => ({ id: String(row2.id), label: String(row2.name) })), { cols: frame.cols ?? 100, rows: frame.rows ?? 100 });
+      children.forEach((location2) => {
+        if (location2.map_id === mapId && location2.grid_x != null && location2.grid_y != null && location2.coord_precision !== "unknown" && (location2.coord_precision === "exact" || Number(location2.grid_x) >= 0 && Number(location2.grid_y) >= 0 && Number(location2.grid_x) <= (frame.cols ?? 100) && Number(location2.grid_y) <= (frame.rows ?? 100))) return;
+        const pin = pins.get(String(location2.id));
+        change("locations", location2, {
+          ...location2,
+          map_id: mapId,
+          grid_x: pin.x,
+          grid_y: pin.y,
+          coord_precision: "layout",
+          uncertainty_radius_cells: null,
+          ...location2.map_id && location2.map_id !== mapId ? { area_geometry_json: null } : {}
+        });
+      });
+    }
+    const protagonists = read.selectWhere("characters", { branch_id: branchId, status: "active", role: "protagonist" }, 3);
+    const named = input.povName ? protagonists.filter((row2) => row2.name === input.povName) : [];
+    const pov = named.length === 1 ? named[0].id : branch2.pov_character_id ?? (protagonists.length === 1 ? protagonists[0].id : null);
+    change("branches", branch2, { ...branch2, root_map_id: root.id, pov_character_id: pov });
+  }
+  if (input.calibration) {
+    const c = input.calibration, map = maps.find((m) => m.id === c.mapId || c.mapId === "world" && m.id === root?.id);
+    if (!map) throw new AtlasDbError("REF_UNKNOWN", "标定目标地图不存在", {});
+    if (c.metersPerCell !== void 0 && (!Number.isFinite(c.metersPerCell) || c.metersPerCell <= 0)) throw new AtlasDbError("INVALID_PAYLOAD", "每格距离必须为正数", {});
+    if (c.frame && (!Number.isInteger(c.frame.cols) || !Number.isInteger(c.frame.rows) || c.frame.cols < 1 || c.frame.rows < 1 || c.frame.cols > 1e4 || c.frame.rows > 1e4)) throw new AtlasDbError("INVALID_PAYLOAD", "地图格数应为 1～10000 的整数", {});
+    const after = {
+      ...map,
+      ...c.metersPerCell !== void 0 ? {
+        meters_per_cell: c.metersPerCell,
+        scale_min_meters_per_cell: c.metersPerCell,
+        scale_max_meters_per_cell: c.metersPerCell,
+        scale_quality: c.quality ?? "confirmed",
+        scale_basis_json: { refs: [], note: "作者确认" },
+        calibration_rev: Number(map.calibration_rev) + 1
+      } : {},
+      ...c.locked !== void 0 ? { scale_locked: c.locked ? 1 : 0 } : {},
+      ...c.frame ? { frame_json: { ...map.frame_json, ...c.frame, reference_width_cells: c.frame.cols, reference_height_cells: c.frame.rows } } : {}
+    };
+    change("maps", map, after);
+  }
+  return changes.length ? { id: opId, opIds: [opId], dependsOn: [], readSet: [], mutations: changes } : null;
+}
+var init_atlas_sql_scene_maps = __esm({
+  "src/atlas-sql-scene-maps.ts"() {
+    "use strict";
+    init_atlas_db_readport();
+    init_atlas_db_defaults();
+    init_atlas_ops_geography();
+    init_atlas_scene_layout();
+    init_atlas_db_runtime();
+  }
+});
+
 // src/atlas-db-repository.ts
 var atlas_db_repository_exports = {};
 __export(atlas_db_repository_exports, {
@@ -16489,7 +16644,8 @@ function createSqlRepository(options) {
       worldUid,
       storageRevision: storageRevision + 1,
       activeBranchId: candidate.anchor.branchId,
-      schemaVersion: ATLAS_SCHEMA_VERSION
+      schemaVersion: ATLAS_SCHEMA_VERSION,
+      assets: envelopeAssets
     });
     stored.snapshot = bytes;
     stored.snapshotSha256 = snapshotSha256;
@@ -16584,6 +16740,8 @@ function createSqlRepository(options) {
           return queryDiagnostics(ctx, query);
         case "simulation":
           return querySimulationView(ctx, query);
+        case "prompt":
+          return { branchId: ctx.branchId, revision: ctx.revision, items: [projectPromptView(ctx, query)], metadata: { viewMode: ctx.viewMode ?? "pov" } };
         default:
           return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "VIEW_KIND_UNSUPPORTED", kind: query.kind } };
       }
@@ -16599,7 +16757,8 @@ function createSqlRepository(options) {
         worldUid,
         storageRevision,
         activeBranchId: branchId,
-        schemaVersion: ATLAS_SCHEMA_VERSION
+        schemaVersion: ATLAS_SCHEMA_VERSION,
+        assets: envelopeAssets
       });
     },
     /** B06 createCandidate：从当前库快照建隔离候选；候选改动不出现在正式 query 中。 */
@@ -16637,7 +16796,8 @@ function createSqlRepository(options) {
         worldUid,
         storageRevision: storageRevision + 1,
         activeBranchId: candidate.anchor.branchId,
-        schemaVersion: ATLAS_SCHEMA_VERSION
+        schemaVersion: ATLAS_SCHEMA_VERSION,
+        assets: envelopeAssets
       });
       stored.snapshot = bytes;
       stored.snapshotSha256 = snapshotSha256;
@@ -16828,6 +16988,9 @@ function createSqlRepository(options) {
           assistantSource: input.assistantText,
           userSource: input.userText,
           entityRefs: collectEntityRefs(tables, branchId),
+          geoEntities: collectEntityRefs(tables, branchId).join("\n"),
+          mapScope: JSON.stringify(tables.selectWhere("maps", { branch_id: branchId, status: "active" }, 1e3).map((map) => ({ ref: foregroundKnownRefs.find((r) => r.id === map.id)?.alias, name: map.name, frame: map.frame_json, scaleLocked: map.scale_locked }))),
+          geoSources: input.assistantText,
           sourceSnapshot,
           batchId: `${phase}_${turnId}`
         });
@@ -16997,6 +17160,15 @@ function createSqlRepository(options) {
           groupResults = reconcileRepairResults(groupResults, second.groups, rejectedSnapshot);
         }
       }
+      if (input.sceneMaps || input.mapCalibration) {
+        const mapGroup = compileSqlSceneMaps({ db: candidateDb, branchId, turnId, clockS: clockBefore, makeId, ensureScenes: input.sceneMaps, calibration: input.mapCalibration, povName: input.povName });
+        if (mapGroup) {
+          const mapResult = applyGroups(candidateDb, [mapGroup], { branchId, turnId, attemptId: "scene-maps", validate: true });
+          if (mapResult.journalIssues.length || mapResult.groups.some((group) => group.status === "rejected" || group.status === "blocked"))
+            throw new AtlasDbError("SCENE_MAP_WRITE_FAILED", "地图结构候选未通过校验", { groups: mapResult.groups, journal: mapResult.journalIssues });
+          groupResults.push(...mapResult.groups);
+        }
+      }
       commitTransaction(candidateDb);
       transactionOpen = false;
       const simulation = await settleSqlTurn({
@@ -17005,8 +17177,9 @@ function createSqlRepository(options) {
         anchor,
         turnId,
         clockBefore,
-        operations: parsedOperations,
-        modelPort: input.manual ? null : options.modelPort,
+        sceneOnly: input.sceneOnly,
+        operations: input.sceneOnly ? [] : parsedOperations,
+        modelPort: input.manual || input.sceneOnly ? null : options.modelPort,
         modelBudget: Math.max(0, ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn - foregroundBatches - (repairAttempted ? 1 : 0)),
         makeId,
         isCurrent: input.isCurrent
@@ -17055,6 +17228,7 @@ function createSqlRepository(options) {
           operations: parsedOperations.map((p) => p.value),
           operation_meta: parsedOperations.map(({ opId, line, rawHash }) => ({ opId, line, rawHash })),
           known_refs: foregroundKnownRefs,
+          scene_maps: input.sceneMaps === true,
           operation_context: simulation.operationContexts,
           host_message_index: input.hostMessageIndex,
           simulation_steps: simulation.steps,
@@ -17370,7 +17544,8 @@ function createSqlRepository(options) {
         worldUid,
         storageRevision: storageRevision + 1,
         activeBranchId: branchId,
-        schemaVersion: ATLAS_SCHEMA_VERSION
+        schemaVersion: ATLAS_SCHEMA_VERSION,
+        assets: envelopeAssets
       });
       const stored = candidates.get(candidate.token);
       stored.snapshot = bytes;
@@ -17558,6 +17733,8 @@ var init_atlas_db_repository = __esm({
     init_atlas_sql_refs();
     init_atlas_sql_refs();
     init_atlas_sql_simulation();
+    init_atlas_sql_scene_maps();
+    init_atlas_db_knowledge_view();
     CANONICAL_TABLES = /* @__PURE__ */ new Set([
       "maps",
       "locations",
@@ -19059,7 +19236,7 @@ function worldCandidates(world, skipped) {
     if (!isPlainObject15(entry)) continue;
     const id = str8(entry.id);
     if (id.length === 0) continue;
-    archiveNames.set(id, { name: str8(entry.name), description: str8(entry.description) });
+    archiveNames.set(id, { name: str8(entry.name), description: str8(entry.description), role: str8(entry.role) });
   }
   const records = Array.isArray(world.entityRecords) ? world.entityRecords : [];
   for (const record of records) {
@@ -19069,7 +19246,7 @@ function worldCandidates(world, skipped) {
     const type = str8(record.type).toLowerCase();
     if (isCharacterType(type)) {
       const baseline = isPlainObject15(record.baseline) ? record.baseline : {};
-      archiveNames.set(id, { name: str8(record.name), description: str8(baseline.description ?? baseline.summary) });
+      archiveNames.set(id, { name: str8(record.name), description: str8(baseline.description ?? baseline.summary), role: str8(baseline.role ?? archiveNames.get(id)?.role) });
     }
   }
   const states = Array.isArray(world.characterStates) ? world.characterStates : [];
@@ -19096,6 +19273,7 @@ function worldCandidates(world, skipped) {
         id: `npc:${characterId}`,
         name: archive?.name || characterId,
         description: archive?.description ?? "",
+        role: archive?.role ?? "",
         locationId: pointId.length > 0 ? `loc:${pointId}` : null,
         currentAction: str8(state.status),
         presence: null
@@ -19110,7 +19288,7 @@ function worldCandidates(world, skipped) {
       legacyId: `npc:${id}`,
       index: archiveIndex,
       origin: "$.world.characters",
-      raw: { id: `npc:${id}`, name: archive.name || id, description: archive.description, locationId: null }
+      raw: { id: `npc:${id}`, name: archive.name || id, description: archive.description, role: archive.role, locationId: null }
     });
     archiveIndex += 1;
   }
@@ -19175,6 +19353,13 @@ function collectEntityCandidates(raw, branchId) {
     locations = toCandidates(rowList(selected.payload, "locations"), "location", `$.tables.${selected.key}.locations`, skipped);
     characters = toCandidates(rowList(selected.payload, "characters"), "character", `$.tables.${selected.key}.characters`, skipped);
     items = toCandidates(rowList(selected.payload, "items"), "item", `$.tables.${selected.key}.items`, skipped);
+    if (sources.world) {
+      const archives = new Map(worldCandidates(sources.world, []).characters.map((row2) => [row2.legacyId, row2.raw]));
+      characters = characters.map((row2) => {
+        const archive = archives.get(row2.legacyId);
+        return archive && !str8(row2.raw.role) ? { ...row2, raw: { ...row2.raw, role: archive.role } } : row2;
+      });
+    }
   } else if (sources.world) {
     const fromWorld = worldCandidates(sources.world, skipped);
     locations = fromWorld.locations;
@@ -19422,7 +19607,7 @@ function mapLocationKind(value) {
   };
   return aliases[key] ?? "other";
 }
-function containerMapKind(locationKind) {
+function containerMapKind2(locationKind) {
   if (locationKind === "region" || locationKind === "city" || locationKind === "district") return "region";
   if (locationKind === "room" || locationKind === "vehicle") return "interior";
   return "site";
@@ -19571,7 +19756,7 @@ function resolveMapRef(db, ctx, state, legacyMapId, mapsDoc, locationById) {
     state.cache.set(legacyMapId, id);
     return id;
   }
-  const frame = mapsFrame(mapsDoc);
+  const frame = mapsFrame(mapsDoc, legacyMapId);
   const calibration = mapsCalibration(mapsDoc, legacyMapId);
   if (legacyMapId === LEGACY_WORLD_MAP_ID) {
     const root = queryOne(
@@ -19640,7 +19825,7 @@ function resolveMapRef(db, ctx, state, legacyMapId, mapsDoc, locationById) {
           "maps",
           {
             name: `${host?.name ?? legacyMapId}·内部`,
-            kind: containerMapKind(host?.kind ?? "other"),
+            kind: containerMapKind2(host?.kind ?? "other"),
             container_location_id: host ? legacyMapId : null,
             frame_json: frame,
             meters_per_cell: calibration,
@@ -19685,16 +19870,20 @@ function resolveMapRef(db, ctx, state, legacyMapId, mapsDoc, locationById) {
   state.cache.set(legacyMapId, null);
   return null;
 }
-function mapsFrame(mapsDoc) {
-  const fallback = { origin_x: 0, origin_y: 0, reference_width_cells: 100, reference_height_cells: 100 };
+function mapsFrame(mapsDoc, mapId = "world") {
+  const fallback = { origin_x: 0, origin_y: 0, cols: 100, rows: 100, reference_width_cells: 100, reference_height_cells: 100 };
   if (!mapsDoc) return fallback;
-  const frame = isPlainObject15(mapsDoc.frame) ? mapsDoc.frame : null;
+  const submaps = isPlainObject15(mapsDoc.submaps) ? mapsDoc.submaps : {};
+  const sub = submaps[mapId] ?? submaps[mapId.replace(/^loc:/, "")];
+  const frame = mapId !== "world" && isPlainObject15(sub) && isPlainObject15(sub.frame) ? sub.frame : isPlainObject15(mapsDoc.frame) ? mapsDoc.frame : null;
   if (!frame) return fallback;
   const cols2 = num8(frame.cols) ?? num8(frame.reference_width_cells);
   const rows3 = num8(frame.rows) ?? num8(frame.reference_height_cells);
   return {
     origin_x: num8(frame.origin_x) ?? 0,
     origin_y: num8(frame.origin_y) ?? 0,
+    cols: cols2 !== null && cols2 > 0 ? cols2 : 100,
+    rows: rows3 !== null && rows3 > 0 ? rows3 : 100,
     reference_width_cells: cols2 !== null && cols2 > 0 ? cols2 : fallback.reference_width_cells,
     reference_height_cells: rows3 !== null && rows3 > 0 ? rows3 : fallback.reference_height_cells
   };
@@ -19705,8 +19894,52 @@ function mapsCalibration(mapsDoc, mapId) {
   if (!calibrations) return null;
   const entry = calibrations[mapId];
   if (!isPlainObject15(entry)) return null;
-  const distancePerCell = num8(entry.distancePerCell) ?? num8(entry.metersPerCell) ?? num8(entry.meters_per_cell);
+  const distancePerCell = num8(entry.metersPerCell) ?? num8(entry.meters_per_cell) ?? (str8(entry.unit).toLowerCase() === "m" || str8(entry.unit) === "米" ? num8(entry.distancePerCell) : null);
   return distancePerCell !== null && distancePerCell > 0 ? distancePerCell : null;
+}
+function restoreLegacySceneMaps(raw, db, ctx) {
+  const issues = [], candidates = collectEntityCandidates(raw, ctx.branchId);
+  const sources = readLegacySources(locateAtlas(raw).atlas ?? {});
+  const maps = queryBound(db, "SELECT id,container_location_id,frame_json FROM maps WHERE branch_id=? AND status='active'", [ctx.branchId]);
+  const locations = new Set(queryBound(db, "SELECT id FROM locations WHERE branch_id=?", [ctx.branchId]).map((row2) => String(row2.id)));
+  const resolveMap = (legacyId) => maps.find((map) => legacyId === "world" ? !map.container_location_id : map.container_location_id === legacyId || map.container_location_id === `loc:${legacyId}`);
+  for (const [table, rows3] of [["locations", candidates.locations], ["characters", candidates.characters], ["items", candidates.items]]) {
+    for (const candidate of rows3) {
+      const x = num8(candidate.raw.gridX ?? candidate.raw.x), y = num8(candidate.raw.gridY ?? candidate.raw.y), legacyMapId = str8(candidate.raw.mapId ?? candidate.raw.map_id);
+      if (x === null || y === null || !legacyMapId) continue;
+      const row2 = queryOne(db, `SELECT * FROM ${table} WHERE branch_id=? AND id=?`, [ctx.branchId, candidate.legacyId]);
+      if (!row2 || row2.status === "archived" || table === "items" && (row2.holder_character_id || row2.container_item_id)) continue;
+      const map = resolveMap(legacyMapId);
+      if (!map) continue;
+      const expected = table === "locations" ? row2.parent_location_id : row2.location_id;
+      if (table === "locations" ? (map.container_location_id ?? null) !== (expected ?? null) : !expected || map.container_location_id !== expected) continue;
+      const frame = JSON.parse(String(map.frame_json));
+      if (x < 0 || y < 0 || x > (frame.cols ?? 100) || y > (frame.rows ?? 100)) {
+        issues.push(describeProblem(candidate.origin, "旧坐标超出当前地图；原坐标保留在旧档，显示布局另行估计", "LEGACY_COORDS_OUT_OF_FRAME"));
+        continue;
+      }
+      runBound(
+        db,
+        `UPDATE ${table} SET map_id=?,grid_x=?,grid_y=?,coord_precision=? WHERE branch_id=? AND id=?`,
+        [String(map.id), x, y, candidate.raw.coordinateStatus === "confirmed" ? "exact" : "approximate", ctx.branchId, candidate.legacyId]
+      );
+    }
+  }
+  const calibrations = isPlainObject15(sources.maps?.calibrations) ? sources.maps.calibrations : {};
+  for (const [legacyId, rawCalibration] of Object.entries(calibrations)) {
+    if (!isPlainObject15(rawCalibration)) continue;
+    const locationId = legacyId.startsWith("loc:") ? legacyId : `loc:${legacyId}`;
+    if (legacyId !== "world" && !locations.has(locationId) && !locations.has(legacyId)) continue;
+    const map = resolveMap(legacyId), meters = num8(rawCalibration.metersPerCell ?? rawCalibration.meters_per_cell);
+    if (!map || meters === null || meters <= 0) continue;
+    const locked = rawCalibration.locked === true;
+    runBound(
+      db,
+      "UPDATE maps SET meters_per_cell=?,scale_min_meters_per_cell=?,scale_max_meters_per_cell=?,scale_quality=?,scale_locked=?,calibration_rev=? WHERE branch_id=? AND id=?",
+      [meters, meters, meters, locked ? "confirmed" : "estimated", locked ? 1 : 0, Math.max(1, num8(rawCalibration.revision) ?? 1), ctx.branchId, String(map.id)]
+    );
+  }
+  return issues;
 }
 function migrateLegacyEntities(plan, raw, db, ctx) {
   const issues = [];
@@ -19808,6 +20041,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
   try {
     const locationById = /* @__PURE__ */ new Map();
     const legacyToSql = /* @__PURE__ */ new Map();
+    const parentLinks = [];
     for (const candidate of candidates.locations) {
       const name = str8(candidate.raw.name);
       if (name.length === 0) {
@@ -19832,10 +20066,6 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
         continue;
       }
       const parentLegacyId = str8(candidate.raw.parentLocationId ?? candidate.raw.parentRef ?? candidate.raw.parentId);
-      const parentId = parentLegacyId.length > 0 ? legacyToSql.get(parentLegacyId) ?? (rowExists(db, "locations", ctx.branchId, parentLegacyId) ? parentLegacyId : null) : null;
-      if (parentLegacyId.length > 0 && parentId === null) {
-        issues.push(describeProblem(candidate.origin, `旧父地点 ${parentLegacyId} 未迁移/不存在：${name} 保留为根地点，不伪造父子关系`, "LEGACY_PARENT_UNRESOLVED"));
-      }
       const legacyMapId = str8(candidate.raw.mapId ?? candidate.raw.map_id);
       const mapId = resolveMapRef(db, ctx, mapState, legacyMapId, mapsDoc, locationById);
       const gridX = num8(candidate.raw.gridX ?? candidate.raw.x);
@@ -19851,7 +20081,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
             aliases_json: strList(candidate.raw.aliases ?? candidate.raw.aliases_json),
             kind,
             description: str8(candidate.raw.description),
-            parent_location_id: parentId,
+            parent_location_id: null,
             mobility: str8(candidate.raw.mobility) === "mobile" ? "mobile" : "fixed",
             map_id: hasGrid ? mapId : null,
             grid_x: hasGrid ? gridX : null,
@@ -19878,10 +20108,30 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
           )
         );
       }
+      parentLinks.push({ id, parentLegacyId, origin: candidate.origin, name });
       legacyToSql.set(candidate.legacyId, id);
       bump(mapped, "kind:locations");
       bump(mapped, "kind:entityKeys");
       mapped[`legacy:${candidate.legacyId || id}`] = mapped["kind:locations"] ?? 1;
+    }
+    for (const link of parentLinks) {
+      if (!link.parentLegacyId) continue;
+      const parentId = legacyToSql.get(link.parentLegacyId) ?? (rowExists(db, "locations", ctx.branchId, link.parentLegacyId) ? link.parentLegacyId : null);
+      if (!parentId) {
+        issues.push(describeProblem(link.origin, `旧父地点 ${link.parentLegacyId} 不存在：${link.name} 保留为根地点`, "LEGACY_PARENT_UNRESOLVED"));
+        continue;
+      }
+      runBound(db, "UPDATE locations SET parent_location_id=? WHERE branch_id=? AND id=?", [parentId, ctx.branchId, link.id]);
+    }
+    const parents = new Map(queryBound(db, "SELECT id,parent_location_id FROM locations WHERE branch_id=?", [ctx.branchId]).map((row2) => [String(row2.id), row2.parent_location_id ? String(row2.parent_location_id) : null]));
+    for (const id of parents.keys()) {
+      const seen = /* @__PURE__ */ new Set();
+      let cursor = id;
+      while (cursor) {
+        if (seen.has(cursor)) throw new AtlasDbError("MIGRATION_FAILED", "旧地点包含关系存在循环，拒绝发布候选", { locationId: id });
+        seen.add(cursor);
+        cursor = parents.get(cursor) ?? null;
+      }
     }
     const factionIds = /* @__PURE__ */ new Map();
     for (const candidate of candidates.factions) {
@@ -19968,6 +20218,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
       const hasGrid = mapId !== null && gridX !== null && gridY !== null;
       const created = withSavepoint(db, () => {
         insertEntityKey(db, ctx.branchId, id, "character");
+        const absent = candidate.raw.presence === "left" || candidate.raw.status === "archived";
         insertRow(
           db,
           "characters",
@@ -19984,14 +20235,14 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
             action_tendency: str8(candidate.raw.actionTendency ?? candidate.raw.action_tendency),
             physical_status: mapPhysicalStatus(candidate.raw.physicalStatus ?? candidate.raw.physical_status),
             condition_note: str8(candidate.raw.conditionNote),
-            location_id: locationId,
-            map_id: hasGrid ? mapId : null,
-            grid_x: hasGrid ? gridX : null,
-            grid_y: hasGrid ? gridY : null,
-            coord_precision: hasGrid ? str8(candidate.raw.coordinateStatus) === "confirmed" ? "exact" : "approximate" : "unknown",
+            location_id: absent ? null : locationId,
+            map_id: !absent && hasGrid ? mapId : null,
+            grid_x: !absent && hasGrid ? gridX : null,
+            grid_y: !absent && hasGrid ? gridY : null,
+            coord_precision: !absent && hasGrid ? str8(candidate.raw.coordinateStatus) === "confirmed" ? "exact" : "approximate" : "unknown",
             mobility_profiles_json: Array.isArray(candidate.raw.mobilityProfiles) ? candidate.raw.mobilityProfiles : [],
             capabilities_json: Array.isArray(candidate.raw.capabilities) ? candidate.raw.capabilities : [],
-            status: "active"
+            status: absent ? "archived" : "active"
           },
           { ...rowCtx, id }
         );
@@ -20678,10 +20929,31 @@ function migrateLegacySimulation(plan, raw, db, ctx) {
         const rows3 = Array.isArray(topology[key]) ? topology[key] : [];
         for (const row2 of rows3) {
           if (!isPlainObject15(row2)) continue;
+          const id = str8(row2.locationId ?? row2.id), location2 = queryOne(db, "SELECT id,map_id FROM locations WHERE branch_id=? AND id=?", [ctx.branchId, id]);
+          if (location2 && key === "areas" && Array.isArray(row2.cells) && row2.cells.length <= 256 && row2.cells.every((cell) => isPlainObject15(cell) && Number.isInteger(cell.x) && Number.isInteger(cell.y) && Number(cell.x) >= 0 && Number(cell.y) >= 0)) {
+            runBound(
+              db,
+              "UPDATE locations SET area_geometry_json=?,updated_turn_id=? WHERE branch_id=? AND id=?",
+              [JSON.stringify({ kind: "cells", cells: row2.cells, source: ["manual", "story", "worldbook"].includes(str8(row2.evidence)) ? str8(row2.evidence) : "migration", quality: "confirmed" }), ctx.turnId, ctx.branchId, id]
+            );
+            bump(mapped, "kind:areas");
+            continue;
+          }
+          if (location2 && key === "vehicles") {
+            const anchor = str8(row2.atLocationId), resolved = anchor && rowExists(db, "locations", ctx.branchId, anchor) ? anchor : null;
+            runBound(
+              db,
+              "UPDATE locations SET mobility=?,anchor_location_id=?,vehicle_profile_json=?,updated_turn_id=? WHERE branch_id=? AND id=?",
+              ["mobile", str8(row2.status) === "stopped" ? resolved : null, JSON.stringify({ legacy_status: row2.status, legacy_route_id: row2.routeEdgeId ?? null }), ctx.turnId, ctx.branchId, id]
+            );
+            if (row2.status === "en-route") issues.push(issue15("LEGACY_VEHICLE_TRANSIT_BLOCKED", "$.simulation.geoTopology.vehicles", "旧载具在途记录缺少真实耗时；保留移动载具和旧行程，停靠地点未知", "warning", false));
+            bump(mapped, "kind:vehicles");
+            continue;
+          }
           blocked.push({
             kind: key === "areas" ? "area" : "vehicle",
             legacyId: str8(row2.id),
-            reason: `TOPOLOGY_${key.toUpperCase()}_UNMAPPED: 旧地块/载具没有等价的新表，保留在旧档备份待审`
+            reason: `TOPOLOGY_${key.toUpperCase()}_UNMAPPED: 旧地块/载具缺少有效地点或范围，保留在旧档备份待审`
           });
         }
       }
@@ -20798,6 +21070,8 @@ init_atlas_db_assets();
 // src/atlas-sql-session.ts
 init_atlas_db_envelope();
 init_atlas_db_runtime();
+init_atlas_db_commit();
+init_atlas_sql_scene_maps();
 init_atlas_db_retry();
 init_atlas_db_outbox();
 init_atlas_runtime_limits();
@@ -21666,6 +21940,159 @@ function querySqlCharacterTimeline(ctx, input) {
   return { branchId, revision: ctx.revision, entries, total, offset, limit, nextOffset: offset + entries.length < total ? offset + entries.length : null };
 }
 
+// src/atlas-sql-map-actions.ts
+init_atlas_db_readport();
+init_atlas_sql_refs();
+init_atlas_db_runtime();
+init_atlas_hash();
+var previews = /* @__PURE__ */ new WeakMap();
+async function handleSqlMapAction(session, action, body) {
+  if (body.chatId !== session.chatUid) throw new AtlasDbError("CHAT_CHANGED", "地图请求不属于当前聊天", {});
+  const sourceHash = stableHexHash(JSON.stringify([body.openingMessageId, body.userText, body.assistantText, body.loreSupplement, body.charDescription, body.personaDescription]));
+  if (action === "map/bootstrap" && body.apply === true) {
+    const draft = previews.get(session)?.get(String(body.previewId ?? ""));
+    if (!draft || draft.sourceHash !== sourceHash || body.baseRevision !== draft.commit.anchor.baseRevision) throw new AtlasDbError("SQL_PREVIEW_EXPIRED", "场景预览已失效，需要重新识别", {});
+    const result2 = await commitPreparedTurn(session, draft.commit, typeof body.isCurrent === "function" ? body.isCurrent : void 0);
+    if (!result2.coreSaved) throw new AtlasDbError("SESSION_WRITE_FAILED", "场景候选未保存，正式世界保持原状", { issues: result2.issues });
+    previews.get(session)?.delete(String(body.previewId));
+    return { coreSaved: true, status: "committed", receipt: result2.receipt, issues: result2.issues };
+  }
+  const db = session.repo.db, read = createTableReadPort(db), refs = collectKnownRefs(read, session.branchId);
+  const beforeLocations = new Set(read.selectWhere("locations", { branch_id: session.branchId, status: "active" }, 1e3).map((row2) => String(row2.id)));
+  const find = (table, value) => {
+    const id = String(value ?? ""), row2 = read.selectOne(table, session.branchId, id) ?? read.selectOne(table, session.branchId, id.replace(/^(?:loc|npc|item):/, "")) ?? read.selectOne(table, session.branchId, `${table === "locations" ? "loc" : table === "characters" ? "npc" : "item"}:${id}`);
+    if (!row2) throw new AtlasDbError("REF_UNKNOWN", `目标${table === "locations" ? "地点" : table === "characters" ? "人物" : "物品"}不存在`, {});
+    return row2;
+  };
+  const ref = (id) => {
+    const entry = refs.find((r) => r.id === id);
+    if (!entry) throw new AtlasDbError("REF_UNKNOWN", "目标不在本次只读目录中", {});
+    return entry.alias;
+  };
+  const map = (value) => {
+    const key = String(value ?? ""), maps = read.selectWhere("maps", { branch_id: session.branchId, status: "active" }, 1e3);
+    const branch2 = read.selectOne("branches", session.branchId, session.branchId);
+    const selected = maps.find((m) => m.id === key) || (key === "world" ? maps.find((m) => m.id === branch2.root_map_id || !m.container_location_id) : maps.find((m) => m.container_location_id === key || m.container_location_id === key.replace(/^loc:/, "") || m.container_location_id === `loc:${key}`));
+    if (!selected) throw new AtlasDbError("REF_UNKNOWN", "目标地图不存在", {});
+    return selected;
+  };
+  const operations = [], calibration = void 0;
+  let mapCalibration2 = calibration, manual = true, phases = [];
+  if (action === "map/move") {
+    const raw = String(body.entityId ?? ""), kind = refs.find((r) => r.id === raw || r.id === raw.replace(/^(?:npc|item):/, ""))?.kind;
+    const table = kind === "item" ? "items" : "characters", entity = find(table, raw), target = find("locations", body.toPointId);
+    if (table === "characters") operations.push({ op: "character.upsert", ref: ref(entity.id), data: { location_ref: ref(target.id), position: null }, why: "作者纠偏当前位置" });
+    else operations.push({ op: "item.transfer", ref: ref(entity.id), data: { to: { location_ref: ref(target.id) } }, why: "作者纠偏物品位置" });
+  } else if (action === "map/topology") {
+    const location2 = find("locations", body.locationId), data = {};
+    if (body.operation === "set-parent") data.parent_ref = body.targetLocationId == null ? null : ref(find("locations", body.targetLocationId).id);
+    else if (body.operation === "set-adjacent") {
+      const target = find("locations", body.targetLocationId);
+      operations.push({ op: "route.propose", ref: `new:adjacent-${location2.id}-${target.id}`, data: { from_ref: ref(location2.id), to_ref: ref(target.id), kind: "adjacent", bidirectional: true, quality: "confirmed" }, why: "作者确认邻接" });
+    } else if (body.operation === "confirm-coordinate") {
+      const m = map(body.mapId), x = Number(body.gridX), y = Number(body.gridY);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) throw new AtlasDbError("INVALID_PAYLOAD", "坐标必须是有限数字", {});
+      Object.assign(data, { map_ref: ref(m.id), position: { x, y, precision: "exact" } });
+    } else if (body.operation === "set-vehicle") Object.assign(data, { mobility: body.mobile === false ? "fixed" : "mobile", anchor_ref: (body.anchorLocationId ?? body.targetLocationId) == null ? null : ref(find("locations", body.anchorLocationId ?? body.targetLocationId).id) });
+    else throw new AtlasDbError("INVALID_PAYLOAD", "未知的地图关系确认动作", {});
+    if (Object.keys(data).length) operations.push({ op: "location.upsert", ref: ref(location2.id), data, why: "作者确认地点关系" });
+  } else if (action === "map/areas") {
+    const location2 = find("locations", body.locationId), m = map(body.mapId), frame = m.frame_json;
+    if (location2.map_id !== m.id) throw new AtlasDbError("INVALID_PAYLOAD", "该地点不属于目标地图", {});
+    if (!Array.isArray(body.cells) || body.cells.length > 256) throw new AtlasDbError("INVALID_PAYLOAD", "范围需为最多 256 格的数组", {});
+    const cells = body.cells.map((cell) => {
+      const c = cell;
+      if (!c || !Number.isInteger(c.x) || !Number.isInteger(c.y) || c.x < 0 || c.y < 0 || c.x >= (frame.cols ?? 100) || c.y >= (frame.rows ?? 100)) throw new AtlasDbError("INVALID_PAYLOAD", "范围格子必须在目标地图内", {});
+      return { x: c.x, y: c.y };
+    });
+    operations.push({ op: "location.upsert", ref: ref(location2.id), data: { area: cells.length ? { kind: "cells", cells, quality: "confirmed", source: "manual" } : null }, why: "作者绘制地点范围" });
+  } else if (action === "map/scale") {
+    const m = map(body.mapId);
+    if (body.userMetersPerCell !== void 0) {
+      mapCalibration2 = { mapId: String(m.id), metersPerCell: Number(body.userMetersPerCell), locked: true };
+    } else {
+      if (m.scale_locked) throw new AtlasDbError("MAP_SCALE_LOCKED", "作者已锁定地图尺度，AI 不覆盖该值", {});
+      manual = false;
+      phases = ["geography"];
+    }
+  } else if (action === "map/protagonist") {
+    const candidates = read.selectWhere("characters", { branch_id: session.branchId, status: "active" }, 1e3), name = String(body.name ?? body.playerName ?? "").trim();
+    const matches = candidates.filter((c) => c.name === name || Array.isArray(c.aliases_json) && c.aliases_json.includes(name));
+    if (matches.length > 1) throw new AtlasDbError("REF_AMBIGUOUS", "主角名字匹配了多个档案，不能随机选择", {});
+    if (!name) throw new AtlasDbError("INVALID_PAYLOAD", "主角名字不能为空", {});
+    for (const candidate of candidates.filter((row2) => row2.role === "protagonist" && row2.name !== name)) operations.push({ op: "character.upsert", ref: ref(candidate.id), data: { role: "npc" } });
+    if (matches.length) operations.push({ op: "character.upsert", ref: ref(matches[0].id), data: { role: "protagonist" } });
+    else operations.push({ op: "character.upsert", ref: "new:player", data: { name, role: "protagonist", importance: "core", identity: "用户主角" } });
+  } else if (["map/geo", "map/suggest", "map/bootstrap"].includes(action)) {
+    manual = false;
+    phases = action === "map/bootstrap" ? ["observe"] : ["geography"];
+  } else throw new AtlasDbError("INVALID_PAYLOAD", "未知 SQL 地图动作", {});
+  const sources = [];
+  for (const [key, kind] of [["loreSupplement", "lorebook"], ["assistantText", "story"], ["charDescription", "lorebook"], ["personaDescription", "user"]]) {
+    const value = body[key];
+    if (typeof value === "string" && value) sources.push({ key, kind, text: value, hash: stableHexHash(value) });
+  }
+  if (action === "map/scale" && !manual) {
+    const m = map(body.mapId), scope = JSON.stringify({ targetMap: ref(m.id), name: m.name, frame: m.frame_json, currentScale: m.meters_per_cell });
+    sources.push({ key: "map-task", kind: "estimate", text: `仅用 map.estimate 标定 ${scope}，不要修改其他地图或生成地点。`, hash: stableHexHash(scope) });
+  }
+  const hash = stableHexHash(JSON.stringify([action, body, sources]));
+  const input = {
+    anchor: {
+      chatUid: session.chatUid,
+      branchId: session.branchId,
+      parentTurnId: session.repo.internal.currentHeadTurnId(),
+      baseRevision: session.repo.internal.currentRevision(),
+      baseStorageRevision: session.repo.storageRevision,
+      hostMessageUid: `author:${action}:${body.requestId ?? hash}`,
+      variantKey: "author",
+      inputHash: hash
+    },
+    userText: String(body.userText ?? ""),
+    assistantText: String(body.assistantText ?? ""),
+    sourceSnapshot: sources,
+    phaseBatches: phases,
+    manual,
+    operations,
+    narrativeKind: "manual",
+    sceneMaps: true,
+    sceneOnly: true,
+    mapCalibration: mapCalibration2,
+    povName: action === "map/protagonist" ? String(body.name ?? body.playerName ?? "") : void 0,
+    isCurrent: typeof body.isCurrent === "function" ? body.isCurrent : void 0
+  };
+  if (action === "map/bootstrap" && body.apply === false) {
+    const commit = await session.repo.prepareTurn(input), previewId = commit.token;
+    let drafts = previews.get(session);
+    if (!drafts) {
+      drafts = /* @__PURE__ */ new Map();
+      previews.set(session, drafts);
+    }
+    while (drafts.size >= 4) {
+      const id = drafts.keys().next().value;
+      await session.repo.discardPrepared(drafts.get(id).commit.token);
+      drafts.delete(id);
+    }
+    drafts.set(previewId, { commit, sourceHash });
+    const candidate = session.repo.getCandidate(previewId).db, newLocations = read.selectWhere("locations", { branch_id: session.branchId, status: "active" }, 1e3);
+    const previewRead = createTableReadPort(candidate);
+    return {
+      coreSaved: false,
+      status: "preview",
+      previewId,
+      baseRevision: input.anchor.baseRevision,
+      scene: { resolution: "已识别" },
+      newLocations: previewRead.selectWhere("locations", { branch_id: session.branchId, status: "active" }, 1e3).filter((row2) => !newLocations.some((old) => old.id === row2.id)).map((row2) => ({ name: row2.name })),
+      newCharacters: previewRead.selectWhere("characters", { branch_id: session.branchId, status: "active" }, 1e3).filter((row2) => row2.created_turn_id === commit.receipt.turnId).map((row2) => ({ displayName: row2.name })),
+      summary: "确认后写入当前聊天；识别不推进时间"
+    };
+  }
+  const result = await runSqlTurn(session, input);
+  if (!result.coreSaved) throw new AtlasDbError("SESSION_WRITE_FAILED", "地图候选未获得宿主保存确认", { issues: result.issues });
+  const added = createTableReadPort(session.repo.db).selectWhere("locations", { branch_id: session.branchId, status: "active" }, 1e3).filter((row2) => !beforeLocations.has(String(row2.id)));
+  return { coreSaved: true, pointsAdded: added.filter((row2) => row2.kind !== "region").length, regionsAdded: added.filter((row2) => row2.kind === "region").length, status: action === "map/scale" ? "calibrated" : "committed", message: "已保存到当前聊天的 SQL 数据库", receipt: result.receipt, issues: result.issues };
+}
+
 // src/atlas-sql-retry.ts
 init_atlas_db_runtime();
 init_atlas_db_readport();
@@ -21886,6 +22313,7 @@ async function retry(session, input) {
     attemptId: `retry_${storageRevision}`,
     groups: groups.groups,
     clockS: receipt.clockAfterS,
+    sceneMaps: history.scene_maps,
     isCurrent: input.isCurrent
   });
   const updated = result.coreSaved ? JSON.parse(String(queryBound(session.repo.db, "SELECT receipt_json FROM turns WHERE id=?", [input.turnId])[0].receipt_json)) : receipt;
@@ -21966,6 +22394,7 @@ async function handleSqlChatRequest(session, action, body) {
     }, { chatUid: session.chatUid, worldUid: session.worldUid, worldName: session.branchName }), binding: logicalBinding };
   }
   assertEnabled(session);
+  if (action.startsWith("map/")) return handleSqlMapAction(session, action, body);
   if (action === "retry") {
     const parsed = parseAtlasTurnCommitRequest(body);
     if (!parsed.ok || parsed.value.chatId !== session.chatUid) throw new AtlasDbError("INVALID_PAYLOAD", "SQL 补交素材不属于当前聊天", {});
@@ -22045,6 +22474,7 @@ async function handleSqlChatRequest(session, action, body) {
       manual: false,
       narrativeKind: manual ? "manual" : "narrative",
       hostMessageIndex: request.assistantMessageId,
+      sceneMaps: true,
       isCurrent: typeof body.isCurrent === "function" ? body.isCurrent : void 0
     };
     const result = await runSqlTurn(session, input);
@@ -22058,9 +22488,10 @@ async function handleSqlChatRequest(session, action, body) {
   }
   if (action === "rollback") {
     const floor = text2(body.assistantMessageId);
-    const row2 = latestFloor(session);
-    if (!row2) return { coreSaved: true, duplicate: true, binding: binding(session) };
-    if (floorIndex(row2) !== floor) throw new AtlasDbError("SQL_ROLLBACK_FLOOR_MISMATCH", "该楼层不是最近一次 SQL 推演楼层，不能隐式回退后续剧情", {});
+    const rows3 = queryBound(session.repo.db, "SELECT id,host_message_uid,decisions_json FROM turns WHERE branch_id=? AND kind='narrative' AND status IN ('committed','partial') ORDER BY committed_revision DESC,created_wall_ms DESC", [session.branchId]);
+    if (!rows3.length) return { coreSaved: true, duplicate: true, binding: binding(session) };
+    const row2 = rows3.find((row3) => floorIndex(row3) === floor);
+    if (!row2) throw new AtlasDbError("SQL_ROLLBACK_FLOOR_MISMATCH", "目标楼层没有当前分支的有效 SQL 推演记录", {});
     const result = await runSqlRollback(session, {
       chatUid: session.chatUid,
       branchId: session.branchId,
@@ -22401,6 +22832,22 @@ async function runSqlRetry(session, input) {
         await session.repo.discardPrepared(candidate.token);
         return { ...result, coreSaved: false };
       }
+      if (result.status === "applied" && input.sceneMaps) {
+        const scenes = compileSqlSceneMaps({
+          db: candidate.db,
+          branchId: session.branchId,
+          turnId: input.turnId,
+          clockS: input.clockS,
+          makeId: session.repo.internal.makeId,
+          ensureScenes: true
+        });
+        if (scenes) {
+          const applied = applyGroups(candidate.db, [scenes], { branchId: session.branchId, turnId: input.turnId, attemptId: input.attemptId + "-maps", validate: true });
+          if (applied.journalIssues.length || applied.groups.some((group) => group.status === "rejected" || group.status === "blocked"))
+            throw new AtlasDbError("SCENE_MAP_WRITE_FAILED", "补交地图结构未通过一致性校验", { groups: applied.groups });
+          result.groups.push(...applied.groups);
+        }
+      }
       const row2 = queryBound(candidate.db, "SELECT receipt_json FROM turns WHERE id=?", [input.turnId])[0];
       const receipt = JSON.parse(String(row2.receipt_json));
       if (result.status === "applied") {
@@ -22566,6 +23013,13 @@ async function migrateSessionToSql(options) {
       clockS: 0
     });
     issues.push(...entities.issues);
+    const scenes = compileSqlSceneMaps({ db: session.repo.db, branchId: session.branchId, turnId, clockS: 0, makeId, ensureScenes: true });
+    if (scenes) {
+      const result = applyGroups(session.repo.db, [scenes], { branchId: session.branchId, turnId, attemptId: "migration-scenes", validate: true, journal: false });
+      if (result.journalIssues.length || result.groups.some((group) => group.status === "rejected" || group.status === "blocked"))
+        throw new AtlasDbError("MIGRATION_FAILED", "迁移地图结构未通过一致性校验", { groups: result.groups });
+    }
+    issues.push(...restoreLegacySceneMaps(options.legacy, session.repo.db, { branchId: session.branchId }));
     const simulation = migrateLegacySimulation(inspection, options.legacy, session.repo.db, {
       branchId: session.branchId,
       turnId,
@@ -22577,6 +23031,7 @@ async function migrateSessionToSql(options) {
     issues.push(...simulation.issues);
     const finalized = finalizeMigration(session.repo.db, { branchId: session.branchId });
     issues.push(...finalized.issues);
+    if (!finalized.ok || issues.some((entry) => entry.severity === "error")) throw new AtlasDbError("MIGRATION_FAILED", "旧档迁移存在未解决错误，候选不发布", { issues });
     session.source = "migrated";
     let saved = false;
     if (options.persist !== false) {

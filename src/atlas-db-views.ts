@@ -94,6 +94,7 @@ export type MapViewItem = {
     locationId?: string | null;
     isProtagonist?: boolean;
     hidden?: boolean;
+    area?: unknown;
   }>;
   /** 只知粗粒度地点的人物，不进 points（避免和地点叠图标）。 */
   coarseList: Array<{ entityId: string; name: string; locationId: string; locationName: string | null; hidden?:boolean }>;
@@ -115,7 +116,7 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
   const stale = staleResult(ctx, query.revision);
   if (stale) return stale;
 
-  const maps = rows(ctx, 'maps', '', [], 200).filter((m) => String(m.status) === 'active');
+  const maps = rows(ctx, 'maps', '', [], 1001).filter((m) => String(m.status) === 'active');
   if (maps.length === 0) {
     return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { empty: true, reason: 'NO_MAP' } };
   }
@@ -140,7 +141,8 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
       && !['region','city'].includes(String(container.kind));
     const frame=map.frame_json as {cols?:number;rows?:number} ?? {};
     const roomMembers=characters.filter(ch=>ch.location_id===container?.id && !['unknown','in_transit'].includes(resolveEffectivePosition(ctx,String(ch.id),undefined,positionCache).kind));
-    const layout=leafScene?scenePositions(roomMembers.map(ch=>({id:String(ch.id),currentAction:String(ch.action_tendency??'')})),
+    const roomItems=itemRows.filter(item=>item.location_id===container?.id&&!item.holder_character_id&&!item.container_item_id);
+    const layout=leafScene?scenePositions([...roomMembers.map(ch=>({id:String(ch.id),currentAction:String(ch.action_tendency??'')})),...roomItems.map(item=>({id:String(item.id),currentAction:String(item.description??'')}))],
       {cols:typeof frame.cols==='number'?frame.cols:100,rows:typeof frame.rows==='number'?frame.rows:100}):new Map();
 
     for (const loc of locations) {
@@ -159,6 +161,7 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
         precision,
         radius: typeof loc.uncertainty_radius_cells === 'number' ? loc.uncertainty_radius_cells : null,
         markerQuality: precision as 'exact' | 'approximate' | 'layout',
+        area:loc.area_geometry_json,
       });
     }
 
@@ -202,6 +205,11 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
       const itemId = String(item.id);
       if (item.holder_character_id || item.container_item_id) continue;
       const position = resolveEffectivePosition({ db: ctx.db, branchId: ctx.branchId }, itemId, undefined, positionCache);
+      if(leafScene&&item.location_id===container?.id&&!(item.map_id===mapId&&item.coord_precision!=='unknown'&&item.grid_x!=null)){
+        const pin=layout.get(itemId)!;
+        points.push({entityId:itemId,kind:'item',name:String(item.name),mapId,x:pin.x,y:pin.y,precision:'layout',radius:null,markerQuality:'layout',locationId:String(container.id)});
+        continue;
+      }
       if (position.kind === 'at_grid' && position.mapId === mapId) {
         points.push({
           entityId: itemId,
@@ -259,6 +267,10 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
     items,
     metadata: {
       mapCount: mapIds.size,
+      readLimits:Object.fromEntries([['maps',1001,maps.length],['locations',2000,locations.length],['characters',2000,characters.length],['items',2000,itemRows.length],['routes',1000,routes.length]].map(([table,limit,shown])=>{
+        const total=Number(queryBound(ctx.db,`SELECT COUNT(*) n FROM ${table} WHERE branch_id=? AND status='active'`,[ctx.branchId])[0].n);
+        return [table,{limit,total,shown,truncated:Math.max(0,total-Number(shown))}];
+      })),
       pointCount: items.reduce((n, m) => n + (m as MapViewItem).points.length, 0),
       coarseCount: items.reduce((n, m) => n + (m as MapViewItem).coarseList.length, 0),
       viewMode: ctx.viewMode ?? 'author',

@@ -8111,6 +8111,9 @@ END`;
       }
     }
     ensureLocationRef(data, "location_ref", op, result.issues, changes, "location_id", ["location"], ctx.scope);
+    if (before && Object.prototype.hasOwnProperty.call(changes, "location_id") && changes.location_id !== before.location_id && !Object.prototype.hasOwnProperty.call(data, "position")) {
+      Object.assign(changes, { map_id: null, grid_x: null, grid_y: null, coord_precision: "unknown", uncertainty_radius_cells: null });
+    }
     applyPosition(changes, data, op, result.issues, ctx.scope);
     if (result.issues.some((i) => i.severity === "error")) return result;
     if (creating) {
@@ -9780,7 +9783,15 @@ END`;
       result.issues.push(issue8("MAP_SCALE_ORDER_INVALID", "$.data", "meters_per_cell_min 不能大于 meters_per_cell_max", op));
       return result;
     }
-    const frame = isPlainObject7(before.frame_json) ? before.frame_json : {};
+    let frame = isPlainObject7(before.frame_json) ? before.frame_json : {};
+    if (data.frame !== void 0) {
+      const f = isPlainObject7(data.frame) ? data.frame : null;
+      if (!f || !Number.isInteger(f.cols) || !Number.isInteger(f.rows) || Number(f.cols) < 1 || Number(f.rows) < 1 || Number(f.cols) > 1e4 || Number(f.rows) > 1e4) {
+        result.issues.push(issue8("FRAME_INVALID", "$.data.frame", "frame.cols/rows 必须是 1～10000 的整数", op));
+        return result;
+      }
+      frame = { ...frame, cols: f.cols, rows: f.rows, reference_width_cells: f.cols, reference_height_cells: f.rows };
+    }
     const refWidth = typeof frame.reference_width_cells === "number" && frame.reference_width_cells > 0 ? frame.reference_width_cells : null;
     const refHeight = typeof frame.reference_height_cells === "number" && frame.reference_height_cells > 0 ? frame.reference_height_cells : null;
     let nominal = null;
@@ -9806,6 +9817,7 @@ END`;
     const turnId = ctx.turnId ?? ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
     const after = applyPatch(before, {
       meters_per_cell: nominal,
+      frame_json: frame,
       scale_min_meters_per_cell: lower,
       scale_max_meters_per_cell: upper,
       scale_quality: quality,
@@ -10047,6 +10059,11 @@ END`;
     }
     result.declaredRefs = ref?.startsWith("new:") ? [{ alias: ref, id: rowId, kind: "route", rowRev: null, declaredByOpId: op.opId }] : [];
     return result;
+  }
+  function containerMapKind(containerKind) {
+    if (["region", "city", "district"].includes(containerKind)) return "region";
+    if (["building", "natural", "other"].includes(containerKind)) return "site";
+    return "interior";
   }
 
   // src/atlas-ops-compile.ts
@@ -11165,7 +11182,7 @@ END`;
     "{{allowedOperationHelp}}"
   ].join("\n");
   var MINIMUM_HELP = {
-    "location.upsert": "新建 name；修改 ref + 至少一个变更字段",
+    "location.upsert": "新建 name；修改 ref + 至少一个变更字段；kind=region/city/district/building/room/natural/vehicle/other；parent_ref=所属地点，mobility=fixed/mobile，anchor_ref=载具锚点；推断新增地点用 existence_quality=inferred；area={kind:cells,cells:[{x,y}],quality:confirmed/estimated,source:manual/story/worldbook/estimate} 或 {kind:polygon,points:[{x,y}],quality,source}；范围坐标沿用所属地图尺度，推断布局不证明真实距离；有已提供 map_ref 才能给 position={x,y,precision:exact/approximate/layout}",
     "character.upsert": "新建 name + 身份/重要性线索之一；候选只需 name（registration=watch）；修改 ref",
     "item.upsert": "新建 name；修改 ref",
     "item.transfer": "ref + to（holder_ref / container_ref / location_ref / unknown 四选一）",
@@ -13323,6 +13340,80 @@ END`;
       boundaries: [...BASE_BOUNDARIES]
     };
   }
+  function projectPortrayal(world, scene) {
+    const present = new Set(scene.actorIds ?? scene.entityIds ?? []);
+    const exclusions = [];
+    if (present.size === 0 && scene.locationId) {
+      const here = rows(
+        world.db,
+        "characters",
+        "SELECT id FROM characters WHERE branch_id = ? AND location_id = ? AND status = ?",
+        [world.branchId, scene.locationId, "active"]
+      );
+      for (const row2 of here) present.add(String(row2.id));
+    }
+    const entries = [];
+    for (const entityId of present) {
+      const found = rows(
+        world.db,
+        "characters",
+        "SELECT * FROM characters WHERE branch_id = ? AND id = ? AND status = ?",
+        [world.branchId, entityId, "active"]
+      );
+      if (found.length === 0) {
+        exclusions.push(`${entityId}: 不在本分支的在场人物中`);
+        continue;
+      }
+      const ch = found[0];
+      const position = resolveEffectivePosition({ db: world.db, branchId: world.branchId }, entityId);
+      if (scene.locationId && (position.kind === "at_location" ? position.locationId !== scene.locationId : position.kind === "at_grid" && ch.location_id !== scene.locationId)) {
+        exclusions.push(`${entityId}: 不在当前场景`);
+        continue;
+      }
+      if (position.kind === "unknown" || position.kind === "in_transit") {
+        exclusions.push(`${entityId}: 位置未知或仍在途中，不作为在场角色注入`);
+        continue;
+      }
+      entries.push({
+        entityId,
+        name: String(ch.name ?? ""),
+        identity: String(ch.identity ?? ""),
+        thought: String(ch.thought ?? ""),
+        actionTendency: String(ch.action_tendency ?? ""),
+        physicalStatus: String(ch.physical_status ?? "unknown"),
+        conditionNote: String(ch.condition_note ?? ""),
+        position: position.kind,
+        disclosure: "narrator_only"
+      });
+    }
+    return {
+      entries,
+      exclusions,
+      boundaries: [
+        "可指导言行，不等于主角已知；主角知识仍由 knowledge 决定。",
+        "只包含在场/实际接触的 NPC；远方角色的秘密计划不注入。",
+        "作者地图开关只改变 UI，不扩大本区范围。"
+      ]
+    };
+  }
+  function projectPromptView(world, query) {
+    const branch = queryBound(world.db, "SELECT pov_character_id FROM branches WHERE id = ?", [world.branchId])[0];
+    const candidates = queryBound(world.db, "SELECT id, location_id FROM characters WHERE branch_id = ? AND role = 'protagonist' AND status = 'active'", [world.branchId]);
+    const povId = query.povId ?? (branch?.pov_character_id ? String(branch.pov_character_id) : candidates.length === 1 ? String(candidates[0].id) : null);
+    const player = povId ? queryBound(world.db, "SELECT location_id FROM characters WHERE branch_id = ? AND id = ?", [world.branchId, povId])[0] : null;
+    const playerPosition = povId ? resolveEffectivePosition(world, povId) : null;
+    const locationId = query.sceneLocationId ?? (playerPosition?.kind === "at_location" ? playerPosition.locationId : playerPosition?.kind === "at_grid" && player?.location_id ? String(player.location_id) : null);
+    const pov = projectForPov(world, { characterId: povId });
+    const portrayal = locationId || query.actorIds?.length ? projectPortrayal(world, { locationId, actorIds: query.actorIds }) : null;
+    return {
+      pov,
+      portrayal,
+      promptScope: [
+        `主角已知信息 ${pov.knownFacts.length} 条、已知人物 ${pov.knownCharacters.length} 名、已知地点 ${pov.knownLocations.length} 处`,
+        portrayal ? `在场塑造 ${portrayal.entries.length} 人（narrator_only）` : "无在场塑造区"
+      ]
+    };
+  }
 
   // src/atlas-sql-visibility.ts
   function sqlVisibility(ctx) {
@@ -13404,7 +13495,7 @@ END`;
   function queryMapView(ctx, query) {
     const stale = staleResult(ctx, query.revision);
     if (stale) return stale;
-    const maps = rows2(ctx, "maps", "", [], 200).filter((m) => String(m.status) === "active");
+    const maps = rows2(ctx, "maps", "", [], 1001).filter((m) => String(m.status) === "active");
     if (maps.length === 0) {
       return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { empty: true, reason: "NO_MAP" } };
     }
@@ -13425,8 +13516,9 @@ END`;
       const leafScene = container && (container.kind === "room" || !locations.some((l) => l.parent_location_id === container.id)) && !["region", "city"].includes(String(container.kind));
       const frame = map.frame_json ?? {};
       const roomMembers = characters.filter((ch) => ch.location_id === container?.id && !["unknown", "in_transit"].includes(resolveEffectivePosition(ctx, String(ch.id), void 0, positionCache).kind));
+      const roomItems = itemRows.filter((item) => item.location_id === container?.id && !item.holder_character_id && !item.container_item_id);
       const layout = leafScene ? scenePositions(
-        roomMembers.map((ch) => ({ id: String(ch.id), currentAction: String(ch.action_tendency ?? "") })),
+        [...roomMembers.map((ch) => ({ id: String(ch.id), currentAction: String(ch.action_tendency ?? "") })), ...roomItems.map((item) => ({ id: String(item.id), currentAction: String(item.description ?? "") }))],
         { cols: typeof frame.cols === "number" ? frame.cols : 100, rows: typeof frame.rows === "number" ? frame.rows : 100 }
       ) : /* @__PURE__ */ new Map();
       for (const loc of locations) {
@@ -13444,7 +13536,8 @@ END`;
           y: loc.grid_y,
           precision,
           radius: typeof loc.uncertainty_radius_cells === "number" ? loc.uncertainty_radius_cells : null,
-          markerQuality: precision
+          markerQuality: precision,
+          area: loc.area_geometry_json
         });
       }
       for (const ch of characters) {
@@ -13489,6 +13582,11 @@ END`;
         const itemId = String(item.id);
         if (item.holder_character_id || item.container_item_id) continue;
         const position = resolveEffectivePosition({ db: ctx.db, branchId: ctx.branchId }, itemId, void 0, positionCache);
+        if (leafScene && item.location_id === container?.id && !(item.map_id === mapId && item.coord_precision !== "unknown" && item.grid_x != null)) {
+          const pin = layout.get(itemId);
+          points.push({ entityId: itemId, kind: "item", name: String(item.name), mapId, x: pin.x, y: pin.y, precision: "layout", radius: null, markerQuality: "layout", locationId: String(container.id) });
+          continue;
+        }
         if (position.kind === "at_grid" && position.mapId === mapId) {
           points.push({
             entityId: itemId,
@@ -13541,6 +13639,10 @@ END`;
       items,
       metadata: {
         mapCount: mapIds.size,
+        readLimits: Object.fromEntries([["maps", 1001, maps.length], ["locations", 2e3, locations.length], ["characters", 2e3, characters.length], ["items", 2e3, itemRows.length], ["routes", 1e3, routes.length]].map(([table, limit, shown]) => {
+          const total = Number(queryBound(ctx.db, `SELECT COUNT(*) n FROM ${table} WHERE branch_id=? AND status='active'`, [ctx.branchId])[0].n);
+          return [table, { limit, total, shown, truncated: Math.max(0, total - Number(shown)) }];
+        })),
         pointCount: items.reduce((n, m) => n + m.points.length, 0),
         coarseCount: items.reduce((n, m) => n + m.coarseList.length, 0),
         viewMode: ctx.viewMode ?? "author",
@@ -15299,6 +15401,26 @@ END`;
   }
   async function settleSqlTurn(input) {
     const before = snapshot(input), issues = [], groups = [], modelOperations = [];
+    if (input.sceneOnly) {
+      const branch2 = queryBound(input.db, "SELECT * FROM branches WHERE id=?", [input.branchId])[0];
+      return {
+        elapsed: deriveElapsedInterval({ activities: [{ kind: "dialogue", completed: true }] }, { clockS: input.clockBefore }),
+        clockAfter: input.clockBefore,
+        clockMin: Number(branch2.clock_min_s),
+        clockMax: Number(branch2.clock_max_s),
+        seed: 0,
+        randomDraws: [],
+        simulatedUntil: Number(branch2.simulation_cursor_s),
+        catchingUp: branch2.simulation_status === "catching_up" || branch2.simulation_status === "blocked",
+        pendingActors: [],
+        steps: [],
+        issues,
+        groups,
+        modelOperations,
+        operationContexts: [],
+        worldChanged: false
+      };
+    }
     const appliedIds = new Set(queryBound(input.db, "SELECT operation_id FROM turn_changes WHERE turn_id=?", [input.turnId]).flatMap((r) => String(r.operation_id).split("+")));
     const activities = [];
     for (const op of input.operations) {
@@ -15509,6 +15631,103 @@ END`;
     return { elapsed, clockAfter, clockMin, clockMax, seed, randomDraws, simulatedUntil: cursor, catchingUp, pendingActors, steps, issues, groups, modelOperations, operationContexts, worldChanged: mutations.some((m) => m.table !== "branches") };
   }
 
+  // src/atlas-sql-scene-maps.ts
+  function compileSqlSceneMaps(input) {
+    const { db, branchId, turnId, clockS, makeId } = input, read = createTableReadPort(db);
+    const locations = read.selectWhere("locations", { branch_id: branchId, status: "active" }, 1e3);
+    if (input.ensureScenes && Number(queryBound(db, "SELECT COUNT(*) AS n FROM locations WHERE branch_id=? AND status='active'", [branchId])[0].n) > 1e3)
+      throw new AtlasDbError("SCENE_MAP_LIMIT", "地点超过单次地图结构处理上限 1000；保留原存档，需分批处理", {});
+    const maps = read.selectWhere("maps", { branch_id: branchId, status: "active" }, 1001);
+    const changes = [], opId = `scene_maps_${turnId}`;
+    const change = (table, before, after) => {
+      if (before && JSON.stringify(before) === JSON.stringify(after)) return;
+      changes.push({
+        table,
+        rowId: String(after.id),
+        before,
+        after: before && "row_rev" in before ? { ...after, row_rev: Number(before.row_rev) + 1, updated_turn_id: turnId } : after,
+        sourceOpIds: [opId],
+        basis: { kind: input.calibration ? "manual" : "estimate", reason: input.calibration ? "作者地图标定" : "按实际地点层级建立地图；布局坐标不证明真实距离", certainty: "inferred" }
+      });
+    };
+    const makeMap = (id, name, kind, container, frame) => createRow("maps", {
+      name,
+      kind,
+      container_location_id: container,
+      frame_json: { ...frame, origin_x: 0, origin_y: 0, reference_width_cells: frame.cols, reference_height_cells: frame.rows }
+    }, { branchId, id, turnId, clockS, nowWallMs: Date.now(), rulesetVersion: "atlas-1" });
+    const branch = read.selectOne("branches", branchId, branchId);
+    let root = maps.find((map) => map.id === branch.root_map_id) ?? maps.find((map) => !map.container_location_id);
+    if (input.ensureScenes && locations.length) {
+      if (!root) {
+        root = makeMap(makeId("map", opId, "world"), "世界图", "world", null, { cols: 100, rows: 100 });
+        change("maps", null, root);
+        maps.push(root);
+      }
+      const byContainer = new Map(maps.filter((map) => map.container_location_id).map((map) => [String(map.container_location_id), map]));
+      for (const location of locations) {
+        const id = String(location.id);
+        if (!byContainer.has(id)) {
+          const frame = location.kind === "room" ? { cols: 12, rows: 8 } : { cols: 100, rows: 100 };
+          const map = makeMap(makeId("map", opId, `container:${id}`), String(location.name), containerMapKind(String(location.kind)), id, frame);
+          change("maps", null, map);
+          byContainer.set(id, map);
+          maps.push(map);
+        }
+      }
+      const childrenByMap = /* @__PURE__ */ new Map();
+      for (const location of locations) {
+        const parentMap = location.parent_location_id ? byContainer.get(String(location.parent_location_id)) : root;
+        if (!parentMap) throw new AtlasDbError("REF_UNKNOWN", "父地点没有对应地图", {});
+        const list = childrenByMap.get(String(parentMap.id)) ?? [];
+        list.push(location);
+        childrenByMap.set(String(parentMap.id), list);
+      }
+      for (const [mapId, children] of childrenByMap) {
+        const map = maps.find((map2) => map2.id === mapId), frame = input.calibration?.mapId === mapId && input.calibration.frame ? input.calibration.frame : map.frame_json;
+        const pins = scenePositions(children.map((row2) => ({ id: String(row2.id), label: String(row2.name) })), { cols: frame.cols ?? 100, rows: frame.rows ?? 100 });
+        children.forEach((location) => {
+          if (location.map_id === mapId && location.grid_x != null && location.grid_y != null && location.coord_precision !== "unknown" && (location.coord_precision === "exact" || Number(location.grid_x) >= 0 && Number(location.grid_y) >= 0 && Number(location.grid_x) <= (frame.cols ?? 100) && Number(location.grid_y) <= (frame.rows ?? 100))) return;
+          const pin = pins.get(String(location.id));
+          change("locations", location, {
+            ...location,
+            map_id: mapId,
+            grid_x: pin.x,
+            grid_y: pin.y,
+            coord_precision: "layout",
+            uncertainty_radius_cells: null,
+            ...location.map_id && location.map_id !== mapId ? { area_geometry_json: null } : {}
+          });
+        });
+      }
+      const protagonists = read.selectWhere("characters", { branch_id: branchId, status: "active", role: "protagonist" }, 3);
+      const named = input.povName ? protagonists.filter((row2) => row2.name === input.povName) : [];
+      const pov = named.length === 1 ? named[0].id : branch.pov_character_id ?? (protagonists.length === 1 ? protagonists[0].id : null);
+      change("branches", branch, { ...branch, root_map_id: root.id, pov_character_id: pov });
+    }
+    if (input.calibration) {
+      const c = input.calibration, map = maps.find((m) => m.id === c.mapId || c.mapId === "world" && m.id === root?.id);
+      if (!map) throw new AtlasDbError("REF_UNKNOWN", "标定目标地图不存在", {});
+      if (c.metersPerCell !== void 0 && (!Number.isFinite(c.metersPerCell) || c.metersPerCell <= 0)) throw new AtlasDbError("INVALID_PAYLOAD", "每格距离必须为正数", {});
+      if (c.frame && (!Number.isInteger(c.frame.cols) || !Number.isInteger(c.frame.rows) || c.frame.cols < 1 || c.frame.rows < 1 || c.frame.cols > 1e4 || c.frame.rows > 1e4)) throw new AtlasDbError("INVALID_PAYLOAD", "地图格数应为 1～10000 的整数", {});
+      const after = {
+        ...map,
+        ...c.metersPerCell !== void 0 ? {
+          meters_per_cell: c.metersPerCell,
+          scale_min_meters_per_cell: c.metersPerCell,
+          scale_max_meters_per_cell: c.metersPerCell,
+          scale_quality: c.quality ?? "confirmed",
+          scale_basis_json: { refs: [], note: "作者确认" },
+          calibration_rev: Number(map.calibration_rev) + 1
+        } : {},
+        ...c.locked !== void 0 ? { scale_locked: c.locked ? 1 : 0 } : {},
+        ...c.frame ? { frame_json: { ...map.frame_json, ...c.frame, reference_width_cells: c.frame.cols, reference_height_cells: c.frame.rows } } : {}
+      };
+      change("maps", map, after);
+    }
+    return changes.length ? { id: opId, opIds: [opId], dependsOn: [], readSet: [], mutations: changes } : null;
+  }
+
   // src/atlas-db-repository.ts
   var CANONICAL_TABLES = /* @__PURE__ */ new Set([
     "maps",
@@ -15656,7 +15875,8 @@ END`;
         worldUid,
         storageRevision: storageRevision + 1,
         activeBranchId: candidate.anchor.branchId,
-        schemaVersion: ATLAS_SCHEMA_VERSION
+        schemaVersion: ATLAS_SCHEMA_VERSION,
+        assets: envelopeAssets
       });
       stored.snapshot = bytes;
       stored.snapshotSha256 = snapshotSha256;
@@ -15751,6 +15971,8 @@ END`;
             return queryDiagnostics(ctx, query);
           case "simulation":
             return querySimulationView(ctx, query);
+          case "prompt":
+            return { branchId: ctx.branchId, revision: ctx.revision, items: [projectPromptView(ctx, query)], metadata: { viewMode: ctx.viewMode ?? "pov" } };
           default:
             return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "VIEW_KIND_UNSUPPORTED", kind: query.kind } };
         }
@@ -15766,7 +15988,8 @@ END`;
           worldUid,
           storageRevision,
           activeBranchId: branchId,
-          schemaVersion: ATLAS_SCHEMA_VERSION
+          schemaVersion: ATLAS_SCHEMA_VERSION,
+          assets: envelopeAssets
         });
       },
       /** B06 createCandidate：从当前库快照建隔离候选；候选改动不出现在正式 query 中。 */
@@ -15804,7 +16027,8 @@ END`;
           worldUid,
           storageRevision: storageRevision + 1,
           activeBranchId: candidate.anchor.branchId,
-          schemaVersion: ATLAS_SCHEMA_VERSION
+          schemaVersion: ATLAS_SCHEMA_VERSION,
+          assets: envelopeAssets
         });
         stored.snapshot = bytes;
         stored.snapshotSha256 = snapshotSha256;
@@ -15995,6 +16219,9 @@ END`;
             assistantSource: input.assistantText,
             userSource: input.userText,
             entityRefs: collectEntityRefs(tables, branchId),
+            geoEntities: collectEntityRefs(tables, branchId).join("\n"),
+            mapScope: JSON.stringify(tables.selectWhere("maps", { branch_id: branchId, status: "active" }, 1e3).map((map) => ({ ref: foregroundKnownRefs.find((r) => r.id === map.id)?.alias, name: map.name, frame: map.frame_json, scaleLocked: map.scale_locked }))),
+            geoSources: input.assistantText,
             sourceSnapshot,
             batchId: `${phase}_${turnId}`
           });
@@ -16164,6 +16391,15 @@ END`;
             groupResults = reconcileRepairResults(groupResults, second.groups, rejectedSnapshot);
           }
         }
+        if (input.sceneMaps || input.mapCalibration) {
+          const mapGroup = compileSqlSceneMaps({ db: candidateDb, branchId, turnId, clockS: clockBefore, makeId, ensureScenes: input.sceneMaps, calibration: input.mapCalibration, povName: input.povName });
+          if (mapGroup) {
+            const mapResult = applyGroups(candidateDb, [mapGroup], { branchId, turnId, attemptId: "scene-maps", validate: true });
+            if (mapResult.journalIssues.length || mapResult.groups.some((group) => group.status === "rejected" || group.status === "blocked"))
+              throw new AtlasDbError("SCENE_MAP_WRITE_FAILED", "地图结构候选未通过校验", { groups: mapResult.groups, journal: mapResult.journalIssues });
+            groupResults.push(...mapResult.groups);
+          }
+        }
         commitTransaction(candidateDb);
         transactionOpen = false;
         const simulation = await settleSqlTurn({
@@ -16172,8 +16408,9 @@ END`;
           anchor,
           turnId,
           clockBefore,
-          operations: parsedOperations,
-          modelPort: input.manual ? null : options.modelPort,
+          sceneOnly: input.sceneOnly,
+          operations: input.sceneOnly ? [] : parsedOperations,
+          modelPort: input.manual || input.sceneOnly ? null : options.modelPort,
           modelBudget: Math.max(0, ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn - foregroundBatches - (repairAttempted ? 1 : 0)),
           makeId,
           isCurrent: input.isCurrent
@@ -16222,6 +16459,7 @@ END`;
             operations: parsedOperations.map((p) => p.value),
             operation_meta: parsedOperations.map(({ opId, line, rawHash }) => ({ opId, line, rawHash })),
             known_refs: foregroundKnownRefs,
+            scene_maps: input.sceneMaps === true,
             operation_context: simulation.operationContexts,
             host_message_index: input.hostMessageIndex,
             simulation_steps: simulation.steps,
@@ -16537,7 +16775,8 @@ END`;
           worldUid,
           storageRevision: storageRevision + 1,
           activeBranchId: branchId,
-          schemaVersion: ATLAS_SCHEMA_VERSION
+          schemaVersion: ATLAS_SCHEMA_VERSION,
+          assets: envelopeAssets
         });
         const stored = candidates.get(candidate.token);
         stored.snapshot = bytes;

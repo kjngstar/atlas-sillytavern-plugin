@@ -22,6 +22,8 @@
 import { ATLAS_DATABASE_KEY, ATLAS_SESSION_KEY, createAtlasHostPort } from './atlas-host-port.ts';
 import { decodeSnapshot, sha256Hex } from './atlas-db-envelope.ts';
 import { AtlasDbError, queryBound, runBound } from './atlas-db-runtime.ts';
+import { applyGroups } from './atlas-db-commit.ts';
+import { compileSqlSceneMaps } from './atlas-sql-scene-maps.ts';
 import { retryFailedGroups } from './atlas-db-retry.ts';
 import { withChatCommitLock } from './atlas-db-queue.ts';
 import {
@@ -30,6 +32,7 @@ import {
   legacyBackupPayload,
   migrateLegacyEntities,
   migrateLegacySimulation,
+  restoreLegacySceneMaps,
   tableCounts,
 } from './atlas-db-migrate.ts';
 import { runNextSync, enqueueProjectionSync } from './atlas-db-outbox.ts';
@@ -582,7 +585,7 @@ export async function runSqlTurn(session: SqlSession, input: TurnInput): Promise
 }
 
 /** Retry changes live only in an isolated candidate until the host confirms its save. */
-export async function runSqlRetry(session: SqlSession, input: Omit<FailedGroupRetryInput, 'db'> & { isCurrent?: () => boolean }): Promise<FailedGroupRetryResult & { coreSaved: boolean }> {
+export async function runSqlRetry(session: SqlSession, input: Omit<FailedGroupRetryInput, 'db'> & { isCurrent?: () => boolean;sceneMaps?:boolean }): Promise<FailedGroupRetryResult & { coreSaved: boolean }> {
   if (input.chatUid !== session.chatUid || input.branchId !== session.branchId) throw new AtlasDbError('CHAT_CHANGED', '补交不属于当前 SQL 会话', {});
   return withChatCommitLock(session.chatUid, async () => {
     if (session.isCurrentHost && !session.isCurrentHost()) throw new AtlasDbError('SESSION_STALE', '补交前宿主快照已变化', {});
@@ -594,6 +597,16 @@ export async function runSqlRetry(session: SqlSession, input: Omit<FailedGroupRe
       if (result.status !== 'applied' && result.status !== 'duplicate') {
         await session.repo.discardPrepared(candidate.token);
         return { ...result, coreSaved: false };
+      }
+      if(result.status==='applied'&&input.sceneMaps){
+        const scenes=compileSqlSceneMaps({db:candidate.db,branchId:session.branchId,turnId:input.turnId,clockS:input.clockS,
+          makeId:session.repo.internal.makeId,ensureScenes:true});
+        if(scenes){
+          const applied=applyGroups(candidate.db,[scenes],{branchId:session.branchId,turnId:input.turnId,attemptId:input.attemptId+'-maps',validate:true});
+          if(applied.journalIssues.length||applied.groups.some(group=>group.status==='rejected'||group.status==='blocked'))
+            throw new AtlasDbError('SCENE_MAP_WRITE_FAILED','补交地图结构未通过一致性校验',{groups:applied.groups});
+          result.groups.push(...applied.groups);
+        }
       }
       const row = queryBound(candidate.db, 'SELECT receipt_json FROM turns WHERE id=?', [input.turnId])[0];
       const receipt = JSON.parse(String(row.receipt_json)) as TurnReceipt;
@@ -642,7 +655,7 @@ export async function runSqlRollback(session: SqlSession, input: RollbackInput):
   return { receipt: result.receipt, saved: result.saved, issues: result.issues, coreSaved: result.coreSaved };
 }
 
-async function commitPreparedTurn(session: SqlSession, commit: PreparedCommit, isCurrent?: () => boolean): Promise<SqlTurnResult> {
+export async function commitPreparedTurn(session: SqlSession, commit: PreparedCommit, isCurrent?: () => boolean): Promise<SqlTurnResult> {
   return await withChatCommitLock(session.chatUid, async () => {
     if (session.isCurrentHost && !session.isCurrentHost()) {
       await session.repo.discardPrepared(commit.token);
@@ -786,6 +799,14 @@ export async function migrateSessionToSql(
     });
     issues.push(...entities.issues);
 
+    const scenes=compileSqlSceneMaps({db:session.repo.db,branchId:session.branchId,turnId,clockS:0,makeId,ensureScenes:true});
+    if(scenes){
+      const result=applyGroups(session.repo.db,[scenes],{branchId:session.branchId,turnId,attemptId:'migration-scenes',validate:true,journal:false});
+      if(result.journalIssues.length||result.groups.some(group=>group.status==='rejected'||group.status==='blocked'))
+        throw new AtlasDbError('MIGRATION_FAILED','迁移地图结构未通过一致性校验',{groups:result.groups});
+    }
+
+    issues.push(...restoreLegacySceneMaps(options.legacy,session.repo.db,{branchId:session.branchId}));
     const simulation = migrateLegacySimulation(inspection, options.legacy, session.repo.db, {
       branchId: session.branchId,
       turnId,
@@ -796,8 +817,10 @@ export async function migrateSessionToSql(
     });
     issues.push(...simulation.issues);
 
+
     const finalized = finalizeMigration(session.repo.db, { branchId: session.branchId });
     issues.push(...finalized.issues);
+    if(!finalized.ok||issues.some(entry=>entry.severity==='error'))throw new AtlasDbError('MIGRATION_FAILED','旧档迁移存在未解决错误，候选不发布',{issues});
 
     session.source = 'migrated';
     let saved = false;

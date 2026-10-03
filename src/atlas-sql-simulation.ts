@@ -28,7 +28,7 @@ import type { Opportunity } from './atlas-sim-opportunities.ts';
 import type { ElapsedActivity } from './atlas-sim-time.ts';
 
 type Input = { db: SqlDatabase; branchId: string; anchor: TurnAnchor; turnId: string; clockBefore: number;
-  operations: ParsedOperation[]; modelPort?: AtlasModelPort | null; modelBudget: number;
+  sceneOnly?:boolean; operations: ParsedOperation[]; modelPort?: AtlasModelPort | null; modelBudget: number;
   makeId: (kind: string, opId: string, alias: string) => string; isCurrent?: () => boolean; attemptKey?: string };
 
 function snapshot(input: Input): Map<string, Record<string, unknown>> {
@@ -49,6 +49,14 @@ function write(input: Input, table: string, row: Record<string, unknown>, before
 
 export async function settleSqlTurn(input: Input) {
   const before = snapshot(input), issues: Issue[] = [], groups: GroupResult[] = [], modelOperations: ParsedOperation[] = [];
+  if(input.sceneOnly){
+    const branch=queryBound(input.db,'SELECT * FROM branches WHERE id=?',[input.branchId])[0];
+    return {elapsed:deriveElapsedInterval({activities:[{kind:'dialogue',completed:true}]},{clockS:input.clockBefore}),
+      clockAfter:input.clockBefore,clockMin:Number(branch.clock_min_s),clockMax:Number(branch.clock_max_s),
+      seed:0,randomDraws:[] as RecordedDraw[],simulatedUntil:Number(branch.simulation_cursor_s),
+      catchingUp:branch.simulation_status==='catching_up'||branch.simulation_status==='blocked',pendingActors:[] as string[],steps:[] as Array<Record<string,unknown>>,
+      issues,groups,modelOperations,operationContexts:[] as OperationContext[],worldChanged:false};
+  }
   const appliedIds = new Set(queryBound(input.db,'SELECT operation_id FROM turn_changes WHERE turn_id=?',[input.turnId]).flatMap(r=>String(r.operation_id).split('+')));
   const activities: ElapsedActivity[] = [];
   for (const op of input.operations) {

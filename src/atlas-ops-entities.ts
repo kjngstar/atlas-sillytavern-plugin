@@ -538,6 +538,9 @@ export function compileCharacterUpsert(op: ParsedOperation, ctx: CompileContext)
   }
 
   ensureLocationRef(data, 'location_ref', op, result.issues, changes, 'location_id', ['location'], ctx.scope);
+  if(before&&Object.prototype.hasOwnProperty.call(changes,'location_id')&&changes.location_id!==before.location_id&&!Object.prototype.hasOwnProperty.call(data,'position')){
+    Object.assign(changes,{map_id:null,grid_x:null,grid_y:null,coord_precision:'unknown',uncertainty_radius_cells:null});
+  }
   applyPosition(changes, data, op, result.issues, ctx.scope);
 
   if (result.issues.some((i) => i.severity === 'error')) return result;

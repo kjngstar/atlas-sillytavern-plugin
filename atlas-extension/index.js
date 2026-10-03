@@ -687,6 +687,7 @@ export function atlasSqlMapModel(item, viewMode = "pov") {
       y,
       positionQuality: atlasPositionQuality(raw.markerQuality ?? raw.precision),
       radius: atlasKnownCoordinate(raw.radius),
+      area: raw.area ?? null,
       locationId: raw.locationId == null ? null : String(raw.locationId),
       isProtagonist: raw.isProtagonist === true,
     };
@@ -743,6 +744,7 @@ export function atlasSqlMapModel(item, viewMode = "pov") {
     itemPins,
     coarseList,
     occupantCounts,
+    areas: atlasSqlFilterByViewMode(record.points, viewMode).filter(point => point.kind === "location" && point.area).map(point => ({ locationId: String(point.entityId), geometry: point.area })),
     routes,
   };
 }
@@ -786,6 +788,7 @@ export function atlasSqlSubmaps(items) {
       scaleQuality: model.scaleQuality,
       /** SQL 模式没有旧式自由单位比例尺：保持 null，绝不伪造单位换算。 */
       scale: null,
+      frame: model.frame,
       points: model.locations.map((location) => ({ id: location.id, name: location.name, x: location.x, y: location.y })),
       model,
     };
@@ -1170,6 +1173,9 @@ export function createAtlasSessionApi(deps) {
       const requestMetadata = requestContext.chatMetadata ?? null;
       let payload = body;
       let requestSession = null;
+      if(method === "POST" && path.startsWith("/sql/")) {
+        payload = { ...(body ?? {}), chatUid: body?.chatUid ?? body?.chatId ?? requestChatId };
+      }
       if (method === "POST" && pathWantsSession(path)) {
         requestSession = readAtlasSession(context);
         const latest = requestMetadata && latestByMetadata.get(requestMetadata);
@@ -2746,6 +2752,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     getVisibleGridPaths,
     // H16：已证实范围的填色投影（只染有证据的格；没有 areas 就一格不染）
     projectColorAreas,
+    projectSqlMapAreas,
   /**
    * H08：缺坐标地点的示意布局（纯函数）。**只有这里调它**——显示用位置绝不回写三表。
    */
@@ -3328,7 +3335,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     if (cells.length === 0) { setStatus("没有选中任何格。", "error"); return; }
     areaDrawRefs.bar?.querySelectorAll?.("button").forEach((b) => { b.disabled = true; });
     try {
-      const response = await api.request("POST", "/maps/areas/upsert", {
+      const response = await api.request("POST", (sqlMode.enabled ? "/sql/chat/map/areas" : "/maps/areas/upsert"), {
         chatId, mapId: areaDraw.mapId, locationId: areaDraw.locationId, cells,
       });
       if (response.status !== 200 || !response.body?.ok) {
@@ -4958,24 +4965,10 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
 
   /** 0.9.50 标定请求（AI 模式 / 人工模式共用一条路由；成功后 refresh 走 renderMap 重建详情）。 */
   async function runScaleCalibrate(payload, label) {
-    /**
-     * H06（§10.3）：SQL 世界数据模式下标定属于地图行（`meters_per_cell`），
-     * 由会话桥写入候选库；旧 `/worlds/scale/calibrate` 写的是旧三表标定——
-     * 在 SQL 模式下调用它就是**第二套权威**，因此这里直接拒绝并给具名诊断。
-     */
-    if (sqlMode.enabled) {
-      emitAtlasDiagnostic({
-        level: "warn", source: "map", code: "SQL_SCALE_WRITE_UNSUPPORTED",
-        operation: "scale", phase: "request", outcome: "skipped", retryable: false,
-        details: { route: "/worlds/scale/calibrate", mode: ATLAS_SQL_MODE_SETTING },
-      });
-      setStatus("SQL 世界数据模式：标定只读 SQL 地图行（meters_per_cell），本版标定写入口未接入；未改动任何数据。", "warn");
-      return;
-    }
     if (scaleCalibrating) return;
     scaleCalibrating = true;
     try {
-      const result = await api.request("POST", "/worlds/scale/calibrate", payload);
+      const result = await api.request("POST", (sqlMode.enabled ? "/sql/chat/map/scale" : "/worlds/scale/calibrate"), payload);
       const body = result.body ?? {};
       if (result.status === 200 && body.ok) {
         const status = String(body.data?.status ?? "");
@@ -5040,10 +5033,8 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     // AI 按钮：人工锁定值不可被 AI 覆盖（服务端同样拒绝，双保险）
     const aiBtn = el("button", "aw-btn aw-btn--ghost aw-scale__action", calibration?.locked ? "AI 重新判断（已锁定）" : calibration ? "AI 重新判断地图大小" : "AI 判断地图大小");
     aiBtn.type = "button";
-    // H06（§10.3）：SQL 模式的标定只读地图行的 meters_per_cell；本版标定写入口未接入
-    // （写 SQL 行属于兄弟模块的会话桥），因此这里**禁用写入按钮**，绝不在 SQL 模式下
-    // 偷偷写回旧三表标定（那就是第二套权威）。
-    aiBtn.disabled = Boolean(calibration?.locked) || sqlSource;
+    // SQL 和兼容模式分别调用各自的显式标定入口。
+    aiBtn.disabled = Boolean(calibration?.locked);
     aiBtn.setAttribute("aria-label", "用 1 次推演请求让 AI 判断当前地图的实际范围并换算每格米数");
     aiBtn.addEventListener("click", async () => {
       if (scaleCalibrating || !chatId) return;
@@ -5274,7 +5265,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       } catch { return []; }
     };
     const runGeoAdopt = async (payload, label) => {
-      const result = await api.request("POST", "/worlds/geo/adopt", payload);
+      const result = await api.request("POST", (sqlMode.enabled ? "/sql/chat/map/geo" : "/worlds/geo/adopt"), payload);
       const data = result.body?.data ?? {};
       if (result.status === 200 && result.body?.ok) {
         emitAtlasDiagnostic({ level: "info", source: "map", code: "GEO_ADOPT_COMPLETE",
@@ -5801,7 +5792,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       const ok = globalThis.confirm?.(`把「${String(npc.name)}」拖到「${label}」？作者纠偏会写入世界（账本留痕）。`) ?? false;
       if (!ok) return;
       void api
-        .request("POST", "/worlds/move-author", { chatId, entityId, toPointId })
+        .request("POST", (sqlMode.enabled ? "/sql/chat/map/move" : "/worlds/move-author"), { chatId, entityId, toPointId })
         .then((result_) => {
           if (result_.status === 200 && result_.body?.ok) {
             setStatus(`已把「${String(npc.name)}」拖到「${label}」。`, "ok");
@@ -6120,7 +6111,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         locateBtn.addEventListener("click", async () => {
           if (!(globalThis.confirm?.(`将主角位置纠偏到「${String(point.name)}」？这会更新本聊天的位置记录。`) ?? false)) return;
           try {
-            const response = await api.request("POST", "/worlds/move-author", {
+            const response = await api.request("POST", (sqlMode.enabled ? "/sql/chat/map/move" : "/worlds/move-author"), {
               chatId: String(state().chatId ?? ""), entityId: String(protagonists[0].id), toPointId: String(point.id),
             });
             if (response.status !== 200 || !response.body?.ok) {
@@ -6163,7 +6154,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         if (!chatId) { confirmStatus.textContent = "当前没有活动聊天。"; confirmStatus.className = "aw-confirm__status is-error"; return; }
         const targetLocationId = targetSelect.value ? String(targetSelect.value) : null;
         try {
-          const response = await api.request("POST", "/maps/topology/confirm", {
+          const response = await api.request("POST", (sqlMode.enabled ? "/sql/chat/map/topology" : "/maps/topology/confirm"), {
             chatId,
             operation,
             locationId: hereRowId,
@@ -6766,7 +6757,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     const measuredFrame = computeMapFrame(framePoints);
     const roomCols = Number(currentSub?.frame?.cols) > 0 ? Number(currentSub.frame.cols) : 100;
     const roomRows = Number(currentSub?.frame?.rows) > 0 ? Number(currentSub.frame.rows) : 100;
-    const floorplan = !sqlMapItems && inSub && typeof buildFloorplan === "function" ? buildFloorplan({
+    const floorplan = inSub && typeof buildFloorplan === "function" ? buildFloorplan({
       name: roomName, cols: roomCols, rows: roomRows,
       children: [...points.map((point) => ({ id: String(point.id), name: String(point.name), x: Number(point.x), y: Number(point.y) })),
         ...(tableMap?.unplacedLocations?.entries ?? []).filter((row) => row.parentLocationId === `loc:${view.pointId}`)
@@ -7412,7 +7403,10 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     // 图层顺序由 DOM 决定：底图 → 面积 → 网格 → 路线 → 地点/载具 → 徽标，与 §2.5 一致。
     areaLayer.innerHTML = "";
     if (typeof projectColorAreas === "function") {
-      const topology = tableMap?.geoTopology ?? d.map?.geoTopology ?? null;
+      const topology = sqlModel ? { areas: sqlModel.areas.filter(area => area.geometry.kind === "cells" && ["manual", "story", "worldbook"].includes(area.geometry.source)).map(area => ({
+        id: `${sqlMapView.view.branchId}|${inSub ? String(view.pointId) : "world"}|${area.locationId}`,
+        mapId: inSub ? String(view.pointId) : "world", locationId: area.locationId, cells: area.geometry.cells, evidence: area.geometry.source,
+      })) } : tableMap?.geoTopology ?? d.map?.geoTopology ?? null;
       const areaMapId = inSub ? String(view.pointId) : "world";
       const projection = topology
         ? projectColorAreas({
@@ -7487,6 +7481,27 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       } else {
         areaLayer.dataset.halos = "0";
       }
+    }
+
+    if(sqlModel && typeof projectSqlMapAreas === "function") {
+      const frame = currentSub?.frame ?? {cols:100,rows:100};
+      const projection = projectSqlMapAreas(sqlModel.areas,frame);
+      // Native SQL handles cells and polygons with their own provenance.
+      areaLayer.innerHTML = "";
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("class", "aw-areas__svg");
+      svg.setAttribute("viewBox", `${cameraFrame.minX} ${cameraFrame.minY} ${cameraFrame.spanX} ${cameraFrame.spanY}`);
+      svg.setAttribute("preserveAspectRatio", "none");
+      Object.assign(svg.style,{left:`${cameraFrame.minX}px`,top:`${cameraFrame.minY}px`,width:`${cameraFrame.spanX}px`,height:`${cameraFrame.spanY}px`});
+      for(const area of projection.areas){
+        const path=document.createElementNS("http://www.w3.org/2000/svg","path");
+        path.setAttribute("d",area.path);path.setAttribute("class",`aw-areas__area is-${area.quality}`);
+        path.style.opacity="0.18";path.dataset.locationId=area.locationId;path.dataset.source=area.source;
+        if(area.quality==='estimated')path.style.strokeDasharray="1 0.6";
+        svg.append(path);
+      }
+      areaLayer.append(svg);areaLayer.dataset.paintedCells=String(projection.areas.reduce((n,a)=>n+a.cells,0));
+      areaLayer.dataset.skippedAreas=String(projection.skipped.length);
     }
 
     const preview = state().destinationPreview;
@@ -8227,7 +8242,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
           : await readCardLoreSupplementViaSelector(currentLoreSelectionContext("bootstrap", assistantText));
         const previewRequest = { chatId, openingMessageId, userText, assistantText, recentAssistantTexts,
           ...(loreSupplement ? { loreSupplement } : {}) };
-        const result = await api.request("POST", "/scene/bootstrap", { ...previewRequest, apply: false });
+        const result = await api.request("POST", (sqlMode.enabled ? "/sql/chat/map/bootstrap" : "/scene/bootstrap"), { ...previewRequest, apply: false });
         scenePreviewBox.innerHTML = "";
         if (result.status !== 200 || !result.body?.ok) {
           scenePreviewBox.append(el("p", "aw-note aw-note--error", result.body?.error?.message ?? `识别失败（HTTP ${result.status}）`));
@@ -8255,7 +8270,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         applyBtn.addEventListener("click", async () => {
           applyBtn.disabled = true;
           try {
-            const applyResult = await api.request("POST", "/scene/bootstrap", { ...previewRequest,
+            const applyResult = await api.request("POST", (sqlMode.enabled ? "/sql/chat/map/bootstrap" : "/scene/bootstrap"), { ...previewRequest,
               apply: true, previewId: scenePreview?.previewId, baseRevision: scenePreview?.baseRevision });
             if (applyResult.status !== 200 || !applyResult.body?.ok) {
               setStatus(applyResult.body?.error?.message ?? `应用失败（HTTP ${applyResult.status}）`, "error");
@@ -10701,7 +10716,7 @@ async function importWorldbookGeography(chatId, worldId, onProgress = null, prov
     for (const loreSupplement of chunks) {
       if (String(SillyTavern.getContext()?.chatId ?? "") !== chatId) break;
       if (String(atlasRuntime.core?.getState()?.binding?.worldId ?? "") !== worldId) break;
-      const result = await atlasRuntime.api.request("POST", "/worlds/geo/adopt", { chatId, loreSupplement });
+      const result = await atlasRuntime.api.request("POST", (SillyTavern.getContext()?.extensionSettings?.[ATLAS_SETTINGS_KEY]?.[ATLAS_SQL_MODE_SETTING] === true ? "/sql/chat/map/geo" : "/worlds/geo/adopt"), { chatId, loreSupplement });
       if (result.status !== 200 || result.body?.ok !== true) {
         failure = String(result.body?.error?.message ?? `HTTP ${result.status}`).slice(0, 160);
         emitAtlasDiagnostic({ level: "warn", source: "map", code: "GEO_ADOPT_FAILED",
@@ -11208,7 +11223,7 @@ async function connectOnce() {
         const cardName = String(card?.name || ctx?.name2 || "").trim();
         const playerName = String(ctx?.name1 || "").trim();
         if (!cardName || !playerName || cardName === playerName) return true;
-        const result = await api.request("POST", "/worlds/protagonist/sync", {
+        const result = await api.request("POST", (context()?.extensionSettings?.[ATLAS_SETTINGS_KEY]?.[ATLAS_SQL_MODE_SETTING] === true ? "/sql/chat/map/protagonist" : "/worlds/protagonist/sync"), {
           chatId, worldId, cardName, playerName,
           playerDescription: String(ctx?.powerUserSettings?.persona_description || ctx?.persona_description || ""),
           cardDescription: String(card?.description || ""),

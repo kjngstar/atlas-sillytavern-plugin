@@ -125,13 +125,14 @@ test('Q03 mode changed between prepare and prose completion cannot fall back to 
   } finally { await f.close(); }
 });
 
-test('Q03 old chat without migration stays blocked and preserves its original metadata', async () => {
+test('Q08 formal UI migrates a valid old chat once and retains its original documents', async () => {
   const f = fixture(); f.current.chatMetadata.atlas = { world: { original: true }, tables: { locations: [], characters: [], items: [] } };
   try {
-    const before = JSON.stringify(f.current.chatMetadata); await f.ui.refresh();
-    assert.equal(f.ui.getState().binding, null); assert.ok(f.ui.getState().lastError.includes('迁移'));
-    await f.ui.handleEvent('MESSAGE_SENT', { kind: 'message-sent', messageId: '0', userText: '继续' });
-    assert.equal(f.calls(), 0); assert.equal(f.saves(), 0); assert.equal(JSON.stringify(f.current.chatMetadata), before);
+    const retained = JSON.stringify(f.current.chatMetadata.atlas); await f.ui.refresh();
+    assert.ok(f.ui.getState().binding); assert.equal(f.ui.getState().lastError,null);
+    await f.prepare(); assert.equal(f.calls(),0); assert.equal(f.saves(),1);
+    const {database,...old}=f.current.chatMetadata.atlas; assert.ok(database);assert.equal(JSON.stringify(old),retained);
+    await f.ui.refresh();assert.equal(f.saves(),1);
   } finally { await f.close(); }
 });
 
@@ -211,4 +212,17 @@ test('Q03 partial UI retry repairs failed operations only; host failure and repe
     await f.mutate(); assert.equal(queryBound(session.repo.db, 'SELECT COUNT(*) AS n FROM items', [])[0].n, 0);
     assert.equal(queryBound(session.repo.db, 'SELECT COUNT(*) AS n FROM locations', [])[0].n, 0);
   } finally { await f.close(); }
+});
+
+test('Q03 deleting an earlier SQL floor restores its maps and all dependent later turns',async()=>{
+ const f=fixture({model:async req=>req.anchor.hostMessageUid.includes('3')?'{"op":"location.upsert","ref":"new:later","data":{"name":"后续地点","kind":"room"}}':room});
+ try{
+  await f.ui.refresh();await f.prepare('0');await f.end('1');await f.prepare('2');await f.end('3');
+  const s=await f.provider.session('chat-auto');assert.equal(f.ui.getState().binding.lastCommittedMessageId,'3');
+  assert.equal(queryBound(s.repo.db,"SELECT COUNT(*) n FROM turns WHERE kind='narrative' AND status='committed'",[])[0].n,2);
+  await f.mutate('message-deleted','1');
+  assert.equal(queryBound(s.repo.db,'SELECT COUNT(*) n FROM locations',[])[0].n,0);assert.equal(queryBound(s.repo.db,'SELECT COUNT(*) n FROM maps',[])[0].n,0);
+  assert.equal(queryBound(s.repo.db,"SELECT COUNT(*) n FROM turns WHERE kind='narrative' AND status IN ('committed','partial')",[])[0].n,0);
+  assert.equal(f.ui.getState().binding.lastCommittedMessageId,null);
+ }finally{await f.close();}
 });

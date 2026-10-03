@@ -212,3 +212,5 @@ export {
   type AtlasNamedDiagnosticCode,
   type AtlasNamedDiagnosticSpec,
 } from "./atlas-diagnostics.ts";
+
+export { projectSqlMapAreas } from "./atlas-sql-map-areas.ts";

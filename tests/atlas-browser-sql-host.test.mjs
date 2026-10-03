@@ -52,10 +52,10 @@ test('Q01: a host switch during lazy SQL opening rejects the old identity', asyn
   await f.provider.close();
 });
 
-test('Q01: old data cannot be replaced by a new empty SQL database before migration', async () => {
-  const f = hostFixture(); f.host.chatMetadata.atlas = { tables: { locations: [], characters: [], items: [] } };
+test('Q08: corrupt legacy payload cannot be replaced by a new empty SQL database', async () => {
+  const f = hostFixture(); f.host.chatMetadata.atlas = { tables: '损坏的旧三表' };
   const before = JSON.stringify(f.host.chatMetadata);
-  await assert.rejects(f.provider.session('browser-host-A'), error => error.code === 'SQL_MIGRATION_REQUIRED');
+  await assert.rejects(f.provider.session('browser-host-A'), error => error.code === 'LEGACY_CORRUPT');
   assert.equal(JSON.stringify(f.host.chatMetadata), before); assert.equal(f.saves(), 0);
   await f.provider.close();
 });
