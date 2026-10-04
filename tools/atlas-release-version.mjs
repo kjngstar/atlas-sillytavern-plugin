@@ -309,8 +309,8 @@ const VERSION_POINT_SPECS = [
     assertedBy: ["tests/atlas-integration.test.mjs serverMod.ATLAS_PLUGIN_VERSION", "tests/atlas-server-plugin.test.mjs health version", "tests/atlas-packed-replay.test.mjs"],
   },
   {
-    id: "src/atlas-server.ts#health.version",
-    file: "src/atlas-server.ts",
+    id: "src/atlas-settings-routes.ts#health.version",
+    file: "src/atlas-settings-routes.ts",
     role: "dispatch 核心 health 响应里的 version（「六处同步第 6 处」）",
     required: true,
     locator: { type: "anchored-field", anchor: "async function handleHealth(", key: "version" },

@@ -1,72 +1,55 @@
-# Atlas 源码目录
+# Atlas 源码与构建
 
-阿特拉斯 / Atlas 插件的工程源码。运行入口与安装说明见仓库根 `README.md` 与 `atlas-extension/README.md`。
-
-## 命令
-
-在仓库根执行：
+权威源码为根 `index.js`、`style.css`、`settings.html`、`manifest.json`、`ui/` 和 `src/`。
+`atlas-extension/`、根 `dist/` 与 `release/` 由工具生成，不手工修补镜像。
 
 ```bash
-npm install
-npm run test        # 全部单测（node:test，--experimental-strip-types）
-npm run typecheck   # tsc --noEmit -p tsconfig.json
-npm run pack        # 构建并组装 release/ 自包含安装包（同时同步仓库根安装单元）
+node tools/sync-mirror.mjs
+npm run typecheck
+npm run pack
+npm test
+node tools/audit-source-references.mjs
+node tools/verify-sql-release.mjs
 ```
 
-## 结构
+## 正式运行
 
-```text
-阿特拉斯/
-  package.json                 # 构建与测试脚本
-  tsconfig.json                # 类型检查
-  src/
-    atlas-contract.ts          # 纯数据契约（稳定错误码与硬上限）
-    atlas-relevance.ts         # 相关性核心：附近地点 / NPC 命中原因 / 触发筛选 / 稳定种子
-    atlas-turn.ts              # 回合事务：prepare（零 API）与 commit（账本原子采用）
-    atlas-server.ts            # 引擎纯 dispatch 核心：路由 / 队列 / RPM / 幂等
-    atlas-api-client.ts        # 推演 API 客户端：单请求 / 错误分类 / 草稿解析 / 脱敏
-    atlas-ui-core.ts           # UI 核心：状态机 / 事件映射 / 注入编排（宿主无关）
-    atlas-lorebook.ts          # 世界书注入层：条目规划 / 严格解析 / 滚动修剪
-    atlas-browser-store.ts     # 浏览器侧文档存储（extensionSettings 持久化，有界）
-    atlas-browser-entry.ts     # 浏览器打包入口（UI 核心 + 引擎核心导出）
-  atlas-extension/             # SillyTavern UI 扩展（manifest / index.js / style.css / settings.html）
-  atlas-server-plugin/         # 进阶形态：Server Plugin（文件级数据安全）
-  lib/                         # 世界核心快照（来源与同步纪律见 lib/VENDORED.md）
-  tests/                       # 单测 / 集成 / 扩展夹具契约测试
-  tools/                       # 构建（build.mjs）与打包（pack.mjs）
-```
+浏览器 `index.js` 使用 `src/atlas-browser-entry.ts` 的产物启动；宿主注入按聊天隔离的
+SQL provider、模型端口和保存端口。`atlas-production-server` 仅分发设置和 SQL 路由。
+Node 插件也注入同一 SQL 运行时，聊天信封原子保存到 `sql-chat:<chatUid>` 文档。
+新安装默认启用 SQL；已明确关闭的设置保留为暂停，关闭期间不加载 WASM、不运行旧写者。
 
-## 模块依赖方向
+回合进入 `atlas-sql-chat` → Repository 隔离候选 → 编译语义操作、时间与后台结算
+→ 校验、导出 → 宿主保存确认 → 发布新修订。重试沿用原楼日志，回退撤销原楼及依赖后文。
+地图写入、作者纠偏、布局、尺度、底图、导入与修复使用同一候选/保存/回退机制。
+只读缓存按聊天、分支、存档修订、快照和资产指纹刷新；失败报告原因，不用旧档覆盖 SQL。
 
-```text
-atlas-extension/index.js ─→ dist/atlas-ui-core.mjs（browser-entry 打包产物）
-                              ├─→ src/atlas-ui-core.ts ─→ src/atlas-server.ts ─→ src/atlas-turn.ts
-                              ├─→ src/atlas-lorebook.ts          │
-                              └─→ src/atlas-browser-store.ts     └─→ src/atlas-api-client.ts
-                                                                          src/atlas-relevance.ts
-```
+## 职责边界
 
-世界核心快照只 import、不复制：`lib/world-engine.ts`、`lib/world-npc.ts`、`lib/world-ledger.ts`、
-`lib/world-checkpoint.ts`、`lib/world-definition.ts`、`lib/world-schema.ts`、`lib/world-cards.ts`。
+| 模块 | 职责 |
+| --- | --- |
+| `ui/atlas-host-context.mjs` | 宿主会话、身份和迟到响应守卫，注入 context 端口 |
+| `ui/atlas-sql-view-controller.mjs` | 只读快照连接、视图缓存、失效与关闭 |
+| `ui/atlas-scene-ui-adapter.mjs` | 地图、附近和兼容数据的纯只读适配，无 DOM/持久化 |
+| `ui/atlas-map-controller.mjs` | 相机、层级栈、手势、弹卡位置、resize 与 cleanup |
+| `src/atlas-production-server.ts` | 正式路由分发，拒绝已退出的旧写入口 |
+| `src/atlas-server-contract.ts` | 宿主/存储类型契约，独立于旧执行器 |
+| `src/atlas-settings-routes.ts` | 设置命令、脱敏响应与访问控制 |
+| `src/atlas-sql-routes.ts` | SQL 会话、提交、重试、回退与查询路由 |
+| `src/atlas-browser-sql-host.ts` / `atlas-node-sql-host.ts` | 当前聊天 SQL 生命周期和宿主保存桥 |
+| `src/atlas-sql-*` / `atlas-db-*` / `atlas-sim-*` | 地图、迁移、提示词、数据库和后台结算 |
 
-## 源码与生成文件
+`src/atlas-server.ts` 是正式入口的转出门面。原三表执行器已移到
+`tests/legacy/atlas-server-fixture.ts`，仅供历史回归；不进入正式源码入口或发布产物。
+旧解析器、类型与必要的只读投影保留在迁移/兼容边界，不持续反向写入。
+`lib/` 按实际类型、迁移、演示和测试引用保留，来源见 `lib/VENDORED.md`。
 
-只编辑根 `index.js`、`style.css`、`settings.html`、`manifest.json` 和 `src/` 源码。
-根入口修改后执行 `node tools/sync-mirror.mjs`；`npm run pack` 同步镜像、刷新根 `dist/`
-并生成 `release/`。不要手动修补生成文件；根 `dist/` 仍是仓库安装单元的一部分。
+Leaflet 地图实验台仍是独立实验；正式渲染复用原网格、相机和房间布局模块。
+引用审查区分生产、类型、测试、实验及无法静态解析的引用；它不自动删除文件。
 
-## 生产、实验与待接线路径
+## 验收
 
-- 当前生产路径：浏览器入口启动核心，默认回合走三表增量，地图、附近与注入读取其投影。
-- SQL 路径：`atlas-sql-session`、Repository、SQL 路由和视图已实现；正式宿主注入、回合分流与快照缓存尚待贯通，不能用手工注入 Repository 的测试代替正式接线验收。
-- 实验路径：`atlas-map-render-model.ts` 当前供地图实验台和测试使用，Leaflet 尚未成为正式渲染器。
-- 待接线功能：`atlas-sim-time`、`atlas-sim-scheduler`、`atlas-sim-decision-context`、`atlas-sim-outcome-context` 等保留，用于 SQL 时间推进、后台行动与传播，尚未在每个正式回合完整运行。
-- 引用审查：`node tools/audit-source-references.mjs` 输出生产、类型、测试、实验入边与无法解析的动态引用；它不自动删除模块，也不代替行为验收。
-
-## 纪律
-
-- 推演密钥只存浏览器侧、只经酒馆自带后端代理转发；响应与日志只出脱敏视图。
-- 所有契约带 `ATLAS_PROTOCOL_VERSION`，不兼容时拒绝并说明，不静默猜测。
-- 错误序列化只允许白名单字段，禁止携带 apiKey / Authorization / 本地绝对路径。
-- prepare 零模型请求；一条最终回复的 commit 恰好 1 条请求；重复提交 0 条新请求。
-- `lib/` 快照不得做 Atlas 私有修改；核心演进先改上游，再整体重新快照（见 `lib/VENDORED.md`）。
+发布产物验收必须加载实际 WASM 和真实 SQL 快照，不能只检查文件存在。
+正文推演与后台阶段按需要调用模型，重复通知不再请求；预热/预览不调用模型。
+世界书按启用条目原顺序与明确预算发送，不按内容筛除；作者视图不扩大正文注入认知范围。
+完整施工与实机证据见 `docs/atlas-architecture-cleanup-progress.md`。

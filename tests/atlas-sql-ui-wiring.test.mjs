@@ -1,3 +1,4 @@
+import {readUiSource} from './ui-source-helper.mjs';
 /**
  * atlas-sql-ui-wiring.test.mjs — H05–H08 / H12（SQL 世界数据 UI 接线）定向验收。
  *
@@ -10,7 +11,7 @@
  *
  * 本文件只做一件事：证明 UI 侧的 SQL 世界数据接线是**显式 opt-in** 的——
  *   关闭 → 旧路径一字不变、且绝不加载 sql.js（一次都不尝试）；
- *   开启 → 地图 / 附近 / 日志只读 SQL 视图；缺核心 / 缺视图 → 具名诊断 + 旧渲染器兜底。
+ *   开启 → 地图 / 附近 / 日志只读 SQL 视图；缺核心 / 缺视图 → 具名诊断 + 空的当前视图。
  * 测试用 data: URL 桩模块替代 `dist/atlas-sql.mjs`（绝不真的加载 sql.js/wasm）。
  */
 
@@ -26,7 +27,7 @@ import { encodeSnapshot } from '../src/atlas-db-envelope.ts';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 /** 发布镜像 = 真实扩展入口（与 atlas-changes-page / atlas-extension-harness 同源）。 */
-const INDEX_SOURCE = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
+const INDEX_SOURCE = readUiSource(join(root, "atlas-extension", "index.js"));
 
 /** 每个 mount 用唯一 URL：data: URL 模块按 URL 缓存，串用会让模块级状态跨用例泄漏。 */
 let mountSeq = 0;
@@ -406,10 +407,10 @@ test("H05：模式关闭 → 旧路径照常渲染，且 loadSqlCore 一次都�
 });
 
 // ---------------------------------------------------------------------------
-// 2) 模式开启但 SQL 核心不可用：具名诊断 + 旧渲染器兜底
+// 2) 模式开启但 SQL 核心不可用：具名诊断 + 空的当前视图
 // ---------------------------------------------------------------------------
 
-test("H05/H12：模式开启但 SQL 核心不可用 → 具名诊断 SQL_CORE_UNAVAILABLE，面板退回旧渲染器（不静默、不白屏）", async () => {
+test("H05/H12：模式开启但 SQL 核心不可用 → 具名诊断 SQL_CORE_UNAVAILABLE，面板显示具名错误且不混入旧世界", async () => {
   const mounted = await mountAtlas({
     page: "map",
     sqlCandidates: [missingCoreUrl()],
@@ -427,7 +428,7 @@ test("H05/H12：模式开启但 SQL 核心不可用 → 具名诊断 SQL_CORE_UN
   assert.ok(String(note.textContent).includes("dist/atlas-sql.mjs"), "提示要说清缺哪个产物");
 
   const ids = [...mounted.container.querySelectorAll("[data-point-id]")].map((node) => node.dataset.pointId).sort();
-  assert.deepEqual(ids, ["1", "2"], "核心不可用时必须退回旧渲染器（绝不空白面板）");
+  assert.deepEqual(ids, [], "SQL 核心不可用时只显示具名错误，不能把旧三表点位冒充当前世界");
   mounted.dom.window.close();
 });
 

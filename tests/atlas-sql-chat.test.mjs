@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createAtlasUiCore } from '../src/atlas-ui-core.ts';
-import { createAtlasServerCore } from '../src/atlas-server.ts';
+import { createAtlasServerCore } from './legacy/atlas-server-fixture.ts';
 import { createBrowserSqlHost } from '../src/atlas-browser-sql-host.ts';
 import { loadAtlasSqlRuntime } from '../src/atlas-sql-session.ts';
 import { queryBound } from '../src/atlas-db-runtime.ts';

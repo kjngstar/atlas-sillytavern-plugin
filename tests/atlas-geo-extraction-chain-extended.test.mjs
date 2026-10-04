@@ -22,7 +22,7 @@ import assert from "node:assert/strict";
 
 import { buildStarterWorld } from "../src/atlas-starter-world.ts";
 import { legacyStartWorld } from "./atlas-legacy-start-world.mjs";
-import { createAtlasServerCore, createMemoryDocumentStore, planGeoRelations } from "../src/atlas-server.ts";
+import { createAtlasServerCore, createMemoryDocumentStore, planGeoRelations } from "./legacy/atlas-server-fixture.ts";
 import {
   MAP_DOC_CALIBRATIONS_MAX,
   MAP_DOC_LIMITS,

@@ -342,7 +342,7 @@ test("B06 便利封装：noop 不改数据，解析失败不产生 delta", () =>
  * C03 / C05：上下文装配与一次回合提交（都是纯函数）
  * ================================================================== */
 
-const { buildTableDeltaContext, commitTableDeltaTurn } = await import("../src/atlas-server.ts");
+const { buildTableDeltaContext, commitTableDeltaTurn } = await import("./legacy/atlas-server-fixture.ts");
 const { buildWorldFromTemplate, getDemoTemplate } = await import("../lib/demo-events.ts");
 const { parseWorld } = await import("../lib/world-schema.ts");
 
@@ -830,7 +830,7 @@ test("A05 大体积会话：T16 规模可确定性构造，分块体积与 paylo
 });
 
 test("A05 一次 handle 往返：payload 大小与耗时实测，会话不被写坏", async (t) => {
-  const { createAtlasServerCore, createMemoryDocumentStore } = await import("../src/atlas-server.ts");
+  const { createAtlasServerCore, createMemoryDocumentStore } = await import("./legacy/atlas-server-fixture.ts");
   const session = buildLargeSession();
   const core = createAtlasServerCore({ store: createMemoryDocumentStore() });
   const carrier = createSessionCarrier(core, { session });
@@ -846,7 +846,7 @@ test("A05 一次 handle 往返：payload 大小与耗时实测，会话不被写
 });
 
 test("A05 越界输入被校验拒绝，且不损坏旧档", async () => {
-  const { createAtlasServerCore, createMemoryDocumentStore } = await import("../src/atlas-server.ts");
+  const { createAtlasServerCore, createMemoryDocumentStore } = await import("./legacy/atlas-server-fixture.ts");
   const small = () => buildLargeSession({
     maps: 1, locations: 1, characters: 1, items: 1, tasks: 1, signals: 1, deliveries: 1,
     edges: 0, areas: 0, vehicles: 0, turns: 1, eventsPerTurn: 1,

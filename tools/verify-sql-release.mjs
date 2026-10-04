@@ -76,7 +76,7 @@ try {
   await startupPage.goto(origin);
   const off = await startupPage.evaluate(async () => {
     let saves = 0;
-    const host = { chatId: 'release-startup', chatMetadata: {}, extensionSettings: {}, chat: [],
+    const host = { chatId: 'release-startup', chatMetadata: {}, extensionSettings: {atlas_world_sim:{sqlMode:false}}, chat: [],
       saveMetadata: async () => { saves++; return true; }, saveSettingsDebounced() {},
       getRequestHeaders: () => ({}), eventSource: { on() {}, off() {}, removeListener() {} }, event_types: {} };
     window.SillyTavern = { getContext: () => host };
@@ -90,7 +90,7 @@ try {
     return result.body.data;
   });
   assert.equal(off.sqlMode, false);
-  assert.equal(startupRequests.some(url => /atlas-sql|\.wasm/.test(url)), false, 'SQL off startup must not load SQL');
+  assert.equal(startupRequests.some(url => /\/dist\/atlas-sql(?:\.mjs|-worker\.js)|\.wasm/.test(url)), false, 'SQL off startup must not load SQL');
   const started = await startupPage.evaluate(async () => {
     const host = window.releaseStartupHost;
     host.extensionSettings.atlas_world_sim = { sqlMode: true };

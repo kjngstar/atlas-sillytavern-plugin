@@ -10,7 +10,7 @@ import type { AtomicGroup, RowMutation } from './atlas-ops-contract.ts';
 export type SqlMapCalibration = {mapId:string;metersPerCell?:number;locked?:boolean;frame?:{cols:number;rows:number};quality?:'estimated'|'confirmed'};
 
 export function compileSqlSceneMaps(input:{db:SqlDatabase;branchId:string;turnId:string;clockS:number;
-  makeId:(kind:string,opId:string,alias:string)=>string;calibration?:SqlMapCalibration;ensureScenes?:boolean;povName?:string}):AtomicGroup|null {
+  makeId:(kind:string,opId:string,alias:string)=>string;calibration?:SqlMapCalibration;ensureScenes?:boolean;povName?:string;background?:{mapId:string;asset:import('./atlas-db-contract.ts').AtlasAssetRef|null}}):AtomicGroup|null {
   const {db,branchId,turnId,clockS,makeId}=input,read=createTableReadPort(db);
   const locations=read.selectWhere('locations',{branch_id:branchId,status:'active'},1000);
   if(input.ensureScenes && Number(queryBound(db,"SELECT COUNT(*) AS n FROM locations WHERE branch_id=? AND status='active'",[branchId])[0].n)>1000)
@@ -19,8 +19,12 @@ export function compileSqlSceneMaps(input:{db:SqlDatabase;branchId:string;turnId
   const changes:RowMutation[]=[],opId=`scene_maps_${turnId}`;
   const change=(table:string,before:Record<string,unknown>|null,after:Record<string,unknown>)=>{
     if(before&&JSON.stringify(before)===JSON.stringify(after))return;
-    changes.push({table,rowId:String(after.id),before,after:before&&'row_rev' in before?{...after,row_rev:Number(before.row_rev)+1,updated_turn_id:turnId}:after,
-      sourceOpIds:[opId],basis:{kind:input.calibration?'manual':'estimate',reason:input.calibration?'作者地图标定':'按实际地点层级建立地图；布局坐标不证明真实距离',certainty:'inferred'}});
+    const previous=changes.find(change=>change.table===table&&change.rowId===after.id);
+    const baseline=previous?previous.before:before;
+    const next=previous?{...previous.after,...Object.fromEntries(Object.entries(after).filter(([key,value])=>JSON.stringify(value)!==JSON.stringify(before?.[key])))}:after;
+    const mutation:RowMutation={table,rowId:String(after.id),before:baseline,after:baseline&&'row_rev' in baseline?{...next,row_rev:Number(baseline.row_rev)+1,updated_turn_id:turnId}:next,
+      sourceOpIds:[opId],basis:{kind:input.calibration||input.background?'manual':'estimate',reason:input.calibration?'作者地图标定':input.background?'作者设置地图底图':'按实际地点层级建立地图；布局坐标不证明真实距离',certainty:input.calibration||input.background?'confirmed':'inferred'}};
+    if(previous)changes[changes.indexOf(previous)]=mutation;else changes.push(mutation);
   };
   const makeMap=(id:string,name:string,kind:string,container:string|null,frame:{cols:number;rows:number})=>createRow('maps',{
     name,kind,container_location_id:container,frame_json:{...frame,origin_x:0,origin_y:0,reference_width_cells:frame.cols,reference_height_cells:frame.rows},
@@ -69,6 +73,11 @@ export function compileSqlSceneMaps(input:{db:SqlDatabase;branchId:string;turnId
       scale_basis_json:{refs:[],note:'作者确认'},calibration_rev:Number(map.calibration_rev)+1}:{}),
       ...(c.locked!==undefined?{scale_locked:c.locked?1:0}:{}),...(c.frame?{frame_json:{...(map.frame_json as Record<string,unknown>),...c.frame,reference_width_cells:c.frame.cols,reference_height_cells:c.frame.rows}}:{})};
     change('maps',map,after);
+  }
+  if(input.background){
+    const target=maps.find(map=>map.id===input.background!.mapId||input.background!.mapId==='world'&&map.id===root?.id);
+    if(!target)throw new AtlasDbError('REF_UNKNOWN','底图对应地图不存在',{});
+    change('maps',target,{...target,background_asset_key:input.background.asset?.key??null});
   }
   return changes.length?{id:opId,opIds:[opId],dependsOn:[],readSet:[],mutations:changes}:null;
 }

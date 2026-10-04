@@ -3,7 +3,7 @@
  *
  * 用 esbuild 把 TS 纯核心打包成组件目录内的自包含 ESM 产物：
  * - src/atlas-browser-entry.ts → atlas-extension/dist/atlas-ui-core.mjs（browser，含引擎与契约）
- * - src/atlas-server.ts        → atlas-server-plugin/dist/atlas-server.mjs（node，含世界核心快照）
+ * - src/atlas-production-server.ts → atlas-server-plugin/dist/atlas-server.mjs（node，含世界核心快照）
  *
  * esbuild 优先本仓库 node_modules（devDependencies），在 Atlasia 工作区内开发时向上兜底；
  * esbuild 不进发布包。打包是复制快照，不修改 lib/ 世界核心快照。
@@ -50,7 +50,7 @@ export async function buildAll({ log = () => {} } = {}) {
   log("built atlas-extension/dist/atlas-ui-core.mjs");
   await esbuild.build({
     ...common,
-    entryPoints: [join(root, "src", "atlas-server.ts")],
+    entryPoints: [join(root, "src", "atlas-production-server.ts")],
     outfile: join(root, "atlas-server-plugin", "dist", "atlas-server.mjs"),
     platform: "node",
     target: "node18",
@@ -64,6 +64,7 @@ export async function buildAll({ log = () => {} } = {}) {
     ...common,
     entryPoints: [join(root, "src", "atlas-sql-browser-entry.ts")],
     outfile: join(root, "atlas-server-plugin", "dist", "atlas-sql.mjs"),
+    banner: { js: 'import {createRequire as atlasCreateRequire} from "node:module"; import {fileURLToPath as atlasFileURLToPath} from "node:url"; import {dirname as atlasDirname} from "node:path"; const require=atlasCreateRequire(import.meta.url); const __dirname=atlasDirname(atlasFileURLToPath(import.meta.url));' },
     platform: "node",
     target: "node18",
   });
@@ -112,6 +113,9 @@ export async function buildAll({ log = () => {} } = {}) {
     }
     copyFileSync(source, join(vendorDir, to));
   }
+  const nodeVendorDir=join(root,"atlas-server-plugin","dist","vendor");
+  mkdirSync(nodeVendorDir,{recursive:true});
+  copyFileSync(join(vendorDir,"sql-wasm.wasm"),join(nodeVendorDir,"sql-wasm.wasm"));
   if (missingVendor.length > 0) {
     throw new Error(`sql.js 本地资源缺失（不从 CDN 兜底）：${missingVendor.join(", ")}`);
   }

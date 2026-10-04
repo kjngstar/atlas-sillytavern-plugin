@@ -530,6 +530,7 @@ export interface AtlasSqlRepository {
 }
 
 export interface AtlasModelPort {
+  preview?(request:import('./atlas-ops-contract.ts').ModelBatchRequest):Promise<{messages:Array<{role:string;content:string;chars:number}>;promptSource:string;missing:Record<string,boolean>;coreSaved:boolean}>;
   request(input: import('./atlas-ops-contract.ts').ModelBatchRequest): Promise<import('./atlas-ops-contract.ts').ModelBatchResponse>;
 }
 

@@ -73,6 +73,7 @@ function staleResult(ctx: ViewContext, requested: number | undefined): ViewResul
 export type MapViewItem = {
   mapId: string;
   name: string;
+  backgroundAssetKey?: string|null;
   kind: string;
   containerLocationId: string | null;
   metersPerCell: number | null;
@@ -250,6 +251,7 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
       scaleQuality: String(map.scale_quality ?? 'uncalibrated'),
       scaleLocked: Number(map.scale_locked ?? 0) === 1,
       calibrationRev: Number(map.calibration_rev ?? 1),
+      backgroundAssetKey:map.background_asset_key?String(map.background_asset_key):null,
       defaultTerrain: String(map.default_terrain ?? 'unknown'),
       points:ctx.viewMode==='pov'?points.filter(point=>!point.hidden):points,
       coarseList:ctx.viewMode==='pov'?coarseList.filter(entry=>!entry.hidden):coarseList,

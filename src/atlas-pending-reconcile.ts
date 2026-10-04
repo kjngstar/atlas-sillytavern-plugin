@@ -21,7 +21,7 @@
  * - 不修改世界、绑定、turn 文档——只动 pending:*
  */
 
-import type { AtlasDocumentStore } from "./atlas-server.ts";
+import type { AtlasDocumentStore } from "./atlas-server-contract.ts";
 
 export interface ScannedPending {
   /** pending 文档全名（含 `pending:` 前缀）。 */

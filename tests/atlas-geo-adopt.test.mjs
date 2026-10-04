@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import { buildStarterWorld } from "../src/atlas-starter-world.ts";
 // 提炼去重 / 归属回退的基线需要「已有地理」的旧存档形状（新世界是空地理，见文末用例）
 import { legacyStartWorld } from "./atlas-legacy-start-world.mjs";
-import { createAtlasServerCore, createMemoryDocumentStore } from "../src/atlas-server.ts";
+import { createAtlasServerCore, createMemoryDocumentStore } from "./legacy/atlas-server-fixture.ts";
 import { ATLAS_ERROR_CODES } from "../src/atlas-contract.ts";
 import { createSessionCarrier, carrierAsCore } from "./atlas-session-helper.mjs";
 

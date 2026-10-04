@@ -6,13 +6,13 @@ import ts from 'typescript';
 const slash = value => value.replaceAll('\\', '/');
 export const DEFAULT_ROOTS = [
   'index.js', 'src/atlas-browser-entry.ts', 'src/atlas-sql-browser-entry.ts',
-  'src/atlas-sql-worker-entry.ts', 'src/atlas-server.ts', 'atlas-server-plugin/index.mjs',
+  'src/atlas-sql-worker-entry.ts', 'src/atlas-production-server.ts', 'atlas-server-plugin/index.mjs',
 ];
 const GENERATED_ENTRIES = {
   'dist/atlas-ui-core.mjs': 'src/atlas-browser-entry.ts',
   'dist/atlas-sql.mjs': 'src/atlas-sql-browser-entry.ts',
   'dist/atlas-sql-worker.js': 'src/atlas-sql-worker-entry.ts',
-  'atlas-server-plugin/dist/atlas-server.mjs': 'src/atlas-server.ts',
+  'atlas-server-plugin/dist/atlas-server.mjs': 'src/atlas-production-server.ts',
   'atlas-server-plugin/dist/atlas-sql.mjs': 'src/atlas-sql-browser-entry.ts',
 };
 const PENDING = new Set([
@@ -34,7 +34,7 @@ export function auditSourceReferences(root, { productionRoots = DEFAULT_ROOTS, g
       else if (/\.(?:ts|mjs|js)$/.test(entry.name)) files.push(slash(relative(root, path)));
     }
   };
-  for (const directory of ['src', 'lib', 'tools', 'tests', 'atlas-server-plugin']) walk(join(root, directory));
+  for (const directory of ['src', 'lib', 'ui', 'tools', 'tests', 'atlas-server-plugin']) walk(join(root, directory));
   for (const file of productionRoots) if (existsSync(join(root, file)) && !files.includes(file)) files.push(file);
   files.sort();
   const present = new Set(files);
@@ -105,7 +105,7 @@ export function auditSourceReferences(root, { productionRoots = DEFAULT_ROOTS, g
   const productionWithTypes = traverse(productionRoots, true);
   const tests = traverse(files.filter(file => file.startsWith('tests/')), true);
   const experiments = traverse(files.filter(file => file.startsWith('tools/map-lab/')), true);
-  const modules = files.filter(file => file.startsWith('src/') || file.startsWith('lib/')).map(file => {
+  const modules = files.filter(file => file.startsWith('src/') || file.startsWith('lib/') || file.startsWith('ui/')).map(file => {
     const incoming = edges.filter(edge => edge.to === file).map(edge => ({ ...edge,
       sourceUses: [production.has(edge.from) ? 'production' : null,
         productionWithTypes.has(edge.from) && !production.has(edge.from) ? 'production-type' : null,

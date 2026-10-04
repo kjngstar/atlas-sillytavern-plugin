@@ -14,7 +14,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ATLAS_PLUGIN_ROUTES, createAtlasServerPlugin } from '../atlas-server-plugin/index.mjs';
-import { ATLAS_ROUTE_MANIFEST } from '../src/atlas-server.ts';
+import { ATLAS_ROUTE_MANIFEST } from './legacy/atlas-server-fixture.ts';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const sqlRoutes = ['/sql/turn', '/sql/retry', '/sql/rollback', '/sql/state', '/sql/maintenance', '/sql/migrate'];
@@ -65,7 +65,7 @@ test('H13-03 构建产物存在时能真正载入 SQL 运行时（同一入口�
 });
 
 test('H13-04 无 repository 时 /sql/state 回具名诊断而不是 404/崩溃', async () => {
-  const { createAtlasServerCore } = await import('../src/atlas-server.ts');
+  const { createAtlasServerCore } = await import('./legacy/atlas-server-fixture.ts');
   const store = {
     async read() {
       return null;

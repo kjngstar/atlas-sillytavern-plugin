@@ -5,7 +5,7 @@ import { createDefaultSettingsV2, applySettingsCommand, settingsViewV2 } from '.
 import { DEFAULT_SQL_PROMPT_SEGMENTS } from '../src/atlas-sql-prompts.ts';
 import { buildStagePrompt } from '../src/atlas-ops-prompts.ts';
 import { createBrowserSqlHost } from '../src/atlas-browser-sql-host.ts';
-import { createAtlasServerCore } from '../src/atlas-server.ts';
+import { createAtlasServerCore } from './legacy/atlas-server-fixture.ts';
 import { loadAtlasSqlRuntime } from '../src/atlas-sql-session.ts';
 import { queryBound } from '../src/atlas-db-runtime.ts';
 

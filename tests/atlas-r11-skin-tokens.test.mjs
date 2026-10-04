@@ -1,3 +1,4 @@
+import {readUiSource} from './ui-source-helper.mjs';
 /**
  * atlas-r11-skin-tokens.test.mjs — R11 增量皮肤令牌 + 新样式类契约测试。
  *
@@ -21,7 +22,7 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const styleCss = readFileSync(resolve(root, "style.css"), "utf8");
-const indexJs = readFileSync(resolve(root, "index.js"), "utf8");
+const indexJs = readUiSource(resolve(root, "index.js"));
 
 const REQUIRED_TOKENS = [
   // R11 增量

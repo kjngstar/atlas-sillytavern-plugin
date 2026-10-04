@@ -34,7 +34,7 @@ export {
   createAtlasServerCore,
   type AtlasServerCore,
   type AtlasDocumentStore,
-} from "./atlas-server.ts";
+} from "./atlas-production-server.ts";
 
 export { DEFAULT_WORLD_TURN_SYSTEM_PROMPT } from "./atlas-api-client.ts";
 

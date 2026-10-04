@@ -1,3 +1,5 @@
+import {buildSqlForegroundRequest} from './atlas-sql-model-context.ts';
+import {applySqlLegacyImport} from './atlas-sql-legacy-import.ts';
 /**
  * atlas-db-repository.ts — 业务存储唯一入口（B05–B09 / B17–B19 / E06 / E09）。
  *
@@ -139,7 +141,7 @@ export function assertTwentyTables(db: SqlDatabase): string[] {
   return tables;
 }
 
-type StoredCandidate = CandidateInfo & { db: SqlDatabase };
+type StoredCandidate = CandidateInfo & { db: SqlDatabase; assets?:AtlasAssetRef[] };
 
 /**
  * 创建 Repository。返回对象同时满足 §16.4 的 AtlasSqlRepository 与查询/诊断辅助方法。
@@ -278,7 +280,7 @@ export function createSqlRepository(options: RepositoryOptions) {
       storageRevision: storageRevision + 1,
       activeBranchId: candidate.anchor.branchId,
       schemaVersion: ATLAS_SCHEMA_VERSION,
-      assets: envelopeAssets,
+      assets: stored.assets ?? envelopeAssets,
     });
     stored.snapshot = bytes;
     stored.snapshotSha256 = snapshotSha256;
@@ -495,6 +497,7 @@ export function createSqlRepository(options: RepositoryOptions) {
         db = stored.db;
         enableForeignKeys(db);
         storageRevision += 1;
+        envelopeAssets=stored.envelope.assets.map(asset=>({...asset}));
         candidates.delete(ack.token);
         for (const [token, other] of candidates) {
           if (other.kind === 'turn' && other.anchor.chatUid === chatUid) {
@@ -574,6 +577,10 @@ export function createSqlRepository(options: RepositoryOptions) {
       currentClock,
       currentHeadTurnId,
       branchRow,
+      setMigrationAssets(assets:AtlasAssetRef[]){
+        if(storageRevision!==0||candidates.size)throw new AtlasDbError('MIGRATION_ALREADY_APPLIED','只允许在未发布的迁移基点登记旧底图',{});
+        envelopeAssets=assets.map(asset=>({...asset}));
+      },
     },
   };
 
@@ -653,24 +660,7 @@ export function createSqlRepository(options: RepositoryOptions) {
           });
           break;
         }
-        const request = buildStagePrompt({
-          phase,
-          allowedOps: input.manual ? undefined : undefined,
-          assistantSource: input.assistantText,
-          userSource: input.userText,
-          entityRefs: collectEntityRefs(tables, branchId),
-          geoEntities:collectEntityRefs(tables,branchId).join('\n'),
-          mapScope:JSON.stringify(tables.selectWhere('maps',{branch_id:branchId,status:'active'},1000).map(map=>({ref:foregroundKnownRefs.find(r=>r.id===map.id)?.alias,name:map.name,frame:map.frame_json,scaleLocked:map.scale_locked}))),
-          geoSources:input.assistantText,
-          sourceSnapshot,
-          batchId: `${phase}_${turnId}`,
-        });
-        request.anchor = anchor;
-        request.sourceSnapshot = sourceSnapshot;
-        request.promptInput = { injectionText: collectEntityRefs(tables, branchId).join('\n'),
-          userText: input.userText, assistantText: input.assistantText,
-          loreSupplement: sourceSnapshot.filter(s => s.kind === 'lorebook').map(s => s.text).join('\n'),
-          baseRevision: anchor.baseRevision };
+        const request = buildSqlForegroundRequest(tables,branchId,input,phase,turnId);
         const startedWall = now();
         let response: ModelBatchResponse;
         try {
@@ -850,14 +840,22 @@ export function createSqlRepository(options: RepositoryOptions) {
       }
 
       // All program/model settlement belongs to this same isolated floor. No SQL
-      if(input.sceneMaps||input.mapCalibration){
-        const mapGroup=compileSqlSceneMaps({db:candidateDb,branchId,turnId,clockS:clockBefore,makeId,ensureScenes:input.sceneMaps,calibration:input.mapCalibration,povName:input.povName});
+      if(input.legacyImport!==undefined){
+        const imported=applySqlLegacyImport({db:candidateDb,branchId,turnId,clockS:clockBefore,nowWallMs:now(),rulesetVersion,makeId,legacy:input.legacyImport});
+        groupResults.push(imported.result);allIssues.push(...imported.issues);
+      }
+      if(input.sceneMaps||input.mapCalibration||input.mapBackground){
+        const mapGroup=compileSqlSceneMaps({db:candidateDb,branchId,turnId,clockS:clockBefore,makeId,ensureScenes:input.sceneMaps,calibration:input.mapCalibration,povName:input.povName,background:input.mapBackground});
         if(mapGroup){
           const mapResult=applyGroups(candidateDb,[mapGroup],{branchId,turnId,attemptId:'scene-maps',validate:true});
           if(mapResult.journalIssues.length||mapResult.groups.some(group=>group.status==='rejected'||group.status==='blocked'))
             throw new AtlasDbError('SCENE_MAP_WRITE_FAILED','地图结构候选未通过校验',{groups:mapResult.groups,journal:mapResult.journalIssues});
           groupResults.push(...mapResult.groups);
         }
+      }
+      if(input.mapBackground?.asset){
+        const asset=input.mapBackground.asset;
+        (candidates.get(candidate.token) as StoredCandidate).assets=[...envelopeAssets.filter(old=>old.key!==asset.key),asset];
       }
       // All program/model settlement belongs to this same isolated floor. No SQL
       // transaction is held across its model requests; host publication remains later.

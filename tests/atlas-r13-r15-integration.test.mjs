@@ -19,7 +19,7 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const imp = (p) => import(pathToFileURL(resolve(root, p)).href);
 
-const { createAtlasServerCore, createMemoryDocumentStore } = await imp("src/atlas-server.ts");
+const { createAtlasServerCore, createMemoryDocumentStore } = await imp("tests/legacy/atlas-server-fixture.ts");
 const { reconcilePendingCommits } = await imp("src/atlas-pending-reconcile.ts");
 const { createDefaultSettingsV2 } = await imp("src/atlas-settings.ts");
 const { buildStarterWorld } = await imp("src/atlas-starter-world.ts");

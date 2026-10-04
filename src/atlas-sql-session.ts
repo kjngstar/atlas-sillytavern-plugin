@@ -1,8 +1,9 @@
+import {restoreMigrationImage} from './atlas-sql-map-assets.ts';
 /**
  * atlas-sql-session.ts — H01–H03 单聊天 SQL 会话桥（§7.1–§7.3 / §16.1 / §16.4）。
  *
- * 固定决策：SQL 世界数据是**显式 opt-in**（`settings.atlas.sqlMode`，默认关闭）。
- * - 打开（OFF）：所有既有代码路径一字不变，三表 `chatMetadata.atlas.tables` 仍是唯一写入者。
+ * 正式启动由宿主设置启用 SQL；新安装默认启用，明确关闭时暂停。
+ * - 关闭（OFF）：不加载 WASM、不提交世界；旧存档只保留作备份。
  * - 打开（ON）：SQL 是**唯一**业务写入目标；旧 world/tables/simulation 只能作为一次迁移输入
  *   或只读兼容投影，**绝不双向同步**（§16.1 第 3 条）。
  *
@@ -59,7 +60,7 @@ import type {
 } from './atlas-ops-contract.ts';
 
 /* ================================================================== *
- * 模式开关（默认 false：既有行为一字不变）
+ * 模式开关读取（只接受明确布尔值，默认选择由正式宿主负责）
  * ================================================================== */
 
 export const ATLAS_SQL_MODE_KEY = 'sqlMode';
@@ -327,9 +328,9 @@ export async function openSqlSession(options: SqlSessionOptions): Promise<OpenSq
   if (chatUid.length === 0) {
     throw new AtlasDbError('CHAT_UID_REQUIRED', 'SQL 会话必须由宿主聊天身份发起：chatUid 不能为空', {});
   }
-  const branchId = options.branchId ?? 'main';
+  let branchId = options.branchId ?? 'main';
   const branchName = options.branchName ?? '主线';
-  const worldUid = options.worldUid ?? `world_${chatUid}`;
+  let worldUid = options.worldUid ?? `world_${chatUid}`;
   const rulesetVersion = options.rulesetVersion ?? 'atlas-1';
 
   const raw = readSqlEnvelope(options.chatMetadata);
@@ -351,6 +352,8 @@ export async function openSqlSession(options: SqlSessionOptions): Promise<OpenSq
       );
     }
     bytes = decoded.bytes;
+    worldUid = envelope.world_uid;
+    if(options.branchId===undefined)branchId=envelope.active_branch_id;
     source = 'existing';
   }
 
@@ -412,7 +415,7 @@ export async function openSqlSession(options: SqlSessionOptions): Promise<OpenSq
     chatUid,
     worldUid,
     branchId: repo.branchId,
-    branchName,
+    branchName: String(repo.internal.branchRow()?.name ?? branchName),
     rulesetVersion,
     chatMetadata: options.chatMetadata,
     saveSession,
@@ -818,6 +821,7 @@ export async function migrateSessionToSql(
     issues.push(...simulation.issues);
 
 
+    await restoreMigrationImage(session,options.legacy);
     const finalized = finalizeMigration(session.repo.db, { branchId: session.branchId });
     issues.push(...finalized.issues);
     if(!finalized.ok||issues.some(entry=>entry.severity==='error'))throw new AtlasDbError('MIGRATION_FAILED','旧档迁移存在未解决错误，候选不发布',{issues});
@@ -873,7 +877,7 @@ export async function closeSqlSession(session: SqlSession): Promise<void> {
 /**
  * H13 注入用的 SQL 运行时函数集。
  *
- * 为什么要有这个对象：`atlas-server.ts` 属于**浏览器核心包**（`atlas-ui-core.mjs`，见
+ * 为什么要有这个对象：`atlas-production-server.ts` 属于**浏览器核心包**（`atlas-ui-core.mjs`，见
  * `src/atlas-browser-entry.ts`），而 sql.js/wasm 必须是独立产物（H14：体积大，启用 SQL 时才加载）。
  * 因此 server 核心只持有这个接口，运行时由宿主注入——本地模式从 `atlas-sql.mjs` 注入，
  * Node 模式注入自己那份；**server 核心本身不静态引用任何 sql.js 模块**。

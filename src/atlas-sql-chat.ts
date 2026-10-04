@@ -1,3 +1,8 @@
+import {readSqlMapImage} from './atlas-sql-map-assets.ts';
+import {previewSqlTravel} from './atlas-sql-travel-preview.ts';
+import {inspectSqlWorld} from './atlas-sql-inspect.ts';
+import {buildSqlForegroundRequest} from './atlas-sql-model-context.ts';
+import {createTableReadPort} from './atlas-db-readport.ts';
 /** Automatic chat compatibility boundary. Business writes use the SQL session only. */
 import { parseAtlasTurnCommitRequest, parseAtlasTurnPrepareRequest } from './atlas-contract.ts';
 import type { AtlasTurnCommitRequest } from './atlas-contract.ts';
@@ -65,9 +70,18 @@ function chatSources(request: AtlasTurnCommitRequest, playerName: string): TurnI
 
 /** Called by the explicit /sql/chat/* routes; no old session document is returned. */
 export async function handleSqlChatRequest(session: SqlSession, action: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  if(action==='map/image')return readSqlMapImage(session,body.mapId);
+  if(action==='travel-preview')return previewSqlTravel(session,body.destinationPointId);
+  if(action==='inspect')return {report:inspectSqlWorld(session),coreSaved:false};
   if (action === 'binding') return { binding: binding(session), coreSaved: false };
   if (action === 'timeline') return querySqlCharacterTimeline({db:session.repo.db,branchId:session.branchId,revision:session.repo.internal.currentRevision(),viewMode:'author'},
     {characterId:text(body.characterId),offset:typeof body.offset==='number'?body.offset:undefined,limit:typeof body.limit==='number'?body.limit:undefined});
+  if(action==='preview'){
+    if(!session.modelPort?.preview)throw new AtlasDbError('SQL_PREVIEW_UNAVAILABLE','当前模型端口未提供请求预览，未调用模型',{});
+    const sources=chatSources({...body,userText:text(body.userText),assistantText:text(body.assistantText),userMessageId:'preview',assistantMessageId:'preview'} as AtlasTurnCommitRequest,text(body.playerName));
+    const input:TurnInput={anchor:{chatUid:session.chatUid,branchId:session.branchId,parentTurnId:session.repo.internal.currentHeadTurnId(),hostMessageUid:'preview',variantKey:'preview',baseRevision:session.repo.internal.currentRevision(),baseStorageRevision:session.repo.storageRevision,inputHash:'preview'},userText:text(body.userText),assistantText:text(body.assistantText),sourceSnapshot:sources,phaseBatches:['observe'],manual:false};
+    return session.modelPort.preview(buildSqlForegroundRequest(createTableReadPort(session.repo.db),session.branchId,input,'observe','preview'));
+  }
   if (action === 'state') {
     const logicalBinding=binding(session);
     return {...querySqlSceneState({db:session.repo.db,branchId:session.branchId,revision:session.repo.internal.currentRevision(),

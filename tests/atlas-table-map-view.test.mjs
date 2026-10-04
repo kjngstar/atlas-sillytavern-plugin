@@ -255,7 +255,7 @@ test("D01 父地点不可达的行不静默丢：计入 dropped", () => {
 });
 
 test("D02 /state：迁移过的分支带 tableMap（total/truncated），旧会话保持原状", async () => {
-  const { createAtlasServerCore, createMemoryDocumentStore } = await import("../src/atlas-server.ts");
+  const { createAtlasServerCore, createMemoryDocumentStore } = await import("./legacy/atlas-server-fixture.ts");
   const { createSessionCarrier } = await import("./atlas-session-helper.mjs");
   const { buildWorldFromTemplate, getDemoTemplate } = await import("../lib/demo-events.ts");
   const { parseWorld } = await import("../lib/world-schema.ts");
@@ -296,7 +296,7 @@ test("D02 /state：迁移过的分支带 tableMap（total/truncated），旧会�
 });
 
 test("D02 旧会话：只读 /state 靠懒迁移拿到 tableMap，但绝不写会话", async () => {
-  const { createAtlasServerCore, createMemoryDocumentStore } = await import("../src/atlas-server.ts");
+  const { createAtlasServerCore, createMemoryDocumentStore } = await import("./legacy/atlas-server-fixture.ts");
   const { createSessionCarrier } = await import("./atlas-session-helper.mjs");
   const { buildWorldFromTemplate, getDemoTemplate } = await import("../lib/demo-events.ts");
   const { parseWorld } = await import("../lib/world-schema.ts");
@@ -341,7 +341,7 @@ test("D02 旧会话：只读 /state 靠懒迁移拿到 tableMap，但绝不写�
 });
 
 test("D02 目录分页：默认仍是 48/32，但 total/truncated 如实下发，且能取到后面的实体", async () => {
-  const { createAtlasServerCore, createMemoryDocumentStore } = await import("../src/atlas-server.ts");
+  const { createAtlasServerCore, createMemoryDocumentStore } = await import("./legacy/atlas-server-fixture.ts");
   const { createSessionCarrier } = await import("./atlas-session-helper.mjs");
   const { buildWorldFromTemplate, getDemoTemplate } = await import("../lib/demo-events.ts");
   const { parseWorld } = await import("../lib/world-schema.ts");

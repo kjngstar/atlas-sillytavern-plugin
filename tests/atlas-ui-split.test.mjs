@@ -1,3 +1,4 @@
+import {readUiSource} from './ui-source-helper.mjs';
 /**
  * atlas-ui-split.test.mjs — ATLAS-18 侧边栏六栏结构与输入控件样式合约（先红后绿）。
  *
@@ -36,7 +37,7 @@ test("侧边栏九栏：顺序固定为 概览/地图/附近/变化/推进/API/�
 
 test("源码中不再存在 settings 页面残留（page id / 导航 / 渲染分支）", () => {
   const uiCore = readFileSync(join(root, "src", "atlas-ui-core.ts"), "utf8");
-  const indexJs = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
+  const indexJs = readUiSource(join(root, "atlas-extension", "index.js"));
   assert.ok(!/page\s*[:=]\s*"settings"/.test(uiCore), "ui-core 不再出现 settings 页状态");
   assert.ok(!/id:\s*"settings",\s*label/.test(indexJs), "导航不再渲染「设置」项");
   assert.ok(!/settingsSlot/.test(indexJs), "settingsSlot 死代码已删除");
@@ -91,7 +92,7 @@ test("CSS 合约：样式必须限定在 .atlas-workbench 内，不污染酒馆�
 // ---------------------------------------------------------------------------
 
 test("职责隔离：API 页不出现提示词预设库编辑，推进页不出现连接字段", () => {
-  const js = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
+  const js = readUiSource(join(root, "atlas-extension", "index.js"));
   const apiPanel = js.slice(js.indexOf("function buildApiPanel()"), js.indexOf("async function testConnection"));
   const progression = js.slice(js.indexOf("function buildProgressionPanel()"), js.indexOf("function buildApiPanel()"));
   assert.ok(apiPanel.length > 0 && progression.length > 0, "两个面板都存在");
@@ -107,13 +108,13 @@ test("职责隔离：API 页不出现提示词预设库编辑，推进页不出�
 });
 
 test("majorEvent 已从生产 UI 隐藏（未接线功能不得露出）", () => {
-  const js = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
+  const js = readUiSource(join(root, "atlas-extension", "index.js"));
   assert.ok(!js.includes("majorEvent"), "生产 UI 不再出现 majorEvent 槽位");
   assert.ok(!js.includes("重大事件"), "生产 UI 不再出现「重大事件」按钮");
 });
 
 test("高级世界管理默认折叠；普通未绑定状态不要求导入", () => {
-  const js = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
+  const js = readUiSource(join(root, "atlas-extension", "index.js"));
   assert.ok(/高级：迁移或恢复已有世界/.test(js), "高级入口文案存在");
   assert.ok(/createElement\("details"\)/.test(js), "用 <details> 折叠");
   assert.ok(!/details\.open\s*=\s*true/.test(js), "默认不展开");
@@ -122,14 +123,14 @@ test("高级世界管理默认折叠；普通未绑定状态不要求导入", ()
 });
 
 test("草稿保护：统一未保存确认文案，且两页草稿互不阻塞", () => {
-  const js = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
+  const js = readUiSource(join(root, "atlas-extension", "index.js"));
   assert.ok(/当前有未保存的更改。继续将丢弃这些更改。/.test(js), "统一确认文案");
   assert.ok(/apiDraftDirty/.test(js) && /promptDraftDirty/.test(js), "两个草稿各自维护 dirty");
   assert.ok(/confirmDiscard\("API 连接"\)/.test(js) && /confirmDiscard\("提示词"\)/.test(js), "确认分别作用于两个编辑区");
 });
 
 test("自动建世：确定性 ID + 并发闸门 + 切聊天保护（不再用时间戳 ID）", () => {
-  const js = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
+  const js = readUiSource(join(root, "atlas-extension", "index.js"));
   assert.ok(/starterWorldIdForChat\(chatId\)/.test(js), "世界 ID 由 chatId 确定性派生");
   assert.ok(!/id: `world-\$\{Date\.now\(\)\}`/.test(js), "建世不再使用时间戳 ID（避免重试重复世界）");
   assert.ok(/const ensureWorldInFlight = new Map\(\)/.test(js), "并发闸门是 Map<chatId, Promise>");

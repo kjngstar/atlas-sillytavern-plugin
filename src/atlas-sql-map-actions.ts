@@ -1,4 +1,7 @@
+import {imageAsset} from './atlas-sql-map-assets.ts';
+import {inspectSqlWorld} from './atlas-sql-inspect.ts';
 /** Explicit SQL map commands; legacy map routes never write this repository. */
+import { parseWorld } from '../lib/world-schema.ts';
 import { createTableReadPort } from './atlas-db-readport.ts';
 import { collectKnownRefs } from './atlas-sql-refs.ts';
 import { AtlasDbError } from './atlas-db-runtime.ts';
@@ -35,8 +38,14 @@ export async function handleSqlMapAction(session:SqlSession,action:string,body:R
     if(!selected)throw new AtlasDbError('REF_UNKNOWN','目标地图不存在',{});return selected;
   };
   const operations:ModelOperation[]=[],calibration:TurnInput['mapCalibration']=undefined;
+  let mapBackground:TurnInput['mapBackground'];
   let mapCalibration:TurnInput['mapCalibration']=calibration,manual=true,phases:TurnInput['phaseBatches']=[];
-  if(action==='map/move'){
+  if(action==='map/repair'){
+    const report=inspectSqlWorld(session);
+    if(!report.canApply||body.reportToken!==report.reportToken)throw new AtlasDbError('SQL_PREVIEW_EXPIRED','地图检查报告已变化，请重新检查',{});
+  }else if(action==='map/image/set'){
+    mapBackground={mapId:String(map(body.mapId??'world').id),asset:body.dataUrl===null?null:await imageAsset(body.dataUrl)};
+  }else if(action==='map/move'){
     const raw=String(body.entityId??''),kind=refs.find(r=>r.id===raw||r.id===raw.replace(/^(?:npc|item):/,''))?.kind;
     const table=kind==='item'?'items':'characters',entity=find(table,raw),target=find('locations',body.toPointId);
     if(table==='characters')operations.push({op:'character.upsert',ref:ref(entity.id),data:{location_ref:ref(target.id),position:null},why:'作者纠偏当前位置'});
@@ -77,6 +86,11 @@ export async function handleSqlMapAction(session:SqlSession,action:string,body:R
     for(const candidate of candidates.filter(row=>row.role==='protagonist'&&row.name!==name))operations.push({op:'character.upsert',ref:ref(candidate.id),data:{role:'npc'}});
     if(matches.length)operations.push({op:'character.upsert',ref:ref(matches[0].id),data:{role:'protagonist'}});
     else operations.push({op:'character.upsert',ref:'new:player',data:{name,role:'protagonist',importance:'core',identity:'用户主角'}});
+  }else if(action==='map/import'){
+    if(!body.world||typeof body.world!=='object')throw new AtlasDbError('INVALID_PAYLOAD','导入需要世界文档',{});
+    if(!parseWorld(body.world))throw new AtlasDbError('INVALID_PAYLOAD','世界文档格式不合法',{});
+    const image=(body.world as {mapImage?:unknown}).mapImage;
+    if(typeof image==='string'&&image)mapBackground={mapId:'world',asset:await imageAsset(image)};
   }else if(['map/geo','map/suggest','map/bootstrap'].includes(action)){
     manual=false;phases=action==='map/bootstrap'?['observe']:['geography'];
   }else throw new AtlasDbError('INVALID_PAYLOAD','未知 SQL 地图动作',{});
@@ -92,7 +106,7 @@ export async function handleSqlMapAction(session:SqlSession,action:string,body:R
   const input:TurnInput={anchor:{chatUid:session.chatUid,branchId:session.branchId,parentTurnId:session.repo.internal.currentHeadTurnId(),
     baseRevision:session.repo.internal.currentRevision(),baseStorageRevision:session.repo.storageRevision,hostMessageUid:`author:${action}:${body.requestId??hash}`,variantKey:'author',inputHash:hash},
     userText:String(body.userText??''),assistantText:String(body.assistantText??''),sourceSnapshot:sources,phaseBatches:phases,manual,operations,
-    narrativeKind:'manual',sceneMaps:true,sceneOnly:true,mapCalibration,povName:action==='map/protagonist'?String(body.name??body.playerName??''):undefined,isCurrent:typeof body.isCurrent==='function'?body.isCurrent as ()=>boolean:undefined};
+    narrativeKind:'manual',sceneMaps:true,sceneOnly:true,mapCalibration,mapBackground,legacyImport:action==='map/import'?{atlas:{world:body.world,maps:body.maps??null}}:undefined,povName:action==='map/protagonist'?String(body.name??body.playerName??''):undefined,isCurrent:typeof body.isCurrent==='function'?body.isCurrent as ()=>boolean:undefined};
   if(action==='map/bootstrap'&&body.apply===false){
     const commit=await session.repo.prepareTurn(input),previewId=commit.token;
     let drafts=previews.get(session);if(!drafts){drafts=new Map();previews.set(session,drafts);}

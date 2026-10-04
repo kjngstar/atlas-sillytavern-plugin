@@ -1,3 +1,10 @@
+import {atlasClockLabel,atlasLegacyNearby,buildTableMapNpcIndex,atlasMapSource,atlasMapLayerInput,atlasMapOccupants} from './ui/atlas-scene-ui-adapter.mjs';
+import {createMapController,markerPopupPosition} from './ui/atlas-map-controller.mjs';
+import { createSqlViewController } from './ui/atlas-sql-view-controller.mjs';
+import { isValidAtlasSession, createEmptyAtlasSession, readAtlasSession, writeAtlasSession, atlasSessionWriteGuard, atlasSessionHasPersistentPayload, atlasStarterWorldWriteGuard, atlasChatIdentitySnapshot, atlasSameChatIdentity, atlasStaleWriteNotice, atlasContentHash, atlasFloorIdentity, atlasContextRecord, atlasAssistantFloorIdentity, pathWantsSession, createAtlasSessionApi, ATLAS_SESSION_KEY, ATLAS_SESSION_SCHEMA_VERSION, SESSION_ROUTE_PREFIXES } from './ui/atlas-host-context.mjs';
+export { ATLAS_SESSION_KEY, ATLAS_SESSION_SCHEMA_VERSION, isValidAtlasSession, createEmptyAtlasSession, writeAtlasSession, atlasSessionHasPersistentPayload, atlasStarterWorldWriteGuard, atlasChatIdentitySnapshot, atlasSameChatIdentity, atlasStaleWriteNotice, atlasContentHash, atlasFloorIdentity, atlasAssistantFloorIdentity, createAtlasSessionApi };
+import { atlasPointRefOf, atlasKnownCoordinate, atlasPositionQuality, atlasSqlMapModel, atlasSqlSubmaps, atlasSqlMapItemFor, atlasSqlFilterByViewMode, atlasSqlNearbyCards, buildSqlPromptScope } from './ui/atlas-scene-ui-adapter.mjs';
+export { atlasPointRefOf, atlasKnownCoordinate, atlasPositionQuality, atlasSqlMapModel, atlasSqlSubmaps, atlasSqlMapItemFor, atlasSqlFilterByViewMode, atlasSqlNearbyCards, buildSqlPromptScope };
 /* global SillyTavern */
 /**
  * 阿特拉斯 / Atlas — SillyTavern UI Extension（ATLAS-04）。
@@ -18,9 +25,6 @@ export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
 export const ATLAS_BINDING_KEY = "atlas_binding";
-/** 0.9.42 会话承载：世界文档（world/maps/turns/geoAuto/binding/rev）挂在 chatMetadata.atlas。 */
-export const ATLAS_SESSION_KEY = "atlas";
-export const ATLAS_SESSION_SCHEMA_VERSION = 1;
 /** 0.9.48（T01）：会话写回守卫纯函数（导出供测试；sessionApi 写回前调用）。 */
 export { atlasSessionWriteGuard };
 /** R08：地图相机纯数学已迁至 src/atlas-map-camera.ts（dist 经 atlas-browser-entry 导出，
@@ -41,211 +45,15 @@ export const ATLAS_API_BASE = "/api/plugins/atlas";
 export const ATLAS_MINIMUM_CLIENT_VERSION = "1.12.0";
 
 // ---------------------------------------------------------------------------
-// 0.9.42 会话承载：世界数据随聊天走（chatMetadata.atlas 单文档，空间换安全）
-// ---------------------------------------------------------------------------
-
-/** 判定 chatMetadata 上的会话文档是否为当前 schema（宽容：损坏一律按不存在处理）。 */
-export function isValidAtlasSession(value) {
-  return Boolean(
-    value && typeof value === "object" && !Array.isArray(value) && value.schemaVersion === ATLAS_SESSION_SCHEMA_VERSION,
-  );
-}
-
-/**
- * 新建空会话文档。
- *
- * C07a（0.9.59）：必须显式带 `simulation: null`——推演模块属于会话级数据，
- * 与 `world` / `maps` / `scene` 同级。旧聊天缺该字段仍按「合法空模块」读，
- * 但**新写的会话一律写明**，避免客户端与服务端对空会话的定义分叉。
- */
-export function createEmptyAtlasSession() {
-  return {
-    schemaVersion: ATLAS_SESSION_SCHEMA_VERSION,
-    rev: 0, binding: null, world: null, maps: null, scene: null,
-    turns: {}, geoAuto: {}, tables: null,
-    simulation: null,
-  };
-}
-
-/** 读取当前聊天会话文档（无则 null；绝不创建半截对象）。 */
-function readAtlasSession(context) {
-  const metadata = context().chatMetadata;
-  if (!metadata || typeof metadata !== "object") return null;
-  return isValidAtlasSession(metadata[ATLAS_SESSION_KEY]) ? metadata[ATLAS_SESSION_KEY] : null;
-}
-
-/**
- * 写回会话文档并触发酒馆存档（世界数据的唯一落盘路径）。
- *
- * A07：三表随同 `chatMetadata.atlas` **一次写回**（不另开存储、不额外 saveMetadata）；
- * 旧会话没有 `tables` 字段照样合法（未迁移聊天兼容）；写失败必须明确抛错，
- * 由调用方按 `SESSION_WRITE_FAILED` 记账——绝不静默返回假装写成功。
- * 导出供测试（与 `atlasSessionWriteGuard` 同口径）。
- *
- * C07b（0.9.59）：新增**可选** `expectedChatId`。
- * - 异步请求（commit / bootstrap / retry / geo 提炼）**必须**把「发起时捕获的 chatId」
- *   传进来：写回前先核对当前聊天是否还是它，切过聊天就拒绝写——这是 B02b 的落点，
- *   防止 A 的迟到响应把 B 的会话盖掉。
- * - 同时校验 `session.world.id` 与 `session.binding.worldId` 是否自洽（同一份会话里
- *   世界 id 不能自相矛盾），避免半截会话落盘。
- * - **不传** `expectedChatId` 的现有人工导入调用保持原契约：只写「被显式选择的当前聊天」。
- *   旧调用点语义一字不变。
- */
-export async function writeAtlasSession(context, session, expectedChatId = null, expectedMetadata = null) {
-  if (!isValidAtlasSession(session)) {
-    throw new Error("Atlas 会话写回被拒绝：会话形状非法（schemaVersion 不匹配）。");
-  }
-  const ctx = context();
-  const metadata = ctx?.chatMetadata;
-  if (!metadata || typeof metadata !== "object") {
-    throw new Error("Atlas 会话写回失败：当前聊天没有可写的 chatMetadata。");
-  }
-  if (expectedMetadata && metadata !== expectedMetadata) {
-    throw new Error("Atlas 会话写回被拒绝：聊天会话对象在请求期间已变更。");
-  }
-  if (expectedChatId !== null && expectedChatId !== undefined && String(expectedChatId) !== "") {
-    const currentChatId = ctx?.chatId ?? null;
-    if (String(currentChatId ?? "") !== String(expectedChatId)) {
-      // 切聊天之后的迟到写入：宁可不写，也不把 A 的结果盖到 B 上
-      throw new Error(
-        `Atlas 会话写回被拒绝：请求发起于聊天 ${String(expectedChatId)}，当前聊天已是 ${String(currentChatId ?? "(无)")}。`,
-      );
-    }
-  }
-  // C07b：会话自洽性——世界 id 不能自相矛盾（半截会话不许落盘）
-  const sessionWorldId = session?.world && typeof session.world === "object" ? String(session.world.id ?? "") : "";
-  const bindingWorldId = session?.binding && typeof session.binding === "object" ? String(session.binding.worldId ?? "") : "";
-  if (sessionWorldId && bindingWorldId && sessionWorldId !== bindingWorldId) {
-    throw new Error(
-      `Atlas 会话写回被拒绝：会话内世界 id 不一致（world.id=${sessionWorldId}，binding.worldId=${bindingWorldId}）。`,
-    );
-  }
-  metadata[ATLAS_SESSION_KEY] = session;
-  if (typeof ctx.saveMetadata === "function") await ctx.saveMetadata();
-  return true;
-}
-
-/**
- * 0.9.48（T01）+ B02a（0.9.59 聊天隔离）会话写回守卫（纯函数，可测）。
- *
- * 判定「这份响应会话能不能写回当前聊天」，三方身份必须**同时**成立：
- * 1. 发起请求时的聊天身份（requestChatId）必须仍是当前聊天（currentChatId）；
- * 2. 会话归属（sessionChatId，来自 responseSession.binding.chatId）必须与当前聊天一致；
- * 3. 归属**缺席**（无 binding / binding 无 chatId）而响应里带着持久数据
- *    （world / tables / simulation，见 §2.1 的三块业务数据）→ 拒绝写回：
- *    宁可不写，也不把一份「无主会话」盖到当前聊天上。
- *
- * 只有既无绑定、又无持久数据的响应会话按非持久响应放行——这正是 B02b 的
- * 「允许设置类响应不含会话 / 空会话」。缺会话本身永远不算错误。
- *
- * 兼容：不传第 4 参数时沿用 0.9.58 的三方判定（归属未知放行）；旧调用点
- * （atlas-stability T01 用例等）语义一字不变，4 参形态是 sessionApi 的生产路径。
- */
-function atlasSessionWriteGuard(requestChatId, currentChatId, sessionChatId, responseSession) {
-  if (currentChatId === null || currentChatId === undefined || currentChatId === "") return false;
-  if (requestChatId !== currentChatId) return false;
-  const claimed = sessionChatId === null || sessionChatId === undefined ? "" : String(sessionChatId);
-  if (claimed !== "") return claimed === currentChatId;
-  if (responseSession === undefined) return true; // 旧三方形态：归属未知 → 保守放行
-  if (responseSession === null || typeof responseSession !== "object") return true;
-  const binding = responseSession.binding;
-  const bindingChatId = binding && typeof binding === "object" && typeof binding.chatId === "string"
-    ? binding.chatId.trim() : "";
-  if (bindingChatId !== "") return bindingChatId === currentChatId;
-  // 缺绑定 / 缺归属：带持久数据的会话拒绝写回（B02a）；空会话（设置类响应）放行
-  return !atlasSessionHasPersistentPayload(responseSession);
-}
-
-/**
- * B02a 纯函数：响应会话是否带着**持久业务数据**。
- * 只认计划 §2.1 点名的三块：world（兼容镜像）/ tables（三表权威）/ simulation（第四块）。
- * maps / scene / turns 不在拒绝清单里——它们单独出现时不足以判定归属，宁可少拦不误拦。
- */
-export function atlasSessionHasPersistentPayload(session) {
-  if (!session || typeof session !== "object") return false;
-  if (session.world) return true;
-  if (session.tables) return true;
-  if (session.simulation) return true;
-  return false;
-}
-
-/**
- * First-world bootstrap is the one intentional unbound write. Its response
- * cannot carry a binding yet, so the general unbound-session guard must stay
- * strict for every other route. Tie this exception to the request, chat
- * metadata identity, starter ID and the returned world before saving it.
- */
-export function atlasStarterWorldWriteGuard(requestChatId, currentChatId, requestMetadata, currentMetadata, requestWorld, responseSession, requestSession) {
-  if (!requestChatId || requestChatId !== currentChatId) return false;
-  if (!requestMetadata || requestMetadata !== currentMetadata) return false;
-  const worldId = typeof requestWorld?.id === "string" ? requestWorld.id : "";
-  if (!/^world-auto-[0-9a-f]{16}$/.test(worldId)) return false;
-  if (requestSession?.binding || (requestSession?.world && requestSession.world.id !== worldId)) return false;
-  if (!responseSession || responseSession.binding !== null || responseSession.tables || responseSession.simulation) return false;
-  return responseSession.world?.id === worldId;
-}
-
-/**
- * B01：捕获「这一次异步工作属于哪个聊天」的身份快照。
- *
- * 两个字段都要抓，缺一不可：
- * - `chatId`：聊天标识（人类可读的定位依据）；
- * - `metadata`：`chatMetadata` 的**对象身份**——切聊天后酒馆会换成另一个对象，
- *   只比 chatId 会在「同名 / 空 chatId / 关聊天」时误判，比对象身份才是硬证据。
- */
-export function atlasChatIdentitySnapshot(context) {
-  let ctx = null;
-  try {
-    ctx = typeof context === "function" ? context() : context;
-  } catch { ctx = null; }
-  const record = ctx && typeof ctx === "object" ? ctx : {};
-  return {
-    chatId: record.chatId === null || record.chatId === undefined ? "" : String(record.chatId),
-    metadata: record.chatMetadata && typeof record.chatMetadata === "object" ? record.chatMetadata : null,
-  };
-}
-
-/**
- * B01 纯函数：`captured` 是否仍是「当前上下文的同一身份」。
- * 空身份一律判不符——身份不可核验时绝不写盘（这是 B01 的安全底线）。
- */
-export function atlasSameChatIdentity(captured, current) {
-  if (!captured || !current) return false;
-  const left = captured.chatId === null || captured.chatId === undefined ? "" : String(captured.chatId);
-  const right = current.chatId === null || current.chatId === undefined ? "" : String(current.chatId);
-  if (!left || !right) return false;
-  if (left !== right) return false;
-  if (!captured.metadata || !current.metadata) return false;
-  return captured.metadata === current.metadata;
-}
-
-/**
- * B02b 纯函数：写回被守卫拒绝时的诊断码 + 用户提示（只回文案，绝不带任何正文）。
- *
- * 引擎侧可能已经提交（committed / duplicate）——此时必须让用户知道「回执被丢了」，
- * 而不是静默消失：回到原聊天核对动向，数据在那边，没有丢。
- */
-export function atlasStaleWriteNotice(receiptStatus) {
-  if (receiptStatus !== "committed" && receiptStatus !== "duplicate") {
-    return { code: "STALE_CHAT_RESPONSE_DROPPED", reasonCode: "SESSION_IDENTITY_MISMATCH", notice: null };
-  }
-  return {
-    code: receiptStatus === "committed" ? "STALE_COMMIT_RESPONSE_DROPPED" : "STALE_CHAT_RESPONSE_DROPPED",
-    reasonCode: "SESSION_IDENTITY_MISMATCH",
-    notice: "切聊天弃回执：引擎侧这一轮可能已提交，但回执没有写回本窗口。请回到原聊天核对动向——数据仍在原聊天，没有丢。",
-  };
-}
-
-// ---------------------------------------------------------------------------
 // H05–H08 / H12（0.9.61）：SQL 世界数据 UI 接线的纯函数底座
 //
 // 纪律（计划 §10.1–§10.4 / §16.3 / §17H）：
-// - **显式 opt-in、默认关闭**。开关键 = `extensionSettings.atlas_world_sim.sqlMode`
+// - **新安装默认启用；明确关闭则暂停**。开关键 = `extensionSettings.atlas_world_sim.sqlMode`
 //   （= `ATLAS_SETTINGS_KEY` 下的 `ATLAS_SQL_MODE_SETTING`，与兄弟模块
 //   `src/atlas-sql-session.ts` 的 `ATLAS_SQL_MODE_KEY` 同名同义；settings.html 有可见开关）。
-//   关闭时本节函数一个都不跑，也绝不加载 sql.js/wasm——旧三表路径逐字节不变。
+//   关闭时本节函数一个都不跑，也绝不加载 sql.js/wasm——不再进入旧写入链。
 // - **同一时刻只有一个读权威**：开启后地图 / 附近 / 日志只读 SQL 视图 DTO；视图缺失时
-//   给具名诊断并退回旧渲染器（不假装 SQL 生效，也不留空白面板）。
+//   给具名诊断并清空当前视图，保留原存档。
 // - **坐标诚实**（H12）：未知坐标（null / NaN / ±Infinity）一律丢弃，**绝不用 0 补位**。
 // ---------------------------------------------------------------------------
 
@@ -271,154 +79,6 @@ export const ATLAS_SQL_DIAGNOSTICS_EXPORT_ROUTE = "/sql/diagnostics/export";
  * tools/pack.mjs 的 stripDevFallback 会把两元素形态收敛成发布形态（只留 ./dist/）。
  */
 export const ATLAS_SQL_CORE_CANDIDATES = ["./dist/atlas-sql.mjs", "../src/atlas-sql-browser-entry.ts"];
-
-/**
- * H12（§16.3 / §17H-H12）：UI 消费的 SQL DTO 形状（与 `src/atlas-db-views.ts` 一字对齐）。
- *
- * 这些类型写在这里是为了让「界面读哪些字段」有唯一的书面口径：
- * - 一律**不补缺省 0**：`x` / `y` / `radius` / `distanceM` / `gridDistance` 未知就是 null，
- *   渲染层必须跳过（`atlasKnownCoordinate`）；
- * - `positionQuality` 必须一路带到 DOM（`data-position-quality`），作者一眼能分辨
- *   「量出来的」与「估出来的」；
- * - `coarseList` 的人物**不得**画成地图人物图标（§10.2：只进名单）。
- *
- * @typedef {"exact"|"approximate"|"layout"|"coarse"|"unknown"} AtlasSqlPositionQuality
- * @typedef {object} AtlasSqlMapPoint
- * @property {string} entityId 实体行 id（`loc:*` / `npc:*` / `item:*`）
- * @property {"location"|"character"|"item"} kind
- * @property {string} name
- * @property {string} mapId
- * @property {number|null} x 未知坐标 = null（绝不是 0）
- * @property {number|null} y
- * @property {string} precision
- * @property {number|null} radius
- * @property {string} markerQuality
- * @property {boolean} [hidden] 主角尚不知道（作者视图才显示；只影响 UI 过滤）
- * @property {string} [visibility] `'hidden'` 等价于 hidden
- * @typedef {object} AtlasSqlCoarseEntry
- * @property {string} entityId
- * @property {string} name
- * @property {string} locationId
- * @property {string|null} locationName
- * @typedef {object} AtlasSqlRoute
- * @property {string} routeId
- * @property {string} fromId
- * @property {string} toId
- * @property {string} geometryQuality `confirmed` 之外的几何一律虚线 + 「估计」
- * @property {number|null} distanceM
- * @property {boolean} dashed
- * @typedef {object} AtlasSqlMapViewItem
- * @property {string} mapId
- * @property {string} name
- * @property {string|null} containerLocationId 非空 = 该地点的子图
- * @property {number|null} metersPerCell 地图行原值：缩放只改读数，绝不改它（§10.3）
- * @property {string} scaleQuality
- * @property {boolean} scaleLocked
- * @property {AtlasSqlMapPoint[]} points
- * @property {AtlasSqlCoarseEntry[]} coarseList
- * @property {AtlasSqlRoute[]} routes
- * @property {{frame?: object, scaleBar?: object|null}} frames
- * @typedef {object} AtlasSqlViewResult
- * @property {string} branchId
- * @property {number} revision 界面只认当前修订（§10.1）
- * @property {unknown[]} items
- * @property {string} [nextCursor] 分页游标：只影响列表，不截断导出（H08）
- * @property {object} metadata
- * @typedef {object} AtlasSqlNearbyItem
- * @property {string} entityId
- * @property {string} name
- * @property {string} relevance
- * @property {string} positionQuality
- * @property {number|null} gridDistance 未知 = null（绝不显示「0 格」）
- * @typedef {object} AtlasSqlDiagnosticsItem
- * @property {string} logId 与回执错误**同一个** log ID（H08）
- * @property {"change"|"failed_turn"} kind
- * @property {string} turnId
- */
-
-/** `loc:2` / `2` 两种写法的地点引用归一（地图点 id 与三表行 id 比较时统一用这个）。 */
-export function atlasPointRefOf(entityId) {
-  return String(entityId ?? "").trim().replace(/^loc:/, "");
-}
-
-/** H12：坐标只能是有限数；未知一律返回 null（**绝不返回 0**，绝不把 (0,0) 当合法缺省）。 */
-export function atlasKnownCoordinate(value) {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string" && value.trim() !== "") {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed)) return parsed;
-  }
-  return null;
-}
-
-/** H06 / §10.2：位置质量词表归一（precision / markerQuality / positionQuality 共用一套词）。 */
-export function atlasPositionQuality(value) {
-  const raw = String(value ?? "").trim().toLowerCase();
-  if (raw === "exact" || raw === "precise" || raw === "confirmed") return "exact";
-  if (raw === "approximate" || raw === "approx" || raw === "estimated") return "approximate";
-  if (raw === "layout") return "layout";
-  if (raw === "coarse" || raw === "location") return "coarse";
-  return "unknown";
-}
-
-/** H05：内容哈希（FNV-1a 32 位十六进制；纯函数、不依赖 crypto、同输入同输出）。 */
-export function atlasContentHash(text) {
-  const input = typeof text === "string" ? text : text === null || text === undefined ? "" : String(text);
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < input.length; index += 1) {
-    hash ^= input.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193) >>> 0;
-  }
-  return hash.toString(16).padStart(8, "0");
-}
-
-/**
- * H05：楼层身份归一——稳定 `messageUID` / `variantKey` / `contentHash`。
- *
- * **绝不用数组下标冒充身份**（删楼 / 截断会让下标漂移）：
- * - `messageUID`：优先宿主给的稳定 id（messageUID / mesId / messageId）；
- *   其次 `chatId:role:send_date`（落盘时间戳，删楼不变）；
- *   再退到**内容寻址** `chatId:role:<variantKey>`，并显式标 `identityFallback: true`。
- *   内容寻址时用 `#f<下标>` 只做**同内容重复楼层的消歧后缀**，不是身份本体。
- * - `variantKey`：正文变体键——换 swipe（重新生成）必然换键，同一段正文永远同键。
- * - `contentHash`：正文内容哈希（改一个字就变）。
- */
-export function atlasFloorIdentity(message, floorIndex = 0, { chatId = null } = {}) {
-  const record = message && typeof message === "object" ? message : {};
-  const text = typeof record.mes === "string" ? record.mes : "";
-  const contentHash = atlasContentHash(text);
-  const index = Number.isInteger(floorIndex) && floorIndex >= 0 ? floorIndex : 0;
-  const role = record.is_user === true ? "u" : "a";
-  const chatKey = chatId === null || chatId === undefined || String(chatId) === "" ? "chat" : String(chatId);
-  const hostUid = [record.messageUID, record.mesId, record.messageId]
-    .map((value) => {
-      if (typeof value === "string" && value.trim() !== "") return value.trim();
-      if (typeof value === "number" && Number.isFinite(value)) return String(value);
-      return null;
-    })
-    .find((value) => value !== null) ?? null;
-  const parsedDate = Number(record.send_date);
-  const sendDate = Number.isFinite(parsedDate) && parsedDate > 0 ? String(Math.trunc(parsedDate)) : null;
-  const parsedSwipe = Number(record.swipe_id);
-  const swipeId = Number.isInteger(parsedSwipe) && parsedSwipe >= 0 ? parsedSwipe : null;
-  const swipes = Array.isArray(record.swipes) && record.swipes.length > 0 ? record.swipes : null;
-  const swipeText = swipes && swipeId !== null && typeof swipes[swipeId] === "string" ? swipes[swipeId] : null;
-  const variantKey = swipeId === null
-    ? `v0-${contentHash}`
-    : `v${swipeId}-${atlasContentHash(swipeText ?? text)}`;
-  const contentAddressed = `${chatKey}:${role}:${variantKey}`;
-  const messageUID = hostUid
-    ?? (sendDate !== null ? `${chatKey}:${role}:${sendDate}` : `${contentAddressed}#f${index}`);
-  return {
-    messageUID,
-    variantKey,
-    contentHash,
-    floorIndex: index,
-    swipeId,
-    /** 身份是内容寻址来的（既无宿主 id 也无 send_date）——调用方按「可能漂移」对待。 */
-    identityFallback: hostUid === null && sendDate === null,
-  };
-}
 
 /** H05：候选 token（messageUID + variantKey + contentHash 派生；同变体必然同 token）。 */
 export function atlasSqlPrepareToken(identity) {
@@ -586,49 +246,6 @@ export function atlasSqlPrepareQueue() {
   return atlasSqlPrepareQueueSingleton;
 }
 
-/** 宿主上下文读取（每次都重新取，绝不缓存聊天对象；失败返回 null）。 */
-function atlasContextRecord(context) {
-  try {
-    const record = typeof context === "function" ? context() : context;
-    return record && typeof record === "object" ? record : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * H05：本轮**助手楼层**的稳定身份（用户楼层 / 无楼层 → null，绝不猜）。
- * 下标只用于「定位这一楼层」，身份本身来自 `atlasFloorIdentity`（见上）。
- */
-export function atlasAssistantFloorIdentity(context, payload, event = "") {
-  const record = atlasContextRecord(context);
-  const chat = Array.isArray(record?.chat) ? record.chat : null;
-  if (!chat || chat.length === 0) return null;
-  const name = String(event ?? "");
-  const raw = Number(payload);
-  let index = -1;
-  if (["MESSAGE_RECEIVED", "MESSAGE_SWIPED", "MESSAGE_EDITED"].includes(name) && Number.isInteger(raw) && raw >= 0 && raw < chat.length) {
-    index = raw;
-  } else {
-    for (let cursor = chat.length - 1; cursor >= 0; cursor -= 1) {
-      const message = chat[cursor];
-      if (message && message.is_user === false && typeof message.mes === "string" && message.mes.trim()) {
-        index = cursor;
-        break;
-      }
-    }
-  }
-  if (index < 0) return null;
-  const message = chat[index];
-  // 只有助手楼层能触发 SQL 候选（用户楼层编辑不产生世界回合）
-  if (!message || message.is_user === true) return null;
-  return {
-    ...atlasFloorIdentity(message, index, { chatId: record?.chatId ?? null }),
-    assistantText: typeof message.mes === "string" ? message.mes : "",
-    userText: typeof chat[index - 1]?.mes === "string" ? chat[index - 1].mes : "",
-  };
-}
-
 /**
  * H05：宿主事件 → SQL 候选生命周期（事件归一入口；与 `createEventAdapter` 同源）。
  *
@@ -655,209 +272,6 @@ export function atlasSqlNoteHostEvent(event, payload, context) {
     return { status: regenerated ? "reprepare" : "prepare", variantKey: identity.variantKey };
   }
   return { status: "ignored" };
-}
-
-/**
- * H06：SQL 地图视图行 → UI 渲染模型（纯函数）。
- *
- * - 地点 / 人物 / 物品分成三组：**粗定位人物绝不混进人物标点**（§10.2）；
- * - 未知坐标一个点都不产出（H12：绝不用 0 补位）；
- * - 保留 `positionQuality` / `radius`，渲染层据此加范围或「估计」标识；
- * - `occupantCounts` 是地点标点上的「这里有 N 人」（粗定位名单 + 与该地点同坐标的人物）；
- * - `viewMode` 只影响**这一层显示什么**（§10.4：作者视图 = UI 过滤），
- *   不改数据结构、不改任何注入范围。
- */
-export function atlasSqlMapModel(item, viewMode = "pov") {
-  const record = item && typeof item === "object" ? item : {};
-  const locations = [];
-  const characterPins = [];
-  const itemPins = [];
-  for (const raw of atlasSqlFilterByViewMode(record.points, viewMode)) {
-    if (!raw || typeof raw !== "object") continue;
-    const x = atlasKnownCoordinate(raw.x);
-    const y = atlasKnownCoordinate(raw.y);
-    // H12：未知坐标一律丢弃（绝不落到 (0,0) 冒充一个真实位置）
-    if (x === null || y === null) continue;
-    const entityId = String(raw.entityId ?? "");
-    const entry = {
-      id: atlasPointRefOf(entityId),
-      rowId: entityId,
-      name: String(raw.name ?? ""),
-      x,
-      y,
-      positionQuality: atlasPositionQuality(raw.markerQuality ?? raw.precision),
-      radius: atlasKnownCoordinate(raw.radius),
-      area: raw.area ?? null,
-      locationId: raw.locationId == null ? null : String(raw.locationId),
-      isProtagonist: raw.isProtagonist === true,
-    };
-    const kind = String(raw.kind ?? "location");
-    if (kind === "character") characterPins.push(entry);
-    else if (kind === "item") itemPins.push(entry);
-    else locations.push(entry);
-  }
-  const coarseList = atlasSqlFilterByViewMode(record.coarseList, viewMode)
-    .filter((raw) => raw && typeof raw === "object")
-    .map((raw) => ({
-      entityId: String(raw.entityId ?? ""),
-      name: String(raw.name ?? ""),
-      locationId: String(raw.locationId ?? ""),
-      locationName: raw.locationName === null || raw.locationName === undefined ? null : String(raw.locationName),
-    }));
-  const occupantCounts = new Map();
-  for (const entry of coarseList) {
-    const key = String(entry.locationId);
-    if (!key) continue;
-    occupantCounts.set(key, (occupantCounts.get(key) ?? 0) + 1);
-  }
-  for (const pin of characterPins) {
-    // 人物与地点坐标重合 = 只知「在这个地点」（§10.2：不叠图标，但人数必须看得见）
-    const host = locations.find((location) => pin.locationId ? location.rowId === pin.locationId : location.x === pin.x && location.y === pin.y);
-    if (host) occupantCounts.set(host.rowId, (occupantCounts.get(host.rowId) ?? 0) + 1);
-  }
-  const routes = (Array.isArray(record.routes) ? record.routes : [])
-    .filter((raw) => raw && typeof raw === "object")
-    .map((raw) => ({
-      routeId: String(raw.routeId ?? ""),
-      fromId: String(raw.fromId ?? ""),
-      toId: String(raw.toId ?? ""),
-      kind: String(raw.kind ?? ""),
-      geometryQuality: String(raw.geometryQuality ?? "unknown"),
-      distanceM: atlasKnownCoordinate(raw.distanceM),
-      allowedModes: Array.isArray(raw.allowedModes) ? raw.allowedModes.map((mode) => String(mode)) : [],
-      /** §10.2：只有已证实几何才画实线；其余一律虚线 + 「估计」说明。 */
-      estimated: raw.dashed === true || String(raw.geometryQuality ?? "unknown") !== "confirmed",
-    }));
-  return {
-    mapId: String(record.mapId ?? ""),
-    name: String(record.name ?? ""),
-    kind: String(record.kind ?? "world"),
-    containerLocationId: record.containerLocationId === null || record.containerLocationId === undefined
-      ? null : String(record.containerLocationId),
-    metersPerCell: atlasKnownCoordinate(record.metersPerCell),
-    scaleQuality: String(record.scaleQuality ?? "uncalibrated"),
-    scaleLocked: record.scaleLocked === true,
-    defaultTerrain: String(record.defaultTerrain ?? "unknown"),
-    frame: record.frames?.frame && typeof record.frames.frame === "object" ? record.frames.frame : {},
-    locations,
-    characterPins,
-    itemPins,
-    coarseList,
-    occupantCounts,
-    areas: atlasSqlFilterByViewMode(record.points, viewMode).filter(point => point.kind === "location" && point.area).map(point => ({ locationId: String(point.entityId), geometry: point.area })),
-    routes,
-  };
-}
-
-/** H06：SQL 地图视图 → 子图索引（键 = 宿主地点的点 id；形状与旧 `maps.submaps` 一致）。 */
-export function atlasSqlSubmaps(items) {
-  const list = Array.isArray(items) ? items : [];
-  const locationMapId = new Map();
-  for (const item of list) {
-    for (const point of Array.isArray(item?.points) ? item.points : []) {
-      if (!point || typeof point !== "object") continue;
-      if (String(point.kind ?? "location") !== "location") continue;
-      const entityId = String(point.entityId ?? "");
-      if (entityId) locationMapId.set(entityId, String(item?.mapId ?? ""));
-    }
-  }
-  const byMapId = new Map(list.map((item) => [String(item?.mapId ?? ""), item]));
-  const submaps = {};
-  for (const item of list) {
-    const container = item?.containerLocationId;
-    if (container === null || container === undefined || String(container) === "") continue;
-    const containerRef = String(container);
-    const key = atlasPointRefOf(containerRef);
-    if (!key || submaps[key]) continue;
-    /**
-     * `parentMapId` = 「从哪一层点进来的」：宿主地点自己所在的那张图的宿主地点点 id
-     * （世界图 = "world"）。与旧 `maps.submaps` 同义，`hasChildSubmap` 的父链校验才能继续成立。
-     */
-    const hostItem = byMapId.get(locationMapId.get(containerRef) ?? "world") ?? null;
-    const hostContainer = hostItem?.containerLocationId;
-    // 子图索引必须看**全部**地点（含作者视图下才显示的）：否则父链会断，子图进不去；
-    // 「显示什么」由渲染层按当前 viewMode 决定（见 atlasSqlMapModel 的第二参）。
-    const model = atlasSqlMapModel(item, "author");
-    submaps[key] = {
-      parentMapId: hostContainer === null || hostContainer === undefined || String(hostContainer) === ""
-        ? "world" : atlasPointRefOf(hostContainer),
-      ownerLocationId: containerRef,
-      mapId: model.mapId,
-      name: model.name || key,
-      metersPerCell: model.metersPerCell,
-      scaleQuality: model.scaleQuality,
-      /** SQL 模式没有旧式自由单位比例尺：保持 null，绝不伪造单位换算。 */
-      scale: null,
-      frame: model.frame,
-      points: model.locations.map((location) => ({ id: location.id, name: location.name, x: location.x, y: location.y })),
-      model,
-    };
-  }
-  return submaps;
-}
-
-/** H06：按层级挑 SQL 地图行（pointId 为空 → 世界图 = containerLocationId 为空的那一张）。 */
-export function atlasSqlMapItemFor(items, pointId) {
-  const list = Array.isArray(items) ? items : [];
-  const isWorld = (item) => item?.containerLocationId === null
-    || item?.containerLocationId === undefined
-    || String(item.containerLocationId) === "";
-  if (pointId === null || pointId === undefined || String(pointId) === "") {
-    return list.find((item) => isWorld(item)) ?? null;
-  }
-  const wanted = atlasPointRefOf(pointId);
-  return list.find((item) => !isWorld(item) && atlasPointRefOf(item.containerLocationId) === wanted) ?? null;
-}
-
-/**
- * H12 / §10.4：UI 侧的「作者视图 / 主角所知」过滤（**只影响界面显示**）。
- *
- * `pov` 时隐藏 DTO 显式标记为隐藏的条目（`hidden` / `visibility: 'hidden'`）；
- * `author` 时全量显示。任何情况下都**不改数据、不改注入范围**——
- * 送进模型 / 世界书的投影只由 `buildSqlPromptScope`（永远按 pov 投影）构造。
- */
-export function atlasSqlFilterByViewMode(items, viewMode = "pov") {
-  const list = Array.isArray(items) ? items : [];
-  if (String(viewMode) === "author") return list;
-  return list.filter((item) => item?.hidden !== true && String(item?.visibility ?? "") !== "hidden");
-}
-
-/**
- * H07：SQL 附近视图 → 卡片数据。
- *
- * 只认**这一份**视图里的 `items`；没有 items 就返回空数组——调用方据此清空卡片，
- * 绝不保留「上几次的人物缓存」（§10.1）。距离未知时 `gridDistance` 为 null（绝不写 0）。
- */
-export function atlasSqlNearbyCards(view, viewMode = "pov") {
-  const list = atlasSqlFilterByViewMode(view?.items, viewMode);
-  return list
-    .filter((raw) => raw && typeof raw === "object")
-    .map((raw) => ({
-      id: String(raw.entityId ?? ""),
-      name: String(raw.name ?? ""),
-      relevance: String(raw.relevance ?? ""),
-      positionQuality: atlasPositionQuality(raw.positionQuality),
-      gridDistance: atlasKnownCoordinate(raw.gridDistance),
-      lastSeenAt: raw.lastSeenAt ?? null,
-    }));
-}
-
-/**
- * H12 / §10.4：SQL 模式下**唯一**允许送进模型 / 世界书的投影构造点。
- *
- * 界面上的「作者视图」开关只改 UI 过滤：`uiViewMode` 在这里**只被记录**，
- * 绝不参与投影计算——投影永远按 `projectForPov(world, pov)` 构造，字段级知识边界
- * 由 knowledge 决定，不因为作者开了作者地图就放宽注入范围（§10.4）。
- */
-export function buildSqlPromptScope(sqlCore, world, pov, uiViewMode = "pov") {
-  const mode = String(uiViewMode ?? "pov");
-  const projectForPov = sqlCore?.projectForPov;
-  if (typeof projectForPov !== "function") {
-    return { ok: false, code: "SQL_CORE_UNAVAILABLE", projection: null, uiViewMode: mode };
-  }
-  // 刻意不把 viewMode 传进投影：注入范围与界面开关无关。
-  const projection = projectForPov(world, pov);
-  return { ok: true, projection, uiViewMode: mode };
 }
 
 // ---------------------------------------------------------------------------
@@ -1116,137 +530,6 @@ export function atlasDiagnoseEmptyNearby(input) {
     };
   }
   return { case: "no-confirmed-people", persons: 0, message: "附近暂无已确认人物。" };
-}
-
-// ---------------------------------------------------------------------------
-// B02b：会话路由请求包装（可测工厂）
-// ---------------------------------------------------------------------------
-
-/** 需要携带会话文档的引擎路由前缀（0.9.42 会话承载的既有清单，一字不改）。 */
-const SESSION_ROUTE_PREFIXES = [
-  "/state",
-  "/characters/timeline",
-  "/map/image",
-  "/map/travel-preview",
-  "/turns/",
-  "/bindings",
-  "/worlds/import",
-  "/worlds/ensure-starter",
-  "/worlds/protagonist/sync",
-  "/worlds/geo/adopt",
-  "/worlds/geo/suggest",
-  "/worlds/move-author",
-  "/scene/",
-  "/session/",
-];
-
-function pathWantsSession(path) {
-  return SESSION_ROUTE_PREFIXES.some((prefix) => path === prefix || path.startsWith(prefix));
-}
-
-/**
- * B02b（聊天隔离）会话路由请求包装。
- *
- * - 请求发起时固定 `requestChatId`，并把**当前聊天**的会话文档随体带上（唯一往返路径）；
- * - 响应带回会话时只经 `atlasSessionWriteGuard` 四方核对后才写回（B02a）；
- * - 响应**不含会话**（设置类 / 只读类路由）是正常情况：不写回、不报错；
- * - 发起聊天 ≠ 当前聊天（A 等待期间切到 B，A 的迟到 commit / bootstrap / retry 响应）
- *   → 丢弃写回，记 `STALE_*_DROPPED`；若引擎侧已提交，额外给用户一条
- *   「切聊天弃回执，回原聊天核对」的可见提示（绝不静默吞掉回执）。
- *
- * 抽成工厂是为了让 harness 能真跑这条路径（connectOnce 里的接线一字不改地调用它）。
- */
-export function createAtlasSessionApi(deps) {
-  const context = deps.context;
-  const innerApi = deps.innerApi;
-  const emit = typeof deps.emit === "function" ? deps.emit : () => {};
-  const notify = typeof deps.notify === "function" ? deps.notify : () => {};
-  const logCall = typeof deps.logCall === "function" ? deps.logCall : (method, path, run) => run();
-  if (!context || !innerApi) throw new Error("createAtlasSessionApi 需要 context 与 innerApi。");
-  // 酒馆生成结束时可能有一笔较早发起的 saveMetadata 迟到，短暂覆盖刚写回的 Atlas rev。
-  // 仅在同一聊天、同一 metadata 对象内记住本 API 成功写回的修订；下一请求先恢复它。
-  const latestByMetadata = new WeakMap();
-  return {
-    async request(method, path, body) {
-      const requestContext = context();
-      const requestChatId = requestContext.chatId ?? null;
-      const requestMetadata = requestContext.chatMetadata ?? null;
-      let payload = body;
-      let requestSession = null;
-      if(method === "POST" && path.startsWith("/sql/")) {
-        payload = { ...(body ?? {}), chatUid: body?.chatUid ?? body?.chatId ?? requestChatId };
-      }
-      if (method === "POST" && pathWantsSession(path)) {
-        requestSession = readAtlasSession(context);
-        const latest = requestMetadata && latestByMetadata.get(requestMetadata);
-        if (latest && latest.chatId === requestChatId && latest.session.rev > (requestSession?.rev ?? -1)) {
-          await writeAtlasSession(context, latest.session, requestChatId, requestMetadata);
-          requestSession = latest.session;
-        }
-        if (requestSession) payload = { ...(body ?? {}), session: requestSession };
-      }
-      const result = await logCall(method, path, () => innerApi.request(method, path, payload));
-      const firstWorld = method === "POST" && path === "/worlds/ensure-starter" &&
-        !result?.body?.session?.binding;
-      try {
-        const responseSession = result?.body?.session;
-        // 设置类响应不带会话：正常路径，直接返回（B02b：不因为没会话就报错）
-        if (!isValidAtlasSession(responseSession)) return result;
-        const currentChatId = context().chatId ?? null;
-        const sessionChatId =
-          responseSession?.binding && typeof responseSession.binding.chatId === "string"
-            ? responseSession.binding.chatId
-            : null;
-        const starterAllowed = firstWorld && atlasStarterWorldWriteGuard(
-          requestChatId, currentChatId, requestMetadata, context().chatMetadata ?? null,
-          payload?.world, responseSession, requestSession,
-        );
-        if (atlasSessionWriteGuard(requestChatId, currentChatId, sessionChatId, responseSession) || starterAllowed) {
-          // C07b：把 B02b 捕获的 chatId 交给写回再做一次身份核对（守卫已过，这里是第二道锁，
-          // 覆盖「守卫通过之后、await 落盘之前又切了聊天」的极窄窗口）。
-          await writeAtlasSession(context, responseSession, requestChatId, starterAllowed ? requestMetadata : null);
-          if (requestMetadata && requestChatId === currentChatId) {
-            latestByMetadata.set(requestMetadata, { chatId: requestChatId, session: responseSession });
-          }
-          return result;
-        }
-        // 发起聊天 ≠ 当前聊天（切卡 / 换聊天 / 会话归属不一致）：丢弃写回。
-        // 引擎侧已提交；回到原聊天时该会话由 chatMetadata 持久层自然恢复。
-        const receiptStatus = result?.body?.data?.receipt?.status ?? null;
-        const decision = atlasStaleWriteNotice(receiptStatus);
-        emit({
-          level: "info", source: "storage", code: decision.code,
-          operation: "session", phase: "write", outcome: "skipped",
-          errorCode: decision.reasonCode,
-          details: { reasonCode: decision.reasonCode, coreCommitted: receiptStatus === "committed" },
-        });
-        if (decision.notice) notify(decision.notice);
-        // A successful ensure response without a saved world must not be
-        // followed by /bindings: that would turn this write rejection into an
-        // opaque WORLD_NOT_FOUND error.
-        if (firstWorld && requestChatId === currentChatId) {
-          return { status: 409, body: { ok: false, error: {
-            code: "SESSION_IDENTITY_MISMATCH",
-            message: "自动建世结果未写入当前聊天：会话身份或世界 ID 不符，请在概览页重试初始化。",
-          } } };
-        }
-      } catch (error) {
-        // 写回失败（聊天正被切换等）：引擎侧已提交，本侧会话等下次响应覆盖；记日志排查
-        emit({
-          level: "error", source: "storage", code: "SESSION_WRITE_FAILED",
-          operation: "session", phase: "write", outcome: "failed", retryable: true,
-          details: { coreCommitted: result?.body?.data?.receipt?.status === "committed" },
-        });
-        if (firstWorld && requestChatId === (context().chatId ?? null)) {
-          return { status: 409, body: { ok: false, error: {
-            code: "SESSION_WRITE_FAILED",
-            message: "自动建世已返回，但写入当前聊天失败；请在概览页重试初始化。",
-          } } };
-        }
-      }
-      return result;
-    },
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1537,7 +820,7 @@ let sqlCoreState = { status: "idle", code: null, message: null };
 export const ATLAS_SQL_MODE_TOGGLE_ID = "atlas-sql-mode-toggle";
 
 /**
- * H05/§17H：settings.html 的「SQL 世界数据」开关（**默认关闭**）。
+ * H05/§17H：settings.html 的「SQL 世界数据」开关（新安装默认启用）。
  *
  * 写入唯一设置键 `extensionSettings[ATLAS_SETTINGS_KEY][ATLAS_SQL_MODE_SETTING]`
  * （与 settings.html 上的说明一致），切换后立刻重渲染工作台——地图 / 附近 / 日志的
@@ -1556,9 +839,9 @@ export function bindSqlModeToggle(context, onChanged = null) {
     }
   };
   toggle.checked = read();
-  if (toggle.dataset.atlasBound === "true") return toggle;
+  if(toggle.__atlasChangeHandler)toggle.removeEventListener("change",toggle.__atlasChangeHandler);
   toggle.dataset.atlasBound = "true";
-  toggle.addEventListener("change", () => {
+  const handler=() => {
     const ctx = context();
     ctx.extensionSettings[ATLAS_SETTINGS_KEY] = {
       ...(ctx.extensionSettings[ATLAS_SETTINGS_KEY] ?? {}),
@@ -1571,7 +854,9 @@ export function bindSqlModeToggle(context, onChanged = null) {
       details: { setting: ATLAS_SQL_MODE_SETTING },
     });
     if (typeof onChanged === "function") onChanged(toggle.checked === true);
-  });
+  };
+  toggle.__atlasChangeHandler=handler;
+  toggle.addEventListener("change",handler);
   return toggle;
 }
 
@@ -1590,7 +875,7 @@ export function atlasSqlCoreStatus() {
  * SQL 世界数据模式开启时**才被调用：sql.js + wasm 体积大，保持旧模式的用户一分钱都不付。
  * 记忆化 = 一次结果只算一次；任何候选都失败时：
  * 1. 给出**具名诊断** `SQL_CORE_UNAVAILABLE`（面板也会显示该代码，不静默）；
- * 2. 返回 null，让调用方退回旧三表渲染器；
+ * 2. 返回 null，调用方报告核心不可用并保持当前视图为空；
  * 3. 绝不假装 SQL 模式已生效。
  */
 function loadSqlCore() {
@@ -2641,55 +1926,6 @@ const SQL_NEARBY_REASON_LABELS = {
  * `__isNear`：位置 = 当前地点，或当前地点的**子地点**（与 `projectTablesToMapView` 同一口径；
  * 根地点之间不算相邻——两座城相距几十格）。`__` 前缀字段只在 UI 内部用，不落任何数据。
  */
-function buildTableMapNpcIndex(d) {
-  const index = new Map();
-  const tableMap = d?.tableMap;
-  const entries = tableMap?.nearby?.entries;
-  if (!Array.isArray(entries) || entries.length === 0) return index;
-  const currentRowId = String(tableMap?.current?.locationId ?? d?.currentLocationId ?? "");
-  const chainIds = new Set((tableMap?.current?.chain ?? []).map((row) => String(row.id ?? "")));
-  const nearRowIds = new Set();
-  for (const row of chainIds) nearRowIds.add(row);
-  for (const row of entries) {
-    const locationId = String(row.locationId ?? "");
-    if (!locationId) continue;
-    if (locationId === currentRowId || chainIds.has(locationId)) nearRowIds.add(locationId);
-  }
-  for (const row of entries) {
-    const id = String(row.id ?? "").replace(/^npc:/, "");
-    if (!id) continue;
-    const locationId = row.locationId === null || row.locationId === undefined ? null : String(row.locationId);
-    const pointId = locationId === null ? null : locationId.replace(/^loc:/, "");
-    index.set(id, {
-      id,
-      name: String(row.name ?? ""),
-      pointId,
-      pointName: row.locationName ?? null,
-      presence: row.presence,
-      thought: row.thought ?? "",
-      actionTendency: row.actionTendency ?? "",
-      currentAction: row.currentAction ?? "",
-      positionSource: row.positionSource ?? null,
-      isProtagonist: row.isProtagonist === true,
-      fromTables: true,
-      __isNear: row.isNear === true || (row.isNear !== false && locationId !== null && nearRowIds.has(locationId)),
-    });
-  }
-  return index;
-}
-
-/** D05：目录人物 + 三表人物合并（三表字段最后展开 —— 位置 / 在场 / 想法以三表为准）。 */
-function mergeNearbyNpc(npc, table) {
-  if (!table) return npc;
-  return {
-    ...npc,
-    ...table,
-    reason: npc.reason,
-    recentNarratives: npc.recentNarratives,
-    isProtagonist: npc.isProtagonist === true || table.isProtagonist === true,
-  };
-}
-
 /** 回执状态 → 用户可读标签（与 core 的 AtlasTurnReceiptStatus 对齐）。 */
 const STATUS_LABELS = {
   committed: "已提交",
@@ -2947,279 +2183,12 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     },
   };
 
-  /** 视图 DTO 取值：`/state` 的 `sqlViews.<kind>` 与扁平键 `sql<Kind>` 两种下发形态都认。 */
-  function sqlViewOf(kind, d) {
-    const flat = d?.[ATLAS_SQL_VIEW_KEYS[kind] ?? ""];
-    if (flat && typeof flat === "object") return flat;
-    const nested = d?.sqlViews?.[kind];
-    return nested && typeof nested === "object" ? nested : null;
-  }
-
-  /** H13 本地模式：SQL 快照信封是否就在本聊天里（`chatMetadata.atlas.<ATLAS_DATABASE_KEY>`）。 */
-  function sqlEnvelopePresent() {
-    try {
-      if (typeof SillyTavern === "undefined") return false;
-      const metadata = SillyTavern.getContext?.()?.chatMetadata;
-      const atlas = metadata && typeof metadata === "object" ? metadata[ATLAS_SESSION_KEY] : null;
-      if (!atlas || typeof atlas !== "object") return false;
-      const key = String(sqlMode.module?.ATLAS_DATABASE_KEY ?? "database");
-      return atlas[key] !== undefined && atlas[key] !== null;
-    } catch {
-      return false;
-    }
-  }
-
-  /**
-   * 打开（或复用）**只读**SQL 会话：`openSqlSession` 对既有信封只做 decode + open，不写库；
-   * UI 只用它查视图，世界写入仍然只有 `/sql/turn` 一个入口（§16.4「同一时刻一个写者」）。
-   * 聊天 / 分支变化即整体作废并关闭旧会话。
-   */
-  function sqlSnapshotScope(d) {
-    const record = typeof SillyTavern !== "undefined" ? atlasContextRecord(() => SillyTavern.getContext()) : null;
-    const metadata = record?.chatMetadata ?? null;
-    const envelope = metadata?.[ATLAS_SESSION_KEY]?.[String(sqlMode.module?.ATLAS_DATABASE_KEY ?? "database")];
-    return {
-      key: JSON.stringify([String(state().chatId ?? ""), String(record?.chatId ?? ""),
-        String(d?.branchId ?? state().binding?.branchId ?? "main"),
-        envelope?.storage_revision ?? null, envelope?.sha256 ?? null, d?.revision ?? null]),
-      // 比较实际快照内容，不能只信外部声明的 hash；不把正文/快照放进日志或缓存键。
-      snapshotData: envelope?.data ?? null,
-      metadata,
-    };
-  }
-
-  function sqlSameSnapshot(a, b) {
-    return a.key === b.key && a.snapshotData === b.snapshotData && a.metadata === b.metadata;
-  }
-
-  async function sqlOpenSession(d) {
-    const mod = sqlMode.module;
-    const captured = sqlSnapshotScope(d);
-    if (sqlMode.session && sqlMode.sessionKey === captured.key
-      && sqlMode.sessionData === captured.snapshotData && sqlMode.sessionMetadata === captured.metadata) return sqlMode.session;
-    if (sqlMode.sessionPending && sqlSameSnapshot(sqlMode.sessionPending, captured)) return sqlMode.sessionPending.task;
-    if (typeof mod?.openSqlSession !== "function") {
-      emitSqlBridgeMissing(["openSqlSession"]);
-      return null;
-    }
-    const pending = { ...captured, task: null };
-    const task = (async () => {
-      try {
-        const ctx = () => SillyTavern.getContext();
-        const record = atlasContextRecord(ctx);
-        const previous = sqlMode.session;
-        sqlMode.session = null;
-        sqlMode.sessionKey = "";
-        if (previous && typeof mod.closeSqlSession === "function") {
-          void Promise.resolve(mod.closeSqlSession(previous)).catch(() => {});
-        }
-        const session = await mod.openSqlSession({
-          chatUid: String(record?.chatId ?? state().chatId ?? ""),
-          branchId: d?.branchId ?? state().binding?.branchId ?? undefined,
-          chatMetadata: captured.metadata,
-          saveSession: async () => {
-            throw new Error("SQL_READ_ONLY：视图快照不能保存世界数据");
-          },
-          // 唯一会话写回路径（与 chatMetadata.atlas 同源），但 UI 只读时根本不会走到写
-          confirmSave: false,
-        });
-        if (!sqlMode.enabled || !sqlSameSnapshot(captured, sqlSnapshotScope(data()))) {
-          if (typeof mod.closeSqlSession === "function") await mod.closeSqlSession(session);
-          return null;
-        }
-        sqlMode.session = session;
-        sqlMode.sessionKey = captured.key;
-        sqlMode.sessionData = captured.snapshotData;
-        sqlMode.sessionMetadata = captured.metadata;
-        return session;
-      } catch (error) {
-        const code = String(error?.code ?? "SQL_SESSION_OPEN_FAILED");
-        emitAtlasDiagnostic({
-          level: "error", source: "storage", code: "SQL_SESSION_OPEN_FAILED",
-          operation: "sql-session", phase: "open", outcome: "failed", errorCode: code,
-          retryable: false,
-          details: { message: error instanceof Error ? error.message : String(error) },
-        });
-        return null;
-      } finally {
-        if (sqlMode.sessionPending === pending) sqlMode.sessionPending = null;
-      }
-    })();
-    pending.task = task;
-    sqlMode.sessionPending = pending;
-    return task;
-  }
-
-  /** 视图缓存键：聊天 / 分支 / 修订 / 视图模式 / 查询参数任一变化即重新查询（§10.1）。 */
-  function sqlViewKey(kind, d, query) {
-    return [
-      kind,
-      String(state().chatId ?? ""),
-      String(d?.branchId ?? ""),
-      String(d?.revision ?? d?.currentTime ?? ""),
-      String(sqlViewMode),
-      JSON.stringify(query ?? {}),
-    ].join("|");
-  }
-
-  /** 修订或聊天变化 → 旧视图整体失效（绝不让上一修订的卡片留在界面上）。 */
-  function sqlSyncViewScope(d) {
-    const snapshot = sqlSnapshotScope(d);
-    const scopeKey = snapshot.key;
-    if (sqlMode.viewScopeKey !== scopeKey || sqlMode.viewSnapshotData !== snapshot.snapshotData
-      || sqlMode.viewSnapshotMetadata !== snapshot.metadata) {
-      sqlMode.viewScopeKey = scopeKey;
-      sqlMode.viewSnapshotData = snapshot.snapshotData;
-      sqlMode.viewSnapshotMetadata = snapshot.metadata;
-      sqlMode.viewEpoch++;
-      sqlMode.views.clear();
-      sqlMode.viewPending.clear();
-      sqlMode.viewFailed.clear();
-      sqlMode.viewRevision = null;
-    }
-  }
-
-  /** 只读查询一个视图（本地 SQL 快照路径）。失败即具名诊断，绝不返回假视图。 */
-  async function sqlQueryView(kind, query, d) {
-    const captured = sqlSnapshotScope(d);
-    const session = await sqlOpenSession(d);
-    if (!sqlMode.enabled || !sqlSameSnapshot(captured, sqlSnapshotScope(data()))) return null;
-    const queryView = session?.repo?.queryView;
-    if (typeof queryView !== "function") {
-      emitSqlBridgeMissing(["repo.queryView"]);
-      return null;
-    }
-    try {
-      return await queryView.call(session.repo, { kind, ...query });
-    } catch (error) {
-      emitAtlasDiagnostic({
-        level: "error", source: "storage", code: "SQL_VIEW_QUERY_FAILED",
-        operation: "sql-view", phase: "query", outcome: "failed", retryable: true,
-        errorCode: String(error?.code ?? ""),
-        details: { kind, message: error instanceof Error ? error.message : String(error) },
-      });
-      return null;
-    }
-  }
-
-  /**
-   * 触发一次异步取视图（结果落地后重渲染一次；同一键不重复发请求）。
-   * 失败键记入 `viewFailed`：同一修订内不再重试（否则「渲染 → 查询失败 → 再渲染」会自激）。
-   */
-  function sqlKickView(kind, d, query) {
-    const key = sqlViewKey(kind, d, query);
-    const epoch = sqlMode.viewEpoch;
-    const snapshot = sqlSnapshotScope(d);
-    const isCurrent = () => sqlMode.enabled && epoch === sqlMode.viewEpoch && sqlSameSnapshot(snapshot, sqlSnapshotScope(data()));
-    if (sqlMode.viewPending.has(key) || sqlMode.viewFailed.has(key)) return;
-    sqlMode.viewPending.add(key);
-    void sqlQueryView(kind, query, d)
-      .then((view) => {
-        if (!isCurrent()) return;
-        sqlMode.viewPending.delete(key);
-        if (!view || typeof view !== "object") {
-          sqlMode.viewFailed.add(key);
-          renderPage();
-          return;
-        }
-        const revision = Number(view.revision);
-        if (Number.isFinite(revision)) {
-          if (sqlMode.viewRevision !== null && revision < sqlMode.viewRevision) {
-            // 迟到的旧修订结果：丢弃，绝不覆盖当前修订的视图
-            emitAtlasDiagnostic({
-              level: "info", source: "storage", code: "SQL_VIEW_STALE_DROPPED",
-              operation: "sql-view", phase: "response", outcome: "skipped",
-              details: { kind, revision, currentRevision: sqlMode.viewRevision },
-            });
-            return;
-          }
-          sqlMode.viewRevision = revision;
-        }
-        sqlMode.views.set(key, view);
-        renderPage();
-      })
-      .catch(() => {
-        if (!isCurrent()) return;
-        sqlMode.viewPending.delete(key);
-        sqlMode.viewFailed.add(key);
-      });
-  }
-
-  /** 供 H05 端口预热视图（不阻塞：结果落地会重渲染）。 */
-  async function sqlWarmViews(d) {
-    const wanted = [
-      ["map", { mapId: undefined }],
-      ["nearby", { entityId: String(d?.currentLocationId ?? "") || undefined }],
-    ];
-    for (const [kind, query] of wanted) {
-      if (sqlMode.views.has(sqlViewKey(kind, d, query))) continue;
-      const view = await sqlQueryView(kind, query, d);
-      if (view) sqlMode.views.set(sqlViewKey(kind, d, query), view);
-    }
-  }
-
-  /**
-   * 面板级 SQL 视图决议（H06/H07/H08 共用）。
-   *
-   * 读权威顺序（§10.1「一个位置解析入口」）：
-   * 1. `/state` 已带回该 kind 的 SQL 视图（服务端只读适配；远程模式走这条）；
-   * 2. 浏览器手里有 SQL 快照信封 → 本地**只读**会话 `repo.queryView`（本地模式，H13）；
-   * 3. 两者都没有 → 具名诊断 + 旧渲染器兜底（绝不假装 SQL 生效、绝不留白屏）。
-   *
-   * `active: true` 表示「本面板的读权威是 SQL」；否则返回具名 `code` + `note` 供调用方显示。
-   */
-  function sqlResolveView(kind, d = data(), query = null) {
-    if (!sqlMode.enabled) return { active: false, reason: "off", view: null, code: null, note: null };
-    if (sqlMode.core === "loading") {
-      return {
-        active: false, reason: "loading", view: null, code: "SQL_CORE_LOADING",
-        note: `SQL 世界数据模式已开启，正在加载 SQL 核心（${ATLAS_SQL_MODE_SETTING}）；加载完成前本面板暂用旧路径渲染。`,
-      };
-    }
-    if (sqlMode.core !== "ready") {
-      const message = sqlMode.message ?? atlasSqlCoreStatus().message ?? "";
-      return {
-        active: false, reason: "unavailable", view: null, code: "SQL_CORE_UNAVAILABLE",
-        note: `SQL 世界数据模式已开启，但 SQL 核心（dist/atlas-sql.mjs）不可用：${message || "未知原因"}。已退回旧路径渲染；请重新执行 npm run build 后刷新，或在设置里关闭该模式。`,
-      };
-    }
-    sqlSyncViewScope(d);
-    const embedded = sqlViewOf(kind, d);
-    if (embedded) return sqlAcceptView(kind, d, embedded);
-    if (!sqlEnvelopePresent()) {
-      return {
-        active: false, reason: "no-source", view: null, code: "SQL_VIEW_UNAVAILABLE",
-        note: `SQL 世界数据模式已开启，但本聊天既没有 SQL 视图下发（/state），也没有浏览器侧 SQL 快照（chatMetadata.atlas.database）：本面板暂用旧路径渲染。`,
-      };
-    }
-    const cached = sqlMode.views.get(sqlViewKey(kind, d, query)) ?? null;
-    if (cached) return sqlAcceptView(kind, d, cached);
-    if (sqlMode.viewFailed.has(sqlViewKey(kind, d, query))) {
-      return {
-        active: false, reason: "query-failed", view: null, code: "SQL_VIEW_QUERY_FAILED",
-        note: `SQL 世界数据模式：读取 ${kind} 视图失败（详见日志的 SQL_VIEW_QUERY_FAILED）；本修订内不再重试，本面板暂用旧路径渲染。`,
-      };
-    }
-    sqlKickView(kind, d, query);
-    return {
-      active: false, reason: "querying", view: null, code: "SQL_VIEW_LOADING",
-      note: `SQL 世界数据模式：正在从 SQL 世界库读取 ${kind} 视图…（只读查询，不改任何数据）`,
-    };
-  }
-
-  /** 视图可用性 + 修订校验（修订不符 → 空视图替换旧内容，绝不显示上一修订的卡片）。 */
-  function sqlAcceptView(kind, d, view) {
-    const currentRevision = Number(d?.revision ?? d?.sqlRevision);
-    const viewRevision = Number(view?.revision);
-    if (Number.isFinite(currentRevision) && Number.isFinite(viewRevision) && viewRevision !== currentRevision) {
-      return {
-        active: true, reason: "stale", code: "SQL_VIEW_STALE_REVISION",
-        view: { ...view, items: [] },
-        note: `SQL ${kind} 视图停在修订 ${String(viewRevision)}，当前修订 ${String(currentRevision)}：已按空视图替换旧内容。`,
-      };
-    }
-    return { active: true, reason: "ok", view, code: null, note: null };
-  }
+  const sqlViewController=createSqlViewController({
+    state:()=>state(),data:()=>data(),getContext:()=>typeof SillyTavern!=="undefined"?SillyTavern.getContext():null,
+    sqlMode,getViewMode:()=>sqlViewMode,emitAtlasDiagnostic,emitSqlBridgeMissing,renderPage,
+    atlasSqlCoreStatus,ATLAS_SQL_VIEW_KEYS,ATLAS_SQL_MODE_SETTING,
+  });
+  const {sqlViewOf,sqlEnvelopePresent,sqlSnapshotScope,sqlSameSnapshot,sqlOpenSession,sqlViewKey,sqlSyncViewScope,sqlQueryView,sqlKickView,sqlWarmViews,sqlResolveView,sqlAcceptView}=sqlViewController;
 
   /** 供 renderCenter 页使用的提示条（带 data-sql-code，测试与作者都能对上号）。 */
   function sqlFallbackNote(resolved) {
@@ -3353,8 +2322,9 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     }
   }
 
-  const mapCameras = new Map();
-  const mapCameraViewports = new Map();
+  const mapController=createMapController({createPanGesture,createPinchTracker,zoomCameraAtPoint,panCameraBy});
+  const mapCameras = mapController.cameras;
+  const mapCameraViewports = mapController.viewports;
   let regionFilter = "";
   let dragOffsetX = 0;
   let dragOffsetY = 0;
@@ -3497,6 +2467,10 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
   }
 
   function currentLocationName(d) {
+    const current = d?.tableMap?.current?.chain?.[0];
+    if(current?.name && String(current.id)===String(d?.currentLocationId))return String(current.name);
+    const row = d?.tableMap?.locations?.entries?.find(location=>String(location.id)===String(d?.currentLocationId));
+    if(row?.name)return String(row.name);
     const id = String(d?.currentLocationId ?? "").replace(/^loc:/, "");
     if (!id) return null;
     const sources = [d?.map?.points, d?.tableMap?.world?.points];
@@ -3521,7 +2495,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     const pointer = el("span", "aw-topbar__hint", "按住空白处可拖动窗口");
     topbarLeft.append(pointer);
     if (state().pendingTurn) topbarRight.append(el("span", "aw-chip aw-chip--busy", state().turnPhase === "committing" ? "世界推演中" : state().turnPhase === "reading-context" ? "读取资料中" : state().turnPhase === "queued" ? "推演排队中" : "等待正文"));
-    if (d.currentTime !== undefined) topbarRight.append(el("span", "aw-chip aw-chip--gold", `第 ${String(d.currentTime)} 时段`));
+    if (d.currentTime !== undefined) topbarRight.append(el("span", "aw-chip aw-chip--gold", atlasClockLabel(d.currentTime,sqlModeFlag(d))));
     if (d.currentLocationId) {
       const pointName = currentLocationName(d);
       topbarRight.append(el("span", "aw-chip aw-chip--teal", `位置：${pointName ?? String(d.currentLocationId)}`));
@@ -4375,7 +3349,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       if (s.worldNotice) center.append(el("div", "aw-note", s.worldNotice));
       const stats = el("div", "aw-stats");
       const statsSpec = [
-        ["世界时间", `第 ${String(d.currentTime ?? 0)} 时段`],
+        ["世界时间", atlasClockLabel(d.currentTime,sqlModeFlag(d))],
         ["所在位置", currentLocationName(d) ?? (d.currentLocationId ? `地点 ${String(d.currentLocationId)}` : "未知")],
         ["地点总数", String(d.map?.pointCount ?? 0)],
         ["相关 NPC", String(Array.isArray(d.npcDirectory) ? d.npcDirectory.length : 0)],
@@ -4479,36 +3453,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         sqlNoteOnce(sqlNearby.code, { kind: "nearby" });
         center.append(sqlFallbackNote(sqlNearby));
       }
-      const npcs = Array.isArray(d.npcDirectory) ? d.npcDirectory : [];
-      // S11（0.9.55）：附近页只展示**引擎判定的相关人物**，按 relevantNpcIds 的命中顺序，
-      // 不再把整张 npcDirectory 当「附近」——旧实现把远在别处的目录成员也列成附近人物。
-      // 目录本身不变：非相关成员仍在地点菜单（「当前在这里」）里可查、可纠偏。
-      // 主角（服务端 isProtagonist，口径同 move-author）不在附近卡片里冒充 NPC；
-      // 已离场者保留展示（卡片如实标「已离场」，不伪装在场）。
-      const npcById = new Map(npcs.map((n) => [String(n.id ?? ""), n]));
-      /**
-       * D05：有 `tableMap` 时，**人物字段以三表为准**（想法 / 行动倾向 / 在场性 / 位置来源），
-       * 目录只补它独有的最近叙事与关联原因。三表里有、目录里还没有的人物也要出现
-       * （本轮刚被行增量记下的人不能因为目录投影滞后而消失）；已离场者不进"附近"。
-       */
-      const nearbyTableEntries = buildTableMapNpcIndex(d);
-      const hasTableNearby = Array.isArray(d.tableMap?.nearby?.entries);
-      const relevant = (Array.isArray(d.relevantNpcIds) ? d.relevantNpcIds : [])
-        .map((id) => npcById.get(String(id)))
-        .filter((npc) => Boolean(npc))
-        .map((npc) => mergeNearbyNpc(npc, nearbyTableEntries.get(String(npc.id ?? ""))))
-        .filter((npc) => npc.isProtagonist !== true && npc.presence !== "left"
-          && (!hasTableNearby || nearbyTableEntries.get(String(npc.id ?? ""))?.__isNear === true));
-      // 旧相关名单可能漏掉本轮新建 / 同步的人物；同地点判断以三表投影为准，
-      // 即使旧目录已经有这个 ID，也必须出现在附近页，且只出现一次。
-      const displayedIds = new Set(relevant.map((npc) => String(npc.id ?? "")));
-      for (const [id, view] of nearbyTableEntries) {
-        if (view.presence === "left" || view.isProtagonist) continue;
-        if (!view.__isNear) continue;
-        if (displayedIds.has(id)) continue;
-        relevant.push(mergeNearbyNpc(npcById.get(id) ?? view, view));
-        displayedIds.add(id);
-      }
+      const {relevant,nearbyTableEntries}=atlasLegacyNearby(d);
       if (relevant.length === 0) {
         // A03 / F8 + §2.4：空关联**不等于**"没人"，更不等于串档。三种情形分开口径：
         // 当前位置未知（还没算过附近）/ 当前地点确实有人（引擎没给相关性）/ 真的没确认的人。
@@ -4802,7 +3747,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
   // 当前标尺条上下文（renderMap 时更新；setZoom 联动只重算条长，不动 detail）
   let scaleCtx = null;
   // 0.9.35 子图视图栈：空 = 世界图；每层 = {pointId, name}（点挂子图，递归）
-  let mapStack = [];
+  mapController.stack = [];
   let mapStackKey = "";
   let mapCrumb = null;
   let mapPanel = null;
@@ -5082,28 +4027,9 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     stage.append(imageLayer, areaLayer, gridLayer, mapLayer);
     viewport.append(stage);
     // 0.9.49（M03）：视口尺寸变化 → 等比布局重算（cellPx / 留白 / 格网同步刷新）
-    if (typeof ResizeObserver === "function") {
-      let resizeTimer = null;
-      let lastW = 0;
-      let lastH = 0;
-      const observer = new ResizeObserver((entries) => {
-        const rect = entries[0]?.contentRect;
-        if (!rect) return;
-        const w = Math.round(rect.width);
-        const h = Math.round(rect.height);
-        if (w === lastW && h === lastH) return;
-        lastW = w;
-        lastH = h;
-        if (resizeTimer) clearTimeout(resizeTimer);
-        resizeTimer = setTimeout(() => {
-          if (state().page === "map" && lastMapData) {
-            // 仅适配当前图的视口，保留其他层的中心与缩放；面包屑换行也会触发 resize。
-            renderMap(data());
-          }
-        }, 120);
-      });
-      observer.observe(viewport);
-    }
+    mapController.observe(viewport,()=>{
+      if(state().page === "map" && lastMapData)renderMap(data());
+    });
     for (const corner of ["tl", "tr", "bl", "br"]) viewport.append(el("span", `aw-corner aw-corner--${corner}`));
     const compass = el("div", "aw-compass");
     compass.append(el("span", "aw-compass__n", "N"), el("i", "aw-compass__needle"));
@@ -5346,87 +4272,8 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     // - 空白 pointerdown 超过阈值才 pan；按钮 / 输入框 / 弹层起手不启动拖拽。
     // - 双指 = pinch 缩放（中点锚定）；单指回落重启平移基线。
     // - pointercancel / capture 释放；pan 结束的合成 click 被吞，不当空白点击。
-    const panGesture = createPanGesture();
-    const pinch = createPinchTracker();
-    const activePointers = new Map();
-    const GESTURE_BLOCK_SELECTOR =
-      "button, input, select, textarea, label, .aw-mappanel, .aw-maptools, .aw-scale, .aw-mapcrumb, .aw-maplegend, .aw-travel, .aw-zoom";
-    viewport.addEventListener("pointerdown", (e) => {
-      if (!camera) return;
-      if (e.pointerType === "mouse" && e.button !== 0) return;
-      const interactive = Boolean(e.target?.closest?.(GESTURE_BLOCK_SELECTOR));
-      /**
-       * H15b：绘制模式**独占**网格点击——不启动平移，把这一下当成「选中/取消一个格」。
-       * 工具栏 / 弹层等交互元素仍然照常可点（interactive 优先）。
-       */
-      if (areaDraw.active && !interactive) {
-        const cell = areaDrawCellAt(e.clientX, e.clientY);
-        if (cell) {
-          const key = `${cell.x},${cell.y}`;
-          if (areaDraw.cells.has(key)) areaDraw.cells.delete(key); else areaDraw.cells.add(key);
-          renderAreaDraw();
-        }
-        return;
-      }
-      activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-      if (activePointers.size >= 2) {
-        panGesture.cancel(); // 进入双指：终止单指平移
-        pinch.down(e.pointerId, e.clientX, e.clientY);
-        viewport.setPointerCapture?.(e.pointerId);
-        return;
-      }
-      if (interactive) return; // 按钮 / 输入框 / 弹层起手：不启动手势，也不抢 pointer capture（capture 会把合成 click 重定向给 viewport，按钮点击就废了）
-      panGesture.down(e.clientX, e.clientY);
-      viewport.setPointerCapture?.(e.pointerId);
-    });
-    viewport.addEventListener("pointermove", (e) => {
-      if (!camera) return;
-      if (activePointers.has(e.pointerId)) activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-      if (pinch.active) {
-        const update = pinch.move(e.pointerId, e.clientX, e.clientY);
-        if (update) {
-          const rect = viewport.getBoundingClientRect();
-          commitCamera(zoomCameraAtPoint(camera, update.x - rect.left, update.y - rect.top, viewport.clientWidth || 0, viewport.clientHeight || 0, update.factor));
-        }
-        return;
-      }
-      const step = panGesture.move(e.clientX, e.clientY);
-      if (step?.panning) commitCamera(panCameraBy(camera, step.dx, step.dy));
-    });
-    const endMapPointer = (e, cancelled) => {
-      if (activePointers.has(e.pointerId)) {
-        activePointers.delete(e.pointerId);
-        if (cancelled) pinch.cancel();
-        else pinch.up(e.pointerId);
-      }
-      if (pinch.active) return;
-      if (activePointers.size === 1) {
-        // 双指回落到单指：以剩余指位重启平移基线
-        const [only] = [...activePointers.values()];
-        panGesture.cancel();
-        panGesture.down(only.x, only.y);
-        return;
-      }
-      if (cancelled) panGesture.cancel();
-      else panGesture.up(); // suppress 标记保留给 click 消费（不在 pointerup 提前清除）
-    };
-    viewport.addEventListener("pointerup", (e) => endMapPointer(e, false));
-    viewport.addEventListener("pointercancel", (e) => endMapPointer(e, true));
-    // 光标缩放：光标下世界点不漂移（zoomCameraAtPoint）；ctrl+滚轮 = 触控板捏合细步
-    viewport.addEventListener("wheel", (e) => {
-      if (!camera) return;
-      e.preventDefault();
-      const rect = viewport.getBoundingClientRect();
-      const factor = e.ctrlKey
-        ? Math.min(2, Math.max(0.5, Math.exp(-e.deltaY * 0.01)))
-        : e.deltaY < 0 ? 1.2 : 1 / 1.2;
-      commitCamera(zoomCameraAtPoint(camera, e.clientX - rect.left, e.clientY - rect.top, viewport.clientWidth || 0, viewport.clientHeight || 0, factor));
-    }, { passive: false });
-    // 0.9.47 mapview 同款交互：点地图空白处 / 按 ESC 关面板；面板内点击不冒泡
-    viewport.addEventListener("click", () => {
-      if (panGesture.consumeClick()) return; // pan 结束的合成 click 不当空白点击
-      closeMapPanel();
-    });
+    mapController.mountViewport({viewport,readCamera:()=>camera,commitCamera,areaDraw,
+      areaDrawCellAt,renderAreaDraw,closeMapPanel});
     mapPanel.addEventListener("click", (e) => e.stopPropagation());
     /**
      * H06/H08：SQL 世界数据模式的地图内元素（默认隐藏，只有 SQL 视图生效时才填内容）。
@@ -5522,7 +4369,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       setStatus("本轮尚未确定主角所在地点。", "warn");
       return;
     }
-    const ownerId = mapStack.length ? String(mapStack[mapStack.length - 1].pointId) : "world";
+    const ownerId = mapController.stack.length ? String(mapController.stack[mapController.stack.length - 1].pointId) : "world";
     const targetId = ownerId === "world" ? chain[chain.length - 1]
       : chain[chain.indexOf(ownerId) - 1];
     if (targetId) {
@@ -5577,14 +4424,14 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         nextStack.push({ pointId: id, name: String(sub.name ?? id) });
       }
       if (nextStack.length && nextStack[nextStack.length - 1].pointId === desiredOwner) {
-        mapStack = nextStack;
+        mapController.stack = nextStack;
         renderMap(data());
         locatePlayerCamera();
         return;
       }
     }
-    if (mapStack.length > 0 && !chain.includes(ownerId)) {
-      mapStack = [];
+    if (mapController.stack.length > 0 && !chain.includes(ownerId)) {
+      mapController.stack = [];
       renderMap(data());
       locatePlayerCamera();
       return;
@@ -5594,7 +4441,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
 
   /** 0.9.35 返回上一层子图（世界图 = 栈空）。R08：相机按视图持久化，返回恢复原相机。 */
   function popMapStack() {
-    mapStack.pop();
+    mapController.stack.pop();
     closeMapPanel();
     renderMap(data());
   }
@@ -5617,7 +4464,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       return;
     }
     mapCrumb.style.display = "";
-    const back = el("button", "aw-mapcrumb__back", `← 返回${mapStack.length > 1 ? "上一层" : "世界图"}`);
+    const back = el("button", "aw-mapcrumb__back", `← 返回${mapController.stack.length > 1 ? "上一层" : "世界图"}`);
     back.type = "button";
     back.setAttribute("aria-label", "返回上一层地图");
     back.addEventListener("click", () => popMapStack());
@@ -5628,13 +4475,13 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     rootLink.type = "button";
     rootLink.setAttribute("aria-label", "返回世界图");
     rootLink.addEventListener("click", () => {
-      mapStack = [];
+      mapController.stack = [];
       renderMap(data());
     });
     trail.append(rootLink);
-    mapStack.forEach((item, i) => {
+    mapController.stack.forEach((item, i) => {
       trail.append(el("span", "aw-mapcrumb__sep", "›"));
-      const isCurrent = i === mapStack.length - 1;
+      const isCurrent = i === mapController.stack.length - 1;
       const label = isCurrent ? String(currentSub.name || item.name) : String(item.name);
       const link = el("button", `aw-mapcrumb__link${isCurrent ? " is-current" : ""}`, label);
       link.type = "button";
@@ -5644,7 +4491,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       } else {
         link.setAttribute("aria-label", `跳回 ${label}`);
         link.addEventListener("click", () => {
-          mapStack = mapStack.slice(0, i + 1);
+          mapController.stack = mapController.stack.slice(0, i + 1);
           renderMap(data());
         });
       }
@@ -5674,13 +4521,9 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     const mr = anchorEl.getBoundingClientRect();
     const panelW = mapPanel.offsetWidth || 280;
     const panelH = mapPanel.offsetHeight || 240;
-    let left = mr.right - vr.left + 10;
-    if (left + panelW > vr.width - 10) left = mr.left - vr.left - panelW - 10;
-    if (left < 10) left = Math.max(10, (vr.width - panelW) / 2);
-    let top = mr.top - vr.top;
-    top = Math.min(Math.max(8, top), Math.max(8, vr.height - panelH - 10));
-    mapPanel.style.left = `${Math.round(left)}px`;
-    mapPanel.style.top = `${Math.round(top)}px`;
+    const position=markerPopupPosition(vr,mr,panelW,panelH);
+    mapPanel.style.left = `${position.left}px`;
+    mapPanel.style.top = `${position.top}px`;
     mapPanel.style.right = "auto";
   }
 
@@ -5829,8 +4672,8 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       ? { id: String(pointId), rowId: String(unplaced.id), name: String(unplaced.name), unplaced: true }
       : null);
     if (!target) return;
-    if (mapStack.length > 0) {
-      mapStack = [];
+    if (mapController.stack.length > 0) {
+      mapController.stack = [];
       renderMap(data());
     }
     const marker = mapLayer?.querySelector(`[data-point-id="${String(pointId)}"]`) ?? null;
@@ -5840,15 +4683,15 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
   /**
    * S8（0.9.55）：能否进入某个子图。
    * 深度上限与后端一致：世界图之外最多八张连续子图。
-   * mapStack.length 是已进入的层数；城市、街区、建筑、楼层、房间可继续往下细化。
+   * mapController.stack.length 是已进入的层数；城市、街区、建筑、楼层、房间可继续往下细化。
    * 同时按 parentMapId 校验父链，避免跨图误挂。
    */
   const MAP_SUBMAP_DEPTH_MAX = 8;
   function hasChildSubmap(submaps, pointId) {
     const id = String(pointId);
     const child = submaps[id];
-    if (!child || mapStack.length >= MAP_SUBMAP_DEPTH_MAX || mapStack.some((item) => item.pointId === id)) return false;
-    const parentId = mapStack.length ? String(mapStack[mapStack.length - 1].pointId) : "world";
+    if (!child || mapController.stack.length >= MAP_SUBMAP_DEPTH_MAX || mapController.stack.some((item) => item.pointId === id)) return false;
+    const parentId = mapController.stack.length ? String(mapController.stack[mapController.stack.length - 1].pointId) : "world";
     return String(child.parentMapId ?? "world") === parentId;
   }
 
@@ -5985,7 +4828,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     mapPanel.append(head);
 
     const metaLines = [];
-    if (inSub) metaLines.push(`属于：${mapStack[mapStack.length - 1]?.name ?? ""} 内部`);
+    if (inSub) metaLines.push(`属于：${mapController.stack[mapController.stack.length - 1]?.name ?? ""} 内部`);
     else if (region) metaLines.push(`地区：${String(region.name)}`);
     const scale = inSub ? currentSub?.scale ?? null : null;
     if (scale) metaLines.push(`比例尺：1 格 ≈ ${scale.distancePerCell}${scale.unit ? ` ${scale.unit}` : ""}`);
@@ -5999,40 +4842,8 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     const protagonists = (Array.isArray(d.npcDirectory) ? d.npcDirectory : [])
       .filter((npc) => npc.isProtagonist === true);
     // 0.9.41 在场名单：当前地点上的人物 / 物品（npcDirectory / objectDirectory 按 pointId 分组）
-    const d0 = lastMapData;
-    // D04：有 `tableMap` 时，**位置与在场性以三表为准**（行增量回合只改三表）；
-    // 目录只补它独有的字段（最近叙事 / reason / status），避免"面板说人在、三表说人走"。
-    const panelTableMap = d0?.tableMap ?? null;
-    const tableNpcsHere = panelTableMap ? tableNpcsAtLocation(panelTableMap, point.id) : [];
-    const directoryNpcs = Array.isArray(d0?.npcDirectory) ? d0.npcDirectory : [];
-    const directoryById = new Map(directoryNpcs.map((n) => [String(n.id ?? ""), n]));
-    const hereNpcs = panelTableMap
-      ? tableNpcsHere.map((entry) => {
-          const view = npcViewFromTableRow(entry);
-          const rich = directoryById.get(view.id);
-          // 合并顺序很重要：三表字段**最后展开**（位置 / 在场性 / 想法以三表为准），
-          // 只从目录里取它独有的最近叙事与关联原因。
-          return rich ? { ...rich, ...view, recentNarratives: rich.recentNarratives, reason: rich.reason } : view;
-        })
-      // H06：SQL 模式下列表来自 SQL 口径（粗定位名单 + 同坐标人物点），不读旧目录
-      : lastSqlModel
-        ? sqlNpcsAtPoint(lastSqlModel, point)
-        : directoryNpcs.filter((n) => String(n.pointId ?? "") === String(point.id) && n.presence !== "left");
-    const tableObjectsHere = panelTableMap ? tableObjectsAtLocation(panelTableMap, point.id) : [];
-    const directoryObjects = Array.isArray(d0?.objectDirectory) ? d0.objectDirectory : [];
-    const objectById = new Map(directoryObjects.map((o) => [String(o.id ?? ""), o]));
-    const hereObjects = panelTableMap
-      ? tableObjectsHere.map((entry) => {
-          const view = objectViewFromTableRow(entry);
-          const rich = objectById.get(view.id);
-          return rich ? { ...rich, ...view } : view;
-        })
-      : lastSqlModel
-        // H06：SQL 口径的物品标点（与自己所在地点同坐标的物品）
-        ? lastSqlModel.itemPins
-            .filter((pin) => pin.x === atlasKnownCoordinate(point.x) && pin.y === atlasKnownCoordinate(point.y))
-            .map((pin) => ({ id: String(pin.rowId), name: String(pin.name), type: "物品" }))
-        : directoryObjects.filter((o) => String(o.pointId ?? "") === String(point.id));
+    const {hereNpcs,hereObjects,candidateLocations,branchKey:panelBranchKey}=atlasMapOccupants(lastMapData,point,lastSqlModel,sqlMode.enabled,
+      {tableNpcsAtLocation,tableObjectsAtLocation,npcViewFromTableRow,objectViewFromTableRow,sqlNpcsAtPoint});
     const here = el("div", "aw-mappanel__here");
     /**
      * F05（§2.4）：地点弹窗是「你点开的那个地点**实际在场**的人」，不是「附近」。
@@ -6040,13 +4851,13 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
      * H06（§10.2）：SQL 模式下这里也列出**只知「在这个地点」**的人——他们不画地图标点，
      * 但必须在地点面板里查得到（否则等于「人从地图上消失了」）。
      */
-    const atCurrentLocation = String(point.id) === String(d0?.currentLocationId ?? "");
+    const atCurrentLocation = String(point.id) === String(d?.currentLocationId ?? "");
     const hereLabel = el("div", "aw-mappanel__here-label",
       `${atCurrentLocation ? "当前在这里" : "该地点在场"}（${hereNpcs.length + hereObjects.length}）`);
     here.append(hereLabel);
     if (!atCurrentLocation) {
       here.append(el("div", "aw-mappanel__here-hint",
-        d0?.currentLocationId ? "你当前不在此地：这里是该地点在场者（作者信息），不是「附近」。"
+        d?.currentLocationId ? "你当前不在此地：这里是该地点在场者（作者信息），不是「附近」。"
           : "主角当前位置尚未确认；这里是该地点的在场记录（作者信息），不代表这些人在你附近。"));
     }
     if (hereNpcs.length > 0) {
@@ -6128,13 +4939,11 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         confirmBox.append(locateBtn);
       }
       confirmBox.append(el("p", "aw-confirm__ident",
-        `聊天 ${String(d0?.chatId ?? "(无)")} · 分支 ${String(panelTableMap?.branchKey ?? "canon")} · 地点行 ${hereRowId}`));
+        `聊天 ${String(d?.chatId ?? "(无)")} · 分支 ${String(panelBranchKey)} · 地点行 ${hereRowId}`));
       confirmBox.append(el("p", "aw-confirm__hint",
         "关系只由证据或人工确认写入；未确认的留空，不会因为名字相近就自动认亲。"));
 
-      const candidateEntries = (Array.isArray(panelTableMap?.locationOccupants?.entries)
-        ? panelTableMap.locationOccupants.entries : [])
-        .filter((entry) => String(entry?.locationId ?? "") !== hereRowId);
+      const candidateEntries=candidateLocations;
       const targetSelect = el("select", "aw-input aw-input--select");
       targetSelect.setAttribute("aria-label", "选择要确认关联的地点");
       const noneOption = el("option", "", "— 未确认（请显式选择目标地点）—");
@@ -6212,7 +5021,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
             return;
           }
           void sendConfirm("confirm-coordinate", { gridX: x, gridY: y,
-            mapId: inSub ? `loc:${String(mapStack[mapStack.length - 1]?.pointId)}` : "world" });
+            mapId: inSub ? `loc:${String(mapController.stack[mapController.stack.length - 1]?.pointId)}` : "world" });
         });
         coordRow.append(xInput, yInput, coordinateBtn);
         confirmBox.append(coordRow);
@@ -6236,7 +5045,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       enterBtn.type = "button";
       enterBtn.setAttribute("aria-label", `进入 ${point.name} 的内部地图`);
       enterBtn.addEventListener("click", () => {
-        mapStack.push({ pointId: String(point.id), name: String(point.name) });
+        mapController.stack.push({ pointId: String(point.id), name: String(point.name) });
         closeMapPanel();
         renderMap(data());
       });
@@ -6490,7 +5299,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       // 否则新聊天的地图渲染出来之前，旧聊天的弹窗与名单还挂在界面上（跨聊天串档最直观的一种）。
       // B03 补：相机缓存（`mapCameras` 按 camKey = 作用域键 + 视图）与前一份 /state 派生数据
       // （lastMapData）一并作废——新作用域从 fitCamera 重新起算，绝不沿用旧分支 / 旧聊天的视角。
-      mapStack = [];
+      mapController.stack = [];
       mapStackKey = viewKey;
       lastMapData = null;
       mapPanelAnchor = null;
@@ -6504,7 +5313,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     }
     lastMapData = d;
     mapLayer.innerHTML = "";
-    const mapData = d.map ?? {};
+    const mapData = { ...(d.map ?? {}) };
     /**
      * H06（§10.1 / §17H）：SQL 世界数据模式。
      *
@@ -6531,29 +5340,17 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     }
     // 视图条目不做条目级过滤：地图行本身是容器（隐藏一张图会连带藏掉它的子图），
     // 「显示哪些点位」在 atlasSqlMapModel 里按 viewMode 过滤。
-    const sqlMapItems = sqlMapView.active && Array.isArray(sqlMapView.view.items) ? sqlMapView.view.items : null;
-    const sqlSubmapsResolved = sqlMapItems ? atlasSqlSubmaps(sqlMapItems) : null;
-    // D03：已经懒迁移过的分支，`/state` 会带 `tableMap`（三表投影）。
-    // 世界图与子图都优先用它——世界图只含根地点、子图按父地点键挂载，与 A03/A04/D-20 的口径一致。
-    // 没有 `tableMap` 的旧会话（或 projection 为空）**完全走原来的逻辑**，行为一字不变。
-    // H06：SQL 模式开启时 tableMap 不再参与渲染（唯一读权威 = SQL 视图）。
-    const tableMap = !sqlMapView.active && d.tableMap && typeof d.tableMap === "object" ? d.tableMap : null;
-    const tableSubmaps = tableMap && tableMap.submaps && typeof tableMap.submaps === "object" ? tableMap.submaps : null;
-    const submapSource = sqlSubmapsResolved
-      ?? tableSubmaps
-      ?? (mapData.submaps && typeof mapData.submaps === "object" ? mapData.submaps : {});
-    const submaps = submapSource;
-    const pointMeta = mapData.pointMeta && typeof mapData.pointMeta === "object" ? mapData.pointMeta : {};
-    while (mapStack.length > 0) {
-      const top = mapStack[mapStack.length - 1];
-      const expectedParent = mapStack.length > 1 ? mapStack[mapStack.length - 2].pointId : "world";
+    const {sqlMapItems,sqlSubmapsResolved,tableMap,submaps,pointMeta}=atlasMapSource(d,sqlMapView);
+    while (mapController.stack.length > 0) {
+      const top = mapController.stack[mapController.stack.length - 1];
+      const expectedParent = mapController.stack.length > 1 ? mapController.stack[mapController.stack.length - 2].pointId : "world";
       const submap = submaps[String(top.pointId)];
       if (submap && String(submap.parentMapId ?? "world") === String(expectedParent)) break;
-      mapStack.pop();
+      mapController.stack.pop();
       closeMapPanel();
     }
     // 0.9.35 子图视图：栈顶决定当前渲染哪张图（世界图或任意点挂子图，递归）
-    const view = mapStack[mapStack.length - 1] ?? null;
+    const view = mapController.stack[mapController.stack.length - 1] ?? null;
     const currentSub = view ? submaps[String(view.pointId)] ?? null : null;
     const inSub = Boolean(currentSub);
     renderMapCrumb(d, view, currentSub);
@@ -6568,106 +5365,21 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       ? atlasSqlMapItemFor(sqlMapItems, inSub ? view?.pointId ?? null : null)
       : null;
     const sqlModel = sqlItem ? atlasSqlMapModel(sqlItem, sqlViewMode) : null;
+    if (sqlMapView.active) {
+      mapData.mapImagePresent = Boolean(sqlModel?.backgroundAssetKey);
+      mapData.mapImageRevision = `${sqlModel?.mapId ?? ""}|${sqlModel?.backgroundAssetKey ?? ""}`;
+    }
     lastSqlModel = sqlModel;
     lastSqlSubmaps = sqlSubmapsResolved;
     const sqlEmptyMapNote = "SQL_MAP_EMPTY：当前层级在 SQL 地图视图里没有对应地图行，按空地图渲染（绝不回落到旧三表数据冒充当前内容）。";
     if (sqlMapItems && !sqlModel) sqlNoteOnce("SQL_MAP_EMPTY", { kind: "map", level: inSub ? String(view?.pointId ?? "") : "world" });
-    const sqlMapNote = sqlMapItems ? (sqlModel ? sqlMapView.note : sqlEmptyMapNote) : sqlMapView.note;
-    const sqlMapNoteCode = sqlMapItems ? (sqlModel ? sqlMapView.code : "SQL_MAP_EMPTY") : sqlMapView.code;
+    const sqlMapNote = sqlMapView.note ?? (sqlMapItems && !sqlModel ? sqlEmptyMapNote : null);
+    const sqlMapNoteCode = sqlMapView.code ?? (sqlMapItems && !sqlModel ? "SQL_MAP_EMPTY" : null);
 
-    const legacyPointsAll = Array.isArray(mapData.points) ? mapData.points : [];
-    const tableWorldPoints = tableMap && Array.isArray(tableMap.world?.points)
-      ? tableMap.world.points
-        .filter((point) => !point.kind || point.kind === "location")
-        .map((point) => ({ id: point.id, name: point.name, x: point.x, y: point.y, regionId: point.regionId ?? null }))
-      : null;
-    const sqlPoints = sqlModel ? sqlModel.locations : [];
-    const pointsAll = sqlMapItems ? sqlPoints : (tableWorldPoints ?? legacyPointsAll);
-    const subPoints = sqlMapItems
-      ? sqlPoints
-      : (inSub && Array.isArray(currentSub.points)
-        ? (tableMap ? currentSub.points.filter((point) => !point.kind || point.kind === "location") : currentSub.points)
-        : null);
-    // SQL 模式不做地区筛选：地区染色来自 SQL 地点范围（`area_geometry_json` / relations），
-    // 旧 `regionId` 在 SQL 行里没有对应字段——宁可不过滤，也不拿旧世界字段筛 SQL 点。
-    const points = sqlMapItems
-      ? sqlPoints
-      : inSub
-        ? subPoints
-        : regionFilter
-          ? pointsAll.filter((p) => String(p.regionId ?? "") === regionFilter)
-          : pointsAll;
-    activeMapPoints = points;
-    activeMapSubmaps = submaps;
-    // 世界图以地点和人数徽标承载人物；子图只有真实细格坐标才画独立人物点，
-    // 建筑级与未知位置仍由地点面板名单承载。
-    // H06：SQL 模式下目录 / 三表一律不参与（人物由 SQL 人物标点 + 粗定位名单承载）。
-    const npcsAll = sqlMapItems ? [] : (Array.isArray(d.npcDirectory) ? d.npcDirectory : []);
-    const objectsAll = sqlMapItems ? [] : (Array.isArray(d.objectDirectory) ? d.objectDirectory : []);
-    let rosterNpcs = [];
-    let objects;
-    if (inSub) {
-      const ownerId = String(view.pointId);
-      // 账本 presence=left 的人已经离场，不能出现在「建筑内」名单里冒充在场
-      rosterNpcs = npcsAll.filter((n) => String(n.pointId ?? "") === ownerId && n.presence !== "left");
-      const estimatedNpcIds = new Set((Array.isArray(currentSub?.points) ? currentSub.points : [])
-        .filter((point) => point?.kind === "character" && point.positionQuality === "estimated")
-        .map((point) => String(point.rowId ?? point.id ?? "")));
-      rosterNpcs = rosterNpcs.filter((npc) => !estimatedNpcIds.has(tableRowIdOf(npc.id)));
-      objects = objectsAll.filter((o) => String(o.pointId ?? "") === ownerId);
-      if (tableMap) {
-        /**
-         * D03 / D-34：子图名单同样以三表为准，并且**口径与地图一致**——
-         * 当前层可见的房间 = 宿主 + `submaps` 里以宿主为父的那些房间（含再下一层），
-         * 名单里列的是"归属于这些房间、但**没有房间内细坐标**"的人 / 物品。
-         * 有细坐标的人已经在地图上画成图钉了，不该在名单里再出现一次。
-         *
-         * 旧实现按宿主 id 精确匹配位置，于是"位置=某个房间"的人一个都进不来——
-         * 名单与地图会同时为空，而人其实就在这层楼里。
-         */
-        /**
-         * 口径与地图上的图钉**完全一致**：可见房间 = 当前图层渲染出来的地点标点
-         * （子图里 = 宿主 + 同层房间）。名单只列"归属于这些房间、但没有房间内细坐标"的人 / 物品；
-         * 有细坐标的已经在地图上画成图钉，不在名单里重复出现。
-         */
-        const visibleRoomIds = new Set([`loc:${ownerId}`, ...points.map((point) => `loc:${String(point.id)}`)]);
-        const hasFinePosition = (row) => typeof row.gridX === "number" && typeof row.gridY === "number";
-        const knownNpcKeys = new Set();
-        for (const npc of rosterNpcs) {
-          knownNpcKeys.add(tableRowIdOf(npc.id));
-          knownNpcKeys.add(String(npc.id ?? ""));
-        }
-        const tableObjectsHere = (tableMap.objects?.entries ?? []).filter((entry) =>
-          visibleRoomIds.has(String(entry.locationId ?? "")) && entry.holderCharacterId === null);
-        // 三表是物品权威；旧目录镜像若另用了 id，也不能把同一支水笔列两次。
-        objects = objects.filter((object) => !tableObjectsHere.some((entry) =>
-          String(entry.id) === String(object.id) ||
-          (String(entry.name).trim() === String(object.name).trim()
-            && String(entry.description ?? "").trim() === String(object.description ?? "").trim()
-            && String(entry.locationId ?? "") === `loc:${String(object.pointId ?? ownerId)}`)));
-        const knownObjectIds = new Set(objects.map((o) => String(o.id ?? "")));
-        for (const entry of tableMap.nearby?.entries ?? []) {
-          const locationId = String(entry.locationId ?? "");
-          if (!visibleRoomIds.has(locationId)) continue;
-          if (entry.presence === "left") continue;
-          if (entry.isProtagonist === true) continue;
-          const rowId = String(entry.id ?? "").startsWith("npc:") ? String(entry.id) : `npc:${String(entry.id ?? "")}`;
-          if (hasFinePosition(entry) || estimatedNpcIds.has(rowId)) continue;
-          if (knownNpcKeys.has(rowId)) continue;
-          rosterNpcs = [...rosterNpcs, npcViewFromTableRow(entry)];
-        }
-        for (const entry of tableMap.objects?.entries ?? []) {
-          const locationId = String(entry.locationId ?? "");
-          if (!visibleRoomIds.has(locationId)) continue;
-          if (entry.holderCharacterId !== null) continue;
-          if (hasFinePosition(entry)) continue;
-          if (knownObjectIds.has(String(entry.id ?? ""))) continue;
-          objects = [...objects, objectViewFromTableRow(entry)];
-        }
-      }
-    } else {
-      objects = regionFilter ? objectsAll.filter((o) => String(o.regionId ?? "") === regionFilter) : objectsAll;
-    }
+    const {pointsAll,points,subPoints,rosterNpcs,objects}=atlasMapLayerInput(
+      {d,mapData,tableMap,sqlMapItems,sqlModel,inSub,currentSub,view,regionFilter},
+      {tableRowIdOf,npcViewFromTableRow,objectViewFromTableRow});
+    activeMapPoints=points;activeMapSubmaps=submaps;
     if (regionSelect) regionSelect.style.display = inSub || sqlMapItems ? "none" : "";
     if (travelBar) travelBar.style.display = inSub ? "none" : "";
     interiorRoster.innerHTML = "";
@@ -7506,7 +6218,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
 
     const preview = state().destinationPreview;
     // 0.9.35 子图视图跳过路线预览：子图点位非世界点位，画不出有意义路线
-    if (preview && !inSub) {
+    if (preview && !inSub && preview.distanceUnit !== "m") {
       const from = pointsAll.find((p) => String(p.id) === String(d.currentLocationId ?? ""));
       const to = pointsAll.find((p) => String(p.id) === String(preview.destinationId));
       if (from && to) {
@@ -7545,7 +6257,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         mapImageCache.set(cacheKey, null);
         // B03：回调里要复核的是「加载发起时的身份」，故先冻结一份不可变快照。
         const capturedIdentity = { ...mapIdentity };
-        void api.request("POST", "/map/image", { chatId: String(state().chatId ?? "") }).then((result) => {
+        void api.request("POST", sqlMode.enabled ? "/sql/chat/map/image" : "/map/image", { chatId: String(state().chatId ?? ""), mapId: sqlModel?.mapId ?? "world" }).then((result) => {
           const payload = result.body?.data?.dataUrl;
           if (result.status !== 200 || !result.body?.ok || typeof payload !== "string") {
             emitAtlasDiagnostic({ level: "warn", source: "map",
@@ -7595,10 +6307,12 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       // 0.9.51（M06）：有标定时格程旁附物理距离（估计口径）；耗时语义一行不动——
       // 比例尺用于空间参考，旅行耗时沿用当前世界规则（lib/ 快照零改动，不重算已提交时间线）
       const metersPerCell = scaleCtx?.calibration?.metersPerCell ?? null;
-      const distanceLabel = scaleApiMissing ? "" : formatTravelDistance(preview.distance, metersPerCell);
-      travelBar.append(el("span", "aw-travel__meta", distanceLabel
-        ? `距离 ${preview.distance} 格（${distanceLabel}，按标定估计） · 预计 ${preview.estimatedDuration} 时段（旅行耗时沿用世界规则）`
-        : `距离 ${preview.distance} 格 · 预计 ${preview.estimatedDuration} 时段`));
+      const distanceLabel = preview.distanceUnit === "m" || scaleApiMissing ? "" : formatTravelDistance(preview.distance, metersPerCell);
+      const previewText = preview.distanceUnit === "m"
+        ? `距离约 ${Math.round(preview.distance)} 米 · 预计约 ${Math.round(preview.estimatedDuration / 60)} 分钟`
+        : distanceLabel ? `距离 ${preview.distance} 格（${distanceLabel}，按标定估计） · 预计 ${preview.estimatedDuration} 时段（旅行耗时沿用世界规则）`
+        : `距离 ${preview.distance} 格 · 预计 ${preview.estimatedDuration} 时段`;
+      travelBar.append(el("span", "aw-travel__meta", previewText));
       const actions = el("span", "aw-travel__actions");
       const confirm = el("button", "aw-btn aw-btn--primary", "填入行动");
       confirm.type = "button";
@@ -7689,7 +6403,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
           id: `world-demo-${Date.now()}`,
           now: Date.now(),
         });
-        const result = await api.request("POST", "/worlds/import", { world });
+        const result = await api.request("POST", sqlMode.enabled ? "/sql/chat/map/import" : "/worlds/import", { world, chatId: String(state().chatId ?? "") });
         if (result.status !== 200 || !result.body?.ok) {
           settingsStatus = `演示世界创建被拒绝：${result.body?.error?.message ?? `HTTP ${result.status}`}`;
           settingsStatusKind = "error";
@@ -7729,7 +6443,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       if (!selected) return;
       try {
         const parsed = JSON.parse(await selected.text());
-        const result = await api.request("POST", "/worlds/import", { world: parsed });
+        const result = await api.request("POST", sqlMode.enabled ? "/sql/chat/map/import" : "/worlds/import", { world: parsed, chatId: String(state().chatId ?? "") });
         if (result.status !== 200 || !result.body?.ok) {
           settingsStatus = `世界导入被拒绝：${result.body?.error?.message ?? `HTTP ${result.status}`}`;
           settingsStatusKind = "error";
@@ -7738,7 +6452,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         }
         // 0.9.42 会话承载：导入的世界已进当前聊天会话——直接绑定（旧「可绑定列表」只列未迁移的存量世界）
         await core.bindToWorld(String(parsed.id));
-        settingsStatus = `已导入并绑定「${String(result.body.data?.name ?? result.body.data?.id ?? "")}」。`;
+        settingsStatus = `已将「${String(parsed.name ?? parsed.id ?? "导入世界")}」合并到当前聊天。`;
         settingsStatusKind = "ok";
         renderCenter();
       } catch (error) {
@@ -7757,7 +6471,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       unbind.addEventListener("click", async () => {
         const confirmed = typeof window === "undefined" || typeof window.confirm !== "function"
           ? true
-          : window.confirm("解绑后，下一条消息会按当前角色卡自动重建世界；只想暂停推演请用「停用」。继续解绑？");
+          : window.confirm("解绑会停用本聊天推演并保留数据库；重新启用后继续原世界。继续？");
         if (!confirmed) return;
         await core.unbind();
       });
@@ -7786,6 +6500,14 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         item.type = "button";
         item.setAttribute("aria-label", `绑定世界 ${String(world.name ?? world.id)}`);
         item.addEventListener("click", async () => {
+          if(sqlMode.enabled){
+            const capturedChatId=String(state().chatId ?? '');
+            const exported=await api.request('POST','/session/export',{chatId:capturedChatId,worldId:String(world.id)});
+            if(!exported.body?.ok||!exported.body.data?.session?.world){settingsStatus='未找到可导入的旧世界资料';settingsStatusKind='error';core.__renderPage?.();return;}
+            const legacy=exported.body.data.session;
+            const imported=await api.request('POST','/sql/chat/map/import',{chatId:capturedChatId,world:legacy.world,maps:legacy.maps});
+            if(imported.status!==200||!imported.body?.ok){settingsStatus=imported.body?.error?.message ?? '导入失败';settingsStatusKind='error';core.__renderPage?.();return;}
+          }
           await core.bindToWorld(String(world.id));
           if (core.getState().binding) {
             core.setPage("overview");
@@ -8302,10 +7024,9 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
      */
     const legacyProtocolNotice = settingsV2?.legacyWorldTurnProtocol ?? null;
     const protocolNote = el("div", "aw-note");
-    protocolNote.append(el("strong", "", "推进输出协议：表格增量（table-delta-v1）"));
+    protocolNote.append(el("strong", "", sqlMode.enabled ? "推进输出协议：SQL 语义操作" : "推演已暂停（原档保留）"));
     protocolNote.append(document.createTextNode(
-      "模型回复只要求一块 <atlasEdit>，块内每行一个独立 JSON（地点 / 人物 / 物品 / 提案新消息）。"
-      + "旧的 v1 世界草稿与 v2 整份封套已停用；若模型仍按旧格式输出，本轮会被判为协议不符并拒绝提交。",
+      "模型按阶段输出地点、人物、物品和后台事件的 JSON 操作；程序校验后写入当前聊天数据库。旧提示词预设保留，协议冲突时明确暂停并提供另存兼容预设入口。",
     ));
     if (legacyProtocolNotice && typeof legacyProtocolNotice === "object") {
       // 原文一字不改，只如实告诉作者「存档里还是旧值、运行时已按增量解读」
@@ -8324,7 +7045,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       if (!chatId) { setStatus("当前没有活动聊天。", "error"); return; }
       checkWorldBtn.disabled = true;
       try {
-        const response = await api.request("POST", "/scene/repair-start", { chatId, apply: false });
+        const response = await api.request("POST", sqlMode.enabled ? "/sql/chat/inspect" : "/scene/repair-start", { chatId, apply: false });
         repairBox.innerHTML = "";
         if (response.status !== 200 || !response.body?.ok) {
           repairBox.append(el("p", "aw-note aw-note--error", response.body?.error?.message ?? "检查失败"));
@@ -8332,6 +7053,21 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
         }
         const report = response.body.data?.report;
         if (!report) return;
+        if(report.database){
+          repairBox.append(el("p","aw-panel__meta",`${report.reason} · ${report.locations} 地点 / ${report.characters} 人物 / ${report.items} 物品`));
+          if(report.canApply){
+            const repair=el("button","aw-btn","重建缺失地图");repair.type="button";
+            repair.addEventListener("click",async()=>{
+              repair.disabled=true;
+              try{
+                const result=await api.request("POST","/sql/chat/map/repair",{chatId,reportToken:report.reportToken});
+                if(result.status!==200||!result.body?.ok)throw Error(result.body?.error?.message??"修复未保存");
+                setStatus("地图结构已保存；可以随对应操作回退。","ok");await core.refresh();
+              }catch(error){setStatus(String(error.message??error),"error");}finally{repair.disabled=false;}
+            });repairBox.append(repair);
+          }
+          return;
+        }
         repairBox.append(el("p", "aw-panel__meta", "只读检查：系统起点结构 " +
           (report.structuralFingerprint ? "吻合" : "不吻合") + "；完整占位指纹 " +
           (report.fullFingerprint ? "吻合" : "不吻合") + "；" + report.reason));
@@ -8939,7 +7675,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     previewDetails.className = "aw-details";
     const previewSummary = document.createElement("summary");
     previewSummary.className = "aw-details__summary";
-    previewSummary.textContent = "最终请求预览（与实际发送逐字一致）";
+    previewSummary.textContent = "当前材料的请求预览（与提交使用相同装配规则）";
     const previewBody = el("div", "aw-request-preview");
     previewBody.append(el("p", "aw-panel__meta", "按当前世界状态与已启用预设装配请求（不调用模型、不计费）。未保存或尚未启用的编辑草稿不进入此预览。"));
     const previewBtn = el("button", "aw-btn", "生成最终请求预览");
@@ -8950,7 +7686,17 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       if (!chatId) { setStatus("当前没有活动聊天。", "error"); renderCenter(); return; }
       previewBtn.disabled = true;
       try {
-        const result = await api.request("POST", "/turns/preview", { chatId });
+        const ctx = SillyTavern.getContext();
+        const floors = Array.isArray(ctx?.chat) ? ctx.chat : [];
+        const assistantIndex = floors.findLastIndex(message => message?.is_user === false && typeof message?.mes === "string");
+        const assistantText = String(floors[assistantIndex]?.mes ?? "");
+        const userText = String(floors[assistantIndex - 1]?.mes ?? "");
+        const card = ctx?.characters?.[ctx?.characterId];
+        const loreSupplement = await readCardLoreSupplementViaSelector({ ...currentLoreSelectionContext("commit", assistantText), userText });
+        const result = await api.request("POST", sqlMode.enabled ? "/sql/chat/preview" : "/turns/preview", { chatId, userText, assistantText,
+          playerName: String(ctx?.name1 ?? ""), personaDescription: String(ctx?.powerUserSettings?.persona_description ?? ""),
+          charDescription: String(card?.description ?? card?.data?.description ?? ""), loreSupplement,
+          recentAssistantTexts: floors.slice(0, assistantIndex).filter(message => message?.is_user === false).slice(-10).map(message => String(message.mes ?? "")) });
         previewBody.innerHTML = "";
         if (result.status !== 200 || !result.body?.ok) {
           previewBody.append(el("p", "aw-note aw-note--error", result.body?.error?.message ?? `预览失败（HTTP ${result.status}）`));
@@ -10161,6 +8907,10 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
   // 被 connectOnce 的 catch 吞掉 → 面板只剩静态骨架、零功能（0.9.2 全量必现）。
   // 设置的懒加载已由 ensureSettingsLoaded（进入 推进/API 页时拉取一次）接管。
 
+  renderPage.dispose=async()=>{
+    mapController.dispose();closeMapPanel();mapImageCache.clear();
+    await sqlViewController.dispose();
+  };
   core.__renderPage = renderPage;
   renderPage();
   void refreshLorebookSnapshot();
@@ -10935,6 +9685,7 @@ function currentLoreSelectionContext(mode, assistantText = "") {
 }
 
 async function connectOnce() {
+  const hostCleanups=[];
   try {
     const mod = await loadUiCore();
     let diagnosticStorage = null;
@@ -10977,14 +9728,21 @@ async function connectOnce() {
     };
 
     const context = () => SillyTavern.getContext();
+    const initialSettings = context()?.extensionSettings;
+    if (initialSettings) {
+      initialSettings[ATLAS_SETTINGS_KEY] ??= {};
+      if (typeof initialSettings[ATLAS_SETTINGS_KEY][ATLAS_SQL_MODE_SETTING] !== "boolean") initialSettings[ATLAS_SETTINGS_KEY][ATLAS_SQL_MODE_SETTING] = true;
+    }
     const loreHost = context();
+    const onHost=(type,handler)=>{
+      loreHost.eventSource.on(type,handler);
+      hostCleanups.push(()=>{if(typeof loreHost.eventSource.removeListener==="function")loreHost.eventSource.removeListener(type,handler);else loreHost.eventSource.off?.(type,handler);});
+    };
     if (loreHost?.eventSource && loreHost?.event_types?.WORLD_INFO_ACTIVATED) {
       hostLoreActivationApiAvailable = true;
-      loreHost.eventSource.on(loreHost.event_types.WORLD_INFO_ACTIVATED,
-        (entries) => recordAtlasHostLoreActivation(entries, context()));
-      for (const eventName of ["GENERATION_STARTED", "CHAT_CHANGED", "MESSAGE_EDITED", "MESSAGE_DELETED"]) {
-        const eventType = loreHost.event_types[eventName];
-        if (eventType) loreHost.eventSource.on(eventType, () => { hostLoreActivation = null; });
+      onHost(loreHost.event_types.WORLD_INFO_ACTIVATED,(entries)=>recordAtlasHostLoreActivation(entries,context()));
+      for(const name of ["GENERATION_STARTED","CHAT_CHANGED","MESSAGE_EDITED","MESSAGE_DELETED"]){
+        const type=loreHost.event_types[name];if(type)onHost(type,()=>{hostLoreActivation=null;});
       }
     }
     // ATLAS-09 纯浏览器接线：引擎核心整体打进本扩展，进程内 dispatch，零网络。
@@ -11380,7 +10138,7 @@ async function connectOnce() {
       write: (key, value) => hostRef.writeData(key, value),
     });
     let diagnosticRenderTimer = null;
-    atlasDiagnostics.subscribe(() => {
+    const unsubscribeDiagnostics = atlasDiagnostics.subscribe(() => {
       if (core.getState().page !== "logs" || diagnosticRenderTimer) return;
       diagnosticRenderTimer = setTimeout(() => {
         diagnosticRenderTimer = null;
@@ -11389,11 +10147,22 @@ async function connectOnce() {
     });
     installMenuButton(core);
     core.init();
-    // H05/§17H：把 settings.html 的「SQL 世界数据」开关接上（默认关闭；抽屉不在则静默跳过）
-    bindSqlModeToggle(context, () => rerender());
-    connected = { core, rerender, api };
+    // H05/§17H：把 settings.html 的「SQL 世界数据」开关接上（新安装默认启用；抽屉不在则跳过）
+    const sqlToggle=bindSqlModeToggle(context, () => rerender());
+    const toggleHandler=sqlToggle?.__atlasChangeHandler;
+    hostCleanups.push(()=>{
+      if(sqlToggle && toggleHandler && sqlToggle.__atlasChangeHandler===toggleHandler){sqlToggle.removeEventListener("change",toggleHandler);delete sqlToggle.__atlasChangeHandler;delete sqlToggle.dataset.atlasBound;}
+    });
+    connected = { core, rerender, api, dispose: async () => {
+      for(const cleanup of hostCleanups.splice(0).reverse())cleanup();
+      hostLoreActivation=null;hostLoreActivationApiAvailable=false;
+      unsubscribeDiagnostics?.();
+      if(diagnosticRenderTimer)clearTimeout(diagnosticRenderTimer);
+      await rerender.dispose?.();await engine.closeSqlSessions();
+    } };
     return connected;
   } catch (error) {
+    for(const cleanup of hostCleanups.splice(0).reverse())cleanup();
     emitAtlasDiagnostic({ level: "error", source: "ui", code: "UI_CORE_LOAD_FAILED",
       operation: "initialize", phase: "startup", outcome: "failed" });
     console.warn("[atlas] UI 扩展初始化失败（酒馆聊天不受影响）：", error instanceof Error ? error.message : String(error));
@@ -11452,6 +10221,7 @@ function removeMenuButton() {
 export async function disconnectAtlas() {
   if (!connected) return;
   connected.core.dispose();
+  await connected.dispose?.();
   removeMenuButton();
   const root = document.getElementById("atlas-extension-panel-root");
   if (root) root.remove();

@@ -1,3 +1,4 @@
+import {readUiSource} from './ui-source-helper.mjs';
 /**
  * atlas-lorebook-scope-wiring.test.mjs — B05 适配点①（世界书聊天作用域）接线验收。
  *
@@ -27,7 +28,7 @@ globalThis.window = dom.window;
 globalThis.document = dom.window.document;
 globalThis.HTMLElement = dom.window.HTMLElement;
 
-const source = readFileSync(join(root, "index.js"), "utf8");
+const source = readUiSource(join(root, "index.js"));
 const { createLorebookPort } = await import(
   "data:text/javascript;base64," + Buffer.from(source).toString("base64")
 );

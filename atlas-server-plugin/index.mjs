@@ -217,7 +217,7 @@ let corePromise = null;
 async function loadCore(dataDir, fetchFn) {
   const store = createNodeDocumentStore(dataDir);
   // 先组件内构建产物（发布形态），再上级 src（开发形态，需 Node ≥22.6 strip-types）
-  const attempts = ["./dist/atlas-server.mjs", "../src/atlas-server.ts"];
+  const attempts = ["./dist/atlas-server.mjs", "../src/atlas-production-server.ts"];
   let lastError = null;
   for (const specifier of attempts) {
     try {
@@ -230,7 +230,10 @@ async function loadCore(dataDir, fetchFn) {
        * 核心的具名诊断依赖（sqlRuntime: null），由 `/sql/*` 回执如实呈现。
        */
       const sqlRuntime = await loadSqlRuntimeForNode();
-      return mod.createAtlasServerCore({ store, ...(fetchFn ? { fetchFn } : {}), sqlRuntime });
+      if(!sqlRuntime)throw new Error('SQL_RUNTIME_UNAVAILABLE：发布 SQL 运行时缺失');
+      const sqlSessionProvider=mod.createNodeSqlHost({store,runtime:sqlRuntime,
+        modelPort:mod.createSqlModelPort({readSettings:()=>store.read('settings'),fetchFn})});
+      return mod.createAtlasServerCore({ store, ...(fetchFn ? { fetchFn } : {}), sqlRuntime,sqlSessionProvider });
     } catch (error) {
       lastError = error;
     }
@@ -277,7 +280,10 @@ async function loadSqlRuntimeForNode() {
   for (const specifier of attempts) {
     try {
       const mod = await import(new URL(specifier, import.meta.url).href);
-      if (typeof mod.loadAtlasSqlRuntime === "function") return await mod.loadAtlasSqlRuntime();
+      if (typeof mod.loadAtlasSqlRuntime === "function") {
+        if(specifier.startsWith('./dist/'))await mod.loadSqlModule(()=>fileURLToPath(new URL('./dist/vendor/sql-wasm.wasm',import.meta.url)));
+        return await mod.loadAtlasSqlRuntime();
+      }
     } catch {
       // 下一个候选；两个都失败则返回 null（由回执如实报告）
     }
@@ -348,6 +354,10 @@ export async function init(router, options = {}) {
   post({ path: "/sql/state" });
   post({ path: "/sql/maintenance" });
   post({ path: "/sql/migrate" });
+  for (const action of ['binding','state','timeline','preview','inspect','travel-preview','prepare','commit','retry','rollback',
+    'map/image','map/image/set','map/import','map/repair','map/bootstrap','map/move','map/topology','map/areas','map/scale','map/geo','map/suggest','map/protagonist']) {
+    post({path:`/sql/chat/${action}`});
+  }
 
   return { core };
 }

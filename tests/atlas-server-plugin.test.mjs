@@ -19,7 +19,7 @@ import { buildWorldFromTemplate, getDemoTemplate } from "../lib/demo-events.ts";
 import { parseWorld } from "../lib/world-schema.ts";
 import { appendStateEvent } from "../lib/world-ledger.ts";
 import { upsertEntityRecord } from "../lib/world-definition.ts";
-import { createAtlasServerCore, createMemoryDocumentStore, ATLAS_ROUTE_MANIFEST } from "../src/atlas-server.ts";
+import { createAtlasServerCore, createMemoryDocumentStore, ATLAS_ROUTE_MANIFEST } from "./legacy/atlas-server-fixture.ts";
 import { createSessionCarrier, carrierAsCore } from "./atlas-session-helper.mjs";
 import { isCheckpointIntact } from "../lib/world-checkpoint.ts";
 import { buildAtlasChatUrl, callAtlasWorldTurnApi, DEFAULT_WORLD_TURN_SYSTEM_PROMPT } from "../src/atlas-api-client.ts";

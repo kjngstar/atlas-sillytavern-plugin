@@ -16,7 +16,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { planGeoRelations } from "../src/atlas-server.ts";
+import { planGeoRelations } from "./legacy/atlas-server-fixture.ts";
 
 /** 本轮可用材料：引文必须**逐字**出现在这里面才算证据。 */
 const MATERIAL = [

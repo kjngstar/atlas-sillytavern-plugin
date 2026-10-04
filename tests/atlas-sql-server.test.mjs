@@ -15,7 +15,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createAtlasServerCore, createMemoryDocumentStore } from '../src/atlas-server.ts';
+import { createAtlasServerCore, createMemoryDocumentStore } from './legacy/atlas-server-fixture.ts';
 import { createSqlRepository } from '../src/atlas-db-repository.ts';
 import { queryBound } from '../src/atlas-db-runtime.ts';
 import { LEGACY_ENTITY_CAP, toLegacyTurnReceipt, toPovStateDto } from '../src/atlas-db-state-adapter.ts';

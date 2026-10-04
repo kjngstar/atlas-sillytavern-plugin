@@ -1,6 +1,6 @@
 import type { SqlSession, AtlasSqlRuntime } from './atlas-sql-session.ts';
 import type { AtlasModelPort } from './atlas-db-contract.ts';
-import type { AtlasSqlSessionProvider } from './atlas-server.ts';
+import type { AtlasSqlSessionProvider } from './atlas-sql-routes.ts';
 
 export type BrowserSqlHostRecord = {
   chatUid: string;
@@ -80,6 +80,10 @@ export function createBrowserSqlHost(options: BrowserSqlHostOptions): AtlasSqlSe
         const atlas = record.chatMetadata.atlas as Record<string, unknown> | undefined;
         const openOptions={
           chatUid, branchId, chatMetadata: record.chatMetadata, modelPort: options.modelPort ?? null,
+          ...(!envelopeOf(record.chatMetadata)&&atlas?.world&&typeof atlas.world==='object'?{
+            worldUid:typeof (atlas.world as Record<string,unknown>).id==='string'?(atlas.world as {id:string}).id:undefined,
+            branchName:typeof (atlas.world as Record<string,unknown>).name==='string'?(atlas.world as {name:string}).name:undefined,
+          }:{}),
           confirmSave: true,
           isCurrentHost: () => isCurrent(record, branchId)
             && sameSnapshot(current?.session.chatMetadata === record.chatMetadata ? current.storedSnapshot : openingSnapshot,

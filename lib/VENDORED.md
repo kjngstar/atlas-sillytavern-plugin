@@ -55,3 +55,12 @@ Atlasia 上游位于 `E:\地图\`，**不是 git 仓库**，本次会话无法�
 3. 快照版本信息就写在本文件"快照日期"一栏；同步时必须更新它。
 4. 任何新的偏差都必须在此登记「引入版本 / 涉及文件 / 为什么违反纪律 / 回灌要求」，
    不允许无声累积。
+
+## 2026-10-04 架构收口复查
+
+13 个现存模块均有运行、类型、迁移、演示、实验或历史回归入边，未整目录裁剪。
+正式 SQL 不再运行旧 world 账本、三表执行器或旧后台调度；历史执行器保存在测试夹具。
+world-schema/world-cards/demo-events 保留于读取或演示入口；ai-connections 的类型引用仍有效。
+world-checkpoint/definition/engine/ledger/lineage/npc/projection/timepoint/travel 保留历史回归与必要类型依赖。
+引用图由 `tools/audit-source-references.mjs` 生成；详细分类见 `docs/atlas-source-reference-audit.md`。
+本次未修改快照业务内容，快照清单和许可证保留。

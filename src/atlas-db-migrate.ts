@@ -554,6 +554,11 @@ function collectEntityCandidates(raw: unknown, branchId: string): EntityCandidat
     items = fromWorld.items;
   }
 
+  const retired = new Set(isPlainObject(atlas.scene)&&Array.isArray(atlas.scene.retiredPointIds)
+    ? atlas.scene.retiredPointIds.map(value=>String(value).replace(/^loc:/,'')) : []);
+  locations=locations.map(row=>retired.has(row.legacyId.replace(/^loc:/,''))
+    ? {...row,raw:{...row.raw,status:'archived'}} : row);
+
   const factions: EntityCandidate[] = [];
   if (selected) {
     factions.push(...toCandidates(rowList(selected.payload, 'factions'), 'faction', `$.tables.${selected.key}.factions`, skipped));

@@ -1,3 +1,4 @@
+import {readUiSource} from './ui-source-helper.mjs';
 /**
  * atlas-scale.test.mjs — 0.9.50（外部 AI 计划 M04/M05：地图尺度标定 + 动态比例尺条）。
  *
@@ -163,7 +164,7 @@ test("C5：比例尺只有一份权威实现，浏览器入口确实接线到它
   assert.equal(entry.formatTravelDistance, formatTravelDistance, "同一函数引用");
 
   // index.js 不再自带副本：源码内不应再出现函数定义
-  const indexSource = readFileSync(join(root, "index.js"), "utf8");
+  const indexSource = readUiSource(join(root, "index.js"));
   for (const fn of ["function computeScaleBar", "function formatDistanceMeters", "function formatTravelDistance"]) {
     assert.ok(!indexSource.includes(fn), `index.js 不得再定义 ${fn}`);
   }

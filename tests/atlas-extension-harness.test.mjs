@@ -1,3 +1,4 @@
+import {readUiSource} from './ui-source-helper.mjs';
 /**
  * atlas-extension-harness.test.mjs — ATLAS-03 UI Extension mock harness。
  *
@@ -331,7 +332,7 @@ test("形态契约：工作台是悬浮窗而非全屏铺满", () => {
 });
 
 test("形态契约：中区按栏位切页，地图只属于地图页", () => {
-  const js = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
+  const js = readUiSource(join(root, "atlas-extension", "index.js"));
   ok(js.includes("core.setPage(page.id)"), "导航按钮切换页面状态");
   ok(js.includes('if (state().page === "map") renderMap(d)'), "只有地图页才渲染地图");
   // 侧边栏七项（0.9.7 新增「日志」）
@@ -344,7 +345,7 @@ test("形态契约：中区按栏位切页，地图只属于地图页", () => {
 });
 
 test("形态契约：右上角常驻关闭钮（作者 2026-09-19 反馈）", () => {
-  const js = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
+  const js = readUiSource(join(root, "atlas-extension", "index.js"));
   const css = readFileSync(join(root, "atlas-extension", "style.css"), "utf8");
   ok(js.includes('el("button", "aw-topbar__close", "×")'), "顶栏有关闭钮");
   ok(js.includes('topbarClose.setAttribute("aria-label", "关闭工作台，返回酒馆聊天")'), "关闭钮带无障碍名称");
@@ -359,7 +360,7 @@ test("形态契约：右上角常驻关闭钮（作者 2026-09-19 反馈）", ()
 });
 
 test("形态契约：扩展菜单打开入口（作者 2026-09-19 反馈：修好隐藏后没有打开入口）", () => {
-  const js = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
+  const js = readUiSource(join(root, "atlas-extension", "index.js"));
   ok(js.includes('document.getElementById("extensionsMenu")'), "往酒馆扩展菜单 #extensionsMenu 挂条目");
   ok(js.includes('item.id = "atlas-menu-open"'), "菜单条目有稳定 id（幂等不重复挂载）");
   ok(js.includes("installMenuButton(core)"), "连接时安装菜单入口");
@@ -368,7 +369,7 @@ test("形态契约：扩展菜单打开入口（作者 2026-09-19 反馈：修�
 });
 
 test("形态契约：预览控制挂右栏槽位，不常驻生产界面", () => {
-  const js = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
+  const js = readUiSource(join(root, "atlas-extension", "index.js"));
   const css = readFileSync(join(root, "atlas-extension", "style.css"), "utf8");
   const preview = readFileSync(join(root, "dev-preview", "index.html"), "utf8");
   ok(js.includes("window.__atlasDevSlot"), "插件只在宿主提供钩子时注入预览控制");
@@ -380,7 +381,7 @@ test("形态契约：预览控制挂右栏槽位，不常驻生产界面", () =>
 });
 
 test("connectAtlas 并发安全：模块自初始化与 activate 共享同一次挂载", () => {
-  const js = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
+  const js = readUiSource(join(root, "atlas-extension", "index.js"));
   ok(js.includes("if (connecting) return connecting;"), "有在途连接闸门（只有 connected 检查会双重挂载）");
   ok(js.includes("connecting = connectOnce();"), "在途 Promise 被记录");
   ok(/finally\s*\{\s*connecting = null;/.test(js), "连接结束后清空在途标记");
@@ -390,7 +391,7 @@ test("connectAtlas 并发安全：模块自初始化与 activate 共享同一次
 });
 
 test("世界书注入层：端口适配 + onLorebookSync 接线 + 变化页条目面板（ATLAS-09）", () => {
-  const js = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
+  const js = readUiSource(join(root, "atlas-extension", "index.js"));
   ok(js.includes("export function createLorebookPort"), "world-info → port 适配器存在且导出（单测复用真实适配器）");
   ok(js.includes("chatMetadata.world_info"), "绑定走 chatMetadata.world_info 槽");
   ok(js.includes("window.__atlasWorldInfoModule"), "预览 / 测试可注入 world-info stub");
@@ -1797,7 +1798,7 @@ test("数据隔离：旧聊天的迟到 /state 响应被丢弃（跨聊天竞态
 // 长按用派发 MouseEvent；真实拖拽落点由施工单 S10 的人工验收覆盖。
 // ---------------------------------------------------------------------------
 
-const S10_INDEX_SOURCE = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
+const S10_INDEX_SOURCE = readUiSource(join(root, "atlas-extension", "index.js"));
 
 /** S10 /state 夹具：世界图只含根地点；`submaps[父地点ID]` = 该地点的内部地图。 */
 function s10State({ chatId, worldId, currentLocationId, points, submaps = {}, pointParents = {}, npcDirectory = [], objectDirectory = [], regions = [], relevantNpcIds = [], npcReasons = {} }) {
@@ -2698,7 +2699,7 @@ const { buildLorebookPlans, createAtlasLorebookWriter } = await import(
 );
 
 /** 根 index.js 源码（DOM 用例经 data:URL 注入 `export { renderPanel }`）。 */
-const B_INDEX_SOURCE = readFileSync(join(root, "index.js"), "utf8");
+const B_INDEX_SOURCE = readUiSource(join(root, "index.js"));
 let bMountSeq = 0;
 
 /** 挂载**根 index.js** 的真实地图页（与 mountAtlasMap 同套路，只是源码换成根文件）。 */

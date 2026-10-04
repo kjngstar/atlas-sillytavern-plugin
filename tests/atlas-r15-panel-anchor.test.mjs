@@ -1,3 +1,4 @@
+import {readUiSource} from './ui-source-helper.mjs';
 /**
  * atlas-r15-panel-anchor.test.mjs — R15 补：信息面板锚点续锚 / 失效关闭（R08 残留收口）。
  *
@@ -28,7 +29,7 @@ async function mountPanel() {
   style.textContent = readFileSync(resolve(root, "style.css"), "utf8");
   document.head.append(style);
 
-  const source = readFileSync(resolve(root, "index.js"), "utf8");
+  const source = readUiSource(resolve(root, "index.js"));
   const { renderPanel } = await import(
     "data:text/javascript;base64," + Buffer.from(source + "\nexport {renderPanel};").toString("base64")
   );

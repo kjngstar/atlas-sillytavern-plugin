@@ -97,6 +97,8 @@ function copyReleaseFile(from, to) {
   writeFileAtomic(to, stripDevFallback(content));
 }
 
+copyTree(join(root, 'ui'), join(root, 'atlas-extension', 'ui'));
+
 // 3) 根文件先同步到 UI 镜像，确保本次发布副本读到的就是当前版本。
 // 根 = 权威源；index.js 镜像只允许开发回退行这一处差异。
 const MIRROR_SYNC_FILES = ["style.css", "settings.html", "manifest.json"];

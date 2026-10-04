@@ -1,3 +1,4 @@
+import {readUiSource} from './ui-source-helper.mjs';
 /**
  * atlas-map-vehicles.test.mjs — H16 / H20 定向验收（载具显示 + 图例收进可折叠工具条）。
  *
@@ -27,7 +28,7 @@ async function mountMapWithVehicles(anchors) {
   style.textContent = readFileSync(join(root, "atlas-extension", "style.css"), "utf8");
   document.head.append(style);
 
-  const source = readFileSync(join(root, "index.js"), "utf8");
+  const source = readUiSource(join(root, "index.js"));
   const { renderPanel } = await import(
     "data:text/javascript;base64," + Buffer.from(`${source}\nexport { renderPanel };`).toString("base64")
   );

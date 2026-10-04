@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 
 import { buildStarterWorld, starterWorldIdForChat } from "../src/atlas-starter-world.ts";
 import { migrateLegacyToTables } from "../src/atlas-table-migration.ts";
-import { createAtlasServerCore, createMemoryDocumentStore } from "../src/atlas-server.ts";
+import { createAtlasServerCore, createMemoryDocumentStore } from "./legacy/atlas-server-fixture.ts";
 import { createLocalAtlasApi } from "../src/atlas-local-api.ts";
 import { createAtlasSessionApi, atlasSessionWriteGuard, atlasStarterWorldWriteGuard } from "../index.js";
 import { createSessionCarrier, carrierAsCore } from "./atlas-session-helper.mjs";

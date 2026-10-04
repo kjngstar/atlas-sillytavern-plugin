@@ -59,7 +59,7 @@ export function createTableReadPort(db: SqlDatabase): TableReadPort {
       }
       // 固定排序：程序提供的短引用（C1/L1 等）必须与行顺序一致且可复现，
       // 否则同一轮里「C2」会随机指向不同人物（§8.3 短引用稳定性）。
-      const sql = `SELECT * FROM ${table}${clauses.length ? ` WHERE ${clauses.join(' AND ')}` : ''} ORDER BY ${tableColumnNames(table).includes('branch_id') ? 'branch_id, ' : ''}id ASC LIMIT ${Math.max(1, Math.min(1000, limit))}`;
+      const sql = `SELECT * FROM ${table}${clauses.length ? ` WHERE ${clauses.join(' AND ')}` : ''} ORDER BY ${tableColumnNames(table).includes('branch_id') ? 'branch_id, ' : ''}id ASC LIMIT ${Math.max(1, Math.min(1001, limit))}`;
       const rows = queryBound(db, sql, params);
       return rows.map((row) => {
         const decoded = decodeRow(table, row, { allowExtra: true });

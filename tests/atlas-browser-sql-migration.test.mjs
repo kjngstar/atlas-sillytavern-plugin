@@ -63,11 +63,12 @@ test('Q08 forward parent links, archive protagonist identity and valid legacy ma
  const f=fixture(),a=f.record.chatMetadata.atlas;
  a.tables.branches.canon.locations.reverse();
  a.tables.branches.canon.characters[0].role=undefined;
- a.world={characters:[{id:'user',name:'用户',role:'主角'}],characterStates:[{characterId:'user',currentPointId:'room'}],points:[]};
+ a.world={id:'old-world-stable',name:'旧世界名称',characters:[{id:'user',name:'用户',role:'主角'}],characterStates:[{characterId:'user',currentPointId:'room'}],points:[]};
  a.maps.calibrations={'loc:city':{metersPerCell:3,locked:true,source:'user',revision:4}};
  const before=JSON.stringify(a);
  try{
   const s=await f.provider.session(f.record.chatUid);
+  assert.equal(s.worldUid,'old-world-stable');assert.equal(queryBound(s.repo.db,'SELECT name FROM branches',[])[0].name,'旧世界名称');
   const room=queryBound(s.repo.db,"SELECT parent_location_id,map_id,grid_x,grid_y FROM locations WHERE id='loc:room'",[])[0];
   assert.equal(room.parent_location_id,'loc:city');assert.deepEqual([room.grid_x,room.grid_y],[2,3]);
   const map=queryBound(s.repo.db,'SELECT * FROM maps WHERE id=?',[room.map_id])[0];
@@ -88,5 +89,19 @@ test('Q08 editing the legacy payload during save discards the candidate but reta
   await assert.rejects(f.provider.session(f.record.chatUid),error=>['SESSION_STALE','SESSION_WRITE_FAILED'].includes(error.code));
   assert.equal(f.record.chatMetadata.atlas.database,undefined);assert.equal(f.record.chatMetadata.atlas.tables.branches.canon.locations[0].name,'作者新名称');
   f.setSave(async()=>true);const s=await f.provider.session(f.record.chatUid);assert.equal(queryBound(s.repo.db,"SELECT name FROM locations WHERE id='loc:city'",[])[0].name,'作者新名称');
+ }finally{await f.provider.close();}
+});
+
+test('Q08 retired placeholder locations remain archived after migration and reopen',async()=>{
+ const f=fixture(),a=f.record.chatMetadata.atlas;
+ a.tables.branches.canon.locations.push({id:'loc:start',name:'旧起点',kind:'room'});
+ a.scene={schemaVersion:1,retiredPointIds:['start']};const before=JSON.stringify(a);
+ try{
+  let session=await f.provider.session(f.record.chatUid);
+  assert.equal(queryBound(session.repo.db,"SELECT status FROM locations WHERE id='loc:start'",[])[0].status,'archived');
+  assert.equal(queryBound(session.repo.db,"SELECT COUNT(*) n FROM maps WHERE container_location_id='loc:start'",[])[0].n,0);
+  assert.equal(JSON.stringify({...a,database:undefined}),before);
+  await f.provider.close();session=await f.provider.session(f.record.chatUid);
+  assert.equal(queryBound(session.repo.db,"SELECT status FROM locations WHERE id='loc:start'",[])[0].status,'archived');
  }finally{await f.provider.close();}
 });

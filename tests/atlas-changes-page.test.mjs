@@ -1,3 +1,4 @@
+import {readUiSource} from './ui-source-helper.mjs';
 /**
  * atlas-changes-page.test.mjs — D08 定向验收（变化页「幕后推演」四分类）。
  *
@@ -30,7 +31,7 @@ async function mountChangesPage({ simulationView, receipts = [], visibility = "k
   style.textContent = readFileSync(join(root, "atlas-extension", "style.css"), "utf8");
   document.head.append(style);
 
-  const source = readFileSync(join(root, "index.js"), "utf8");
+  const source = readUiSource(join(root, "index.js"));
   const { renderPanel, resetTestDiagnostics } = await import(
     "data:text/javascript;base64," + Buffer.from(`${source}\nexport { renderPanel }; export function resetTestDiagnostics(entries) { pendingDiagnostics.length = 0; atlasDiagnostics = null; pendingDiagnostics.push(...entries); }`).toString("base64")
   );

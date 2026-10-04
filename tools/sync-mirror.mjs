@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
 
 const root = "index.js";
 const mirror = "atlas-extension/index.js";
@@ -9,3 +9,6 @@ if (!rootSource.includes(SHIP)) throw new Error("根 index.js 里找不到打包
 writeFileSync(mirror, rootSource.replace(SHIP, DEV));
 const strip = (content) => content.replace(DEV, SHIP);
 console.log(strip(readFileSync(mirror, "utf8")) === rootSource ? "mirror in sync" : "MISMATCH");
+
+mkdirSync("atlas-extension/ui",{recursive:true});
+for(const file of readdirSync("ui"))writeFileSync(`atlas-extension/ui/${file}`,readFileSync(`ui/${file}`));

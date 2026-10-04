@@ -26,7 +26,7 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const imp = (p) => import(pathToFileURL(resolve(root, p)).href);
 
-const { createMemoryDocumentStore, createSessionOverlayStore, parseAtlasSessionDoc, parseAtlasSessionDocDetailed, cloneSessionDoc, ensureSessionTables } = await imp("src/atlas-server.ts");
+const { createMemoryDocumentStore, createSessionOverlayStore, parseAtlasSessionDoc, parseAtlasSessionDocDetailed, cloneSessionDoc, ensureSessionTables } = await imp("tests/legacy/atlas-server-fixture.ts");
 const { buildWorldFromTemplate, getDemoTemplate } = await imp("lib/demo-events.ts");
 const { parseWorld } = await imp("lib/world-schema.ts");
 const { migrateLegacyToTables } = await imp("src/atlas-table-migration.ts");

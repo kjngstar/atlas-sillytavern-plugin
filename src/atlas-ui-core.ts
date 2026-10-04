@@ -264,6 +264,8 @@ export interface AtlasDestinationPreview {
   destinationName: string;
   distance: number;
   estimatedDuration: number;
+  distanceUnit?: 'm';
+  durationUnit?: 's';
   factors: string[];
 }
 
@@ -1838,7 +1840,9 @@ export function createAtlasUiCore(deps: {
 
     async bindToWorld(worldId: string) {
       if (sqlEnabled()) {
-        setState({ lastError: 'SQL 世界属于当前聊天；旧世界导入需完成单向迁移，不能在这里改写三表绑定。' });
+        await refresh();
+        if (state.binding) await host.writeBinding({...state.binding,enabled:true});
+        await refresh();
         return;
       }
       const chatId = host.getChatId();
@@ -1934,13 +1938,13 @@ export function createAtlasUiCore(deps: {
       const points = (state.stateData?.map as { points?: Array<Record<string, unknown>> } | undefined)?.points ?? [];
       const point = points.find((p) => String(p.id) === String(pointId));
       try {
-        const result = await api.request("POST", "/map/travel-preview", {
+        const result = await api.request("POST", sqlEnabled()?"/sql/chat/travel-preview":"/map/travel-preview", {
           chatId,
           destinationPointId: String(pointId).slice(0, ATLAS_LIMITS.ID_CHARS),
         });
         const body = result.body as {
           ok?: boolean;
-          data?: { preview?: { destinationId: string; distance: number; estimatedDuration: number; factors: string[] } | null };
+          data?: { preview?: { destinationId: string; distance: number; estimatedDuration: number; distanceUnit?: 'm'; durationUnit?: 's'; factors: string[] } | null };
           error?: { message?: string };
         };
         if (result.status === 200 && body.ok) {
@@ -1952,6 +1956,8 @@ export function createAtlasUiCore(deps: {
                 destinationName: typeof point?.name === "string" ? point.name : preview.destinationId,
                 distance: preview.distance,
                 estimatedDuration: preview.estimatedDuration,
+                distanceUnit: preview.distanceUnit,
+                durationUnit: preview.durationUnit,
                 factors: Array.isArray(preview.factors) ? preview.factors.map(String) : [],
               },
               lastError: null,

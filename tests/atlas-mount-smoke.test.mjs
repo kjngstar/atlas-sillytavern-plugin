@@ -18,9 +18,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
+import initSqlJs from 'sql.js';
 
 const dom = new JSDOM(
-  `<!doctype html><html><body><div id="extensionsMenu"></div><textarea id="send_textarea"></textarea></body></html>`,
+  `<!doctype html><html><body><div id="extensionsMenu"></div><textarea id="send_textarea"></textarea><input type="checkbox" id="atlas-sql-mode-toggle"></body></html>`,
   { url: "http://localhost/", pretendToBeVisual: true },
 );
 globalThis.window = dom.window;
@@ -32,6 +33,7 @@ globalThis.Node = dom.window.Node;
 globalThis.requestAnimationFrame = dom.window.requestAnimationFrame?.bind(dom.window);
 globalThis.getComputedStyle = dom.window.getComputedStyle.bind(dom.window);
 
+const hostListeners=new Map();
 const hostContext = {
   extensionSettings: {},
   chatMetadata: {},
@@ -42,8 +44,12 @@ const hostContext = {
   characterId: 0,
   name2: "Aria",
   getRequestHeaders: () => ({ "x-csrf": "stub" }),
-  eventSource: { on: () => {}, makeLast: () => {}, addEventListener: () => {} },
-  event_types: {},
+  eventSource: {
+    on:(type,handler)=>{const listeners=hostListeners.get(type)??new Set();listeners.add(handler);hostListeners.set(type,listeners);},
+    off:(type,handler)=>hostListeners.get(type)?.delete(handler),
+    removeListener:(type,handler)=>hostListeners.get(type)?.delete(handler),
+  },
+  event_types: Object.fromEntries(['WORLD_INFO_ACTIVATED','GENERATION_STARTED','GENERATION_ENDED','GENERATION_STOPPED','CHAT_CHANGED','MESSAGE_SENT','MESSAGE_EDITED','MESSAGE_DELETED','MESSAGE_SWIPED'].map(name=>[name,name])),
 };
 globalThis.SillyTavern = { getContext: () => hostContext };
 
@@ -90,6 +96,10 @@ hostContext.chatMetadata.atlas = {
   geoAuto: {},
 };
 
+// The published browser bundle can accept a host-initialized genuine sql.js instance.
+// Actual browser resource fetching is covered separately by verify-sql-release.mjs.
+const sql = await import('../atlas-extension/dist/atlas-sql.mjs');
+sql.injectSqlModule(await initSqlJs());
 const mod = await import("../atlas-extension/index.js");
 // 等模块自初始化（void connectAtlas()）完成
 await new Promise((resolve) => setTimeout(resolve, 300));
@@ -144,5 +154,12 @@ conn.core.setPanelOpen(true);
 conn.core.__renderPage();
 assert.notEqual(root.style.display, "none", "panelOpen=true 时根节点必须可见");
 
-conn.core.dispose();
+const activeListeners=[...hostListeners.values()].reduce((n,set)=>n+set.size,0);
+assert.ok(activeListeners>0,"actual host events registered");
+await mod.disconnectAtlas();
+assert.equal([...hostListeners.values()].reduce((n,set)=>n+set.size,0),0,"disconnect releases all host subscriptions");
+const reconnected=await mod.connectAtlas();assert.ok(reconnected);
+assert.equal([...hostListeners.values()].reduce((n,set)=>n+set.size,0),activeListeners,"reconnect does not duplicate subscriptions");
+await mod.disconnectAtlas();
+assert.equal([...hostListeners.values()].reduce((n,set)=>n+set.size,0),0);
 });

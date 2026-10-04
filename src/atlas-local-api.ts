@@ -8,9 +8,10 @@
  * body 仍为 { ok: true, data } / { ok: false, error } 契约形状。
  */
 
-import type { AtlasServerCore, AtlasRequestContext } from "./atlas-server.ts";
+import type {AtlasServerCore} from "./atlas-production-server.ts";
+import type {AtlasRequestContext} from "./atlas-server-contract.ts";
 
-export function createLocalAtlasApi(core: AtlasServerCore, ctx: AtlasRequestContext = { local: true }) {
+export function createLocalAtlasApi(core: Pick<AtlasServerCore,'handle'>, ctx: AtlasRequestContext = { local: true }) {
   return {
     async request(method: string, path: string, body?: unknown): Promise<{ status: number; body: unknown }> {
       const result = await core.handle(method, path, body, ctx);

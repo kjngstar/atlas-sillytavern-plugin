@@ -22,7 +22,7 @@ import { buildWorldFromTemplate, getDemoTemplate } from "../lib/demo-events.ts";
 import { parseWorld } from "../lib/world-schema.ts";
 import { upsertEntityRecord } from "../lib/world-definition.ts";
 import { createCheckpoint } from "../lib/world-checkpoint.ts";
-import { createAtlasServerCore, createMemoryDocumentStore } from "../src/atlas-server.ts";
+import { createAtlasServerCore, createMemoryDocumentStore } from "./legacy/atlas-server-fixture.ts";
 import { ATLAS_ERROR_CODES } from "../src/atlas-contract.ts";
 import { createSessionCarrier, carrierAsCore } from "./atlas-session-helper.mjs";
 

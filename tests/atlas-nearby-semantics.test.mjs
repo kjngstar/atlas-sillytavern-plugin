@@ -1,3 +1,4 @@
+import {readUiSource} from './ui-source-helper.mjs';
 /**
  * atlas-nearby-semantics.test.mjs — F05 定向验收（「附近」口径）。
  *
@@ -27,7 +28,7 @@ globalThis.HTMLElement = dom.window.HTMLElement;
 globalThis.Node = dom.window.Node;
 
 // index.js 本身已经 `export function atlasDiagnoseEmptyNearby`，直接导入即可（不要再 export 一次）
-const source = readFileSync(join(root, "index.js"), "utf8");
+const source = readUiSource(join(root, "index.js"));
 const { atlasDiagnoseEmptyNearby } = await import(
   "data:text/javascript;base64," + Buffer.from(source).toString("base64")
 );

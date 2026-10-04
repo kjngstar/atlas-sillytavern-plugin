@@ -1,3 +1,4 @@
+import {readUiSource} from './ui-source-helper.mjs';
 /**
  * atlas-ui-core-exports.test.mjs — ATLAS-18 回归修复（0.9.4）的永久门禁。
  *
@@ -15,7 +16,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const indexSource = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
+const indexSource = readUiSource(join(root, "atlas-extension", "index.js"));
 
 test("dist/atlas-ui-core.mjs 覆盖 index.js 全部 loadUiCore 解构需求 + 关键接线导出", async () => {
   const dist = await import("../atlas-extension/dist/atlas-ui-core.mjs");
@@ -42,7 +43,7 @@ test("dist/atlas-ui-core.mjs 覆盖 index.js 全部 loadUiCore 解构需求 + �
 
 test("C6：导航页清单只有一份权威（ui-core），index.js 不再自带副本", async () => {
   const { ATLAS_UI_PAGES } = await import("../src/atlas-ui-core.ts");
-  const js = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
+  const js = readUiSource(join(root, "atlas-extension", "index.js"));
 
   // 权威清单必须包含实际支持的全部页面（含 skin——旧清单漏了它，
   // 而旧测试只检查「权威是 index.js 副本的子集」，因此永远测不出缺失）

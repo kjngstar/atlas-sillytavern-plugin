@@ -22,7 +22,7 @@ import assert from "node:assert/strict";
 import { createBrowserDocumentStore, ATLAS_BROWSER_DOC_LIMITS } from "../src/atlas-browser-store.ts";
 import { createLocalAtlasApi } from "../src/atlas-local-api.ts";
 import { createStProxyFetch, atlasCustomIncludeHeaders, normalizeAtlasClaudeBase, normalizeAtlasGeminiBase, normalizeAtlasExcludeBody, normalizeAtlasPromptPostProcessing, ATLAS_ST_GENERATE_PATH } from "../src/atlas-proxy-fetch.ts";
-import { createAtlasServerCore, createMemoryDocumentStore } from "../src/atlas-server.ts";
+import { createAtlasServerCore, createMemoryDocumentStore } from "./legacy/atlas-server-fixture.ts";
 import { ATLAS_ERROR_CODES } from "../src/atlas-contract.ts";
 import { callAtlasWorldTurnApi } from "../src/atlas-api-client.ts";
 

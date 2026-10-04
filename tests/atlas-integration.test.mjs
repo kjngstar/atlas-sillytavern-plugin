@@ -449,25 +449,24 @@ async function wiredPlugin() {
   const dataDir = mkdtempSync(join(tmpdir(), "atlas-wire-"));
   const { core } = await plugin.init(router, { dataDir, fetchFn: async () => { throw new Error("no network"); } });
   const world = buildWorld();
-  const imported = await router.invoke("POST", "/worlds/import", { body: { world: JSON.parse(JSON.stringify(world)) }, user: { profile: { handle: "dev", admin: false } } });
+  const imported = await router.invoke("POST", "/sql/chat/map/import", { body: { chatUid: "chat-a", chatId: "chat-a", world: JSON.parse(JSON.stringify(world)) }, user: { profile: { handle: "dev", admin: false } } });
   equal(imported.status, 200, "世界导入成功");
-  const bound = await router.invoke("POST", "/bindings", { body: { action: "bind", binding: bindingFor(world) }, user: { profile: { handle: "dev", admin: false } } });
-  equal(bound.status, 200, "绑定成功");
   return { plugin, router, core, dataDir, world };
 }
 
 test("P0-06：动态路由用真实请求路径；map/image 已注册并可访问", async () => {
-  const { router, dataDir, world } = await wiredPlugin();
+  const { router, core, dataDir, world } = await wiredPlugin();
   try {
-    const state = await router.invoke("POST", "/state", { body: { chatId: "chat-a" } });
+    const state = await router.invoke("POST", "/sql/chat/state", { body: { chatUid: "chat-a", chatId: "chat-a" }, user: { profile: { handle: "dev" } } });
     equal(state.status, 200, "POST /state（chatId 随体）命中绑定（0.9.42 会话承载改排）");
-    equal(state.body?.data?.worldId, world.id, "返回绑定世界的状态");
+    ok(state.body?.data?.sqlMode === true, "正式状态来自当前聊天 SQL");
     ok(state.body?.data?.map && typeof state.body.data.map === "object", "state 携带 map 有界数据");
-    const image = await router.invoke("POST", "/map/image", { body: { chatId: "chat-a" } });
+    const image = await router.invoke("POST", "/sql/chat/map/image", { body: { chatUid: "chat-a", chatId: "chat-a" }, user: { profile: { handle: "dev" } } });
     equal(image.status, 200, "POST /map/image 已注册且可达");
     equal(image.body?.ok, true, "map/image 契约信封");
-    ok(router.routes.some((r) => r.method === "POST" && r.path === "/map/image"), "路由清单含 map image");
+    ok(router.routes.some((r) => r.method === "POST" && r.path === "/sql/chat/map/image"), "路由清单含 map image");
   } finally {
+    await core.closeSqlSessions();
     rmtree(dataDir);
   }
 });
@@ -477,7 +476,7 @@ test("P0-06：动态路由用真实请求路径；map/image 已注册并可访�
 // ---------------------------------------------------------------------------
 
 test("P0-07：req.user 身份模型——本机登录允许、未登录 / 远程非管理员拒绝、管理员例外", async () => {
-  const { router, dataDir, world } = await wiredPlugin();
+  const { router, core, dataDir, world } = await wiredPlugin();
   try {
     const localUser = { profile: { handle: "dev", admin: false } };
     const allowed = await router.invoke("PUT", "/settings", {
@@ -508,13 +507,14 @@ test("P0-07：req.user 身份模型——本机登录允许、未登录 / 远程
     });
     equal(admin.status, 200, "管理员不受本机限制");
 
-    const remoteWorldImport = await router.invoke("POST", "/worlds/import", {
-      body: { world: JSON.parse(JSON.stringify(world)) },
+    const remoteWorldImport = await router.invoke("POST", "/sql/chat/map/import", {
+      body: { chatUid: "chat-a", chatId: "chat-a", world: JSON.parse(JSON.stringify(world)) },
       user: localUser,
       remoteAddress: "203.0.113.9",
     });
     equal(remoteWorldImport.status, 403, "世界导入同样受写策略约束");
   } finally {
+    await core.closeSqlSessions();
     rmtree(dataDir);
   }
 });

@@ -23,7 +23,7 @@ const { legacyStartWorld } = await imp("tests/atlas-legacy-start-world.mjs");
 const { detectStartPlaceholder, retireStartPlaceholder, sanitizeSceneDoc, emptySceneDoc, resolveSceneStatus, sceneDocKey } = await imp("src/atlas-scene.ts");
 const { parseWorld } = await imp("lib/world-schema.ts");
 const { substitutePromptPlaceholders } = await imp("src/atlas-api-client.ts");
-const { createAtlasServerCore, createMemoryDocumentStore } = await imp("src/atlas-server.ts");
+const { createAtlasServerCore, createMemoryDocumentStore } = await imp("tests/legacy/atlas-server-fixture.ts");
 
 const NOW = 1_700_000_000_000;
 

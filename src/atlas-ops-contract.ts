@@ -332,6 +332,9 @@ export type TurnInput = {
   sceneMaps?: boolean;
   mapCalibration?: import('./atlas-sql-scene-maps.ts').SqlMapCalibration;
   sceneOnly?: boolean;
+  /** Trusted author import, never supplied by a model operation. */
+  legacyImport?: unknown;
+  mapBackground?: {mapId:string;asset:import("./atlas-db-contract.ts").AtlasAssetRef|null};
   povName?: string;
 };
 
