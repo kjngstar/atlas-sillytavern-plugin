@@ -3194,6 +3194,7 @@ function createAtlasUiCore(deps) {
   const sqlEnabled = () => deps.sqlEnabled?.() === true;
   let sqlRetryRequest = null;
   let sqlPartialTurnId = null;
+  let sqlRetryRestored = false;
   const bootstrappedBranches = /* @__PURE__ */ new Set();
   const openingAttemptedMessages = /* @__PURE__ */ new Set();
   let stoppedGeneration = false;
@@ -3506,6 +3507,36 @@ function createAtlasUiCore(deps) {
           simulationView,
           lastError: null
         });
+        if (useSql && !sqlRetryRequest && !state.pendingTurn && !commitFlight) {
+          const retry = body.data.retryContext;
+          if (retry && typeof retry.turnId === "string" && typeof retry.assistantMessageId === "string") {
+            const floor = deps.resolveRetryFloor?.(retry.assistantMessageId);
+            const restored = floor ? parseAtlasTurnCommitRequest({
+              turnId: retry.turnId,
+              chatId: binding.chatId,
+              userMessageId: floor.userMessageId,
+              assistantMessageId: retry.assistantMessageId,
+              swipeId: null,
+              userText: floor.userText.slice(0, ATLAS_LIMITS.USER_TEXT_CHARS),
+              assistantText: floor.assistantText.slice(0, ATLAS_LIMITS.ASSISTANT_TEXT_CHARS)
+            }) : null;
+            if (restored?.ok) {
+              const identity = deps.getCommitIdentity?.(restored.value);
+              if ((identity?.messageUID ?? restored.value.assistantMessageId) === retry.hostMessageUid && (identity?.variantKey ?? "original") === retry.variantKey) {
+                sqlRetryRequest = restored.value;
+                sqlPartialTurnId = retry.turnId;
+                sqlRetryRestored = true;
+                setState({ retryableCommit: {
+                  chatId: binding.chatId,
+                  userMessageId: restored.value.userMessageId,
+                  assistantMessageId: restored.value.assistantMessageId,
+                  swipeId: null,
+                  sqlMode: true
+                } });
+              }
+            }
+          }
+        }
         return;
       }
       const code = body.error?.code ?? "";
@@ -3588,6 +3619,8 @@ function createAtlasUiCore(deps) {
       stoppedGeneration = false;
       generationRevision += 1;
       sqlRetryRequest = null;
+      sqlPartialTurnId = null;
+      sqlRetryRestored = false;
       swipeIdForNextCommit = null;
       activeTraceId = null;
       activeAttemptId = null;
@@ -4261,6 +4294,7 @@ function createAtlasUiCore(deps) {
     const isCurrent = () => !disposed && host.getChatId() === value.chatId && state.chatId === value.chatId && generationRevision === revision && useSql === sqlEnabled() && (hostGuard?.() ?? deps.isCommitCurrent?.(value) ?? true) && (!identity || JSON.stringify(deps.getCommitIdentity?.(value)) === JSON.stringify(identity));
     if (useSql) {
       sqlPartialTurnId = null;
+      sqlRetryRestored = false;
       sqlRetryRequest = value;
     }
     if (state.chatId === value.chatId) setState({ turnPhase: "committing" });
@@ -4624,12 +4658,19 @@ function createAtlasUiCore(deps) {
     if (sqlEnabled()) {
       if (!sqlRetryRequest || commitFlight) return;
       if (sqlPartialTurnId) {
-        const original = sqlRetryRequest, turnId = sqlPartialTurnId, revision = generationRevision;
+        let original = sqlRetryRequest;
+        const turnId = sqlPartialTurnId, revision = generationRevision;
         const flight = claimCommit(turnId);
         const identity = deps.getCommitIdentity?.(original);
         const hostGuard = deps.createCommitGuard?.(original);
         const isCurrent = () => !disposed && state.chatId === failed.chatId && host.getChatId() === failed.chatId && sqlEnabled() && generationRevision === revision && (hostGuard?.() ?? deps.isCommitCurrent?.(original) ?? true) && (!identity || JSON.stringify(deps.getCommitIdentity?.(original)) === JSON.stringify(identity));
         try {
+          if (sqlRetryRestored) {
+            const commitContext = deps.getCommitContext ? await safeCommitContext(deps.getCommitContext, original.assistantText) : null;
+            const lore = deps.getLoreSupplement ? await readContextWithDeadline(deps.getLoreSupplement({ chatId: failed.chatId, characterId: null, mode: "turn", userText: original.userText, assistantText: original.assistantText, recentAssistantTexts: commitContext?.recentAssistantTexts ?? [] })) : null;
+            if (!isCurrent()) return;
+            original = { ...original, ...commitContext, ...typeof lore === "string" && lore.trim() ? { loreSupplement: lore } : {} };
+          }
           const result = await api.request("POST", "/sql/chat/retry", {
             ...original,
             chatUid: failed.chatId,

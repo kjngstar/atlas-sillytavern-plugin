@@ -463,6 +463,8 @@ export function createAtlasUiCore(deps: {
    * 返回 null（无 AI 楼层 / 聊天不可读）→ 回退用事件锚点。
    */
   resolveAssistantFloor?: () => { assistantMessageId: string; assistantText: string } | null;
+  /** Recover only the current last assistant floor and its actual preceding user floor. */
+  resolveRetryFloor?: (assistantMessageId: string) => { userMessageId: string; userText: string; assistantText: string } | null;
   /** GENERATION_ENDED 防抖窗口（ms；测试可调小）。 */
   endedDebounceMs?: number;
   /** 楼层变动（swipe / 编辑 / 删除）聚合防抖窗口（ms；测试可调小）。 */
@@ -578,6 +580,7 @@ export function createAtlasUiCore(deps: {
   const sqlEnabled = () => deps.sqlEnabled?.() === true;
   let sqlRetryRequest: AtlasTurnCommitRequest | null = null;
   let sqlPartialTurnId: string | null = null;
+  let sqlRetryRestored = false;
   const bootstrappedBranches = new Set<string>();
   const openingAttemptedMessages = new Set<string>();
   let stoppedGeneration = false;
@@ -883,6 +886,23 @@ export function createAtlasUiCore(deps: {
           simulationView,
           lastError: null,
         });
+        if (useSql && !sqlRetryRequest && !state.pendingTurn && !commitFlight) {
+          const retry = body.data.retryContext as Record<string, unknown> | null;
+          if (retry && typeof retry.turnId === 'string' && typeof retry.assistantMessageId === 'string') {
+            const floor = deps.resolveRetryFloor?.(retry.assistantMessageId);
+            const restored = floor ? parseAtlasTurnCommitRequest({ turnId: retry.turnId, chatId: binding.chatId,
+              userMessageId: floor.userMessageId, assistantMessageId: retry.assistantMessageId, swipeId: null,
+              userText: floor.userText.slice(0, ATLAS_LIMITS.USER_TEXT_CHARS), assistantText: floor.assistantText.slice(0, ATLAS_LIMITS.ASSISTANT_TEXT_CHARS) }) : null;
+            if (restored?.ok) {
+              const identity = deps.getCommitIdentity?.(restored.value);
+              if ((identity?.messageUID ?? restored.value.assistantMessageId) === retry.hostMessageUid && (identity?.variantKey ?? 'original') === retry.variantKey) {
+                sqlRetryRequest = restored.value; sqlPartialTurnId = retry.turnId; sqlRetryRestored = true;
+                setState({ retryableCommit: { chatId: binding.chatId, userMessageId: restored.value.userMessageId,
+                  assistantMessageId: restored.value.assistantMessageId, swipeId: null, sqlMode: true } });
+              }
+            }
+          }
+        }
         return;
       }
       const code = body.error?.code ?? "";
@@ -951,6 +971,7 @@ export function createAtlasUiCore(deps: {
       stoppedGeneration = false;
       generationRevision += 1;
       sqlRetryRequest = null;
+      sqlPartialTurnId = null; sqlRetryRestored = false;
       swipeIdForNextCommit = null;
       activeTraceId = null;
       activeAttemptId = null;
@@ -1512,7 +1533,7 @@ export function createAtlasUiCore(deps: {
     const isCurrent = () => !disposed && host.getChatId() === value.chatId && state.chatId === value.chatId
       && generationRevision === revision && useSql === sqlEnabled() && (hostGuard?.() ?? deps.isCommitCurrent?.(value) ?? true)
       && (!identity || JSON.stringify(deps.getCommitIdentity?.(value)) === JSON.stringify(identity));
-    if (useSql) { sqlPartialTurnId = null; sqlRetryRequest = value; }
+    if (useSql) { sqlPartialTurnId = null; sqlRetryRestored = false; sqlRetryRequest = value; }
     if (state.chatId === value.chatId) setState({ turnPhase: "committing" });
     diagnostic({ level: "info", source: "ui", code: "COMMIT_STARTED",
       operation: "commit", phase: "request", outcome: "started" });
@@ -1828,7 +1849,8 @@ export function createAtlasUiCore(deps: {
     if (sqlEnabled()) {
       if (!sqlRetryRequest || commitFlight) return;
       if (sqlPartialTurnId) {
-        const original = sqlRetryRequest, turnId = sqlPartialTurnId, revision = generationRevision;
+        let original = sqlRetryRequest;
+        const turnId = sqlPartialTurnId, revision = generationRevision;
         const flight = claimCommit(turnId);
         const identity = deps.getCommitIdentity?.(original);
         const hostGuard = deps.createCommitGuard?.(original);
@@ -1836,6 +1858,12 @@ export function createAtlasUiCore(deps: {
           && generationRevision === revision && (hostGuard?.() ?? deps.isCommitCurrent?.(original) ?? true)
           && (!identity || JSON.stringify(deps.getCommitIdentity?.(original)) === JSON.stringify(identity));
         try {
+          if (sqlRetryRestored) {
+            const commitContext = deps.getCommitContext ? await safeCommitContext(deps.getCommitContext, original.assistantText) : null;
+            const lore = deps.getLoreSupplement ? await readContextWithDeadline(deps.getLoreSupplement({chatId:failed.chatId,characterId:null,mode:'turn',userText:original.userText,assistantText:original.assistantText,recentAssistantTexts:commitContext?.recentAssistantTexts??[]})) : null;
+            if (!isCurrent()) return;
+            original = { ...original, ...commitContext, ...(typeof lore==='string'&&lore.trim()?{loreSupplement:lore}:{}) };
+          }
           const result = await api.request('POST', '/sql/chat/retry', { ...original, chatUid: failed.chatId,
             sqlTurnId: turnId, playerName: deps.getPlayerName?.() ?? '', isCurrent });
           if (!isCurrent()) return;

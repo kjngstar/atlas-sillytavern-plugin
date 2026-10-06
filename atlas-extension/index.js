@@ -3065,6 +3065,17 @@ async function connectOnce() {
         return user?.is_user === true && assistant?.is_user === false && typeof user.mes === 'string' && typeof assistant.mes === 'string'
           ? { userText: user.mes, assistantText: assistant.mes } : null;
       },
+      resolveRetryFloor: (assistantMessageId) => {
+        const chat = context()?.chat;
+        if (!Array.isArray(chat) || !/^\d+$/.test(assistantMessageId)) return null;
+        const index = Number(assistantMessageId), assistant = chat[index];
+        if (assistant?.is_user !== false || typeof assistant.mes !== 'string' || chat.slice(index + 1).some(message => !message?.is_system)) return null;
+        for (let userIndex = index - 1; userIndex >= 0; userIndex--) {
+          const user = chat[userIndex];
+          if (user?.is_user === true && typeof user.mes === 'string') return { userMessageId: String(userIndex), userText: user.mes, assistantText: assistant.mes };
+        }
+        return null;
+      },
       onDiagnostic: emitAtlasDiagnostic,
       host: (hostRef ??= createHost(context)),
       emitter: createEmitter(context),

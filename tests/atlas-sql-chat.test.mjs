@@ -8,7 +8,7 @@ import { queryBound } from '../src/atlas-db-runtime.ts';
 
 const room = '{"op":"location.upsert","ref":"new:library","data":{"name":"图书馆","kind":"room"}}';
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
-function fixture({ response = room, model, identity, lore = '全部世界书原文：文风规则与地点。' } = {}) {
+function fixture({ response = room, model, identity, retryFloor, lore = '全部世界书原文：文风规则与地点。' } = {}) {
   let enabled = true, saves = 0, calls = 0, saveOk = true;
   const requests = [], batches = [];
   const current = { chatUid: 'chat-auto', branchId: 'main', chatMetadata: {}, saveMetadata: async () => { saves++; return saveOk; } };
@@ -20,21 +20,23 @@ function fixture({ response = room, model, identity, lore = '全部世界书原�
   const host = { getChatId: () => live.chatUid, readPanelOpen: () => false, writePanelOpen() {},
     readBinding: () => { throw Error('SQL must not read or migrate the old session'); }, writeBinding: async b => { current.chatMetadata.atlas.sqlChatEnabled = b.enabled; },
     readData: () => null, writeData() {}, fillInput() {} };
-  const ui = createAtlasUiCore({ host, emitter: { on() {}, off() {} }, sqlEnabled: () => enabled,
+  const makeUi = () => createAtlasUiCore({ host, emitter: { on() {}, off() {} }, sqlEnabled: () => enabled,
     api: { request: async (method, path, body) => { requests.push({ method, path, body }); return server.handle(method, path, body, { local: true }); } },
     adaptEvent: (_event, payload) => payload ?? null, endedDebounceMs: 0, mutationDebounceMs: 0,
     getPlayerName: () => '用户主角', getLoreSupplement: async () => lore,
     getCommitIdentity: identity ? () => identity : undefined,
+    resolveRetryFloor: retryFloor,
     getCommitContext: async () => ({ charDescription: '角色卡设定', personaDescription: '用户人设', recentAssistantTexts: ['开场白'] }),
     ensureWorld: async () => { throw Error('Must not build an old world'); },
     syncProtagonistIdentity: async () => { throw Error('Must not write old characters'); },
     getOpeningMessage: async () => { throw Error('Must not bootstrap old tables'); },
     onLorebookSync: async () => { throw Error('Must not project the old worldbook'); },
   });
+  let ui=makeUi();
   async function prepare(id = '0') { await ui.handleEvent('MESSAGE_SENT', { kind: 'message-sent', messageId: id, userText: '走进图书馆' }); assert.ok(ui.getState().pendingTurn); }
   async function end(id = '1') { await ui.handleEvent('GENERATION_ENDED', { kind: 'generation-ended', assistantMessageId: id, assistantText: '你走进了图书馆。' }); await pause(5); await ui.handleEvent('FLUSH'); }
   async function mutate(kind = 'message-deleted', id = '1') { await ui.handleEvent('MESSAGE_DELETED', { kind, messageId: id }); await pause(5); await ui.handleEvent('FLUSH'); }
-  return { ui, server, provider, current, requests, batches, prepare, end, mutate,
+  return { get ui(){return ui;}, restartUi(){ui.dispose();ui=makeUi();}, server, provider, current, requests, batches, prepare, end, mutate,
     calls: () => calls, saves: () => saves, setSave: value => { saveOk = value; }, setEnabled: value => { enabled = value; },
     switchChat: () => { live = { ...current, chatUid: 'chat-other', chatMetadata: {} }; },
     async close() { ui.dispose(); await provider.close(); },
@@ -74,6 +76,30 @@ test('首轮未知短编号的命名对象可定向修正声明，保存实际�
     assert.ok(queryBound(session.repo.db,'SELECT id FROM maps',[]).length>=3);
     assert.ok(f.current.chatMetadata.atlas.database); assert.equal(f.saves(),1);
   } finally { await f.close(); }
+});
+
+test('刷新后恢复最新部分回合的补交入口，旧失败地点可补回而成功事件不重复', async () => {
+  let repairCalls=0,allowFloor=true;
+  const identity={messageUID:'stable-last-floor',variantKey:'content-original'};
+  const f=fixture({identity,retryFloor:id=>allowFloor&&id==='1'?{userMessageId:'0',userText:'走进图书馆',assistantText:'你走进了图书馆。'}:null,
+    model:async request=>request.phase==='repair'?(++repairCalls===1?'{"ticket":"R1","op":"noop","why":"暂时未完成"}':'{"ticket":"R1","op":"location.upsert","ref":"new:L1","data":{"name":"图书馆","kind":"building"}}'):
+      '{"op":"location.upsert","ref":"L1","data":{"name":"图书馆","kind":"building"}}\n{"op":"event.propose","data":{"title":"进入图书馆","phase":"observed"}}'});
+  try{
+    await f.ui.refresh(); await f.prepare(); await f.end();
+    const session=await f.provider.session('chat-auto'),head=session.repo.internal.currentHeadTurnId();
+    assert.equal(queryBound(session.repo.db,'SELECT COUNT(*) n FROM locations',[])[0].n,0);
+    assert.equal(queryBound(session.repo.db,'SELECT COUNT(*) n FROM events',[])[0].n,1);
+    allowFloor=false; f.restartUi(); await f.ui.refresh(); assert.equal(f.ui.getState().retryableCommit,null);
+    allowFloor=true;identity.variantKey='edited-content';f.restartUi();await f.ui.refresh();assert.equal(f.ui.getState().retryableCommit,null);
+    identity.variantKey='content-original';f.restartUi();await f.ui.refresh();
+    assert.ok(f.ui.getState().retryableCommit);assert.equal(f.calls(),2,'恢复入口零模型调用');
+    await f.ui.retryLastCommit();
+    assert.equal(f.ui.getState().retryableCommit,null,f.ui.getState().lastError??'');
+    assert.equal(queryBound(session.repo.db,'SELECT COUNT(*) n FROM locations',[])[0].n,1);
+    assert.equal(queryBound(session.repo.db,'SELECT COUNT(*) n FROM maps',[])[0].n,2);
+    assert.equal(queryBound(session.repo.db,'SELECT COUNT(*) n FROM events',[])[0].n,1);
+    assert.equal(session.repo.internal.currentHeadTurnId(),head);assert.equal(f.calls(),3);
+  }finally{await f.close();}
 });
 
 test('Q03 automatic events: prepare is read-only; completion writes one real SQL snapshot and no legacy world', async () => {

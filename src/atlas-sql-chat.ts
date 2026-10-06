@@ -96,8 +96,14 @@ export async function handleSqlChatRequest(session: SqlSession, action: string, 
   }
   if (action === 'state') {
     const logicalBinding=binding(session);
+    const head=session.repo.internal.currentHeadTurnId();
+    const headRow=head?queryBound(session.repo.db,"SELECT id, host_message_uid, host_variant_key, decisions_json, receipt_json FROM turns WHERE id=? AND branch_id=? AND kind='narrative' AND status='partial'",[head,session.branchId])[0]:null;
+    const nativeReceipt=headRow?JSON.parse(String(headRow.receipt_json)):null;
+    const retryContext=headRow&&toLegacyTurnReceipt(nativeReceipt).retryable===true?{
+      turnId:String(headRow.id),assistantMessageId:floorIndex(headRow),hostMessageUid:String(headRow.host_message_uid),variantKey:String(headRow.host_variant_key),
+    }:null;
     return {...querySqlSceneState({db:session.repo.db,branchId:session.branchId,revision:session.repo.internal.currentRevision(),
-      povId:protagonist(session),viewMode:'author',assets:((session.chatMetadata.atlas as {database?:AtlasEnvelope}|undefined)?.database?.assets??[])}, {chatUid:session.chatUid,worldUid:session.worldUid,worldName:session.branchName}),binding:logicalBinding};
+      povId:protagonist(session),viewMode:'author',assets:((session.chatMetadata.atlas as {database?:AtlasEnvelope}|undefined)?.database?.assets??[])}, {chatUid:session.chatUid,worldUid:session.worldUid,worldName:session.branchName}),binding:logicalBinding,retryContext};
   }
   assertEnabled(session);
   // M3/W08：UI 显式重试布局 —— 只给这张地图的 failed 请求开新 ticket/opID，
