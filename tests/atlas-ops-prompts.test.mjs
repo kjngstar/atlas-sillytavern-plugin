@@ -89,7 +89,7 @@ test('T23-03 原分段角色与内容保留：system/user 分段不变，用户�
   const user = request.messages[1].content;
 
   // 固定格式段仍在 system 里，且是第 1 段
-  assert.ok(system.startsWith(STAGE_PROMPT_TEMPLATES.FORMAT_SEGMENT.slice(0, STAGE_PROMPT_TEMPLATES.FORMAT_SEGMENT.indexOf('{{allowedOperationHelp}}'))), 'system 必须以固定格式段开头');
+  assert.ok(system.startsWith(STAGE_PROMPT_TEMPLATES.FORMAT_SEGMENT.split('{{')[0]), 'system 必须以固定格式段开头');
   assert.ok(system.includes('你负责 Atlas 的本次状态任务。'), 'system 必须含 §19.1 固定格式段');
   assert.ok(system.includes('只输出本次允许的操作，每行一个完整 JSON 对象。'));
   assert.ok(system.includes('不要输出整份世界、SQL、解释段或思考过程。'));
@@ -130,7 +130,11 @@ test('T23-04 没有一边要求 SQL 一边要求 JSON：全部阶段禁 SQL 且�
     for (const [label, pattern] of sqlPatterns) {
       assert.equal((text.match(pattern) ?? []).length, 0, `${phase}: 不得出现 ${label}`);
     }
-    assert.ok(text.includes(CANONICAL_JSON_LINE), `${phase}: 必须含 §19.1 规范 JSON 示例行`);
+    const system=request.messages[0].content;
+    if(request.allowedOps.includes('character.upsert')) assert.ok(system.includes(CANONICAL_JSON_LINE));
+    if(request.allowedOps.includes('location.upsert')) assert.ok(system.includes('"ref":"new:library","data":{"name":"图书馆"'));
+    if(request.allowedOps.includes('event.propose')) assert.ok(system.includes('"data":{"title":"进入图书馆","phase":"observed"}'));
+    for(const match of system.matchAll(/"op":"([a-z]+\.[a-z.]+)"/g)) assert.ok(request.allowedOps.includes(match[1]),`${phase}: 示例不能暗示越权操作 ${match[1]}`);
     assert.ok(text.includes('每行一个完整 JSON 对象。'), `${phase}: 必须明确要求 JSON 逐行输出`);
     assert.equal(/output\s+SQL/i.test(text), false, `${phase}: 不得要求 SQL`);
   }

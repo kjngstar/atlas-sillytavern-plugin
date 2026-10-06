@@ -131,6 +131,36 @@ function cloneIssue(issue: Issue): Issue {
   return { ...issue };
 }
 
+/** An unknown short ref on a named upsert can correct its declaration, not create a different entity. */
+function creationCorrections(originals: ParsedOperation[], tickets: RepairTicket[]): Map<string, ParsedOperation> {
+  const byId = new Map(originals.map(op => [op.opId, op]));
+  const result = new Map<string, ParsedOperation>();
+  const duplicates = new Set<string>();
+  const prefixes: Record<string, string> = { 'location.upsert': 'L', 'character.upsert': 'C', 'item.upsert': 'I', 'faction.upsert': 'F' };
+  for (const ticket of tickets) {
+    const original = byId.get(ticket.originalOpId);
+    if (!original) continue;
+    const { op, ref, data } = original.value;
+    const prefix = prefixes[op];
+    if (!prefix || typeof ref !== 'string' || !new RegExp(`^${prefix}[1-9]\\d*$`).test(ref) || typeof data?.name !== 'string' || !data.name.trim()) continue;
+    if (!ticket.issues.some(issue => issue.code === 'REF_UNKNOWN' && (issue.path === '$.ref' || issue.path === '$.data.ref'))) continue;
+    if (result.has(ref)) duplicates.add(ref);
+    else result.set(ref, original);
+  }
+  for (const ref of duplicates) result.delete(ref);
+  return result;
+}
+
+function referencedCorrections(value: unknown, corrections: Map<string, ParsedOperation>, depth = 0): string[] {
+  if (!value || typeof value !== 'object' || depth > 32) return [];
+  const refs: string[] = [];
+  for (const [key, item] of Object.entries(value)) {
+    if ((key === 'ref' || key.endsWith('_ref')) && typeof item === 'string' && corrections.has(item)) refs.push(item);
+    else if (item && typeof item === 'object') refs.push(...referencedCorrections(item, corrections, depth + 1));
+  }
+  return refs;
+}
+
 /* ───────────────────────── C08：buildRepairBatch ───────────────────────── */
 
 function renderTicketLine(ticket: RepairTicket, op: ParsedOperation | undefined): string {
@@ -187,6 +217,7 @@ export function buildRepairBatch(
     tickets.push(ticket);
     ticketLines.push(renderTicketLine(ticket, entry?.op));
   });
+  const corrections = creationCorrections(list.map(entry => entry.op), tickets);
 
   const relatedObjects = tickets
     .map((ticket) => {
@@ -203,6 +234,11 @@ export function buildRepairBatch(
     '只使用原本允许的操作。若无足够信息完成，输出同 ticket 的 noop，并用 why 说明。',
     '不要重新输出整个世界，不要改用 SQL，不要编造不存在的引用或证据。',
     `本批允许操作：${ctx.allowedOps.length > 0 ? ctx.allowedOps.join(', ') : '（无）'}`,
+    '实际字段必须放在 data 内，不能把 title、phase、subject_ref 等放在顶层。',
+    ...(corrections.size ? [
+      '以下未知编号来自本批已命名的新建操作，可仅为原对象修正声明；保持原操作类型与 data.name，禁止借此新建其他对象。原操作中指向这些对象的引用也可按同一映射修正：',
+      JSON.stringify([...corrections].map(([ref, op]) => ({ from: ref, to: `new:${ref}`, op: op.value.op, name: op.value.data!.name, originalOpId: op.opId }))),
+    ] : []),
     '失败票据、原操作、准确错误：',
     ...ticketLines,
     `相关对象：${relatedObjects.length > 0 ? relatedObjects : '（本批未附读取集）'}`,
@@ -260,9 +296,12 @@ export function mergeRepair(
 
   // 票据的原依赖集合：修复只能使用原操作里已经出现过的 new: 别名（§16.5 步骤 6）。
   const allowedAliases = new Map<string, Set<string>>();
+  const corrections = creationCorrections(originals, ticketList);
   for (const [ticketId, ticket] of ticketById) {
     const originalOp = originalById.get(ticket.originalOpId);
-    allowedAliases.set(ticketId, new Set(originalOp ? collectNewAliases([originalOp]) : []));
+    const aliases = new Set(originalOp ? collectNewAliases([originalOp]) : []);
+    for (const ref of referencedCorrections(originalOp?.value, corrections)) aliases.add(ref);
+    allowedAliases.set(ticketId, aliases);
   }
 
   const issues: Issue[] = [];
@@ -377,6 +416,13 @@ export function mergeRepair(
     }
 
     const allowed = allowedAliases.get(ticketId) ?? new Set<string>();
+    const creationRef = typeof model?.ref === 'string' && model.ref.startsWith('new:') ? model.ref.slice(4) : '';
+    const creation = corrections.get(creationRef);
+    if (creation && (creation.opId !== originalOp.opId || model.op !== originalOp.value.op || model.data?.name !== originalOp.value.data?.name)) {
+      exceededScope = true;
+      issues.push(makeIssue('REPAIR_SCOPE_VIOLATION', '$.ref', `票据「${ticketId}」只能把原命名对象修正为 new:${creationRef}，不能更换对象名称、操作类型或声明其他票据的对象。`, 'error', false, { line, opId: originalOp.opId }));
+      continue;
+    }
     const illegalAlias = collectNewAliases([entry]).find((alias) => !allowed.has(alias));
     if (illegalAlias !== undefined) {
       exceededScope = true;

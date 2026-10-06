@@ -61,6 +61,36 @@ function repairOps(text) {
   return parseOperations(text, { phase: 'repair' }).operations;
 }
 
+test('命名新建声明修正只接受相同对象，拒绝换名、任意别名和无声明的依赖', () => {
+  const original=repairOps('{"op":"location.upsert","ref":"L1","data":{"name":"图书馆","kind":"building"}}');
+  const batch=buildRepairBatch([{op:original[0],issues:[{code:'REF_UNKNOWN',path:'$.data.ref',message:'L1 不存在',severity:'error',retryable:true}]}],{phase:'repair',allowedOps:['location.upsert']});
+  const corrected=mergeRepair(original,repairOps('{"ticket":"R1","op":"location.upsert","ref":"new:L1","data":{"name":"图书馆","kind":"building"}}'),batch.tickets,{phase:'repair'});
+  assert.deepEqual(corrected.issues,[]); assert.equal(corrected.operations[0].value.ref,'new:L1');
+  assert.equal(corrected.operations[0].opId,original[0].opId);
+  for(const data of [
+    {ref:'new:L1',data:{name:'无关城堡'}},
+    {ref:'new:helper',data:{name:'图书馆'}},
+    {ref:'new:L1',data:{name:'图书馆',parent_ref:'new:L9'}},
+  ]) {
+    const result=mergeRepair(original,repairOps(JSON.stringify({ticket:'R1',op:'location.upsert',...data})),batch.tickets,{phase:'repair'});
+    assert.ok(result.issues.some(issue=>issue.code==='REPAIR_SCOPE_VIOLATION'));
+    assert.equal(result.operations[0],original[0]);
+  }
+});
+
+test('已知编号更新和重复未知编号声明不能通过纠错新建对象', () => {
+  const original=repairOps('{"op":"location.upsert","ref":"L1","data":{"name":"图书馆"}}');
+  for(const [ops,issues] of [
+    [original,[{code:'FIELD_INVALID',path:'$.data.kind',message:'字段错误',severity:'error',retryable:true}]],
+    [[...original,{...original[0],opId:'duplicate'}],[{code:'REF_UNKNOWN',path:'$.data.ref',message:'不存在',severity:'error',retryable:true}]],
+  ]) {
+    const batch=buildRepairBatch(ops.map(op=>({op,issues})),{phase:'repair',allowedOps:['location.upsert']});
+    const result=mergeRepair(ops,repairOps('{"ticket":"R1","op":"location.upsert","ref":"new:L1","data":{"name":"图书馆"}}'),batch.tickets,{phase:'repair'});
+    assert.ok(result.issues.some(issue=>issue.code==='REPAIR_SCOPE_VIOLATION'));
+    assert.equal(result.operations[0],ops[0]);
+  }
+});
+
 /* ───────────────────────── 部分成功也会修失败组 ───────────────────────── */
 
 test('T09-01 部分成功也修失败组：真实 rejected 组进修复批次，恰好一票且不含成功操作文本', async () => {

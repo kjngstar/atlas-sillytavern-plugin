@@ -45,6 +45,37 @@ test('原版 UI 只读入口：新聊天没有保存快照仍读取同一个内�
 test('原版 UI 回执：模型失败在无快照时也形成有错误码的真实回执',async()=>{const f=fixture({model:async()=>{throw Object.assign(Error('连接未配置'),{code:'API_NOT_CONFIGURED',retryable:false});}});try{await f.ui.refresh();await f.prepare();await f.end();const r=f.ui.getState().receipts[0];assert.equal(r.status,'failed');assert.match(r.summary,/连接未配置/);assert.equal(r.detail.coreSaved,false);assert.equal(r.detail.httpStatus,500);assert.ok(r.detail.receipt||r.errorCode);assert.equal(f.current.chatMetadata.atlas?.database,undefined);const read=await f.server.handle('POST','/sql/chat/ui-read',{chatUid:'chat-auto',kind:'diagnostics',viewMode:'author'},{local:true});assert.equal(read.status,200);assert.equal(f.saves(),0);}finally{await f.close();}});
 test('原版 UI 回执：成功提交保留原生分组与保存状态',async()=>{const f=fixture();try{await f.ui.refresh();await f.prepare();await f.end();const r=f.ui.getState().receipts[0];assert.equal(r.detail.coreSaved,true);assert.ok(r.detail.receipt.groups.length>0);assert.equal(r.detail.receipt.groups[0].status,'applied');assert.equal('anchor' in r.detail.receipt,false);}finally{await f.close();}});
 
+test('首轮未知短编号的命名对象可定向修正声明，保存实际地点层级、人物位置和地图', async () => {
+  const f = fixture({ model: async request => {
+    if (request.phase !== 'repair') return [
+      { op:'location.upsert', ref:'L1', data:{name:'验收城',kind:'city'} },
+      { op:'location.upsert', ref:'L2', data:{name:'验收图书馆',kind:'building',parent_ref:'L1'} },
+      { op:'character.upsert', ref:'C1', data:{name:'用户主角',identity:'读者',role:'protagonist',location_ref:'L2'} },
+    ].map(op=>JSON.stringify(op)).join('\n');
+    const tickets = request.messages.map(m=>m.content).join('\n').split('\n')
+      .filter(line=>line.startsWith('{"ticket"')&&line.includes('originalOpId='))
+      .map(line=>JSON.parse(line.split(' ｜')[0]));
+    assert.equal(tickets.length,3);
+    return tickets.map(op=>JSON.stringify({...op,ref:'new:'+op.ref,data:{...op.data,
+      ...(op.data.parent_ref?{parent_ref:'new:'+op.data.parent_ref}:{}),
+      ...(op.data.location_ref?{location_ref:'new:'+op.data.location_ref}:{})}})).join('\n');
+  }});
+  try {
+    await f.ui.refresh(); await f.prepare(); await f.end();
+    const receipt=f.ui.getState().receipts.at(-1);
+    assert.equal(receipt.detail.coreSaved,true);
+    assert.ok(receipt.detail.receipt.groups.every(group=>group.status==='applied'));
+    const session=await f.provider.session('chat-auto');
+    const locations=queryBound(session.repo.db,'SELECT id,name,parent_location_id,map_id FROM locations',[]);
+    const city=locations.find(row=>row.name==='验收城'),library=locations.find(row=>row.name==='验收图书馆');
+    assert.equal(locations.length,2); assert.equal(library.parent_location_id,city.id);
+    assert.ok(library.map_id);
+    assert.equal(queryBound(session.repo.db,'SELECT location_id FROM characters WHERE name=?',['用户主角'])[0].location_id,library.id);
+    assert.ok(queryBound(session.repo.db,'SELECT id FROM maps',[]).length>=3);
+    assert.ok(f.current.chatMetadata.atlas.database); assert.equal(f.saves(),1);
+  } finally { await f.close(); }
+});
+
 test('Q03 automatic events: prepare is read-only; completion writes one real SQL snapshot and no legacy world', async () => {
   const f = fixture();
   try {
