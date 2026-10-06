@@ -74,7 +74,7 @@ const MINIMUM_HELP: Record<string, string> = {
   'item.upsert': '新建 name；修改 ref',
   'item.transfer': 'ref + to（holder_ref / container_ref / location_ref / unknown 四选一）',
   'faction.upsert': '新建 name；修改 ref',
-  'relation.upsert': 'subject_ref, object_ref, label',
+  'relation.upsert': 'data.subject_ref, data.object_ref, data.label；data.kind 仅允许 member_of/leads/controls/knows/kinship/ally/hostile/owes/protects/other，所有者或控制关系用 controls，不用 ownership；已有对象引用必须使用本次目录提供的引用或稳定 ID，禁止新建辅助人物',
   'plan.propose': 'actor_ref, goal, steps',
   'plan.revise': 'ref, change(pause/cancel/resume/replace_future)',
   'event.propose': 'title, phase(scheduled/observed/simulated)',

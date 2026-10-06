@@ -15,6 +15,12 @@ test('人物的实际子图点位优先于目录粗地图，地图计数和右�
  const d=projectReferenceData({mapView:view([{...map,points:map.points.filter(p=>p.kind==='location')},{mapId:'inside',name:'学校室内',kind:'site',containerLocationId:'L',points:[{entityId:'C',kind:'character',name:'艾琳',mapId:'inside',locationId:'L',x:5,y:5}]}]),catalogView:view(cat),viewMode:'author'});
  assert.equal(d.CAST[0].mapNodeId,'inside');assert.equal(d.ROOT.children[0].marks[0].id,'C');
 });
+test('子图计数与右栏包含本图对象，父图仍汇总后代；实体 ID 与地图 ID 不混用',()=>{
+ const D={ROOT:{id:'world',children:[{id:'car-map',children:[{id:'cabin-map',children:[]}]}]},LOCATIONS:[{id:'cabin-location',mapId:'car-map'}],CAST:[{id:'C',state:'present',locationId:'cabin-location',mapNodeId:'cabin-map'}],ITEMS:[{id:'I',locationId:'cabin-location',mapNodeId:'cabin-map'}],MESSAGES:[],meta:{}};
+ const code=readFileSync(new URL('../ui/atlas-reference/js/app.js',import.meta.url),'utf8');
+ const ctx=vm.createContext({D,state:{nodeId:'cabin-map',viewMode:'author'}});vm.runInContext(code.slice(code.indexOf('function nodes('),code.indexOf('function message(')),ctx);
+ assert.equal(ctx.sceneCast().length,1);assert.equal(ctx.sceneCast('world').length,1);assert.equal(ctx.sceneItems().length,1);
+});
 test('SQL 子地图按实际容器种类投影，site/interior 不冒充世界层级',()=>{
  for(const [sqlKind,containerKind,expected] of [['region','city','city'],['site','building','building'],['interior','room','room'],['site',null,'building'],['interior',null,'room']]){
   const g=referenceGeometry({...map,kind:sqlKind,containerLocationKind:containerKind});assert.equal(g.kind,expected);

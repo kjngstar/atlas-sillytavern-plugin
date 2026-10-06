@@ -25,9 +25,9 @@ function clock(){const m=D.meta.timeMinutes;return `${String(Math.floor(m/60)%24
 function placeName(id){return byId(id)?.name||'位置未明确';}
 function known(o){return state.viewMode==='author'||o.known!==false;}
 function within(id,ancestor){return (path(id)||[]).some(n=>n.id===ancestor);}
-function sceneCast(id=state.nodeId){return D.CAST.filter(c=>c.state!=='away'&&c.state!=='off'&&c.state!=='unknown'&&within(c.locationId,id)&&known(c));}
-function sceneItems(id=state.nodeId){return D.ITEMS.filter(it=>within(it.locationId,id)&&known(it));}
-function sceneMessages(id=state.nodeId){return D.MESSAGES.filter(m=>(within(m.locationId,id)||within(id,m.locationId))&&known(m));}
+function sceneCast(id=state.nodeId){return D.CAST.filter(c=>c.state!=='away'&&c.state!=='off'&&c.state!=='unknown'&&within(c.mapNodeId||c.locationId,id)&&known(c));}
+function sceneItems(id=state.nodeId){return D.ITEMS.filter(it=>within(it.mapNodeId||it.locationId,id)&&known(it));}
+function sceneMessages(id=state.nodeId){return D.MESSAGES.filter(m=>(within(m.mapNodeId||m.locationId,id)||within(id,m.mapNodeId||m.locationId))&&known(m));}
 function message(id){return D.MESSAGES.find(m=>m.id===id);}
 function task(id){return D.TASKS.find(t=>t.id===id);}
 function setPage(page){window.AtlasHost.onPage?.(page);state.page=names[page]?page:'map';state.query='';state.filter='all';renderPage();renderRail();map.setPaused(state.page!=='map'||document.hidden);if(state.page==='map')requestAnimationFrame(()=>map.resize());}
