@@ -347,9 +347,9 @@ export const ATLAS_UI_EVENTS = [
  */
 export type AtlasAdaptedEvent =
   | { kind: "message-sent"; messageId: string; userText: string }
-  | { kind: "generation-ended"; assistantMessageId: string; assistantText: string }
+  | { kind: "generation-ended"; assistantMessageId: string; assistantText: string; foreground?: boolean }
   | { kind: "generation-stopped" }
-  | { kind: "generation-started"; gated: boolean }
+  | { kind: "generation-started"; gated: boolean; retryTurn?: { userMessageId: string; userText: string; assistantMessageId: string } }
   | { kind: "message-swiped"; messageId: string; userMessageId: string; userText: string; regenerating: boolean | null }
   | { kind: "message-edited"; messageId: string }
   | { kind: "message-deleted"; messageId: string };
@@ -425,6 +425,8 @@ export function createAtlasUiCore(deps: {
   getPlayerName?: () => string;
   getCommitIdentity?: (request: AtlasTurnCommitRequest) => { messageUID: string; variantKey: string } | null;
   isCommitCurrent?: (request: AtlasTurnCommitRequest) => boolean;
+  /** Capture complete host text once; model request budgets must not invalidate long floors. */
+  createCommitGuard?: (request: AtlasTurnCommitRequest) => () => boolean;
   host: AtlasUiHost;
   emitter: AtlasUiEmitter;
   onDiagnostic?: (event: AtlasDiagnosticInput) => void;
@@ -567,6 +569,8 @@ export function createAtlasUiCore(deps: {
   let stoppedGeneration = false;
   /** 最近一次 MESSAGE_SENT 触发的 prepare 任务（waitPendingTurn 等它落定）。 */
   let lastPrepareTask: Promise<void> | null = null;
+  let lastMutationTask: Promise<void> | null = null;
+  let retryRollbackFloor: string | null = null;
   /** ATLAS-06：当前生成是否被门控（quiet / dryRun / automatic_trigger → 事件全部忽略）。 */
   let generationGate = false;
   /** ATLAS-06：rearm 重推演时本次 commit 使用的唯一 swipeId。 */
@@ -928,6 +932,8 @@ export function createAtlasUiCore(deps: {
       healthCheckedAt = -Infinity; // 事件驱动时强制重新检查服务
       // 切聊天：清回合/门控/防抖状态（rearm 属于旧聊天的楼层，绝不能带过去）
       generationGate = false;
+      retryRollbackFloor = null;
+      lastMutationTask = null;
       stoppedGeneration = false;
       generationRevision += 1;
       sqlRetryRequest = null;
@@ -984,6 +990,7 @@ export function createAtlasUiCore(deps: {
         return;
       } // quiet / dryRun / automatic_trigger
       stoppedGeneration = false;
+      retryRollbackFloor = null;
       setState({ rearmTurn: null }); // 真实用户回合优先于 swipe rearm
       swipeIdForNextCommit = null;
       const task = onMessageSent(adapted.messageId, adapted.userText);
@@ -992,8 +999,17 @@ export function createAtlasUiCore(deps: {
     } else if (adapted.kind === "generation-started") {
       generationGate = adapted.gated;
       stoppedGeneration = false;
+      // Regenerating an uncommitted/failed floor emits no new MESSAGE_SENT.
+      // A committed floor still waits for its normal mutation/rollback path.
+      if (!adapted.gated && adapted.retryTurn && !state.pendingTurn) {
+        const retry = adapted.retryTurn;
+        if (state.binding?.enabled) {
+          retryRollbackFloor = state.binding.lastCommittedMessageId === retry.assistantMessageId ? retry.assistantMessageId : null;
+          setState({ rearmTurn: { userMessageId: retry.userMessageId, userText: retry.userText, swipeId: 'swipe-' + now() } });
+        }
+      }
       // Menu regeneration has no MESSAGE_SENT event. Reprepare the stopped turn.
-      if (!adapted.gated && state.rearmTurn && !state.pendingTurn) {
+      if (!adapted.gated && state.rearmTurn && !state.pendingTurn && retryRollbackFloor === null) {
         const rearm = state.rearmTurn;
         swipeIdForNextCommit = rearm.swipeId;
         const task = onMessageSent(rearm.userMessageId, rearm.userText);
@@ -1007,12 +1023,13 @@ export function createAtlasUiCore(deps: {
         return;
       }
       // shujuku 门控：被门控生成（总结 / 向量索引等酒馆内部 quiet 请求）的 ENDED 不推演。
-      // 闸门在消费后复位——真实生成随后会有自己的 STARTED / ENDED。
-      if (generationGate) {
+      // 真实生成随后会有自己的 STARTED；完成通知可能有多个别名。
+      if (generationGate && !(adapted.foreground && (state.pendingTurn || state.rearmTurn))) {
         diagnostic({ level: "debug", source: "host", code: "GENERATION_GATED",
           operation: "generation", phase: "ended", outcome: "skipped",
           details: { reasonCode: "QUIET_OR_AUTOMATIC" } });
-        generationGate = false;
+        // Completion can arrive through RECEIVED, ENDED and AFTER_COMMANDS.
+        // The next STARTED resets the gate; no alias may consume another pending turn.
         return;
       }
       scheduleGenerationEnded(adapted);
@@ -1078,7 +1095,9 @@ export function createAtlasUiCore(deps: {
       mutationTimer = null;
       const queue = mutationQueue;
       mutationQueue = [];
-      void track(processMutations(queue));
+      const previous = lastMutationTask;
+      lastMutationTask = (async () => { await previous; await processMutations(queue); })();
+      void track(lastMutationTask);
     }, Math.max(0, deps.mutationDebounceMs ?? 400));
   }
 
@@ -1298,7 +1317,26 @@ export function createAtlasUiCore(deps: {
   /** 最终回复完成：commit（至多 1 次请求；重复通知 / 空回复 / 停止不推进世界）。 */
   async function onGenerationEnded(assistantMessageId: string, assistantText: string): Promise<void> {
     if (disposed) return;
+    const endingChat = state.chatId;
     await waitPendingTurn();
+    // A quick regeneration can complete before the mutation debounce expires.
+    // Finish its rollback before preparing the replacement against a revision.
+    if (mutationTimer) {
+      clearTimeout(mutationTimer); mutationTimer = null;
+      const queue = mutationQueue; mutationQueue = [];
+      const previous = lastMutationTask;
+      lastMutationTask = (async () => { await previous; await processMutations(queue); })();
+      void track(lastMutationTask);
+    }
+    await lastMutationTask;
+    if (disposed || state.chatId !== endingChat) return;
+    if (retryRollbackFloor !== null) {
+      if (state.binding?.lastCommittedMessageId === retryRollbackFloor) {
+        setState({ pendingTurn: null, rearmTurn: null, lastError: state.lastError ?? '重新生成前的世界回退未完成，本轮未推演。' });
+        return;
+      }
+      retryRollbackFloor = null;
+    }
     let pending = state.pendingTurn;
     // ATLAS-06 swipe 同级重推演：回退后没有 pending；用 rearm 暂存的用户楼层重建回合。
     // swipeId 换成唯一新值（swipe-<ts>）——同键重提交会被账本幂等判 duplicate，永远推不动。
@@ -1414,8 +1452,9 @@ export function createAtlasUiCore(deps: {
     const useSql = sqlEnabled();
     const revision = generationRevision;
     const identity = useSql ? deps.getCommitIdentity?.(value) : null;
+    const hostGuard = useSql ? deps.createCommitGuard?.(value) : undefined;
     const isCurrent = () => !disposed && host.getChatId() === value.chatId && state.chatId === value.chatId
-      && generationRevision === revision && useSql === sqlEnabled() && (deps.isCommitCurrent?.(value) ?? true)
+      && generationRevision === revision && useSql === sqlEnabled() && (hostGuard?.() ?? deps.isCommitCurrent?.(value) ?? true)
       && (!identity || JSON.stringify(deps.getCommitIdentity?.(value)) === JSON.stringify(identity));
     if (useSql) { sqlPartialTurnId = null; sqlRetryRequest = value; }
     if (state.chatId === value.chatId) setState({ turnPhase: "committing" });
@@ -1427,7 +1466,13 @@ export function createAtlasUiCore(deps: {
           ...(identity ? { hostMessageUid: identity.messageUID, variantKey: identity.variantKey } : {}) } : {}),
       });
       const body = result.body as { ok?: boolean; data?: { receipt?: unknown; nativeReceipt?: unknown; issues?: unknown; coreSaved?: boolean }; error?: { message?: string; code?: string; retryable?: boolean; details?:Record<string,unknown> } };
-      if (useSql && !isCurrent()) return;
+      if (useSql && !isCurrent()) {
+        diagnostic({ level: 'warn', source: 'host', code: 'COMMIT_STALE_SKIPPED',
+          operation: 'commit', phase: 'response', outcome: 'skipped' });
+        if (state.chatId === value.chatId && generationRevision === revision && useSql === sqlEnabled())
+          setState({ lastError: '本轮聊天正文或楼层身份已变化，推演结果未保存；请重新推演当前正文。' });
+        return;
+      }
       const receiptParsed = body.data?.receipt ? parseAtlasTurnReceipt(body.data.receipt) : null;
       // 0.9.28 归属守卫：请求在途时用户可能已切聊天——过期回执 / 失败挂单绝不写进新聊天
       const stale = state.chatId !== value.chatId;
@@ -1476,6 +1521,7 @@ export function createAtlasUiCore(deps: {
             assistantMessageId: value.assistantMessageId, swipeId, sqlMode: true } : null });
         }
         if (receiptParsed.value.status === "committed" || receiptParsed.value.status === "duplicate") {
+          rolledBackFloors.delete(`${value.chatId}:${value.assistantMessageId}`);
           healthCheckedAt = -Infinity;
           if (!stale) await refresh();
         }
@@ -1729,8 +1775,9 @@ export function createAtlasUiCore(deps: {
         const original = sqlRetryRequest, turnId = sqlPartialTurnId, revision = generationRevision;
         const flight = claimCommit(turnId);
         const identity = deps.getCommitIdentity?.(original);
+        const hostGuard = deps.createCommitGuard?.(original);
         const isCurrent = () => !disposed && state.chatId === failed.chatId && host.getChatId() === failed.chatId && sqlEnabled()
-          && generationRevision === revision && (deps.isCommitCurrent?.(original) ?? true)
+          && generationRevision === revision && (hostGuard?.() ?? deps.isCommitCurrent?.(original) ?? true)
           && (!identity || JSON.stringify(deps.getCommitIdentity?.(original)) === JSON.stringify(identity));
         try {
           const result = await api.request('POST', '/sql/chat/retry', { ...original, chatUid: failed.chatId,

@@ -3084,6 +3084,8 @@ function createAtlasUiCore(deps) {
   const openingAttemptedMessages = /* @__PURE__ */ new Set();
   let stoppedGeneration = false;
   let lastPrepareTask = null;
+  let lastMutationTask = null;
+  let retryRollbackFloor = null;
   let generationGate = false;
   let swipeIdForNextCommit = null;
   let endedTimer = null;
@@ -3467,6 +3469,8 @@ function createAtlasUiCore(deps) {
     if (event === "APP_READY" || event === "CHAT_CHANGED") {
       healthCheckedAt = -Infinity;
       generationGate = false;
+      retryRollbackFloor = null;
+      lastMutationTask = null;
       stoppedGeneration = false;
       generationRevision += 1;
       sqlRetryRequest = null;
@@ -3518,6 +3522,7 @@ function createAtlasUiCore(deps) {
         return;
       }
       stoppedGeneration = false;
+      retryRollbackFloor = null;
       setState({ rearmTurn: null });
       swipeIdForNextCommit = null;
       const task = onMessageSent(adapted.messageId, adapted.userText);
@@ -3526,7 +3531,14 @@ function createAtlasUiCore(deps) {
     } else if (adapted.kind === "generation-started") {
       generationGate = adapted.gated;
       stoppedGeneration = false;
-      if (!adapted.gated && state.rearmTurn && !state.pendingTurn) {
+      if (!adapted.gated && adapted.retryTurn && !state.pendingTurn) {
+        const retry = adapted.retryTurn;
+        if (state.binding?.enabled) {
+          retryRollbackFloor = state.binding.lastCommittedMessageId === retry.assistantMessageId ? retry.assistantMessageId : null;
+          setState({ rearmTurn: { userMessageId: retry.userMessageId, userText: retry.userText, swipeId: "swipe-" + now() } });
+        }
+      }
+      if (!adapted.gated && state.rearmTurn && !state.pendingTurn && retryRollbackFloor === null) {
         const rearm = state.rearmTurn;
         swipeIdForNextCommit = rearm.swipeId;
         const task = onMessageSent(rearm.userMessageId, rearm.userText);
@@ -3545,7 +3557,7 @@ function createAtlasUiCore(deps) {
         });
         return;
       }
-      if (generationGate) {
+      if (generationGate && !(adapted.foreground && (state.pendingTurn || state.rearmTurn))) {
         diagnostic2({
           level: "debug",
           source: "host",
@@ -3555,7 +3567,6 @@ function createAtlasUiCore(deps) {
           outcome: "skipped",
           details: { reasonCode: "QUIET_OR_AUTOMATIC" }
         });
-        generationGate = false;
         return;
       }
       scheduleGenerationEnded(adapted);
@@ -3617,7 +3628,12 @@ function createAtlasUiCore(deps) {
       mutationTimer = null;
       const queue = mutationQueue;
       mutationQueue = [];
-      void track(processMutations(queue));
+      const previous = lastMutationTask;
+      lastMutationTask = (async () => {
+        await previous;
+        await processMutations(queue);
+      })();
+      void track(lastMutationTask);
     }, Math.max(0, deps.mutationDebounceMs ?? 400));
   }
   async function waitPendingTurn(timeoutMs = 1e4) {
@@ -3895,7 +3911,29 @@ function createAtlasUiCore(deps) {
   }
   async function onGenerationEnded(assistantMessageId, assistantText) {
     if (disposed) return;
+    const endingChat = state.chatId;
     await waitPendingTurn();
+    if (mutationTimer) {
+      clearTimeout(mutationTimer);
+      mutationTimer = null;
+      const queue = mutationQueue;
+      mutationQueue = [];
+      const previous = lastMutationTask;
+      lastMutationTask = (async () => {
+        await previous;
+        await processMutations(queue);
+      })();
+      void track(lastMutationTask);
+    }
+    await lastMutationTask;
+    if (disposed || state.chatId !== endingChat) return;
+    if (retryRollbackFloor !== null) {
+      if (state.binding?.lastCommittedMessageId === retryRollbackFloor) {
+        setState({ pendingTurn: null, rearmTurn: null, lastError: state.lastError ?? "重新生成前的世界回退未完成，本轮未推演。" });
+        return;
+      }
+      retryRollbackFloor = null;
+    }
     let pending = state.pendingTurn;
     if (!pending && state.rearmTurn) {
       const rearm = state.rearmTurn;
@@ -4039,7 +4077,8 @@ function createAtlasUiCore(deps) {
     const useSql = sqlEnabled();
     const revision = generationRevision;
     const identity = useSql ? deps.getCommitIdentity?.(value) : null;
-    const isCurrent = () => !disposed && host.getChatId() === value.chatId && state.chatId === value.chatId && generationRevision === revision && useSql === sqlEnabled() && (deps.isCommitCurrent?.(value) ?? true) && (!identity || JSON.stringify(deps.getCommitIdentity?.(value)) === JSON.stringify(identity));
+    const hostGuard = useSql ? deps.createCommitGuard?.(value) : void 0;
+    const isCurrent = () => !disposed && host.getChatId() === value.chatId && state.chatId === value.chatId && generationRevision === revision && useSql === sqlEnabled() && (hostGuard?.() ?? deps.isCommitCurrent?.(value) ?? true) && (!identity || JSON.stringify(deps.getCommitIdentity?.(value)) === JSON.stringify(identity));
     if (useSql) {
       sqlPartialTurnId = null;
       sqlRetryRequest = value;
@@ -4064,7 +4103,19 @@ function createAtlasUiCore(deps) {
         } : {}
       });
       const body = result.body;
-      if (useSql && !isCurrent()) return;
+      if (useSql && !isCurrent()) {
+        diagnostic2({
+          level: "warn",
+          source: "host",
+          code: "COMMIT_STALE_SKIPPED",
+          operation: "commit",
+          phase: "response",
+          outcome: "skipped"
+        });
+        if (state.chatId === value.chatId && generationRevision === revision && useSql === sqlEnabled())
+          setState({ lastError: "本轮聊天正文或楼层身份已变化，推演结果未保存；请重新推演当前正文。" });
+        return;
+      }
       const receiptParsed = body.data?.receipt ? parseAtlasTurnReceipt(body.data.receipt) : null;
       const stale = state.chatId !== value.chatId;
       if (result.status === 200 && body.ok && receiptParsed?.ok && (!useSql || body.data?.coreSaved === true || receiptParsed.value.status === "failed")) {
@@ -4119,6 +4170,7 @@ function createAtlasUiCore(deps) {
           } : null });
         }
         if (receiptParsed.value.status === "committed" || receiptParsed.value.status === "duplicate") {
+          rolledBackFloors.delete(`${value.chatId}:${value.assistantMessageId}`);
           healthCheckedAt = -Infinity;
           if (!stale) await refresh();
         }
@@ -4395,7 +4447,8 @@ function createAtlasUiCore(deps) {
         const original = sqlRetryRequest, turnId = sqlPartialTurnId, revision = generationRevision;
         const flight = claimCommit(turnId);
         const identity = deps.getCommitIdentity?.(original);
-        const isCurrent = () => !disposed && state.chatId === failed.chatId && host.getChatId() === failed.chatId && sqlEnabled() && generationRevision === revision && (deps.isCommitCurrent?.(original) ?? true) && (!identity || JSON.stringify(deps.getCommitIdentity?.(original)) === JSON.stringify(identity));
+        const hostGuard = deps.createCommitGuard?.(original);
+        const isCurrent = () => !disposed && state.chatId === failed.chatId && host.getChatId() === failed.chatId && sqlEnabled() && generationRevision === revision && (hostGuard?.() ?? deps.isCommitCurrent?.(original) ?? true) && (!identity || JSON.stringify(deps.getCommitIdentity?.(original)) === JSON.stringify(identity));
         try {
           const result = await api.request("POST", "/sql/chat/retry", {
             ...original,
@@ -4789,7 +4842,7 @@ function createAtlasSettingsRoutes(deps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.78",
+      version: "0.9.79",
       protocolVersion: 1,
       time: now()
     });

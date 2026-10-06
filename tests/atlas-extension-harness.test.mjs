@@ -1268,6 +1268,7 @@ test("ATLAS-06 门控：quiet / dryRun 生成不触发 prepare / commit，闸门
   await flush();
   equal(api.calls.filter((c) => c.path === "/turns/commit").length, 0, "quiet 的 ENDED 零 commit");
   // 闸门复位：真实用户回合照常工作
+  await core.handleEvent("GENERATION_STARTED", { gated: false });
   await core.handleEvent("MESSAGE_SENT", { messageId: "m-0", userText: "我从城门走向集市。" });
   equal(api.calls.filter((c) => c.path === "/turns/prepare").length, 1, "闸门复位后 prepare 恢复");
 });

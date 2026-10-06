@@ -138,6 +138,7 @@ function renderInspector(){const n=current(),sel=state.selected;if(!sel&&state.i
 function eventRow(e){return `<button class="event-row" data-event="${esc(e.id)}"><span class="event-time">${esc(e.t)}</span><em class="event-kind ${e.kind}">${{cast:'人物',msg:'消息',sim:'行程',item:'物品',geo:'地理'}[e.kind]||'事件'}</em><span class="event-summary">${esc(e.title)}</span>${e.known?'':'<span class="event-private">后台</span>'}${icon('chev')}</button>`;}
 function taskCard(t){return `<button class="task-card" style="--c:${t.c}" data-select-kind="task" data-select="${esc(t.id)}"><div class="tc-h"><span class="tc-n">${esc(t.n)}</span><em class="tc-st ${t.st}">${esc(t.stName)}</em></div><div class="tc-d">${esc(t.d)}</div>${t.p==null?'<div class="task-indeterminate">等待条件满足</div>':`<div class="tc-progress"><i style="width:${t.p}%"></i></div><div class="task-percent">${t.p}%</div>`}</button>`;}
 function receiptCard(r){const status={committed:'已提交',duplicate:'重复回执',failed:'失败','pending-review':'待审阅'}[r.status]||r.status,detail={status:r.status,...(r.detail??{}),...(r.logs?.length?{logs:r.logs}:{})};return `<div class="receipt-row"><i class="rc-ok ${r.ok?'':'rc-fail'}"></i><div><b>推演回执 · ${esc(status)} · ${esc(r.t)}</b><p>${esc(r.m)}</p>${r.issue?`<code>${esc(r.issue)}</code>`:''}<details class="diagnostic-row"><summary>查看本轮日志</summary><pre>${esc(JSON.stringify(detail,null,2))}</pre></details></div>${r.retryable?`<button class="action-btn" data-retry="${esc(r.id)}">重试失败项</button>`:r.ok?`<span class="receipt-done">${esc(status)}</span>`:'<button class="action-btn" data-page="diag">查看诊断</button>'}</div>`;}
+function enginePhaseText(engine=D.meta.engine??{}){return {'awaiting-reply':'等待酒馆正文完成…',queued:'推演排队中…','reading-context':'正在读取推演资料…',committing:'正在推演，等待回执…'}[engine.phase]||'正在处理…';}
 function renderDock(){
  $$('#dockTabs .dt').forEach(b=>{b.classList.toggle('active',b.dataset.tab===state.dock);b.setAttribute('aria-selected',b.dataset.tab===state.dock);});
  const el=$('#dockBody');
@@ -148,9 +149,9 @@ function renderDock(){
  $('#turnChip').textContent=`第 ${D.meta.turn} 轮 · ${clock()}`;
  $('#queueLabel').textContent=`${D.TASKS.filter(t=>known(t)&&t.st!=='done').length} 项后台动向`;
  $('#dockTabs [data-tab="tasks"] em').textContent=D.TASKS.filter(known).length;
- $('#syncText').textContent=`${D.meta.snapshotSaved===false?'等待首次保存 · ':''}修订 ${D.meta.revision} · ${clock()}`;
+ $('#syncText').textContent=`${D.meta.engine?.busy?enginePhaseText()+' · ':D.meta.engine?.error?'推演失败 · ':D.meta.snapshotSaved===false?'等待首次保存 · ':''}修订 ${D.meta.revision} · ${clock()}`;
  $('#undoDemo').disabled=!D.meta.canUndo;
- const engine=D.meta.engine??{};$('#nextDemo').disabled=!!engine.busy||!engine.hasChat||!engine.sqlEnabled||engine.bound&&!engine.enabled;$('#nextDemo').textContent=engine.busy?'正在处理…':engine.bound?'立即推演':'建立当前世界';
+ const engine=D.meta.engine??{};$('#nextDemo').disabled=!!engine.busy||!engine.hasChat||!engine.sqlEnabled||engine.bound&&!engine.enabled;$('#nextDemo').textContent=engine.busy?enginePhaseText(engine):engine.bound?'立即推演':'建立当前世界';
 }
 function pageHeader(title,sub,extra=''){return `<div class="workspace-header"><div><span class="workspace-eyebrow">ATLAS · ${esc(D.meta.worldName)}</span><h2>${esc(title)}</h2><p>${esc(sub)}</p></div>${extra}</div>`;}
 function renderPage(){const el=$('#workspacePage');el.hidden=state.page==='map';$('#viewport').classList.toggle('page-open',state.page!=='map');

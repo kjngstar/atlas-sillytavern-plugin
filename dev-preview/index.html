@@ -76,7 +76,7 @@
     on(name, fn) { if (!listeners.has(name)) listeners.set(name, new Set()); listeners.get(name).add(fn); },
     off(name, fn) { listeners.get(name)?.delete(fn); },
     removeListener(name, fn) { listeners.get(name)?.delete(fn); },
-    emit(name, payload) { for (const fn of [...(listeners.get(name) ?? [])]) fn(payload); },
+    async emit(name, ...args) { for (const fn of [...(listeners.get(name) ?? [])]) await fn(...args); },
   };
   const chat = [];
   const extensionSettings = { atlas_world_sim: { panelOpen: true, docs: null } };
@@ -91,12 +91,16 @@
     eventSource,
     event_types: {
       APP_READY: "app_ready",
+      GENERATION_STARTED: "generation_started",
       CHAT_CHANGED: "chat_changed",
       MESSAGE_SENT: "message_sent",
       MESSAGE_RECEIVED: "message_received",
       GENERATION_ENDED_AFTER_COMMANDS: "generation_ended_after_commands",
       GENERATION_ENDED: "generation_ended",
       GENERATION_STOPPED: "generation_stopped",
+      MESSAGE_DELETED: "message_deleted",
+      MESSAGE_EDITED: "message_edited",
+      MESSAGE_SWIPED: "message_swiped",
     },
     setExtensionPrompt() {},
   };
@@ -164,6 +168,7 @@
       if (!text) return;
       sendText = "";
       textarea.value = "";
+      await eventSource.emit("generation_started", "normal", {}, false);
       chat.push({ mes: text, is_user: true });
       eventSource.emit("message_sent", chat.length - 1);
       await delay(400);

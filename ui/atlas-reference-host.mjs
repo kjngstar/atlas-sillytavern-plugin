@@ -14,7 +14,7 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
   const context=()=>{const c=getContext?.();return c?.chatMetadata?c:null;};
   function scope(){const s=core.getState(),c=context(),env=c?.chatMetadata?.atlas?.database,enabled=c?.extensionSettings?.atlas_world_sim?.sqlMode??s.stateData?.sqlModeEnabled??s.stateData?.sqlMode??true;return {state:s,context:c,metadata:c?.chatMetadata,enabled,key:JSON.stringify([s.chatId,c?.chatId??c?.chat_id,s.binding?.branchId??'main',env?.sha256,env?.storage_revision,s.stateData?.revision,viewMode,enabled]),data:env?.data};}
   function live(ticket){const now=scope();return !disposed&&ticket.epoch===epoch&&ticket.key===now.key&&ticket.data===now.data&&ticket.metadata===now.metadata;}
-  function deliver(data,resetScope=false){const s=core.getState();data.meta.engine={hasChat:!!s.chatId,bound:!!s.binding,enabled:s.binding?.enabled===true,sqlEnabled:scope().enabled,serviceStatus:s.serviceStatus??'checking',busy:actionBusy||!!s.pendingTurn,error:actionScope===data.meta.scopeKey&&actionError? actionError:typeof s.lastError==='string'?s.lastError:s.lastError?.message??null};
+  function deliver(data,resetScope=false){const s=core.getState();data.meta.engine={hasChat:!!s.chatId,bound:!!s.binding,enabled:s.binding?.enabled===true,sqlEnabled:scope().enabled,serviceStatus:s.serviceStatus??'checking',phase:s.turnPhase??'idle',busy:actionBusy||!!s.pendingTurn||['queued','reading-context','committing'].includes(s.turnPhase),error:actionScope===data.meta.scopeKey&&actionError? actionError:typeof s.lastError==='string'?s.lastError:s.lastError?.message??null};
     data.RECEIPTS=referenceReceipts(s,data.DIAGNOSTICS);const ids=new Set(data.DIAGNOSTICS.map(d=>d.id));data.DIAGNOSTICS.push(...referenceDiagnostics(diagnostics()).filter(d=>!ids.has(d.id)));
     if(data.meta.engine.error&&!data.DIAGNOSTICS.some(d=>d.message===data.meta.engine.error))data.DIAGNOSTICS.unshift({id:'engine-last-error',t:'',level:'error',code:'ENGINE_ACTION_FAILED',message:data.meta.engine.error});
     latest=data;if(ready)frame.contentWindow?.AtlasPreview?.updateSnapshot(data,{resetScope});}
@@ -26,7 +26,7 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
     if(disposed)return;
     const captured=scope(),worldScope=JSON.stringify([captured.state.chatId,captured.state.binding?.branchId,viewMode]);
     const changed=scopeId!==worldScope;scopeId=worldScope;
-    const key=captured.key+'|'+JSON.stringify([captured.state.receipts,captured.state.lastError,captured.state.binding?.enabled,captured.state.serviceStatus,captured.state.pendingTurn,actionBusy,diagnostics().length]);
+    const key=captured.key+'|'+JSON.stringify([captured.state.receipts,captured.state.lastError,captured.state.binding?.enabled,captured.state.serviceStatus,captured.state.pendingTurn,captured.state.turnPhase,actionBusy,diagnostics().length]);
     if(!force&&key===lastKey)return loading;
     lastKey=key;const ticket={...captured,epoch:++epoch};
     if(changed)deliver(emptyReferenceData({viewMode,scopeKey:worldScope,worldName:captured.state.binding?'正在读取当前世界':'尚未建立世界'}),true);

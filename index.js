@@ -21,7 +21,7 @@ export { atlasPointRefOf, atlasKnownCoordinate, atlasPositionQuality, atlasSqlMa
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.78";
+export const ATLAS_EXTENSION_VERSION = "0.9.79";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -1048,7 +1048,7 @@ function createHost(context) {
 
 function createEmitter(context) {
   const { eventSource, event_types } = context();
-  /** Atlas UI 事件 → SillyTavern event_types；候选按序回退，全部缺失则跳过注册。 */
+  /** Register all available completion aliases; core debounces duplicate notifications. */
   const EVENT_MAP = {
     APP_READY: ["APP_READY"],
     CHAT_CHANGED: ["CHAT_CHANGED"],
@@ -1061,20 +1061,19 @@ function createEmitter(context) {
     MESSAGE_EDITED: ["MESSAGE_EDITED"],
     MESSAGE_DELETED: ["MESSAGE_DELETED"],
   };
-  const nameFor = (event) => {
+  const namesFor = (event) => {
     const candidates = EVENT_MAP[event];
     if (!candidates) throw new Error(`未映射的 Atlas UI 事件：${event}`);
-    for (const name of candidates) {
-      if (event_types[name]) return event_types[name];
-    }
+    const names = [...new Set(candidates.map(name => event_types[name]).filter(Boolean))];
+    if (names.length) return names;
     throw new Error(`SillyTavern 未提供事件 ${event}，Atlas 跳过注册。`);
   };
   const handlers = [];
   return {
     on(event, handler) {
-      let mapped = null;
+      let mapped = [];
       try {
-        mapped = nameFor(event);
+        mapped = namesFor(event);
       } catch (error) {
         emitAtlasDiagnostic({
           level: "warn", source: "host", code: "HOST_EVENT_UNAVAILABLE",
@@ -1092,12 +1091,13 @@ function createEmitter(context) {
        * 原处理函数——归一与业务处理是同一次事件，绝不各自缓存一份「上次的楼层」。
        * SQL 模式关闭时该函数立刻返回（端口未注册），对旧路径零影响。
        */
-      const wrapped = (payload) => {
+      const wrapped = (...args) => {
+        const payload = args[0];
         if (event === "CHAT_CHANGED") clearInjection();
         atlasSqlNoteHostEvent(event, payload, context);
-        return handler(payload);
+        return handler(args.length > 1 ? args : payload);
       };
-      eventSource.on(mapped, wrapped);
+      for (const name of mapped) eventSource.on(name, wrapped);
       // 三元组保留原始 handler 身份：off 时按原始 handler 反查（core.dispose 用原始引用注销）
       handlers.push([mapped, wrapped, handler]);
     },
@@ -1106,8 +1106,10 @@ function createEmitter(context) {
       const index = handlers.findIndex(([, fn, original]) => fn === handler || original === handler);
       if (index < 0) return;
       const [mapped, fn] = handlers[index];
-      if (typeof eventSource.removeListener === "function") eventSource.removeListener(mapped, fn);
-      else if (typeof eventSource.off === "function") eventSource.off(mapped, fn);
+      for (const name of mapped) {
+        if (typeof eventSource.removeListener === "function") eventSource.removeListener(name, fn);
+        else if (typeof eventSource.off === "function") eventSource.off(name, fn);
+      }
       handlers.splice(index, 1);
     },
   };
@@ -1155,17 +1157,19 @@ function createEventAdapter(context) {
     };
     if (event === "MESSAGE_SENT") {
       const chat = context().chat;
-      const index = Number(payload);
+      const index = Number(Array.isArray(payload) ? payload[0] : payload);
       if (!Array.isArray(chat) || !Number.isInteger(index) || index < 0 || index >= chat.length) return null;
       return { kind: "message-sent", messageId: String(index), userText: String(chat[index]?.mes ?? "") };
     }
     if (event === "MESSAGE_RECEIVED") {
+      const args = Array.isArray(payload) ? payload : [payload];
+      if (['first_message', 'quiet', 'impersonate'].includes(args[1])) return null;
       const chat = context().chat;
       if (!Array.isArray(chat) || chat.length === 0) return null;
-      const raw = Number(payload);
+      const raw = Number(args[0]);
       const index = Number.isInteger(raw) && raw >= 0 && raw < chat.length ? raw : chat.length - 1;
       clearInjection();
-      return withIdentity(event, index, { kind: "generation-ended", assistantMessageId: String(index), assistantText: String(chat[index]?.mes ?? "") });
+      return withIdentity(event, index, { kind: "generation-ended", foreground: args.length > 1, assistantMessageId: String(index), assistantText: String(chat[index]?.mes ?? "") });
     }
     if (event === "GENERATION_ENDED" || event === "GENERATION_ENDED_AFTER_COMMANDS") {
       const chat = context().chat;
@@ -1191,11 +1195,16 @@ function createEventAdapter(context) {
         dryRun ||
         (typeof params.quiet_prompt === "string" && params.quiet_prompt.length > 0) ||
         params.automatic_trigger === true;
-      return { kind: "generation-started", gated };
+      const chat = context().chat;
+      const userIndex = Array.isArray(chat) ? chat.findLastIndex(m => m?.is_user === true && typeof m.mes === 'string') : -1;
+      const retryTurn = !gated && ['regenerate', 'swipe'].includes(type) && userIndex >= 0
+        ? { userMessageId: String(userIndex), userText: chat[userIndex].mes, assistantMessageId: String(chat.length - 1) }
+        : undefined;
+      return { kind: "generation-started", gated, ...(retryTurn ? { retryTurn } : {}) };
     }
     if (event === "MESSAGE_SWIPED") {
       const chat = context().chat;
-      const index = Number(payload);
+      const index = Number(Array.isArray(payload) ? payload[0] : payload);
       if (!Array.isArray(chat) || !Number.isInteger(index) || index < 0 || index >= chat.length) return null;
       const mes = chat[index];
       // 新生成可为数组外的待填槽，也可为末尾空占位；已有非空变体不回退。
@@ -1210,7 +1219,7 @@ function createEventAdapter(context) {
       });
     }
     if (event === "MESSAGE_EDITED" || event === "MESSAGE_DELETED") {
-      const index = Number(payload);
+      const index = Number(Array.isArray(payload) ? payload[0] : payload);
       if (!Number.isInteger(index) || index < 0) return null;
       return { kind: event === "MESSAGE_EDITED" ? "message-edited" : "message-deleted", messageId: String(index) };
     }
@@ -3018,12 +3027,24 @@ async function connectOnce() {
         const identity = atlasFloorIdentity(message, index, { chatId: request.chatId });
         return { messageUID: identity.messageUID, variantKey: identity.variantKey };
       },
-      isCommitCurrent: (request) => {
-        if (request.turnId.startsWith('turn-manual-')) return true;
+      createCommitGuard: (request) => {
+        if (request.turnId.startsWith('turn-manual-')) return () => true;
         const chat = context()?.chat;
         const message = Array.isArray(chat) ? chat[Number(request.assistantMessageId)] : null;
         const user = Array.isArray(chat) ? chat[Number(request.userMessageId)] : null;
-        return message?.is_user === false && message.mes === request.assistantText && user?.is_user === true && user.mes === request.userText;
+        // Request budgets limit model input; freshness checks retain full host text.
+        // Also compare the complete suffix while the model runs, including text beyond the budget.
+        const assistantText = message?.mes, userText = user?.mes;
+        const matches = message?.is_user === false && typeof assistantText === 'string'
+          && assistantText.slice(0, mod.ATLAS_LIMITS.ASSISTANT_TEXT_CHARS) === request.assistantText
+          && user?.is_user === true && typeof userText === 'string'
+          && userText.slice(0, mod.ATLAS_LIMITS.USER_TEXT_CHARS) === request.userText;
+        return () => {
+          const live = context()?.chat;
+          const assistant = live?.[Number(request.assistantMessageId)], player = live?.[Number(request.userMessageId)];
+          return matches && assistant?.is_user === false && assistant.mes === assistantText
+            && player?.is_user === true && player.mes === userText;
+        };
       },
       onDiagnostic: emitAtlasDiagnostic,
       host: (hostRef ??= createHost(context)),
