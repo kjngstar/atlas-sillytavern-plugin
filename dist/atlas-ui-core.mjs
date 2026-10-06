@@ -2753,6 +2753,88 @@ function createAtlasLorebookWriter(port, opts = {}) {
   };
 }
 
+// src/atlas-generation-lifecycle.ts
+function createAtlasGenerationLifecycle(now = Date.now) {
+  let sequence = 0, frames = [];
+  function lastMatching(predicate) {
+    for (let i = frames.length - 1; i >= 0; i--) if (predicate(frames[i])) return frames[i];
+    return null;
+  }
+  function prune() {
+    frames = frames.filter((f) => now() - f.startedAt < 30 * 6e4).slice(-128);
+  }
+  function current() {
+    prune();
+    return lastMatching((f) => !f.completed);
+  }
+  function decision(frame, duplicate = false) {
+    return { gated: frame?.gated === true, duplicate, details: {
+      generationSequence: frame?.sequence ?? 0,
+      generationType: frame?.generationType ?? "unknown",
+      dryRun: frame?.dryRun === true,
+      automaticTrigger: frame?.automaticTrigger === true,
+      quietPromptPresent: frame?.quietPromptPresent === true
+    } };
+  }
+  return {
+    reset() {
+      frames = [];
+    },
+    start(gated, metadata = {}) {
+      prune();
+      const frame = {
+        ...metadata,
+        sequence: ++sequence,
+        gated,
+        startedAt: now(),
+        completed: false,
+        rawEnded: false,
+        afterCommands: false,
+        stopped: false
+      };
+      frames.push(frame);
+      return decision(frame);
+    },
+    message() {
+      return decision(current());
+    },
+    complete(signal, foreground = false) {
+      const active = current();
+      if (signal === "received") {
+        const frame = foreground ? lastMatching((f) => !f.completed && !f.gated) ?? active : active;
+        return decision(frame ?? frames.at(-1) ?? null);
+      }
+      if (signal === "ended") {
+        const stopped = lastMatching((f) => f.completed && f.stopped && !f.rawEnded);
+        if (stopped && (!active || stopped.sequence > active.sequence)) {
+          stopped.rawEnded = true;
+          return decision(stopped, true);
+        }
+      }
+      if (signal === "after-commands") {
+        const ended = lastMatching((f) => f.completed && (f.rawEnded || f.stopped) && !f.afterCommands);
+        if (ended && (!active || ended.sequence > active.sequence)) {
+          ended.afterCommands = true;
+          return decision(ended, true);
+        }
+      }
+      if (!active) return decision(frames.at(-1) ?? null, frames.length > 0);
+      active.completed = true;
+      active.rawEnded = signal === "ended";
+      active.afterCommands = signal === "after-commands";
+      return decision(active);
+    },
+    stop() {
+      const active = current();
+      if (active) {
+        active.completed = true;
+        active.stopped = true;
+      }
+      return decision(active);
+    }
+  };
+}
+
 // src/atlas-proxy-fetch.ts
 var ATLAS_ST_GENERATE_PATH = "/api/backends/chat-completions/generate";
 function atlasCustomIncludeHeaders(headerValue) {
@@ -3086,7 +3168,7 @@ function createAtlasUiCore(deps) {
   let lastPrepareTask = null;
   let lastMutationTask = null;
   let retryRollbackFloor = null;
-  let generationGate = false;
+  const generationLifecycle = createAtlasGenerationLifecycle(now);
   let swipeIdForNextCommit = null;
   let endedTimer = null;
   let mutationTimer = null;
@@ -3468,7 +3550,7 @@ function createAtlasUiCore(deps) {
     if (disposed) return;
     if (event === "APP_READY" || event === "CHAT_CHANGED") {
       healthCheckedAt = -Infinity;
-      generationGate = false;
+      generationLifecycle.reset();
       retryRollbackFloor = null;
       lastMutationTask = null;
       stoppedGeneration = false;
@@ -3509,7 +3591,8 @@ function createAtlasUiCore(deps) {
     const adapted = deps.adaptEvent?.(event, payload) ?? null;
     if (!adapted) return;
     if (adapted.kind === "message-sent") {
-      if (generationGate) {
+      const generation = generationLifecycle.message();
+      if (generation.gated) {
         diagnostic2({
           level: "debug",
           source: "host",
@@ -3517,7 +3600,7 @@ function createAtlasUiCore(deps) {
           operation: "generation",
           phase: "message",
           outcome: "skipped",
-          details: { reasonCode: "QUIET_OR_AUTOMATIC" }
+          details: { reasonCode: "QUIET_OR_AUTOMATIC", ...generation.details }
         });
         return;
       }
@@ -3529,8 +3612,17 @@ function createAtlasUiCore(deps) {
       lastPrepareTask = task;
       void track(task);
     } else if (adapted.kind === "generation-started") {
-      generationGate = adapted.gated;
-      stoppedGeneration = false;
+      const generation = generationLifecycle.start(adapted.gated, adapted.metadata);
+      diagnostic2({
+        level: "debug",
+        source: "host",
+        code: "HOST_GENERATION_STARTED",
+        operation: "generation",
+        phase: "started",
+        outcome: adapted.gated ? "skipped" : "started",
+        details: { ...generation.details, gated: generation.gated }
+      });
+      if (!adapted.gated) stoppedGeneration = false;
       if (!adapted.gated && adapted.retryTurn && !state.pendingTurn) {
         const retry = adapted.retryTurn;
         if (state.binding?.enabled) {
@@ -3546,6 +3638,9 @@ function createAtlasUiCore(deps) {
         void track(task);
       }
     } else if (adapted.kind === "generation-ended") {
+      const completionSignal = adapted.completionSignal ?? "received";
+      const generation = generationLifecycle.complete(completionSignal, adapted.foreground === true);
+      if (generation.duplicate) return;
       if (stoppedGeneration) {
         diagnostic2({
           level: "info",
@@ -3557,7 +3652,7 @@ function createAtlasUiCore(deps) {
         });
         return;
       }
-      if (generationGate && !(adapted.foreground && (state.pendingTurn || state.rearmTurn))) {
+      if (generation.gated) {
         diagnostic2({
           level: "debug",
           source: "host",
@@ -3565,13 +3660,27 @@ function createAtlasUiCore(deps) {
           operation: "generation",
           phase: "ended",
           outcome: "skipped",
-          details: { reasonCode: "QUIET_OR_AUTOMATIC" }
+          details: { reasonCode: "QUIET_OR_AUTOMATIC", completionSignal, ...generation.details }
         });
         return;
       }
+      deps.onGenerationComplete?.();
       scheduleGenerationEnded(adapted);
     } else if (adapted.kind === "generation-stopped") {
-      generationGate = false;
+      const generation = generationLifecycle.stop();
+      if (generation.gated) {
+        diagnostic2({
+          level: "debug",
+          source: "host",
+          code: "GENERATION_GATED",
+          operation: "generation",
+          phase: "stopped",
+          outcome: "skipped",
+          details: { reasonCode: "QUIET_OR_AUTOMATIC", ...generation.details }
+        });
+        return;
+      }
+      deps.onGenerationComplete?.();
       onGenerationStopped();
     } else {
       scheduleMutation(adapted);
@@ -4842,7 +4951,7 @@ function createAtlasSettingsRoutes(deps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.79",
+      version: "0.9.80",
       protocolVersion: 1,
       time: now()
     });
@@ -8456,7 +8565,14 @@ var DETAIL_KEYS = /* @__PURE__ */ new Set([
   "candidateCount",
   "selectedCount",
   "outputChars",
-  "chatMatch"
+  "chatMatch",
+  "generationSequence",
+  "generationType",
+  "dryRun",
+  "automaticTrigger",
+  "quietPromptPresent",
+  "completionSignal",
+  "gated"
 ]);
 var SAFE_ATOM = /^[a-zA-Z0-9_.$:\[\]-]{1,120}$/;
 var SAFE_ROUTES = /* @__PURE__ */ new Set([
@@ -8731,6 +8847,8 @@ function sanitizeDiagnostic(raw, now = Date.now) {
         else if (key === "reason" && SAFE_LORE_REASONS.has(token)) details[key] = token;
         else if (key === "capability" && SAFE_CAPABILITIES.has(token)) details[key] = token;
         else if (key === "reasonCode" && /^[A-Z][A-Z0-9_]{0,63}$/.test(token)) details[key] = token;
+        else if (key === "generationType" && ["normal", "quiet", "regenerate", "swipe", "continue", "impersonate", "unknown"].includes(token)) details[key] = token;
+        else if (key === "completionSignal" && ["received", "ended", "after-commands"].includes(token)) details[key] = token;
         else if (key === "schemaPath" && (token === "$" || /^\$(?:\.[A-Za-z0-9_]+|\[\d+\])+(?:\.[A-Za-z0-9_]+|\[\d+\])*$/.test(token))) details[key] = token;
         else if (key === "protocolVersion" && /^v?[0-9.]{1,16}$/.test(token)) details[key] = token;
         else if (key === "event" && /^[A-Z][A-Z0-9_]{0,63}$/.test(token)) details[key] = token;

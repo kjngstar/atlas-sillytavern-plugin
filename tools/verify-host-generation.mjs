@@ -62,6 +62,22 @@ try{
   await c.eventSource.emit(e.GENERATION_STARTED,'quiet',{quiet_prompt:'后台总结'},false);await c.eventSource.emit(e.GENERATION_ENDED,1);await c.eventSource.emit(e.GENERATION_ENDED_AFTER_COMMANDS,1);
   c.chat.push({mes:'你走进了图书馆。',is_user:false});await c.eventSource.emit(e.MESSAGE_RECEIVED,1,'normal');await c.eventSource.emit(e.GENERATION_ENDED,2);
  });await finish(nested.p);s=await state(nested.p);check('nested-quiet-completion-does-not-swallow-real-floor',s.calls===1&&s.saves===1&&s.receipts[0]?.status==='committed',s);await nested.p.close();
+ for(const stop of [false,true]){
+  const before=await open();await before.p.evaluate(async stop=>{const c=SillyTavern.getContext(),e=c.event_types;
+   await c.eventSource.emit(e.GENERATION_STARTED,'normal',{},false);
+   await c.eventSource.emit(e.GENERATION_STARTED,'quiet',{quiet_prompt:'内部预处理'},false);
+   if(stop)await c.eventSource.emit(e.GENERATION_STOPPED);
+   else {await c.eventSource.emit(e.GENERATION_ENDED,0);await c.eventSource.emit(e.GENERATION_ENDED_AFTER_COMMANDS,0);}
+   c.chat.push({mes:'进入图书馆',is_user:true});await c.eventSource.emit(e.MESSAGE_SENT,0);await atlasPreviewConnection.core.waitPendingTurn();
+   c.chat.push({mes:'你走进了图书馆。',is_user:false});await c.eventSource.emit(e.MESSAGE_RECEIVED,1,'normal');await c.eventSource.emit(e.GENERATION_ENDED,2);await c.eventSource.emit(e.GENERATION_ENDED_AFTER_COMMANDS,2);
+  },stop);await finish(before.p);s=await state(before.p);
+  check(`nested-pre-send-${stop?'stop':'completion'}-preserves-foreground`,s.calls===1&&s.saves===1&&s.receipts[0]?.status==='committed',s);await before.p.close();
+ }
+ const nestedStop=await open();await nestedStop.p.evaluate(async()=>{const c=SillyTavern.getContext(),e=c.event_types;
+  await c.eventSource.emit(e.GENERATION_STARTED,'normal',{},false);c.chat.push({mes:'进入图书馆',is_user:true});await c.eventSource.emit(e.MESSAGE_SENT,0);await atlasPreviewConnection.core.waitPendingTurn();
+  await c.eventSource.emit(e.GENERATION_STARTED,'quiet',{},false);await c.eventSource.emit(e.GENERATION_STOPPED);await c.eventSource.emit(e.GENERATION_ENDED,1);await c.eventSource.emit(e.GENERATION_ENDED_AFTER_COMMANDS,1);
+  c.chat.push({mes:'你走进了图书馆。',is_user:false});await c.eventSource.emit(e.MESSAGE_RECEIVED,1,'normal');await c.eventSource.emit(e.GENERATION_ENDED,2);
+ });await finish(nestedStop.p);s=await state(nestedStop.p);check('nested-stop-preserves-pending-turn',s.calls===1&&s.saves===1&&s.receipts[0]?.status==='committed',s);await nestedStop.p.close();
  for(const target of ['assistant','user']){
   const {p,f}=await open();await p.evaluate(()=>window.__hold=true);await floor(p,{user:'我'.repeat(12001),assistant:'你'.repeat(24001)});
   await p.waitForFunction(()=>typeof window.__release==='function');await f.waitForFunction(()=>AtlasPreview.data.meta.engine.phase==='committing');

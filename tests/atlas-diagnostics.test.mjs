@@ -17,6 +17,16 @@ const base = {
   httpStatus: 401, details: { route: "model-proxy", mode: "custom" },
 };
 
+test('generation diagnostics preserve safe flags while excluding prompt text and unknown types', () => {
+  const entry = sanitizeDiagnostic({ ...base, details: { generationSequence: 3, generationType: 'quiet',
+    dryRun: false, automaticTrigger: true, quietPromptPresent: true, completionSignal: 'ended', gated: true,
+    quiet_prompt: 'private summary', params: { key: 'private' } } });
+  assert.deepEqual(entry.details, { generationSequence: 3, generationType: 'quiet', dryRun: false,
+    automaticTrigger: true, quietPromptPresent: true, completionSignal: 'ended', gated: true });
+  const rejected = sanitizeDiagnostic({ ...base, details: { generationType: 'private-text', completionSignal: 'secret' } });
+  assert.equal(rejected.details, undefined);
+});
+
 test("lore selection diagnostics retain bounded counts and modes without body text", () => {
   const entry = sanitizeDiagnostic({ level: "info", source: "lorebook", code: "LORE_SELECTION_COMPLETE",
     operation: "lore-context", phase: "select", outcome: "success",

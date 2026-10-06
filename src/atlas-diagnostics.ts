@@ -61,6 +61,7 @@ const DETAIL_KEYS = new Set([
   "collection",
   "droppedCount", "limitCount", "keptCount", "truncatedCount", "scannedCount",
   "candidateCount", "selectedCount", "outputChars", "chatMatch",
+  "generationSequence", "generationType", "dryRun", "automaticTrigger", "quietPromptPresent", "completionSignal", "gated",
 ]);
 // 0.9.54 A9/A11：允许 `$` `[` `]`，否则 JSON 路径（$.relationUpdates[0].value）永远过不了
 // safeToken —— `$` 是 JSONPath 的根记号，缺它整条 schemaPath 都进不了诊断。
@@ -390,6 +391,8 @@ export function sanitizeDiagnostic(raw: unknown, now: () => number = Date.now): 
         else if (key === "reason" && SAFE_LORE_REASONS.has(token)) details[key] = token;
         else if (key === "capability" && SAFE_CAPABILITIES.has(token)) details[key] = token;
         else if (key === "reasonCode" && /^[A-Z][A-Z0-9_]{0,63}$/.test(token)) details[key] = token;
+        else if (key === "generationType" && ["normal", "quiet", "regenerate", "swipe", "continue", "impersonate", "unknown"].includes(token)) details[key] = token;
+        else if (key === "completionSignal" && ["received", "ended", "after-commands"].includes(token)) details[key] = token;
         // 根路径 `$` 也是真实的 JSONPath：JSON 无法解析或顶层不是对象时解析器只返回 `$`。
         // 0.9.54 A9/A11：其余路径必须以 `$.` 或 `$[` 开头，
         // 否则任意「字母数字下划线点」字符串（例如一段裸密钥）都能冒充 schemaPath 混进诊断。

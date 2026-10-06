@@ -26,6 +26,7 @@ import {
 } from "./atlas-contract.ts";
 import { parseAtlasLorebookPlans, type AtlasLorebookPlans } from "./atlas-lorebook.ts";
 import type { AtlasDiagnosticInput } from "./atlas-diagnostics.ts";
+import { createAtlasGenerationLifecycle, type AtlasGenerationMetadata, type AtlasGenerationSignal } from "./atlas-generation-lifecycle.ts";
 
 /** 内置默认推演提示词（API 页「查看内置默认提示词」用；开发态 src 直载时也必须可见）。 */
 export { DEFAULT_WORLD_TURN_SYSTEM_PROMPT } from "./atlas-api-client.ts";
@@ -347,9 +348,9 @@ export const ATLAS_UI_EVENTS = [
  */
 export type AtlasAdaptedEvent =
   | { kind: "message-sent"; messageId: string; userText: string }
-  | { kind: "generation-ended"; assistantMessageId: string; assistantText: string; foreground?: boolean }
+  | { kind: "generation-ended"; assistantMessageId: string; assistantText: string; foreground?: boolean; completionSignal?: AtlasGenerationSignal }
   | { kind: "generation-stopped" }
-  | { kind: "generation-started"; gated: boolean; retryTurn?: { userMessageId: string; userText: string; assistantMessageId: string } }
+  | { kind: "generation-started"; gated: boolean; metadata?: AtlasGenerationMetadata; retryTurn?: { userMessageId: string; userText: string; assistantMessageId: string } }
   | { kind: "message-swiped"; messageId: string; userMessageId: string; userText: string; regenerating: boolean | null }
   | { kind: "message-edited"; messageId: string }
   | { kind: "message-deleted"; messageId: string };
@@ -430,6 +431,8 @@ export function createAtlasUiCore(deps: {
   host: AtlasUiHost;
   emitter: AtlasUiEmitter;
   onDiagnostic?: (event: AtlasDiagnosticInput) => void;
+  /** Clear foreground prompt injection only after its own completion or stop. */
+  onGenerationComplete?: () => void;
   now?: () => number;
   /** 任意状态变化后的回调（UI 层重绘用；同步调用，不等待异步刷新完成） */
   onStateChange?: () => void;
@@ -572,7 +575,7 @@ export function createAtlasUiCore(deps: {
   let lastMutationTask: Promise<void> | null = null;
   let retryRollbackFloor: string | null = null;
   /** ATLAS-06：当前生成是否被门控（quiet / dryRun / automatic_trigger → 事件全部忽略）。 */
-  let generationGate = false;
+  const generationLifecycle = createAtlasGenerationLifecycle(now);
   /** ATLAS-06：rearm 重推演时本次 commit 使用的唯一 swipeId。 */
   let swipeIdForNextCommit: string | null = null;
   /** ATLAS-06 防抖计时器（ENDED 重解析 / 楼层变动聚合）。 */
@@ -931,7 +934,7 @@ export function createAtlasUiCore(deps: {
     if (event === "APP_READY" || event === "CHAT_CHANGED") {
       healthCheckedAt = -Infinity; // 事件驱动时强制重新检查服务
       // 切聊天：清回合/门控/防抖状态（rearm 属于旧聊天的楼层，绝不能带过去）
-      generationGate = false;
+      generationLifecycle.reset();
       retryRollbackFloor = null;
       lastMutationTask = null;
       stoppedGeneration = false;
@@ -983,10 +986,11 @@ export function createAtlasUiCore(deps: {
     const adapted = deps.adaptEvent?.(event, payload) ?? null;
     if (!adapted) return;
     if (adapted.kind === "message-sent") {
-      if (generationGate) {
+      const generation = generationLifecycle.message();
+      if (generation.gated) {
         diagnostic({ level: "debug", source: "host", code: "GENERATION_GATED",
           operation: "generation", phase: "message", outcome: "skipped",
-          details: { reasonCode: "QUIET_OR_AUTOMATIC" } });
+          details: { reasonCode: "QUIET_OR_AUTOMATIC", ...generation.details } });
         return;
       } // quiet / dryRun / automatic_trigger
       stoppedGeneration = false;
@@ -997,8 +1001,11 @@ export function createAtlasUiCore(deps: {
       lastPrepareTask = task;
       void track(task);
     } else if (adapted.kind === "generation-started") {
-      generationGate = adapted.gated;
-      stoppedGeneration = false;
+      const generation = generationLifecycle.start(adapted.gated, adapted.metadata);
+      diagnostic({ level: "debug", source: "host", code: "HOST_GENERATION_STARTED",
+        operation: "generation", phase: "started", outcome: adapted.gated ? "skipped" : "started",
+        details: { ...generation.details, gated: generation.gated } });
+      if (!adapted.gated) stoppedGeneration = false;
       // Regenerating an uncommitted/failed floor emits no new MESSAGE_SENT.
       // A committed floor still waits for its normal mutation/rollback path.
       if (!adapted.gated && adapted.retryTurn && !state.pendingTurn) {
@@ -1017,24 +1024,32 @@ export function createAtlasUiCore(deps: {
         void track(task);
       }
     } else if (adapted.kind === "generation-ended") {
+      const completionSignal = adapted.completionSignal ?? "received";
+      const generation = generationLifecycle.complete(completionSignal, adapted.foreground === true);
+      if (generation.duplicate) return;
       if (stoppedGeneration) {
         diagnostic({ level: "info", source: "host", code: "GENERATION_STOPPED",
           operation: "generation", phase: "ended", outcome: "skipped" });
         return;
       }
-      // shujuku 门控：被门控生成（总结 / 向量索引等酒馆内部 quiet 请求）的 ENDED 不推演。
-      // 真实生成随后会有自己的 STARTED；完成通知可能有多个别名。
-      if (generationGate && !(adapted.foreground && (state.pendingTurn || state.rearmTurn))) {
+      // An internal completion restores the still-running foreground request.
+      if (generation.gated) {
         diagnostic({ level: "debug", source: "host", code: "GENERATION_GATED",
           operation: "generation", phase: "ended", outcome: "skipped",
-          details: { reasonCode: "QUIET_OR_AUTOMATIC" } });
-        // Completion can arrive through RECEIVED, ENDED and AFTER_COMMANDS.
-        // The next STARTED resets the gate; no alias may consume another pending turn.
+          details: { reasonCode: "QUIET_OR_AUTOMATIC", completionSignal, ...generation.details } });
         return;
       }
+      deps.onGenerationComplete?.();
       scheduleGenerationEnded(adapted);
     } else if (adapted.kind === "generation-stopped") {
-      generationGate = false;
+      const generation = generationLifecycle.stop();
+      if (generation.gated) {
+        diagnostic({ level: "debug", source: "host", code: "GENERATION_GATED",
+          operation: "generation", phase: "stopped", outcome: "skipped",
+          details: { reasonCode: "QUIET_OR_AUTOMATIC", ...generation.details } });
+        return;
+      }
+      deps.onGenerationComplete?.();
       onGenerationStopped();
     } else {
       // 楼层变动（swipe / 编辑 / 删除）：300ms 级防抖聚合——批量删除与 regenerate

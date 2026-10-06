@@ -21,7 +21,7 @@ export { atlasPointRefOf, atlasKnownCoordinate, atlasPositionQuality, atlasSqlMa
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.79";
+export const ATLAS_EXTENSION_VERSION = "0.9.80";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -1091,26 +1091,32 @@ function createEmitter(context) {
        * 原处理函数——归一与业务处理是同一次事件，绝不各自缓存一份「上次的楼层」。
        * SQL 模式关闭时该函数立刻返回（端口未注册），对旧路径零影响。
        */
-      const wrapped = (...args) => {
-        const payload = args[0];
-        if (event === "CHAT_CHANGED") clearInjection();
-        atlasSqlNoteHostEvent(event, payload, context);
-        return handler(args.length > 1 ? args : payload);
-      };
-      for (const name of mapped) eventSource.on(name, wrapped);
-      // 三元组保留原始 handler 身份：off 时按原始 handler 反查（core.dispose 用原始引用注销）
-      handlers.push([mapped, wrapped, handler]);
+      for (const name of mapped) {
+        const wrapped = (...args) => {
+          const payload = args[0];
+          if (event === "CHAT_CHANGED") clearInjection();
+          atlasSqlNoteHostEvent(event, payload, context);
+          const value = args.length > 1 ? args : payload;
+          return handler(event === "GENERATION_ENDED"
+            ? { atlasCompletionSignal: name === event_types.GENERATION_ENDED ? "ended" : "after-commands", payload: value }
+            : value);
+        };
+        eventSource.on(name, wrapped);
+        // 每个别名保留原始 handler 身份，dispose 逐个注销。
+        handlers.push([[name], wrapped, handler]);
+      }
     },
     off(event, handler) {
       // 按处理函数身份查找（on 时可能已因事件缺失而未注册；可能是原始引用，也可能是包装函数）
-      const index = handlers.findIndex(([, fn, original]) => fn === handler || original === handler);
-      if (index < 0) return;
-      const [mapped, fn] = handlers[index];
-      for (const name of mapped) {
-        if (typeof eventSource.removeListener === "function") eventSource.removeListener(name, fn);
-        else if (typeof eventSource.off === "function") eventSource.off(name, fn);
+      for (let index = handlers.length - 1; index >= 0; index--) {
+        const [mapped, fn, original] = handlers[index];
+        if (fn !== handler && original !== handler) continue;
+        for (const name of mapped) {
+          if (typeof eventSource.removeListener === "function") eventSource.removeListener(name, fn);
+          else if (typeof eventSource.off === "function") eventSource.off(name, fn);
+        }
+        handlers.splice(index, 1);
       }
-      handlers.splice(index, 1);
     },
   };
 }
@@ -1168,18 +1174,16 @@ function createEventAdapter(context) {
       if (!Array.isArray(chat) || chat.length === 0) return null;
       const raw = Number(args[0]);
       const index = Number.isInteger(raw) && raw >= 0 && raw < chat.length ? raw : chat.length - 1;
-      clearInjection();
-      return withIdentity(event, index, { kind: "generation-ended", foreground: args.length > 1, assistantMessageId: String(index), assistantText: String(chat[index]?.mes ?? "") });
+      return withIdentity(event, index, { kind: "generation-ended", completionSignal: "received", foreground: args.length > 1, assistantMessageId: String(index), assistantText: String(chat[index]?.mes ?? "") });
     }
     if (event === "GENERATION_ENDED" || event === "GENERATION_ENDED_AFTER_COMMANDS") {
       const chat = context().chat;
-      if (!Array.isArray(chat) || chat.length === 0) return null;
-      const index = chat.length - 1;
-      clearInjection();
-      return withIdentity(event, index, { kind: "generation-ended", assistantMessageId: String(index), assistantText: String(chat[index]?.mes ?? "") });
+      // Background requests can finish before the first visible floor exists.
+      const index = Array.isArray(chat) ? chat.length - 1 : -1;
+      const completionSignal = payload?.atlasCompletionSignal ?? (event === "GENERATION_ENDED_AFTER_COMMANDS" ? "after-commands" : "ended");
+      return withIdentity(event, index, { kind: "generation-ended", completionSignal, assistantMessageId: String(index), assistantText: String(chat?.[index]?.mes ?? "") });
     }
     if (event === "GENERATION_STOPPED") {
-      clearInjection();
       // H05：停止生成 = 这一轮的 SQL 候选作废（生命周期由 emitter 归一入口统一收口）
       return { kind: "generation-stopped" };
     }
@@ -1200,7 +1204,11 @@ function createEventAdapter(context) {
       const retryTurn = !gated && ['regenerate', 'swipe'].includes(type) && userIndex >= 0
         ? { userMessageId: String(userIndex), userText: chat[userIndex].mes, assistantMessageId: String(chat.length - 1) }
         : undefined;
-      return { kind: "generation-started", gated, ...(retryTurn ? { retryTurn } : {}) };
+      const generationType = ['normal', 'quiet', 'regenerate', 'swipe', 'continue', 'impersonate'].includes(type) ? type : 'unknown';
+      return { kind: "generation-started", gated, metadata: { generationType, dryRun,
+        automaticTrigger: params.automatic_trigger === true,
+        quietPromptPresent: typeof params.quiet_prompt === 'string' && params.quiet_prompt.length > 0 },
+        ...(retryTurn ? { retryTurn } : {}) };
     }
     if (event === "MESSAGE_SWIPED") {
       const chat = context().chat;
@@ -2905,6 +2913,7 @@ async function connectOnce() {
       store: engineStore,
       fetchFn: hostDispatchFetch,
       onDiagnostic: emitAtlasDiagnostic,
+      onGenerationComplete: clearInjection,
       sqlSessionProvider,
     });
     // R15 集成：启动时清扫 orphan pending（R12 收口的最后一块——reconcilePending
