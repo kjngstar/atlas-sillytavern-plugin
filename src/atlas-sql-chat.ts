@@ -16,6 +16,7 @@ import { runSqlTurn, runSqlRollback } from './atlas-sql-session.ts';
 import { runSqlModelRetry } from './atlas-sql-retry.ts';
 import type { SqlSession } from './atlas-sql-session.ts';
 import type { TurnAnchor, TurnInput } from './atlas-ops-contract.ts';
+import { VIEW_KINDS, CATALOG_ENTITY_KINDS, type ViewQuery } from './atlas-ops-contract.ts';
 import type { AtlasEnvelope } from './atlas-db-contract.ts';
 
 const preparations = new WeakMap<SqlSession, Map<string, { anchor: TurnAnchor; messageId: string; userText: string }>>();
@@ -70,6 +71,17 @@ function chatSources(request: AtlasTurnCommitRequest, playerName: string): TurnI
 
 /** Called by the explicit /sql/chat/* routes; no old session document is returned. */
 export async function handleSqlChatRequest(session: SqlSession, action: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  if(action==='ui-read'){
+    const kind=text(body.kind);
+    if(!(VIEW_KINDS as readonly string[]).includes(kind))throw new AtlasDbError('INVALID_PAYLOAD','未知的只读视图',{});
+    const query:ViewQuery={kind:kind as ViewQuery['kind'],branchId:session.branchId,viewMode:body.viewMode==='author'?'author':'pov',
+      revision:typeof body.revision==='number'?body.revision:undefined,entityId:text(body.entityId)||undefined,mapId:text(body.mapId)||undefined,
+      entityKind:(CATALOG_ENTITY_KINDS as readonly string[]).includes(text(body.entityKind))?body.entityKind as ViewQuery['entityKind']:undefined,
+      cursor:text(body.cursor)||undefined,limit:Math.min(200,Math.max(1,typeof body.limit==='number'?body.limit:200))};
+    const result=await session.repo.queryView(query),last=latestFloor(session);
+    return {...result,metadata:{...result.metadata,protagonistId:protagonist(session)??null,rollbackMessageId:last?floorIndex(last):null,
+      canUndo:!!last,snapshotSaved:!!(session.chatMetadata.atlas as {database?:AtlasEnvelope}|undefined)?.database}};
+  }
   if(action==='map/image')return readSqlMapImage(session,body.mapId);
   if(action==='travel-preview')return previewSqlTravel(session,body.destinationPointId);
   if(action==='inspect')return {report:inspectSqlWorld(session),coreSaved:false};

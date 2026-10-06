@@ -1084,6 +1084,8 @@ test("回合：commit 失败 → retryableCommit；retry 沿用原键且成功�
   equal(retryable.chatId, "chat-a", "键字段：chatId");
   equal(retryable.userMessageId, "m-0", "键字段：userMessageId");
   equal(retryable.assistantMessageId, "m-1", "键字段：assistantMessageId");
+  equal(core.getState().receipts[0].status, "failed", "HTTP 失败也保留推演回执");
+  ok(core.getState().receipts[0].summary.includes("推演模型超时"), "失败原因写入回执");
 
   // 重试失败：仍保留 retryable
   const failing = await readyCore({ commitError: "x", retryError: "仍然失败" });
@@ -1101,7 +1103,9 @@ test("回合：commit 失败 → retryableCommit；retry 沿用原键且成功�
   equal(retries[0].body.userMessageId, "m-0", "retry 沿用原幂等键字段");
   equal(retries[0].body.assistantMessageId, "m-1", "retry 键：assistantMessageId");
   equal(core.getState().retryableCommit, null, "成功后清空 retryable");
-  equal(core.getState().receipts.length, 1, "回执入列");
+  equal(core.getState().receipts.length, 2, "成功回执与之前的失败记录均保留");
+  equal(core.getState().receipts[0].status, "committed", "最新回执为成功");
+  equal(core.getState().receipts[1].status, "failed", "之前的失败记录可追溯");
   equal(core.getState().lastError, null, "错误清除");
 });
 

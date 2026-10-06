@@ -41,6 +41,10 @@ function fixture({ response = room, model, identity, lore = '全部世界书原�
   };
 }
 
+test('原版 UI 只读入口：新聊天没有保存快照仍读取同一个内存库，零保存零模型调用',async()=>{const f=fixture();try{await f.ui.refresh();assert.equal(f.current.chatMetadata.atlas?.database,undefined);const result=await f.server.handle('POST','/sql/chat/ui-read',{chatUid:'chat-auto',kind:'map',viewMode:'author'},{local:true});assert.equal(result.status,200);assert.ok(Array.isArray(result.body.data.items));assert.equal(result.body.data.metadata.snapshotSaved,false);assert.equal(f.saves(),0);assert.equal(f.calls(),0);const bad=await f.server.handle('POST','/sql/chat/ui-read',{chatUid:'chat-auto',kind:'logs'},{local:true});assert.equal(bad.status,400);assert.equal(f.current.chatMetadata.atlas?.database,undefined);}finally{await f.close();}});
+test('原版 UI 回执：模型失败在无快照时也形成有错误码的真实回执',async()=>{const f=fixture({model:async()=>{throw Object.assign(Error('连接未配置'),{code:'API_NOT_CONFIGURED',retryable:false});}});try{await f.ui.refresh();await f.prepare();await f.end();const r=f.ui.getState().receipts[0];assert.equal(r.status,'failed');assert.match(r.summary,/连接未配置/);assert.equal(r.detail.coreSaved,false);assert.equal(r.detail.httpStatus,500);assert.ok(r.detail.receipt||r.errorCode);assert.equal(f.current.chatMetadata.atlas?.database,undefined);const read=await f.server.handle('POST','/sql/chat/ui-read',{chatUid:'chat-auto',kind:'diagnostics',viewMode:'author'},{local:true});assert.equal(read.status,200);assert.equal(f.saves(),0);}finally{await f.close();}});
+test('原版 UI 回执：成功提交保留原生分组与保存状态',async()=>{const f=fixture();try{await f.ui.refresh();await f.prepare();await f.end();const r=f.ui.getState().receipts[0];assert.equal(r.detail.coreSaved,true);assert.ok(r.detail.receipt.groups.length>0);assert.equal(r.detail.receipt.groups[0].status,'applied');assert.equal('anchor' in r.detail.receipt,false);}finally{await f.close();}});
+
 test('Q03 automatic events: prepare is read-only; completion writes one real SQL snapshot and no legacy world', async () => {
   const f = fixture();
   try {

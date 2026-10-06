@@ -2905,6 +2905,15 @@ var ATLAS_UI_PAGES = [
   { id: "skin", label: "皮肤" },
   { id: "logs", label: "日志" }
 ];
+function receiptDetail(value, depth = 0) {
+  if (depth > 8) return "[depth]";
+  if (Array.isArray(value)) return value.map((v) => receiptDetail(v, depth + 1));
+  if (typeof value === "string") return value.replace(/sk-[A-Za-z0-9_-]{6,}|Bearer\s+\S+/gi, "[redacted]");
+  if (value === null || typeof value === "number" || typeof value === "boolean") return value;
+  if (!value || typeof value !== "object") return void 0;
+  const keys = /* @__PURE__ */ new Set(["turnId", "status", "summary", "groups", "groupId", "opIds", "changedRows", "issues", "code", "message", "path", "schemaPath", "severity", "retryable", "dependsOn", "dependencies", "dependency", "opId", "phase", "stage", "attempt", "attempts", "batchId", "httpStatus", "durationMs", "errorCode", "clockBeforeS", "clockAfterS", "simulatedUntilS", "worldChanged", "timeChanged", "coreSaved", "coreCommitted", "receipt"]);
+  return Object.fromEntries(Object.entries(value).filter(([k]) => keys.has(k)).map(([k, v]) => [k, receiptDetail(v, depth + 1)]));
+}
 var SIMULATION_VIEW_ROW_CAP = 64;
 function simulationRows(value) {
   if (!Array.isArray(value)) return [];
@@ -3120,7 +3129,10 @@ function createAtlasUiCore(deps) {
       currentTime: typeof record.currentTime === "number" ? record.currentTime : 0,
       currentLocationId: typeof record.currentLocationId === "string" ? record.currentLocationId : null,
       adoptedEventCount: typeof record.adoptedEventCount === "number" ? record.adoptedEventCount : 0,
-      recordedAt: typeof record.recordedAt === "number" ? record.recordedAt : 0
+      recordedAt: typeof record.recordedAt === "number" ? record.recordedAt : 0,
+      ...typeof record.retryable === "boolean" ? { retryable: record.retryable } : {},
+      ...typeof record.errorCode === "string" ? { errorCode: record.errorCode } : {},
+      ...record.detail && typeof record.detail === "object" ? { detail: receiptDetail(record.detail) } : {}
     };
   }
   function readReceiptBuckets() {
@@ -3152,10 +3164,10 @@ function createAtlasUiCore(deps) {
     }
     setState({ receipts: readReceiptBuckets()[chatId] ?? [] });
   }
-  function addReceipt(receipt, chatId) {
+  function addReceipt(receipt, chatId, extra = {}) {
     if (chatId !== state.chatId) return;
     const previous = state.receipts.find((r) => r.receiptId === receipt.receiptId);
-    if (previous && !(sqlEnabled() && (previous.status === "failed" && receipt.status !== "failed" || previous.summary !== receipt.summary))) return;
+    if (previous && !(sqlEnabled() && (previous.status === "failed" && receipt.status !== "failed" || previous.summary !== receipt.summary || JSON.stringify(previous.detail) !== JSON.stringify(receiptDetail(extra))))) return;
     const record = {
       receiptId: receipt.receiptId,
       chatId,
@@ -3165,7 +3177,10 @@ function createAtlasUiCore(deps) {
       currentTime: receipt.currentTime,
       currentLocationId: typeof receipt.currentLocationId === "string" ? receipt.currentLocationId : null,
       adoptedEventCount: receipt.adoptedEventIds.length,
-      recordedAt: now()
+      recordedAt: now(),
+      retryable: receipt.retryable,
+      ...typeof extra.errorCode === "string" ? { errorCode: extra.errorCode } : {},
+      detail: receiptDetail(extra)
     };
     const receipts = [record, ...state.receipts.filter((r) => r.receiptId !== receipt.receiptId)].slice(0, RECEIPTS_MAX);
     setState({ receipts });
@@ -4073,7 +4088,7 @@ function createAtlasUiCore(deps) {
           phase: "receipt",
           outcome: "skipped"
         });
-        addReceipt(receiptParsed.value, value.chatId);
+        addReceipt(receiptParsed.value, value.chatId, { receipt: body.data?.nativeReceipt, issues: body.data?.issues, coreSaved: body.data?.coreSaved, httpStatus: result.status });
         if (receiptParsed.value.status === "failed") {
           setState({
             pendingTurn: null,
@@ -4136,6 +4151,22 @@ function createAtlasUiCore(deps) {
         errorCode: body.error?.code,
         retryable: true
       });
+      if (!stale) addReceipt(
+        {
+          receiptId: value.turnId,
+          status: "failed",
+          branchId: state.binding?.branchId ?? null,
+          previousTime: state.binding?.worldTimeCursor ?? 0,
+          currentTime: state.binding?.worldTimeCursor ?? 0,
+          currentLocationId: state.binding?.currentLocationId ?? null,
+          triggeredNpcIds: [],
+          adoptedEventIds: [],
+          summary: body.error?.message ?? `世界推演失败（HTTP ${result.status}）`,
+          retryable: body.error?.retryable !== false
+        },
+        value.chatId,
+        { ...body.error?.details, errorCode: body.error?.code, httpStatus: result.status, message: body.error?.message, coreSaved: false }
+      );
       setState({
         pendingTurn: null,
         rearmTurn: null,
@@ -4161,6 +4192,18 @@ function createAtlasUiCore(deps) {
         retryable: true
       });
       const stale = state.chatId !== value.chatId || useSql && !isCurrent();
+      if (!stale) addReceipt({
+        receiptId: value.turnId,
+        status: "failed",
+        branchId: state.binding?.branchId ?? null,
+        previousTime: state.binding?.worldTimeCursor ?? 0,
+        currentTime: state.binding?.worldTimeCursor ?? 0,
+        currentLocationId: state.binding?.currentLocationId ?? null,
+        triggeredNpcIds: [],
+        adoptedEventIds: [],
+        summary: "世界推演失败：服务不可用",
+        retryable: true
+      }, value.chatId, { errorCode: "SERVICE_UNAVAILABLE", coreSaved: false });
       setState({
         pendingTurn: null,
         rearmTurn: null,
@@ -4365,7 +4408,7 @@ function createAtlasUiCore(deps) {
           const body = result.body;
           const parsed = body.data?.receipt ? parseAtlasTurnReceipt(body.data.receipt) : null;
           if (result.status === 200 && body.ok && parsed?.ok) {
-            addReceipt(parsed.value, failed.chatId);
+            addReceipt(parsed.value, failed.chatId, { receipt: body.data?.nativeReceipt, issues: body.data?.issues, coreSaved: body.data?.coreSaved, httpStatus: result.status });
             setState({
               lastError: parsed.value.status === "failed" ? parsed.value.summary : null,
               retryableCommit: parsed.value.retryable ? failed : null

@@ -1,5 +1,5 @@
 /** Mount the supplied UI intact in its own document; provide data and real backend ports. */
-import { emptyReferenceData, projectReferenceData, referenceEntity } from './atlas-reference-data.mjs';
+import { emptyReferenceData, projectReferenceData, referenceEntity,referenceReceipts,referenceDiagnostics } from './atlas-reference-data.mjs';
 import { referencePresetDocument, referenceSettingsCommands } from './atlas-reference-presets.mjs';
 
 export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort,diagnostics=()=>[],emit=()=>{},defaultPrompt='',loadSqlRuntime=()=>import(new URL('../dist/atlas-sql.mjs',import.meta.url).href)}) {
@@ -9,28 +9,18 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
   const frame=root.ownerDocument.createElement('iframe');frame.title='ATLAS 世界工作台';
   frame.setAttribute('aria-label','原版 ATLAS 世界工作台');
   Object.assign(frame.style,{display:'block',width:'100%',height:'100%',border:'0',background:'transparent'});
-  let disposed=false,ready=false,viewMode='author',epoch=0,lastKey='',scopeId='',latest=emptyReferenceData(),session=null,sqlMod=null,sessionKey='',loading=null;
+  let disposed=false,ready=false,viewMode='author',epoch=0,lastKey='',scopeId='',lastReadFailure='',latest=emptyReferenceData(),sqlMod=null,loading=null;
   let settings={},prefs={},presetDoc=null,presetQueue=Promise.resolve(),actionBusy=false,actionError=null,actionScope='';
   const context=()=>{const c=getContext?.();return c?.chatMetadata?c:null;};
   function scope(){const s=core.getState(),c=context(),env=c?.chatMetadata?.atlas?.database,enabled=c?.extensionSettings?.atlas_world_sim?.sqlMode??s.stateData?.sqlModeEnabled??s.stateData?.sqlMode??true;return {state:s,context:c,metadata:c?.chatMetadata,enabled,key:JSON.stringify([s.chatId,c?.chatId??c?.chat_id,s.binding?.branchId??'main',env?.sha256,env?.storage_revision,s.stateData?.revision,viewMode,enabled]),data:env?.data};}
   function live(ticket){const now=scope();return !disposed&&ticket.epoch===epoch&&ticket.key===now.key&&ticket.data===now.data&&ticket.metadata===now.metadata;}
   function deliver(data,resetScope=false){const s=core.getState();data.meta.engine={hasChat:!!s.chatId,bound:!!s.binding,enabled:s.binding?.enabled===true,sqlEnabled:scope().enabled,serviceStatus:s.serviceStatus??'checking',busy:actionBusy||!!s.pendingTurn,error:actionScope===data.meta.scopeKey&&actionError? actionError:typeof s.lastError==='string'?s.lastError:s.lastError?.message??null};
+    data.RECEIPTS=referenceReceipts(s,data.DIAGNOSTICS);const ids=new Set(data.DIAGNOSTICS.map(d=>d.id));data.DIAGNOSTICS.push(...referenceDiagnostics(diagnostics()).filter(d=>!ids.has(d.id)));
     if(data.meta.engine.error&&!data.DIAGNOSTICS.some(d=>d.message===data.meta.engine.error))data.DIAGNOSTICS.unshift({id:'engine-last-error',t:'',level:'error',code:'ENGINE_ACTION_FAILED',message:data.meta.engine.error});
     latest=data;if(ready)frame.contentWindow?.AtlasPreview?.updateSnapshot(data,{resetScope});}
   async function request(method,path,body){const r=await api.request(method,path,body);if(r.status!==200||r.body?.ok===false)throw Error(r.body?.error?.message??`请求失败（${r.status}）`);return r.body?.data??r.body;}
-  async function sqlSession(ticket){
-    if(!sqlMod)sqlMod=await loadSqlRuntime();
-    if(!live(ticket))return null;
-    if(session&&sessionKey===ticket.key)return session;
-    const old=session;session=null;sessionKey='';if(old)await sqlMod.closeSqlSession(old);
-    if(!ticket.context?.chatMetadata?.atlas?.database)return null;
-    const opened=await sqlMod.openSqlSession({chatUid:String(ticket.state.chatId??ticket.context.chatId??ticket.context.chat_id??''),branchId:ticket.state.binding?.branchId??'main',chatMetadata:ticket.metadata,
-      saveSession:async()=>{throw Error('UI_READ_ONLY');},confirmSave:false});
-    if(!live(ticket)){await sqlMod.closeSqlSession(opened);return null;}
-    session=opened;sessionKey=ticket.key;return opened;
-  }
-  async function query(ticket,kind,extra={}){const opened=await sqlSession(ticket);if(!opened)return {items:[],metadata:{unavailable:true}};
-    const result=await opened.repo.queryView({kind,branchId:opened.branchId,viewMode,limit:200,...extra});
+  async function query(ticket,kind,extra={}){if(!live(ticket))return null;
+    const result=await request('POST','/sql/chat/ui-read',{chatUid:ticket.state.chatId,branchId:ticket.state.binding?.branchId??'main',kind,viewMode,limit:200,...extra});
     if(!live(ticket))return null;return result;}
   async function refresh(force=false){
     if(disposed)return;
@@ -43,18 +33,19 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
     loading=(async()=>{
       if(!ticket.state.binding){deliver(emptyReferenceData({viewMode,scopeKey:worldScope}),changed);return;}
       if(!ticket.enabled){deliver(emptyReferenceData({viewMode,scopeKey:worldScope,worldName:'世界推演已暂停'}),true);return;}
-      if(!ticket.data)throw Error('SQL_SNAPSHOT_UNAVAILABLE：当前聊天没有可读取的数据库快照');
+      // A new SQL world has a live read-only base before its first successful
+      // turn creates a saved envelope. Read the authoritative engine session.
+      if(!sqlMod)sqlMod=await loadSqlRuntime();if(!live(ticket))return;
       const mapView=await query(ticket,'map');if(!mapView||!live(ticket))return;
       const revision=mapView.revision;
-      const [sceneView,taskView,flowView,changesView,logsView]=await Promise.all(['scene','tasks','flows','changes','logs'].map(kind=>query(ticket,kind,{revision})));
+      const [sceneView,taskView,flowView,changesView,logsView]=await Promise.all(['scene','tasks','flows','changes','diagnostics'].map(kind=>query(ticket,kind,{revision})));
       const catalogRows=[];let cursor;
       for(let page=0;page<100;page++){
         const dto=await query(ticket,'catalog',{revision,cursor});if(!dto||!live(ticket))return;
         catalogRows.push(...dto.items);if(!dto.nextCursor)break;if(dto.nextCursor===cursor)throw Error('目录游标未前进');if(page===99)throw Error('目录超过当前读取上限，请缩小目录范围');cursor=dto.nextCursor;
       }
       if(!live(ticket))return;
-      const opened=await sqlSession(ticket);
-      const protagonistId=sqlMod.queryBound(opened.repo.db,'SELECT pov_character_id FROM branches WHERE id=?',[opened.branchId])[0]?.pov_character_id??null;
+      const protagonistId=mapView.metadata?.protagonistId??null;
       const detailRows=[];
       // Load summaries in bounded batches; queries enforce the active POV field restrictions.
       const characters=catalogRows.filter(c=>c.entityKind==='character');
@@ -63,11 +54,9 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
         diagnostics:diagnostics(),viewMode,scopeKey:worldScope,projectOverview:sqlMod.projectMapView});
       if(!changed&&latest.meta.scopeKey===worldScope)data.LORE=latest.LORE;
       // Rollback identity comes from the real saved turn, never from a UI demo snapshot.
-      const last=opened&&sqlMod.queryBound(opened.repo.db,"SELECT host_message_uid,decisions_json FROM turns WHERE branch_id=? AND kind='narrative' AND status IN ('committed','partial') ORDER BY committed_revision DESC,created_wall_ms DESC LIMIT 1",[opened.branchId])[0];
-      let decisions={};try{decisions=JSON.parse(last?.decisions_json??'{}');}catch{}
-      data.meta.rollbackMessageId=last?decisions.host_message_index??last.host_message_uid:null;data.meta.canUndo=!!last;
-      if(live(ticket))deliver(data,changed);
-    })().catch(error=>{if(!live(ticket))return;emit({level:'error',source:'ui',code:'REFERENCE_UI_READ_FAILED',details:{message:error.message}});
+      data.meta.rollbackMessageId=mapView.metadata?.rollbackMessageId??null;data.meta.canUndo=mapView.metadata?.canUndo===true;data.meta.snapshotSaved=mapView.metadata?.snapshotSaved===true;
+      if(live(ticket)){lastReadFailure='';deliver(data,changed);}
+    })().catch(error=>{if(!live(ticket))return;const failureKey=ticket.key+'|'+error.message;if(lastReadFailure!==failureKey){lastReadFailure=failureKey;emit({level:'error',source:'ui',code:'REFERENCE_UI_READ_FAILED',details:{message:error.message}});}
       const data=emptyReferenceData({viewMode,scopeKey:worldScope,worldName:'世界读取失败'});data.DIAGNOSTICS=[{id:'read-failed',t:'',level:'error',code:'REFERENCE_UI_READ_FAILED',message:error.message}];deliver(data,changed);});
     return loading;
   }
@@ -131,6 +120,6 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
   frame.__atlasHost=bridge;frame.src=new URL('./atlas-reference/index.html',import.meta.url).href;root.append(frame);
   let wasOpen=false;
   const render=()=>{const open=core.getState().panelOpen!==false;root.style.display=open?'':'none';if(ready){frame.contentWindow?.AtlasPreview?.setVisible?.(open);if(open&&!wasOpen)frame.contentWindow?.focus?.();}wasOpen=open;void refresh();};
-  render.dispose=async()=>{disposed=true;epoch++;ready=false;frame.contentWindow?.AtlasPreview?.destroy?.();frame.__atlasHost=null;frame.remove();if(session&&sqlMod)await sqlMod.closeSqlSession(session);};
+  render.dispose=async()=>{disposed=true;epoch++;ready=false;frame.contentWindow?.AtlasPreview?.destroy?.();frame.__atlasHost=null;frame.remove();};
   core.__renderPage=render;render();return render;
 }

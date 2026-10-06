@@ -96,6 +96,21 @@ export interface AtlasReceiptRecord {
   currentLocationId: string | null;
   adoptedEventCount: number;
   recordedAt: number;
+  retryable?: boolean;
+  errorCode?: string;
+  detail?: Record<string, unknown>;
+}
+
+/** Persist structured receipts only; request/response bodies and credentials
+ * never become receipt logs. Existing summary-only records remain readable. */
+function receiptDetail(value:unknown,depth=0):unknown{
+  if(depth>8)return '[depth]';
+  if(Array.isArray(value))return value.map(v=>receiptDetail(v,depth+1));
+  if(typeof value==='string')return value.replace(/sk-[A-Za-z0-9_-]{6,}|Bearer\s+\S+/gi,'[redacted]');
+  if(value===null||typeof value==='number'||typeof value==='boolean')return value;
+  if(!value||typeof value!=='object')return undefined;
+  const keys=new Set(['turnId','status','summary','groups','groupId','opIds','changedRows','issues','code','message','path','schemaPath','severity','retryable','dependsOn','dependencies','dependency','opId','phase','stage','attempt','attempts','batchId','httpStatus','durationMs','errorCode','clockBeforeS','clockAfterS','simulatedUntilS','worldChanged','timeChanged','coreSaved','coreCommitted','receipt']);
+  return Object.fromEntries(Object.entries(value).filter(([k])=>keys.has(k)).map(([k,v])=>[k,receiptDetail(v,depth+1)]));
 }
 
 /**
@@ -606,6 +621,9 @@ export function createAtlasUiCore(deps: {
       currentLocationId: typeof record.currentLocationId === "string" ? record.currentLocationId : null,
       adoptedEventCount: typeof record.adoptedEventCount === "number" ? record.adoptedEventCount : 0,
       recordedAt: typeof record.recordedAt === "number" ? record.recordedAt : 0,
+      ...(typeof record.retryable==='boolean'?{retryable:record.retryable}:{}),
+      ...(typeof record.errorCode==='string'?{errorCode:record.errorCode}:{}),
+      ...(record.detail&&typeof record.detail==='object'?{detail:receiptDetail(record.detail) as Record<string,unknown>}:{}),
     };
   }
 
@@ -647,11 +665,11 @@ export function createAtlasUiCore(deps: {
     setState({ receipts: readReceiptBuckets()[chatId] ?? [] });
   }
 
-  function addReceipt(receipt: AtlasTurnReceipt, chatId: string): void {
+  function addReceipt(receipt: AtlasTurnReceipt, chatId: string, extra:Record<string,unknown>={}): void {
     // 0.9.28 归属守卫：跨聊天迟到的回执直接丢弃（服务端世界已一致，只是 UI 不显示过期回执）
     if (chatId !== state.chatId) return;
     const previous = state.receipts.find(r => r.receiptId === receipt.receiptId);
-    if (previous && !(sqlEnabled() && (previous.status === 'failed' && receipt.status !== 'failed' || previous.summary !== receipt.summary))) return;
+    if (previous && !(sqlEnabled() && (previous.status === 'failed' && receipt.status !== 'failed' || previous.summary !== receipt.summary || JSON.stringify(previous.detail)!==JSON.stringify(receiptDetail(extra))))) return;
     const record: AtlasReceiptRecord = {
       receiptId: receipt.receiptId,
       chatId,
@@ -662,6 +680,9 @@ export function createAtlasUiCore(deps: {
       currentLocationId: typeof receipt.currentLocationId === "string" ? receipt.currentLocationId : null,
       adoptedEventCount: receipt.adoptedEventIds.length,
       recordedAt: now(),
+      retryable:receipt.retryable,
+      ...(typeof extra.errorCode==='string'?{errorCode:extra.errorCode}:{}),
+      detail:receiptDetail(extra) as Record<string,unknown>,
     };
     const receipts = [record, ...state.receipts.filter(r => r.receiptId !== receipt.receiptId)].slice(0, RECEIPTS_MAX);
     setState({ receipts });
@@ -1405,7 +1426,7 @@ export function createAtlasUiCore(deps: {
         ...value, ...(useSql ? { chatUid: value.chatId, playerName: deps.getPlayerName?.() ?? '', isCurrent,
           ...(identity ? { hostMessageUid: identity.messageUID, variantKey: identity.variantKey } : {}) } : {}),
       });
-      const body = result.body as { ok?: boolean; data?: { receipt?: unknown; coreSaved?: boolean }; error?: { message?: string; code?: string; retryable?: boolean } };
+      const body = result.body as { ok?: boolean; data?: { receipt?: unknown; nativeReceipt?: unknown; issues?: unknown; coreSaved?: boolean }; error?: { message?: string; code?: string; retryable?: boolean; details?:Record<string,unknown> } };
       if (useSql && !isCurrent()) return;
       const receiptParsed = body.data?.receipt ? parseAtlasTurnReceipt(body.data.receipt) : null;
       // 0.9.28 归属守卫：请求在途时用户可能已切聊天——过期回执 / 失败挂单绝不写进新聊天
@@ -1424,7 +1445,7 @@ export function createAtlasUiCore(deps: {
         });
         if (stale) diagnostic({ level: "warn", source: "ui", code: "STALE_CHAT_RESPONSE_DROPPED",
           operation: "commit", phase: "receipt", outcome: "skipped" });
-        addReceipt(receiptParsed.value, value.chatId);
+        addReceipt(receiptParsed.value, value.chatId,{receipt:body.data?.nativeReceipt,issues:body.data?.issues,coreSaved:body.data?.coreSaved,httpStatus:result.status});
         // 0.9.54 A13：HTTP 200 + body.ok 只说明接口处理成功，不代表世界已提交。
         // 必须按 receipt.status 分流：failed 要展示失败摘要、置 lastError、按 retryable
         // 保留或清空挂单，并且**不得**刷新地图 / 同步世界书（世界确实没变）。
@@ -1478,6 +1499,9 @@ export function createAtlasUiCore(deps: {
       diagnostic({ level: "error", source: "ui", code: "COMMIT_FAILED",
         operation: "commit", phase: "response", outcome: "failed",
         httpStatus: result.status, errorCode: body.error?.code, retryable: true });
+      if(!stale)addReceipt({receiptId:value.turnId,status:'failed',branchId:state.binding?.branchId??null,previousTime:state.binding?.worldTimeCursor??0,currentTime:state.binding?.worldTimeCursor??0,
+        currentLocationId:state.binding?.currentLocationId??null,triggeredNpcIds:[],adoptedEventIds:[],summary:body.error?.message??`世界推演失败（HTTP ${result.status}）`,retryable:body.error?.retryable!==false},value.chatId,
+        {...body.error?.details,errorCode:body.error?.code,httpStatus:result.status,message:body.error?.message,coreSaved:false});
       // commit 失败：保留可重试信息，清 pending；零部分写入由服务端保证
       setState({
         pendingTurn: null,
@@ -1497,6 +1521,8 @@ export function createAtlasUiCore(deps: {
       diagnostic({ level: "error", source: "ui", code: "COMMIT_FAILED",
         operation: "commit", phase: "request", outcome: "failed", retryable: true });
       const stale = state.chatId !== value.chatId || (useSql && !isCurrent());
+      if(!stale)addReceipt({receiptId:value.turnId,status:'failed',branchId:state.binding?.branchId??null,previousTime:state.binding?.worldTimeCursor??0,currentTime:state.binding?.worldTimeCursor??0,
+        currentLocationId:state.binding?.currentLocationId??null,triggeredNpcIds:[],adoptedEventIds:[],summary:'世界推演失败：服务不可用',retryable:true},value.chatId,{errorCode:'SERVICE_UNAVAILABLE',coreSaved:false});
       setState({
         pendingTurn: null,
         rearmTurn: null,
@@ -1710,10 +1736,10 @@ export function createAtlasUiCore(deps: {
           const result = await api.request('POST', '/sql/chat/retry', { ...original, chatUid: failed.chatId,
             sqlTurnId: turnId, playerName: deps.getPlayerName?.() ?? '', isCurrent });
           if (!isCurrent()) return;
-          const body = result.body as { ok?: boolean; data?: { coreSaved?: boolean; receipt?: unknown }; error?: { message?: string; retryable?: boolean } };
+          const body = result.body as { ok?: boolean; data?: { coreSaved?: boolean; receipt?: unknown; nativeReceipt?:unknown; issues?:unknown }; error?: { message?: string; retryable?: boolean } };
           const parsed = body.data?.receipt ? parseAtlasTurnReceipt(body.data.receipt) : null;
           if (result.status === 200 && body.ok && parsed?.ok) {
-            addReceipt(parsed.value, failed.chatId);
+            addReceipt(parsed.value, failed.chatId,{receipt:body.data?.nativeReceipt,issues:body.data?.issues,coreSaved:body.data?.coreSaved,httpStatus:result.status});
             setState({ lastError: parsed.value.status === 'failed' ? parsed.value.summary : null,
               retryableCommit: parsed.value.retryable ? failed : null });
             if (!parsed.value.retryable) { sqlPartialTurnId = null; sqlRetryRequest = null; }

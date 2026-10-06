@@ -2244,7 +2244,7 @@ function allowedOpsForPhase(phase, repairAllow) {
   if (phase === "repair") return repairAllow ?? [];
   return PHASE_ALLOWED_OPS[phase] ?? [];
 }
-var ATLAS_SEMANTIC_OPS, ATLAS_NOOP, PHASE_ALLOWED_OPS, SYSTEM_OWNED_FIELDS, OP_FIELD_ALIASES, CATALOG_ENTITY_KINDS;
+var ATLAS_SEMANTIC_OPS, ATLAS_NOOP, PHASE_ALLOWED_OPS, SYSTEM_OWNED_FIELDS, OP_FIELD_ALIASES, VIEW_KINDS, CATALOG_ENTITY_KINDS;
 var init_atlas_ops_contract = __esm({
   "src/atlas-ops-contract.ts"() {
     "use strict";
@@ -2340,6 +2340,19 @@ var init_atlas_ops_contract = __esm({
       gridX: "position.x",
       gridY: "position.y"
     };
+    VIEW_KINDS = [
+      "map",
+      "nearby",
+      "entity",
+      "changes",
+      "diagnostics",
+      "simulation",
+      "prompt",
+      "scene",
+      "catalog",
+      "flows",
+      "tasks"
+    ];
     CATALOG_ENTITY_KINDS = ["location", "character", "item", "event", "rumor"];
   }
 });
@@ -28810,6 +28823,7 @@ async function retry(session, input) {
 }
 
 // src/atlas-sql-chat.ts
+init_atlas_ops_contract();
 var preparations = /* @__PURE__ */ new WeakMap();
 var text3 = (v) => typeof v === "string" ? v : "";
 function branch(session) {
@@ -28866,6 +28880,29 @@ function chatSources(request, playerName) {
   return sources;
 }
 async function handleSqlChatRequest(session, action, body) {
+  if (action === "ui-read") {
+    const kind = text3(body.kind);
+    if (!VIEW_KINDS.includes(kind)) throw new AtlasDbError("INVALID_PAYLOAD", "未知的只读视图", {});
+    const query = {
+      kind,
+      branchId: session.branchId,
+      viewMode: body.viewMode === "author" ? "author" : "pov",
+      revision: typeof body.revision === "number" ? body.revision : void 0,
+      entityId: text3(body.entityId) || void 0,
+      mapId: text3(body.mapId) || void 0,
+      entityKind: CATALOG_ENTITY_KINDS.includes(text3(body.entityKind)) ? body.entityKind : void 0,
+      cursor: text3(body.cursor) || void 0,
+      limit: Math.min(200, Math.max(1, typeof body.limit === "number" ? body.limit : 200))
+    };
+    const result = await session.repo.queryView(query), last = latestFloor(session);
+    return { ...result, metadata: {
+      ...result.metadata,
+      protagonistId: protagonist(session) ?? null,
+      rollbackMessageId: last ? floorIndex(last) : null,
+      canUndo: !!last,
+      snapshotSaved: !!session.chatMetadata.atlas?.database
+    } };
+  }
   if (action === "map/image") return readSqlMapImage(session, body.mapId);
   if (action === "travel-preview") return previewSqlTravel(session, body.destinationPointId);
   if (action === "inspect") return { report: inspectSqlWorld(session), coreSaved: false };

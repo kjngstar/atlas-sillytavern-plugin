@@ -17,6 +17,10 @@ export function emptyReferenceData(meta = {}) {
     LOCATIONS:[],CAST:[],ITEMS:[],MESSAGES:[],TASKS:[],EVENTS:[],RECEIPTS:[],LORE:[],DIAGNOSTICS:[],FLOWS:{},JOURNEYS:{},PROMPTS:[]};
 }
 
+export function referenceDiagnostics(rows=[]){return rows.map((l,i)=>({...l,id:l.logId??l.id??`log-${i}`,t:text(l.at??l.createdAt??''),level:l.level??(l.kind==='issue'||l.kind==='failed_turn'?'error':'info'),code:l.code??(l.kind==='failed_turn'?'TURN_FAILED':l.kind??'WORLD_LOG'),message:l.message??l.summary??(l.kind==='failed_turn'?`推演${l.status==='partial'?'部分提交':'失败'} · ${l.issueCount??0} 项问题`:l.code??''),details:l.details??l.issues??null}));}
+export function referenceReceipts(state={},logs=[]){return (state.receipts??[]).filter(r=>!r.chatId||r.chatId===state.chatId).map((r,i)=>({id:r.receiptId??r.receipt?.receiptId??`receipt-${i}`,turn:(state.receipts?.length??0)-i,t:typeof r.recordedAt==='number'?new Date(r.recordedAt).toLocaleString('zh-CN',{hour12:false}):text(r.recordedAt??r.at??''),ok:r.status==='committed'||r.status==='duplicate'||r.receipt?.status==='committed'||r.ok===true,status:r.status??r.receipt?.status??'unknown',retryable:r.retryable===true&&i===0&&!!state.retryableCommit,
+  m:text(r.summary??r.receipt?.summary??r.message??r.status??'推演回执'),issue:text(r.errorCode??r.receipt?.issues?.[0]?.code??''),detail:r.detail??null,logs:logs.filter(l=>l.turnId===r.receiptId)}));}
+
 /** Convert geometry once; the original renderer keeps its original colors, materials and gestures. */
 export function referenceGeometry(map, document) {
   const layout = document?.layout;
@@ -103,8 +107,8 @@ export function projectReferenceData({state={},mapView,sceneView,catalogView,tas
   out.meta.protagonistId=protagonistId??maps.flatMap(m=>m.points??[]).find(p=>p.isProtagonist)?.entityId??out.CAST.find(c=>c.role==='主角'||c.role==='protagonist')?.id??null;
   out.meta.initialNodeId=out.CAST.find(c=>c.id===out.meta.protagonistId)?.mapNodeId??out.ROOT.id;
   for(const node of nodes.values())for(const mark of node.marks)if(mark.type==='char'){const c=out.CAST.find(c=>c.id===mark.id);if(c){mark.c=c.c;mark.initial=c.initial;mark.hero=mark.id===out.meta.protagonistId;}}
-  out.RECEIPTS=(state.receipts??[]).map((r,i)=>({id:r.receiptId??r.receipt?.receiptId??`receipt-${i}`,turn:i+1,t:text(r.recordedAt??r.at??''),ok:r.status==='committed'||r.receipt?.status==='committed'||r.ok===true,m:text(r.summary??r.receipt?.summary??r.message??r.status??'推演回执'),issue:text(r.receipt?.issues?.[0]?.code??r.errorCode??'')}));
-  out.DIAGNOSTICS=[...items(logsView),...diagnostics,...(state.lastError?[typeof state.lastError==='string'?{message:state.lastError,code:'WORLD_ACTION_FAILED',level:'error'}:{...state.lastError,level:'error'}]:[])].map((l,i)=>({id:l.logId??l.id??`log-${i}`,t:text(l.at??l.createdAt??''),level:l.level??(l.kind==='issue'?'warn':'info'),code:l.code??l.kind??'WORLD_LOG',message:l.message??l.summary??'',details:typeof(l.details??l.issues)==='object'?JSON.stringify(l.details??l.issues):l.details??l.issues??''}));
+  out.RECEIPTS=referenceReceipts(state,items(logsView));
+  out.DIAGNOSTICS=referenceDiagnostics([...items(logsView),...diagnostics,...(state.lastError?[typeof state.lastError==='string'?{message:state.lastError,code:'WORLD_ACTION_FAILED',level:'error'}:{...state.lastError,level:'error'}]:[])]);
   for(const f of flows){const node=nodes.get(f.mapId);if(!node||!f.path?.points?.length)continue;const tr=node.transform,convert=f.path.units==='cells'&&tr.units==='meters';if(convert&&!(Number.isFinite(tr.metersPerCell)&&tr.metersPerCell>0))continue;const units=convert?tr.metersPerCell:1;
     const points=f.path.points.map(p=>[(p.x*units-(tr.bounds.x??0)-tr.bounds.w/2)*tr.scale,(p.y*units-(tr.bounds.y??0)-tr.bounds.h/2)*tr.scale]);
     const edge={id:f.flowId,entityId:f.moverEntityId,from:points[0],to:points.at(-1),via:points.length>2?points[Math.floor(points.length/2)]:null,points,progress:typeof f.progress==='number'?Math.min(1,Math.max(0,f.progress)):null,pct:typeof f.progress==='number'?f.progress*100:null,known:true,c:COLORS[3],name:f.label};

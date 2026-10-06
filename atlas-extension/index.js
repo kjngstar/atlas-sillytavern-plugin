@@ -3214,10 +3214,10 @@ async function connectOnce() {
     });
     let diagnosticRenderTimer = null;
     const unsubscribeDiagnostics = atlasDiagnostics.subscribe(() => {
-      if (core.getState().page !== "logs" || diagnosticRenderTimer) return;
+      if (core.getState().panelOpen === false || diagnosticRenderTimer) return;
       diagnosticRenderTimer = setTimeout(() => {
         diagnosticRenderTimer = null;
-        if (core.getState().page === "logs") rerender();
+        if (core.getState().panelOpen !== false) rerender();
       }, 150);
     });
     installMenuButton(core);
