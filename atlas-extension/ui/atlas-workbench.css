@@ -1,0 +1,262 @@
+/* U03：新工作台样式。
+   纪律：
+   - 全部作用域限定在 .atlas-starmap（工作台根）之内，绝不 reset body / button，不污染酒馆原有样式。
+   - 颜色/边框/光效一律走 --aw-* / --am-* 令牌，不写死外部主题色（缺令牌时用中性兜底）。
+   - canvas 容器 min-width:0（否则 flex 子项撑破窄屏）；320px 下不出现横向溢出。
+   - 悬停只描边/发光，不用 translateY，避免标点跳动。 */
+
+.atlas-starmap {
+  --awb-radius: var(--aw-radius, 10px);
+  --awb-border: var(--aw-border, rgba(127, 212, 255, 0.22));
+  --awb-panel: var(--aw-panel, rgba(9, 16, 28, 0.72));
+  --awb-text: var(--aw-text, #dce9fb);
+  --awb-muted: var(--aw-muted, #91a9c3);
+  --awb-accent: var(--aw-accent, #43e0ff);
+  --awb-gold: var(--am-gold, #ffc247);
+  --awb-mint: var(--am-mint, #39e0a0);
+  --awb-motion: var(--aw-motion, 160ms);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  color: var(--awb-text);
+}
+
+.atlas-starmap .as-body {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+/* 中央地图：canvas 容器必须能收缩，否则 320px 会溢出 */
+.atlas-starmap .aw-center,
+.atlas-starmap .as-canvas-host {
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  position: relative;
+}
+
+.atlas-starmap canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+}
+
+/* 左下比例尺：固定 96 CSS px，图例在其上方折叠 */
+.atlas-starmap .aw-scale,
+.atlas-starmap .as-scale {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  width: 96px;
+  max-width: 96px;
+  pointer-events: none;
+}
+
+.atlas-starmap .as-maplegend {
+  position: absolute;
+  left: 10px;
+  bottom: 46px;
+  max-width: 220px;
+  pointer-events: auto;
+}
+
+.atlas-starmap .as-maplegend[hidden] { display: none; }
+
+/* 工作台插槽：树 / 详情 / 目录 / 时间线 / 摘要 / 日志 */
+/* U15：空间画布（SQL 视图生效时的唯一绘制面）。铺满视口、垫在名单/弹层之下。 */
+.atlas-starmap .aw-viewport,
+.atlas-workbench .aw-viewport { position: relative; }
+
+.aw-viewport .aw-spatial-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  z-index: 1;
+  touch-action: none;
+  cursor: grab;
+}
+
+/* U05 返工：新树（buildMapTree 节点）生效时隐藏旧树列表——同一时刻只有一份树。 */
+.atlas-starmap.awb-tree-authoritative .as-tree-list,
+.atlas-workbench.awb-tree-authoritative .as-tree-list { display: none; }
+
+.atlas-starmap .awb-slot {
+  min-width: 0;
+  overflow: auto;
+  padding: 6px 8px;
+  border-top: 1px solid var(--awb-border);
+}
+
+.atlas-starmap .awb-empty {
+  margin: 4px 0;
+  color: var(--awb-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* Catalog selections use the same visible inspector as map selections. */
+.atlas-starmap:not([data-page="map"]).is-inspector-open .aw-side { display: flex; }
+.atlas-starmap .as-inspector-content:has(.awb-card) .as-inspector-roster { display: none; }
+
+/* 地图层级树 */
+.atlas-starmap .awb-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding-left: calc(var(--awb-depth, 0) * 12px);
+}
+
+.atlas-starmap .awb-tree-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.atlas-starmap .awb-tree-row.is-active > .awb-tree-label {
+  color: var(--awb-accent);
+  font-weight: 600;
+}
+
+/* 悬停只描边，不位移 */
+.atlas-starmap .awb-tree-label:hover,
+.atlas-starmap .awb-tree-label:focus-visible {
+  outline: 1px solid var(--awb-accent);
+  outline-offset: 1px;
+}
+
+.atlas-starmap .awb-tree-meta { color: var(--awb-muted); font-size: 11px; }
+
+/* 详情卡 */
+.atlas-starmap .awb-card {
+  border: 1px solid var(--awb-border);
+  border-radius: var(--awb-radius);
+  background: var(--awb-panel);
+  padding: 8px 10px;
+}
+
+.atlas-starmap .awb-card h3 { margin: 0 0 4px; font-size: 14px; }
+.atlas-starmap .awb-card-meta { margin: 0; color: var(--awb-muted); font-size: 12px; }
+.atlas-starmap .awb-card-intro { margin: 6px 0 0; font-size: 13px; line-height: 1.6; }
+.atlas-starmap .awb-card-block { margin-top: 8px; }
+.atlas-starmap .awb-card-block h4 { margin: 0 0 4px; font-size: 12px; color: var(--awb-muted); }
+.atlas-starmap .awb-card-block ul { margin: 0; padding-left: 16px; font-size: 12px; line-height: 1.6; }
+.atlas-starmap .awb-badge {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 6px;
+  border: 1px solid var(--awb-gold);
+  border-radius: 999px;
+  color: var(--awb-gold);
+  font-size: 11px;
+}
+.atlas-starmap .awb-tool,
+.atlas-starmap .awb-chip {
+  margin: 4px 4px 0 0;
+  padding: 3px 8px;
+  border: 1px solid var(--awb-border);
+  border-radius: var(--awb-radius);
+  background: var(--awb-panel);
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+/* 目录 */
+.atlas-starmap .awb-catalog-list { margin: 0; padding: 0; list-style: none; }
+.atlas-starmap .awb-catalog-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 6px;
+  border: 1px solid var(--awb-border);
+  border-radius: var(--awb-radius);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.atlas-starmap .awb-catalog-entry:hover { border-color: var(--awb-accent); }
+.atlas-starmap .awb-catalog-meta,
+.atlas-starmap .awb-catalog-summary { color: var(--awb-muted); font-size: 11px; }
+
+/* 时间线 / 摘要 / 日志 */
+.atlas-starmap .awb-timeline-list,
+.atlas-starmap .awb-summary-list,
+.atlas-starmap .awb-log-list { margin: 0; padding: 0; list-style: none; }
+
+.atlas-starmap .awb-timeline-entry,
+.atlas-starmap .awb-summary-entry {
+  display: flex;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: var(--awb-radius);
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.atlas-starmap .awb-timeline-entry.is-pending { color: var(--awb-muted); }
+.atlas-starmap .awb-timeline-kind { color: var(--awb-accent); }
+.atlas-starmap .awb-timeline-head,
+.atlas-starmap .awb-summary-head,
+.atlas-starmap .awb-log-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.atlas-starmap .awb-summary-meta { color: var(--awb-muted); font-size: 11px; }
+.atlas-starmap .awb-log-body { padding-left: 10px; border-left: 1px dashed var(--awb-border); }
+.atlas-starmap .awb-log-message,
+.atlas-starmap .awb-log-path,
+.atlas-starmap .awb-log-dep,
+.atlas-starmap .awb-log-detail {
+  margin: 2px 0;
+  font-size: 11px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+.atlas-starmap .awb-log-level { font-size: 10px; padding: 0 4px; border-radius: 4px; border: 1px solid var(--awb-border); }
+.atlas-starmap .awb-log-level.is-error { color: #ff6b6b; }
+.atlas-starmap .awb-log-level.is-warn { color: var(--awb-gold); }
+
+/* 窄屏：侧栏变抽屉，不产生横向滚动 */
+@media (max-width: 900px) {
+  .atlas-starmap .as-tree-pane,
+  .atlas-starmap .aw-side {
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: min(78vw, 320px);
+    z-index: 3;
+  }
+  .atlas-starmap .aw-scale { width: 64px; max-width: 64px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .atlas-starmap * { animation: none !important; transition: none !important; }
+}

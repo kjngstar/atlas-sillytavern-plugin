@@ -18,7 +18,7 @@ import {
   allowedOpsForPhase,
   isSemanticOp,
 } from './atlas-ops-contract.ts';
-import { WHY_MAX_CHARS } from './atlas-runtime-limits.ts';
+import { ATLAS_RUNTIME_LIMITS, WHY_MAX_CHARS } from './atlas-runtime-limits.ts';
 import { ATLAS_ERROR_CODES, toIssue } from './atlas-ops-errors.ts';
 
 export type NormalizeResult = {
@@ -29,6 +29,220 @@ export type NormalizeResult = {
 };
 
 export type MinimumFieldResult = { ok: true } | { ok: false; issue: Issue };
+
+/* ───────────── map.layout.request：小约束协议的常量与 spec 校验 ───────────── */
+
+/** 生成器模板种类：只接受这两个值，其余拒绝而不是静默挑一个。 */
+export const LAYOUT_REQUEST_KINDS = ['floor', 'city'] as const;
+
+/** spec 里允许的集合（逐条校验；AI 省略某项表示「保持不变」）。 */
+export const LAYOUT_SPEC_COLLECTIONS = ['rooms', 'contents', 'actors', 'items', 'districts', 'buildings'] as const;
+
+/** spec 顶层的生成参数；未列出的键按未知字段处理（警告后丢弃）。 */
+export const LAYOUT_SPEC_SCALARS = [
+  'name',
+  'width',
+  'height',
+  'corridorWidth',
+  'riverWidth',
+  'blocksPerDistrict',
+  'mapId',
+  'rebuild',
+  'deletes',
+] as const;
+
+/**
+ * spec 里由程序独占的字段：AI 提供时忽略并警告。
+ * seed/locks/metersPerCell 等一旦被模型改写就会重排已保存布局，必须拦在这里。
+ */
+export const LAYOUT_SPEC_PROGRAM_KEYS = [
+  'id',
+  'parentId',
+  'seed',
+  'scope',
+  'chatId',
+  'chatUid',
+  'branchId',
+  'revision',
+  'rowRev',
+  'row_rev',
+  'locks',
+  'viewMode',
+  'requestId',
+  'operationId',
+  'createdTurnId',
+  'turnId',
+  'metersPerCell',
+  'scale',
+  'inputSignature',
+] as const;
+
+const MAX_LAYOUT_SPEC_ID_CHARS = 160;
+
+export type LayoutSpecResult = {
+  ok: boolean;
+  /** 规范化后的 spec（剥离程序字段、保留自由文本字节）。 */
+  spec: Record<string, unknown> | null;
+  issues: Issue[];
+};
+
+function utf8Bytes(value: unknown): number {
+  try {
+    return new TextEncoder().encode(JSON.stringify(value ?? null)).length;
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
+/**
+ * 逐条校验 layout spec：结构错误（error）拒绝该操作，程序字段（warning）忽略后继续。
+ * 自由文本（name/description 等）只做透传，绝不改写字节。
+ */
+export function normalizeLayoutSpec(
+  data: Record<string, unknown>,
+  op?: { opId?: string; line?: number },
+): LayoutSpecResult {
+  const issues: Issue[] = [];
+  const spec: Record<string, unknown> = {};
+  const raw = data['spec'];
+
+  if (!isPlainObject(raw)) {
+    return {
+      ok: false,
+      spec: null,
+      issues: [
+        issue(
+          ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING,
+          '$.data.spec',
+          'map.layout.request requires data.spec as an object with the changed constraints (rooms/contents/actors/items or districts/buildings); example: {"op":"map.layout.request","ref":"M2","data":{"kind":"floor","spec":{"rooms":[{"id":"L3","side":"north","w":6,"h":5}]}}}',
+          { severity: 'error', retryable: true, opId: op?.opId, line: op?.line },
+        ),
+      ],
+    };
+  }
+
+  const budget = ATLAS_RUNTIME_LIMITS.layoutSpecUtf8Bytes;
+  const size = utf8Bytes(raw);
+  if (size > budget) {
+    return {
+      ok: false,
+      spec: null,
+      issues: [
+        issue(
+          ATLAS_ERROR_CODES.OPERATION_TOO_LARGE,
+          '$.data.spec',
+          `map.layout.request spec is ${size} bytes, over the ${budget} byte budget; split the request or describe fewer constraints`,
+          { severity: 'error', retryable: true, opId: op?.opId, line: op?.line },
+        ),
+      ],
+    };
+  }
+
+  for (const key of Object.keys(raw)) {
+    if ((LAYOUT_SPEC_PROGRAM_KEYS as readonly string[]).includes(key)) {
+      issues.push(
+        issue(
+          ATLAS_ERROR_CODES.SYSTEM_FIELD_IGNORED,
+          `$.data.spec.${key}`,
+          `map.layout.request: program-owned field spec.${key} ignored (identity, scale and seed come from the map row and the program)`,
+          { opId: op?.opId, line: op?.line },
+        ),
+      );
+      continue;
+    }
+    spec[key] = raw[key];
+  }
+
+  // 逐条校验集合：结构错误只拒绝该操作，其他操作继续。
+  for (const key of LAYOUT_SPEC_COLLECTIONS) {
+    const value = spec[key];
+    if (value === undefined || value === null) continue;
+    if (!Array.isArray(value)) {
+      return {
+        ok: false,
+        spec: null,
+        issues: [
+          issue(
+            ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING,
+            `$.data.spec.${key}`,
+            `map.layout.request: spec.${key} must be an array`,
+            { severity: 'error', retryable: true, opId: op?.opId, line: op?.line },
+          ),
+        ],
+      };
+    }
+    for (let i = 0; i < value.length; i += 1) {
+      const entry = value[i];
+      const path = `$.data.spec.${key}[${i}]`;
+      if (!isPlainObject(entry)) {
+        return {
+          ok: false,
+          spec: null,
+          issues: [
+            issue(
+              ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING,
+              path,
+              `map.layout.request: spec.${key}[${i}] must be an object with an id`,
+              { severity: 'error', retryable: true, opId: op?.opId, line: op?.line },
+            ),
+          ],
+        };
+      }
+      const id = entry['id'];
+      if (typeof id !== 'string' || id.trim() === '' || id.length > MAX_LAYOUT_SPEC_ID_CHARS) {
+        return {
+          ok: false,
+          spec: null,
+          issues: [
+            issue(
+              ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING,
+              `${path}.id`,
+              `map.layout.request: spec.${key}[${i}].id must be a non-empty string of at most ${MAX_LAYOUT_SPEC_ID_CHARS} chars`,
+              { severity: 'error', retryable: true, opId: op?.opId, line: op?.line },
+            ),
+          ],
+        };
+      }
+    }
+  }
+
+  // deletes：删除必须显式表达，形状错误同样只拒绝该操作。
+  const deletes = spec['deletes'];
+  if (deletes !== undefined && deletes !== null) {
+    if (!isPlainObject(deletes)) {
+      return {
+        ok: false,
+        spec: null,
+        issues: [
+          issue(
+            ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING,
+            '$.data.spec.deletes',
+            'map.layout.request: spec.deletes must be an object mapping collection names to id arrays',
+            { severity: 'error', retryable: true, opId: op?.opId, line: op?.line },
+          ),
+        ],
+      };
+    }
+    for (const [key, value] of Object.entries(deletes)) {
+      if (!(LAYOUT_SPEC_COLLECTIONS as readonly string[]).includes(key) || !Array.isArray(value)) {
+        return {
+          ok: false,
+          spec: null,
+          issues: [
+            issue(
+              ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING,
+              `$.data.spec.deletes.${key}`,
+              `map.layout.request: spec.deletes.${key} must be an array of ids`,
+              { severity: 'error', retryable: true, opId: op?.opId, line: op?.line },
+            ),
+          ],
+        };
+      }
+    }
+  }
+
+  return { ok: true, spec, issues };
+}
 
 /**
  * §8.4 “可选参数”列的冻结副本（含各操作的最少参数）。
@@ -173,6 +387,11 @@ export const OP_KNOWN_FIELDS: Record<string, readonly string[]> = {
     'access',
     'duration',
   ],
+  /**
+   * map.layout.request：模型只提交「当前地图的变化约束」，不输出完整 scene。
+   * data = {kind: floor|city, spec: {…}}；程序负责生成几何并落库。
+   */
+  'map.layout.request': ['kind', 'spec'],
   [ATLAS_NOOP]: [],
 };
 
@@ -226,6 +445,9 @@ const OP_ENUM_DICTS: Record<string, Record<string, readonly string[]>> = {
   },
   'route.propose': {
     kind: ['adjacent', 'road', 'path', 'door', 'stairs', 'air', 'water', 'portal', 'estimated'],
+  },
+  'map.layout.request': {
+    kind: LAYOUT_REQUEST_KINDS,
   },
 };
 
@@ -934,6 +1156,41 @@ export function validateMinimum(
           `$.data.${missing[0]}`,
           `route.propose requires from_ref and to_ref; missing: ${missing.join(', ')}; example: {"op":"route.propose","data":{"from_ref":"L1","to_ref":"L2","kind":"road"}}`,
         );
+      }
+      return { ok: true };
+    }
+
+    case 'map.layout.request': {
+      if (ref === '') {
+        return fail(
+          '$.ref',
+          'map.layout.request requires ref naming the map; example: {"op":"map.layout.request","ref":"M2","data":{"kind":"floor","spec":{"rooms":[{"id":"L3","side":"north","w":6,"h":5}]}}}',
+        );
+      }
+      const kind = text('kind').toLowerCase();
+      if (kind === '') {
+        return fail(
+          '$.data.kind',
+          `map.layout.request requires data.kind ∈ {${LAYOUT_REQUEST_KINDS.join(',')}}; example: {"op":"map.layout.request","ref":"${ref}","data":{"kind":"floor","spec":{"rooms":[{"id":"L3","side":"north","w":6,"h":5}]}}}`,
+        );
+      }
+      if (!(LAYOUT_REQUEST_KINDS as readonly string[]).includes(kind)) {
+        return fail(
+          '$.data.kind',
+          `map.layout.request kind must be one of {${LAYOUT_REQUEST_KINDS.join(',')}}; got ${JSON.stringify(text('kind'))}`,
+        );
+      }
+      if (!meaningful('spec')) {
+        return fail(
+          '$.data.spec',
+          `map.layout.request requires data.spec (object of changed constraints); example: {"op":"map.layout.request","ref":"${ref}","data":{"kind":"${kind}","spec":{"rooms":[{"id":"L3","side":"north","w":6,"h":5}]}}}`,
+        );
+      }
+      // 深校验（集合逐条、程序字段忽略）在 normalizeLayoutSpec：error 只拒绝本操作。
+      const checked = normalizeLayoutSpec(data, parsed);
+      if (!checked.ok) {
+        const first = checked.issues.find((i) => i.severity === 'error') ?? checked.issues[0];
+        return { ok: false, issue: first };
       }
       return { ok: true };
     }

@@ -552,10 +552,10 @@ var DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA = [
 var DEFAULT_WORLD_TURN_SYSTEM_PROMPT = DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA[0].content;
 var LORE_SUPPLEMENT_HEADER = "【世界书资料（当前角色卡，可能有噪声，仅供理解世界）】";
 function wrapWorldbookContext(content) {
-  const text = String(content ?? "");
-  return text ? `
+  const text2 = String(content ?? "");
+  return text2 ? `
 <worldbook_context>
-${text}
+${text2}
 </worldbook_context>
 ` : "";
 }
@@ -715,14 +715,14 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
         payload = firstSsePayload(rawText);
       }
       const truncated = choiceFinishReason(payload) === "length";
-      const text2 = extractAssistantText(payload);
-      if (text2 === null || text2.trim().length === 0) {
+      const text3 = extractAssistantText(payload);
+      if (text3 === null || text3.trim().length === 0) {
         const emptyChoices = Boolean(
           payload && typeof payload === "object" && Array.isArray(payload.choices) && payload.choices.length === 0
         );
         return { text: null, gatewayError: gatewayErrorMessage(payload), rawText, emptyChoices, truncated };
       }
-      return { text: text2.trim(), gatewayError: null, rawText, emptyChoices: false, truncated };
+      return { text: text3.trim(), gatewayError: null, rawText, emptyChoices: false, truncated };
     };
     let parsed = await parseCall(response);
     if (controller.signal.aborted) return fail3(ATLAS_ERROR_CODES.API_TIMEOUT, `推演请求超过 ${timeoutMs}ms 超时。`, true);
@@ -758,8 +758,8 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
         status
       );
     }
-    const text = parsed.text;
-    if (text === null || text.length === 0) {
+    const text2 = parsed.text;
+    if (text2 === null || text2.length === 0) {
       if (parsed.emptyChoices) {
         return fail3(
           ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
@@ -794,7 +794,7 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
     }
     return {
       ok: true,
-      text,
+      text: text2,
       status,
       durationMs: now() - startedAt,
       ...rescueAttempted ? { notice: "已按 MiniMax 订阅密钥自动切换 Anthropic 路由（…/anthropic）重试成功。建议到「API」页把该连接的接口协议改为 Claude（Anthropic）、端点改为 …/anthropic 并保存。" } : {}
@@ -1530,13 +1530,13 @@ function applySettingsCommand(settings, command, deps = {}) {
       if (typeof preset.name !== "string" || !preset.name.trim() || preset.name.length > MAX_NAME_CHARS) {
         return fail2(settings, "INVALID_PAYLOAD", "提示词名称必填且不超过 64 字。");
       }
-      const text = typeof preset.systemPrompt === "string" ? preset.systemPrompt.trim() : "";
+      const text2 = typeof preset.systemPrompt === "string" ? preset.systemPrompt.trim() : "";
       const segments = normalizePromptSegments(preset.segments);
-      if (!text && segments.length === 0) return fail2(settings, "INVALID_PAYLOAD", "提示词正文不能为空（空 = 内置默认，无需保存；分段预设请至少给出 1 段）。");
+      if (!text2 && segments.length === 0) return fail2(settings, "INVALID_PAYLOAD", "提示词正文不能为空（空 = 内置默认，无需保存；分段预设请至少给出 1 段）。");
       if (segments.length > 0 && !segments.some((segment) => segment.enabled !== false)) {
         return fail2(settings, "INVALID_PAYLOAD", "请至少启用一个非空提示词条目，再保存预设。");
       }
-      if (text.length > MAX_PROMPT_CHARS) return fail2(settings, "FIELD_LIMIT_EXCEEDED", `提示词不超过 ${MAX_PROMPT_CHARS} 字。`);
+      if (text2.length > MAX_PROMPT_CHARS) return fail2(settings, "FIELD_LIMIT_EXCEEDED", `提示词不超过 ${MAX_PROMPT_CHARS} 字。`);
       const targetId = preset.id === void 0 ? null : normalizeId(preset.id);
       if (preset.id !== void 0 && targetId === null) return fail2(settings, "INVALID_PAYLOAD", "预设 ID 形状非法。");
       const existingIndex = targetId ? settings.promptPresets.findIndex((p) => p.id === targetId) : -1;
@@ -1546,9 +1546,9 @@ function applySettingsCommand(settings, command, deps = {}) {
       }
       const usedNames = new Set(settings.promptPresets.filter((_, i) => i !== existingIndex).map((p) => p.name));
       const entry = {
-        id: targetId ?? resolveId("prompt", settings.promptPresets.length, text, deps, new Set(settings.promptPresets.map((p) => p.id))),
+        id: targetId ?? resolveId("prompt", settings.promptPresets.length, text2, deps, new Set(settings.promptPresets.map((p) => p.id))),
         name: uniqueName(preset.name, usedNames),
-        systemPrompt: text,
+        systemPrompt: text2,
         ...segments.length > 0 ? { segments } : {},
         ...normalizeContextTurnCount(preset.contextTurnCount) !== null ? { contextTurnCount: normalizeContextTurnCount(preset.contextTurnCount) } : {},
         updatedAt: now
@@ -1717,19 +1717,19 @@ function applyLegacySettingsPatch(settings, body, deps = {}) {
     return id;
   };
   const upsertPrompt = (legacy) => {
-    const text = legacy.systemPrompt.trim();
-    if (!text || text.length > MAX_PROMPT_CHARS) return null;
-    const existing = next.promptPresets.find((p) => p.systemPrompt === text);
+    const text2 = legacy.systemPrompt.trim();
+    if (!text2 || text2.length > MAX_PROMPT_CHARS) return null;
+    const existing = next.promptPresets.find((p) => p.systemPrompt === text2);
     if (existing) return existing.id;
     if (next.promptPresets.length >= MAX_PRESETS_PER_LIBRARY) return null;
-    const id = resolveId("prompt", next.promptPresets.length, text, deps, usedPromptIds);
+    const id = resolveId("prompt", next.promptPresets.length, text2, deps, usedPromptIds);
     const names = new Set(next.promptPresets.map((p) => p.name));
     next = {
       ...next,
       promptPresets: [...next.promptPresets, {
         id,
         name: uniqueName(`${legacy.name} · 提示词`, names),
-        systemPrompt: text,
+        systemPrompt: text2,
         updatedAt: now
       }]
     };
@@ -1937,6 +1937,111 @@ function createSqlModelPort(options) {
   };
 }
 
+// src/atlas-world-summary.ts
+var TECHNICAL_PATTERNS = [
+  /MIGRATED/i,
+  /TABLE_MIGRATED/i,
+  /SCHEMA/i,
+  /SQL_/i,
+  /WORLD_TURN/i,
+  /RECEIPT/i,
+  /第\s*\d+\s*[→\->]\s*\d+\s*时段/,
+  /应用\s*\d+\s*行/,
+  /^[A-Z][A-Z0-9_]{5,}$/
+];
+function text(value) {
+  if (value == null) return "";
+  const out = String(value).trim();
+  return out;
+}
+function isTechnical(line) {
+  return TECHNICAL_PATTERNS.some((pattern) => pattern.test(line));
+}
+function visible(input, rows) {
+  if (!Array.isArray(rows)) return [];
+  const author = input.viewMode === "author";
+  return rows.filter((row) => row && typeof row === "object" && (author || row.hidden !== true && row.secret !== true));
+}
+function nameOf(row) {
+  return text(row.actorName) || text(row.title) || text(row.summary);
+}
+function lineForEvent(row) {
+  const actor = text(row.actorName);
+  const where = text(row.locationName);
+  const what = text(row.title) || text(row.summary);
+  if (!actor && !what) return null;
+  if (actor && where && what) return `${actor} 在${where}：${what}`;
+  if (actor && what) return `${actor}：${what}`;
+  if (actor && where) return `${actor} 出现在${where}`;
+  return what || null;
+}
+function lineForTask(row) {
+  const actor = text(row.actorName);
+  const to = text(row.toLocationName);
+  const from = text(row.fromLocationName);
+  if (row.blocked === true || row.status === "blocked") {
+    return actor ? `${actor} 还在等待条件，没有出发` : null;
+  }
+  if (actor && from && to) return `${actor} 从${from}前往${to}`;
+  if (actor && to) return `${actor} 正在前往${to}`;
+  return lineForEvent(row);
+}
+function lineForFront(row) {
+  const where = text(row.locationName);
+  const what = text(row.title) || text(row.summary);
+  if (!what) return null;
+  return where ? `${where}传出消息：${what}` : `有消息在传：${what}`;
+}
+function lineForChange(row) {
+  const who = nameOf(row);
+  const where = text(row.locationName) || text(row.toLocationName);
+  const kind = text(row.kind);
+  if (kind === "departed" || kind === "leave") return who && where ? `${who} 离开了${where}` : null;
+  if (kind === "arrived" || kind === "arrival") return who && where ? `${who} 抵达${where}` : null;
+  return lineForEvent(row);
+}
+function buildProgramLines(input, limit = 3) {
+  const out = [];
+  const push = (value) => {
+    const line = text(value);
+    if (!line || isTechnical(line) || out.includes(line)) return;
+    out.push(line);
+  };
+  for (const row of visible(input, input.events)) {
+    if (out.length >= limit) break;
+    push(lineForEvent(row));
+  }
+  for (const row of visible(input, input.tasks)) {
+    if (out.length >= limit) break;
+    push(lineForTask(row));
+  }
+  for (const row of visible(input, input.fronts)) {
+    if (out.length >= limit) break;
+    push(lineForFront(row));
+  }
+  for (const row of visible(input, input.changes)) {
+    if (out.length >= limit) break;
+    push(lineForChange(row));
+  }
+  return out.slice(0, limit);
+}
+function buildVisibleWorldSummarySync(input = {}) {
+  const viewMode = input.viewMode === "author" ? "author" : "pov";
+  const limit = Math.min(3, Math.max(1, Math.trunc(Number(input.maxLines ?? 3) || 3)));
+  const lines = buildProgramLines({ ...input, viewMode }, limit);
+  const visibleCount = visible(input, input.events).length + visible(input, input.tasks).length + visible(input, input.fronts).length + visible(input, input.changes).length;
+  return {
+    turnId: input.turnId ?? null,
+    revision: Number.isInteger(input.revision) ? Number(input.revision) : null,
+    viewMode,
+    lines,
+    source: lines.length ? "program" : "empty",
+    note: lines.length ? null : viewMode === "author" ? "这一轮没有可见变化，也没有后台变化。" : "这一轮没有主角可见的动向。",
+    visibleCount,
+    modelFailed: false
+  };
+}
+
 // src/atlas-lorebook.ts
 var ATLAS_LOREBOOK_LIMITS = {
   /** 单条目关键词上限 */
@@ -1966,7 +2071,7 @@ var ATLAS_LOREBOOK_LIMITS = {
   /** E08：三表上下文单行最大字符 */
   TABLE_LINE_CHARS: 160
 };
-function atlasLorebookDigest(text) {
+function atlasLorebookDigest(text2) {
   const fnv = (input, seed) => {
     let hash = seed >>> 0;
     for (let index = 0; index < input.length; index += 1) {
@@ -1975,8 +2080,8 @@ function atlasLorebookDigest(text) {
     }
     return hash >>> 0;
   };
-  const low = fnv(text, 2166136261).toString(16).padStart(8, "0");
-  const high = fnv(`${text}#atlas`, 16777619).toString(16).padStart(8, "0");
+  const low = fnv(text2, 2166136261).toString(16).padStart(8, "0");
+  const high = fnv(`${text2}#atlas`, 16777619).toString(16).padStart(8, "0");
   return low + high;
 }
 function normalizeAtlasLorebookScope(input) {
@@ -2776,8 +2881,12 @@ var ATLAS_UI_PAGES = [
   { id: "nearby", label: "附近" },
   { id: "changes", label: "变化" },
   { id: "progression", label: "推进" },
+  { id: "characters", label: "人物" },
+  { id: "items", label: "物品" },
+  { id: "events", label: "事件" },
   { id: "api", label: "API" },
   { id: "replace", label: "替换" },
+  { id: "prompts", label: "提示词" },
   { id: "skin", label: "皮肤" },
   { id: "logs", label: "日志" }
 ];
@@ -3695,8 +3804,8 @@ function createAtlasUiCore(deps) {
         const response = parsedResponse.value;
         if (deps.getNarrativeContext) {
           try {
-            const text = await readContextWithDeadline(deps.getNarrativeContext());
-            response.injectionText = typeof text === "string" ? text.slice(0, ATLAS_LIMITS.INJECTION_CHARS) : "";
+            const text2 = await readContextWithDeadline(deps.getNarrativeContext());
+            response.injectionText = typeof text2 === "string" ? text2.slice(0, ATLAS_LIMITS.INJECTION_CHARS) : "";
           } catch {
             response.injectionText = "";
           }
@@ -3850,7 +3959,7 @@ function createAtlasUiCore(deps) {
       let loreSupplement;
       if (deps.getLoreSupplement) {
         try {
-          const text = await readContextWithDeadline(deps.getLoreSupplement({
+          const text2 = await readContextWithDeadline(deps.getLoreSupplement({
             chatId: pending.chatId,
             characterId: null,
             mode: "turn",
@@ -3859,7 +3968,7 @@ function createAtlasUiCore(deps) {
             recentAssistantTexts: commitContext?.recentAssistantTexts ?? []
           }));
           if (disposed || state.chatId !== pending.chatId || generationRevision !== commitRevision) return;
-          if (typeof text === "string" && text.trim().length > 0) loreSupplement = text;
+          if (typeof text2 === "string" && text2.trim().length > 0) loreSupplement = text2;
         } catch {
           loreSupplement = void 0;
         }
@@ -4076,9 +4185,9 @@ function createAtlasUiCore(deps) {
     const ts = now();
     let lastAssistant = "";
     try {
-      const text = deps.getLastAssistantText ? await readContextWithDeadline(deps.getLastAssistantText()) : null;
+      const text2 = deps.getLastAssistantText ? await readContextWithDeadline(deps.getLastAssistantText()) : null;
       if (disposed) return;
-      if (typeof text === "string") lastAssistant = text;
+      if (typeof text2 === "string") lastAssistant = text2;
     } catch {
       lastAssistant = "";
     }
@@ -4088,7 +4197,7 @@ function createAtlasUiCore(deps) {
     let loreSupplement;
     if (deps.getLoreSupplement) {
       try {
-        const text = await readContextWithDeadline(deps.getLoreSupplement({
+        const text2 = await readContextWithDeadline(deps.getLoreSupplement({
           chatId,
           characterId: null,
           mode: "turn",
@@ -4097,7 +4206,7 @@ function createAtlasUiCore(deps) {
           recentAssistantTexts: commitContext?.recentAssistantTexts ?? []
         }));
         if (disposed || state.chatId !== chatId || generationRevision !== manualRevision) return;
-        if (typeof text === "string" && text.trim().length > 0) loreSupplement = text;
+        if (typeof text2 === "string" && text2.trim().length > 0) loreSupplement = text2;
       } catch {
         loreSupplement = void 0;
       }
@@ -4622,7 +4731,7 @@ function createAtlasSettingsRoutes(deps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.75",
+      version: "0.9.76",
       protocolVersion: 1,
       time: now()
     });
@@ -6414,8 +6523,8 @@ function buildWorldFromTemplate(template, opts) {
 function toResponse(like) {
   return like;
 }
-function textResponse(text) {
-  const body = JSON.stringify({ choices: [{ message: { content: text } }] });
+function textResponse(text2) {
+  const body = JSON.stringify({ choices: [{ message: { content: text2 } }] });
   return toResponse({
     ok: true,
     status: 200,
@@ -6473,9 +6582,9 @@ function createTavernMainFetch(deps) {
     const maxTokens = typeof payload?.max_tokens === "number" ? payload.max_tokens : void 0;
     try {
       const response = await helper.generateRaw({ ordered_prompts: prompts, should_stream: false, ...maxTokens ? { max_tokens: maxTokens } : {} });
-      const text = typeof response === "string" ? response : String(response ?? "");
-      if (!text.trim()) return hostErrorJsonResponse("主API生成返回为空。");
-      return textResponse(text.trim());
+      const text2 = typeof response === "string" ? response : String(response ?? "");
+      if (!text2.trim()) return hostErrorJsonResponse("主API生成返回为空。");
+      return textResponse(text2.trim());
     } catch (error2) {
       return hostErrorJsonResponse(`主API生成失败：${error2 instanceof Error ? error2.message : String(error2)}`);
     }
@@ -6513,9 +6622,9 @@ function createTavernProfileFetch(deps) {
         }
         const response = await service.sendRequest(profileId, prompts, maxTokens);
         const content = response?.result?.choices?.[0]?.message?.content ?? response?.content;
-        const text = typeof content === "string" ? content : "";
-        if (!text.trim()) return hostErrorJsonResponse("酒馆连接预设返回为空或形状不支持。");
-        return textResponse(text.trim());
+        const text2 = typeof content === "string" ? content : "";
+        if (!text2.trim()) return hostErrorJsonResponse("酒馆连接预设返回为空或形状不支持。");
+        return textResponse(text2.trim());
       } catch (error2) {
         return hostErrorJsonResponse(`酒馆连接预设调用失败：${error2 instanceof Error ? error2.message : String(error2)}`);
       } finally {
@@ -7770,10 +7879,10 @@ function normalizeFrame2(raw) {
 function cellKey(x, y) {
   return `${x},${y}`;
 }
-function fnv1a(text) {
+function fnv1a(text2) {
   let hash = 2166136261;
-  for (let index = 0; index < text.length; index += 1) {
-    hash ^= text.charCodeAt(index);
+  for (let index = 0; index < text2.length; index += 1) {
+    hash ^= text2.charCodeAt(index);
     hash = Math.imul(hash, 16777619) >>> 0;
   }
   return hash >>> 0;
@@ -8022,12 +8131,12 @@ function matchingExcerpt(content, keywords, limit) {
 }
 function keywordScore(entry, chat, scene) {
   let score = 0;
-  const text = (entry.title ?? "") + "\n" + (entry.keys ?? []).join("\n") + "\n" + entry.content;
+  const text2 = (entry.title ?? "") + "\n" + (entry.keys ?? []).join("\n") + "\n" + entry.content;
   for (const k of chat) {
-    if (k.length > 0 && text.includes(k)) score += 1;
+    if (k.length > 0 && text2.includes(k)) score += 1;
   }
   for (const k of scene) {
-    if (k.length > 0 && text.includes(k)) score += 5;
+    if (k.length > 0 && text2.includes(k)) score += 5;
   }
   return score;
 }
@@ -8156,6 +8265,8 @@ var ATLAS_RUNTIME_LIMITS = {
   responseUtf8Bytes: 256 * 1024,
   operationsPerResponse: 64,
   operationUtf8Bytes: 8 * 1024,
+  /** map.layout.request 的 spec 预算（与空间生成器 inputBytes 一致）。 */
+  layoutSpecUtf8Bytes: 64 * 1024,
   responseJsonDepth: 16,
   conditionDepth: 4,
   repairAttemptsPerBatch: 1,
@@ -8170,13 +8281,18 @@ var ATLAS_RUNTIME_LIMITS = {
   containerDepth: 4,
   actionPlanDepth: 2,
   detailedAttemptsPerTurn: 20,
-  diagnosticPageSize: 100
+  diagnosticPageSize: 100,
+  /** M4：只读目录视图单页上限（完整导出走游标，不允许一次全量）。 */
+  catalogViewMaxLimit: 200,
+  /** M4：只读目录视图默认页大小。 */
+  catalogViewDefaultLimit: 50
 };
 
 // src/atlas-diagnostics.ts
 var LEVELS = /* @__PURE__ */ new Set(["debug", "info", "warn", "error"]);
 var SOURCES = /* @__PURE__ */ new Set(["host", "ui", "engine", "model", "storage", "lorebook", "map"]);
 var OUTCOMES = /* @__PURE__ */ new Set(["started", "success", "skipped", "failed", "recovered"]);
+var SAFE_SCENE_STATUS = /* @__PURE__ */ new Set(["ready", "missing", "invalid", "empty"]);
 var DETAIL_KEYS = /* @__PURE__ */ new Set([
   "route",
   "mode",
@@ -8210,6 +8326,16 @@ var DETAIL_KEYS = /* @__PURE__ */ new Set([
   "locationRef",
   "signalRef",
   "taskRef",
+  // U13：空间模块定位指纹与枚举字段。`*Ref` 同上只接受指纹形态；
+  // module / function 限定小写连字符标识，sceneStatus 限定契约内取值，bytes 限定非负整数。
+  "mapRef",
+  "entityRef",
+  "operationRef",
+  "module",
+  "function",
+  "phase",
+  "sceneStatus",
+  "bytes",
   "collection",
   "droppedCount",
   "limitCount",
@@ -8298,6 +8424,19 @@ function chatFingerprintFromRef(chatRef) {
   const source = /^chat-[a-z0-9]{4,16}$/.test(chatRef) ? chatRef.slice("chat-".length) : chatRef;
   return atlasRefFingerprint(source);
 }
+var SPATIAL_DETAILS = Object.freeze([
+  "chatFingerprint",
+  "branchRef",
+  "mapRef",
+  "entityRef",
+  "operationRef",
+  "module",
+  "function",
+  "phase",
+  "sceneStatus",
+  "bytes",
+  "reasonCode"
+]);
 var ATLAS_NAMED_DIAGNOSTICS = Object.freeze({
   // B：异步迁移 / 写入迟到的聊天身份已与当前上下文不符 → 丢弃，不写回任何表。
   SESSION_IDENTITY_MISMATCH: Object.freeze({
@@ -8349,6 +8488,41 @@ var ATLAS_NAMED_DIAGNOSTICS = Object.freeze({
       "locationRef",
       "reasonCode"
     ])
+  }),
+  // U13：frame_json 不可读 / 与场景契约不符（保留其他地图，不静默归空）。
+  SPATIAL_FRAME_INVALID: Object.freeze({
+    code: "SPATIAL_FRAME_INVALID",
+    level: "error",
+    source: "storage",
+    details: SPATIAL_DETAILS
+  }),
+  // U13：旧修订场景被拿来更新当前地图 → 跳过本次投影，不清掉已有效的旧图。
+  SPATIAL_SCENE_STALE: Object.freeze({
+    code: "SPATIAL_SCENE_STALE",
+    level: "warn",
+    source: "ui",
+    details: SPATIAL_DETAILS
+  }),
+  // U13：候选布局写入失败（整组回退，回执原样给 UI）。
+  SPATIAL_LAYOUT_FAILED: Object.freeze({
+    code: "SPATIAL_LAYOUT_FAILED",
+    level: "error",
+    source: "map",
+    details: SPATIAL_DETAILS
+  }),
+  // U13：路线几何不可用作行走路线（单项跳过，其他路线继续）。
+  SPATIAL_ROUTE_INVALID: Object.freeze({
+    code: "SPATIAL_ROUTE_INVALID",
+    level: "warn",
+    source: "map",
+    details: SPATIAL_DETAILS
+  }),
+  // U13：作用域不一致（分支 / 修订 / 视角），拒绝跨聊天或跨分支落地。
+  SPATIAL_SCOPE_MISMATCH: Object.freeze({
+    code: "SPATIAL_SCOPE_MISMATCH",
+    level: "warn",
+    source: "ui",
+    details: SPATIAL_DETAILS
   })
 });
 function namedDiagnosticSpec(code) {
@@ -8452,11 +8626,19 @@ function sanitizeDiagnostic(raw, now = Date.now) {
         else if (key === "stage" && /^[a-z][a-z0-9_-]{0,63}$/.test(token)) details[key] = token;
         else if (key.endsWith("Ref")) {
           if (isAtlasRefFingerprint(token)) details[key] = token;
+        } else if (key === "module" || key === "function" || key === "phase") {
+          if (/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(token)) details[key] = token;
+        } else if (key === "sceneStatus") {
+          if (SAFE_SCENE_STATUS.has(token)) details[key] = token;
         } else if (key === "collection") {
           if (SAFE_COLLECTIONS.has(token)) details[key] = token;
         }
       } else if (isAtlasRefDetailKey(key)) {
         continue;
+      } else if (key === "bytes") {
+        if (typeof detail === "number" && Number.isInteger(detail) && detail >= 0 && detail <= 67108864) {
+          details[key] = detail;
+        }
       } else if (key === "rowLine") {
         if (typeof detail === "number" && Number.isInteger(detail) && detail >= 0 && detail <= 1e5) {
           details[key] = detail;
@@ -8721,6 +8903,7 @@ export {
   atlasRefFingerprint,
   buildFloorplan,
   buildStarterWorld,
+  buildVisibleWorldSummarySync,
   buildWorldFromTemplate,
   cameraStageTransform,
   cameraZoomPercent,

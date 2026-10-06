@@ -88,6 +88,44 @@ export async function handleSqlChatRequest(session: SqlSession, action: string, 
       povId:protagonist(session),viewMode:'author',assets:((session.chatMetadata.atlas as {database?:AtlasEnvelope}|undefined)?.database?.assets??[])}, {chatUid:session.chatUid,worldUid:session.worldUid,worldName:session.branchName}),binding:logicalBinding};
   }
   assertEnabled(session);
+  // M3/W08：UI 显式重试布局 —— 只给这张地图的 failed 请求开新 ticket/opID，
+  // 走受控 manual turn（不重放事件、不推进时间），成功与否都把回执原样交给 UI。
+  if (action === 'layout-retry') {
+    const mapId = text(body.mapId);
+    if (!mapId) throw new AtlasDbError('INVALID_PAYLOAD', '重试布局需要指定地图', {});
+    const rows = queryBound(session.repo.db, 'SELECT id, frame_json FROM maps WHERE branch_id=? AND id=?', [session.branchId, mapId]);
+    let frame: Record<string, unknown> = {};
+    if (rows.length) {
+      try {
+        const parsed: unknown = JSON.parse(String(rows[0].frame_json));
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) frame = parsed as Record<string, unknown>;
+      } catch { frame = {}; }
+    }
+    const request = frame.atlasLayoutRequest as Record<string, unknown> | undefined;
+    if (!request || String(request.status ?? '') !== 'failed') {
+      return { coreSaved: false, noop: true, issues: [], receipt: null };
+    }
+    const ticket = stableHexHash(JSON.stringify([session.branchId, mapId, text(request.requestId), text(request.failedAtTurnId), session.repo.internal.currentRevision()]));
+    const suffix = ticket.slice(0, 24);
+    const operationId = `op_layout_retry_${suffix}`;
+    const requestId = `req_layout_retry_${suffix}`;
+    const input: TurnInput = {
+      anchor: { chatUid: session.chatUid, branchId: session.branchId, parentTurnId: session.repo.internal.currentHeadTurnId(),
+        hostMessageUid: `layout-retry:${mapId}`, variantKey: 'layout-retry', baseRevision: session.repo.internal.currentRevision(),
+        baseStorageRevision: session.repo.storageRevision, inputHash: stableHexHash(JSON.stringify([mapId, ticket])) },
+      userText: '', assistantText: '', sourceSnapshot: [], phaseBatches: ['observe'], manual: true, narrativeKind: 'manual',
+      operations: [], sceneMaps: false, layoutRetry: { mapId, requestId, operationId },
+      isCurrent: typeof body.isCurrent === 'function' ? body.isCurrent as () => boolean : undefined,
+    };
+    const result = await runSqlTurn(session, input);
+    const receipt = toLegacyTurnReceipt(result.receipt, { coreSaved: result.coreSaved });
+    receipt.status = result.coreSaved ? (result.duplicate ? 'duplicate' : 'committed') : 'failed';
+    if (!result.coreSaved) {
+      receipt.summary = result.issues.map(i => i.message).join('；') || '布局重试未通过校验，旧图保持原状。';
+      receipt.retryable = result.issues.every(i => !['CHAT_CHANGED', 'SESSION_STALE', 'STALE_BASE', 'TURN_CANCELLED'].includes(i.code));
+    }
+    return { receipt, nativeReceipt: result.receipt, coreSaved: result.coreSaved, issues: result.issues, noop: false };
+  }
   if(action.startsWith('map/'))return handleSqlMapAction(session,action,body);
   if (action === 'retry') {
     const parsed = parseAtlasTurnCommitRequest(body);

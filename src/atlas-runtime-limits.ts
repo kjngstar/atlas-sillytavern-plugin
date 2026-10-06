@@ -9,6 +9,8 @@ export const ATLAS_RUNTIME_LIMITS = {
   responseUtf8Bytes: 256 * 1024,
   operationsPerResponse: 64,
   operationUtf8Bytes: 8 * 1024,
+  /** map.layout.request 的 spec 预算（与空间生成器 inputBytes 一致）。 */
+  layoutSpecUtf8Bytes: 64 * 1024,
   responseJsonDepth: 16,
   conditionDepth: 4,
   repairAttemptsPerBatch: 1,
@@ -24,6 +26,10 @@ export const ATLAS_RUNTIME_LIMITS = {
   actionPlanDepth: 2,
   detailedAttemptsPerTurn: 20,
   diagnosticPageSize: 100,
+  /** M4：只读目录视图单页上限（完整导出走游标，不允许一次全量）。 */
+  catalogViewMaxLimit: 200,
+  /** M4：只读目录视图默认页大小。 */
+  catalogViewDefaultLimit: 50,
 } as const;
 
 /**

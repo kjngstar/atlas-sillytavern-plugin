@@ -1,6 +1,6 @@
 {
   "name": "atlas-sillytavern-plugin",
-  "version": "0.9.75",
+  "version": "0.9.76",
   "private": true,
   "description": "Atlas — SillyTavern 世界引擎扩展（独立项目；内嵌 Atlasia 世界核心快照）",
   "type": "module",
@@ -9,6 +9,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "pack": "node tools/pack.mjs",
     "build": "node tools/build.mjs",
+    "sync": "node tools/sync-mirror.mjs",
+    "verify:workbench": "node tools/verify-workbench-browser.mjs",
     "map:lab": "node tools/map-lab/build.mjs",
     "map:verify": "node --experimental-strip-types tools/map-lab/verify.mjs"
   },

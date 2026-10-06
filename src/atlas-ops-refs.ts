@@ -227,6 +227,7 @@ const OP_REF_KINDS: Record<string, RefKind> = {
   'attention.propose': 'knowledge',
   'channel.upsert': 'channel',
   'map.estimate': 'map',
+  'map.layout.request': 'map',
   'route.propose': 'route',
 };
 
@@ -268,8 +269,72 @@ function scanNewRefs(data: unknown, visit: (hit: NewRefHit) => void): void {
   }
 }
 
+/* ─── map.layout.request：spec 内的嵌套引用扫描（P03） ─── */
+
+/**
+ * spec 集合 → 引用字段及期望的实体类型。
+ * `contents` **不在**表里：家具 group 的 id 是局部视觉 ID，
+ * 不进 entity_keys、不声明依赖，只作为 near/on 的匹配池。
+ */
+export const LAYOUT_SPEC_REF_FIELDS: Readonly<Record<string, Readonly<Record<string, RefKind>>>> = {
+  rooms: { id: 'location' },
+  actors: { id: 'character', roomId: 'location' },
+  items: { id: 'item' },
+  districts: { id: 'location' },
+  buildings: { id: 'location', districtId: 'location' },
+};
+
+/** 家具（局部视觉 ID）所在集合。 */
+export const LAYOUT_LOCAL_COLLECTION = 'contents';
+
+/** 指向家具组的局部关联字段：只做池内匹配，绝不解析成实体。 */
+export const LAYOUT_LOCAL_FIELDS: Readonly<Record<string, readonly string[]>> = {
+  actors: ['near'],
+  items: ['on'],
+};
+
+export type LayoutRefHit = {
+  /** 不含 `new:` 前缀的别名。 */
+  alias: string;
+  /** 相对 `$.data.` 的路径，例如 `spec.rooms[0].id`。 */
+  path: string;
+  /** 期望实体类型；局部关联为 null。 */
+  kind: RefKind | null;
+  /** true = 局部视觉 ID（家具组），不建 entity_keys。 */
+  local: boolean;
+};
+
+/**
+ * 扫描 layout spec 里的 `new:` 引用。
+ * 只认上表列出的字段：`description` / `name` 等自由文本里写 `new:xxx`
+ * 一律不算引用（也不会被改写）。
+ */
+export function scanLayoutSpecRefs(spec: unknown, visit: (hit: LayoutRefHit) => void): void {
+  if (spec === null || typeof spec !== 'object') return;
+  const root = spec as Record<string, unknown>;
+  for (const [collection, fields] of Object.entries(LAYOUT_SPEC_REF_FIELDS)) {
+    const rows = root[collection];
+    if (!Array.isArray(rows)) continue;
+    for (let i = 0; i < rows.length; i += 1) {
+      const row = rows[i];
+      if (row === null || typeof row !== 'object') continue;
+      const record = row as Record<string, unknown>;
+      for (const [field, kind] of Object.entries(fields)) {
+        const alias = newAliasOf(record[field]);
+        if (alias === null) continue;
+        visit({ alias, path: `spec.${collection}[${i}].${field}`, kind, local: false });
+      }
+      for (const field of LAYOUT_LOCAL_FIELDS[collection] ?? []) {
+        const alias = newAliasOf(record[field]);
+        if (alias === null) continue;
+        visit({ alias, path: `spec.${collection}[${i}].${field}`, kind: null, local: true });
+      }
+    }
+  }
+}
+
 /** 某个操作声明/引用到的全部 `new:` 别名（不含 new: 前缀）。 */
-function newAliasesOf(value: { ref?: unknown; data?: unknown } | null | undefined): string[] {
+function newAliasesOf(value: { ref?: unknown; op?: unknown; data?: unknown } | null | undefined): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   const push = (alias: string | null): void => {
@@ -281,6 +346,11 @@ function newAliasesOf(value: { ref?: unknown; data?: unknown } | null | undefine
   if (value && typeof value === 'object') {
     push(newAliasOf(value.ref));
     scanNewRefs(value.data, (hit) => push(hit.alias));
+    if (value.op === 'map.layout.request') {
+      scanLayoutSpecRefs((value.data as Record<string, unknown> | undefined)?.['spec'], (hit) =>
+        push(hit.alias),
+      );
+    }
   }
   return out;
 }
@@ -445,6 +515,13 @@ export function declareRefs(
     scanNewRefs(op?.value?.data, (hit) => {
       if (hit.kind !== null && !hints.has(hit.alias)) hints.set(hit.alias, hit.kind);
     });
+    // layout spec 的嵌套引用同样提供类型提示：spec.actors[].id 写 new:elin
+    // 时，即使本批没有 character.upsert 声明，也能推断 elin 期望是 character。
+    if (op?.value?.op === 'map.layout.request') {
+      scanLayoutSpecRefs((op?.value?.data as Record<string, unknown> | undefined)?.['spec'], (hit) => {
+        if (hit.kind !== null && !hit.local && !hints.has(hit.alias)) hints.set(hit.alias, hit.kind);
+      });
+    }
   }
 
   const firstDeclaration = new Map<string, { opId: string; line: number }>();
@@ -632,6 +709,128 @@ export function resolveRef(
         { line: where?.line, opId: where?.opId },
       ),
     ],
+  };
+}
+
+/* ─── map.layout.request：spec 引用的第二遍解析（P03） ─── */
+
+/**
+ * 家具组的局部 ID 池：同时收录原样 id 与去掉 `new:` 后的裸别名，
+ * 这样 `contents[].id` 写 `new:table1` 或 `table1` 都能被 `near`/`on` 命中。
+ */
+function collectLocalIds(spec: Record<string, unknown>): Set<string> {
+  const pool = new Set<string>();
+  const rows = spec[LAYOUT_LOCAL_COLLECTION];
+  if (!Array.isArray(rows)) return pool;
+  for (const row of rows) {
+    if (row === null || typeof row !== 'object') continue;
+    const id = (row as Record<string, unknown>)['id'];
+    if (typeof id !== 'string') continue;
+    const trimmed = id.trim();
+    if (trimmed.length === 0) continue;
+    pool.add(trimmed);
+    const bare = newAliasOf(trimmed);
+    if (bare !== null) pool.add(bare);
+  }
+  return pool;
+}
+
+export type LayoutSpecResolveResult = {
+  ok: boolean;
+  /** 实体 id 已替换为当前分支规范 ID 的 spec 副本；局部关联与自由文本原样保留。 */
+  spec: Record<string, unknown> | null;
+  issues: Issue[];
+  /** 解析出的实体 ID（去重、按出现顺序），供调用方声明依赖，绝不凭名字生成。 */
+  dependencies: string[];
+};
+
+/**
+ * 第二遍：把 layout spec 里的 `new:` 别名换成当前分支的规范 ID。
+ *
+ * - 只解析 `new:` 前缀；其他值（已保存约束的稳定 ID、局部键）原样保留 —— 省略即保持。
+ * - 家具 group 的 `near`/`on` 只在 contents 的局部池里匹配，不建 entity_keys、不入 dependencies。
+ * - `description` 等自由文本里的 `new:` 不是引用，不解析也不改写。
+ * - 类型不符 REF_TYPE_MISMATCH、找不到 REF_UNKNOWN，路径精确到 `spec.rooms[0].id`。
+ */
+export function resolveLayoutSpecRefs(
+  spec: Record<string, unknown>,
+  scope: RefScope,
+  where?: { opId?: string; line?: number },
+): LayoutSpecResolveResult {
+  const issues: Issue[] = [];
+  const dependencies: string[] = [];
+  const seen = new Set<string>();
+  const out: Record<string, unknown> = { ...spec };
+  const localPool = collectLocalIds(spec);
+
+  for (const [collection, fields] of Object.entries(LAYOUT_SPEC_REF_FIELDS)) {
+    const rows = spec[collection];
+    if (!Array.isArray(rows)) continue;
+    const nextRows: unknown[] = [];
+    for (let i = 0; i < rows.length; i += 1) {
+      const row = rows[i];
+      if (row === null || typeof row !== 'object') {
+        nextRows.push(row);
+        continue;
+      }
+      const record: Record<string, unknown> = { ...(row as Record<string, unknown>) };
+
+      for (const [field, kind] of Object.entries(fields)) {
+        const raw = record[field];
+        if (typeof raw !== 'string') continue;
+        const rawText = raw.trim();
+        if (rawText.length === 0) continue;
+        const resolved = resolveRef(rawText, kind, scope, {
+          opId: where?.opId,
+          line: where?.line,
+          field: `spec.${collection}[${i}].${field}`,
+        });
+        if (resolved.entry !== null) {
+          record[field] = resolved.entry.id;
+          if (!seen.has(resolved.entry.id)) {
+            seen.add(resolved.entry.id);
+            dependencies.push(resolved.entry.id);
+          }
+          continue;
+        }
+        // new: 是引用声明，必须可解析；裸 ID 可能只是已保存约束的键或程序未收录的短引用，
+        // 「找不到」时原样保留（省略即保持，绝不按名字猜），但类型不符/歧义必须报出来。
+        const isNewRef = rawText.startsWith(NEW_PREFIX);
+        for (const item of resolved.issues) {
+          if (!isNewRef && item.code === 'REF_UNKNOWN') continue;
+          issues.push(item);
+        }
+      }
+
+      for (const field of LAYOUT_LOCAL_FIELDS[collection] ?? []) {
+        const raw = record[field];
+        const alias = newAliasOf(raw);
+        if (alias === null) continue;
+        const rawText = typeof raw === 'string' ? raw.trim() : '';
+        if (localPool.has(rawText) || localPool.has(alias)) continue;
+        issues.push(
+          makeIssue(
+            'REF_UNKNOWN',
+            refPath(`spec.${collection}[${i}].${field}`),
+            `局部引用「${alias}」不在本请求 spec.${LAYOUT_LOCAL_COLLECTION} 的家具 ID 中；` +
+              `near/on 只认家具组的局部视觉 ID，不建实体、不按名字猜（来源 op ${where?.opId ?? '未知'}）。`,
+            'error',
+            true,
+            { opId: where?.opId, line: where?.line },
+          ),
+        );
+      }
+
+      nextRows.push(record);
+    }
+    out[collection] = nextRows;
+  }
+
+  return {
+    ok: !issues.some((item) => item.severity === 'error'),
+    spec: out,
+    issues,
+    dependencies,
   };
 }
 

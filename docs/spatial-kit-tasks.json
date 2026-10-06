@@ -1,0 +1,1733 @@
+{
+  "baseline": {
+    "version": "0.9.75",
+    "commit": "a0fa40aebb45e8b96d3317ca5aba8636965b8c24"
+  },
+  "contractVersion": "atlas-spatial-kit/1",
+  "taskCount": 89,
+  "tasks": [
+    {
+      "id": "V01",
+      "stage": "M1 正式模块入库",
+      "file": "vendor/atlas-spatial/contracts.mjs",
+      "function": "按原名复制",
+      "depends_on": [],
+      "status": "completed",
+      "actions": "从本包 src/contracts.mjs 原样复制这一个文件；保留相对import与公开函数。不要加入夹具、默认NPC、localStorage世界或模型网络请求。",
+      "acceptance": "与本包该文件SHA256一致；V16完成后 Node import vendor/atlas-spatial/index.mjs 无DOM/Buffer异常。",
+      "edge_cases": "未依赖齐备时只记录待V16统一导入；不要为临时import报错把代码内容删掉。",
+      "evidence": [
+        {
+          "command": "sha256sum 对比 + node --test .tmp/spatial-kit/t（100/100，退出码 0）",
+          "exitCode": 0,
+          "note": "与原包 SHA256 一致"
+        }
+      ]
+    },
+    {
+      "id": "V02",
+      "stage": "M1 正式模块入库",
+      "file": "vendor/atlas-spatial/foundation.mjs",
+      "function": "按原名复制",
+      "depends_on": [
+        "V01"
+      ],
+      "status": "completed",
+      "actions": "从本包 src/foundation.mjs 原样复制这一个文件；保留相对import与公开函数。不要加入夹具、默认NPC、localStorage世界或模型网络请求。",
+      "acceptance": "与本包该文件SHA256一致；V16完成后 Node import vendor/atlas-spatial/index.mjs 无DOM/Buffer异常。",
+      "edge_cases": "未依赖齐备时只记录待V16统一导入；不要为临时import报错把代码内容删掉。",
+      "evidence": [
+        {
+          "command": "sha256sum 对比 + node --test .tmp/spatial-kit/t（100/100，退出码 0）",
+          "exitCode": 0,
+          "note": "与原包 SHA256 一致"
+        }
+      ]
+    },
+    {
+      "id": "V03",
+      "stage": "M1 正式模块入库",
+      "file": "vendor/atlas-spatial/layout-core.mjs",
+      "function": "按原名复制",
+      "depends_on": [
+        "V02"
+      ],
+      "status": "completed",
+      "actions": "从本包 src/layout-core.mjs 原样复制这一个文件；保留相对import与公开函数。不要加入夹具、默认NPC、localStorage世界或模型网络请求。",
+      "acceptance": "与本包该文件SHA256一致；V16完成后 Node import vendor/atlas-spatial/index.mjs 无DOM/Buffer异常。",
+      "edge_cases": "未依赖齐备时只记录待V16统一导入；不要为临时import报错把代码内容删掉。",
+      "evidence": [
+        {
+          "command": "sha256sum 对比 + node --test .tmp/spatial-kit/t（100/100，退出码 0）",
+          "exitCode": 0,
+          "note": "与原包 SHA256 一致"
+        }
+      ]
+    },
+    {
+      "id": "V04",
+      "stage": "M1 正式模块入库",
+      "file": "vendor/atlas-spatial/generation.mjs",
+      "function": "按原名复制",
+      "depends_on": [
+        "V03"
+      ],
+      "status": "completed",
+      "actions": "从本包 src/generation.mjs 原样复制这一个文件；保留相对import与公开函数。不要加入夹具、默认NPC、localStorage世界或模型网络请求。",
+      "acceptance": "与本包该文件SHA256一致；V16完成后 Node import vendor/atlas-spatial/index.mjs 无DOM/Buffer异常。",
+      "edge_cases": "未依赖齐备时只记录待V16统一导入；不要为临时import报错把代码内容删掉。",
+      "evidence": [
+        {
+          "command": "sha256sum 对比 + node --test .tmp/spatial-kit/t（100/100，退出码 0）",
+          "exitCode": 0,
+          "note": "有意偏离原包：按审查补充 20261006 必修项修正，见 docs/spatial-kit-integration-log.md"
+        }
+      ]
+    },
+    {
+      "id": "V05",
+      "stage": "M1 正式模块入库",
+      "file": "vendor/atlas-spatial/placement.mjs",
+      "function": "按原名复制",
+      "depends_on": [
+        "V04"
+      ],
+      "status": "completed",
+      "actions": "从本包 src/placement.mjs 原样复制这一个文件；保留相对import与公开函数。不要加入夹具、默认NPC、localStorage世界或模型网络请求。",
+      "acceptance": "与本包该文件SHA256一致；V16完成后 Node import vendor/atlas-spatial/index.mjs 无DOM/Buffer异常。",
+      "edge_cases": "未依赖齐备时只记录待V16统一导入；不要为临时import报错把代码内容删掉。",
+      "evidence": [
+        {
+          "command": "sha256sum 对比 + node --test .tmp/spatial-kit/t（100/100，退出码 0）",
+          "exitCode": 0,
+          "note": "与原包 SHA256 一致"
+        }
+      ]
+    },
+    {
+      "id": "V06",
+      "stage": "M1 正式模块入库",
+      "file": "vendor/atlas-spatial/storage.mjs",
+      "function": "按原名复制",
+      "depends_on": [
+        "V05"
+      ],
+      "status": "completed",
+      "actions": "从本包 src/storage.mjs 原样复制这一个文件；保留相对import与公开函数。不要加入夹具、默认NPC、localStorage世界或模型网络请求。",
+      "acceptance": "与本包该文件SHA256一致；V16完成后 Node import vendor/atlas-spatial/index.mjs 无DOM/Buffer异常。",
+      "edge_cases": "未依赖齐备时只记录待V16统一导入；不要为临时import报错把代码内容删掉。",
+      "evidence": [
+        {
+          "command": "sha256sum 对比 + node --test .tmp/spatial-kit/t（100/100，退出码 0）",
+          "exitCode": 0,
+          "note": "与原包 SHA256 一致"
+        }
+      ]
+    },
+    {
+      "id": "V07",
+      "stage": "M1 正式模块入库",
+      "file": "vendor/atlas-spatial/view-adapter.mjs",
+      "function": "按原名复制",
+      "depends_on": [
+        "V06"
+      ],
+      "status": "completed",
+      "actions": "从本包 src/view-adapter.mjs 原样复制这一个文件；保留相对import与公开函数。不要加入夹具、默认NPC、localStorage世界或模型网络请求。",
+      "acceptance": "与本包该文件SHA256一致；V16完成后 Node import vendor/atlas-spatial/index.mjs 无DOM/Buffer异常。",
+      "edge_cases": "未依赖齐备时只记录待V16统一导入；不要为临时import报错把代码内容删掉。",
+      "evidence": [
+        {
+          "command": "sha256sum 对比 + node --test .tmp/spatial-kit/t（100/100，退出码 0）",
+          "exitCode": 0,
+          "note": "有意偏离原包：按审查补充 20261006 必修项修正，见 docs/spatial-kit-integration-log.md"
+        }
+      ]
+    },
+    {
+      "id": "V08",
+      "stage": "M1 正式模块入库",
+      "file": "vendor/atlas-spatial/host-context.mjs",
+      "function": "按原名复制",
+      "depends_on": [
+        "V07"
+      ],
+      "status": "completed",
+      "actions": "从本包 src/host-context.mjs 原样复制这一个文件；保留相对import与公开函数。不要加入夹具、默认NPC、localStorage世界或模型网络请求。",
+      "acceptance": "与本包该文件SHA256一致；V16完成后 Node import vendor/atlas-spatial/index.mjs 无DOM/Buffer异常。",
+      "edge_cases": "未依赖齐备时只记录待V16统一导入；不要为临时import报错把代码内容删掉。",
+      "evidence": [
+        {
+          "command": "sha256sum 对比 + node --test .tmp/spatial-kit/t（100/100，退出码 0）",
+          "exitCode": 0,
+          "note": "与原包 SHA256 一致"
+        }
+      ]
+    },
+    {
+      "id": "V09",
+      "stage": "M1 正式模块入库",
+      "file": "vendor/atlas-spatial/candidate-group.mjs",
+      "function": "按原名复制",
+      "depends_on": [
+        "V08"
+      ],
+      "status": "completed",
+      "actions": "从本包 src/candidate-group.mjs 原样复制这一个文件；保留相对import与公开函数。不要加入夹具、默认NPC、localStorage世界或模型网络请求。",
+      "acceptance": "与本包该文件SHA256一致；V16完成后 Node import vendor/atlas-spatial/index.mjs 无DOM/Buffer异常。",
+      "edge_cases": "未依赖齐备时只记录待V16统一导入；不要为临时import报错把代码内容删掉。",
+      "evidence": [
+        {
+          "command": "sha256sum 对比 + node --test .tmp/spatial-kit/t（100/100，退出码 0）",
+          "exitCode": 0,
+          "note": "与原包 SHA256 一致"
+        }
+      ]
+    },
+    {
+      "id": "V10",
+      "stage": "M1 正式模块入库",
+      "file": "vendor/atlas-spatial/candidate-apply.mjs",
+      "function": "按原名复制",
+      "depends_on": [
+        "V09"
+      ],
+      "status": "completed",
+      "actions": "从本包 src/candidate-apply.mjs 原样复制这一个文件；保留相对import与公开函数。不要加入夹具、默认NPC、localStorage世界或模型网络请求。",
+      "acceptance": "与本包该文件SHA256一致；V16完成后 Node import vendor/atlas-spatial/index.mjs 无DOM/Buffer异常。",
+      "edge_cases": "未依赖齐备时只记录待V16统一导入；不要为临时import报错把代码内容删掉。",
+      "evidence": [
+        {
+          "command": "sha256sum 对比 + node --test .tmp/spatial-kit/t（100/100，退出码 0）",
+          "exitCode": 0,
+          "note": "与原包 SHA256 一致"
+        }
+      ]
+    },
+    {
+      "id": "V11",
+      "stage": "M1 正式模块入库",
+      "file": "vendor/atlas-spatial/renderer-drawing.mjs",
+      "function": "按原名复制",
+      "depends_on": [
+        "V10"
+      ],
+      "status": "completed",
+      "actions": "从本包 src/renderer-drawing.mjs 原样复制这一个文件；保留相对import与公开函数。不要加入夹具、默认NPC、localStorage世界或模型网络请求。",
+      "acceptance": "与本包该文件SHA256一致；V16完成后 Node import vendor/atlas-spatial/index.mjs 无DOM/Buffer异常。",
+      "edge_cases": "未依赖齐备时只记录待V16统一导入；不要为临时import报错把代码内容删掉。",
+      "evidence": [
+        {
+          "command": "sha256sum 对比 + node --test .tmp/spatial-kit/t（100/100，退出码 0）",
+          "exitCode": 0,
+          "note": "与原包 SHA256 一致"
+        }
+      ]
+    },
+    {
+      "id": "V12",
+      "stage": "M1 正式模块入库",
+      "file": "vendor/atlas-spatial/renderer.mjs",
+      "function": "按原名复制",
+      "depends_on": [
+        "V11"
+      ],
+      "status": "completed",
+      "actions": "从本包 src/renderer.mjs 原样复制这一个文件；保留相对import与公开函数。不要加入夹具、默认NPC、localStorage世界或模型网络请求。",
+      "acceptance": "与本包该文件SHA256一致；V16完成后 Node import vendor/atlas-spatial/index.mjs 无DOM/Buffer异常。",
+      "edge_cases": "未依赖齐备时只记录待V16统一导入；不要为临时import报错把代码内容删掉。",
+      "evidence": [
+        {
+          "command": "sha256sum 对比 + node --test .tmp/spatial-kit/t（100/100，退出码 0）",
+          "exitCode": 0,
+          "note": "与原包 SHA256 一致"
+        }
+      ]
+    },
+    {
+      "id": "V13",
+      "stage": "M1 正式模块入库",
+      "file": "vendor/atlas-spatial/tools.mjs",
+      "function": "按原名复制",
+      "depends_on": [
+        "V12"
+      ],
+      "status": "completed",
+      "actions": "从本包 src/tools.mjs 原样复制这一个文件；保留相对import与公开函数。不要加入夹具、默认NPC、localStorage世界或模型网络请求。",
+      "acceptance": "与本包该文件SHA256一致；V16完成后 Node import vendor/atlas-spatial/index.mjs 无DOM/Buffer异常。",
+      "edge_cases": "未依赖齐备时只记录待V16统一导入；不要为临时import报错把代码内容删掉。",
+      "evidence": [
+        {
+          "command": "sha256sum 对比 + node --test .tmp/spatial-kit/t（100/100，退出码 0）",
+          "exitCode": 0,
+          "note": "与原包 SHA256 一致"
+        }
+      ]
+    },
+    {
+      "id": "V14",
+      "stage": "M1 正式模块入库",
+      "file": "vendor/atlas-spatial/index.mjs",
+      "function": "按原名复制",
+      "depends_on": [
+        "V13"
+      ],
+      "status": "completed",
+      "actions": "从本包 src/index.mjs 原样复制这一个文件；保留相对import与公开函数。不要加入夹具、默认NPC、localStorage世界或模型网络请求。",
+      "acceptance": "与本包该文件SHA256一致；V16完成后 Node import vendor/atlas-spatial/index.mjs 无DOM/Buffer异常。",
+      "edge_cases": "未依赖齐备时只记录待V16统一导入；不要为临时import报错把代码内容删掉。",
+      "evidence": [
+        {
+          "command": "sha256sum 对比 + node --test .tmp/spatial-kit/t（100/100，退出码 0）",
+          "exitCode": 0,
+          "note": "与原包 SHA256 一致"
+        }
+      ]
+    },
+    {
+      "id": "V15",
+      "stage": "M1 正式模块入库",
+      "file": "vendor/atlas-spatial/index.d.mts",
+      "function": "按原名复制",
+      "depends_on": [
+        "V14"
+      ],
+      "status": "completed",
+      "actions": "从本包 src/index.d.mts 原样复制这一个文件；保留相对import与公开函数。不要加入夹具、默认NPC、localStorage世界或模型网络请求。",
+      "acceptance": "与本包该文件SHA256一致；V16完成后 Node import vendor/atlas-spatial/index.mjs 无DOM/Buffer异常。",
+      "edge_cases": "未依赖齐备时只记录待V16统一导入；不要为临时import报错把代码内容删掉。",
+      "evidence": [
+        {
+          "command": "sha256sum 对比 + node --test .tmp/spatial-kit/t（100/100，退出码 0）",
+          "exitCode": 0,
+          "note": "与原包 SHA256 一致"
+        }
+      ]
+    },
+    {
+      "id": "V16",
+      "stage": "M1 正式模块入库",
+      "file": "vendor/atlas-spatial/initial-frame.mjs",
+      "function": "按原名复制",
+      "depends_on": [
+        "V15"
+      ],
+      "status": "completed",
+      "actions": "从本包 src/initial-frame.mjs 原样复制这一个文件；保留相对import与公开函数。不要加入夹具、默认NPC、localStorage世界或模型网络请求。",
+      "acceptance": "与本包该文件SHA256一致；V16完成后 Node import vendor/atlas-spatial/index.mjs 无DOM/Buffer异常。",
+      "edge_cases": "未依赖齐备时只记录待V16统一导入；不要为临时import报错把代码内容删掉。",
+      "evidence": [
+        {
+          "command": "sha256sum 对比 + node --test .tmp/spatial-kit/t（100/100，退出码 0）",
+          "exitCode": 0,
+          "note": "与原包 SHA256 一致"
+        }
+      ]
+    },
+    {
+      "id": "V17",
+      "stage": "M1 正式模块入库",
+      "file": "vendor/atlas-spatial/LICENSE",
+      "function": "许可文件",
+      "depends_on": [
+        "V16"
+      ],
+      "status": "completed",
+      "actions": "复制本包LICENSE，并在第三方清单登记本包版本；字体仅作为另外的OFL资源管理。",
+      "acceptance": "正式发布产物保留MIT许可。",
+      "edge_cases": "不把preview内嵌字体或reference-ui示例包当成运行模块。",
+      "evidence": [
+        {
+          "command": "cp LICENSE + 登记于 docs/spatial-kit-integration-log.md 第三方清单",
+          "exitCode": 0,
+          "note": "MIT 许可保留"
+        }
+      ]
+    },
+    {
+      "id": "P01",
+      "stage": "M2 小约束协议",
+      "file": "src/atlas-ops-contract.ts",
+      "function": "语义操作与geography白名单",
+      "depends_on": [
+        "V17"
+      ],
+      "status": "completed",
+      "actions": "新增map.layout.request至ATLAS_SEMANTIC_OPS与geography/repair允许集合；ModelOperation外封套保持原样。数据合同固定data={kind:floor|city,spec:object}。",
+      "acceptance": "isSemanticOp识别新操作；observe/decision/outcome仍拒绝布局操作；现有操作数量断言改为实际列表。",
+      "edge_cases": "不要新增v3全量输出协议；noop行为保持。",
+      "evidence": [
+        "npm run typecheck → 0 errors",
+        "npm test → 1506/1506 pass",
+        "ATLAS_SEMANTIC_OPS 15 项，geography 放行 map.layout.request"
+      ]
+    },
+    {
+      "id": "P02",
+      "stage": "M2 小约束协议",
+      "file": "src/atlas-ops-normalize.ts",
+      "function": "OP_KNOWN_FIELDS与最少字段",
+      "depends_on": [
+        "P01"
+      ],
+      "status": "completed",
+      "actions": "登记kind/spec；验证spec完整plain object、kind两值、UTF-8≤64KiB。逐条校验collection，保留自由文本字节；忽略AI提供scope/revision/row_rev/locks等程序字段并给警告。",
+      "acceptance": "有效小请求通过；缺spec、截断或越预算只拒绝该操作，其他操作可继续。",
+      "edge_cases": "数字仅在数值字段归一；未知可选字段不导致整轮拒绝；不增加quote要求。",
+      "evidence": [
+        "npm run typecheck → 0 errors",
+        "normalizeLayoutSpec：spec≤64KiB(OPERATION_TOO_LARGE)、程序字段 SYSTEM_FIELD_IGNORED、集合逐条 id≤160 字符、deletes 形状校验"
+      ]
+    },
+    {
+      "id": "P03",
+      "stage": "M2 小约束协议",
+      "file": "src/atlas-ops-refs.ts",
+      "function": "新操作引用及嵌套引用扫描",
+      "depends_on": [
+        "P02"
+      ],
+      "status": "completed",
+      "actions": "ref期望map。显式解析rooms.id、actors.id/roomId/near、items.id/on、districts.id、buildings.id/districtId；家具group.id是局部视觉ID，只解析对应near/on的局部关联，不新建entity_keys。所有实体别名转当前分支规范ID并声明依赖。",
+      "acceptance": "先建房间+人物再请求图可解析；未知实体报告具体路径/alias；字符串description里的new:不当引用。",
+      "edge_cases": "前向引用走现有declareRefs；跨分支或错误类型拒绝，不能用名字猜ID。",
+      "evidence": [
+        "npm run typecheck → 0 errors",
+        "7 项冒烟全绿：前向引用/未知 new:/类型不符/局部家具命中与落空/自由文本 new: 不当引用/跨分支",
+        "OP_REF_KINDS 登记 map.layout.request → map；解析策略：new: 严格、裸 ID 尽力规范化、找不到原样保留"
+      ]
+    },
+    {
+      "id": "P04",
+      "stage": "M2 小约束协议",
+      "file": "src/atlas-spatial-request.ts（新增）",
+      "function": "compileMapLayoutRequest(op,ctx)",
+      "depends_on": [
+        "P03"
+      ],
+      "status": "completed",
+      "actions": "使用现有CompileContext；从ctx.tables读最新地图；规范化spec.mapId；构造maps frame_json.atlasLayoutRequest变更+readSet+dependencies+basis。程序生成requestId/createdTurnId/operationId。重复相同request与scene约束返回幂等结果；合并同批独立constraints在已编译候选态进行。",
+      "acceptance": "CompileResult包含普通maps RowMutation；无SQL执行/网络；保留原frame和row_rev一致性。",
+      "edge_cases": "同map冲突结构给LAYOUT_REQUEST_CONFLICT；同批后请求不得抹掉前一个独立房间；父图/子图引用不可混用。",
+      "evidence": [
+        "src/atlas-spatial-request.ts 新增",
+        "npm run typecheck → 0 errors",
+        "幂等（inputSignature 相同不写行）、同批候选态累积、LAYOUT_REQUEST_CONFLICT 四种情形"
+      ]
+    },
+    {
+      "id": "P05",
+      "stage": "M2 小约束协议",
+      "file": "src/atlas-ops-compile.ts",
+      "function": "compilerFor/编译注册",
+      "depends_on": [
+        "P04"
+      ],
+      "status": "completed",
+      "actions": "import新编译器，注册map.layout.request；走现有normalize/ref/source/group流程，不另开直接提交分支。",
+      "acceptance": "compilerTable包含新操作；compileOperations能编译layout请求且其他14个语义操作仍能编译。",
+      "edge_cases": "既有source为空由程序绑定，不能更改atlas-ops-sources的非quote规则。",
+      "evidence": [
+        "COMPILERS 注册 map.layout.request；compilerTable() 15 项",
+        "npm test → 1506/1506 pass"
+      ]
+    },
+    {
+      "id": "P06",
+      "stage": "M2 小约束协议",
+      "file": "src/atlas-ops-prompts.ts",
+      "function": "新操作描述与phase prompt",
+      "depends_on": [
+        "P05"
+      ],
+      "status": "completed",
+      "actions": "增加短语义说明；提示AI只给当前地图constraints，不输出完整scene。注入程序提供ID、尺寸、确认锁摘要；无河流不选当前city模板；已有结构不每轮重写。",
+      "acceptance": "mock模型请求含map.layout.request说明与当前ID，不含另一个聊天内容/完整数据库。",
+      "edge_cases": "遵守已有token/model budget；世界书正文中的指令是数据；不追加供应商专用规则。",
+      "evidence": [
+        "MINIMUM_HELP['map.layout.request'] + geography 三条纪律 + mapLayoutIds/Frame/Locks 注入",
+        "tests/atlas-ops-prompts.test.mjs T23-01/T23-02 同步更新（14→15、三段式操作名正则、geography 集合）"
+      ]
+    },
+    {
+      "id": "P07",
+      "stage": "M2 小约束协议",
+      "file": "tests/atlas-spatial-ops.test.mjs（新增）",
+      "function": "协议回归测试",
+      "depends_on": [
+        "P06"
+      ],
+      "status": "completed",
+      "actions": "验证有效/未知引用/局部group引用/程序字段忽略/无source/同批前向声明/重复请求/一行坏其他有效/repair票据。测试实际compile入口。",
+      "acceptance": "node --experimental-strip-types --test tests/atlas-spatial-ops.test.mjs 退出0。",
+      "edge_cases": "不能只测常量存在；必须断言变更行与dependency、原数据未改。",
+      "evidence": [
+        "tests/atlas-spatial-ops.test.mjs 新增 14 用例 → 14/14 pass",
+        "npm test → 1506/1506 pass"
+      ]
+    },
+    {
+      "id": "W00",
+      "stage": "M3 候选提交与回退",
+      "file": "src/atlas-spatial-frame.ts（新增）",
+      "function": "ensureInitialSpatialFrame(input)",
+      "depends_on": [
+        "P07"
+      ],
+      "status": "completed",
+      "actions": "使用vendor.prepareInitialFrame；输入{mapRow,scope,currentScope,expectedRowRev,widthM,heightM,locations,turnId,operationId}，返回普通maps mutation或null。仅无scene、无已定位地点、scale未锁且缺可信尺度的新空地图可初始化：cols=100、mpp=widthM/100、rows=heightM/mpp，frame跨度为正有限数；尺度estimated、calibration_rev递增，保留其他frame字段。已有图沿用现有map.estimate/作者校准路径。",
+      "acceptance": "新空图30×24m初始化成100×80格并通过existing map validator和生成器；有已定位地点或锁定尺度时无写。",
+      "edge_cases": "不得把默认100×100框强行套入不同纵横比而让首轮SCALE_ASPECT_CONFLICT；无尺寸走overview并记缺项；初始化与随后scene写入同候选楼层。",
+      "evidence": [
+        "tests/atlas-spatial-storage.test.mjs: W00-01~W00-06 全绿（30×24m→100×80 格、mpp=0.3、calibration_rev 2；已确认/已有 scene/已定位→retained；缺尺寸→INITIAL_EXTENT_MISSING）"
+      ]
+    },
+    {
+      "id": "W01",
+      "stage": "M3 候选提交与回退",
+      "file": "src/atlas-spatial-candidate.ts（新增）",
+      "function": "applyPendingSpatialRequests(input)",
+      "depends_on": [
+        "W00"
+      ],
+      "status": "completed",
+      "actions": "签名固定{db,scope,isCurrent,turnId,clockS,maxJobs=2,ports}→{groups,issues,processed,pending}。仅在existing候选事务内同步读取status=pending请求，按requestId稳定排序；用本包compileSceneGroup/applySceneGroup，ports注入现有queryBound/decodeRow/applyGroups。",
+      "acceptance": "两张待处理图最多处理maxJobs；第3张仍pending；没有请求无写入；函数不调用COMMIT或保存聊天。",
+      "edge_cases": "isCurrent前后检查；每地图独立savepoint，core FK不能关闭；传入viewMode=author为内部生成，后续POV仍过滤。",
+      "evidence": [
+        "tests/atlas-spatial-storage.test.mjs: W01-01 三图只处理两张、第三张仍 pending；W01-02 无请求零写入；W01-03 中途 STALE_SCOPE 停下；W01-05 回滚后一切还原（证明不 COMMIT）"
+      ]
+    },
+    {
+      "id": "W02",
+      "stage": "M3 候选提交与回退",
+      "file": "src/atlas-spatial-candidate.ts（新增，续）",
+      "function": "recordFailedSpatialRequest(input)",
+      "depends_on": [
+        "W01"
+      ],
+      "status": "completed",
+      "actions": "只把失败request.status改failed并存完整Issue列表，保留atlasScene/地点坐标；用普通map变更+journal。失败组仍入回执，返回changedRows与实际结果。",
+      "acceptance": "生成器不支持或无解时旧图不变；失败request和每个字段错误可在日志查到；其他世界组保留。",
+      "edge_cases": "记录失败也要readSet；标failed写失败且涉及存档一致性时抛明确核心错误；重开界面不能自动再试。",
+      "evidence": [
+        "W01-04 失败整组恢复：旧 scene 与地点坐标原值、请求标 failed 且 LOCATION_MAP_MISMATCH 入 issues；W02-01 失败标记保留完整 Issue 字段"
+      ]
+    },
+    {
+      "id": "W03",
+      "stage": "M3 候选提交与回退",
+      "file": "src/atlas-db-repository.ts",
+      "function": "prepareTurnInner空间钩子",
+      "depends_on": [
+        "W02"
+      ],
+      "status": "completed",
+      "actions": "在settleSqlTurn之后重新beginTransaction后、foreignKeyCheck/validateCandidate前调用W01，追加groupResults/allIssues。空间组更新纳入worldChanged/newRevision/receipt/outbox原计算。不移动原candidate保存确认边界。",
+      "acceptance": "实际prepareTurn出现maps+locations空间变更；receipt与最终snapshot一致；核心保存失败不留下半套图。",
+      "edge_cases": "模型await期间不能持事务；UI只读不能调W01；空间失败应partial且coreCommitted真实。",
+      "evidence": [
+        "tests/atlas-spatial-storage.test.mjs: W03-01 prepareTurn 真实产出 maps+locations 空间变更，saved 后 atlasScene 落库、请求已消费、foreignKeyCheck 空；全量 npm test 1528/1528"
+      ]
+    },
+    {
+      "id": "W04",
+      "stage": "M3 候选提交与回退",
+      "file": "src/atlas-spatial-occupants.ts（新增）",
+      "function": "reconcileOccupantsSpec(input)",
+      "depends_on": [
+        "W03"
+      ],
+      "status": "completed",
+      "actions": "输入{scene,requestSpec,locations,characters,items,effectivePositions}；以最后SQL归属建立actors/items，移除在途、跨房间、已持有物品。新人物同room生成视觉约束，旧near仍合法则保留；items无支撑组使用通用局部地面摆放而不是扔掉数据库行。输出{spec,looseItemMarkers,dirty,issues}；looseItemMarkers为{id,roomId,name,type:item}，以房间可通行区和家具障碍调用placeMarkers，其结果仅追加scene.items，不改真实SQL归属。",
+      "acceptance": "角色迁出移除旧锚点；迁入同room有可点标点；unknown学校不进入某教室；持有物品不再地面显示。",
+      "edge_cases": "无room坐标仍允许名单；无空间给issue+名单；不写characters/items exact坐标。",
+      "evidence": [
+        "W04-01 跨房间移除/迁入补齐/持有物品不当地面物品；W04-02 一致时 dirty=false"
+      ]
+    },
+    {
+      "id": "W05",
+      "stage": "M3 候选提交与回退",
+      "file": "src/atlas-spatial-candidate.ts（新增，续）",
+      "function": "调用reconcileOccupantsSpec与局部锚点更新",
+      "depends_on": [
+        "W04"
+      ],
+      "status": "completed",
+      "actions": "对pending布局及已有scene中确实受本轮位置/室内倾向影响的图调用W04；无语义结构变化只更新视觉锚点，不重生城市/房间。地面物品无支撑组时，在生成后调用placeMarkers，把同roomId视觉结果追加scene.items再用buildSceneMutation重建maps mutation；不能凭空造一张桌子。合并本轮同map多变更时重读候选行。",
+      "acceptance": "新NPC不等下一轮才出现；100次只读开图新增0 maps journal；相同输入不重复写。",
+      "edge_cases": "预算耗尽的其他图保留pending/dirty并显示状态；不能借读视图补写库。",
+      "evidence": [
+        "W05-01 迁入人物本轮有锚点、地面物品有视觉点、持有物品没有；W05-02 迁出后旧锚点被删除（走 deletes 显式表达）"
+      ]
+    },
+    {
+      "id": "W06",
+      "stage": "M3 候选提交与回退",
+      "file": "src/atlas-spatial-branch.ts（新增）",
+      "function": "copySceneForBranch(frame,newBranchId,newRevision)",
+      "depends_on": [
+        "W05"
+      ],
+      "status": "completed",
+      "actions": "纯函数保留几何与其他frame字段，重写scene.branchId、sourceRevision并保留provenance；删除父pending request；不改变父对象。",
+      "acceptance": "分支B的scene能通过readSceneFrame；父A字节不变；无scene旧frame原样保留。",
+      "edge_cases": "未知scene版本保留但标不可用，不能清存档；坏frame返回明确诊断。",
+      "evidence": [
+        "W06-01 纯函数：父对象不变、provenance 保留、无场景旧帧原样、坏帧 FRAME_JSON_INVALID"
+      ]
+    },
+    {
+      "id": "W07",
+      "stage": "M3 候选提交与回退",
+      "file": "src/atlas-db-branches.ts",
+      "function": "copyTableRows地图frame处理",
+      "depends_on": [
+        "W06"
+      ],
+      "status": "completed",
+      "actions": "在table=maps复制frame_json时调用W06；保留现有branch基点和事务纪律。只改新行字段；entityID不重新分配。",
+      "acceptance": "fork后B读取地图可用且A仍可回退到原图。",
+      "edge_cases": "不能在fork中执行pending父请求；不能回写祖先日志。",
+      "evidence": [
+        "W07-01 fork 后子分支 scene.branchId 已重写且几何保留，父分支帧字节不变，父 pending 请求不带过去"
+      ]
+    },
+    {
+      "id": "W08",
+      "stage": "M3 候选提交与回退",
+      "file": "src/atlas-sql-chat.ts",
+      "function": "显式布局重试接入",
+      "depends_on": [
+        "W07"
+      ],
+      "status": "completed",
+      "actions": "将UI重试布局请求走existing受控turn/manual路径：只对选map的failed request产生新ticket/opID，不重放事件/时间。把返回receipt完整转给UI。",
+      "acceptance": "重试布局后clock不额外增加、已提交移动不重复；成功移除failed pending，failed保留旧图。",
+      "edge_cases": "isCurrent/保存确认/expectedRevision仍必需；没有失败请求返回noop。",
+      "evidence": [
+        "W08-01 failed→pending 后同轮被消费并生成场景；第二次 arm 是 LAYOUT_RETRY_NOOP 零写入"
+      ]
+    },
+    {
+      "id": "W09",
+      "stage": "M3 候选提交与回退",
+      "file": "tests/atlas-spatial-storage.test.mjs（新增）",
+      "function": "原子组/回退/分支集成",
+      "depends_on": [
+        "W08"
+      ],
+      "status": "completed",
+      "actions": "移植本包plugin-check的真实schema/codec/applyGroups/journal/rollback路径，增加prepareTurn钩子、失败request、迁入迁出、fork测试。",
+      "acceptance": "退出0；deferred FK失败时maps和locations都原值；删楼恢复scene+坐标+锚点。",
+      "edge_cases": "检查foreign_keys读回；不要用mock applyGroups替代唯一原子性验收。",
+      "evidence": [
+        "tests/atlas-spatial-storage.test.mjs 22/22；W09-01 延迟外键在 COMMIT 处失败，maps 帧与 locations 坐标一起回到原值"
+      ]
+    },
+    {
+      "id": "Q01",
+      "stage": "M4 只读数据口",
+      "file": "src/atlas-ops-contract.ts",
+      "function": "扩展ViewQuery/ViewResult类型",
+      "depends_on": [
+        "W09"
+      ],
+      "status": "completed",
+      "actions": "新增kind=scene/catalog/flows/tasks；catalog entityKind/pageSize/cursor/q/status；flows mapId/selectedEntityId/filter；每种都带existingbranch/revision/viewMode。保持原种类向后兼容。",
+      "acceptance": "typecheck通过；未知kind仍明确reason，不静默当map。",
+      "edge_cases": "catalog limit最大200默认50；完整导出通过游标而非一次全部加载。",
+      "evidence": [
+        "src/atlas-ops-contract.ts: VIEW_KINDS/CATALOG_ENTITY_KINDS/ViewQuery/normalizeViewLimit/asViewKind",
+        "src/atlas-runtime-limits.ts: catalogViewMaxLimit=200 / catalogViewDefaultLimit=50"
+      ]
+    },
+    {
+      "id": "Q02",
+      "stage": "M4 只读数据口",
+      "file": "src/atlas-db-views.ts",
+      "function": "queryMapView扩展字段与frame剥离",
+      "depends_on": [
+        "Q01"
+      ],
+      "status": "completed",
+      "actions": "frames.frame调用publicMapFrame，删除scene/request。routes加入geometry={mapId,units:cells,points}或null；确认geometry_json形状后投影，坏路径单项issue。items at_grid分支始终带locationId。",
+      "acceptance": "POV/author普通map response不含atlasScene/request；路线有效时geometry可绘，unknown无假线；地面物品location一致。",
+      "edge_cases": "保留现有coarseList、position cache和visibility过滤；非零origin不得丢。",
+      "evidence": [
+        "src/atlas-db-views.ts: projectRouteGeometry + publicMapFrame + routes.geometry/fromLocationId/toLocationId + at_grid locationId + metadata.routeIssues",
+        "tests/atlas-spatial-views.test.mjs: Q13-04"
+      ]
+    },
+    {
+      "id": "Q03",
+      "stage": "M4 只读数据口",
+      "file": "src/atlas-spatial-views.ts（新增）",
+      "function": "querySpatialScene(ctx,query)",
+      "depends_on": [
+        "Q02"
+      ],
+      "status": "completed",
+      "actions": "读取当前branch地图frame，用readSceneFrame；当前SQL可见集合过滤→同revision projection hydrate→返回01/04固定scene DTO。new入住锚点由W05提供，不在查询写库；无scene返回missing可用overview。",
+      "acceptance": "原始POV JSON全文找不到隐藏实体名称/ID/inputSignature/spec；author可见；新chat items=[]清空。",
+      "edge_cases": "场景sourceRevision旧于viewRevision可静态复用；地图/branch mismatch拒绝；坏scene保留SQL概览。",
+      "evidence": [
+        "src/atlas-spatial-views.ts: querySpatialScene（readSceneFrame→filterSceneForView→hydrateScene）",
+        "tests/atlas-spatial-views.test.mjs: Q13-01/02/02b"
+      ]
+    },
+    {
+      "id": "Q04",
+      "stage": "M4 只读数据口",
+      "file": "src/atlas-catalog-views.ts（新增）",
+      "function": "queryCatalog(ctx,query)",
+      "depends_on": [
+        "Q03"
+      ],
+      "status": "completed",
+      "actions": "真实实体表分页只读、参数绑定，固定排序(name,id)或稳定id游标；服务端应用visibility，返回{entityId,entityKind,name,locationId,mapId,summary,status}及nextCursor。地点/人物/物品/事件/风声分别映射实际表。",
+      "acceptance": "超过2000实体可以翻到末页；search能找到不在当前地图的可见实体；隐藏结果与count不泄漏。",
+      "edge_cases": "cursor含queryScope校验；空query清空旧结果；不要字符串拼接用户SQL。",
+      "evidence": [
+        "src/atlas-catalog-views.ts: queryCatalog keyset 游标 + 服务端可见性 + 默认50上限200",
+        "tests/atlas-spatial-views.test.mjs: Q13-05（2001 条翻到末页）"
+      ]
+    },
+    {
+      "id": "Q05",
+      "stage": "M4 只读数据口",
+      "file": "src/atlas-spatial-flow-views.ts（新增）",
+      "function": "querySpatialFlows(ctx,query)",
+      "depends_on": [
+        "Q04"
+      ],
+      "status": "completed",
+      "actions": "投影relations/journeys及已有传播action/front/channel结果；固定FlowDTO使用cells路径后由UI转scene单位。journey依据committed segmentDistance/Time计算进度；无持久化传播任务则只输出到达front/卡片。",
+      "acceptance": "等待UI5秒flow进度不变；没有route.geometry时卡片reason明确；pov看不到后台秘密目的地。",
+      "edge_cases": "只读口不能调用scheduleDeliveries产生新任务；跨map路线拆段或卡片；relation默认selected对象。",
+      "evidence": [
+        "src/atlas-spatial-flow-views.ts: querySpatialFlows（只读，不调 scheduleDeliveries）",
+        "tests/atlas-spatial-views.test.mjs: Q13-07（两次查询进度一致）"
+      ]
+    },
+    {
+      "id": "Q06",
+      "stage": "M4 只读数据口",
+      "file": "src/atlas-task-views.ts（新增）",
+      "function": "queryTasks(ctx,query)",
+      "depends_on": [
+        "Q05"
+      ],
+      "status": "completed",
+      "actions": "读取actions/journeys/events，按可见性返回任务状态、关联角色/地点/开始/到达估计范围、是否待执行；使用实际表，不造deliveries表。",
+      "acceptance": "NPC计划/在途/停留/改道可查询；author与pov的条目差异有测试。",
+      "edge_cases": "计划是意图不等于已发生；没有时间标unknown而不自动加一楼时间。",
+      "evidence": [
+        "src/atlas-task-views.ts: queryTasks（actions/journeys/events，planned≠occurred）"
+      ]
+    },
+    {
+      "id": "Q07",
+      "stage": "M4 只读数据口",
+      "file": "src/atlas-db-repository.ts",
+      "function": "queryView注册新只读口",
+      "depends_on": [
+        "Q06"
+      ],
+      "status": "completed",
+      "actions": "添加scene/catalog/flows/tasks cases并传existingctx，不传writer或saveSession给读口。branch错误与revision stale沿用统一规则。",
+      "acceptance": "repository.queryView每新kind返回同branch/revision；读前后DBsnapshot/journal相同。",
+      "edge_cases": "没有data返回空数组，绝不调用legacy或示例fallback。",
+      "evidence": [
+        "src/atlas-db-repository.ts: queryView 注册 scene/catalog/flows/tasks，读口不拿 writer/saveSession"
+      ]
+    },
+    {
+      "id": "Q08",
+      "stage": "M4 只读数据口",
+      "file": "src/atlas-sql-view-state.ts",
+      "function": "state包装的新视图键",
+      "depends_on": [
+        "Q07"
+      ],
+      "status": "completed",
+      "actions": "在实际sqlViews包装登记scene/flows/tasks，catalog按需查询；保留旧flat keys兼容，不在/state预取整个目录。",
+      "acceptance": "state入口能按明确键解包；新UI不从多个旧字段猜数据。",
+      "edge_cases": "新chat wrapper返回空视图，不能保留上次flat/sqlViews。",
+      "evidence": [
+        "src/atlas-sql-view-state.ts: sqlViews 增加 scene/flows/tasks + catalogBase（不预取目录）"
+      ]
+    },
+    {
+      "id": "Q09",
+      "stage": "M4 只读数据口",
+      "file": "src/atlas-sql-browser-entry.ts",
+      "function": "导出新桥接与空间入口",
+      "depends_on": [
+        "Q08"
+      ],
+      "status": "completed",
+      "actions": "导出新读口所需桥接及空间component API；保持SQLbrowser依赖无Node模块。不要导出write candidate操作给不受控UI直接提交。",
+      "acceptance": "browser bundle可import renderer/projectMapView；不含node:fs/Buffer。",
+      "edge_cases": "Node版验证通过不足以证明浏览器可用；有实际浏览器import检查。",
+      "evidence": [
+        "src/atlas-sql-browser-entry.ts: 导出只读口与 createSpatialRenderer/projectMapView，未导出写侧候选操作",
+        "tests/atlas-build-artifacts-p0.browser.test.mjs: P0-04d"
+      ]
+    },
+    {
+      "id": "Q10",
+      "stage": "M4 只读数据口",
+      "file": "ui/atlas-sql-view-controller.mjs",
+      "function": "新view键、scopeGate与清理",
+      "depends_on": [
+        "Q09"
+      ],
+      "status": "completed",
+      "actions": "登记新kind缓存；复用existing snapshotData/metadata/hash保护，加scopeGate epoch应对A→B→A。scope变时同时清scene/details/nearby/catalog/flows/tasks/selection并关闭旧readonlysession。",
+      "acceptance": "延迟A响应在切B再回A后不覆盖；author→pov立即删除秘密图层；empty数组清旧卡。",
+      "edge_cases": "不把view session变writer；旧组件destroy；失败查询给日志和当前空/error状态。",
+      "evidence": [
+        "ui/atlas-sql-view-controller.mjs: sqlScopeTicket（含视角）+ sqlClearReadViews + SQL_READONLY_KINDS",
+        "index.js: sqlMode.viewScopeTicket/selection"
+      ]
+    },
+    {
+      "id": "Q11",
+      "stage": "M4 只读数据口",
+      "file": "src/atlas-db-views.ts",
+      "function": "queryEntityDetail补地面物品与子地图",
+      "depends_on": [
+        "Q10"
+      ],
+      "status": "completed",
+      "actions": "地点详情增加当前groundItems（排除持有/容器内）、childMaps列表及actual present人物；人物包含heldItems/计划/行程；所有结果应用当前视角过滤。",
+      "acceptance": "点击地点看到同地点名单/物品/多个楼层；人物库存不会同时作为地面标点。",
+      "edge_cases": "父地点名单区分直接在场/子地点粗聚合；unknown位置显示归属不编教室。",
+      "evidence": [
+        "src/atlas-db-views.ts: queryEntityDetail 增加 groundItems/childMaps/coarsePresent/heldItems",
+        "tests/atlas-spatial-views.test.mjs: Q13-03"
+      ]
+    },
+    {
+      "id": "Q12",
+      "stage": "M4 只读数据口",
+      "file": "src/atlas-db-views.ts",
+      "function": "queryDiagnostics完整问题分页",
+      "depends_on": [
+        "Q11"
+      ],
+      "status": "completed",
+      "actions": "把partial/failed receipt所有groups/issues纳入日志数据，不限最新50轮就声称完整。以稳定时间+ID游标分页问题与change记录，导出遍历到末页，metadata给真实droppedCount/retention。",
+      "acceptance": "一次3字段失败日志可见3条完整路径+依赖链；超过50失败turn仍能翻到；不存在的记录不重复导出。",
+      "edge_cases": "coreCommitted根据真实receipt；脱敏key/header，不把完整response默认复制日志。",
+      "evidence": [
+        "src/atlas-db-views.ts: queryDiagnostics 稳定游标双命名空间 + 回执 issues 摊平 + redactForLog",
+        "tests/atlas-spatial-views.test.mjs: Q13-06（60 条失败轮翻完）"
+      ]
+    },
+    {
+      "id": "Q13",
+      "stage": "M4 只读数据口",
+      "file": "tests/atlas-spatial-views.test.mjs（新增）",
+      "function": "视图隔离、分页、坐标测试",
+      "depends_on": [
+        "Q12"
+      ],
+      "status": "completed",
+      "actions": "用真实SQL seed覆盖scene/rawframe泄漏、同revision、父子地图、多楼层、routes/items字段、2001catalog、50+失败轮分页、纯查询无写。",
+      "acceptance": "本文件测试退出0；扫描序列化POV响应确保秘密不出现。",
+      "edge_cases": "不能只检DOM隐藏；必须检服务端返回JSON。",
+      "evidence": [
+        "tests/atlas-spatial-views.test.mjs: 8/8 通过；全量 npm test 1537/1537"
+      ]
+    },
+    {
+      "id": "U01",
+      "stage": "M5 新UI连接",
+      "file": "ui/atlas-workbench-model.mjs（新增）",
+      "function": "createWorkbenchModel(ports)",
+      "depends_on": [
+        "Q13"
+      ],
+      "status": "completed",
+      "actions": "唯一UI状态{scope,mapId,selected,page,views,settings,cameraByMap}；ports={queryView,settings,emitDiagnostic,onScopeInvalidated}由宿主注入。数据来自Q系列，不使用demo-data。",
+      "acceptance": "初始化没有示例地图/人物；empty/stale清空；切页不变世界clock。",
+      "edge_cases": "camera偏好key包含chat/branch/map/viewMode；不能拿全局currentScene跨聊复用。",
+      "evidence": [
+        {
+          "command": "node --test tests/atlas-workbench.test.mjs",
+          "exitCode": 0,
+          "note": "18/18：初始化无示例数据、scope 切换清空、切页不动时钟、相机 key 含 chat/branch/map/viewMode"
+        },
+        {
+          "command": "npm run verify:workbench（真实 Chrome + dev-preview 的 SQL 宿主页）",
+          "exitCode": 0,
+          "note": "M5 返工验收：U08 项：UI 名单与后端查询逐条相等（4×4）"
+        },
+        {
+          "command": "npm run verify:workbench（真实 Chrome + dev-preview 的 SQL 宿主页）",
+          "exitCode": 0,
+          "note": "M5 返工验收：返工回归：scope 展开 + 口径来源断言"
+        }
+      ],
+      "rework": {
+        "at": "2026-10-06",
+        "problem": "mountWorkbench.sync 只调旧 shell.sync，新 model 没拿到 scope；目录查询因此走默认口径。",
+        "fix": "sync 把宿主单一权威口径（snapshot.viewMode）与 chat/branch/revision 一起写进 model scope；load 把 scope 展开到 ViewQuery 顶层字段（branchId/revision/viewMode/povId），不塞 scope 包。"
+      }
+    },
+    {
+      "id": "U02",
+      "stage": "M5 新UI连接",
+      "file": "ui/atlas-workbench-shell.mjs（新增）",
+      "function": "mountWorkbench(root,ports)",
+      "depends_on": [
+        "U01"
+      ],
+      "status": "completed",
+      "actions": "迁移reference-ui主布局DOM：导航、tree、canvas、右详情、底事件；全部textContent渲染资料。组件只持UI状态，返回destroy。",
+      "acceptance": "root只挂一个workbench；重复mount先destroy；按05区域定义可见。",
+      "edge_cases": "资料名含HTML不执行；按钮有label/键盘焦点；窄屏侧栏抽屉。",
+      "evidence": [
+        {
+          "command": "node --test tests/atlas-workbench.e2e.test.mjs",
+          "exitCode": 0,
+          "note": "12/12：六个区域齐全、重复 mount 先 destroy、资料名含 HTML 不执行"
+        },
+        {
+          "command": "npm run verify:workbench（真实 Chrome + dev-preview 的 SQL 宿主页）",
+          "exitCode": 0,
+          "note": "M5 返工验收：地图树 7 节点、旧树 0 节点（浏览器实测）"
+        }
+      ],
+      "rework": {
+        "at": "2026-10-06",
+        "problem": "工作台外壳 mount 了但 sync/updateMap 没把新状态与权威树分发下去。",
+        "fix": "sync 先跑旧 shell 再写 model scope；updateMap 按 shape 分发 spatialTree（buildMapTree 结构）而不是旧行数组。"
+      }
+    },
+    {
+      "id": "U03",
+      "stage": "M5 新UI连接",
+      "file": "ui/atlas-workbench.css（新增）",
+      "function": "工作台样式",
+      "depends_on": [
+        "U02"
+      ],
+      "status": "completed",
+      "actions": "迁移参考UI样式并scoped于workbench根；所有颜色/边框/光效用tokens；canvas容器min-width:0；左下scale固定96px、legend上方折叠。",
+      "acceptance": "320px无横向溢出，scale可见；hover无translateY标点跳动；外部酒馆样式不被污染。",
+      "edge_cases": "font素材按OFL许可；不要全局body/button reset。",
+      "evidence": [
+        {
+          "command": "node --test tests/atlas-workbench.e2e.test.mjs (U03 样式契约)",
+          "exitCode": 0,
+          "note": "canvas min-width:0、900px 抽屉、标尺固定 96px、prefers-reduced-motion、无 body/button reset"
+        },
+        {
+          "command": "npm run verify:workbench（真实 Chrome + dev-preview 的 SQL 宿主页）",
+          "exitCode": 0,
+          "note": "M5 返工验收：U03 项：document.styleSheets 命中 atlas-workbench.css"
+        }
+      ],
+      "rework": {
+        "at": "2026-10-06",
+        "problem": "ui/atlas-workbench.css 没有加载入口，Chrome document.styleSheets 里根本不含它。",
+        "fix": "renderPanel 首行 ensureWorkbenchStylesheet()：按 import.meta.url 解析出正式路径插 <link id=\"atlas-workbench-css\">，data: URL 等无法解析的环境跳过。"
+      }
+    },
+    {
+      "id": "U04",
+      "stage": "M5 新UI连接",
+      "file": "ui/atlas-map-controller.mjs（新增）",
+      "function": "createMapController(ports)",
+      "depends_on": [
+        "U03"
+      ],
+      "status": "completed",
+      "actions": "使用createSpatialRenderer；同scope并行取得map/scene/flows后确认snapshot再投影；缺scene显示SQLoverview。onSelect调用entity或视觉卡；scope变化destroy/clear。",
+      "acceptance": "真实SQL六房间可点击，shelf/door/NPC/item都可命中；切图清旧selected。",
+      "edge_cases": "一个gesture owner；过期response不setScene；错误scene不清有效旧图并标状态。",
+      "evidence": [
+        {
+          "command": "node --test tests/atlas-workbench.test.mjs (U04 用例)",
+          "exitCode": 0,
+          "note": "同 revision 快照才投影、缺 scene 报 SPATIAL_SCENE_EMPTY、过期 response 不 setScene"
+        },
+        {
+          "command": "npm run verify:workbench（真实 Chrome + dev-preview 的 SQL 宿主页）",
+          "exitCode": 0,
+          "note": "M5 返工验收：U04/U15 canvas 两项：canvas 940×683 且在画（546 色）"
+        },
+        {
+          "command": "npm run verify:workbench（真实 Chrome + dev-preview 的 SQL 宿主页）",
+          "exitCode": 0,
+          "note": "M5 返工验收：返工回归：scene ready 优先画已保存场景（projectorCalls=0）"
+        }
+      ],
+      "rework": {
+        "at": "2026-10-06",
+        "problem": "showMap 只 setScene(projection.scene)——fetchSnapshot 查了 scene 却从不消费 snapshot.scene.items，合法的已保存 floor 场景被画成 overview 却回报 ready。",
+        "fix": "新增 resolveScene(snapshot)：按 mapId 取 scene 条目，sceneStatus=ready 且有 scene 载荷 → 直接 setScene(entry.scene)（不经过 projectMapView）；invalid/missing 记诊断后退概览。"
+      }
+    },
+    {
+      "id": "U05",
+      "stage": "M5 新UI连接",
+      "file": "ui/atlas-map-tree.mjs（新增）",
+      "function": "renderMapTree/mapsForLocation",
+      "depends_on": [
+        "U04"
+      ],
+      "status": "completed",
+      "actions": "使用buildMapTree，展开地区→城→建筑→楼层；容器下可多个子图。选中保留面包屑与返回父图。",
+      "acceptance": "学校图进入楼层，教室父图准确；多个楼层不自动挑第一项。",
+      "edge_cases": "cycle给日志且不死循环；相邻外城区不是contained；车厢所属内部图保持载具关系。",
+      "evidence": [
+        {
+          "command": "node --test tests/atlas-workbench.test.mjs + e2e",
+          "exitCode": 0,
+          "note": "父子链/多子图/自环不死循环；两个楼层都渲染，点击行触发导航"
+        },
+        {
+          "command": "npm run verify:workbench（真实 Chrome + dev-preview 的 SQL 宿主页）",
+          "exitCode": 0,
+          "note": "M5 返工验收：U05 项：新树 7 节点 / 旧树 0 节点"
+        }
+      ],
+      "rework": {
+        "at": "2026-10-06",
+        "problem": "index.js 把旧 atlasWorkbenchTree 行数组传进树槽，renderMapTree 读 tree.nodes → 双树并存（旧树 7 项 + 新树「当前世界还没有可进入的地图」）。",
+        "fix": "index.js 另算 spatialTree = buildMapTree(sqlMapItems, locationRows) 并单独传；旧 shell 在权威模式下**不再绘制**旧列表（不是画完再隐藏）。"
+      }
+    },
+    {
+      "id": "U06",
+      "stage": "M5 新UI连接",
+      "file": "ui/atlas-entity-panel.mjs（新增）",
+      "function": "renderEntityPanel(entityDTO)",
+      "depends_on": [
+        "U05"
+      ],
+      "status": "completed",
+      "actions": "右栏显示location/person/item不同卡：简介、子地点、在场、物品、thought/action/journey/knowledge。POV读到什么显示什么，author隐藏内容标后台。",
+      "acceptance": "默认单击先打开右信息；名单点角色切详情；item库存归属正确。",
+      "edge_cases": "无实体显示未选中而非上一人；异步detail捕获selection+scope防错卡。",
+      "evidence": [
+        {
+          "command": "node --test tests/atlas-workbench.e2e.test.mjs (U06)",
+          "exitCode": 0,
+          "note": "未选中显示「未选中」；名称含 <img onerror> 不产生元素；地点/人物/物品分支"
+        },
+        {
+          "command": "npm run verify:workbench（真实 Chrome + dev-preview 的 SQL 宿主页）",
+          "exitCode": 0,
+          "note": "M5 返工验收：U06 项：点画布标点出 awb-card--location / loc:4101"
+        }
+      ],
+      "rework": {
+        "at": "2026-10-06",
+        "problem": "index.js 没调 showEntity，新详情卡永远停在「未选中对象」。",
+        "fix": "渲染器 onSelect 双路：starmapShell.showEntity（新卡）+ openStarmapEntity（旧面板）；旧面板取不到实体时新卡兜底。"
+      }
+    },
+    {
+      "id": "U07",
+      "stage": "M5 新UI连接",
+      "file": "ui/atlas-map-controller.mjs（新增，续）",
+      "function": "enterSelectedLocation与点击开关",
+      "depends_on": [
+        "U06"
+      ],
+      "status": "completed",
+      "actions": "默认单击信息；singleClickEnter开关改变进入行为；唯一子图直入，多图弹选择；双击/Enter入口和按钮共用一个函数。",
+      "acceptance": "两种设置可验证；多楼层有选层；移动/拖动不会触发进入。",
+      "edge_cases": "无子图只留详情；known/author权限由query验证，不能直跳秘密图。",
+      "evidence": [
+        {
+          "command": "node --test tests/atlas-workbench.test.mjs (U07)",
+          "exitCode": 0,
+          "note": "默认单击只开详情；开关开且唯一子图才进入；多子图交 onChoose；force 走同一函数；拖拽 4px 阈值"
+        },
+        {
+          "command": "npm run verify:workbench（真实 Chrome + dev-preview 的 SQL 宿主页）",
+          "exitCode": 0,
+          "note": "M5 返工验收：U04/U15 第三项：旧标点 0、旧 stage display:none"
+        }
+      ],
+      "rework": {
+        "at": "2026-10-06",
+        "problem": "新旧两套绘制/手势可能同时在跑。",
+        "fix": "渲染路径互斥：走新渲染器时旧 stage 隐藏、camera=null 让旧 wheel/pan/点击早退；旧标点归零。"
+      }
+    },
+    {
+      "id": "U08",
+      "stage": "M5 新UI连接",
+      "file": "ui/atlas-catalog-panel.mjs（新增）",
+      "function": "renderCatalog/search",
+      "depends_on": [
+        "U07"
+      ],
+      "status": "completed",
+      "actions": "人物/物品/地点/事件/风声页对接Q04分页；紧凑搜索只展开最多20结果，点击定位正确map再开detail。",
+      "acceptance": "找到不在当前地图的实体；全部目录不被map可见上限截断。",
+      "edge_cases": "debounce请求有ticket；q变取消旧cursor；空结果立即清。",
+      "evidence": [
+        {
+          "command": "node --test tests/atlas-workbench.test.mjs + e2e (U08)",
+          "exitCode": 0,
+          "note": "debounce+ticket，q 变旧结果 resolve(null) 不落地；上限 20；POV 不显示总数"
+        },
+        {
+          "command": "npm run verify:workbench（真实 Chrome + dev-preview 的 SQL 宿主页）",
+          "exitCode": 0,
+          "note": "M5 返工验收：U08 两项：UI 名单 == 后端查询（4×4 逐条相等）+ 负向锁 kind=实体种类必须查空"
+        }
+      ],
+      "rework": {
+        "at": "2026-10-06",
+        "problem": "atlas-sql-view-controller 用 {kind, ...query} 构造查询，调用方传的 kind:'character' 把视图类型覆盖掉 → 视图分发表失配，目录恒空；面板侧还把实体种类塞进了 kind。",
+        "fix": "改为 { ...query, kind }（视图类型最后写入，查询参数不得覆盖）；面板改传契约字段 entityKind。另修：口径不再被压成 pov。"
+      }
+    },
+    {
+      "id": "U09",
+      "stage": "M5 新UI连接",
+      "file": "ui/atlas-world-timeline.mjs（新增）",
+      "function": "renderTurnTimeline",
+      "depends_on": [
+        "U08"
+      ],
+      "status": "completed",
+      "actions": "底部展示当前轮visible events/arrivals/passages/fronts；点事件定位或详情；关联虚线开关对接flows；不从技术日志造剧情。",
+      "acceptance": "点击到达事件定位人物/地点；等UI时间不变数据；侧栏和底栏引用同轮。",
+      "edge_cases": "跨map事件先切图；秘密事件只author；blocked计划不标occurred。",
+      "evidence": [
+        {
+          "command": "node --test tests/atlas-workbench.e2e.test.mjs (U09)",
+          "exitCode": 0,
+          "note": "blocked 标「等待条件」不标已发生；POV 看不到 hidden 事件；含任务分组"
+        },
+        {
+          "command": "npm run verify:workbench（真实 Chrome + dev-preview 的 SQL 宿主页）",
+          "exitCode": 0,
+          "note": "M5 返工验收：地图页 timeline 槽有真实文案（changes=0 的数据实况）"
+        }
+      ],
+      "rework": {
+        "at": "2026-10-06",
+        "problem": "底部事件带只显示空壳（showTimeline 没被调用 / 无数据）。",
+        "fix": "renderSpatialPanels 用 changes 视图喂 showTimeline；demo 世界 changes=0，文案如实说「本轮没有可见动向」而不是假空面板。"
+      }
+    },
+    {
+      "id": "U10",
+      "stage": "M5 新UI连接",
+      "file": "src/atlas-world-summary.ts（新增）",
+      "function": "buildVisibleWorldSummary(input)",
+      "depends_on": [
+        "U09"
+      ],
+      "status": "completed",
+      "actions": "默认程序模板从已过滤changes/events/tasks生成1–3条读者动向；可选summary模型只收到可见小集合。保存/显示摘要明确turnId/revision/viewMode。",
+      "acceptance": "侧栏显示谁行动/哪里有风声，不显示行数/MIGRATED；无公开变化有正常空说明。",
+      "edge_cases": "模型摘要失败回程序模板；不为摘要重读全世界书或修改事实。",
+      "evidence": [
+        {
+          "command": "node --test tests/atlas-workbench.test.mjs (U10)",
+          "exitCode": 0,
+          "note": "1–3 条；技术串（TABLE_MIGRATED/应用 N 行/第 0→0 时段）被过滤；模型失败回退程序模板"
+        },
+        {
+          "command": "npm run verify:workbench（真实 Chrome + dev-preview 的 SQL 宿主页）",
+          "exitCode": 0,
+          "note": "M5 返工验收：index.js 接线 + 左下摘要槽有真实文案"
+        }
+      ],
+      "rework": {
+        "at": "2026-10-06",
+        "problem": "buildVisibleWorldSummary 是纯函数，宿主入口没接线。",
+        "fix": "atlas-browser-entry 导出 buildVisibleWorldSummarySync；index.js 解构并接进摘要槽。"
+      }
+    },
+    {
+      "id": "U11",
+      "stage": "M5 新UI连接",
+      "file": "ui/atlas-world-summary.mjs（新增）",
+      "function": "renderWorldSummary",
+      "depends_on": [
+        "U10"
+      ],
+      "status": "completed",
+      "actions": "绑定当前turn/revision/视角的U10输出；不把技术计数和WORLD_TURN success当世界动向；点击事件开详情。",
+      "acceptance": "新聊天旧摘要消失；0分钟短对话也可有公开行为摘要；author切pov秘密摘要消失。",
+      "edge_cases": "stale或无新数据不能沿用上一聊天。",
+      "evidence": [
+        {
+          "command": "node --test tests/atlas-workbench.e2e.test.mjs (U11)",
+          "exitCode": 0,
+          "note": "turnId/revision 不一致即 stale，显示等待说明，不沿用上一聊天摘要"
+        },
+        {
+          "command": "npm run verify:workbench（真实 Chrome + dev-preview 的 SQL 宿主页）",
+          "exitCode": 0,
+          "note": "M5 返工验收：U11 项：摘要槽文案来自同快照 changes 视图"
+        }
+      ],
+      "rework": {
+        "at": "2026-10-06",
+        "problem": "buildVisibleWorldSummary 未接正式 UI，左下摘要停在「等待」。",
+        "fix": "renderSpatialPanels 每次地图页渲染都算一份可见摘要写入 awb-slot--summary。"
+      }
+    },
+    {
+      "id": "U12",
+      "stage": "M5 新UI连接",
+      "file": "ui/atlas-unified-log-panel.mjs（新增）",
+      "function": "renderUnifiedLogTimeline/export",
+      "depends_on": [
+        "U11"
+      ],
+      "status": "completed",
+      "actions": "一条日志时间线合并host/model/storage/map/receipt issues，用trace/attempt/turn/group关联展开。每个code/path/dependency/message完整显示，保留原详情链接但不让用户去推进页才看错误。",
+      "acceptance": "三条失败/依赖在日志页全可读；导出JSON按游标完整；coreCommitted文案真实。",
+      "edge_cases": "默认脱敏key/header，内部ID以原有fingerprint关联；作者日志导出秘密提示由既有权限控制而非额外上传。",
+      "evidence": [
+        {
+          "command": "node --test tests/atlas-workbench.test.mjs + e2e (U12)",
+          "exitCode": 0,
+          "note": "sk-/Bearer/32+hex 脱敏；api_key 不落日志页；按 trace/attempt 分组展开"
+        },
+        {
+          "command": "npm run verify:workbench（真实 Chrome + dev-preview 的 SQL 宿主页）",
+          "exitCode": 0,
+          "note": "M5 返工验收：U12 项：日志页记录 19 条"
+        }
+      ],
+      "rework": {
+        "at": "2026-10-06",
+        "problem": "index.js 没调 showLog，日志槽空。",
+        "fix": "日志页渲染前 starmapShell.showLog(items, {hasMore}) 接真实记录与游标。"
+      }
+    },
+    {
+      "id": "U13",
+      "stage": "M5 新UI连接",
+      "file": "src/atlas-diagnostics.ts",
+      "function": "空间诊断注册与安全字段",
+      "depends_on": [
+        "U12"
+      ],
+      "status": "completed",
+      "actions": "注册SPATIAL_*代码、mapRef/entityRef/operationRef等定位指纹以及module/function/phase/sceneStatus/bytes字段。保留原敏感数据清洗。完整自然语言Issue从已过滤receipt展开，不把任意prompt塞details绕过sanitizer。",
+      "acceptance": "空间错误可定位具体模块函数路径；日志未吞掉schemaPath或计数；key/URL不落默认日志。",
+      "edge_cases": "不要使用details.message却不知道现有sanitizer会丢掉；显式白名单并测试。",
+      "evidence": [
+        {
+          "command": "node --test tests/atlas-diagnostics.test.mjs",
+          "exitCode": 0,
+          "note": "31/31：新增 5 个 SPATIAL_* 码与 module/function/phase/sceneStatus/bytes + mapRef/entityRef/operationRef 白名单"
+        },
+        {
+          "command": "npm run verify:workbench（真实 Chrome + dev-preview 的 SQL 宿主页）",
+          "exitCode": 0,
+          "note": "M5 返工验收：诊断脱敏用例保持绿；sceneStatus 走 SAFE_SCENE_STATUS 白名单"
+        }
+      ],
+      "rework": {
+        "at": "2026-10-06",
+        "problem": "SPATIAL_* 诊断的 mapRef/entityRef/operationRef/function/phase/bytes/sceneStatus 被脱敏白名单丢掉。",
+        "fix": "注册表与全局 DETAIL_KEYS 同步补键；module|function|phase 正则放宽到 [A-Za-z][A-Za-z0-9_-]{0,63}（大写函数名此前会被丢）。"
+      }
+    },
+    {
+      "id": "U14",
+      "stage": "M5 新UI连接",
+      "file": "src/atlas-ui-core.ts",
+      "function": "导航清单单一权威",
+      "depends_on": [
+        "U13"
+      ],
+      "status": "completed",
+      "actions": "新增人物/物品/事件/提示词页定义并更新AtlasUiPage；原overview/nearby/progression/api/skin/logs功能有明确入口。使用单一ATLAS_UI_PAGES导出，禁止index再建第二份导航。",
+      "acceptance": "所有页可从同一清单访问；skin/api/prompts不遗漏。",
+      "edge_cases": "不为新nav删除用户仍用的替换页；相同功能可合并但保留明确路由。",
+      "evidence": [
+        {
+          "command": "node --test tests/atlas-ui-core-exports.test.mjs + atlas-ui-split.test.mjs",
+          "exitCode": 0,
+          "note": "单一权威 ATLAS_UI_PAGES 扩到 13 页，四新页在 index.js 都有渲染分支"
+        },
+        {
+          "command": "npm run verify:workbench（真实 Chrome + dev-preview 的 SQL 宿主页）",
+          "exitCode": 0,
+          "note": "M5 返工验收：人物目录 4 条（UI=后端）；物品/事件为空是世界数据实况（items total=0）"
+        }
+      ],
+      "rework": {
+        "at": "2026-10-06",
+        "problem": "目录页路由存在但查询链路被 U08 的 kind 撞车拖垮。",
+        "fix": "ATLAS_UI_PAGES 13 页（+characters/items/events/prompts），目录页头部文案跟随当前口径而不是硬写 POV。"
+      }
+    },
+    {
+      "id": "U15",
+      "stage": "M5 新UI连接",
+      "file": "index.js",
+      "function": "renderPanel挂接新workbench",
+      "depends_on": [
+        "U14"
+      ],
+      "status": "completed",
+      "actions": "导入/加载宿主ports，mount新shell并传SQLcontroller/settings/skin/diagnostic；停用同实例旧地图绘制与旧wheel/pointer监听，其他现有宿主generation事件保存逻辑保持。",
+      "acceptance": "真实酒馆只出现一个地图实例；generation结束→刷新UI；关闭再开无重复监听。",
+      "edge_cases": "源index.js为权威，atlas-extension副本由pack同步；切聊天时ports重绑定。",
+      "evidence": [
+        {
+          "command": "node --test tests/atlas-browser-replay.test.mjs",
+          "exitCode": 0,
+          "note": "真实 index.js 挂载无异常；mountWorkbench 同 root 单例，旧实例先销毁"
+        },
+        {
+          "command": "npm run verify:workbench（真实 Chrome + dev-preview 的 SQL 宿主页）",
+          "exitCode": 0,
+          "note": "M5 返工验收：canvas 已挂 / 旧标点 0 / 新树 7 / CSS 已加载 / 无 pageerror / 无 4xx（全部浏览器实测）"
+        }
+      ],
+      "rework": {
+        "at": "2026-10-06",
+        "problem": "正式地图未挂新渲染器：index.js 仍导入旧 createMapController、建 div.aw-maparea、挂旧 mountViewport；createWorkbenchMapController 从未实例化 → 真实浏览器 canvas 数量 0。",
+        "fix": "index.js 新增真 canvas（aw-spatial-canvas）+ ensureSpatialMapController()（用 createSpatialRenderer/unwrapViewResult/projectMapView，queryView 走 sqlQueryView）；渲染器可用时旧绘制整段 return；树导航/事件带/摘要/日志/CSS 全部接线；jsdom 拿不到 2D 上下文时回退旧绘制（测试环境不留白屏）。"
+      }
+    },
+    {
+      "id": "U16",
+      "stage": "M5 新UI连接",
+      "file": "tests/atlas-workbench.e2e.test.mjs（新增）",
+      "function": "新UI真实事件浏览器测试",
+      "depends_on": [
+        "U15"
+      ],
+      "status": "completed",
+      "actions": "建只读SQL-backed宿主harness，复用本包browser-check的mouse/touch/resize，再测新导航、detail/tree/search/nearby/empty与scopeRace。",
+      "acceptance": "playwright实际点击、拖拽、双指、320px、fixedscale全部通过；浏览器无异常。",
+      "edge_cases": "mock只代替host外部能力，不用固定数组替代SQL查询验收；无真实ST测试时明确标harness。",
+      "evidence": [
+        {
+          "command": "node --test tests/atlas-workbench.e2e.test.mjs",
+          "exitCode": 0,
+          "note": "**harness**：本环境无 playwright/浏览器（node_modules 内无 playwright），用 jsdom 派发真实 DOM 事件；320px 与 96px 标尺改为 CSS 契约断言；未做真实 ST 验收"
+        },
+        {
+          "command": "npm run verify:workbench（真实 Chrome + dev-preview 的 SQL 宿主页）",
+          "exitCode": 0,
+          "note": "M5 返工验收：12/12 通过；证据落 docs/atlas-m5-rework-evidence-20261006.json"
+        }
+      ],
+      "rework": {
+        "at": "2026-10-06",
+        "problem": "验收只 readFileSync 断言 CSS 文本，捕获不到「文件在但没接线」。",
+        "fix": "新增 tools/verify-workbench-browser.mjs：真实 Chrome 打开 SQL 宿主页，断言 canvas/单手势 owner/单树/CSS 进 styleSheets/目录与后端同口径/日志记录/详情卡/320px 无溢出/无 JS 错误与 4xx，任何一项不过就非零退出。"
+      }
+    },
+    {
+      "id": "S01",
+      "stage": "M6 预设管理",
+      "file": "src/atlas-settings.ts",
+      "function": "UI设置与任务预设绑定字段",
+      "depends_on": [
+        "U16"
+      ],
+      "status": "pending",
+      "actions": "新增ui={singleClickEnter,viewMode,lastPage?}与taskBindings={layout,simulation,summary}:{apiPresetId:string|null,promptPresetId:string|null}；缺省沿用active。parser/migration/保存保留所有现有API、prompt字段。",
+      "acceptance": "旧设置重读字节语义不丢；任务binding引用失效有fallback告警；角色三值与mainSlot/deletable保留。",
+      "edge_cases": "API delete清相关binding；不把参考presets数据写默认；设置仅偏好不存世界scene。",
+      "evidence": []
+    },
+    {
+      "id": "S02",
+      "stage": "M6 预设管理",
+      "file": "src/atlas-settings-routes.ts",
+      "function": "绑定与UI设置保存路由",
+      "depends_on": [
+        "S01"
+      ],
+      "status": "pending",
+      "actions": "添加明确settings动作保存ui/taskBindings，沿用existing读写服务和错误；APIkey在返回/日志脱敏策略保持。",
+      "acceptance": "保存重开binding仍在，invalid任务键被拒；UI收到真实持久化成功。",
+      "edge_cases": "不能仅localStorage模拟保存；save失败不显示已保存。",
+      "evidence": []
+    },
+    {
+      "id": "S03",
+      "stage": "M6 预设管理",
+      "file": "src/atlas-model-task-routing.ts（新增）",
+      "function": "resolveTaskPreset(settings,task)",
+      "depends_on": [
+        "S02"
+      ],
+      "status": "pending",
+      "actions": "task=layout/simulation/summary；优先任务binding有效preset，否则当前active/内置。输出existingmodel adapter可接受的完整preset，不裁掉headers/body/format。",
+      "acceptance": "两个任务使用不同API/prompt mock可验证；默认兼容现有active流程；不硬编码provider。",
+      "edge_cases": "供应商无原生tools使用文字map.layout.request；重复fallback给一条issue。",
+      "evidence": []
+    },
+    {
+      "id": "S04",
+      "stage": "M6 预设管理",
+      "file": "src/atlas-sql-chat.ts",
+      "function": "模型阶段任务路由调用",
+      "depends_on": [
+        "S03"
+      ],
+      "status": "pending",
+      "actions": "在实际模型port构造处调用S03，geography/layout/decision/outcome/summary对应真实任务；保持超时/cancel/一次repair预算。",
+      "acceptance": "UI改binding能改变实际发出的模型请求，不只是显示；取消保持pending/receipt可读。",
+      "edge_cases": "现有simulation多个阶段不得额外无上限调用；key不写到turn attempts。",
+      "evidence": []
+    },
+    {
+      "id": "S05",
+      "stage": "M6 预设管理",
+      "file": "ui/atlas-api-presets.mjs（新增）",
+      "function": "API预设编辑器",
+      "depends_on": [
+        "S04"
+      ],
+      "status": "pending",
+      "actions": "从settings ports展示/新建/复制/删除/激活/任务binding；差量保存完整preset；额外字段折叠可编辑。",
+      "acceptance": "多个预设真实保存，未知兼容字段经编辑保留；切provider不擅自删用户请求参数。",
+      "edge_cases": "测试连接失败展示HTTP/timeout/cancel分类；无密钥时正常错误，不空白。",
+      "evidence": []
+    },
+    {
+      "id": "S06",
+      "stage": "M6 预设管理",
+      "file": "ui/atlas-prompt-presets.mjs（新增）",
+      "function": "分段编辑器",
+      "depends_on": [
+        "S05"
+      ],
+      "status": "pending",
+      "actions": "角色下拉system/user/assistant，段前/段后插入、名称、移动、enabled、mainSlot、复制、删除；遵守existing16段限制，保存前预览实际messages顺序。",
+      "acceptance": "顺序/role重开一致；内置改为副本；单system旧预设不消失。",
+      "edge_cases": "越上限阻止操作并提示，不静默截断用户内容；所有段停用显示明确保存错误。",
+      "evidence": []
+    },
+    {
+      "id": "S07",
+      "stage": "M6 预设管理",
+      "file": "ui/atlas-workbench-shell.mjs（新增，续）",
+      "function": "挂接预设页与真实设置",
+      "depends_on": [
+        "S06"
+      ],
+      "status": "pending",
+      "actions": "导航API/提示词/设置页挂S05/S06，mapController读取singleClickEnter；后端binding未就绪时不显示伪功能。",
+      "acceptance": "从nav管理多API和多prompt，刷新保留；发送预览与实际model request一致。",
+      "edge_cases": "取消未保存编辑不改active；避免页面切换丢稿。",
+      "evidence": []
+    },
+    {
+      "id": "S08",
+      "stage": "M6 预设管理",
+      "file": "tests/atlas-workbench-settings.test.mjs（新增）",
+      "function": "设置兼容与路由验证",
+      "depends_on": [
+        "S07"
+      ],
+      "status": "pending",
+      "actions": "旧多API/分段preset round-trip、新binding、invalidID、delete fallback、role/order、保存失败、provider字段保留。",
+      "acceptance": "退出0并断言模型mock收到真正选中的参数。",
+      "edge_cases": "不只测前端localStorage；经settings routes走实际保存对象。",
+      "evidence": []
+    },
+    {
+      "id": "T01",
+      "stage": "M7 皮肤接口",
+      "file": "src/atlas-ui-skin.ts（新增）",
+      "function": "parseUiSkinPackage(input)",
+      "depends_on": [
+        "S08"
+      ],
+      "status": "pending",
+      "actions": "实现05固定atlas-ui-skin schema与资源限额/path规范化/图片SVG清洗；支持旧atlas-map-skin迁移映射，用户包无JS执行。",
+      "acceptance": "合法完整主题可读，越界路径/script/超大图片拒绝；缺资源局部fallback。",
+      "edge_cases": "不替用户生成最终美术包；保留旧skin设置与应用/取消语义。",
+      "evidence": []
+    },
+    {
+      "id": "T02",
+      "stage": "M7 皮肤接口",
+      "file": "ui/atlas-skin-controller.mjs（新增）",
+      "function": "createSkinController(ports)",
+      "depends_on": [
+        "T01"
+      ],
+      "status": "pending",
+      "actions": "token映射DOM边框、图标、纹理及Canvas theme；插件已注册painterFactory选择；theme变化只redraw。导入预览/应用/取消/导出走真实skinPort。",
+      "acceptance": "古风与赛博测试素材能改变边框/图标/纹理而不仅色；geometry/clock/snapshot不变。",
+      "edge_cases": "导入文件无eval，降低动画有效；取消释放blobURL；layer资产缺失不丢实体。",
+      "evidence": []
+    },
+    {
+      "id": "T03",
+      "stage": "M7 皮肤接口",
+      "file": "ui/atlas-workbench.css（新增，续）",
+      "function": "皮肤边框与资源挂载样式",
+      "depends_on": [
+        "T02"
+      ],
+      "status": "pending",
+      "actions": "使用border-image/nine-slice、图标mask或img、panel纹理；缩放/手机布局保留可读内容；所有规则scope。",
+      "acceptance": "不同角花、边框、按钮状态可见；右栏文字/scale不被盖。",
+      "edge_cases": "无美术资源仍有token样式；hover不能改变标点几何。",
+      "evidence": []
+    },
+    {
+      "id": "T04",
+      "stage": "M7 皮肤接口",
+      "file": "ui/atlas-workbench-shell.mjs（新增，续）",
+      "function": "皮肤页面挂接",
+      "depends_on": [
+        "T03"
+      ],
+      "status": "pending",
+      "actions": "主题管理页面绑定T01/T02；保存用现有skinPort；应用前预览可取消；选择已注册painter后重建或更新renderer但保留相机和选中实体ID。",
+      "acceptance": "页面管理/刷新恢复；切皮肤地图大小/距离/点击位置相同。",
+      "edge_cases": "旧地图painter销毁，无双RAF；不存在painter回退default并日志。",
+      "evidence": []
+    },
+    {
+      "id": "T05",
+      "stage": "M7 皮肤接口",
+      "file": "tests/atlas-workbench-skins.test.mjs（新增）",
+      "function": "完整皮肤测试",
+      "depends_on": [
+        "T04"
+      ],
+      "status": "pending",
+      "actions": "两种合成素材包检测边框/图标/纹理变化、路径防护、取消、缺资产、reduced-motion和geometry不变。",
+      "acceptance": "浏览器截图与几何hash断言通过；用户包不执行脚本。",
+      "edge_cases": "素材仅fixtures，不放用户例子。",
+      "evidence": []
+    },
+    {
+      "id": "X01",
+      "stage": "M8 扩展生成器",
+      "file": "src/atlas-spatial-templates.ts（新增）",
+      "function": "选择空间模板的固定入口",
+      "depends_on": [
+        "T05"
+      ],
+      "status": "pending",
+      "actions": "基于地图kind/约束/已有轮廓选择floor/city/overview/generic；unsupported返回可用overview+明确issue，不能为选模板编河流/走廊。注册扩展generator版本并保留旧scene。",
+      "acceptance": "无河流城可正常显示SQL概览，旧floor/city输出不变；版本不认识不覆盖存档。",
+      "edge_cases": "生成模式与作者确认分开；不能每开图自动选新模板重排。",
+      "evidence": []
+    },
+    {
+      "id": "X02",
+      "stage": "M8 扩展生成器",
+      "file": "src/atlas-spatial-outline.ts（新增）",
+      "function": "generateFromExistingOutlines(input,context)",
+      "depends_on": [
+        "X01"
+      ],
+      "status": "pending",
+      "actions": "先做通用现成polygon/route绘制场景：保留任意合法地点轮廓、路径、confirmed坐标与非零origin，按地图bounds裁剪装饰。缺outline只画已定位点。",
+      "acceptance": "非矩形/非零origin地图无伪平移；仍可点地块/NPC/item；不会强制矩形生成。",
+      "edge_cases": "polygon自交/NaN独立issue；跨map引用拒绝；不改真实距离。",
+      "evidence": []
+    },
+    {
+      "id": "X03",
+      "stage": "M8 扩展生成器",
+      "file": "src/atlas-spatial-layout-generic.ts（新增）",
+      "function": "约束布局的首个扩展",
+      "depends_on": [
+        "X02"
+      ],
+      "status": "pending",
+      "actions": "实现无河城市/室外的确定性bounded polygon布局：已有polygon优先，未知地点按parent容器区域与adjacency避让摆放，质量layout；道路仅已有或明确estimated，维持原ID与旧锚点。",
+      "acceptance": "新增孤立地点有估计坐标且不在零点堆叠；相邻约束满足或issue；旧确认点不移动。",
+      "edge_cases": "不可解保留旧图+名单；面积/路径距离无确认不能标measured；不改SQL父链以让布局好看。",
+      "evidence": []
+    },
+    {
+      "id": "X04",
+      "stage": "M8 扩展生成器",
+      "file": "src/atlas-spatial-layout-interior.ts（新增）",
+      "function": "多走廊室内约束扩展",
+      "depends_on": [
+        "X03"
+      ],
+      "status": "pending",
+      "actions": "以已有floor后向兼容为首要；新增corridors/entrances/room polygons的小约束模板，程序校验门连通、家具通行、楼梯链接不同floor mapId。schema扩展以scene/generator版本管理，不要求模型输出每个网格。",
+      "acceptance": "L形房间/两走廊/两层楼梯能生成且可达；旧六房间夹具不变；门/楼梯可点到相关层。",
+      "edge_cases": "不支持任意户型时列明；超预算拆楼层，不删除建筑；确认几何不可改。",
+      "evidence": []
+    },
+    {
+      "id": "X05",
+      "stage": "M8 扩展生成器",
+      "file": "ui/atlas-map-controller.mjs（新增，续）",
+      "function": "新template painter绑定",
+      "depends_on": [
+        "X04"
+      ],
+      "status": "pending",
+      "actions": "general shapes/routes进入overview painter；多走廊内部绑定注册painter，保留hit/scene filtering。房间归属/层级仍来自SQL。",
+      "acceptance": "复杂轮廓/新楼梯点击与右detail一致；不同模板scale/legend不重复。",
+      "edge_cases": "没有对应painter fallback现有概览并给issue；不白屏。",
+      "evidence": []
+    },
+    {
+      "id": "X06",
+      "stage": "M8 扩展生成器",
+      "file": "tests/atlas-spatial-extensions.test.mjs（新增）",
+      "function": "非模板与多层几何验收",
+      "depends_on": [
+        "X05"
+      ],
+      "status": "pending",
+      "actions": "实测无河城市、非零origin、L形房间、两个走廊、上下楼梯、确认polygon保护、更新旧锚点，使用独立碰撞/连通性断言。",
+      "acceptance": "退出0；每种新template有实际浏览器截图和data验证。",
+      "edge_cases": "模板不足不能写完成；不把仅截图漂亮当可保存/可回退。",
+      "evidence": []
+    },
+    {
+      "id": "R01",
+      "stage": "M9 完整交付验收",
+      "file": "tools/build.mjs",
+      "function": "空间模块与新UI构建入口",
+      "depends_on": [
+        "X06"
+      ],
+      "status": "pending",
+      "actions": "把实际新增JS/CSS加入当前build流程、browser entry自动打包vendor；检查无Node-only依赖，保留SQL worker/WASM路径。",
+      "acceptance": "npm run build退出0，发布加载到新component实际入口。",
+      "edge_cases": "不要把预览全内嵌runtime/fixture直接当dist；Node与浏览器两套产物都检查。",
+      "evidence": []
+    },
+    {
+      "id": "R02",
+      "stage": "M9 完整交付验收",
+      "file": "tools/pack.mjs",
+      "function": "发布复制与排除夹具",
+      "depends_on": [
+        "R01"
+      ],
+      "status": "pending",
+      "actions": "将新UI/模块/许可复制到实际release路径；同步index.js与atlas-extension/index.js现有规则；排除fixture/examples/demo-data/私有报告密钥。",
+      "acceptance": "npm run pack产物含所有必需资产且无示例世界；解压release可启动。",
+      "edge_cases": "预览字体若用于发布必须有OFL；不能手改副本掩盖pack遗漏。",
+      "evidence": []
+    },
+    {
+      "id": "R03",
+      "stage": "M9 完整交付验收",
+      "file": "package.json",
+      "function": "版本及验证脚本",
+      "depends_on": [
+        "R02"
+      ],
+      "status": "pending",
+      "actions": "当前若仍0.9.75则升级0.9.76；若已有更高版本按当前patch递增，登记spatial/e2e验证命令。",
+      "acceptance": "版本号与最终release计划一致，脚本可在Windows/Node执行。",
+      "edge_cases": "不要覆盖整个package.json；保留所有原依赖。",
+      "evidence": []
+    },
+    {
+      "id": "R04",
+      "stage": "M9 完整交付验收",
+      "file": "atlas-extension/manifest.json",
+      "function": "扩展版本同步",
+      "depends_on": [
+        "R03"
+      ],
+      "status": "pending",
+      "actions": "只同步实际版本与必要新UI说明。",
+      "acceptance": "版本等于R03。",
+      "edge_cases": "保留原manifest权限/入口。",
+      "evidence": []
+    },
+    {
+      "id": "R05",
+      "stage": "M9 完整交付验收",
+      "file": "atlas-server-plugin/package.json",
+      "function": "服务端版本同步",
+      "depends_on": [
+        "R04"
+      ],
+      "status": "pending",
+      "actions": "只同步版本并保留服务端入口。",
+      "acceptance": "版本等于R03/R04；existing版本一致性测试通过。",
+      "edge_cases": "即使空间主要在浏览器也保持原三处版本一致。",
+      "evidence": []
+    },
+    {
+      "id": "R06",
+      "stage": "M9 完整交付验收",
+      "file": "tests/atlas-workbench-host.e2e.test.mjs（新增）",
+      "function": "实际酒馆事件全链验证",
+      "depends_on": [
+        "R05"
+      ],
+      "status": "pending",
+      "actions": "本机SillyTavern启动测试配置，mock模型离线返回通用小约束；执行初始化、首轮重要人物、开/关图、重生成、截断、删楼、fork、新聊天、author/pov、API502、地图重试、手机操作。",
+      "acceptance": "07中T01–T30完整记录；关键数据查SQL验证；真实ST结果与harness结果分开。",
+      "edge_cases": "在线模型另取样；没有本机环境不能虚报通过，要提供测试入口和缺项。",
+      "evidence": []
+    },
+    {
+      "id": "R07",
+      "stage": "M9 完整交付验收",
+      "file": "docs/atlas-ui-integration-verification.md（新增）",
+      "function": "最终交付报告",
+      "depends_on": [
+        "R06"
+      ],
+      "status": "pending",
+      "actions": "汇总tasks.json、命令/退出码、测试数、版本/HEAD、真实ST截图、release路径、安装/回滚说明和未完能力。重跑typecheck/test/build/pack一次并保存结果。",
+      "acceptance": "完整证据、自包含安装步骤；未完成项明确；无凭空“全通过”。",
+      "edge_cases": "不要把本包报告冒充接入后报告；发布/推送需遵循用户实际指令。",
+      "evidence": []
+    }
+  ],
+  "reworkGate": {
+    "at": "2026-10-06",
+    "trigger": "ATLAS-UI-Spatial-进度验收-20261006.md（M5 判不通过）",
+    "updatedTasks": 16,
+    "gate": [
+      {
+        "command": "npm test",
+        "exitCode": 0,
+        "note": "M5 返工后全量 1574/1574（含新增镜像一致性门禁与 3 条返工回归）"
+      },
+      {
+        "command": "npm run typecheck",
+        "exitCode": 0,
+        "note": "tsc --noEmit 0 errors"
+      },
+      {
+        "command": "node tools/sync-mirror.mjs && npm run pack",
+        "exitCode": 0,
+        "note": "镜像一致 + 自包含安装包"
+      },
+      {
+        "command": "npm run verify:workbench",
+        "exitCode": 0,
+        "note": "真实 Chrome 12 项全过；证据 docs/atlas-m5-rework-evidence-20261006.json"
+      },
+      {
+        "command": "node --test tests/atlas-workbench.test.mjs tests/atlas-workbench.e2e.test.mjs",
+        "exitCode": 0,
+        "note": "37/37：U01–U16 单测与真实 index.js 接线 e2e"
+      }
+    ]
+  }
+}

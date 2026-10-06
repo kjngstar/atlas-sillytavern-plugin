@@ -10,6 +10,7 @@ import {applySqlLegacyImport} from './atlas-sql-legacy-import.ts';
  */
 
 import { applyGroups } from './atlas-db-commit.ts';
+import type { ApplyGroupsContext } from './atlas-db-commit.ts';
 // E08：回退计划的唯一权威（逆因果序、中间楼定位、显式上限拒绝）。
 import { applyRollbackPlan, planRollback } from './atlas-db-rollback.ts';
 import { validateCandidate } from './atlas-db-invariants.ts';
@@ -38,10 +39,16 @@ import { ATLAS_SCHEMA_VERSION, installSchemaSafe } from './atlas-db-schema.ts';
 import { encodeSnapshot, sha256HexSync, sha256Hex } from './atlas-db-envelope.ts';
 import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
 import { queryChanges, queryDiagnostics, queryEntityDetail, queryMapView, queryNearby, querySimulationView } from './atlas-db-views.ts';
+// M4/Q07：四个新只读口。这里只传查询上下文，绝不把 writer / saveSession 交给读口。
+import { queryCatalog } from './atlas-catalog-views.ts';
+import { querySpatialFlows } from './atlas-spatial-flow-views.ts';
+import { querySpatialScene } from './atlas-spatial-views.ts';
+import { queryTasks } from './atlas-task-views.ts';
 import { collectKnownRefs, collectEntityRefs } from './atlas-sql-refs.ts';
 export { collectKnownRefs, collectEntityRefs } from './atlas-sql-refs.ts';
 import { settleSqlTurn } from './atlas-sql-simulation.ts';
 import { compileSqlSceneMaps } from './atlas-sql-scene-maps.ts';
+import { applyPendingSpatialRequests, armLayoutRetry } from './atlas-spatial-candidate.ts';
 import { projectPromptView } from './atlas-db-knowledge-view.ts';
 import type { SqlDatabase } from './atlas-db-runtime.ts';
 import type {
@@ -364,6 +371,7 @@ export function createSqlRepository(options: RepositoryOptions) {
         revision: currentRevision(),
         viewMode: query.viewMode,
         povId: query.povId ?? (branchRow()?.pov_character_id as string | null) ?? null,
+        chatId: chatUid,
         // §7.1 第 6 条：把随存档带来的资产清单交给视图层，由它产出缺底图诊断。
         assets: envelopeAssets,
       };
@@ -382,6 +390,15 @@ export function createSqlRepository(options: RepositoryOptions) {
           return querySimulationView(ctx, query);
         case 'prompt':
           return {branchId:ctx.branchId,revision:ctx.revision,items:[projectPromptView(ctx,query)],metadata:{viewMode:ctx.viewMode??'pov'}};
+        // M4/Q07：只读数据口。同一个 branch/revision/viewMode/povId，不写库、不落 journal。
+        case 'scene':
+          return querySpatialScene(ctx, query);
+        case 'catalog':
+          return queryCatalog(ctx, query);
+        case 'flows':
+          return querySpatialFlows(ctx, query);
+        case 'tasks':
+          return queryTasks(ctx, query);
         default:
           return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: 'VIEW_KIND_UNSUPPORTED', kind: query.kind } };
       }
@@ -872,6 +889,42 @@ export function createSqlRepository(options: RepositoryOptions) {
       groupResults.push(...simulation.groups);
       parsedOperations.push(...simulation.modelOperations);
       timeChanged = simulation.clockAfter !== clockBefore;
+
+      // M3/W03：布局请求结算 —— 仍在同一个受控候选事务内，before 最终外键/不变量检查。
+      // 生成器是同步纯函数：这里不 await、不开新事务、不提交、不保存聊天。
+      const spatialGuard = input.isCurrent ?? (() => true);
+      const spatialPorts = {
+        applyGroups: (db: SqlDatabase, groups: unknown[], ctx: ApplyGroupsContext) => applyGroups(db, groups as AtomicGroup[], ctx),
+        isCurrent: spatialGuard,
+        branchId,
+        turnId,
+        attemptId: 'spatial',
+      };
+      // M3/W08：UI 显式重试 —— 先把 failed 请求重新武装成 pending（只改状态与 ID）。
+      if (input.layoutRetry && typeof input.layoutRetry.mapId === 'string' && input.layoutRetry.mapId) {
+        const armed = armLayoutRetry({
+          db: candidateDb,
+          branchId,
+          mapId: input.layoutRetry.mapId,
+          requestId: input.layoutRetry.requestId,
+          operationId: input.layoutRetry.operationId,
+          turnId,
+          ports: spatialPorts,
+        });
+        groupResults.push(...armed.groups);
+        allIssues.push(...armed.issues);
+      }
+
+      const spatial = applyPendingSpatialRequests({
+        db: candidateDb,
+        scope: { chatId: anchor.chatUid, branchId, revision: rev, viewMode: 'author' },
+        isCurrent: spatialGuard,
+        turnId,
+        clockS: clockBefore,
+        ports: spatialPorts,
+      });
+      groupResults.push(...spatial.groups);
+      allIssues.push(...spatial.issues);
 
       const fkViolations = foreignKeyCheck(candidateDb);
       const finalCheck = validateCandidate(candidateDb, { branchId });

@@ -47,11 +47,13 @@ test("C6：导航页清单只有一份权威（ui-core），index.js 不再自�
 
   // 权威清单必须包含实际支持的全部页面（含 skin——旧清单漏了它，
   // 而旧测试只检查「权威是 index.js 副本的子集」，因此永远测不出缺失）
+  // U14：新增 characters / items / events（Q04 目录只读口）与 prompts（提示词库独立入口）
   const ids = ATLAS_UI_PAGES.map((p) => p.id);
-  for (const expected of ["overview", "map", "nearby", "changes", "progression", "api", "replace", "skin", "logs"]) {
+  for (const expected of ["overview", "map", "nearby", "changes", "progression", "characters", "items",
+    "events", "prompts", "api", "replace", "skin", "logs"]) {
     assert.ok(ids.includes(expected), `权威清单必须包含页面 ${expected}`);
   }
-  assert.equal(ids.length, 9, "权威清单为 9 页");
+  assert.equal(ids.length, 13, "权威清单为 13 页");
   assert.equal(new Set(ids).size, ids.length, "页面 id 不重复");
   assert.ok(!ids.includes("settings"), "不得回流 settings 页");
 

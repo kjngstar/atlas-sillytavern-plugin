@@ -14,9 +14,59 @@ import { buildPositionCache, resolveEffectivePosition } from './atlas-sim-positi
 import { computeViewportScaleBar } from './atlas-scale.ts';
 import { scenePositions } from './atlas-scene-layout.ts';
 import { sqlVisibility } from './atlas-sql-visibility.ts';
+import { publicMapFrame } from '../vendor/atlas-spatial/index.mjs';
 import type { SqlDatabase } from './atlas-db-runtime.ts';
 import type { ViewQuery, ViewResult } from './atlas-ops-contract.ts';
 import type { AtlasAssetRef, AtlasTableName } from './atlas-db-contract.ts';
+
+/**
+ * M4/Q02：把 `routes.geometry_json`（{kind,coordinates:[[x,y]]}）投影成可绘制的格坐标几何。
+ *
+ * - 只有 kind='line' 且至少两个有限坐标点才给 geometry；polygon 不是路线，null。
+ * - 坏几何 / 缺几何一律 null + 一条逐路由的 issue，UI 显示「不可绘制」而不是画假线。
+ */
+export function projectRouteGeometry(
+  route: Record<string, unknown>,
+  mapId: string,
+): { geometry: { mapId: string; units: 'cells'; points: Array<{ x: number; y: number }> } | null; issue?: { routeId: string; code: string; message: string } } {
+  const routeId = String(route.id ?? '');
+  const raw = route.geometry_json;
+  if (raw === null || raw === undefined || raw === '') return { geometry: null };
+  let parsed: unknown = raw;
+  if (typeof raw === 'string') {
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return { geometry: null, issue: { routeId, code: 'GEOMETRY_JSON_INVALID', message: '路线几何不是合法 JSON，按无几何处理' } };
+    }
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { geometry: null, issue: { routeId, code: 'GEOMETRY_SHAPE_INVALID', message: '路线几何必须是对象，按无几何处理' } };
+  }
+  const doc = parsed as Record<string, unknown>;
+  const kind = String(doc.kind ?? '');
+  if (kind !== 'line') {
+    return { geometry: null, issue: { routeId, code: 'GEOMETRY_KIND_NOT_LINE', message: `路线几何 kind=${kind || '空'} 不是 line，不画线` } };
+  }
+  const coords = doc.coordinates;
+  if (!Array.isArray(coords) || coords.length < 2) {
+    return { geometry: null, issue: { routeId, code: 'GEOMETRY_TOO_FEW_POINTS', message: '路线几何至少需要两个点，按无几何处理' } };
+  }
+  const points: Array<{ x: number; y: number }> = [];
+  for (const entry of coords) {
+    const pair = Array.isArray(entry) ? entry : (entry !== null && typeof entry === 'object' ? [(entry as Record<string, unknown>).x, (entry as Record<string, unknown>).y] : null);
+    if (!pair || pair.length < 2) {
+      return { geometry: null, issue: { routeId, code: 'GEOMETRY_POINT_INVALID', message: '路线几何存在非法顶点，整条路线按无几何处理' } };
+    }
+    const x = Number(pair[0]);
+    const y = Number(pair[1]);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      return { geometry: null, issue: { routeId, code: 'GEOMETRY_POINT_INVALID', message: '路线几何存在非有限坐标，整条路线按无几何处理' } };
+    }
+    points.push({ x, y });
+  }
+  return { geometry: { mapId, units: 'cells', points } };
+}
 
 export type ViewContext = {
   db: SqlDatabase;
@@ -27,6 +77,8 @@ export type ViewContext = {
   /** 视角过滤：pov 只返回主角已知内容；author 返回作者视图。 */
   viewMode?: 'pov' | 'author';
   povId?: string | null;
+  /** M4/Q03：空间适配器作用域需要 chatId；读口无宿主会话时用分支兜底。 */
+  chatId?: string;
 };
 
 function rows(ctx: ViewContext, table: AtlasTableName, where = '', params: Array<string | number | null> = [], limit = 500): Array<Record<string, unknown>> {
@@ -108,6 +160,12 @@ export type MapViewItem = {
     distanceM: number | null;
     dashed: boolean;
     allowedModes: string[];
+    /** M4/Q02：可绘制格坐标几何（{mapId,units:'cells',points}）；无几何 / 坏几何一律 null，不画假线。 */
+    geometry: { mapId: string; units: 'cells'; points: Array<{ x: number; y: number }> } | null;
+    /** M4/Q02：端点引用，供适配器判断路线在 POV 下是否可见。 */
+    mapId: string;
+    fromLocationId: string;
+    toLocationId: string;
   }>;
   frames: { frame: Record<string, unknown>; scaleBar: ReturnType<typeof computeViewportScaleBar> | null };
 };
@@ -133,6 +191,7 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
   const positionCache = buildPositionCache({ db: ctx.db, branchId: ctx.branchId });
   const visibility=sqlVisibility(ctx);
 
+  const routeIssues: Array<{ routeId: string; code: string; message: string }> = [];
   const items: MapViewItem[] = selected.map((map) => {
     const mapId = String(map.id);
     const points: MapViewItem['points'] = [];
@@ -222,22 +281,34 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
           precision: position.precision,
           radius: position.radius ?? null,
           markerQuality: position.precision,
+          // M4/Q02：地面物品在网格上也要带归属地点，UI 才知道它属于哪个房间。
+          locationId: item.location_id ? String(item.location_id) : null,
         });
       }
     }
 
     const mapRoutes = routes
       .filter((r) => (r.map_id ? String(r.map_id) === mapId : false))
-      .map((r) => ({
-        routeId: String(r.id),
-        fromId: String(r.from_location_id),
-        toId: String(r.to_location_id),
-        kind: String(r.kind),
-        geometryQuality: String(r.geometry_quality ?? 'unknown'),
-        distanceM: typeof r.distance_m === 'number' ? r.distance_m : null,
-        dashed: String(r.geometry_quality) !== 'confirmed',
-        allowedModes: Array.isArray(r.allowed_modes_json) ? (r.allowed_modes_json as string[]) : [],
-      }));
+      .map((r) => {
+        const projected = projectRouteGeometry(r, mapId);
+        if (projected.issue) routeIssues.push(projected.issue);
+        return {
+          routeId: String(r.id),
+          fromId: String(r.from_location_id),
+          toId: String(r.to_location_id),
+          kind: String(r.kind),
+          geometryQuality: String(r.geometry_quality ?? 'unknown'),
+          distanceM: typeof r.distance_m === 'number' ? r.distance_m : null,
+          dashed: String(r.geometry_quality) !== 'confirmed',
+          allowedModes: Array.isArray(r.allowed_modes_json) ? (r.allowed_modes_json as string[]) : [],
+          /** M4/Q02：可绘制几何（格坐标）或 null；unknown/坏几何一律 null，绝不画假线。 */
+          geometry: projected.geometry,
+          // M4/Q02：适配器按端点引用判断路线可见性（审查必修 2），不随 DTO 下发就只能在 POV 全砍。
+          mapId,
+          fromLocationId: String(r.from_location_id),
+          toLocationId: String(r.to_location_id),
+        };
+      });
 
     const metersPerCell = typeof map.meters_per_cell === 'number' ? map.meters_per_cell : null;
     for(const point of points)point.hidden=!visibility.visible(point.kind,point.entityId);
@@ -257,7 +328,8 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
       coarseList:ctx.viewMode==='pov'?coarseList.filter(entry=>!entry.hidden):coarseList,
       routes: mapRoutes,
       frames: {
-        frame: (map.frame_json as Record<string, unknown>) ?? {},
+        // M4/Q02：POV/author 的普通地图响应都不含 atlasScene / atlasLayoutRequest。
+        frame: publicMapFrame((map.frame_json ?? {}) as Record<string, unknown>),
         scaleBar: metersPerCell === null ? null : computeViewportScaleBar({ cameraK: 40, metersPerCell }),
       },
     };
@@ -276,6 +348,8 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
       pointCount: items.reduce((n, m) => n + (m as MapViewItem).points.length, 0),
       coarseCount: items.reduce((n, m) => n + (m as MapViewItem).coarseList.length, 0),
       viewMode: ctx.viewMode ?? 'author',
+      /** M4/Q02：坏几何按路线逐条列出，方便定位是哪一条、为什么不能画。 */
+      routeIssues,
       ...assetDiagnostics(ctx, selected),
     },
   };
@@ -383,19 +457,27 @@ export function queryEntityDetail(ctx: ViewContext, query: ViewQuery): ViewResul
     if(visibility && entityId!==visibility.povId){
       if(!visibility.visibleCharacters.has(entityId)&&!visibility.knownCharacters.has(entityId))return {branchId:ctx.branchId,revision:ctx.revision,items:[],metadata:{reason:'POV_UNKNOWN'}};
       const seen=visibility.visibleCharacters.has(entityId);
+      // M4/Q11：POV 看别人也只给「已知 + 当场可见」的字段；手持物品按可见集合过滤。
+      const povHeld=rows(ctx,'items',"holder_character_id = ? AND status = 'active'",[entityId],200)
+        .filter(entry=>visibility.visibleItems.has(String(entry.id)))
+        .map(entry=>({id:entry.id,name:entry.name,kind:entry.kind}));
       return {branchId:ctx.branchId,revision:ctx.revision,items:[{kind,character:{id:entityId,name:character.name,...(seen?{location_id:character.location_id,physical_status:character.physical_status}:{})},
-        relations:[],actions:[],journeys:[],knowledge:[],position:seen?resolveEffectivePosition(ctx,entityId):null,lastSeen:visibility.projection.lastSeen.filter(item=>item.entityId===entityId)}],metadata:{fieldLimited:true,currentPositionKnown:seen}};
+        relations:[],actions:[],journeys:[],heldItems:povHeld,knowledge:[],position:seen?resolveEffectivePosition(ctx,entityId):null,lastSeen:visibility.projection.lastSeen.filter(item=>item.entityId===entityId)}],metadata:{fieldLimited:true,currentPositionKnown:seen}};
     }
     const relations = rows(ctx, 'relations', 'subject_entity_id = ? OR object_entity_id = ?', [entityId, entityId], 200);
     const actions = rows(ctx, 'actions', 'actor_entity_id = ?', [entityId], 100);
     const journeys = rows(ctx, 'journeys', 'mover_entity_id = ?', [entityId], 20);
+    // M4/Q11：人物库存（手持物品）单独列出——地面标点那边已经排除持有中的物品，两边不能互相冒充。
+    const heldItems = rows(ctx, 'items', "holder_character_id = ? AND status = 'active'", [entityId], 200)
+      .filter((entry) => !visibility || visibility.visibleItems.has(String(entry.id)))
+      .map((entry) => (visibility ? { id: entry.id, name: entry.name, kind: entry.kind } : entry));
     const knowledge = rows(ctx, 'knowledge', 'knower_character_id = ?', [entityId], 200);
     const position = resolveEffectivePosition({ db: ctx.db, branchId: ctx.branchId }, entityId);
     return {
       branchId: ctx.branchId,
       revision: ctx.revision,
-      items: [{ kind, character, relations, actions, journeys, knowledge, position }],
-      metadata: { counts: { relations: relations.length, actions: actions.length, knowledge: knowledge.length } },
+      items: [{ kind, character, relations, actions, journeys, heldItems, knowledge, position }],
+      metadata: { counts: { relations: relations.length, actions: actions.length, journeys: journeys.length, heldItems: heldItems.length, knowledge: knowledge.length } },
     };
   }
 
@@ -411,14 +493,31 @@ export function queryEntityDetail(ctx: ViewContext, query: ViewQuery): ViewResul
       .map(character=>visibility?{id:character.id,name:character.name,location_id:character.location_id,physical_status:character.physical_status}:character);
     const events = rows(ctx, 'events', 'location_id = ?', [entityId], 200).filter(event=>!visibility||event.secrecy==='public'&&visibility.here===entityId&&event.status==='occurred');
     const fronts = visibility?[]:rows(ctx, 'rumor_fronts', 'location_id = ?', [entityId], 200);
+    // M4/Q11：地面物品 = 直接落在本地点、且不在任何人/容器手里（手持与容器内不算地面）。
+    const groundItems = rows(ctx, 'items', "location_id = ? AND status = 'active' AND holder_character_id IS NULL AND container_item_id IS NULL", [entityId], 200)
+      .filter((entry) => !visibility || visibility.visibleItems.has(String(entry.id)))
+      .map((entry) => (visibility ? { id: entry.id, name: entry.name, kind: entry.kind } : entry));
+    // M4/Q11：子地图（同一地点可有多层楼层地图）与「在子地点里」的粗聚合在场名单。
+    const childMaps = rows(ctx, 'maps', "container_location_id = ? AND status = 'active'", [entityId], 50)
+      .map((map) => ({ mapId: String(map.id), name: String(map.name ?? ''), kind: String(map.kind ?? 'world') }));
+    const childIds = new Set(children.map((child) => String(child.id)));
+    const coarsePresent = rows(ctx, 'characters', "status = 'active'", [], 2000)
+      .filter((character) => {
+        const at = String(character.location_id ?? '');
+        return at !== entityId && childIds.has(at);
+      })
+      .filter((character) => !['in_transit', 'unknown'].includes(resolveEffectivePosition(ctx, String(character.id), undefined, cache).kind))
+      .filter((character) => !visibility || visibility.visibleCharacters.has(String(character.id)))
+      .map((character) => ({ id: character.id, name: character.name, locationId: String(character.location_id) }));
     const position = resolveEffectivePosition({ db: ctx.db, branchId: ctx.branchId }, entityId);
     return {
       branchId: ctx.branchId,
       revision: ctx.revision,
       items: [{ kind, location:visibility?{id:location.id,name:location.name,kind:location.kind,parent_location_id:location.parent_location_id}:location,
         children:visibility?children.map(child=>({id:child.id,name:child.name,kind:child.kind})):children,
-        present, events:visibility?events.map(event=>({id:event.id,title:event.title,occurred_at_s:event.occurred_at_s})):events, fronts, position }],
-      metadata: { counts: { children: children.length, present: present.length, events: events.length, fronts: fronts.length } },
+        present, coarsePresent, groundItems, childMaps,
+        events:visibility?events.map(event=>({id:event.id,title:event.title,occurred_at_s:event.occurred_at_s})):events, fronts, position }],
+      metadata: { counts: { children: children.length, present: present.length, coarsePresent: coarsePresent.length, groundItems: groundItems.length, childMaps: childMaps.length, events: events.length, fronts: fronts.length } },
     };
   }
 
@@ -487,67 +586,179 @@ function safeJson(text: unknown): Record<string, unknown> {
   }
 }
 
+const LOG_SECRET_KEY = /(api[_-]?key|authorization|token|secret|password|cookie|bearer|signature)/i;
+const LOG_SECRET_VALUE = /(sk-[A-Za-z0-9]{6,}|Bearer\s+\S+|[A-Fa-f0-9]{32,})/;
+
+/** M4/Q12：日志默认不带完整 response / 密钥类字段，脱敏后再落日志。 */
+function redactForLog(value: unknown, depth = 0): unknown {
+  if (depth > 6) return '[depth]';
+  if (Array.isArray(value)) return value.map((entry) => redactForLog(entry, depth + 1));
+  if (typeof value === 'string') return LOG_SECRET_VALUE.test(value) ? '[redacted]' : value.length > 2000 ? `${value.slice(0, 2000)}…[truncated]` : value;
+  if (value === null || typeof value !== 'object') return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (LOG_SECRET_KEY.test(key) || key === 'response' || key === 'headers') {
+      out[key] = '[redacted]';
+      continue;
+    }
+    out[key] = redactForLog(entry, depth + 1);
+  }
+  return out;
+}
+
+/** M4/Q12：把 partial/failed 回执里的组与问题摊平成日志条目（保留完整路径与依赖链）。 */
+function receiptIssues(receipt: Record<string, unknown>, turnId: string): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = [];
+  const groups = Array.isArray(receipt.groups) ? (receipt.groups as Array<Record<string, unknown>>) : [];
+  for (const group of groups) {
+    const issues = Array.isArray(group.issues) ? (group.issues as Array<Record<string, unknown>>) : [];
+    for (const issue of issues) {
+      out.push({
+        logId: `issue_${String(turnId)}_${out.length}`,
+        kind: 'issue',
+        turnId,
+        groupId: String(group.groupId ?? ''),
+        groupStatus: String(group.status ?? ''),
+        operationId: String(group.operationId ?? issue.operationId ?? ''),
+        code: String(issue.code ?? ''),
+        path: String(issue.path ?? ''),
+        message: String(issue.message ?? ''),
+        entityId: issue.entityId === null || issue.entityId === undefined ? null : String(issue.entityId),
+        severity: String(issue.severity ?? 'error'),
+        retryable: issue.retryable === true,
+        module: String(issue.module ?? group.module ?? ''),
+        dependsOn: Array.isArray(group.dependsOn) ? group.dependsOn.map(String) : [],
+      });
+    }
+  }
+  return out;
+}
+
 /**
  * G11 queryDiagnostics：时间线筛选/分页/完整导出游标。
  * 分页 100 条不等于导出截断：导出全部匹配记录，超出留存范围明确给出 droppedCount。
+ *
+ * M4/Q12：
+ * - 失败/部分回执**不再只取最新 50 轮**；用「稳定时间 + ID」游标一直翻到末页。
+ * - 每轮把回执里的所有 groups/issues 摊平成独立日志条目（完整 path + 依赖链），一次三字段失败能看见三条路径。
+ * - 变更记录与失败轮用两个独立游标命名空间，避免跨页重复导出同一条记录。
  */
 export function queryDiagnostics(ctx: ViewContext, query: ViewQuery): ViewResult {
   const stale = staleResult(ctx, query.revision);
   if (stale) return stale;
   const limit = Math.max(1, Math.min(500, query.limit ?? 100));
-  const offset = query.cursor ? Number(query.cursor) : 0;
+  const rawCursor = typeof query.cursor === 'string' ? query.cursor : '';
+  const changeCursor = rawCursor.startsWith('ch:') ? rawCursor.slice(3).split('|') : null;
+  const failedCursor = rawCursor.startsWith('ft:') ? rawCursor.slice(3).split('|') : null;
+  const legacyOffset = !changeCursor && !failedCursor && rawCursor && Number.isFinite(Number(rawCursor)) ? Number(rawCursor) : 0;
   const total = queryBound(
     ctx.db,
     `SELECT COUNT(*) AS n FROM turn_changes tc JOIN turns t ON t.id = tc.turn_id WHERE t.branch_id = ?`,
     [ctx.branchId],
   );
   const totalCount = Number(total[0]?.n ?? 0);
-  const changes = queryBound(
+  const failedTotal = Number(
+    queryBound(ctx.db, `SELECT COUNT(*) AS n FROM turns WHERE branch_id = ? AND status IN ('failed','partial')`, [ctx.branchId])[0]?.n ?? 0,
+  );
+
+  const changeParams: Array<string | number | null> = [ctx.branchId];
+  let changeWhere = '';
+  if (changeCursor) {
+    changeWhere = ' AND (tc.turn_id > ? OR (tc.turn_id = ? AND tc.sequence > ?))';
+    changeParams.push(changeCursor[0], changeCursor[0], Number(changeCursor[1] ?? 0));
+  }
+  const changes = failedCursor
+    ? []
+    : queryBound(
     ctx.db,
-    `SELECT tc.id, tc.turn_id, tc.group_id, tc.operation_id, tc.target_table, tc.target_row_id, tc.operation, tc.summary, tc.basis_json
+    `SELECT tc.id, tc.turn_id, tc.sequence, tc.group_id, tc.operation_id, tc.target_table, tc.target_row_id, tc.operation, tc.summary, tc.basis_json
      FROM turn_changes tc JOIN turns t ON t.id = tc.turn_id
-     WHERE t.branch_id = ? ORDER BY tc.turn_id, tc.sequence LIMIT ? OFFSET ?`,
-    [ctx.branchId, limit, offset],
+     WHERE t.branch_id = ?${changeWhere} ORDER BY tc.turn_id, tc.sequence LIMIT ? OFFSET ?`,
+    [...changeParams, limit, legacyOffset],
   );
-  const failedTurns = queryBound(
-    ctx.db,
-    `SELECT id, status, receipt_json, attempts_json FROM turns WHERE branch_id = ? AND status IN ('failed','partial') ORDER BY created_wall_ms DESC LIMIT 50`,
-    [ctx.branchId],
-  );
-  const nextOffset = offset + changes.length;
-  return {
-    branchId: ctx.branchId,
-    revision: ctx.revision,
-    items: [
-      ...changes.map((c) => ({
-        logId: String(c.id),
-        kind: 'change',
-        turnId: String(c.turn_id),
-        groupId: String(c.group_id),
-        operationId: String(c.operation_id),
-        table: String(c.target_table),
-        rowId: String(c.target_row_id),
-        operation: String(c.operation),
-        summary: String(c.summary ?? ''),
-        basis: safeJson(c.basis_json),
-      })),
-      ...failedTurns.map((t) => ({
+
+  const failedParams: Array<string | number | null> = [ctx.branchId];
+  let failedWhere = '';
+  if (failedCursor) {
+    failedWhere = ' AND (created_wall_ms < ? OR (created_wall_ms = ? AND id < ?))';
+    failedParams.push(Number(failedCursor[0] ?? 0), Number(failedCursor[0] ?? 0), failedCursor[1] ?? '');
+  }
+  const failedTurns = changeCursor
+    ? []
+    : queryBound(
+        ctx.db,
+        `SELECT id, status, clock_after_s, created_wall_ms, receipt_json, attempts_json FROM turns WHERE branch_id = ? AND status IN ('failed','partial')${failedWhere}
+         ORDER BY created_wall_ms DESC, id DESC LIMIT ?`,
+        [...failedParams, limit],
+      );
+
+  const items: Array<Record<string, unknown>> = [];
+  for (const c of changes) {
+    items.push({
+      logId: String(c.id),
+      kind: 'change',
+      turnId: String(c.turn_id),
+      groupId: String(c.group_id),
+      operationId: String(c.operation_id),
+      table: String(c.target_table),
+      rowId: String(c.target_row_id),
+      operation: String(c.operation),
+      summary: String(c.summary ?? ''),
+      basis: redactForLog(safeJson(c.basis_json)),
+    });
+  }
+  let issueCount = 0;
+  for (const t of failedTurns) {
+    const receipt = safeJson(t.receipt_json);
+    const status = String(t.status ?? '');
+    const issues = receiptIssues(receipt, String(t.id));
+    issueCount += issues.length;
+    items.push(
+      {
         logId: `turn_${String(t.id)}`,
         kind: 'failed_turn',
         turnId: String(t.id),
-        status: String(t.status),
-        receipt: safeJson(t.receipt_json),
-        attempts: safeJson(t.attempts_json),
-      })),
-    ],
-    nextCursor: nextOffset < totalCount ? String(nextOffset) : undefined,
+        status,
+        /** M4/Q12：coreCommitted 取真实回执，不由 HTTP 200 或页面状态推断。 */
+        coreCommitted: receipt.coreCommitted === true || status === 'partial',
+        receipt: redactForLog(receipt),
+        attempts: redactForLog(safeJson(t.attempts_json)),
+        issueCount: issues.length,
+      },
+      ...issues,
+    );
+  }
+
+  const lastChange = changes[changes.length - 1];
+  const lastFailed = failedTurns[failedTurns.length - 1];
+  const changeReturned = legacyOffset + changes.length;
+  const nextChangeCursor = lastChange && changes.length === limit ? `ch:${String(lastChange.turn_id)}|${String(lastChange.sequence)}` : undefined;
+  const nextFailedCursor =
+    lastFailed && failedTurns.length === limit ? `ft:${String(lastFailed.created_wall_ms)}|${String(lastFailed.id)}` : undefined;
+  return {
+    branchId: ctx.branchId,
+    revision: ctx.revision,
+    items,
+    nextCursor: nextChangeCursor ?? nextFailedCursor,
     metadata: {
       totalCount,
-      returned: changes.length,
+      failedTurnTotal: failedTotal,
+      returned: items.length,
+      changeReturned: changes.length,
+      failedReturned: failedTurns.length,
+      issueCount,
+      /** 「未取回」与「已丢失」是两件事：分页能翻到的只算 remaining，不算 dropped。 */
+      remainingChanges: Math.max(0, totalCount - changeReturned),
+      remainingFailedTurns: Math.max(0, failedTotal - (legacyOffset + failedTurns.length)),
       droppedCount: 0,
       pageSize: limit,
-      /** 导出全部匹配记录；分页不截断导出。 */
+      retention: { changeTotal: totalCount, failedTurnTotal: failedTotal },
+      /** 变更与失败轮两个游标分开导出，跨页不会重复同一条记录。 */
+      nextChangeCursor,
+      nextFailedCursor,
+      /** 只有真的丢了记录才 false；分页没翻完依然是完整可导出。 */
       exportComplete: true,
+      redacted: true,
     },
   };
 }

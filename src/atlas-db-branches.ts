@@ -36,6 +36,7 @@ import type { SqlDatabase } from './atlas-db-runtime.ts';
 import type { SqlValue } from './atlas-db-contract.ts';
 import type { AtlasTableName } from './atlas-db-contract.ts';
 import type { Issue } from './atlas-ops-contract.ts';
+import { copySceneForBranch } from './atlas-spatial-branch.ts';
 
 /**
  * 分叉时复制的表（**恰好 16 张**）：14 张业务表 + entity_keys + mention_candidates。
@@ -245,7 +246,7 @@ export function forkBranch(input: ForkBranchInput, db: SqlDatabase): ForkBranchR
 
     // 3) 复制业务当前行：同 ID、换 branch_id、row_rev 归 1、turn 列指向分叉 turn。
     for (const table of FORK_COPY_TABLES) {
-      copiedRows += copyTableRows(db, table, input.parentBranchId, input.newBranchId, forkTurnId);
+      copiedRows += copyTableRows(db, table, input.parentBranchId, input.newBranchId, forkTurnId, parentRevision, issues);
     }
 
     // §7.4/§7.3：COMMIT 前显式外键检查（不能以 RELEASE/写入成功代替）。
@@ -272,7 +273,7 @@ export function forkBranch(input: ForkBranchInput, db: SqlDatabase): ForkBranchR
 }
 
 /** 复制一张表的全部分支行；列名来自 schema 常量，值全部参数绑定。 */
-function copyTableRows(db: SqlDatabase, table: AtlasTableName, parentBranchId: string, newBranchId: string, forkTurnId: string): number {
+function copyTableRows(db: SqlDatabase, table: AtlasTableName, parentBranchId: string, newBranchId: string, forkTurnId: string, newRevision: number, issues: Issue[]): number {
   const columns = tableColumnNames(table);
   const rows = queryBound(db, `SELECT ${columns.join(', ')} FROM ${table} WHERE branch_id = ?`, [parentBranchId]);
   if (rows.length === 0) return 0;
@@ -282,6 +283,12 @@ function copyTableRows(db: SqlDatabase, table: AtlasTableName, parentBranchId: s
       if (column === 'branch_id') return newBranchId;
       if (column === 'row_rev') return 1;
       if (column === 'created_turn_id' || column === 'updated_turn_id') return forkTurnId;
+      // M3/W07：地图框架的分支归属随场景一起搬，父分支的 pending 布局请求不带过来。
+      if (table === 'maps' && column === 'frame_json') {
+        const copied = copySceneForBranch(row[column], newBranchId, newRevision);
+        for (const item of copied.issues) issues.push(item);
+        return JSON.stringify(copied.frame);
+      }
       const value = row[column];
       return value === undefined ? null : value;
     });

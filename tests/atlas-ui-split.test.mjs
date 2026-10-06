@@ -18,15 +18,17 @@ import { ATLAS_UI_PAGES } from "../src/atlas-ui-core.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-test("侧边栏九栏：顺序固定为 概览/地图/附近/变化/推进/API/替换/皮肤/日志，且不存在「设置」", () => {
+// U14（空间接入 M5）：新增 人物 / 物品 / 事件 / 提示词 四栏，其余顺序保持不动。
+test("侧边栏：顺序固定（概览/地图/附近/变化/推进/人物/物品/事件/API/替换/提示词/皮肤/日志），且不存在「设置」", () => {
   assert.deepEqual(
     ATLAS_UI_PAGES.map((p) => p.id),
-    ["overview", "map", "nearby", "changes", "progression", "api", "replace", "skin", "logs"],
+    ["overview", "map", "nearby", "changes", "progression", "characters", "items", "events",
+      "api", "replace", "prompts", "skin", "logs"],
     "页面 id 顺序固定",
   );
   assert.deepEqual(
     ATLAS_UI_PAGES.map((p) => p.label),
-    ["概览", "地图", "附近", "变化", "推进", "API", "替换", "皮肤", "日志"],
+    ["概览", "地图", "附近", "变化", "推进", "人物", "物品", "事件", "API", "替换", "提示词", "皮肤", "日志"],
     "用户标签固定",
   );
   assert.ok(

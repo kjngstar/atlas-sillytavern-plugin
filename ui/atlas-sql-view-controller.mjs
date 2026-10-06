@@ -116,20 +116,50 @@ export function createSqlViewController(deps) {
     ].join("|");
   }
 
+  /**
+   * M4/Q10：scopeGate 票据。A→B→A 不能靠「键值相等」判定为同源——
+   * 每次 scope 变化都换一张新票据（epoch 单调递增），迟到响应一律作废。
+   * 视角（author/pov）也进票据：切到 pov 必须立刻丢掉 author 的秘密图层。
+   */
+  function sqlScopeTicket(d) {
+    return [sqlSnapshotScope(d).key, String(getViewMode() ?? "author")].join("|");
+  }
+
+  /** M4/Q10：只读视图种类。scope 变化时这些连同 selection 一起清空。 */
+  const SQL_READONLY_KINDS = ["scene", "details", "nearby", "catalog", "flows", "tasks"];
+
   /** 修订或聊天变化 → 旧视图整体失效（绝不让上一修订的卡片留在界面上）。 */
   function sqlSyncViewScope(d) {
     const snapshot = sqlSnapshotScope(d);
-    const scopeKey = snapshot.key;
-    if (sqlMode.viewScopeKey !== scopeKey || sqlMode.viewSnapshotData !== snapshot.snapshotData
+    const ticket = sqlScopeTicket(d);
+    if (sqlMode.viewScopeKey !== snapshot.key || sqlMode.viewScopeTicket !== ticket
+      || sqlMode.viewSnapshotData !== snapshot.snapshotData
       || sqlMode.viewSnapshotMetadata !== snapshot.metadata) {
-      sqlMode.viewScopeKey = scopeKey;
+      sqlMode.viewScopeKey = snapshot.key;
+      sqlMode.viewScopeTicket = ticket;
       sqlMode.viewSnapshotData = snapshot.snapshotData;
       sqlMode.viewSnapshotMetadata = snapshot.metadata;
       sqlMode.viewEpoch++;
-      sqlMode.views.clear();
-      sqlMode.viewPending.clear();
-      sqlMode.viewFailed.clear();
-      sqlMode.viewRevision = null;
+      sqlClearReadViews();
+    }
+  }
+
+  /** M4/Q10：清空全部只读视图与选择，并关闭旧的只读会话（读会话绝不变成写者）。 */
+  function sqlClearReadViews() {
+    sqlMode.views.clear();
+    sqlMode.viewPending.clear();
+    sqlMode.viewFailed.clear();
+    sqlMode.viewRevision = null;
+    if (sqlMode.selection) sqlMode.selection = null;
+    const stale = sqlMode.session;
+    if (stale) {
+      sqlMode.session = null;
+      sqlMode.sessionKey = "";
+      sqlMode.sessionData = null;
+      sqlMode.sessionMetadata = null;
+      if (typeof sqlMode.module?.closeSqlSession === "function") {
+        void Promise.resolve(sqlMode.module.closeSqlSession(stale)).catch(() => {});
+      }
     }
   }
 
@@ -144,7 +174,10 @@ export function createSqlViewController(deps) {
       return null;
     }
     try {
-      return await queryView.call(session.repo, { kind, ...query });
+      // kind 放在 query 之后：查询参数（含 entityKind 等）绝不允许覆盖视图类型本身。
+      // （U08 返工：此前 {kind, ...query} 会把目录查询变成 kind='character'，视图分发表直接失配。）
+      const scopedQuery = { ...query, viewMode: query?.viewMode ?? getViewMode() };
+      return await queryView.call(session.repo, { ...scopedQuery, kind });
     } catch (error) {
       emitAtlasDiagnostic({
         level: "error", source: "storage", code: "SQL_VIEW_QUERY_FAILED",
@@ -199,11 +232,15 @@ export function createSqlViewController(deps) {
       });
   }
 
-  /** 供 H05 端口预热视图（不阻塞：结果落地会重渲染）。 */
+  /** 供 H05 端口预热视图（不阻塞：结果落地会重渲染）。M4/Q10：目录不预取，按需查询。 */
   async function sqlWarmViews(d) {
+    const mapId = String(d?.currentMapId ?? "") || undefined;
     const wanted = [
       ["map", { mapId: undefined }],
       ["nearby", { entityId: String(d?.currentLocationId ?? "") || undefined }],
+      ["scene", { mapId }],
+      ["flows", { mapId }],
+      ["tasks", {}],
     ];
     for (const [kind, query] of wanted) {
       if (sqlMode.views.has(sqlViewKey(kind, d, query))) continue;
@@ -239,7 +276,8 @@ export function createSqlViewController(deps) {
     }
     sqlSyncViewScope(d);
     const embedded = sqlViewOf(kind, d);
-    if (embedded) return sqlAcceptView(kind, d, embedded);
+    const embeddedMode = embedded?.metadata?.viewMode ?? d?.sqlViewMode;
+    if (embedded && (!embeddedMode || embeddedMode === getViewMode())) return sqlAcceptView(kind, d, embedded);
     if(kind==='map' && state().page!=='map')return {active:true,reason:'inactive',view:{items:[],metadata:{}},code:null,note:null};
     if (!sqlEnvelopePresent()) {
       return {
@@ -283,5 +321,5 @@ export function createSqlViewController(deps) {
   sqlMode.views.clear();sqlMode.viewFailed.clear();
   if(session&&typeof sqlMode.module?.closeSqlSession==='function')await sqlMode.module.closeSqlSession(session);
  }
- return {dispose,sqlViewOf,sqlEnvelopePresent,sqlSnapshotScope,sqlSameSnapshot,sqlOpenSession,sqlViewKey,sqlSyncViewScope,sqlQueryView,sqlKickView,sqlWarmViews,sqlResolveView,sqlAcceptView};
+ return {dispose,sqlViewOf,sqlEnvelopePresent,sqlSnapshotScope,sqlSameSnapshot,sqlOpenSession,sqlViewKey,sqlScopeTicket,sqlSyncViewScope,sqlClearReadViews,SQL_READONLY_KINDS,sqlQueryView,sqlKickView,sqlWarmViews,sqlResolveView,sqlAcceptView};
 }

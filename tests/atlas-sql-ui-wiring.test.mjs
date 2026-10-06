@@ -66,6 +66,7 @@ export async function openSqlSession(options) {
       queryView: async (query) => {
         store.queries.push(query);
         const view = (store.views ?? {})[query.kind];
+        if (query.kind === "entity" && store.entityDelay) await store.entityDelay;
         return view ? JSON.parse(JSON.stringify(view)) : { branchId: "main-A", revision: 3, items: [], metadata: {} };
       },
     },
@@ -371,6 +372,31 @@ async function mountSqlMap(stateData = {}) {
   await flush();
   return mounted;
 }
+
+test('星幕详情查询晚到时，不覆盖切换视角或新选中的地点', async () => {
+  for (const switchKind of ['view', 'selection']) {
+    const mounted = await mountSqlMap();
+    const { container } = mounted;
+    try {
+      container.querySelector('.as-view-badge').click();
+      await flush();
+      let release;
+      globalThis.__atlasSqlStub.entityDelay = new Promise(resolve => { release = resolve; });
+      globalThis.__atlasSqlStub.views.entity = { branchId: 'main-A', revision: 3,
+        items: [{ kind: 'character', character: { id: 'npc:C1', name: '艾琳', thought: '旧作者详情秘密' } }] };
+      container.querySelector('.as-entity-card').click();
+      await flush();
+      assert.ok(globalThis.__atlasSqlStub.queries.some(query => query.kind === 'entity'));
+      if (switchKind === 'view') container.querySelector('.as-view-badge').click();
+      else container.querySelector('.aw-point[data-point-id="1"]').click();
+      release();
+      await flush();
+      assert.ok(!container.querySelector('.aw-mappanel').textContent.includes('旧作者详情秘密'));
+      if (switchKind === 'view') assert.equal(container.querySelector('.aw-mappanel').style.display, 'none');
+      else assert.equal(container.querySelector('.aw-mappanel__name').textContent, '城市L1');
+    } finally { mounted.dom.window.close(); }
+  }
+});
 
 /** 打开某地点面板并进入它的内部地图（子图下钻：世界图 → 学校图 → 教室图）。 */
 function enterSubmap(container, marker) {

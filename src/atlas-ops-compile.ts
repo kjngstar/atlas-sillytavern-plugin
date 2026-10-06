@@ -24,6 +24,7 @@ import { compilePlanPropose, compilePlanRevise } from './atlas-ops-actions.ts';
 import { compileEventPropose } from './atlas-ops-events.ts';
 import { compileInformationPropose, compileAttentionPropose, compileChannelUpsert } from './atlas-ops-information.ts';
 import { compileMapEstimate, compileRoutePropose } from './atlas-ops-geography.ts';
+import { compileMapLayoutRequest } from './atlas-spatial-request.ts';
 import type { TurnAnchor } from './atlas-ops-contract.ts';
 
 export type CompileOperationsInput = {
@@ -96,6 +97,7 @@ const COMPILERS: Record<string, (op: ParsedOperation, ctx: CompileContext) => Co
   'channel.upsert': compileChannelUpsert,
   'map.estimate': compileMapEstimate,
   'route.propose': compileRoutePropose,
+  'map.layout.request': compileMapLayoutRequest,
 };
 
 export function compilerFor(op: string): ((op: ParsedOperation, ctx: CompileContext) => CompileResult) | null {

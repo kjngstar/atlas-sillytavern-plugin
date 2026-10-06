@@ -1,0 +1,143 @@
+{
+  "startedAt": "2026-10-06T03:23:47.451Z",
+  "checks": {
+    "U04/U15 canvas 已挂进正式地图视口": {
+      "ok": true,
+      "detail": {
+        "w": 940,
+        "h": 683
+      }
+    },
+    "U04/U15 canvas 真的画了东西（多色、非空）": {
+      "ok": true,
+      "detail": {
+        "w": 940,
+        "h": 683,
+        "opaqueSamples": 49387,
+        "colorCount": 546
+      }
+    },
+    "U04/U15 旧标点绘制已停用（同一时刻只有一个绘制 owner）": {
+      "ok": true,
+      "detail": {
+        "oldMarkers": 0,
+        "oldStageHidden": true
+      }
+    },
+    "U05 只有一棵权威地图树（新树有节点、旧树不再绘制）": {
+      "ok": true,
+      "detail": {
+        "newTreeNodes": 7,
+        "oldTreeNodes": 0
+      }
+    },
+    "U03 atlas-workbench.css 是真的样式表（document.styleSheets）": {
+      "ok": true,
+      "detail": true
+    },
+    "U08 kind 是视图类型、entityKind 是实体种类（负向锁：kind=实体种类必须查空）": {
+      "ok": true,
+      "detail": 0
+    },
+    "U08 目录页与后端同口径（UI 名单 = 后端查询结果）": {
+      "ok": true,
+      "detail": {
+        "ui": [
+          "伊莱恩·莫尔",
+          "塔尔·霜铁",
+          "薇尔·星环",
+          "赛芙·潮歌"
+        ],
+        "backend": [
+          "伊莱恩·莫尔",
+          "塔尔·霜铁",
+          "薇尔·星环",
+          "赛芙·潮歌"
+        ],
+        "viewMode": "author"
+      }
+    },
+    "U12 运行日志页有真实记录": {
+      "ok": true,
+      "detail": "运行日志\n\n宿主、模型和引擎按时间排列；推进失败行在这里显示错误码、行号与字段路径。\n\nSQL 世界数据 · 修订 0 · 记录 19 条 · 视图返回 0 条 / 共 0 条\n\n全部\n报错\n警告\n宿主\n界面\n引擎\n模型\n存储\n世界书\n地图"
+    },
+    "U06 画布选中实体 → 新详情卡拿到实体数据": {
+      "ok": true,
+      "detail": {
+        "entityId": "loc:4101",
+        "text": "雪线驿站地点 · 地图 world"
+      }
+    },
+    "320px 无横向溢出且 canvas 仍有尺寸": {
+      "ok": true,
+      "detail": {
+        "pageOverflow": false,
+        "rootOverflow": false,
+        "canvasBox": {
+          "w": 266,
+          "h": 647
+        }
+      }
+    },
+    "无未捕获 pageerror": {
+      "ok": true,
+      "detail": []
+    },
+    "无 4xx/5xx 资源请求": {
+      "ok": true,
+      "detail": []
+    }
+  },
+  "failed": [],
+  "finishedAt": "2026-10-06T03:23:54.032Z",
+  "pageErrors": [],
+  "badResponses": [],
+  "sceneStatuses": [
+    {
+      "mapId": "world",
+      "sceneStatus": "missing",
+      "hasScene": false
+    },
+    {
+      "mapId": "map_c7334ac7e7aab3e4a3a03f6f",
+      "sceneStatus": "missing",
+      "hasScene": false
+    },
+    {
+      "mapId": "map_fdf342c0a814019411167018",
+      "sceneStatus": "missing",
+      "hasScene": false
+    },
+    {
+      "mapId": "map_5b290559633d41a015d9643d",
+      "sceneStatus": "missing",
+      "hasScene": false
+    },
+    {
+      "mapId": "map_d784efbaf075c54860a9ba9e",
+      "sceneStatus": "missing",
+      "hasScene": false
+    },
+    {
+      "mapId": "map_8e02e77362e7259c75d8b193",
+      "sceneStatus": "missing",
+      "hasScene": false
+    },
+    {
+      "mapId": "map_0b2c97ec70a9174c3b572a1c",
+      "sceneStatus": "missing",
+      "hasScene": false
+    }
+  ],
+  "mapIds": [
+    "world",
+    "map_c7334ac7e7aab3e4a3a03f6f",
+    "map_fdf342c0a814019411167018",
+    "map_5b290559633d41a015d9643d",
+    "map_d784efbaf075c54860a9ba9e",
+    "map_8e02e77362e7259c75d8b193",
+    "map_0b2c97ec70a9174c3b572a1c"
+  ],
+  "summary": "这一轮动向这一轮没有可见变化，也没有后台变化。",
+  "timeline": "本轮动向显示关系线本轮没有可见动向。"
+}

@@ -33,13 +33,21 @@ export { DEFAULT_WORLD_TURN_SYSTEM_PROMPT } from "./atlas-api-client.ts";
 export { atlasCustomIncludeHeaders } from "./atlas-proxy-fetch.ts";
 
 export type AtlasUiMode = "offline" | "protocol-incompatible" | "unbound" | "world-missing" | "ready";
-export type AtlasUiPage = "overview" | "map" | "nearby" | "changes" | "progression" | "api" | "replace" | "skin" | "logs";
+export type AtlasUiPage =
+  | "overview" | "map" | "nearby" | "changes" | "progression"
+  // U14：目录类页面（人物 / 物品 / 事件）与提示词页；数据来自 Q 系列只读口与既有提示词库。
+  | "characters" | "items" | "events" | "prompts"
+  | "api" | "replace" | "skin" | "logs";
 
 /**
- * 侧边栏九项（顺序不可自行调整）。0.9.7 新增「日志」；0.9.16 新增「替换」
+ * 侧边栏（顺序不可自行调整）。0.9.7 新增「日志」；0.9.16 新增「替换」
  * （内容替换规则库，照抄 shujuku + 开关增强）；0.9.46 新增「皮肤」。
- * 已取消含义模糊的「设置」：世界初始化回到「概览」，推进行为与提示词在「推进」，
- * 连接资料在「API」。
+ * 已取消含义模糊的「设置」：世界初始化回到「概览」，推进行为在「推进」，连接资料在「API」。
+ *
+ * U14（空间接入 M5）：新增「人物 / 物品 / 事件 / 提示词」四项。
+ * - 人物 / 物品 / 事件走 Q04 目录只读口（分页，POV 只给可见条目）；
+ * - 提示词沿用既有提示词库（与「推进」同一套编辑器，这里是它的独立入口，不新建第二份草稿状态）。
+ * 原有 overview / nearby / progression / api / skin / logs 全部保留，功能不因新导航消失。
  *
  * C6（0.9.54）：本清单是**唯一权威**——index.js 不再自带 PAGES 副本，改为从
  * atlas-browser-entry 导出后消费。此前两处清单漂移：index.js 有 9 页（含 skin），
@@ -52,8 +60,12 @@ export const ATLAS_UI_PAGES: ReadonlyArray<{ id: AtlasUiPage; label: string }> =
   { id: "nearby", label: "附近" },
   { id: "changes", label: "变化" },
   { id: "progression", label: "推进" },
+  { id: "characters", label: "人物" },
+  { id: "items", label: "物品" },
+  { id: "events", label: "事件" },
   { id: "api", label: "API" },
   { id: "replace", label: "替换" },
+  { id: "prompts", label: "提示词" },
   { id: "skin", label: "皮肤" },
   { id: "logs", label: "日志" },
 ];

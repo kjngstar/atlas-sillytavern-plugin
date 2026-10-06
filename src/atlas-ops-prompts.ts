@@ -32,6 +32,12 @@ export type StagePromptInput = {
   geoEntities?: string;
   geoSources?: string;
   geoMissing?: string;
+  /** map.layout.request：程序提供的本图可用 ID（地图/房间/人物/物品短引用）。 */
+  mapLayoutIds?: string;
+  /** map.layout.request：程序提供的幅面尺寸摘要（列×行、米/格区间）。 */
+  mapLayoutFrame?: string;
+  /** map.layout.request：程序提供的已确认/锁定结构摘要（不可改写部分）。 */
+  mapLayoutLocks?: string;
   repairTickets?: string;
   repairRefs?: string;
   repairSources?: string;
@@ -75,6 +81,7 @@ const MINIMUM_HELP: Record<string, string> = {
   'channel.upsert': 'owner_ref, kind, name',
   'map.estimate': 'ref + 尺寸或距离依据',
   'route.propose': 'from_ref, to_ref',
+  'map.layout.request': 'ref + kind(floor/city) + spec（只写本次变化的约束：floor 用 rooms/contents/actors/items，city 用 districts/buildings，每条都要 id）；省略的键保持原样，删除只能写 spec.deletes；不要输出完整 scene、几何坐标、seed 或比例尺',
   noop: '无修改',
 };
 
@@ -93,6 +100,9 @@ const PHASE_TASK: Record<Phase, string[]> = {
     '城内地点归入城市子图，周边地点通过实际邻接/路线表达。移动载具不当作固定建筑。',
     '先根据给定资料判断地图大致现实尺寸；信息不足时给合理估计范围并说明 why，不能声称精确测量。',
     '不要利用界面标签排版坐标推出真实距离。用户已锁定的标定不修改。',
+    '布局只提交这一张图上**发生变化**的约束：已有房间、家具、人物位置、物品不必每轮重写，未提及的一律保持原样，删除必须写 spec.deletes。',
+    '不要输出完整 scene、几何坐标、seed 或比例尺；这些由程序生成并保管，模型给的是约束不是成品。',
+    '没有河流/水域资料时不要选 city 模板的水系结构；地块与建筑用程序给定的 ID 引用，不要凭名字猜 ID。',
   ],
   decision: [
     '任务：为下面列出的角色判断注意、相信和下一步意图。',
@@ -152,6 +162,11 @@ export function buildStagePrompt(input: StagePromptInput): ModelBatchRequest {
     user.push(`现有地点与关系：${input.geoEntities ?? ''}`);
     user.push(`地理依据：${input.geoSources ?? ''}`);
     user.push(`本次具体缺项：${input.geoMissing ?? ''}`);
+    if (input.mapLayoutIds || input.mapLayoutFrame || input.mapLayoutLocks) {
+      user.push(`布局可用 ID：${input.mapLayoutIds ?? '（无）'}`);
+      user.push(`幅面尺寸：${input.mapLayoutFrame ?? '（无）'}`);
+      user.push(`已确认/锁定结构：${input.mapLayoutLocks ?? '（无）'}`);
+    }
   } else if (input.phase === 'repair') {
     user.push(`失败票据、原操作、准确错误：${input.repairTickets ?? ''}`);
     user.push(`相关对象：${input.repairRefs ?? ''}`);

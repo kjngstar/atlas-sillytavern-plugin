@@ -88,3 +88,30 @@ test('P0-04c 浏览器路径:超长输入仍返回 TOO_LARGE Issue', async () =>
   );
   assert.match(out, /OK/);
 });
+/**
+ * M4/Q09：浏览器 bundle 要能 import 空间只读口与渲染器，
+ * 且**不得**导出写侧候选操作（UI 不能绕过宿主事务直接提交世界变更）。
+ */
+test('P0-04d 浏览器路径:空间只读口与渲染器可 import，写侧操作未导出', async () => {
+  const inlineScript = `
+    delete globalThis.Buffer;
+    const url = ${JSON.stringify(pathToFileURL(distPath).href)};
+    const mod = await import(url);
+    for (const name of ['querySpatialScene','queryCatalog','querySpatialFlows','queryTasks','projectRouteGeometry',
+                        'projectMapView','unwrapViewResult','filterSceneForView','publicMapFrame','buildMapTree',
+                        'createSpatialRenderer','buildOverlays']) {
+      if (typeof mod[name] !== 'function') { console.error('missing export: ' + name); process.exit(2); }
+    }
+    for (const name of ['applySceneGroup','compileSceneGroup','applyPendingSpatialRequests','armLayoutRetry']) {
+      if (mod[name] !== undefined) { console.error('write-side op leaked to browser: ' + name); process.exit(3); }
+    }
+    if (mod.ATLAS_SPATIAL_LIMITS === undefined) { console.error('missing ATLAS_SPATIAL_LIMITS'); process.exit(4); }
+    console.log('OK');
+  `;
+  const out = execFileSync(
+    process.execPath,
+    ['--input-type=module', '-e', inlineScript],
+    { encoding: 'utf8', timeout: 30000 },
+  );
+  assert.match(out, /OK/);
+});

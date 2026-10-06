@@ -4,10 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Atlas 世界工作台 · 本地预览</title>
+<!-- 内联空图标：避免浏览器自动请求 /favicon.ico 打出无意义的 404（验收会把控制台错误当真）。 -->
+<link rel="icon" href="data:,">
 <link rel="stylesheet" href="../atlas-extension/style.css">
 <style>
   /* 宿主页面背景：只为衬托悬浮窗，不属于插件样式。 */
-  html, body { margin: 0; height: 100%; background: #e6e1d4; }
+  html, body { margin: 0; height: 100%; background: #02050a; }
   body::before {
     content: "";
     position: fixed;
@@ -274,16 +276,17 @@
     },
   };
 
-  // ---- 演示世界：先入库，再启动插件（插件启动时即可读到）----
+  // 预览数据经正式迁移器进入本页面的 SQL 会话，与用户聊天完全隔离。
   const DEMO_WORLD_ID = "atlas-preview-chronicle";
   setStatus("准备演示世界…");
-  if (!(await hostStore.read(`world:${DEMO_WORLD_ID}`))) {
-    const demoWorld = await fetch("./demo-world.json").then((r) => r.json());
-    const imported = await hostApi.request("POST", "/worlds/import", { world: demoWorld });
-    setStatus(imported.status === 200 ? `演示世界「${demoWorld.name}」已导入 ✓` : "演示世界导入失败");
-  } else {
-    setStatus("演示世界已就绪 ✓");
-  }
+  const demoWorld = await fetch("./demo-world.json").then((r) => r.json());
+  const sqlRuntime = await import("../atlas-extension/dist/atlas-sql.mjs");
+  const migrated = await sqlRuntime.migrateSessionToSql({
+    chatUid: contextValue.chatId, branchId: "main", chatMetadata: contextValue.chatMetadata,
+    saveSession: async () => true, legacy: { atlas: { world: demoWorld } },
+  });
+  if (!migrated.saved) throw new Error(`预览 SQL 迁移失败：${JSON.stringify(migrated.issues)}`);
+  await sqlRuntime.closeSqlSession(migrated.session);
 
   // ---- 导入插件（模块加载即幂等自初始化 connectAtlas，工作台挂载）----
   setStatus("加载 Atlas 工作台…");
@@ -297,8 +300,10 @@
   // ---- 首次自动绑定演示世界，省去手动「读取世界列表 → 绑定」----
   // （验证「未绑定」空态时可先解绑，再刷新页面即回到未绑定。）
   const connection = await mod.connectAtlas();
-  if (connection && !contextValue.chatMetadata[mod.ATLAS_BINDING_KEY]) {
-    await connection.core.bindToWorld(DEMO_WORLD_ID);
+  if (connection) {
+    await connection.core.refresh();
+    connection.core.setPage("map");
+    window.atlasPreviewConnection = connection;
   }
   connection?.rerender?.();
   setStatus("演示世界已绑定 ✓ 左栏可看世界动向，右栏是变化简览");

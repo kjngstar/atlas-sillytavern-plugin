@@ -119,6 +119,31 @@ export {
   type PovStateOptions,
 } from './atlas-db-state-adapter.ts';
 
+/* —— M4/Q09：空间只读口与组件 API。
+ * 只导出读侧与渲染器：**不导出** compileSceneGroup / applySceneGroup / applyPendingSpatialRequests，
+ * 浏览器 UI 不能绕过宿主事务直接提交世界变更。vendor 无 node: 依赖，可安全进 bundle。 */
+export { querySpatialScene, type SpatialSceneItem, type SpatialSceneStatus } from './atlas-spatial-views.ts';
+export { queryCatalog, parseAudienceAllows, type CatalogItem } from './atlas-catalog-views.ts';
+export { querySpatialFlows, type SpatialFlow, type FlowPath } from './atlas-spatial-flow-views.ts';
+export { queryTasks, type TaskItem, type TaskTimeQuality } from './atlas-task-views.ts';
+export { projectRouteGeometry, type MapViewItem, type ViewContext } from './atlas-db-views.ts';
+export {
+  projectMapView,
+  unwrapViewResult,
+  filterSceneForView,
+  publicMapFrame,
+  buildMapTree,
+  createSpatialRenderer,
+  buildOverlays,
+  LIMITS as ATLAS_SPATIAL_LIMITS,
+  DEFAULT_THEME as ATLAS_SPATIAL_THEME,
+  SCENE_KIND,
+  SCENE_VERSION,
+  type SceneDocument,
+  type Diagnostic as SpatialDiagnostic,
+  type Scope as SpatialScope,
+} from '../vendor/atlas-spatial/index.mjs';
+
 /** 便于宿主检查版本固定：sql.js 只从本地 vendor 目录加载。 */
 export const ATLAS_SQL_VERSION = '1.14.1';
 export type { SqlJsStatic };

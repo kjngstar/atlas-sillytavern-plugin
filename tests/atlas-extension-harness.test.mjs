@@ -14,7 +14,7 @@ import {readUiSource} from './ui-source-helper.mjs';
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { JSDOM } from "jsdom";
@@ -334,7 +334,8 @@ test("形态契约：工作台是悬浮窗而非全屏铺满", () => {
 test("形态契约：中区按栏位切页，地图只属于地图页", () => {
   const js = readUiSource(join(root, "atlas-extension", "index.js"));
   ok(js.includes("core.setPage(page.id)"), "导航按钮切换页面状态");
-  ok(js.includes('if (state().page === "map") renderMap(d)'), "只有地图页才渲染地图");
+  // U15 返工后仍是「只有地图页才渲染地图」：renderMap 与事件带/摘要同块（块形态）。
+  ok(/if \(state\(\)\.page === "map"\) \{\s*renderMap\(d\);/.test(js), "只有地图页才渲染地图");
   // 侧边栏七项（0.9.7 新增「日志」）
   for (const page of ["overview", "map", "nearby", "changes", "progression", "api", "logs"]) {
     ok(js.includes(`s.page === "${page}"`), `中区有独立的「${page}」页分支`);
@@ -2137,8 +2138,8 @@ test("S10 前端：同地点人物只在地点名单（离场者不出现、头�
   ok(rows[0].querySelector(".aw-mappanel__person-avatar.aw-person-drag") !== null,
     "人物头像带 .aw-person-drag（长按纠偏手柄）");
   ok(!String(panel.textContent).includes("阿澈"), "presence=left 的人不出现在地点名单");
-  equal(occurrences(container.querySelector(".aw-maparea").textContent, "林拾"), 1,
-    "同一位人物在地图上只出现一次（无标点与头像重叠）");
+  equal(occurrences(panel.textContent, "林拾"), 1,
+    "右侧地点详情里的在场人物只出现一次（无标点与头像重叠）");
 
   // S9：头像长按 350ms 后进入 is-armed（起拖就绪）。jsdom 无 setPointerCapture /
   // elementFromPoint，故只验证「长按成立」这一段；真实拖到标点纠偏走人工验收。
@@ -4007,4 +4008,34 @@ test("H16 填色层：无证据来源的范围（非法 evidence）不进填色�
   equal(areaLayer.querySelectorAll(".aw-areas__area").length, 0, "没有可靠证据就不许染色");
   ok(Number(areaLayer.dataset.paintedCells) === 0, "paintedCells 必须是 0");
   dom.window.close();
+});
+
+/**
+ * M5 返工补的门禁：`atlas-extension/` 是**发布镜像**，必须与仓库根逐字节一致
+ * （只有 index.js 的 dev 回退行不同）。
+ *
+ * 为什么必须锁：真实浏览器验收跑的是镜像，而 `npm test` 跑的是根源码。
+ * 镜像一旦落后，两边看到的不是同一份代码——返工排查时被这个坑过一次：
+ * 镜像缺了一处能力检查，测试里「正式地图把旧标点吞了」的假象，看起来像代码 bug。
+ * tools/pack.mjs 在打包时会拒绝不一致的镜像，但那只在打包时生效；这里让它进常驻用例。
+ */
+test("发布镜像一致性：atlas-extension/index.js 与 index.js 只差 dev 回退行", () => {
+  const rootSource = readFileSync(join(root, "index.js"), "utf8");
+  const mirrorSource = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
+  const SHIP = 'const attempts = ["./dist/atlas-ui-core.mjs"];';
+  const DEV = 'const attempts = ["./dist/atlas-ui-core.mjs", "../src/atlas-ui-core.ts"];';
+  assert.ok(rootSource.includes(SHIP), "根 index.js 里必须有打包行");
+  assert.ok(mirrorSource.includes(DEV), "镜像 index.js 里必须有 dev 回退行");
+  assert.equal(mirrorSource.replace(DEV, SHIP), rootSource, "镜像与根必须逐字节一致（先跑 node tools/sync-mirror.mjs）");
+});
+
+test("发布镜像一致性：ui/ 下的工作台模块全部同步到 atlas-extension/ui/", () => {
+  const uiDir = join(root, "ui");
+  const names = readdirSync(uiDir).filter((name) => name.endsWith(".mjs") || name.endsWith(".css"));
+  assert.ok(names.length > 0, "ui/ 下应当有模块");
+  for (const name of names) {
+    const source = readFileSync(join(uiDir, name), "utf8");
+    const mirrored = readFileSync(join(root, "atlas-extension", "ui", name), "utf8");
+    assert.equal(mirrored, source, `atlas-extension/ui/${name} 与 ui/${name} 不一致（先跑 node tools/sync-mirror.mjs）`);
+  }
 });

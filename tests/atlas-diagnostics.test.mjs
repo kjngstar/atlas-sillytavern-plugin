@@ -334,6 +334,12 @@ const A04_CODES = [
   "SIMULATION_TRUNCATED",
   "LOREBOOK_STALE_CHAT_DROPPED",
   "BACKGROUND_BLOCKED",
+  // U13：空间模块定位诊断（只落指纹与枚举字段）
+  "SPATIAL_FRAME_INVALID",
+  "SPATIAL_SCENE_STALE",
+  "SPATIAL_LAYOUT_FAILED",
+  "SPATIAL_ROUTE_INVALID",
+  "SPATIAL_SCOPE_MISMATCH",
 ];
 
 // A04 的五个具名诊断各自允许的 details（键名与注册表一致，另会逐条核对注册表）。
@@ -345,6 +351,12 @@ const A04_DETAIL_KEYS = {
   SIMULATION_TRUNCATED: ["branchRef", "collection", "droppedCount", "keptCount", "limitCount", "reasonCode"],
   LOREBOOK_STALE_CHAT_DROPPED: ["branchRef", "reasonCode", "stage"],
   BACKGROUND_BLOCKED: ["branchRef", "turnRef", "taskRef", "actorRef", "locationRef", "reasonCode"],
+  // U13：空间诊断共用一组定位字段（module / function / phase / sceneStatus / bytes + 指纹）
+  SPATIAL_FRAME_INVALID: ["branchRef", "mapRef", "entityRef", "operationRef", "module", "function", "phase", "sceneStatus", "bytes", "reasonCode"],
+  SPATIAL_SCENE_STALE: ["branchRef", "mapRef", "entityRef", "operationRef", "module", "function", "phase", "sceneStatus", "bytes", "reasonCode"],
+  SPATIAL_LAYOUT_FAILED: ["branchRef", "mapRef", "entityRef", "operationRef", "module", "function", "phase", "sceneStatus", "bytes", "reasonCode"],
+  SPATIAL_ROUTE_INVALID: ["branchRef", "mapRef", "entityRef", "operationRef", "module", "function", "phase", "sceneStatus", "bytes", "reasonCode"],
+  SPATIAL_SCOPE_MISMATCH: ["branchRef", "mapRef", "entityRef", "operationRef", "module", "function", "phase", "sceneStatus", "bytes", "reasonCode"],
 };
 // 注册表里额外允许的顶层定位键（不落 details）。
 const A04_REGISTRY_EXTRA_KEYS = ["chatFingerprint"];
@@ -391,6 +403,10 @@ const A04_ACTOR_FP = expectedFingerprint("npc:薇尔·星环");
 const A04_LOCATION_FP = expectedFingerprint("loc:三年二班");
 const A04_TASK_FP = expectedFingerprint("sim-task-0000000000000042");
 const A04_SIGNAL_FP = expectedFingerprint("sim-signal-0000000000000007");
+// U13：空间诊断的定位指纹（地图 / 实体 / 操作），同样是脱敏指纹形态，不是原始 id。
+const A04_MAP_FP = expectedFingerprint("sql-map-0000000000000001");
+const A04_ENTITY_FP = expectedFingerprint("sql-entity-0000000000000002");
+const A04_OPERATION_FP = expectedFingerprint("sql-op-0000000000000003");
 
 test("A04 指纹工具：形态固定、确定性、且不含原始字符串片段", () => {
   withRealTextEncoder(() => {
@@ -498,6 +514,15 @@ test("A04 五个具名诊断各自都能生成合法诊断", () => {
     reasonCode: "NO_PATH",
     schemaPath: "$.simulation.branches.canon.tasks[0].id",
     stage: "rebuild",
+    // U13：空间诊断的定位字段
+    mapRef: A04_MAP_FP,
+    entityRef: A04_ENTITY_FP,
+    operationRef: A04_OPERATION_FP,
+    module: "atlas-spatial-views",
+    function: "querySpatialScene",
+    phase: "project",
+    sceneStatus: "invalid",
+    bytes: 2048,
   };
   for (const code of A04_CODES) {
     const input = namedDiagnosticInput({
@@ -887,6 +912,15 @@ test("A04 五个具名诊断走 sanitizeDiagnostic 时同样受白名单约束�
       reasonCode: "LIMIT_REACHED",
       schemaPath: "$.simulation.branches.canon.signals",
       stage: "rebuild",
+      // U13：空间诊断的定位字段
+      mapRef: A04_MAP_FP,
+      entityRef: A04_ENTITY_FP,
+      operationRef: A04_OPERATION_FP,
+      module: "atlas-spatial-views",
+      function: "querySpatialScene",
+      phase: "project",
+      sceneStatus: "invalid",
+      bytes: 2048,
     };
     const entry = sanitizeDiagnostic({
       level: spec.level,

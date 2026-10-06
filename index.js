@@ -1,9 +1,13 @@
 import {atlasClockLabel,atlasLegacyNearby,buildTableMapNpcIndex,atlasMapSource,atlasMapLayerInput,atlasMapOccupants} from './ui/atlas-scene-ui-adapter.mjs';
-import {createMapController,markerPopupPosition} from './ui/atlas-map-controller.mjs';
+import {createMapController,markerPopupPosition,createWorkbenchMapController} from './ui/atlas-map-controller.mjs';
+import { createStarmapShell, atlasWorkbenchTree } from './ui/atlas-starmap-shell.mjs';
+// U15：新工作台外壳（U02）——同一宿主只挂一个实例，重复 mount 先销毁旧实例。
+import { mountWorkbench } from './ui/atlas-workbench-shell.mjs';
 import { createSqlViewController } from './ui/atlas-sql-view-controller.mjs';
 import { isValidAtlasSession, createEmptyAtlasSession, readAtlasSession, writeAtlasSession, atlasSessionWriteGuard, atlasSessionHasPersistentPayload, atlasStarterWorldWriteGuard, atlasChatIdentitySnapshot, atlasSameChatIdentity, atlasStaleWriteNotice, atlasContentHash, atlasFloorIdentity, atlasContextRecord, atlasAssistantFloorIdentity, pathWantsSession, createAtlasSessionApi, ATLAS_SESSION_KEY, ATLAS_SESSION_SCHEMA_VERSION, SESSION_ROUTE_PREFIXES } from './ui/atlas-host-context.mjs';
 export { ATLAS_SESSION_KEY, ATLAS_SESSION_SCHEMA_VERSION, isValidAtlasSession, createEmptyAtlasSession, writeAtlasSession, atlasSessionHasPersistentPayload, atlasStarterWorldWriteGuard, atlasChatIdentitySnapshot, atlasSameChatIdentity, atlasStaleWriteNotice, atlasContentHash, atlasFloorIdentity, atlasAssistantFloorIdentity, createAtlasSessionApi };
 import { atlasPointRefOf, atlasKnownCoordinate, atlasPositionQuality, atlasSqlMapModel, atlasSqlSubmaps, atlasSqlMapItemFor, atlasSqlFilterByViewMode, atlasSqlNearbyCards, buildSqlPromptScope } from './ui/atlas-scene-ui-adapter.mjs';
+import { visibleWorkbenchMaps, workbenchMapPath, workbenchEntity } from './ui/atlas-workbench-data.mjs';
 export { atlasPointRefOf, atlasKnownCoordinate, atlasPositionQuality, atlasSqlMapModel, atlasSqlSubmaps, atlasSqlMapItemFor, atlasSqlFilterByViewMode, atlasSqlNearbyCards, buildSqlPromptScope };
 /* global SillyTavern */
 /**
@@ -20,7 +24,7 @@ export { atlasPointRefOf, atlasKnownCoordinate, atlasPositionQuality, atlasSqlMa
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.75";
+export const ATLAS_EXTENSION_VERSION = "0.9.76";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -1382,7 +1386,8 @@ export const ATLAS_SKIN_VARIABLES = [
 
 /** 内置主题（id ↔ style.css 的 data-atlas-theme 值；"paper" 为缺省 = 无属性）。 */
 export const ATLAS_SKIN_THEMES = [
-  { id: "paper", label: "纸面（默认）" },
+  { id: "starmap", label: "星幕（默认）" },
+  { id: "paper", label: "纸面" },
   { id: "dark", label: "深色战术" },
 ];
 
@@ -1955,7 +1960,29 @@ function el(tag, className, text) {
  */
 
 
+/**
+ * U03 返工：新工作台样式的生产加载入口——<link> 相对本模块 URL 注入一次。
+ * data: URL（测试注入）等非层级地址解析失败时跳过：测试环境用源码/产物断言兜底，
+ * 真实浏览器（http 服务形态）则必须实际加载（验收点：document.styleSheets 包含它）。
+ */
+function ensureWorkbenchStylesheet() {
+  if (typeof document === "undefined" || document.getElementById("atlas-workbench-css")) return;
+  let href = null;
+  try {
+    href = new URL("./ui/atlas-workbench.css", import.meta.url).href;
+  } catch {
+    return; // data: 等非层级模块地址：跳过，不抛错
+  }
+  if (!/^https?:|^file:|^\/|[a-zA-Z]:[\\/]/.test(String(href))) return;
+  const link = document.createElement("link");
+  link.id = "atlas-workbench-css";
+  link.rel = "stylesheet";
+  link.href = String(href);
+  document.head.append(link);
+}
+
 function renderPanel(core, root, api, store, mod, skinPort = null) {
+  ensureWorkbenchStylesheet();
   root.className = "atlas-workbench";
   root.id = "atlas-extension-panel-root";
   root.setAttribute("role", "application");
@@ -2005,6 +2032,8 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     formatTravelDistance,
     // C6（0.9.54）：导航页清单唯一权威（src/atlas-ui-core.ts 的 ATLAS_UI_PAGES）
     ATLAS_UI_PAGES,
+    // U10/U11：世界动向摘要（同一 ui-core bundle 供给；缺席时侧栏显示等待说明）
+    buildVisibleWorldSummarySync,
   } = mod;
   const cameraApiMissing =
     typeof computeMapFrame !== "function" ||
@@ -2038,6 +2067,8 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     /** 视图缓存（键含 kind/聊天/分支/修订/视图参数）；聊天或修订变化即整体作废。 */
     views: new Map(), viewPending: new Set(), viewFailed: new Set(), viewRevision: null, viewScopeKey: "",
     viewSnapshotData: null, viewSnapshotMetadata: null, viewEpoch: 0,
+    /** M4/Q10：scopeGate 票据（含视角）与面板选择；scope 变化时一并清空。 */
+    viewScopeTicket: "", selection: null,
   };
   /** SQL 地图面板缓存（openMapPanel / 标尺详情在同一次渲染后复用，避免重算）。 */
   let lastSqlModel = null;
@@ -2333,7 +2364,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
 
   // 0.9.46 皮肤：挂载即恢复上次保存的主题 / 自定义 CSS（键在 extensionSettings.atlas 下）
   const skinState = {
-    theme: normalizeAtlasSkinTheme(skinPort?.read?.("skinTheme") ?? "paper"),
+    theme: normalizeAtlasSkinTheme(skinPort?.read?.("skinTheme") ?? "starmap"),
     customCss: typeof skinPort?.read?.("skinCustomCss") === "string" ? skinPort.read("skinCustomCss") : "",
   };
   applyAtlasSkin(root, skinState);
@@ -2419,6 +2450,60 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
   side.append(sideFoot);
 
   root.append(rail, main, side);
+  // U15：改挂新工作台（mountWorkbench 内部仍是同一个 createStarmapShell 布局，
+  // 额外接上 U05 层级树 / U06 详情卡 / U08 目录 / U09 时间线 / U11 摘要 / U12 统一日志）。
+  // 同一 root 上重复 mount 会先销毁旧实例 → 不会出现第二个地图实例或重复监听。
+  const starmapShell = mountWorkbench({ root, rail, brand, navButtons, foot, main, sideFoot,
+    topbar, topbarLeft, topbarRight, center, side, sideChanges, devSlot, moves, core,
+    onNavigate: (row) => {
+      // U05 返工：新树行带 mapId（地图 id）→ 直接走地图导航；旧树行（path 数组）保持原逻辑。
+      if (row && row.mapId && sqlMode.enabled) { sqlSpatialEnterMap(String(row.mapId)); return; }
+      mapController.stack = row.path.map(owner => ({ ...owner }));
+      closeMapPanel();
+      renderMap(data());
+      if (!row.hasMap) {
+        const point = activeMapPoints.find(point => String(point.id) === row.id);
+        openStarmapLocation(point ?? { id: row.id, rowId: row.entityId, name: row.name, unplaced: true });
+      }
+    },
+    onSelect: (kind, entry) => {
+      if (sqlMode.enabled) { void openWorkbenchEntity({ kind, ...entry }); return; }
+      if (kind === "locations") {
+        const point = activeMapPoints.find(point => String(point.id) === String(entry.id));
+        if (point) openStarmapLocation(point);
+      } else void openStarmapEntity(kind, entry);
+    },
+    onCloseDetail: () => closeMapPanel(),
+    onLocate: (payload) => payload?.id && sqlMode.enabled ? void locateWorkbenchEntity(payload) : locatePlayerCamera(),
+    onViewMode: () => sqlViewToggleEl?.click(),
+    onResetPosition: () => { dragOffsetX = 0; dragOffsetY = 0; },
+    // 新面板需要的宿主回调（世界数据一律经只读口，不在 UI 里另算一份）
+    onSelectEntity: (payload) => {
+      if (!payload?.id) return;
+      if (sqlMode.enabled) void openWorkbenchEntity(payload);
+      else void openStarmapEntity(payload.kind === 'character' ? 'characters' : payload.kind === 'item' ? 'items' : payload.kind, { ...payload.row, ...payload });
+    },
+    onEnterLocation: (payload) => {
+      const children = Array.isArray(payload?.children) ? payload.children : [];
+      // 子项可能是子地图（mapId）也可能是子地点（id）——统一换算成地图行再导航。
+      const mapIds = children.map((child) => {
+        const id = String(child?.mapId ?? child?.id ?? "");
+        if (!id) return "";
+        const direct = (lastSqlMapItems ?? []).find((item) => String(item?.mapId ?? "") === id);
+        if (direct) return String(direct.mapId);
+        const byContainer = (lastSqlMapItems ?? []).find((item) => String(item?.containerLocationId ?? "") === id);
+        return byContainer ? String(byContainer.mapId) : "";
+      }).filter(Boolean);
+      if (mapIds.length === 1) sqlSpatialEnterMap(mapIds[0]);
+      else if (mapIds.length > 1) sqlSpatialChooseMap(mapIds);
+    },
+    turnId: () => data()?.turnId ?? null,
+  }, {
+    // U15：ports 由宿主注入；工作台只认这几个口子，不直接碰会话/存储。
+    queryView: (kind, query) => sqlQueryView(kind, query ?? {}, data()),
+    emitDiagnostic: (row) => { if (row?.code) sqlNoteOnce(row.code, { kind: "workbench" }); },
+    onScopeInvalidated: () => { spatialMapController?.invalidate(); lastSqlMapItems = null; closeMapPanel(); },
+  });
 
   // 0.9.47 mapview 同款：ESC 关闭地图信息面板
   document.addEventListener("keydown", (e) => {
@@ -2701,6 +2786,34 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     return box;
   }
 
+  /**
+   * U09/U11 返工：底部事件带 + 左下世界动向摘要——同快照真实响应（SQL changes 视图）。
+   * 摘要用 U10 的程序模板（1–3 条读者动向，技术串过滤）；SQL 未生效时面板保持等待态。
+   */
+  function renderSpatialPanels(d) {
+    if (!sqlMode.enabled) return;
+    const changes = sqlResolveView("changes", d, { limit: 20 });
+    const items = Array.isArray(changes.view?.items) ? changes.view.items : [];
+    const events = items.map((row) => ({
+      id: String(row?.changeId ?? ""),
+      title: String(row?.summary ?? ""),
+      mapId: null,
+      occurred: true,
+    }));
+    starmapShell.showTimeline({ events, tasks: [], viewMode: sqlViewMode });
+    if (typeof buildVisibleWorldSummarySync === "function") {
+      const view = changes.view;
+      starmapShell.showSummary(buildVisibleWorldSummarySync({
+        turnId: items[0]?.turnId ?? null,
+        revision: Number.isInteger(view?.revision) ? Number(view.revision) : null,
+        viewMode: sqlViewMode === "author" ? "author" : "pov",
+        events: items.map((row) => ({ title: String(row?.summary ?? ""), turnId: row?.turnId })),
+        changes: items.map((row) => ({ title: String(row?.summary ?? ""), kind: String(row?.operation ?? "") })),
+        tasks: [], fronts: [],
+      }));
+    }
+  }
+
   function renderMoves() {
     movesList.innerHTML = "";
     const s = state();
@@ -2775,8 +2888,8 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     // 开发预览槽：宿主要求时才注入（生产环境不出现）
     devSlot.innerHTML = "";
     if (typeof window !== "undefined" && typeof window.__atlasDevSlot === "function") {
-      const box = el("div", "aw-dev__box");
-      box.append(el("span", "aw-eyebrow", "预览控制"));
+      const box = el("details", "aw-dev__box");
+      box.append(el("summary", "aw-eyebrow", "预览控制"));
       try {
         window.__atlasDevSlot(box);
       } catch (error) {
@@ -3623,11 +3736,47 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       return;
     }
 
+    // U14：目录页（人物 / 物品 / 事件）——Q04 只读口，分页由工作台目录控制器持有。
+    // 切页只读，不推进世界时间；POV 只看得到主角已知条目。
+    if (s.page === "characters" || s.page === "items" || s.page === "events") {
+      const kind = s.page === "characters" ? "character" : s.page === "items" ? "item" : "event";
+      const label = s.page === "characters" ? "人物" : s.page === "items" ? "物品" : "事件";
+      /**
+       * M5 返工：口径文案必须跟着**当前口径**走，不能硬写 POV。
+       * 之前无论口径是什么都写「POV 只看得到主角已知的条目」，而查询被错误地压到
+       * 主角所知口径、世界又没登记主角知识时，页面只会显示空目录 —— 读者分不清
+       * 「真没有」和「口径滤掉了」（验收报告 P1/U08）。
+       */
+      center.append(pageHeader(`${label}目录`, sqlViewMode === "author"
+        ? "作者口径：显示当前分支的全部条目。切到「主角所知」只看得到主角已知的条目；切页不推进世界时间。"
+        : "主角所知口径：只看得到主角已知的条目；作者口径可看全部。切页不推进世界时间。"));
+      const holder = el("div", "aw-page-catalog");
+      center.append(holder);
+      if (!ready) {
+        holder.append(el("div", "aw-note", "世界尚未初始化，暂无目录可显示。"));
+        return;
+      }
+      void starmapShell.renderCatalogPage(holder, kind).catch(() => {
+        holder.replaceChildren(el("div", "aw-note aw-note--error", "目录查询失败，请查看运行日志。"));
+      });
+      return;
+    }
+
     if (s.page === "api") {
       center.append(pageHeader("API 连接", "保存并切换世界推演使用的独立模型连接。提示词请在左侧「推进」中管理。"));
       if (s.lastError) center.append(el("div", "aw-note aw-note--error", s.lastError));
       ensureSettingsLoaded();
       center.append(buildApiPanel());
+      return;
+    }
+
+    // U14：提示词独立入口。与「推进」共用同一套草稿状态（不新建第二份提示词库），
+    // 只是给它一个明确路由，避免「清单里有、界面点不开」。
+    if (s.page === "prompts") {
+      center.append(pageHeader("提示词", "提示词预设的独立入口：段落增删、启用、排序、复制都在这里；与「推进」共用同一套草稿，保存后生效。"));
+      if (s.lastError) center.append(el("div", "aw-note aw-note--error", s.lastError));
+      ensureSettingsLoaded();
+      center.append(buildProgressionPanel());
       return;
     }
 
@@ -3654,6 +3803,9 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
        */
       const sqlLogs = sqlResolveView("diagnostics", d, { limit: 100 });
       if (sqlLogs.active) {
+        // U12 返工：统一日志面板接真实诊断视图（分组展开 + 默认脱敏在面板内兜底）。
+        const items = Array.isArray(sqlLogs.view?.items) ? sqlLogs.view.items : [];
+        starmapShell.showLog(items, { hasMore: Boolean(sqlLogs.view?.nextCursor) });
         center.append(buildSqlLogPage(sqlLogs, d));
         return;
       }
@@ -3730,8 +3882,24 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
   let sqlNoteEl = null;
   let sqlRouteNoteEl = null;
   /**
+   * U04/U15：SQL 空间渲染（正式接线）。
+   * - `sqlSpatialCanvas`：真 canvas，挂进地图视口（只有 SQL 视图生效时显示）；
+   * - `spatialMapController`：createWorkbenchMapController 实例——一个手势 owner，
+   *   场景 ready 优先画已保存 floor/city 场景，missing/invalid 才退 SQL 概览；
+   * - `lastSqlMapItems`：renderMap 的地图行缓存，供「进入子图 / 返回父图」换算导航栈。
+   */
+  let sqlSpatialCanvas = null;
+  let spatialMapController = null;
+  let lastSqlMapItems = null;
+  /**
    * H12 / §10.4：作者 / 主角所知视图开关（**只改 UI 过滤**）。
    * 它不参与提示词与世界书投影（见 `buildSqlPromptScope`），默认跟随 `/state` 下发的口径。
+   * 初值保持「非作者视图」（H12 既有门禁锁死）：真正的口径由 renderMap 依
+   * `metadata.viewMode`（引擎回包的实际口径）初始化一次，之后只随用户显式切换变化。
+   *
+   * M5 返工注记：工作台（新 model）的查询口径**必须复用同一个值**，
+   * 由 renderPage 把 `sqlViewMode` 放进 snapshot 交给 shell.sync —— 先前它自己从
+   * `/state` 字段反推出固定 pov，把目录页压成空（验收报告 P1/U08）。
    */
   let sqlViewMode = "pov";
   let sqlViewModeInitialized = false;
@@ -4057,6 +4225,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     // 回到 100% 不再连带清空平移——旧 setZoom(1) 清 pan 的行为删除）；
     // ⌖ = 定位当前位置（保持比例，视口中心对准玩家）。
     const zoomByFactor = (factor) => {
+      if (sqlSpatialCanvas?.style.display !== 'none' && spatialMapController) { spatialMapController.zoomBy(factor); return; }
       if (!camera) return;
       commitCamera(setCameraZoom(camera, camera.k * factor));
     };
@@ -4064,6 +4233,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       ["＋", "放大地图", () => zoomByFactor(1.25)],
       ["－", "缩小地图", () => zoomByFactor(0.8)],
       ["⌂", "全图适配（重置缩放与平移）", () => {
+        if (sqlSpatialCanvas?.style.display !== 'none' && spatialMapController) { spatialMapController.fit(); return; }
         if (cameraFrame) commitCamera(fitCamera(cameraFrame, cameraViewport.w, cameraViewport.h));
       }],
       ["⌖", "定位当前位置", () => locatePlayerCamera()],
@@ -4107,7 +4277,9 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       if (mode === "grid") gridToggleEl = viewBtn;
       viewSwitch.append(viewBtn);
     }
-    mapTools.append(viewSwitch, zoomBox);
+    mapTools.append(viewSwitch);
+    zoomBox.classList.add("as-map-zoom");
+    viewport.append(zoomBox);
     /**
      * H20（0.9.59）：图例搬进右上**可折叠**工具条。
      *
@@ -4163,9 +4335,12 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     sqlViewToggleEl.title = "只改变界面显示范围；注入世界书与提示词的范围仍由主角所知（knowledge）决定。";
     sqlViewToggleEl.style.display = "none";
     sqlViewToggleEl.addEventListener("click", () => {
+      closeMapPanel();
       sqlViewMode = sqlViewMode === "author" ? "pov" : "author";
       sqlViewToggleEl.setAttribute("aria-pressed", String(sqlViewMode === "author"));
-      if (lastMapData) renderMap(data());
+      spatialMapController?.invalidate();
+      starmapShell.showEntity(null);
+      renderPage();
     });
     legendPanel.append(sqlViewToggleEl);
     // 0.9.24 世界书提炼地理；0.9.26 地图抢救：geoBar 常显 + 新增「从近期剧情提炼新地点」
@@ -4287,6 +4462,16 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     sqlRouteNoteEl = el("div", "aw-note aw-route-note");
     sqlRouteNoteEl.style.display = "none";
     viewport.append(interiorRoster, mapPanel, sqlRoster, sqlNoteEl, sqlRouteNoteEl);
+    // U15：真 canvas（空间渲染器唯一绘制面）。放在名单/弹层之前 → DOM 顺序在其下，
+    // 点击 canvas 不冒泡到 viewport 的「空白点击关面板」监听（选中/进入由渲染器自己接管）。
+    sqlSpatialCanvas = document.createElement("canvas");
+    sqlSpatialCanvas.tabIndex = 0;
+    sqlSpatialCanvas.setAttribute('aria-label', '地图：滚轮缩放，拖动平移，双击或按 Enter 进入选中地点');
+    sqlSpatialCanvas.className = "aw-spatial-canvas";
+    sqlSpatialCanvas.style.display = "none";
+    sqlSpatialCanvas.addEventListener("click", (event) => event.stopPropagation());
+    viewport.insertBefore(sqlSpatialCanvas, interiorRoster);
+    starmapShell.dockDetail(mapPanel);
     // 0.9.41 图例：地点 / 人物 / 物品三型标点（原型 mapview 同款信息架构）
     // 0.9.43 真修（0.9.46 补提交）：el() 第三参只吃文本——DOM 节点会被 textContent
     // 强转成 "[object HTMLElement]"，标签文字（第 4 参）则被静默丢弃。
@@ -4339,6 +4524,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     vehicleNoteEl.style.display = "none";
     viewport.append(vehicleNoteEl);
     mapCanvas.append(mapCrumb, mapTools, viewport, mapHint, geoBar, travelBar);
+    starmapShell.layerSlot.append(mapTools);
     return mapCanvas;
   }
 
@@ -4361,6 +4547,11 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
   }
 
   function locatePlayerCamera() {
+    if (sqlSpatialCanvas?.style.display !== 'none' && spatialMapController) {
+      const id = String(data()?.currentLocationId ?? '');
+      if (id) void locateWorkbenchEntity({ id: id.startsWith('loc:') ? id : `loc:${id}`, kind: 'location' });
+      return;
+    }
     if (!camera || !cameraFrame) return;
     const d = lastMapData;
     const chain = currentLocationChain(d);
@@ -4446,13 +4637,81 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     renderMap(data());
   }
 
+  let starmapDetailEpoch = 0;
+  function openStarmapLocation(point) {
+    const owner = mapController.stack.at(-1);
+    openMapPanel(point, { inSub: Boolean(owner), currentSub: owner ? activeMapSubmaps[owner.pointId] ?? null : null });
+  }
+  async function openWorkbenchEntity(payload) {
+    const id = String(payload?.rowId ?? payload?.entityId ?? payload?.id ?? '');
+    closeMapPanel();
+    if (!id || !sqlMode.enabled) return;
+    const d = data(), snapshot = sqlSnapshotScope(d), viewMode = sqlViewMode;
+    const epoch = ++starmapDetailEpoch, page = state().page;
+    starmapShell.model.select(payload.kind, id);
+    const result = await sqlQueryView('entity', { entityId: id, branchId: d.branchId, viewMode }, d);
+    if (epoch !== starmapDetailEpoch || viewMode !== sqlViewMode || state().page !== page
+      || !sqlSameSnapshot(snapshot, sqlSnapshotScope(data()))) return;
+    const entity = workbenchEntity(result?.items?.[0]);
+    starmapShell.model.select(entity?.kind, entity?.id, entity);
+    starmapShell.showEntity(entity);
+    if (entity) starmapShell.openInspector();
+  }
+
+  async function locateWorkbenchEntity(payload) {
+    const entity = payload?.entity ?? payload?.row ?? payload;
+    const id = String(payload?.id ?? entity?.id ?? '');
+    if (!id) return;
+    if (state().page !== 'map') core.setPage('map');
+    let targetId = id;
+    let map = (lastSqlMapItems ?? []).find(row => (row.points ?? []).some(point => String(point.entityId) === targetId));
+    if (!map && entity?.locationId) {
+      targetId = String(entity.locationId);
+      map = (lastSqlMapItems ?? []).find(row => (row.points ?? []).some(point => String(point.entityId) === targetId));
+    }
+    if (!map) return;
+    sqlSpatialEnterMap(map.mapId);
+    const view = sqlResolveView('map', data());
+    await spatialMapController?.showMap(sqlSpatialScope(data(), view), map.mapId);
+    spatialMapController?.focus(targetId);
+  }
+
+  async function openStarmapEntity(kind, entry) {
+    if (sqlMode.enabled) { await openWorkbenchEntity({ ...entry, kind, id: entry.rowId ?? entry.entityId ?? entry.id }); return; }
+    const open = kind === "characters" ? openNpcPanel : openObjectPanel;
+    open(entry);
+    if (!sqlMode.enabled) return;
+    const epoch = ++starmapDetailEpoch;
+    const d = data();
+    const snapshot = sqlSnapshotScope(d);
+    const viewMode = sqlViewMode;
+    const result = await sqlQueryView("entity", { entityId: String(entry.rowId ?? entry.entityId ?? entry.id),
+      branchId: d.branchId, viewMode }, d);
+    if (epoch !== starmapDetailEpoch || viewMode !== sqlViewMode || state().page !== "map"
+      || !sqlSameSnapshot(snapshot, sqlSnapshotScope(data()))) return;
+    const detail = result?.items?.[0];
+    if (!detail) return;
+    if (kind === "characters" && detail.character) {
+      const character = detail.character;
+      openNpcPanel({ ...entry, id: character.id, name: character.name,
+        thought: character.thought ?? "", currentAction: character.action_tendency ?? "",
+        status: character.physical_status ?? "", isProtagonist: character.id === d.protagonistId });
+    } else if (kind === "items" && detail.item) {
+      openObjectPanel({ ...entry, id: detail.item.id, name: detail.item.name,
+        description: detail.item.description ?? "" });
+    }
+  }
+
   function closeMapPanel() {
+    starmapDetailEpoch++;
     if (mapPanel) {
       mapPanel.style.display = "none";
       mapPanel.innerHTML = "";
     }
     mapPanelAnchor = null;
     mapLayer?.querySelectorAll(".is-active-marker").forEach((n) => n.classList.remove("is-active-marker"));
+    starmapShell.closeInspector();
+    starmapShell.showEntity(null);
   }
 
   /** 0.9.35 面包屑：子图层级 + 返回按钮。 */
@@ -4504,6 +4763,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
   /** 0.9.47 锚定弹出（mapview 同款交互）：面板贴着标点弹，越界翻边，标点高亮。 */
   function anchorPanelToMarker(anchorEl) {
     if (!mapPanel) return;
+    starmapShell.openInspector();
     mapLayer?.querySelectorAll(".is-active-marker").forEach((n) => n.classList.remove("is-active-marker"));
     if (!anchorEl) {
       mapPanelAnchor = null;
@@ -4805,6 +5065,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
   }
 
   function openMapPanel(point, { inSub, currentSub }, anchorEl = null) {
+    starmapDetailEpoch++;
     const d = lastMapData;
     if (!mapPanel || !d) return;
     mapPanel.innerHTML = "";
@@ -5080,6 +5341,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
 
   /** 0.9.41 人物面板：想法（最近涉及叙事）+ 动向（状态摘要 / 在场原因）。 */
   function openNpcPanel(npc, anchorEl = null) {
+    starmapDetailEpoch++;
     if (sqlMode.enabled && sqlViewMode === "pov" && npc?.isProtagonist !== true) {
       npc = { ...npc, thought: "", actionTendency: "", currentAction: "", status: "", recentNarratives: [] };
     }
@@ -5233,6 +5495,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
 
   /** 0.9.41 物品面板：描述 + 所在。 */
   function openObjectPanel(object, anchorEl = null) {
+    starmapDetailEpoch++;
     if (!mapPanel) return;
     mapPanel.innerHTML = "";
     const head = el("div", "aw-mappanel__head");
@@ -5286,6 +5549,81 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     anchorPanelToMarker(anchorEl);
   }
 
+  /**
+   * U04/U15：SQL 空间渲染器的宿主接线（只在 SQL 模式 + 核心就绪时创建）。
+   * - 渲染器 / 投影器来自懒加载的 SQL bundle（atlas-sql-browser-entry 的导出）；
+   * - 查询走 sqlQueryView（同一会话、同一快照口径，scope 显式传顶层字段）；
+   * - 选中 → 新详情卡（U06）+ 旧实体面板双路展示；进入子图走 sqlSpatialEnterMap。
+   */
+  function ensureSpatialMapController() {
+    if (spatialMapController) return spatialMapController;
+    if (!sqlSpatialCanvas) return null;
+    const sqlMod = sqlMode.module;
+    if (!sqlMod || typeof sqlMod.createSpatialRenderer !== "function"
+      || typeof sqlMod.projectMapView !== "function") {
+      sqlNoteOnce("SPATIAL_RENDERER_MISSING", { kind: "spatial" });
+      return null;
+    }
+    spatialMapController = createWorkbenchMapController({
+      canvas: sqlSpatialCanvas,
+      createRenderer: (options) => sqlMod.createSpatialRenderer({ ...options, ownsGestures: true }),
+      projectors: { unwrapViewResult: sqlMod.unwrapViewResult, projectMapView: sqlMod.projectMapView },
+      model: starmapShell.model,
+      getChildren: entity => (lastSqlMapItems ?? []).filter(row => String(row.containerLocationId ?? '') === String(entity?.id ?? '')),
+      onViewport: ({ zoom }) => { zoomLabel.textContent = `${Math.round(zoom * 100)}%`; },
+      queryView: (kind, query) => sqlQueryView(kind, query ?? {}, data()),
+      onSelect: (entity) => {
+        if (!entity?.id) { closeMapPanel(); return; }
+        sqlSpatialCanvas.focus({ preventScroll: true });
+        void openWorkbenchEntity(entity);
+      },
+      onIssue: (row) => { if (row?.code) sqlNoteOnce(String(row.code), { kind: "spatial" }); },
+      onEnter: (mapId) => sqlSpatialEnterMap(mapId),
+      onChoose: ({ maps }) => sqlSpatialChooseMap(maps),
+    });
+    return spatialMapController;
+  }
+
+  /** 新树导航：按地图行换算旧视图栈（容器地点 = 栈层），随后整图重渲染。 */
+  function sqlSpatialEnterMap(nextMapId) {
+    const items = lastSqlMapItems;
+    if (!Array.isArray(items) || nextMapId == null) return;
+    const target = items.find((row) => row && String(row.mapId ?? "") === String(nextMapId));
+    if (!target) return;
+    const path = workbenchMapPath(items, target.mapId);
+    if (!path) return;
+    mapController.stack = path;
+    closeMapPanel();
+    renderMap(data());
+  }
+
+  /** 多个候选子图：在地图上列选择按钮（不自动挑第一个）。 */
+  function sqlSpatialChooseMap(maps) {
+    if (!sqlRoster || !Array.isArray(maps)) return;
+    sqlRoster.innerHTML = "";
+    sqlRoster.append(el("div", "aw-sql-roster__title", "这个地点有多个内部地图，请选择"));
+    for (const mapId of maps) {
+      const row = (lastSqlMapItems ?? []).find((item) => String(item?.mapId ?? "") === String(mapId));
+      const button = el("button", "aw-btn aw-btn--ghost", String(row?.name ?? mapId));
+      button.type = "button";
+      button.addEventListener("click", () => sqlSpatialEnterMap(mapId));
+      sqlRoster.append(button);
+    }
+    sqlRoster.style.display = "";
+  }
+
+  /** U15：当前作用域（scope 显式映射到 ViewQuery 顶层字段；revision 以 SQL 视图为准）。 */
+  function sqlSpatialScope(d, sqlMapView) {
+    return {
+      chatId: String(state().chatId ?? ""),
+      branchId: String(d?.branchId ?? state().binding?.branchId ?? "main"),
+      revision: Number.isInteger(sqlMapView?.view?.revision) ? Number(sqlMapView.view.revision) : null,
+      viewMode: sqlViewMode,
+      povId: null,
+      snapshotKey: `${sqlSnapshotScope(d).key}|${sqlMode.viewEpoch}`,
+    };
+  }
+
   function renderMap(d) {
     if (!d.worldId) return;
     // 0.9.35 换聊天 / 换世界 → 子图视图栈立即作废（数据隔离，绝不让旧子图带进新卡）
@@ -5322,6 +5660,12 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
      * 核心未就绪 / 本轮没有 SQL 地图视图 → 具名诊断 + 旧渲染器兜底（不留白屏，也不假装 SQL 生效）。
      */
     sqlModeSync(d);
+    if (!sqlViewModeInitialized) {
+      const declared = sqlViewOf('map', d)?.metadata?.viewMode ?? d.sqlViewMode;
+      if (declared === 'author' || declared === 'pov') {
+        sqlViewMode = declared; sqlViewModeInitialized = true;
+      }
+    }
     const sqlMapView = sqlResolveView("map", d);
     sqlNoteOnce(sqlMapView.code, { kind: "map" });
     /**
@@ -5333,14 +5677,20 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       sqlViewToggleEl.setAttribute("aria-pressed", String(sqlViewMode === "author"));
     }
     if (sqlMapView.active && !sqlViewModeInitialized) {
-      sqlViewModeInitialized = true;
-      const declared = String(sqlMapView.view?.metadata?.viewMode ?? d.sqlViewMode ?? "pov");
-      sqlViewMode = declared === "author" ? "author" : "pov";
+      const declared = sqlMapView.view?.metadata?.viewMode ?? d.sqlViewMode;
+      if (declared === 'author' || declared === 'pov') {
+        sqlViewModeInitialized = true;
+        sqlViewMode = declared;
+      }
       if (sqlViewToggleEl) sqlViewToggleEl.setAttribute("aria-pressed", String(sqlViewMode === "author"));
     }
     // 视图条目不做条目级过滤：地图行本身是容器（隐藏一张图会连带藏掉它的子图），
     // 「显示哪些点位」在 atlasSqlMapModel 里按 viewMode 过滤。
-    const {sqlMapItems,sqlSubmapsResolved,tableMap,submaps,pointMeta}=atlasMapSource(d,sqlMapView);
+    const source = atlasMapSource(d, sqlMapView);
+    const sqlMapItems = source.sqlMapItems ? visibleWorkbenchMaps(source.sqlMapItems, sqlViewMode) : null;
+    const sqlSubmapsResolved = sqlMapItems ? atlasSqlSubmaps(sqlMapItems) : null;
+    const { tableMap, pointMeta } = source;
+    const submaps = sqlSubmapsResolved ?? source.submaps;
     while (mapController.stack.length > 0) {
       const top = mapController.stack[mapController.stack.length - 1];
       const expectedParent = mapController.stack.length > 1 ? mapController.stack[mapController.stack.length - 2].pointId : "world";
@@ -5371,6 +5721,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     }
     lastSqlModel = sqlModel;
     lastSqlSubmaps = sqlSubmapsResolved;
+    lastSqlMapItems = sqlMapItems ?? null;
     const sqlEmptyMapNote = "SQL_MAP_EMPTY：当前层级在 SQL 地图视图里没有对应地图行，按空地图渲染（绝不回落到旧三表数据冒充当前内容）。";
     if (sqlMapItems && !sqlModel) sqlNoteOnce("SQL_MAP_EMPTY", { kind: "map", level: inSub ? String(view?.pointId ?? "") : "world" });
     const sqlMapNote = sqlMapView.note ?? (sqlMapItems && !sqlModel ? sqlEmptyMapNote : null);
@@ -5380,6 +5731,38 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       {d,mapData,tableMap,sqlMapItems,sqlModel,inSub,currentSub,view,regionFilter},
       {tableRowIdOf,npcViewFromTableRow,objectViewFromTableRow});
     activeMapPoints=points;activeMapSubmaps=submaps;
+    // U05 返工：新地图树用 vendor buildMapTree 的节点结构（mapId / 父链 / 容器地点），
+    // 与旧 atlasWorkbenchTree 的行数组分开传——mountWorkbench 按 shape 分发，
+    // 不再把旧数组错喂给 renderMapTree 的 tree.nodes。
+    let spatialTree = null;
+    if (sqlMapItems && typeof sqlMode.module?.buildMapTree === "function") {
+      const locationRows = [];
+      for (const item of sqlMapItems) {
+        for (const point of item?.points ?? []) {
+          if (point?.kind === "location") locationRows.push({ id: String(point.entityId), map_id: String(point.mapId) });
+        }
+      }
+      spatialTree = sqlMode.module.buildMapTree(sqlMapItems, locationRows);
+    }
+    const tree = atlasWorkbenchTree({ sqlItems: sqlMapItems, viewMode: sqlViewMode,
+      worldName: d.worldName, rootPoints: tableMap?.world?.points ?? mapData.points ?? [], submaps });
+    const characterEntries = sqlModel
+      ? [...sqlModel.characterPins, ...sqlModel.coarseList.map(entry => ({ ...entry,
+        id: entry.entityId, rowId: entry.entityId, meta: entry.locationName
+          ? `位于 ${entry.locationName} · 位置未细分` : "位置未细分" }))]
+      : rosterNpcs;
+    starmapShell.updateMap({ sql: sqlMapView.active, viewMode: sqlViewMode, tree, spatialTree,
+      activeMapId: sqlModel?.mapId ?? null,
+      path: mapController.stack, ownerId: view?.pointId ?? "world",
+      name: sqlModel?.name || currentSub?.name || view?.name || d.worldName || "世界地图",
+      characters: characterEntries.map(entry => ({ ...entry,
+        id: entry.rowId ?? entry.entityId ?? entry.id, name: String(entry.name ?? "未知人物") })),
+      items: (sqlModel?.itemPins ?? objects).map(entry => ({ ...entry,
+        id: entry.rowId ?? entry.id, name: String(entry.name ?? "未知物品") })),
+      locations: points.map(entry => ({ ...entry, name: String(entry.name ?? "未知地点"),
+        meta: submaps[String(entry.id)] ? "包含内部地图" : "当前地图地点" })),
+      truncated: Boolean(sqlMapView.view?.metadata?.readLimits?.truncated),
+    });
     if (regionSelect) regionSelect.style.display = inSub || sqlMapItems ? "none" : "";
     if (travelBar) travelBar.style.display = inSub ? "none" : "";
     interiorRoster.innerHTML = "";
@@ -5419,6 +5802,30 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
       sqlNoteEl.dataset.sqlCode = sqlMapNote ? String(sqlMapNoteCode ?? "") : "";
       sqlNoteEl.style.display = sqlMapNote ? "" : "none";
     }
+
+    /**
+     * U04/U15 返工：SQL 视图生效且有地图行时，**正式地图 = 新空间渲染器（canvas）**。
+     * - stage（旧网格/标点/底图 DOM）隐藏，旧手势随之停用（readCamera 早退）；
+     * - 一个手势 owner：渲染器自己接管滚轮 / 指针 / 双指（ownsGestures=true）；
+     * - 同 scope 并行取 map/scene/flows，快照一致才投影；scene ready 优先画已保存场景；
+     * - SQL 未生效 / 无地图行 / 渲染器缺席 → 旧绘制路径原样兜底（不留白屏）。
+     */
+    const spatialController = (sqlMapView.active && sqlModel && (function hasCanvas2d() {
+      // 能力检查：环境拿不到 2D 上下文（如 jsdom）时退回旧绘制路径，不留白屏。
+      try { return Boolean(sqlSpatialCanvas?.getContext?.("2d")); } catch { return false; }
+    })()) ? ensureSpatialMapController() : null;
+    if (spatialController) {
+      if (sqlSpatialCanvas) sqlSpatialCanvas.style.display = "";
+      stage.style.display = "none";
+      if (mapScaleEl) mapScaleEl.style.display = "none";
+      camera = null; // 旧 wheel/pan/点击手势全部早退（防双 owner）
+      cameraFrame = null;
+      void spatialController.showMap(sqlSpatialScope(d, sqlMapView), sqlModel.mapId);
+      return; // 旧标点 / 相机 / 网格路径不再执行（同实例只有一套绘制）
+    }
+    if (sqlSpatialCanvas) sqlSpatialCanvas.style.display = "none";
+    stage.style.display = "";
+    if (mapScaleEl) mapScaleEl.style.display = "";
 
     const regions = Array.isArray(d.regions) ? d.regions : [];
     // 0.9.20 空地理诚实提示；0.9.26 地图抢救后文案更新——单点地图不是渲染坏了，
@@ -8893,11 +9300,17 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
     // 关闭可见性（作者 2026-09-19 反馈：× 与退出都关不掉）——setPanelOpen 只改状态，
     // 这里负责消费：panelOpen=false 时隐藏根节点（面板 DOM 保留，重开零重建）。
     root.style.display = state().panelOpen === false ? "none" : "";
+    starmapShell.sync(d, state(), { ...sqlSnapshotScope(d), viewMode: sqlViewMode });
     renderNav();
     renderEngineStatus();
     renderTopbar(d);
     renderCenter(d);
-    if (state().page === "map") renderMap(d);
+    if (state().page === "map") {
+      renderMap(d);
+      // U09/U11 返工：底部事件带与左下摘要接真实数据（同快照 changes 视图），
+      // 不再用空面板「等待」冒充已接线。
+      renderSpatialPanels(d);
+    }
     renderMoves();
     renderSide();
   }
@@ -8908,6 +9321,7 @@ function renderPanel(core, root, api, store, mod, skinPort = null) {
   // 设置的懒加载已由 ensureSettingsLoaded（进入 推进/API 页时拉取一次）接管。
 
   renderPage.dispose=async()=>{
+    spatialMapController?.destroy(); starmapShell.destroy();
     mapController.dispose();closeMapPanel();mapImageCache.clear();
     await sqlViewController.dispose();
   };

@@ -44,6 +44,8 @@ type StoragePort = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 const LEVELS = new Set(["debug", "info", "warn", "error"]);
 const SOURCES = new Set(["host", "ui", "engine", "model", "storage", "lorebook", "map"]);
 const OUTCOMES = new Set(["started", "success", "skipped", "failed", "recovered"]);
+/** U13：场景状态枚举（与 Q03 的 SpatialSceneStatus + 空态对齐），不是这个集合的值一律丢弃。 */
+const SAFE_SCENE_STATUS = new Set(["ready", "missing", "invalid", "empty"]);
 const DETAIL_KEYS = new Set([
   "route", "mode", "sourceMode", "activationMode", "reason", "reasonCode", "schemaPath", "protocolVersion",
   "responseChars", "capability", "event", "build", "coreCommitted",
@@ -53,6 +55,9 @@ const DETAIL_KEYS = new Set([
   // 聊天指纹只走顶层 `chatFingerprint`（注册表把它列为可传键，组装时镜像到顶层），
   // 不在 details 里另留一份，避免同一条日志出现两个含义相同的键。
   "branchRef", "turnRef", "worldRef", "actorRef", "locationRef", "signalRef", "taskRef",
+  // U13：空间模块定位指纹与枚举字段。`*Ref` 同上只接受指纹形态；
+  // module / function 限定小写连字符标识，sceneStatus 限定契约内取值，bytes 限定非负整数。
+  "mapRef", "entityRef", "operationRef", "module", "function", "phase", "sceneStatus", "bytes",
   "collection",
   "droppedCount", "limitCount", "keptCount", "truncatedCount", "scannedCount",
   "candidateCount", "selectedCount", "outputChars", "chatMatch",
@@ -162,7 +167,19 @@ export type AtlasNamedDiagnosticCode =
   | "SIMULATION_CORRUPT"
   | "SIMULATION_TRUNCATED"
   | "LOREBOOK_STALE_CHAT_DROPPED"
-  | "BACKGROUND_BLOCKED";
+  | "BACKGROUND_BLOCKED"
+  // U13：空间模块定位指纹（只落指纹与枚举字段，正文/密钥一律不进日志）
+  | "SPATIAL_FRAME_INVALID"
+  | "SPATIAL_SCENE_STALE"
+  | "SPATIAL_LAYOUT_FAILED"
+  | "SPATIAL_ROUTE_INVALID"
+  | "SPATIAL_SCOPE_MISMATCH";
+
+/** U13：空间诊断共用的定位字段白名单（module / function / phase / sceneStatus / bytes + 指纹）。 */
+const SPATIAL_DETAILS = Object.freeze([
+  "chatFingerprint", "branchRef", "mapRef", "entityRef", "operationRef",
+  "module", "function", "phase", "sceneStatus", "bytes", "reasonCode",
+]);
 
 export interface AtlasNamedDiagnosticSpec {
   readonly code: AtlasNamedDiagnosticCode;
@@ -223,6 +240,26 @@ export const ATLAS_NAMED_DIAGNOSTICS: Readonly<Record<AtlasNamedDiagnosticCode, 
       details: Object.freeze([
         "chatFingerprint", "branchRef", "turnRef", "taskRef", "actorRef", "locationRef", "reasonCode",
       ]),
+    }),
+    // U13：frame_json 不可读 / 与场景契约不符（保留其他地图，不静默归空）。
+    SPATIAL_FRAME_INVALID: Object.freeze({
+      code: "SPATIAL_FRAME_INVALID", level: "error", source: "storage", details: SPATIAL_DETAILS,
+    }),
+    // U13：旧修订场景被拿来更新当前地图 → 跳过本次投影，不清掉已有效的旧图。
+    SPATIAL_SCENE_STALE: Object.freeze({
+      code: "SPATIAL_SCENE_STALE", level: "warn", source: "ui", details: SPATIAL_DETAILS,
+    }),
+    // U13：候选布局写入失败（整组回退，回执原样给 UI）。
+    SPATIAL_LAYOUT_FAILED: Object.freeze({
+      code: "SPATIAL_LAYOUT_FAILED", level: "error", source: "map", details: SPATIAL_DETAILS,
+    }),
+    // U13：路线几何不可用作行走路线（单项跳过，其他路线继续）。
+    SPATIAL_ROUTE_INVALID: Object.freeze({
+      code: "SPATIAL_ROUTE_INVALID", level: "warn", source: "map", details: SPATIAL_DETAILS,
+    }),
+    // U13：作用域不一致（分支 / 修订 / 视角），拒绝跨聊天或跨分支落地。
+    SPATIAL_SCOPE_MISMATCH: Object.freeze({
+      code: "SPATIAL_SCOPE_MISMATCH", level: "warn", source: "ui", details: SPATIAL_DETAILS,
     }),
   } as Record<AtlasNamedDiagnosticCode, AtlasNamedDiagnosticSpec>);
 
@@ -369,6 +406,14 @@ export function sanitizeDiagnostic(raw: unknown, now: () => number = Date.now): 
         else if (key.endsWith("Ref")) {
           if (isAtlasRefFingerprint(token)) details[key] = token;
         }
+        // U13：空间模块的定位标识——只允许小写连字符标识，防止把路径/正文塞进来。
+        else if (key === "module" || key === "function" || key === "phase") {
+          if (/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(token)) details[key] = token;
+        }
+        // U13：场景状态取契约内枚举值（与 Q03 的 SpatialSceneStatus 对齐）。
+        else if (key === "sceneStatus") {
+          if (SAFE_SCENE_STATUS.has(token)) details[key] = token;
+        }
         // A04：集合名走精确白名单（simulationUndo.collection 的取值域）。
         else if (key === "collection") {
           if (SAFE_COLLECTIONS.has(token)) details[key] = token;
@@ -376,6 +421,11 @@ export function sanitizeDiagnostic(raw: unknown, now: () => number = Date.now): 
       } else if (isAtlasRefDetailKey(key)) {
         // A04：`*Ref` 是字符串型定位字段，boolean / null / 数字都不得冒充（原始 ID 更不行）。
         continue;
+      } else if (key === "bytes") {
+        // U13：体积只接受 0..64MiB 的整数；其他形态（布尔 / 小数 / 负数）一律丢弃。
+        if (typeof detail === "number" && Number.isInteger(detail) && detail >= 0 && detail <= 67_108_864) {
+          details[key] = detail;
+        }
       } else if (key === "rowLine") {
         if (typeof detail === "number" && Number.isInteger(detail) && detail >= 0 && detail <= 100_000) {
           details[key] = detail;

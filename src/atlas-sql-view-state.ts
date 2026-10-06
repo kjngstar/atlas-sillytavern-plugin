@@ -2,6 +2,10 @@
 import { queryBound } from './atlas-db-runtime.ts';
 import { createTableReadPort } from './atlas-db-readport.ts';
 import { queryMapView, queryNearby, queryChanges, queryDiagnostics, querySimulationView } from './atlas-db-views.ts';
+// M4/Q08：只读口按明确键进 state.sqlViews；目录按需查询，不在 /state 预取整张目录。
+import { querySpatialFlows } from './atlas-spatial-flow-views.ts';
+import { querySpatialScene } from './atlas-spatial-views.ts';
+import { queryTasks } from './atlas-task-views.ts';
 import { resolveEffectivePosition, buildPositionCache } from './atlas-sim-position.ts';
 import { toLegacyStateDto } from './atlas-db-state-adapter.ts';
 import type { ViewContext } from './atlas-db-views.ts';
@@ -33,6 +37,15 @@ export function querySqlSceneState(ctx: ViewContext, query: {chatUid:string;worl
   const mapQuery:ViewQuery={...base,kind:'map'}, map=queryMapView(viewContext,mapQuery);
   const nearby=queryNearby(viewContext,{...base,kind:'nearby',entityId:povId,limit:500});
   const changes=queryChanges(viewContext,{...base,kind:'changes'}),diagnostics=queryDiagnostics(viewContext,{...base,kind:'diagnostics'}),simulation=querySimulationView(viewContext,{...base,kind:'simulation'});
+  // M4/Q08：scene 需要带 atlasScene 的原始 frame（map 视图已按 Q02 剥离），因此这里独立查一次；
+  // flows 需要一个焦点地图，取主角所在图，否则退回第一张图。
+  const playerPosition=player?position(String(player.id)):null;
+  const focusMapId=playerPosition?.kind==='at_grid'?playerPosition.mapId:String((map.items as Array<{mapId:string}>)[0]?.mapId??'');
+  const scene=querySpatialScene(viewContext,{...base,kind:'scene',mapId:focusMapId||undefined});
+  const flows=querySpatialFlows(viewContext,{...base,kind:'flows',mapId:focusMapId||undefined});
+  const tasks=queryTasks(viewContext,{...base,kind:'tasks'});
+  /** 目录不预取：UI 自己带 cursor/entityKind/q 调 queryView，避免一次拉整张表。 */
+  const catalogBase:ViewQuery={...base,kind:'catalog'};
   const compatible=toLegacyStateDto(map,mapQuery);
   const nearbyIds=new Set(nearby.items.map(raw=>String((raw as {entityId:string}).entityId)));
   const npcs=characters.map(row=>{
@@ -61,6 +74,6 @@ export function querySqlSceneState(ctx: ViewContext, query: {chatUid:string;worl
     tableMap:{...tableMap,nearby:{entries:npcs,total:counts.characters,truncated:counts.characters-npcs.length},objects:{entries:objects,total:counts.items,truncated:counts.items-objects.length},
       locations:{entries:locationsDto,total:counts.locations,truncated:counts.locations-locations.length},unplacedLocations:{entries:unplaced,total:unplaced.length,truncated:counts.locations-locations.length},
       locationOccupants:{entries:occupants,total:occupants.length,truncated:0},current:{locationId:currentLocationId,chain,position:player?position(String(player.id)):null}},
-    sqlViews:{map,nearby,changes,diagnostics,simulation},changes:changes.items,simulationView:simulation.items[0]??null,
+    sqlViews:{map,nearby,changes,diagnostics,simulation,scene,flows,tasks},catalogBase,changes:changes.items,simulationView:simulation.items[0]??null,
     sqlMode:true,coreSaved:false,readLimits:{limit:1000,counts,truncated:Object.fromEntries(Object.entries(counts).map(([key,total])=>[key,Math.max(0,total-1000)]))}};
 }
