@@ -776,6 +776,42 @@ test('推演等待：资料钩子超时仍提交一次，重复完成通知不�
   core.dispose();
 });
 
+test('资料读取期间宿主补写正文，重读资料后只提交当前楼层一次', async () => {
+  let floor = { userText: '当前用户正文', assistantText: '最初的回复' }, reads = 0;
+  const diagnostics = [];
+  const { core, api } = await readyCore({}, {}, diagnostics, {
+    resolveCommitFloor: () => ({ ...floor }),
+    getCommitContext: async () => { if (++reads === 1) floor = { userText:'宿主补写后的用户正文',assistantText:'宿主补写后的回复' }; return {}; },
+  });
+  await core.onMessageSent('1', '最初的用户正文');
+  await core.onGenerationEnded('2', '最初的回复');
+  const calls = api.calls.filter(c => c.path === '/turns/commit');
+  equal(calls.length, 1);
+  equal(calls[0].body.userText, floor.userText);
+  equal(calls[0].body.assistantText, floor.assistantText);
+  equal(api.calls.filter(c => c.path === '/turns/prepare').length, 2);
+  equal(reads, 2);
+  ok(diagnostics.some(d => d.code === 'HOST_FLOOR_REFRESHED'));
+  core.dispose();
+});
+
+test('资料读取期间正文连续变化，有限次重读后报告错误且不提交', async () => {
+  let version = 0;
+  const { core, api } = await readyCore({}, {}, [], {
+    resolveCommitFloor: () => ({ userText:'用户正文',assistantText:'回复'+version }),
+    getCommitContext: async () => { version++; return {}; },
+  });
+  await core.onMessageSent('1', '用户正文');
+  await core.onGenerationEnded('2', '回复0');
+  equal(version, 3);
+  equal(api.calls.filter(c => c.path === '/turns/commit').length, 0);
+  ok(core.getState().lastError.includes('仍在更新'));
+  equal(core.getState().turnPhase, 'idle');
+  equal(core.getState().receipts[0].status, 'failed');
+  equal(core.getState().receipts[0].detail.errorCode, 'HOST_FLOOR_UNSTABLE');
+  core.dispose();
+});
+
 test('推演等待：生成结束但没有本轮助手楼层，清理等待且不更新世界', async () => {
   for (const floor of [null, { assistantMessageId: '2', assistantText: '上一轮旧正文。' }]) {
     const { core, api } = await readyCore({}, {}, [], { resolveAssistantFloor: () => floor });

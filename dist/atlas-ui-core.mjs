@@ -3158,6 +3158,23 @@ function createAtlasUiCore(deps) {
     if (commitFlight === flight) commitFlight = null;
     flight.finish();
   }
+  function reportHostTurnFailure(turn, summary, code) {
+    if (state.chatId !== turn.chatId) return;
+    diagnostic2({ level: "error", source: "host", code, operation: "commit", phase: "validation", outcome: "failed" });
+    addReceipt({
+      receiptId: turn.turnId,
+      status: "failed",
+      branchId: state.binding?.branchId ?? null,
+      previousTime: state.binding?.worldTimeCursor ?? 0,
+      currentTime: state.binding?.worldTimeCursor ?? 0,
+      currentLocationId: state.binding?.currentLocationId ?? null,
+      triggeredNpcIds: [],
+      adoptedEventIds: [],
+      summary,
+      retryable: false
+    }, turn.chatId, { errorCode: code, coreSaved: false });
+    setState({ pendingTurn: null, rearmTurn: null, retryableCommit: null, lastError: summary });
+  }
   let generationRevision = 0;
   const sqlEnabled = () => deps.sqlEnabled?.() === true;
   let sqlRetryRequest = null;
@@ -4131,24 +4148,63 @@ function createAtlasUiCore(deps) {
     const flight = claimCommit(pending.turnId);
     setState({ turnPhase: "reading-context" });
     try {
-      const commitContext = deps.getCommitContext ? await safeCommitContext(deps.getCommitContext, assistantText) : null;
-      if (disposed || state.chatId !== pending.chatId || generationRevision !== commitRevision) return;
+      let userText = pending.userText;
+      let commitContext = null;
       let loreSupplement;
-      if (deps.getLoreSupplement) {
-        try {
-          const text2 = await readContextWithDeadline(deps.getLoreSupplement({
-            chatId: pending.chatId,
-            characterId: null,
-            mode: "turn",
-            userText: pending.userText,
-            assistantText,
-            recentAssistantTexts: commitContext?.recentAssistantTexts ?? []
-          }));
-          if (disposed || state.chatId !== pending.chatId || generationRevision !== commitRevision) return;
-          if (typeof text2 === "string" && text2.trim().length > 0) loreSupplement = text2;
-        } catch {
-          loreSupplement = void 0;
+      for (let read = 0; read < 3; read++) {
+        const floor = deps.resolveCommitFloor?.(pending.messageId, assistantMessageId);
+        if (deps.resolveCommitFloor && !floor) {
+          reportHostTurnFailure(pending, "本轮聊天楼层已变化，无法读取当前正文，请重新生成。", "HOST_FLOOR_CHANGED");
+          return;
         }
+        if (floor) {
+          userText = floor.userText;
+          assistantText = floor.assistantText;
+        }
+        commitContext = deps.getCommitContext ? await safeCommitContext(deps.getCommitContext, assistantText) : null;
+        if (disposed || state.chatId !== pending.chatId || generationRevision !== commitRevision) return;
+        loreSupplement = void 0;
+        if (deps.getLoreSupplement) {
+          try {
+            const text2 = await readContextWithDeadline(deps.getLoreSupplement({
+              chatId: pending.chatId,
+              characterId: null,
+              mode: "turn",
+              userText,
+              assistantText,
+              recentAssistantTexts: commitContext?.recentAssistantTexts ?? []
+            }));
+            if (disposed || state.chatId !== pending.chatId || generationRevision !== commitRevision) return;
+            if (typeof text2 === "string" && text2.trim().length > 0) loreSupplement = text2;
+          } catch {
+            loreSupplement = void 0;
+          }
+        }
+        const current = deps.resolveCommitFloor?.(pending.messageId, assistantMessageId);
+        if (!deps.resolveCommitFloor || current?.userText === userText && current.assistantText === assistantText) break;
+        diagnostic2({
+          level: "info",
+          source: "host",
+          code: "HOST_FLOOR_REFRESHED",
+          operation: "commit",
+          phase: "context",
+          outcome: "recovered",
+          details: { attempt: read + 1 }
+        });
+        if (read === 2) {
+          reportHostTurnFailure(pending, "其他插件仍在更新本轮正文，暂未推演；正文稳定后请重新推演。", "HOST_FLOOR_UNSTABLE");
+          return;
+        }
+      }
+      if (userText.slice(0, ATLAS_LIMITS.USER_TEXT_CHARS) !== pending.userText) {
+        const previous = pending;
+        setState({ pendingTurn: null });
+        await onMessageSent(previous.messageId, userText);
+        if (disposed || state.chatId !== previous.chatId || generationRevision !== commitRevision) return;
+        pending = state.pendingTurn;
+        if (!pending) return;
+        flight.turnId = pending.turnId;
+        setState({ turnPhase: "reading-context" });
       }
       const request = {
         turnId: pending.turnId,
@@ -4156,7 +4212,7 @@ function createAtlasUiCore(deps) {
         userMessageId: pending.messageId,
         assistantMessageId: assistantMessageId.slice(0, ATLAS_LIMITS.ID_CHARS),
         swipeId: commitSwipeId,
-        userText: pending.userText,
+        userText: userText.slice(0, ATLAS_LIMITS.USER_TEXT_CHARS),
         assistantText: assistantText.slice(0, ATLAS_LIMITS.ASSISTANT_TEXT_CHARS),
         ...loreSupplement ? { loreSupplement } : {},
         ...commitContext?.recentAssistantTexts?.length ? { recentAssistantTexts: commitContext.recentAssistantTexts } : {},
@@ -4222,7 +4278,7 @@ function createAtlasUiCore(deps) {
           outcome: "skipped"
         });
         if (state.chatId === value.chatId && generationRevision === revision && useSql === sqlEnabled())
-          setState({ lastError: "本轮聊天正文或楼层身份已变化，推演结果未保存；请重新推演当前正文。" });
+          reportHostTurnFailure(value, "本轮聊天正文或楼层身份已变化，推演结果未保存；请重新推演当前正文。", "HOST_FLOOR_CHANGED");
         return;
       }
       const receiptParsed = body.data?.receipt ? parseAtlasTurnReceipt(body.data.receipt) : null;
@@ -4951,7 +5007,7 @@ function createAtlasSettingsRoutes(deps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.80",
+      version: "0.9.81",
       protocolVersion: 1,
       time: now()
     });

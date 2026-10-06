@@ -9,8 +9,11 @@ const report={checks:{},errors:[],failed:[]};
 function check(name,ok,detail){report.checks[name]={ok:!!ok,detail};if(!ok)report.failed.push(name);}
 const server=spawn(process.execPath,['dev-preview/serve.mjs'],{env:{...process.env,ATLAS_PREVIEW_PORT:String(port),ATLAS_PREVIEW_NO_OPEN:'1'},stdio:'ignore'});
 const browser=await chromium.launch({headless:true,executablePath:process.env.ATLAS_CHROME_PATH||'C:/Program Files/Google/Chrome/Application/chrome.exe'});
-async function open({afterOnly=false,configure=true}={}){
+async function open({afterOnly=false,configure=true,rewriteContext=false}={}){
  const p=await browser.newPage({viewport:{width:1600,height:1000}});p.on('pageerror',e=>report.errors.push(e.message));
+ if(rewriteContext)await p.route('**/release/atlas-ui-extension/index.js',async route=>{const res=await route.fetch();const src=await res.text();const marker='getCommitContext: async (assistantText) => {';
+  if(!src.includes(marker))throw Error('context hook boundary changed');
+  await route.fulfill({response:res,body:src.replace(marker,marker+"if(!window.__contextRewritten){window.__contextRewritten=true;const c=context();c.chat.at(-1).mes+=' 宿主补写';c.chat.at(-2).mes+=' 宿主补写';}")});});
  await p.route('**/dev-preview/index.html',async route=>{const res=await route.fetch();let src=await res.text();
   src=src.replace('await sqlRuntime.closeSqlSession(migrated.session);','await sqlRuntime.closeSqlSession(migrated.session);contextValue.chatMetadata={};'+(afterOnly?'delete contextValue.event_types.MESSAGE_RECEIVED;':''))
    .replaceAll('../atlas-extension/','../release/atlas-ui-extension/');await route.fulfill({response:res,body:src});});
@@ -78,12 +81,14 @@ try{
   await c.eventSource.emit(e.GENERATION_STARTED,'quiet',{},false);await c.eventSource.emit(e.GENERATION_STOPPED);await c.eventSource.emit(e.GENERATION_ENDED,1);await c.eventSource.emit(e.GENERATION_ENDED_AFTER_COMMANDS,1);
   c.chat.push({mes:'你走进了图书馆。',is_user:false});await c.eventSource.emit(e.MESSAGE_RECEIVED,1,'normal');await c.eventSource.emit(e.GENERATION_ENDED,2);
  });await finish(nestedStop.p);s=await state(nestedStop.p);check('nested-stop-preserves-pending-turn',s.calls===1&&s.saves===1&&s.receipts[0]?.status==='committed',s);await nestedStop.p.close();
+ const rewrite=await open({rewriteContext:true});await floor(rewrite.p);await finish(rewrite.p);s=await state(rewrite.p);
+ check('context-postprocessing-rereads-current-user-and-assistant',s.calls===1&&s.saves===1&&s.receipts[0]?.status==='committed'&&!s.error,s);await rewrite.p.close();
  for(const target of ['assistant','user']){
   const {p,f}=await open();await p.evaluate(()=>window.__hold=true);await floor(p,{user:'我'.repeat(12001),assistant:'你'.repeat(24001)});
   await p.waitForFunction(()=>typeof window.__release==='function');await f.waitForFunction(()=>AtlasPreview.data.meta.engine.phase==='committing');
   check(`progress-visible:${target}`,(await f.locator('#syncText').innerText()).includes('正在推演'));
   await p.evaluate(target=>{const c=SillyTavern.getContext();c.chat[target==='assistant'?c.chat.length-1:c.chat.length-2].mes+='修改超预算部分';window.__release();},target);
-  await finish(p);s=await state(p);check(`late-suffix-edit-rejected:${target}`,s.calls===1&&s.saves===0&&!s.saved&&s.receipts.length===0&&!!s.error,s);await p.close();
+  await finish(p);s=await state(p);check(`late-suffix-edit-rejected:${target}`,s.calls===1&&s.saves===0&&!s.saved&&s.receipts[0]?.status==='failed'&&!!s.error,s);await p.close();
  }
  const failure=await open({configure:false});await floor(failure.p);await finish(failure.p);s=await state(failure.p);
  check('automatic-model-error-has-real-receipt',s.receipts[0]?.status==='failed'&&!!s.error&&!s.saved,s);await failure.f.waitForFunction(()=>AtlasPreview.data.RECEIPTS[0]?.status==='failed');check('automatic-error-reaches-original-ui',await failure.f.evaluate(()=>!!AtlasPreview.data.meta.engine.error));await failure.p.close();

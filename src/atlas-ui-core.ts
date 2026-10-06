@@ -428,6 +428,8 @@ export function createAtlasUiCore(deps: {
   isCommitCurrent?: (request: AtlasTurnCommitRequest) => boolean;
   /** Capture complete host text once; model request budgets must not invalidate long floors. */
   createCommitGuard?: (request: AtlasTurnCommitRequest) => () => boolean;
+  /** Read the same visible floors again after asynchronous host postprocessing. */
+  resolveCommitFloor?: (userMessageId: string, assistantMessageId: string) => { userText: string; assistantText: string } | null;
   host: AtlasUiHost;
   emitter: AtlasUiEmitter;
   onDiagnostic?: (event: AtlasDiagnosticInput) => void;
@@ -562,6 +564,15 @@ export function createAtlasUiCore(deps: {
   function releaseCommit(flight: CommitFlight): void {
     if (commitFlight === flight) commitFlight = null;
     flight.finish();
+  }
+  function reportHostTurnFailure(turn: { turnId: string; chatId: string }, summary: string, code: string): void {
+    if (state.chatId !== turn.chatId) return;
+    diagnostic({ level: 'error', source: 'host', code, operation: 'commit', phase: 'validation', outcome: 'failed' });
+    addReceipt({ receiptId: turn.turnId, status: 'failed', branchId: state.binding?.branchId ?? null,
+      previousTime: state.binding?.worldTimeCursor ?? 0, currentTime: state.binding?.worldTimeCursor ?? 0,
+      currentLocationId: state.binding?.currentLocationId ?? null, triggeredNpcIds: [], adoptedEventIds: [],
+      summary, retryable: false }, turn.chatId, { errorCode: code, coreSaved: false });
+    setState({ pendingTurn: null, rearmTurn: null, retryableCommit: null, lastError: summary });
   }
   let generationRevision = 0;
   const sqlEnabled = () => deps.sqlEnabled?.() === true;
@@ -1416,22 +1427,52 @@ export function createAtlasUiCore(deps: {
     const flight = claimCommit(pending.turnId);
     setState({ turnPhase: "reading-context" });
     try {
-      const commitContext = deps.getCommitContext ? await safeCommitContext(deps.getCommitContext, assistantText) : null;
-      if (disposed || state.chatId !== pending.chatId || generationRevision !== commitRevision) return;
-      // 0.9.21 世界书资料（可选钩子）：失败 / 空一律当无资料，绝不阻断回合
+      let userText = pending.userText;
+      let commitContext: Awaited<ReturnType<typeof safeCommitContext>> = null;
       let loreSupplement: string | undefined;
-      if (deps.getLoreSupplement) {
-        try {
-          const text = await readContextWithDeadline(deps.getLoreSupplement({
-            chatId: pending.chatId, characterId: null, mode: "turn",
-            userText: pending.userText, assistantText,
-            recentAssistantTexts: commitContext?.recentAssistantTexts ?? [],
-          }));
-          if (disposed || state.chatId !== pending.chatId || generationRevision !== commitRevision) return;
-          if (typeof text === "string" && text.trim().length > 0) loreSupplement = text;
-        } catch {
-          loreSupplement = undefined;
+      for (let read = 0; read < 3; read++) {
+        const floor = deps.resolveCommitFloor?.(pending.messageId, assistantMessageId);
+        if (deps.resolveCommitFloor && !floor) {
+          reportHostTurnFailure(pending, '本轮聊天楼层已变化，无法读取当前正文，请重新生成。', 'HOST_FLOOR_CHANGED');
+          return;
         }
+        if (floor) { userText = floor.userText; assistantText = floor.assistantText; }
+        commitContext = deps.getCommitContext ? await safeCommitContext(deps.getCommitContext, assistantText) : null;
+        if (disposed || state.chatId !== pending.chatId || generationRevision !== commitRevision) return;
+        loreSupplement = undefined;
+        if (deps.getLoreSupplement) {
+          try {
+            const text = await readContextWithDeadline(deps.getLoreSupplement({
+              chatId: pending.chatId, characterId: null, mode: "turn",
+              userText, assistantText,
+              recentAssistantTexts: commitContext?.recentAssistantTexts ?? [],
+            }));
+            if (disposed || state.chatId !== pending.chatId || generationRevision !== commitRevision) return;
+            if (typeof text === "string" && text.trim().length > 0) loreSupplement = text;
+          } catch {
+            loreSupplement = undefined;
+          }
+        }
+        const current = deps.resolveCommitFloor?.(pending.messageId, assistantMessageId);
+        if (!deps.resolveCommitFloor || current?.userText === userText && current.assistantText === assistantText) break;
+        diagnostic({ level: 'info', source: 'host', code: 'HOST_FLOOR_REFRESHED',
+          operation: 'commit', phase: 'context', outcome: 'recovered', details: { attempt: read + 1 } });
+        if (read === 2) {
+          reportHostTurnFailure(pending, '其他插件仍在更新本轮正文，暂未推演；正文稳定后请重新推演。', 'HOST_FLOOR_UNSTABLE');
+          return;
+        }
+      }
+      // SQL prepare is bound to the original user input hash. Host preprocessing
+      // can replace that input; prepare it again before committing current text.
+      if (userText.slice(0, ATLAS_LIMITS.USER_TEXT_CHARS) !== pending.userText) {
+        const previous = pending;
+        setState({ pendingTurn: null });
+        await onMessageSent(previous.messageId, userText);
+        if (disposed || state.chatId !== previous.chatId || generationRevision !== commitRevision) return;
+        pending = state.pendingTurn;
+        if (!pending) return;
+        flight.turnId = pending.turnId;
+        setState({ turnPhase: 'reading-context' });
       }
       // 0.9.25 shujuku 占位符体系：$7 前文 / $U 用户设定 / $C 角色描述（可选钩子，失败即缺省）
       const request = {
@@ -1440,7 +1481,7 @@ export function createAtlasUiCore(deps: {
         userMessageId: pending.messageId,
         assistantMessageId: assistantMessageId.slice(0, ATLAS_LIMITS.ID_CHARS),
         swipeId: commitSwipeId,
-        userText: pending.userText,
+        userText: userText.slice(0, ATLAS_LIMITS.USER_TEXT_CHARS),
         assistantText: assistantText.slice(0, ATLAS_LIMITS.ASSISTANT_TEXT_CHARS),
         ...(loreSupplement ? { loreSupplement } : {}),
         ...(commitContext?.recentAssistantTexts?.length ? { recentAssistantTexts: commitContext.recentAssistantTexts } : {}),
@@ -1485,7 +1526,7 @@ export function createAtlasUiCore(deps: {
         diagnostic({ level: 'warn', source: 'host', code: 'COMMIT_STALE_SKIPPED',
           operation: 'commit', phase: 'response', outcome: 'skipped' });
         if (state.chatId === value.chatId && generationRevision === revision && useSql === sqlEnabled())
-          setState({ lastError: '本轮聊天正文或楼层身份已变化，推演结果未保存；请重新推演当前正文。' });
+          reportHostTurnFailure(value, '本轮聊天正文或楼层身份已变化，推演结果未保存；请重新推演当前正文。', 'HOST_FLOOR_CHANGED');
         return;
       }
       const receiptParsed = body.data?.receipt ? parseAtlasTurnReceipt(body.data.receipt) : null;

@@ -21,7 +21,7 @@ export { atlasPointRefOf, atlasKnownCoordinate, atlasPositionQuality, atlasSqlMa
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.80";
+export const ATLAS_EXTENSION_VERSION = "0.9.81";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -3048,12 +3048,22 @@ async function connectOnce() {
           && assistantText.slice(0, mod.ATLAS_LIMITS.ASSISTANT_TEXT_CHARS) === request.assistantText
           && user?.is_user === true && typeof userText === 'string'
           && userText.slice(0, mod.ATLAS_LIMITS.USER_TEXT_CHARS) === request.userText;
+        if (!matches) emitAtlasDiagnostic({ level: 'warn', source: 'host', code: 'HOST_COMMIT_TEXT_MISMATCH',
+          operation: 'commit', phase: 'capture', outcome: 'skipped', details: {
+            reasonCode: message?.is_user !== false ? 'ASSISTANT_FLOOR_INVALID' : user?.is_user !== true ? 'USER_FLOOR_INVALID'
+              : typeof assistantText !== 'string' || assistantText.slice(0, mod.ATLAS_LIMITS.ASSISTANT_TEXT_CHARS) !== request.assistantText ? 'ASSISTANT_TEXT_CHANGED' : 'USER_TEXT_CHANGED' } });
         return () => {
           const live = context()?.chat;
           const assistant = live?.[Number(request.assistantMessageId)], player = live?.[Number(request.userMessageId)];
           return matches && assistant?.is_user === false && assistant.mes === assistantText
             && player?.is_user === true && player.mes === userText;
         };
+      },
+      resolveCommitFloor: (userMessageId, assistantMessageId) => {
+        const chat = context()?.chat;
+        const user = chat?.[Number(userMessageId)], assistant = chat?.[Number(assistantMessageId)];
+        return user?.is_user === true && assistant?.is_user === false && typeof user.mes === 'string' && typeof assistant.mes === 'string'
+          ? { userText: user.mes, assistantText: assistant.mes } : null;
       },
       onDiagnostic: emitAtlasDiagnostic,
       host: (hostRef ??= createHost(context)),
