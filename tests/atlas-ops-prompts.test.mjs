@@ -162,7 +162,7 @@ test('T23-05 repair 阶段：含失败票据与 ticket 示例，并明确不重�
 
   assert.ok(text.includes('失败票据、原操作、准确错误：'), '必须给出票据段');
   assert.ok(text.includes('"ticket":"R1"'), '必须包含失败票据 R1 的内容');
-  assert.ok(text.includes('{"ticket":"R1","op":"character.upsert","ref":"C1","data":{"location_ref":"L2"}}'), '必须包含 §19.6 的 ticket 示例行');
+  assert.ok(text.includes('{"ticket":"R1","op":"noop","why":"缺少必要依据时说明原因"}'), '必须包含与允许操作无关的 ticket 格式示例');
   assert.ok(text.includes('相关对象：C1=艾琳（人物）'));
   assert.ok(text.includes('相关来源/机会：W1'));
   assert.ok(text.includes('逐条使用给定 ticket 修正原操作，每行一个完整 JSON 对象。'));

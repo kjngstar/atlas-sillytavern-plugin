@@ -244,7 +244,7 @@ export function buildRepairBatch(
     `相关对象：${relatedObjects.length > 0 ? relatedObjects : '（本批未附读取集）'}`,
     '相关来源/机会：（由调用方在 repairSources 段补入，本批未附）',
     '示例：',
-    '{"ticket":"R1","op":"character.upsert","ref":"C1","data":{"location_ref":"L2"}}',
+    '{"ticket":"R1","op":"noop","why":"缺少必要依据时说明原因"}',
   ];
 
   return { batchId, tickets, issues: [], promptLines };

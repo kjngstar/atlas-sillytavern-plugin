@@ -42,6 +42,9 @@ test('T21-02 教室子图：有精坐标的人物显示为独立点；近似点�
     const result = queryMapView(ctx, { kind: 'map', branchId: IDS.branchMain, mapId: IDS.M2 });
     const room = result.items.find((m) => m.mapId === IDS.M2);
     assert.equal(room.containerLocationKind, 'room');
+    const withoutPov={...ctx,povId:'unregistered-reader'};
+    assert.equal(queryMapView(withoutPov,{kind:'map',branchId:IDS.branchMain,mapId:IDS.M2}).items[0].containerLocationKind,'room');
+    assert.equal(queryMapView({...withoutPov,viewMode:'pov'},{kind:'map',branchId:IDS.branchMain,mapId:IDS.M2}).items[0].containerLocationKind,null);
     assert.ok(room.points.some((p) => p.entityId === IDS.C1 && p.markerQuality === 'exact'));
     seed.db.run(`UPDATE characters SET coord_precision = 'approximate', uncertainty_radius_cells = 1.5 WHERE branch_id = ? AND id = ?`, [
       IDS.branchMain,

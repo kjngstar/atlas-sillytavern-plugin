@@ -8,6 +8,22 @@ import { queryBound } from '../src/atlas-db-runtime.ts';
 
 const room = '{"op":"location.upsert","ref":"new:library","data":{"name":"图书馆","kind":"room"}}';
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+test('空短引用目录的补交显示同批已保存人物的稳定 ID，关系可引用且不重建人物',async()=>{
+ let repairs=0;
+ const f=fixture({model:async req=>{
+  if(req.phase!=='repair')return '{"op":"character.upsert","ref":"new:mentor","data":{"name":"老师","identity":"导师"}}\n{"op":"character.upsert","ref":"new:pupil","data":{"name":"学生","identity":"学徒"}}\n{"op":"relation.upsert","data":{},"why":"老师是学生的导师"}';
+  if(++repairs===1)return '{"ticket":"R1","op":"noop","why":"等待补交"}';
+  const text=req.messages.map(m=>m.content).join('\n');
+  const mentor=text.match(/(chr_[a-z0-9]+)=老师（character）/),pupil=text.match(/(chr_[a-z0-9]+)=学生（character）/);
+  assert.ok(mentor,text);assert.ok(pupil,text);
+  return JSON.stringify({ticket:'R1',op:'relation.upsert',data:{subject_ref:mentor[1],object_ref:pupil[1],label:'导师'}});
+ }});
+ try{await f.ui.refresh();await f.prepare();await f.end();await f.ui.retryLastCommit();
+  assert.equal(f.ui.getState().receipts[0].detail.receipt.status,'committed',f.ui.getState().lastError??'');
+  const s=await f.provider.session('chat-auto');assert.equal(queryBound(s.repo.db,'SELECT COUNT(*) n FROM characters',[])[0].n,2);
+  assert.equal(queryBound(s.repo.db,'SELECT COUNT(*) n FROM relations',[])[0].n,1);
+ }finally{await f.close();}
+});
 test('部分补交替换失败操作的旧诊断，保留成功组且不重复累计失败组',async()=>{
  let repairs=0;
  const f=fixture({model:async req=>{

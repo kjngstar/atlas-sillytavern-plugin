@@ -11,6 +11,10 @@ import {createDefaultSettingsV2,applySettingsCommand,settingsViewV2} from '../sr
 const view=items=>({branchId:'main',revision:3,items});
 const map={mapId:'world',name:'真实城市',kind:'city',containerLocationId:null,metersPerCell:2,points:[{entityId:'L',kind:'location',name:'学校',x:10,y:10},{entityId:'C',kind:'character',name:'艾琳',x:15,y:16,locationId:'L',isProtagonist:true}]};
 const cat=[{entityId:'L',entityKind:'location',name:'学校',mapId:'world'},{entityId:'C',entityKind:'character',name:'艾琳',mapId:'world',locationId:'L',summary:'这是人物描述'}];
+test('人物的实际子图点位优先于目录粗地图，地图计数和右栏对应画布',()=>{
+ const d=projectReferenceData({mapView:view([{...map,points:map.points.filter(p=>p.kind==='location')},{mapId:'inside',name:'学校室内',kind:'site',containerLocationId:'L',points:[{entityId:'C',kind:'character',name:'艾琳',mapId:'inside',locationId:'L',x:5,y:5}]}]),catalogView:view(cat),viewMode:'author'});
+ assert.equal(d.CAST[0].mapNodeId,'inside');assert.equal(d.ROOT.children[0].marks[0].id,'C');
+});
 test('SQL 子地图按实际容器种类投影，site/interior 不冒充世界层级',()=>{
  for(const [sqlKind,containerKind,expected] of [['region','city','city'],['site','building','building'],['interior','room','room'],['site',null,'building'],['interior',null,'room']]){
   const g=referenceGeometry({...map,kind:sqlKind,containerLocationKind:containerKind});assert.equal(g.kind,expected);

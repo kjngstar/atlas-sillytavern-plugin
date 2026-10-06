@@ -319,7 +319,7 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
       name: String(map.name ?? ''),
       kind: String(map.kind ?? 'world'),
       containerLocationId: map.container_location_id ? String(map.container_location_id) : null,
-      containerLocationKind: container && visibility.visible('location', String(container.id)) ? String(container.kind) : null,
+      containerLocationKind: container && (ctx.viewMode !== 'pov' || visibility.visible('location', String(container.id))) ? String(container.kind) : null,
       metersPerCell,
       scaleQuality: String(map.scale_quality ?? 'uncalibrated'),
       scaleLocked: Number(map.scale_locked ?? 0) === 1,

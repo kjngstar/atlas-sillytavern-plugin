@@ -2397,7 +2397,7 @@
       "只使用原本允许的操作。若无足够信息完成，输出同 ticket 的 noop，并用 why 说明。",
       "不要重新输出整个世界，不要改用 SQL，不要编造不存在的引用或证据。",
       "示例：",
-      '{"ticket":"R1","op":"character.upsert","ref":"C1","data":{"location_ref":"L2"}}'
+      '{"ticket":"R1","op":"noop","why":"缺少必要依据时说明原因"}'
     ]
   };
   function allowedOperationHelp(allowedOps) {
@@ -13409,7 +13409,7 @@ END`;
       `相关对象：${relatedObjects.length > 0 ? relatedObjects : "（本批未附读取集）"}`,
       "相关来源/机会：（由调用方在 repairSources 段补入，本批未附）",
       "示例：",
-      '{"ticket":"R1","op":"character.upsert","ref":"C1","data":{"location_ref":"L2"}}'
+      '{"ticket":"R1","op":"noop","why":"缺少必要依据时说明原因"}'
     ];
     return { batchId, tickets, issues: [], promptLines };
   }
@@ -17145,7 +17145,7 @@ END`;
         name: String(map.name ?? ""),
         kind: String(map.kind ?? "world"),
         containerLocationId: map.container_location_id ? String(map.container_location_id) : null,
-        containerLocationKind: container && visibility.visible("location", String(container.id)) ? String(container.kind) : null,
+        containerLocationKind: container && (ctx.viewMode !== "pov" || visibility.visible("location", String(container.id))) ? String(container.kind) : null,
         metersPerCell,
         scaleQuality: String(map.scale_quality ?? "uncalibrated"),
         scaleLocked: Number(map.scale_locked ?? 0) === 1,

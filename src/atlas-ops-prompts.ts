@@ -126,7 +126,7 @@ const PHASE_TASK: Record<Phase, string[]> = {
     '只使用原本允许的操作。若无足够信息完成，输出同 ticket 的 noop，并用 why 说明。',
     '不要重新输出整个世界，不要改用 SQL，不要编造不存在的引用或证据。',
     '示例：',
-    '{"ticket":"R1","op":"character.upsert","ref":"C1","data":{"location_ref":"L2"}}',
+    '{"ticket":"R1","op":"noop","why":"缺少必要依据时说明原因"}',
   ],
 };
 

@@ -62,9 +62,21 @@ async function retry(session: SqlSession, input: RetryInput): Promise<RetryResul
     clockS, revision, tables, sources: sourceContext,
     turnId: input.turnId, makeId: session.repo.internal.makeId, knownRefs: refs });
   const allowedOps = [...new Set(failed.map(op => op.value.op))];
+  const knownRefs = [...refs];
+  for (const alias of original.aliasById.keys()) {
+    const ref = original.scope.get(alias);
+    if (ref && !failedIds.has(ref.declaredByOpId ?? '')) {
+      knownRefs.push({ alias, id:ref.id, kind: ref.kind, rowRev: ref.rowRev });
+      // Successful declarations belong to this original batch. Expose their
+      // saved stable IDs without renumbering its frozen short-ref catalogue.
+      const table=({location:'locations',character:'characters',item:'items',faction:'factions'} as const)[ref.kind as 'location'|'character'|'item'|'faction'];
+      const saved=table?tables.selectOne(table,session.branchId,ref.id):null;
+      if(saved)knownRefs.push({alias:ref.id,id:ref.id,kind:ref.kind,rowRev:typeof saved.row_rev==='number'?saved.row_rev:null});
+    }
+  }
   const tickets = buildRepairBatch(failed.map(op => ({ op, issues: rejected.filter(g => g.opIds.includes(op.opId)).flatMap(g => g.issues),
     readSet: original.results.find(r => r.opId === op.opId)?.result.readSet ?? [] })), { phase: 'repair', allowedOps });
-  const request = buildStagePrompt({ phase: 'repair', allowedOps, entityRefs: collectEntityRefs(tables, session.branchId, refs),
+  const request = buildStagePrompt({ phase: 'repair', allowedOps, repairRefs: collectEntityRefs(tables, session.branchId, knownRefs.filter(ref=>!ref.alias.startsWith('new:'))).join('\n'),
     repairTickets: tickets.promptLines.join('\n'), sourceSnapshot: sources, batchId: 'retry_' + tickets.batchId, repairOfBatchId: tickets.batchId });
   request.anchor = anchor; request.sourceSnapshot = sources;
   const response = await session.modelPort.request(request);
@@ -76,11 +88,6 @@ async function retry(session: SqlSession, input: RetryInput): Promise<RetryResul
   const issues = [...tickets.issues, ...payload.issues, ...parsed.issues, ...corrected.issues];
   if (!corrected.operations.length) return { receipt, coreSaved: false, issues };
   if (context?.phase==='decision' && corrected.operations.some(op=>!inDecisionScope(op,context,tables,session.branchId))) throw new AtlasDbError('ACTOR_SCOPE_VIOLATION','补交不能扩大原人物决策权限',{});
-  const knownRefs = [...refs];
-  for (const alias of original.aliasById.keys()) {
-    const ref = original.scope.get(alias);
-      if (ref && !failedIds.has(ref.declaredByOpId ?? '')) knownRefs.push({ alias, id:ref.id, kind: ref.kind, rowRev: ref.rowRev });
-  }
   const compiled = compileOperations({ operations: corrected.operations, anchor, phase: 'repair', allowedOps,
     clockS, revision, tables, sources: sourceContext,
     turnId: input.turnId, makeId: session.repo.internal.makeId, knownRefs,

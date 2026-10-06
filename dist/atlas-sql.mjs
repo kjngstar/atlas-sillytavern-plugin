@@ -2508,7 +2508,7 @@ var init_atlas_ops_prompts = __esm({
         "只使用原本允许的操作。若无足够信息完成，输出同 ticket 的 noop，并用 why 说明。",
         "不要重新输出整个世界，不要改用 SQL，不要编造不存在的引用或证据。",
         "示例：",
-        '{"ticket":"R1","op":"character.upsert","ref":"C1","data":{"location_ref":"L2"}}'
+        '{"ticket":"R1","op":"noop","why":"缺少必要依据时说明原因"}'
       ]
     };
   }
@@ -14249,7 +14249,7 @@ function buildRepairBatch(failed, ctx) {
     `相关对象：${relatedObjects.length > 0 ? relatedObjects : "（本批未附读取集）"}`,
     "相关来源/机会：（由调用方在 repairSources 段补入，本批未附）",
     "示例：",
-    '{"ticket":"R1","op":"character.upsert","ref":"C1","data":{"location_ref":"L2"}}'
+    '{"ticket":"R1","op":"noop","why":"缺少必要依据时说明原因"}'
   ];
   return { batchId, tickets, issues: [], promptLines };
 }
@@ -19330,7 +19330,7 @@ function queryMapView(ctx, query) {
       name: String(map.name ?? ""),
       kind: String(map.kind ?? "world"),
       containerLocationId: map.container_location_id ? String(map.container_location_id) : null,
-      containerLocationKind: container && visibility.visible("location", String(container.id)) ? String(container.kind) : null,
+      containerLocationKind: container && (ctx.viewMode !== "pov" || visibility.visible("location", String(container.id))) ? String(container.kind) : null,
       metersPerCell,
       scaleQuality: String(map.scale_quality ?? "uncalibrated"),
       scaleLocked: Number(map.scale_locked ?? 0) === 1,
@@ -28814,6 +28814,16 @@ async function retry(session, input) {
     knownRefs: refs
   });
   const allowedOps = [...new Set(failed.map((op) => op.value.op))];
+  const knownRefs = [...refs];
+  for (const alias of original.aliasById.keys()) {
+    const ref = original.scope.get(alias);
+    if (ref && !failedIds.has(ref.declaredByOpId ?? "")) {
+      knownRefs.push({ alias, id: ref.id, kind: ref.kind, rowRev: ref.rowRev });
+      const table = { location: "locations", character: "characters", item: "items", faction: "factions" }[ref.kind];
+      const saved = table ? tables.selectOne(table, session.branchId, ref.id) : null;
+      if (saved) knownRefs.push({ alias: ref.id, id: ref.id, kind: ref.kind, rowRev: typeof saved.row_rev === "number" ? saved.row_rev : null });
+    }
+  }
   const tickets = buildRepairBatch(failed.map((op) => ({
     op,
     issues: rejected.filter((g) => g.opIds.includes(op.opId)).flatMap((g) => g.issues),
@@ -28822,7 +28832,7 @@ async function retry(session, input) {
   const request = buildStagePrompt({
     phase: "repair",
     allowedOps,
-    entityRefs: collectEntityRefs(tables, session.branchId, refs),
+    repairRefs: collectEntityRefs(tables, session.branchId, knownRefs.filter((ref) => !ref.alias.startsWith("new:"))).join("\n"),
     repairTickets: tickets.promptLines.join("\n"),
     sourceSnapshot: sources,
     batchId: "retry_" + tickets.batchId,
@@ -28839,11 +28849,6 @@ async function retry(session, input) {
   const issues = [...tickets.issues, ...payload.issues, ...parsed.issues, ...corrected.issues];
   if (!corrected.operations.length) return { receipt, coreSaved: false, issues };
   if (context?.phase === "decision" && corrected.operations.some((op) => !inDecisionScope(op, context, tables, session.branchId))) throw new AtlasDbError("ACTOR_SCOPE_VIOLATION", "补交不能扩大原人物决策权限", {});
-  const knownRefs = [...refs];
-  for (const alias of original.aliasById.keys()) {
-    const ref = original.scope.get(alias);
-    if (ref && !failedIds.has(ref.declaredByOpId ?? "")) knownRefs.push({ alias, id: ref.id, kind: ref.kind, rowRev: ref.rowRev });
-  }
   const compiled = compileOperations({
     operations: corrected.operations,
     anchor,
