@@ -38,7 +38,7 @@ function createBrowserSqlHost(options) {
     async session(chatUid, requestedBranch) {
       const record = capture(chatUid, requestedBranch);
       const branchId = record.branchId;
-      if (current && !current.session.closed && current.session.chatUid === chatUid && current.session.branchId === branchId && current.session.chatMetadata === record.chatMetadata && sameSnapshot(current.storedSnapshot, snapshot(record.chatMetadata))) return current.session;
+      if (current && !current.session.closed && current.session.chatUid === chatUid && current.session.branchId === branchId && current.session.chatMetadata === record.chatMetadata && (sameSnapshot(current.storedSnapshot, snapshot(record.chatMetadata)) || current.savingSnapshot && sameSnapshot(current.savingSnapshot, snapshot(record.chatMetadata)))) return current.session;
       if (pending && pending.chatUid === chatUid && pending.branchId === branchId && pending.metadata === record.chatMetadata) return pending.promise;
       const openingEpoch = ++epoch;
       const originalSnapshot = snapshot(record.chatMetadata);
@@ -66,15 +66,26 @@ function createBrowserSqlHost(options) {
           } : {},
           confirmSave: true,
           isCurrentHost: () => isCurrent(record, branchId) && sameSnapshot(
-            current?.session.chatMetadata === record.chatMetadata ? current.storedSnapshot : openingSnapshot,
+            current?.session.chatMetadata === record.chatMetadata ? current.savingSnapshot ?? current.storedSnapshot : openingSnapshot,
             snapshot(record.chatMetadata)
           ),
           saveSession: async () => {
             if (!isCurrent(record, branchId)) throw error("CHAT_CHANGED", "保存前聊天或分支已变化");
             if (migrating && legacySignature() !== originalLegacy) throw error("SESSION_STALE", "保存前旧档已变化，拒绝发布迁移候选");
-            const result = await record.saveMetadata();
+            const saving = current?.session.chatMetadata === record.chatMetadata ? current : null;
+            if (saving) saving.savingSnapshot = snapshot(record.chatMetadata);
+            let result;
+            try {
+              result = await record.saveMetadata();
+            } catch (cause) {
+              if (saving) delete saving.savingSnapshot;
+              throw cause;
+            }
             if (migrating && legacySignature() !== originalLegacy) throw error("SESSION_STALE", "保存期间旧档已变化，拒绝发布迁移候选");
-            if (result === false) throw error("SESSION_WRITE_FAILED", "宿主拒绝保存 SQL 快照");
+            if (result === false) {
+              if (saving) delete saving.savingSnapshot;
+              throw error("SESSION_WRITE_FAILED", "宿主拒绝保存 SQL 快照");
+            }
             if (!isCurrent(record, branchId)) throw error("CHAT_CHANGED", "保存过程中聊天或分支已变化");
             return result;
           }
@@ -109,7 +120,10 @@ function createBrowserSqlHost(options) {
       }
     },
     saved(session) {
-      if (current?.session === session) current.storedSnapshot = snapshot(session.chatMetadata);
+      if (current?.session === session) {
+        current.storedSnapshot = snapshot(session.chatMetadata);
+        delete current.savingSnapshot;
+      }
     },
     async close() {
       epoch++;

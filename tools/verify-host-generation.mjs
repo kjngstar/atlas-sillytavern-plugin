@@ -9,7 +9,7 @@ const report={checks:{},errors:[],failed:[]};
 function check(name,ok,detail){report.checks[name]={ok:!!ok,detail};if(!ok)report.failed.push(name);}
 const server=spawn(process.execPath,['dev-preview/serve.mjs'],{env:{...process.env,ATLAS_PREVIEW_PORT:String(port),ATLAS_PREVIEW_NO_OPEN:'1'},stdio:'ignore'});
 const browser=await chromium.launch({headless:true,executablePath:process.env.ATLAS_CHROME_PATH||'C:/Program Files/Google/Chrome/Application/chrome.exe'});
-async function open({afterOnly=false,configure=true,rewriteContext=false}={}){
+async function open({afterOnly=false,configure=true,rewriteContext=false,readDuringSave=false}={}){
  const p=await browser.newPage({viewport:{width:1600,height:1000}});p.on('pageerror',e=>report.errors.push(e.message));
  if(rewriteContext)await p.route('**/release/atlas-ui-extension/index.js',async route=>{const res=await route.fetch();const src=await res.text();const marker='getCommitContext: async (assistantText) => {';
   if(!src.includes(marker))throw Error('context hook boundary changed');
@@ -19,13 +19,14 @@ async function open({afterOnly=false,configure=true,rewriteContext=false}={}){
    .replaceAll('../atlas-extension/','../release/atlas-ui-extension/');await route.fulfill({response:res,body:src});});
  await p.goto(`${base}/dev-preview/index.html`);await p.waitForFunction(()=>!!window.atlasPreviewConnection&&!!document.querySelector('iframe')?.contentWindow?.AtlasPreview);
  await p.evaluate(()=>atlasPreviewConnection.core.refresh());
- await p.evaluate(async configure=>{const c=SillyTavern.getContext();window.__calls=0;window.__saves=0;c.saveMetadata=async()=>{window.__saves++;};
+ await p.evaluate(async ({configure,readDuringSave})=>{const c=SillyTavern.getContext();window.__calls=0;window.__saves=0;c.saveMetadata=async()=>{window.__saves++;
+  if(readDuringSave)await atlasPreviewConnection.api.request('POST','/sql/chat/ui-read',{chatUid:c.chatId});};
   window.TavernHelper={generateRaw:async()=>{window.__calls++;if(window.__hold)await new Promise(resolve=>window.__release=resolve);
    return window.__calls===1?'{"op":"location.upsert","ref":"new:library","data":{"name":"图书馆","kind":"room"}}':'{"op":"noop"}';}};
   if(!configure)return;const api=atlasPreviewConnection.api;
   const r=await api.request('PUT','/settings',{action:'batch',commands:[{action:'api.save',create:true,preset:{id:'test-main',name:'测试连接',connectionMode:'main',endpoint:'',model:'',maxTokens:1024,temperature:0.7,topP:1,timeoutMs:30000},apiKeyMode:'clear'},{action:'api.activate',id:'test-main'}]});
   if(r.status!==200)throw Error(JSON.stringify(r));
- },configure);
+ },{configure,readDuringSave});
  return {p,f:p.frames().find(f=>f.url().includes('/atlas-reference/index.html'))};
 }
 async function floor(p,{user='走进图书馆',assistant='你走进了图书馆。',type='normal',params={},dryRun=false,alias='all'}={}){
@@ -83,6 +84,8 @@ try{
  });await finish(nestedStop.p);s=await state(nestedStop.p);check('nested-stop-preserves-pending-turn',s.calls===1&&s.saves===1&&s.receipts[0]?.status==='committed',s);await nestedStop.p.close();
  const rewrite=await open({rewriteContext:true});await floor(rewrite.p);await finish(rewrite.p);s=await state(rewrite.p);
  check('context-postprocessing-rereads-current-user-and-assistant',s.calls===1&&s.saves===1&&s.receipts[0]?.status==='committed'&&!s.error,s);await rewrite.p.close();
+ const saveRead=await open({readDuringSave:true});await floor(saveRead.p);await finish(saveRead.p);s=await state(saveRead.p);
+ check('ui-read-during-save-preserves-candidate-until-confirmed',s.calls===1&&s.saves===1&&s.receipts[0]?.status==='committed'&&!s.error,s);await saveRead.p.close();
  for(const target of ['assistant','user']){
   const {p,f}=await open();await p.evaluate(()=>window.__hold=true);await floor(p,{user:'我'.repeat(12001),assistant:'你'.repeat(24001)});
   await p.waitForFunction(()=>typeof window.__release==='function');await f.waitForFunction(()=>AtlasPreview.data.meta.engine.phase==='committing');

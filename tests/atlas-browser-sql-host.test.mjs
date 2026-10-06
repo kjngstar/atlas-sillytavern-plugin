@@ -40,6 +40,25 @@ test('Q01: browser host creates its repository, saves once and reuses the confir
   } finally { await f.provider.close(); }
 });
 
+test('Q01: UI reads during asynchronous candidate save keep the pending repository alive', async () => {
+  const f = hostFixture();
+  try {
+    const session = await f.provider.session(turn.chatUid);
+    f.setSave(async () => {
+      const readSession = await f.provider.session(turn.chatUid);
+      assert.equal(readSession, session);
+      assert.equal(session.closed, false);
+      assert.equal(session.repo.internal.currentRevision(), 0, '保存确认前仍读取正式旧库');
+      return true;
+    });
+    const response = await f.core.handle('POST', '/sql/turn', turn, { local: true });
+    assert.equal(response.body.data.coreSaved, true);
+    assert.equal(session.repo.internal.currentRevision(), 1);
+    assert.equal(await f.provider.session(turn.chatUid), session);
+    assert.equal(f.saves(), 1);
+  } finally { await f.provider.close(); }
+});
+
 test('Q01: a host switch during lazy SQL opening rejects the old identity', async () => {
   let release;
   const gate = new Promise(resolve => { release = resolve; });
