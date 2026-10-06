@@ -21,7 +21,7 @@ export { atlasPointRefOf, atlasKnownCoordinate, atlasPositionQuality, atlasSqlMa
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.77";
+export const ATLAS_EXTENSION_VERSION = "0.9.78";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -3270,14 +3270,21 @@ function ensureAtlasMenuItem(core) {
   if (!item) {
     item = el("div", "list-group-item flex-container flexGap5 interactable");
     item.id = "atlas-menu-open";
+    item.setAttribute("role", "button");
     item.setAttribute("tabindex", "0");
     item.title = "打开阿特拉斯世界工作台";
     const icon = el("div", "fa-fw fa-solid fa-globe extensionsMenuExtensionButton");
     const label = el("span", null, "阿特拉斯 / Atlas");
     item.append(icon, label);
-    item.addEventListener("click", (event) => {
-      event.stopPropagation();
+    item.addEventListener("click", () => {
+      // SillyTavern closes its wand menu in the bubbling html click handler.
+      // Keep this event bubbling so its visibility flag and Popper stay in sync.
       core.setPanelOpen(true);
+    });
+    item.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      item.click();
     });
     menu.append(item);
   }

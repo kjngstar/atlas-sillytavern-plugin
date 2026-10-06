@@ -10,11 +10,13 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
   frame.setAttribute('aria-label','原版 ATLAS 世界工作台');
   Object.assign(frame.style,{display:'block',width:'100%',height:'100%',border:'0',background:'transparent'});
   let disposed=false,ready=false,viewMode='author',epoch=0,lastKey='',scopeId='',latest=emptyReferenceData(),session=null,sqlMod=null,sessionKey='',loading=null;
-  let settings={},prefs={},presetDoc=null,presetQueue=Promise.resolve(),actionBusy=false;
+  let settings={},prefs={},presetDoc=null,presetQueue=Promise.resolve(),actionBusy=false,actionError=null,actionScope='';
   const context=()=>{const c=getContext?.();return c?.chatMetadata?c:null;};
   function scope(){const s=core.getState(),c=context(),env=c?.chatMetadata?.atlas?.database,enabled=c?.extensionSettings?.atlas_world_sim?.sqlMode??s.stateData?.sqlModeEnabled??s.stateData?.sqlMode??true;return {state:s,context:c,metadata:c?.chatMetadata,enabled,key:JSON.stringify([s.chatId,c?.chatId??c?.chat_id,s.binding?.branchId??'main',env?.sha256,env?.storage_revision,s.stateData?.revision,viewMode,enabled]),data:env?.data};}
   function live(ticket){const now=scope();return !disposed&&ticket.epoch===epoch&&ticket.key===now.key&&ticket.data===now.data&&ticket.metadata===now.metadata;}
-  function deliver(data,resetScope=false){latest=data;if(ready)frame.contentWindow?.AtlasPreview?.updateSnapshot(data,{resetScope});}
+  function deliver(data,resetScope=false){const s=core.getState();data.meta.engine={hasChat:!!s.chatId,bound:!!s.binding,enabled:s.binding?.enabled===true,sqlEnabled:scope().enabled,serviceStatus:s.serviceStatus??'checking',busy:actionBusy||!!s.pendingTurn,error:actionScope===data.meta.scopeKey&&actionError? actionError:typeof s.lastError==='string'?s.lastError:s.lastError?.message??null};
+    if(data.meta.engine.error&&!data.DIAGNOSTICS.some(d=>d.message===data.meta.engine.error))data.DIAGNOSTICS.unshift({id:'engine-last-error',t:'',level:'error',code:'ENGINE_ACTION_FAILED',message:data.meta.engine.error});
+    latest=data;if(ready)frame.contentWindow?.AtlasPreview?.updateSnapshot(data,{resetScope});}
   async function request(method,path,body){const r=await api.request(method,path,body);if(r.status!==200||r.body?.ok===false)throw Error(r.body?.error?.message??`请求失败（${r.status}）`);return r.body?.data??r.body;}
   async function sqlSession(ticket){
     if(!sqlMod)sqlMod=await loadSqlRuntime();
@@ -34,7 +36,7 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
     if(disposed)return;
     const captured=scope(),worldScope=JSON.stringify([captured.state.chatId,captured.state.binding?.branchId,viewMode]);
     const changed=scopeId!==worldScope;scopeId=worldScope;
-    const key=captured.key+'|'+JSON.stringify([captured.state.receipts,captured.state.lastError,diagnostics().length]);
+    const key=captured.key+'|'+JSON.stringify([captured.state.receipts,captured.state.lastError,captured.state.binding?.enabled,captured.state.serviceStatus,captured.state.pendingTurn,actionBusy,diagnostics().length]);
     if(!force&&key===lastKey)return loading;
     lastKey=key;const ticket={...captured,epoch:++epoch};
     if(changed)deliver(emptyReferenceData({viewMode,scopeKey:worldScope,worldName:captured.state.binding?'正在读取当前世界':'尚未建立世界'}),true);
@@ -99,21 +101,24 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
   }
   async function withTask(task,run){
     if(actionBusy||core.getState().pendingTurn||['queued','reading-context','committing'].includes(core.getState().turnPhase))throw Error('有回合正在处理，请稍后再试');
-    actionBusy=true;
+    if(!scope().enabled)throw Error('SQL 世界数据已关闭，请在酒馆扩展设置中开启');
+    if(!core.getState().chatId)throw Error('请先打开一个酒馆聊天');
+    actionError=null;actionScope=latest.meta.scopeKey;actionBusy=true;deliver(latest);
     try{await presetQueue;const original=await request('GET','/settings'),p=presetDoc?.assignments?.[task];
     const commands=[];
     if(p&&original.apiPresets?.some(c=>c.id===p.connectionId)&&p.connectionId!==original.activeApiPresetId)commands.push({action:'api.activate',id:p.connectionId});
     if(p&&original.promptPresets?.some(c=>c.id===p.promptPresetId)&&p.promptPresetId!==original.activePromptPresetId)commands.push({action:'prompt.activate',id:p.promptPresetId});
     if(commands.length)await request('PUT','/settings',{action:'batch',commands});
     try{const result=await run();const error=core.getState().lastError;if(error)throw Error(typeof error==='string'?error:error.message??error.code??'推演失败');return result;}finally{if(commands.length)await request('PUT','/settings',{action:'batch',commands:[{action:'api.activate',id:original.activeApiPresetId},{action:'prompt.activate',id:original.activePromptPresetId}]});await refresh(true);}
-    }finally{actionBusy=false;}
+    }catch(error){actionError=error.message;throw error;}finally{actionBusy=false;deliver(latest);}
   }
   const bridge={boot,ready(){ready=true;deliver(latest);render();if(core.getState().panelOpen!==false)frame.contentWindow?.focus?.();},inspect,persistPresets,
     async setViewMode(mode){viewMode=mode==='author'?'author':'pov';await refresh(true);},
     onPage(page){core.setPage({cast:'characters',items:'items',msgs:'events',sim:'advance',time:'events',lore:'world',diag:'logs',prefs:'prompts'}[page]??'map');if(page==='lore')void Promise.resolve(refresh()).then(readLore).catch(error=>emit({level:'error',source:'ui',code:'LORE_READ_FAILED',details:{message:error.message}}));},
     async toggleLore(id){if(viewMode!=='author')throw Error('请切换世界后台后修改世界书');await lorePort?.toggle?.(id);await readLore();},
     close(){core.setPanelOpen(false);},
-    async advance(){return withTask(core.getState().binding?'advance':'initialize',()=>core.getState().binding?core.manualAdvance():core.initializeWorld());},
+    async setEnabled(enabled){if(actionBusy||core.getState().pendingTurn)throw Error('有回合正在处理，请稍后再试');if(!core.getState().binding)throw Error('请先建立当前聊天的世界');await core.setEnabled(enabled);await refresh(true);const s=core.getState();if(s.binding?.enabled!==enabled)throw Error(s.lastError??'推演开关未保存');},
+    async advance(){return withTask(core.getState().binding?'advance':'initialize',async()=>{if(core.getState().binding)return core.manualAdvance();const result=await core.initializeWorld();if(result!==true)throw Error(core.getState().lastError??'当前聊天的世界初始化未完成');return result;});},
     async retry(){return withTask('repair',()=>core.retryLastCommit());},
     async undo(){const messageId=latest.meta.rollbackMessageId;if(messageId===null||messageId===undefined)throw Error('没有可回退的已提交回合');
       const captured=scope();const result=await request('POST','/sql/chat/rollback',{chatUid:captured.state.chatId,chatId:captured.state.chatId,assistantMessageId:String(messageId)});
@@ -124,7 +129,8 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
     diagnostic(entry){emit(entry);},
   };
   frame.__atlasHost=bridge;frame.src=new URL('./atlas-reference/index.html',import.meta.url).href;root.append(frame);
-  const render=()=>{root.style.display=core.getState().panelOpen===false?'none':'';if(ready)frame.contentWindow?.AtlasPreview?.setVisible?.(core.getState().panelOpen!==false);void refresh();};
+  let wasOpen=false;
+  const render=()=>{const open=core.getState().panelOpen!==false;root.style.display=open?'':'none';if(ready){frame.contentWindow?.AtlasPreview?.setVisible?.(open);if(open&&!wasOpen)frame.contentWindow?.focus?.();}wasOpen=open;void refresh();};
   render.dispose=async()=>{disposed=true;epoch++;ready=false;frame.contentWindow?.AtlasPreview?.destroy?.();frame.__atlasHost=null;frame.remove();if(session&&sqlMod)await sqlMod.closeSqlSession(session);};
   core.__renderPage=render;render();return render;
 }
