@@ -1,0 +1,12 @@
+{
+  "source": "atlas-ui-source.zip",
+  "preview": "atlas-ui-preview (2).html",
+  "sourceSha256": "9afee6f61ce9d0c4cdc5ab0a2f9e0162d6091da76b0f588edfa11aa62c996f65",
+  "previewSha256": "4083324d095f967d5efcdbdf8db914983543272795cb7039da3e38eeec84bb07",
+  "assets": {
+    "css/atlas.css": "82546670e3f2b94fd9bed5ab20f82d0320a77fe9046d070282e462bc6bffe401",
+    "css/preview.css": "45d36e7133f77abe244a833585e7b1b1a4b7db2b691ac525c60f7a69b74cbab8",
+    "fonts/atlas-sans.woff": "7c3e8691a54655f9c748eb2d9c6d09cfa31f1766588131857af3778a876b2c26"
+  },
+  "templateSha256": "53daab5cb8359788dc15c448a2fb1c803b5ba3130e5cd4604bd35b834b1f3617"
+}

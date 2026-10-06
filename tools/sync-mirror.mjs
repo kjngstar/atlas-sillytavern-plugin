@@ -1,4 +1,5 @@
-import { readFileSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
 
 const root = "index.js";
 const mirror = "atlas-extension/index.js";
@@ -10,5 +11,11 @@ writeFileSync(mirror, rootSource.replace(SHIP, DEV));
 const strip = (content) => content.replace(DEV, SHIP);
 console.log(strip(readFileSync(mirror, "utf8")) === rootSource ? "mirror in sync" : "MISMATCH");
 
-mkdirSync("atlas-extension/ui",{recursive:true});
-for(const file of readdirSync("ui"))writeFileSync(`atlas-extension/ui/${file}`,readFileSync(`ui/${file}`));
+function copyUi(source,target){
+  mkdirSync(target,{recursive:true});
+  for(const name of readdirSync(source)){
+    const from=join(source,name),to=join(target,name);
+    if(statSync(from).isDirectory())copyUi(from,to);else writeFileSync(to,readFileSync(from));
+  }
+}
+copyUi("ui","atlas-extension/ui");

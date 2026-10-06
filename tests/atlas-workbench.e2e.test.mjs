@@ -67,40 +67,22 @@ async function mount(doc, host, ports = {}) {
   return mountWorkbench(host, ports);
 }
 
-test("U15 宿主挂接：index.js 挂的是新工作台，四个新页都有真实渲染分支", () => {
-  const js = readFileSync(join(root, "index.js"), "utf8");
-  assert.ok(js.includes("mountWorkbench"), "index.js 挂接 mountWorkbench（不是第二份外壳）");
-  assert.ok(js.includes("./ui/atlas-workbench-shell.mjs"), "新外壳从 ui/ 加载");
-  for (const page of ["characters", "items", "events", "prompts"]) {
-    assert.ok(new RegExp(`s\\.page === "${page}"`).test(js), `index.js 必须有 ${page} 的渲染分支`);
-  }
-  // 单一权威：不允许再出现第二份页面清单字面量
-  assert.ok(!/const PAGES = \[/.test(js), "index.js 不得自带页面清单副本");
+test('原版 UI 正式入口只挂参考 UI，不包含旧面板',()=>{
+ const js=readFileSync(join(root,'index.js'),'utf8');
+ assert.ok(js.includes('return mountReferenceUi('));
+ assert.ok(!js.includes('function renderLegacyPanel'));
+ assert.ok(!js.includes('function renderHistoricalPanel'));
+ assert.ok(!js.includes('mountWorkbench'));
 });
-
-test("U15 返工回归：真实渲染器接线存在（canvas + 一个手势 owner + 旧绘制停用）", () => {
-  const js = readFileSync(join(root, "index.js"), "utf8");
-  // 进度验收 20261006 指出的 P1：index.js 没有实例化 createWorkbenchMapController、没有 canvas。
-  assert.ok(js.includes("createWorkbenchMapController"), "index.js 必须实例化新地图控制器");
-  assert.ok(/createWorkbenchMapController\(\{/.test(js), "控制器在宿主内被构造（不是只有 import）");
-  assert.ok(/aw-spatial-canvas/.test(js), "宿主创建真 canvas（.aw-spatial-canvas）");
-  assert.ok(/createElement\("canvas"\)/.test(js), "canvas 由 document.createElement 建立");
-  assert.ok(js.includes("createSpatialRenderer"), "渲染器来自 SQL bundle（createSpatialRenderer）");
-  assert.ok(/camera = null; \/\/ 旧 wheel\/pan\/点击手势全部早退/.test(js), "旧手势显式停用（防双 owner）");
-  assert.ok(/stage\.style\.display = "none";/.test(js), "SQL 场景生效时隐藏旧 stage 绘制");
-  assert.ok(js.includes("sqlSpatialEnterMap"), "新树导航入口存在（mapId 换算视图栈）");
-  assert.ok(js.includes("spatialTree") && js.includes("buildMapTree"), "地图树走 buildMapTree 节点结构");
+test('原版地图通过独立文档接线，canvas 与手势来自提供的源文件',()=>{
+ const host=readFileSync(join(root,'ui/atlas-reference-host.mjs'),'utf8'),html=readFileSync(join(root,'ui/atlas-reference/index.html'),'utf8'),map=readFileSync(join(root,'ui/atlas-reference/js/map.js'),'utf8');
+ assert.ok(host.includes("createElement('iframe')"));assert.ok(html.includes('<canvas id="map"'));
+ assert.ok(map.includes("listen(canvas,'pointerdown'"));assert.ok(map.includes('if(st.node.host)return (st.node.marks||[])'));
 });
-
-test("U03 返工回归：CSS 有生产加载入口（link 注入 + 发布镜像带文件）", () => {
-  const js = readFileSync(join(root, "index.js"), "utf8");
-  assert.ok(js.includes("ensureWorkbenchStylesheet"), "index.js 必须注入样式 link（此前 CSS 无任何加载入口）");
-  assert.ok(/atlas-workbench\.css/.test(js), "link 指向 atlas-workbench.css");
-  // 发布形态：pack 后镜像必须带这份 CSS（atlas-extension 是安装包的权威副本）
-  const mirrored = join(root, "atlas-extension", "ui", "atlas-workbench.css");
-  assert.ok(existsSync(mirrored), "atlas-extension/ui/atlas-workbench.css 必须随包分发");
-  const mirrorJs = readFileSync(join(root, "atlas-extension", "index.js"), "utf8");
-  assert.ok(mirrorJs.includes("ensureWorkbenchStylesheet"), "镜像 index.js 同样带样式注入");
+test('原版样式与字体随生产包分发，正式文档有实际加载入口',()=>{
+ const html=readFileSync(join(root,'atlas-extension/ui/atlas-reference/index.html'),'utf8');
+ for(const css of ['atlas.css','preview.css']){assert.ok(html.includes('css/'+css));assert.ok(existsSync(join(root,'atlas-extension/ui/atlas-reference/css',css)));}
+ assert.ok(existsSync(join(root,'atlas-extension/ui/atlas-reference/fonts/atlas-sans.woff')));
 });
 
 test("U08 返工回归：视图类型不被查询参数覆盖（控制器侧防线）", () => {

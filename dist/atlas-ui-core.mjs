@@ -1401,6 +1401,19 @@ function fail2(settings, code, message) {
 }
 function applySettingsCommand(settings, command, deps = {}) {
   const now = nowOf(deps);
+  if (command.action === "batch") {
+    if (!Array.isArray(command.commands) || command.commands.length < 1 || command.commands.length > 100) {
+      return { ok: false, settings, code: "INVALID_PAYLOAD", message: "设置批次须包含 1 至 100 个命令。" };
+    }
+    let candidate = settings;
+    for (const entry of command.commands) {
+      if (!entry || entry.action === "batch") return { ok: false, settings, code: "INVALID_PAYLOAD", message: "设置批次不支持嵌套。" };
+      const result = applySettingsCommand(candidate, entry, deps);
+      if (!result.ok) return { ...result, settings };
+      candidate = result.settings;
+    }
+    return { ok: true, settings: candidate };
+  }
   switch (command.action) {
     case "api.save": {
       const preset = command.preset;
@@ -1447,7 +1460,8 @@ function applySettingsCommand(settings, command, deps = {}) {
         return fail2(settings, "INVALID_PAYLOAD", "预设 ID 形状非法。");
       }
       const existingIndex = targetId ? settings.apiPresets.findIndex((p) => p.id === targetId) : -1;
-      if (targetId && existingIndex < 0) {
+      if (command.create === true && existingIndex >= 0) return fail2(settings, "INVALID_PAYLOAD", "新建连接标识已存在。");
+      if (targetId && existingIndex < 0 && command.create !== true) {
         return fail2(settings, "INVALID_PAYLOAD", "要更新的连接不存在（另存为请省略 id）。");
       }
       let apiKey;
@@ -1540,7 +1554,8 @@ function applySettingsCommand(settings, command, deps = {}) {
       const targetId = preset.id === void 0 ? null : normalizeId(preset.id);
       if (preset.id !== void 0 && targetId === null) return fail2(settings, "INVALID_PAYLOAD", "预设 ID 形状非法。");
       const existingIndex = targetId ? settings.promptPresets.findIndex((p) => p.id === targetId) : -1;
-      if (targetId && existingIndex < 0) return fail2(settings, "INVALID_PAYLOAD", "要更新的提示词预设不存在（另存为请省略 id）。");
+      if (command.create === true && existingIndex >= 0) return fail2(settings, "INVALID_PAYLOAD", "新建提示词标识已存在。");
+      if (targetId && existingIndex < 0 && command.create !== true) return fail2(settings, "INVALID_PAYLOAD", "要更新的提示词预设不存在（另存为请省略 id）。");
       if (existingIndex < 0 && settings.promptPresets.length >= MAX_PRESETS_PER_LIBRARY) {
         return fail2(settings, "FIELD_LIMIT_EXCEEDED", `最多保存 ${MAX_PRESETS_PER_LIBRARY} 条提示词预设。`);
       }
@@ -4731,7 +4746,7 @@ function createAtlasSettingsRoutes(deps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.76",
+      version: "0.9.77",
       protocolVersion: 1,
       time: now()
     });

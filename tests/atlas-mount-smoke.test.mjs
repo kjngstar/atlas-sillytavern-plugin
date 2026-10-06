@@ -64,7 +64,7 @@ globalThis.SillyTavern = { getContext: () => hostContext };
  * 失败计数因此失去意义（排查协议收口时被这个假象误导过一次）。
  * 现在失败会以**一条具名用例**的形式暴露，其余文件的计数也不再被牵连。
  */
-test("ATLAS-18 挂载冒烟：connectAtlas 真实跑通、六页可渲染、地图图例与标点齐全", async () => {
+test("原版 UI 宿主挂载：connectAtlas、真实只读 SQL 和断开重连", async () => {
 const { buildStarterWorld } = await import("../src/atlas-starter-world.ts");
 const smokeWorld = buildStarterWorld({
   id: "w-smoke",
@@ -110,45 +110,17 @@ assert.ok(conn, "connectAtlas 必须成功（挂载路径任何 ReferenceError �
 const root = globalThis.document.getElementById("atlas-extension-panel-root");
 assert.ok(root, "面板根节点已挂到 body");
 
-// 骨架完整性：右栏内容区必须真的挂进 DOM（sideFoot 曾是 v0.7.0 起的孤儿节点）
-assert.ok(root.querySelector(".aw-side__changes"), "右栏 .aw-side__changes 必须在 DOM 里");
-assert.ok(root.querySelector(".aw-moves__list"), "左栏动向列表必须在 DOM 里");
-
-// 六页全部走一遍：每页中区都必须有内容（renderPage 任一分支抛错都会在这里暴露）
-for (const page of ["overview", "map", "nearby", "changes", "progression", "api", "skin"]) {
-  conn.core.setPage(page);
-  conn.core.__renderPage();
-  const center = root.querySelector(".aw-center");
-  assert.ok(center.children.length > 0, `页面 ${page} 的中区必须渲染出内容`);
-  // 0.9.43 回归锁：el() 只接受文本，DOM 节点被当文字传进去会渲染成 "[object HTMLElement]"
-  // （0.9.41 图例真实翻车：三个图例项全部变成 [object HTMLElement]）
-  assert.ok(
-    !center.textContent.includes("[object HTMLElement"),
-    `页面 ${page} 不得出现 "[object HTMLElement]"（有 DOM 节点被当字符串塞进 el()）`,
-  );
-}
-
-// 0.9.46 真锁：绑世界后的地图页必须渲染出图例，且三型标签是文字不是 "[object …]"
-// （0.9.43 的修复从未真正进过提交——commit 只有版本号，锁又只查中区，双重失明）
-let legend = null;
-for (let i = 0; i < 60; i += 1) {
-  conn.core.setPage("map");
-  conn.core.__renderPage();
-  legend = root.querySelector(".aw-maplegend");
-  if (legend) break;
-  await new Promise((resolve) => setTimeout(resolve, 50));
-}
-assert.ok(legend, "绑定世界后地图页必须渲染出图例（.aw-maplegend）");
-const legendText = legend.textContent ?? "";
-assert.ok(legendText.includes("地点"), "图例必须渲染出「地点」标签");
-assert.ok(legendText.includes("人物"), "图例必须渲染出「人物」标签");
-assert.ok(legendText.includes("物品"), "图例必须渲染出「物品」标签");
-assert.ok(
-  !root.textContent.includes("[object HTMLElement"),
-  "全面板任何位置不得出现 \"[object HTMLElement]\"（0.9.46 起查整棵面板树，不再只查中区）",
-);
-assert.ok(root.querySelector(".aw-point"), "地图必须渲染出地点标点（绑定世界生效的证据）");
-
+// jsdom does not execute iframe scripts. Real original pages and canvas are tested in Chrome.
+assert.equal(root.className,'atlas-native-ui-host');
+assert.equal(root.children.length,1);
+const frame=root.querySelector('iframe');assert.ok(frame);assert.match(frame.src,/atlas-reference\/index.html$/);
+assert.equal(root.querySelector('.aw-center,.atlas-starmap'),null);
+const migrated=await sql.migrateSessionToSql({chatUid:hostContext.chatId,chatMetadata:hostContext.chatMetadata,saveSession:async()=>true,legacy:{atlas:{world:smokeWorld}}});
+assert.ok(migrated.saved);await sql.closeSqlSession(migrated.session);
+await conn.core.refresh();const before=JSON.stringify(hostContext.chatMetadata.atlas.database);
+const initial=await frame.__atlasHost.boot();
+assert.ok(initial.data.LOCATIONS.some(x=>x.name==='烟雾港'));
+assert.equal(JSON.stringify(hostContext.chatMetadata.atlas.database),before,'UI query does not write snapshot');
 // 打开可见性消费正常
 conn.core.setPanelOpen(true);
 conn.core.__renderPage();

@@ -1,0 +1,274 @@
+<!DOCTYPE html><html lang="zh-CN"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ATLAS · 星幕交互示例</title>
+<link rel="stylesheet" href="css/atlas.css">
+<link rel="stylesheet" href="css/preview.css"><style data-standalone="true">body{margin:0;padding:24px;background:#02050a;color:#dce9fb;}#atlasDemo{height:max(660px,calc(100dvh - 48px));}#atlasDemo.maximized{height:100dvh;}@media(max-width:720px){body{padding:0;}#atlasDemo{height:max(660px,100dvh);}}</style></head>
+<body><div id="atlasDemo" data-motion="full" aria-label="ATLAS 世界地图交互示例">
+
+<!-- ═══════════ 图标精灵 ═══════════ -->
+<svg class="sprite" aria-hidden="true"><defs>
+  <symbol id="i-map" viewBox="0 0 24 24"><path d="M9 3 3 6v15l6-3 6 3 6-3V3l-6 3-6-3Z"></path><path d="M9 3v15M15 6v15"></path></symbol>
+  <symbol id="i-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13A4 4 0 0 1 19 7a4 4 0 0 1-3 3.87"></path></symbol>
+  <symbol id="i-box" viewBox="0 0 24 24"><path d="M21 8 12 3 3 8v8l9 5 9-5V8Z"></path><path d="m3 8 9 5 9-5M12 21v-8"></path></symbol>
+  <symbol id="i-wave" viewBox="0 0 24 24"><circle cx="12" cy="12" r="1.6"></circle><path d="M8.5 15.5a5 5 0 0 1 0-7M15.5 8.5a5 5 0 0 1 0 7M5.6 18.4a9 9 0 0 1 0-12.8M18.4 5.6a9 9 0 0 1 0 12.8"></path></symbol>
+  <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"></rect><rect x="9" y="9" width="6" height="6" rx="1"></rect><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"></path></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5.2l3.4 2"></path></symbol>
+  <symbol id="i-book" viewBox="0 0 24 24"><path d="M4 4.5A2.5 2.5 0 0 1 6.5 2H20v16H6.5A2.5 2.5 0 0 0 4 20.5v-16Z"></path><path d="M4 20.5A2.5 2.5 0 0 1 6.5 18H20v4H6.5A2.5 2.5 0 0 1 4 19.5"></path></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M5 21v-6M5 11V3M12 21v-9M12 8V3M19 21v-4M19 13V3M2 15h6M9 8h6M16 17h6"></path></symbol>
+  <symbol id="i-pulse" viewBox="0 0 24 24"><path d="M2 12h4l2.5-7 3.5 14 3-9 2 2h5"></path></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="M12 2 2 7l10 5 10-5-10-5Z"></path><path d="m2 12.5 10 5 10-5M2 17.5l10 5 10-5"></path></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"></circle><path d="m21 21-4.3-4.3"></path></symbol>
+  <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><circle cx="12" cy="12" r="4"></circle><circle cx="12" cy="12" r="1"></circle><path d="M12 1v3M12 20v3M1 12h3M20 12h3"></path></symbol>
+  <symbol id="i-pin" viewBox="0 0 24 24"><path d="M12 22s7-6.3 7-11.4A7 7 0 1 0 5 10.6C5 15.7 12 22 12 22Z"></path><circle cx="12" cy="10.4" r="2.6"></circle></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></symbol>
+  <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14"></path></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"></path></symbol>
+  <symbol id="i-max" viewBox="0 0 24 24"><rect x="4.5" y="4.5" width="15" height="15" rx="2"></rect></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"></path></symbol>
+  <symbol id="i-chev-d" viewBox="0 0 24 24"><path d="m5 9 7 7 7-7"></path></symbol>
+  <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"></rect><path d="M3 9h18M3 15h18M9 3v18M15 3v18"></path></symbol>
+  <symbol id="i-spark" viewBox="0 0 24 24"><path d="m12 2 2.2 6.1L20 10l-5.8 1.9L12 18l-2.2-6.1L4 10l5.8-1.9L12 2Z"></path><path d="M19 16.5l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9.9-2.1Z"></path></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4.5" y="10.5" width="15" height="11" rx="2.2"></rect><path d="M8 10.5V7a4 4 0 0 1 8 0v3.5"></path></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.8-7 10-7 10 7 10 7-3.8 7-10 7-10-7-10-7Z"></path><circle cx="12" cy="12" r="3"></circle></symbol>
+  <symbol id="i-route" viewBox="0 0 24 24"><circle cx="6" cy="19" r="2.6"></circle><circle cx="18" cy="5" r="2.6"></circle><path d="M15.4 5H9a3.5 3.5 0 0 0 0 7h6a3.5 3.5 0 0 1 0 7H8.6"></path></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-3.6 8-10V5.5L12 2 4 5.5V12c0 6.4 8 10 8 10Z"></path><path d="m9 12 2 2 4-4"></path></symbol>
+  <symbol id="i-flow" viewBox="0 0 24 24"><circle cx="5" cy="6" r="2.6"></circle><circle cx="19" cy="18" r="2.6"></circle><path d="M7.6 6H14a3 3 0 0 1 0 6h-4a3 3 0 0 0 0 6h6.4"></path></symbol>
+</defs></svg>
+
+<!-- ═══════════ 舞台背景 ═══════════ -->
+<div class="stage" id="stage">
+  <div class="aurora a1"></div>
+  <div class="aurora a2"></div>
+  <div class="aurora a3"></div>
+  <div class="floor"></div>
+  <div class="scanlines"></div>
+  <div class="noise"></div>
+  <div class="vignette"></div>
+</div>
+
+<!-- ═══════════ 主窗口 ═══════════ -->
+<div class="app-window" id="appWindow">
+  <div class="win-border"></div>
+  <div class="win-streams"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+
+  <!-- ── 标题栏 ── -->
+  <header class="titlebar" id="titlebar">
+    <div class="brand">
+      <div class="mark">
+        <svg viewBox="0 0 44 44">
+          <circle class="mk-r1" cx="22" cy="22" r="18.5"></circle>
+          <circle class="mk-r2" cx="22" cy="22" r="12" stroke-dasharray="3 5"></circle>
+          <path class="mk-tri" d="M22 8.5 33.4 30.5H10.6Z"></path>
+          <path class="mk-core" d="M22 16.5 27 26h-10Z"></path>
+          <circle class="mk-orb" cx="22" cy="22" r="1.7"></circle>
+        </svg>
+      </div>
+      <div class="brand-txt">
+        <div class="brand-name">ATLAS<span>·</span></div>
+        <div class="brand-sub">WORLD STATE ENGINE</div>
+      </div>
+    </div>
+
+    <div class="crumbs" id="crumbs"></div>
+
+    <div class="tb-right">
+      <div class="stat-pill" id="syncPill">
+        <span class="pd"></span>
+        <span class="sp-k">SYNC</span>
+        <span class="sp-v" id="syncText">已同步 · T+04:12</span>
+      </div>
+      <span class="demo-badge">交互示例</span><button id="viewBadge" class="view-badge" aria-label="切换世界视角">世界后台</button><button id="nextDemo" class="top-next">演示下一轮</button>
+      <div class="tb-sep"></div>
+      <button class="ic-btn" id="btnPalette" data-tip="命令面板  Ctrl+K" aria-label="打开命令面板"><svg><use href="#i-search"></use></svg></button>
+      <button class="ic-btn" id="btnSettings" data-tip="提示词预设 / 连接" aria-label="打开预设与外观"><svg><use href="#i-sliders"></use></svg></button>
+      <div class="tb-sep"></div>
+      <div class="win-ctl">
+        <button class="wc" data-act="min" aria-label="收起窗口"><svg><use href="#i-minus"></use></svg></button>
+        <button class="wc" data-act="max" aria-label="扩大窗口"><svg><use href="#i-max"></use></svg></button>
+        <button class="wc danger" data-act="close" aria-label="关闭示例窗口"><svg><use href="#i-x"></use></svg></button>
+      </div>
+    </div>
+  </header>
+
+  <div class="win-body">
+
+    <!-- ── 图标导航 ── -->
+    <nav class="rail">
+      <div class="rail-group">
+        <button class="rail-btn active" data-view="map"><svg><use href="#i-map"></use></svg><span>地图</span></button>
+        <button class="rail-btn" data-view="cast"><svg><use href="#i-users"></use></svg><span>人物</span></button>
+        <button class="rail-btn" data-view="items"><svg><use href="#i-box"></use></svg><span>物品</span></button>
+        <button class="rail-btn" data-view="msgs"><svg><use href="#i-wave"></use></svg><span>消息</span><em class="rail-badge">3</em></button>
+        <button class="rail-btn" data-view="sim"><svg><use href="#i-cpu"></use></svg><span>推演</span><em class="rail-badge hot">2</em></button>
+        <button class="rail-btn" data-view="time"><svg><use href="#i-clock"></use></svg><span>时间线</span></button>
+        <button class="rail-btn" data-view="lore"><svg><use href="#i-book"></use></svg><span>世界书</span></button>
+      </div>
+      <div class="rail-group bottom">
+        <button class="rail-btn" data-view="diag"><svg><use href="#i-pulse"></use></svg><span>诊断</span></button>
+        <button class="rail-btn" data-view="prefs"><svg><use href="#i-sliders"></use></svg><span>预设</span></button>
+        <button class="rail-ava" aria-label="切换世界视角">作</button>
+      </div>
+    </nav>
+
+    <!-- ── 左面板 ── -->
+    <aside class="panel panel-left" id="panelLeft">
+      <div class="p-head">
+        <div class="p-title"><svg class="p-ico"><use href="#i-layers"></use></svg><span>层级图层</span></div>
+        <div class="p-head-act">
+          <button class="mini-btn" id="btnLocate" data-tip="定位主角" aria-label="查看主角位置"><svg><use href="#i-target"></use></svg></button>
+          <button class="mini-btn" id="leftCollapse" data-tip="折叠" aria-label="折叠地图层级"><svg><use href="#i-chev"></use></svg></button>
+        </div>
+      </div>
+
+      <div class="depth-ladder" id="depthLadder"></div>
+
+      <div class="p-scroll">
+        <div class="p-sec">
+          <div class="sec-h"><span>地图树</span><em id="treeCount">—</em></div>
+          <div class="tree" id="layerTree"></div>
+        </div>
+
+        <div class="p-sec">
+          <div class="sec-h"><span>图层显示</span></div>
+          <div class="switch-list" id="switchList"></div>
+        </div>
+
+        <div class="p-sec">
+          <div class="sec-h"><span>地区筛选</span></div>
+          <div class="chips" id="regionChips"></div>
+        </div>
+
+        <div class="p-sec"><details class="scale-details"><summary>地图尺度资料</summary><div class="scale-box"><div class="sb-row"><span>当前地图</span><b id="scWorld"></b></div><div class="sb-row"><span>换算比例</span><b id="scRatio"></b></div><div class="sb-note">示例中的尺度与坐标用于演示层级切换。</div></div></details></div>
+      </div>
+    </aside>
+
+    <!-- ── 地图视口 ── -->
+    <main class="viewport" id="viewport">
+      <canvas id="map" role="img" aria-label="世界地图；拖动平移，滚轮缩放，单击地点查看信息"></canvas>
+      <div class="vp-grain"></div>
+
+      <!-- 角标 -->
+      <span class="corner c-tl"></span><span class="corner c-tr"></span>
+      <span class="corner c-bl"></span><span class="corner c-br"></span>
+
+      <!-- 当前地点卡 -->
+      <div class="hud hud-place" id="placeCard"></div>
+
+      <!-- 视图模式 -->
+      <div class="hud hud-modes" id="viewModes">
+        <button class="vm active" data-mode="map">地图</button>
+        <button class="vm" data-mode="flow">消息流</button>
+        <button class="vm" data-mode="sim">推演视图</button>
+        <button class="vm" data-mode="heat">热力</button>
+      </div>
+
+      <!-- 图例与比例尺共用左下角收纳区 -->
+      <div class="hud-readout">
+       <div class="hud hud-legend" id="legend">
+        <div class="lg-h"><span>图例</span><button class="lg-t" id="legendToggle" aria-expanded="true" aria-controls="legendBody">收起</button></div>
+        <div class="lg-body" id="legendBody">
+          <div class="lg-i"><i class="pt char"></i>人物</div>
+          <div class="lg-i"><i class="pt item"></i>物品</div>
+          <div class="lg-i"><i class="pt poi"></i>地点</div>
+          <div class="lg-i"><i class="pt sig"></i>消息源</div>
+          <div class="lg-i"><i class="pt evt"></i>事件</div>
+          <div class="lg-i"><i class="pt exit"></i>出入口</div>
+        </div>
+       </div>
+       <div class="hud hud-scale">
+        <div class="sc-line"><i aria-hidden="true"></i><span id="scaleLabel">20 m</span></div>
+        <div class="sc-coord" id="coordLabel">X 000.0 · Y 000.0</div>
+       </div>
+      </div>
+
+      <!-- 导航控件 -->
+      <div class="hud hud-nav">
+        <button class="nav-b" id="zIn" data-tip="放大" aria-label="放大地图"><svg><use href="#i-plus"></use></svg></button>
+        <button class="nav-b" id="zOut" data-tip="缩小" aria-label="缩小地图"><svg><use href="#i-minus"></use></svg></button>
+        <button class="nav-b" id="zFit" data-tip="适应视野" aria-label="适应视野"><svg><use href="#i-target"></use></svg></button>
+        <button class="nav-b" id="zGrid" data-tip="网格" aria-label="切换网格"><svg><use href="#i-grid"></use></svg></button>
+      </div>
+
+      <!-- 小地图 -->
+      <div class="hud hud-mini">
+        <div class="mm-h"><span>OVERVIEW</span><em id="mmZoom">100%</em></div>
+        <canvas id="minimap" width="212" height="132"></canvas>
+      </div>
+
+      <!-- 底部状态条 -->
+      <div class="hud hud-ticker">
+        <div class="tk-live"><span class="pd"></span>LIVE</div>
+        <div class="tk-track"><div class="tk-run" id="ticker">正在同步世界状态…</div></div>
+      </div>
+    <section id="workspacePage" class="workspace-page" hidden=""></section></main>
+
+    <!-- ── 右面板 ── -->
+    <aside class="panel panel-right" id="panelRight">
+      <div class="p-head">
+        <div class="p-title"><svg class="p-ico"><use href="#i-pin"></use></svg><span id="insTitle">星辉学院 · 三层东翼</span></div>
+        <div class="p-head-act">
+          <button class="mini-btn" data-clear-selection="" aria-label="返回当前地图概览"><svg><use href="#i-route"></use></svg></button>
+          <button class="mini-btn" id="rightCollapse" data-tip="折叠" aria-label="折叠详情"><svg><use href="#i-chev"></use></svg></button>
+        </div>
+      </div>
+
+      <div class="insp-tabs" id="inspTabs">
+        <button class="it active" data-tab="cast">人物 <em>4</em></button>
+        <button class="it" data-tab="items">物品 <em>7</em></button>
+        <button class="it" data-tab="msgs">消息 <em>3</em></button>
+        <button class="it" data-tab="lore">线索 <em>5</em></button>
+      </div>
+
+      <div class="p-scroll" id="inspector"></div>
+    </aside>
+  </div>
+
+  <!-- ── 底部 dock ── -->
+  <footer class="dock" id="dock">
+    <div class="dock-head">
+      <div class="dh-tabs" id="dockTabs">
+        <button class="dt active" data-tab="log">事件流</button>
+        <button class="dt" data-tab="tasks">后台任务 <em>2</em></button>
+        <button class="dt" data-tab="receipt">推演回执</button>
+        <button class="dt" data-tab="prop">消息传播</button>
+      </div>
+      <div class="dh-right">
+        <div class="dh-chip"><span class="pd sm"></span><span id="queueLabel">等待演示推进</span></div>
+        <div class="dh-chip mono" id="turnChip">TURN 128 · T+04:12</div>
+        <button class="action-btn dock-action" id="undoDemo" disabled="">回退</button><button class="action-btn dock-action" id="resetDemo">重置</button><button class="mini-btn" id="dockToggle" aria-label="折叠或展开事件栏"><svg><use href="#i-chev-d"></use></svg></button>
+      </div>
+    </div>
+    <div class="dock-body" id="dockBody"></div>
+  </footer>
+</div>
+
+<!-- ═══════════ 命令面板 ═══════════ -->
+<button id="reopenLeft" class="panel-toggle reopen-left" aria-label="展开地图层级">‹</button><button id="reopenRight" class="panel-toggle reopen-right" aria-label="展开详情">›</button><button id="windowRestore" class="window-restore" hidden="">重新打开 ATLAS</button><div id="demoModal" class="demo-modal" hidden=""><section class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><header><h3 id="modalTitle"></h3><button id="modalClose" aria-label="关闭对话框">×</button></header><div id="modalBody"></div></section></div><div class="palette-wrap" id="paletteWrap">
+  <div class="palette-backdrop"></div>
+  <div class="palette" role="dialog" aria-modal="true" aria-label="搜索地图对象">
+    <div class="pal-head">
+      <svg class="p-ico"><use href="#i-spark"></use></svg>
+      <input id="palInput" placeholder="搜索地点、人物或物品…" aria-label="搜索地点、人物或物品" autocomplete="off" spellcheck="false">
+      <kbd>ESC</kbd>
+    </div>
+    <div class="pal-count" id="palCount" aria-live="polite"></div>
+    <div class="pal-list" id="palList"></div>
+    <div class="pal-foot">
+      <span><kbd>↑</kbd><kbd>↓</kbd> 选择</span>
+      <span><kbd>↵</kbd> 执行</span>
+      <span><kbd>Ctrl</kbd>+<kbd>K</kbd> 开关</span>
+    </div>
+  </div>
+</div>
+
+<div class="toast-wrap" id="toastWrap" aria-live="polite"></div>
+<div class="warp" id="warp"></div>
+<div class="tooltip" id="tooltip"></div>
+
+
+
+
+
+
+</div><script src="js/data.js"></script><script src="js/demo-data.js"></script><script src="js/map.js"></script><script src="js/presets.js"></script><script src="js/preset-ui.js"></script><script src="js/ui-model.js"></script><script src="js/app.js"></script></body></html>

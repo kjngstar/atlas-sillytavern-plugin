@@ -341,8 +341,11 @@ export interface AtlasSettingsCommandResult {
 }
 
 export type AtlasSettingsCommand =
+  | { action: "batch"; commands: AtlasSettingsCommand[] }
   | {
       action: "api.save";
+      /** Explicit creation with a UI-generated stable ID; default remains update-only. */
+      create?: boolean;
       preset: {
         id?: string;
         name: string;
@@ -366,7 +369,7 @@ export type AtlasSettingsCommand =
     }
   | { action: "api.delete"; id: string }
   | { action: "api.activate"; id: string | null }
-  | { action: "prompt.save"; preset: { id?: string; name: string; systemPrompt: string; segments?: AtlasPromptSegment[]; contextTurnCount?: number } }
+  | { action: "prompt.save"; create?: boolean; preset: { id?: string; name: string; systemPrompt: string; segments?: AtlasPromptSegment[]; contextTurnCount?: number } }
   /**
    * E02：把作者自己保存的旧协议提示词预设**复制**成一份兼容增量草稿（新建预设 + 可选激活）。
    * 旧预设原文一字不改；命令返回新建预设的 id 与改写的旧关键词清单供 UI 预览。
@@ -780,6 +783,19 @@ export function applySettingsCommand(
   deps: AtlasSettingsDeps = {},
 ): AtlasSettingsCommandResult {
   const now = nowOf(deps);
+  if (command.action === "batch") {
+    if (!Array.isArray(command.commands) || command.commands.length < 1 || command.commands.length > 100) {
+      return { ok: false, settings, code: "INVALID_PAYLOAD", message: "设置批次须包含 1 至 100 个命令。" };
+    }
+    let candidate = settings;
+    for (const entry of command.commands) {
+      if (!entry || entry.action === "batch") return { ok: false, settings, code: "INVALID_PAYLOAD", message: "设置批次不支持嵌套。" };
+      const result = applySettingsCommand(candidate, entry, deps);
+      if (!result.ok) return { ...result, settings };
+      candidate = result.settings;
+    }
+    return { ok: true, settings: candidate };
+  }
   switch (command.action) {
     case "api.save": {
       const preset = command.preset;
@@ -827,7 +843,8 @@ export function applySettingsCommand(
         return fail(settings, "INVALID_PAYLOAD", "预设 ID 形状非法。");
       }
       const existingIndex = targetId ? settings.apiPresets.findIndex((p) => p.id === targetId) : -1;
-      if (targetId && existingIndex < 0) {
+      if (command.create === true && existingIndex >= 0) return fail(settings, "INVALID_PAYLOAD", "新建连接标识已存在。");
+      if (targetId && existingIndex < 0 && command.create !== true) {
         return fail(settings, "INVALID_PAYLOAD", "要更新的连接不存在（另存为请省略 id）。");
       }
       let apiKey: string;
@@ -919,7 +936,8 @@ export function applySettingsCommand(
       const targetId = preset.id === undefined ? null : normalizeId(preset.id);
       if (preset.id !== undefined && targetId === null) return fail(settings, "INVALID_PAYLOAD", "预设 ID 形状非法。");
       const existingIndex = targetId ? settings.promptPresets.findIndex((p) => p.id === targetId) : -1;
-      if (targetId && existingIndex < 0) return fail(settings, "INVALID_PAYLOAD", "要更新的提示词预设不存在（另存为请省略 id）。");
+      if (command.create === true && existingIndex >= 0) return fail(settings, "INVALID_PAYLOAD", "新建提示词标识已存在。");
+      if (targetId && existingIndex < 0 && command.create !== true) return fail(settings, "INVALID_PAYLOAD", "要更新的提示词预设不存在（另存为请省略 id）。");
       if (existingIndex < 0 && settings.promptPresets.length >= MAX_PRESETS_PER_LIBRARY) {
         return fail(settings, "FIELD_LIMIT_EXCEEDED", `最多保存 ${MAX_PRESETS_PER_LIBRARY} 条提示词预设。`);
       }

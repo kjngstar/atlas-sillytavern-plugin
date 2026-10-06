@@ -1,0 +1,4 @@
+# Preserve supplied visual assets byte for byte across Windows checkouts.
+ui/atlas-reference/** -text
+atlas-extension/ui/atlas-reference/** -text
+docs/reference-ui/** -text
