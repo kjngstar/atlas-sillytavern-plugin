@@ -2453,7 +2453,7 @@ var init_atlas_ops_prompts = __esm({
     ].join("\n");
     MINIMUM_HELP = {
       "location.upsert": "新建 name；修改 ref + 至少一个变更字段；kind=region/city/district/building/room/natural/vehicle/other；parent_ref=所属地点，mobility=fixed/mobile，anchor_ref=载具锚点；推断新增地点用 existence_quality=inferred；area={kind:cells,cells:[{x,y}],quality:confirmed/estimated,source:manual/story/worldbook/estimate} 或 {kind:polygon,points:[{x,y}],quality,source}；范围坐标沿用所属地图尺度，推断布局不证明真实距离；有已提供 map_ref 才能给 position={x,y,precision:exact/approximate/layout}",
-      "character.upsert": "新建 name + 身份/重要性线索之一；候选只需 name（registration=watch）；修改 ref",
+      "character.upsert": "正式新建必须 data.name + data.identity / data.importance / data.importance_reason 至少一个；identity 写有依据的身份，不能只写 role 或 description 代替；候选只需 data.name（data.registration=watch）；修改已有对象用 ref",
       "item.upsert": "新建 name；修改 ref",
       "item.transfer": "ref + to（holder_ref / container_ref / location_ref / unknown 四选一）",
       "faction.upsert": "新建 name；修改 ref",
@@ -19330,6 +19330,7 @@ function queryMapView(ctx, query) {
       name: String(map.name ?? ""),
       kind: String(map.kind ?? "world"),
       containerLocationId: map.container_location_id ? String(map.container_location_id) : null,
+      containerLocationKind: container && visibility.visible("location", String(container.id)) ? String(container.kind) : null,
       metersPerCell,
       scaleQuality: String(map.scale_quality ?? "uncalibrated"),
       scaleLocked: Number(map.scale_locked ?? 0) === 1,
@@ -22285,7 +22286,7 @@ function compileSqlSceneMaps(input) {
   if (input.ensureScenes && Number(queryBound(db, "SELECT COUNT(*) AS n FROM locations WHERE branch_id=? AND status='active'", [branchId])[0].n) > 1e3)
     throw new AtlasDbError("SCENE_MAP_LIMIT", "地点超过单次地图结构处理上限 1000；保留原存档，需分批处理", {});
   const maps = read.selectWhere("maps", { branch_id: branchId, status: "active" }, 1001);
-  const changes = [], opId = `scene_maps_${turnId}`;
+  const changes = [], opId = input.operationId ?? `scene_maps_${turnId}`;
   const change = (table, before, after) => {
     if (before && JSON.stringify(before) === JSON.stringify(after)) return;
     const previous = changes.find((change2) => change2.table === table && change2.rowId === after.id);
@@ -28867,6 +28868,7 @@ async function retry(session, input) {
     groups: groups.groups,
     clockS: receipt.clockAfterS,
     sceneMaps: history.scene_maps,
+    replacementOperations: corrected.operations,
     isCurrent: input.isCurrent
   });
   const updated = result.coreSaved ? JSON.parse(String(queryBound(session.repo.db, "SELECT receipt_json FROM turns WHERE id=?", [input.turnId])[0].receipt_json)) : receipt;
@@ -29488,7 +29490,8 @@ async function runSqlRetry(session, input) {
           turnId: input.turnId,
           clockS: input.clockS,
           makeId: session.repo.internal.makeId,
-          ensureScenes: true
+          ensureScenes: true,
+          operationId: `scene_maps_${input.turnId}_${input.attemptId}`
         });
         if (scenes) {
           const applied = applyGroups(candidate.db, [scenes], { branchId: session.branchId, turnId: input.turnId, attemptId: input.attemptId + "-maps", validate: true });
@@ -29497,17 +29500,26 @@ async function runSqlRetry(session, input) {
           result.groups.push(...applied.groups);
         }
       }
-      const row2 = queryBound(candidate.db, "SELECT receipt_json FROM turns WHERE id=?", [input.turnId])[0];
+      const row2 = queryBound(candidate.db, "SELECT receipt_json, decisions_json FROM turns WHERE id=?", [input.turnId])[0];
       const receipt = JSON.parse(String(row2.receipt_json));
       if (result.status === "applied") {
-        const correctedOps = new Set(result.groups.filter((g) => g.status === "applied" || g.status === "duplicate").flatMap((g) => g.opIds));
+        const attemptedOps = new Set(result.groups.flatMap((g) => g.opIds));
         receipt.groups = receipt.groups.flatMap((g) => {
           if (g.status !== "rejected" && g.status !== "blocked") return [g];
-          const remaining = g.opIds.filter((id) => !correctedOps.has(id));
-          return remaining.length ? [{ ...g, opIds: remaining }] : [];
+          const remaining = g.opIds.filter((id) => !attemptedOps.has(id));
+          return remaining.length ? [{ ...g, opIds: remaining, issues: g.issues.filter((i) => !i.opId || !attemptedOps.has(i.opId)) }] : [];
         });
-        receipt.groups.push(...result.groups);
-        receipt.issues = receipt.issues.filter((i) => !i.opId || !correctedOps.has(i.opId));
+        for (const group of result.groups) {
+          const previous = receipt.groups.find((g) => g.groupId === group.groupId && ["applied", "duplicate"].includes(g.status) && ["applied", "duplicate"].includes(group.status));
+          if (previous) {
+            previous.changedRows += group.changedRows;
+            previous.opIds = [.../* @__PURE__ */ new Set([...previous.opIds, ...group.opIds])];
+          } else receipt.groups.push(group);
+        }
+        receipt.issues = [
+          ...receipt.issues.filter((i) => !i.opId || !attemptedOps.has(i.opId)),
+          ...result.groups.filter((g) => g.status === "rejected" || g.status === "blocked").flatMap((g) => g.issues)
+        ];
         receipt.worldChanged = receipt.worldChanged || result.groups.some((g) => g.changedRows > 0);
         const branchStatus = queryBound(candidate.db, "SELECT simulation_status FROM branches WHERE id=?", [session.branchId])[0]?.simulation_status;
         receipt.status = branchStatus === "catching_up" || branchStatus === "blocked" || receipt.groups.some((g) => g.status === "rejected" || g.status === "blocked") ? "partial" : "committed";
@@ -29516,6 +29528,14 @@ async function runSqlRetry(session, input) {
           "UPDATE turns SET receipt_json=?, status=? WHERE id=?",
           [JSON.stringify(receipt), receipt.status, input.turnId]
         );
+        if (input.replacementOperations?.length) {
+          const history = JSON.parse(String(row2.decisions_json));
+          const replacements = new Map(input.replacementOperations.map((op) => [op.opId, op.value]));
+          if (!Array.isArray(history.operations) || history.operation_meta?.length !== history.operations.length)
+            throw new AtlasDbError("SQL_RETRY_HISTORY_MISSING", "补交操作身份记录不完整，候选不保存", {});
+          history.operations = history.operations.map((value, index) => replacements.get(history.operation_meta[index].opId) ?? value);
+          runBound(candidate.db, "UPDATE turns SET decisions_json=? WHERE id=?", [JSON.stringify(history), input.turnId]);
+        }
         const payloadHash = await sha256Hex4(new TextEncoder().encode(JSON.stringify([input.turnId, input.attemptId, result.groups])));
         enqueueProjectionSync(candidate.db, {
           branchId: session.branchId,

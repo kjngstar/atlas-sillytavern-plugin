@@ -41,7 +41,8 @@ export function referenceGeometry(map, document) {
   const uniquePins=[...new Map(rawPins.filter(finite).map(p=>[`${p.type}:${p.entityId??p.id}`,p])).values()];
   const marks = uniquePins.map((p,i)=>{const [x,y]=xy(p);return {id:text(p.entityId??p.id),type:p.type==='person'?'char':p.type==='item'?'item':'poi',
     x,y,name:text(p.name),sub:text(p.quality??p.markerQuality??p.precision),hero:p.isProtagonist===true,silent:p.silent===true,c:COLORS[i%COLORS.length],locationId:p.locationId??p.roomId??null};});
-  let kind=REFERENCE_LEVELS.some(l=>l.key===map.kind)?map.kind:'world',geo={};
+  const containerKind=map.containerLocationKind;
+  let kind=REFERENCE_LEVELS.some(l=>l.key===containerKind)?containerKind:REFERENCE_LEVELS.some(l=>l.key===map.kind)?map.kind:({site:'building',interior:'room'}[map.kind]??'world'),geo={};
   if(layout?.kind==='city') {
     kind='city';
     const river=layout.river;

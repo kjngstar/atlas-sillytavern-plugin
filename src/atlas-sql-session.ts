@@ -49,6 +49,7 @@ import type { LorebookPort, ManagedLorebookEntry } from './atlas-db-outbox.ts';
 import type { AtlasSqlRepositoryWithHelpers } from './atlas-db-repository.ts';
 import type {
   Issue,
+  ParsedOperation,
   PreparedCommit,
   PreparedMaintenance,
   MaintenanceInput,
@@ -588,7 +589,7 @@ export async function runSqlTurn(session: SqlSession, input: TurnInput): Promise
 }
 
 /** Retry changes live only in an isolated candidate until the host confirms its save. */
-export async function runSqlRetry(session: SqlSession, input: Omit<FailedGroupRetryInput, 'db'> & { isCurrent?: () => boolean;sceneMaps?:boolean }): Promise<FailedGroupRetryResult & { coreSaved: boolean }> {
+export async function runSqlRetry(session: SqlSession, input: Omit<FailedGroupRetryInput, 'db'> & { isCurrent?: () => boolean;sceneMaps?:boolean;replacementOperations?:ParsedOperation[] }): Promise<FailedGroupRetryResult & { coreSaved: boolean }> {
   if (input.chatUid !== session.chatUid || input.branchId !== session.branchId) throw new AtlasDbError('CHAT_CHANGED', '补交不属于当前 SQL 会话', {});
   return withChatCommitLock(session.chatUid, async () => {
     if (session.isCurrentHost && !session.isCurrentHost()) throw new AtlasDbError('SESSION_STALE', '补交前宿主快照已变化', {});
@@ -603,7 +604,7 @@ export async function runSqlRetry(session: SqlSession, input: Omit<FailedGroupRe
       }
       if(result.status==='applied'&&input.sceneMaps){
         const scenes=compileSqlSceneMaps({db:candidate.db,branchId:session.branchId,turnId:input.turnId,clockS:input.clockS,
-          makeId:session.repo.internal.makeId,ensureScenes:true});
+          makeId:session.repo.internal.makeId,ensureScenes:true,operationId:`scene_maps_${input.turnId}_${input.attemptId}`});
         if(scenes){
           const applied=applyGroups(candidate.db,[scenes],{branchId:session.branchId,turnId:input.turnId,attemptId:input.attemptId+'-maps',validate:true});
           if(applied.journalIssues.length||applied.groups.some(group=>group.status==='rejected'||group.status==='blocked'))
@@ -611,22 +612,35 @@ export async function runSqlRetry(session: SqlSession, input: Omit<FailedGroupRe
           result.groups.push(...applied.groups);
         }
       }
-      const row = queryBound(candidate.db, 'SELECT receipt_json FROM turns WHERE id=?', [input.turnId])[0];
+      const row = queryBound(candidate.db, 'SELECT receipt_json, decisions_json FROM turns WHERE id=?', [input.turnId])[0];
       const receipt = JSON.parse(String(row.receipt_json)) as TurnReceipt;
       if (result.status === 'applied') {
-        const correctedOps = new Set(result.groups.filter(g => g.status === 'applied' || g.status === 'duplicate').flatMap(g => g.opIds));
+        const attemptedOps = new Set(result.groups.flatMap(g => g.opIds));
         receipt.groups = receipt.groups.flatMap(g => {
           if (g.status !== 'rejected' && g.status !== 'blocked') return [g];
-          const remaining = g.opIds.filter(id => !correctedOps.has(id));
-          return remaining.length ? [{ ...g, opIds: remaining }] : [];
+          const remaining = g.opIds.filter(id => !attemptedOps.has(id));
+          return remaining.length ? [{ ...g, opIds: remaining, issues: g.issues.filter(i => !i.opId || !attemptedOps.has(i.opId)) }] : [];
         });
-        receipt.groups.push(...result.groups);
-        receipt.issues = receipt.issues.filter(i => !i.opId || !correctedOps.has(i.opId));
+        for(const group of result.groups){
+          const previous=receipt.groups.find(g=>g.groupId===group.groupId&&['applied','duplicate'].includes(g.status)&&['applied','duplicate'].includes(group.status));
+          if(previous){previous.changedRows+=group.changedRows;previous.opIds=[...new Set([...previous.opIds,...group.opIds])];}
+          else receipt.groups.push(group);
+        }
+        receipt.issues = [...receipt.issues.filter(i => !i.opId || !attemptedOps.has(i.opId)),
+          ...result.groups.filter(g => g.status === 'rejected' || g.status === 'blocked').flatMap(g => g.issues)];
         receipt.worldChanged = receipt.worldChanged || result.groups.some(g => g.changedRows > 0);
         const branchStatus=queryBound(candidate.db,'SELECT simulation_status FROM branches WHERE id=?',[session.branchId])[0]?.simulation_status;
         receipt.status = branchStatus==='catching_up'||branchStatus==='blocked'||receipt.groups.some(g => g.status === 'rejected' || g.status === 'blocked') ? 'partial' : 'committed';
         runBound(candidate.db, 'UPDATE turns SET receipt_json=?, status=? WHERE id=?',
           [JSON.stringify(receipt), receipt.status, input.turnId]);
+        if(input.replacementOperations?.length){
+          const history=JSON.parse(String(row.decisions_json));
+          const replacements=new Map(input.replacementOperations.map(op=>[op.opId,op.value]));
+          if(!Array.isArray(history.operations)||history.operation_meta?.length!==history.operations.length)
+            throw new AtlasDbError('SQL_RETRY_HISTORY_MISSING','补交操作身份记录不完整，候选不保存',{});
+          history.operations=history.operations.map((value:unknown,index:number)=>replacements.get(history.operation_meta[index].opId)??value);
+          runBound(candidate.db,'UPDATE turns SET decisions_json=? WHERE id=?',[JSON.stringify(history),input.turnId]);
+        }
         const payloadHash = await sha256Hex(new TextEncoder().encode(JSON.stringify([input.turnId, input.attemptId, result.groups])));
         enqueueProjectionSync(candidate.db, { branchId: session.branchId, turnId: input.turnId,
           targetRevision: anchor.baseRevision, projectionScope: 'pov', payloadHash, nowWallMs: session.now(),

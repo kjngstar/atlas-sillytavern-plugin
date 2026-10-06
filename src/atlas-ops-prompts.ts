@@ -70,7 +70,7 @@ const FORMAT_SEGMENT = [
 
 const MINIMUM_HELP: Record<string, string> = {
   'location.upsert': '新建 name；修改 ref + 至少一个变更字段；kind=region/city/district/building/room/natural/vehicle/other；parent_ref=所属地点，mobility=fixed/mobile，anchor_ref=载具锚点；推断新增地点用 existence_quality=inferred；area={kind:cells,cells:[{x,y}],quality:confirmed/estimated,source:manual/story/worldbook/estimate} 或 {kind:polygon,points:[{x,y}],quality,source}；范围坐标沿用所属地图尺度，推断布局不证明真实距离；有已提供 map_ref 才能给 position={x,y,precision:exact/approximate/layout}',
-  'character.upsert': '新建 name + 身份/重要性线索之一；候选只需 name（registration=watch）；修改 ref',
+  'character.upsert': '正式新建必须 data.name + data.identity / data.importance / data.importance_reason 至少一个；identity 写有依据的身份，不能只写 role 或 description 代替；候选只需 data.name（data.registration=watch）；修改已有对象用 ref',
   'item.upsert': '新建 name；修改 ref',
   'item.transfer': 'ref + to（holder_ref / container_ref / location_ref / unknown 四选一）',
   'faction.upsert': '新建 name；修改 ref',

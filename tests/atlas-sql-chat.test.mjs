@@ -8,6 +8,28 @@ import { queryBound } from '../src/atlas-db-runtime.ts';
 
 const room = '{"op":"location.upsert","ref":"new:library","data":{"name":"图书馆","kind":"room"}}';
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+test('部分补交替换失败操作的旧诊断，保留成功组且不重复累计失败组',async()=>{
+ let repairs=0;
+ const f=fixture({model:async req=>{
+  if(req.phase!=='repair')return '{"op":"event.propose","data":{"title":"进入图书馆","phase":"observed"}}\n{"op":"location.upsert","ref":"L1","data":{"name":"图书馆","kind":"building"}}\n{"op":"character.upsert","ref":"C1","data":{"name":"用户主角","role":"protagonist"}}';
+  repairs++;
+  const tickets=req.messages.map(m=>m.content).join('\n').split('\n').filter(l=>l.startsWith('{"ticket"')&&l.includes('originalOpId=')).map(l=>JSON.parse(l.split(' ｜')[0]));
+  if(repairs===1)return tickets.map(t=>JSON.stringify({ticket:t.ticket,op:'noop',why:'等待补交'})).join('\n');
+  return tickets.map(t=>JSON.stringify({...t,ref:t.ref.startsWith('new:')?t.ref:'new:'+t.ref,data:{...t.data,...(repairs>=3&&t.op==='character.upsert'?{identity:'读者'}:{})}})).join('\n');
+ }});
+ try{
+  await f.ui.refresh();await f.prepare();await f.end();await f.ui.retryLastCommit();
+  let r=f.ui.getState().receipts[0].detail.receipt;
+  const failures=r.groups.filter(g=>g.status==='rejected'||g.status==='blocked');
+  assert.equal(failures.length,1);assert.equal(failures[0].issues[0].code,'MINIMUM_FIELD_MISSING');
+  assert.equal(new Set(r.groups.map(g=>g.groupId)).size,r.groups.length);
+  assert.ok(!r.issues.some(i=>i.code==='REF_UNKNOWN'));
+  await f.ui.retryLastCommit();r=f.ui.getState().receipts[0].detail.receipt;assert.equal(r.status,'committed',JSON.stringify({r,repairs,error:f.ui.getState().lastError}));
+  assert.equal(new Set(r.groups.map(g=>g.groupId)).size,r.groups.length);
+  const s=await f.provider.session('chat-auto');assert.equal(queryBound(s.repo.db,'SELECT COUNT(*) n FROM events',[])[0].n,1);
+  assert.equal(queryBound(s.repo.db,'SELECT COUNT(*) n FROM characters',[])[0].n,1);
+ }finally{await f.close();}
+});
 function fixture({ response = room, model, identity, retryFloor, lore = '全部世界书原文：文风规则与地点。' } = {}) {
   let enabled = true, saves = 0, calls = 0, saveOk = true;
   const requests = [], batches = [];

@@ -128,6 +128,7 @@ export type MapViewItem = {
   backgroundAssetKey?: string|null;
   kind: string;
   containerLocationId: string | null;
+  containerLocationKind?: string | null;
   metersPerCell: number | null;
   scaleQuality: string;
   scaleLocked: boolean;
@@ -318,6 +319,7 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
       name: String(map.name ?? ''),
       kind: String(map.kind ?? 'world'),
       containerLocationId: map.container_location_id ? String(map.container_location_id) : null,
+      containerLocationKind: container && visibility.visible('location', String(container.id)) ? String(container.kind) : null,
       metersPerCell,
       scaleQuality: String(map.scale_quality ?? 'uncalibrated'),
       scaleLocked: Number(map.scale_locked ?? 0) === 1,

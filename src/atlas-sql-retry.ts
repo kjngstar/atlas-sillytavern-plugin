@@ -87,7 +87,7 @@ async function retry(session: SqlSession, input: RetryInput): Promise<RetryResul
     seedRefs:original.scope.all().filter(ref=>!failedIds.has(ref.declaredByOpId ?? '')) });
   const groups = buildAtomicGroups(compiled.results.map(r => ({ opId: r.opId, ...r.result })));
   const result = await runSqlRetry(session, { branchId: session.branchId, chatUid: session.chatUid, turnId: input.turnId,
-    currentHeadTurnId: input.turnId, attemptId: `retry_${storageRevision}`, groups: groups.groups, clockS: receipt.clockAfterS, sceneMaps:history.scene_maps, isCurrent: input.isCurrent });
+    currentHeadTurnId: input.turnId, attemptId: `retry_${storageRevision}`, groups: groups.groups, clockS: receipt.clockAfterS, sceneMaps:history.scene_maps, replacementOperations:corrected.operations, isCurrent: input.isCurrent });
   const updated = result.coreSaved ? JSON.parse(String(queryBound(session.repo.db, 'SELECT receipt_json FROM turns WHERE id=?', [input.turnId])[0].receipt_json)) as TurnReceipt : receipt;
   return { receipt: updated, coreSaved: result.coreSaved, issues: [...issues, ...compiled.issues, ...groups.issues, ...result.issues] };
 }

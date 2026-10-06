@@ -9,14 +9,14 @@ import type { AtomicGroup, RowMutation } from './atlas-ops-contract.ts';
 
 export type SqlMapCalibration = {mapId:string;metersPerCell?:number;locked?:boolean;frame?:{cols:number;rows:number};quality?:'estimated'|'confirmed'};
 
-export function compileSqlSceneMaps(input:{db:SqlDatabase;branchId:string;turnId:string;clockS:number;
+export function compileSqlSceneMaps(input:{db:SqlDatabase;branchId:string;turnId:string;clockS:number;operationId?:string;
   makeId:(kind:string,opId:string,alias:string)=>string;calibration?:SqlMapCalibration;ensureScenes?:boolean;povName?:string;background?:{mapId:string;asset:import('./atlas-db-contract.ts').AtlasAssetRef|null}}):AtomicGroup|null {
   const {db,branchId,turnId,clockS,makeId}=input,read=createTableReadPort(db);
   const locations=read.selectWhere('locations',{branch_id:branchId,status:'active'},1000);
   if(input.ensureScenes && Number(queryBound(db,"SELECT COUNT(*) AS n FROM locations WHERE branch_id=? AND status='active'",[branchId])[0].n)>1000)
     throw new AtlasDbError('SCENE_MAP_LIMIT','地点超过单次地图结构处理上限 1000；保留原存档，需分批处理',{});
   const maps=read.selectWhere('maps',{branch_id:branchId,status:'active'},1001);
-  const changes:RowMutation[]=[],opId=`scene_maps_${turnId}`;
+  const changes:RowMutation[]=[],opId=input.operationId??`scene_maps_${turnId}`;
   const change=(table:string,before:Record<string,unknown>|null,after:Record<string,unknown>)=>{
     if(before&&JSON.stringify(before)===JSON.stringify(after))return;
     const previous=changes.find(change=>change.table===table&&change.rowId===after.id);

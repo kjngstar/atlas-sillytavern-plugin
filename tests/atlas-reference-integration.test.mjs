@@ -11,6 +11,11 @@ import {createDefaultSettingsV2,applySettingsCommand,settingsViewV2} from '../sr
 const view=items=>({branchId:'main',revision:3,items});
 const map={mapId:'world',name:'真实城市',kind:'city',containerLocationId:null,metersPerCell:2,points:[{entityId:'L',kind:'location',name:'学校',x:10,y:10},{entityId:'C',kind:'character',name:'艾琳',x:15,y:16,locationId:'L',isProtagonist:true}]};
 const cat=[{entityId:'L',entityKind:'location',name:'学校',mapId:'world'},{entityId:'C',entityKind:'character',name:'艾琳',mapId:'world',locationId:'L',summary:'这是人物描述'}];
+test('SQL 子地图按实际容器种类投影，site/interior 不冒充世界层级',()=>{
+ for(const [sqlKind,containerKind,expected] of [['region','city','city'],['site','building','building'],['interior','room','room'],['site',null,'building'],['interior',null,'room']]){
+  const g=referenceGeometry({...map,kind:sqlKind,containerLocationKind:containerKind});assert.equal(g.kind,expected);
+ }
+});
 function projection(extra={}){return projectReferenceData({mapView:view([map]),catalogView:view(cat),viewMode:'author',...extra});}
 test('原版接入：未知坐标不补零，实体 ID 与地图尺度保持来源',()=>{const g=referenceGeometry({...map,points:[...map.points,{entityId:'unknown',x:null,y:undefined}]});assert.equal(g.marks.length,2);assert.equal(g.marks[1].id,'C');assert.ok(Math.abs(g.metric*g.transform.scale-2)<1e-8);});
 test('原版接入：描写不冒充行动，主角由正式地图确定',()=>{const d=projection();assert.equal(d.CAST[0].doing,'尚无行动记录');assert.equal(d.CAST[0].description,'这是人物描述');assert.equal(d.meta.protagonistId,'C');});
