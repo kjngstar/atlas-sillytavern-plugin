@@ -37,10 +37,18 @@ test('Q03: SQL stage reuses the selected API connection and sends only semantic 
   assert.equal(f.calls.length, 1);
   assert.equal(f.calls[0].body.model, 'fixture-model');
   assert.equal(f.calls[0].body.temperature, 0.4);
+  assert.equal(f.calls[0].body.max_tokens, 9000, '保存的输出上限不得被阶段默认 4096 隐式压低');
   assert.ok(f.calls[0].body.messages[0].content.includes('character.upsert'));
   assert.equal(JSON.stringify(f.calls[0].body.messages).includes('<atlasEdit>'), false);
   assert.deepEqual(f.calls[0].body.messages.slice(1, 7), DEFAULT_SQL_PROMPT_SEGMENTS.map(({role,content}) => ({role,content})));
   assert.deepEqual(settingsViewV2(f.settings).builtInSqlPrompt.segments.map(({role,content}) => ({role,content})), f.calls[0].body.messages.slice(1,7));
+});
+
+test('Q03: SQL repair also honors a saved output limit above the stage default', async () => {
+  const f = fixture();
+  const req = request(); req.phase = 'repair'; req.maxTokens = 2048;
+  await f.port.request(req);
+  assert.equal(f.calls[0].body.max_tokens, 9000);
 });
 
 test('Q03: explicit SQL draft preserves the original and copied entries, only disables conflicting protocols in the new copy', async () => {

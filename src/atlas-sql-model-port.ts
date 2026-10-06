@@ -61,8 +61,9 @@ export function createSqlModelPort(options: Options): AtlasModelPort {
   async request(request:ModelBatchRequest){
    const {preset,input,messages}=await prepare(request);
       const result = await callAtlasWorldTurnApi({ ...preset,
-        maxTokens: Math.min(preset.maxTokens ?? request.maxTokens, request.maxTokens),
-        timeoutMs: Math.min(preset.timeoutMs ?? request.timeoutMs, request.timeoutMs),
+        // Stage budgets are defaults; explicit saved connection settings take priority.
+        maxTokens: preset.maxTokens ?? request.maxTokens,
+        timeoutMs: preset.timeoutMs ?? request.timeoutMs,
       }, input, { fetchFn: options.fetchFn, now: options.now, messagesOverride: messages });
       if (!result.ok) throw failure(result.code, result.message, result.retryable);
       return { batchId: request.batchId, text: result.text, finishReason: null,
