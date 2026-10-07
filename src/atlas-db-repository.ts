@@ -798,6 +798,7 @@ export function createSqlRepository(options: RepositoryOptions) {
     beginTransaction(candidateDb);
     let committed = false;
     let transactionOpen = true;
+    let preparationStep='entity-apply';
     try {
       insertTurnRow(candidateDb, {
         turnId,
@@ -827,6 +828,7 @@ export function createSqlRepository(options: RepositoryOptions) {
       if (rejected.length > 0 && !input.manual && options.modelPort) {
         // The candidate is isolated; release its transaction before waiting for
         // the repair model, then resume writing the same candidate afterward.
+        preparationStep='before-repair';
         commitTransaction(candidateDb);
         transactionOpen = false;
         const repairOutcome = await runRepair({
@@ -877,6 +879,7 @@ export function createSqlRepository(options: RepositoryOptions) {
       }
       // All program/model settlement belongs to this same isolated floor. No SQL
       // transaction is held across its model requests; host publication remains later.
+      preparationStep='before-simulation';
       commitTransaction(candidateDb);
       transactionOpen = false;
       const simulation = await settleSqlTurn({ db: candidateDb, branchId, anchor, turnId, clockBefore,
@@ -895,6 +898,7 @@ export function createSqlRepository(options: RepositoryOptions) {
       // isolated candidate transaction during the spatial model request as well.
       const layoutTask=input.layoutMaps?buildSqlLayoutTask(candidateDb,branchId,input,turnId):null;
       if(layoutTask&&options.modelPort&&foregroundBatches+(repairAttempted?1:0)+(simulation.modelBatches??0)<ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn){
+        preparationStep='before-layout';
         commitTransaction(candidateDb);transactionOpen=false;
         try{
           const response=await options.modelPort.request(layoutTask.request);
@@ -1037,6 +1041,7 @@ export function createSqlRepository(options: RepositoryOptions) {
         });
       }
 
+      preparationStep='final-save';
       commitTransaction(candidateDb);
       transactionOpen = false;
       committed = true;
@@ -1051,6 +1056,7 @@ export function createSqlRepository(options: RepositoryOptions) {
 
       return await exportCandidateImpl(candidate, receipt);
     } catch (err) {
+      const failedForeignKeys=foreignKeyCheck(candidateDb);
       if (!committed) {
         if (transactionOpen) rollbackTransaction(candidateDb);
         await discardPreparedImpl(candidate.token);
@@ -1060,7 +1066,7 @@ export function createSqlRepository(options: RepositoryOptions) {
         await discardPreparedImpl(candidate.token);
       }
       if (err instanceof AtlasDbError) throw err;
-      throw new AtlasDbError('TURN_PREPARE_FAILED', `准备回合失败：${(err as Error).message}`, { sequencesUsed });
+      throw new AtlasDbError('TURN_PREPARE_FAILED', `准备回合失败（${preparationStep}）：${(err as Error).message}${failedForeignKeys.length?'；未完成依赖：'+failedForeignKeys.map(v=>`${v.table}→${v.parent}`).join(', '):''}`, { sequencesUsed,preparationStep,foreignKeys:failedForeignKeys,groups:groupResults });
     }
   }
 

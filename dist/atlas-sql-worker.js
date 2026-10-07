@@ -21588,6 +21588,7 @@ END`;
       beginTransaction(candidateDb);
       let committed = false;
       let transactionOpen = true;
+      let preparationStep = "entity-apply";
       try {
         insertTurnRow(candidateDb, {
           turnId,
@@ -21612,6 +21613,7 @@ END`;
         const rejected = groupResults.filter((g) => g.status === "rejected");
         const rejectedSnapshot = [...rejected];
         if (rejected.length > 0 && !input.manual && options.modelPort) {
+          preparationStep = "before-repair";
           commitTransaction(candidateDb);
           transactionOpen = false;
           const repairOutcome = await runRepair({
@@ -21659,6 +21661,7 @@ END`;
           const asset = input.mapBackground.asset;
           candidates.get(candidate.token).assets = [...envelopeAssets.filter((old) => old.key !== asset.key), asset];
         }
+        preparationStep = "before-simulation";
         commitTransaction(candidateDb);
         transactionOpen = false;
         const simulation = await settleSqlTurn({
@@ -21682,6 +21685,7 @@ END`;
         timeChanged = simulation.clockAfter !== clockBefore;
         const layoutTask = input.layoutMaps ? buildSqlLayoutTask(candidateDb, branchId, input, turnId) : null;
         if (layoutTask && options.modelPort && foregroundBatches + (repairAttempted ? 1 : 0) + (simulation.modelBatches ?? 0) < ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn) {
+          preparationStep = "before-layout";
           commitTransaction(candidateDb);
           transactionOpen = false;
           try {
@@ -21831,6 +21835,7 @@ END`;
             makeId: (key) => makeId("outbox", turnId, key)
           });
         }
+        preparationStep = "final-save";
         commitTransaction(candidateDb);
         transactionOpen = false;
         committed = true;
@@ -21842,6 +21847,7 @@ END`;
         }
         return await exportCandidateImpl(candidate, receipt);
       } catch (err) {
+        const failedForeignKeys = foreignKeyCheck(candidateDb);
         if (!committed) {
           if (transactionOpen) rollbackTransaction(candidateDb);
           await discardPreparedImpl(candidate.token);
@@ -21851,7 +21857,7 @@ END`;
           await discardPreparedImpl(candidate.token);
         }
         if (err instanceof AtlasDbError) throw err;
-        throw new AtlasDbError("TURN_PREPARE_FAILED", `准备回合失败：${err.message}`, { sequencesUsed });
+        throw new AtlasDbError("TURN_PREPARE_FAILED", `准备回合失败（${preparationStep}）：${err.message}${failedForeignKeys.length ? "；未完成依赖：" + failedForeignKeys.map((v) => `${v.table}→${v.parent}`).join(", ") : ""}`, { sequencesUsed, preparationStep, foreignKeys: failedForeignKeys, groups: groupResults });
       }
     }
     async function runRepair(args) {
