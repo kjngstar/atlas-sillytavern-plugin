@@ -37,6 +37,7 @@
 #atlasDemo .viewport{background:#060b14;min-width:0;}
 #atlasDemo #map{touch-action:none;}
 #atlasDemo .hud-place{width:220px;pointer-events:none;}
+#atlasDemo .hud-place button{pointer-events:auto;}
 #atlasDemo .pl-name{font-size:14px;}
 #atlasDemo .pl-path{font-size:10px;line-height:1.6;}
 #atlasDemo .pl-grid{gap:4px;}
