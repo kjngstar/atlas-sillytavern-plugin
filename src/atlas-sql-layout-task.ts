@@ -19,10 +19,13 @@ export function buildSqlLayoutTask(db:SqlDatabase,branchId:string,input:TurnInpu
   const container=locations.find(l=>l.id===m.container_location_id)!;
   const kind=['city','district'].includes(String(container.kind))?'city':'floor';
   const frame=m.frame_json as Record<string,unknown>,scene=frame.atlasScene as Record<string,unknown>|undefined;
+  const cols=Number(frame.cols),rows=Number(frame.rows);
+  const mpp=Number(m.meters_per_cell)>0?Number(m.meters_per_cell):(kind==='floor'?(container.kind==='room'?12:24):1000)/Math.max(cols,rows);
+  const extent={width:cols*mpp,height:rows*mpp};
   const own=locations.filter(l=>l.map_id===m.id);
   const local=kind==='floor'&&container.kind==='room'?[container]:own;
   return {map:ref(m.id),name:m.name,kind,container:{ref:ref(container.id),kind:container.kind,name:container.name},
-   frame:{cols:frame.cols,rows:frame.rows,metersPerCell:m.meters_per_cell,scaleLocked:!!m.scale_locked},
+   frame:{cols:frame.cols,rows:frame.rows,metersPerCell:m.meters_per_cell,scaleLocked:!!m.scale_locked},extent,
    locations:local.map(l=>({ref:ref(l.id),name:l.name,kind:l.kind,parent:ref(l.parent_location_id)})),
    actors:characters.filter(c=>local.some(l=>l.id===c.location_id)).map(c=>({ref:ref(c.id),name:c.name,roomId:ref(c.location_id)})),
    savedConstraints:scene?.constraints??null};
@@ -34,9 +37,9 @@ export function buildSqlLayoutTask(db:SqlDatabase,branchId:string,input:TurnInpu
   mapLayoutFrame:'width/height 为估计米数；未标定时必须与 cols:rows 成比例。floor 通常 12×8 或 24×24，city 至少 900×700。已有尺度使用 cols*metersPerCell、rows*metersPerCell。',
   mapLayoutLocks:'保留 savedConstraints 的既有结构；新增陈设只用正文提到的实物，尺寸可以合理估计并在 why 说明。没有河流依据时 riverWidth=0。',
  });
- request.messages[1].content+='\n布局字段：floor rooms=[{id:地点引用,name,w,h,side:"north"或"south"}]；contents=[{id:"本图局部陈设ID",name,type:"bench"/"shelf"/"desk"/"reading"/"stairs",roomId:房间引用,w,h}]；actors=[{id:人物引用,roomId:房间引用,near:可选陈设ID}]。单独房间用 container.ref 作为唯一 rooms.id，房间尺寸应小于幅面；楼层或载具使用已提供子房间，不新增地点。city districts=[{id:地点引用,name,bank:"west"或"east",order:整数}]，buildings=[{id:地点引用,name,districtId:地块引用,w,h}]；没有已登记街区时允许用城市 container.ref 表示整个城市的单个范围；有河道才给 riverWidth 正数。不要输出其他操作。';
+ request.messages[1].content+='\n完整操作外层必须为 {"op":"map.layout.request","ref":"本图map引用","data":{"kind":"floor或city","spec":{"width":本图extent.width,"height":本图extent.height,"rooms":[],"contents":[],"actors":[]}},"why":"依据正文估计"}；幅面使用程序提供的 extent，实体尺寸小于幅面。布局字段：floor rooms=[{id:地点引用,name,w,h,side:"north"或"south"}]；contents=[{id:"本图局部陈设ID",name,type:"bench"/"shelf"/"desk"/"reading"/"stairs",roomId:房间引用,w,h}]；actors=[{id:人物引用,roomId:房间引用,near:可选陈设ID}]。单独房间用 container.ref 作为唯一 rooms.id，房间尺寸应小于幅面；楼层或载具使用已提供子房间，不新增地点。city districts=[{id:地点引用,name,bank:"west"或"east",order:整数}]，buildings=[{id:地点引用,name,districtId:地块引用,w,h}]；没有已登记街区时允许用城市 container.ref 表示整个城市的单个范围；有河道才给 riverWidth 正数。不要输出其他操作。';
  request.anchor=input.anchor;
  request.promptInput={injectionText:request.messages[1].content,userText:input.userText,assistantText:input.assistantText,
   loreSupplement:input.sourceSnapshot.filter(s=>s.kind==='lorebook').map(s=>s.text).join('\n'),baseRevision:input.anchor.baseRevision};
- return {request,mapIds:chosen.map(m=>String(m.id))};
+ return {request,mapIds:chosen.map(m=>String(m.id)),extents:Object.fromEntries(chosen.map((m,i)=>[String(m.id),scopes[i].extent]))};
 }

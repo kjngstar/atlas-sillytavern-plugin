@@ -908,7 +908,17 @@ export function createSqlRepository(options: RepositoryOptions) {
           allIssues.push(...extracted.issues,...parsed.issues);
           const layoutRefs=collectKnownRefs(createTableReadPort(candidateDb),branchId);
           const allowedRefs=new Set(layoutRefs.filter(r=>layoutTask.mapIds.includes(r.id)).flatMap(r=>[r.id,r.alias]));
-          const ops=parsed.operations.filter(op=>op.value.op==='map.layout.request'&&allowedRefs.has(op.value.ref??'')).map(op=>({...op,opId:`layout_${op.opId}`}));
+          const ops=parsed.operations.filter(op=>op.value.op==='map.layout.request'&&allowedRefs.has(op.value.ref??'')).map(op=>{
+            const id=layoutRefs.find(r=>r.id===op.value.ref||r.alias===op.value.ref)?.id;
+            const extent=id?layoutTask.extents[id]:undefined;
+            const data=op.value.data,spec=data?.spec;
+            // The program supplies the schematic canvas. Omitted canvas dimensions
+            // must not discard otherwise valid AI room and furniture constraints.
+            if(extent&&Number.isFinite(extent.width)&&Number.isFinite(extent.height)&&extent.width>0&&extent.height>0&&spec&&typeof spec==='object'&&!Array.isArray(spec)){
+              return {...op,opId:`layout_${op.opId}`,value:{...op.value,data:{...data,spec:{width:extent.width,height:extent.height,...spec}}}};
+            }
+            return {...op,opId:`layout_${op.opId}`};
+          });
           if(!ops.length)allIssues.push({code:'LAYOUT_NOT_GENERATED',path:'$.layout',message:'模型没有返回空间布局约束；已登记地点仍保留，可在当前地图点击生成布局重试',severity:'warning',retryable:true});
           const layoutCompiled=compileOperations({operations:ops,anchor,phase:'geography',clockS:clockBefore,revision:rev,
             tables:createTableReadPort(candidateDb),sources:{phase:'geography',snapshot:sourceSnapshot,clockS:clockBefore},makeId,
