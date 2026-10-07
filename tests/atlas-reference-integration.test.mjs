@@ -24,6 +24,16 @@ test('人物的实际子图点位优先于目录粗地图，地图计数和右�
  const d=projectReferenceData({mapView:view([{...map,points:map.points.filter(p=>p.kind==='location')},{mapId:'inside',name:'学校室内',kind:'site',containerLocationId:'L',points:[{entityId:'C',kind:'character',name:'艾琳',mapId:'inside',locationId:'L',x:5,y:5}]}]),catalogView:view(cat),viewMode:'author'});
  assert.equal(d.CAST[0].mapNodeId,'inside');assert.equal(d.ROOT.children[0].marks[0].id,'C');
 });
+
+test('容器自己的房间轮廓可序列化；父地图入口只存子图 ID，避免环形引用',()=>{
+ const child={mapId:'inside',name:'学校室内',kind:'interior',containerLocationId:'L',containerLocationKind:'room',points:[]};
+ const scene={layout:{kind:'floor',bounds:{x:0,y:0,w:12,h:8},corridor:{x:0,y:0,w:0,h:0},rooms:[{id:'L',name:'学校室内',x:2,y:1,w:8,h:6}],actors:[],groups:[],doors:[]}};
+ const d=projection({mapView:view([map,child]),sceneView:view([{mapId:'inside',scene}])});
+ assert.doesNotThrow(()=>JSON.stringify(d));
+ assert.equal(d.ROOT.marks.find(m=>m.id==='L').node.id,'inside');
+ assert.equal(d.ROOT.children[0].marks.find(m=>m.id==='L').node,null);
+ assert.equal(d.ROOT.children[0].hasLayout,true);
+});
 test('子图计数与右栏包含本图对象，父图仍汇总后代；实体 ID 与地图 ID 不混用',()=>{
  const D={ROOT:{id:'world',children:[{id:'car-map',children:[{id:'cabin-map',children:[]}]}]},LOCATIONS:[{id:'cabin-location',mapId:'car-map'}],CAST:[{id:'C',state:'present',locationId:'cabin-location',mapNodeId:'cabin-map'}],ITEMS:[{id:'I',locationId:'cabin-location',mapNodeId:'cabin-map'}],MESSAGES:[],meta:{}};
  const code=readFileSync(new URL('../ui/atlas-reference/js/app.js',import.meta.url),'utf8');

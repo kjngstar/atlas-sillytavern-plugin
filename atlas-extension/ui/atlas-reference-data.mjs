@@ -92,7 +92,7 @@ export function projectReferenceData({state={},mapView,sceneView,catalogView,tas
   out.LOCATIONS=catalog.filter(c=>c.entityKind==='location').map(c=>({id:c.entityId,name:c.name,description:c.summary??'',kind:'location',tag:'地点',code:'地点',mapId:c.mapId,children:[],known:true,
     childMapIds:maps.filter(m=>m.containerLocationId===c.entityId).map(m=>m.mapId)}));
   const locationMap=new Map(out.LOCATIONS.map(l=>[l.id,l]));
-  for(const n of nodes.values())for(const mark of n.marks){if(mark.type==='poi'){mark.node=nodes.get(locationMap.get(mark.id)?.childMapIds[0])??null;mark.placeId=mark.id;}}
+  for(const n of nodes.values())for(const mark of n.marks){if(mark.type==='poi'){const target=nodes.get(locationMap.get(mark.id)?.childMapIds[0]);mark.node=target&&target!==n?{id:target.id,known:target.known!==false}:null;mark.placeId=mark.id;}}
   const mapAt=id=>locationMap.get(id)?.childMapIds[0]??locationMap.get(id)?.mapId??null;
   out.CAST=catalog.filter(c=>c.entityKind==='character').map((c,i)=>{const p=pointIndex.get(c.entityId);return {id:c.entityId,name:c.name,initial:Array.from(c.name??'人').at(-1)||'人',role:p?.isProtagonist?'主角':'人物',c:COLORS[i%COLORS.length],
     state:c.locationId?'present':'unknown',tag:'已记录',locationId:c.locationId,mapNodeId:p?.mapId??mapAt(c.locationId)??c.mapId,description:c.summary??'',doing:'尚无行动记录',mind:'尚无后台想法记录',carry:[],known:true,

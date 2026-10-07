@@ -59,7 +59,7 @@ function showEntity(kind,id,focus=false){
  select(kind,id,true);return true;
 }
 const map=window.AtlasMap.create($('#map'),$('#minimap'),{
- onSelect(m){if(m?.placeId){if(state.singleClickEnter&&m.node)navigate(m.node);else inspectPlace(m.placeId);return;}if(!m){state.selected=null;state.inspectorTab='cast';renderInspector();return;}if(m.node){if(state.singleClickEnter)navigate(m.node);else inspectPlace(m.node.id);return;}
+ onSelect(m){if(m?.placeId){if(state.singleClickEnter&&m.node)navigate(m.node.id);else inspectPlace(m.placeId);return;}if(!m){state.selected=null;state.inspectorTab='cast';renderInspector();return;}if(m.node){if(state.singleClickEnter)navigate(m.node.id);else inspectPlace(m.node.id);return;}
   if(m.type==='char')select('character',m.id,true);
   else if(m.type==='item')select('item',m.id,true);
   else if(m.type==='message'||m.type==='sig')select('message',m.id||'m4',true);
