@@ -530,7 +530,7 @@ export function applyPendingSpatialRequests(input: ApplyPendingInput): ApplyPend
           request: job.request,
           issues: [...initial.issues, ...issues.filter((i) => i.severity === 'error')],
           turnId,
-          operationId: job.operationId,
+          operationId: `${job.operationId}:failed`,
           ports,
         });
         if (failed.group) groups.push(failed.group);
@@ -549,7 +549,7 @@ export function applyPendingSpatialRequests(input: ApplyPendingInput): ApplyPend
       characters,
       items,
       turnId,
-      operationId: job.operationId,
+      operationId: `${job.operationId}:scene`,
     }) as { ok: boolean; status: string; scene?: unknown; issues?: Array<Record<string, unknown>>; group?: Record<string, unknown> | null };
 
     const kitIssues = (compiled.issues ?? []).map((item) =>
@@ -573,7 +573,7 @@ export function applyPendingSpatialRequests(input: ApplyPendingInput): ApplyPend
         request: job.request,
         issues: errors,
         turnId,
-        operationId: job.operationId,
+        operationId: `${job.operationId}:failed`,
         ports,
       });
       if (failed.group) groups.push(failed.group);
@@ -602,7 +602,7 @@ export function applyPendingSpatialRequests(input: ApplyPendingInput): ApplyPend
         request: job.request,
         issues: [...errors, ...applyIssues],
         turnId,
-        operationId: job.operationId,
+        operationId: `${job.operationId}:failed`,
         ports,
       });
       if (failed.group) groups.push(failed.group);

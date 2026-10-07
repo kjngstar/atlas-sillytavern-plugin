@@ -10,6 +10,14 @@ const scope={chatId:'chat-1',branchId:'b1',revision:3,viewMode:'author'};
 const POV={...scope,viewMode:'pov'};
 const baseRooms=()=>Array.from({length:6},(_,i)=>({id:'room-'+i,name:'房间'+i,side:i%2?'north':'south',w:6,h:5}));
 const baseCtx=(locations)=>({scope,currentScope:scope,map:{id:'map-1',name:'fixture',metersPerCell:2,frame:{cols:15,rows:12}},entities:{locations,characters:['npc-1'],items:['item-1']}});
+test('没有河流资料的城市仍生成可读多边形、道路和建筑，水域为空',()=>{
+ const ctx={...baseCtx(['district','building']),map:{id:'map-1',name:'无河城市',metersPerCell:10,frame:{cols:120,rows:100}}};
+ const result=Kit.generateCity({riverWidth:0,districts:[{id:'district',name:'城区',bank:'west',order:0}],buildings:[{id:'building',districtId:'district',name:'市场',w:40,h:30}]},ctx);
+ assert.equal(result.ok,true,JSON.stringify(result.issues));assert.equal(result.scene.layout.river,null);
+ assert.equal(result.scene.layout.dock,null);assert.ok(result.scene.layout.districts[0].polygon.length>=3);
+ assert.ok(result.scene.layout.buildings.some(b=>b.id==='building'));assert.ok(result.scene.layout.roads.length);
+ assert.deepEqual(Kit.checkSceneDocument(result.scene),[]);
+});
 
 // ---------- 必修1：增量约束合并 ----------
 

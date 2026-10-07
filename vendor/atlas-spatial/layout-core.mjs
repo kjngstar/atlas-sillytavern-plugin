@@ -102,7 +102,7 @@ import * as B from './foundation.mjs';
       const g=groups.find(g=>g.id===i.on),b=g?.bodies.find(b=>['table','desk','shelf'].includes(b.type));
       if(b)items.push({...i,...center(b),roomId:g.roomId,type:'item',containerId:g.id,elevation:.8,quality:'layout'});else issues.push({id:i.id,code:'ITEM_CONTAINER_NOT_FOUND'});
     }
-    for(let x=1.5;x<spec.width;x+=3)lamps.push({id:'hall-light:'+x,type:'light',roomId:'corridor',x,y:bare.corridor.y+.22,elevation:2.8});
+    if(bare.corridor.h>0)for(let x=1.5;x<spec.width;x+=3)lamps.push({id:'hall-light:'+x,type:'light',roomId:'corridor',x,y:bare.corridor.y+.22,elevation:2.8});
     for(const v of [...(spec.contents||[]),...(spec.actors||[])])if(!bare.rooms.some(r=>r.id===v.roomId))issues.push({id:v.id,code:'ROOM_REF_UNKNOWN'});
     let path=[];if(actors.length>=2){
       const [a,b]=actors,[ra,rb]=[a,b].map(a=>bare.rooms.find(r=>r.id===a.roomId)),[da,db]=[ra,rb].map(r=>bare.doors.find(d=>d.roomId===r.id));
@@ -123,15 +123,16 @@ import * as B from './foundation.mjs';
     for(let i=1;i<sorted.length;i++){const t0=sorted[i-1],t1=sorted[i];if(t1-t0>1e-6)out.push({a:point(t0),b:point(t1),kind:water(river,point((t0+t1)/2))?'bridge':'road'});}return out;
   }
   function city(spec,previous=null){
-    if(!Number.isFinite(spec.width)||!Number.isFinite(spec.height)||spec.width<900||spec.height<700||!Number.isFinite(spec.riverWidth)||spec.riverWidth<=0||spec.riverWidth>spec.width*.15||!Array.isArray(spec.districts)||!spec.districts.length||new Set(spec.districts.map(d=>d.id)).size!==spec.districts.length||spec.districts.some(d=>!['west','east'].includes(d.bank)||!Number.isFinite(d.order)))return {ok:false,issues:[{id:spec.id,code:'CITY_INPUT_INVALID'}]};
+    if(!Number.isFinite(spec.width)||!Number.isFinite(spec.height)||spec.width<900||spec.height<700||!Number.isFinite(spec.riverWidth)||spec.riverWidth<0||spec.riverWidth>spec.width*.15||!Array.isArray(spec.districts)||!spec.districts.length||new Set(spec.districts.map(d=>d.id)).size!==spec.districts.length||spec.districts.some(d=>!['west','east'].includes(d.bank)||!Number.isFinite(d.order)))return {ok:false,issues:[{id:spec.id,code:'CITY_INPUT_INVALID'}]};
     const structure = v => JSON.stringify({width:v.width,height:v.height,riverWidth:v.riverWidth,seed:v.seed,districts:ordered(v.districts||[]).map(d=>[d.id,d.bank,d.order])});
     if(previous?.structureKey && previous.structureKey!==structure(spec))return {ok:false,issues:[{id:spec.id,code:'CITY_STRUCTURE_CHANGE_REQUIRES_REBUILD'}],kept:clone(previous)};
     const w=spec.width,h=spec.height,rng=rand(spec.seed||spec.id),origin=pt(w*.46,h*.5),raw=[];
     for(let i=0;i<14;i++){const a=i*Math.PI/7,rr=.95+rng()*.05;raw.push(pt(origin.x+Math.cos(a)*w*.405*rr,origin.y+Math.sin(a)*h*.405*rr));}
     const wall=hull(raw),river={cx:w*.62,amplitude:w*.035,width:spec.riverWidth,height:h},bankGap=river.width/2+18;
-    const left=clip(wall,1,0,river.cx-river.amplitude-bankGap),right=clip(wall,-1,0,-river.cx-river.amplitude-bankGap),districts=[];
+    const wet=river.width>0;
+    const left=wet?clip(wall,1,0,river.cx-river.amplitude-bankGap):clip(wall,1,0,w*.55),right=wet?clip(wall,-1,0,-river.cx-river.amplitude-bankGap):clip(wall,-1,0,-w*.55),districts=[];
     for(const bank of ['west','east']){
-      const group=ordered(spec.districts.filter(d=>d.bank===bank)).sort((a,b)=>a.order-b.order),land=bank==='west'?left:right;
+      const group=ordered(spec.districts.filter(d=>d.bank===bank)).sort((a,b)=>a.order-b.order),land=!wet&&group.length===spec.districts.length?wall:bank==='west'?left:right;
       const ys=land.map(p=>p.y),minY=Math.min(...ys),maxY=Math.max(...ys),xs=land.map(p=>p.x),cx=(Math.min(...xs)+Math.max(...xs))/2;
       const seeds=group.map((d,i)=>({...d,site:pt(cx+(i%2?1:-1)*w*.025,minY+(maxY-minY)*(i+.5)/group.length)}));
       for(const d of seeds){let poly=land;for(const other of seeds)if(other.id!==d.id){const a=d.site,b=other.site;poly=clip(poly,2*(b.x-a.x),2*(b.y-a.y),b.x*b.x+b.y*b.y-a.x*a.x-a.y*a.y);}
@@ -143,7 +144,7 @@ import * as B from './foundation.mjs';
     const horizontalIntersections=wall.map((a,i)=>{const b=wall[(i+1)%wall.length];if((a.y-centerY)*(b.y-centerY)<=0&&a.y!==b.y)return a.x+(b.x-a.x)*(centerY-a.y)/(b.y-a.y);return null;}).filter(x=>x!==null).sort((a,b)=>a-b);
     const gates=[{id:'gate-west',name:'西城门',x:horizontalIntersections[0],y:centerY},{id:'gate-east',name:'东城门',x:horizontalIntersections.at(-1),y:centerY}];
     const hubs=[pt(w*.31,centerY),pt(w*.77,centerY)],roads=[],segments=[],buildings=[],issues=[];
-    const addRoad=(id,a,b)=>{const road={id,a,b,width:12};roads.push(road);segments.push(...splitWater(a,b,river).map((s,i)=>({...s,id:id+':'+i,roadId:id,width:12})));};
+    const addRoad=(id,a,b)=>{const road={id,a,b,width:12};roads.push(road);segments.push(...(wet?splitWater(a,b,river):[{a,b,kind:'road'}]).map((s,i)=>({...s,id:id+':'+i,roadId:id,width:12})));};
     addRoad('avenue',pt(gates[0].x,centerY),pt(gates[1].x,centerY));
     for(const d of districts)addRoad('road:'+d.id,hubs[d.bank==='west'?0:1],d.site);
     // The inner ring is a connected road. Its river crossings become bridges by the same rule.
@@ -176,7 +177,7 @@ import * as B from './foundation.mjs';
     for(const d of districts)for(let i=0;i<(spec.blocksPerDistrict??8);i++)placeBuilding({id:'texture:'+d.id+':'+i,districtId:d.id,name:'街区轮廓',w:28+rng()*24,h:25+rng()*25},true);
     const rline=Array.from({length:81},(_,i)=>pt(riverX(river,h*i/80),h*i/80)),riverPolygon=rline.map(p=>pt(p.x-river.width/2,p.y)).concat([...rline].reverse().map(p=>pt(p.x+river.width/2,p.y)));
     const dock={id:'dock',name:'河岸码头',type:'dock',x:riverX(river,h*.68)-river.width/2,y:h*.68,bank:'west',width:river.width*.38};
-    return {ok:true,structureKey:structure(spec),id:spec.id,name:spec.name,kind:'city',bounds:{x:0,y:0,w,h},wall,origin,river,riverPolygon,districts,roads,segments,gates,buildings,dock,issues};
+    return {ok:true,structureKey:structure(spec),id:spec.id,name:spec.name,kind:'city',bounds:{x:0,y:0,w,h},wall,origin,river:wet?river:null,riverPolygon:wet?riverPolygon:[],districts,roads,segments,gates,buildings,dock:wet?dock:null,issues};
   }
   function segmentIntersectsRect(a,b,r){
     let lo=0,hi=1;const dx=b.x-a.x,dy=b.y-a.y;

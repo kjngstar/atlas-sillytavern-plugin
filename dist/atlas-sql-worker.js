@@ -2534,37 +2534,6 @@
     return request;
   }
 
-  // src/atlas-db-contract.ts
-  var BUSINESS_TABLES = [
-    "maps",
-    "locations",
-    "characters",
-    "items",
-    "factions",
-    "relations",
-    "routes",
-    "actions",
-    "journeys",
-    "events",
-    "information",
-    "rumor_fronts",
-    "knowledge",
-    "channels"
-  ];
-  var INTERNAL_TABLES = [
-    "entity_keys",
-    "branches",
-    "turns",
-    "turn_changes",
-    "mention_candidates",
-    "sync_outbox"
-  ];
-  var JOURNALED_TABLES = [...BUSINESS_TABLES, "entity_keys", "mention_candidates", "branches"];
-  var ATLAS_USER_TABLES = [...BUSINESS_TABLES, ...INTERNAL_TABLES];
-
-  // src/atlas-db-runtime.ts
-  var import_sql = __toESM(require_sql_wasm_browser(), 1);
-
   // src/atlas-db-schema.ts
   var ATLAS_SCHEMA_VERSION = 1;
   var C_COLUMNS = [
@@ -3409,6 +3378,183 @@ END`;
     db.run(`PRAGMA user_version = ${ATLAS_SCHEMA_VERSION}`);
   }
 
+  // src/atlas-db-codec.ts
+  var BOOLEAN_COLUMNS = /* @__PURE__ */ new Set(["scale_locked", "bidirectional", "is_pov"]);
+  function isJsonColumn(name) {
+    return name.endsWith("_json");
+  }
+  function isBooleanColumn(name) {
+    return BOOLEAN_COLUMNS.has(name);
+  }
+  function isPlainObject(v) {
+    return typeof v === "object" && v !== null && !Array.isArray(v);
+  }
+  function normalizeValue(table, column, value) {
+    const path = `${table}.${column}`;
+    if (value === void 0 || value === null) return { ok: true, value: null };
+    if (typeof value === "boolean") {
+      if (!isBooleanColumn(column)) {
+        return { ok: false, issue: { code: "CODEC_TYPE_INVALID", path, message: `列 ${column} 不是布尔列，不接受 boolean` } };
+      }
+      return { ok: true, value: value ? 1 : 0 };
+    }
+    if (typeof value === "number") {
+      if (!Number.isFinite(value)) {
+        return { ok: false, issue: { code: "CODEC_NUMBER_NOT_FINITE", path, message: `列 ${column} 不接受 NaN/Infinity` } };
+      }
+      return { ok: true, value };
+    }
+    if (typeof value === "string") return { ok: true, value };
+    if (value instanceof Uint8Array) return { ok: true, value };
+    if (isPlainObject(value) || Array.isArray(value)) {
+      if (!isJsonColumn(column)) {
+        return { ok: false, issue: { code: "CODEC_TYPE_INVALID", path, message: `列 ${column} 不是 JSON 列，不接受对象/数组` } };
+      }
+      try {
+        return { ok: true, value: JSON.stringify(value) };
+      } catch (err) {
+        return { ok: false, issue: { code: "CODEC_JSON_UNSERIALIZABLE", path, message: `列 ${column} 无法序列化：${err.message}` } };
+      }
+    }
+    return { ok: false, issue: { code: "CODEC_TYPE_INVALID", path, message: `列 ${column} 的值类型不受支持：${typeof value}` } };
+  }
+  function encodeRow(table, row2, options = {}) {
+    if (!isKnownTable(table)) {
+      return { ok: false, issues: [{ code: "CODEC_UNKNOWN_TABLE", path: String(table), message: `未知表名：${String(table)}` }] };
+    }
+    const spec = ATLAS_TABLE_COLUMNS[table];
+    const issues = [];
+    const values = [];
+    for (const column of spec) {
+      const present = Object.prototype.hasOwnProperty.call(row2, column.name);
+      const value = present ? row2[column.name] : null;
+      if (!column.nullable && (value === null || value === void 0)) {
+        issues.push({ code: "CODEC_REQUIRED_NULL", path: `${table}.${column.name}`, message: `列 ${column.name} 不允许 NULL` });
+        values.push(null);
+        continue;
+      }
+      const normalized = normalizeValue(table, column.name, value);
+      if (!normalized.ok) {
+        issues.push(normalized.issue);
+        values.push(null);
+        continue;
+      }
+      values.push(normalized.value);
+    }
+    if (options.requireAll) {
+      for (const key of Object.keys(row2)) {
+        if (!spec.some((c) => c.name === key)) {
+          issues.push({ code: "CODEC_UNKNOWN_COLUMN", path: `${table}.${key}`, message: `表 ${table} 没有列 ${key}` });
+        }
+      }
+    }
+    if (issues.length) return { ok: false, issues };
+    return { ok: true, columns: tableColumnNames(table), values, row: row2 };
+  }
+  function buildInsertSql(table, columns) {
+    const placeholders = columns.map(() => "?").join(", ");
+    return `INSERT INTO ${table} (${columns.join(", ")}) VALUES (${placeholders})`;
+  }
+  function buildUpdateSql(table, columns) {
+    const assignments = columns.map((c) => `${c} = ?`).join(", ");
+    if (table === "branches" || table === "turns" || table === "turn_changes" || table === "sync_outbox") {
+      return `UPDATE ${table} SET ${assignments} WHERE id = ?`;
+    }
+    return `UPDATE ${table} SET ${assignments} WHERE branch_id = ? AND id = ?`;
+  }
+  function buildDeleteSql(table) {
+    if (table === "branches" || table === "turns" || table === "turn_changes" || table === "sync_outbox") {
+      return `DELETE FROM ${table} WHERE id = ?`;
+    }
+    return `DELETE FROM ${table} WHERE branch_id = ? AND id = ?`;
+  }
+  function buildInsertOrIgnoreSql(table, columns) {
+    const placeholders = columns.map(() => "?").join(", ");
+    return `INSERT INTO ${table} (${columns.join(", ")}) VALUES (${placeholders}) ON CONFLICT DO NOTHING`;
+  }
+  function encodePartialRow(table, row2) {
+    if (!isKnownTable(table)) {
+      return { ok: false, issues: [{ code: "CODEC_UNKNOWN_TABLE", path: String(table), message: `未知表名：${String(table)}` }] };
+    }
+    const allowed = new Set(tableColumnNames(table));
+    const issues = [];
+    const columns = [];
+    const values = [];
+    for (const [key, value] of Object.entries(row2)) {
+      if (!allowed.has(key)) {
+        issues.push({ code: "CODEC_UNKNOWN_COLUMN", path: `${table}.${key}`, message: `表 ${table} 没有列 ${key}` });
+        continue;
+      }
+      const normalized = normalizeValue(table, key, value);
+      if (!normalized.ok) {
+        issues.push(normalized.issue);
+        continue;
+      }
+      columns.push(key);
+      values.push(normalized.value);
+    }
+    if (issues.length) return { ok: false, issues };
+    return { ok: true, columns, values, row: row2 };
+  }
+  function decodeRow(table, row2, options = {}) {
+    if (!isKnownTable(table)) {
+      return { ok: false, issues: [{ code: "CODEC_UNKNOWN_TABLE", path: String(table), message: `未知表名：${String(table)}` }] };
+    }
+    const spec = ATLAS_TABLE_COLUMNS[table];
+    const issues = [];
+    const out = {};
+    for (const column of spec) {
+      const raw = Object.prototype.hasOwnProperty.call(row2, column.name) ? row2[column.name] : null;
+      if (raw === null || raw === void 0) {
+        out[column.name] = null;
+        continue;
+      }
+      if (isBooleanColumn(column.name)) {
+        if (raw === 1 || raw === 0) {
+          out[column.name] = raw === 1;
+        } else if (typeof raw === "boolean") {
+          out[column.name] = raw;
+        } else {
+          issues.push({ code: "CODEC_BOOLEAN_INVALID", path: `${table}.${column.name}`, message: `布尔列 ${column.name} 的值不是 0/1：${String(raw)}` });
+        }
+        continue;
+      }
+      if (isJsonColumn(column.name)) {
+        if (typeof raw !== "string") {
+          issues.push({ code: "CODEC_JSON_TYPE", path: `${table}.${column.name}`, message: `JSON 列 ${column.name} 的 SQL 值必须是 TEXT` });
+          continue;
+        }
+        try {
+          out[column.name] = JSON.parse(raw);
+        } catch (err) {
+          issues.push({
+            code: "CODEC_JSON_INVALID",
+            path: `${table}.${column.name}`,
+            message: `JSON 列 ${column.name} 损坏：${err.message}`
+          });
+        }
+        continue;
+      }
+      if (typeof raw === "number" && !Number.isFinite(raw)) {
+        issues.push({ code: "CODEC_NUMBER_NOT_FINITE", path: `${table}.${column.name}`, message: `列 ${column.name} 读到 NaN/Infinity` });
+        continue;
+      }
+      out[column.name] = raw;
+    }
+    if (!options.allowExtra) {
+      for (const key of Object.keys(row2)) {
+        if (!spec.some((c) => c.name === key)) {
+          issues.push({ code: "CODEC_UNKNOWN_COLUMN", path: `${table}.${key}`, message: `表 ${table} 没有列 ${key}` });
+        }
+      }
+    }
+    if (issues.length) return { ok: false, issues };
+    return { ok: true, row: out };
+  }
+
+  // src/atlas-db-runtime.ts
+  var import_sql = __toESM(require_sql_wasm_browser(), 1);
+
   // src/atlas-db-assets.ts
   var import_meta = {};
   var ATLAS_SQL_VENDOR_FILES = [
@@ -3630,179 +3776,141 @@ END`;
     return sql.split("\n")[0].trim().slice(0, 120);
   }
 
-  // src/atlas-db-codec.ts
-  var BOOLEAN_COLUMNS = /* @__PURE__ */ new Set(["scale_locked", "bidirectional", "is_pov"]);
-  function isJsonColumn(name) {
-    return name.endsWith("_json");
+  // src/atlas-db-readport.ts
+  function pkColumns(table) {
+    if (table === "branches" || table === "turns" || table === "turn_changes" || table === "sync_outbox") return ["id"];
+    return ["branch_id", "id"];
   }
-  function isBooleanColumn(name) {
-    return BOOLEAN_COLUMNS.has(name);
-  }
-  function isPlainObject(v) {
-    return typeof v === "object" && v !== null && !Array.isArray(v);
-  }
-  function normalizeValue(table, column, value) {
-    const path = `${table}.${column}`;
-    if (value === void 0 || value === null) return { ok: true, value: null };
-    if (typeof value === "boolean") {
-      if (!isBooleanColumn(column)) {
-        return { ok: false, issue: { code: "CODEC_TYPE_INVALID", path, message: `列 ${column} 不是布尔列，不接受 boolean` } };
-      }
-      return { ok: true, value: value ? 1 : 0 };
-    }
-    if (typeof value === "number") {
-      if (!Number.isFinite(value)) {
-        return { ok: false, issue: { code: "CODEC_NUMBER_NOT_FINITE", path, message: `列 ${column} 不接受 NaN/Infinity` } };
-      }
-      return { ok: true, value };
-    }
-    if (typeof value === "string") return { ok: true, value };
-    if (value instanceof Uint8Array) return { ok: true, value };
-    if (isPlainObject(value) || Array.isArray(value)) {
-      if (!isJsonColumn(column)) {
-        return { ok: false, issue: { code: "CODEC_TYPE_INVALID", path, message: `列 ${column} 不是 JSON 列，不接受对象/数组` } };
-      }
-      try {
-        return { ok: true, value: JSON.stringify(value) };
-      } catch (err) {
-        return { ok: false, issue: { code: "CODEC_JSON_UNSERIALIZABLE", path, message: `列 ${column} 无法序列化：${err.message}` } };
-      }
-    }
-    return { ok: false, issue: { code: "CODEC_TYPE_INVALID", path, message: `列 ${column} 的值类型不受支持：${typeof value}` } };
-  }
-  function encodeRow(table, row2, options = {}) {
-    if (!isKnownTable(table)) {
-      return { ok: false, issues: [{ code: "CODEC_UNKNOWN_TABLE", path: String(table), message: `未知表名：${String(table)}` }] };
-    }
-    const spec = ATLAS_TABLE_COLUMNS[table];
-    const issues = [];
-    const values = [];
-    for (const column of spec) {
-      const present = Object.prototype.hasOwnProperty.call(row2, column.name);
-      const value = present ? row2[column.name] : null;
-      if (!column.nullable && (value === null || value === void 0)) {
-        issues.push({ code: "CODEC_REQUIRED_NULL", path: `${table}.${column.name}`, message: `列 ${column.name} 不允许 NULL` });
-        values.push(null);
-        continue;
-      }
-      const normalized = normalizeValue(table, column.name, value);
-      if (!normalized.ok) {
-        issues.push(normalized.issue);
-        values.push(null);
-        continue;
-      }
-      values.push(normalized.value);
-    }
-    if (options.requireAll) {
-      for (const key of Object.keys(row2)) {
-        if (!spec.some((c) => c.name === key)) {
-          issues.push({ code: "CODEC_UNKNOWN_COLUMN", path: `${table}.${key}`, message: `表 ${table} 没有列 ${key}` });
+  function createTableReadPort(db) {
+    return {
+      selectOne(table, branchId, id) {
+        if (!isKnownTable(table)) return null;
+        const pks = pkColumns(table);
+        const where = pks.map((c) => `${c} = ?`).join(" AND ");
+        const params = pks.includes("branch_id") ? [branchId, id] : [id];
+        const rows4 = queryBound(db, `SELECT * FROM ${table} WHERE ${where} LIMIT 1`, params);
+        if (rows4.length === 0) return null;
+        const decoded = decodeRow(table, rows4[0], { allowExtra: true });
+        if (!decoded.ok) throw new Error(`READ_DECODE_FAILED: ${table}: ${decoded.issues.map((i) => i.path).join(",")}`);
+        const row2 = decoded.row;
+        if (pks.includes("branch_id")) row2.branch_id = branchId;
+        return row2;
+      },
+      selectWhere(table, where, limit = 200) {
+        if (!isKnownTable(table)) return [];
+        const clauses = [];
+        const params = [];
+        for (const [key, value] of Object.entries(where)) {
+          if (!tableColumnNames(table).includes(key)) continue;
+          if (value === null) {
+            clauses.push(`${key} IS NULL`);
+          } else if (typeof value === "boolean") {
+            clauses.push(`${key} = ?`);
+            params.push(value ? 1 : 0);
+          } else if (typeof value === "number" || typeof value === "string") {
+            clauses.push(`${key} = ?`);
+            params.push(value);
+          } else if (Array.isArray(value)) {
+            if (value.length === 0) {
+              clauses.push("0");
+              continue;
+            }
+            clauses.push(`${key} IN (${value.map(() => "?").join(",")})`);
+            for (const v of value) params.push(v);
+          } else {
+            continue;
+          }
         }
+        const sql = `SELECT * FROM ${table}${clauses.length ? ` WHERE ${clauses.join(" AND ")}` : ""} ORDER BY ${tableColumnNames(table).includes("branch_id") ? "branch_id, " : ""}id ASC LIMIT ${Math.max(1, Math.min(1001, limit))}`;
+        const rows4 = queryBound(db, sql, params);
+        return rows4.map((row2) => {
+          const decoded = decodeRow(table, row2, { allowExtra: true });
+          if (!decoded.ok) throw new Error(`READ_DECODE_FAILED: ${table}: ${decoded.issues.map((i) => i.path).join(",")}`);
+          return decoded.row;
+        });
       }
-    }
-    if (issues.length) return { ok: false, issues };
-    return { ok: true, columns: tableColumnNames(table), values, row: row2 };
+    };
   }
-  function buildInsertSql(table, columns) {
-    const placeholders = columns.map(() => "?").join(", ");
-    return `INSERT INTO ${table} (${columns.join(", ")}) VALUES (${placeholders})`;
+
+  // src/atlas-sql-layout-task.ts
+  function buildSqlLayoutTask(db, branchId, input, turnId) {
+    const tables = createTableReadPort(db), known = collectKnownRefs(tables, branchId);
+    const locations = tables.selectWhere("locations", { branch_id: branchId, status: "active" }, 1e3);
+    const characters = tables.selectWhere("characters", { branch_id: branchId, status: "active" }, 1e3);
+    const maps = tables.selectWhere("maps", { branch_id: branchId, status: "active" }, 1e3);
+    const ref = (id) => known.find((r) => r.id === id)?.alias;
+    const eligible = maps.filter((m) => m.container_location_id && locations.some((l) => l.id === m.container_location_id && ["city", "district", "building", "vehicle", "room"].includes(String(l.kind))));
+    const occupied = new Set(characters.map((c) => c.location_id));
+    const chosen = (input.layoutMaps === "active" ? eligible.filter((m) => occupied.has(m.container_location_id)).sort((a, b) => String(a.id).localeCompare(String(b.id))) : eligible.filter((m) => input.layoutMaps?.includes(String(m.id)))).slice(0, 2);
+    if (!chosen.length) return null;
+    const scopes = chosen.map((m) => {
+      const container = locations.find((l) => l.id === m.container_location_id);
+      const kind = ["city", "district"].includes(String(container.kind)) ? "city" : "floor";
+      const frame = m.frame_json, scene = frame.atlasScene;
+      const own = locations.filter((l) => l.map_id === m.id);
+      const local = kind === "floor" && container.kind === "room" ? [container] : own;
+      return {
+        map: ref(m.id),
+        name: m.name,
+        kind,
+        container: { ref: ref(container.id), kind: container.kind, name: container.name },
+        frame: { cols: frame.cols, rows: frame.rows, metersPerCell: m.meters_per_cell, scaleLocked: !!m.scale_locked },
+        locations: local.map((l) => ({ ref: ref(l.id), name: l.name, kind: l.kind, parent: ref(l.parent_location_id) })),
+        actors: characters.filter((c) => local.some((l) => l.id === c.location_id)).map((c) => ({ ref: ref(c.id), name: c.name, roomId: ref(c.location_id) })),
+        savedConstraints: scene?.constraints ?? null
+      };
+    });
+    const request = buildStagePrompt({
+      phase: "geography",
+      allowedOps: ["map.layout.request", "noop"],
+      batchId: `layout_${turnId}`,
+      mapScope: JSON.stringify(scopes),
+      geoMissing: "必须为以上地图生成或更新可绘制空间布局，每张图一行 map.layout.request。仅有坐标点不算完成。",
+      geoSources: input.assistantText,
+      sourceSnapshot: input.sourceSnapshot,
+      mapLayoutIds: known.map((r) => `${r.alias}=${r.id}`).join("\n"),
+      mapLayoutFrame: "width/height 为估计米数；未标定时必须与 cols:rows 成比例。floor 通常 12×8 或 24×24，city 至少 900×700。已有尺度使用 cols*metersPerCell、rows*metersPerCell。",
+      mapLayoutLocks: "保留 savedConstraints 的既有结构；新增陈设只用正文提到的实物，尺寸可以合理估计并在 why 说明。没有河流依据时 riverWidth=0。"
+    });
+    request.messages[1].content += '\n布局字段：floor rooms=[{id:地点引用,name,w,h,side:"north"或"south"}]；contents=[{id:"本图局部陈设ID",name,type:"bench"/"shelf"/"desk"/"reading"/"stairs",roomId:房间引用,w,h}]；actors=[{id:人物引用,roomId:房间引用,near:可选陈设ID}]。单独房间用 container.ref 作为唯一 rooms.id，房间尺寸应小于幅面；楼层或载具使用已提供子房间，不新增地点。city districts=[{id:地点引用,name,bank:"west"或"east",order:整数}]，buildings=[{id:地点引用,name,districtId:地块引用,w,h}]；没有已登记街区时允许用城市 container.ref 表示整个城市的单个范围；有河道才给 riverWidth 正数。不要输出其他操作。';
+    request.anchor = input.anchor;
+    request.promptInput = {
+      injectionText: request.messages[1].content,
+      userText: input.userText,
+      assistantText: input.assistantText,
+      loreSupplement: input.sourceSnapshot.filter((s) => s.kind === "lorebook").map((s) => s.text).join("\n"),
+      baseRevision: input.anchor.baseRevision
+    };
+    return { request, mapIds: chosen.map((m) => String(m.id)) };
   }
-  function buildUpdateSql(table, columns) {
-    const assignments = columns.map((c) => `${c} = ?`).join(", ");
-    if (table === "branches" || table === "turns" || table === "turn_changes" || table === "sync_outbox") {
-      return `UPDATE ${table} SET ${assignments} WHERE id = ?`;
-    }
-    return `UPDATE ${table} SET ${assignments} WHERE branch_id = ? AND id = ?`;
-  }
-  function buildDeleteSql(table) {
-    if (table === "branches" || table === "turns" || table === "turn_changes" || table === "sync_outbox") {
-      return `DELETE FROM ${table} WHERE id = ?`;
-    }
-    return `DELETE FROM ${table} WHERE branch_id = ? AND id = ?`;
-  }
-  function buildInsertOrIgnoreSql(table, columns) {
-    const placeholders = columns.map(() => "?").join(", ");
-    return `INSERT INTO ${table} (${columns.join(", ")}) VALUES (${placeholders}) ON CONFLICT DO NOTHING`;
-  }
-  function encodePartialRow(table, row2) {
-    if (!isKnownTable(table)) {
-      return { ok: false, issues: [{ code: "CODEC_UNKNOWN_TABLE", path: String(table), message: `未知表名：${String(table)}` }] };
-    }
-    const allowed = new Set(tableColumnNames(table));
-    const issues = [];
-    const columns = [];
-    const values = [];
-    for (const [key, value] of Object.entries(row2)) {
-      if (!allowed.has(key)) {
-        issues.push({ code: "CODEC_UNKNOWN_COLUMN", path: `${table}.${key}`, message: `表 ${table} 没有列 ${key}` });
-        continue;
-      }
-      const normalized = normalizeValue(table, key, value);
-      if (!normalized.ok) {
-        issues.push(normalized.issue);
-        continue;
-      }
-      columns.push(key);
-      values.push(normalized.value);
-    }
-    if (issues.length) return { ok: false, issues };
-    return { ok: true, columns, values, row: row2 };
-  }
-  function decodeRow(table, row2, options = {}) {
-    if (!isKnownTable(table)) {
-      return { ok: false, issues: [{ code: "CODEC_UNKNOWN_TABLE", path: String(table), message: `未知表名：${String(table)}` }] };
-    }
-    const spec = ATLAS_TABLE_COLUMNS[table];
-    const issues = [];
-    const out = {};
-    for (const column of spec) {
-      const raw = Object.prototype.hasOwnProperty.call(row2, column.name) ? row2[column.name] : null;
-      if (raw === null || raw === void 0) {
-        out[column.name] = null;
-        continue;
-      }
-      if (isBooleanColumn(column.name)) {
-        if (raw === 1 || raw === 0) {
-          out[column.name] = raw === 1;
-        } else if (typeof raw === "boolean") {
-          out[column.name] = raw;
-        } else {
-          issues.push({ code: "CODEC_BOOLEAN_INVALID", path: `${table}.${column.name}`, message: `布尔列 ${column.name} 的值不是 0/1：${String(raw)}` });
-        }
-        continue;
-      }
-      if (isJsonColumn(column.name)) {
-        if (typeof raw !== "string") {
-          issues.push({ code: "CODEC_JSON_TYPE", path: `${table}.${column.name}`, message: `JSON 列 ${column.name} 的 SQL 值必须是 TEXT` });
-          continue;
-        }
-        try {
-          out[column.name] = JSON.parse(raw);
-        } catch (err) {
-          issues.push({
-            code: "CODEC_JSON_INVALID",
-            path: `${table}.${column.name}`,
-            message: `JSON 列 ${column.name} 损坏：${err.message}`
-          });
-        }
-        continue;
-      }
-      if (typeof raw === "number" && !Number.isFinite(raw)) {
-        issues.push({ code: "CODEC_NUMBER_NOT_FINITE", path: `${table}.${column.name}`, message: `列 ${column.name} 读到 NaN/Infinity` });
-        continue;
-      }
-      out[column.name] = raw;
-    }
-    if (!options.allowExtra) {
-      for (const key of Object.keys(row2)) {
-        if (!spec.some((c) => c.name === key)) {
-          issues.push({ code: "CODEC_UNKNOWN_COLUMN", path: `${table}.${key}`, message: `表 ${table} 没有列 ${key}` });
-        }
-      }
-    }
-    if (issues.length) return { ok: false, issues };
-    return { ok: true, row: out };
-  }
+
+  // src/atlas-db-contract.ts
+  var BUSINESS_TABLES = [
+    "maps",
+    "locations",
+    "characters",
+    "items",
+    "factions",
+    "relations",
+    "routes",
+    "actions",
+    "journeys",
+    "events",
+    "information",
+    "rumor_fronts",
+    "knowledge",
+    "channels"
+  ];
+  var INTERNAL_TABLES = [
+    "entity_keys",
+    "branches",
+    "turns",
+    "turn_changes",
+    "mention_candidates",
+    "sync_outbox"
+  ];
+  var JOURNALED_TABLES = [...BUSINESS_TABLES, "entity_keys", "mention_candidates", "branches"];
+  var ATLAS_USER_TABLES = [...BUSINESS_TABLES, ...INTERNAL_TABLES];
 
   // src/atlas-db-defaults.ts
   var LIST_COLUMNS = /* @__PURE__ */ new Set([
@@ -7592,6 +7700,7 @@ END`;
   }
   var LAYOUT_SPEC_REF_FIELDS = {
     rooms: { id: "location" },
+    contents: { roomId: "location" },
     actors: { id: "character", roomId: "location" },
     items: { id: "item" },
     districts: { id: "location" },
@@ -12361,7 +12470,7 @@ END`;
       const row2 = ctx.tables.selectOne("locations", ctx.branchId, id);
       if (!row2) continue;
       const owner = row2["map_id"] === null || row2["map_id"] === void 0 ? "" : String(row2["map_id"]);
-      if (owner !== "" && owner !== mapId) {
+      if (owner !== "" && owner !== mapId && id !== before.container_location_id) {
         result.issues.push(
           issue10(
             LAYOUT_REQUEST_CONFLICT,
@@ -13698,62 +13807,6 @@ END`;
     if (Array.isArray(value)) return `[${value.map((v) => stableStringify(v)).join(",")}]`;
     const entries = Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
     return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`).join(",")}}`;
-  }
-
-  // src/atlas-db-readport.ts
-  function pkColumns(table) {
-    if (table === "branches" || table === "turns" || table === "turn_changes" || table === "sync_outbox") return ["id"];
-    return ["branch_id", "id"];
-  }
-  function createTableReadPort(db) {
-    return {
-      selectOne(table, branchId, id) {
-        if (!isKnownTable(table)) return null;
-        const pks = pkColumns(table);
-        const where = pks.map((c) => `${c} = ?`).join(" AND ");
-        const params = pks.includes("branch_id") ? [branchId, id] : [id];
-        const rows4 = queryBound(db, `SELECT * FROM ${table} WHERE ${where} LIMIT 1`, params);
-        if (rows4.length === 0) return null;
-        const decoded = decodeRow(table, rows4[0], { allowExtra: true });
-        if (!decoded.ok) throw new Error(`READ_DECODE_FAILED: ${table}: ${decoded.issues.map((i) => i.path).join(",")}`);
-        const row2 = decoded.row;
-        if (pks.includes("branch_id")) row2.branch_id = branchId;
-        return row2;
-      },
-      selectWhere(table, where, limit = 200) {
-        if (!isKnownTable(table)) return [];
-        const clauses = [];
-        const params = [];
-        for (const [key, value] of Object.entries(where)) {
-          if (!tableColumnNames(table).includes(key)) continue;
-          if (value === null) {
-            clauses.push(`${key} IS NULL`);
-          } else if (typeof value === "boolean") {
-            clauses.push(`${key} = ?`);
-            params.push(value ? 1 : 0);
-          } else if (typeof value === "number" || typeof value === "string") {
-            clauses.push(`${key} = ?`);
-            params.push(value);
-          } else if (Array.isArray(value)) {
-            if (value.length === 0) {
-              clauses.push("0");
-              continue;
-            }
-            clauses.push(`${key} IN (${value.map(() => "?").join(",")})`);
-            for (const v of value) params.push(v);
-          } else {
-            continue;
-          }
-        }
-        const sql = `SELECT * FROM ${table}${clauses.length ? ` WHERE ${clauses.join(" AND ")}` : ""} ORDER BY ${tableColumnNames(table).includes("branch_id") ? "branch_id, " : ""}id ASC LIMIT ${Math.max(1, Math.min(1001, limit))}`;
-        const rows4 = queryBound(db, sql, params);
-        return rows4.map((row2) => {
-          const decoded = decodeRow(table, row2, { allowExtra: true });
-          if (!decoded.ok) throw new Error(`READ_DECODE_FAILED: ${table}: ${decoded.issues.map((i) => i.path).join(",")}`);
-          return decoded.row;
-        });
-      }
-    };
   }
 
   // src/atlas-sim-position.ts
@@ -15801,7 +15854,7 @@ END`;
     if (!b || ![b.x, b.y, b.w, b.h].every(finite) || b.w <= 0 || b.h <= 0) issues.push(diagnostic("SCENE_BOUNDS_INVALID", "$.layout.bounds", "地图范围必须为有限正尺寸"));
     const shape = doc.layout;
     if (shape?.kind === "floor" && (!plain(shape.corridor) || !["rooms", "groups", "bodies", "doors", "windows", "lamps", "actors", "items"].every((k) => Array.isArray(shape[k])))) issues.push(diagnostic("SCENE_LAYOUT_INCOMPLETE", "$.layout", "室内场景缺少绘制所需的数组"));
-    if (shape?.kind === "city" && (!plain(shape.river) || !plain(shape.dock) || !["wall", "riverPolygon", "districts", "roads", "segments", "gates", "buildings"].every((k) => Array.isArray(shape[k])))) issues.push(diagnostic("SCENE_LAYOUT_INCOMPLETE", "$.layout", "城市场景缺少绘制所需的数组"));
+    if (shape?.kind === "city" && (!(plain(shape.river) || shape.river === null) || !(plain(shape.dock) || shape.dock === null) || !["wall", "riverPolygon", "districts", "roads", "segments", "gates", "buildings"].every((k) => Array.isArray(shape[k])))) issues.push(diagnostic("SCENE_LAYOUT_INCOMPLETE", "$.layout", "城市场景缺少绘制所需的数组"));
     if (shape?.kind === "overview" && !Array.isArray(shape.pins)) issues.push(diagnostic("SCENE_LAYOUT_INCOMPLETE", "$.layout.pins", "概览场景缺少标点数组"));
     const rect = (p) => plain(p) && [p.x, p.y, p.w, p.h].every(finite) && p.w > 0 && p.h > 0;
     const point = (p) => plain(p) && finite(p.x) && finite(p.y);
@@ -15818,7 +15871,7 @@ END`;
       for (let i = 0; i < shape[key].length; i++) bad(shape[key][i], validate, "$.layout." + key + "[" + i + "]");
     };
     if (shape?.kind === "floor") {
-      bad(shape.corridor, rect, "$.layout.corridor");
+      bad(shape.corridor, (p) => rect(p) || plain(p) && [p.x, p.y, p.w, p.h].every(finite) && p.w === 0 && p.h === 0 && shape.rooms?.length === 1, "$.layout.corridor");
       collection2("rooms", (p) => rect(p) && ["north", "south"].includes(p.side), LIMITS.rooms);
       collection2("groups", (p) => rect(p) && Array.isArray(p.bodies) && p.bodies.every(rect), LIMITS.contents);
       collection2("bodies", rect);
@@ -15829,9 +15882,11 @@ END`;
       collection2("lamps", point);
     } else if (shape?.kind === "city") {
       bad(shape.wall, polygon2, "$.layout.wall");
-      bad(shape.riverPolygon, polygon2, "$.layout.riverPolygon");
-      bad(shape.dock, (p) => point(p) && finite(p.width) && p.width > 0, "$.layout.dock");
-      bad(shape.river, (p) => plain(p) && [p.cx, p.amplitude, p.width, p.height].every(finite) && p.width > 0 && p.height > 0, "$.layout.river");
+      if (shape.river !== null) {
+        bad(shape.riverPolygon, polygon2, "$.layout.riverPolygon");
+        bad(shape.dock, (p) => point(p) && finite(p.width) && p.width > 0, "$.layout.dock");
+        bad(shape.river, (p) => plain(p) && [p.cx, p.amplitude, p.width, p.height].every(finite) && p.width > 0 && p.height > 0, "$.layout.river");
+      } else if (shape.riverPolygon?.length || shape.dock !== null) issues.push(diagnostic("SCENE_GEOMETRY_INVALID", "$.layout.river", "无河流的城市不能保留水域或码头"));
       collection2("districts", (p) => plain(p) && polygon2(p.polygon) && point(p.site), LIMITS.districts);
       collection2("buildings", rect);
       collection2("gates", point);
@@ -15894,13 +15949,22 @@ END`;
       placed.push({ ...rect, mapId: spec.id, parentId: spec.parentId, polygon: polygon(rect) });
     };
     const specs = ordered(spec.rooms);
-    for (const r of specs.filter((r2) => r2.locked)) {
+    if (spec.singleRoom && specs.length === 1) {
+      const r = specs[0], x = r.locked?.x ?? (bounds.w - r.w) / 2, y = r.locked?.y ?? (bounds.h - r.h) / 2;
+      if (!contains({ x: 0.5, y: 0.5, w: bounds.w - 1, h: bounds.h - 1 }, { x, y, w: r.w, h: r.h })) return { ok: false, issues: [issue14(r.id, "ROOM_NO_SPACE")] };
+      save(r, x, y, r.locked ? "confirmed" : "layout");
+      corridor.x = 0;
+      corridor.y = y + r.h;
+      corridor.w = 0;
+      corridor.h = 0;
+    }
+    for (const r of specs.filter((r2) => r2.locked && !placed.some((p) => p.id === r2.id))) {
       const rect = { ...r, ...r.locked };
       if (!Number.isFinite(rect.x) || !Number.isFinite(rect.y) || !admissible(rect)) problems.push(issue14(r.id, "LOCK_CONFLICT"));
       else save(r, rect.x, rect.y, "confirmed");
     }
     if (problems.length) return { ok: false, issues: problems, kept: previous ? clone2(previous) : null };
-    for (const r of specs.filter((r2) => !r2.locked)) {
+    for (const r of specs.filter((r2) => !r2.locked && !placed.some((p) => p.id === r2.id))) {
       const p = old.get(r.id);
       if (p && p.side === r.side && p.w === r.w && p.h === r.h && admissible(p)) save(r, p.x, p.y, p.quality);
     }
@@ -16156,7 +16220,7 @@ END`;
       if (b) items.push({ ...i, ...center(b), roomId: g.roomId, type: "item", containerId: g.id, elevation: 0.8, quality: "layout" });
       else issues.push({ id: i.id, code: "ITEM_CONTAINER_NOT_FOUND" });
     }
-    for (let x = 1.5; x < spec.width; x += 3) lamps.push({ id: "hall-light:" + x, type: "light", roomId: "corridor", x, y: bare.corridor.y + 0.22, elevation: 2.8 });
+    if (bare.corridor.h > 0) for (let x = 1.5; x < spec.width; x += 3) lamps.push({ id: "hall-light:" + x, type: "light", roomId: "corridor", x, y: bare.corridor.y + 0.22, elevation: 2.8 });
     for (const v of [...spec.contents || [], ...spec.actors || []]) if (!bare.rooms.some((r) => r.id === v.roomId)) issues.push({ id: v.id, code: "ROOM_REF_UNKNOWN" });
     let path = [];
     if (actors.length >= 2) {
@@ -16196,7 +16260,7 @@ END`;
     return out;
   }
   function city(spec, previous = null) {
-    if (!Number.isFinite(spec.width) || !Number.isFinite(spec.height) || spec.width < 900 || spec.height < 700 || !Number.isFinite(spec.riverWidth) || spec.riverWidth <= 0 || spec.riverWidth > spec.width * 0.15 || !Array.isArray(spec.districts) || !spec.districts.length || new Set(spec.districts.map((d) => d.id)).size !== spec.districts.length || spec.districts.some((d) => !["west", "east"].includes(d.bank) || !Number.isFinite(d.order))) return { ok: false, issues: [{ id: spec.id, code: "CITY_INPUT_INVALID" }] };
+    if (!Number.isFinite(spec.width) || !Number.isFinite(spec.height) || spec.width < 900 || spec.height < 700 || !Number.isFinite(spec.riverWidth) || spec.riverWidth < 0 || spec.riverWidth > spec.width * 0.15 || !Array.isArray(spec.districts) || !spec.districts.length || new Set(spec.districts.map((d) => d.id)).size !== spec.districts.length || spec.districts.some((d) => !["west", "east"].includes(d.bank) || !Number.isFinite(d.order))) return { ok: false, issues: [{ id: spec.id, code: "CITY_INPUT_INVALID" }] };
     const structure = (v) => JSON.stringify({ width: v.width, height: v.height, riverWidth: v.riverWidth, seed: v.seed, districts: ordered2(v.districts || []).map((d) => [d.id, d.bank, d.order]) });
     if (previous?.structureKey && previous.structureKey !== structure(spec)) return { ok: false, issues: [{ id: spec.id, code: "CITY_STRUCTURE_CHANGE_REQUIRES_REBUILD" }], kept: clone3(previous) };
     const w = spec.width, h = spec.height, rng = rand(spec.seed || spec.id), origin = pt(w * 0.46, h * 0.5), raw = [];
@@ -16205,9 +16269,10 @@ END`;
       raw.push(pt(origin.x + Math.cos(a) * w * 0.405 * rr, origin.y + Math.sin(a) * h * 0.405 * rr));
     }
     const wall = hull(raw), river = { cx: w * 0.62, amplitude: w * 0.035, width: spec.riverWidth, height: h }, bankGap = river.width / 2 + 18;
-    const left = clip2(wall, 1, 0, river.cx - river.amplitude - bankGap), right = clip2(wall, -1, 0, -river.cx - river.amplitude - bankGap), districts = [];
+    const wet = river.width > 0;
+    const left = wet ? clip2(wall, 1, 0, river.cx - river.amplitude - bankGap) : clip2(wall, 1, 0, w * 0.55), right = wet ? clip2(wall, -1, 0, -river.cx - river.amplitude - bankGap) : clip2(wall, -1, 0, -w * 0.55), districts = [];
     for (const bank of ["west", "east"]) {
-      const group = ordered2(spec.districts.filter((d) => d.bank === bank)).sort((a, b) => a.order - b.order), land = bank === "west" ? left : right;
+      const group = ordered2(spec.districts.filter((d) => d.bank === bank)).sort((a, b) => a.order - b.order), land = !wet && group.length === spec.districts.length ? wall : bank === "west" ? left : right;
       const ys = land.map((p) => p.y), minY = Math.min(...ys), maxY = Math.max(...ys), xs = land.map((p) => p.x), cx = (Math.min(...xs) + Math.max(...xs)) / 2;
       const seeds = group.map((d, i) => ({ ...d, site: pt(cx + (i % 2 ? 1 : -1) * w * 0.025, minY + (maxY - minY) * (i + 0.5) / group.length) }));
       for (const d of seeds) {
@@ -16231,7 +16296,7 @@ END`;
     const addRoad = (id, a, b) => {
       const road = { id, a, b, width: 12 };
       roads.push(road);
-      segments.push(...splitWater(a, b, river).map((s, i) => ({ ...s, id: id + ":" + i, roadId: id, width: 12 })));
+      segments.push(...(wet ? splitWater(a, b, river) : [{ a, b, kind: "road" }]).map((s, i) => ({ ...s, id: id + ":" + i, roadId: id, width: 12 })));
     };
     addRoad("avenue", pt(gates[0].x, centerY), pt(gates[1].x, centerY));
     for (const d of districts) addRoad("road:" + d.id, hubs[d.bank === "west" ? 0 : 1], d.site);
@@ -16278,7 +16343,7 @@ END`;
     for (const d of districts) for (let i = 0; i < (spec.blocksPerDistrict ?? 8); i++) placeBuilding({ id: "texture:" + d.id + ":" + i, districtId: d.id, name: "街区轮廓", w: 28 + rng() * 24, h: 25 + rng() * 25 }, true);
     const rline = Array.from({ length: 81 }, (_, i) => pt(riverX(river, h * i / 80), h * i / 80)), riverPolygon = rline.map((p) => pt(p.x - river.width / 2, p.y)).concat([...rline].reverse().map((p) => pt(p.x + river.width / 2, p.y)));
     const dock = { id: "dock", name: "河岸码头", type: "dock", x: riverX(river, h * 0.68) - river.width / 2, y: h * 0.68, bank: "west", width: river.width * 0.38 };
-    return { ok: true, structureKey: structure(spec), id: spec.id, name: spec.name, kind: "city", bounds: { x: 0, y: 0, w, h }, wall, origin, river, riverPolygon, districts, roads, segments, gates, buildings, dock, issues };
+    return { ok: true, structureKey: structure(spec), id: spec.id, name: spec.name, kind: "city", bounds: { x: 0, y: 0, w, h }, wall, origin, river: wet ? river : null, riverPolygon: wet ? riverPolygon : [], districts, roads, segments, gates, buildings, dock: wet ? dock : null, issues };
   }
   function segmentIntersectsRect(a, b, r) {
     let lo = 0, hi = 1;
@@ -16438,6 +16503,7 @@ END`;
         const locked = trustedLock(ctx, "rooms", r.id);
         return { ...d, side: r.side, ...locked ? { locked } : {} };
       });
+      s.spec.singleRoom = s.spec.rooms.length === 1 && s.spec.rooms[0].id === s.map.containerLocationId;
       if (!s.spec.rooms.length) return failure("NO_VALID_ROOMS", "$.rooms", "没有可生成的有效房间", { kept: s.previous ? clone(s.previous) : null });
       if (s.spec.rooms.reduce((n, r) => n + Math.ceil(r.w / 0.2) * Math.ceil(r.h / 0.2), 0) > LIMITS.navigationCells) throw new Error("NAVIGATION_BUDGET_EXCEEDED");
       const roomIds = new Set(s.spec.rooms.map((r) => r.id));
@@ -16469,8 +16535,8 @@ END`;
       s = setup(value, context, "city");
       const ctx = context;
       s.constraintKeys = ["riverWidth", "seed", "blocksPerDistrict", "districts", "buildings"];
-      if (!finite(s.input.riverWidth) || s.input.riverWidth <= 0) return failure("RIVER_CONSTRAINT_REQUIRED", "$.riverWidth", "此生成器仅处理有明确河流约束的城市；其他城市使用已有地图轮廓", { kept: s.previous ? clone(s.previous) : null });
-      s.spec.riverWidth = s.input.riverWidth;
+      if (s.input.riverWidth !== void 0 && (!finite(s.input.riverWidth) || s.input.riverWidth < 0)) return failure("RIVER_CONSTRAINT_INVALID", "$.riverWidth", "河宽应为非负数，零表示无水系", { kept: s.previous ? clone(s.previous) : null });
+      s.spec.riverWidth = s.input.riverWidth ?? 0;
       s.spec.seed = label(context.seed) || s.map.id;
       s.spec.blocksPerDistrict = Number.isInteger(s.input.blocksPerDistrict) ? Math.max(0, Math.min(LIMITS.blocksPerDistrict, s.input.blocksPerDistrict)) : 8;
       s.spec.districts = collectAndMerge(s, "districts", LIMITS.districts, "locations", (r) => {
@@ -16862,6 +16928,7 @@ END`;
       if (!prepared.ok) return prepared;
       const mutations = prepared.mutation ? [prepared.mutation] : [], readSet = [{ table: "maps", rowId: mapRow.id, rowRev: mapRow.row_rev }], issues = [...result.issues], byId = new Map((locations ?? []).filter((l) => l.branch_id === scope.branchId).map((l) => [l.id, l]));
       for (const geo of sceneLocationGeometry(result.scene)) {
+        if (geo.entityId === mapRow.container_location_id) continue;
         const before = byId.get(geo.entityId);
         if (!before) return failure("LOCATION_REF_UNKNOWN", "$.locations", "场景引用的地点未在候选数据库建档");
         if (before.map_id !== mapRow.id) return failure("LOCATION_MAP_MISMATCH", "$.locations.map_id", "不能通过摆放把地点迁移到另一地图");
@@ -19961,7 +20028,7 @@ END`;
     const seq = Number(queryBound(input.db, "SELECT COALESCE(MAX(sequence),0) AS n FROM turn_changes WHERE turn_id=?", [input.turnId])[0].n) + 1;
     const journal = recordGroupChanges(input.db, { id: `simulation_${input.attemptKey ?? input.turnId}`, mutations, opIds: [`simulation:${input.attemptKey ?? input.turnId}`] }, { turnId: input.turnId, attemptId: input.attemptKey ?? "simulation", startSequence: seq });
     if (journal.issues.length) throw new AtlasDbError("JOURNAL_WRITE_FAILED", `后台变化不能可靠回退，候选不发布：${journal.issues.join("；")}`, { issues: journal.issues });
-    return { elapsed, clockAfter, clockMin, clockMax, seed, randomDraws, simulatedUntil: cursor, catchingUp, pendingActors, steps, issues, groups, modelOperations, operationContexts, worldChanged: mutations.some((m) => m.table !== "branches") };
+    return { elapsed, clockAfter, clockMin, clockMax, seed, randomDraws, simulatedUntil: cursor, catchingUp, pendingActors, steps, issues, groups, modelOperations, modelBatches: batches, operationContexts, worldChanged: mutations.some((m) => m.table !== "branches") };
   }
 
   // src/atlas-sql-scene-maps.ts
@@ -20824,7 +20891,7 @@ END`;
             request: job.request,
             issues: [...initial.issues, ...issues.filter((i) => i.severity === "error")],
             turnId,
-            operationId: job.operationId,
+            operationId: `${job.operationId}:failed`,
             ports
           });
           if (failed.group) groups.push(failed.group);
@@ -20841,7 +20908,7 @@ END`;
         characters,
         items,
         turnId,
-        operationId: job.operationId
+        operationId: `${job.operationId}:scene`
       });
       const kitIssues = (compiled.issues ?? []).map(
         (item) => spatialIssue(item, { mapId: job.mapId, branchId: scope.branchId, revision: scope.revision, operationId: job.operationId, turnId })
@@ -20862,7 +20929,7 @@ END`;
           request: job.request,
           issues: errors,
           turnId,
-          operationId: job.operationId,
+          operationId: `${job.operationId}:failed`,
           ports
         });
         if (failed.group) groups.push(failed.group);
@@ -20889,7 +20956,7 @@ END`;
           request: job.request,
           issues: [...errors, ...applyIssues],
           turnId,
-          operationId: job.operationId,
+          operationId: `${job.operationId}:failed`,
           ports
         });
         if (failed.group) groups.push(failed.group);
@@ -21486,7 +21553,7 @@ END`;
           { base: anchor.baseRevision, current: revAfterModel }
         );
       }
-      const compilePhase = "observe";
+      const compilePhase = input.phaseBatches.length === 1 ? input.phaseBatches[0] : "observe";
       const compiled = compileOperations({
         operations: parsedOperations,
         anchor,
@@ -21613,6 +21680,51 @@ END`;
         groupResults.push(...simulation.groups);
         parsedOperations.push(...simulation.modelOperations);
         timeChanged = simulation.clockAfter !== clockBefore;
+        const layoutTask = input.layoutMaps ? buildSqlLayoutTask(candidateDb, branchId, input, turnId) : null;
+        if (layoutTask && options.modelPort && foregroundBatches + (repairAttempted ? 1 : 0) + (simulation.modelBatches ?? 0) < ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn) {
+          commitTransaction(candidateDb);
+          transactionOpen = false;
+          try {
+            const response = await options.modelPort.request(layoutTask.request);
+            attempts.push({ id: `att_${attempts.length}`, kind: "layout", phase: "geography", http_status: response.httpStatus, response_chars: response.text?.length ?? 0, response_hash: sha256HexSync(response.text ?? "") });
+            if (input.isCurrent && !input.isCurrent() || currentRevision() !== anchor.baseRevision) throw new AtlasDbError("STALE_BASE", "布局生成期间聊天或世界修订已变化，候选不发布", {});
+            const extracted = extractPayload(response.text ?? ""), parsed = parseOperations(extracted.payload, { phase: "geography" });
+            allIssues.push(...extracted.issues, ...parsed.issues);
+            const layoutRefs = collectKnownRefs(createTableReadPort(candidateDb), branchId);
+            const allowedRefs = new Set(layoutRefs.filter((r) => layoutTask.mapIds.includes(r.id)).flatMap((r) => [r.id, r.alias]));
+            const ops = parsed.operations.filter((op) => op.value.op === "map.layout.request" && allowedRefs.has(op.value.ref ?? "")).map((op) => ({ ...op, opId: `layout_${op.opId}` }));
+            if (!ops.length) allIssues.push({ code: "LAYOUT_NOT_GENERATED", path: "$.layout", message: "模型没有返回空间布局约束；已登记地点仍保留，可在当前地图点击生成布局重试", severity: "warning", retryable: true });
+            const layoutCompiled = compileOperations({
+              operations: ops,
+              anchor,
+              phase: "geography",
+              clockS: clockBefore,
+              revision: rev,
+              tables: createTableReadPort(candidateDb),
+              sources: { phase: "geography", snapshot: sourceSnapshot, clockS: clockBefore },
+              makeId,
+              knownRefs: collectKnownRefs(createTableReadPort(candidateDb), branchId),
+              turnId,
+              allowedOps: ["map.layout.request"]
+            });
+            const groups = buildAtomicGroups(layoutCompiled.results.map((r) => ({ opId: r.opId, issues: r.result.issues, mutations: r.result.mutations, readSet: r.result.readSet, dependencies: r.result.dependencies, entityKeyWrites: r.result.entityKeyWrites, operationKeys: r.result.operationKeys })));
+            allIssues.push(...layoutCompiled.issues, ...groups.issues);
+            beginTransaction(candidateDb);
+            transactionOpen = true;
+            const appliedLayout = applyGroups(candidateDb, orderGroups(groups.groups).order, { branchId, turnId, attemptId: "layout", validate: true });
+            groupResults.push(...appliedLayout.groups);
+            parsedOperations.push(...ops);
+            for (const message of appliedLayout.journalIssues) allIssues.push({ code: "JOURNAL_WRITE_FAILED", path: "$.layout", message, severity: "error", retryable: false });
+          } catch (error) {
+            if (!transactionOpen) {
+              beginTransaction(candidateDb);
+              transactionOpen = true;
+            }
+            if (error instanceof AtlasDbError && error.code === "STALE_BASE") throw error;
+            allIssues.push({ code: "LAYOUT_MODEL_FAILED", path: "$.layout", message: `空间布局未生成：${error.message}。已登记的世界数据保留，可单独重试布局。`, severity: "warning", retryable: true });
+            attempts.push({ id: `att_${attempts.length}`, kind: "layout", phase: "geography", error: error.message });
+          }
+        }
         const spatialGuard = input.isCurrent ?? (() => true);
         const spatialPorts = {
           applyGroups: (db2, groups, ctx) => applyGroups(db2, groups, ctx),

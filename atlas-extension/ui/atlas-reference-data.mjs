@@ -47,9 +47,9 @@ export function referenceGeometry(map, document) {
     kind='city';
     const river=layout.river;
     geo={districts:(layout.districts??[]).filter(d=>d.polygon?.length>=3&&d.polygon.every(finite)).map((d,i)=>({id:d.id,name:d.name,c:COLORS[i%COLORS.length],pts:d.polygon.map(xy)})),
-      river:river?Array.from({length:41},(_,i)=>{const y=(river.height??b.h)*i/40;return xy({x:river.cx+Math.sin(y/(river.height||b.h)*Math.PI*2)*river.amplitude,y});}):null,
+      river:river?Array.from({length:41},(_,i)=>{const y=(river.height??b.h)*i/40;return xy({x:river.cx+Math.sin((y/(river.height||b.h)*2-.35)*Math.PI)*river.amplitude,y});}):null,
       riverWidth:river?.width?river.width*scale:null,wallPoints:(layout.wall??[]).filter(finite).map(xy),
-      avenues:(layout.roads??[]).filter(r=>finite(r.from)&&finite(r.to)).map(r=>({from:xy(r.from),to:xy(r.to)})),pois:[]};
+      avenues:(layout.roads??[]).filter(r=>finite(r.from??r.a)&&finite(r.to??r.b)).map(r=>({from:xy(r.from??r.a),to:xy(r.to??r.b)})),pois:[]};
   } else if(layout?.kind==='floor') {
     kind='floor';const corridor=rect(layout.corridor);
     geo={corridor:{...corridor,y:corridor.y+corridor.h/2},rooms:(layout.rooms??[]).map((r,i)=>({...rect(r),id:r.id,name:r.name,kind:'room',tint:['67,224,255','155,107,255','57,224,160','127,212,255'][i%4],live:false})),
@@ -82,7 +82,7 @@ export function projectReferenceData({state={},mapView,sceneView,catalogView,tas
     const overview=!saved&&projectOverview?projectOverview({view:mapView,mapId:m.mapId,scope:{chatId:state.chatId,branchId:mapView.branchId,revision:mapView.revision,viewMode}})?.scene:null;
     const g=referenceGeometry(m,saved??overview),level=REFERENCE_LEVELS.find(l=>l.key===g.kind)??REFERENCE_LEVELS[0];
     nodes.set(m.mapId,{id:m.mapId,mapId:m.mapId,name:m.name||m.mapId,kind:g.kind,code:level.code,tag:level.name,description:saved?'已保存的空间布局':'当前 SQL 地图概览；尚无已保存空间布局',
-      children:[],...g,host:true,containerLocationId:m.containerLocationId??null,sceneStatus:saved?'ready':'missing'});
+      children:[],...g,host:true,containerLocationId:m.containerLocationId??null,hasLayout:!!saved,sceneStatus:saved?'ready':'missing'});
   }
   const roots=[];
   for(const m of maps){const n=nodes.get(m.mapId),parent=nodes.get(owners.get(m.containerLocationId));if(parent&&parent!==n)parent.children.push(n);else if(!m.containerLocationId)roots.push(n);}

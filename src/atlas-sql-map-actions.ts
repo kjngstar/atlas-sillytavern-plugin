@@ -39,8 +39,11 @@ export async function handleSqlMapAction(session:SqlSession,action:string,body:R
   };
   const operations:ModelOperation[]=[],calibration:TurnInput['mapCalibration']=undefined;
   let mapBackground:TurnInput['mapBackground'];
+  let layoutMaps:TurnInput['layoutMaps'];
   let mapCalibration:TurnInput['mapCalibration']=calibration,manual=true,phases:TurnInput['phaseBatches']=[];
-  if(action==='map/repair'){
+  if(action==='map/layout'){
+    layoutMaps=[String(map(body.mapId).id)];
+  }else if(action==='map/repair'){
     const report=inspectSqlWorld(session);
     if(!report.canApply||body.reportToken!==report.reportToken)throw new AtlasDbError('SQL_PREVIEW_EXPIRED','地图检查报告已变化，请重新检查',{});
   }else if(action==='map/image/set'){
@@ -106,7 +109,7 @@ export async function handleSqlMapAction(session:SqlSession,action:string,body:R
   const input:TurnInput={anchor:{chatUid:session.chatUid,branchId:session.branchId,parentTurnId:session.repo.internal.currentHeadTurnId(),
     baseRevision:session.repo.internal.currentRevision(),baseStorageRevision:session.repo.storageRevision,hostMessageUid:`author:${action}:${body.requestId??hash}`,variantKey:'author',inputHash:hash},
     userText:String(body.userText??''),assistantText:String(body.assistantText??''),sourceSnapshot:sources,phaseBatches:phases,manual,operations,
-    narrativeKind:'manual',sceneMaps:true,sceneOnly:true,mapCalibration,mapBackground,legacyImport:action==='map/import'?{atlas:{world:body.world,maps:body.maps??null}}:undefined,povName:action==='map/protagonist'?String(body.name??body.playerName??''):undefined,isCurrent:typeof body.isCurrent==='function'?body.isCurrent as ()=>boolean:undefined};
+    narrativeKind:'manual',sceneMaps:true,sceneOnly:true,layoutMaps,mapCalibration,mapBackground,legacyImport:action==='map/import'?{atlas:{world:body.world,maps:body.maps??null}}:undefined,povName:action==='map/protagonist'?String(body.name??body.playerName??''):undefined,isCurrent:typeof body.isCurrent==='function'?body.isCurrent as ()=>boolean:undefined};
   if(action==='map/bootstrap'&&body.apply===false){
     const commit=await session.repo.prepareTurn(input),previewId=commit.token;
     let drafts=previews.get(session);if(!drafts){drafts=new Map();previews.set(session,drafts);}

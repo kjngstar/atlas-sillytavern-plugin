@@ -88,7 +88,7 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
     };
     const pending=presetQueue.then(task);presetQueue=pending.catch(()=>{});return pending;
   }
-  async function withTask(task,run){
+  async function withTask(task,run,checkCoreError=true){
     if(actionBusy||core.getState().pendingTurn||['queued','reading-context','committing'].includes(core.getState().turnPhase))throw Error('有回合正在处理，请稍后再试');
     if(!scope().enabled)throw Error('SQL 世界数据已关闭，请在酒馆扩展设置中开启');
     if(!core.getState().chatId)throw Error('请先打开一个酒馆聊天');
@@ -98,7 +98,7 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
     if(p&&original.apiPresets?.some(c=>c.id===p.connectionId)&&p.connectionId!==original.activeApiPresetId)commands.push({action:'api.activate',id:p.connectionId});
     if(p&&original.promptPresets?.some(c=>c.id===p.promptPresetId)&&p.promptPresetId!==original.activePromptPresetId)commands.push({action:'prompt.activate',id:p.promptPresetId});
     if(commands.length)await request('PUT','/settings',{action:'batch',commands});
-    try{const result=await run();const error=core.getState().lastError;if(error)throw Error(typeof error==='string'?error:error.message??error.code??'推演失败');return result;}finally{if(commands.length)await request('PUT','/settings',{action:'batch',commands:[{action:'api.activate',id:original.activeApiPresetId},{action:'prompt.activate',id:original.activePromptPresetId}]});await refresh(true);}
+    try{const result=await run();const error=checkCoreError&&core.getState().lastError;if(error)throw Error(typeof error==='string'?error:error.message??error.code??'推演失败');return result;}finally{if(commands.length)await request('PUT','/settings',{action:'batch',commands:[{action:'api.activate',id:original.activeApiPresetId},{action:'prompt.activate',id:original.activePromptPresetId}]});await refresh(true);}
     }catch(error){actionError=error.message;throw error;}finally{actionBusy=false;deliver(latest);}
   }
   const bridge={boot,ready(){ready=true;deliver(latest);render();if(core.getState().panelOpen!==false)frame.contentWindow?.focus?.();},inspect,persistPresets,
@@ -109,6 +109,16 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
     async setEnabled(enabled){if(actionBusy||core.getState().pendingTurn)throw Error('有回合正在处理，请稍后再试');if(!core.getState().binding)throw Error('请先建立当前聊天的世界');await core.setEnabled(enabled);await refresh(true);const s=core.getState();if(s.binding?.enabled!==enabled)throw Error(s.lastError??'推演开关未保存');},
     async advance(){return withTask(core.getState().binding?'advance':'initialize',async()=>{if(core.getState().binding)return core.manualAdvance();const result=await core.initializeWorld();if(result!==true)throw Error(core.getState().lastError??'当前聊天的世界初始化未完成');return result;});},
     async retry(){return withTask('repair',()=>core.retryLastCommit());},
+    async layout(mapId){return withTask('initialize',async()=>{
+      const captured=scope(),c=captured.context,chat=c?.chat??[],last=chat.filter(m=>!m.is_user&&!m.is_system).at(-1),user=chat.filter(m=>m.is_user&&!m.is_system).at(-1);
+      const result=await request('POST','/sql/chat/map/layout',{chatId:captured.state.chatId,mapId,
+        assistantText:last?.mes??'',userText:user?.mes??'',charDescription:c?.characters?.[c.characterId]?.description??'',
+        loreSupplement:(await lorePort?.read?.()??[]).filter(e=>e.enabled!==false).map(e=>e.content).join('\n')});
+      await core.refresh();await refresh(true);
+      const node=findNode(latest.ROOT,mapId);
+      if(!node?.hasLayout)throw Error(result.issues?.map(i=>i.message).join('；')||'没有生成可绘制的布局，请查看诊断');
+      return result;
+    },false);},
     async undo(){const messageId=latest.meta.rollbackMessageId;if(messageId===null||messageId===undefined)throw Error('没有可回退的已提交回合');
       const captured=scope();const result=await request('POST','/sql/chat/rollback',{chatUid:captured.state.chatId,chatId:captured.state.chatId,assistantMessageId:String(messageId)});
       if(result.coreSaved!==true)throw Error(result.issues?.map(x=>x.message).join('；')||'回退未保存');await core.refresh();await refresh(true);},

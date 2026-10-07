@@ -289,7 +289,7 @@ export function compileMapLayoutRequest(op: ParsedOperation, ctx: CompileContext
     const row = ctx.tables.selectOne('locations', ctx.branchId, id);
     if (!row) continue;
     const owner = row['map_id'] === null || row['map_id'] === undefined ? '' : String(row['map_id']);
-    if (owner !== '' && owner !== mapId) {
+    if (owner !== '' && owner !== mapId && id !== before.container_location_id) {
       result.issues.push(
         issue(
           LAYOUT_REQUEST_CONFLICT,

@@ -192,6 +192,7 @@ export async function handleSqlChatRequest(session: SqlSession, action: string, 
       narrativeKind: manual ? 'manual' : 'narrative',
       hostMessageIndex: request.assistantMessageId,
       sceneMaps:true,
+      layoutMaps:'active',
       isCurrent: typeof body.isCurrent === 'function' ? body.isCurrent as () => boolean : undefined };
     const result = await runSqlTurn(session, input);
     const receipt = toLegacyTurnReceipt(result.receipt, { coreSaved: result.coreSaved });

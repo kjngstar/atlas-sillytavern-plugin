@@ -39,7 +39,7 @@ export function checkSceneDocument(doc){
   const b=doc.layout?.bounds;if(!b||![b.x,b.y,b.w,b.h].every(finite)||b.w<=0||b.h<=0)issues.push(diagnostic('SCENE_BOUNDS_INVALID','$.layout.bounds','地图范围必须为有限正尺寸'));
   const shape=doc.layout;
   if(shape?.kind==='floor'&&(!plain(shape.corridor)||!['rooms','groups','bodies','doors','windows','lamps','actors','items'].every(k=>Array.isArray(shape[k]))))issues.push(diagnostic('SCENE_LAYOUT_INCOMPLETE','$.layout','室内场景缺少绘制所需的数组'));
-  if(shape?.kind==='city'&&(!plain(shape.river)||!plain(shape.dock)||!['wall','riverPolygon','districts','roads','segments','gates','buildings'].every(k=>Array.isArray(shape[k]))))issues.push(diagnostic('SCENE_LAYOUT_INCOMPLETE','$.layout','城市场景缺少绘制所需的数组'));
+  if(shape?.kind==='city'&&(!(plain(shape.river)||shape.river===null)||!(plain(shape.dock)||shape.dock===null)||!['wall','riverPolygon','districts','roads','segments','gates','buildings'].every(k=>Array.isArray(shape[k]))))issues.push(diagnostic('SCENE_LAYOUT_INCOMPLETE','$.layout','城市场景缺少绘制所需的数组'));
   if(shape?.kind==='overview'&&!Array.isArray(shape.pins))issues.push(diagnostic('SCENE_LAYOUT_INCOMPLETE','$.layout.pins','概览场景缺少标点数组'));
   const rect=p=>plain(p)&&[p.x,p.y,p.w,p.h].every(finite)&&p.w>0&&p.h>0;
   const point=p=>plain(p)&&finite(p.x)&&finite(p.y);
@@ -51,12 +51,14 @@ export function checkSceneDocument(doc){
     for(let i=0;i<shape[key].length;i++)bad(shape[key][i],validate,'$.layout.'+key+'['+i+']');
   };
   if(shape?.kind==='floor'){
-    bad(shape.corridor,rect,'$.layout.corridor');collection('rooms',p=>rect(p)&&['north','south'].includes(p.side),LIMITS.rooms);
+    bad(shape.corridor,p=>rect(p)||(plain(p)&&[p.x,p.y,p.w,p.h].every(finite)&&p.w===0&&p.h===0&&shape.rooms?.length===1),'$.layout.corridor');collection('rooms',p=>rect(p)&&['north','south'].includes(p.side),LIMITS.rooms);
     collection('groups',p=>rect(p)&&Array.isArray(p.bodies)&&p.bodies.every(rect),LIMITS.contents);collection('bodies',rect);
     collection('actors',point,LIMITS.actors);collection('items',point,LIMITS.items);collection('doors',p=>point(p)&&finite(p.width)&&p.width>0);collection('windows',point);collection('lamps',point);
   }else if(shape?.kind==='city'){
-    bad(shape.wall,polygon,'$.layout.wall');bad(shape.riverPolygon,polygon,'$.layout.riverPolygon');bad(shape.dock,p=>point(p)&&finite(p.width)&&p.width>0,'$.layout.dock');
-    bad(shape.river,p=>plain(p)&&[p.cx,p.amplitude,p.width,p.height].every(finite)&&p.width>0&&p.height>0,'$.layout.river');
+    bad(shape.wall,polygon,'$.layout.wall');
+    if(shape.river!==null){bad(shape.riverPolygon,polygon,'$.layout.riverPolygon');bad(shape.dock,p=>point(p)&&finite(p.width)&&p.width>0,'$.layout.dock');
+      bad(shape.river,p=>plain(p)&&[p.cx,p.amplitude,p.width,p.height].every(finite)&&p.width>0&&p.height>0,'$.layout.river');}
+    else if(shape.riverPolygon?.length||shape.dock!==null)issues.push(diagnostic('SCENE_GEOMETRY_INVALID','$.layout.river','无河流的城市不能保留水域或码头'));
     collection('districts',p=>plain(p)&&polygon(p.polygon)&&point(p.site),LIMITS.districts);collection('buildings',rect);collection('gates',point);
     for(const key of ['roads','segments'])collection(key,p=>plain(p)&&point(p.a)&&point(p.b)&&finite(p.width)&&p.width>0);
   }else if(shape?.kind==='overview'){

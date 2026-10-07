@@ -27,6 +27,8 @@ export function compileSceneGroup({request,scope,currentScope,mapRow,locations,c
   const prepared=buildSceneMutation({result,mapRow,scope,currentScope,turnId,operationId,expectedRowRev:mapRow.row_rev});if(!prepared.ok)return prepared;
   const mutations=prepared.mutation?[prepared.mutation]:[],readSet=[{table:'maps',rowId:mapRow.id,rowRev:mapRow.row_rev}],issues=[...result.issues],byId=new Map((locations??[]).filter(l=>l.branch_id===scope.branchId).map(l=>[l.id,l]));
   for(const geo of sceneLocationGeometry(result.scene)){
+    // The container is drawn inside its own child map without moving its parent-map pin.
+    if(geo.entityId===mapRow.container_location_id)continue;
     const before=byId.get(geo.entityId);if(!before)return failure('LOCATION_REF_UNKNOWN','$.locations','场景引用的地点未在候选数据库建档');
     if(before.map_id!==mapRow.id)return failure('LOCATION_MAP_MISMATCH','$.locations.map_id','不能通过摆放把地点迁移到另一地图');
     if(before.coord_precision==='exact'&&finite(before.grid_x)&&finite(before.grid_y)&&(Math.abs(before.grid_x-geo.gridX)>1e-6||Math.abs(before.grid_y-geo.gridY)>1e-6))return failure('LOCATION_GEOMETRY_LOCK_CONFLICT','$.locations','当前模板无法满足已确认的地点坐标；保留原场景',{entityId:before.id});

@@ -331,6 +331,8 @@ export type TurnInput = {
   operations?: ModelOperation[];
   /** Internal scene writer options, constructed by the host route, never from model text. */
   sceneMaps?: boolean;
+  /** Host-owned spatial task; at most two current/explicit maps, after entity settlement. */
+  layoutMaps?: 'active' | string[];
   mapCalibration?: import('./atlas-sql-scene-maps.ts').SqlMapCalibration;
   sceneOnly?: boolean;
   /** Trusted author import, never supplied by a model operation. */

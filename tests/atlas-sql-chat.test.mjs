@@ -8,6 +8,27 @@ import { queryBound } from '../src/atlas-db-runtime.ts';
 
 const room = '{"op":"location.upsert","ref":"new:library","data":{"name":"图书馆","kind":"room"}}';
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+test('普通酒馆楼层自动生成真实车厢房间和陈设，保存后重开仍有几何且不移动父地图位置',async()=>{
+ const f=fixture({model:async req=>{
+  if(req.phase==='geography'){
+   const scopes=JSON.parse(req.messages[1].content.split('\n').find(l=>l.startsWith('本图：')).slice(3));
+   return scopes.map(s=>JSON.stringify({op:'map.layout.request',ref:s.map,data:{kind:'floor',spec:{width:12,height:8,rooms:[{id:s.container.ref,name:'车厢',w:10,h:6,side:'north'}],contents:[{id:'bench',name:'软垫长椅',roomId:s.container.ref,type:'bench',w:2,h:.7},{id:'cabinet',name:'木柜',roomId:s.container.ref,type:'shelf',w:1,h:.5}]}}})).join('\n');
+  }
+  return '{"op":"location.upsert","ref":"new:cabin","data":{"name":"车厢","kind":"room"}}\n{"op":"character.upsert","ref":"new:player","data":{"name":"用户主角","identity":"乘客","role":"protagonist","location_ref":"new:cabin"}}';
+ }});
+ try{
+  await f.ui.refresh();await f.prepare();await f.end();
+  const s=await f.provider.session('chat-auto'),map=queryBound(s.repo.db,"SELECT * FROM maps WHERE container_location_id IS NOT NULL",[])[0];
+  const scene=JSON.parse(map.frame_json).atlasScene;
+  assert.ok(scene,JSON.stringify(f.ui.getState().receipts[0]));assert.equal(scene.layout.rooms.length,1);
+  assert.equal(scene.layout.groups.length,2);assert.equal(scene.layout.actors.length,1);assert.equal(scene.layout.corridor.h,0);
+  assert.equal(queryBound(s.repo.db,'SELECT map_id FROM locations WHERE id=?',[map.container_location_id])[0].map_id===map.id,false);
+  f.restartUi();await f.ui.refresh();
+  const read=await f.server.handle('POST','/sql/chat/ui-read',{chatUid:'chat-auto',kind:'scene',viewMode:'author'},{local:true});
+  assert.ok(read.body.data.items.some(x=>x.mapId===map.id));
+  assert.equal(f.calls(),2);assert.equal(f.saves(),1);
+ }finally{await f.close();}
+});
 test('空短引用目录的补交显示同批已保存人物的稳定 ID，关系可引用且不重建人物',async()=>{
  let repairs=0;
  const f=fixture({model:async req=>{

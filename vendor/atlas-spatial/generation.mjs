@@ -94,6 +94,7 @@ export function generateFloor(value,context){
     s.constraintKeys=['corridorWidth','rooms','contents','actors','items'];
     s.spec.corridorWidth=finite(s.input.corridorWidth)?s.input.corridorWidth:2;
     s.spec.rooms=collectAndMerge(s,'rooms',LIMITS.rooms,'locations',r=>{const d=ctx.locks?.rooms?.[r.id]?.w>0?dimensions(ctx.locks.rooms[r.id]):dimensions(r);if(d.w>LIMITS.roomSide||d.h>LIMITS.roomSide||!['north','south'].includes(r.side))throw new Error('ROOM_CONSTRAINT_UNSUPPORTED');const locked=trustedLock(ctx,'rooms',r.id);return {...d,side:r.side,...(locked?{locked}:{} )};});
+    s.spec.singleRoom=s.spec.rooms.length===1&&s.spec.rooms[0].id===s.map.containerLocationId;
     if(!s.spec.rooms.length)return failure('NO_VALID_ROOMS','$.rooms','没有可生成的有效房间',{kept:s.previous?clone(s.previous):null});
     if(s.spec.rooms.reduce((n,r)=>n+Math.ceil(r.w/.2)*Math.ceil(r.h/.2),0)>LIMITS.navigationCells)throw new Error('NAVIGATION_BUDGET_EXCEEDED');
     const roomIds=new Set(s.spec.rooms.map(r=>r.id));
@@ -109,8 +110,8 @@ export function generateCity(value,context){
   try{
     s=setup(value,context,'city');const ctx=context;
     s.constraintKeys=['riverWidth','seed','blocksPerDistrict','districts','buildings'];
-    if(!finite(s.input.riverWidth)||s.input.riverWidth<=0)return failure('RIVER_CONSTRAINT_REQUIRED','$.riverWidth','此生成器仅处理有明确河流约束的城市；其他城市使用已有地图轮廓',{kept:s.previous?clone(s.previous):null});
-    s.spec.riverWidth=s.input.riverWidth;
+    if(s.input.riverWidth!==undefined&&(!finite(s.input.riverWidth)||s.input.riverWidth<0))return failure('RIVER_CONSTRAINT_INVALID','$.riverWidth','河宽应为非负数，零表示无水系',{kept:s.previous?clone(s.previous):null});
+    s.spec.riverWidth=s.input.riverWidth??0;
     s.spec.seed=label(context.seed)||s.map.id; // The program provides the seed; the AI cannot reshuffle a saved city.
     s.spec.blocksPerDistrict=Number.isInteger(s.input.blocksPerDistrict)?Math.max(0,Math.min(LIMITS.blocksPerDistrict,s.input.blocksPerDistrict)):8;
     s.spec.districts=collectAndMerge(s,'districts',LIMITS.districts,'locations',r=>{if(!['west','east'].includes(r.bank)||!finite(r.order))throw new Error('DISTRICT_CONSTRAINT_INVALID');return {bank:r.bank,order:r.order};});

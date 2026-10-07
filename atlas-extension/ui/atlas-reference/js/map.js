@@ -505,6 +505,7 @@ function create(canvas, mini, hooks){
     const seed = hash(st.node.id);
     // 走廊
     const c = g.corridor;
+    if(c.w>0&&c.h>0){
     ctx.save();
     ctx.beginPath(); rrect(ctx,c.x,c.y-c.h/2,c.w,c.h,8);
     ctx.fillStyle='rgba(38,62,98,.55)'; ctx.fill();
@@ -534,6 +535,7 @@ function create(canvas, mini, hooks){
       ctx.beginPath(); rrect(ctx,bx,6,74,10,3); ctx.fill();
     });
     ctx.restore();
+    }
 
     // 房间
     (g.rooms||[]).forEach((r,i)=>{

@@ -29,6 +29,10 @@ function request(sources = []) {
   req.sourceSnapshot = sources;
   return req;
 }
+test('小型空间布局任务限制输出预算，原连接上限保存不变',async()=>{
+ const f=fixture(),req=request();req.batchId='layout_fixture';req.phase='geography';
+ await f.port.request(req);assert.equal(f.calls[0].body.max_tokens,4096);assert.equal(f.settings.apiPresets[0].maxTokens,9000);
+});
 
 test('Q03: SQL stage reuses the selected API connection and sends only semantic operation instructions', async () => {
   const f = fixture();

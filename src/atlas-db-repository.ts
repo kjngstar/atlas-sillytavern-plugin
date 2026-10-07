@@ -1,4 +1,5 @@
 import {buildSqlForegroundRequest} from './atlas-sql-model-context.ts';
+import {buildSqlLayoutTask} from './atlas-sql-layout-task.ts';
 import {applySqlLegacyImport} from './atlas-sql-legacy-import.ts';
 /**
  * atlas-db-repository.ts — 业务存储唯一入口（B05–B09 / B17–B19 / E06 / E09）。
@@ -759,7 +760,7 @@ export function createSqlRepository(options: RepositoryOptions) {
      * attention.propose / plan.propose 等非 observe 操作；把它们锁死在 observe
      * 会让 manual 编辑收不到 UNKNOWN_OPERATION 之外的任何结果。
      */
-    const compilePhase: Phase = 'observe';
+    const compilePhase: Phase = input.phaseBatches.length===1?input.phaseBatches[0]:'observe';
     const compiled = compileOperations({
       operations: parsedOperations,
       anchor,
@@ -889,6 +890,38 @@ export function createSqlRepository(options: RepositoryOptions) {
       groupResults.push(...simulation.groups);
       parsedOperations.push(...simulation.modelOperations);
       timeChanged = simulation.clockAfter !== clockBefore;
+
+      // Entities/maps must exist before the model can reference them. Release the
+      // isolated candidate transaction during the spatial model request as well.
+      const layoutTask=input.layoutMaps?buildSqlLayoutTask(candidateDb,branchId,input,turnId):null;
+      if(layoutTask&&options.modelPort&&foregroundBatches+(repairAttempted?1:0)+(simulation.modelBatches??0)<ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn){
+        commitTransaction(candidateDb);transactionOpen=false;
+        try{
+          const response=await options.modelPort.request(layoutTask.request);
+          attempts.push({id:`att_${attempts.length}`,kind:'layout',phase:'geography',http_status:response.httpStatus,response_chars:response.text?.length??0,response_hash:sha256HexSync(response.text??'')});
+          if(input.isCurrent&&!input.isCurrent()||currentRevision()!==anchor.baseRevision)throw new AtlasDbError('STALE_BASE','布局生成期间聊天或世界修订已变化，候选不发布',{});
+          const extracted=extractPayload(response.text??''),parsed=parseOperations(extracted.payload,{phase:'geography'});
+          allIssues.push(...extracted.issues,...parsed.issues);
+          const layoutRefs=collectKnownRefs(createTableReadPort(candidateDb),branchId);
+          const allowedRefs=new Set(layoutRefs.filter(r=>layoutTask.mapIds.includes(r.id)).flatMap(r=>[r.id,r.alias]));
+          const ops=parsed.operations.filter(op=>op.value.op==='map.layout.request'&&allowedRefs.has(op.value.ref??'')).map(op=>({...op,opId:`layout_${op.opId}`}));
+          if(!ops.length)allIssues.push({code:'LAYOUT_NOT_GENERATED',path:'$.layout',message:'模型没有返回空间布局约束；已登记地点仍保留，可在当前地图点击生成布局重试',severity:'warning',retryable:true});
+          const layoutCompiled=compileOperations({operations:ops,anchor,phase:'geography',clockS:clockBefore,revision:rev,
+            tables:createTableReadPort(candidateDb),sources:{phase:'geography',snapshot:sourceSnapshot,clockS:clockBefore},makeId,
+            knownRefs:collectKnownRefs(createTableReadPort(candidateDb),branchId),turnId,allowedOps:['map.layout.request']});
+          const groups=buildAtomicGroups(layoutCompiled.results.map(r=>({opId:r.opId,issues:r.result.issues,mutations:r.result.mutations,readSet:r.result.readSet,dependencies:r.result.dependencies,entityKeyWrites:r.result.entityKeyWrites,operationKeys:r.result.operationKeys})));
+          allIssues.push(...layoutCompiled.issues,...groups.issues);
+          beginTransaction(candidateDb);transactionOpen=true;
+          const appliedLayout=applyGroups(candidateDb,orderGroups(groups.groups).order,{branchId,turnId,attemptId:'layout',validate:true});
+          groupResults.push(...appliedLayout.groups);parsedOperations.push(...ops);
+          for(const message of appliedLayout.journalIssues)allIssues.push({code:'JOURNAL_WRITE_FAILED',path:'$.layout',message,severity:'error',retryable:false});
+        }catch(error){
+          if(!transactionOpen){beginTransaction(candidateDb);transactionOpen=true;}
+          if(error instanceof AtlasDbError&&error.code==='STALE_BASE')throw error;
+          allIssues.push({code:'LAYOUT_MODEL_FAILED',path:'$.layout',message:`空间布局未生成：${(error as Error).message}。已登记的世界数据保留，可单独重试布局。`,severity:'warning',retryable:true});
+          attempts.push({id:`att_${attempts.length}`,kind:'layout',phase:'geography',error:(error as Error).message});
+        }
+      }
 
       // M3/W03：布局请求结算 —— 仍在同一个受控候选事务内，before 最终外键/不变量检查。
       // 生成器是同步纯函数：这里不 await、不开新事务、不提交、不保存聊天。

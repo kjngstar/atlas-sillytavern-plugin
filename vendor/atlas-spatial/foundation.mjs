@@ -25,15 +25,20 @@
       placed.push({...rect,mapId:spec.id,parentId:spec.parentId,polygon:polygon(rect)});
     };
     const specs=ordered(spec.rooms);
+    if(spec.singleRoom&&specs.length===1){
+      const r=specs[0],x=r.locked?.x??(bounds.w-r.w)/2,y=r.locked?.y??(bounds.h-r.h)/2;
+      if(!contains({x:.5,y:.5,w:bounds.w-1,h:bounds.h-1},{x,y,w:r.w,h:r.h}))return {ok:false,issues:[issue(r.id,'ROOM_NO_SPACE')]};
+      save(r,x,y,r.locked?'confirmed':'layout');corridor.x=0;corridor.y=y+r.h;corridor.w=0;corridor.h=0;
+    }
     // Confirmed/manual geometry is reserved first. A contradiction is reported, never moved silently.
-    for(const r of specs.filter(r=>r.locked)){
+    for(const r of specs.filter(r=>r.locked&&!placed.some(p=>p.id===r.id))){
       const rect={...r,...r.locked};
       if(!Number.isFinite(rect.x)||!Number.isFinite(rect.y)||!admissible(rect)) problems.push(issue(r.id,'LOCK_CONFLICT'));
       else save(r,rect.x,rect.y,'confirmed');
     }
     if(problems.length) return {ok:false,issues:problems,kept:previous?clone(previous):null};
     // Preserve unchanged geometry from the saved layout before placing new rooms.
-    for(const r of specs.filter(r=>!r.locked)){
+    for(const r of specs.filter(r=>!r.locked&&!placed.some(p=>p.id===r.id))){
       const p=old.get(r.id);
       if(p && p.side===r.side && p.w===r.w && p.h===r.h && admissible(p)) save(r,p.x,p.y,p.quality);
     }

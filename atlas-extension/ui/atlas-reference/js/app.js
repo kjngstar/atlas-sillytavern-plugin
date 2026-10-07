@@ -105,6 +105,7 @@ const flags=[['showGrid','网格底图'],['showMarks','世界标记'],['showLabe
 function renderSwitches(){const el=$('#switchList');el.innerHTML=flags.map(([k,t])=>`<button class="sw-row ${map.state[k]?'on':''}" data-flag="${k}" aria-pressed="${map.state[k]}"><span>${t}</span><i class="sw"></i></button>`).join('');$('#zGrid').classList.toggle('on',map.state.showGrid);}
 function renderChips(){const g=current().geo,arr=current().kind==='city'?(g.districts||[]):[];$('#regionChips').innerHTML=arr.length?`<button class="chip ${!map.state.filter.size?'on':''}" data-filter-region="all">全部</button>`+arr.map(d=>`<button class="chip ${map.state.filter.has(d.id)?'on':''}" data-filter-region="${esc(d.id)}">${esc(d.name)}</button>`).join(''):'<span class="scope-note">筛选会随当前地图切换</span>';}
 function renderPlace(){const n=current(),roster=sceneCast(),items=sceneItems();$('#placeCard').innerHTML=`<div class="pl-top"><div><div class="pl-name">${esc(n.name)}</div><div class="pl-path mono">${esc(n.code)} · ${esc(D.LEVELS.find(l=>l.key===n.kind)?.name||n.tag)} <span class="diagram-tag">空间示意</span></div></div></div><div class="pl-grid"><div class="pl-cell"><span>人物</span><b class="c">${roster.length}</b></div><div class="pl-cell"><span>物品</span><b class="a">${items.length}</b></div><div class="pl-cell"><span>消息</span><b class="v">${sceneMessages().length}</b></div></div>`;
+ if(n.containerLocationId&&state.viewMode==='author')$('#placeCard').innerHTML+=`<div class="detail-actions"><button class="action-btn" data-layout="${esc(n.id)}" ${D.meta.engine?.busy?'disabled':''}>${n.hasLayout?'更新布局':'生成布局'}</button><span class="scope-note">${n.hasLayout?'已保存空间布局':'尚未生成空间布局'}</span></div>`;
  $('#scWorld').textContent=n.code+' · '+n.name;$('#scRatio').textContent=n.metric?'1 u ≈ '+formatDistance(n.metric):'未标定 · 坐标格';
  $('#ticker').textContent=D.EVENTS.filter(known).slice(0,2).map(e=>e.title).join('　 ·　 ');$('#ticker').style.animation='none';
 }
@@ -197,6 +198,7 @@ function advanceDemo(){state.dock='receipt';$('#dock').classList.remove('collaps
 function undoDemo(){return runHost('undo','世界已回退');}
 function resetDemo(){return runHost('refresh','已刷新当前世界');}
 function retry(){return runHost('retry','重试请求已处理');}
+ function generateLayout(id=state.nodeId){return runHost('layout','空间布局已保存',id);}
 function switchView(){return window.AtlasHost.setViewMode(state.viewMode==='author'?'pov':'author').catch(error=>toast(error.message,'warn'));}
 function download(name,content,type='application/json'){const blob=new Blob([content],{type}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;a.click();later(()=>URL.revokeObjectURL(url),1000);}
 function exportData(kind){if(kind==='receipts')download('atlas-turn-receipts.json',JSON.stringify(D.RECEIPTS,null,2));else if(kind==='diagnostics')download('atlas-preview-diagnostics.jsonl',D.DIAGNOSTICS.map(d=>JSON.stringify(d)).join('\n'),'application/x-ndjson');else download('atlas-preview-skin.json',JSON.stringify({kind:'atlas-preview-skin',version:1,accent:state.accent||'#43e0ff',motion:state.motion,radar:map.state.showRadar,coordinates:root.classList.contains('show-coordinates')},null,2));}
@@ -212,6 +214,7 @@ function paletteCommands(){return [
  ...D.MESSAGES.filter(known).map(m=>({title:m.src,sub:'消息 · '+m.status,run:()=>showFlow(m.id)})),
  {title:'预设与设置',sub:'API、提示词与地图交互',run:()=>setPage('prefs')},
  {title:'立即推演',sub:'观察人物、事件与消息变化',run:advanceDemo},
+ {title:'生成当前地图布局',sub:'绘制房间、陈设与城市范围',run:()=>generateLayout()},
  {title:'回退演示回合',sub:'恢复人物、时间与消息',run:undoDemo}
  ];}
 function paletteSuggestions(){
@@ -267,6 +270,7 @@ function bind(){
   if(b.dataset.loreToggle){try{await window.AtlasHost.toggleLore(b.dataset.loreToggle);toast('世界书条目已更新');}catch(error){toast(error.message,'warn');}return;}
   if(b.dataset.loreTarget){const l=D.LORE.find(l=>l.id===b.dataset.loreTarget);if(!l.target){toast('当前条目没有匹配到已记录对象','warn');return;}if(byId(l.target))navigate(l.target);else showEntity('character',l.target,true);return;}
   if(b.hasAttribute('data-demo-next')){advanceDemo();return;}
+  if(b.hasAttribute('data-layout')){generateLayout(b.dataset.layout);return;}
   if(b.hasAttribute('data-skin-reset')){applySkin({kind:'atlas-preview-skin',version:1,accent:'#43e0ff',motion:true,radar:true,coordinates:false});saveSkin();renderPage();return;}
   if(b.dataset.command!=null){runCommand(+b.dataset.command);return;}
   if(b.classList.contains('rail-ava')||b.id==='viewBadge'){switchView();return;}

@@ -273,11 +273,11 @@ function scanNewRefs(data: unknown, visit: (hit: NewRefHit) => void): void {
 
 /**
  * spec 集合 → 引用字段及期望的实体类型。
- * `contents` **不在**表里：家具 group 的 id 是局部视觉 ID，
- * 不进 entity_keys、不声明依赖，只作为 near/on 的匹配池。
+ * contents.id 是局部视觉 ID，不进 entity_keys；contents.roomId 是真实地点引用。
  */
 export const LAYOUT_SPEC_REF_FIELDS: Readonly<Record<string, Readonly<Record<string, RefKind>>>> = {
   rooms: { id: 'location' },
+  contents: { roomId: 'location' },
   actors: { id: 'character', roomId: 'location' },
   items: { id: 'item' },
   districts: { id: 'location' },

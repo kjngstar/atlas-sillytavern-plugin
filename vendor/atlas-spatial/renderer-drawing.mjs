@@ -115,13 +115,13 @@ const ctx=canvas.getContext('2d');
         for(let y=bounds.y;y<bounds.y+bounds.h;y+=36)line([{x:bounds.x,y},{x:bounds.x+bounds.w,y}],alpha(color,.065),.45);
         glow(d.site,alpha(color,.055),Math.min(120,bounds.h*k*.6));ctx.restore();
       }
-      const riverBounds={x:s.river.cx-s.river.amplitude-s.river.width/2,y:0,w:s.river.width+s.river.amplitude*2,h:s.bounds.h};
+      if(s.river){const riverBounds={x:s.river.cx-s.river.amplitude-s.river.width/2,y:0,w:s.river.width+s.river.amplitude*2,h:s.bounds.h};
       poly(s.riverPolygon,gradient(riverBounds,'#12609f65','#0a315b80'));
       for(const bank of [s.riverPolygon.slice(0,81),s.riverPolygon.slice(81)]){
         ctx.save();ctx.shadowColor=C.cyan;ctx.shadowBlur=9;line(bank,'#57bfe96b',1);ctx.restore();
       }
       const riverLine=s.riverPolygon.slice(0,81).map(q=>({x:q.x+s.river.width/2,y:q.y}));line(riverLine,'#8ae3ff28',.6,[2,13]);
-      for(let y=80;y<s.bounds.h;y+=92){const x=E.riverX(s.river,y);line([{x:x-s.river.width*.2,y},{x:x+s.river.width*.13,y:y-5}],'#69d2ea25',.6)}
+      for(let y=80;y<s.bounds.h;y+=92){const x=E.riverX(s.river,y);line([{x:x-s.river.width*.2,y},{x:x+s.river.width*.13,y:y-5}],'#69d2ea25',.6)}}
       for(const road of s.segments){
         const w=Math.max(1.3,road.width*k);line([road.a,road.b],'#95c1e21a',w+2);line([road.a,road.b],road.kind==='bridge'?'#ffd1848c':'#b2cdeb4b',w);
         if(road.kind==='bridge'){
@@ -153,7 +153,7 @@ const ctx=canvas.getContext('2d');
 
       for(let i=0;i<s.districts.length;i++){const d=s.districts[i];mapLabel(d.name,{x:d.site.x,y:d.site.y-55},palette[i%palette.length],12);}
       for(const gate of s.gates){diamond(gate,C.gold);mapLabel(gate.name,{x:gate.x,y:gate.y-60},'#e5bd79',11)}
-      ctx.save();ctx.shadowColor=C.gold;ctx.shadowBlur=5;line([{x:s.dock.x-28,y:s.dock.y},{x:s.dock.x+s.dock.width,y:s.dock.y}],'#ffdd968a',3);ctx.restore();mapLabel(s.dock.name,{x:s.dock.x-95,y:s.dock.y-45},'#e5bd79',11);
+      if(s.dock){ctx.save();ctx.shadowColor=C.gold;ctx.shadowBlur=5;line([{x:s.dock.x-28,y:s.dock.y},{x:s.dock.x+s.dock.width,y:s.dock.y}],'#ffdd968a',3);ctx.restore();mapLabel(s.dock.name,{x:s.dock.x-95,y:s.dock.y-45},'#e5bd79',11);}
     }
 
 return {floor,city,grid,line,poly,rect,dot,diamond,text,mapLabel,resetLabels(){labelBoxes=[];},labels(){return labelBoxes.slice();}};
