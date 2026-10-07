@@ -666,13 +666,13 @@ test('T08-15 真实编译器（P02 前向引用）：新建地点与人物按组
       })),
     );
     assert.deepEqual(built.issues, []);
-    assert.equal(built.groups.length, 2);
-    // §2.2：四张实体表的 id 同时引用 entity_keys；身份和详情不能拆到两组。
+    assert.equal(built.groups.length, 1);
+    // 新人物依赖本批新地点，身份、详情和前向引用必须一起落库或回滚。
     const tableSets = built.groups.map((group) => group.mutations.map((m) => m.table).sort());
-    assert.deepEqual(tableSets.sort(), [['characters', 'entity_keys'], ['entity_keys', 'locations']]);
+    assert.deepEqual(tableSets, [['characters', 'entity_keys', 'entity_keys', 'locations']]);
 
     const applied = applyGroups(seed.db, orderGroups(built.groups).order, APPLY_CTX);
-    assert.deepEqual(applied.groups.map((entry) => entry.status), ['applied', 'applied']);
+    assert.deepEqual(applied.groups.map((entry) => entry.status), ['applied']);
 
     const school = seed.db.exec(
       `SELECT id, name, parent_location_id, grid_x FROM locations WHERE branch_id='${IDS.branchMain}' AND name='圣光学校' AND id <> '${IDS.L2}'`,
