@@ -3957,8 +3957,9 @@ function buildSqlLayoutTask(db, branchId, input, turnId) {
     const mpp = Number(m.meters_per_cell) > 0 ? Number(m.meters_per_cell) : (kind === "floor" ? container.kind === "room" ? 12 : 24 : 1e3) / Math.max(cols2, rows4);
     const extent = { width: cols2 * mpp, height: rows4 * mpp };
     const own = locations.filter((l) => l.map_id === m.id);
-    const local = kind === "floor" && container.kind === "room" ? [container] : own;
-    const baselineRooms = kind === "floor" && container.kind === "room" ? [{ id: ref(container.id), name: container.name, w: extent.width * 0.75, h: extent.height * 0.75, side: "north" }] : [];
+    const standalone = kind === "floor" && (container.kind === "room" || container.kind === "vehicle" && !own.length);
+    const local = standalone ? [container] : own;
+    const baselineRooms = standalone ? [{ id: ref(container.id), name: container.name, w: Math.min(extent.width * 0.75, container.kind === "vehicle" ? 4 : Infinity), h: Math.min(extent.height * 0.75, container.kind === "vehicle" ? 6 : Infinity), side: "north" }] : [];
     return {
       map: ref(m.id),
       name: m.name,

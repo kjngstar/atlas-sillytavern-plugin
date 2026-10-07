@@ -26,12 +26,12 @@ test('普通酒馆楼层自动生成真实车厢房间和陈设，保存后重�
  const f=fixture({model:async req=>{
   if(req.phase==='geography'){
    const scopes=JSON.parse(req.messages[1].content.split('\n').find(l=>l.startsWith('本图：')).slice(3));
-   assert.deepEqual(scopes[0].extent,{width:12,height:8});
+   assert.deepEqual(scopes[0].extent,{width:24,height:24});
    assert.equal(scopes[0].baselineRooms[0].id,scopes[0].container.ref);
    // The model can assemble contents using the program-owned canvas and room.
    return scopes.map(s=>JSON.stringify({op:'map.layout.request',ref:s.map,data:{kind:'floor',spec:{contents:[{id:'bench',name:'软垫长椅',roomId:s.container.ref,type:'bench',w:2,h:.7},{id:'cabinet',name:'木柜',roomId:s.container.ref,type:'shelf',w:1,h:.5}]}}})).join('\n');
   }
-  return '{"op":"location.upsert","ref":"new:cabin","data":{"name":"车厢","kind":"room"}}\n{"op":"character.upsert","ref":"new:player","data":{"name":"用户主角","identity":"乘客","role":"protagonist","location_ref":"new:cabin"}}';
+  return '{"op":"location.upsert","ref":"new:cabin","data":{"name":"车厢","kind":"vehicle"}}\n{"op":"character.upsert","ref":"new:player","data":{"name":"用户主角","identity":"乘客","role":"protagonist","location_ref":"new:cabin"}}';
  }});
  try{
   await f.ui.refresh();await f.prepare();await f.end();
@@ -42,7 +42,7 @@ test('普通酒馆楼层自动生成真实车厢房间和陈设，保存后重�
   assert.equal(queryBound(s.repo.db,'SELECT map_id FROM locations WHERE id=?',[map.container_location_id])[0].map_id===map.id,false);
   f.restartUi();await f.ui.refresh();
   const read=await f.server.handle('POST','/sql/chat/ui-read',{chatUid:'chat-auto',kind:'scene',viewMode:'author'},{local:true});
-  assert.ok(read.body.data.items.some(x=>x.mapId===map.id));
+  assert.equal(read.body.data.items.find(x=>x.mapId===map.id)?.scene?.layout.rooms.length,1,JSON.stringify(read.body.data));
   assert.equal(f.calls(),2);assert.equal(f.saves(),1);
  }finally{await f.close();}
 });

@@ -23,8 +23,9 @@ export function buildSqlLayoutTask(db:SqlDatabase,branchId:string,input:TurnInpu
   const mpp=Number(m.meters_per_cell)>0?Number(m.meters_per_cell):(kind==='floor'?(container.kind==='room'?12:24):1000)/Math.max(cols,rows);
   const extent={width:cols*mpp,height:rows*mpp};
   const own=locations.filter(l=>l.map_id===m.id);
-  const local=kind==='floor'&&container.kind==='room'?[container]:own;
-  const baselineRooms=kind==='floor'&&container.kind==='room'?[{id:ref(container.id),name:container.name,w:extent.width*.75,h:extent.height*.75,side:'north'}]:[];
+  const standalone=kind==='floor'&&(container.kind==='room'||container.kind==='vehicle'&&!own.length);
+  const local=standalone?[container]:own;
+  const baselineRooms=standalone?[{id:ref(container.id),name:container.name,w:Math.min(extent.width*.75,container.kind==='vehicle'?4:Infinity),h:Math.min(extent.height*.75,container.kind==='vehicle'?6:Infinity),side:'north'}]:[];
   return {map:ref(m.id),name:m.name,kind,container:{ref:ref(container.id),kind:container.kind,name:container.name},
    frame:{cols:frame.cols,rows:frame.rows,metersPerCell:m.meters_per_cell,scaleLocked:!!m.scale_locked},extent,baselineRooms,
    locations:local.map(l=>({ref:ref(l.id),name:l.name,kind:l.kind,parent:ref(l.parent_location_id)})),
