@@ -915,7 +915,10 @@ export function createSqlRepository(options: RepositoryOptions) {
             // The program supplies the schematic canvas. Omitted canvas dimensions
             // must not discard otherwise valid AI room and furniture constraints.
             if(extent&&Number.isFinite(extent.width)&&Number.isFinite(extent.height)&&extent.width>0&&extent.height>0&&spec&&typeof spec==='object'&&!Array.isArray(spec)){
-              return {...op,opId:`layout_${op.opId}`,value:{...op.value,data:{...data,spec:{width:extent.width,height:extent.height,...spec}}}};
+              const baseline=id?layoutTask.baselineRooms[id]:[];
+              const rooms='rooms' in spec?spec.rooms:undefined;
+              const defaults=baseline?.length&&(rooms===undefined||Array.isArray(rooms)&&rooms.length===0)?{rooms:baseline}:{};
+              return {...op,opId:`layout_${op.opId}`,value:{...op.value,data:{...data,spec:{width:extent.width,height:extent.height,...spec,...defaults}}}};
             }
             return {...op,opId:`layout_${op.opId}`};
           });

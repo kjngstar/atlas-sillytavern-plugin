@@ -95,7 +95,7 @@ export function generateFloor(value,context){
     s.spec.corridorWidth=finite(s.input.corridorWidth)?s.input.corridorWidth:2;
     s.spec.rooms=collectAndMerge(s,'rooms',LIMITS.rooms,'locations',r=>{const d=ctx.locks?.rooms?.[r.id]?.w>0?dimensions(ctx.locks.rooms[r.id]):dimensions(r);if(d.w>LIMITS.roomSide||d.h>LIMITS.roomSide||!['north','south'].includes(r.side))throw new Error('ROOM_CONSTRAINT_UNSUPPORTED');const locked=trustedLock(ctx,'rooms',r.id);return {...d,side:r.side,...(locked?{locked}:{} )};});
     s.spec.singleRoom=s.spec.rooms.length===1&&s.spec.rooms[0].id===s.map.containerLocationId;
-    if(!s.spec.rooms.length)return failure('NO_VALID_ROOMS','$.rooms','没有可生成的有效房间',{kept:s.previous?clone(s.previous):null});
+    if(!s.spec.rooms.length){const failed=failure('NO_VALID_ROOMS','$.rooms','没有可生成的有效房间',{kept:s.previous?clone(s.previous):null});failed.issues.push(...s.issues);return failed;}
     if(s.spec.rooms.reduce((n,r)=>n+Math.ceil(r.w/.2)*Math.ceil(r.h/.2),0)>LIMITS.navigationCells)throw new Error('NAVIGATION_BUDGET_EXCEEDED');
     const roomIds=new Set(s.spec.rooms.map(r=>r.id));
     s.spec.contents=collectAndMerge(s,'contents',LIMITS.contents,null,r=>{if(!roomIds.has(r.roomId))throw new Error('ROOM_REF_UNKNOWN');if(!['reading','shelf','desk','bench','stairs'].includes(r.type))throw new Error('FURNITURE_TYPE_UNSUPPORTED');const locked=trustedLock(ctx,'contents',r.id);return {...dimensions(r),roomId:r.roomId,type:r.type,...(locked?{locked}:{})};});

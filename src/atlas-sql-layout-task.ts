@@ -24,8 +24,9 @@ export function buildSqlLayoutTask(db:SqlDatabase,branchId:string,input:TurnInpu
   const extent={width:cols*mpp,height:rows*mpp};
   const own=locations.filter(l=>l.map_id===m.id);
   const local=kind==='floor'&&container.kind==='room'?[container]:own;
+  const baselineRooms=kind==='floor'&&container.kind==='room'?[{id:ref(container.id),name:container.name,w:extent.width*.75,h:extent.height*.75,side:'north'}]:[];
   return {map:ref(m.id),name:m.name,kind,container:{ref:ref(container.id),kind:container.kind,name:container.name},
-   frame:{cols:frame.cols,rows:frame.rows,metersPerCell:m.meters_per_cell,scaleLocked:!!m.scale_locked},extent,
+   frame:{cols:frame.cols,rows:frame.rows,metersPerCell:m.meters_per_cell,scaleLocked:!!m.scale_locked},extent,baselineRooms,
    locations:local.map(l=>({ref:ref(l.id),name:l.name,kind:l.kind,parent:ref(l.parent_location_id)})),
    actors:characters.filter(c=>local.some(l=>l.id===c.location_id)).map(c=>({ref:ref(c.id),name:c.name,roomId:ref(c.location_id)})),
    savedConstraints:scene?.constraints??null};
@@ -41,5 +42,8 @@ export function buildSqlLayoutTask(db:SqlDatabase,branchId:string,input:TurnInpu
  request.anchor=input.anchor;
  request.promptInput={injectionText:request.messages[1].content,userText:input.userText,assistantText:input.assistantText,
   loreSupplement:input.sourceSnapshot.filter(s=>s.kind==='lorebook').map(s=>s.text).join('\n'),baseRevision:input.anchor.baseRevision};
- return {request,mapIds:chosen.map(m=>String(m.id)),extents:Object.fromEntries(chosen.map((m,i)=>[String(m.id),scopes[i].extent]))};
+ request.messages[1].content+='\n单房间地图的 baselineRooms 是插件提供的合法示意房间；没有更明确尺寸依据时直接保留，至少要包含这个已登记的房间。不要把 width/height 写成房间尺寸，房间尺寸字段为 w/h，side 固定选 north 或 south。';
+ // Keep the compatibility preset's injected copy consistent with the final task.
+ request.promptInput.injectionText=request.messages[1].content;
+ return {request,mapIds:chosen.map(m=>String(m.id)),extents:Object.fromEntries(chosen.map((m,i)=>[String(m.id),scopes[i].extent])),baselineRooms:Object.fromEntries(chosen.map((m,i)=>[String(m.id),scopes[i].baselineRooms]))};
 }

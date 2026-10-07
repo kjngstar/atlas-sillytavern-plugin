@@ -27,8 +27,9 @@ test('普通酒馆楼层自动生成真实车厢房间和陈设，保存后重�
   if(req.phase==='geography'){
    const scopes=JSON.parse(req.messages[1].content.split('\n').find(l=>l.startsWith('本图：')).slice(3));
    assert.deepEqual(scopes[0].extent,{width:12,height:8});
-   // Actual model responses may omit the canvas extent while supplying rooms.
-   return scopes.map(s=>JSON.stringify({op:'map.layout.request',ref:s.map,data:{kind:'floor',spec:{rooms:[{id:s.container.ref,name:'车厢',w:10,h:6,side:'north'}],contents:[{id:'bench',name:'软垫长椅',roomId:s.container.ref,type:'bench',w:2,h:.7},{id:'cabinet',name:'木柜',roomId:s.container.ref,type:'shelf',w:1,h:.5}]}}})).join('\n');
+   assert.equal(scopes[0].baselineRooms[0].id,scopes[0].container.ref);
+   // The model can assemble contents using the program-owned canvas and room.
+   return scopes.map(s=>JSON.stringify({op:'map.layout.request',ref:s.map,data:{kind:'floor',spec:{contents:[{id:'bench',name:'软垫长椅',roomId:s.container.ref,type:'bench',w:2,h:.7},{id:'cabinet',name:'木柜',roomId:s.container.ref,type:'shelf',w:1,h:.5}]}}})).join('\n');
   }
   return '{"op":"location.upsert","ref":"new:cabin","data":{"name":"车厢","kind":"room"}}\n{"op":"character.upsert","ref":"new:player","data":{"name":"用户主角","identity":"乘客","role":"protagonist","location_ref":"new:cabin"}}';
  }});

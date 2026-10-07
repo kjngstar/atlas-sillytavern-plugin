@@ -111,7 +111,7 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
     async retry(){return withTask('repair',()=>core.retryLastCommit());},
     async layout(mapId){return withTask('initialize',async()=>{
       const captured=scope(),c=captured.context,chat=c?.chat??[],last=chat.filter(m=>!m.is_user&&!m.is_system).at(-1),user=chat.filter(m=>m.is_user&&!m.is_system).at(-1);
-      const result=await request('POST','/sql/chat/map/layout',{chatId:captured.state.chatId,mapId,
+      const result=await request('POST','/sql/chat/map/layout',{chatId:captured.state.chatId,mapId,requestId:crypto.randomUUID(),
         assistantText:last?.mes??'',userText:user?.mes??'',charDescription:c?.characters?.[c.characterId]?.description??'',
         loreSupplement:(await lorePort?.read?.()??[]).filter(e=>e.enabled!==false).map(e=>e.content).join('\n')});
       emit({level:result.receipt?.status==='partial'?'warn':'info',source:'layout',code:'LAYOUT_TASK_COMPLETE',details:{mapId,receipt:result.receipt,coreSaved:result.coreSaved}});
