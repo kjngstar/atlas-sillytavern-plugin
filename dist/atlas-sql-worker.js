@@ -12354,6 +12354,7 @@ END`;
     const out = isPlainObject9(baseSpec) ? { ...baseSpec } : {};
     const deletes = incoming["deletes"];
     if (isPlainObject9(deletes)) {
+      out["deletes"] = deletes;
       for (const [collection2, ids2] of Object.entries(deletes)) {
         if (!Array.isArray(ids2)) continue;
         const rows4 = out[collection2];
@@ -12387,7 +12388,7 @@ END`;
       }
       out[key] = value;
     }
-    for (const key of DIRECTIVE_KEYS) delete out[key];
+    delete out["rebuild"];
     return { spec: out, conflicts };
   }
   function collectLocationRefs(spec) {

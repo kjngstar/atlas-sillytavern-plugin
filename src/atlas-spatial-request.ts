@@ -134,6 +134,9 @@ function mergeConstraints(
 
   const deletes = incoming['deletes'];
   if (isPlainObject(deletes)) {
+    // The geometry generator also merges previous constraints; carry the
+    // explicit deletion through that boundary so removed rows cannot return.
+    out['deletes'] = deletes;
     for (const [collection, ids] of Object.entries(deletes)) {
       if (!Array.isArray(ids)) continue;
       const rows = out[collection];
@@ -170,7 +173,7 @@ function mergeConstraints(
     out[key] = value;
   }
 
-  for (const key of DIRECTIVE_KEYS) delete out[key];
+  delete out['rebuild'];
   return { spec: out, conflicts };
 }
 

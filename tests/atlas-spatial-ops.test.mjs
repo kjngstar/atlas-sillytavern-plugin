@@ -56,6 +56,14 @@ function errorsOf(out) {
   return out.issues.filter((i) => i.severity === 'error');
 }
 
+test('明确删除的陈设 ID 穿过编译边界，防止几何层重新并回旧约束',async()=>{
+ const seed=await fresh();
+ const {out}=compileText(seed,JSON.stringify({op:'map.layout.request',ref:'M2',data:{kind:'floor',spec:{rooms:[{id:'L3',w:5,h:4,side:'north'}],deletes:{contents:['duplicate-seat']}}}}));
+ assert.deepEqual(errorsOf(out),[]);
+ assert.deepEqual(out.results[0].result.mutations[0].after.frame_json.atlasLayoutRequest.spec.deletes,{contents:['duplicate-seat']});
+ seed.db.close();
+});
+
 test('P07-01 编译器注册：map.layout.request 在编译表里且 15 个操作都在', () => {
   const table = compilerTable();
   assert.ok(table.includes('map.layout.request'), 'COMPILERS 必须注册 map.layout.request');

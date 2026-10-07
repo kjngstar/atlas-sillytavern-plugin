@@ -54,7 +54,7 @@ export function referenceGeometry(map, document) {
     kind='floor';const corridor=rect(layout.corridor);
     geo={corridor:{...corridor,y:corridor.y+corridor.h/2},rooms:(layout.rooms??[]).map((r,i)=>({...rect(r),id:r.id,name:r.name,kind:'room',tint:['67,224,255','155,107,255','57,224,160','127,212,255'][i%4],live:false})),
       doors:(layout.doors??[]).map(d=>{const [x,y]=xy(d);return {x,y,w:d.width*scale};}),
-      furn:(layout.groups??[]).flatMap(g=>(g.bodies??[]).map(body=>{const r=rect(body);return {id:g.id,r:[r.x,r.y,r.x+r.w,r.y+r.h],t:body.type==='chair'?'table':body.type,n:7};}))};
+      furn:(layout.groups??[]).flatMap(g=>(g.bodies??[]).map(body=>{const r=rect(body);return {id:g.id,r:[r.x,r.y,r.x+r.w,r.y+r.h],t:['chair','bench'].includes(body.type)?'table':body.type==='stairs'?'desk':body.type,n:7};}))};
   }
   return {kind,geo,marks,metric,transform:{scale,bounds:b,units:document?.units??'cells',metersPerCell:map.metersPerCell??null},extent:[-540,540,-340,360]};
 }
