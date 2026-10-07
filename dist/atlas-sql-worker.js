@@ -3864,7 +3864,8 @@ END`;
         baselineRooms,
         locations: local.map((l) => ({ ref: ref(l.id), name: l.name, kind: l.kind, parent: ref(l.parent_location_id) })),
         actors: characters.filter((c) => local.some((l) => l.id === c.location_id)).map((c) => ({ ref: ref(c.id), name: c.name, roomId: ref(c.location_id) })),
-        savedConstraints: scene?.constraints ?? null
+        savedConstraints: scene?.constraints ?? null,
+        layoutIssues: scene?.layout?.issues ?? []
       };
     });
     const request = buildStagePrompt({
@@ -3889,6 +3890,7 @@ END`;
       baseRevision: input.anchor.baseRevision
     };
     request.messages[1].content += "\n单房间地图的 baselineRooms 是插件提供的合法示意房间；没有更明确尺寸依据时直接保留，至少要包含这个已登记的房间。不要把 width/height 写成房间尺寸，房间尺寸字段为 w/h，side 固定选 north 或 south。";
+    request.messages[1].content += '\n更新布局时，同一实物必须沿用 savedConstraints.contents 的既有 id，不得换 id 重复添加。layoutIssues 是旧图未放下的陈设：按正文校正估计尺寸；若旧约束重复描述同一座椅或柜子，保留一个既有 id，用 spec.deletes={"contents":[重复的局部陈设id]} 显式清理重复约束，并同步 actors.near。不要删除已确认的锁定结构。';
     request.promptInput.injectionText = request.messages[1].content;
     return { request, mapIds: chosen.map((m) => String(m.id)), extents: Object.fromEntries(chosen.map((m, i) => [String(m.id), scopes[i].extent])), baselineRooms: Object.fromEntries(chosen.map((m, i) => [String(m.id), scopes[i].baselineRooms])) };
   }
@@ -16193,7 +16195,8 @@ END`;
     if (!bare.ok) return bare;
     const groups = [], bodies = [], actors = [], items = [], windows = [], lamps = [], issues = [], doorSwings = [];
     for (const r of bare.rooms) {
-      const door = bare.doors.find((d) => d.roomId === r.id), spine = { x: door.x - 0.8, y: r.y, w: 1.6, h: r.h }, inner = { x: r.x + 0.4, y: r.y + 1, w: r.w - 0.8, h: r.h - 1.4 };
+      const door = bare.doors.find((d) => d.roomId === r.id), aisle = spec.singleRoom ? 0.8 : 1.6, margin = spec.singleRoom ? 0.2 : 0.4;
+      const spine = { x: door.x - aisle / 2, y: r.y, w: aisle, h: r.h }, inner = { x: r.x + margin, y: r.y + (spec.singleRoom ? margin : 1), w: r.w - margin * 2, h: r.h - (spec.singleRoom ? margin * 2 : 1.4) };
       const swing = { id: "swing:" + r.id, roomId: r.id, x: door.x - door.width / 2, y: r.side === "north" ? door.y - door.width : door.y, w: door.width, h: door.width };
       doorSwings.push(swing);
       const exact = (spec.actors || []).filter((a) => a.roomId === r.id && a.position).map((a) => ({ id: a.id, ...a.position }));
@@ -16522,7 +16525,7 @@ END`;
     if (previous && (previous.mapId !== s.map.id || previous.branchId !== s.scope.branchId)) return failure("SCENE_SCOPE_MISMATCH", "$.previousScene", "旧场景属于另一地图或分支");
     if (previous && s.input.rebuild !== true && !plain(previous.constraints)) s.issues.push(diagnostic("CONSTRAINTS_LEGACY", "$.previousScene", "旧场景缺少受控约束字段，本次按整图重建语义处理", { severity: "warning" }));
     const inputSignature = stable(s.spec);
-    if (previous?.inputSignature === inputSignature && checkSceneDocument(previous).length === 0) {
+    if (previous?.inputSignature === inputSignature && !previous.layout?.issues?.length && checkSceneDocument(previous).length === 0) {
       return { ok: true, status: s.issues.length ? "partial" : "reused", scene: clone(previous), issues: s.issues, guard: { scope: s.scope, mapId: s.map.id, inputSignature }, metricProposal: s.metricProposal };
     }
     const layout = layoutFn(s.spec, previous?.layout ?? null);

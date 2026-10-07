@@ -114,7 +114,8 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
       const result=await request('POST','/sql/chat/map/layout',{chatId:captured.state.chatId,mapId,requestId:crypto.randomUUID(),
         assistantText:last?.mes??'',userText:user?.mes??'',charDescription:c?.characters?.[c.characterId]?.description??'',
         loreSupplement:(await lorePort?.read?.()??[]).filter(e=>e.enabled!==false).map(e=>e.content).join('\n')});
-      emit({level:result.receipt?.status==='partial'?'warn':'info',source:'layout',code:'LAYOUT_TASK_COMPLETE',details:{mapId,receipt:result.receipt,coreSaved:result.coreSaved}});
+      core.recordExternalReceipt?.(sqlMod.toLegacyTurnReceipt(result.receipt,{coreSaved:result.coreSaved}),captured.state.chatId,{receipt:result.receipt,issues:result.receipt?.issues??result.issues,coreSaved:result.coreSaved});
+      emit({level:result.receipt?.status==='partial'?'warn':'info',source:'map',code:'LAYOUT_TASK_COMPLETE',operation:'layout',phase:'commit',outcome:result.receipt?.status==='partial'?'failed':'success'});
       await core.refresh();await refresh(true);
       const node=findNode(latest.ROOT,mapId);
       if(!node?.hasLayout)throw Error([...(result.receipt?.issues??[]),...(result.issues??[])].map(i=>`${i.code}: ${i.message}`).join('；')||'没有生成可绘制的布局，请查看诊断');

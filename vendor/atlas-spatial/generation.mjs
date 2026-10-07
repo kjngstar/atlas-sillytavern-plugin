@@ -75,7 +75,7 @@ function finish(s,ctx,layoutFn){
   if(previous&&(previous.mapId!==s.map.id||previous.branchId!==s.scope.branchId))return failure('SCENE_SCOPE_MISMATCH','$.previousScene','旧场景属于另一地图或分支');
   if(previous&&s.input.rebuild!==true&&!plain(previous.constraints))s.issues.push(diagnostic('CONSTRAINTS_LEGACY','$.previousScene','旧场景缺少受控约束字段，本次按整图重建语义处理',{severity:'warning'}));
   const inputSignature=stable(s.spec);
-  if(previous?.inputSignature===inputSignature&&checkSceneDocument(previous).length===0){return {ok:true,status:s.issues.length?'partial':'reused',scene:clone(previous),issues:s.issues,guard:{scope:s.scope,mapId:s.map.id,inputSignature},metricProposal:s.metricProposal};}
+  if(previous?.inputSignature===inputSignature&&!(previous.layout?.issues?.length)&&checkSceneDocument(previous).length===0){return {ok:true,status:s.issues.length?'partial':'reused',scene:clone(previous),issues:s.issues,guard:{scope:s.scope,mapId:s.map.id,inputSignature},metricProposal:s.metricProposal};}
   const layout=layoutFn(s.spec,previous?.layout??null);
   for(const issue of layout.issues??[])s.issues.push(diagnostic(issue.code,'$.layout','空间约束未满足',{entityId:issue.id??null}));
   if(!layout.ok)return {ok:false,status:'failed',scene:null,kept:previous?clone(previous):null,issues:s.issues,guard:{scope:s.scope,mapId:s.map.id,inputSignature}};

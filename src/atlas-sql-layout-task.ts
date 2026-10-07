@@ -30,7 +30,7 @@ export function buildSqlLayoutTask(db:SqlDatabase,branchId:string,input:TurnInpu
    frame:{cols:frame.cols,rows:frame.rows,metersPerCell:m.meters_per_cell,scaleLocked:!!m.scale_locked},extent,baselineRooms,
    locations:local.map(l=>({ref:ref(l.id),name:l.name,kind:l.kind,parent:ref(l.parent_location_id)})),
    actors:characters.filter(c=>local.some(l=>l.id===c.location_id)).map(c=>({ref:ref(c.id),name:c.name,roomId:ref(c.location_id)})),
-   savedConstraints:scene?.constraints??null};
+   savedConstraints:scene?.constraints??null,layoutIssues:(scene?.layout as Record<string,unknown>|undefined)?.issues??[]};
  });
  const request=buildStagePrompt({phase:'geography',allowedOps:['map.layout.request','noop'],batchId:`layout_${turnId}`,
   mapScope:JSON.stringify(scopes),geoMissing:'必须为以上地图生成或更新可绘制空间布局，每张图一行 map.layout.request。仅有坐标点不算完成。',
@@ -44,6 +44,7 @@ export function buildSqlLayoutTask(db:SqlDatabase,branchId:string,input:TurnInpu
  request.promptInput={injectionText:request.messages[1].content,userText:input.userText,assistantText:input.assistantText,
   loreSupplement:input.sourceSnapshot.filter(s=>s.kind==='lorebook').map(s=>s.text).join('\n'),baseRevision:input.anchor.baseRevision};
  request.messages[1].content+='\n单房间地图的 baselineRooms 是插件提供的合法示意房间；没有更明确尺寸依据时直接保留，至少要包含这个已登记的房间。不要把 width/height 写成房间尺寸，房间尺寸字段为 w/h，side 固定选 north 或 south。';
+ request.messages[1].content+='\n更新布局时，同一实物必须沿用 savedConstraints.contents 的既有 id，不得换 id 重复添加。layoutIssues 是旧图未放下的陈设：按正文校正估计尺寸；若旧约束重复描述同一座椅或柜子，保留一个既有 id，用 spec.deletes={"contents":[重复的局部陈设id]} 显式清理重复约束，并同步 actors.near。不要删除已确认的锁定结构。';
  // Keep the compatibility preset's injected copy consistent with the final task.
  request.promptInput.injectionText=request.messages[1].content;
  return {request,mapIds:chosen.map(m=>String(m.id)),extents:Object.fromEntries(chosen.map((m,i)=>[String(m.id),scopes[i].extent])),baselineRooms:Object.fromEntries(chosen.map((m,i)=>[String(m.id),scopes[i].baselineRooms]))};

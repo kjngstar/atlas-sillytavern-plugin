@@ -385,6 +385,7 @@ export interface AtlasUiCore {
   retryLastCommit(): Promise<void>;
   /** 0.9.22 立即推演：不发言也让世界流动（推进页按钮；合成一回合）。 */
   manualAdvance(): Promise<void>;
+  recordExternalReceipt(receipt: unknown, chatId: string, extra?: Record<string,unknown>): void;
   /**
    * 等待最近一次 MESSAGE_SENT 触发的 prepare 落定（有界超时）。
    * 真实酒馆的事件监听是 fire-and-forget；生成拦截器在注入前必须调用本方法，
@@ -1965,6 +1966,10 @@ export function createAtlasUiCore(deps: {
 
     /** 0.9.22 立即推演：不发言也让世界流动（推进页按钮）。 */
     manualAdvance,
+    recordExternalReceipt(receipt, chatId, extra={}) {
+      const parsed=parseAtlasTurnReceipt(receipt);
+      if(parsed.ok)addReceipt(parsed.value,chatId,extra);
+    },
 
     /** ATLAS-18：概览页「重试初始化」按钮用（未注入 ensureWorld 时安全无操作）。 */
     async initializeWorld(): Promise<boolean> {      if (disposed) return false;

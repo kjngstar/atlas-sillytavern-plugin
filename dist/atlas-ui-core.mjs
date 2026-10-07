@@ -4776,6 +4776,10 @@ function createAtlasUiCore(deps) {
     },
     /** 0.9.22 立即推演：不发言也让世界流动（推进页按钮）。 */
     manualAdvance,
+    recordExternalReceipt(receipt, chatId, extra = {}) {
+      const parsed = parseAtlasTurnReceipt(receipt);
+      if (parsed.ok) addReceipt(parsed.value, chatId, extra);
+    },
     /** ATLAS-18：概览页「重试初始化」按钮用（未注入 ensureWorld 时安全无操作）。 */
     async initializeWorld() {
       if (disposed) return false;

@@ -10,6 +10,22 @@ const scope={chatId:'chat-1',branchId:'b1',revision:3,viewMode:'author'};
 const POV={...scope,viewMode:'pov'};
 const baseRooms=()=>Array.from({length:6},(_,i)=>({id:'room-'+i,name:'房间'+i,side:i%2?'north':'south',w:6,h:5}));
 const baseCtx=(locations)=>({scope,currentScope:scope,map:{id:'map-1',name:'fixture',metersPerCell:2,frame:{cols:15,rows:12}},entities:{locations,characters:['npc-1'],items:['item-1']}});
+
+test('四米车厢可容纳一米深的相对座椅和暗柜；旧部分布局不能直接复用为空图',()=>{
+ const ctx={...baseCtx(['carriage']),map:{id:'map-1',name:'车厢',containerLocationId:'carriage',metersPerCell:.24,frame:{cols:100,rows:100}}};
+ const spec={rooms:[{id:'carriage',name:'车厢',w:4,h:6,side:'north'}],contents:[
+  {id:'cabinet',type:'shelf',roomId:'carriage',w:1,h:1},
+  {id:'seat-a',type:'bench',roomId:'carriage',w:3,h:1},
+  {id:'seat-b',type:'bench',roomId:'carriage',w:3,h:1}],actors:[{id:'npc-1',roomId:'carriage',near:'seat-a'}]};
+ const first=Kit.generateFloor(spec,ctx);
+ assert.equal(first.ok,true,JSON.stringify(first.issues));
+ assert.equal(first.scene.layout.groups.length,3,JSON.stringify(first.issues));
+ assert.equal(first.scene.layout.actors.length,1);
+ const broken=Kit.clone(first.scene);broken.layout.groups=[];broken.layout.bodies=[];broken.layout.issues=[{id:'seat-a',code:'DETAIL_NO_SPACE'}];
+ const repaired=Kit.generateFloor(spec,{...ctx,previousScene:broken});
+ assert.notEqual(repaired.status,'reused');assert.equal(repaired.scene.layout.groups.length,3);
+ assert.ok(!repaired.issues.some(i=>i.code==='DETAIL_NO_SPACE'),JSON.stringify(repaired.issues));
+});
 test('没有河流资料的城市仍生成可读多边形、道路和建筑，水域为空',()=>{
  const ctx={...baseCtx(['district','building']),map:{id:'map-1',name:'无河城市',metersPerCell:10,frame:{cols:120,rows:100}}};
  const result=Kit.generateCity({riverWidth:0,districts:[{id:'district',name:'城区',bank:'west',order:0}],buildings:[{id:'building',districtId:'district',name:'市场',w:40,h:30}]},ctx);

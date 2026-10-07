@@ -58,7 +58,8 @@ import * as B from './foundation.mjs';
     const bare=B.floor({...spec,furniture:[],actors:[]},previous);if(!bare.ok)return bare;
     const groups=[],bodies=[],actors=[],items=[],windows=[],lamps=[],issues=[],doorSwings=[];
     for(const r of bare.rooms){
-      const door=bare.doors.find(d=>d.roomId===r.id),spine={x:door.x-.8,y:r.y,w:1.6,h:r.h},inner={x:r.x+.4,y:r.y+1,w:r.w-.8,h:r.h-1.4};
+      const door=bare.doors.find(d=>d.roomId===r.id),aisle=spec.singleRoom?.8:1.6,margin=spec.singleRoom?.2:.4;
+      const spine={x:door.x-aisle/2,y:r.y,w:aisle,h:r.h},inner={x:r.x+margin,y:r.y+(spec.singleRoom?margin:1),w:r.w-margin*2,h:r.h-(spec.singleRoom?margin*2:1.4)};
       const swing={id:'swing:'+r.id,roomId:r.id,x:door.x-door.width/2,y:r.side==='north'?door.y-door.width:door.y,w:door.width,h:door.width};doorSwings.push(swing);
       const exact=(spec.actors||[]).filter(a=>a.roomId===r.id&&a.position).map(a=>({id:a.id,...a.position}));
       const priority=f=>f.locked?2:previous?.groups?.some(g=>g.id===f.id)?1:0;
