@@ -1483,6 +1483,7 @@ function buildReceipt(args: {
   // 有成功组同时有失败组，回执都是 partial。
   if (failed.length > 0 && applied.length > 0) status = 'partial';
   if (args.repairAttempted && applied.length > 0) status = 'partial';
+  if (applied.length > 0 && args.issues.some(issue => issue.severity === 'error')) status = 'partial';
   return {
     turnId: args.turnId,
     anchor: args.anchor,

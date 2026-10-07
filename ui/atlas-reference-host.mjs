@@ -114,9 +114,10 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
       const result=await request('POST','/sql/chat/map/layout',{chatId:captured.state.chatId,mapId,
         assistantText:last?.mes??'',userText:user?.mes??'',charDescription:c?.characters?.[c.characterId]?.description??'',
         loreSupplement:(await lorePort?.read?.()??[]).filter(e=>e.enabled!==false).map(e=>e.content).join('\n')});
+      emit({level:result.receipt?.status==='partial'?'warn':'info',source:'layout',code:'LAYOUT_TASK_COMPLETE',details:{mapId,receipt:result.receipt,coreSaved:result.coreSaved}});
       await core.refresh();await refresh(true);
       const node=findNode(latest.ROOT,mapId);
-      if(!node?.hasLayout)throw Error(result.issues?.map(i=>i.message).join('；')||'没有生成可绘制的布局，请查看诊断');
+      if(!node?.hasLayout)throw Error([...(result.receipt?.issues??[]),...(result.issues??[])].map(i=>`${i.code}: ${i.message}`).join('；')||'没有生成可绘制的布局，请查看诊断');
       return result;
     },false);},
     async undo(){const messageId=latest.meta.rollbackMessageId;if(messageId===null||messageId===undefined)throw Error('没有可回退的已提交回合');

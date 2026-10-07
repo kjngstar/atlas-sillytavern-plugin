@@ -22233,6 +22233,7 @@ END`;
     if (args.incomplete && applied.length > 0) status = "partial";
     if (failed.length > 0 && applied.length > 0) status = "partial";
     if (args.repairAttempted && applied.length > 0) status = "partial";
+    if (applied.length > 0 && args.issues.some((issue17) => issue17.severity === "error")) status = "partial";
     return {
       turnId: args.turnId,
       anchor: args.anchor,
