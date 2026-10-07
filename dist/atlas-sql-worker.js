@@ -16224,11 +16224,20 @@ END`;
           }
         }
         if (!chosen) chosen = candidates.sort((a, b) => a.score - b.score || a.q.y - b.q.y || a.q.x - b.q.x)[0]?.q;
+        if (!chosen && !f.locked && f.w !== f.h) {
+          for (let y = inner.y; y + f.w <= inner.y + inner.h + EPS && !chosen; y += 0.25) for (let x = inner.x; x + f.h <= inner.x + inner.w + EPS; x += 0.25) {
+            const q = { x, y, w: f.h, h: f.w };
+            if (free(q)) {
+              chosen = q;
+              break;
+            }
+          }
+        }
         if (!chosen) {
           issues.push({ id: f.id, code: "DETAIL_NO_SPACE" });
           continue;
         }
-        const g = makeGroup(f, r, chosen.x, chosen.y);
+        const g = makeGroup({ ...f, w: chosen.w, h: chosen.h }, r, chosen.x, chosen.y);
         if (f.locked) g.quality = "confirmed";
         groups.push(g);
         bodies.push(...g.bodies);
@@ -20953,11 +20962,9 @@ END`;
       const kitIssues = (compiled.issues ?? []).map(
         (item) => spatialIssue(item, { mapId: job.mapId, branchId: scope.branchId, revision: scope.revision, operationId: job.operationId, turnId })
       );
-      const warnings = kitIssues.filter((item) => item.severity === "warning");
       const errors = kitIssues.filter((item) => item.severity === "error");
-      issues.push(...warnings);
+      issues.push(...kitIssues);
       if (!compiled.ok || !compiled.group) {
-        issues.push(...errors);
         if (errors.length === 0) {
           processed.push(job.requestId);
           continue;

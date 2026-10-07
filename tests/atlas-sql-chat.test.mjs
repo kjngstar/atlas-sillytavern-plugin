@@ -38,7 +38,7 @@ test('普通酒馆楼层自动生成真实车厢房间和陈设，保存后重�
   const s=await f.provider.session('chat-auto'),map=queryBound(s.repo.db,"SELECT * FROM maps WHERE container_location_id IS NOT NULL",[])[0];
   const scene=JSON.parse(map.frame_json).atlasScene;
   assert.ok(scene,JSON.stringify(f.ui.getState().receipts[0]));assert.equal(scene.layout.rooms.length,1);
-  assert.equal(scene.layout.groups.length,2);assert.equal(scene.layout.actors.length,1);assert.equal(scene.layout.corridor.h,0);
+  assert.equal(scene.layout.groups.length,2,JSON.stringify({scene,receipt:f.ui.getState().receipts[0]}));assert.equal(scene.layout.actors.length,1);assert.equal(scene.layout.corridor.h,0);
   assert.equal(queryBound(s.repo.db,'SELECT map_id FROM locations WHERE id=?',[map.container_location_id])[0].map_id===map.id,false);
   f.restartUi();await f.ui.refresh();
   const read=await f.server.handle('POST','/sql/chat/ui-read',{chatUid:'chat-auto',kind:'scene',viewMode:'author'},{local:true});

@@ -78,8 +78,15 @@ import * as B from './foundation.mjs';
           }
         }
         if(!chosen)chosen=candidates.sort((a,b)=>a.score-b.score||a.q.y-b.q.y||a.q.x-b.q.x)[0]?.q;
+        // In a narrow carriage a bench or cabinet can fit along the other axis.
+        // Preserve the original orientation whenever it fits; locked furniture stays fixed.
+        if(!chosen&&!f.locked&&f.w!==f.h){
+          for(let y=inner.y;y+f.w<=inner.y+inner.h+EPS&&!chosen;y+=.25)for(let x=inner.x;x+f.h<=inner.x+inner.w+EPS;x+=.25){
+            const q={x,y,w:f.h,h:f.w};if(free(q)){chosen=q;break;}
+          }
+        }
         if(!chosen){issues.push({id:f.id,code:'DETAIL_NO_SPACE'});continue;}
-        const g=makeGroup(f,r,chosen.x,chosen.y);if(f.locked)g.quality='confirmed';groups.push(g);bodies.push(...g.bodies);
+        const g=makeGroup({...f,w:chosen.w,h:chosen.h},r,chosen.x,chosen.y);if(f.locked)g.quality='confirmed';groups.push(g);bodies.push(...g.bodies);
       }
       const outerY=r.side==='north'?r.y:r.y+r.h;
       for(let i=0;i<Math.max(1,Math.floor(r.w/3));i++)windows.push({id:'window:'+r.id+':'+i,type:'window',roomId:r.id,x:r.x+(i+.5)*r.w/Math.max(1,Math.floor(r.w/3)),y:outerY,width:1.2,elevation:1.1});

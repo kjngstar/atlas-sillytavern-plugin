@@ -555,12 +555,10 @@ export function applyPendingSpatialRequests(input: ApplyPendingInput): ApplyPend
     const kitIssues = (compiled.issues ?? []).map((item) =>
       spatialIssue(item as never, { mapId: job.mapId, branchId: scope.branchId, revision: scope.revision, operationId: job.operationId, turnId }),
     );
-    const warnings = kitIssues.filter((item) => item.severity === 'warning');
     const errors = kitIssues.filter((item) => item.severity === 'error');
-    issues.push(...warnings);
+    issues.push(...kitIssues);
 
     if (!compiled.ok || !compiled.group) {
-      issues.push(...errors);
       if (errors.length === 0) {
         // duplicate：内容与已保存场景相同且请求已被消费 → 不算失败。
         processed.push(job.requestId);
