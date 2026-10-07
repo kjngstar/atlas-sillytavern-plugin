@@ -24206,7 +24206,7 @@ function createSqlRepository(options) {
       }
       return await exportCandidateImpl(candidate, receipt);
     } catch (err) {
-      const failedForeignKeys = foreignKeyCheck(candidateDb);
+      const failedForeignKeys = committed ? [] : foreignKeyCheck(candidateDb);
       if (!committed) {
         if (transactionOpen) rollbackTransaction(candidateDb);
         await discardPreparedImpl(candidate.token);
