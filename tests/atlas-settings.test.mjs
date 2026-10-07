@@ -58,6 +58,14 @@ function connection(overrides = {}) {
   };
 }
 
+test('API 超时 1200000 毫秒可保存并在重载后保留，超过上限拒绝', () => {
+  const preset = connection({id:'long-timeout',timeoutMs:1_200_000});
+  const saved = applySettingsCommand(createDefaultSettingsV2(), {action:'api.save',create:true,preset,apiKeyMode:'clear'});
+  assert.equal(saved.ok, true);
+  assert.equal(sanitizeSettingsV2(saved.settings).settings.apiPresets[0].timeoutMs, 1_200_000);
+  assert.equal(applySettingsCommand(saved.settings, {action:'api.save',preset:{...preset,timeoutMs:1_200_001},apiKeyMode:'keep'}).ok, false);
+});
+
 /** v1 夹具：活动组合预设 + 预设库 + majorEvent 旧数据。 */
 function v1Fixture() {
   return {

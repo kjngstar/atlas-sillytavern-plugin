@@ -1018,6 +1018,35 @@ test("A7 兼容：finish_reason=stop + 合法 JSON → 成功；缺失 finish_re
   assert.equal(other.ok, true, "非 length 的停止码不由本规则判定");
 });
 
+test("API 允许等待 20 分钟，超过原 120 秒时仍继续等待并可收取回复", async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let complete;
+  const pending = callAtlasWorldTurnApi(
+    { ...TRUNCATION_PRESET, timeoutMs: 1_200_000 }, TRUNCATION_INPUT,
+    { fetchFn: (_url, init) => new Promise((resolve, reject) => {
+      complete = () => resolve(new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }] })));
+      init.signal.addEventListener('abort', () => reject(new Error('aborted')));
+    }) },
+  );
+  t.mock.timers.tick(120_001);
+  complete();
+  assert.equal((await pending).ok, true);
+});
+
+test("API 20 分钟截止时间仍会终止无响应请求", async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const pending = callAtlasWorldTurnApi(
+    { ...TRUNCATION_PRESET, timeoutMs: 1_200_000 }, TRUNCATION_INPUT,
+    { fetchFn: (_url, init) => new Promise((_resolve, reject) => {
+      init.signal.addEventListener('abort', () => reject(new Error('aborted')));
+    }) },
+  );
+  t.mock.timers.tick(1_200_000);
+  const result = await pending;
+  assert.equal(result.code, ATLAS_ERROR_CODES.API_TIMEOUT);
+  assert.match(result.message, /1200000ms/);
+});
+
 test("A7 超时：fake fetch 尊重 AbortSignal 且人为超时 → API_TIMEOUT，与截断可区分", async () => {
   // 不真的等待：fetch 收到 abort 立即 reject，超时阈值压到最小合法值以上一点
   const fetchFn = async (_url, init) => {

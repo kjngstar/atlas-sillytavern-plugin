@@ -382,7 +382,7 @@ export async function callAtlasWorldTurnApi(
   const temperature = typeof preset.temperature === "number" ? preset.temperature : 1.0;
   const topP = typeof preset.topP === "number" ? preset.topP : 0.95;
 
-  const timeoutMs = Math.min(Math.max(preset.timeoutMs ?? 30_000, 1_000), 120_000);
+  const timeoutMs = Math.min(Math.max(preset.timeoutMs ?? 30_000, 1_000), 1_200_000);
   const fetchFn = deps.fetchFn ?? globalThis.fetch;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);

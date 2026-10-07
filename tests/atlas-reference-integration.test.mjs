@@ -46,6 +46,13 @@ test('SQL 子地图按实际容器种类投影，site/interior 不冒充世界�
  }
 });
 function projection(extra={}){return projectReferenceData({mapView:view([map]),catalogView:view(cat),viewMode:'author',...extra});}
+test('原版 API 编辑器保存 20 分钟超时，经过预设仓库与插件保存后保留',async()=>{
+ const d=referencePresetDocument({});d.connections[0]={...connection,timeoutMs:120000};d.active.connectionId=connection.id;for(const a of Object.values(d.assignments))a.connectionId=connection.id;
+ const window={crypto:{randomUUID:()=> 'unique'},TextEncoder},ctx=vm.createContext({window,TextEncoder,URL});vm.runInContext(readFileSync(new URL('../ui/atlas-reference/js/presets.js',import.meta.url),'utf8'),ctx);
+ let command;const store=window.AtlasPresetStore.create([],{storage:null,initialDocument:d,onPersist:async(doc,action)=>{command=referenceSettingsCommands(doc,{},action)[0];}});
+ store.draft('connection').timeoutMs=1200000;await store.save('connection');
+ assert.equal(command.preset.timeoutMs,1200000);const saved=applySettingsCommand(createDefaultSettingsV2(),command);assert.equal(saved.ok,true);assert.equal(referencePresetDocument(saved.settings).connections[0].timeoutMs,1200000);
+});
 test('原版接入：未知坐标不补零，实体 ID 与地图尺度保持来源',()=>{const g=referenceGeometry({...map,points:[...map.points,{entityId:'unknown',x:null,y:undefined}]});assert.equal(g.marks.length,2);assert.equal(g.marks[1].id,'C');assert.ok(Math.abs(g.metric*g.transform.scale-2)<1e-8);});
 test('原版接入：描写不冒充行动，主角由正式地图确定',()=>{const d=projection();assert.equal(d.CAST[0].doing,'尚无行动记录');assert.equal(d.CAST[0].description,'这是人物描述');assert.equal(d.meta.protagonistId,'C');});
 test('原版接入：扁平回执的成功、失败和时间准确',()=>{const d=projection({state:{receipts:[{receiptId:'R',status:'committed',summary:'已提交',recordedAt:'now'},{receiptId:'F',status:'rejected',summary:'失败'}]}});assert.equal(d.RECEIPTS[0].id,'R');assert.equal(d.RECEIPTS[0].ok,true);assert.equal(d.RECEIPTS[1].ok,false);assert.equal(d.RECEIPTS[0].t,'now');});
