@@ -1952,7 +1952,7 @@ function createSqlModelPort(options) {
       const result = await callAtlasWorldTurnApi({
         ...preset,
         // Stage budgets are defaults; explicit saved connection settings take priority.
-        maxTokens: request.batchId.startsWith("layout_") ? Math.min(preset.maxTokens ?? request.maxTokens, request.maxTokens) : preset.maxTokens ?? request.maxTokens,
+        maxTokens: preset.maxTokens ?? request.maxTokens,
         timeoutMs: preset.timeoutMs ?? request.timeoutMs
       }, input, { fetchFn: options.fetchFn, now: options.now, messagesOverride: messages });
       if (!result.ok) throw failure(result.code, result.message, result.retryable);
