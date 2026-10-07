@@ -11,6 +11,15 @@ import {createDefaultSettingsV2,applySettingsCommand,settingsViewV2} from '../sr
 const view=items=>({branchId:'main',revision:3,items});
 const map={mapId:'world',name:'真实城市',kind:'city',containerLocationId:null,metersPerCell:2,points:[{entityId:'L',kind:'location',name:'学校',x:10,y:10},{entityId:'C',kind:'character',name:'艾琳',x:15,y:16,locationId:'L',isProtagonist:true}]};
 const cat=[{entityId:'L',entityKind:'location',name:'学校',mapId:'world'},{entityId:'C',entityKind:'character',name:'艾琳',mapId:'world',locationId:'L',summary:'这是人物描述'}];
+
+test('界面更新同一个快照对象不会清空地图；坏快照保留可用画面',()=>{
+ const D={meta:{scopeKey:'A',viewMode:'author',initialNodeId:'world'},ROOT:{id:'world'},CAST:[],ITEMS:[]};
+ const context=vm.createContext({D,state:{page:'map',nodeId:'world',selected:null,cameras:new Map(),open:new Set()},clone:v=>JSON.parse(JSON.stringify(v)),nodes:()=>[D.ROOT],navigate:()=>{},renderAll:()=>{},map:{setPaused(){}},document:{hidden:false}});
+ const code=readFileSync(new URL('../ui/atlas-reference/js/app.js',import.meta.url),'utf8');
+ vm.runInContext(code.slice(code.indexOf('function updateSnapshot('),code.indexOf('async function runHost(')),context);
+ context.updateSnapshot(D);assert.equal(D.meta.scopeKey,'A');assert.equal(D.ROOT.id,'world');
+ assert.throws(()=>context.updateSnapshot({ROOT:{id:'bad'}}),/ATLAS_SNAPSHOT_INVALID/);assert.equal(D.ROOT.id,'world');
+});
 test('人物的实际子图点位优先于目录粗地图，地图计数和右栏对应画布',()=>{
  const d=projectReferenceData({mapView:view([{...map,points:map.points.filter(p=>p.kind==='location')},{mapId:'inside',name:'学校室内',kind:'site',containerLocationId:'L',points:[{entityId:'C',kind:'character',name:'艾琳',mapId:'inside',locationId:'L',x:5,y:5}]}]),catalogView:view(cat),viewMode:'author'});
  assert.equal(d.CAST[0].mapNodeId,'inside');assert.equal(d.ROOT.children[0].marks[0].id,'C');
