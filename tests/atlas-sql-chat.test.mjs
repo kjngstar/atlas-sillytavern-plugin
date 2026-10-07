@@ -8,6 +8,20 @@ import { queryBound } from '../src/atlas-db-runtime.ts';
 
 const room = '{"op":"location.upsert","ref":"new:library","data":{"name":"图书馆","kind":"room"}}';
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+test('坏地点声明的下游地点和人物不能留下悬空外键；独立地点仍保存',async()=>{
+ const f=fixture({model:async req=>req.phase==='repair'?'{"ticket":"R1","op":"noop","why":"等待纠正"}':[
+  {op:'location.upsert',ref:'new:bad',data:{name:'坏父地点',kind:'invalid'}},
+  {op:'location.upsert',ref:'new:child',data:{name:'车厢',kind:'room',parent_ref:'new:bad'}},
+  {op:'character.upsert',ref:'new:actor',data:{name:'乘客',identity:'乘客',location_ref:'new:child'}},
+  {op:'location.upsert',ref:'new:independent',data:{name:'独立城市',kind:'city'}},
+ ].map(JSON.stringify).join('\n')});
+ try{await f.ui.refresh();await f.prepare();await f.end();
+  const s=await f.provider.session('chat-auto');assert.ok(f.ui.getState().receipts[0]?.detail?.coreSaved,JSON.stringify(f.ui.getState().receipts[0]));
+  assert.deepEqual(queryBound(s.repo.db,'SELECT name FROM locations',[]).map(l=>l.name),['独立城市']);
+  assert.equal(queryBound(s.repo.db,'SELECT COUNT(*) n FROM characters',[])[0].n,0);
+  assert.deepEqual(queryBound(s.repo.db,'PRAGMA foreign_key_check',[]),[]);
+ }finally{await f.close();}
+});
 test('普通酒馆楼层自动生成真实车厢房间和陈设，保存后重开仍有几何且不移动父地图位置',async()=>{
  const f=fixture({model:async req=>{
   if(req.phase==='geography'){
@@ -125,7 +139,7 @@ test('首轮未知短编号的命名对象可定向修正声明，保存实际�
     await f.ui.refresh(); await f.prepare(); await f.end();
     const receipt=f.ui.getState().receipts.at(-1);
     assert.equal(receipt.detail.coreSaved,true);
-    assert.ok(receipt.detail.receipt.groups.every(group=>group.status==='applied'));
+    assert.ok(receipt.detail.receipt.groups.every(group=>group.status==='applied'),JSON.stringify(receipt.detail.receipt));
     const session=await f.provider.session('chat-auto');
     const locations=queryBound(session.repo.db,'SELECT id,name,parent_location_id,map_id FROM locations',[]);
     const city=locations.find(row=>row.name==='验收城'),library=locations.find(row=>row.name==='验收图书馆');

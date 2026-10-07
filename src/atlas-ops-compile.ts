@@ -230,6 +230,33 @@ export function compileOperations(input: CompileOperationsInput): CompiledOperat
     results.push({ opId: op.opId, result: { ...compiled, issues: compiled.issues } });
   }
 
+  // A declared new ID is a promise, not a saved entity. Record the producer of
+  // every actual foreign-key value before grouping. A rejected declaration must
+  // block its dependents; otherwise relations/events can retain dangling keys
+  // and COMMIT fails before the repair model even gets a ticket.
+  const producers=new Map(declared.declared.filter(r=>r.declaredByOpId).map(r=>[r.id,r.declaredByOpId!]));
+  const byOp=new Map(results.map(r=>[r.opId,r.result]));
+  for(const {opId,result} of results){
+    for(const mutation of result.mutations){
+      for(const [field,value] of Object.entries(mutation.after??{})){
+        if(field==='id'||typeof value!=='string')continue;
+        const producer=producers.get(value);
+        if(producer&&producer!==opId&&byOp.has(producer)&&!result.dependencies.includes(producer))result.dependencies.push(producer);
+      }
+    }
+  }
+  for(let pass=0;pass<results.length;pass++){
+    let changed=false;
+    for(const {opId,result} of results){
+      if(result.issues.some(i=>i.severity==='error'))continue;
+      const failed=result.dependencies.find(dep=>byOp.get(dep)?.issues.some(i=>i.severity==='error'));
+      if(!failed)continue;
+      const issue:Issue={code:'DEPENDENCY_FAILED',path:'$.data',message:`依赖的新对象声明 ${failed} 未通过校验；本操作保留待纠错，不能写入悬空引用`,severity:'error',retryable:true,opId};
+      result.issues.push(issue);issues.push(issue);result.mutations=[];result.effects=[];result.entityKeyWrites=[];changed=true;
+    }
+    if(!changed)break;
+  }
+
   // bindSources 的告警在所有 op 编译完之后并入（basisFor 是懒调用），并按 (opId,code,path) 去重。
   const seenSource = new Set(issues.map((i) => `${i.opId ?? ''}|${i.code}|${i.path}`));
   for (const issue of sourceIssues) {

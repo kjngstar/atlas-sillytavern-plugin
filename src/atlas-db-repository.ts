@@ -1102,7 +1102,7 @@ export function createSqlRepository(options: RepositoryOptions) {
       phase: 'repair',
       allowedOps: [...allowedOps],
       repairTickets: repair.promptLines.join('\n'),
-      entityRefs: collectEntityRefs(createTableReadPort(args.candidateDb), branchId, args.compiled.scope.all()),
+      repairRefs: collectEntityRefs(createTableReadPort(args.candidateDb), branchId, args.compiled.scope.all()).join('\n'),
       batchId: `${repair.batchId}`,
       repairOfBatchId: repair.batchId,
       sourceSnapshot: args.sourceSnapshot,
@@ -1428,18 +1428,14 @@ export type AtlasSqlRepositoryWithHelpers = ReturnType<typeof createSqlRepositor
  *   组级明细仍可定位到 groupId/opIds（§8.5：局部失败不能被包装成全成功）。
  */
 function reconcileRepairResults(first: GroupResult[], second: GroupResult[], rejected: GroupResult[]): GroupResult[] {
-  const merged = [...first];
-  const rejectedIds = new Set(rejected.map((g) => g.groupId));
+  const repaired=new Set(second.filter(g=>g.status==='applied'||g.status==='duplicate').flatMap(g=>g.opIds));
+  const merged = first.filter(g=>!rejected.some(r=>r.groupId===g.groupId)||!g.opIds.length||!g.opIds.every(id=>repaired.has(id)));
   for (const g of second) {
     const idx = merged.findIndex((x) => x.groupId === g.groupId);
     if (idx >= 0) merged[idx] = g;
     else merged.push(g);
   }
-  // 原失败组若纠错后仍未成功，保留失败记录；若已成功，其成功记录已在 merged 里。
-  for (const r of rejected) {
-    if (!merged.some((g) => g.groupId === r.groupId)) merged.push(r);
-  }
-  void rejectedIds;
+  // Repair may regroup the same operation IDs after resolving their dependencies.
   return merged;
 }
 

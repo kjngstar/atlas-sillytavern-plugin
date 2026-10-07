@@ -2453,7 +2453,7 @@ var init_atlas_ops_prompts = __esm({
     ].join("\n");
     MINIMUM_HELP = {
       "location.upsert": "新建 name；修改 ref + 至少一个变更字段；kind=region/city/district/building/room/natural/vehicle/other；parent_ref=所属地点，mobility=fixed/mobile，anchor_ref=载具锚点；推断新增地点用 existence_quality=inferred；area={kind:cells,cells:[{x,y}],quality:confirmed/estimated,source:manual/story/worldbook/estimate} 或 {kind:polygon,points:[{x,y}],quality,source}；范围坐标沿用所属地图尺度，推断布局不证明真实距离；有已提供 map_ref 才能给 position={x,y,precision:exact/approximate/layout}",
-      "character.upsert": "正式新建必须 data.name + data.identity / data.importance / data.importance_reason 至少一个；identity 写有依据的身份，不能只写 role 或 description 代替；候选只需 data.name（data.registration=watch）；修改已有对象用 ref",
+      "character.upsert": "正式新建必须 data.name + data.identity / data.importance / data.importance_reason 至少一个；identity 写有依据的身份，不能只写 role 或 description 代替；role=protagonist/companion/npc，importance=core/recurring/supporting（不用 primary）；候选只需 data.name（data.registration=watch）；修改已有对象用 ref",
       "item.upsert": "新建 name；修改 ref",
       "item.transfer": "ref + to（holder_ref / container_ref / location_ref / unknown 四选一）",
       "faction.upsert": "新建 name；修改 ref",
@@ -13569,6 +13569,33 @@ function compileOperations(input) {
     issues.push(...compiled.issues);
     results.push({ opId: op.opId, result: { ...compiled, issues: compiled.issues } });
   }
+  const producers = new Map(declared.declared.filter((r) => r.declaredByOpId).map((r) => [r.id, r.declaredByOpId]));
+  const byOp = new Map(results.map((r) => [r.opId, r.result]));
+  for (const { opId, result } of results) {
+    for (const mutation7 of result.mutations) {
+      for (const [field, value] of Object.entries(mutation7.after ?? {})) {
+        if (field === "id" || typeof value !== "string") continue;
+        const producer = producers.get(value);
+        if (producer && producer !== opId && byOp.has(producer) && !result.dependencies.includes(producer)) result.dependencies.push(producer);
+      }
+    }
+  }
+  for (let pass = 0; pass < results.length; pass++) {
+    let changed = false;
+    for (const { opId, result } of results) {
+      if (result.issues.some((i) => i.severity === "error")) continue;
+      const failed = result.dependencies.find((dep) => byOp.get(dep)?.issues.some((i) => i.severity === "error"));
+      if (!failed) continue;
+      const issue20 = { code: "DEPENDENCY_FAILED", path: "$.data", message: `依赖的新对象声明 ${failed} 未通过校验；本操作保留待纠错，不能写入悬空引用`, severity: "error", retryable: true, opId };
+      result.issues.push(issue20);
+      issues.push(issue20);
+      result.mutations = [];
+      result.effects = [];
+      result.entityKeyWrites = [];
+      changed = true;
+    }
+    if (!changed) break;
+  }
   const seenSource = new Set(issues.map((i) => `${i.opId ?? ""}|${i.code}|${i.path}`));
   for (const issue20 of sourceIssues) {
     const key = `${issue20.opId ?? ""}|${issue20.code}|${issue20.path}`;
@@ -24238,7 +24265,7 @@ function createSqlRepository(options) {
       phase: "repair",
       allowedOps: [...allowedOps],
       repairTickets: repair.promptLines.join("\n"),
-      entityRefs: collectEntityRefs(createTableReadPort(args.candidateDb), branchId, args.compiled.scope.all()),
+      repairRefs: collectEntityRefs(createTableReadPort(args.candidateDb), branchId, args.compiled.scope.all()).join("\n"),
       batchId: `${repair.batchId}`,
       repairOfBatchId: repair.batchId,
       sourceSnapshot: args.sourceSnapshot
@@ -24527,17 +24554,13 @@ function createSqlRepository(options) {
   }
 }
 function reconcileRepairResults(first, second, rejected) {
-  const merged = [...first];
-  const rejectedIds = new Set(rejected.map((g) => g.groupId));
+  const repaired = new Set(second.filter((g) => g.status === "applied" || g.status === "duplicate").flatMap((g) => g.opIds));
+  const merged = first.filter((g) => !rejected.some((r) => r.groupId === g.groupId) || !g.opIds.length || !g.opIds.every((id) => repaired.has(id)));
   for (const g of second) {
     const idx = merged.findIndex((x) => x.groupId === g.groupId);
     if (idx >= 0) merged[idx] = g;
     else merged.push(g);
   }
-  for (const r of rejected) {
-    if (!merged.some((g) => g.groupId === r.groupId)) merged.push(r);
-  }
-  void rejectedIds;
   return merged;
 }
 function buildReceipt(args) {
