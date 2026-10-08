@@ -409,6 +409,203 @@ export function armLayoutRetry(input: ArmRetryInput): { groups: GroupResult[]; i
   return { groups: [first], issues };
 }
 
+/* ───────────── M2-12：仅清理已移走的局部锚点 ───────────── */
+
+/**
+ * 旧场景会留着「上一轮还在地图上、这一轮已经搬到别处」的成员锚点。编译器的合并逻辑
+ * 只判断「实体是否还在本分支引用表」，管不到「实体还在、但已经不属于这张图」这一类；
+ * 这里补上这个洞：按本图**实际成员**算出失效 ID，喂进请求的 `deletes`，让剪除随这次
+ * 编译的 maps 变更一起落库、一起被 journal 记录、一起受候选 scope guard 保护（不另开写）。
+ *
+ * 三条纪律：
+ * 1. 只在候选事务内、编译前计算；本模块自己不写库（写入仍走 applySceneGroup 的 savepoint）。
+ * 2. 只有「确实是已知实体，但既不按 parent 归属本图、也不带本图 map_id」的成员才剪；
+ *    静态背景/程序生成装饰（id 根本不在实体表里）一律保留。
+ * 3. 家具组（contents）自身不是实体，按 roomId 悬空剪除；routes 不是可合并约束键，每次编译重算。
+ */
+
+/** 场景里由实体支撑的约束集合 → 实体种类。 */
+const SCENE_MEMBER_KIND = Object.freeze({
+  rooms: 'locations',
+  districts: 'locations',
+  buildings: 'locations',
+  actors: 'characters',
+  items: 'items',
+} as const);
+
+type MemberKind = 'locations' | 'characters' | 'items';
+
+function idsOf(rows: SqlRow[]): Set<string> {
+  const out = new Set<string>();
+  for (const row of rows) if (typeof row.id === 'string' && row.id) out.add(row.id);
+  return out;
+}
+
+function containerKey(value: unknown, locationIds: Set<string>): string | null {
+  if (value === null || value === undefined) return null;
+  const raw = String(value);
+  if (!raw) return null;
+  // 与 M2-09 同一套判定：地点 ID 本身可能就叫 `loc:1`，不能无脑剥前缀。
+  if (locationIds.has(raw)) return raw;
+  if (raw.startsWith('loc:') && locationIds.has(raw.slice(4))) return raw.slice(4);
+  return raw;
+}
+
+export type SceneMemberIds = {
+  mapId: string;
+  /** 本图**实际**成员：按 parent 归属本图、或带本图 map_id 的地点；角色/物品同理。 */
+  members: Record<MemberKind, Set<string>>;
+  /** 本分支全部已知实体（用于把「程序装饰」和「搬走的实体」区分开）。 */
+  known: Record<MemberKind, Set<string>>;
+};
+
+/**
+ * collectSceneMemberIds：算出「谁真的在这张图上」以及「本分支都有哪些实体」。
+ *
+ * 地点归属以 **parent 链** 为准（与 M2-09/M2-10 一致：导航按已纠正的 parent），
+ * 同时把 `map_id === 本图` 也算作归属——两个信号任一成立就保留，宁可少剪不误剪。
+ * 角色/物品先看自己的 map_id，再看它所在房间是否归属本图（location_id 反查）。
+ */
+export function collectSceneMemberIds(input: {
+  mapId: string;
+  maps: SqlRow[];
+  locations: SqlRow[];
+  characters: SqlRow[];
+  items: SqlRow[];
+}): SceneMemberIds {
+  const { mapId, maps, locations, characters, items } = input;
+  const locationIds = new Set(locations.map((row) => String(row.id)));
+  const mapIdByContainer = new Map<string, string>();
+  let rootMapId: string | null = null;
+  for (const map of maps) {
+    if (String(map.status ?? 'active') !== 'active') continue;
+    const id = String(map.id);
+    const key = containerKey(map.container_location_id, locationIds);
+    if (key === null) {
+      // 容器为空 = 根图。多张根图时取 id 最小的一张，保证可复现。
+      if (rootMapId === null || id < rootMapId) rootMapId = id;
+      continue;
+    }
+    const held = mapIdByContainer.get(key);
+    if (held === undefined || id < held) mapIdByContainer.set(key, id);
+  }
+
+  const memberLocations = new Set<string>();
+  for (const location of locations) {
+    if (String(location.status ?? 'active') !== 'active') continue;
+    const id = String(location.id);
+    if (String(location.map_id ?? '') === mapId) {
+      memberLocations.add(id);
+      continue;
+    }
+    const parentKey = containerKey(location.parent_location_id, locationIds);
+    const owner = parentKey === null ? rootMapId : mapIdByContainer.get(parentKey) ?? null;
+    if (owner === mapId) memberLocations.add(id);
+  }
+
+  const memberCharacters = new Set<string>();
+  for (const character of characters) {
+    if (String(character.status ?? 'active') !== 'active') continue;
+    const id = String(character.id);
+    if (String(character.map_id ?? '') === mapId || memberLocations.has(String(character.location_id ?? ''))) {
+      memberCharacters.add(id);
+    }
+  }
+
+  const memberItems = new Set<string>();
+  for (const item of items) {
+    if (String(item.status ?? 'active') !== 'active') continue;
+    const id = String(item.id);
+    if (String(item.map_id ?? '') === mapId || memberLocations.has(String(item.location_id ?? ''))) {
+      memberItems.add(id);
+    }
+  }
+
+  return {
+    mapId,
+    members: { locations: memberLocations, characters: memberCharacters, items: memberItems },
+    known: { locations: idsOf(locations), characters: idsOf(characters), items: idsOf(items) },
+  };
+}
+
+export type PruneSceneResult = {
+  /** 可直接并进请求 spec.deletes 的失效 ID；空对象表示本图没有要剪的东西。 */
+  deletes: Record<string, string[]>;
+  /** 被剪掉的全部 ID（含家具组），按集合名排序，便于诊断与测试断言。 */
+  pruned: string[];
+  issues: Issue[];
+};
+
+/**
+ * pruneInvalidSceneMembers：拿旧场景 + 本图实际成员，算出「该剪掉哪些锚点」。
+ *
+ * 只读；不写库、不改入参。没有任何失效成员时返回空 deletes（调用方据此保持零写入）。
+ */
+export function pruneInvalidSceneMembers(input: {
+  scene: unknown;
+  mapId: string;
+  memberIds: SceneMemberIds;
+}): PruneSceneResult {
+  const { scene, mapId, memberIds } = input;
+  const deletes: Record<string, string[]> = {};
+  const pruned: string[] = [];
+  const issues: Issue[] = [];
+  const constraints = plain(scene) && plain((scene as SqlRow).constraints) ? ((scene as SqlRow).constraints as SqlRow) : null;
+  if (!constraints) return { deletes, pruned, issues };
+
+  const bump = (key: string, id: string): void => {
+    const list = deletes[key] ?? [];
+    list.push(id);
+    deletes[key] = list;
+    pruned.push(id);
+  };
+
+  for (const [key, kind] of Object.entries(SCENE_MEMBER_KIND) as Array<[string, MemberKind]>) {
+    const entries = constraints[key];
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries) {
+      const id = plain(entry) && typeof (entry as SqlRow).id === 'string' ? String((entry as SqlRow).id) : '';
+      // 不在实体表里的 id 是程序装饰/静态背景：保留，绝不误剪。
+      if (!id || !memberIds.known[kind].has(id)) continue;
+      if (memberIds.members[kind].has(id)) continue;
+      bump(key, id);
+    }
+  }
+
+  // 家具组自身不是实体：房间被剪掉后，挂在它下面的组会变成悬空引用，一并剪除。
+  const prunedRooms = new Set(deletes.rooms ?? []);
+  if (prunedRooms.size > 0 && Array.isArray(constraints.contents)) {
+    for (const entry of constraints.contents as unknown[]) {
+      if (!plain(entry)) continue;
+      const roomId = typeof (entry as SqlRow).roomId === 'string' ? String((entry as SqlRow).roomId) : '';
+      const id = typeof (entry as SqlRow).id === 'string' ? String((entry as SqlRow).id) : '';
+      if (!id || !roomId || !prunedRooms.has(roomId)) continue;
+      bump('contents', id);
+    }
+  }
+
+  if (pruned.length > 0) {
+    const detail = Object.entries(deletes)
+      .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+      .map(([key, list]) => `${key}:${[...list].sort().join(',')}`)
+      .join(' / ');
+    issues.push(
+      spatialIssue(
+        {
+          code: 'SCENE_STALE_MEMBER_PRUNED',
+          path: '$.frame_json.atlasScene.constraints',
+          message: `地图 ${mapId} 的旧场景里 ${pruned.length} 个锚点已不属于本图（${detail}）：本次只剪这些失效锚点，其余旧几何与静态背景原样保留`,
+          severity: 'warning',
+          retryable: false,
+        },
+        { mapId },
+      ),
+    );
+  }
+
+  return { deletes, pruned, issues };
+}
+
 /* ───────────────────────── W01：处理 pending ───────────────────────── */
 
 /**
@@ -449,6 +646,7 @@ export function applyPendingSpatialRequests(input: ApplyPendingInput): ApplyPend
   const locations = readTable(input.db, 'locations', scope.branchId, ports);
   const characters = readTable(input.db, 'characters', scope.branchId, ports);
   const items = readTable(input.db, 'items', scope.branchId, ports);
+  const maps = readTable(input.db, 'maps', scope.branchId, ports);
 
   for (let index = 0; index < queue.length; index += 1) {
     const job = queue[index];
@@ -484,12 +682,28 @@ export function applyPendingSpatialRequests(input: ApplyPendingInput): ApplyPend
     issues.push(...occupants.issues);
     spec.actors = occupants.spec.actors;
     spec.items = occupants.spec.items;
-    const removals: Record<string, string[]> = {};
-    if (occupants.deleted.actors.length > 0) removals.actors = occupants.deleted.actors;
-    if (occupants.deleted.items.length > 0) removals.items = occupants.deleted.items;
-    if (Object.keys(removals).length > 0) {
-      spec.deletes = { ...(plain(spec.deletes) ? spec.deletes : {}), ...removals };
-    }
+    // M2-12：编译前按本图**实际成员**剪掉已经搬走的旧锚点。剪除随这次编译的 maps 变更
+    // 一起落库、一起 journal、一起受候选 scope guard 保护，不另开写。
+    const stale = pruneInvalidSceneMembers({
+      scene: frameRead.scene,
+      mapId: job.mapId,
+      memberIds: collectSceneMemberIds({ mapId: job.mapId, maps, locations, characters, items }),
+    });
+    issues.push(...stale.issues);
+    const deletes: Record<string, string[]> = {};
+    const mergeDeletes = (source: unknown): void => {
+      if (!plain(source)) return;
+      for (const [key, value] of Object.entries(source)) {
+        if (!Array.isArray(value)) continue;
+        const list = deletes[key] ?? [];
+        for (const id of value) if (typeof id === 'string' && id && !list.includes(id)) list.push(id);
+        deletes[key] = list;
+      }
+    };
+    mergeDeletes(plain(spec.deletes) ? spec.deletes : null);
+    mergeDeletes({ actors: occupants.deleted.actors, items: occupants.deleted.items });
+    mergeDeletes(stale.deletes);
+    if (Object.keys(deletes).length > 0) spec.deletes = deletes;
     const initial = ensureInitialSpatialFrame({
       mapRow,
       scope,

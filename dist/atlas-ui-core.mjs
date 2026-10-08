@@ -1670,7 +1670,7 @@ var require_sql_wasm_browser = __commonJS({
           }
         }, Jc = {}, Lc = () => {
           if (!Kc) {
-            var a = { USER: "web_user", LOGNAME: "web_user", PATH: "/", PWD: "/", HOME: "/home/web_user", LANG: (globalThis.navigator?.language ?? "C").replace("-", "_") + ".UTF-8", _: va || "./this.program" }, b;
+            var a = { USER: "web_user", LOGNAME: "web_user", PATH: ".", PWD: ".", HOME: "home/web_user", LANG: (globalThis.navigator?.language ?? "C").replace("-", "_") + ".UTF-8", _: va || "./this.program" }, b;
             for (b in Jc) void 0 === Jc[b] ? delete a[b] : a[b] = Jc[b];
             var c = [];
             for (b in a) c.push(`${b}=${a[b]}`);
@@ -1740,8 +1740,8 @@ var require_sql_wasm_browser = __commonJS({
         R = Array(4096);
         Pb(O, "/");
         U("/tmp");
-        U("/home");
-        U("/home/web_user");
+        U("home");
+        U("home/web_user");
         (function() {
           U("/dev");
           rb(259, { read: () => 0, write: (d, e, g, h) => h, Ya: () => 0 });
@@ -2522,6 +2522,13 @@ var init_atlas_runtime_limits = __esm({
   }
 });
 
+// src/atlas-map-topology.ts
+var init_atlas_map_topology = __esm({
+  "src/atlas-map-topology.ts"() {
+    "use strict";
+  }
+});
+
 // src/atlas-db-invariants.ts
 var LOCATION_DEPTH, CONTAINER_DEPTH, ACTION_PLAN_DEPTH, CAPABILITY_LIMIT, MOBILITY_PROFILE_LIMIT, ALIAS_LIMIT, PARTICIPANTS_LIMIT, GEOMETRY_VERTEX_LIMIT, ITEM_PROPERTY_LIMIT, MENTION_RECENT_LIMIT;
 var init_atlas_db_invariants = __esm({
@@ -2531,6 +2538,7 @@ var init_atlas_db_invariants = __esm({
     init_atlas_db_runtime();
     init_atlas_runtime_limits();
     init_atlas_db_codec();
+    init_atlas_map_topology();
     LOCATION_DEPTH = ATLAS_RUNTIME_LIMITS.locationDepth;
     CONTAINER_DEPTH = ATLAS_RUNTIME_LIMITS.containerDepth;
     ACTION_PLAN_DEPTH = ATLAS_RUNTIME_LIMITS.actionPlanDepth;
@@ -2735,6 +2743,7 @@ var init_atlas_ops_geography = __esm({
     init_atlas_ops_entities();
     init_atlas_runtime_limits();
     init_atlas_db_schema();
+    init_atlas_location_kinds();
   }
 });
 
@@ -2742,6 +2751,163 @@ var init_atlas_ops_geography = __esm({
 var init_atlas_scene_layout = __esm({
   "src/atlas-scene-layout.ts"() {
     "use strict";
+  }
+});
+
+// vendor/atlas-spatial/contracts.mjs
+var LIMITS;
+var init_contracts = __esm({
+  "vendor/atlas-spatial/contracts.mjs"() {
+    "use strict";
+    LIMITS = Object.freeze({ inputBytes: 65536, sceneBytes: 524288, rooms: 24, contents: 128, actors: 128, items: 256, districts: 16, buildings: 64, blocksPerDistrict: 24, floorSide: 100, roomSide: 40, citySide: 2e4, navigationCells: 18e4, markers: 512, overlays: 256, pathPoints: 2048 });
+  }
+});
+
+// vendor/atlas-spatial/foundation.mjs
+var init_foundation = __esm({
+  "vendor/atlas-spatial/foundation.mjs"() {
+    "use strict";
+  }
+});
+
+// vendor/atlas-spatial/layout-core.mjs
+var init_layout_core = __esm({
+  "vendor/atlas-spatial/layout-core.mjs"() {
+    "use strict";
+    init_foundation();
+  }
+});
+
+// vendor/atlas-spatial/generation.mjs
+var init_generation = __esm({
+  "vendor/atlas-spatial/generation.mjs"() {
+    "use strict";
+    init_layout_core();
+    init_contracts();
+  }
+});
+
+// vendor/atlas-spatial/placement.mjs
+var init_placement = __esm({
+  "vendor/atlas-spatial/placement.mjs"() {
+    "use strict";
+    init_layout_core();
+    init_contracts();
+  }
+});
+
+// vendor/atlas-spatial/storage.mjs
+var init_storage = __esm({
+  "vendor/atlas-spatial/storage.mjs"() {
+    "use strict";
+    init_contracts();
+  }
+});
+
+// vendor/atlas-spatial/view-adapter.mjs
+var init_view_adapter = __esm({
+  "vendor/atlas-spatial/view-adapter.mjs"() {
+    "use strict";
+    init_contracts();
+  }
+});
+
+// vendor/atlas-spatial/tools.mjs
+var TOOL_NAMES;
+var init_tools = __esm({
+  "vendor/atlas-spatial/tools.mjs"() {
+    "use strict";
+    init_generation();
+    init_placement();
+    init_contracts();
+    TOOL_NAMES = Object.freeze(["atlas_generate_floor", "atlas_generate_city", "atlas_place_markers", "atlas_build_overlays"]);
+  }
+});
+
+// vendor/atlas-spatial/renderer-drawing.mjs
+var init_renderer_drawing = __esm({
+  "vendor/atlas-spatial/renderer-drawing.mjs"() {
+    "use strict";
+    init_layout_core();
+  }
+});
+
+// vendor/atlas-spatial/renderer.mjs
+var DEFAULT_THEME;
+var init_renderer = __esm({
+  "vendor/atlas-spatial/renderer.mjs"() {
+    "use strict";
+    init_layout_core();
+    init_renderer_drawing();
+    init_contracts();
+    DEFAULT_THEME = Object.freeze({ bg: "#060a12", grid: "#4977a125", wall: "#b2d4ef", mint: "#39e0a0", gold: "#ffc247", blue: "#7fd4ff", text: "#dce9fb", muted: "#91a9c3", floor: "#101d2f", cyan: "#43e0ff", violet: "#9b6bff" });
+  }
+});
+
+// vendor/atlas-spatial/host-context.mjs
+var init_host_context = __esm({
+  "vendor/atlas-spatial/host-context.mjs"() {
+    "use strict";
+    init_contracts();
+    init_storage();
+  }
+});
+
+// vendor/atlas-spatial/candidate-group.mjs
+var init_candidate_group = __esm({
+  "vendor/atlas-spatial/candidate-group.mjs"() {
+    "use strict";
+    init_host_context();
+    init_generation();
+    init_storage();
+    init_contracts();
+  }
+});
+
+// vendor/atlas-spatial/candidate-apply.mjs
+var init_candidate_apply = __esm({
+  "vendor/atlas-spatial/candidate-apply.mjs"() {
+    "use strict";
+    init_contracts();
+  }
+});
+
+// vendor/atlas-spatial/initial-frame.mjs
+var init_initial_frame = __esm({
+  "vendor/atlas-spatial/initial-frame.mjs"() {
+    "use strict";
+    init_contracts();
+  }
+});
+
+// vendor/atlas-spatial/index.mjs
+var init_atlas_spatial = __esm({
+  "vendor/atlas-spatial/index.mjs"() {
+    "use strict";
+    init_contracts();
+    init_generation();
+    init_placement();
+    init_storage();
+    init_view_adapter();
+    init_tools();
+    init_renderer();
+    init_host_context();
+    init_candidate_group();
+    init_candidate_apply();
+    init_initial_frame();
+  }
+});
+
+// src/atlas-spatial-frame.ts
+var SQL_MAP_FRAME_SIZE_FIELDS;
+var init_atlas_spatial_frame = __esm({
+  "src/atlas-spatial-frame.ts"() {
+    "use strict";
+    init_atlas_spatial();
+    SQL_MAP_FRAME_SIZE_FIELDS = Object.freeze({
+      cols: { alias: "reference_width_cells", label: "宽（格数）" },
+      rows: { alias: "reference_height_cells", label: "高（格数）" }
+    });
   }
 });
 
@@ -2753,6 +2919,7 @@ var init_atlas_sql_scene_maps = __esm({
     init_atlas_db_defaults();
     init_atlas_ops_geography();
     init_atlas_scene_layout();
+    init_atlas_spatial_frame();
     init_atlas_db_runtime();
   }
 });
@@ -3121,150 +3288,6 @@ var init_atlas_sql_visibility = __esm({
   }
 });
 
-// vendor/atlas-spatial/contracts.mjs
-var LIMITS;
-var init_contracts = __esm({
-  "vendor/atlas-spatial/contracts.mjs"() {
-    "use strict";
-    LIMITS = Object.freeze({ inputBytes: 65536, sceneBytes: 524288, rooms: 24, contents: 128, actors: 128, items: 256, districts: 16, buildings: 64, blocksPerDistrict: 24, floorSide: 100, roomSide: 40, citySide: 2e4, navigationCells: 18e4, markers: 512, overlays: 256, pathPoints: 2048 });
-  }
-});
-
-// vendor/atlas-spatial/foundation.mjs
-var init_foundation = __esm({
-  "vendor/atlas-spatial/foundation.mjs"() {
-    "use strict";
-  }
-});
-
-// vendor/atlas-spatial/layout-core.mjs
-var init_layout_core = __esm({
-  "vendor/atlas-spatial/layout-core.mjs"() {
-    "use strict";
-    init_foundation();
-  }
-});
-
-// vendor/atlas-spatial/generation.mjs
-var init_generation = __esm({
-  "vendor/atlas-spatial/generation.mjs"() {
-    "use strict";
-    init_layout_core();
-    init_contracts();
-  }
-});
-
-// vendor/atlas-spatial/placement.mjs
-var init_placement = __esm({
-  "vendor/atlas-spatial/placement.mjs"() {
-    "use strict";
-    init_layout_core();
-    init_contracts();
-  }
-});
-
-// vendor/atlas-spatial/storage.mjs
-var init_storage = __esm({
-  "vendor/atlas-spatial/storage.mjs"() {
-    "use strict";
-    init_contracts();
-  }
-});
-
-// vendor/atlas-spatial/view-adapter.mjs
-var init_view_adapter = __esm({
-  "vendor/atlas-spatial/view-adapter.mjs"() {
-    "use strict";
-    init_contracts();
-  }
-});
-
-// vendor/atlas-spatial/tools.mjs
-var TOOL_NAMES;
-var init_tools = __esm({
-  "vendor/atlas-spatial/tools.mjs"() {
-    "use strict";
-    init_generation();
-    init_placement();
-    init_contracts();
-    TOOL_NAMES = Object.freeze(["atlas_generate_floor", "atlas_generate_city", "atlas_place_markers", "atlas_build_overlays"]);
-  }
-});
-
-// vendor/atlas-spatial/renderer-drawing.mjs
-var init_renderer_drawing = __esm({
-  "vendor/atlas-spatial/renderer-drawing.mjs"() {
-    "use strict";
-    init_layout_core();
-  }
-});
-
-// vendor/atlas-spatial/renderer.mjs
-var DEFAULT_THEME;
-var init_renderer = __esm({
-  "vendor/atlas-spatial/renderer.mjs"() {
-    "use strict";
-    init_layout_core();
-    init_renderer_drawing();
-    init_contracts();
-    DEFAULT_THEME = Object.freeze({ bg: "#060a12", grid: "#4977a125", wall: "#b2d4ef", mint: "#39e0a0", gold: "#ffc247", blue: "#7fd4ff", text: "#dce9fb", muted: "#91a9c3", floor: "#101d2f", cyan: "#43e0ff", violet: "#9b6bff" });
-  }
-});
-
-// vendor/atlas-spatial/host-context.mjs
-var init_host_context = __esm({
-  "vendor/atlas-spatial/host-context.mjs"() {
-    "use strict";
-    init_contracts();
-    init_storage();
-  }
-});
-
-// vendor/atlas-spatial/candidate-group.mjs
-var init_candidate_group = __esm({
-  "vendor/atlas-spatial/candidate-group.mjs"() {
-    "use strict";
-    init_host_context();
-    init_generation();
-    init_storage();
-    init_contracts();
-  }
-});
-
-// vendor/atlas-spatial/candidate-apply.mjs
-var init_candidate_apply = __esm({
-  "vendor/atlas-spatial/candidate-apply.mjs"() {
-    "use strict";
-    init_contracts();
-  }
-});
-
-// vendor/atlas-spatial/initial-frame.mjs
-var init_initial_frame = __esm({
-  "vendor/atlas-spatial/initial-frame.mjs"() {
-    "use strict";
-    init_contracts();
-  }
-});
-
-// vendor/atlas-spatial/index.mjs
-var init_atlas_spatial = __esm({
-  "vendor/atlas-spatial/index.mjs"() {
-    "use strict";
-    init_contracts();
-    init_generation();
-    init_placement();
-    init_storage();
-    init_view_adapter();
-    init_tools();
-    init_renderer();
-    init_host_context();
-    init_candidate_group();
-    init_candidate_apply();
-    init_initial_frame();
-  }
-});
-
 // src/atlas-db-views.ts
 var init_atlas_db_views = __esm({
   "src/atlas-db-views.ts"() {
@@ -3275,6 +3298,8 @@ var init_atlas_db_views = __esm({
     init_atlas_scale();
     init_atlas_scene_layout();
     init_atlas_sql_visibility();
+    init_atlas_map_topology();
+    init_atlas_runtime_limits();
     init_atlas_spatial();
   }
 });
@@ -9510,6 +9535,8 @@ init_atlas_db_readport();
 // src/atlas-sql-inspect.ts
 init_atlas_db_runtime();
 init_atlas_hash();
+init_atlas_map_topology();
+init_atlas_runtime_limits();
 
 // src/atlas-sql-chat.ts
 init_atlas_sql_model_context();

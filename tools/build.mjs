@@ -151,6 +151,11 @@ export async function buildAll({ log = () => {} } = {}) {
     join(vendorDir, "sql-wasm.js"),
     join(sqlDist, "atlas-sql.mjs"),
     join(sqlDist, "atlas-sql-worker.js"),
+    // M2-03 门禁修复（基线既有缺陷）：UI 主产物与服务插件主产物同样内联了 Emscripten
+    // 运行时，但原清单漏掉二者，于是 `npm run pack` 把它们同步进 release/ 与根 dist/ 之后，
+    // ATLAS-07 发布扫描会报「本地绝对路径 /home/」。同一卫生规则必须一致适用。
+    join(sqlDist, "atlas-ui-core.mjs"),
+    join(root, "atlas-server-plugin", "dist", "atlas-server.mjs"),
     // H13：Node 服务插件的同一份 SQL 产物也含 Emscripten 虚拟 FS 字面量，
     // 同一发布卫生规则必须一致适用（漏掉它发布扫描就会报本地绝对路径）。
     join(root, "atlas-server-plugin", "dist", "atlas-sql.mjs"),

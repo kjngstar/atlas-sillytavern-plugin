@@ -73,6 +73,129 @@ export function normalizeFrame(frame: unknown): Record<string, unknown> {
   return {};
 }
 
+/** 幅面归一的固定错误码；P03/P04/S02 按这些码断言。 */
+export type SqlMapFrameCode = 'FRAME_INVALID' | 'FRAME_ALIAS_CONFLICT' | 'FRAME_ORIGIN_INVALID';
+
+/**
+ * 归一后的地图幅面。ok=false 时 cols/rows 只作诊断用，调用方不得拿去排位。
+ * - 尺寸成功：cols/rows 为正整数；缺必需尺寸、两套字段冲突、尺寸非正整数 → ok=false。
+ * - origin：缺省（字段不存在 / null / undefined）按 0；出现但不是有限数 → FRAME_ORIGIN_INVALID
+ *   且 ok=false，绝不默默当 0（origin 只影响显示偏移，损坏值就是损坏值，不替它圆场）。
+ */
+export type SqlMapFrame = {
+  ok: boolean;
+  /** 正整数；失败时 null —— 绝不返回 NaN 让上层继续排位。 */
+  cols: number | null;
+  rows: number | null;
+  originX: number;
+  originY: number;
+  /** 原 frame 的浅拷贝：atlasScene / atlasLayoutRequest / 未知扩展字段一律保留、不写回。 */
+  frame: Record<string, unknown>;
+  issues: Issue[];
+};
+
+/** 新旧两套尺寸字段的固定对应表。 */
+export const SQL_MAP_FRAME_SIZE_FIELDS = Object.freeze({
+  cols: { alias: 'reference_width_cells', label: '宽（格数）' },
+  rows: { alias: 'reference_height_cells', label: '高（格数）' },
+} as const);
+
+const FRAME_SIZE_ABSENT = 0;
+const FRAME_SIZE_OK = 1;
+const FRAME_SIZE_BAD = 2;
+
+/** 正整数才算合法尺寸：0、负数、小数、字符串、NaN/Infinity 一律算「写了但不合法」。 */
+function probeSize(frame: Record<string, unknown>, key: string): { state: number; value: number | null } {
+  if (!Object.prototype.hasOwnProperty.call(frame, key)) return { state: FRAME_SIZE_ABSENT, value: null };
+  const raw = frame[key];
+  if (raw === undefined || raw === null) return { state: FRAME_SIZE_ABSENT, value: null };
+  if (typeof raw === 'number' && Number.isInteger(raw) && raw >= 1) return { state: FRAME_SIZE_OK, value: raw };
+  return { state: FRAME_SIZE_BAD, value: null };
+}
+
+/** 内部先攒裸 Issue，最后统一并一次上下文，避免消息里重复拼接 mapId/branchId。 */
+function sizeIssue(code: SqlMapFrameCode, key: string, message: string): Issue {
+  return { code, path: `$.frame_json.${key}`, message, severity: 'error', retryable: false };
+}
+
+/** 单轴归一：两套字段「同时存在且不一致」报 FRAME_ALIAS_CONFLICT，缺必需尺寸报 FRAME_INVALID。 */
+function resolveFrameSize(
+  frame: Record<string, unknown>,
+  key: 'cols' | 'rows',
+  issues: Issue[],
+): number | null {
+  const { alias, label } = SQL_MAP_FRAME_SIZE_FIELDS[key];
+  const primary = probeSize(frame, key);
+  const secondary = probeSize(frame, alias);
+  if (primary.state === FRAME_SIZE_OK && secondary.state === FRAME_SIZE_OK) {
+    if (primary.value !== secondary.value) {
+      issues.push(
+        sizeIssue('FRAME_ALIAS_CONFLICT', key,
+          `${label}两套字段不一致：${key}=${primary.value} 与 ${alias}=${secondary.value}；不猜哪个为准，先让作者纠正`),
+      );
+      return null;
+    }
+    return primary.value;
+  }
+  for (const [probe, probeKey] of [[primary, key], [secondary, alias]] as const) {
+    if (probe.state !== FRAME_SIZE_BAD) continue;
+    issues.push(
+      sizeIssue('FRAME_INVALID', probeKey,
+        `${label}字段存在但不是正整数：${probeKey}=${JSON.stringify(frame[probeKey])}；拒绝以 NaN/零幅面继续排位`),
+    );
+    return null;
+  }
+  if (primary.state === FRAME_SIZE_OK) return primary.value;
+  if (secondary.state === FRAME_SIZE_OK) return secondary.value;
+  issues.push(
+    sizeIssue('FRAME_INVALID', key,
+      `缺少必需的地图幅面${label}：${key} 与 ${alias} 都没有正整数（frame_json 缺失、不是对象，或没有可用尺寸）`),
+  );
+  return null;
+}
+
+/** 单轴 origin：缺省 0；出现则必须是有限数，否则报错并原样交回「不可用」信号。 */
+function resolveFrameOrigin(frame: Record<string, unknown>, key: 'origin_x' | 'origin_y', issues: Issue[]): number {
+  if (!Object.prototype.hasOwnProperty.call(frame, key)) return 0;
+  const raw = frame[key];
+  if (raw === undefined || raw === null) return 0;
+  if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+  issues.push(
+    sizeIssue('FRAME_ORIGIN_INVALID', key,
+      `幅面原点不是有限数：${key}=${JSON.stringify(raw)}；不默默按 0 替代，先纠正损坏字段`),
+  );
+  return Number.NaN;
+}
+
+/**
+ * M2-08A：旧新幅面字段统一归一。
+ *
+ * 供 compileSqlSceneMaps / layout-task / 任何需要读 maps.frame_json 尺寸的地方统一调用，
+ * 不再各自复制 `frame.cols ?? frame.reference_width_cells ?? 100` 这种 fallback
+ * （那种写法会把 120×80 的旧档悄悄当成 100×100，也会把 `Number(frame.cols)` 的 NaN 放进排位）。
+ *
+ * 纯函数：不写库、不发请求、不改传入对象。
+ */
+export function normalizeSqlMapFrame(frame: unknown, ctx: SpatialIssueContext = {}): SqlMapFrame {
+  const normalized = normalizeFrame(frame);
+  const issues: Issue[] = [];
+  const cols = resolveFrameSize(normalized, 'cols', issues);
+  const rows = resolveFrameSize(normalized, 'rows', issues);
+  const originX = resolveFrameOrigin(normalized, 'origin_x', issues);
+  const originY = resolveFrameOrigin(normalized, 'origin_y', issues);
+  const ok = cols !== null && rows !== null && issues.length === 0;
+  return {
+    ok,
+    cols,
+    rows,
+    originX,
+    originY,
+    // 浅拷贝：扩展字段（atlasScene / atlasLayoutRequest / 未知键）完整保留，归一结果不写回。
+    frame: normalized,
+    issues: issues.map((item) => spatialIssue(item, ctx)),
+  };
+}
+
 export type SpatialFrameRead = {
   ok: boolean;
   frame: Record<string, unknown>;

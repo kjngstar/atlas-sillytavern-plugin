@@ -2623,6 +2623,9 @@ var init_atlas_sql_model_context = __esm({
 });
 
 // src/atlas-location-kinds.ts
+function isAtlasLocationKind(value) {
+  return typeof value === "string" && ATLAS_LOCATION_KINDS.includes(value);
+}
 var ATLAS_LOCATION_KINDS, ATLAS_LOCATION_KINDS_SQL;
 var init_atlas_location_kinds = __esm({
   "src/atlas-location-kinds.ts"() {
@@ -6838,6 +6841,226 @@ var init_atlas_sql_legacy_import = __esm({
   }
 });
 
+// src/atlas-map-topology.ts
+function topologyIssue(code, message, severity, extra = {}) {
+  return { code, path: "$.topology", message, severity, retryable: false, ...extra };
+}
+function resolveMapTopology(input) {
+  const issues = [];
+  const maxDepth = Number.isFinite(input.maxDepth) && input.maxDepth > 0 ? Math.floor(input.maxDepth) : DEFAULT_MAX_DEPTH;
+  const locationsById = /* @__PURE__ */ new Map();
+  for (const location2 of input.locations) {
+    if (location2.branchId !== input.branchId || location2.status !== ACTIVE) continue;
+    if (!locationsById.has(location2.id)) locationsById.set(location2.id, location2);
+  }
+  const mapsById = /* @__PURE__ */ new Map();
+  for (const map of input.maps) {
+    if (map.branchId !== input.branchId || map.status !== ACTIVE) continue;
+    if (!mapsById.has(map.id)) mapsById.set(map.id, map);
+  }
+  const mapIds = [...mapsById.keys()].sort();
+  const mapsByContainer = /* @__PURE__ */ new Map();
+  for (const mapId of mapIds) {
+    const container = mapsById.get(mapId).containerLocationId;
+    if (!container) continue;
+    const list = mapsByContainer.get(container);
+    if (list) list.push(mapId);
+    else mapsByContainer.set(container, [mapId]);
+  }
+  const unlinked = /* @__PURE__ */ new Set();
+  const reported = /* @__PURE__ */ new Set();
+  function report(code, key, message, severity = "error", extra = {}) {
+    if (reported.has(key)) return;
+    reported.add(key);
+    issues.push(topologyIssue(code, message, severity, extra));
+  }
+  function soleContainerMap(locationId, selfMapId) {
+    const list = mapsByContainer.get(locationId);
+    if (!list || list.length === 0) return null;
+    if (list.length > 1) {
+      for (const id of list) if (id !== selfMapId) unlinked.add(id);
+      report(
+        "AMBIGUOUS_CONTAINER_MAP",
+        `ambiguous:${locationId}`,
+        `地点 ${locationId} 被 ${list.length} 张地图当作容器：不随机取第一项，全部列入未挂接`,
+        "error",
+        { locationId, relatedIds: [...list] }
+      );
+      return null;
+    }
+    const only = list[0];
+    if (only === selfMapId) return null;
+    return only;
+  }
+  const nullContainerIds = mapIds.filter((id) => !mapsById.get(id).containerLocationId);
+  const designatedRoot = input.rootMapId && mapsById.has(input.rootMapId) ? input.rootMapId : null;
+  if (input.rootMapId && !designatedRoot) {
+    report(
+      "ROOT_MAP_MISSING",
+      `root:${input.rootMapId}`,
+      `根图 ${input.rootMapId} 不是本分支的 active 地图：不假造根图，相关地图列为未挂接`,
+      "error",
+      { mapId: input.rootMapId, relatedIds: [...nullContainerIds] }
+    );
+  }
+  if (nullContainerIds.length > 1) {
+    const extraRoot = nullContainerIds.find((id) => id !== designatedRoot) ?? null;
+    report(
+      "MULTIPLE_ROOT_MAPS",
+      "roots",
+      `本分支有 ${nullContainerIds.length} 张无容器顶图：只按 ${designatedRoot ?? "首个顶图"} 作回落根，其余顶图按自身为根单独列出`,
+      designatedRoot ? "warning" : "error",
+      { mapId: extraRoot ?? void 0, relatedIds: [...nullContainerIds] }
+    );
+  }
+  if (nullContainerIds.length === 0 && !designatedRoot) {
+    report("ROOT_MAP_MISSING", "root:none", "分支没有根图：所有地图只能单独列出，不猜根");
+  }
+  const fallbackRootId = designatedRoot ?? (nullContainerIds.length === 1 ? nullContainerIds[0] : null);
+  function resolveMap(mapId, map) {
+    const containerId = map.containerLocationId;
+    if (!containerId) {
+      report("MAP_CONTAINER_MISSING", `container:${mapId}`, `地图 ${mapId} 没有容器地点：无法确定归属`, "error", {
+        mapId
+      });
+      return { parentMapId: null, quality: "invalid" };
+    }
+    const container = locationsById.get(containerId);
+    if (!container) {
+      report(
+        "CONTAINER_LOCATION_MISSING",
+        `containerMissing:${mapId}`,
+        `地图 ${mapId} 的容器地点 ${containerId} 不存在或不是 active：不猜归属`,
+        "error",
+        { mapId, locationId: containerId }
+      );
+      return { parentMapId: null, quality: "invalid" };
+    }
+    const siblings = mapsByContainer.get(containerId) ?? [];
+    if (siblings.length > 1) {
+      for (const id of siblings) unlinked.add(id);
+      report(
+        "AMBIGUOUS_CONTAINER_MAP",
+        `ambiguous:${containerId}`,
+        `地点 ${containerId} 被 ${siblings.length} 张地图当作容器：不随机取第一项，全部列入未挂接`,
+        "error",
+        { mapId, locationId: containerId, relatedIds: [...siblings] }
+      );
+      return { parentMapId: null, quality: "invalid" };
+    }
+    if (container.mapId === mapId) {
+      report(
+        "MAP_SELF_CONTAINED",
+        `self:${mapId}`,
+        `地图 ${mapId} 的容器地点 ${containerId} 自身位于该图内：自容器循环，拒绝挂接`,
+        "error",
+        { mapId, locationId: containerId }
+      );
+      return { parentMapId: null, quality: "invalid" };
+    }
+    if (container.mobility === "mobile" && container.anchorLocationId) {
+      const anchorId = container.anchorLocationId;
+      if (!locationsById.has(anchorId)) {
+        report(
+          "ANCHOR_LOCATION_MISSING",
+          `anchor:${mapId}`,
+          `载具容器 ${containerId} 的停靠 ${anchorId} 不存在或不是 active：本次按结构父链回落`,
+          "warning",
+          { mapId, locationId: anchorId }
+        );
+      } else {
+        const anchorMap = soleContainerMap(anchorId, mapId);
+        if (anchorMap && anchorMap !== mapId) return { parentMapId: anchorMap, quality: "anchored" };
+      }
+    }
+    let cursor = container;
+    const seen = /* @__PURE__ */ new Set([container.id]);
+    let depth = 0;
+    while (cursor.parentLocationId) {
+      depth += 1;
+      if (depth > maxDepth) {
+        report(
+          "LOCATION_DEPTH_LIMIT",
+          `depth:${container.id}`,
+          `地图 ${mapId} 的容器父链超过 ${maxDepth} 条父边：拒绝继续深挖，不无限上溯`,
+          "error",
+          { mapId, locationId: container.id, relatedIds: [...seen] }
+        );
+        return { parentMapId: null, quality: "invalid" };
+      }
+      const parentId = cursor.parentLocationId;
+      if (seen.has(parentId)) {
+        report("LOCATION_PARENT_CYCLE", `cycle:${container.id}`, `地点父链成环（回到 ${parentId}）：不无限上溯`, "error", {
+          locationId: parentId,
+          mapId,
+          relatedIds: [...seen]
+        });
+        return { parentMapId: null, quality: "invalid" };
+      }
+      const parent = locationsById.get(parentId);
+      if (!parent) {
+        report(
+          "LOCATION_PARENT_MISSING",
+          `parentMissing:${mapId}`,
+          `地图 ${mapId} 的容器 ${container.id} 上溯到不存在的父地点 ${parentId}：不猜归属`,
+          "error",
+          { mapId, locationId: parentId }
+        );
+        return { parentMapId: null, quality: "invalid" };
+      }
+      seen.add(parentId);
+      const parentMap = soleContainerMap(parentId, mapId);
+      if (parentMap && parentMap !== mapId) return { parentMapId: parentMap, quality: "contained" };
+      cursor = parent;
+    }
+    if (fallbackRootId && fallbackRootId !== mapId) {
+      return { parentMapId: fallbackRootId, quality: "unclassified" };
+    }
+    report("MAP_UNLINKED", `unlinked:${mapId}`, `地图 ${mapId} 找不到可用祖先且没有可用根图：列入未挂接`, "error", {
+      mapId
+    });
+    return { parentMapId: null, quality: "invalid" };
+  }
+  const nodes = [];
+  for (const mapId of mapIds) {
+    const map = mapsById.get(mapId);
+    if (!map.containerLocationId) {
+      nodes.push({
+        mapId,
+        containerLocationId: null,
+        parentMapId: null,
+        connectionQuality: "root"
+      });
+      continue;
+    }
+    const resolved = resolveMap(mapId, map);
+    if (resolved.quality === "invalid") unlinked.add(mapId);
+    nodes.push({
+      mapId,
+      containerLocationId: map.containerLocationId,
+      parentMapId: resolved.parentMapId,
+      connectionQuality: resolved.quality
+    });
+  }
+  if (nullContainerIds.length > 1 && fallbackRootId) {
+    for (const id of nullContainerIds) if (id !== fallbackRootId) unlinked.add(id);
+  }
+  return {
+    nodes,
+    rootMapIds: [...nullContainerIds].sort(),
+    unlinkedMapIds: [...unlinked].sort(),
+    issues
+  };
+}
+var ACTIVE, DEFAULT_MAX_DEPTH;
+var init_atlas_map_topology = __esm({
+  "src/atlas-map-topology.ts"() {
+    "use strict";
+    ACTIVE = "active";
+    DEFAULT_MAX_DEPTH = 12;
+  }
+});
+
 // src/atlas-db-invariants.ts
 function violation(code, table, rowId, field, message, beforeAfter) {
   return { code, table, rowId, field, message, beforeAfter };
@@ -6867,6 +7090,62 @@ function finiteOrNull(value) {
   if (value === null || value === void 0) return null;
   if (typeof value !== "number" || !Number.isFinite(value)) return Number.NaN;
   return value;
+}
+function textOrNull(value) {
+  return value === null || value === void 0 ? null : String(value);
+}
+function mergePendingRows(rows4, table, pending) {
+  const byId = new Map(rows4.map((row2) => [String(row2.id), row2]));
+  for (const item of pending) {
+    if (item.table !== table) continue;
+    if (!item.row) {
+      byId.delete(item.rowId);
+      continue;
+    }
+    const existing = byId.get(item.rowId);
+    byId.set(item.rowId, existing ? { ...existing, ...item.row } : item.row);
+  }
+  return [...byId.values()];
+}
+function revertPendingRows(rows4, table, pending) {
+  const byId = new Map(rows4.map((row2) => [String(row2.id), row2]));
+  for (const item of pending) {
+    if (item.table !== table) continue;
+    if (item.before === void 0) continue;
+    if (item.before === null) {
+      byId.delete(item.rowId);
+      continue;
+    }
+    byId.set(item.rowId, item.before);
+  }
+  return [...byId.values()];
+}
+function topologyInputOf(branchId, rootMapId, mapRows, locationRows) {
+  return {
+    branchId,
+    rootMapId,
+    maxDepth: LOCATION_DEPTH,
+    maps: mapRows.map((row2) => ({
+      id: String(row2.id),
+      branchId: textOrNull(row2.branch_id) ?? branchId,
+      containerLocationId: textOrNull(row2.container_location_id),
+      status: textOrNull(row2.status) ?? "active"
+    })),
+    locations: locationRows.map((row2) => ({
+      id: String(row2.id),
+      branchId: textOrNull(row2.branch_id) ?? branchId,
+      kind: textOrNull(row2.kind) ?? "other",
+      parentLocationId: textOrNull(row2.parent_location_id),
+      anchorLocationId: textOrNull(row2.anchor_location_id),
+      mobility: row2.mobility === "mobile" ? "mobile" : "fixed",
+      mapId: textOrNull(row2.map_id),
+      status: textOrNull(row2.status) ?? "active"
+    }))
+  };
+}
+function topologyIssueKey(issue20) {
+  const related = [...issue20.relatedIds ?? []].sort().join(",");
+  return `${issue20.code}|${issue20.mapId ?? ""}|${issue20.locationId ?? ""}|${related}`;
 }
 function isJsonColumn2(name) {
   return name.endsWith("_json");
@@ -6925,6 +7204,7 @@ function validateCandidate(db, options) {
     if (onlyRows && onlyRows.size > 0 && !onlyRows.has(id)) return false;
     return true;
   };
+  const mapRows = rowsOf(db, "maps", branchId);
   const entityKeys = rowsOf(db, "entity_keys", branchId);
   const keyKindById = /* @__PURE__ */ new Map();
   for (const key of entityKeys) {
@@ -6994,6 +7274,46 @@ function validateCandidate(db, options) {
       }
       cursor = parentOf.get(cursor) ?? null;
     }
+  }
+  const pendingList = options.pendingRows ?? [];
+  const branchRows = rowsOf(db, "branches", branchId);
+  let baseRootMapId = textOrNull(branchRows[0]?.root_map_id);
+  let candidateRootMapId = baseRootMapId;
+  for (const item of pendingList) {
+    if (item.table !== "branches") continue;
+    if (branchRows.length > 0 && item.rowId !== String(branchRows[0].id)) continue;
+    if (item.before === void 0) continue;
+    baseRootMapId = item.before === null ? null : textOrNull(item.before.root_map_id);
+    if (item.row) candidateRootMapId = textOrNull(item.row.root_map_id);
+  }
+  const baseTopology = resolveMapTopology(
+    topologyInputOf(
+      branchId,
+      baseRootMapId,
+      revertPendingRows(mapRows, "maps", pendingList),
+      revertPendingRows(locations, "locations", pendingList)
+    )
+  );
+  const candidateTopology = resolveMapTopology(
+    topologyInputOf(
+      branchId,
+      candidateRootMapId,
+      mergePendingRows(mapRows, "maps", pendingList),
+      mergePendingRows(locations, "locations", pendingList)
+    )
+  );
+  const baseTopologyKeys = new Set(baseTopology.issues.map(topologyIssueKey));
+  for (const issue20 of candidateTopology.issues) {
+    const mapped = TOPOLOGY_INVARIANT_CODES[issue20.code];
+    if (!mapped) continue;
+    if (baseTopologyKeys.has(topologyIssueKey(issue20))) continue;
+    const target = TOPOLOGY_ISSUE_TARGET[issue20.code] ?? {
+      table: "maps",
+      field: "container_location_id",
+      rowFrom: "map"
+    };
+    const rowId = (target.rowFrom === "location" ? issue20.locationId : issue20.mapId) ?? issue20.mapId ?? issue20.locationId ?? null;
+    violations.push(violation(mapped, target.table, rowId, target.field, `${issue20.code}：${issue20.message}`));
   }
   const items = rowsOf(db, "items", branchId);
   const containerEdges = /* @__PURE__ */ new Map();
@@ -7358,7 +7678,7 @@ function collectConditionLeaves(condition, depth) {
 function validateGroup(db, branchId, tables, rowIds, pendingRows) {
   return validateCandidate(db, { branchId, tables, rowIds: new Set(rowIds), pendingRows });
 }
-var LOCATION_DEPTH, CONTAINER_DEPTH, ACTION_PLAN_DEPTH, CAPABILITY_LIMIT2, MOBILITY_PROFILE_LIMIT2, ALIAS_LIMIT2, PARTICIPANTS_LIMIT2, GEOMETRY_VERTEX_LIMIT2, ITEM_PROPERTY_LIMIT2, MENTION_RECENT_LIMIT2;
+var LOCATION_DEPTH, CONTAINER_DEPTH, ACTION_PLAN_DEPTH, CAPABILITY_LIMIT2, MOBILITY_PROFILE_LIMIT2, ALIAS_LIMIT2, PARTICIPANTS_LIMIT2, GEOMETRY_VERTEX_LIMIT2, ITEM_PROPERTY_LIMIT2, MENTION_RECENT_LIMIT2, TOPOLOGY_INVARIANT_CODES, TOPOLOGY_ISSUE_TARGET;
 var init_atlas_db_invariants = __esm({
   "src/atlas-db-invariants.ts"() {
     "use strict";
@@ -7366,6 +7686,7 @@ var init_atlas_db_invariants = __esm({
     init_atlas_db_runtime();
     init_atlas_runtime_limits();
     init_atlas_db_codec();
+    init_atlas_map_topology();
     LOCATION_DEPTH = ATLAS_RUNTIME_LIMITS.locationDepth;
     CONTAINER_DEPTH = ATLAS_RUNTIME_LIMITS.containerDepth;
     ACTION_PLAN_DEPTH = ATLAS_RUNTIME_LIMITS.actionPlanDepth;
@@ -7376,6 +7697,28 @@ var init_atlas_db_invariants = __esm({
     GEOMETRY_VERTEX_LIMIT2 = ATLAS_FIELD_LIMITS.geometryVertexLimit;
     ITEM_PROPERTY_LIMIT2 = ATLAS_FIELD_LIMITS.itemPropertyLimit;
     MENTION_RECENT_LIMIT2 = ATLAS_FIELD_LIMITS.mentionRecentLimit;
+    TOPOLOGY_INVARIANT_CODES = {
+      AMBIGUOUS_CONTAINER_MAP: "INVARIANT_MAP_CONTAINER_AMBIGUOUS",
+      CONTAINER_LOCATION_MISSING: "INVARIANT_MAP_CONTAINER_MISSING",
+      MAP_CONTAINER_MISSING: "INVARIANT_MAP_CONTAINER_MISSING",
+      MAP_SELF_CONTAINED: "INVARIANT_LOCATION_MAP_SELF",
+      LOCATION_PARENT_MISSING: "INVARIANT_MAP_PARENT_MISSING",
+      ANCHOR_LOCATION_MISSING: "INVARIANT_MAP_ANCHOR_MISSING",
+      ROOT_MAP_MISSING: "INVARIANT_MAP_ROOT_MISSING",
+      MULTIPLE_ROOT_MAPS: "INVARIANT_MAP_MULTIPLE_ROOTS",
+      MAP_UNLINKED: "INVARIANT_MAP_UNLINKED"
+    };
+    TOPOLOGY_ISSUE_TARGET = {
+      AMBIGUOUS_CONTAINER_MAP: { table: "maps", field: "container_location_id", rowFrom: "map" },
+      CONTAINER_LOCATION_MISSING: { table: "maps", field: "container_location_id", rowFrom: "map" },
+      MAP_CONTAINER_MISSING: { table: "maps", field: "container_location_id", rowFrom: "map" },
+      MULTIPLE_ROOT_MAPS: { table: "maps", field: "container_location_id", rowFrom: "map" },
+      MAP_UNLINKED: { table: "maps", field: "container_location_id", rowFrom: "map" },
+      MAP_SELF_CONTAINED: { table: "locations", field: "map_id", rowFrom: "location" },
+      LOCATION_PARENT_MISSING: { table: "locations", field: "parent_location_id", rowFrom: "location" },
+      ANCHOR_LOCATION_MISSING: { table: "locations", field: "anchor_location_id", rowFrom: "location" },
+      ROOT_MAP_MISSING: { table: "branches", field: "root_map_id", rowFrom: "map" }
+    };
   }
 });
 
@@ -7488,7 +7831,7 @@ function applyGroups(db, orderedGroups, ctx) {
       if (validate) {
         const tables = [...new Set(merged.map((m) => m.table))].filter((t) => isKnownTable(t));
         const rowIds = [...new Set(merged.map((m) => m.rowId))];
-        const pendingRows = merged.map((m) => ({ table: m.table, rowId: m.rowId, row: m.after }));
+        const pendingRows = merged.map((m) => ({ table: m.table, rowId: m.rowId, row: m.after, before: m.before }));
         const validation = validateGroup(db, ctx.branchId, tables, rowIds, pendingRows);
         if (!validation.ok) {
           const violations = validation.violations.slice(0, 8).map((v) => `${v.code}@${v.table}.${v.field}`).join("; ");
@@ -13216,11 +13559,9 @@ function compileRoutePropose(op, ctx) {
   return result;
 }
 function containerMapKind2(containerKind) {
-  if (["region", "city", "district"].includes(containerKind)) return "region";
-  if (["building", "natural", "other"].includes(containerKind)) return "site";
-  return "interior";
+  return isAtlasLocationKind(containerKind) ? CONTAINER_MAP_KIND_BY_LOCATION[containerKind] : "interior";
 }
-var ROUTE_KINDS, GEOMETRY_QUALITY, DISTANCE_BASIS, SCALE_QUALITY, MOBILITY_MODES;
+var ROUTE_KINDS, GEOMETRY_QUALITY, DISTANCE_BASIS, SCALE_QUALITY, MOBILITY_MODES, CONTAINER_MAP_KIND_BY_LOCATION;
 var init_atlas_ops_geography = __esm({
   "src/atlas-ops-geography.ts"() {
     "use strict";
@@ -13230,11 +13571,23 @@ var init_atlas_ops_geography = __esm({
     init_atlas_ops_entities();
     init_atlas_runtime_limits();
     init_atlas_db_schema();
+    init_atlas_location_kinds();
     ROUTE_KINDS = ["adjacent", "road", "path", "door", "stairs", "air", "water", "portal", "estimated"];
     GEOMETRY_QUALITY = ["confirmed", "estimated", "unknown"];
     DISTANCE_BASIS = ["measured", "calibrated", "narrative", "estimated", "unknown"];
     SCALE_QUALITY = ["uncalibrated", "estimated", "confirmed"];
     MOBILITY_MODES = ["walk", "ride", "ground_vehicle", "water", "flight", "teleport", "custom"];
+    CONTAINER_MAP_KIND_BY_LOCATION = {
+      region: "region",
+      natural: "region",
+      city: "site",
+      district: "site",
+      building: "site",
+      other: "site",
+      floor: "interior",
+      room: "interior",
+      vehicle: "interior"
+    };
   }
 });
 
@@ -15479,6 +15832,133 @@ var init_atlas_scale = __esm({
 });
 
 // src/atlas-scene-layout.ts
+function placementIssue(code, message, severity = "error", extra = {}) {
+  return { code, path: "$.placeUnlocatedScenePoints", message, severity, retryable: false, ...extra };
+}
+function stableHash4(text4) {
+  let hash2 = 2166136261;
+  for (let i = 0; i < text4.length; i += 1) {
+    hash2 ^= text4.charCodeAt(i);
+    hash2 = Math.imul(hash2, 16777619);
+  }
+  return hash2 >>> 0;
+}
+function isFinitePoint(value) {
+  return typeof value === "object" && value !== null && Number.isFinite(value.x) && Number.isFinite(value.y);
+}
+function distanceToExtent(point, extent) {
+  const dx = Math.max(extent.x - point.x, 0, point.x - (extent.x + extent.w));
+  const dy = Math.max(extent.y - point.y, 0, point.y - (extent.y + extent.h));
+  return Math.hypot(dx, dy);
+}
+function outsideAll(neighbourhood, distances) {
+  return distances.every((distance2) => distance2 >= neighbourhood);
+}
+function placeUnlocatedScenePoints(input) {
+  const issues = [];
+  const pendingIds = input.pending.map((entry) => entry.id);
+  const cols2 = Number(input.frame?.cols);
+  const rows4 = Number(input.frame?.rows);
+  if (!Number.isFinite(cols2) || !Number.isFinite(rows4) || cols2 <= 0 || rows4 <= 0) {
+    issues.push(
+      placementIssue("FRAME_INVALID", `场景 frame 必须是有限正数（收到 cols=${String(input.frame?.cols)}, rows=${String(input.frame?.rows)}）：拒绝以 NaN/零幅面继续排位`)
+    );
+    return { placed: [], remainingIds: [...pendingIds].sort(), issues };
+  }
+  const defaultGap = Math.max(1, Math.min(cols2, rows4) / 12);
+  const requestedGap = input.minGapCells === void 0 ? defaultGap : Number(input.minGapCells);
+  if (!Number.isFinite(requestedGap) || requestedGap <= 0) {
+    issues.push(placementIssue("MIN_GAP_INVALID", `minGapCells 必须是有限正数（收到 ${String(input.minGapCells)}）`));
+    return { placed: [], remainingIds: [...pendingIds].sort(), issues };
+  }
+  const minGap = requestedGap;
+  const lowX = Math.min(minGap, cols2 / 2);
+  const lowY = Math.min(minGap, rows4 / 2);
+  const highX = Math.max(lowX, cols2 - minGap);
+  const highY = Math.max(lowY, rows4 - minGap);
+  const occupied = [];
+  for (const entry of input.existing) {
+    if (!isFinitePoint(entry)) continue;
+    occupied.push({ id: entry.id, point: { x: entry.x, y: entry.y } });
+  }
+  const obstacles = [];
+  for (const extent of input.obstacles) {
+    const candidate = extent;
+    if (!candidate || !Number.isFinite(candidate.x) || !Number.isFinite(candidate.y) || !Number.isFinite(candidate.w) || !Number.isFinite(candidate.h) || Number(candidate.w) < 0 || Number(candidate.h) < 0) {
+      issues.push(placementIssue("OBSTACLE_INVALID", "存在非法障碍（坐标为 NaN/∞ 或宽高为负）：该障碍按忽略处理，其余照常排位", "warning"));
+      continue;
+    }
+    obstacles.push({ x: Number(candidate.x), y: Number(candidate.y), w: Number(candidate.w), h: Number(candidate.h) });
+  }
+  const placed = [];
+  const remainingIds = [];
+  const pending = [...input.pending].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  for (const entry of pending) {
+    const rawHint = entry.hint;
+    let target = { x: (lowX + highX) / 2, y: (lowY + highY) / 2 };
+    let reason = "layout:center";
+    if (rawHint !== void 0) {
+      if (isFinitePoint(rawHint)) {
+        target = {
+          x: Math.min(highX, Math.max(lowX, rawHint.x)),
+          y: Math.min(highY, Math.max(lowY, rawHint.y))
+        };
+        reason = "layout:hint";
+      } else {
+        issues.push(
+          placementIssue("HINT_INVALID", `实体 ${entry.id} 的方位 hint 不是有限坐标：按 frame 中心处理`, "warning", {
+            locationId: entry.id
+          })
+        );
+      }
+    }
+    const startIndex = stableHash4(`${input.seed}\0${entry.id}`) % MAX_CANDIDATES;
+    let chosen = null;
+    let chosenGap = minGap;
+    for (const factor of GAP_RETRY_FACTORS) {
+      const neighbourhood = minGap * factor;
+      for (let step = 0; step < MAX_CANDIDATES; step += 1) {
+        const index = startIndex + step;
+        const radius = neighbourhood * Math.sqrt(step + 1);
+        const angle = index * GOLDEN_ANGLE;
+        const candidate = { x: target.x + radius * Math.cos(angle), y: target.y + radius * Math.sin(angle) };
+        if (candidate.x < lowX || candidate.x > highX || candidate.y < lowY || candidate.y > highY) continue;
+        const pointsOk = outsideAll(
+          neighbourhood,
+          occupied.map((item) => Math.hypot(candidate.x - item.point.x, candidate.y - item.point.y))
+        );
+        if (!pointsOk) continue;
+        if (!outsideAll(neighbourhood, obstacles.map((extent) => distanceToExtent(candidate, extent)))) continue;
+        chosen = candidate;
+        chosenGap = neighbourhood;
+        break;
+      }
+      if (chosen) break;
+    }
+    if (!chosen) {
+      remainingIds.push(entry.id);
+      continue;
+    }
+    occupied.push({ id: entry.id, point: chosen });
+    placed.push({
+      ...chosen,
+      id: entry.id,
+      precision: "layout",
+      reason: chosenGap === minGap ? reason : `${reason}:tightened`
+    });
+  }
+  if (remainingIds.length > 0) {
+    issues.push(
+      placementIssue(
+        "PLACEMENT_FULL",
+        `场景内没有可用空位：${remainingIds.length} 个示意点未能排位（不会叠到同一点）`,
+        "error",
+        { relatedIds: [...remainingIds] }
+      )
+    );
+  }
+  return { placed, remainingIds: remainingIds.sort(), issues };
+}
 function interiorPositionHint(action, id) {
   const zones = [
     [/(窗边|窗旁|靠窗|window)/i, 80, 30, "窗边"],
@@ -15550,9 +16030,13 @@ function scenePositions(rows4, frame) {
   }
   return result;
 }
+var GOLDEN_ANGLE, MAX_CANDIDATES, GAP_RETRY_FACTORS;
 var init_atlas_scene_layout = __esm({
   "src/atlas-scene-layout.ts"() {
     "use strict";
+    GOLDEN_ANGLE = 2.399963229728653;
+    MAX_CANDIDATES = 512;
+    GAP_RETRY_FACTORS = [1, 0.75, 0.5];
   }
 });
 
@@ -19576,6 +20060,62 @@ function queryMapView(ctx, query) {
   const routes = rows2(ctx, "routes", "", [], 1e3);
   const positionCache = buildPositionCache({ db: ctx.db, branchId: ctx.branchId });
   const visibility = sqlVisibility(ctx);
+  const rootRow = rows2(ctx, "branches", "id = ?", [ctx.branchId], 2)[0];
+  const rootMapId = rootRow && rootRow.root_map_id ? String(rootRow.root_map_id) : null;
+  const visibleLocations = ctx.viewMode === "pov" ? locations.filter((l) => visibility.visible("location", String(l.id))) : locations;
+  const topology = resolveMapTopology({
+    branchId: ctx.branchId,
+    rootMapId,
+    maxDepth: ATLAS_RUNTIME_LIMITS.locationDepth,
+    maps: maps.map((m) => ({
+      id: String(m.id),
+      branchId: ctx.branchId,
+      containerLocationId: m.container_location_id === null || m.container_location_id === void 0 ? null : String(m.container_location_id),
+      status: String(m.status ?? "active")
+    })),
+    locations: visibleLocations.map((l) => ({
+      id: String(l.id),
+      branchId: ctx.branchId,
+      kind: l.kind === null || l.kind === void 0 ? "other" : String(l.kind),
+      parentLocationId: l.parent_location_id === null || l.parent_location_id === void 0 ? null : String(l.parent_location_id),
+      anchorLocationId: l.anchor_location_id === null || l.anchor_location_id === void 0 ? null : String(l.anchor_location_id),
+      mobility: l.mobility === "mobile" ? "mobile" : "fixed",
+      mapId: l.map_id === null || l.map_id === void 0 ? null : String(l.map_id),
+      status: String(l.status ?? "active")
+    }))
+  });
+  const topologyNodeById = new Map(topology.nodes.map((node) => [node.mapId, node]));
+  const publicRootMapId = topology.nodes.find((node) => node.connectionQuality === "root" && node.mapId === rootMapId)?.mapId ?? topology.nodes.find((node) => node.connectionQuality === "root")?.mapId ?? null;
+  const topologyCodesByMap = /* @__PURE__ */ new Map();
+  for (const issue20 of topology.issues) {
+    if (ctx.viewMode === "pov") continue;
+    const touched = /* @__PURE__ */ new Set([...issue20.mapId ? [issue20.mapId] : [], ...issue20.relatedIds ?? []]);
+    if (issue20.code === "MAP_SELF_CONTAINED" && issue20.mapId) touched.add(issue20.mapId);
+    if (issue20.locationId) {
+      for (const map of maps) {
+        if (map.container_location_id !== null && map.container_location_id !== void 0 && String(map.container_location_id) === issue20.locationId) {
+          touched.add(String(map.id));
+        }
+      }
+    }
+    if (touched.size === 0 && publicRootMapId) touched.add(publicRootMapId);
+    for (const mapId of touched) {
+      const bucket = topologyCodesByMap.get(mapId) ?? /* @__PURE__ */ new Set();
+      bucket.add(issue20.code);
+      topologyCodesByMap.set(mapId, bucket);
+    }
+  }
+  const resolveNavigation = (mapId) => {
+    const node = topologyNodeById.get(mapId);
+    if (!node) return { parentMapId: null, connectionQuality: "invalid" };
+    if (ctx.viewMode !== "pov") {
+      return { parentMapId: node.parentMapId, connectionQuality: node.connectionQuality };
+    }
+    if (node.connectionQuality === "invalid") {
+      return { parentMapId: publicRootMapId === mapId ? null : publicRootMapId, connectionQuality: "unclassified" };
+    }
+    return { parentMapId: node.parentMapId, connectionQuality: node.connectionQuality };
+  };
   const routeIssues = [];
   const items = selected.map((map) => {
     const mapId = String(map.id);
@@ -19701,6 +20241,14 @@ function queryMapView(ctx, query) {
       kind: String(map.kind ?? "world"),
       containerLocationId: map.container_location_id ? String(map.container_location_id) : null,
       containerLocationKind: container && (ctx.viewMode !== "pov" || visibility.visible("location", String(container.id))) ? String(container.kind) : null,
+      ...(function navigation2() {
+        const resolved = resolveNavigation(mapId);
+        return {
+          parentMapId: resolved.parentMapId,
+          connectionQuality: resolved.connectionQuality,
+          topologyIssueCodes: [...topologyCodesByMap.get(mapId) ?? /* @__PURE__ */ new Set()].sort()
+        };
+      })(),
       metersPerCell,
       scaleQuality: String(map.scale_quality ?? "uncalibrated"),
       scaleLocked: Number(map.scale_locked ?? 0) === 1,
@@ -19730,6 +20278,20 @@ function queryMapView(ctx, query) {
       pointCount: items.reduce((n, m) => n + m.points.length, 0),
       coarseCount: items.reduce((n, m) => n + m.coarseList.length, 0),
       viewMode: ctx.viewMode ?? "author",
+      /**
+       * M2-05：作者视图给出完整坏图诊断（含未挂接地图清单），供 UI 在「未挂接地图」组里
+       * 说明为什么某张图没挂上；POV 一律不下发，避免用父图标题/ID 泄密。
+       */
+      topologyIssues: ctx.viewMode === "pov" ? [] : topology.issues.map((issue20) => ({
+        code: issue20.code,
+        mapId: issue20.mapId ?? null,
+        locationId: issue20.locationId ?? null,
+        relatedIds: [...issue20.relatedIds ?? []],
+        severity: issue20.severity,
+        message: issue20.message
+      })),
+      unlinkedMapIds: ctx.viewMode === "pov" ? [] : [...topology.unlinkedMapIds],
+      publicRootMapId,
       /** M4/Q02：坏几何按路线逐条列出，方便定位是哪一条、为什么不能画。 */
       routeIssues,
       ...assetDiagnostics(ctx, selected)
@@ -20136,6 +20698,8 @@ var init_atlas_db_views = __esm({
     init_atlas_scale();
     init_atlas_scene_layout();
     init_atlas_sql_visibility();
+    init_atlas_map_topology();
+    init_atlas_runtime_limits();
     init_atlas_spatial();
     LOG_SECRET_KEY = /(api[_-]?key|authorization|token|secret|password|cookie|bearer|signature)/i;
     LOG_SECRET_VALUE = /(sk-[A-Za-z0-9]{6,}|Bearer\s+\S+|[A-Fa-f0-9]{32,})/;
@@ -22649,123 +23213,6 @@ var init_atlas_sql_simulation = __esm({
   }
 });
 
-// src/atlas-sql-scene-maps.ts
-function compileSqlSceneMaps(input) {
-  const { db, branchId, turnId, clockS, makeId } = input, read = createTableReadPort(db);
-  const locations = read.selectWhere("locations", { branch_id: branchId, status: "active" }, 1e3);
-  if (input.ensureScenes && Number(queryBound(db, "SELECT COUNT(*) AS n FROM locations WHERE branch_id=? AND status='active'", [branchId])[0].n) > 1e3)
-    throw new AtlasDbError("SCENE_MAP_LIMIT", "地点超过单次地图结构处理上限 1000；保留原存档，需分批处理", {});
-  const maps = read.selectWhere("maps", { branch_id: branchId, status: "active" }, 1001);
-  const changes = [], opId = input.operationId ?? `scene_maps_${turnId}`;
-  const change = (table, before, after) => {
-    if (before && JSON.stringify(before) === JSON.stringify(after)) return;
-    const previous = changes.find((change2) => change2.table === table && change2.rowId === after.id);
-    const baseline = previous ? previous.before : before;
-    const next = previous ? { ...previous.after, ...Object.fromEntries(Object.entries(after).filter(([key, value]) => JSON.stringify(value) !== JSON.stringify(before?.[key]))) } : after;
-    const mutation7 = {
-      table,
-      rowId: String(after.id),
-      before: baseline,
-      after: baseline && "row_rev" in baseline ? { ...next, row_rev: Number(baseline.row_rev) + 1, updated_turn_id: turnId } : next,
-      sourceOpIds: [opId],
-      basis: { kind: input.calibration || input.background ? "manual" : "estimate", reason: input.calibration ? "作者地图标定" : input.background ? "作者设置地图底图" : "按实际地点层级建立地图；布局坐标不证明真实距离", certainty: input.calibration || input.background ? "confirmed" : "inferred" }
-    };
-    if (previous) changes[changes.indexOf(previous)] = mutation7;
-    else changes.push(mutation7);
-  };
-  const makeMap = (id, name, kind, container, frame) => createRow("maps", {
-    name,
-    kind,
-    container_location_id: container,
-    frame_json: { ...frame, origin_x: 0, origin_y: 0, reference_width_cells: frame.cols, reference_height_cells: frame.rows }
-  }, { branchId, id, turnId, clockS, nowWallMs: Date.now(), rulesetVersion: "atlas-1" });
-  const branch2 = read.selectOne("branches", branchId, branchId);
-  let root = maps.find((map) => map.id === branch2.root_map_id) ?? maps.find((map) => !map.container_location_id);
-  if (input.ensureScenes && locations.length) {
-    if (!root) {
-      root = makeMap(makeId("map", opId, "world"), "世界图", "world", null, { cols: 100, rows: 100 });
-      change("maps", null, root);
-      maps.push(root);
-    }
-    const byContainer = new Map(maps.filter((map) => map.container_location_id).map((map) => [String(map.container_location_id), map]));
-    for (const location2 of locations) {
-      const id = String(location2.id);
-      if (!byContainer.has(id)) {
-        const frame = location2.kind === "room" ? { cols: 12, rows: 8 } : { cols: 100, rows: 100 };
-        const map = makeMap(makeId("map", opId, `container:${id}`), String(location2.name), containerMapKind2(String(location2.kind)), id, frame);
-        change("maps", null, map);
-        byContainer.set(id, map);
-        maps.push(map);
-      }
-    }
-    const childrenByMap = /* @__PURE__ */ new Map();
-    for (const location2 of locations) {
-      const parentMap = location2.parent_location_id ? byContainer.get(String(location2.parent_location_id)) : root;
-      if (!parentMap) throw new AtlasDbError("REF_UNKNOWN", "父地点没有对应地图", {});
-      const list = childrenByMap.get(String(parentMap.id)) ?? [];
-      list.push(location2);
-      childrenByMap.set(String(parentMap.id), list);
-    }
-    for (const [mapId, children] of childrenByMap) {
-      const map = maps.find((map2) => map2.id === mapId), frame = input.calibration?.mapId === mapId && input.calibration.frame ? input.calibration.frame : map.frame_json;
-      const pins = scenePositions(children.map((row2) => ({ id: String(row2.id), label: String(row2.name) })), { cols: frame.cols ?? 100, rows: frame.rows ?? 100 });
-      children.forEach((location2) => {
-        if (location2.map_id === mapId && location2.grid_x != null && location2.grid_y != null && location2.coord_precision !== "unknown" && (location2.coord_precision === "exact" || Number(location2.grid_x) >= 0 && Number(location2.grid_y) >= 0 && Number(location2.grid_x) <= (frame.cols ?? 100) && Number(location2.grid_y) <= (frame.rows ?? 100))) return;
-        const pin = pins.get(String(location2.id));
-        change("locations", location2, {
-          ...location2,
-          map_id: mapId,
-          grid_x: pin.x,
-          grid_y: pin.y,
-          coord_precision: "layout",
-          uncertainty_radius_cells: null,
-          ...location2.map_id && location2.map_id !== mapId ? { area_geometry_json: null } : {}
-        });
-      });
-    }
-    const protagonists = read.selectWhere("characters", { branch_id: branchId, status: "active", role: "protagonist" }, 3);
-    const named = input.povName ? protagonists.filter((row2) => row2.name === input.povName) : [];
-    const pov = named.length === 1 ? named[0].id : branch2.pov_character_id ?? (protagonists.length === 1 ? protagonists[0].id : null);
-    change("branches", branch2, { ...branch2, root_map_id: root.id, pov_character_id: pov });
-  }
-  if (input.calibration) {
-    const c = input.calibration, map = maps.find((m) => m.id === c.mapId || c.mapId === "world" && m.id === root?.id);
-    if (!map) throw new AtlasDbError("REF_UNKNOWN", "标定目标地图不存在", {});
-    if (c.metersPerCell !== void 0 && (!Number.isFinite(c.metersPerCell) || c.metersPerCell <= 0)) throw new AtlasDbError("INVALID_PAYLOAD", "每格距离必须为正数", {});
-    if (c.frame && (!Number.isInteger(c.frame.cols) || !Number.isInteger(c.frame.rows) || c.frame.cols < 1 || c.frame.rows < 1 || c.frame.cols > 1e4 || c.frame.rows > 1e4)) throw new AtlasDbError("INVALID_PAYLOAD", "地图格数应为 1～10000 的整数", {});
-    const after = {
-      ...map,
-      ...c.metersPerCell !== void 0 ? {
-        meters_per_cell: c.metersPerCell,
-        scale_min_meters_per_cell: c.metersPerCell,
-        scale_max_meters_per_cell: c.metersPerCell,
-        scale_quality: c.quality ?? "confirmed",
-        scale_basis_json: { refs: [], note: "作者确认" },
-        calibration_rev: Number(map.calibration_rev) + 1
-      } : {},
-      ...c.locked !== void 0 ? { scale_locked: c.locked ? 1 : 0 } : {},
-      ...c.frame ? { frame_json: { ...map.frame_json, ...c.frame, reference_width_cells: c.frame.cols, reference_height_cells: c.frame.rows } } : {}
-    };
-    change("maps", map, after);
-  }
-  if (input.background) {
-    const target = maps.find((map) => map.id === input.background.mapId || input.background.mapId === "world" && map.id === root?.id);
-    if (!target) throw new AtlasDbError("REF_UNKNOWN", "底图对应地图不存在", {});
-    change("maps", target, { ...target, background_asset_key: input.background.asset?.key ?? null });
-  }
-  return changes.length ? { id: opId, opIds: [opId], dependsOn: [], readSet: [], mutations: changes } : null;
-}
-var init_atlas_sql_scene_maps = __esm({
-  "src/atlas-sql-scene-maps.ts"() {
-    "use strict";
-    init_atlas_db_readport();
-    init_atlas_db_defaults();
-    init_atlas_ops_geography();
-    init_atlas_scene_layout();
-    init_atlas_db_runtime();
-  }
-});
-
 // src/atlas-spatial-frame.ts
 function spatialIssue(input, ctx = {}) {
   const parts = [input.message];
@@ -22800,6 +23247,88 @@ function normalizeFrame(frame) {
     return { ...frame };
   }
   return {};
+}
+function probeSize(frame, key) {
+  if (!Object.prototype.hasOwnProperty.call(frame, key)) return { state: FRAME_SIZE_ABSENT, value: null };
+  const raw = frame[key];
+  if (raw === void 0 || raw === null) return { state: FRAME_SIZE_ABSENT, value: null };
+  if (typeof raw === "number" && Number.isInteger(raw) && raw >= 1) return { state: FRAME_SIZE_OK, value: raw };
+  return { state: FRAME_SIZE_BAD, value: null };
+}
+function sizeIssue(code, key, message) {
+  return { code, path: `$.frame_json.${key}`, message, severity: "error", retryable: false };
+}
+function resolveFrameSize(frame, key, issues) {
+  const { alias, label: label2 } = SQL_MAP_FRAME_SIZE_FIELDS[key];
+  const primary = probeSize(frame, key);
+  const secondary = probeSize(frame, alias);
+  if (primary.state === FRAME_SIZE_OK && secondary.state === FRAME_SIZE_OK) {
+    if (primary.value !== secondary.value) {
+      issues.push(
+        sizeIssue(
+          "FRAME_ALIAS_CONFLICT",
+          key,
+          `${label2}两套字段不一致：${key}=${primary.value} 与 ${alias}=${secondary.value}；不猜哪个为准，先让作者纠正`
+        )
+      );
+      return null;
+    }
+    return primary.value;
+  }
+  for (const [probe, probeKey] of [[primary, key], [secondary, alias]]) {
+    if (probe.state !== FRAME_SIZE_BAD) continue;
+    issues.push(
+      sizeIssue(
+        "FRAME_INVALID",
+        probeKey,
+        `${label2}字段存在但不是正整数：${probeKey}=${JSON.stringify(frame[probeKey])}；拒绝以 NaN/零幅面继续排位`
+      )
+    );
+    return null;
+  }
+  if (primary.state === FRAME_SIZE_OK) return primary.value;
+  if (secondary.state === FRAME_SIZE_OK) return secondary.value;
+  issues.push(
+    sizeIssue(
+      "FRAME_INVALID",
+      key,
+      `缺少必需的地图幅面${label2}：${key} 与 ${alias} 都没有正整数（frame_json 缺失、不是对象，或没有可用尺寸）`
+    )
+  );
+  return null;
+}
+function resolveFrameOrigin(frame, key, issues) {
+  if (!Object.prototype.hasOwnProperty.call(frame, key)) return 0;
+  const raw = frame[key];
+  if (raw === void 0 || raw === null) return 0;
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  issues.push(
+    sizeIssue(
+      "FRAME_ORIGIN_INVALID",
+      key,
+      `幅面原点不是有限数：${key}=${JSON.stringify(raw)}；不默默按 0 替代，先纠正损坏字段`
+    )
+  );
+  return Number.NaN;
+}
+function normalizeSqlMapFrame(frame, ctx = {}) {
+  const normalized = normalizeFrame(frame);
+  const issues = [];
+  const cols2 = resolveFrameSize(normalized, "cols", issues);
+  const rows4 = resolveFrameSize(normalized, "rows", issues);
+  const originX = resolveFrameOrigin(normalized, "origin_x", issues);
+  const originY = resolveFrameOrigin(normalized, "origin_y", issues);
+  const ok = cols2 !== null && rows4 !== null && issues.length === 0;
+  return {
+    ok,
+    cols: cols2,
+    rows: rows4,
+    originX,
+    originY,
+    // 浅拷贝：扩展字段（atlasScene / atlasLayoutRequest / 未知键）完整保留，归一结果不写回。
+    frame: normalized,
+    issues: issues.map((item) => spatialIssue(item, ctx))
+  };
 }
 function readSpatialFrame(frame, scope, ctx = {}) {
   const normalized = normalizeFrame(frame);
@@ -22872,12 +23401,253 @@ function ensureInitialSpatialFrame(input) {
   }
   return { ok: false, status: "failed", mutation: null, issues };
 }
-var SPATIAL_REQUEST_KEY;
+var SPATIAL_REQUEST_KEY, SQL_MAP_FRAME_SIZE_FIELDS, FRAME_SIZE_ABSENT, FRAME_SIZE_OK, FRAME_SIZE_BAD;
 var init_atlas_spatial_frame = __esm({
   "src/atlas-spatial-frame.ts"() {
     "use strict";
     init_atlas_spatial();
     SPATIAL_REQUEST_KEY = "atlasLayoutRequest";
+    SQL_MAP_FRAME_SIZE_FIELDS = Object.freeze({
+      cols: { alias: "reference_width_cells", label: "宽（格数）" },
+      rows: { alias: "reference_height_cells", label: "高（格数）" }
+    });
+    FRAME_SIZE_ABSENT = 0;
+    FRAME_SIZE_OK = 1;
+    FRAME_SIZE_BAD = 2;
+  }
+});
+
+// src/atlas-sql-scene-maps.ts
+function containerRaw(value) {
+  if (value === null || value === void 0) return null;
+  const text4 = String(value);
+  return text4 ? text4 : null;
+}
+function compileSqlSceneMaps(input) {
+  const { db, branchId, turnId, clockS, makeId } = input, read = createTableReadPort(db);
+  const locations = read.selectWhere("locations", { branch_id: branchId, status: "active" }, SCENE_ROW_LIMIT + 1);
+  if (input.ensureScenes && Number(queryBound(db, "SELECT COUNT(*) AS n FROM locations WHERE branch_id=? AND status='active'", [branchId])[0].n) > SCENE_ROW_LIMIT)
+    throw new AtlasDbError("SCENE_MAP_LIMIT", `地点超过单次地图结构处理上限 ${SCENE_ROW_LIMIT}；保留原存档，需分批处理`, {});
+  const maps = read.selectWhere("maps", { branch_id: branchId, status: "active" }, SCENE_ROW_LIMIT + 1);
+  const changes = [], opId = input.operationId ?? `scene_maps_${turnId}`, opIssues = [];
+  const change = (table, before, after) => {
+    if (before && JSON.stringify(before) === JSON.stringify(after)) return;
+    const previous = changes.find((change2) => change2.table === table && change2.rowId === after.id);
+    const baseline = previous ? previous.before : before;
+    const next = previous ? { ...previous.after, ...Object.fromEntries(Object.entries(after).filter(([key, value]) => JSON.stringify(value) !== JSON.stringify(before?.[key]))) } : after;
+    const mutation7 = {
+      table,
+      rowId: String(after.id),
+      before: baseline,
+      after: baseline && "row_rev" in baseline ? { ...next, row_rev: Number(baseline.row_rev) + 1, updated_turn_id: turnId } : next,
+      sourceOpIds: [opId],
+      basis: { kind: input.calibration || input.background ? "manual" : "estimate", reason: input.calibration ? "作者地图标定" : input.background ? "作者设置地图底图" : "按实际地点层级建立地图；布局坐标不证明真实距离", certainty: input.calibration || input.background ? "confirmed" : "inferred" }
+    };
+    if (previous) changes[changes.indexOf(previous)] = mutation7;
+    else changes.push(mutation7);
+  };
+  const makeMap = (id, name, kind, container, size) => createRow("maps", {
+    name,
+    kind,
+    container_location_id: container,
+    // 两套字段同时写：新读法认 cols/rows，旧读法认 reference_*，不给未来的归一留下歧义。
+    frame_json: { origin_x: 0, origin_y: 0, cols: size.cols, rows: size.rows, reference_width_cells: size.cols, reference_height_cells: size.rows }
+  }, { branchId, id, turnId, clockS, nowWallMs: Date.now(), rulesetVersion: "atlas-1" });
+  const branch2 = read.selectOne("branches", branchId, branchId);
+  maps.sort((left, right) => String(left.id) < String(right.id) ? -1 : String(left.id) > String(right.id) ? 1 : 0);
+  const locationIds = new Set(locations.map((row2) => String(row2.id)));
+  const canonicalContainerId = (value) => {
+    const raw = containerRaw(value);
+    if (raw === null) return null;
+    if (locationIds.has(raw)) return raw;
+    if (raw.startsWith("loc:") && locationIds.has(raw.slice(4))) return raw.slice(4);
+    return raw;
+  };
+  const byContainer = /* @__PURE__ */ new Map(), duplicateContainers = /* @__PURE__ */ new Map();
+  for (const map of maps) {
+    const key = canonicalContainerId(map.container_location_id);
+    if (key === null) continue;
+    const held = byContainer.get(key);
+    if (!held) {
+      byContainer.set(key, map);
+      continue;
+    }
+    const ids2 = duplicateContainers.get(key) ?? [String(held.id)];
+    ids2.push(String(map.id));
+    duplicateContainers.set(key, ids2);
+    if (String(map.id) < String(held.id)) byContainer.set(key, map);
+  }
+  for (const [containerId, ids2] of [...duplicateContainers.entries()].sort((a, b) => a[0] < b[0] ? -1 : 1)) {
+    const kept = byContainer.get(containerId);
+    opIssues.push({
+      code: "SCENE_MAP_DUPLICATE_CONTAINER",
+      path: `$.maps.${String(kept.id)}`,
+      message: `容器地点 ${containerId} 有 ${ids2.length} 张地图（${[...ids2].sort().join(" / ")}）：本次沿用 ${String(kept.id)}，其余旧图原样保留（不删除、不改写 kind/ID）`,
+      severity: "warning",
+      retryable: false
+    });
+  }
+  let root = maps.find((map) => map.id === branch2.root_map_id) ?? maps.find((map) => canonicalContainerId(map.container_location_id) === null);
+  if (input.ensureScenes && locations.length) {
+    if (!root) {
+      root = makeMap(makeId("map", opId, "world"), "世界图", "world", null, CONTAINER_FRAME_CELLS.other);
+      change("maps", null, root);
+      maps.push(root);
+    }
+    const createBudget = Math.max(0, SCENE_ROW_LIMIT - maps.length), remainingLocationIds = [];
+    let created = 0;
+    for (const location2 of locations) {
+      const id = String(location2.id);
+      if (byContainer.has(id)) continue;
+      if (created >= createBudget) {
+        remainingLocationIds.push(id);
+        continue;
+      }
+      const size = String(location2.kind) === "room" ? CONTAINER_FRAME_CELLS.room : CONTAINER_FRAME_CELLS.other;
+      const map = makeMap(makeId("map", opId, `container:${id}`), String(location2.name), containerMapKind2(String(location2.kind)), id, size);
+      change("maps", null, map);
+      byContainer.set(id, map);
+      maps.push(map);
+      created += 1;
+    }
+    if (remainingLocationIds.length) opIssues.push({
+      code: "SCENE_MAP_BUDGET_REMAINING",
+      path: "$.maps",
+      message: `地图数量已达保护预算 ${SCENE_ROW_LIMIT}：本次未建 ${remainingLocationIds.length} 张容器图（${[...remainingLocationIds].sort().join(" / ")}）。旧图一律保留，需分批处理`,
+      severity: "warning",
+      retryable: true
+    });
+    const childrenByMap = /* @__PURE__ */ new Map();
+    for (const location2 of locations) {
+      const parentKey = location2.parent_location_id ? canonicalContainerId(location2.parent_location_id) : null;
+      const parentMap = parentKey ? byContainer.get(parentKey) : root;
+      if (!parentMap) throw new AtlasDbError("REF_UNKNOWN", "父地点没有对应地图", {});
+      const list = childrenByMap.get(String(parentMap.id)) ?? [];
+      list.push(location2);
+      childrenByMap.set(String(parentMap.id), list);
+    }
+    const frameBlocked = [], fullMapIds = [], blockedMigrations = [], unplacedFrames = [];
+    for (const mapId of [...childrenByMap.keys()].sort()) {
+      const children = childrenByMap.get(mapId), map = maps.find((row2) => row2.id === mapId);
+      const override = input.calibration?.mapId === mapId && input.calibration.frame ? input.calibration.frame : null;
+      const normalized = normalizeSqlMapFrame(map.frame_json, { mapId, branchId, turnId, operationId: opId });
+      const frame = override && Number.isInteger(override.cols) && Number.isInteger(override.rows) && override.cols >= 1 && override.rows >= 1 ? override : normalized.ok ? { cols: normalized.cols, rows: normalized.rows } : null;
+      if (!frame) {
+        frameBlocked.push(mapId);
+        for (const item of normalized.issues) opIssues.push({ ...item, severity: "warning" });
+        continue;
+      }
+      const existing = [], pending = [];
+      for (const location2 of children) {
+        const id = String(location2.id);
+        const precision = String(location2.coord_precision ?? "unknown");
+        const confirmed = precision === "exact" || precision === "confirmed";
+        const onThisMap = String(location2.map_id ?? "") === mapId;
+        const finite3 = Number.isFinite(Number(location2.grid_x)) && Number.isFinite(Number(location2.grid_y));
+        if (!confirmed) {
+          if (onThisMap && finite3) existing.push({ id, x: Number(location2.grid_x), y: Number(location2.grid_y) });
+          else pending.push({ id });
+          continue;
+        }
+        if (onThisMap) continue;
+        blockedMigrations.push(`${id}→${mapId}`);
+      }
+      if (!pending.length && !existing.length) continue;
+      const placement = placeUnlocatedScenePoints({ frame, existing, pending, obstacles: [], seed: `${branchId}\0${mapId}` });
+      for (const item of placement.issues) {
+        if (item.code === "PLACEMENT_FULL") continue;
+        opIssues.push({ code: item.code, path: item.path, message: item.message, severity: "warning", retryable: false });
+      }
+      if (placement.remainingIds.length) fullMapIds.push(`${mapId}(${placement.remainingIds.length})`);
+      const byId = new Map(pending.map((entry) => [entry.id, entry]));
+      for (const point of placement.placed) {
+        const location2 = children.find((row2) => String(row2.id) === point.id);
+        byId.delete(point.id);
+        change("locations", location2, {
+          ...location2,
+          map_id: mapId,
+          grid_x: point.x,
+          grid_y: point.y,
+          coord_precision: "layout",
+          uncertainty_radius_cells: null,
+          ...location2.map_id && String(location2.map_id) !== mapId ? { area_geometry_json: null } : {}
+        });
+      }
+      for (const id of byId.keys()) unplacedFrames.push(id);
+    }
+    if (blockedMigrations.length) opIssues.push({
+      code: "COORD_FRAME_MIGRATION_BLOCKED",
+      path: "$.locations",
+      message: `${blockedMigrations.length} 个已确认地点需要跨图但没有可靠的 frame transform（${blockedMigrations.join(" / ")}）：保留原 map_id/坐标/范围，不降级为 layout、不搬 old x/y；导航仍按已纠正的 parent，新父图的代理入口由布局阶段补`,
+      severity: "warning",
+      retryable: false
+    });
+    if (frameBlocked.length) opIssues.push({
+      code: "SCENE_MAP_FRAME_INVALID",
+      path: "$.maps",
+      message: `${frameBlocked.length} 张地图幅面无法归一（${frameBlocked.join(" / ")}）：本次不排位、不写 NaN，旧坐标原样保留；按上面 FRAME_INVALID / FRAME_ALIAS_CONFLICT 明细纠正`,
+      severity: "warning",
+      retryable: false
+    });
+    if (fullMapIds.length) opIssues.push({
+      code: "SCENE_MAP_PLACEMENT_FULL",
+      path: "$.maps",
+      message: `${fullMapIds.length} 张地图没有可用空位（${fullMapIds.join(" / ")}）：这些地点保持原坐标，等扩容或作者指定位置；绝不叠到同一点`,
+      severity: "warning",
+      retryable: false
+    });
+    if (unplacedFrames.length) opIssues.push({
+      code: "SCENE_MAP_UNPLACED",
+      path: "$.locations",
+      message: `${unplacedFrames.length} 个地点本次没有排上位（${[...unplacedFrames].sort().join(" / ")}）：旧字段原样保留，下一轮或作者指定后再放`,
+      severity: "warning",
+      retryable: true
+    });
+    const protagonists = read.selectWhere("characters", { branch_id: branchId, status: "active", role: "protagonist" }, 3);
+    const named = input.povName ? protagonists.filter((row2) => row2.name === input.povName) : [];
+    const pov = named.length === 1 ? named[0].id : branch2.pov_character_id ?? (protagonists.length === 1 ? protagonists[0].id : null);
+    change("branches", branch2, { ...branch2, root_map_id: root.id, pov_character_id: pov });
+  }
+  if (input.calibration) {
+    const c = input.calibration, map = maps.find((m) => m.id === c.mapId || c.mapId === "world" && m.id === root?.id);
+    if (!map) throw new AtlasDbError("REF_UNKNOWN", "标定目标地图不存在", {});
+    if (c.metersPerCell !== void 0 && (!Number.isFinite(c.metersPerCell) || c.metersPerCell <= 0)) throw new AtlasDbError("INVALID_PAYLOAD", "每格距离必须为正数", {});
+    if (c.frame && (!Number.isInteger(c.frame.cols) || !Number.isInteger(c.frame.rows) || c.frame.cols < 1 || c.frame.rows < 1 || c.frame.cols > 1e4 || c.frame.rows > 1e4)) throw new AtlasDbError("INVALID_PAYLOAD", "地图格数应为 1～10000 的整数", {});
+    const after = {
+      ...map,
+      ...c.metersPerCell !== void 0 ? {
+        meters_per_cell: c.metersPerCell,
+        scale_min_meters_per_cell: c.metersPerCell,
+        scale_max_meters_per_cell: c.metersPerCell,
+        scale_quality: c.quality ?? "confirmed",
+        scale_basis_json: { refs: [], note: "作者确认" },
+        calibration_rev: Number(map.calibration_rev) + 1
+      } : {},
+      ...c.locked !== void 0 ? { scale_locked: c.locked ? 1 : 0 } : {},
+      ...c.frame ? { frame_json: { ...map.frame_json, ...c.frame, reference_width_cells: c.frame.cols, reference_height_cells: c.frame.rows } } : {}
+    };
+    change("maps", map, after);
+  }
+  if (input.background) {
+    const target = maps.find((map) => map.id === input.background.mapId || input.background.mapId === "world" && map.id === root?.id);
+    if (!target) throw new AtlasDbError("REF_UNKNOWN", "底图对应地图不存在", {});
+    change("maps", target, { ...target, background_asset_key: input.background.asset?.key ?? null });
+  }
+  if (!changes.length && !opIssues.length) return null;
+  return { id: opId, opIds: [opId], dependsOn: [], readSet: [], mutations: changes, opIssues };
+}
+var SCENE_ROW_LIMIT, CONTAINER_FRAME_CELLS;
+var init_atlas_sql_scene_maps = __esm({
+  "src/atlas-sql-scene-maps.ts"() {
+    "use strict";
+    init_atlas_db_readport();
+    init_atlas_db_defaults();
+    init_atlas_ops_geography();
+    init_atlas_scene_layout();
+    init_atlas_spatial_frame();
+    init_atlas_db_runtime();
+    SCENE_ROW_LIMIT = 1e3;
+    CONTAINER_FRAME_CELLS = { room: { cols: 12, rows: 8 }, other: { cols: 100, rows: 100 } };
   }
 });
 
@@ -23428,6 +24198,119 @@ function armLayoutRetry(input) {
   }
   return { groups: [first], issues };
 }
+function idsOf(rows4) {
+  const out = /* @__PURE__ */ new Set();
+  for (const row2 of rows4) if (typeof row2.id === "string" && row2.id) out.add(row2.id);
+  return out;
+}
+function containerKey(value, locationIds) {
+  if (value === null || value === void 0) return null;
+  const raw = String(value);
+  if (!raw) return null;
+  if (locationIds.has(raw)) return raw;
+  if (raw.startsWith("loc:") && locationIds.has(raw.slice(4))) return raw.slice(4);
+  return raw;
+}
+function collectSceneMemberIds(input) {
+  const { mapId, maps, locations, characters, items } = input;
+  const locationIds = new Set(locations.map((row2) => String(row2.id)));
+  const mapIdByContainer = /* @__PURE__ */ new Map();
+  let rootMapId = null;
+  for (const map of maps) {
+    if (String(map.status ?? "active") !== "active") continue;
+    const id = String(map.id);
+    const key = containerKey(map.container_location_id, locationIds);
+    if (key === null) {
+      if (rootMapId === null || id < rootMapId) rootMapId = id;
+      continue;
+    }
+    const held = mapIdByContainer.get(key);
+    if (held === void 0 || id < held) mapIdByContainer.set(key, id);
+  }
+  const memberLocations = /* @__PURE__ */ new Set();
+  for (const location2 of locations) {
+    if (String(location2.status ?? "active") !== "active") continue;
+    const id = String(location2.id);
+    if (String(location2.map_id ?? "") === mapId) {
+      memberLocations.add(id);
+      continue;
+    }
+    const parentKey = containerKey(location2.parent_location_id, locationIds);
+    const owner = parentKey === null ? rootMapId : mapIdByContainer.get(parentKey) ?? null;
+    if (owner === mapId) memberLocations.add(id);
+  }
+  const memberCharacters = /* @__PURE__ */ new Set();
+  for (const character of characters) {
+    if (String(character.status ?? "active") !== "active") continue;
+    const id = String(character.id);
+    if (String(character.map_id ?? "") === mapId || memberLocations.has(String(character.location_id ?? ""))) {
+      memberCharacters.add(id);
+    }
+  }
+  const memberItems = /* @__PURE__ */ new Set();
+  for (const item of items) {
+    if (String(item.status ?? "active") !== "active") continue;
+    const id = String(item.id);
+    if (String(item.map_id ?? "") === mapId || memberLocations.has(String(item.location_id ?? ""))) {
+      memberItems.add(id);
+    }
+  }
+  return {
+    mapId,
+    members: { locations: memberLocations, characters: memberCharacters, items: memberItems },
+    known: { locations: idsOf(locations), characters: idsOf(characters), items: idsOf(items) }
+  };
+}
+function pruneInvalidSceneMembers(input) {
+  const { scene, mapId, memberIds } = input;
+  const deletes = {};
+  const pruned = [];
+  const issues = [];
+  const constraints = plain3(scene) && plain3(scene.constraints) ? scene.constraints : null;
+  if (!constraints) return { deletes, pruned, issues };
+  const bump2 = (key, id) => {
+    const list = deletes[key] ?? [];
+    list.push(id);
+    deletes[key] = list;
+    pruned.push(id);
+  };
+  for (const [key, kind] of Object.entries(SCENE_MEMBER_KIND)) {
+    const entries = constraints[key];
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries) {
+      const id = plain3(entry) && typeof entry.id === "string" ? String(entry.id) : "";
+      if (!id || !memberIds.known[kind].has(id)) continue;
+      if (memberIds.members[kind].has(id)) continue;
+      bump2(key, id);
+    }
+  }
+  const prunedRooms = new Set(deletes.rooms ?? []);
+  if (prunedRooms.size > 0 && Array.isArray(constraints.contents)) {
+    for (const entry of constraints.contents) {
+      if (!plain3(entry)) continue;
+      const roomId = typeof entry.roomId === "string" ? String(entry.roomId) : "";
+      const id = typeof entry.id === "string" ? String(entry.id) : "";
+      if (!id || !roomId || !prunedRooms.has(roomId)) continue;
+      bump2("contents", id);
+    }
+  }
+  if (pruned.length > 0) {
+    const detail = Object.entries(deletes).sort((a, b) => a[0] < b[0] ? -1 : 1).map(([key, list]) => `${key}:${[...list].sort().join(",")}`).join(" / ");
+    issues.push(
+      spatialIssue(
+        {
+          code: "SCENE_STALE_MEMBER_PRUNED",
+          path: "$.frame_json.atlasScene.constraints",
+          message: `地图 ${mapId} 的旧场景里 ${pruned.length} 个锚点已不属于本图（${detail}）：本次只剪这些失效锚点，其余旧几何与静态背景原样保留`,
+          severity: "warning",
+          retryable: false
+        },
+        { mapId }
+      )
+    );
+  }
+  return { deletes, pruned, issues };
+}
 function applyPendingSpatialRequests(input) {
   const groups = [];
   const issues = [];
@@ -23457,6 +24340,7 @@ function applyPendingSpatialRequests(input) {
   const locations = readTable(input.db, "locations", scope.branchId, ports);
   const characters = readTable(input.db, "characters", scope.branchId, ports);
   const items = readTable(input.db, "items", scope.branchId, ports);
+  const maps = readTable(input.db, "maps", scope.branchId, ports);
   for (let index = 0; index < queue.length; index += 1) {
     const job = queue[index];
     if (processed.length >= maxJobs) {
@@ -23486,12 +24370,26 @@ function applyPendingSpatialRequests(input) {
     issues.push(...occupants.issues);
     spec.actors = occupants.spec.actors;
     spec.items = occupants.spec.items;
-    const removals = {};
-    if (occupants.deleted.actors.length > 0) removals.actors = occupants.deleted.actors;
-    if (occupants.deleted.items.length > 0) removals.items = occupants.deleted.items;
-    if (Object.keys(removals).length > 0) {
-      spec.deletes = { ...plain3(spec.deletes) ? spec.deletes : {}, ...removals };
-    }
+    const stale = pruneInvalidSceneMembers({
+      scene: frameRead.scene,
+      mapId: job.mapId,
+      memberIds: collectSceneMemberIds({ mapId: job.mapId, maps, locations, characters, items })
+    });
+    issues.push(...stale.issues);
+    const deletes = {};
+    const mergeDeletes = (source) => {
+      if (!plain3(source)) return;
+      for (const [key, value] of Object.entries(source)) {
+        if (!Array.isArray(value)) continue;
+        const list = deletes[key] ?? [];
+        for (const id of value) if (typeof id === "string" && id && !list.includes(id)) list.push(id);
+        deletes[key] = list;
+      }
+    };
+    mergeDeletes(plain3(spec.deletes) ? spec.deletes : null);
+    mergeDeletes({ actors: occupants.deleted.actors, items: occupants.deleted.items });
+    mergeDeletes(stale.deletes);
+    if (Object.keys(deletes).length > 0) spec.deletes = deletes;
     const initial = ensureInitialSpatialFrame({
       mapRow,
       scope,
@@ -23621,7 +24519,7 @@ function applyPendingSpatialRequests(input) {
   }
   return { groups, issues, processed, pending };
 }
-var DEFAULT_MAX_JOBS;
+var DEFAULT_MAX_JOBS, SCENE_MEMBER_KIND;
 var init_atlas_spatial_candidate = __esm({
   "src/atlas-spatial-candidate.ts"() {
     "use strict";
@@ -23631,6 +24529,13 @@ var init_atlas_spatial_candidate = __esm({
     init_atlas_spatial();
     init_atlas_spatial_frame();
     DEFAULT_MAX_JOBS = 2;
+    SCENE_MEMBER_KIND = Object.freeze({
+      rooms: "locations",
+      districts: "locations",
+      buildings: "locations",
+      actors: "characters",
+      items: "items"
+    });
   }
 });
 
@@ -25852,7 +26757,7 @@ var FORK_COPY_TABLES = [
 function issue18(code, path, message, severity = "error", retryable = false) {
   return { code, path, message, severity, retryable };
 }
-function stableHash4(text4) {
+function stableHash5(text4) {
   let h = 2166136261;
   for (let i = 0; i < text4.length; i += 1) {
     h ^= text4.charCodeAt(i);
@@ -25931,8 +26836,8 @@ function forkBranch(input, db) {
   const rootMapId = text2(parent.root_map_id) || null;
   const rulesetVersion = input.rulesetVersion || text2(parent.ruleset_version) || "atlas-1";
   const forkTurnId = input.makeId("turn", "branch.fork", `${input.parentBranchId}:${input.forkTurnId ?? "root"}:${input.newBranchId}`);
-  const inputHash = `fork:${stableHash4(`${input.parentBranchId}\0${input.forkTurnId ?? "root"}\0${input.newBranchId}`)}`;
-  const rngSeed = `rng_fork_${stableHash4(`${input.newBranchId}\0${input.forkTurnId ?? "root"}`)}`;
+  const inputHash = `fork:${stableHash5(`${input.parentBranchId}\0${input.forkTurnId ?? "root"}\0${input.newBranchId}`)}`;
+  const rngSeed = `rng_fork_${stableHash5(`${input.newBranchId}\0${input.forkTurnId ?? "root"}`)}`;
   let copiedRows = 0;
   beginTransaction(db);
   try {
@@ -26466,21 +27371,197 @@ function previewSqlTravel(session, destination) {
 // src/atlas-sql-inspect.ts
 init_atlas_db_runtime();
 init_atlas_hash();
+init_atlas_map_topology();
+init_atlas_runtime_limits();
 function inspectSqlWorld(session) {
-  const branch2 = session.repo.internal.branchRow(), db = session.repo.db, b = session.branchId;
-  const counts = queryBound(db, "SELECT (SELECT COUNT(*) FROM locations WHERE branch_id=?) locations,(SELECT COUNT(*) FROM characters WHERE branch_id=?) characters,(SELECT COUNT(*) FROM items WHERE branch_id=?) items", [b, b, b])[0];
-  const missing = queryBound(db, "SELECT l.id FROM locations l WHERE l.branch_id=? AND l.status='active' AND NOT EXISTS (SELECT 1 FROM maps m WHERE m.branch_id=l.branch_id AND m.container_location_id=l.id AND m.status='active')", [b]);
-  const foreignKeys = foreignKeyCheck(db), rootMissing = Number(counts.locations) > 0 && !branch2.root_map_id;
+  const branch2 = session.repo.internal.branchRow();
+  const db = session.repo.db;
+  const b = session.branchId;
+  const counts = queryBound(
+    db,
+    "SELECT (SELECT COUNT(*) FROM locations WHERE branch_id=?) locations,(SELECT COUNT(*) FROM characters WHERE branch_id=?) characters,(SELECT COUNT(*) FROM items WHERE branch_id=?) items",
+    [b, b, b]
+  )[0];
+  const missing = queryBound(
+    db,
+    "SELECT l.id FROM locations l WHERE l.branch_id=? AND l.status='active' AND NOT EXISTS (SELECT 1 FROM maps m WHERE m.branch_id=l.branch_id AND m.container_location_id=l.id AND m.status='active')",
+    [b]
+  );
+  const foreignKeys = foreignKeyCheck(db);
+  const rootMissing = Number(counts.locations) > 0 && !branch2.root_map_id;
+  const mapRows = queryBound(db, "SELECT id, container_location_id, status FROM maps WHERE branch_id=? AND status='active'", [b]);
+  const locationRows = queryBound(
+    db,
+    "SELECT id, kind, parent_location_id, anchor_location_id, mobility, map_id, grid_x, grid_y, coord_precision, area_geometry_json, name, status FROM locations WHERE branch_id=? AND status='active'",
+    [b]
+  );
+  const routeRows = queryBound(db, "SELECT id, from_location_id, to_location_id FROM routes WHERE branch_id=?", [b]);
+  const diagnostics = buildInspectDiagnostics({
+    branchId: b,
+    rootMapId: branch2.root_map_id ? String(branch2.root_map_id) : null,
+    mapRows,
+    locationRows,
+    routeRows
+  });
+  const { topologyIssues, unlinkedMapIds, unknownContainment, isolatedComponents, coordinateConflicts } = diagnostics;
+  const reportToken = stableHexHash(
+    JSON.stringify([
+      session.repo.storageRevision,
+      session.repo.internal.currentRevision(),
+      session.repo.internal.currentHeadTurnId(),
+      missing,
+      branch2.root_map_id,
+      topologyIssues.map((issue20) => [issue20.code, issue20.mapId, issue20.locationId, issue20.relatedIds]),
+      unlinkedMapIds,
+      unknownContainment.map((issue20) => issue20.locationId),
+      isolatedComponents.map((component) => component.locationIds),
+      coordinateConflicts.map((conflict) => [conflict.locationId, conflict.mapId, conflict.expectedMapId])
+    ])
+  );
+  const errorCount = topologyIssues.filter((issue20) => issue20.kind === "error").length;
+  const inferenceCount = topologyIssues.filter((issue20) => issue20.kind === "inference").length + unknownContainment.length + isolatedComponents.length;
+  const reasons = [];
+  if (foreignKeys.length) reasons.push("存在引用错误；保存候选会拒绝该状态，请从完整备份恢复");
+  if (missing.length || rootMissing) reasons.push("部分地点缺少内部地图，可重建地图结构并记录回退");
+  if (errorCount) reasons.push(`地图包含关系有 ${errorCount} 处明确错误（父环/缺父/重复容器/自容器图等），需作者经候选组修复`);
+  if (inferenceCount) reasons.push(`有 ${inferenceCount} 处需要推断或人工确认（未知包含、孤立交通分量等），可能合法，不自动判错`);
+  if (reasons.length === 0) reasons.push("地点、人物、物品和地图引用检查通过");
   return {
     database: true,
     ...counts,
     missingMapIds: missing.map((row2) => String(row2.id)),
     rootMissing,
     foreignKeys,
+    // ── M2-06 新增：结构性诊断与需推断项，全部只读 ──────────────────────
+    topologyIssues,
+    unlinkedMapIds,
+    unknownContainment,
+    isolatedComponents,
+    coordinateConflicts,
+    /** 只读诊断**不修复**：作者要修必须走候选组（prepareTurn → ACK），此处永远为 true。 */
+    readonlyDiagnosis: true,
     canApply: foreignKeys.length === 0 && (missing.length > 0 || rootMissing),
-    reportToken: stableHexHash(JSON.stringify([session.repo.storageRevision, session.repo.internal.currentRevision(), session.repo.internal.currentHeadTurnId(), missing, branch2.root_map_id])),
-    reason: foreignKeys.length ? "存在引用错误；保存候选会拒绝该状态，请从完整备份恢复" : missing.length || rootMissing ? "部分地点缺少内部地图，可重建地图结构并记录回退" : "地点、人物、物品和地图引用检查通过"
+    reportToken,
+    reason: reasons.join("；")
   };
+}
+function buildInspectDiagnostics(input) {
+  const { branchId: b, rootMapId, mapRows, locationRows, routeRows } = input;
+  const topology = resolveMapTopology({
+    branchId: b,
+    rootMapId,
+    maxDepth: ATLAS_RUNTIME_LIMITS.locationDepth,
+    maps: mapRows.map((row2) => ({
+      id: String(row2.id),
+      branchId: b,
+      containerLocationId: row2.container_location_id === null || row2.container_location_id === void 0 ? null : String(row2.container_location_id),
+      status: String(row2.status ?? "active")
+    })),
+    locations: locationRows.map((row2) => ({
+      id: String(row2.id),
+      branchId: b,
+      kind: row2.kind === null || row2.kind === void 0 ? "other" : String(row2.kind),
+      parentLocationId: row2.parent_location_id === null || row2.parent_location_id === void 0 ? null : String(row2.parent_location_id),
+      anchorLocationId: row2.anchor_location_id === null || row2.anchor_location_id === void 0 ? null : String(row2.anchor_location_id),
+      mobility: row2.mobility === "mobile" ? "mobile" : "fixed",
+      mapId: row2.map_id === null || row2.map_id === void 0 ? null : String(row2.map_id),
+      status: String(row2.status ?? "active")
+    }))
+  });
+  const topologyIssues = topology.issues.map((issue20) => ({
+    code: issue20.code,
+    mapId: issue20.mapId ?? null,
+    locationId: issue20.locationId ?? null,
+    relatedIds: [...issue20.relatedIds ?? []],
+    severity: issue20.severity,
+    kind: "error",
+    message: issue20.message
+  }));
+  const mapByContainer = /* @__PURE__ */ new Map();
+  for (const row2 of mapRows) {
+    const container = row2.container_location_id === null || row2.container_location_id === void 0 ? null : String(row2.container_location_id);
+    if (!container) continue;
+    mapByContainer.set(container, [...mapByContainer.get(container) ?? [], String(row2.id)]);
+  }
+  const mapById = new Map(mapRows.map((row2) => [String(row2.id), row2]));
+  const locationById = new Map(locationRows.map((row2) => [String(row2.id), row2]));
+  const unknownContainment = [];
+  for (const row2 of locationRows) {
+    const id = String(row2.id);
+    if (row2.parent_location_id !== null && row2.parent_location_id !== void 0) continue;
+    const mapId = row2.map_id === null || row2.map_id === void 0 ? null : String(row2.map_id);
+    const map = mapId ? mapById.get(mapId) : void 0;
+    const onRoot = Boolean(map && !map.container_location_id);
+    if (onRoot || !mapId) continue;
+    unknownContainment.push({
+      code: "UNKNOWN_CONTAINMENT",
+      mapId,
+      locationId: id,
+      relatedIds: [],
+      severity: "warning",
+      kind: "inference",
+      message: `地点 ${id}（${String(row2.name ?? "")}）没有父地点，却画在非根图 ${mapId} 上：包含关系需要推断或由作者确认`
+    });
+  }
+  const adjacency = /* @__PURE__ */ new Map();
+  for (const row2 of locationRows) adjacency.set(String(row2.id), /* @__PURE__ */ new Set());
+  for (const route of routeRows) {
+    const from = String(route.from_location_id);
+    const to = String(route.to_location_id);
+    if (!adjacency.has(from) || !adjacency.has(to)) continue;
+    adjacency.get(from).add(to);
+    adjacency.get(to).add(from);
+  }
+  const seen = /* @__PURE__ */ new Set();
+  const components = [];
+  for (const id of [...adjacency.keys()].sort()) {
+    if (seen.has(id)) continue;
+    const stack = [id];
+    const component = [];
+    seen.add(id);
+    while (stack.length > 0) {
+      const current = stack.pop();
+      component.push(current);
+      for (const next of [...adjacency.get(current) ?? []].sort()) {
+        if (seen.has(next)) continue;
+        seen.add(next);
+        stack.push(next);
+      }
+    }
+    components.push(component.sort());
+  }
+  const main = components.reduce((a, c) => c.length > a.length ? c : a, []);
+  const isolatedComponents = components.filter((component) => component !== main).map((component) => ({
+    locationIds: component,
+    size: component.length,
+    connectedToMain: false,
+    note: "这些地点没有任何路线连到主分量：可能是合法孤岛、只通航的岛屿或飞行目的地，需人工确认后再补路线"
+  }));
+  const coordinateConflicts = [];
+  for (const row2 of locationRows) {
+    const id = String(row2.id);
+    const precision = String(row2.coord_precision ?? "unknown");
+    if (precision !== "exact") continue;
+    if (typeof row2.grid_x !== "number" || typeof row2.grid_y !== "number") continue;
+    const mapId = row2.map_id === null || row2.map_id === void 0 ? null : String(row2.map_id);
+    if (!mapId) continue;
+    const parentId = row2.parent_location_id === null || row2.parent_location_id === void 0 ? null : String(row2.parent_location_id);
+    if (!parentId) continue;
+    const parent = locationById.get(parentId);
+    if (!parent) continue;
+    const expected = (mapByContainer.get(parentId) ?? [])[0] ?? null;
+    if (!expected || expected === mapId) continue;
+    coordinateConflicts.push({
+      locationId: id,
+      name: String(row2.name ?? ""),
+      mapId,
+      expectedMapId: expected,
+      precision,
+      hasArea: row2.area_geometry_json !== null && row2.area_geometry_json !== void 0 && row2.area_geometry_json !== "",
+      note: "该地点的确认坐标落在父地点内图之外的坐标系：跨图迁移需要双方已确认的 frame 变换，否则保留原 map_id/坐标/范围（COORD_FRAME_MIGRATION_BLOCKED）"
+    });
+  }
+  return { topologyIssues, unlinkedMapIds: [...topology.unlinkedMapIds], unknownContainment, isolatedComponents, coordinateConflicts };
 }
 
 // src/atlas-sql-chat.ts

@@ -16,6 +16,8 @@ import { resolveRef } from './atlas-ops-refs.ts';
 import { fieldIgnoredWarning, asString, applyPatch } from './atlas-ops-entities.ts';
 import { GEOMETRY_VERTEX_LIMIT } from './atlas-runtime-limits.ts';
 import { ATLAS_SCHEMA_VERSION } from './atlas-db-schema.ts';
+import { isAtlasLocationKind } from './atlas-location-kinds.ts';
+import type { AtlasLocationKind } from './atlas-location-kinds.ts';
 
 const ROUTE_KINDS = ['adjacent', 'road', 'path', 'door', 'stairs', 'air', 'water', 'portal', 'estimated'];
 const GEOMETRY_QUALITY = ['confirmed', 'estimated', 'unknown'];
@@ -406,11 +408,30 @@ export function compileRoutePropose(op: ParsedOperation, ctx: CompileContext): C
   return result;
 }
 
-/** §16.9：子图 kind 按容器判定。 */
+/**
+ * §16.9 / M4-04：子图 kind 按容器判定。
+ *
+ * 表按 `AtlasLocationKind` 写全，新增地点类型时这里会编译不过——避免悄悄落进兜底分支：
+ * - floor / room / vehicle → interior：楼层与载具内部是真正的室内场景；
+ * - region / natural → region：自然区域与地区同级，不能降成 site；
+ * - city / district / building / other → site：作为「场所」图纸承载其内部成员。
+ *
+ * 载具停在哪里不改变它自己的内部图 kind（停车城市不覆盖 vehicle 内图）。
+ */
+const CONTAINER_MAP_KIND_BY_LOCATION: Record<AtlasLocationKind, 'region' | 'site' | 'interior'> = {
+  region: 'region',
+  natural: 'region',
+  city: 'site',
+  district: 'site',
+  building: 'site',
+  other: 'site',
+  floor: 'interior',
+  room: 'interior',
+  vehicle: 'interior',
+};
+
 export function containerMapKind(containerKind: string): 'region' | 'site' | 'interior' {
-  if (['region', 'city', 'district'].includes(containerKind)) return 'region';
-  if (['building', 'natural', 'other'].includes(containerKind)) return 'site';
-  return 'interior';
+  return isAtlasLocationKind(containerKind) ? CONTAINER_MAP_KIND_BY_LOCATION[containerKind] : 'interior';
 }
 
 /**

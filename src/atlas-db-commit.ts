@@ -190,7 +190,8 @@ export function applyGroups(
       if (validate) {
         const tables = [...new Set(merged.map((m) => m.table))].filter((t): t is AtlasTableName => isKnownTable(t));
         const rowIds = [...new Set(merged.map((m) => m.rowId))];
-        const pendingRows = merged.map((m) => ({ table: m.table, rowId: m.rowId, row: m.after }));
+        // M2-03：带上 before，组边界才能判断坏拓扑是本次候选引入/恶化还是旧档自带。
+        const pendingRows = merged.map((m) => ({ table: m.table, rowId: m.rowId, row: m.after, before: m.before }));
         const validation = validateGroup(db, ctx.branchId, tables, rowIds, pendingRows);
         if (!validation.ok) {
           const violations = validation.violations.slice(0, 8).map((v) => `${v.code}@${v.table}.${v.field}`).join('; ');

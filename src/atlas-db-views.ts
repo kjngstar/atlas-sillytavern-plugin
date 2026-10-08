@@ -14,8 +14,11 @@ import { buildPositionCache, resolveEffectivePosition } from './atlas-sim-positi
 import { computeViewportScaleBar } from './atlas-scale.ts';
 import { scenePositions } from './atlas-scene-layout.ts';
 import { sqlVisibility } from './atlas-sql-visibility.ts';
+import { resolveMapTopology } from './atlas-map-topology.ts';
+import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
 import { publicMapFrame } from '../vendor/atlas-spatial/index.mjs';
 import type { SqlDatabase } from './atlas-db-runtime.ts';
+import type { ConnectionQuality, TopologyLocation, TopologyMap } from './atlas-world-contract.ts';
 import type { ViewQuery, ViewResult } from './atlas-ops-contract.ts';
 import type { AtlasAssetRef, AtlasTableName } from './atlas-db-contract.ts';
 
@@ -129,6 +132,16 @@ export type MapViewItem = {
   kind: string;
   containerLocationId: string | null;
   containerLocationKind?: string | null;
+  /**
+   * M2-05（02 §3）：本次解析出的导航父图与连接质量。**不是**数据库里的永久列，
+   * 也不由 `location.map_id` 推导；`contained` = 由容器地点的父链找到的祖先内图，
+   * `anchored` = 载具按有效停靠点挂接，`root` = 自身即顶图，`unclassified` = 无可用祖先
+   * （只挂可见根图），`invalid` = 结构性坏图（含父环/缺父/重复容器/自容器）。
+   */
+  parentMapId: string | null;
+  connectionQuality: ConnectionQuality;
+  /** 与本图相关的坏图诊断码（去重、稳定排序）。POV 下只含可公开部分，不借父图标题泄密。 */
+  topologyIssueCodes: string[];
   metersPerCell: number | null;
   scaleQuality: string;
   scaleLocked: boolean;
@@ -191,6 +204,75 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
   // 一次预取全部相关行：逐实体解析若各自查库会退化成本规模的 N+1（实测 500 人规模 24s）。
   const positionCache = buildPositionCache({ db: ctx.db, branchId: ctx.branchId });
   const visibility=sqlVisibility(ctx);
+
+  // ── M2-05：从 SQL 构造统一 TopologyInput，只算一次导航父图（02 §3）──────────
+  // POV 先按原 sqlVisibility 把地点筛成可见集合再算拓扑：隐藏祖先自然断链，
+  // 于是只能回落到可见根图，既不会下发隐藏父图 ID，也不会泄露其标题。
+  const rootRow = rows(ctx, 'branches', 'id = ?', [ctx.branchId], 2)[0];
+  const rootMapId = rootRow && rootRow.root_map_id ? String(rootRow.root_map_id) : null;
+  const visibleLocations =
+    ctx.viewMode === 'pov' ? locations.filter((l) => visibility.visible('location', String(l.id))) : locations;
+  const topology = resolveMapTopology({
+    branchId: ctx.branchId,
+    rootMapId,
+    maxDepth: ATLAS_RUNTIME_LIMITS.locationDepth,
+    maps: maps.map((m): TopologyMap => ({
+      id: String(m.id),
+      branchId: ctx.branchId,
+      containerLocationId: m.container_location_id === null || m.container_location_id === undefined ? null : String(m.container_location_id),
+      status: String(m.status ?? 'active'),
+    })),
+    locations: visibleLocations.map((l): TopologyLocation => ({
+      id: String(l.id),
+      branchId: ctx.branchId,
+      kind: (l.kind === null || l.kind === undefined ? 'other' : String(l.kind)) as TopologyLocation['kind'],
+      parentLocationId: l.parent_location_id === null || l.parent_location_id === undefined ? null : String(l.parent_location_id),
+      anchorLocationId: l.anchor_location_id === null || l.anchor_location_id === undefined ? null : String(l.anchor_location_id),
+      mobility: l.mobility === 'mobile' ? 'mobile' : 'fixed',
+      mapId: l.map_id === null || l.map_id === undefined ? null : String(l.map_id),
+      status: String(l.status ?? 'active'),
+    })),
+  });
+  const topologyNodeById = new Map(topology.nodes.map((node) => [node.mapId, node]));
+  /** 可见根图：author 用真实根图；POV 用「无容器顶图」里的第一张（顶图没有隐藏容器，公开安全）。 */
+  const publicRootMapId =
+    topology.nodes.find((node) => node.connectionQuality === 'root' && node.mapId === rootMapId)?.mapId ??
+    topology.nodes.find((node) => node.connectionQuality === 'root')?.mapId ??
+    null;
+  const topologyCodesByMap = new Map<string, Set<string>>();
+  for (const issue of topology.issues) {
+    // POV 不下发任何可能与隐藏实体相关的诊断（拓扑已基于可见集合计算，这里再兜一道）。
+    if (ctx.viewMode === 'pov') continue;
+    const touched = new Set<string>([...(issue.mapId ? [issue.mapId] : []), ...(issue.relatedIds ?? [])]);
+    if (issue.code === 'MAP_SELF_CONTAINED' && issue.mapId) touched.add(issue.mapId);
+    // 地点级问题（父链环/缺父/自容器）归到「以该地点为容器的图」上，便于按图定位。
+    if (issue.locationId) {
+      for (const map of maps) {
+        if (map.container_location_id !== null && map.container_location_id !== undefined && String(map.container_location_id) === issue.locationId) {
+          touched.add(String(map.id));
+        }
+      }
+    }
+    // 未挂接/多根这类没有落到具体图的全局问题，归到根图那一行，避免整份响应只在 metadata 里可见。
+    if (touched.size === 0 && publicRootMapId) touched.add(publicRootMapId);
+    for (const mapId of touched) {
+      const bucket = topologyCodesByMap.get(mapId) ?? new Set<string>();
+      bucket.add(issue.code);
+      topologyCodesByMap.set(mapId, bucket);
+    }
+  }
+  const resolveNavigation = (mapId: string): { parentMapId: string | null; connectionQuality: ConnectionQuality } => {
+    const node = topologyNodeById.get(mapId);
+    if (!node) return { parentMapId: null, connectionQuality: 'invalid' };
+    if (ctx.viewMode !== 'pov') {
+      return { parentMapId: node.parentMapId, connectionQuality: node.connectionQuality };
+    }
+    // POV：坏图一律呈现为「挂可见根 + 未分类」，既不谎报结构也不泄露隐藏祖先。
+    if (node.connectionQuality === 'invalid') {
+      return { parentMapId: publicRootMapId === mapId ? null : publicRootMapId, connectionQuality: 'unclassified' };
+    }
+    return { parentMapId: node.parentMapId, connectionQuality: node.connectionQuality };
+  };
 
   const routeIssues: Array<{ routeId: string; code: string; message: string }> = [];
   const items: MapViewItem[] = selected.map((map) => {
@@ -320,6 +402,14 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
       kind: String(map.kind ?? 'world'),
       containerLocationId: map.container_location_id ? String(map.container_location_id) : null,
       containerLocationKind: container && (ctx.viewMode !== 'pov' || visibility.visible('location', String(container.id))) ? String(container.kind) : null,
+      ...(function navigation() {
+        const resolved = resolveNavigation(mapId);
+        return {
+          parentMapId: resolved.parentMapId,
+          connectionQuality: resolved.connectionQuality,
+          topologyIssueCodes: [...(topologyCodesByMap.get(mapId) ?? new Set<string>())].sort(),
+        };
+      })(),
       metersPerCell,
       scaleQuality: String(map.scale_quality ?? 'uncalibrated'),
       scaleLocked: Number(map.scale_locked ?? 0) === 1,
@@ -350,6 +440,23 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
       pointCount: items.reduce((n, m) => n + (m as MapViewItem).points.length, 0),
       coarseCount: items.reduce((n, m) => n + (m as MapViewItem).coarseList.length, 0),
       viewMode: ctx.viewMode ?? 'author',
+      /**
+       * M2-05：作者视图给出完整坏图诊断（含未挂接地图清单），供 UI 在「未挂接地图」组里
+       * 说明为什么某张图没挂上；POV 一律不下发，避免用父图标题/ID 泄密。
+       */
+      topologyIssues:
+        ctx.viewMode === 'pov'
+          ? []
+          : topology.issues.map((issue) => ({
+              code: issue.code,
+              mapId: issue.mapId ?? null,
+              locationId: issue.locationId ?? null,
+              relatedIds: [...(issue.relatedIds ?? [])],
+              severity: issue.severity,
+              message: issue.message,
+            })),
+      unlinkedMapIds: ctx.viewMode === 'pov' ? [] : [...topology.unlinkedMapIds],
+      publicRootMapId,
       /** M4/Q02：坏几何按路线逐条列出，方便定位是哪一条、为什么不能画。 */
       routeIssues,
       ...assetDiagnostics(ctx, selected),

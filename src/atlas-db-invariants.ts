@@ -9,6 +9,8 @@ import { ATLAS_TABLE_COLUMNS, isKnownTable, tableColumnNames } from './atlas-db-
 import { queryBound } from './atlas-db-runtime.ts';
 import { ATLAS_RUNTIME_LIMITS, ATLAS_FIELD_LIMITS } from './atlas-runtime-limits.ts';
 import { decodeRow } from './atlas-db-codec.ts';
+import { resolveMapTopology } from './atlas-map-topology.ts';
+import type { PlanIssue, TopologyInput, TopologyLocation } from './atlas-world-contract.ts';
 import type { AtlasTableName } from './atlas-db-contract.ts';
 import type { SqlDatabase } from './atlas-db-runtime.ts';
 import type { Issue } from './atlas-ops-contract.ts';
@@ -81,14 +83,140 @@ function finiteOrNull(value: unknown): number | null {
   return value;
 }
 
+function textOrNull(value: unknown): string | null {
+  return value === null || value === undefined ? null : String(value);
+}
+
+// ─────────────────────── M2-03：统一地图包含权威接入 ───────────────────────
+
+/**
+ * 组边界候选行。`before` 是可选的**基线行**：有它才能判断某个坏拓扑
+ * 是「本次候选引入/恶化」还是「旧档自带」。生产路径由 atlas-db-commit 从
+ * `mergeGroupMutations` 的 before 传入；缺失时按「未改变」保守处理
+ * （不因缺信息而误判成新问题）。
+ */
+export type PendingRow = {
+  table: string;
+  rowId: string;
+  row: Record<string, unknown> | null;
+  before?: Record<string, unknown> | null;
+};
+
+/** 把尚未落库的候选行合并进基线行集合，得到「候选态」世界快照。 */
+function mergePendingRows(rows: Array<Record<string, unknown>>, table: string, pending: PendingRow[]): Array<Record<string, unknown>> {
+  const byId = new Map(rows.map((row) => [String(row.id), row]));
+  for (const item of pending) {
+    if (item.table !== table) continue;
+    if (!item.row) {
+      byId.delete(item.rowId);
+      continue;
+    }
+    const existing = byId.get(item.rowId);
+    byId.set(item.rowId, existing ? { ...existing, ...item.row } : item.row);
+  }
+  return [...byId.values()];
+}
+
+/** 用候选行的 `before` 还原「候选之前」的世界快照（未提供 before 的行保持不变）。 */
+function revertPendingRows(rows: Array<Record<string, unknown>>, table: string, pending: PendingRow[]): Array<Record<string, unknown>> {
+  const byId = new Map(rows.map((row) => [String(row.id), row]));
+  for (const item of pending) {
+    if (item.table !== table) continue;
+    if (item.before === undefined) continue;
+    if (item.before === null) {
+      byId.delete(item.rowId);
+      continue;
+    }
+    byId.set(item.rowId, item.before);
+  }
+  return [...byId.values()];
+}
+
+function topologyInputOf(
+  branchId: string,
+  rootMapId: string | null,
+  mapRows: Array<Record<string, unknown>>,
+  locationRows: Array<Record<string, unknown>>,
+): TopologyInput {
+  return {
+    branchId,
+    rootMapId,
+    maxDepth: LOCATION_DEPTH,
+    maps: mapRows.map((row) => ({
+      id: String(row.id),
+      branchId: textOrNull(row.branch_id) ?? branchId,
+      containerLocationId: textOrNull(row.container_location_id),
+      status: textOrNull(row.status) ?? 'active',
+    })),
+    locations: locationRows.map((row) => ({
+      id: String(row.id),
+      branchId: textOrNull(row.branch_id) ?? branchId,
+      kind: (textOrNull(row.kind) ?? 'other') as TopologyLocation['kind'],
+      parentLocationId: textOrNull(row.parent_location_id),
+      anchorLocationId: textOrNull(row.anchor_location_id),
+      mobility: row.mobility === 'mobile' ? 'mobile' : 'fixed',
+      mapId: textOrNull(row.map_id),
+      status: textOrNull(row.status) ?? 'active',
+    })),
+  };
+}
+
+/**
+ * 坏图问题 → 不变量码。逐行坐标检查（`checkCoordinates`）只保留
+ * 「map_id 与地点 id 字面相同」这一条本地判据；**「地点落自己内图」的真实判据
+ * 是容器关系**（`maps.container_location_id === location.id`），必须放进下面
+ * 的候选/基线比较里才判得准（T05：比较实际容器，不比较两个字符串是否相等）。
+ */
+const TOPOLOGY_INVARIANT_CODES: Record<string, string> = {
+  AMBIGUOUS_CONTAINER_MAP: 'INVARIANT_MAP_CONTAINER_AMBIGUOUS',
+  CONTAINER_LOCATION_MISSING: 'INVARIANT_MAP_CONTAINER_MISSING',
+  MAP_CONTAINER_MISSING: 'INVARIANT_MAP_CONTAINER_MISSING',
+  MAP_SELF_CONTAINED: 'INVARIANT_LOCATION_MAP_SELF',
+  LOCATION_PARENT_MISSING: 'INVARIANT_MAP_PARENT_MISSING',
+  ANCHOR_LOCATION_MISSING: 'INVARIANT_MAP_ANCHOR_MISSING',
+  ROOT_MAP_MISSING: 'INVARIANT_MAP_ROOT_MISSING',
+  MULTIPLE_ROOT_MAPS: 'INVARIANT_MAP_MULTIPLE_ROOTS',
+  MAP_UNLINKED: 'INVARIANT_MAP_UNLINKED',
+};
+
+/** 问题落点：报告成哪张表的哪个字段（行 id 取地图或地点）。 */
+const TOPOLOGY_ISSUE_TARGET: Record<string, { table: string; field: string; rowFrom: 'map' | 'location' }> = {
+  AMBIGUOUS_CONTAINER_MAP: { table: 'maps', field: 'container_location_id', rowFrom: 'map' },
+  CONTAINER_LOCATION_MISSING: { table: 'maps', field: 'container_location_id', rowFrom: 'map' },
+  MAP_CONTAINER_MISSING: { table: 'maps', field: 'container_location_id', rowFrom: 'map' },
+  MULTIPLE_ROOT_MAPS: { table: 'maps', field: 'container_location_id', rowFrom: 'map' },
+  MAP_UNLINKED: { table: 'maps', field: 'container_location_id', rowFrom: 'map' },
+  MAP_SELF_CONTAINED: { table: 'locations', field: 'map_id', rowFrom: 'location' },
+  LOCATION_PARENT_MISSING: { table: 'locations', field: 'parent_location_id', rowFrom: 'location' },
+  ANCHOR_LOCATION_MISSING: { table: 'locations', field: 'anchor_location_id', rowFrom: 'location' },
+  ROOT_MAP_MISSING: { table: 'branches', field: 'root_map_id', rowFrom: 'map' },
+};
+
+/** 问题键：用于「候选新引入/恶化」比较，含全部关联 ID。 */
+function topologyIssueKey(issue: PlanIssue): string {
+  const related = [...(issue.relatedIds ?? [])].sort().join(',');
+  return `${issue.code}|${issue.mapId ?? ''}|${issue.locationId ?? ''}|${related}`;
+}
+
 function isJsonColumn(name: string): boolean {
   return name.endsWith('_json');
 }
 
 void isJsonColumn;
 
-/** §7.6.2：坐标 x/y 同空或同非空；有坐标必须有 map_id；数值有限；精度与地图归属一致。 */
-function checkCoordinates(table: AtlasTableName, row: Record<string, unknown>, out: InvariantViolation[]): void {
+/**
+ * §7.6.2：坐标 x/y 同空或同非空；有坐标必须有 map_id；数值有限；精度与地图归属一致。
+ *
+ * 关于「地点落自己内图」（T05, INVARIANT_LOCATION_MAP_SELF）：判据是**容器关系**
+ * `maps.container_location_id === location.id`，属于跨表结构问题，放在
+ * `validateCandidate` 的候选/基线拓扑比较里报告；这里只保留「map_id 与地点 id
+ * 字面相同」这一条纯本行判据（历史行为，且不依赖其它行）。
+ */
+function checkCoordinates(
+  table: AtlasTableName,
+  row: Record<string, unknown>,
+  out: InvariantViolation[],
+): void {
   const hasX = row.grid_x !== undefined && row.grid_x !== null;
   const hasY = row.grid_y !== undefined && row.grid_y !== null;
   const id = rowIdOf(table, row);
@@ -141,7 +269,7 @@ export type ValidateOptions = {
   /** 只检查这些行 id（组边界用）。 */
   rowIds?: Set<string>;
   /** 组内新写行的临时视图（尚未落库时用于组边界检查）。 */
-  pendingRows?: Array<{ table: string; rowId: string; row: Record<string, unknown> | null }>;
+  pendingRows?: PendingRow[];
 };
 
 /**
@@ -160,6 +288,9 @@ export function validateCandidate(db: SqlDatabase, options: ValidateOptions): Ca
     if (onlyRows && onlyRows.size > 0 && !onlyRows.has(id)) return false;
     return true;
   };
+
+  // M2-03：容器索引先建好，供坐标检查（地点落自己内图）与坏拓扑检测共用。
+  const mapRows = rowsOf(db, 'maps', branchId);
 
   // —— 1. 实体身份 ↔ 详情恰有一份 ——
   const entityKeys = rowsOf(db, 'entity_keys', branchId);
@@ -209,6 +340,9 @@ export function validateCandidate(db: SqlDatabase, options: ValidateOptions): Ca
   }
 
   // —— 2. 地点父链无环 + 层级上限 ——
+  // 层级按**父边数**计算：从该地点出发向上走一条 parent_location_id 记 1 条边，
+  // 走到第 LOCATION_DEPTH 条仍合法，第 LOCATION_DEPTH+1 条（即 13）越界。
+  // 物品容器链的 CONTAINER_DEPTH=4 是另一条独立上限，二者互不影响（T04）。
   const locations = rowsOf(db, 'locations', branchId);
   const parentEdges = new Map<string, string | null>();
   const parentOf = new Map<string, string | null>();
@@ -233,6 +367,57 @@ export function validateCandidate(db: SqlDatabase, options: ValidateOptions): Ca
       }
       cursor = parentOf.get(cursor) ?? null;
     }
+  }
+
+  // —— 2b. 地图包含权威（M2-03）——
+  // 复用 atlas-map-topology 的统一解析识别「坏根 / 坏父链 / 重复容器 / 自容器图 / 未挂接」，
+  // 但**只拒绝候选新引入或恶化的问题**：旧档自带的问题保持只读诊断（由 inspect 展示），
+  // 不能因为历史坏数据就让之后每一次写入都必死。比较基准是问题键集合
+  // （码 + 地图/地点 ID + 全部关联 ID），新增键才算候选引入或恶化。
+  //
+  // 基线从候选行的 `before` 还原。全库一致性检查（无 pendingRows，例如保存前
+  // 对候选库的整体校验）拿不到 before，于是候选态与基线完全相同 → 这里**不会**
+  // 对旧档问题报警；「新引入即拒绝对应原子组」由组边界路径负责，与 02 §3
+  // 「新候选造成同样问题则拒绝对应原子组」一致。
+  const pendingList = options.pendingRows ?? [];
+  const branchRows = rowsOf(db, 'branches', branchId);
+  let baseRootMapId = textOrNull(branchRows[0]?.root_map_id);
+  let candidateRootMapId = baseRootMapId;
+  for (const item of pendingList) {
+    if (item.table !== 'branches') continue;
+    if (branchRows.length > 0 && item.rowId !== String(branchRows[0].id)) continue;
+    if (item.before === undefined) continue;
+    baseRootMapId = item.before === null ? null : textOrNull(item.before.root_map_id);
+    if (item.row) candidateRootMapId = textOrNull(item.row.root_map_id);
+  }
+  const baseTopology = resolveMapTopology(
+    topologyInputOf(
+      branchId,
+      baseRootMapId,
+      revertPendingRows(mapRows, 'maps', pendingList),
+      revertPendingRows(locations, 'locations', pendingList),
+    ),
+  );
+  const candidateTopology = resolveMapTopology(
+    topologyInputOf(
+      branchId,
+      candidateRootMapId,
+      mergePendingRows(mapRows, 'maps', pendingList),
+      mergePendingRows(locations, 'locations', pendingList),
+    ),
+  );
+  const baseTopologyKeys = new Set(baseTopology.issues.map(topologyIssueKey));
+  for (const issue of candidateTopology.issues) {
+    const mapped = TOPOLOGY_INVARIANT_CODES[issue.code];
+    if (!mapped) continue;
+    if (baseTopologyKeys.has(topologyIssueKey(issue))) continue;
+    const target = TOPOLOGY_ISSUE_TARGET[issue.code] ?? {
+      table: 'maps',
+      field: 'container_location_id',
+      rowFrom: 'map' as const,
+    };
+    const rowId = (target.rowFrom === 'location' ? issue.locationId : issue.mapId) ?? issue.mapId ?? issue.locationId ?? null;
+    violations.push(violation(mapped, target.table, rowId, target.field, `${issue.code}：${issue.message}`));
   }
 
   // —— 3. 物品容器链无环 + 层级上限 + 位置互斥（schema 已约束，逐项复核） ——
@@ -642,7 +827,7 @@ export function validateGroup(
   branchId: string,
   tables: AtlasTableName[],
   rowIds: string[],
-  pendingRows?: Array<{ table: string; rowId: string; row: Record<string, unknown> | null }>,
+  pendingRows?: PendingRow[],
 ): CandidateValidation {
   return validateCandidate(db, { branchId, tables, rowIds: new Set(rowIds), pendingRows });
 }
