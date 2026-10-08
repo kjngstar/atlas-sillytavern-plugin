@@ -58,6 +58,15 @@ export const ATLAS_ERROR_CODES = {
    * 不猜、不偷偷换管线——指明当前选项让作者自己切（推进页协议下拉）。
    */
   PROTOCOL_MISMATCH: "PROTOCOL_MISMATCH",
+  /**
+   * M3-03/03A：本回合模型预算（固定 4 次真实传输发送）已用尽。
+   * 领取失败的请求**不发**，如实记 deferred；不是世界整轮失败。
+   */
+  MODEL_BUDGET_EXHAUSTED: "MODEL_BUDGET_EXHAUSTED",
+  /**
+   * M3-03：同一 batchId 的重复候选——不重复发请求，直接拒。
+   */
+  MODEL_BATCH_DUPLICATE: "MODEL_BATCH_DUPLICATE",
 } as const;
 
 export type AtlasErrorCode = (typeof ATLAS_ERROR_CODES)[keyof typeof ATLAS_ERROR_CODES];

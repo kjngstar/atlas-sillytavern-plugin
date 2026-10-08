@@ -794,17 +794,53 @@ test("callAtlasWorldTurnApi：MiniMax 订阅密钥 Not Found → 自动换 anthr
     // 模拟 MiniMax 官方对订阅密钥打 /v1/chat/completions 的 Not Found（HTTP 200 包错误 JSON）
     return { ok: true, status: 200, text: async () => JSON.stringify({ error: { message: "Not Found" }, quota_error: false }) };
   };
+  // M3-03A：兼容路由的第二次发送必须显式领取传输额度；调用方不声明预算就不放行。
+  const claims = [];
   const result = await callAtlasWorldTurnApi(
     { name: "t", endpoint: "https://api.minimaxi.com/v1", model: "MiniMax-M3", apiKey: "sk-cp-sub" },
     { injectionText: "c", userText: "u", assistantText: "a" },
-    { fetchFn },
+    { fetchFn, rescueTransport: () => { claims.push(1); return { ok: true }; } },
   );
   assert.equal(result.ok, true);
   assert.equal(result.text, "救场成功");
   assert.match(result.notice ?? "", /anthropic/);
   assert.equal(seen.length, 2, "两次请求：原路径 + 救场");
+  assert.equal(claims.length, 1, "第二次发送前领了一次传输额度");
   assert.equal(seen[1].url, "https://api.minimaxi.com/anthropic/chat/completions");
   assert.equal(seen[1].format, "claude", "救场请求带 claude 协议头");
+});
+
+test("callAtlasWorldTurnApi：M3-03A 未声明传输预算 / 预算已用尽 → 不发隐藏重试，明确报原因", async () => {
+  const base = { injectionText: "c", userText: "u", assistantText: "a" };
+  const presetValue = { name: "t", endpoint: "https://api.minimaxi.com/v1", model: "MiniMax-M3", apiKey: "sk-cp-sub" };
+  const makeFetch = () => {
+    const calls = [];
+    const fetchFn = async (input) => {
+      const url = typeof input === "string" ? input : input.toString();
+      calls.push(url);
+      return { ok: true, status: 200, text: async () => JSON.stringify({ error: { message: "Not Found" }, quota_error: false }) };
+    };
+    return { fetchFn, calls };
+  };
+
+  // (a) 调用方未提供 port → 最严策略：只发 1 次，不发隐藏重试
+  let t = makeFetch();
+  let r = await callAtlasWorldTurnApi(presetValue, base, { fetchFn: t.fetchFn });
+  assert.equal(t.calls.length, 1, "未声明预算 → 只发首次请求，不隐藏重试");
+  assert.equal(r.ok, false);
+  assert.equal(r.code, "MODEL_BUDGET_EXHAUSTED", "明确返回预算错误码，不静默");
+  assert.match(r.message, /【MiniMax 检测】/, "仍保留原错误与 MiniMax 专项提示用于诊断");
+  assert.match(r.message, /未自动重试/, "明确说明未重试");
+
+  // (b) port 报无余额 → 同样不发第二次
+  t = makeFetch();
+  r = await callAtlasWorldTurnApi(presetValue, base, {
+    fetchFn: t.fetchFn,
+    rescueTransport: () => ({ ok: false, reason: "本回合模型预算 4 已用尽（实际发送 4 次），不再发送" }),
+  });
+  assert.equal(t.calls.length, 1, "预算尽 → 不发第二次");
+  assert.equal(r.code, "MODEL_BUDGET_EXHAUSTED");
+  assert.match(r.message, /已用尽/, "带出预算 port 给出的原因");
 });
 
 test("callAtlasWorldTurnApi：非 MiniMax 域 / 非 sk-cp- 密钥 / claude 协议 → 不触发救场", async () => {

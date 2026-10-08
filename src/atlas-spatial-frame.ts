@@ -25,6 +25,11 @@ export type SpatialScope = {
 };
 
 export const SPATIAL_REQUEST_KEY = 'atlasLayoutRequest';
+/**
+ * frame_json 里场景命名空间的键。取自工具包权威 `FRAME_SCENE_KEY`，不另造第二份字面量；
+ * 需要判「本图是否已有 scene」的模块（如世界建设）引用这里，而不是自己写 'atlasScene'。
+ */
+export const SPATIAL_SCENE_KEY = FRAME_SCENE_KEY;
 
 export type SpatialIssueContext = {
   mapId?: string;

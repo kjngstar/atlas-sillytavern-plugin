@@ -346,7 +346,19 @@ function errorMessageForStatus(status: number): { code: AtlasErrorCode; retryabl
 export async function callAtlasWorldTurnApi(
   preset: AtlasApiPreset,
   input: AtlasWorldTurnPromptInput,
-  deps: { fetchFn?: typeof fetch; now?: () => number; messagesOverride?: Array<{ role: string; content: string }> } = {},
+  deps: {
+    fetchFn?: typeof fetch;
+    now?: () => number;
+    messagesOverride?: Array<{ role: string; content: string }>;
+    /**
+     * M3-03A：兼容路由第二次真实发送前必须领到的传输额度。
+     *
+     * 「一次 modelPort.request ≠ 一次真实网络请求」——MiniMax 订阅密钥走 OpenAI 路径挨
+     * Not Found 时，本函数内部会再发一次 fetch。那次发送也必须占本回合预算。
+     * 缺省（未提供）时按**最严策略**处理：视为没有余额，不发隐藏重试，并返回明确原因。
+     */
+    rescueTransport?: () => { ok: boolean; reason?: string };
+  } = {},
 ): Promise<AtlasApiCallResult | AtlasApiCallFailure> {
   const now = deps.now ?? Date.now;
   const startedAt = now();
@@ -428,6 +440,9 @@ export async function callAtlasWorldTurnApi(
   try {
     let response: Response;
     let rescueAttempted = false;
+    // M3-03A：兼容路由被拒时的明确原因（缺预算 / 调用方未提供 port）。非 null 表示
+    // 「本该重试但没发」——失败路径会把它并进 message，绝不静默。
+    let rescueDeniedReason: string | null = null;
     const initial = buildPayload(false);
     try {
       response = await awaitResponse(fetchFn(initial.url, {
@@ -478,6 +493,9 @@ export async function callAtlasWorldTurnApi(
     // 0.9.14 自动救场（第二层保险）：MiniMax 订阅密钥（sk-cp-）打 OpenAI 路径挨 Not Found 时，
     // 自动改走官方 Anthropic 兼容路由（origin + /anthropic）重试一次——成功即通，notice 落引擎日志；
     // 失败则保留原错误与专项提示。非 MiniMax 域 / 非 sk-cp- 密钥不做任何魔法。
+    //
+    // M3-03A：这次重试**不是免费的**。它是同一次 modelPort.request 内发生的第二次真实 fetch，
+    // 必须再从本轮预算里领一次额度；领不到就不发（禁止隐藏重试），失败路径会报明确原因。
     if (
       mode === "custom" &&
       preset.apiFormat !== "claude" &&
@@ -486,26 +504,43 @@ export async function callAtlasWorldTurnApi(
       isMinimaxUrl(url) &&
       /^sk-cp-/i.test(preset.apiKey.trim())
     ) {
-      const rescue = buildPayload(true);
-      try {
-        const rescueResponse = await awaitResponse(fetchFn(rescue.url, {
-          method: "POST",
-          headers: rescue.headers,
-          body: rescue.body,
-          signal: controller.signal,
-        }), controller.signal);
-        status = rescueResponse.status;
-        const rescueParsed = await parseCall(rescueResponse);
-        if (rescueParsed.text !== null) {
-          parsed = rescueParsed;
-          rescueAttempted = true;
-        }
-      } catch { /* 救场失败 → 落回原错误路径 */ }
+      // 调用方未提供 port → 最严策略：视为无余额，不放行（不默认放行）。
+      const claim = deps.rescueTransport
+        ? deps.rescueTransport()
+        : { ok: false, reason: "调用方未提供本轮传输预算 port，按最严策略不自动重试" };
+      if (!claim.ok) {
+        rescueDeniedReason = claim.reason ?? "本轮模型请求预算已用尽";
+      } else {
+        const rescue = buildPayload(true);
+        try {
+          const rescueResponse = await awaitResponse(fetchFn(rescue.url, {
+            method: "POST",
+            headers: rescue.headers,
+            body: rescue.body,
+            signal: controller.signal,
+          }), controller.signal);
+          status = rescueResponse.status;
+          const rescueParsed = await parseCall(rescueResponse);
+          if (rescueParsed.text !== null) {
+            parsed = rescueParsed;
+            rescueAttempted = true;
+          }
+        } catch { /* 救场失败 → 落回原错误路径 */ }
+      }
     }
 
     if (controller.signal.aborted) return fail(ATLAS_ERROR_CODES.API_TIMEOUT, `推演请求超过 ${timeoutMs}ms 超时。`, true);
     if (!response.ok && !rescueAttempted) {
       const mapped = errorMessageForStatus(status);
+      // M3-03A：HTTP 失败 + 本该自动重试但被预算拒绝 → 明确报出，不静默。
+      if (rescueDeniedReason) {
+        return fail(
+          ATLAS_ERROR_CODES.MODEL_BUDGET_EXHAUSTED,
+          `${mapped.message}\n【未自动重试】已识别到 Anthropic 兼容路由可救场，但${rescueDeniedReason}，本次**未**发出第二次请求。首次失败原始状态：HTTP ${status}${parsed.gatewayError ? `（${parsed.gatewayError}）` : ""}。`,
+          false,
+          status,
+        );
+      }
       return fail(mapped.code, mapped.message, mapped.retryable, status);
     }
 
@@ -549,6 +584,15 @@ export async function callAtlasWorldTurnApi(
           );
         }
         const minimaxHint = minimaxNotFoundHint(url, gatewayError, preset.apiKey);
+        // M3-03A：本该自动重试却被预算拒绝 → 错误码明确为 MODEL_BUDGET_EXHAUSTED，
+        // 同时保留首次失败的原始错误与 MiniMax 专项提示用于诊断（不隐藏、不静默）。
+        if (rescueDeniedReason) {
+          return fail(
+            ATLAS_ERROR_CODES.MODEL_BUDGET_EXHAUSTED,
+            `推演服务返回错误：${gatewayError}（HTTP 200，但响应体是错误 JSON）——通常是模型名在网关上不存在 / 无可用渠道，或端点路径不完整（一般应为 http(s)://地址/v1，Atlas 会自动补 /chat/completions）。请到「日志」页核对实际发送的目标与模型名。${minimaxHint}\n【未自动重试】已识别到 Anthropic 兼容路由可救场，但${rescueDeniedReason}，本次**未**发出第二次请求；本轮未提交任何模型结果。`,
+            false,
+          );
+        }
         return fail(
           ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
           `推演服务返回错误：${gatewayError}（HTTP 200，但响应体是错误 JSON）——通常是模型名在网关上不存在 / 无可用渠道，或端点路径不完整（一般应为 http(s)://地址/v1，Atlas 会自动补 /chat/completions）。请到「日志」页核对实际发送的目标与模型名。${minimaxHint}`,

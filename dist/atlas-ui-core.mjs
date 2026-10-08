@@ -4078,7 +4078,16 @@ var ATLAS_ERROR_CODES = {
    * C04（§2）：模型输出的形态与 `settings.worldTurnProtocol` 不符。
    * 不猜、不偷偷换管线——指明当前选项让作者自己切（推进页协议下拉）。
    */
-  PROTOCOL_MISMATCH: "PROTOCOL_MISMATCH"
+  PROTOCOL_MISMATCH: "PROTOCOL_MISMATCH",
+  /**
+   * M3-03/03A：本回合模型预算（固定 4 次真实传输发送）已用尽。
+   * 领取失败的请求**不发**，如实记 deferred；不是世界整轮失败。
+   */
+  MODEL_BUDGET_EXHAUSTED: "MODEL_BUDGET_EXHAUSTED",
+  /**
+   * M3-03：同一 batchId 的重复候选——不重复发请求，直接拒。
+   */
+  MODEL_BATCH_DUPLICATE: "MODEL_BATCH_DUPLICATE"
 };
 var ATLAS_LIMITS = {
   /** ID 类字段最大字符数 */
@@ -4603,6 +4612,7 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
   try {
     let response;
     let rescueAttempted = false;
+    let rescueDeniedReason = null;
     const initial = buildPayload(false);
     try {
       response = await awaitResponse(fetchFn(initial.url, {
@@ -4642,26 +4652,40 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
     if (controller.signal.aborted) return fail3(ATLAS_ERROR_CODES.API_TIMEOUT, `推演请求超过 ${timeoutMs}ms 超时。`, true);
     let status = response.status;
     if (mode === "custom" && preset.apiFormat !== "claude" && parsed.gatewayError && /Not Found/i.test(parsed.gatewayError) && isMinimaxUrl(url) && /^sk-cp-/i.test(preset.apiKey.trim())) {
-      const rescue = buildPayload(true);
-      try {
-        const rescueResponse = await awaitResponse(fetchFn(rescue.url, {
-          method: "POST",
-          headers: rescue.headers,
-          body: rescue.body,
-          signal: controller.signal
-        }), controller.signal);
-        status = rescueResponse.status;
-        const rescueParsed = await parseCall(rescueResponse);
-        if (rescueParsed.text !== null) {
-          parsed = rescueParsed;
-          rescueAttempted = true;
+      const claim = deps.rescueTransport ? deps.rescueTransport() : { ok: false, reason: "调用方未提供本轮传输预算 port，按最严策略不自动重试" };
+      if (!claim.ok) {
+        rescueDeniedReason = claim.reason ?? "本轮模型请求预算已用尽";
+      } else {
+        const rescue = buildPayload(true);
+        try {
+          const rescueResponse = await awaitResponse(fetchFn(rescue.url, {
+            method: "POST",
+            headers: rescue.headers,
+            body: rescue.body,
+            signal: controller.signal
+          }), controller.signal);
+          status = rescueResponse.status;
+          const rescueParsed = await parseCall(rescueResponse);
+          if (rescueParsed.text !== null) {
+            parsed = rescueParsed;
+            rescueAttempted = true;
+          }
+        } catch {
         }
-      } catch {
       }
     }
     if (controller.signal.aborted) return fail3(ATLAS_ERROR_CODES.API_TIMEOUT, `推演请求超过 ${timeoutMs}ms 超时。`, true);
     if (!response.ok && !rescueAttempted) {
       const mapped = errorMessageForStatus(status);
+      if (rescueDeniedReason) {
+        return fail3(
+          ATLAS_ERROR_CODES.MODEL_BUDGET_EXHAUSTED,
+          `${mapped.message}
+【未自动重试】已识别到 Anthropic 兼容路由可救场，但${rescueDeniedReason}，本次**未**发出第二次请求。首次失败原始状态：HTTP ${status}${parsed.gatewayError ? `（${parsed.gatewayError}）` : ""}。`,
+          false,
+          status
+        );
+      }
       return fail3(mapped.code, mapped.message, mapped.retryable, status);
     }
     if (parsed.truncated) {
@@ -4693,6 +4717,14 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
           );
         }
         const minimaxHint = minimaxNotFoundHint(url, gatewayError, preset.apiKey);
+        if (rescueDeniedReason) {
+          return fail3(
+            ATLAS_ERROR_CODES.MODEL_BUDGET_EXHAUSTED,
+            `推演服务返回错误：${gatewayError}（HTTP 200，但响应体是错误 JSON）——通常是模型名在网关上不存在 / 无可用渠道，或端点路径不完整（一般应为 http(s)://地址/v1，Atlas 会自动补 /chat/completions）。请到「日志」页核对实际发送的目标与模型名。${minimaxHint}
+【未自动重试】已识别到 Anthropic 兼容路由可救场，但${rescueDeniedReason}，本次**未**发出第二次请求；本轮未提交任何模型结果。`,
+            false
+          );
+        }
         return fail3(
           ATLAS_ERROR_CODES.RESPONSE_MALFORMED,
           `推演服务返回错误：${gatewayError}（HTTP 200，但响应体是错误 JSON）——通常是模型名在网关上不存在 / 无可用渠道，或端点路径不完整（一般应为 http(s)://地址/v1，Atlas 会自动补 /chat/completions）。请到「日志」页核对实际发送的目标与模型名。${minimaxHint}`,
@@ -5801,6 +5833,40 @@ function resolveWorldTurnPreset(settings) {
   };
 }
 
+// src/atlas-sql-generation-budget.ts
+function transportBudgetPort(budget, stage, batchId) {
+  return {
+    claim: () => {
+      const claim = budget.claimTransport(stage, batchId);
+      return claim.ok ? { ok: true } : { ok: false, reason: claim.reason };
+    }
+  };
+}
+function budgetError(claim) {
+  return Object.assign(new Error(claim.reason), { code: claim.code, retryable: false, deferred: true });
+}
+function budgetedModelPort(port, budget, stage) {
+  return {
+    ...port,
+    /** 阶段名优先取请求自带的 phase（observe/geography/decision/outcome/repair），否则用端口默认。 */
+    async request(request) {
+      const phase = request.phase || stage;
+      const logical = budget.claimBatch(phase, request.batchId);
+      if (!logical.ok) throw budgetError(logical);
+      const claim = budget.claimTransport(phase, request.batchId);
+      if (!claim.ok) throw budgetError(claim);
+      try {
+        const response = await port.request(request);
+        budget.finishBatch(request.batchId, "completed");
+        return response;
+      } catch (error2) {
+        budget.finishBatch(request.batchId, "failed");
+        throw error2;
+      }
+    }
+  };
+}
+
 // src/atlas-sql-model-port.ts
 function failure(code, message, retryable = false) {
   return Object.assign(new Error(message), { code, retryable });
@@ -5837,7 +5903,7 @@ function createSqlModelPort(options) {
     })), ...request.messages.slice(1)];
     return { preset, input, messages, promptSource: preset.systemPrompt?.trim() ? "connection" : preset.promptSegments?.length ? "preset" : "builtin" };
   }
-  return {
+  const port = {
     async preview(request) {
       const { input, messages, promptSource } = await prepare(request);
       return {
@@ -5849,12 +5915,21 @@ function createSqlModelPort(options) {
     },
     async request(request) {
       const { preset, input, messages } = await prepare(request);
+      const budget = options.budget;
+      const phase = request.phase || options.stage || "observe";
       const result = await callAtlasWorldTurnApi({
         ...preset,
         // Stage budgets are defaults; explicit saved connection settings take priority.
         maxTokens: preset.maxTokens ?? request.maxTokens,
         timeoutMs: preset.timeoutMs ?? request.timeoutMs
-      }, input, { fetchFn: options.fetchFn, now: options.now, messagesOverride: messages });
+      }, input, {
+        fetchFn: options.fetchFn,
+        now: options.now,
+        messagesOverride: messages,
+        // M3-03A：API 内部兼容路由的第二次真实发送，也走同一局部预算。缺预算 port 时不传，
+        // 由 api-client 按最严策略拒发并明确报错（绝不隐藏重试）。
+        ...budget ? { rescueTransport: () => transportBudgetPort(budget, phase, request.batchId).claim() } : {}
+      });
       if (!result.ok) throw failure(result.code, result.message, result.retryable);
       return {
         batchId: request.batchId,
@@ -5865,6 +5940,7 @@ function createSqlModelPort(options) {
       };
     }
   };
+  return options.budget ? budgetedModelPort(port, options.budget, options.stage ?? "observe") : port;
 }
 
 // src/atlas-world-summary.ts

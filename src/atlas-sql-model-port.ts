@@ -3,11 +3,21 @@ import { migrateAtlasSettings, resolveWorldTurnPreset, sanitizeSettingsV2 } from
 import type { AtlasModelPort } from './atlas-db-contract.ts';
 import type { ModelBatchRequest } from './atlas-ops-contract.ts';
 import { DEFAULT_SQL_PROMPT_SEGMENTS, hasLegacySqlPromptProtocol } from './atlas-sql-prompts.ts';
+import { budgetedModelPort, transportBudgetPort, type GenerationBudgetPort } from './atlas-sql-generation-budget.ts';
 
 type Options = {
   readSettings: () => Promise<unknown>;
   fetchFn?: typeof fetch;
   now?: () => number;
+  /**
+   * M3-03 / M3-03A：本回合局部模型预算。提供时——
+   * 1) 每个真实发送前统一 claim（含 API 内部兼容路由的第二次发送）；
+   * 2) 未提供则保持既有单次行为（直接调用方自行负责记账）。
+   * 预算实例由调用方传入，绝不使用全局单例：不同聊天 / 并发任务互相隔离。
+   */
+  budget?: GenerationBudgetPort;
+  /** 端口默认阶段名；请求自带 phase 时以 phase 为准。 */
+  stage?: string;
 };
 
 function failure(code: string, message: string, retryable = false) {
@@ -52,7 +62,7 @@ export function createSqlModelPort(options: Options): AtlasModelPort {
   })), ...request.messages.slice(1)];
   return {preset,input,messages,promptSource: preset.systemPrompt?.trim()?'connection':preset.promptSegments?.length?'preset':'builtin'};
  }
- return {
+ const port: AtlasModelPort = {
   async preview(request:ModelBatchRequest){
    const {input,messages,promptSource}=await prepare(request);
    return {messages:messages.map(message=>({...message,chars:message.content.length})),promptSource,
@@ -60,14 +70,23 @@ export function createSqlModelPort(options: Options): AtlasModelPort {
   },
   async request(request:ModelBatchRequest){
    const {preset,input,messages}=await prepare(request);
+      const budget = options.budget;
+      const phase = (request as { phase?: string }).phase || options.stage || 'observe';
       const result = await callAtlasWorldTurnApi({ ...preset,
         // Stage budgets are defaults; explicit saved connection settings take priority.
         maxTokens: preset.maxTokens ?? request.maxTokens,
         timeoutMs: preset.timeoutMs ?? request.timeoutMs,
-      }, input, { fetchFn: options.fetchFn, now: options.now, messagesOverride: messages });
+      }, input, {
+        fetchFn: options.fetchFn, now: options.now, messagesOverride: messages,
+        // M3-03A：API 内部兼容路由的第二次真实发送，也走同一局部预算。缺预算 port 时不传，
+        // 由 api-client 按最严策略拒发并明确报错（绝不隐藏重试）。
+        ...(budget ? { rescueTransport: () => transportBudgetPort(budget, phase, request.batchId).claim() } : {}),
+      });
       if (!result.ok) throw failure(result.code, result.message, result.retryable);
       return { batchId: request.batchId, text: result.text, finishReason: null,
         httpStatus: result.status, durationMs: result.durationMs };
     },
   };
+  // 局部预算：真实发送前统一 claimBatch + claimTransport；不提供预算时保持既有单次行为。
+  return options.budget ? budgetedModelPort(port, options.budget, options.stage ?? 'observe') : port;
 }
