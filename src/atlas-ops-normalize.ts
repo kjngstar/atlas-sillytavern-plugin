@@ -20,6 +20,7 @@ import {
 } from './atlas-ops-contract.ts';
 import { ATLAS_RUNTIME_LIMITS, WHY_MAX_CHARS } from './atlas-runtime-limits.ts';
 import { ATLAS_ERROR_CODES, toIssue } from './atlas-ops-errors.ts';
+import { ATLAS_LOCATION_KINDS } from './atlas-location-kinds.ts';
 
 export type NormalizeResult = {
   op: ModelOperation | null;
@@ -398,7 +399,8 @@ export const OP_KNOWN_FIELDS: Record<string, readonly string[]> = {
 /** 每个字段的固定英文取值；只有字典明确的字段才做 enum 归一。 */
 const OP_ENUM_DICTS: Record<string, Record<string, readonly string[]>> = {
   'location.upsert': {
-    kind: ['region', 'city', 'district', 'building', 'room', 'natural', 'vehicle', 'other'],
+    // 唯一来源：atlas-location-kinds.ts（含 floor）。此处不再复制字符串联合。
+    kind: [...ATLAS_LOCATION_KINDS],
     mobility: ['fixed', 'mobile'],
     existence_quality: ['confirmed', 'inferred', 'hypothetical'],
   },

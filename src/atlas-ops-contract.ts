@@ -344,6 +344,16 @@ export type TurnInput = {
    * 只对指定地图上 status=failed 的请求重新武装，不重放事件、不推进时间。
    */
   layoutRetry?: { mapId: string; requestId: string; operationId: string };
+  /**
+   * M3：显式「建设世界」参数，由宿主路由构造；绝不来自模型文本，
+   * UI 也不得借此透传任意字段或 SQL 标识符。省略时按普通回合处理。
+   */
+  worldCompletion?: import('./atlas-world-contract.ts').WorldCompletionInput;
+  /**
+   * M3-15：世界书分块抽取阶段只做事实登记（extract-only）。
+   * 抽取全部结束后才发一次总体建设，禁止每个分块重复扩建。
+   */
+  constructionMode?: 'extract-only';
 };
 
 export type RollbackInput = {
@@ -385,6 +395,8 @@ export const VIEW_KINDS = [
   'catalog',
   'flows',
   'tasks',
+  // M5：真实故事事件流（只读派生视图）。分发在 M5-07 注册前会落到 default 的明确不支持结果。
+  'world-feed',
 ] as const;
 
 export type ViewKind = (typeof VIEW_KINDS)[number];
@@ -413,6 +425,12 @@ export type ViewQuery = {
   selectedEntityId?: string;
   /** flows / tasks：附加过滤（只能是白名单里的键，视图层逐键校验）。 */
   filter?: Record<string, unknown>;
+  /**
+   * M1-11 / M5：world-feed 的过滤条件。
+   * 只接受契约白名单字段（category/mapId/entityId/currentTurnOnly），
+   * 调用方不得借此透传任意字段或 SQL 标识符。
+   */
+  feedFilter?: import('./atlas-world-contract.ts').FeedFilter;
 };
 
 export type ViewResult = {

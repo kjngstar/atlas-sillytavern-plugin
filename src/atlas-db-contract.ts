@@ -21,6 +21,7 @@ import type {
   ViewQuery,
   ViewResult,
 } from './atlas-ops-contract.ts';
+import type { AtlasLocationKind } from './atlas-location-kinds.ts';
 
 /** sql.js 参数绑定可接受的值。undefined 由 codec 归一为 NULL。 */
 export type SqlValue = string | number | null | Uint8Array | undefined;
@@ -58,7 +59,7 @@ export type MapRow = CommonColumns & {
 export type LocationRow = CommonColumns & {
   name: string;
   aliases_json: string;
-  kind: 'region' | 'city' | 'district' | 'building' | 'room' | 'natural' | 'vehicle' | 'other';
+  kind: AtlasLocationKind;
   description: string;
   parent_location_id: string | null;
   mobility: 'fixed' | 'mobile';

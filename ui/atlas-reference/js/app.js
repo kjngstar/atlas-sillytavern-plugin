@@ -70,8 +70,8 @@ const map=window.AtlasMap.create($('#map'),$('#minimap'),{
   tt.textContent=m.name+(m.node?(state.singleClickEnter?' · 单击进入':' · 单击查看'):'');tt.style.left=Math.min(rect.width-210,Math.max(8,x-rect.left+14))+'px';tt.style.top=Math.min(rect.height-48,y-rect.top+18)+'px';tt.classList.add('on');},
  onFrame:frameChrome,
  getMarks(n,marks){return marks.filter(m=>{
-  if(m.type==='char'){const c=D.CAST.find(c=>c.id===m.id);if(!c)return false;return known(c)&&c.state!=='away'&&c.state!=='off'&&c.state!=='unknown'&&within(c.locationId,n.id);}
-  if(m.type==='item'){const it=D.ITEMS.find(it=>it.id===m.id);return it?known(it)&&within(it.locationId,n.id):false;}
+  if(m.type==='char'){const c=D.CAST.find(c=>c.id===m.id);if(!c)return false;return known(c)&&c.state!=='away'&&c.state!=='off'&&c.state!=='unknown'&&within(c.mapNodeId||c.locationId,n.id);}
+  if(m.type==='item'){const it=D.ITEMS.find(it=>it.id===m.id);return it?known(it)&&within(it.mapNodeId||it.locationId,n.id):false;}
   if(m.node)return known(m.node);if(m.type==='sig')return message(m.id)?known(message(m.id)):false;return true;
  });},
  getFlows:id=>(D.FLOWS[id]||[]).filter(known),getJourneys:id=>(D.JOURNEYS[id]||[]).filter(known),

@@ -49,6 +49,11 @@ export const ATLAS_ERROR_CODES = {
   /** 开场预览已经过期或会话/世界修订变化；必须重新预览，不能重新调用模型暗中替换候选。 */
   PREVIEW_STALE: "PREVIEW_STALE",
   /**
+   * M1-06A：升级前原档备份不存在、损坏，或不属于当前聊天。
+   * 三种情况共用同一个码：不让调用方借此探测其他聊天是否存在备份。
+   */
+  BACKUP_NOT_AVAILABLE: "BACKUP_NOT_AVAILABLE",
+  /**
    * C04（§2）：模型输出的形态与 `settings.worldTurnProtocol` 不符。
    * 不猜、不偷偷换管线——指明当前选项让作者自己切（推进页协议下拉）。
    */

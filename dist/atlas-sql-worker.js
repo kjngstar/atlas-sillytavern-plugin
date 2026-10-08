@@ -2173,7 +2173,7 @@
     repairResponseTokens: 2048,
     modelTimeoutMs: 12e4,
     mentionCandidates: 256,
-    locationDepth: 4,
+    locationDepth: 12,
     containerDepth: 4,
     actionPlanDepth: 2,
     detailedAttemptsPerTurn: 20,
@@ -2181,7 +2181,36 @@
     /** M4：只读目录视图单页上限（完整导出走游标，不允许一次全量）。 */
     catalogViewMaxLimit: 200,
     /** M4：只读目录视图默认页大小。 */
-    catalogViewDefaultLimit: 50
+    catalogViewDefaultLimit: 50,
+    // ── M3/M4 世界建设与广域生成的统一预算（01 §4）─────────────────────────
+    /** 一次显式「建设世界」的目标地点总量上限（分批完成，不是一次填满）。 */
+    worldFillTargets: 64,
+    /** 单个模型批次最多新增的交互地点数。 */
+    newLocationsPerBatch: 12,
+    /** 单个模型批次最多新增的合理路线数。 */
+    newRoutesPerBatch: 16,
+    /** 单个批次最多把本次目标再向下展开的父边数。 */
+    additionalParentDepthPerBatch: 2,
+    /** 同一批次最多处理的地图数（优先当前具体图 + 必要宏观图）。 */
+    layoutMapsPerBatch: 2,
+    /** 单张概览图的分区上限（G11 场景体积预算）。 */
+    overviewZoneLimit: 64,
+    /** 单张概览图的地物上限。 */
+    overviewFeatureLimit: 128,
+    /** 单张概览图的连接（路线/水系）上限。 */
+    overviewLinkLimit: 128,
+    /** 保存场景（maps.frame_json.atlasScene）的 UTF-8 字节上限，与 vendor 生成器一致。 */
+    sceneSaveUtf8Bytes: 512 * 1024,
+    /** 定向引用目录单次解析的最大条目数（超过则要求更窄的目标范围）。 */
+    refCatalogMaxEntries: 512,
+    /** 事件流读取：单次扫描的回合数上限。 */
+    feedTurnsPerScan: 24,
+    /** 事件流读取：单页最大条数。 */
+    feedPageMax: 100,
+    /** 事件流读取：异常回溯的最大块数。 */
+    feedMaxScanBlocks: 8,
+    /** 事件流读取：单回合 journal 明细的硬上限（超出给明确诊断，不返回半轮）。 */
+    feedTurnJournalMax: 2e3
   };
   var ATLAS_FIELD_LIMITS = {
     aliasLimit: 8,
@@ -2534,8 +2563,22 @@
     return request;
   }
 
+  // src/atlas-location-kinds.ts
+  var ATLAS_LOCATION_KINDS = [
+    "region",
+    "city",
+    "district",
+    "building",
+    "floor",
+    "room",
+    "natural",
+    "vehicle",
+    "other"
+  ];
+  var ATLAS_LOCATION_KINDS_SQL = ATLAS_LOCATION_KINDS.map((kind) => `'${kind}'`).join(",");
+
   // src/atlas-db-schema.ts
-  var ATLAS_SCHEMA_VERSION = 1;
+  var ATLAS_SCHEMA_VERSION = 2;
   var C_COLUMNS = [
     { name: "branch_id", nullable: false },
     { name: "id", nullable: false },
@@ -2777,7 +2820,7 @@ END`;
   ${commonColumnsSql()},
   name TEXT NOT NULL CHECK (length(trim(name)) > 0),
   aliases_json TEXT NOT NULL DEFAULT '[]',
-  kind TEXT NOT NULL CHECK (kind IN ('region','city','district','building','room','natural','vehicle','other')),
+  kind TEXT NOT NULL CHECK (kind IN (${ATLAS_LOCATION_KINDS_SQL})),
   description TEXT NOT NULL DEFAULT '',
   parent_location_id TEXT,
   mobility TEXT NOT NULL DEFAULT 'fixed' CHECK (mobility IN ('fixed','mobile')),
@@ -3362,6 +3405,12 @@ END`;
     ];
   }
   var USER_TABLE_COUNT = Object.keys(ATLAS_TABLE_COLUMNS).length;
+  var MIGRATION_LOCATIONS_SQL = locationsSql();
+  function currentSchemaVersion(db) {
+    const rows4 = db.exec("PRAGMA user_version");
+    const raw = rows4[0]?.values?.[0]?.[0];
+    return Number(raw ?? 0);
+  }
   function installSchemaSafe(db) {
     const tables = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'");
     const names = new Set((tables[0]?.values ?? []).map((row2) => String(row2[0])));
@@ -3372,6 +3421,17 @@ END`;
       const missing = [...expected].filter((n) => !names.has(n));
       throw new Error(
         `DB_SCHEMA_INVALID: 用户表不是预期的 ${USER_TABLE_COUNT} 张（多 ${unexpected.length}，少 ${missing.length}）：多 ${unexpected.join(",")}；少 ${missing.join(",")}`
+      );
+    }
+    const version = currentSchemaVersion(db);
+    if (version > ATLAS_SCHEMA_VERSION) {
+      throw new Error(
+        `DB_SCHEMA_UNSUPPORTED: user_version=${version} 高于本构建支持的 schema${ATLAS_SCHEMA_VERSION}，拒绝覆盖。`
+      );
+    }
+    if (existing === USER_TABLE_COUNT && version < ATLAS_SCHEMA_VERSION) {
+      throw new Error(
+        `DB_UPGRADE_REQUIRED: 已有 ${USER_TABLE_COUNT} 张表的 schema${version} 旧库，必须先经副本升级到 schema${ATLAS_SCHEMA_VERSION}。`
       );
     }
     for (const sql of schemaStatements()) db.run(sql);
@@ -8555,7 +8615,8 @@ END`;
   };
   var OP_ENUM_DICTS = {
     "location.upsert": {
-      kind: ["region", "city", "district", "building", "room", "natural", "vehicle", "other"],
+      // 唯一来源：atlas-location-kinds.ts（含 floor）。此处不再复制字符串联合。
+      kind: [...ATLAS_LOCATION_KINDS],
       mobility: ["fixed", "mobile"],
       existence_quality: ["confirmed", "inferred", "hypothetical"]
     },
@@ -10065,7 +10126,7 @@ END`;
     "vehicle_profile",
     "existence_quality"
   ]);
-  var LOCATION_KINDS2 = ["region", "city", "district", "building", "room", "natural", "vehicle", "other"];
+  var LOCATION_KINDS2 = ATLAS_LOCATION_KINDS;
   var LOCATION_EXISTENCE = ["confirmed", "inferred", "hypothetical"];
   function compileLocationUpsert(op, ctx) {
     const result = emptyCompileResult();
@@ -10115,6 +10176,9 @@ END`;
       const mobility = String(data.mobility);
       if (!["fixed", "mobile"].includes(mobility)) result.issues.push(issue4("ENUM_INVALID", "$.data.mobility", `mobility 非法：${mobility}`, op));
       else changes.mobility = mobility;
+    }
+    if (creating && !Object.prototype.hasOwnProperty.call(data, "mobility") && changes.kind === "vehicle") {
+      changes.mobility = "mobile";
     }
     if (Object.prototype.hasOwnProperty.call(data, "existence_quality")) {
       const q = String(data.existence_quality);
@@ -13846,6 +13910,161 @@ END`;
     if (Array.isArray(value)) return `[${value.map((v) => stableStringify(v)).join(",")}]`;
     const entries = Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
     return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`).join(",")}}`;
+  }
+
+  // src/atlas-db-upgrade.ts
+  var UPGRADE_TEMP_TABLE = "_atlas_locations_upgrade_2";
+  function pragmaNumber(db, pragma) {
+    const result = db.exec(`PRAGMA ${pragma}`);
+    const value = result?.[0]?.values?.[0]?.[0];
+    return typeof value === "number" ? value : Number(value ?? 0);
+  }
+  function scalar(db, sql) {
+    const result = db.exec(sql);
+    const rows4 = result?.[0]?.values ?? [];
+    return rows4.length > 0 ? rows4[0][0] : null;
+  }
+  function tableNames(db) {
+    const result = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name");
+    return (result?.[0]?.values ?? []).map((row2) => String(row2[0]));
+  }
+  function columnNames(db, table) {
+    const result = db.exec(`PRAGMA table_info(${table})`);
+    return (result?.[0]?.values ?? []).map((row2) => String(row2[1]));
+  }
+  function readKeyPairs(db, table) {
+    const result = db.exec(`SELECT branch_id, id FROM ${table}`);
+    const out = /* @__PURE__ */ new Set();
+    for (const row2 of result?.[0]?.values ?? []) out.add(`${String(row2[0])}\0${String(row2[1])}`);
+    return out;
+  }
+  function rowCounts(db) {
+    const out = /* @__PURE__ */ new Map();
+    for (const table of Object.keys(ATLAS_TABLE_COLUMNS)) {
+      out.set(table, Number(scalar(db, `SELECT COUNT(*) FROM ${table}`) ?? 0));
+    }
+    return out;
+  }
+  function upgradeTemporaryTableSql() {
+    const ddl = locationsSql();
+    const marker = "CREATE TABLE IF NOT EXISTS locations";
+    if (!ddl.startsWith(marker)) {
+      throw new AtlasDbError("DB_UPGRADE_FAILED", "locations DDL 模板与预期不符，拒绝迁移。", {});
+    }
+    return `CREATE TABLE ${UPGRADE_TEMP_TABLE}${ddl.slice(marker.length)}`;
+  }
+  function upgradeSchema1To2(db) {
+    const from = pragmaNumber(db, "user_version");
+    const to = ATLAS_SCHEMA_VERSION;
+    if (from === to) return { changed: false, from, to, issues: [] };
+    if (from > to) {
+      throw new AtlasDbError("DB_SCHEMA_UNSUPPORTED", `副本 schema_version=${from} 高于本实现支持的 ${to}。`, {
+        from,
+        supported: to
+      });
+    }
+    if (from !== 1) {
+      throw new AtlasDbError("DB_UPGRADE_FAILED", `副本 schema_version=${from} 不是可升级的版本 1。`, { from });
+    }
+    const tablesBefore = tableNames(db).sort();
+    if (tablesBefore.length !== USER_TABLE_COUNT) {
+      throw new AtlasDbError("DB_UPGRADE_FAILED", `副本不是预期的 ${USER_TABLE_COUNT} 张表，实际 ${tablesBefore.length}。`, {
+        tables: tablesBefore.length
+      });
+    }
+    const fixedColumns = ATLAS_TABLE_COLUMNS.locations.map((spec) => spec.name);
+    const issues = [];
+    db.run("PRAGMA foreign_keys = OFF");
+    const fkAfterOff = pragmaNumber(db, "foreign_keys");
+    if (fkAfterOff !== 0) {
+      throw new AtlasDbError("DB_UPGRADE_FAILED", "foreign_keys 未能关闭为 0，拒绝在开启外键时迁移。", { fkAfterOff });
+    }
+    const countsBefore = rowCounts(db);
+    const keysBefore = readKeyPairs(db, "locations");
+    const columnNamesBefore = columnNames(db, "locations");
+    try {
+      db.run("BEGIN");
+      const attachedResult = db.exec(
+        "SELECT type, name, sql FROM sqlite_master WHERE tbl_name='locations' AND type IN ('index','trigger') AND name NOT LIKE 'sqlite_autoindex_%' ORDER BY type, name"
+      );
+      const attached = (attachedResult?.[0]?.values ?? []).map((row2) => ({
+        type: String(row2[0]),
+        name: String(row2[1]),
+        sql: String(row2[2])
+      }));
+      db.run(upgradeTemporaryTableSql());
+      const missingFixed = fixedColumns.filter((name) => !columnNamesBefore.includes(name));
+      if (missingFixed.length > 0) {
+        throw new AtlasDbError("DB_UPGRADE_FAILED", "固定列清单含原 locations 表没有的列。", { missing: missingFixed });
+      }
+      const columnList = fixedColumns.join(", ");
+      db.run(`INSERT INTO ${UPGRADE_TEMP_TABLE} (${columnList}) SELECT ${columnList} FROM locations`);
+      const tempColumns = columnNames(db, UPGRADE_TEMP_TABLE);
+      if (tempColumns.length !== columnNamesBefore.length || tempColumns.some((name) => !columnNamesBefore.includes(name))) {
+        throw new AtlasDbError("DB_UPGRADE_FAILED", "临时表列与原 locations 列集合不一致。", {
+          expected: columnNamesBefore.length,
+          actual: tempColumns.length
+        });
+      }
+      const copiedCount = Number(scalar(db, `SELECT COUNT(*) FROM ${UPGRADE_TEMP_TABLE}`) ?? -1);
+      if (copiedCount !== countsBefore.get("locations")) {
+        throw new AtlasDbError("DB_UPGRADE_FAILED", `locations 复制行数不符：${copiedCount} ≠ ${countsBefore.get("locations")}。`, {});
+      }
+      const tempKeys = readKeyPairs(db, UPGRADE_TEMP_TABLE);
+      if (tempKeys.size !== keysBefore.size || [...keysBefore].some((key) => !tempKeys.has(key))) {
+        throw new AtlasDbError("DB_UPGRADE_FAILED", "locations 复制后 (branch_id,id) 集合与升级前不一致。", {});
+      }
+      if (columnNamesBefore.length !== fixedColumns.length) {
+        issues.push(`LOCATIONS_COLUMN_ORDER_DIFFERS:physical=${columnNamesBefore.length},logical=${fixedColumns.length}`);
+      }
+      db.run("DROP TABLE locations");
+      db.run(`ALTER TABLE ${UPGRADE_TEMP_TABLE} RENAME TO locations`);
+      for (const item of attached) db.run(item.sql);
+      const foreignKeyIssues = db.exec("PRAGMA foreign_key_check");
+      if ((foreignKeyIssues?.[0]?.values ?? []).length > 0) {
+        throw new AtlasDbError("DB_UPGRADE_FAILED", "升级后 foreign_key_check 报告违规。", {
+          violations: (foreignKeyIssues[0].values ?? []).length
+        });
+      }
+      const integrity = String(scalar(db, "PRAGMA integrity_check") ?? "");
+      if (integrity !== "ok") {
+        throw new AtlasDbError("DB_UPGRADE_FAILED", `升级后 integrity_check 不是 ok：${integrity}。`, { integrity });
+      }
+      const tablesAfter = tableNames(db).sort();
+      if (tablesAfter.length !== USER_TABLE_COUNT || tablesAfter.some((name, i) => name !== tablesBefore[i])) {
+        throw new AtlasDbError("DB_UPGRADE_FAILED", "升级后表清单发生变化。", { before: tablesBefore.length, after: tablesAfter.length });
+      }
+      const finalColumns = columnNames(db, "locations");
+      if (finalColumns.length !== columnNamesBefore.length || finalColumns.some((name) => !columnNamesBefore.includes(name))) {
+        throw new AtlasDbError("DB_UPGRADE_FAILED", "升级后 locations 列集合与升级前不一致。", {});
+      }
+      const countsAfter = rowCounts(db);
+      for (const [table, before] of countsBefore) {
+        const after = countsAfter.get(table) ?? -1;
+        if (after !== before) {
+          throw new AtlasDbError("DB_UPGRADE_FAILED", `表 ${table} 行数在升级中被改变：${before} → ${after}。`, { table });
+        }
+      }
+      const keysAfter = readKeyPairs(db, "locations");
+      if (keysAfter.size !== keysBefore.size || [...keysBefore].some((key) => !keysAfter.has(key))) {
+        throw new AtlasDbError("DB_UPGRADE_FAILED", "升级后 locations 主键集合与升级前不一致。", {});
+      }
+      if (tableNames(db).includes(UPGRADE_TEMP_TABLE)) {
+        throw new AtlasDbError("DB_UPGRADE_FAILED", "迁移临时表泄漏进结果文件。", {});
+      }
+      db.run(`PRAGMA user_version = ${to}`);
+      db.run("COMMIT");
+    } catch (err) {
+      try {
+        db.run("ROLLBACK");
+      } catch {
+      }
+      throw err instanceof AtlasDbError ? err : new AtlasDbError("DB_UPGRADE_FAILED", `schema 升级失败：${err.message}`, { from });
+    } finally {
+      db.run("PRAGMA foreign_keys = ON");
+      if (pragmaNumber(db, "foreign_keys") !== 1) issues.push("FOREIGN_KEYS_RESTORE_FAILED");
+    }
+    return { changed: true, from, to, issues };
   }
 
   // src/atlas-sim-position.ts
@@ -21221,11 +21440,21 @@ END`;
       get storageRevision() {
         return storageRevision;
       },
-      /** B05 open：新建有 migration/seed turn 和 branch；根图可存在而无「起点」实体。 */
+      /**
+       * B05 open：新建有 migration/seed turn 和 branch；根图可存在而无「起点」实体。
+       *
+       * §2 第 1/10 步：存档按版本分流。版本 1 的旧档在**已导入的独立副本**上升级，
+       * 原 envelope 与 bytes 不被改写，也不在此处触发宿主保存；
+       * 升级结果只作为本次会话的候选快照，随下一次业务提交或维护候选与 ACK 输出。
+       */
       async open(openOptions = {}) {
         if (openOptions.bytes && openOptions.bytes.length > 0) {
           db = await openDatabase(openOptions.bytes);
           enableForeignKeys(db);
+          if (currentSchemaVersion(db) < ATLAS_SCHEMA_VERSION) {
+            upgradeSchema1To2(db);
+            enableForeignKeys(db);
+          }
           assertTwentyTables(db);
           const existingBranch = queryBound(db, "SELECT id FROM branches WHERE id = ? LIMIT 1", [branchId]);
           if (existingBranch.length === 0) {

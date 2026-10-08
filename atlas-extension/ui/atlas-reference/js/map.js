@@ -143,7 +143,8 @@ function create(canvas, mini, hooks){
     else { bg.addColorStop(0,'#070b14'); bg.addColorStop(1,'#0a1120'); }
     ctx.fillStyle = bg; ctx.fillRect(x0-200,y0-200,(x1-x0)+400,(y1-y0)+400);
 
-    if(st.node.host&&st.node.sceneStatus!=='ready') return;
+    if(st.node.host&&st.node.sceneStatus!=='ready') { overviewMap(g); return; }
+    if(g.overviewShapes||g.overviewRoutes) { overviewMap(g); return; }
     if(st.kind==='world')      worldMap(g);
     else if(st.kind==='region')regionMap(g);
     else if(st.kind==='city')  cityMap(g);
@@ -151,6 +152,23 @@ function create(canvas, mini, hooks){
     else if(st.kind==='building')buildingMap(g);
     else if(st.kind==='floor') floorMap(g);
     else                       roomMap(g);
+  }
+
+  // SQL overview geometry is usable before a decorative floor/city layout
+  // exists. All points stay in this map's transform; absent paths stay absent.
+  function overviewMap(g){
+    ctx.save();
+    for(const shape of g.overviewShapes||[]){
+      ctx.beginPath();shape.pts.forEach((p,i)=>i?ctx.lineTo(p[0],p[1]):ctx.moveTo(p[0],p[1]));ctx.closePath();
+      ctx.fillStyle=hexA(shape.c,.08);ctx.fill();ctx.strokeStyle=hexA(shape.c,.48);ctx.lineWidth=1/st.cam.s;
+      ctx.setLineDash(shape.quality==='exact'||shape.quality==='confirmed'?[]:[5/st.cam.s,4/st.cam.s]);ctx.stroke();
+    }
+    for(const route of g.overviewRoutes||[]){
+      ctx.beginPath();route.points.forEach((p,i)=>i?ctx.lineTo(p[0],p[1]):ctx.moveTo(p[0],p[1]));
+      ctx.strokeStyle=route.dashed?'rgba(127,212,255,.55)':'rgba(67,224,255,.7)';ctx.lineWidth=1.5/st.cam.s;
+      ctx.setLineDash(route.dashed?[6/st.cam.s,4/st.cam.s]:[]);ctx.stroke();
+    }
+    ctx.restore();
   }
 
   /* ── L0 世界 ── */
@@ -1099,6 +1117,16 @@ function create(canvas, mini, hooks){
       else { const W=st.geo.walls; const p=T(W.x,W.y); mctx.strokeRect(p[0],p[1],W.w*s,W.h*s);
         (st.geo.shelves||[]).forEach(sh=>{ const q=T(sh.r[0],sh.r[1]); mctx.fillStyle='rgba(255,194,71,.3)'; mctx.fillRect(q[0],q[1],(sh.r[2]-sh.r[0])*s,(sh.r[3]-sh.r[1])*s); }); }
     }
+    // Overview routes and footprints use the same transform on the minimap.
+    for(const shape of st.geo.overviewShapes||[]){
+      mctx.beginPath();shape.pts.forEach((p,i)=>{const q=T(p[0],p[1]);i?mctx.lineTo(q[0],q[1]):mctx.moveTo(q[0],q[1]);});mctx.closePath();
+      mctx.fillStyle=hexA(shape.c,.12);mctx.fill();mctx.strokeStyle=hexA(shape.c,.45);mctx.stroke();
+    }
+    for(const route of st.geo.overviewRoutes||[]){
+      mctx.beginPath();route.points.forEach((p,i)=>{const q=T(p[0],p[1]);i?mctx.lineTo(q[0],q[1]):mctx.moveTo(q[0],q[1]);});
+      mctx.strokeStyle='rgba(67,224,255,.6)';mctx.setLineDash(route.dashed?[3,2]:[]);mctx.stroke();
+    }
+    mctx.setLineDash([]);
     // 标记
     st.marks.forEach(m=>{ const q=T(m.x,m.y); mctx.beginPath(); mctx.arc(q[0],q[1],2.2,0,7);
       mctx.fillStyle=m.c||({char:C.cyan,item:C.amber,poi:C.violet,sig:C.green,exit:C.blue}[m.type]||C.cyan); mctx.fill(); });

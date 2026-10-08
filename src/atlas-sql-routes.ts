@@ -5,6 +5,7 @@ import { okResult, errorResult } from './atlas-route-result.ts';
 import type {AtlasRequestContext} from './atlas-server-contract.ts';
 import type {AtlasRouteResult} from './atlas-route-result.ts';
 import type { AtlasSqlRuntime, SqlSession } from './atlas-sql-session.ts';
+import { readUpgradeBackup } from './atlas-sql-session.ts';
 import type { AtlasSqlRepositoryWithHelpers } from './atlas-db-repository.ts';
 import type { AtlasModelPort } from './atlas-db-contract.ts';
 import type { LorebookPort, ManagedLorebookEntry } from './atlas-db-outbox.ts';
@@ -260,6 +261,38 @@ export function createAtlasSqlRouteGroup(deps: AtlasSqlRouteGroupDeps) {
       const branchId = sqlText(record.branchId) || undefined;
       const runtime = await sqlRuntime();
       if (!runtime) return unavailable(route);
+
+      // M1-06A：升级前原档的只读导出。
+      // 只读 chatMetadata，不 open session、不写库、不触发宿主保存，也不清除备份。
+      if (route === "/sql/upgrade-backup") {
+        const host = hostFor(chatUid);
+        const metadata = host && isPlainRecord(host.chatMetadata) ? host.chatMetadata : null;
+        if (!metadata) {
+          throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, `SQL 模式缺少聊天落点（chatMetadata）：${chatUid}`);
+        }
+        const backup = readUpgradeBackup(metadata, chatUid);
+        if (!backup) {
+          // 无备份 / 备份损坏 / 备份属于另一个聊天：统一给同一个明确错误，不泄露他人备份是否存在。
+          return errorResult(
+            new AtlasError('BACKUP_NOT_AVAILABLE', '当前聊天没有可导出的升级前原档备份（或备份不属于本聊天）'),
+          );
+        }
+        return okResult({
+          route,
+          code: 'BACKUP_AVAILABLE',
+          backup: {
+            version: backup.version,
+            chatId: backup.chatId,
+            branchId: backup.branchId,
+            createdAtMs: backup.createdAtMs,
+            sourceRevision: backup.sourceRevision,
+            envelopeSha256: backup.envelopeSha256,
+            envelopeSchemaVersion: backup.envelopeSchemaVersion,
+            pendingUpgrade: backup.pendingUpgrade,
+            envelope: backup.envelope,
+          },
+        });
+      }
 
       if (route.startsWith('/sql/chat/')) {
         const session = await sessionFor(chatUid, branchId, runtime);

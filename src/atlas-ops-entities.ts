@@ -17,6 +17,8 @@ import { updateMentionCandidates } from './atlas-db-mentions.ts';
 import type { RefScope } from './atlas-ops-refs.ts';
 import { resolveRef } from './atlas-ops-refs.ts';
 import { ALIAS_LIMIT, CAPABILITY_LIMIT, MOBILITY_PROFILE_LIMIT, ITEM_PROPERTY_LIMIT } from './atlas-runtime-limits.ts';
+// 唯一来源：atlas-location-kinds.ts（含 floor）。本文件不再复制地点类型枚举。
+import { ATLAS_LOCATION_KINDS } from './atlas-location-kinds.ts';
 
 type Data = Record<string, unknown>;
 
@@ -231,7 +233,7 @@ const LOCATION_FIELDS = new Set([
   'name', 'aliases', 'kind', 'description', 'parent_ref', 'mobility', 'anchor_ref', 'map_ref', 'position',
   'area', 'terrain', 'access', 'vehicle_profile', 'existence_quality',
 ]);
-const LOCATION_KINDS = ['region', 'city', 'district', 'building', 'room', 'natural', 'vehicle', 'other'];
+const LOCATION_KINDS: readonly string[] = ATLAS_LOCATION_KINDS;
 const LOCATION_EXISTENCE = ['confirmed', 'inferred', 'hypothetical'];
 
 /** D01 compileLocationUpsert。 */
@@ -290,6 +292,11 @@ export function compileLocationUpsert(op: ParsedOperation, ctx: CompileContext):
     const mobility = String(data.mobility);
     if (!['fixed', 'mobile'].includes(mobility)) result.issues.push(issue('ENUM_INVALID', '$.data.mobility', `mobility 非法：${mobility}`, op));
     else changes.mobility = mobility;
+  }
+  // M1-08：新建载具在未写 mobility 时默认 mobile。
+  // 只作用于新建；显式 fixed 与既有行的 mobility 一律保留，不用默认值反转作者纠偏。
+  if (creating && !Object.prototype.hasOwnProperty.call(data, 'mobility') && changes.kind === 'vehicle') {
+    changes.mobility = 'mobile';
   }
   if (Object.prototype.hasOwnProperty.call(data, 'existence_quality')) {
     const q = String(data.existence_quality);

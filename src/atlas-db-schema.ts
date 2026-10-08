@@ -9,8 +9,14 @@
  */
 
 import type { AtlasTableName } from './atlas-db-contract.ts';
+import { ATLAS_LOCATION_KINDS_SQL } from './atlas-location-kinds.ts';
 
-export const ATLAS_SCHEMA_VERSION = 1;
+/**
+ * 数据库 schema 版本（PRAGMA user_version）。
+ * 1 → 2：locations.kind 正式加入 floor；只扩展枚举，不加表、不加列。
+ * 该版本与旧模型协议 v2 无关，storage_version 仍为 1。
+ */
+export const ATLAS_SCHEMA_VERSION = 2;
 
 export type ColumnSpec = {
   name: string;
@@ -296,7 +302,7 @@ export function locationsSql(): string {
   ${commonColumnsSql()},
   name TEXT NOT NULL CHECK (length(trim(name)) > 0),
   aliases_json TEXT NOT NULL DEFAULT '[]',
-  kind TEXT NOT NULL CHECK (kind IN ('region','city','district','building','room','natural','vehicle','other')),
+  kind TEXT NOT NULL CHECK (kind IN (${ATLAS_LOCATION_KINDS_SQL})),
   description TEXT NOT NULL DEFAULT '',
   parent_location_id TEXT,
   mobility TEXT NOT NULL DEFAULT 'fixed' CHECK (mobility IN ('fixed','mobile')),
@@ -944,9 +950,23 @@ export function installSchema(db: MinimalDb): void {
 /** 用户表数量断言辅助（不含 sqlite_% 内部表）。 */
 export const USER_TABLE_COUNT = Object.keys(ATLAS_TABLE_COLUMNS).length;
 
+/** 升级迁移必须使用的固定 locations DDL（schema2 版本，含 floor）。 */
+export const MIGRATION_LOCATIONS_SQL = locationsSql();
+
+/** 读取当前 PRAGMA user_version；无值按 0（空库）处理。 */
+export function currentSchemaVersion(db: MinimalDb): number {
+  const rows = db.exec('PRAGMA user_version');
+  const raw = rows[0]?.values?.[0]?.[0];
+  return Number(raw ?? 0);
+}
+
 /**
  * 幂等安装：已存在的表不重建；只在需要时写 user_version。
- * 已建库（有表）但版本更高时明确报错，不覆盖。
+ *
+ * - 有表但数量不是 20：DB_SCHEMA_INVALID。
+ * - user_version 高于本构建：DB_SCHEMA_UNSUPPORTED，不覆盖。
+ * - 已有 20 表的旧版本库：DB_UPGRADE_REQUIRED，必须先走副本升级，
+ *   不得用 CREATE TABLE IF NOT EXISTS 假装升级完成。
  */
 export function installSchemaSafe(db: MinimalDb): void {
   const tables = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'");
@@ -958,6 +978,17 @@ export function installSchemaSafe(db: MinimalDb): void {
     const missing = [...expected].filter((n) => !names.has(n));
     throw new Error(
       `DB_SCHEMA_INVALID: 用户表不是预期的 ${USER_TABLE_COUNT} 张（多 ${unexpected.length}，少 ${missing.length}）：多 ${unexpected.join(',')}；少 ${missing.join(',')}`,
+    );
+  }
+  const version = currentSchemaVersion(db);
+  if (version > ATLAS_SCHEMA_VERSION) {
+    throw new Error(
+      `DB_SCHEMA_UNSUPPORTED: user_version=${version} 高于本构建支持的 schema${ATLAS_SCHEMA_VERSION}，拒绝覆盖。`,
+    );
+  }
+  if (existing === USER_TABLE_COUNT && version < ATLAS_SCHEMA_VERSION) {
+    throw new Error(
+      `DB_UPGRADE_REQUIRED: 已有 ${USER_TABLE_COUNT} 张表的 schema${version} 旧库，必须先经副本升级到 schema${ATLAS_SCHEMA_VERSION}。`,
     );
   }
   for (const sql of schemaStatements()) db.run(sql);

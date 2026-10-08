@@ -38,6 +38,7 @@ import {
 } from './atlas-db-migrate.ts';
 import { runNextSync, enqueueProjectionSync } from './atlas-db-outbox.ts';
 import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
+import { ATLAS_SCHEMA_VERSION } from './atlas-db-schema.ts';
 import { handleSqlChatRequest } from './atlas-sql-chat.ts';
 import { runSqlModelRetry } from './atlas-sql-retry.ts';
 import type { AtlasEnvelope, AtlasModelPort } from './atlas-db-contract.ts';
@@ -230,6 +231,95 @@ function makeIdOf(repo: AtlasSqlRepositoryWithHelpers): (kind: string, opId: str
   return repo.internal.makeId;
 }
 
+/* ================================================================== *
+ * M1-06：升级前原档的持久备份与导出
+ * ================================================================== */
+
+/** 升级前原档的独立持久位置：`chatMetadata.atlas.databaseBackup`。
+ *  **不递归进 `database.data`**，也不只是 session 内的临时引用。 */
+export const ATLAS_DATABASE_BACKUP_KEY = 'databaseBackup';
+
+/** 升级前备份记录。同一聊天只保留最近一次原档。 */
+export type UpgradeBackupRecord = {
+  version: 1;
+  /** 聊天身份绑定：只有同一个聊天身份能取出这份备份。 */
+  chatId: string;
+  branchId: string;
+  createdAtMs: number;
+  sourceRevision: number;
+  /** 原档 envelope 的 sha256，供用户导出后核对。 */
+  envelopeSha256: string;
+  envelopeSchemaVersion: number;
+  /** true = 升级结果尚未被宿主 ACK 确认；false = 已确认，备份保留以便导出。 */
+  pendingUpgrade: boolean;
+  /** 原档 envelope 原样保存；不递归包入新数据库。 */
+  envelope: unknown;
+};
+
+/** 取得（必要时创建）`chatMetadata.atlas` 记录。 */
+function atlasRecordOf(chatMetadata: Record<string, unknown>): Record<string, unknown> {
+  const existing = chatMetadata[ATLAS_SESSION_KEY];
+  if (existing !== null && typeof existing === 'object' && !Array.isArray(existing)) {
+    return existing as Record<string, unknown>;
+  }
+  const created: Record<string, unknown> = {};
+  chatMetadata[ATLAS_SESSION_KEY] = created;
+  return created;
+}
+
+/**
+ * 写入/覆盖升级前备份（只保留最近一次），并做聊天身份绑定。
+ * 由 openSqlSession 在检测到 schema1 旧档、副本升级**之前**调用。
+ */
+export function writeUpgradeBackup(
+  chatMetadata: Record<string, unknown>,
+  input: { chatUid: string; branchId: string; envelope: AtlasEnvelope; now: number },
+): UpgradeBackupRecord {
+  const atlas = atlasRecordOf(chatMetadata);
+  const record: UpgradeBackupRecord = {
+    version: 1,
+    chatId: input.chatUid,
+    branchId: input.branchId,
+    createdAtMs: input.now,
+    sourceRevision: Number(input.envelope.storage_revision ?? 0),
+    envelopeSha256: String(input.envelope.sha256 ?? ''),
+    envelopeSchemaVersion: Number(input.envelope.schema_version ?? 0),
+    pendingUpgrade: true,
+    envelope: input.envelope,
+  };
+  atlas[ATLAS_DATABASE_BACKUP_KEY] = record;
+  return record;
+}
+
+/**
+ * 只读读取升级前备份。跨聊天（身份不匹配）或备份缺失一律返回 null，
+ * 由路由层给明确错误，绝不跨聊天泄露备份内容。
+ */
+export function readUpgradeBackup(
+  chatMetadata: Record<string, unknown> | null | undefined,
+  chatUid: string,
+): UpgradeBackupRecord | null {
+  if (!chatMetadata || typeof chatMetadata !== 'object') return null;
+  const atlas = chatMetadata[ATLAS_SESSION_KEY];
+  if (atlas === null || typeof atlas !== 'object' || Array.isArray(atlas)) return null;
+  const raw = (atlas as Record<string, unknown>)[ATLAS_DATABASE_BACKUP_KEY];
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const record = raw as UpgradeBackupRecord;
+  if (record.chatId !== chatUid) return null;
+  return record;
+}
+
+/**
+ * 宿主 ACK 确认新档落盘后清 pending。备份本身**不清除**：用户仍需能导出升级前原档。
+ * 返回是否真的更新了一条绑定到本聊天的备份。
+ */
+export function confirmUpgradeBackup(chatMetadata: Record<string, unknown>, chatUid: string): boolean {
+  const record = readUpgradeBackup(chatMetadata, chatUid);
+  if (!record) return false;
+  record.pendingUpgrade = false;
+  return true;
+}
+
 /**
  * 保存前快照 `chatMetadata.atlas`（浅拷贝 + 旧信封引用）。
  * 宿主端口会就地把新信封写进 `atlas.database`；明确失败时要能恢复**未持久化前**的值，
@@ -356,6 +446,16 @@ export async function openSqlSession(options: SqlSessionOptions): Promise<OpenSq
     worldUid = envelope.world_uid;
     if(options.branchId===undefined)branchId=envelope.active_branch_id;
     source = 'existing';
+    // M1-06：检测到 schema1 旧档时，先把它存进独立持久位置（不是 session 内存引用），
+    // 再在副本上升级。只保留最近一次原档，不递归包入新数据库。
+    if (Number(envelope.schema_version ?? 0) < ATLAS_SCHEMA_VERSION) {
+      writeUpgradeBackup(options.chatMetadata, {
+        chatUid,
+        branchId: envelope.active_branch_id,
+        envelope,
+        now: now(),
+      });
+    }
   }
 
   const repo =
@@ -500,6 +600,8 @@ export async function persistSqlSession(session: SqlSession, options: PersistSql
   if (ack.result === 'saved') {
     if (commit) await session.repo.confirmSaved(ack);
     session.envelopePresent = true;
+    // M1-06：宿主已确认新档落盘 → 升级完成，清升级待确认标记；备份保留以便用户导出。
+    confirmUpgradeBackup(session.chatMetadata, session.chatUid);
     return { saved: true, ack, envelope, issues };
   }
 

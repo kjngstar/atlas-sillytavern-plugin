@@ -22,7 +22,7 @@ export function referenceReceipts(state={},logs=[]){return (state.receipts??[]).
   m:text(r.summary??r.receipt?.summary??r.message??r.status??'推演回执'),issue:text(r.errorCode??r.receipt?.issues?.[0]?.code??''),detail:r.detail??null,logs:logs.filter(l=>l.turnId===r.receiptId)}));}
 
 /** Convert geometry once; the original renderer keeps its original colors, materials and gestures. */
-export function referenceGeometry(map, document) {
+export function referenceGeometry(map, document, {viewMode='author',visibleLocationIds=[]} = {}) {
   const layout = document?.layout;
   const bounds = layout?.bounds;
   const pins = layout?.pins ?? [];
@@ -50,6 +50,17 @@ export function referenceGeometry(map, document) {
       river:river?Array.from({length:41},(_,i)=>{const y=(river.height??b.h)*i/40;return xy({x:river.cx+Math.sin((y/(river.height||b.h)*2-.35)*Math.PI)*river.amplitude,y});}):null,
       riverWidth:river?.width?river.width*scale:null,wallPoints:(layout.wall??[]).filter(finite).map(xy),
       avenues:(layout.roads??[]).filter(r=>finite(r.from??r.a)&&finite(r.to??r.b)).map(r=>({from:xy(r.from??r.a),to:xy(r.to??r.b)})),pois:[]};
+  } else if(layout?.kind==='overview') {
+    // A SQL overview already contains validated geometry. Keep its paths and
+    // footprints instead of reducing the whole map to unconnected markers.
+    const qualityById=new Map((map.points??[]).map(p=>[p.entityId,p.area?.quality]));
+    const visible=new Set(visibleLocationIds);
+    geo={overviewShapes:(layout.shapes??[]).filter(s=>s.polygon?.length>=3&&s.polygon.every(finite)).map((s,i)=>({
+      id:s.id,name:s.name,c:COLORS[i%COLORS.length],quality:s.quality??qualityById.get(s.id)??'estimated',pts:s.polygon.map(xy),
+    })),overviewRoutes:(layout.routes??[]).filter(r=>r.path?.length>=2&&r.path.every(finite)
+      &&(viewMode!=='pov'||r.hidden!==true&&r.fromLocationId&&r.toLocationId&&visible.has(r.fromLocationId)&&visible.has(r.toLocationId))).map(r=>({
+      id:r.id,quality:r.quality,dashed:r.dashed!==false||r.quality!=='confirmed',points:r.path.map(xy),
+    }))};
   } else if(layout?.kind==='floor') {
     kind='floor';const corridor=rect(layout.corridor);
     geo={corridor:{...corridor,y:corridor.y+corridor.h/2},rooms:(layout.rooms??[]).map((r,i)=>({...rect(r),id:r.id,name:r.name,kind:'room',tint:['67,224,255','155,107,255','57,224,160','127,212,255'][i%4],live:false})),
@@ -80,7 +91,7 @@ export function projectReferenceData({state={},mapView,sceneView,catalogView,tas
   for(const m of maps){
     const saved=scenes.get(m.mapId);
     const overview=!saved&&projectOverview?projectOverview({view:mapView,mapId:m.mapId,scope:{chatId:state.chatId,branchId:mapView.branchId,revision:mapView.revision,viewMode}})?.scene:null;
-    const g=referenceGeometry(m,saved??overview),level=REFERENCE_LEVELS.find(l=>l.key===g.kind)??REFERENCE_LEVELS[0];
+    const g=referenceGeometry(m,saved??overview,{viewMode,visibleLocationIds:items(catalogView).filter(c=>c.entityKind==='location').map(c=>c.entityId)}),level=REFERENCE_LEVELS.find(l=>l.key===g.kind)??REFERENCE_LEVELS[0];
     nodes.set(m.mapId,{id:m.mapId,mapId:m.mapId,name:m.name||m.mapId,kind:g.kind,code:level.code,tag:level.name,description:saved?'已保存的空间布局':'当前 SQL 地图概览；尚无已保存空间布局',
       children:[],...g,host:true,containerLocationId:m.containerLocationId??null,hasLayout:!!saved,sceneStatus:saved?'ready':'missing'});
   }
@@ -98,7 +109,7 @@ export function projectReferenceData({state={},mapView,sceneView,catalogView,tas
     state:c.locationId?'present':'unknown',tag:'已记录',locationId:c.locationId,mapNodeId:p?.mapId??mapAt(c.locationId)??c.mapId,description:c.summary??'',doing:'尚无行动记录',mind:'尚无后台想法记录',carry:[],known:true,
     ...referenceEntity(detailIndex.get(c.entityId),c),...(detailIndex.has(c.entityId)&&!detailIndex.get(c.entityId).position?{mapNodeId:null}:{})};});
   const held=new Map(details.filter(d=>d.kind==='character').flatMap(d=>(d.heldItems??[]).map(i=>[i.id,d.character.id])));
-  out.ITEMS=catalog.filter(c=>c.entityKind==='item').map(c=>({id:c.entityId,name:c.name,description:c.summary??'',sub:c.summary??'',locationId:c.locationId,mapNodeId:c.mapId??mapAt(c.locationId),holder:held.get(c.entityId)??null,st:'已记录',known:true,...referenceEntity(detailIndex.get(c.entityId),c)}));
+  out.ITEMS=catalog.filter(c=>c.entityKind==='item').map(c=>({id:c.entityId,name:c.name,description:c.summary??'',sub:c.summary??'',locationId:c.locationId,mapNodeId:pointIndex.get(c.entityId)?.mapId??c.mapId??mapAt(c.locationId),holder:held.get(c.entityId)??null,st:'已记录',known:true,...referenceEntity(detailIndex.get(c.entityId),c)}));
   out.MESSAGES=catalog.filter(c=>c.entityKind==='rumor').map(c=>({id:c.entityId,src:c.name,txt:c.summary??'',locationId:c.locationId,mapNodeId:c.mapId??mapAt(c.locationId),kind:'rumor',status:'已记录',hops:[],pct:null,known:true}));
   const flows=items(flowView),taskStatus=s=>['done','completed','occurred'].includes(s)?'done':['blocked','failed'].includes(s)?'blocked':'running';
   out.TASKS=items(taskView).map(t=>{const f=flows.find(f=>f.flowId===t.taskId||f.moverEntityId===t.actorEntityId);return {id:t.taskId,n:t.title,d:t.reasonCode??(t.planned?'计划中的行动':'已记录的行动'),st:taskStatus(t.status),stName:t.status,

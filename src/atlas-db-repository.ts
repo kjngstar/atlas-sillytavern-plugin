@@ -36,7 +36,8 @@ import {
   runBound,
   userTableNames,
 } from './atlas-db-runtime.ts';
-import { ATLAS_SCHEMA_VERSION, installSchemaSafe } from './atlas-db-schema.ts';
+import { ATLAS_SCHEMA_VERSION, currentSchemaVersion, installSchemaSafe } from './atlas-db-schema.ts';
+import { upgradeSchema1To2 } from './atlas-db-upgrade.ts';
 import { encodeSnapshot, sha256HexSync, sha256Hex } from './atlas-db-envelope.ts';
 import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
 import { queryChanges, queryDiagnostics, queryEntityDetail, queryMapView, queryNearby, querySimulationView } from './atlas-db-views.ts';
@@ -331,11 +332,23 @@ export function createSqlRepository(options: RepositoryOptions) {
       return storageRevision;
     },
 
-    /** B05 open：新建有 migration/seed turn 和 branch；根图可存在而无「起点」实体。 */
+    /**
+     * B05 open：新建有 migration/seed turn 和 branch；根图可存在而无「起点」实体。
+     *
+     * §2 第 1/10 步：存档按版本分流。版本 1 的旧档在**已导入的独立副本**上升级，
+     * 原 envelope 与 bytes 不被改写，也不在此处触发宿主保存；
+     * 升级结果只作为本次会话的候选快照，随下一次业务提交或维护候选与 ACK 输出。
+     */
     async open(openOptions: OpenOptions = {}): Promise<void> {
       if (openOptions.bytes && openOptions.bytes.length > 0) {
         db = await openDatabase(openOptions.bytes);
         enableForeignKeys(db);
+        // 旧 schema1 档：先在副本上升级到 schema2（内部会临时关闭并恢复 FK），再校验 20 表。
+        // 升级失败会抛 DB_UPGRADE_FAILED 并保留原 bytes，绝不以 seedNewDatabase 作为错误后备。
+        if (currentSchemaVersion(db) < ATLAS_SCHEMA_VERSION) {
+          upgradeSchema1To2(db);
+          enableForeignKeys(db);
+        }
         assertTwentyTables(db);
             const existingBranch = queryBound(db, 'SELECT id FROM branches WHERE id = ? LIMIT 1', [branchId]);
         if (existingBranch.length === 0) {

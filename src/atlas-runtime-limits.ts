@@ -21,7 +21,7 @@ export const ATLAS_RUNTIME_LIMITS = {
   repairResponseTokens: 2048,
   modelTimeoutMs: 120000,
   mentionCandidates: 256,
-  locationDepth: 4,
+  locationDepth: 12,
   containerDepth: 4,
   actionPlanDepth: 2,
   detailedAttemptsPerTurn: 20,
@@ -30,6 +30,36 @@ export const ATLAS_RUNTIME_LIMITS = {
   catalogViewMaxLimit: 200,
   /** M4：只读目录视图默认页大小。 */
   catalogViewDefaultLimit: 50,
+
+  // ── M3/M4 世界建设与广域生成的统一预算（01 §4）─────────────────────────
+  /** 一次显式「建设世界」的目标地点总量上限（分批完成，不是一次填满）。 */
+  worldFillTargets: 64,
+  /** 单个模型批次最多新增的交互地点数。 */
+  newLocationsPerBatch: 12,
+  /** 单个模型批次最多新增的合理路线数。 */
+  newRoutesPerBatch: 16,
+  /** 单个批次最多把本次目标再向下展开的父边数。 */
+  additionalParentDepthPerBatch: 2,
+  /** 同一批次最多处理的地图数（优先当前具体图 + 必要宏观图）。 */
+  layoutMapsPerBatch: 2,
+  /** 单张概览图的分区上限（G11 场景体积预算）。 */
+  overviewZoneLimit: 64,
+  /** 单张概览图的地物上限。 */
+  overviewFeatureLimit: 128,
+  /** 单张概览图的连接（路线/水系）上限。 */
+  overviewLinkLimit: 128,
+  /** 保存场景（maps.frame_json.atlasScene）的 UTF-8 字节上限，与 vendor 生成器一致。 */
+  sceneSaveUtf8Bytes: 512 * 1024,
+  /** 定向引用目录单次解析的最大条目数（超过则要求更窄的目标范围）。 */
+  refCatalogMaxEntries: 512,
+  /** 事件流读取：单次扫描的回合数上限。 */
+  feedTurnsPerScan: 24,
+  /** 事件流读取：单页最大条数。 */
+  feedPageMax: 100,
+  /** 事件流读取：异常回溯的最大块数。 */
+  feedMaxScanBlocks: 8,
+  /** 事件流读取：单回合 journal 明细的硬上限（超出给明确诊断，不返回半轮）。 */
+  feedTurnJournalMax: 2000,
 } as const;
 
 /**
