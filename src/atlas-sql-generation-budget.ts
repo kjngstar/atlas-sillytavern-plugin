@@ -38,6 +38,11 @@ export type GenerationBudgetPort = {
   claimBatch(stage: string, batchId: string): BudgetClaim;
   /** 真实发送：每次都占额度，失败不退还。 */
   claimTransport(stage: string, batchId: string): BudgetClaim;
+  /**
+   * 折入一次**已经发生**的真实发送（不由本 port 发出，例如 settle 内部按数值预算自管的批次）。
+   * 不做余额校验——因为它确实已经发出去了，假装没发才是造假；只把账补平。
+   */
+  recordTransport(stage: string, batchId: string): void;
   finishBatch(batchId: string, status: 'completed' | 'failed'): void;
   reserveBackground(batchId: string): boolean;
   releaseBackground(): void;
@@ -113,6 +118,11 @@ export function createGenerationBudget(input: CreateGenerationBudgetInput = {}):
       const existing = attemptOf(batchId);
       if (existing) existing.status = status;
       else attemptList.push({ stage: 'unknown', batchId, status });
+    },
+
+    recordTransport: (stage, batchId) => {
+      transports += 1;
+      if (!attemptOf(batchId)) attemptList.push({ stage, batchId, status: 'completed' });
     },
 
     reserveBackground: (batchId) => {

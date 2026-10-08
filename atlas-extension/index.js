@@ -2541,15 +2541,30 @@ async function importWorldbookGeography(chatId, worldId, onProgress = null, prov
   if (geoImportInFlight.has(chatId)) return geoImportInFlight.get(chatId);
   const task = (async () => {
     const chunks = providedChunks ?? await readCardGeoLoreChunks(chatId);
+    const sqlMode = () => SillyTavern.getContext()?.extensionSettings?.[ATLAS_SETTINGS_KEY]?.[ATLAS_SQL_MODE_SETTING] === true;
+    // 真实宿主身份：每个 await 之后都要复核（新聊天切换必须取消剩余任务）。
+    const characterId = SillyTavern.getContext()?.characterId ?? null;
+    const identityHeld = () => {
+      const live = SillyTavern.getContext();
+      return String(live?.chatId ?? "") === chatId
+        && (live?.characterId ?? null) === characterId
+        && String(atlasRuntime.core?.getState()?.binding?.worldId ?? "") === worldId;
+    };
     let regionsAdded = 0;
     let pointsAdded = 0;
     let completed = 0;
     let capacityReached = false;
     let failure = "";
+    let buildStatus = "skipped";
+    let chunkCursor = 0;
     for (const loreSupplement of chunks) {
-      if (String(SillyTavern.getContext()?.chatId ?? "") !== chatId) break;
-      if (String(atlasRuntime.core?.getState()?.binding?.worldId ?? "") !== worldId) break;
-      const result = await atlasRuntime.api.request("POST", (SillyTavern.getContext()?.extensionSettings?.[ATLAS_SETTINGS_KEY]?.[ATLAS_SQL_MODE_SETTING] === true ? "/sql/chat/map/geo" : "/worlds/geo/adopt"), { chatId, loreSupplement });
+      if (!identityHeld()) break;
+      const requestId = `geo_${chatId}_${chunkCursor}`;
+      chunkCursor += 1;
+      const result = await atlasRuntime.api.request("POST", (sqlMode() ? "/sql/chat/map/build" : "/worlds/geo/adopt"), (sqlMode()
+        // M3-15：SQL 路径每个分块都是 extract-only —— 只登记事实，不发总体空间请求。
+        ? { chatId, requestId, mode: "bootstrap", constructionMode: "extract-only", focusLocationIds: [], loreSupplement }
+        : { chatId, loreSupplement }));
       if (result.status !== 200 || result.body?.ok !== true) {
         failure = String(result.body?.error?.message ?? `HTTP ${result.status}`).slice(0, 160);
         emitAtlasDiagnostic({ level: "warn", source: "map", code: "GEO_ADOPT_FAILED",
@@ -2560,14 +2575,30 @@ async function importWorldbookGeography(chatId, worldId, onProgress = null, prov
       regionsAdded += Number(result.body.data?.regionsAdded ?? 0);
       pointsAdded += Number(result.body.data?.pointsAdded ?? 0);
       onProgress?.({ completed, total: chunks.length, regionsAdded, pointsAdded });
-      if (String(SillyTavern.getContext()?.chatId ?? "") === chatId) await atlasRuntime.core?.refresh();
+      if (identityHeld()) await atlasRuntime.core?.refresh();
       if (result.body.data?.capacityReached === true) {
         capacityReached = true;
         break;
       }
     }
+    // 抽取全部结束之后只发**一次** map/build（bootstrap + 完整相关来源快照）；
+    // 绝不每个 chunk 都重复扩建。抽取失败时明确 skipped，不假装已建。
+    if (sqlMode() && !failure && !capacityReached && completed > 0 && completed === chunks.length && identityHeld()) {
+      const build = await atlasRuntime.api.request("POST", "/sql/chat/map/build", {
+        chatId, requestId: `build_${chatId}`, mode: "bootstrap", focusLocationIds: [],
+        loreSupplement: chunks.map((chunk) => String(chunk ?? "")).join("\n\n"),
+      });
+      if (build.status === 200 && build.body?.ok === true) {
+        buildStatus = String(build.body.data?.build?.status ?? "committed");
+      } else {
+        buildStatus = "failed";
+        emitAtlasDiagnostic({ level: "warn", source: "map", code: "WORLD_BUILD_FAILED",
+          operation: "build", phase: "response", outcome: "failed", httpStatus: build.status });
+      }
+      if (identityHeld()) await atlasRuntime.core?.refresh();
+    }
     return { completed, total: chunks.length, regionsAdded, pointsAdded,
-      truncated: chunks.truncated === true, capacityReached, failure };
+      truncated: chunks.truncated === true, capacityReached, failure, buildStatus };
   })();
   geoImportInFlight.set(chatId, task);
   try { return await task; } finally { geoImportInFlight.delete(chatId); }

@@ -355,7 +355,8 @@ export async function init(router, options = {}) {
   post({ path: "/sql/maintenance" });
   post({ path: "/sql/migrate" });
   for (const action of ['binding','state','timeline','preview','inspect','travel-preview','prepare','commit','retry','rollback',
-    'map/image','map/image/set','map/import','map/repair','map/bootstrap','map/move','map/topology','map/areas','map/scale','map/geo','map/suggest','map/protagonist']) {
+    // M3-13：map/build 是显式「建设世界」入口；map/layout 之前漏注册（UI 已在调用 /sql/chat/map/layout）。
+    'map/image','map/image/set','map/import','map/repair','map/bootstrap','map/build','map/layout','map/move','map/topology','map/areas','map/scale','map/geo','map/suggest','map/protagonist']) {
     post({path:`/sql/chat/${action}`});
   }
 

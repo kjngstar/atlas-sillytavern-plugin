@@ -36,6 +36,45 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 
+// src/atlas-sql-generation-budget.ts
+function transportBudgetPort(budget, stage, batchId) {
+  return {
+    claim: () => {
+      const claim = budget.claimTransport(stage, batchId);
+      return claim.ok ? { ok: true } : { ok: false, reason: claim.reason };
+    }
+  };
+}
+function budgetError(claim) {
+  return Object.assign(new Error(claim.reason), { code: claim.code, retryable: false, deferred: true });
+}
+function budgetedModelPort(port, budget, stage) {
+  return {
+    ...port,
+    /** 阶段名优先取请求自带的 phase（observe/geography/decision/outcome/repair），否则用端口默认。 */
+    async request(request) {
+      const phase = request.phase || stage;
+      const logical = budget.claimBatch(phase, request.batchId);
+      if (!logical.ok) throw budgetError(logical);
+      const claim = budget.claimTransport(phase, request.batchId);
+      if (!claim.ok) throw budgetError(claim);
+      try {
+        const response = await port.request(request);
+        budget.finishBatch(request.batchId, "completed");
+        return response;
+      } catch (error2) {
+        budget.finishBatch(request.batchId, "failed");
+        throw error2;
+      }
+    }
+  };
+}
+var init_atlas_sql_generation_budget = __esm({
+  "src/atlas-sql-generation-budget.ts"() {
+    "use strict";
+  }
+});
+
 // src/atlas-scene-context.ts
 var init_atlas_scene_context = __esm({
   "src/atlas-scene-context.ts"() {
@@ -3368,6 +3407,35 @@ var init_atlas_task_views = __esm({
   }
 });
 
+// src/atlas-sql-task-refs.ts
+var init_atlas_sql_task_refs = __esm({
+  "src/atlas-sql-task-refs.ts"() {
+    "use strict";
+    init_atlas_runtime_limits();
+    init_atlas_hash();
+  }
+});
+
+// src/atlas-sql-world-sources.ts
+var init_atlas_sql_world_sources = __esm({
+  "src/atlas-sql-world-sources.ts"() {
+    "use strict";
+    init_atlas_hash();
+  }
+});
+
+// src/atlas-sql-world-completion.ts
+var init_atlas_sql_world_completion = __esm({
+  "src/atlas-sql-world-completion.ts"() {
+    "use strict";
+    init_atlas_runtime_limits();
+    init_atlas_hash();
+    init_atlas_sql_task_refs();
+    init_atlas_sql_world_sources();
+    init_atlas_spatial_frame();
+  }
+});
+
 // src/atlas-ops-errors.ts
 var ATLAS_ERROR_CODES2;
 var init_atlas_ops_errors = __esm({
@@ -5833,41 +5901,8 @@ function resolveWorldTurnPreset(settings) {
   };
 }
 
-// src/atlas-sql-generation-budget.ts
-function transportBudgetPort(budget, stage, batchId) {
-  return {
-    claim: () => {
-      const claim = budget.claimTransport(stage, batchId);
-      return claim.ok ? { ok: true } : { ok: false, reason: claim.reason };
-    }
-  };
-}
-function budgetError(claim) {
-  return Object.assign(new Error(claim.reason), { code: claim.code, retryable: false, deferred: true });
-}
-function budgetedModelPort(port, budget, stage) {
-  return {
-    ...port,
-    /** 阶段名优先取请求自带的 phase（observe/geography/decision/outcome/repair），否则用端口默认。 */
-    async request(request) {
-      const phase = request.phase || stage;
-      const logical = budget.claimBatch(phase, request.batchId);
-      if (!logical.ok) throw budgetError(logical);
-      const claim = budget.claimTransport(phase, request.batchId);
-      if (!claim.ok) throw budgetError(claim);
-      try {
-        const response = await port.request(request);
-        budget.finishBatch(request.batchId, "completed");
-        return response;
-      } catch (error2) {
-        budget.finishBatch(request.batchId, "failed");
-        throw error2;
-      }
-    }
-  };
-}
-
 // src/atlas-sql-model-port.ts
+init_atlas_sql_generation_budget();
 function failure(code, message, retryable = false) {
   return Object.assign(new Error(message), { code, retryable });
 }
@@ -9650,6 +9685,8 @@ init_atlas_db_readport();
 init_atlas_sql_refs();
 init_atlas_db_runtime();
 init_atlas_hash();
+init_atlas_runtime_limits();
+init_atlas_sql_world_completion();
 
 // src/atlas-sql-retry.ts
 init_atlas_db_runtime();
@@ -9674,6 +9711,7 @@ init_atlas_ops_contract();
 
 // src/atlas-sql-chat.ts
 init_atlas_ops_contract();
+init_atlas_runtime_limits();
 
 // src/atlas-sql-session.ts
 var ATLAS_DATABASE_BACKUP_KEY = "databaseBackup";

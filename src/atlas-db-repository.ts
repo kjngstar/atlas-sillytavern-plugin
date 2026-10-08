@@ -51,6 +51,11 @@ export { collectKnownRefs, collectEntityRefs } from './atlas-sql-refs.ts';
 import { settleSqlTurn } from './atlas-sql-simulation.ts';
 import { compileSqlSceneMaps } from './atlas-sql-scene-maps.ts';
 import { applyPendingSpatialRequests, armLayoutRetry } from './atlas-spatial-candidate.ts';
+// M3-10/11/12：世界建设阶段接入 + 本回合局部模型预算 + 建设状态元数据。
+import { createGenerationBudget } from './atlas-sql-generation-budget.ts';
+import { WORLD_CONSTRUCTION_OPS, WORLD_FILL_FRAME_KEY, buildSqlWorldCompletionTask, normalizeConstructionOps } from './atlas-sql-world-completion.ts';
+import { dedupeWorldConstructionOps } from './atlas-sql-world-dedupe.ts';
+import { SPATIAL_REQUEST_KEY } from './atlas-spatial-frame.ts';
 import { projectPromptView } from './atlas-db-knowledge-view.ts';
 import type { SqlDatabase } from './atlas-db-runtime.ts';
 import type {
@@ -78,6 +83,7 @@ import type {
   ViewResult,
 } from './atlas-ops-contract.ts';
 import type { SourceSnapshotEntry } from './atlas-ops-contract.ts';
+import type { GenerationTask, WorldFillStatus } from './atlas-world-contract.ts';
 
 export type RepositoryOptions = {
   chatUid: string;
@@ -96,6 +102,28 @@ export type RepositoryOptions = {
 export function mergeRow(target: Record<string, unknown> | null, patch: Record<string, unknown> | null): Record<string, unknown> | null {
   if (patch === null) return null;
   return { ...(target ?? {}), ...patch };
+}
+
+/**
+ * M3-11：已到期的后台决策工作量（用于「后台优先 = 预算优先」的名额保留）。
+ *
+ * 只认活着的 action（planned/ready/active）且 `next_check_s <= 当前世界时钟`；
+ * 有界读取，不做全表扫描，也不把 clock/npc 的细小动作当成需要保留名额的工作。
+ */
+function countDueBackgroundActions(tables: ReturnType<typeof createTableReadPort>, branchId: string, clockS: number): number {
+  const rows = tables.selectWhere('actions', { branch_id: branchId }, ATLAS_RUNTIME_LIMITS.actorsPerDecisionBatch);
+  return rows.filter((row) => {
+    const status = String(row.status ?? '');
+    if (status !== 'planned' && status !== 'ready' && status !== 'active') return false;
+    const nextCheck = row.next_check_s;
+    return typeof nextCheck === 'number' && Number.isFinite(nextCheck) && nextCheck <= clockS;
+  }).length;
+}
+
+/** 分支根图：建设状态没有焦点图时的落点（branches 以 id 为主键，无 branch_id 列）。 */
+function branchRootMapId(tables: ReturnType<typeof createTableReadPort>, branchId: string): string {
+  const branch = tables.selectOne('branches', branchId, branchId);
+  return branch ? String(branch.root_map_id ?? '') : '';
 }
 
 /** 语义化位置合并：patch 里的 null 表示清空字段（与「保持」区分）。 */
@@ -873,6 +901,151 @@ export function createSqlRepository(options: RepositoryOptions) {
       }
 
       // All program/model settlement belongs to this same isolated floor. No SQL
+      /* ───────── M3-10/11：世界建设阶段（01 §4 优先级；在 settle 之前，
+         让本轮后台决策能读到刚建好的结构）───────── */
+      // 单一本回合局部预算：前景 + 纠错（attempts）为起点，建设与布局共用同一个 port，
+      // 绝不使用全局 activeBudget —— 不同聊天 / 并发任务的预算互相隔离。
+      const turnBudget = createGenerationBudget({
+        attempts: attempts.slice(0, Math.max(attempts.length, foregroundBatches)).map((attempt, index) => ({
+          stage: String(attempt.phase ?? 'observe'),
+          batchId: String(attempt.id ?? `att_${index}`),
+          status: 'completed' as const,
+        })),
+      });
+      // 「后台优先」是**预算优先**：观察/纠错后先给已到期的后台决策留一个名额，
+      // 建设与布局不得吃掉它；没有到期工作不保留，未使用必须显式释放。
+      const dueBackgroundWork = countDueBackgroundActions(tables, branchId, clockBefore);
+      const backgroundReserved = dueBackgroundWork > 0 ? turnBudget.reserveBackground(`bg_due_${turnId}`) : false;
+      const construction = {
+        attempted: false,
+        deferred: false,
+        status: null as WorldFillStatus | null,
+        reasonCode: null as string | null,
+        focusMapId: '',
+        contextHash: '',
+        task: null as GenerationTask<ModelBatchRequest> | null,
+        createdLocationIds: [] as string[],
+        createdRouteIds: [] as string[],
+        remainingLocationIds: [] as string[],
+      };
+      if (!input.manual && !input.constructionMode && input.worldCompletion && options.modelPort) {
+        const task = buildSqlWorldCompletionTask(tables, branchId, {
+          mode: input.worldCompletion.mode,
+          focusLocationIds: input.worldCompletion.focusLocationIds,
+          policy: input.worldCompletion.policy,
+          chatUid: anchor.chatUid,
+          baseRevision: anchor.baseRevision,
+          baseStorageRevision: anchor.baseStorageRevision,
+          sourceSnapshot,
+        }, turnId, turnBudget.stageRemaining('geography'));
+        if (!task) {
+          // 无缺项 / contextHash 未变 / 无目标 / 没预算：不是失败，但要如实记 deferred。
+          construction.deferred = true;
+          construction.reasonCode = 'WORLD_CONSTRUCTION_NOT_NEEDED';
+        } else {
+          construction.contextHash = task.contextHash;
+          construction.remainingLocationIds = task.remainingLocationIds;
+          const firstFocus = tables.selectOne('locations', branchId, task.focusLocationIds[0] ?? '');
+          construction.focusMapId = String(firstFocus?.map_id ?? '') || branchRootMapId(tables, branchId) || '';
+          const claim = turnBudget.claimTransport('geography', task.request.batchId);
+          if (!claim.ok) {
+            construction.deferred = true;
+            construction.reasonCode = 'MODEL_BUDGET_EXHAUSTED';
+            allIssues.push({ code: 'MODEL_BUDGET_EXHAUSTED', path: '$.worldCompletion', message: `空间建设未执行：${claim.reason}。已登记的世界数据保留，下一轮继续。`, severity: 'warning', retryable: true });
+          } else {
+            construction.attempted = true;
+            construction.task = task;
+            preparationStep = 'before-construction';
+            commitTransaction(candidateDb);
+            transactionOpen = false;
+            try {
+              const response = await options.modelPort.request(task.request);
+              attempts.push({
+                id: `att_${attempts.length}`, kind: 'construction', phase: 'geography',
+                started_wall_ms: now(), finished_wall_ms: now(), http_status: response.httpStatus,
+                response_chars: response.text?.length ?? 0, response_hash: sha256HexSync(response.text ?? ''),
+                finish_reason: response.finishReason,
+              });
+              if ((input.isCurrent && !input.isCurrent()) || currentRevision() !== anchor.baseRevision) {
+                throw new AtlasDbError('STALE_BASE', '世界建设期间聊天或世界修订已变化，候选不发布', {});
+              }
+              beginTransaction(candidateDb);
+              transactionOpen = true;
+              turnBudget.finishBatch(task.request.batchId, 'completed');
+              // 解析必须使用**原始冻结目录**（task.catalogue）：不重新收集、不重新编号 alias。
+              const extracted = extractPayload(response.text ?? '');
+              const parsedConstruction = parseOperations(extracted.payload, { phase: 'geography' });
+              allIssues.push(...extracted.issues, ...parsedConstruction.issues);
+              const readPort = createTableReadPort(candidateDb);
+              const deduped = dedupeWorldConstructionOps({
+                operations: parsedConstruction.operations.map((op) => op.value),
+                existingLocations: readPort.selectWhere('locations', { branch_id: branchId }, ATLAS_RUNTIME_LIMITS.refCatalogMaxEntries),
+              });
+              const declaredNewRefs = parsedConstruction.operations
+                .map((op) => String(op.value.ref ?? ''))
+                .filter((ref) => ref.startsWith('new:'));
+              const normalized = normalizeConstructionOps({
+                operations: deduped.operations,
+                knownIds: task.catalogue.knownRefs.map((ref) => ref.id),
+                declaredNewRefs,
+              });
+              allIssues.push(...deduped.issues, ...normalized.issues);
+              const constructionParsed: ParsedOperation[] = normalized.operations.map((value, index) => {
+                const raw = JSON.stringify(value);
+                return { opId: `cons_${index}_${sha256HexSync(raw).slice(0, 8)}`, line: index + 1, rawHash: sha256HexSync(raw), value };
+              });
+              if (constructionParsed.length === 0) {
+                construction.status = 'deferred';
+                construction.reasonCode = construction.reasonCode ?? 'WORLD_CONSTRUCTION_EMPTY';
+              } else {
+                const compiledConstruction = compileOperations({
+                  operations: constructionParsed, anchor, phase: 'geography', clockS: clockBefore, revision: rev,
+                  tables: readPort, sources: { phase: 'geography', snapshot: sourceSnapshot, clockS: clockBefore }, makeId,
+                  knownRefs: [...task.catalogue.knownRefs], turnId, allowedOps: WORLD_CONSTRUCTION_OPS,
+                });
+                allIssues.push(...compiledConstruction.issues);
+                const groupsConstruction = buildAtomicGroups(compiledConstruction.results.map((r) => ({
+                  opId: r.opId, issues: r.result.issues, mutations: r.result.mutations, readSet: r.result.readSet,
+                  dependencies: r.result.dependencies, entityKeyWrites: r.result.entityKeyWrites, operationKeys: r.result.operationKeys,
+                })));
+                const orderedConstruction = orderGroups(groupsConstruction.groups);
+                allIssues.push(...groupsConstruction.issues, ...orderedConstruction.issues);
+                // 与前景同一 journal / ACK：同一候选事务、同一 turnId、attemptId=construction。
+                const appliedConstruction = applyGroups(candidateDb, orderedConstruction.order, { branchId, turnId, attemptId: 'construction', validate: true });
+                groupResults.push(...appliedConstruction.groups);
+                parsedOperations.push(...constructionParsed);
+                for (const message of appliedConstruction.journalIssues) {
+                  allIssues.push({ code: 'JOURNAL_WRITE_FAILED', path: '$.worldCompletion', message, severity: 'error', retryable: false });
+                }
+                const appliedGroupIds = new Set(appliedConstruction.groups.filter((g) => g.status === 'applied').map((g) => g.groupId));
+                for (const group of orderedConstruction.order) {
+                  if (!appliedGroupIds.has(group.id)) continue;
+                  for (const mutation of group.mutations) {
+                    if (mutation.before !== null) continue; // 只记本次新建
+                    if (mutation.table === 'locations') construction.createdLocationIds.push(mutation.rowId);
+                    if (mutation.table === 'routes') construction.createdRouteIds.push(mutation.rowId);
+                  }
+                }
+                const rejected = appliedConstruction.groups.filter((g) => g.status === 'rejected' || g.status === 'blocked');
+                const ok = appliedConstruction.groups.filter((g) => g.status === 'applied' || g.status === 'duplicate');
+                // 独立合法地点可以保存；只有相关组失败时状态为 partial（W08）。
+                construction.status = rejected.length === 0 ? 'ready' : ok.length > 0 ? 'partial' : 'deferred';
+                if (rejected.length > 0) construction.reasonCode = 'WORLD_CONSTRUCTION_PARTIAL';
+              }
+            } catch (error) {
+              if (!transactionOpen) { beginTransaction(candidateDb); transactionOpen = true; }
+              if (error instanceof AtlasDbError && error.code === 'STALE_BASE') throw error;
+              turnBudget.finishBatch(task.request.batchId, 'failed');
+              construction.deferred = true;
+              construction.status = 'deferred';
+              construction.reasonCode = 'WORLD_CONSTRUCTION_FAILED';
+              allIssues.push({ code: 'WORLD_CONSTRUCTION_FAILED', path: '$.worldCompletion', message: `世界建设未完成：${(error as Error).message}。本轮已登记的前景实体全部保留，可下一轮继续。`, severity: 'warning', retryable: true });
+              attempts.push({ id: `att_${attempts.length}`, kind: 'construction', phase: 'geography', error: (error as Error).message });
+            }
+          }
+        }
+      }
+
       if(input.legacyImport!==undefined){
         const imported=applySqlLegacyImport({db:candidateDb,branchId,turnId,clockS:clockBefore,nowWallMs:now(),rulesetVersion,makeId,legacy:input.legacyImport});
         groupResults.push(imported.result);allIssues.push(...imported.issues);
@@ -898,10 +1071,18 @@ export function createSqlRepository(options: RepositoryOptions) {
       const simulation = await settleSqlTurn({ db: candidateDb, branchId, anchor, turnId, clockBefore,
         sceneOnly:input.sceneOnly,
         operations: input.sceneOnly?[]:parsedOperations, modelPort: input.manual||input.sceneOnly ? null : options.modelPort,
-        modelBudget: Math.max(0, ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn - foregroundBatches - (repairAttempted ? 1 : 0)),
+        // M3-11：settle 用**同一本回合预算**的剩余额度，不另起计数；被保留给到期后台的名额
+        // 在 stageRemaining 里已经扣掉，所以建设不会抢先吃掉它。
+        modelBudget: Math.max(0, turnBudget.stageRemaining('geography')),
         makeId, isCurrent: input.isCurrent });
       beginTransaction(candidateDb);
       transactionOpen = true;
+      // settle 内部按数值预算自管的真实发送，折回同一本账（它确实已经发出去了）。
+      for (let index = 0; index < (simulation.modelBatches ?? 0); index += 1) {
+        turnBudget.recordTransport('settle', `settle_${turnId}_${index}`);
+      }
+      // 后台名额的使命到此结束：未使用必须释放，否则会白占一个额度。
+      if (backgroundReserved) turnBudget.releaseBackground();
       allIssues.push(...simulation.issues);
       groupResults.push(...simulation.groups);
       parsedOperations.push(...simulation.modelOperations);
@@ -910,10 +1091,13 @@ export function createSqlRepository(options: RepositoryOptions) {
       // Entities/maps must exist before the model can reference them. Release the
       // isolated candidate transaction during the spatial model request as well.
       const layoutTask=input.layoutMaps?buildSqlLayoutTask(candidateDb,branchId,input,turnId):null;
-      if(layoutTask&&options.modelPort&&foregroundBatches+(repairAttempted?1:0)+(simulation.modelBatches??0)<ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn){
+      if(layoutTask&&options.modelPort&&turnBudget.remaining()>0&&foregroundBatches+(repairAttempted?1:0)+(simulation.modelBatches??0)<ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn){
         preparationStep='before-layout';
         commitTransaction(candidateDb);transactionOpen=false;
         try{
+          // 布局与建设共用同一个局部预算 port：仍然要真的领到额度才发。
+          const layoutClaim = turnBudget.claimTransport('geography', `layout_${turnId}`);
+          if (!layoutClaim.ok) throw new AtlasDbError('MODEL_BUDGET_EXHAUSTED', layoutClaim.reason, {});
           const response=await options.modelPort.request(layoutTask.request);
           attempts.push({id:`att_${attempts.length}`,kind:'layout',phase:'geography',http_status:response.httpStatus,response_chars:response.text?.length??0,response_hash:sha256HexSync(response.text??'')});
           if(input.isCurrent&&!input.isCurrent()||currentRevision()!==anchor.baseRevision)throw new AtlasDbError('STALE_BASE','布局生成期间聊天或世界修订已变化，候选不发布',{});
@@ -988,6 +1172,68 @@ export function createSqlRepository(options: RepositoryOptions) {
       });
       groupResults.push(...spatial.groups);
       allIssues.push(...spatial.issues);
+
+      // M3-12：建设状态元数据也必须进 journal —— 通过 RowMutation + applyGroups 保存，
+      // 因此删楼回退时它跟业务数据一起被恢复，而不是散落在 frame 里改不回去。
+      if (construction.attempted && construction.focusMapId) {
+        const fillPort = createTableReadPort(candidateDb);
+        const mapRow = fillPort.selectOne('maps', branchId, construction.focusMapId);
+        if (mapRow) {
+          const rawFrame = mapRow.frame_json;
+          const frame: Record<string, unknown> = rawFrame && typeof rawFrame === 'object' && !Array.isArray(rawFrame)
+            ? { ...(rawFrame as Record<string, unknown>) }
+            : {};
+          let status: WorldFillStatus = construction.status ?? 'deferred';
+          let reasonCode = construction.reasonCode;
+          if (status === 'ready') {
+            // ready 不能只看 HTTP 200：对应结构必须真的可绘制。
+            // 焦点图若仍有 pending / failed 的布局请求，本轮只能算 partial。
+            const pending = frame[SPATIAL_REQUEST_KEY];
+            const pendingStatus = pending && typeof pending === 'object' && !Array.isArray(pending)
+              ? String((pending as Record<string, unknown>).status ?? '')
+              : '';
+            if (pendingStatus === 'pending' || pendingStatus === 'failed') {
+              status = 'partial';
+              reasonCode = 'WORLD_LAYOUT_PENDING';
+            }
+          }
+          frame[WORLD_FILL_FRAME_KEY] = {
+            version: 1,
+            policyVersion: 1,
+            contextHash: construction.contextHash,
+            status,
+            completedTurnId: turnId,
+            // 只保留本次有界结果：不复制全表、不复制全文 lore。
+            createdLocationIds: construction.createdLocationIds.slice(0, ATLAS_RUNTIME_LIMITS.worldFillTargets),
+            createdRouteIds: construction.createdRouteIds.slice(0, ATLAS_RUNTIME_LIMITS.worldFillTargets),
+            remainingLocationIds: construction.remainingLocationIds.slice(0, ATLAS_RUNTIME_LIMITS.worldFillTargets),
+            reasonCode,
+          };
+          const fillOpId = `world_fill_${turnId}`;
+          const fillGroup: AtomicGroup = {
+            id: `grp_world_fill_${turnId}`,
+            opIds: [fillOpId],
+            dependsOn: [],
+            readSet: [{ table: 'maps', rowId: construction.focusMapId, rowRev: Number(mapRow.row_rev ?? 0) }],
+            mutations: [{
+              table: 'maps',
+              rowId: construction.focusMapId,
+              before: { ...mapRow },
+              after: { ...mapRow, frame_json: frame },
+              sourceOpIds: [fillOpId],
+              basis: { kind: 'simulation', sources: [], causes: [], reason: '本轮世界建设的实际应用结果（业务群组 + 布局可绘制性）', verification: 'causal', certainty: 'inferred' },
+            }],
+          };
+          const appliedFill = applyGroups(candidateDb, [fillGroup], { branchId, turnId, attemptId: 'world-fill', validate: true });
+          groupResults.push(...appliedFill.groups);
+          for (const message of appliedFill.journalIssues) {
+            allIssues.push({ code: 'JOURNAL_WRITE_FAILED', path: '$.worldFill', message, severity: 'error', retryable: false });
+          }
+        } else {
+          construction.deferred = true;
+          construction.reasonCode = construction.reasonCode ?? 'WORLD_FILL_NO_TARGET_MAP';
+        }
+      }
 
       const fkViolations = foreignKeyCheck(candidateDb);
       const finalCheck = validateCandidate(candidateDb, { branchId });

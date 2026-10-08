@@ -18,6 +18,42 @@ import type { SqlSession } from './atlas-sql-session.ts';
 import type { TurnAnchor, TurnInput } from './atlas-ops-contract.ts';
 import { VIEW_KINDS, CATALOG_ENTITY_KINDS, type ViewQuery } from './atlas-ops-contract.ts';
 import type { AtlasEnvelope } from './atlas-db-contract.ts';
+import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
+import type { WorldCompletionInput } from './atlas-world-contract.ts';
+
+/**
+ * M3-14：普通楼层的建设焦点 = **主角当前实际所在地点**。
+ *
+ * 不用助手卡名称、不用楼层数推算时间；主角位置就是 branches.pov_character_id →
+ * characters.location_id。没有可靠位置就返回空数组，builder 会返回 null（不造假起点）。
+ */
+function turnFocusLocationIds(session: SqlSession): string[] {
+  const read = createTableReadPort(session.repo.db);
+  const branchRow = read.selectOne('branches', session.branchId, session.branchId);
+  const povId = String(branchRow?.pov_character_id ?? '');
+  if (!povId) return [];
+  const pov = read.selectOne('characters', session.branchId, povId);
+  const locationId = String(pov?.location_id ?? '');
+  return locationId ? [locationId] : [];
+}
+
+/** M3-14：普通回合的 local 建设参数；无焦点就返回 undefined（不发建设请求）。 */
+function localWorldCompletion(session: SqlSession, manual: boolean): WorldCompletionInput | undefined {
+  if (manual) return undefined;
+  const focusLocationIds = turnFocusLocationIds(session);
+  if (focusLocationIds.length === 0) return undefined;
+  return {
+    mode: 'local',
+    focusLocationIds,
+    policy: {
+      version: 1,
+      density: 'balanced',
+      maxNewLocations: ATLAS_RUNTIME_LIMITS.newLocationsPerBatch,
+      maxNewRoutes: ATLAS_RUNTIME_LIMITS.newRoutesPerBatch,
+      maxAdditionalDepth: 2,
+    },
+  };
+}
 
 const preparations = new WeakMap<SqlSession, Map<string, { anchor: TurnAnchor; messageId: string; userText: string }>>();
 const text = (v: unknown): string => typeof v === 'string' ? v : '';
@@ -193,6 +229,7 @@ export async function handleSqlChatRequest(session: SqlSession, action: string, 
       hostMessageIndex: request.assistantMessageId,
       sceneMaps:true,
       layoutMaps:'active',
+      worldCompletion: localWorldCompletion(session, manual),
       isCurrent: typeof body.isCurrent === 'function' ? body.isCurrent as () => boolean : undefined };
     const result = await runSqlTurn(session, input);
     const receipt = toLegacyTurnReceipt(result.receipt, { coreSaved: result.coreSaved });

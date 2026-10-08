@@ -6,16 +6,19 @@ import { createTableReadPort } from './atlas-db-readport.ts';
 import { collectKnownRefs } from './atlas-sql-refs.ts';
 import { AtlasDbError } from './atlas-db-runtime.ts';
 import { stableHexHash } from './atlas-hash.ts';
+import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
 import { runSqlTurn, commitPreparedTurn } from './atlas-sql-session.ts';
 import type { SqlSession } from './atlas-sql-session.ts';
 import type { ModelOperation, TurnInput, SourceSnapshotEntry, PreparedCommit } from './atlas-ops-contract.ts';
+import type { WorldCompletionInput } from './atlas-world-contract.ts';
+import { WORLD_FILL_FRAME_KEY } from './atlas-sql-world-completion.ts';
 
 const previews=new WeakMap<SqlSession,Map<string,{commit:PreparedCommit;sourceHash:string}>>();
 
 export async function handleSqlMapAction(session:SqlSession,action:string,body:Record<string,unknown>):Promise<Record<string,unknown>> {
   if(body.chatId!==session.chatUid)throw new AtlasDbError('CHAT_CHANGED','地图请求不属于当前聊天',{});
   const sourceHash=stableHexHash(JSON.stringify([body.openingMessageId,body.userText,body.assistantText,body.loreSupplement,body.charDescription,body.personaDescription]));
-  if(action==='map/bootstrap'&&body.apply===true){
+  if((action==='map/bootstrap'||action==='map/build')&&body.apply===true){
     const draft=previews.get(session)?.get(String(body.previewId??''));
     if(!draft||draft.sourceHash!==sourceHash||body.baseRevision!==draft.commit.anchor.baseRevision)throw new AtlasDbError('SQL_PREVIEW_EXPIRED','场景预览已失效，需要重新识别',{});
     const result=await commitPreparedTurn(session,draft.commit,typeof body.isCurrent==='function'?body.isCurrent as ()=>boolean:undefined);
@@ -40,9 +43,32 @@ export async function handleSqlMapAction(session:SqlSession,action:string,body:R
   const operations:ModelOperation[]=[],calibration:TurnInput['mapCalibration']=undefined;
   let mapBackground:TurnInput['mapBackground'];
   let layoutMaps:TurnInput['layoutMaps'];
+  let worldCompletion:WorldCompletionInput|undefined;
+  let constructionMode:TurnInput['constructionMode'];
   let mapCalibration:TurnInput['mapCalibration']=calibration,manual=true,phases:TurnInput['phaseBatches']=[];
   if(action==='map/layout'){
     layoutMaps=[String(map(body.mapId).id)];
+  }else if(action==='map/build'){
+    // M3-13：显式「建设世界」。manual narrativeKind + sceneOnly —— 只补结构，不推进世界时间。
+    const mode:(WorldCompletionInput['mode'])=body.mode==='bootstrap'?'bootstrap':'local';
+    const requested=Array.isArray(body.focusLocationIds)?body.focusLocationIds.map(value=>String(value)).filter(Boolean):[];
+    if(requested.length>ATLAS_RUNTIME_LIMITS.worldFillTargets)throw new AtlasDbError('INVALID_PAYLOAD',`focusLocationIds 不能超过 ${ATLAS_RUNTIME_LIMITS.worldFillTargets} 个`,{});
+    if(mode==='local'&&requested.length===0)throw new AtlasDbError('INVALID_PAYLOAD','局部建设需要至少一个 focusLocationIds',{});
+    // 身份错误必须报具体错：焦点只能是本分支真实地点。
+    const resolvedFocus=requested.map(value=>String(find('locations',value).id));
+    // 显式建设允许调用方带上 baseRevision；带了就必须对得上，否则明确报 STALE_BASE。
+    // 不带时由会话按权威 revision 自行构造 anchor（预览路径还会在 apply 时再校验一次）。
+    if(body.baseRevision!==undefined&&body.baseRevision!==null){
+      const expected=session.repo.internal.currentRevision();
+      if(Number(body.baseRevision)!==expected)throw new AtlasDbError('STALE_BASE',`地图建设请求基于过期 revision：请求 ${String(body.baseRevision)}，当前 ${expected}`,{expected,actual:body.baseRevision});
+    }
+    worldCompletion={mode,focusLocationIds:resolvedFocus,policy:{version:1,density:'balanced',
+      maxNewLocations:ATLAS_RUNTIME_LIMITS.newLocationsPerBatch,
+      maxNewRoutes:ATLAS_RUNTIME_LIMITS.newRoutesPerBatch,
+      maxAdditionalDepth:2}};
+    // 分块抽取阶段（M3-15）：只做事实登记，不建设、不布局、不发总体空间请求。
+    constructionMode=body.constructionMode==='extract-only'?'extract-only':undefined;
+    manual=false;phases=['observe'];
   }else if(action==='map/repair'){
     const report=inspectSqlWorld(session);
     if(!report.canApply||body.reportToken!==report.reportToken)throw new AtlasDbError('SQL_PREVIEW_EXPIRED','地图检查报告已变化，请重新检查',{});
@@ -95,7 +121,20 @@ export async function handleSqlMapAction(session:SqlSession,action:string,body:R
     const image=(body.world as {mapImage?:unknown}).mapImage;
     if(typeof image==='string'&&image)mapBackground={mapId:'world',asset:await imageAsset(image)};
   }else if(['map/geo','map/suggest','map/bootstrap'].includes(action)){
-    manual=false;phases=action==='map/bootstrap'?['observe']:['geography'];
+    manual=false;
+    if(action==='map/bootstrap'){
+      // M3-13：初建也走同一建设阶段（预览同样在候选里跑），而不是另起一条旧路径。
+      // bootstrap 的焦点 = 本分支的顶层地点；完全没有地点时 focus 为空，
+      // builder 会返回 null —— 「完全无 world 不造假起点」，等 observe 先登记第一个场所。
+      const roots=read.selectWhere('locations',{branch_id:session.branchId,status:'active'},1000)
+        .filter(row=>!row.parent_location_id&&String(row.status??'active')==='active')
+        .map(row=>String(row.id)).sort().slice(0,ATLAS_RUNTIME_LIMITS.worldFillTargets);
+      worldCompletion={mode:'bootstrap',focusLocationIds:roots,policy:{version:1,density:'balanced',
+        maxNewLocations:ATLAS_RUNTIME_LIMITS.newLocationsPerBatch,
+        maxNewRoutes:ATLAS_RUNTIME_LIMITS.newRoutesPerBatch,
+        maxAdditionalDepth:2}};
+      phases=['observe'];
+    }else phases=['geography'];
   }else throw new AtlasDbError('INVALID_PAYLOAD','未知 SQL 地图动作',{});
   const sources:SourceSnapshotEntry[]=[];
   for(const [key,kind] of [['loreSupplement','lorebook'],['assistantText','story'],['charDescription','lorebook'],['personaDescription','user']] as const){
@@ -109,8 +148,8 @@ export async function handleSqlMapAction(session:SqlSession,action:string,body:R
   const input:TurnInput={anchor:{chatUid:session.chatUid,branchId:session.branchId,parentTurnId:session.repo.internal.currentHeadTurnId(),
     baseRevision:session.repo.internal.currentRevision(),baseStorageRevision:session.repo.storageRevision,hostMessageUid:`author:${action}:${body.requestId??hash}`,variantKey:'author',inputHash:hash},
     userText:String(body.userText??''),assistantText:String(body.assistantText??''),sourceSnapshot:sources,phaseBatches:phases,manual,operations,
-    narrativeKind:'manual',sceneMaps:true,sceneOnly:true,layoutMaps,mapCalibration,mapBackground,legacyImport:action==='map/import'?{atlas:{world:body.world,maps:body.maps??null}}:undefined,povName:action==='map/protagonist'?String(body.name??body.playerName??''):undefined,isCurrent:typeof body.isCurrent==='function'?body.isCurrent as ()=>boolean:undefined};
-  if(action==='map/bootstrap'&&body.apply===false){
+    narrativeKind:'manual',sceneMaps:true,sceneOnly:true,layoutMaps,mapCalibration,mapBackground,worldCompletion,constructionMode,legacyImport:action==='map/import'?{atlas:{world:body.world,maps:body.maps??null}}:undefined,povName:action==='map/protagonist'?String(body.name??body.playerName??''):undefined,isCurrent:typeof body.isCurrent==='function'?body.isCurrent as ()=>boolean:undefined};
+  if((action==='map/bootstrap'||action==='map/build')&&body.apply===false){
     const commit=await session.repo.prepareTurn(input),previewId=commit.token;
     let drafts=previews.get(session);if(!drafts){drafts=new Map();previews.set(session,drafts);}
     while(drafts.size>=4){const id=drafts.keys().next().value!;await session.repo.discardPrepared(drafts.get(id)!.commit.token);drafts.delete(id);}
@@ -123,6 +162,43 @@ export async function handleSqlMapAction(session:SqlSession,action:string,body:R
   }
   const result=await runSqlTurn(session,input);
   if(!result.coreSaved)throw new AtlasDbError('SESSION_WRITE_FAILED','地图候选未获得宿主保存确认',{issues:result.issues});
-  const added = createTableReadPort(session.repo.db).selectWhere('locations',{branch_id:session.branchId,status:'active'},1000).filter(row=>!beforeLocations.has(String(row.id)));
-  return {coreSaved:true,pointsAdded:added.filter(row=>row.kind!=='region').length,regionsAdded:added.filter(row=>row.kind==='region').length,status:action==='map/scale'?'calibrated':'committed',message:'已保存到当前聊天的 SQL 数据库',receipt:result.receipt,issues:result.issues};
+  const readBack=createTableReadPort(session.repo.db);
+  const added = readBack.selectWhere('locations',{branch_id:session.branchId,status:'active'},1000).filter(row=>!beforeLocations.has(String(row.id)));
+  const build=action==='map/build'?summarizeWorldFill(readBack,session.branchId,worldCompletion):undefined;
+  return {coreSaved:true,pointsAdded:added.filter(row=>row.kind!=='region').length,regionsAdded:added.filter(row=>row.kind==='region').length,status:action==='map/scale'?'calibrated':constructionMode==='extract-only'?'extracted':'committed',message:constructionMode==='extract-only'?'分块事实已登记；总体建设留到抽取结束后一次执行':'已保存到当前聊天的 SQL 数据库',...(build?{build}:{}),receipt:result.receipt,issues:result.issues};
+}
+
+/**
+ * M3-13：把本次建设状态如实回报给调用方（bootstrap 预览 / 应用都要看得到）。
+ *
+ * ready 只认程序写入的 frame 状态：HTTP 200 不算 ready；没有被应用就报 deferred，
+ * 并把「还缺哪张图的布局」一并交出，让客户端可以接着调 map/layout。
+ */
+function summarizeWorldFill(
+  read:ReturnType<typeof createTableReadPort>,
+  branchId:string,
+  worldCompletion:WorldCompletionInput|undefined,
+):Record<string,unknown>{
+  const focusIds=worldCompletion?.focusLocationIds??[];
+  const maps:string[]=[];
+  for(const id of focusIds){
+    const mapId=String(read.selectOne('locations',branchId,id)?.map_id??'');
+    if(mapId&&!maps.includes(mapId))maps.push(mapId);
+  }
+  if(!maps.length){
+    const branch=read.selectOne('branches',branchId,branchId);
+    const root=String(branch?.root_map_id??'');
+    if(root)maps.push(root);
+  }
+  const fill=maps.length?read.selectOne('maps',branchId,maps[0])?.frame_json as Record<string,unknown>|undefined:undefined;
+  const state=fill&&typeof fill[WORLD_FILL_FRAME_KEY]==='object'?fill[WORLD_FILL_FRAME_KEY] as Record<string,unknown>:null;
+  return {
+    mode:worldCompletion?.mode??null,
+    focusLocationIds:focusIds.slice(0,ATLAS_RUNTIME_LIMITS.worldFillTargets),
+    status:state?String(state.status??'deferred'):'deferred',
+    reasonCode:state?state.reasonCode??null:'WORLD_FILL_NOT_WRITTEN',
+    createdLocationIds:state&&Array.isArray(state.createdLocationIds)?state.createdLocationIds:[],
+    remainingLocationIds:state&&Array.isArray(state.remainingLocationIds)?state.remainingLocationIds:[],
+    focusMapId:maps[0]??null,
+  };
 }
