@@ -1,6 +1,8 @@
 /**
  * tools/verify-tavern-world-construction.mjs — M7-06 真实酒馆验收（真实 SillyTavern + 真实 release）
  *
+ * 覆盖案例：I12（真实酒馆加载最终产物验收；离线 mock 与 --live 真实模型两条路径）。
+ *
  * 用法：
  *   node tools/verify-tavern-world-construction.mjs                     # 离线：只驱动 UI，不打任何后端模型
  *   node tools/verify-tavern-world-construction.mjs --live              # 额外做一次真实模型生成
