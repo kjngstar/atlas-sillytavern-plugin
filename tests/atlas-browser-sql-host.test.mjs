@@ -294,3 +294,40 @@ test('Q03: host snapshot changes during asynchronous export cannot become a new 
     assert.equal(f.saves(), saves);
   } finally { await f.provider.close(); }
 });
+
+test('S05: 升级前原档导出不依赖 host 绑定 —— 只注入 sessionProvider 的扩展也必须能读落点', async () => {
+  // M7-06 真酒馆验收抓到的 M1-06A 缺口：扩展的 createAtlasServerCore 只传 sqlSessionProvider，
+  // 而 /sql/upgrade-backup 旧实现只认 hostFor → 真扩展里导出入口永远返回
+  // 「SQL 模式缺少聊天落点（chatMetadata）」，链路是断的。
+  const f = hostFixture();
+  try {
+    // 1) 没有备份：必须是「没有可导出的备份」，不能是「缺少聊天落点」。
+    const none = await f.core.handle('POST', '/sql/upgrade-backup', { chatUid: 'browser-host-A', branchId: 'main' }, { local: true });
+    assert.equal(none.body.ok, false);
+    assert.equal(none.body.error.code, 'BACKUP_NOT_AVAILABLE');
+    assert.ok(!/chatMetadata/.test(none.body.error.message), `不该把内部术语印给用户：${none.body.error.message}`);
+
+    // 2) 本聊天的备份在：原样交出 envelope 与 SHA256，供用户核对。
+    const envelope = { kind: 'atlas-upgrade-backup', schema_version: 1, payload: '原档字节' };
+    f.host.chatMetadata.atlas = { databaseBackup: {
+      version: 1, chatId: 'browser-host-A', branchId: 'main', createdAtMs: Date.UTC(2026, 9, 8, 1, 2, 3),
+      sourceRevision: 0, envelopeSha256: 'a'.repeat(64), envelopeSchemaVersion: 1, pendingUpgrade: false, envelope,
+    } };
+    const before = JSON.stringify(f.host.chatMetadata);
+    const found = await f.core.handle('POST', '/sql/upgrade-backup', { chatUid: 'browser-host-A', branchId: 'main' }, { local: true });
+    assert.equal(found.body.ok, true);
+    assert.equal(found.body.data.code, 'BACKUP_AVAILABLE');
+    assert.equal(found.body.data.backup.envelopeSha256, 'a'.repeat(64));
+    assert.deepEqual(found.body.data.backup.envelope, envelope);
+    assert.equal(typeof found.body.data.backup.createdAtMs, 'number');
+
+    // 3) 只读铁律：一个字节都不改，也绝不触发宿主保存。
+    assert.equal(JSON.stringify(f.host.chatMetadata), before);
+    assert.equal(f.saves(), 0);
+
+    // 4) 别的聊天的备份不能借给本聊天（服务端不泄露他人备份是否存在）。
+    const other = await f.core.handle('POST', '/sql/upgrade-backup', { chatUid: 'browser-host-B', branchId: 'main' }, { local: true });
+    assert.equal(other.body.ok, false);
+    assert.equal(other.body.error.code, 'INVALID_PAYLOAD');
+  } finally { await f.provider.close(); }
+});

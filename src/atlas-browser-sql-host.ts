@@ -59,6 +59,19 @@ export function createBrowserSqlHost(options: BrowserSqlHostOptions): AtlasSqlSe
   return {
     enabled: options.enabled,
     runtime: options.loadRuntime,
+    /**
+     * M1-06A：只读落点，给 `/sql/upgrade-backup` 用。
+     *
+     * 刻意**不走 `session()`**：那条路会开 session、可能在旧档上跑迁移、还会写回宿主，
+     * 而导出升级前原档必须一个字节都不改（只读 chatMetadata）。所以这里只做两件事：
+     * 确认 SQL 模式开着、确认请求的就是当前聊天，然后把活的落点交出去。
+     */
+    metadata(chatUid) {
+      if (!options.enabled()) return null;
+      const record = options.context();
+      if (!record || record.chatUid !== chatUid) return null;
+      return record.chatMetadata;
+    },
     async session(chatUid, requestedBranch) {
       const record = capture(chatUid, requestedBranch);
       const branchId = record.branchId;

@@ -35,6 +35,14 @@ export type AtlasSqlSessionProvider = {
   session(chatUid: string, branchId?: string): Promise<SqlSession>;
   saved(session: SqlSession): void;
   close(): Promise<void>;
+  /**
+   * M1-06A：只读拿当前聊天的落点（chatMetadata），**不打开 session、不迁移、不保存**。
+   *
+   * 存在的理由：浏览器扩展只注入 `sessionProvider`，从来不注入 `host`。
+   * 而「升级前原档导出」必须能在没有 session 的情况下读备份，否则入口在、功能不可达。
+   * 可选实现：不提供就退回 `host.chatMetadata`（Node 宿主的走法）。
+   */
+  metadata?(chatUid: string): Record<string, unknown> | null;
 };
 
 export type AtlasSqlRouteGroupDeps = {
@@ -140,6 +148,22 @@ export function createAtlasSqlRouteGroup(deps: AtlasSqlRouteGroupDeps) {
   function hostFor(chatUid: string): AtlasSqlHostBinding | null {
     if (!deps.host) return null;
     return typeof deps.host === "function" ? deps.host(chatUid) : deps.host;
+  }
+
+  /**
+   * 聊天落点的解析顺序：**先问会话提供者，再退回 host 绑定**。
+   *
+   * 为什么顺序是这样：浏览器扩展的 `createAtlasServerCore` 只传 `sqlSessionProvider`，
+   * 不传 `host`；旧实现让 `/sql/upgrade-backup` 只认 `hostFor`，于是真扩展里
+   * 「导出升级前原档」永远返回 `SQL 模式缺少聊天落点（chatMetadata）` ——
+   * 入口画得出来，链路却是断的（M7-06 真酒馆验收抓到的 M1-06A 缺口）。
+   * 这里只读落点，不打开 session、不迁移、不写库，导出仍然是纯只读操作。
+   */
+  function chatMetadataFor(chatUid: string): Record<string, unknown> | null {
+    const fromProvider = deps.sessionProvider?.metadata?.(chatUid);
+    if (isPlainRecord(fromProvider)) return fromProvider;
+    const host = hostFor(chatUid);
+    return host && isPlainRecord(host.chatMetadata) ? host.chatMetadata : null;
   }
 
   function requireChatUid(body: Record<string, unknown>): string {
@@ -273,8 +297,7 @@ export function createAtlasSqlRouteGroup(deps: AtlasSqlRouteGroupDeps) {
       // M1-06A：升级前原档的只读导出。
       // 只读 chatMetadata，不 open session、不写库、不触发宿主保存，也不清除备份。
       if (route === "/sql/upgrade-backup") {
-        const host = hostFor(chatUid);
-        const metadata = host && isPlainRecord(host.chatMetadata) ? host.chatMetadata : null;
+        const metadata = chatMetadataFor(chatUid);
         if (!metadata) {
           throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, `SQL 模式缺少聊天落点（chatMetadata）：${chatUid}`);
         }

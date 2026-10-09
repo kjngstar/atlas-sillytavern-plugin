@@ -4040,6 +4040,19 @@ function createBrowserSqlHost(options) {
   return {
     enabled: options.enabled,
     runtime: options.loadRuntime,
+    /**
+     * M1-06A：只读落点，给 `/sql/upgrade-backup` 用。
+     *
+     * 刻意**不走 `session()`**：那条路会开 session、可能在旧档上跑迁移、还会写回宿主，
+     * 而导出升级前原档必须一个字节都不改（只读 chatMetadata）。所以这里只做两件事：
+     * 确认 SQL 模式开着、确认请求的就是当前聊天，然后把活的落点交出去。
+     */
+    metadata(chatUid) {
+      if (!options.enabled()) return null;
+      const record = options.context();
+      if (!record || record.chatUid !== chatUid) return null;
+      return record.chatMetadata;
+    },
     async session(chatUid, requestedBranch) {
       const record = capture(chatUid, requestedBranch);
       const branchId = record.branchId;
@@ -9847,6 +9860,12 @@ function createAtlasSqlRouteGroup(deps) {
     if (!deps.host) return null;
     return typeof deps.host === "function" ? deps.host(chatUid) : deps.host;
   }
+  function chatMetadataFor(chatUid) {
+    const fromProvider = deps.sessionProvider?.metadata?.(chatUid);
+    if (isPlainRecord(fromProvider)) return fromProvider;
+    const host = hostFor(chatUid);
+    return host && isPlainRecord(host.chatMetadata) ? host.chatMetadata : null;
+  }
   function requireChatUid(body) {
     const chatUid = sqlText(body.chatUid);
     if (chatUid.length === 0) {
@@ -9960,8 +9979,7 @@ function createAtlasSqlRouteGroup(deps) {
       const runtime = await sqlRuntime();
       if (!runtime) return unavailable(route);
       if (route === "/sql/upgrade-backup") {
-        const host = hostFor(chatUid);
-        const metadata = host && isPlainRecord(host.chatMetadata) ? host.chatMetadata : null;
+        const metadata = chatMetadataFor(chatUid);
         if (!metadata) {
           throw new AtlasError(ATLAS_ERROR_CODES.INVALID_PAYLOAD, `SQL 模式缺少聊天落点（chatMetadata）：${chatUid}`);
         }
