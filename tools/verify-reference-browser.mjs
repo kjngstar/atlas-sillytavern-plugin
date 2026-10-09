@@ -1,10 +1,10 @@
 /** Original supplied UI, real packaged extension and SQL, in Chrome. */
-import {spawn} from 'node:child_process';
+import {spawn,execFileSync} from 'node:child_process';
 import {readFileSync,writeFileSync,mkdirSync} from 'node:fs';
 import {createHash} from 'node:crypto';
 import {setTimeout as delay} from 'node:timers/promises';
 import {chromium} from 'playwright';
-import {generateFloor,generateCity} from '../vendor/atlas-spatial/index.mjs';
+import {generateFloor,generateCity,generateOverview} from '../vendor/atlas-spatial/index.mjs';
 const dir=process.env.ATLAS_EVIDENCE_DIR||'.tmp/reference-browser';mkdirSync(dir,{recursive:true});
 const port=Number(process.env.ATLAS_VERIFY_PORT||4296),base=process.env.ATLAS_REVIEW_BASE||`http://127.0.0.1:${port}`;
 const report={checks:{},errors:[],failed:[],startedAt:new Date().toISOString()};
@@ -23,7 +23,43 @@ const saved=await sqlRuntime.persistSqlSession(migrated.session);if(!saved.saved
  await p.goto(`${base}/dev-preview/index.html`);await p.waitForFunction(()=>!!document.querySelector('iframe')?.contentWindow?.AtlasPreview&&!!window.atlasPreviewConnection,{timeout:20000});const f=p.frames().find(f=>f.url().includes('/atlas-reference/index.html'));return {p,f};}
 try{
  for(let i=0;i<40;i++){try{if((await fetch(`${base}/dev-preview/index.html`)).ok)break;}catch{}await delay(250);}
- for(const [file,hash] of [['css/atlas.css','82546670e3f2b94fd9bed5ab20f82d0320a77fe9046d070282e462bc6bffe401'],['css/preview.css','45d36e7133f77abe244a833585e7b1b1a4b7db2b691ac525c60f7a69b74cbab8'],['fonts/atlas-sans.woff','7c3e8691a54655f9c748eb2d9c6d09cfa31f1766588131857af3778a876b2c26']])check(`original:${file}`,createHash('sha256').update(readFileSync(`release/atlas-ui-extension/ui/atlas-reference/${file}`)).digest('hex')===hash);
+ /**
+  * M7-02：原样式基线不再靠硬编码 hash。
+  *
+  * 旧门禁把三个哈希写死在代码里，其中 css/preview.css 用的是**供给原版**的哈希；
+  * 之后 a87640f 为了修「HUD 里的进入按钮点不动」合法加了 1 行，门禁就永久红了 ——
+  * 而当时的处理方式只能是「盲改 hash」或「删掉门禁」，两条都不可接受。
+  *
+  * 现在改读可审计台账 docs/reference-ui/provenance.json：
+  *  - assets = 供给原版哈希（只读，来自 atlas-ui-source.zip）；
+  *  - auditedDeltas = 供给之后每一次改动的逐字记录（提交、原因、加/删了哪几行）。
+  * 校验三件事：现行文件哈希 == 台账期望值；每条 delta 声明的增删行真的在/不在文件里；
+  * 以及供给原版能否从仓库历史里原样复原（有 git 时）——「可审计」而不是「改了就算」。
+  */
+ const provenance=JSON.parse(readFileSync('docs/reference-ui/provenance.json','utf8'));
+ // 二进制资源（woff）必须按 Buffer 哈希；按 utf8 读会把无效字节替换成 U+FFFD，哈希必然对不上。
+ const sha256Bytes=p=>createHash('sha256').update(readFileSync(p)).digest('hex');
+ const deltasByFile=new Map();
+ for(const d of provenance.auditedDeltas??[]){const list=deltasByFile.get(d.file)??[];list.push(d);deltasByFile.set(d.file,list);}
+ check('original-baseline-ledger',Object.keys(provenance.assets??{}).length===3&&/^[0-9a-f]{7,40}$/.test(String(provenance.suppliedCommit))&&Array.isArray(provenance.auditedDeltas)&&!!provenance.suppliedRepoPath,{suppliedCommit:provenance.suppliedCommit,deltas:(provenance.auditedDeltas??[]).length});
+ let gitAvailable=true;try{execFileSync('git',['rev-parse','--git-dir'],{stdio:'ignore'});}catch(_){gitAvailable=false;}
+ for(const [file,suppliedHash] of Object.entries(provenance.assets)){
+   const rel=`release/atlas-ui-extension/ui/atlas-reference/${file}`;
+   const actual=sha256Bytes(rel);
+   const deltas=deltasByFile.get(file)??[],expected=deltas.length?(deltas.at(-1).currentSha256??suppliedHash):suppliedHash;
+   check(`original:${file}`,actual===expected,{actual,expected,supplied:suppliedHash,deltas:deltas.length});
+   // 台账不许「声明了改动却没登记」：哈希变了就必须有 delta，没变就不许有 delta。
+   check(`original-ledger-matches:${file}`,(actual!==suppliedHash)===(deltas.length>0),{changed:actual!==suppliedHash,deltas:deltas.length});
+   if(!deltas.length)continue;
+   const text=readFileSync(rel,'utf8');
+   for(const d of deltas){
+     const added=(d.linesAdded??[]).filter(Boolean),removed=(d.linesRemoved??[]).filter(Boolean);
+     check(`delta-content:${file}@${d.commit}`,!!d.reason&&added.every(line=>text.includes(line))&&removed.every(line=>!text.includes(line)),{added:added.length,removed:removed.length});
+     let recovered=null;
+     try{recovered=execFileSync('git',['show',`${provenance.suppliedCommit}:${provenance.suppliedRepoPath}/${file}`],{encoding:'buffer',maxBuffer:1<<26});}catch(_){recovered=null;}
+     check(`delta-provenance:${file}@${d.commit}`,!gitAvailable||(recovered&&createHash('sha256').update(recovered).digest('hex')===suppliedHash),{git:gitAvailable,recovered:!!recovered});
+   }
+ }
  const {p,f}=await open();
  const {p:fresh,f:freshUi}=await open({fresh:true});await freshUi.waitForFunction(()=>AtlasPreview.data.meta.snapshotSaved===false);check('new-chat-no-snapshot-readable',await freshUi.evaluate(()=>!AtlasPreview.data.DIAGNOSTICS.some(d=>d.message?.includes('SQL_SNAPSHOT_UNAVAILABLE'))));check('new-chat-reading-does-not-save',await fresh.evaluate(()=>!SillyTavern.getContext().chatMetadata.atlas?.database));
  await freshUi.locator('#nextDemo').click();await freshUi.waitForFunction(()=>AtlasPreview.data.RECEIPTS.length>0);await freshUi.locator('[data-tab="receipt"]').click();check('real-model-failure-in-receipts',(await freshUi.locator('#dockBody').innerText()).includes('尚未配置活动 API'));await freshUi.locator('#dockBody details').first().locator('summary').click();check('real-model-failure-detail',(await freshUi.locator('#dockBody pre').first().innerText()).includes('API_NOT_CONFIGURED'));check('failed-first-turn-no-fake-snapshot',await fresh.evaluate(()=>!SillyTavern.getContext().chatMetadata.atlas?.database));await fresh.screenshot({path:`${dir}/native-first-turn-failure.png`});await fresh.close();
@@ -54,6 +90,87 @@ try{
  if(!place)throw Error('No visible real child-map marker in fixture');await p.mouse.click(place.x,place.y);check('single-click-inspects',await f.evaluate(id=>AtlasPreview.state.selected?.id===id,place.id));await f.locator(`#inspector [data-go="${place.child}"]`).click();check('original-enter-button',await f.evaluate(id=>AtlasPreview.state.nodeId===id,place.child));await f.locator('#crumbs [data-go]').first().click();check('breadcrumb-return',await f.evaluate(()=>AtlasPreview.state.nodeId===AtlasPreview.data.ROOT.id));
  await f.evaluate(id=>AtlasPreview.showEntity('character',id,true),char.id);await f.waitForFunction(()=>document.getElementById('insTitle').textContent==='对象详情');check('entity-detail',(await f.locator('#inspector').innerText()).includes(char.name));
  for(const tab of ['cast','items','msgs','sim','time','lore','diag','prefs']){await f.locator(`[data-view="${tab}"]`).click();check(`page:${tab}`,await f.locator('#workspacePage').isVisible());}
+ // ── M7-02：U01–U06 的真实浏览器验收（像素、手势、命中这类 jsdom 断言不了的部分） ──
+ await f.locator('[data-view="map"]').click();
+ /** HUD 里的 `.hud-place` 带 pointer-events:none（供给版如此），子元素必须自己把点击拿回来。
+  *  台账里那条 preview.css delta 修的就是这个 —— 这里做真实 hit-test，改了就算回归。 */
+ const hitTest=async(locator,ownerSelector)=>{const box=await locator.boundingBox();if(!box)return null;
+   return f.evaluate(([x,y,sel])=>{const el=document.elementFromPoint(x,y);const owner=el?.closest(sel)??null;
+     return {tag:el?.tagName??null,owner:owner?owner.tagName:null,text:owner?owner.textContent:null};},[box.x+box.width/2,box.y+box.height/2,ownerSelector]);};
+ const childMapId=await f.evaluate(()=>AtlasPreview.data.ROOT.children.find(n=>n.host&&n.containerLocationId)?.id??null);
+ if(childMapId){await f.evaluate(id=>AtlasPreview.go(id),childMapId);await delay(300);
+   const hud=await hitTest(f.locator('#placeCard [data-layout]'),'[data-layout]');
+   check('U01-hud-layout-button-clickable',!!hud&&hud.owner==='BUTTON',hud);
+   // U02：74px 线长固定 —— 折叠图例、折叠左栏、缩放都只改读数，不改线长。
+   const scaleNow=async()=>f.locator('.sc-line i').evaluate(el=>({width:el.dataset.width,distance:el.dataset.distance,label:document.getElementById('scaleLabel').textContent}));
+   const s0=await scaleNow();
+   await f.locator('#legendToggle').click();const s1=await scaleNow();await f.locator('#legendToggle').click();
+   await f.locator('#leftCollapse').click();const s2=await scaleNow();await f.locator('#reopenLeft').click();
+   await f.locator('#zIn').click();await delay(250);const s3=await scaleNow();
+   check('U02-scale-width-fixed-74',[s0,s1,s2,s3].every(x=>x.width==='74'),[s0.width,s1.width,s2.width,s3.width]);
+   // 读数只由「每 UI 单位多少 CSS 像素 × 每 UI 单位多少米」决定；缩放加倍，读数必须减半（用真实相机与真实标定算）。
+   const scaleRelation=await f.evaluate(()=>{const m=AtlasUIModel,s=AtlasPreview.map.state.cam.s,metric=AtlasPreview.map.state.node?.metric;
+     const a=m.fixedScale(s,metric),b=m.fixedScale(s*2,metric);
+     return {wa:a.width,wb:b.width,da:a.distance,db:b.distance,la:a.label,lb:b.label,unit:a.unit};});
+   check('U02-scale-readout-inverse-proportional',scaleRelation.wa===74&&scaleRelation.wb===74&&Number.isFinite(scaleRelation.da)&&Math.abs(scaleRelation.da-2*scaleRelation.db)<1e-9&&scaleRelation.la!==scaleRelation.lb,scaleRelation);
+   await f.locator('#zFit').click();await delay(250);
+   // U03：网格步长 1/2/5×10^n、屏距 12–40 CSS px、单帧线数封顶 —— 直接问渲染器的纯函数。
+   const gridContract=await f.evaluate(list=>{const m=AtlasPreview.map,out=[];
+     for(const s of list){const step=m.gridStep(s);out.push({s,step,px:step*s});}return out;},[0.02,0.1,0.5,1,3.7,12,60,300]);
+   check('U03-grid-step-contract',gridContract.every(x=>x.step>0&&[1,2,5].some(m=>Math.abs(Number(x.step.toExponential().split('e')[0])-m)<1e-9)&&x.px>=12&&x.px<=40.0001),gridContract.map(x=>`${x.s}:${x.step}`).join(' '));
+   const gridLines=await f.evaluate(()=>AtlasPreview.map.paintGrid(document.createElement('canvas').getContext('2d'),{cam:{x:0,y:0,s:1e-6},vw:4000,vh:4000,dpr:1,step:1e-9}));
+   check('U03-grid-line-cap',gridLines<=2000,gridLines);
+   // 停帧后逐像素比对：同一相机、同一 t，唯一变量就是网格有没有画。
+   // 先量一次「同一状态重画的噪声」，再要求开/关网格造成的差异远大于噪声 —— 不用裸哈希相等冒充确定性。
+   await f.evaluate(()=>{const c=document.getElementById('map');
+     window.__atlasGrab=()=>{window.__px=c.getContext('2d').getImageData(0,0,c.width,c.height).data.slice();};
+     window.__atlasDiff=()=>{const a=c.getContext('2d').getImageData(0,0,c.width,c.height).data;let n=0;
+       for(let i=0;i<a.length;i+=4)if(Math.abs(a[i]-window.__px[i])+Math.abs(a[i+1]-window.__px[i+1])+Math.abs(a[i+2]-window.__px[i+2])>12)n++;return n;};});
+   await f.evaluate(()=>{AtlasPreview.map.setPaused(true);AtlasPreview.map.resize();window.__atlasGrab();});
+   await f.evaluate(()=>AtlasPreview.map.resize());
+   const gridNoise=await f.evaluate(()=>window.__atlasDiff());
+   await f.evaluate(()=>window.__atlasGrab());
+   await f.locator('#zGrid').click();await f.evaluate(()=>AtlasPreview.map.resize());
+   const gridDiff=await f.evaluate(()=>window.__atlasDiff());
+   await f.locator('#zGrid').click();await f.evaluate(()=>AtlasPreview.map.resize());
+   const gridNoiseAgain=await f.evaluate(()=>window.__atlasDiff());
+   await f.evaluate(()=>AtlasPreview.map.setPaused(false));
+   check('U03-grid-actually-painted',gridDiff>Math.max(gridNoise*20,2000)&&gridNoiseAgain<=gridNoise,{gridDiff,gridNoise,gridNoiseAgain});
+   // U04：真实 hover 不改锚点 —— 鼠标压上去，可命中点与世界坐标一动不动。
+   // 先回世界图（子图上可能一个标记都没有，拿不到可悬停目标）。
+   await f.evaluate(()=>AtlasPreview.go(AtlasPreview.data.ROOT.id));await f.locator('#zFit').click();await delay(350);
+   const marks=async()=>f.evaluate(()=>AtlasPreview.map.state.hits.map(h=>[h.m.id,Math.round(h.x),Math.round(h.y)]));
+   const rect=await f.locator('#map').boundingBox();
+   const hoverPoint=await f.evaluate(()=>{const h=AtlasPreview.map.state.hits[0];if(!h)return null;const r=document.getElementById('map').getBoundingClientRect();return {x:r.left+h.x,y:r.top+h.y,id:h.m.id};});
+   const beforeHover=await marks();
+   if(hoverPoint){await p.mouse.move(hoverPoint.x,hoverPoint.y);await delay(250);}
+   const afterHover=await marks();
+   check('U04-hover-keeps-anchors',!!hoverPoint&&JSON.stringify(beforeHover)===JSON.stringify(afterHover),{id:hoverPoint?.id,moved:beforeHover.filter((h,i)=>JSON.stringify(h)!==JSON.stringify(afterHover[i]))});
+   check('U04-hover-hits-same-mark',!!hoverPoint&&await f.evaluate(id=>AtlasPreview.map.state.hover?.id===id,hoverPoint.id));
+   await p.mouse.move(rect.x+4,rect.y+4);await delay(150);
+   // U05：本轮动向与历史记录是一份数据的**不重叠划分**；本轮为空必须明说。
+   const feed=await f.evaluate(()=>({latestTurnId:AtlasPreview.data.meta.latestTurnId,turn:AtlasPreview.data.meta.turn,
+     known:AtlasPreview.data.EVENTS.filter(e=>e.known).length,turnN:AtlasPreview.turnEvents().length,histN:AtlasPreview.historyEvents().length,
+     overlap:AtlasPreview.turnEvents().filter(e=>AtlasPreview.historyEvents().some(h=>h.id===e.id)).length,
+     turnIds:[...new Set(AtlasPreview.turnEvents().map(e=>e.turnId))]}));
+   check('U05-turn-and-history-partition',feed.overlap===0&&feed.turnN+feed.histN===feed.known&&(feed.latestTurnId==null||feed.turnIds.every(id=>id===feed.latestTurnId)),feed);
+   await f.locator('[data-view="sim"]').click();await delay(150);
+   const simText=await f.locator('#workspacePage').innerText();
+   check('U05-empty-turn-is-explained',feed.turnN>0||simText.includes('本轮暂无新的世界动向'),{turnN:feed.turnN});
+   await f.locator('[data-view="map"]').click();
+   // U06：POV 不得把作者可见的实体从任何界面区域漏回来。
+   const authorNames=await f.evaluate(()=>AtlasPreview.data.CAST.map(c=>c.name).concat(AtlasPreview.data.LOCATIONS.map(l=>l.name)));
+   await f.evaluate(()=>AtlasPreview.switchView('pov'));await f.waitForFunction(()=>AtlasPreview.data.meta.viewMode==='pov');
+   const povLeak=await f.evaluate(names=>{const zones=['#inspector','#railList','#dockBody','#placeCard','#crumbs','#workspacePage'];
+     const text=zones.map(z=>document.querySelector(z)?.innerText??'').join('\n');
+     return {leaked:names.filter(n=>n&&text.includes(n)),povCast:AtlasPreview.data.CAST.length,povLoc:AtlasPreview.data.LOCATIONS.length};},authorNames);
+   check('U06-pov-does-not-leak-hidden-entities',povLeak.leaked.length===0,povLeak);
+   check('U06-pov-narrows-entities',povLeak.povCast<authorNames.length/2||povLeak.povLoc===0,povLeak);
+   await f.evaluate(()=>AtlasPreview.switchView('author'));await f.waitForFunction(()=>AtlasPreview.data.meta.viewMode==='author');
+   await f.evaluate(()=>AtlasPreview.go(AtlasPreview.data.ROOT.id));await delay(250);
+ }else{check('U01-hud-layout-button-clickable',false,'夹具里没有带容器的子图，无法验证内存 HUD 按钮中的布局按钮');}
+ // 下面几步要用设置页的分类标签，收尾必须回到「预设与外观」，别把后续检查踩空。
+ await f.locator('[data-view="prefs"]').click();await delay(150);
  await f.locator('[data-settings-tab="connection"]').click();await f.locator('#connectionName').fill('原版接入验收连接');await f.locator('#connectionProvider').selectOption('sillytavern');await f.locator('[data-save-connection]').click();await delay(300);check('connection-save-status',await f.evaluate(()=>!AtlasPreview.presets.status.error),await f.evaluate(()=>AtlasPreview.presets.status));
  let settings=await p.evaluate(async()=> (await atlasPreviewConnection.api.request('GET','/settings')).body.data);
  check('connection-real-save',settings.apiPresets.some(c=>c.name==='原版接入验收连接'&&c.connectionMode==='main'),{count:settings.apiPresets.length});
@@ -74,8 +191,41 @@ try{
  await p.screenshot({path:`${dir}/native-desktop.png`});await p.setViewportSize({width:390,height:844});await delay(400);check('mobile-no-overflow',await f.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth));await p.screenshot({path:`${dir}/native-mobile.png`});await p.setViewportSize({width:1600,height:1000});
  const locations=await p.evaluate(async()=>{const sql=await import('/release/atlas-ui-extension/dist/atlas-sql.mjs'),ctx=SillyTavern.getContext(),s=await sql.openSqlSession({chatUid:ctx.chatId,chatMetadata:ctx.chatMetadata,saveSession:async()=>{throw Error('read only');}});try{return (await s.repo.queryView({kind:'catalog',entityKind:'location',viewMode:'author'})).items.filter(x=>x.mapId==='world').slice(0,6).map(x=>({id:x.entityId,name:x.name}));}finally{await sql.closeSqlSession(s);}});
  const scope={chatId:'review',branchId:'main',revision:0,viewMode:'author'},context={scope,map:{id:'world',name:'空间验收',metersPerCell:2,frame:{cols:15,rows:12}},entities:{locations:locations.map(x=>x.id),characters:[],items:[]}};
- const generated={floor:generateFloor({id:'world',width:42,height:34,corridorWidth:3,rooms:locations.map((x,i)=>({...x,side:i<3?'north':'south',w:12,h:12})),contents:[{id:'review-shelf',name:'书架',roomId:locations[0].id,type:'shelf',w:3,h:1}],actors:[],items:[]},{...context,map:{...context.map,frame:{cols:21,rows:17}}}),city:generateCity({id:'world',width:1200,height:900,riverWidth:36,blocksPerDistrict:3,districts:locations.slice(0,4).map((x,i)=>({...x,bank:i%2?'east':'west',order:Math.floor(i/2)})),buildings:[]},{...context,map:{...context.map,metersPerCell:30,frame:{cols:40,rows:30}}})};
- for(const [kind,g] of Object.entries(generated)){if(!g.ok)throw Error(JSON.stringify(g.issues));const {p:proof,f:ff}=await open({scene:g.scene});await ff.waitForFunction(k=>AtlasPreview.map.state.kind===k,kind);const actual=await ff.evaluate(()=>({kind:AtlasPreview.map.state.kind,rooms:AtlasPreview.map.state.geo.rooms?.length,river:AtlasPreview.map.state.geo.river?.length,districts:AtlasPreview.map.state.geo.districts?.length,furniture:AtlasPreview.map.state.geo.furn?.length,marks:AtlasPreview.map.state.marks.length}));check(`saved-${kind}`,kind==='floor'?actual.rooms===locations.length&&actual.furniture>0:actual.districts===4&&actual.river>20,actual);await proof.screenshot({path:`${dir}/native-${kind}.png`});await proof.close();}
+ /** 概览层：真实路线端点（走 locks.points）+ 分区 + 水系/林地装饰，全部从生成器的正式入口走。 */
+ const overviewContext={...context,entities:{...context.entities,routes:['review-route']},
+   routesById:{'review-route':{from_location_id:locations[0].id,to_location_id:locations[1].id}},
+   locks:{points:{[locations[0].id]:{x:120,y:90},[locations[1].id]:{x:900,y:620}}}};
+ const generated={
+   floor:generateFloor({id:'world',width:42,height:34,corridorWidth:3,rooms:locations.map((x,i)=>({...x,side:i<3?'north':'south',w:12,h:12})),contents:[{id:'review-shelf',name:'书架',roomId:locations[0].id,type:'shelf',w:3,h:1}],actors:[],items:[]},{...context,map:{...context.map,frame:{cols:21,rows:17}}}),
+   city:generateCity({id:'world',width:1200,height:900,riverWidth:36,blocksPerDistrict:3,districts:locations.slice(0,4).map((x,i)=>({...x,bank:i%2?'east':'west',order:Math.floor(i/2)})),buildings:[]},{...context,map:{...context.map,metersPerCell:30,frame:{cols:40,rows:30}}}),
+   overview:generateOverview({id:'world',surface:'forest',
+     zones:locations.slice(0,4).map((x,i)=>({...x,role:i===0?'settlement':'forest',size:'medium'})),
+     links:[{id:'review-route',name:'验收路线'}],
+     features:[{id:'review-water',name:'验收河',type:'watercourse',zoneId:locations[0].id,fromSector:'north',toSector:'south',widthClass:'medium'},
+       {id:'review-ridge',name:'验收山脊',type:'ridge',density:'low'},
+       {id:'review-woods',name:'验收林地',type:'forest_texture',zoneId:locations[1].id,density:'high'}]},
+     {...overviewContext,map:{...overviewContext.map,metersPerCell:30,frame:{cols:50,rows:30}}})};
+ // 每个层级断言的是「界面真的读到了这类图元」，不是「生成器自己说 ok」。
+ // 概览的封锁型装饰（林地）可能因为避让真实内容被整条丢弃 —— 那是 G05/G06 要的行为，
+ // 所以这里只要求「水系 + 无 zone 的山脊」都在，并记录实际拿到了哪些类型。
+ const expectTier={
+   floor:actual=>actual.rooms===locations.length&&actual.furniture>0&&actual.marks>0,
+   city:actual=>actual.districts===4&&actual.river>20&&actual.marks>0,
+   overview:actual=>actual.shapes===4&&actual.routes>=1&&actual.features>=2
+     &&actual.featureTypes.includes('watercourse')&&actual.featureTypes.includes('ridge')&&actual.surface==='forest'};
+ for(const [kind,g] of Object.entries(generated)){
+   if(!g.ok)throw Error(`${kind}: ${JSON.stringify(g.issues)}`);
+   const {p:proof,f:ff}=await open({scene:g.scene});
+   await ff.waitForFunction(k=>{const s=AtlasPreview.map.state;
+     return k==='overview'?(s.geo.overviewShapes?.length??0)>0:s.kind===k;},kind);
+   const actual=await ff.evaluate(()=>({kind:AtlasPreview.map.state.kind,rooms:AtlasPreview.map.state.geo.rooms?.length,river:AtlasPreview.map.state.geo.river?.length,
+     districts:AtlasPreview.map.state.geo.districts?.length,furniture:AtlasPreview.map.state.geo.furn?.length,marks:AtlasPreview.map.state.marks.length,
+     shapes:AtlasPreview.map.state.geo.overviewShapes?.length,features:AtlasPreview.map.state.geo.overviewFeatures?.length,routes:AtlasPreview.map.state.geo.overviewRoutes?.length,
+     featureTypes:(AtlasPreview.map.state.geo.overviewFeatures??[]).map(x=>x.type),surface:AtlasPreview.map.state.geo.surface??null}));
+   check(`saved-${kind}`,expectTier[kind](actual),actual);
+   check(`saved-${kind}-painted`,(await ff.evaluate(()=>{const c=document.getElementById('map'),a=c.getContext('2d').getImageData(0,0,c.width,c.height).data,s=new Set();for(let i=0;i<a.length;i+=64)s.add(`${a[i]},${a[i+1]},${a[i+2]}`);return s.size;}))>18);
+   await proof.screenshot({path:`${dir}/native-${kind}.png`});await proof.close();
+ }
  await f.evaluate(()=>AtlasHost.close());check('host-close',await p.locator('.atlas-native-ui-host').evaluate(el=>el.style.display==='none'));await p.evaluate(()=>atlasPreviewConnection.core.setPanelOpen(true));check('host-reopen',await p.locator('.atlas-native-ui-host').evaluate(el=>el.style.display!=='none'));
  check('no-browser-errors',report.errors.length===0,report.errors);await p.close();
 }catch(e){report.failed.push(e.stack);}finally{report.finishedAt=new Date().toISOString();writeFileSync(`${dir}/evidence.json`,JSON.stringify(report,null,2));await browser.close();server?.kill();}

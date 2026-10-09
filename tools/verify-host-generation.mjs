@@ -40,7 +40,23 @@ async function floor(p,{user='走进图书馆',assistant='你走进了图书馆�
   if(a.alias==='all'||a.alias==='after')await c.eventSource.emit(e.GENERATION_ENDED_AFTER_COMMANDS,c.chat.length);
  },{user,assistant,type,params,dryRun,alias});
 }
-async function finish(p){await delay(550);await p.evaluate(()=>atlasPreviewConnection.core.handleEvent('FLUSH'));}
+/**
+ * 收尾：先把待处理的整轮回执排上队，再**等它真的静下来**才让调用方断言。
+ *
+ * 旧实现是 `delay(550)` 死等 —— 冷启动第一轮（SQL wasm 装载 + 目录读取 + 模型往返）经常超过 550ms，
+ * 于是 `normal-floor-real-model-and-save` 会随机读到 `phase:'committing'`（calls=1 / saves=0 / receipts=[]），
+ * 门禁一半概率假红。这里改成轮询到 `phase==='idle'`（或已带出错误）为止，断言的目标状态一个没放宽。
+ */
+async function finish(p){
+ await delay(550); // 原语义：先让本轮收尾跑起来，再 FLUSH 兜底。顺序不能动。
+ await p.evaluate(()=>atlasPreviewConnection.core.handleEvent('FLUSH'));
+ for(let i=0;i<240;i++){
+  const s=await p.evaluate(()=>({phase:atlasPreviewConnection.core.getState().turnPhase,error:atlasPreviewConnection.core.getState().lastError}));
+  if(s.phase==='idle'||s.error)return;
+  await delay(50);
+ }
+ throw Error('turn never settled: phase stayed non-idle for 12s');
+}
 const state=p=>p.evaluate(()=>({calls:__calls,saves:__saves,receipts:atlasPreviewConnection.core.getState().receipts,error:atlasPreviewConnection.core.getState().lastError,phase:atlasPreviewConnection.core.getState().turnPhase,saved:!!SillyTavern.getContext().chatMetadata.atlas?.database}));
 try{
  for(let i=0;i<40;i++){try{if((await fetch(`${base}/dev-preview/index.html`)).ok)break;}catch{}await delay(250);}

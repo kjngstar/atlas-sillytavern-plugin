@@ -227,10 +227,17 @@ export function projectReferenceData({state={},mapView,sceneView,catalogView,tas
    * 坑：世界图的 mapId 很可能**就叫 `world`**（旧适配器 atlas-db-state-adapter 也用 'world'
    * 当「挂在世界根」的哨兵）。所以绝不能在比较时直接特判字符串 —— 先按真实 mapId 找，
    * 找不到再考虑哨兵，否则父图会被自己顶掉、整个树被摊平成两层。
+   *
+   * 坑二（M7-02 浏览器门禁抓到的真回归）：`connectionQuality==='unclassified'` 的语义是
+   * **「服务端找不到可用祖先，已把它挂到世界根图」**（见 02-固定接口与算法说明：
+   * "不存在可用祖先但根图有效时，挂到世界根图并标 connectionQuality=unclassified"），
+   * 不是「这张图坏了」。把 unclassified 当坏图会把所有「容器地点种类不认识」的内部图
+   * 整批丢进「未挂接」，同时把真正的世界图挤成合成根的子节点 —— 树是活的，图却全没了。
+   * 只有 `invalid`（服务端连拓扑节点都定位不到 / 没有可用根图）才进「未挂接」组。
    */
   const parentLinkOf=m=>{
     const quality=text(m.connectionQuality);
-    if(quality==='invalid'||quality==='unclassified')return UNCLASSIFIED;
+    if(quality==='invalid')return UNCLASSIFIED;
     const declared=text(m.parentMapId);
     if(!declared)return null;
     if(nodes.has(declared))return declared;
@@ -250,7 +257,16 @@ export function projectReferenceData({state={},mapView,sceneView,catalogView,tas
     if(cyclic){unclassified.push(n);continue;}
     parent.children.push(n);
   }
-  out.ROOT=(roots.length===1&&unclassified.length===0)?roots[0]:{...out.ROOT,name:out.meta.worldName,children:roots};
+  /**
+   * 世界根：只要服务端给出了**唯一**根图，就拿那张真图当世界根 —— 它带着自己的 geo/marks/points，
+   * 是唯一能画、能进、能被 `initialNodeId` 选中的东西。
+   *
+   * 坏图（invalid / 父环 / 缺父）只配多出「未挂接的图」这一个分组，
+   * **没有资格把真世界图挤成合成容器的一个子节点**（那是 M7-02 门禁抓到的同一类回归的残党）：
+   * 一旦降级，世界图就不在根位置，`fit` / 标记 / 米制标定全落到空壳上。
+   * 只有「压根没有唯一根图」（0 张或 >1 张）才用合成容器兜底。
+   */
+  out.ROOT=roots.length===1?roots[0]:{...out.ROOT,name:out.meta.worldName,children:roots};
   if(unclassified.length)out.ROOT.children.push({id:UNCLASSIFIED,name:'未挂接的图',kind:'region',code:'L2',tag:'未挂接',
     description:'这些图找不到可信的父图（父环、缺父或结构损坏），先单独列出来，不随便挂到某座城市下。',
     children:unclassified,geo:{},marks:[],host:true,unclassified:true});

@@ -8,5 +8,21 @@
     "css/preview.css": "45d36e7133f77abe244a833585e7b1b1a4b7db2b691ac525c60f7a69b74cbab8",
     "fonts/atlas-sans.woff": "7c3e8691a54655f9c748eb2d9c6d09cfa31f1766588131857af3778a876b2c26"
   },
-  "templateSha256": "53daab5cb8359788dc15c448a2fb1c803b5ba3130e5cd4604bd35b834b1f3617"
+  "templateSha256": "53daab5cb8359788dc15c448a2fb1c803b5ba3130e5cd4604bd35b834b1f3617",
+  "note": "assets 是**供给原版**的哈希，只读、不许改写；suppliedCommit 是这些字节最后一次以原样进入仓库的提交。供给之后对同文件的任何改动都必须逐条登记在 auditedDeltas 里 —— 只登记「确有必要、且改动内容可逐字核对」的那一类。门禁 tools/verify-reference-browser.mjs 会同时校验：现行文件哈希、每条 delta 的增删行确实存在于文件里、以及供给原版能否从 suppliedCommit 复原。",
+  "suppliedCommit": "38413a0",
+  "suppliedRepoPath": "ui/atlas-reference",
+  "auditedDeltas": [
+    {
+      "file": "css/preview.css",
+      "commit": "a87640f",
+      "commitSubject": "fix: enable layout actions inside the map information overlay",
+      "reason": "供给版给 #atlasDemo .hud-place 设了 pointer-events:none，HUD 里的「进入此地点」按钮在真实浏览器里点不动 —— U01 的子图入口整条链失效。只加回按钮自身的 pointer-events:auto，不动容器。",
+      "linesAdded": [
+        "#atlasDemo .hud-place button{pointer-events:auto;}"
+      ],
+      "linesRemoved": [],
+      "currentSha256": "0b13be32695a6e973526f0c240f98dd2462b10d1f229f234f96cd2eae0c62e7f"
+    }
+  ]
 }

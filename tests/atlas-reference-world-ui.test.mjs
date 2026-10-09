@@ -117,6 +117,30 @@ test('U01：单子图不吞外层 —— 建筑的唯一内部图仍然挂在世
   assert.equal(BUILDING_DATA.ROOT.children[0].kind,'building','导航层级取 SQL 容器种类，不因为画法是 floor 就变成楼层');
 });
 
+test('U01：unclassified 是「挂到世界根」而不是「坏图」——内部图不许被整批孤立',()=>{
+  // 回归：真实夹具里每张内部图的 connectionQuality 就是 'unclassified'
+  // （容器地点种类不认识 → 服务端挂到根图）。旧实现把它当坏图，
+  // 结果 6 张子图全进「未挂接」，真正的世界图还被挤成合成根的子节点。
+  const child=(id,name)=>Object.assign({},BUILDING_MAP,{mapId:id,name,parentMapId:'world',connectionQuality:'unclassified'});
+  const data=projectReferenceData({mapView:view([WORLD,child('m-a','雪线驿站'),child('m-b','潮门港'),
+    {...BUILDING_MAP,mapId:'m-broken',name:'断裂图',parentMapId:'world',connectionQuality:'invalid'}]),
+    catalogView:view(CATALOG),viewMode:'author',scopeKey:'S4'});
+  assert.equal(data.ROOT.id,'world','世界根必须是真正的世界图，不是包一层的合成容器');
+  assert.equal(data.ROOT.mapId,'world','合成容器壳没有 mapId —— 有 mapId 才证明这是服务端那张真图');
+  assert.ok(data.ROOT.host,'世界根必须自己就是一张地图');
+  assert.equal(data.ROOT.kind,'world');
+  const names=data.ROOT.children.filter(n=>!n.unclassified).map(n=>n.id);
+  assert.deepEqual(names,['m-a','m-b'],'unclassified 的内部图按服务端 parentMapId 挂在世界图下');
+  // 「未挂接」分组是**多出来的一个分组**，不许把真世界图挤下去 —— 根必须还是那张有 points 的世界图。
+  assert.equal(data.ROOT.children.at(-1).id,'__unclassified__','坏图只在世界根下多一个分组，不另起合成根');
+  const bucket=data.ROOT.children.find(n=>n.unclassified);
+  assert.ok(bucket,'invalid 的图必须单独进「未挂接」');
+  assert.deepEqual(bucket.children.map(n=>n.id),['m-broken']);
+  // 每张图恰好可达一次，谁都没丢（「未挂接」是分组壳，没有 mapId，按 mapId 分辨）。
+  const reachable=[];const walk=n=>{if(n.mapId)reachable.push(n.id);for(const c of n.children||[])walk(c);};walk(data.ROOT);
+  assert.deepEqual([...reachable].sort(),['m-a','m-b','m-broken','world'].sort());
+});
+
 test('U01：单击开对应详情，入口按钮进子图，外层地图不被替换',t=>{
   const {w,preview}=withUI(t);
   freeze(preview.map);
