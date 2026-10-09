@@ -2749,6 +2749,7 @@ export async function readCardLoreSupplementViaSelector(selectionContext, select
       sceneKeywords: sceneKeywords,
       mode: selectionContext.mode,
       includeAllEnabled: true,
+      prioritizeGeography: true,
       maxChars: LORE_SUPPLEMENT_LIMITS.TOTAL_CHARS,
     });
     if (failedBooks > 0) {

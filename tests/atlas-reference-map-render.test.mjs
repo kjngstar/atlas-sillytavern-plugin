@@ -16,6 +16,20 @@ import {referenceGeometry} from '../ui/atlas-reference-data.mjs';
 
 const SOURCE = readFileSync(new URL('../ui/atlas-reference/js/map.js', import.meta.url), 'utf8');
 const cut = (from, to) => SOURCE.slice(SOURCE.indexOf(from), SOURCE.indexOf(to));
+
+test('独立房间视野适应实际房间，保留物理尺度与多房间整图视野',()=>{
+ const room={x:-90,y:35,w:80,h:120};
+ const st={kind:'floor',node:{extent:[-540,540,-340,360]},geo:{rooms:[room],corridor:{h:0}},vw:800,vh:600,cam:{},tgt:{}};
+ const runtime=vm.createContext({st,EXTENT:{},Math,Number});
+ vm.runInContext(cut('function extent()', 'function W2S('),runtime);
+ vm.runInContext('fit(false)',runtime);
+ assert.equal(st.cam.x,-50);assert.equal(st.cam.y,95);
+ assert.ok(Math.abs(st.cam.s-600/(120*1.16))<1e-10);
+ assert.deepEqual(st.node.extent,[-540,540,-340,360]);
+ st.geo.rooms.push({...room,x:100});vm.runInContext('fit(false)',runtime);
+ assert.equal(st.cam.x,0);assert.equal(st.cam.y,10);
+ assert.ok(st.cam.s<1);
+});
 /** 模块级工具区（hash/rng/smooth/rrect/glow + 概览背景）。 */
 const TOOLS = cut('function hash(s)', 'function create(canvas');
 

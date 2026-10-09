@@ -1238,7 +1238,7 @@ export function createSqlRepository(options: RepositoryOptions) {
             before: { ...row },
             after: {
               ...row,
-              frame_json: { ...frame, [LAYOUT_CONTEXT_FRAME_KEY]: { version: 1, hash: layoutTask.contextHash, completedTurnId: turnId } },
+              frame_json: { ...frame, [LAYOUT_CONTEXT_FRAME_KEY]: { version: 2, hash: layoutTask.contextHashes?.[mapId]??layoutTask.contextHash, completedTurnId: turnId } },
               row_rev: Number(row.row_rev ?? 1) + 1,
               updated_turn_id: turnId,
             },

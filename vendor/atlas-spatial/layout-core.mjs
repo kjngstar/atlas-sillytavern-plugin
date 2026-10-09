@@ -130,7 +130,7 @@ import * as B from './foundation.mjs';
       }
     }
     for(const i of spec.items||[]){
-      const g=groups.find(g=>g.id===i.on),b=g?.bodies.find(b=>['table','desk','shelf'].includes(b.type));
+      const g=groups.find(g=>g.id===i.on),b=g?.bodies.find(b=>['table','desk','shelf','cabinet'].includes(b.type));
       if(b)items.push({...i,...center(b),roomId:g.roomId,type:'item',containerId:g.id,elevation:.8,quality:'layout'});else issues.push({id:i.id,code:'ITEM_CONTAINER_NOT_FOUND'});
     }
     if(bare.corridor.h>0)for(let x=1.5;x<spec.width;x+=3)lamps.push({id:'hall-light:'+x,type:'light',roomId:'corridor',x,y:bare.corridor.y+.22,elevation:2.8});

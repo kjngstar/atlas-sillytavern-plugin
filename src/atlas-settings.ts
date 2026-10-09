@@ -227,6 +227,7 @@ export interface AtlasApiConnectionPreset {
   profileId?: string;
   /** 附加请求体参数（custom_include_body，JSON / YAML object 文本）。 */
   bodyParams?: string;
+  toolCalling?: boolean;
   /** 排除请求体字段（custom_exclude_body，逗号 / 换行分隔字段名）。 */
   excludeBodyParams?: string;
   /** 附加请求标头（每行 Header: Value，追加在 Authorization 之后）。 */
@@ -359,6 +360,7 @@ export type AtlasSettingsCommand =
         apiFormat?: AtlasApiFormat;
         profileId?: string;
         bodyParams?: string;
+        toolCalling?: boolean;
         excludeBodyParams?: string;
         requestHeaders?: string;
         promptPostProcessing?: string;
@@ -526,6 +528,7 @@ function parseConnectionPreset(raw: unknown): Omit<AtlasApiConnectionPreset, "id
     timeoutMs: record.timeoutMs,
     ...(normalizeApiFormat(record.apiFormat) !== "openai" ? { apiFormat: normalizeApiFormat(record.apiFormat) } : {}),
     ...(typeof record.profileId === "string" && record.profileId.trim() ? { profileId: record.profileId.trim().slice(0, 128) } : {}),
+    ...(record.toolCalling === true ? { toolCalling: true } : {}),
     ...(typeof record.bodyParams === "string" && record.bodyParams.trim() ? { bodyParams: record.bodyParams.slice(0, 4000) } : {}),
     ...(typeof record.excludeBodyParams === "string" && record.excludeBodyParams.trim() ? { excludeBodyParams: record.excludeBodyParams.slice(0, 2000) } : {}),
     ...(typeof record.requestHeaders === "string" && record.requestHeaders.trim() ? { requestHeaders: record.requestHeaders.slice(0, 2000) } : {}),
@@ -881,6 +884,7 @@ export function applySettingsCommand(
         timeoutMs: preset.timeoutMs,
         ...(normalizeApiFormat(preset.apiFormat) !== "openai" ? { apiFormat: normalizeApiFormat(preset.apiFormat) } : {}),
         ...(connectionMode === "profile" && typeof preset.profileId === "string" && preset.profileId.trim() ? { profileId: preset.profileId.trim().slice(0, 128) } : {}),
+        ...(preset.toolCalling === true ? { toolCalling: true } : {}),
         ...(typeof preset.bodyParams === "string" && preset.bodyParams.trim() ? { bodyParams: preset.bodyParams.slice(0, 4000) } : {}),
         ...(typeof preset.excludeBodyParams === "string" && preset.excludeBodyParams.trim() ? { excludeBodyParams: preset.excludeBodyParams.slice(0, 2000) } : {}),
         ...(typeof preset.requestHeaders === "string" && preset.requestHeaders.trim() ? { requestHeaders: preset.requestHeaders.slice(0, 2000) } : {}),
@@ -1226,6 +1230,7 @@ export interface AtlasSettingsView {
     apiFormat: AtlasApiFormat;
     profileId: string;
     bodyParams: string;
+    toolCalling?: boolean;
     excludeBodyParams: string;
     requestHeaders: string;
     promptPostProcessing: string;
@@ -1309,6 +1314,7 @@ export function settingsViewV2(settings: AtlasServerSettingsV2): AtlasSettingsVi
         apiFormat: normalizeApiFormat(p.apiFormat),
         profileId: p.profileId ?? "",
         bodyParams: p.bodyParams ?? "",
+        toolCalling: p.toolCalling === true,
         excludeBodyParams: p.excludeBodyParams ?? "",
         requestHeaders: p.requestHeaders ?? "",
         promptPostProcessing: normalizePromptPostProcessing(p.promptPostProcessing),
@@ -1370,6 +1376,7 @@ export function resolveWorldTurnPreset(settings: AtlasServerSettingsV2): AtlasAp
     ...(mode !== "custom" ? { connectionMode: mode } : {}),
     ...(format !== "openai" ? { apiFormat: format } : {}),
     ...(mode === "profile" && connection.profileId ? { profileId: connection.profileId } : {}),
+    ...(connection.toolCalling === true ? { toolCalling: true } : {}),
     ...(connection.bodyParams ? { bodyParams: connection.bodyParams } : {}),
     ...(connection.excludeBodyParams ? { excludeBodyParams: connection.excludeBodyParams } : {}),
     ...(connection.requestHeaders ? { requestHeaders: connection.requestHeaders } : {}),

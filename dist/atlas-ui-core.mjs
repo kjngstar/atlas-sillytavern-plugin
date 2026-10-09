@@ -4685,6 +4685,7 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
     const body = JSON.stringify({
       model: bodyModel,
       messages: bodyMessages,
+      ...deps.responseTool && !forClaude && (!preset.apiFormat || preset.apiFormat === "openai") ? { tools: [{ type: "function", function: deps.responseTool }], tool_choice: "auto" } : {},
       max_tokens: maxTokens,
       temperature,
       top_p: topP,
@@ -4741,7 +4742,7 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
         payload = firstSsePayload(rawText);
       }
       const truncated = choiceFinishReason(payload) === "length";
-      const text3 = extractAssistantText(payload);
+      const text3 = extractAssistantText(payload, deps.responseTool?.name);
       if (text3 === null || text3.trim().length === 0) {
         const emptyChoices = Boolean(
           payload && typeof payload === "object" && Array.isArray(payload.choices) && payload.choices.length === 0
@@ -4929,11 +4930,23 @@ function choiceFinishReason(payload) {
   const reason = first.finish_reason;
   return typeof reason === "string" ? reason : null;
 }
-function extractAssistantText(payload) {
+function extractAssistantText(payload, responseTool) {
   if (!payload || typeof payload !== "object") return null;
   const p = payload;
   if (Array.isArray(p.choices) && p.choices.length > 0) {
     const choice = p.choices[0];
+    const calls = choice?.message?.tool_calls;
+    if (Array.isArray(calls) && calls.length) {
+      if (!responseTool || calls.length !== 1) return null;
+      const fn = calls[0]?.function;
+      if (fn?.name !== responseTool || typeof fn.arguments !== "string") return null;
+      try {
+        const args = JSON.parse(fn.arguments);
+        return args && typeof args.content === "string" ? args.content : null;
+      } catch {
+        return null;
+      }
+    }
     const fromMessage = textContentOf(choice?.message?.content);
     const fromReasoning = textContentOf(choice?.message?.reasoning_content) ?? textContentOf(choice?.message?.reasoning);
     const picked = pickFirstNonEmpty([
@@ -5257,6 +5270,7 @@ function parseConnectionPreset(raw) {
     timeoutMs: record.timeoutMs,
     ...normalizeApiFormat(record.apiFormat) !== "openai" ? { apiFormat: normalizeApiFormat(record.apiFormat) } : {},
     ...typeof record.profileId === "string" && record.profileId.trim() ? { profileId: record.profileId.trim().slice(0, 128) } : {},
+    ...record.toolCalling === true ? { toolCalling: true } : {},
     ...typeof record.bodyParams === "string" && record.bodyParams.trim() ? { bodyParams: record.bodyParams.slice(0, 4e3) } : {},
     ...typeof record.excludeBodyParams === "string" && record.excludeBodyParams.trim() ? { excludeBodyParams: record.excludeBodyParams.slice(0, 2e3) } : {},
     ...typeof record.requestHeaders === "string" && record.requestHeaders.trim() ? { requestHeaders: record.requestHeaders.slice(0, 2e3) } : {},
@@ -5550,6 +5564,7 @@ function applySettingsCommand(settings, command, deps = {}) {
         timeoutMs: preset.timeoutMs,
         ...normalizeApiFormat(preset.apiFormat) !== "openai" ? { apiFormat: normalizeApiFormat(preset.apiFormat) } : {},
         ...connectionMode === "profile" && typeof preset.profileId === "string" && preset.profileId.trim() ? { profileId: preset.profileId.trim().slice(0, 128) } : {},
+        ...preset.toolCalling === true ? { toolCalling: true } : {},
         ...typeof preset.bodyParams === "string" && preset.bodyParams.trim() ? { bodyParams: preset.bodyParams.slice(0, 4e3) } : {},
         ...typeof preset.excludeBodyParams === "string" && preset.excludeBodyParams.trim() ? { excludeBodyParams: preset.excludeBodyParams.slice(0, 2e3) } : {},
         ...typeof preset.requestHeaders === "string" && preset.requestHeaders.trim() ? { requestHeaders: preset.requestHeaders.slice(0, 2e3) } : {},
@@ -5867,6 +5882,7 @@ function settingsViewV2(settings) {
         apiFormat: normalizeApiFormat(p.apiFormat),
         profileId: p.profileId ?? "",
         bodyParams: p.bodyParams ?? "",
+        toolCalling: p.toolCalling === true,
         excludeBodyParams: p.excludeBodyParams ?? "",
         requestHeaders: p.requestHeaders ?? "",
         promptPostProcessing: normalizePromptPostProcessing(p.promptPostProcessing),
@@ -5924,6 +5940,7 @@ function resolveWorldTurnPreset(settings) {
     ...mode !== "custom" ? { connectionMode: mode } : {},
     ...format !== "openai" ? { apiFormat: format } : {},
     ...mode === "profile" && connection.profileId ? { profileId: connection.profileId } : {},
+    ...connection.toolCalling === true ? { toolCalling: true } : {},
     ...connection.bodyParams ? { bodyParams: connection.bodyParams } : {},
     ...connection.excludeBodyParams ? { excludeBodyParams: connection.excludeBodyParams } : {},
     ...connection.requestHeaders ? { requestHeaders: connection.requestHeaders } : {},
@@ -5985,6 +6002,7 @@ function createSqlModelPort(options) {
     },
     async request(request) {
       const { preset, input, messages } = await prepare(request);
+      if (preset.toolCalling && ((preset.connectionMode ?? "custom") !== "custom" || (preset.apiFormat ?? "openai") !== "openai")) throw failure("TOOL_PROTOCOL_UNSUPPORTED", "函数输出目前仅支持自定义 OpenAI 兼容连接，请关闭函数输出或切换连接");
       const budget = options.budget;
       const phase = options.stage === "background" ? "background" : request.phase || options.stage || "observe";
       const logical = budget?.claimBatch(phase, request.batchId);
@@ -5998,6 +6016,7 @@ function createSqlModelPort(options) {
         fetchFn: options.fetchFn,
         now: options.now,
         messagesOverride: messages,
+        ...preset.toolCalling ? { responseTool: { name: "emit_atlas_operations", description: "Return the complete Atlas operations exactly once as JSONL in content. Follow the stage operation contract; do not write text outside this call.", parameters: { type: "object", properties: { content: { type: "string", description: "Complete stage reply, one validated operation JSON object per line" } }, required: ["content"], additionalProperties: false } } } : {},
         // M3-03A：API 内部兼容路由的第二次真实发送，也走同一局部预算。缺预算 port 时不传，
         // 由 api-client 按最严策略拒发并明确报错（绝不隐藏重试）。
         ...budget ? { initialTransport: () => transportBudgetPort(budget, phase, request.batchId).claim(), rescueTransport: () => transportBudgetPort(budget, phase, request.batchId).claim() } : {}
@@ -7016,6 +7035,7 @@ function createStProxyFetch(deps) {
       custom_url: customUrlRaw,
       model: payload.model,
       messages: payload.messages,
+      ...payload.tools !== void 0 ? { tools: payload.tools, tool_choice: payload.tool_choice ?? "auto" } : {},
       stream: payload.stream ?? false,
       ...payload.temperature !== void 0 ? { temperature: payload.temperature } : {},
       ...payload.max_tokens !== void 0 ? { max_tokens: payload.max_tokens } : {},
@@ -12470,7 +12490,7 @@ function pickSlot(candidate, context) {
 var DEFAULT_PER_ENTRY_CHARS = 400;
 var DEFAULT_GEO_PER_ENTRY_CHARS = 4e3;
 var DEFAULT_MAX_ENTRIES = 60;
-var GEO_TITLE_PREFIX = /(?:地图|地理|地点|地区|区域|领域|城镇|城市|城镇|关隘|道路|街道|聚落|场所|大陆|国家|地形|风土)/;
+var GEO_TITLE_PREFIX = /(?:世界观|地图|地理|地点|地区|区域|领域|城镇|城市|关隘|道路|街道|聚落|场所|大陆|国家|地形|风土)/;
 function stableUid(entry, _idx) {
   const fallback = `${entry.title ?? ""}:${entry.content.slice(0, 80)}`;
   return `${entry.bookName ?? "?"}:${entry.uid && entry.uid.length > 0 ? entry.uid : fallback}`;
@@ -12511,7 +12531,7 @@ function selectAtlasLoreSupplement(input) {
   const chat = input.chatKeywords;
   const scene = input.sceneKeywords;
   filtered.sort((a, b) => {
-    if (input.includeAllEnabled) return a.__idx - b.__idx;
+    if (input.includeAllEnabled) return (input.prioritizeGeography ? Number(isGeographicTitle(b.title ?? "")) - Number(isGeographicTitle(a.title ?? "")) : 0) || a.__idx - b.__idx;
     const aAct = activatedUids?.has(stableUid(a, a.__idx)) ? 1 : 0;
     const bAct = activatedUids?.has(stableUid(b, b.__idx)) ? 1 : 0;
     if (aAct !== bAct) return bAct - aAct;

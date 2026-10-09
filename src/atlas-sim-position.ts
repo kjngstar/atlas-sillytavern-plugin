@@ -131,6 +131,10 @@ export function resolveEffectivePosition(
         };
       }
       // 停靠位置优先于固定坐标之外的解析
+      if(location.mobility==='mobile'&&location.anchor_location_id){
+        const anchored=pickRow(world,cache,'locations',String(location.anchor_location_id));
+        if(anchored)return gridOf(anchored)??{kind:'at_location',locationId:String(anchored.id),precision:'coarse'};
+      }
       const grid = gridOf(location);
       if (grid) return grid;
       const anchor = location.anchor_location_id ? String(location.anchor_location_id) : null;

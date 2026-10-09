@@ -71,6 +71,7 @@ export function createSqlModelPort(options: Options): AtlasModelPort {
   },
   async request(request:ModelBatchRequest){
    const {preset,input,messages}=await prepare(request);
+      if(preset.toolCalling&&((preset.connectionMode??'custom')!=='custom'||(preset.apiFormat??'openai')!=='openai'))throw failure('TOOL_PROTOCOL_UNSUPPORTED','函数输出目前仅支持自定义 OpenAI 兼容连接，请关闭函数输出或切换连接');
       const budget = options.budget;
       const phase = options.stage === 'background' ? 'background' : request.phase || options.stage || 'observe';
       const logical = budget?.claimBatch(phase, request.batchId);
@@ -81,6 +82,7 @@ export function createSqlModelPort(options: Options): AtlasModelPort {
         timeoutMs: preset.timeoutMs ?? request.timeoutMs,
       }, input, {
         fetchFn: options.fetchFn, now: options.now, messagesOverride: messages,
+        ...(preset.toolCalling?{responseTool:{name:'emit_atlas_operations',description:'Return the complete Atlas operations exactly once as JSONL in content. Follow the stage operation contract; do not write text outside this call.',parameters:{type:'object',properties:{content:{type:'string',description:'Complete stage reply, one validated operation JSON object per line'}},required:['content'],additionalProperties:false}}}:{}),
         // M3-03A：API 内部兼容路由的第二次真实发送，也走同一局部预算。缺预算 port 时不传，
         // 由 api-client 按最严策略拒发并明确报错（绝不隐藏重试）。
         ...(budget ? { initialTransport: () => transportBudgetPort(budget, phase, request.batchId).claim(), rescueTransport: () => transportBudgetPort(budget, phase, request.batchId).claim() } : {}),

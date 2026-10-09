@@ -150,6 +150,8 @@ export type MapViewItem = {
   points: Array<{
     entityId: string;
     kind: 'location' | 'character' | 'item';
+    mobility?: string;
+    locationKind?: string;
     name: string;
     mapId: string;
     x: number;
@@ -290,6 +292,12 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
 
     for (const loc of locations) {
       const locId = String(loc.id);
+      if(loc.mobility==='mobile'){
+        if(ctx.viewMode==='pov'&&loc.anchor_location_id&&!visibility.visible('location',String(loc.anchor_location_id)))continue;
+        const position=resolveEffectivePosition(ctx,locId,undefined,positionCache);
+        if(position.kind==='at_grid'&&position.mapId===mapId)points.push({entityId:locId,kind:'location',locationKind:String(loc.kind??''),mobility:'mobile',name:String(loc.name??''),mapId,x:position.x,y:position.y,precision:position.precision,radius:position.radius??null,markerQuality:position.precision});
+        continue;
+      }
       const locMap = loc.map_id ? String(loc.map_id) : null;
       if (locMap !== mapId) continue;
       const precision = String(loc.coord_precision ?? 'unknown');

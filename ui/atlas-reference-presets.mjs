@@ -3,7 +3,7 @@ const clone = value => JSON.parse(JSON.stringify(value));
 const pair = (connectionId,promptPresetId) => ({connectionId,promptPresetId});
 export function referencePresetDocument(settings={},preferences={},defaultPrompt='') {
   const connections=(settings.apiPresets??[]).map(c=>({id:c.id,name:c.name,provider:c.connectionMode==='main'||c.connectionMode==='profile'?'sillytavern':'openai-compatible',
-    url:c.endpoint??'',model:c.model??'',temperature:c.temperature??0.7,maxTokens:c.maxTokens??8192,timeoutMs:c.timeoutMs??60000,rememberKey:!!c.apiKey,apiKey:c.apiKey??''}));
+    toolCalling:c.toolCalling===true,url:c.endpoint??'',model:c.model??'',temperature:c.temperature??0.7,maxTokens:c.maxTokens??8192,timeoutMs:c.timeoutMs??60000,rememberKey:!!c.apiKey,apiKey:c.apiKey??''}));
   if(!connections.length)connections.push({id:'reference-unconfigured',name:'尚未配置连接',provider:'openai-compatible',url:'',model:'',temperature:0.7,maxTokens:8192,rememberKey:false});
   const promptPresets=(settings.promptPresets??[]).map(p=>({id:p.id,name:p.name,segments:(p.segments?.length?p.segments:[{role:'system',name:'系统提示词',content:p.systemPrompt,enabled:true}]).map((s,i)=>({...s,id:`segment-${i}`,name:s.name??`第 ${i+1} 段`,enabled:s.enabled!==false}))}));
   if(!promptPresets.length){const builtin=settings.builtInSqlPrompt??settings.builtInPrompt;promptPresets.push({id:'reference-default-prompt',name:'内置默认提示词 · 可另存',segments:(builtin?.segments?.length?builtin.segments:[{name:'世界推演',role:'system',content:defaultPrompt}]).map((s,i)=>({...s,id:`segment-${i}`,name:s.name||`第 ${i+1} 段`,enabled:s.enabled!==false}))});}
@@ -25,7 +25,7 @@ export function referenceSettingsCommands(doc,settings={},action={}) {
     if(c.id==='reference-unconfigured'&&c.provider!=='sillytavern'&&!c.url&&!c.model)throw Error('请先填写 API 地址与模型，或选择酒馆主 API。');
     const old=settings.apiPresets?.find(x=>x.id===c.id)??{};
     const connectionMode=c.provider==='sillytavern'?(old.connectionMode==='profile'?'profile':'main'):'custom';
-    const preset={...old,id:c.id,name:c.name,connectionMode,endpoint:c.url,model:c.model,temperature:c.temperature,maxTokens:c.maxTokens,topP:old.topP??1,timeoutMs:c.timeoutMs??old.timeoutMs??60000};
+    const preset={...old,id:c.id,name:c.name,connectionMode,endpoint:c.url,model:c.model,toolCalling:c.toolCalling===true,temperature:c.temperature,maxTokens:c.maxTokens,topP:old.topP??1,timeoutMs:c.timeoutMs??old.timeoutMs??60000};
     delete preset.apiKey;delete preset.hasApiKey;delete preset.apiKeyLast4;
     const key=c.rememberKey?c.apiKey??'':'';
     commands.push({action:'api.save',create:!old.id,preset,apiKeyMode:old.id&&key===old.apiKey?'keep':key?'replace':'clear',...(key?{apiKey:key}:{})});

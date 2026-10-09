@@ -84,3 +84,5 @@
   #atlasDemo .hud-scale .sc-line i{width:74px;flex:0 0 74px;}
 }
 #atlasDemo,#atlasDemo .workspace,#atlasDemo .dock-body{overflow-x:hidden;}
+#atlasDemo .pt.vehicle{background:transparent;border:1px solid #7fd4ff;border-radius:2px;box-shadow:0 0 8px #7fd4ff;width:12px;height:7px;position:relative;}
+#atlasDemo .pt.vehicle:after{content:'• •';position:absolute;color:#7fd4ff;font-size:9px;left:0;top:1px;white-space:pre;}

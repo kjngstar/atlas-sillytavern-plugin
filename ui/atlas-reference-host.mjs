@@ -10,7 +10,7 @@ import { referencePresetDocument, referenceSettingsCommands } from './atlas-refe
 const ATLAS_FEED_PAGE_MAX=100;
 const ATLAS_FEED_MAX_PAGES=20;
 
-export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort,diagnostics=()=>[],emit=()=>{},defaultPrompt='',loadSqlRuntime=()=>import(new URL('../dist/atlas-sql.mjs',import.meta.url).href)}) {
+export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort,diagnostics=()=>[],emit=()=>{},defaultPrompt='',fetchFn=globalThis.fetch,loadSqlRuntime=()=>import(new URL('../dist/atlas-sql.mjs',import.meta.url).href)}) {
   root.replaceChildren();root.className='atlas-native-ui-host';root.id='atlas-extension-panel-root';
   root.setAttribute('role','application');root.setAttribute('aria-label','阿特拉斯世界工作台');
   Object.assign(root.style,{position:'fixed',inset:'0',zIndex:'10000',padding:'0',margin:'0',background:'transparent'});
@@ -198,6 +198,22 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
     }catch(error){actionError=error.message;throw error;}finally{actionBusy=false;deliver(latest);}
   }
   const bridge={boot,ready(){ready=true;deliver(latest);render();if(core.getState().panelOpen!==false)frame.contentWindow?.focus?.();},inspect,persistPresets,
+    async fetchModels(connection){
+      if(connection?.provider==='sillytavern')throw Error('酒馆主连接的模型请在酒馆 API 设置中选择；自定义连接可在这里获取模型');
+      let url;try{url=new URL(String(connection?.url??'').trim());}catch{throw Error('请先填写有效的 API 地址');}
+      if(!['http:','https:'].includes(url.protocol))throw Error('API 地址必须使用 HTTP 或 HTTPS');
+      url.pathname=url.pathname.replace(/\/(?:chat\/completions|messages)\/?$/,'').replace(/\/$/,'');
+      const headers=context()?.getRequestHeaders?.();if(!headers)throw Error('酒馆请求端口不可用');
+      const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),30000);
+      try{
+        const response=await fetchFn('/api/backends/chat-completions/status',{method:'POST',headers:{...headers,'Content-Type':'application/json'},signal:controller.signal,
+          body:JSON.stringify({chat_completion_source:'custom',custom_url:url.href.replace(/\/$/,''),custom_include_headers:connection.apiKey?.trim()?`Authorization: Bearer ${connection.apiKey.trim()}`:''})});
+        if(!response.ok)throw Error(`获取模型失败（HTTP ${response.status}）`);
+        const data=await response.json();const models=[...new Set((Array.isArray(data.data)?data.data:[]).map(m=>m?.id).filter(id=>typeof id==='string'&&id.trim()))].sort();
+        if(!models.length)throw Error('接口没有返回模型列表；可以继续手动填写模型名称');
+        return models;
+      }catch(error){if(error.name==='AbortError')throw Error('获取模型超过 30 秒，请检查接口');throw error;}finally{clearTimeout(timer);}
+    },
     async setViewMode(mode){viewMode=mode==='author'?'author':'pov';await refresh(true);},
     onPage(page){core.setPage({cast:'characters',items:'items',msgs:'events',sim:'advance',time:'events',lore:'world',diag:'logs',prefs:'prompts'}[page]??'map');if(page==='lore')void Promise.resolve(refresh()).then(readLore).catch(error=>emit({level:'error',source:'ui',code:'LORE_READ_FAILED',details:{message:error.message}}));},
     async toggleLore(id){if(viewMode!=='author')throw Error('请切换世界后台后修改世界书');await lorePort?.toggle?.(id);await readLore();},

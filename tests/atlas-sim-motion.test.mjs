@@ -416,6 +416,11 @@ test('T17-06 载具内部人跟随：在途乘客随车解析，停车后回到�
       ['at_grid', IDS.M1, 10, 10],
       '车厢/载具的世界坐标只属于载具，不属于乘客',
     );
+    seed.db.run(`UPDATE locations SET anchor_location_id = ? WHERE id = 'V1'`, [IDS.L2]);
+    const anchor=resolveEffectivePosition(world,IDS.L2);
+    const anchored=resolveEffectivePosition(world,'V1');
+    assert.deepEqual(anchored,anchor,'停靠点必须优先于载具离站前的旧坐标');
+    assert.deepEqual(resolveEffectivePosition(world,'V1',undefined,buildPositionCache(world)),anchored);
   } finally {
     seed.close();
   }

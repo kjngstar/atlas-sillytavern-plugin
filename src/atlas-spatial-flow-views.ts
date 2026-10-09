@@ -122,7 +122,7 @@ export function querySpatialFlows(ctx: ViewContext, query: ViewQuery): ViewResul
       const mover = journey.mover_entity_id === null || journey.mover_entity_id === undefined ? null : String(journey.mover_entity_id);
       const destination = journey.destination_location_id === null || journey.destination_location_id === undefined ? null : String(journey.destination_location_id);
       if (isPov) {
-        if (!mover || !(visibility.povId === mover || visibility.visibleCharacters.has(mover))) continue;
+        if (!mover || !(visibility.povId === mover || visibility.visibleCharacters.has(mover)||visibility.knownLocations.has(mover))) continue;
         if (destination && !visibility.knownLocations.has(destination)) continue;
       }
       const segments = asArray(journey.segments_json);

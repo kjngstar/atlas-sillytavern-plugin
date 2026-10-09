@@ -280,15 +280,25 @@ function create(canvas, mini, hooks){
   }
 
   function extent(){ return st.node?.extent || EXTENT[st.kind] || EXTENT.world; }
+  function fitExtent(){
+    // Fit any standalone room to its actual geometry, without changing map units.
+    const rooms=st.geo.rooms;
+    if(st.kind==='floor'&&rooms?.length===1&&st.geo.corridor?.h===0){
+      const r=rooms[0];
+      if([r.x,r.y,r.w,r.h].every(Number.isFinite)&&r.w>0&&r.h>0)return [r.x,r.x+r.w,r.y,r.y+r.h];
+    }
+    return extent();
+  }
   function fitScale(pad){
-    const [x0,x1,y0,y1] = extent();
+    const [x0,x1,y0,y1] = fitExtent();
     pad = pad==null?1.16:pad;
     return Math.min(st.vw/((x1-x0)*pad), st.vh/((y1-y0)*pad));
   }
   function fit(anim){
     const s = fitScale();
-    st.tgt.s = s; st.tgt.x = 0; st.tgt.y = 0;
-    if(!anim){ st.cam.s=s; st.cam.x=0; st.cam.y=0; }
+    const [x0,x1,y0,y1]=fitExtent(),x=(x0+x1)/2,y=(y0+y1)/2;
+    st.tgt.s = s; st.tgt.x = x; st.tgt.y = y;
+    if(!anim){ st.cam.s=s; st.cam.x=x; st.cam.y=y; }
   }
   function W2S(x,y){ return [ (x-st.cam.x)*st.cam.s + st.vw/2, (y-st.cam.y)*st.cam.s + st.vh/2 ]; }
   function S2W(x,y){ return [ (x-st.vw/2)/st.cam.s + st.cam.x, (y-st.vh/2)/st.cam.s + st.cam.y ]; }
@@ -867,7 +877,7 @@ function create(canvas, mini, hooks){
       // 那是示例世界的文案，会被原样印到任何世界的图上。现在有 status 用 status，
       // 没有就写中性描述，绝不为哪个房间编一个剧情状态。
       pushLabel(x+w/2, y+h/2 - 4, r.name, !!r.live?C.cyan:'#a8bdd6', !!r.live?'live':'name', true);
-      pushLabel(x+w/2, y+h-13, r.status || (r.kind==='exit'?'通道':'房间'), 'rgba(140,170,200,.75)','sub', true);
+      pushLabel(x+w/2, y+h-13, r.status || (r.kind==='vehicle'?'车厢内部':r.kind==='exit'?'通道':'房间'), 'rgba(140,170,200,.75)','sub', true);
     });
 
     // 门
@@ -1337,6 +1347,11 @@ function create(canvas, mini, hooks){
       if(!m.silent){
         ctx.beginPath(); ctx.arc(sx,sy,13,0,7); ctx.strokeStyle=hexA(col,.25); ctx.lineWidth=1; ctx.stroke();
       }
+    } else if(m.type==='vehicle'){
+      ctx.save();ctx.translate(sx,sy);ctx.strokeStyle=col;ctx.fillStyle=hexA(col,.25);ctx.lineWidth=1.6;
+      ctx.beginPath();rrect(ctx,-8,-5,16,10,2);ctx.fill();ctx.stroke();
+      for(const x of [-5,5]){ctx.beginPath();ctx.arc(x,7,2.2,0,7);ctx.fillStyle=col;ctx.fill();}
+      ctx.beginPath();ctx.moveTo(10,-2);ctx.lineTo(15,0);ctx.lineTo(10,2);ctx.stroke();ctx.restore();
     } else if(m.type==='exit'){
       ctx.save(); ctx.translate(sx,sy);
       ctx.beginPath(); ctx.moveTo(0,-8); ctx.lineTo(7,4); ctx.lineTo(0,1); ctx.lineTo(-7,4); ctx.closePath();
@@ -1516,11 +1531,11 @@ function create(canvas, mini, hooks){
     ctx.strokeStyle=hexA(col,active?.95:.55);ctx.lineWidth=active?2.8:1.7;
     ctx.shadowColor=col;ctx.shadowBlur=active?14:7;ctx.stroke();ctx.setLineDash([]);
     const positioned=!journey||Number.isFinite(edge.progress),k=journey?edge.progress:(t*.2)%1,[x,y]=at(k);
-    if(positioned){ctx.beginPath();ctx.arc(x,y,journey?6:3.5,0,7);ctx.fillStyle=col;ctx.fill();}
+    if(positioned){if(journey&&edge.entityKind==='vehicle')drawMark(ctx,{type:'vehicle',c:col,silent:true},x,y,t,false,false);else{ctx.beginPath();ctx.arc(x,y,journey?6:3.5,0,7);ctx.fillStyle=col;ctx.fill();}}
     const [hx,hy]=at(.5);
     st.edgeHits.push({x:hx,y:hy,r:16,m:{type:journey?'journey':'message',id:edge.id,name:edge.name,sub:journey?'行程位置':'消息传播路径'}});
     if(active||journey){ctx.shadowBlur=0;ctx.font='500 11px '+F.sans;ctx.fillStyle='#dce9fb';ctx.textAlign='center';ctx.fillText(edge.name,hx,hy-13);}
-    if(journey&&positioned)st.edgeHits.push({x,y,r:14,m:{type:'char',id:edge.entityId,name:edge.name}});
+    if(journey&&positioned)st.edgeHits.push({x,y,r:14,m:{type:edge.entityKind==='vehicle'?'vehicle':edge.entityKind==='location'?'poi':'char',...(edge.entityKind==='vehicle'||edge.entityKind==='location'?{placeId:edge.entityId}:{}),id:edge.entityId,name:edge.name}});
     ctx.restore();
   }
 

@@ -68,6 +68,7 @@ export async function handleSqlMapAction(session:SqlSession,action:string,body:R
       maxAdditionalDepth:2}};
     // 分块抽取阶段（M3-15）：只做事实登记，不建设、不布局、不发总体空间请求。
     constructionMode=body.constructionMode==='extract-only'?'extract-only':undefined;
+    if(!constructionMode)layoutMaps='active';
     manual=false;phases=['observe'];
   }else if(action==='map/repair'){
     const report=inspectSqlWorld(session);

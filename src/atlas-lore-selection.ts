@@ -48,6 +48,8 @@ export interface AtlasLoreSelectionInput {
   maxEntries?: number;
   /** Full source mode: preserve enabled entries in source order, without activation/keyword selection. */
   includeAllEnabled?: boolean;
+  /** Keep geography/world rules ahead of long biographies within the same source budget. */
+  prioritizeGeography?: boolean;
 }
 
 export interface AtlasLoreSelectionResult {
@@ -68,7 +70,7 @@ export interface AtlasLoreSelectionResult {
 const DEFAULT_PER_ENTRY_CHARS = 400;
 const DEFAULT_GEO_PER_ENTRY_CHARS = 4_000;
 const DEFAULT_MAX_ENTRIES = 60;
-const GEO_TITLE_PREFIX = /(?:地图|地理|地点|地区|区域|领域|城镇|城市|城镇|关隘|道路|街道|聚落|场所|大陆|国家|地形|风土)/;
+const GEO_TITLE_PREFIX = /(?:世界观|地图|地理|地点|地区|区域|领域|城镇|城市|关隘|道路|街道|聚落|场所|大陆|国家|地形|风土)/;
 
 function stableUid(entry: AtlasLoreSelectionEntry, _idx: number): string {
   const fallback = `${entry.title ?? ""}:${entry.content.slice(0, 80)}`;
@@ -126,7 +128,7 @@ export function selectAtlasLoreSupplement(
 
   // 排序(确定性:不依赖输入次序,只用 bookName + uid 做 tiebreaker)
   filtered.sort((a, b) => {
-    if (input.includeAllEnabled) return a.__idx - b.__idx;
+    if (input.includeAllEnabled) return (input.prioritizeGeography?Number(isGeographicTitle(b.title??''))-Number(isGeographicTitle(a.title??'')):0)||a.__idx-b.__idx;
     const aAct = activatedUids?.has(stableUid(a, a.__idx)) ? 1 : 0;
     const bAct = activatedUids?.has(stableUid(b, b.__idx)) ? 1 : 0;
     if (aAct !== bAct) return bAct - aAct;

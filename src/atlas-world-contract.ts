@@ -231,6 +231,7 @@ export type GenerationTask<Request> = {
 };
 
 export type LayoutTask<Request> = GenerationTask<Request> & {
+  contextHashes?: Record<string,string>;
   mapIds: string[];
   kinds: Record<string, LayoutKind>;
   extents: Record<string, { width: number; height: number; units: 'meters' | 'cells' }>;

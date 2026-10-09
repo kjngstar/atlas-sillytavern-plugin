@@ -32,6 +32,7 @@ function awaitResponse<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
 
 /** 独立推演预设（服务端保存；apiKey 永不出本模块的 Authorization 头）。 */
 export interface AtlasApiPreset {
+  toolCalling?: boolean;
   name: string;
   endpoint: string;
   model: string;
@@ -350,6 +351,7 @@ export async function callAtlasWorldTurnApi(
     fetchFn?: typeof fetch;
     now?: () => number;
     messagesOverride?: Array<{ role: string; content: string }>;
+    responseTool?: { name: string; description: string; parameters: Record<string, unknown> };
     initialTransport?: () => { ok: boolean; reason?: string };
     /**
      * M3-03A：兼容路由第二次真实发送前必须领到的传输额度。
@@ -413,6 +415,7 @@ export async function callAtlasWorldTurnApi(
     const body = JSON.stringify({
       model: bodyModel,
       messages: bodyMessages,
+      ...(deps.responseTool&&!forClaude&&(!preset.apiFormat||preset.apiFormat==='openai')?{tools:[{type:'function',function:deps.responseTool}],tool_choice:'auto'}:{}),
       max_tokens: maxTokens,
       temperature,
       top_p: topP,
@@ -476,7 +479,7 @@ export async function callAtlasWorldTurnApi(
       // stop / 缺失 / null 一律 false——不猜测其他厂商停止码，也不因为「正文里刚好
       // 有完整 JSON」就当成没截断（截断优先，见下面的检查顺序）。
       const truncated = choiceFinishReason(payload) === "length";
-      const text = extractAssistantText(payload);
+      const text = extractAssistantText(payload, deps.responseTool?.name);
       if (text === null || text.trim().length === 0) {
         // 0.9.24 空回复专项：choices 数组存在且为空（Gemini 系安全过滤静默拦截的典型形状）
         const emptyChoices = Boolean(
@@ -734,10 +737,10 @@ function choiceFinishReason(payload: unknown): string | null {
 }
 
 /** 从 OpenAI 风格或兼容响应中取助手正文。 */
-function extractAssistantText(payload: unknown): string | null {
+function extractAssistantText(payload: unknown, responseTool?: string): string | null {
   if (!payload || typeof payload !== "object") return null;
   const p = payload as {
-    choices?: Array<{ message?: { content?: unknown; reasoning_content?: unknown; reasoning?: unknown }; text?: unknown }>;
+    choices?: Array<{ message?: { content?: unknown; reasoning_content?: unknown; reasoning?: unknown; tool_calls?: unknown }; text?: unknown }>;
     text?: unknown;
     content?: unknown;
     response?: unknown;
@@ -745,6 +748,13 @@ function extractAssistantText(payload: unknown): string | null {
   };
   if (Array.isArray(p.choices) && p.choices.length > 0) {
     const choice = p.choices[0];
+    // A response function carries data only. Never execute returned tool names/code.
+    const calls=choice?.message?.tool_calls;
+    if(Array.isArray(calls)&&calls.length){
+      if(!responseTool||calls.length!==1)return null;
+      const fn=calls[0]?.function;if(fn?.name!==responseTool||typeof fn.arguments!=='string')return null;
+      try{const args=JSON.parse(fn.arguments);return args&&typeof args.content==='string'?args.content:null;}catch{return null;}
+    }
     // 0.9.36 推理字段兜底：MiniMax-M3 实测会把全部输出（含 JSON）写进 reasoning_content、
     // content 为空（甚至 finish_reason=tool_calls）——此前判「空回复」整单报废，
     // 下游 JSON 抢救链（extractJsonObject / 容错解析）完全没机会介入。

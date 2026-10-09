@@ -11,6 +11,13 @@ const POV={...scope,viewMode:'pov'};
 const baseRooms=()=>Array.from({length:6},(_,i)=>({id:'room-'+i,name:'房间'+i,side:i%2?'north':'south',w:6,h:5}));
 const baseCtx=(locations)=>({scope,currentScope:scope,map:{id:'map-1',name:'fixture',metersPerCell:2,frame:{cols:15,rows:12}},entities:{locations,characters:['npc-1'],items:['item-1']}});
 
+test('柜面可承载物品并保留真实容器引用',()=>{
+ const result=Kit.generateFloor({rooms:baseRooms(),contents:[{id:'cabinet',type:'cabinet',roomId:'room-0',w:1,h:1}],items:[{id:'item-1',on:'cabinet'}]},baseCtx(baseRooms().map(r=>r.id)));
+ assert.equal(result.ok,true,JSON.stringify(result.issues));
+ assert.equal(result.scene.layout.items[0]?.containerId,'cabinet');
+ assert.ok(!result.issues.some(i=>i.code==='ITEM_CONTAINER_NOT_FOUND'));
+});
+
 test('四米车厢可容纳一米深的相对座椅和暗柜；旧部分布局不能直接复用为空图',()=>{
  const ctx={...baseCtx(['carriage']),map:{id:'map-1',name:'车厢',containerLocationId:'carriage',metersPerCell:.24,frame:{cols:100,rows:100}}};
  const spec={rooms:[{id:'carriage',name:'车厢',w:4,h:6,side:'north'}],contents:[

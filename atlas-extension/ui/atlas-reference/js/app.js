@@ -14,6 +14,7 @@ let preferenceStorage=window.AtlasHost.preferenceStorage;
 const preferences=ui.preferences(preferenceStorage);
 const state={page:'map',nodeId:D.meta.initialNodeId||D.ROOT.id,selected:null,inspectorTab:'cast',dock:'log',viewMode:D.meta.viewMode||'pov',mapMode:'map',open:new Set(),cameras:new Map(),query:'',filter:'all',settingsTab:'prompts',motion:true,leftClosed:false,rightClosed:false,branch:'main',advance:0,...preferences.value};
 const timers=new Set(),unlisten=[];
+const autoLayouts=new Set();
 const presets=window.AtlasPresetStore.create(D.PROMPTS,{storage:null,initialDocument:window.AtlasHost.initial.presets,onPersist:window.AtlasHost.persistPresets});
 function later(fn,ms){const id=setTimeout(()=>{timers.delete(id);fn();},ms);timers.add(id);return id;}
 function listen(el,type,fn,opt){el.addEventListener(type,fn,opt);unlisten.push(()=>el.removeEventListener(type,fn,opt));}
@@ -52,7 +53,11 @@ function navigate(n,silent=false){
  const cam=state.cameras.get(n.id);if(cam){map.state.cam={x:cam.x,y:cam.y,s:cam.s*map.fitScale()/(cam.fit||map.fitScale())};map.state.tgt={...map.state.cam};}
  map.setMode(state.mapMode);map.setPaused(document.hidden);
  renderAll();requestAnimationFrame(()=>map.resize());
- if(!silent)toast(`已进入 ${n.name}`);return true;
+ if(!silent){toast(`已进入 ${n.name}`);const key=D.meta.scopeKey+':'+n.id;
+  if(n.host&&!n.hasLayout&&!n.unclassified&&D.meta.engine?.bound&&!D.meta.engine?.busy&&!autoLayouts.has(key)){
+   autoLayouts.add(key);toast('正在生成本图空间布局…');void window.AtlasHost.layout(n.id).catch(error=>toast(error.message,'warn'));
+  }
+ }return true;
 }
 function select(kind,id,show=false){state.selected={kind,id};state.inspectorTab='details';renderInspector();if(show)openRight();const capturedScope=D.meta.scopeKey,capturedRevision=D.meta.revision;void window.AtlasHost.inspect(kind,id).then(value=>{if(!value||D.meta.scopeKey!==capturedScope||D.meta.revision!==capturedRevision||state.selected?.kind!==kind||state.selected?.id!==id)return;const row=kind==='character'?D.CAST.find(x=>x.id===id):kind==='item'?D.ITEMS.find(x=>x.id===id):kind==='message'?D.MESSAGES.find(x=>x.id===id):(kind==='task'||kind==='action'||kind==='journey')?D.TASKS.find(x=>x.id===id):(D.LOCATIONS||[]).find(x=>x.id===id);if(row)Object.assign(row,value);renderInspector();}).catch(error=>toast(error.message,'warn'));}
 function inspectPlace(id,focus=false){
@@ -90,7 +95,7 @@ const map=window.AtlasMap.create($('#map'),$('#minimap'),{
  activeEdge:()=>state.selected?.kind==='message'||state.selected?.kind==='task'?state.selected.id:null,
  getMotion:()=>state.motion
 });
-const presetUI=window.AtlasPresetUI.create({root,store:presets,esc,toast,diagnostic,modal,renderPage,download});
+const presetUI=window.AtlasPresetUI.create({root,store:presets,esc,toast,diagnostic,modal,renderPage,download,fetchModels:connection=>window.AtlasHost.fetchModels(connection)});
 function formatDistance(m){if(m>=1000)return `${+(m/1000).toFixed(2)} km`;return `${+m.toFixed(m<1?2:1)} m`;}
 function frameChrome(st){
  if(!st.node)return;

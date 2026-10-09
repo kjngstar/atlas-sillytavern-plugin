@@ -92,8 +92,11 @@ function resolveFeedPovId(session: SqlSession, asked: string): string | undefine
  */
 /** M3-14：让 builder 在观察阶段之后解析本轮 local 建设焦点。 */
 function localWorldCompletion(_session: SqlSession, _manual: boolean): WorldCompletionInput | undefined {
+  const maps=createTableReadPort(_session.repo.db).selectWhere('maps',{branch_id:_session.branchId,status:'active'});
+  const unfinished=maps.some(m=>{let frame=m.frame_json;try{if(typeof frame==='string')frame=JSON.parse(frame);}catch{return true;}const fill=(frame as Record<string,unknown>)?.atlasWorldFill as Record<string,unknown>|undefined;return fill?.status==='deferred'||fill?.status==='partial';});
+  const firstConstruction=!maps.some(m=>String(m.frame_json??'').includes('atlasWorldFill')||typeof m.frame_json==='object'&&m.frame_json!==null&&'atlasWorldFill' in m.frame_json);
   return {
-    mode: 'local',
+    mode: unfinished||firstConstruction?'bootstrap':'local',
     // Derive from the observe-applied candidate, including a newly registered POV.
     focusLocationIds: [],
     policy: {

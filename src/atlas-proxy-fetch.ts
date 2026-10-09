@@ -117,6 +117,8 @@ export interface StProxyFetchDeps {
 }
 
 interface ChatCompletionBody {
+  tools?: unknown;
+  tool_choice?: unknown;
   model?: unknown;
   messages?: unknown;
   stream?: unknown;
@@ -229,6 +231,7 @@ export function createStProxyFetch(deps: StProxyFetchDeps): typeof fetch {
       custom_url: customUrlRaw,
       model: payload.model,
       messages: payload.messages,
+      ...(payload.tools!==undefined?{tools:payload.tools,tool_choice:payload.tool_choice??'auto'}:{}),
       stream: payload.stream ?? false,
       ...(payload.temperature !== undefined ? { temperature: payload.temperature } : {}),
       ...(payload.max_tokens !== undefined ? { max_tokens: payload.max_tokens } : {}),

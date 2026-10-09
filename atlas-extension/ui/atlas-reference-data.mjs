@@ -70,6 +70,7 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
     ...(layout.districts??[]).filter(d=>d.polygon?.length>=3&&d.polygon.every(finite)).map(d=>({...d,type:'location',silent:true,x:d.polygon.reduce((n,p)=>n+point(p)[0],0)/d.polygon.length,y:d.polygon.reduce((n,p)=>n+point(p)[1],0)/d.polygon.length})),
     ...(layout.buildings??[]).filter(p=>!p.decorative).map(r=>({...r,type:'location',x:r.x+r.w/2,y:r.y+r.h/2})),
   ] : (map.points??[]).map(p=>({...p,id:p.entityId,type:p.kind==='character'?'person':p.kind}));
+  if(layout)rawPins.push(...(map.points??[]).filter(p=>p.mobility==='mobile').map(p=>({...p,id:p.entityId,type:'location'})));
   const uniquePins=[...new Map(rawPins.filter(finite).map(p=>[`${p.type}:${p.entityId??p.id}`,p])).values()];
   /**
    * M6-03③：示意坐标不许被「升格」成精确。
@@ -154,7 +155,7 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
       ? (layout.groups??[]).filter(Boolean).flatMap(g=>(g.bodies??[]).filter(Boolean).map(b=>({body:b,groupId:b.groupId??g.id,roomId:b.roomId??g.roomId})))
       : (layout.bodies??[]).filter(Boolean).map(b=>({body:b,groupId:b.groupId??null,roomId:b.roomId??null}));
     geo={corridor:{...corridor,y:corridor.y+corridor.h/2},
-      rooms:(layout.rooms??[]).map((r,i)=>({...rect(r),id:r.id,name:r.name,kind:'room',
+      rooms:(layout.rooms??[]).map((r,i)=>({...rect(r),id:r.id,name:r.name,kind:r.id===map.containerLocationId&&map.containerLocationKind==='vehicle'?'vehicle':'room',
         status:text(r.status)||null,
         tint:['67,224,255','155,107,255','57,224,160','127,212,255'][i%4],live:false})),
       doors:(layout.doors??[]).map((d,i)=>{const [x,y]=xy(d);return {id:text(d.id)||`door:${text(d.roomId)||i}`,roomId:text(d.roomId)||null,x,y,w:d.width*scale};}),
@@ -272,10 +273,18 @@ export function projectReferenceData({state={},mapView,sceneView,catalogView,tas
     children:unclassified,geo:{},marks:[],host:true,unclassified:true});
   const catalog=items(catalogView),detailIndex=new Map(details.map(x=>{const row=x.character??x.item??x.location;return [row?.id,x];}));
   const pointIndex=new Map(maps.flatMap(m=>(m.points??[]).map(p=>[p.entityId,p])));
-  out.LOCATIONS=catalog.filter(c=>c.entityKind==='location').map(c=>({id:c.entityId,name:c.name,description:c.summary??'',kind:'location',tag:'地点',code:'地点',mapId:c.mapId,children:[],known:true,
+  out.LOCATIONS=catalog.filter(c=>c.entityKind==='location').map(c=>({id:c.entityId,name:c.name,description:c.summary??'',kind:'location',entityKind:c.locationKind,mobility:c.mobility,anchorLocationId:c.anchorLocationId,tag:c.mobility==='mobile'?'移动载具':'地点',code:c.mobility==='mobile'?'载具':'地点',mapId:c.mapId,children:[],known:true,
     childMapIds:maps.filter(m=>m.containerLocationId===c.entityId).map(m=>m.mapId)}));
   const locationMap=new Map(out.LOCATIONS.map(l=>[l.id,l]));
-  for(const n of nodes.values())for(const mark of n.marks){if(mark.type==='poi'){const target=nodes.get(locationMap.get(mark.id)?.childMapIds[0]);mark.node=target&&target!==n?{id:target.id,known:target.known!==false}:null;mark.placeId=mark.id;}}
+  const mobileIds=new Set(out.LOCATIONS.filter(l=>l.mobility==='mobile').map(l=>l.id));
+  const inTransit=new Set(items(flowView).filter(f=>f.kind==='journey'&&['moving','paused','blocked'].includes(f.status)).map(f=>f.moverEntityId));
+  for(const n of nodes.values()){
+    // A vehicle has an interior map, but no permanent geographic footprint.
+    if(n.geo?.overviewShapes)n.geo.overviewShapes=n.geo.overviewShapes.filter(s=>!mobileIds.has(s.id));
+    if(n.geo?.districts)n.geo.districts=n.geo.districts.filter(s=>!mobileIds.has(s.id));
+    n.marks=n.marks.filter(mark=>!mobileIds.has(mark.id)||!inTransit.has(mark.id)&&pointIndex.has(mark.id));
+    for(const mark of n.marks){if(mark.type==='poi'){const location=locationMap.get(mark.id),target=nodes.get(location?.childMapIds[0]);mark.node=target&&target!==n?{id:target.id,known:target.known!==false}:null;mark.placeId=mark.id;if(mobileIds.has(mark.id)){mark.type='vehicle';mark.sub=location.anchorLocationId?'停靠载具':'载具位置';}}}
+  }
   const mapAt=id=>locationMap.get(id)?.childMapIds[0]??locationMap.get(id)?.mapId??null;
   out.CAST=catalog.filter(c=>c.entityKind==='character').map((c,i)=>{const p=pointIndex.get(c.entityId);return {id:c.entityId,name:c.name,initial:Array.from(c.name??'人').at(-1)||'人',role:p?.isProtagonist?'主角':'人物',c:COLORS[i%COLORS.length],
     state:c.locationId?'present':'unknown',tag:'已记录',locationId:c.locationId,mapNodeId:p?.mapId??mapAt(c.locationId)??c.mapId,description:c.summary??'',doing:'尚无行动记录',mind:'尚无后台想法记录',carry:[],known:true,
@@ -319,7 +328,8 @@ export function projectReferenceData({state={},mapView,sceneView,catalogView,tas
   out.DIAGNOSTICS=referenceDiagnostics([...items(logsView),...diagnostics,...(state.lastError?[typeof state.lastError==='string'?{message:state.lastError,code:'WORLD_ACTION_FAILED',level:'error'}:{...state.lastError,level:'error'}]:[])]);
   for(const f of flows){const node=nodes.get(f.mapId);if(!node||!f.path?.points?.length)continue;const tr=node.transform,convert=f.path.units==='cells'&&tr.units==='meters';if(convert&&!(Number.isFinite(tr.metersPerCell)&&tr.metersPerCell>0))continue;const units=convert?tr.metersPerCell:1;
     const points=f.path.points.map(p=>[(p.x*units-(tr.bounds.x??0)-tr.bounds.w/2)*tr.scale,(p.y*units-(tr.bounds.y??0)-tr.bounds.h/2)*tr.scale]);
-    const edge={id:f.flowId,entityId:f.moverEntityId,from:points[0],to:points.at(-1),via:points.length>2?points[Math.floor(points.length/2)]:null,points,progress:typeof f.progress==='number'?Math.min(1,Math.max(0,f.progress)):null,pct:typeof f.progress==='number'?f.progress*100:null,known:true,c:COLORS[3],name:f.label};
+    const mover=locationMap.get(f.moverEntityId),vehicle=mobileIds.has(f.moverEntityId);
+    const edge={id:f.flowId,entityId:f.moverEntityId,entityKind:vehicle?'vehicle':mover?'location':'character',from:points[0],to:points.at(-1),via:points.length>2?points[Math.floor(points.length/2)]:null,points,progress:typeof f.progress==='number'?Math.min(1,Math.max(0,f.progress)):null,pct:typeof f.progress==='number'?f.progress*100:null,known:true,c:COLORS[3],name:mover?`${mover.name} · 在途`:f.label};
     const bucket=f.kind==='journey'?out.JOURNEYS:out.FLOWS;(bucket[f.mapId]??=[]).push(edge);
   }
   return out;
