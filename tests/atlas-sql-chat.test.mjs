@@ -8,6 +8,17 @@ import { queryBound } from '../src/atlas-db-runtime.ts';
 
 const room = '{"op":"location.upsert","ref":"new:library","data":{"name":"图书馆","kind":"room"}}';
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+test('failed external receipts retain SQL transport metadata while stripping bodies and keys',async()=>{
+ const f=fixture({model:async()=>'{"op":"noop"}'});
+ try{await f.ui.refresh();
+  f.ui.recordExternalReceipt({receiptId:'layout-failure',status:'failed',branchId:null,previousTime:0,currentTime:0,currentLocationId:null,triggeredNpcIds:[],adoptedEventIds:[],summary:'布局解析失败',retryable:true},'chat-auto',{
+   coreSaved:false,attempts:[{kind:'layout',phase:'geography',http_status:200,response_chars:803,response_hash:'hash',started_wall_ms:100,finished_wall_ms:110,error:'JSON_SYNTAX',requestBody:'private',apiKey:'secret'}]});
+  const attempt=f.ui.getState().receipts[0].detail.attempts[0];
+  assert.equal(attempt.http_status,200);assert.equal(attempt.kind,'layout');assert.equal(attempt.response_chars,803);assert.equal(attempt.error,'JSON_SYNTAX');
+  assert.equal(attempt.requestBody,undefined);assert.equal(attempt.apiKey,undefined);
+ }finally{await f.close();}
+});
 test('坏地点声明的下游地点和人物不能留下悬空外键；独立地点仍保存',async()=>{
  const f=fixture({model:async req=>req.phase==='repair'?'{"ticket":"R1","op":"noop","why":"等待纠正"}':[
   {op:'location.upsert',ref:'new:bad',data:{name:'坏父地点',kind:'invalid'}},

@@ -1114,10 +1114,22 @@ export function createSqlRepository(options: RepositoryOptions) {
         commitTransaction(candidateDb);transactionOpen=false;
         try{
           // 布局与建设共用同一个局部预算 port：仍然要真的领到额度才发。
-          const response=await modelPort!.request(layoutTask.request);
-          attempts.push({id:`att_${attempts.length}`,kind:'layout',phase:'geography',http_status:response.httpStatus,response_chars:response.text?.length??0,response_hash:sha256HexSync(response.text??'')});
+          const layoutStarted=now();
+          let response=await modelPort!.request(layoutTask.request);
+          attempts.push({id:`att_${attempts.length}`,kind:'layout',phase:'geography',started_wall_ms:layoutStarted,finished_wall_ms:now(),http_status:response.httpStatus,response_chars:response.text?.length??0,response_hash:sha256HexSync(response.text??''),finish_reason:response.finishReason});
           if(input.isCurrent&&!input.isCurrent()||currentRevision()!==anchor.baseRevision)throw new AtlasDbError('STALE_BASE','布局生成期间聊天或世界修订已变化，候选不发布',{});
-          const extracted=extractPayload(response.text??''),parsed=parseOperations(extracted.payload,{phase:'geography'});
+          let extracted=extractPayload(response.text??''),parsed=parseOperations(extracted.payload,{phase:'geography'});
+          // Ask for a fresh complete response once. Never patch broken JSON locally or reuse partial lines as a full layout.
+          if(!parsed.operations.length&&parsed.issues.some(i=>i.code==='JSON_SYNTAX')&&!extracted.incomplete&&turnBudget.remaining()>0){
+            const repairText=layoutTask.request.messages[1].content+'\n【布局格式纠错】上次回复不是合法 JSON，解析问题：'+parsed.issues.map(i=>i.message).join('；')+'\n重新生成以上地图的完整布局。只返回 JSONL，每张图一个完整 JSON 对象，所有键及字符串用双引号，不要代码围栏、解释、逗号连接两个对象或在字段内省略括号。';
+            const repairRequest={...layoutTask.request,batchId:layoutTask.request.batchId+'_format_retry',messages:layoutTask.request.messages.map((m,i)=>i===1?{...m,content:repairText}:m),promptInput:layoutTask.request.promptInput?{...layoutTask.request.promptInput,injectionText:repairText}:undefined};
+            allIssues.push({code:'LAYOUT_RESPONSE_RETRIED',path:'$.layout',message:'首次布局回复无法解析，已在本轮预算内请求一次完整格式纠错；原回复未写入地图。',severity:'warning',retryable:false});
+            const retryStarted=now();
+            response=await modelPort!.request(repairRequest);
+            attempts.push({id:`att_${attempts.length}`,kind:'layout_repair',phase:'geography',started_wall_ms:retryStarted,finished_wall_ms:now(),http_status:response.httpStatus,response_chars:response.text?.length??0,response_hash:sha256HexSync(response.text??''),finish_reason:response.finishReason});
+            if(input.isCurrent&&!input.isCurrent()||currentRevision()!==anchor.baseRevision)throw new AtlasDbError('STALE_BASE','布局纠错期间聊天或世界修订已变化，候选不发布',{});
+            extracted=extractPayload(response.text??'');parsed=parseOperations(extracted.payload,{phase:'geography'});
+          }
           allIssues.push(...extracted.issues,...parsed.issues);
           // M4-23：解析必须用**原任务的冻结目录**，不能 await 回来再收一次 —— 候选期间新插入的
           // 行会让 alias 改指向，同一批回复就会被解到别的实体上。

@@ -287,6 +287,14 @@ function create(canvas, mini, hooks){
       const r=rooms[0];
       if([r.x,r.y,r.w,r.h].every(Number.isFinite)&&r.w>0&&r.h>0)return [r.x,r.x+r.w,r.y,r.y+r.h];
     }
+    if(st.kind==='floor'&&st.node?.host&&rooms?.length>1){
+      const valid=rooms.filter(r=>[r.x,r.y,r.w,r.h].every(Number.isFinite)&&r.w>0&&r.h>0);
+      if(valid.length){
+        const candidate=st.geo.corridor,c=candidate&&[candidate.x,candidate.w,candidate.h].every(Number.isFinite)&&candidate.w>0&&candidate.h>0?candidate:null;
+        const x0=Math.min(...valid.map(r=>r.x),c?.x??Infinity),x1=Math.max(...valid.map(r=>r.x+r.w),c?c.x+c.w:-Infinity);
+        return [x0-24,x1+12,Math.min(...valid.map(r=>r.y))-72,Math.max(...valid.map(r=>r.y+r.h))+60];
+      }
+    }
     return extent();
   }
   function fitScale(pad){
@@ -799,6 +807,9 @@ function create(canvas, mini, hooks){
   /* ── L5 楼层 ── */
   function floorMap(g){
     const seed = hash(st.node.id);
+    const rooms=g.rooms||[];
+    const planTop=rooms.length?Math.min(...rooms.map(r=>r.y)):-280;
+    const planBottom=rooms.length?Math.max(...rooms.map(r=>r.y+r.h)):280;
     // 走廊
     const c = g.corridor;
     if(c.w>0&&c.h>0){
@@ -808,7 +819,7 @@ function create(canvas, mini, hooks){
     ctx.strokeStyle='rgba(140,200,255,.28)'; ctx.lineWidth=1.4/st.cam.s; ctx.stroke();
     ctx.setLineDash([8/st.cam.s,8/st.cam.s]);
     ctx.strokeStyle='rgba(67,224,255,.22)'; ctx.lineWidth=1.2/st.cam.s;
-    ctx.beginPath(); ctx.moveTo(c.x+14,0); ctx.lineTo(c.x+c.w-14,0); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(c.x+14,c.y); ctx.lineTo(c.x+c.w-14,c.y); ctx.stroke();
     ctx.setLineDash([]);
     // 走廊铺地
     ctx.strokeStyle='rgba(150,205,255,.06)'; ctx.lineWidth=1/st.cam.s;
@@ -816,7 +827,7 @@ function create(canvas, mini, hooks){
     // 壁灯
     for(let x=c.x+56;x<c.x+c.w-30;x+=126){
       [-1,1].forEach(sgn=>{
-        const ly=sgn*(c.h/2-9);
+        const ly=c.y+sgn*(c.h/2-9);
         const rg=ctx.createRadialGradient(x,ly,1,x,ly,46);
         rg.addColorStop(0,'rgba(255,214,140,.24)'); rg.addColorStop(1,'rgba(255,214,140,0)');
         ctx.beginPath(); ctx.arc(x,ly,46,0,7); ctx.fillStyle=rg; ctx.fill();
@@ -826,7 +837,7 @@ function create(canvas, mini, hooks){
     }
     // 长凳
     ctx.fillStyle='rgba(150,200,255,.13)';
-    [-330,-40,250].forEach(bx=>{
+    (st.node.host?[]:[-330,-40,250]).forEach(bx=>{
       ctx.beginPath(); rrect(ctx,bx,-16,74,10,3); ctx.fill();
       ctx.beginPath(); rrect(ctx,bx,6,74,10,3); ctx.fill();
     });
@@ -847,6 +858,14 @@ function create(canvas, mini, hooks){
       ctx.strokeStyle=`rgba(${tint},${live?.85:.35})`; ctx.lineWidth=(live?2.2:1.3)/st.cam.s;
       if(live){ ctx.shadowColor=`rgba(${tint},.8)`; ctx.shadowBlur=16/st.cam.s; }
       ctx.stroke();
+      if(r.role==='garden'||r.role==='outdoor'){
+        // Surface material only. These strokes are not furniture or new world entities.
+        ctx.save();ctx.beginPath();rrect(ctx,x+2,y+2,w-4,h-4,4);ctx.clip();
+        ctx.strokeStyle=r.role==='garden'?'rgba(57,224,160,.10)':'rgba(255,194,71,.08)';ctx.lineWidth=1/st.cam.s;
+        for(let yy=y+16;yy<y+h;yy+=20){ctx.beginPath();ctx.moveTo(x+3,yy);ctx.lineTo(x+w-3,yy);ctx.stroke();}
+        if(r.role==='garden')for(let xx=x+16;xx<x+w;xx+=24){ctx.beginPath();ctx.moveTo(xx,y+3);ctx.lineTo(xx,y+h-3);ctx.stroke();}
+        ctx.restore();
+      }
       ctx.restore();
     });
 
@@ -877,8 +896,19 @@ function create(canvas, mini, hooks){
       // 那是示例世界的文案，会被原样印到任何世界的图上。现在有 status 用 status，
       // 没有就写中性描述，绝不为哪个房间编一个剧情状态。
       pushLabel(x+w/2, y+h/2 - 4, r.name, !!r.live?C.cyan:'#a8bdd6', !!r.live?'live':'name', true);
-      pushLabel(x+w/2, y+h-13, r.status || (r.kind==='vehicle'?'车厢内部':r.kind==='exit'?'通道':'房间'), 'rgba(140,170,200,.75)','sub', true);
+      pushLabel(x+w/2, y+h-13, r.status || (r.kind==='vehicle'?'车厢内部':r.role==='garden'?'园林 · 示意':r.role==='outdoor'?'室外 · 示意':r.kind==='exit'?'通道':'房间'), 'rgba(140,170,200,.75)','sub', true);
     });
+
+    // Saved window geometry was projected but never drawn. Keep the reference page's cyan glazing.
+    ctx.save();
+    (g.windows||[]).forEach(win=>{
+      ctx.beginPath();ctx.moveTo(win.x-win.w/2,win.y);ctx.lineTo(win.x+win.w/2,win.y);
+      ctx.strokeStyle='rgba(10,16,26,1)';ctx.lineWidth=6/st.cam.s;ctx.stroke();
+      ctx.strokeStyle='rgba(127,212,255,.65)';ctx.lineWidth=2/st.cam.s;ctx.stroke();
+      ctx.beginPath();ctx.moveTo(win.x-win.w/2,win.y-3/st.cam.s);ctx.lineTo(win.x+win.w/2,win.y-3/st.cam.s);
+      ctx.strokeStyle='rgba(127,212,255,.25)';ctx.lineWidth=1/st.cam.s;ctx.stroke();
+    });
+    ctx.restore();
 
     // 门
     ctx.save();
@@ -899,21 +929,22 @@ function create(canvas, mini, hooks){
     const measureLeft=-measureWidth/2,measureRight=measureWidth/2;
     ctx.save();
     ctx.strokeStyle='rgba(140,200,255,.30)'; ctx.lineWidth=1/st.cam.s;
-    const dy=328;
+    const dy=st.node.host?planBottom+36:328;
     ctx.beginPath(); ctx.moveTo(measureLeft,dy); ctx.lineTo(measureRight,dy); ctx.stroke();
     for(let x=measureLeft;x<=measureRight;x+=measureWidth/8){ ctx.beginPath(); ctx.moveTo(x,dy-7); ctx.lineTo(x,dy+7); ctx.stroke(); }
-    ctx.beginPath(); ctx.moveTo(-470,-70); ctx.lineTo(-470,dy); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(st.node.host?measureLeft-16:-470,st.node.host?planTop:-70); ctx.lineTo(st.node.host?measureLeft-16:-470,dy); ctx.stroke();
     ctx.restore();
     pushLabel(0, dy+11, st.node.host?`宽度 ${(measureWidth*mpp).toFixed(1)} ${st.node.metric?'m':'格'}`:`940 u · 约 ${(940*mpp).toFixed(1)} m`, 'rgba(150,200,240,.8)', 'sub', true);
     // 图签
+    const stampX=st.node.host?measureRight-228:296,stampY=st.node.host?planTop-62:-302;
     ctx.save();
-    ctx.beginPath(); rrect(ctx,296,-302,228,50,4);
+    ctx.beginPath(); rrect(ctx,stampX,stampY,228,50,4);
     ctx.fillStyle='rgba(8,14,24,.82)'; ctx.fill();
     ctx.strokeStyle='rgba(120,200,255,.35)'; ctx.lineWidth=1/st.cam.s; ctx.stroke();
     ctx.restore();
-    pushLabel(410, -297, (st.path[st.path.length-2]||{}).name || '建筑图', '#bcd6ee', 'name', true);
-    pushLabel(410, -284, st.node.host?`空间示意 · 单位 ${st.node.metric?'m':'格'}`:`比例 1:${Math.round(0.085/mpp*140)} · ATLAS 制图`, 'rgba(140,170,200,.85)', 'sub', true);
-    pushLabel(410, -271, `地点 ${st.node.id} · ${st.node.name}`, 'rgba(140,170,200,.85)', 'sub', true);
+    pushLabel(stampX+114, stampY+5, (st.path[st.path.length-2]||{}).name || '建筑图', '#bcd6ee', 'name', true);
+    pushLabel(stampX+114, stampY+18, st.node.host?`空间示意 · 单位 ${st.node.metric?'m':'格'}`:`比例 1:${Math.round(0.085/mpp*140)} · ATLAS 制图`, 'rgba(140,170,200,.85)', 'sub', true);
+    pushLabel(stampX+114, stampY+31, st.node.host?st.node.name:`地点 ${st.node.id} · ${st.node.name}`, 'rgba(140,170,200,.85)', 'sub', true);
   }
   /**
    * M6-06②：通用室内陈设。

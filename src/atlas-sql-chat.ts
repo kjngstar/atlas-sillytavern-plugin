@@ -204,7 +204,7 @@ export async function handleSqlChatRequest(session: SqlSession, action: string, 
         const native = JSON.parse(String(row.receipt_json));
         if (!native?.turnId || !Array.isArray(native.groups) || !Array.isArray(native.issues)) return [];
         const legacy = toLegacyTurnReceipt(native, { coreSaved: true });
-        const attempts = JSON.parse(String(row.attempts_json ?? '[]')).map((attempt: Record<string, unknown>) => ({ stage: attempt.kind ?? attempt.phase, phase: attempt.phase, httpStatus: attempt.http_status, errorCode: attempt.error_code, message: attempt.error, status: attempt.error ? 'failed' : 'completed' }));
+        const attempts = JSON.parse(String(row.attempts_json ?? '[]')).map((attempt: Record<string, unknown>) => ({ stage: attempt.kind ?? attempt.phase, phase: attempt.phase, httpStatus: attempt.http_status, errorCode: attempt.error_code, message: attempt.error, responseChars:attempt.response_chars,finishReason:attempt.finish_reason,durationMs:typeof attempt.started_wall_ms==='number'&&typeof attempt.finished_wall_ms==='number'?attempt.finished_wall_ms-attempt.started_wall_ms:undefined,status: attempt.error ? 'failed' : 'completed' }));
         return [{ ...legacy, status: native.status === 'noop' ? 'committed' : legacy.status, chatId: session.chatUid, recordedAt: Number(row.created_wall_ms), adoptedEventCount: 0, detail: { receipt: legacy.receipt, issues: legacy.issues, attempts, coreSaved: true } }];
       } catch { return []; }
     });

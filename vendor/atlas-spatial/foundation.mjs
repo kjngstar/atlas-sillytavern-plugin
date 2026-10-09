@@ -21,7 +21,7 @@
     const candidate = r => ({...r, y:r.side==='north'?corridor.y-r.h:corridor.y+corridor.h});
     const admissible = r => contains({x:0.5,y:0.5,w:bounds.w-1,h:bounds.h-1},r) && !intersects(r,corridor) && !placed.some(p=>intersects(r,p)) && Math.abs((r.side==='north'?r.y+r.h:r.y)-(r.side==='north'?corridor.y:corridor.y+corridor.h)) < 1e-8;
     const save = (r, x, y, quality) => {
-      const rect={id:r.id,name:r.name,side:r.side,x,y,w:r.w,h:r.h,quality};
+      const rect={id:r.id,name:r.name,side:r.side,...(r.role?{role:r.role}:{}),x,y,w:r.w,h:r.h,quality};
       placed.push({...rect,mapId:spec.id,parentId:spec.parentId,polygon:polygon(rect)});
     };
     const specs=ordered(spec.rooms);

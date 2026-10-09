@@ -55,6 +55,17 @@ const finite = (value: unknown): value is number => typeof value === 'number' &&
 const byId = (left: string, right: string): number => (left < right ? -1 : left > right ? 1 : 0);
 const uniqueSorted = (values: Iterable<string>): string[] => [...new Set(values)].sort(byId);
 
+/** Schematic capacity only: registered spaces get connected footprints, never invented entities. */
+export function baselineFloorRooms(locations: SqlRow[], extent: {width:number;height:number}, ref: (id:unknown)=>string|undefined) {
+  const local=[...locations].sort((a,b)=>byId(String(a.id),String(b.id)));
+  const perSide=Math.ceil(local.length/2);
+  if(!perSide)return [];
+  const w=Math.floor(Math.min(8,(extent.width-1)/perSide)*2)/2;
+  const h=Math.floor(Math.min(8,(extent.height-2)/2-.5)*10)/10;
+  if(w<=0||h<=0)return [];
+  return local.map((row,i)=>({id:ref(row.id),name:row.name,w,h,side:i%2?'south':'north'}));
+}
+
 /** Only registered entity IDs become short refs; local furniture IDs remain intact. */
 function aliasLayoutRefs(value:unknown, refs:readonly {id:string;alias:string}[]):unknown{
   if(typeof value==='string')return refs.find(r=>r.id===value)?.alias??value;
@@ -161,6 +172,7 @@ export function buildSqlLayoutTask(
   const issues: PlanIssue[] = [];
   const locations = tables.selectWhere('locations', { branch_id: branchId, status: 'active' }, 1000) as SqlRow[];
   const characters = tables.selectWhere('characters', { branch_id: branchId, status: 'active' }, 1000) as SqlRow[];
+  const items = tables.selectWhere('items', { branch_id: branchId, status: 'active' }, 1000) as SqlRow[];
   const maps = tables.selectWhere('maps', { branch_id: branchId, status: 'active' }, 1000) as SqlRow[];
   if (maps.length === 0) return null;
 
@@ -334,7 +346,7 @@ export function buildSqlLayoutTask(
         h: Math.min(entry.extent.height * 0.75, container.kind === 'vehicle' ? 6 : Number.POSITIVE_INFINITY),
         side: 'north',
       }]
-      : [];
+      : entry.kind==='floor' ? baselineFloorRooms(entry.own,entry.extent,ref) : [];
     const local = entry.standalone && container ? [container] : entry.own;
     const localIds = new Set(local.map((row) => String(row.id)));
     return {
@@ -355,11 +367,14 @@ export function buildSqlLayoutTask(
         ref: ref(row.id),
         name: row.name,
         kind: row.kind,
+        description: row.description,
         parent: ref(row.parent_location_id),
       })),
       actors: characters
         .filter((row) => localIds.has(String(row.location_id ?? '')))
         .map((row) => ({ ref: ref(row.id), name: row.name, roomId: ref(row.location_id) })),
+      items: items.filter(row=>localIds.has(String(row.location_id??'')))
+        .map(row=>({ref:ref(row.id),name:row.name,kind:row.kind,description:row.description,roomId:ref(row.location_id)})),
       savedConstraints: aliasLayoutRefs(scene?.constraints ?? null, catalogue.knownRefs),
       layoutIssues: aliasLayoutRefs(sceneLayout?.issues ?? [], catalogue.knownRefs),
     };
@@ -393,7 +408,7 @@ export function buildSqlLayoutTask(
     + '\noverview：spec={"surface":"mixed","zones":[{"id":地点引用,"name","role":"city/settlement/forest/water/mountain/ruins/district/campus/land/other","size":"small/medium/large","sector":"north/south/east/west/northeast/northwest/southeast/southwest/center","near":可选地点引用}],"links":[{"id":已登记route引用}],"features":[{"id":"本图局部装饰ID","type":"forest_texture/ridge/shore/building_cluster/road_texture/ruins_scatter/watercourse","zoneId":可选,"density":"low/medium/high"}]}。'
     + 'overview 的 zone 必须是本图直属地点或目录里已有的代理入口；links 只能用目录中已登记的路线引用；feature 只是本图局部装饰，永远不产生新实体、也不产生新道路。'
     + '\ncity：spec={"districts":[{"id":地点引用,"name","bank":"west/east","order":整数}],"buildings":[{"id":地点引用,"name","districtId":地块引用,"w","h"}],"enclosure":"open/wall","riverWidth":数值}。没有已登记街区时允许用城市 container.ref 表示整个城市的单个范围；新城市默认 enclosure="open"（无城墙、无城门、无环城墙道路）。'
-    + '\nfloor：spec={"rooms":[{"id":地点引用,"name","w","h","side":"north/south"}],"contents":[{"id":"本图局部陈设ID","name","type":"shelf/desk/bench/reading/stairs/table/chair/bed/cabinet/doorway/light/decor","roomId":房间引用,"w","h"}],"actors":[{"id":人物引用,"roomId":房间引用,"near":可选陈设ID}],"items":[{"id":物品引用,"on":陈设ID}]}。'
+    + '\nfloor 的 rooms 每项用 id/name/w/h/side，side 只能 north 或 south；可选 role=indoor/outdoor/garden，分别表示室内、开放院落、园林。contents 每项用 id/name/type/roomId/w/h，type 只能 shelf/desk/bench/reading/stairs/table/chair/bed/cabinet/doorway/light/decor；actors 每项用 id/roomId，可选 near=陈设ID；items 每项用 id/on=陈设ID。所有键都必须双引号，不得照抄省略号或伪 JSON。'
     + '\n布局阶段不新建 SQL 实体：所有可交互地点必须已经在目录里。但建设阶段允许新增地点，两者不冲突——不要因为布局不新建实体就停止补全世界。'
     + '\n不要输出其他操作。';
   request.anchor = input.anchor;
@@ -406,7 +421,11 @@ export function buildSqlLayoutTask(
     loreSupplement: input.sourceSnapshot.filter((item) => item.kind === 'lorebook').map((item) => item.text).join('\n'),
     baseRevision: input.anchor.baseRevision,
   };
-  request.messages[1].content += '\n单房间地图的 baselineRooms 是插件提供的合法示意房间；没有更明确尺寸依据时直接保留，至少要包含这个已登记的房间。不要把 width/height 写成房间尺寸，房间尺寸字段为 w/h，side 固定选 north 或 south。';
+  request.messages[1].content += '\nbaselineRooms 是程序为已登记空间提供的可容纳轮廓，不是实测尺寸；没有更明确尺寸依据时直接沿用，并在每间房补 role。多空间图必须覆盖 locations 中全部直属空间，庭院和花园也应有连通范围，不能退化成散点；室外空间用 outdoor/garden，不伪造室内窗户。不要把 width/height 写成房间尺寸，房间尺寸字段为 w/h，side 固定选 north 或 south。';
+  request.messages[1].content += '\n细节要求：按世界观和各空间用途组装陈设，不能只返回 rooms 空轮廓。正文点名的家具优先；没有逐件描写时可补用途合理的示意家具，每个有明确用途的室内空间通常 2–4 件，空置房间或室外空间可不补。卧室可估计床与储物柜，书房可估计书桌与书架，工作空间按资料选择桌台和储物；不得把同一套陈设复制进每间房，不使用示例世界地名或剧情。局部陈设不是新增 SQL 物品，所有坐标与通行由程序计算。';
+  for(const scope of scopes.filter(s=>s.kind==='floor')){
+    request.messages[1].content+='\n【本图合法 JSON 外层示例；按资料补齐 contents，不照搬为空布局】\n'+JSON.stringify({op:'map.layout.request',ref:scope.map,data:{kind:'floor',spec:{rooms:scope.baselineRooms,contents:[],actors:scope.actors.map(a=>({id:a.ref,roomId:a.roomId})),items:[]}},why:'依据已登记空间生成估计布局'});
+  }
   request.messages[1].content += '\n普通阅览桌用 type="table"，椅子单独用 type="chair"；reading 是桌子加四把椅子的整套组合，占地 w/h 均至少 2 米，不能用于 2×1 米的单张桌子。所有陈设用正数 w/h，完整占地必须装进房间。';
   request.messages[1].content += '\n多房间 floor 保留中央走廊，默认 corridorWidth=2；每个房间 w 不超过 extent.width-1，h 不超过 (extent.height-2)/2-0.5，side=north 或 south。同侧多个房间的宽度与间隔合计也必须装得下。单间房的 baselineRooms 可占满整个 extent，不另扣中央走廊。';
   request.messages[1].content += '\noverview 的水系 feature 必须为 {"id":"本图局部水系ID","type":"watercourse","zoneId":"本图已登记水域引用（可选）","fromSector":"north","toSector":"south","widthClass":"narrow/medium/wide"}。fromSector/toSector 取 north/northeast/east/southeast/south/southwest/west/northwest 且不同；不要仅写 zoneId/density 而省略起终方向。方向是估计布局，不能标成已测量事实。';

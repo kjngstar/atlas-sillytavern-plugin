@@ -13,7 +13,7 @@ import { handleSqlChatRequest } from '../src/atlas-sql-chat.ts';
 import { normalizeConstructionOps } from '../src/atlas-sql-world-completion.ts';
 import { floor } from '../vendor/atlas-spatial/foundation.mjs';
 import { dedupeWorldConstructionOps } from '../src/atlas-sql-world-dedupe.ts';
-import { buildSqlLayoutTask } from '../src/atlas-sql-layout-task.ts';
+import { buildSqlLayoutTask, baselineFloorRooms } from '../src/atlas-sql-layout-task.ts';
 import { overview } from '../vendor/atlas-spatial/overview-core.mjs';
 const SQL = await (await import('sql.js')).default();
 const noop = '{"op":"noop"}';
@@ -21,6 +21,29 @@ const model = fn => ({calls:[], async request(req){this.calls.push(req);return {
 const anchor = {chatUid:IDS.chatA,branchId:IDS.branchMain,parentTurnId:IDS.seedTurn,hostMessageUid:'accept-fix',variantKey:'v1',baseRevision:0,baseStorageRevision:0,inputHash:'accept-fix'};
 async function seeded(port, setup){const seed=await makeSeedWith(SQL);setup?.(seed.db);const bytes=seed.exportBytes();seed.close();const repo=createSqlRepository({chatUid:IDS.chatA,branchId:IDS.branchMain,modelPort:port});await repo.open({bytes});return repo;}
 const input = extra => ({anchor,userText:'合成验收',assistantText:'合成验收',sourceSnapshot:[],phaseBatches:['observe'],manual:false,sceneOnly:true,worldCompletion:{mode:'local',focusLocationIds:[IDS.L3]},...extra});
+
+test('six registered spaces fit a connected baseline without inventing or dropping locations',()=>{
+ const spaces=Array.from({length:6},(_,i)=>({id:`space-${i}`,name:`空间 ${i}`}));
+ const rooms=baselineFloorRooms(spaces,{width:24,height:24},id=>id);
+ const result=floor({id:'house',width:24,height:24,corridorWidth:2,rooms});
+ assert.equal(result.ok,true,JSON.stringify(result.issues));assert.equal(result.rooms.length,6);
+ assert.deepEqual(result.rooms.map(r=>r.id).sort(),spaces.map(r=>r.id));
+ assert.ok(result.corridor.h>0);assert.equal(result.doors.length,6);
+ assert.ok(result.rooms.every(r=>r.x>=0&&r.x+r.w<=24&&r.y>=0&&r.y+r.h<=24));
+});
+
+test('malformed layout gets one budgeted fresh response; only the valid response is saved',async()=>{
+ const port=model((req,n)=>n===1?'{"op":"map.layout.request"}garbage':JSON.stringify({op:'map.layout.request',ref:IDS.M1,data:{kind:'overview',spec:{zones:[{id:IDS.L1,name:'城市',role:'city',size:'medium'}]}}}));
+ const repo=await seeded(port);
+ try{const p=await repo.prepareTurn(input({manual:true,phaseBatches:[],operations:[],worldCompletion:undefined,sceneMaps:true,layoutMaps:[IDS.M1]}));
+  assert.equal(port.calls.length,2);assert.match(port.calls[1].batchId,/_format_retry$/);
+  assert.ok(!p.receipt.issues.some(i=>i.code==='JSON_SYNTAX'));assert.ok(p.receipt.issues.some(i=>i.code==='LAYOUT_RESPONSE_RETRIED'));
+  const db=repo.getCandidate(p.token).db;const saved=JSON.parse(queryBound(db,'SELECT frame_json FROM maps WHERE id=?',[IDS.M1])[0].frame_json).atlasScene;
+  assert.ok(saved);assert.ok(saved.layout.shapes.some(s=>s.id===IDS.L1));
+  const attempts=JSON.parse(queryBound(db,'SELECT attempts_json FROM turns WHERE id=?',[p.receipt.turnId])[0].attempts_json);
+  assert.deepEqual(attempts.map(a=>a.kind),['layout','layout_repair']);assert.ok(attempts.every(a=>a.http_status===200&&a.response_chars>0));
+ }finally{await repo.close();}
+});
 
 test('successive layouts retain the container room and furniture while removing an actor who left',async()=>{
  const repo=await seeded(model(()=>noop),db=>{db.run('UPDATE characters SET location_id=?,map_id=?,grid_x=NULL,grid_y=NULL WHERE id IN (?,?)',[IDS.L3,IDS.M1,IDS.C1,IDS.C2]);db.run('UPDATE locations SET map_id=? WHERE id=?',[IDS.M1,IDS.L3]);});

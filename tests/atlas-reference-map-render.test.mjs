@@ -29,6 +29,15 @@ test('独立房间视野适应实际房间，保留物理尺度与多房间整�
  st.geo.rooms.push({...room,x:100});vm.runInContext('fit(false)',runtime);
  assert.equal(st.cam.x,0);assert.equal(st.cam.y,10);
  assert.ok(st.cam.s<1);
+ st.node.host=true;vm.runInContext('fit(false)',runtime);
+ assert.ok(st.cam.s>1,'已保存的多房间布局应填满视野，不沿用空白整图范围');
+ for(const r of st.geo.rooms){
+   for(const [x,y] of [[r.x,r.y],[r.x+r.w,r.y+r.h]]){
+     const sx=(x-st.cam.x)*st.cam.s+st.vw/2,sy=(y-st.cam.y)*st.cam.s+st.vh/2;
+     assert.ok(sx>0&&sx<st.vw&&sy>0&&sy<st.vh,'所有房间边界应留在视口内');
+   }
+ }
+ assert.deepEqual(st.node.extent,[-540,540,-340,360]);
 });
 /** 模块级工具区（hash/rng/smooth/rrect/glow + 概览背景）。 */
 const TOOLS = cut('function hash(s)', 'function create(canvas');
@@ -60,7 +69,7 @@ const strokes = (log, style) => log.filter(e => e.op === 'stroke' && e.stroke ==
 /** 在 vm 里拼出 map.js 的指定区段，并注入 canvas/st/pushLabel 替身。 */
 function mapRuntime({ctx, st, pushLabel, sections}){
   const runtime = vm.createContext({
-    ctx, st, pushLabel,
+    ctx, st, pushLabel,C:{cyan:'#43e0ff'},
     extent: () => [-50, 50, -50, 50],
     hexA: (c, a) => c + '@' + a,
     Math, Number, Array, Object, String, JSON, console,
@@ -142,6 +151,15 @@ function floorScene(){
   }};
 }
 const floorGeo = () => referenceGeometry(FLOOR_MAP, floorScene(), {viewMode: 'author'}).geo;
+
+test('saved windows are drawn and protagonist rooms retain the reference cyan emphasis',()=>{
+ const scene=floorScene();
+ const geometry=referenceGeometry({...FLOOR_MAP,points:[{entityId:'C1',kind:'character',isProtagonist:true}]},scene);
+ assert.equal(geometry.geo.rooms.find(r=>r.id==='R2').live,true);
+ assert.equal(geometry.marks.find(m=>m.id==='C1').hero,true);
+ const {runtime,log}=sceneRuntime(FLOOR,geometry.geo);runtime.floorMap(geometry.geo);
+ assert.equal(strokes(log,'rgba(127,212,255,.65)'),1);
+});
 
 test('G08 · 通用陈设各自有可辨画法，实体障碍与装饰分开', () => {
   const geo = floorGeo();

@@ -11,6 +11,19 @@ const POV={...scope,viewMode:'pov'};
 const baseRooms=()=>Array.from({length:6},(_,i)=>({id:'room-'+i,name:'房间'+i,side:i%2?'north':'south',w:6,h:5}));
 const baseCtx=(locations)=>({scope,currentScope:scope,map:{id:'map-1',name:'fixture',metersPerCell:2,frame:{cols:15,rows:12}},entities:{locations,characters:['npc-1'],items:['item-1']}});
 
+test('outdoor and garden spaces retain their role through saving, updating and POV filtering without indoor windows',()=>{
+ const rooms=baseRooms().map((r,i)=>({...r,role:i===0?'garden':i===1?'outdoor':'indoor'}));
+ const ctx=baseCtx(rooms.map(r=>r.id));const first=Kit.generateFloor({rooms},ctx);
+ assert.equal(first.ok,true,JSON.stringify(first.issues));
+ assert.ok(!first.scene.layout.windows.some(w=>['room-0','room-1'].includes(w.roomId)));
+ assert.ok(first.scene.layout.windows.some(w=>w.roomId==='room-2'));
+ const next=Kit.generateFloor({contents:[]},{...ctx,previousScene:first.scene});
+ assert.equal(next.scene.layout.rooms.find(r=>r.id==='room-0').role,'garden');
+ const pov=Kit.filterSceneForView(next.scene,{scope:POV,visibleLocations:rooms.map(r=>r.id),visibleCharacters:[],visibleItems:[]});
+ assert.equal(pov.ok,true);assert.equal(pov.scene.layout.rooms.find(r=>r.id==='room-0').role,'garden');
+ assert.equal(pov.scene.constraints,undefined);
+});
+
 test('柜面可承载物品并保留真实容器引用',()=>{
  const result=Kit.generateFloor({rooms:baseRooms(),contents:[{id:'cabinet',type:'cabinet',roomId:'room-0',w:1,h:1}],items:[{id:'item-1',on:'cabinet'}]},baseCtx(baseRooms().map(r=>r.id)));
  assert.equal(result.ok,true,JSON.stringify(result.issues));

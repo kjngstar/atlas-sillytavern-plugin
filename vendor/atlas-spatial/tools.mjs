@@ -5,7 +5,7 @@ export const TOOL_NAMES=Object.freeze(['atlas_generate_floor','atlas_generate_ci
 /** Neutral definitions. Provider message/tool envelopes belong to the existing model adapter. */
 export function getSpatialToolDefinitions(){
   const id={type:'string',minLength:1,maxLength:160},num={type:'number'},item=(properties,required)=>({type:'object',properties,required,additionalProperties:false});
-  const rooms=item({id,name:{type:'string'},side:{enum:['north','south']},w:num,h:num},['id','side','w','h']);
+  const rooms=item({id,name:{type:'string'},side:{enum:['north','south']},role:{enum:['indoor','outdoor','garden']},w:num,h:num},['id','side','w','h']);
   const groups=item({id,name:{type:'string'},roomId:id,type:{enum:['shelf','desk','bench','reading','stairs','table','chair','bed','cabinet','doorway','light','decor']},w:num,h:num},['id','roomId','type','w','h']);
   const descriptions=['生成当前地图的室内细节；只提供房间、尺寸和归属，程序计算位置','生成有河流约束的城市分区和建筑；保留已保存的几何','在调用者提供的合法区域内摆放视觉标点；不改变实体真实位置','从程序提供的已过滤关系、路线与传播数据生成图层','生成广域概览：分区、已登记路线与局部装饰；不新建 SQL 实体，装饰永远不是道路'];
   const overviewZone=item({id,name:{type:'string'},role:{enum:['city','settlement','forest','water','mountain','ruins','district','campus','land','other']},size:{enum:['small','medium','large']},sector:{enum:['north','northeast','east','southeast','south','southwest','west','northwest','center']},near:id},['id']);

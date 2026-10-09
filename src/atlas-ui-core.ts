@@ -110,7 +110,7 @@ function receiptDetail(value:unknown,depth=0):unknown{
   if(typeof value==='string')return value.replace(/sk-[A-Za-z0-9_-]{6,}|Bearer\s+\S+/gi,'[redacted]');
   if(value===null||typeof value==='number'||typeof value==='boolean')return value;
   if(!value||typeof value!=='object')return undefined;
-  const keys=new Set(['turnId','status','summary','groups','groupId','opIds','changedRows','issues','code','message','path','schemaPath','severity','retryable','dependsOn','dependencies','dependency','opId','phase','stage','attempt','attempts','batchId','httpStatus','durationMs','errorCode','clockBeforeS','clockAfterS','simulatedUntilS','worldChanged','timeChanged','coreSaved','coreCommitted','receipt']);
+  const keys=new Set(['turnId','status','summary','groups','groupId','opIds','changedRows','issues','code','message','path','schemaPath','severity','retryable','dependsOn','dependencies','dependency','opId','phase','stage','kind','attempt','attempts','batchId','httpStatus','durationMs','responseChars','finishReason','http_status','started_wall_ms','finished_wall_ms','response_chars','response_hash','finish_reason','error','errorCode','clockBeforeS','clockAfterS','simulatedUntilS','worldChanged','timeChanged','coreSaved','coreCommitted','receipt']);
   return Object.fromEntries(Object.entries(value).filter(([k])=>keys.has(k)).map(([k,v])=>[k,receiptDetail(v,depth+1)]));
 }
 

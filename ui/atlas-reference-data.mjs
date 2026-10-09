@@ -64,8 +64,9 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
   const xy = p => {const [x,y]=point(p);return [(x-(b.x??0)-b.w/2)*scale,(y-(b.y??0)-b.h/2)*scale];};
   const rect = r => {const [x,y]=xy(r);return {x,y,w:r.w*scale,h:r.h*scale};};
   const metric = document?.units==='meters' ? 1/scale : typeof map.metersPerCell==='number'&&map.metersPerCell>0 ? map.metersPerCell/scale : null;
+  const protagonistIds=new Set((map.points??[]).filter(p=>p.isProtagonist===true).map(p=>p.entityId));
   const rawPins = layout ? [
-    ...pins, ...(layout.actors??[]).map(p=>({...p,type:'person'})), ...(layout.items??[]).map(p=>({...p,type:'item'})),
+    ...pins, ...(layout.actors??[]).map(p=>({...p,isProtagonist:p.isProtagonist===true||protagonistIds.has(p.id),type:'person'})), ...(layout.items??[]).map(p=>({...p,type:'item'})),
     ...(layout.rooms??[]).map(r=>({...r,type:'location',silent:true,x:r.x+r.w/2,y:r.y+r.h/2})),
     ...(layout.districts??[]).filter(d=>d.polygon?.length>=3&&d.polygon.every(finite)).map(d=>({...d,type:'location',silent:true,x:d.polygon.reduce((n,p)=>n+point(p)[0],0)/d.polygon.length,y:d.polygon.reduce((n,p)=>n+point(p)[1],0)/d.polygon.length})),
     ...(layout.buildings??[]).filter(p=>!p.decorative).map(r=>({...r,type:'location',x:r.x+r.w/2,y:r.y+r.h/2})),
@@ -154,10 +155,12 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
     const furnSource=(layout.groups??[]).filter(Boolean).length
       ? (layout.groups??[]).filter(Boolean).flatMap(g=>(g.bodies??[]).filter(Boolean).map(b=>({body:b,groupId:b.groupId??g.id,roomId:b.roomId??g.roomId})))
       : (layout.bodies??[]).filter(Boolean).map(b=>({body:b,groupId:b.groupId??null,roomId:b.roomId??null}));
+    const activeRooms=new Set((layout.actors??[]).filter(a=>a.isProtagonist===true||protagonistIds.has(a.id)).map(a=>a.roomId));
     geo={corridor:{...corridor,y:corridor.y+corridor.h/2},
       rooms:(layout.rooms??[]).map((r,i)=>({...rect(r),id:r.id,name:r.name,kind:r.id===map.containerLocationId&&map.containerLocationKind==='vehicle'?'vehicle':'room',
+        role:r.role??'indoor',
         status:text(r.status)||null,
-        tint:['67,224,255','155,107,255','57,224,160','127,212,255'][i%4],live:false})),
+        tint:r.role==='garden'?'57,224,160':r.role==='outdoor'?'255,194,71':['67,224,255','155,107,255','57,224,160','127,212,255'][i%4],live:activeRooms.has(r.id)})),
       doors:(layout.doors??[]).map((d,i)=>{const [x,y]=xy(d);return {id:text(d.id)||`door:${text(d.roomId)||i}`,roomId:text(d.roomId)||null,x,y,w:d.width*scale};}),
       windows:(layout.windows??[]).map((w,i)=>{const [x,y]=xy(w);return {id:text(w.id)||`window:${i}`,roomId:text(w.roomId)||null,x,y,w:(Number.isFinite(w.width)?w.width:1.2)*scale};}),
       lamps:(layout.lamps??[]).map((l,i)=>{const [x,y]=xy(l);return {id:text(l.id)||`light:${i}`,roomId:text(l.roomId)||null,x,y,
@@ -165,7 +168,7 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
       furn:furnSource.map(({body,groupId,roomId},i)=>{
         const r=rect(body),type=text(body.type)||null;
         return {id:text(body.id)||`${text(groupId)||'furn'}:${type??'decor'}:${i}`,
-          type,t:type?LEGACY_FURN_CLASS[type]??type:'decor',
+          name:text(body.name),type,t:type?LEGACY_FURN_CLASS[type]??type:'decor',
           gid:text(groupId)||null,roomId:text(roomId)||null,
           // POV 清洗会把 body.type 剥掉：此时不猜它是什么，明确标 detail=false，
           // 让渲染层画中性块而不是编一个「桌子」出来。

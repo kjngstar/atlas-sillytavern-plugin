@@ -94,7 +94,7 @@ function stripLayoutForPov(s){
   const sanitize={
     floor:{
       corridor:p=>pick(p,'x','y','w','h'),
-      rooms:p=>pick(p,'id','name','x','y','w','h','side'),
+      rooms:p=>pick(p,'id','name','x','y','w','h','side','role'),
       groups:p=>({...pick(p,'id','name','roomId','x','y','w','h'),...(Array.isArray(p.bodies)?{bodies:p.bodies.map(b=>pick(b,'x','y','w','h')).filter(Boolean)}:{})}),
       bodies:p=>pick(p,'x','y','w','h','roomId'),
       doors:p=>pick(p,'x','y','width','roomId'),

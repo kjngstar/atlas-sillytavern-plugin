@@ -113,7 +113,7 @@ import * as B from './foundation.mjs';
         const g=makeGroup({...f,w:chosen.w,h:chosen.h},r,chosen.x,chosen.y);if(f.locked)g.quality='confirmed';groups.push(g);bodies.push(...g.bodies);
       }
       const outerY=r.side==='north'?r.y:r.y+r.h;
-      for(let i=0;i<Math.max(1,Math.floor(r.w/3));i++)windows.push({id:'window:'+r.id+':'+i,type:'window',roomId:r.id,x:r.x+(i+.5)*r.w/Math.max(1,Math.floor(r.w/3)),y:outerY,width:1.2,elevation:1.1});
+      if(!['outdoor','garden'].includes(r.role))for(let i=0;i<Math.max(1,Math.floor(r.w/3));i++)windows.push({id:'window:'+r.id+':'+i,type:'window',roomId:r.id,x:r.x+(i+.5)*r.w/Math.max(1,Math.floor(r.w/3)),y:outerY,width:1.2,elevation:1.1});
       lamps.push({id:'light:'+r.id,type:'light',roomId:r.id,x:door.x,y:r.y+r.h*.45,elevation:2.8});
       const nav=navigation(r,door,bodies.filter(b=>b.roomId===r.id));
       for(const g of groups.filter(g=>g.roomId===r.id)){
