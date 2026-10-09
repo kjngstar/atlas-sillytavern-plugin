@@ -401,10 +401,11 @@ test('§6.3 toLegacyTurnReceipt：partial → committed + rejectedGroups，完�
   assert.equal(legacy.groupCounts.applied, 1);
   assert.equal(legacy.groupCounts.rejected, 1);
 
-  // 只有「零组成功且无有效时间/程序变化」才 report failed
+  // 原生 failed 始终失败；有独立有效时间变化的原生 partial 仍适配为 committed。
   const onlyRejected = { ...receipt, groups: [receipt.groups[1]] };
   assert.equal(toLegacyTurnReceipt({ ...onlyRejected, status: 'failed', worldChanged: false, timeChanged: false }).status, 'failed');
-  assert.equal(toLegacyTurnReceipt({ ...onlyRejected, status: 'failed', worldChanged: false, timeChanged: true }).status, 'committed');
+  assert.equal(toLegacyTurnReceipt({ ...onlyRejected, status: 'partial', worldChanged: false, timeChanged: true }).status, 'committed');
+  assert.equal(toLegacyTurnReceipt({ ...receipt, status: 'failed', worldChanged: false, timeChanged: false }).status, 'failed');
   assert.equal(toLegacyTurnReceipt({ ...receipt, status: 'noop', groups: [], worldChanged: false, timeChanged: false }).status, 'noop');
   // 未由宿主确认时不得伪造 coreSaved
   assert.equal(toLegacyTurnReceipt(receipt).coreSaved, null);

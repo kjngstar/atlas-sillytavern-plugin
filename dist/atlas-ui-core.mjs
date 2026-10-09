@@ -45,30 +45,6 @@ function transportBudgetPort(budget, stage, batchId) {
     }
   };
 }
-function budgetError(claim) {
-  return Object.assign(new Error(claim.reason), { code: claim.code, retryable: false, deferred: true });
-}
-function budgetedModelPort(port, budget, stage) {
-  return {
-    ...port,
-    /** 阶段名优先取请求自带的 phase（observe/geography/decision/outcome/repair），否则用端口默认。 */
-    async request(request) {
-      const phase = request.phase || stage;
-      const logical = budget.claimBatch(phase, request.batchId);
-      if (!logical.ok) throw budgetError(logical);
-      const claim = budget.claimTransport(phase, request.batchId);
-      if (!claim.ok) throw budgetError(claim);
-      try {
-        const response = await port.request(request);
-        budget.finishBatch(request.batchId, "completed");
-        return response;
-      } catch (error2) {
-        budget.finishBatch(request.batchId, "failed");
-        throw error2;
-      }
-    }
-  };
-}
 var init_atlas_sql_generation_budget = __esm({
   "src/atlas-sql-generation-budget.ts"() {
     "use strict";
@@ -3108,7 +3084,7 @@ var init_atlas_ops_prompts = __esm({
       '没有需要修改的数据时输出 {"op":"noop"}。',
       "未知信息省略或在允许清空时写 null；不知道精确坐标时保留粗粒度地点。",
       "不要把人物的愿望当作已经发生的行动，也不要把某地有传言当作人人知情。",
-      "可选 source 使用给定的来源编号；不需要逐字摘录 quote。",
+      "可选 source 必须复制给定来源的完整 key，例如 story:2、user:1、player；不能只写 2 或其它序号，不需要逐字摘录 quote。",
       "格式示例：",
       "{{allowedOperationExamples}}",
       "本次允许的操作与最少参数：",
@@ -3464,6 +3440,7 @@ var init_atlas_sql_world_completion = __esm({
     init_atlas_sql_task_refs();
     init_atlas_sql_world_sources();
     init_atlas_spatial_frame();
+    init_atlas_ops_prompts();
   }
 });
 
@@ -4737,6 +4714,8 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
     let rescueAttempted = false;
     let rescueDeniedReason = null;
     const initial = buildPayload(false);
+    const initialClaim = deps.initialTransport?.();
+    if (initialClaim && !initialClaim.ok) return fail3(ATLAS_ERROR_CODES.MODEL_BUDGET_EXHAUSTED, initialClaim.reason ?? "本轮传输预算已用尽", false);
     try {
       response = await awaitResponse(fetchFn(initial.url, {
         method: "POST",
@@ -5994,6 +5973,7 @@ function createSqlModelPort(options) {
     return { preset, input, messages, promptSource: preset.systemPrompt?.trim() ? "connection" : preset.promptSegments?.length ? "preset" : "builtin" };
   }
   const port = {
+    withBudget: (budget, stage) => createSqlModelPort({ ...options, budget, stage }),
     async preview(request) {
       const { input, messages, promptSource } = await prepare(request);
       return {
@@ -6006,7 +5986,9 @@ function createSqlModelPort(options) {
     async request(request) {
       const { preset, input, messages } = await prepare(request);
       const budget = options.budget;
-      const phase = request.phase || options.stage || "observe";
+      const phase = options.stage === "background" ? "background" : request.phase || options.stage || "observe";
+      const logical = budget?.claimBatch(phase, request.batchId);
+      if (logical && !logical.ok) throw failure(logical.code, logical.reason);
       const result = await callAtlasWorldTurnApi({
         ...preset,
         // Stage budgets are defaults; explicit saved connection settings take priority.
@@ -6018,8 +6000,9 @@ function createSqlModelPort(options) {
         messagesOverride: messages,
         // M3-03A：API 内部兼容路由的第二次真实发送，也走同一局部预算。缺预算 port 时不传，
         // 由 api-client 按最严策略拒发并明确报错（绝不隐藏重试）。
-        ...budget ? { rescueTransport: () => transportBudgetPort(budget, phase, request.batchId).claim() } : {}
+        ...budget ? { initialTransport: () => transportBudgetPort(budget, phase, request.batchId).claim(), rescueTransport: () => transportBudgetPort(budget, phase, request.batchId).claim() } : {}
       });
+      budget?.finishBatch(request.batchId, result.ok ? "completed" : "failed");
       if (!result.ok) throw failure(result.code, result.message, result.retryable);
       return {
         batchId: request.batchId,
@@ -6030,7 +6013,7 @@ function createSqlModelPort(options) {
       };
     }
   };
-  return options.budget ? budgetedModelPort(port, options.budget, options.stage ?? "observe") : port;
+  return port;
 }
 
 // src/atlas-world-summary.ts
@@ -7568,10 +7551,13 @@ function createAtlasUiCore(deps) {
           httpStatus: result.status
         });
         const simulationView = parseAtlasSimulationView(body.data.simulationView);
+        const savedReceipts = useSql && Array.isArray(body.data.receipts) ? body.data.receipts.map((record) => sanitizeReceiptRecord(record, binding.chatId)).filter((record) => !!record && record.chatId === binding.chatId) : [];
+        const restoredReceipts = useSql && Array.isArray(body.data.receipts) ? [...savedReceipts, ...state.receipts.filter((record) => record.status === "failed" && record.detail?.coreSaved !== true && !savedReceipts.some((saved) => saved.receiptId === record.receiptId))].sort((a, b) => b.recordedAt - a.recordedAt).slice(0, RECEIPTS_MAX) : state.receipts;
         setState({
           mode: "ready",
           stateData: body.data,
           simulationView,
+          receipts: restoredReceipts,
           lastError: null
         });
         if (useSql && !sqlRetryRequest && !state.pendingTurn && !commitFlight) {
@@ -9140,7 +9126,7 @@ function createAtlasSettingsRoutes(deps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.84",
+      version: "0.9.85",
       protocolVersion: 1,
       time: now()
     });
@@ -9597,7 +9583,9 @@ function toLegacyTurnReceipt(receipt, options = {}) {
   const succeeded = groups.filter((group) => group.status === "applied" || group.status === "duplicate");
   const rejected = groups.filter((group) => group.status === "rejected" || group.status === "blocked");
   let status;
-  if (succeeded.length === 0 && !receipt.timeChanged && !receipt.worldChanged) {
+  if (receipt.status === "failed") {
+    status = "failed";
+  } else if (succeeded.length === 0 && !receipt.timeChanged && !receipt.worldChanged) {
     status = receipt.status === "noop" ? "noop" : "failed";
   } else if (receipt.status === "noop" && succeeded.length === 0) {
     status = "noop";
@@ -9766,8 +9754,10 @@ init_atlas_sql_simulation();
 init_atlas_db_outbox();
 init_atlas_db_journal();
 init_atlas_runtime_limits();
+init_atlas_sql_generation_budget();
 
 // src/atlas-sql-retry.ts
+init_atlas_sql_generation_budget();
 init_atlas_ops_contract();
 
 // src/atlas-sql-chat.ts

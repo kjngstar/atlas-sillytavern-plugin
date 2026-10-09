@@ -17,7 +17,7 @@ async function fixture(){
  let saves=0,calls=0,saveOk=true,response=initial.map(op=>JSON.stringify(op)).join('\n');
  const host={chatUid:'maps-real',branchId:'main',chatMetadata:{},saveMetadata:async()=>{saves++;return saveOk;}};
  const provider=createBrowserSqlHost({enabled:()=>true,context:()=>host,loadRuntime:loadAtlasSqlRuntime,
-  modelPort:{request:async request=>{calls++;return {batchId:request.batchId,text:response,finishReason:'stop'};}}});
+  modelPort:{request:async request=>{calls++;return {batchId:request.batchId,text:request.batchId.startsWith('construction_')?'{"op":"noop"}':response,finishReason:'stop'};}}});
  const core=createAtlasServerCore({store:{read:async()=>null,write:async()=>{throw Error('No legacy writer');}},sqlSessionProvider:provider});
  const send=(action,body={})=>core.handle('POST','/sql/chat/'+action,{chatId:host.chatUid,chatUid:host.chatUid,...body},{local:true});
  const session=await provider.session(host.chatUid),seed=session.repo.internal.currentHeadTurnId();
@@ -35,11 +35,11 @@ test('Q07 bootstrap previews actual scene layout without saving; applying uses t
  const f=await fixture();try{
   const req={assistantText:'在学校教室。',openingMessageId:'opening'};
   const preview=await f.send('map/bootstrap',{...req,apply:false});assert.equal(preview.status,200,JSON.stringify(preview.body));
-  assert.equal(preview.body.data.newLocations.length,3);assert.equal(f.saves(),0);assert.equal(f.calls(),1);
+  assert.equal(preview.body.data.newLocations.length,3);assert.equal(f.saves(),0);assert.equal(f.calls(),2);
   assert.equal(queryBound(f.session.repo.db,'SELECT COUNT(*) n FROM locations',[])[0].n,0);
   const p=preview.body.data;
   const apply=await f.send('map/bootstrap',{...req,apply:true,previewId:p.previewId,baseRevision:p.baseRevision});assert.equal(apply.body.data.coreSaved,true,JSON.stringify(apply.body));
-  assert.equal(f.calls(),1);assert.equal(f.saves(),1);
+  assert.equal(f.calls(),2);assert.equal(f.saves(),1);
   const branch=queryBound(f.session.repo.db,'SELECT * FROM branches',[])[0];assert.equal(branch.clock_s,0);assert.ok(branch.pov_character_id);assert.ok(branch.root_map_id);
   assert.equal(queryBound(f.session.repo.db,'SELECT COUNT(*) n FROM maps',[])[0].n,4);
   const state=(await f.send('state')).body.data;

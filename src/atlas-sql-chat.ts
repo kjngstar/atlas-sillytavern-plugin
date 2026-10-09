@@ -87,27 +87,15 @@ function resolveFeedPovId(session: SqlSession, asked: string): string | undefine
 /**
  * M3-14：普通楼层的建设焦点 = **主角当前实际所在地点**。
  *
- * 不用助手卡名称、不用楼层数推算时间；主角位置就是 branches.pov_character_id →
- * characters.location_id。没有可靠位置就返回空数组，builder 会返回 null（不造假起点）。
+ * 焦点由观察已应用的候选数据库解析：优先 branches.pov_character_id →
+ * characters.location_id；首轮也可使用本轮刚登记的地点，不用旧快照猜起点。
  */
-function turnFocusLocationIds(session: SqlSession): string[] {
-  const read = createTableReadPort(session.repo.db);
-  const branchRow = read.selectOne('branches', session.branchId, session.branchId);
-  const povId = String(branchRow?.pov_character_id ?? '');
-  if (!povId) return [];
-  const pov = read.selectOne('characters', session.branchId, povId);
-  const locationId = String(pov?.location_id ?? '');
-  return locationId ? [locationId] : [];
-}
-
-/** M3-14：普通回合的 local 建设参数；无焦点就返回 undefined（不发建设请求）。 */
-function localWorldCompletion(session: SqlSession, manual: boolean): WorldCompletionInput | undefined {
-  if (manual) return undefined;
-  const focusLocationIds = turnFocusLocationIds(session);
-  if (focusLocationIds.length === 0) return undefined;
+/** M3-14：让 builder 在观察阶段之后解析本轮 local 建设焦点。 */
+function localWorldCompletion(_session: SqlSession, _manual: boolean): WorldCompletionInput | undefined {
   return {
     mode: 'local',
-    focusLocationIds,
+    // Derive from the observe-applied candidate, including a newly registered POV.
+    focusLocationIds: [],
     policy: {
       version: 1,
       density: 'balanced',
@@ -208,8 +196,17 @@ export async function handleSqlChatRequest(session: SqlSession, action: string, 
     const retryContext=headRow&&toLegacyTurnReceipt(nativeReceipt).retryable===true?{
       turnId:String(headRow.id),assistantMessageId:floorIndex(headRow),hostMessageUid:String(headRow.host_message_uid),variantKey:String(headRow.host_variant_key),
     }:null;
+    const receipts = queryBound(session.repo.db, "SELECT receipt_json, attempts_json, created_wall_ms FROM turns WHERE branch_id=? AND status IN ('committed','partial','failed') ORDER BY created_wall_ms DESC, rowid DESC LIMIT 10", [session.branchId]).flatMap(row => {
+      try {
+        const native = JSON.parse(String(row.receipt_json));
+        if (!native?.turnId || !Array.isArray(native.groups) || !Array.isArray(native.issues)) return [];
+        const legacy = toLegacyTurnReceipt(native, { coreSaved: true });
+        const attempts = JSON.parse(String(row.attempts_json ?? '[]')).map((attempt: Record<string, unknown>) => ({ stage: attempt.kind ?? attempt.phase, phase: attempt.phase, httpStatus: attempt.http_status, errorCode: attempt.error_code, message: attempt.error, status: attempt.error ? 'failed' : 'completed' }));
+        return [{ ...legacy, status: native.status === 'noop' ? 'committed' : legacy.status, chatId: session.chatUid, recordedAt: Number(row.created_wall_ms), adoptedEventCount: 0, detail: { receipt: legacy.receipt, issues: legacy.issues, attempts, coreSaved: true } }];
+      } catch { return []; }
+    });
     return {...querySqlSceneState({db:session.repo.db,branchId:session.branchId,revision:session.repo.internal.currentRevision(),
-      povId:protagonist(session),viewMode:'author',assets:((session.chatMetadata.atlas as {database?:AtlasEnvelope}|undefined)?.database?.assets??[])}, {chatUid:session.chatUid,worldUid:session.worldUid,worldName:session.branchName}),binding:logicalBinding,retryContext};
+      povId:protagonist(session),viewMode:'author',assets:((session.chatMetadata.atlas as {database?:AtlasEnvelope}|undefined)?.database?.assets??[])}, {chatUid:session.chatUid,worldUid:session.worldUid,worldName:session.branchName}),binding:logicalBinding,retryContext,receipts};
   }
   assertEnabled(session);
   // M3/W08：UI 显式重试布局 —— 只给这张地图的 failed 请求开新 ticket/opID，
@@ -298,6 +295,7 @@ export async function handleSqlChatRequest(session: SqlSession, action: string, 
       narrativeKind: manual ? 'manual' : 'narrative',
       hostMessageIndex: request.assistantMessageId,
       sceneMaps:true,
+      povName: text(body.playerName),
       layoutMaps:'active',
       worldCompletion: localWorldCompletion(session, manual),
       isCurrent: typeof body.isCurrent === 'function' ? body.isCurrent as () => boolean : undefined };

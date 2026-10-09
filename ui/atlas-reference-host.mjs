@@ -22,12 +22,15 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
   const context=()=>{const c=getContext?.();return c?.chatMetadata?c:null;};
   function scope(){const s=core.getState(),c=context(),env=c?.chatMetadata?.atlas?.database,enabled=c?.extensionSettings?.atlas_world_sim?.sqlMode??s.stateData?.sqlModeEnabled??s.stateData?.sqlMode??true;return {state:s,context:c,metadata:c?.chatMetadata,enabled,key:JSON.stringify([s.chatId,c?.chatId??c?.chat_id,s.binding?.branchId??'main',env?.sha256,env?.storage_revision,s.stateData?.revision,viewMode,enabled]),data:env?.data};}
   function live(ticket){const now=scope();return !disposed&&ticket.epoch===epoch&&ticket.key===now.key&&ticket.data===now.data&&ticket.metadata===now.metadata;}
+  // 写入完成后本聊天的 revision/hash 必然变化；此时只核对聊天和分支身份。
+  // 读取仍使用 live() 的完整快照守卫，不能将旧读取应用到新的修订。
+  function sameWorld(ticket){const now=scope();return !disposed&&ticket.state.chatId===now.state.chatId&&ticket.state.binding?.branchId===now.state.binding?.branchId&&ticket.metadata===now.metadata&&now.enabled;}
   function deliver(data,resetScope=false){const s=core.getState();data.meta.engine={hasChat:!!s.chatId,bound:!!s.binding,enabled:s.binding?.enabled===true,sqlEnabled:scope().enabled,serviceStatus:s.serviceStatus??'checking',phase:s.turnPhase??'idle',busy:actionBusy||!!s.pendingTurn||['queued','reading-context','committing'].includes(s.turnPhase),error:actionScope===data.meta.scopeKey&&actionError? actionError:typeof s.lastError==='string'?s.lastError:s.lastError?.message??null};
     data.RECEIPTS=referenceReceipts(s,data.DIAGNOSTICS);const ids=new Set(data.DIAGNOSTICS.map(d=>d.id));data.DIAGNOSTICS.push(...referenceDiagnostics(diagnostics()).filter(d=>!ids.has(d.id)));
     if(data.meta.engine.error&&!data.DIAGNOSTICS.some(d=>d.message===data.meta.engine.error))data.DIAGNOSTICS.unshift({id:'engine-last-error',t:'',level:'error',code:'ENGINE_ACTION_FAILED',message:data.meta.engine.error});
     latest=data;if(ready)frame.contentWindow?.AtlasPreview?.updateSnapshot(data,{resetScope});}
   // 错误要带上 code：调用方需要区分「游标过期，重读第一页就行」和「服务真的坏了」。
-  async function request(method,path,body){const r=await api.request(method,path,body);if(r.status!==200||r.body?.ok===false){const error=Error(r.body?.error?.message??`请求失败（${r.status}）`);error.code=r.body?.error?.code??null;error.status=r.status;throw error;}return r.body?.data??r.body;}
+  async function request(method,path,body){const r=await api.request(method,path,body);if(r.status!==200||r.body?.ok===false){const error=Error(r.body?.error?.message??`请求失败（${r.status}）`);error.code=r.body?.error?.code??null;error.status=r.status;error.details=r.body?.error?.details??null;throw error;}return r.body?.data??r.body;}
   async function query(ticket,kind,extra={}){if(!live(ticket))return null;
     const result=await request('POST','/sql/chat/ui-read',{chatUid:ticket.state.chatId,branchId:ticket.state.binding?.branchId??'main',kind,viewMode,limit:200,...extra});
     if(!live(ticket))return null;return result;}
@@ -204,8 +207,10 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
     async retry(){return withTask('repair',()=>core.retryLastCommit());},
     async layout(mapId){return withTask('initialize',async()=>{
       const captured=scope();
-      const result=await request('POST','/sql/chat/map/layout',{chatId:captured.state.chatId,mapId,requestId:crypto.randomUUID(),...await sourceText(captured)});
-      if(!live({...captured,epoch}))return null;
+      let result;
+      try{result=await request('POST','/sql/chat/map/layout',{chatId:captured.state.chatId,mapId,requestId:crypto.randomUUID(),...await sourceText(captured)});}
+      catch(error){const receipt=error.details?.receipt;if(receipt&&sqlMod&&core.getState().chatId===captured.state.chatId&&context()?.chatMetadata===captured.metadata){core.recordExternalReceipt?.(sqlMod.toLegacyTurnReceipt(receipt,{coreSaved:false}),captured.state.chatId,{...error.details,coreSaved:false,errorCode:error.code,httpStatus:error.status});}throw error;}
+      if(!sameWorld(captured))return null;
       recordMapReceipt(result,captured,'layout','LAYOUT_TASK_COMPLETE');
       await core.refresh();await refresh(true);
       const node=findNode(latest.ROOT,mapId);
@@ -238,7 +243,7 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
         const result=await request('POST','/sql/chat/map/build',{chatId:captured.state.chatId,branchId:captured.state.binding?.branchId??'main',
           requestId:crypto.randomUUID(),mode:requested,...(requested==='local'?{focusLocationIds:focus}:{}),
           baseRevision:view.revision,...await sourceText(captured)});
-        if(!live(ticket))return null;
+        if(!sameWorld(captured))return null;
         recordMapReceipt(result,captured,'build','WORLD_BUILD_TASK_COMPLETE');
         // 只有真保存了（coreSaved=true）才算「正式结果」；否则候选一律丢弃并报全部问题。
         if(result.coreSaved!==true)throw Error(mapIssues(result).join('；')||'本图建设未保存');

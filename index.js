@@ -21,7 +21,7 @@ export { atlasPointRefOf, atlasKnownCoordinate, atlasPositionQuality, atlasSqlMa
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.84";
+export const ATLAS_EXTENSION_VERSION = "0.9.85";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";

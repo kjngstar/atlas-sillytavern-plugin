@@ -3,7 +3,7 @@ import { migrateAtlasSettings, resolveWorldTurnPreset, sanitizeSettingsV2 } from
 import type { AtlasModelPort } from './atlas-db-contract.ts';
 import type { ModelBatchRequest } from './atlas-ops-contract.ts';
 import { DEFAULT_SQL_PROMPT_SEGMENTS, hasLegacySqlPromptProtocol } from './atlas-sql-prompts.ts';
-import { budgetedModelPort, transportBudgetPort, type GenerationBudgetPort } from './atlas-sql-generation-budget.ts';
+import { transportBudgetPort, type GenerationBudgetPort } from './atlas-sql-generation-budget.ts';
 
 type Options = {
   readSettings: () => Promise<unknown>;
@@ -63,6 +63,7 @@ export function createSqlModelPort(options: Options): AtlasModelPort {
   return {preset,input,messages,promptSource: preset.systemPrompt?.trim()?'connection':preset.promptSegments?.length?'preset':'builtin'};
  }
  const port: AtlasModelPort = {
+  withBudget: (budget, stage) => createSqlModelPort({ ...options, budget, stage }),
   async preview(request:ModelBatchRequest){
    const {input,messages,promptSource}=await prepare(request);
    return {messages:messages.map(message=>({...message,chars:message.content.length})),promptSource,
@@ -71,7 +72,9 @@ export function createSqlModelPort(options: Options): AtlasModelPort {
   async request(request:ModelBatchRequest){
    const {preset,input,messages}=await prepare(request);
       const budget = options.budget;
-      const phase = (request as { phase?: string }).phase || options.stage || 'observe';
+      const phase = options.stage === 'background' ? 'background' : request.phase || options.stage || 'observe';
+      const logical = budget?.claimBatch(phase, request.batchId);
+      if (logical && !logical.ok) throw failure(logical.code, logical.reason);
       const result = await callAtlasWorldTurnApi({ ...preset,
         // Stage budgets are defaults; explicit saved connection settings take priority.
         maxTokens: preset.maxTokens ?? request.maxTokens,
@@ -80,13 +83,14 @@ export function createSqlModelPort(options: Options): AtlasModelPort {
         fetchFn: options.fetchFn, now: options.now, messagesOverride: messages,
         // M3-03A：API 内部兼容路由的第二次真实发送，也走同一局部预算。缺预算 port 时不传，
         // 由 api-client 按最严策略拒发并明确报错（绝不隐藏重试）。
-        ...(budget ? { rescueTransport: () => transportBudgetPort(budget, phase, request.batchId).claim() } : {}),
+        ...(budget ? { initialTransport: () => transportBudgetPort(budget, phase, request.batchId).claim(), rescueTransport: () => transportBudgetPort(budget, phase, request.batchId).claim() } : {}),
       });
+      budget?.finishBatch(request.batchId, result.ok ? 'completed' : 'failed');
       if (!result.ok) throw failure(result.code, result.message, result.retryable);
       return { batchId: request.batchId, text: result.text, finishReason: null,
         httpStatus: result.status, durationMs: result.durationMs };
     },
   };
   // 局部预算：真实发送前统一 claimBatch + claimTransport；不提供预算时保持既有单次行为。
-  return options.budget ? budgetedModelPort(port, options.budget, options.stage ?? 'observe') : port;
+  return port;
 }

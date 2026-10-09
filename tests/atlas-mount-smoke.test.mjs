@@ -116,10 +116,12 @@ assert.equal(root.children.length,1);
 const frame=root.querySelector('iframe');assert.ok(frame);assert.match(frame.src,/atlas-reference\/index.html$/);
 assert.equal(root.querySelector('.aw-center,.atlas-starmap'),null);
 const migrated=await sql.migrateSessionToSql({chatUid:hostContext.chatId,chatMetadata:hostContext.chatMetadata,saveSession:async()=>true,legacy:{atlas:{world:smokeWorld}}});
-assert.ok(migrated.saved);await sql.closeSqlSession(migrated.session);
+// connectAtlas 可能已经自动导入旧档；再次迁移应幂等拒绝，不要求重复保存。
+assert.ok(migrated.saved || migrated.issues.some(i=>i.code==='MIGRATION_ALREADY_APPLIED'),JSON.stringify(migrated.issues));
+assert.ok(!migrated.issues.some(i=>i.severity==='error'),JSON.stringify(migrated.issues));await sql.closeSqlSession(migrated.session);
 await conn.core.refresh();const before=JSON.stringify(hostContext.chatMetadata.atlas.database);
 const initial=await frame.__atlasHost.boot();
-assert.ok(initial.data.LOCATIONS.some(x=>x.name==='烟雾港'));
+assert.equal(initial.data.LOCATIONS.filter(x=>x.name==='烟雾港').length,1,'自动或显式迁移后旧地点恰好保留一次');
 assert.equal(JSON.stringify(hostContext.chatMetadata.atlas.database),before,'UI query does not write snapshot');
 // 打开可见性消费正常
 conn.core.setPanelOpen(true);

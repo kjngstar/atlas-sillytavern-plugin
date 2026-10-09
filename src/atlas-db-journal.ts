@@ -66,7 +66,7 @@ export function mergeGroupMutations(mutations: RowMutation[]): RowMutation[] {
       order.push(key);
       continue;
     }
-    if (existing.before === null && m.before !== null) existing.before = { ...m.before };
+    // Keep the first before, including null: create then update is still an insert.
     existing.after = m.after === null ? null : { ...m.after };
     for (const opId of m.sourceOpIds) {
       if (!existing.sourceOpIds.includes(opId)) existing.sourceOpIds.push(opId);

@@ -38,6 +38,11 @@
 #atlasDemo .hud-mini{z-index:17;}
 #atlasDemo .dock{z-index:30;}
 #atlasDemo .dock.collapsed{max-height:44px;overflow:hidden;}
+/* Short host windows must keep the bottom navigation above the event dock. */
+#atlasDemo .rail{min-height:0;overflow:hidden;}
+#atlasDemo .rail>.rail-group:not(.bottom){flex:1 1 auto;min-height:0;overflow-y:auto;width:100%;scrollbar-width:thin;}
+#atlasDemo .rail>.rail-group.bottom{flex:0 0 auto;padding-top:6px;}
+#atlasDemo .rail-btn,#atlasDemo .rail-ava{flex-shrink:0;}
 #atlasDemo .hud-readout,#atlasDemo .hud-readout>.hud{pointer-events:none;}
 #atlasDemo .hud-readout>.hud button,#atlasDemo .hud-readout>.hud summary{pointer-events:auto;}
 

@@ -49,7 +49,7 @@ export function emptyReferenceData(meta = {}) {
     LOCATIONS:[],CAST:[],ITEMS:[],MESSAGES:[],TASKS:[],EVENTS:[],RECEIPTS:[],LORE:[],DIAGNOSTICS:[],FLOWS:{},JOURNEYS:{},PROMPTS:[]};
 }
 
-export function referenceDiagnostics(rows=[]){return rows.map((l,i)=>({...l,id:l.logId??l.id??`log-${i}`,t:text(l.at??l.createdAt??''),level:l.level??(l.kind==='issue'||l.kind==='failed_turn'?'error':'info'),code:l.code??(l.kind==='failed_turn'?'TURN_FAILED':l.kind??'WORLD_LOG'),message:l.message??l.summary??(l.kind==='failed_turn'?`推演${l.status==='partial'?'部分提交':'失败'} · ${l.issueCount??0} 项问题`:l.code??''),details:l.details??l.issues??null}));}
+export function referenceDiagnostics(rows=[]){return rows.map((l,i)=>({...l,id:l.logId??l.id??`log-${i}`,t:text(l.at??l.createdAt??''),level:l.level??(l.kind==='issue'||l.kind==='failed_turn'?'error':'info'),code:l.code??(l.kind==='failed_turn'?'TURN_FAILED':l.kind??'WORLD_LOG'),message:l.message??l.summary??(l.kind==='failed_turn'?`推演${l.status==='partial'?'部分提交':'失败'} · ${l.receipt?.issues?.length??l.issues?.length??l.issueCount??0} 项问题`:l.code??''),details:l.details??l.issues??l.receipt?.issues??null}));}
 export function referenceReceipts(state={},logs=[]){return (state.receipts??[]).filter(r=>!r.chatId||r.chatId===state.chatId).map((r,i)=>({id:r.receiptId??r.receipt?.receiptId??`receipt-${i}`,turn:(state.receipts?.length??0)-i,t:typeof r.recordedAt==='number'?new Date(r.recordedAt).toLocaleString('zh-CN',{hour12:false}):text(r.recordedAt??r.at??''),ok:r.status==='committed'||r.status==='duplicate'||r.receipt?.status==='committed'||r.ok===true,status:r.status??r.receipt?.status??'unknown',retryable:r.retryable===true&&i===0&&!!state.retryableCommit,
   m:text(r.summary??r.receipt?.summary??r.message??r.status??'推演回执'),issue:text(r.errorCode??r.receipt?.issues?.[0]?.code??''),detail:r.detail??null,logs:logs.filter(l=>l.turnId===r.receiptId)}));}
 
@@ -207,7 +207,7 @@ export function projectReferenceData({state={},mapView,sceneView,catalogView,tas
     const navKind=navigationKind(m,g.kind);
     const level=REFERENCE_LEVELS.find(l=>l.key===navKind)??REFERENCE_LEVELS.find(l=>l.key===g.kind)??REFERENCE_LEVELS[0];
     nodes.set(m.mapId,{id:m.mapId,mapId:m.mapId,name:m.name||m.mapId,code:level.code,tag:level.name,description:saved?'已保存的空间布局':'当前 SQL 地图概览；尚无已保存空间布局',
-      children:[],...g,kind:navKind,host:true,containerLocationId:m.containerLocationId??null,
+      children:[],...g,renderKind:g.kind,kind:navKind,host:true,containerLocationId:m.containerLocationId??null,
       parentMapId:m.parentMapId??null,connectionQuality:m.connectionQuality??null,
       topologyIssueCodes:Array.isArray(m.topologyIssueCodes)?[...m.topologyIssueCodes]:[],
       hasLayout:!!saved,sceneStatus:saved?'ready':'missing'});

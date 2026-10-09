@@ -716,7 +716,7 @@ export function compileItemTransfer(op: ParsedOperation, ctx: CompileContext): C
     return result;
   }
   const rowId = resolved.entry.id;
-  const before = ctx.tables.selectOne('items', ctx.branchId, rowId);
+  const before = ctx.tables.selectOne('items', ctx.branchId, rowId) ?? ctx.newItemRows?.get(rowId) ?? null;
   if (!before) {
     result.issues.push(issue('REF_UNKNOWN', '$.ref', `物品行不存在：${rowId}`, op));
     return result;

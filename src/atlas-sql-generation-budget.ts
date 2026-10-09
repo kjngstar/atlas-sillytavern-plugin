@@ -182,7 +182,7 @@ export function budgetedModelPort(port: AtlasModelPort, budget: GenerationBudget
     ...port,
     /** 阶段名优先取请求自带的 phase（observe/geography/decision/outcome/repair），否则用端口默认。 */
     async request(request) {
-      const phase = (request as { phase?: string }).phase || stage;
+      const phase = stage === 'background' ? 'background' : request.phase || stage;
       const logical = budget.claimBatch(phase, request.batchId);
       if (!logical.ok) throw budgetError(logical);
       const claim = budget.claimTransport(phase, request.batchId);
@@ -197,4 +197,9 @@ export function budgetedModelPort(port: AtlasModelPort, budget: GenerationBudget
       }
     },
   };
+}
+
+/** Production ports also bind their internal compatibility sends to this budget. */
+export function bindModelBudget(port: AtlasModelPort, budget: GenerationBudgetPort, stage = 'observe'): AtlasModelPort {
+  return port.withBudget ? port.withBudget(budget, stage) : budgetedModelPort(port, budget, stage);
 }

@@ -193,8 +193,11 @@ export function compileSqlSceneMaps(input:{db:SqlDatabase;branchId:string;turnId
       severity:'warning',retryable:true});
 
     const protagonists=read.selectWhere('characters',{branch_id:branchId,status:'active',role:'protagonist'},3);
+    const personaMatches=input.povName?read.selectWhere('characters',{branch_id:branchId,status:'active',name:input.povName},2):[];
+    const inferredPov=!branch.pov_character_id&&protagonists.length===0&&personaMatches.length===1?personaMatches[0]:null;
+    if(inferredPov){change('characters',inferredPov,{...inferredPov,role:'protagonist'});const registered=changes.find(m=>m.table==='characters'&&m.rowId===inferredPov.id);if(registered)registered.basis={kind:'user',reason:'当前用户人设名称与唯一已登记人物精确匹配',certainty:'confirmed'};}
     const named=input.povName?protagonists.filter(row=>row.name===input.povName):[];
-    const pov=named.length===1?named[0].id:branch.pov_character_id??(protagonists.length===1?protagonists[0].id:null);
+    const pov=named.length===1?named[0].id:branch.pov_character_id??inferredPov?.id??(protagonists.length===1?protagonists[0].id:null);
     change('branches',branch,{...branch,root_map_id:root.id,pov_character_id:pov});
   }
   if(input.calibration){

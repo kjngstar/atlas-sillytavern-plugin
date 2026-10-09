@@ -149,6 +149,7 @@ export function compileOperations(input: CompileOperationsInput): CompiledOperat
     scope,
     sources: input.sources,
     tables: input.tables,
+    newItemRows: new Map(),
     makeId,
     branchId: input.anchor.branchId,
     // 审计列按「本次正在创建的楼」记账（见 CompileContext.turnId）。
@@ -227,6 +228,13 @@ export function compileOperations(input: CompileOperationsInput): CompiledOperat
       if (!scope.get(ref.alias)) scope.declare(ref);
     }
     issues.push(...compiled.issues);
+    if (!compiled.issues.some(i => i.severity === 'error')) {
+      for (const mutation of compiled.mutations) {
+        if (mutation.table === 'items' && mutation.after && (mutation.before === null || ctx.newItemRows!.has(mutation.rowId))) {
+          ctx.newItemRows!.set(mutation.rowId, mutation.after);
+        }
+      }
+    }
     results.push({ opId: op.opId, result: { ...compiled, issues: compiled.issues } });
   }
 

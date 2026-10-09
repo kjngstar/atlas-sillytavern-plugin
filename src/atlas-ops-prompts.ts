@@ -61,7 +61,7 @@ const FORMAT_SEGMENT = [
   '没有需要修改的数据时输出 {"op":"noop"}。',
   '未知信息省略或在允许清空时写 null；不知道精确坐标时保留粗粒度地点。',
   '不要把人物的愿望当作已经发生的行动，也不要把某地有传言当作人人知情。',
-  '可选 source 使用给定的来源编号；不需要逐字摘录 quote。',
+  '可选 source 必须复制给定来源的完整 key，例如 story:2、user:1、player；不能只写 2 或其它序号，不需要逐字摘录 quote。',
   '格式示例：',
   '{{allowedOperationExamples}}',
   '本次允许的操作与最少参数：',
@@ -69,10 +69,10 @@ const FORMAT_SEGMENT = [
 ].join('\n');
 
 const MINIMUM_HELP: Record<string, string> = {
-  'location.upsert': '新建 name；修改 ref + 至少一个变更字段；kind=region/city/district/building/room/natural/vehicle/other；parent_ref=所属地点，mobility=fixed/mobile，anchor_ref=载具锚点；推断新增地点用 existence_quality=inferred；area={kind:cells,cells:[{x,y}],quality:confirmed/estimated,source:manual/story/worldbook/estimate} 或 {kind:polygon,points:[{x,y}],quality,source}；范围坐标沿用所属地图尺度，推断布局不证明真实距离；有已提供 map_ref 才能给 position={x,y,precision:exact/approximate/layout}',
+  'location.upsert': '新建 name；修改 ref + 至少一个变更字段；kind=region/city/district/building/room/natural/vehicle/other；parent_ref=所属地点，mobility=fixed/mobile，anchor_ref=载具锚点；existence_quality=confirmed/inferred/hypothetical，正文明确事实用 confirmed，推断新增地点用 inferred，不能写 story（story 是来源名）；area={kind:cells,cells:[{x,y}],quality:confirmed/estimated,source:manual/story/worldbook/estimate} 或 {kind:polygon,points:[{x,y}],quality,source}；范围坐标沿用所属地图尺度，推断布局不证明真实距离；有已提供 map_ref 才能给 position={x,y,precision:exact/approximate/layout}',
   'character.upsert': '正式新建必须 data.name + data.identity / data.importance / data.importance_reason 至少一个；identity 写有依据的身份，不能只写 role 或 description 代替；role=protagonist/companion/npc，importance=core/recurring/supporting（不用 primary）；候选只需 data.name（data.registration=watch）；修改已有对象用 ref',
-  'item.upsert': '新建 name；修改 ref',
-  'item.transfer': 'ref + to（holder_ref / container_ref / location_ref / unknown 四选一）',
+  'item.upsert': '新建 name，可用 placement={holder_ref|container_ref|location_ref} 指定初始落点；修改 ref；既有物品换落点用 item.transfer',
+  'item.transfer': 'ref + data.to 对象：{"holder_ref":"人物引用"} / {"container_ref":"容器物品引用"} / {"location_ref":"地点引用"} / {"unknown":true} 四选一；to 不能直接写字符串。同批可先 item.upsert ref:"new:rope"，再 item.transfer ref:"new:rope"，转移是引用这个新物品，不是重复新建',
   'faction.upsert': '新建 name；修改 ref',
   'relation.upsert': 'data.subject_ref, data.object_ref, data.label；data.kind 仅允许 member_of/leads/controls/knows/kinship/ally/hostile/owes/protects/other，所有者或控制关系用 controls，不用 ownership；已有对象引用必须使用本次目录提供的引用或稳定 ID，禁止新建辅助人物',
   'plan.propose': 'actor_ref, goal, steps',

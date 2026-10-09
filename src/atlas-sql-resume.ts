@@ -7,6 +7,7 @@ import { persistSqlSession } from './atlas-sql-session.ts';
 import { enqueueProjectionSync, projectionHash } from './atlas-db-outbox.ts';
 import { recordGroupChanges } from './atlas-db-journal.ts';
 import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
+import { bindModelBudget, createGenerationBudget } from './atlas-sql-generation-budget.ts';
 import type { SqlSession } from './atlas-sql-session.ts';
 import type { TurnReceipt } from './atlas-ops-contract.ts';
 
@@ -27,7 +28,7 @@ export async function runSqlResume(session: SqlSession, input: {turnId:string;is
     const candidate=await session.repo.createCandidate(anchor,'maintenance');
     try {
       const simulation=await settleSqlTurn({db:candidate.db,branchId:session.branchId,anchor,turnId:input.turnId,
-        clockBefore:Number(branch.clock_s),operations:[],modelPort:session.modelPort,
+        clockBefore:Number(branch.clock_s),operations:[],modelPort:session.modelPort ? bindModelBudget(session.modelPort, createGenerationBudget(), 'background') : null,
         modelBudget:ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn,makeId:session.repo.internal.makeId,
         isCurrent:()=>{assertCurrent();return true;},attemptKey:`resume_${anchor.baseStorageRevision}`});
       assertCurrent();

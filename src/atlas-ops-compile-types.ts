@@ -25,6 +25,8 @@ export type CompileContext = {
   scope: RefScope;
   sources: SourceBindContext;
   tables: TableReadPort;
+  /** Valid item creations already compiled in this batch; never writes the database. */
+  newItemRows?: Map<string, Record<string, unknown>>;
   /** 程序分配 ID（确定性，不透明）。 */
   makeId: (kind: string, opId: string, alias: string) => string;
   /** 当前分支 id（= anchor.branchId）。 */

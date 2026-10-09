@@ -138,7 +138,8 @@ export type BuildLayoutTaskInput = TurnInput;
  *
  * 选图优先级（`layoutMaps:'active'`）：
  * 1. 当前有人的「具体图」（成员真正站在里面）；
- * 2. 没有 1 时，这些成员向上必经、但还没有场景的「missing 上级图」。
+ * 2. 尚未绘制的根图（当前图存在也要给宏观概览留候选）；
+ * 3. 没有 1 时，这些成员向上必经、但还没有场景的「missing 上级图」。
  * 显式给定 `layoutMaps: string[]` 时按给定顺序取（允许无人图），仍受 layoutMapsPerBatch 限制。
  */
 export function buildSqlLayoutTask(
@@ -243,6 +244,7 @@ export function buildSqlLayoutTask(
       }
       chosen = missing.sort((a, b) => byId(a.mapId, b.mapId));
     }
+    if (occupied.length > 0) chosen.push(...entries.filter(entry => entry.container === null && !hasScene(entry.map) && !chosen.includes(entry)).sort((a,b)=>byId(a.mapId,b.mapId)));
   } else if (Array.isArray(input.layoutMaps)) {
     const requested = input.layoutMaps.map((id) => String(id));
     chosen = entries
@@ -381,6 +383,9 @@ export function buildSqlLayoutTask(
     baseRevision: input.anchor.baseRevision,
   };
   request.messages[1].content += '\n单房间地图的 baselineRooms 是插件提供的合法示意房间；没有更明确尺寸依据时直接保留，至少要包含这个已登记的房间。不要把 width/height 写成房间尺寸，房间尺寸字段为 w/h，side 固定选 north 或 south。';
+  request.messages[1].content += '\n普通阅览桌用 type="table"，椅子单独用 type="chair"；reading 是桌子加四把椅子的整套组合，占地 w/h 均至少 2 米，不能用于 2×1 米的单张桌子。所有陈设用正数 w/h，完整占地必须装进房间。';
+  request.messages[1].content += '\n多房间 floor 保留中央走廊，默认 corridorWidth=2；每个房间 w 不超过 extent.width-1，h 不超过 (extent.height-2)/2-0.5，side=north 或 south。同侧多个房间的宽度与间隔合计也必须装得下。单间房的 baselineRooms 可占满整个 extent，不另扣中央走廊。';
+  request.messages[1].content += '\noverview 的水系 feature 必须为 {"id":"本图局部水系ID","type":"watercourse","zoneId":"本图已登记水域引用（可选）","fromSector":"north","toSector":"south","widthClass":"narrow/medium/wide"}。fromSector/toSector 取 north/northeast/east/southeast/south/southwest/west/northwest 且不同；不要仅写 zoneId/density 而省略起终方向。方向是估计布局，不能标成已测量事实。';
   request.messages[1].content += '\n更新布局时，同一实物必须沿用 savedConstraints 的既有局部 id，不得换 id 重复添加。layoutIssues 是旧图未放下的陈设：按正文校正估计尺寸；若旧约束重复描述同一座椅或柜子，保留一个既有 id，用 spec.deletes={"contents":[重复的局部陈设id]} 显式清理重复约束，并同步 actors.near。不要删除已确认的锁定结构。';
   // 兼容预设的注入副本必须与最终任务一致（预览与真实发送不能两套）。
   request.promptInput.injectionText = request.messages[1].content;

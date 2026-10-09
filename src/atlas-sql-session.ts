@@ -682,7 +682,10 @@ export async function runSqlTurn(session: SqlSession, input: TurnInput): Promise
       const receipt = JSON.parse(rows[0].receipt_json) as TurnReceipt;
       return { receipt, saved: true, coreSaved: true, commit: null, issues: [], duplicate: true };
     }
-    const commit = await session.repo.prepareTurn(input);
+      const commit = await session.repo.prepareTurn({ ...input, isCurrent: () => {
+        if (session.closed || session.isCurrentHost && !session.isCurrentHost()) throw new AtlasDbError('SESSION_STALE', '模型等待期间宿主快照已变化，候选不发布', {});
+        return !input.isCurrent || input.isCurrent();
+      } });
     return await commitPreparedTurn(session, commit, input.isCurrent);
   })();
   flights.set(key, task);

@@ -295,7 +295,7 @@ function create(canvas, mini, hooks){
 
   /* ── 层级切换 ── */
   function setPath(node, path){
-    st.node = node; st.path = path||[]; st.kind = node.kind || 'world';
+    st.node = node; st.path = path||[]; st.kind = node.renderKind || node.kind || 'world';
     st.geo = node.geo || {}; st.sel = null; st.hover = null;st.hits=[];st.edgeHits=[];
     refreshMarks();
     fit(false);

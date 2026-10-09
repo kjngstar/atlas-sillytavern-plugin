@@ -126,10 +126,7 @@ export async function handleSqlMapAction(session:SqlSession,action:string,body:R
       // M3-13：初建也走同一建设阶段（预览同样在候选里跑），而不是另起一条旧路径。
       // bootstrap 的焦点 = 本分支的顶层地点；完全没有地点时 focus 为空，
       // builder 会返回 null —— 「完全无 world 不造假起点」，等 observe 先登记第一个场所。
-      const roots=read.selectWhere('locations',{branch_id:session.branchId,status:'active'},1000)
-        .filter(row=>!row.parent_location_id&&String(row.status??'active')==='active')
-        .map(row=>String(row.id)).sort().slice(0,ATLAS_RUNTIME_LIMITS.worldFillTargets);
-      worldCompletion={mode:'bootstrap',focusLocationIds:roots,policy:{version:1,density:'balanced',
+      worldCompletion={mode:'bootstrap',focusLocationIds:[],policy:{version:1,density:'balanced',
         maxNewLocations:ATLAS_RUNTIME_LIMITS.newLocationsPerBatch,
         maxNewRoutes:ATLAS_RUNTIME_LIMITS.newRoutesPerBatch,
         maxAdditionalDepth:2}};
@@ -165,7 +162,7 @@ export async function handleSqlMapAction(session:SqlSession,action:string,body:R
   const readBack=createTableReadPort(session.repo.db);
   const added = readBack.selectWhere('locations',{branch_id:session.branchId,status:'active'},1000).filter(row=>!beforeLocations.has(String(row.id)));
   const build=action==='map/build'?summarizeWorldFill(readBack,session.branchId,worldCompletion):undefined;
-  return {coreSaved:true,pointsAdded:added.filter(row=>row.kind!=='region').length,regionsAdded:added.filter(row=>row.kind==='region').length,status:action==='map/scale'?'calibrated':constructionMode==='extract-only'?'extracted':'committed',message:constructionMode==='extract-only'?'分块事实已登记；总体建设留到抽取结束后一次执行':'已保存到当前聊天的 SQL 数据库',...(build?{build}:{}),receipt:result.receipt,issues:result.issues};
+  return {coreSaved:true,pointsAdded:added.filter(row=>row.kind!=='region').length,regionsAdded:added.filter(row=>row.kind==='region').length,status:action==='map/scale'?'calibrated':constructionMode==='extract-only'?'extracted':result.receipt.status,message:constructionMode==='extract-only'?'分块事实已登记；总体建设留到抽取结束后一次执行':'已保存到当前聊天的 SQL 数据库',...(build?{build}:{}),receipt:result.receipt,issues:result.issues};
 }
 
 /**

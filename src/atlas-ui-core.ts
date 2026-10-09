@@ -881,10 +881,13 @@ export function createAtlasUiCore(deps: {
          * 旧版 /state 没有该字段时保持既有行为（simulationView = null，绝不回退成「空推演」结论）。
          */
         const simulationView = parseAtlasSimulationView((body.data as Record<string, unknown>).simulationView);
+        const savedReceipts = useSql && Array.isArray(body.data.receipts) ? body.data.receipts.map(record => sanitizeReceiptRecord(record, binding.chatId)).filter((record): record is AtlasReceiptRecord => !!record && record.chatId === binding.chatId) : [];
+        const restoredReceipts = useSql && Array.isArray(body.data.receipts) ? [...savedReceipts, ...state.receipts.filter(record => record.status === 'failed' && record.detail?.coreSaved !== true && !savedReceipts.some(saved => saved.receiptId === record.receiptId))].sort((a,b) => b.recordedAt - a.recordedAt).slice(0, RECEIPTS_MAX) : state.receipts;
         setState({
           mode: "ready",
           stateData: body.data,
           simulationView,
+          receipts: restoredReceipts,
           lastError: null,
         });
         if (useSql && !sqlRetryRequest && !state.pendingTurn && !commitFlight) {

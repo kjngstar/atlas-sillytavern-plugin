@@ -16,7 +16,7 @@
  *  - 任何一项失败都进 `failed` 数组并让进程退出码为 1；不做「跳过即通过」。
  */
 import {chromium} from 'playwright';
-import {mkdirSync,writeFileSync} from 'node:fs';
+import {mkdirSync,writeFileSync,readFileSync} from 'node:fs';
 import {setTimeout as delay} from 'node:timers/promises';
 
 const option=(key,fallback)=>{const i=process.argv.indexOf(key);return i<0?fallback:process.argv[i+1];};
@@ -46,7 +46,7 @@ try{
   const installed=await page.evaluate(async p=>{const r=await fetch(p+'/manifest.json');const m=await r.json();
     return {version:m.version,display:m.display_name,entry:m.js};},extensionPath);
   report.installed=installed;
-  check('tavern-serves-installed-release',installed.version==='0.9.84',installed);
+  check('tavern-serves-installed-release',installed.version===JSON.parse(readFileSync('package.json','utf8')).version,installed);
 
   // ── 2. 专用验收角色下**新建**测试聊天（用户已有聊天不动） ────────────────────
   const before=await page.evaluate(()=>({chatId:SillyTavern.getContext().chatId}));
@@ -272,7 +272,7 @@ try{
     // 若仍用 `receipts>0` 判完成，等待循环会在真实网络请求发出之前就退出，
     // 把「真实模型已跑」误报成 live-model-request-was-sent=false（曾实测到）。
     const liveBaseline=await page.evaluate(()=>{const h=window.__atlasAcceptance.handle,s=h.core.getState();
-      return {receipts:s.receipts?.length??0,chat:SillyTavern.getContext().chat.length};});
+      return {receiptId:s.receipts?.[0]?.receiptId??null,receipts:s.receipts?.length??0,chat:SillyTavern.getContext().chat.length};});
     report.live.baseline=liveBaseline;
     const prompt=option('--prompt','我推开图书馆的门，走了进去。');
     await page.evaluate(async text=>{const box=document.getElementById('send_textarea');box.value=text;
@@ -281,17 +281,17 @@ try{
     let settled=null;
     for(let i=0;i<150;i++){
       settled=await page.evaluate(()=>{const h=window.__atlasAcceptance.handle,s=h.core.getState();
-        return {phase:s.turnPhase??null,error:s.lastError??null,receipts:s.receipts?.length??0,lastReceipt:s.receipts?.[0]?.status??null,chat:SillyTavern.getContext().chat.length};});
+        const r=s.receipts?.[0];return {phase:s.turnPhase??null,error:s.lastError??null,receiptId:r?.receiptId??null,coreSaved:r?.detail?.coreSaved===true,nativeStatus:r?.detail?.receipt?.status??null,receipts:s.receipts?.length??0,lastReceipt:r?.status??null,chat:SillyTavern.getContext().chat.length};});
       if(settled.error)break;
       // 「真回合结束」的判据必须是**结果**，不是「请求发出」——
       // 只看 modelRequests>0 会在回合仍在中途时提前退出，随后的收尾会把回合掐断，
       // 造成「HTTP 成功但没 commit」的假通过。这里要求回执或消息确实新增。
-      if((settled.receipts>liveBaseline.receipts||settled.chat>liveBaseline.chat)&&settled.phase==='idle')break;
+      if(settled.receiptId&&settled.receiptId!==liveBaseline.receiptId&&settled.coreSaved&&settled.phase==='idle')break;
       await delay(2500);
     }
     report.live.settled=settled;
     report.live.modelRequestsIobserved=report.live.modelRequests;
-    report.live.committed=settled?.receipts>liveBaseline.receipts||settled?.chat>liveBaseline.chat;
+    report.live.committed=!!settled?.receiptId&&settled.receiptId!==liveBaseline.receiptId&&settled.coreSaved===true&&settled.nativeStatus==='committed';
     check('live-model-request-was-sent',report.live.modelRequests>0,{modelRequests:report.live.modelRequests});
     check('live-turn-settled-without-error',!settled?.error,settled);
     check('live-turn-committed-a-new-outcome',!!report.live.committed,{baseline:liveBaseline,settled});

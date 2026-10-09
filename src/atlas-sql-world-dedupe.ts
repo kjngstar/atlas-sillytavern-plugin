@@ -171,6 +171,12 @@ export function dedupeWorldConstructionOps(input: DedupeWorldOpsInput): DedupeWo
       return false;
     });
 
+    if (!('parent_ref' in data) && matches.length === 0 && existing.some(entry => entry.parentId && (!kind || entry.kind === kind) && [...normalizedNames].some(name => entry.names.has(name)))) {
+      poisoned.add(ref);
+      issues.push(makeIssue('LOCATION_PARENT_REQUIRED', `$.operations.location.upsert.${ref}.data.parent_ref`, `${ref} 与已有非根地点同名却省略了父关系；该操作及依赖者留待重试，不能保存为孤立根地点。`, 'error', true, ref));
+      continue;
+    }
+
     if (matches.length === 1) {
       resolved.set(ref, matches[0].id);
       reusedIds.push({ ref, id: matches[0].id, name, parentId: matches[0].parentId });

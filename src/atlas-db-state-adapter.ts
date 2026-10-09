@@ -534,7 +534,9 @@ export function toLegacyTurnReceipt(
   const rejected = groups.filter((group) => group.status === 'rejected' || group.status === 'blocked');
 
   let status: 'committed' | 'noop' | 'failed';
-  if (succeeded.length === 0 && !receipt.timeChanged && !receipt.worldChanged) {
+    if (receipt.status === 'failed') {
+      status = 'failed';
+    } else if (succeeded.length === 0 && !receipt.timeChanged && !receipt.worldChanged) {
     status = receipt.status === 'noop' ? 'noop' : 'failed';
   } else if (receipt.status === 'noop' && succeeded.length === 0) {
     status = 'noop';

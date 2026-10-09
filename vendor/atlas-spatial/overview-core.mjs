@@ -182,7 +182,8 @@ export function overview(spec,previous=null){
     if(finite(z.locked?.x)&&finite(z.locked.y)){sites.set(z.id,pt(z.locked.x,z.locked.y));reasons.set(z.id,'locked');continue;}
     const r=baseRadius.get(z.id);
     const near=z.near&&sites.get(z.near)?sites.get(z.near):null;
-    const target=near?pt(clamp(near.x,box.x0,box.x1),clamp(near.y,box.y0,box.y1)):pt((box.x0+box.x1)/2,(box.y0+box.y1)/2);
+    const angle=SECTOR_ANGLE[z.sector];
+    const target=angle!==undefined?pt(W*(.5+.24*Math.cos(angle)),H*(.5+.24*Math.sin(angle))):near?pt(clamp(near.x,box.x0,box.x1),clamp(near.y,box.y0,box.y1)):pt((box.x0+box.x1)/2,(box.y0+box.y1)/2);
     const startIndex=hashOf(`${seed}\u0000${z.id}`)%MAX_CANDIDATES;
     let chosen=null;
     for(const factor of GAP_FACTORS){
@@ -208,7 +209,7 @@ export function overview(spec,previous=null){
   for(const z of zonesIn){
     const site=sites.get(z.id);
     if(!site)continue;
-    const structureKey=stable({role:z.role??null,size:z.size??null,sector:z.sector??null,near:z.near??null,locked:z.locked??null,lockedPolygon:z.lockedPolygon??null});
+    const structureKey=stable({role:z.role??null,size:z.size??null,sector:z.sector??null,near:z.near??null,locked:z.locked??null,lockedPolygon:z.lockedPolygon??null,...(SECTOR_ANGLE[z.sector]!==undefined?{placementPolicy:2}:{})});
     const placement=z.placement==='proxy'?'proxy':undefined;
     const prevShape=prevShapes.get(z.id);
     if(prevShape&&prevShape.structureKey===structureKey&&prevShape.polygon?.length>=3){

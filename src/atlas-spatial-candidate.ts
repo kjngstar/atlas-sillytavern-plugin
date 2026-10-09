@@ -464,7 +464,7 @@ function containerKey(value: unknown, locationIds: Set<string>): string | null {
 
 export type SceneMemberIds = {
   mapId: string;
-  /** 本图**实际**成员：按 parent 归属本图、或带本图 map_id 的地点；角色/物品同理。 */
+  /** 本图成员：容器本身、按 parent 归属本图或带本图 map_id 的地点；角色/物品同理。 */
   members: Record<MemberKind, Set<string>>;
   /** 本分支全部已知实体（用于把「程序装饰」和「搬走的实体」区分开）。 */
   known: Record<MemberKind, Set<string>>;
@@ -486,6 +486,10 @@ export function collectSceneMemberIds(input: {
 }): SceneMemberIds {
   const { mapId, maps, locations, characters, items } = input;
   const locationIds = new Set(locations.map((row) => String(row.id)));
+  // 房间/载具自己的室内图可以直接用容器作为唯一房间。容器的 map_id 指向外层图，
+  // 不能因此把本图里的容器房间、家具与直接位于容器的角色当成已经搬走。
+  const currentMap = maps.find((row) => String(row.id) === mapId && String(row.status ?? 'active') === 'active');
+  const ownContainer = currentMap ? containerKey(currentMap.container_location_id, locationIds) : null;
   const mapIdByContainer = new Map<string, string>();
   let rootMapId: string | null = null;
   for (const map of maps) {
@@ -505,7 +509,7 @@ export function collectSceneMemberIds(input: {
   for (const location of locations) {
     if (String(location.status ?? 'active') !== 'active') continue;
     const id = String(location.id);
-    if (String(location.map_id ?? '') === mapId) {
+    if (id === ownContainer || String(location.map_id ?? '') === mapId) {
       memberLocations.add(id);
       continue;
     }

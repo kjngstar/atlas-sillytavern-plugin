@@ -30,7 +30,7 @@ test('普通酒馆楼层自动生成真实车厢房间和陈设，保存后重�
    assert.deepEqual(scopes[0].extent,{width:24,height:24,units:'meters'});
    assert.equal(scopes[0].baselineRooms[0].id,scopes[0].container.ref);
    // The model can assemble contents using the program-owned canvas and room.
-   return scopes.map(s=>JSON.stringify({op:'map.layout.request',ref:s.map,data:{kind:'floor',spec:{contents:[{id:'bench',name:'软垫长椅',roomId:s.container.ref,type:'bench',w:2,h:.7},{id:'cabinet',name:'木柜',roomId:s.container.ref,type:'shelf',w:1,h:.5}]}}})).join('\n');
+   return scopes.map(s=>s.container?JSON.stringify({op:'map.layout.request',ref:s.map,data:{kind:'floor',spec:{contents:[{id:'bench',name:'软垫长椅',roomId:s.container.ref,type:'bench',w:2,h:.7},{id:'cabinet',name:'木柜',roomId:s.container.ref,type:'shelf',w:1,h:.5}]}}}):JSON.stringify({op:'map.layout.request',ref:s.map,data:{kind:'overview',spec:{surface:'land'}}})).join('\n');
   }
   return '{"op":"location.upsert","ref":"new:cabin","data":{"name":"车厢","kind":"vehicle"}}\n{"op":"character.upsert","ref":"new:player","data":{"name":"用户主角","identity":"乘客","role":"protagonist","location_ref":"new:cabin"}}';
  }});
@@ -44,7 +44,7 @@ test('普通酒馆楼层自动生成真实车厢房间和陈设，保存后重�
   f.restartUi();await f.ui.refresh();
   const read=await f.server.handle('POST','/sql/chat/ui-read',{chatUid:'chat-auto',kind:'scene',viewMode:'author'},{local:true});
   assert.equal(read.body.data.items.find(x=>x.mapId===map.id)?.scene?.layout.rooms.length,1,JSON.stringify(read.body.data));
-  assert.equal(f.calls(),2);assert.equal(f.saves(),1);
+  assert.equal(f.calls(),3);assert.equal(f.saves(),1);
  }finally{await f.close();}
 });
 test('空短引用目录的补交显示同批已保存人物的稳定 ID，关系可引用且不重建人物',async()=>{
@@ -91,7 +91,7 @@ function fixture({ response = room, model, identity, retryFloor, lore = '全部�
   const current = { chatUid: 'chat-auto', branchId: 'main', chatMetadata: {}, saveMetadata: async () => { saves++; return saveOk; } };
   let live = current;
   const provider = createBrowserSqlHost({ enabled: () => enabled, context: () => live, loadRuntime: loadAtlasSqlRuntime,
-    modelPort: { request: async request => { calls++; batches.push(request); const generated = model ? await model(request) : null;
+    modelPort: { request: async request => { calls++; batches.push(request); const generated = request.batchId.startsWith('construction_') ? '{"op":"noop"}' : model ? await model(request) : null;
       return { batchId: request.batchId, text: typeof generated === 'string' ? generated : response, finishReason: 'stop', httpStatus: 200, durationMs: 1 }; } } });
   const server = createAtlasServerCore({ store: { read: async () => null, write: async () => {} }, sqlSessionProvider: provider });
   const host = { getChatId: () => live.chatUid, readPanelOpen: () => false, writePanelOpen() {},
@@ -122,7 +122,7 @@ function fixture({ response = room, model, identity, retryFloor, lore = '全部�
 
 test('原版 UI 只读入口：新聊天没有保存快照仍读取同一个内存库，零保存零模型调用',async()=>{const f=fixture();try{await f.ui.refresh();assert.equal(f.current.chatMetadata.atlas?.database,undefined);const result=await f.server.handle('POST','/sql/chat/ui-read',{chatUid:'chat-auto',kind:'map',viewMode:'author'},{local:true});assert.equal(result.status,200);assert.ok(Array.isArray(result.body.data.items));assert.equal(result.body.data.metadata.snapshotSaved,false);assert.equal(f.saves(),0);assert.equal(f.calls(),0);const bad=await f.server.handle('POST','/sql/chat/ui-read',{chatUid:'chat-auto',kind:'logs'},{local:true});assert.equal(bad.status,400);assert.equal(f.current.chatMetadata.atlas?.database,undefined);}finally{await f.close();}});
 test('原版 UI 回执：模型失败在无快照时也形成有错误码的真实回执',async()=>{const f=fixture({model:async()=>{throw Object.assign(Error('连接未配置'),{code:'API_NOT_CONFIGURED',retryable:false});}});try{await f.ui.refresh();await f.prepare();await f.end();const r=f.ui.getState().receipts[0];assert.equal(r.status,'failed');assert.match(r.summary,/连接未配置/);assert.equal(r.detail.coreSaved,false);assert.equal(r.detail.httpStatus,500);assert.ok(r.detail.receipt||r.errorCode);assert.equal(f.current.chatMetadata.atlas?.database,undefined);const read=await f.server.handle('POST','/sql/chat/ui-read',{chatUid:'chat-auto',kind:'diagnostics',viewMode:'author'},{local:true});assert.equal(read.status,200);assert.equal(f.saves(),0);}finally{await f.close();}});
-test('原版 UI 回执：成功提交保留原生分组与保存状态',async()=>{const f=fixture();try{await f.ui.refresh();await f.prepare();await f.end();const r=f.ui.getState().receipts[0];assert.equal(r.detail.coreSaved,true);assert.ok(r.detail.receipt.groups.length>0);assert.equal(r.detail.receipt.groups[0].status,'applied');assert.equal('anchor' in r.detail.receipt,false);}finally{await f.close();}});
+test('原版 UI 回执：成功提交保留原生分组与保存状态；刷新从 SQL 恢复且零模型零保存',async()=>{const f=fixture();try{await f.ui.refresh();await f.prepare();await f.end();const r=f.ui.getState().receipts[0];assert.equal(r.detail.coreSaved,true);assert.ok(r.detail.receipt.groups.length>0);assert.equal(r.detail.receipt.groups[0].status,'applied');assert.equal('anchor' in r.detail.receipt,false);const calls=f.calls(),saves=f.saves();f.restartUi();await f.ui.refresh();assert.equal(f.ui.getState().receipts[0].receiptId,r.receiptId);assert.equal(f.ui.getState().receipts[0].detail.receipt.status,r.detail.receipt.status);assert.ok(f.ui.getState().receipts[0].detail.attempts.length>0);assert.equal(f.calls(),calls);assert.equal(f.saves(),saves);}finally{await f.close();}});
 
 test('首轮未知短编号的命名对象可定向修正声明，保存实际地点层级、人物位置和地图', async () => {
   const f = fixture({ model: async request => {
@@ -185,7 +185,7 @@ test('Q03 automatic events: prepare is read-only; completion writes one real SQL
     await f.ui.refresh(); await f.prepare();
     assert.equal(f.saves(), 0); assert.equal(f.calls(), 0); assert.deepEqual(f.current.chatMetadata, {});
     await f.end();
-    assert.equal(f.calls(), 1); assert.equal(f.saves(), 1);
+    assert.equal(f.calls(), 2); assert.equal(f.saves(), 1);
     assert.equal(f.ui.getState().receipts.at(-1).status, 'committed');
     assert.equal(f.ui.getState().binding.lastCommittedMessageId, '1');
     assert.deepEqual(Object.keys(f.current.chatMetadata.atlas), ['database']);
@@ -196,7 +196,7 @@ test('Q03 automatic events: prepare is read-only; completion writes one real SQL
     const session = await f.provider.session('chat-auto');
     assert.equal(queryBound(session.repo.db, 'SELECT name FROM locations', [])[0].name, '图书馆');
     await f.ui.handleEvent('GENERATION_ENDED', { kind: 'generation-ended', assistantMessageId: '1', assistantText: '你走进了图书馆。' });
-    await pause(5); await f.ui.handleEvent('FLUSH'); assert.equal(f.calls(), 1); assert.equal(f.saves(), 1);
+    await pause(5); await f.ui.handleEvent('FLUSH'); assert.equal(f.calls(), 2); assert.equal(f.saves(), 1);
   } finally { await f.close(); }
 });
 
@@ -209,7 +209,7 @@ test('Q03 automatic save failure: UI reports failed; retry uses the original SQL
     assert.equal(queryBound(session.repo.db, 'SELECT COUNT(*) AS n FROM locations', [])[0].n, 0);
     f.setSave(true); await f.ui.retryLastCommit();
     assert.equal(f.ui.getState().receipts.at(-1).status, 'committed'); assert.equal(f.ui.getState().retryableCommit, null);
-    assert.equal(f.calls(), 2); assert.equal(f.saves(), 2);
+    assert.equal(f.calls(), 4); assert.equal(f.saves(), 2);
     assert.equal(queryBound(session.repo.db, 'SELECT COUNT(*) AS n FROM locations', [])[0].n, 1);
   } finally { await f.close(); }
 });
@@ -223,7 +223,7 @@ test('Q03 automatic delete: failed host save keeps the floor and world; confirme
     const session = await f.provider.session('chat-auto');
     assert.equal(queryBound(session.repo.db, 'SELECT COUNT(*) AS n FROM locations', [])[0].n, 0);
     assert.equal(f.ui.getState().binding.lastCommittedMessageId, null);
-    await f.prepare(); await f.end(); assert.equal(f.calls(), 2);
+    await f.prepare(); await f.end(); assert.equal(f.calls(), 4);
     assert.equal(queryBound(session.repo.db, 'SELECT COUNT(*) AS n FROM locations', [])[0].n, 1);
   } finally { await f.close(); }
 });
@@ -279,7 +279,7 @@ test('Q03 failed SQL request cannot be retried through the legacy writer after a
   try {
     f.setSave(false); await f.ui.refresh(); await f.prepare(); await f.end();
     assert.ok(f.ui.getState().retryableCommit); f.setEnabled(false); await f.ui.retryLastCommit();
-    assert.equal(f.requests.some(r => r.path === '/turns/retry'), false); assert.equal(f.calls(), 1);
+    assert.equal(f.requests.some(r => r.path === '/turns/retry'), false); assert.equal(f.calls(), 2);
     assert.equal(f.ui.getState().retryableCommit, null); assert.ok(f.ui.getState().lastError.includes('存储模式'));
   } finally { await f.close(); }
 });
@@ -288,7 +288,7 @@ test('Q03 manual advance requests the SQL model and preserves the narrative floo
   const f = fixture();
   try {
     await f.ui.refresh(); await f.ui.manualAdvance();
-    assert.equal(f.calls(), 1); assert.equal(f.saves(), 1);
+    assert.equal(f.calls(), 2); assert.equal(f.saves(), 1);
     assert.equal(f.ui.getState().receipts[0].status, 'committed'); assert.equal(f.ui.getState().binding.lastCommittedMessageId, null);
     const session = await f.provider.session('chat-auto');
     assert.equal(queryBound(session.repo.db, "SELECT COUNT(*) AS n FROM turns WHERE kind='manual'", [])[0].n, 1);
@@ -357,10 +357,13 @@ test('Q03 deleting an earlier SQL floor restores its maps and all dependent late
  try{
   await f.ui.refresh();await f.prepare('0');await f.end('1');await f.prepare('2');await f.end('3');
   const s=await f.provider.session('chat-auto');assert.equal(f.ui.getState().binding.lastCommittedMessageId,'3');
-  assert.equal(queryBound(s.repo.db,"SELECT COUNT(*) n FROM turns WHERE kind='narrative' AND status='committed'",[])[0].n,2);
+  const priorReceiptIds=f.ui.getState().receipts.map(r=>r.receiptId);
+  assert.equal(queryBound(s.repo.db,"SELECT COUNT(*) n FROM turns WHERE kind='narrative' AND status IN ('committed','partial')",[])[0].n,2);
   await f.mutate('message-deleted','1');
   assert.equal(queryBound(s.repo.db,'SELECT COUNT(*) n FROM locations',[])[0].n,0);assert.equal(queryBound(s.repo.db,'SELECT COUNT(*) n FROM maps',[])[0].n,0);
   assert.equal(queryBound(s.repo.db,"SELECT COUNT(*) n FROM turns WHERE kind='narrative' AND status IN ('committed','partial')",[])[0].n,0);
   assert.equal(f.ui.getState().binding.lastCommittedMessageId,null);
+  assert.ok(!f.ui.getState().receipts.some(r=>priorReceiptIds.includes(r.receiptId)),'rolled-back successful receipts are removed; the real rollback receipt remains');
+  f.restartUi();await f.ui.refresh();assert.ok(!f.ui.getState().receipts.some(r=>priorReceiptIds.includes(r.receiptId)),'reload cannot resurrect rolled-back receipts');
  }finally{await f.close();}
 });

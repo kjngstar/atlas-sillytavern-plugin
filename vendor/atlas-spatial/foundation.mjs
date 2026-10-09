@@ -27,7 +27,8 @@
     const specs=ordered(spec.rooms);
     if(spec.singleRoom&&specs.length===1){
       const r=specs[0],x=r.locked?.x??(bounds.w-r.w)/2,y=r.locked?.y??(bounds.h-r.h)/2;
-      if(!contains({x:.5,y:.5,w:bounds.w-1,h:bounds.h-1},{x,y,w:r.w,h:r.h}))return {ok:false,issues:[issue(r.id,'ROOM_NO_SPACE')]};
+      // A single room owns the whole canvas; its outer walls need no corridor margin.
+      if(!contains(bounds,{x,y,w:r.w,h:r.h}))return {ok:false,issues:[issue(r.id,'ROOM_NO_SPACE')]};
       save(r,x,y,r.locked?'confirmed':'layout');corridor.x=0;corridor.y=y+r.h;corridor.w=0;corridor.h=0;
     }
     // Confirmed/manual geometry is reserved first. A contradiction is reported, never moved silently.

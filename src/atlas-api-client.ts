@@ -350,6 +350,7 @@ export async function callAtlasWorldTurnApi(
     fetchFn?: typeof fetch;
     now?: () => number;
     messagesOverride?: Array<{ role: string; content: string }>;
+    initialTransport?: () => { ok: boolean; reason?: string };
     /**
      * M3-03A：兼容路由第二次真实发送前必须领到的传输额度。
      *
@@ -444,6 +445,8 @@ export async function callAtlasWorldTurnApi(
     // 「本该重试但没发」——失败路径会把它并进 message，绝不静默。
     let rescueDeniedReason: string | null = null;
     const initial = buildPayload(false);
+    const initialClaim = deps.initialTransport?.();
+    if (initialClaim && !initialClaim.ok) return fail(ATLAS_ERROR_CODES.MODEL_BUDGET_EXHAUSTED, initialClaim.reason ?? '本轮传输预算已用尽', false);
     try {
       response = await awaitResponse(fetchFn(initial.url, {
         method: "POST",

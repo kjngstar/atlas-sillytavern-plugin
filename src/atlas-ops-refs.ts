@@ -230,6 +230,7 @@ const OP_REF_KINDS: Record<string, RefKind> = {
   'map.layout.request': 'map',
   'route.propose': 'route',
 };
+const EXISTING_TARGET_OPS = new Set(['item.transfer', 'plan.revise', 'map.estimate', 'map.layout.request']);
 
 /** 操作名推断类型；未知操作返回 null（此时才用引用字段的类型提示）。 */
 function kindFromOp(op: string): RefKind | null {
@@ -565,6 +566,8 @@ export function declareRefs(
     const value = op?.value;
     const refRaw = typeof value?.ref === 'string' ? value.ref.trim() : '';
     const alias = newAliasOf(refRaw);
+    // These operations reference a target declared elsewhere; they do not create it.
+    if (alias !== null && EXISTING_TARGET_OPS.has(String(value?.op))) continue;
     if (alias === null) {
       // 修改既有对象：按原样登记短引用，真实 ID 留给第二遍解析（§16.5 步骤 3）。
       if (refRaw.length > 0) {

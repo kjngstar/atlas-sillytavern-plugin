@@ -237,8 +237,8 @@ export function reconcileOccupantsSpec(input: OccupantsInput): OccupantsResult {
     const roomId = text(row?.location_id);
     if (!id || !roomIds.has(roomId)) continue; // 在学校但不在具体教室 → 不下场
     if (seenActors.has(id) || transit.has(id)) continue;
-    const rowMapId = text(row?.map_id);
-    if (mapId && rowMapId && rowMapId !== mapId) continue;
+    // location_id 已明确落在本图房间时，外层/旧地图上的坐标不能覆盖当前房间归属。
+    // 真正在途的角色已由 effectivePositions 上面的 transit 集合排除。
     const previous = prevActors.get(id);
     pushActor({ id, roomId, ...(previous?.near && groupIds.has(previous.near) ? { near: previous.near } : {}) });
   }

@@ -309,8 +309,8 @@ test('W07: 结构已 ready 且 contextHash 未变 → 不发建设请求；来�
 
   // 没有预算 → null（由调用方记 deferred，不伪装成功）
   assert.equal(buildSqlWorldCompletionTask(f.tables, BRANCH, input, TURN, 0), null);
-  // 没有目标 → null（完全无 world 不造假起点）
-  assert.equal(buildSqlWorldCompletionTask(f.tables, BRANCH, baseInput({ focusLocationIds: [] }), TURN, 4), null);
+  // Empty caller focus derives the real POV location from the candidate.
+  assert.ok(buildSqlWorldCompletionTask(f.tables, BRANCH, baseInput({ focusLocationIds: [] }), TURN, 4));
   f.close();
 });
 

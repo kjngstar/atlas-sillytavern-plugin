@@ -503,8 +503,8 @@ test('T08-10 mergeGroupMutations：同组同行取最早 before 与最新 after�
     assert.equal(twoRows.length, 2);
     assert.deepEqual(twoRows.map((m) => `${m.table}:${m.rowId}`), ['characters:chr_x', 'items:I1']);
     assert.deepEqual(twoRows[0].sourceOpIds, ['op_a']);
-    // 组内先 insert 后 update 同一行时，before 仍是组内最早的非空行（插入前的 null 被后续 before 补上）。
-    assert.deepEqual(twoRows[0].before, { id: 'chr_x' });
+    // 先 insert 后 update 仍是插入，回退应删除新行，不能恢复中间状态。
+    assert.equal(twoRows[0].before, null);
     assert.deepEqual(twoRows[0].after, { id: 'chr_x', thought: 'x' });
     assert.equal(twoRows[1].before.quantity, 1);
   } finally {
