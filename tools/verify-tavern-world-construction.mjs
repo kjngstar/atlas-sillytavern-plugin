@@ -266,21 +266,33 @@ try{
       startedAt:new Date().toISOString()
     };
     page.on('request',request=>{if(new URL(request.url()).pathname==='/api/backends/chat-completions/generate')report.live.modelRequests++;});
+    // 基线必须**在发真实请求之前**取。离线回合已经留下一张回执，
+    // 若仍用 `receipts>0` 判完成，等待循环会在真实网络请求发出之前就退出，
+    // 把「真实模型已跑」误报成 live-model-request-was-sent=false（曾实测到）。
+    const liveBaseline=await page.evaluate(()=>{const h=window.__atlasAcceptance.handle,s=h.core.getState();
+      return {receipts:s.receipts?.length??0,chat:SillyTavern.getContext().chat.length};});
+    report.live.baseline=liveBaseline;
     const prompt=option('--prompt','我推开图书馆的门，走了进去。');
     await page.evaluate(async text=>{const box=document.getElementById('send_textarea');box.value=text;
       box.dispatchEvent(new Event('input',{bubbles:true}));
       document.getElementById('send_but').click();},prompt);
     let settled=null;
-    for(let i=0;i<120;i++){
+    for(let i=0;i<150;i++){
       settled=await page.evaluate(()=>{const h=window.__atlasAcceptance.handle,s=h.core.getState();
         return {phase:s.turnPhase??null,error:s.lastError??null,receipts:s.receipts?.length??0,lastReceipt:s.receipts?.[0]?.status??null,chat:SillyTavern.getContext().chat.length};});
-      if(settled.error||(settled.receipts>0&&settled.phase==='idle'))break;
+      if(settled.error)break;
+      // 「真回合结束」的判据必须是**结果**，不是「请求发出」——
+      // 只看 modelRequests>0 会在回合仍在中途时提前退出，随后的收尾会把回合掐断，
+      // 造成「HTTP 成功但没 commit」的假通过。这里要求回执或消息确实新增。
+      if((settled.receipts>liveBaseline.receipts||settled.chat>liveBaseline.chat)&&settled.phase==='idle')break;
       await delay(2500);
     }
     report.live.settled=settled;
     report.live.modelRequestsIobserved=report.live.modelRequests;
+    report.live.committed=settled?.receipts>liveBaseline.receipts||settled?.chat>liveBaseline.chat;
     check('live-model-request-was-sent',report.live.modelRequests>0,{modelRequests:report.live.modelRequests});
     check('live-turn-settled-without-error',!settled?.error,settled);
+    check('live-turn-committed-a-new-outcome',!!report.live.committed,{baseline:liveBaseline,settled});
     await shot(page,'04-live-turn');
   }else{
     report.live={skipped:true,reason:'未传 --live：本次只做离线 UI 与数据验收，不发真实模型请求。'};
