@@ -4666,7 +4666,7 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
     return fail3(ATLAS_ERROR_CODES.API_REQUEST_FAILED, "提示词预设没有启用的非空条目，请先编辑预设。", false);
   }
   const bodyModel = preset.model.trim().replace(/^models\//, "") || "host";
-  const maxTokens = typeof preset.maxTokens === "number" && preset.maxTokens > 0 ? preset.maxTokens : 2e4;
+  const maxTokens = Number.isSafeInteger(preset.maxTokens) && preset.maxTokens > 0 ? preset.maxTokens : void 0;
   const temperature = typeof preset.temperature === "number" ? preset.temperature : 1;
   const topP = typeof preset.topP === "number" ? preset.topP : 0.95;
   const timeoutMs = Math.min(Math.max(preset.timeoutMs ?? 3e4, 1e3), 12e5);
@@ -4686,7 +4686,7 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
       model: bodyModel,
       messages: bodyMessages,
       ...deps.responseTool && !forClaude && (!preset.apiFormat || preset.apiFormat === "openai") ? { tools: [{ type: "function", function: deps.responseTool }], tool_choice: "auto" } : {},
-      max_tokens: maxTokens,
+      ...maxTokens !== void 0 ? { max_tokens: maxTokens } : {},
       temperature,
       top_p: topP,
       stream: false,
@@ -4937,12 +4937,14 @@ function extractAssistantText(payload, responseTool) {
     const choice = p.choices[0];
     const calls = choice?.message?.tool_calls;
     if (Array.isArray(calls) && calls.length) {
-      if (!responseTool || calls.length !== 1) return null;
+      if (calls.length !== 1) return null;
       const fn = calls[0]?.function;
-      if (fn?.name !== responseTool || typeof fn.arguments !== "string") return null;
+      const carrier = typeof fn?.name === "string" && /^(?:[^:]+:)*emit_complete_response_[a-f0-9]{24}$/.test(fn.name);
+      if ((!responseTool || fn?.name !== responseTool) && !carrier) return null;
+      if (calls[0]?.type !== void 0 && calls[0].type !== "function") return null;
       try {
-        const args = JSON.parse(fn.arguments);
-        return args && typeof args.content === "string" ? args.content : null;
+        const args = typeof fn.arguments === "string" ? JSON.parse(fn.arguments) : fn.arguments;
+        return args && typeof args === "object" && !Array.isArray(args) && typeof args.content === "string" ? args.content : null;
       } catch {
         return null;
       }
@@ -5114,8 +5116,8 @@ var MAX_NAME_CHARS = 64;
 var MAX_ENDPOINT_CHARS = 2048;
 var MAX_MODEL_CHARS = 128;
 var MAX_API_KEY_CHARS = 4096;
-var MIN_MAX_TOKENS = 1;
-var MAX_MAX_TOKENS = 65536;
+var MIN_MAX_TOKENS = 0;
+var MAX_MAX_TOKENS = Number.MAX_SAFE_INTEGER;
 var MIN_TEMPERATURE = 0;
 var MAX_TEMPERATURE = 2;
 var MIN_TOP_P = 0;
@@ -5380,7 +5382,7 @@ function parseLegacyPreset(raw) {
   if (typeof record.model !== "string" || !record.model.trim() || record.model.length > MAX_MODEL_CHARS) return null;
   const apiKey = typeof record.apiKey === "string" && record.apiKey.length <= MAX_API_KEY_CHARS ? record.apiKey : null;
   if (apiKey === null) return null;
-  const maxTokens = isFiniteIntIn(record.maxTokens, MIN_MAX_TOKENS, MAX_MAX_TOKENS) ? record.maxTokens : 1024;
+  const maxTokens = isFiniteIntIn(record.maxTokens, MIN_MAX_TOKENS, MAX_MAX_TOKENS) ? record.maxTokens : 0;
   const temperature = isFiniteIn(record.temperature, MIN_TEMPERATURE, MAX_TEMPERATURE) ? record.temperature : 0.7;
   const timeoutMs = isFiniteIntIn(record.timeoutMs, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS) ? record.timeoutMs : 3e4;
   const systemPrompt = typeof record.systemPrompt === "string" ? record.systemPrompt : "";
@@ -5506,7 +5508,7 @@ function applySettingsCommand(settings, command, deps = {}) {
         return fail2(settings, "INVALID_PAYLOAD", `System Prompt 不超过 ${MAX_PROMPT_CHARS} 字。`);
       }
       if (!isFiniteIntIn(preset.maxTokens, MIN_MAX_TOKENS, MAX_MAX_TOKENS)) {
-        return fail2(settings, "INVALID_PAYLOAD", `最大回复长度必须是 ${MIN_MAX_TOKENS}..${MAX_MAX_TOKENS} 的整数。`);
+        return fail2(settings, "INVALID_PAYLOAD", "输出上限需为非负安全整数；0 表示不指定，由服务商或酒馆连接决定。");
       }
       if (!isFiniteIn(preset.temperature, MIN_TEMPERATURE, MAX_TEMPERATURE)) {
         return fail2(settings, "INVALID_PAYLOAD", `温度必须在 ${MIN_TEMPERATURE}..${MAX_TEMPERATURE}。`);
@@ -6009,8 +6011,8 @@ function createSqlModelPort(options) {
       if (logical && !logical.ok) throw failure(logical.code, logical.reason);
       const result = await callAtlasWorldTurnApi({
         ...preset,
-        // Stage budgets are defaults; explicit saved connection settings take priority.
-        maxTokens: preset.maxTokens ?? request.maxTokens,
+        // Output length comes only from the connection; stages must not add a hidden cap.
+        maxTokens: preset.maxTokens,
         timeoutMs: preset.timeoutMs ?? request.timeoutMs
       }, input, {
         fetchFn: options.fetchFn,
@@ -11161,7 +11163,7 @@ function createTavernProfileFetch(deps) {
     if (!profileId) return hostErrorJsonResponse("酒馆连接预设模式未选择连接预设。");
     const prompts = payload ? orderedPromptsOf(payload) : [];
     if (prompts.length === 0) return hostErrorJsonResponse("酒馆连接预设调用失败：请求缺少有效的 messages。");
-    const maxTokens = typeof payload?.max_tokens === "number" ? payload.max_tokens : 1024;
+    const maxTokens = typeof payload?.max_tokens === "number" && payload.max_tokens > 0 ? payload.max_tokens : void 0;
     const profiles = getConnectionManagerProfiles(deps.getContext);
     const target = profiles.find((p) => p.id === profileId);
     const targetName = target?.name ?? profileId;
@@ -11174,7 +11176,7 @@ function createTavernProfileFetch(deps) {
           await triggerSlash(helper, `/profile await=true "${targetName.replace(/"/g, '\\"')}"`);
         }
         const response = await service.sendRequest(profileId, prompts, maxTokens);
-        const content = response?.result?.choices?.[0]?.message?.content ?? response?.content;
+        const content = extractAssistantText(response?.result ?? response);
         const text2 = typeof content === "string" ? content : "";
         if (!text2.trim()) return hostErrorJsonResponse("酒馆连接预设返回为空或形状不支持。");
         return textResponse(text2.trim());

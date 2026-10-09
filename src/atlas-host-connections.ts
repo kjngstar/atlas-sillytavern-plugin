@@ -14,6 +14,8 @@
  * message 原文报给用户），不走 HTTP 错误码。
  */
 
+import { extractAssistantText } from './atlas-api-client.ts';
+
 /** Response-like 最小实现：引擎只用 ok / status / text()；日志层用 clone().text()。 */
 interface AtlasHostResponseLike {
   ok: boolean;
@@ -144,7 +146,7 @@ function triggerSlash(helper: unknown, command: string): Promise<string> {
 export function createTavernProfileFetch(deps: TavernProfileFetchDeps): typeof fetch {
   return async (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const payload = parseHostPayload(init);
-    const ctx = deps.getContext() as { ConnectionManagerRequestService?: { sendRequest?: (id: string, msgs: unknown, max: number) => Promise<unknown> } } | null | undefined;
+    const ctx = deps.getContext() as { ConnectionManagerRequestService?: { sendRequest?: (id: string, msgs: unknown, max?: number) => Promise<unknown> } } | null | undefined;
     const service = ctx?.ConnectionManagerRequestService;
     if (!service || typeof service.sendRequest !== "function") {
       return hostErrorJsonResponse("ConnectionManagerRequestService 不可用。请检查酒馆版本或连接管理器配置。");
@@ -153,7 +155,7 @@ export function createTavernProfileFetch(deps: TavernProfileFetchDeps): typeof f
     if (!profileId) return hostErrorJsonResponse("酒馆连接预设模式未选择连接预设。");
     const prompts = payload ? orderedPromptsOf(payload) : [];
     if (prompts.length === 0) return hostErrorJsonResponse("酒馆连接预设调用失败：请求缺少有效的 messages。");
-    const maxTokens = typeof payload?.max_tokens === "number" ? payload.max_tokens : 1024;
+    const maxTokens = typeof payload?.max_tokens === "number" && payload.max_tokens > 0 ? payload.max_tokens : undefined;
 
     const profiles = getConnectionManagerProfiles(deps.getContext);
     const target = profiles.find((p) => p.id === profileId);
@@ -168,9 +170,7 @@ export function createTavernProfileFetch(deps: TavernProfileFetchDeps): typeof f
           await triggerSlash(helper, `/profile await=true "${targetName.replace(/"/g, '\\"')}"`);
         }
         const response = await service.sendRequest!(profileId, prompts, maxTokens);
-        const content =
-          (response as { result?: { choices?: Array<{ message?: { content?: unknown } }> } })?.result?.choices?.[0]?.message?.content ??
-          (response as { content?: unknown })?.content;
+        const content = extractAssistantText((response as {result?: unknown})?.result ?? response);
         const text = typeof content === "string" ? content : "";
         if (!text.trim()) return hostErrorJsonResponse("酒馆连接预设返回为空或形状不支持。");
         return textResponse(text.trim());

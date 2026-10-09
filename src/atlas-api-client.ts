@@ -381,7 +381,7 @@ export async function callAtlasWorldTurnApi(
   if (mode === "custom" && !preset.model.trim()) return fail(ATLAS_ERROR_CODES.API_NOT_CONFIGURED, "推演预设未填写模型名称。", false);
 
   // 0.9.14 全抄 shujuku buildCustomApiRequestBody_ACU 的字段口径（能跑通是唯一标准）：
-  // max_tokens 默认 20000 / temperature 默认 1.0 / top_p 默认 0.95 / reasoning_effort 'medium'
+  // max_tokens 仅在明确指定正数时发送 / temperature 默认 1.0 / top_p 默认 0.95 / reasoning_effort 'medium'
   // / include_reasoning·enable_web_search·request_images 显式 false / group_names 空数组；
   // role 归一小写、model 去 'models/' 前缀——与 shujuku 发出的请求逐字段同构。
   // 请求消息装配（0.9.18 分段模式优先，见 buildWorldTurnMessages）；role 归一小写与 shujuku 同款
@@ -393,7 +393,7 @@ export async function callAtlasWorldTurnApi(
     return fail(ATLAS_ERROR_CODES.API_REQUEST_FAILED, "提示词预设没有启用的非空条目，请先编辑预设。", false);
   }
   const bodyModel = preset.model.trim().replace(/^models\//, "") || "host";
-  const maxTokens = typeof preset.maxTokens === "number" && preset.maxTokens > 0 ? preset.maxTokens : 20_000;
+  const maxTokens = Number.isSafeInteger(preset.maxTokens) && preset.maxTokens! > 0 ? preset.maxTokens : undefined;
   const temperature = typeof preset.temperature === "number" ? preset.temperature : 1.0;
   const topP = typeof preset.topP === "number" ? preset.topP : 0.95;
 
@@ -416,7 +416,7 @@ export async function callAtlasWorldTurnApi(
       model: bodyModel,
       messages: bodyMessages,
       ...(deps.responseTool&&!forClaude&&(!preset.apiFormat||preset.apiFormat==='openai')?{tools:[{type:'function',function:deps.responseTool}],tool_choice:'auto'}:{}),
-      max_tokens: maxTokens,
+      ...(maxTokens !== undefined ? { max_tokens: maxTokens } : {}),
       temperature,
       top_p: topP,
       stream: false,
@@ -737,7 +737,7 @@ function choiceFinishReason(payload: unknown): string | null {
 }
 
 /** 从 OpenAI 风格或兼容响应中取助手正文。 */
-function extractAssistantText(payload: unknown, responseTool?: string): string | null {
+export function extractAssistantText(payload: unknown, responseTool?: string): string | null {
   if (!payload || typeof payload !== "object") return null;
   const p = payload as {
     choices?: Array<{ message?: { content?: unknown; reasoning_content?: unknown; reasoning?: unknown; tool_calls?: unknown }; text?: unknown }>;
@@ -751,9 +751,15 @@ function extractAssistantText(payload: unknown, responseTool?: string): string |
     // A response function carries data only. Never execute returned tool names/code.
     const calls=choice?.message?.tool_calls;
     if(Array.isArray(calls)&&calls.length){
-      if(!responseTool||calls.length!==1)return null;
-      const fn=calls[0]?.function;if(fn?.name!==responseTool||typeof fn.arguments!=='string')return null;
-      try{const args=JSON.parse(fn.arguments);return args&&typeof args.content==='string'?args.content:null;}catch{return null;}
+      if(calls.length!==1)return null;
+      const fn=calls[0]?.function;
+      // Kemini's transport is a data envelope, including namespaced gateway names.
+      const carrier=typeof fn?.name==='string'&&/^(?:[^:]+:)*emit_complete_response_[a-f0-9]{24}$/.test(fn.name);
+      if((!responseTool||fn?.name!==responseTool)&&!carrier)return null;
+      if(calls[0]?.type!==undefined&&calls[0].type!=='function')return null;
+      try{const args=typeof fn.arguments==='string'?JSON.parse(fn.arguments):fn.arguments;
+        return args&&typeof args==='object'&&!Array.isArray(args)&&typeof args.content==='string'?args.content:null;
+      }catch{return null;}
     }
     // 0.9.36 推理字段兜底：MiniMax-M3 实测会把全部输出（含 JSON）写进 reasoning_content、
     // content 为空（甚至 finish_reason=tool_calls）——此前判「空回复」整单报废，

@@ -727,7 +727,7 @@ test("callAtlasWorldTurnApi：main/profile 模式 → atlas://host 占位 + 保�
 // 0.9.14 全盘对齐 shujuku 请求构造（逐字段同构）+ MiniMax 订阅密钥自动救场
 // ---------------------------------------------------------------------------
 
-test("callAtlasWorldTurnApi：请求体逐字段同构 shujuku buildCustomApiRequestBody_ACU", async () => {
+test("callAtlasWorldTurnApi：保留 shujuku 兼容请求字段，未指定输出长度时不加限制", async () => {
   const bodies = [];
   const fetchOk = async (input, init) => {
     bodies.push(JSON.parse(init.body));
@@ -746,7 +746,7 @@ test("callAtlasWorldTurnApi：请求体逐字段同构 shujuku buildCustomApiReq
     ["system", "user", "user", "user", "user", "user"],
     "R03 六段默认（system 契约 + 世界状态 + 背景 + 连续性 + 本轮素材 + 核对；无 assistant 应答与 { 预填）",
   );
-  assert.equal(b.max_tokens, 20_000, "maxTokens 缺省 20000（shujuku 同款）");
+  assert.equal(Object.hasOwn(b, "max_tokens"), false, "未指定输出长度时不发送 ATLAS 默认上限");
   assert.equal(b.temperature, 1.0, "temperature 缺省 1.0");
   assert.equal(b.top_p, 0.95, "top_p 缺省 0.95（shujuku 同款）");
   assert.equal(b.stream, false);

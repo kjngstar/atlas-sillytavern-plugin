@@ -29,7 +29,7 @@ function connection(c,keepKey=false){
  if(url){try{const parsed=new URL(url);if(!['https:','http:'].includes(parsed.protocol)||parsed.username||parsed.password)fail('API 地址需为不含账号密码的 http / https 地址');}catch(e){fail('API 地址需为不含账号密码的 http / https 地址');}}
  if(!['openai-compatible','sillytavern'].includes(c.provider))fail('连接方式不支持');
  if(typeof c.temperature!=='number'||!Number.isFinite(c.temperature)||c.temperature<0||c.temperature>2)fail('温度必须介于 0 和 2');
- if(!Number.isInteger(c.maxTokens)||c.maxTokens<1||c.maxTokens>65536)fail('输出上限必须是 1 至 65536 的整数');
+ if(!Number.isSafeInteger(c.maxTokens)||c.maxTokens<0)fail('输出上限必须为非负安全整数；0 表示不指定');
  const timeoutMs=c.timeoutMs??60000;
  if(!Number.isInteger(timeoutMs)||timeoutMs<1000||timeoutMs>1200000)fail('请求超时必须是 1000 至 1200000 毫秒的整数');
  const out={toolCalling:c.toolCalling===true,id:identity(c.id),name:text(c.name,'连接名称',120),provider:c.provider,url,model:text(c.model,'模型名称',200,true).trim(),temperature:c.temperature,maxTokens:c.maxTokens,timeoutMs,rememberKey:keepKey&&c.rememberKey===true};
@@ -53,7 +53,7 @@ function validateDoc(value,keepKey=false){
 function bytes(value){return new TextEncoder().encode(JSON.stringify(value)).byteLength;}
 function bounded(value){if(bytes(value)>LIMITS.bytes)fail('预设配置超过 1.5 MB，请减少段落或拆分文件');return value;}
 function publicDoc(doc){return validateDoc(doc,false);}
-function blankConnection(id,name){return {id,name,provider:'openai-compatible',url:'',model:'',temperature:0.7,maxTokens:8192,rememberKey:false};}
+function blankConnection(id,name){return {id,name,provider:'openai-compatible',url:'',model:'',temperature:0.7,maxTokens:0,rememberKey:false};}
 function defaults(seed){
  const connections=[blankConnection('connection-default','自定义服务商')];
  const promptPresets=[

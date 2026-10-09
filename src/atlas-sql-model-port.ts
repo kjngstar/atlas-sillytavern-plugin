@@ -77,8 +77,8 @@ export function createSqlModelPort(options: Options): AtlasModelPort {
       const logical = budget?.claimBatch(phase, request.batchId);
       if (logical && !logical.ok) throw failure(logical.code, logical.reason);
       const result = await callAtlasWorldTurnApi({ ...preset,
-        // Stage budgets are defaults; explicit saved connection settings take priority.
-        maxTokens: preset.maxTokens ?? request.maxTokens,
+        // Output length comes only from the connection; stages must not add a hidden cap.
+        maxTokens: preset.maxTokens,
         timeoutMs: preset.timeoutMs ?? request.timeoutMs,
       }, input, {
         fetchFn: options.fetchFn, now: options.now, messagesOverride: messages,

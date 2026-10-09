@@ -163,8 +163,9 @@ const MAX_NAME_CHARS = 64;
 const MAX_ENDPOINT_CHARS = 2048;
 const MAX_MODEL_CHARS = 128;
 const MAX_API_KEY_CHARS = 4096;
-const MIN_MAX_TOKENS = 1;
-const MAX_MAX_TOKENS = 65536;
+// 0 means no Atlas output override; positive values have no model-specific ceiling.
+const MIN_MAX_TOKENS = 0;
+const MAX_MAX_TOKENS = Number.MAX_SAFE_INTEGER;
 const MIN_TEMPERATURE = 0;
 const MAX_TEMPERATURE = 2;
 const MIN_TOP_P = 0;
@@ -672,7 +673,7 @@ function parseLegacyPreset(raw: unknown): LegacyPresetShape | null {
   if (typeof record.model !== "string" || !record.model.trim() || record.model.length > MAX_MODEL_CHARS) return null;
   const apiKey = typeof record.apiKey === "string" && record.apiKey.length <= MAX_API_KEY_CHARS ? record.apiKey : null;
   if (apiKey === null) return null;
-  const maxTokens = isFiniteIntIn(record.maxTokens, MIN_MAX_TOKENS, MAX_MAX_TOKENS) ? record.maxTokens : 1024;
+  const maxTokens = isFiniteIntIn(record.maxTokens, MIN_MAX_TOKENS, MAX_MAX_TOKENS) ? record.maxTokens : 0;
   const temperature = isFiniteIn(record.temperature, MIN_TEMPERATURE, MAX_TEMPERATURE) ? record.temperature : 0.7;
   const timeoutMs = isFiniteIntIn(record.timeoutMs, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS) ? record.timeoutMs : 30_000;
   const systemPrompt = typeof record.systemPrompt === "string" ? record.systemPrompt : "";
@@ -830,7 +831,7 @@ export function applySettingsCommand(
         return fail(settings, "INVALID_PAYLOAD", `System Prompt 不超过 ${MAX_PROMPT_CHARS} 字。`);
       }
       if (!isFiniteIntIn(preset.maxTokens, MIN_MAX_TOKENS, MAX_MAX_TOKENS)) {
-        return fail(settings, "INVALID_PAYLOAD", `最大回复长度必须是 ${MIN_MAX_TOKENS}..${MAX_MAX_TOKENS} 的整数。`);
+        return fail(settings, "INVALID_PAYLOAD", "输出上限需为非负安全整数；0 表示不指定，由服务商或酒馆连接决定。");
       }
       if (!isFiniteIn(preset.temperature, MIN_TEMPERATURE, MAX_TEMPERATURE)) {
         return fail(settings, "INVALID_PAYLOAD", `温度必须在 ${MIN_TEMPERATURE}..${MAX_TEMPERATURE}。`);

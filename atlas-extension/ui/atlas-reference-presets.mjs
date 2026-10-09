@@ -3,8 +3,8 @@ const clone = value => JSON.parse(JSON.stringify(value));
 const pair = (connectionId,promptPresetId) => ({connectionId,promptPresetId});
 export function referencePresetDocument(settings={},preferences={},defaultPrompt='') {
   const connections=(settings.apiPresets??[]).map(c=>({id:c.id,name:c.name,provider:c.connectionMode==='main'||c.connectionMode==='profile'?'sillytavern':'openai-compatible',
-    toolCalling:c.toolCalling===true,url:c.endpoint??'',model:c.model??'',temperature:c.temperature??0.7,maxTokens:c.maxTokens??8192,timeoutMs:c.timeoutMs??60000,rememberKey:!!c.apiKey,apiKey:c.apiKey??''}));
-  if(!connections.length)connections.push({id:'reference-unconfigured',name:'尚未配置连接',provider:'openai-compatible',url:'',model:'',temperature:0.7,maxTokens:8192,rememberKey:false});
+    toolCalling:c.toolCalling===true,url:c.endpoint??'',model:c.model??'',temperature:c.temperature??0.7,maxTokens:c.maxTokens??0,timeoutMs:c.timeoutMs??60000,rememberKey:!!c.apiKey,apiKey:c.apiKey??''}));
+  if(!connections.length)connections.push({id:'reference-unconfigured',name:'尚未配置连接',provider:'openai-compatible',url:'',model:'',temperature:0.7,maxTokens:0,rememberKey:false});
   const promptPresets=(settings.promptPresets??[]).map(p=>({id:p.id,name:p.name,segments:(p.segments?.length?p.segments:[{role:'system',name:'系统提示词',content:p.systemPrompt,enabled:true}]).map((s,i)=>({...s,id:`segment-${i}`,name:s.name??`第 ${i+1} 段`,enabled:s.enabled!==false}))}));
   if(!promptPresets.length){const builtin=settings.builtInSqlPrompt??settings.builtInPrompt;promptPresets.push({id:'reference-default-prompt',name:'内置默认提示词 · 可另存',segments:(builtin?.segments?.length?builtin.segments:[{name:'世界推演',role:'system',content:defaultPrompt}]).map((s,i)=>({...s,id:`segment-${i}`,name:s.name||`第 ${i+1} 段`,enabled:s.enabled!==false}))});}
   // Unsaved drafts belong to the editor. Saved settings remain the authoritative library.
