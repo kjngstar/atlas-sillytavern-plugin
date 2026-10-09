@@ -24,6 +24,18 @@ function current(){return byId(state.nodeId)||D.ROOT;}
 function clock(){const m=D.meta.timeMinutes;return `${String(Math.floor(m/60)%24).padStart(2,'0')}:${String(Math.floor(m%60)).padStart(2,'0')}`;}
 function placeName(id){return byId(id)?.name||'位置未明确';}
 function known(o){return state.viewMode==='author'||o.known!==false;}
+/**
+ * M6-11①：左栏读的是**本轮故事**，判据是服务端给的真实 narrative 回合 id（`meta.latestTurnId`），
+ * 不是数组顺序、也不是「本地第几个事件」——manual 标定与地图建设都会造事件，
+ * 但它们**不推进** latestNarrativeTurnId，所以标定之后左栏该说「本轮暂无新的世界动向」，
+ * 而不是把上一条标定当成剧情动向报出来。
+ */
+function turnEvents(){const id=D.meta?.latestTurnId;return id==null?[]:D.EVENTS.filter(e=>known(e)&&e.turnId===id);}
+function historyEvents(){const id=D.meta?.latestTurnId;return D.EVENTS.filter(e=>known(e)&&(id==null||e.turnId!==id));}
+const EVENT_KIND={event:'事件',story:'事件',observation:'见闻',message:'消息',action:'行动',journey:'行程',manual:'作者标定',build:'世界建设',cast:'人物',msg:'消息',sim:'行程',item:'物品',geo:'地理'};
+function eventKindLabel(e){return EVENT_KIND[e.category]||EVENT_KIND[e.kind]||'事件';}
+/** M6-11②：事件 → 可点击关联对象的 kind 映射（message/action/journey 各走自己的详情）。 */
+const LINK_KIND={message:'消息',action:'行动',journey:'旅程'};
 function within(id,ancestor){return (path(id)||[]).some(n=>n.id===ancestor);}
 function sceneCast(id=state.nodeId){return D.CAST.filter(c=>c.state!=='away'&&c.state!=='off'&&c.state!=='unknown'&&within(c.mapNodeId||c.locationId,id)&&known(c));}
 function sceneItems(id=state.nodeId){return D.ITEMS.filter(it=>within(it.mapNodeId||it.locationId,id)&&known(it));}
@@ -42,7 +54,7 @@ function navigate(n,silent=false){
  renderAll();requestAnimationFrame(()=>map.resize());
  if(!silent)toast(`已进入 ${n.name}`);return true;
 }
-function select(kind,id,show=false){state.selected={kind,id};state.inspectorTab='details';renderInspector();if(show)openRight();const capturedScope=D.meta.scopeKey,capturedRevision=D.meta.revision;void window.AtlasHost.inspect(kind,id).then(value=>{if(!value||D.meta.scopeKey!==capturedScope||D.meta.revision!==capturedRevision||state.selected?.kind!==kind||state.selected?.id!==id)return;const row=kind==='character'?D.CAST.find(x=>x.id===id):kind==='item'?D.ITEMS.find(x=>x.id===id):(D.LOCATIONS||[]).find(x=>x.id===id);if(row)Object.assign(row,value);renderInspector();}).catch(error=>toast(error.message,'warn'));}
+function select(kind,id,show=false){state.selected={kind,id};state.inspectorTab='details';renderInspector();if(show)openRight();const capturedScope=D.meta.scopeKey,capturedRevision=D.meta.revision;void window.AtlasHost.inspect(kind,id).then(value=>{if(!value||D.meta.scopeKey!==capturedScope||D.meta.revision!==capturedRevision||state.selected?.kind!==kind||state.selected?.id!==id)return;const row=kind==='character'?D.CAST.find(x=>x.id===id):kind==='item'?D.ITEMS.find(x=>x.id===id):kind==='message'?D.MESSAGES.find(x=>x.id===id):(kind==='task'||kind==='action'||kind==='journey')?D.TASKS.find(x=>x.id===id):(D.LOCATIONS||[]).find(x=>x.id===id);if(row)Object.assign(row,value);renderInspector();}).catch(error=>toast(error.message,'warn'));}
 function inspectPlace(id,focus=false){
  const n=byId(id);if(!n||!known(n))return false;
  if(focus){const chain=path(id)||[],parent=chain[chain.length-2];navigate(parent||n,true);map.refreshMarks();map.focusKey(id);}
@@ -125,13 +137,16 @@ function detailHTML(){const s=state.selected;if(!s)return '';
  if(s.kind==='place'){
   const n=byId(s.id);if(!n||!known(n))return empty('当前视角没有该地点的信息');
   const cast=sceneCast(n.id),items=sceneItems(n.id),children=(n.children||[]).filter(known);
-  return `<div class="detail-tags"><em>地点</em><em>${esc(D.LEVELS.find(l=>l.key===n.kind)?.name||n.tag)}</em></div><h3 class="detail-place-name">${esc(n.name)}</h3><p class="detail-text">${esc(n.description||'已记录的地点。')}</p>${field('所属路径',(path(n.id)||[]).filter(known).map(p=>p.name).join(' › '))}<div class="detail-actions">${(n.host&&n.id!==state.nodeId)||n.childMapIds?.length?`<button class="action-btn primary" data-go="${esc(n.childMapIds?.[0]||n.id)}">进入此地点</button>`:'<span class="scope-note">当前正在查看此地点</span>'}</div><div class="section-label">在这里的人物 · ${cast.length}</div>${cast.map(c=>castCard(c)).join('')||empty('这里暂无已记录的在场人物')}<div class="section-label">物品 · ${items.length}</div>${items.map(itemCard).join('')||'<p class="scope-note">暂无已记录物品</p>'}${children.length?`<div class="section-label">下属地点 · ${children.length}</div>${children.map(ch=>`<button class="child-location" data-inspect-place="${esc(ch.id)}"><i style="--ac:${color[ch.kind]}"></i><span>${esc(ch.name)}</span><em>${esc(ch.code)}</em>›</button>`).join('')}`:''}`;
+  return `<div class="detail-tags"><em>地点</em><em>${esc(D.LEVELS.find(l=>l.key===n.kind)?.name||n.tag)}</em>${n.sceneStatus==='missing'?'<em>尚无内部结构</em>':''}</div><h3 class="detail-place-name">${esc(n.name)}</h3><p class="detail-text">${esc(n.description||'已记录的地点。')}</p>${field('所属路径',(path(n.id)||[]).filter(known).map(p=>p.name).join(' › '))}<div class="detail-actions">${(n.host&&n.id!==state.nodeId)||n.childMapIds?.length?`<button class="action-btn primary" data-go="${esc(n.childMapIds?.[0]||n.id)}">进入此地点</button>`:'<span class="scope-note">当前正在查看此地点</span>'}${
+    // M6-11③：只有**用户点这个按钮**才会请求模型补结构；打开地图/切页都不会自动建设。
+    n.host&&n.sceneStatus==='missing'?`<button class="action-btn" data-build-map="${esc(n.id)}">完善本图</button>`:''}</div>${
+    n.host&&n.sceneStatus==='missing'?'<p class="scope-note">「完善本图」只在点击后才会调用一次模型；切页、缩放与打开地图不会自动建设。</p>':''}<div class="section-label">在这里的人物 · ${cast.length}</div>${cast.map(c=>castCard(c)).join('')||empty('这里暂无已记录的在场人物')}<div class="section-label">物品 · ${items.length}</div>${items.map(itemCard).join('')||'<p class="scope-note">暂无已记录物品</p>'}${children.length?`<div class="section-label">下属地点 · ${children.length}</div>${children.map(ch=>`<button class="child-location" data-inspect-place="${esc(ch.id)}"><i style="--ac:${color[ch.kind]}"></i><span>${esc(ch.name)}</span><em>${esc(ch.code)}</em>›</button>`).join('')}`:''}`;
  }
  if(s.kind==='character'){const c=D.CAST.find(c=>c.id===s.id);if(!c||!known(c))return empty('当前视角没有该人物的信息');return `<div class="entity-hero" style="--ac:${c.c}"><div class="entity-avatar">${esc(c.initial)}</div><div><h3>${esc(c.name)}</h3><span>${esc(c.role)}</span></div></div><div class="detail-tags"><em>${esc(c.tag)}</em><em>${esc(placeName(c.locationId))}</em></div>${field('当前行动',c.doing)}${state.viewMode==='author'?field('后台想法',c.mind):field('可见表现','仅显示主角能够观察到的行动与状态。')}${field('位置',c.state==='away'?(c.description||'目前在途'):placeName(c.locationId))}<div class="detail-actions">${action('查看地图位置','character',c.id,true)}${action('查看人物经历','timeline',c.id)}</div><div class="section-label">携带物品</div>${D.ITEMS.filter(it=>it.holder===c.id&&known(it)).map(itemCard).join('')||empty('暂无已记录的携带物品')}<div class="section-label">最近相关事件</div>${D.EVENTS.filter(e=>e.target===c.id&&known(e)).map(eventRow).join('')||'<p class="scope-note">暂无相关记录</p>'}`;}
  if(s.kind==='item'){const it=D.ITEMS.find(it=>it.id===s.id);if(!it||!known(it))return empty('当前视角没有该物品的信息');return `<div class="detail-title">${icon('box')}<h3>${esc(it.name)}</h3></div>${field('描述',it.description)}${field('当前状态',it.st)}${field('归属',it.holder?(D.CAST.find(c=>c.id===it.holder)?.name||'未知持有者'):'放置于地点')}${field('所在地点',placeName(it.locationId))}<div class="detail-actions">${action('查看地图位置','item',it.id,true)}${it.holder?action('查看持有者','character',it.holder):''}</div>`;}
  if(s.kind==='message'){const m=message(s.id);if(!m||!known(m))return empty('该消息尚未进入当前视角');return `<div class="detail-title">${icon('wave')}<h3>${esc(m.src)}</h3></div><div class="detail-tags"><em>${esc(m.status)}</em><em>${m.known?'主角已可获知':'世界后台 · 未送达主角'}</em></div><p class="detail-text">${esc(m.txt)}</p>${field('来源地点',placeName(m.locationId))}<div class="section-label">传播节点</div><div class="flow-steps">${m.hops.map((h,i)=>`<div><i>${i+1}</i><span>${esc(h)}</span></div>`).join('')}</div><div class="detail-actions"><button class="action-btn" data-show-flow="${esc(m.id)}">在地图上查看信息流</button></div>`;}
  if(s.kind==='task'){const t=task(s.id);if(!t||!known(t))return empty('当前视角没有此后台任务');return `<div class="detail-title">${icon('cpu')}<h3>${esc(t.n)}</h3></div>${field('状态',t.stName)}${field('行动',t.d)}${t.p!=null?`<div class="task-progress"><span>当前进度 ${t.p}%</span><div><i style="width:${t.p}%"></i></div></div>`:field('进度','等待条件满足，尚无可计算的进度')}<div class="detail-actions"><button class="action-btn" data-task-map="${esc(t.id)}">查看地图动向</button>${action('查看相关人物','character',t.entityId)}</div>`;}
- if(s.kind==='event'){const e=D.EVENTS.find(e=>e.id===s.id);if(!e||!known(e))return empty('当前视角没有此事件');return `<div class="detail-tags"><em>第 ${e.turn} 轮</em><em>${esc(e.t)}</em></div><h3 class="event-title">${esc(e.title)}</h3><p class="detail-text">${esc(e.detail)}</p>${field('发生地点',placeName(e.mapId))}<div class="detail-actions">${action('查看相关对象',e.targetKind,e.target)}<button class="action-btn" data-go="${esc(e.mapId)}">查看发生地点</button></div><p class="scope-note">这里展示历史记录，世界保持当前状态。</p>`;}
+ if(s.kind==='event'){const e=D.EVENTS.find(e=>e.id===s.id);if(!e||!known(e))return empty('当前视角没有此事件');return `<div class="detail-tags"><em>第 ${e.turn} 轮</em><em>${esc(eventKindLabel(e))}</em><em>${esc(e.t)}</em></div><h3 class="event-title">${esc(e.title)}</h3><p class="detail-text">${esc(e.detail)}</p>${field('发生地点',placeName(e.mapId))}${eventLinksHTML(e)}<div class="detail-actions">${e.target&&e.targetKind&&known(e)?action('查看相关对象',e.targetKind,e.target):''}<button class="action-btn" data-go="${esc(e.mapId)}">查看发生地点</button></div><p class="scope-note">这里展示历史记录，世界保持当前状态。</p>`;}
  if(s.kind==='lore'){const l=D.LORE.find(l=>l.id===s.id);if(!l)return '';return `<div class="detail-tags"><em>${esc(l.kind)}</em><em>${l.enabled?'已启用':'已停用'}</em></div><h3>${esc(l.title)}</h3><p class="detail-text">${esc(l.content)}</p><button class="action-btn" data-lore-target="${esc(l.id)}">查看关联对象</button>`;}
  return `<h3>${esc(s.name||'地图对象')}</h3>${field('信息',s.sub||'点击层级树可查看所属地点。')}`;
 }
@@ -142,14 +157,35 @@ function renderInspector(){const n=current(),sel=state.selected;if(!sel&&state.i
  else if(state.inspectorTab==='msgs')el.innerHTML=sceneMessages().map(messageCard).join('')||empty('这里暂无可见消息');
  else el.innerHTML=`<h3 class="detail-place-name">${esc(n.name)}</h3><p class="detail-text">${esc(n.description||'已记录的地图与地点信息。')}</p>${field('层级路径',(path(n.id)||[]).map(p=>p.name).join(' › '))}<div class="section-label">下属地点</div>${(n.children||[]).filter(known).map(ch=>`<button class="child-location" data-go="${esc(ch.id)}"><i style="--ac:${color[ch.kind]}"></i><span>${esc(ch.name)}</span><em>${esc(ch.code)}</em>›</button>`).join('')||'<p class="scope-note">当前为最细一级空间</p>'}`;
 }
-function eventRow(e){return `<button class="event-row" data-event="${esc(e.id)}"><span class="event-time">${esc(e.t)}</span><em class="event-kind ${e.kind}">${{cast:'人物',msg:'消息',sim:'行程',item:'物品',geo:'地理'}[e.kind]||'事件'}</em><span class="event-summary">${esc(e.title)}</span>${e.known?'':'<span class="event-private">后台</span>'}${icon('chev')}</button>`;}
+function eventRow(e){return `<button class="event-row" data-event="${esc(e.id)}"><span class="event-time">${esc(e.t)}</span><em class="event-kind ${esc(e.category||e.kind||'event')}">${esc(eventKindLabel(e))}</em><span class="event-summary">${esc(e.title)}</span>${e.known?'':'<span class="event-private">后台</span>'}${icon('chev')}</button>`;}
+/**
+ * M6-11②③：关联对象。三条例律：
+ * - 只给**当前视角看得见**的目标做链接（隐藏目标不留可点死链）；
+ * - message 走消息详情，action/journey 走各自的任务/旅程详情，**不塞给只认三实体的 inspect**；
+ * - 目标不在本地已加载数据里就不画按钮 —— 宁可少一个入口，也不做一个点了报错的按钮。
+ */
+function eventLinksHTML(e){
+  // POV 下整条事件都不可见时，**任何**关联按钮都不该出现：
+  // 隐藏事件本身就不该在左栏/详情里被点开，漏了这一层等于把 POV 裁掉的实体又递回给读者。
+  if(!e||!known(e))return '';
+  const rows=(Array.isArray(e.links)?e.links:[]).filter(l=>l&&l.id&&l.kind).map(l=>{
+    if(l.kind==='message'){const m=message(l.id);if(!m||!known(m))return '';return `<button class="action-btn" data-select-kind="message" data-select="${esc(l.id)}">${esc(l.label||LINK_KIND.message)}</button>`;}
+    if(l.kind==='action'||l.kind==='journey'){const t=task(l.id);if(!t||!known(t))return '';return `<button class="action-btn" data-select-kind="task" data-select="${esc(l.id)}">${esc(l.label||LINK_KIND[l.kind])}</button>`;}
+    if(l.kind==='item'){const it=D.ITEMS.find(x=>x.id===l.id);if(!it||!known(it))return '';return action(l.label||'相关物品','item',l.id);}
+    const c=D.CAST.find(x=>x.id===l.id);if(!c||!known(c))return '';
+    return action(l.label||'相关人物','character',l.id);
+  }).filter(Boolean);
+  return rows.length?`<div class="section-label">关联对象</div><div class="detail-actions">${rows.join('')}</div>`:'';
+}
 function taskCard(t){return `<button class="task-card" style="--c:${t.c}" data-select-kind="task" data-select="${esc(t.id)}"><div class="tc-h"><span class="tc-n">${esc(t.n)}</span><em class="tc-st ${t.st}">${esc(t.stName)}</em></div><div class="tc-d">${esc(t.d)}</div>${t.p==null?'<div class="task-indeterminate">等待条件满足</div>':`<div class="tc-progress"><i style="width:${t.p}%"></i></div><div class="task-percent">${t.p}%</div>`}</button>`;}
 function receiptCard(r){const partial=r.detail?.receipt?.status==='partial',status=partial?'部分成功':{committed:'已提交',duplicate:'重复回执',failed:'失败','pending-review':'待审阅'}[r.status]||r.status,detail={status:r.status,...(r.detail??{}),...(r.logs?.length?{logs:r.logs}:{})};return `<div class="receipt-row"><i class="rc-ok ${r.ok&&!partial?'':'rc-fail'}"></i><div><b>推演回执 · ${esc(status)} · ${esc(r.t)}</b><p>${esc(r.m)}</p>${r.issue?`<code>${esc(r.issue)}</code>`:''}<details class="diagnostic-row"><summary>查看本轮日志</summary><pre>${esc(JSON.stringify(detail,null,2))}</pre></details></div>${r.retryable?`<button class="action-btn" data-retry="${esc(r.id)}">重试失败项</button>`:r.ok?`<span class="receipt-done">${esc(status)}</span>`:'<button class="action-btn" data-page="diag">查看诊断</button>'}</div>`;}
 function enginePhaseText(engine=D.meta.engine??{}){return {'awaiting-reply':'等待酒馆正文完成…',queued:'推演排队中…','reading-context':'正在读取推演资料…',committing:'正在推演，等待回执…'}[engine.phase]||'正在处理…';}
 function renderDock(){
  $$('#dockTabs .dt').forEach(b=>{b.classList.toggle('active',b.dataset.tab===state.dock);b.setAttribute('aria-selected',b.dataset.tab===state.dock);});
  const el=$('#dockBody');
- if(state.dock==='log')el.innerHTML=`<div class="event-list">${D.EVENTS.filter(known).slice(0,12).map(eventRow).join('')}</div>`;
+ if(state.dock==='log'){const now=turnEvents(),old=historyEvents();
+   el.innerHTML=`<div class="section-label">本轮世界动向 · ${now.length}</div><div class="event-list">${now.map(eventRow).join('')||'<p class="scope-note">本轮暂无新的世界动向</p>'}</div>`+
+     (old.length?`<div class="section-label">历史记录 · ${old.length}</div><div class="event-list">${old.slice(0,60).map(eventRow).join('')}</div>`:'');}
  else if(state.dock==='tasks')el.innerHTML=`<div class="task-grid">${D.TASKS.filter(known).map(taskCard).join('')||empty('当前视角暂无后台任务')}</div>`;
  else if(state.dock==='receipt')el.innerHTML=(D.RECEIPTS.length?'<button class="action-btn" data-export="receipts">导出推演回执</button>':'')+D.RECEIPTS.map(receiptCard).join('')+(D.meta.engine?.error?`<div class="receipt-row"><i class="rc-ok rc-fail"></i><div><b>当前错误</b><p>${esc(D.meta.engine.error)}</p></div><button class="action-btn" data-page="diag">查看诊断</button></div>`:'')+(!D.RECEIPTS.length&&!D.meta.engine?.error?empty(D.meta.engine?.busy?'正在推演，等待回执…':'尚无推演回执；首次推演完成后在此查看结果与日志'):'');
  else el.innerHTML=`<div class="prop-grid">${D.MESSAGES.filter(known).map(m=>`<button class="propagation-row" data-show-flow="${esc(m.id)}"><i class="pd sm"></i><div><b>${esc(m.src)}</b><span>${esc(m.hops.join(' → '))}</span></div><em>${esc(m.status)}</em>${icon('chev')}</button>`).join('')}</div>`;
@@ -168,10 +204,11 @@ function renderPage(){const el=$('#workspacePage');el.hidden=state.page==='map';
  if(['cast','items','msgs'].includes(state.page)){
   const options=state.page==='cast'?[['all','全部人物'],['here','当前地点'],['travel','在途'],['away','其他地点']]:state.page==='items'?[['all','全部物品'],['ground','地点物品'],['held','人物持有']]:[['all','全部消息'],['delivered','已送达'],['rumor','传播与传闻'],['disputed','待核实']];
   el.innerHTML+=`<div class="catalog-toolbar"><label class="search-field">${icon('search')}<input id="catalogSearch" aria-label="搜索${esc(names[state.page])}" placeholder="搜索名称、地点或内容…" value="${esc(state.query)}"></label><div class="catalog-filters">${options.map(([k,t])=>`<button class="filter-btn ${state.filter===k?'on':''}" data-catalog-filter="${k}">${t}</button>`).join('')}</div></div><div class="catalog-count" id="catalogCount"></div><div class="catalog-grid ${state.page}" id="catalogResults"></div>`;renderCatalog();
- }else if(state.page==='sim')el.innerHTML+=simulationControlsHTML()+`<div class="full-task-grid">${D.TASKS.filter(known).map(taskCard).join('')}</div><div class="section-label">本轮世界动向</div><div class="event-list">${D.EVENTS.filter(known).filter(e=>e.turn===D.meta.turn).map(eventRow).join('')}</div>`;
+ }else if(state.page==='sim'){const events=turnEvents();
+  el.innerHTML+=simulationControlsHTML()+`<div class="full-task-grid">${D.TASKS.filter(known).map(taskCard).join('')}</div><div class="section-label">本轮世界动向</div><div class="event-list">${events.slice(0,3).map(eventRow).join('')||'<p class="scope-note">本轮暂无新的世界动向</p>'}</div>`+(events.length>3?`<p class="scope-note">另有 ${events.length-3} 条动向在下方事件栏</p>`:'');}
  else if(state.page==='time')el.innerHTML+=timelineHTML();
  else if(state.page==='lore')el.innerHTML+=`<div class="lore-grid">${D.LORE.map(l=>`<article class="lore-card"><div><em class="tag-s ${l.enabled?'g':'a'}">${l.enabled?'已启用':'已停用'}</em><span>${esc(l.kind)}</span></div><button class="lore-title" data-select-kind="lore" data-select="${esc(l.id)}">${esc(l.title)}</button><p>${esc(l.content)}</p><div class="lore-actions"><button class="action-btn" data-lore-target="${esc(l.id)}">查看关联对象</button><button class="text-btn" data-lore-toggle="${esc(l.id)}">${l.enabled?'停用':'启用'}</button></div></article>`).join('')}</div>`;
- else if(state.page==='diag')el.innerHTML+=diagnosticsHTML();
+ else if(state.page==='diag'){el.innerHTML+=diagnosticsHTML();refreshBackupStatus();}
  else if(state.page==='prefs')el.innerHTML+=settingsHTML();
 }
 function renderCatalog(){const q=state.query.trim().toLowerCase(),f=state.filter,p=state.page;let list=p==='cast'?D.CAST:p==='items'?D.ITEMS:D.MESSAGES;
@@ -184,8 +221,45 @@ function renderCatalog(){const q=state.query.trim().toLowerCase(),f=state.filter
 }
 function timelineHTML(){const turns=[...new Set(D.EVENTS.filter(known).map(e=>e.turn))];return `<div class="timeline">${turns.map(t=>`<section><div class="timeline-turn"><i></i><span>第 ${t} 轮</span><em>${esc(D.EVENTS.find(e=>e.turn===t).t)}</em></div><div class="timeline-events">${D.EVENTS.filter(e=>e.turn===t&&known(e)).map(eventRow).join('')}</div></section>`).join('')}</div>`;}
 function simulationControlsHTML(){const e=D.meta.engine??{},status=!e.hasChat?'请先打开一个聊天':!e.sqlEnabled?'SQL 世界数据已关闭':!e.bound?'尚未建立世界':e.enabled?'本聊天推演已启用':'本聊天推演已停用';return `<div class="simulation-banner"><span class="pd"></span><div><b>${esc(status)}</b><span>世界时间 ${clock()} · 浏览与动画不会推进世界时间</span></div><button class="action-btn primary" data-demo-next ${e.busy||!e.hasChat||!e.sqlEnabled||e.bound&&!e.enabled?'disabled':''}>${e.busy?'正在处理…':e.bound?'立即推演':'建立当前世界'}</button></div><div class="detail-actions">${e.bound?`<button class="action-btn" data-engine-enable="${e.enabled?'false':'true'}" ${e.busy||!e.sqlEnabled?'disabled':''}>${e.enabled?'暂停本聊天推演':'启用本聊天推演'}</button>`:''}<button class="action-btn" data-open-backend="connection">API 连接</button><button class="action-btn" data-open-backend="prompts">提示词</button><button class="action-btn" data-open-backend="assignments">任务绑定</button><button class="action-btn" data-page="diag">查看诊断</button></div>${e.error?`<div class="receipt-row"><i class="rc-ok rc-fail"></i><div><b>最近一次操作失败</b><p role="alert" data-engine-error>${esc(e.error)}</p></div><button class="action-btn" data-page="diag">查看详细日志</button></div>`:''}<div class="section-label">推演回执</div>${D.RECEIPTS.map(receiptCard).join('')||empty(e.busy?'正在推演，等待回执…':'尚无推演回执')}<p class="scope-note">连接与提示词在此工作台内设置；世界引擎运行在浏览器中，世界数据随当前酒馆聊天保存。</p>`;}
-function diagnosticsHTML(){return `<div class="catalog-toolbar"><label class="search-field">${icon('search')}<input id="diagnosticSearch" placeholder="搜索错误代码、内容或字段路径…" aria-label="搜索诊断"></label><select id="diagnosticLevel" aria-label="日志等级"><option value="all">全部等级</option><option value="error">错误</option><option value="warn">警告</option><option value="info">信息</option><option value="debug">调试</option></select><button class="action-btn" data-export="diagnostics">导出日志</button></div><div id="diagnosticRows">${diagnosticRows()}</div>`;}
-function diagnosticRows(q='',level='all'){const rows=D.DIAGNOSTICS.filter(d=>(level==='all'||d.level===level)&&JSON.stringify(d).toLowerCase().includes(q.toLowerCase()));return rows.map(d=>`<details class="diagnostic-row ${d.level}"><summary><time>${esc(d.t)}</time><em>${esc(d.level)}</em><div><b>${esc(d.code)}</b><span>${esc(d.message)}</span></div>${icon('chev')}</summary><pre>${esc(JSON.stringify(d,null,2))}</pre></details>`).join('')||empty('没有符合条件的日志');}
+/**
+ * M6-16：统一诊断页。
+ *
+ * 一次推演会同时来自 host / model / storage / layout / world-build 与回执，
+ * 旧实现把两边的错误各列一份，用户得在两个页面之间猜哪份才是全的。
+ * 现在**只剩这一份**：按真实 trace（没有 trace 时退回阶段）分组，每条都带
+ * stage / code / opId / group / line / path —— 一次 layout 的每一处问题都能查到具体位置。
+ */
+function diagnosticMeta(d){
+  const t=d&&typeof d.details==='object'&&d.details?d.details:{},bits=[];
+  if(d?.phase)bits.push(`阶段 ${d.phase}`);
+  if(d?.operation)bits.push(`动作 ${d.operation}`);
+  if(t.stage)bits.push(`stage ${t.stage}`);
+  if(t.opId)bits.push(`opId ${t.opId}`);
+  if(t.groupId)bits.push(`group ${t.groupId}`);
+  if(t.line!==undefined&&t.line!==null)bits.push(`line ${t.line}`);
+  if(t.path)bits.push(`path ${t.path}`);
+  if(t.route)bits.push(`route ${t.route}`);
+  if(d?.errorCode)bits.push(`错误码 ${d.errorCode}`);
+  if(typeof t.retryable==='boolean')bits.push(t.retryable?'可重试':'不可重试');
+  if(Array.isArray(t.issues)&&t.issues.length)bits.push(`${t.issues.length} 项问题`);
+  return bits.join(' · ');
+}
+function diagnosticGroups(rows){
+  const groups=new Map();
+  for(const d of rows){const key=String(d.traceId??d.turnId??d.phase??'其他记录');if(!groups.has(key))groups.set(key,[]);groups.get(key).push(d);}
+  return [...groups.entries()];
+}
+function backupPanelHTML(){
+  const b=state.backup;
+  const status=!b?'正在检查升级前备份…':b.available?`可导出 · SHA256 ${esc(String(b.sha||'').slice(0,16))}… · ${esc(String(b.createdAt||''))}`:`不可导出：${esc(b.reason||'当前聊天没有持久备份')}`;
+  return `<section class="backup-panel"><div class="section-label">升级前原档</div><p class="scope-note">只保留最近一次升级前的原档；导出是只读操作，不会改动当前数据库，也不会清除备份。</p><div class="detail-actions"><button class="action-btn" data-backup-export ${b?.available?'':'disabled'}>导出升级前备份</button><button class="action-btn" data-backup-recheck>重新检查</button></div><p class="scope-note" data-backup-status>${status}</p></section>`;
+}
+function diagnosticsHTML(){return `<div class="catalog-toolbar"><label class="search-field">${icon('search')}<input id="diagnosticSearch" placeholder="搜索错误代码、内容或字段路径…" aria-label="搜索诊断"></label><select id="diagnosticLevel" aria-label="日志等级"><option value="all">全部等级</option><option value="error">错误</option><option value="warn">警告</option><option value="info">信息</option><option value="debug">调试</option></select><button class="action-btn" data-copy-diagnostics>复制当前列表</button><button class="action-btn" data-export="diagnostics">导出日志</button></div>${backupPanelHTML()}<div id="diagnosticRows">${diagnosticRows()}</div>`;}
+function diagnosticRows(q='',level='all'){
+  const rows=D.DIAGNOSTICS.filter(d=>(level==='all'||d.level===level)&&JSON.stringify(d).toLowerCase().includes(q.toLowerCase()));
+  if(!rows.length)return empty('没有符合条件的日志');
+  return diagnosticGroups(rows).map(([key,list])=>`<section class="diagnostic-group"><div class="section-label">${esc(key)} · ${list.length} 项</div>${list.map(d=>{const meta=diagnosticMeta(d);return `<details class="diagnostic-row ${esc(d.level)}"><summary><time>${esc(d.t)}</time><em>${esc(d.level)}</em><div><b>${esc(d.code)}</b><span>${esc(d.message)}</span>${meta?`<code class="diag-meta">${esc(meta)}</code>`:''}</div>${icon('chev')}</summary><pre>${esc(JSON.stringify(d,null,2))}</pre></details>`;}).join('')}</section>`).join('');
+}
 function settingsHTML(){const tabs=[['prompts','提示词'],['connection','API 连接'],['assignments','任务绑定'],['interaction','地图交互'],['appearance','外观']];let html=`<div class="settings-tabs" role="tablist" aria-label="预设分类">${tabs.map(([id,t])=>`<button class="filter-btn ${state.settingsTab===id?'on':''}" data-settings-tab="${id}" role="tab" aria-selected="${state.settingsTab===id}">${t}</button>`).join('')}</div>`;
  if(state.settingsTab==='interaction')return html+`<div class="appearance-form"><h3>地图交互</h3><label class="appearance-row"><span>单击地点直接进入子地图</span><input type="checkbox" data-single-click-enter ${state.singleClickEnter?'checked':''}></label><p class="scope-note">默认关闭：单击地点查看右栏信息，再点击「进入此地点」。人物、物品与消息始终单击查看详情。</p><label class="appearance-row"><span>收起地图图例</span><input type="checkbox" data-legend-collapsed ${state.legendCollapsed?'checked':''}></label><p class="scope-note">图例固定收纳在比例尺上方。比例尺长度保持不变，缩放只改变距离数值。</p><p class="scope-note">${preferences.persistent?'交互偏好保存在当前浏览器。':'当前环境无法保存到浏览器，偏好在本次打开期间有效。'}</p></div>`;
  if(state.settingsTab!=='appearance')return html+presetUI.render(state.settingsTab);
@@ -207,6 +281,36 @@ function retry(){return runHost('retry','重试请求已处理');}
  function generateLayout(id=state.nodeId){return runHost('layout','空间布局已保存',id);}
 function switchView(){return window.AtlasHost.setViewMode(state.viewMode==='author'?'pov':'author').catch(error=>toast(error.message,'warn'));}
 function download(name,content,type='application/json'){const blob=new Blob([content],{type}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;a.click();later(()=>URL.revokeObjectURL(url),1000);}
+/** M6-11③：显式建设本图。切页/缩放/打开地图都不会走到这里，只有按钮会。 */
+function buildMap(mapId){return runHost('build','本图建设已提交',mapId,{mode:'local'});}
+/** M6-18：导出升级前原档。失败必须给明确原因并写进统一诊断，成功则让用户核对 SHA256。 */
+function exportUpgradeBackup(){
+  const host=window.AtlasHost;
+  if(typeof host?.exportUpgradeBackup!=='function'){toast('当前宿主不支持导出升级前备份','warn');return Promise.resolve();}
+  return Promise.resolve(host.exportUpgradeBackup()).then(({backup,envelope})=>{
+    const at=Number(backup?.createdAtMs);
+    const stamp=new Date(Number.isFinite(at)&&at>0?at:Date.now()).toISOString().replace(/[:.]/g,'-');
+    download(`atlas-upgrade-backup-${stamp}.json`,JSON.stringify(envelope,null,2));
+    toast(`升级前备份已导出 · SHA256 ${String(backup?.envelopeSha256??'').slice(0,12)}…`);
+    state.backup={available:true,sha:backup?.envelopeSha256??'',createdAt:Number.isFinite(at)&&at>0?new Date(at).toLocaleString('zh-CN',{hour12:false}):'时间未知'};
+    renderPage();
+  }).catch(error=>{toast(error.message,'warn');diagnostic('error','UPGRADE_BACKUP_EXPORT_FAILED',error.message,{stage:'world-build'});renderPage();});
+}
+/** 只在诊断页首次渲染时探一次（只读路由，不改库、不下载、不清除备份）。 */
+function refreshBackupStatus(force=false){
+  const host=window.AtlasHost;
+  if(!host?.exportUpgradeBackup||(!force&&state.backupChecked))return;
+  state.backupChecked=true;
+  Promise.resolve(host.exportUpgradeBackup()).then(({backup})=>{
+    const at=Number(backup?.createdAtMs);
+    state.backup={available:true,sha:backup?.envelopeSha256??'',createdAt:Number.isFinite(at)&&at>0?new Date(at).toLocaleString('zh-CN',{hour12:false}):'时间未知'};
+  }).catch(error=>{state.backup={available:false,reason:error.message};}).finally(()=>{if(state.page==='diag')renderPage();});
+}
+function copyDiagnostics(){
+  const rows=diagnosticGroups(D.DIAGNOSTICS.filter(d=>(($('#diagnosticLevel')?.value)||'all')==='all'||d.level===($('#diagnosticLevel')?.value))).map(([key,list])=>[`## ${key}`,...list.map(d=>JSON.stringify(d))].join('\n')).join('\n\n');
+  if(!navigator.clipboard?.writeText){toast('当前环境不支持剪贴板，请使用「导出日志」','warn');return;}
+  void navigator.clipboard.writeText(rows).then(()=>toast('诊断已复制到剪贴板')).catch(error=>toast(error.message,'warn'));
+}
 function exportData(kind){if(kind==='receipts')download('atlas-turn-receipts.json',JSON.stringify(D.RECEIPTS,null,2));else if(kind==='diagnostics')download('atlas-preview-diagnostics.jsonl',D.DIAGNOSTICS.map(d=>JSON.stringify(d)).join('\n'),'application/x-ndjson');else download('atlas-preview-skin.json',JSON.stringify({kind:'atlas-preview-skin',version:1,accent:state.accent||'#43e0ff',motion:state.motion,radar:map.state.showRadar,coordinates:root.classList.contains('show-coordinates')},null,2));}
 function skinValue(){return {kind:'atlas-preview-skin',version:1,accent:state.accent||'#43e0ff',motion:state.motion,radar:map.state.showRadar,coordinates:root.classList.contains('show-coordinates')};}
 function saveSkin(){void window.AtlasHost.saveSkin(skinValue()).catch(error=>toast(error.message,'warn'));}
@@ -270,6 +374,10 @@ function bind(){
   if(b.dataset.tab){state.dock=b.dataset.tab;renderDock();$('#dock').classList.remove('collapsed');return;}
   if(b.dataset.catalogFilter){state.filter=b.dataset.catalogFilter;$$('[data-catalog-filter]').forEach(el=>el.classList.toggle('on',el===b));renderCatalog();return;}
   if(b.dataset.showFlow){showFlow(b.dataset.showFlow);return;}if(b.dataset.taskMap){showTask(b.dataset.taskMap);return;}
+  if(b.dataset.buildMap){buildMap(b.dataset.buildMap);return;}
+  if(b.hasAttribute('data-backup-export')){exportUpgradeBackup();return;}
+  if(b.hasAttribute('data-backup-recheck')){state.backupChecked=false;state.backup=undefined;renderPage();refreshBackupStatus(true);return;}
+  if(b.hasAttribute('data-copy-diagnostics')){copyDiagnostics();return;}
   if(b.dataset.event){showEvent(b.dataset.event);return;}if(b.dataset.retry){retry(b.dataset.retry);return;}
   if(b.dataset.settingsTab){state.settingsTab=b.dataset.settingsTab;renderPage();return;}
   if(b.dataset.export){exportData(b.dataset.export);return;}
@@ -327,5 +435,6 @@ function destroy(){map.destroy();timers.forEach(clearTimeout);timers.clear();unl
 state.open=new Set((path(state.nodeId)||[]).map(n=>n.id));
 if(window.AtlasHost.initial.skin)applySkin(window.AtlasHost.initial.skin);applyInteractionPreferences();map.boot();bind();navigate(state.nodeId,true);
 requestAnimationFrame(()=>{map.resize();map.fit(false);});
-window.AtlasPreview={state,map,data:D,presets,updateSnapshot,setVisible:visible=>{map.setPaused(!visible||state.page!=='map');if(visible){$('#appWindow').hidden=false;map.resize();}},go:id=>navigate(id),page:setPage,select,inspectPlace,showEntity,showFlow,showTask,advance:advanceDemo,undo:undoDemo,reset:resetDemo,switchView,destroy,formatDistance,frameChrome};
+window.AtlasPreview={state,map,data:D,presets,updateSnapshot,setVisible:visible=>{map.setPaused(!visible||state.page!=='map');if(visible){$('#appWindow').hidden=false;map.resize();}},go:id=>navigate(id),page:setPage,select,inspectPlace,showEntity,showFlow,showTask,advance:advanceDemo,undo:undoDemo,reset:resetDemo,switchView,destroy,formatDistance,frameChrome,
+ turnEvents,historyEvents,eventLinksHTML,backupPanelHTML,buildMap,exportUpgradeBackup,refreshBackupStatus};
 })();

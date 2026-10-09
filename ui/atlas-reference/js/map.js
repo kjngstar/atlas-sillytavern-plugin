@@ -1810,7 +1810,13 @@ function create(canvas, mini, hooks){
         cssPixelsPerUnit:Number.isFinite(camS)&&camS>0?camS*(calibrated?1:(st.node?.transform?.scale||1)):null,
         metersPerUnit:calibrated?metric:null};
     },
-    fitScale, extent
+    fitScale, extent,
+    /**
+     * M6-07①：网格的两个纯函数入口（只吃数字与 ctx，不碰相机生命周期）。
+     * 暴露出来是为了让「步长只取 1/2/5×10^n、屏距 12–40px、单帧 ≤2000 线」
+     * 这三条契约能在 UI 层直接断言，而不是靠读源码正则猜。
+     */
+    gridStep, paintGrid
   };
 }
 return { create, C };

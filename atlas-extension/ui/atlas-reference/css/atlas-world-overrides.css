@@ -1,0 +1,81 @@
+/**
+ * atlas-world-overrides.css — M6-13 独立功能样式层
+ *
+ * 纪律（施工单 M6-13）：
+ *  - `atlas.css` / `preview.css` 是**原样基线**，本文件只做增量覆盖，不重写主题、不动原字体；
+ *  - 绝不用 CSS transform 去缩放地图 canvas 或比例尺线 —— 那会让 74px 变成"看着像 74px"，
+ *    也会让 canvas 位图糊掉。缩放只发生在渲染器内部（DPR + 相机）。
+ *  - 所有颜色走既有皮肤变量（`--cyan` / `--line-2` / `--txt-2` / `--mono`），缺少时给同色回退。
+ */
+
+/* ── 1. 图例收纳在比例尺**上方**，且折叠不改变比例尺长度 ── */
+#atlasDemo .hud-readout{display:flex;flex-direction:column;align-items:flex-start;gap:8px;}
+#atlasDemo .hud-readout .hud-legend{order:1;}
+#atlasDemo .hud-readout .hud-scale{order:2;}
+#atlasDemo .hud-legend.collapsed .lg-body{display:none;}
+#atlasDemo .hud-legend.collapsed{width:172px;}
+
+/* 74px 是**契约**（U02）：任何布局变化都不许改它。 */
+#atlasDemo .hud-scale .sc-line i{width:74px;flex:0 0 74px;min-width:74px;max-width:74px;}
+#atlasDemo .hud-scale .sc-line span{font-variant-numeric:tabular-nums;}
+
+/* ── 2. 悬停不跳动：只改颜色/光晕，不位移 ── */
+#atlasDemo .event-row:hover,
+#atlasDemo .cast-card:hover,
+#atlasDemo .row-item:hover,
+#atlasDemo .msg-card:hover,
+#atlasDemo .task-card:hover,
+#atlasDemo .child-location:hover,
+#atlasDemo .lore-card:hover,
+#atlasDemo .propagation-row:hover{transform:none;}
+#atlasDemo .event-row:hover .event-summary{color:var(--cyan,#43e0ff);}
+#atlasDemo .child-location:hover{border-color:var(--cyan,#43e0ff);}
+#atlasDemo button:hover .cc-ava,
+#atlasDemo .action-btn:hover{box-shadow:0 0 14px rgba(67,224,255,.22);}
+
+/* ── 3. 图例与事件栏都不许挡住当前 marker ── */
+#atlasDemo .hud-readout{z-index:18;}
+#atlasDemo .hud-mini{z-index:17;}
+#atlasDemo .dock{z-index:30;}
+#atlasDemo .dock.collapsed{max-height:44px;overflow:hidden;}
+#atlasDemo .hud-readout,#atlasDemo .hud-readout>.hud{pointer-events:none;}
+#atlasDemo .hud-readout>.hud button,#atlasDemo .hud-readout>.hud summary{pointer-events:auto;}
+
+/* ── 4. 新增功能样式：诊断分组 / 关联对象 / 升级前备份 / 未挂接提示 ── */
+#atlasDemo .diagnostic-group{margin-bottom:14px;}
+#atlasDemo .diagnostic-group>.section-label{display:flex;justify-content:space-between;}
+#atlasDemo .diagnostic-row .diag-meta{
+  display:block;margin-top:4px;font:10.5px var(--mono,ui-monospace);
+  color:var(--txt-2,#91a9c3);word-break:break-all;
+}
+#atlasDemo .diagnostic-row.error>.summary,
+#atlasDemo .diagnostic-row.error{border-left:2px solid rgba(255,95,146,.6);}
+#atlasDemo .backup-panel{
+  margin:0 0 12px;padding:12px 14px;border:1px solid var(--line-2,#1d2c3f);
+  border-radius:10px;background:rgba(9,19,33,.55);
+}
+#atlasDemo .backup-panel .scope-note{margin:6px 0 0;}
+#atlasDemo .event-row .event-kind.manual,
+#atlasDemo .event-row .event-kind.build{opacity:.75;}
+#atlasDemo .event-row .event-kind.message{color:#9b6bff;}
+#atlasDemo .event-row .event-kind.action,
+#atlasDemo .event-row .event-kind.journey{color:#39e0a0;}
+#atlasDemo .scope-note[data-backup-status]{word-break:break-all;}
+#atlasDemo .node-unlinked>span{color:var(--txt-2,#91a9c3);font-style:italic;}
+
+/* ── 5. 窄屏信息栏：单列、可换行、绝不产生横向滚动 ── */
+@media(max-width:720px){
+  #atlasDemo .hud-readout{max-width:calc(100% - 24px);}
+  #atlasDemo .hud-readout .hud-legend{width:min(172px,52vw);}
+  #atlasDemo .catalog-toolbar{flex-wrap:wrap;gap:8px;}
+  #atlasDemo .catalog-toolbar .search-field{flex:1 1 100%;}
+  #atlasDemo .diagnostic-group .section-label{flex-wrap:wrap;gap:4px;}
+  #atlasDemo .event-summary{white-space:normal;overflow-wrap:anywhere;}
+  #atlasDemo .backup-panel .detail-actions{flex-wrap:wrap;}
+}
+@media(max-width:520px){
+  #atlasDemo .hud-readout{left:10px;bottom:12px;right:10px;align-items:stretch;}
+  #atlasDemo .hud-readout .hud-legend{width:100%;}
+  #atlasDemo .hud-scale .sc-line i{width:74px;flex:0 0 74px;}
+}
+#atlasDemo,#atlasDemo .workspace,#atlasDemo .dock-body{overflow-x:hidden;}

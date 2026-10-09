@@ -6299,22 +6299,36 @@ function createPainter(canvas, state, C, width, height) {
     ctx.fill();
     ctx.restore();
   }
+  function gridStepFor(s) {
+    if (!Number.isFinite(s) || s <= 0) return null;
+    const raw = 12 / s, exp = Math.floor(Math.log10(raw));
+    for (const m of [1, 2, 5, 10]) {
+      const step = m * Math.pow(10, exp);
+      if (step * s >= 12) return step;
+    }
+    return 10 * Math.pow(10, exp);
+  }
   function grid() {
-    const c = state.cam, w = width(), h = height();
-    let step = state.kind === "floor" ? 1 : 100;
-    while (step * c.s < 14) step *= 2;
-    while (step * c.s > 48) step /= 2;
+    const c = state.cam;
+    if (!c || !Number.isFinite(c.s) || c.s <= 0 || !Number.isFinite(c.x) || !Number.isFinite(c.y)) return;
+    const w = width(), h = height(), step = gridStepFor(c.s);
+    if (!step) return;
     const a = world2({ x: 0, y: 0 }, c), b = world2({ x: w, y: h }, c);
+    state.gridStep = step;
+    const columns = Math.ceil((b.x - a.x) / step) + 2, rows4 = Math.ceil((b.y - a.y) / step) + 2;
+    if (columns + rows4 > 2e3) return;
     ctx.strokeStyle = C.grid;
-    ctx.lineWidth = 0.55;
+    ctx.lineWidth = 1 / Math.max(1, Math.min(globalThis.devicePixelRatio || 1, 3));
     ctx.beginPath();
-    for (let x = Math.floor(a.x / step) * step; x < b.x; x += step) {
-      const xx = p({ x, y: 0 }).x;
+    for (let i = 0; i <= columns; i++) {
+      const x = a.x + i * step, xx = p({ x, y: 0 }).x;
+      if (xx < 0 || xx > w) continue;
       ctx.moveTo(xx, 0);
       ctx.lineTo(xx, h);
     }
-    for (let y = Math.floor(a.y / step) * step; y < b.y; y += step) {
-      const yy = p({ x: 0, y }).y;
+    for (let j = 0; j <= rows4; j++) {
+      const y = a.y + j * step, yy = p({ x: 0, y }).y;
+      if (yy < 0 || yy > h) continue;
       ctx.moveTo(0, yy);
       ctx.lineTo(w, yy);
     }
@@ -6380,6 +6394,7 @@ function createPainter(canvas, state, C, width, height) {
     for (const group of s.groups) {
       const selected = state.selected?.id === group.id || state.hover?.id === group.id;
       for (const b of group.bodies) {
+        const live = selected || state.selected?.id === b.id || state.hover?.id === b.id;
         ctx.save();
         if (b.type !== "chair") {
           ctx.shadowColor = "#00000088";
@@ -6387,13 +6402,13 @@ function createPainter(canvas, state, C, width, height) {
           ctx.shadowOffsetY = 2;
         }
         if (b.type === "stairs") {
-          rounded(b, "#0a1529", selected ? C.cyan : "#8ca7c15c", 0.8, 0.07);
+          rounded(b, "#0a1529", live ? C.cyan : "#8ca7c15c", 0.8, 0.07);
           ctx.shadowBlur = 0;
           for (let j = 1; j < 10; j++) line([{ x: b.x + 0.06, y: b.y + b.h * j / 10 }, { x: b.x + b.w - 0.06, y: b.y + b.h * j / 10 }], "#99b5ce55", 0.7);
           line([{ x: b.x + b.w / 2, y: b.y + b.h - 0.3 }, { x: b.x + b.w / 2, y: b.y + 0.3 }], alpha(C.blue, 0.6), 0.8);
           text4("↑", center(b), C.blue, 12);
         } else if (b.type === "shelf") {
-          rounded(b, "#182025", selected ? C.cyan : "#f7c26a6e", 0.85, 0.07);
+          rounded(b, "#182025", live ? C.cyan : "#f7c26a6e", 0.85, 0.07);
           ctx.shadowBlur = 0;
           ctx.shadowOffsetY = 0;
           for (let j = 0; j < 13; j++) {
@@ -6404,9 +6419,45 @@ function createPainter(canvas, state, C, width, height) {
         } else if (b.type === "chair") {
           rounded(b, "#263b506b", "#a0c9e25e", 0.65, 0.06);
           line([{ x: b.x + 0.02, y: b.y + 0.04 }, { x: b.x + b.w - 0.02, y: b.y + 0.04 }], "#c0dfed88", 0.75);
+        } else if (b.type === "bed") {
+          rounded(b, "#2b3350", "#b496ff73", 0.9, 0.12);
+          ctx.shadowBlur = 0;
+          ctx.shadowOffsetY = 0;
+          const hw = Math.min(b.w, b.h), pillow = { x: b.x + b.w * 0.12, y: b.y + b.h * 0.1, w: b.w * 0.76, h: hw * 0.22 };
+          rounded(pillow, "#dfe8ff5c", null, 1, 0.06);
+          for (let j = 1; j < 3; j++) line([{ x: b.x + b.w * 0.1, y: b.y + b.h * (0.38 + j * 0.2) }, { x: b.x + b.w * 0.9, y: b.y + b.h * (0.38 + j * 0.2) }], "#dfe8ff2e", 0.6);
+        } else if (b.type === "cabinet") {
+          rounded(b, "#3a3222", "#ffcd828c", 0.9, 0.08);
+          ctx.shadowBlur = 0;
+          ctx.shadowOffsetY = 0;
+          line([{ x: b.x + b.w / 2, y: b.y + 0.08 }, { x: b.x + b.w / 2, y: b.y + b.h - 0.08 }], "#ffcd8252", 0.7);
+          line([{ x: b.x + 0.08, y: b.y + b.h / 2 }, { x: b.x + b.w - 0.08, y: b.y + b.h / 2 }], "#ffcd8252", 0.6);
+        } else if (b.type === "doorway") {
+          rounded(b, alpha(C.gold, 0.1), alpha(C.gold, 0.45), 0.8, 0.05);
+          ctx.shadowBlur = 0;
+          ctx.shadowOffsetY = 0;
+          ctx.setLineDash([3, 3]);
+          rounded(b, null, alpha(C.gold, 0.55), 0.7, 0.05);
+          ctx.setLineDash([]);
+        } else if (b.type === "light") {
+          ctx.shadowBlur = 0;
+          ctx.shadowOffsetY = 0;
+          glow({ x: b.x + b.w / 2, y: b.y + b.h / 2 }, "#ffe8b447", Math.max(20, k * 2.2));
+          const c0 = p({ x: b.x + b.w / 2, y: b.y + b.h / 2 });
+          ctx.fillStyle = "#ffeec2";
+          ctx.beginPath();
+          ctx.arc(c0.x, c0.y, 2, 0, Math.PI * 2);
+          ctx.fill();
+        } else if (b.type === "decor") {
+          rounded(b, "#b4cdeb1c", "#b4cdeb38", 0.5, 0.05);
+          ctx.shadowBlur = 0;
+          ctx.shadowOffsetY = 0;
+          ctx.setLineDash([3, 3]);
+          rounded(b, null, "#b4cdeb5c", 0.6, 0.05);
+          ctx.setLineDash([]);
         } else {
           const tint = b.type === "bench" ? C.gold : C.blue;
-          rounded(b, gradient(b, alpha(tint, 0.16), alpha(tint, 0.07)), selected ? C.cyan : alpha(tint, 0.5), 0.9, 0.14);
+          rounded(b, gradient(b, alpha(tint, 0.16), alpha(tint, 0.07)), live ? C.cyan : alpha(tint, 0.5), 0.9, 0.14);
           ctx.shadowBlur = 0;
           ctx.shadowOffsetY = 0;
           if (b.type === "bench") for (let j = 1; j < 4; j++) line([{ x: b.x + 0.1, y: b.y + b.h * j / 4 }, { x: b.x + b.w - 0.1, y: b.y + b.h * j / 4 }], "#ffe8ad27", 0.5);
@@ -6450,11 +6501,14 @@ function createPainter(canvas, state, C, width, height) {
   }
   function city2() {
     const s = state.scene, k = state.cam.s, palette = [C.cyan, C.gold, C.mint, C.blue, C.violet];
-    ctx.save();
-    ctx.shadowColor = "#183f73";
-    ctx.shadowBlur = 28;
-    poly(s.wall, "#0a1120", "#7ea8d029", 1.2);
-    ctx.restore();
+    const wall = Array.isArray(s.wall) ? s.wall : [], walled = wall.length >= 3 && s.enclosure !== "open";
+    if (walled) {
+      ctx.save();
+      ctx.shadowColor = "#183f73";
+      ctx.shadowBlur = 28;
+      poly(wall, "#0a1120", "#7ea8d029", 1.2);
+      ctx.restore();
+    }
     for (let i = 0; i < s.districts.length; i++) {
       const d = s.districts[i], color = palette[i % palette.length], xs = d.polygon.map((q) => q.x), ys = d.polygon.map((q) => q.y), bounds = { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
       poly(d.polygon, gradient(bounds, alpha(color, 0.13), alpha(color, 0.025)), alpha(color, 0.35), 0.85);
@@ -6519,16 +6573,18 @@ function createPainter(canvas, state, C, width, height) {
         if (k > 0.12) mapLabel(b.name, { x: q.x, y: b.y + b.h + 43 }, "#c2d5ec", 11);
       }
     }
-    ctx.save();
-    ctx.shadowColor = C.blue;
-    ctx.shadowBlur = 5;
-    line([...s.wall, s.wall[0]], "#a1c5e86b", 1.1, [9, 3]);
-    ctx.restore();
-    for (let i = 0; i < s.wall.length; i++) {
-      const a = s.wall[i], b = s.wall[(i + 1) % s.wall.length], n = Math.ceil(distance(a, b) / 95);
-      for (let j = 0; j < n; j++) {
-        const q = { x: a.x + (b.x - a.x) * j / n, y: a.y + (b.y - a.y) * j / n };
-        rect({ x: q.x - 6, y: q.y - 6, w: 12, h: 12 }, "#a4cae557");
+    if (walled) {
+      ctx.save();
+      ctx.shadowColor = C.blue;
+      ctx.shadowBlur = 5;
+      line([...wall, wall[0]], "#a1c5e86b", 1.1, [9, 3]);
+      ctx.restore();
+      for (let i = 0; i < wall.length; i++) {
+        const a = wall[i], b = wall[(i + 1) % wall.length], n = Math.ceil(distance(a, b) / 95);
+        for (let j = 0; j < n; j++) {
+          const q = { x: a.x + (b.x - a.x) * j / n, y: a.y + (b.y - a.y) * j / n };
+          rect({ x: q.x - 6, y: q.y - 6, w: 12, h: 12 }, "#a4cae557");
+        }
       }
     }
     for (let i = 0; i < s.districts.length; i++) {
@@ -6566,7 +6622,7 @@ function createSpatialRenderer({ canvas, onSelect = () => {
 }, onHover = () => {
 }, onViewport = () => {
 }, onIssue = () => {
-}, theme = {}, scaleBarWidth = 96, ownsGestures = true, painterFactory = createPainter, animate = false } = {}) {
+}, theme = {}, scaleBarWidth = 74, ownsGestures = true, painterFactory = createPainter, animate = false } = {}) {
   if (!canvas?.getContext) throw new Error("CANVAS_REQUIRED");
   const ctx = canvas.getContext("2d"), C = { ...DEFAULT_THEME, ...theme };
   const state = { kind: null, scene: null, document: null, zoom: 1, offset: { x: 0, y: 0 }, cam: null, selected: null, hover: null, gridStep: null, overlays: [], labels: [], paused: false, destroyed: false, externalCamera: null };
@@ -6580,7 +6636,19 @@ function createSpatialRenderer({ canvas, onSelect = () => {
   function entities() {
     const s = state.scene;
     if (!s) return [];
-    if (s.kind === "overview") return s.pins ?? [];
+    if (s.kind === "overview") {
+      const shapeCenter = (f) => {
+        const pts = Array.isArray(f.polygon) ? f.polygon : Array.isArray(f.path) ? f.path : [];
+        const p = pts.map((q) => Array.isArray(q) ? { x: q[0], y: q[1] } : q).filter((q) => finite(q?.x) && finite(q?.y));
+        if (!p.length) return null;
+        return { x: p.reduce((n, q) => n + q.x, 0) / p.length, y: p.reduce((n, q) => n + q.y, 0) / p.length };
+      };
+      const features = (s.features ?? []).map((f) => {
+        const c = shapeCenter(f);
+        return c ? { ...f, type: "feature", x: c.x, y: c.y } : null;
+      }).filter(Boolean);
+      return [...s.pins ?? [], ...features];
+    }
     if (s.kind === "floor") return [...s.actors, ...s.items, ...s.groups, ...s.doors.map((d) => ({ ...d, type: "door", name: "门" })), ...s.windows, ...s.lamps, ...s.rooms.map((r) => ({ ...r, type: "room" }))];
     return [...s.buildings.filter((b) => !b.decorative), ...s.segments.filter((r) => r.kind === "bridge").map((r) => ({ ...r, type: "bridge", name: "桥梁", x: (r.a.x + r.b.x) / 2, y: (r.a.y + r.b.y) / 2 })), ...s.gates.map((g) => ({ ...g, type: "gate" })), s.dock, ...s.districts.map((d) => ({ ...d, type: "district", x: d.site.x, y: d.site.y }))].filter(Boolean);
   }
@@ -6609,8 +6677,29 @@ function createSpatialRenderer({ canvas, onSelect = () => {
     return entity;
   }
   function overview2() {
-    for (const shape of state.scene.shapes ?? []) painter.poly(shape.polygon, "#43e0ff0c", "#43e0ff66", 0.9);
-    for (const pin of state.scene.pins ?? []) {
+    const s = state.scene, w = width(), h = height();
+    const paint = OVERVIEW_SURFACE_PAINT[s.surface];
+    if (paint && s.bounds && finite(s.bounds.w) && finite(s.bounds.h) && s.bounds.w > 0 && s.bounds.h > 0) {
+      const a = screen2({ x: s.bounds.x, y: s.bounds.y }, state.cam), b = screen2({ x: s.bounds.x + s.bounds.w, y: s.bounds.y + s.bounds.h }, state.cam);
+      const g = ctx.createLinearGradient(a.x, a.y, b.x, b.y);
+      g.addColorStop(0, paint[0]);
+      g.addColorStop(1, paint[1]);
+      ctx.fillStyle = g;
+      ctx.fillRect(a.x, a.y, s.bounds.w * state.cam.s, s.bounds.h * state.cam.s);
+    }
+    for (const shape of s.shapes ?? []) {
+      const tint = ZONE_ROLE_TINT[shape.role] ?? C.cyan;
+      const estimated = shape.quality !== "confirmed";
+      const polygon2 = shape.polygon ?? [];
+      painter.poly(polygon2, rgba(tint, 0.05), rgba(tint, estimated ? 0.4 : 0.62), estimated ? 0.9 : 1.2);
+      if (estimated && polygon2.length >= 3) painter.line([...polygon2, polygon2[0]], rgba(tint, 0.28), 0.7, [4, 5]);
+    }
+    for (const f of s.features ?? []) {
+      const tint = FEATURE_TINT[f.type] ?? C.muted;
+      if (Array.isArray(f.polygon) && f.polygon.length >= 3) painter.poly(f.polygon, rgba(tint, 0.1), rgba(tint, 0.2), 0.6);
+      if (Array.isArray(f.path) && f.path.length >= 2) painter.line(f.path, rgba(tint, 0.45), Math.max(0.8, Math.min(3, (f.width ?? 1) * state.cam.s)), f.type === "road_texture" ? [] : [3, 4]);
+    }
+    for (const pin of s.pins ?? []) {
       const tint = pin.type === "person" ? C.mint : pin.type === "item" ? C.gold : C.cyan;
       if (pin.type === "item") painter.diamond(pin, tint);
       else painter.dot(pin, tint, pin.name);
@@ -6652,9 +6741,21 @@ function createSpatialRenderer({ canvas, onSelect = () => {
       if (flow.marker) painter.dot({ ...flow.marker, id: flow.id }, color);
     }
     state.labels = painter.labels();
-    const distance3 = scaleBarWidth / state.cam.s, unit = state.document.units === "cells" ? "cells" : distance3 >= 1e3 ? "km" : "m";
-    const value = unit === "km" ? distance3 / 1e3 : distance3;
-    onViewport({ camera: { ...state.cam }, zoom: state.zoom, scale: { widthPx: scaleBarWidth, distance: value, unit, label: value.toFixed(value >= 10 ? 0 : value >= 1 ? 1 : 2) + " " + (unit === "cells" ? "格" : unit), quality: state.document.metricQuality }, gridStep: state.gridStep });
+    const s = state.cam.s && Number.isFinite(state.cam.s) && state.cam.s > 0 ? state.cam.s : null;
+    const metric = state.document?.units === "meters" ? 1 : Number.isFinite(state.document?.metersPerCell) && state.document.metersPerCell > 0 ? state.document.metersPerCell : null;
+    const cells = state.document?.units === "cells" || !(state.document?.units === "meters" && metric);
+    const raw = s ? scaleBarWidth / s * (cells ? 1 : metric) : null;
+    const unit = !s ? "unknown" : cells ? "cells" : raw >= 1e3 ? "km" : "m";
+    const value = raw === null ? null : unit === "km" ? raw / 1e3 : raw;
+    const estimated = state.document?.metricQuality != null && state.document.metricQuality !== "confirmed";
+    onViewport({ camera: { ...state.cam }, zoom: state.zoom, scale: {
+      widthPx: scaleBarWidth,
+      distance: value,
+      unit,
+      estimated,
+      label: value === null ? "—" : (estimated ? "约 " : "") + value.toFixed(value >= 10 ? 0 : value >= 1 ? 1 : 2) + " " + (unit === "cells" ? "格" : unit),
+      quality: state.document?.metricQuality ?? null
+    }, gridStep: state.gridStep });
   }
   function schedule() {
     if (state.destroyed || state.paused) return;
@@ -6862,7 +6963,7 @@ function createSpatialRenderer({ canvas, onSelect = () => {
     }
   };
 }
-var DEFAULT_THEME;
+var DEFAULT_THEME, OVERVIEW_SURFACE_PAINT, ZONE_ROLE_TINT, FEATURE_TINT, rgba;
 var init_renderer = __esm({
   "vendor/atlas-spatial/renderer.mjs"() {
     "use strict";
@@ -6870,6 +6971,21 @@ var init_renderer = __esm({
     init_renderer_drawing();
     init_contracts();
     DEFAULT_THEME = Object.freeze({ bg: "#060a12", grid: "#4977a125", wall: "#b2d4ef", mint: "#39e0a0", gold: "#ffc247", blue: "#7fd4ff", text: "#dce9fb", muted: "#91a9c3", floor: "#101d2f", cyan: "#43e0ff", violet: "#9b6bff" });
+    OVERVIEW_SURFACE_PAINT = Object.freeze({
+      mixed: ["#070e1a", "#0a1524"],
+      urban: ["#080b16", "#0d1220"],
+      forest: ["#061310", "#0a1c16"],
+      mountain: ["#0a0e14", "#121822"],
+      water: ["#04121e", "#062034"],
+      indoor: ["#0a0d14", "#111722"],
+      void: ["#03060c", "#03060c"]
+    });
+    ZONE_ROLE_TINT = Object.freeze({ city: "#43e0ff", settlement: "#39e0a0", forest: "#2fbf8f", water: "#3fa9ff", mountain: "#91a9c3", ruins: "#ffc247", district: "#9b6bff", campus: "#7fd4ff", land: "#39e0a0", other: "#7fd4ff" });
+    FEATURE_TINT = Object.freeze({ forest_texture: "#2fbf8f", ridge: "#91a9c3", shore: "#7fd4ff", building_cluster: "#ffc247", road_texture: "#b2cdeb", ruins_scatter: "#9b6bff", watercourse: "#3fa9ff" });
+    rgba = (hex, a) => {
+      const [r, g, b] = [1, 3, 5].map((i) => parseInt(String(hex).slice(i, i + 2), 16));
+      return `rgba(${r},${g},${b},${a})`;
+    };
   }
 });
 

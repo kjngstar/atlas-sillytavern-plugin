@@ -23,13 +23,32 @@ const ctx=canvas.getContext('2d');
     function glow(q,color,radius){const a=p(q),g=ctx.createRadialGradient(a.x,a.y,0,a.x,a.y,radius);g.addColorStop(0,color);g.addColorStop(1,'transparent');ctx.fillStyle=g;ctx.beginPath();ctx.arc(a.x,a.y,radius,0,Math.PI*2);ctx.fill()}
     function dot(q,color,label){const a=p(q);ctx.save();glow(q,alpha(color,.20),22);ctx.fillStyle='#071521';ctx.strokeStyle=alpha(color,.75);ctx.lineWidth=1.2;ctx.beginPath();ctx.arc(a.x,a.y,7,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.fillStyle=color;ctx.shadowColor=color;ctx.shadowBlur=9;ctx.beginPath();ctx.arc(a.x,a.y,2.7,0,Math.PI*2);ctx.fill();ctx.shadowBlur=0;if(state.selected?.id===q.id){ctx.beginPath();ctx.arc(a.x,a.y,12,0,Math.PI*2);ctx.strokeStyle=alpha(color,.35);ctx.stroke()}ctx.restore();if(state.cam.s>12&&label)mapLabel(label,{x:q.x,y:q.y+.75},color,11)}
     function diamond(q,color){const a=p(q);ctx.save();glow(q,alpha(color,.16),16);ctx.fillStyle=color;ctx.shadowColor=color;ctx.shadowBlur=7;ctx.beginPath();ctx.moveTo(a.x,a.y-4.5);ctx.lineTo(a.x+4.5,a.y);ctx.lineTo(a.x,a.y+4.5);ctx.lineTo(a.x-4.5,a.y);ctx.closePath();ctx.fill();ctx.restore()}
+    /**
+     * M6-09①：网格画在**屏幕空间**，范围取当前可见视口（`E.world(0,0)`→`E.world(w,h)`），
+     * 不再按固定逻辑 extent 全铺 —— 缩出去就是空白的老毛病来自后者。
+     * 步长只取 1/2/5×10^n，屏幕间距恒定落在 12–40 CSS px；线宽是屏幕常量，
+     * 不随缩放变粗（被 CSS 放大的位图网格才会糊）。
+     */
+    function gridStepFor(s){
+      if(!Number.isFinite(s)||s<=0)return null;
+      const raw=12/s,exp=Math.floor(Math.log10(raw));
+      for(const m of [1,2,5,10]){const step=m*Math.pow(10,exp);if(step*s>=12)return step;}
+      return 10*Math.pow(10,exp);
+    }
     function grid(){
-      const c=state.cam,w=width(),h=height();let step=state.kind==='floor'?1:100;
-      while(step*c.s<14)step*=2;while(step*c.s>48)step/=2;
+      const c=state.cam;
+      if(!c||!Number.isFinite(c.s)||c.s<=0||!Number.isFinite(c.x)||!Number.isFinite(c.y))return;
+      const w=width(),h=height(),step=gridStepFor(c.s);
+      if(!step)return;
       const a=E.world({x:0,y:0},c),b=E.world({x:w,y:h},c);
-      ctx.strokeStyle=C.grid;ctx.lineWidth=.55;ctx.beginPath();
-      for(let x=Math.floor(a.x/step)*step;x<b.x;x+=step){const xx=p({x,y:0}).x;ctx.moveTo(xx,0);ctx.lineTo(xx,h)}
-      for(let y=Math.floor(a.y/step)*step;y<b.y;y+=step){const yy=p({x:0,y}).y;ctx.moveTo(0,yy);ctx.lineTo(w,yy)}ctx.stroke();state.gridStep=step;
+      state.gridStep=step;
+      // 单帧线数上限：极缩放时宁可少画一层，也不能把浏览器画死。
+      const columns=Math.ceil((b.x-a.x)/step)+2,rows=Math.ceil((b.y-a.y)/step)+2;
+      if(columns+rows>2000)return;
+      ctx.strokeStyle=C.grid;ctx.lineWidth=1/Math.max(1,Math.min(globalThis.devicePixelRatio||1,3));ctx.beginPath();
+      for(let i=0;i<=columns;i++){const x=a.x+i*step,xx=p({x,y:0}).x;if(xx<0||xx>w)continue;ctx.moveTo(xx,0);ctx.lineTo(xx,h)}
+      for(let j=0;j<=rows;j++){const y=a.y+j*step,yy=p({x:0,y}).y;if(yy<0||yy>h)continue;ctx.moveTo(0,yy);ctx.lineTo(w,yy)}
+      ctx.stroke();state.gridStep=step;
     }
     function floor(){const s=state.scene,k=state.cam.s,palette=[C.cyan,C.violet,C.blue,C.mint,C.blue,C.gold];
       const focus=state.selected?.roomId||(state.selected?.type==='room'?state.selected.id:null)||s.actors[0]?.roomId;
@@ -60,17 +79,20 @@ const ctx=canvas.getContext('2d');
         const a=p(l);ctx.save();ctx.fillStyle='#ffdfab';ctx.shadowColor='#ffcd75';ctx.shadowBlur=11;ctx.beginPath();ctx.arc(a.x,a.y,1.6,0,Math.PI*2);ctx.fill();ctx.restore();
       }
       for(const group of s.groups){
+        // M6-09②：选中/悬停按**真实 local id** 判定（组 id 或单件家具 id 都算），
+        // 这样「点中哪件家具」和「画出哪件家具」用的是同一个身份。
         const selected=state.selected?.id===group.id||state.hover?.id===group.id;
         // Shadows and finish stay inside/under the same body coordinates; no new gameplay obstacles are added.
         for(const b of group.bodies){
+          const live=selected||state.selected?.id===b.id||state.hover?.id===b.id;
           ctx.save();
           if(b.type!=='chair'){ctx.shadowColor='#00000088';ctx.shadowBlur=4;ctx.shadowOffsetY=2}
           if(b.type==='stairs'){
-            rounded(b,'#0a1529',selected?C.cyan:'#8ca7c15c',.8,.07);ctx.shadowBlur=0;
+            rounded(b,'#0a1529',live?C.cyan:'#8ca7c15c',.8,.07);ctx.shadowBlur=0;
             for(let j=1;j<10;j++)line([{x:b.x+.06,y:b.y+b.h*j/10},{x:b.x+b.w-.06,y:b.y+b.h*j/10}],'#99b5ce55',.7);
             line([{x:b.x+b.w/2,y:b.y+b.h-.3},{x:b.x+b.w/2,y:b.y+.3}],alpha(C.blue,.6),.8);text('↑',E.center(b),C.blue,12);
           }else if(b.type==='shelf'){
-            rounded(b,'#182025',selected?C.cyan:'#f7c26a6e',.85,.07);ctx.shadowBlur=0;ctx.shadowOffsetY=0;
+            rounded(b,'#182025',live?C.cyan:'#f7c26a6e',.85,.07);ctx.shadowBlur=0;ctx.shadowOffsetY=0;
             for(let j=0;j<13;j++){
               const x=b.x+.10+(b.w-.20)*j/13,h=b.h*(.43+(j*7%9)/30);
               rect({x,y:b.y+b.h-.10-h,w:Math.min(.14,(b.w-.20)/15),h},['#a4a7b269','#80699988','#82a7b285','#c0ab736a','#718c9490'][j%5]);
@@ -78,9 +100,33 @@ const ctx=canvas.getContext('2d');
             line([{x:b.x+.05,y:b.y+b.h-.05},{x:b.x+b.w-.05,y:b.y+b.h-.05}],'#ebc47d4d',.6);
           }else if(b.type==='chair'){
             rounded(b,'#263b506b','#a0c9e25e',.65,.06);line([{x:b.x+.02,y:b.y+.04},{x:b.x+b.w-.02,y:b.y+.04}],'#c0dfed88',.75);
+          }else if(b.type==='bed'){
+            // 床：实心底 + 枕头 + 被面折线，实线表示这是**可通行的实体障碍**。
+            rounded(b,'#2b3350','#b496ff73',.9,.12);ctx.shadowBlur=0;ctx.shadowOffsetY=0;
+            const hw=Math.min(b.w,b.h),pillow={x:b.x+b.w*.12,y:b.y+b.h*.10,w:b.w*.76,h:hw*.22};
+            rounded(pillow,'#dfe8ff5c',null,1,.06);
+            for(let j=1;j<3;j++)line([{x:b.x+b.w*.10,y:b.y+b.h*(.38+j*.20)},{x:b.x+b.w*.90,y:b.y+b.h*(.38+j*.20)}],'#dfe8ff2e',.6);
+          }else if(b.type==='cabinet'){
+            rounded(b,'#3a3222','#ffcd828c',.9,.08);ctx.shadowBlur=0;ctx.shadowOffsetY=0;
+            line([{x:b.x+b.w/2,y:b.y+.08},{x:b.x+b.w/2,y:b.y+b.h-.08}],'#ffcd8252',.7);
+            line([{x:b.x+.08,y:b.y+b.h/2},{x:b.x+b.w-.08,y:b.y+b.h/2}],'#ffcd8252',.6);
+          }else if(b.type==='doorway'){
+            // 门洞：虚线表示**可通行**，不是实体家具。
+            rounded(b,alpha(C.gold,.10),alpha(C.gold,.45),.8,.05);ctx.shadowBlur=0;ctx.shadowOffsetY=0;
+            ctx.setLineDash([3,3]);rounded(b,null,alpha(C.gold,.55),.7,.05);ctx.setLineDash([]);
+          }else if(b.type==='light'){
+            // 灯具：只画光晕与灯芯。**不生成实体 id** —— 灯不是可点的业务对象。
+            ctx.shadowBlur=0;ctx.shadowOffsetY=0;
+            glow({x:b.x+b.w/2,y:b.y+b.h/2},'#ffe8b447',Math.max(20,k*2.2));
+            const c0=p({x:b.x+b.w/2,y:b.y+b.h/2});
+            ctx.fillStyle='#ffeec2';ctx.beginPath();ctx.arc(c0.x,c0.y,2,0,Math.PI*2);ctx.fill();
+          }else if(b.type==='decor'){
+            // 装饰块：中性材质，虚线，明确不是实体。
+            rounded(b,'#b4cdeb1c','#b4cdeb38',.5,.05);ctx.shadowBlur=0;ctx.shadowOffsetY=0;
+            ctx.setLineDash([3,3]);rounded(b,null,'#b4cdeb5c',.6,.05);ctx.setLineDash([]);
           }else{
             const tint=b.type==='bench'?C.gold:C.blue;
-            rounded(b,gradient(b,alpha(tint,.16),alpha(tint,.07)),selected?C.cyan:alpha(tint,.50),.9,.14);ctx.shadowBlur=0;ctx.shadowOffsetY=0;
+            rounded(b,gradient(b,alpha(tint,.16),alpha(tint,.07)),live?C.cyan:alpha(tint,.50),.9,.14);ctx.shadowBlur=0;ctx.shadowOffsetY=0;
             if(b.type==='bench')for(let j=1;j<4;j++)line([{x:b.x+.10,y:b.y+b.h*j/4},{x:b.x+b.w-.10,y:b.y+b.h*j/4}],'#ffe8ad27',.5);
             if(b.type==='table'||b.type==='desk'){
               const py=b.y+.18,px=b.x+.20;
@@ -105,7 +151,14 @@ const ctx=canvas.getContext('2d');
       if(width()>480){const y=s.bounds.h-.35;line([{x:.5,y},{x:s.bounds.w-.5,y}],'#86badc30',.65);for(let x=.5;x<s.bounds.w;x+=5)line([{x,y:y-.15},{x,y:y+.15}],'#86badc50',.6);text((s.bounds.w-1).toFixed(0)+' m · 楼层空间示意',{x:s.bounds.w/2,y:y-.35},'#91b8cf9e',11);}
     }
     function city(){const s=state.scene,k=state.cam.s,palette=[C.cyan,C.gold,C.mint,C.blue,C.violet];
-      ctx.save();ctx.shadowColor='#183f73';ctx.shadowBlur=28;poly(s.wall,'#0a1120','#7ea8d029',1.2);ctx.restore();
+      /**
+       * M6-09②：`enclosure==='open'`（水城 / 无墙城市）根本不画城墙 ——
+       * 契约保证此时 `wall` 是空数组，画家不能再按「旧档必有墙」的假设去取 `wall[0]`，
+       * 否则空数组会画出一圈假城门、或者直接读 undefined 崩掉整张图。
+       * 旧档（无 enclosure 字段）与 wall 城市原样保留。
+       */
+      const wall=Array.isArray(s.wall)?s.wall:[],walled=wall.length>=3&&s.enclosure!=='open';
+      if(walled){ctx.save();ctx.shadowColor='#183f73';ctx.shadowBlur=28;poly(wall,'#0a1120','#7ea8d029',1.2);ctx.restore();}
       for(let i=0;i<s.districts.length;i++){
         const d=s.districts[i],color=palette[i%palette.length],xs=d.polygon.map(q=>q.x),ys=d.polygon.map(q=>q.y),bounds={x:Math.min(...xs),y:Math.min(...ys),w:Math.max(...xs)-Math.min(...xs),h:Math.max(...ys)-Math.min(...ys)};
         poly(d.polygon,gradient(bounds,alpha(color,.13),alpha(color,.025)),alpha(color,.35),.85);
@@ -148,8 +201,10 @@ const ctx=canvas.getContext('2d');
           if(k>.12)mapLabel(b.name,{x:q.x,y:b.y+b.h+43},'#c2d5ec',11);
         }
       }
-      ctx.save();ctx.shadowColor=C.blue;ctx.shadowBlur=5;line([...s.wall,s.wall[0]],'#a1c5e86b',1.1,[9,3]);ctx.restore();
-      for(let i=0;i<s.wall.length;i++){const a=s.wall[i],b=s.wall[(i+1)%s.wall.length],n=Math.ceil(E.distance(a,b)/95);for(let j=0;j<n;j++){const q={x:a.x+(b.x-a.x)*j/n,y:a.y+(b.y-a.y)*j/n};rect({x:q.x-6,y:q.y-6,w:12,h:12},'#a4cae557')}}
+      if(walled){
+        ctx.save();ctx.shadowColor=C.blue;ctx.shadowBlur=5;line([...wall,wall[0]],'#a1c5e86b',1.1,[9,3]);ctx.restore();
+        for(let i=0;i<wall.length;i++){const a=wall[i],b=wall[(i+1)%wall.length],n=Math.ceil(E.distance(a,b)/95);for(let j=0;j<n;j++){const q={x:a.x+(b.x-a.x)*j/n,y:a.y+(b.y-a.y)*j/n};rect({x:q.x-6,y:q.y-6,w:12,h:12},'#a4cae557')}}
+      }
 
       for(let i=0;i<s.districts.length;i++){const d=s.districts[i];mapLabel(d.name,{x:d.site.x,y:d.site.y-55},palette[i%palette.length],12);}
       for(const gate of s.gates){diamond(gate,C.gold);mapLabel(gate.name,{x:gate.x,y:gate.y-60},'#e5bd79',11)}

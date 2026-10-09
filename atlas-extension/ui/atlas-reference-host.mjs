@@ -107,13 +107,65 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
     await refresh(true);
     return {data:latest,presets:presetDoc,preferences:prefs.interaction??null,skin:prefs.skin??null};
   }
-  async function inspect(kind,id){const ticket={...scope(),epoch};const entityKind=kind==='place'?'location':kind;if(!['character','item','location'].includes(entityKind))return null;
+  /** 本轮正文来源：布局与建设必须用**同一份**正文，不能各拿一次（否则 sourceHash 对不上）。 */
+  async function sourceText(captured){
+    const c=captured.context,chat=c?.chat??[],last=chat.filter(m=>!m.is_user&&!m.is_system).at(-1),user=chat.filter(m=>m.is_user&&!m.is_system).at(-1);
+    return {assistantText:last?.mes??'',userText:user?.mes??'',charDescription:c?.characters?.[c.characterId]?.description??'',
+      loreSupplement:(await lorePort?.read?.()??[]).filter(e=>e.enabled!==false).map(e=>e.content).join('\n')};
+  }
+  /** 把一次地图类回执记进宿主（核心只有这一条外部回执通道）。 */
+  function recordMapReceipt(result,captured,operation,code){
+    core.recordExternalReceipt?.(sqlMod.toLegacyTurnReceipt(result.receipt,{coreSaved:result.coreSaved}),captured.state.chatId,{receipt:result.receipt,issues:result.receipt?.issues??result.issues,coreSaved:result.coreSaved});
+    emit({level:result.receipt?.status==='partial'?'warn':'info',source:'map',code,operation,phase:'commit',outcome:result.receipt?.status==='partial'?'failed':'success'});
+  }
+  /** 「有失败就报全」：地图类任务的每一处 map/path 问题都要露出来，不许只留第一条。 */
+  function mapIssues(result){
+    return [...(result?.receipt?.issues??[]),...(result?.issues??[])].map(i=>`${i?.code??'ISSUE'}${i?.path?`@${i.path}`:''}: ${i?.message??''}`);
+  }
+  /**
+   * M6-12②：message / action / journey 的**关联详情**。
+   *
+   * 这三种不是 SQL 三实体（人物/物品/地点），`inspect` 通道里没有它们的聚合详情 ——
+   * 所以这里走各自**真实存在的只读视图**（目录 / 任务），拿到安全 DTO 再交给 UI；
+   * 查不到就返回 null，**绝不伪造**成 inspect 的三实体结果糊过去。
+   */
+  async function inspectLinked(ticket,kind,id){
+    if(kind==='message'){
+      const dto=await query(ticket,'catalog',{});if(!dto||!live(ticket))return null;
+      const row=(dto.items??[]).find(x=>String(x.entityId)===String(id)&&x.entityKind==='rumor');if(!row)return null;
+      return {id:String(row.entityId),src:String(row.name??''),txt:String(row.summary??''),locationId:row.locationId??null,mapNodeId:row.mapId??null,status:'已记录',known:row.known!==false,kind:'rumor'};
+    }
+    if(kind==='action'||kind==='journey'){
+      const dto=await query(ticket,'tasks',{});if(!dto||!live(ticket))return null;
+      const row=(dto.items??[]).find(x=>String(x.taskId)===String(id));if(!row)return null;
+      return {id:String(row.taskId),n:String(row.title??''),d:String(row.reasonCode??(row.planned?'计划中的行动':'已记录的行动')),
+        stName:String(row.status??'running'),entityId:row.actorEntityId??null,known:row.known!==false};
+    }
+    return null;
+  }
+  async function inspect(kind,id){const ticket={...scope(),epoch};
+    if(kind==='message'||kind==='action'||kind==='journey')return inspectLinked(ticket,kind,id);
+    const entityKind=kind==='place'?'location':kind;if(!['character','item','location'].includes(entityKind))return null;
     const location=kind==='place'?latest.LOCATIONS.find(x=>x.id===id):null;
     const node=kind==='place'&&!location?findNode(latest.ROOT,id):null;
     const entityId=node?.containerLocationId??id;
     const dto=await query(ticket,'entity',{entityKind,entityId});
     if(!dto||!live(ticket))return null;
     return referenceEntity(dto.items?.[0]);
+  }
+  /**
+   * M6-18：升级前原档的只读导出。
+   *
+   * 走 M1-06A 的 `/sql/upgrade-backup`：只读 chatMetadata，不 open session、不写库、
+   * 不触发宿主保存，也**不清除**备份 —— 用户刷新或重开聊天后仍能导出同一份原档。
+   * 没有备份/备份损坏/备份属于另一个聊天时，统一抛出明确错误（服务端不泄露他人备份是否存在）。
+   */
+  async function exportUpgradeBackup(){
+    const captured=scope();if(!captured.state.chatId)throw Error('请先打开一个酒馆聊天');
+    const result=await request('POST','/sql/upgrade-backup',{chatUid:captured.state.chatId,branchId:captured.state.binding?.branchId??'main'});
+    const backup=result?.backup??null;
+    if(!backup?.envelope)throw Error('当前聊天没有可导出的升级前原档备份');
+    return {backup,envelope:backup.envelope};
   }
   function findNode(node,id){if(node.id===id)return node;for(const child of node.children??[]){const found=findNode(child,id);if(found)return found;}return null;}
   async function readLore(){const ticket={...scope(),epoch};const rows=viewMode==='author'?await lorePort?.read?.()??[]:[];if(!live(ticket))return;latest.LORE=rows.map(l=>({...l,target:[...latest.LOCATIONS,...latest.CAST].find(x=>l.keys.some(k=>k===x.name))?.id??null}));deliver(latest);}
@@ -151,17 +203,50 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
     async advance(){return withTask(core.getState().binding?'advance':'initialize',async()=>{if(core.getState().binding)return core.manualAdvance();const result=await core.initializeWorld();if(result!==true)throw Error(core.getState().lastError??'当前聊天的世界初始化未完成');return result;});},
     async retry(){return withTask('repair',()=>core.retryLastCommit());},
     async layout(mapId){return withTask('initialize',async()=>{
-      const captured=scope(),c=captured.context,chat=c?.chat??[],last=chat.filter(m=>!m.is_user&&!m.is_system).at(-1),user=chat.filter(m=>m.is_user&&!m.is_system).at(-1);
-      const result=await request('POST','/sql/chat/map/layout',{chatId:captured.state.chatId,mapId,requestId:crypto.randomUUID(),
-        assistantText:last?.mes??'',userText:user?.mes??'',charDescription:c?.characters?.[c.characterId]?.description??'',
-        loreSupplement:(await lorePort?.read?.()??[]).filter(e=>e.enabled!==false).map(e=>e.content).join('\n')});
-      core.recordExternalReceipt?.(sqlMod.toLegacyTurnReceipt(result.receipt,{coreSaved:result.coreSaved}),captured.state.chatId,{receipt:result.receipt,issues:result.receipt?.issues??result.issues,coreSaved:result.coreSaved});
-      emit({level:result.receipt?.status==='partial'?'warn':'info',source:'map',code:'LAYOUT_TASK_COMPLETE',operation:'layout',phase:'commit',outcome:result.receipt?.status==='partial'?'failed':'success'});
+      const captured=scope();
+      const result=await request('POST','/sql/chat/map/layout',{chatId:captured.state.chatId,mapId,requestId:crypto.randomUUID(),...await sourceText(captured)});
+      if(!live({...captured,epoch}))return null;
+      recordMapReceipt(result,captured,'layout','LAYOUT_TASK_COMPLETE');
       await core.refresh();await refresh(true);
       const node=findNode(latest.ROOT,mapId);
-      if(!node?.hasLayout)throw Error([...(result.receipt?.issues??[]),...(result.issues??[])].map(i=>`${i.code}: ${i.message}`).join('；')||'没有生成可绘制的布局，请查看诊断');
+      if(result.coreSaved!==true)throw Error(mapIssues(result).join('；')||'本图布局未保存');
+      if(!node?.hasLayout)throw Error(mapIssues(result).join('；')||'没有生成可绘制的布局，请查看诊断');
       return result;
     },false);},
+    /**
+     * M6-12①：显式「建设本图」。
+     *
+     * 与 layout 的分工：layout 只画**已登记实体**的布局；build 才会让引擎补新地点/新连接。
+     * 因此它必须是**用户明确点击**才发（不因打开地图自动调模型），且带真实的
+     * chatUid/branch/revision/正文来源 —— revision 对不上由服务端回 STALE_BASE，
+     * 由 UI 提示「世界已经推进，请重试」，而不是把旧候选当新结果画出来。
+     */
+    async build(mapId,{mode='local',focusLocationIds=null}={}){
+      if(actionBusy||core.getState().pendingTurn)throw Error('有回合正在处理，请稍后再试');
+      if(!scope().enabled)throw Error('SQL 世界数据已关闭，请在酒馆扩展设置中开启');
+      if(!core.getState().chatId)throw Error('请先打开一个酒馆聊天');
+      const captured=scope(),ticket={...captured,epoch:++epoch};
+      actionError=null;actionScope=latest.meta.scopeKey;actionBusy=true;deliver(latest);
+      try{
+        await presetQueue;
+        if(!sqlMod)sqlMod=await loadSqlRuntime();
+        const view=await query(ticket,'map',{});
+        if(!view||!live(ticket))return null;
+        const row=(view.items??[]).find(m=>String(m.mapId??m.id)===String(mapId))??null;
+        const focus=(Array.isArray(focusLocationIds)&&focusLocationIds.length?focusLocationIds.map(String):(row?.containerLocationId?[String(row.containerLocationId)]:[]));
+        const requested=mode==='bootstrap'||!focus.length?'bootstrap':'local';
+        const result=await request('POST','/sql/chat/map/build',{chatId:captured.state.chatId,branchId:captured.state.binding?.branchId??'main',
+          requestId:crypto.randomUUID(),mode:requested,...(requested==='local'?{focusLocationIds:focus}:{}),
+          baseRevision:view.revision,...await sourceText(captured)});
+        if(!live(ticket))return null;
+        recordMapReceipt(result,captured,'build','WORLD_BUILD_TASK_COMPLETE');
+        // 只有真保存了（coreSaved=true）才算「正式结果」；否则候选一律丢弃并报全部问题。
+        if(result.coreSaved!==true)throw Error(mapIssues(result).join('；')||'本图建设未保存');
+        await core.refresh();await refresh(true);
+        return result;
+      }catch(error){actionError=error.message;throw error;}finally{actionBusy=false;deliver(latest);}
+    },
+    exportUpgradeBackup,
     async undo(){const messageId=latest.meta.rollbackMessageId;if(messageId===null||messageId===undefined)throw Error('没有可回退的已提交回合');
       const captured=scope();const result=await request('POST','/sql/chat/rollback',{chatUid:captured.state.chatId,chatId:captured.state.chatId,assistantMessageId:String(messageId)});
       if(result.coreSaved!==true)throw Error(result.issues?.map(x=>x.message).join('；')||'回退未保存');await core.refresh();await refresh(true);},

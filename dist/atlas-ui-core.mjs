@@ -2892,7 +2892,7 @@ var init_renderer_drawing = __esm({
 });
 
 // vendor/atlas-spatial/renderer.mjs
-var DEFAULT_THEME;
+var DEFAULT_THEME, OVERVIEW_SURFACE_PAINT, ZONE_ROLE_TINT, FEATURE_TINT;
 var init_renderer = __esm({
   "vendor/atlas-spatial/renderer.mjs"() {
     "use strict";
@@ -2900,6 +2900,17 @@ var init_renderer = __esm({
     init_renderer_drawing();
     init_contracts();
     DEFAULT_THEME = Object.freeze({ bg: "#060a12", grid: "#4977a125", wall: "#b2d4ef", mint: "#39e0a0", gold: "#ffc247", blue: "#7fd4ff", text: "#dce9fb", muted: "#91a9c3", floor: "#101d2f", cyan: "#43e0ff", violet: "#9b6bff" });
+    OVERVIEW_SURFACE_PAINT = Object.freeze({
+      mixed: ["#070e1a", "#0a1524"],
+      urban: ["#080b16", "#0d1220"],
+      forest: ["#061310", "#0a1c16"],
+      mountain: ["#0a0e14", "#121822"],
+      water: ["#04121e", "#062034"],
+      indoor: ["#0a0d14", "#111722"],
+      void: ["#03060c", "#03060c"]
+    });
+    ZONE_ROLE_TINT = Object.freeze({ city: "#43e0ff", settlement: "#39e0a0", forest: "#2fbf8f", water: "#3fa9ff", mountain: "#91a9c3", ruins: "#ffc247", district: "#9b6bff", campus: "#7fd4ff", land: "#39e0a0", other: "#7fd4ff" });
+    FEATURE_TINT = Object.freeze({ forest_texture: "#2fbf8f", ridge: "#91a9c3", shore: "#7fd4ff", building_cluster: "#ffc247", road_texture: "#b2cdeb", ruins_scatter: "#9b6bff", watercourse: "#3fa9ff" });
   }
 });
 
@@ -12685,7 +12696,16 @@ var SAFE_ROUTES = /* @__PURE__ */ new Set([
   "/turns/rollback",
   "/map/travel-preview",
   "/session/export",
-  "/session/purge"
+  "/session/purge",
+  // M6-15：SQL 世界建设的**安全动作枚举**。
+  // 这些都是真实存在的只读/建设路由；白名单只用来决定「能不能把路由名写进诊断」，
+  // 任何未列出的字符串一律被丢弃 —— 诊断里不允许出现任意路径（可能夹带 key 或用户内容）。
+  "/sql/chat/ui-read",
+  "/sql/chat/map/build",
+  "/sql/chat/map/layout",
+  "/sql/chat/rollback",
+  "/sql/chat/repair",
+  "/sql/upgrade-backup"
 ]);
 var SAFE_CAPABILITIES = /* @__PURE__ */ new Set(["setExtensionPrompt", "eventSource", "getContext", "generateRaw"]);
 var SAFE_MODES = /* @__PURE__ */ new Set(["main", "profile", "custom", "openai", "claude", "gemini", "v1", "v2", "turn", "geo", "bootstrap"]);

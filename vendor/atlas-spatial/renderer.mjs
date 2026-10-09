@@ -2,8 +2,20 @@ import * as E from './layout-core.mjs';
 import {createPainter} from './renderer-drawing.mjs';
 import {checkSceneDocument,clone,finite,LIMITS,diagnostic} from './contracts.mjs';
 export const DEFAULT_THEME=Object.freeze({bg:'#060a12',grid:'#4977a125',wall:'#b2d4ef',mint:'#39e0a0',gold:'#ffc247',blue:'#7fd4ff',text:'#dce9fb',muted:'#91a9c3',floor:'#101d2f',cyan:'#43e0ff',violet:'#9b6bff'});
+/**
+ * M6-08①：概览的表面材质底色，与正式 UI（`ui/atlas-reference/js/map.js` 的 `SURFACE_PAINT`）同表。
+ * `void` 是「未知世界」——只给纯材质，不许拿别的世界的地形纹理来补。
+ */
+export const OVERVIEW_SURFACE_PAINT=Object.freeze({
+  mixed:['#070e1a','#0a1524'],urban:['#080b16','#0d1220'],forest:['#061310','#0a1c16'],
+  mountain:['#0a0e14','#121822'],water:['#04121e','#062034'],indoor:['#0a0d14','#111722'],void:['#03060c','#03060c'],
+});
+/** 分区角色 → 描边色。角色缺失时退回表内默认，不猜世界。 */
+const ZONE_ROLE_TINT=Object.freeze({city:'#43e0ff',settlement:'#39e0a0',forest:'#2fbf8f',water:'#3fa9ff',mountain:'#91a9c3',ruins:'#ffc247',district:'#9b6bff',campus:'#7fd4ff',land:'#39e0a0',other:'#7fd4ff'});
+const FEATURE_TINT=Object.freeze({forest_texture:'#2fbf8f',ridge:'#91a9c3',shore:'#7fd4ff',building_cluster:'#ffc247',road_texture:'#b2cdeb',ruins_scatter:'#9b6bff',watercourse:'#3fa9ff'});
+const rgba=(hex,a)=>{const [r,g,b]=[1,3,5].map(i=>parseInt(String(hex).slice(i,i+2),16));return `rgba(${r},${g},${b},${a})`;};
 /** The component only draws passed state. It has no storage, model port or world clock. */
-export function createSpatialRenderer({canvas,onSelect=()=>{},onHover=()=>{},onViewport=()=>{},onIssue=()=>{},theme={},scaleBarWidth=96,ownsGestures=true,painterFactory=createPainter,animate=false}={}){
+export function createSpatialRenderer({canvas,onSelect=()=>{},onHover=()=>{},onViewport=()=>{},onIssue=()=>{},theme={},scaleBarWidth=74,ownsGestures=true,painterFactory=createPainter,animate=false}={}){
   if(!canvas?.getContext)throw new Error('CANVAS_REQUIRED');
   const ctx=canvas.getContext('2d'),C={...DEFAULT_THEME,...theme};
   const state={kind:null,scene:null,document:null,zoom:1,offset:{x:0,y:0},cam:null,selected:null,hover:null,gridStep:null,overlays:[],labels:[],paused:false,destroyed:false,externalCamera:null};
@@ -12,7 +24,18 @@ export function createSpatialRenderer({canvas,onSelect=()=>{},onHover=()=>{},onV
   function listen(target,type,fn,opts){target.addEventListener(type,fn,opts);cleanup.push(()=>target.removeEventListener(type,fn,opts));}
   function entities(){
     const s=state.scene;if(!s)return [];
-    if(s.kind==='overview')return s.pins??[];
+    if(s.kind==='overview'){
+      // M6-08②：概览的 pins 与 features 都能点，但**kind 必须分得清** ——
+      // pin 是已登记的地点/人物/物品，feature 只是地形装饰；调用方按 kind 决定开什么详情。
+      const shapeCenter=f=>{
+        const pts=Array.isArray(f.polygon)?f.polygon:Array.isArray(f.path)?f.path:[];
+        const p=pts.map(q=>Array.isArray(q)?{x:q[0],y:q[1]}:q).filter(q=>finite(q?.x)&&finite(q?.y));
+        if(!p.length)return null;
+        return {x:p.reduce((n,q)=>n+q.x,0)/p.length,y:p.reduce((n,q)=>n+q.y,0)/p.length};
+      };
+      const features=(s.features??[]).map(f=>{const c=shapeCenter(f);return c?{...f,type:'feature',x:c.x,y:c.y}:null;}).filter(Boolean);
+      return [...(s.pins??[]),...features];
+    }
     if(s.kind==='floor')return [...s.actors,...s.items,...s.groups,...s.doors.map(d=>({...d,type:'door',name:'门'})),...s.windows,...s.lamps,...s.rooms.map(r=>({...r,type:'room'}))];
     return [...s.buildings.filter(b=>!b.decorative),...s.segments.filter(r=>r.kind==='bridge').map(r=>({...r,type:'bridge',name:'桥梁',x:(r.a.x+r.b.x)/2,y:(r.a.y+r.b.y)/2})),...s.gates.map(g=>({...g,type:'gate'})),s.dock,...s.districts.map(d=>({...d,type:'district',x:d.site.x,y:d.site.y}))].filter(Boolean);
   }
@@ -26,9 +49,34 @@ export function createSpatialRenderer({canvas,onSelect=()=>{},onHover=()=>{},onV
     return null;
   }
   function select(entity){state.selected=entity;onSelect(entity?clone(entity):null);schedule();return entity;}
+  /**
+   * M6-08①：概览绘制顺序与正式 UI 一致 ——
+   * surface 底色 → zone 填色 → 地形装饰 → 建筑群 → 路线 → marker/标签。
+   * 全部几何都来自**同一份**已保存场景；这里不发模型、不补新地点。
+   */
   function overview(){
-    for(const shape of state.scene.shapes??[])painter.poly(shape.polygon,'#43e0ff0c','#43e0ff66',.9);
-    for(const pin of state.scene.pins??[]){const tint=pin.type==='person'?C.mint:pin.type==='item'?C.gold:C.cyan;if(pin.type==='item')painter.diamond(pin,tint);else painter.dot(pin,tint,pin.name);if(state.cam.s>1||pin.type==='location')painter.mapLabel(pin.name,{x:pin.x,y:pin.y+14/state.cam.s},tint,11);}
+    const s=state.scene,w=width(),h=height();
+    const paint=OVERVIEW_SURFACE_PAINT[s.surface];
+    if(paint&&s.bounds&&finite(s.bounds.w)&&finite(s.bounds.h)&&s.bounds.w>0&&s.bounds.h>0){
+      const a=E.screen({x:s.bounds.x,y:s.bounds.y},state.cam),b=E.screen({x:s.bounds.x+s.bounds.w,y:s.bounds.y+s.bounds.h},state.cam);
+      const g=ctx.createLinearGradient(a.x,a.y,b.x,b.y);
+      g.addColorStop(0,paint[0]);g.addColorStop(1,paint[1]);
+      ctx.fillStyle=g;ctx.fillRect(a.x,a.y,s.bounds.w*state.cam.s,s.bounds.h*state.cam.s);
+    }
+    for(const shape of s.shapes??[]){
+      const tint=ZONE_ROLE_TINT[shape.role]??C.cyan;
+      // quality 决定「已确认」还是「估计」：估计的多边形用虚线轮廓，读者一眼能分辨。
+      const estimated=shape.quality!=='confirmed';
+      const polygon=shape.polygon??[];
+      painter.poly(polygon,rgba(tint,.05),rgba(tint,estimated?.4:.62),estimated?.9:1.2);
+      if(estimated&&polygon.length>=3)painter.line([...polygon,polygon[0]],rgba(tint,.28),.7,[4,5]);
+    }
+    for(const f of s.features??[]){
+      const tint=FEATURE_TINT[f.type]??C.muted;
+      if(Array.isArray(f.polygon)&&f.polygon.length>=3)painter.poly(f.polygon,rgba(tint,.10),rgba(tint,.20),.6);
+      if(Array.isArray(f.path)&&f.path.length>=2)painter.line(f.path,rgba(tint,.45),Math.max(.8,Math.min(3,(f.width??1)*state.cam.s)),f.type==='road_texture'?[]:[3,4]);
+    }
+    for(const pin of s.pins??[]){const tint=pin.type==='person'?C.mint:pin.type==='item'?C.gold:C.cyan;if(pin.type==='item')painter.diamond(pin,tint);else painter.dot(pin,tint,pin.name);if(state.cam.s>1||pin.type==='location')painter.mapLabel(pin.name,{x:pin.x,y:pin.y+14/state.cam.s},tint,11);}
   }
   function draw(timestamp=0){
     if(state.destroyed||state.paused)return;
@@ -45,9 +93,23 @@ export function createSpatialRenderer({canvas,onSelect=()=>{},onHover=()=>{},onV
       painter.line(flow.path,color,1.2,flow.dashed?[4,6]:[]);ctx.restore();
       if(flow.marker)painter.dot({...flow.marker,id:flow.id},color);
     }
-    state.labels=painter.labels();const distance=scaleBarWidth/state.cam.s,unit=state.document.units==='cells'?'cells':distance>=1000?'km':'m';
-    const value=unit==='km'?distance/1000:distance;
-    onViewport({camera:{...state.cam},zoom:state.zoom,scale:{widthPx:scaleBarWidth,distance:value,unit,label:value.toFixed(value>=10?0:value>=1?1:2)+' '+(unit==='cells'?'格':unit),quality:state.document.metricQuality},gridStep:state.gridStep});
+    state.labels=painter.labels();
+    /**
+     * M6-08②：比例尺线长**恒定 74 CSS px**，读数只由 `camera.s` 与场景单位决定：
+     * distance = 74 / s（格）或 74 / s × 每单位米数（米制）。
+     * - 未标定（units=cells）只报「格」，绝不因为数值大就自己升成 km；
+     * - 估计出来的尺度必须带「约」，不能把模型推的 mpp 当实测值印在图上。
+     */
+    const s=state.cam.s&&Number.isFinite(state.cam.s)&&state.cam.s>0?state.cam.s:null;
+    const metric=state.document?.units==='meters'?1:(Number.isFinite(state.document?.metersPerCell)&&state.document.metersPerCell>0?state.document.metersPerCell:null);
+    const cells=state.document?.units==='cells'||!(state.document?.units==='meters'&&metric);
+    const raw=s?scaleBarWidth/s*(cells?1:metric):null;
+    const unit=!s?'unknown':cells?'cells':raw>=1000?'km':'m';
+    const value=raw===null?null:unit==='km'?raw/1000:raw;
+    const estimated=state.document?.metricQuality!=null&&state.document.metricQuality!=='confirmed';
+    onViewport({camera:{...state.cam},zoom:state.zoom,scale:{widthPx:scaleBarWidth,distance:value,unit,estimated,
+      label:value===null?'—':(estimated?'约 ':'')+value.toFixed(value>=10?0:value>=1?1:2)+' '+(unit==='cells'?'格':unit),
+      quality:state.document?.metricQuality??null},gridStep:state.gridStep});
   }
   function schedule(){if(state.destroyed||state.paused)return;cancelAnimationFrame(frameId);frameId=requestAnimationFrame(t=>{frameId=0;draw(t);});}
   function animationTick(t){if(state.destroyed||state.paused||!animate)return;draw(t);rafAnimation=requestAnimationFrame(animationTick);}

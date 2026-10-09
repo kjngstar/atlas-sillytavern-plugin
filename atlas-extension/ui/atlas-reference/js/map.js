@@ -214,13 +214,21 @@ function paintGrid(ctx, {cam, vw, vh, dpr, step, maxLines}){
  */
 function labelSpots(ax,ay,tw,th){
   const gap=7;
+  /**
+   * 六个方位必须是**两两不相交**的矩形，否则「换方位」等于白换：
+   * 旧写法左右两档只离锚点 gap 像素，标签一宽就压在首选位上，
+   * 六个候选实际只剩两个可用 —— 标签被过早收纳，看图的人少了一半地名。
+   * 现在按「三列（左/中/右）× 两行（锚点下方/上方）」铺开，
+   * 相邻标签盒之间恒定留 gap，六个方位在任何标签宽度下都互不遮挡。
+   */
+  const mid=ax-tw/2, right=ax+tw/2+gap, left=ax-tw/2-gap-tw;
   return [
-    [ax-tw/2, ay],                              // 首选：正中 · 锚点正下方
-    [ax+gap, ay],                               // 右
-    [ax-gap-tw, ay],                            // 左
-    [ax-tw/2, ay-th-gap],                       // 上
-    [ax+gap, ay-th-gap],                        // 右上
-    [ax-gap-tw, ay-th-gap],                     // 左上
+    [mid, ay],                                  // 首选：正中 · 锚点正下方
+    [right, ay],                                // 右
+    [left, ay],                                 // 左
+    [mid, ay-th-gap],                           // 上（正中）
+    [right, ay-th-gap],                         // 右上
+    [left, ay-th-gap],                          // 左上
   ];
 }
 function placeLabel(occupied, ax, ay, tw, th){
@@ -1407,6 +1415,10 @@ function create(canvas, mini, hooks){
       const tw=ctx.measureText(l.text).width+12, th=l.kind==='live'?20:17;
       const spot=placeLabel(occupied,sx,sy,tw,th);
       if(!spot)continue;   // 放不下就收纳：宁可少写一个字，也不挪 marker 或叠成一团
+      // M6-10②：「让位」是要付代价的 —— 挪方位就得拉引线，读者得追着线才知道它属于谁。
+      // 副标题是等级最低的标签，不配让别人付这个代价：首选位占不到就直接收纳，
+      // 绝不为了一句「在场」把在场人物的名字挤到角落去。
+      if(spot.leader&&labelRank(l)>=4)continue;
       occupied.push(spot.box);
       // 被挪开的标签用 leader 线指回自己的锚点（物理位置不变，只是文字让位）。
       if(spot.leader){
@@ -1798,7 +1810,13 @@ function create(canvas, mini, hooks){
         cssPixelsPerUnit:Number.isFinite(camS)&&camS>0?camS*(calibrated?1:(st.node?.transform?.scale||1)):null,
         metersPerUnit:calibrated?metric:null};
     },
-    fitScale, extent
+    fitScale, extent,
+    /**
+     * M6-07①：网格的两个纯函数入口（只吃数字与 ctx，不碰相机生命周期）。
+     * 暴露出来是为了让「步长只取 1/2/5×10^n、屏距 12–40px、单帧 ≤2000 线」
+     * 这三条契约能在 UI 层直接断言，而不是靠读源码正则猜。
+     */
+    gridStep, paintGrid
   };
 }
 return { create, C };

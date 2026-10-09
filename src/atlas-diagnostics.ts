@@ -74,7 +74,14 @@ const SAFE_ROUTES = new Set([
   "/turns/preview", "/scene/bootstrap", "/turns/commit", "/turns/retry",
   "/turns/restore", "/turns/rollback", "/map/travel-preview",
   "/session/export", "/session/purge",
+  // M6-15：SQL 世界建设的**安全动作枚举**。
+  // 这些都是真实存在的只读/建设路由；白名单只用来决定「能不能把路由名写进诊断」，
+  // 任何未列出的字符串一律被丢弃 —— 诊断里不允许出现任意路径（可能夹带 key 或用户内容）。
+  "/sql/chat/ui-read", "/sql/chat/map/build", "/sql/chat/map/layout",
+  "/sql/chat/rollback", "/sql/chat/repair", "/sql/upgrade-backup",
 ]);
+// M6-15：世界建设的阶段名（observe / geography / overview / world-build / layout / commit / rollback）
+// 走 `phase` 字段的既有安全原子校验（`SAFE_ATOM`，不接受 `://` 与外内容），无需另立白名单。
 const SAFE_CAPABILITIES = new Set(["setExtensionPrompt", "eventSource", "getContext", "generateRaw"]);
 const SAFE_MODES = new Set(["main", "profile", "custom", "openai", "claude", "gemini", "v1", "v2", "turn", "geo", "bootstrap"]);
 const SAFE_LORE_ACTIVATION_MODES = new Set(["host-activated", "context-fallback", "disabled"]);
