@@ -236,6 +236,11 @@ export type InitialFrameInput = {
   scope: SpatialScope;
   currentScope: SpatialScope;
   expectedRowRev: number;
+  /**
+   * M4-18：请求种类。`overview` 在无 mpp 时按「格」建初始幅面（meters_per_cell=null），
+   * 不会把 1 格当成 1 米；floor/city 沿用估计 extent 的米制路径。省略等于旧调用语义。
+   */
+  kind?: 'floor' | 'city' | 'overview' | null;
   widthM?: number | null;
   heightM?: number | null;
   locations?: Array<Record<string, unknown>>;
@@ -278,6 +283,7 @@ export function ensureInitialSpatialFrame(input: InitialFrameInput): InitialFram
       scope: input.scope,
       currentScope: input.currentScope,
       expectedRowRev: input.expectedRowRev,
+      kind: input.kind ?? undefined,
       widthM: typeof input.widthM === 'number' ? input.widthM : Number.NaN,
       heightM: typeof input.heightM === 'number' ? input.heightM : Number.NaN,
       locations: input.locations ?? [],

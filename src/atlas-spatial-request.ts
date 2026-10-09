@@ -18,16 +18,32 @@ import type { Issue, ParsedOperation, RowMutation } from './atlas-ops-contract.t
 import type { CompileContext, CompileResult } from './atlas-ops-compile-types.ts';
 import { emptyCompileResult } from './atlas-ops-compile-types.ts';
 import { LAYOUT_SPEC_REF_FIELDS, resolveLayoutSpecRefs, resolveRef } from './atlas-ops-refs.ts';
-import { LAYOUT_SPEC_COLLECTIONS, LAYOUT_SPEC_SCALARS, normalizeLayoutSpec } from './atlas-ops-normalize.ts';
+import {
+  LAYOUT_KIND_COLLECTIONS,
+  LAYOUT_SPEC_COLLECTIONS,
+  LAYOUT_SPEC_SCALARS,
+  normalizeLayoutSpec,
+} from './atlas-ops-normalize.ts';
 import { applyPatch } from './atlas-ops-entities.ts';
 import { ATLAS_ERROR_CODES } from './atlas-ops-errors.ts';
 
 /** 规格中本操作专属的错误码（已登记进 ATLAS_ERROR_CODES）。 */
 const LAYOUT_REQUEST_CONFLICT = ATLAS_ERROR_CODES.LAYOUT_REQUEST_CONFLICT;
 
-/** floor 模板只认这些集合；city 模板只认 districts/buildings。混用即冲突。 */
-const FLOOR_COLLECTIONS = ['rooms', 'contents', 'actors', 'items'] as const;
-const CITY_COLLECTIONS = ['districts', 'buildings'] as const;
+/**
+ * 每套模板只认自己的集合，混用即冲突（M4-03 起由 LAYOUT_KIND_COLLECTIONS 单一来源给出，
+ * 这里只保留「本模板的集合」视图，避免出现第二份硬编码清单）。
+ */
+const FLOOR_COLLECTIONS = LAYOUT_KIND_COLLECTIONS.floor;
+const CITY_COLLECTIONS = LAYOUT_KIND_COLLECTIONS.city;
+const OVERVIEW_COLLECTIONS = LAYOUT_KIND_COLLECTIONS.overview;
+
+/** kind → 本模板允许的集合；未列出的集合出现即冲突。 */
+const KIND_COLLECTIONS: Readonly<Record<string, readonly string[]>> = {
+  floor: FLOOR_COLLECTIONS,
+  city: CITY_COLLECTIONS,
+  overview: OVERVIEW_COLLECTIONS,
+};
 
 /** 指令型字段：不写进持久化约束（否则会把一次性意图固化下来）。 */
 const DIRECTIVE_KEYS = ['deletes', 'rebuild'] as const;
@@ -212,12 +228,12 @@ export function compileMapLayoutRequest(op: ParsedOperation, ctx: CompileContext
   const data = (op.value.data ?? {}) as Record<string, unknown>;
 
   const kind = typeof data['kind'] === 'string' ? data['kind'].trim().toLowerCase() : '';
-  if (kind !== 'floor' && kind !== 'city') {
+  if (kind !== 'floor' && kind !== 'city' && kind !== 'overview') {
     result.issues.push(
       issue(
         ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING,
         '$.data.kind',
-        `map.layout.request kind must be one of {floor,city}; got ${JSON.stringify(data['kind'] ?? null)}`,
+        `map.layout.request kind must be one of {floor,city,overview}; got ${JSON.stringify(data['kind'] ?? null)}`,
         op,
       ),
     );
@@ -264,16 +280,17 @@ export function compileMapLayoutRequest(op: ParsedOperation, ctx: CompileContext
   }
   spec['mapId'] = mapId;
 
-  // floor / city 集合不可混用（父图与子图是两套模板）。
-  const wrong = kind === 'floor' ? CITY_COLLECTIONS : FLOOR_COLLECTIONS;
-  for (const collection of wrong) {
+  // 模板集合不可混用（父图与子图是两套模板）：floor/city/overview 各自只认自己的集合。
+  const allowed = KIND_COLLECTIONS[kind] ?? FLOOR_COLLECTIONS;
+  for (const collection of LAYOUT_SPEC_COLLECTIONS) {
+    if (allowed.includes(collection)) continue;
     const rows = spec[collection];
     if (Array.isArray(rows) && rows.length > 0) {
       result.issues.push(
         issue(
           LAYOUT_REQUEST_CONFLICT,
           `$.data.spec.${collection}`,
-          `kind=${kind} 的布局请求不接受 ${collection}；floor 与 city 是两套模板，父图/子图引用不可混用。`,
+          `kind=${kind} 的布局请求不接受 ${collection}；floor / city / overview 是三套模板，引用不可混用。`,
           op,
         ),
       );

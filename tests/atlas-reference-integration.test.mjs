@@ -9,7 +9,8 @@ import {mountReferenceUi} from '../ui/atlas-reference-host.mjs';
 import {createReferenceLorePort} from '../ui/atlas-reference-lore.mjs';
 import {createDefaultSettingsV2,applySettingsCommand,settingsViewV2} from '../src/atlas-settings.ts';
 const view=items=>({branchId:'main',revision:3,items});
-const map={mapId:'world',name:'真实城市',kind:'city',containerLocationId:null,metersPerCell:2,points:[{entityId:'L',kind:'location',name:'学校',x:10,y:10},{entityId:'C',kind:'character',name:'艾琳',x:15,y:16,locationId:'L',isProtagonist:true}]};
+// 真实 MapViewItem 必带 parentMapId/connectionQuality（导航父子只认它，不认 containerLocationId）。
+const map={mapId:'world',name:'真实城市',kind:'city',containerLocationId:null,parentMapId:null,connectionQuality:'root',metersPerCell:2,points:[{entityId:'L',kind:'location',name:'学校',x:10,y:10},{entityId:'C',kind:'character',name:'艾琳',x:15,y:16,locationId:'L',isProtagonist:true}]};
 const cat=[{entityId:'L',entityKind:'location',name:'学校',mapId:'world'},{entityId:'C',entityKind:'character',name:'艾琳',mapId:'world',locationId:'L',summary:'这是人物描述'}];
 
 test('界面更新同一个快照对象不会清空地图；坏快照保留可用画面',()=>{
@@ -21,12 +22,12 @@ test('界面更新同一个快照对象不会清空地图；坏快照保留可�
  assert.throws(()=>context.updateSnapshot({ROOT:{id:'bad'}}),/ATLAS_SNAPSHOT_INVALID/);assert.equal(D.ROOT.id,'world');
 });
 test('人物的实际子图点位优先于目录粗地图，地图计数和右栏对应画布',()=>{
- const d=projectReferenceData({mapView:view([{...map,points:map.points.filter(p=>p.kind==='location')},{mapId:'inside',name:'学校室内',kind:'site',containerLocationId:'L',points:[{entityId:'C',kind:'character',name:'艾琳',mapId:'inside',locationId:'L',x:5,y:5}]}]),catalogView:view(cat),viewMode:'author'});
+ const d=projectReferenceData({mapView:view([{...map,points:map.points.filter(p=>p.kind==='location')},{mapId:'inside',name:'学校室内',kind:'site',containerLocationId:'L',parentMapId:'world',connectionQuality:'contained',points:[{entityId:'C',kind:'character',name:'艾琳',mapId:'inside',locationId:'L',x:5,y:5}]}]),catalogView:view(cat),viewMode:'author'});
  assert.equal(d.CAST[0].mapNodeId,'inside');assert.equal(d.ROOT.children[0].marks[0].id,'C');
 });
 
 test('容器自己的房间轮廓可序列化；父地图入口只存子图 ID，避免环形引用',()=>{
- const child={mapId:'inside',name:'学校室内',kind:'interior',containerLocationId:'L',containerLocationKind:'room',points:[]};
+ const child={mapId:'inside',name:'学校室内',kind:'interior',containerLocationId:'L',containerLocationKind:'room',parentMapId:'world',connectionQuality:'contained',points:[]};
  const scene={layout:{kind:'floor',bounds:{x:0,y:0,w:12,h:8},corridor:{x:0,y:0,w:0,h:0},rooms:[{id:'L',name:'学校室内',x:2,y:1,w:8,h:6}],actors:[],groups:[],doors:[]}};
  const d=projection({mapView:view([map,child]),sceneView:view([{mapId:'inside',scene}])});
  assert.doesNotThrow(()=>JSON.stringify(d));
@@ -58,7 +59,7 @@ test('原版接入：描写不冒充行动，主角由正式地图确定',()=>{c
 test('原版接入：扁平回执的成功、失败和时间准确',()=>{const d=projection({state:{receipts:[{receiptId:'R',status:'committed',summary:'已提交',recordedAt:'now'},{receiptId:'F',status:'rejected',summary:'失败'}]}});assert.equal(d.RECEIPTS[0].id,'R');assert.equal(d.RECEIPTS[0].ok,true);assert.equal(d.RECEIPTS[1].ok,false);assert.equal(d.RECEIPTS[0].t,'now');});
 test('原版接入：人物在途不标成在场，手持物品来自真实 DTO',()=>{const d=referenceEntity({kind:'character',character:{id:'C',name:'艾琳',action_tendency:'前往学校',thought:'私密想法'},position:{kind:'in_transit'},heldItems:[{id:'I',name:'剑'}]});assert.equal(d.state,'away');assert.equal(d.doing,'前往学校');assert.deepEqual(d.carry,['剑']);});
 test('原版接入：POV 未知位置不从目录恢复私密位置',()=>{const d=referenceEntity({kind:'character',character:{id:'C',name:'艾琳'},position:null},{locationId:'secret'});assert.equal(d.locationId,null);assert.equal(d.state,'unknown');assert.equal(d.mind,'尚无后台想法记录');});
-test('原版接入：无坐标地点仍可通过目录关联真实子图',()=>{const d=projection({mapView:view([{...map,points:[]},{mapId:'room-map',name:'教室图',kind:'room',containerLocationId:'L',points:[]}])});assert.equal(d.ROOT.id,'world');assert.equal(d.ROOT.children[0].id,'room-map');assert.deepEqual(d.LOCATIONS[0].childMapIds,['room-map']);});
+test('原版接入：无坐标地点仍可通过目录关联真实子图',()=>{const d=projection({mapView:view([{...map,points:[]},{mapId:'room-map',name:'教室图',kind:'room',containerLocationId:'L',parentMapId:'world',connectionQuality:'contained',points:[]}])});assert.equal(d.ROOT.id,'world');assert.equal(d.ROOT.children[0].id,'room-map');assert.deepEqual(d.LOCATIONS[0].childMapIds,['room-map']);});
 test('原版接入：河道、多边形和城墙直接接收空间参数',()=>{const g=referenceGeometry(map,{units:'meters',layout:{kind:'city',bounds:{x:0,y:0,w:100,h:80},river:{cx:50,amplitude:5,width:8,height:80},districts:[{id:'D',name:'学院区',polygon:[[0,0],[40,0],[40,30],[0,30]]}],wall:[[0,0],[100,0],[100,80]],roads:[]}});assert.equal(g.kind,'city');assert.equal(g.geo.districts.length,1);assert.equal(g.geo.river.length,41);assert.equal(g.geo.wallPoints.length,3);assert.ok(Math.abs(g.geo.riverWidth/g.transform.scale-8)<1e-8);});
 test('原版接入：楼层房间、门、家具保留真实位置与大小',()=>{const g=referenceGeometry(map,{units:'meters',layout:{kind:'floor',bounds:{x:0,y:0,w:20,h:15},corridor:{x:0,y:6,w:20,h:3},rooms:[{id:'L',name:'教室',x:1,y:1,w:8,h:4}],doors:[{x:5,y:6,width:1}],groups:[{id:'G',bodies:[{type:'shelf',x:2,y:2,w:3,h:1},{type:'bench',x:6,y:2,w:1,h:2}]}]}});assert.equal(g.kind,'floor');assert.equal(g.geo.rooms[0].id,'L');assert.equal(g.geo.furn[0].t,'shelf');assert.equal(g.geo.furn[1].t,'table');assert.ok(Math.abs((g.geo.furn[1].r[3]-g.geo.furn[1].r[1])/g.transform.scale-2)<1e-8);assert.equal(g.marks[0].id,'L');assert.ok(Math.abs(g.geo.rooms[0].w/g.transform.scale-8)<1e-8);});
 test('原版预设：默认使用正式 SQL 分段，保留启用和保护字段',()=>{const d=referencePresetDocument(settingsViewV2(createDefaultSettingsV2()));assert.ok(d.promptPresets[0].segments.length>1);assert.ok(d.promptPresets[0].segments.every(s=>s.content.length<=8000));});

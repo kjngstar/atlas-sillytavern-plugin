@@ -82,9 +82,15 @@ const presetUI=window.AtlasPresetUI.create({root,store:presets,esc,toast,diagnos
 function formatDistance(m){if(m>=1000)return `${+(m/1000).toFixed(2)} km`;return `${+m.toFixed(m<1?2:1)} m`;}
 function frameChrome(st){
  if(!st.node)return;
- const scale=ui.fixedScale(st.node.metric?st.cam.s:st.cam.s*(st.node.transform?.scale||1),st.node.metric),bar=$('.sc-line i'),label=scale.label;
+ // M6-07②：比例尺的尺度依据由地图层给出（真实相机尺度 + 这个尺度可不可信）；
+ // 74px 线长与换算公式只在 ui-model.fixedScale 里写一次 —— 这里不重复实现。
+ const q=typeof map.scaleQuality==='function'?map.scaleQuality():null;
+ const pxPerUnit=q&&Number.isFinite(q.cssPixelsPerUnit)?q.cssPixelsPerUnit:(st.node.metric?st.cam.s:st.cam.s*(st.node.transform?.scale||1));
+ const scale=ui.fixedScale(pxPerUnit,q?q.metersPerUnit:st.node.metric,{estimated:!!q&&q.estimated}),bar=$('.sc-line i'),label=scale.label;
  if($('#scaleLabel').textContent!==label)$('#scaleLabel').textContent=label;
- $('#scaleLabel').dataset.distance=scale.distance===null?'':String(scale.distance);bar.dataset.width=String(scale.width);
+ $('#scaleLabel').dataset.distance=scale.distance===null?'':String(scale.distance);
+ $('#scaleLabel').dataset.estimated=scale.estimated?'1':'';
+ bar.dataset.width=String(scale.width);
  $('#mmZoom').textContent=Math.round(st.cam.s/map.fitScale()*100)+'%';
  $('#coordLabel').textContent=`X ${st.cam.x.toFixed(1)} · Y ${st.cam.y.toFixed(1)}`;
 }

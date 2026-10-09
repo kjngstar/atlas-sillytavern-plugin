@@ -43,7 +43,7 @@ export function projectMapView({view,mapId,scope}={}){
       // 审查必修2：路线可见性依据——端点引用必须随 DTO 下发，POV 过滤据此执行。
       ...(typeof r.fromLocationId==='string'?{fromLocationId:r.fromLocationId}:{}),...(typeof r.toLocationId==='string'?{toLocationId:r.toLocationId}:{}),...(r.hidden===true?{hidden:true}:{})});
   }
-  const scene={kind:SCENE_KIND,version:SCENE_VERSION,generator:'sql-view-adapter/1',mapId,branchId:scope.branchId,sourceRevision:scope.revision,units:mpp?'meters':'cells',metersPerCell:mpp,metricQuality:raw.scaleQuality??'uncalibrated',layout:{id:mapId,name:raw.name,kind:'overview',bounds,pins,shapes:pins.filter(p=>p.polygon).map(p=>({id:p.id,polygon:p.polygon,name:p.name})),routes}};
+  const scene={kind:SCENE_KIND,version:SCENE_VERSION,generator:'sql-view-adapter/1',mapId,branchId:scope.branchId,sourceRevision:scope.revision,units:mpp?'meters':'cells',metersPerCell:mpp,metricQuality:raw.scaleQuality??'uncalibrated',layout:{id:mapId,name:raw.name,kind:'overview',bounds,surface:typeof raw.surface==='string'?raw.surface:'mixed',pins,shapes:pins.filter(p=>p.polygon).map(p=>({id:p.id,polygon:p.polygon,name:p.name})),routes,features:[]}};
   return {ok:true,status:'ready',scene,coarseList:(raw.coarseList??[]).filter(p=>scope.viewMode==='author'||p.hidden!==true).map(clone),issues};
 }
 /** Display-only filter. The host must also filter SQL responses before crossing a UI boundary. */
@@ -54,7 +54,7 @@ export function filterSceneForView(scene,{scope,visibleLocations=[],visibleChara
   if(!author){
     // Never pass internal diagnostics, input constraints or unknown extension fields to POV.
     const top=['kind','version','generator','mapId','branchId','sourceRevision','units','metersPerCell','metricQuality'];
-    const keys={floor:['id','name','kind','bounds','corridor','rooms','groups','bodies','doors','windows','lamps','doorSwings','actors','items','path'],city:['id','name','kind','bounds','wall','origin','river','riverPolygon','districts','roads','segments','gates','buildings','dock'],overview:['id','name','kind','bounds','pins','shapes','routes']};
+    const keys={floor:['id','name','kind','bounds','corridor','rooms','groups','bodies','doors','windows','lamps','doorSwings','actors','items','path'],city:['id','name','kind','bounds','wall','origin','river','riverPolygon','districts','roads','segments','gates','buildings','dock'],overview:['id','name','kind','bounds','surface','pins','shapes','routes','features']};
     const saved=d.layout;d=Object.fromEntries(top.filter(k=>d[k]!==undefined).map(k=>[k,d[k]]));d.layout=Object.fromEntries((keys[saved.kind]??[]).filter(k=>saved[k]!==undefined).map(k=>[k,saved[k]]));
   }
   const s=d.layout;
@@ -69,7 +69,7 @@ export function filterSceneForView(scene,{scope,visibleLocations=[],visibleChara
     s.buildings=s.buildings.filter(b=>districts.has(b.districtId)&&(b.decorative||allowed(b.id,'location'))).map(name);
     if(!author){s.roads=s.roads.filter(r=>r.id==='avenue'||[...districts].some(id=>r.id==='road:'+id));const roads=new Set(s.roads.map(r=>r.id));s.segments=s.segments.filter(r=>roads.has(r.roadId));}
   }else{
-    s.pins=s.pins.filter(p=>allowed(p.id,p.type)).map(name);s.shapes=(s.shapes??[]).filter(p=>allowed(p.id,'location'));
+    s.pins=s.pins.filter(p=>allowed(p.id,p.type)).map(name);s.shapes=(s.shapes??[]).filter(p=>allowed(p.id,'location')).map(name);
     // 审查必修2：overview 路线过滤——隐藏路线不下发 POV；路线必须具备端点引用作可见性依据，
     // 且全部端点都必须在当前可见集合内（任一端点隐藏即视为隐藏路线，不得泄露其 ID 与路径）。
     s.routes=(s.routes??[]).filter(r=>{
@@ -79,6 +79,9 @@ export function filterSceneForView(scene,{scope,visibleLocations=[],visibleChara
       if(!endpoints.length)return false;
       return endpoints.every(id=>L.has(id));
     });
+    // M4-19：挂在不透明 zone 上的装饰连同其 ID/几何一起剔除；全图公开材质（无 zoneId）可以保留。
+    const visibleZones=new Set(s.shapes.map(x=>x.id));
+    s.features=(s.features??[]).filter(f=>author||!f.zoneId||visibleZones.has(f.zoneId));
   }
   if(!author)d.layout=stripLayoutForPov(s);
   return {ok:true,scene:d,issues:[]};
@@ -114,9 +117,12 @@ function stripLayoutForPov(s){
       buildings:p=>pick(p,'id','name','districtId','x','y','w','h','decorative'),
     },
     overview:{
+      surface:p=>p,
       pins:p=>({...pick(p,'id','entityId','name','type','mapId','x','y','quality','locationId','radius'),...(Array.isArray(p.polygon)?{polygon:pickPoints(p.polygon)}:{})}),
       shapes:p=>({...pick(p,'id','name'),...(Array.isArray(p.polygon)?{polygon:pickPoints(p.polygon)}:{})}),
       routes:p=>({...pick(p,'id','kind','mapId','quality','dashed','progress','fromLocationId','toLocationId'),...(Array.isArray(p.path)?{path:pickPoints(p.path)}:{})}),
+      // 装饰只有视觉字段；type/zoneId/density 之外的一切（structureKey/placement/内部标记）一律不下发。
+      features:p=>({...pick(p,'id','type','zoneId','density','decorative','quality','width','widthClass','fromSector','toSector'),...(Array.isArray(p.path)?{path:pickPoints(p.path)}:{}),...(Array.isArray(p.polygon)?{polygon:pickPoints(p.polygon)}:{})}),
     },
   }[s.kind]??{};
   const out={};
@@ -127,6 +133,7 @@ function stripLayoutForPov(s){
     if(!rule)continue;
     if(Array.isArray(value))out[key]=value.map(rule).filter(Boolean);
     else if(plain(value))out[key]=rule(value);
+    else if(typeof value==='string'||typeof value==='number'||typeof value==='boolean')out[key]=value;
   }
   return out;
 }
@@ -137,7 +144,8 @@ export function buildMapTree(mapItems,locationRows){
   const issues=[];for(const n of nodes){const seen=new Set([n.mapId]);let next=n.parentMapId;while(next){if(seen.has(next)){issues.push(diagnostic('MAP_PARENT_CYCLE','$.nodes','地图父链形成循环',{entityId:n.mapId}));n.parentMapId=null;break;}seen.add(next);next=nodes.find(v=>v.mapId===next)?.parentMapId??null;}}
   return {nodes,childMapsByLocation:Object.fromEntries(byContainer),issues};
 }
-export function publicMapFrame(frame){const out=clone(frame??{});delete out.atlasScene;delete out.atlasLayoutRequest;return out;}
+/** 送往 UI/iframe 前只保留可公开的 frame：场景、待生成 spec、世界填充进度都是内部字段。 */
+export function publicMapFrame(frame){const out=clone(frame??{});delete out.atlasScene;delete out.atlasLayoutRequest;delete out.atlasWorldFill;return out;}
 /** Reconcile saved visual anchors with the same-revision SQL position projection. */
 export function hydrateScene(scene,projection){
   if(!projection?.ok||!projection.scene||scene.mapId!==projection.scene.mapId||scene.branchId!==projection.scene.branchId)return failure('PROJECTION_SCOPE_MISMATCH','$','几何文档与 SQL 现状不属于同一地图');

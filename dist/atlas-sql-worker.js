@@ -2384,7 +2384,7 @@
     "channel.upsert": "owner_ref, kind, name",
     "map.estimate": "ref + 尺寸或距离依据",
     "route.propose": "from_ref, to_ref",
-    "map.layout.request": "ref + kind(floor/city) + spec（只写本次变化的约束：floor 用 rooms/contents/actors/items，city 用 districts/buildings，每条都要 id）；省略的键保持原样，删除只能写 spec.deletes；不要输出完整 scene、几何坐标、seed 或比例尺",
+    "map.layout.request": "ref + kind(overview/city/floor，以程序给定值为准) + spec（只写本次变化的约束：overview 用 surface/zones/links/features，city 用 districts/buildings/enclosure/riverWidth，floor 用 rooms/contents/actors/items，每条都要 id）；省略的键保持原样，删除只能写 spec.deletes；不要输出完整 scene、几何坐标、seed 或比例尺",
     noop: "无修改"
   };
   var PHASE_TASK = {
@@ -2399,12 +2399,15 @@
     ],
     geography: [
       "任务：处理这一张地图的层级、范围标定或路线估计。",
+      "每张图的角色由程序给定，不得改写：overview（根图/地区/自然）填 zones/links/features/surface；city（城市/街区）填 districts/buildings/enclosure；floor（建筑/楼层/房间/载具）填 rooms/contents/actors/items。",
+      "三种包含关系要分开：地点在容器内部（contained）→ 归入容器子图；只是相邻（adjacent）→ 用 routes 表达邻接；移动载具停靠（anchor）→ 用 anchor_ref。不要把载具当成固定建筑，也不要给相邻地区编造包含关系。",
       "城内地点归入城市子图，周边地点通过实际邻接/路线表达。移动载具不当作固定建筑。",
       "先根据给定资料判断地图大致现实尺寸；信息不足时给合理估计范围并说明 why，不能声称精确测量。",
       "不要利用界面标签排版坐标推出真实距离。用户已锁定的标定不修改。",
       "布局只提交这一张图上**发生变化**的约束：已有房间、家具、人物位置、物品不必每轮重写，未提及的一律保持原样，删除必须写 spec.deletes。",
       "不要输出完整 scene、几何坐标、seed 或比例尺；这些由程序生成并保管，模型给的是约束不是成品。",
-      "没有河流/水域资料时不要选 city 模板的水系结构；地块与建筑用程序给定的 ID 引用，不要凭名字猜 ID。"
+      "没有河流/水域资料时不要选 city 模板的水系结构；没有依据就不给 riverWidth，也不给每张图强塞城墙或树林。新城市默认 enclosure=open。地块与建筑用程序给定的 ID 引用，不要凭名字猜 ID。",
+      "布局阶段不新建 SQL 实体：可交互地点必须已经在目录里。但建设阶段允许新增地点，两者不冲突——不要因为布局不新建实体就停止补全世界。"
     ],
     decision: [
       "任务：为下面列出的角色判断注意、相信和下一步意图。",
@@ -3895,42 +3898,2572 @@ END`;
     };
   }
 
+  // src/atlas-hash.ts
+  var nodeCrypto;
+  function getNodeCrypto() {
+    if (nodeCrypto !== void 0) return nodeCrypto;
+    try {
+      const proc = globalThis.process;
+      if (proc && typeof proc.getBuiltinModule === "function") {
+        const mod = proc.getBuiltinModule("node:crypto");
+        nodeCrypto = mod && typeof mod.createHash === "function" ? mod : null;
+        return nodeCrypto;
+      }
+    } catch {
+    }
+    nodeCrypto = null;
+    return nodeCrypto;
+  }
+  function pureHash(text2) {
+    let h1 = 2166136261;
+    let h2 = 16777619;
+    let h3 = 2654435769;
+    let h4 = 2246822507;
+    for (let i = 0; i < text2.length; i += 1) {
+      const c = text2.charCodeAt(i);
+      h1 = Math.imul(h1 ^ c, 16777619) >>> 0;
+      h2 = (Math.imul(h2 ^ c, 2246822507) >>> 0) + c;
+      h3 = Math.imul(h3 ^ c, 3266489909) >>> 0;
+      h4 = (h4 ^ c + i) >>> 0;
+      h4 = Math.imul(h4, 668265263) >>> 0;
+    }
+    const hex = (n) => (n >>> 0).toString(16).padStart(8, "0");
+    return `${hex(h1)}${hex(h2)}${hex(h3)}${hex(h4)}`;
+  }
+  function stableHexHash(text2) {
+    const crypto2 = getNodeCrypto();
+    if (crypto2) return crypto2.createHash("sha256").update(text2).digest("hex");
+    return pureHash(text2);
+  }
+
+  // src/atlas-sql-task-refs.ts
+  var REF_TABLES = [
+    { table: "locations", prefix: "L", kind: "location" },
+    { table: "characters", prefix: "C", kind: "character" },
+    { table: "items", prefix: "I", kind: "item" },
+    { table: "factions", prefix: "F", kind: "faction" },
+    { table: "maps", prefix: "M", kind: "map" },
+    { table: "actions", prefix: "A", kind: "action" },
+    { table: "information", prefix: "N", kind: "information" },
+    { table: "routes", prefix: "R", kind: "route" },
+    { table: "events", prefix: "E", kind: "event" },
+    { table: "journeys", prefix: "J", kind: "journey" },
+    { table: "channels", prefix: "H", kind: "channel" },
+    { table: "knowledge", prefix: "K", kind: "knowledge" }
+  ];
+  var SELECT_LIMIT = 1e3;
+  var rowId = (row2) => {
+    if (!row2) return null;
+    const id = row2.id;
+    return typeof id === "string" && id ? id : id === null || id === void 0 ? null : String(id);
+  };
+  var rowRev = (row2) => typeof row2.row_rev === "number" ? row2.row_rev : null;
+  var byId = (left, right) => left < right ? -1 : left > right ? 1 : 0;
+  function addAll(target, values) {
+    for (const value of values) if (value !== null && value !== "") target.add(value);
+  }
+  function asStringArray(value) {
+    return Array.isArray(value) ? value.filter((item) => typeof item === "string" && item !== "") : [];
+  }
+  function collectTaskRefs(tables, input) {
+    const branchId = String(input.branchId ?? "");
+    const issues = [];
+    const maxEntries = Number.isInteger(input.maxEntries) && input.maxEntries > 0 ? input.maxEntries : ATLAS_RUNTIME_LIMITS.refCatalogMaxEntries;
+    const neededMaps = /* @__PURE__ */ new Set();
+    const neededLocations = /* @__PURE__ */ new Set();
+    const extraMaps = /* @__PURE__ */ new Set();
+    const extraLocations = /* @__PURE__ */ new Set();
+    const extraCharacters = /* @__PURE__ */ new Set();
+    const extraItems = /* @__PURE__ */ new Set();
+    const extraRoutes = /* @__PURE__ */ new Set();
+    addAll(neededMaps, asStringArray(input.focusMapIds));
+    addAll(neededLocations, asStringArray(input.focusLocationIds));
+    const readOne = (table, id) => tables.selectOne(table, branchId, id);
+    const readWhere = (table, where) => tables.selectWhere(table, { branch_id: branchId, ...where }, SELECT_LIMIT);
+    const ancestorVisited = /* @__PURE__ */ new Set();
+    const pendingAncestors = [...neededLocations];
+    while (pendingAncestors.length > 0) {
+      const current = pendingAncestors.pop();
+      if (ancestorVisited.has(current)) continue;
+      ancestorVisited.add(current);
+      const row2 = readOne("locations", current);
+      if (!row2) continue;
+      const parent = row2.parent_location_id === null || row2.parent_location_id === void 0 ? null : String(row2.parent_location_id);
+      if (parent && parent !== current) {
+        neededLocations.add(parent);
+        pendingAncestors.push(parent);
+      }
+      if (input.includeAncestors && row2.map_id !== null && row2.map_id !== void 0) neededMaps.add(String(row2.map_id));
+    }
+    for (const id of [...neededLocations]) {
+      const row2 = readOne("locations", id);
+      if (!row2) continue;
+      if (row2.map_id !== null && row2.map_id !== void 0) neededMaps.add(String(row2.map_id));
+      if (input.includeAncestors && row2.parent_location_id !== null && row2.parent_location_id !== void 0) {
+        neededLocations.add(String(row2.parent_location_id));
+      }
+    }
+    if (input.includeDirectChildren) {
+      const parents = [...neededLocations].sort(byId);
+      if (parents.length > 0) {
+        for (const row2 of readWhere("locations", { parent_location_id: parents })) {
+          addAll(extraLocations, [rowId(row2)]);
+        }
+      }
+    }
+    const selectedLocations = () => [.../* @__PURE__ */ new Set([...neededLocations, ...extraLocations])].sort(byId);
+    const containerHosts = selectedLocations();
+    if (containerHosts.length > 0) {
+      for (const row2 of readWhere("maps", { container_location_id: containerHosts })) addAll(extraMaps, [rowId(row2)]);
+    }
+    for (const id of containerHosts) {
+      const row2 = readOne("locations", id);
+      const mapId = row2?.map_id;
+      if (mapId !== null && mapId !== void 0) neededMaps.add(String(mapId));
+    }
+    if (input.includeRoutes && containerHosts.length > 0) {
+      const seenRoutes = /* @__PURE__ */ new Set();
+      for (const column of ["from_location_id", "to_location_id"]) {
+        for (const row2 of readWhere("routes", { [column]: containerHosts })) {
+          const id = rowId(row2);
+          if (id === null || seenRoutes.has(id)) continue;
+          seenRoutes.add(id);
+          extraRoutes.add(id);
+          if (row2.status !== void 0 && String(row2.status) !== "active") continue;
+          addAll(extraLocations, [
+            row2.from_location_id === null || row2.from_location_id === void 0 ? null : String(row2.from_location_id),
+            row2.to_location_id === null || row2.to_location_id === void 0 ? null : String(row2.to_location_id)
+          ]);
+          if (row2.map_id !== null && row2.map_id !== void 0) extraMaps.add(String(row2.map_id));
+        }
+      }
+    }
+    if (input.includeOccupants) {
+      const hosts = selectedLocations();
+      const selectedMaps = [.../* @__PURE__ */ new Set([...neededMaps, ...extraMaps])].sort(byId);
+      for (const table of ["characters", "items"]) {
+        const sink = table === "characters" ? extraCharacters : extraItems;
+        if (hosts.length > 0) for (const row2 of readWhere(table, { location_id: hosts })) addAll(sink, [rowId(row2)]);
+        if (selectedMaps.length > 0) for (const row2 of readWhere(table, { map_id: selectedMaps })) addAll(sink, [rowId(row2)]);
+        for (const id of [...sink]) {
+          const row2 = readOne(table, id);
+          if (!row2) continue;
+          if (row2.location_id !== null && row2.location_id !== void 0) extraLocations.add(String(row2.location_id));
+          if (row2.map_id !== null && row2.map_id !== void 0) extraMaps.add(String(row2.map_id));
+        }
+      }
+    }
+    for (const id of selectedLocations()) {
+      const row2 = readOne("locations", id);
+      const mapId = row2?.map_id;
+      if (mapId !== null && mapId !== void 0) neededMaps.add(String(mapId));
+    }
+    const buckets = {
+      locations: { needed: neededLocations, extra: extraLocations },
+      maps: { needed: neededMaps, extra: extraMaps },
+      characters: { needed: /* @__PURE__ */ new Set(), extra: extraCharacters },
+      items: { needed: /* @__PURE__ */ new Set(), extra: extraItems },
+      routes: { needed: /* @__PURE__ */ new Set(), extra: extraRoutes }
+    };
+    const neededByTable = /* @__PURE__ */ new Map();
+    let neededTotal = 0;
+    for (const { table } of REF_TABLES) {
+      const bucket = buckets[table];
+      const ids2 = bucket ? [...bucket.needed].sort(byId) : [];
+      neededByTable.set(table, ids2);
+      neededTotal += ids2.length;
+    }
+    const remainingIds = [];
+    const extraByTable = /* @__PURE__ */ new Map();
+    let budget = Math.max(0, maxEntries - neededTotal);
+    let truncated = 0;
+    for (const { table } of REF_TABLES) {
+      const bucket = buckets[table];
+      if (!bucket) continue;
+      const extras = [...bucket.extra].filter((id) => !bucket.needed.has(id)).sort(byId);
+      const keptExtras = [];
+      for (const id of extras) {
+        if (budget <= 0) {
+          remainingIds.push(id);
+          truncated += 1;
+          continue;
+        }
+        keptExtras.push(id);
+        budget -= 1;
+      }
+      extraByTable.set(table, keptExtras);
+    }
+    const rows4 = {};
+    const knownRefs = [];
+    for (const { table, prefix, kind } of REF_TABLES) {
+      const ordered4 = [...neededByTable.get(table) ?? []];
+      for (const id of extraByTable.get(table) ?? []) if (!ordered4.includes(id)) ordered4.push(id);
+      const tableRows = [];
+      let ordinal = 0;
+      for (const id of ordered4) {
+        const row2 = readOne(table, id);
+        if (!row2) continue;
+        ordinal += 1;
+        tableRows.push(row2);
+        knownRefs.push({ alias: `${prefix}${ordinal}`, id, kind, rowRev: rowRev(row2) });
+      }
+      rows4[table] = tableRows;
+    }
+    if (neededTotal > maxEntries) {
+      issues.push({
+        code: "REF_CATALOGUE_OVERSIZE",
+        path: "$.catalogue",
+        message: `必要引用 ${neededTotal} 条已超过目录上限 ${maxEntries}：必要项一律保留（目标与祖先不能丢），本次不再纳入任何非必要引用，请在调用方分批`,
+        severity: "warning",
+        retryable: true
+      });
+    } else if (truncated > 0) {
+      issues.push({
+        code: "REF_CATALOGUE_TRUNCATED",
+        path: "$.catalogue",
+        message: `${remainingIds.length} 个非必要引用超出目录上限 ${maxEntries}（${remainingIds.slice(0, 12).join(" / ")}${remainingIds.length > 12 ? " …" : ""}）：目标与祖先已全部保留，超出部分列入 remainingIds，需分批处理`,
+        severity: "warning",
+        retryable: true
+      });
+    }
+    const catalogueHash = stableHexHash(
+      knownRefs.map((ref) => `${ref.kind}\0${ref.id}\0${ref.rowRev ?? ""}`).join("")
+    );
+    return { knownRefs, rows: rows4, remainingIds, issues, catalogueHash };
+  }
+
+  // vendor/atlas-spatial/contracts.mjs
+  var KIT_VERSION = "atlas-spatial-kit/1";
+  var SCENE_KIND = "atlas-scene";
+  var SCENE_VERSION = 1;
+  var FRAME_SCENE_KEY = "atlasScene";
+  var LIMITS = Object.freeze({ inputBytes: 65536, sceneBytes: 524288, rooms: 24, contents: 128, actors: 128, items: 256, districts: 16, buildings: 64, blocksPerDistrict: 24, floorSide: 100, roomSide: 40, citySide: 2e4, navigationCells: 18e4, markers: 512, overlays: 256, pathPoints: 2048, zones: 64, features: 128, links: 128, watercourseSegments: 24 });
+  var OVERVIEW_FEATURE_TYPES = Object.freeze(["forest_texture", "ridge", "shore", "building_cluster", "road_texture", "ruins_scatter", "watercourse"]);
+  var OVERVIEW_SURFACES = Object.freeze(["mixed", "urban", "forest", "mountain", "water", "indoor", "void"]);
+  var OVERVIEW_ZONE_ROLES = Object.freeze(["city", "settlement", "forest", "water", "mountain", "ruins", "district", "campus", "land", "other"]);
+  var OVERVIEW_ZONE_SIZES = Object.freeze(["small", "medium", "large"]);
+  var OVERVIEW_DENSITIES = Object.freeze(["low", "medium", "high"]);
+  var OVERVIEW_SECTORS = Object.freeze(["north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest"]);
+  var OVERVIEW_WIDTH_CLASSES = Object.freeze(["narrow", "medium", "wide"]);
+  var CITY_ENCLOSURES = Object.freeze(["open", "wall"]);
+  var SCENE_QUALITIES = Object.freeze(["estimated", "confirmed"]);
+  var clone = (value) => JSON.parse(JSON.stringify(value));
+  var finite = (value) => typeof value === "number" && Number.isFinite(value);
+  var plain = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+  var bytes = (value) => new TextEncoder().encode(typeof value === "string" ? value : JSON.stringify(value)).length;
+  function stable(value) {
+    if (Array.isArray(value)) return "[" + value.map(stable).join(",") + "]";
+    if (plain(value)) return "{" + Object.keys(value).sort().filter((k) => value[k] !== void 0).map((k) => JSON.stringify(k) + ":" + stable(value[k])).join(",") + "}";
+    return JSON.stringify(value);
+  }
+  function diagnostic(code, path, message, { severity = "error", entityId = null, retryable = false } = {}) {
+    return { code, path, message, severity, entityId, retryable, module: "atlas-spatial-kit" };
+  }
+  function failure(code, path, message, extra = {}) {
+    return { ok: false, status: "failed", scene: null, issues: [diagnostic(code, path, message)], ...extra };
+  }
+  function normalizeScope(value) {
+    if (!plain(value) || typeof value.chatId !== "string" || !value.chatId || typeof value.branchId !== "string" || !value.branchId || !Number.isInteger(value.revision) || value.revision < 0 || !["pov", "author"].includes(value.viewMode)) throw new Error("SCOPE_INVALID");
+    return { chatId: value.chatId, branchId: value.branchId, revision: value.revision, viewMode: value.viewMode };
+  }
+  function scopeKey(value) {
+    return stable(normalizeScope(value));
+  }
+  function sameScope(a, b) {
+    try {
+      return scopeKey(a) === scopeKey(b);
+    } catch {
+      return false;
+    }
+  }
+  function parseWholeArguments(value) {
+    if (plain(value)) {
+      if (bytes(value) > LIMITS.inputBytes) throw new Error("INPUT_TOO_LARGE");
+      return clone(value);
+    }
+    if (typeof value !== "string") throw new Error("INPUT_INVALID");
+    if (bytes(value) > LIMITS.inputBytes) throw new Error("INPUT_TOO_LARGE");
+    const parsed = JSON.parse(value);
+    if (!plain(parsed)) throw new Error("INPUT_INVALID");
+    return parsed;
+  }
+  function checkSceneDocument(doc) {
+    const issues = [];
+    if (!plain(doc) || doc.kind !== SCENE_KIND || doc.version !== SCENE_VERSION) return [diagnostic("SCENE_VERSION_UNSUPPORTED", "$", "不支持的场景文档版本")];
+    if (typeof doc.mapId !== "string" || !doc.mapId || typeof doc.branchId !== "string" || !doc.branchId) issues.push(diagnostic("SCENE_ID_INVALID", "$.mapId", "需要地图与分支标识"));
+    if (!["meters", "cells"].includes(doc.units) || !plain(doc.layout) || !["floor", "city", "overview"].includes(doc.layout.kind)) issues.push(diagnostic("SCENE_LAYOUT_INVALID", "$.layout", "需要已生成的布局与明确单位"));
+    const b = doc.layout?.bounds;
+    if (!b || ![b.x, b.y, b.w, b.h].every(finite) || b.w <= 0 || b.h <= 0) issues.push(diagnostic("SCENE_BOUNDS_INVALID", "$.layout.bounds", "地图范围必须为有限正尺寸"));
+    const shape = doc.layout;
+    if (shape?.kind === "floor" && (!plain(shape.corridor) || !["rooms", "groups", "bodies", "doors", "windows", "lamps", "actors", "items"].every((k) => Array.isArray(shape[k])))) issues.push(diagnostic("SCENE_LAYOUT_INCOMPLETE", "$.layout", "室内场景缺少绘制所需的数组"));
+    if (shape?.kind === "city" && (!(plain(shape.river) || shape.river === null) || !(plain(shape.dock) || shape.dock === null) || !["wall", "riverPolygon", "districts", "roads", "segments", "gates", "buildings"].every((k) => Array.isArray(shape[k])))) issues.push(diagnostic("SCENE_LAYOUT_INCOMPLETE", "$.layout", "城市场景缺少绘制所需的数组"));
+    if (shape?.kind === "overview" && !["pins", "shapes", "routes", "features"].every((k) => Array.isArray(shape[k]))) issues.push(diagnostic("SCENE_LAYOUT_INCOMPLETE", "$.layout", "概览场景缺少绘制所需的数组"));
+    const rect = (p) => plain(p) && [p.x, p.y, p.w, p.h].every(finite) && p.w > 0 && p.h > 0;
+    const point = (p) => plain(p) && finite(p.x) && finite(p.y);
+    const polygon2 = (p) => Array.isArray(p) && p.length >= 3 && p.every(point);
+    const eps = b && finite(b.w) && finite(b.h) ? 1e-6 * Math.max(1, Math.abs(b.w), Math.abs(b.h)) : 1e-6;
+    const inside = (p) => point(p) && p.x >= b.x - eps && p.x <= b.x + b.w + eps && p.y >= b.y - eps && p.y <= b.y + b.h + eps;
+    const bad = (value, validate, path) => {
+      if (!validate(value)) issues.push(diagnostic("SCENE_GEOMETRY_INVALID", path, "保存的几何字段不可绘制，使用 SQL 概览"));
+    };
+    const collection2 = (key, validate, max = 4096) => {
+      if (!Array.isArray(shape?.[key])) return;
+      if (shape[key].length > max) {
+        issues.push(diagnostic("SCENE_COLLECTION_LIMIT", "$.layout." + key, "保存的几何集合超出预算"));
+        return;
+      }
+      for (let i = 0; i < shape[key].length; i++) bad(shape[key][i], validate, "$.layout." + key + "[" + i + "]");
+    };
+    if (shape?.kind === "floor") {
+      bad(shape.corridor, (p) => rect(p) || plain(p) && [p.x, p.y, p.w, p.h].every(finite) && p.w === 0 && p.h === 0 && shape.rooms?.length === 1, "$.layout.corridor");
+      collection2("rooms", (p) => rect(p) && ["north", "south"].includes(p.side), LIMITS.rooms);
+      collection2("groups", (p) => rect(p) && Array.isArray(p.bodies) && p.bodies.every(rect), LIMITS.contents);
+      collection2("bodies", rect);
+      collection2("actors", point, LIMITS.actors);
+      collection2("items", point, LIMITS.items);
+      collection2("doors", (p) => point(p) && finite(p.width) && p.width > 0);
+      collection2("windows", point);
+      collection2("lamps", point);
+    } else if (shape?.kind === "city") {
+      const enclosure = shape.enclosure;
+      if (enclosure !== void 0 && !CITY_ENCLOSURES.includes(enclosure)) issues.push(diagnostic("SCENE_ENUM_INVALID", "$.layout.enclosure", "城市边界策略非法"));
+      if (enclosure === "open") {
+        if (!(Array.isArray(shape.wall) && shape.wall.length === 0)) issues.push(diagnostic("SCENE_GEOMETRY_INVALID", "$.layout.wall", "开放城市不得保留城墙多边形，使用 SQL 概览"));
+        if (!(Array.isArray(shape.gates) && shape.gates.length === 0)) issues.push(diagnostic("SCENE_GEOMETRY_INVALID", "$.layout.gates", "开放城市不得保留城门，使用 SQL 概览"));
+      } else {
+        bad(shape.wall, polygon2, "$.layout.wall");
+      }
+      if (shape.river !== null) {
+        bad(shape.riverPolygon, polygon2, "$.layout.riverPolygon");
+        bad(shape.dock, (p) => point(p) && finite(p.width) && p.width > 0, "$.layout.dock");
+        bad(shape.river, (p) => plain(p) && [p.cx, p.amplitude, p.width, p.height].every(finite) && p.width > 0 && p.height > 0, "$.layout.river");
+      } else if (shape.riverPolygon?.length || shape.dock !== null) issues.push(diagnostic("SCENE_GEOMETRY_INVALID", "$.layout.river", "无河流的城市不能保留水域或码头"));
+      collection2("districts", (p) => plain(p) && polygon2(p.polygon) && point(p.site), LIMITS.districts);
+      collection2("buildings", rect);
+      collection2("gates", point);
+      for (const key of ["roads", "segments"]) collection2(key, (p) => plain(p) && point(p.a) && point(p.b) && finite(p.width) && p.width > 0);
+    } else if (shape?.kind === "overview") {
+      if (shape.surface !== void 0 && !OVERVIEW_SURFACES.includes(shape.surface)) issues.push(diagnostic("SCENE_ENUM_INVALID", "$.layout.surface", "概览表面类型非法"));
+      const feature = (p) => {
+        if (!plain(p) || typeof p.id !== "string" || !p.id || !OVERVIEW_FEATURE_TYPES.includes(p.type)) return false;
+        if (p.density !== void 0 && p.density !== null && !OVERVIEW_DENSITIES.includes(p.density)) return false;
+        if (p.zoneId !== void 0 && p.zoneId !== null && (typeof p.zoneId !== "string" || !p.zoneId)) return false;
+        if (p.decorative !== void 0 && typeof p.decorative !== "boolean") return false;
+        if (p.quality !== void 0 && p.quality !== null && !SCENE_QUALITIES.includes(p.quality)) return false;
+        if (p.fromSector !== void 0 && p.fromSector !== null && !OVERVIEW_SECTORS.includes(p.fromSector)) return false;
+        if (p.toSector !== void 0 && p.toSector !== null && !OVERVIEW_SECTORS.includes(p.toSector)) return false;
+        if (p.widthClass !== void 0 && p.widthClass !== null && !OVERVIEW_WIDTH_CLASSES.includes(p.widthClass)) return false;
+        if (p.type === "watercourse") {
+          if (!Array.isArray(p.path) || p.path.length < LIMITS.watercourseSegments + 1 || !p.path.every(inside)) return false;
+          if (!(finite(p.width) && p.width > 0)) return false;
+          if (p.decorative === true && p.quality !== void 0 && p.quality !== "estimated") return false;
+        }
+        return true;
+      };
+      const shapeRef = (p) => plain(p) && polygon2(p.polygon) && p.polygon.every(inside);
+      const routeRef = (p) => plain(p) && Array.isArray(p.path) && p.path.length >= 2 && p.path.every(inside);
+      collection2("pins", inside, LIMITS.markers);
+      collection2("shapes", shapeRef, LIMITS.zones);
+      collection2("routes", routeRef, LIMITS.links);
+      collection2("features", feature, LIMITS.features);
+      for (let i = 0; i < (Array.isArray(shape.routes) ? shape.routes.length : 0); i++) {
+        const path = shape.routes[i]?.path;
+        if (Array.isArray(path) && path.length > LIMITS.pathPoints) issues.push(diagnostic("SCENE_COLLECTION_LIMIT", "$.layout.routes[" + i + "].path", "路径点数超出预算"));
+      }
+      for (let i = 0; i < (Array.isArray(shape.features) ? shape.features.length : 0); i++) {
+        const path = shape.features[i]?.path;
+        if (Array.isArray(path) && path.length > LIMITS.pathPoints) issues.push(diagnostic("SCENE_COLLECTION_LIMIT", "$.layout.features[" + i + "].path", "水系路径点数超出预算"));
+      }
+      const seen = /* @__PURE__ */ new Map();
+      for (const key of ["shapes", "routes", "features"]) {
+        const list = shape[key];
+        if (!Array.isArray(list)) continue;
+        for (let i = 0; i < list.length; i++) {
+          const id = list[i]?.id;
+          if (typeof id !== "string" || !id) continue;
+          const path = "$.layout." + key + "[" + i + "].id";
+          if (seen.has(id)) issues.push(diagnostic("SCENE_ID_DUPLICATE", path, "概览局部 ID 必须唯一：" + id + " 已在 " + seen.get(id) + " 使用"));
+          else seen.set(id, path);
+        }
+      }
+    }
+    if (doc.units === "meters" && (!finite(doc.metersPerCell) || doc.metersPerCell <= 0)) issues.push(diagnostic("SCENE_METRIC_INVALID", "$.metersPerCell", "米制场景需要每格米数"));
+    if (doc.units === "cells" && doc.metersPerCell !== null && doc.metersPerCell !== void 0 && (!finite(doc.metersPerCell) || doc.metersPerCell <= 0)) issues.push(diagnostic("SCENE_METRIC_INVALID", "$.metersPerCell", "格制场景的米制换算必须是有限正数或未标定空值"));
+    const visited = /* @__PURE__ */ new Set();
+    let invalidNumber = null, invalidCycle = false;
+    function scan(value, path, depth = 0) {
+      if (typeof value === "number" && !finite(value)) invalidNumber ??= path;
+      if (value && typeof value === "object") {
+        if (visited.has(value) || depth > 40) {
+          invalidCycle = true;
+          return;
+        }
+        visited.add(value);
+        for (const [key, child] of Object.entries(value)) scan(child, path + "." + key, depth + 1);
+        visited.delete(value);
+      }
+    }
+    scan(doc, "$");
+    if (invalidNumber) issues.push(diagnostic("SCENE_NUMBER_INVALID", invalidNumber, "场景坐标和尺寸必须是有限数值"));
+    if (invalidCycle) issues.push(diagnostic("SCENE_STRUCTURE_INVALID", "$", "场景不得含循环或过深结构"));
+    try {
+      if (bytes(doc) > LIMITS.sceneBytes) issues.push(diagnostic("SCENE_TOO_LARGE", "$", "场景超过 512 KiB，保留原场景"));
+    } catch {
+      issues.push(diagnostic("SCENE_SERIALIZATION_FAILED", "$", "场景无法序列化"));
+    }
+    return issues;
+  }
+
+  // vendor/atlas-spatial/foundation.mjs
+  var clone2 = (value) => JSON.parse(JSON.stringify(value));
+  var finitePositive = (n) => typeof n === "number" && Number.isFinite(n) && n > 0;
+  var intersects = (a, b) => a.x < b.x + b.w - 1e-8 && a.x + a.w > b.x + 1e-8 && a.y < b.y + b.h - 1e-8 && a.y + a.h > b.y + 1e-8;
+  var contains = (a, b) => b.x >= a.x - 1e-8 && b.y >= a.y - 1e-8 && b.x + b.w <= a.x + a.w + 1e-8 && b.y + b.h <= a.y + a.h + 1e-8;
+  var pointInside = (r, p) => p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
+  var polygon = (r) => [[r.x, r.y], [r.x + r.w, r.y], [r.x + r.w, r.y + r.h], [r.x, r.y + r.h]];
+  var issue = (id, code) => ({ id, code });
+  var ordered = (values) => [...values].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  function validIds(values) {
+    return Array.isArray(values) && values.every((v) => v && typeof v.id === "string" && v.id.length) && new Set(values.map((v) => v.id)).size === values.length;
+  }
+  function floor(spec, previous = null) {
+    const problems = [];
+    const bounds = { x: 0, y: 0, w: spec.width, h: spec.height };
+    if (!finitePositive(spec.width) || !finitePositive(spec.height) || !finitePositive(spec.corridorWidth) || spec.corridorWidth >= spec.height || !validIds(spec.rooms) || spec.rooms.some((r) => !finitePositive(r.w) || !finitePositive(r.h) || !["north", "south"].includes(r.side))) {
+      return { ok: false, issues: [issue(spec.id, "INPUT_INVALID")], kept: previous ? clone2(previous) : null };
+    }
+    const corridor = { id: "corridor", x: 0, y: (bounds.h - spec.corridorWidth) / 2, w: bounds.w, h: spec.corridorWidth };
+    const placed = [], old = new Map((previous?.rooms || []).map((r) => [r.id, r]));
+    const candidate = (r) => ({ ...r, y: r.side === "north" ? corridor.y - r.h : corridor.y + corridor.h });
+    const admissible = (r) => contains({ x: 0.5, y: 0.5, w: bounds.w - 1, h: bounds.h - 1 }, r) && !intersects(r, corridor) && !placed.some((p) => intersects(r, p)) && Math.abs((r.side === "north" ? r.y + r.h : r.y) - (r.side === "north" ? corridor.y : corridor.y + corridor.h)) < 1e-8;
+    const save = (r, x, y, quality) => {
+      const rect = { id: r.id, name: r.name, side: r.side, x, y, w: r.w, h: r.h, quality };
+      placed.push({ ...rect, mapId: spec.id, parentId: spec.parentId, polygon: polygon(rect) });
+    };
+    const specs = ordered(spec.rooms);
+    if (spec.singleRoom && specs.length === 1) {
+      const r = specs[0], x = r.locked?.x ?? (bounds.w - r.w) / 2, y = r.locked?.y ?? (bounds.h - r.h) / 2;
+      if (!contains({ x: 0.5, y: 0.5, w: bounds.w - 1, h: bounds.h - 1 }, { x, y, w: r.w, h: r.h })) return { ok: false, issues: [issue(r.id, "ROOM_NO_SPACE")] };
+      save(r, x, y, r.locked ? "confirmed" : "layout");
+      corridor.x = 0;
+      corridor.y = y + r.h;
+      corridor.w = 0;
+      corridor.h = 0;
+    }
+    for (const r of specs.filter((r2) => r2.locked && !placed.some((p) => p.id === r2.id))) {
+      const rect = { ...r, ...r.locked };
+      if (!Number.isFinite(rect.x) || !Number.isFinite(rect.y) || !admissible(rect)) problems.push(issue(r.id, "LOCK_CONFLICT"));
+      else save(r, rect.x, rect.y, "confirmed");
+    }
+    if (problems.length) return { ok: false, issues: problems, kept: previous ? clone2(previous) : null };
+    for (const r of specs.filter((r2) => !r2.locked && !placed.some((p) => p.id === r2.id))) {
+      const p = old.get(r.id);
+      if (p && p.side === r.side && p.w === r.w && p.h === r.h && admissible(p)) save(r, p.x, p.y, p.quality);
+    }
+    for (const r of specs.filter((r2) => !placed.some((p) => p.id === r2.id))) {
+      let found = null;
+      for (let x = 0.5; x + r.w <= bounds.w - 0.5 + 1e-8; x += 0.5) {
+        const rect = candidate({ ...r, x });
+        if (admissible(rect)) {
+          found = rect;
+          break;
+        }
+      }
+      if (found) save(r, found.x, found.y, "layout");
+      else problems.push(issue(r.id, "ROOM_NO_SPACE"));
+    }
+    if (problems.length) return { ok: false, issues: problems, kept: previous ? clone2(previous) : null };
+    const rooms = ordered(placed), doors = rooms.map((r) => ({ id: "door:" + r.id, roomId: r.id, x: r.x + r.w / 2, y: r.side === "north" ? r.y + r.h : r.y, width: Math.min(1.2, r.w - 0.2) }));
+    const furniture = [], pins = [];
+    const oldFurniture = new Map((previous?.furniture || []).map((f) => [f.id, f]));
+    for (const r of rooms) {
+      const spine = { x: r.x + r.w / 2 - 0.6, y: r.y, w: 1.2, h: r.h };
+      const inner = { x: r.x + 0.35, y: r.y + 0.35, w: r.w - 0.7, h: r.h - 0.7 };
+      const content = ordered(spec.furniture?.filter((f) => f.roomId === r.id) || []);
+      for (const f of content) {
+        if (!finitePositive(f.w) || !finitePositive(f.h)) {
+          problems.push(issue(f.id, "FURNITURE_INVALID"));
+          continue;
+        }
+        const reservedActors = (spec.actors || []).filter((a) => a.roomId === r.id && a.position && pointInside(r, a.position)).map((a) => ({ x: a.position.x - 0.25, y: a.position.y - 0.25, w: 0.5, h: 0.5 }));
+        const free = (q2) => contains(inner, q2) && !intersects(q2, spine) && !reservedActors.some((p) => intersects(q2, p)) && !furniture.some((p) => p.roomId === r.id && intersects(q2, p));
+        const prev = oldFurniture.get(f.id);
+        let q = prev && prev.roomId === r.id && prev.w === f.w && prev.h === f.h && free(prev) ? prev : null;
+        for (let y = inner.y; !q && y + f.h <= inner.y + inner.h + 1e-8; y += 0.5) {
+          for (let x = inner.x; x + f.w <= inner.x + inner.w + 1e-8; x += 0.5) {
+            const test = { x, y, w: f.w, h: f.h };
+            if (free(test)) {
+              q = test;
+              break;
+            }
+          }
+        }
+        if (q) furniture.push({ ...q, id: f.id, roomId: r.id, name: f.name, type: f.type || "table", quality: "layout" });
+        else problems.push(issue(f.id, "FURNITURE_NO_SPACE"));
+      }
+      for (const a of ordered(spec.actors?.filter((a2) => a2.roomId === r.id) || [])) {
+        if (a.position) {
+          if (!Number.isFinite(a.position.x) || !Number.isFinite(a.position.y) || !pointInside(r, a.position)) problems.push(issue(a.id, "ACTOR_POSITION_INVALID"));
+          else pins.push({ ...a.position, id: a.id, name: a.name, roomId: r.id, mapId: spec.id, quality: "confirmed" });
+          continue;
+        }
+        const oldPin = previous?.pins?.find((p2) => p2.id === a.id && p2.roomId === r.id);
+        const free = (p2) => contains(inner, { x: p2.x - 0.25, y: p2.y - 0.25, w: 0.5, h: 0.5 }) && !intersects({ x: p2.x - 0.25, y: p2.y - 0.25, w: 0.5, h: 0.5 }, spine) && !furniture.some((f) => f.roomId === r.id && intersects(f, { x: p2.x - 0.25, y: p2.y - 0.25, w: 0.5, h: 0.5 })) && !pins.some((q) => Math.hypot(q.x - p2.x, q.y - p2.y) < 0.7);
+        let p = oldPin && free(oldPin) ? oldPin : null;
+        for (let y = inner.y + 0.25; !p && y <= inner.y + inner.h - 0.25 + 1e-8; y += 0.75) {
+          for (let x = inner.x + 0.25; x <= inner.x + inner.w - 0.25 + 1e-8; x += 0.75) {
+            if (free({ x, y })) {
+              p = { x, y };
+              break;
+            }
+          }
+        }
+        if (p) pins.push({ id: a.id, name: a.name, roomId: r.id, mapId: spec.id, x: p.x, y: p.y, quality: "layout" });
+        else problems.push(issue(a.id, "ACTOR_LAYOUT_NO_SPACE"));
+      }
+    }
+    for (const v of [...spec.furniture || [], ...spec.actors || []]) if (!rooms.some((r) => r.id === v.roomId)) problems.push(issue(v.id, "ROOM_REF_UNKNOWN"));
+    return { ok: true, id: spec.id, name: spec.name, kind: "floor", bounds, corridor, rooms, doors, furniture, pins, edges: doors.map((d) => ({ from: d.roomId, to: "corridor", via: d.id })), issues: problems };
+  }
+
+  // vendor/atlas-spatial/layout-core.mjs
+  var clone3 = clone2;
+  var EPS = 1e-7;
+  var pt = (x, y) => ({ x, y });
+  var center = (r) => pt(r.x + r.w / 2, r.y + r.h / 2);
+  var inflate = (r, d) => ({ x: r.x - d, y: r.y - d, w: r.w + 2 * d, h: r.h + 2 * d });
+  var corners = (r) => [pt(r.x, r.y), pt(r.x + r.w, r.y), pt(r.x + r.w, r.y + r.h), pt(r.x, r.y + r.h)];
+  var distance = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+  var segmentDistance = (p, a, b) => {
+    const dx = b.x - a.x, dy = b.y - a.y, t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / (dx * dx + dy * dy || 1)));
+    return distance(p, pt(a.x + t * dx, a.y + t * dy));
+  };
+  function polygonContains(poly, p) {
+    if (poly.some((a, i) => segmentDistance(p, a, poly[(i + 1) % poly.length]) < EPS)) return true;
+    let inside = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const a = poly[i], b = poly[j];
+      if (a.y > p.y !== b.y > p.y && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x) inside = !inside;
+    }
+    return inside;
+  }
+  function clip(poly, nx, ny, k) {
+    const out = [];
+    for (let i = 0; i < poly.length; i++) {
+      const a = poly[i], b = poly[(i + 1) % poly.length], fa = a.x * nx + a.y * ny - k, fb = b.x * nx + b.y * ny - k;
+      if (fa <= EPS) out.push(a);
+      if (fa < 0 && fb > 0 || fa > 0 && fb < 0) {
+        const t = fa / (fa - fb);
+        out.push(pt(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t));
+      }
+    }
+    return out;
+  }
+  function hull(points) {
+    const sorted = [...points].sort((a, b) => a.x - b.x || a.y - b.y), cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x), lower = [], upper = [];
+    for (const p of sorted) {
+      while (lower.length >= 2 && cross(lower.at(-2), lower.at(-1), p) <= 0) lower.pop();
+      lower.push(p);
+    }
+    for (const p of [...sorted].reverse()) {
+      while (upper.length >= 2 && cross(upper.at(-2), upper.at(-1), p) <= 0) upper.pop();
+      upper.push(p);
+    }
+    lower.pop();
+    upper.pop();
+    return lower.concat(upper);
+  }
+  var hash = (s) => {
+    let n = 2166136261;
+    for (const c of String(s)) {
+      n ^= c.charCodeAt(0);
+      n = Math.imul(n, 16777619);
+    }
+    return n >>> 0;
+  };
+  var rand = (s) => {
+    let n = hash(s);
+    return () => {
+      n = Math.imul(n, 1664525) + 1013904223 >>> 0;
+      return n / 4294967296;
+    };
+  };
+  var ordered2 = (a) => [...a].sort((a2, b) => a2.id.localeCompare(b.id, "en"));
+  var SOLID_TYPES = /* @__PURE__ */ new Set(["shelf", "desk", "bench", "reading", "table", "chair", "bed", "cabinet"]);
+  function makeGroup(f, r, x, y) {
+    const group = { id: f.id, name: f.name, type: f.type, roomId: r.id, x, y, w: f.w, h: f.h, quality: "layout" }, bodies = [];
+    const add2 = (type, bx, by, bw, bh) => bodies.push({ id: f.id + ":" + type + (bodies.length ? ":" + bodies.length : ""), type, x: bx, y: by, w: bw, h: bh });
+    if (f.type === "reading") {
+      add2("table", x + 0.55, y + 0.55, f.w - 1.1, f.h - 1.1);
+      for (const [dx, dy] of [[0.1, 0.72], [f.w - 0.45, 0.72], [0.1, f.h - 1.07], [f.w - 0.45, f.h - 1.07]]) add2("chair", x + dx, y + dy, 0.35, 0.35);
+    } else if (f.type === "table") {
+      add2("table", x, y, f.w, f.h);
+      if (f.w > 1.2 && f.h > 1.2) for (const [dx, dy] of [[0.12, 0.12], [f.w - 0.47, 0.12], [0.12, f.h - 0.47], [f.w - 0.47, f.h - 0.47]]) add2("chair", x + dx, y + dy, 0.35, 0.35);
+    } else if (f.type === "desk") {
+      add2("desk", x, y, f.w, f.h * 0.68);
+      if (f.w > 1.1 && f.h > 0.8) add2("chair", x + f.w - 0.4, y + f.h - 0.38, 0.35, 0.35);
+    } else if (f.type === "bed") {
+      add2("bed", x, y, f.w, f.h);
+      if (f.w > 0.9 && f.h > 0.9) add2("pillow", x + 0.1, y + 0.1, Math.max(0.2, f.w - 0.2), 0.25);
+    } else if (f.type === "cabinet" || f.type === "shelf" || f.type === "bench" || f.type === "chair" || f.type === "stairs") {
+      add2(f.type, x, y, f.w, f.h);
+    } else if (f.type === "doorway") {
+      add2("doorway", x, y, f.w, f.h);
+    } else if (f.type === "light") {
+      add2("light", x, y, f.w, f.h);
+    } else {
+      add2("decor", x, y, f.w, f.h);
+    }
+    return { ...group, bodies: bodies.map((b) => ({ ...b, groupId: f.id, roomId: r.id, solid: SOLID_TYPES.has(b.type) })) };
+  }
+  function navigation(room, door, bodies, step = 0.2, radius = 0.18) {
+    const nx = Math.ceil(room.w / step), ny = Math.ceil(room.h / step), blocked = bodies.filter((b) => b.solid !== false).map((b) => inflate(b, radius));
+    const positions = [], free = [];
+    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+      const p = pt(room.x + (i + 0.5) * step, room.y + (j + 0.5) * step);
+      positions.push(p);
+      free.push(p.x <= room.x + room.w - radius && p.x >= room.x + radius && p.y <= room.y + room.h - radius && p.y >= room.y + radius && !blocked.some((b) => pointInside(b, p)));
+    }
+    const nearest = (p) => {
+      let best = -1, d = Infinity;
+      for (let i = 0; i < positions.length; i++) if (free[i] && distance(p, positions[i]) < d) {
+        best = i;
+        d = distance(p, positions[i]);
+      }
+      return best;
+    };
+    const start = nearest(pt(door.x, door.y + (room.side === "north" ? -0.45 : 0.45))), parent = Array(positions.length).fill(-2), queue = [];
+    if (start >= 0) {
+      parent[start] = -1;
+      queue.push(start);
+    }
+    for (let q = 0; q < queue.length; q++) {
+      const n = queue[q], x = n % nx, y = Math.floor(n / nx);
+      for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+        const xx = x + dx, yy = y + dy, m = yy * nx + xx;
+        if (xx >= 0 && xx < nx && yy >= 0 && yy < ny && free[m] && parent[m] === -2) {
+          parent[m] = n;
+          queue.push(m);
+        }
+      }
+    }
+    return { positions, free, parent, nearest, reachable: (p) => {
+      const n = nearest(p);
+      return n >= 0 && distance(positions[n], p) < step * 1.5 && parent[n] !== -2;
+    }, path: (p) => {
+      let n = nearest(p);
+      if (n < 0 || parent[n] === -2) return null;
+      const line = [];
+      while (n >= 0) {
+        line.push(positions[n]);
+        n = parent[n];
+      }
+      return line.reverse();
+    } };
+  }
+  function floor2(spec, previous = null) {
+    const collections = ["contents", "actors", "items"];
+    if (collections.some((k) => spec[k] !== void 0 && (!Array.isArray(spec[k]) || spec[k].some((v) => !v || typeof v.id !== "string" || !v.id) || new Set(spec[k].map((v) => v.id)).size !== spec[k].length))) return { ok: false, issues: [{ id: spec.id, code: "DETAIL_INPUT_INVALID" }], kept: previous ? clone3(previous) : null };
+    const bare = floor({ ...spec, furniture: [], actors: [] }, previous);
+    if (!bare.ok) return bare;
+    const groups = [], bodies = [], actors = [], items = [], windows = [], lamps = [], issues = [], doorSwings = [];
+    for (const r of bare.rooms) {
+      const door = bare.doors.find((d) => d.roomId === r.id), aisle = spec.singleRoom ? 0.8 : 1.6, margin = spec.singleRoom ? 0.2 : 0.4;
+      const spine = { x: door.x - aisle / 2, y: r.y, w: aisle, h: r.h }, inner = { x: r.x + margin, y: r.y + (spec.singleRoom ? margin : 1), w: r.w - margin * 2, h: r.h - (spec.singleRoom ? margin * 2 : 1.4) };
+      const swing = { id: "swing:" + r.id, roomId: r.id, x: door.x - door.width / 2, y: r.side === "north" ? door.y - door.width : door.y, w: door.width, h: door.width };
+      doorSwings.push(swing);
+      const exact = (spec.actors || []).filter((a) => a.roomId === r.id && a.position).map((a) => ({ id: a.id, ...a.position }));
+      const priority = (f) => f.locked ? 2 : previous?.groups?.some((g) => g.id === f.id) ? 1 : 0;
+      for (const f of ordered2((spec.contents || []).filter((f2) => f2.roomId === r.id)).sort((a, b) => priority(b) - priority(a))) {
+        if (!Number.isFinite(f.w) || !Number.isFinite(f.h) || f.w <= 0 || f.h <= 0 || f.type === "reading" && (f.w < 2 || f.h < 2)) {
+          issues.push({ id: f.id, code: "DETAIL_DIMENSION_INVALID" });
+          continue;
+        }
+        if (f.type !== "light" && f.type !== "decor" && (f.w > inner.w + EPS || f.h > inner.h + EPS) && !f.locked) {
+          issues.push({ id: f.id, code: "DETAIL_TOO_LARGE" });
+          continue;
+        }
+        const free = (q) => contains(inner, q) && !intersects(q, spine) && !intersects(q, swing) && !groups.filter((g2) => g2.roomId === r.id).some((g2) => intersects(inflate(g2, 0.28), q)) && !exact.some((p) => intersects(q, { x: p.x - 0.25, y: p.y - 0.25, w: 0.5, h: 0.5 }));
+        let chosen = null;
+        const old = previous?.groups?.find((g2) => g2.id === f.id && g2.roomId === r.id && g2.w === f.w && g2.h === f.h);
+        if (old && free(old)) chosen = old;
+        if (f.locked) {
+          const q = { ...f, ...f.locked };
+          if (free(q)) chosen = q;
+          else {
+            issues.push({ id: f.id, code: "DETAIL_LOCK_CONFLICT" });
+            continue;
+          }
+        }
+        const candidates = [];
+        if (!chosen) for (let y = inner.y; y + f.h <= inner.y + inner.h + EPS; y += 0.25) for (let x = inner.x; x + f.w <= inner.x + inner.w + EPS; x += 0.25) {
+          const q = { x, y, w: f.w, h: f.h };
+          if (free(q)) {
+            const score = f.type === "shelf" ? Math.abs(y - (r.side === "north" ? inner.y : inner.y + inner.h - f.h)) : distance(center(q), pt(r.x + r.w * 0.25, door.y + (r.side === "north" ? -2.2 : 2.2)));
+            candidates.push({ q, score });
+          }
+        }
+        if (!chosen) chosen = candidates.sort((a, b) => a.score - b.score || a.q.y - b.q.y || a.q.x - b.q.x)[0]?.q;
+        if (!chosen && !f.locked && f.w !== f.h) {
+          for (let y = inner.y; y + f.w <= inner.y + inner.h + EPS && !chosen; y += 0.25) for (let x = inner.x; x + f.h <= inner.x + inner.w + EPS; x += 0.25) {
+            const q = { x, y, w: f.h, h: f.w };
+            if (free(q)) {
+              chosen = q;
+              break;
+            }
+          }
+        }
+        if (!chosen) {
+          issues.push({ id: f.id, code: "DETAIL_NO_SPACE" });
+          continue;
+        }
+        const g = makeGroup({ ...f, w: chosen.w, h: chosen.h }, r, chosen.x, chosen.y);
+        if (f.locked) g.quality = "confirmed";
+        groups.push(g);
+        bodies.push(...g.bodies);
+      }
+      const outerY = r.side === "north" ? r.y : r.y + r.h;
+      for (let i = 0; i < Math.max(1, Math.floor(r.w / 3)); i++) windows.push({ id: "window:" + r.id + ":" + i, type: "window", roomId: r.id, x: r.x + (i + 0.5) * r.w / Math.max(1, Math.floor(r.w / 3)), y: outerY, width: 1.2, elevation: 1.1 });
+      lamps.push({ id: "light:" + r.id, type: "light", roomId: r.id, x: door.x, y: r.y + r.h * 0.45, elevation: 2.8 });
+      const nav = navigation(r, door, bodies.filter((b) => b.roomId === r.id));
+      for (const g of groups.filter((g2) => g2.roomId === r.id)) {
+        const edgePoints = [pt(g.x + g.w + 0.48, g.y + g.h / 2), pt(g.x - 0.48, g.y + g.h / 2), pt(g.x + g.w / 2, g.y + g.h + 0.48), pt(g.x + g.w / 2, g.y - 0.48)];
+        g.interaction = edgePoints.find((p) => pointInside(inner, p) && nav.reachable(p)) || null;
+        if (!g.interaction) issues.push({ id: g.id, code: "DETAIL_NOT_REACHABLE" });
+      }
+      for (const a of ordered2((spec.actors || []).filter((a2) => a2.roomId === r.id))) {
+        const target = groups.find((g) => g.id === a.near), old = previous?.actors?.find((p2) => p2.id === a.id && p2.roomId === a.roomId && p2.near === a.near), p = a.position || old || (target?.interaction || null);
+        const candidates = nav.positions.filter((p2, i) => nav.parent[i] !== -2 && (!target || distance(p2, center(target)) < 4)).sort((p2, q) => distance(p2, target ? center(target) : center(r)) - distance(q, target ? center(target) : center(r)));
+        const free = (p2) => p2 && nav.reachable(p2) && !actors.some((q) => distance(p2, q) < 0.7) && !bodies.filter((b) => b.roomId === r.id && b.solid).some((b) => intersects(b, { x: p2.x - 0.18, y: p2.y - 0.18, w: 0.36, h: 0.36 }));
+        const point = free(p) ? p : !a.position ? candidates.find(free) : null;
+        if (point) actors.push({ ...a, ...point, mapId: spec.id, type: "person", quality: a.position ? "confirmed" : "layout" });
+        else issues.push({ id: a.id, code: a.position ? "ACTOR_LOCK_CONFLICT" : "ACTOR_NO_REACHABLE_POSITION" });
+      }
+    }
+    for (const i of spec.items || []) {
+      const g = groups.find((g2) => g2.id === i.on), b = g?.bodies.find((b2) => ["table", "desk", "shelf"].includes(b2.type));
+      if (b) items.push({ ...i, ...center(b), roomId: g.roomId, type: "item", containerId: g.id, elevation: 0.8, quality: "layout" });
+      else issues.push({ id: i.id, code: "ITEM_CONTAINER_NOT_FOUND" });
+    }
+    if (bare.corridor.h > 0) for (let x = 1.5; x < spec.width; x += 3) lamps.push({ id: "hall-light:" + x, type: "light", roomId: "corridor", x, y: bare.corridor.y + 0.22, elevation: 2.8 });
+    for (const v of [...spec.contents || [], ...spec.actors || []]) if (!bare.rooms.some((r) => r.id === v.roomId)) issues.push({ id: v.id, code: "ROOM_REF_UNKNOWN" });
+    let path = [];
+    if (actors.length >= 2) {
+      const [a, b] = actors, [ra, rb] = [a, b].map((a2) => bare.rooms.find((r) => r.id === a2.roomId)), [da, db] = [ra, rb].map((r) => bare.doors.find((d) => d.roomId === r.id));
+      const pa = navigation(ra, da, bodies.filter((x) => x.roomId === ra.id)).path(a), pb = navigation(rb, db, bodies.filter((x) => x.roomId === rb.id)).path(b), cy = bare.corridor.y + bare.corridor.h / 2;
+      if (pa && pb) path = [...pa.reverse(), pt(da.x, da.y), pt(da.x, cy), pt(db.x, cy), pt(db.x, db.y), ...pb];
+    }
+    return { ...bare, groups, bodies, actors, items, windows, lamps, doorSwings, path, issues };
+  }
+  var riverX = (river, y) => river.cx + river.amplitude * Math.sin((y / river.height * 2 - 0.35) * Math.PI);
+  var water = (river, p) => Math.abs(p.x - riverX(river, p.y)) < river.width / 2 - EPS;
+  function splitWater(a, b, river) {
+    const point = (t) => pt(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t), cuts = [0, 1];
+    for (const sign of [-1, 1]) {
+      const f = (t) => {
+        const p = point(t);
+        return p.x - riverX(river, p.y) - sign * river.width / 2;
+      };
+      for (let i = 0; i < 160; i++) {
+        let lo = i / 160, hi = (i + 1) / 160, fl = f(lo), fh = f(hi);
+        if (Math.abs(fl) < EPS) cuts.push(lo);
+        if (fl * fh < 0) {
+          for (let n = 0; n < 32; n++) {
+            const mid = (lo + hi) / 2;
+            if (f(lo) * f(mid) <= 0) hi = mid;
+            else lo = mid;
+          }
+          cuts.push((lo + hi) / 2);
+        }
+      }
+    }
+    const sorted = cuts.sort((a2, b2) => a2 - b2).filter((t, i, a2) => i === 0 || t - a2[i - 1] > 1e-6), out = [];
+    for (let i = 1; i < sorted.length; i++) {
+      const t0 = sorted[i - 1], t1 = sorted[i];
+      if (t1 - t0 > 1e-6) out.push({ a: point(t0), b: point(t1), kind: water(river, point((t0 + t1) / 2)) ? "bridge" : "road" });
+    }
+    return out;
+  }
+  function city(spec, previous = null) {
+    if (!Number.isFinite(spec.width) || !Number.isFinite(spec.height) || spec.width < 900 || spec.height < 700 || !Number.isFinite(spec.riverWidth) || spec.riverWidth < 0 || spec.riverWidth > spec.width * 0.15 || !Array.isArray(spec.districts) || !spec.districts.length || new Set(spec.districts.map((d) => d.id)).size !== spec.districts.length || spec.districts.some((d) => !["west", "east"].includes(d.bank) || !Number.isFinite(d.order))) return { ok: false, issues: [{ id: spec.id, code: "CITY_INPUT_INVALID" }] };
+    const structure = (v) => JSON.stringify({ width: v.width, height: v.height, riverWidth: v.riverWidth, seed: v.seed, districts: ordered2(v.districts || []).map((d) => [d.id, d.bank, d.order]) });
+    if (previous?.structureKey && previous.structureKey !== structure(spec)) return { ok: false, issues: [{ id: spec.id, code: "CITY_STRUCTURE_CHANGE_REQUIRES_REBUILD" }], kept: clone3(previous) };
+    const w = spec.width, h = spec.height, rng = rand(spec.seed || spec.id), origin = pt(w * 0.46, h * 0.5), raw = [];
+    for (let i = 0; i < 14; i++) {
+      const a = i * Math.PI / 7, rr = 0.95 + rng() * 0.05;
+      raw.push(pt(origin.x + Math.cos(a) * w * 0.405 * rr, origin.y + Math.sin(a) * h * 0.405 * rr));
+    }
+    const open = spec.enclosure === "open", hullOutline = hull(raw), land0 = open ? [pt(0, 0), pt(w, 0), pt(w, h), pt(0, h)] : hullOutline;
+    const wall = open ? [] : hullOutline, river = { cx: w * 0.62, amplitude: w * 0.035, width: spec.riverWidth, height: h }, bankGap = river.width / 2 + 18;
+    const wet = river.width > 0;
+    const left = wet ? clip(land0, 1, 0, river.cx - river.amplitude - bankGap) : clip(land0, 1, 0, w * 0.55), right = wet ? clip(land0, -1, 0, -(river.cx + river.amplitude + bankGap)) : clip(land0, -1, 0, -w * 0.55), districts = [];
+    for (const bank of ["west", "east"]) {
+      const group = ordered2(spec.districts.filter((d) => d.bank === bank)).sort((a, b) => a.order - b.order), land = !wet && group.length === spec.districts.length ? land0 : bank === "west" ? left : right;
+      const ys = land.map((p) => p.y), minY = Math.min(...ys), maxY = Math.max(...ys), xs = land.map((p) => p.x), cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+      const seeds = group.map((d, i) => ({ ...d, site: pt(cx + (i % 2 ? 1 : -1) * w * 0.025, minY + (maxY - minY) * (i + 0.5) / group.length) }));
+      for (const d of seeds) {
+        let poly = land;
+        for (const other of seeds) if (other.id !== d.id) {
+          const a = d.site, b = other.site;
+          poly = clip(poly, 2 * (b.x - a.x), 2 * (b.y - a.y), b.x * b.x + b.y * b.y - a.x * a.x - a.y * a.y);
+        }
+        if (poly.length < 3 || !polygonContains(poly, d.site)) return { ok: false, issues: [{ id: d.id, code: "DISTRICT_SEED_OUTSIDE" }] };
+        districts.push({ ...d, mapId: spec.id, parentId: spec.parentId, polygon: poly, quality: "layout" });
+      }
+    }
+    const centerY = h * 0.5;
+    const horizontalIntersections = wall.map((a, i) => {
+      const b = wall[(i + 1) % wall.length];
+      if ((a.y - centerY) * (b.y - centerY) <= 0 && a.y !== b.y) return a.x + (b.x - a.x) * (centerY - a.y) / (b.y - a.y);
+      return null;
+    }).filter((x) => x !== null).sort((a, b) => a - b);
+    const gates = open ? [] : [{ id: "gate-west", name: "西城门", x: horizontalIntersections[0], y: centerY }, { id: "gate-east", name: "东城门", x: horizontalIntersections.at(-1), y: centerY }];
+    const hubs = [pt(w * 0.31, centerY), pt(w * 0.77, centerY)], roads = [], segments = [], buildings = [], issues = [];
+    const addRoad = (id, a, b) => {
+      const road = { id, a, b, width: 12 };
+      roads.push(road);
+      segments.push(...(wet ? splitWater(a, b, river) : [{ a, b, kind: "road" }]).map((s, i) => ({ ...s, id: id + ":" + i, roadId: id, width: 12 })));
+    };
+    addRoad("avenue", open ? hubs[0] : pt(gates[0].x, centerY), open ? hubs[1] : pt(gates[1].x, centerY));
+    for (const d of districts) addRoad("road:" + d.id, hubs[d.bank === "west" ? 0 : 1], d.site);
+    if (!open) {
+      const ring = wall.map((p) => pt(origin.x + (p.x - origin.x) * 0.86, origin.y + (p.y - origin.y) * 0.86));
+      for (let i = 0; i < ring.length; i++) addRoad("ring:" + i, ring[i], ring[(i + 1) % ring.length]);
+      addRoad("ring-access-west", hubs[0], ring.reduce((a, b) => distance(a, hubs[0]) < distance(b, hubs[0]) ? a : b));
+      addRoad("ring-access-east", hubs[1], ring.reduce((a, b) => distance(a, hubs[1]) < distance(b, hubs[1]) ? a : b));
+    }
+    const roadClear = (q) => !roads.some((r) => {
+      const min = Math.min(...corners(q).map((p) => segmentDistance(p, r.a, r.b)), segmentDistance(center(q), r.a, r.b));
+      return min < r.width / 2 + 12 || segmentIntersectsRect(r.a, r.b, inflate(q, 12));
+    });
+    function placeBuilding(f, decorative = false) {
+      const d = districts.find((d2) => d2.id === f.districtId);
+      if (!d || !Number.isFinite(f.w) || !Number.isFinite(f.h) || f.w <= 0 || f.h <= 0) return null;
+      const xs = d.polygon.map((p) => p.x), ys = d.polygon.map((p) => p.y), candidates = [], step = Math.max(decorative ? 22 : 10, Math.max(w, h) / 240);
+      for (let y = Math.min(...ys) + 12; y + f.h < Math.max(...ys); y += step) for (let x = Math.min(...xs) + 12; x + f.w < Math.max(...xs); x += step) {
+        const q2 = { x, y, w: f.w, h: f.h };
+        if (corners(inflate(q2, 6)).every((p) => polygonContains(d.polygon, p)) && roadClear(q2) && !buildings.some((b2) => intersects(inflate(b2, decorative ? 6 : 12), q2))) {
+          const score = Math.min(...roads.map((r) => segmentDistance(center(q2), r.a, r.b))) + distance(center(q2), d.site) * 0.035 + (decorative ? rng() * 30 : 0);
+          candidates.push({ q: q2, score });
+        }
+      }
+      const q = candidates.sort((a, b2) => a.score - b2.score || a.q.y - b2.q.y || a.q.x - b2.q.x)[0]?.q;
+      if (!q) return null;
+      const b = { ...f, ...q, type: decorative ? "block" : "building", decorative, quality: "layout", mapId: spec.id };
+      buildings.push(b);
+      return b;
+    }
+    const validBuilding = (q) => {
+      const d = districts.find((d2) => d2.id === q.districtId);
+      return d && corners(inflate(q, 6)).every((p) => polygonContains(d.polygon, p)) && roadClear(q) && !buildings.some((b) => intersects(inflate(b, 12), q));
+    };
+    for (const f of ordered2(spec.buildings || []).filter((f2) => f2.locked)) {
+      const q = { ...f, ...f.locked };
+      if (validBuilding(q)) buildings.push({ ...q, type: "building", decorative: false, quality: "confirmed", mapId: spec.id });
+      else return { ok: false, issues: [{ id: f.id, code: "BUILDING_LOCK_CONFLICT" }], kept: previous ? clone3(previous) : null };
+    }
+    for (const f of ordered2(spec.buildings || []).filter((f2) => !f2.locked)) {
+      const old = previous?.buildings?.find((b) => !b.decorative && b.id === f.id && b.districtId === f.districtId && b.w === f.w && b.h === f.h);
+      if (old && validBuilding(old)) buildings.push({ ...old, name: f.name });
+      else if (old?.quality === "confirmed") return { ok: false, issues: [{ id: f.id, code: "BUILDING_LOCK_CONFLICT" }], kept: clone3(previous) };
+    }
+    for (const f of ordered2(spec.buildings || []).filter((f2) => !buildings.some((b) => b.id === f2.id))) if (!placeBuilding(f)) issues.push({ id: f.id, code: "BUILDING_NO_SPACE" });
+    for (const d of districts) for (let i = 0; i < (spec.blocksPerDistrict ?? 8); i++) placeBuilding({ id: "texture:" + d.id + ":" + i, districtId: d.id, name: "街区轮廓", w: 28 + rng() * 24, h: 25 + rng() * 25 }, true);
+    const rline = Array.from({ length: 81 }, (_, i) => pt(riverX(river, h * i / 80), h * i / 80)), riverPolygon = rline.map((p) => pt(p.x - river.width / 2, p.y)).concat([...rline].reverse().map((p) => pt(p.x + river.width / 2, p.y)));
+    const dock = { id: "dock", name: "河岸码头", type: "dock", x: riverX(river, h * 0.68) - river.width / 2, y: h * 0.68, bank: "west", width: river.width * 0.38 };
+    return { ok: true, structureKey: structure(spec), id: spec.id, name: spec.name, kind: "city", enclosure: open ? "open" : "wall", bounds: { x: 0, y: 0, w, h }, wall, origin, river: wet ? river : null, riverPolygon: wet ? riverPolygon : [], districts, roads, segments, gates, buildings, dock: wet ? dock : null, issues };
+  }
+  function segmentIntersectsRect(a, b, r) {
+    let lo = 0, hi = 1;
+    const dx = b.x - a.x, dy = b.y - a.y;
+    for (const [p, q] of [[-dx, a.x - r.x], [dx, r.x + r.w - a.x], [-dy, a.y - r.y], [dy, r.y + r.h - a.y]]) {
+      if (Math.abs(p) < EPS) {
+        if (q < 0) return false;
+      } else {
+        const t = q / p;
+        if (p < 0) lo = Math.max(lo, t);
+        else hi = Math.min(hi, t);
+        if (lo > hi) return false;
+      }
+    }
+    return true;
+  }
+
+  // vendor/atlas-spatial/overview-core.mjs
+  var PAD = 0.06;
+  var LOCK_PAD = 0.1;
+  var EPS2 = 1e-6;
+  var GOLDEN_ANGLE = 2.399963229728653;
+  var MAX_CANDIDATES = 512;
+  var GAP_FACTORS = [1, 0.75, 0.5];
+  var SIZE_RATIO = { small: 0.035, medium: 0.065, large: 0.1 };
+  var MIN_SIZE_RATIO = 8e-3;
+  var WIDTH_RATIO = { narrow: 8e-3, medium: 0.015, wide: 0.025 };
+  var DENSITY_INFLATE = { low: 1.12, medium: 1.28, high: 1.5 };
+  var SURFACE_SET = /* @__PURE__ */ new Set(["mixed", "urban", "forest", "mountain", "water", "indoor", "void"]);
+  var SIZE_SET = /* @__PURE__ */ new Set(["small", "medium", "large"]);
+  var DENSITY_SET = /* @__PURE__ */ new Set(["low", "medium", "high"]);
+  var WIDTH_CLASS_SET = /* @__PURE__ */ new Set(["narrow", "medium", "wide"]);
+  var URBAN_ROLES = /* @__PURE__ */ new Set(["city", "settlement", "district", "campus"]);
+  var BLOCKING_ROLES = /* @__PURE__ */ new Set(["mountain", "water"]);
+  var SECTOR_ANGLE = { north: -Math.PI / 2, northeast: -Math.PI / 4, east: 0, southeast: Math.PI / 4, south: Math.PI / 2, southwest: 3 * Math.PI / 4, west: Math.PI, northwest: -3 * Math.PI / 4 };
+  var OPPOSITE = { north: "south", northeast: "southwest", east: "west", southeast: "northwest", south: "north", southwest: "northeast", west: "east", northwest: "southeast" };
+  var FEATURE_TYPES = /* @__PURE__ */ new Set(["forest_texture", "ridge", "shore", "building_cluster", "road_texture", "ruins_scatter", "watercourse"]);
+  var pt2 = (x, y) => ({ x, y });
+  var clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  var distance2 = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+  var byId2 = (a, b) => String(a?.id).localeCompare(String(b?.id), "en");
+  var ordered3 = (list) => [...list].sort(byId2);
+  function hashOf(text2) {
+    let n = 2166136261;
+    const s = String(text2);
+    for (let i = 0; i < s.length; i++) {
+      n ^= s.charCodeAt(i);
+      n = Math.imul(n, 16777619);
+    }
+    return n >>> 0;
+  }
+  function randOf(seed) {
+    let n = hashOf(seed);
+    return () => {
+      n = Math.imul(n, 1664525) + 1013904223 >>> 0;
+      return n / 4294967296;
+    };
+  }
+  function pointInPolygon(poly, p) {
+    if (!Array.isArray(poly) || poly.length < 3) return false;
+    let inside = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const a = poly[i], b = poly[j];
+      if (a.y > p.y !== b.y > p.y && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y || EPS2) + a.x) inside = !inside;
+    }
+    return inside;
+  }
+  function centroid(poly) {
+    let x = 0, y = 0;
+    for (const p of poly) {
+      x += p.x;
+      y += p.y;
+    }
+    return pt2(x / poly.length, y / poly.length);
+  }
+  function scalePolygon(poly, f, c = centroid(poly)) {
+    return poly.map((p) => pt2(c.x + (p.x - c.x) * f, c.y + (p.y - c.y) * f));
+  }
+  function fitPolygon(poly, box) {
+    for (let attempt = 0; attempt < 6; attempt++) {
+      let f = 1, c = centroid(poly);
+      for (const p of poly) {
+        const dx = p.x - c.x, dy = p.y - c.y;
+        if (dx > EPS2 && c.x + dx > box.x1) f = Math.min(f, (box.x1 - c.x) / dx);
+        if (dx < -EPS2 && c.x + dx < box.x0) f = Math.min(f, (box.x0 - c.x) / dx);
+        if (dy > EPS2 && c.y + dy > box.y1) f = Math.min(f, (box.y1 - c.y) / dy);
+        if (dy < -EPS2 && c.y + dy < box.y0) f = Math.min(f, (box.y0 - c.y) / dy);
+      }
+      if (!(f < 1) || !(f > 0)) return poly;
+      poly = scalePolygon(poly, f, c);
+    }
+    return null;
+  }
+  function inflatePolygon(poly, factor) {
+    const c = centroid(poly);
+    return poly.map((p) => pt2(c.x + (p.x - c.x) * factor, c.y + (p.y - c.y) * factor));
+  }
+  function bezierPath(p0, p1, p2, p3, segments) {
+    const out = [];
+    for (let i = 0; i <= segments; i++) {
+      const t = i / segments, u = 1 - t;
+      const a = u * u * u, b = 3 * u * u * t, c = 3 * u * t * t, d = t * t * t;
+      out.push(pt2(a * p0.x + b * p1.x + c * p2.x + d * p3.x, a * p0.y + b * p1.y + c * p2.y + d * p3.y));
+    }
+    return out;
+  }
+  function edgePoint(sector, box) {
+    const dx = Math.cos(SECTOR_ANGLE[sector] ?? 0), dy = Math.sin(SECTOR_ANGLE[sector] ?? 0);
+    const cx = (box.x0 + box.x1) / 2, cy = (box.y0 + box.y1) / 2, hw = (box.x1 - box.x0) / 2, hh = (box.y1 - box.y0) / 2;
+    const t = Math.min(hw / Math.max(Math.abs(dx), EPS2), hh / Math.max(Math.abs(dy), EPS2));
+    return pt2(cx + dx * t, cy + dy * t);
+  }
+  function featuresOf(layout, type) {
+    return (Array.isArray(layout?.features) ? layout.features : []).filter((f) => f?.type === type);
+  }
+  function previousSpots(previous) {
+    const out = [];
+    for (const s of previous?.shapes ?? []) out.push(...s.polygon ?? []);
+    for (const r of previous?.routes ?? []) out.push(...r.path ?? []);
+    for (const f of previous?.features ?? []) out.push(...f.path ?? [], ...f.polygon ?? []);
+    return out.filter((p) => finite(p?.x) && finite(p?.y));
+  }
+  function confirmedSpots(zones, links) {
+    const out = [];
+    for (const z of zones) {
+      if (finite(z?.locked?.x) && finite(z.locked.y)) out.push(z.locked);
+      for (const p of z?.lockedPolygon ?? []) if (finite(p?.x) && finite(p?.y)) out.push(p);
+    }
+    for (const l of links) for (const p of l?.locked?.path ?? []) if (finite(p?.x) && finite(p?.y)) out.push(p);
+    return out;
+  }
+  function scaleLayout(layout, k) {
+    const sp = (p) => plain(p) ? { ...p, x: p.x * k, y: p.y * k } : p;
+    const sps = (v) => Array.isArray(v) ? v.map(sp) : v;
+    const out = { ...layout };
+    if (plain(out.bounds)) out.bounds = { ...out.bounds, x: out.bounds.x * k, y: out.bounds.y * k, w: out.bounds.w * k, h: out.bounds.h * k };
+    out.pins = (layout.pins ?? []).map((p) => ({ ...p, ...sp(p), ...Array.isArray(p.polygon) ? { polygon: sps(p.polygon) } : {} }));
+    out.shapes = (layout.shapes ?? []).map((s) => ({ ...s, ...Array.isArray(s.polygon) ? { polygon: sps(s.polygon) } : {} }));
+    out.routes = (layout.routes ?? []).map((r) => ({ ...r, ...Array.isArray(r.path) ? { path: sps(r.path) } : {} }));
+    out.features = (layout.features ?? []).map((f) => ({ ...f, ...Array.isArray(f.path) ? { path: sps(f.path) } : {}, ...Array.isArray(f.polygon) ? { polygon: sps(f.polygon) } : {}, ...finite(f.width) ? { width: f.width * k } : {} }));
+    return out;
+  }
+  function overview(spec, previous = null) {
+    const kept = previous ? clone(previous) : null;
+    const unitScale = finite(spec?.unitScale) && spec.unitScale > 0 ? spec.unitScale : 1;
+    if (unitScale !== 1 && previous) previous = scaleLayout(previous, unitScale);
+    const issues = [];
+    if (!plain(spec) || typeof spec.id !== "string" || !spec.id) return { ok: false, issues: [{ id: null, code: "OVERVIEW_INPUT_INVALID" }], kept };
+    const zonesIn = ordered3(Array.isArray(spec.zones) ? spec.zones : []).slice(0, LIMITS.zones);
+    const linksIn = ordered3(Array.isArray(spec.links) ? spec.links : []).slice(0, LIMITS.links);
+    const featuresIn = ordered3(Array.isArray(spec.features) ? spec.features : []).slice(0, LIMITS.features);
+    if ((spec.zones ?? []).length > LIMITS.zones) issues.push({ id: null, code: "OVERVIEW_ZONE_LIMIT" });
+    if ((spec.links ?? []).length > LIMITS.links) issues.push({ id: null, code: "OVERVIEW_LINK_LIMIT" });
+    if ((spec.features ?? []).length > LIMITS.features) issues.push({ id: null, code: "OVERVIEW_FEATURE_LIMIT" });
+    let w = spec.width, h = spec.height;
+    if (!finite(w) || !finite(h) || w <= 0 || h <= 0) return { ok: false, issues: [...issues, { id: spec.id, code: "OVERVIEW_EXTENT_INVALID" }], kept };
+    const locked = confirmedSpots(zonesIn, linksIn);
+    for (const p of locked) {
+      w = Math.max(w, p.x / (1 - LOCK_PAD));
+      h = Math.max(h, p.y / (1 - LOCK_PAD));
+    }
+    for (const p of previousSpots(previous)) {
+      w = Math.max(w, p.x / (1 - PAD));
+      h = Math.max(h, p.y / (1 - PAD));
+    }
+    const W = w, H = h, S = Math.min(W, H);
+    const box = { x0: W * PAD, y0: H * PAD, x1: W * (1 - PAD), y1: H * (1 - PAD) };
+    const surface = SURFACE_SET.has(spec.surface) ? spec.surface : "mixed";
+    if (spec.surface !== void 0 && !SURFACE_SET.has(spec.surface)) issues.push({ id: spec.id, code: "OVERVIEW_SURFACE_INVALID" });
+    const seed = `${spec.mapId ?? spec.id}/${spec.seed ?? spec.id}`;
+    const prevShapes = new Map((previous?.shapes ?? []).filter((s) => s && typeof s.id === "string").map((s) => [s.id, s]));
+    const prevPins = new Map((previous?.pins ?? []).filter((p) => p && typeof p.id === "string").map((p) => [p.id, p]));
+    const prevRoutes = new Map((previous?.routes ?? []).filter((r) => r && typeof r.id === "string").map((r) => [r.id, r]));
+    const prevFeatures = new Map((previous?.features ?? []).filter((f) => f && typeof f.id === "string").map((f) => [f.id, f]));
+    const baseRadius = /* @__PURE__ */ new Map();
+    for (const z of zonesIn) {
+      const ratio = SIZE_RATIO[SIZE_SET.has(z.size) ? z.size : "medium"];
+      baseRadius.set(z.id, S * ratio);
+    }
+    const occupied = [];
+    for (const z of zonesIn) if (finite(z.locked?.x) && finite(z.locked.y)) occupied.push({ id: z.id, point: pt2(z.locked.x, z.locked.y) });
+    const obstacles = [];
+    for (const z of zonesIn) if (z.lockedPolygon?.length >= 3) obstacles.push({ id: z.id, polygon: z.lockedPolygon });
+    const sites = /* @__PURE__ */ new Map(), reasons = /* @__PURE__ */ new Map();
+    const minGap = S / 12;
+    for (const z of zonesIn) {
+      if (finite(z.locked?.x) && finite(z.locked.y)) {
+        sites.set(z.id, pt2(z.locked.x, z.locked.y));
+        reasons.set(z.id, "locked");
+        continue;
+      }
+      const r = baseRadius.get(z.id);
+      const near = z.near && sites.get(z.near) ? sites.get(z.near) : null;
+      const target = near ? pt2(clamp(near.x, box.x0, box.x1), clamp(near.y, box.y0, box.y1)) : pt2((box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2);
+      const startIndex = hashOf(`${seed}\0${z.id}`) % MAX_CANDIDATES;
+      let chosen = null;
+      for (const factor of GAP_FACTORS) {
+        const gap = minGap * factor;
+        for (let step = 0; step < MAX_CANDIDATES; step++) {
+          const index = startIndex + step, radius = gap * Math.sqrt(step + 1), angle = index * GOLDEN_ANGLE;
+          const c = pt2(target.x + radius * Math.cos(angle), target.y + radius * Math.sin(angle));
+          if (c.x < box.x0 + r || c.x > box.x1 - r || c.y < box.y0 + r || c.y > box.y1 - r) continue;
+          if (!occupied.every((o) => distance2(c, o.point) >= gap)) continue;
+          if (!obstacles.every((o) => !pointInPolygon(o.polygon, c))) continue;
+          chosen = c;
+          break;
+        }
+        if (chosen) break;
+      }
+      if (!chosen) {
+        issues.push({ id: z.id, code: "OVERVIEW_ZONE_NO_SPACE" });
+        continue;
+      }
+      sites.set(z.id, chosen);
+      reasons.set(z.id, near ? "layout:near" : "layout:center");
+      occupied.push({ id: z.id, point: chosen });
+    }
+    const shapes = [], pins = [];
+    const shapePolygon = /* @__PURE__ */ new Map();
+    for (const z of zonesIn) {
+      const site = sites.get(z.id);
+      if (!site) continue;
+      const structureKey = stable({ role: z.role ?? null, size: z.size ?? null, sector: z.sector ?? null, near: z.near ?? null, locked: z.locked ?? null, lockedPolygon: z.lockedPolygon ?? null });
+      const placement = z.placement === "proxy" ? "proxy" : void 0;
+      const prevShape = prevShapes.get(z.id);
+      if (prevShape && prevShape.structureKey === structureKey && prevShape.polygon?.length >= 3) {
+        const reused = clone(prevShape);
+        if (placement) reused.placement = placement;
+        else delete reused.placement;
+        shapes.push(reused);
+        shapePolygon.set(z.id, prevShape.polygon);
+        const prevPin = prevPins.get(z.id);
+        pins.push(prevPin ? clone(prevPin) : { id: z.id, name: z.name ?? null, type: "location", x: site.x, y: site.y, quality: "layout" });
+        continue;
+      }
+      let polygon2 = z.lockedPolygon?.length >= 3 ? z.lockedPolygon.map((p) => pt2(p.x, p.y)) : null;
+      if (!polygon2) {
+        let r = baseRadius.get(z.id);
+        const nearest = occupied.filter((o) => o.id !== z.id).reduce((d, o) => Math.min(d, distance2(site, o.point)), Infinity);
+        if (finite(nearest)) r = Math.max(S * MIN_SIZE_RATIO, Math.min(r, nearest * 0.35));
+        polygon2 = zonePolygon(z, site.x, site.y, r, seed);
+      }
+      const fitted = polygon2.every((p) => finite(p.x) && finite(p.y)) ? fitPolygon(polygon2, box) : null;
+      if (!fitted || fitted.length < 3) {
+        issues.push({ id: z.id, code: "OVERVIEW_ZONE_OUT_OF_BOUNDS" });
+        continue;
+      }
+      const lockedPoint = finite(z.locked?.x) && finite(z.locked.y) ? pt2(z.locked.x, z.locked.y) : null;
+      shapes.push({
+        id: z.id,
+        name: z.name ?? null,
+        quality: z.lockedPolygon?.length >= 3 ? "confirmed" : "estimated",
+        polygon: fitted,
+        structureKey,
+        ...lockedPoint ? { locked: lockedPoint } : {},
+        ...placement ? { placement } : {},
+        ...SIZE_SET.has(z.size) ? { size: z.size } : {},
+        ...typeof z.role === "string" ? { role: z.role } : {}
+      });
+      shapePolygon.set(z.id, fitted);
+      pins.push({ id: z.id, name: z.name ?? null, type: "location", x: lockedPoint ? lockedPoint.x : site.x, y: lockedPoint ? lockedPoint.y : site.y, quality: lockedPoint ? "exact" : "layout" });
+    }
+    for (const pin of Array.isArray(spec.pins) ? spec.pins.slice(0, LIMITS.markers) : []) {
+      if (!plain(pin) || typeof pin.id !== "string" || !pin.id) continue;
+      if (!(finite(pin.x) && finite(pin.y)) || pin.x < 0 || pin.x > W || pin.y < 0 || pin.y > H) {
+        issues.push({ id: pin.id, code: "OVERVIEW_PIN_OUT_OF_RANGE" });
+        continue;
+      }
+      pins.push({ id: pin.id, name: pin.name ?? null, type: typeof pin.type === "string" ? pin.type : typeof pin.kind === "string" ? pin.kind : "location", x: pin.x, y: pin.y, quality: pin.quality === "exact" ? "exact" : "layout" });
+    }
+    const blockingPolygons = [];
+    for (const [id, polygon2] of shapePolygon) {
+      const zone = zonesIn.find((z) => z.id === id);
+      if (zone && BLOCKING_ROLES.has(String(zone.role))) blockingPolygons.push({ id, polygon: polygon2 });
+    }
+    const routes = [];
+    for (const link of linksIn) {
+      const prev = prevRoutes.get(link.id);
+      if (link.locked?.path?.length >= 2) {
+        const confirmed = link.locked.quality === "confirmed";
+        routes.push({ id: link.id, kind: "route", mapId: spec.mapId ?? null, path: link.locked.path.map((p) => pt2(p.x, p.y)), quality: confirmed ? "confirmed" : "estimated", dashed: !confirmed, progress: null, fromLocationId: link.locked.fromLocationId ?? link.fromLocationId ?? null, toLocationId: link.locked.toLocationId ?? link.toLocationId ?? null });
+        continue;
+      }
+      const a = link.fromSite && finite(link.fromSite.x) && finite(link.fromSite.y) ? pt2(link.fromSite.x, link.fromSite.y) : sites.get(link.fromLocationId);
+      const b = link.toSite && finite(link.toSite.x) && finite(link.toSite.y) ? pt2(link.toSite.x, link.toSite.y) : sites.get(link.toLocationId);
+      const structureKey = stable({ a: a ?? null, b: b ?? null });
+      if (prev && prev.structureKey === structureKey && prev.path?.length >= 2) {
+        routes.push(clone(prev));
+        continue;
+      }
+      if (!a || !b || distance2(a, b) <= EPS2) {
+        issues.push({ id: link.id, code: "OVERVIEW_ROUTE_ENDPOINT_UNKNOWN" });
+        continue;
+      }
+      const mid = pt2((a.x + b.x) / 2, (a.y + b.y) / 2);
+      const R = randOf(`${seed}/route/${link.id}`);
+      const bend = (R() - 0.5) * 0.08 * S;
+      const nx = -(b.y - a.y), ny = b.x - a.x, len = Math.hypot(nx, ny) || 1;
+      mid.x = clamp(mid.x + nx / len * bend, 0, W);
+      mid.y = clamp(mid.y + ny / len * bend, 0, H);
+      const crosses = blockingPolygons.some((o) => pointInPolygon(o.polygon, mid) || pointInPolygon(o.polygon, a) || pointInPolygon(o.polygon, b));
+      routes.push({ id: link.id, kind: "route", mapId: spec.mapId ?? null, path: [a, mid, b], quality: "estimated", dashed: true, progress: null, uncertain: crosses, fromLocationId: link.fromLocationId ?? null, toLocationId: link.toLocationId ?? null, structureKey });
+    }
+    const clearZones = [];
+    for (const [id, polygon2] of shapePolygon) {
+      const zone = zonesIn.find((z) => z.id === id);
+      if (!zone || !URBAN_ROLES.has(String(zone.role))) continue;
+      clearZones.push({ id, polygon: polygon2 });
+    }
+    const clearPoints = [...locked];
+    const clearRoutes = routes.map((r) => r.path);
+    const features = [];
+    const pushFeature = (feature) => {
+      features.push(feature);
+    };
+    for (const f of featuresIn) {
+      if (!FEATURE_TYPES.has(f.type)) {
+        issues.push({ id: f.id, code: "OVERVIEW_FEATURE_TYPE_INVALID" });
+        continue;
+      }
+      const density = DENSITY_SET.has(f.density) ? f.density : "medium";
+      const structureKey = stable({ type: f.type, zoneId: f.zoneId ?? null, density, fromSector: f.fromSector ?? null, toSector: f.toSector ?? null, widthClass: f.widthClass ?? null });
+      const prev = prevFeatures.get(f.id);
+      if (prev && prev.structureKey === structureKey) {
+        pushFeature(clone(prev));
+        continue;
+      }
+      const base = { id: f.id, type: f.type, density, decorative: true, quality: "estimated", structureKey };
+      if (typeof f.zoneId === "string" && f.zoneId) base.zoneId = f.zoneId;
+      const zonePolygon2 = f.zoneId ? shapePolygon.get(f.zoneId) : null;
+      if (f.zoneId && !zonePolygon2) {
+        issues.push({ id: f.id, code: "OVERVIEW_FEATURE_ZONE_UNKNOWN" });
+        continue;
+      }
+      if (f.type === "watercourse") {
+        const fromSector = SECTOR_ANGLE[f.fromSector] !== void 0 ? f.fromSector : "west";
+        const toSector = SECTOR_ANGLE[f.toSector] !== void 0 ? f.toSector : OPPOSITE[fromSector];
+        const widthClass = WIDTH_CLASS_SET.has(f.widthClass) ? f.widthClass : "medium";
+        const width = S * WIDTH_RATIO[widthClass];
+        const p0 = edgePoint(fromSector, box), p3 = edgePoint(toSector, box);
+        const R = randOf(`${seed}/water/${f.id}`);
+        const nx = -(p3.y - p0.y), ny = p3.x - p0.x, len = Math.hypot(nx, ny) || 1;
+        const off1 = (R() - 0.5) * 0.22 * S, off2 = (R() - 0.5) * 0.22 * S;
+        const mid1 = pt2(p0.x + (p3.x - p0.x) / 3 + nx / len * off1, p0.y + (p3.y - p0.y) / 3 + ny / len * off1);
+        const mid2 = pt2(p0.x + (p3.x - p0.x) * 2 / 3 + nx / len * off2, p0.y + (p3.y - p0.y) * 2 / 3 + ny / len * off2);
+        const p1 = pt2(clamp(mid1.x, box.x0, box.x1), clamp(mid1.y, box.y0, box.y1));
+        const p2 = pt2(clamp(mid2.x, box.x0, box.x1), clamp(mid2.y, box.y0, box.y1));
+        const path = bezierPath(p0, p1, p2, p3, LIMITS.watercourseSegments);
+        if (path.length < LIMITS.watercourseSegments + 1 || !path.every((p) => finite(p.x) && finite(p.y) && p.x >= 0 && p.x <= W && p.y >= 0 && p.y <= H)) {
+          issues.push({ id: f.id, code: "OVERVIEW_FEATURE_GEOMETRY_INVALID" });
+          continue;
+        }
+        pushFeature({ ...base, fromSector, toSector, widthClass, width, path });
+        continue;
+      }
+      if (f.type === "shore") {
+        const water2 = features.find((x) => x.type === "watercourse") ?? featuresOf(previous, "watercourse")[0];
+        const waterZone = zonesIn.find((z) => z.role === "water" && shapePolygon.has(z.id));
+        if (water2?.path?.length >= 2) {
+          const R = randOf(`${seed}/shore/${f.id}`);
+          const shift = (0.4 + R() * 0.3) * (water2.width ?? S * WIDTH_RATIO.medium);
+          const nx = -(water2.path[1].y - water2.path[0].y), ny = water2.path[1].x - water2.path[0].x, len = Math.hypot(nx, ny) || 1;
+          const path = water2.path.map((p) => pt2(clamp(p.x + nx / len * shift, 0, W), clamp(p.y + ny / len * shift, 0, H)));
+          pushFeature({ ...base, path, width: water2.width ?? S * WIDTH_RATIO.medium });
+          continue;
+        }
+        if (waterZone) {
+          const path = shapePolygon.get(waterZone.id).map((p) => pt2(p.x, p.y));
+          pushFeature({ ...base, path, zoneId: waterZone.id });
+          continue;
+        }
+        issues.push({ id: f.id, code: "OVERVIEW_FEATURE_NO_BASIS" });
+        continue;
+      }
+      if (f.type === "ridge") {
+        const R = randOf(`${seed}/ridge/${f.id}`);
+        const horizontal = R() < 0.5;
+        const path = [];
+        for (let i = 0; i <= 4; i++) {
+          const t = i / 4;
+          path.push(horizontal ? pt2(box.x0 + (box.x1 - box.x0) * t, box.y0 + (box.y1 - box.y0) * (0.22 + R() * 0.12)) : pt2(box.x0 + (box.x1 - box.x0) * (0.22 + R() * 0.12), box.y0 + (box.y1 - box.y0) * t));
+        }
+        pushFeature({ ...base, path, density });
+        continue;
+      }
+      if (f.type === "road_texture") {
+        const R = randOf(`${seed}/texture/${f.id}`);
+        const path = [];
+        for (let i = 0; i <= 3; i++) path.push(pt2(box.x0 + (box.x1 - box.x0) * (i / 3), box.y0 + (box.y1 - box.y0) * (0.3 + R() * 0.4)));
+        pushFeature({ ...base, path, width: S * 4e-3, density });
+        continue;
+      }
+      const source = zonePolygon2 ?? [pt2(box.x0, box.y0), pt2(box.x1, box.y0), pt2(box.x1, box.y1), pt2(box.x0, box.y1)];
+      let polygon2 = f.type === "forest_texture" || f.type === "ruins_scatter" ? inflatePolygon(source, DENSITY_INFLATE[density]) : scalePolygon(source, 0.85);
+      if (f.type === "building_cluster" && !zonePolygon2) {
+        issues.push({ id: f.id, code: "OVERVIEW_FEATURE_NO_BASIS" });
+        continue;
+      }
+      let fitted = fitPolygon(polygon2, box), blocked = false;
+      const avoidRoutes = zonePolygon2 ? clearRoutes.filter((path) => !pointInPolygon(zonePolygon2, path[0]) && !pointInPolygon(zonePolygon2, path[path.length - 1])) : clearRoutes;
+      if (f.zoneId) for (let attempt = 0; attempt < 3 && fitted; attempt++) {
+        const touches = clearZones.some((z) => z.id !== f.zoneId && pointsTouch(fitted, z.polygon)) || clearPoints.some((p) => pointInPolygon(fitted, p)) || avoidRoutes.some((path) => path.some((p, i) => i > 0 && segmentTouchesPolygon(path[i - 1], p, fitted)));
+        if (!touches) break;
+        blocked = attempt === 2;
+        fitted = fitPolygon(scalePolygon(fitted, 0.7), box);
+      }
+      if (!fitted || fitted.length < 3) {
+        issues.push({ id: f.id, code: "OVERVIEW_FEATURE_GEOMETRY_INVALID" });
+        continue;
+      }
+      if (blocked) {
+        issues.push({ id: f.id, code: "OVERVIEW_FEATURE_BLOCKED" });
+        continue;
+      }
+      pushFeature({ ...base, polygon: fitted });
+    }
+    return {
+      ok: true,
+      kind: "overview",
+      id: spec.id,
+      name: spec.name ?? spec.id,
+      bounds: { x: 0, y: 0, w: W, h: H },
+      surface,
+      pins: ordered3(pins),
+      shapes: ordered3(shapes),
+      routes: ordered3(routes),
+      features: ordered3(features),
+      issues
+    };
+  }
+  function zonePolygon(zone, cx, cy, r, seed) {
+    const R = randOf(`${seed}/zone/${zone.id}`);
+    const count = 8 + Math.floor(R() * 5);
+    const rounded = URBAN_ROLES.has(String(zone.role));
+    const points = [];
+    for (let i = 0; i < count; i++) {
+      const angle = i / count * Math.PI * 2 + (rounded ? Math.PI / count : 0);
+      const jitter = rounded ? 1 + (R() - 0.5) * 0.16 : 1 + (R() - 0.5) * 0.44;
+      points.push(pt2(cx + Math.cos(angle) * r * jitter, cy + Math.sin(angle) * r * jitter));
+    }
+    return points;
+  }
+  function pointsTouch(a, b) {
+    return a.some((p) => pointInPolygon(b, p)) || b.some((p) => pointInPolygon(a, p));
+  }
+  function segmentTouchesPolygon(a, b, poly) {
+    if (pointInPolygon(poly, a) || pointInPolygon(poly, b)) return true;
+    const cross = (o, p, q) => (p.x - o.x) * (q.y - o.y) - (p.y - o.y) * (q.x - o.x);
+    for (let i = 0; i < poly.length; i++) {
+      const c = poly[i], d = poly[(i + 1) % poly.length];
+      if (cross(a, b, c) * cross(a, b, d) < 0 && cross(c, d, a) * cross(c, d, b) < 0) return true;
+    }
+    return false;
+  }
+
+  // vendor/atlas-spatial/generation.mjs
+  var label = (v) => typeof v === "string" ? v.slice(0, 120) : "";
+  var ids = (v) => new Set(v instanceof Set ? v : Array.isArray(v) ? v : []);
+  var sort = (rows4) => rows4.sort((a, b) => a.id.localeCompare(b.id, "en"));
+  function setup(value, context, kind) {
+    const scope = normalizeScope(context.scope), input = parseWholeArguments(value), map = context.map;
+    if (!plain(map) || typeof map.id !== "string" || !map.id) throw new Error("MAP_CONTEXT_REQUIRED");
+    if (input.mapId !== void 0 && input.mapId !== map.id) throw new Error("MAP_ID_MISMATCH");
+    if (input.id !== void 0 && input.id !== map.id) throw new Error("MAP_ID_MISMATCH");
+    if (context.currentScope && !same(context.currentScope, scope)) throw new Error("STALE_SCOPE");
+    const known = { locations: ids(context.entities?.locations), characters: ids(context.entities?.characters), items: ids(context.entities?.items), routes: ids(context.entities?.routes) };
+    let w = input.width, h = input.height, mpp = map.metersPerCell, metricProposal = null, units = "meters";
+    const f = map.frame || {}, cols2 = f.cols ?? f.reference_width_cells, rows4 = f.rows ?? f.reference_height_cells;
+    const hasFrame = finite(cols2) && cols2 > 0 && finite(rows4) && rows4 > 0, calibrated = finite(mpp) && mpp > 0;
+    if (!calibrated && map.scaleLocked) throw new Error("SCALE_LOCKED_UNCALIBRATED");
+    if (kind === "overview") {
+      if (!hasFrame) throw new Error("FRAME_REQUIRED_FOR_OVERVIEW");
+      if (calibrated) {
+        w = cols2 * mpp;
+        h = rows4 * mpp;
+        units = "meters";
+      } else {
+        w = cols2;
+        h = rows4;
+        units = "cells";
+        metricProposal = null;
+      }
+    } else {
+      if (calibrated && hasFrame) {
+        w = cols2 * mpp;
+        h = rows4 * mpp;
+      }
+      if (!finite(w) || !finite(h) || w <= 0 || h <= 0) throw new Error("EXTENT_REQUIRED");
+      if (!calibrated) {
+        if (!hasFrame) throw new Error("FRAME_REQUIRED_FOR_CALIBRATION");
+        const a = w / cols2, b = h / rows4;
+        if (Math.abs(a - b) / Math.max(a, b) > 0.01) throw new Error("SCALE_ASPECT_CONFLICT");
+        mpp = a;
+        metricProposal = { metersPerCell: mpp, scaleQuality: "estimated", basis: { source: "layout-extent", widthM: w, heightM: h } };
+      }
+    }
+    if (kind === "floor" && (w > LIMITS.floorSide || h > LIMITS.floorSide) || kind === "city" && (w > LIMITS.citySide || h > LIMITS.citySide)) throw new Error("EXTENT_TOO_LARGE");
+    const issues = [], spec = { id: map.id, parentId: map.containerLocationId ?? null, name: label(map.name) || label(input.name) || map.id, width: w, height: h };
+    return { scope, input, map, known, spec, issues, mpp, units, metricProposal, previous: context.previousScene ?? null };
+  }
+  var same = (a, b) => stable(normalizeScope(a)) === stable(normalizeScope(b));
+  function collection(s, key, limit, kind, normalize2) {
+    const values = s.input[key] ?? [];
+    if (!Array.isArray(values) || values.length > limit) throw new Error("COLLECTION_LIMIT:" + key);
+    const seen = /* @__PURE__ */ new Set(), out = [];
+    for (let n = 0; n < values.length; n++) {
+      const raw = values[n], path = "$." + key + "[" + n + "]";
+      if (!plain(raw) || typeof raw.id !== "string" || !raw.id || raw.id.length > 160 || seen.has(raw.id)) {
+        s.issues.push(diagnostic("ENTITY_ID_INVALID", path, "缺少标识或标识重复"));
+        continue;
+      }
+      seen.add(raw.id);
+      if (kind && !s.known[kind].has(raw.id)) {
+        s.issues.push(diagnostic("ENTITY_REF_UNKNOWN", path + ".id", "实体不在程序提供的当前分支引用表中", { entityId: raw.id }));
+        continue;
+      }
+      try {
+        const row2 = normalize2(raw);
+        out.push({ ...row2, id: raw.id, name: label(raw.name) || raw.id });
+      } catch (e) {
+        s.issues.push(diagnostic(String(e.message), path, "本项约束不可用，其他独立项继续处理", { entityId: raw.id }));
+      }
+    }
+    return sort(out);
+  }
+  var MERGEABLE_KEYS = ["rooms", "contents", "actors", "items", "districts", "buildings", "zones", "links", "features"];
+  function deletionSet(s, key) {
+    const raw = s.input.deletes;
+    if (raw === void 0 || raw === null) return /* @__PURE__ */ new Set();
+    if (!plain(raw)) {
+      s.issues.push(diagnostic("DELETE_SHAPE_INVALID", "$.deletes", "deletes 必须是集合名到字符串 ID 数组的对象", { severity: "warning" }));
+      return /* @__PURE__ */ new Set();
+    }
+    const out = /* @__PURE__ */ new Set();
+    for (const [k, v] of Object.entries(raw)) {
+      if (!MERGEABLE_KEYS.includes(k)) {
+        s.issues.push(diagnostic("DELETE_TARGET_UNKNOWN", "$.deletes." + k, "未知删除目标集合", { severity: "warning" }));
+        continue;
+      }
+      if (k !== key) continue;
+      if (!Array.isArray(v) || !v.every((id) => typeof id === "string" && id)) {
+        s.issues.push(diagnostic("DELETE_SHAPE_INVALID", "$.deletes." + k, "删除列表必须是字符串 ID 数组", { severity: "warning" }));
+        continue;
+      }
+      for (const id of v) out.add(id);
+    }
+    return out;
+  }
+  function collectAndMerge(s, key, limit, kind, normalize2) {
+    const requestRows = collection(s, key, limit, kind, normalize2);
+    if (s.input.rebuild === true) return requestRows;
+    const saved = s.previous?.constraints;
+    if (!plain(saved) || !Array.isArray(saved[key])) return requestRows;
+    const del = deletionSet(s, key), out = new Map(requestRows.map((r) => [r.id, r]));
+    for (const raw of saved[key]) {
+      if (!plain(raw) || typeof raw.id !== "string" || !raw.id || del.has(raw.id) || out.has(raw.id)) continue;
+      if (kind && !s.known[kind].has(raw.id)) {
+        s.issues.push(diagnostic("ENTITY_REF_UNKNOWN", "$.previousScene.constraints." + key + ".id", "已保存约束引用的实体不在当前分支引用表中", { entityId: raw.id }));
+        continue;
+      }
+      try {
+        const row2 = normalize2(raw);
+        out.set(raw.id, { ...row2, id: raw.id, name: label(raw.name) || raw.id });
+      } catch (e) {
+        s.issues.push(diagnostic(String(e.message), "$.previousScene.constraints." + key, "已保存约束条目不可用，其他独立项继续处理", { entityId: raw.id }));
+      }
+    }
+    if (out.size > limit) {
+      s.issues.push(diagnostic("COLLECTION_LIMIT:" + key, "$." + key, "合并已保存约束后超出预算，仅保留本次请求条目"));
+      return requestRows;
+    }
+    return sort([...out.values()]);
+  }
+  function dimensions(raw) {
+    if (!finite(raw.w) || !finite(raw.h) || raw.w <= 0 || raw.h <= 0) throw new Error("DIMENSION_INVALID");
+    return { w: raw.w, h: raw.h };
+  }
+  var FLOOR_FURNITURE_TYPES = ["shelf", "desk", "bench", "reading", "stairs", "table", "chair", "bed", "cabinet", "doorway", "light", "decor"];
+  function trustedLock(ctx, type, id) {
+    const v = ctx.locks?.[type]?.[id];
+    return v && finite(v.x) && finite(v.y) ? { x: v.x, y: v.y } : null;
+  }
+  function finish(s, ctx, layoutFn) {
+    const previous = s.previous;
+    if (previous && (previous.mapId !== s.map.id || previous.branchId !== s.scope.branchId)) return failure("SCENE_SCOPE_MISMATCH", "$.previousScene", "旧场景属于另一地图或分支");
+    if (previous && s.input.rebuild !== true && !plain(previous.constraints)) s.issues.push(diagnostic("CONSTRAINTS_LEGACY", "$.previousScene", "旧场景缺少受控约束字段，本次按整图重建语义处理", { severity: "warning" }));
+    const inputSignature = stable(s.spec);
+    if (previous?.inputSignature === inputSignature && !previous.layout?.issues?.length && checkSceneDocument(previous).length === 0) {
+      return { ok: true, status: s.issues.length ? "partial" : "reused", scene: clone(previous), issues: s.issues, guard: { scope: s.scope, mapId: s.map.id, inputSignature }, metricProposal: s.metricProposal };
+    }
+    const layout = layoutFn(s.spec, previous?.layout ?? null);
+    for (const issue17 of layout.issues ?? []) s.issues.push(diagnostic(issue17.code, "$.layout", "空间约束未满足", { entityId: issue17.id ?? null }));
+    if (!layout.ok) return { ok: false, status: "failed", scene: null, kept: previous ? clone(previous) : null, issues: s.issues, guard: { scope: s.scope, mapId: s.map.id, inputSignature } };
+    for (const a of layout.actors ?? []) if (!ctx.locks?.actors?.[a.id]) a.quality = "layout";
+    const scene = { kind: SCENE_KIND, version: SCENE_VERSION, generator: KIT_VERSION, mapId: s.map.id, branchId: s.scope.branchId, sourceRevision: s.scope.revision, units: s.units ?? "meters", metersPerCell: (s.units ?? "meters") === "cells" ? null : s.mpp, metricQuality: (s.units ?? "meters") === "cells" ? "uncalibrated" : s.metricProposal ? "estimated" : s.map.scaleQuality ?? "estimated", inputSignature, layout };
+    if (Array.isArray(s.constraintKeys) && s.constraintKeys.length) scene.constraints = Object.fromEntries(s.constraintKeys.filter((k) => s.spec[k] !== void 0).map((k) => [k, clone(s.spec[k])]));
+    const checks = checkSceneDocument(scene);
+    if (checks.length) return { ok: false, status: "failed", scene: null, kept: previous ? clone(previous) : null, issues: [...s.issues, ...checks] };
+    return { ok: true, status: s.issues.length ? "partial" : "generated", scene, issues: s.issues, guard: { scope: s.scope, mapId: s.map.id, inputSignature }, metricProposal: s.metricProposal };
+  }
+  function generateFloor(value, context) {
+    let s = null;
+    try {
+      s = setup(value, context, "floor");
+      const ctx = context;
+      s.constraintKeys = ["corridorWidth", "rooms", "contents", "actors", "items"];
+      s.spec.corridorWidth = finite(s.input.corridorWidth) ? s.input.corridorWidth : 2;
+      s.spec.rooms = collectAndMerge(s, "rooms", LIMITS.rooms, "locations", (r) => {
+        const d = ctx.locks?.rooms?.[r.id]?.w > 0 ? dimensions(ctx.locks.rooms[r.id]) : dimensions(r);
+        if (d.w > LIMITS.roomSide || d.h > LIMITS.roomSide || !["north", "south"].includes(r.side)) throw new Error("ROOM_CONSTRAINT_UNSUPPORTED");
+        const locked = trustedLock(ctx, "rooms", r.id);
+        return { ...d, side: r.side, ...locked ? { locked } : {} };
+      });
+      s.spec.singleRoom = s.spec.rooms.length === 1 && s.spec.rooms[0].id === s.map.containerLocationId;
+      if (!s.spec.rooms.length) {
+        const failed = failure("NO_VALID_ROOMS", "$.rooms", "没有可生成的有效房间", { kept: s.previous ? clone(s.previous) : null });
+        failed.issues.push(...s.issues);
+        return failed;
+      }
+      if (s.spec.rooms.reduce((n, r) => n + Math.ceil(r.w / 0.2) * Math.ceil(r.h / 0.2), 0) > LIMITS.navigationCells) throw new Error("NAVIGATION_BUDGET_EXCEEDED");
+      const roomIds = new Set(s.spec.rooms.map((r) => r.id));
+      s.spec.contents = collectAndMerge(s, "contents", LIMITS.contents, null, (r) => {
+        if (!roomIds.has(r.roomId)) throw new Error("ROOM_REF_UNKNOWN");
+        if (!FLOOR_FURNITURE_TYPES.includes(r.type)) throw new Error("FURNITURE_TYPE_UNSUPPORTED");
+        const locked = trustedLock(ctx, "contents", r.id);
+        return { ...dimensions(r), roomId: r.roomId, type: r.type, ...locked ? { locked } : {} };
+      });
+      const groups = new Set(s.spec.contents.map((g) => g.id));
+      s.spec.actors = collectAndMerge(s, "actors", LIMITS.actors, "characters", (r) => {
+        if (!roomIds.has(r.roomId)) throw new Error("ROOM_REF_UNKNOWN");
+        if (r.near && !groups.has(r.near)) throw new Error("NEAR_REF_UNKNOWN");
+        const position = trustedLock(ctx, "actors", r.id);
+        return { roomId: r.roomId, ...r.near ? { near: r.near } : {}, ...position ? { position } : {} };
+      });
+      s.spec.items = collectAndMerge(s, "items", LIMITS.items, "items", (r) => {
+        if (!groups.has(r.on)) throw new Error("ITEM_SUPPORT_UNKNOWN");
+        return { on: r.on };
+      });
+      return finish(s, ctx, floor2);
+    } catch (e) {
+      return failure(String(e.message), "$", "生成请求不可用；保留已保存布局", { kept: context?.previousScene ? clone(context.previousScene) : null });
+    }
+  }
+  function generateCity(value, context) {
+    let s = null;
+    try {
+      s = setup(value, context, "city");
+      const ctx = context;
+      s.constraintKeys = ["riverWidth", "seed", "blocksPerDistrict", "districts", "buildings", "enclosure"];
+      if (s.input.riverWidth !== void 0 && (!finite(s.input.riverWidth) || s.input.riverWidth < 0)) return failure("RIVER_CONSTRAINT_INVALID", "$.riverWidth", "河宽应为非负数，零表示无水系", { kept: s.previous ? clone(s.previous) : null });
+      s.spec.riverWidth = s.input.riverWidth ?? 0;
+      s.spec.seed = label(context.seed) || s.map.id;
+      s.spec.blocksPerDistrict = Number.isInteger(s.input.blocksPerDistrict) ? Math.max(0, Math.min(LIMITS.blocksPerDistrict, s.input.blocksPerDistrict)) : 8;
+      if (s.input.enclosure !== void 0 && !CITY_ENCLOSURES.includes(s.input.enclosure)) s.issues.push(diagnostic("ENCLOSURE_INVALID", "$.enclosure", "城市边界策略只能是 open 或 wall；已按既有/默认策略处理", { severity: "warning" }));
+      s.spec.enclosure = CITY_ENCLOSURES.includes(s.input.enclosure) ? s.input.enclosure : s.previous ? s.previous.constraints?.enclosure ?? "wall" : "open";
+      s.spec.districts = collectAndMerge(s, "districts", LIMITS.districts, "locations", (r) => {
+        if (!["west", "east"].includes(r.bank) || !finite(r.order)) throw new Error("DISTRICT_CONSTRAINT_INVALID");
+        return { bank: r.bank, order: r.order };
+      });
+      const districtIds = new Set(s.spec.districts.map((d) => d.id));
+      s.spec.buildings = collectAndMerge(s, "buildings", LIMITS.buildings, "locations", (r) => {
+        if (!districtIds.has(r.districtId)) throw new Error("DISTRICT_REF_UNKNOWN");
+        const locked = trustedLock(ctx, "buildings", r.id);
+        return { ...ctx.locks?.buildings?.[r.id]?.w > 0 ? dimensions(ctx.locks.buildings[r.id]) : dimensions(r), districtId: r.districtId, ...locked ? { locked } : {} };
+      });
+      return finish(s, ctx, city);
+    } catch (e) {
+      return failure(String(e.message), "$", "生成请求不可用；保留已保存布局", { kept: context?.previousScene ? clone(context.previousScene) : null });
+    }
+  }
+  function generateOverview(value, context) {
+    let s = null;
+    try {
+      s = setup(value, context, "overview");
+      const ctx = context;
+      s.constraintKeys = ["surface", "zones", "links", "features"];
+      s.spec.mapId = s.map.id;
+      s.spec.seed = label(context.seed) || s.map.id;
+      if (s.input.seed !== void 0 && s.input.seed !== s.spec.seed) s.issues.push(diagnostic("SEED_OVERRIDDEN", "$.seed", "seed 由程序按地图给定，模型提供的值已忽略；已保存几何不会因此重排", { severity: "warning" }));
+      s.spec.units = s.units;
+      {
+        const prevScene = context?.previousScene;
+        const flips = prevScene && prevScene.units !== s.units;
+        s.spec.unitScale = !flips ? 1 : s.units === "meters" ? finite(s.mpp) && s.mpp > 0 ? s.mpp : 1 : finite(s.mpp) && s.mpp > 0 ? 1 / s.mpp : 1;
+      }
+      if (!OVERVIEW_SURFACES.includes(s.input.surface)) {
+        if (s.input.surface !== void 0) s.issues.push(diagnostic("SURFACE_INVALID", "$.surface", "概览表面类型非法；已按 mixed 处理", { severity: "warning" }));
+        s.spec.surface = "mixed";
+      } else s.spec.surface = s.input.surface;
+      if (s.input.width !== void 0 || s.input.height !== void 0) s.issues.push(diagnostic("EXTENT_OVERRIDDEN", "$.width", "概览幅面由程序按地图框架给定，模型提供的 width/height 已忽略", { severity: "warning" }));
+      const pointOf = (id) => {
+        const p = ctx.locks?.points?.[id];
+        return p && finite(p.x) && finite(p.y) ? { x: p.x, y: p.y } : null;
+      };
+      s.spec.zones = collectAndMerge(s, "zones", LIMITS.zones, "locations", (r) => {
+        const out = {};
+        if (r.role !== void 0) {
+          if (!OVERVIEW_ZONE_ROLES.includes(r.role)) throw new Error("ZONE_ROLE_UNSUPPORTED");
+          out.role = r.role;
+        }
+        if (r.size !== void 0) {
+          if (!OVERVIEW_ZONE_SIZES.includes(r.size)) throw new Error("ZONE_SIZE_UNSUPPORTED");
+          out.size = r.size;
+        }
+        if (r.sector !== void 0) {
+          if (![...OVERVIEW_SECTORS, "center"].includes(r.sector)) throw new Error("ZONE_SECTOR_UNSUPPORTED");
+          out.sector = r.sector;
+        }
+        if (typeof r.near === "string" && r.near) out.near = r.near;
+        const locked = pointOf(r.id);
+        if (locked) out.locked = locked;
+        const area = ctx.locks?.areas?.[r.id];
+        if (area?.points?.length >= 3) out.lockedPolygon = area.points.map((p) => ({ x: p.x, y: p.y }));
+        if (ctx.placement?.[r.id] === "proxy") out.placement = "proxy";
+        return out;
+      });
+      const zoneIds = new Set(s.spec.zones.map((z) => z.id));
+      for (const z of s.spec.zones) if (z.near && !zoneIds.has(z.near) && !s.known.locations.has(z.near)) s.issues.push(diagnostic("ZONE_NEAR_UNKNOWN", "$.zones", "near 指向的地点不在本分支引用表中，已忽略该提示", { severity: "warning", entityId: z.id }));
+      s.spec.links = collectAndMerge(s, "links", LIMITS.links, "routes", (r) => {
+        const row2 = ctx.routesById?.[r.id], locked = ctx.locks?.routes?.[r.id], out = {};
+        const from = row2?.from_location_id ?? null, to = row2?.to_location_id ?? null;
+        if (from) out.fromLocationId = from;
+        if (to) out.toLocationId = to;
+        const fp = from ? pointOf(from) : null, tp = to ? pointOf(to) : null;
+        if (fp) out.fromSite = fp;
+        if (tp) out.toSite = tp;
+        if (locked?.path?.length >= 2) out.locked = { quality: locked.quality === "confirmed" ? "confirmed" : "estimated", path: locked.path, fromLocationId: locked.fromLocationId ?? from, toLocationId: locked.toLocationId ?? to };
+        return out;
+      });
+      s.spec.features = collectAndMerge(s, "features", LIMITS.features, null, (r) => {
+        if (!OVERVIEW_FEATURE_TYPES.includes(r.type)) throw new Error("FEATURE_TYPE_UNSUPPORTED");
+        const out = { type: r.type };
+        if (typeof r.zoneId === "string" && r.zoneId) out.zoneId = r.zoneId;
+        if (r.density !== void 0) {
+          if (!OVERVIEW_DENSITIES.includes(r.density)) throw new Error("FEATURE_DENSITY_UNSUPPORTED");
+          out.density = r.density;
+        }
+        if (r.type === "watercourse") {
+          if (!OVERVIEW_SECTORS.includes(r.fromSector) || !OVERVIEW_SECTORS.includes(r.toSector) || r.fromSector === r.toSector) throw new Error("WATERCOURSE_SECTOR_REQUIRED");
+          out.fromSector = r.fromSector;
+          out.toSector = r.toSector;
+          if (r.widthClass !== void 0) {
+            if (!OVERVIEW_WIDTH_CLASSES.includes(r.widthClass)) throw new Error("WATERCOURSE_WIDTH_UNSUPPORTED");
+            out.widthClass = r.widthClass;
+          }
+        } else {
+          if (r.fromSector !== void 0 || r.toSector !== void 0) throw new Error("FEATURE_SECTOR_UNSUPPORTED");
+          if (OVERVIEW_WIDTH_CLASSES.includes(r.widthClass)) out.widthClass = r.widthClass;
+        }
+        return out;
+      });
+      s.spec.features = s.spec.features.filter((f) => {
+        if (!f.zoneId || zoneIds.has(f.zoneId)) return true;
+        s.issues.push(diagnostic("FEATURE_ZONE_UNKNOWN", "$.features", "feature 指向的 zone 不在本图约束中，已跳过该装饰", { severity: "warning", entityId: f.id }));
+        return false;
+      });
+      return finish(s, ctx, overview);
+    } catch (e) {
+      return failure(String(e.message), "$", "生成请求不可用；保留已保存布局", { kept: context?.previousScene ? clone(context.previousScene) : null });
+    }
+  }
+
+  // vendor/atlas-spatial/placement.mjs
+  function placeMarkers({ region, markers, obstacles = [], previous = [], step = 0.25, clearance = 0.25 } = {}) {
+    if (!Array.isArray(region) || region.length < 3 || !region.every((p) => finite(p.x) && finite(p.y)) || !Array.isArray(markers) || markers.length > LIMITS.markers || !finite(step) || step <= 0 || !finite(clearance) || clearance <= 0) return failure("PLACEMENT_INPUT_INVALID", "$", "需要有效多边形、标点列表、步长和间距");
+    const xs = region.map((p) => p.x), ys = region.map((p) => p.y), minX = Math.min(...xs), minY = Math.min(...ys), maxX = Math.max(...xs), maxY = Math.max(...ys);
+    if (Math.ceil((maxX - minX) / step) * Math.ceil((maxY - minY) / step) > 2e5) return failure("PLACEMENT_BUDGET_EXCEEDED", "$.step", "提高扫描步长或缩小本次摆放区域");
+    const out = [], issues = [], seen = /* @__PURE__ */ new Set(), valid = [];
+    for (const m of markers) {
+      if (!m || typeof m.id !== "string" || seen.has(m.id)) {
+        issues.push(diagnostic("MARKER_ID_INVALID", "$.markers", "标识缺失或重复"));
+        continue;
+      }
+      seen.add(m.id);
+      valid.push(m);
+    }
+    const free = (p, r = clearance) => finite(p.x) && finite(p.y) && polygonContains(region, p) && [{ x: p.x + r, y: p.y }, { x: p.x - r, y: p.y }, { x: p.x, y: p.y + r }, { x: p.x, y: p.y - r }].every((q) => polygonContains(region, q)) && !obstacles.some((o) => p.x >= o.x - r && p.x <= o.x + o.w + r && p.y >= o.y - r && p.y <= o.y + o.h + r) && !out.some((o) => distance(o, p) < (o.radius ?? clearance) + r);
+    const ordered4 = [...valid].sort((a, b) => Number(!!b.locked) - Number(!!a.locked) || a.id.localeCompare(b.id, "en"));
+    const pending = [];
+    for (const m of ordered4) {
+      const old = previous.find((p2) => p2.id === m.id && p2.locationId === m.locationId), p = m.locked || old;
+      if (p && free(p, m.radius ?? clearance)) out.push({ ...m, x: p.x, y: p.y, quality: m.locked ? "exact" : "layout" });
+      else if (m.locked) issues.push(diagnostic("MARKER_LOCK_CONFLICT", "$.markers", "确认点不能放在区域外或障碍内", { entityId: m.id }));
+      else pending.push(m);
+    }
+    for (const m of pending) {
+      const target = m.near && finite(m.near.x) && finite(m.near.y) ? m.near : { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
+      let best = null, score = Infinity;
+      for (let y = minY + clearance; y < maxY; y += step) for (let x = minX + clearance; x < maxX; x += step) {
+        const q = { x, y };
+        if (free(q, m.radius ?? clearance)) {
+          const d = distance(q, target);
+          if (d < score) {
+            score = d;
+            best = q;
+          }
+        }
+      }
+      if (best) out.push({ ...m, ...best, quality: "layout" });
+      else issues.push(diagnostic("MARKER_NO_SPACE", "$.markers", "没有可摆放空间，保留名单", { entityId: m.id }));
+    }
+    return { ok: true, status: issues.length ? "partial" : "generated", markers: out, issues };
+  }
+
+  // vendor/atlas-spatial/storage.mjs
+  function record(v) {
+    if (typeof v === "string") return JSON.parse(v);
+    if (plain(v)) return clone(v);
+    throw new Error("FRAME_INVALID");
+  }
+  function readSceneFrame(frame, { branchId, mapId } = {}) {
+    try {
+      const doc = record(frame)[FRAME_SCENE_KEY];
+      if (doc === void 0) return { ok: true, scene: null, issues: [] };
+      const issues = checkSceneDocument(doc);
+      if (doc.branchId !== branchId || doc.mapId !== mapId) issues.push(diagnostic("SCENE_SCOPE_MISMATCH", "$.atlasScene", "场景与当前地图/分支不匹配"));
+      return { ok: issues.length === 0, scene: issues.length ? null : clone(doc), issues };
+    } catch {
+      return failure("FRAME_JSON_INVALID", "$.frame_json", "地图框架无法读取，未覆盖原记录");
+    }
+  }
+  function buildSceneMutation({ result, mapRow, scope, currentScope, turnId, operationId, expectedRowRev } = {}) {
+    try {
+      if (!sameScope(scope, currentScope) || !sameScope(result?.guard?.scope, scope)) return failure("STALE_SCOPE", "$.scope", "生成期间会话、视角或修订发生变化");
+      if (!result?.ok || !result.scene) return failure("SCENE_RESULT_FAILED", "$.result", "失败的布局不得覆盖原场景");
+      if (mapRow?.branch_id !== scope.branchId || mapRow?.id !== result.scene.mapId) return failure("SCENE_SCOPE_MISMATCH", "$.mapRow", "地图行不属于本次生成作用域");
+      if (mapRow.row_rev !== expectedRowRev) return failure("STALE_ROW", "$.expectedRowRev", "地图行已经被其他变更修改");
+      if (typeof turnId !== "string" || !turnId || typeof operationId !== "string" || !operationId) return failure("COMMIT_ANCHOR_REQUIRED", "$.turnId", "需要程序分配的楼层与操作标识");
+      const checks = checkSceneDocument(result.scene);
+      if (checks.length) return { ok: false, status: "failed", issues: checks };
+      const before = clone(mapRow), frame = record(mapRow.frame_json), old = frame[FRAME_SCENE_KEY];
+      if (stable(old ?? null) === stable(result.scene) && !frame.atlasLayoutRequest) return { ok: true, status: "duplicate", mutation: null, issues: result.issues ?? [] };
+      frame[FRAME_SCENE_KEY] = clone(result.scene);
+      delete frame.atlasLayoutRequest;
+      if (bytes(frame) > LIMITS.sceneBytes + 65536) return failure("FRAME_TOO_LARGE", "$.frame_json", "框架与细节总量超限，保留原行");
+      const after = { ...before, frame_json: frame, row_rev: before.row_rev + 1, updated_turn_id: turnId };
+      const metric = result.metricProposal;
+      if (metric) {
+        if (Number(before.scale_locked) === 1) return failure("SCALE_LOCKED", "$.mapRow.scale_locked", "不能覆盖锁定比例尺");
+        after.meters_per_cell = metric.metersPerCell;
+        after.scale_quality = metric.scaleQuality;
+        after.scale_basis_json = metric.basis;
+        after.calibration_rev = Number(before.calibration_rev ?? 0) + 1;
+      }
+      return { ok: true, status: "prepared", issues: result.issues ?? [], mutation: { table: "maps", rowId: before.id, before, after, sourceOpIds: [operationId], basis: { kind: "layout", generator: result.scene.generator, mapId: before.id, sourceRevision: scope.revision } } };
+    } catch (e) {
+      return failure(String(e.message), "$.mapRow", "无法构造地图变更，原行未修改");
+    }
+  }
+  function sceneLocationGeometry(scene) {
+    const scale = scene.units === "cells" ? 1 : scene.metersPerCell;
+    if (!(scale > 0)) return [];
+    const layout = scene.layout;
+    const parts = layout.kind === "floor" ? layout.rooms : layout.kind === "city" ? [...layout.districts, ...layout.buildings.filter((b) => !b.decorative)] : (layout.shapes ?? []).filter((s) => s && s.placement !== "proxy");
+    const centroid2 = (polygon2) => {
+      let x = 0, y = 0;
+      for (const q of polygon2) {
+        x += q.x;
+        y += q.y;
+      }
+      return { x: x / polygon2.length, y: y / polygon2.length };
+    };
+    return parts.map((p) => {
+      const polygon2 = Array.isArray(p.polygon) ? p.polygon.map((q) => Array.isArray(q) ? { x: q[0], y: q[1] } : q) : [{ x: p.x, y: p.y }, { x: p.x + p.w, y: p.y }, { x: p.x + p.w, y: p.y + p.h }, { x: p.x, y: p.y + p.h }];
+      const locked = p.locked && Number.isFinite(p.locked.x) && Number.isFinite(p.locked.y) ? p.locked : null;
+      const point = locked ?? p.site ?? centroid2(polygon2);
+      const confirmed = p.quality === "confirmed" || !!locked;
+      return { entityId: p.id, mapId: scene.mapId, gridX: point.x / scale, gridY: point.y / scale, precision: confirmed ? "exact" : "layout", area: { kind: "polygon", points: polygon2.map((q) => ({ x: q.x / scale, y: q.y / scale })), quality: p.quality === "confirmed" ? "confirmed" : "estimated", source: p.quality === "confirmed" ? "author" : "estimate" } };
+    });
+  }
+
+  // vendor/atlas-spatial/view-adapter.mjs
+  function projectMapView({ view, mapId, scope } = {}) {
+    try {
+      scope = normalizeScope(scope);
+    } catch {
+      return failure("SCOPE_INVALID", "$.scope", "缺少当前 UI 作用域");
+    }
+    if (view?.branchId !== scope.branchId || view?.revision !== scope.revision || view?.metadata?.stale) return failure("VIEW_STALE", "$.revision", "旧视图不能更新当前地图");
+    const raw = view.items?.find((m) => m.mapId === mapId);
+    if (!raw) return { ok: true, status: "empty", scene: null, coarseList: [], issues: [] };
+    const mpp = finite(raw.metersPerCell) && raw.metersPerCell > 0 ? raw.metersPerCell : null, k = mpp ?? 1, frame = raw.frames?.frame ?? {}, issues = [];
+    const frameWidth = frame.cols ?? frame.reference_width_cells, frameHeight = frame.rows ?? frame.reference_height_cells;
+    const pins = [];
+    const geometry = (value, path) => {
+      if (typeof value !== "string") return value;
+      try {
+        return JSON.parse(value);
+      } catch {
+        issues.push(diagnostic("GEOMETRY_JSON_INVALID", path, "此项轮廓不可读，保留其他标点", { severity: "warning" }));
+        return null;
+      }
+    };
+    for (const p of raw.points ?? []) {
+      if (scope.viewMode === "pov" && p.hidden === true) continue;
+      if (!finite(p.x) || !finite(p.y)) {
+        issues.push(diagnostic("POINT_UNLOCATED", "$.points", "坐标未知，保留目录，不制造零点", { entityId: p.entityId, severity: "warning" }));
+        continue;
+      }
+      if (!["location", "character", "item"].includes(p.kind)) continue;
+      let polygon2 = null;
+      const area = geometry(p.area, "$.points.area");
+      if (area?.kind === "polygon" && Array.isArray(area.points) && area.points.length >= 3 && area.points.every((q) => finite(q.x) && finite(q.y))) polygon2 = area.points.map((q) => ({ x: q.x * k, y: q.y * k }));
+      pins.push({ id: p.entityId, entityId: p.entityId, name: String(p.name ?? ""), type: p.kind === "character" ? "person" : p.kind, mapId, x: p.x * k, y: p.y * k, quality: p.markerQuality ?? p.precision ?? "approximate", locationId: p.locationId ?? null, radius: finite(p.radius) ? p.radius * k : null, polygon: polygon2 });
+    }
+    const xs = pins.map((p) => p.x), ys = pins.map((p) => p.y);
+    const bounds = finite(frameWidth) && frameWidth > 0 && finite(frameHeight) && frameHeight > 0 ? { x: finite(frame.origin_x) ? frame.origin_x * k : 0, y: finite(frame.origin_y) ? frame.origin_y * k : 0, w: frameWidth * k, h: frameHeight * k } : { x: Math.min(0, ...xs) - k, y: Math.min(0, ...ys) - k, w: Math.max(k, Math.max(0, ...xs) - Math.min(0, ...xs) + 2 * k), h: Math.max(k, Math.max(0, ...ys) - Math.min(0, ...ys) + 2 * k) };
+    const routes = [];
+    for (const r of raw.routes ?? []) {
+      const geom = geometry(r.geometry, "$.routes.geometry");
+      if (!plain(geom)) continue;
+      let pts = null, mapRef = null;
+      if (Array.isArray(geom.coordinates)) {
+        if (geom.kind !== "line") {
+          issues.push(diagnostic("ROUTE_GEOMETRY_KIND", "$.routes.geometry", `仅 line 几何可作为行走路线，收到 kind=${String(geom.kind)}`, { severity: "warning", entityId: r.routeId }));
+          continue;
+        }
+        pts = geom.coordinates;
+        mapRef = typeof r.mapId === "string" ? r.mapId : mapId;
+      } else if (Array.isArray(geom.points)) {
+        pts = geom.points;
+        mapRef = typeof geom.mapId === "string" ? geom.mapId : typeof r.mapId === "string" ? r.mapId : mapId;
+      } else {
+        issues.push(diagnostic("ROUTE_GEOMETRY_SHAPE", "$.routes.geometry", "路线几何既无 coordinates 也无 points", { severity: "warning", entityId: r.routeId }));
+        continue;
+      }
+      if (mapRef !== mapId) continue;
+      const coord = (v) => typeof v === "number" && finite(v);
+      if (pts.length < 2 || !pts.every((q) => Array.isArray(q) ? q.length >= 2 && coord(q[0]) && coord(q[1]) : plain(q) && coord(q.x) && coord(q.y))) {
+        issues.push(diagnostic("ROUTE_COORDS_INVALID", "$.routes.geometry", "路线坐标不足或含非有限值，跳过该路线", { severity: "warning", entityId: r.routeId }));
+        continue;
+      }
+      routes.push({
+        id: r.routeId,
+        kind: "route",
+        mapId,
+        path: pts.map((q) => ({ x: (Array.isArray(q) ? Number(q[0]) : q.x) * k, y: (Array.isArray(q) ? Number(q[1]) : q.y) * k })),
+        quality: r.geometryQuality === "confirmed" ? "confirmed" : "estimated",
+        dashed: r.geometryQuality !== "confirmed",
+        progress: null,
+        // 审查必修2：路线可见性依据——端点引用必须随 DTO 下发，POV 过滤据此执行。
+        ...typeof r.fromLocationId === "string" ? { fromLocationId: r.fromLocationId } : {},
+        ...typeof r.toLocationId === "string" ? { toLocationId: r.toLocationId } : {},
+        ...r.hidden === true ? { hidden: true } : {}
+      });
+    }
+    const scene = { kind: SCENE_KIND, version: SCENE_VERSION, generator: "sql-view-adapter/1", mapId, branchId: scope.branchId, sourceRevision: scope.revision, units: mpp ? "meters" : "cells", metersPerCell: mpp, metricQuality: raw.scaleQuality ?? "uncalibrated", layout: { id: mapId, name: raw.name, kind: "overview", bounds, surface: typeof raw.surface === "string" ? raw.surface : "mixed", pins, shapes: pins.filter((p) => p.polygon).map((p) => ({ id: p.id, polygon: p.polygon, name: p.name })), routes, features: [] } };
+    return { ok: true, status: "ready", scene, coarseList: (raw.coarseList ?? []).filter((p) => scope.viewMode === "author" || p.hidden !== true).map(clone), issues };
+  }
+  function filterSceneForView(scene, { scope, visibleLocations = [], visibleCharacters = [], visibleItems = [], names = {} } = {}) {
+    if (checkSceneDocument(scene).length) return failure("SCENE_INVALID", "$", "不能展示损坏的几何文档");
+    if (scene.branchId !== scope?.branchId) return failure("SCENE_SCOPE_MISMATCH", "$.branchId", "场景分支不一致");
+    let d = clone(scene);
+    const L = new Set(visibleLocations), C = new Set(visibleCharacters), I = new Set(visibleItems), author = scope.viewMode === "author";
+    if (!author) {
+      const top = ["kind", "version", "generator", "mapId", "branchId", "sourceRevision", "units", "metersPerCell", "metricQuality"];
+      const keys = { floor: ["id", "name", "kind", "bounds", "corridor", "rooms", "groups", "bodies", "doors", "windows", "lamps", "doorSwings", "actors", "items", "path"], city: ["id", "name", "kind", "bounds", "wall", "origin", "river", "riverPolygon", "districts", "roads", "segments", "gates", "buildings", "dock"], overview: ["id", "name", "kind", "bounds", "surface", "pins", "shapes", "routes", "features"] };
+      const saved = d.layout;
+      d = Object.fromEntries(top.filter((k) => d[k] !== void 0).map((k) => [k, d[k]]));
+      d.layout = Object.fromEntries((keys[saved.kind] ?? []).filter((k) => saved[k] !== void 0).map((k) => [k, saved[k]]));
+    }
+    const s = d.layout;
+    const allowed = (id, type) => author || (type === "person" ? C : type === "item" ? I : L).has(id);
+    const name = (p) => ({ ...p, name: names[p.id] ?? p.name ?? "" });
+    if (s.kind === "floor") {
+      s.rooms = s.rooms.filter((r) => allowed(r.id, "location")).map(name);
+      const rooms = new Set(s.rooms.map((r) => r.id));
+      for (const key of ["groups", "bodies", "doors", "windows", "lamps", "doorSwings"]) s[key] = (s[key] ?? []).filter((p) => rooms.has(p.roomId));
+      s.actors = (s.actors ?? []).filter((p) => rooms.has(p.roomId) && allowed(p.id, "person")).map(name);
+      s.items = (s.items ?? []).filter((p) => rooms.has(p.roomId) && allowed(p.id, "item")).map(name);
+      s.path = [];
+    } else if (s.kind === "city") {
+      s.districts = s.districts.filter((d2) => allowed(d2.id, "location")).map(name);
+      const districts = new Set(s.districts.map((d2) => d2.id));
+      s.buildings = s.buildings.filter((b) => districts.has(b.districtId) && (b.decorative || allowed(b.id, "location"))).map(name);
+      if (!author) {
+        s.roads = s.roads.filter((r) => r.id === "avenue" || [...districts].some((id) => r.id === "road:" + id));
+        const roads = new Set(s.roads.map((r) => r.id));
+        s.segments = s.segments.filter((r) => roads.has(r.roadId));
+      }
+    } else {
+      s.pins = s.pins.filter((p) => allowed(p.id, p.type)).map(name);
+      s.shapes = (s.shapes ?? []).filter((p) => allowed(p.id, "location")).map(name);
+      s.routes = (s.routes ?? []).filter((r) => {
+        if (author) return true;
+        if (r.hidden === true) return false;
+        const endpoints = [r.fromLocationId, r.toLocationId].filter((v) => typeof v === "string" && v);
+        if (!endpoints.length) return false;
+        return endpoints.every((id) => L.has(id));
+      });
+      const visibleZones = new Set(s.shapes.map((x) => x.id));
+      s.features = (s.features ?? []).filter((f) => author || !f.zoneId || visibleZones.has(f.zoneId));
+    }
+    if (!author) d.layout = stripLayoutForPov(s);
+    return { ok: true, scene: d, issues: [] };
+  }
+  var pickPoint = (q) => plain(q) ? { x: q.x, y: q.y } : null;
+  var pickPoints = (v) => Array.isArray(v) ? v.map(pickPoint).filter(Boolean) : [];
+  var pick = (p, ...fields) => {
+    if (!plain(p)) return null;
+    const out = {};
+    for (const f of fields) if (p[f] !== void 0) out[f] = p[f];
+    return out;
+  };
+  function stripLayoutForPov(s) {
+    const sanitize = {
+      floor: {
+        corridor: (p) => pick(p, "x", "y", "w", "h"),
+        rooms: (p) => pick(p, "id", "name", "x", "y", "w", "h", "side"),
+        groups: (p) => ({ ...pick(p, "id", "name", "roomId", "x", "y", "w", "h"), ...Array.isArray(p.bodies) ? { bodies: p.bodies.map((b) => pick(b, "x", "y", "w", "h")).filter(Boolean) } : {} }),
+        bodies: (p) => pick(p, "x", "y", "w", "h", "roomId"),
+        doors: (p) => pick(p, "x", "y", "width", "roomId"),
+        windows: (p) => pick(p, "x", "y", "roomId"),
+        lamps: (p) => pick(p, "x", "y", "roomId"),
+        doorSwings: (p) => pick(p, "x", "y", "w", "h", "roomId"),
+        actors: (p) => pick(p, "id", "name", "roomId", "x", "y", "quality"),
+        items: (p) => pick(p, "id", "name", "roomId", "x", "y", "quality"),
+        path: pickPoints
+      },
+      city: {
+        wall: pickPoints,
+        riverPolygon: pickPoints,
+        origin: (p) => pick(p, "x", "y"),
+        river: (p) => pick(p, "cx", "amplitude", "width", "height"),
+        dock: (p) => pick(p, "x", "y", "width"),
+        districts: (p) => ({ ...pick(p, "id", "name"), ...Array.isArray(p.polygon) ? { polygon: pickPoints(p.polygon) } : {}, ...plain(p.site) ? { site: pickPoint(p.site) } : {} }),
+        roads: (p) => ({ ...pick(p, "id", "name", "roadId", "width"), ...plain(p.a) ? { a: pickPoint(p.a) } : {}, ...plain(p.b) ? { b: pickPoint(p.b) } : {} }),
+        segments: (p) => ({ ...pick(p, "id", "roadId", "width"), ...plain(p.a) ? { a: pickPoint(p.a) } : {}, ...plain(p.b) ? { b: pickPoint(p.b) } : {} }),
+        gates: (p) => pick(p, "id", "name", "x", "y"),
+        buildings: (p) => pick(p, "id", "name", "districtId", "x", "y", "w", "h", "decorative")
+      },
+      overview: {
+        surface: (p) => p,
+        pins: (p) => ({ ...pick(p, "id", "entityId", "name", "type", "mapId", "x", "y", "quality", "locationId", "radius"), ...Array.isArray(p.polygon) ? { polygon: pickPoints(p.polygon) } : {} }),
+        shapes: (p) => ({ ...pick(p, "id", "name"), ...Array.isArray(p.polygon) ? { polygon: pickPoints(p.polygon) } : {} }),
+        routes: (p) => ({ ...pick(p, "id", "kind", "mapId", "quality", "dashed", "progress", "fromLocationId", "toLocationId"), ...Array.isArray(p.path) ? { path: pickPoints(p.path) } : {} }),
+        // 装饰只有视觉字段；type/zoneId/density 之外的一切（structureKey/placement/内部标记）一律不下发。
+        features: (p) => ({ ...pick(p, "id", "type", "zoneId", "density", "decorative", "quality", "width", "widthClass", "fromSector", "toSector"), ...Array.isArray(p.path) ? { path: pickPoints(p.path) } : {}, ...Array.isArray(p.polygon) ? { polygon: pickPoints(p.polygon) } : {} })
+      }
+    }[s.kind] ?? {};
+    const out = {};
+    for (const [key, value] of Object.entries(s)) {
+      if (key === "id" || key === "name" || key === "kind") {
+        out[key] = value;
+        continue;
+      }
+      if (key === "bounds") {
+        out[key] = pick(value, "x", "y", "w", "h");
+        continue;
+      }
+      const rule = sanitize[key];
+      if (!rule) continue;
+      if (Array.isArray(value)) out[key] = value.map(rule).filter(Boolean);
+      else if (plain(value)) out[key] = rule(value);
+      else if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") out[key] = value;
+    }
+    return out;
+  }
+  function publicMapFrame(frame) {
+    const out = clone(frame ?? {});
+    delete out.atlasScene;
+    delete out.atlasLayoutRequest;
+    delete out.atlasWorldFill;
+    return out;
+  }
+  function hydrateScene(scene, projection) {
+    if (!projection?.ok || !projection.scene || scene.mapId !== projection.scene.mapId || scene.branchId !== projection.scene.branchId) return failure("PROJECTION_SCOPE_MISMATCH", "$", "几何文档与 SQL 现状不属于同一地图");
+    if (scene.units !== projection.scene.units || scene.metersPerCell !== projection.scene.metersPerCell) return failure("PROJECTION_METRIC_MISMATCH", "$", "已保存布局需要重新按当前尺度验证");
+    const d = clone(scene), s = d.layout;
+    if (s.kind !== "floor") return { ok: true, scene: d, issues: [] };
+    const pins = projection.scene.layout.pins ?? [], coarse = projection.coarseList ?? [], P = new Map(pins.map((p) => [p.id, p])), C = new Map(coarse.map((p) => [p.entityId, p]));
+    s.actors = s.actors.filter((a) => {
+      const p = P.get(a.id), c = C.get(a.id);
+      return p?.locationId === a.roomId || c?.locationId === a.roomId;
+    }).map((a) => {
+      const p = P.get(a.id);
+      return p && p.quality !== "layout" ? { ...a, x: p.x, y: p.y, quality: p.quality, name: p.name } : a;
+    });
+    s.items = s.items.filter((a) => {
+      const p = P.get(a.id);
+      return p?.locationId === a.roomId;
+    }).map((a) => {
+      const p = P.get(a.id);
+      return p && p.quality !== "layout" ? { ...a, x: p.x, y: p.y, quality: p.quality, name: p.name } : a;
+    });
+    s.path = [];
+    return { ok: true, scene: d, issues: [] };
+  }
+
+  // vendor/atlas-spatial/tools.mjs
+  var TOOL_NAMES = Object.freeze(["atlas_generate_floor", "atlas_generate_city", "atlas_place_markers", "atlas_build_overlays", "atlas_generate_overview"]);
+
+  // vendor/atlas-spatial/renderer.mjs
+  var DEFAULT_THEME = Object.freeze({ bg: "#060a12", grid: "#4977a125", wall: "#b2d4ef", mint: "#39e0a0", gold: "#ffc247", blue: "#7fd4ff", text: "#dce9fb", muted: "#91a9c3", floor: "#101d2f", cyan: "#43e0ff", violet: "#9b6bff" });
+
+  // vendor/atlas-spatial/host-context.mjs
+  function buildLayoutContext({ scope, mapRow, locations = [], characters = [], items = [], routes = [] } = {}) {
+    try {
+      scope = normalizeScope(scope);
+      if (mapRow?.branch_id !== scope.branchId) return failure("MAP_BRANCH_MISMATCH", "$.mapRow", "地图与当前分支不匹配");
+      const frame = typeof mapRow.frame_json === "string" ? JSON.parse(mapRow.frame_json) : mapRow.frame_json, mpp = mapRow.meters_per_cell;
+      if (!plain(frame)) return failure("FRAME_INVALID", "$.mapRow.frame_json", "需要完整地图框架");
+      const active = (rows4) => rows4.filter((r) => r.branch_id === scope.branchId && r.status === "active");
+      const ls = active(locations), cs = active(characters);
+      const rs = routes.filter((r) => r.branch_id === scope.branchId && r.status !== "closed");
+      const its = active(items).filter((i) => !i.holder_character_id && !i.container_item_id);
+      const calibrated = finite(mpp) && mpp > 0;
+      const scale = calibrated ? mpp : 1;
+      const own = ls.filter((l) => l.map_id === mapRow.id), ownRoutes = rs.filter((r) => r.map_id === mapRow.id);
+      const issues = [];
+      const locks = { rooms: {}, buildings: {}, actors: {}, points: {}, areas: {}, routes: {} };
+      const json = (raw) => {
+        if (raw === null || raw === void 0 || raw === "") return null;
+        if (typeof raw !== "string") return raw;
+        try {
+          return JSON.parse(raw);
+        } catch {
+          return void 0;
+        }
+      };
+      for (const l of own) {
+        const area = json(l.area_geometry_json);
+        if (area === void 0) {
+          issues.push(diagnostic("LOCK_GEOMETRY_UNREADABLE", "$.entities.locations." + l.id, "确认几何无法解析，已按无锁处理", { severity: "warning", entityId: l.id }));
+        } else if (plain(area) && area.quality === "confirmed" && area.kind === "polygon" && Array.isArray(area.points)) {
+          const raw = area.points;
+          if (raw.length >= 3 && raw.every((p) => plain(p) && finite(p.x) && finite(p.y))) {
+            const points = raw.map((p) => ({ x: p.x * scale, y: p.y * scale }));
+            locks.areas[l.id] = { kind: "polygon", quality: "confirmed", name: l.name ?? null, points };
+            if (calibrated && raw.length === 4) {
+              const xs = raw.map((p) => p.x), ys = raw.map((p) => p.y), x = Math.min(...xs), y = Math.min(...ys), w = Math.max(...xs) - x, h = Math.max(...ys) - y;
+              const axisAligned = w > 0 && h > 0 && raw.every((p) => (Math.abs(p.x - x) < 1e-6 || Math.abs(p.x - x - w) < 1e-6) && (Math.abs(p.y - y) < 1e-6 || Math.abs(p.y - y - h) < 1e-6));
+              if (axisAligned) locks[l.kind === "room" ? "rooms" : "buildings"][l.id] = { x: x * scale, y: y * scale, w: w * scale, h: h * scale };
+            }
+          } else issues.push(diagnostic("LOCK_GEOMETRY_INVALID", "$.entities.locations." + l.id + ".area_geometry_json", "确认多边形顶点不足或含非有限数值，已按无锁处理", { severity: "warning", entityId: l.id }));
+        }
+        if (l.coord_precision === "exact" && finite(l.grid_x) && finite(l.grid_y)) locks.points[l.id] = { x: l.grid_x * scale, y: l.grid_y * scale };
+      }
+      for (const c of cs) if (c.map_id === mapRow.id && c.coord_precision === "exact" && finite(c.grid_x) && finite(c.grid_y)) {
+        locks.points[c.id] = { x: c.grid_x * scale, y: c.grid_y * scale };
+        if (calibrated) locks.actors[c.id] = { x: c.grid_x * mpp, y: c.grid_y * mpp };
+      }
+      for (const r of ownRoutes) {
+        const geo = json(r.geometry_json);
+        if (geo === void 0) issues.push(diagnostic("LOCK_GEOMETRY_UNREADABLE", "$.entities.routes." + r.id, "路线几何无法解析，按缺几何处理", { severity: "warning", entityId: r.id }));
+        const coords = plain(geo) ? Array.isArray(geo.points) ? geo.points : Array.isArray(geo.coordinates) ? geo.coordinates : null : null;
+        const path = coords && coords.length >= 2 ? coords.map((p) => Array.isArray(p) ? { x: p[0], y: p[1] } : plain(p) ? { x: p.x, y: p.y } : null) : null;
+        if (!path || path.some((p) => !p || !finite(p.x) || !finite(p.y))) continue;
+        const confirmed = r.geometry_quality === "confirmed";
+        locks.routes[r.id] = { quality: confirmed ? "confirmed" : "estimated", dashed: !confirmed, path: path.map((p) => ({ x: p.x * scale, y: p.y * scale })), fromLocationId: r.from_location_id ?? null, toLocationId: r.to_location_id ?? null };
+      }
+      const containerId = mapRow.container_location_id ?? null, placement = {};
+      for (const l of ls) {
+        if (l.map_id === mapRow.id) {
+          placement[l.id] = "local";
+          continue;
+        }
+        if (containerId && l.parent_location_id === containerId) placement[l.id] = "proxy";
+      }
+      const directory = (rows4) => Object.fromEntries(rows4.map((r) => [r.id, r]));
+      const endpointIds = /* @__PURE__ */ new Set();
+      for (const r of ownRoutes) {
+        if (r.from_location_id) endpointIds.add(r.from_location_id);
+        if (r.to_location_id) endpointIds.add(r.to_location_id);
+      }
+      const locationsById = directory([...own, ...ls.filter((l) => !own.includes(l) && endpointIds.has(l.id))]);
+      const routesById = directory(ownRoutes);
+      const saved = readSceneFrame(frame, { branchId: scope.branchId, mapId: mapRow.id });
+      if (!saved.ok) return saved;
+      return { ok: true, context: { scope, map: { id: mapRow.id, name: mapRow.name, containerLocationId: containerId, metersPerCell: calibrated ? mpp : null, scaleQuality: mapRow.scale_quality, scaleLocked: Number(mapRow.scale_locked) === 1, frame }, entities: { locations: ls.map((l) => l.id), characters: cs.map((c) => c.id), items: its.map((i) => i.id), routes: rs.map((r) => r.id) }, locationsById, routesById, placement, locks, previousScene: saved.scene, seed: mapRow.id }, issues };
+    } catch (e) {
+      return failure("CONTEXT_BUILD_FAILED", "$", "当前分支行或已保存场景不可读取", { detailCode: String(e.message) });
+    }
+  }
+
+  // vendor/atlas-spatial/candidate-group.mjs
+  var GENERATORS = { floor: generateFloor, city: generateCity, overview: generateOverview };
+  function compileSceneGroup({ request, scope, currentScope, mapRow, locations, characters, items, routes = [], turnId, operationId } = {}) {
+    try {
+      const generate = GENERATORS[request?.kind];
+      if (!generate) return failure("LAYOUT_KIND_UNSUPPORTED", "$.request.kind", "使用 floor/city/overview；其他空间沿用现有轮廓");
+      const built = buildLayoutContext({ scope, mapRow, locations, characters, items, routes });
+      if (!built.ok) return built;
+      const ctx = { ...built.context, currentScope }, spec = clone(request.spec), membershipIssues = [];
+      if (request.kind === "floor") {
+        const chars = new Map((characters ?? []).filter((c) => c.branch_id === scope.branchId && c.status === "active").map((c) => [c.id, c]));
+        const groundItems = new Map((items ?? []).filter((i) => i.branch_id === scope.branchId && i.status === "active" && !i.holder_character_id && !i.container_item_id).map((i) => [i.id, i]));
+        const groups = new Map((spec.contents ?? []).map((g) => [g.id, g]));
+        spec.actors = (spec.actors ?? []).filter((a) => {
+          const allowed = chars.get(a.id)?.location_id === a.roomId;
+          if (!allowed) membershipIssues.push(diagnostic("ACTOR_LOCATION_MISMATCH", "$.actors.roomId", "当前 SQL 位置不在此房间，保留名单与真实位置", { entityId: a.id, severity: "warning" }));
+          return allowed;
+        });
+        spec.items = (spec.items ?? []).filter((i) => {
+          const actual = groundItems.get(i.id), group = groups.get(i.on), allowed = !!actual && !!group && actual.location_id === group.roomId;
+          if (!allowed) membershipIssues.push(diagnostic("ITEM_LOCATION_MISMATCH", "$.items.on", "物品不在该房间或已被持有，不能画作地面物品", { entityId: i.id, severity: "warning" }));
+          return allowed;
+        });
+      }
+      const result = generate(spec, ctx);
+      if (!result.ok) return result;
+      result.issues.push(...membershipIssues);
+      const prepared = buildSceneMutation({ result, mapRow, scope, currentScope, turnId, operationId, expectedRowRev: mapRow.row_rev });
+      if (!prepared.ok) return prepared;
+      const mutations = prepared.mutation ? [prepared.mutation] : [], readSet = [{ table: "maps", rowId: mapRow.id, rowRev: mapRow.row_rev }], issues = [...result.issues], byId5 = new Map((locations ?? []).filter((l) => l.branch_id === scope.branchId).map((l) => [l.id, l]));
+      for (const geo of sceneLocationGeometry(result.scene)) {
+        if (geo.entityId === mapRow.container_location_id) continue;
+        const before = byId5.get(geo.entityId);
+        if (!before) return failure("LOCATION_REF_UNKNOWN", "$.locations", "场景引用的地点未在候选数据库建档");
+        if (before.map_id !== mapRow.id) return failure("LOCATION_MAP_MISMATCH", "$.locations.map_id", "不能通过摆放把地点迁移到另一地图", { entityId: before.id });
+        if (before.coord_precision === "exact" && finite(before.grid_x) && finite(before.grid_y) && (Math.abs(before.grid_x - geo.gridX) > 1e-6 || Math.abs(before.grid_y - geo.gridY) > 1e-6)) return failure("LOCATION_GEOMETRY_LOCK_CONFLICT", "$.locations", "当前模板无法满足已确认的地点坐标；保留原场景", { entityId: before.id });
+        const area = typeof before.area_geometry_json === "string" ? JSON.parse(before.area_geometry_json) : before.area_geometry_json;
+        if (area?.quality === "confirmed" && geo.area.quality !== "confirmed") return failure("CONFIRMED_AREA_LOCKED", "$.locations.area_geometry_json", "不能用示意轮廓覆盖作者确认的范围");
+        const after = { ...clone(before), grid_x: geo.gridX, grid_y: geo.gridY, coord_precision: before.coord_precision === "exact" ? "exact" : geo.precision, area_geometry_json: geo.area };
+        if (stable([before.grid_x, before.grid_y, before.coord_precision, area]) === stable([after.grid_x, after.grid_y, after.coord_precision, after.area_geometry_json])) continue;
+        after.row_rev = before.row_rev + 1;
+        after.updated_turn_id = turnId;
+        mutations.push({ table: "locations", rowId: before.id, before: clone(before), after, sourceOpIds: [operationId], basis: { kind: "layout", mapId: mapRow.id, quality: geo.precision } });
+        readSet.push({ table: "locations", rowId: before.id, rowRev: before.row_rev });
+      }
+      return { ok: true, status: mutations.length ? "prepared" : "duplicate", scene: result.scene, issues, group: mutations.length ? { id: "layout:" + operationId, opIds: [operationId], dependsOn: [], readSet, mutations } : null };
+    } catch (e) {
+      return failure("SCENE_COMPILE_FAILED", "$", "无法编译场景变更，原行未修改", { detailCode: String(e.message) });
+    }
+  }
+
+  // vendor/atlas-spatial/candidate-apply.mjs
+  function applySceneGroup(db, group, ports) {
+    if (ports?.insideCandidateTransaction !== true) return failure("CANDIDATE_TRANSACTION_REQUIRED", "$", "只能在宿主已有的候选事务内应用布局");
+    if (!group) return { ok: true, status: "duplicate", groups: [], issues: [] };
+    if (typeof ports.applyGroups !== "function" || typeof ports.queryBound !== "function" || typeof ports.isCurrent !== "function") return failure("COMMIT_PORT_REQUIRED", "$", "缺少宿主应用、查询或身份守卫接口");
+    if (!ports.isCurrent()) return failure("STALE_SCOPE", "$.scope", "世界已经切换，禁止应用布局");
+    if (db.exec("PRAGMA foreign_keys")[0]?.values[0]?.[0] !== 1) return failure("FOREIGN_KEYS_OFF", "$", "需要宿主在开启事务前启用并读回外键");
+    for (const r of group.readSet ?? []) {
+      if (!["maps", "locations"].includes(r.table)) return failure("READ_TABLE_INVALID", "$.readSet", "布局读集只包含地图和地点");
+      const row2 = ports.queryBound(db, "SELECT row_rev FROM " + r.table + " WHERE branch_id=? AND id=?", [ports.branchId, r.rowId])[0];
+      if (row2?.row_rev !== r.rowRev) return failure("STALE_ROW", "$.readSet", "候选行在编译后已改变");
+    }
+    const savepoint2 = "atlas_spatial_component";
+    db.run("SAVEPOINT " + savepoint2);
+    try {
+      const applied = ports.applyGroups(db, [group], { branchId: ports.branchId, turnId: ports.turnId, attemptId: ports.attemptId ?? "spatial", validate: true, journal: true });
+      const failed = applied.groups.some((g) => g.status === "rejected" || g.status === "blocked") || applied.journalIssues.length > 0;
+      if (failed) {
+        db.run("ROLLBACK TO SAVEPOINT " + savepoint2);
+        db.run("RELEASE SAVEPOINT " + savepoint2);
+        return { ok: false, status: "failed", groups: applied.groups.map((g) => ({ ...g, status: "rejected", changedRows: 0 })), issues: [...applied.groups.flatMap((g) => g.issues ?? []), ...applied.journalIssues.map((message) => diagnostic("JOURNAL_WRITE_FAILED", "$.turn_changes", message))] };
+      }
+      db.run("RELEASE SAVEPOINT " + savepoint2);
+      return { ok: true, status: "applied", groups: applied.groups, issues: [] };
+    } catch (e) {
+      db.run("ROLLBACK TO SAVEPOINT " + savepoint2);
+      db.run("RELEASE SAVEPOINT " + savepoint2);
+      return failure(e.code ?? "SCENE_APPLY_FAILED", "$", String(e.message));
+    }
+  }
+
+  // vendor/atlas-spatial/initial-frame.mjs
+  function prepareInitialFrame({ mapRow, scope, currentScope, locations = [], kind = null, widthM, heightM, turnId, operationId, expectedRowRev } = {}) {
+    try {
+      if (!sameScope(scope, currentScope)) return failure("STALE_SCOPE", "$.scope", "初始化时作用域已经改变");
+      if (mapRow?.branch_id !== scope.branchId) return failure("MAP_BRANCH_MISMATCH", "$.mapRow", "地图不在当前分支");
+      if (!Number.isInteger(mapRow.row_rev) || mapRow.row_rev !== expectedRowRev) return failure("STALE_ROW", "$.expectedRowRev", "地图行已经改变");
+      const frame = typeof mapRow.frame_json === "string" ? JSON.parse(mapRow.frame_json) : clone(mapRow.frame_json);
+      if (!plain(frame)) return failure("FRAME_INVALID", "$.frame_json", "框架必须是普通对象");
+      const positioned = locations.some((l) => l.branch_id === scope.branchId && l.map_id === mapRow.id && l.status === "active" && finite(l.grid_x) && finite(l.grid_y));
+      if (frame.atlasScene || positioned || Number(mapRow.scale_locked) === 1 || mapRow.scale_quality === "confirmed") return { ok: true, status: "retained", mutation: null, issues: [] };
+      if (typeof turnId !== "string" || !turnId || typeof operationId !== "string" || !operationId) return failure("COMMIT_ANCHOR_REQUIRED", "$.turnId", "需要当前楼层与操作ID");
+      const calibrated = finite(mapRow.meters_per_cell) && mapRow.meters_per_cell > 0;
+      if (kind === "overview" && !calibrated) {
+        const cols2 = finite(frame.cols) ? frame.cols : finite(frame.reference_width_cells) ? frame.reference_width_cells : 100;
+        const rows5 = finite(frame.rows) ? frame.rows : finite(frame.reference_height_cells) ? frame.reference_height_cells : 80;
+        if (!finite(cols2) || !finite(rows5) || cols2 <= 0 || rows5 <= 0) return failure("INITIAL_FRAME_RANGE_INVALID", "$", "概览需要有限正的格幅面");
+        const before2 = clone(mapRow), after2 = { ...clone(mapRow), frame_json: { ...frame, cols: cols2, rows: rows5, origin_x: 0, origin_y: 0 }, meters_per_cell: null, scale_quality: "uncalibrated", scale_min_meters_per_cell: null, scale_max_meters_per_cell: null, scale_basis_json: { source: "overview-cells", cols: cols2, rows: rows5 }, calibration_rev: Number(mapRow.calibration_rev ?? 0) + 1, row_rev: mapRow.row_rev + 1, updated_turn_id: turnId };
+        return { ok: true, status: "prepared", issues: [], mutation: { table: "maps", rowId: mapRow.id, before: before2, after: after2, sourceOpIds: [operationId], basis: { kind: "estimate", source: "overview-cells" } } };
+      }
+      if (!finite(widthM) || !finite(heightM) || widthM <= 0 || heightM <= 0) return failure("INITIAL_EXTENT_REQUIRED", "$", "新空地图需要有限正尺寸，或继续使用原概览");
+      const mpp = widthM / 100, rows4 = heightM / mpp;
+      if (!finite(mpp) || !finite(rows4) || mpp <= 0 || rows4 <= 0) return failure("INITIAL_FRAME_RANGE_INVALID", "$", "尺寸无法得到有效坐标跨度");
+      const before = clone(mapRow), after = { ...clone(mapRow), frame_json: { ...frame, cols: 100, rows: rows4, origin_x: 0, origin_y: 0 }, meters_per_cell: mpp, scale_quality: "estimated", scale_min_meters_per_cell: null, scale_max_meters_per_cell: null, scale_basis_json: { source: "initial-spatial-extent", widthM, heightM }, calibration_rev: Number(mapRow.calibration_rev ?? 0) + 1, row_rev: mapRow.row_rev + 1, updated_turn_id: turnId };
+      return { ok: true, status: "prepared", issues: [], mutation: { table: "maps", rowId: mapRow.id, before, after, sourceOpIds: [operationId], basis: { kind: "estimate", source: "initial-spatial-extent" } } };
+    } catch (e) {
+      return failure("INITIAL_FRAME_INVALID", "$", "初始化没有写入原地图", { detailCode: String(e.message) });
+    }
+  }
+
+  // src/atlas-spatial-frame.ts
+  var SPATIAL_REQUEST_KEY = "atlasLayoutRequest";
+  var SPATIAL_SCENE_KEY = FRAME_SCENE_KEY;
+  function spatialIssue(input, ctx = {}) {
+    const parts = [input.message];
+    if (ctx.mapId) parts.push(`mapId=${ctx.mapId}`);
+    if (ctx.branchId) parts.push(`branchId=${ctx.branchId}`);
+    if (ctx.revision !== void 0) parts.push(`revision=${ctx.revision}`);
+    if (ctx.operationId) parts.push(`operationId=${ctx.operationId}`);
+    if (ctx.turnId) parts.push(`turnId=${ctx.turnId}`);
+    if (input.entityId) parts.push(`entityId=${input.entityId}`);
+    if (ctx.entityId && ctx.entityId !== input.entityId) parts.push(`entityId=${ctx.entityId}`);
+    return {
+      code: input.code,
+      path: input.path,
+      message: parts.join(" ｜ "),
+      severity: input.severity === "warning" ? "warning" : "error",
+      retryable: input.retryable === true
+    };
+  }
+  function normalizeFrame(frame) {
+    if (typeof frame === "string") {
+      try {
+        const parsed = JSON.parse(frame);
+        if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+          return { ...parsed };
+        }
+      } catch {
+        return {};
+      }
+      return {};
+    }
+    if (frame !== null && typeof frame === "object" && !Array.isArray(frame)) {
+      return { ...frame };
+    }
+    return {};
+  }
+  var SQL_MAP_FRAME_SIZE_FIELDS = Object.freeze({
+    cols: { alias: "reference_width_cells", label: "宽（格数）" },
+    rows: { alias: "reference_height_cells", label: "高（格数）" }
+  });
+  var FRAME_SIZE_ABSENT = 0;
+  var FRAME_SIZE_OK = 1;
+  var FRAME_SIZE_BAD = 2;
+  function probeSize(frame, key) {
+    if (!Object.prototype.hasOwnProperty.call(frame, key)) return { state: FRAME_SIZE_ABSENT, value: null };
+    const raw = frame[key];
+    if (raw === void 0 || raw === null) return { state: FRAME_SIZE_ABSENT, value: null };
+    if (typeof raw === "number" && Number.isInteger(raw) && raw >= 1) return { state: FRAME_SIZE_OK, value: raw };
+    return { state: FRAME_SIZE_BAD, value: null };
+  }
+  function sizeIssue(code, key, message) {
+    return { code, path: `$.frame_json.${key}`, message, severity: "error", retryable: false };
+  }
+  function resolveFrameSize(frame, key, issues) {
+    const { alias, label: label2 } = SQL_MAP_FRAME_SIZE_FIELDS[key];
+    const primary = probeSize(frame, key);
+    const secondary = probeSize(frame, alias);
+    if (primary.state === FRAME_SIZE_OK && secondary.state === FRAME_SIZE_OK) {
+      if (primary.value !== secondary.value) {
+        issues.push(
+          sizeIssue(
+            "FRAME_ALIAS_CONFLICT",
+            key,
+            `${label2}两套字段不一致：${key}=${primary.value} 与 ${alias}=${secondary.value}；不猜哪个为准，先让作者纠正`
+          )
+        );
+        return null;
+      }
+      return primary.value;
+    }
+    for (const [probe, probeKey] of [[primary, key], [secondary, alias]]) {
+      if (probe.state !== FRAME_SIZE_BAD) continue;
+      issues.push(
+        sizeIssue(
+          "FRAME_INVALID",
+          probeKey,
+          `${label2}字段存在但不是正整数：${probeKey}=${JSON.stringify(frame[probeKey])}；拒绝以 NaN/零幅面继续排位`
+        )
+      );
+      return null;
+    }
+    if (primary.state === FRAME_SIZE_OK) return primary.value;
+    if (secondary.state === FRAME_SIZE_OK) return secondary.value;
+    issues.push(
+      sizeIssue(
+        "FRAME_INVALID",
+        key,
+        `缺少必需的地图幅面${label2}：${key} 与 ${alias} 都没有正整数（frame_json 缺失、不是对象，或没有可用尺寸）`
+      )
+    );
+    return null;
+  }
+  function resolveFrameOrigin(frame, key, issues) {
+    if (!Object.prototype.hasOwnProperty.call(frame, key)) return 0;
+    const raw = frame[key];
+    if (raw === void 0 || raw === null) return 0;
+    if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+    issues.push(
+      sizeIssue(
+        "FRAME_ORIGIN_INVALID",
+        key,
+        `幅面原点不是有限数：${key}=${JSON.stringify(raw)}；不默默按 0 替代，先纠正损坏字段`
+      )
+    );
+    return Number.NaN;
+  }
+  function normalizeSqlMapFrame(frame, ctx = {}) {
+    const normalized = normalizeFrame(frame);
+    const issues = [];
+    const cols2 = resolveFrameSize(normalized, "cols", issues);
+    const rows4 = resolveFrameSize(normalized, "rows", issues);
+    const originX = resolveFrameOrigin(normalized, "origin_x", issues);
+    const originY = resolveFrameOrigin(normalized, "origin_y", issues);
+    const ok = cols2 !== null && rows4 !== null && issues.length === 0;
+    return {
+      ok,
+      cols: cols2,
+      rows: rows4,
+      originX,
+      originY,
+      // 浅拷贝：扩展字段（atlasScene / atlasLayoutRequest / 未知键）完整保留，归一结果不写回。
+      frame: normalized,
+      issues: issues.map((item) => spatialIssue(item, ctx))
+    };
+  }
+  function readSpatialFrame(frame, scope, ctx = {}) {
+    const normalized = normalizeFrame(frame);
+    const read = readSceneFrame(normalized, scope);
+    const issues = (read.issues ?? []).map((item) => spatialIssue(item, ctx));
+    const rawRequest = normalized[SPATIAL_REQUEST_KEY];
+    return {
+      ok: read.ok,
+      frame: normalized,
+      scene: read.ok ? read.scene : null,
+      request: rawRequest !== null && typeof rawRequest === "object" && !Array.isArray(rawRequest) ? { ...rawRequest } : null,
+      issues
+    };
+  }
+  function ensureInitialSpatialFrame(input) {
+    const mapId = typeof input.mapRow?.id === "string" ? input.mapRow.id : "";
+    const ctx = {
+      mapId,
+      branchId: input.scope?.branchId,
+      revision: input.scope?.revision,
+      operationId: input.operationId,
+      turnId: input.turnId
+    };
+    let prepared;
+    try {
+      prepared = prepareInitialFrame({
+        mapRow: input.mapRow,
+        scope: input.scope,
+        currentScope: input.currentScope,
+        expectedRowRev: input.expectedRowRev,
+        kind: input.kind ?? void 0,
+        widthM: typeof input.widthM === "number" ? input.widthM : Number.NaN,
+        heightM: typeof input.heightM === "number" ? input.heightM : Number.NaN,
+        locations: input.locations ?? [],
+        turnId: input.turnId,
+        operationId: input.operationId
+      });
+    } catch (err) {
+      return {
+        ok: false,
+        status: "failed",
+        mutation: null,
+        issues: [spatialIssue({ code: "INITIAL_FRAME_INVALID", path: "$.frame_json", message: `初始化幅面失败：${err.message}` }, ctx)]
+      };
+    }
+    const issues = (prepared.issues ?? []).map((item) => spatialIssue(item, ctx));
+    if (prepared.ok && prepared.mutation) {
+      return { ok: true, status: "prepared", mutation: prepared.mutation, issues };
+    }
+    const missing = typeof input.widthM !== "number" || typeof input.heightM !== "number" || !Number.isFinite(input.widthM) || !Number.isFinite(input.heightM) || issues.some((item) => item.code === "INITIAL_EXTENT_REQUIRED");
+    if (missing) {
+      return {
+        ok: true,
+        status: "retained",
+        mutation: null,
+        issues: [
+          spatialIssue(
+            {
+              code: "INITIAL_EXTENT_MISSING",
+              path: "$.data.spec",
+              message: "新空地图没有可用尺寸：本轮沿用概览，等地图标定或布局请求给出宽高后再初始化。",
+              severity: "warning"
+            },
+            ctx
+          )
+        ]
+      };
+    }
+    if (prepared.ok) {
+      return { ok: true, status: "retained", mutation: null, issues };
+    }
+    return { ok: false, status: "failed", mutation: null, issues };
+  }
+
   // src/atlas-sql-layout-task.ts
+  var LAYOUT_CONTEXT_FRAME_KEY = "atlasLayoutContext";
+  var OVERVIEW_CONTAINER_KINDS = /* @__PURE__ */ new Set(["region", "natural"]);
+  var CITY_CONTAINER_KINDS = /* @__PURE__ */ new Set(["city", "district"]);
+  var FLOOR_CONTAINER_KINDS = /* @__PURE__ */ new Set(["building", "floor", "room", "vehicle"]);
+  var FLOOR_BASE_SIDE_M = 24;
+  var ROOM_BASE_SIDE_M = 12;
+  var CITY_BASE_SIDE_M = 1e3;
+  var FALLBACK_COLS = 100;
+  var FALLBACK_ROWS = 80;
+  var asId = (value) => typeof value === "string" && value ? value : null;
+  var finite2 = (value) => typeof value === "number" && Number.isFinite(value);
+  var byId3 = (left, right) => left < right ? -1 : left > right ? 1 : 0;
+  var uniqueSorted = (values) => [...new Set(values)].sort(byId3);
+  function classify(map, locations, container) {
+    if (container) {
+      const kind = String(container.kind ?? "");
+      if (OVERVIEW_CONTAINER_KINDS.has(kind)) return "overview";
+      if (CITY_CONTAINER_KINDS.has(kind)) return "city";
+      if (FLOOR_CONTAINER_KINDS.has(kind)) return "floor";
+      return null;
+    }
+    const hasContainerField = map.container_location_id !== null && map.container_location_id !== void 0 && map.container_location_id !== "";
+    if (hasContainerField) return null;
+    void locations;
+    return "overview";
+  }
+  function measure(kind, container, cols2, rows4, metersPerCell) {
+    const calibrated = finite2(metersPerCell) && metersPerCell > 0;
+    const maxSide = Math.max(cols2, rows4);
+    if (kind === "overview") {
+      if (calibrated) return { width: cols2 * metersPerCell, height: rows4 * metersPerCell, units: "meters" };
+      return { width: cols2, height: rows4, units: "cells" };
+    }
+    if (calibrated) return { width: cols2 * metersPerCell, height: rows4 * metersPerCell, units: "meters" };
+    const containerKind = String(container?.kind ?? "");
+    const base = containerKind === "room" ? ROOM_BASE_SIDE_M : kind === "city" ? CITY_BASE_SIDE_M : FLOOR_BASE_SIDE_M;
+    const mpp = base / maxSide;
+    return { width: cols2 * mpp, height: rows4 * mpp, units: "meters" };
+  }
+  function hasScene(map) {
+    const frame = normalizeFrame(map.frame_json);
+    return frame.atlasScene !== void 0 && frame.atlasScene !== null;
+  }
+  function storedLayoutHash(map) {
+    const frame = normalizeFrame(map.frame_json);
+    const stored = frame[LAYOUT_CONTEXT_FRAME_KEY];
+    if (stored === null || typeof stored !== "object" || Array.isArray(stored)) return null;
+    const hash2 = stored.hash;
+    return typeof hash2 === "string" && hash2 ? hash2 : null;
+  }
   function buildSqlLayoutTask(db, branchId, input, turnId) {
-    const tables = createTableReadPort(db), known = collectKnownRefs(tables, branchId);
+    const tables = createTableReadPort(db);
+    const issues = [];
     const locations = tables.selectWhere("locations", { branch_id: branchId, status: "active" }, 1e3);
     const characters = tables.selectWhere("characters", { branch_id: branchId, status: "active" }, 1e3);
     const maps = tables.selectWhere("maps", { branch_id: branchId, status: "active" }, 1e3);
-    const ref = (id) => known.find((r) => r.id === id)?.alias;
-    const eligible = maps.filter((m) => m.container_location_id && locations.some((l) => l.id === m.container_location_id && ["city", "district", "building", "vehicle", "room"].includes(String(l.kind))));
-    const occupied = new Set(characters.map((c) => c.location_id));
-    const chosen = (input.layoutMaps === "active" ? eligible.filter((m) => occupied.has(m.container_location_id)).sort((a, b) => String(a.id).localeCompare(String(b.id))) : eligible.filter((m) => input.layoutMaps?.includes(String(m.id)))).slice(0, 2);
-    if (!chosen.length) return null;
-    const scopes = chosen.map((m) => {
-      const container = locations.find((l) => l.id === m.container_location_id);
-      const kind = ["city", "district"].includes(String(container.kind)) ? "city" : "floor";
-      const frame = m.frame_json, scene = frame.atlasScene;
-      const cols2 = Number(frame.cols), rows4 = Number(frame.rows);
-      const mpp = Number(m.meters_per_cell) > 0 ? Number(m.meters_per_cell) : (kind === "floor" ? container.kind === "room" ? 12 : 24 : 1e3) / Math.max(cols2, rows4);
-      const extent = { width: cols2 * mpp, height: rows4 * mpp };
-      const own = locations.filter((l) => l.map_id === m.id);
-      const standalone = kind === "floor" && (container.kind === "room" || container.kind === "vehicle" && !own.length);
-      const local = standalone ? [container] : own;
-      const baselineRooms = standalone ? [{ id: ref(container.id), name: container.name, w: Math.min(extent.width * 0.75, container.kind === "vehicle" ? 4 : Infinity), h: Math.min(extent.height * 0.75, container.kind === "vehicle" ? 6 : Infinity), side: "north" }] : [];
-      return {
-        map: ref(m.id),
-        name: m.name,
+    if (maps.length === 0) return null;
+    const locationById = /* @__PURE__ */ new Map();
+    for (const row2 of locations) {
+      const id = asId(row2.id);
+      if (id) locationById.set(id, row2);
+    }
+    const parentOf = (id) => asId(locationById.get(id)?.parent_location_id);
+    const entries = [];
+    for (const map of maps) {
+      const mapId = asId(map.id);
+      if (mapId === null) continue;
+      const containerId = asId(map.container_location_id);
+      const container = containerId ? locationById.get(containerId) ?? null : null;
+      const kind = classify(map, locations, container);
+      if (kind === null) continue;
+      const frame = normalizeSqlMapFrame(map.frame_json, { mapId, branchId });
+      let cols2 = frame.cols;
+      let rows4 = frame.rows;
+      if (!frame.ok || !finite2(cols2) || !finite2(rows4) || cols2 <= 0 || rows4 <= 0) {
+        issues.push({
+          code: "LAYOUT_FRAME_UNUSABLE",
+          path: `$.maps.${mapId}.frame_json`,
+          message: `地图 ${mapId} 的幅面不可用（${frame.issues.map((item) => item.code).join("/") || "FRAME_INVALID"}）：本轮改用 ${FALLBACK_COLS}×${FALLBACK_ROWS} 的兜底幅面出图，请作者校正`,
+          severity: "warning",
+          retryable: true,
+          mapId
+        });
+        cols2 = FALLBACK_COLS;
+        rows4 = FALLBACK_ROWS;
+      }
+      const own = locations.filter((row2) => String(row2.map_id ?? "") === mapId);
+      const containerKind = String(container?.kind ?? "");
+      const standalone = kind === "floor" && own.length === 0 && (containerKind === "room" || containerKind === "vehicle" || containerKind === "floor" || containerKind === "building");
+      entries.push({
+        map,
+        mapId,
         kind,
-        container: { ref: ref(container.id), kind: container.kind, name: container.name },
-        frame: { cols: frame.cols, rows: frame.rows, metersPerCell: m.meters_per_cell, scaleLocked: !!m.scale_locked },
-        extent,
+        container,
+        frameCols: cols2,
+        frameRows: rows4,
+        extent: measure(kind, container, cols2, rows4, map.meters_per_cell),
+        standalone,
+        own
+      });
+    }
+    if (entries.length === 0) return null;
+    const mapByContainer = /* @__PURE__ */ new Map();
+    for (const entry of entries) {
+      const containerId = asId(entry.map.container_location_id);
+      if (!containerId) continue;
+      const held = mapByContainer.get(containerId);
+      if (!held || entry.mapId < held.mapId) mapByContainer.set(containerId, entry);
+    }
+    let chosen = [];
+    if (input.layoutMaps === "active") {
+      const occupied = uniqueSorted(characters.map((row2) => asId(row2.location_id)).filter((id) => id !== null));
+      const occupiedSet = new Set(occupied);
+      const hot = entries.filter((entry) => entry.container !== null && occupiedSet.has(String(entry.container.id))).sort((a, b) => byId3(a.mapId, b.mapId));
+      if (hot.length > 0) {
+        chosen = hot;
+      } else {
+        const missing = [];
+        for (const locationId of occupied) {
+          let current = locationId;
+          const guard = /* @__PURE__ */ new Set();
+          while (current !== null && !guard.has(current)) {
+            guard.add(current);
+            const entry = mapByContainer.get(current);
+            if (entry) {
+              if (!hasScene(entry.map)) missing.push(entry);
+              break;
+            }
+            current = parentOf(current);
+          }
+        }
+        chosen = missing.sort((a, b) => byId3(a.mapId, b.mapId));
+      }
+    } else if (Array.isArray(input.layoutMaps)) {
+      const requested = input.layoutMaps.map((id) => String(id));
+      chosen = entries.filter((entry) => requested.includes(entry.mapId)).sort((a, b) => requested.indexOf(a.mapId) - requested.indexOf(b.mapId));
+    }
+    if (chosen.length === 0) return null;
+    const batchLimit = ATLAS_RUNTIME_LIMITS.layoutMapsPerBatch;
+    const selected = chosen.slice(0, batchLimit);
+    const remaining = chosen.slice(batchLimit).map((entry) => entry.mapId);
+    const focusLocations = [];
+    for (const entry of selected) {
+      const containerId = asId(entry.map.container_location_id);
+      if (containerId) focusLocations.push(containerId);
+      for (const row2 of entry.own) {
+        const id = asId(row2.id);
+        if (id) focusLocations.push(id);
+      }
+    }
+    const catalogue = collectTaskRefs(tables, {
+      branchId,
+      focusMapIds: uniqueSorted(selected.map((entry) => entry.mapId)),
+      focusLocationIds: uniqueSorted(focusLocations),
+      includeAncestors: true,
+      includeDirectChildren: true,
+      includeRoutes: true,
+      includeOccupants: true,
+      maxEntries: ATLAS_RUNTIME_LIMITS.refCatalogMaxEntries
+    });
+    const ref = (id) => catalogue.knownRefs.find((item) => item.id === id)?.alias;
+    const structureRefs = catalogue.knownRefs.filter((item) => item.kind === "location" || item.kind === "route").map((item) => `${item.kind}\0${item.id}\0${item.rowRev ?? ""}`).join("");
+    const frameSignature = selected.map((entry) => `${entry.mapId}\0${entry.kind}\0${entry.extent.units}\0${entry.extent.width}\0${entry.extent.height}`).join("");
+    const contextHash = stableHexHash([`layout`, `maps:${selected.map((entry) => entry.mapId).join(",")}`, `frame:${frameSignature}`, `refs:${structureRefs}`].join(""));
+    const pending = selected.filter((entry) => storedLayoutHash(entry.map) !== contextHash);
+    if (pending.length === 0) return null;
+    const scopes = pending.map((entry) => {
+      const container = entry.container;
+      const frame = normalizeFrame(entry.map.frame_json);
+      const scene = frame.atlasScene && typeof frame.atlasScene === "object" && !Array.isArray(frame.atlasScene) ? frame.atlasScene : null;
+      const sceneLayout = scene && typeof scene.layout === "object" && scene.layout !== null && !Array.isArray(scene.layout) ? scene.layout : null;
+      const baselineRooms = entry.standalone && container ? [{
+        id: ref(container.id),
+        name: container.name,
+        w: Math.min(entry.extent.width * 0.75, container.kind === "vehicle" ? 4 : Number.POSITIVE_INFINITY),
+        h: Math.min(entry.extent.height * 0.75, container.kind === "vehicle" ? 6 : Number.POSITIVE_INFINITY),
+        side: "north"
+      }] : [];
+      const local = entry.standalone && container ? [container] : entry.own;
+      const localIds = new Set(local.map((row2) => String(row2.id)));
+      return {
+        map: ref(entry.mapId),
+        name: entry.map.name,
+        kind: entry.kind,
+        units: entry.extent.units,
+        container: container ? { ref: ref(container.id), kind: container.kind, name: container.name } : null,
+        frame: {
+          cols: entry.frameCols,
+          rows: entry.frameRows,
+          metersPerCell: entry.map.meters_per_cell,
+          scaleLocked: !!entry.map.scale_locked
+        },
+        extent: { width: entry.extent.width, height: entry.extent.height, units: entry.extent.units },
         baselineRooms,
-        locations: local.map((l) => ({ ref: ref(l.id), name: l.name, kind: l.kind, parent: ref(l.parent_location_id) })),
-        actors: characters.filter((c) => local.some((l) => l.id === c.location_id)).map((c) => ({ ref: ref(c.id), name: c.name, roomId: ref(c.location_id) })),
+        locations: local.map((row2) => ({
+          ref: ref(row2.id),
+          name: row2.name,
+          kind: row2.kind,
+          parent: ref(row2.parent_location_id)
+        })),
+        actors: characters.filter((row2) => localIds.has(String(row2.location_id ?? ""))).map((row2) => ({ ref: ref(row2.id), name: row2.name, roomId: ref(row2.location_id) })),
         savedConstraints: scene?.constraints ?? null,
-        layoutIssues: scene?.layout?.issues ?? []
+        layoutIssues: sceneLayout?.issues ?? []
       };
     });
+    const pendingIds = pending.map((entry) => entry.mapId);
     const request = buildStagePrompt({
       phase: "geography",
       allowedOps: ["map.layout.request", "noop"],
@@ -3939,23 +6472,51 @@ END`;
       geoMissing: "必须为以上地图生成或更新可绘制空间布局，每张图一行 map.layout.request。仅有坐标点不算完成。",
       geoSources: input.assistantText,
       sourceSnapshot: input.sourceSnapshot,
-      mapLayoutIds: known.map((r) => `${r.alias}=${r.id}`).join("\n"),
-      mapLayoutFrame: "width/height 为估计米数；未标定时必须与 cols:rows 成比例。floor 通常 12×8 或 24×24，city 至少 900×700。已有尺度使用 cols*metersPerCell、rows*metersPerCell。",
-      mapLayoutLocks: "保留 savedConstraints 的既有结构；新增陈设只用正文提到的实物，尺寸可以合理估计并在 why 说明。没有河流依据时 riverWidth=0。"
+      mapLayoutIds: catalogue.knownRefs.map((item) => `${item.alias}=${item.id}`).join("\n"),
+      mapLayoutFrame: [
+        "extent 是程序给定的幅面；kind 与 units 以每张图给出的值为准，不得改写。",
+        "units=cells 表示这张图还没标定，width/height 是格数，不是米；units=meters 时 width/height 才是米。",
+        "floor 通常是 12×8 或 24×24 米量级；city 至少 900×700 米；overview 直接用程序给的格幅面。",
+        "已有尺度时 extent = cols×metersPerCell、rows×metersPerCell；不要自己换算比例尺。"
+      ].join("\n"),
+      mapLayoutLocks: [
+        "保留 savedConstraints 的既有结构与稳定局部 ID；省略字段表示保持，不表示删除。",
+        "已确认/锁定的几何与作者确认的事实不得改写。",
+        "没有河流依据时 riverWidth=0；没有生态依据的城市允许无河、无城墙、无树林。",
+        "合理陈设可以按场所用途补全（estimated），不要求正文逐项点名。"
+      ].join("\n")
     });
-    request.messages[1].content += '\n完整操作外层必须为 {"op":"map.layout.request","ref":"本图map引用","data":{"kind":"floor或city","spec":{"width":本图extent.width,"height":本图extent.height,"rooms":[],"contents":[],"actors":[]}},"why":"依据正文估计"}；幅面使用程序提供的 extent，实体尺寸小于幅面。布局字段：floor rooms=[{id:地点引用,name,w,h,side:"north"或"south"}]；contents=[{id:"本图局部陈设ID",name,type:"bench"/"shelf"/"desk"/"reading"/"stairs",roomId:房间引用,w,h}]；actors=[{id:人物引用,roomId:房间引用,near:可选陈设ID}]。单独房间用 container.ref 作为唯一 rooms.id，房间尺寸应小于幅面；楼层或载具使用已提供子房间，不新增地点。city districts=[{id:地点引用,name,bank:"west"或"east",order:整数}]，buildings=[{id:地点引用,name,districtId:地块引用,w,h}]；没有已登记街区时允许用城市 container.ref 表示整个城市的单个范围；有河道才给 riverWidth 正数。不要输出其他操作。';
+    request.messages[1].content += '\n完整操作外层必须为 {"op":"map.layout.request","ref":"本图map引用","data":{"kind":"overview或city或floor","spec":{...}},"why":"依据"}；spec 只写本次变化的约束，幅面用程序给的 extent。\noverview：spec={"surface":"mixed","zones":[{"id":地点引用,"name","role":"city/settlement/forest/water/mountain/ruins/district/campus/land/other","size":"small/medium/large","sector":"north/south/east/west/northeast/northwest/southeast/southwest/center","near":可选地点引用}],"links":[{"id":已登记route引用}],"features":[{"id":"本图局部装饰ID","type":"forest_texture/ridge/shore/building_cluster/road_texture/ruins_scatter/watercourse","zoneId":可选,"density":"low/medium/high"}]}。overview 的 zone 必须是本图直属地点或目录里已有的代理入口；links 只能用目录中已登记的路线引用；feature 只是本图局部装饰，永远不产生新实体、也不产生新道路。\ncity：spec={"districts":[{"id":地点引用,"name","bank":"west/east","order":整数}],"buildings":[{"id":地点引用,"name","districtId":地块引用,"w","h"}],"enclosure":"open/wall","riverWidth":数值}。没有已登记街区时允许用城市 container.ref 表示整个城市的单个范围；新城市默认 enclosure="open"（无城墙、无城门、无环城墙道路）。\nfloor：spec={"rooms":[{"id":地点引用,"name","w","h","side":"north/south"}],"contents":[{"id":"本图局部陈设ID","name","type":"shelf/desk/bench/reading/stairs/table/chair/bed/cabinet/doorway/light/decor","roomId":房间引用,"w","h"}],"actors":[{"id":人物引用,"roomId":房间引用,"near":可选陈设ID}],"items":[{"id":物品引用,"on":陈设ID}]}。\n布局阶段不新建 SQL 实体：所有可交互地点必须已经在目录里。但建设阶段允许新增地点，两者不冲突——不要因为布局不新建实体就停止补全世界。\n不要输出其他操作。';
     request.anchor = input.anchor;
     request.promptInput = {
       injectionText: request.messages[1].content,
       userText: input.userText,
       assistantText: input.assistantText,
-      loreSupplement: input.sourceSnapshot.filter((s) => s.kind === "lorebook").map((s) => s.text).join("\n"),
+      loreSupplement: input.sourceSnapshot.filter((item) => item.kind === "lorebook").map((item) => item.text).join("\n"),
       baseRevision: input.anchor.baseRevision
     };
     request.messages[1].content += "\n单房间地图的 baselineRooms 是插件提供的合法示意房间；没有更明确尺寸依据时直接保留，至少要包含这个已登记的房间。不要把 width/height 写成房间尺寸，房间尺寸字段为 w/h，side 固定选 north 或 south。";
-    request.messages[1].content += '\n更新布局时，同一实物必须沿用 savedConstraints.contents 的既有 id，不得换 id 重复添加。layoutIssues 是旧图未放下的陈设：按正文校正估计尺寸；若旧约束重复描述同一座椅或柜子，保留一个既有 id，用 spec.deletes={"contents":[重复的局部陈设id]} 显式清理重复约束，并同步 actors.near。不要删除已确认的锁定结构。';
+    request.messages[1].content += '\n更新布局时，同一实物必须沿用 savedConstraints 的既有局部 id，不得换 id 重复添加。layoutIssues 是旧图未放下的陈设：按正文校正估计尺寸；若旧约束重复描述同一座椅或柜子，保留一个既有 id，用 spec.deletes={"contents":[重复的局部陈设id]} 显式清理重复约束，并同步 actors.near。不要删除已确认的锁定结构。';
     request.promptInput.injectionText = request.messages[1].content;
-    return { request, mapIds: chosen.map((m) => String(m.id)), extents: Object.fromEntries(chosen.map((m, i) => [String(m.id), scopes[i].extent])), baselineRooms: Object.fromEntries(chosen.map((m, i) => [String(m.id), scopes[i].baselineRooms])) };
+    return {
+      request,
+      catalogue: { ...catalogue, issues: [...issues, ...catalogue.issues] },
+      guard: {
+        chatUid: input.anchor.chatUid,
+        branchId,
+        baseRevision: input.anchor.baseRevision,
+        baseStorageRevision: input.anchor.baseStorageRevision
+      },
+      contextHash,
+      focusLocationIds: uniqueSorted(focusLocations),
+      remainingLocationIds: remaining,
+      mapIds: pendingIds,
+      kinds: Object.fromEntries(pending.map((entry) => [entry.mapId, entry.kind])),
+      extents: Object.fromEntries(pending.map((entry) => [entry.mapId, { ...entry.extent }])),
+      baselineRooms: Object.fromEntries(
+        pending.map((entry, index) => [entry.mapId, scopes[index]?.baselineRooms ?? []])
+      )
+    };
   }
 
   // src/atlas-db-contract.ts
@@ -4492,10 +7053,10 @@ END`;
     }
     return h.toString(16).padStart(8, "0");
   }
-  function clip(text2, max) {
+  function clip2(text2, max) {
     return text2.length <= max ? text2 : text2.slice(0, max);
   }
-  function issue(code, path, message, severity = "warning", retryable = false) {
+  function issue2(code, path, message, severity = "warning", retryable = false) {
     return { code, path, message, severity, retryable };
   }
   function bump(mapped, key, by = 1) {
@@ -5172,7 +7733,7 @@ END`;
     return null;
   }
   function describeProblem(path, message, code) {
-    return issue(code, path, message, "warning", true);
+    return issue2(code, path, message, "warning", true);
   }
   function resolveMapRef(db, ctx, state, legacyMapId, mapsDoc, locationById) {
     if (legacyMapId.length === 0) return null;
@@ -5219,13 +7780,13 @@ END`;
         );
       });
       if (!created.ok) {
-        state.issues.push(issue("LEGACY_MAP_CREATE_FAILED", `$.maps.${legacyMapId}`, `旧根图建档失败：${created.message}`, "warning", true));
+        state.issues.push(issue2("LEGACY_MAP_CREATE_FAILED", `$.maps.${legacyMapId}`, `旧根图建档失败：${created.message}`, "warning", true));
         state.cache.set(legacyMapId, null);
         return null;
       }
       state.created += 1;
       state.issues.push(
-        issue("LEGACY_MAP_CREATED", `$.maps.${legacyMapId}`, `按旧地图文档建立根图 rows=1（id=${LEGACY_WORLD_MAP_ID}）`, "warning", false)
+        issue2("LEGACY_MAP_CREATED", `$.maps.${legacyMapId}`, `按旧地图文档建立根图 rows=1（id=${LEGACY_WORLD_MAP_ID}）`, "warning", false)
       );
       state.cache.set(legacyMapId, LEGACY_WORLD_MAP_ID);
       return LEGACY_WORLD_MAP_ID;
@@ -5266,13 +7827,13 @@ END`;
           );
         });
         if (!created.ok) {
-          state.issues.push(issue("LEGACY_MAP_CREATE_FAILED", `$.maps.${legacyMapId}`, `旧子图建档失败：${created.message}`, "warning", true));
+          state.issues.push(issue2("LEGACY_MAP_CREATE_FAILED", `$.maps.${legacyMapId}`, `旧子图建档失败：${created.message}`, "warning", true));
           state.cache.set(legacyMapId, null);
           return null;
         }
         state.created += 1;
         state.issues.push(
-          issue(
+          issue2(
             "LEGACY_MAP_CONVERTED",
             `$.maps.${legacyMapId}`,
             `旧「mapId 等于地点 ID」约定已死：为 ${legacyMapId} 建立独立容器图 ${mapId}（不再把地点 ID 当地图 ID）`,
@@ -5286,7 +7847,7 @@ END`;
     }
     if (!state.cache.has(legacyMapId)) {
       state.issues.push(
-        issue(
+        issue2(
           "LEGACY_MAP_UNRESOLVED",
           `$.maps.${legacyMapId}`,
           `旧 mapId「${legacyMapId}」不对应任何真实地图：保留实体粗位置，坐标置空（不猜地图，也不把坐标塞进别的地图）`,
@@ -5377,7 +7938,7 @@ END`;
     if (plan.kind === "corrupt") {
       return {
         mapped,
-        issues: [issue("LEGACY_CORRUPT", "$", `旧档损坏（${plan.reason}）：拒绝迁移，先修复或导出旧档备份`, "error", false)],
+        issues: [issue2("LEGACY_CORRUPT", "$", `旧档损坏（${plan.reason}）：拒绝迁移，先修复或导出旧档备份`, "error", false)],
         skipped
       };
     }
@@ -5385,7 +7946,7 @@ END`;
       return {
         mapped,
         issues: [
-          issue(
+          issue2(
             "ALREADY_IMPORTED",
             "$",
             `会话文档里已有 SQLite 存档信封（${plan.kind}）：不重复导入旧三表，避免重复造世界`,
@@ -5427,7 +7988,7 @@ END`;
     if (!branch) {
       return {
         mapped,
-        issues: [issue("REF_UNKNOWN", "$.branchId", `目标分支不存在：${ctx.branchId}`, "error", true)],
+        issues: [issue2("REF_UNKNOWN", "$.branchId", `目标分支不存在：${ctx.branchId}`, "error", true)],
         skipped
       };
     }
@@ -5438,7 +7999,7 @@ END`;
     }
     for (const label2 of periodLabels) {
       issues.push(
-        issue(
+        issue2(
           "PERIOD_NOT_CONVERTED",
           "$.period",
           `旧时间抽象「${label2}」没有可靠现实分钟含义：保留为日历标签（branches.calendar_label），新时间轴从迁移基点相对 0 开始，不折算成秒`,
@@ -5452,7 +8013,7 @@ END`;
         runBound(db, "UPDATE branches SET calendar_label = COALESCE(calendar_label, ?) WHERE id = ?", [periodLabels.join(" / "), ctx.branchId]);
       });
       if (!created.ok) {
-        issues.push(issue("LEGACY_CALENDAR_LABEL_FAILED", "$.period", `旧日历标签写入失败：${created.message}`, "warning", true));
+        issues.push(issue2("LEGACY_CALENDAR_LABEL_FAILED", "$.period", `旧日历标签写入失败：${created.message}`, "warning", true));
       }
     }
     let ownsTransaction = false;
@@ -5490,7 +8051,7 @@ END`;
         const keyKind = checkEntityKey(db, ctx.branchId, id, "location");
         if (keyKind !== null) {
           skipped.push({ kind: "location", legacyId: candidate.legacyId, reason: keyKind });
-          issues.push(issue("ENTITY_KEY_KIND_CONFLICT", candidate.origin, `entity_keys 里 ${id} 已是 ${keyKind}，不能同时是地点`, "error", false));
+          issues.push(issue2("ENTITY_KEY_KIND_CONFLICT", candidate.origin, `entity_keys 里 ${id} 已是 ${keyKind}，不能同时是地点`, "error", false));
           continue;
         }
         const parentLegacyId = str(candidate.raw.parentLocationId ?? candidate.raw.parentRef ?? candidate.raw.parentId);
@@ -5524,7 +8085,7 @@ END`;
         });
         if (!created.ok) {
           skipped.push({ kind: "location", legacyId: candidate.legacyId, reason: `SQL_CONSTRAINT: ${created.message}` });
-          issues.push(issue("LEGACY_ROW_REJECTED", candidate.origin, `旧地点「${name}」写入被拒：${created.message}`, "error", true));
+          issues.push(issue2("LEGACY_ROW_REJECTED", candidate.origin, `旧地点「${name}」写入被拒：${created.message}`, "error", true));
           continue;
         }
         if (legacyMapId.length > 0 && !hasGrid) {
@@ -5601,7 +8162,7 @@ END`;
         });
         if (!created.ok) {
           skipped.push({ kind: "faction", legacyId: candidate.legacyId || name, reason: `SQL_CONSTRAINT: ${created.message}` });
-          issues.push(issue("LEGACY_ROW_REJECTED", candidate.origin, `旧势力「${name}」写入被拒：${created.message}`, "error", true));
+          issues.push(issue2("LEGACY_ROW_REJECTED", candidate.origin, `旧势力「${name}」写入被拒：${created.message}`, "error", true));
           continue;
         }
         factionIds.set(name, id);
@@ -5625,7 +8186,7 @@ END`;
         const keyKind = checkEntityKey(db, ctx.branchId, id, "character");
         if (keyKind !== null) {
           skipped.push({ kind: "character", legacyId: candidate.legacyId, reason: keyKind });
-          issues.push(issue("ENTITY_KEY_KIND_CONFLICT", candidate.origin, `entity_keys 里 ${id} 已是 ${keyKind}，不能同时是人物`, "error", false));
+          issues.push(issue2("ENTITY_KEY_KIND_CONFLICT", candidate.origin, `entity_keys 里 ${id} 已是 ${keyKind}，不能同时是人物`, "error", false));
           continue;
         }
         const locationLegacyId = str(candidate.raw.locationId ?? candidate.raw.locationRef ?? candidate.raw.location_id);
@@ -5677,7 +8238,7 @@ END`;
         });
         if (!created.ok) {
           skipped.push({ kind: "character", legacyId: candidate.legacyId, reason: `SQL_CONSTRAINT: ${created.message}` });
-          issues.push(issue("LEGACY_ROW_REJECTED", candidate.origin, `旧人物「${name}」写入被拒：${created.message}`, "error", true));
+          issues.push(issue2("LEGACY_ROW_REJECTED", candidate.origin, `旧人物「${name}」写入被拒：${created.message}`, "error", true));
           continue;
         }
         legacyToSql.set(candidate.legacyId, id);
@@ -5762,7 +8323,7 @@ END`;
         });
         if (!created.ok) {
           skipped.push({ kind: "item", legacyId: candidate.legacyId, reason: `SQL_CONSTRAINT: ${created.message}` });
-          issues.push(issue("LEGACY_ROW_REJECTED", candidate.origin, `旧物品「${name}」写入被拒：${created.message}`, "error", true));
+          issues.push(issue2("LEGACY_ROW_REJECTED", candidate.origin, `旧物品「${name}」写入被拒：${created.message}`, "error", true));
           continue;
         }
         legacyToSql.set(candidate.legacyId, id);
@@ -5776,7 +8337,7 @@ END`;
         const originLocationId = legacyToSql.get(rumor.locationId) ?? null;
         if (originLocationId === null) {
           issues.push(
-            describeProblem(rumor.origin, `风声「${clip(content, 40)}」的起源地点 ${rumor.locationId} 未迁移：仍建 information，但不建当地 front`, "LEGACY_RUMOR_ORIGIN_UNKNOWN")
+            describeProblem(rumor.origin, `风声「${clip2(content, 40)}」的起源地点 ${rumor.locationId} 未迁移：仍建 information，但不建当地 front`, "LEGACY_RUMOR_ORIGIN_UNKNOWN")
           );
         }
         const contentHash = `rumor_${stableHash(content)}`;
@@ -5786,7 +8347,7 @@ END`;
         ]);
         if (existingInfo) {
           bump(mapped, "kind:alreadyImported");
-          issues.push(describeProblem(rumor.origin, `风声「${clip(content, 40)}」已导入（id=${String(existingInfo.id)}），跳过重复插入`, "ALREADY_IMPORTED"));
+          issues.push(describeProblem(rumor.origin, `风声「${clip2(content, 40)}」已导入（id=${String(existingInfo.id)}），跳过重复插入`, "ALREADY_IMPORTED"));
           continue;
         }
         const informationId = ctx.makeId("information", "migration.rumor", `${ctx.branchId}:${rumor.locationId}:${contentHash}`);
@@ -5796,7 +8357,7 @@ END`;
             "information",
             {
               kind: "rumor",
-              title: clip(content, 24),
+              title: clip2(content, 24),
               content,
               // 无法识别真假的内容一律 unknown；created_at_s 用迁移基点（相对 0），不是旧 period。
               truth_status: "unknown",
@@ -5828,7 +8389,7 @@ END`;
         });
         if (!created.ok) {
           skipped.push({ kind: "information", legacyId: contentHash, reason: `SQL_CONSTRAINT: ${created.message}` });
-          issues.push(issue("LEGACY_ROW_REJECTED", rumor.origin, `风声「${clip(content, 40)}」写入被拒：${created.message}`, "error", true));
+          issues.push(issue2("LEGACY_ROW_REJECTED", rumor.origin, `风声「${clip2(content, 40)}」写入被拒：${created.message}`, "error", true));
           continue;
         }
         bump(mapped, "kind:information");
@@ -5841,7 +8402,7 @@ END`;
         const subjectId = subjectRef.length > 0 ? legacyToSql.get(subjectRef) ?? (entityKeyExists(db, ctx.branchId, subjectRef) ? subjectRef : null) : null;
         const objectId = objectRef.length > 0 ? legacyToSql.get(objectRef) ?? (entityKeyExists(db, ctx.branchId, objectRef) ? objectRef : null) : null;
         if (subjectId === null || objectId === null) {
-          const reason = objectRef.length === 0 && subjectId !== null ? `RELATION_OBJECT_UNRESOLVED: ${clip(description || str(candidate.raw.label) || "(无描述)", 120)}` : `RELATION_ENDPOINT_UNRESOLVED: subject=${subjectRef || "missing"} object=${objectRef || "missing"} description=${clip(description, 120)}`;
+          const reason = objectRef.length === 0 && subjectId !== null ? `RELATION_OBJECT_UNRESOLVED: ${clip2(description || str(candidate.raw.label) || "(无描述)", 120)}` : `RELATION_ENDPOINT_UNRESOLVED: subject=${subjectRef || "missing"} object=${objectRef || "missing"} description=${clip2(description, 120)}`;
           skipped.push({ kind: "relation", legacyId: candidate.legacyId, reason });
           issues.push(
             describeProblem(
@@ -5890,7 +8451,7 @@ END`;
         });
         if (!created.ok) {
           skipped.push({ kind: "relation", legacyId: candidate.legacyId, reason: `SQL_CONSTRAINT: ${created.message}` });
-          issues.push(issue("LEGACY_ROW_REJECTED", candidate.origin, `旧关系写入被拒：${created.message}`, "error", true));
+          issues.push(issue2("LEGACY_ROW_REJECTED", candidate.origin, `旧关系写入被拒：${created.message}`, "error", true));
           continue;
         }
         bump(mapped, "kind:relations");
@@ -5921,7 +8482,7 @@ END`;
     const alias = `${candidate.kind}:${extraAlias || str(candidate.raw.name)}#${candidate.index}`;
     const minted = ctx.makeId(candidate.kind, `migration.${candidate.kind}`, alias);
     issues.push(
-      issue(
+      issue2(
         "LEGACY_ID_MINTED",
         candidate.origin,
         `旧${candidate.kind}「${str(candidate.raw.name)}」缺少 id：按旧档内容铸造确定性 ID ${minted}（同输入必得同 ID，重复导入可识别）`,
@@ -6384,30 +8945,30 @@ END`;
     return value === null || value === void 0 ? null : String(value);
   }
   function mergePendingRows(rows4, table, pending) {
-    const byId3 = new Map(rows4.map((row2) => [String(row2.id), row2]));
+    const byId5 = new Map(rows4.map((row2) => [String(row2.id), row2]));
     for (const item of pending) {
       if (item.table !== table) continue;
       if (!item.row) {
-        byId3.delete(item.rowId);
+        byId5.delete(item.rowId);
         continue;
       }
-      const existing = byId3.get(item.rowId);
-      byId3.set(item.rowId, existing ? { ...existing, ...item.row } : item.row);
+      const existing = byId5.get(item.rowId);
+      byId5.set(item.rowId, existing ? { ...existing, ...item.row } : item.row);
     }
-    return [...byId3.values()];
+    return [...byId5.values()];
   }
   function revertPendingRows(rows4, table, pending) {
-    const byId3 = new Map(rows4.map((row2) => [String(row2.id), row2]));
+    const byId5 = new Map(rows4.map((row2) => [String(row2.id), row2]));
     for (const item of pending) {
       if (item.table !== table) continue;
       if (item.before === void 0) continue;
       if (item.before === null) {
-        byId3.delete(item.rowId);
+        byId5.delete(item.rowId);
         continue;
       }
-      byId3.set(item.rowId, item.before);
+      byId5.set(item.rowId, item.before);
     }
-    return [...byId3.values()];
+    return [...byId5.values()];
   }
   function topologyInputOf(branchId, rootMapId, mapRows, locationRows) {
     return {
@@ -6991,7 +9552,7 @@ END`;
   }
 
   // src/atlas-db-commit.ts
-  function issue2(code, message, extra = {}) {
+  function issue3(code, message, extra = {}) {
     return { code, path: "$", message, severity: "error", retryable: true, ...extra };
   }
   function applyMutation(db, m, branchId) {
@@ -7047,7 +9608,7 @@ END`;
           groupId: gid,
           opIds: group.opIds,
           status: "blocked",
-          issues: [issue2("DEPENDENCY_FAILED", `上游组 ${root} 未成功：本组不执行`, { groupId: gid, dependencyId: root, retryable: true })],
+          issues: [issue3("DEPENDENCY_FAILED", `上游组 ${root} 未成功：本组不执行`, { groupId: gid, dependencyId: root, retryable: true })],
           changedRows: 0
         });
         blockedGroups.add(gid);
@@ -7141,7 +9702,7 @@ END`;
           opIds: group.opIds,
           status: "rejected",
           issues: [
-            issue2(code, dbErr.message ?? String(err), {
+            issue3(code, dbErr.message ?? String(err), {
               groupId: gid,
               retryable: code !== "INVARIANT_FAILED"
             })
@@ -7162,7 +9723,7 @@ END`;
             opIds: [],
             status: "rejected",
             issues: [
-              issue2("SQL_CONSTRAINT", `整批应用后外键检查未通过：${summary}`, {
+              issue3("SQL_CONSTRAINT", `整批应用后外键检查未通过：${summary}`, {
                 retryable: false
               })
             ],
@@ -7465,7 +10026,7 @@ END`;
         else if (parentAction === "insert") addEdge(j, i);
       }
     }
-    const ordered3 = [];
+    const ordered4 = [];
     const taken = new Array(n).fill(false);
     for (let count = 0; count < n; count += 1) {
       let picked = -1;
@@ -7476,14 +10037,14 @@ END`;
         }
       }
       if (picked === -1) {
-        for (let i = 0; i < n; i += 1) if (!taken[i]) ordered3.push(steps[i]);
+        for (let i = 0; i < n; i += 1) if (!taken[i]) ordered4.push(steps[i]);
         break;
       }
       taken[picked] = true;
-      ordered3.push(steps[picked]);
+      ordered4.push(steps[picked]);
       for (const next of edges[picked]) indegree[next] -= 1;
     }
-    return ordered3;
+    return ordered4;
   }
   async function applyRollbackPlan(db, plan, ctx) {
     const issues = [...plan.issues];
@@ -7681,7 +10242,7 @@ END`;
     return [...map.values()];
   }
   function mergeDependencyCycles(groups, issues) {
-    const byId3 = new Map(groups.map((g) => [g.id, g]));
+    const byId5 = new Map(groups.map((g) => [g.id, g]));
     const visiting = /* @__PURE__ */ new Set();
     const visited = /* @__PURE__ */ new Set();
     const cycles = [];
@@ -7694,9 +10255,9 @@ END`;
       }
       visiting.add(id);
       stack.push(id);
-      const g = byId3.get(id);
+      const g = byId5.get(id);
       for (const dep of g?.dependsOn ?? []) {
-        if (byId3.has(dep)) dfs(dep, stack);
+        if (byId5.has(dep)) dfs(dep, stack);
       }
       stack.pop();
       visiting.delete(id);
@@ -7748,7 +10309,7 @@ END`;
   }
   function orderGroups(groups) {
     const issues = [];
-    const byId3 = new Map(groups.map((g) => [g.id, g]));
+    const byId5 = new Map(groups.map((g) => [g.id, g]));
     const state = /* @__PURE__ */ new Map();
     const order = [];
     const blockedBy = /* @__PURE__ */ new Map();
@@ -7770,7 +10331,7 @@ END`;
       stack.add(g.id);
       let ok = true;
       for (const dep of [...g.dependsOn].sort()) {
-        const depGroup = byId3.get(dep);
+        const depGroup = byId5.get(dep);
         if (!depGroup) {
           blockedBy.set(g.id, dep);
           issues.push({
@@ -8111,12 +10672,34 @@ END`;
     actors: { id: "character", roomId: "location" },
     items: { id: "item" },
     districts: { id: "location" },
-    buildings: { id: "location", districtId: "location" }
+    buildings: { id: "location", districtId: "location" },
+    // M4-02：概览集合（02 §10 / 契约 OverviewSpec）。
+    // zones.id 与 zones.near 是**地点**引用（命名河流作为已登记自然地点参与互动）；
+    // links.id 是**路线**引用（不得凭空造路）；features.zoneId 是地点引用，
+    // 而 features.id 是**本图局部视觉 ID**（不进 entity_keys，见 LAYOUT_LOCAL_COLLECTIONS）。
+    zones: { id: "location", near: "location" },
+    links: { id: "route" },
+    features: { zoneId: "location" }
   };
   var LAYOUT_LOCAL_COLLECTION = "contents";
+  var LAYOUT_LOCAL_COLLECTIONS = {
+    contents: ["id"],
+    features: ["id"]
+  };
   var LAYOUT_LOCAL_FIELDS = {
     actors: ["near"],
     items: ["on"]
+  };
+  var LAYOUT_DELETE_REF_KINDS = {
+    zones: "location",
+    links: "route",
+    rooms: "location",
+    districts: "location",
+    buildings: "location",
+    actors: "character",
+    items: "item",
+    contents: null,
+    features: null
   };
   function scanLayoutSpecRefs(spec, visit) {
     if (spec === null || typeof spec !== "object") return;
@@ -8187,7 +10770,7 @@ END`;
   }
   function createRefScope(seed = []) {
     const byAlias = /* @__PURE__ */ new Map();
-    const byId3 = /* @__PURE__ */ new Map();
+    const byId5 = /* @__PURE__ */ new Map();
     const ambiguousAliases = /* @__PURE__ */ new Set();
     const order = [];
     const orderKeys = /* @__PURE__ */ new Set();
@@ -8220,8 +10803,8 @@ END`;
         }
       }
       if (entry.id.length > 0) {
-        const existingById = byId3.get(entry.id);
-        if (!existingById) byId3.set(entry.id, entry);
+        const existingById = byId5.get(entry.id);
+        if (!existingById) byId5.set(entry.id, entry);
         else fillMissing(existingById, entry);
       }
       remember(canonical);
@@ -8242,7 +10825,7 @@ END`;
             if (declared) return declared;
           }
         }
-        return byId3.get(raw) ?? null;
+        return byId5.get(raw) ?? null;
       },
       all() {
         return [...order];
@@ -8253,7 +10836,7 @@ END`;
       byId(id) {
         const raw = typeof id === "string" ? id.trim() : "";
         if (raw.length === 0) return null;
-        return byId3.get(raw) ?? null;
+        return byId5.get(raw) ?? null;
       }
     };
   }
@@ -8399,8 +10982,8 @@ END`;
       };
     }
     if (!isNew) {
-      const byId3 = scope.byId(raw);
-      if (byId3) return checkKind(byId3, raw, expectedKind, where);
+      const byId5 = scope.byId(raw);
+      if (byId5) return checkKind(byId5, raw, expectedKind, where);
     }
     return {
       entry: null,
@@ -8418,17 +11001,21 @@ END`;
   }
   function collectLocalIds(spec) {
     const pool = /* @__PURE__ */ new Set();
-    const rows4 = spec[LAYOUT_LOCAL_COLLECTION];
-    if (!Array.isArray(rows4)) return pool;
-    for (const row2 of rows4) {
-      if (row2 === null || typeof row2 !== "object") continue;
-      const id = row2["id"];
-      if (typeof id !== "string") continue;
-      const trimmed = id.trim();
-      if (trimmed.length === 0) continue;
-      pool.add(trimmed);
-      const bare = newAliasOf(trimmed);
-      if (bare !== null) pool.add(bare);
+    for (const [collection2, fields] of Object.entries(LAYOUT_LOCAL_COLLECTIONS)) {
+      const rows4 = spec[collection2];
+      if (!Array.isArray(rows4)) continue;
+      for (const row2 of rows4) {
+        if (row2 === null || typeof row2 !== "object") continue;
+        for (const field of fields) {
+          const id = row2[field];
+          if (typeof id !== "string") continue;
+          const trimmed = id.trim();
+          if (trimmed.length === 0) continue;
+          pool.add(trimmed);
+          const bare = newAliasOf(trimmed);
+          if (bare !== null) pool.add(bare);
+        }
+      }
     }
     return pool;
   }
@@ -8493,6 +11080,52 @@ END`;
         nextRows.push(record2);
       }
       out[collection2] = nextRows;
+    }
+    const deletes = out["deletes"];
+    if (deletes !== null && typeof deletes === "object" && !Array.isArray(deletes)) {
+      const nextDeletes = { ...deletes };
+      for (const [collection2, kind] of Object.entries(LAYOUT_DELETE_REF_KINDS)) {
+        const list = nextDeletes[collection2];
+        if (!Array.isArray(list)) continue;
+        const nextList = [];
+        for (let i = 0; i < list.length; i += 1) {
+          const raw = list[i];
+          if (typeof raw !== "string") {
+            nextList.push(raw);
+            continue;
+          }
+          const rawText = raw.trim();
+          if (rawText.length === 0) {
+            nextList.push(raw);
+            continue;
+          }
+          if (kind === null) {
+            nextList.push(rawText);
+            continue;
+          }
+          const resolved = resolveRef(rawText, kind, scope, {
+            opId: where?.opId,
+            line: where?.line,
+            field: `spec.deletes.${collection2}[${i}]`
+          });
+          if (resolved.entry !== null) {
+            nextList.push(resolved.entry.id);
+            if (!seen.has(resolved.entry.id)) {
+              seen.add(resolved.entry.id);
+              dependencies.push(resolved.entry.id);
+            }
+            continue;
+          }
+          const isNewRef = rawText.startsWith(NEW_PREFIX);
+          for (const item of resolved.issues) {
+            if (!isNewRef && item.code === "REF_UNKNOWN") continue;
+            issues.push(item);
+          }
+          nextList.push(rawText);
+        }
+        nextDeletes[collection2] = nextList;
+      }
+      out["deletes"] = nextDeletes;
     }
     return {
       ok: !issues.some((item) => item.severity === "error"),
@@ -8627,8 +11260,52 @@ END`;
   }
 
   // src/atlas-ops-normalize.ts
-  var LAYOUT_REQUEST_KINDS = ["floor", "city"];
-  var LAYOUT_SPEC_COLLECTIONS = ["rooms", "contents", "actors", "items", "districts", "buildings"];
+  var LAYOUT_REQUEST_KINDS = ["floor", "city", "overview"];
+  var LAYOUT_SPEC_COLLECTIONS = [
+    "rooms",
+    "contents",
+    "actors",
+    "items",
+    "districts",
+    "buildings",
+    "zones",
+    "links",
+    "features"
+  ];
+  var LAYOUT_KIND_COLLECTIONS = {
+    floor: ["rooms", "contents", "actors", "items"],
+    // city 只认街区/建筑（家具与人物属于室内模板，混用即冲突——与原实现同口径）。
+    city: ["districts", "buildings"],
+    overview: ["zones", "links", "features"]
+  };
+  var LAYOUT_OVERVIEW_FEATURE_TYPES = [
+    "forest_texture",
+    "ridge",
+    "shore",
+    "building_cluster",
+    "road_texture",
+    "ruins_scatter",
+    "watercourse"
+  ];
+  var LAYOUT_OVERVIEW_SURFACES = ["mixed", "urban", "forest", "mountain", "water", "indoor", "void"];
+  var LAYOUT_OVERVIEW_ZONE_ROLES = [
+    "city",
+    "settlement",
+    "forest",
+    "water",
+    "mountain",
+    "ruins",
+    "district",
+    "campus",
+    "land",
+    "other"
+  ];
+  var LAYOUT_OVERVIEW_ZONE_SIZES = ["small", "medium", "large"];
+  var LAYOUT_OVERVIEW_DENSITIES = ["low", "medium", "high"];
+  var LAYOUT_OVERVIEW_SECTORS = ["north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest"];
+  var LAYOUT_OVERVIEW_ZONE_SECTORS = [...LAYOUT_OVERVIEW_SECTORS, "center"];
+  var LAYOUT_OVERVIEW_WIDTH_CLASSES = ["narrow", "medium", "wide"];
+  var LAYOUT_CITY_ENCLOSURES = ["open", "wall"];
   var LAYOUT_SPEC_SCALARS = [
     "name",
     "width",
@@ -8636,6 +11313,8 @@ END`;
     "corridorWidth",
     "riverWidth",
     "blocksPerDistrict",
+    "surface",
+    "enclosure",
     "mapId",
     "rebuild",
     "deletes"
@@ -8678,7 +11357,7 @@ END`;
         ok: false,
         spec: null,
         issues: [
-          issue3(
+          issue4(
             ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING,
             "$.data.spec",
             'map.layout.request requires data.spec as an object with the changed constraints (rooms/contents/actors/items or districts/buildings); example: {"op":"map.layout.request","ref":"M2","data":{"kind":"floor","spec":{"rooms":[{"id":"L3","side":"north","w":6,"h":5}]}}}',
@@ -8694,7 +11373,7 @@ END`;
         ok: false,
         spec: null,
         issues: [
-          issue3(
+          issue4(
             ATLAS_ERROR_CODES.OPERATION_TOO_LARGE,
             "$.data.spec",
             `map.layout.request spec is ${size} bytes, over the ${budget} byte budget; split the request or describe fewer constraints`,
@@ -8706,7 +11385,7 @@ END`;
     for (const key of Object.keys(raw)) {
       if (LAYOUT_SPEC_PROGRAM_KEYS.includes(key)) {
         issues.push(
-          issue3(
+          issue4(
             ATLAS_ERROR_CODES.SYSTEM_FIELD_IGNORED,
             `$.data.spec.${key}`,
             `map.layout.request: program-owned field spec.${key} ignored (identity, scale and seed come from the map row and the program)`,
@@ -8717,15 +11396,80 @@ END`;
       }
       spec[key] = raw[key];
     }
+    const kindText = typeof data["kind"] === "string" ? data["kind"] : "";
+    const kind = LAYOUT_REQUEST_KINDS.includes(kindText) ? kindText : null;
+    const allowedCollections = kind ? LAYOUT_KIND_COLLECTIONS[kind] : LAYOUT_SPEC_COLLECTIONS;
+    for (const key of ["width", "height"]) {
+      const value = spec[key];
+      if (value === void 0 || value === null) continue;
+      if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+        return {
+          ok: false,
+          spec: null,
+          issues: [
+            issue4(
+              "ENUM_INVALID",
+              `$.data.spec.${key}`,
+              `map.layout.request: spec.${key} must be a finite positive number`,
+              { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
+            )
+          ]
+        };
+      }
+    }
+    if (kind === "overview") {
+      const surface = spec["surface"];
+      if (surface !== void 0 && surface !== null && !LAYOUT_OVERVIEW_SURFACES.includes(String(surface))) {
+        return {
+          ok: false,
+          spec: null,
+          issues: [issue4(
+            "ENUM_INVALID",
+            "$.data.spec.surface",
+            `map.layout.request: spec.surface must be one of {${LAYOUT_OVERVIEW_SURFACES.join(",")}}; got ${JSON.stringify(surface)}`,
+            { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
+          )]
+        };
+      }
+    }
+    if (kind === "city") {
+      const enclosure = spec["enclosure"];
+      if (enclosure !== void 0 && enclosure !== null && !LAYOUT_CITY_ENCLOSURES.includes(String(enclosure))) {
+        return {
+          ok: false,
+          spec: null,
+          issues: [issue4(
+            "ENUM_INVALID",
+            "$.data.spec.enclosure",
+            `map.layout.request: spec.enclosure must be one of {${LAYOUT_CITY_ENCLOSURES.join(",")}}; got ${JSON.stringify(enclosure)}`,
+            { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
+          )]
+        };
+      }
+    }
     for (const key of LAYOUT_SPEC_COLLECTIONS) {
       const value = spec[key];
       if (value === void 0 || value === null) continue;
+      if (!allowedCollections.includes(key)) {
+        return {
+          ok: false,
+          spec: null,
+          issues: [
+            issue4(
+              "ENUM_INVALID",
+              `$.data.spec.${key}`,
+              `map.layout.request kind=${kind ?? "(unknown)"} does not accept spec.${key}; allowed: {${allowedCollections.join(", ")}}`,
+              { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
+            )
+          ]
+        };
+      }
       if (!Array.isArray(value)) {
         return {
           ok: false,
           spec: null,
           issues: [
-            issue3(
+            issue4(
               ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING,
               `$.data.spec.${key}`,
               `map.layout.request: spec.${key} must be an array`,
@@ -8734,6 +11478,22 @@ END`;
           ]
         };
       }
+      const limit = key === "zones" ? ATLAS_RUNTIME_LIMITS.overviewZoneLimit : key === "features" ? ATLAS_RUNTIME_LIMITS.overviewFeatureLimit : key === "links" ? ATLAS_RUNTIME_LIMITS.overviewLinkLimit : null;
+      if (limit !== null && value.length > limit) {
+        return {
+          ok: false,
+          spec: null,
+          issues: [
+            issue4(
+              ATLAS_ERROR_CODES.OPERATION_TOO_LARGE,
+              `$.data.spec.${key}`,
+              `map.layout.request: spec.${key} has ${value.length} entries, over the ${limit} limit; split the request`,
+              { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
+            )
+          ]
+        };
+      }
+      const seenIds = /* @__PURE__ */ new Set();
       for (let i = 0; i < value.length; i += 1) {
         const entry = value[i];
         const path = `$.data.spec.${key}[${i}]`;
@@ -8742,7 +11502,7 @@ END`;
             ok: false,
             spec: null,
             issues: [
-              issue3(
+              issue4(
                 ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING,
                 path,
                 `map.layout.request: spec.${key}[${i}] must be an object with an id`,
@@ -8757,7 +11517,7 @@ END`;
             ok: false,
             spec: null,
             issues: [
-              issue3(
+              issue4(
                 ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING,
                 `${path}.id`,
                 `map.layout.request: spec.${key}[${i}].id must be a non-empty string of at most ${MAX_LAYOUT_SPEC_ID_CHARS} chars`,
@@ -8765,6 +11525,25 @@ END`;
               )
             ]
           };
+        }
+        if (seenIds.has(id)) {
+          return {
+            ok: false,
+            spec: null,
+            issues: [
+              issue4(
+                "ENUM_INVALID",
+                `${path}.id`,
+                `map.layout.request: spec.${key} has duplicate id ${JSON.stringify(id)}`,
+                { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
+              )
+            ]
+          };
+        }
+        seenIds.add(id);
+        if (kind === "overview") {
+          const rejected = overviewEntryIssue(key, entry, path, op);
+          if (rejected) return { ok: false, spec: null, issues: [rejected] };
         }
       }
     }
@@ -8775,7 +11554,7 @@ END`;
           ok: false,
           spec: null,
           issues: [
-            issue3(
+            issue4(
               ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING,
               "$.data.spec.deletes",
               "map.layout.request: spec.deletes must be an object mapping collection names to id arrays",
@@ -8785,15 +11564,15 @@ END`;
         };
       }
       for (const [key, value] of Object.entries(deletes)) {
-        if (!LAYOUT_SPEC_COLLECTIONS.includes(key) || !Array.isArray(value)) {
+        if (!allowedCollections.includes(key) || !Array.isArray(value)) {
           return {
             ok: false,
             spec: null,
             issues: [
-              issue3(
+              issue4(
                 ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING,
                 `$.data.spec.deletes.${key}`,
-                `map.layout.request: spec.deletes.${key} must be an array of ids`,
+                `map.layout.request: spec.deletes.${key} must be an array of ids for kind=${kind ?? "(unknown)"}; allowed: {${allowedCollections.join(", ")}}`,
                 { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
               )
             ]
@@ -8802,6 +11581,57 @@ END`;
       }
     }
     return { ok: true, spec, issues };
+  }
+  function overviewEntryIssue(collection2, entry, path, op) {
+    const bad = (field, message) => issue4(
+      "ENUM_INVALID",
+      `${path}.${field}`,
+      message,
+      { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
+    );
+    const inSet = (allowed, value) => allowed.includes(value);
+    if (collection2 === "zones") {
+      const role = entry["role"];
+      if (role === void 0 || role === null || !inSet(LAYOUT_OVERVIEW_ZONE_ROLES, role)) {
+        return bad("role", `overview zone role must be one of {${LAYOUT_OVERVIEW_ZONE_ROLES.join(",")}}; got ${JSON.stringify(role)}`);
+      }
+      const size = entry["size"];
+      if (size !== void 0 && size !== null && !inSet(LAYOUT_OVERVIEW_ZONE_SIZES, size)) {
+        return bad("size", `overview zone size must be one of {${LAYOUT_OVERVIEW_ZONE_SIZES.join(",")}}; got ${JSON.stringify(size)}`);
+      }
+      const sector = entry["sector"];
+      if (sector !== void 0 && sector !== null && !inSet(LAYOUT_OVERVIEW_ZONE_SECTORS, sector)) {
+        return bad("sector", `overview zone sector must be one of {${LAYOUT_OVERVIEW_ZONE_SECTORS.join(",")}}; got ${JSON.stringify(sector)}`);
+      }
+      return null;
+    }
+    if (collection2 === "features") {
+      const type = entry["type"];
+      if (type === void 0 || type === null || !inSet(LAYOUT_OVERVIEW_FEATURE_TYPES, type)) {
+        return bad("type", `overview feature type must be one of {${LAYOUT_OVERVIEW_FEATURE_TYPES.join(",")}}; got ${JSON.stringify(type)}`);
+      }
+      const density = entry["density"];
+      if (density !== void 0 && density !== null && !inSet(LAYOUT_OVERVIEW_DENSITIES, density)) {
+        return bad("density", `overview feature density must be one of {${LAYOUT_OVERVIEW_DENSITIES.join(",")}}; got ${JSON.stringify(density)}`);
+      }
+      for (const field of ["fromSector", "toSector"]) {
+        const value = entry[field];
+        if (value === void 0 || value === null) continue;
+        if (type !== "watercourse") return bad(field, `overview feature ${field} is only valid for type=watercourse`);
+        if (!inSet(LAYOUT_OVERVIEW_SECTORS, value)) {
+          return bad(field, `watercourse ${field} must be one of {${LAYOUT_OVERVIEW_SECTORS.join(",")}}; got ${JSON.stringify(value)}`);
+        }
+      }
+      const widthClass = entry["widthClass"];
+      if (widthClass !== void 0 && widthClass !== null) {
+        if (type !== "watercourse") return bad("widthClass", "overview feature widthClass is only valid for type=watercourse");
+        if (!inSet(LAYOUT_OVERVIEW_WIDTH_CLASSES, widthClass)) {
+          return bad("widthClass", `watercourse widthClass must be one of {${LAYOUT_OVERVIEW_WIDTH_CLASSES.join(",")}}; got ${JSON.stringify(widthClass)}`);
+        }
+      }
+      return null;
+    }
+    return null;
   }
   var OP_KNOWN_FIELDS = {
     "location.upsert": [
@@ -9124,7 +11954,7 @@ END`;
   var PLAN_CHANGES = ["pause", "cancel", "resume", "replace_future"];
   var EVENT_PHASES = ["scheduled", "observed", "simulated"];
   var BELIEFS = ["heard", "doubted", "believed", "verified", "rejected"];
-  function issue3(code, path, message, extra = {}) {
+  function issue4(code, path, message, extra = {}) {
     return toIssue2(new Error(message), { code, path, severity: "warning", ...extra });
   }
   function isPlainObject3(value) {
@@ -9153,7 +11983,7 @@ END`;
   function coerceNumeric(value, path, opName, issues) {
     const reject = (shown) => {
       issues.push(
-        issue3(ATLAS_ERROR_CODES.INVARIANT_FAILED, path, `${opName}: ${path} is ${shown}; NaN/Infinity are never legal`, {
+        issue4(ATLAS_ERROR_CODES.INVARIANT_FAILED, path, `${opName}: ${path} is ${shown}; NaN/Infinity are never legal`, {
           severity: "error",
           retryable: true
         })
@@ -9206,7 +12036,7 @@ END`;
       if (key === "why" && typeof next === "string" && next.length > WHY_MAX_CHARS) {
         const truncated = truncateWhy(next);
         issues.push(
-          issue3(
+          issue4(
             ATLAS_ERROR_CODES.FIELD_IGNORED,
             "$.data.why",
             `${opName}: why is ${next.length} chars, over the ${WHY_MAX_CHARS} char limit; truncated to ${truncated.length}`
@@ -9229,7 +12059,7 @@ END`;
     if (opName === "" || !allowed.has(opName)) {
       const reason = opName === "" ? "operation is missing op" : isSemanticOp(opName) ? `op ${opName} is not allowed in phase ${phase}` : `unknown op ${JSON.stringify(opName)}`;
       issues.push(
-        issue3(ATLAS_ERROR_CODES.UNKNOWN_OPERATION, "$.op", `${reason}; allowed: ${allowedList}`, {
+        issue4(ATLAS_ERROR_CODES.UNKNOWN_OPERATION, "$.op", `${reason}; allowed: ${allowedList}`, {
           severity: "error",
           retryable: true
         })
@@ -9241,22 +12071,22 @@ END`;
       const ref = raw.ref.trim();
       if (ref !== "") op.ref = ref;
     } else if (raw.ref !== void 0 && raw.ref !== null) {
-      issues.push(issue3(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.ref", `${opName}: ref must be a string; ignored`));
+      issues.push(issue4(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.ref", `${opName}: ref must be a string; ignored`));
     }
     if (typeof raw.source === "string") {
       op.source = raw.source.trim();
     } else if (Array.isArray(raw.source)) {
       const list = raw.source.filter((entry) => typeof entry === "string").map((entry) => entry.trim());
       if (list.length > 0) op.source = list;
-      else issues.push(issue3(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.source", `${opName}: source has no usable entries; ignored`));
+      else issues.push(issue4(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.source", `${opName}: source has no usable entries; ignored`));
     } else if (raw.source !== void 0 && raw.source !== null) {
-      issues.push(issue3(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.source", `${opName}: source must be a string or string array; ignored`));
+      issues.push(issue4(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.source", `${opName}: source must be a string or string array; ignored`));
     }
     if (typeof raw.why === "string") {
       if (raw.why.length > WHY_MAX_CHARS) {
         op.why = truncateWhy(raw.why);
         issues.push(
-          issue3(
+          issue4(
             ATLAS_ERROR_CODES.FIELD_IGNORED,
             "$.why",
             `${opName}: why is ${raw.why.length} chars, over the ${WHY_MAX_CHARS} char limit; truncated to ${op.why.length}`
@@ -9266,13 +12096,13 @@ END`;
         op.why = raw.why;
       }
     } else if (raw.why !== void 0 && raw.why !== null) {
-      issues.push(issue3(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.why", `${opName}: why must be a string; ignored`));
+      issues.push(issue4(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.why", `${opName}: why must be a string; ignored`));
     }
     if (typeof raw.ticket === "string") op.ticket = raw.ticket.trim();
     let data = null;
     if (raw.data !== void 0 && raw.data !== null) {
       if (!isPlainObject3(raw.data)) {
-        issues.push(issue3(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.data", `${opName}: data must be an object; ignored`));
+        issues.push(issue4(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.data", `${opName}: data must be an object; ignored`));
       } else {
         const sourceData = raw.data;
         const collected = {};
@@ -9281,7 +12111,7 @@ END`;
           if (SYSTEM_OWNED_FIELDS.includes(key) && !isKnownFieldForOp(opName, key)) {
             systemFields.push(key);
             issues.push(
-              issue3(
+              issue4(
                 ATLAS_ERROR_CODES.SYSTEM_FIELD_IGNORED,
                 `$.data.${key}`,
                 `${opName}: program-owned field ${key} ignored`
@@ -9295,7 +12125,7 @@ END`;
               if (!isKnownFieldForOp(opName, "position")) {
                 ignoredFields.push(key);
                 issues.push(
-                  issue3(ATLAS_ERROR_CODES.FIELD_IGNORED, `$.data.${key}`, `${opName}: alias ${key} → position is not a legal field; ignored`)
+                  issue4(ATLAS_ERROR_CODES.FIELD_IGNORED, `$.data.${key}`, `${opName}: alias ${key} → position is not a legal field; ignored`)
                 );
                 continue;
               }
@@ -9304,7 +12134,7 @@ END`;
               if (existing !== void 0 && existing !== null && !isPlainObject3(existing)) {
                 ignoredFields.push(key);
                 issues.push(
-                  issue3(ATLAS_ERROR_CODES.FIELD_IGNORED, `$.data.${key}`, `${opName}: position is not an object; alias ${key} ignored`)
+                  issue4(ATLAS_ERROR_CODES.FIELD_IGNORED, `$.data.${key}`, `${opName}: position is not an object; alias ${key} ignored`)
                 );
                 continue;
               }
@@ -9312,7 +12142,7 @@ END`;
               if (hasOwn2(position, axis)) {
                 ignoredFields.push(key);
                 issues.push(
-                  issue3(ATLAS_ERROR_CODES.FIELD_IGNORED, `$.data.${key}`, `${opName}: position.${axis} already provided; alias ${key} ignored`)
+                  issue4(ATLAS_ERROR_CODES.FIELD_IGNORED, `$.data.${key}`, `${opName}: position.${axis} already provided; alias ${key} ignored`)
                 );
                 collected["position"] = position;
                 continue;
@@ -9327,7 +12157,7 @@ END`;
             }
             ignoredFields.push(key);
             issues.push(
-              issue3(
+              issue4(
                 ATLAS_ERROR_CODES.FIELD_IGNORED,
                 `$.data.${key}`,
                 `${opName}: alias ${key} → ${aliasTarget} is not usable here (target illegal or already present); ignored`
@@ -9338,7 +12168,7 @@ END`;
           if (!isKnownFieldForOp(opName, key)) {
             ignoredFields.push(key);
             issues.push(
-              issue3(
+              issue4(
                 ATLAS_ERROR_CODES.FIELD_IGNORED,
                 `$.data.${key}`,
                 `${opName}: unknown field ${key} ignored (operation continues)`
@@ -10291,7 +13121,7 @@ END`;
   }
 
   // src/atlas-ops-entities.ts
-  function issue4(code, path, message, op, extra = {}) {
+  function issue5(code, path, message, op, extra = {}) {
     return {
       code,
       path,
@@ -10367,12 +13197,12 @@ END`;
   function ensureAliases(value, op, path) {
     if (value === void 0) return { value: null, issues: [] };
     if (value === null) return { value: [], issues: [] };
-    if (!Array.isArray(value)) return { value: null, issues: [issue4("FIELD_TYPE_INVALID", path, "aliases 必须是字符串数组", op)] };
+    if (!Array.isArray(value)) return { value: null, issues: [issue5("FIELD_TYPE_INVALID", path, "aliases 必须是字符串数组", op)] };
     const list = value.filter((v) => typeof v === "string" && v.trim().length > 0).map((v) => v.trim());
     if (list.length > ALIAS_LIMIT) {
       return {
         value: list.slice(0, ALIAS_LIMIT),
-        issues: [issue4("FIELD_LIMIT_EXCEEDED", path, `aliases 最多 ${ALIAS_LIMIT} 个，收到 ${list.length} 个`, op)]
+        issues: [issue5("FIELD_LIMIT_EXCEEDED", path, `aliases 最多 ${ALIAS_LIMIT} 个，收到 ${list.length} 个`, op)]
       };
     }
     return { value: list, issues: [] };
@@ -10389,25 +13219,25 @@ END`;
       return;
     }
     if (!isPlainObject4(position)) {
-      issues.push(issue4("FIELD_TYPE_INVALID", "$.data.position", "position 必须是 {x,y,precision,radius?}", op));
+      issues.push(issue5("FIELD_TYPE_INVALID", "$.data.position", "position 必须是 {x,y,precision,radius?}", op));
       return;
     }
     const x = asFiniteNumber(position.x);
     const y = asFiniteNumber(position.y);
     if (x === null || y === null) {
       issues.push(
-        issue4("COORD_INCOMPLETE", "$.data.position", "position 必须同时给出有限数字 x 与 y；不知道精确位置时请省略 position", op)
+        issue5("COORD_INCOMPLETE", "$.data.position", "position 必须同时给出有限数字 x 与 y；不知道精确位置时请省略 position", op)
       );
       return;
     }
     const precision = position.precision === void 0 ? "approximate" : String(position.precision);
     if (!["exact", "approximate", "layout", "unknown"].includes(precision)) {
-      issues.push(issue4("ENUM_INVALID", "$.data.position.precision", `coord precision 取值非法：${precision}`, op));
+      issues.push(issue5("ENUM_INVALID", "$.data.position.precision", `coord precision 取值非法：${precision}`, op));
       return;
     }
     const mapRefRaw = data.map_ref;
     if (typeof mapRefRaw !== "string" || mapRefRaw.trim() === "") {
-      issues.push(issue4("COORD_MAP_REQUIRED", "$.data.map_ref", "给出坐标必须同时给出 map_ref（程序不把坐标默认挂到根图）", op));
+      issues.push(issue5("COORD_MAP_REQUIRED", "$.data.map_ref", "给出坐标必须同时给出 map_ref（程序不把坐标默认挂到根图）", op));
       return;
     }
     const mapResolved = resolveRef(mapRefRaw, "map", scope, { opId: op.opId, line: op.line, field: "map_ref" });
@@ -10430,7 +13260,7 @@ END`;
       return;
     }
     if (typeof raw !== "string" || raw.trim() === "") {
-      issues.push(issue4("FIELD_TYPE_INVALID", `$.data.${field}`, `${field} 必须是引用字符串`, op));
+      issues.push(issue5("FIELD_TYPE_INVALID", `$.data.${field}`, `${field} 必须是引用字符串`, op));
       return;
     }
     const resolved = resolveRef(raw, expectedKind, scope, { opId: op.opId, line: op.line, field });
@@ -10473,27 +13303,27 @@ END`;
     const resolvingExisting = Boolean(ref) && !ref.startsWith("new:");
     const existing = resolvingExisting ? resolveRef(ref, "location", ctx.scope, { opId: op.opId, line: op.line, field: "ref" }) : null;
     if (resolvingExisting && !existing?.entry) {
-      result.issues.push(...existing?.issues ?? [issue4("REF_UNKNOWN", "$.ref", `找不到地点引用：${ref}`, op)]);
+      result.issues.push(...existing?.issues ?? [issue5("REF_UNKNOWN", "$.ref", `找不到地点引用：${ref}`, op)]);
       return result;
     }
     const creating = !existing?.entry;
     const rowId2 = existing?.entry ? existing.entry.id : ctx.makeId("location", op.opId, ref && ref.startsWith("new:") ? ref.slice(4) : `auto:${op.opId}`);
     const before = existing?.entry ? ctx.tables.selectOne("locations", ctx.branchId, rowId2) : null;
     if (!creating && !before) {
-      result.issues.push(issue4("REF_UNKNOWN", "$.ref", `引用存在但地点行不存在：${rowId2}`, op));
+      result.issues.push(issue5("REF_UNKNOWN", "$.ref", `引用存在但地点行不存在：${rowId2}`, op));
       return result;
     }
     const changes = {};
     const name = asString(data.name);
     if (creating) {
       if (!name) {
-        result.issues.push(issue4("MINIMUM_FIELD_MISSING", "$.data.name", "新建地点必须给 name", op));
+        result.issues.push(issue5("MINIMUM_FIELD_MISSING", "$.data.name", "新建地点必须给 name", op));
         return result;
       }
       changes.name = name;
     } else if (Object.prototype.hasOwnProperty.call(data, "name")) {
       if (!name) {
-        result.issues.push(issue4("FIELD_TYPE_INVALID", "$.data.name", "地点名称 trim 后不能为空", op));
+        result.issues.push(issue5("FIELD_TYPE_INVALID", "$.data.name", "地点名称 trim 后不能为空", op));
         return result;
       }
       changes.name = name;
@@ -10503,14 +13333,14 @@ END`;
     if (aliases.value) changes.aliases_json = aliases.value;
     if (Object.prototype.hasOwnProperty.call(data, "kind")) {
       const kind = String(data.kind);
-      if (!LOCATION_KINDS2.includes(kind)) result.issues.push(issue4("ENUM_INVALID", "$.data.kind", `地点类型非法：${kind}`, op));
+      if (!LOCATION_KINDS2.includes(kind)) result.issues.push(issue5("ENUM_INVALID", "$.data.kind", `地点类型非法：${kind}`, op));
       else changes.kind = kind;
     }
     if (Object.prototype.hasOwnProperty.call(data, "description")) changes.description = String(data.description ?? "");
     if (Object.prototype.hasOwnProperty.call(data, "terrain")) changes.terrain = asString(data.terrain) ?? "unknown";
     if (Object.prototype.hasOwnProperty.call(data, "mobility")) {
       const mobility = String(data.mobility);
-      if (!["fixed", "mobile"].includes(mobility)) result.issues.push(issue4("ENUM_INVALID", "$.data.mobility", `mobility 非法：${mobility}`, op));
+      if (!["fixed", "mobile"].includes(mobility)) result.issues.push(issue5("ENUM_INVALID", "$.data.mobility", `mobility 非法：${mobility}`, op));
       else changes.mobility = mobility;
     }
     if (creating && !Object.prototype.hasOwnProperty.call(data, "mobility") && changes.kind === "vehicle") {
@@ -10518,7 +13348,7 @@ END`;
     }
     if (Object.prototype.hasOwnProperty.call(data, "existence_quality")) {
       const q = String(data.existence_quality);
-      if (!LOCATION_EXISTENCE.includes(q)) result.issues.push(issue4("ENUM_INVALID", "$.data.existence_quality", `existence_quality 非法：${q}`, op));
+      if (!LOCATION_EXISTENCE.includes(q)) result.issues.push(issue5("ENUM_INVALID", "$.data.existence_quality", `existence_quality 非法：${q}`, op));
       else changes.existence_quality = q;
     }
     if (Object.prototype.hasOwnProperty.call(data, "access")) changes.access_rules_json = data.access ?? null;
@@ -10543,7 +13373,7 @@ END`;
     } else {
       const merged = applyPatch(before, changes);
       if (merged.parent_location_id === rowId2) {
-        result.issues.push(issue4("INVARIANT_LOCATION_PARENT_CYCLE", "$.data.parent_ref", "地点不能以自己为父地点", op));
+        result.issues.push(issue5("INVARIANT_LOCATION_PARENT_CYCLE", "$.data.parent_ref", "地点不能以自己为父地点", op));
         return result;
       }
       merged.row_rev = Number(before.row_rev ?? 1) + 1;
@@ -10608,13 +13438,13 @@ END`;
     const ref = op.value.ref?.trim();
     const registration = data.registration === void 0 ? "auto" : String(data.registration);
     if (!["auto", "watch"].includes(registration)) {
-      result.issues.push(issue4("ENUM_INVALID", "$.data.registration", `registration 非法：${registration}`, op));
+      result.issues.push(issue5("ENUM_INVALID", "$.data.registration", `registration 非法：${registration}`, op));
       return result;
     }
     const resolvingExisting = Boolean(ref) && !ref.startsWith("new:");
     const existing = resolvingExisting ? resolveRef(ref, "character", ctx.scope, { opId: op.opId, line: op.line, field: "ref" }) : null;
     if (resolvingExisting && !existing?.entry) {
-      result.issues.push(...existing?.issues ?? [issue4("REF_UNKNOWN", "$.ref", `找不到人物引用：${ref}`, op)]);
+      result.issues.push(...existing?.issues ?? [issue5("REF_UNKNOWN", "$.ref", `找不到人物引用：${ref}`, op)]);
       return result;
     }
     const creating = !existing?.entry;
@@ -10626,7 +13456,7 @@ END`;
     const sourceKeys = Array.isArray(op.value.source) ? op.value.source : op.value.source ? [op.value.source] : [];
     if (registration === "watch" && creating) {
       if (!name) {
-        result.issues.push(issue4("MINIMUM_FIELD_MISSING", "$.data.name", "watch 候选至少需要 name", op));
+        result.issues.push(issue5("MINIMUM_FIELD_MISSING", "$.data.name", "watch 候选至少需要 name", op));
         return result;
       }
       const mention = mentionMutations(ctx, op, { name, identity, importanceHint: "review", sourceKeys });
@@ -10660,14 +13490,14 @@ END`;
         return result;
       }
       result.issues.push(
-        issue4("MINIMUM_FIELD_MISSING", "$.data.name", "新建人物必须给 name，并至少给 identity / importance / importance_reason 之一", op)
+        issue5("MINIMUM_FIELD_MISSING", "$.data.name", "新建人物必须给 name，并至少给 identity / importance / importance_reason 之一", op)
       );
       return result;
     }
     const rowId2 = existing?.entry ? existing.entry.id : ctx.makeId("character", op.opId, ref && ref.startsWith("new:") ? ref.slice(4) : `auto:${op.opId}`);
     const before = existing?.entry ? ctx.tables.selectOne("characters", ctx.branchId, rowId2) : null;
     if (!creating && !before) {
-      result.issues.push(issue4("REF_UNKNOWN", "$.ref", `引用存在但人物行不存在：${rowId2}`, op));
+      result.issues.push(issue5("REF_UNKNOWN", "$.ref", `引用存在但人物行不存在：${rowId2}`, op));
       return result;
     }
     const changes = {};
@@ -10675,7 +13505,7 @@ END`;
       changes.name = name;
     } else if (Object.prototype.hasOwnProperty.call(data, "name")) {
       if (!name) {
-        result.issues.push(issue4("FIELD_TYPE_INVALID", "$.data.name", "人物名称 trim 后不能为空", op));
+        result.issues.push(issue5("FIELD_TYPE_INVALID", "$.data.name", "人物名称 trim 后不能为空", op));
         return result;
       }
       changes.name = name;
@@ -10685,17 +13515,17 @@ END`;
     if (aliases.value) changes.aliases_json = aliases.value;
     if (Object.prototype.hasOwnProperty.call(data, "role")) {
       const role = String(data.role);
-      if (!CHARACTER_ROLES.includes(role)) result.issues.push(issue4("ENUM_INVALID", "$.data.role", `role 非法：${role}`, op));
+      if (!CHARACTER_ROLES.includes(role)) result.issues.push(issue5("ENUM_INVALID", "$.data.role", `role 非法：${role}`, op));
       else changes.role = role;
     }
     if (Object.prototype.hasOwnProperty.call(data, "importance")) {
       const importance = String(data.importance);
-      if (!CHARACTER_IMPORTANCE.includes(importance)) result.issues.push(issue4("ENUM_INVALID", "$.data.importance", `importance 非法：${importance}`, op));
+      if (!CHARACTER_IMPORTANCE.includes(importance)) result.issues.push(issue5("ENUM_INVALID", "$.data.importance", `importance 非法：${importance}`, op));
       else changes.importance = importance;
     }
     if (Object.prototype.hasOwnProperty.call(data, "physical_status")) {
       const st = String(data.physical_status);
-      if (!CHARACTER_PHYSICAL.includes(st)) result.issues.push(issue4("ENUM_INVALID", "$.data.physical_status", `physical_status 非法：${st}`, op));
+      if (!CHARACTER_PHYSICAL.includes(st)) result.issues.push(issue5("ENUM_INVALID", "$.data.physical_status", `physical_status 非法：${st}`, op));
       else changes.physical_status = st;
     }
     for (const field of ["identity", "description", "personality", "thought", "action_tendency", "condition_note"]) {
@@ -10708,14 +13538,14 @@ END`;
     }
     if (Object.prototype.hasOwnProperty.call(data, "mobility_profiles")) {
       const list = Array.isArray(data.mobility_profiles) ? data.mobility_profiles : null;
-      if (!list) result.issues.push(issue4("FIELD_TYPE_INVALID", "$.data.mobility_profiles", "mobility_profiles 必须是数组", op));
-      else if (list.length > MOBILITY_PROFILE_LIMIT) result.issues.push(issue4("FIELD_LIMIT_EXCEEDED", "$.data.mobility_profiles", `最多 ${MOBILITY_PROFILE_LIMIT} 种移动方式`, op));
+      if (!list) result.issues.push(issue5("FIELD_TYPE_INVALID", "$.data.mobility_profiles", "mobility_profiles 必须是数组", op));
+      else if (list.length > MOBILITY_PROFILE_LIMIT) result.issues.push(issue5("FIELD_LIMIT_EXCEEDED", "$.data.mobility_profiles", `最多 ${MOBILITY_PROFILE_LIMIT} 种移动方式`, op));
       else changes.mobility_profiles_json = list;
     }
     if (Object.prototype.hasOwnProperty.call(data, "capabilities")) {
       const list = Array.isArray(data.capabilities) ? data.capabilities : null;
-      if (!list) result.issues.push(issue4("FIELD_TYPE_INVALID", "$.data.capabilities", "capabilities 必须是数组", op));
-      else if (list.length > CAPABILITY_LIMIT) result.issues.push(issue4("FIELD_LIMIT_EXCEEDED", "$.data.capabilities", `最多 ${CAPABILITY_LIMIT} 项能力`, op));
+      if (!list) result.issues.push(issue5("FIELD_TYPE_INVALID", "$.data.capabilities", "capabilities 必须是数组", op));
+      else if (list.length > CAPABILITY_LIMIT) result.issues.push(issue5("FIELD_LIMIT_EXCEEDED", "$.data.capabilities", `最多 ${CAPABILITY_LIMIT} 项能力`, op));
       else changes.capabilities_json = list;
     }
     if (ctx.phase === "decision" && !creating) {
@@ -10723,7 +13553,7 @@ END`;
       const illegal = Object.keys(changes).filter((k) => !allowed.has(k));
       if (illegal.length) {
         result.issues.push(
-          issue4("PHASE_FIELD_NOT_ALLOWED", "$.data", `decision 阶段不得修改这些字段：${illegal.join("、")}（本阶段只写想法/倾向/注意）`, op)
+          issue5("PHASE_FIELD_NOT_ALLOWED", "$.data", `decision 阶段不得修改这些字段：${illegal.join("、")}（本阶段只写想法/倾向/注意）`, op)
         );
         return result;
       }
@@ -10779,19 +13609,19 @@ END`;
     const resolvingExisting = Boolean(ref) && !ref.startsWith("new:");
     const existing = resolvingExisting ? resolveRef(ref, "item", ctx.scope, { opId: op.opId, line: op.line, field: "ref" }) : null;
     if (resolvingExisting && !existing?.entry) {
-      result.issues.push(...existing?.issues ?? [issue4("REF_UNKNOWN", "$.ref", `找不到物品引用：${ref}`, op)]);
+      result.issues.push(...existing?.issues ?? [issue5("REF_UNKNOWN", "$.ref", `找不到物品引用：${ref}`, op)]);
       return result;
     }
     const creating = !existing?.entry;
     const name = asString(data.name);
     if (creating && !name) {
-      result.issues.push(issue4("MINIMUM_FIELD_MISSING", "$.data.name", "新建物品必须给 name", op));
+      result.issues.push(issue5("MINIMUM_FIELD_MISSING", "$.data.name", "新建物品必须给 name", op));
       return result;
     }
     const rowId2 = existing?.entry ? existing.entry.id : ctx.makeId("item", op.opId, ref && ref.startsWith("new:") ? ref.slice(4) : `auto:${op.opId}`);
     const before = existing?.entry ? ctx.tables.selectOne("items", ctx.branchId, rowId2) : null;
     if (!creating && !before) {
-      result.issues.push(issue4("REF_UNKNOWN", "$.ref", `引用存在但物品行不存在：${rowId2}`, op));
+      result.issues.push(issue5("REF_UNKNOWN", "$.ref", `引用存在但物品行不存在：${rowId2}`, op));
       return result;
     }
     const changes = {};
@@ -10802,12 +13632,12 @@ END`;
     if (aliases.value) changes.aliases_json = aliases.value;
     if (Object.prototype.hasOwnProperty.call(data, "kind")) {
       const kind = String(data.kind);
-      if (!ITEM_KINDS2.includes(kind)) result.issues.push(issue4("ENUM_INVALID", "$.data.kind", `物品类别非法：${kind}`, op));
+      if (!ITEM_KINDS2.includes(kind)) result.issues.push(issue5("ENUM_INVALID", "$.data.kind", `物品类别非法：${kind}`, op));
       else changes.kind = kind;
     }
     if (Object.prototype.hasOwnProperty.call(data, "status")) {
       const st = String(data.status);
-      if (!ITEM_STATUS.includes(st)) result.issues.push(issue4("ENUM_INVALID", "$.data.status", `物品状态非法：${st}`, op));
+      if (!ITEM_STATUS.includes(st)) result.issues.push(issue5("ENUM_INVALID", "$.data.status", `物品状态非法：${st}`, op));
       else changes.status = st;
     }
     if (Object.prototype.hasOwnProperty.call(data, "description")) changes.description = String(data.description ?? "");
@@ -10819,7 +13649,7 @@ END`;
       } else {
         const q = asFiniteNumber(data.quantity);
         if (q === null || q < 0) {
-          result.issues.push(issue4("QUANTITY_INVALID", "$.data.quantity", "quantity 必须是有限非负数或 null（未知）", op));
+          result.issues.push(issue5("QUANTITY_INVALID", "$.data.quantity", "quantity 必须是有限非负数或 null（未知）", op));
         } else {
           changes.quantity = q;
           if (q === 0) changes.status = "consumed";
@@ -10828,8 +13658,8 @@ END`;
     }
     if (Object.prototype.hasOwnProperty.call(data, "properties")) {
       const list = Array.isArray(data.properties) ? data.properties : null;
-      if (!list) result.issues.push(issue4("FIELD_TYPE_INVALID", "$.data.properties", "properties 必须是数组", op));
-      else if (list.length > ITEM_PROPERTY_LIMIT) result.issues.push(issue4("FIELD_LIMIT_EXCEEDED", "$.data.properties", `properties 最多 ${ITEM_PROPERTY_LIMIT} 项`, op));
+      if (!list) result.issues.push(issue5("FIELD_TYPE_INVALID", "$.data.properties", "properties 必须是数组", op));
+      else if (list.length > ITEM_PROPERTY_LIMIT) result.issues.push(issue5("FIELD_LIMIT_EXCEEDED", "$.data.properties", `properties 最多 ${ITEM_PROPERTY_LIMIT} 项`, op));
       else changes.properties_json = list;
     }
     if (creating && Object.prototype.hasOwnProperty.call(data, "placement")) {
@@ -10848,10 +13678,10 @@ END`;
           if (r.entry) changes.location_id = r.entry.id;
           else result.issues.push(...r.issues);
         } else {
-          result.issues.push(issue4("TRANSFER_TARGET_CONFLICT", "$.data.placement", "placement 需要 holder_ref / container_ref / location_ref 之一", op));
+          result.issues.push(issue5("TRANSFER_TARGET_CONFLICT", "$.data.placement", "placement 需要 holder_ref / container_ref / location_ref 之一", op));
         }
       } else {
-        result.issues.push(issue4("FIELD_TYPE_INVALID", "$.data.placement", "placement 必须是 {holder_ref|container_ref|location_ref}", op));
+        result.issues.push(issue5("FIELD_TYPE_INVALID", "$.data.placement", "placement 必须是 {holder_ref|container_ref|location_ref}", op));
       }
     }
     if (result.issues.some((i) => i.severity === "error")) return result;
@@ -10882,7 +13712,7 @@ END`;
     const data = dataOf(op);
     const ref = op.value.ref?.trim();
     if (!ref) {
-      result.issues.push(issue4("MINIMUM_FIELD_MISSING", "$.ref", "item.transfer 需要 ref", op));
+      result.issues.push(issue5("MINIMUM_FIELD_MISSING", "$.ref", "item.transfer 需要 ref", op));
       return result;
     }
     const resolved = resolveRef(ref, "item", ctx.scope, { opId: op.opId, line: op.line, field: "ref" });
@@ -10893,12 +13723,12 @@ END`;
     const rowId2 = resolved.entry.id;
     const before = ctx.tables.selectOne("items", ctx.branchId, rowId2);
     if (!before) {
-      result.issues.push(issue4("REF_UNKNOWN", "$.ref", `物品行不存在：${rowId2}`, op));
+      result.issues.push(issue5("REF_UNKNOWN", "$.ref", `物品行不存在：${rowId2}`, op));
       return result;
     }
     const to = data.to;
     if (!isPlainObject4(to)) {
-      result.issues.push(issue4("MINIMUM_FIELD_MISSING", "$.data.to", "item.transfer 需要 to={holder_ref|container_ref|location_ref|unknown}", op));
+      result.issues.push(issue5("MINIMUM_FIELD_MISSING", "$.data.to", "item.transfer 需要 to={holder_ref|container_ref|location_ref|unknown}", op));
       return result;
     }
     const kinds = ["holder_ref", "container_ref", "location_ref"].filter(
@@ -10906,11 +13736,11 @@ END`;
     );
     const isUnknown = to.unknown === true;
     if (isUnknown && kinds.length > 0) {
-      result.issues.push(issue4("TRANSFER_TARGET_CONFLICT", "$.data.to", "to 的落点互斥：unknown 不能与 holder_ref/container_ref/location_ref 同时出现", op));
+      result.issues.push(issue5("TRANSFER_TARGET_CONFLICT", "$.data.to", "to 的落点互斥：unknown 不能与 holder_ref/container_ref/location_ref 同时出现", op));
       return result;
     }
     if (!isUnknown && kinds.length !== 1) {
-      result.issues.push(issue4("TRANSFER_TARGET_CONFLICT", "$.data.to", `to 必须且只能给出一种落点（收到 ${kinds.length} 种）`, op));
+      result.issues.push(issue5("TRANSFER_TARGET_CONFLICT", "$.data.to", `to 必须且只能给出一种落点（收到 ${kinds.length} 种）`, op));
       return result;
     }
     const changes = {
@@ -10937,7 +13767,7 @@ END`;
         return result;
       }
       if (r.entry.id === rowId2) {
-        result.issues.push(issue4("INVARIANT_CONTAINER_CYCLE", "$.data.to.container_ref", "物品不能装在自己里面", op));
+        result.issues.push(issue5("INVARIANT_CONTAINER_CYCLE", "$.data.to.container_ref", "物品不能装在自己里面", op));
         return result;
       }
       changes.container_item_id = r.entry.id;
@@ -10980,11 +13810,11 @@ END`;
     const movedQty = Object.prototype.hasOwnProperty.call(data, "quantity") ? asFiniteNumber(data.quantity) : null;
     const heldQty = typeof before.quantity === "number" ? before.quantity : null;
     if (Object.prototype.hasOwnProperty.call(data, "quantity") && (movedQty === null || movedQty <= 0)) {
-      result.issues.push(issue4("QUANTITY_INVALID", "$.data.quantity", "转移数量必须为正有限数", op));
+      result.issues.push(issue5("QUANTITY_INVALID", "$.data.quantity", "转移数量必须为正有限数", op));
       return result;
     }
     if (movedQty !== null && heldQty !== null && movedQty > heldQty) {
-      result.issues.push(issue4("QUANTITY_INSUFFICIENT", "$.data.quantity", `转移数量 ${movedQty} 超过持有量 ${heldQty}`, op));
+      result.issues.push(issue5("QUANTITY_INSUFFICIENT", "$.data.quantity", `转移数量 ${movedQty} 超过持有量 ${heldQty}`, op));
       return result;
     }
     if (result.issues.some((i) => i.severity === "error")) return result;
@@ -11027,19 +13857,19 @@ END`;
     const resolvingExisting = Boolean(ref) && !ref.startsWith("new:");
     const existing = resolvingExisting ? resolveRef(ref, "faction", ctx.scope, { opId: op.opId, line: op.line, field: "ref" }) : null;
     if (resolvingExisting && !existing?.entry) {
-      result.issues.push(...existing?.issues ?? [issue4("REF_UNKNOWN", "$.ref", `找不到势力引用：${ref}`, op)]);
+      result.issues.push(...existing?.issues ?? [issue5("REF_UNKNOWN", "$.ref", `找不到势力引用：${ref}`, op)]);
       return result;
     }
     const creating = !existing?.entry;
     const name = asString(data.name);
     if (creating && !name) {
-      result.issues.push(issue4("MINIMUM_FIELD_MISSING", "$.data.name", "新建势力必须给 name", op));
+      result.issues.push(issue5("MINIMUM_FIELD_MISSING", "$.data.name", "新建势力必须给 name", op));
       return result;
     }
     const rowId2 = existing?.entry ? existing.entry.id : ctx.makeId("faction", op.opId, ref && ref.startsWith("new:") ? ref.slice(4) : `auto:${op.opId}`);
     const before = existing?.entry ? ctx.tables.selectOne("factions", ctx.branchId, rowId2) : null;
     if (!creating && !before) {
-      result.issues.push(issue4("REF_UNKNOWN", "$.ref", `引用存在但势力行不存在：${rowId2}`, op));
+      result.issues.push(issue5("REF_UNKNOWN", "$.ref", `引用存在但势力行不存在：${rowId2}`, op));
       return result;
     }
     const changes = {};
@@ -11050,20 +13880,20 @@ END`;
     if (aliases.value) changes.aliases_json = aliases.value;
     if (Object.prototype.hasOwnProperty.call(data, "kind")) {
       const kind = String(data.kind);
-      if (!FACTION_KINDS2.includes(kind)) result.issues.push(issue4("ENUM_INVALID", "$.data.kind", `势力类型非法：${kind}`, op));
+      if (!FACTION_KINDS2.includes(kind)) result.issues.push(issue5("ENUM_INVALID", "$.data.kind", `势力类型非法：${kind}`, op));
       else changes.kind = kind;
     }
     if (Object.prototype.hasOwnProperty.call(data, "status")) {
       const st = String(data.status);
-      if (!FACTION_STATUS.includes(st)) result.issues.push(issue4("ENUM_INVALID", "$.data.status", `势力状态非法：${st}`, op));
+      if (!FACTION_STATUS.includes(st)) result.issues.push(issue5("ENUM_INVALID", "$.data.status", `势力状态非法：${st}`, op));
       else changes.status = st;
     }
     if (Object.prototype.hasOwnProperty.call(data, "description")) changes.description = String(data.description ?? "");
     if (Object.prototype.hasOwnProperty.call(data, "goal")) changes.goal = String(data.goal ?? "");
     if (Object.prototype.hasOwnProperty.call(data, "capabilities")) {
       const list = Array.isArray(data.capabilities) ? data.capabilities : null;
-      if (!list) result.issues.push(issue4("FIELD_TYPE_INVALID", "$.data.capabilities", "capabilities 必须是数组", op));
-      else if (list.length > CAPABILITY_LIMIT) result.issues.push(issue4("FIELD_LIMIT_EXCEEDED", "$.data.capabilities", `最多 ${CAPABILITY_LIMIT} 项能力`, op));
+      if (!list) result.issues.push(issue5("FIELD_TYPE_INVALID", "$.data.capabilities", "capabilities 必须是数组", op));
+      else if (list.length > CAPABILITY_LIMIT) result.issues.push(issue5("FIELD_LIMIT_EXCEEDED", "$.data.capabilities", `最多 ${CAPABILITY_LIMIT} 项能力`, op));
       else changes.capabilities_json = list;
     }
     ensureLocationRef(data, "headquarters_ref", op, result.issues, changes, "headquarters_location_id", ["location"], ctx.scope);
@@ -11108,7 +13938,7 @@ END`;
   var RELATION_ATTITUDE = ["supportive", "neutral", "suspicious", "hostile", "unknown"];
   var RELATION_TRUST = ["high", "medium", "low", "unknown"];
   var RELATION_SECRECY = ["public", "restricted", "secret"];
-  function issue5(code, path, message, op, extra = {}) {
+  function issue6(code, path, message, op, extra = {}) {
     return { code, path, message, severity: "error", retryable: true, opId: op.opId, line: op.line, ...extra };
   }
   function basisOf(ctx, op) {
@@ -11141,7 +13971,7 @@ END`;
       rowId2 = r.entry.id;
       existingRow = ctx.tables.selectOne("relations", ctx.branchId, rowId2);
       if (!existingRow) {
-        result.issues.push(issue5("REF_UNKNOWN", "$.ref", `关系引用存在但行不存在：${rowId2}`, op));
+        result.issues.push(issue6("REF_UNKNOWN", "$.ref", `关系引用存在但行不存在：${rowId2}`, op));
         return result;
       }
       subjectId = String(existingRow.subject_entity_id);
@@ -11149,18 +13979,18 @@ END`;
     } else {
       const subject = resolveRef(String(data.subject_ref ?? ""), null, ctx.scope, { opId: op.opId, field: "subject_ref" });
       if (!subject.entry) {
-        result.issues.push(...subject.issues.length ? subject.issues : [issue5("MINIMUM_FIELD_MISSING", "$.data.subject_ref", "relation.upsert 需要 subject_ref", op)]);
+        result.issues.push(...subject.issues.length ? subject.issues : [issue6("MINIMUM_FIELD_MISSING", "$.data.subject_ref", "relation.upsert 需要 subject_ref", op)]);
         return result;
       }
       const object = resolveRef(String(data.object_ref ?? ""), null, ctx.scope, { opId: op.opId, field: "object_ref" });
       if (!object.entry) {
-        result.issues.push(...object.issues.length ? object.issues : [issue5("MINIMUM_FIELD_MISSING", "$.data.object_ref", "relation.upsert 需要 object_ref", op)]);
+        result.issues.push(...object.issues.length ? object.issues : [issue6("MINIMUM_FIELD_MISSING", "$.data.object_ref", "relation.upsert 需要 object_ref", op)]);
         return result;
       }
       subjectId = subject.entry.id;
       objectId = object.entry.id;
       if (subjectId === objectId) {
-        result.issues.push(issue5("RELATION_SELF_TARGET", "$.data.object_ref", "关系的主体和客体不能是同一条身份", op));
+        result.issues.push(issue6("RELATION_SELF_TARGET", "$.data.object_ref", "关系的主体和客体不能是同一条身份", op));
         return result;
       }
       const kind = data.kind === void 0 ? "other" : String(data.kind);
@@ -11176,24 +14006,24 @@ END`;
     const changes = {};
     if (Object.prototype.hasOwnProperty.call(data, "kind")) {
       const kind = String(data.kind);
-      if (!RELATION_KINDS2.includes(kind)) result.issues.push(issue5("ENUM_INVALID", "$.data.kind", `关系类型非法：${kind}`, op));
+      if (!RELATION_KINDS2.includes(kind)) result.issues.push(issue6("ENUM_INVALID", "$.data.kind", `关系类型非法：${kind}`, op));
       else changes.kind = kind;
     }
     if (Object.prototype.hasOwnProperty.call(data, "label")) changes.label = asString(data.label) ?? "";
     if (Object.prototype.hasOwnProperty.call(data, "attitude")) {
       const attitude = String(data.attitude);
-      if (!RELATION_ATTITUDE.includes(attitude)) result.issues.push(issue5("ENUM_INVALID", "$.data.attitude", `attitude 非法：${attitude}`, op));
+      if (!RELATION_ATTITUDE.includes(attitude)) result.issues.push(issue6("ENUM_INVALID", "$.data.attitude", `attitude 非法：${attitude}`, op));
       else changes.attitude = attitude;
     }
     if (Object.prototype.hasOwnProperty.call(data, "trust")) {
       const trust = String(data.trust);
-      if (!RELATION_TRUST.includes(trust)) result.issues.push(issue5("ENUM_INVALID", "$.data.trust", `trust 非法：${trust}`, op));
+      if (!RELATION_TRUST.includes(trust)) result.issues.push(issue6("ENUM_INVALID", "$.data.trust", `trust 非法：${trust}`, op));
       else changes.trust = trust;
     }
     if (Object.prototype.hasOwnProperty.call(data, "description")) changes.description = String(data.description ?? "");
     if (Object.prototype.hasOwnProperty.call(data, "secrecy")) {
       const secrecy = String(data.secrecy);
-      if (!RELATION_SECRECY.includes(secrecy)) result.issues.push(issue5("ENUM_INVALID", "$.data.secrecy", `secrecy 非法：${secrecy}`, op));
+      if (!RELATION_SECRECY.includes(secrecy)) result.issues.push(issue6("ENUM_INVALID", "$.data.secrecy", `secrecy 非法：${secrecy}`, op));
       else changes.secrecy = secrecy;
     }
     if (Object.prototype.hasOwnProperty.call(data, "ends_after_s")) {
@@ -11204,7 +14034,7 @@ END`;
       } else if (typeof ends === "number" && Number.isFinite(ends)) {
         changes.valid_until_s = ctx.clockS + ends;
       } else {
-        result.issues.push(issue5("FIELD_TYPE_INVALID", "$.data.ends_after_s", "ends_after_s 必须是有限秒数或 null", op));
+        result.issues.push(issue6("FIELD_TYPE_INVALID", "$.data.ends_after_s", "ends_after_s 必须是有限秒数或 null", op));
       }
     }
     if (result.issues.some((i) => i.severity === "error")) return result;
@@ -11236,7 +14066,7 @@ END`;
   // src/atlas-ops-actions.ts
   var STEP_KINDS = ["prepare", "travel", "wait", "interact", "transmit", "investigate", "act"];
   var ACTION_SECRECY = ["public", "restricted", "secret"];
-  function issue6(code, path, message, op, extra = {}) {
+  function issue7(code, path, message, op, extra = {}) {
     return { code, path, message, severity: "error", retryable: true, opId: op.opId, line: op.line, ...extra };
   }
   function basisOf2(ctx, op, causes = []) {
@@ -11258,18 +14088,18 @@ END`;
   }
   function normalizeSteps(steps, op, ctx, issues) {
     if (!Array.isArray(steps) || steps.length === 0) {
-      issues.push(issue6("MINIMUM_FIELD_MISSING", "$.data.steps", "plan.propose 需要至少一个 step", op));
+      issues.push(issue7("MINIMUM_FIELD_MISSING", "$.data.steps", "plan.propose 需要至少一个 step", op));
       return [];
     }
     const out = [];
     steps.forEach((raw, i) => {
       if (!isPlainObject5(raw)) {
-        issues.push(issue6("FIELD_TYPE_INVALID", `$.data.steps[${i}]`, "step 必须是对象", op));
+        issues.push(issue7("FIELD_TYPE_INVALID", `$.data.steps[${i}]`, "step 必须是对象", op));
         return;
       }
       const kind = String(raw.kind ?? "");
       if (!STEP_KINDS.includes(kind)) {
-        issues.push(issue6("ENUM_INVALID", `$.data.steps[${i}].kind`, `step.kind 非法：${kind}`, op));
+        issues.push(issue7("ENUM_INVALID", `$.data.steps[${i}].kind`, `step.kind 非法：${kind}`, op));
         return;
       }
       const payload = {};
@@ -11290,7 +14120,7 @@ END`;
       if (kind === "travel") {
         const destination = resolveOne(raw.destination_ref, ["location"], `steps[${i}].destination_ref`);
         if (!destination) {
-          issues.push(issue6("MINIMUM_FIELD_MISSING", `$.data.steps[${i}].destination_ref`, "travel step 需要 destination_ref", op));
+          issues.push(issue7("MINIMUM_FIELD_MISSING", `$.data.steps[${i}].destination_ref`, "travel step 需要 destination_ref", op));
           return;
         }
         targetLocationId = destination;
@@ -11315,7 +14145,7 @@ END`;
           conditionUncompiled = raw.wait_for_status;
         } else {
           issues.push(
-            issue6("MINIMUM_FIELD_MISSING", `$.data.steps[${i}]`, "wait step 需要 wait_for_event_ref 或明确条件；时间未知的典礼不要编一个具体时刻", op)
+            issue7("MINIMUM_FIELD_MISSING", `$.data.steps[${i}]`, "wait step 需要 wait_for_event_ref 或明确条件；时间未知的典礼不要编一个具体时刻", op)
           );
           return;
         }
@@ -11324,7 +14154,7 @@ END`;
         const channelId = resolveOne(raw.channel_ref, ["channel"], `steps[${i}].channel_ref`);
         const recipient = resolveOne(raw.recipient_ref, ["character", "faction", "location"], `steps[${i}].recipient_ref`);
         if (!informationId || !recipient) {
-          issues.push(issue6("MINIMUM_FIELD_MISSING", `$.data.steps[${i}]`, "transmit step 需要 information_ref 与 recipient_ref", op));
+          issues.push(issue7("MINIMUM_FIELD_MISSING", `$.data.steps[${i}]`, "transmit step 需要 information_ref 与 recipient_ref", op));
           return;
         }
         payload.information_ref = informationId;
@@ -11334,7 +14164,7 @@ END`;
       } else if (kind === "interact") {
         const other = resolveOne(raw.target_ref, null, `steps[${i}].target_ref`);
         if (!other) {
-          issues.push(issue6("MINIMUM_FIELD_MISSING", `$.data.steps[${i}].target_ref`, "interact step 需要 target_ref", op));
+          issues.push(issue7("MINIMUM_FIELD_MISSING", `$.data.steps[${i}].target_ref`, "interact step 需要 target_ref", op));
           return;
         }
         payload.other_ref = other;
@@ -11362,7 +14192,7 @@ END`;
         payload.capability_key = typeof raw.capability_key === "string" ? raw.capability_key : null;
         const stakes = raw.stakes === void 0 ? "ordinary" : String(raw.stakes);
         if (!["ordinary", "major"].includes(stakes)) {
-          issues.push(issue6("ENUM_INVALID", `$.data.steps[${i}].stakes`, `stakes 非法：${stakes}`, op));
+          issues.push(issue7("ENUM_INVALID", `$.data.steps[${i}].stakes`, `stakes 非法：${stakes}`, op));
           return;
         }
         payload.stakes = stakes;
@@ -11378,7 +14208,7 @@ END`;
         if (min !== null && nominal !== null && max !== null && min >= 0 && min <= nominal && nominal <= max) {
           durationHint = { min_s: min, nominal_s: nominal, max_s: max, quality: "estimated", basis_refs: [] };
         } else if (min !== null || nominal !== null || max !== null) {
-          issues.push(issue6("DURATION_ORDER_INVALID", `$.data.steps[${i}].duration_hint`, "duration_hint 必须 0≤min≤nominal≤max", op));
+          issues.push(issue7("DURATION_ORDER_INVALID", `$.data.steps[${i}].duration_hint`, "duration_hint 必须 0≤min≤nominal≤max", op));
         }
       }
       if (typeof raw.requires_action_ref === "string" && raw.requires_action_ref.trim() !== "") {
@@ -11417,13 +14247,13 @@ END`;
     const actor = resolveRef(String(data.actor_ref ?? ""), null, ctx.scope, { opId: op.opId, line: op.line, field: "actor_ref" });
     if (!actor.entry) {
       result.issues.push(
-        ...actor.issues.length ? actor.issues : [issue6("MINIMUM_FIELD_MISSING", "$.data.actor_ref", "plan.propose 需要 actor_ref", op)]
+        ...actor.issues.length ? actor.issues : [issue7("MINIMUM_FIELD_MISSING", "$.data.actor_ref", "plan.propose 需要 actor_ref", op)]
       );
       return result;
     }
     const goal = asString(data.goal);
     if (!goal) {
-      result.issues.push(issue6("MINIMUM_FIELD_MISSING", "$.data.goal", "plan.propose 需要 goal", op));
+      result.issues.push(issue7("MINIMUM_FIELD_MISSING", "$.data.goal", "plan.propose 需要 goal", op));
       return result;
     }
     const steps = normalizeSteps(data.steps, op, ctx, result.issues);
@@ -11432,7 +14262,7 @@ END`;
     if (data.secrecy !== void 0) {
       const s = String(data.secrecy);
       if (!ACTION_SECRECY.includes(s)) {
-        result.issues.push(issue6("ENUM_INVALID", "$.data.secrecy", `secrecy 非法：${s}`, op));
+        result.issues.push(issue7("ENUM_INVALID", "$.data.secrecy", `secrecy 非法：${s}`, op));
         return result;
       }
       secrecy = s;
@@ -11508,12 +14338,12 @@ END`;
     if (unknown.length) result.issues.push(fieldIgnoredWarning(op, unknown));
     const ref = (op.value.ref ?? asString(data.ref))?.trim();
     if (!ref) {
-      result.issues.push(issue6("MINIMUM_FIELD_MISSING", "$.ref", "plan.revise 需要 ref", op));
+      result.issues.push(issue7("MINIMUM_FIELD_MISSING", "$.ref", "plan.revise 需要 ref", op));
       return result;
     }
     const change = data.change === void 0 ? "" : String(data.change);
     if (!["pause", "cancel", "resume", "replace_future"].includes(change)) {
-      result.issues.push(issue6("MINIMUM_FIELD_MISSING", "$.data.change", "change 必须是 pause/cancel/resume/replace_future", op));
+      result.issues.push(issue7("MINIMUM_FIELD_MISSING", "$.data.change", "change 必须是 pause/cancel/resume/replace_future", op));
       return result;
     }
     const resolved = resolveRef(ref, "action", ctx.scope, { opId: op.opId, line: op.line, field: "ref" });
@@ -11524,7 +14354,7 @@ END`;
     const rowId2 = resolved.entry.id;
     const before = ctx.tables.selectOne("actions", ctx.branchId, rowId2);
     if (!before) {
-      result.issues.push(issue6("REF_UNKNOWN", "$.ref", `行动引用存在但行不存在：${rowId2}`, op));
+      result.issues.push(issue7("REF_UNKNOWN", "$.ref", `行动引用存在但行不存在：${rowId2}`, op));
       return result;
     }
     const turnId = ctx.turnId ?? ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
@@ -11540,14 +14370,14 @@ END`;
     };
     if (change === "pause") {
       if (before.status === "completed" || before.status === "cancelled") {
-        result.issues.push(issue6("ACTION_STATE_INVALID", "$.data.change", `已结束的行动（${before.status}）不能暂停`, op));
+        result.issues.push(issue7("ACTION_STATE_INVALID", "$.data.change", `已结束的行动（${before.status}）不能暂停`, op));
         return result;
       }
       touches.push({ rowId: rowId2, row: before, target: applyTo(before, { status: "paused", reason_code: "PLAN_PAUSED" }) });
       for (const c of children) touches.push({ rowId: String(c.id), row: c, target: applyTo(c, { status: "paused", reason_code: "PLAN_PAUSED" }) });
     } else if (change === "resume") {
       if (!["paused", "blocked"].includes(String(before.status))) {
-        result.issues.push(issue6("ACTION_STATE_INVALID", "$.data.change", `只有 paused/blocked 的行动可以恢复（当前 ${before.status}）`, op));
+        result.issues.push(issue7("ACTION_STATE_INVALID", "$.data.change", `只有 paused/blocked 的行动可以恢复（当前 ${before.status}）`, op));
         return result;
       }
       touches.push({ rowId: rowId2, row: before, target: applyTo(before, { status: "planned", reason_code: null }) });
@@ -11567,7 +14397,7 @@ END`;
       const steps = normalizeSteps(data.steps, op, ctx, result.issues);
       if (result.issues.some((i) => i.severity === "error")) return result;
       if (steps.length === 0) {
-        result.issues.push(issue6("MINIMUM_FIELD_MISSING", "$.data.steps", "replace_future 需要新的 steps", op));
+        result.issues.push(issue7("MINIMUM_FIELD_MISSING", "$.data.steps", "replace_future 需要新的 steps", op));
         return result;
       }
       for (const c of children) {
@@ -11619,7 +14449,7 @@ END`;
   var LOCATION_STATUS = ["active", "destroyed", "merged", "archived"];
   var ACTION_RESULT = ["completed", "failed", "cancelled"];
   var EFFECT_TYPES = ["character_status", "item_transfer", "location_status", "action_result"];
-  function issue7(code, path, message, op, extra = {}) {
+  function issue8(code, path, message, op, extra = {}) {
     return { code, path, message, severity: "error", retryable: true, opId: op.opId, line: op.line, ...extra };
   }
   function isPlainObject6(v) {
@@ -11634,7 +14464,7 @@ END`;
     const min = typeof hint.min_s === "number" && Number.isFinite(hint.min_s) ? hint.min_s : null;
     const max = typeof hint.max_s === "number" && Number.isFinite(hint.max_s) ? hint.max_s : null;
     if (elapsed !== null && elapsed < 0) {
-      issues.push(issue7("DURATION_NEGATIVE", "$.data.time_hint.elapsed_s", "elapsed_s 不能为负", op));
+      issues.push(issue8("DURATION_NEGATIVE", "$.data.time_hint.elapsed_s", "elapsed_s 不能为负", op));
       return { quality: "unknown", basis_refs: [] };
     }
     if (elapsed !== null) {
@@ -11644,7 +14474,7 @@ END`;
       const lo = min ?? 0;
       const hi = max ?? lo;
       if (hi < lo) {
-        issues.push(issue7("DURATION_ORDER_INVALID", "$.data.time_hint", "time_hint 需要 min_s ≤ max_s", op));
+        issues.push(issue8("DURATION_ORDER_INVALID", "$.data.time_hint", "time_hint 需要 min_s ≤ max_s", op));
         return { quality: "unknown", basis_refs: [] };
       }
       return { min_s: lo, nominal_s: Math.round((lo + hi) / 2), max_s: hi, quality: "estimated", basis_refs: [] };
@@ -11675,12 +14505,12 @@ END`;
     if (unknown.length) result.issues.push(fieldIgnoredWarning(op, unknown));
     const title = asString(data.title);
     if (!title) {
-      result.issues.push(issue7("MINIMUM_FIELD_MISSING", "$.data.title", "event.propose 需要 title", op));
+      result.issues.push(issue8("MINIMUM_FIELD_MISSING", "$.data.title", "event.propose 需要 title", op));
       return result;
     }
     const phase = data.phase === void 0 ? "" : String(data.phase);
     if (!EVENT_PHASES2.includes(phase)) {
-      result.issues.push(issue7("MINIMUM_FIELD_MISSING", "$.data.phase", "event.propose 需要 phase=scheduled/observed/simulated", op));
+      result.issues.push(issue8("MINIMUM_FIELD_MISSING", "$.data.phase", "event.propose 需要 phase=scheduled/observed/simulated", op));
       return result;
     }
     const resolveOne = (value, kinds, field) => {
@@ -11700,7 +14530,7 @@ END`;
     const scheduledCause = parentEventId && ctx.sources.dueEventIds?.includes(parentEventId);
     if (phase === "simulated" && !causeActionId && !scheduledCause) {
       result.issues.push(
-        issue7("SIMULATED_EVENT_UNBOUND", "$.data.action_ref", "simulated 事件必须绑定真实到期行动（action_ref）；不能凭标题落实结果", op)
+        issue8("SIMULATED_EVENT_UNBOUND", "$.data.action_ref", "simulated 事件必须绑定真实到期行动（action_ref）；不能凭标题落实结果", op)
       );
       return result;
     }
@@ -11714,14 +14544,14 @@ END`;
         participants.push({ entity_id: id, role: typeof raw.role === "string" ? raw.role : "participant" });
       }
       if (data.participants.length > PARTICIPANTS_LIMIT) {
-        result.issues.push(issue7("FIELD_LIMIT_EXCEEDED", "$.data.participants", `participants 最多 ${PARTICIPANTS_LIMIT} 个`, op));
+        result.issues.push(issue8("FIELD_LIMIT_EXCEEDED", "$.data.participants", `participants 最多 ${PARTICIPANTS_LIMIT} 个`, op));
       }
     }
     let secrecy = "restricted";
     if (data.secrecy !== void 0) {
       const s = String(data.secrecy);
       if (!SECRECY.includes(s)) {
-        result.issues.push(issue7("ENUM_INVALID", "$.data.secrecy", `secrecy 非法：${s}`, op));
+        result.issues.push(issue8("ENUM_INVALID", "$.data.secrecy", `secrecy 非法：${s}`, op));
         return result;
       }
       secrecy = s;
@@ -11730,7 +14560,7 @@ END`;
     if (data.kind !== void 0) {
       const k = String(data.kind);
       if (!EVENT_KINDS.includes(k)) {
-        result.issues.push(issue7("ENUM_INVALID", "$.data.kind", `事件类型非法：${k}`, op));
+        result.issues.push(issue8("ENUM_INVALID", "$.data.kind", `事件类型非法：${k}`, op));
         return result;
       }
       kind = k;
@@ -11773,18 +14603,18 @@ END`;
     const effects = data.effects;
     if (effects !== void 0) {
       if (!Array.isArray(effects)) {
-        result.issues.push(issue7("FIELD_TYPE_INVALID", "$.data.effects", "effects 必须是数组", op));
+        result.issues.push(issue8("FIELD_TYPE_INVALID", "$.data.effects", "effects 必须是数组", op));
         return result;
       }
       for (let i = 0; i < effects.length; i += 1) {
         const eff = effects[i];
         if (!isPlainObject6(eff)) {
-          result.issues.push(issue7("FIELD_TYPE_INVALID", `$.data.effects[${i}]`, "effect 必须是对象", op));
+          result.issues.push(issue8("FIELD_TYPE_INVALID", `$.data.effects[${i}]`, "effect 必须是对象", op));
           continue;
         }
         const type = String(eff.type ?? "");
         if (!EFFECT_TYPES.includes(type)) {
-          result.issues.push(issue7("EFFECT_TYPE_UNSUPPORTED", `$.data.effects[${i}].type`, `不允许的事件效果类型：${type}`, op));
+          result.issues.push(issue8("EFFECT_TYPE_UNSUPPORTED", `$.data.effects[${i}].type`, `不允许的事件效果类型：${type}`, op));
           continue;
         }
         if (type === "character_status") {
@@ -11792,12 +14622,12 @@ END`;
           if (!targetId) continue;
           const value = String(eff.value ?? "");
           if (!CHARACTER_STATUS.includes(value)) {
-            result.issues.push(issue7("ENUM_INVALID", `$.data.effects[${i}].value`, `character_status 取值非法：${value}`, op));
+            result.issues.push(issue8("ENUM_INVALID", `$.data.effects[${i}].value`, `character_status 取值非法：${value}`, op));
             continue;
           }
           const before = ctx.tables.selectOne("characters", ctx.branchId, targetId);
           if (!before) {
-            result.issues.push(issue7("REF_UNKNOWN", `$.data.effects[${i}].target_ref`, `人物不存在：${targetId}`, op));
+            result.issues.push(issue8("REF_UNKNOWN", `$.data.effects[${i}].target_ref`, `人物不存在：${targetId}`, op));
             continue;
           }
           const after = applyPatch(before, {
@@ -11815,12 +14645,12 @@ END`;
           if (!targetId) continue;
           const value = String(eff.value ?? "");
           if (!LOCATION_STATUS.includes(value)) {
-            result.issues.push(issue7("ENUM_INVALID", `$.data.effects[${i}].value`, `location_status 取值非法：${value}`, op));
+            result.issues.push(issue8("ENUM_INVALID", `$.data.effects[${i}].value`, `location_status 取值非法：${value}`, op));
             continue;
           }
           const before = ctx.tables.selectOne("locations", ctx.branchId, targetId);
           if (!before) {
-            result.issues.push(issue7("REF_UNKNOWN", `$.data.effects[${i}].target_ref`, `地点不存在：${targetId}`, op));
+            result.issues.push(issue8("REF_UNKNOWN", `$.data.effects[${i}].target_ref`, `地点不存在：${targetId}`, op));
             continue;
           }
           const after = applyPatch(before, { status: value, row_rev: Number(before.row_rev ?? 1) + 1, updated_turn_id: turnId });
@@ -11831,12 +14661,12 @@ END`;
           if (!actionId) continue;
           const value = String(eff.value ?? "");
           if (!ACTION_RESULT.includes(value)) {
-            result.issues.push(issue7("ENUM_INVALID", `$.data.effects[${i}].value`, `action_result 取值非法：${value}`, op));
+            result.issues.push(issue8("ENUM_INVALID", `$.data.effects[${i}].value`, `action_result 取值非法：${value}`, op));
             continue;
           }
           const before = ctx.tables.selectOne("actions", ctx.branchId, actionId);
           if (!before) {
-            result.issues.push(issue7("REF_UNKNOWN", `$.data.effects[${i}].action_ref`, `行动不存在：${actionId}`, op));
+            result.issues.push(issue8("REF_UNKNOWN", `$.data.effects[${i}].action_ref`, `行动不存在：${actionId}`, op));
             continue;
           }
           const after = applyPatch(before, {
@@ -11893,7 +14723,7 @@ END`;
   var ATTENTION = ["low", "normal", "high"];
   var CHANNEL_KINDS = ["contact", "faction_network", "messenger", "surveillance", "broadcast", "magic", "other"];
   var RELIABILITY = ["high", "medium", "low", "unknown"];
-  function issue8(code, path, message, op, extra = {}) {
+  function issue9(code, path, message, op, extra = {}) {
     return { code, path, message, severity: "error", retryable: true, opId: op.opId, line: op.line, ...extra };
   }
   function isPlainObject7(v) {
@@ -11950,7 +14780,7 @@ END`;
     if (unknown.length) result.issues.push(fieldIgnoredWarning(op, unknown));
     const content = asString(data.content);
     if (!content) {
-      result.issues.push(issue8("MINIMUM_FIELD_MISSING", "$.data.content", "information.propose 需要 content", op));
+      result.issues.push(issue9("MINIMUM_FIELD_MISSING", "$.data.content", "information.propose 需要 content", op));
       return result;
     }
     const resolveOne = (value, kinds, field) => {
@@ -11966,7 +14796,7 @@ END`;
     if (data.kind !== void 0) {
       const k = String(data.kind);
       if (!INFORMATION_KINDS.includes(k)) {
-        result.issues.push(issue8("ENUM_INVALID", "$.data.kind", `信息性质非法：${k}`, op));
+        result.issues.push(issue9("ENUM_INVALID", "$.data.kind", `信息性质非法：${k}`, op));
         return result;
       }
       kind = k;
@@ -11975,7 +14805,7 @@ END`;
     if (data.truth !== void 0) {
       const t = String(data.truth);
       if (!TRUTH_STATUS.includes(t)) {
-        result.issues.push(issue8("ENUM_INVALID", "$.data.truth", `truth 非法：${t}`, op));
+        result.issues.push(issue9("ENUM_INVALID", "$.data.truth", `truth 非法：${t}`, op));
         return result;
       }
       truth = t;
@@ -11984,7 +14814,7 @@ END`;
     if (data.secrecy !== void 0) {
       const s = String(data.secrecy);
       if (!SECRECY2.includes(s)) {
-        result.issues.push(issue8("ENUM_INVALID", "$.data.secrecy", `secrecy 非法：${s}`, op));
+        result.issues.push(issue9("ENUM_INVALID", "$.data.secrecy", `secrecy 非法：${s}`, op));
         return result;
       }
       secrecy = s;
@@ -11997,7 +14827,7 @@ END`;
     const spreadAtLocationId = resolveOne(data.spread_at_ref, ["location"], "spread_at_ref");
     const recipientId = resolveOne(data.recipient_ref, ["character", "faction"], "recipient_ref");
     if (data.payload !== void 0 && data.payload !== null && !isPlainObject7(data.payload)) {
-      result.issues.push(issue8("FIELD_TYPE_INVALID", "$.data.payload", "payload 必须是 SubjectPayload 对象", op));
+      result.issues.push(issue9("FIELD_TYPE_INVALID", "$.data.payload", "payload 必须是 SubjectPayload 对象", op));
       return result;
     }
     const hash2 = contentHashOf(content);
@@ -12097,7 +14927,7 @@ END`;
         result.mutations.push(mutation4("knowledge", knowledgeId, null, row2, op, basisOf3(ctx, op)));
       }
     }
-    if (!kind) result.issues.push(issue8("ENUM_INVALID", "$.data.kind", "信息性质无法解析", op));
+    if (!kind) result.issues.push(issue9("ENUM_INVALID", "$.data.kind", "信息性质无法解析", op));
     return result;
   }
   function compileAttentionPropose(op, ctx) {
@@ -12108,26 +14938,26 @@ END`;
     if (unknown.length) result.issues.push(fieldIgnoredWarning(op, unknown));
     const opportunityRef = op.value.ref?.trim() || asString(data.opportunity_ref);
     if (!opportunityRef) {
-      result.issues.push(issue8("MINIMUM_FIELD_MISSING", "$.data.opportunity_ref", "attention.propose 需要 opportunity_ref", op));
+      result.issues.push(issue9("MINIMUM_FIELD_MISSING", "$.data.opportunity_ref", "attention.propose 需要 opportunity_ref", op));
       return result;
     }
     const opportunity = resolveRef(opportunityRef, ["opportunity"], ctx.scope, { opId: op.opId, line: op.line, field: "opportunity_ref" });
     if (!opportunity.entry) {
       result.issues.push(
-        ...opportunity.issues.length ? opportunity.issues : [issue8("OPPORTUNITY_UNKNOWN", "$.data.opportunity_ref", `没有这个接触机会：${opportunityRef}；无机会不能让人物凭空获知消息`, op)]
+        ...opportunity.issues.length ? opportunity.issues : [issue9("OPPORTUNITY_UNKNOWN", "$.data.opportunity_ref", `没有这个接触机会：${opportunityRef}；无机会不能让人物凭空获知消息`, op)]
       );
       return result;
     }
     const belief = data.belief === void 0 ? "" : String(data.belief);
     if (!BELIEF.includes(belief)) {
-      result.issues.push(issue8("MINIMUM_FIELD_MISSING", "$.data.belief", "attention.propose 需要 belief=heard/doubted/believed/verified/rejected", op));
+      result.issues.push(issue9("MINIMUM_FIELD_MISSING", "$.data.belief", "attention.propose 需要 belief=heard/doubted/believed/verified/rejected", op));
       return result;
     }
     let attention = "normal";
     if (data.attention !== void 0) {
       const a = String(data.attention);
       if (!ATTENTION.includes(a)) {
-        result.issues.push(issue8("ENUM_INVALID", "$.data.attention", `attention 非法：${a}`, op));
+        result.issues.push(issue9("ENUM_INVALID", "$.data.attention", `attention 非法：${a}`, op));
         return result;
       }
       attention = a;
@@ -12140,7 +14970,7 @@ END`;
       const informationId = contact?.informationId ? ctx.tables.selectOne("information", ctx.branchId, contact.informationId) : null;
       if (!receiver || !informationId) {
         result.issues.push(
-          issue8(
+          issue9(
             "OPPORTUNITY_NOT_MATERIALIZED",
             "$.data.opportunity_ref",
             `机会 ${opportunity.entry.id} 尚未物化为接收者+信息的认知行：请由程序先建立机会`,
@@ -12207,7 +15037,7 @@ END`;
     const ref = op.value.ref?.trim();
     const existing = ref && !ref.startsWith("new:") ? resolveRef(ref, "channel", ctx.scope, { opId: op.opId, line: op.line, field: "ref" }) : null;
     if (ref && !ref.startsWith("new:") && !existing?.entry) {
-      result.issues.push(...existing?.issues ?? [issue8("REF_UNKNOWN", "$.ref", `找不到渠道引用：${ref}`, op)]);
+      result.issues.push(...existing?.issues ?? [issue9("REF_UNKNOWN", "$.ref", `找不到渠道引用：${ref}`, op)]);
       return result;
     }
     const creating = !existing?.entry;
@@ -12222,17 +15052,17 @@ END`;
     };
     const ownerId = resolveOne(data.owner_ref, ["character", "faction", "item"], "owner_ref");
     if (creating && !ownerId) {
-      result.issues.push(issue8("MINIMUM_FIELD_MISSING", "$.data.owner_ref", "channel.upsert 需要 owner_ref", op));
+      result.issues.push(issue9("MINIMUM_FIELD_MISSING", "$.data.owner_ref", "channel.upsert 需要 owner_ref", op));
       return result;
     }
     const kind = data.kind === void 0 ? "" : String(data.kind);
     if (creating && !CHANNEL_KINDS.includes(kind)) {
-      result.issues.push(issue8("MINIMUM_FIELD_MISSING", "$.data.kind", `channel.upsert 需要 kind（${CHANNEL_KINDS.join("/")}）`, op));
+      result.issues.push(issue9("MINIMUM_FIELD_MISSING", "$.data.kind", `channel.upsert 需要 kind（${CHANNEL_KINDS.join("/")}）`, op));
       return result;
     }
     const name = asString(data.name);
     if (creating && !name) {
-      result.issues.push(issue8("MINIMUM_FIELD_MISSING", "$.data.name", "channel.upsert 需要 name", op));
+      result.issues.push(issue9("MINIMUM_FIELD_MISSING", "$.data.name", "channel.upsert 需要 name", op));
       return result;
     }
     const sourceEntityId = resolveOne(data.source_ref, ["character", "faction", "item"], "source_ref");
@@ -12240,11 +15070,11 @@ END`;
     const recipientEntityId = resolveOne(data.recipient_ref, ["character", "faction"], "recipient_ref");
     const recipientLocationId = resolveOne(data.recipient_location_ref, ["location"], "recipient_location_ref");
     if (recipientEntityId && recipientLocationId) {
-      result.issues.push(issue8("CHANNEL_RECIPIENT_CONFLICT", "$.data", "recipient 实体/地点至多一个", op));
+      result.issues.push(issue9("CHANNEL_RECIPIENT_CONFLICT", "$.data", "recipient 实体/地点至多一个", op));
       return result;
     }
     if (data.scope !== void 0 && data.scope !== null && !isPlainObject7(data.scope)) {
-      result.issues.push(issue8("FIELD_TYPE_INVALID", "$.data.scope", "scope 必须是 {location_refs,entity_refs,radius_m?,topics}", op));
+      result.issues.push(issue9("FIELD_TYPE_INVALID", "$.data.scope", "scope 必须是 {location_refs,entity_refs,radius_m?,topics}", op));
       return result;
     }
     const scope = isPlainObject7(data.scope) ? data.scope : { location_refs: [], entity_refs: [], topics: [] };
@@ -12265,7 +15095,7 @@ END`;
     const hasScope = scopeLocationRefs.length > 0 || scopeEntityRefs.length > 0;
     if (creating && !sourceEntityId && !sourceLocationId && !hasScope) {
       result.issues.push(
-        issue8("CHANNEL_SCOPE_REQUIRED", "$.data", "渠道必须至少有一项 source_ref / source_location_ref 或有效 scope；范围不能默认为整个世界", op)
+        issue9("CHANNEL_SCOPE_REQUIRED", "$.data", "渠道必须至少有一项 source_ref / source_location_ref 或有效 scope；范围不能默认为整个世界", op)
       );
       return result;
     }
@@ -12273,7 +15103,7 @@ END`;
     if (data.reliability !== void 0) {
       const r = String(data.reliability);
       if (!RELIABILITY.includes(r)) {
-        result.issues.push(issue8("ENUM_INVALID", "$.data.reliability", `reliability 非法：${r}`, op));
+        result.issues.push(issue9("ENUM_INVALID", "$.data.reliability", `reliability 非法：${r}`, op));
         return result;
       }
       reliability = r;
@@ -12282,13 +15112,13 @@ END`;
     if (data.secrecy !== void 0) {
       const s = String(data.secrecy);
       if (!SECRECY2.includes(s)) {
-        result.issues.push(issue8("ENUM_INVALID", "$.data.secrecy", `secrecy 非法：${s}`, op));
+        result.issues.push(issue9("ENUM_INVALID", "$.data.secrecy", `secrecy 非法：${s}`, op));
         return result;
       }
       secrecy = s;
     }
     if (data.requirements !== void 0 && data.requirements !== null && !isPlainObject7(data.requirements)) {
-      result.issues.push(issue8("FIELD_TYPE_INVALID", "$.data.requirements", "requirements 必须是条件对象", op));
+      result.issues.push(issue9("FIELD_TYPE_INVALID", "$.data.requirements", "requirements 必须是条件对象", op));
       return result;
     }
     const turnId = ctx.turnId ?? ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
@@ -12334,7 +15164,7 @@ END`;
   var DISTANCE_BASIS = ["measured", "calibrated", "narrative", "estimated", "unknown"];
   var SCALE_QUALITY = ["uncalibrated", "estimated", "confirmed"];
   var MOBILITY_MODES = ["walk", "ride", "ground_vehicle", "water", "flight", "teleport", "custom"];
-  function issue9(code, path, message, op, extra = {}) {
+  function issue10(code, path, message, op, extra = {}) {
     return { code, path, message, severity: "error", retryable: true, opId: op.opId, line: op.line, ...extra };
   }
   function isPlainObject8(v) {
@@ -12362,7 +15192,7 @@ END`;
     if (unknown.length) result.issues.push(fieldIgnoredWarning(op, unknown));
     const ref = op.value.ref?.trim();
     if (!ref) {
-      result.issues.push(issue9("MINIMUM_FIELD_MISSING", "$.ref", "map.estimate 需要 ref", op));
+      result.issues.push(issue10("MINIMUM_FIELD_MISSING", "$.ref", "map.estimate 需要 ref", op));
       return result;
     }
     const resolved = resolveRef(ref, "map", ctx.scope, { opId: op.opId, line: op.line, field: "ref" });
@@ -12373,11 +15203,11 @@ END`;
     const mapId = resolved.entry.id;
     const before = ctx.tables.selectOne("maps", ctx.branchId, mapId);
     if (!before) {
-      result.issues.push(issue9("REF_UNKNOWN", "$.ref", `地图行不存在：${mapId}`, op));
+      result.issues.push(issue10("REF_UNKNOWN", "$.ref", `地图行不存在：${mapId}`, op));
       return result;
     }
     if (Number(before.scale_locked) === 1) {
-      result.issues.push(issue9("MAP_SCALE_LOCKED", "$.ref", "用户已锁定该图标定，map.estimate 不修改", op, { retryable: false }));
+      result.issues.push(issue10("MAP_SCALE_LOCKED", "$.ref", "用户已锁定该图标定，map.estimate 不修改", op, { retryable: false }));
       return result;
     }
     const widthM = typeof data.width_m === "number" && Number.isFinite(data.width_m) ? data.width_m : null;
@@ -12387,25 +15217,25 @@ END`;
     const basis = asString(data.basis);
     if (widthM === null && heightM === null && minCell === null && maxCell === null) {
       result.issues.push(
-        issue9("MINIMUM_FIELD_MISSING", "$.data", "map.estimate 需要尺寸（width_m/height_m）或比例尺依据（meters_per_cell_min/max）；不能声称精确测量", op)
+        issue10("MINIMUM_FIELD_MISSING", "$.data", "map.estimate 需要尺寸（width_m/height_m）或比例尺依据（meters_per_cell_min/max）；不能声称精确测量", op)
       );
       return result;
     }
     for (const [name, value] of [["width_m", widthM], ["height_m", heightM], ["meters_per_cell_min", minCell], ["meters_per_cell_max", maxCell]]) {
       if (value !== null && value <= 0) {
-        result.issues.push(issue9("MAP_SCALE_NOT_POSITIVE", `$.data.${name}`, `${name} 必须为正数`, op));
+        result.issues.push(issue10("MAP_SCALE_NOT_POSITIVE", `$.data.${name}`, `${name} 必须为正数`, op));
         return result;
       }
     }
     if (minCell !== null && maxCell !== null && minCell > maxCell) {
-      result.issues.push(issue9("MAP_SCALE_ORDER_INVALID", "$.data", "meters_per_cell_min 不能大于 meters_per_cell_max", op));
+      result.issues.push(issue10("MAP_SCALE_ORDER_INVALID", "$.data", "meters_per_cell_min 不能大于 meters_per_cell_max", op));
       return result;
     }
     let frame = isPlainObject8(before.frame_json) ? before.frame_json : {};
     if (data.frame !== void 0) {
       const f = isPlainObject8(data.frame) ? data.frame : null;
       if (!f || !Number.isInteger(f.cols) || !Number.isInteger(f.rows) || Number(f.cols) < 1 || Number(f.rows) < 1 || Number(f.cols) > 1e4 || Number(f.rows) > 1e4) {
-        result.issues.push(issue9("FRAME_INVALID", "$.data.frame", "frame.cols/rows 必须是 1～10000 的整数", op));
+        result.issues.push(issue10("FRAME_INVALID", "$.data.frame", "frame.cols/rows 必须是 1～10000 的整数", op));
         return result;
       }
       frame = { ...frame, cols: f.cols, rows: f.rows, reference_width_cells: f.cols, reference_height_cells: f.rows };
@@ -12451,33 +15281,33 @@ END`;
   function validateGeometry(geometry, op, issues, path) {
     if (geometry === void 0 || geometry === null) return null;
     if (!isPlainObject8(geometry)) {
-      issues.push(issue9("GEOMETRY_INVALID", path, "geometry 必须是 {kind,coordinates}", op));
+      issues.push(issue10("GEOMETRY_INVALID", path, "geometry 必须是 {kind,coordinates}", op));
       return null;
     }
     const kind = String(geometry.kind ?? "");
     if (!["point", "line", "polygon"].includes(kind)) {
-      issues.push(issue9("GEOMETRY_INVALID", path, `geometry.kind 非法：${kind}`, op));
+      issues.push(issue10("GEOMETRY_INVALID", path, `geometry.kind 非法：${kind}`, op));
       return null;
     }
     if (!Array.isArray(geometry.coordinates)) {
-      issues.push(issue9("GEOMETRY_INVALID", path, "geometry.coordinates 必须是数组", op));
+      issues.push(issue10("GEOMETRY_INVALID", path, "geometry.coordinates 必须是数组", op));
       return null;
     }
     if (geometry.coordinates.length > GEOMETRY_VERTEX_LIMIT) {
-      issues.push(issue9("GEOMETRY_TOO_MANY_VERTICES", path, `geometry 顶点上限 ${GEOMETRY_VERTEX_LIMIT}，收到 ${geometry.coordinates.length}`, op));
+      issues.push(issue10("GEOMETRY_TOO_MANY_VERTICES", path, `geometry 顶点上限 ${GEOMETRY_VERTEX_LIMIT}，收到 ${geometry.coordinates.length}`, op));
       return null;
     }
     const coords = [];
     for (const point of geometry.coordinates) {
       const pair = Array.isArray(point) ? point : isPlainObject8(point) ? [point.x, point.y] : null;
       if (!pair || pair.length < 2) {
-        issues.push(issue9("GEOMETRY_INVALID", path, "geometry.coordinates 每项必须是 [x,y]", op));
+        issues.push(issue10("GEOMETRY_INVALID", path, "geometry.coordinates 每项必须是 [x,y]", op));
         return null;
       }
       const x = Number(pair[0]);
       const y = Number(pair[1]);
       if (!Number.isFinite(x) || !Number.isFinite(y)) {
-        issues.push(issue9("GEOMETRY_INVALID", path, "geometry 坐标必须是有限数字（NaN/Infinity 非法）", op));
+        issues.push(issue10("GEOMETRY_INVALID", path, "geometry 坐标必须是有限数字（NaN/Infinity 非法）", op));
         return null;
       }
       coords.push([x, y]);
@@ -12508,7 +15338,7 @@ END`;
     const ref = op.value.ref?.trim();
     const existingRow = ref && !ref.startsWith("new:") ? resolveRef(ref, "route", ctx.scope, { opId: op.opId, line: op.line, field: "ref" }) : null;
     if (ref && !ref.startsWith("new:") && !existingRow?.entry) {
-      result.issues.push(...existingRow?.issues ?? [issue9("REF_UNKNOWN", "$.ref", `找不到路线引用：${ref}`, op)]);
+      result.issues.push(...existingRow?.issues ?? [issue10("REF_UNKNOWN", "$.ref", `找不到路线引用：${ref}`, op)]);
       return result;
     }
     const fromRef = data.from_ref ?? null;
@@ -12528,17 +15358,17 @@ END`;
     const rowId2 = existingRow?.entry ? existingRow.entry.id : ctx.makeId("route", op.opId, ref && ref.startsWith("new:") ? ref : `route:${fromId}:${toId}`);
     const before = existingRow?.entry ? ctx.tables.selectOne("routes", ctx.branchId, rowId2) : null;
     if (existingRow?.entry && !before) {
-      result.issues.push(issue9("REF_UNKNOWN", "$.ref", `路线行不存在：${rowId2}`, op));
+      result.issues.push(issue10("REF_UNKNOWN", "$.ref", `路线行不存在：${rowId2}`, op));
       return result;
     }
     if (!fromId) fromId = before ? String(before.from_location_id) : null;
     if (!toId) toId = before ? String(before.to_location_id) : null;
     if (!fromId || !toId) {
-      result.issues.push(issue9("MINIMUM_FIELD_MISSING", "$.data", "route.propose 需要 from_ref 与 to_ref", op));
+      result.issues.push(issue10("MINIMUM_FIELD_MISSING", "$.data", "route.propose 需要 from_ref 与 to_ref", op));
       return result;
     }
     if (fromId === toId) {
-      result.issues.push(issue9("ROUTE_SELF_LOOP", "$.data", "路线两端不能是同一地点", op));
+      result.issues.push(issue10("ROUTE_SELF_LOOP", "$.data", "路线两端不能是同一地点", op));
       return result;
     }
     const geometry = validateGeometry(data.geometry, op, result.issues, "$.data.geometry");
@@ -12558,7 +15388,7 @@ END`;
     const toMap = toRow?.map_id ? String(toRow.map_id) : null;
     if (geometry && mapId && fromMap && toMap && fromMap !== toMap) {
       result.issues.push(
-        issue9("ROUTE_GEOMETRY_CROSS_MAP", "$.data.geometry", "两端地点属于不同地图：跨图连接不要给几何（用两端地点与耗时表达）", op)
+        issue10("ROUTE_GEOMETRY_CROSS_MAP", "$.data.geometry", "两端地点属于不同地图：跨图连接不要给几何（用两端地点与耗时表达）", op)
       );
       return result;
     }
@@ -12566,7 +15396,7 @@ END`;
     if (data.kind !== void 0) {
       const k = String(data.kind);
       if (!ROUTE_KINDS.includes(k)) {
-        result.issues.push(issue9("ENUM_INVALID", "$.data.kind", `路线类型非法：${k}`, op));
+        result.issues.push(issue10("ENUM_INVALID", "$.data.kind", `路线类型非法：${k}`, op));
         return result;
       }
       kind = k;
@@ -12575,7 +15405,7 @@ END`;
     if (data.quality !== void 0) {
       const q = String(data.quality);
       if (!GEOMETRY_QUALITY.includes(q)) {
-        result.issues.push(issue9("ENUM_INVALID", "$.data.quality", `geometry quality 非法：${q}`, op));
+        result.issues.push(issue10("ENUM_INVALID", "$.data.quality", `geometry quality 非法：${q}`, op));
         return result;
       }
       quality = q;
@@ -12585,20 +15415,20 @@ END`;
     const distanceMax = typeof data.distance_max_m === "number" && Number.isFinite(data.distance_max_m) ? data.distance_max_m : null;
     for (const [name, value] of [["distance_m", distanceM], ["distance_min_m", distanceMin], ["distance_max_m", distanceMax]]) {
       if (value !== null && value < 0) {
-        result.issues.push(issue9("DISTANCE_NEGATIVE", `$.data.${name}`, `${name} 不能为负`, op));
+        result.issues.push(issue10("DISTANCE_NEGATIVE", `$.data.${name}`, `${name} 不能为负`, op));
         return result;
       }
     }
     if (distanceMin !== null && distanceM !== null && distanceMin > distanceM) {
-      result.issues.push(issue9("DISTANCE_ORDER_INVALID", "$.data", "distance_min_m 不能大于 distance_m", op));
+      result.issues.push(issue10("DISTANCE_ORDER_INVALID", "$.data", "distance_min_m 不能大于 distance_m", op));
       return result;
     }
     if (distanceMax !== null && distanceM !== null && distanceM > distanceMax) {
-      result.issues.push(issue9("DISTANCE_ORDER_INVALID", "$.data", "distance_m 不能大于 distance_max_m", op));
+      result.issues.push(issue10("DISTANCE_ORDER_INVALID", "$.data", "distance_m 不能大于 distance_max_m", op));
       return result;
     }
     if (distanceMin !== null && distanceMax !== null && distanceMin > distanceMax) {
-      result.issues.push(issue9("DISTANCE_ORDER_INVALID", "$.data", "distance_min_m 不能大于 distance_max_m", op));
+      result.issues.push(issue10("DISTANCE_ORDER_INVALID", "$.data", "distance_min_m 不能大于 distance_max_m", op));
       return result;
     }
     const modes = [];
@@ -12606,24 +15436,24 @@ END`;
       for (const m of data.modes) {
         const mode = String(m);
         if (!MOBILITY_MODES.includes(mode)) {
-          result.issues.push(issue9("ENUM_INVALID", "$.data.modes", `移动方式非法：${mode}`, op));
+          result.issues.push(issue10("ENUM_INVALID", "$.data.modes", `移动方式非法：${mode}`, op));
           return result;
         }
         modes.push(mode);
       }
     }
     if (data.access !== void 0 && data.access !== null && !isPlainObject8(data.access)) {
-      result.issues.push(issue9("FIELD_TYPE_INVALID", "$.data.access", "access 必须是条件对象", op));
+      result.issues.push(issue10("FIELD_TYPE_INVALID", "$.data.access", "access 必须是条件对象", op));
       return result;
     }
     if (data.duration !== void 0 && data.duration !== null && !isPlainObject8(data.duration)) {
-      result.issues.push(issue9("FIELD_TYPE_INVALID", "$.data.duration", "duration 必须是 TimeEstimate 对象", op));
+      result.issues.push(issue10("FIELD_TYPE_INVALID", "$.data.duration", "duration 必须是 TimeEstimate 对象", op));
       return result;
     }
     const distanceBasis = before ? String(before.distance_basis) : "unknown";
     const resolvedBasis = distanceM !== null || distanceMin !== null || distanceMax !== null ? data.quality === "confirmed" ? "calibrated" : "estimated" : distanceBasis;
     if (!DISTANCE_BASIS.includes(resolvedBasis)) {
-      result.issues.push(issue9("ENUM_INVALID", "$.data", "distance_basis 无法确定", op));
+      result.issues.push(issue10("ENUM_INVALID", "$.data", "distance_basis 无法确定", op));
       return result;
     }
     if (result.issues.some((i) => i.severity === "error")) return result;
@@ -12695,13 +15525,19 @@ END`;
 
   // src/atlas-spatial-request.ts
   var LAYOUT_REQUEST_CONFLICT = ATLAS_ERROR_CODES.LAYOUT_REQUEST_CONFLICT;
-  var FLOOR_COLLECTIONS = ["rooms", "contents", "actors", "items"];
-  var CITY_COLLECTIONS = ["districts", "buildings"];
+  var FLOOR_COLLECTIONS = LAYOUT_KIND_COLLECTIONS.floor;
+  var CITY_COLLECTIONS = LAYOUT_KIND_COLLECTIONS.city;
+  var OVERVIEW_COLLECTIONS = LAYOUT_KIND_COLLECTIONS.overview;
+  var KIND_COLLECTIONS = {
+    floor: FLOOR_COLLECTIONS,
+    city: CITY_COLLECTIONS,
+    overview: OVERVIEW_COLLECTIONS
+  };
   var DIRECTIVE_KEYS = ["deletes", "rebuild"];
   function isPlainObject9(v) {
     return typeof v === "object" && v !== null && !Array.isArray(v);
   }
-  function issue10(code, path, message, op, extra = {}) {
+  function issue11(code, path, message, op, extra = {}) {
     return { code, path, message, severity: "error", retryable: true, opId: op.opId, line: op.line, ...extra };
   }
   function mutation6(table, rowId2, before, after, op, basis) {
@@ -12775,17 +15611,17 @@ END`;
     for (const collection2 of LAYOUT_SPEC_COLLECTIONS) {
       const rows4 = incoming[collection2];
       if (!Array.isArray(rows4)) continue;
-      const byId3 = /* @__PURE__ */ new Map();
+      const byId5 = /* @__PURE__ */ new Map();
       for (const row2 of Array.isArray(out[collection2]) ? out[collection2] : []) {
-        if (isPlainObject9(row2)) byId3.set(String(row2["id"]), row2);
+        if (isPlainObject9(row2)) byId5.set(String(row2["id"]), row2);
       }
       for (const raw of rows4) {
         if (!isPlainObject9(raw)) continue;
         const id = String(raw["id"]);
-        const existing = byId3.get(id);
-        byId3.set(id, existing ? mergeRow(existing, raw, `spec.${collection2}[${id}]`, strict, conflicts) : { ...raw });
+        const existing = byId5.get(id);
+        byId5.set(id, existing ? mergeRow(existing, raw, `spec.${collection2}[${id}]`, strict, conflicts) : { ...raw });
       }
-      out[collection2] = [...byId3.values()];
+      out[collection2] = [...byId5.values()];
     }
     for (const key of LAYOUT_SPEC_SCALARS) {
       if (DIRECTIVE_KEYS.includes(key)) continue;
@@ -12824,12 +15660,12 @@ END`;
     const result = emptyCompileResult();
     const data = op.value.data ?? {};
     const kind = typeof data["kind"] === "string" ? data["kind"].trim().toLowerCase() : "";
-    if (kind !== "floor" && kind !== "city") {
+    if (kind !== "floor" && kind !== "city" && kind !== "overview") {
       result.issues.push(
-        issue10(
+        issue11(
           ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING,
           "$.data.kind",
-          `map.layout.request kind must be one of {floor,city}; got ${JSON.stringify(data["kind"] ?? null)}`,
+          `map.layout.request kind must be one of {floor,city,overview}; got ${JSON.stringify(data["kind"] ?? null)}`,
           op
         )
       );
@@ -12841,7 +15677,7 @@ END`;
     const spec = { ...cleaned.spec };
     const ref = op.value.ref?.trim() ?? "";
     if (ref === "") {
-      result.issues.push(issue10(ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING, "$.ref", "map.layout.request 需要 ref 指定地图", op));
+      result.issues.push(issue11(ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING, "$.ref", "map.layout.request 需要 ref 指定地图", op));
       return result;
     }
     const resolved = resolveRef(ref, "map", ctx.scope, { opId: op.opId, line: op.line, field: "ref" });
@@ -12852,13 +15688,13 @@ END`;
     const mapId = resolved.entry.id;
     const before = ctx.tables.selectOne("maps", ctx.branchId, mapId);
     if (!before) {
-      result.issues.push(issue10(ATLAS_ERROR_CODES.REF_UNKNOWN, "$.ref", `地图行不存在：${mapId}`, op));
+      result.issues.push(issue11(ATLAS_ERROR_CODES.REF_UNKNOWN, "$.ref", `地图行不存在：${mapId}`, op));
       return result;
     }
     const specMapId = typeof spec["mapId"] === "string" ? spec["mapId"].trim() : "";
     if (specMapId !== "" && specMapId !== mapId) {
       result.issues.push(
-        issue10(
+        issue11(
           LAYOUT_REQUEST_CONFLICT,
           "$.data.spec.mapId",
           `spec.mapId（${specMapId}）与 ref 解析出的地图（${mapId}）不一致；同一请求不能跨图。`,
@@ -12868,15 +15704,16 @@ END`;
       return result;
     }
     spec["mapId"] = mapId;
-    const wrong = kind === "floor" ? CITY_COLLECTIONS : FLOOR_COLLECTIONS;
-    for (const collection2 of wrong) {
+    const allowed = KIND_COLLECTIONS[kind] ?? FLOOR_COLLECTIONS;
+    for (const collection2 of LAYOUT_SPEC_COLLECTIONS) {
+      if (allowed.includes(collection2)) continue;
       const rows4 = spec[collection2];
       if (Array.isArray(rows4) && rows4.length > 0) {
         result.issues.push(
-          issue10(
+          issue11(
             LAYOUT_REQUEST_CONFLICT,
             `$.data.spec.${collection2}`,
-            `kind=${kind} 的布局请求不接受 ${collection2}；floor 与 city 是两套模板，父图/子图引用不可混用。`,
+            `kind=${kind} 的布局请求不接受 ${collection2}；floor / city / overview 是三套模板，引用不可混用。`,
             op
           )
         );
@@ -12893,7 +15730,7 @@ END`;
       const owner = row2["map_id"] === null || row2["map_id"] === void 0 ? "" : String(row2["map_id"]);
       if (owner !== "" && owner !== mapId && id !== before.container_location_id) {
         result.issues.push(
-          issue10(
+          issue11(
             LAYOUT_REQUEST_CONFLICT,
             "$.data.spec",
             `实体 ${id} 属于另一张图（${owner}），不能出现在 ${mapId} 的布局里：父图/子图引用不可混用。`,
@@ -12915,7 +15752,7 @@ END`;
     const previous = state.get(mapId);
     if (savedKind !== null && savedKind !== kind) {
       result.issues.push(
-        issue10(
+        issue11(
           LAYOUT_REQUEST_CONFLICT,
           "$.data.kind",
           `该图已保存 kind=${savedKind} 的布局请求，本次是 ${kind}；同一张图的两套模板不能并存，请先显式重建。`,
@@ -12926,14 +15763,14 @@ END`;
     }
     if (previous && previous.kind !== kind) {
       result.issues.push(
-        issue10(LAYOUT_REQUEST_CONFLICT, "$.data.kind", `同批前一个请求是 ${previous.kind}，本次是 ${kind}。`, op)
+        issue11(LAYOUT_REQUEST_CONFLICT, "$.data.kind", `同批前一个请求是 ${previous.kind}，本次是 ${kind}。`, op)
       );
       return result;
     }
     const merged = mergeConstraints(previous ? previous.spec : savedSpec, resolvedSpec, previous !== void 0);
     if (merged.conflicts.length > 0) {
       result.issues.push(
-        issue10(
+        issue11(
           LAYOUT_REQUEST_CONFLICT,
           `$.data.spec.${merged.conflicts[0].replace(/^spec\./, "")}`,
           `本次请求与同批已编译的约束在 ${merged.conflicts.join("、")} 上冲突；不静默覆盖，请合并成一条或改用不同 id。`,
@@ -13155,44 +15992,6 @@ END`;
     return { results, merged, issues, scope, aliasById: declared.aliasById, normalized };
   }
 
-  // src/atlas-hash.ts
-  var nodeCrypto;
-  function getNodeCrypto() {
-    if (nodeCrypto !== void 0) return nodeCrypto;
-    try {
-      const proc = globalThis.process;
-      if (proc && typeof proc.getBuiltinModule === "function") {
-        const mod = proc.getBuiltinModule("node:crypto");
-        nodeCrypto = mod && typeof mod.createHash === "function" ? mod : null;
-        return nodeCrypto;
-      }
-    } catch {
-    }
-    nodeCrypto = null;
-    return nodeCrypto;
-  }
-  function pureHash(text2) {
-    let h1 = 2166136261;
-    let h2 = 16777619;
-    let h3 = 2654435769;
-    let h4 = 2246822507;
-    for (let i = 0; i < text2.length; i += 1) {
-      const c = text2.charCodeAt(i);
-      h1 = Math.imul(h1 ^ c, 16777619) >>> 0;
-      h2 = (Math.imul(h2 ^ c, 2246822507) >>> 0) + c;
-      h3 = Math.imul(h3 ^ c, 3266489909) >>> 0;
-      h4 = (h4 ^ c + i) >>> 0;
-      h4 = Math.imul(h4, 668265263) >>> 0;
-    }
-    const hex = (n) => (n >>> 0).toString(16).padStart(8, "0");
-    return `${hex(h1)}${hex(h2)}${hex(h3)}${hex(h4)}`;
-  }
-  function stableHexHash(text2) {
-    const crypto2 = getNodeCrypto();
-    if (crypto2) return crypto2.createHash("sha256").update(text2).digest("hex");
-    return pureHash(text2);
-  }
-
   // src/atlas-ops-parser.ts
   var UTF8_ENCODER = new TextEncoder();
   function utf8ByteLength(text2) {
@@ -13208,7 +16007,7 @@ END`;
   var SQL_START_RE = /^(SELECT|UPDATE|INSERT|DELETE|CREATE|DROP|ALTER|PRAGMA|ATTACH|WITH|REPLACE)\b/i;
   var OPERATION_TOP_FIELDS = ["op", "ref", "data", "source", "why", "ticket"];
   var EXCERPT_CHARS = 80;
-  function issue11(code, path, message, extra = {}) {
+  function issue12(code, path, message, extra = {}) {
     return toIssue2(new Error(message), { code, path, ...extra });
   }
   function normalizeText(text2) {
@@ -13371,7 +16170,7 @@ END`;
     const source = normalizeText(typeof text2 === "string" ? text2 : "");
     const reasoning = stripReasoningBlocks(source, (blockedLine, tag) => {
       issues.push(
-        issue11(
+        issue12(
           ATLAS_ERROR_CODES.UNTERMINATED_REASONING,
           "$.reasoning",
           `unterminated <${tag}> block opened on line ${blockedLine}; nothing after it is extracted`,
@@ -13390,7 +16189,7 @@ END`;
         body = body.slice(afterOpen, afterOpen + close.index);
       } else {
         issues.push(
-          issue11(
+          issue12(
             ATLAS_ERROR_CODES.WRAPPER_INCOMPLETE,
             "$.atlasEdit",
             `missing </atlasEdit> closing tag (opened on line ${openLine}); inner content kept`,
@@ -13405,7 +16204,7 @@ END`;
       if (closeOnly) {
         const closeLine = makeLineIndex(body).lineAt(closeOnly.index);
         issues.push(
-          issue11(
+          issue12(
             ATLAS_ERROR_CODES.WRAPPER_INCOMPLETE,
             "$.atlasEdit",
             `stray </atlasEdit> closing tag without opening tag on line ${closeLine}; tag stripped`,
@@ -13432,7 +16231,7 @@ END`;
   function buildOperation(value, candidate, index, issues) {
     if (!isPlainObject10(value)) {
       issues.push(
-        issue11(
+        issue12(
           ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING,
           "$",
           `line ${candidate.line}: each response line must be a JSON object with a string op; got ${Array.isArray(value) ? "array" : typeof value}; excerpt: ${excerptOf(candidate.raw)}`,
@@ -13444,7 +16243,7 @@ END`;
     const opRaw = typeof value["op"] === "string" ? value["op"] : "";
     if (opRaw.trim() === "") {
       issues.push(
-        issue11(
+        issue12(
           ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING,
           "$.op",
           `line ${candidate.line}: operation object is missing required string field op; minimal example: {"op":"character.upsert","ref":"C1","data":{"thought":"先观察。"}}`,
@@ -13459,7 +16258,7 @@ END`;
     if (typeof ref === "string") modelOp.ref = ref;
     else if (ref !== void 0 && ref !== null) {
       issues.push(
-        issue11(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.ref", `line ${candidate.line}: ref must be a string; ignored`, {
+        issue12(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.ref", `line ${candidate.line}: ref must be a string; ignored`, {
           severity: "warning",
           line: candidate.line
         })
@@ -13469,7 +16268,7 @@ END`;
     if (isPlainObject10(data)) modelOp.data = data;
     else if (data !== void 0 && data !== null) {
       issues.push(
-        issue11(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.data", `line ${candidate.line}: data must be an object; ignored`, {
+        issue12(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.data", `line ${candidate.line}: data must be an object; ignored`, {
           severity: "warning",
           line: candidate.line
         })
@@ -13482,7 +16281,7 @@ END`;
       if (list.length > 0) modelOp.source = list;
       else {
         issues.push(
-          issue11(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.source", `line ${candidate.line}: source array has no string entries; ignored`, {
+          issue12(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.source", `line ${candidate.line}: source array has no string entries; ignored`, {
             severity: "warning",
             line: candidate.line
           })
@@ -13490,7 +16289,7 @@ END`;
       }
     } else if (source !== void 0 && source !== null) {
       issues.push(
-        issue11(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.source", `line ${candidate.line}: source must be a string or string array; ignored`, {
+        issue12(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.source", `line ${candidate.line}: source must be a string or string array; ignored`, {
           severity: "warning",
           line: candidate.line
         })
@@ -13500,7 +16299,7 @@ END`;
     if (typeof why === "string") modelOp.why = why;
     else if (why !== void 0 && why !== null) {
       issues.push(
-        issue11(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.why", `line ${candidate.line}: why must be a string; ignored`, {
+        issue12(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.why", `line ${candidate.line}: why must be a string; ignored`, {
           severity: "warning",
           line: candidate.line
         })
@@ -13510,7 +16309,7 @@ END`;
     if (typeof ticket === "string") modelOp.ticket = ticket;
     else if (ticket !== void 0 && ticket !== null) {
       issues.push(
-        issue11(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.ticket", `line ${candidate.line}: ticket must be a string; ignored`, {
+        issue12(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.ticket", `line ${candidate.line}: ticket must be a string; ignored`, {
           severity: "warning",
           line: candidate.line
         })
@@ -13520,7 +16319,7 @@ END`;
       if (OPERATION_TOP_FIELDS.includes(key)) continue;
       const systemOwned = SYSTEM_OWNED_FIELDS.includes(key);
       issues.push(
-        issue11(
+        issue12(
           systemOwned ? ATLAS_ERROR_CODES.SYSTEM_FIELD_IGNORED : ATLAS_ERROR_CODES.FIELD_IGNORED,
           `$.${key}`,
           `line ${candidate.line}: ${systemOwned ? "program-owned field" : "unknown top-level field"} ${key} ignored on ${opRaw.trim()}`,
@@ -13542,7 +16341,7 @@ END`;
     const byteLength = utf8ByteLength(rawInput);
     if (byteLength > ATLAS_RUNTIME_LIMITS.responseUtf8Bytes) {
       issues.push(
-        issue11(
+        issue12(
           ATLAS_ERROR_CODES.RESPONSE_TOO_LARGE,
           "$",
           `response is ${byteLength} bytes, over the ${ATLAS_RUNTIME_LIMITS.responseUtf8Bytes} byte limit; no operation kept (response not truncated)`,
@@ -13571,7 +16370,7 @@ END`;
       const arrayEnd = findJsonValueEnd(source, bodyStart);
       if (arrayEnd < 0) {
         issues.push(
-          issue11(
+          issue12(
             ATLAS_ERROR_CODES.JSON_SYNTAX,
             "$",
             `JSON array is unterminated (${byteLength} bytes); excerpt: ${excerptOf(head)}`,
@@ -13589,7 +16388,7 @@ END`;
         const at = /position (\d+)/.exec(detail);
         const offset = at ? bodyStart + Number(at[1]) : bodyStart;
         issues.push(
-          issue11(
+          issue12(
             ATLAS_ERROR_CODES.JSON_SYNTAX,
             "$",
             `JSON array is malformed (${utf8ByteLength(arrayText)} bytes): ${detail}; excerpt: ${excerptOf(arrayText)}`,
@@ -13600,7 +16399,7 @@ END`;
       }
       if (!Array.isArray(parsedArray)) {
         issues.push(
-          issue11(ATLAS_ERROR_CODES.JSON_SYNTAX, "$", `expected a JSON array; excerpt: ${excerptOf(arrayText)}`, {
+          issue12(ATLAS_ERROR_CODES.JSON_SYNTAX, "$", `expected a JSON array; excerpt: ${excerptOf(arrayText)}`, {
             line: lineIndex.lineAt(bodyStart),
             retryable: true
           })
@@ -13649,7 +16448,7 @@ END`;
       const bytes2 = utf8ByteLength(candidate.raw);
       if (bytes2 > ATLAS_RUNTIME_LIMITS.operationUtf8Bytes) {
         issues.push(
-          issue11(
+          issue12(
             ATLAS_ERROR_CODES.OPERATION_TOO_LARGE,
             "$",
             `operation on line ${candidate.line} is ${bytes2} bytes, over the ${ATLAS_RUNTIME_LIMITS.operationUtf8Bytes} byte per-operation limit; line skipped, other lines unaffected`,
@@ -13665,7 +16464,7 @@ END`;
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         issues.push(
-          issue11(
+          issue12(
             ATLAS_ERROR_CODES.JSON_SYNTAX,
             "$",
             `line ${candidate.line}: invalid JSON (${bytes2} bytes): ${detail}; excerpt: ${excerptOf(candidate.raw)}`,
@@ -13678,7 +16477,7 @@ END`;
       const depth = jsonNestingDepth(candidate.raw);
       if (depth > ATLAS_RUNTIME_LIMITS.responseJsonDepth) {
         issues.push(
-          issue11(
+          issue12(
             ATLAS_ERROR_CODES.JSON_TOO_DEEP,
             "$",
             `line ${candidate.line}: JSON nesting depth ${depth} exceeds ${ATLAS_RUNTIME_LIMITS.responseJsonDepth}; line skipped`,
@@ -13706,7 +16505,7 @@ END`;
     }
     if (validCount > limit) {
       issues.push(
-        issue11(
+        issue12(
           ATLAS_ERROR_CODES.TOO_MANY_OPERATIONS,
           "$",
           `response contains ${validCount} valid operations, over the ${limit} per-response limit; kept the first ${limit} and reported the remaining ${validCount - limit} (no silent drop)`,
@@ -13878,12 +16677,12 @@ END`;
     return { ...issue17 };
   }
   function creationCorrections(originals, tickets) {
-    const byId3 = new Map(originals.map((op) => [op.opId, op]));
+    const byId5 = new Map(originals.map((op) => [op.opId, op]));
     const result = /* @__PURE__ */ new Map();
     const duplicates = /* @__PURE__ */ new Set();
     const prefixes = { "location.upsert": "L", "character.upsert": "C", "item.upsert": "I", "faction.upsert": "F" };
     for (const ticket of tickets) {
-      const original = byId3.get(ticket.originalOpId);
+      const original = byId5.get(ticket.originalOpId);
       if (!original) continue;
       const { op, ref, data } = original.value;
       const prefix = prefixes[op];
@@ -14660,8 +17459,8 @@ END`;
   }
 
   // src/atlas-scene-layout.ts
-  var GOLDEN_ANGLE = 2.399963229728653;
-  var MAX_CANDIDATES = 512;
+  var GOLDEN_ANGLE2 = 2.399963229728653;
+  var MAX_CANDIDATES2 = 512;
   var GAP_RETRY_FACTORS = [1, 0.75, 0.5];
   function placementIssue(code, message, severity = "error", extra = {}) {
     return { code, path: "$.placeUnlocatedScenePoints", message, severity, retryable: false, ...extra };
@@ -14683,7 +17482,7 @@ END`;
     return Math.hypot(dx, dy);
   }
   function outsideAll(neighbourhood, distances) {
-    return distances.every((distance2) => distance2 >= neighbourhood);
+    return distances.every((distance3) => distance3 >= neighbourhood);
   }
   function placeUnlocatedScenePoints(input) {
     const issues = [];
@@ -14743,15 +17542,15 @@ END`;
           );
         }
       }
-      const startIndex = stableHash4(`${input.seed}\0${entry.id}`) % MAX_CANDIDATES;
+      const startIndex = stableHash4(`${input.seed}\0${entry.id}`) % MAX_CANDIDATES2;
       let chosen = null;
       let chosenGap = minGap;
       for (const factor of GAP_RETRY_FACTORS) {
         const neighbourhood = minGap * factor;
-        for (let step = 0; step < MAX_CANDIDATES; step += 1) {
+        for (let step = 0; step < MAX_CANDIDATES2; step += 1) {
           const index = startIndex + step;
           const radius = neighbourhood * Math.sqrt(step + 1);
-          const angle = index * GOLDEN_ANGLE;
+          const angle = index * GOLDEN_ANGLE2;
           const candidate = { x: target.x + radius * Math.cos(angle), y: target.y + radius * Math.sin(angle) };
           if (candidate.x < lowX || candidate.x > highX || candidate.y < lowY || candidate.y > highY) continue;
           const pointsOk = outsideAll(
@@ -14824,8 +17623,8 @@ END`;
     const result = /* @__PURE__ */ new Map();
     const occupied = [];
     const gap = Math.min(12, 45 / Math.sqrt(Math.max(1, rows4.length)));
-    const ordered3 = [...rows4].sort((a, b) => Number(Boolean(b.positionHint || b.currentAction)) - Number(Boolean(a.positionHint || a.currentAction)) || a.id.localeCompare(b.id));
-    for (const row2 of ordered3) {
+    const ordered4 = [...rows4].sort((a, b) => Number(Boolean(b.positionHint || b.currentAction)) - Number(Boolean(a.positionHint || a.currentAction)) || a.id.localeCompare(b.id));
+    for (const row2 of ordered4) {
       const hint = interiorPositionHint(row2.positionHint || row2.currentAction || "", row2.id);
       let index = 0;
       if (hint) {
@@ -14876,7 +17675,7 @@ END`;
     goal: "other"
   };
   var BELIEF_RANK = { rejected: 0, heard: 1, doubted: 2, believed: 3, verified: 4 };
-  function issue12(code, path, message, severity = "warning") {
+  function issue13(code, path, message, severity = "warning") {
     return { code, path, message, severity, retryable: false };
   }
   function isPlainObject11(value) {
@@ -15139,8 +17938,8 @@ END`;
       if (byStatus !== 0) return byStatus;
       return String(a.id) < String(b.id) ? -1 : String(a.id) > String(b.id) ? 1 : 0;
     });
-    const byId3 = /* @__PURE__ */ new Map();
-    for (const row2 of rows4) byId3.set(String(row2.id), row2);
+    const byId5 = /* @__PURE__ */ new Map();
+    for (const row2 of rows4) byId5.set(String(row2.id), row2);
     const mainAssigned = /* @__PURE__ */ new Map();
     const activeRows = rows4.filter((r) => String(r.status) === "active" && String(r.kind) !== "goal");
     const sortByPriority = (a, b) => {
@@ -15173,7 +17972,7 @@ END`;
       const startFloor = Math.max(fromS, evaluated);
       const condition = trigger ? evaluateCondition(world3, trigger, { clockS: untilS, actorId }) : { ok: true, reasons: [], atS: null };
       const dependencies = asArray(row2.depends_on_json).filter((d) => typeof d === "string");
-      const pendingDeps = dependencies.filter((dep) => String(byId3.get(dep)?.status ?? "") !== "completed");
+      const pendingDeps = dependencies.filter((dep) => String(byId5.get(dep)?.status ?? "") !== "completed");
       const actor = actorRow(actorId);
       const physical = actor ? String(actor.physical_status ?? "unknown") : "unknown";
       const able = physical !== "dead" && physical !== "incapacitated";
@@ -15228,12 +18027,12 @@ END`;
           reasonCode = "CONDITION_FAILED";
         } else if (!able) {
           reasonCode = "ACTOR_UNABLE";
-          issues.push(issue12("ACTION_ACTOR_UNABLE", `actions.${actionId}`, `${actorId} 已死亡或失去行动能力，行动不再推进（应由 haltActorWork 取消）`, "warning"));
+          issues.push(issue13("ACTION_ACTOR_UNABLE", `actions.${actionId}`, `${actorId} 已死亡或失去行动能力，行动不再推进（应由 haltActorWork 取消）`, "warning"));
         } else {
           const accrualStart = Math.max(startFloor, startedAt ?? startFloor);
           let start = accrualStart;
           for (const dep of dependencies) {
-            const depFinish = num3(byId3.get(dep)?.finished_at_s);
+            const depFinish = num3(byId5.get(dep)?.finished_at_s);
             if (depFinish !== null) start = Math.max(start, depFinish);
           }
           const dt = Math.max(0, untilS - start);
@@ -15264,7 +18063,7 @@ END`;
               if (nominal === null) {
                 reasonCode = "DURATION_UNKNOWN";
                 issues.push(
-                  issue12("ACTION_DURATION_UNKNOWN", `actions.${actionId}`, "有效执行时间未知：累计时间但不假装完成，也不当成本轮 0 秒", "warning")
+                  issue13("ACTION_DURATION_UNKNOWN", `actions.${actionId}`, "有效执行时间未知：累计时间但不假装完成，也不当成本轮 0 秒", "warning")
                 );
               } else if (nominal <= 0) {
                 status = "completed";
@@ -15280,7 +18079,7 @@ END`;
             } else if (dt > 0) {
               reasonCode = "TIME_SHARED";
               issues.push(
-                issue12(
+                issue13(
                   "ACTION_TIME_SHARED",
                   `actions.${actionId}`,
                   `${actorId} 的主要行动时间已被 ${mainAssigned.get(actorId)} 占用，本窗口不重复计进度`,
@@ -15376,7 +18175,7 @@ END`;
   var SPEED_BASES = /* @__PURE__ */ new Set(["preset", "narrative", "worldbook", "estimate"]);
   var JOURNEY_SEGMENT_LIMIT = ATLAS_FIELD_LIMITS.journeySegmentLimit;
   var GEOMETRY_VERTEX_LIMIT3 = ATLAS_FIELD_LIMITS.geometryVertexLimit;
-  function issue13(code, path, message, severity = "error") {
+  function issue14(code, path, message, severity = "error") {
     return { code, path, message, severity, retryable: false };
   }
   function isPlainObject12(value) {
@@ -15445,7 +18244,7 @@ END`;
       const preferred = evidenceMode !== null && (key === evidenceMode || mode === evidenceMode);
       if (evidenceMode !== null && !preferred && profiles.length === 1) {
         issues2.push(
-          issue13(
+          issue14(
             "MOBILITY_MODE_UNAVAILABLE",
             "mobility_profiles_json",
             `人物不具备移动方式 ${evidenceMode}；现有方式只有 ${key}（不自动授予其它模式的预设速度）`,
@@ -15454,19 +18253,19 @@ END`;
         );
       }
       if (allowedModes.length > 0 && !allowedModes.includes(mode)) {
-        issues2.push(issue13("MOBILITY_MODE_NOT_ALLOWED_ON_ROUTE", "routes.allowed_modes_json", `该路段不允许移动方式 ${mode}`, "error"));
+        issues2.push(issue14("MOBILITY_MODE_NOT_ALLOWED_ON_ROUTE", "routes.allowed_modes_json", `该路段不允许移动方式 ${mode}`, "error"));
       }
       const constraints = asObject2(profile.constraints) ?? {};
       const deny = asArray2(constraints.terrain_deny).filter((t) => typeof t === "string");
       const allow = asArray2(constraints.terrain_allow).filter((t) => typeof t === "string");
       if (deny.includes(terrain)) {
-        issues2.push(issue13("MOBILITY_TERRAIN_DENIED", "mobility_profile.constraints.terrain_deny", `该方式禁止地形 ${terrain}`, "error"));
+        issues2.push(issue14("MOBILITY_TERRAIN_DENIED", "mobility_profile.constraints.terrain_deny", `该方式禁止地形 ${terrain}`, "error"));
       }
       if (allow.length > 0 && !allow.includes(terrain)) {
-        issues2.push(issue13("MOBILITY_TERRAIN_NOT_ALLOWED", "mobility_profile.constraints.terrain_allow", `该方式只允许地形 ${allow.join("/")}`, "error"));
+        issues2.push(issue14("MOBILITY_TERRAIN_NOT_ALLOWED", "mobility_profile.constraints.terrain_allow", `该方式只允许地形 ${allow.join("/")}`, "error"));
       }
       if (WATER_TERRAINS.has(terrain) && GROUND_MODES.has(mode)) {
-        issues2.push(issue13("WATER_CROSSING_INFEASIBLE", "routes.terrain", `步行/地面方式不能越过水域（${terrain}）`, "error"));
+        issues2.push(issue14("WATER_CROSSING_INFEASIBLE", "routes.terrain", `步行/地面方式不能越过水域（${terrain}）`, "error"));
       }
       const preset2 = MOVEMENT_SPEED_PRESETS[mode] ?? null;
       const profileMin = positive(profile.speed_min_mps);
@@ -15474,7 +18273,7 @@ END`;
       const profileMax = positive(profile.speed_max_mps);
       const nominal = profileNominal ?? preset2?.nominal_mps ?? profileMin ?? profileMax ?? 0;
       if (mode !== "teleport" && nominal === 0) {
-        issues2.push(issue13("MOBILITY_SPEED_UNKNOWN", "mobility_profiles_json", `移动方式 ${key} 没有速度依据，不能凭未知填一个默认速度`, "error"));
+        issues2.push(issue14("MOBILITY_SPEED_UNKNOWN", "mobility_profiles_json", `移动方式 ${key} 没有速度依据，不能凭未知填一个默认速度`, "error"));
       }
       return { mode, key, profile, issues: issues2, preferred, nominal };
     });
@@ -15495,7 +18294,7 @@ END`;
     const speedBasis = SPEED_BASES.has(String(evidence?.speed_basis)) ? String(evidence?.speed_basis) : SPEED_BASES.has(String(declaredBasis)) ? String(declaredBasis) : "preset";
     if (chosen.mode === "teleport") {
       issues.push(
-        issue13(
+        issue14(
           "TELEPORT_NO_SPEED",
           "mobility_profiles_json",
           "传送没有速度值：由条件、范围限制与准备/施法耗时控制，调用方必须用 duration_override/准备时间，不得除以零",
@@ -15568,7 +18367,7 @@ END`;
     const hi = calibration.max ?? perCell;
     return { minM: cells * Math.min(lo, perCell), nominalM: cells * perCell, maxM: cells * Math.max(hi, perCell) };
   }
-  function segmentDistance(world3, route) {
+  function segmentDistance2(world3, route) {
     const nominal = num4(route.distance_m);
     const basis = String(route.distance_basis ?? "unknown");
     if (nominal !== null && nominal >= 0) {
@@ -15588,18 +18387,18 @@ END`;
   function computeTravelInterval(world3, actor, route, mode) {
     const selection = selectMobility(actor, route, { mode });
     if (!selection || selection.issues.some((i) => i.severity === "error") || route.status !== "open") return null;
-    const distance2 = segmentDistance(world3, route);
+    const distance3 = segmentDistance2(world3, route);
     const segment = {
-      distanceMinM: distance2.minM,
-      distanceNominalM: distance2.nominalM,
-      distanceMaxM: distance2.maxM,
+      distanceMinM: distance3.minM,
+      distanceNominalM: distance3.nominalM,
+      distanceMaxM: distance3.maxM,
       speedMinMps: selection.minMps,
       speedNominalMps: selection.nominalMps,
       speedMaxMps: selection.maxMps,
       durationOverride: asObject2(route.travel_time_override_json),
-      quality: distance2.quality
+      quality: distance3.quality
     };
-    if (distance2.quality === "unknown" && !segment.durationOverride) return null;
+    if (distance3.quality === "unknown" && !segment.durationOverride) return null;
     const bounds = segmentBounds(segment);
     return bounds ? { min_s: bounds.min, nominal_s: bounds.nominal, max_s: bounds.max } : null;
   }
@@ -15670,24 +18469,24 @@ END`;
     const status = String(action?.status ?? "planned");
     if (status !== "ready") {
       issues.push(
-        issue13("JOURNEY_NOT_READY", "actions.status", `行动状态为 ${status}；只有 ready 且条件成立的行动才建立行程（「我想去 C」只是计划）`, "warning")
+        issue14("JOURNEY_NOT_READY", "actions.status", `行动状态为 ${status}；只有 ready 且条件成立的行动才建立行程（「我想去 C」只是计划）`, "warning")
       );
       return { journey: null, issues };
     }
     const kind = String(action?.kind ?? "");
     if (kind !== "travel") {
-      issues.push(issue13("JOURNEY_NOT_TRAVEL", "actions.kind", `行动类型 ${kind} 不是 travel，不建立行程`, "warning"));
+      issues.push(issue14("JOURNEY_NOT_TRAVEL", "actions.kind", `行动类型 ${kind} 不是 travel，不建立行程`, "warning"));
       return { journey: null, issues };
     }
     const actorId = str4(action?.actor_entity_id);
     if (!actorId || !actionId) {
-      issues.push(issue13("JOURNEY_NO_ACTOR", "actions.actor_entity_id", "travel 行动缺少 actor_entity_id 或 id"));
+      issues.push(issue14("JOURNEY_NO_ACTOR", "actions.actor_entity_id", "travel 行动缺少 actor_entity_id 或 id"));
       return { journey: null, issues };
     }
     const payload = asObject2(action?.payload_json) ?? {};
     const destination = str4(action?.target_location_id) ?? str4(payload.destination_ref);
     if (!destination) {
-      issues.push(issue13("JOURNEY_NO_DESTINATION", "actions.target_location_id", "travel 行动没有目的地，不能建立行程"));
+      issues.push(issue14("JOURNEY_NO_DESTINATION", "actions.target_location_id", "travel 行动没有目的地，不能建立行程"));
       return { journey: null, issues };
     }
     const trigger = asObject2(action?.trigger_json);
@@ -15695,7 +18494,7 @@ END`;
       const evaluated = evaluateCondition(world3, trigger, { clockS: world3.clockS, actorId });
       if (!evaluated.ok) {
         issues.push(
-          issue13("JOURNEY_CONDITION_UNMET", "actions.trigger_json", `行动条件未成立，不开始行程：${evaluated.reasons.join("; ") || "条件为假"}`, "warning")
+          issue14("JOURNEY_CONDITION_UNMET", "actions.trigger_json", `行动条件未成立，不开始行程：${evaluated.reasons.join("; ") || "条件为假"}`, "warning")
         );
         return { journey: null, issues };
       }
@@ -15706,16 +18505,16 @@ END`;
       [world3.branchId, actorId]
     );
     if (existing.length > 0) {
-      issues.push(issue13("JOURNEY_ALREADY_OPEN", "journeys.mover_entity_id", `同一 mover 已有未结束行程 ${String(existing[0].id)}`, "warning"));
+      issues.push(issue14("JOURNEY_ALREADY_OPEN", "journeys.mover_entity_id", `同一 mover 已有未结束行程 ${String(existing[0].id)}`, "warning"));
       return { journey: null, issues };
     }
     const origin = originLocationOf(world3, actorId);
     if (!origin) {
-      issues.push(issue13("JOURNEY_ORIGIN_UNKNOWN", "characters.location_id", "出发地未知；保持未知而不是伪造一个起点", "warning"));
+      issues.push(issue14("JOURNEY_ORIGIN_UNKNOWN", "characters.location_id", "出发地未知；保持未知而不是伪造一个起点", "warning"));
       return { journey: null, issues };
     }
     if (origin === destination) {
-      issues.push(issue13("JOURNEY_ALREADY_THERE", "actions.target_location_id", "出发地与目的地相同，不建立行程", "warning"));
+      issues.push(issue14("JOURNEY_ALREADY_THERE", "actions.target_location_id", "出发地与目的地相同，不建立行程", "warning"));
       return { journey: null, issues };
     }
     const viaRefs = asArray2(payload.via_refs).filter((v) => typeof v === "string");
@@ -15726,23 +18525,23 @@ END`;
       const leg = bfsLeg(world3, waypoints[i - 1], waypoints[i], actorId, world3.clockS, maxLegs - legs.length);
       if (!leg) {
         issues.push(
-          issue13("JOURNEY_NO_ROUTE", "routes", `找不到从 ${waypoints[i - 1]} 到 ${waypoints[i]} 的可通行路线（不伪造道路）`, "warning")
+          issue14("JOURNEY_NO_ROUTE", "routes", `找不到从 ${waypoints[i - 1]} 到 ${waypoints[i]} 的可通行路线（不伪造道路）`, "warning")
         );
         return { journey: null, issues };
       }
       legs.push(...leg);
     }
     if (legs.length === 0) {
-      issues.push(issue13("JOURNEY_NO_ROUTE", "routes", "没有可用路段"));
+      issues.push(issue14("JOURNEY_NO_ROUTE", "routes", "没有可用路段"));
       return { journey: null, issues };
     }
     if (legs.length > JOURNEY_SEGMENT_LIMIT) {
-      issues.push(issue13("JOURNEY_TOO_MANY_SEGMENTS", "journeys.segments_json", `路段数超过上限 ${JOURNEY_SEGMENT_LIMIT}`, "warning"));
+      issues.push(issue14("JOURNEY_TOO_MANY_SEGMENTS", "journeys.segments_json", `路段数超过上限 ${JOURNEY_SEGMENT_LIMIT}`, "warning"));
       return { journey: null, issues };
     }
     const source = mobilitySource(world3, actorId);
     if (!source) {
-      issues.push(issue13("JOURNEY_ACTOR_UNKNOWN", "entity_keys", `找不到 mover ${actorId} 的能力配置`));
+      issues.push(issue14("JOURNEY_ACTOR_UNKNOWN", "entity_keys", `找不到 mover ${actorId} 的能力配置`));
       return { journey: null, issues };
     }
     const segments = [];
@@ -15753,7 +18552,7 @@ END`;
         mode: requestedMode ?? void 0
       });
       if (!selection) {
-        issues.push(issue13("JOURNEY_MOBILITY_MISSING", "mobility_profiles_json", `${actorId} 没有任何可用移动方式，不能开始行程`, "warning"));
+        issues.push(issue14("JOURNEY_MOBILITY_MISSING", "mobility_profiles_json", `${actorId} 没有任何可用移动方式，不能开始行程`, "warning"));
         return { journey: null, issues };
       }
       const errors = selection.issues.filter((i) => i.severity === "error");
@@ -15762,11 +18561,11 @@ END`;
         return { journey: null, issues };
       }
       issues.push(...selection.issues);
-      const distance2 = segmentDistance(world3, route);
+      const distance3 = segmentDistance2(world3, route);
       const calibration = mapCalibration(world3, str4(route.map_id));
-      if (distance2.quality === "unknown" && !asObject2(route.travel_time_override_json)) {
+      if (distance3.quality === "unknown" && !asObject2(route.travel_time_override_json)) {
         issues.push(
-          issue13("JOURNEY_ETA_UNKNOWN", "routes.distance_m", `路段 ${String(route.id)} 无距离依据且无通行耗时覆盖：保留在途状态，ETA 未知`, "warning")
+          issue14("JOURNEY_ETA_UNKNOWN", "routes.distance_m", `路段 ${String(route.id)} 无距离依据且无通行耗时覆盖：保留在途状态，ETA 未知`, "warning")
         );
       }
       segments.push({
@@ -15779,12 +18578,12 @@ END`;
         speedMinMps: selection.minMps,
         speedNominalMps: selection.nominalMps,
         speedMaxMps: selection.maxMps,
-        distanceMinM: distance2.minM,
-        distanceNominalM: distance2.nominalM,
-        distanceMaxM: distance2.maxM,
+        distanceMinM: distance3.minM,
+        distanceNominalM: distance3.nominalM,
+        distanceMaxM: distance3.maxM,
         durationOverride: asObject2(route.travel_time_override_json),
         calibrationRev: calibration.rev,
-        quality: segmentQuality(String(route.geometry_quality ?? "unknown"), distance2.quality)
+        quality: segmentQuality(String(route.geometry_quality ?? "unknown"), distance3.quality)
       });
     }
     const journey = {
@@ -15875,7 +18674,7 @@ END`;
     const rawSegments = journey.segments_json;
     const segmentsRaw = asArray2(rawSegments).filter(isPlainObject12);
     if (typeof rawSegments === "string" && rawSegments.trim() !== "" && segmentsRaw.length === 0) {
-      issues.push(issue13("JOURNEY_SEGMENTS_INVALID", "journeys.segments_json", "segments_json 损坏，保持原状不推进"));
+      issues.push(issue14("JOURNEY_SEGMENTS_INVALID", "journeys.segments_json", "segments_json 损坏，保持原状不推进"));
       return { journey: row2, events, remainingS: Math.max(0, untilS - (num4(journey.last_advanced_at_s) ?? 0)), issues };
     }
     const segments = segmentsRaw;
@@ -15909,7 +18708,7 @@ END`;
       const bounds = segmentBounds(segment);
       if (!bounds || bounds.nominal <= 0) {
         issues.push(
-          issue13("JOURNEY_PROGRESS_UNKNOWN", "journeys.segments_json", `路段 ${routeId ?? index} 没有可用距离/速度依据：只累计时间，不伪造精确进度与到达`, "warning")
+          issue14("JOURNEY_PROGRESS_UNKNOWN", "journeys.segments_json", `路段 ${routeId ?? index} 没有可用距离/速度依据：只累计时间，不伪造精确进度与到达`, "warning")
         );
         timeDone += untilS - cursor;
         cursor = untilS;
@@ -15952,7 +18751,7 @@ END`;
         cursor += dwell;
         if (dwell < NODE_REVIEW_DWELL_S) {
           issues.push(
-            issue13("DWELL_TRUNCATED", "journeys.last_advanced_at_s", `本轮余额不足以完成 ${NODE_REVIEW_DWELL_S} 秒节点观察，只扣了 ${dwell} 秒`, "warning")
+            issue14("DWELL_TRUNCATED", "journeys.last_advanced_at_s", `本轮余额不足以完成 ${NODE_REVIEW_DWELL_S} 秒节点观察，只扣了 ${dwell} 秒`, "warning")
           );
         }
         if (!isDestination) {
@@ -16531,1220 +19330,6 @@ END`;
       visibleItems,
       visible: (kind, id) => kind === "location" ? knownLocations.has(id) : kind === "character" ? visibleCharacters.has(id) : visibleItems.has(id)
     };
-  }
-
-  // vendor/atlas-spatial/contracts.mjs
-  var KIT_VERSION = "atlas-spatial-kit/1";
-  var SCENE_KIND = "atlas-scene";
-  var SCENE_VERSION = 1;
-  var FRAME_SCENE_KEY = "atlasScene";
-  var LIMITS = Object.freeze({ inputBytes: 65536, sceneBytes: 524288, rooms: 24, contents: 128, actors: 128, items: 256, districts: 16, buildings: 64, blocksPerDistrict: 24, floorSide: 100, roomSide: 40, citySide: 2e4, navigationCells: 18e4, markers: 512, overlays: 256, pathPoints: 2048 });
-  var clone = (value) => JSON.parse(JSON.stringify(value));
-  var finite = (value) => typeof value === "number" && Number.isFinite(value);
-  var plain = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
-  var bytes = (value) => new TextEncoder().encode(typeof value === "string" ? value : JSON.stringify(value)).length;
-  function stable(value) {
-    if (Array.isArray(value)) return "[" + value.map(stable).join(",") + "]";
-    if (plain(value)) return "{" + Object.keys(value).sort().filter((k) => value[k] !== void 0).map((k) => JSON.stringify(k) + ":" + stable(value[k])).join(",") + "}";
-    return JSON.stringify(value);
-  }
-  function diagnostic(code, path, message, { severity = "error", entityId = null, retryable = false } = {}) {
-    return { code, path, message, severity, entityId, retryable, module: "atlas-spatial-kit" };
-  }
-  function failure(code, path, message, extra = {}) {
-    return { ok: false, status: "failed", scene: null, issues: [diagnostic(code, path, message)], ...extra };
-  }
-  function normalizeScope(value) {
-    if (!plain(value) || typeof value.chatId !== "string" || !value.chatId || typeof value.branchId !== "string" || !value.branchId || !Number.isInteger(value.revision) || value.revision < 0 || !["pov", "author"].includes(value.viewMode)) throw new Error("SCOPE_INVALID");
-    return { chatId: value.chatId, branchId: value.branchId, revision: value.revision, viewMode: value.viewMode };
-  }
-  function scopeKey(value) {
-    return stable(normalizeScope(value));
-  }
-  function sameScope(a, b) {
-    try {
-      return scopeKey(a) === scopeKey(b);
-    } catch {
-      return false;
-    }
-  }
-  function parseWholeArguments(value) {
-    if (plain(value)) {
-      if (bytes(value) > LIMITS.inputBytes) throw new Error("INPUT_TOO_LARGE");
-      return clone(value);
-    }
-    if (typeof value !== "string" || bytes(value) > LIMITS.inputBytes) throw new Error("INPUT_INVALID");
-    const parsed = JSON.parse(value);
-    if (!plain(parsed)) throw new Error("INPUT_INVALID");
-    return parsed;
-  }
-  function checkSceneDocument(doc) {
-    const issues = [];
-    if (!plain(doc) || doc.kind !== SCENE_KIND || doc.version !== SCENE_VERSION) return [diagnostic("SCENE_VERSION_UNSUPPORTED", "$", "不支持的场景文档版本")];
-    if (typeof doc.mapId !== "string" || !doc.mapId || typeof doc.branchId !== "string" || !doc.branchId) issues.push(diagnostic("SCENE_ID_INVALID", "$.mapId", "需要地图与分支标识"));
-    if (!["meters", "cells"].includes(doc.units) || !plain(doc.layout) || !["floor", "city", "overview"].includes(doc.layout.kind)) issues.push(diagnostic("SCENE_LAYOUT_INVALID", "$.layout", "需要已生成的布局与明确单位"));
-    const b = doc.layout?.bounds;
-    if (!b || ![b.x, b.y, b.w, b.h].every(finite) || b.w <= 0 || b.h <= 0) issues.push(diagnostic("SCENE_BOUNDS_INVALID", "$.layout.bounds", "地图范围必须为有限正尺寸"));
-    const shape = doc.layout;
-    if (shape?.kind === "floor" && (!plain(shape.corridor) || !["rooms", "groups", "bodies", "doors", "windows", "lamps", "actors", "items"].every((k) => Array.isArray(shape[k])))) issues.push(diagnostic("SCENE_LAYOUT_INCOMPLETE", "$.layout", "室内场景缺少绘制所需的数组"));
-    if (shape?.kind === "city" && (!(plain(shape.river) || shape.river === null) || !(plain(shape.dock) || shape.dock === null) || !["wall", "riverPolygon", "districts", "roads", "segments", "gates", "buildings"].every((k) => Array.isArray(shape[k])))) issues.push(diagnostic("SCENE_LAYOUT_INCOMPLETE", "$.layout", "城市场景缺少绘制所需的数组"));
-    if (shape?.kind === "overview" && !Array.isArray(shape.pins)) issues.push(diagnostic("SCENE_LAYOUT_INCOMPLETE", "$.layout.pins", "概览场景缺少标点数组"));
-    const rect = (p) => plain(p) && [p.x, p.y, p.w, p.h].every(finite) && p.w > 0 && p.h > 0;
-    const point = (p) => plain(p) && finite(p.x) && finite(p.y);
-    const polygon2 = (p) => Array.isArray(p) && p.length >= 3 && p.every(point);
-    const bad = (value, validate, path) => {
-      if (!validate(value)) issues.push(diagnostic("SCENE_GEOMETRY_INVALID", path, "保存的几何字段不可绘制，使用 SQL 概览"));
-    };
-    const collection2 = (key, validate, max = 4096) => {
-      if (!Array.isArray(shape?.[key])) return;
-      if (shape[key].length > max) {
-        issues.push(diagnostic("SCENE_COLLECTION_LIMIT", "$.layout." + key, "保存的几何集合超出预算"));
-        return;
-      }
-      for (let i = 0; i < shape[key].length; i++) bad(shape[key][i], validate, "$.layout." + key + "[" + i + "]");
-    };
-    if (shape?.kind === "floor") {
-      bad(shape.corridor, (p) => rect(p) || plain(p) && [p.x, p.y, p.w, p.h].every(finite) && p.w === 0 && p.h === 0 && shape.rooms?.length === 1, "$.layout.corridor");
-      collection2("rooms", (p) => rect(p) && ["north", "south"].includes(p.side), LIMITS.rooms);
-      collection2("groups", (p) => rect(p) && Array.isArray(p.bodies) && p.bodies.every(rect), LIMITS.contents);
-      collection2("bodies", rect);
-      collection2("actors", point, LIMITS.actors);
-      collection2("items", point, LIMITS.items);
-      collection2("doors", (p) => point(p) && finite(p.width) && p.width > 0);
-      collection2("windows", point);
-      collection2("lamps", point);
-    } else if (shape?.kind === "city") {
-      bad(shape.wall, polygon2, "$.layout.wall");
-      if (shape.river !== null) {
-        bad(shape.riverPolygon, polygon2, "$.layout.riverPolygon");
-        bad(shape.dock, (p) => point(p) && finite(p.width) && p.width > 0, "$.layout.dock");
-        bad(shape.river, (p) => plain(p) && [p.cx, p.amplitude, p.width, p.height].every(finite) && p.width > 0 && p.height > 0, "$.layout.river");
-      } else if (shape.riverPolygon?.length || shape.dock !== null) issues.push(diagnostic("SCENE_GEOMETRY_INVALID", "$.layout.river", "无河流的城市不能保留水域或码头"));
-      collection2("districts", (p) => plain(p) && polygon2(p.polygon) && point(p.site), LIMITS.districts);
-      collection2("buildings", rect);
-      collection2("gates", point);
-      for (const key of ["roads", "segments"]) collection2(key, (p) => plain(p) && point(p.a) && point(p.b) && finite(p.width) && p.width > 0);
-    } else if (shape?.kind === "overview") {
-      collection2("pins", point);
-      collection2("shapes", (p) => plain(p) && polygon2(p.polygon));
-      collection2("routes", (p) => plain(p) && Array.isArray(p.path) && p.path.length >= 2 && p.path.length <= LIMITS.pathPoints && p.path.every(point));
-    }
-    if (doc.units === "meters" && (!finite(doc.metersPerCell) || doc.metersPerCell <= 0)) issues.push(diagnostic("SCENE_METRIC_INVALID", "$.metersPerCell", "米制场景需要每格米数"));
-    const visited = /* @__PURE__ */ new Set();
-    let invalidNumber = null, invalidCycle = false;
-    function scan(value, path, depth = 0) {
-      if (typeof value === "number" && !finite(value)) invalidNumber ??= path;
-      if (value && typeof value === "object") {
-        if (visited.has(value) || depth > 40) {
-          invalidCycle = true;
-          return;
-        }
-        visited.add(value);
-        for (const [key, child] of Object.entries(value)) scan(child, path + "." + key, depth + 1);
-        visited.delete(value);
-      }
-    }
-    scan(doc, "$");
-    if (invalidNumber) issues.push(diagnostic("SCENE_NUMBER_INVALID", invalidNumber, "场景坐标和尺寸必须是有限数值"));
-    if (invalidCycle) issues.push(diagnostic("SCENE_STRUCTURE_INVALID", "$", "场景不得含循环或过深结构"));
-    try {
-      if (bytes(doc) > LIMITS.sceneBytes) issues.push(diagnostic("SCENE_TOO_LARGE", "$", "场景超过 512 KiB，保留原场景"));
-    } catch {
-      issues.push(diagnostic("SCENE_SERIALIZATION_FAILED", "$", "场景无法序列化"));
-    }
-    return issues;
-  }
-
-  // vendor/atlas-spatial/foundation.mjs
-  var clone2 = (value) => JSON.parse(JSON.stringify(value));
-  var finitePositive = (n) => typeof n === "number" && Number.isFinite(n) && n > 0;
-  var intersects = (a, b) => a.x < b.x + b.w - 1e-8 && a.x + a.w > b.x + 1e-8 && a.y < b.y + b.h - 1e-8 && a.y + a.h > b.y + 1e-8;
-  var contains = (a, b) => b.x >= a.x - 1e-8 && b.y >= a.y - 1e-8 && b.x + b.w <= a.x + a.w + 1e-8 && b.y + b.h <= a.y + a.h + 1e-8;
-  var pointInside = (r, p) => p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
-  var polygon = (r) => [[r.x, r.y], [r.x + r.w, r.y], [r.x + r.w, r.y + r.h], [r.x, r.y + r.h]];
-  var issue14 = (id, code) => ({ id, code });
-  var ordered = (values) => [...values].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
-  function validIds(values) {
-    return Array.isArray(values) && values.every((v) => v && typeof v.id === "string" && v.id.length) && new Set(values.map((v) => v.id)).size === values.length;
-  }
-  function floor(spec, previous = null) {
-    const problems = [];
-    const bounds = { x: 0, y: 0, w: spec.width, h: spec.height };
-    if (!finitePositive(spec.width) || !finitePositive(spec.height) || !finitePositive(spec.corridorWidth) || spec.corridorWidth >= spec.height || !validIds(spec.rooms) || spec.rooms.some((r) => !finitePositive(r.w) || !finitePositive(r.h) || !["north", "south"].includes(r.side))) {
-      return { ok: false, issues: [issue14(spec.id, "INPUT_INVALID")], kept: previous ? clone2(previous) : null };
-    }
-    const corridor = { id: "corridor", x: 0, y: (bounds.h - spec.corridorWidth) / 2, w: bounds.w, h: spec.corridorWidth };
-    const placed = [], old = new Map((previous?.rooms || []).map((r) => [r.id, r]));
-    const candidate = (r) => ({ ...r, y: r.side === "north" ? corridor.y - r.h : corridor.y + corridor.h });
-    const admissible = (r) => contains({ x: 0.5, y: 0.5, w: bounds.w - 1, h: bounds.h - 1 }, r) && !intersects(r, corridor) && !placed.some((p) => intersects(r, p)) && Math.abs((r.side === "north" ? r.y + r.h : r.y) - (r.side === "north" ? corridor.y : corridor.y + corridor.h)) < 1e-8;
-    const save = (r, x, y, quality) => {
-      const rect = { id: r.id, name: r.name, side: r.side, x, y, w: r.w, h: r.h, quality };
-      placed.push({ ...rect, mapId: spec.id, parentId: spec.parentId, polygon: polygon(rect) });
-    };
-    const specs = ordered(spec.rooms);
-    if (spec.singleRoom && specs.length === 1) {
-      const r = specs[0], x = r.locked?.x ?? (bounds.w - r.w) / 2, y = r.locked?.y ?? (bounds.h - r.h) / 2;
-      if (!contains({ x: 0.5, y: 0.5, w: bounds.w - 1, h: bounds.h - 1 }, { x, y, w: r.w, h: r.h })) return { ok: false, issues: [issue14(r.id, "ROOM_NO_SPACE")] };
-      save(r, x, y, r.locked ? "confirmed" : "layout");
-      corridor.x = 0;
-      corridor.y = y + r.h;
-      corridor.w = 0;
-      corridor.h = 0;
-    }
-    for (const r of specs.filter((r2) => r2.locked && !placed.some((p) => p.id === r2.id))) {
-      const rect = { ...r, ...r.locked };
-      if (!Number.isFinite(rect.x) || !Number.isFinite(rect.y) || !admissible(rect)) problems.push(issue14(r.id, "LOCK_CONFLICT"));
-      else save(r, rect.x, rect.y, "confirmed");
-    }
-    if (problems.length) return { ok: false, issues: problems, kept: previous ? clone2(previous) : null };
-    for (const r of specs.filter((r2) => !r2.locked && !placed.some((p) => p.id === r2.id))) {
-      const p = old.get(r.id);
-      if (p && p.side === r.side && p.w === r.w && p.h === r.h && admissible(p)) save(r, p.x, p.y, p.quality);
-    }
-    for (const r of specs.filter((r2) => !placed.some((p) => p.id === r2.id))) {
-      let found = null;
-      for (let x = 0.5; x + r.w <= bounds.w - 0.5 + 1e-8; x += 0.5) {
-        const rect = candidate({ ...r, x });
-        if (admissible(rect)) {
-          found = rect;
-          break;
-        }
-      }
-      if (found) save(r, found.x, found.y, "layout");
-      else problems.push(issue14(r.id, "ROOM_NO_SPACE"));
-    }
-    if (problems.length) return { ok: false, issues: problems, kept: previous ? clone2(previous) : null };
-    const rooms = ordered(placed), doors = rooms.map((r) => ({ id: "door:" + r.id, roomId: r.id, x: r.x + r.w / 2, y: r.side === "north" ? r.y + r.h : r.y, width: Math.min(1.2, r.w - 0.2) }));
-    const furniture = [], pins = [];
-    const oldFurniture = new Map((previous?.furniture || []).map((f) => [f.id, f]));
-    for (const r of rooms) {
-      const spine = { x: r.x + r.w / 2 - 0.6, y: r.y, w: 1.2, h: r.h };
-      const inner = { x: r.x + 0.35, y: r.y + 0.35, w: r.w - 0.7, h: r.h - 0.7 };
-      const content = ordered(spec.furniture?.filter((f) => f.roomId === r.id) || []);
-      for (const f of content) {
-        if (!finitePositive(f.w) || !finitePositive(f.h)) {
-          problems.push(issue14(f.id, "FURNITURE_INVALID"));
-          continue;
-        }
-        const reservedActors = (spec.actors || []).filter((a) => a.roomId === r.id && a.position && pointInside(r, a.position)).map((a) => ({ x: a.position.x - 0.25, y: a.position.y - 0.25, w: 0.5, h: 0.5 }));
-        const free = (q2) => contains(inner, q2) && !intersects(q2, spine) && !reservedActors.some((p) => intersects(q2, p)) && !furniture.some((p) => p.roomId === r.id && intersects(q2, p));
-        const prev = oldFurniture.get(f.id);
-        let q = prev && prev.roomId === r.id && prev.w === f.w && prev.h === f.h && free(prev) ? prev : null;
-        for (let y = inner.y; !q && y + f.h <= inner.y + inner.h + 1e-8; y += 0.5) {
-          for (let x = inner.x; x + f.w <= inner.x + inner.w + 1e-8; x += 0.5) {
-            const test = { x, y, w: f.w, h: f.h };
-            if (free(test)) {
-              q = test;
-              break;
-            }
-          }
-        }
-        if (q) furniture.push({ ...q, id: f.id, roomId: r.id, name: f.name, type: f.type || "table", quality: "layout" });
-        else problems.push(issue14(f.id, "FURNITURE_NO_SPACE"));
-      }
-      for (const a of ordered(spec.actors?.filter((a2) => a2.roomId === r.id) || [])) {
-        if (a.position) {
-          if (!Number.isFinite(a.position.x) || !Number.isFinite(a.position.y) || !pointInside(r, a.position)) problems.push(issue14(a.id, "ACTOR_POSITION_INVALID"));
-          else pins.push({ ...a.position, id: a.id, name: a.name, roomId: r.id, mapId: spec.id, quality: "confirmed" });
-          continue;
-        }
-        const oldPin = previous?.pins?.find((p2) => p2.id === a.id && p2.roomId === r.id);
-        const free = (p2) => contains(inner, { x: p2.x - 0.25, y: p2.y - 0.25, w: 0.5, h: 0.5 }) && !intersects({ x: p2.x - 0.25, y: p2.y - 0.25, w: 0.5, h: 0.5 }, spine) && !furniture.some((f) => f.roomId === r.id && intersects(f, { x: p2.x - 0.25, y: p2.y - 0.25, w: 0.5, h: 0.5 })) && !pins.some((q) => Math.hypot(q.x - p2.x, q.y - p2.y) < 0.7);
-        let p = oldPin && free(oldPin) ? oldPin : null;
-        for (let y = inner.y + 0.25; !p && y <= inner.y + inner.h - 0.25 + 1e-8; y += 0.75) {
-          for (let x = inner.x + 0.25; x <= inner.x + inner.w - 0.25 + 1e-8; x += 0.75) {
-            if (free({ x, y })) {
-              p = { x, y };
-              break;
-            }
-          }
-        }
-        if (p) pins.push({ id: a.id, name: a.name, roomId: r.id, mapId: spec.id, x: p.x, y: p.y, quality: "layout" });
-        else problems.push(issue14(a.id, "ACTOR_LAYOUT_NO_SPACE"));
-      }
-    }
-    for (const v of [...spec.furniture || [], ...spec.actors || []]) if (!rooms.some((r) => r.id === v.roomId)) problems.push(issue14(v.id, "ROOM_REF_UNKNOWN"));
-    return { ok: true, id: spec.id, name: spec.name, kind: "floor", bounds, corridor, rooms, doors, furniture, pins, edges: doors.map((d) => ({ from: d.roomId, to: "corridor", via: d.id })), issues: problems };
-  }
-
-  // vendor/atlas-spatial/layout-core.mjs
-  var clone3 = clone2;
-  var EPS = 1e-7;
-  var pt = (x, y) => ({ x, y });
-  var center = (r) => pt(r.x + r.w / 2, r.y + r.h / 2);
-  var inflate = (r, d) => ({ x: r.x - d, y: r.y - d, w: r.w + 2 * d, h: r.h + 2 * d });
-  var corners = (r) => [pt(r.x, r.y), pt(r.x + r.w, r.y), pt(r.x + r.w, r.y + r.h), pt(r.x, r.y + r.h)];
-  var distance = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
-  var segmentDistance2 = (p, a, b) => {
-    const dx = b.x - a.x, dy = b.y - a.y, t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / (dx * dx + dy * dy || 1)));
-    return distance(p, pt(a.x + t * dx, a.y + t * dy));
-  };
-  function polygonContains(poly, p) {
-    if (poly.some((a, i) => segmentDistance2(p, a, poly[(i + 1) % poly.length]) < EPS)) return true;
-    let inside = false;
-    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-      const a = poly[i], b = poly[j];
-      if (a.y > p.y !== b.y > p.y && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x) inside = !inside;
-    }
-    return inside;
-  }
-  function clip2(poly, nx, ny, k) {
-    const out = [];
-    for (let i = 0; i < poly.length; i++) {
-      const a = poly[i], b = poly[(i + 1) % poly.length], fa = a.x * nx + a.y * ny - k, fb = b.x * nx + b.y * ny - k;
-      if (fa <= EPS) out.push(a);
-      if (fa < 0 && fb > 0 || fa > 0 && fb < 0) {
-        const t = fa / (fa - fb);
-        out.push(pt(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t));
-      }
-    }
-    return out;
-  }
-  function hull(points) {
-    const sorted = [...points].sort((a, b) => a.x - b.x || a.y - b.y), cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x), lower = [], upper = [];
-    for (const p of sorted) {
-      while (lower.length >= 2 && cross(lower.at(-2), lower.at(-1), p) <= 0) lower.pop();
-      lower.push(p);
-    }
-    for (const p of [...sorted].reverse()) {
-      while (upper.length >= 2 && cross(upper.at(-2), upper.at(-1), p) <= 0) upper.pop();
-      upper.push(p);
-    }
-    lower.pop();
-    upper.pop();
-    return lower.concat(upper);
-  }
-  var hash = (s) => {
-    let n = 2166136261;
-    for (const c of String(s)) {
-      n ^= c.charCodeAt(0);
-      n = Math.imul(n, 16777619);
-    }
-    return n >>> 0;
-  };
-  var rand = (s) => {
-    let n = hash(s);
-    return () => {
-      n = Math.imul(n, 1664525) + 1013904223 >>> 0;
-      return n / 4294967296;
-    };
-  };
-  var ordered2 = (a) => [...a].sort((a2, b) => a2.id.localeCompare(b.id, "en"));
-  function makeGroup(f, r, x, y) {
-    const group = { id: f.id, name: f.name, type: f.type, roomId: r.id, x, y, w: f.w, h: f.h, quality: "layout" }, bodies = [];
-    if (f.type === "reading") {
-      bodies.push({ id: f.id + ":table", type: "table", x: x + 0.55, y: y + 0.55, w: f.w - 1.1, h: f.h - 1.1 });
-      for (const [dx, dy] of [[0.1, 0.72], [f.w - 0.45, 0.72], [0.1, f.h - 1.07], [f.w - 0.45, f.h - 1.07]]) bodies.push({ id: f.id + ":chair:" + bodies.length, type: "chair", x: x + dx, y: y + dy, w: 0.35, h: 0.35 });
-    } else bodies.push({ id: f.id + ":body", type: f.type, x, y, w: f.w, h: f.h });
-    return { ...group, bodies: bodies.map((b) => ({ ...b, groupId: f.id, roomId: r.id, solid: f.type !== "stairs" })) };
-  }
-  function navigation(room, door, bodies, step = 0.2, radius = 0.18) {
-    const nx = Math.ceil(room.w / step), ny = Math.ceil(room.h / step), blocked = bodies.filter((b) => b.solid !== false).map((b) => inflate(b, radius));
-    const positions = [], free = [];
-    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
-      const p = pt(room.x + (i + 0.5) * step, room.y + (j + 0.5) * step);
-      positions.push(p);
-      free.push(p.x <= room.x + room.w - radius && p.x >= room.x + radius && p.y <= room.y + room.h - radius && p.y >= room.y + radius && !blocked.some((b) => pointInside(b, p)));
-    }
-    const nearest = (p) => {
-      let best = -1, d = Infinity;
-      for (let i = 0; i < positions.length; i++) if (free[i] && distance(p, positions[i]) < d) {
-        best = i;
-        d = distance(p, positions[i]);
-      }
-      return best;
-    };
-    const start = nearest(pt(door.x, door.y + (room.side === "north" ? -0.45 : 0.45))), parent = Array(positions.length).fill(-2), queue = [];
-    if (start >= 0) {
-      parent[start] = -1;
-      queue.push(start);
-    }
-    for (let q = 0; q < queue.length; q++) {
-      const n = queue[q], x = n % nx, y = Math.floor(n / nx);
-      for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
-        const xx = x + dx, yy = y + dy, m = yy * nx + xx;
-        if (xx >= 0 && xx < nx && yy >= 0 && yy < ny && free[m] && parent[m] === -2) {
-          parent[m] = n;
-          queue.push(m);
-        }
-      }
-    }
-    return { positions, free, parent, nearest, reachable: (p) => {
-      const n = nearest(p);
-      return n >= 0 && distance(positions[n], p) < step * 1.5 && parent[n] !== -2;
-    }, path: (p) => {
-      let n = nearest(p);
-      if (n < 0 || parent[n] === -2) return null;
-      const line = [];
-      while (n >= 0) {
-        line.push(positions[n]);
-        n = parent[n];
-      }
-      return line.reverse();
-    } };
-  }
-  function floor2(spec, previous = null) {
-    const collections = ["contents", "actors", "items"];
-    if (collections.some((k) => spec[k] !== void 0 && (!Array.isArray(spec[k]) || spec[k].some((v) => !v || typeof v.id !== "string" || !v.id) || new Set(spec[k].map((v) => v.id)).size !== spec[k].length))) return { ok: false, issues: [{ id: spec.id, code: "DETAIL_INPUT_INVALID" }], kept: previous ? clone3(previous) : null };
-    const bare = floor({ ...spec, furniture: [], actors: [] }, previous);
-    if (!bare.ok) return bare;
-    const groups = [], bodies = [], actors = [], items = [], windows = [], lamps = [], issues = [], doorSwings = [];
-    for (const r of bare.rooms) {
-      const door = bare.doors.find((d) => d.roomId === r.id), aisle = spec.singleRoom ? 0.8 : 1.6, margin = spec.singleRoom ? 0.2 : 0.4;
-      const spine = { x: door.x - aisle / 2, y: r.y, w: aisle, h: r.h }, inner = { x: r.x + margin, y: r.y + (spec.singleRoom ? margin : 1), w: r.w - margin * 2, h: r.h - (spec.singleRoom ? margin * 2 : 1.4) };
-      const swing = { id: "swing:" + r.id, roomId: r.id, x: door.x - door.width / 2, y: r.side === "north" ? door.y - door.width : door.y, w: door.width, h: door.width };
-      doorSwings.push(swing);
-      const exact = (spec.actors || []).filter((a) => a.roomId === r.id && a.position).map((a) => ({ id: a.id, ...a.position }));
-      const priority = (f) => f.locked ? 2 : previous?.groups?.some((g) => g.id === f.id) ? 1 : 0;
-      for (const f of ordered2((spec.contents || []).filter((f2) => f2.roomId === r.id)).sort((a, b) => priority(b) - priority(a))) {
-        if (!Number.isFinite(f.w) || !Number.isFinite(f.h) || f.w <= 0 || f.h <= 0 || f.type === "reading" && (f.w < 2 || f.h < 2)) {
-          issues.push({ id: f.id, code: "DETAIL_DIMENSION_INVALID" });
-          continue;
-        }
-        const free = (q) => contains(inner, q) && !intersects(q, spine) && !intersects(q, swing) && !groups.filter((g2) => g2.roomId === r.id).some((g2) => intersects(inflate(g2, 0.28), q)) && !exact.some((p) => intersects(q, { x: p.x - 0.25, y: p.y - 0.25, w: 0.5, h: 0.5 }));
-        let chosen = null;
-        const old = previous?.groups?.find((g2) => g2.id === f.id && g2.roomId === r.id && g2.w === f.w && g2.h === f.h);
-        if (old && free(old)) chosen = old;
-        if (f.locked) {
-          const q = { ...f, ...f.locked };
-          if (free(q)) chosen = q;
-          else {
-            issues.push({ id: f.id, code: "DETAIL_LOCK_CONFLICT" });
-            continue;
-          }
-        }
-        const candidates = [];
-        if (!chosen) for (let y = inner.y; y + f.h <= inner.y + inner.h + EPS; y += 0.25) for (let x = inner.x; x + f.w <= inner.x + inner.w + EPS; x += 0.25) {
-          const q = { x, y, w: f.w, h: f.h };
-          if (free(q)) {
-            const score = f.type === "shelf" ? Math.abs(y - (r.side === "north" ? inner.y : inner.y + inner.h - f.h)) : distance(center(q), pt(r.x + r.w * 0.25, door.y + (r.side === "north" ? -2.2 : 2.2)));
-            candidates.push({ q, score });
-          }
-        }
-        if (!chosen) chosen = candidates.sort((a, b) => a.score - b.score || a.q.y - b.q.y || a.q.x - b.q.x)[0]?.q;
-        if (!chosen && !f.locked && f.w !== f.h) {
-          for (let y = inner.y; y + f.w <= inner.y + inner.h + EPS && !chosen; y += 0.25) for (let x = inner.x; x + f.h <= inner.x + inner.w + EPS; x += 0.25) {
-            const q = { x, y, w: f.h, h: f.w };
-            if (free(q)) {
-              chosen = q;
-              break;
-            }
-          }
-        }
-        if (!chosen) {
-          issues.push({ id: f.id, code: "DETAIL_NO_SPACE" });
-          continue;
-        }
-        const g = makeGroup({ ...f, w: chosen.w, h: chosen.h }, r, chosen.x, chosen.y);
-        if (f.locked) g.quality = "confirmed";
-        groups.push(g);
-        bodies.push(...g.bodies);
-      }
-      const outerY = r.side === "north" ? r.y : r.y + r.h;
-      for (let i = 0; i < Math.max(1, Math.floor(r.w / 3)); i++) windows.push({ id: "window:" + r.id + ":" + i, type: "window", roomId: r.id, x: r.x + (i + 0.5) * r.w / Math.max(1, Math.floor(r.w / 3)), y: outerY, width: 1.2, elevation: 1.1 });
-      lamps.push({ id: "light:" + r.id, type: "light", roomId: r.id, x: door.x, y: r.y + r.h * 0.45, elevation: 2.8 });
-      const nav = navigation(r, door, bodies.filter((b) => b.roomId === r.id));
-      for (const g of groups.filter((g2) => g2.roomId === r.id)) {
-        const edgePoints = [pt(g.x + g.w + 0.48, g.y + g.h / 2), pt(g.x - 0.48, g.y + g.h / 2), pt(g.x + g.w / 2, g.y + g.h + 0.48), pt(g.x + g.w / 2, g.y - 0.48)];
-        g.interaction = edgePoints.find((p) => pointInside(inner, p) && nav.reachable(p)) || null;
-        if (!g.interaction) issues.push({ id: g.id, code: "DETAIL_NOT_REACHABLE" });
-      }
-      for (const a of ordered2((spec.actors || []).filter((a2) => a2.roomId === r.id))) {
-        const target = groups.find((g) => g.id === a.near), old = previous?.actors?.find((p2) => p2.id === a.id && p2.roomId === a.roomId && p2.near === a.near), p = a.position || old || (target?.interaction || null);
-        const candidates = nav.positions.filter((p2, i) => nav.parent[i] !== -2 && (!target || distance(p2, center(target)) < 4)).sort((p2, q) => distance(p2, target ? center(target) : center(r)) - distance(q, target ? center(target) : center(r)));
-        const free = (p2) => p2 && nav.reachable(p2) && !actors.some((q) => distance(p2, q) < 0.7) && !bodies.filter((b) => b.roomId === r.id && b.solid).some((b) => intersects(b, { x: p2.x - 0.18, y: p2.y - 0.18, w: 0.36, h: 0.36 }));
-        const point = free(p) ? p : !a.position ? candidates.find(free) : null;
-        if (point) actors.push({ ...a, ...point, mapId: spec.id, type: "person", quality: a.position ? "confirmed" : "layout" });
-        else issues.push({ id: a.id, code: a.position ? "ACTOR_LOCK_CONFLICT" : "ACTOR_NO_REACHABLE_POSITION" });
-      }
-    }
-    for (const i of spec.items || []) {
-      const g = groups.find((g2) => g2.id === i.on), b = g?.bodies.find((b2) => ["table", "desk", "shelf"].includes(b2.type));
-      if (b) items.push({ ...i, ...center(b), roomId: g.roomId, type: "item", containerId: g.id, elevation: 0.8, quality: "layout" });
-      else issues.push({ id: i.id, code: "ITEM_CONTAINER_NOT_FOUND" });
-    }
-    if (bare.corridor.h > 0) for (let x = 1.5; x < spec.width; x += 3) lamps.push({ id: "hall-light:" + x, type: "light", roomId: "corridor", x, y: bare.corridor.y + 0.22, elevation: 2.8 });
-    for (const v of [...spec.contents || [], ...spec.actors || []]) if (!bare.rooms.some((r) => r.id === v.roomId)) issues.push({ id: v.id, code: "ROOM_REF_UNKNOWN" });
-    let path = [];
-    if (actors.length >= 2) {
-      const [a, b] = actors, [ra, rb] = [a, b].map((a2) => bare.rooms.find((r) => r.id === a2.roomId)), [da, db] = [ra, rb].map((r) => bare.doors.find((d) => d.roomId === r.id));
-      const pa = navigation(ra, da, bodies.filter((x) => x.roomId === ra.id)).path(a), pb = navigation(rb, db, bodies.filter((x) => x.roomId === rb.id)).path(b), cy = bare.corridor.y + bare.corridor.h / 2;
-      if (pa && pb) path = [...pa.reverse(), pt(da.x, da.y), pt(da.x, cy), pt(db.x, cy), pt(db.x, db.y), ...pb];
-    }
-    return { ...bare, groups, bodies, actors, items, windows, lamps, doorSwings, path, issues };
-  }
-  var riverX = (river, y) => river.cx + river.amplitude * Math.sin((y / river.height * 2 - 0.35) * Math.PI);
-  var water = (river, p) => Math.abs(p.x - riverX(river, p.y)) < river.width / 2 - EPS;
-  function splitWater(a, b, river) {
-    const point = (t) => pt(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t), cuts = [0, 1];
-    for (const sign of [-1, 1]) {
-      const f = (t) => {
-        const p = point(t);
-        return p.x - riverX(river, p.y) - sign * river.width / 2;
-      };
-      for (let i = 0; i < 160; i++) {
-        let lo = i / 160, hi = (i + 1) / 160, fl = f(lo), fh = f(hi);
-        if (Math.abs(fl) < EPS) cuts.push(lo);
-        if (fl * fh < 0) {
-          for (let n = 0; n < 32; n++) {
-            const mid = (lo + hi) / 2;
-            if (f(lo) * f(mid) <= 0) hi = mid;
-            else lo = mid;
-          }
-          cuts.push((lo + hi) / 2);
-        }
-      }
-    }
-    const sorted = cuts.sort((a2, b2) => a2 - b2).filter((t, i, a2) => i === 0 || t - a2[i - 1] > 1e-6), out = [];
-    for (let i = 1; i < sorted.length; i++) {
-      const t0 = sorted[i - 1], t1 = sorted[i];
-      if (t1 - t0 > 1e-6) out.push({ a: point(t0), b: point(t1), kind: water(river, point((t0 + t1) / 2)) ? "bridge" : "road" });
-    }
-    return out;
-  }
-  function city(spec, previous = null) {
-    if (!Number.isFinite(spec.width) || !Number.isFinite(spec.height) || spec.width < 900 || spec.height < 700 || !Number.isFinite(spec.riverWidth) || spec.riverWidth < 0 || spec.riverWidth > spec.width * 0.15 || !Array.isArray(spec.districts) || !spec.districts.length || new Set(spec.districts.map((d) => d.id)).size !== spec.districts.length || spec.districts.some((d) => !["west", "east"].includes(d.bank) || !Number.isFinite(d.order))) return { ok: false, issues: [{ id: spec.id, code: "CITY_INPUT_INVALID" }] };
-    const structure = (v) => JSON.stringify({ width: v.width, height: v.height, riverWidth: v.riverWidth, seed: v.seed, districts: ordered2(v.districts || []).map((d) => [d.id, d.bank, d.order]) });
-    if (previous?.structureKey && previous.structureKey !== structure(spec)) return { ok: false, issues: [{ id: spec.id, code: "CITY_STRUCTURE_CHANGE_REQUIRES_REBUILD" }], kept: clone3(previous) };
-    const w = spec.width, h = spec.height, rng = rand(spec.seed || spec.id), origin = pt(w * 0.46, h * 0.5), raw = [];
-    for (let i = 0; i < 14; i++) {
-      const a = i * Math.PI / 7, rr = 0.95 + rng() * 0.05;
-      raw.push(pt(origin.x + Math.cos(a) * w * 0.405 * rr, origin.y + Math.sin(a) * h * 0.405 * rr));
-    }
-    const wall = hull(raw), river = { cx: w * 0.62, amplitude: w * 0.035, width: spec.riverWidth, height: h }, bankGap = river.width / 2 + 18;
-    const wet = river.width > 0;
-    const left = wet ? clip2(wall, 1, 0, river.cx - river.amplitude - bankGap) : clip2(wall, 1, 0, w * 0.55), right = wet ? clip2(wall, -1, 0, -river.cx - river.amplitude - bankGap) : clip2(wall, -1, 0, -w * 0.55), districts = [];
-    for (const bank of ["west", "east"]) {
-      const group = ordered2(spec.districts.filter((d) => d.bank === bank)).sort((a, b) => a.order - b.order), land = !wet && group.length === spec.districts.length ? wall : bank === "west" ? left : right;
-      const ys = land.map((p) => p.y), minY = Math.min(...ys), maxY = Math.max(...ys), xs = land.map((p) => p.x), cx = (Math.min(...xs) + Math.max(...xs)) / 2;
-      const seeds = group.map((d, i) => ({ ...d, site: pt(cx + (i % 2 ? 1 : -1) * w * 0.025, minY + (maxY - minY) * (i + 0.5) / group.length) }));
-      for (const d of seeds) {
-        let poly = land;
-        for (const other of seeds) if (other.id !== d.id) {
-          const a = d.site, b = other.site;
-          poly = clip2(poly, 2 * (b.x - a.x), 2 * (b.y - a.y), b.x * b.x + b.y * b.y - a.x * a.x - a.y * a.y);
-        }
-        if (poly.length < 3 || !polygonContains(poly, d.site)) return { ok: false, issues: [{ id: d.id, code: "DISTRICT_SEED_OUTSIDE" }] };
-        districts.push({ ...d, mapId: spec.id, parentId: spec.parentId, polygon: poly, quality: "layout" });
-      }
-    }
-    const centerY = h * 0.5;
-    const horizontalIntersections = wall.map((a, i) => {
-      const b = wall[(i + 1) % wall.length];
-      if ((a.y - centerY) * (b.y - centerY) <= 0 && a.y !== b.y) return a.x + (b.x - a.x) * (centerY - a.y) / (b.y - a.y);
-      return null;
-    }).filter((x) => x !== null).sort((a, b) => a - b);
-    const gates = [{ id: "gate-west", name: "西城门", x: horizontalIntersections[0], y: centerY }, { id: "gate-east", name: "东城门", x: horizontalIntersections.at(-1), y: centerY }];
-    const hubs = [pt(w * 0.31, centerY), pt(w * 0.77, centerY)], roads = [], segments = [], buildings = [], issues = [];
-    const addRoad = (id, a, b) => {
-      const road = { id, a, b, width: 12 };
-      roads.push(road);
-      segments.push(...(wet ? splitWater(a, b, river) : [{ a, b, kind: "road" }]).map((s, i) => ({ ...s, id: id + ":" + i, roadId: id, width: 12 })));
-    };
-    addRoad("avenue", pt(gates[0].x, centerY), pt(gates[1].x, centerY));
-    for (const d of districts) addRoad("road:" + d.id, hubs[d.bank === "west" ? 0 : 1], d.site);
-    const ring = wall.map((p) => pt(origin.x + (p.x - origin.x) * 0.86, origin.y + (p.y - origin.y) * 0.86));
-    for (let i = 0; i < ring.length; i++) addRoad("ring:" + i, ring[i], ring[(i + 1) % ring.length]);
-    addRoad("ring-access-west", hubs[0], ring.reduce((a, b) => distance(a, hubs[0]) < distance(b, hubs[0]) ? a : b));
-    addRoad("ring-access-east", hubs[1], ring.reduce((a, b) => distance(a, hubs[1]) < distance(b, hubs[1]) ? a : b));
-    const roadClear = (q) => !roads.some((r) => {
-      const min = Math.min(...corners(q).map((p) => segmentDistance2(p, r.a, r.b)), segmentDistance2(center(q), r.a, r.b));
-      return min < r.width / 2 + 12 || segmentIntersectsRect(r.a, r.b, inflate(q, 12));
-    });
-    function placeBuilding(f, decorative = false) {
-      const d = districts.find((d2) => d2.id === f.districtId);
-      if (!d || !Number.isFinite(f.w) || !Number.isFinite(f.h) || f.w <= 0 || f.h <= 0) return null;
-      const xs = d.polygon.map((p) => p.x), ys = d.polygon.map((p) => p.y), candidates = [], step = Math.max(decorative ? 22 : 10, Math.max(w, h) / 240);
-      for (let y = Math.min(...ys) + 12; y + f.h < Math.max(...ys); y += step) for (let x = Math.min(...xs) + 12; x + f.w < Math.max(...xs); x += step) {
-        const q2 = { x, y, w: f.w, h: f.h };
-        if (corners(inflate(q2, 6)).every((p) => polygonContains(d.polygon, p)) && roadClear(q2) && !buildings.some((b2) => intersects(inflate(b2, decorative ? 6 : 12), q2))) {
-          const score = Math.min(...roads.map((r) => segmentDistance2(center(q2), r.a, r.b))) + distance(center(q2), d.site) * 0.035 + (decorative ? rng() * 30 : 0);
-          candidates.push({ q: q2, score });
-        }
-      }
-      const q = candidates.sort((a, b2) => a.score - b2.score || a.q.y - b2.q.y || a.q.x - b2.q.x)[0]?.q;
-      if (!q) return null;
-      const b = { ...f, ...q, type: decorative ? "block" : "building", decorative, quality: "layout", mapId: spec.id };
-      buildings.push(b);
-      return b;
-    }
-    const validBuilding = (q) => {
-      const d = districts.find((d2) => d2.id === q.districtId);
-      return d && corners(inflate(q, 6)).every((p) => polygonContains(d.polygon, p)) && roadClear(q) && !buildings.some((b) => intersects(inflate(b, 12), q));
-    };
-    for (const f of ordered2(spec.buildings || []).filter((f2) => f2.locked)) {
-      const q = { ...f, ...f.locked };
-      if (validBuilding(q)) buildings.push({ ...q, type: "building", decorative: false, quality: "confirmed", mapId: spec.id });
-      else return { ok: false, issues: [{ id: f.id, code: "BUILDING_LOCK_CONFLICT" }], kept: previous ? clone3(previous) : null };
-    }
-    for (const f of ordered2(spec.buildings || []).filter((f2) => !f2.locked)) {
-      const old = previous?.buildings?.find((b) => !b.decorative && b.id === f.id && b.districtId === f.districtId && b.w === f.w && b.h === f.h);
-      if (old && validBuilding(old)) buildings.push({ ...old, name: f.name });
-      else if (old?.quality === "confirmed") return { ok: false, issues: [{ id: f.id, code: "BUILDING_LOCK_CONFLICT" }], kept: clone3(previous) };
-    }
-    for (const f of ordered2(spec.buildings || []).filter((f2) => !buildings.some((b) => b.id === f2.id))) if (!placeBuilding(f)) issues.push({ id: f.id, code: "BUILDING_NO_SPACE" });
-    for (const d of districts) for (let i = 0; i < (spec.blocksPerDistrict ?? 8); i++) placeBuilding({ id: "texture:" + d.id + ":" + i, districtId: d.id, name: "街区轮廓", w: 28 + rng() * 24, h: 25 + rng() * 25 }, true);
-    const rline = Array.from({ length: 81 }, (_, i) => pt(riverX(river, h * i / 80), h * i / 80)), riverPolygon = rline.map((p) => pt(p.x - river.width / 2, p.y)).concat([...rline].reverse().map((p) => pt(p.x + river.width / 2, p.y)));
-    const dock = { id: "dock", name: "河岸码头", type: "dock", x: riverX(river, h * 0.68) - river.width / 2, y: h * 0.68, bank: "west", width: river.width * 0.38 };
-    return { ok: true, structureKey: structure(spec), id: spec.id, name: spec.name, kind: "city", bounds: { x: 0, y: 0, w, h }, wall, origin, river: wet ? river : null, riverPolygon: wet ? riverPolygon : [], districts, roads, segments, gates, buildings, dock: wet ? dock : null, issues };
-  }
-  function segmentIntersectsRect(a, b, r) {
-    let lo = 0, hi = 1;
-    const dx = b.x - a.x, dy = b.y - a.y;
-    for (const [p, q] of [[-dx, a.x - r.x], [dx, r.x + r.w - a.x], [-dy, a.y - r.y], [dy, r.y + r.h - a.y]]) {
-      if (Math.abs(p) < EPS) {
-        if (q < 0) return false;
-      } else {
-        const t = q / p;
-        if (p < 0) lo = Math.max(lo, t);
-        else hi = Math.min(hi, t);
-        if (lo > hi) return false;
-      }
-    }
-    return true;
-  }
-
-  // vendor/atlas-spatial/generation.mjs
-  var label = (v) => typeof v === "string" ? v.slice(0, 120) : "";
-  var ids = (v) => new Set(v instanceof Set ? v : Array.isArray(v) ? v : []);
-  var sort = (rows4) => rows4.sort((a, b) => a.id.localeCompare(b.id, "en"));
-  function setup(value, context, kind) {
-    const scope = normalizeScope(context.scope), input = parseWholeArguments(value), map = context.map;
-    if (!plain(map) || typeof map.id !== "string" || !map.id) throw new Error("MAP_CONTEXT_REQUIRED");
-    if (input.mapId !== void 0 && input.mapId !== map.id) throw new Error("MAP_ID_MISMATCH");
-    if (input.id !== void 0 && input.id !== map.id) throw new Error("MAP_ID_MISMATCH");
-    if (context.currentScope && !same(context.currentScope, scope)) throw new Error("STALE_SCOPE");
-    const known = { locations: ids(context.entities?.locations), characters: ids(context.entities?.characters), items: ids(context.entities?.items) };
-    let w = input.width, h = input.height, mpp = map.metersPerCell, metricProposal = null;
-    const f = map.frame || {}, cols2 = f.cols ?? f.reference_width_cells, rows4 = f.rows ?? f.reference_height_cells;
-    if (finite(mpp) && mpp > 0 && finite(cols2) && cols2 > 0 && finite(rows4) && rows4 > 0) {
-      w = cols2 * mpp;
-      h = rows4 * mpp;
-    }
-    if (!finite(w) || !finite(h) || w <= 0 || h <= 0) throw new Error("EXTENT_REQUIRED");
-    if (!finite(mpp) || mpp <= 0) {
-      if (map.scaleLocked) throw new Error("SCALE_LOCKED_UNCALIBRATED");
-      if (!finite(cols2) || !finite(rows4) || cols2 <= 0 || rows4 <= 0) throw new Error("FRAME_REQUIRED_FOR_CALIBRATION");
-      const a = w / cols2, b = h / rows4;
-      if (Math.abs(a - b) / Math.max(a, b) > 0.01) throw new Error("SCALE_ASPECT_CONFLICT");
-      mpp = a;
-      metricProposal = { metersPerCell: mpp, scaleQuality: "estimated", basis: { source: "layout-extent", widthM: w, heightM: h } };
-    }
-    if (kind === "floor" && (w > LIMITS.floorSide || h > LIMITS.floorSide) || kind === "city" && (w > LIMITS.citySide || h > LIMITS.citySide)) throw new Error("EXTENT_TOO_LARGE");
-    const issues = [], spec = { id: map.id, parentId: map.containerLocationId ?? null, name: label(map.name) || label(input.name) || map.id, width: w, height: h };
-    return { scope, input, map, known, spec, issues, mpp, metricProposal, previous: context.previousScene ?? null };
-  }
-  var same = (a, b) => stable(normalizeScope(a)) === stable(normalizeScope(b));
-  function collection(s, key, limit, kind, normalize2) {
-    const values = s.input[key] ?? [];
-    if (!Array.isArray(values) || values.length > limit) throw new Error("COLLECTION_LIMIT:" + key);
-    const seen = /* @__PURE__ */ new Set(), out = [];
-    for (let n = 0; n < values.length; n++) {
-      const raw = values[n], path = "$." + key + "[" + n + "]";
-      if (!plain(raw) || typeof raw.id !== "string" || !raw.id || raw.id.length > 160 || seen.has(raw.id)) {
-        s.issues.push(diagnostic("ENTITY_ID_INVALID", path, "缺少标识或标识重复"));
-        continue;
-      }
-      seen.add(raw.id);
-      if (kind && !s.known[kind].has(raw.id)) {
-        s.issues.push(diagnostic("ENTITY_REF_UNKNOWN", path + ".id", "实体不在程序提供的当前分支引用表中", { entityId: raw.id }));
-        continue;
-      }
-      try {
-        const row2 = normalize2(raw);
-        out.push({ ...row2, id: raw.id, name: label(raw.name) || raw.id });
-      } catch (e) {
-        s.issues.push(diagnostic(String(e.message), path, "本项约束不可用，其他独立项继续处理", { entityId: raw.id }));
-      }
-    }
-    return sort(out);
-  }
-  var MERGEABLE_KEYS = ["rooms", "contents", "actors", "items", "districts", "buildings"];
-  function deletionSet(s, key) {
-    const raw = s.input.deletes;
-    if (raw === void 0 || raw === null) return /* @__PURE__ */ new Set();
-    if (!plain(raw)) {
-      s.issues.push(diagnostic("DELETE_SHAPE_INVALID", "$.deletes", "deletes 必须是集合名到字符串 ID 数组的对象", { severity: "warning" }));
-      return /* @__PURE__ */ new Set();
-    }
-    const out = /* @__PURE__ */ new Set();
-    for (const [k, v] of Object.entries(raw)) {
-      if (!MERGEABLE_KEYS.includes(k)) {
-        s.issues.push(diagnostic("DELETE_TARGET_UNKNOWN", "$.deletes." + k, "未知删除目标集合", { severity: "warning" }));
-        continue;
-      }
-      if (k !== key) continue;
-      if (!Array.isArray(v) || !v.every((id) => typeof id === "string" && id)) {
-        s.issues.push(diagnostic("DELETE_SHAPE_INVALID", "$.deletes." + k, "删除列表必须是字符串 ID 数组", { severity: "warning" }));
-        continue;
-      }
-      for (const id of v) out.add(id);
-    }
-    return out;
-  }
-  function collectAndMerge(s, key, limit, kind, normalize2) {
-    const requestRows = collection(s, key, limit, kind, normalize2);
-    if (s.input.rebuild === true) return requestRows;
-    const saved = s.previous?.constraints;
-    if (!plain(saved) || !Array.isArray(saved[key])) return requestRows;
-    const del = deletionSet(s, key), out = new Map(requestRows.map((r) => [r.id, r]));
-    for (const raw of saved[key]) {
-      if (!plain(raw) || typeof raw.id !== "string" || !raw.id || del.has(raw.id) || out.has(raw.id)) continue;
-      if (kind && !s.known[kind].has(raw.id)) {
-        s.issues.push(diagnostic("ENTITY_REF_UNKNOWN", "$.previousScene.constraints." + key + ".id", "已保存约束引用的实体不在当前分支引用表中", { entityId: raw.id }));
-        continue;
-      }
-      try {
-        const row2 = normalize2(raw);
-        out.set(raw.id, { ...row2, id: raw.id, name: label(raw.name) || raw.id });
-      } catch (e) {
-        s.issues.push(diagnostic(String(e.message), "$.previousScene.constraints." + key, "已保存约束条目不可用，其他独立项继续处理", { entityId: raw.id }));
-      }
-    }
-    if (out.size > limit) {
-      s.issues.push(diagnostic("COLLECTION_LIMIT:" + key, "$." + key, "合并已保存约束后超出预算，仅保留本次请求条目"));
-      return requestRows;
-    }
-    return sort([...out.values()]);
-  }
-  function dimensions(raw) {
-    if (!finite(raw.w) || !finite(raw.h) || raw.w <= 0 || raw.h <= 0) throw new Error("DIMENSION_INVALID");
-    return { w: raw.w, h: raw.h };
-  }
-  function trustedLock(ctx, type, id) {
-    const v = ctx.locks?.[type]?.[id];
-    return v && finite(v.x) && finite(v.y) ? { x: v.x, y: v.y } : null;
-  }
-  function finish(s, ctx, layoutFn) {
-    const previous = s.previous;
-    if (previous && (previous.mapId !== s.map.id || previous.branchId !== s.scope.branchId)) return failure("SCENE_SCOPE_MISMATCH", "$.previousScene", "旧场景属于另一地图或分支");
-    if (previous && s.input.rebuild !== true && !plain(previous.constraints)) s.issues.push(diagnostic("CONSTRAINTS_LEGACY", "$.previousScene", "旧场景缺少受控约束字段，本次按整图重建语义处理", { severity: "warning" }));
-    const inputSignature = stable(s.spec);
-    if (previous?.inputSignature === inputSignature && !previous.layout?.issues?.length && checkSceneDocument(previous).length === 0) {
-      return { ok: true, status: s.issues.length ? "partial" : "reused", scene: clone(previous), issues: s.issues, guard: { scope: s.scope, mapId: s.map.id, inputSignature }, metricProposal: s.metricProposal };
-    }
-    const layout = layoutFn(s.spec, previous?.layout ?? null);
-    for (const issue17 of layout.issues ?? []) s.issues.push(diagnostic(issue17.code, "$.layout", "空间约束未满足", { entityId: issue17.id ?? null }));
-    if (!layout.ok) return { ok: false, status: "failed", scene: null, kept: previous ? clone(previous) : null, issues: s.issues, guard: { scope: s.scope, mapId: s.map.id, inputSignature } };
-    for (const a of layout.actors ?? []) if (!ctx.locks?.actors?.[a.id]) a.quality = "layout";
-    const scene = { kind: SCENE_KIND, version: SCENE_VERSION, generator: KIT_VERSION, mapId: s.map.id, branchId: s.scope.branchId, sourceRevision: s.scope.revision, units: "meters", metersPerCell: s.mpp, metricQuality: s.metricProposal ? "estimated" : s.map.scaleQuality ?? "estimated", inputSignature, layout };
-    if (Array.isArray(s.constraintKeys) && s.constraintKeys.length) scene.constraints = Object.fromEntries(s.constraintKeys.filter((k) => s.spec[k] !== void 0).map((k) => [k, clone(s.spec[k])]));
-    const checks = checkSceneDocument(scene);
-    if (checks.length) return { ok: false, status: "failed", scene: null, kept: previous ? clone(previous) : null, issues: [...s.issues, ...checks] };
-    return { ok: true, status: s.issues.length ? "partial" : "generated", scene, issues: s.issues, guard: { scope: s.scope, mapId: s.map.id, inputSignature }, metricProposal: s.metricProposal };
-  }
-  function generateFloor(value, context) {
-    let s = null;
-    try {
-      s = setup(value, context, "floor");
-      const ctx = context;
-      s.constraintKeys = ["corridorWidth", "rooms", "contents", "actors", "items"];
-      s.spec.corridorWidth = finite(s.input.corridorWidth) ? s.input.corridorWidth : 2;
-      s.spec.rooms = collectAndMerge(s, "rooms", LIMITS.rooms, "locations", (r) => {
-        const d = ctx.locks?.rooms?.[r.id]?.w > 0 ? dimensions(ctx.locks.rooms[r.id]) : dimensions(r);
-        if (d.w > LIMITS.roomSide || d.h > LIMITS.roomSide || !["north", "south"].includes(r.side)) throw new Error("ROOM_CONSTRAINT_UNSUPPORTED");
-        const locked = trustedLock(ctx, "rooms", r.id);
-        return { ...d, side: r.side, ...locked ? { locked } : {} };
-      });
-      s.spec.singleRoom = s.spec.rooms.length === 1 && s.spec.rooms[0].id === s.map.containerLocationId;
-      if (!s.spec.rooms.length) {
-        const failed = failure("NO_VALID_ROOMS", "$.rooms", "没有可生成的有效房间", { kept: s.previous ? clone(s.previous) : null });
-        failed.issues.push(...s.issues);
-        return failed;
-      }
-      if (s.spec.rooms.reduce((n, r) => n + Math.ceil(r.w / 0.2) * Math.ceil(r.h / 0.2), 0) > LIMITS.navigationCells) throw new Error("NAVIGATION_BUDGET_EXCEEDED");
-      const roomIds = new Set(s.spec.rooms.map((r) => r.id));
-      s.spec.contents = collectAndMerge(s, "contents", LIMITS.contents, null, (r) => {
-        if (!roomIds.has(r.roomId)) throw new Error("ROOM_REF_UNKNOWN");
-        if (!["reading", "shelf", "desk", "bench", "stairs"].includes(r.type)) throw new Error("FURNITURE_TYPE_UNSUPPORTED");
-        const locked = trustedLock(ctx, "contents", r.id);
-        return { ...dimensions(r), roomId: r.roomId, type: r.type, ...locked ? { locked } : {} };
-      });
-      const groups = new Set(s.spec.contents.map((g) => g.id));
-      s.spec.actors = collectAndMerge(s, "actors", LIMITS.actors, "characters", (r) => {
-        if (!roomIds.has(r.roomId)) throw new Error("ROOM_REF_UNKNOWN");
-        if (r.near && !groups.has(r.near)) throw new Error("NEAR_REF_UNKNOWN");
-        const position = trustedLock(ctx, "actors", r.id);
-        return { roomId: r.roomId, ...r.near ? { near: r.near } : {}, ...position ? { position } : {} };
-      });
-      s.spec.items = collectAndMerge(s, "items", LIMITS.items, "items", (r) => {
-        if (!groups.has(r.on)) throw new Error("ITEM_SUPPORT_UNKNOWN");
-        return { on: r.on };
-      });
-      return finish(s, ctx, floor2);
-    } catch (e) {
-      return failure(String(e.message), "$", "生成请求不可用；保留已保存布局", { kept: context?.previousScene ? clone(context.previousScene) : null });
-    }
-  }
-  function generateCity(value, context) {
-    let s = null;
-    try {
-      s = setup(value, context, "city");
-      const ctx = context;
-      s.constraintKeys = ["riverWidth", "seed", "blocksPerDistrict", "districts", "buildings"];
-      if (s.input.riverWidth !== void 0 && (!finite(s.input.riverWidth) || s.input.riverWidth < 0)) return failure("RIVER_CONSTRAINT_INVALID", "$.riverWidth", "河宽应为非负数，零表示无水系", { kept: s.previous ? clone(s.previous) : null });
-      s.spec.riverWidth = s.input.riverWidth ?? 0;
-      s.spec.seed = label(context.seed) || s.map.id;
-      s.spec.blocksPerDistrict = Number.isInteger(s.input.blocksPerDistrict) ? Math.max(0, Math.min(LIMITS.blocksPerDistrict, s.input.blocksPerDistrict)) : 8;
-      s.spec.districts = collectAndMerge(s, "districts", LIMITS.districts, "locations", (r) => {
-        if (!["west", "east"].includes(r.bank) || !finite(r.order)) throw new Error("DISTRICT_CONSTRAINT_INVALID");
-        return { bank: r.bank, order: r.order };
-      });
-      const districtIds = new Set(s.spec.districts.map((d) => d.id));
-      s.spec.buildings = collectAndMerge(s, "buildings", LIMITS.buildings, "locations", (r) => {
-        if (!districtIds.has(r.districtId)) throw new Error("DISTRICT_REF_UNKNOWN");
-        const locked = trustedLock(ctx, "buildings", r.id);
-        return { ...ctx.locks?.buildings?.[r.id]?.w > 0 ? dimensions(ctx.locks.buildings[r.id]) : dimensions(r), districtId: r.districtId, ...locked ? { locked } : {} };
-      });
-      return finish(s, ctx, city);
-    } catch (e) {
-      return failure(String(e.message), "$", "生成请求不可用；保留已保存布局", { kept: context?.previousScene ? clone(context.previousScene) : null });
-    }
-  }
-
-  // vendor/atlas-spatial/placement.mjs
-  function placeMarkers({ region, markers, obstacles = [], previous = [], step = 0.25, clearance = 0.25 } = {}) {
-    if (!Array.isArray(region) || region.length < 3 || !region.every((p) => finite(p.x) && finite(p.y)) || !Array.isArray(markers) || markers.length > LIMITS.markers || !finite(step) || step <= 0 || !finite(clearance) || clearance <= 0) return failure("PLACEMENT_INPUT_INVALID", "$", "需要有效多边形、标点列表、步长和间距");
-    const xs = region.map((p) => p.x), ys = region.map((p) => p.y), minX = Math.min(...xs), minY = Math.min(...ys), maxX = Math.max(...xs), maxY = Math.max(...ys);
-    if (Math.ceil((maxX - minX) / step) * Math.ceil((maxY - minY) / step) > 2e5) return failure("PLACEMENT_BUDGET_EXCEEDED", "$.step", "提高扫描步长或缩小本次摆放区域");
-    const out = [], issues = [], seen = /* @__PURE__ */ new Set(), valid = [];
-    for (const m of markers) {
-      if (!m || typeof m.id !== "string" || seen.has(m.id)) {
-        issues.push(diagnostic("MARKER_ID_INVALID", "$.markers", "标识缺失或重复"));
-        continue;
-      }
-      seen.add(m.id);
-      valid.push(m);
-    }
-    const free = (p, r = clearance) => finite(p.x) && finite(p.y) && polygonContains(region, p) && [{ x: p.x + r, y: p.y }, { x: p.x - r, y: p.y }, { x: p.x, y: p.y + r }, { x: p.x, y: p.y - r }].every((q) => polygonContains(region, q)) && !obstacles.some((o) => p.x >= o.x - r && p.x <= o.x + o.w + r && p.y >= o.y - r && p.y <= o.y + o.h + r) && !out.some((o) => distance(o, p) < (o.radius ?? clearance) + r);
-    const ordered3 = [...valid].sort((a, b) => Number(!!b.locked) - Number(!!a.locked) || a.id.localeCompare(b.id, "en"));
-    const pending = [];
-    for (const m of ordered3) {
-      const old = previous.find((p2) => p2.id === m.id && p2.locationId === m.locationId), p = m.locked || old;
-      if (p && free(p, m.radius ?? clearance)) out.push({ ...m, x: p.x, y: p.y, quality: m.locked ? "exact" : "layout" });
-      else if (m.locked) issues.push(diagnostic("MARKER_LOCK_CONFLICT", "$.markers", "确认点不能放在区域外或障碍内", { entityId: m.id }));
-      else pending.push(m);
-    }
-    for (const m of pending) {
-      const target = m.near && finite(m.near.x) && finite(m.near.y) ? m.near : { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
-      let best = null, score = Infinity;
-      for (let y = minY + clearance; y < maxY; y += step) for (let x = minX + clearance; x < maxX; x += step) {
-        const q = { x, y };
-        if (free(q, m.radius ?? clearance)) {
-          const d = distance(q, target);
-          if (d < score) {
-            score = d;
-            best = q;
-          }
-        }
-      }
-      if (best) out.push({ ...m, ...best, quality: "layout" });
-      else issues.push(diagnostic("MARKER_NO_SPACE", "$.markers", "没有可摆放空间，保留名单", { entityId: m.id }));
-    }
-    return { ok: true, status: issues.length ? "partial" : "generated", markers: out, issues };
-  }
-
-  // vendor/atlas-spatial/storage.mjs
-  function record(v) {
-    if (typeof v === "string") return JSON.parse(v);
-    if (plain(v)) return clone(v);
-    throw new Error("FRAME_INVALID");
-  }
-  function readSceneFrame(frame, { branchId, mapId } = {}) {
-    try {
-      const doc = record(frame)[FRAME_SCENE_KEY];
-      if (doc === void 0) return { ok: true, scene: null, issues: [] };
-      const issues = checkSceneDocument(doc);
-      if (doc.branchId !== branchId || doc.mapId !== mapId) issues.push(diagnostic("SCENE_SCOPE_MISMATCH", "$.atlasScene", "场景与当前地图/分支不匹配"));
-      return { ok: issues.length === 0, scene: issues.length ? null : clone(doc), issues };
-    } catch {
-      return failure("FRAME_JSON_INVALID", "$.frame_json", "地图框架无法读取，未覆盖原记录");
-    }
-  }
-  function buildSceneMutation({ result, mapRow, scope, currentScope, turnId, operationId, expectedRowRev } = {}) {
-    try {
-      if (!sameScope(scope, currentScope) || !sameScope(result?.guard?.scope, scope)) return failure("STALE_SCOPE", "$.scope", "生成期间会话、视角或修订发生变化");
-      if (!result?.ok || !result.scene) return failure("SCENE_RESULT_FAILED", "$.result", "失败的布局不得覆盖原场景");
-      if (mapRow?.branch_id !== scope.branchId || mapRow?.id !== result.scene.mapId) return failure("SCENE_SCOPE_MISMATCH", "$.mapRow", "地图行不属于本次生成作用域");
-      if (mapRow.row_rev !== expectedRowRev) return failure("STALE_ROW", "$.expectedRowRev", "地图行已经被其他变更修改");
-      if (typeof turnId !== "string" || !turnId || typeof operationId !== "string" || !operationId) return failure("COMMIT_ANCHOR_REQUIRED", "$.turnId", "需要程序分配的楼层与操作标识");
-      const checks = checkSceneDocument(result.scene);
-      if (checks.length) return { ok: false, status: "failed", issues: checks };
-      const before = clone(mapRow), frame = record(mapRow.frame_json), old = frame[FRAME_SCENE_KEY];
-      if (stable(old ?? null) === stable(result.scene) && !frame.atlasLayoutRequest) return { ok: true, status: "duplicate", mutation: null, issues: result.issues ?? [] };
-      frame[FRAME_SCENE_KEY] = clone(result.scene);
-      delete frame.atlasLayoutRequest;
-      if (bytes(frame) > LIMITS.sceneBytes + 65536) return failure("FRAME_TOO_LARGE", "$.frame_json", "框架与细节总量超限，保留原行");
-      const after = { ...before, frame_json: frame, row_rev: before.row_rev + 1, updated_turn_id: turnId };
-      const metric = result.metricProposal;
-      if (metric) {
-        if (Number(before.scale_locked) === 1) return failure("SCALE_LOCKED", "$.mapRow.scale_locked", "不能覆盖锁定比例尺");
-        after.meters_per_cell = metric.metersPerCell;
-        after.scale_quality = metric.scaleQuality;
-        after.scale_basis_json = metric.basis;
-        after.calibration_rev = Number(before.calibration_rev ?? 0) + 1;
-      }
-      return { ok: true, status: "prepared", issues: result.issues ?? [], mutation: { table: "maps", rowId: before.id, before, after, sourceOpIds: [operationId], basis: { kind: "layout", generator: result.scene.generator, mapId: before.id, sourceRevision: scope.revision } } };
-    } catch (e) {
-      return failure(String(e.message), "$.mapRow", "无法构造地图变更，原行未修改");
-    }
-  }
-  function sceneLocationGeometry(scene) {
-    const scale = scene.metersPerCell;
-    if (!(scale > 0)) return [];
-    const layout = scene.layout, parts = layout.kind === "floor" ? layout.rooms : layout.kind === "city" ? [...layout.districts, ...layout.buildings.filter((b) => !b.decorative)] : [];
-    return parts.map((p) => {
-      const polygon2 = Array.isArray(p.polygon) ? p.polygon.map((q) => Array.isArray(q) ? { x: q[0], y: q[1] } : q) : [{ x: p.x, y: p.y }, { x: p.x + p.w, y: p.y }, { x: p.x + p.w, y: p.y + p.h }, { x: p.x, y: p.y + p.h }];
-      const point = p.site ?? { x: p.x + p.w / 2, y: p.y + p.h / 2 };
-      return { entityId: p.id, mapId: scene.mapId, gridX: point.x / scale, gridY: point.y / scale, precision: p.quality === "confirmed" ? "exact" : "layout", area: { kind: "polygon", points: polygon2.map((q) => ({ x: q.x / scale, y: q.y / scale })), quality: p.quality === "confirmed" ? "confirmed" : "estimated", source: p.quality === "confirmed" ? "author" : "estimate" } };
-    });
-  }
-
-  // vendor/atlas-spatial/view-adapter.mjs
-  function projectMapView({ view, mapId, scope } = {}) {
-    try {
-      scope = normalizeScope(scope);
-    } catch {
-      return failure("SCOPE_INVALID", "$.scope", "缺少当前 UI 作用域");
-    }
-    if (view?.branchId !== scope.branchId || view?.revision !== scope.revision || view?.metadata?.stale) return failure("VIEW_STALE", "$.revision", "旧视图不能更新当前地图");
-    const raw = view.items?.find((m) => m.mapId === mapId);
-    if (!raw) return { ok: true, status: "empty", scene: null, coarseList: [], issues: [] };
-    const mpp = finite(raw.metersPerCell) && raw.metersPerCell > 0 ? raw.metersPerCell : null, k = mpp ?? 1, frame = raw.frames?.frame ?? {}, issues = [];
-    const frameWidth = frame.cols ?? frame.reference_width_cells, frameHeight = frame.rows ?? frame.reference_height_cells;
-    const pins = [];
-    const geometry = (value, path) => {
-      if (typeof value !== "string") return value;
-      try {
-        return JSON.parse(value);
-      } catch {
-        issues.push(diagnostic("GEOMETRY_JSON_INVALID", path, "此项轮廓不可读，保留其他标点", { severity: "warning" }));
-        return null;
-      }
-    };
-    for (const p of raw.points ?? []) {
-      if (scope.viewMode === "pov" && p.hidden === true) continue;
-      if (!finite(p.x) || !finite(p.y)) {
-        issues.push(diagnostic("POINT_UNLOCATED", "$.points", "坐标未知，保留目录，不制造零点", { entityId: p.entityId, severity: "warning" }));
-        continue;
-      }
-      if (!["location", "character", "item"].includes(p.kind)) continue;
-      let polygon2 = null;
-      const area = geometry(p.area, "$.points.area");
-      if (area?.kind === "polygon" && Array.isArray(area.points) && area.points.length >= 3 && area.points.every((q) => finite(q.x) && finite(q.y))) polygon2 = area.points.map((q) => ({ x: q.x * k, y: q.y * k }));
-      pins.push({ id: p.entityId, entityId: p.entityId, name: String(p.name ?? ""), type: p.kind === "character" ? "person" : p.kind, mapId, x: p.x * k, y: p.y * k, quality: p.markerQuality ?? p.precision ?? "approximate", locationId: p.locationId ?? null, radius: finite(p.radius) ? p.radius * k : null, polygon: polygon2 });
-    }
-    const xs = pins.map((p) => p.x), ys = pins.map((p) => p.y);
-    const bounds = finite(frameWidth) && frameWidth > 0 && finite(frameHeight) && frameHeight > 0 ? { x: finite(frame.origin_x) ? frame.origin_x * k : 0, y: finite(frame.origin_y) ? frame.origin_y * k : 0, w: frameWidth * k, h: frameHeight * k } : { x: Math.min(0, ...xs) - k, y: Math.min(0, ...ys) - k, w: Math.max(k, Math.max(0, ...xs) - Math.min(0, ...xs) + 2 * k), h: Math.max(k, Math.max(0, ...ys) - Math.min(0, ...ys) + 2 * k) };
-    const routes = [];
-    for (const r of raw.routes ?? []) {
-      const geom = geometry(r.geometry, "$.routes.geometry");
-      if (!plain(geom)) continue;
-      let pts = null, mapRef = null;
-      if (Array.isArray(geom.coordinates)) {
-        if (geom.kind !== "line") {
-          issues.push(diagnostic("ROUTE_GEOMETRY_KIND", "$.routes.geometry", `仅 line 几何可作为行走路线，收到 kind=${String(geom.kind)}`, { severity: "warning", entityId: r.routeId }));
-          continue;
-        }
-        pts = geom.coordinates;
-        mapRef = typeof r.mapId === "string" ? r.mapId : mapId;
-      } else if (Array.isArray(geom.points)) {
-        pts = geom.points;
-        mapRef = typeof geom.mapId === "string" ? geom.mapId : typeof r.mapId === "string" ? r.mapId : mapId;
-      } else {
-        issues.push(diagnostic("ROUTE_GEOMETRY_SHAPE", "$.routes.geometry", "路线几何既无 coordinates 也无 points", { severity: "warning", entityId: r.routeId }));
-        continue;
-      }
-      if (mapRef !== mapId) continue;
-      const coord = (v) => typeof v === "number" && finite(v);
-      if (pts.length < 2 || !pts.every((q) => Array.isArray(q) ? q.length >= 2 && coord(q[0]) && coord(q[1]) : plain(q) && coord(q.x) && coord(q.y))) {
-        issues.push(diagnostic("ROUTE_COORDS_INVALID", "$.routes.geometry", "路线坐标不足或含非有限值，跳过该路线", { severity: "warning", entityId: r.routeId }));
-        continue;
-      }
-      routes.push({
-        id: r.routeId,
-        kind: "route",
-        mapId,
-        path: pts.map((q) => ({ x: (Array.isArray(q) ? Number(q[0]) : q.x) * k, y: (Array.isArray(q) ? Number(q[1]) : q.y) * k })),
-        quality: r.geometryQuality === "confirmed" ? "confirmed" : "estimated",
-        dashed: r.geometryQuality !== "confirmed",
-        progress: null,
-        // 审查必修2：路线可见性依据——端点引用必须随 DTO 下发，POV 过滤据此执行。
-        ...typeof r.fromLocationId === "string" ? { fromLocationId: r.fromLocationId } : {},
-        ...typeof r.toLocationId === "string" ? { toLocationId: r.toLocationId } : {},
-        ...r.hidden === true ? { hidden: true } : {}
-      });
-    }
-    const scene = { kind: SCENE_KIND, version: SCENE_VERSION, generator: "sql-view-adapter/1", mapId, branchId: scope.branchId, sourceRevision: scope.revision, units: mpp ? "meters" : "cells", metersPerCell: mpp, metricQuality: raw.scaleQuality ?? "uncalibrated", layout: { id: mapId, name: raw.name, kind: "overview", bounds, pins, shapes: pins.filter((p) => p.polygon).map((p) => ({ id: p.id, polygon: p.polygon, name: p.name })), routes } };
-    return { ok: true, status: "ready", scene, coarseList: (raw.coarseList ?? []).filter((p) => scope.viewMode === "author" || p.hidden !== true).map(clone), issues };
-  }
-  function filterSceneForView(scene, { scope, visibleLocations = [], visibleCharacters = [], visibleItems = [], names = {} } = {}) {
-    if (checkSceneDocument(scene).length) return failure("SCENE_INVALID", "$", "不能展示损坏的几何文档");
-    if (scene.branchId !== scope?.branchId) return failure("SCENE_SCOPE_MISMATCH", "$.branchId", "场景分支不一致");
-    let d = clone(scene);
-    const L = new Set(visibleLocations), C = new Set(visibleCharacters), I = new Set(visibleItems), author = scope.viewMode === "author";
-    if (!author) {
-      const top = ["kind", "version", "generator", "mapId", "branchId", "sourceRevision", "units", "metersPerCell", "metricQuality"];
-      const keys = { floor: ["id", "name", "kind", "bounds", "corridor", "rooms", "groups", "bodies", "doors", "windows", "lamps", "doorSwings", "actors", "items", "path"], city: ["id", "name", "kind", "bounds", "wall", "origin", "river", "riverPolygon", "districts", "roads", "segments", "gates", "buildings", "dock"], overview: ["id", "name", "kind", "bounds", "pins", "shapes", "routes"] };
-      const saved = d.layout;
-      d = Object.fromEntries(top.filter((k) => d[k] !== void 0).map((k) => [k, d[k]]));
-      d.layout = Object.fromEntries((keys[saved.kind] ?? []).filter((k) => saved[k] !== void 0).map((k) => [k, saved[k]]));
-    }
-    const s = d.layout;
-    const allowed = (id, type) => author || (type === "person" ? C : type === "item" ? I : L).has(id);
-    const name = (p) => ({ ...p, name: names[p.id] ?? p.name ?? "" });
-    if (s.kind === "floor") {
-      s.rooms = s.rooms.filter((r) => allowed(r.id, "location")).map(name);
-      const rooms = new Set(s.rooms.map((r) => r.id));
-      for (const key of ["groups", "bodies", "doors", "windows", "lamps", "doorSwings"]) s[key] = (s[key] ?? []).filter((p) => rooms.has(p.roomId));
-      s.actors = (s.actors ?? []).filter((p) => rooms.has(p.roomId) && allowed(p.id, "person")).map(name);
-      s.items = (s.items ?? []).filter((p) => rooms.has(p.roomId) && allowed(p.id, "item")).map(name);
-      s.path = [];
-    } else if (s.kind === "city") {
-      s.districts = s.districts.filter((d2) => allowed(d2.id, "location")).map(name);
-      const districts = new Set(s.districts.map((d2) => d2.id));
-      s.buildings = s.buildings.filter((b) => districts.has(b.districtId) && (b.decorative || allowed(b.id, "location"))).map(name);
-      if (!author) {
-        s.roads = s.roads.filter((r) => r.id === "avenue" || [...districts].some((id) => r.id === "road:" + id));
-        const roads = new Set(s.roads.map((r) => r.id));
-        s.segments = s.segments.filter((r) => roads.has(r.roadId));
-      }
-    } else {
-      s.pins = s.pins.filter((p) => allowed(p.id, p.type)).map(name);
-      s.shapes = (s.shapes ?? []).filter((p) => allowed(p.id, "location"));
-      s.routes = (s.routes ?? []).filter((r) => {
-        if (author) return true;
-        if (r.hidden === true) return false;
-        const endpoints = [r.fromLocationId, r.toLocationId].filter((v) => typeof v === "string" && v);
-        if (!endpoints.length) return false;
-        return endpoints.every((id) => L.has(id));
-      });
-    }
-    if (!author) d.layout = stripLayoutForPov(s);
-    return { ok: true, scene: d, issues: [] };
-  }
-  var pickPoint = (q) => plain(q) ? { x: q.x, y: q.y } : null;
-  var pickPoints = (v) => Array.isArray(v) ? v.map(pickPoint).filter(Boolean) : [];
-  var pick = (p, ...fields) => {
-    if (!plain(p)) return null;
-    const out = {};
-    for (const f of fields) if (p[f] !== void 0) out[f] = p[f];
-    return out;
-  };
-  function stripLayoutForPov(s) {
-    const sanitize = {
-      floor: {
-        corridor: (p) => pick(p, "x", "y", "w", "h"),
-        rooms: (p) => pick(p, "id", "name", "x", "y", "w", "h", "side"),
-        groups: (p) => ({ ...pick(p, "id", "name", "roomId", "x", "y", "w", "h"), ...Array.isArray(p.bodies) ? { bodies: p.bodies.map((b) => pick(b, "x", "y", "w", "h")).filter(Boolean) } : {} }),
-        bodies: (p) => pick(p, "x", "y", "w", "h", "roomId"),
-        doors: (p) => pick(p, "x", "y", "width", "roomId"),
-        windows: (p) => pick(p, "x", "y", "roomId"),
-        lamps: (p) => pick(p, "x", "y", "roomId"),
-        doorSwings: (p) => pick(p, "x", "y", "w", "h", "roomId"),
-        actors: (p) => pick(p, "id", "name", "roomId", "x", "y", "quality"),
-        items: (p) => pick(p, "id", "name", "roomId", "x", "y", "quality"),
-        path: pickPoints
-      },
-      city: {
-        wall: pickPoints,
-        riverPolygon: pickPoints,
-        origin: (p) => pick(p, "x", "y"),
-        river: (p) => pick(p, "cx", "amplitude", "width", "height"),
-        dock: (p) => pick(p, "x", "y", "width"),
-        districts: (p) => ({ ...pick(p, "id", "name"), ...Array.isArray(p.polygon) ? { polygon: pickPoints(p.polygon) } : {}, ...plain(p.site) ? { site: pickPoint(p.site) } : {} }),
-        roads: (p) => ({ ...pick(p, "id", "name", "roadId", "width"), ...plain(p.a) ? { a: pickPoint(p.a) } : {}, ...plain(p.b) ? { b: pickPoint(p.b) } : {} }),
-        segments: (p) => ({ ...pick(p, "id", "roadId", "width"), ...plain(p.a) ? { a: pickPoint(p.a) } : {}, ...plain(p.b) ? { b: pickPoint(p.b) } : {} }),
-        gates: (p) => pick(p, "id", "name", "x", "y"),
-        buildings: (p) => pick(p, "id", "name", "districtId", "x", "y", "w", "h", "decorative")
-      },
-      overview: {
-        pins: (p) => ({ ...pick(p, "id", "entityId", "name", "type", "mapId", "x", "y", "quality", "locationId", "radius"), ...Array.isArray(p.polygon) ? { polygon: pickPoints(p.polygon) } : {} }),
-        shapes: (p) => ({ ...pick(p, "id", "name"), ...Array.isArray(p.polygon) ? { polygon: pickPoints(p.polygon) } : {} }),
-        routes: (p) => ({ ...pick(p, "id", "kind", "mapId", "quality", "dashed", "progress", "fromLocationId", "toLocationId"), ...Array.isArray(p.path) ? { path: pickPoints(p.path) } : {} })
-      }
-    }[s.kind] ?? {};
-    const out = {};
-    for (const [key, value] of Object.entries(s)) {
-      if (key === "id" || key === "name" || key === "kind") {
-        out[key] = value;
-        continue;
-      }
-      if (key === "bounds") {
-        out[key] = pick(value, "x", "y", "w", "h");
-        continue;
-      }
-      const rule = sanitize[key];
-      if (!rule) continue;
-      if (Array.isArray(value)) out[key] = value.map(rule).filter(Boolean);
-      else if (plain(value)) out[key] = rule(value);
-    }
-    return out;
-  }
-  function publicMapFrame(frame) {
-    const out = clone(frame ?? {});
-    delete out.atlasScene;
-    delete out.atlasLayoutRequest;
-    return out;
-  }
-  function hydrateScene(scene, projection) {
-    if (!projection?.ok || !projection.scene || scene.mapId !== projection.scene.mapId || scene.branchId !== projection.scene.branchId) return failure("PROJECTION_SCOPE_MISMATCH", "$", "几何文档与 SQL 现状不属于同一地图");
-    if (scene.units !== projection.scene.units || scene.metersPerCell !== projection.scene.metersPerCell) return failure("PROJECTION_METRIC_MISMATCH", "$", "已保存布局需要重新按当前尺度验证");
-    const d = clone(scene), s = d.layout;
-    if (s.kind !== "floor") return { ok: true, scene: d, issues: [] };
-    const pins = projection.scene.layout.pins ?? [], coarse = projection.coarseList ?? [], P = new Map(pins.map((p) => [p.id, p])), C = new Map(coarse.map((p) => [p.entityId, p]));
-    s.actors = s.actors.filter((a) => {
-      const p = P.get(a.id), c = C.get(a.id);
-      return p?.locationId === a.roomId || c?.locationId === a.roomId;
-    }).map((a) => {
-      const p = P.get(a.id);
-      return p && p.quality !== "layout" ? { ...a, x: p.x, y: p.y, quality: p.quality, name: p.name } : a;
-    });
-    s.items = s.items.filter((a) => {
-      const p = P.get(a.id);
-      return p?.locationId === a.roomId;
-    }).map((a) => {
-      const p = P.get(a.id);
-      return p && p.quality !== "layout" ? { ...a, x: p.x, y: p.y, quality: p.quality, name: p.name } : a;
-    });
-    s.path = [];
-    return { ok: true, scene: d, issues: [] };
-  }
-
-  // vendor/atlas-spatial/tools.mjs
-  var TOOL_NAMES = Object.freeze(["atlas_generate_floor", "atlas_generate_city", "atlas_place_markers", "atlas_build_overlays"]);
-
-  // vendor/atlas-spatial/renderer.mjs
-  var DEFAULT_THEME = Object.freeze({ bg: "#060a12", grid: "#4977a125", wall: "#b2d4ef", mint: "#39e0a0", gold: "#ffc247", blue: "#7fd4ff", text: "#dce9fb", muted: "#91a9c3", floor: "#101d2f", cyan: "#43e0ff", violet: "#9b6bff" });
-
-  // vendor/atlas-spatial/host-context.mjs
-  function buildLayoutContext({ scope, mapRow, locations = [], characters = [], items = [] } = {}) {
-    try {
-      scope = normalizeScope(scope);
-      if (mapRow?.branch_id !== scope.branchId) return failure("MAP_BRANCH_MISMATCH", "$.mapRow", "地图与当前分支不匹配");
-      const frame = typeof mapRow.frame_json === "string" ? JSON.parse(mapRow.frame_json) : mapRow.frame_json, mpp = mapRow.meters_per_cell;
-      if (!plain(frame)) return failure("FRAME_INVALID", "$.mapRow.frame_json", "需要完整地图框架");
-      const active = (rows4) => rows4.filter((r) => r.branch_id === scope.branchId && r.status === "active"), ls = active(locations), cs = active(characters), its = active(items).filter((i) => !i.holder_character_id && !i.container_item_id);
-      const own = ls.filter((l) => l.map_id === mapRow.id), locks = { rooms: {}, buildings: {}, actors: {} };
-      if (finite(mpp) && mpp > 0) {
-        for (const l of own) {
-          const area = typeof l.area_geometry_json === "string" ? JSON.parse(l.area_geometry_json) : l.area_geometry_json;
-          if (area?.quality !== "confirmed" || area?.kind !== "polygon" || area.points?.length !== 4) continue;
-          const p = area.points;
-          if (!p.every((p2) => finite(p2.x) && finite(p2.y))) continue;
-          const xs = p.map((p2) => p2.x), ys = p.map((p2) => p2.y), x = Math.min(...xs), y = Math.min(...ys), w = Math.max(...xs) - x, h = Math.max(...ys) - y;
-          if (w <= 0 || h <= 0 || !p.every((p2) => (Math.abs(p2.x - x) < 1e-6 || Math.abs(p2.x - x - w) < 1e-6) && (Math.abs(p2.y - y) < 1e-6 || Math.abs(p2.y - y - h) < 1e-6))) continue;
-          locks[l.kind === "room" ? "rooms" : "buildings"][l.id] = { x: x * mpp, y: y * mpp, w: w * mpp, h: h * mpp };
-        }
-        for (const c of cs) if (c.map_id === mapRow.id && c.coord_precision === "exact" && finite(c.grid_x) && finite(c.grid_y)) locks.actors[c.id] = { x: c.grid_x * mpp, y: c.grid_y * mpp };
-      }
-      const saved = readSceneFrame(frame, { branchId: scope.branchId, mapId: mapRow.id });
-      if (!saved.ok) return saved;
-      return { ok: true, context: { scope, map: { id: mapRow.id, name: mapRow.name, containerLocationId: mapRow.container_location_id ?? null, metersPerCell: finite(mpp) && mpp > 0 ? mpp : null, scaleQuality: mapRow.scale_quality, scaleLocked: Number(mapRow.scale_locked) === 1, frame }, entities: { locations: ls.map((l) => l.id), characters: cs.map((c) => c.id), items: its.map((i) => i.id) }, locks, previousScene: saved.scene, seed: mapRow.id }, issues: [] };
-    } catch (e) {
-      return failure("CONTEXT_BUILD_FAILED", "$", "当前分支行或已保存场景不可读取", { detailCode: String(e.message) });
-    }
-  }
-
-  // vendor/atlas-spatial/candidate-group.mjs
-  function compileSceneGroup({ request, scope, currentScope, mapRow, locations, characters, items, turnId, operationId } = {}) {
-    try {
-      if (!["floor", "city"].includes(request?.kind)) return failure("LAYOUT_KIND_UNSUPPORTED", "$.request.kind", "使用 floor/city；其他空间沿用现有轮廓");
-      const built = buildLayoutContext({ scope, mapRow, locations, characters, items });
-      if (!built.ok) return built;
-      const ctx = { ...built.context, currentScope }, spec = clone(request.spec), membershipIssues = [];
-      if (request.kind === "floor") {
-        const chars = new Map((characters ?? []).filter((c) => c.branch_id === scope.branchId && c.status === "active").map((c) => [c.id, c]));
-        const groundItems = new Map((items ?? []).filter((i) => i.branch_id === scope.branchId && i.status === "active" && !i.holder_character_id && !i.container_item_id).map((i) => [i.id, i]));
-        const groups = new Map((spec.contents ?? []).map((g) => [g.id, g]));
-        spec.actors = (spec.actors ?? []).filter((a) => {
-          const allowed = chars.get(a.id)?.location_id === a.roomId;
-          if (!allowed) membershipIssues.push(diagnostic("ACTOR_LOCATION_MISMATCH", "$.actors.roomId", "当前 SQL 位置不在此房间，保留名单与真实位置", { entityId: a.id, severity: "warning" }));
-          return allowed;
-        });
-        spec.items = (spec.items ?? []).filter((i) => {
-          const actual = groundItems.get(i.id), group = groups.get(i.on), allowed = !!actual && !!group && actual.location_id === group.roomId;
-          if (!allowed) membershipIssues.push(diagnostic("ITEM_LOCATION_MISMATCH", "$.items.on", "物品不在该房间或已被持有，不能画作地面物品", { entityId: i.id, severity: "warning" }));
-          return allowed;
-        });
-      }
-      const result = request.kind === "floor" ? generateFloor(spec, ctx) : generateCity(spec, ctx);
-      if (!result.ok) return result;
-      result.issues.push(...membershipIssues);
-      const prepared = buildSceneMutation({ result, mapRow, scope, currentScope, turnId, operationId, expectedRowRev: mapRow.row_rev });
-      if (!prepared.ok) return prepared;
-      const mutations = prepared.mutation ? [prepared.mutation] : [], readSet = [{ table: "maps", rowId: mapRow.id, rowRev: mapRow.row_rev }], issues = [...result.issues], byId3 = new Map((locations ?? []).filter((l) => l.branch_id === scope.branchId).map((l) => [l.id, l]));
-      for (const geo of sceneLocationGeometry(result.scene)) {
-        if (geo.entityId === mapRow.container_location_id) continue;
-        const before = byId3.get(geo.entityId);
-        if (!before) return failure("LOCATION_REF_UNKNOWN", "$.locations", "场景引用的地点未在候选数据库建档");
-        if (before.map_id !== mapRow.id) return failure("LOCATION_MAP_MISMATCH", "$.locations.map_id", "不能通过摆放把地点迁移到另一地图");
-        if (before.coord_precision === "exact" && finite(before.grid_x) && finite(before.grid_y) && (Math.abs(before.grid_x - geo.gridX) > 1e-6 || Math.abs(before.grid_y - geo.gridY) > 1e-6)) return failure("LOCATION_GEOMETRY_LOCK_CONFLICT", "$.locations", "当前模板无法满足已确认的地点坐标；保留原场景", { entityId: before.id });
-        const area = typeof before.area_geometry_json === "string" ? JSON.parse(before.area_geometry_json) : before.area_geometry_json;
-        if (area?.quality === "confirmed" && geo.area.quality !== "confirmed") return failure("CONFIRMED_AREA_LOCKED", "$.locations.area_geometry_json", "不能用示意轮廓覆盖作者确认的范围");
-        const after = { ...clone(before), grid_x: geo.gridX, grid_y: geo.gridY, coord_precision: before.coord_precision === "exact" ? "exact" : geo.precision, area_geometry_json: geo.area };
-        if (stable([before.grid_x, before.grid_y, before.coord_precision, area]) === stable([after.grid_x, after.grid_y, after.coord_precision, after.area_geometry_json])) continue;
-        after.row_rev = before.row_rev + 1;
-        after.updated_turn_id = turnId;
-        mutations.push({ table: "locations", rowId: before.id, before: clone(before), after, sourceOpIds: [operationId], basis: { kind: "layout", mapId: mapRow.id, quality: geo.precision } });
-        readSet.push({ table: "locations", rowId: before.id, rowRev: before.row_rev });
-      }
-      return { ok: true, status: mutations.length ? "prepared" : "duplicate", scene: result.scene, issues, group: mutations.length ? { id: "layout:" + operationId, opIds: [operationId], dependsOn: [], readSet, mutations } : null };
-    } catch (e) {
-      return failure("SCENE_COMPILE_FAILED", "$", "无法编译场景变更，原行未修改", { detailCode: String(e.message) });
-    }
-  }
-
-  // vendor/atlas-spatial/candidate-apply.mjs
-  function applySceneGroup(db, group, ports) {
-    if (ports?.insideCandidateTransaction !== true) return failure("CANDIDATE_TRANSACTION_REQUIRED", "$", "只能在宿主已有的候选事务内应用布局");
-    if (!group) return { ok: true, status: "duplicate", groups: [], issues: [] };
-    if (typeof ports.applyGroups !== "function" || typeof ports.queryBound !== "function" || typeof ports.isCurrent !== "function") return failure("COMMIT_PORT_REQUIRED", "$", "缺少宿主应用、查询或身份守卫接口");
-    if (!ports.isCurrent()) return failure("STALE_SCOPE", "$.scope", "世界已经切换，禁止应用布局");
-    if (db.exec("PRAGMA foreign_keys")[0]?.values[0]?.[0] !== 1) return failure("FOREIGN_KEYS_OFF", "$", "需要宿主在开启事务前启用并读回外键");
-    for (const r of group.readSet ?? []) {
-      if (!["maps", "locations"].includes(r.table)) return failure("READ_TABLE_INVALID", "$.readSet", "布局读集只包含地图和地点");
-      const row2 = ports.queryBound(db, "SELECT row_rev FROM " + r.table + " WHERE branch_id=? AND id=?", [ports.branchId, r.rowId])[0];
-      if (row2?.row_rev !== r.rowRev) return failure("STALE_ROW", "$.readSet", "候选行在编译后已改变");
-    }
-    const savepoint2 = "atlas_spatial_component";
-    db.run("SAVEPOINT " + savepoint2);
-    try {
-      const applied = ports.applyGroups(db, [group], { branchId: ports.branchId, turnId: ports.turnId, attemptId: ports.attemptId ?? "spatial", validate: true, journal: true });
-      const failed = applied.groups.some((g) => g.status === "rejected" || g.status === "blocked") || applied.journalIssues.length > 0;
-      if (failed) {
-        db.run("ROLLBACK TO SAVEPOINT " + savepoint2);
-        db.run("RELEASE SAVEPOINT " + savepoint2);
-        return { ok: false, status: "failed", groups: applied.groups.map((g) => ({ ...g, status: "rejected", changedRows: 0 })), issues: [...applied.groups.flatMap((g) => g.issues ?? []), ...applied.journalIssues.map((message) => diagnostic("JOURNAL_WRITE_FAILED", "$.turn_changes", message))] };
-      }
-      db.run("RELEASE SAVEPOINT " + savepoint2);
-      return { ok: true, status: "applied", groups: applied.groups, issues: [] };
-    } catch (e) {
-      db.run("ROLLBACK TO SAVEPOINT " + savepoint2);
-      db.run("RELEASE SAVEPOINT " + savepoint2);
-      return failure(e.code ?? "SCENE_APPLY_FAILED", "$", String(e.message));
-    }
-  }
-
-  // vendor/atlas-spatial/initial-frame.mjs
-  function prepareInitialFrame({ mapRow, scope, currentScope, locations = [], widthM, heightM, turnId, operationId, expectedRowRev } = {}) {
-    try {
-      if (!sameScope(scope, currentScope)) return failure("STALE_SCOPE", "$.scope", "初始化时作用域已经改变");
-      if (mapRow?.branch_id !== scope.branchId) return failure("MAP_BRANCH_MISMATCH", "$.mapRow", "地图不在当前分支");
-      if (!Number.isInteger(mapRow.row_rev) || mapRow.row_rev !== expectedRowRev) return failure("STALE_ROW", "$.expectedRowRev", "地图行已经改变");
-      const frame = typeof mapRow.frame_json === "string" ? JSON.parse(mapRow.frame_json) : clone(mapRow.frame_json);
-      if (!plain(frame)) return failure("FRAME_INVALID", "$.frame_json", "框架必须是普通对象");
-      const positioned = locations.some((l) => l.branch_id === scope.branchId && l.map_id === mapRow.id && l.status === "active" && finite(l.grid_x) && finite(l.grid_y));
-      if (frame.atlasScene || positioned || Number(mapRow.scale_locked) === 1 || mapRow.scale_quality === "confirmed") return { ok: true, status: "retained", mutation: null, issues: [] };
-      if (!finite(widthM) || !finite(heightM) || widthM <= 0 || heightM <= 0) return failure("INITIAL_EXTENT_REQUIRED", "$", "新空地图需要有限正尺寸，或继续使用原概览");
-      if (typeof turnId !== "string" || !turnId || typeof operationId !== "string" || !operationId) return failure("COMMIT_ANCHOR_REQUIRED", "$.turnId", "需要当前楼层与操作ID");
-      const mpp = widthM / 100, rows4 = heightM / mpp;
-      if (!finite(mpp) || !finite(rows4) || mpp <= 0 || rows4 <= 0) return failure("INITIAL_FRAME_RANGE_INVALID", "$", "尺寸无法得到有效坐标跨度");
-      const before = clone(mapRow), after = { ...clone(mapRow), frame_json: { ...frame, cols: 100, rows: rows4, origin_x: 0, origin_y: 0 }, meters_per_cell: mpp, scale_quality: "estimated", scale_min_meters_per_cell: null, scale_max_meters_per_cell: null, scale_basis_json: { source: "initial-spatial-extent", widthM, heightM }, calibration_rev: Number(mapRow.calibration_rev ?? 0) + 1, row_rev: mapRow.row_rev + 1, updated_turn_id: turnId };
-      return { ok: true, status: "prepared", issues: [], mutation: { table: "maps", rowId: mapRow.id, before, after, sourceOpIds: [operationId], basis: { kind: "estimate", source: "initial-spatial-extent" } } };
-    } catch (e) {
-      return failure("INITIAL_FRAME_INVALID", "$", "初始化没有写入原地图", { detailCode: String(e.message) });
-    }
   }
 
   // src/atlas-db-views.ts
@@ -18694,10 +20279,10 @@ END`;
       if (nominal !== null && nominal > 0) return nominal;
     }
     const quality = String(segment.quality ?? "unknown");
-    const distance2 = num6(segment.distanceNominalM ?? segment.distance_nominal_m);
+    const distance3 = num6(segment.distanceNominalM ?? segment.distance_nominal_m);
     const speed = num6(segment.speedNominalMps ?? segment.speed_nominal_mps);
-    if (quality === "unknown" || distance2 === null || speed === null || speed <= 0) return null;
-    return distance2 / speed;
+    if (quality === "unknown" || distance3 === null || speed === null || speed <= 0) return null;
+    return distance3 / speed;
   }
   function clamp01(value) {
     return Math.max(0, Math.min(1, value));
@@ -18976,12 +20561,12 @@ END`;
     for (const viewItem of viewItems) {
       const mapId = viewItem.mapId;
       const frame = frames.get(mapId) ?? null;
-      const hasScene = frame !== null && Object.prototype.hasOwnProperty.call(frame, "atlasScene");
+      const hasScene2 = frame !== null && Object.prototype.hasOwnProperty.call(frame, "atlasScene");
       const read = readSceneFrame(frame, { branchId: ctx.branchId, mapId });
       const issues = [...read.issues ?? []];
       let scene = read.scene;
-      let sceneStatus = scene ? "ready" : hasScene ? "invalid" : "missing";
-      if (frame === null && !hasScene) {
+      let sceneStatus = scene ? "ready" : hasScene2 ? "invalid" : "missing";
+      if (frame === null && !hasScene2) {
         issues.push({
           code: "FRAME_MISSING",
           path: `$.maps[${mapId}].frame_json`,
@@ -19200,6 +20785,1292 @@ END`;
     };
   }
 
+  // src/atlas-world-feed-history.ts
+  var BOOKKEEPING_COLUMNS = /* @__PURE__ */ new Set(["row_rev", "updated_turn_id"]);
+  var HISTORICAL_TURN_STATUSES = ["committed", "partial"];
+  var HISTORICAL_DEFAULT_TABLES = ["characters", "locations", "information"];
+  var MAX_TURN_IDS_PER_QUERY = 200;
+  function planIssue(code, path, message, extra = {}) {
+    return { code, path, message, severity: "warning", retryable: false, ...extra };
+  }
+  function canonicalValue(value) {
+    if (value === void 0) return "undefined";
+    if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "undefined";
+    if (Array.isArray(value)) return `[${value.map(canonicalValue).join(",")}]`;
+    const record2 = value;
+    const keys = Object.keys(record2).filter((k) => record2[k] !== void 0).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalValue(record2[k])}`).join(",")}}`;
+  }
+  function canonicalRow(row2) {
+    if (row2 === null || row2 === void 0) return "null";
+    const keys = Object.keys(row2).filter((k) => !BOOKKEEPING_COLUMNS.has(k) && row2[k] !== void 0).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalValue(row2[k])}`).join(",")}}`;
+  }
+  function asRow(value) {
+    if (value === null || value === void 0) return null;
+    if (typeof value !== "object" || Array.isArray(value)) return null;
+    return { ...value };
+  }
+  var compareText = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+  function collapseTurnSnapshots(rows4) {
+    const groups = /* @__PURE__ */ new Map();
+    let order = 0;
+    for (const raw of rows4 ?? []) {
+      if (!raw || typeof raw.turnId !== "string" || typeof raw.table !== "string" || typeof raw.rowId !== "string") continue;
+      const key = `${raw.turnId}\0${raw.table}\0${raw.rowId}`;
+      let group = groups.get(key);
+      if (!group) {
+        group = { key, turnId: raw.turnId, table: raw.table, rowId: raw.rowId, entries: [] };
+        groups.set(key, group);
+      }
+      group.entries.push({
+        sequence: Number.isFinite(raw.sequence) ? Number(raw.sequence) : 0,
+        order: order++,
+        operationId: typeof raw.operationId === "string" ? raw.operationId : "",
+        groupId: typeof raw.groupId === "string" ? raw.groupId : "",
+        before: asRow(raw.before),
+        after: asRow(raw.after)
+      });
+    }
+    const out = [];
+    for (const group of groups.values()) {
+      group.entries.sort(
+        (a, b) => a.sequence - b.sequence || compareText(a.operationId, b.operationId) || compareText(a.groupId, b.groupId) || a.order - b.order
+      );
+      const first = group.entries[0];
+      const last = group.entries[group.entries.length - 1];
+      if (canonicalRow(first.before) === canonicalRow(last.after)) continue;
+      const operationIds = [...new Set(group.entries.map((e) => e.operationId).filter(Boolean))].sort(compareText);
+      const groupIds = [...new Set(group.entries.map((e) => e.groupId).filter(Boolean))].sort(compareText);
+      out.push({ turnId: group.turnId, table: group.table, rowId: group.rowId, before: first.before, after: last.after, operationIds, groupIds });
+    }
+    out.sort(
+      (a, b) => compareText(a.turnId, b.turnId) || compareText(a.table, b.table) || compareText(a.rowId, b.rowId)
+    );
+    return out;
+  }
+  function readJournalRows(db, turnIds, tables) {
+    const issues = [];
+    const entries = [];
+    const countsByTurn = /* @__PURE__ */ new Map();
+    let rawCount = 0;
+    if (turnIds.length === 0) return { entries, issues, rawCount, countsByTurn };
+    const allowed = new Set(tables);
+    for (let start = 0; start < turnIds.length; start += MAX_TURN_IDS_PER_QUERY) {
+      const chunk = turnIds.slice(start, start + MAX_TURN_IDS_PER_QUERY);
+      const sql = `SELECT turn_id, sequence, operation_id, group_id, target_table, target_row_id, before_json, after_json
+       FROM turn_changes WHERE turn_id IN (${chunk.map(() => "?").join(", ")}) ORDER BY sequence ASC`;
+      const rows4 = queryBound(db, sql, chunk);
+      for (const row2 of rows4) {
+        rawCount += 1;
+        const table = String(row2.target_table ?? "");
+        const turnId = String(row2.turn_id ?? "");
+        countsByTurn.set(turnId, (countsByTurn.get(turnId) ?? 0) + 1);
+        if (!allowed.has(table)) continue;
+        const sequence = Number(row2.sequence ?? 0);
+        const beforeJson = row2.before_json === null || row2.before_json === void 0 ? null : String(row2.before_json);
+        const afterJson = row2.after_json === null || row2.after_json === void 0 ? null : String(row2.after_json);
+        let before = null;
+        let after = null;
+        let broken = false;
+        try {
+          before = beforeJson === null ? null : asRow(JSON.parse(beforeJson));
+          after = afterJson === null ? null : asRow(JSON.parse(afterJson));
+        } catch {
+          broken = true;
+        }
+        if (broken) {
+          issues.push(
+            planIssue(
+              "JOURNAL_JSON_INVALID",
+              `$.turnChanges.${table}.${String(row2.target_row_id ?? "")}`,
+              "变更日志里的 before/after 不是可解析的 JSON；该行按「历史不可判定」处理，不采用当前值",
+              {
+                severity: "error",
+                relatedIds: [String(row2.target_row_id ?? "")]
+              }
+            )
+          );
+          continue;
+        }
+        entries.push({
+          turnId,
+          sequence,
+          table,
+          rowId: String(row2.target_row_id ?? ""),
+          before,
+          after,
+          operationId: String(row2.operation_id ?? ""),
+          groupId: String(row2.group_id ?? "")
+        });
+      }
+    }
+    return { entries, issues, rawCount, countsByTurn };
+  }
+  function readTurnChangeRows(db, turnIds, tables) {
+    return readJournalRows(db, turnIds, tables);
+  }
+  function readHistoricalRows(db, input) {
+    const branchId = String(input?.branchId ?? "");
+    const turnId = String(input?.turnId ?? "");
+    const tables = [...new Set((input?.tables ?? HISTORICAL_DEFAULT_TABLES).map((t) => String(t)))];
+    const base = {
+      ok: false,
+      branchId,
+      turnId,
+      committedRevision: null,
+      turnStatus: null,
+      turnIds: [],
+      rows: {},
+      present: {},
+      unresolved: {},
+      journalEntries: 0,
+      issues: []
+    };
+    if (!branchId || !turnId) {
+      return { ...base, issues: [planIssue("TURN_REF_REQUIRED", "$.turnId", "需要分支与回合标识", { severity: "error" })] };
+    }
+    for (const table of tables) {
+      if (!ATLAS_USER_TABLES.includes(table)) {
+        return { ...base, issues: [planIssue("TABLE_NOT_ALLOWED", "$.tables", `时间线只读白名单之外的表明：${table}`, { severity: "error" })] };
+      }
+    }
+    const turnRows = queryBound(
+      db,
+      "SELECT id, status, committed_revision FROM turns WHERE branch_id = ? AND id = ?",
+      [branchId, turnId]
+    );
+    if (turnRows.length === 0) {
+      return { ...base, issues: [planIssue("TURN_NOT_FOUND", "$.turnId", "该分支没有这个回合，不能凭当前数据假装知道当时状态", { severity: "error" })] };
+    }
+    const turnStatus = String(turnRows[0].status ?? "");
+    const committedRevisionRaw = turnRows[0].committed_revision;
+    if (!HISTORICAL_TURN_STATUSES.includes(turnStatus) || committedRevisionRaw === null || committedRevisionRaw === void 0) {
+      return {
+        ...base,
+        turnStatus,
+        issues: [planIssue("TURN_NOT_COMMITTED", "$.turnId", `回合状态为 ${turnStatus || "unknown"}，失败/回退/未提交的回合没有可信历史`, { severity: "error" })]
+      };
+    }
+    const committedRevision = Number(committedRevisionRaw);
+    if (!Number.isInteger(committedRevision)) {
+      return { ...base, turnStatus, issues: [planIssue("TURN_REVISION_INVALID", "$.committedRevision", "committed_revision 不是整数，历史窗口无法界定", { severity: "error" })] };
+    }
+    const windowTurns = queryBound(
+      db,
+      `SELECT id, committed_revision, created_wall_ms FROM turns
+      WHERE branch_id = ? AND committed_revision IS NOT NULL AND committed_revision <= ?
+        AND status IN (${HISTORICAL_TURN_STATUSES.map(() => "?").join(", ")})
+      ORDER BY committed_revision ASC, created_wall_ms ASC, id ASC`,
+      [branchId, committedRevision, ...HISTORICAL_TURN_STATUSES]
+    );
+    const turnIds = windowTurns.map((t) => String(t.id));
+    const turnRank = new Map(turnIds.map((id, index) => [id, index]));
+    const { entries, issues, rawCount } = readJournalRows(db, turnIds, tables);
+    entries.sort(
+      (a, b) => (turnRank.get(a.turnId) ?? 0) - (turnRank.get(b.turnId) ?? 0) || a.sequence - b.sequence
+    );
+    const folded = /* @__PURE__ */ new Map();
+    for (const entry of entries) {
+      const key = `${entry.table}\0${entry.rowId}`;
+      const existing = folded.get(key);
+      const operationIds = new Set(existing?.operationIds ?? []);
+      if (entry.operationId) operationIds.add(entry.operationId);
+      const groupIds = new Set(existing?.groupIds ?? []);
+      if (entry.groupId) groupIds.add(entry.groupId);
+      folded.set(key, {
+        table: entry.table,
+        rowId: entry.rowId,
+        exists: entry.after !== null,
+        row: entry.after,
+        lastTurnId: entry.turnId,
+        lastSequence: entry.sequence,
+        operationIds: [...operationIds].sort(compareText),
+        groupIds: [...groupIds].sort(compareText)
+      });
+    }
+    const rows4 = {};
+    const present = {};
+    const unresolved = {};
+    for (const table of tables) {
+      assertSafeIdentifier(table);
+      present[table] = [];
+      unresolved[table] = [];
+      const currentIds = queryBound(db, `SELECT id FROM ${table} WHERE branch_id = ?`, [branchId]).map((r) => String(r.id ?? "")).filter(Boolean);
+      for (const id of currentIds) {
+        if (!folded.has(`${table}\0${id}`)) unresolved[table].push(id);
+      }
+      present[table].sort(compareText);
+      unresolved[table].sort(compareText);
+    }
+    for (const [key, value] of folded) {
+      rows4[key] = value;
+      if (value.exists) present[value.table]?.push(value.rowId);
+    }
+    for (const table of tables) present[table]?.sort(compareText);
+    return {
+      ok: true,
+      branchId,
+      turnId,
+      committedRevision,
+      turnStatus,
+      turnIds,
+      rows: rows4,
+      present,
+      unresolved,
+      journalEntries: rawCount,
+      issues
+    };
+  }
+
+  // src/atlas-world-feed-events.ts
+  var EVENT_EFFECT_TABLES = /* @__PURE__ */ new Set(["characters", "items", "locations", "actions"]);
+  var finite3 = (v) => typeof v === "number" && Number.isFinite(v);
+  var str7 = (v) => typeof v === "string" ? v : "";
+  function planIssue2(code, path, message, extra = {}) {
+    return { code, path, message, severity: "warning", retryable: false, ...extra };
+  }
+  function defaultTimeLabel(seconds) {
+    if (!finite3(seconds) || seconds < 0) return "时间未知";
+    const total = Math.floor(seconds);
+    const h = Math.floor(total / 3600);
+    const m = Math.floor(total % 3600 / 60);
+    return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+  }
+  function asRow2(value) {
+    if (value === null || value === void 0) return null;
+    if (typeof value !== "object" || Array.isArray(value)) return null;
+    return value;
+  }
+  function parseList(raw) {
+    if (Array.isArray(raw)) return raw.filter((v) => !!v && typeof v === "object" && !Array.isArray(v));
+    if (typeof raw === "string") {
+      try {
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed.filter((v) => !!v && typeof v === "object" && !Array.isArray(v)) : [];
+      } catch {
+        return [];
+      }
+    }
+    return [];
+  }
+  function categoryFor() {
+    return "event";
+  }
+  function stableId(flavor, eventId, turnId) {
+    return `feed:event:${flavor}:${eventId}:${turnId}`;
+  }
+  function buildEventFeedCandidates(turns, options = {}) {
+    const formatTime = options.formatTime ?? defaultTimeLabel;
+    const labels = options.labels ?? {};
+    const labelOf = (id) => typeof labels[id] === "string" && labels[id] ? labels[id] : id;
+    const out = [];
+    for (const turn of turns ?? []) {
+      if (!turn || typeof turn.turnId !== "string" || !turn.turnId) continue;
+      const turnSnapshots = turn.snapshots ?? [];
+      const eventSnapshots = turnSnapshots.filter((s) => s && s.table === "events");
+      for (const snapshot2 of eventSnapshots) {
+        const issues = [];
+        const before = asRow2(snapshot2.before);
+        const after = asRow2(snapshot2.after);
+        if (after === null) continue;
+        const eventId = snapshot2.rowId;
+        const beforeStatus = str7(before?.status);
+        const afterStatus = str7(after.status);
+        const afterOccurredAt = after.occurred_at_s;
+        const hadEnded = before?.ended_at_s !== null && before?.ended_at_s !== void 0;
+        const nowEnded = after.ended_at_s !== null && after.ended_at_s !== void 0;
+        const isNewOccurrence = afterStatus === "occurred" || afterStatus === "ongoing";
+        const alreadyOccurred = beforeStatus === "occurred" || beforeStatus === "ongoing";
+        const occurredTransition = isNewOccurrence && !alreadyOccurred;
+        const endedTransition = nowEnded && !hadEnded && before !== null;
+        const planOnly = afterStatus === "scheduled";
+        if (!occurredTransition && !endedTransition && !planOnly) continue;
+        const title = str7(after.title) || labelOf(eventId);
+        const humanSummary = str7(after.summary) || str7(after.outcome) || title;
+        if (!title) {
+          issues.push(planIssue2("EVENT_TITLE_MISSING", "$.title", "事件缺少可读标题，跳过这张卡", { severity: "error", relatedIds: [eventId] }));
+          continue;
+        }
+        let occurredAtS = null;
+        if (finite3(afterOccurredAt)) occurredAtS = afterOccurredAt;
+        else if (finite3(turn.clockS)) occurredAtS = turn.clockS;
+        if (!finite3(afterOccurredAt)) {
+          issues.push(
+            planIssue2(
+              "EVENT_OCCURRED_AT_UNKNOWN",
+              "$.occurred_at_s",
+              occurredAtS === null ? "事件没有发生时刻、所在回合也没有故事时刻：卡片标记为时间未知" : "事件行没有 occurred_at_s，卡片时间取自所在回合的故事时刻并标为推断",
+              { relatedIds: [eventId] }
+            )
+          );
+        }
+        const participants = parseList(after.participants_json);
+        const locationId = str7(after.location_id) || null;
+        const links = [];
+        if (locationId) links.push({ kind: "location", id: locationId, label: labelOf(locationId) });
+        for (const p of participants) {
+          const id = str7(p.entity_id);
+          if (!id || id === locationId) continue;
+          links.push({
+            kind: options.entityKindById?.[id] ?? "character",
+            id,
+            label: str7(p.role) && str7(p.role) !== "participant" ? str7(p.role) : labelOf(id)
+          });
+        }
+        const subjectId = str7(after.subject_entity_id);
+        if (subjectId && !links.some((l) => l.id === subjectId)) {
+          links.push({ kind: options.entityKindById?.[subjectId] ?? "character", id: subjectId, label: labelOf(subjectId) });
+        }
+        const ownGroups = new Set(snapshot2.groupIds ?? []);
+        const covered = [{ table: "events", rowId: eventId }];
+        const coveredGroupIds = new Set(snapshot2.groupIds ?? []);
+        if (ownGroups.size > 0) {
+          for (const other of turnSnapshots) {
+            if (other.table === "events" && other.rowId === eventId) continue;
+            if (!EVENT_EFFECT_TABLES.has(other.table)) continue;
+            if (!(other.groupIds ?? []).some((g) => ownGroups.has(g))) continue;
+            covered.push({ table: other.table, rowId: other.rowId });
+            for (const g of other.groupIds ?? []) coveredGroupIds.add(g);
+          }
+        }
+        const sourceKind = options.sourceKindByTurn?.[turn.turnId] ?? (str7(after.cause_action_id) ? "simulation" : "story");
+        const factQuality = finite3(afterOccurredAt) ? "confirmed" : "inferred";
+        const flavor = endedTransition && !occurredTransition ? "ended" : planOnly ? "planned" : "occurred";
+        const item = {
+          id: stableId(flavor, eventId, turn.turnId),
+          category: categoryFor(),
+          title,
+          summary: humanSummary,
+          // 未知时刻绝不用本机墙钟：没有依据时用 0 并靠 factQuality/timeLabel 标明不确定性。
+          occurredAtS: occurredAtS ?? 0,
+          timeLabel: formatTime(occurredAtS),
+          turnId: turn.turnId,
+          turnOrdinal: Number.isFinite(turn.turnOrdinal) ? turn.turnOrdinal : 0,
+          committedRevision: Number.isFinite(turn.committedRevision) ? turn.committedRevision : 0,
+          locationId,
+          mapId: locationId ? options.mapIdByLocationId?.[locationId] ?? null : null,
+          target: { kind: "event", id: eventId },
+          links,
+          visibility: "background",
+          sourceKind,
+          factQuality,
+          trace: {
+            turnId: turn.turnId,
+            groupIds: [...new Set(snapshot2.groupIds ?? [])].sort(),
+            operationIds: [...new Set(snapshot2.operationIds ?? [])].sort()
+          }
+        };
+        out.push({
+          item,
+          covered,
+          coveredGroupIds: [...coveredGroupIds].sort(),
+          planOnly: planOnly && !occurredTransition && !endedTransition,
+          issues
+        });
+      }
+    }
+    out.sort(
+      (a, b) => a.item.turnOrdinal - b.item.turnOrdinal || a.item.committedRevision - b.item.committedRevision || (a.item.id < b.item.id ? -1 : a.item.id > b.item.id ? 1 : 0)
+    );
+    return out;
+  }
+
+  // src/atlas-world-feed-transitions.ts
+  var finite4 = (v) => typeof v === "number" && Number.isFinite(v);
+  var str8 = (v) => typeof v === "string" ? v : "";
+  function planIssue3(code, path, message, extra = {}) {
+    return { code, path, message, severity: "warning", retryable: false, ...extra };
+  }
+  function asRow3(value) {
+    if (value === null || value === void 0) return null;
+    if (typeof value !== "object" || Array.isArray(value)) return null;
+    return value;
+  }
+  function defaultTransitionTimeLabel(seconds) {
+    if (!finite4(seconds) || seconds < 0) return "时间未知";
+    const total = Math.floor(seconds);
+    const h = Math.floor(total / 3600);
+    const m = Math.floor(total % 3600 / 60);
+    return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+  }
+  var ACTION_KINDS = {
+    goal: "计划",
+    prepare: "准备",
+    travel: "赶路",
+    wait: "等待",
+    interact: "交涉",
+    transmit: "传讯",
+    investigate: "调查",
+    act: "行动"
+  };
+  var ACTION_VERB = {
+    active: "开始",
+    ready: "准备",
+    completed: "完成",
+    failed: "失败",
+    cancelled: "取消"
+  };
+  function buildTransitionFeedCandidates(turns, options = {}) {
+    const formatTime = options.formatTime ?? defaultTransitionTimeLabel;
+    const labels = options.labels ?? {};
+    const labelOf = (id) => {
+      const key = str8(id);
+      if (!key) return "";
+      const label2 = labels[key];
+      return typeof label2 === "string" && label2 ? label2 : key;
+    };
+    const kindOf = (id) => options.entityKindById?.[id] ?? "character";
+    const mapOf = (id) => id ? options.mapIdByLocationId?.[id] ?? null : null;
+    const info = options.informationById ?? {};
+    const covered = new Set((options.coveredByEvents ?? []).map((c) => `${c.table}\0${c.rowId}`));
+    const out = [];
+    for (const turn of turns ?? []) {
+      if (!turn || typeof turn.turnId !== "string" || !turn.turnId) continue;
+      if (turn.origin === "manual" || turn.origin === "migration") continue;
+      const snapshots = turn.snapshots ?? [];
+      const turnIssues = [];
+      const emit = (rowId2, draft, snapshot2) => {
+        const item = {
+          id: `feed:${draft.category}:${draft.flavor}:${rowId2}:${turn.turnId}`,
+          category: draft.category,
+          title: draft.title,
+          summary: draft.summary,
+          occurredAtS: finite4(turn.clockS) ? turn.clockS : 0,
+          timeLabel: formatTime(finite4(turn.clockS) ? turn.clockS : null),
+          turnId: turn.turnId,
+          turnOrdinal: Number.isFinite(turn.turnOrdinal) ? turn.turnOrdinal : 0,
+          committedRevision: Number.isFinite(turn.committedRevision) ? turn.committedRevision : 0,
+          locationId: draft.locationId,
+          mapId: mapOf(draft.locationId),
+          target: draft.target,
+          links: draft.links,
+          visibility: draft.visibility,
+          sourceKind: draft.sourceKind,
+          factQuality: draft.factQuality,
+          trace: {
+            turnId: turn.turnId,
+            groupIds: [...new Set(snapshot2.groupIds ?? [])].sort(),
+            operationIds: [...new Set(snapshot2.operationIds ?? [])].sort()
+          }
+        };
+        out.push({ item, issues: turnIssues });
+      };
+      for (const snapshot2 of snapshots) {
+        if (snapshot2.table !== "journeys") continue;
+        if (covered.has(`journeys\0${snapshot2.rowId}`)) continue;
+        const before = asRow3(snapshot2.before);
+        const after = asRow3(snapshot2.after);
+        if (after === null) continue;
+        const mover = str8(after.mover_entity_id);
+        const who = labelOf(mover);
+        const destination = str8(after.destination_location_id);
+        const destName = labelOf(destination);
+        const nextStatus = str8(after.status);
+        const prevStatus = str8(before?.status);
+        const rerouted = before !== null && str8(before.destination_location_id) !== destination;
+        const started = before === null;
+        let flavor = "";
+        let title = "";
+        let summary = "";
+        if (nextStatus === "arrived" && prevStatus !== "arrived") {
+          flavor = "arrive";
+          title = `${who}到达${destName}`;
+          summary = `旅程结束，${who}抵达${destName}。`;
+        } else if (nextStatus === "cancelled" && prevStatus !== "cancelled") {
+          flavor = "cancel";
+          title = `${who}中止前往${destName}的旅程`;
+          summary = `原定前往${destName}的行程已取消。`;
+        } else if (nextStatus === "blocked" && prevStatus !== "blocked") {
+          flavor = "blocked";
+          title = `${who}的行程受阻`;
+          summary = `前往${destName}的路上受阻，暂时停在${labelOf(str8(after.stop_location_id)) || "途中"}。`;
+        } else if (nextStatus === "paused" && prevStatus === "moving") {
+          flavor = "stop";
+          const at = labelOf(str8(after.stop_location_id)) || labelOf(str8(after.last_reached_location_id));
+          title = `${who}在${at || "途中"}停留`;
+          summary = `行程暂停${at ? `，${who}停在${at}` : ""}。`;
+        } else if (rerouted && !started) {
+          flavor = "reroute";
+          title = `${who}改道前往${destName}`;
+          summary = `旅程改变目的地，转向${destName}。`;
+        } else if (nextStatus === "moving" && prevStatus === "paused") {
+          flavor = "resume";
+          title = `${who}继续前往${destName}`;
+          summary = `行程恢复，${who}重新上路。`;
+        } else if (started && nextStatus === "moving") {
+          flavor = "start";
+          title = `${who}出发前往${destName}`;
+          summary = `从${labelOf(str8(after.origin_location_id)) || "出发地"}启程，目标${destName}。`;
+        }
+        if (!flavor) continue;
+        const stop = str8(after.stop_location_id) || str8(after.last_reached_location_id) || str8(after.origin_location_id);
+        const links = [];
+        if (destination) links.push({ kind: "location", id: destination, label: destName });
+        if (mover) links.push({ kind: kindOf(mover), id: mover, label: who });
+        emit(snapshot2.rowId, {
+          flavor,
+          category: "journey",
+          title,
+          summary,
+          target: { kind: "journey", id: snapshot2.rowId },
+          locationId: flavor === "arrive" ? destination || null : stop || positionLocation(after),
+          links,
+          visibility: "background",
+          factQuality: finite4(after.arrived_at_s) || !started ? "confirmed" : "inferred",
+          sourceKind: "simulation"
+        }, snapshot2);
+      }
+      for (const snapshot2 of snapshots) {
+        if (snapshot2.table !== "actions") continue;
+        if (covered.has(`actions\0${snapshot2.rowId}`)) continue;
+        const before = asRow3(snapshot2.before);
+        const after = asRow3(snapshot2.after);
+        if (after === null) continue;
+        const status = str8(after.status);
+        const prev = str8(before?.status);
+        const verb = ACTION_VERB[status];
+        if (!verb) continue;
+        if (before !== null && prev === status) continue;
+        if (before === null && !(status === "active" || status === "completed" || status === "failed")) continue;
+        const actor = str8(after.actor_entity_id);
+        const who = labelOf(actor);
+        const kindLabel = ACTION_KINDS[str8(after.kind)] ?? ACTION_KINDS.act;
+        const what = str8(after.title) || str8(after.intent) || kindLabel;
+        const links = [];
+        if (actor) links.push({ kind: kindOf(actor), id: actor, label: who });
+        if (str8(after.target_location_id)) links.push({ kind: "location", id: str8(after.target_location_id), label: labelOf(str8(after.target_location_id)) });
+        emit(snapshot2.rowId, {
+          flavor: `action-${status}`,
+          category: "action",
+          title: `${who}${verb}${kindLabel}：${what}`,
+          summary: str8(after.result_event_id) ? `${verb}「${what}」，并由此产生了一个后续事件。` : `${who}的${kindLabel}「${what}」已${verb}。`,
+          target: { kind: "action", id: snapshot2.rowId },
+          locationId: str8(after.target_location_id) || null,
+          links,
+          visibility: "background",
+          factQuality: "confirmed",
+          sourceKind: "simulation"
+        }, snapshot2);
+      }
+      for (const snapshot2 of snapshots) {
+        if (snapshot2.table !== "items") continue;
+        if (covered.has(`items\0${snapshot2.rowId}`)) continue;
+        const before = asRow3(snapshot2.before);
+        const after = asRow3(snapshot2.after);
+        if (after === null) continue;
+        const holder = str8(after.holder_character_id);
+        const location = str8(after.location_id);
+        const container = str8(after.container_item_id);
+        const prevHolder = str8(before?.holder_character_id);
+        const prevLocation = str8(before?.location_id);
+        const qty = after.quantity;
+        const prevQty = before?.quantity;
+        const holderChanged = holder !== prevHolder && (holder !== "" || prevHolder !== "");
+        const locationChanged = location !== prevLocation && (location !== "" || prevLocation !== "");
+        const quantityChanged = finite4(qty) && finite4(prevQty) && qty !== prevQty;
+        const name = str8(after.name) || snapshot2.rowId;
+        if (!holderChanged && !locationChanged && !quantityChanged) continue;
+        const parts = [];
+        let flavor = "";
+        if (holderChanged) {
+          flavor ||= "holder";
+          parts.push(holder ? `由${labelOf(holder)}持有` : "已不在任何人手上");
+        }
+        if (!holderChanged && locationChanged) {
+          flavor ||= "location";
+          parts.push(location ? `位于${labelOf(location)}` : "离开了原来的位置");
+        }
+        if (!holderChanged && !locationChanged && container) {
+          flavor ||= "location";
+          parts.push(`收在${labelOf(container)}里`);
+        }
+        if (quantityChanged) {
+          flavor ||= "quantity";
+          parts.push(`数量 ${prevQty} → ${qty}`);
+        }
+        const links = [];
+        if (holder) links.push({ kind: "character", id: holder, label: labelOf(holder) });
+        if (location) links.push({ kind: "location", id: location, label: labelOf(location) });
+        emit(snapshot2.rowId, {
+          flavor: `item-${flavor}`,
+          category: "item",
+          title: quantityChanged && !holderChanged && !locationChanged ? `${name}数量变化` : `${name}易主/移动`,
+          summary: `${name}${parts.length ? "：" + parts.join("；") : ""}。`,
+          target: { kind: "item", id: snapshot2.rowId },
+          locationId: location || null,
+          links,
+          visibility: "background",
+          factQuality: "confirmed",
+          sourceKind: "simulation"
+        }, snapshot2);
+      }
+      const knowledgeInfos = /* @__PURE__ */ new Set();
+      for (const snapshot2 of snapshots) {
+        if (snapshot2.table !== "knowledge") continue;
+        if (covered.has(`knowledge\0${snapshot2.rowId}`)) continue;
+        const before = asRow3(snapshot2.before);
+        const after = asRow3(snapshot2.after);
+        if (after === null) continue;
+        if (before !== null) continue;
+        const informationId = str8(after.information_id);
+        if (!informationId) continue;
+        const snapshotInfo = info[informationId];
+        if (!snapshotInfo) {
+          turnIssues.push(planIssue3(
+            "KNOWLEDGE_INFORMATION_UNKNOWN",
+            "$.information_id",
+            "知识指向的信息没有当时快照：卡片不编造内容，只保留「收到一条消息」",
+            { relatedIds: [informationId] }
+          ));
+        }
+        const title = str8(snapshotInfo?.title) || labelOf(informationId);
+        const content = str8(snapshotInfo?.content);
+        const truth = str8(snapshotInfo?.truth_status);
+        const isPov = Number(after.is_pov) === 1;
+        const knower = str8(after.knower_character_id);
+        knowledgeInfos.add(informationId);
+        emit(snapshot2.rowId, {
+          flavor: "knowledge",
+          category: "message",
+          title,
+          // 只展示这条信息自己的内容与真伪；绝不转用 source_event.summary。
+          summary: `${content || "（这条消息没有可读内容）"}${truth && truth !== "unknown" ? `（可信度：${truth}）` : ""}`,
+          target: { kind: "information", id: informationId },
+          locationId: str8(snapshotInfo?.origin_location_id) || null,
+          links: [
+            { kind: "information", id: informationId, label: title },
+            ...knower ? [{ kind: "character", id: knower, label: labelOf(knower) }] : []
+          ],
+          // 主角本人收到的信息属于程序支持的直接见闻；其他人的接收是后台。
+          visibility: isPov ? "known" : "background",
+          factQuality: truth === "true" ? "confirmed" : truth === "false" ? "reported" : "reported",
+          sourceKind: "delivery"
+        }, snapshot2);
+      }
+      for (const snapshot2 of snapshots) {
+        if (snapshot2.table !== "knowledge") continue;
+        const after = asRow3(snapshot2.after);
+        if (after === null || asRow3(snapshot2.before) !== null) continue;
+        const informationId = str8(after.information_id);
+        const record2 = info[informationId];
+        if (!record2 || str8(record2.kind) !== "observation") continue;
+        const subject = str8(record2.subject_entity_id);
+        const origin = str8(record2.origin_location_id);
+        const discovered = subject && kindOf(subject) === "location" ? subject : origin && kindOf(origin) === "location" ? origin : "";
+        if (!discovered) continue;
+        emit(snapshot2.rowId, {
+          flavor: "observation",
+          category: "discovery",
+          title: `发现${labelOf(discovered)}`,
+          summary: str8(record2.content) || `${labelOf(discovered)}第一次被实际观察到。`,
+          target: { kind: "location", id: discovered },
+          locationId: discovered,
+          links: [{ kind: "location", id: discovered, label: labelOf(discovered) }],
+          visibility: Number(after.is_pov) === 1 ? "known" : "background",
+          factQuality: "confirmed",
+          sourceKind: "story"
+        }, snapshot2);
+      }
+    }
+    out.sort(
+      (a, b) => a.item.turnOrdinal - b.item.turnOrdinal || a.item.committedRevision - b.item.committedRevision || (a.item.id < b.item.id ? -1 : a.item.id > b.item.id ? 1 : 0)
+    );
+    return out;
+  }
+  function positionLocation(row2) {
+    for (const key of ["stop_location_id", "last_reached_location_id", "origin_location_id"]) {
+      const value = str8(row2[key]);
+      if (value) return value;
+    }
+    return null;
+  }
+
+  // src/atlas-world-feed-visibility.ts
+  function planIssue4(code, path, message, extra = {}) {
+    return { code, path, message, severity: "warning", retryable: false, ...extra };
+  }
+  function knowledgeIsEvidence(fact) {
+    return fact.status === "active" && fact.belief !== "rejected";
+  }
+  function filterFeedCandidates(candidates, ctx) {
+    const author = ctx.viewMode === "author";
+    const povId = ctx.povId;
+    const povPlaceAtTurn = ctx.povPlaceAtTurn ?? (() => null);
+    const knowledgeAtTurn = ctx.knowledgeAtTurn ?? (() => []);
+    const visible = ctx.visibleEntityIds ?? /* @__PURE__ */ new Set();
+    const issues = [];
+    const items = [];
+    if (!author && !povId) {
+      return {
+        items: [],
+        issues: [planIssue4("FEED_POV_ID_REQUIRED", "$.povId", "POV 视角必须指明主角；否则一律不下发", { severity: "error" })]
+      };
+    }
+    for (const candidate of candidates ?? []) {
+      if (!candidate || !candidate.item) continue;
+      const item = candidate.item;
+      if (author) {
+        items.push({ ...item, visibility: "background" });
+        continue;
+      }
+      const isPovPersonally = item.visibility === "known";
+      const category = item.category;
+      const isEventCard = category === "event";
+      const isMessageLike = category === "message" || category === "discovery";
+      if (isMessageLike) {
+        if (isPovPersonally) items.push({ ...item, visibility: "known" });
+        continue;
+      }
+      const facts = knowledgeAtTurn(item.turnId).filter(knowledgeIsEvidence);
+      const firstHand = facts.filter((f) => f.isPov || povId !== null && f.knowerCharacterId === povId);
+      const reported = facts.filter((f) => !firstHand.includes(f));
+      const isParticipant = !!povId && (candidate.participantIds ?? []).some((id) => id === povId);
+      const samePlace = !!candidate.locationId && povPlaceAtTurn(item.turnId) === candidate.locationId;
+      if (isEventCard && candidate.eventId) {
+        const firstHandCovers = firstHand.some((f) => f.sourceEventId && f.sourceEventId === candidate.eventId);
+        if (reported.some((f) => f.sourceEventId === candidate.eventId) && !firstHandCovers && !isParticipant) continue;
+        if (isParticipant) {
+          items.push({ ...item, visibility: "known" });
+          continue;
+        }
+        if (candidate.secrecy === "secret") {
+          if (firstHandCovers) items.push({ ...item, visibility: "known" });
+          continue;
+        }
+        if (samePlace) {
+          items.push({ ...item, visibility: "known" });
+          continue;
+        }
+        if (firstHandCovers) {
+          items.push({ ...item, visibility: "known" });
+          continue;
+        }
+        continue;
+      }
+      const isActor = !!povId && (candidate.participantIds ?? []).some((id) => id === povId);
+      if (isActor) {
+        items.push({ ...item, visibility: "known" });
+        continue;
+      }
+      if (samePlace) {
+        items.push({ ...item, visibility: "known" });
+        continue;
+      }
+    }
+    const sanitized = author ? items : items.map((item) => {
+      const keep = (id) => item.target?.id === id || visible.has(id) || id === povId;
+      const links = item.links.filter((l) => keep(l.id));
+      const locationId = item.locationId && keep(item.locationId) ? item.locationId : null;
+      return {
+        ...item,
+        links,
+        locationId,
+        mapId: locationId ? item.mapId : null
+      };
+    });
+    return { items: sanitized, issues };
+  }
+
+  // src/atlas-world-feed-cursor.ts
+  var B64_ALPHABET2 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  var B64_LOOKUP = (() => {
+    const map = /* @__PURE__ */ new Map();
+    for (let i = 0; i < B64_ALPHABET2.length; i += 1) map.set(B64_ALPHABET2[i], i);
+    return map;
+  })();
+  var FEED_CURSOR_MAX_CHARS = 4096;
+  var MAX_ID_CHARS = 200;
+  var MAX_HASH_CHARS = 64;
+  function encodeBase64Url(bytes2) {
+    let out = "";
+    for (let i = 0; i < bytes2.length; i += 3) {
+      const b0 = bytes2[i];
+      const has1 = i + 1 < bytes2.length;
+      const has2 = i + 2 < bytes2.length;
+      const b1 = has1 ? bytes2[i + 1] : 0;
+      const b2 = has2 ? bytes2[i + 2] : 0;
+      out += B64_ALPHABET2[b0 >> 2];
+      out += B64_ALPHABET2[(b0 & 3) << 4 | b1 >> 4];
+      if (has1) out += B64_ALPHABET2[(b1 & 15) << 2 | b2 >> 6];
+      if (has2) out += B64_ALPHABET2[b2 & 63];
+    }
+    return out;
+  }
+  function decodeBase64Url(text2) {
+    if (typeof text2 !== "string") return null;
+    if (text2.length % 4 === 1) return null;
+    const bytes2 = [];
+    let buffer = 0;
+    let bits = 0;
+    for (const ch of text2) {
+      const value = B64_LOOKUP.get(ch);
+      if (value === void 0) return null;
+      buffer = buffer << 6 | value;
+      bits += 6;
+      if (bits >= 8) {
+        bits -= 8;
+        bytes2.push(buffer >> bits & 255);
+        buffer &= (1 << bits) - 1;
+      }
+    }
+    return new Uint8Array(bytes2);
+  }
+  function utf8Encode(text2) {
+    return new TextEncoder().encode(text2);
+  }
+  function utf8Decode(bytes2) {
+    return new TextDecoder().decode(bytes2);
+  }
+  function feedFilterHash(filter) {
+    const keys = ["category", "mapId", "entityId", "currentTurnOnly"];
+    const parts = [];
+    for (const key of keys) {
+      const value = filter?.[key];
+      if (value === void 0 || value === null || value === "") continue;
+      parts.push(`${key}=${String(value)}`);
+    }
+    return stableHexHash(parts.join("&")).slice(0, 32);
+  }
+  var isPlainObject14 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+  var shortString = (v, max) => typeof v === "string" && v.length > 0 && v.length <= max;
+  var CURSOR_KEYS = /* @__PURE__ */ new Set(["version", "branchId", "revision", "viewMode", "povId", "filterHash", "after", "scanAfterTurnId"]);
+  function parseFeedCursor(text2) {
+    if (typeof text2 !== "string" || text2.length === 0 || text2.length > FEED_CURSOR_MAX_CHARS) return null;
+    const bytes2 = decodeBase64Url(text2);
+    if (!bytes2) return null;
+    let parsed;
+    try {
+      parsed = JSON.parse(utf8Decode(bytes2));
+    } catch {
+      return null;
+    }
+    if (!isPlainObject14(parsed)) return null;
+    for (const key of Object.keys(parsed)) if (!CURSOR_KEYS.has(key)) return null;
+    if (parsed.version !== 1) return null;
+    if (!shortString(parsed.branchId, 128)) return null;
+    if (!Number.isInteger(parsed.revision) || parsed.revision < 0) return null;
+    if (parsed.viewMode !== "pov" && parsed.viewMode !== "author") return null;
+    if (!(parsed.povId === null || shortString(parsed.povId, 128))) return null;
+    if (!shortString(parsed.filterHash, MAX_HASH_CHARS)) return null;
+    if (!(parsed.scanAfterTurnId === null || parsed.scanAfterTurnId === void 0 || shortString(parsed.scanAfterTurnId, MAX_ID_CHARS))) return null;
+    let after = null;
+    if (parsed.after !== null && parsed.after !== void 0) {
+      const raw = parsed.after;
+      if (!isPlainObject14(raw)) return null;
+      const keys = Object.keys(raw);
+      if (!keys.every((k) => k === "occurredAtS" || k === "committedRevision" || k === "id")) return null;
+      if (typeof raw.occurredAtS !== "number" || !Number.isFinite(raw.occurredAtS)) return null;
+      if (!Number.isInteger(raw.committedRevision) || raw.committedRevision < 0) return null;
+      if (!shortString(raw.id, MAX_ID_CHARS)) return null;
+      after = { occurredAtS: raw.occurredAtS, committedRevision: raw.committedRevision, id: raw.id };
+    }
+    return {
+      version: 1,
+      branchId: parsed.branchId,
+      revision: parsed.revision,
+      viewMode: parsed.viewMode,
+      povId: parsed.povId ?? null,
+      filterHash: parsed.filterHash,
+      after,
+      scanAfterTurnId: parsed.scanAfterTurnId ?? null
+    };
+  }
+  function encodeFeedCursor(cursor) {
+    const payload = {
+      version: 1,
+      branchId: cursor.branchId,
+      revision: cursor.revision,
+      viewMode: cursor.viewMode,
+      povId: cursor.povId ?? null,
+      filterHash: cursor.filterHash,
+      after: cursor.after ? { occurredAtS: cursor.after.occurredAtS, committedRevision: cursor.after.committedRevision, id: cursor.after.id } : null,
+      scanAfterTurnId: cursor.scanAfterTurnId ?? null
+    };
+    return encodeBase64Url(utf8Encode(JSON.stringify(payload)));
+  }
+  function validateFeedCursor(raw, expected) {
+    const cursor = parseFeedCursor(raw);
+    if (!cursor) {
+      return { ok: false, code: "VIEW_CURSOR_INVALID", message: "游标不可解析或形状非法；请从第一页重新读取" };
+    }
+    if (cursor.branchId !== expected.branchId || cursor.viewMode !== expected.viewMode || (cursor.povId ?? null) !== (expected.povId ?? null) || cursor.filterHash !== expected.filterHash) {
+      return { ok: false, code: "VIEW_CURSOR_STALE", message: "分支、视角或筛选条件已改变，旧页不能拼到新结果上" };
+    }
+    if (cursor.revision !== expected.revision) {
+      return { ok: false, code: "VIEW_CURSOR_STALE", message: "修订已变化，请重新读取第一页" };
+    }
+    return { ok: true, cursor };
+  }
+  function compareFeedItems(a, b) {
+    if (a.occurredAtS !== b.occurredAtS) return b.occurredAtS - a.occurredAtS;
+    if (a.committedRevision !== b.committedRevision) return b.committedRevision - a.committedRevision;
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  }
+  function sortFeedItems(items) {
+    return [...items].sort(compareFeedItems);
+  }
+  function isAfterCursor(item, after) {
+    if (!after) return true;
+    if (item.occurredAtS < after.occurredAtS) return true;
+    if (item.occurredAtS > after.occurredAtS) return false;
+    if (item.committedRevision < after.committedRevision) return true;
+    if (item.committedRevision > after.committedRevision) return false;
+    return item.id > after.id;
+  }
+  function cursorAnchorOf(item) {
+    return { occurredAtS: item.occurredAtS, committedRevision: item.committedRevision, id: item.id };
+  }
+
+  // src/atlas-world-feed.ts
+  var FEED_TABLES = ["events", "journeys", "actions", "items", "knowledge", "information", "locations", "characters"];
+  var CONTEXT_TABLES = ["information", "knowledge", "locations", "characters"];
+  var str9 = (v) => typeof v === "string" ? v : "";
+  function isPlainObject15(v) {
+    return typeof v === "object" && v !== null && !Array.isArray(v);
+  }
+  function readTurnWindow(ctx) {
+    const rows4 = queryBound(
+      ctx.db,
+      `SELECT id, kind, status, committed_revision, clock_after_s, created_wall_ms
+       FROM turns WHERE branch_id = ? AND status IN ('committed','partial') AND committed_revision IS NOT NULL
+       ORDER BY clock_after_s DESC, committed_revision DESC, id ASC`,
+      [ctx.branchId]
+    );
+    return rows4.map((r) => ({
+      id: String(r.id),
+      kind: String(r.kind ?? ""),
+      status: String(r.status ?? ""),
+      committedRevision: Number(r.committed_revision ?? 0),
+      clockAfterS: Number(r.clock_after_s ?? 0),
+      wallMs: Number(r.created_wall_ms ?? 0)
+    }));
+  }
+  function readLabelTables(ctx) {
+    const labels = {};
+    const kinds = {};
+    const mapIdByLocationId = {};
+    const sources = [
+      ["locations", "location", "name"],
+      ["characters", "character", "name"],
+      ["items", "item", "name"],
+      ["events", "event", "title"],
+      ["information", "information", "title"],
+      ["actions", "action", "title"]
+    ];
+    for (const [table, kind, labelColumn] of sources) {
+      for (const row2 of queryBound(ctx.db, `SELECT id, ${labelColumn} AS label FROM ${table} WHERE branch_id = ?`, [ctx.branchId])) {
+        const id = String(row2.id ?? "");
+        if (!id) continue;
+        kinds[id] = kind;
+        const name = str9(row2.label);
+        if (name) labels[id] = name;
+      }
+    }
+    for (const row2 of queryBound(ctx.db, "SELECT id, map_id FROM locations WHERE branch_id = ?", [ctx.branchId])) {
+      mapIdByLocationId[String(row2.id ?? "")] = row2.map_id === null || row2.map_id === void 0 ? null : String(row2.map_id);
+    }
+    return { labels, kinds, mapIdByLocationId };
+  }
+  function povVisibleSet(ctx, povId) {
+    const set = /* @__PURE__ */ new Set([povId]);
+    for (const row2 of queryBound(
+      ctx.db,
+      `SELECT DISTINCT tc.after_json AS after_json FROM turn_changes tc JOIN turns t ON t.id = tc.turn_id
+      WHERE t.branch_id = ? AND t.status IN ('committed','partial')
+        AND tc.target_table = 'characters' AND tc.target_row_id = ? AND tc.after_json IS NOT NULL`,
+      [ctx.branchId, povId]
+    )) {
+      try {
+        const parsed = JSON.parse(String(row2.after_json));
+        if (isPlainObject15(parsed) && str9(parsed.location_id)) set.add(str9(parsed.location_id));
+      } catch {
+      }
+    }
+    for (const row2 of queryBound(
+      ctx.db,
+      `SELECT k.information_id, i.origin_location_id, i.subject_entity_id
+       FROM knowledge k LEFT JOIN information i ON i.branch_id = k.branch_id AND i.id = k.information_id
+      WHERE k.branch_id = ? AND k.status = 'active' AND (k.is_pov = 1 OR k.knower_character_id = ?)`,
+      [ctx.branchId, povId]
+    )) {
+      const infoId = str9(row2.information_id);
+      if (infoId) set.add(infoId);
+      for (const key of ["origin_location_id", "subject_entity_id"]) {
+        const id = str9(row2[key]);
+        if (id) set.add(id);
+      }
+    }
+    return set;
+  }
+  var PLACEHOLDER = {
+    location: "某处",
+    character: "某人",
+    item: "某物",
+    event: "某事件",
+    information: "某条消息",
+    journey: "某段行程",
+    action: "某个行动"
+  };
+  function knowledgeFactsAt(history, informationKindOf) {
+    const facts = [];
+    for (const [key, row2] of Object.entries(history.rows)) {
+      if (!key.startsWith("knowledge\0")) continue;
+      if (!row2.exists || !row2.row) continue;
+      const informationId = str9(row2.row.information_id);
+      if (!informationId) continue;
+      facts.push({
+        knowledgeId: row2.rowId,
+        informationId,
+        informationKind: informationKindOf(informationId),
+        sourceEventId: informationSourceEvent(history, informationId),
+        knowerCharacterId: str9(row2.row.knower_character_id) || null,
+        isPov: Number(row2.row.is_pov) === 1,
+        belief: str9(row2.row.belief) || "heard",
+        status: str9(row2.row.status) || "active"
+      });
+    }
+    return facts;
+  }
+  function informationSourceEvent(history, informationId) {
+    const row2 = history.rows[`information\0${informationId}`];
+    return row2?.exists && row2.row ? str9(row2.row.source_event_id) || null : null;
+  }
+  function informationSnapshots(history) {
+    const out = {};
+    for (const [key, row2] of Object.entries(history.rows)) {
+      if (!key.startsWith("information\0")) continue;
+      if (!row2.exists || !row2.row) continue;
+      out[row2.rowId] = {
+        title: str9(row2.row.title) || null,
+        content: str9(row2.row.content) || null,
+        kind: str9(row2.row.kind) || null,
+        truth_status: str9(row2.row.truth_status) || null,
+        subject_entity_id: str9(row2.row.subject_entity_id) || null,
+        origin_location_id: str9(row2.row.origin_location_id) || null,
+        secrecy: str9(row2.row.secrecy) || null
+      };
+    }
+    return out;
+  }
+  function queryWorldFeed(ctx, query) {
+    const branchId = ctx.branchId;
+    const revision = ctx.revision;
+    const viewMode = ctx.viewMode ?? "pov";
+    const povId = ctx.povId ?? null;
+    const filter = query.feedFilter ?? {};
+    const filterHash = feedFilterHash(filter);
+    const limit = normalizeViewLimit(query.limit, { fallback: 50, max: ATLAS_RUNTIME_LIMITS.feedPageMax });
+    if (viewMode === "pov" && !povId) {
+      throw new AtlasDbError("FEED_POV_ID_REQUIRED", "POV 事件流必须指定视角角色", { branchId });
+    }
+    let after = null;
+    let scanAfterTurnId = null;
+    if (typeof query.cursor === "string" && query.cursor) {
+      const checked = validateFeedCursor(query.cursor, { branchId, revision, viewMode, povId, filterHash });
+      if (!checked.ok) {
+        throw new AtlasDbError(checked.code, checked.message, { branchId, viewMode, filterHash });
+      }
+      after = checked.cursor.after;
+      scanAfterTurnId = checked.cursor.scanAfterTurnId;
+    }
+    const turnWindow = readTurnWindow(ctx);
+    const latestNarrativeIndex = turnWindow.findIndex((t) => t.kind === "narrative");
+    const latestNarrative = latestNarrativeIndex >= 0 ? turnWindow[latestNarrativeIndex] : null;
+    const ascending = [...turnWindow].reverse();
+    const latestNarrativeOrdinal = latestNarrative ? ascending.findIndex((t) => t.id === latestNarrative.id) + 1 : 0;
+    const issues = [];
+    const collected = [];
+    let blocks = 0;
+    let lastScannedTurnId = null;
+    let startIndex = 0;
+    if (scanAfterTurnId) {
+      const idx = turnWindow.findIndex((t) => t.id === scanAfterTurnId);
+      if (idx >= 0) startIndex = idx + 1;
+    }
+    const labelTables = readLabelTables(ctx);
+    const visibleSet = viewMode === "pov" && povId ? povVisibleSet(ctx, povId) : null;
+    const placeholderOf = (id) => {
+      const kind = labelTables.kinds[id];
+      return kind ? PLACEHOLDER[kind] : "某个已知对象";
+    };
+    const effectiveLabels = {};
+    if (viewMode === "pov") {
+      for (const id of Object.keys(labelTables.kinds)) {
+        effectiveLabels[id] = visibleSet?.has(id) ? labelTables.labels[id] ?? id : placeholderOf(id);
+      }
+    } else {
+      for (const [id, name] of Object.entries(labelTables.labels)) effectiveLabels[id] = name;
+    }
+    while (blocks < ATLAS_RUNTIME_LIMITS.feedMaxScanBlocks && collected.length < limit) {
+      const batch = turnWindow.slice(
+        startIndex + blocks * ATLAS_RUNTIME_LIMITS.feedTurnsPerScan,
+        startIndex + (blocks + 1) * ATLAS_RUNTIME_LIMITS.feedTurnsPerScan
+      );
+      if (batch.length === 0) {
+        break;
+      }
+      blocks += 1;
+      lastScannedTurnId = batch[batch.length - 1].id;
+      const batchIds = batch.map((t) => t.id);
+      const journal = readTurnChangeRows(ctx.db, batchIds, FEED_TABLES);
+      issues.push(...journal.issues);
+      const byTurn = /* @__PURE__ */ new Map();
+      for (const entry of journal.entries) {
+        const list = byTurn.get(entry.turnId) ?? [];
+        list.push(entry);
+        byTurn.set(entry.turnId, list);
+      }
+      const historyCache = /* @__PURE__ */ new Map();
+      const historyOf = (turnId) => {
+        let cached = historyCache.get(turnId);
+        if (!cached) {
+          cached = readHistoricalRows(ctx.db, { branchId, turnId, tables: [...CONTEXT_TABLES] });
+          historyCache.set(turnId, cached);
+        }
+        return cached;
+      };
+      const batchItems = [];
+      for (const turn of batch) {
+        const rawCount = journal.countsByTurn.get(turn.id) ?? 0;
+        if (rawCount > ATLAS_RUNTIME_LIMITS.feedTurnJournalMax) {
+          issues.push({
+            code: "FEED_TURN_TOO_LARGE",
+            path: "$.turnId",
+            message: `单轮变更行数 ${rawCount} 超过上限 ${ATLAS_RUNTIME_LIMITS.feedTurnJournalMax}；该轮整体跳过，不返回半轮故事`,
+            severity: "error",
+            retryable: false
+          });
+          continue;
+        }
+        const entries = byTurn.get(turn.id) ?? [];
+        const snapshots = collapseTurnSnapshots(entries);
+        if (snapshots.length === 0) continue;
+        const history = historyOf(turn.id);
+        const infoById = informationSnapshots(history);
+        const kindOfInfo = (id) => str9(infoById[id]?.kind);
+        const turnOrigin = turn.kind === "manual" ? "manual" : turn.kind === "migration" ? "migration" : "story";
+        const turnBase = {
+          turnId: turn.id,
+          turnOrdinal: ascending.findIndex((t) => t.id === turn.id) + 1,
+          committedRevision: turn.committedRevision,
+          clockS: turn.clockAfterS,
+          origin: turnOrigin,
+          snapshots
+        };
+        const eventCandidates = buildEventFeedCandidates([turnBase], {
+          labels: effectiveLabels,
+          entityKindById: labelTables.kinds,
+          mapIdByLocationId: labelTables.mapIdByLocationId
+        });
+        const covered = eventCandidates.flatMap((c) => c.covered);
+        const transitionCandidates = buildTransitionFeedCandidates([turnBase], {
+          labels: effectiveLabels,
+          entityKindById: labelTables.kinds,
+          mapIdByLocationId: labelTables.mapIdByLocationId,
+          informationById: infoById,
+          coveredByEvents: covered
+        });
+        const feedCandidates = [];
+        for (const c of eventCandidates) {
+          if (c.planOnly) continue;
+          const snap = snapshots.find((s) => s.table === "events" && s.rowId === c.item.target?.id);
+          const eventRow = snap?.after ?? null;
+          const participants = [];
+          if (isPlainObject15(eventRow)) {
+            const subject = str9(eventRow.subject_entity_id);
+            if (subject) participants.push(subject);
+            const list = Array.isArray(eventRow.participants_json) ? eventRow.participants_json : [];
+            for (const p of list) if (isPlainObject15(p) && str9(p.entity_id)) participants.push(str9(p.entity_id));
+            const actor = str9(eventRow.subject_entity_id);
+            if (actor && !participants.includes(actor)) participants.push(actor);
+          }
+          feedCandidates.push({
+            item: c.item,
+            eventId: c.item.target?.id ?? null,
+            participantIds: participants,
+            locationId: c.item.locationId,
+            secrecy: isPlainObject15(eventRow) ? str9(eventRow.secrecy) || null : null
+          });
+          issues.push(...c.issues);
+        }
+        for (const c of transitionCandidates) {
+          const snap = snapshots.find((s) => s.table === (c.item.category === "journey" ? "journeys" : c.item.category === "action" ? "actions" : c.item.category === "item" ? "items" : "knowledge") && s.rowId === c.item.target?.id);
+          const row2 = snap?.after ?? null;
+          const participants = [];
+          if (isPlainObject15(row2)) {
+            for (const key of ["mover_entity_id", "actor_entity_id", "holder_character_id", "knower_character_id"]) {
+              const id = str9(row2[key]);
+              if (id) participants.push(id);
+            }
+          }
+          feedCandidates.push({
+            item: c.item,
+            participantIds: participants,
+            knowledgeId: c.item.category === "message" ? c.item.target?.id ?? null : null,
+            locationId: c.item.locationId
+          });
+          issues.push(...c.issues);
+        }
+        const visible = filterFeedCandidates(feedCandidates, {
+          viewMode,
+          povId,
+          // 历史重建：只按该回合当时的位置判定，绝不退回当前 sqlVisibility.here。
+          povPlaceAtTurn: (turnId) => {
+            if (!povId) return null;
+            const h = historyOf(turnId);
+            const row2 = h.rows[`characters\0${povId}`];
+            return row2?.exists && row2.row ? str9(row2.row.location_id) || null : null;
+          },
+          knowledgeAtTurn: (turnId) => knowledgeFactsAt(historyOf(turnId), kindOfInfo),
+          visibleEntityIds: visibleSet ?? /* @__PURE__ */ new Set()
+        });
+        issues.push(...visible.issues);
+        for (const item of visible.items) batchItems.push(item);
+      }
+      batchItems.sort((a, b) => a.occurredAtS !== b.occurredAtS ? b.occurredAtS - a.occurredAtS : a.committedRevision !== b.committedRevision ? b.committedRevision - a.committedRevision : a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+      for (const item of batchItems) if (isAfterCursor(item, after)) collected.push(item);
+    }
+    let items = sortFeedItems(collected);
+    if (filter.category) items = items.filter((i) => i.category === filter.category);
+    if (filter.mapId) items = items.filter((i) => i.mapId === filter.mapId);
+    if (filter.entityId) {
+      const wanted = String(filter.entityId);
+      items = items.filter((i) => i.target?.id === wanted || i.links.some((l) => l.id === wanted));
+    }
+    if (filter.currentTurnOnly) items = items.filter((i) => i.turnId === latestNarrative?.id);
+    const page = items.slice(0, limit);
+    const scannedTurnCount = startIndex + blocks * ATLAS_RUNTIME_LIMITS.feedTurnsPerScan;
+    const moreTurnsToScan = scannedTurnCount < turnWindow.length;
+    const hasMoreVisible = items.length > limit || moreTurnsToScan;
+    const nextCursorValue = hasMoreVisible ? encodeFeedCursor({
+      version: 1,
+      branchId,
+      revision,
+      viewMode,
+      povId,
+      filterHash,
+      after: page.length > 0 ? cursorAnchorOf(page[page.length - 1]) : after,
+      scanAfterTurnId: moreTurnsToScan ? lastScannedTurnId : null
+    }) : void 0;
+    return {
+      branchId,
+      revision,
+      items: page,
+      ...nextCursorValue ? { nextCursor: nextCursorValue } : {},
+      metadata: {
+        viewMode,
+        count: page.length,
+        latestNarrativeTurnId: latestNarrative?.id ?? null,
+        latestNarrativeOrdinal,
+        hasMoreVisible,
+        // 需要继续往更老的回合扫才能凑满时给 scanCursor；绝不报告隐藏卡数量。
+        ...moreTurnsToScan && nextCursorValue ? { scanCursor: nextCursorValue } : {},
+        ...issues.length ? { issues } : {}
+      }
+    };
+  }
+
   // src/atlas-sim-time.ts
   var ACTIVITY_DEFAULTS = {
     dialogue: { min_s: 0, nominal_s: 0, max_s: 0 },
@@ -19213,14 +22084,14 @@ END`;
     return found ? { ...found } : null;
   }
   var ZERO = { min: 0, nominal: 0, max: 0 };
-  function isPlainObject14(value) {
+  function isPlainObject16(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
-  function finite2(value) {
+  function finite5(value) {
     return typeof value === "number" && Number.isFinite(value) ? value : null;
   }
   function nonNegative(value) {
-    const n = finite2(value);
+    const n = finite5(value);
     return n !== null && n >= 0 ? n : null;
   }
   function normalize(bound) {
@@ -19251,7 +22122,7 @@ END`;
   function buildNode(activity, index, conflicts) {
     const kind = typeof activity?.kind === "string" ? activity.kind : "other";
     const label2 = `a${index}:${kind}`;
-    const hint = isPlainObject14(activity?.hint) ? activity.hint : {};
+    const hint = isPlainObject16(activity?.hint) ? activity.hint : {};
     const afterRef = typeof hint.after_ref === "string" && hint.after_ref.trim() !== "" ? hint.after_ref : null;
     const sameRef = typeof hint.same_interval_as === "string" && hint.same_interval_as.trim() !== "" ? hint.same_interval_as : null;
     if (afterRef && sameRef) {
@@ -19323,7 +22194,7 @@ END`;
   }
   function deriveElapsedInterval(facts, base) {
     const conflicts = [];
-    const clockRef = `clock_s:${finite2(base?.clockS) ?? 0}`;
+    const clockRef = `clock_s:${finite5(base?.clockS) ?? 0}`;
     const explicit = facts?.explicitElapsedS;
     if (explicit !== null && explicit !== void 0) {
       const value = nonNegative(explicit);
@@ -19520,7 +22391,7 @@ END`;
     }
     return [];
   }
-  function str7(value) {
+  function str10(value) {
     return typeof value === "string" && value !== "" ? value : null;
   }
   function num8(value) {
@@ -19562,8 +22433,8 @@ END`;
     return out;
   }
   function otherEnd(route, locationId) {
-    const from = str7(route.from_location_id);
-    const to = str7(route.to_location_id);
+    const from = str10(route.from_location_id);
+    const to = str10(route.to_location_id);
     if (from === locationId) return to;
     if (to === locationId && (route.bidirectional === true || route.bidirectional === 1)) return from;
     if (to === locationId) return from;
@@ -19587,7 +22458,7 @@ END`;
     }
   }
   function pickCarrier(route, channel) {
-    const channelMode = channel ? str7(channel.transport_mode_key) : null;
+    const channelMode = channel ? str10(channel.transport_mode_key) : null;
     if (channelMode && MOVEMENT_SPEED_PRESETS[channelMode] !== void 0) return channelMode;
     const allowed = asArray5(route.allowed_modes_json).filter((m) => typeof m === "string");
     const pool = allowed.length > 0 ? allowed : ["walk"];
@@ -19637,9 +22508,9 @@ END`;
     const existing = frontIndex(world3);
     const scheduled = /* @__PURE__ */ new Set();
     for (const front of fronts ?? []) {
-      const frontId = str7(front?.id);
-      const informationId = str7(front?.information_id);
-      const locationId = str7(front?.location_id);
+      const frontId = str10(front?.id);
+      const informationId = str10(front?.information_id);
+      const locationId = str10(front?.location_id);
       if (!frontId || !informationId || !locationId) continue;
       if (String(front.status ?? "active") !== "active") continue;
       const nextCheck = num8(front.next_spread_check_s);
@@ -19667,10 +22538,10 @@ END`;
       });
       if (!isPublic) {
         for (const channel of channels ?? []) {
-          const channelId = str7(channel?.id);
-          const sourceLocation = str7(channel?.source_location_id);
-          const recipientLocation = str7(channel?.recipient_location_id);
-          const mode = str7(channel?.transport_mode_key);
+          const channelId = str10(channel?.id);
+          const sourceLocation = str10(channel?.source_location_id);
+          const recipientLocation = str10(channel?.recipient_location_id);
+          const mode = str10(channel?.transport_mode_key);
           if (!channelId || !sourceLocation || !recipientLocation) continue;
           if (String(channel?.status ?? "active") !== "active") continue;
           if (sourceLocation !== locationId) continue;
@@ -19706,12 +22577,12 @@ END`;
           const route = findRoute(world3, sourceLocation, recipientLocation);
           if (!route) continue;
           const speed = carrierSpeed(route, mode);
-          const distance2 = routeDistanceM(route);
-          if (speed === null || distance2.value === null) {
+          const distance3 = routeDistanceM(route);
+          if (speed === null || distance3.value === null) {
             issues.push(issue15("PROPAGATION_ETA_UNKNOWN", "routes", `渠道 ${channelId} 的路径缺少速度/距离依据，到达时间未知（不提前投递）`));
             continue;
           }
-          const arriveAt = channelDepart + distance2.value / speed;
+          const arriveAt = channelDepart + distance3.value / speed;
           tasks.push({
             id: hashId("prop", `${informationId}|${locationId}|${recipientLocation}|${channelId}`),
             task_kind: "delivery",
@@ -19720,14 +22591,14 @@ END`;
             via_channel_id: channelId,
             from_location_id: sourceLocation,
             to_location_id: recipientLocation,
-            route_id: str7(route.id),
+            route_id: str10(route.id),
             mobility_key: mode,
             speed_mps: speed,
-            distance_m: distance2.value,
+            distance_m: distance3.value,
             depart_at_s: channelDepart,
             arrive_at_s: arriveAt,
             due_at_s: arriveAt,
-            quality: distance2.quality,
+            quality: distance3.quality,
             secrecy,
             dedupe_key: `${informationId}|${recipientLocation}`
           });
@@ -19740,15 +22611,15 @@ END`;
         if (existing.has(`${informationId}|${destination}`) || scheduled.has(`${informationId}|${destination}`)) continue;
         const mode = pickCarrier(route, null);
         const speed = carrierSpeed(route, mode);
-        const distance2 = routeDistanceM(route);
-        if (speed === null || distance2.value === null) {
+        const distance3 = routeDistanceM(route);
+        if (speed === null || distance3.value === null) {
           issues.push(
             issue15("PROPAGATION_ETA_UNKNOWN", "routes", `到 ${destination} 的路段缺少速度/距离依据：保留未知，不提前到达也不假装立刻送达`)
           );
           continue;
         }
         const departAtPublic = departAt;
-        const arriveAt = departAtPublic + distance2.value / speed;
+        const arriveAt = departAtPublic + distance3.value / speed;
         scheduled.add(`${informationId}|${destination}`);
         tasks.push({
           id: hashId("prop", `${informationId}|${locationId}|${destination}`),
@@ -19758,14 +22629,14 @@ END`;
           via_channel_id: null,
           from_location_id: locationId,
           to_location_id: destination,
-          route_id: str7(route.id),
+          route_id: str10(route.id),
           mobility_key: mode,
           speed_mps: speed,
-          distance_m: distance2.value,
+          distance_m: distance3.value,
           depart_at_s: departAtPublic,
           arrive_at_s: arriveAt,
           due_at_s: arriveAt,
-          quality: distance2.quality,
+          quality: distance3.quality,
           secrecy,
           dedupe_key: `${informationId}|${destination}`
         });
@@ -19805,9 +22676,9 @@ END`;
       for (const action of queryBound(world3.db, "SELECT * FROM actions WHERE branch_id=? AND kind='transmit' AND status='active' AND deadline_s<=?", [world3.branchId, untilS])) {
         const task = asObject5(action.payload_json);
         if (task?.program_kind !== "rumor_delivery") continue;
-        const arrived = num8(task.arrive_at_s), destination = str7(task.to_location_id), information = str7(task.information_id);
+        const arrived = num8(task.arrive_at_s), destination = str10(task.to_location_id), information = str10(task.information_id);
         if (arrived === null || !destination || !information) continue;
-        const routeId = str7(task.route_id);
+        const routeId = str10(task.route_id);
         if (routeId && queryBound(world3.db, "SELECT id FROM routes WHERE branch_id=? AND id=? AND status='open'", [world3.branchId, routeId]).length === 0) {
           runBound(world3.db, "UPDATE actions SET status='blocked',reason_code='DELIVERY_ROUTE_BLOCKED',row_rev=row_rev+1,updated_turn_id=? WHERE branch_id=? AND id=?", [world3.turnId, world3.branchId, String(action.id)]);
           continue;
@@ -19820,15 +22691,15 @@ END`;
           updated_turn_id: world3.turnId,
           information_id: information,
           location_id: destination,
-          via_channel_id: str7(task.via_channel_id),
-          source_front_id: str7(task.front_id),
+          via_channel_id: str10(task.via_channel_id),
+          source_front_id: str10(task.front_id),
           source_action_id: String(action.id),
           first_available_at_s: arrived,
           last_reinforced_at_s: arrived,
           next_spread_check_s: arrived + PROPAGATION_CHECK_INTERVAL_S,
           expires_at_s: null,
           reach: "local",
-          audience_json: deliveryAudience(world3, information, str7(task.via_channel_id), str7(task.front_id)),
+          audience_json: deliveryAudience(world3, information, str10(task.via_channel_id), str10(task.front_id)),
           status: "active"
         });
         runBound(world3.db, "UPDATE actions SET status='completed',finished_at_s=?,evaluated_until_s=?,row_rev=row_rev+1,updated_turn_id=? WHERE branch_id=? AND id=?", [arrived, arrived, world3.turnId, world3.branchId, String(action.id)]);
@@ -19866,8 +22737,8 @@ END`;
       for (const task of scheduled.tasks) {
         if (String(task.task_kind) !== "delivery") continue;
         const arriveAt = num8(task.arrive_at_s);
-        const destination = str7(task.to_location_id);
-        const informationId = str7(task.information_id);
+        const destination = str10(task.to_location_id);
+        const informationId = str10(task.information_id);
         if (arriveAt === null || !destination || !informationId) continue;
         const dedupeKey = `${informationId}|${destination}`;
         if (seen.has(dedupeKey)) continue;
@@ -19901,7 +22772,7 @@ END`;
           }
           continue;
         }
-        const viaChannel = str7(task.via_channel_id);
+        const viaChannel = str10(task.via_channel_id);
         insertFront(world3, {
           branch_id: world3.branchId,
           id: makeId("rumor_front", informationId, destination),
@@ -19943,18 +22814,18 @@ END`;
   function num9(value) {
     return typeof value === "number" && Number.isFinite(value) ? value : null;
   }
-  function str8(value) {
+  function str11(value) {
     return typeof value === "string" && value !== "" ? value : null;
   }
-  function isPlainObject15(value) {
+  function isPlainObject17(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
   function asObject6(value) {
-    if (isPlainObject15(value)) return value;
+    if (isPlainObject17(value)) return value;
     if (typeof value === "string" && value.trim() !== "") {
       try {
         const parsed = JSON.parse(value);
-        return isPlainObject15(parsed) ? parsed : null;
+        return isPlainObject17(parsed) ? parsed : null;
       } catch {
         return null;
       }
@@ -20035,7 +22906,7 @@ END`;
       const next = nextNodeBoundary(journey);
       if (!next || next.atS > untilS) continue;
       const journeyId = String(journey.id);
-      const policy = stopPolicyOf2(world3, str8(journey.action_id));
+      const policy = stopPolicyOf2(world3, str11(journey.action_id));
       boundaries.push({
         atS: next.atS,
         kind: "journey_node",
@@ -20376,15 +23247,15 @@ END`;
 
   // src/atlas-sim-outcome-context.ts
   var OUTCOME_ALLOWED_OPS = ["event.propose", "information.propose"];
-  function isPlainObject16(value) {
+  function isPlainObject18(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
   function asObject7(value) {
-    if (isPlainObject16(value)) return value;
+    if (isPlainObject18(value)) return value;
     if (typeof value === "string" && value.trim() !== "") {
       try {
         const parsed = JSON.parse(value);
-        return isPlainObject16(parsed) ? parsed : null;
+        return isPlainObject18(parsed) ? parsed : null;
       } catch {
         return null;
       }
@@ -20403,7 +23274,7 @@ END`;
     }
     return [];
   }
-  function str9(value) {
+  function str12(value) {
     return typeof value === "string" && value !== "" ? value : null;
   }
   function num10(value) {
@@ -20425,8 +23296,8 @@ END`;
       seen.add(cursor);
       const item = loadRow3(world3, "items", cursor);
       if (!item) return false;
-      if (str9(item.holder_character_id) === actorId) return true;
-      cursor = str9(item.container_item_id);
+      if (str12(item.holder_character_id) === actorId) return true;
+      cursor = str12(item.container_item_id);
     }
     return false;
   }
@@ -20467,7 +23338,7 @@ END`;
       dueActions.push(action);
       const actionId = String(action.id ?? "");
       const reasons = [];
-      const actorId = str9(action.actor_entity_id);
+      const actorId = str12(action.actor_entity_id);
       const kind = String(action.kind ?? "");
       const payload = asObject7(action.payload_json) ?? {};
       if (!actorId) {
@@ -20488,7 +23359,7 @@ END`;
         actorId,
         physicalStatus: physical,
         conditionNote: String(actor.condition_note ?? ""),
-        locationId: str9(actor.location_id)
+        locationId: str12(actor.location_id)
       });
       if (physical === "dead") reasons.push("ACTOR_DEAD");
       else if (physical === "incapacitated") reasons.push("ACTOR_INCAPACITATED");
@@ -20510,18 +23381,18 @@ END`;
         `SELECT id, status FROM journeys WHERE branch_id = ? AND mover_entity_id = ? AND status IN ('moving','paused','blocked') LIMIT 1`,
         [world3.branchId, actorId]
       );
-      const targetLocation = str9(action.target_location_id);
+      const targetLocation = str12(action.target_location_id);
       if (openJourney.length > 0 && PRESENCE_KINDS.has(kind)) {
         reasons.push(`ACTOR_IN_TRANSIT:${String(openJourney[0].id)}`);
       }
       if (targetLocation && PRESENCE_KINDS.has(kind)) {
-        const here = position.kind === "at_location" ? position.locationId : str9(actor.location_id);
+        const here = position.kind === "at_location" ? position.locationId : str12(actor.location_id);
         if (here !== targetLocation) reasons.push(`NOT_AT_TARGET:${here ?? "unknown"}!=${targetLocation}`);
       }
-      const capabilityKey = str9(payload.capability_key);
+      const capabilityKey = str12(payload.capability_key);
       if (capabilityKey) {
-        const capabilities = asArray6(actor.capabilities_json).filter(isPlainObject16);
-        const has = capabilities.some((c) => str9(c.key) === capabilityKey);
+        const capabilities = asArray6(actor.capabilities_json).filter(isPlainObject18);
+        const has = capabilities.some((c) => str12(c.key) === capabilityKey);
         facts.push({ kind: "capability", actionId, actorId, capabilityKey, has });
         if (!has) reasons.push(`CAPABILITY_MISSING:${capabilityKey}`);
       }
@@ -20694,11 +23565,11 @@ END`;
       if (!input.modelPort || batches >= input.modelBudget) throw new AtlasDbError("MODEL_BUDGET_EXHAUSTED", "后台判断等待下一次结算", {});
       const tables = createTableReadPort(input.db), knownRefs = collectKnownRefs(tables, input.branchId);
       opportunities.forEach((o, i) => knownRefs.push({ alias: `O${i + 1}`, id: o.id, kind: "opportunity", rowRev: null }));
-      const byId3 = new Map(knownRefs.map((ref) => [ref.id, ref.alias]));
+      const byId5 = new Map(knownRefs.map((ref) => [ref.id, ref.alias]));
       const request = buildStagePrompt({ phase, ...fields, batchId: `sim_${input.turnId}_${batches}`, entityRefs: collectEntityRefs(tables, input.branchId, knownRefs) });
       request.anchor = input.anchor;
       request.messages[1].content += "\n现有对象短引用：" + collectEntityRefs(tables, input.branchId, knownRefs).join("、");
-      for (const [id, alias] of byId3) request.messages[1].content = request.messages[1].content.split(JSON.stringify(id)).join(JSON.stringify(alias));
+      for (const [id, alias] of byId5) request.messages[1].content = request.messages[1].content.split(JSON.stringify(id)).join(JSON.stringify(alias));
       request.sourceSnapshot = [];
       batches++;
       const response = await input.modelPort.request(request);
@@ -20734,9 +23605,9 @@ END`;
         makeId: input.makeId,
         turnId: input.turnId
       });
-      const built = buildAtomicGroups(compiled.results.map((r) => ({ opId: r.opId, ...r.result }))), ordered3 = orderGroups(built.groups);
-      const result = applyGroups(input.db, ordered3.order, { branchId: input.branchId, turnId: input.turnId, attemptId: "simulation", journal: false });
-      issues.push(...compiled.issues, ...built.issues, ...ordered3.issues);
+      const built = buildAtomicGroups(compiled.results.map((r) => ({ opId: r.opId, ...r.result }))), ordered4 = orderGroups(built.groups);
+      const result = applyGroups(input.db, ordered4.order, { branchId: input.branchId, turnId: input.turnId, attemptId: "simulation", journal: false });
+      issues.push(...compiled.issues, ...built.issues, ...ordered4.issues);
       groups.push(...result.groups);
       modelOperations.push(...operations);
       return { changed: result.groups.some((g) => g.status === "applied" && g.changedRows > 0), noop: parsed.explicitNoop };
@@ -20854,204 +23725,6 @@ END`;
     const journal = recordGroupChanges(input.db, { id: `simulation_${input.attemptKey ?? input.turnId}`, mutations, opIds: [`simulation:${input.attemptKey ?? input.turnId}`] }, { turnId: input.turnId, attemptId: input.attemptKey ?? "simulation", startSequence: seq });
     if (journal.issues.length) throw new AtlasDbError("JOURNAL_WRITE_FAILED", `后台变化不能可靠回退，候选不发布：${journal.issues.join("；")}`, { issues: journal.issues });
     return { elapsed, clockAfter, clockMin, clockMax, seed, randomDraws, simulatedUntil: cursor, catchingUp, pendingActors, steps, issues, groups, modelOperations, modelBatches: batches, operationContexts, worldChanged: mutations.some((m) => m.table !== "branches") };
-  }
-
-  // src/atlas-spatial-frame.ts
-  var SPATIAL_REQUEST_KEY = "atlasLayoutRequest";
-  var SPATIAL_SCENE_KEY = FRAME_SCENE_KEY;
-  function spatialIssue(input, ctx = {}) {
-    const parts = [input.message];
-    if (ctx.mapId) parts.push(`mapId=${ctx.mapId}`);
-    if (ctx.branchId) parts.push(`branchId=${ctx.branchId}`);
-    if (ctx.revision !== void 0) parts.push(`revision=${ctx.revision}`);
-    if (ctx.operationId) parts.push(`operationId=${ctx.operationId}`);
-    if (ctx.turnId) parts.push(`turnId=${ctx.turnId}`);
-    if (input.entityId) parts.push(`entityId=${input.entityId}`);
-    if (ctx.entityId && ctx.entityId !== input.entityId) parts.push(`entityId=${ctx.entityId}`);
-    return {
-      code: input.code,
-      path: input.path,
-      message: parts.join(" ｜ "),
-      severity: input.severity === "warning" ? "warning" : "error",
-      retryable: input.retryable === true
-    };
-  }
-  function normalizeFrame(frame) {
-    if (typeof frame === "string") {
-      try {
-        const parsed = JSON.parse(frame);
-        if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
-          return { ...parsed };
-        }
-      } catch {
-        return {};
-      }
-      return {};
-    }
-    if (frame !== null && typeof frame === "object" && !Array.isArray(frame)) {
-      return { ...frame };
-    }
-    return {};
-  }
-  var SQL_MAP_FRAME_SIZE_FIELDS = Object.freeze({
-    cols: { alias: "reference_width_cells", label: "宽（格数）" },
-    rows: { alias: "reference_height_cells", label: "高（格数）" }
-  });
-  var FRAME_SIZE_ABSENT = 0;
-  var FRAME_SIZE_OK = 1;
-  var FRAME_SIZE_BAD = 2;
-  function probeSize(frame, key) {
-    if (!Object.prototype.hasOwnProperty.call(frame, key)) return { state: FRAME_SIZE_ABSENT, value: null };
-    const raw = frame[key];
-    if (raw === void 0 || raw === null) return { state: FRAME_SIZE_ABSENT, value: null };
-    if (typeof raw === "number" && Number.isInteger(raw) && raw >= 1) return { state: FRAME_SIZE_OK, value: raw };
-    return { state: FRAME_SIZE_BAD, value: null };
-  }
-  function sizeIssue(code, key, message) {
-    return { code, path: `$.frame_json.${key}`, message, severity: "error", retryable: false };
-  }
-  function resolveFrameSize(frame, key, issues) {
-    const { alias, label: label2 } = SQL_MAP_FRAME_SIZE_FIELDS[key];
-    const primary = probeSize(frame, key);
-    const secondary = probeSize(frame, alias);
-    if (primary.state === FRAME_SIZE_OK && secondary.state === FRAME_SIZE_OK) {
-      if (primary.value !== secondary.value) {
-        issues.push(
-          sizeIssue(
-            "FRAME_ALIAS_CONFLICT",
-            key,
-            `${label2}两套字段不一致：${key}=${primary.value} 与 ${alias}=${secondary.value}；不猜哪个为准，先让作者纠正`
-          )
-        );
-        return null;
-      }
-      return primary.value;
-    }
-    for (const [probe, probeKey] of [[primary, key], [secondary, alias]]) {
-      if (probe.state !== FRAME_SIZE_BAD) continue;
-      issues.push(
-        sizeIssue(
-          "FRAME_INVALID",
-          probeKey,
-          `${label2}字段存在但不是正整数：${probeKey}=${JSON.stringify(frame[probeKey])}；拒绝以 NaN/零幅面继续排位`
-        )
-      );
-      return null;
-    }
-    if (primary.state === FRAME_SIZE_OK) return primary.value;
-    if (secondary.state === FRAME_SIZE_OK) return secondary.value;
-    issues.push(
-      sizeIssue(
-        "FRAME_INVALID",
-        key,
-        `缺少必需的地图幅面${label2}：${key} 与 ${alias} 都没有正整数（frame_json 缺失、不是对象，或没有可用尺寸）`
-      )
-    );
-    return null;
-  }
-  function resolveFrameOrigin(frame, key, issues) {
-    if (!Object.prototype.hasOwnProperty.call(frame, key)) return 0;
-    const raw = frame[key];
-    if (raw === void 0 || raw === null) return 0;
-    if (typeof raw === "number" && Number.isFinite(raw)) return raw;
-    issues.push(
-      sizeIssue(
-        "FRAME_ORIGIN_INVALID",
-        key,
-        `幅面原点不是有限数：${key}=${JSON.stringify(raw)}；不默默按 0 替代，先纠正损坏字段`
-      )
-    );
-    return Number.NaN;
-  }
-  function normalizeSqlMapFrame(frame, ctx = {}) {
-    const normalized = normalizeFrame(frame);
-    const issues = [];
-    const cols2 = resolveFrameSize(normalized, "cols", issues);
-    const rows4 = resolveFrameSize(normalized, "rows", issues);
-    const originX = resolveFrameOrigin(normalized, "origin_x", issues);
-    const originY = resolveFrameOrigin(normalized, "origin_y", issues);
-    const ok = cols2 !== null && rows4 !== null && issues.length === 0;
-    return {
-      ok,
-      cols: cols2,
-      rows: rows4,
-      originX,
-      originY,
-      // 浅拷贝：扩展字段（atlasScene / atlasLayoutRequest / 未知键）完整保留，归一结果不写回。
-      frame: normalized,
-      issues: issues.map((item) => spatialIssue(item, ctx))
-    };
-  }
-  function readSpatialFrame(frame, scope, ctx = {}) {
-    const normalized = normalizeFrame(frame);
-    const read = readSceneFrame(normalized, scope);
-    const issues = (read.issues ?? []).map((item) => spatialIssue(item, ctx));
-    const rawRequest = normalized[SPATIAL_REQUEST_KEY];
-    return {
-      ok: read.ok,
-      frame: normalized,
-      scene: read.ok ? read.scene : null,
-      request: rawRequest !== null && typeof rawRequest === "object" && !Array.isArray(rawRequest) ? { ...rawRequest } : null,
-      issues
-    };
-  }
-  function ensureInitialSpatialFrame(input) {
-    const mapId = typeof input.mapRow?.id === "string" ? input.mapRow.id : "";
-    const ctx = {
-      mapId,
-      branchId: input.scope?.branchId,
-      revision: input.scope?.revision,
-      operationId: input.operationId,
-      turnId: input.turnId
-    };
-    let prepared;
-    try {
-      prepared = prepareInitialFrame({
-        mapRow: input.mapRow,
-        scope: input.scope,
-        currentScope: input.currentScope,
-        expectedRowRev: input.expectedRowRev,
-        widthM: typeof input.widthM === "number" ? input.widthM : Number.NaN,
-        heightM: typeof input.heightM === "number" ? input.heightM : Number.NaN,
-        locations: input.locations ?? [],
-        turnId: input.turnId,
-        operationId: input.operationId
-      });
-    } catch (err) {
-      return {
-        ok: false,
-        status: "failed",
-        mutation: null,
-        issues: [spatialIssue({ code: "INITIAL_FRAME_INVALID", path: "$.frame_json", message: `初始化幅面失败：${err.message}` }, ctx)]
-      };
-    }
-    const issues = (prepared.issues ?? []).map((item) => spatialIssue(item, ctx));
-    if (prepared.ok && prepared.mutation) {
-      return { ok: true, status: "prepared", mutation: prepared.mutation, issues };
-    }
-    const missing = typeof input.widthM !== "number" || typeof input.heightM !== "number" || !Number.isFinite(input.widthM) || !Number.isFinite(input.heightM) || issues.some((item) => item.code === "INITIAL_EXTENT_REQUIRED");
-    if (missing) {
-      return {
-        ok: true,
-        status: "retained",
-        mutation: null,
-        issues: [
-          spatialIssue(
-            {
-              code: "INITIAL_EXTENT_MISSING",
-              path: "$.data.spec",
-              message: "新空地图没有可用尺寸：本轮沿用概览，等地图标定或布局请求给出宽高后再初始化。",
-              severity: "warning"
-            },
-            ctx
-          )
-        ]
-      };
-    }
-    if (prepared.ok) {
-      return { ok: true, status: "retained", mutation: null, issues };
-    }
-    return { ok: false, status: "failed", mutation: null, issues };
   }
 
   // src/atlas-sql-scene-maps.ts
@@ -21182,9 +23855,9 @@ END`;
           const precision = String(location.coord_precision ?? "unknown");
           const confirmed = precision === "exact" || precision === "confirmed";
           const onThisMap = String(location.map_id ?? "") === mapId;
-          const finite3 = Number.isFinite(Number(location.grid_x)) && Number.isFinite(Number(location.grid_y));
+          const finite6 = Number.isFinite(Number(location.grid_x)) && Number.isFinite(Number(location.grid_y));
           if (!confirmed) {
-            if (onThisMap && finite3) existing.push({ id, x: Number(location.grid_x), y: Number(location.grid_y) });
+            if (onThisMap && finite6) existing.push({ id, x: Number(location.grid_x), y: Number(location.grid_y) });
             else pending.push({ id });
             continue;
           }
@@ -21198,10 +23871,10 @@ END`;
           opIssues.push({ code: item.code, path: item.path, message: item.message, severity: "warning", retryable: false });
         }
         if (placement.remainingIds.length) fullMapIds.push(`${mapId}(${placement.remainingIds.length})`);
-        const byId3 = new Map(pending.map((entry) => [entry.id, entry]));
+        const byId5 = new Map(pending.map((entry) => [entry.id, entry]));
         for (const point of placement.placed) {
           const location = children.find((row2) => String(row2.id) === point.id);
-          byId3.delete(point.id);
+          byId5.delete(point.id);
           change("locations", location, {
             ...location,
             map_id: mapId,
@@ -21212,7 +23885,7 @@ END`;
             ...location.map_id && String(location.map_id) !== mapId ? { area_geometry_json: null } : {}
           });
         }
-        for (const id of byId3.keys()) unplacedFrames.push(id);
+        for (const id of byId5.keys()) unplacedFrames.push(id);
       }
       if (blockedMigrations.length) opIssues.push({
         code: "COORD_FRAME_MIGRATION_BLOCKED",
@@ -21584,6 +24257,7 @@ END`;
     const decoded = decode("maps", rows4[0], { allowExtra: true });
     return decoded.ok ? decoded.row : null;
   }
+  var SPATIAL_REQUEST_KINDS = Object.freeze(["floor", "city", "overview"]);
   function collectPendingRequests(db, scope, ports) {
     const issues = [];
     const found = [];
@@ -21595,10 +24269,11 @@ END`;
       if (!request) continue;
       const status = typeof request.status === "string" ? request.status : "pending";
       if (status !== "pending") continue;
-      const kind = request.kind === "floor" || request.kind === "city" ? request.kind : null;
+      const rawKind = typeof request.kind === "string" ? request.kind : "";
+      const kind = SPATIAL_REQUEST_KINDS.includes(rawKind) ? rawKind : null;
       if (kind === null) {
         issues.push(
-          spatialIssue({ code: "LAYOUT_KIND_UNSUPPORTED", path: "$.frame_json.atlasLayoutRequest.kind", message: "待处理布局请求缺少 floor/city 种类，跳过本图。", severity: "warning" }, { mapId })
+          spatialIssue({ code: "LAYOUT_KIND_UNSUPPORTED", path: "$.frame_json.atlasLayoutRequest.kind", message: "待处理布局请求缺少 floor/city/overview 种类，跳过本图。", severity: "warning" }, { mapId })
         );
         continue;
       }
@@ -21967,6 +24642,8 @@ END`;
     const characters = readTable(input.db, "characters", scope.branchId, ports);
     const items = readTable(input.db, "items", scope.branchId, ports);
     const maps = readTable(input.db, "maps", scope.branchId, ports);
+    const routes = readTable(input.db, "routes", scope.branchId, ports);
+    let stoppedByStale = false;
     for (let index = 0; index < queue.length; index += 1) {
       const job = queue[index];
       if (processed.length >= maxJobs) {
@@ -21974,9 +24651,10 @@ END`;
         continue;
       }
       if (!isCurrent()) {
-        issues.push({ code: "STALE_SCOPE", path: "$.scope", message: `处理 ${job.requestId} 前世界已切换，剩余请求保持待处理。`, severity: "error", retryable: false });
-        pending.push(job.requestId);
-        continue;
+        stoppedByStale = true;
+        issues.push({ code: "STALE_SCOPE", path: "$.scope", message: `处理 ${job.requestId} 前世界已切换：本轮立即停止，剩余 ${queue.length - index} 条请求保持待处理。`, severity: "error", retryable: false });
+        for (let rest = index; rest < queue.length; rest += 1) pending.push(queue[rest].requestId);
+        break;
       }
       let mapRow = readMapRow(input.db, job.mapId, scope.branchId, ports);
       if (!mapRow) {
@@ -22021,6 +24699,8 @@ END`;
         scope,
         currentScope: scope,
         expectedRowRev: Number(mapRow.row_rev ?? 1),
+        // M4-18：概览在无尺度时建「格」幅面（meters_per_cell=null），绝不拿 1 格 = 1 米去冒充米制。
+        kind: job.kind,
         widthM: typeof spec.width === "number" ? spec.width : null,
         heightM: typeof spec.height === "number" ? spec.height : null,
         locations,
@@ -22072,6 +24752,7 @@ END`;
         locations,
         characters,
         items,
+        routes,
         turnId,
         operationId: `${job.operationId}:scene`
       });
@@ -22140,7 +24821,7 @@ END`;
       });
       processed.push(job.requestId);
     }
-    if (!isCurrent()) {
+    if (!stoppedByStale && !isCurrent()) {
       issues.push({ code: "STALE_SCOPE", path: "$.scope", message: "布局处理期间世界已切换：已应用的组随候选一并放弃。", severity: "error", retryable: false });
     }
     return { groups, issues, processed, pending };
@@ -22224,202 +24905,6 @@ END`;
       backgroundBatchId: () => reserved ? reservedBatchId : null,
       defer
     };
-  }
-
-  // src/atlas-sql-task-refs.ts
-  var REF_TABLES = [
-    { table: "locations", prefix: "L", kind: "location" },
-    { table: "characters", prefix: "C", kind: "character" },
-    { table: "items", prefix: "I", kind: "item" },
-    { table: "factions", prefix: "F", kind: "faction" },
-    { table: "maps", prefix: "M", kind: "map" },
-    { table: "actions", prefix: "A", kind: "action" },
-    { table: "information", prefix: "N", kind: "information" },
-    { table: "routes", prefix: "R", kind: "route" },
-    { table: "events", prefix: "E", kind: "event" },
-    { table: "journeys", prefix: "J", kind: "journey" },
-    { table: "channels", prefix: "H", kind: "channel" },
-    { table: "knowledge", prefix: "K", kind: "knowledge" }
-  ];
-  var SELECT_LIMIT = 1e3;
-  var rowId = (row2) => {
-    if (!row2) return null;
-    const id = row2.id;
-    return typeof id === "string" && id ? id : id === null || id === void 0 ? null : String(id);
-  };
-  var rowRev = (row2) => typeof row2.row_rev === "number" ? row2.row_rev : null;
-  var byId = (left, right) => left < right ? -1 : left > right ? 1 : 0;
-  function addAll(target, values) {
-    for (const value of values) if (value !== null && value !== "") target.add(value);
-  }
-  function asStringArray(value) {
-    return Array.isArray(value) ? value.filter((item) => typeof item === "string" && item !== "") : [];
-  }
-  function collectTaskRefs(tables, input) {
-    const branchId = String(input.branchId ?? "");
-    const issues = [];
-    const maxEntries = Number.isInteger(input.maxEntries) && input.maxEntries > 0 ? input.maxEntries : ATLAS_RUNTIME_LIMITS.refCatalogMaxEntries;
-    const neededMaps = /* @__PURE__ */ new Set();
-    const neededLocations = /* @__PURE__ */ new Set();
-    const extraMaps = /* @__PURE__ */ new Set();
-    const extraLocations = /* @__PURE__ */ new Set();
-    const extraCharacters = /* @__PURE__ */ new Set();
-    const extraItems = /* @__PURE__ */ new Set();
-    const extraRoutes = /* @__PURE__ */ new Set();
-    addAll(neededMaps, asStringArray(input.focusMapIds));
-    addAll(neededLocations, asStringArray(input.focusLocationIds));
-    const readOne = (table, id) => tables.selectOne(table, branchId, id);
-    const readWhere = (table, where) => tables.selectWhere(table, { branch_id: branchId, ...where }, SELECT_LIMIT);
-    const ancestorVisited = /* @__PURE__ */ new Set();
-    const pendingAncestors = [...neededLocations];
-    while (pendingAncestors.length > 0) {
-      const current = pendingAncestors.pop();
-      if (ancestorVisited.has(current)) continue;
-      ancestorVisited.add(current);
-      const row2 = readOne("locations", current);
-      if (!row2) continue;
-      const parent = row2.parent_location_id === null || row2.parent_location_id === void 0 ? null : String(row2.parent_location_id);
-      if (parent && parent !== current) {
-        neededLocations.add(parent);
-        pendingAncestors.push(parent);
-      }
-      if (input.includeAncestors && row2.map_id !== null && row2.map_id !== void 0) neededMaps.add(String(row2.map_id));
-    }
-    for (const id of [...neededLocations]) {
-      const row2 = readOne("locations", id);
-      if (!row2) continue;
-      if (row2.map_id !== null && row2.map_id !== void 0) neededMaps.add(String(row2.map_id));
-      if (input.includeAncestors && row2.parent_location_id !== null && row2.parent_location_id !== void 0) {
-        neededLocations.add(String(row2.parent_location_id));
-      }
-    }
-    if (input.includeDirectChildren) {
-      const parents = [...neededLocations].sort(byId);
-      if (parents.length > 0) {
-        for (const row2 of readWhere("locations", { parent_location_id: parents })) {
-          addAll(extraLocations, [rowId(row2)]);
-        }
-      }
-    }
-    const selectedLocations = () => [.../* @__PURE__ */ new Set([...neededLocations, ...extraLocations])].sort(byId);
-    const containerHosts = selectedLocations();
-    if (containerHosts.length > 0) {
-      for (const row2 of readWhere("maps", { container_location_id: containerHosts })) addAll(extraMaps, [rowId(row2)]);
-    }
-    for (const id of containerHosts) {
-      const row2 = readOne("locations", id);
-      const mapId = row2?.map_id;
-      if (mapId !== null && mapId !== void 0) neededMaps.add(String(mapId));
-    }
-    if (input.includeRoutes && containerHosts.length > 0) {
-      const seenRoutes = /* @__PURE__ */ new Set();
-      for (const column of ["from_location_id", "to_location_id"]) {
-        for (const row2 of readWhere("routes", { [column]: containerHosts })) {
-          const id = rowId(row2);
-          if (id === null || seenRoutes.has(id)) continue;
-          seenRoutes.add(id);
-          extraRoutes.add(id);
-          if (row2.status !== void 0 && String(row2.status) !== "active") continue;
-          addAll(extraLocations, [
-            row2.from_location_id === null || row2.from_location_id === void 0 ? null : String(row2.from_location_id),
-            row2.to_location_id === null || row2.to_location_id === void 0 ? null : String(row2.to_location_id)
-          ]);
-          if (row2.map_id !== null && row2.map_id !== void 0) extraMaps.add(String(row2.map_id));
-        }
-      }
-    }
-    if (input.includeOccupants) {
-      const hosts = selectedLocations();
-      const selectedMaps = [.../* @__PURE__ */ new Set([...neededMaps, ...extraMaps])].sort(byId);
-      for (const table of ["characters", "items"]) {
-        const sink = table === "characters" ? extraCharacters : extraItems;
-        if (hosts.length > 0) for (const row2 of readWhere(table, { location_id: hosts })) addAll(sink, [rowId(row2)]);
-        if (selectedMaps.length > 0) for (const row2 of readWhere(table, { map_id: selectedMaps })) addAll(sink, [rowId(row2)]);
-        for (const id of [...sink]) {
-          const row2 = readOne(table, id);
-          if (!row2) continue;
-          if (row2.location_id !== null && row2.location_id !== void 0) extraLocations.add(String(row2.location_id));
-          if (row2.map_id !== null && row2.map_id !== void 0) extraMaps.add(String(row2.map_id));
-        }
-      }
-    }
-    for (const id of selectedLocations()) {
-      const row2 = readOne("locations", id);
-      const mapId = row2?.map_id;
-      if (mapId !== null && mapId !== void 0) neededMaps.add(String(mapId));
-    }
-    const buckets = {
-      locations: { needed: neededLocations, extra: extraLocations },
-      maps: { needed: neededMaps, extra: extraMaps },
-      characters: { needed: /* @__PURE__ */ new Set(), extra: extraCharacters },
-      items: { needed: /* @__PURE__ */ new Set(), extra: extraItems },
-      routes: { needed: /* @__PURE__ */ new Set(), extra: extraRoutes }
-    };
-    const neededByTable = /* @__PURE__ */ new Map();
-    let neededTotal = 0;
-    for (const { table } of REF_TABLES) {
-      const bucket = buckets[table];
-      const ids2 = bucket ? [...bucket.needed].sort(byId) : [];
-      neededByTable.set(table, ids2);
-      neededTotal += ids2.length;
-    }
-    const remainingIds = [];
-    const extraByTable = /* @__PURE__ */ new Map();
-    let budget = Math.max(0, maxEntries - neededTotal);
-    let truncated = 0;
-    for (const { table } of REF_TABLES) {
-      const bucket = buckets[table];
-      if (!bucket) continue;
-      const extras = [...bucket.extra].filter((id) => !bucket.needed.has(id)).sort(byId);
-      const keptExtras = [];
-      for (const id of extras) {
-        if (budget <= 0) {
-          remainingIds.push(id);
-          truncated += 1;
-          continue;
-        }
-        keptExtras.push(id);
-        budget -= 1;
-      }
-      extraByTable.set(table, keptExtras);
-    }
-    const rows4 = {};
-    const knownRefs = [];
-    for (const { table, prefix, kind } of REF_TABLES) {
-      const ordered3 = [...neededByTable.get(table) ?? []];
-      for (const id of extraByTable.get(table) ?? []) if (!ordered3.includes(id)) ordered3.push(id);
-      const tableRows = [];
-      let ordinal = 0;
-      for (const id of ordered3) {
-        const row2 = readOne(table, id);
-        if (!row2) continue;
-        ordinal += 1;
-        tableRows.push(row2);
-        knownRefs.push({ alias: `${prefix}${ordinal}`, id, kind, rowRev: rowRev(row2) });
-      }
-      rows4[table] = tableRows;
-    }
-    if (neededTotal > maxEntries) {
-      issues.push({
-        code: "REF_CATALOGUE_OVERSIZE",
-        path: "$.catalogue",
-        message: `必要引用 ${neededTotal} 条已超过目录上限 ${maxEntries}：必要项一律保留（目标与祖先不能丢），本次不再纳入任何非必要引用，请在调用方分批`,
-        severity: "warning",
-        retryable: true
-      });
-    } else if (truncated > 0) {
-      issues.push({
-        code: "REF_CATALOGUE_TRUNCATED",
-        path: "$.catalogue",
-        message: `${remainingIds.length} 个非必要引用超出目录上限 ${maxEntries}（${remainingIds.slice(0, 12).join(" / ")}${remainingIds.length > 12 ? " …" : ""}）：目标与祖先已全部保留，超出部分列入 remainingIds，需分批处理`,
-        severity: "warning",
-        retryable: true
-      });
-    }
-    const catalogueHash = stableHexHash(
-      knownRefs.map((ref) => `${ref.kind}\0${ref.id}\0${ref.rowRev ?? ""}`).join("")
-    );
-    return { knownRefs, rows: rows4, remainingIds, issues, catalogueHash };
   }
 
   // src/atlas-sql-world-sources.ts
@@ -22638,39 +25123,39 @@ ${entry.text}`.toLowerCase();
   function makeIssue5(code, path, message, severity, retryable) {
     return { code, path, message, severity, retryable };
   }
-  function str10(value) {
+  function str13(value) {
     return typeof value === "string" ? value : value === null || value === void 0 ? "" : String(value);
   }
-  function asId(value) {
-    const text2 = str10(value).trim();
+  function asId2(value) {
+    const text2 = str13(value).trim();
     return text2.length > 0 ? text2 : "";
   }
-  function byId2(left, right) {
+  function byId4(left, right) {
     return left < right ? -1 : left > right ? 1 : 0;
   }
-  function uniqueSorted(values) {
-    return [...new Set(values)].filter((value) => value.length > 0).sort(byId2);
+  function uniqueSorted2(values) {
+    return [...new Set(values)].filter((value) => value.length > 0).sort(byId4);
   }
   function normalizeCompletionPolicy(policy) {
-    const clamp = (value, ceiling, floor3 = 0) => {
+    const clamp2 = (value, ceiling, floor3 = 0) => {
       const raw = typeof value === "number" && Number.isFinite(value) ? Math.floor(value) : ceiling;
       return Math.min(ceiling, Math.max(floor3, raw));
     };
     return {
       version: 1,
       density: "balanced",
-      maxNewLocations: clamp(policy?.maxNewLocations, ATLAS_RUNTIME_LIMITS.newLocationsPerBatch),
-      maxNewRoutes: clamp(policy?.maxNewRoutes, ATLAS_RUNTIME_LIMITS.newRoutesPerBatch),
-      maxAdditionalDepth: clamp(policy?.maxAdditionalDepth, ATLAS_RUNTIME_LIMITS.additionalParentDepthPerBatch)
+      maxNewLocations: clamp2(policy?.maxNewLocations, ATLAS_RUNTIME_LIMITS.newLocationsPerBatch),
+      maxNewRoutes: clamp2(policy?.maxNewRoutes, ATLAS_RUNTIME_LIMITS.newRoutesPerBatch),
+      maxAdditionalDepth: clamp2(policy?.maxAdditionalDepth, ATLAS_RUNTIME_LIMITS.additionalParentDepthPerBatch)
     };
   }
   function isUnclassified(row2) {
-    const mapId = asId(row2.map_id);
-    const precision = str10(row2.coord_precision).trim() || "unknown";
+    const mapId = asId2(row2.map_id);
+    const precision = str13(row2.coord_precision).trim() || "unknown";
     return mapId.length === 0 || precision === "unknown";
   }
   function isActive(row2) {
-    const status = str10(row2.status).trim() || "active";
+    const status = str13(row2.status).trim() || "active";
     return status !== "destroyed" && status !== "merged" && status !== "archived";
   }
   function childrenOf(tables, branchId, parentId) {
@@ -22687,7 +25172,7 @@ ${entry.text}`.toLowerCase();
       const row2 = tables.selectOne("locations", branchId, cursor);
       if (!row2) break;
       chain.push(row2);
-      cursor = asId(row2.parent_location_id) || null;
+      cursor = asId2(row2.parent_location_id) || null;
       depth += 1;
     }
     return chain;
@@ -22710,18 +25195,18 @@ ${entry.text}`.toLowerCase();
     const fill = frame?.[WORLD_FILL_FRAME_KEY];
     if (!fill || typeof fill !== "object" || Array.isArray(fill)) return null;
     const value = fill;
-    const status = str10(value.status);
+    const status = str13(value.status);
     if (status !== "ready" && status !== "partial" && status !== "deferred") return null;
     return {
       version: 1,
       policyVersion: 1,
-      contextHash: str10(value.contextHash),
+      contextHash: str13(value.contextHash),
       status,
-      completedTurnId: asId(value.completedTurnId) || null,
-      createdLocationIds: Array.isArray(value.createdLocationIds) ? value.createdLocationIds.map(str10) : [],
-      createdRouteIds: Array.isArray(value.createdRouteIds) ? value.createdRouteIds.map(str10) : [],
-      remainingLocationIds: Array.isArray(value.remainingLocationIds) ? value.remainingLocationIds.map(str10) : [],
-      reasonCode: asId(value.reasonCode) || null
+      completedTurnId: asId2(value.completedTurnId) || null,
+      createdLocationIds: Array.isArray(value.createdLocationIds) ? value.createdLocationIds.map(str13) : [],
+      createdRouteIds: Array.isArray(value.createdRouteIds) ? value.createdRouteIds.map(str13) : [],
+      remainingLocationIds: Array.isArray(value.remainingLocationIds) ? value.remainingLocationIds.map(str13) : [],
+      reasonCode: asId2(value.reasonCode) || null
     };
   }
   function planCandidates(tables, branchId, input, policy) {
@@ -22729,11 +25214,11 @@ ${entry.text}`.toLowerCase();
     const missing = [];
     const memberLines = [];
     const lockLines = [];
-    const ordered3 = [];
+    const ordered4 = [];
     const push = (id) => {
-      if (id && !ordered3.includes(id)) ordered3.push(id);
+      if (id && !ordered4.includes(id)) ordered4.push(id);
     };
-    const requested = uniqueSorted(input.focusLocationIds);
+    const requested = uniqueSorted2(input.focusLocationIds);
     const ancestryIds = [];
     const unclassified = [];
     const noConnectivity = [];
@@ -22745,57 +25230,57 @@ ${entry.text}`.toLowerCase();
         continue;
       }
       const self2 = chain[0];
-      for (const ancestor of chain) ancestryIds.push(asId(ancestor.id));
+      for (const ancestor of chain) ancestryIds.push(asId2(ancestor.id));
       const children = childrenOf(tables, branchId, focusId);
-      const mapId = asId(self2.map_id);
+      const mapId = asId2(self2.map_id);
       const scene = mapId ? readScenePresence(tables, branchId, mapId) : false;
       memberLines.push(
-        `${focusId}（${str10(self2.name)}/${str10(self2.kind)}）直接成员 ${children.length} 个：` + (children.length === 0 ? "（无）" : children.map((row2) => `${asId(row2.id)}=${str10(row2.name)}/${str10(row2.kind)}`).join("、")) + `；本图 scene：${scene ? "已有" : "无"}`
+        `${focusId}（${str13(self2.name)}/${str13(self2.kind)}）直接成员 ${children.length} 个：` + (children.length === 0 ? "（无）" : children.map((row2) => `${asId2(row2.id)}=${str13(row2.name)}/${str13(row2.kind)}`).join("、")) + `；本图 scene：${scene ? "已有" : "无"}`
       );
-      const precision = str10(self2.coord_precision).trim() || "unknown";
-      const terrain = str10(self2.terrain).trim() || "unknown";
+      const precision = str13(self2.coord_precision).trim() || "unknown";
+      const terrain = str13(self2.terrain).trim() || "unknown";
       if (precision === "exact" || precision === "confirmed" || terrain !== "unknown") {
         lockLines.push(`${focusId}：coord_precision=${precision}、terrain=${terrain}（已确认，不为丰富地图重置）`);
       }
       if (children.length === 0 && !scene) {
         emptyStructure.push(focusId);
-        missing.push({ code: "NO_INTERNAL_STRUCTURE", locationId: focusId, detail: `${str10(self2.name)} 没有任何内部结构（无子地点、无场景），需要少量有用途的功能空间` });
+        missing.push({ code: "NO_INTERNAL_STRUCTURE", locationId: focusId, detail: `${str13(self2.name)} 没有任何内部结构（无子地点、无场景），需要少量有用途的功能空间` });
       }
       for (const ancestor of chain.slice(1)) {
-        if (isUnclassified(ancestor)) unclassified.push(asId(ancestor.id));
+        if (isUnclassified(ancestor)) unclassified.push(asId2(ancestor.id));
       }
       const attached = tables.selectWhere("routes", { branch_id: branchId, from_location_id: focusId }, ATLAS_RUNTIME_LIMITS.refCatalogMaxEntries);
       const inbound = tables.selectWhere("routes", { branch_id: branchId, to_location_id: focusId }, ATLAS_RUNTIME_LIMITS.refCatalogMaxEntries);
       if (attached.length + inbound.length === 0 && chain.length > 1) {
         noConnectivity.push(focusId);
-        missing.push({ code: "NO_ROUTE_CONNECTIVITY", locationId: focusId, detail: `${str10(self2.name)} 无任何相邻路线，需要一条合理路线或说明就近可达` });
+        missing.push({ code: "NO_ROUTE_CONNECTIVITY", locationId: focusId, detail: `${str13(self2.name)} 无任何相邻路线，需要一条合理路线或说明就近可达` });
       }
     }
     const expanded = [];
-    let frontier = uniqueSorted(requested);
+    let frontier = uniqueSorted2(requested);
     for (let depth = 0; depth < policy.maxAdditionalDepth; depth += 1) {
       const next = [];
       for (const id of frontier) {
-        for (const child of childrenOf(tables, branchId, id)) next.push(asId(child.id));
+        for (const child of childrenOf(tables, branchId, id)) next.push(asId2(child.id));
       }
       if (next.length === 0) break;
-      expanded.push(...uniqueSorted(next));
-      frontier = uniqueSorted(next);
+      expanded.push(...uniqueSorted2(next));
+      frontier = uniqueSorted2(next);
     }
     for (const id of emptyStructure) push(id);
-    for (const id of uniqueSorted(unclassified)) push(id);
+    for (const id of uniqueSorted2(unclassified)) push(id);
     for (const id of noConnectivity) push(id);
     for (const id of expanded) push(id);
     for (const id of requested) push(id);
     const cap = ATLAS_RUNTIME_LIMITS.worldFillTargets;
-    const focusIds = ordered3.slice(0, cap);
-    const remainingIds = ordered3.slice(cap);
+    const focusIds = ordered4.slice(0, cap);
+    const remainingIds = ordered4.slice(cap);
     if (remainingIds.length > 0) {
       issues.push(
         makeIssue5(
           "WORLD_TARGETS_TRUNCATED",
           "$.focusLocationIds",
-          `本次候选目标 ${ordered3.length} 个超过上限 ${cap}；已处理 ${cap} 个，剩余 ${remainingIds.length} 个完整 ID 已记入 remainingLocationIds，下一批继续（不静默丢弃）。`,
+          `本次候选目标 ${ordered4.length} 个超过上限 ${cap}；已处理 ${cap} 个，剩余 ${remainingIds.length} 个完整 ID 已记入 remainingLocationIds，下一批继续（不静默丢弃）。`,
           "warning",
           false
         )
@@ -22886,7 +25371,7 @@ ${chunk.text}`;
   }
   function buildSqlWorldCompletionTask(tables, branchId, input, turnId, budgetRemaining) {
     if (!Number.isFinite(budgetRemaining) || budgetRemaining <= 0) return null;
-    const requested = uniqueSorted(input.focusLocationIds ?? []);
+    const requested = uniqueSorted2(input.focusLocationIds ?? []);
     if (requested.length === 0) return null;
     const policy = normalizeCompletionPolicy(input.policy);
     const plan = planCandidates(tables, branchId, { ...input, focusLocationIds: requested }, policy);
@@ -22902,12 +25387,12 @@ ${chunk.text}`;
     const focusMaps = [];
     for (const id of plan.focusIds) {
       const row2 = tables.selectOne("locations", branchId, id);
-      const mapId = asId(row2?.map_id);
+      const mapId = asId2(row2?.map_id);
       if (mapId && !focusMaps.includes(mapId)) focusMaps.push(mapId);
     }
     const catalogue = collectTaskRefs(tables, {
       branchId,
-      focusMapIds: uniqueSorted(focusMaps),
+      focusMapIds: uniqueSorted2(focusMaps),
       focusLocationIds: plan.focusIds,
       includeAncestors: true,
       includeDirectChildren: true,
@@ -22947,7 +25432,7 @@ ${chunk.text}`;
     };
   }
   var CONSTRUCTION_FORBIDDEN_PREFIXES = ["event.", "character.", "item.", "plan.", "information.", "attention.", "channel.", "relation."];
-  function isPlainObject17(value) {
+  function isPlainObject19(value) {
     return Boolean(value) && typeof value === "object" && !Array.isArray(value);
   }
   function normalizeConstructionOps(input) {
@@ -22955,13 +25440,13 @@ ${chunk.text}`;
     const operations = [];
     const downgraded = [];
     const protectedDrops = [];
-    const supported = new Set((input.supportedNewRefs ?? []).map((ref) => str10(ref).trim()));
-    const locked = new Set((input.lockedLocationIds ?? []).map((ref) => str10(ref).trim()));
-    const known = new Set((input.knownIds ?? []).map((ref) => str10(ref).trim()));
-    const declared = new Set((input.declaredNewRefs ?? []).map((ref) => str10(ref).trim()));
+    const supported = new Set((input.supportedNewRefs ?? []).map((ref) => str13(ref).trim()));
+    const locked = new Set((input.lockedLocationIds ?? []).map((ref) => str13(ref).trim()));
+    const known = new Set((input.knownIds ?? []).map((ref) => str13(ref).trim()));
+    const declared = new Set((input.declaredNewRefs ?? []).map((ref) => str13(ref).trim()));
     for (const op of input.operations ?? []) {
-      const name = str10(op?.op).trim();
-      const ref = str10(op?.ref).trim();
+      const name = str13(op?.op).trim();
+      const ref = str13(op?.ref).trim();
       if (CONSTRUCTION_FORBIDDEN_PREFIXES.some((prefix) => name.startsWith(prefix))) {
         protectedDrops.push(ref || name);
         issues.push({
@@ -22977,7 +25462,7 @@ ${chunk.text}`;
         operations.push(op);
         continue;
       }
-      const data = isPlainObject17(op.data) ? { ...op.data } : {};
+      const data = isPlainObject19(op.data) ? { ...op.data } : {};
       const isNew = ref.startsWith("new:") || ref.length > 0 && !known.has(ref);
       if (!isNew && ref.length > 0 && locked.has(ref) && ("parent_ref" in data || "position" in data || "area" in data)) {
         protectedDrops.push(ref);
@@ -22990,7 +25475,7 @@ ${chunk.text}`;
         });
         continue;
       }
-      const parentRef = str10(data.parent_ref).trim();
+      const parentRef = str13(data.parent_ref).trim();
       if (isNew && parentRef.startsWith("new:") && !declared.has(parentRef) && !known.has(parentRef)) {
         issues.push({
           code: "WORLD_CONSTRUCTION_PARENT_UNDECLARED",
@@ -23001,7 +25486,7 @@ ${chunk.text}`;
         });
       }
       if (isNew && !supported.has(ref)) {
-        const declaredQuality = str10(data.existence_quality).trim();
+        const declaredQuality = str13(data.existence_quality).trim();
         if (declaredQuality !== "inferred") {
           data.existence_quality = "inferred";
           downgraded.push(ref);
@@ -23030,13 +25515,13 @@ ${chunk.text}`;
   function asText(value) {
     return typeof value === "string" ? value : value === null || value === void 0 ? "" : String(value);
   }
-  function asId2(value) {
+  function asId3(value) {
     return asText(value).trim();
   }
   function normalizeLocationName(name) {
     return asText(name).trim().replace(/^[「『"'（(【\[]+|[」』"'）)】\]]+$/g, "").replace(/\s+/g, " ").toLowerCase();
   }
-  var isPlainObject18 = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
+  var isPlainObject20 = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
   function aliasesOf(row2) {
     const raw = row2.aliases_json ?? row2.aliases;
     if (Array.isArray(raw)) return raw.map(asText);
@@ -23050,7 +25535,7 @@ ${chunk.text}`;
     }
   }
   function indexExisting(rows4) {
-    return rows4.filter((row2) => isPlainObject18(row2) && asId2(row2.id).length > 0).map((row2) => {
+    return rows4.filter((row2) => isPlainObject20(row2) && asId3(row2.id).length > 0).map((row2) => {
       const names = /* @__PURE__ */ new Set();
       const primary = normalizeLocationName(row2.name);
       if (primary.length > 0) names.add(primary);
@@ -23059,8 +25544,8 @@ ${chunk.text}`;
         if (normalized.length > 0) names.add(normalized);
       }
       return {
-        id: asId2(row2.id),
-        parentId: asId2(row2.parent_location_id) || null,
+        id: asId3(row2.id),
+        parentId: asId3(row2.parent_location_id) || null,
         kind: asText(row2.kind).trim(),
         names
       };
@@ -23079,7 +25564,7 @@ ${chunk.text}`;
     const declared = /* @__PURE__ */ new Map();
     const poisoned = /* @__PURE__ */ new Set();
     const resolveParent = (ref) => {
-      const raw = asId2(ref);
+      const raw = asId3(ref);
       if (raw.length === 0) return null;
       if (raw.startsWith("new:")) {
         const mapped = resolved.get(raw);
@@ -23089,9 +25574,9 @@ ${chunk.text}`;
     };
     for (const op of operations) {
       if (asText(op?.op).trim() !== "location.upsert") continue;
-      const ref = asId2(op?.ref);
+      const ref = asId3(op?.ref);
       if (!ref.startsWith("new:")) continue;
-      const data = isPlainObject18(op.data) ? op.data : {};
+      const data = isPlainObject20(op.data) ? op.data : {};
       const name = asText(data.name).trim();
       if (name.length === 0) {
         poisoned.add(ref);
@@ -23136,11 +25621,11 @@ ${chunk.text}`;
     }
     const referencedNew = (op) => {
       const refs = [];
-      const ref = asId2(op?.ref);
+      const ref = asId3(op?.ref);
       if (ref.startsWith("new:")) refs.push(ref);
-      const data = isPlainObject18(op?.data) ? op.data : {};
+      const data = isPlainObject20(op?.data) ? op.data : {};
       for (const key of ["parent_ref", "from_ref", "to_ref", "anchor_ref", "location_ref", "holder_ref", "container_ref"]) {
-        const value = asId2(data[key]);
+        const value = asId3(data[key]);
         if (value.startsWith("new:")) refs.push(value);
       }
       return refs;
@@ -23158,35 +25643,35 @@ ${chunk.text}`;
             `该操作依赖无法解析的新引用 ${blockedBy.join("、")}；依赖组整体拒绝，其余互不依赖的有效组仍可提交。`,
             "error",
             true,
-            asId2(op?.ref) || void 0
+            asId3(op?.ref) || void 0
           )
         );
         continue;
       }
-      const ref = asId2(op?.ref);
+      const ref = asId3(op?.ref);
       if (ref.startsWith("new:")) {
         const mapped = resolved.get(ref);
         if (mapped) {
-          const data2 = isPlainObject18(op.data) ? { ...op.data } : op.data;
-          if (isPlainObject18(data2)) {
-            if (resolved.has(asId2(data2.parent_ref))) data2.parent_ref = resolved.get(asId2(data2.parent_ref));
-            else if (asId2(data2.parent_ref).startsWith("new:") && declared.has(asId2(data2.parent_ref))) data2.parent_ref = asId2(data2.parent_ref);
+          const data2 = isPlainObject20(op.data) ? { ...op.data } : op.data;
+          if (isPlainObject20(data2)) {
+            if (resolved.has(asId3(data2.parent_ref))) data2.parent_ref = resolved.get(asId3(data2.parent_ref));
+            else if (asId3(data2.parent_ref).startsWith("new:") && declared.has(asId3(data2.parent_ref))) data2.parent_ref = asId3(data2.parent_ref);
           }
           out.push({ ...op, ref: mapped, data: data2 });
           continue;
         }
       }
-      const data = isPlainObject18(op.data) ? { ...op.data } : op.data;
-      if (isPlainObject18(data)) {
+      const data = isPlainObject20(op.data) ? { ...op.data } : op.data;
+      if (isPlainObject20(data)) {
         for (const key of ["parent_ref", "from_ref", "to_ref", "anchor_ref", "location_ref", "holder_ref", "container_ref"]) {
-          const value = asId2(data[key]);
+          const value = asId3(data[key]);
           if (value.startsWith("new:")) {
             const mapped = resolved.get(value);
             if (mapped) data[key] = mapped;
           }
         }
       }
-      out.push(isPlainObject18(op.data) ? { ...op, data } : op);
+      out.push(isPlainObject20(op.data) ? { ...op, data } : op);
     }
     const dedupedIssues = [];
     const seen = /* @__PURE__ */ new Set();
@@ -23477,6 +25962,9 @@ ${chunk.text}`;
             return querySpatialFlows(ctx, query);
           case "tasks":
             return queryTasks(ctx, query);
+          // M5-07：新故事事件流。changes 仍是「数据表变动/技术日志」，两者职责不混。
+          case "world-feed":
+            return queryWorldFeed(ctx, query);
           default:
             return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: "VIEW_KIND_UNSUPPORTED", kind: query.kind } };
         }
@@ -23820,8 +26308,8 @@ ${chunk.text}`;
       }));
       const built = buildAtomicGroups(compileInputs);
       allIssues.push(...built.issues);
-      const ordered3 = orderGroups(built.groups);
-      allIssues.push(...ordered3.issues);
+      const ordered4 = orderGroups(built.groups);
+      allIssues.push(...ordered4.issues);
       let groupResults = [];
       let sequencesUsed = 0;
       beginTransaction(candidateDb);
@@ -23838,7 +26326,7 @@ ${chunk.text}`;
           storyHash: input.assistantText ? sha256HexSync(input.assistantText) : null,
           attempts
         });
-        const applied = applyGroups(candidateDb, ordered3.order, {
+        const applied = applyGroups(candidateDb, ordered4.order, {
           branchId,
           turnId,
           attemptId: input.manual ? "manual" : "model",
@@ -24082,6 +26570,7 @@ ${chunk.text}`;
         parsedOperations.push(...simulation.modelOperations);
         timeChanged = simulation.clockAfter !== clockBefore;
         const layoutTask = input.layoutMaps ? buildSqlLayoutTask(candidateDb, branchId, input, turnId) : null;
+        let layoutApplied = false;
         if (layoutTask && options.modelPort && turnBudget.remaining() > 0 && foregroundBatches + (repairAttempted ? 1 : 0) + (simulation.modelBatches ?? 0) < ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn) {
           preparationStep = "before-layout";
           commitTransaction(candidateDb);
@@ -24094,19 +26583,20 @@ ${chunk.text}`;
             if (input.isCurrent && !input.isCurrent() || currentRevision() !== anchor.baseRevision) throw new AtlasDbError("STALE_BASE", "布局生成期间聊天或世界修订已变化，候选不发布", {});
             const extracted = extractPayload(response.text ?? ""), parsed = parseOperations(extracted.payload, { phase: "geography" });
             allIssues.push(...extracted.issues, ...parsed.issues);
-            const layoutRefs = collectKnownRefs(createTableReadPort(candidateDb), branchId);
+            const layoutRefs = layoutTask.catalogue.knownRefs;
             const allowedRefs = new Set(layoutRefs.filter((r) => layoutTask.mapIds.includes(r.id)).flatMap((r) => [r.id, r.alias]));
             const ops = parsed.operations.filter((op) => op.value.op === "map.layout.request" && allowedRefs.has(op.value.ref ?? "")).map((op) => {
               const id = layoutRefs.find((r) => r.id === op.value.ref || r.alias === op.value.ref)?.id;
               const extent = id ? layoutTask.extents[id] : void 0;
+              const kind = id ? layoutTask.kinds[id] : void 0;
               const data = op.value.data, spec = data?.spec;
-              if (extent && Number.isFinite(extent.width) && Number.isFinite(extent.height) && extent.width > 0 && extent.height > 0 && spec && typeof spec === "object" && !Array.isArray(spec)) {
-                const baseline = id ? layoutTask.baselineRooms[id] : [];
-                const rooms = "rooms" in spec ? spec.rooms : void 0;
-                const defaults = baseline?.length && (rooms === void 0 || Array.isArray(rooms) && rooms.length === 0) ? { rooms: baseline } : {};
-                return { ...op, opId: `layout_${op.opId}`, value: { ...op.value, data: { ...data, spec: { width: extent.width, height: extent.height, ...spec, ...defaults } } } };
-              }
-              return { ...op, opId: `layout_${op.opId}` };
+              if (!id || !extent || !kind || !spec || typeof spec !== "object" || Array.isArray(spec)) return { ...op, opId: `layout_${op.opId}` };
+              if (data?.kind !== kind) allIssues.push({ code: "LAYOUT_KIND_OVERRIDDEN", path: "$.layout.kind", message: `地图 ${id} 的角色由容器决定为 ${kind}，模型给出的 ${String(data?.kind ?? "(空)")} 已按 ${kind} 处理`, severity: "warning", retryable: false });
+              const canvas = extent.units === "meters" ? { width: extent.width, height: extent.height } : {};
+              const baseline = kind === "floor" ? layoutTask.baselineRooms[id] ?? [] : [];
+              const rooms = "rooms" in spec ? spec.rooms : void 0;
+              const defaults = baseline.length && (rooms === void 0 || Array.isArray(rooms) && rooms.length === 0) ? { rooms: baseline } : {};
+              return { ...op, opId: `layout_${op.opId}`, value: { ...op.value, data: { ...data, kind, spec: { ...canvas, ...spec, ...defaults } } } };
             });
             if (!ops.length) allIssues.push({ code: "LAYOUT_NOT_GENERATED", path: "$.layout", message: "模型没有返回空间布局约束；已登记地点仍保留，可在当前地图点击生成布局重试", severity: "warning", retryable: true });
             const layoutCompiled = compileOperations({
@@ -24118,7 +26608,7 @@ ${chunk.text}`;
               tables: createTableReadPort(candidateDb),
               sources: { phase: "geography", snapshot: sourceSnapshot, clockS: clockBefore },
               makeId,
-              knownRefs: collectKnownRefs(createTableReadPort(candidateDb), branchId),
+              knownRefs: [...layoutRefs],
               turnId,
               allowedOps: ["map.layout.request"]
             });
@@ -24129,6 +26619,7 @@ ${chunk.text}`;
             const appliedLayout = applyGroups(candidateDb, orderGroups(groups.groups).order, { branchId, turnId, attemptId: "layout", validate: true });
             groupResults.push(...appliedLayout.groups);
             parsedOperations.push(...ops);
+            layoutApplied = ops.length > 0;
             for (const message of appliedLayout.journalIssues) allIssues.push({ code: "JOURNAL_WRITE_FAILED", path: "$.layout", message, severity: "error", retryable: false });
           } catch (error) {
             if (!transactionOpen) {
@@ -24161,6 +26652,20 @@ ${chunk.text}`;
           groupResults.push(...armed.groups);
           allIssues.push(...armed.issues);
         }
+        const pendingRequestByMap = /* @__PURE__ */ new Map();
+        if (layoutApplied && layoutTask) {
+          const scanPort = createTableReadPort(candidateDb);
+          for (const mapId of layoutTask.mapIds) {
+            const row2 = scanPort.selectOne("maps", branchId, mapId);
+            if (!row2) continue;
+            const frame = normalizeFrame(row2.frame_json);
+            const request = frame[SPATIAL_REQUEST_KEY];
+            if (!request || typeof request !== "object" || Array.isArray(request)) continue;
+            if (String(request.status ?? "") !== "pending") continue;
+            const requestId = String(request.requestId ?? `req_${mapId}`);
+            pendingRequestByMap.set(mapId, requestId);
+          }
+        }
         const spatial = applyPendingSpatialRequests({
           db: candidateDb,
           scope: { chatId: anchor.chatUid, branchId, revision: rev, viewMode: "author" },
@@ -24171,6 +26676,49 @@ ${chunk.text}`;
         });
         groupResults.push(...spatial.groups);
         allIssues.push(...spatial.issues);
+        if (pendingRequestByMap.size > 0 && layoutTask) {
+          const processedRequests = new Set(spatial.processed);
+          const ctxPort = createTableReadPort(candidateDb);
+          const ctxMutations = [];
+          for (const [mapId, requestId] of pendingRequestByMap) {
+            if (!processedRequests.has(requestId)) continue;
+            const row2 = ctxPort.selectOne("maps", branchId, mapId);
+            if (!row2) continue;
+            const rawFrame = row2.frame_json;
+            const frame = rawFrame && typeof rawFrame === "object" && !Array.isArray(rawFrame) ? { ...rawFrame } : {};
+            if (!frame.atlasScene) continue;
+            const request = frame[SPATIAL_REQUEST_KEY];
+            const requestStatus = request && typeof request === "object" && !Array.isArray(request) ? String(request.status ?? "") : "";
+            if (requestStatus === "pending" || requestStatus === "failed") continue;
+            ctxMutations.push({
+              table: "maps",
+              rowId: mapId,
+              before: { ...row2 },
+              after: {
+                ...row2,
+                frame_json: { ...frame, [LAYOUT_CONTEXT_FRAME_KEY]: { version: 1, hash: layoutTask.contextHash, completedTurnId: turnId } },
+                row_rev: Number(row2.row_rev ?? 1) + 1,
+                updated_turn_id: turnId
+              },
+              sourceOpIds: [`layout_ctx_${mapId}`],
+              basis: { kind: "simulation", sources: [], causes: [], reason: `记录地图 ${mapId} 本轮布局所依据的结构指纹`, verification: "causal", certainty: "confirmed" }
+            });
+          }
+          if (ctxMutations.length > 0) {
+            const ctxGroup = {
+              id: `grp_layout_ctx_${turnId}`,
+              opIds: ctxMutations.map((m) => String((m.sourceOpIds ?? [])[0] ?? "layout_ctx")),
+              dependsOn: [],
+              readSet: ctxMutations.map((m) => ({ table: "maps", rowId: m.rowId, rowRev: Number(m.before.row_rev ?? 0) })),
+              mutations: ctxMutations
+            };
+            const appliedCtx = applyGroups(candidateDb, [ctxGroup], { branchId, turnId, attemptId: "layout-context", validate: true });
+            groupResults.push(...appliedCtx.groups);
+            for (const message of appliedCtx.journalIssues) {
+              allIssues.push({ code: "JOURNAL_WRITE_FAILED", path: "$.layout.context", message, severity: "error", retryable: false });
+            }
+          }
+        }
         if (construction.attempted && construction.focusMapId) {
           const fillPort = createTableReadPort(candidateDb);
           const mapRow = fillPort.selectOne("maps", branchId, construction.focusMapId);
@@ -24410,9 +26958,9 @@ ${chunk.text}`;
         }))
       );
       args.allIssues.push(...built.issues);
-      const ordered3 = orderGroups(built.groups);
-      args.allIssues.push(...ordered3.issues);
-      return { applied: ordered3.order };
+      const ordered4 = orderGroups(built.groups);
+      args.allIssues.push(...ordered4.issues);
+      return { applied: ordered4.order };
     }
     async function prepareRollbackInner(input) {
       if (input.chatUid !== chatUid) {

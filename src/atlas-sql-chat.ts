@@ -19,7 +19,70 @@ import type { TurnAnchor, TurnInput } from './atlas-ops-contract.ts';
 import { VIEW_KINDS, CATALOG_ENTITY_KINDS, type ViewQuery } from './atlas-ops-contract.ts';
 import type { AtlasEnvelope } from './atlas-db-contract.ts';
 import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
-import type { WorldCompletionInput } from './atlas-world-contract.ts';
+import {
+  WORLD_FEED_CATEGORIES,
+  type FeedFilter,
+  type WorldCompletionInput,
+  type WorldFeedCategory,
+} from './atlas-world-contract.ts';
+
+/** world-feed 过滤条件里唯一允许出现的键；别的键直接 INVALID_PAYLOAD。 */
+const FEED_FILTER_KEYS = ['category', 'mapId', 'entityId', 'currentTurnOnly'] as const;
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * M5-08：把客户端传来的 feedFilter 收敛成契约字段。
+ *
+ * 纪律：绝不 `{...body}` 或 `{...body.feedFilter}` 透传 —— 只认白名单里这四个键，
+ * 值和类型也要对；任何越界一律 INVALID_PAYLOAD（含「未知键」，不静默丢弃）。
+ */
+function parseFeedFilter(raw: unknown): FeedFilter | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (!isPlainRecord(raw)) throw new AtlasDbError('INVALID_PAYLOAD', 'feedFilter 必须是对象', {});
+  for (const key of Object.keys(raw)) {
+    if (!(FEED_FILTER_KEYS as readonly string[]).includes(key)) {
+      throw new AtlasDbError('INVALID_PAYLOAD', `feedFilter 不接受字段 ${key}`, { key });
+    }
+  }
+  const filter: FeedFilter = {};
+  if (raw.category !== undefined) {
+    const category = String(raw.category);
+    if (!(WORLD_FEED_CATEGORIES as readonly string[]).includes(category)) {
+      throw new AtlasDbError('INVALID_PAYLOAD', `未知的事件流分类 ${category}`, { category });
+    }
+    filter.category = category as WorldFeedCategory;
+  }
+  if (raw.mapId !== undefined) {
+    if (typeof raw.mapId !== 'string' || !raw.mapId) throw new AtlasDbError('INVALID_PAYLOAD', 'feedFilter.mapId 必须是非空字符串', {});
+    filter.mapId = raw.mapId;
+  }
+  if (raw.entityId !== undefined) {
+    if (typeof raw.entityId !== 'string' || !raw.entityId) throw new AtlasDbError('INVALID_PAYLOAD', 'feedFilter.entityId 必须是非空字符串', {});
+    filter.entityId = raw.entityId;
+  }
+  if (raw.currentTurnOnly !== undefined) {
+    if (typeof raw.currentTurnOnly !== 'boolean') throw new AtlasDbError('INVALID_PAYLOAD', 'feedFilter.currentTurnOnly 必须是布尔值', {});
+    filter.currentTurnOnly = raw.currentTurnOnly;
+  }
+  return Object.keys(filter).length ? filter : undefined;
+}
+
+/**
+ * M5-08：事件流的 POV 身份只认宿主已绑定的主角。
+ *
+ * 客户端不能拿一个字符 id 就借别人的视角看世界（敌对方角色就是典型越权）。
+ * 拒绝时统一用同一句、同一个码：**不查、不区分**「不存在」与「没授权」——
+ * 一旦消息有差别，就等于告诉客户端某个隐藏 id 到底存不存在。
+ */
+function resolveFeedPovId(session: SqlSession, asked: string): string | undefined {
+  const allowed = protagonist(session);
+  if (!asked) return allowed;
+  if (asked === allowed) return allowed;
+  throw new AtlasDbError('INVALID_PAYLOAD', '该视角不属于当前分支或宿主未授权', { chatId: session.chatUid });
+}
 
 /**
  * M3-14：普通楼层的建设焦点 = **主角当前实际所在地点**。
@@ -110,10 +173,17 @@ export async function handleSqlChatRequest(session: SqlSession, action: string, 
   if(action==='ui-read'){
     const kind=text(body.kind);
     if(!(VIEW_KINDS as readonly string[]).includes(kind))throw new AtlasDbError('INVALID_PAYLOAD','未知的只读视图',{});
+    // M5-08：事件流的过滤与视角单独走白名单；别的视图保持原样（不把新字段塞进旧只读口）。
+    const isFeed=kind==='world-feed';
+    const feedFilter=isFeed?parseFeedFilter(body.feedFilter):undefined;
+    const maxLimit=isFeed?ATLAS_RUNTIME_LIMITS.feedPageMax:200;
     const query:ViewQuery={kind:kind as ViewQuery['kind'],branchId:session.branchId,viewMode:body.viewMode==='author'?'author':'pov',
       revision:typeof body.revision==='number'?body.revision:undefined,entityId:text(body.entityId)||undefined,mapId:text(body.mapId)||undefined,
       entityKind:(CATALOG_ENTITY_KINDS as readonly string[]).includes(text(body.entityKind))?body.entityKind as ViewQuery['entityKind']:undefined,
-      cursor:text(body.cursor)||undefined,limit:Math.min(200,Math.max(1,typeof body.limit==='number'?body.limit:200))};
+      cursor:text(body.cursor)||undefined,limit:Math.min(maxLimit,Math.max(1,typeof body.limit==='number'?body.limit:maxLimit))};
+    if(isFeed){query.povId=resolveFeedPovId(session,text(body.povId));if(feedFilter)query.feedFilter=feedFilter;}
+    // cursor 过期/形状不对由 queryWorldFeed 走 VIEW_CURSOR_STALE / VIEW_CURSOR_INVALID，
+    // 这里原样返回回执里的 code，让 UI 知道该重读第一页而不是误报 500。
     const result=await session.repo.queryView(query),last=latestFloor(session);
     return {...result,metadata:{...result.metadata,protagonistId:protagonist(session)??null,rollbackMessageId:last?floorIndex(last):null,
       canUndo:!!last,snapshotSaved:!!(session.chatMetadata.atlas as {database?:AtlasEnvelope}|undefined)?.database}};

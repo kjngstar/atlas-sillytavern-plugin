@@ -5,6 +5,9 @@ function httpStatusFor(code: string): number {
     case ATLAS_ERROR_CODES.INVALID_PAYLOAD:
     case ATLAS_ERROR_CODES.PROTOCOL_INCOMPATIBLE:
     case ATLAS_ERROR_CODES.NOT_BOUND:
+    // M5-08A：事件流的参数类错误。形状坏掉的游标是「请求写错了」，重试无用。
+    case 'VIEW_CURSOR_INVALID':
+    case 'FEED_POV_ID_REQUIRED':
       return 400;
     case ATLAS_ERROR_CODES.FORBIDDEN:
       return 403;
@@ -19,6 +22,9 @@ function httpStatusFor(code: string): number {
     // C04：协议不符 = 「设置与响应形态冲突」，不是格式错（400）也不是服务故障（502）——
     // 作者要做的动作是回推进页切协议，409 与既有前端错误呈现一致。
     case ATLAS_ERROR_CODES.PROTOCOL_MISMATCH:
+    // M5-08A：事件流的冲突类错误。客户端拿着旧身份或过期游标，重读第一页即可 —— 不是服务坏了。
+    case 'VIEW_CURSOR_STALE':
+    case 'SQL_PREVIEW_EXPIRED':
       return 409;
     case ATLAS_ERROR_CODES.API_RATE_LIMITED:
       return 429;

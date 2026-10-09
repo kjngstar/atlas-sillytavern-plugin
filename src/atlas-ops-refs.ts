@@ -282,15 +282,50 @@ export const LAYOUT_SPEC_REF_FIELDS: Readonly<Record<string, Readonly<Record<str
   items: { id: 'item' },
   districts: { id: 'location' },
   buildings: { id: 'location', districtId: 'location' },
+  // M4-02：概览集合（02 §10 / 契约 OverviewSpec）。
+  // zones.id 与 zones.near 是**地点**引用（命名河流作为已登记自然地点参与互动）；
+  // links.id 是**路线**引用（不得凭空造路）；features.zoneId 是地点引用，
+  // 而 features.id 是**本图局部视觉 ID**（不进 entity_keys，见 LAYOUT_LOCAL_COLLECTIONS）。
+  zones: { id: 'location', near: 'location' },
+  links: { id: 'route' },
+  features: { zoneId: 'location' },
 };
 
-/** 家具（局部视觉 ID）所在集合。 */
+/** 家具/装饰（局部视觉 ID）所在集合。 */
 export const LAYOUT_LOCAL_COLLECTION = 'contents';
 
-/** 指向家具组的局部关联字段：只做池内匹配，绝不解析成实体。 */
+/**
+ * M4-02：定义局部视觉 ID 的集合与字段。
+ * `contents[].id` 是房间家具的局部 ID；`features[].id` 是概览地物的本图局部 ID——
+ * 两者都只在本图内有意义，绝不写入 entity_keys，也不允许被解析成实体。
+ */
+export const LAYOUT_LOCAL_COLLECTIONS: Readonly<Record<string, readonly string[]>> = {
+  contents: ['id'],
+  features: ['id'],
+};
+
+/** 引用了局部视觉 ID 的字段：只做池内匹配，绝不解析成实体。 */
 export const LAYOUT_LOCAL_FIELDS: Readonly<Record<string, readonly string[]>> = {
   actors: ['near'],
   items: ['on'],
+};
+
+/**
+ * M4-02：`spec.deletes` 按集合区分「实体 ID」与「本图局部 ID」。
+ * zones/links/rooms/... 删除的是实体行（可为 `new:` 引用，必须解析）；
+ * features/contents 删除的是本图局部视觉 ID，且它可能来自**上一次请求**保存的约束，
+ * 因此不在本请求 spec 里也必须放行（不按本地池校验，只做字符串形状检查）。
+ */
+export const LAYOUT_DELETE_REF_KINDS: Readonly<Record<string, RefKind | null>> = {
+  zones: 'location',
+  links: 'route',
+  rooms: 'location',
+  districts: 'location',
+  buildings: 'location',
+  actors: 'character',
+  items: 'item',
+  contents: null,
+  features: null,
 };
 
 export type LayoutRefHit = {
@@ -715,22 +750,27 @@ export function resolveRef(
 /* ─── map.layout.request：spec 引用的第二遍解析（P03） ─── */
 
 /**
- * 家具组的局部 ID 池：同时收录原样 id 与去掉 `new:` 后的裸别名，
+ * 局部视觉 ID 池：同时收录原样 id 与去掉 `new:` 后的裸别名，
  * 这样 `contents[].id` 写 `new:table1` 或 `table1` 都能被 `near`/`on` 命中。
+ * M4-02：`features[].id`（概览地物的本图局部 ID）同样入池。
  */
 function collectLocalIds(spec: Record<string, unknown>): Set<string> {
   const pool = new Set<string>();
-  const rows = spec[LAYOUT_LOCAL_COLLECTION];
-  if (!Array.isArray(rows)) return pool;
-  for (const row of rows) {
-    if (row === null || typeof row !== 'object') continue;
-    const id = (row as Record<string, unknown>)['id'];
-    if (typeof id !== 'string') continue;
-    const trimmed = id.trim();
-    if (trimmed.length === 0) continue;
-    pool.add(trimmed);
-    const bare = newAliasOf(trimmed);
-    if (bare !== null) pool.add(bare);
+  for (const [collection, fields] of Object.entries(LAYOUT_LOCAL_COLLECTIONS)) {
+    const rows = spec[collection];
+    if (!Array.isArray(rows)) continue;
+    for (const row of rows) {
+      if (row === null || typeof row !== 'object') continue;
+      for (const field of fields) {
+        const id = (row as Record<string, unknown>)[field];
+        if (typeof id !== 'string') continue;
+        const trimmed = id.trim();
+        if (trimmed.length === 0) continue;
+        pool.add(trimmed);
+        const bare = newAliasOf(trimmed);
+        if (bare !== null) pool.add(bare);
+      }
+    }
   }
   return pool;
 }
@@ -824,6 +864,59 @@ export function resolveLayoutSpecRefs(
       nextRows.push(record);
     }
     out[collection] = nextRows;
+  }
+
+  // M4-02：deletes 按集合区分实体 ID 与局部视觉 ID，绝不把两者混为一谈。
+  // - zones/links/rooms/... 删的是实体行：`new:` 引用必须解析成功，裸 ID 找不到就原样保留
+  //   （它可能就是上一轮保存的实体 ID，省略即保持、绝不按名字猜）。
+  // - features/contents 删的是本图局部视觉 ID：只做字符串形状检查，不要求出现在本请求 spec 里
+  //   （重复约束清理正是要删掉本请求没再列出的旧 ID）。
+  const deletes = out['deletes'];
+  if (deletes !== null && typeof deletes === 'object' && !Array.isArray(deletes)) {
+    const nextDeletes: Record<string, unknown> = { ...(deletes as Record<string, unknown>) };
+    for (const [collection, kind] of Object.entries(LAYOUT_DELETE_REF_KINDS)) {
+      const list = nextDeletes[collection];
+      if (!Array.isArray(list)) continue;
+      const nextList: unknown[] = [];
+      for (let i = 0; i < list.length; i += 1) {
+        const raw = list[i];
+        if (typeof raw !== 'string') {
+          nextList.push(raw);
+          continue;
+        }
+        const rawText = raw.trim();
+        if (rawText.length === 0) {
+          nextList.push(raw);
+          continue;
+        }
+        if (kind === null) {
+          // 局部视觉 ID：不解析、不建实体；形状由 normalizeLayoutSpec 负责。
+          nextList.push(rawText);
+          continue;
+        }
+        const resolved = resolveRef(rawText, kind, scope, {
+          opId: where?.opId,
+          line: where?.line,
+          field: `spec.deletes.${collection}[${i}]`,
+        });
+        if (resolved.entry !== null) {
+          nextList.push(resolved.entry.id);
+          if (!seen.has(resolved.entry.id)) {
+            seen.add(resolved.entry.id);
+            dependencies.push(resolved.entry.id);
+          }
+          continue;
+        }
+        const isNewRef = rawText.startsWith(NEW_PREFIX);
+        for (const item of resolved.issues) {
+          if (!isNewRef && item.code === 'REF_UNKNOWN') continue;
+          issues.push(item);
+        }
+        nextList.push(rawText);
+      }
+      nextDeletes[collection] = nextList;
+    }
+    out['deletes'] = nextDeletes;
   }
 
   return {

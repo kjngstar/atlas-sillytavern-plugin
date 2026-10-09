@@ -69,7 +69,171 @@ function rrect(ctx,x,y,w,h,r){
 }
 function glow(ctx,color,blur,fn){ ctx.save(); ctx.shadowColor=color; ctx.shadowBlur=blur; fn(); ctx.restore(); }
 
+/* ───────── M6-05 概览背景 ───────── */
+
+/* 面形材质：现有皮肤令牌的延伸，不引入新色系。未知世界一律不是实心背景。 */
+const SURFACE_PAINT = {
+  mixed:  ['#070e1a','#0a1524'],
+  urban:  ['#080b16','#0d1220'],
+  forest: ['#061310','#0a1c16'],
+  mountain:['#0a0e14','#121822'],
+  water:  ['#04121e','#062034'],
+  indoor: ['#0a0d14','#111722'],
+  void:   ['#03060c','#03060c']
+};
+
+/**
+ * M6-05②：装饰几何**记忆化**。
+ *
+ * 旧代码每帧用 `rng()` 现场撒一遍树点/碎石：同一张图每帧点位都不同，缩放时整片
+ * 林地会"抖"，而且这种逐帧随机在山地/森林图上直接变成噪点。这里按
+ * `地图:图元:尺寸` 做键缓存，点位一次算清、之后只画不算。
+ */
+const decorCache = new Map();
+function decor(seedKey, build){
+  let value = decorCache.get(seedKey);
+  if(value === undefined){
+    value = build();
+    // 缓存只服务于"别每帧重算"，不需要无限增长；超量就整体丢弃重来。
+    if(decorCache.size >= 512) decorCache.clear();
+    decorCache.set(seedKey, value);
+  }
+  return value;
+}
+/** 点是否落在多边形内（射线法）；pts 为 [x,y] 串。 */
+function insidePoly(pts,x,y){
+  let hit = false;
+  for(let i=0,j=pts.length-1;i<pts.length;j=i++){
+    const [xi,yi]=pts[i], [xj,yj]=pts[j];
+    if((yi>y)!==(yj>y) && x < (xj-xi)*(y-yi)/(yj-yi)+xi) hit = !hit;
+  }
+  return hit;
+}
+/** 装饰点的数量只由 density 决定；没有 density 就不撒点，不编一个默认密度。 */
+const DECOR_DOTS = {low:10, medium:22, high:38};
+function decorDots(id, pts, density){
+  const count = DECOR_DOTS[density];
+  if(!count || !Array.isArray(pts) || pts.length < 3) return [];
+  return decor('dots:'+id+':'+density,()=>{
+    const rnd = rng(hash(id) || 11);
+    let ax=Infinity,ay=Infinity,bx=-Infinity,by=-Infinity;
+    for(const [x,y] of pts){ ax=Math.min(ax,x); ay=Math.min(ay,y); bx=Math.max(bx,x); by=Math.max(by,y); }
+    const out=[], span=Math.max(1e-6,bx-ax), spanY=Math.max(1e-6,by-ay);
+    for(let i=0;i<count*4 && out.length<count;i++){
+      const x=ax+rnd()*span, y=ay+rnd()*spanY;
+      if(insidePoly(pts,x,y)) out.push([x,y]);
+    }
+    return out;
+  });
+}
+/**
+ * 视口在世界坐标下的矩形（含 pad）。纯函数，方便单测与复用。
+ * NaN / 零缩放防护：拿不到可信相机就退回"全画"，绝不因 NaN 静默丢掉整张图。
+ */
+function worldViewRect(cam,vw,vh,pad){
+  const s=cam&&cam.s;
+  if(!Number.isFinite(s)||s<=0||!Number.isFinite(cam.x)||!Number.isFinite(cam.y)||!Number.isFinite(vw)||!Number.isFinite(vh))
+    return {x0:-Infinity,x1:Infinity,y0:-Infinity,y1:Infinity};
+  const k=(pad==null?1.12:pad)/s;
+  return {x0:cam.x-vw/2*k, x1:cam.x+vw/2*k, y0:cam.y-vh/2*k, y1:cam.y+vh/2*k};
+}
+/** 一串世界坐标点只要包围盒与裁剪框相交就值得画。 */
+function ptsVisible(pts, r){
+  if(!pts || !pts.length) return false;
+  let ax=Infinity,ay=Infinity,bx=-Infinity,by=-Infinity;
+  for(const p of pts){ const x=p[0],y=p[1]; if(x<ax)ax=x; if(x>bx)bx=x; if(y<ay)ay=y; if(y>by)by=y; }
+  return !(bx<r.x0 || ax>r.x1 || by<r.y0 || ay>r.y1);
+}
+
 /* ══════════════════════════════════════════════════════════════ */
+/* ══════════ 网格（M6-07：步长与视口裁剪） ══════════ */
+/**
+ * M6-07①：步长只取 1/2/5×10^n，并且屏幕间距必须落在 12–40 CSS px。
+ *
+ * 旧实现把步长取自写死的 `[1,2,5,10,20,25,50,100,200,250,500,1000]`：
+ * 既混进了 25/250 这种非 1-2-5 档，又会在极端缩放下**饱和在 1000** ——
+ * 缩到很小时循环步长再也跟不上，只能刷出上万条线。现在按当前缩放现算，永不饱和。
+ */
+function gridStep(camS, minPx, maxPx){
+  const lo=minPx==null?12:minPx, hi=maxPx==null?40:maxPx;
+  if(!Number.isFinite(camS)||camS<=0)return null;
+  const base=Math.pow(10,Math.ceil(Math.log10(lo/camS)));
+  for(const m of [1,2,5]){
+    const s=base/m, px=s*camS;
+    if(Number.isFinite(s)&&s>0&&px>=lo&&px<=hi)return s;
+  }
+  // 浮点边界兜底：在 1/2/5 档里取屏距最接近下限的那一档。
+  const ladder=[base,base/2,base/5].filter(s=>Number.isFinite(s)&&s>0);
+  if(!ladder.length)return null;
+  return ladder.reduce((best,s)=>Math.abs(s*camS-lo)<Math.abs(best*camS-lo)?s:best,ladder[0]);
+}
+
+/**
+ * M6-07①：按 1/2/5 档与可见视口画网格。
+ *
+ * 纯函数式入口（只吃 ctx + 几何参数），所以可以直接单测线数、坐标范围与线宽，
+ * 不必去构造整个 canvas 生命周期。
+ */
+function paintGrid(ctx, {cam, vw, vh, dpr, step, maxLines}){
+  const limit=maxLines==null?2000:maxLines;
+  if(!ctx||!cam||!Number.isFinite(cam.s)||cam.s<=0)return 0;
+  if(!Number.isFinite(cam.x)||!Number.isFinite(cam.y)||!Number.isFinite(vw)||!Number.isFinite(vh))return 0;
+  if(!Number.isFinite(step)||step<=0||vw<=0||vh<=0)return 0;
+  const scale=Number.isFinite(dpr)&&dpr>0?dpr:1;
+  const x0=(0-vw/2)/cam.s+cam.x, x1=(vw-vw/2)/cam.s+cam.x;
+  const y0=(0-vh/2)/cam.s+cam.y, y1=(vh-vh/2)/cam.s+cam.y;
+  const sx=x=>(x-cam.x)*cam.s+vw/2, sy=y=>(y-cam.y)*cam.s+vh/2;
+  // 对齐到设备像素中心：1 物理像素的线才能画实，而不是糊成两格灰。
+  const align=v=>Math.round(v*scale)/scale+0.5/scale;
+  ctx.save();
+  ctx.lineWidth=1/scale;
+  let count=0;
+  for(let x=Math.floor(x0/step)*step; x<=x1 && count<limit; x+=step, count++){
+    const major=Math.abs(Math.round(x/step))%5===0;
+    ctx.strokeStyle=major?'rgba(110,190,255,.20)':'rgba(110,190,255,.075)';
+    const px=align(sx(x));
+    ctx.beginPath(); ctx.moveTo(px,0); ctx.lineTo(px,vh); ctx.stroke();
+  }
+  for(let y=Math.floor(y0/step)*step; y<=y1 && count<limit; y+=step, count++){
+    const major=Math.abs(Math.round(y/step))%5===0;
+    ctx.strokeStyle=major?'rgba(110,190,255,.20)':'rgba(110,190,255,.075)';
+    const py=align(sy(y));
+    ctx.beginPath(); ctx.moveTo(0,py); ctx.lineTo(vw,py); ctx.stroke();
+  }
+  ctx.restore();
+  return count;
+}
+
+/**
+ * M6-10②：标签避让。
+ *
+ * 规则只有一条不能破：**marker 的物理坐标不为排字而移动**。
+ * 首选位保持原观感（正中、锚点正下方）；挤不下就依次试右、左、上方，
+ * 六个方位全挤不下就整条收纳不画 —— 绝不叠成一团，也绝不挪 marker。
+ * 被挪开的标签拉一条 leader 线指回锚点，读者仍知道它属于谁。
+ */
+function labelSpots(ax,ay,tw,th){
+  const gap=7;
+  return [
+    [ax-tw/2, ay],                              // 首选：正中 · 锚点正下方
+    [ax+gap, ay],                               // 右
+    [ax-gap-tw, ay],                            // 左
+    [ax-tw/2, ay-th-gap],                       // 上
+    [ax+gap, ay-th-gap],                        // 右上
+    [ax-gap-tw, ay-th-gap],                     // 左上
+  ];
+}
+function placeLabel(occupied, ax, ay, tw, th){
+  const spots=labelSpots(ax,ay,tw,th);
+  for(let i=0;i<spots.length;i++){
+    const box={x:spots[i][0], y:spots[i][1], w:tw, h:th};
+    const clash=occupied.some(b=>box.x<b.x+b.w+4 && box.x+box.w>b.x-4 && box.y<b.y+b.h+4 && box.y+box.h>b.y-4);
+    if(clash)continue;
+    return {box, leader:i>0, lx:clamp(ax, box.x+3, box.x+box.w-3), ly: box.y>=ay?box.y:box.y+box.h};
+  }
+  return null;
+}
+
 function create(canvas, mini, hooks){
   const ctx = canvas.getContext('2d');
   const mctx = mini.getContext('2d');
@@ -136,8 +300,12 @@ function create(canvas, mini, hooks){
   function terrainWorld(g,w,h){
     const [x0,x1,y0,y1] = extent();
     // 底色
+    // M6-05③：概览声明的 surface 覆盖层级默认底色；void（未知世界）就是纯材质，
+    // 不许拿别的世界的地形纹理来补。未声明 surface 时保持原层级配色，观感不变。
+    const paint = SURFACE_PAINT[g.surface];
     const bg = ctx.createLinearGradient(0,y0,0,y1);
-    if(st.kind==='world'){ bg.addColorStop(0,'#040a14'); bg.addColorStop(1,'#05121e'); }
+    if(paint){ bg.addColorStop(0,paint[0]); bg.addColorStop(1,paint[1]); }
+    else if(st.kind==='world'){ bg.addColorStop(0,'#040a14'); bg.addColorStop(1,'#05121e'); }
     else if(st.kind==='region'){ bg.addColorStop(0,'#07130f'); bg.addColorStop(1,'#0a1a14'); }
     else if(st.kind==='city'){ bg.addColorStop(0,'#080b16'); bg.addColorStop(1,'#0b1020'); }
     else { bg.addColorStop(0,'#070b14'); bg.addColorStop(1,'#0a1120'); }
@@ -156,17 +324,128 @@ function create(canvas, mini, hooks){
 
   // SQL overview geometry is usable before a decorative floor/city layout
   // exists. All points stay in this map's transform; absent paths stay absent.
+  /**
+   * M6-05①：概览的绘制顺序是固定的 ——
+   *   ①面形底色（terrainWorld 已铺）→ ②zone 填色 → ③背景林地/山地/水岸 →
+   *   ④道路 → ⑤建筑群质感 →（屏幕空间）marker/label → flow。
+   *
+   * M6-05③：装饰只有材质。这里**不产生**任何可点击/可查询的实体 ——
+   * 无名装饰不是地点，缺 shape 时也绝不补一个新地点出来。
+   */
   function overviewMap(g){
+    const r=worldViewRect(st.cam,st.vw,st.vh,1.12), cam=st.cam.s;
+    // 建成区 role 是 schema 枚举；没声明 role 就不加质感，不猜这块地是不是城市。
+    const BUILT_ROLES = {city:1,settlement:1,district:1,campus:1};
     ctx.save();
+    // ② zone 填色
     for(const shape of g.overviewShapes||[]){
+      if(!ptsVisible(shape.pts,r)) continue;
       ctx.beginPath();shape.pts.forEach((p,i)=>i?ctx.lineTo(p[0],p[1]):ctx.moveTo(p[0],p[1]));ctx.closePath();
-      ctx.fillStyle=hexA(shape.c,.08);ctx.fill();ctx.strokeStyle=hexA(shape.c,.48);ctx.lineWidth=1/st.cam.s;
-      ctx.setLineDash(shape.quality==='exact'||shape.quality==='confirmed'?[]:[5/st.cam.s,4/st.cam.s]);ctx.stroke();
+      ctx.fillStyle=hexA(shape.c,.10);ctx.fill();
+      ctx.strokeStyle=hexA(shape.c,shape.proxy?.36:.48);ctx.lineWidth=1/cam;
+      ctx.setLineDash(shape.quality==='exact'||shape.quality==='confirmed'?[]:[5/cam,4/cam]);ctx.stroke();
+      // proxy：轮廓在别的图上，这里是"入口示意" —— 叠一圈点线把它和实测轮廓分开。
+      if(shape.proxy){ctx.setLineDash([1.5/cam,3/cam]);ctx.strokeStyle='rgba(255,194,71,.5)';ctx.stroke();}
     }
+    ctx.setLineDash([]);
+    // ③ 背景林地 / 山地 / 水岸
+    for(const f of g.overviewFeatures||[]) drawFeature(f,r,cam);
+    // ④ 已登记道路
     for(const route of g.overviewRoutes||[]){
+      if(!ptsVisible(route.points,r)) continue;
       ctx.beginPath();route.points.forEach((p,i)=>i?ctx.lineTo(p[0],p[1]):ctx.moveTo(p[0],p[1]));
-      ctx.strokeStyle=route.dashed?'rgba(127,212,255,.55)':'rgba(67,224,255,.7)';ctx.lineWidth=1.5/st.cam.s;
-      ctx.setLineDash(route.dashed?[6/st.cam.s,4/st.cam.s]:[]);ctx.stroke();
+      ctx.strokeStyle=route.dashed?'rgba(127,212,255,.42)':'rgba(67,224,255,.7)';
+      ctx.lineWidth=(route.dashed?1.1:1.5)/cam;
+      ctx.setLineDash(route.dashed?[6/cam,4/cam]:[]);ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    // ⑤ 建筑群质感（只在 zone 自己声明了建成区 role 时加）
+    for(const shape of g.overviewShapes||[]){
+      if(!BUILT_ROLES[shape.role]||!ptsVisible(shape.pts,r)) continue;
+      ctx.beginPath();shape.pts.forEach((p,i)=>i?ctx.lineTo(p[0],p[1]):ctx.moveTo(p[0],p[1]));ctx.closePath();
+      ctx.fillStyle=hexA(shape.c,.13);ctx.fill();
+      ctx.save();ctx.clip();
+      ctx.strokeStyle='rgba(200,230,255,.10)';ctx.lineWidth=.8/cam;
+      for(const [dx,dy] of decorDots(shape.id+':slab',shape.pts,'medium')){
+        ctx.beginPath();ctx.moveTo(dx-2.4,dy);ctx.lineTo(dx+2.4,dy);ctx.moveTo(dx,dy-2.4);ctx.lineTo(dx,dy+2.4);ctx.stroke();
+      }
+      ctx.restore();
+      ctx.strokeStyle=hexA(shape.c,.55);ctx.lineWidth=1.2/cam;ctx.setLineDash([]);ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  /**
+   * 单条装饰材质。类型是 schema 枚举；未知类型只铺一层极淡材质，
+   * 既不猜它是什么，也不给它建实体。
+   */
+  function drawFeature(f,r,cam){
+    const line=f.line,poly=f.poly;
+    if(line&&!ptsVisible(line,r))return;
+    if(poly&&!ptsVisible(poly,r))return;
+    const path=pts=>{ctx.beginPath();smooth(ctx,pts,!!poly);};
+    ctx.save();
+    switch(f.type){
+      case 'watercourse':{
+        // G01：水系必须是"有宽度的线"，不能退化成一个蓝点；宽度是真实正数且随缩放走。
+        const w=Math.max(f.width||0,2.2/cam);
+        path(line);ctx.lineCap='round';
+        ctx.lineWidth=w*1.9;ctx.strokeStyle='rgba(24,96,150,.30)';ctx.stroke();
+        ctx.lineWidth=w;ctx.strokeStyle='rgba(90,215,255,.55)';
+        ctx.shadowColor='rgba(67,224,255,.55)';ctx.shadowBlur=10/cam;ctx.stroke();
+        break;
+      }
+      case 'shore':{
+        path(line||poly);ctx.lineCap='round';
+        ctx.lineWidth=Math.max(f.width||0,1.6/cam);
+        ctx.setLineDash([9/cam,6/cam]);ctx.strokeStyle='rgba(255,214,150,.32)';ctx.stroke();
+        break;
+      }
+      case 'road_texture':{
+        // 路纹只是纹理：不进旅程/路径表，也不生成可点击实体。
+        path(line||poly);ctx.lineCap='round';
+        ctx.lineWidth=Math.max(f.width||0,1.2/cam);
+        ctx.setLineDash([5/cam,5/cam]);ctx.strokeStyle='rgba(200,220,240,.20)';ctx.stroke();
+        break;
+      }
+      case 'forest_texture':{
+        path(line||poly);
+        ctx.fillStyle='rgba(52,150,110,.15)';if(poly)ctx.fill();
+        ctx.lineWidth=Math.max(f.width||0,1/cam);ctx.strokeStyle='rgba(90,220,160,.28)';ctx.stroke();
+        // 树点是按 (图元:密度) 记忆化的固定点位 —— 不每帧重撒，缩放时不抖。
+        if(poly){
+          ctx.fillStyle='rgba(120,235,175,.28)';
+          for(const [dx,dy] of decorDots(f.id,poly,f.density)){ctx.beginPath();ctx.arc(dx,dy,Math.max(1.0,.9),0,7);ctx.fill();}
+        }
+        break;
+      }
+      case 'ridge':{
+        path(line||poly);
+        ctx.fillStyle='rgba(120,140,175,.16)';if(poly)ctx.fill();
+        ctx.lineWidth=Math.max(f.width||0,2/cam);ctx.strokeStyle='rgba(170,195,235,.30)';ctx.stroke();
+        break;
+      }
+      case 'building_cluster':{
+        path(line||poly);
+        ctx.fillStyle='rgba(170,205,255,.10)';if(poly)ctx.fill();
+        ctx.lineWidth=Math.max(f.width||0,1/cam);ctx.strokeStyle='rgba(180,215,255,.24)';ctx.stroke();
+        if(poly){ctx.fillStyle='rgba(200,225,255,.20)';
+          for(const [dx,dy] of decorDots(f.id,poly,f.density)){ctx.fillRect(dx-1.1,dy-1.1,2.2,2.2);}}
+        break;
+      }
+      case 'ruins_scatter':{
+        path(line||poly);
+        ctx.fillStyle='rgba(255,194,71,.07)';if(poly)ctx.fill();
+        ctx.lineWidth=Math.max(f.width||0,1/cam);ctx.strokeStyle='rgba(255,194,71,.22)';ctx.stroke();
+        if(poly){ctx.fillStyle='rgba(255,205,140,.24)';
+          for(const [dx,dy] of decorDots(f.id,poly,f.density)){ctx.fillRect(dx-1.3,dy-0.7,2.6,1.4);}}
+        break;
+      }
+      default:{
+        path(line||poly);
+        ctx.fillStyle='rgba(120,180,255,.06)';if(poly)ctx.fill();
+        ctx.lineWidth=Math.max(f.width||0,1/cam);ctx.strokeStyle='rgba(120,180,255,.18)';ctx.stroke();
+      }
     }
     ctx.restore();
   }
@@ -323,7 +602,6 @@ function create(canvas, mini, hooks){
 
   /* ── L2 城市 ── */
   function cityMap(g){
-    const seed = hash(st.node.id);
     if(g.wallPoints?.length){ctx.save();ctx.beginPath();smooth(ctx,g.wallPoints,true);ctx.strokeStyle='rgba(120,190,255,.13)';ctx.lineWidth=6/st.cam.s;ctx.stroke();ctx.strokeStyle='rgba(170,225,255,.5)';ctx.lineWidth=1.8/st.cam.s;ctx.setLineDash([12/st.cam.s,5/st.cam.s]);ctx.stroke();ctx.restore();}
     // 河流
     if(g.river){
@@ -366,29 +644,11 @@ function create(canvas, mini, hooks){
       pushLabel(cx, cy-7, d.name, d.c, 'name', true);
       pushLabel(cx, cy+11, d.id.slice(0,4).toUpperCase()+' · 街区', 'rgba(140,170,200,.72)', 'sub', true);
     });
-    // 环路
-    ctx.save(); ctx.strokeStyle='rgba(150,200,255,.22)'; ctx.lineWidth=2.4/st.cam.s;
-    (g.rings||[]).forEach((r,i)=>{
-      ctx.beginPath(); smooth(ctx,wobbly(0,0,r.r,r.seg,r.wob,seed+i),true); ctx.stroke();
-    });
-    ctx.restore();
-    // 放射大道
-    ctx.save(); ctx.strokeStyle='rgba(150,200,255,.16)'; ctx.lineWidth=1.8/st.cam.s;
-    for(let i=0;i<(g.radials||0);i++){
-      const a=i/(g.radials||1)*Math.PI*2;
-      ctx.beginPath(); ctx.moveTo(Math.cos(a)*200,Math.sin(a)*200);
-      ctx.lineTo(Math.cos(a)*430,Math.sin(a)*430); ctx.stroke();
-    }
-    ctx.restore();
-    // 城墙
-    (g.walls||[]).forEach((w,i)=>{
-      ctx.save();
-      ctx.beginPath(); smooth(ctx,wobbly(0,0,w.r,w.seg,w.wob,seed+90+i),true);
-      ctx.lineWidth=6/st.cam.s; ctx.strokeStyle='rgba(120,190,255,.13)'; ctx.stroke();
-      ctx.lineWidth=1.8/st.cam.s; ctx.strokeStyle='rgba(170,225,255,.5)';
-      ctx.setLineDash([12/st.cam.s,5/st.cam.s]); ctx.stroke();
-      ctx.restore();
-    });
+    // 环路 / 放射大道 / 环形城墙：
+    // 这三段读的是 `g.rings` / `g.radials` / `g.walls` —— 仓库里**没有任何生产方**会产出它们
+    // （referenceGeometry 的 city 分支只下发 districts/river/wallPoints/avenues）。
+    // 留着它们等于留了一条"没数据也能画出一圈城墙"的伪造路径，与 G07「open city 不画默认城墙」冲突，
+    // 所以整段删除。真实城墙只看 wallPoints（由 layout.wall 投影，空数组就是开放式城市）。
     // 中心
     ctx.save();
     ctx.beginPath(); ctx.arc(0,0,7/st.cam.s,0,7); ctx.fillStyle='rgba(255,255,255,.25)'; ctx.fill();
@@ -570,15 +830,36 @@ function create(canvas, mini, hooks){
       if(live){ ctx.shadowColor=`rgba(${tint},.8)`; ctx.shadowBlur=16/st.cam.s; }
       ctx.stroke();
       ctx.restore();
-      // 家具
+    });
+
+    // M6-06②：灯光先于陈设与人物 —— 光晕压在人物**下方**，不许糊住 marker。
+    (g.lamps||[]).forEach(l=>{
+      const rad=Math.max(26,46);
+      ctx.save();
+      const rg=ctx.createRadialGradient(l.x,l.y,1,l.x,l.y,rad);
+      rg.addColorStop(0,'rgba(255,214,140,.20)'); rg.addColorStop(1,'rgba(255,214,140,0)');
+      ctx.beginPath(); ctx.arc(l.x,l.y,rad,0,7); ctx.fillStyle=rg; ctx.fill();
+      ctx.beginPath(); ctx.arc(l.x,l.y,2.6,0,7); ctx.fillStyle='rgba(255,232,180,.85)';
+      ctx.shadowColor='rgba(255,220,150,.9)'; ctx.shadowBlur=10/st.cam.s; ctx.fill();
+      ctx.restore();
+    });
+
+    // 陈设（M6-06②：按**真实 roomId** 归属，不再靠几何包含猜；ID 稳定可直接命中）
+    (g.rooms||[]).forEach(r=>{
+      const x=r.x, y=r.y, w=r.w, h=r.h;
+      const tint = r.tint || '120,180,255';
       (g.furn||[]).forEach(f=>{
         if(f.r3){ if(!(f.r3[0]===x&&f.r3[1]===y)) return; }
+        else if(f.roomId){ if(f.roomId!==r.id) return; }
         else if(!(f.r && f.r[0]>=x-1 && f.r[2]<=x+w+1 && f.r[1]>=y-1 && f.r[3]<=y+h+1)) return;
         drawFurn(f, x, y, w, h, tint);
       });
       // 房间标签
-      pushLabel(x+w/2, y+h/2 + (r.kind==='exit'?0:-4), r.name, live?C.cyan:'#a8bdd6', live?'live':'name', true);
-      pushLabel(x+w/2, y+h-13, r.kind==='vault'?'禁书区 · 上锁':(r.kind==='exit'?'可达 · 室外':'房间'), 'rgba(140,170,200,.75)','sub', true);
+      // M6-06③：副标题只写**真实字段**。旧代码在这里硬写「禁书区 · 上锁」——
+      // 那是示例世界的文案，会被原样印到任何世界的图上。现在有 status 用 status，
+      // 没有就写中性描述，绝不为哪个房间编一个剧情状态。
+      pushLabel(x+w/2, y+h/2 - 4, r.name, !!r.live?C.cyan:'#a8bdd6', !!r.live?'live':'name', true);
+      pushLabel(x+w/2, y+h-13, r.status || (r.kind==='exit'?'通道':'房间'), 'rgba(140,170,200,.75)','sub', true);
     });
 
     // 门
@@ -616,37 +897,148 @@ function create(canvas, mini, hooks){
     pushLabel(410, -284, st.node.host?`空间示意 · 单位 ${st.node.metric?'m':'格'}`:`比例 1:${Math.round(0.085/mpp*140)} · ATLAS 制图`, 'rgba(140,170,200,.85)', 'sub', true);
     pushLabel(410, -271, `地点 ${st.node.id} · ${st.node.name}`, 'rgba(140,170,200,.85)', 'sub', true);
   }
+  /**
+   * M6-06②：通用室内陈设。
+   *
+   * - 真实类型优先：读 `f.type`（M6-03 从场景的真实 body.type 投影而来）。
+   *   POV 场景的服务端白名单会剥掉 body.type，此时 `f.detail===false`、
+   *   这里画一块中性块 —— **不猜**它是一张床还是一张桌。
+   * - `f.solid===false`（灯、门洞、摆件）走虚线淡描：G08 要求实体障碍与装饰一眼可分。
+   * - 渲染靠 `f.r`（4 元组绝对坐标）；`x,y,w,h` 是所属房间，仅用于 fallback 着色。
+   */
   function drawFurn(f,x,y,w,h,tint){
+    const r=f.r||[x,y,x+w,y+h];
+    const [a,b,c2,d]=r;
+    const bw=c2-a, bh=d-b;
+    const known=!!f.type||!!f.detail;
+    const kind=f.type||f.t||'decor';
+    const solid=f.solid===true;
+    const stroke=solid?'rgba(214,232,255,.5)':'rgba(200,220,240,.30)';
+    const fill=solid?'rgba(200,225,255,.15)':'rgba(200,220,240,.07)';
     ctx.save();
-    if(f.t==='shelf'){
-      const[a,b,c2,d]=f.r;
-      ctx.beginPath(); rrect(ctx,a,b,c2-a,d-b,3);
-      ctx.fillStyle='rgba(255,194,71,.14)'; ctx.fill();
-      ctx.strokeStyle='rgba(255,194,71,.45)'; ctx.lineWidth=1.1/st.cam.s; ctx.stroke();
-      const n = f.n||7, horiz = (c2-a) > (d-b);
-      ctx.strokeStyle='rgba(255,214,130,.35)';
-      for(let i=1;i<n;i++){
-        ctx.beginPath();
-        if(horiz){ const xx=a+(c2-a)*i/n; ctx.moveTo(xx,b+3); ctx.lineTo(xx,d-3); }
-        else { const yy=b+(d-b)*i/n; ctx.moveTo(a+3,yy); ctx.lineTo(c2-3,yy); }
-        ctx.stroke();
+    if(!known||kind==='decor'){
+      // 不知道是什么，只标"这里有一件东西"，不编形状。
+      ctx.beginPath(); rrect(ctx,a,b,bw,bh,3);
+      ctx.fillStyle='rgba(170,200,235,.07)'; ctx.fill();
+      ctx.strokeStyle='rgba(180,205,235,.22)'; ctx.lineWidth=1/st.cam.s;
+      ctx.setLineDash([3/st.cam.s,3/st.cam.s]); ctx.stroke(); ctx.setLineDash([]);
+      ctx.restore(); return;
+    }
+    switch(kind){
+      case 'shelf':{
+        ctx.beginPath(); rrect(ctx,a,b,bw,bh,3);
+        ctx.fillStyle='rgba(255,194,71,.14)'; ctx.fill();
+        ctx.strokeStyle='rgba(255,194,71,.45)'; ctx.lineWidth=1.1/st.cam.s; ctx.stroke();
+        // 隔板数量是**画法参数**（约每 1.1 世界单位一层），不是世界数据；
+        // 旧代码读 `f.n`，而 `n` 从来没被任何数据源产出过 —— 那是个固定的假数字。
+        const horiz=bw>bh;
+        const n=Math.max(2,Math.min(8,Math.round((horiz?bw:bh)/1.1)));
+        ctx.strokeStyle='rgba(255,214,130,.35)';
+        for(let i=1;i<n;i++){
+          ctx.beginPath();
+          if(horiz){ const xx=a+bw*i/n; ctx.moveTo(xx,b+3); ctx.lineTo(xx,d-3); }
+          else { const yy=b+bh*i/n; ctx.moveTo(a+3,yy); ctx.lineTo(c2-3,yy); }
+          ctx.stroke();
+        }
+        break;
       }
-    } else if(f.t==='table'){
-      const[a,b,c2,d]=f.r;
-      ctx.beginPath(); rrect(ctx,a,b,c2-a,d-b,8);
-      ctx.fillStyle='rgba(200,225,255,.16)'; ctx.fill();
-      ctx.strokeStyle='rgba(200,230,255,.5)'; ctx.lineWidth=1.4/st.cam.s; ctx.stroke();
-    } else if(f.t==='desk'){
-      const[a,b,c2,d]=f.r;
-      ctx.beginPath(); rrect(ctx,a,b,c2-a,d-b,3);
-      ctx.fillStyle='rgba(140,200,255,.12)'; ctx.fill();
-      ctx.strokeStyle='rgba(150,210,255,.4)'; ctx.lineWidth=1.1/st.cam.s; ctx.stroke();
-    } else if(f.t==='rug'){
-      const[a,b,c2,d]=f.r;
-      ctx.beginPath(); rrect(ctx,a,b,c2-a,d-b,14);
-      ctx.fillStyle=`rgba(${tint},.10)`; ctx.fill();
-      ctx.setLineDash([6/st.cam.s,6/st.cam.s]);
-      ctx.strokeStyle=`rgba(${tint},.4)`; ctx.lineWidth=1.2/st.cam.s; ctx.stroke();
+      case 'table':{
+        ctx.beginPath(); rrect(ctx,a,b,bw,bh,8);
+        ctx.fillStyle='rgba(200,225,255,.16)'; ctx.fill();
+        ctx.strokeStyle='rgba(200,230,255,.5)'; ctx.lineWidth=1.4/st.cam.s; ctx.stroke();
+        break;
+      }
+      case 'desk':{
+        ctx.beginPath(); rrect(ctx,a,b,bw,bh,3);
+        ctx.fillStyle='rgba(140,200,255,.12)'; ctx.fill();
+        ctx.strokeStyle='rgba(150,210,255,.4)'; ctx.lineWidth=1.1/st.cam.s; ctx.stroke();
+        break;
+      }
+      case 'chair':{
+        ctx.beginPath(); rrect(ctx,a,b,bw,bh,2);
+        ctx.fillStyle='rgba(190,215,250,.14)'; ctx.fill();
+        ctx.strokeStyle='rgba(200,225,255,.42)'; ctx.lineWidth=1/st.cam.s; ctx.stroke();
+        // 椅背：沿短边画一道，让人一眼看出朝向
+        ctx.beginPath();
+        if(bw>=bh){ ctx.moveTo(a+1,b+1); ctx.lineTo(c2-1,b+1); }
+        else { ctx.moveTo(a+1,b+1); ctx.lineTo(a+1,d-1); }
+        ctx.lineWidth=2/st.cam.s; ctx.strokeStyle='rgba(200,225,255,.6)'; ctx.stroke();
+        break;
+      }
+      case 'bed':{
+        ctx.beginPath(); rrect(ctx,a,b,bw,bh,4);
+        ctx.fillStyle='rgba(155,107,255,.14)'; ctx.fill();
+        ctx.strokeStyle='rgba(180,150,255,.45)'; ctx.lineWidth=1.2/st.cam.s; ctx.stroke();
+        // 枕头（短边一侧）+ 被沿
+        ctx.fillStyle='rgba(210,195,255,.22)';
+        if(bh>=bw){ ctx.beginPath(); rrect(ctx,a+2,b+2,bw-4,Math.min(bh*.22,7),2); ctx.fill();
+          ctx.beginPath(); ctx.moveTo(a+2,b+bh*.42); ctx.lineTo(c2-2,b+bh*.42); }
+        else { ctx.beginPath(); rrect(ctx,a+2,b+2,Math.min(bw*.22,7),bh-4,2); ctx.fill();
+          ctx.beginPath(); ctx.moveTo(a+bw*.42,b+2); ctx.lineTo(a+bw*.42,d-2); }
+        ctx.strokeStyle='rgba(210,195,255,.35)'; ctx.lineWidth=1/st.cam.s; ctx.stroke();
+        break;
+      }
+      case 'pillow':{
+        ctx.beginPath(); rrect(ctx,a,b,bw,bh,Math.min(bw,bh)/2);
+        ctx.fillStyle='rgba(210,195,255,.20)'; ctx.fill(); ctx.strokeStyle=stroke; ctx.lineWidth=1/st.cam.s; ctx.stroke();
+        break;
+      }
+      case 'cabinet':{
+        ctx.beginPath(); rrect(ctx,a,b,bw,bh,2);
+        ctx.fillStyle='rgba(255,194,71,.10)'; ctx.fill();
+        ctx.strokeStyle='rgba(255,205,130,.40)'; ctx.lineWidth=1.2/st.cam.s; ctx.stroke();
+        // 双开门 + 把手
+        ctx.beginPath();
+        if(bw>=bh){ const mx=a+bw/2; ctx.moveTo(mx,b+1); ctx.lineTo(mx,d-1); }
+        else { const my=b+bh/2; ctx.moveTo(a+1,my); ctx.lineTo(c2-1,my); }
+        ctx.strokeStyle='rgba(255,205,130,.28)'; ctx.lineWidth=0.9/st.cam.s; ctx.stroke();
+        ctx.beginPath(); ctx.arc(bw>=bh?a+bw*.42:a+bw*.45, bh>=bw?b+bh*.42:b+bh*.45, 0.9, 0, 7);
+        ctx.fillStyle='rgba(255,215,150,.6)'; ctx.fill();
+        break;
+      }
+      case 'rug':{
+        ctx.beginPath(); rrect(ctx,a,b,bw,bh,14);
+        ctx.fillStyle=`rgba(${tint},.10)`; ctx.fill();
+        ctx.setLineDash([6/st.cam.s,6/st.cam.s]);
+        ctx.strokeStyle=`rgba(${tint},.4)`; ctx.lineWidth=1.2/st.cam.s; ctx.stroke(); ctx.setLineDash([]);
+        break;
+      }
+      case 'light':{
+        // 灯不是障碍：只画一小圈光，且永远在人物下方（本函数在 marker 之前调用）。
+        ctx.beginPath(); ctx.arc(a+bw/2,b+bh/2,Math.max(2,Math.min(bw,bh)/2),0,7);
+        ctx.fillStyle='rgba(255,228,170,.28)'; ctx.fill();
+        ctx.strokeStyle='rgba(255,232,180,.5)'; ctx.lineWidth=0.9/st.cam.s;
+        ctx.setLineDash([2/st.cam.s,2/st.cam.s]); ctx.stroke(); ctx.setLineDash([]);
+        break;
+      }
+      case 'doorway':{
+        // 门洞是通行结构：画门槛，不画实体填充，也不参与碰撞。
+        ctx.beginPath(); ctx.moveTo(a,b); ctx.lineTo(c2,d);
+        ctx.strokeStyle='rgba(255,225,150,.45)'; ctx.lineWidth=1.4/st.cam.s;
+        ctx.setLineDash([4/st.cam.s,3/st.cam.s]); ctx.stroke(); ctx.setLineDash([]);
+        break;
+      }
+      case 'stairs':{
+        ctx.beginPath(); rrect(ctx,a,b,bw,bh,2);
+        ctx.fillStyle='rgba(160,175,205,.12)'; ctx.fill();
+        ctx.strokeStyle='rgba(170,190,225,.38)'; ctx.lineWidth=1/st.cam.s; ctx.stroke();
+        ctx.strokeStyle='rgba(170,190,225,.26)';
+        const steps=Math.max(2,Math.round((bw>=bh?bw:bh)/1.2));
+        for(let i=1;i<steps;i++){
+          ctx.beginPath();
+          if(bw>=bh){ const xx=a+bw*i/steps; ctx.moveTo(xx,b+1); ctx.lineTo(xx,d-1); }
+          else { const yy=b+bh*i/steps; ctx.moveTo(a+1,yy); ctx.lineTo(c2-1,yy); }
+          ctx.stroke();
+        }
+        break;
+      }
+      default:{
+        ctx.beginPath(); rrect(ctx,a,b,bw,bh,3);
+        ctx.fillStyle=fill; ctx.fill();
+        ctx.strokeStyle=stroke; ctx.lineWidth=1/st.cam.s;
+        if(!solid)ctx.setLineDash([3/st.cam.s,3/st.cam.s]);
+        ctx.stroke(); ctx.setLineDash([]);
+      }
     }
     ctx.restore();
   }
@@ -655,6 +1047,12 @@ function create(canvas, mini, hooks){
   function roomMap(g){
     const seed = hash(st.node.id), rnd = rng(seed);
     const W = g.walls;
+    // M6-06 边界：有已保存场景、但几何不是已知 kind 时会走到这里。
+    // 旧代码直接读 W.x 抛异常，整张图白屏；现在退化成空地面 + 明确说明。
+    if(!W || !Number.isFinite(W.x) || !Number.isFinite(W.y) || !Number.isFinite(W.w) || !Number.isFinite(W.h)){
+      pushLabel(0,0,'尚未建立内部空间','rgba(150,180,215,.85)','sub',true);
+      return;
+    }
     // 地面
     ctx.save();
     ctx.beginPath(); rrect(ctx,W.x,W.y,W.w,W.h,4);
@@ -781,31 +1179,27 @@ function create(canvas, mini, hooks){
   }
 
   /* ══════════ 网格 ══════════ */
+  /**
+   * M6-07①：网格画在**屏幕空间**，范围由可见视口决定。
+   *
+   * 旧实现在世界空间里画、靠 `1/st.cam.s` 反算线宽：看着也是 1px，但线位置没有对齐
+   * 设备像素，缩放时细线会忽明忽暗甚至消失半像素；而且范围取自固定的逻辑 extent，
+   * 缩放到外面就只剩一片空白。现在：可见视口算范围、线宽恒为 1 物理像素、
+   * 坐标对齐设备像素网格，单帧线数硬上限 2000。
+   */
   function grid(){
     if(!st.showGrid) return;
-    const [x0,x1,y0,y1]=extent();
-    const target = 62/st.cam.s;
-    const steps=[1,2,5,10,20,25,50,100,200,250,500,1000];
-    let step=steps[0];
-    for(const s of steps){ if(s>=target){ step=s; break; } step=s; }
-    const [wx0,wy0]=S2W(0,0), [wx1,wy1]=S2W(st.vw,st.vh);
-    ctx.save();
-    ctx.lineWidth=1/st.cam.s;
-    const majorEvery=5;
-    for(let x=Math.floor(wx0/step)*step; x<=wx1; x+=step){
-      const major = Math.abs(Math.round(x/step))%majorEvery===0;
-      ctx.strokeStyle = major?'rgba(110,190,255,.20)':'rgba(110,190,255,.075)';
-      ctx.beginPath(); ctx.moveTo(x,wy0); ctx.lineTo(x,wy1); ctx.stroke();
-    }
-    for(let y=Math.floor(wy0/step)*step; y<=wy1; y+=step){
-      const major = Math.abs(Math.round(y/step))%majorEvery===0;
-      ctx.strokeStyle = major?'rgba(110,190,255,.20)':'rgba(110,190,255,.075)';
-      ctx.beginPath(); ctx.moveTo(wx0,y); ctx.lineTo(wx1,y); ctx.stroke();
-    }
-    ctx.restore();
+    const cam=st.cam;
+    // NaN / 零缩放防护：算不出可信步长就不画网格，绝不进死循环。
+    if(!Number.isFinite(cam.s)||cam.s<=0||!Number.isFinite(cam.x)||!Number.isFinite(cam.y)
+      ||!Number.isFinite(st.vw)||!Number.isFinite(st.vh)) return;
+    const step=gridStep(cam.s);
+    if(!(step>0)) return;
+    paintGrid(ctx,{cam,vw:st.vw,vh:st.vh,dpr:st.dpr,step});
   }
 
-  function pushLabel(x,y,text,color,kind,world){ if(st.showLabels) st.labels.push({x,y,text,color,kind,scr:!world}); }
+  /** `rank` 越小越优先（0 = 选中/悬停）。不传就按标签种类给默认优先级。 */
+  function pushLabel(x,y,text,color,kind,world,rank){ if(st.showLabels) st.labels.push({x,y,text,color,kind,scr:!world,rank}); }
 
   /* ══════════ 标记（屏幕空间） ══════════ */
   function collectMarks(){
@@ -856,18 +1250,32 @@ function create(canvas, mini, hooks){
     return (p&&(p.children||[]).find(x=>x.id===id))||null;
   }
 
+  /**
+   * M6-10①：标记的屏幕坐标只在这里算一次。
+   *
+   * 命中测试与绘制必须用**完全相同**的固定坐标 —— 旧代码在 drawMarks 里算一遍、
+   * 在 hitTest 里用 W2S 再算一遍，任何一侧加个偏移就会出现"看得到点不中"。
+   * 这里同时做视口裁剪，保证"画出来的就能点、点不到的就不画"。
+   */
+  function markScreenPos(m){
+    const [x,y]=W2S(m.x,m.y);
+    if(x<-90||x>st.vw+90||y<-90||y>st.vh+90) return null;
+    return {m,x,y,r:16};
+  }
+  function visibleMarkHits(){
+    const out=[];
+    for(const m of st.marks){ const hit=markScreenPos(m); if(hit) out.push(hit); }
+    return out;
+  }
+
   function drawMarks(t){
-    const marks = st.marks;
     st.hits=[];
     ctx.save();
-    marks.forEach(m=>{
-      const [sx,sy]=W2S(m.x,m.y);
-      if(sx<-90||sx>st.vw+90||sy<-90||sy>st.vh+90) return;
-      const isHover = st.hover && st.hover.key===m.key;
-      const isSel = st.sel && st.sel.key===m.key;
-      st.hits.push({ x:sx, y:sy, r:16, m });
-      drawMark(ctx, m, sx, sy, t, isHover, isSel);
-    });
+    for(const hit of visibleMarkHits()){
+      // 悬停/选中只改颜色与光晕，**绝不**改坐标 —— 锚点一挪，点击目标就跟着飘。
+      st.hits.push(hit);
+      drawMark(ctx, hit.m, hit.x, hit.y, t, st.hover && st.hover.key===hit.m.key, st.sel && st.sel.key===hit.m.key);
+    }
     ctx.restore();
   }
 
@@ -965,48 +1373,72 @@ function create(canvas, mini, hooks){
     ctx.restore();
 
     if(!m.silent && m.name){
-      pushLabel(sx, sy + (m.type==='char'?24:18), m.name, m.live?C.cyan:'#c3d6ea', m.live?'live':'name');
-      if(m.sub && (sel||hover||st.cam.s>1.5)) pushLabel(sx, sy + (m.type==='char'?39:32), m.sub, 'rgba(160,185,210,.9)','sub');
+      // 选中/悬停的标签拿最高优先级，拥挤时优先保住它。
+      const rank=(sel||hover)?0:undefined;
+      pushLabel(sx, sy + (m.type==='char'?24:18), m.name, m.live?C.cyan:'#c3d6ea', m.live?'live':'name', false, rank);
+      if(m.sub && (sel||hover||st.cam.s>1.5)) pushLabel(sx, sy + (m.type==='char'?39:32), m.sub, 'rgba(160,185,210,.9)','sub', false, rank);
     }
   }
 
+  /**
+   * M6-10②③：标签按优先级绘制 + 屏幕矩形碰撞避让。
+   *
+   * 旧实现按 push 顺序先到先得 —— 一条没有名的副标题能顶掉在场人物的名字。
+   * 现在先按优先级排序（选中/悬停 > 在场 > 名称 > 副标题），挤不下就换方位、
+   * 再挤不下就收纳不画；任何情况下都不移动 marker 本身。
+   */
+  function labelRank(l){
+    if(Number.isFinite(l.rank))return l.rank;
+    if(l.kind==='live')return 1;
+    if(l.kind==='name')return 2;
+    return 4;
+  }
   function drawLabels(){
     ctx.save();
     ctx.textAlign='center'; ctx.textBaseline='top';
     const occupied=[];
-    st.labels.forEach(l=>{
+    const items=st.labels.map((l,i)=>{
       const [sx,sy]= l.scr ? [l.x,l.y] : W2S(l.x,l.y);
-      if(sx<-40||sx>st.vw+40||sy<-30||sy>st.vh+30) return;
+      return {l,sx,sy,i,rank:labelRank(l)};
+    }).filter(e=>e.sx>-40&&e.sx<=st.vw+40&&e.sy>-30&&e.sy<=st.vh+30)
+      .sort((a,b)=>a.rank-b.rank||a.i-b.i);
+    for(const {l,sx,sy} of items){
       ctx.font=(l.kind==='sub'?'400 11px ':l.kind==='live'?'600 12px ':'500 11px ')+F.sans;
-      const tw=ctx.measureText(l.text).width+12,th=l.kind==='live'?20:17;
-      const box={x:sx-tw/2,y:sy,w:tw,h:th};
-      if(occupied.some(b=>box.x<b.x+b.w+3&&box.x+box.w>b.x-3&&box.y<b.y+b.h+3&&box.y+box.h>b.y-3))return;
-      occupied.push(box);
+      const tw=ctx.measureText(l.text).width+12, th=l.kind==='live'?20:17;
+      const spot=placeLabel(occupied,sx,sy,tw,th);
+      if(!spot)continue;   // 放不下就收纳：宁可少写一个字，也不挪 marker 或叠成一团
+      occupied.push(spot.box);
+      // 被挪开的标签用 leader 线指回自己的锚点（物理位置不变，只是文字让位）。
+      if(spot.leader){
+        ctx.beginPath(); ctx.moveTo(sx,sy); ctx.lineTo(spot.lx,spot.ly);
+        ctx.strokeStyle=hexA(l.color,.5); ctx.lineWidth=1; ctx.stroke();
+      }
+      const cx=spot.box.x+spot.box.w/2;
       if(l.kind==='live'){
         ctx.font='600 11.5px '+F.sans;
         const w=ctx.measureText(l.text).width;
         ctx.beginPath();
-        rrect(ctx, sx-w/2-8, sy-2, w+16, 18, 9);
+        rrect(ctx, cx-w/2-8, spot.box.y-2, w+16, 18, 9);
         ctx.fillStyle='rgba(6,14,24,.82)'; ctx.fill();
         ctx.strokeStyle=hexA(l.color,.45); ctx.lineWidth=1; ctx.stroke();
         ctx.fillStyle=l.color;
         ctx.shadowColor=l.color; ctx.shadowBlur=10;
-        ctx.fillText(l.text, sx, sy+1);
+        ctx.fillText(l.text, cx, spot.box.y+1);
         ctx.shadowBlur=0;
       } else if(l.kind==='name'){
         ctx.font='500 11px '+F.sans;
         const w=ctx.measureText(l.text).width;
-        ctx.beginPath(); rrect(ctx, sx-w/2-6, sy-1, w+12, 15, 7);
+        ctx.beginPath(); rrect(ctx, cx-w/2-6, spot.box.y-1, w+12, 15, 7);
         ctx.fillStyle='rgba(5,11,20,.72)'; ctx.fill();
-        ctx.fillStyle=l.color; ctx.fillText(l.text, sx, sy);
+        ctx.fillStyle=l.color; ctx.fillText(l.text, cx, spot.box.y);
       } else {
         ctx.font='400 11px '+F.mono;
         const w=ctx.measureText(l.text).width;
         ctx.fillStyle='rgba(6,12,20,.78)';
-        ctx.fillRect(sx-w/2-3, sy-1, w+6, 12);
-        ctx.fillStyle=l.color; ctx.fillText(l.text, sx, sy);
+        ctx.fillRect(cx-w/2-3, spot.box.y-1, w+6, 12);
+        ctx.fillStyle=l.color; ctx.fillText(l.text, cx, spot.box.y);
       }
-    });
+    }
     ctx.restore();
   }
 
@@ -1122,6 +1554,16 @@ function create(canvas, mini, hooks){
       mctx.beginPath();shape.pts.forEach((p,i)=>{const q=T(p[0],p[1]);i?mctx.lineTo(q[0],q[1]):mctx.moveTo(q[0],q[1]);});mctx.closePath();
       mctx.fillStyle=hexA(shape.c,.12);mctx.fill();mctx.strokeStyle=hexA(shape.c,.45);mctx.stroke();
     }
+    // M6-05②：mini 用**同一份**装饰几何，只是抽掉细节（不撒点、不画阴影）。
+    for(const f of st.geo.overviewFeatures||[]){
+      const pts=f.line||f.poly;if(!pts||pts.length<2)continue;
+      mctx.beginPath();pts.forEach((p,i)=>{const q=T(p[0],p[1]);i?mctx.lineTo(q[0],q[1]):mctx.moveTo(q[0],q[1]);});
+      if(f.poly)mctx.closePath();
+      if(f.type==='watercourse'){mctx.strokeStyle='rgba(90,215,255,.55)';mctx.lineWidth=1;}
+      else if(f.type==='forest_texture'){mctx.fillStyle='rgba(52,150,110,.30)';mctx.fill();mctx.strokeStyle='rgba(90,220,160,.35)';mctx.lineWidth=.8;}
+      else {mctx.fillStyle='rgba(120,160,210,.16)';if(f.poly)mctx.fill();mctx.strokeStyle='rgba(120,160,210,.28)';mctx.lineWidth=.8;}
+      mctx.stroke();
+    }
     for(const route of st.geo.overviewRoutes||[]){
       mctx.beginPath();route.points.forEach((p,i)=>{const q=T(p[0],p[1]);i?mctx.lineTo(q[0],q[1]):mctx.moveTo(q[0],q[1]);});
       mctx.strokeStyle='rgba(67,224,255,.6)';mctx.setLineDash(route.dashed?[3,2]:[]);mctx.stroke();
@@ -1160,8 +1602,11 @@ function create(canvas, mini, hooks){
     ctx.scale(st.cam.s, st.cam.s);
     ctx.translate(-st.cam.x, -st.cam.y);
     terrainWorld(st.geo, st.vw, st.vh);
-    grid();
     ctx.restore();
+
+    // M6-07①：网格走**屏幕空间** —— 线宽恒为 1 物理像素，既不受缩放影响，
+    // 也不会像被 CSS 放大的位图那样糊掉。
+    grid();
 
     if(st.showMarks){
       if(st.mode==='heat') heatLayer();
@@ -1203,7 +1648,9 @@ function create(canvas, mini, hooks){
   /* ══════════ 交互 ══════════ */
   function hitTest(mx,my){
     let best=null, bd=1e9;
-    const markHits=st.showMarks?st.marks.map(m=>{const [x,y]=W2S(m.x,m.y);return {x,y,r:16,m};}):[];
+    // M6-10①：命中用**和绘制同一个** markScreenPos（含同样的视口裁剪），
+    // 保证"画出来的点点得中、点得中的一定画着"。
+    const markHits=st.showMarks?visibleMarkHits():[];
     markHits.concat(st.edgeHits).forEach(h=>{
       const d=Math.hypot(h.x-mx,h.y-my);
       if(d<h.r+7 && d<bd){ bd=d; best=h.m; }
@@ -1332,6 +1779,25 @@ function create(canvas, mini, hooks){
     setFlag(k,v){ st[k]=v; },
     setFilter(set){ st.filter=set; },
     heroScreen(){ const h=st.marks.find(m=>m.hero); return h?W2S(h.x,h.y):[st.vw/2,st.vh/2]; },
+    /**
+     * M6-07②：比例尺的**屏幕依据**只在这里回答"这一屏 1 UI 单位有多少 CSS 像素、
+     * 以及这个尺度可不可信"。
+     *
+     * 为什么公式不写在这里：`SCALE_WIDTH_PX=74` 与
+     * `distance = 74 / cssPixelsPerUnit × metersPerUnit` 是 ui-model.js 的唯一权威
+     * （纯函数、可单测）。在 map.js 再抄一遍 74 等于埋第二份会走样的常量。
+     * 这里只提供它算不出来的部分：相机尺度与尺度质量。
+     */
+    scaleQuality(){
+      const camS=st.cam.s, metric=st.node?.metric;
+      const calibrated=Number.isFinite(metric)&&metric>0;
+      const quality=st.node?.transform?.metricQuality??st.node?.transform?.scaleQuality??null;
+      // 未标定 → 报「格」；已标定但质量不是 confirmed → 是"约"出来的数字。
+      return {calibrated,quality,estimated:!calibrated||(quality!==null&&quality!=='confirmed'),
+        // 格制场景：1 UI 单位 = 1/transform.scale 格，折算成格的相机尺度要再乘一次。
+        cssPixelsPerUnit:Number.isFinite(camS)&&camS>0?camS*(calibrated?1:(st.node?.transform?.scale||1)):null,
+        metersPerUnit:calibrated?metric:null};
+    },
     fitScale, extent
   };
 }

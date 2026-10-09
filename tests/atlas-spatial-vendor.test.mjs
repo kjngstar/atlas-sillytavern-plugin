@@ -156,7 +156,7 @@ test('审查2：author 视角保留完整场景（含私密扩展），清洗只
   assert.ok(JSON.stringify(r.scene).includes('privateExtension'));
 });
 
-const overviewScene=(routes)=>({kind:'atlas-scene',version:1,generator:'test/1',mapId:'map-1',branchId:'b1',sourceRevision:3,units:'cells',metersPerCell:null,metricQuality:'uncalibrated',inputSignature:'sig-should-not-leak',layout:{id:'map-1',name:'overview',kind:'overview',bounds:{x:0,y:0,w:30,h:24},pins:[],shapes:[],routes}});
+const overviewScene=(routes)=>({kind:'atlas-scene',version:1,generator:'test/1',mapId:'map-1',branchId:'b1',sourceRevision:3,units:'cells',metersPerCell:null,metricQuality:'uncalibrated',inputSignature:'sig-should-not-leak',layout:{id:'map-1',name:'overview',kind:'overview',bounds:{x:0,y:0,w:30,h:24},pins:[],shapes:[],routes,features:[]}});
 
 test('审查2：overview 路线按端点可见性过滤——隐藏路线、无依据路线均不下发 POV',()=>{
   const scene=overviewScene([

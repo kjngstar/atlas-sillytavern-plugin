@@ -722,7 +722,7 @@ test('I08: 两个聊天 + fork —— 无共享实体缓存；fork 是显式复�
 // I11 · 读取不写入
 // ---------------------------------------------------------------------------
 
-test('I11: 连续只读 map/entity/nearby —— 0 次 hostSave、0 次模型调用、存档字节不变', async () => {
+test('I11: 连续只读 map/entity/nearby/事件流 —— 0 次 hostSave、0 次模型调用、存档字节不变', async () => {
   const { repo, model } = await makeRepo({ responses: [NOOP, INDEPENDENT_NEW] });
   try {
     const turn1 = await repo.prepareTurn({
@@ -746,6 +746,9 @@ test('I11: 连续只读 map/entity/nearby —— 0 次 hostSave、0 次模型调
       await repo.queryView({ kind: 'entity', branchId: BRANCH, viewMode: 'author', entityId: IDS.L1 });
       await repo.queryView({ kind: 'catalog', branchId: BRANCH, viewMode: 'author' });
       await repo.queryView({ kind: 'scene', branchId: BRANCH, viewMode: 'author' });
+      // M5-06 / I11：新事件流也是只读口，必须一起证明「读不写入」。
+      await repo.queryView({ kind: 'world-feed', branchId: BRANCH, viewMode: 'author' });
+      await repo.queryView({ kind: 'world-feed', branchId: BRANCH, viewMode: 'pov', povId: IDS.C1 });
     }
 
     assert.equal(model.calls.length, modelCallsBefore, '只读视图不得调用模型');

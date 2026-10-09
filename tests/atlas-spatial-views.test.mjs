@@ -265,7 +265,7 @@ test('Q13-04 routes/items 字段：好几何可绘、坏几何单项 issue、地
     const overview = {
       ...classroomScene(),
       mapId: IDS.M1,
-      layout: { kind: 'overview', id: IDS.M1, name: '世界图', bounds: { x: 0, y: 0, w: 120, h: 80 }, pins: [], shapes: [], routes: [] },
+      layout: { kind: 'overview', id: IDS.M1, name: '世界图', bounds: { x: 0, y: 0, w: 120, h: 80 }, pins: [], shapes: [], routes: [], features: [] },
     };
     writeSceneFrame(seed.db, IDS.M1, overview, { atlasLayoutRequest: { requestId: 'R0', status: 'pending', spec: { rooms: ['圣光学校'] } } });
     queryBound(seed.db, 'UPDATE routes SET geometry_json = ? WHERE branch_id = ? AND id = ?', [

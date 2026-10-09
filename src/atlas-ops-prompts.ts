@@ -83,7 +83,7 @@ const MINIMUM_HELP: Record<string, string> = {
   'channel.upsert': 'owner_ref, kind, name',
   'map.estimate': 'ref + 尺寸或距离依据',
   'route.propose': 'from_ref, to_ref',
-  'map.layout.request': 'ref + kind(floor/city) + spec（只写本次变化的约束：floor 用 rooms/contents/actors/items，city 用 districts/buildings，每条都要 id）；省略的键保持原样，删除只能写 spec.deletes；不要输出完整 scene、几何坐标、seed 或比例尺',
+  'map.layout.request': 'ref + kind(overview/city/floor，以程序给定值为准) + spec（只写本次变化的约束：overview 用 surface/zones/links/features，city 用 districts/buildings/enclosure/riverWidth，floor 用 rooms/contents/actors/items，每条都要 id）；省略的键保持原样，删除只能写 spec.deletes；不要输出完整 scene、几何坐标、seed 或比例尺',
   noop: '无修改',
 };
 
@@ -99,12 +99,15 @@ const PHASE_TASK: Record<Phase, string[]> = {
   ],
   geography: [
     '任务：处理这一张地图的层级、范围标定或路线估计。',
+    '每张图的角色由程序给定，不得改写：overview（根图/地区/自然）填 zones/links/features/surface；city（城市/街区）填 districts/buildings/enclosure；floor（建筑/楼层/房间/载具）填 rooms/contents/actors/items。',
+    '三种包含关系要分开：地点在容器内部（contained）→ 归入容器子图；只是相邻（adjacent）→ 用 routes 表达邻接；移动载具停靠（anchor）→ 用 anchor_ref。不要把载具当成固定建筑，也不要给相邻地区编造包含关系。',
     '城内地点归入城市子图，周边地点通过实际邻接/路线表达。移动载具不当作固定建筑。',
     '先根据给定资料判断地图大致现实尺寸；信息不足时给合理估计范围并说明 why，不能声称精确测量。',
     '不要利用界面标签排版坐标推出真实距离。用户已锁定的标定不修改。',
     '布局只提交这一张图上**发生变化**的约束：已有房间、家具、人物位置、物品不必每轮重写，未提及的一律保持原样，删除必须写 spec.deletes。',
     '不要输出完整 scene、几何坐标、seed 或比例尺；这些由程序生成并保管，模型给的是约束不是成品。',
-    '没有河流/水域资料时不要选 city 模板的水系结构；地块与建筑用程序给定的 ID 引用，不要凭名字猜 ID。',
+    '没有河流/水域资料时不要选 city 模板的水系结构；没有依据就不给 riverWidth，也不给每张图强塞城墙或树林。新城市默认 enclosure=open。地块与建筑用程序给定的 ID 引用，不要凭名字猜 ID。',
+    '布局阶段不新建 SQL 实体：可交互地点必须已经在目录里。但建设阶段允许新增地点，两者不冲突——不要因为布局不新建实体就停止补全世界。',
   ],
   decision: [
     '任务：为下面列出的角色判断注意、相信和下一步意图。',

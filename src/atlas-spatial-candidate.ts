@@ -1,5 +1,5 @@
 /**
- * atlas-spatial-candidate.ts — M3/W01 + W02 + W05：候选事务内的布局请求处理。
+ * atlas-spatial-candidate.ts — M3/W01 + W02 + W05 + M4-17：候选事务内的布局请求处理。
  *
  * 纪律（改这个文件前先读一遍）：
  * 1. **只在宿主已有的候选事务内执行**：`ports.insideCandidateTransaction` 必须是宿主签发的票据；
@@ -7,9 +7,11 @@
  * 2. **生成器是同步纯函数**：不持有事务等待任何 await。读到的都是最终 SQL 位置。
  * 3. **一张图一个 savepoint**：applySceneGroup 内部包了 `atlas_spatial_component` savepoint，
  *    失败整组恢复（延迟外键失败也会退回），旧 scene 与地点坐标都不变。不要绕过它。
+ *    单图失败只把该图的请求标 failed，**不影响其他图**，也不影响本轮已落库的世界实体。
  * 4. **预算**：默认 maxJobs=2，超出预算的图保持 pending 并回报，不偷偷多跑。
  * 5. **失败也落库**：标 failed 的请求用一条普通 maps 变更 + journal 记录完整 Issue 列表，
  *    这样重开界面不会自动重试同一请求。
+ * 6. **STALE 立即停**：处理到一半世界切换时，本轮整体停下，剩余请求全部保持 pending。
  */
 
 import type { GroupResult, Issue, RowMutation } from './atlas-ops-contract.ts';
@@ -65,7 +67,10 @@ function plain(value: unknown): value is SqlRow {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-function readTable(db: SqlDatabase, table: 'maps' | 'locations' | 'characters' | 'items', branchId: string, ports: SpatialPorts): SqlRow[] {
+/** M4-17：候选读取白名单。`routes` 用于概览的路线复用（已确认路线原样、缺失按估计折线）。 */
+type SpatialReadTable = 'maps' | 'locations' | 'characters' | 'items' | 'routes';
+
+function readTable(db: SqlDatabase, table: SpatialReadTable, branchId: string, ports: SpatialPorts): SqlRow[] {
   const run = ports.queryBound ?? queryBound;
   const decode = ports.decodeRow ?? decodeRow;
   const out: SqlRow[] = [];
@@ -85,11 +90,16 @@ function readMapRow(db: SqlDatabase, mapId: string, branchId: string, ports: Spa
   return decoded.ok ? (decoded.row as SqlRow) : null;
 }
 
+/** M4-17：队列支持的布局种类。`overview` 是宏观概览（区域/连通/背景材质）。 */
+type SpatialRequestKind = 'floor' | 'city' | 'overview';
+
+const SPATIAL_REQUEST_KINDS: readonly SpatialRequestKind[] = Object.freeze(['floor', 'city', 'overview'] as const);
+
 type PendingRequest = {
   mapId: string;
   requestId: string;
   operationId: string;
-  kind: 'floor' | 'city';
+  kind: SpatialRequestKind;
   request: SqlRow;
 };
 
@@ -109,10 +119,11 @@ export function collectPendingRequests(
     if (!request) continue;
     const status = typeof request.status === 'string' ? request.status : 'pending';
     if (status !== 'pending') continue;
-    const kind = request.kind === 'floor' || request.kind === 'city' ? request.kind : null;
+    const rawKind = typeof request.kind === 'string' ? request.kind : '';
+    const kind = (SPATIAL_REQUEST_KINDS as readonly string[]).includes(rawKind) ? (rawKind as SpatialRequestKind) : null;
     if (kind === null) {
       issues.push(
-        spatialIssue({ code: 'LAYOUT_KIND_UNSUPPORTED', path: '$.frame_json.atlasLayoutRequest.kind', message: '待处理布局请求缺少 floor/city 种类，跳过本图。', severity: 'warning' }, { mapId }),
+        spatialIssue({ code: 'LAYOUT_KIND_UNSUPPORTED', path: '$.frame_json.atlasLayoutRequest.kind', message: '待处理布局请求缺少 floor/city/overview 种类，跳过本图。', severity: 'warning' }, { mapId }),
       );
       continue;
     }
@@ -647,7 +658,10 @@ export function applyPendingSpatialRequests(input: ApplyPendingInput): ApplyPend
   const characters = readTable(input.db, 'characters', scope.branchId, ports);
   const items = readTable(input.db, 'items', scope.branchId, ports);
   const maps = readTable(input.db, 'maps', scope.branchId, ports);
+  // M4-17：概览要按已登记路线决定「原样复用 / 估计折线」，所以候选内先读同分支 routes。
+  const routes = readTable(input.db, 'routes', scope.branchId, ports);
 
+  let stoppedByStale = false;
   for (let index = 0; index < queue.length; index += 1) {
     const job = queue[index];
     if (processed.length >= maxJobs) {
@@ -655,9 +669,12 @@ export function applyPendingSpatialRequests(input: ApplyPendingInput): ApplyPend
       continue;
     }
     if (!isCurrent()) {
-      issues.push({ code: 'STALE_SCOPE', path: '$.scope', message: `处理 ${job.requestId} 前世界已切换，剩余请求保持待处理。`, severity: 'error', retryable: false });
-      pending.push(job.requestId);
-      continue;
+      // STALE 停止整个候选：不再处理后续任何一张图，剩余请求全部保持 pending。
+      // 这里报一次就够了，循环尾不再重复同一条错误。
+      stoppedByStale = true;
+      issues.push({ code: 'STALE_SCOPE', path: '$.scope', message: `处理 ${job.requestId} 前世界已切换：本轮立即停止，剩余 ${queue.length - index} 条请求保持待处理。`, severity: 'error', retryable: false });
+      for (let rest = index; rest < queue.length; rest += 1) pending.push(queue[rest].requestId);
+      break;
     }
     // 每次都重读候选行：同一轮可能已被 map.estimate / 初始化 / 前一个请求改过。
     let mapRow = readMapRow(input.db, job.mapId, scope.branchId, ports);
@@ -709,6 +726,8 @@ export function applyPendingSpatialRequests(input: ApplyPendingInput): ApplyPend
       scope,
       currentScope: scope,
       expectedRowRev: Number(mapRow.row_rev ?? 1),
+      // M4-18：概览在无尺度时建「格」幅面（meters_per_cell=null），绝不拿 1 格 = 1 米去冒充米制。
+      kind: job.kind,
       widthM: typeof spec.width === 'number' ? spec.width : null,
       heightM: typeof spec.height === 'number' ? spec.height : null,
       locations,
@@ -762,6 +781,7 @@ export function applyPendingSpatialRequests(input: ApplyPendingInput): ApplyPend
       locations,
       characters,
       items,
+      routes,
       turnId,
       operationId: `${job.operationId}:scene`,
     }) as { ok: boolean; status: string; scene?: unknown; issues?: Array<Record<string, unknown>>; group?: Record<string, unknown> | null };
@@ -838,7 +858,7 @@ export function applyPendingSpatialRequests(input: ApplyPendingInput): ApplyPend
     processed.push(job.requestId);
   }
 
-  if (!isCurrent()) {
+  if (!stoppedByStale && !isCurrent()) {
     issues.push({ code: 'STALE_SCOPE', path: '$.scope', message: '布局处理期间世界已切换：已应用的组随候选一并放弃。', severity: 'error', retryable: false });
   }
   return { groups, issues, processed, pending };

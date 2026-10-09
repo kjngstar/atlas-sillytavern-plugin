@@ -28,13 +28,34 @@ import * as B from './foundation.mjs';
   const hash=s=>{let n=2166136261;for(const c of String(s)){n^=c.charCodeAt(0);n=Math.imul(n,16777619);}return n>>>0;};
   const rand=s=>{let n=hash(s);return()=>{n=(Math.imul(n,1664525)+1013904223)>>>0;return n/4294967296;};};
   const ordered=a=>[...a].sort((a,b)=>a.id.localeCompare(b.id,'en'));
+  // 02 §6.4：solid 类型参与碰撞，light/decor/doorway/stairs 不挡路；marker 与家具渲染形状分开。
+  const SOLID_TYPES=new Set(['shelf','desk','bench','reading','table','chair','bed','cabinet']);
   function makeGroup(f,r,x,y){
     const group={id:f.id,name:f.name,type:f.type,roomId:r.id,x,y,w:f.w,h:f.h,quality:'layout'},bodies=[];
+    const add=(type,bx,by,bw,bh)=>bodies.push({id:f.id+':'+type+(bodies.length?':'+bodies.length:''),type,x:bx,y:by,w:bw,h:bh});
     if(f.type==='reading'){
-      bodies.push({id:f.id+':table',type:'table',x:x+.55,y:y+.55,w:f.w-1.1,h:f.h-1.1});
-      for(const [dx,dy]of [[.1,.72],[f.w-.45,.72],[.1,f.h-1.07],[f.w-.45,f.h-1.07]])bodies.push({id:f.id+':chair:'+bodies.length,type:'chair',x:x+dx,y:y+dy,w:.35,h:.35});
-    }else bodies.push({id:f.id+':body',type:f.type,x,y,w:f.w,h:f.h});
-    return {...group,bodies:bodies.map(b=>({...b,groupId:f.id,roomId:r.id,solid:f.type!=='stairs'}))};
+      add('table',x+.55,y+.55,f.w-1.1,f.h-1.1);
+      for(const [dx,dy]of [[.1,.72],[f.w-.45,.72],[.1,f.h-1.07],[f.w-.45,f.h-1.07]])add('chair',x+dx,y+dy,.35,.35);
+    }else if(f.type==='table'){
+      add('table',x,y,f.w,f.h);
+      if(f.w>1.2&&f.h>1.2)for(const [dx,dy]of [[.12,.12],[f.w-.47,.12],[.12,f.h-.47],[f.w-.47,f.h-.47]])add('chair',x+dx,y+dy,.35,.35);
+    }else if(f.type==='desk'){
+      add('desk',x,y,f.w,f.h*.68);
+      if(f.w>1.1&&f.h>.8)add('chair',x+f.w-.4,y+f.h-.38,.35,.35);
+    }else if(f.type==='bed'){
+      add('bed',x,y,f.w,f.h);
+      if(f.w>.9&&f.h>.9)add('pillow',x+.1,y+.1,Math.max(.2,f.w-.2),.25);
+    }else if(f.type==='cabinet'||f.type==='shelf'||f.type==='bench'||f.type==='chair'||f.type==='stairs'){
+      add(f.type,x,y,f.w,f.h);
+    }else if(f.type==='doorway'){
+      // 门洞是通行结构不是障碍：绘制但永不参与碰撞。
+      add('doorway',x,y,f.w,f.h);
+    }else if(f.type==='light'){
+      add('light',x,y,f.w,f.h);
+    }else{
+      add('decor',x,y,f.w,f.h);
+    }
+    return {...group,bodies:bodies.map(b=>({...b,groupId:f.id,roomId:r.id,solid:SOLID_TYPES.has(b.type)}))};
   }
   // Four-neighbour flood fill. A human-size disk is conservatively approximated by an inflated box.
   function navigation(room,door,bodies,step=.2,radius=.18){
@@ -65,6 +86,8 @@ import * as B from './foundation.mjs';
       const priority=f=>f.locked?2:previous?.groups?.some(g=>g.id===f.id)?1:0;
       for(const f of ordered((spec.contents||[]).filter(f=>f.roomId===r.id)).sort((a,b)=>priority(b)-priority(a))){
         if(!Number.isFinite(f.w)||!Number.isFinite(f.h)||f.w<=0||f.h<=0||f.type==='reading'&&(f.w<2||f.h<2)){issues.push({id:f.id,code:'DETAIL_DIMENSION_INVALID'});continue;}
+        // 陈设塞不进房间：明确到 ID，绝不能偷偷放大到穿墙。
+        if(f.type!=='light'&&f.type!=='decor'&&(f.w>inner.w+EPS||f.h>inner.h+EPS)&&!f.locked){issues.push({id:f.id,code:'DETAIL_TOO_LARGE'});continue;}
         const free=q=>B.contains(inner,q)&&!B.intersects(q,spine)&&!B.intersects(q,swing)&&!groups.filter(g=>g.roomId===r.id).some(g=>B.intersects(inflate(g,.28),q))&&!exact.some(p=>B.intersects(q,{x:p.x-.25,y:p.y-.25,w:.5,h:.5}));
         let chosen=null;
         const old=previous?.groups?.find(g=>g.id===f.id&&g.roomId===r.id&&g.w===f.w&&g.h===f.h);
@@ -136,11 +159,13 @@ import * as B from './foundation.mjs';
     if(previous?.structureKey && previous.structureKey!==structure(spec))return {ok:false,issues:[{id:spec.id,code:'CITY_STRUCTURE_CHANGE_REQUIRES_REBUILD'}],kept:clone(previous)};
     const w=spec.width,h=spec.height,rng=rand(spec.seed||spec.id),origin=pt(w*.46,h*.5),raw=[];
     for(let i=0;i<14;i++){const a=i*Math.PI/7,rr=.95+rng()*.05;raw.push(pt(origin.x+Math.cos(a)*w*.405*rr,origin.y+Math.sin(a)*h*.405*rr));}
-    const wall=hull(raw),river={cx:w*.62,amplitude:w*.035,width:spec.riverWidth,height:h},bankGap=river.width/2+18;
+    // G07：open 城市不生成假城墙/城门/墙附属环路；旧档（无 enclosure）继续走 hull 老路径。
+    const open=spec.enclosure==='open',hullOutline=hull(raw),land0=open?[pt(0,0),pt(w,0),pt(w,h),pt(0,h)]:hullOutline;
+    const wall=open?[]:hullOutline,river={cx:w*.62,amplitude:w*.035,width:spec.riverWidth,height:h},bankGap=river.width/2+18;
     const wet=river.width>0;
-    const left=wet?clip(wall,1,0,river.cx-river.amplitude-bankGap):clip(wall,1,0,w*.55),right=wet?clip(wall,-1,0,-river.cx-river.amplitude-bankGap):clip(wall,-1,0,-w*.55),districts=[];
+    const left=wet?clip(land0,1,0,river.cx-river.amplitude-bankGap):clip(land0,1,0,w*.55),right=wet?clip(land0,-1,0,-(river.cx+river.amplitude+bankGap)):clip(land0,-1,0,-w*.55),districts=[];
     for(const bank of ['west','east']){
-      const group=ordered(spec.districts.filter(d=>d.bank===bank)).sort((a,b)=>a.order-b.order),land=!wet&&group.length===spec.districts.length?wall:bank==='west'?left:right;
+      const group=ordered(spec.districts.filter(d=>d.bank===bank)).sort((a,b)=>a.order-b.order),land=!wet&&group.length===spec.districts.length?land0:bank==='west'?left:right;
       const ys=land.map(p=>p.y),minY=Math.min(...ys),maxY=Math.max(...ys),xs=land.map(p=>p.x),cx=(Math.min(...xs)+Math.max(...xs))/2;
       const seeds=group.map((d,i)=>({...d,site:pt(cx+(i%2?1:-1)*w*.025,minY+(maxY-minY)*(i+.5)/group.length)}));
       for(const d of seeds){let poly=land;for(const other of seeds)if(other.id!==d.id){const a=d.site,b=other.site;poly=clip(poly,2*(b.x-a.x),2*(b.y-a.y),b.x*b.x+b.y*b.y-a.x*a.x-a.y*a.y);}
@@ -150,16 +175,19 @@ import * as B from './foundation.mjs';
     }
     const centerY=h*.5;
     const horizontalIntersections=wall.map((a,i)=>{const b=wall[(i+1)%wall.length];if((a.y-centerY)*(b.y-centerY)<=0&&a.y!==b.y)return a.x+(b.x-a.x)*(centerY-a.y)/(b.y-a.y);return null;}).filter(x=>x!==null).sort((a,b)=>a-b);
-    const gates=[{id:'gate-west',name:'西城门',x:horizontalIntersections[0],y:centerY},{id:'gate-east',name:'东城门',x:horizontalIntersections.at(-1),y:centerY}];
+    const gates=open?[]:[{id:'gate-west',name:'西城门',x:horizontalIntersections[0],y:centerY},{id:'gate-east',name:'东城门',x:horizontalIntersections.at(-1),y:centerY}];
     const hubs=[pt(w*.31,centerY),pt(w*.77,centerY)],roads=[],segments=[],buildings=[],issues=[];
     const addRoad=(id,a,b)=>{const road={id,a,b,width:12};roads.push(road);segments.push(...(wet?splitWater(a,b,river):[{a,b,kind:'road'}]).map((s,i)=>({...s,id:id+':'+i,roadId:id,width:12})));};
-    addRoad('avenue',pt(gates[0].x,centerY),pt(gates[1].x,centerY));
+    // 主轴：有墙时连两座城门；开放城市不依赖不存在的 gate.x，直接连两个功能枢纽。
+    addRoad('avenue',open?hubs[0]:pt(gates[0].x,centerY),open?hubs[1]:pt(gates[1].x,centerY));
     for(const d of districts)addRoad('road:'+d.id,hubs[d.bank==='west'?0:1],d.site);
-    // The inner ring is a connected road. Its river crossings become bridges by the same rule.
-    const ring=wall.map(p=>pt(origin.x+(p.x-origin.x)*.86,origin.y+(p.y-origin.y)*.86));
-    for(let i=0;i<ring.length;i++)addRoad('ring:'+i,ring[i],ring[(i+1)%ring.length]);
-    addRoad('ring-access-west',hubs[0],ring.reduce((a,b)=>distance(a,hubs[0])<distance(b,hubs[0])?a:b));
-    addRoad('ring-access-east',hubs[1],ring.reduce((a,b)=>distance(a,hubs[1])<distance(b,hubs[1])?a:b));
+    if(!open){
+      // The inner ring is a connected road. Its river crossings become bridges by the same rule.
+      const ring=wall.map(p=>pt(origin.x+(p.x-origin.x)*.86,origin.y+(p.y-origin.y)*.86));
+      for(let i=0;i<ring.length;i++)addRoad('ring:'+i,ring[i],ring[(i+1)%ring.length]);
+      addRoad('ring-access-west',hubs[0],ring.reduce((a,b)=>distance(a,hubs[0])<distance(b,hubs[0])?a:b));
+      addRoad('ring-access-east',hubs[1],ring.reduce((a,b)=>distance(a,hubs[1])<distance(b,hubs[1])?a:b));
+    }
     const roadClear=q=>!roads.some(r=>{const min=Math.min(...corners(q).map(p=>segmentDistance(p,r.a,r.b)),segmentDistance(center(q),r.a,r.b));return min<r.width/2+12||segmentIntersectsRect(r.a,r.b,inflate(q,12));});
     function placeBuilding(f,decorative=false){
       const d=districts.find(d=>d.id===f.districtId);if(!d||!Number.isFinite(f.w)||!Number.isFinite(f.h)||f.w<=0||f.h<=0)return null;
@@ -185,7 +213,7 @@ import * as B from './foundation.mjs';
     for(const d of districts)for(let i=0;i<(spec.blocksPerDistrict??8);i++)placeBuilding({id:'texture:'+d.id+':'+i,districtId:d.id,name:'街区轮廓',w:28+rng()*24,h:25+rng()*25},true);
     const rline=Array.from({length:81},(_,i)=>pt(riverX(river,h*i/80),h*i/80)),riverPolygon=rline.map(p=>pt(p.x-river.width/2,p.y)).concat([...rline].reverse().map(p=>pt(p.x+river.width/2,p.y)));
     const dock={id:'dock',name:'河岸码头',type:'dock',x:riverX(river,h*.68)-river.width/2,y:h*.68,bank:'west',width:river.width*.38};
-    return {ok:true,structureKey:structure(spec),id:spec.id,name:spec.name,kind:'city',bounds:{x:0,y:0,w,h},wall,origin,river:wet?river:null,riverPolygon:wet?riverPolygon:[],districts,roads,segments,gates,buildings,dock:wet?dock:null,issues};
+    return {ok:true,structureKey:structure(spec),id:spec.id,name:spec.name,kind:'city',enclosure:open?'open':'wall',bounds:{x:0,y:0,w,h},wall,origin,river:wet?river:null,riverPolygon:wet?riverPolygon:[],districts,roads,segments,gates,buildings,dock:wet?dock:null,issues};
   }
   function segmentIntersectsRect(a,b,r){
     let lo=0,hi=1;const dx=b.x-a.x,dy=b.y-a.y;

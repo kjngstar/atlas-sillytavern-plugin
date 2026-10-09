@@ -26,7 +26,8 @@ test('普通酒馆楼层自动生成真实车厢房间和陈设，保存后重�
  const f=fixture({model:async req=>{
   if(req.phase==='geography'){
    const scopes=JSON.parse(req.messages[1].content.split('\n').find(l=>l.startsWith('本图：')).slice(3));
-   assert.deepEqual(scopes[0].extent,{width:24,height:24});
+   // M4-21：extents 由程序按真实 container.kind 给定；契约要求带单位（src/atlas-world-contract.ts）。
+   assert.deepEqual(scopes[0].extent,{width:24,height:24,units:'meters'});
    assert.equal(scopes[0].baselineRooms[0].id,scopes[0].container.ref);
    // The model can assemble contents using the program-owned canvas and room.
    return scopes.map(s=>JSON.stringify({op:'map.layout.request',ref:s.map,data:{kind:'floor',spec:{contents:[{id:'bench',name:'软垫长椅',roomId:s.container.ref,type:'bench',w:2,h:.7},{id:'cabinet',name:'木柜',roomId:s.container.ref,type:'shelf',w:1,h:.5}]}}})).join('\n');

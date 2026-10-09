@@ -25,9 +25,20 @@ export function buildSceneMutation({result,mapRow,scope,currentScope,turnId,oper
 }
 /** Locations remain authoritative. This is a candidate-only projection, never a SQL write. */
 export function sceneLocationGeometry(scene){
-  const scale=scene.metersPerCell;if(!(scale>0))return [];
-  const layout=scene.layout,parts=layout.kind==='floor'?layout.rooms:layout.kind==='city'?[...layout.districts,...layout.buildings.filter(b=>!b.decorative)]:[];
+  // 布局空间 → 格坐标只换算一次：格制场景本来就是格，米制场景才除以 metersPerCell（绝不乘两次）。
+  const scale=scene.units==='cells'?1:scene.metersPerCell;
+  if(!(scale>0))return [];
+  const layout=scene.layout;
+  // 概览只映射真实已登记 zone；feature 永远没有 SQL 身份，proxy 入口只存在于场景里（07 §3）。
+  const parts=layout.kind==='floor'?layout.rooms
+    :layout.kind==='city'?[...layout.districts,...layout.buildings.filter(b=>!b.decorative)]
+      :(layout.shapes??[]).filter(s=>s&&s.placement!=='proxy');
+  const centroid=polygon=>{let x=0,y=0;for(const q of polygon){x+=q.x;y+=q.y;}return {x:x/polygon.length,y:y/polygon.length};};
   return parts.map(p=>{const polygon=Array.isArray(p.polygon)?p.polygon.map(q=>Array.isArray(q)?{x:q[0],y:q[1]}:q):[{x:p.x,y:p.y},{x:p.x+p.w,y:p.y},{x:p.x+p.w,y:p.y+p.h},{x:p.x,y:p.y+p.h}];
-    const point=p.site??{x:p.x+p.w/2,y:p.y+p.h/2};return {entityId:p.id,mapId:scene.mapId,gridX:point.x/scale,gridY:point.y/scale,precision:p.quality==='confirmed'?'exact':'layout',area:{kind:'polygon',points:polygon.map(q=>({x:q.x/scale,y:q.y/scale})),quality:p.quality==='confirmed'?'confirmed':'estimated',source:p.quality==='confirmed'?'author':'estimate'}};
+    // 确认站点优先于多边形质心：已确认的点不能被估计轮廓重新落位。
+    const locked=p.locked&&Number.isFinite(p.locked.x)&&Number.isFinite(p.locked.y)?p.locked:null;
+    const point=locked??p.site??centroid(polygon);
+    const confirmed=p.quality==='confirmed'||!!locked;
+    return {entityId:p.id,mapId:scene.mapId,gridX:point.x/scale,gridY:point.y/scale,precision:confirmed?'exact':'layout',area:{kind:'polygon',points:polygon.map(q=>({x:q.x/scale,y:q.y/scale})),quality:p.quality==='confirmed'?'confirmed':'estimated',source:p.quality==='confirmed'?'author':'estimate'}};
   });
 }

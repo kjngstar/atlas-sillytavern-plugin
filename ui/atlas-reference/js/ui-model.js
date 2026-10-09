@@ -2,15 +2,25 @@
 (function(host){
 'use strict';
 const SCALE_WIDTH_PX=74,SEARCH_LIMIT=8,PREFERENCE_KEY='atlas.ui-demo.interaction.v1';
-function fixedScale(cssPixelsPerUnit,metersPerUnit){
- if(!Number.isFinite(cssPixelsPerUnit)||cssPixelsPerUnit<=0)return {width:SCALE_WIDTH_PX,distance:null,label:'—',unit:'unknown'};
+/**
+ * M6-07②：比例尺。
+ *
+ * 线长**固定** 74 CSS px —— 缩放只改变距离数值，绝不为凑"整数字"去改线长。
+ * `cssPixelsPerUnit` = 每 UI 单位多少 CSS 像素（camera.s）；`metersPerUnit` = 每 UI 单位多少米。
+ * 未标定（或非正数）时用「格」而不是假装成米；单位只在真的 ≥1000 m 时升级到 km。
+ * `options.estimated` 为真（尺度是估的/推的）时，数值前加「约」。
+ */
+function fixedScale(cssPixelsPerUnit,metersPerUnit,options){
+ const estimated=options?.estimated===true;
+ if(!Number.isFinite(cssPixelsPerUnit)||cssPixelsPerUnit<=0)return {width:SCALE_WIDTH_PX,distance:null,label:'—',unit:'unknown',estimated:false};
  const calibrated=Number.isFinite(metersPerUnit)&&metersPerUnit>0;
  const distance=SCALE_WIDTH_PX/cssPixelsPerUnit*(calibrated?metersPerUnit:1);
+ if(!Number.isFinite(distance)||distance<=0)return {width:SCALE_WIDTH_PX,distance:null,label:'—',unit:'unknown',estimated:false};
  const unit=calibrated?(distance>=1000?'km':'m'):'格';
  const value=unit==='km'?distance/1000:distance;
  // Three significant digits without rounding a small nonzero distance to zero.
  const text=Number(value.toPrecision(3)).toLocaleString('en-US',{maximumSignificantDigits:3,useGrouping:false});
- return {width:SCALE_WIDTH_PX,distance,label:text+' '+unit,unit};
+ return {width:SCALE_WIDTH_PX,distance,label:(estimated?'约 ':'')+text+' '+unit,unit,estimated};
 }
 function search(entries,query,limit=SEARCH_LIMIT){
  const q=String(query||'').trim().toLocaleLowerCase();

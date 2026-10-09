@@ -1,12 +1,14 @@
 import {buildLayoutContext} from './host-context.mjs';
-import {generateFloor,generateCity} from './generation.mjs';
+import {generateFloor,generateCity,generateOverview} from './generation.mjs';
 import {buildSceneMutation,sceneLocationGeometry} from './storage.mjs';
 import {clone,finite,diagnostic,failure,stable} from './contracts.mjs';
+const GENERATORS={floor:generateFloor,city:generateCity,overview:generateOverview};
 /** Compile one layout request to the existing AtomicGroup shape. No database writes. */
-export function compileSceneGroup({request,scope,currentScope,mapRow,locations,characters,items,turnId,operationId}={}){
+export function compileSceneGroup({request,scope,currentScope,mapRow,locations,characters,items,routes=[],turnId,operationId}={}){
   try{
-  if(!['floor','city'].includes(request?.kind))return failure('LAYOUT_KIND_UNSUPPORTED','$.request.kind','使用 floor/city；其他空间沿用现有轮廓');
-  const built=buildLayoutContext({scope,mapRow,locations,characters,items});if(!built.ok)return built;
+  const generate=GENERATORS[request?.kind];
+  if(!generate)return failure('LAYOUT_KIND_UNSUPPORTED','$.request.kind','使用 floor/city/overview；其他空间沿用现有轮廓');
+  const built=buildLayoutContext({scope,mapRow,locations,characters,items,routes});if(!built.ok)return built;
   const ctx={...built.context,currentScope},spec=clone(request.spec),membershipIssues=[];
   if(request.kind==='floor'){
     const chars=new Map((characters??[]).filter(c=>c.branch_id===scope.branchId&&c.status==='active').map(c=>[c.id,c]));
@@ -21,7 +23,7 @@ export function compileSceneGroup({request,scope,currentScope,mapRow,locations,c
       if(!allowed)membershipIssues.push(diagnostic('ITEM_LOCATION_MISMATCH','$.items.on','物品不在该房间或已被持有，不能画作地面物品',{entityId:i.id,severity:'warning'}));return allowed;
     });
   }
-  const result=request.kind==='floor'?generateFloor(spec,ctx):generateCity(spec,ctx);
+  const result=generate(spec,ctx);
   if(!result.ok)return result;
   result.issues.push(...membershipIssues);
   const prepared=buildSceneMutation({result,mapRow,scope,currentScope,turnId,operationId,expectedRowRev:mapRow.row_rev});if(!prepared.ok)return prepared;
@@ -30,7 +32,9 @@ export function compileSceneGroup({request,scope,currentScope,mapRow,locations,c
     // The container is drawn inside its own child map without moving its parent-map pin.
     if(geo.entityId===mapRow.container_location_id)continue;
     const before=byId.get(geo.entityId);if(!before)return failure('LOCATION_REF_UNKNOWN','$.locations','场景引用的地点未在候选数据库建档');
-    if(before.map_id!==mapRow.id)return failure('LOCATION_MAP_MISMATCH','$.locations.map_id','不能通过摆放把地点迁移到另一地图');
+    // 合法代理入口（坐标留在另一张旧图、无 transform）已由 sceneLocationGeometry 过滤，只在场景里绘制；
+    // 走到这里的跨图引用不是代理，属于真的错位，仍必须失败并保留原场景。
+    if(before.map_id!==mapRow.id)return failure('LOCATION_MAP_MISMATCH','$.locations.map_id','不能通过摆放把地点迁移到另一地图',{entityId:before.id});
     if(before.coord_precision==='exact'&&finite(before.grid_x)&&finite(before.grid_y)&&(Math.abs(before.grid_x-geo.gridX)>1e-6||Math.abs(before.grid_y-geo.gridY)>1e-6))return failure('LOCATION_GEOMETRY_LOCK_CONFLICT','$.locations','当前模板无法满足已确认的地点坐标；保留原场景',{entityId:before.id});
     const area=typeof before.area_geometry_json==='string'?JSON.parse(before.area_geometry_json):before.area_geometry_json;
     if(area?.quality==='confirmed'&&geo.area.quality!=='confirmed')return failure('CONFIRMED_AREA_LOCKED','$.locations.area_geometry_json','不能用示意轮廓覆盖作者确认的范围');

@@ -2,6 +2,14 @@
 import { emptyReferenceData, projectReferenceData, referenceEntity,referenceReceipts,referenceDiagnostics } from './atlas-reference-data.mjs';
 import { referencePresetDocument, referenceSettingsCommands } from './atlas-reference-presets.mjs';
 
+/**
+ * M6-01：事件流分页参数，镜像 `src/atlas-runtime-limits.ts` 的 feedPageMax。
+ * 引擎侧最终仍会自己收敛（超出就夹回 100），这里只是别发出明显超限的请求。
+ * 页数上限是 UI 侧的保护，防止服务端一直给 nextCursor 时死循环。
+ */
+const ATLAS_FEED_PAGE_MAX=100;
+const ATLAS_FEED_MAX_PAGES=20;
+
 export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort,diagnostics=()=>[],emit=()=>{},defaultPrompt='',loadSqlRuntime=()=>import(new URL('../dist/atlas-sql.mjs',import.meta.url).href)}) {
   root.replaceChildren();root.className='atlas-native-ui-host';root.id='atlas-extension-panel-root';
   root.setAttribute('role','application');root.setAttribute('aria-label','阿特拉斯世界工作台');
@@ -18,10 +26,41 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
     data.RECEIPTS=referenceReceipts(s,data.DIAGNOSTICS);const ids=new Set(data.DIAGNOSTICS.map(d=>d.id));data.DIAGNOSTICS.push(...referenceDiagnostics(diagnostics()).filter(d=>!ids.has(d.id)));
     if(data.meta.engine.error&&!data.DIAGNOSTICS.some(d=>d.message===data.meta.engine.error))data.DIAGNOSTICS.unshift({id:'engine-last-error',t:'',level:'error',code:'ENGINE_ACTION_FAILED',message:data.meta.engine.error});
     latest=data;if(ready)frame.contentWindow?.AtlasPreview?.updateSnapshot(data,{resetScope});}
-  async function request(method,path,body){const r=await api.request(method,path,body);if(r.status!==200||r.body?.ok===false)throw Error(r.body?.error?.message??`请求失败（${r.status}）`);return r.body?.data??r.body;}
+  // 错误要带上 code：调用方需要区分「游标过期，重读第一页就行」和「服务真的坏了」。
+  async function request(method,path,body){const r=await api.request(method,path,body);if(r.status!==200||r.body?.ok===false){const error=Error(r.body?.error?.message??`请求失败（${r.status}）`);error.code=r.body?.error?.code??null;error.status=r.status;throw error;}return r.body?.data??r.body;}
   async function query(ticket,kind,extra={}){if(!live(ticket))return null;
     const result=await request('POST','/sql/chat/ui-read',{chatUid:ticket.state.chatId,branchId:ticket.state.binding?.branchId??'main',kind,viewMode,limit:200,...extra});
     if(!live(ticket))return null;return result;}
+  /**
+   * M6-01：读故事事件流。
+   *
+   * 分页必须绑住本次读取的身份（epoch/revision/viewMode/filter）。两条纪律：
+   * - **游标过期不是错误**：作者切了视角 / 世界推进了 revision，旧游标必然作废 ——
+   *   丢掉已收集的页、从第一页重读一次即可，绝不能把两个身份的页拼在一起。
+   * - **半路换 revision 整份丢弃**：返回的 revision 和本批要求的不一致时直接放弃这一批，
+   *   否则左栏会出现「上一轮世界的事件 + 这一轮世界的事件」混排。
+   */
+  async function readWorldFeed(ticket,revision,feedFilter){
+    const seen=new Set();const items=[];let cursor;let metadata={};let restarted=false;
+    for(let page=0;page<ATLAS_FEED_MAX_PAGES;page++){
+      let dto;
+      try{
+        dto=await query(ticket,'world-feed',{revision,cursor,limit:ATLAS_FEED_PAGE_MAX,feedFilter});
+      }catch(error){
+        const stale=error?.code==='VIEW_CURSOR_STALE'||error?.code==='VIEW_CURSOR_INVALID';
+        if(stale&&cursor&&!restarted){restarted=true;cursor=undefined;items.length=0;seen.clear();continue;}
+        if(stale)return {items:[],metadata:{}};
+        throw error;
+      }
+      if(!dto||!live(ticket))return null;
+      if(Number(dto.revision)!==Number(revision))return null;
+      metadata=dto.metadata??{};
+      for(const item of dto.items??[]){if(item&&!seen.has(item.id)){seen.add(item.id);items.push(item);}}
+      cursor=dto.nextCursor;
+      if(!cursor)break;
+    }
+    return {items,metadata};
+  }
   async function refresh(force=false){
     if(disposed)return;
     const captured=scope(),worldScope=JSON.stringify([captured.state.chatId,captured.state.binding?.branchId,viewMode]);
@@ -38,7 +77,9 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
       if(!sqlMod)sqlMod=await loadSqlRuntime();if(!live(ticket))return;
       const mapView=await query(ticket,'map');if(!mapView||!live(ticket))return;
       const revision=mapView.revision;
+      // world-feed 是**故事**（读者看的），changes 只留给回执的技术明细，两者职责不混。
       const [sceneView,taskView,flowView,changesView,logsView]=await Promise.all(['scene','tasks','flows','changes','diagnostics'].map(kind=>query(ticket,kind,{revision})));
+      const worldFeedView=await readWorldFeed(ticket,revision,null);if(!worldFeedView||!live(ticket))return;
       const catalogRows=[];let cursor;
       for(let page=0;page<100;page++){
         const dto=await query(ticket,'catalog',{revision,cursor});if(!dto||!live(ticket))return;
@@ -50,7 +91,7 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
       // Load summaries in bounded batches; queries enforce the active POV field restrictions.
       const characters=catalogRows.filter(c=>c.entityKind==='character');
       for(let i=0;i<characters.length;i+=25){const batch=await Promise.all(characters.slice(i,i+25).map(c=>query(ticket,'entity',{revision,entityKind:'character',entityId:c.entityId})));if(!live(ticket))return;detailRows.push(...batch.flatMap(x=>x?.items??[]));}
-      const data=projectReferenceData({state:ticket.state,mapView,sceneView,catalogView:{items:catalogRows},taskView,flowView,changesView,logsView,details:detailRows,protagonistId,
+      const data=projectReferenceData({state:ticket.state,mapView,sceneView,catalogView:{items:catalogRows},taskView,flowView,changesView,worldFeedView,logsView,details:detailRows,protagonistId,
         diagnostics:diagnostics(),viewMode,scopeKey:worldScope,projectOverview:sqlMod.projectMapView});
       if(!changed&&latest.meta.scopeKey===worldScope)data.LORE=latest.LORE;
       // Rollback identity comes from the real saved turn, never from a UI demo snapshot.

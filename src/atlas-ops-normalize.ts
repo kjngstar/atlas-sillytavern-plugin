@@ -33,11 +33,69 @@ export type MinimumFieldResult = { ok: true } | { ok: false; issue: Issue };
 
 /* ───────────── map.layout.request：小约束协议的常量与 spec 校验 ───────────── */
 
-/** 生成器模板种类：只接受这两个值，其余拒绝而不是静默挑一个。 */
-export const LAYOUT_REQUEST_KINDS = ['floor', 'city'] as const;
+/** 生成器模板种类：只接受这三个值，其余拒绝而不是静默挑一个。 */
+export const LAYOUT_REQUEST_KINDS = ['floor', 'city', 'overview'] as const;
+export type LayoutRequestKind = (typeof LAYOUT_REQUEST_KINDS)[number];
 
 /** spec 里允许的集合（逐条校验；AI 省略某项表示「保持不变」）。 */
-export const LAYOUT_SPEC_COLLECTIONS = ['rooms', 'contents', 'actors', 'items', 'districts', 'buildings'] as const;
+export const LAYOUT_SPEC_COLLECTIONS = [
+  'rooms',
+  'contents',
+  'actors',
+  'items',
+  'districts',
+  'buildings',
+  'zones',
+  'links',
+  'features',
+] as const;
+
+/**
+ * M4-01：三种 kind 的集合**分开验证**（02 §10 / 契约 OverviewSpec）。
+ * floor 里混 zones、overview 里混 rooms 都是结构错误，必须拒绝而不是挑一个能跑的解释。
+ */
+export const LAYOUT_KIND_COLLECTIONS: Record<LayoutRequestKind, readonly string[]> = {
+  floor: ['rooms', 'contents', 'actors', 'items'],
+  // city 只认街区/建筑（家具与人物属于室内模板，混用即冲突——与原实现同口径）。
+  city: ['districts', 'buildings'],
+  overview: ['zones', 'links', 'features'],
+};
+
+/** 02 §10：概览地物类型（含水系 watercourse）。 */
+export const LAYOUT_OVERVIEW_FEATURE_TYPES = [
+  'forest_texture',
+  'ridge',
+  'shore',
+  'building_cluster',
+  'road_texture',
+  'ruins_scatter',
+  'watercourse',
+] as const;
+/** 概览表面类型。 */
+export const LAYOUT_OVERVIEW_SURFACES = ['mixed', 'urban', 'forest', 'mountain', 'water', 'indoor', 'void'] as const;
+/** 概览分区角色。 */
+export const LAYOUT_OVERVIEW_ZONE_ROLES = [
+  'city',
+  'settlement',
+  'forest',
+  'water',
+  'mountain',
+  'ruins',
+  'district',
+  'campus',
+  'land',
+  'other',
+] as const;
+export const LAYOUT_OVERVIEW_ZONE_SIZES = ['small', 'medium', 'large'] as const;
+export const LAYOUT_OVERVIEW_DENSITIES = ['low', 'medium', 'high'] as const;
+/** 02 §10：watercourse 的 8 方向（center 对首尾无意义）。 */
+export const LAYOUT_OVERVIEW_SECTORS = ['north', 'northeast', 'east', 'southeast', 'south', 'southwest', 'west', 'northwest'] as const;
+/** 分区方位允许 center（居中分区）。 */
+export const LAYOUT_OVERVIEW_ZONE_SECTORS = [...LAYOUT_OVERVIEW_SECTORS, 'center'] as const;
+/** 02 §10：水系宽度分级（最短边的 0.008 / 0.015 / 0.025 由生成器换算）。 */
+export const LAYOUT_OVERVIEW_WIDTH_CLASSES = ['narrow', 'medium', 'wide'] as const;
+/** G07：城市边界策略。缺省（旧 spec 无该字段）保持既有行为，不由归一化改写。 */
+export const LAYOUT_CITY_ENCLOSURES = ['open', 'wall'] as const;
 
 /** spec 顶层的生成参数；未列出的键按未知字段处理（警告后丢弃）。 */
 export const LAYOUT_SPEC_SCALARS = [
@@ -47,6 +105,8 @@ export const LAYOUT_SPEC_SCALARS = [
   'corridorWidth',
   'riverWidth',
   'blocksPerDistrict',
+  'surface',
+  'enclosure',
   'mapId',
   'rebuild',
   'deletes',
@@ -154,10 +214,76 @@ export function normalizeLayoutSpec(
     spec[key] = raw[key];
   }
 
+  // M4-01：kind 决定允许的集合——floor 里混 zones / overview 里混 rooms 都是结构错误。
+  const kindText = typeof data['kind'] === 'string' ? (data['kind'] as string) : '';
+  const kind = (LAYOUT_REQUEST_KINDS as readonly string[]).includes(kindText) ? (kindText as LayoutRequestKind) : null;
+  const allowedCollections: readonly string[] = kind ? LAYOUT_KIND_COLLECTIONS[kind] : LAYOUT_SPEC_COLLECTIONS;
+
+  // 幅面必须是有限正数：NaN/Infinity/字符串都不允许悄悄发布（G11 体积预算的前提）。
+  for (const key of ['width', 'height'] as const) {
+    const value = spec[key];
+    if (value === undefined || value === null) continue;
+    if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+      return {
+        ok: false,
+        spec: null,
+        issues: [
+          issue(
+            'ENUM_INVALID',
+            `$.data.spec.${key}`,
+            `map.layout.request: spec.${key} must be a finite positive number`,
+            { severity: 'error', retryable: true, opId: op?.opId, line: op?.line },
+          ),
+        ],
+      };
+    }
+  }
+
+  if (kind === 'overview') {
+    const surface = spec['surface'];
+    if (surface !== undefined && surface !== null
+      && !(LAYOUT_OVERVIEW_SURFACES as readonly unknown[]).includes(String(surface))) {
+      return {
+        ok: false,
+        spec: null,
+        issues: [issue('ENUM_INVALID', '$.data.spec.surface',
+          `map.layout.request: spec.surface must be one of {${LAYOUT_OVERVIEW_SURFACES.join(',')}}; got ${JSON.stringify(surface)}`,
+          { severity: 'error', retryable: true, opId: op?.opId, line: op?.line })],
+      };
+    }
+  }
+  if (kind === 'city') {
+    const enclosure = spec['enclosure'];
+    if (enclosure !== undefined && enclosure !== null
+      && !(LAYOUT_CITY_ENCLOSURES as readonly unknown[]).includes(String(enclosure))) {
+      return {
+        ok: false,
+        spec: null,
+        issues: [issue('ENUM_INVALID', '$.data.spec.enclosure',
+          `map.layout.request: spec.enclosure must be one of {${LAYOUT_CITY_ENCLOSURES.join(',')}}; got ${JSON.stringify(enclosure)}`,
+          { severity: 'error', retryable: true, opId: op?.opId, line: op?.line })],
+      };
+    }
+  }
+
   // 逐条校验集合：结构错误只拒绝该操作，其他操作继续。
   for (const key of LAYOUT_SPEC_COLLECTIONS) {
     const value = spec[key];
     if (value === undefined || value === null) continue;
+    if (!allowedCollections.includes(key)) {
+      return {
+        ok: false,
+        spec: null,
+        issues: [
+          issue(
+            'ENUM_INVALID',
+            `$.data.spec.${key}`,
+            `map.layout.request kind=${kind ?? '(unknown)'} does not accept spec.${key}; allowed: {${allowedCollections.join(', ')}}`,
+            { severity: 'error', retryable: true, opId: op?.opId, line: op?.line },
+          ),
+        ],
+      };
+    }
     if (!Array.isArray(value)) {
       return {
         ok: false,
@@ -172,6 +298,26 @@ export function normalizeLayoutSpec(
         ],
       };
     }
+    // G11 场景体积预算：分区/地物/连接的条数上限来自 ATLAS_RUNTIME_LIMITS，不在这里写第二份数字。
+    const limit = key === 'zones' ? ATLAS_RUNTIME_LIMITS.overviewZoneLimit
+      : key === 'features' ? ATLAS_RUNTIME_LIMITS.overviewFeatureLimit
+        : key === 'links' ? ATLAS_RUNTIME_LIMITS.overviewLinkLimit
+          : null;
+    if (limit !== null && value.length > limit) {
+      return {
+        ok: false,
+        spec: null,
+        issues: [
+          issue(
+            ATLAS_ERROR_CODES.OPERATION_TOO_LARGE,
+            `$.data.spec.${key}`,
+            `map.layout.request: spec.${key} has ${value.length} entries, over the ${limit} limit; split the request`,
+            { severity: 'error', retryable: true, opId: op?.opId, line: op?.line },
+          ),
+        ],
+      };
+    }
+    const seenIds = new Set<string>();
     for (let i = 0; i < value.length; i += 1) {
       const entry = value[i];
       const path = `$.data.spec.${key}[${i}]`;
@@ -204,10 +350,30 @@ export function normalizeLayoutSpec(
           ],
         };
       }
+      // 同一集合内 ID 重复会让后续按 id 定位的操作歧义，直接拒绝（不要静默取最后一个）。
+      if (seenIds.has(id)) {
+        return {
+          ok: false,
+          spec: null,
+          issues: [
+            issue(
+              'ENUM_INVALID',
+              `${path}.id`,
+              `map.layout.request: spec.${key} has duplicate id ${JSON.stringify(id)}`,
+              { severity: 'error', retryable: true, opId: op?.opId, line: op?.line },
+            ),
+          ],
+        };
+      }
+      seenIds.add(id);
+      if (kind === 'overview') {
+        const rejected = overviewEntryIssue(key, entry, path, op);
+        if (rejected) return { ok: false, spec: null, issues: [rejected] };
+      }
     }
   }
 
-  // deletes：删除必须显式表达，形状错误同样只拒绝该操作。
+  // deletes：删除必须显式表达，形状错误同样只拒绝该操作；键必须是本 kind 的集合。
   const deletes = spec['deletes'];
   if (deletes !== undefined && deletes !== null) {
     if (!isPlainObject(deletes)) {
@@ -225,7 +391,7 @@ export function normalizeLayoutSpec(
       };
     }
     for (const [key, value] of Object.entries(deletes)) {
-      if (!(LAYOUT_SPEC_COLLECTIONS as readonly string[]).includes(key) || !Array.isArray(value)) {
+      if (!allowedCollections.includes(key) || !Array.isArray(value)) {
         return {
           ok: false,
           spec: null,
@@ -233,7 +399,7 @@ export function normalizeLayoutSpec(
             issue(
               ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING,
               `$.data.spec.deletes.${key}`,
-              `map.layout.request: spec.deletes.${key} must be an array of ids`,
+              `map.layout.request: spec.deletes.${key} must be an array of ids for kind=${kind ?? '(unknown)'}; allowed: {${allowedCollections.join(', ')}}`,
               { severity: 'error', retryable: true, opId: op?.opId, line: op?.line },
             ),
           ],
@@ -243,6 +409,68 @@ export function normalizeLayoutSpec(
   }
 
   return { ok: true, spec, issues };
+}
+
+/**
+ * M4-01 / 02 §10：概览集合的语义约束。
+ * 只做「少数语义约束」——水系不要求 AI 输出逐点河道，但类型/方位/宽度分级必须合法。
+ */
+function overviewEntryIssue(
+  collection: string,
+  entry: Record<string, unknown>,
+  path: string,
+  op?: { opId?: string; line?: number },
+): Issue | null {
+  const bad = (field: string, message: string) =>
+    issue('ENUM_INVALID', `${path}.${field}`, message,
+      { severity: 'error', retryable: true, opId: op?.opId, line: op?.line });
+  const inSet = (allowed: readonly unknown[], value: unknown) => allowed.includes(value);
+
+  if (collection === 'zones') {
+    const role = entry['role'];
+    if (role === undefined || role === null || !inSet(LAYOUT_OVERVIEW_ZONE_ROLES, role)) {
+      return bad('role', `overview zone role must be one of {${LAYOUT_OVERVIEW_ZONE_ROLES.join(',')}}; got ${JSON.stringify(role)}`);
+    }
+    const size = entry['size'];
+    if (size !== undefined && size !== null && !inSet(LAYOUT_OVERVIEW_ZONE_SIZES, size)) {
+      return bad('size', `overview zone size must be one of {${LAYOUT_OVERVIEW_ZONE_SIZES.join(',')}}; got ${JSON.stringify(size)}`);
+    }
+    const sector = entry['sector'];
+    if (sector !== undefined && sector !== null && !inSet(LAYOUT_OVERVIEW_ZONE_SECTORS, sector)) {
+      return bad('sector', `overview zone sector must be one of {${LAYOUT_OVERVIEW_ZONE_SECTORS.join(',')}}; got ${JSON.stringify(sector)}`);
+    }
+    return null;
+  }
+
+  if (collection === 'features') {
+    const type = entry['type'];
+    if (type === undefined || type === null || !inSet(LAYOUT_OVERVIEW_FEATURE_TYPES, type)) {
+      return bad('type', `overview feature type must be one of {${LAYOUT_OVERVIEW_FEATURE_TYPES.join(',')}}; got ${JSON.stringify(type)}`);
+    }
+    const density = entry['density'];
+    if (density !== undefined && density !== null && !inSet(LAYOUT_OVERVIEW_DENSITIES, density)) {
+      return bad('density', `overview feature density must be one of {${LAYOUT_OVERVIEW_DENSITIES.join(',')}}; got ${JSON.stringify(density)}`);
+    }
+    // watercourse 专属字段：只在真正支持后再放行，绝不「normalizer 丢掉后假装支持河流」。
+    for (const field of ['fromSector', 'toSector'] as const) {
+      const value = entry[field];
+      if (value === undefined || value === null) continue;
+      if (type !== 'watercourse') return bad(field, `overview feature ${field} is only valid for type=watercourse`);
+      if (!inSet(LAYOUT_OVERVIEW_SECTORS, value)) {
+        return bad(field, `watercourse ${field} must be one of {${LAYOUT_OVERVIEW_SECTORS.join(',')}}; got ${JSON.stringify(value)}`);
+      }
+    }
+    const widthClass = entry['widthClass'];
+    if (widthClass !== undefined && widthClass !== null) {
+      if (type !== 'watercourse') return bad('widthClass', 'overview feature widthClass is only valid for type=watercourse');
+      if (!inSet(LAYOUT_OVERVIEW_WIDTH_CLASSES, widthClass)) {
+        return bad('widthClass', `watercourse widthClass must be one of {${LAYOUT_OVERVIEW_WIDTH_CLASSES.join(',')}}; got ${JSON.stringify(widthClass)}`);
+      }
+    }
+    return null;
+  }
+
+  return null;
 }
 
 /**

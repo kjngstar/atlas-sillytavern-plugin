@@ -82,7 +82,20 @@ function sqlText(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
-/** STALE_BASE / CHAT_CHANGED 属于冲突（409），不是服务故障（500）。 */
+/**
+ * M5-08A：错误按「冲突 / 参数 / 服务」三类各归各位。
+ *
+ * - 冲突 409：客户端拿着旧身份或过期游标，重读一次即可 —— 不是服务坏了，别误报 500。
+ * - 参数 400：形状或取值不对，重试无用。
+ * - 其余 500：服务端真故障。DB_UPGRADE_FAILED / DB_SCHEMA_UNSUPPORTED 保持 500 且**不清空库**
+ *   （库本身没坏，只是这个构建读不了；清空等于把用户世界删了）。
+ */
+const CONFLICT_CODES = new Set([
+  'STALE_BASE', 'CHAT_CHANGED', 'SESSION_STALE', 'CANDIDATE_UNKNOWN',
+  'VIEW_CURSOR_STALE', 'SQL_PREVIEW_EXPIRED',
+]);
+const BAD_REQUEST_CODES = new Set(['INVALID_PAYLOAD', 'VIEW_CURSOR_INVALID', 'FEED_POV_ID_REQUIRED']);
+
 function sqlErrorResult(thrown: unknown): AtlasRouteResult {
   const candidate = thrown as { code?: unknown; message?: unknown; detail?: unknown };
   if (candidate && typeof candidate.code === "string" && candidate.code.length > 0) {
@@ -90,12 +103,7 @@ function sqlErrorResult(thrown: unknown): AtlasRouteResult {
     const failedReceipt = isPlainRecord(candidate.detail) && isPlainRecord(candidate.detail.receipt) ? candidate.detail.receipt : null;
     const receiptIssues = failedReceipt && Array.isArray(failedReceipt.issues) ? failedReceipt.issues.filter(isPlainRecord) : [];
     const retryable = code === 'TURN_FAILED' && receiptIssues.some(i => i.retryable === true);
-    const status =
-      code === "STALE_BASE" || code === "CHAT_CHANGED" || code === "SESSION_STALE" || code === "CANDIDATE_UNKNOWN"
-        ? 409
-        : code === "INVALID_PAYLOAD"
-          ? 400
-          : 500;
+    const status = CONFLICT_CODES.has(code) ? 409 : BAD_REQUEST_CODES.has(code) ? 400 : 500;
     return {
       status,
       body: {
