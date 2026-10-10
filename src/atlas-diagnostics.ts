@@ -51,6 +51,8 @@ const DETAIL_KEYS = new Set([
   "responseChars", "capability", "event", "build", "coreCommitted",
   "transport", "hostHttpStatus", "finishReason", "blockReason", "toolCallCount", "transportCarrier", "responseBytes",
   "hostMainApi", "rawServiceAvailable", "modelReaderAvailable", "headersAvailable",
+  "responseShape", "responseChoiceCount", "googlePartCount", "thoughtPartCount", "textPartCount", "visibleTextChars",
+  "refusalPresent", "upstreamErrorPresent", "providerErrorKind",
   "count", "stage", "attempt", "scanned", "cleaned", "kept", "malformed", "rowLine",
   // A04：具名诊断的安全定位字段。`*Ref` 只接受 atlasRefFingerprint 的形态
   // （原始 chatId / 分支名 / turnKey 一律丢弃）；collection 与计数字段见下方校验。
@@ -398,7 +400,9 @@ export function sanitizeDiagnostic(raw: unknown, now: () => number = Date.now): 
         else if(key==='transport'&&['chat-completions-raw','tavern-helper'].includes(token))details[key]=token;
         else if(key==='hostMainApi'&&['openai','textgenerationwebui','kobold','koboldhorde','novel'].includes(token))details[key]=token;
         else if(key==='finishReason'&&['stop','length','tool_calls','content_filter','STOP','MAX_TOKENS','SAFETY','RECITATION','OTHER','BLOCKLIST','PROHIBITED_CONTENT','SPII','MALFORMED_FUNCTION_CALL'].includes(token))details[key]=token;
-        else if(key==='blockReason'&&['SAFETY','OTHER','BLOCKLIST','PROHIBITED_CONTENT','IMAGE_SAFETY'].includes(token))details[key]=token;
+        else if(key==='blockReason'&&['SAFETY','OTHER','BLOCKLIST','PROHIBITED_CONTENT','SPII','IMAGE_SAFETY'].includes(token))details[key]=token;
+        else if(key==='responseShape'&&['openai','google','error','unknown'].includes(token))details[key]=token;
+        else if(key==='providerErrorKind'&&['content-filter','output-limit','upstream-error','none'].includes(token))details[key]=token;
         else if ((key === "mode" || key === "sourceMode") && SAFE_MODES.has(token)) details[key] = token;
         else if (key === "activationMode" && SAFE_LORE_ACTIVATION_MODES.has(token)) details[key] = token;
         else if (key === "reason" && SAFE_LORE_REASONS.has(token)) details[key] = token;

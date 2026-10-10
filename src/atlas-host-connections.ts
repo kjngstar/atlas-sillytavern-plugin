@@ -133,6 +133,35 @@ interface MainContext {
   };
 }
 
+/** Structural diagnostics only: never retain prompt, reply, error text or signatures. */
+export function summarizeHostResponse(data: any, hostHttpStatus: number, responseBytes: number): Record<string, unknown> {
+  const candidate=data?.candidates?.[0],message=data?.choices?.[0]?.message;
+  const parts=data?.responseContent?.parts ?? candidate?.content?.parts;
+  const googleParts=Array.isArray(parts)?parts:[];
+  const calls=message?.tool_calls ?? googleParts.filter((part:any)=>part?.functionCall).map((part:any)=>({function:{name:part.functionCall.name}}));
+  const finishReason=data?.choices?.[0]?.finish_reason ?? candidate?.finishReason ?? data?.responseContent?.finishReason ?? null;
+  const blockReason=data?.promptFeedback?.blockReason ?? data?.responseContent?.promptFeedback?.blockReason ?? null;
+  const refusalPresent=typeof message?.refusal==='string'&&message.refusal.trim().length>0;
+  const errorMessage=typeof data?.error?.message==='string'?data.error.message:'';
+  const filtered=refusalPresent||['SAFETY','BLOCKLIST','PROHIBITED_CONTENT','SPII','IMAGE_SAFETY'].includes(blockReason)
+    ||['content_filter','SAFETY','BLOCKLIST','PROHIBITED_CONTENT','SPII','IMAGE_SAFETY'].includes(finishReason)
+    || /(?:blocked due to\s*:\s*(?:SAFETY|BLOCKLIST|PROHIBITED_CONTENT)|content[_ -]filter|safety filter)/i.test(errorMessage);
+  const truncated=['length','MAX_TOKENS'].includes(finishReason);
+  return {transport:'chat-completions-raw',hostHttpStatus,finishReason,blockReason,
+    responseShape:data?.error?'error':Array.isArray(data?.choices)?'openai':Array.isArray(data?.candidates)?'google':'unknown',
+    responseChoiceCount:Array.isArray(data?.choices)?data.choices.length:0,
+    candidateCount:Array.isArray(data?.candidates)?data.candidates.length:0,
+    googlePartCount:googleParts.length,thoughtPartCount:googleParts.filter((part:any)=>part?.thought===true).length,
+    textPartCount:googleParts.filter((part:any)=>part?.thought!==true&&typeof part?.text==='string').length,
+    visibleTextChars:googleParts.filter((part:any)=>part?.thought!==true&&typeof part?.text==='string').reduce((n:number,part:any)=>n+part.text.length,0)
+      +(typeof message?.content==='string'?message.content.length:0),
+    refusalPresent,upstreamErrorPresent:!!data?.error,
+    providerErrorKind:filtered?'content-filter':truncated?'output-limit':data?.error?'upstream-error':'none',
+    toolCallCount:Array.isArray(calls)?calls.length:0,
+    transportCarrier:Array.isArray(calls)&&calls.some((call:any)=>typeof call?.function?.name==='string'&&/^(?:[^:]+:)*emit_complete_response_[a-f0-9]{24}$/.test(call.function.name)),
+    responseBytes};
+}
+
 async function rawMainResponse(ctx: MainContext, deps: TavernMainFetchDeps, payload: HostRequestPayload, prompts: Array<{role:string;content:string}>, init?: RequestInit): Promise<Response> {
   const request = await ctx.ChatCompletionService!.presetToGeneratePayload!({}, {}, {
     messages: prompts, model: ctx.getChatCompletionModel!(), stream: false,
@@ -149,17 +178,15 @@ async function rawMainResponse(ctx: MainContext, deps: TavernMainFetchDeps, payl
   try { data=JSON.parse(wire); } catch {
     return hostErrorJsonResponse('酒馆生成端点未返回合法 JSON；模型结果未提交。', 'RESPONSE_MALFORMED', 'HOST_INVALID_JSON', {transport:'chat-completions-raw',hostHttpStatus:response.status,responseBytes:wire.length});
   }
-  const googleParts=data?.responseContent?.parts ?? data?.candidates?.[0]?.content?.parts;
-  const calls=data?.choices?.[0]?.message?.tool_calls ?? (Array.isArray(googleParts)?googleParts.filter((part:any)=>part?.functionCall).map((part:any)=>({function:{name:part.functionCall.name}})):undefined);
-  const meta={transport:'chat-completions-raw',hostHttpStatus:response.status,
-    finishReason:data?.choices?.[0]?.finish_reason ?? data?.candidates?.[0]?.finishReason ?? null,
-    blockReason:data?.promptFeedback?.blockReason ?? null,
-    toolCallCount:Array.isArray(calls)?calls.length:0,
-    transportCarrier:Array.isArray(calls)&&calls.some((call:any)=>typeof call?.function?.name==='string'&&/^(?:[^:]+:)*emit_complete_response_[a-f0-9]{24}$/.test(call.function.name)),
-    responseBytes:wire.length};
-  if(!response.ok||data?.error) return hostErrorJsonResponse(`酒馆生成端点请求失败（HTTP ${response.status}）；模型结果未提交。`, 'API_REQUEST_FAILED', 'HOST_HTTP_FAILED', meta);
+  const meta=summarizeHostResponse(data,response.status,wire.length);
+  if(!response.ok||data?.error) return hostErrorJsonResponse(meta.providerErrorKind==='content-filter'
+    ?'模型响应明确包含内容审核拦截标记；本轮未提交。'
+    :`酒馆生成端点请求失败（HTTP ${response.status}）；模型结果未提交。`, 'API_REQUEST_FAILED', 'HOST_HTTP_FAILED', meta);
   const text=hostAssistantText(data,payload.tools?.[0]?.function?.name);
-  if(!text?.trim()) return hostErrorJsonResponse('酒馆生成端点未返回可用正文；模型结果未提交。请查看本轮原始响应的结束原因与工具调用数量。', 'RESPONSE_MALFORMED', 'HOST_EMPTY_RESPONSE', meta);
+  if(!text?.trim()) return hostErrorJsonResponse(meta.providerErrorKind==='content-filter'
+    ?'模型响应明确包含内容审核拦截标记；本轮未提交。'
+    :meta.providerErrorKind==='output-limit'?'模型响应标记输出额度耗尽，且没有可用正文；本轮未提交。'
+    :'酒馆生成端点未返回可用正文；模型结果未提交。当前响应未提供明确审核拦截或输出截断标记，请查看响应结构诊断。', 'RESPONSE_MALFORMED', 'HOST_EMPTY_RESPONSE', meta);
   return textResponse(text.trim(),meta);
 }
 

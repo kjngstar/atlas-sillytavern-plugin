@@ -11157,6 +11157,37 @@ function getConnectionManagerProfiles(getContext) {
   if (!Array.isArray(profiles)) return [];
   return profiles.filter((p) => !!p && typeof p === "object" && typeof p.id === "string").map((p) => ({ id: p.id, name: String(p.name ?? p.id) }));
 }
+function summarizeHostResponse(data, hostHttpStatus, responseBytes) {
+  const candidate = data?.candidates?.[0], message = data?.choices?.[0]?.message;
+  const parts = data?.responseContent?.parts ?? candidate?.content?.parts;
+  const googleParts = Array.isArray(parts) ? parts : [];
+  const calls = message?.tool_calls ?? googleParts.filter((part) => part?.functionCall).map((part) => ({ function: { name: part.functionCall.name } }));
+  const finishReason = data?.choices?.[0]?.finish_reason ?? candidate?.finishReason ?? data?.responseContent?.finishReason ?? null;
+  const blockReason = data?.promptFeedback?.blockReason ?? data?.responseContent?.promptFeedback?.blockReason ?? null;
+  const refusalPresent = typeof message?.refusal === "string" && message.refusal.trim().length > 0;
+  const errorMessage = typeof data?.error?.message === "string" ? data.error.message : "";
+  const filtered = refusalPresent || ["SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY"].includes(blockReason) || ["content_filter", "SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY"].includes(finishReason) || /(?:blocked due to\s*:\s*(?:SAFETY|BLOCKLIST|PROHIBITED_CONTENT)|content[_ -]filter|safety filter)/i.test(errorMessage);
+  const truncated = ["length", "MAX_TOKENS"].includes(finishReason);
+  return {
+    transport: "chat-completions-raw",
+    hostHttpStatus,
+    finishReason,
+    blockReason,
+    responseShape: data?.error ? "error" : Array.isArray(data?.choices) ? "openai" : Array.isArray(data?.candidates) ? "google" : "unknown",
+    responseChoiceCount: Array.isArray(data?.choices) ? data.choices.length : 0,
+    candidateCount: Array.isArray(data?.candidates) ? data.candidates.length : 0,
+    googlePartCount: googleParts.length,
+    thoughtPartCount: googleParts.filter((part) => part?.thought === true).length,
+    textPartCount: googleParts.filter((part) => part?.thought !== true && typeof part?.text === "string").length,
+    visibleTextChars: googleParts.filter((part) => part?.thought !== true && typeof part?.text === "string").reduce((n, part) => n + part.text.length, 0) + (typeof message?.content === "string" ? message.content.length : 0),
+    refusalPresent,
+    upstreamErrorPresent: !!data?.error,
+    providerErrorKind: filtered ? "content-filter" : truncated ? "output-limit" : data?.error ? "upstream-error" : "none",
+    toolCallCount: Array.isArray(calls) ? calls.length : 0,
+    transportCarrier: Array.isArray(calls) && calls.some((call) => typeof call?.function?.name === "string" && /^(?:[^:]+:)*emit_complete_response_[a-f0-9]{24}$/.test(call.function.name)),
+    responseBytes
+  };
+}
 async function rawMainResponse(ctx, deps, payload, prompts, init) {
   const request = await ctx.ChatCompletionService.presetToGeneratePayload({}, {}, {
     messages: prompts,
@@ -11179,20 +11210,10 @@ async function rawMainResponse(ctx, deps, payload, prompts, init) {
   } catch {
     return hostErrorJsonResponse("酒馆生成端点未返回合法 JSON；模型结果未提交。", "RESPONSE_MALFORMED", "HOST_INVALID_JSON", { transport: "chat-completions-raw", hostHttpStatus: response.status, responseBytes: wire.length });
   }
-  const googleParts = data?.responseContent?.parts ?? data?.candidates?.[0]?.content?.parts;
-  const calls = data?.choices?.[0]?.message?.tool_calls ?? (Array.isArray(googleParts) ? googleParts.filter((part) => part?.functionCall).map((part) => ({ function: { name: part.functionCall.name } })) : void 0);
-  const meta = {
-    transport: "chat-completions-raw",
-    hostHttpStatus: response.status,
-    finishReason: data?.choices?.[0]?.finish_reason ?? data?.candidates?.[0]?.finishReason ?? null,
-    blockReason: data?.promptFeedback?.blockReason ?? null,
-    toolCallCount: Array.isArray(calls) ? calls.length : 0,
-    transportCarrier: Array.isArray(calls) && calls.some((call) => typeof call?.function?.name === "string" && /^(?:[^:]+:)*emit_complete_response_[a-f0-9]{24}$/.test(call.function.name)),
-    responseBytes: wire.length
-  };
-  if (!response.ok || data?.error) return hostErrorJsonResponse(`酒馆生成端点请求失败（HTTP ${response.status}）；模型结果未提交。`, "API_REQUEST_FAILED", "HOST_HTTP_FAILED", meta);
+  const meta = summarizeHostResponse(data, response.status, wire.length);
+  if (!response.ok || data?.error) return hostErrorJsonResponse(meta.providerErrorKind === "content-filter" ? "模型响应明确包含内容审核拦截标记；本轮未提交。" : `酒馆生成端点请求失败（HTTP ${response.status}）；模型结果未提交。`, "API_REQUEST_FAILED", "HOST_HTTP_FAILED", meta);
   const text2 = hostAssistantText(data, payload.tools?.[0]?.function?.name);
-  if (!text2?.trim()) return hostErrorJsonResponse("酒馆生成端点未返回可用正文；模型结果未提交。请查看本轮原始响应的结束原因与工具调用数量。", "RESPONSE_MALFORMED", "HOST_EMPTY_RESPONSE", meta);
+  if (!text2?.trim()) return hostErrorJsonResponse(meta.providerErrorKind === "content-filter" ? "模型响应明确包含内容审核拦截标记；本轮未提交。" : meta.providerErrorKind === "output-limit" ? "模型响应标记输出额度耗尽，且没有可用正文；本轮未提交。" : "酒馆生成端点未返回可用正文；模型结果未提交。当前响应未提供明确审核拦截或输出截断标记，请查看响应结构诊断。", "RESPONSE_MALFORMED", "HOST_EMPTY_RESPONSE", meta);
   return textResponse(text2.trim(), meta);
 }
 function createTavernMainFetch(deps) {
@@ -12756,6 +12777,15 @@ var DETAIL_KEYS = /* @__PURE__ */ new Set([
   "rawServiceAvailable",
   "modelReaderAvailable",
   "headersAvailable",
+  "responseShape",
+  "responseChoiceCount",
+  "googlePartCount",
+  "thoughtPartCount",
+  "textPartCount",
+  "visibleTextChars",
+  "refusalPresent",
+  "upstreamErrorPresent",
+  "providerErrorKind",
   "count",
   "stage",
   "attempt",
@@ -13083,7 +13113,9 @@ function sanitizeDiagnostic(raw, now = Date.now) {
         else if (key === "transport" && ["chat-completions-raw", "tavern-helper"].includes(token)) details[key] = token;
         else if (key === "hostMainApi" && ["openai", "textgenerationwebui", "kobold", "koboldhorde", "novel"].includes(token)) details[key] = token;
         else if (key === "finishReason" && ["stop", "length", "tool_calls", "content_filter", "STOP", "MAX_TOKENS", "SAFETY", "RECITATION", "OTHER", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "MALFORMED_FUNCTION_CALL"].includes(token)) details[key] = token;
-        else if (key === "blockReason" && ["SAFETY", "OTHER", "BLOCKLIST", "PROHIBITED_CONTENT", "IMAGE_SAFETY"].includes(token)) details[key] = token;
+        else if (key === "blockReason" && ["SAFETY", "OTHER", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY"].includes(token)) details[key] = token;
+        else if (key === "responseShape" && ["openai", "google", "error", "unknown"].includes(token)) details[key] = token;
+        else if (key === "providerErrorKind" && ["content-filter", "output-limit", "upstream-error", "none"].includes(token)) details[key] = token;
         else if ((key === "mode" || key === "sourceMode") && SAFE_MODES.has(token)) details[key] = token;
         else if (key === "activationMode" && SAFE_LORE_ACTIVATION_MODES.has(token)) details[key] = token;
         else if (key === "reason" && SAFE_LORE_REASONS.has(token)) details[key] = token;

@@ -97,7 +97,7 @@ async function loadExtensionModule() {
  * 跑一次真实的地理建图链路：真实 `readCardGeoLoreChunks` → 真实分块
  * → 真实 `importWorldbookGeography`，只把宿主与 API 换成记录器。
  */
-async function runPipeline({ onRequest = null } = {}) {
+async function runPipeline({ onRequest = null, excludedLoreEntries = [] } = {}) {
   const previous = {
     window: globalThis.window,
     SillyTavern: globalThis.SillyTavern,
@@ -110,7 +110,7 @@ async function runPipeline({ onRequest = null } = {}) {
     characterId: 0,
     chatMetadata: { world_info: null },
     characters: [{ data: { extensions: { world: BOOK } } }],
-    extensionSettings: { atlas_world_sim: { sqlMode: true } },
+    extensionSettings: { atlas_world_sim: { sqlMode: true, excludedLoreEntries } },
     chat: [],
   };
   const calls = [];
@@ -159,6 +159,12 @@ async function runPipeline({ onRequest = null } = {}) {
 /** 只做建设、不做逐块抽取的那些请求。 */
 const buildCalls = (calls) => calls.filter((call) => call.body?.constructionMode !== "extract-only");
 const payloads = (calls) => calls.map((call) => String(call.body?.loreSupplement ?? ""));
+
+test('ATLAS 读取排除对真实地理分块和最终建设都有效，酒馆条目仍启用',async()=>{
+ const {calls}=await runPipeline({excludedLoreEntries:[JSON.stringify([BOOK,'biz'])]});
+ assert.ok(calls.length>1);assert.ok(payloads(calls).every(text=>!text.includes(BIZ_MARKER)));
+ assert.ok(payloads(calls).some(text=>text.includes(TAIL)));
+});
 
 test("W10：12000 字资料来源分三块、尾部关系进模型；抽取完成后只发一次 map/build", async () => {
   const { calls, extracted, progress, result, mod, reads } = await runPipeline();

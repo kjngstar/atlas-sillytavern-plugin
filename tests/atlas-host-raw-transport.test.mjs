@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createTavernMainFetch} from '../src/atlas-host-connections.ts';
+import {createTavernMainFetch,summarizeHostResponse} from '../src/atlas-host-connections.ts';
 import {extractAssistantText} from '../src/atlas-api-client.ts';
 import {sanitizeDiagnostic} from '../src/atlas-diagnostics.ts';
 
@@ -40,4 +40,22 @@ test('empty raw response retains finish reason without inventing success or losi
  const fetchFn=createTavernMainFetch({getTavernHelper:()=>null,getContext:()=>({mainApi:'openai',getChatCompletionModel:()=> 'fixture',getRequestHeaders:()=>({}),ChatCompletionService:{presetToGeneratePayload:async(a,b,c)=>c}}),fetchFn:async()=>Response.json({choices:[{message:{content:''},finish_reason:'content_filter'}]})});
  const response=await fetchFn('atlas://host',init),json=await response.json();
  assert.equal(response.ok,false);assert.equal(json.error.reasonCode,'HOST_EMPTY_RESPONSE');assert.equal(json.hostTransport.finishReason,'content_filter');assert.equal(json.hostTransport.toolCallCount,0);
+});
+
+test('structural diagnostics distinguish explicit filters, output limits and unclassified empty replies without leaking text',()=>{
+ for(const [payload,expected] of [
+  [{promptFeedback:{blockReason:'SAFETY'}},'content-filter'],
+  [{choices:[{message:{content:'',refusal:'private refusal'},finish_reason:'content_filter'}]},'content-filter'],
+  [{error:{message:'Prompt was blocked due to : PROHIBITED_CONTENT'}},'content-filter'],
+  [{candidates:[{finishReason:'MAX_TOKENS',content:{parts:[]}}]},'output-limit'],
+  [{choices:[{message:{content:''}}],responseContent:{parts:[{thought:true,text:'private reasoning',thoughtSignature:'private signature'}]}},'none'],
+ ]){
+  const raw=summarizeHostResponse(payload,200,188);assert.equal(raw.providerErrorKind,expected);
+  const safe=sanitizeDiagnostic({level:'error',source:'model',code:'MODEL_HOST_FAILED',operation:'generation',phase:'response',outcome:'failed',details:raw}).details;
+  assert.equal(safe.providerErrorKind,expected);assert.ok(!JSON.stringify(safe).includes('private'));
+ }
+ const empty=summarizeHostResponse({choices:[{message:{content:''}}],responseContent:{parts:[{text:''}]}},200,188);
+ assert.equal(empty.visibleTextChars,0);assert.equal(empty.textPartCount,1);assert.equal(empty.upstreamErrorPresent,false);
+ const invalid=sanitizeDiagnostic({level:'error',source:'model',code:'MODEL_HOST_FAILED',operation:'generation',phase:'response',outcome:'failed',details:{responseShape:'private-data',providerErrorKind:'private-data'}});
+ assert.equal(invalid.details,undefined);
 });

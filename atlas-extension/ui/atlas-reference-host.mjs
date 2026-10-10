@@ -114,7 +114,7 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
   async function sourceText(captured){
     const c=captured.context,chat=c?.chat??[],last=chat.filter(m=>!m.is_user&&!m.is_system).at(-1),user=chat.filter(m=>m.is_user&&!m.is_system).at(-1);
     return {assistantText:last?.mes??'',userText:user?.mes??'',charDescription:c?.characters?.[c.characterId]?.description??'',
-      loreSupplement:(await lorePort?.read?.()??[]).filter(e=>e.enabled!==false).map(e=>e.content).join('\n')};
+      loreSupplement:(await lorePort?.read?.()??[]).filter(e=>e.enabled!==false&&e.atlasReadable!==false).map(e=>e.content).join('\n')};
   }
   /** 把一次地图类回执记进宿主（核心只有这一条外部回执通道）。 */
   function recordMapReceipt(result,captured,operation,code){
@@ -217,6 +217,7 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
     async setViewMode(mode){viewMode=mode==='author'?'author':'pov';await refresh(true);},
     onPage(page){core.setPage({cast:'characters',items:'items',msgs:'events',sim:'advance',time:'events',lore:'world',diag:'logs',prefs:'prompts'}[page]??'map');if(page==='lore')void Promise.resolve(refresh()).then(readLore).catch(error=>emit({level:'error',source:'ui',code:'LORE_READ_FAILED',details:{message:error.message}}));},
     async toggleLore(id){if(viewMode!=='author')throw Error('请切换世界后台后修改世界书');await lorePort?.toggle?.(id);await readLore();},
+    async setLoreRead(id,enabled){if(viewMode!=='author')throw Error('请切换世界后台后修改 ATLAS 读取设置');if(!lorePort?.setAtlasRead)throw Error('ATLAS 读取设置不可用');await lorePort.setAtlasRead(id,enabled);await readLore();},
     close(){core.setPanelOpen(false);},
     async setEnabled(enabled){if(actionBusy||core.getState().pendingTurn)throw Error('有回合正在处理，请稍后再试');if(!core.getState().binding)throw Error('请先建立当前聊天的世界');await core.setEnabled(enabled);await refresh(true);const s=core.getState();if(s.binding?.enabled!==enabled)throw Error(s.lastError??'推演开关未保存');},
     async advance(){return withTask(core.getState().binding?'advance':'initialize',async()=>{if(core.getState().binding)return core.manualAdvance();const result=await core.initializeWorld();if(result!==true)throw Error(core.getState().lastError??'当前聊天的世界初始化未完成');return result;});},

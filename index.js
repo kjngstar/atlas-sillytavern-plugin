@@ -1,7 +1,7 @@
 import {atlasClockLabel,atlasLegacyNearby,buildTableMapNpcIndex,atlasMapSource,atlasMapLayerInput,atlasMapOccupants} from './ui/atlas-scene-ui-adapter.mjs';
 // U15：新工作台外壳（U02）——同一宿主只挂一个实例，重复 mount 先销毁旧实例。
 import { mountReferenceUi } from './ui/atlas-reference-host.mjs';
-import { createReferenceLorePort } from './ui/atlas-reference-lore.mjs';
+import { createReferenceLorePort, isAtlasLoreEntryReadable, atlasLoreReadPolicy } from './ui/atlas-reference-lore.mjs';
 import { isValidAtlasSession, createEmptyAtlasSession, readAtlasSession, writeAtlasSession, atlasSessionWriteGuard, atlasSessionHasPersistentPayload, atlasStarterWorldWriteGuard, atlasChatIdentitySnapshot, atlasSameChatIdentity, atlasStaleWriteNotice, atlasContentHash, atlasFloorIdentity, atlasContextRecord, atlasAssistantFloorIdentity, pathWantsSession, createAtlasSessionApi, ATLAS_SESSION_KEY, ATLAS_SESSION_SCHEMA_VERSION, SESSION_ROUTE_PREFIXES } from './ui/atlas-host-context.mjs';
 export { ATLAS_SESSION_KEY, ATLAS_SESSION_SCHEMA_VERSION, isValidAtlasSession, createEmptyAtlasSession, writeAtlasSession, atlasSessionHasPersistentPayload, atlasStarterWorldWriteGuard, atlasChatIdentitySnapshot, atlasSameChatIdentity, atlasStaleWriteNotice, atlasContentHash, atlasFloorIdentity, atlasAssistantFloorIdentity, createAtlasSessionApi };
 import { atlasPointRefOf, atlasKnownCoordinate, atlasPositionQuality, atlasSqlMapModel, atlasSqlSubmaps, atlasSqlMapItemFor, atlasSqlFilterByViewMode, atlasSqlNearbyCards, buildSqlPromptScope } from './ui/atlas-scene-ui-adapter.mjs';
@@ -1996,7 +1996,7 @@ function ensureWorkbenchStylesheet() {
 }
 
 function renderPanel(core, root, api, store, mod, skinPort = null) {
-  return mountReferenceUi({root,core,api,getContext:()=>globalThis.SillyTavern?.getContext?.(),settingsPort:skinPort,lorePort:createReferenceLorePort(()=>globalThis.SillyTavern?.getContext?.(),loadStWorldInfo),
+  return mountReferenceUi({root,core,api,getContext:()=>globalThis.SillyTavern?.getContext?.(),settingsPort:skinPort,lorePort:createReferenceLorePort(()=>globalThis.SillyTavern?.getContext?.(),loadStWorldInfo,async()=>{try{return await globalThis.TavernHelper?.getCharWorldbookNames?.('current')??[];}catch{return [];}}),
     diagnostics:()=>atlasDiagnostics?.getSnapshot?.()??pendingDiagnostics,emit:emitAtlasDiagnostic,defaultPrompt:mod.DEFAULT_WORLD_TURN_SYSTEM_PROMPT??''});
 }
 
@@ -2492,6 +2492,7 @@ async function readCardGeoLoreChunks(chatId) {
   if (String(ctx?.chatId ?? "") !== chatId) return [];
   const character = ctx?.characters?.[ctx?.characterId] ?? null;
   const characterId = ctx?.characterId ?? null;
+  const readPolicy = JSON.stringify([...atlasLoreReadPolicy(ctx)].sort());
   const bookNames = [];
   const addBook = (raw) => {
     const name = typeof raw === "string" ? raw.trim() : typeof raw?.name === "string" ? raw.name.trim() : "";
@@ -2514,7 +2515,8 @@ async function readCardGeoLoreChunks(chatId) {
   for (const bookName of bookNames) {
     let book;
     try { book = await worldInfo.loadWorldInfo(bookName); } catch { continue; }
-    for (const entry of Object.values(book?.entries ?? {})) {
+    for (const [uid, entry] of Object.entries(book?.entries ?? {})) {
+      if (!isAtlasLoreEntryReadable(ctx, bookName, uid)) continue;
       if (!entry || typeof entry !== "object" || entry.disable === true || !String(entry.content ?? "").trim()) continue;
       const title = String(entry.comment ?? entry.key?.[0] ?? "条目");
       if (prefixes.some((prefix) => title.startsWith(String(prefix)))) continue;
@@ -2523,7 +2525,8 @@ async function readCardGeoLoreChunks(chatId) {
   }
   const live = SillyTavern.getContext();
   if (String(live?.chatId ?? "") !== chatId || (live?.characterId ?? null) !== characterId
-    || live?.chatMetadata !== ctx?.chatMetadata) return [];
+    || live?.chatMetadata !== ctx?.chatMetadata
+    || JSON.stringify([...atlasLoreReadPolicy(live)].sort()) !== readPolicy) return [];
   return buildAtlasGeoLoreChunks(entries);
 }
 
@@ -2608,13 +2611,15 @@ export async function readCardLoreSupplementViaSelector(selectionContext, select
     const characterBook = character?.data?.extensions?.world ?? null;
     const chatBook = ctx?.chatMetadata?.world_info ?? null;
     const branchId = ctx?.chatMetadata?.atlas?.binding?.branchId ?? null;
+    const readPolicy = JSON.stringify([...atlasLoreReadPolicy(ctx)].sort());
     const isCurrent = () => {
       const live = SillyTavern.getContext();
       return String(live?.chatId ?? "") === chatId && (live?.characterId ?? null) === characterId
         && live?.chatMetadata === ctx?.chatMetadata
         && (live?.characters?.[live?.characterId]?.data?.extensions?.world ?? null) === characterBook
         && (live?.chatMetadata?.world_info ?? null) === chatBook
-        && (live?.chatMetadata?.atlas?.binding?.branchId ?? null) === branchId;
+        && (live?.chatMetadata?.atlas?.binding?.branchId ?? null) === branchId
+        && JSON.stringify([...atlasLoreReadPolicy(live)].sort()) === readPolicy;
     };
     const dropStale = () => {
       emit({ level: "info", source: "lorebook", code: "LORE_STALE_CONTEXT_DROPPED",
@@ -2671,13 +2676,14 @@ export async function readCardLoreSupplementViaSelector(selectionContext, select
         }
         const data = await dataPromise;
         rawEntries = data && typeof data === "object" && data.entries && typeof data.entries === "object"
-          ? Object.values(data.entries)
+          ? Object.entries(data.entries)
           : [];
       } catch {
         failedBooks += 1;
         continue;
       }
-      for (const entry of rawEntries) {
+      for (const [entryKey, entry] of rawEntries) {
+        if (!isAtlasLoreEntryReadable(ctx, bookName, entryKey)) continue;
         if (!entry || typeof entry !== "object") continue;
         const content = typeof entry.content === "string" ? entry.content : "";
         if (!content.trim()) continue;
@@ -2686,8 +2692,7 @@ export async function readCardLoreSupplementViaSelector(selectionContext, select
         const keys = Array.isArray(entry.key) ? entry.key.filter((k) => typeof k === "string" && k.trim()) : [];
         const title = comment || (keys.length > 0 ? keys.slice(0, 4).join(" / ") : "条目");
         allEntries.push({
-          uid: typeof entry.uid === "string" || typeof entry.uid === "number" ? String(entry.uid)
-            : (typeof entry.id === "string" || typeof entry.id === "number" ? String(entry.id) : ""),
+          uid: String(entryKey),
           title,
           bookName,
           content,

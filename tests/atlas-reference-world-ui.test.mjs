@@ -96,6 +96,15 @@ function boot({data=BUILDING_DATA,host={},preferences={version:1,singleClickEnte
 function withUI(t,options){const ui=boot(options);t.after(ui.dispose);return ui;}
 
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
+
+test('世界书读取开关呈现独立状态，点击只调用 ATLAS 读取端口',async t=>{
+ const data=structuredClone(BUILDING_DATA);data.LORE=[{id:JSON.stringify(['Book','1']),kind:'Book',title:'城市资料',content:'中性地理资料',enabled:true,atlasReadable:false,keys:[]}];
+ const reads=[],hostToggles=[];const ui=withUI(t,{data,host:{setLoreRead:async(...args)=>reads.push(args),toggleLore:async id=>hostToggles.push(id)}});
+ ui.w.document.querySelector('[data-view="lore"]').click();await tick();
+ const control=ui.w.document.querySelector('[data-lore-read-toggle]');assert.equal(control.getAttribute('aria-checked'),'false');assert.match(control.textContent,/开启 ATLAS 读取/);
+ control.click();await tick();assert.deepEqual(reads,[[data.LORE[0].id,true]]);assert.equal(hostToggles.length,0);
+ assert.match(ui.w.document.querySelector('.lore-card').textContent,/已启用/);
+});
 /** 停掉 rAF 并同步画一帧 —— jsdom 的 rAF 是定时器，先跑断言只会看到空 hits。 */
 function freeze(map){map.setPaused(true);return map;}
 /**

@@ -212,7 +212,7 @@ function renderPage(){const el=$('#workspacePage');el.hidden=state.page==='map';
  }else if(state.page==='sim'){const events=turnEvents();
   el.innerHTML+=simulationControlsHTML()+`<div class="full-task-grid">${D.TASKS.filter(known).map(taskCard).join('')}</div><div class="section-label">本轮世界动向</div><div class="event-list">${events.slice(0,3).map(eventRow).join('')||'<p class="scope-note">本轮暂无新的世界动向</p>'}</div>`+(events.length>3?`<p class="scope-note">另有 ${events.length-3} 条动向在下方事件栏</p>`:'');}
  else if(state.page==='time')el.innerHTML+=timelineHTML();
- else if(state.page==='lore')el.innerHTML+=`<div class="lore-grid">${D.LORE.map(l=>`<article class="lore-card"><div><em class="tag-s ${l.enabled?'g':'a'}">${l.enabled?'已启用':'已停用'}</em><span>${esc(l.kind)}</span></div><button class="lore-title" data-select-kind="lore" data-select="${esc(l.id)}">${esc(l.title)}</button><p>${esc(l.content)}</p><div class="lore-actions"><button class="action-btn" data-lore-target="${esc(l.id)}">查看关联对象</button><button class="text-btn" data-lore-toggle="${esc(l.id)}">${l.enabled?'停用':'启用'}</button></div></article>`).join('')}</div>`;
+ else if(state.page==='lore')el.innerHTML+=`<p class="scope-note">酒馆启停控制正常聊天中的世界书；ATLAS 读取开关仅控制插件推演、建图和布局的资料输入。同一世界书条目的读取设置会保留并用于其他聊天。</p><div class="lore-grid">${D.LORE.map(l=>`<article class="lore-card"><div><em class="tag-s ${l.enabled?'g':'a'}">${l.enabled?'已启用':'已停用'}</em><em class="tag-s ${l.atlasReadable===false?'a':'g'}">${l.atlasReadable===false?'ATLAS 不读取':'ATLAS 读取'}</em><span>${esc(l.kind)}</span></div><button class="lore-title" data-select-kind="lore" data-select="${esc(l.id)}">${esc(l.title)}</button><p>${esc(l.content)}</p><div class="lore-actions"><button class="action-btn" data-lore-target="${esc(l.id)}">查看关联对象</button><button class="action-btn" role="switch" aria-checked="${l.atlasReadable!==false}" aria-label="ATLAS 读取：${esc(l.title)}" data-lore-read-toggle="${esc(l.id)}" data-lore-read-enabled="${l.atlasReadable===false}">${l.atlasReadable===false?'开启 ATLAS 读取':'关闭 ATLAS 读取'}</button><button class="text-btn" data-lore-toggle="${esc(l.id)}">${l.enabled?'停用':'启用'}</button></div></article>`).join('')}</div>`;
  else if(state.page==='diag'){el.innerHTML+=diagnosticsHTML();refreshBackupStatus();}
  else if(state.page==='prefs')el.innerHTML+=settingsHTML();
 }
@@ -387,6 +387,7 @@ function bind(){
   if(b.dataset.settingsTab){state.settingsTab=b.dataset.settingsTab;renderPage();return;}
   if(b.dataset.export){exportData(b.dataset.export);return;}
   if(b.dataset.loreToggle){try{await window.AtlasHost.toggleLore(b.dataset.loreToggle);toast('世界书条目已更新');}catch(error){toast(error.message,'warn');}return;}
+  if(b.dataset.loreReadToggle){b.disabled=true;try{await window.AtlasHost.setLoreRead(b.dataset.loreReadToggle,b.dataset.loreReadEnabled==='true');toast('ATLAS 读取设置已保存');}catch(error){toast(error.message,'warn');}finally{b.disabled=false;}return;}
   if(b.dataset.loreTarget){const l=D.LORE.find(l=>l.id===b.dataset.loreTarget);if(!l.target){toast('当前条目没有匹配到已记录对象','warn');return;}if(byId(l.target))navigate(l.target);else showEntity('character',l.target,true);return;}
   if(b.hasAttribute('data-demo-next')){advanceDemo();return;}
   if(b.hasAttribute('data-layout')){generateLayout(b.dataset.layout);return;}
