@@ -124,6 +124,7 @@ export async function handleSqlMapAction(session:SqlSession,action:string,body:R
   }else if(['map/geo','map/suggest','map/bootstrap'].includes(action)){
     manual=false;
     if(action==='map/bootstrap'){
+      layoutMaps='active';
       // M3-13：初建也走同一建设阶段（预览同样在候选里跑），而不是另起一条旧路径。
       // bootstrap 的焦点 = 本分支的顶层地点；完全没有地点时 focus 为空，
       // builder 会返回 null —— 「完全无 world 不造假起点」，等 observe 先登记第一个场所。

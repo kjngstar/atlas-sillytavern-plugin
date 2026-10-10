@@ -17,7 +17,10 @@ async function fixture(){
  let saves=0,calls=0,saveOk=true,response=initial.map(op=>JSON.stringify(op)).join('\n');
  const host={chatUid:'maps-real',branchId:'main',chatMetadata:{},saveMetadata:async()=>{saves++;return saveOk;}};
  const provider=createBrowserSqlHost({enabled:()=>true,context:()=>host,loadRuntime:loadAtlasSqlRuntime,
-  modelPort:{request:async request=>{calls++;return {batchId:request.batchId,text:request.batchId.startsWith('construction_')?'{"op":"noop"}':response,finishReason:'stop'};}}});
+  modelPort:{request:async request=>{calls++;
+   const line=request.messages?.[1]?.content.split('\n').find(line=>line.startsWith('本图：'));
+   const layout=line?JSON.parse(line.slice(3)).map(scope=>JSON.stringify({op:'map.layout.request',ref:scope.map,data:{kind:scope.kind,spec:scope.kind==='floor'?{rooms:scope.baselineRooms}:scope.kind==='city'?{riverWidth:0,districts:[{id:scope.container.ref,name:scope.name,bank:'west',order:0}]}:{surface:'mixed'}}})).join('\n'):null;
+   return {batchId:request.batchId,text:request.batchId.startsWith('construction_')?'{"op":"noop"}':layout??response,finishReason:'stop'};}}});
  const core=createAtlasServerCore({store:{read:async()=>null,write:async()=>{throw Error('No legacy writer');}},sqlSessionProvider:provider});
  const send=(action,body={})=>core.handle('POST','/sql/chat/'+action,{chatId:host.chatUid,chatUid:host.chatUid,...body},{local:true});
  const session=await provider.session(host.chatUid),seed=session.repo.internal.currentHeadTurnId();
@@ -35,16 +38,19 @@ test('Q07 bootstrap previews actual scene layout without saving; applying uses t
  const f=await fixture();try{
   const req={assistantText:'在学校教室。',openingMessageId:'opening'};
   const preview=await f.send('map/bootstrap',{...req,apply:false});assert.equal(preview.status,200,JSON.stringify(preview.body));
-  assert.equal(preview.body.data.newLocations.length,3);assert.equal(f.saves(),0);assert.equal(f.calls(),2);
+  assert.equal(preview.body.data.newLocations.length,3);assert.equal(f.saves(),0);assert.equal(f.calls(),4);
   assert.equal(queryBound(f.session.repo.db,'SELECT COUNT(*) n FROM locations',[])[0].n,0);
   const p=preview.body.data;
   const apply=await f.send('map/bootstrap',{...req,apply:true,previewId:p.previewId,baseRevision:p.baseRevision});assert.equal(apply.body.data.coreSaved,true,JSON.stringify(apply.body));
-  assert.equal(f.calls(),2);assert.equal(f.saves(),1);
+  assert.equal(f.calls(),4);assert.equal(f.saves(),1);
+  const builtMaps=queryBound(f.session.repo.db,'SELECT frame_json FROM maps',[]);
+  assert.equal(builtMaps.filter(map=>JSON.parse(map.frame_json).atlasScene).length,4,JSON.stringify({message:'所有四张地图与两批布局必须在一次确认中一起保存',maps:builtMaps.map(map=>JSON.parse(map.frame_json)),receipt:apply.body.data.receipt}));
+  assert.ok(builtMaps.every(map=>JSON.parse(map.frame_json).atlasLayoutContext),'两批布局都必须记录结构指纹，避免下轮重复生成');
   const branch=queryBound(f.session.repo.db,'SELECT * FROM branches',[])[0];assert.equal(branch.clock_s,0);assert.ok(branch.pov_character_id);assert.ok(branch.root_map_id);
   assert.equal(queryBound(f.session.repo.db,'SELECT COUNT(*) n FROM maps',[])[0].n,4);
   const state=(await f.send('state')).body.data;
   const room=state.sqlViews.map.items.find(m=>m.containerLocationId===row(f,'locations','教室').id);
-  assert.deepEqual([room.frames.frame.cols,room.frames.frame.rows],[12,8]);assert.equal(room.points.filter(p=>p.kind==='character').length,2);
+  assert.ok(Math.abs(room.frames.frame.cols*room.metersPerCell-12)<1e-6);assert.ok(Math.abs(room.frames.frame.rows*room.metersPerCell-8)<1e-6);assert.equal(room.points.filter(p=>p.kind==='character').length,2);
   const undo=await f.core.handle('POST','/sql/rollback',{chatUid:f.host.chatUid,targetParentTurnId:f.seed},{local:true});assert.equal(undo.body.data.coreSaved,true,JSON.stringify(undo.body));
   assert.equal(queryBound(f.session.repo.db,'SELECT COUNT(*) n FROM maps',[])[0].n,0);assert.equal(queryBound(f.session.repo.db,'SELECT root_map_id FROM branches',[])[0].root_map_id,null);
   await bootstrap(f);assert.equal(queryBound(f.session.repo.db,'SELECT COUNT(*) n FROM maps',[])[0].n,4);

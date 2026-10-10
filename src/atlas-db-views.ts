@@ -748,6 +748,15 @@ function receiptIssues(receipt: Record<string, unknown>, turnId: string): Array<
       });
     }
   }
+  // Transport/construction/layout issues may belong to no atomic business group.
+  // Keep them visible and count each once, including older saved partial receipts.
+  const globalIssues=Array.isArray(receipt.issues)?receipt.issues as Array<Record<string,unknown>>:[];
+  for(const issue of globalIssues){
+    if(out.some(item=>item.code===String(issue.code??'')&&item.path===String(issue.path??'')&&item.message===String(issue.message??'')))continue;
+    out.push({logId:`issue_${turnId}_${out.length}`,kind:'issue',turnId,groupId:null,
+      code:String(issue.code??''),path:String(issue.path??''),message:String(issue.message??''),
+      severity:String(issue.severity??'error'),retryable:issue.retryable===true,dependsOn:[]});
+  }
   return out;
 }
 

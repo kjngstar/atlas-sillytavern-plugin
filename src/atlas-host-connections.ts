@@ -29,8 +29,8 @@ function toResponse(like: AtlasHostResponseLike): Response {
   return like as unknown as Response;
 }
 
-function textResponse(text: string): Response {
-  const body = JSON.stringify({ choices: [{ message: { content: text } }] });
+function textResponse(text: string, hostTransport?: Record<string, unknown>): Response {
+  const body = JSON.stringify({ choices: [{ message: { content: text }, ...(typeof hostTransport?.finishReason==='string'?{finish_reason:hostTransport.finishReason}:{}) }], ...(hostTransport ? {hostTransport} : {}) });
   return toResponse({
     ok: true,
     status: 200,
@@ -41,8 +41,8 @@ function textResponse(text: string): Response {
 }
 
 /** 502 是适配层状态，不代表已观察到模型服务商的 HTTP 状态。 */
-function hostErrorJsonResponse(message: string, code = "API_REQUEST_FAILED", reasonCode = "HOST_GENERATION_FAILED"): Response {
-  const body = JSON.stringify({ error: { message, code, reasonCode, origin: "atlas-host", retryable: false } });
+function hostErrorJsonResponse(message: string, code = "API_REQUEST_FAILED", reasonCode = "HOST_GENERATION_FAILED", hostTransport?: Record<string, unknown>): Response {
+  const body = JSON.stringify({ error: { message, code, reasonCode, origin: "atlas-host", retryable: false }, ...(hostTransport ? {hostTransport} : {}) });
   return toResponse({
     ok: false,
     status: 502,
@@ -117,18 +117,70 @@ export function getConnectionManagerProfiles(getContext: () => unknown): Array<{
 export interface TavernMainFetchDeps {
   /** 通常 = () => globalThis.TavernHelper；测试注入 fake。 */
   getTavernHelper: () => unknown;
+  /** 新版酒馆原始 Chat Completion 通道；不让已装配的资料再次执行 EJS。 */
+  getContext?: () => unknown;
+  /** 在发送时查找当前 fetch，保留外部脚本网关的包装链。 */
+  fetchFn?: typeof fetch;
+}
+
+interface MainContext {
+  mainApi?: string;
+  chatCompletionSettings?: Record<string, unknown>;
+  getChatCompletionModel?: () => string;
+  getRequestHeaders?: () => Record<string, string>;
+  ChatCompletionService?: {
+    presetToGeneratePayload?: (preset: Record<string, unknown>, overrides: Record<string, unknown>, payload: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  };
+}
+
+async function rawMainResponse(ctx: MainContext, deps: TavernMainFetchDeps, payload: HostRequestPayload, prompts: Array<{role:string;content:string}>, init?: RequestInit): Promise<Response> {
+  const request = await ctx.ChatCompletionService!.presetToGeneratePayload!({}, {}, {
+    messages: prompts, model: ctx.getChatCompletionModel!(), stream: false,
+    ...(typeof payload.max_tokens === 'number' && payload.max_tokens > 0 ? {max_tokens:payload.max_tokens} : {}),
+    ...(payload.tools?.length ? {tools:payload.tools, tool_choice:payload.tool_choice ?? 'auto'} : {}),
+  });
+  // The host settings event may add tools. Do not set tool_choice=none or cache fetch.
+  const response = await (deps.fetchFn ?? globalThis.fetch)('/api/backends/chat-completions/generate', {
+    method:'POST', headers:{...ctx.getRequestHeaders!(), 'Content-Type':'application/json'},
+    cache:'no-cache', body:JSON.stringify({...request, stream:false}), signal:init?.signal,
+  });
+  const wire = await response.text();
+  let data: any;
+  try { data=JSON.parse(wire); } catch {
+    return hostErrorJsonResponse('酒馆生成端点未返回合法 JSON；模型结果未提交。', 'RESPONSE_MALFORMED', 'HOST_INVALID_JSON', {transport:'chat-completions-raw',hostHttpStatus:response.status,responseBytes:wire.length});
+  }
+  const googleParts=data?.responseContent?.parts ?? data?.candidates?.[0]?.content?.parts;
+  const calls=data?.choices?.[0]?.message?.tool_calls ?? (Array.isArray(googleParts)?googleParts.filter((part:any)=>part?.functionCall).map((part:any)=>({function:{name:part.functionCall.name}})):undefined);
+  const meta={transport:'chat-completions-raw',hostHttpStatus:response.status,
+    finishReason:data?.choices?.[0]?.finish_reason ?? data?.candidates?.[0]?.finishReason ?? null,
+    blockReason:data?.promptFeedback?.blockReason ?? null,
+    toolCallCount:Array.isArray(calls)?calls.length:0,
+    transportCarrier:Array.isArray(calls)&&calls.some((call:any)=>typeof call?.function?.name==='string'&&/^(?:[^:]+:)*emit_complete_response_[a-f0-9]{24}$/.test(call.function.name)),
+    responseBytes:wire.length};
+  if(!response.ok||data?.error) return hostErrorJsonResponse(`酒馆生成端点请求失败（HTTP ${response.status}）；模型结果未提交。`, 'API_REQUEST_FAILED', 'HOST_HTTP_FAILED', meta);
+  const text=hostAssistantText(data,payload.tools?.[0]?.function?.name);
+  if(!text?.trim()) return hostErrorJsonResponse('酒馆生成端点未返回可用正文；模型结果未提交。请查看本轮原始响应的结束原因与工具调用数量。', 'RESPONSE_MALFORMED', 'HOST_EMPTY_RESPONSE', meta);
+  return textResponse(text.trim(),meta);
 }
 
 /** 酒馆主 API 适配：拦截引擎请求 → TavernHelper.generateRaw → OpenAI 形状回包。 */
 export function createTavernMainFetch(deps: TavernMainFetchDeps): typeof fetch {
   return async (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const payload = parseHostPayload(init);
+    const ctx = deps.getContext?.() as MainContext | undefined;
+    const prompts = payload ? orderedPromptsOf(payload) : [];
+    if (prompts.length === 0) return hostErrorJsonResponse("主API生成失败：请求缺少有效的 messages。");
+    if(ctx?.mainApi === 'openai' && typeof ctx.ChatCompletionService?.presetToGeneratePayload === 'function' && typeof ctx.getChatCompletionModel === 'function' && typeof ctx.getRequestHeaders === 'function') {
+      try { return await rawMainResponse(ctx,deps,payload!,prompts,init); }
+      catch(error) { return hostErrorJsonResponse(`酒馆原始生成请求失败：${error instanceof Error?error.message:String(error)}`, 'API_REQUEST_FAILED', 'HOST_RAW_REQUEST_FAILED', {transport:'chat-completions-raw'}); }
+    }
     const helper = deps.getTavernHelper() as { generateRaw?: (opts: Record<string, unknown>) => Promise<unknown> } | null | undefined;
+    const fallbackMeta={transport:'tavern-helper',hostMainApi:ctx?.mainApi??null,
+      rawServiceAvailable:typeof ctx?.ChatCompletionService?.presetToGeneratePayload==='function',
+      modelReaderAvailable:typeof ctx?.getChatCompletionModel==='function',headersAvailable:typeof ctx?.getRequestHeaders==='function'};
     if (!helper || typeof helper.generateRaw !== "function") {
       return hostErrorJsonResponse("主API生成不可用：未检测到酒馆助手（TavernHelper.generateRaw）。请安装酒馆助手（JS-Slash-Runner），或改用自定义 API 连接。", "API_NOT_CONFIGURED", "HOST_HELPER_UNAVAILABLE");
     }
-    const prompts = payload ? orderedPromptsOf(payload) : [];
-    if (prompts.length === 0) return hostErrorJsonResponse("主API生成失败：请求缺少有效的 messages。");
     const maxTokens = typeof payload?.max_tokens === "number" ? payload.max_tokens : undefined;
     try {
       const response = await helper.generateRaw({ ordered_prompts: prompts, should_stream: false,
@@ -136,8 +188,8 @@ export function createTavernMainFetch(deps: TavernMainFetchDeps): typeof fetch {
         ...(payload?.tools?.length ? { tools: payload.tools, tool_choice: payload.tool_choice ?? "auto" } : {}),
         ...(maxTokens ? { max_tokens: maxTokens } : {}) });
       const text = hostAssistantText(response, payload?.tools?.[0]?.function?.name);
-      if (!text?.trim()) return hostErrorJsonResponse("酒馆主 API 未返回可用正文（空回复或无法识别的响应）。本轮未提交。请核对酒馆当前连接与脚本网关的响应日志；Atlas 未观察到上游 HTTP 状态，不能据此判断模型不存在或地址错误。", "RESPONSE_MALFORMED", "HOST_EMPTY_RESPONSE");
-      return textResponse(text.trim());
+      if (!text?.trim()) return hostErrorJsonResponse("酒馆主 API 未返回可用正文（空回复或无法识别的响应）。模型结果未提交。请核对酒馆当前连接与脚本网关的响应日志；Atlas 未观察到上游 HTTP 状态，不能据此判断模型不存在或地址错误。", "RESPONSE_MALFORMED", "HOST_EMPTY_RESPONSE");
+      return textResponse(text.trim(),fallbackMeta);
     } catch (error) {
       return hostErrorJsonResponse(`主API生成失败：${error instanceof Error ? error.message : String(error)}`);
     }

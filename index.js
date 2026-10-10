@@ -2880,14 +2880,15 @@ async function connectOnce() {
         return mod.createStProxyFetch({ getContext: context, fetchFn: loggingModelFetch })(input, init);
       }
       const adapter = mode === "main"
-        ? mod.createTavernMainFetch({ getTavernHelper })
+        ? mod.createTavernMainFetch({ getTavernHelper, getContext: context, fetchFn: (url, options) => globalThis.fetch(url, options) })
         : mod.createTavernProfileFetch({ getContext: context, getTavernHelper });
       const startedAt = Date.now();
       try {
         const response = await adapter(input, init);
         const hostBody = await response.clone().text();
         let hostError = null;
-        try { hostError = JSON.parse(hostBody)?.error; } catch { /* 无正文不记录原文 */ }
+        let hostTransport = null;
+        try { const parsed=JSON.parse(hostBody);hostError=parsed?.error;hostTransport=parsed?.hostTransport; } catch { /* 无正文不记录原文 */ }
         emitAtlasDiagnostic({
           level: response.ok ? "info" : "error", source: "model",
           code: response.ok ? "MODEL_HOST_COMPLETE" : "MODEL_HOST_FAILED",
@@ -2896,6 +2897,7 @@ async function connectOnce() {
           durationMs: Date.now() - startedAt,
           ...(hostError?.code ? { errorCode: hostError.code, retryable: hostError.retryable === true } : {}),
           details: { route: "host-model", mode,
+            ...(hostTransport ?? {}),
             ...(hostError?.reasonCode ? { reasonCode: hostError.reasonCode } : {}),
             responseChars: response.ok ? (JSON.parse(hostBody)?.choices?.[0]?.message?.content?.length ?? 0) : 0 },
         });

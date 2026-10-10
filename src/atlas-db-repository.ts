@@ -1107,9 +1107,12 @@ export function createSqlRepository(options: RepositoryOptions) {
 
       // Entities/maps must exist before the model can reference them. Release the
       // isolated candidate transaction during the spatial model request as well.
-      const layoutTask=input.layoutMaps?buildSqlLayoutTask(candidateDb,branchId,input,turnId):null;
+      let layoutTask=input.layoutMaps?buildSqlLayoutTask(candidateDb,branchId,input,turnId):null;
+      const layoutTasks:NonNullable<typeof layoutTask>[]=[];
       let layoutApplied=false;
-      if(layoutTask&&options.modelPort&&turnBudget.remaining()>0&&foregroundBatches+(repairAttempted?1:0)+(simulation.modelBatches??0)<ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn){
+      while(layoutTask&&options.modelPort&&turnBudget.remaining()>0&&foregroundBatches+(repairAttempted?1:0)+(simulation.modelBatches??0)<ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn){
+        const currentLayoutTask=layoutTask;
+        layoutTasks.push(layoutTask);
         preparationStep='before-layout';
         commitTransaction(candidateDb);transactionOpen=false;
         try{
@@ -1134,23 +1137,23 @@ export function createSqlRepository(options: RepositoryOptions) {
           // M4-23：解析必须用**原任务的冻结目录**，不能 await 回来再收一次 —— 候选期间新插入的
           // 行会让 alias 改指向，同一批回复就会被解到别的实体上。
           const layoutRefs=layoutTask.catalogue.knownRefs;
-          const allowedRefs=new Set(layoutRefs.filter(r=>layoutTask.mapIds.includes(r.id)).flatMap(r=>[r.id,r.alias]));
+          const allowedRefs=new Set(layoutRefs.filter(r=>currentLayoutTask.mapIds.includes(r.id)).flatMap(r=>[r.id,r.alias]));
           const ops=parsed.operations.filter(op=>op.value.op==='map.layout.request'&&allowedRefs.has(op.value.ref??'')).map(op=>{
             const id=layoutRefs.find(r=>r.id===op.value.ref||r.alias===op.value.ref)?.id;
-            const extent=id?layoutTask.extents[id]:undefined;
-            const kind=id?layoutTask.kinds[id]:undefined;
+            const extent=id?currentLayoutTask.extents[id]:undefined;
+            const kind=id?currentLayoutTask.kinds[id]:undefined;
             const data=op.value.data,spec=data?.spec;
             if(!id||!extent||!kind||!spec||typeof spec!=='object'||Array.isArray(spec))return {...op,opId:`layout_${op.opId}`};
             // 角色由真实容器决定：模型写错 kind 时以程序值为准（只记诊断，不按错误的 kind 生成）。
             if(data?.kind!==kind)allIssues.push({code:'LAYOUT_KIND_OVERRIDDEN',path:'$.layout.kind',message:`地图 ${id} 的角色由容器决定为 ${kind}，模型给出的 ${String(data?.kind ?? '(空)')} 已按 ${kind} 处理`,severity:'warning',retryable:false});
             // overview 的幅面由程序按地图框架给定（未标定时是格）：不把米制 width/height 塞回去冒充尺度。
             const canvas=extent.units==='meters'?{width:extent.width,height:extent.height}:{};
-            const baseline=kind==='floor'?(layoutTask.baselineRooms[id]??[]):[];
+            const baseline=kind==='floor'?(currentLayoutTask.baselineRooms[id]??[]):[];
             const rooms='rooms' in spec?spec.rooms:undefined;
             const defaults=baseline.length&&(rooms===undefined||Array.isArray(rooms)&&rooms.length===0)?{rooms:baseline}:{};
             return {...op,opId:`layout_${op.opId}`,value:{...op.value,data:{...data,kind,spec:{...canvas,...spec,...defaults}}}};
           });
-          if(!ops.length)allIssues.push({code:'LAYOUT_NOT_GENERATED',path:'$.layout',message:'模型没有返回空间布局约束；已登记地点仍保留，可在当前地图点击生成布局重试',severity:'warning',retryable:true});
+          if(!ops.length)allIssues.push({code:'LAYOUT_NOT_GENERATED',path:'$.layout',message:'模型没有返回空间布局约束；地图与布局尚未完成，已登记地点保留，下一轮自动继续布局',severity:'warning',retryable:true});
           const layoutCompiled=compileOperations({operations:ops,anchor,phase:'geography',clockS:clockBefore,revision:rev,
             tables:createTableReadPort(candidateDb),sources:{phase:'geography',snapshot:sourceSnapshot,clockS:clockBefore},makeId,
             knownRefs:[...layoutRefs],turnId,allowedOps:['map.layout.request']});
@@ -1160,15 +1163,20 @@ export function createSqlRepository(options: RepositoryOptions) {
           const appliedLayout=applyGroups(candidateDb,orderGroups(groups.groups).order,{branchId,turnId,attemptId:'layout',validate:true});
           groupResults.push(...appliedLayout.groups);parsedOperations.push(...ops);
           // 只有真拿到布局操作才算本轮「发过布局」；空响应 / 全被拒不算，否则会把失败伪装成成功。
-          layoutApplied=ops.length>0;
+          layoutApplied=layoutApplied||ops.length>0;
           for(const message of appliedLayout.journalIssues)allIssues.push({code:'JOURNAL_WRITE_FAILED',path:'$.layout',message,severity:'error',retryable:false});
         }catch(error){
           if(!transactionOpen){beginTransaction(candidateDb);transactionOpen=true;}
           if(error instanceof AtlasDbError&&error.code==='STALE_BASE')throw error;
-          allIssues.push({code:'LAYOUT_MODEL_FAILED',path:'$.layout',message:`空间布局未生成：${(error as Error).message}。已登记的世界数据保留，可单独重试布局。`,severity:'warning',retryable:true});
+          allIssues.push({code:'LAYOUT_MODEL_FAILED',path:'$.layout',message:`空间布局未生成：${(error as Error).message} 已登记的世界数据保留，下一轮自动继续布局。`,severity:'warning',retryable:true});
           attempts.push({id:`att_${attempts.length}`,kind:'layout',phase:'geography',error:(error as Error).message});
         }
+        // Continue the next chunk inside this same isolated candidate. No intermediate
+        // save exposes point-only maps and no second UI click is required.
+        const remaining=layoutTask.remainingLocationIds;
+        layoutTask=remaining.length?buildSqlLayoutTask(candidateDb,branchId,{...input,layoutMaps:remaining},`${turnId}_layout_${layoutTasks.length}`):null;
       }
+      if(layoutTask)allIssues.push({code:'LAYOUT_BATCH_PENDING',path:'$.layout',message:`本轮布局预算已用尽，${layoutTask.mapIds.length+layoutTask.remainingLocationIds.length} 张地图的空间布局仍待处理；下一轮自动继续。`,severity:'warning',retryable:true});
 
       // M3/W03：布局请求结算 —— 仍在同一个受控候选事务内，before 最终外键/不变量检查。
       // 生成器是同步纯函数：这里不 await、不开新事务、不提交、不保存聊天。
@@ -1198,15 +1206,16 @@ export function createSqlRepository(options: RepositoryOptions) {
       // M4-21 / M4-23：本轮真正发出布局请求的图 → requestId，用于结算后写「结构指纹」。
       // 只有本轮被队列消费掉的请求才记指纹：布局失败/空响应绝不能被记成「这张图已布局完成」。
       const pendingRequestByMap = new Map<string, string>();
-      if (layoutApplied && layoutTask) {
+      const taskByMap=new Map(layoutTasks.flatMap(task=>task.mapIds.map(mapId=>[mapId,task] as const)));
+      if (layoutApplied && taskByMap.size) {
         const scanPort = createTableReadPort(candidateDb);
-        for (const mapId of layoutTask.mapIds) {
+        for (const mapId of taskByMap.keys()) {
           const row = scanPort.selectOne('maps', branchId, mapId);
           if (!row) continue;
           const frame = normalizeFrame(row.frame_json);
           const request = frame[SPATIAL_REQUEST_KEY];
           if (!request || typeof request !== 'object' || Array.isArray(request)) continue;
-          if (String((request as Record<string, unknown>).status ?? '') !== 'pending') continue;
+          if (String((request as Record<string, unknown>).status ?? 'pending') !== 'pending') continue;
           const requestId = String((request as Record<string, unknown>).requestId ?? `req_${mapId}`);
           pendingRequestByMap.set(mapId, requestId);
         }
@@ -1218,6 +1227,7 @@ export function createSqlRepository(options: RepositoryOptions) {
         isCurrent: spatialGuard,
         turnId,
         clockS: clockBefore,
+        maxJobs:Math.max(ATLAS_RUNTIME_LIMITS.layoutMapsPerBatch,taskByMap.size),
         ports: spatialPorts,
       });
       groupResults.push(...spatial.groups);
@@ -1225,11 +1235,12 @@ export function createSqlRepository(options: RepositoryOptions) {
 
       // M4-21 / M4-23：结构指纹结算 —— 只有「场景真的落成、请求已被消费」的图才记指纹。
       // 记上之后，成员/来源不变时 buildSqlLayoutTask 不再为同一张图重复请求模型（W07）。
-      if (pendingRequestByMap.size > 0 && layoutTask) {
+      if (pendingRequestByMap.size > 0 && taskByMap.size) {
         const processedRequests = new Set(spatial.processed);
         const ctxPort = createTableReadPort(candidateDb);
         const ctxMutations: RowMutation[] = [];
         for (const [mapId, requestId] of pendingRequestByMap) {
+          const mapLayoutTask=taskByMap.get(mapId)!;
           if (!processedRequests.has(requestId)) continue;
           const row = ctxPort.selectOne('maps', branchId, mapId);
           if (!row) continue;
@@ -1250,7 +1261,7 @@ export function createSqlRepository(options: RepositoryOptions) {
             before: { ...row },
             after: {
               ...row,
-              frame_json: { ...frame, [LAYOUT_CONTEXT_FRAME_KEY]: { version: 2, hash: layoutTask.contextHashes?.[mapId]??layoutTask.contextHash, completedTurnId: turnId } },
+              frame_json: { ...frame, [LAYOUT_CONTEXT_FRAME_KEY]: { version: 2, hash: mapLayoutTask.contextHashes?.[mapId]??mapLayoutTask.contextHash, completedTurnId: turnId } },
               row_rev: Number(row.row_rev ?? 1) + 1,
               updated_turn_id: turnId,
             },
@@ -1290,6 +1301,7 @@ export function createSqlRepository(options: RepositoryOptions) {
           let status: WorldFillStatus = construction.status ?? 'deferred';
           let reasonCode = construction.reasonCode;
           if (status === 'ready') {
+            if(!frame[SPATIAL_SCENE_KEY]){status='partial';reasonCode='WORLD_LAYOUT_PENDING';}
             // ready 不能只看 HTTP 200：对应结构必须真的可绘制。
             // 焦点图若仍有 pending / failed 的布局请求，本轮只能算 partial。
             const pending = frame[SPATIAL_REQUEST_KEY];
@@ -1357,7 +1369,7 @@ export function createSqlRepository(options: RepositoryOptions) {
       }
 
       const appliedGroups = groupResults.filter((g) => g.status === 'applied');
-      worldChanged = simulation.worldChanged || appliedGroups.some((g) => g.changedRows > 0);
+      worldChanged = simulation.worldChanged || appliedGroups.some((g) => g.changedRows > 0 && !g.groupId.startsWith('grp_world_fill_'));
       const newRevision = rev + (worldChanged || timeChanged ? 1 : 0);
 
       const receipt = buildReceipt({
@@ -1381,6 +1393,7 @@ export function createSqlRepository(options: RepositoryOptions) {
       if (input.layoutMaps && allIssues.some(issue => issue.severity === 'error')) {
         receipt.status = worldChanged || timeChanged ? 'partial' : 'failed';
       }
+      if(input.layoutMaps && allIssues.some(issue=>issue.path.startsWith('$.layout')&&issue.retryable) && receipt.status!=='failed')receipt.status='partial';
 
       // 5) 记录回执、状态与同步任务（同一事务）
       runBound(candidateDb, `UPDATE turns SET status = ?, committed_revision = ?, receipt_json = ?, attempts_json = ?, decisions_json = ? WHERE id = ?`, [

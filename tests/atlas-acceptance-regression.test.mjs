@@ -102,17 +102,29 @@ test('ready occupied and root maps do not block an unpainted city in the next au
 });
 
 test('empty bootstrap observes first, constructs its newly registered place, and restores native receipts without a global bucket', async()=>{
- const port=model((req,n)=>n===1?'{"op":"location.upsert","ref":"new:lodge","data":{"name":"新旅店","kind":"building"}}\n{"op":"character.upsert","ref":"new:pov","data":{"name":"测试主角","identity":"旅行者","role":"protagonist","location_ref":"new:lodge"}}':JSON.stringify({op:'location.upsert',ref:'new:kitchen',data:{name:'厨房',kind:'room',parent_ref:req.messages[1].content.match(/focus=([^、\n]+)/)[1]}}));
+ const port=model((req,n)=>{
+  if(req.batchId.startsWith('layout_'))return JSON.parse(req.messages[1].content.split('\n').find(line=>line.startsWith('本图：')).slice(3)).map(scope=>JSON.stringify({op:'map.layout.request',ref:scope.map,data:{kind:scope.kind,spec:scope.kind==='floor'?{rooms:scope.baselineRooms}:{surface:'mixed'}}})).join('\n');
+  return n===1?'{"op":"location.upsert","ref":"new:lodge","data":{"name":"新旅店","kind":"building"}}\n{"op":"character.upsert","ref":"new:pov","data":{"name":"测试主角","identity":"旅行者","role":"protagonist","location_ref":"new:lodge"}}':JSON.stringify({op:'location.upsert',ref:'new:kitchen',data:{name:'厨房',kind:'room',parent_ref:req.messages[1].content.match(/focus=([^、\n]+)/)[1]}});
+ });
  const hostRecord={chatUid:'accept-bootstrap',branchId:'main',chatMetadata:{},saveMetadata:async()=>true};
  const provider=createBrowserSqlHost({enabled:()=>true,context:()=>hostRecord,loadRuntime:loadAtlasSqlRuntime,modelPort:port});
  try {const session=await provider.session(hostRecord.chatUid);await handleSqlMapAction(session,'map/bootstrap',{chatId:hostRecord.chatUid,requestId:'initial',assistantText:'主角进入有厨房的旅店。'});
-  assert.equal(port.calls.length,2);assert.ok(port.calls[1].batchId.startsWith('construction_'));
+  assert.equal(port.calls.length,4);assert.ok(port.calls[1].batchId.startsWith('construction_'));assert.ok(port.calls.slice(2).every(call=>call.batchId.startsWith('layout_')));
   assert.match(port.calls[1].messages[0].content,/parent_ref/);assert.match(port.calls[1].messages[0].content,/from_ref/);
   assert.match(port.calls[1].messages[1].content,/新旅店/);
   const places=queryBound(session.repo.db,'SELECT id,name,parent_location_id FROM locations',[]);assert.equal(places.find(p=>p.name==='厨房').parent_location_id,places.find(p=>p.name==='新旅店').id);
-  const state=await handleSqlChatRequest(session,'state',{});assert.equal(state.receipts.length,1);assert.equal(state.receipts[0].detail.coreSaved,true);assert.ok(state.receipts[0].detail.receipt.groups.length);assert.equal(state.receipts[0].detail.attempts.length,2);
+  const state=await handleSqlChatRequest(session,'state',{});assert.equal(state.receipts.length,1);assert.equal(state.receipts[0].detail.coreSaved,true);assert.ok(state.receipts[0].detail.receipt.groups.length);assert.equal(state.receipts[0].detail.attempts.length,4);
+  assert.ok(queryBound(session.repo.db,'SELECT frame_json FROM maps',[]).every(row=>JSON.parse(row.frame_json).atlasScene),'初建所有地图自动生成布局后统一保存');
   assert.ok(queryBound(session.repo.db,'SELECT frame_json FROM maps',[]).some(row=>JSON.parse(row.frame_json).atlasWorldFill));
  }finally{await provider.close();}
+});
+
+test('all model stages failing cannot publish progress metadata as a successful world change',async()=>{
+ const repo=await seeded({request:async()=>{throw Error('synthetic empty response');}});
+ try{const before=Buffer.from(repo.db.export());
+  await assert.rejects(repo.prepareTurn(input({layoutMaps:'active'})),error=>{assert.equal(error.code,'TURN_FAILED');assert.equal(error.detail.receipt.status,'failed');assert.equal(error.detail.receipt.worldChanged,false);assert.ok(error.detail.receipt.issues.some(issue=>issue.code==='LAYOUT_MODEL_FAILED'));return true;});
+  assert.deepEqual(Buffer.from(repo.db.export()),before);
+ }finally{await repo.close();}
 });
 
 test('construction protects saved parent and coordinates and defers excess locations, leaving the native receipt partial',async()=>{

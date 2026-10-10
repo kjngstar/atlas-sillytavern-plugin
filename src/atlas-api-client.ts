@@ -750,6 +750,16 @@ function choiceFinishReason(payload: unknown): string | null {
 /** 从 OpenAI 风格或兼容响应中取助手正文。 */
 export function extractAssistantText(payload: unknown, responseTool?: string): string | null {
   if (!payload || typeof payload !== "object") return null;
+  // Native Gemini responses, including SillyTavern's non-stream responseContent wrapper.
+  // Function calls carry reply data only; never execute them or arbitrary client tools.
+  const google = payload as {responseContent?: {parts?: unknown[]}; candidates?: Array<{content?: {parts?: unknown[]}}>};
+  const parts=google.responseContent?.parts ?? google.candidates?.[0]?.content?.parts;
+  if(Array.isArray(parts)) {
+    const calls=parts.filter((part:any)=>part?.functionCall).map((part:any)=>part.functionCall);
+    if(calls.length) return extractAssistantText({choices:[{message:{tool_calls:calls.map((call:any)=>({type:'function',function:{name:call.name,arguments:call.args}}))}}]},responseTool);
+    const text=parts.filter((part:any)=>part?.thought!==true&&typeof part?.text==='string').map((part:any)=>part.text).join('\n');
+    if(text.trim())return text;
+  }
   const p = payload as {
     choices?: Array<{ message?: { content?: unknown; reasoning_content?: unknown; reasoning?: unknown; tool_calls?: unknown }; text?: unknown }>;
     text?: unknown;

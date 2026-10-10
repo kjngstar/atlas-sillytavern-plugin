@@ -132,7 +132,9 @@ function measure(
     : kind === 'city'
       ? CITY_BASE_SIDE_M
       : FLOOR_BASE_SIDE_M;
-  const mpp = base / maxSide;
+  // The city solver requires a 900×700 m canvas. Default estimates must satisfy
+  // both dimensions; calibrated physical dimensions remain untouched above.
+  const mpp = kind==='city'?Math.max(base/maxSide,900/cols,700/rows):base/maxSide;
   return { width: cols * mpp, height: rows * mpp, units: 'meters' };
 }
 

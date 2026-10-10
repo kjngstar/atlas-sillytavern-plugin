@@ -6530,7 +6530,7 @@ ${entry.text}`.toLowerCase();
     if (calibrated) return { width: cols2 * metersPerCell, height: rows4 * metersPerCell, units: "meters" };
     const containerKind = String(container?.kind ?? "");
     const base = containerKind === "room" ? ROOM_BASE_SIDE_M : kind === "city" ? CITY_BASE_SIDE_M : FLOOR_BASE_SIDE_M;
-    const mpp = base / maxSide;
+    const mpp = kind === "city" ? Math.max(base / maxSide, 900 / cols2, 700 / rows4) : base / maxSide;
     return { width: cols2 * mpp, height: rows4 * mpp, units: "meters" };
   }
   function hasScene(map) {
@@ -20191,6 +20191,22 @@ ${c.text}`).join("\n");
         });
       }
     }
+    const globalIssues = Array.isArray(receipt.issues) ? receipt.issues : [];
+    for (const issue17 of globalIssues) {
+      if (out.some((item) => item.code === String(issue17.code ?? "") && item.path === String(issue17.path ?? "") && item.message === String(issue17.message ?? ""))) continue;
+      out.push({
+        logId: `issue_${turnId}_${out.length}`,
+        kind: "issue",
+        turnId,
+        groupId: null,
+        code: String(issue17.code ?? ""),
+        path: String(issue17.path ?? ""),
+        message: String(issue17.message ?? ""),
+        severity: String(issue17.severity ?? "error"),
+        retryable: issue17.retryable === true,
+        dependsOn: []
+      });
+    }
     return out;
   }
   function queryDiagnostics(ctx, query) {
@@ -26758,9 +26774,12 @@ ${chunk.text}`;
         groupResults.push(...simulation.groups);
         parsedOperations.push(...simulation.modelOperations);
         timeChanged = simulation.clockAfter !== clockBefore;
-        const layoutTask = input.layoutMaps ? buildSqlLayoutTask(candidateDb, branchId, input, turnId) : null;
+        let layoutTask = input.layoutMaps ? buildSqlLayoutTask(candidateDb, branchId, input, turnId) : null;
+        const layoutTasks = [];
         let layoutApplied = false;
-        if (layoutTask && options.modelPort && turnBudget.remaining() > 0 && foregroundBatches + (repairAttempted ? 1 : 0) + (simulation.modelBatches ?? 0) < ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn) {
+        while (layoutTask && options.modelPort && turnBudget.remaining() > 0 && foregroundBatches + (repairAttempted ? 1 : 0) + (simulation.modelBatches ?? 0) < ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn) {
+          const currentLayoutTask = layoutTask;
+          layoutTasks.push(layoutTask);
           preparationStep = "before-layout";
           commitTransaction(candidateDb);
           transactionOpen = false;
@@ -26783,21 +26802,21 @@ ${chunk.text}`;
             }
             allIssues.push(...extracted.issues, ...parsed.issues);
             const layoutRefs = layoutTask.catalogue.knownRefs;
-            const allowedRefs = new Set(layoutRefs.filter((r) => layoutTask.mapIds.includes(r.id)).flatMap((r) => [r.id, r.alias]));
+            const allowedRefs = new Set(layoutRefs.filter((r) => currentLayoutTask.mapIds.includes(r.id)).flatMap((r) => [r.id, r.alias]));
             const ops = parsed.operations.filter((op) => op.value.op === "map.layout.request" && allowedRefs.has(op.value.ref ?? "")).map((op) => {
               const id = layoutRefs.find((r) => r.id === op.value.ref || r.alias === op.value.ref)?.id;
-              const extent = id ? layoutTask.extents[id] : void 0;
-              const kind = id ? layoutTask.kinds[id] : void 0;
+              const extent = id ? currentLayoutTask.extents[id] : void 0;
+              const kind = id ? currentLayoutTask.kinds[id] : void 0;
               const data = op.value.data, spec = data?.spec;
               if (!id || !extent || !kind || !spec || typeof spec !== "object" || Array.isArray(spec)) return { ...op, opId: `layout_${op.opId}` };
               if (data?.kind !== kind) allIssues.push({ code: "LAYOUT_KIND_OVERRIDDEN", path: "$.layout.kind", message: `地图 ${id} 的角色由容器决定为 ${kind}，模型给出的 ${String(data?.kind ?? "(空)")} 已按 ${kind} 处理`, severity: "warning", retryable: false });
               const canvas = extent.units === "meters" ? { width: extent.width, height: extent.height } : {};
-              const baseline = kind === "floor" ? layoutTask.baselineRooms[id] ?? [] : [];
+              const baseline = kind === "floor" ? currentLayoutTask.baselineRooms[id] ?? [] : [];
               const rooms = "rooms" in spec ? spec.rooms : void 0;
               const defaults = baseline.length && (rooms === void 0 || Array.isArray(rooms) && rooms.length === 0) ? { rooms: baseline } : {};
               return { ...op, opId: `layout_${op.opId}`, value: { ...op.value, data: { ...data, kind, spec: { ...canvas, ...spec, ...defaults } } } };
             });
-            if (!ops.length) allIssues.push({ code: "LAYOUT_NOT_GENERATED", path: "$.layout", message: "模型没有返回空间布局约束；已登记地点仍保留，可在当前地图点击生成布局重试", severity: "warning", retryable: true });
+            if (!ops.length) allIssues.push({ code: "LAYOUT_NOT_GENERATED", path: "$.layout", message: "模型没有返回空间布局约束；地图与布局尚未完成，已登记地点保留，下一轮自动继续布局", severity: "warning", retryable: true });
             const layoutCompiled = compileOperations({
               operations: ops,
               anchor,
@@ -26818,7 +26837,7 @@ ${chunk.text}`;
             const appliedLayout = applyGroups(candidateDb, orderGroups(groups.groups).order, { branchId, turnId, attemptId: "layout", validate: true });
             groupResults.push(...appliedLayout.groups);
             parsedOperations.push(...ops);
-            layoutApplied = ops.length > 0;
+            layoutApplied = layoutApplied || ops.length > 0;
             for (const message of appliedLayout.journalIssues) allIssues.push({ code: "JOURNAL_WRITE_FAILED", path: "$.layout", message, severity: "error", retryable: false });
           } catch (error) {
             if (!transactionOpen) {
@@ -26826,10 +26845,13 @@ ${chunk.text}`;
               transactionOpen = true;
             }
             if (error instanceof AtlasDbError && error.code === "STALE_BASE") throw error;
-            allIssues.push({ code: "LAYOUT_MODEL_FAILED", path: "$.layout", message: `空间布局未生成：${error.message}。已登记的世界数据保留，可单独重试布局。`, severity: "warning", retryable: true });
+            allIssues.push({ code: "LAYOUT_MODEL_FAILED", path: "$.layout", message: `空间布局未生成：${error.message} 已登记的世界数据保留，下一轮自动继续布局。`, severity: "warning", retryable: true });
             attempts.push({ id: `att_${attempts.length}`, kind: "layout", phase: "geography", error: error.message });
           }
+          const remaining = layoutTask.remainingLocationIds;
+          layoutTask = remaining.length ? buildSqlLayoutTask(candidateDb, branchId, { ...input, layoutMaps: remaining }, `${turnId}_layout_${layoutTasks.length}`) : null;
         }
+        if (layoutTask) allIssues.push({ code: "LAYOUT_BATCH_PENDING", path: "$.layout", message: `本轮布局预算已用尽，${layoutTask.mapIds.length + layoutTask.remainingLocationIds.length} 张地图的空间布局仍待处理；下一轮自动继续。`, severity: "warning", retryable: true });
         const spatialGuard = input.isCurrent ?? (() => true);
         const spatialPorts = {
           applyGroups: (db2, groups, ctx) => applyGroups(db2, groups, ctx),
@@ -26852,15 +26874,16 @@ ${chunk.text}`;
           allIssues.push(...armed.issues);
         }
         const pendingRequestByMap = /* @__PURE__ */ new Map();
-        if (layoutApplied && layoutTask) {
+        const taskByMap = new Map(layoutTasks.flatMap((task) => task.mapIds.map((mapId) => [mapId, task])));
+        if (layoutApplied && taskByMap.size) {
           const scanPort = createTableReadPort(candidateDb);
-          for (const mapId of layoutTask.mapIds) {
+          for (const mapId of taskByMap.keys()) {
             const row2 = scanPort.selectOne("maps", branchId, mapId);
             if (!row2) continue;
             const frame = normalizeFrame(row2.frame_json);
             const request = frame[SPATIAL_REQUEST_KEY];
             if (!request || typeof request !== "object" || Array.isArray(request)) continue;
-            if (String(request.status ?? "") !== "pending") continue;
+            if (String(request.status ?? "pending") !== "pending") continue;
             const requestId = String(request.requestId ?? `req_${mapId}`);
             pendingRequestByMap.set(mapId, requestId);
           }
@@ -26871,15 +26894,17 @@ ${chunk.text}`;
           isCurrent: spatialGuard,
           turnId,
           clockS: clockBefore,
+          maxJobs: Math.max(ATLAS_RUNTIME_LIMITS.layoutMapsPerBatch, taskByMap.size),
           ports: spatialPorts
         });
         groupResults.push(...spatial.groups);
         allIssues.push(...spatial.issues);
-        if (pendingRequestByMap.size > 0 && layoutTask) {
+        if (pendingRequestByMap.size > 0 && taskByMap.size) {
           const processedRequests = new Set(spatial.processed);
           const ctxPort = createTableReadPort(candidateDb);
           const ctxMutations = [];
           for (const [mapId, requestId] of pendingRequestByMap) {
+            const mapLayoutTask = taskByMap.get(mapId);
             if (!processedRequests.has(requestId)) continue;
             const row2 = ctxPort.selectOne("maps", branchId, mapId);
             if (!row2) continue;
@@ -26895,7 +26920,7 @@ ${chunk.text}`;
               before: { ...row2 },
               after: {
                 ...row2,
-                frame_json: { ...frame, [LAYOUT_CONTEXT_FRAME_KEY]: { version: 2, hash: layoutTask.contextHashes?.[mapId] ?? layoutTask.contextHash, completedTurnId: turnId } },
+                frame_json: { ...frame, [LAYOUT_CONTEXT_FRAME_KEY]: { version: 2, hash: mapLayoutTask.contextHashes?.[mapId] ?? mapLayoutTask.contextHash, completedTurnId: turnId } },
                 row_rev: Number(row2.row_rev ?? 1) + 1,
                 updated_turn_id: turnId
               },
@@ -26930,6 +26955,10 @@ ${chunk.text}`;
             let status = construction.status ?? "deferred";
             let reasonCode = construction.reasonCode;
             if (status === "ready") {
+              if (!frame[SPATIAL_SCENE_KEY]) {
+                status = "partial";
+                reasonCode = "WORLD_LAYOUT_PENDING";
+              }
               const pending = frame[SPATIAL_REQUEST_KEY];
               const pendingStatus = pending && typeof pending === "object" && !Array.isArray(pending) ? String(pending.status ?? "") : "";
               if (pendingStatus === "pending" || pendingStatus === "failed") {
@@ -26991,7 +27020,7 @@ ${chunk.text}`;
           );
         }
         const appliedGroups = groupResults.filter((g) => g.status === "applied");
-        worldChanged = simulation.worldChanged || appliedGroups.some((g) => g.changedRows > 0);
+        worldChanged = simulation.worldChanged || appliedGroups.some((g) => g.changedRows > 0 && !g.groupId.startsWith("grp_world_fill_"));
         const newRevision = rev + (worldChanged || timeChanged ? 1 : 0);
         const receipt = buildReceipt({
           turnId,
@@ -27014,6 +27043,7 @@ ${chunk.text}`;
         if (input.layoutMaps && allIssues.some((issue17) => issue17.severity === "error")) {
           receipt.status = worldChanged || timeChanged ? "partial" : "failed";
         }
+        if (input.layoutMaps && allIssues.some((issue17) => issue17.path.startsWith("$.layout") && issue17.retryable) && receipt.status !== "failed") receipt.status = "partial";
         runBound(candidateDb, `UPDATE turns SET status = ?, committed_revision = ?, receipt_json = ?, attempts_json = ?, decisions_json = ? WHERE id = ?`, [
           receipt.status === "failed" ? "failed" : receipt.status === "partial" ? "partial" : "committed",
           receipt.status === "failed" ? null : newRevision,
