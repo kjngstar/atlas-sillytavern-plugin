@@ -36,9 +36,11 @@ function hostInit(overrides = {}) {
 }
 
 async function readJson(response) {
-  assert.equal(response.ok, true, "宿主侧失败必须是 200 包错误 JSON");
-  assert.equal(response.status, 200);
-  return response.json();
+  const body = await response.json();
+  assert.equal(response.ok, !body.error, "宿主错误不能记录为成功");
+  assert.equal(response.status, body.error ? 502 : 200);
+  if (body.error) assert.equal(body.error.origin, "atlas-host");
+  return body;
 }
 
 test("isTavernMainAvailable：generateRaw 存在且为函数才算可用", () => {
@@ -76,7 +78,7 @@ test("getConnectionManagerProfiles：非数组/缺 id 过滤，name 缺省回退
   assert.deepEqual(getConnectionManagerProfiles(() => null), []);
 });
 
-test("main fetch：TavernHelper 缺失 → 200 包错误 JSON，提示装酒馆助手", async () => {
+test("main fetch：TavernHelper 缺失 → 本地失败，提示装酒馆助手", async () => {
   const fetchFn = createTavernMainFetch({ getTavernHelper: () => null });
   const response = await fetchFn("atlas://host", hostInit());
   const body = await readJson(response);
@@ -109,7 +111,7 @@ test("main fetch：合法请求 → generateRaw({ ordered_prompts, max_tokens, s
   assert.equal((await response.clone().text()).includes("星辰女王"), true);
 });
 
-test("main fetch：messages 全无效 → 200 包错误 JSON，不调 generateRaw", async () => {
+test("main fetch：messages 全无效 → 本地失败，不调 generateRaw", async () => {
   let called = 0;
   const helper = { generateRaw: async () => { called += 1; return "x"; } };
   const fetchFn = createTavernMainFetch({ getTavernHelper: () => helper });
@@ -118,21 +120,21 @@ test("main fetch：messages 全无效 → 200 包错误 JSON，不调 generateRa
   assert.match(body.error.message, /messages/);
 });
 
-test("main fetch：generateRaw 抛错 → 200 包错误 JSON 带原文", async () => {
+test("main fetch：generateRaw 抛错 → 本地失败带原文", async () => {
   const helper = { generateRaw: async () => { throw new Error("宿主网络断了"); } };
   const fetchFn = createTavernMainFetch({ getTavernHelper: () => helper });
   const body = await readJson(await fetchFn("atlas://host", hostInit()));
   assert.match(body.error.message, /宿主网络断了/);
 });
 
-test("main fetch：generateRaw 返回空串 → 200 包错误 JSON", async () => {
+test("main fetch：generateRaw 返回空串 → 本地失败", async () => {
   const helper = { generateRaw: async () => "   " };
   const fetchFn = createTavernMainFetch({ getTavernHelper: () => helper });
   const body = await readJson(await fetchFn("atlas://host", hostInit()));
-  assert.match(body.error.message, /为空/);
+  assert.match(body.error.message, /空回复/);
 });
 
-test("profile fetch：服务缺失 / 未选预设 / 无 messages → 200 包错误 JSON", async () => {
+test("profile fetch：服务缺失 / 未选预设 / 无 messages → 本地失败", async () => {
   const noService = createTavernProfileFetch({ getContext: () => ({}), getTavernHelper: () => null });
   assert.match((await readJson(await noService("atlas://host", hostInit({ xAtlasConnectionMode: "profile" })))).error.message, /ConnectionManagerRequestService/);
 

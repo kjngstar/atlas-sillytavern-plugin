@@ -4210,8 +4210,8 @@ var ATLAS_LIMITS = {
   TIME_MAX: Number.MAX_SAFE_INTEGER,
   /** 单回合推演时长上限（时段数） */
   TURN_DURATION_MAX: 1e4,
-  /** 0.9.21 世界书资料补充块最大字符数（推演请求专用；主聊天注入不带） */
-  LORE_SUPPLEMENT_CHARS: 6e3,
+  /** 兼容旧调用方的无界值；世界书资料不再由 Atlas 按字符截断。 */
+  LORE_SUPPLEMENT_CHARS: Infinity,
   /** Server Plugin 响应体最大字节数 */
   RESPONSE_BODY_BYTES: 262144
 };
@@ -4454,7 +4454,7 @@ function parseAtlasTurnCommitRequest(raw) {
       request.swipeId = requireStringOrNull(record, "swipeId", "AtlasTurnCommitRequest");
     }
     if (typeof record.loreSupplement === "string" && record.loreSupplement.trim().length > 0) {
-      request.loreSupplement = record.loreSupplement.slice(0, ATLAS_LIMITS.LORE_SUPPLEMENT_CHARS);
+      request.loreSupplement = record.loreSupplement;
     }
     if (Array.isArray(record.recentAssistantTexts)) {
       const texts = record.recentAssistantTexts.filter((item) => typeof item === "string" && item.trim().length > 0).slice(0, 10).map((item) => item.slice(0, ATLAS_LIMITS.ASSISTANT_TEXT_CHARS));
@@ -4778,6 +4778,16 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
       }
     }
     if (controller.signal.aborted) return fail3(ATLAS_ERROR_CODES.API_TIMEOUT, `推演请求超过 ${timeoutMs}ms 超时。`, true);
+    if (mode !== "custom" && parsed.gatewayError) {
+      try {
+        const hostError = JSON.parse(parsed.rawText)?.error;
+        if (hostError?.origin === "atlas-host") {
+          const code = Object.values(ATLAS_ERROR_CODES).includes(hostError.code) ? hostError.code : ATLAS_ERROR_CODES.API_REQUEST_FAILED;
+          return fail3(code, parsed.gatewayError, hostError.retryable === true);
+        }
+      } catch {
+      }
+    }
     if (!response.ok && !rescueAttempted) {
       const mapped = errorMessageForStatus(status);
       if (rescueDeniedReason) {
@@ -4844,7 +4854,7 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
     return {
       ok: true,
       text: text2,
-      status,
+      status: mode === "custom" ? status : null,
       durationMs: now() - startedAt,
       ...rescueAttempted ? { notice: "已按 MiniMax 订阅密钥自动切换 Anthropic 路由（…/anthropic）重试成功。建议到「API」页把该连接的接口协议改为 Claude（Anthropic）、端点改为 …/anthropic 并保存。" } : {}
     };
@@ -8470,7 +8480,7 @@ function createAtlasUiCore(deps) {
               chatId: value.chatId,
               triggerId: value.turnId,
               autoApply: true,
-              loreSupplement: [value.charDescription, value.loreSupplement].filter(Boolean).join("\n").slice(0, ATLAS_LIMITS.LORE_SUPPLEMENT_CHARS),
+              loreSupplement: [value.charDescription, value.loreSupplement].filter(Boolean).join("\n"),
               recentTexts: [...value.recentAssistantTexts ?? [], value.assistantText].slice(-8)
             });
             if (expansion.status === 200 && expansion.body?.ok && state.chatId === value.chatId) {
@@ -11088,15 +11098,28 @@ function textResponse(text2) {
     clone: () => ({ text: async () => body })
   });
 }
-function hostErrorJsonResponse(message) {
-  const body = JSON.stringify({ error: { message } });
+function hostErrorJsonResponse(message, code = "API_REQUEST_FAILED", reasonCode = "HOST_GENERATION_FAILED") {
+  const body = JSON.stringify({ error: { message, code, reasonCode, origin: "atlas-host", retryable: false } });
   return toResponse({
-    ok: true,
-    status: 200,
+    ok: false,
+    status: 502,
     text: async () => body,
     json: async () => JSON.parse(body),
     clone: () => ({ text: async () => body })
   });
+}
+function hostAssistantText(response, responseTool) {
+  if (typeof response === "string") return response;
+  if (!response || typeof response !== "object") return null;
+  const detail = response;
+  if (Array.isArray(detail.tool_calls) || typeof detail.reasoning === "string") {
+    return extractAssistantText({ choices: [{ message: {
+      content: detail.content,
+      reasoning_content: detail.reasoning,
+      tool_calls: detail.tool_calls
+    } }] }, responseTool);
+  }
+  return extractAssistantText(response, responseTool);
 }
 function parseHostPayload(init) {
   if (typeof init?.body !== "string" || !init.body.trimStart().startsWith("{")) return null;
@@ -11130,15 +11153,21 @@ function createTavernMainFetch(deps) {
     const payload = parseHostPayload(init);
     const helper = deps.getTavernHelper();
     if (!helper || typeof helper.generateRaw !== "function") {
-      return hostErrorJsonResponse("主API生成不可用：未检测到酒馆助手（TavernHelper.generateRaw）。请安装酒馆助手（JS-Slash-Runner），或改用自定义 API 连接。");
+      return hostErrorJsonResponse("主API生成不可用：未检测到酒馆助手（TavernHelper.generateRaw）。请安装酒馆助手（JS-Slash-Runner），或改用自定义 API 连接。", "API_NOT_CONFIGURED", "HOST_HELPER_UNAVAILABLE");
     }
     const prompts = payload ? orderedPromptsOf(payload) : [];
     if (prompts.length === 0) return hostErrorJsonResponse("主API生成失败：请求缺少有效的 messages。");
     const maxTokens = typeof payload?.max_tokens === "number" ? payload.max_tokens : void 0;
     try {
-      const response = await helper.generateRaw({ ordered_prompts: prompts, should_stream: false, ...maxTokens ? { max_tokens: maxTokens } : {} });
-      const text2 = typeof response === "string" ? response : String(response ?? "");
-      if (!text2.trim()) return hostErrorJsonResponse("主API生成返回为空。");
+      const response = await helper.generateRaw({
+        ordered_prompts: prompts,
+        should_stream: false,
+        should_return_reasoning: true,
+        ...payload?.tools?.length ? { tools: payload.tools, tool_choice: payload.tool_choice ?? "auto" } : {},
+        ...maxTokens ? { max_tokens: maxTokens } : {}
+      });
+      const text2 = hostAssistantText(response, payload?.tools?.[0]?.function?.name);
+      if (!text2?.trim()) return hostErrorJsonResponse("酒馆主 API 未返回可用正文（空回复或无法识别的响应）。本轮未提交。请核对酒馆当前连接与脚本网关的响应日志；Atlas 未观察到上游 HTTP 状态，不能据此判断模型不存在或地址错误。", "RESPONSE_MALFORMED", "HOST_EMPTY_RESPONSE");
       return textResponse(text2.trim());
     } catch (error2) {
       return hostErrorJsonResponse(`主API生成失败：${error2 instanceof Error ? error2.message : String(error2)}`);
@@ -11176,9 +11205,9 @@ function createTavernProfileFetch(deps) {
           await triggerSlash(helper, `/profile await=true "${targetName.replace(/"/g, '\\"')}"`);
         }
         const response = await service.sendRequest(profileId, prompts, maxTokens);
-        const content = extractAssistantText(response?.result ?? response);
+        const content = hostAssistantText(response?.result ?? response, payload?.tools?.[0]?.function?.name);
         const text2 = typeof content === "string" ? content : "";
-        if (!text2.trim()) return hostErrorJsonResponse("酒馆连接预设返回为空或形状不支持。");
+        if (!text2.trim()) return hostErrorJsonResponse("酒馆连接预设返回为空或形状不支持，本轮未提交。请核对所选连接与脚本网关响应。", "RESPONSE_MALFORMED", "HOST_EMPTY_RESPONSE");
         return textResponse(text2.trim());
       } catch (error2) {
         return hostErrorJsonResponse(`酒馆连接预设调用失败：${error2 instanceof Error ? error2.message : String(error2)}`);
@@ -12519,9 +12548,9 @@ function isGeographicTitle(title) {
   return GEO_TITLE_PREFIX.test(title);
 }
 function selectAtlasLoreSupplement(input) {
-  const perEntryChars = input.perEntryChars ?? (input.includeAllEnabled ? input.maxChars : input.mode === "geo" ? DEFAULT_GEO_PER_ENTRY_CHARS : DEFAULT_PER_ENTRY_CHARS);
+  const maxChars = input.maxChars === void 0 || input.maxChars === Infinity ? Infinity : Number.isFinite(input.maxChars) ? Math.max(0, Math.floor(input.maxChars)) : 0;
+  const perEntryChars = input.perEntryChars ?? (input.includeAllEnabled ? maxChars : input.mode === "geo" ? DEFAULT_GEO_PER_ENTRY_CHARS : DEFAULT_PER_ENTRY_CHARS);
   const maxEntries = input.maxEntries ?? (input.includeAllEnabled ? input.entries.length : DEFAULT_MAX_ENTRIES);
-  const maxChars = Math.max(0, input.maxChars | 0);
   const filtered = [];
   for (let i = 0; i < input.entries.length; i++) {
     const e = input.entries[i];

@@ -31899,8 +31899,8 @@ var ATLAS_LIMITS = {
   TIME_MAX: Number.MAX_SAFE_INTEGER,
   /** 单回合推演时长上限（时段数） */
   TURN_DURATION_MAX: 1e4,
-  /** 0.9.21 世界书资料补充块最大字符数（推演请求专用；主聊天注入不带） */
-  LORE_SUPPLEMENT_CHARS: 6e3,
+  /** 兼容旧调用方的无界值；世界书资料不再由 Atlas 按字符截断。 */
+  LORE_SUPPLEMENT_CHARS: Infinity,
   /** Server Plugin 响应体最大字节数 */
   RESPONSE_BODY_BYTES: 262144
 };
@@ -32009,7 +32009,7 @@ function parseAtlasTurnCommitRequest(raw) {
       request.swipeId = requireStringOrNull(record2, "swipeId", "AtlasTurnCommitRequest");
     }
     if (typeof record2.loreSupplement === "string" && record2.loreSupplement.trim().length > 0) {
-      request.loreSupplement = record2.loreSupplement.slice(0, ATLAS_LIMITS.LORE_SUPPLEMENT_CHARS);
+      request.loreSupplement = record2.loreSupplement;
     }
     if (Array.isArray(record2.recentAssistantTexts)) {
       const texts = record2.recentAssistantTexts.filter((item) => typeof item === "string" && item.trim().length > 0).slice(0, 10).map((item) => item.slice(0, ATLAS_LIMITS.ASSISTANT_TEXT_CHARS));

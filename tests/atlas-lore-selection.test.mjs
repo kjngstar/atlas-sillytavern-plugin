@@ -13,6 +13,38 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { selectAtlasLoreSupplement } from '../src/atlas-lore-selection.ts';
+import { parseAtlasTurnCommitRequest } from '../src/atlas-contract.ts';
+import { callAtlasWorldTurnApi } from '../src/atlas-api-client.ts';
+
+test('普通推演无默认世界书预算：全部条目经过请求校验和实际发送后仍完整', async () => {
+  const entries = Array.from({length: 75}, (_,i) => makeEntry(String(i), `正文${i}\n` + '资料'.repeat(200)));
+  entries.push(makeEntry('tail', '末尾地点：雾港。\n完整的道路与区域资料。'));
+  const lore = selectAtlasLoreSupplement({entries, includeAllEnabled:true, mode:'turn',
+    chatKeywords:new Set(), sceneKeywords:new Set()});
+  assert.equal(lore.selectedUids.length,76);
+  assert.equal(lore.truncatedCount,0);
+  assert.ok(lore.text.length > 30_000);
+  const parsed = parseAtlasTurnCommitRequest({turnId:'turn-test',chatId:'chat-test',userMessageId:'u',
+    assistantMessageId:'a',swipeId:null,userText:'测试',assistantText:'验收',loreSupplement:lore.text});
+  assert.equal(parsed.ok,true);
+  let sent;
+  const response = await callAtlasWorldTurnApi({name:'test',endpoint:'https://example.test/v1',model:'fixture',apiKey:'',
+    promptSegments:[{role:'user',content:'{{source:$1}}'}]},
+    {...parsed.value,injectionText:''},{fetchFn:async(_url,init) => {
+      sent = JSON.parse(init.body); return Response.json({choices:[{message:{content:'验收'}}]});
+    }});
+  assert.equal(response.ok,true);
+  const source = JSON.parse(sent.messages[0].content.split('\n')[1]);
+  assert.equal(source,lore.text);
+  for (const entry of entries) assert.ok(source.includes(entry.content));
+});
+
+test('显式无限预算不被位运算变成零，显式零预算仍不读取', () => {
+  const input={entries:[makeEntry('long','原文'.repeat(6000))],includeAllEnabled:true,mode:'turn',chatKeywords:new Set(),sceneKeywords:new Set()};
+  assert.equal(selectAtlasLoreSupplement({...input,maxChars:Infinity}).truncatedCount,0);
+  assert.ok(selectAtlasLoreSupplement({...input,maxChars:Infinity}).text.length>12000);
+  assert.equal(selectAtlasLoreSupplement({...input,maxChars:0}).text,'');
+});
 
 test('原文模式不按标题、激活状态或关键词选择条目，不重排或摘录正文', () => {
   const entries = ['文风规则', 'DS写作思维链', '角色背景', '学校地点'].map((title,i) =>

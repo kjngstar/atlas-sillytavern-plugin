@@ -4,6 +4,16 @@ import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
 import {JSDOM} from 'jsdom';
 import {referenceGeometry,referenceEntity,projectReferenceData,referenceDiagnostics} from '../ui/atlas-reference-data.mjs';
+
+test('已保存的部分提交不会冒充整轮失败，真实失败和单项问题仍是错误',()=>{
+ const rows=referenceDiagnostics([{kind:'failed_turn',status:'partial',coreCommitted:true,receipt:{issues:[]}},
+   {kind:'failed_turn',status:'failed',receipt:{issues:[{code:'RESPONSE_MALFORMED'}]}},
+   {kind:'issue',code:'MODEL_BUDGET_EXHAUSTED'}]);
+ assert.equal(rows[0].level,'warn');assert.equal(rows[0].code,'TURN_PARTIAL');
+ assert.match(rows[0].message,/部分提交 · 0 项问题/);
+ assert.equal(rows[1].level,'error');assert.equal(rows[1].code,'TURN_FAILED');
+ assert.equal(rows[2].level,'error');
+});
 import {referencePresetDocument,referenceSettingsCommands} from '../ui/atlas-reference-presets.mjs';
 import {mountReferenceUi} from '../ui/atlas-reference-host.mjs';
 import {toLegacyTurnReceipt} from '../src/atlas-db-state-adapter.ts';

@@ -93,8 +93,8 @@ export const ATLAS_LIMITS = {
   TIME_MAX: Number.MAX_SAFE_INTEGER,
   /** 单回合推演时长上限（时段数） */
   TURN_DURATION_MAX: 10_000,
-  /** 0.9.21 世界书资料补充块最大字符数（推演请求专用；主聊天注入不带） */
-  LORE_SUPPLEMENT_CHARS: 6_000,
+  /** 兼容旧调用方的无界值；世界书资料不再由 Atlas 按字符截断。 */
+  LORE_SUPPLEMENT_CHARS: Infinity,
   /** Server Plugin 响应体最大字节数 */
   RESPONSE_BODY_BYTES: 262_144,
 } as const;
@@ -472,7 +472,7 @@ export function parseAtlasTurnCommitRequest(raw: unknown): ParseResult<AtlasTurn
     }
     // 0.9.21 世界书资料补充：可选宽容字段——非字符串直接丢弃（绝不因宿主噪声拒整单）
     if (typeof record.loreSupplement === "string" && record.loreSupplement.trim().length > 0) {
-      request.loreSupplement = record.loreSupplement.slice(0, ATLAS_LIMITS.LORE_SUPPLEMENT_CHARS);
+      request.loreSupplement = record.loreSupplement;
     }
     // 0.9.25 shujuku 占位符体系：$7 / $U / $C 宿主采集字段，全部宽容可选——形状不对就丢弃，不拒整单
     if (Array.isArray(record.recentAssistantTexts)) {

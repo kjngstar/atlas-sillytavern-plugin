@@ -10,8 +10,7 @@
  * - profile→ /profile 斜杠切换 + ConnectionManagerRequestService.sendRequest + 恢复
  * 两者都把宿主结果包回 OpenAI 形状的 Response-like，引擎零改动。
  *
- * 宿主侧失败（酒馆助手缺失 / 服务缺失）→ 200 包错误 JSON（引擎的网关错误路径会把
- * message 原文报给用户），不走 HTTP 错误码。
+ * 宿主侧失败返回带来源标记的本地错误，不能冒充上游 HTTP 200 成功。
  */
 
 import { extractAssistantText } from './atlas-api-client.ts';
@@ -41,12 +40,12 @@ function textResponse(text: string): Response {
   });
 }
 
-/** 宿主侧失败：200 包错误 JSON（引擎的网关错误路径会把 message 原文报给用户；不用 HTTP 错误码）。 */
-function hostErrorJsonResponse(message: string): Response {
-  const body = JSON.stringify({ error: { message } });
+/** 502 是适配层状态，不代表已观察到模型服务商的 HTTP 状态。 */
+function hostErrorJsonResponse(message: string, code = "API_REQUEST_FAILED", reasonCode = "HOST_GENERATION_FAILED"): Response {
+  const body = JSON.stringify({ error: { message, code, reasonCode, origin: "atlas-host", retryable: false } });
   return toResponse({
-    ok: true,
-    status: 200,
+    ok: false,
+    status: 502,
     text: async () => body,
     json: async () => JSON.parse(body),
     clone: () => ({ text: async () => body }),
@@ -58,6 +57,21 @@ interface HostRequestPayload {
   max_tokens?: unknown;
   xAtlasConnectionMode?: unknown;
   xAtlasProfileId?: unknown;
+  tools?: Array<{ type: string; function: { name: string; parameters?: unknown } }>;
+  tool_choice?: unknown;
+}
+
+/** 酒馆助手新版返回详情对象；保持工具信封为数据，绝不执行工具。 */
+function hostAssistantText(response: unknown, responseTool?: string): string | null {
+  if (typeof response === "string") return response;
+  if (!response || typeof response !== "object") return null;
+  const detail = response as { content?: unknown; reasoning?: unknown; tool_calls?: unknown };
+  if (Array.isArray(detail.tool_calls) || typeof detail.reasoning === "string") {
+    return extractAssistantText({ choices: [{ message: {
+      content: detail.content, reasoning_content: detail.reasoning, tool_calls: detail.tool_calls,
+    } }] }, responseTool);
+  }
+  return extractAssistantText(response, responseTool);
 }
 
 function parseHostPayload(init?: RequestInit): HostRequestPayload | null {
@@ -111,15 +125,18 @@ export function createTavernMainFetch(deps: TavernMainFetchDeps): typeof fetch {
     const payload = parseHostPayload(init);
     const helper = deps.getTavernHelper() as { generateRaw?: (opts: Record<string, unknown>) => Promise<unknown> } | null | undefined;
     if (!helper || typeof helper.generateRaw !== "function") {
-      return hostErrorJsonResponse("主API生成不可用：未检测到酒馆助手（TavernHelper.generateRaw）。请安装酒馆助手（JS-Slash-Runner），或改用自定义 API 连接。");
+      return hostErrorJsonResponse("主API生成不可用：未检测到酒馆助手（TavernHelper.generateRaw）。请安装酒馆助手（JS-Slash-Runner），或改用自定义 API 连接。", "API_NOT_CONFIGURED", "HOST_HELPER_UNAVAILABLE");
     }
     const prompts = payload ? orderedPromptsOf(payload) : [];
     if (prompts.length === 0) return hostErrorJsonResponse("主API生成失败：请求缺少有效的 messages。");
     const maxTokens = typeof payload?.max_tokens === "number" ? payload.max_tokens : undefined;
     try {
-      const response = await helper.generateRaw({ ordered_prompts: prompts, should_stream: false, ...(maxTokens ? { max_tokens: maxTokens } : {}) });
-      const text = typeof response === "string" ? response : String(response ?? "");
-      if (!text.trim()) return hostErrorJsonResponse("主API生成返回为空。");
+      const response = await helper.generateRaw({ ordered_prompts: prompts, should_stream: false,
+        should_return_reasoning: true,
+        ...(payload?.tools?.length ? { tools: payload.tools, tool_choice: payload.tool_choice ?? "auto" } : {}),
+        ...(maxTokens ? { max_tokens: maxTokens } : {}) });
+      const text = hostAssistantText(response, payload?.tools?.[0]?.function?.name);
+      if (!text?.trim()) return hostErrorJsonResponse("酒馆主 API 未返回可用正文（空回复或无法识别的响应）。本轮未提交。请核对酒馆当前连接与脚本网关的响应日志；Atlas 未观察到上游 HTTP 状态，不能据此判断模型不存在或地址错误。", "RESPONSE_MALFORMED", "HOST_EMPTY_RESPONSE");
       return textResponse(text.trim());
     } catch (error) {
       return hostErrorJsonResponse(`主API生成失败：${error instanceof Error ? error.message : String(error)}`);
@@ -170,9 +187,9 @@ export function createTavernProfileFetch(deps: TavernProfileFetchDeps): typeof f
           await triggerSlash(helper, `/profile await=true "${targetName.replace(/"/g, '\\"')}"`);
         }
         const response = await service.sendRequest!(profileId, prompts, maxTokens);
-        const content = extractAssistantText((response as {result?: unknown})?.result ?? response);
+        const content = hostAssistantText((response as {result?: unknown})?.result ?? response, payload?.tools?.[0]?.function?.name);
         const text = typeof content === "string" ? content : "";
-        if (!text.trim()) return hostErrorJsonResponse("酒馆连接预设返回为空或形状不支持。");
+        if (!text.trim()) return hostErrorJsonResponse("酒馆连接预设返回为空或形状不支持，本轮未提交。请核对所选连接与脚本网关响应。", "RESPONSE_MALFORMED", "HOST_EMPTY_RESPONSE");
         return textResponse(text.trim());
       } catch (error) {
         return hostErrorJsonResponse(`酒馆连接预设调用失败：${error instanceof Error ? error.message : String(error)}`);

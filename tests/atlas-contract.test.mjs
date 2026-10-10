@@ -326,10 +326,10 @@ test("commit 请求：loreSupplement 可选宽容处理", () => {
   assert.equal(parsedLore.value.loreSupplement, "- <REGION>：地点描述", "loreSupplement 保留");
 
   const longLore = validCommitRequest();
-  longLore.loreSupplement = "料".repeat(ATLAS_LIMITS.LORE_SUPPLEMENT_CHARS + 100);
+  longLore.loreSupplement = "料".repeat(60_000) + "末尾地理信息";
   const parsedLong = parseAtlasTurnCommitRequest(longLore);
   assert.ok(parsedLong.ok, "超长 loreSupplement 不拒整单");
-  assert.equal(parsedLong.value.loreSupplement.length, ATLAS_LIMITS.LORE_SUPPLEMENT_CHARS, "超长 loreSupplement 截断到上限");
+  assert.equal(parsedLong.value.loreSupplement, longLore.loreSupplement, "世界书全文含末尾信息保留");
 
   const badLore = validCommitRequest();
   badLore.loreSupplement = 42;

@@ -68,7 +68,8 @@ export interface AtlasApiPreset {
 export interface AtlasApiCallResult {
   ok: true;
   text: string;
-  status: number;
+  /** 仅直连/代理 HTTP 可观察到供应商状态；宿主助手返回文本时为 null。 */
+  status: number | null;
   durationMs: number;
   /** 0.9.14 自动救场提示（如 MiniMax 订阅密钥自动切换 Anthropic 路由），随引擎 world-turn 日志落档。 */
   notice?: string;
@@ -536,6 +537,16 @@ export async function callAtlasWorldTurnApi(
     }
 
     if (controller.signal.aborted) return fail(ATLAS_ERROR_CODES.API_TIMEOUT, `推演请求超过 ${timeoutMs}ms 超时。`, true);
+    // 宿主适配层的本地状态不代表供应商 HTTP 状态，保留准确原因，不套网关地址猜测。
+    if (mode !== "custom" && parsed.gatewayError) {
+      try {
+        const hostError = JSON.parse(parsed.rawText)?.error;
+        if (hostError?.origin === "atlas-host") {
+          const code = Object.values(ATLAS_ERROR_CODES).includes(hostError.code) ? hostError.code : ATLAS_ERROR_CODES.API_REQUEST_FAILED;
+          return fail(code, parsed.gatewayError, hostError.retryable === true);
+        }
+      } catch { /* 非本地错误继续标准 HTTP 分类 */ }
+    }
     if (!response.ok && !rescueAttempted) {
       const mapped = errorMessageForStatus(status);
       // M3-03A：HTTP 失败 + 本该自动重试但被预算拒绝 → 明确报出，不静默。
@@ -615,7 +626,7 @@ export async function callAtlasWorldTurnApi(
     return {
       ok: true,
       text,
-      status,
+      status: mode === "custom" ? status : null,
       durationMs: now() - startedAt,
       ...(rescueAttempted ? { notice: "已按 MiniMax 订阅密钥自动切换 Anthropic 路由（…/anthropic）重试成功。建议到「API」页把该连接的接口协议改为 Claude（Anthropic）、端点改为 …/anthropic 并保存。" } : {}),
     };

@@ -1611,7 +1611,7 @@ export function createAtlasUiCore(deps: {
           try {
             const expansion = await api.request("POST", "/worlds/geo/suggest", {
               chatId: value.chatId, triggerId: value.turnId, autoApply: true,
-              loreSupplement: [value.charDescription, value.loreSupplement].filter(Boolean).join("\n").slice(0, ATLAS_LIMITS.LORE_SUPPLEMENT_CHARS),
+              loreSupplement: [value.charDescription, value.loreSupplement].filter(Boolean).join("\n"),
               recentTexts: [...(value.recentAssistantTexts ?? []), value.assistantText].slice(-8),
             });
             if (expansion.status === 200 && (expansion.body as { ok?: boolean })?.ok && state.chatId === value.chatId) {

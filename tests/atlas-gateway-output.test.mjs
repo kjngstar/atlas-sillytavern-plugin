@@ -16,6 +16,40 @@ const envelope=(name=carrier,args=JSON.stringify({content}))=>({choices:[{messag
 const preset={name:'fixture',endpoint:'https://example.test/v1',model:'fixture',apiKey:'fixture',timeoutMs:1000,maxTokens:0};
 const prompt={injectionText:'Return operations',userText:'',assistantText:''};
 
+test('main adapter reads TavernHelper detail results and reasoning without stringifying objects',async()=>{
+ for (const detail of [{content}, {content:'',reasoning:content},
+   {content:'',tool_calls:envelope().choices[0].message.tool_calls},envelope()]) {
+  let calls=0;
+  const fetchFn=createTavernMainFetch({getTavernHelper:()=>({generateRaw:async opts=>{
+    calls++;assert.equal(opts.should_return_reasoning,true);return detail;
+  }})});
+  const result=await callAtlasWorldTurnApi({...preset,connectionMode:'main'},prompt,{fetchFn});
+  assert.equal(result.ok,true);assert.equal(result.text,content);assert.equal(calls,1);
+  assert.equal(result.status,null,'宿主助手结果不虚构供应商 HTTP 状态');
+ }
+});
+
+test('host empty/unsupported replies are failures with accurate origin and no phantom HTTP success or retry',async()=>{
+ for(const detail of ['', {content:''}, {unrecognized:'data'}, envelope('execute_code')]) {
+  let calls=0;
+  const fetchFn=createTavernMainFetch({getTavernHelper:()=>({generateRaw:async()=>{calls++;return detail;}})});
+  const result=await callAtlasWorldTurnApi({...preset,connectionMode:'main'},prompt,{fetchFn});
+  assert.equal(result.ok,false);assert.equal(result.code,'RESPONSE_MALFORMED');assert.equal(calls,1);
+  assert.match(result.message,/酒馆主 API/);assert.doesNotMatch(result.message,/HTTP 200|通常是模型名/);
+  assert.equal(result.status,undefined);
+ }
+});
+
+test('main preserves explicitly requested response tool definitions and decodes only that tool',async()=>{
+ const responseTool={name:'emit_fixture',description:'data',parameters:{type:'object'}};
+ const fetchFn=createTavernMainFetch({getTavernHelper:()=>({generateRaw:async opts=>{
+  assert.deepEqual(opts.tools,[{type:'function',function:responseTool}]);assert.equal(opts.tool_choice,'auto');
+  return {content:'',tool_calls:envelope(responseTool.name).choices[0].message.tool_calls};
+ }})});
+ const result=await callAtlasWorldTurnApi({...preset,connectionMode:'main'},prompt,{fetchFn,responseTool});
+ assert.equal(result.ok,true);assert.equal(result.text,content);
+});
+
 test('unlimited and explicit large values survive UI/settings save and reload without a token ceiling',()=>{
  for(const maxTokens of [0,262144]){
   const settings=createDefaultSettingsV2(),doc=referencePresetDocument(settings),c=doc.connections[0];

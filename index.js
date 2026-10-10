@@ -2426,17 +2426,8 @@ async function ensureStarterWorld() {
 // ---------------------------------------------------------------------------
 // 0.9.21 世界书资料块（抄 shujuku 读卡书思路，走 ST 原生 world-info API）：
 // 自动建世只读卡名+描述，推演 AI 长期「瞎着」推世界——本块把当前角色卡世界书
-// 的启用条目变成有界文本，随 commit 请求喂给推演模型（只进推演，不进主聊天注入）。
+// 的启用条目完整读取，随 commit 请求喂给推演模型（只进推演，不进主聊天注入）。
 // ---------------------------------------------------------------------------
-
-const LORE_SUPPLEMENT_LIMITS = {
-  /** 单条目正文截断 */
-  ENTRY_CONTENT_CHARS: 400,
-  /** 条目数上限（按书内顺序取前 N 条启用的） */
-  ENTRIES_MAX: 60,
-  /** 总字符上限（与引擎 ATLAS_LIMITS.LORE_SUPPLEMENT_CHARS 同口径，双保险） */
-  TOTAL_CHARS: 6000,
-};
 
 /** 宿主在本轮生成时公布的绿灯 ID；仅保留身份，不缓存条目正文。 */
 let hostLoreActivation = null;
@@ -2465,7 +2456,7 @@ export function recordAtlasHostLoreActivation(entries, ctx) {
     phase: "select", outcome: "success", details: { count: ids.size } });
 }
 
-/** 地理建图读取完整启用条目，不受普通回合的激活/6000 字注入预算限制。 */
+/** 地理建图读取完整启用条目，按请求分块发送。普通回合也不截断世界书原文。 */
 export function buildAtlasGeoLoreChunks(entries, maxChars = 5500, maxChunks = 32) {
   const geographic = /地图|地理|地点|地区|区域|领域|城镇|城市|关隘|道路|街道|聚落|场所|大陆|国家|地形|风土|学校|建筑|房间|遗迹|森林|村|镇/;
   const rows = (Array.isArray(entries) ? entries : [])
@@ -2750,7 +2741,6 @@ export async function readCardLoreSupplementViaSelector(selectionContext, select
       mode: selectionContext.mode,
       includeAllEnabled: true,
       prioritizeGeography: true,
-      maxChars: LORE_SUPPLEMENT_LIMITS.TOTAL_CHARS,
     });
     if (failedBooks > 0) {
       emit({ level: "warn", source: "lorebook",
@@ -2895,13 +2885,19 @@ async function connectOnce() {
       const startedAt = Date.now();
       try {
         const response = await adapter(input, init);
+        const hostBody = await response.clone().text();
+        let hostError = null;
+        try { hostError = JSON.parse(hostBody)?.error; } catch { /* 无正文不记录原文 */ }
         emitAtlasDiagnostic({
           level: response.ok ? "info" : "error", source: "model",
-          code: response.ok ? "MODEL_HTTP_COMPLETE" : "MODEL_HTTP_FAILED",
+          code: response.ok ? "MODEL_HOST_COMPLETE" : "MODEL_HOST_FAILED",
           operation: "generation", phase: "response",
           outcome: response.ok ? "success" : "failed",
-          httpStatus: response.status, durationMs: Date.now() - startedAt,
-          details: { route: "host-model", mode },
+          durationMs: Date.now() - startedAt,
+          ...(hostError?.code ? { errorCode: hostError.code, retryable: hostError.retryable === true } : {}),
+          details: { route: "host-model", mode,
+            ...(hostError?.reasonCode ? { reasonCode: hostError.reasonCode } : {}),
+            responseChars: response.ok ? (JSON.parse(hostBody)?.choices?.[0]?.message?.content?.length ?? 0) : 0 },
         });
         return response;
       } catch (error) {

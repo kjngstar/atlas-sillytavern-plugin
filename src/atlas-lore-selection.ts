@@ -2,14 +2,13 @@
  * atlas-lore-selection.ts — P2-01
  *
  * 纯函数:接受一组世界书条目 + 关键词,按"激活/相关/地理背景"排序并截断
- * 到 ATLAS_LIMITS.LORE_SUPPLEMENT_CHARS 字符预算。输出包含选中条目 ID
- * 与每条被截断的字节数,便于上层在 diagnostic 记录用途与覆盖。
+ * 到调用方显式指定的字符预算；省略预算时保留完整原文。输出包含选中条目 ID
+ * 与被截断的条目数,便于上层在 diagnostic 记录用途与覆盖。
  *
  * 排序:确认激活 → 当前场景/正文/人物交集 → 地理背景;同分按书名 + UID 固定
- * 排序,字符预算保持 ATLAS_LIMITS.LORE_SUPPLEMENT_CHARS。空 keywords 不
- * 凭空激活;同一输入次序稳定;中文长内容优先保留含关键词片段。
+ * 排序。关键词模式的空 keywords 不凭空激活；原文模式保留全部启用条目。
  *
- * 注意:此模块不负责读取宿主世界书,只负责"已读到条目"的有界选取。
+ * 注意:此模块不负责读取宿主世界书，只负责已读到条目的排序与可选预算。
  */
 
 export type AtlasLorePurpose = "turn" | "geo" | "bootstrap";
@@ -40,8 +39,8 @@ export interface AtlasLoreSelectionInput {
   sceneKeywords: ReadonlySet<string>;
   /** 用途(影响截断与排序) */
   mode: AtlasLorePurpose;
-  /** 字符预算上限 */
-  maxChars: number;
+  /** 可选字符预算；省略或 Infinity 表示不截断。0 仍表示不读取。 */
+  maxChars?: number;
   /** 每条正文最大字符(geo 默认更长) */
   perEntryChars?: number;
   /** 最多条目数 */
@@ -109,10 +108,11 @@ function isGeographicTitle(title: string): boolean {
 export function selectAtlasLoreSupplement(
   input: AtlasLoreSelectionInput,
 ): AtlasLoreSelectionResult {
+  const maxChars = input.maxChars === undefined || input.maxChars === Infinity
+    ? Infinity : Number.isFinite(input.maxChars) ? Math.max(0, Math.floor(input.maxChars)) : 0;
   const perEntryChars = input.perEntryChars
-    ?? (input.includeAllEnabled ? input.maxChars : input.mode === "geo" ? DEFAULT_GEO_PER_ENTRY_CHARS : DEFAULT_PER_ENTRY_CHARS);
+    ?? (input.includeAllEnabled ? maxChars : input.mode === "geo" ? DEFAULT_GEO_PER_ENTRY_CHARS : DEFAULT_PER_ENTRY_CHARS);
   const maxEntries = input.maxEntries ?? (input.includeAllEnabled ? input.entries.length : DEFAULT_MAX_ENTRIES);
-  const maxChars = Math.max(0, input.maxChars | 0);
 
   const filtered: Array<AtlasLoreSelectionEntry & { __idx: number }> = [];
   for (let i = 0; i < input.entries.length; i++) {
