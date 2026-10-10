@@ -77,7 +77,7 @@ test("B05 接线：chatId 两侧空白被裁剪；非字符串 chatId 视为没�
   assert.equal(await portFor(12345, async () => ({ worldId: "w-1" })).resolveChatScope(), null);
 });
 
-test("B05 接线：注入通道按 IN_CHAT 深度 4 写入，与生成拦截器同档位", async () => {
+test("B05 接线：注入通道写入聊天尾部，与生成拦截器同档位", async () => {
   const calls = [];
   const port = createLorebookPort(
     () => ({ chatId: "chat-a", setExtensionPrompt: (...args) => calls.push(args) }),
@@ -85,8 +85,8 @@ test("B05 接线：注入通道按 IN_CHAT 深度 4 写入，与生成拦截器�
     async () => ({ worldId: "w-1" }),
   );
   await port.injectTurn("atlas:scope:abc", "动向正文");
-  assert.deepEqual(calls, [["atlas:scope:abc", "动向正文", 2, 4]],
-    "位置 2（IN_CHAT）、深度 4 —— 与 installGenerateInterceptor 一致");
+  assert.deepEqual(calls, [["atlas:scope:abc", "动向正文", 1, 0, false, 0]],
+    "宿主 IN_CHAT=1、depth=0；不扫描为世界书关键词，与拦截器一致");
 
   // 清空：酒馆语义是传空串
   await port.injectTurn("atlas:scope:abc", "");

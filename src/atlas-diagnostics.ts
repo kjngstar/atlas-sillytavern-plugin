@@ -53,6 +53,7 @@ const DETAIL_KEYS = new Set([
   "hostMainApi", "rawServiceAvailable", "modelReaderAvailable", "headersAvailable",
   "responseShape", "responseChoiceCount", "googlePartCount", "thoughtPartCount", "textPartCount", "visibleTextChars",
   "refusalPresent", "upstreamErrorPresent", "providerErrorKind",
+  "streamed", "streamEventCount", "streamComplete",
   "count", "stage", "attempt", "scanned", "cleaned", "kept", "malformed", "rowLine",
   // A04：具名诊断的安全定位字段。`*Ref` 只接受 atlasRefFingerprint 的形态
   // （原始 chatId / 分支名 / turnKey 一律丢弃）；collection 与计数字段见下方校验。

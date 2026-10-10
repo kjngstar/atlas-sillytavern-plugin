@@ -14,6 +14,7 @@
  */
 
 import { extractAssistantText } from './atlas-api-client.ts';
+import { assembleHostStream } from './atlas-host-stream.ts';
 
 /** Response-like 最小实现：引擎只用 ok / status / text()；日志层用 clone().text()。 */
 interface AtlasHostResponseLike {
@@ -128,6 +129,9 @@ interface MainContext {
   chatCompletionSettings?: Record<string, unknown>;
   getChatCompletionModel?: () => string;
   getRequestHeaders?: () => Record<string, string>;
+  eventTypes?: Record<string, string>;
+  event_types?: Record<string, string>;
+  eventSource?: { emit: (event: string, payload: Record<string, unknown>) => Promise<unknown> };
   ChatCompletionService?: {
     presetToGeneratePayload?: (preset: Record<string, unknown>, overrides: Record<string, unknown>, payload: Record<string, unknown>) => Promise<Record<string, unknown>>;
   };
@@ -164,24 +168,37 @@ export function summarizeHostResponse(data: any, hostHttpStatus: number, respons
 
 async function rawMainResponse(ctx: MainContext, deps: TavernMainFetchDeps, payload: HostRequestPayload, prompts: Array<{role:string;content:string}>, init?: RequestInit): Promise<Response> {
   const request = await ctx.ChatCompletionService!.presetToGeneratePayload!({}, {}, {
-    messages: prompts, model: ctx.getChatCompletionModel!(), stream: false,
+    messages: prompts, model: ctx.getChatCompletionModel!(), stream: ctx.chatCompletionSettings?.stream_openai === true,
     ...(typeof payload.max_tokens === 'number' && payload.max_tokens > 0 ? {max_tokens:payload.max_tokens} : {}),
     ...(payload.tools?.length ? {tools:payload.tools, tool_choice:payload.tool_choice ?? 'auto'} : {}),
   });
-  // The host settings event may add tools. Do not set tool_choice=none or cache fetch.
+  // Match the host's settings hook; prebuilt sources must not pass through prompt/EJS assembly again.
+  const readyEvent = (ctx.eventTypes ?? ctx.event_types)?.CHAT_COMPLETION_SETTINGS_READY;
+  if (readyEvent && ctx.eventSource?.emit) await ctx.eventSource.emit(readyEvent, request);
+  if (init?.signal?.aborted) throw new Error('HOST_REQUEST_ABORTED');
+  // Do not set tool_choice=none or cache fetch: external transport extensions own their wrapper.
   const response = await (deps.fetchFn ?? globalThis.fetch)('/api/backends/chat-completions/generate', {
     method:'POST', headers:{...ctx.getRequestHeaders!(), 'Content-Type':'application/json'},
-    cache:'no-cache', body:JSON.stringify({...request, stream:false}), signal:init?.signal,
+    cache:'no-cache', body:JSON.stringify(request), signal:init?.signal,
   });
   const wire = await response.text();
+  if (init?.signal?.aborted) throw new Error('HOST_REQUEST_ABORTED');
   let data: any;
-  try { data=JSON.parse(wire); } catch {
-    return hostErrorJsonResponse('酒馆生成端点未返回合法 JSON；模型结果未提交。', 'RESPONSE_MALFORMED', 'HOST_INVALID_JSON', {transport:'chat-completions-raw',hostHttpStatus:response.status,responseBytes:wire.length});
+  let streamMeta: Record<string, unknown> = { streamed: false };
+  try {
+    if (/^data:/m.test(wire)) { const assembled = assembleHostStream(wire); data = assembled.data; streamMeta = assembled.meta; }
+    else data=JSON.parse(wire);
+  } catch (error) {
+    const incomplete = error instanceof Error && error.message === 'HOST_STREAM_INCOMPLETE';
+    return hostErrorJsonResponse(incomplete ? '模型流式响应未完整结束；本轮未提交，请查看网关或连接日志。' : '酒馆生成端点未返回合法完整响应；模型结果未提交。', 'RESPONSE_MALFORMED', incomplete ? 'HOST_STREAM_INCOMPLETE' : 'HOST_INVALID_JSON', {transport:'chat-completions-raw',hostHttpStatus:response.status,responseBytes:wire.length,streamed:/^data:/m.test(wire),streamComplete:false});
   }
-  const meta=summarizeHostResponse(data,response.status,wire.length);
+  const meta={...summarizeHostResponse(data,response.status,wire.length),...streamMeta};
   if(!response.ok||data?.error) return hostErrorJsonResponse(meta.providerErrorKind==='content-filter'
     ?'模型响应明确包含内容审核拦截标记；本轮未提交。'
     :`酒馆生成端点请求失败（HTTP ${response.status}）；模型结果未提交。`, 'API_REQUEST_FAILED', 'HOST_HTTP_FAILED', meta);
+  if (meta.providerErrorKind === 'content-filter' || meta.providerErrorKind === 'output-limit') return hostErrorJsonResponse(
+    meta.providerErrorKind === 'content-filter' ? '模型响应明确包含内容审核拦截标记；本轮未提交。' : '模型响应标记输出额度耗尽；不提交可能被截断的结果。',
+    'RESPONSE_MALFORMED', 'HOST_EMPTY_RESPONSE', meta);
   const text=hostAssistantText(data,payload.tools?.[0]?.function?.name);
   if(!text?.trim()) return hostErrorJsonResponse(meta.providerErrorKind==='content-filter'
     ?'模型响应明确包含内容审核拦截标记；本轮未提交。'

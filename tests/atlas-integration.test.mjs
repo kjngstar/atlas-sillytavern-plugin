@@ -273,6 +273,8 @@ test("P0-03：拦截器按 (chat, contextSize, abort, type) 触发；有 pending
   equal(aborted, false, "绝不触发 abort");
   equal(calls.length, 1, "一次 setExtensionPrompt");
   equal(calls[0].value, "【阿特拉斯世界上下文】你站在白塔王都。", "注入 prepare 文本");
+  equal(calls[0].position, 1, "本机宿主 IN_CHAT=1，不是 BEFORE_PROMPT=2");
+  equal(calls[0].depth, 0, "最新世界上下文位于聊天尾部");
 
   // 无 pending：清空注入
   calls.length = 0;

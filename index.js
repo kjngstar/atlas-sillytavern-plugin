@@ -1123,8 +1123,8 @@ function createEmitter(context) {
 
 /** 清除生成拦截器注入（临时上下文；不写入可见聊天历史）。 */
 function clearInjection() {
-  defaultSetExtensionPrompt(ATLAS_INJECTION_KEY, "", 2, 4);
-  for (const key of atlasSceneInjectionKeys) defaultSetExtensionPrompt(key, "", 2, 4);
+  defaultSetExtensionPrompt(ATLAS_INJECTION_KEY, "");
+  for (const key of atlasSceneInjectionKeys) defaultSetExtensionPrompt(key, "");
   atlasSceneInjectionKeys.clear();
 }
 
@@ -1250,8 +1250,16 @@ function createAssistantFloorResolver(context) {
   };
 }
 
-/** 默认注入通道：SillyTavern setExtensionPrompt（IN_CHAT 深度 4；临时上下文）。 */
-function defaultSetExtensionPrompt(key, value, position, depth) {
+/** The verified host fallback is IN_CHAT=1, SYSTEM=0. Depth zero means the chat tail. */
+export function atlasChatTailInjectionOptions(ctx) {
+  const types = ctx?.extensionPromptTypes ?? ctx?.extension_prompt_types;
+  const roles = ctx?.extensionPromptRoles ?? ctx?.extension_prompt_roles;
+  return { position: Number.isInteger(types?.IN_CHAT) && types.IN_CHAT >= 0 ? types.IN_CHAT : 1,
+    depth: 0, role: Number.isInteger(roles?.SYSTEM) && roles.SYSTEM >= 0 ? roles.SYSTEM : 0 };
+}
+
+/** 默认注入通道：SillyTavern setExtensionPrompt（聊天尾部；临时上下文）。 */
+function defaultSetExtensionPrompt(key, value) {
   if (typeof SillyTavern === "undefined") return;
   const ctx = SillyTavern.getContext();
   if (typeof ctx?.setExtensionPrompt !== "function") {
@@ -1261,7 +1269,8 @@ function defaultSetExtensionPrompt(key, value, position, depth) {
     console.warn("[atlas] 酒馆未提供 setExtensionPrompt，本轮无法注入阿特拉斯上下文。");
     return;
   }
-  ctx.setExtensionPrompt(key, value, position, depth);
+  const options = atlasChatTailInjectionOptions(ctx);
+  ctx.setExtensionPrompt(key, value, options.position, options.depth, false, options.role);
 }
 
 /**
@@ -1273,10 +1282,11 @@ function defaultSetExtensionPrompt(key, value, position, depth) {
  * @param {{ setExtensionPrompt?: Function, waitMs?: number }} [io] 测试注入
  */
 export function createGenerateInterceptor(core, io = {}) {
-  const setPrompt =
-    typeof io.setExtensionPrompt === "function"
-      ? io.setExtensionPrompt
-      : (key, value) => defaultSetExtensionPrompt(key, value, 2, 4);
+  const setPrompt = (key, value) => {
+    if (typeof io.setExtensionPrompt !== "function") return defaultSetExtensionPrompt(key, value);
+    const options = atlasChatTailInjectionOptions(globalThis.SillyTavern?.getContext?.());
+    return io.setExtensionPrompt(key, value, options.position, options.depth, false, options.role);
+  };
   const waitMs = typeof io.waitMs === "number" ? io.waitMs : 10_000;
   return async function atlasGenerateInterceptor(chat, contextSize, abort, type) {
     // 官方四参数契约：chat（不改动）、contextSize（不使用）、abort（绝不调用）。
@@ -1284,10 +1294,10 @@ export function createGenerateInterceptor(core, io = {}) {
     void chat;
     void contextSize;
     void abort;
-    for (const key of atlasSceneInjectionKeys) setPrompt(key, "", 2, 4);
+    for (const key of atlasSceneInjectionKeys) setPrompt(key, "");
     atlasSceneInjectionKeys.clear();
     if (type === "quiet") {
-      setPrompt(ATLAS_INJECTION_KEY, "", 2, 4);
+      setPrompt(ATLAS_INJECTION_KEY, "");
       return;
     }
     try {
@@ -1297,16 +1307,16 @@ export function createGenerateInterceptor(core, io = {}) {
         emitAtlasDiagnostic({ level: "info", source: "host", code: "PROMPT_INJECTION_SKIPPED",
           operation: "injection", phase: "pending", outcome: "skipped",
           details: { reasonCode: "NO_PENDING" } });
-        setPrompt(ATLAS_INJECTION_KEY, "", 2, 4);
+        setPrompt(ATLAS_INJECTION_KEY, "");
         return;
       }
-      setPrompt(ATLAS_INJECTION_KEY, String(pending.injectionText ?? ""), 2, 4);
+      setPrompt(ATLAS_INJECTION_KEY, String(pending.injectionText ?? ""));
       emitAtlasDiagnostic({ level: "info", source: "host", code: "PROMPT_INJECTION_COMPLETE",
         operation: "injection", phase: "applied", outcome: "success" });
     } catch (error) {
       emitAtlasDiagnostic({ level: "error", source: "host", code: "INJECTION_FAILED",
         operation: "injection", phase: "applied", outcome: "failed", retryable: true });
-      setPrompt(ATLAS_INJECTION_KEY, "", 2, 4);
+      setPrompt(ATLAS_INJECTION_KEY, "");
       console.warn("[atlas] 注入失败（酒馆生成不受影响）：", error instanceof Error ? error.message : String(error));
     }
   };
@@ -2230,7 +2240,7 @@ export function createLorebookPort(context, worldInfo, readScopeBinding = null) 
      * 纪律：
      * - 酒馆没提供 `setExtensionPrompt` → **必须 throw**（不能静默 return），
      *   否则 writer 会以为注入成功而既不写专属书也不报错，动态内容等于凭空消失；
-     * - 档位与 `installGenerateInterceptor` 一致（IN_CHAT、深度 4），避免同一段内容
+     * - 档位与 `installGenerateInterceptor` 一致（IN_CHAT、聊天尾部），避免同一段内容
      *   在两个注入点出现不同的可见性；
      * - 清空传空串（酒馆语义即清除该 key 的注入）。
      */
@@ -2239,7 +2249,8 @@ export function createLorebookPort(context, worldInfo, readScopeBinding = null) 
       if (typeof ctx?.setExtensionPrompt !== "function") {
         throw new Error("setExtensionPrompt unavailable");
       }
-      ctx.setExtensionPrompt(String(key), String(value ?? ""), 2, 4);
+      const options = atlasChatTailInjectionOptions(ctx);
+      ctx.setExtensionPrompt(String(key), String(value ?? ""), options.position, options.depth, false, options.role);
       if (value) atlasSceneInjectionKeys.add(String(key)); else atlasSceneInjectionKeys.delete(String(key));
     },
     createEntry(data, patch) {
