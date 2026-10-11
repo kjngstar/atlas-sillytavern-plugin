@@ -14,7 +14,8 @@ let preferenceStorage=window.AtlasHost.preferenceStorage;
 const preferences=ui.preferences(preferenceStorage);
 const state={page:'map',nodeId:D.meta.initialNodeId||D.ROOT.id,selected:null,inspectorTab:'cast',dock:'log',viewMode:D.meta.viewMode||'pov',mapMode:'map',open:new Set(),cameras:new Map(),query:'',filter:'all',settingsTab:'prompts',motion:true,leftClosed:false,rightClosed:false,branch:'main',advance:0,...preferences.value};
 const timers=new Set(),unlisten=[];
-const autoLayouts=new Set();
+let mapExportUrl=null;
+let mapExportText='';
 const presets=window.AtlasPresetStore.create(D.PROMPTS,{storage:null,initialDocument:window.AtlasHost.initial.presets,onPersist:window.AtlasHost.persistPresets});
 function later(fn,ms){const id=setTimeout(()=>{timers.delete(id);fn();},ms);timers.add(id);return id;}
 function listen(el,type,fn,opt){el.addEventListener(type,fn,opt);unlisten.push(()=>el.removeEventListener(type,fn,opt));}
@@ -53,11 +54,8 @@ function navigate(n,silent=false){
  const cam=state.cameras.get(n.id);if(cam){map.state.cam={x:cam.x,y:cam.y,s:cam.s*map.fitScale()/(cam.fit||map.fitScale())};map.state.tgt={...map.state.cam};}
  map.setMode(state.mapMode);map.setPaused(document.hidden);
  renderAll();requestAnimationFrame(()=>map.resize());
- if(!silent){toast(`已进入 ${n.name}`);const key=D.meta.scopeKey+':'+n.id;
-  if(n.host&&!n.hasLayout&&!n.unclassified&&D.meta.engine?.bound&&!D.meta.engine?.busy&&!autoLayouts.has(key)){
-   autoLayouts.add(key);toast('正在生成本图空间布局…');void window.AtlasHost.layout(n.id).catch(error=>toast(error.message,'warn'));
-  }
- }return true;
+ if(!silent)toast(`已进入 ${n.name}`);
+ return true;
 }
 function select(kind,id,show=false){state.selected={kind,id};state.inspectorTab='details';renderInspector();if(show)openRight();const capturedScope=D.meta.scopeKey,capturedRevision=D.meta.revision;void window.AtlasHost.inspect(kind,id).then(value=>{if(!value||D.meta.scopeKey!==capturedScope||D.meta.revision!==capturedRevision||state.selected?.kind!==kind||state.selected?.id!==id)return;const row=kind==='character'?D.CAST.find(x=>x.id===id):kind==='item'?D.ITEMS.find(x=>x.id===id):kind==='message'?D.MESSAGES.find(x=>x.id===id):(kind==='task'||kind==='action'||kind==='journey')?D.TASKS.find(x=>x.id===id):(D.LOCATIONS||[]).find(x=>x.id===id);if(row)Object.assign(row,value);renderInspector();}).catch(error=>toast(error.message,'warn'));}
 function inspectPlace(id,focus=false){
@@ -316,7 +314,18 @@ function copyDiagnostics(){
   if(!navigator.clipboard?.writeText){toast('当前环境不支持剪贴板，请使用「导出日志」','warn');return;}
   void navigator.clipboard.writeText(rows).then(()=>toast('诊断已复制到剪贴板')).catch(error=>toast(error.message,'warn'));
 }
-function exportData(kind){if(kind==='receipts')download('atlas-turn-receipts.json',JSON.stringify(D.RECEIPTS,null,2));else if(kind==='diagnostics')download('atlas-preview-diagnostics.jsonl',D.DIAGNOSTICS.map(d=>JSON.stringify(d)).join('\n'),'application/x-ndjson');else download('atlas-preview-skin.json',JSON.stringify({kind:'atlas-preview-skin',version:1,accent:state.accent||'#43e0ff',motion:state.motion,radar:map.state.showRadar,coordinates:root.classList.contains('show-coordinates')},null,2));}
+async function exportData(kind){
+ if(kind==='map'){
+  try{
+   const result=await window.AtlasHost.exportMap(current().id);
+   mapExportText=JSON.stringify(result.file,null,2);
+   if(mapExportUrl)URL.revokeObjectURL(mapExportUrl);
+   mapExportUrl=URL.createObjectURL(new Blob([mapExportText],{type:'application/json'}));
+   modal('导出当前地图',`<p>已准备 ${result.file.scope.mapCount} 张地图（含子图）的布局、坐标与组装约束。</p><p><a class="action-btn" href="${esc(mapExportUrl)}" download="${esc(result.filename)}">下载地图 JSON</a> <button class="action-btn" data-copy-map-export>复制地图 JSON</button></p><p class="scope-note">此文件用于分析，不是可直接导入的存档。</p><details><summary>查看 JSON</summary><pre>${esc(mapExportText)}</pre></details>`);
+   if(window.AtlasHost.downloadMap){const text=mapExportText;$('#modalBody a[download]').onclick=event=>{event.preventDefault();window.AtlasHost.downloadMap(result.filename,text);};}
+  }catch(error){toast(error.message,'warn');}
+ }else if(kind==='receipts')download('atlas-turn-receipts.json',JSON.stringify(D.RECEIPTS,null,2));else if(kind==='diagnostics')download('atlas-preview-diagnostics.jsonl',D.DIAGNOSTICS.map(d=>JSON.stringify(d)).join('\n'),'application/x-ndjson');else download('atlas-preview-skin.json',JSON.stringify({kind:'atlas-preview-skin',version:1,accent:state.accent||'#43e0ff',motion:state.motion,radar:map.state.showRadar,coordinates:root.classList.contains('show-coordinates')},null,2));
+}
 function skinValue(){return {kind:'atlas-preview-skin',version:1,accent:state.accent||'#43e0ff',motion:state.motion,radar:map.state.showRadar,coordinates:root.classList.contains('show-coordinates')};}
 function saveSkin(){void window.AtlasHost.saveSkin(skinValue()).catch(error=>toast(error.message,'warn'));}
 function applySkin(s){if(s.kind!=='atlas-preview-skin'||s.version!==1||!/^#[0-9a-f]{6}$/i.test(s.accent))throw new Error('皮肤格式不支持，请使用导出的皮肤文件。');state.accent=s.accent;root.style.setProperty('--cyan',s.accent);state.motion=s.motion!==false;root.dataset.motion=state.motion?'full':'reduced';map.setFlag('showRadar',s.radar!==false);root.classList.toggle('show-coordinates',s.coordinates===true);renderSwitches();}
@@ -385,7 +394,8 @@ function bind(){
   if(b.hasAttribute('data-copy-diagnostics')){copyDiagnostics();return;}
   if(b.dataset.event){showEvent(b.dataset.event);return;}if(b.dataset.retry){retry(b.dataset.retry);return;}
   if(b.dataset.settingsTab){state.settingsTab=b.dataset.settingsTab;renderPage();return;}
-  if(b.dataset.export){exportData(b.dataset.export);return;}
+  if(b.hasAttribute('data-copy-map-export')){try{await navigator.clipboard.writeText(mapExportText);toast('地图 JSON 已复制');}catch{toast('复制不可用，请展开 JSON 后复制或使用下载链接','warn');}return;}
+  if(b.dataset.export){await exportData(b.dataset.export);return;}
   if(b.dataset.loreToggle){try{await window.AtlasHost.toggleLore(b.dataset.loreToggle);toast('世界书条目已更新');}catch(error){toast(error.message,'warn');}return;}
   if(b.dataset.loreReadToggle){b.disabled=true;try{await window.AtlasHost.setLoreRead(b.dataset.loreReadToggle,b.dataset.loreReadEnabled==='true');toast('ATLAS 读取设置已保存');}catch(error){toast(error.message,'warn');}finally{b.disabled=false;}return;}
   if(b.dataset.loreTarget){const l=D.LORE.find(l=>l.id===b.dataset.loreTarget);if(!l.target){toast('当前条目没有匹配到已记录对象','warn');return;}if(byId(l.target))navigate(l.target);else showEntity('character',l.target,true);return;}
@@ -437,7 +447,7 @@ function bind(){
 }
 function updateSnapshot(value,{resetScope=false}={}){const snapshot=clone(value);if(!snapshot?.meta||!snapshot.ROOT)throw Error('ATLAS_SNAPSHOT_INVALID');const page=state.page,id=state.nodeId,selected=state.selected,oldScope=D.meta?.scopeKey;for(const key of Object.keys(D))delete D[key];Object.assign(D,snapshot);state.viewMode=D.meta.viewMode;if(resetScope||oldScope!==D.meta.scopeKey){state.cameras.clear();state.selected=null;state.open.clear();}const next=nodes().find(n=>n.id===id)?id:D.meta.initialNodeId||D.ROOT.id;navigate(next,true);if(!resetScope&&oldScope===D.meta.scopeKey&&selected){const exists=selected.kind==='character'?D.CAST.some(x=>x.id===selected.id):selected.kind==='item'?D.ITEMS.some(x=>x.id===selected.id):selected.kind==='place'?!!byId(selected.id):selected.kind==='message'?!!message(selected.id):selected.kind==='task'?!!task(selected.id):selected.kind==='lore'?D.LORE.some(x=>x.id===selected.id):D.EVENTS.some(x=>x.id===selected.id);if(exists)state.selected=selected;}state.page=page;renderAll();map.setPaused(page!=='map'||document.hidden);}
 async function runHost(action,success,...args){const before=D.meta.scopeKey;try{await window.AtlasHost[action](...args);if(before===D.meta.scopeKey)toast(success);}catch(error){toast(error.message,'warn');if(before===D.meta.scopeKey){D.meta.engine??={};D.meta.engine.error=error.message;diagnostic('error','UI_ACTION_FAILED',error.message,{action});renderDock();renderPage();}window.AtlasHost.diagnostic({level:'error',source:'ui',code:'UI_ACTION_FAILED',details:{action,message:error.message}});}}
-function destroy(){map.destroy();timers.forEach(clearTimeout);timers.clear();unlisten.splice(0).forEach(fn=>fn());}
+function destroy(){if(mapExportUrl)URL.revokeObjectURL(mapExportUrl);mapExportUrl=null;mapExportText='';map.destroy();timers.forEach(clearTimeout);timers.clear();unlisten.splice(0).forEach(fn=>fn());}
 state.open=new Set((path(state.nodeId)||[]).map(n=>n.id));
 if(window.AtlasHost.initial.skin)applySkin(window.AtlasHost.initial.skin);applyInteractionPreferences();map.boot();bind();navigate(state.nodeId,true);
 requestAnimationFrame(()=>{map.resize();map.fit(false);});

@@ -809,7 +809,6 @@ function create(canvas, mini, hooks){
     const seed = hash(st.node.id);
     const rooms=g.rooms||[];
     const planTop=rooms.length?Math.min(...rooms.map(r=>r.y)):-280;
-    const planBottom=rooms.length?Math.max(...rooms.map(r=>r.y+r.h)):280;
     // 走廊
     const c = g.corridor;
     if(c.w>0&&c.h>0){
@@ -923,18 +922,10 @@ function create(canvas, mini, hooks){
     });
     ctx.restore();
 
-    // ── 制图标注（尺寸线 + 图签）──
+    // 图签；幅面尺寸留在数据中，不在地图上绘制尺寸线或宽度读数。
     const mpp = st.node.host?(st.node.metric||1/st.node.transform.scale):(st.node.metric||0.085);
     const measureWidth=st.node.host?st.node.transform.bounds.w*st.node.transform.scale:940;
-    const measureLeft=-measureWidth/2,measureRight=measureWidth/2;
-    ctx.save();
-    ctx.strokeStyle='rgba(140,200,255,.30)'; ctx.lineWidth=1/st.cam.s;
-    const dy=st.node.host?planBottom+36:328;
-    ctx.beginPath(); ctx.moveTo(measureLeft,dy); ctx.lineTo(measureRight,dy); ctx.stroke();
-    for(let x=measureLeft;x<=measureRight;x+=measureWidth/8){ ctx.beginPath(); ctx.moveTo(x,dy-7); ctx.lineTo(x,dy+7); ctx.stroke(); }
-    ctx.beginPath(); ctx.moveTo(st.node.host?measureLeft-16:-470,st.node.host?planTop:-70); ctx.lineTo(st.node.host?measureLeft-16:-470,dy); ctx.stroke();
-    ctx.restore();
-    pushLabel(0, dy+11, st.node.host?`宽度 ${(measureWidth*mpp).toFixed(1)} ${st.node.metric?'m':'格'}`:`940 u · 约 ${(940*mpp).toFixed(1)} m`, 'rgba(150,200,240,.8)', 'sub', true);
+    const measureRight=measureWidth/2;
     // 图签
     const stampX=st.node.host?measureRight-228:296,stampY=st.node.host?planTop-62:-302;
     ctx.save();

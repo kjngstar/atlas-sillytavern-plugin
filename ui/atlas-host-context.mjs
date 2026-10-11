@@ -235,11 +235,20 @@ export function atlasContentHash(text) {
  *   再退到**内容寻址** `chatId:role:<variantKey>`，并显式标 `identityFallback: true`。
  *   内容寻址时用 `#f<下标>` 只做**同内容重复楼层的消歧后缀**，不是身份本体。
  * - `variantKey`：正文变体键——换 swipe（重新生成）必然换键，同一段正文永远同键。
- * - `contentHash`：正文内容哈希（改一个字就变）。
+ * - `contentHash`：叙事正文哈希；其他插件独立标记的生成投影不属于正文编辑。
  */
+/** shujuku appends/replaces its owned projection after visible prose completes.
+ * It is generated guidance, not an edit to the story's floor identity. Only
+ * complete, versioned owned blocks are excluded; ordinary HTML stays intact.
+ */
+export function atlasNarrativeIdentityText(value) {
+  return String(value ?? '').replace(/(?:\r?\n)*<!-- qrf-world-simulation-projection:(v[12]):start -->[\s\S]*?<!-- qrf-world-simulation-projection:\1:end -->(?:\r?\n)*/g, '').trimEnd();
+}
+
 export function atlasFloorIdentity(message, floorIndex = 0, { chatId = null } = {}) {
   const record = message && typeof message === "object" ? message : {};
-  const text = typeof record.mes === "string" ? record.mes : "";
+  const rawText = typeof record.mes === "string" ? record.mes : "";
+  const text = record.is_user === true ? rawText : atlasNarrativeIdentityText(rawText);
   const contentHash = atlasContentHash(text);
   const index = Number.isInteger(floorIndex) && floorIndex >= 0 ? floorIndex : 0;
   const role = record.is_user === true ? "u" : "a";
@@ -259,7 +268,7 @@ export function atlasFloorIdentity(message, floorIndex = 0, { chatId = null } = 
   const swipeText = swipes && swipeId !== null && typeof swipes[swipeId] === "string" ? swipes[swipeId] : null;
   const variantKey = swipeId === null
     ? `v0-${contentHash}`
-    : `v${swipeId}-${atlasContentHash(swipeText ?? text)}`;
+    : `v${swipeId}-${atlasContentHash(swipeText === null ? text : record.is_user === true ? swipeText : atlasNarrativeIdentityText(swipeText))}`;
   const contentAddressed = `${chatKey}:${role}:${variantKey}`;
   const messageUID = hostUid
     ?? (sendDate !== null ? `${chatKey}:${role}:${sendDate}` : `${contentAddressed}#f${index}`);

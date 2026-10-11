@@ -185,8 +185,35 @@ test('production repository shares four actual sends including MiniMax compatibi
  const repo=await seeded(port);try{const p=await repo.prepareTurn(input({phaseBatches:['observe','geography']}));assert.equal(calls.length,4);assert.equal(calls.filter(url=>url.includes('/anthropic')).length,2);assert.ok(p.receipt.issues.some(i=>i.code==='MODEL_BUDGET_EXHAUSTED'));assert.equal(p.receipt.status,'partial');}finally{await repo.close();}
 });
 
-test('a due background outcome uses the reserved fourth slot before optional layout',async()=>{
+test('a due background outcome keeps its reserved fourth slot; spatial assembly follows independently',async()=>{
  const port=model((_req,n)=>n===1?'{"op":"event.propose","data":{"title":"休息一分","phase":"observed","activity":{"kind":"rest","completed":true},"time_hint":{"elapsed_s":60}}}':noop);
  const repo=await seeded(port,db=>insertRows(db,'actions',[createRow('actions',{id:'work',actor_entity_id:IDS.C2,kind:'prepare',title:'到期任务',status:'active',started_at_s:0,evaluated_until_s:0,next_check_s:0,duration_json:{min_s:30,nominal_s:30,max_s:30,quality:'explicit',basis_refs:[]}},{branchId:IDS.branchMain,id:'work',turnId:IDS.seedTurn,clockS:0,nowWallMs:0,rulesetVersion:'atlas-1'})]));
- try{await repo.prepareTurn(input({sceneOnly:false,phaseBatches:['observe','geography'],sceneMaps:true,layoutMaps:'active'}));assert.equal(port.calls.length,4);assert.equal(port.calls[3].phase,'outcome');assert.ok(!port.calls.some(req=>req.batchId.startsWith('layout_')));}finally{await repo.close();}
+ try{await repo.prepareTurn(input({sceneOnly:false,phaseBatches:['observe','geography'],sceneMaps:true,layoutMaps:'active'}));assert.ok(port.calls.length>4);assert.equal(port.calls[3].phase,'outcome');assert.ok(port.calls.slice(4).every(req=>req.batchId.startsWith('layout_')));}finally{await repo.close();}
+});
+
+test('one candidate finishes every registered unvisited room beyond the foreground four-send limit',async()=>{
+ const port=model(req=>req.batchId.startsWith('layout_')
+  ? JSON.parse(req.messages[1].content.split('\n').find(line=>line.startsWith('本图：')).slice(3)).map(scope=>JSON.stringify({op:'map.layout.request',ref:scope.map,data:{kind:scope.kind,spec:scope.kind==='floor'?{rooms:scope.baselineRooms}:{surface:'mixed'}}})).join('\n')
+  : noop);
+ const repo=await seeded(port,db=>{
+  for(let i=0;i<9;i++){
+   const loc=`unvisited-room-${i}`,map=`unvisited-map-${i}`;
+   insertRows(db,'entity_keys',[{branch_id:IDS.branchMain,id:loc,kind:'location'}]);
+   insertRows(db,'locations',[createRow('locations',{name:`空客房 ${i}`,kind:'room',parent_location_id:IDS.L2,map_id:IDS.M1},{branchId:IDS.branchMain,id:loc,turnId:IDS.seedTurn,clockS:0,nowWallMs:1,rulesetVersion:'atlas-1'})]);
+   insertRows(db,'maps',[createRow('maps',{name:`空客房 ${i}`,kind:'interior',container_location_id:loc,frame_json:{cols:12,rows:8}},{branchId:IDS.branchMain,id:map,turnId:IDS.seedTurn,clockS:0,nowWallMs:1,rulesetVersion:'atlas-1'})]);
+  }
+ });
+ try{
+  const before=Buffer.from(repo.db.export());
+  const p=await repo.prepareTurn(input({phaseBatches:['observe','geography'],worldCompletion:undefined,layoutMaps:'active'}));
+  assert.deepEqual(Buffer.from(repo.db.export()),before,'所有布局结束前不发布候选');
+  assert.equal(port.calls.filter(req=>req.batchId.startsWith('layout_')).length,6);
+  assert.ok(!p.receipt.issues.some(i=>i.code==='LAYOUT_BATCH_PENDING'||i.severity==='error'),JSON.stringify(p.receipt.issues));
+  const frames=queryBound(repo.getCandidate(p.token).db,'SELECT frame_json FROM maps WHERE branch_id=?',[IDS.branchMain]).map(row=>JSON.parse(row.frame_json));
+  assert.equal(frames.length,11);assert.ok(frames.every(f=>f.atlasScene&&f.atlasLayoutContext));
+  await repo.confirmSaved({token:p.token,snapshotSha256:p.snapshotSha256,result:'saved'});
+  const prior=port.calls.length;
+  await repo.prepareTurn(input({anchor:{...anchor,parentTurnId:p.receipt.turnId,hostMessageUid:'unchanged',inputHash:'unchanged',baseRevision:1,baseStorageRevision:1},worldCompletion:undefined,layoutMaps:'active'}));
+  assert.ok(!port.calls.slice(prior).some(req=>req.batchId.startsWith('layout_')),'结构不变不重复生成：'+JSON.stringify(port.calls.slice(prior).filter(req=>req.batchId.startsWith('layout_')).flatMap(req=>JSON.parse(req.messages[1].content.split('\n').find(line=>line.startsWith('本图：')).slice(3))).map(s=>({name:s.name,extent:s.extent,locations:s.locations.map(l=>l.name)}))));
+ }finally{await repo.close();}
 });

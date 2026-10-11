@@ -3,7 +3,7 @@
  *
  * 只做三件事，绝不做第四件：
  * 1. 包一层 vendor 的 `prepareInitialFrame`：新空、未锁定、无已定位地点、缺可信尺度的地图
- *    才能初始化一致纵横比（cols=100、mpp=widthM/100、rows=heightM/mpp）。已有图一律 retained，
+ *    才能初始化一致纵横比与整数格幅面。默认 cols=100；小数 rows 改用等比例整数网格。已有图一律 retained，
  *    继续走现有 map.estimate / 作者校准路径 —— 不覆盖、不重标。
  * 2. 读写 frame 里的两个命名空间（`atlasScene` / `atlasLayoutRequest`），供 W01/W05/W06 复用。
  * 3. 把工具包的 Diagnostic 收敛成宿主 Issue，并把 mapId/operationId/entityId 拼进 message
@@ -261,7 +261,7 @@ type KitInitial = { ok: boolean; status: string; mutation: RowMutation | null; i
 /**
  * W00 ensureInitialSpatialFrame：新空图才有资格初始化。
  *
- * - prepared：给出一条普通 maps RowMutation（cols=100、尺度 estimated、calibration_rev+1）。
+ * - prepared：给出一条普通 maps RowMutation（等比例整数网格、尺度 estimated、calibration_rev+1）。
  * - retained：已有 scene / 已定位地点 / 锁定或已确认尺度 → 不写，沿用现有标定路径。
  * - 没有尺寸也不算错误：退回概览并记一条缺项 warning（不把整轮判失败）。
  */
@@ -301,6 +301,29 @@ export function ensureInitialSpatialFrame(input: InitialFrameInput): InitialFram
 
   const issues = (prepared.issues ?? []).map((item) => spatialIssue(item, ctx));
   if (prepared.ok && prepared.mutation) {
+    const after=prepared.mutation.after as Record<string,unknown>;
+    const frame=normalizeFrame(after.frame_json);
+    // The kit's fixed 100-column estimate can produce fractional rows (12×8 m
+    // becomes 100×66.666…). Our SQL frame contract requires integers. Preserve
+    // the old grid when its aspect agrees; otherwise use an equivalent rational
+    // grid. Never round a row count and thereby change the physical dimensions.
+    if (!Number.isInteger(frame.rows) && input.kind!=='overview' && typeof input.widthM==='number' && typeof input.heightM==='number') {
+      const original=normalizeSqlMapFrame(input.mapRow.frame_json);
+      const mpp=original.ok?input.widthM/original.cols!:Number.NaN;
+      if(original.ok&&Math.abs(original.rows!*mpp-input.heightM)<1e-8){
+        frame.cols=original.cols;frame.rows=original.rows;after.meters_per_cell=mpp;
+      }else{
+        const w=Math.round(input.widthM*1e6),h=Math.round(input.heightM*1e6);
+        const gcd=(a:number,b:number):number=>b?gcd(b,a%b):a;
+        if(!Number.isSafeInteger(w)||!Number.isSafeInteger(h)||w<=0||h<=0)return {ok:false,status:'failed',mutation:null,issues:[spatialIssue({code:'INITIAL_FRAME_RANGE_INVALID',path:'$.frame_json',message:'尺寸无法转换为一致的整数格幅面'},ctx)]};
+        const factor=gcd(w,h),multiple=Math.max(1,Math.ceil(100/(w/factor)));
+        frame.cols=w/factor*multiple;frame.rows=h/factor*multiple;after.meters_per_cell=input.widthM/Number(frame.cols);
+        if(Math.abs(Number(frame.rows)*Number(after.meters_per_cell)-input.heightM)>1e-8)return {ok:false,status:'failed',mutation:null,issues:[spatialIssue({code:'INITIAL_FRAME_RANGE_INVALID',path:'$.frame_json',message:'整数格幅面无法保持给定尺寸'},ctx)]};
+      }
+    }
+    // Old aliases must describe the same frame as cols/rows.
+    frame.reference_width_cells=frame.cols;frame.reference_height_cells=frame.rows;
+    after.frame_json=frame;
     return { ok: true, status: 'prepared', mutation: prepared.mutation, issues };
   }
   // 没有尺寸也不算错误：退回概览并记一条缺项 warning（不把整轮判失败）。

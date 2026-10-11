@@ -1,5 +1,5 @@
 /** Host generation events have no request ID. Track nesting and completion aliases locally. */
-export type AtlasGenerationSignal = 'received' | 'ended' | 'after-commands';
+export type AtlasGenerationSignal = 'received' | 'ended' | 'after-commands' | 'dry-run';
 export type AtlasGenerationMetadata = {
   generationType?: string; dryRun?: boolean; automaticTrigger?: boolean; quietPromptPresent?: boolean;
 };
@@ -33,6 +33,14 @@ export function createAtlasGenerationLifecycle(now: () => number = Date.now) {
     message() { return decision(current()); },
     complete(signal: AtlasGenerationSignal, foreground = false) {
       const active = current();
+      // SillyTavern dry runs return after GENERATE_AFTER_DATA and emit no
+      // GENERATION_ENDED. Close only that dry run, preserving a real parent.
+      if (signal === 'dry-run') {
+        const frame = lastMatching(f => !f.completed && f.dryRun === true);
+        if (!frame) return { ...decision(null, true), gated: true };
+        frame.completed = true; frame.afterCommands = true;
+        return decision(frame);
+      }
       // RECEIVED is an observation of a visible floor, not another request completion.
       // Raw ENDED closes that request; AFTER_COMMANDS may be a second notification.
       if (signal === 'received') {

@@ -6242,6 +6242,29 @@ END`;
     }
     const issues = (prepared.issues ?? []).map((item) => spatialIssue(item, ctx));
     if (prepared.ok && prepared.mutation) {
+      const after = prepared.mutation.after;
+      const frame = normalizeFrame(after.frame_json);
+      if (!Number.isInteger(frame.rows) && input.kind !== "overview" && typeof input.widthM === "number" && typeof input.heightM === "number") {
+        const original = normalizeSqlMapFrame(input.mapRow.frame_json);
+        const mpp = original.ok ? input.widthM / original.cols : Number.NaN;
+        if (original.ok && Math.abs(original.rows * mpp - input.heightM) < 1e-8) {
+          frame.cols = original.cols;
+          frame.rows = original.rows;
+          after.meters_per_cell = mpp;
+        } else {
+          const w = Math.round(input.widthM * 1e6), h = Math.round(input.heightM * 1e6);
+          const gcd = (a, b) => b ? gcd(b, a % b) : a;
+          if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h) || w <= 0 || h <= 0) return { ok: false, status: "failed", mutation: null, issues: [spatialIssue({ code: "INITIAL_FRAME_RANGE_INVALID", path: "$.frame_json", message: "尺寸无法转换为一致的整数格幅面" }, ctx)] };
+          const factor = gcd(w, h), multiple = Math.max(1, Math.ceil(100 / (w / factor)));
+          frame.cols = w / factor * multiple;
+          frame.rows = h / factor * multiple;
+          after.meters_per_cell = input.widthM / Number(frame.cols);
+          if (Math.abs(Number(frame.rows) * Number(after.meters_per_cell) - input.heightM) > 1e-8) return { ok: false, status: "failed", mutation: null, issues: [spatialIssue({ code: "INITIAL_FRAME_RANGE_INVALID", path: "$.frame_json", message: "整数格幅面无法保持给定尺寸" }, ctx)] };
+        }
+      }
+      frame.reference_width_cells = frame.cols;
+      frame.reference_height_cells = frame.rows;
+      after.frame_json = frame;
       return { ok: true, status: "prepared", mutation: prepared.mutation, issues };
     }
     const missing = typeof input.widthM !== "number" || typeof input.heightM !== "number" || !Number.isFinite(input.widthM) || !Number.isFinite(input.heightM) || issues.some((item) => item.code === "INITIAL_EXTENT_REQUIRED");
@@ -6629,7 +6652,7 @@ ${entry.text}`.toLowerCase();
         chosen = missing.sort((a, b) => byId3(a.mapId, b.mapId));
       }
       if (occupied.length > 0) chosen.push(...entries.filter((entry) => entry.container === null && !hasScene(entry.map) && !chosen.includes(entry)).sort((a, b) => byId3(a.mapId, b.mapId)));
-      chosen.push(...entries.filter((entry) => !hasScene(entry.map) && !chosen.includes(entry) && (entry.container !== null || entry.own.length > 0)).sort((a, b) => byId3(a.mapId, b.mapId)));
+      chosen.push(...entries.filter((entry) => !chosen.includes(entry) && (entry.container !== null || entry.own.length > 0)).sort((a, b) => byId3(a.mapId, b.mapId)));
     } else if (Array.isArray(input.layoutMaps)) {
       const requested = input.layoutMaps.map((id) => String(id));
       chosen = entries.filter((entry) => requested.includes(entry.mapId)).sort((a, b) => requested.indexOf(a.mapId) - requested.indexOf(b.mapId));
@@ -20391,7 +20414,7 @@ ${c.text}`).join("\n");
       "l.status AS status",
       `${source.locationExpr} AS location_id`,
       `${source.mapExpr} AS map_id`,
-      ...source.kind === "location" ? ["l.kind AS location_kind", "l.mobility AS mobility", "l.anchor_location_id AS anchor_location_id"] : [],
+      ...source.kind === "location" ? ["l.kind AS location_kind", "l.mobility AS mobility", "l.anchor_location_id AS anchor_location_id", "l.parent_location_id AS parent_location_id"] : [],
       source.kind === "event" ? "l.secrecy AS secrecy" : `'public' AS secrecy`,
       source.kind === "rumor" ? "l.first_available_at_s AS first_available_at_s" : "0 AS first_available_at_s",
       source.kind === "rumor" ? "l.audience_json AS audience_json" : "NULL AS audience_json"
@@ -20509,7 +20532,7 @@ ${c.text}`).join("\n");
             mapId: row2.map_id === null || row2.map_id === void 0 ? null : String(row2.map_id),
             summary: summaryText(row2.summary),
             status: String(row2.status ?? ""),
-            ...kind === "location" ? { locationKind: String(row2.location_kind ?? ""), mobility: String(row2.mobility ?? "fixed"), anchorLocationId: row2.anchor_location_id == null ? null : String(row2.anchor_location_id) } : {}
+            ...kind === "location" ? { locationKind: String(row2.location_kind ?? ""), mobility: String(row2.mobility ?? "fixed"), anchorLocationId: row2.anchor_location_id == null ? null : String(row2.anchor_location_id), parentLocationId: row2.parent_location_id == null || isPov && !visibility.knownLocations.has(String(row2.parent_location_id)) ? null : String(row2.parent_location_id) } : {}
           });
           if (items.length >= limit) {
             reachedLimit = true;
@@ -25137,7 +25160,8 @@ ${c.text}`).join("\n");
     return (attempts ?? []).map((attempt) => ({ stage: String(attempt.stage), batchId: String(attempt.batchId), status: attempt.status }));
   }
   function createGenerationBudget(input = {}) {
-    const limit = GENERATION_BUDGET_LIMIT;
+    const limit = input.limit ?? GENERATION_BUDGET_LIMIT;
+    if (!Number.isSafeInteger(limit) || limit < 1) throw new Error("MODEL_BUDGET_INVALID");
     const attemptList = cloneAttempts(input.attempts);
     const deferredList = [];
     let transports = attemptList.length;
@@ -25756,11 +25780,26 @@ ${chunk.text}`;
       if (raw.length === 0) return null;
       if (raw.startsWith("new:")) {
         const mapped = resolved.get(raw);
-        return mapped ?? null;
+        return mapped ?? raw;
       }
       return raw;
     };
-    for (const op of operations) {
+    const declarations = new Map(operations.filter((op) => op.op === "location.upsert" && asId3(op.ref).startsWith("new:")).map((op) => [asId3(op.ref), op]));
+    const orderedDeclarations = [];
+    const visited = /* @__PURE__ */ new Set();
+    const visiting = /* @__PURE__ */ new Set();
+    const visit = (ref) => {
+      if (visited.has(ref) || visiting.has(ref)) return;
+      const op = declarations.get(ref);
+      if (!op) return;
+      visiting.add(ref);
+      if (isPlainObject20(op.data)) visit(asId3(op.data.parent_ref));
+      visiting.delete(ref);
+      visited.add(ref);
+      orderedDeclarations.push(op);
+    };
+    for (const ref of declarations.keys()) visit(ref);
+    for (const op of orderedDeclarations) {
       if (asText(op?.op).trim() !== "location.upsert") continue;
       const ref = asId3(op?.ref);
       if (!ref.startsWith("new:")) continue;
@@ -26639,15 +26678,22 @@ ${chunk.text}`;
                 const readPort = createTableReadPort(candidateDb);
                 const aliases = new Map(task.catalogue.knownRefs.map((ref) => [ref.alias, ref.id]));
                 const resolveRefs = (value) => typeof value === "string" ? aliases.get(value) ?? value : Array.isArray(value) ? value.map(resolveRefs) : value && typeof value === "object" ? Object.fromEntries(Object.entries(value).map(([key, child]) => [key, key === "ref" || key.endsWith("_ref") || typeof child === "object" ? resolveRefs(child) : child])) : value;
-                const existingLocations = task.catalogue.knownRefs.filter((ref) => ref.kind === "location").map((ref) => readPort.selectOne("locations", branchId, ref.id)).filter((row2) => !!row2);
+                const existingLocations = queryBound(candidateDb, "SELECT id FROM locations WHERE branch_id = ? AND status = ?", [branchId, "active"]).map((row2) => readPort.selectOne("locations", branchId, String(row2.id))).filter((row2) => !!row2);
                 const deduped = dedupeWorldConstructionOps({
                   operations: parsedConstruction.operations.map((op) => resolveRefs(op.value)),
                   existingLocations
                 });
                 const declaredNewRefs = parsedConstruction.operations.map((op) => String(op.value.ref ?? "")).filter((ref) => ref.startsWith("new:"));
+                const constructionRefs = [...task.catalogue.knownRefs];
+                for (const reused of deduped.reusedIds) {
+                  if (!constructionRefs.some((ref) => ref.id === reused.id)) {
+                    const row2 = existingLocations.find((row3) => row3.id === reused.id);
+                    constructionRefs.push({ alias: reused.id, id: reused.id, kind: "location", rowRev: Number(row2.row_rev ?? 0) });
+                  }
+                }
                 const normalized = normalizeConstructionOps({
                   operations: deduped.operations,
-                  knownIds: task.catalogue.knownRefs.map((ref) => ref.id),
+                  knownIds: constructionRefs.map((ref) => ref.id),
                   declaredNewRefs,
                   protectedLocationFacts: Object.fromEntries(existingLocations.map((row2) => [String(row2.id), {
                     ...row2.existence_quality === "confirmed" && row2.parent_location_id ? { parentRef: String(row2.parent_location_id) } : {},
@@ -26674,7 +26720,7 @@ ${chunk.text}`;
                     tables: readPort,
                     sources: { phase: "geography", snapshot: sourceSnapshot, clockS: clockBefore },
                     makeId,
-                    knownRefs: [...task.catalogue.knownRefs],
+                    knownRefs: constructionRefs,
                     turnId,
                     allowedOps: WORLD_CONSTRUCTION_OPS
                   });
@@ -26776,8 +26822,11 @@ ${chunk.text}`;
         timeChanged = simulation.clockAfter !== clockBefore;
         let layoutTask = input.layoutMaps ? buildSqlLayoutTask(candidateDb, branchId, input, turnId) : null;
         const layoutTasks = [];
+        const layoutBatchCount = layoutTask ? Math.ceil((layoutTask.mapIds.length + layoutTask.remainingLocationIds.length) / ATLAS_RUNTIME_LIMITS.layoutMapsPerBatch) : 0;
+        const layoutBudget = createGenerationBudget({ limit: Math.max(1, layoutBatchCount * 4) });
+        const layoutModelPort = options.modelPort ? bindModelBudget(options.modelPort, layoutBudget, "geography") : null;
         let layoutApplied = false;
-        while (layoutTask && options.modelPort && turnBudget.remaining() > 0 && foregroundBatches + (repairAttempted ? 1 : 0) + (simulation.modelBatches ?? 0) < ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn) {
+        while (layoutTask && layoutModelPort && layoutBudget.remaining() > 0) {
           const currentLayoutTask = layoutTask;
           layoutTasks.push(layoutTask);
           preparationStep = "before-layout";
@@ -26785,16 +26834,16 @@ ${chunk.text}`;
           transactionOpen = false;
           try {
             const layoutStarted = now();
-            let response = await modelPort.request(layoutTask.request);
+            let response = await layoutModelPort.request(layoutTask.request);
             attempts.push({ id: `att_${attempts.length}`, kind: "layout", phase: "geography", started_wall_ms: layoutStarted, finished_wall_ms: now(), http_status: response.httpStatus, response_chars: response.text?.length ?? 0, response_hash: sha256HexSync(response.text ?? ""), finish_reason: response.finishReason });
             if (input.isCurrent && !input.isCurrent() || currentRevision() !== anchor.baseRevision) throw new AtlasDbError("STALE_BASE", "布局生成期间聊天或世界修订已变化，候选不发布", {});
             let extracted = extractPayload(response.text ?? ""), parsed = parseOperations(extracted.payload, { phase: "geography" });
-            if (!parsed.operations.length && parsed.issues.some((i) => i.code === "JSON_SYNTAX") && !extracted.incomplete && turnBudget.remaining() > 0) {
+            if (!parsed.operations.length && parsed.issues.some((i) => i.code === "JSON_SYNTAX") && !extracted.incomplete && layoutBudget.remaining() > 0) {
               const repairText = layoutTask.request.messages[1].content + "\n【布局格式纠错】上次回复不是合法 JSON，解析问题：" + parsed.issues.map((i) => i.message).join("；") + "\n重新生成以上地图的完整布局。只返回 JSONL，每张图一个完整 JSON 对象，所有键及字符串用双引号，不要代码围栏、解释、逗号连接两个对象或在字段内省略括号。";
               const repairRequest = { ...layoutTask.request, batchId: layoutTask.request.batchId + "_format_retry", messages: layoutTask.request.messages.map((m, i) => i === 1 ? { ...m, content: repairText } : m), promptInput: layoutTask.request.promptInput ? { ...layoutTask.request.promptInput, injectionText: repairText } : void 0 };
               allIssues.push({ code: "LAYOUT_RESPONSE_RETRIED", path: "$.layout", message: "首次布局回复无法解析，已在本轮预算内请求一次完整格式纠错；原回复未写入地图。", severity: "warning", retryable: false });
               const retryStarted = now();
-              response = await modelPort.request(repairRequest);
+              response = await layoutModelPort.request(repairRequest);
               attempts.push({ id: `att_${attempts.length}`, kind: "layout_repair", phase: "geography", started_wall_ms: retryStarted, finished_wall_ms: now(), http_status: response.httpStatus, response_chars: response.text?.length ?? 0, response_hash: sha256HexSync(response.text ?? ""), finish_reason: response.finishReason });
               if (input.isCurrent && !input.isCurrent() || currentRevision() !== anchor.baseRevision) throw new AtlasDbError("STALE_BASE", "布局纠错期间聊天或世界修订已变化，候选不发布", {});
               extracted = extractPayload(response.text ?? "");
@@ -26851,7 +26900,7 @@ ${chunk.text}`;
           const remaining = layoutTask.remainingLocationIds;
           layoutTask = remaining.length ? buildSqlLayoutTask(candidateDb, branchId, { ...input, layoutMaps: remaining }, `${turnId}_layout_${layoutTasks.length}`) : null;
         }
-        if (layoutTask) allIssues.push({ code: "LAYOUT_BATCH_PENDING", path: "$.layout", message: `本轮布局预算已用尽，${layoutTask.mapIds.length + layoutTask.remainingLocationIds.length} 张地图的空间布局仍待处理；下一轮自动继续。`, severity: "warning", retryable: true });
+        if (layoutTask) allIssues.push({ code: "LAYOUT_BATCH_PENDING", path: "$.layout", message: `${layoutTask.mapIds.length + layoutTask.remainingLocationIds.length} 张地图的空间布局未完成（布局连接不可用或计划传输额度耗尽）；请查看本轮请求错误。`, severity: "warning", retryable: true });
         const spatialGuard = input.isCurrent ?? (() => true);
         const spatialPorts = {
           applyGroups: (db2, groups, ctx) => applyGroups(db2, groups, ctx),

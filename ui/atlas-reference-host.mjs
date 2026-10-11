@@ -1,6 +1,7 @@
 /** Mount the supplied UI intact in its own document; provide data and real backend ports. */
 import { emptyReferenceData, projectReferenceData, referenceEntity,referenceReceipts,referenceDiagnostics } from './atlas-reference-data.mjs';
 import { referencePresetDocument, referenceSettingsCommands } from './atlas-reference-presets.mjs';
+import { buildMapAnalysisExport } from './atlas-map-export.mjs';
 
 /**
  * M6-01：事件流分页参数，镜像 `src/atlas-runtime-limits.ts` 的 feedPageMax。
@@ -19,6 +20,7 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
   Object.assign(frame.style,{display:'block',width:'100%',height:'100%',border:'0',background:'transparent'});
   let disposed=false,ready=false,viewMode='author',epoch=0,lastKey='',scopeId='',lastReadFailure='',latest=emptyReferenceData(),sqlMod=null,loading=null;
   let settings={},prefs={},presetDoc=null,presetQueue=Promise.resolve(),actionBusy=false,actionError=null,actionScope='';
+  let mapExportViews=null;
   const context=()=>{const c=getContext?.();return c?.chatMetadata?c:null;};
   function scope(){const s=core.getState(),c=context(),env=c?.chatMetadata?.atlas?.database,enabled=c?.extensionSettings?.atlas_world_sim?.sqlMode??s.stateData?.sqlModeEnabled??s.stateData?.sqlMode??true;return {state:s,context:c,metadata:c?.chatMetadata,enabled,key:JSON.stringify([s.chatId,c?.chatId??c?.chat_id,s.binding?.branchId??'main',env?.sha256,env?.storage_revision,s.stateData?.revision,viewMode,enabled]),data:env?.data};}
   function live(ticket){const now=scope();return !disposed&&ticket.epoch===epoch&&ticket.key===now.key&&ticket.data===now.data&&ticket.metadata===now.metadata;}
@@ -99,7 +101,7 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
       if(!changed&&latest.meta.scopeKey===worldScope)data.LORE=latest.LORE;
       // Rollback identity comes from the real saved turn, never from a UI demo snapshot.
       data.meta.rollbackMessageId=mapView.metadata?.rollbackMessageId??null;data.meta.canUndo=mapView.metadata?.canUndo===true;data.meta.snapshotSaved=mapView.metadata?.snapshotSaved===true;
-      if(live(ticket)){lastReadFailure='';deliver(data,changed);}
+      if(live(ticket)){lastReadFailure='';mapExportViews={key:ticket.key,mapView,sceneView,catalogView:{items:catalogRows,revision}};deliver(data,changed);}
     })().catch(error=>{if(!live(ticket))return;const failureKey=ticket.key+'|'+error.message;if(lastReadFailure!==failureKey){lastReadFailure=failureKey;emit({level:'error',source:'ui',code:'REFERENCE_UI_READ_FAILED',details:{message:error.message}});}
       const data=emptyReferenceData({viewMode,scopeKey:worldScope,worldName:'世界读取失败'});data.DIAGNOSTICS=[{id:'read-failed',t:'',level:'error',code:'REFERENCE_UI_READ_FAILED',message:error.message}];deliver(data,changed);});
     return loading;
@@ -198,6 +200,14 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
     }catch(error){actionError=error.message;throw error;}finally{actionBusy=false;deliver(latest);}
   }
   const bridge={boot,ready(){ready=true;deliver(latest);render();if(core.getState().panelOpen!==false)frame.contentWindow?.focus?.();},inspect,persistPresets,
+    downloadMap(filename,text){
+      // Own the Blob in the top document: embedded browsers cannot download
+      // a frame-owned Blob. Invoke synchronously from the explicit link click.
+      const doc=root.ownerDocument,win=doc.defaultView;
+      const url=win.URL.createObjectURL(new win.Blob([text],{type:'application/json'}));
+      const link=doc.createElement('a');link.href=url;link.download=filename;link.hidden=true;doc.body.append(link);
+      link.click();link.remove();setTimeout(()=>win.URL.revokeObjectURL(url),60000);
+    },
     async fetchModels(connection){
       if(connection?.provider==='sillytavern')throw Error('酒馆主连接的模型请在酒馆 API 设置中选择；自定义连接可在这里获取模型');
       let url;try{url=new URL(String(connection?.url??'').trim());}catch{throw Error('请先填写有效的 API 地址');}
@@ -213,6 +223,12 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
         if(!models.length)throw Error('接口没有返回模型列表；可以继续手动填写模型名称');
         return models;
       }catch(error){if(error.name==='AbortError')throw Error('获取模型超过 30 秒，请检查接口');throw error;}finally{clearTimeout(timer);}
+    },
+    async exportMap(mapId){
+      const captured=scope();
+      await refresh(true);
+      if(disposed||captured.key!==scope().key||captured.metadata!==context()?.chatMetadata||mapExportViews?.key!==scope().key)throw Error('世界或视角已变化，请重新导出地图');
+      return buildMapAnalysisExport({data:latest,...mapExportViews,mapId});
     },
     async setViewMode(mode){viewMode=mode==='author'?'author':'pov';await refresh(true);},
     onPage(page){core.setPage({cast:'characters',items:'items',msgs:'events',sim:'advance',time:'events',lore:'world',diag:'logs',prefs:'prompts'}[page]??'map');if(page==='lore')void Promise.resolve(refresh()).then(readLore).catch(error=>emit({level:'error',source:'ui',code:'LORE_READ_FAILED',details:{message:error.message}}));},

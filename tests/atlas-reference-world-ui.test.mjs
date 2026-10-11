@@ -166,6 +166,15 @@ test('U01：单击开对应详情，入口按钮进子图，外层地图不被�
   assert.equal(preview.state.nodeId,'world','可以退回外层，单子图没有把世界根顶掉');
 });
 
+test('进入未绘制地点只是导航，不偷偷触发布局模型请求',async t=>{
+ const layoutCalls=[];
+ const data=structuredClone(BUILDING_DATA);data.meta.engine={bound:true,busy:false};
+ const {preview,w}=withUI(t,{data,host:{layout:async id=>layoutCalls.push(id)}});
+ preview.select('place','L-bld');w.document.querySelector('[data-go="bld-map"]').click();await tick();
+ assert.equal(preview.state.nodeId,'bld-map');assert.deepEqual(layoutCalls,[]);
+ assert.ok(w.document.querySelector('[aria-label="导出当前地图"]'));
+});
+
 test('U01：singleClickEnter 开关写进偏好存储（刷新后仍在）',async t=>{
   const {w,store,calls,preview}=withUI(t);
   freeze(preview.map);
@@ -371,6 +380,23 @@ test('U06：作者视图的 message/action/journey 各开自己的详情，不�
 });
 
 /* ── M6-18 · 升级前备份导出入口 ── */
+
+test('map export prepares a persistent, explicit JSON download link from the selected real map',async t=>{
+ const ids=[],downloads=[];
+ const {w,preview}=withUI(t,{host:{downloadMap:(name,text)=>downloads.push({name,file:JSON.parse(text)}),exportMap:async id=>{ids.push(id);return {filename:'atlas-map-测试世界-r4.json',file:{scope:{mapCount:2},maps:[WORLD,BUILDING_MAP]}};}}});
+ preview.go('world');
+ let blob;
+ w.URL.createObjectURL=value=>{blob=value;return 'blob:http://localhost/export-fixture';};
+ w.URL.revokeObjectURL=()=>{};
+ w.document.querySelector('[data-export="map"]').click();
+ await new Promise(resolve=>setTimeout(resolve,10));
+ assert.deepEqual(ids,['world']);assert.equal(blob.type,'application/json');
+ const link=w.document.querySelector('#modalBody a[download]');
+ assert.equal(link.textContent,'下载地图 JSON');assert.equal(link.download,'atlas-map-测试世界-r4.json');
+ assert.equal(w.document.querySelector('#demoModal').hidden,false);
+ assert.match(w.document.querySelector('#modalBody').textContent,/2 张地图/);
+ link.click();assert.equal(downloads[0].name,link.download);assert.equal(downloads[0].file.scope.mapCount,2);
+});
 
 test('S05：无备份时入口禁用并说明原因；有备份时显示 SHA256 供核对',async t=>{
   const denied=withUI(t);

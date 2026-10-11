@@ -986,7 +986,11 @@ export function createSqlRepository(options: RepositoryOptions) {
               const readPort = createTableReadPort(candidateDb);
               const aliases = new Map(task.catalogue.knownRefs.map(ref => [ref.alias, ref.id]));
               const resolveRefs = (value: unknown): unknown => typeof value === 'string' ? aliases.get(value) ?? value : Array.isArray(value) ? value.map(resolveRefs) : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([key, child]) => [key, key === 'ref' || key.endsWith('_ref') || typeof child === 'object' ? resolveRefs(child) : child])) : value;
-              const existingLocations = task.catalogue.knownRefs.filter(ref => ref.kind === 'location').map(ref => readPort.selectOne('locations', branchId, ref.id)).filter((row): row is Record<string, unknown> => !!row);
+              // 去重覆盖同一候选分支的全部现有地点；冻结的模型目录可能只含当前场所，
+              // 不能因此把观察阶段已建成的远处房间再次新建。这里只扩展程序索引，不重编号模型 alias。
+              const existingLocations = queryBound(candidateDb, 'SELECT id FROM locations WHERE branch_id = ? AND status = ?', [branchId, 'active'])
+                .map(row => readPort.selectOne('locations', branchId, String(row.id)))
+                .filter((row): row is Record<string, unknown> => !!row);
               const deduped = dedupeWorldConstructionOps({
                 operations: parsedConstruction.operations.map((op) => resolveRefs(op.value) as ParsedOperation['value']),
                 existingLocations,
@@ -994,9 +998,16 @@ export function createSqlRepository(options: RepositoryOptions) {
               const declaredNewRefs = parsedConstruction.operations
                 .map((op) => String(op.value.ref ?? ''))
                 .filter((ref) => ref.startsWith('new:'));
+              const constructionRefs = [...task.catalogue.knownRefs];
+              for (const reused of deduped.reusedIds) {
+                if (!constructionRefs.some(ref => ref.id === reused.id)) {
+                  const row = existingLocations.find(row => row.id === reused.id)!;
+                  constructionRefs.push({ alias: reused.id, id: reused.id, kind: 'location', rowRev: Number(row.row_rev ?? 0) });
+                }
+              }
               const normalized = normalizeConstructionOps({
                 operations: deduped.operations,
-                knownIds: task.catalogue.knownRefs.map((ref) => ref.id),
+                knownIds: constructionRefs.map((ref) => ref.id),
                 declaredNewRefs,
                 protectedLocationFacts: Object.fromEntries(existingLocations.map(row => [String(row.id), {
                   ...(row.existence_quality === 'confirmed' && row.parent_location_id ? { parentRef: String(row.parent_location_id) } : {}),
@@ -1016,7 +1027,7 @@ export function createSqlRepository(options: RepositoryOptions) {
                 const compiledConstruction = compileOperations({
                   operations: constructionParsed, anchor, phase: 'geography', clockS: clockBefore, revision: rev,
                   tables: readPort, sources: { phase: 'geography', snapshot: sourceSnapshot, clockS: clockBefore }, makeId,
-                  knownRefs: [...task.catalogue.knownRefs], turnId, allowedOps: WORLD_CONSTRUCTION_OPS,
+                  knownRefs: constructionRefs, turnId, allowedOps: WORLD_CONSTRUCTION_OPS,
                 });
                 allIssues.push(...compiledConstruction.issues);
                 const groupsConstruction = buildAtomicGroups(compiledConstruction.results.map((r) => ({
@@ -1109,26 +1120,33 @@ export function createSqlRepository(options: RepositoryOptions) {
       // isolated candidate transaction during the spatial model request as well.
       let layoutTask=input.layoutMaps?buildSqlLayoutTask(candidateDb,branchId,input,turnId):null;
       const layoutTasks:NonNullable<typeof layoutTask>[]=[];
+      // Spatial assembly completes the frozen set before this floor is published.
+      // It cannot be starved by observation/construction/background's four-send budget.
+      // Each planned batch has at most four transports (initial + format repair,
+      // each possibly using one compatibility send); failures never expand the map set.
+      const layoutBatchCount=layoutTask?Math.ceil((layoutTask.mapIds.length+layoutTask.remainingLocationIds.length)/ATLAS_RUNTIME_LIMITS.layoutMapsPerBatch):0;
+      const layoutBudget=createGenerationBudget({limit:Math.max(1,layoutBatchCount*4)});
+      const layoutModelPort=options.modelPort?bindModelBudget(options.modelPort,layoutBudget,'geography'):null;
       let layoutApplied=false;
-      while(layoutTask&&options.modelPort&&turnBudget.remaining()>0&&foregroundBatches+(repairAttempted?1:0)+(simulation.modelBatches??0)<ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn){
+      while(layoutTask&&layoutModelPort&&layoutBudget.remaining()>0){
         const currentLayoutTask=layoutTask;
         layoutTasks.push(layoutTask);
         preparationStep='before-layout';
         commitTransaction(candidateDb);transactionOpen=false;
         try{
-          // 布局与建设共用同一个局部预算 port：仍然要真的领到额度才发。
+          // Every real transport still claims the finite spatial plan's allowance.
           const layoutStarted=now();
-          let response=await modelPort!.request(layoutTask.request);
+          let response=await layoutModelPort.request(layoutTask.request);
           attempts.push({id:`att_${attempts.length}`,kind:'layout',phase:'geography',started_wall_ms:layoutStarted,finished_wall_ms:now(),http_status:response.httpStatus,response_chars:response.text?.length??0,response_hash:sha256HexSync(response.text??''),finish_reason:response.finishReason});
           if(input.isCurrent&&!input.isCurrent()||currentRevision()!==anchor.baseRevision)throw new AtlasDbError('STALE_BASE','布局生成期间聊天或世界修订已变化，候选不发布',{});
           let extracted=extractPayload(response.text??''),parsed=parseOperations(extracted.payload,{phase:'geography'});
           // Ask for a fresh complete response once. Never patch broken JSON locally or reuse partial lines as a full layout.
-          if(!parsed.operations.length&&parsed.issues.some(i=>i.code==='JSON_SYNTAX')&&!extracted.incomplete&&turnBudget.remaining()>0){
+          if(!parsed.operations.length&&parsed.issues.some(i=>i.code==='JSON_SYNTAX')&&!extracted.incomplete&&layoutBudget.remaining()>0){
             const repairText=layoutTask.request.messages[1].content+'\n【布局格式纠错】上次回复不是合法 JSON，解析问题：'+parsed.issues.map(i=>i.message).join('；')+'\n重新生成以上地图的完整布局。只返回 JSONL，每张图一个完整 JSON 对象，所有键及字符串用双引号，不要代码围栏、解释、逗号连接两个对象或在字段内省略括号。';
             const repairRequest={...layoutTask.request,batchId:layoutTask.request.batchId+'_format_retry',messages:layoutTask.request.messages.map((m,i)=>i===1?{...m,content:repairText}:m),promptInput:layoutTask.request.promptInput?{...layoutTask.request.promptInput,injectionText:repairText}:undefined};
             allIssues.push({code:'LAYOUT_RESPONSE_RETRIED',path:'$.layout',message:'首次布局回复无法解析，已在本轮预算内请求一次完整格式纠错；原回复未写入地图。',severity:'warning',retryable:false});
             const retryStarted=now();
-            response=await modelPort!.request(repairRequest);
+            response=await layoutModelPort.request(repairRequest);
             attempts.push({id:`att_${attempts.length}`,kind:'layout_repair',phase:'geography',started_wall_ms:retryStarted,finished_wall_ms:now(),http_status:response.httpStatus,response_chars:response.text?.length??0,response_hash:sha256HexSync(response.text??''),finish_reason:response.finishReason});
             if(input.isCurrent&&!input.isCurrent()||currentRevision()!==anchor.baseRevision)throw new AtlasDbError('STALE_BASE','布局纠错期间聊天或世界修订已变化，候选不发布',{});
             extracted=extractPayload(response.text??'');parsed=parseOperations(extracted.payload,{phase:'geography'});
@@ -1176,7 +1194,7 @@ export function createSqlRepository(options: RepositoryOptions) {
         const remaining=layoutTask.remainingLocationIds;
         layoutTask=remaining.length?buildSqlLayoutTask(candidateDb,branchId,{...input,layoutMaps:remaining},`${turnId}_layout_${layoutTasks.length}`):null;
       }
-      if(layoutTask)allIssues.push({code:'LAYOUT_BATCH_PENDING',path:'$.layout',message:`本轮布局预算已用尽，${layoutTask.mapIds.length+layoutTask.remainingLocationIds.length} 张地图的空间布局仍待处理；下一轮自动继续。`,severity:'warning',retryable:true});
+      if(layoutTask)allIssues.push({code:'LAYOUT_BATCH_PENDING',path:'$.layout',message:`${layoutTask.mapIds.length+layoutTask.remainingLocationIds.length} 张地图的空间布局未完成（布局连接不可用或计划传输额度耗尽）；请查看本轮请求错误。`,severity:'warning',retryable:true});
 
       // M3/W03：布局请求结算 —— 仍在同一个受控候选事务内，before 最终外键/不变量检查。
       // 生成器是同步纯函数：这里不 await、不开新事务、不提交、不保存聊天。

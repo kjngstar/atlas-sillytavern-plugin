@@ -161,7 +161,7 @@ export type BuildLayoutTaskInput = TurnInput;
  * 选图优先级（`layoutMaps:'active'`）：
  * 1. 当前有人的「具体图」（成员真正站在里面）；
  * 2. 尚未绘制的根图（当前图存在也要给宏观概览留候选）；
- * 3. 没有 1 时，这些成员向上必经、但还没有场景的「missing 上级图」。
+ * 3. 所有已登记图：缺失或结构变化都在本轮排队，不以是否进入为条件。
  * 显式给定 `layoutMaps: string[]` 时按给定顺序取（允许无人图），仍受 layoutMapsPerBatch 限制。
  */
 export function buildSqlLayoutTask(
@@ -268,8 +268,9 @@ export function buildSqlLayoutTask(
       chosen = missing.sort((a, b) => byId(a.mapId, b.mapId));
     }
     if (occupied.length > 0) chosen.push(...entries.filter(entry => entry.container === null && !hasScene(entry.map) && !chosen.includes(entry)).sort((a,b)=>byId(a.mapId,b.mapId)));
-    // Continue unfinished registered maps on subsequent ordinary turns, including empty cities.
-    chosen.push(...entries.filter(entry=>!hasScene(entry.map)&&!chosen.includes(entry)&&(entry.container!==null||entry.own.length>0)).sort((a,b)=>byId(a.mapId,b.mapId)));
+    // Every registered map participates, including unvisited spaces and changed ready maps.
+    // The fingerprint filter below keeps unchanged maps out of the model queue.
+    chosen.push(...entries.filter(entry=>!chosen.includes(entry)&&(entry.container!==null||entry.own.length>0)).sort((a,b)=>byId(a.mapId,b.mapId)));
   } else if (Array.isArray(input.layoutMaps)) {
     const requested = input.layoutMaps.map((id) => String(id));
     chosen = entries

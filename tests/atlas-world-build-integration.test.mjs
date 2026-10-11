@@ -108,6 +108,25 @@ const LOCAL_FOCUS = { mode: 'local', focusLocationIds: [IDS.L3] };
 /** 建设任务只在本轮有目标且预算非零时才生成；空响应只用来占位。 */
 const NOOP = '{"op":"noop"}';
 
+test('观察与建设同轮登记远处附楼：子声明在父之前仍复用房间，不跨父合并', async () => {
+  const op = (ref, name, kind, parent_ref) => JSON.stringify({op:'location.upsert',ref,data:{name,kind,parent_ref}});
+  const observe = [op('new:annex-a','测试附楼甲','building','L1'),op('new:store-a','工具库','room','new:annex-a'),op('new:annex-b','测试附楼乙','building','L1'),op('new:store-b','工具库','room','new:annex-b')].join('\n');
+  const construction = [op('new:retry-store-a','工具库','room','new:retry-annex-a'),op('new:retry-annex-a','测试附楼甲','building','L1'),op('new:retry-store-b','工具库','room','new:retry-annex-b'),op('new:retry-annex-b','测试附楼乙','building','L1')].join('\n');
+  const {repo} = await makeRepo({responses:[observe,construction]});
+  try {
+    const prepared = await repo.prepareTurn({anchor:anchorFor(),userText:'仍在原房间，记录远处附楼。',assistantText:'两座附楼各有一间工具库。',sourceSnapshot:SOURCE_SNAPSHOT,phaseBatches:['observe'],manual:false,worldCompletion:LOCAL_FOCUS});
+    const db=cand(repo,prepared);
+    const buildings=rows(db,'locations','AND name IN (?,?)',['测试附楼甲','测试附楼乙']);
+    const stores=rows(db,'locations','AND name = ?',['工具库']);
+    assert.equal(buildings.length,2,JSON.stringify(prepared.receipt));
+    assert.equal(stores.length,2,JSON.stringify(prepared.receipt));
+    assert.deepEqual(stores.map(r=>r.parent_location_id).sort(),buildings.map(r=>r.id).sort());
+    assert.equal(q(db,"SELECT COUNT(*) n FROM turn_changes WHERE turn_id=? AND attempt_id='construction' AND target_table='locations' AND operation='insert'",[prepared.receipt.turnId])[0].n,0);
+    assert.equal(countRows(repo.db,'locations',BRANCH),3,'候选未发布时正式库保持原样');
+    assert.deepEqual(foreignKeyCheck(db),[]);
+  } finally {await repo.close();}
+});
+
 // ---------------------------------------------------------------------------
 // W08 · 独立组部分成功
 // ---------------------------------------------------------------------------

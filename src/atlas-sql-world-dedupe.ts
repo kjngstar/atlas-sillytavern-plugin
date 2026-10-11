@@ -17,7 +17,7 @@ import type { Issue, ModelOperation } from './atlas-ops-contract.ts';
 
 export type DedupeWorldOpsInput = {
   operations: readonly ModelOperation[];
-  /** 现有地点行（已解码的 locations 行）；由调用方从冻结目录读出。 */
+  /** 同一候选分支的现有地点行（已解码）；不受模型冻结目录的焦点截断影响。 */
   existingLocations?: readonly Record<string, unknown>[];
   /**
    * 本批 new: 引用 → 已确定的旧地点 ID。
@@ -131,13 +131,30 @@ export function dedupeWorldConstructionOps(input: DedupeWorldOpsInput): DedupeWo
     if (raw.length === 0) return null;
     if (raw.startsWith('new:')) {
       const mapped = resolved.get(raw);
-      return mapped ?? null;
+      // 未解析的新父仍是独立作用域，不能与无父根地点混为一谈。
+      return mapped ?? raw;
     }
     return raw;
   };
 
   /* ── 第 1 遍：解析本批声明的 new 地点（父引用先解析，再比较） ── */
-  for (const op of operations) {
+  const declarations = new Map(operations.filter(op => op.op === 'location.upsert' && asId(op.ref).startsWith('new:')).map(op => [asId(op.ref), op]));
+  const orderedDeclarations: ModelOperation[] = [];
+  const visited = new Set<string>();
+  const visiting = new Set<string>();
+  const visit = (ref: string): void => {
+    if (visited.has(ref) || visiting.has(ref)) return;
+    const op = declarations.get(ref);
+    if (!op) return;
+    visiting.add(ref);
+    if (isPlainObject(op.data)) visit(asId(op.data.parent_ref));
+    visiting.delete(ref);
+    visited.add(ref);
+    orderedDeclarations.push(op);
+  };
+  for (const ref of declarations.keys()) visit(ref);
+  // 只调整内部比较顺序，最终输出仍保持模型顺序；父环交给编译器的不变量校验。
+  for (const op of orderedDeclarations) {
     if (asText(op?.op).trim() !== 'location.upsert') continue;
     const ref = asId(op?.ref);
     if (!ref.startsWith('new:')) continue;

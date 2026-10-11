@@ -1,5 +1,5 @@
 /**
- * atlas-sql-generation-budget.ts — M3-03 / M3-03A：单回合模型预算（固定 4）。
+ * atlas-sql-generation-budget.ts — M3-03 / M3-03A：传输预算（前景默认 4；空间组装使用冻结计划）。
  *
  * 纪律（改这个文件前先读一遍）：
  * 1. 预算约束的是**真实传输发送**，不是 `modelPort.request` 的调用次数：一次调用内部
@@ -15,7 +15,7 @@
 
 import type { AtlasModelPort } from './atlas-db-contract.ts';
 
-/** 单回合硬上限：4 个真实传输发送。 */
+/** 前景默认预算：4 个真实传输发送，不限制后续冻结的空间组装计划。 */
 export const GENERATION_BUDGET_LIMIT = 4;
 
 export type BudgetAttemptStatus = 'requested' | 'completed' | 'failed';
@@ -55,6 +55,8 @@ export type GenerationBudgetPort = {
 export type CreateGenerationBudgetInput = {
   /** 本回合已经发出的尝试（前景 / 纠错），用来接着排队计数，不重算。 */
   attempts?: readonly BudgetAttempt[];
+  /** Frozen spatial work may use its own finite plan; foreground keeps the default four sends. */
+  limit?: number;
 };
 
 function cloneAttempts(attempts: readonly BudgetAttempt[] | undefined): BudgetAttempt[] {
@@ -62,7 +64,8 @@ function cloneAttempts(attempts: readonly BudgetAttempt[] | undefined): BudgetAt
 }
 
 export function createGenerationBudget(input: CreateGenerationBudgetInput = {}): GenerationBudgetPort {
-  const limit = GENERATION_BUDGET_LIMIT;
+  const limit = input.limit ?? GENERATION_BUDGET_LIMIT;
+  if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('MODEL_BUDGET_INVALID');
   const attemptList = cloneAttempts(input.attempts);
   const deferredList: BudgetDeferred[] = [];
   // 每个既有 attempt 都对应一次已经发出的真实传输（含失败），所以它同样占额度。

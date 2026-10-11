@@ -52,6 +52,24 @@ const HIDDEN = {
   signature: 'SECRET-SIG-DO-NOT-LEAK',
 };
 
+test('地图分析目录提供父地点；POV 不泄露未认知父地点 ID', async () => {
+  const {seed,ctx}=await seeded();
+  try {
+    const author=queryCatalog(ctx,{kind:'catalog',branchId:BRANCH,entityKind:'location'});
+    const child=author.items.find(row=>row.entityId===IDS.L3);
+    assert.equal(child.parentLocationId,IDS.L2);
+    // 把地点挂到测试中不被认知的父地点，已知子地点仍可读取。
+    seedPovKnowledge(seed.db);
+    seed.db.run('UPDATE locations SET parent_location_id=? WHERE branch_id=? AND id=?',[HIDDEN.room,BRANCH,IDS.L3]);
+    seed.db.run('UPDATE characters SET location_id=? WHERE branch_id=? AND id=?',[IDS.L2,BRANCH,IDS.C1]);
+    const pov=queryCatalog(povCtx(ctx),{kind:'catalog',branchId:BRANCH,entityKind:'location'});
+    const room=pov.items.find(row=>row.entityId===IDS.L3);
+    assert.ok(room);
+    assert.equal(pov.items.some(row=>row.entityId===HIDDEN.room),false);
+    assert.equal(room.parentLocationId,null);
+  } finally {seed.close();}
+});
+
 /** 业务表插行前先登记 entity_keys（触发器会校验 kind 一致）。 */
 function addKeys(db, kind, ids) {
   insertRows(db, 'entity_keys', ids.map((id) => ({ branch_id: BRANCH, id, kind })));

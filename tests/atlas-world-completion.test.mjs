@@ -87,6 +87,13 @@ const baseInput = (over = {}) => ({
   ...over,
 });
 
+test('新父未解析时不能把其子地点误合并到同名根地点', () => {
+  const result=dedupeWorldConstructionOps({existingLocations:[{id:'root-room',name:'工具库',kind:'room',parent_location_id:null}],operations:[{op:'location.upsert',ref:'new:child',data:{name:'工具库',kind:'room',parent_ref:'new:parent'}},{op:'location.upsert',ref:'new:parent',data:{name:'新附楼',kind:'building',parent_ref:null}}]});
+  assert.equal(result.reusedIds.length,0);
+  assert.equal(result.operations[0].ref,'new:child');
+  assert.equal(result.operations[0].data.parent_ref,'new:parent');
+});
+
 /** 读出某地图 frame_json 的明文对象。 */
 function readFrame(db, mapId) {
   const rows = db.exec(`SELECT frame_json FROM maps WHERE branch_id = ? AND id = ?`, [BRANCH, mapId]);

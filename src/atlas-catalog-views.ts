@@ -27,6 +27,7 @@ export type CatalogItem = {
   locationKind?: string;
   mobility?: string;
   anchorLocationId?: string | null;
+  parentLocationId?: string | null;
 };
 
 type Source = {
@@ -101,7 +102,7 @@ function fetchWindow(
     'l.status AS status',
     `${source.locationExpr} AS location_id`,
     `${source.mapExpr} AS map_id`,
-    ...(source.kind==='location'?['l.kind AS location_kind','l.mobility AS mobility','l.anchor_location_id AS anchor_location_id']:[]),
+    ...(source.kind==='location'?['l.kind AS location_kind','l.mobility AS mobility','l.anchor_location_id AS anchor_location_id','l.parent_location_id AS parent_location_id']:[]),
     source.kind === 'event' ? 'l.secrecy AS secrecy' : `'public' AS secrecy`,
     source.kind === 'rumor' ? 'l.first_available_at_s AS first_available_at_s' : '0 AS first_available_at_s',
     source.kind === 'rumor' ? 'l.audience_json AS audience_json' : 'NULL AS audience_json',
@@ -232,7 +233,7 @@ export function queryCatalog(ctx: ViewContext, query: ViewQuery): ViewResult {
           mapId: row.map_id === null || row.map_id === undefined ? null : String(row.map_id),
           summary: summaryText(row.summary),
           status: String(row.status ?? ''),
-          ...(kind==='location'?{locationKind:String(row.location_kind??''),mobility:String(row.mobility??'fixed'),anchorLocationId:row.anchor_location_id==null?null:String(row.anchor_location_id)}:{}),
+          ...(kind==='location'?{locationKind:String(row.location_kind??''),mobility:String(row.mobility??'fixed'),anchorLocationId:row.anchor_location_id==null?null:String(row.anchor_location_id),parentLocationId:row.parent_location_id==null||isPov&&!visibility.knownLocations.has(String(row.parent_location_id))?null:String(row.parent_location_id)}:{}),
         });
         if (items.length >= limit) {
           reachedLimit = true;

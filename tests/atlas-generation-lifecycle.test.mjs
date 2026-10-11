@@ -2,6 +2,18 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createAtlasGenerationLifecycle } from '../src/atlas-generation-lifecycle.ts';
 
+test('SillyTavern dry run closes at AFTER_DATA without waiting for an ENDED that never arrives', () => {
+  const g = createAtlasGenerationLifecycle();
+  const main = g.start(false, {generationType:'normal'});
+  g.start(true, {generationType:'normal',dryRun:true});
+  assert.equal(g.message().gated,true);
+  assert.equal(g.complete('dry-run').gated,true);
+  assert.equal(g.message().details.generationSequence,main.details.generationSequence);
+  assert.equal(g.complete('ended').gated,false);
+  assert.equal(g.complete('dry-run').duplicate,true);
+  assert.equal(g.message().gated,false);
+});
+
 test('nested preprocessing and its completion aliases restore the foreground before MESSAGE_SENT', () => {
   const g = createAtlasGenerationLifecycle();
   const main = g.start(false, { generationType: 'normal' });

@@ -2,7 +2,7 @@ import {atlasClockLabel,atlasLegacyNearby,buildTableMapNpcIndex,atlasMapSource,a
 // U15：新工作台外壳（U02）——同一宿主只挂一个实例，重复 mount 先销毁旧实例。
 import { mountReferenceUi } from './ui/atlas-reference-host.mjs';
 import { createReferenceLorePort, isAtlasLoreEntryReadable, atlasLoreReadPolicy } from './ui/atlas-reference-lore.mjs';
-import { isValidAtlasSession, createEmptyAtlasSession, readAtlasSession, writeAtlasSession, atlasSessionWriteGuard, atlasSessionHasPersistentPayload, atlasStarterWorldWriteGuard, atlasChatIdentitySnapshot, atlasSameChatIdentity, atlasStaleWriteNotice, atlasContentHash, atlasFloorIdentity, atlasContextRecord, atlasAssistantFloorIdentity, pathWantsSession, createAtlasSessionApi, ATLAS_SESSION_KEY, ATLAS_SESSION_SCHEMA_VERSION, SESSION_ROUTE_PREFIXES } from './ui/atlas-host-context.mjs';
+import { isValidAtlasSession, createEmptyAtlasSession, readAtlasSession, writeAtlasSession, atlasSessionWriteGuard, atlasSessionHasPersistentPayload, atlasStarterWorldWriteGuard, atlasChatIdentitySnapshot, atlasSameChatIdentity, atlasStaleWriteNotice, atlasContentHash, atlasFloorIdentity, atlasNarrativeIdentityText, atlasContextRecord, atlasAssistantFloorIdentity, pathWantsSession, createAtlasSessionApi, ATLAS_SESSION_KEY, ATLAS_SESSION_SCHEMA_VERSION, SESSION_ROUTE_PREFIXES } from './ui/atlas-host-context.mjs';
 export { ATLAS_SESSION_KEY, ATLAS_SESSION_SCHEMA_VERSION, isValidAtlasSession, createEmptyAtlasSession, writeAtlasSession, atlasSessionHasPersistentPayload, atlasStarterWorldWriteGuard, atlasChatIdentitySnapshot, atlasSameChatIdentity, atlasStaleWriteNotice, atlasContentHash, atlasFloorIdentity, atlasAssistantFloorIdentity, createAtlasSessionApi };
 import { atlasPointRefOf, atlasKnownCoordinate, atlasPositionQuality, atlasSqlMapModel, atlasSqlSubmaps, atlasSqlMapItemFor, atlasSqlFilterByViewMode, atlasSqlNearbyCards, buildSqlPromptScope } from './ui/atlas-scene-ui-adapter.mjs';
 export { atlasPointRefOf, atlasKnownCoordinate, atlasPositionQuality, atlasSqlMapModel, atlasSqlSubmaps, atlasSqlMapItemFor, atlasSqlFilterByViewMode, atlasSqlNearbyCards, buildSqlPromptScope };
@@ -1055,6 +1055,7 @@ function createEmitter(context) {
     MESSAGE_SENT: ["MESSAGE_SENT"],
     MESSAGE_RECEIVED: ["MESSAGE_RECEIVED"],
     GENERATION_STARTED: ["GENERATION_STARTED"],
+    GENERATE_AFTER_DATA: ["GENERATE_AFTER_DATA"],
     GENERATION_ENDED: ["GENERATION_ENDED_AFTER_COMMANDS", "GENERATION_ENDED"],
     GENERATION_STOPPED: ["GENERATION_STOPPED"],
     MESSAGE_SWIPED: ["MESSAGE_SWIPED"],
@@ -1149,6 +1150,10 @@ export function atlasSwipeRegenerating(message) {
 
 function createEventAdapter(context) {
   return function adaptEvent(event, payload) {
+    if (event === 'GENERATE_AFTER_DATA') {
+      const args = Array.isArray(payload) ? payload : [payload];
+      return args[1] === true ? { kind: 'generation-ended', completionSignal: 'dry-run', assistantMessageId: '', assistantText: '' } : null;
+    }
     /**
      * H05：给「带助手楼层」的事件补一份身份。
      * 身份取不到（无楼层 / 形状未知）时**不补字段**：宁可让下游按「无身份」处理，
@@ -3087,11 +3092,12 @@ async function connectOnce() {
         const chat = context()?.chat;
         const message = Array.isArray(chat) ? chat[Number(request.assistantMessageId)] : null;
         const user = Array.isArray(chat) ? chat[Number(request.userMessageId)] : null;
-        // Request budgets limit model input; freshness checks retain full host text.
-        // Also compare the complete suffix while the model runs, including text beyond the budget.
+        // Compare the complete narrative, including its suffix beyond model input
+        // budgets. shujuku's separately owned guidance is not a narrative edit.
         const assistantText = message?.mes, userText = user?.mes;
+        const assistantNarrative = atlasNarrativeIdentityText(assistantText);
         const matches = message?.is_user === false && typeof assistantText === 'string'
-          && assistantText.slice(0, mod.ATLAS_LIMITS.ASSISTANT_TEXT_CHARS) === request.assistantText
+          && atlasNarrativeIdentityText(assistantText.slice(0, mod.ATLAS_LIMITS.ASSISTANT_TEXT_CHARS)) === atlasNarrativeIdentityText(request.assistantText)
           && user?.is_user === true && typeof userText === 'string'
           && userText.slice(0, mod.ATLAS_LIMITS.USER_TEXT_CHARS) === request.userText;
         if (!matches) emitAtlasDiagnostic({ level: 'warn', source: 'host', code: 'HOST_COMMIT_TEXT_MISMATCH',
@@ -3101,7 +3107,7 @@ async function connectOnce() {
         return () => {
           const live = context()?.chat;
           const assistant = live?.[Number(request.assistantMessageId)], player = live?.[Number(request.userMessageId)];
-          return matches && assistant?.is_user === false && assistant.mes === assistantText
+          return matches && assistant?.is_user === false && atlasNarrativeIdentityText(assistant.mes) === assistantNarrative
             && player?.is_user === true && player.mes === userText;
         };
       },

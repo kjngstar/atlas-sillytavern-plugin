@@ -96,7 +96,7 @@ test('部分补交替换失败操作的旧诊断，保留成功组且不重复�
   assert.equal(queryBound(s.repo.db,'SELECT COUNT(*) n FROM characters',[])[0].n,1);
  }finally{await f.close();}
 });
-function fixture({ response = room, model, identity, retryFloor, lore = '全部世界书原文：文风规则与地点。' } = {}) {
+function fixture({ response = room, model, identity, retryFloor, afterResponse, commitGuard, lore = '全部世界书原文：文风规则与地点。' } = {}) {
   let enabled = true, saves = 0, calls = 0, saveOk = true;
   const requests = [], batches = [];
   const current = { chatUid: 'chat-auto', branchId: 'main', chatMetadata: {}, saveMetadata: async () => { saves++; return saveOk; } };
@@ -109,10 +109,11 @@ function fixture({ response = room, model, identity, retryFloor, lore = '全部�
     readBinding: () => { throw Error('SQL must not read or migrate the old session'); }, writeBinding: async b => { current.chatMetadata.atlas.sqlChatEnabled = b.enabled; },
     readData: () => null, writeData() {}, fillInput() {} };
   const makeUi = () => createAtlasUiCore({ host, emitter: { on() {}, off() {} }, sqlEnabled: () => enabled,
-    api: { request: async (method, path, body) => { requests.push({ method, path, body }); return server.handle(method, path, body, { local: true }); } },
+    api: { request: async (method, path, body) => { requests.push({ method, path, body }); const result=await server.handle(method, path, body, { local: true }); afterResponse?.(path,result); return result; } },
     adaptEvent: (_event, payload) => payload ?? null, endedDebounceMs: 0, mutationDebounceMs: 0,
     getPlayerName: () => '用户主角', getLoreSupplement: async () => lore,
     getCommitIdentity: identity ? () => identity : undefined,
+    createCommitGuard: commitGuard,
     resolveRetryFloor: retryFloor,
     getCommitContext: async () => ({ charDescription: '角色卡设定', personaDescription: '用户人设', recentAssistantTexts: ['开场白'] }),
     ensureWorld: async () => { throw Error('Must not build an old world'); },
@@ -130,6 +131,20 @@ function fixture({ response = room, model, identity, retryFloor, lore = '全部�
     async close() { ui.dispose(); await provider.close(); },
   };
 }
+
+test('durably saved SQL receipt stays committed when the host changes after publication',async()=>{
+ let current=true;
+ const f=fixture({commitGuard:()=>()=>current,afterResponse:(path,result)=>{
+  if(path==='/sql/chat/commit'&&result.body?.data?.coreSaved===true)current=false;
+ }});
+ try{
+  await f.ui.refresh();await f.prepare();await f.end();
+  const r=f.ui.getState().receipts[0];
+  assert.equal(r.status,'committed');assert.equal(r.detail.coreSaved,true);
+  assert.equal(f.ui.getState().lastError,null);assert.equal(f.ui.getState().pendingTurn,null);
+  assert.ok(f.saves()>0);assert.ok(f.current.chatMetadata.atlas.database);
+ }finally{await f.close();}
+});
 
 test('原版 UI 只读入口：新聊天没有保存快照仍读取同一个内存库，零保存零模型调用',async()=>{const f=fixture();try{await f.ui.refresh();assert.equal(f.current.chatMetadata.atlas?.database,undefined);const result=await f.server.handle('POST','/sql/chat/ui-read',{chatUid:'chat-auto',kind:'map',viewMode:'author'},{local:true});assert.equal(result.status,200);assert.ok(Array.isArray(result.body.data.items));assert.equal(result.body.data.metadata.snapshotSaved,false);assert.equal(f.saves(),0);assert.equal(f.calls(),0);const bad=await f.server.handle('POST','/sql/chat/ui-read',{chatUid:'chat-auto',kind:'logs'},{local:true});assert.equal(bad.status,400);assert.equal(f.current.chatMetadata.atlas?.database,undefined);}finally{await f.close();}});
 test('原版 UI 回执：模型失败在无快照时也形成有错误码的真实回执',async()=>{const f=fixture({model:async()=>{throw Object.assign(Error('连接未配置'),{code:'API_NOT_CONFIGURED',retryable:false});}});try{await f.ui.refresh();await f.prepare();await f.end();const r=f.ui.getState().receipts[0];assert.equal(r.status,'failed');assert.match(r.summary,/连接未配置/);assert.equal(r.detail.coreSaved,false);assert.equal(r.detail.httpStatus,500);assert.ok(r.detail.receipt||r.errorCode);assert.equal(f.current.chatMetadata.atlas?.database,undefined);const read=await f.server.handle('POST','/sql/chat/ui-read',{chatUid:'chat-auto',kind:'diagnostics',viewMode:'author'},{local:true});assert.equal(read.status,200);assert.equal(f.saves(),0);}finally{await f.close();}});

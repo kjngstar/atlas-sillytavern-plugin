@@ -326,6 +326,7 @@ export interface AtlasUiEmitter {
 
 /** 本包注册的酒馆事件；只在实现对应能力后追加，禁止注册后不处理。 */
 export const ATLAS_UI_EVENTS = [
+  "GENERATE_AFTER_DATA",
   "APP_READY",
   "CHAT_CHANGED",
   "MESSAGE_SENT",
@@ -1547,14 +1548,28 @@ export function createAtlasUiCore(deps: {
           ...(identity ? { hostMessageUid: identity.messageUID, variantKey: identity.variantKey } : {}) } : {}),
       });
       const body = result.body as { ok?: boolean; data?: { receipt?: unknown; nativeReceipt?: unknown; issues?: unknown; coreSaved?: boolean }; error?: { message?: string; code?: string; retryable?: boolean; details?:Record<string,unknown> } };
+      const receiptParsed = body.data?.receipt ? parseAtlasTurnReceipt(body.data.receipt) : null;
       if (useSql && !isCurrent()) {
+        // The backend checks the host before publishing. A change after durable
+        // save cannot turn its confirmed receipt into a fictitious save failure.
+        if (result.status === 200 && body.ok && body.data?.coreSaved === true && receiptParsed?.ok
+          && ['committed', 'duplicate'].includes(receiptParsed.value.status)) {
+          addReceipt(receiptParsed.value, value.chatId, { receipt: body.data.nativeReceipt,
+            issues: body.data.issues, coreSaved: true, httpStatus: result.status });
+          diagnostic({ level: 'info', source: 'host', code: 'COMMIT_SAVED_HOST_MOVED',
+            operation: 'commit', phase: 'response', outcome: 'success', details: { coreCommitted: true } });
+          if (state.chatId === value.chatId) {
+            if (state.pendingTurn?.turnId === value.turnId) setState({ pendingTurn: null, lastError: null });
+            await refresh();
+          }
+          return;
+        }
         diagnostic({ level: 'warn', source: 'host', code: 'COMMIT_STALE_SKIPPED',
           operation: 'commit', phase: 'response', outcome: 'skipped' });
         if (state.chatId === value.chatId && generationRevision === revision && useSql === sqlEnabled())
           reportHostTurnFailure(value, '本轮聊天正文或楼层身份已变化，推演结果未保存；请重新推演当前正文。', 'HOST_FLOOR_CHANGED');
         return;
       }
-      const receiptParsed = body.data?.receipt ? parseAtlasTurnReceipt(body.data.receipt) : null;
       // 0.9.28 归属守卫：请求在途时用户可能已切聊天——过期回执 / 失败挂单绝不写进新聊天
       const stale = state.chatId !== value.chatId;
       if (result.status === 200 && body.ok && receiptParsed?.ok && (!useSql || body.data?.coreSaved === true || receiptParsed.value.status === 'failed')) {
@@ -1665,7 +1680,8 @@ export function createAtlasUiCore(deps: {
         }),
       });
     } finally {
-      if (useSql && !isCurrent() && state.chatId === value.chatId) setState({ pendingTurn: null, retryableCommit: null });
+      if (useSql && !isCurrent() && state.chatId === value.chatId && state.pendingTurn?.turnId === value.turnId)
+        setState({ pendingTurn: null, retryableCommit: null });
       releaseCommit(flight);
     }
   }
