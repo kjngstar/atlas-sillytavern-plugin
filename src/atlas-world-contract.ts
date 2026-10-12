@@ -11,9 +11,11 @@
  *   两者各司其职，不做强行合并。
  */
 
-import type { Issue, Phase } from './atlas-ops-contract.ts';
+import type { Issue, Phase, RequiredRef } from './atlas-ops-contract.ts';
 import type { KnownRef } from './atlas-sql-refs.ts';
 import type { AtlasLocationKind } from './atlas-location-kinds.ts';
+
+export type { RequiredRef };
 
 export type ViewMode = 'author' | 'pov';
 export type Point = { x: number; y: number };
@@ -101,6 +103,13 @@ export type WorldCompletionInput = {
   mode: WorldCompletionMode;
   focusLocationIds: string[];
   policy: CompletionPolicy;
+  /**
+   * P10/R02：来源选取参数。缺省时建设按默认预算 24k / 块 2000 字选取。
+   * `focusTerms` 只用于同轮相关性排序，不参与内容解释。
+   */
+  focusTerms?: string[];
+  sourceMaxChars?: number;
+  sourceChunkChars?: number;
 };
 
 export type WorldFillState = {
@@ -126,6 +135,12 @@ export type TaskRefInput = {
   includeRoutes: boolean;
   includeOccupants: boolean;
   maxEntries: number;
+  /**
+   * P08/R05：程序用真实 ID 声明的必要引用（人物/物品/路线/地图…）。
+   * 统一一种形状，避免每多一种操作就再加一个「必要 X 集合」数组。
+   * 它们无条件下发；总量因此超出上限时按 REF_REQUIRED_BUDGET_EXCEEDED 明确失败。
+   */
+  requiredRefs?: readonly RequiredRef[];
 };
 
 export type TaskCatalogue = {
@@ -134,6 +149,8 @@ export type TaskCatalogue = {
   remainingIds: string[];
   issues: PlanIssue[];
   catalogueHash: string;
+  /** 真：必要引用本身已超上限，调用方**不得发送**该批（REF04）。 */
+  requiredBudgetExceeded?: boolean;
 };
 
 /** 统一的模型预算记账（M3-03 / M3-03A）；limit 固定 4，含真实传输发送。 */
@@ -148,6 +165,42 @@ export type GenerationBudget = {
 
 export const LAYOUT_KINDS = ['overview', 'city', 'floor'] as const;
 export type LayoutKind = (typeof LAYOUT_KINDS)[number];
+
+/**
+ * 空间程序能力（P11/R03 §18）。
+ *
+ * 纪律：**只有** normalize / 编译器 / 生成器 / 存储回写 / DTO 全部打通并跑过测试的能力，
+ * 才允许出现在这里 —— 未完成的能力不能提前进入默认提示词（否则等于让模型按不存在的契约行事）。
+ * `corridor-binding/v1`：命名走廊用 `corridorLocationRef` 绑定已有地点；该地点不再加入普通 rooms。
+ */
+export const SPATIAL_CAPABILITIES = ['corridor-binding/v1', 'space-canonical/v1', 'spatial-profile/v1'] as const;
+export type SpatialCapability = (typeof SPATIAL_CAPABILITIES)[number];
+export const CAPABILITY_CORRIDOR_BINDING = 'corridor-binding/v1';
+/** P12/R03 §19：父子共享空间尺寸与陈设账本（canonical 是物理权威，陈设用稳定空间 localId）。 */
+export const CAPABILITY_SPACE_CANONICAL = 'space-canonical/v1';
+/**
+ * P13/R03 §20：本图绘图档案（室外 / 沿线 / 复合场所）。
+ *
+ * 进这张表的前提（§21.5）：normalize（`normalizeRequestedProfileMode`）、编译（`resolveSpatialProfile`
+ * → `layoutKind`）、生成（各档案禁区进提示词）、存储回写（frame 命名空间）、DTO（地图 `profile`）
+ * 与命令（`map/profile`）全部打通并跑过测试 —— P13 已全部落地。
+ */
+export const CAPABILITY_SPATIAL_PROFILE = 'spatial-profile/v1';
+export function hasSpatialCapability(capability: string): boolean {
+  return (SPATIAL_CAPABILITIES as readonly string[]).includes(capability);
+}
+
+/** 室内（floor）约束：`corridorLocationRef` 是命名走廊唯一新增输入（省略=保持，null=解除）。 */
+export type FloorSpec = {
+  corridorWidth?: number;
+  corridorLocationRef?: string | null;
+  rooms?: Array<{
+    id: string; name?: string; side: 'north' | 'south';
+    role?: 'indoor' | 'outdoor' | 'garden'; w?: number; h?: number;
+  }>;
+  deletes?: { rooms?: string[]; contents?: string[]; actors?: string[]; items?: string[] };
+  rebuild?: boolean;
+};
 
 export const OVERVIEW_SECTORS = [
   'north', 'northeast', 'east', 'southeast', 'south', 'southwest', 'west', 'northwest', 'center',

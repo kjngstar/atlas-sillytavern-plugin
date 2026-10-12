@@ -3,6 +3,22 @@ import {spawn} from 'node:child_process';
 import {mkdirSync,writeFileSync} from 'node:fs';
 import {setTimeout as delay} from 'node:timers/promises';
 import {chromium} from 'playwright';
+// 权威预算常量：src/atlas-runtime-limits.ts 是唯一来源，此处只消费发布产物导出的同一份。
+// （本闸门原本就依赖 pack 产物 release/，因此引入已构建的 dist/ 不新增前置条件。）
+import {ATLAS_RUNTIME_LIMITS} from '../dist/atlas-sql.mjs';
+
+/**
+ * 一轮前台推演的模型批次上限（决策批 + 建设批 + 布局批）。
+ *
+ * 旧版断言写死 `calls===N`（N = 楼层数），前提是「一楼层正好一次模型请求」。该前提早已失效：
+ * 真实契约是单轮可发多批、由 foregroundModelBatchesPerTurn 封顶。故次数改按下限（每层至少一批决策）
+ * 与上限（预算封顶）判定，**不再写第二份次数魔数**。
+ */
+const MAX_BATCHES_PER_TURN=ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn;
+if(!Number.isInteger(MAX_BATCHES_PER_TURN)||MAX_BATCHES_PER_TURN<1)throw Error('foregroundModelBatchesPerTurn 未从发布产物取到，闸门拒绝以失效预算继续');
+/** 已完成 `turns` 个楼层时：每层至少一批决策调用，总量不得超过预算×楼层数。 */
+const callsWithinBudget=(s,turns)=>s.calls>=turns&&s.calls<=turns*MAX_BATCHES_PER_TURN;
+
 const dir=process.env.ATLAS_EVIDENCE_DIR||'.tmp/host-generation';mkdirSync(dir,{recursive:true});
 const port=Number(process.env.ATLAS_VERIFY_PORT||4298),base=`http://127.0.0.1:${port}`;
 const report={checks:{},errors:[],failed:[]};
@@ -62,26 +78,27 @@ try{
  for(let i=0;i<40;i++){try{if((await fetch(`${base}/dev-preview/index.html`)).ok)break;}catch{}await delay(250);}
  const {p,f}=await open();
  await floor(p);await finish(p);let s=await state(p);
- check('normal-floor-real-model-and-save',s.calls===1&&s.saves===1&&s.saved&&s.receipts[0]?.status==='committed',s);
+ check('normal-floor-real-model-and-save',callsWithinBudget(s,1)&&s.saves===1&&s.saved&&s.receipts[0]?.status==='committed',s);
  await f.waitForFunction(()=>AtlasPreview.data.LOCATIONS.some(x=>x.name==='图书馆')&&AtlasPreview.data.RECEIPTS.length===1);
  check('normal-floor-renders-real-location-and-receipt',await f.evaluate(()=>AtlasPreview.data.LOCATIONS.some(x=>x.name==='图书馆')&&AtlasPreview.data.RECEIPTS[0].ok));
+ const beforeDup=s;
  await p.evaluate(async()=>{const c=SillyTavern.getContext();await c.eventSource.emit(c.event_types.GENERATION_ENDED,c.chat.length);await c.eventSource.emit(c.event_types.GENERATION_ENDED_AFTER_COMMANDS,c.chat.length);});await finish(p);s=await state(p);
- check('duplicate-completion-no-second-model-or-save',s.calls===1&&s.saves===1,s);
- await floor(p,{assistant:'你'.repeat(24001)});await finish(p);s=await state(p);check('long-assistant-not-silently-discarded',s.calls===2&&s.saves===2&&s.receipts.length===2&&!s.error,s);
- await floor(p,{user:'我'.repeat(12001),alias:'ended'});await finish(p);s=await state(p);check('long-user-and-raw-ended-alias',s.calls===3&&s.saves===3&&s.receipts.length===3&&!s.error,s);
+ check('duplicate-completion-no-second-model-or-save',s.calls===beforeDup.calls&&s.saves===beforeDup.saves&&s.receipts.length===1,s);
+ await floor(p,{assistant:'你'.repeat(24001)});await finish(p);s=await state(p);check('long-assistant-not-silently-discarded',callsWithinBudget(s,2)&&s.saves===2&&s.receipts.length===2&&!s.error,s);
+ await floor(p,{user:'我'.repeat(12001),alias:'ended'});await finish(p);s=await state(p);check('long-user-and-raw-ended-alias',callsWithinBudget(s,3)&&s.saves===3&&s.receipts.length===3&&!s.error,s);
  await f.locator('[data-tab="receipt"]').click();await f.waitForFunction(()=>AtlasPreview.data.RECEIPTS.length===3);await p.screenshot({path:`${dir}/automatic-receipts.png`});await p.close();
  for(const options of [{type:'quiet'},{dryRun:true},{params:{automatic_trigger:true}},{params:{quiet_prompt:'后台总结'}}]){
   const {p}=await open();await floor(p,options);await finish(p);s=await state(p);const name=options.type||Object.keys(options.params??options)[0];
   check(`gated:${name}`,s.calls===0&&s.saves===0&&s.receipts.length===0,s);
-  await floor(p);await finish(p);s=await state(p);check(`gate-recovers:${name}`,s.calls===1&&s.saves===1,s);await p.close();
+  await floor(p);await finish(p);s=await state(p);check(`gate-recovers:${name}`,callsWithinBudget(s,1)&&s.saves===1,s);await p.close();
  }
- const only=await open({afterOnly:true});await floor(only.p,{alias:'after'});await finish(only.p);s=await state(only.p);check('after-commands-only-host',s.calls===1&&s.saves===1,s);await only.p.close();
+ const only=await open({afterOnly:true});await floor(only.p,{alias:'after'});await finish(only.p);s=await state(only.p);check('after-commands-only-host',callsWithinBudget(s,1)&&s.saves===1,s);await only.p.close();
  const first=await open();await first.p.evaluate(async()=>{const c=SillyTavern.getContext();c.chat.push({mes:'开场白',is_user:false});await c.eventSource.emit(c.event_types.MESSAGE_RECEIVED,0,'first_message');});await finish(first.p);s=await state(first.p);check('chat-opening-does-not-run-world',s.calls===0&&s.saves===0,s);await first.p.close();
  const nested=await open();await nested.p.evaluate(async()=>{const c=SillyTavern.getContext(),e=c.event_types;
   await c.eventSource.emit(e.GENERATION_STARTED,'normal',{},false);c.chat.push({mes:'进入图书馆',is_user:true});await c.eventSource.emit(e.MESSAGE_SENT,0);await atlasPreviewConnection.core.waitPendingTurn();
   await c.eventSource.emit(e.GENERATION_STARTED,'quiet',{quiet_prompt:'后台总结'},false);await c.eventSource.emit(e.GENERATION_ENDED,1);await c.eventSource.emit(e.GENERATION_ENDED_AFTER_COMMANDS,1);
   c.chat.push({mes:'你走进了图书馆。',is_user:false});await c.eventSource.emit(e.MESSAGE_RECEIVED,1,'normal');await c.eventSource.emit(e.GENERATION_ENDED,2);
- });await finish(nested.p);s=await state(nested.p);check('nested-quiet-completion-does-not-swallow-real-floor',s.calls===1&&s.saves===1&&s.receipts[0]?.status==='committed',s);await nested.p.close();
+ });await finish(nested.p);s=await state(nested.p);check('nested-quiet-completion-does-not-swallow-real-floor',callsWithinBudget(s,1)&&s.saves===1&&s.receipts[0]?.status==='committed',s);await nested.p.close();
  for(const stop of [false,true]){
   const before=await open();await before.p.evaluate(async stop=>{const c=SillyTavern.getContext(),e=c.event_types;
    await c.eventSource.emit(e.GENERATION_STARTED,'normal',{},false);
@@ -91,17 +108,17 @@ try{
    c.chat.push({mes:'进入图书馆',is_user:true});await c.eventSource.emit(e.MESSAGE_SENT,0);await atlasPreviewConnection.core.waitPendingTurn();
    c.chat.push({mes:'你走进了图书馆。',is_user:false});await c.eventSource.emit(e.MESSAGE_RECEIVED,1,'normal');await c.eventSource.emit(e.GENERATION_ENDED,2);await c.eventSource.emit(e.GENERATION_ENDED_AFTER_COMMANDS,2);
   },stop);await finish(before.p);s=await state(before.p);
-  check(`nested-pre-send-${stop?'stop':'completion'}-preserves-foreground`,s.calls===1&&s.saves===1&&s.receipts[0]?.status==='committed',s);await before.p.close();
+  check(`nested-pre-send-${stop?'stop':'completion'}-preserves-foreground`,callsWithinBudget(s,1)&&s.saves===1&&s.receipts[0]?.status==='committed',s);await before.p.close();
  }
  const nestedStop=await open();await nestedStop.p.evaluate(async()=>{const c=SillyTavern.getContext(),e=c.event_types;
   await c.eventSource.emit(e.GENERATION_STARTED,'normal',{},false);c.chat.push({mes:'进入图书馆',is_user:true});await c.eventSource.emit(e.MESSAGE_SENT,0);await atlasPreviewConnection.core.waitPendingTurn();
   await c.eventSource.emit(e.GENERATION_STARTED,'quiet',{},false);await c.eventSource.emit(e.GENERATION_STOPPED);await c.eventSource.emit(e.GENERATION_ENDED,1);await c.eventSource.emit(e.GENERATION_ENDED_AFTER_COMMANDS,1);
   c.chat.push({mes:'你走进了图书馆。',is_user:false});await c.eventSource.emit(e.MESSAGE_RECEIVED,1,'normal');await c.eventSource.emit(e.GENERATION_ENDED,2);
- });await finish(nestedStop.p);s=await state(nestedStop.p);check('nested-stop-preserves-pending-turn',s.calls===1&&s.saves===1&&s.receipts[0]?.status==='committed',s);await nestedStop.p.close();
+ });await finish(nestedStop.p);s=await state(nestedStop.p);check('nested-stop-preserves-pending-turn',callsWithinBudget(s,1)&&s.saves===1&&s.receipts[0]?.status==='committed',s);await nestedStop.p.close();
  const rewrite=await open({rewriteContext:true});await floor(rewrite.p);await finish(rewrite.p);s=await state(rewrite.p);
- check('context-postprocessing-rereads-current-user-and-assistant',s.calls===1&&s.saves===1&&s.receipts[0]?.status==='committed'&&!s.error,s);await rewrite.p.close();
+ check('context-postprocessing-rereads-current-user-and-assistant',callsWithinBudget(s,1)&&s.saves===1&&s.receipts[0]?.status==='committed'&&!s.error,s);await rewrite.p.close();
  const saveRead=await open({readDuringSave:true});await floor(saveRead.p);await finish(saveRead.p);s=await state(saveRead.p);
- check('ui-read-during-save-preserves-candidate-until-confirmed',s.calls===1&&s.saves===1&&s.receipts[0]?.status==='committed'&&!s.error,s);await saveRead.p.close();
+ check('ui-read-during-save-preserves-candidate-until-confirmed',callsWithinBudget(s,1)&&s.saves===1&&s.receipts[0]?.status==='committed'&&!s.error,s);await saveRead.p.close();
  for(const target of ['assistant','user']){
   const {p,f}=await open();await p.evaluate(()=>window.__hold=true);await floor(p,{user:'我'.repeat(12001),assistant:'你'.repeat(24001)});
   await p.waitForFunction(()=>typeof window.__release==='function');await f.waitForFunction(()=>AtlasPreview.data.meta.engine.phase==='committing');
@@ -116,12 +133,16 @@ try{
   await c.eventSource.emit(e.GENERATION_STARTED,'regenerate',{},false);
   c.chat.pop();await c.eventSource.emit('message_deleted',1);await atlasPreviewConnection.core.waitPendingTurn();
   c.chat.push({mes:'你走进了图书馆。',is_user:false});await c.eventSource.emit(e.MESSAGE_RECEIVED,1,'regenerate');await c.eventSource.emit(e.GENERATION_ENDED,2);
- });await finish(retry.p);s=await state(retry.p);check('regenerate-uncommitted-floor-without-message-sent',s.calls===1&&s.saves===1&&s.receipts[0]?.status==='committed',s);
+ });await finish(retry.p);s=await state(retry.p);check('regenerate-uncommitted-floor-without-message-sent',callsWithinBudget(s,1)&&s.saves===1&&s.receipts[0]?.status==='committed',s);
  for(let i=0;i<2;i++){
+  const before=await state(retry.p);
   await retry.p.evaluate(async i=>{const c=SillyTavern.getContext(),e=c.event_types;
    await c.eventSource.emit(e.GENERATION_STARTED,'regenerate',{},false);c.chat.pop();await c.eventSource.emit(e.MESSAGE_DELETED,1);
    c.chat.push({mes:'重新生成的图书馆正文'+i,is_user:false});await c.eventSource.emit(e.MESSAGE_RECEIVED,1,'regenerate');await c.eventSource.emit(e.GENERATION_ENDED,2);
-  },i);await finish(retry.p);s=await state(retry.p);check(`regenerate-committed-floor-rollback-before-prepare:${i}`,s.calls===i+2&&s.receipts[0]?.status==='committed'&&!s.error,s);
+  },i);await finish(retry.p);s=await state(retry.p);
+  // 每轮重生成仍须真跑模型（calls 前进）、真落盘（saves 前进），且单轮增量不超预算、累计不超楼层×预算。
+  check(`regenerate-committed-floor-rollback-before-prepare:${i}`,
+    s.calls>before.calls&&s.calls-before.calls<=MAX_BATCHES_PER_TURN&&s.saves>before.saves&&callsWithinBudget(s,i+2)&&s.receipts[0]?.status==='committed'&&!s.error,s);
  }await retry.p.close();
 }catch(error){report.errors.push(error.stack);process.exitCode=1;}finally{
  await browser.close();server.kill();writeFileSync(`${dir}/evidence.json`,JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));if(report.failed.length||report.errors.length)process.exitCode=1;

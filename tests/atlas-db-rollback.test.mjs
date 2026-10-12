@@ -207,6 +207,8 @@ test('T14-02 中间楼后继失效：回退到 T1 会同时撤销 T2/T3，plan.t
       targetParentTurnId: t1.receipt.turnId,
       expectedRevision: 3,
     });
+    assert.equal(rb.receipt.clockBeforeS, 1200, '回退回执使用执行前当前分支时间');
+    assert.equal(rb.receipt.clockAfterS, 0, '回退回执使用目标时间');
     await repo.confirmSaved({ token: rb.token, snapshotSha256: rb.snapshotSha256, result: 'saved' });
 
     // T2/T3 被标记 rolled_back，且它们的效果不再描述当前状态

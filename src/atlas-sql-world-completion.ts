@@ -17,10 +17,11 @@
 import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
 import { stableHexHash } from './atlas-hash.ts';
 import { collectTaskRefs } from './atlas-sql-task-refs.ts';
+import { completionMapIds, completionOwnershipIssues, resolveCompletionMaps } from './atlas-world-completion-ownership.ts';
 import { selectWorldConstructionSources, WORLD_SOURCE_MAX_CHARS, type WorldSourceChunk, type WorldSourceEntry, type WorldSourceSelection } from './atlas-sql-world-sources.ts';
 import { SPATIAL_SCENE_KEY } from './atlas-spatial-frame.ts';
 import type { TableReadPort } from './atlas-ops-compile-types.ts';
-import type { ModelBatchRequest, Issue, ModelOperation } from './atlas-ops-contract.ts';
+import type { ModelBatchRequest, Issue, ModelOperation, RequiredRef } from './atlas-ops-contract.ts';
 import { buildStagePrompt } from './atlas-ops-prompts.ts';
 import type { CompletionPolicy, GenerationTask, PlanIssue, TaskCatalogue, WorldCompletionMode, WorldFillState } from './atlas-world-contract.ts';
 
@@ -48,6 +49,18 @@ export type SqlWorldCompletionInput = {
   sourceMaxChars?: number;
   /** 本 chat 候选内的来源块缓存（键含 chat/branch，跨聊天不共用）。 */
   worldSourceCache?: Map<string, WorldSourceChunk[]>;
+  /**
+   * P10/R02：调用方（建设阶段）用**持久来源账本**算好的选取结果。
+   *
+   * 给了就不再自己选一遍 —— 否则「账本看到的块」和「真正发出去的块」会是两套，
+   * 这正是 R02 要根治的老毛病。`context-only` 模式（布局/repair 复查）也走这里。
+   */
+  sourceSelection?: WorldSourceSelection;
+  /**
+   * P08/R05：程序用真实 ID 声明的必要引用（焦点之外的依赖，如主角、目标地图、路线端点）。
+   * 目录必须无条件收下；装不下时本批不发送（`REF_REQUIRED_BUDGET_EXCEEDED`）。
+   */
+  requiredRefs?: readonly RequiredRef[];
 };
 
 function makeIssue(code: string, path: string, message: string, severity: 'warning' | 'error', retryable: boolean): PlanIssue {
@@ -69,6 +82,12 @@ function byId(left: string, right: string): number {
 
 function uniqueSorted(values: Iterable<string>): string[] {
   return [...new Set(values)].filter((value) => value.length > 0).sort(byId);
+}
+
+/** 分支根图。仅用于「容器图待建」时的**批次级兼容记录**，不代表任何地点的完成状态归属。 */
+function branchRootMapId(tables: TableReadPort, branchId: string): string {
+  const branch = tables.selectOne('branches', branchId, branchId);
+  return branch ? asId(branch.root_map_id) : '';
 }
 
 /** 统一 limits 提供默认值；请求不得擅自抬高（02 §5）。 */
@@ -179,7 +198,7 @@ type CandidatePlan = {
  * 4) 用户明确要求扩建的范围（调用方给的其余焦点）。
  * 向下最多展开 maxAdditionalDepth 条父边；溢出的完整 ID 进 remaining。
  */
-function planCandidates(tables: TableReadPort, branchId: string, input: SqlWorldCompletionInput, policy: CompletionPolicy): CandidatePlan {
+function planCandidates(tables: TableReadPort, branchId: string, input: Pick<SqlWorldCompletionInput, 'mode' | 'focusLocationIds'>, policy: CompletionPolicy): CandidatePlan {
   const issues: PlanIssue[] = [];
   const missing: MissingItem[] = [];
   const memberLines: string[] = [];
@@ -272,6 +291,24 @@ function planCandidates(tables: TableReadPort, branchId: string, input: SqlWorld
   // 完整祖先由 collectTaskRefs(includeAncestors) 收集，不算未处理目标。
 
   return { focusIds, remainingIds, missing, memberLines, lockLines, issues };
+}
+
+/**
+ * P09B/R01：把候选目标的**优先级顺序**单独交出来（`planCandidates` 的只读投影）。
+ *
+ * 持久队列用同一份顺序挑本批要处理的目标，因此「无结构的当前场所 → 未分类祖先 → 缺连通 →
+ * 展开的子地点 → 其余请求范围」这套优先级不会因为改成队列就丢掉。
+ * 注意 `planCandidates` 的直接子地点查询本身每表上限 200 条；超出部分由分页发现补上，
+ * 但排在这份顺序的末尾（它们没有参与优先级分类）。
+ */
+export function orderCompletionTargets(
+  tables: TableReadPort,
+  branchId: string,
+  input: Pick<SqlWorldCompletionInput, 'mode' | 'focusLocationIds'>,
+  policy: ReturnType<typeof normalizeCompletionPolicy>,
+): string[] {
+  const plan = planCandidates(tables, branchId, input, policy);
+  return [...plan.focusIds, ...plan.remainingIds];
 }
 
 function readScenePresence(tables: TableReadPort, branchId: string, mapId: string): boolean {
@@ -389,6 +426,7 @@ export function buildSqlWorldCompletionTask(
   input: SqlWorldCompletionInput,
   turnId: string,
   budgetRemaining: number,
+  report?: { issues: PlanIssue[] },
 ): GenerationTask<ModelBatchRequest> | null {
   if (!Number.isFinite(budgetRemaining) || budgetRemaining <= 0) return null;
   let requested = uniqueSorted(input.focusLocationIds ?? []);
@@ -409,7 +447,7 @@ export function buildSqlWorldCompletionTask(
   const plan = planCandidates(tables, branchId, { ...input, focusLocationIds: requested }, policy);
   if (plan.focusIds.length === 0) return null;
 
-  const sources = selectWorldConstructionSources({
+  const sources = input.sourceSelection ?? selectWorldConstructionSources({
     snapshot: input.sourceSnapshot ?? [],
     focusTerms: input.focusTerms ?? [],
     chatId: input.chatUid,
@@ -418,31 +456,38 @@ export function buildSqlWorldCompletionTask(
     cache: input.worldSourceCache,
   });
 
-  // Mark completion on the focus container's interior map, not its parent's outer map.
-  const focusMaps: string[] = [];
-  for (const id of plan.focusIds) {
-    const row = tables.selectOne('locations', branchId, id);
-    const ownMap=tables.selectWhere('maps',{branch_id:branchId,status:'active',container_location_id:id})[0];
-    const mapId = asId(ownMap?.id)||asId(row?.map_id);
-    if (mapId && !focusMaps.includes(mapId)) focusMaps.push(mapId);
-  }
+  // 完成状态所属图（P07/R04）：由地点**唯一的 active 容器图**持有。
+  // 地点在外部图上的 marker 归属只作目录上下文，绝不参与完成状态的读或写——
+  // 旧实现「读内部图、写 firstFocus.map_id」就是完成标记落到错误所属图的病灶。
+  const owners = resolveCompletionMaps(tables, branchId, plan.focusIds);
+  const ownedMapIds = completionMapIds(owners);
+  const markerMapIds = plan.focusIds
+    .map((id) => asId(tables.selectOne('locations', branchId, id)?.map_id))
+    .filter((id) => id.length > 0);
 
   const catalogue = collectTaskRefs(tables, {
     branchId,
-    focusMapIds: uniqueSorted(focusMaps),
+    focusMapIds: uniqueSorted([...ownedMapIds, ...markerMapIds]),
     focusLocationIds: plan.focusIds,
     includeAncestors: true,
     includeDirectChildren: true,
     includeRoutes: true,
     includeOccupants: true,
     maxEntries: ATLAS_RUNTIME_LIMITS.refCatalogMaxEntries,
+    requiredRefs: input.requiredRefs,
   });
-  // 任务级诊断（目标截断 / 焦点缺失等）与目录诊断合并交出：GenerationTask 没有独立的
+  // 任务级诊断（目标截断 / 焦点缺失 / 容器图冲突等）与目录诊断合并交出：GenerationTask 没有独立的
   // issues 通道，PlanIssue[] 是唯一出口——不能把截断与缺项悄悄丢掉。
   const catalogueWithTaskIssues: TaskCatalogue = {
     ...catalogue,
-    issues: [...plan.issues, ...catalogue.issues],
+    issues: [...plan.issues, ...completionOwnershipIssues(owners), ...catalogue.issues],
   };
+
+  // P08/R05：必要引用本身装不下 → **发送次数 0**，错误明确，不删必要项凑数。
+  if (catalogue.requiredBudgetExceeded) {
+    report?.issues.push(...catalogue.issues.filter((item) => item.code === 'REF_REQUIRED_BUDGET_EXCEEDED'));
+    return null;
+  }
 
   // contextHash 输入（02 §9）：mode / 焦点稳定 ID / 来源 key+hash / 成员与结构 / 结构锁 / 策略版本
   const contextHash = stableHexHash(
@@ -456,9 +501,18 @@ export function buildSqlWorldCompletionTask(
     ].join('\u0001'),
   );
 
-  // 已 ready 且无缺项且 contextHash 未变 → 不发建设请求（W07）
-  const stored = focusMaps.length > 0 ? readWorldFillState(tables, branchId, focusMaps[0]) : null;
-  if (stored && stored.contextHash === contextHash && stored.status === 'ready' && plan.missing.length === 0) return null;
+  // 已 ready 且无缺项且 contextHash 未变 → 不发建设请求（W07）。
+  // 复用判定按**完成状态所属图**逐张检查：任何一张未 ready / hash 变化都要重发。
+  // 一张所属图都还没有时（容器图待建）退回分支根图上的兼容记录——它是批次级兜底，
+  // 不是任何地点的完成状态归属；P09A 的独立进度表就位后由该表接管。
+  const reuseMapIds = ownedMapIds.length > 0
+    ? ownedMapIds
+    : [branchRootMapId(tables, branchId)].filter((id) => id.length > 0);
+  const reusable = reuseMapIds.length > 0 && reuseMapIds.every((mapId) => {
+    const state = readWorldFillState(tables, branchId, mapId);
+    return Boolean(state && state.status === 'ready' && state.contextHash === contextHash);
+  });
+  if (reusable && plan.missing.length === 0) return null;
 
   const request = buildConstructionRequest(input, policy, plan.focusIds, plan, catalogue, sources, turnId);
 

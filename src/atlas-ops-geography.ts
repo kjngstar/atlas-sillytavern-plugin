@@ -21,6 +21,8 @@ import type { AtlasLocationKind } from './atlas-location-kinds.ts';
 
 const ROUTE_KINDS = ['adjacent', 'road', 'path', 'door', 'stairs', 'air', 'water', 'portal', 'estimated'];
 const GEOMETRY_QUALITY = ['confirmed', 'estimated', 'unknown'];
+/** P04/RTE05：与 routes.status 的 SQL CHECK 一致。 */
+const ROUTE_STATUS = ['open', 'blocked', 'closed'];
 const DISTANCE_BASIS = ['measured', 'calibrated', 'narrative', 'estimated', 'unknown'];
 const SCALE_QUALITY = ['uncalibrated', 'estimated', 'confirmed'];
 const MOBILITY_MODES = ['walk', 'ride', 'ground_vehicle', 'water', 'flight', 'teleport', 'custom'];
@@ -212,7 +214,7 @@ export function compileRoutePropose(op: ParsedOperation, ctx: CompileContext): C
   const data = (op.value.data ?? {}) as Record<string, unknown>;
   const known = new Set([
     'from_ref', 'to_ref', 'kind', 'bidirectional', 'map_ref', 'geometry', 'quality', 'distance_m',
-    'distance_min_m', 'distance_max_m', 'terrain', 'modes', 'access', 'duration',
+    'distance_min_m', 'distance_max_m', 'terrain', 'modes', 'access', 'duration', 'status',
   ]);
   const unknown = Object.keys(data).filter((k) => !known.has(k));
   if (unknown.length) result.issues.push(fieldIgnoredWarning(op, unknown));
@@ -257,28 +259,72 @@ export function compileRoutePropose(op: ParsedOperation, ctx: CompileContext): C
   }
 
   const geometry = validateGeometry(data.geometry, op, result.issues, '$.data.geometry');
+  const fromRow = ctx.tables.selectOne('locations', ctx.branchId, fromId);
+  const toRow = ctx.tables.selectOne('locations', ctx.branchId, toId);
+  const fromMap = fromRow?.map_id ? String(fromRow.map_id) : null;
+  const toMap = toRow?.map_id ? String(toRow.map_id) : null;
+  /** 只有两端都在**同一张有效地图**上，归属才可推导；否则这条线只能是拓扑连接。 */
+  const sameMap = fromMap !== null && toMap !== null && fromMap === toMap ? fromMap : null;
+
+  /**
+   * P04 归属真值表（§10.1）：
+   *
+   * | 输入 | 结果 |
+   * | --- | --- |
+   * | 新路线、省略 map_ref、两端同图 M | map_id = M |
+   * | 新路线、省略 map_ref、两端不同图 / 无法确定 | map_id = null（保留拓扑） |
+   * | 显式 map_ref = null | map_id = null（调用方明确选择只保留拓扑） |
+   * | 显式 map_ref = M 且两端确属 M | map_id = M |
+   * | 显式 map_ref 指向别的图 | ROUTE_MAP_MISMATCH，不静默改归属 |
+   * | 已有路线、未提供 map_ref | 保持旧 map_id，不自动重新归属 |
+   *
+   * 旧实现只在「已归属 + 两端分属两图」时报跨图几何：新路线省略 map_ref 一律落到 null，
+   * 同一张图上的合法路线因此永远拿不到可绘制归属（N02 的报错现象）。
+   */
   const mapIdRaw = data.map_ref;
-  let mapId: string | null = before ? (before.map_id as string | null) : null;
-  if (mapIdRaw !== undefined) {
+  const mapRefProvided = mapIdRaw !== undefined;
+  let mapId: string | null = before && before.map_id ? String(before.map_id) : null;
+  if (mapRefProvided) {
     if (mapIdRaw === null) mapId = null;
     else {
       const r = resolveRef(String(mapIdRaw), 'map', ctx.scope, { opId: op.opId, field: 'map_ref' });
       if (!r.entry) result.issues.push(...r.issues);
       else mapId = r.entry.id;
     }
+  } else if (!before) {
+    mapId = sameMap;
   }
 
-  const fromRow = ctx.tables.selectOne('locations', ctx.branchId, fromId);
-  const toRow = ctx.tables.selectOne('locations', ctx.branchId, toId);
-  const fromMap = fromRow?.map_id ? String(fromRow.map_id) : null;
-  const toMap = toRow?.map_id ? String(toRow.map_id) : null;
-
-  // 同图几何 vs 跨图连接（门/楼梯/传送）分开：跨图不用不同坐标系直接相减。
-  if (geometry && mapId && fromMap && toMap && fromMap !== toMap) {
-    result.issues.push(
-      issue('ROUTE_GEOMETRY_CROSS_MAP', '$.data.geometry', '两端地点属于不同地图：跨图连接不要给几何（用两端地点与耗时表达）', op),
-    );
+  // 归属与端点必须一致：显式写了别的图、或两端根本无法确定归属，都不静默接受。
+  if (mapId !== null && sameMap !== mapId) {
+    result.issues.push(issue(
+      'ROUTE_MAP_MISMATCH',
+      '$.data.map_ref',
+      `路线归属图 ${mapId} 与端点所在图不一致（from=${fromMap ?? '未知'}，to=${toMap ?? '未知'}）：不静默改归属，也不拼接跨图坐标`,
+      op,
+    ));
     return result;
+  }
+  // 无法归属到同一张图时不允许直接几何：两端坐标不在同一坐标系里。
+  if (geometry && mapId === null) {
+    result.issues.push(issue(
+      'ROUTE_GEOMETRY_CROSS_MAP',
+      '$.data.geometry',
+      '两端地点无法归属到同一张地图：跨图连接不要给几何（用两端地点与耗时表达）',
+      op,
+    ));
+    return result;
+  }
+
+  // P04/RTE05：路线责任状态。open 可通行 / blocked 保留几何并表达封锁 / closed 从活动集合排除。
+  let status = before ? String(before.status ?? 'open') : 'open';
+  if (data.status !== undefined) {
+    const s = String(data.status);
+    if (!ROUTE_STATUS.includes(s)) {
+      result.issues.push(issue('ENUM_INVALID', '$.data.status', `路线状态非法：${s}`, op));
+      return result;
+    }
+    status = s;
   }
 
   let kind = before ? String(before.kind) : 'estimated';
@@ -371,6 +417,7 @@ export function compileRoutePropose(op: ParsedOperation, ctx: CompileContext): C
       distance_basis: resolvedBasis,
       terrain: data.terrain === undefined ? before.terrain : (asString(data.terrain) ?? 'unknown'),
       allowed_modes_json: data.modes === undefined ? before.allowed_modes_json : modes,
+      status,
       access_rules_json: data.access === undefined ? before.access_rules_json : data.access,
       travel_time_override_json: data.duration === undefined ? before.travel_time_override_json : data.duration,
       row_rev: Number(before.row_rev ?? 1) + 1,
@@ -397,6 +444,7 @@ export function compileRoutePropose(op: ParsedOperation, ctx: CompileContext): C
         allowed_modes_json: modes,
         access_rules_json: data.access ?? null,
         travel_time_override_json: data.duration ?? null,
+        status,
       },
       { branchId: ctx.branchId, id: rowId, turnId, clockS: ctx.clockS, nowWallMs: Date.now(), rulesetVersion: 'atlas-1' },
     );

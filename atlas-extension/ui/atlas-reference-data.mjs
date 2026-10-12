@@ -19,7 +19,18 @@ const ROOT_SENTINEL = 'world';
  * 但一栋建筑必须是 building —— 画法（有没有 floor 布局）不等于结构。
  * 没有容器或容器不可见（POV 下被裁掉）时回落到几何推断的结果，不猜。
  */
-const CONTAINER_NAV_KIND = {region:'region',city:'city',district:'district',building:'building',floor:'floor',room:'room',vehicle:'floor',natural:'region'};
+const CONTAINER_NAV_KIND = {region:'region',city:'city',district:'district',building:'building',floor:'floor',room:'room',vehicle:'floor',natural:'region',
+  // P06/N01：other 是合法场所（庭院/官道/停靠区）。画法是 overview，但**不等于「世界」**；
+  // 结构层级用中性且合法的 region，绝不给尚未定义的 renderKind=place，也不默认成「建筑」。
+  other:'region'};
+/**
+ * P06：中性场所标签。`kind` 必须仍取合法结构 key（导航处理器认这些），
+ * 展示层用 categoryLabel 说人话，避免把「庭院」显示成「地区/建筑」。
+ */
+const NEUTRAL_CATEGORY_LABELS = {other:'场所'};
+function navigationCategoryLabel(map) {
+  return NEUTRAL_CATEGORY_LABELS[text(map?.containerLocationKind)] ?? null;
+}
 function navigationKind(map, geometricKind) {
   const containerKind = text(map?.containerLocationKind);
   return (containerKind && CONTAINER_NAV_KIND[containerKind]) || geometricKind;
@@ -58,7 +69,80 @@ export function referenceDiagnostics(rows=[]){return rows.map((l,i)=>{
     details:l.details??l.issues??l.receipt?.issues??null};
 });}
 export function referenceReceipts(state={},logs=[]){return (state.receipts??[]).filter(r=>!r.chatId||r.chatId===state.chatId).map((r,i)=>({id:r.receiptId??r.receipt?.receiptId??`receipt-${i}`,turn:(state.receipts?.length??0)-i,t:typeof r.recordedAt==='number'?new Date(r.recordedAt).toLocaleString('zh-CN',{hour12:false}):text(r.recordedAt??r.at??''),ok:r.status==='committed'||r.status==='duplicate'||r.receipt?.status==='committed'||r.ok===true,status:r.status??r.receipt?.status??'unknown',retryable:r.retryable===true&&i===0&&!!state.retryableCommit,
-  m:text(r.summary??r.receipt?.summary??r.message??r.status??'推演回执'),issue:text(r.errorCode??r.receipt?.issues?.[0]?.code??''),detail:r.detail??null,logs:logs.filter(l=>l.turnId===r.receiptId)}));}
+  m:text(r.summary??r.receipt?.summary??r.message??r.status??'推演回执'),issue:text(r.errorCode??r.receipt?.issues?.[0]?.code??''),detail:r.detail??null,report:referenceReceiptReport(r.detail),logs:logs.filter(l=>l.turnId===r.receiptId)}));}
+
+/**
+ * P14/§21.3：地图类回执的三层报告（纯派生，UI 只负责画）。
+ *
+ * 三条纪律：
+ *  1. 「世界数据已保存」只由最终 ACK（coreSaved）决定 —— 「请求已发出」不算保存。
+ *  2. 「布局：…」只能来自真实证据：本次动作真的产出了场景（sceneSaved）或逐图场景汇总
+ *     （build.sceneSummary）。coreSaved=true 但**没有场景**（例如官道这类 other 容器）
+ *     一律算「更新失败」，绝不显示「生成完成」。
+ *  3. 「缺漏与语义」只报**计数与分类**，不把实体 ID、隐藏成员或源文塞进文案。
+ *
+ * 非地图回执（没有 operation）返回 null：普通推演回执不该被扣一顶「布局失败」的帽子。
+ */
+export function referenceReceiptReport(detail){
+  const d=detail&&typeof detail==='object'?detail:null;
+  if(!d||typeof d.operation!=='string'||!d.operation)return null;
+  const issues=[];
+  // 同一个问题可能同时出现在 detail.issues 和 receipt.issues（两条真实通道）；
+  // 按同一具体问题去重；同一路径上的不同陈设失败仍须分别计数。
+  const seenIssues=new Set();
+  for(const list of [d.issues,d.receipt?.issues])for(const item of Array.isArray(list)?list:[]){
+    const key=typeof item?.code==='string'?JSON.stringify([item.code,item.path??'',item.message??'']):null;
+    if(key){if(seenIssues.has(key))continue;seenIssues.add(key);}
+    issues.push(item);
+  }
+  const codes=issues.map(i=>text(i?.code)).filter(Boolean);
+  const coreSaved=d.coreSaved===true;
+  const scene=d.build&&typeof d.build==='object'&&d.build.sceneSummary&&typeof d.build.sceneSummary==='object'
+    ?{ready:Number(d.build.sceneSummary.ready)||0,partial:Number(d.build.sceneSummary.partial)||0,missing:Number(d.build.sceneSummary.missing)||0}
+    :null;
+  const unsupported=codes.some(code=>/UNSUPPORTED/.test(code));
+  const layout=!coreSaved?'failed'
+    :scene?(scene.ready>0&&scene.partial===0&&scene.missing===0?'ready':scene.ready>0?'partial':unsupported?'unsupported':'failed')
+    :d.sceneSaved===true?(issues.some(i=>i?.severity==='error'||i?.code==='DETAIL_NO_SPACE'||i?.code==='LAYOUT_DETAILS_DEFERRED')?'partial':'ready')
+    :unsupported?'unsupported'
+    :'failed';
+  const queue=d.build&&typeof d.build==='object'&&d.build.queue&&typeof d.build.queue==='object'?d.build.queue:null;
+  const pendingTargets=queue&&Number.isFinite(queue.pendingTargets)?queue.pendingTargets:null;
+  const count=(scene?.missing??0)+issues.length;
+  const flags=[];
+  if(codes.some(code=>/SCALE|CALIBRAT|METERS_PER_CELL/.test(code)))flags.push('未标定');
+  if(codes.some(code=>/SOURCE|CHUNK/.test(code)))flags.push('来源不足');
+  if((pendingTargets??0)>0)flags.push(`待处理 ${pendingTargets} 项`);
+  return {
+    operation:d.operation,
+    core:{state:coreSaved?'saved':'unsaved',label:coreSaved?'世界数据已保存':'世界数据未保存（候选已丢弃）'},
+    layout:{state:layout,label:`布局：${{ready:'生成完成',partial:'部分完成',unsupported:'暂不支持',failed:'更新失败'}[layout]}`},
+    gaps:{count,pendingTargets,flags,label:(count>0||flags.length)
+      ?`缺漏与语义：可见缺项 ${count} 个${flags.length?` · ${flags.join(' · ')}`:''}`
+      :'缺漏与语义：暂无可见缺项'},
+  };
+}
+
+/**
+ * N03：坐标单位只转换一次。
+ *
+ * 值全部来自 DTO：不修改 SQL、不修改已保存 scene，也不修改传入对象。
+ * - 同单位：原值。
+ * - cells → meters：`x * mpp, y * mpp`。
+ * - meters → cells：`x / mpp, y / mpp`。
+ * - 跨单位但 `mpp` 不是**有限正数**时返回 `null`（失败），绝不默认 `k = 1`：
+ *   默认 1 等于把「没有尺度」伪装成「1 米 = 1 格」的实测值 —— 这正是 N03 的原始错误形态。
+ */
+export function toScenePoint(value, sourceUnits, sceneUnits, metersPerCell) {
+  const [x, y] = point(value);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  const from = sourceUnits === 'meters' ? 'meters' : 'cells';
+  const to = sceneUnits === 'meters' ? 'meters' : 'cells';
+  if (from === to) return { x, y };
+  const mpp = Number.isFinite(metersPerCell) && metersPerCell > 0 ? metersPerCell : null;
+  if (mpp === null) return null;
+  return from === 'cells' ? { x: x * mpp, y: y * mpp } : { x: x / mpp, y: y / mpp };
+}
 
 /** Convert geometry once; the original renderer keeps its original colors, materials and gestures. */
 export function referenceGeometry(map, document, {viewMode='author',visibleLocationIds=[]} = {}) {
@@ -75,10 +159,40 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
   const rawPins = layout ? [
     ...pins, ...(layout.actors??[]).map(p=>({...p,isProtagonist:p.isProtagonist===true||protagonistIds.has(p.id),type:'person'})), ...(layout.items??[]).map(p=>({...p,type:'item'})),
     ...(layout.rooms??[]).map(r=>({...r,type:'location',silent:true,x:r.x+r.w/2,y:r.y+r.h/2})),
+    /**
+     * P11/R03 §18.2 第 9 条：绑定的命名走廊与房间共用同一个地点 ID ——
+     * 它是可点击的（点进去就是该地点已有的子图），但和房间一样 `silent`，不额外画一个 POI 图标。
+     * 匿名辅助通道没有实体身份，这里什么都不加（它只是一个形状）。
+     */
+    ...(layout.corridor?.entityId&&layout.corridor.w>0&&layout.corridor.h>0
+      ?[{...layout.corridor,id:layout.corridor.entityId,type:'location',silent:true,
+        x:layout.corridor.x+layout.corridor.w/2,y:layout.corridor.y+layout.corridor.h/2}]
+      :[]),
     ...(layout.districts??[]).filter(d=>d.polygon?.length>=3&&d.polygon.every(finite)).map(d=>({...d,type:'location',silent:true,x:d.polygon.reduce((n,p)=>n+point(p)[0],0)/d.polygon.length,y:d.polygon.reduce((n,p)=>n+point(p)[1],0)/d.polygon.length})),
     ...(layout.buildings??[]).filter(p=>!p.decorative).map(r=>({...r,type:'location',x:r.x+r.w/2,y:r.y+r.h/2})),
   ] : (map.points??[]).map(p=>({...p,id:p.entityId,type:p.kind==='character'?'person':p.kind}));
-  if(layout)rawPins.push(...(map.points??[]).filter(p=>p.mobility==='mobile').map(p=>({...p,id:p.entityId,type:'location'})));
+  const unitDiagnostics=[];
+  if(layout){
+    /**
+     * N03：`map.points` 永远是 **SQL 的格坐标**，而布局里的 pins/actors/items/rooms 已经是
+     * `document.units` 场景单位。旧代码把载具的格坐标直接丢进 `rawPins` 再套 `xy()`，
+     * 于是 mpp=0.24 的米制场景里 (59.375, 29.1666667) 被画成了 59.375 米而不是 14.25 米。
+     * 现在：**先换算一次单位**，再交给同一个 `xy()`；绝不在 `xy()` 之后补换算。
+     */
+    const sceneUnits=document?.units==='meters'?'meters':'cells';
+    const metersPerCell=Number.isFinite(map.metersPerCell)&&map.metersPerCell>0?map.metersPerCell:null;
+    for(const p of (map.points??[]).filter(p=>p.mobility==='mobile')){
+      // POV 下隐藏载具既不进画面，也不产生诊断（诊断同样可能泄露实体身份）。
+      if(p.hidden===true)continue;
+      const converted=toScenePoint(p,'cells',sceneUnits,metersPerCell);
+      if(!converted){
+        unitDiagnostics.push({code:'POINT_UNIT_UNCONVERTIBLE',entityId:text(p.entityId),mapId:p.mapId??null,
+          message:'载具坐标是格制，但当前场景是米制且没有有效的米/格尺度：保留目录身份，不把错误坐标塞进画面或范围。'});
+        continue;
+      }
+      rawPins.push({...p,x:converted.x,y:converted.y,id:p.entityId,type:'location'});
+    }
+  }
   const uniquePins=[...new Map(rawPins.filter(finite).map(p=>[`${p.type}:${p.entityId??p.id}`,p])).values()];
   /**
    * M6-03③：示意坐标不许被「升格」成精确。
@@ -104,6 +218,9 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
     // footprints instead of reducing the whole map to unconnected markers.
     const qualityById=new Map((map.points??[]).map(p=>[p.entityId,p.area?.quality]));
     const visible=new Set(visibleLocationIds), author=viewMode!=='pov';
+    // P06/N01：other 容器的画法是范围概览，不是建筑内景 —— 渲染类别也用中性的 region，
+    // 免得渲染器按「建筑」去找楼层/房间几何。
+    if(containerKind==='other')kind='region';
     /**
      * M6-03①：轮廓 / 路线端点与路径 / 装饰类型与范围 —— 三样全部走**同一个** `xy`，
      * 保证「只变换一次」；任何一处都不许再套一层变换。
@@ -135,6 +252,19 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
        * 装饰**永远不是**实体：这里只产出绘制几何，不产出可点击的假地点，
        * 也绝不因为缺 shape 而补一个新地点出来。
        */
+      /**
+       * P06/N01：容器自身范围示意。它不是地点、不可点击、也不参与路线端点判断。
+       * OTH05：POV 下容器不可见时，连范围、名称与 id 一起不下发（不暗示"这里有个看不见的东西"）。
+       */
+      selfArea:(()=>{
+        const sa=layout.selfArea;
+        if(!sa||typeof sa!=='object'||!Array.isArray(sa.polygon)||sa.polygon.length<3||!sa.polygon.every(finite))return null;
+        const owner=text(sa.locationId);
+        if(!author&&!(owner&&visible.has(owner)))return null;
+        return {locationId:owner||null,name:text(sa.name)||null,
+          quality:text(sa.quality)||'layout',source:text(sa.source)||'frame',
+          pts:sa.polygon.map(xy)};
+      })(),
       overviewFeatures:(layout.features??[]).flatMap(f=>{
         if(!f||typeof f!=='object')return [];
         const zoneId=text(f.zoneId);
@@ -163,7 +293,11 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
       ? (layout.groups??[]).filter(Boolean).flatMap(g=>(g.bodies??[]).filter(Boolean).map(b=>({body:b,groupId:b.groupId??g.id,roomId:b.roomId??g.roomId})))
       : (layout.bodies??[]).filter(Boolean).map(b=>({body:b,groupId:b.groupId??null,roomId:b.roomId??null}));
     const activeRooms=new Set((layout.actors??[]).filter(a=>a.isProtagonist===true||protagonistIds.has(a.id)).map(a=>a.roomId));
-    geo={corridor:{...corridor,y:corridor.y+corridor.h/2},
+    geo={corridor:{...corridor,
+      // P11/R03：几何 ID 永远是 'corridor'（不破坏旧路径拓扑）；绑定真实走廊时带上实体身份与名称，
+      // 绘制/点击/导航共用同一个 ID。不可见的走廊在 POV 过滤时已被剥掉 entityId/name。
+      entityId:layout.corridor?.entityId??null,name:text(layout.corridor?.name)||null,
+      y:corridor.y+corridor.h/2},
       rooms:(layout.rooms??[]).map((r,i)=>({...rect(r),id:r.id,name:r.name,kind:r.id===map.containerLocationId&&map.containerLocationKind==='vehicle'?'vehicle':'room',
         role:r.role??'indoor',
         status:text(r.status)||null,
@@ -186,6 +320,8 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
       })};
   }
   return {kind,geo,marks,metric,
+    // N03：跨单位又缺尺度时不下发坏坐标，但保留可定位的提示（POV 下隐藏对象连提示都不产生）。
+    diagnostics:unitDiagnostics,
     // M6-07②：比例尺必须知道这个尺度是不是"估计的" —— 没标定的数字要带"约"，
     // 不能把模型推出来的 mpp 当成实测值印在图上。
     transform:{scale,bounds:b,units:document?.units??'cells',metersPerCell:map.metersPerCell??null,
@@ -217,7 +353,9 @@ export function projectReferenceData({state={},mapView,sceneView,catalogView,tas
     // 不能因为「这张图有 floor 布局」就把一栋建筑当成楼层 —— 画法不等于结构。
     const navKind=navigationKind(m,g.kind);
     const level=REFERENCE_LEVELS.find(l=>l.key===navKind)??REFERENCE_LEVELS.find(l=>l.key===g.kind)??REFERENCE_LEVELS[0];
-    nodes.set(m.mapId,{id:m.mapId,mapId:m.mapId,name:m.name||m.mapId,code:level.code,tag:level.name,description:saved?'已保存的空间布局':'当前 SQL 地图概览；尚无已保存空间布局',
+    // P06：other 容器用中性场所标签展示；结构 key 仍是合法层级。
+    const categoryLabel=navigationCategoryLabel(m);
+    nodes.set(m.mapId,{id:m.mapId,mapId:m.mapId,name:m.name||m.mapId,code:level.code,tag:categoryLabel??level.name,categoryLabel,description:saved?'已保存的空间布局':'当前 SQL 地图概览；尚无已保存空间布局',
       children:[],...g,renderKind:g.kind,kind:navKind,host:true,containerLocationId:m.containerLocationId??null,
       parentMapId:m.parentMapId??null,connectionQuality:m.connectionQuality??null,
       topologyIssueCodes:Array.isArray(m.topologyIssueCodes)?[...m.topologyIssueCodes]:[],

@@ -296,6 +296,25 @@ export const LAYOUT_SPEC_REF_FIELDS: Readonly<Record<string, Readonly<Record<str
 export const LAYOUT_LOCAL_COLLECTION = 'contents';
 
 /**
+ * P11/R03 §18.1：spec **顶层标量**里的实体引用。
+ *
+ * `corridorLocationRef` 是「命名走廊绑定」的唯一输入，值是真实地点引用：
+ * - `null` = 显式解除绑定（不是「省略」）；
+ * - 字符串 = 本任务地点目录里的 location（`new:` 别名或短引用/稳定 ID）。
+ *
+ * 它**不**走集合表：家具的局部视觉 ID 不是地点，绝不能靠「名字像走廊」就绑上去 ——
+ * 因此解析只认实体引用表（`resolveRef`），裸 ID 找不到时**报错**而不是原样保留。
+ */
+export const LAYOUT_SPEC_SCALAR_REF_FIELDS: Readonly<Record<string, RefKind>> = {
+  corridorLocationRef: 'location',
+};
+
+/** 顶层标量引用的路径（相对 `$.data.`）。 */
+function scalarRefPath(field: string): string {
+  return `spec.${field}`;
+}
+
+/**
  * M4-02：定义局部视觉 ID 的集合与字段。
  * `contents[].id` 是房间家具的局部 ID；`features[].id` 是概览地物的本图局部 ID——
  * 两者都只在本图内有意义，绝不写入 entity_keys，也不允许被解析成实体。
@@ -348,6 +367,13 @@ export type LayoutRefHit = {
 export function scanLayoutSpecRefs(spec: unknown, visit: (hit: LayoutRefHit) => void): void {
   if (spec === null || typeof spec !== 'object') return;
   const root = spec as Record<string, unknown>;
+  // P11：顶层标量引用（corridorLocationRef）同样算引用：
+  // 写 `new:hall` 时既要在本批建 entity_keys，也要能进依赖与父图/子图校验。
+  for (const [field, kind] of Object.entries(LAYOUT_SPEC_SCALAR_REF_FIELDS)) {
+    const alias = newAliasOf(root[field]);
+    if (alias === null) continue;
+    visit({ alias, path: scalarRefPath(field), kind, local: false });
+  }
   for (const [collection, fields] of Object.entries(LAYOUT_SPEC_REF_FIELDS)) {
     const rows = root[collection];
     if (!Array.isArray(rows)) continue;
@@ -805,6 +831,52 @@ export function resolveLayoutSpecRefs(
   const seen = new Set<string>();
   const out: Record<string, unknown> = { ...spec };
   const localPool = collectLocalIds(spec);
+
+  /**
+   * P11/R03：顶层标量引用（`corridorLocationRef`）单独解析。
+   *
+   * 三条纪律：
+   * - `null` 是**显式解除**，原样保留，不建依赖（省略才是「保持」）。
+   * - 字符串必须解析成实体；这里是新字段，没有「上一轮保存的稳定 ID 可能不在短引用表」的历史包袱，
+   *   所以**裸 ID 找不到也报错**（绝不按名字猜，也绝不放行家具局部 ID）。
+   * - 解析出的规范 ID 进 dependencies，供编译层做父图/子图与快照校验。
+   */
+  for (const [field, kind] of Object.entries(LAYOUT_SPEC_SCALAR_REF_FIELDS)) {
+    const raw = spec[field];
+    if (raw === undefined || raw === null) continue;
+    if (typeof raw !== 'string') continue;
+    const rawText = raw.trim();
+    const resolved = resolveRef(rawText, kind, scope, {
+      opId: where?.opId,
+      line: where?.line,
+      field: scalarRefPath(field),
+    });
+    if (resolved.entry !== null) {
+      out[field] = resolved.entry.id;
+      if (!seen.has(resolved.entry.id)) {
+        seen.add(resolved.entry.id);
+        dependencies.push(resolved.entry.id);
+      }
+      continue;
+    }
+    let reported = false;
+    for (const item of resolved.issues) {
+      issues.push(item);
+      reported = true;
+    }
+    if (!reported) {
+      issues.push(
+        makeIssue(
+          'REF_UNKNOWN',
+          refPath(scalarRefPath(field)),
+          `引用「${rawText}」无法解析为${kind}；id 必须来自本任务地点目录（来源 op ${where?.opId ?? '未知'}）。`,
+          'error',
+          true,
+          { opId: where?.opId, line: where?.line },
+        ),
+      );
+    }
+  }
 
   for (const [collection, fields] of Object.entries(LAYOUT_SPEC_REF_FIELDS)) {
     const rows = spec[collection];

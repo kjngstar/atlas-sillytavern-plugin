@@ -1,6 +1,8 @@
 /** One isolated turn owns foreground elapsed time and all background consequences. */
 import { AtlasDbError, queryBound, runBound } from './atlas-db-runtime.ts';
 import { JOURNALED_TABLES } from './atlas-db-contract.ts';
+// P09A：程序内部表的写入不算世界业务变化。
+import { isBusinessMutationTable } from './atlas-ops-contract.ts';
 import { deriveElapsedInterval } from './atlas-sim-time.ts';
 import { settleWindow } from './atlas-sim-scheduler.ts';
 import { advanceActions, haltActorWork } from './atlas-sim-actions.ts';
@@ -226,5 +228,5 @@ export async function settleSqlTurn(input: Input) {
   const seq=Number(queryBound(input.db,'SELECT COALESCE(MAX(sequence),0) AS n FROM turn_changes WHERE turn_id=?',[input.turnId])[0].n)+1;
   const journal=recordGroupChanges(input.db,{id:`simulation_${input.attemptKey ?? input.turnId}`,mutations,opIds:[`simulation:${input.attemptKey ?? input.turnId}`]},{turnId:input.turnId,attemptId:input.attemptKey ?? 'simulation',startSequence:seq});
   if (journal.issues.length) throw new AtlasDbError('JOURNAL_WRITE_FAILED',`后台变化不能可靠回退，候选不发布：${journal.issues.join('；')}`,{issues:journal.issues});
-  return {elapsed,clockAfter,clockMin,clockMax,seed,randomDraws,simulatedUntil:cursor,catchingUp,pendingActors,steps,issues,groups,modelOperations,modelBatches:batches,operationContexts,worldChanged:mutations.some(m=>m.table!=='branches')};
+  return {elapsed,clockAfter,clockMin,clockMax,seed,randomDraws,simulatedUntil:cursor,catchingUp,pendingActors,steps,issues,groups,modelOperations,modelBatches:batches,operationContexts,worldChanged:mutations.some(m=>isBusinessMutationTable(m.table))};
 }

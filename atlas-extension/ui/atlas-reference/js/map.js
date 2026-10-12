@@ -280,6 +280,49 @@ function create(canvas, mini, hooks){
   }
 
   function extent(){ return st.node?.extent || EXTENT[st.kind] || EXTENT.world; }
+  /**
+   * P14/§21.3：**内容范围只用于取景**。
+   *
+   * 旧实现里非 floor 的图一律按整幅幅面取景 —— 一个只有一座庭院的 overview
+   * 因此被画成整张图正中的一个小点（N01 报的「看起来只有一个点」）。
+   * 这里改成：优先用**已经过 POV 过滤的** shapes / 路线 / 装饰 / 自身示意 / 标记
+   * 的联合范围取景，并且：
+   *  - 只有一个点（或极窄）时给**最小可读视窗**，不把镜头推到无限近；
+   *  - 内容比整幅幅面还大时不缩小视野（世界幅面本身不动）；
+   *  - 只动相机：extent、比例尺、SQL 坐标、实体坐标一律不变。
+   * 楼层沿用房间几何，见 fitExtent 里的 floor 分支。
+   */
+  const CONTENT_MIN_SPAN = 140;
+  function contentExtent(){
+    if(st.kind==='floor')return null;
+    const g=st.geo||{};
+    let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
+    const put=(x,y)=>{if(!Number.isFinite(x)||!Number.isFinite(y))return;if(x<x0)x0=x;if(x>x1)x1=x;if(y<y0)y0=y;if(y>y1)y1=y;};
+    const pts=list=>{if(Array.isArray(list))for(const p of list)if(Array.isArray(p))put(p[0],p[1]);};
+    const box=(x,y,w,h)=>{if([x,y,w,h].every(Number.isFinite)){put(x,y);put(x+w,y+h);}};
+    for(const s of g.overviewShapes||[])pts(s&&s.pts);
+    for(const r of g.overviewRoutes||[])pts(r&&(r.points||r.path));
+    for(const f of g.overviewFeatures||[]){pts(f&&f.poly);pts(f&&f.line);}
+    pts(g.selfArea&&g.selfArea.pts);
+    for(const d of g.districts||[])pts(d&&d.pts);
+    for(const L of g.lands||[])pts(L&&L.pts);
+    for(const p of g.plots||[]){const r=p&&p.r;if(Array.isArray(r))put(r[0],r[1]),put(r[2],r[3]);}
+    for(const b of g.buildings||[]){if(b&&Array.isArray(b.c))box(b.c[0]-b.w/2,b.c[1]-b.h/2,b.w,b.h);}
+    for(const w of g.wings||[])box(w&&w.x-w.w/2,w&&w.y-w.h/2,w&&w.w,w&&w.h);
+    for(const r of g.rooms||[])box(r&&r.x,r&&r.y,r&&r.w,r&&r.h);
+    if(g.corridor)box(g.corridor.x,g.corridor.y,g.corridor.w,g.corridor.h);
+    pts(g.river);
+    if(st.showMarks!==false)for(const m of st.node?.marks||[])put(m&&m.x,m&&m.y);
+    if(!Number.isFinite(x0)||!Number.isFinite(y0))return null;
+    const [ex0,ex1,ey0,ey1]=extent();
+    const cx=(x0+x1)/2,cy=(y0+y1)/2;
+    if(!(x1-x0>0)){x0=cx-CONTENT_MIN_SPAN/2;x1=cx+CONTENT_MIN_SPAN/2;}
+    if(!(y1-y0>0)){y0=cy-CONTENT_MIN_SPAN/2;y1=cy+CONTENT_MIN_SPAN/2;}
+    if(x1-x0<CONTENT_MIN_SPAN){x0=cx-CONTENT_MIN_SPAN/2;x1=cx+CONTENT_MIN_SPAN/2;}
+    if(y1-y0<CONTENT_MIN_SPAN){y0=cy-CONTENT_MIN_SPAN/2;y1=cy+CONTENT_MIN_SPAN/2;}
+    if(x1-x0>ex1-ex0||y1-y0>ey1-ey0)return null;
+    return [x0,x1,y0,y1];
+  }
   function fitExtent(){
     // Fit any standalone room to its actual geometry, without changing map units.
     const rooms=st.geo.rooms;
@@ -295,11 +338,14 @@ function create(canvas, mini, hooks){
         return [x0-24,x1+12,Math.min(...valid.map(r=>r.y))-72,Math.max(...valid.map(r=>r.y+r.h))+60];
       }
     }
+    const content=contentExtent();
+    if(content)return content;
     return extent();
   }
+  function fitPad(){ return contentExtent()?1.12:1.16; }
   function fitScale(pad){
     const [x0,x1,y0,y1] = fitExtent();
-    pad = pad==null?1.16:pad;
+    pad = pad==null?fitPad():pad;
     return Math.min(st.vw/((x1-x0)*pad), st.vh/((y1-y0)*pad));
   }
   function fit(anim){
@@ -363,6 +409,19 @@ function create(canvas, mini, hooks){
     // 建成区 role 是 schema 枚举；没声明 role 就不加质感，不猜这块地是不是城市。
     const BUILT_ROLES = {city:1,settlement:1,district:1,campus:1};
     ctx.save();
+    // ⓪ P06/N01：容器自身范围示意（只在空场地出现）。
+    // 它不是新地点、也不能被当成实测：confirmed 才画实线，layout 一律虚线并标「范围示意」。
+    // 单位提示交给比例尺（未标定走格制），这里不把格制示意说成米制实测。
+    if(g.selfArea&&Array.isArray(g.selfArea.pts)&&g.selfArea.pts.length>=3){
+      const sa=g.selfArea, confirmed=sa.quality==='confirmed';
+      ctx.beginPath();sa.pts.forEach((p,i)=>i?ctx.lineTo(p[0],p[1]):ctx.moveTo(p[0],p[1]));ctx.closePath();
+      ctx.fillStyle=confirmed?'rgba(67,224,255,.07)':'rgba(127,212,255,.05)';ctx.fill();
+      ctx.strokeStyle=confirmed?'rgba(67,224,255,.60)':'rgba(127,212,255,.42)';
+      ctx.lineWidth=1.3/cam;ctx.setLineDash(confirmed?[]:[7/cam,5/cam]);ctx.stroke();ctx.setLineDash([]);
+      const cx=sa.pts.reduce((a,p)=>a+p[0],0)/sa.pts.length, cy=sa.pts.reduce((a,p)=>a+p[1],0)/sa.pts.length;
+      pushLabel(cx,cy-7,sa.name||'当前场所','#bcd6ee','name',true);
+      pushLabel(cx,cy+11,confirmed?'范围（已确认）':'范围示意 · 未标定','rgba(140,170,200,.75)','sub',true);
+    }
     // ② zone 填色
     for(const shape of g.overviewShapes||[]){
       if(!ptsVisible(shape.pts,r)) continue;

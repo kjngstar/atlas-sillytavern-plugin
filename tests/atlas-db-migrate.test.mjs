@@ -14,7 +14,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ATLAS_SCHEMA_VERSION, installSchema } from '../src/atlas-db-schema.ts';
+import { ATLAS_SCHEMA_VERSION, USER_TABLE_COUNT, installSchema } from '../src/atlas-db-schema.ts';
 import {
   finalizeMigration,
   inspectLegacySession,
@@ -565,7 +565,7 @@ test('T15-11 finalizeMigration 校验后标记版本；重开不重复迁移、�
     assert.equal(first.ok, true, JSON.stringify(first.issues));
     assert.equal(Number(scalar(db, 'PRAGMA user_version')), ATLAS_SCHEMA_VERSION);
     assert.deepEqual(foreignKeyCheck(db), []);
-    assert.equal(userTables(db).length, 20);
+    assert.equal(userTables(db).length, USER_TABLE_COUNT);
 
     const second = finalizeMigration(db, { branchId: BRANCH });
     assert.equal(second.ok, true);

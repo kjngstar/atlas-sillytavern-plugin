@@ -11,6 +11,7 @@ export function prepareInitialFrame({mapRow,scope,currentScope,locations=[],kind
     if(frame.atlasScene||positioned||Number(mapRow.scale_locked)===1||mapRow.scale_quality==='confirmed')return {ok:true,status:'retained',mutation:null,issues:[]};
     if(typeof turnId!=='string'||!turnId||typeof operationId!=='string'||!operationId)return failure('COMMIT_ANCHOR_REQUIRED','$.turnId','需要当前楼层与操作ID');
     const calibrated=finite(mapRow.meters_per_cell)&&mapRow.meters_per_cell>0;
+    if(calibrated&&!finite(widthM)&&!finite(heightM)&&Number.isInteger(frame.cols)&&frame.cols>0&&Number.isInteger(frame.rows)&&frame.rows>0)return {ok:true,status:'retained',mutation:null,issues:[]};
     if(kind==='overview'&&!calibrated){
       // M4-18：概览在无尺度时按格建初始框架，绝不塞 1 格 = 1 米去冒充米制。
       const cols=finite(frame.cols)?frame.cols:finite(frame.reference_width_cells)?frame.reference_width_cells:100;

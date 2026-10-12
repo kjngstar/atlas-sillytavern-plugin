@@ -11,7 +11,7 @@ import { buildMapAnalysisExport } from './atlas-map-export.mjs';
 const ATLAS_FEED_PAGE_MAX=100;
 const ATLAS_FEED_MAX_PAGES=20;
 
-export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort,diagnostics=()=>[],emit=()=>{},defaultPrompt='',fetchFn=globalThis.fetch,loadSqlRuntime=()=>import(new URL('../dist/atlas-sql.mjs',import.meta.url).href)}) {
+export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort,diagnostics=()=>[],emit=()=>{},defaultPrompt='',pluginVersion=null,fetchFn=globalThis.fetch,loadSqlRuntime=()=>import(new URL('../dist/atlas-sql.mjs',import.meta.url).href)}) {
   root.replaceChildren();root.className='atlas-native-ui-host';root.id='atlas-extension-panel-root';
   root.setAttribute('role','application');root.setAttribute('aria-label','阿特拉斯世界工作台');
   Object.assign(root.style,{position:'fixed',inset:'0',zIndex:'10000',padding:'0',margin:'0',background:'transparent'});
@@ -101,7 +101,7 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
       if(!changed&&latest.meta.scopeKey===worldScope)data.LORE=latest.LORE;
       // Rollback identity comes from the real saved turn, never from a UI demo snapshot.
       data.meta.rollbackMessageId=mapView.metadata?.rollbackMessageId??null;data.meta.canUndo=mapView.metadata?.canUndo===true;data.meta.snapshotSaved=mapView.metadata?.snapshotSaved===true;
-      if(live(ticket)){lastReadFailure='';mapExportViews={key:ticket.key,mapView,sceneView,catalogView:{items:catalogRows,revision}};deliver(data,changed);}
+      if(live(ticket)){lastReadFailure='';mapExportViews={key:ticket.key,mapView,sceneView,catalogView:{items:catalogRows,revision,branchId:mapView.branchId??null,viewMode}};deliver(data,changed);}
     })().catch(error=>{if(!live(ticket))return;const failureKey=ticket.key+'|'+error.message;if(lastReadFailure!==failureKey){lastReadFailure=failureKey;emit({level:'error',source:'ui',code:'REFERENCE_UI_READ_FAILED',details:{message:error.message}});}
       const data=emptyReferenceData({viewMode,scopeKey:worldScope,worldName:'世界读取失败'});data.DIAGNOSTICS=[{id:'read-failed',t:'',level:'error',code:'REFERENCE_UI_READ_FAILED',message:error.message}];deliver(data,changed);});
     return loading;
@@ -110,7 +110,20 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
     settings=await request('GET','/settings');prefs=await settingsPort?.read?.('referenceUiPreferences')??{};
     presetDoc=referencePresetDocument(settings,prefs,defaultPrompt);
     await refresh(true);
-    return {data:latest,presets:presetDoc,preferences:prefs.interaction??null,skin:prefs.skin??null};
+    return {data:latest,presets:presetDoc,preferences:prefs.interaction??null,skin:prefs.skin??null,
+      /**
+       * P14/§21.5：提示词分层要让作者看见「当前用哪套策略、程序声明了哪些能力、实际发的是什么」。
+       * 这里只搬运设置视图里的**真实值**：策略版本、已声明能力、活动预设与内置建议预设。
+       * 没有任何能力/版本时给空值，不编一个默认能力。
+       */
+      engine:{
+        policyVersion:typeof settings.promptPolicyVersion==='string'?settings.promptPolicyVersion:null,
+        capabilities:Array.isArray(settings.spatialCapabilities)?[...settings.spatialCapabilities]:[],
+        activePromptPresetId:settings.activePromptPresetId??null,
+        suggested:typeof settings.promptPolicyVersion==='string'&&Array.isArray(settings.builtInSqlPrompt?.segments)
+          ?{version:settings.promptPolicyVersion,name:settings.builtInSqlPrompt.name??'内置建议策略',
+            segments:settings.builtInSqlPrompt.segments.map((s,index)=>({role:s.role,name:s.name??`第 ${index+1} 段`,content:s.content,enabled:true}))}:null,
+      }};
   }
   /** 本轮正文来源：布局与建设必须用**同一份**正文，不能各拿一次（否则 sourceHash 对不上）。 */
   async function sourceText(captured){
@@ -118,9 +131,18 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
     return {assistantText:last?.mes??'',userText:user?.mes??'',charDescription:c?.characters?.[c.characterId]?.description??'',
       loreSupplement:(await lorePort?.read?.()??[]).filter(e=>e.enabled!==false&&e.atlasReadable!==false).map(e=>e.content).join('\n')};
   }
-  /** 把一次地图类回执记进宿主（核心只有这一条外部回执通道）。 */
-  function recordMapReceipt(result,captured,operation,code){
-    core.recordExternalReceipt?.(sqlMod.toLegacyTurnReceipt(result.receipt,{coreSaved:result.coreSaved}),captured.state.chatId,{receipt:result.receipt,issues:result.receipt?.issues??result.issues,coreSaved:result.coreSaved});
+  /**
+   * 把一次地图类回执记进宿主（核心只有这一条外部回执通道）。
+   *
+   * P14/§21.3：回执要能分层显示「世界数据已保存 / 布局：… / 缺漏与语义：…」，
+   * 所以这里记的是**真实结果字段**（操作名、保存状态、逐图场景汇总、队列与来源账本），
+   * 让 UI 从真实数据派生，而不是凭内存计数或文案猜。
+   */
+  function recordMapReceipt(result,captured,operation,code,extra={}){
+    const detail={operation,status:typeof result?.status==='string'?result.status:null,
+      receipt:result?.receipt,issues:result?.receipt?.issues??result?.issues,coreSaved:result?.coreSaved===true,
+      ...(result?.build?{build:result.build}:{}),...extra};
+    core.recordExternalReceipt?.(sqlMod.toLegacyTurnReceipt(result.receipt,{coreSaved:result.coreSaved}),captured.state.chatId,detail);
     emit({level:result.receipt?.status==='partial'?'warn':'info',source:'map',code,operation,phase:'commit',outcome:result.receipt?.status==='partial'?'failed':'success'});
   }
   /** 「有失败就报全」：地图类任务的每一处 map/path 问题都要露出来，不许只留第一条。 */
@@ -228,11 +250,9 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
       const captured=scope();
       await refresh(true);
       if(disposed||captured.key!==scope().key||captured.metadata!==context()?.chatMetadata||mapExportViews?.key!==scope().key)throw Error('世界或视角已变化，请重新导出地图');
-      return buildMapAnalysisExport({data:latest,...mapExportViews,mapId});
+      return buildMapAnalysisExport({data:latest,...mapExportViews,mapId,pluginVersion,layoutPolicyVersion:sqlMod?.LAYOUT_SIGNATURE_POLICY_VERSION??null});
     },
     async setViewMode(mode){viewMode=mode==='author'?'author':'pov';await refresh(true);},
-    onPage(page){core.setPage({cast:'characters',items:'items',msgs:'events',sim:'advance',time:'events',lore:'world',diag:'logs',prefs:'prompts'}[page]??'map');if(page==='lore')void Promise.resolve(refresh()).then(readLore).catch(error=>emit({level:'error',source:'ui',code:'LORE_READ_FAILED',details:{message:error.message}}));},
-    async toggleLore(id){if(viewMode!=='author')throw Error('请切换世界后台后修改世界书');await lorePort?.toggle?.(id);await readLore();},
     async setLoreRead(id,enabled){if(viewMode!=='author')throw Error('请切换世界后台后修改 ATLAS 读取设置');if(!lorePort?.setAtlasRead)throw Error('ATLAS 读取设置不可用');await lorePort.setAtlasRead(id,enabled);await readLore();},
     close(){core.setPanelOpen(false);},
     async setEnabled(enabled){if(actionBusy||core.getState().pendingTurn)throw Error('有回合正在处理，请稍后再试');if(!core.getState().binding)throw Error('请先建立当前聊天的世界');await core.setEnabled(enabled);await refresh(true);const s=core.getState();if(s.binding?.enabled!==enabled)throw Error(s.lastError??'推演开关未保存');},
@@ -244,11 +264,14 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
       try{result=await request('POST','/sql/chat/map/layout',{chatId:captured.state.chatId,mapId,requestId:crypto.randomUUID(),...await sourceText(captured)});}
       catch(error){const receipt=error.details?.receipt;if(receipt&&sqlMod&&core.getState().chatId===captured.state.chatId&&context()?.chatMetadata===captured.metadata){core.recordExternalReceipt?.(sqlMod.toLegacyTurnReceipt(receipt,{coreSaved:false}),captured.state.chatId,{...error.details,coreSaved:false,errorCode:error.code,httpStatus:error.status});}throw error;}
       if(!sameWorld(captured))return null;
-      recordMapReceipt(result,captured,'layout','LAYOUT_TASK_COMPLETE');
       await core.refresh();await refresh(true);
       const node=findNode(latest.ROOT,mapId);
+      // 布局回执的「布局：…」一行只能来自**真实证据**：候选保存确认 + 这张图真的有可画场景。
+      // 官道这类没有 scene 的情况即便 coreSaved=true 也不许显示「生成完成」。
+      recordMapReceipt(result,captured,'layout','LAYOUT_TASK_COMPLETE',
+        {sceneSaved:result.coreSaved===true&&result.sceneSaved===true&&node?.hasLayout===true});
       if(result.coreSaved!==true)throw Error(mapIssues(result).join('；')||'本图布局未保存');
-      if(!node?.hasLayout)throw Error(mapIssues(result).join('；')||'没有生成可绘制的布局，请查看诊断');
+      if(!node?.hasLayout||result.sceneSaved!==true)throw Error(mapIssues(result).join('；')||'本轮没有保存新的可绘制布局，原布局已保留，请查看诊断');
       return result;
     },false);},
     /**
@@ -285,6 +308,39 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
       }catch(error){actionError=error.message;throw error;}finally{actionBusy=false;deliver(latest);}
     },
     exportUpgradeBackup,
+    /**
+     * §21.4：回退**执行前**的真实影响预览（只读）。
+     * 返回服务端用同一个 `planRollback` 算出的计划摘要；没有可回退楼或读不到就返回 null，
+     * 由 UI 决定是否还能执行 —— 不许用「数 UI 卡片」猜影响范围。
+     */
+    async rollbackPreview(){const captured=scope();const messageId=latest.meta.rollbackMessageId;
+      if(messageId===null||messageId===undefined)return null;
+      const result=await request('POST','/sql/chat/rollback-preview',{chatUid:captured.state.chatId,chatId:captured.state.chatId,
+        assistantMessageId:String(messageId),viewMode});
+      return result?.preview??null;},
+    /**
+     * P14/§21.5：请求预览（只读）。
+     *
+     * 与真实发送走**同一条组装链**：先按任务的**真实绑定**临时激活连接与提示词预设
+     * （initialize/advance 用它们自己的绑定，repair 用 repair 的绑定），再请求服务端
+     * `port.preview` —— 而 `port.preview` 与 `port.request` 共用 `prepare()` 与
+     * `assemblePromptLayers()`。这里不拼第二份「给人看」的消息。
+     *
+     * 不发模型请求、不改存档：预览只读设置与目录，随后恢复原绑定。
+     */
+    async previewMessages(task='advance'){
+      const phase=task==='repair'?'repair':'observe';
+      return withTask(task,async()=>{
+        const captured=scope();
+        if(!captured.state.chatId)throw Error('请先打开一个酒馆聊天');
+        const text=await sourceText(captured);
+        const result=await request('POST','/sql/chat/preview',{chatUid:captured.state.chatId,chatId:captured.state.chatId,
+          userText:text.userText,assistantText:text.assistantText,playerName:context()?.name1??'',phase});
+        return {...result,task,phase,viewMode,
+          policyVersion:typeof settings?.promptPolicyVersion==='string'?settings.promptPolicyVersion:null,
+          capabilities:Array.isArray(settings?.spatialCapabilities)?[...settings.spatialCapabilities]:[]};
+      },false);
+    },
     async undo(){const messageId=latest.meta.rollbackMessageId;if(messageId===null||messageId===undefined)throw Error('没有可回退的已提交回合');
       const captured=scope();const result=await request('POST','/sql/chat/rollback',{chatUid:captured.state.chatId,chatId:captured.state.chatId,assistantMessageId:String(messageId)});
       if(result.coreSaved!==true)throw Error(result.issues?.map(x=>x.message).join('；')||'回退未保存');await core.refresh();await refresh(true);},

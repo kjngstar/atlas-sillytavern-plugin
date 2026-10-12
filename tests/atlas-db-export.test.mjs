@@ -3,7 +3,7 @@
  *
  * 覆盖：
  * - 导出/导入 hash 一致：export → encodeSnapshot → decodeSnapshot 逐字节相等、sha256 一致，
- *   用解码结果重新 open 后 20 张表的数据行数不变；
+ *   用解码结果重新 open 后全部用户表（schema3 = 21 张）的数据行数不变；
  * - 版本高于实现拒绝写且不清库（DB_SCHEMA_UNSUPPORTED，原数据仍可读）；
  * - hash / 长度 / base64 不符分别拒绝（ENVELOPE_HASH_MISMATCH / ENVELOPE_LENGTH_MISMATCH /
  *   ENVELOPE_BASE64_INVALID），任何失败都不返回 bytes；
@@ -18,6 +18,7 @@ import { makeSeedWith, IDS, countRows, userTables, foreignKeyCheck } from './fix
 import { createSqlRepository } from '../src/atlas-db-repository.ts';
 import { decodeSnapshot, encodeSnapshot, envelopeSummary, sha256Hex } from '../src/atlas-db-envelope.ts';
 import { ATLAS_SQL_VENDOR_FILES, verifySqlVendorAssets } from '../src/atlas-db-assets.ts';
+import { USER_TABLE_COUNT } from '../src/atlas-db-schema.ts';
 
 const SQL = await (await import('sql.js')).default();
 
@@ -76,10 +77,10 @@ test('T27-01 导出/导入 hash 一致：bytes 逐字节相等、sha256 一致�
     assert.equal(decoded.envelope.assetCount, undefined);
     assert.equal(envelopeSummary(decoded.envelope).assetCount, 0);
 
-    // 用解码结果重新打开：20 张表行数与 ID 全部不变。
+    // 用解码结果重新打开：全部用户表（含建设进度表）行数与 ID 全部不变。
     reopened = await openRepo(decoded.bytes);
     const tables = userTables(seed.db);
-    assert.equal(tables.length, 20);
+    assert.equal(tables.length, USER_TABLE_COUNT);
     for (const table of tables) {
       assert.equal(countAll(reopened.db, table), countAll(seed.db, table), `${table} 行数必须不变`);
     }
@@ -110,7 +111,7 @@ test('T27-02 版本高于实现：拒绝写且不清库，原存档仍能读出�
 
     // 同一份原始 bytes 仍能打开并读到原有行：没有被清成空库。
     reopened = await openRepo(bytes);
-    assert.equal(userTables(reopened.db).length, 20);
+    assert.equal(userTables(reopened.db).length, USER_TABLE_COUNT);
     assert.equal(countRows(reopened.db, 'characters', BRANCH), 4);
     assert.equal(countRows(reopened.db, 'maps', BRANCH), 2);
     assert.equal(countRows(reopened.db, 'locations', BRANCH), 3);

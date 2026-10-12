@@ -7,7 +7,7 @@
  * - `branches.parent_branch_id` / `fork_turn_id` 指回，`head_turn_id` 是分叉 turn；
  * - 历史 `turns` 不复制（分叉分支的 turn 数远小于父分支总数）；
  * - 重复分支 ID → BRANCH_EXISTS；不存在的基点 turn → REF_UNKNOWN；
- * - 分叉后 `foreign_key_check` 为空、用户表仍恰 20 张。
+ * - 分叉后 `foreign_key_check` 为空、用户表数量不变（含建设进度表，schema3 = 21 张）。
  */
 
 import test from 'node:test';
@@ -16,6 +16,7 @@ import { makeSeedWith, IDS, countRows, foreignKeyCheck, inTransaction, selectOne
 import { FORK_COPY_TABLES, forkBranch, inspectForkBranch } from '../src/atlas-db-branches.ts';
 import { createRow } from '../src/atlas-db-defaults.ts';
 import { replayRequiredIssue, retryFailedGroups } from '../src/atlas-db-retry.ts';
+import { USER_TABLE_COUNT } from '../src/atlas-db-schema.ts';
 
 const SQL = await (await import('sql.js')).default();
 
@@ -214,7 +215,7 @@ test('T14-03 分叉后父子分支相互独立：一方的写不出现于另一�
     assert.equal(selectOne(db, 'locations', FORK_ID, 'L_MAIN'), null);
 
     assert.deepEqual(foreignKeyCheck(db), []);
-    assert.equal(userTables(db).length, 20);
+    assert.equal(userTables(db).length, USER_TABLE_COUNT);
   } finally {
     seed.close();
   }
@@ -267,12 +268,12 @@ test('T14-04 重复分支 ID 拒绝（BRANCH_EXISTS），不存在的基点 turn
   }
 });
 
-test('T14-05 分叉后外键检查为空、20 张用户表不变、身份与详情配对', async () => {
+test('T14-05 分叉后外键检查为空、用户表数量不变（schema3 = 21）、身份与详情配对', async () => {
   const { seed } = await freshForked();
   try {
     const db = seed.db;
     assert.deepEqual(foreignKeyCheck(db), []);
-    assert.equal(userTables(db).length, 20);
+    assert.equal(userTables(db).length, USER_TABLE_COUNT);
 
     const kinds = db.exec(`SELECT kind, COUNT(*) FROM entity_keys WHERE branch_id = ? GROUP BY kind ORDER BY kind`, [FORK_ID]);
     const counts = Object.fromEntries(kinds[0].values.map((row) => [String(row[0]), Number(row[1])]));

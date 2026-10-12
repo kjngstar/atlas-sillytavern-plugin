@@ -188,7 +188,7 @@ export function queryCatalog(ctx: ViewContext, query: ViewQuery): ViewResult {
     const id = String(row.id);
     const locationId = row.location_id === null || row.location_id === undefined ? null : String(row.location_id);
     if (kind === 'location') return visibility.knownLocations.has(id);
-    if (kind === 'character') return visibility.knownCharacters.has(id);
+    if (kind === 'character') return id === visibility.povId || visibility.knownCharacters.has(id);
     if (kind === 'item') return visibility.visibleItems.has(id);
     if (kind === 'event') {
       if (String(row.secrecy ?? 'restricted') !== 'public') return false;

@@ -14,6 +14,9 @@ import { queryBound } from './atlas-db-runtime.ts';
 import { queryMapView } from './atlas-db-views.ts';
 import type { ViewContext } from './atlas-db-views.ts';
 import { sqlVisibility } from './atlas-sql-visibility.ts';
+import { assessMapCompleteness } from './atlas-map-assessment.ts';
+import type { MapAssessmentV1 } from './atlas-map-assessment.ts';
+import { boundCorridorIdOf, resolveSpatialProfile } from './atlas-spatial-profile.ts';
 import { filterSceneForView, hydrateScene, projectMapView, readSceneFrame } from '../vendor/atlas-spatial/index.mjs';
 import type { Diagnostic, SceneDocument } from '../vendor/atlas-spatial/index.mjs';
 import type { ViewQuery, ViewResult } from './atlas-ops-contract.ts';
@@ -28,6 +31,13 @@ export type SpatialSceneItem = {
   coarseList: Array<{ entityId: string; name: string; locationId: string; locationName: string | null }>;
   issues: Diagnostic[];
   sceneStatus: SpatialSceneStatus;
+  /**
+   * P14/R04 §21.1：本图的可核对状态（保存/请求/场景/完整性/度量质量/语义）。
+   *
+   * 与场景**同源**：期望集合取本视图已过滤的成员与点位，已表示集合取同一个（已过滤的）场景。
+   * UI 不需要、也不允许用图标数量自己猜。
+   */
+  assessment: MapAssessmentV1;
 };
 
 function parseFrame(raw: unknown): Record<string, unknown> | null {
@@ -43,12 +53,12 @@ function parseFrame(raw: unknown): Record<string, unknown> | null {
   return raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : null;
 }
 
-function readMapFrames(ctx: ViewContext): Map<string, Record<string, unknown> | null> {
-  const out = new Map<string, Record<string, unknown> | null>();
+function readMapRows(ctx: ViewContext): Map<string, Record<string, unknown>> {
+  const out = new Map<string, Record<string, unknown>>();
   for (const raw of queryBound(ctx.db, "SELECT * FROM maps WHERE branch_id = ? AND status = 'active'", [ctx.branchId])) {
     const decoded = decodeRow('maps', raw as Record<string, unknown>, { allowExtra: true });
     const row = (decoded.ok ? decoded.row : raw) as Record<string, unknown>;
-    out.set(String(row.id), parseFrame(row.frame_json));
+    out.set(String(row.id), row);
   }
   return out;
 }
@@ -68,7 +78,12 @@ export function querySpatialScene(ctx: ViewContext, query: ViewQuery): ViewResul
   const mapMeta = mapView.metadata as Record<string, unknown>;
   if (mapMeta.stale === true) return mapView;
 
-  const viewItems = mapView.items as Array<{ mapId: string; coarseList?: Array<{ entityId: string; name: string; locationId: string; locationName: string | null }> }>;
+  const viewItems = mapView.items as Array<{
+    mapId: string;
+    points?: Array<Record<string, unknown>>;
+    routes?: Array<Record<string, unknown>>;
+    coarseList?: Array<{ entityId: string; name: string; locationId: string; locationName: string | null }>;
+  }>;
   if (viewItems.length === 0) {
     return {
       branchId: ctx.branchId,
@@ -78,7 +93,14 @@ export function querySpatialScene(ctx: ViewContext, query: ViewQuery): ViewResul
     };
   }
 
-  const frames = readMapFrames(ctx);
+  const mapRows = readMapRows(ctx);
+  const frames = new Map<string, Record<string, unknown> | null>();
+  for (const [mapId, row] of mapRows) frames.set(mapId, parseFrame(row.frame_json));
+  // P14/R04 §21.1–21.2：完整性评估要用的成员与路线。地点/路线只读一次，避免逐图重复查询。
+  const locationRows = queryBound(ctx.db, "SELECT * FROM locations WHERE branch_id = ? AND status = 'active'", [ctx.branchId]) as Array<Record<string, unknown>>;
+  const routeRows = queryBound(ctx.db, 'SELECT * FROM routes WHERE branch_id = ?', [ctx.branchId]) as Array<Record<string, unknown>>;
+  const locationById = new Map<string, Record<string, unknown>>();
+  for (const row of locationRows) locationById.set(String(row.id), row);
   const visibility = sqlVisibility(ctx);
   const scope = {
     chatId: ctx.chatId ?? `branch:${ctx.branchId}`,
@@ -160,12 +182,65 @@ export function querySpatialScene(ctx: ViewContext, query: ViewQuery): ViewResul
       }
     }
 
+    const coarseList = (projection.coarseList ?? []) as SpatialSceneItem['coarseList'];
+
+    // ── P14/R04 §21.1–21.2：完整性评估 ────────────────────────────────────
+    // 期望集合**只**来自本视图已经过滤过的内容（点位/粗定位名单/可见成员），
+    // 这样 POV 在计算之前就过滤完了，秘密成员既不会进 missingIds，也不会改变数量。
+    const mapRow = mapRows.get(mapId) ?? { id: mapId, frame_json: frame };
+    const containerId = mapRow.container_location_id ? String(mapRow.container_location_id) : '';
+    const container = containerId ? locationById.get(containerId) ?? null : null;
+    const visible = (id: string): boolean => scope.viewMode !== 'pov' || visibility.knownLocations.has(id);
+    const members = locationRows.filter((row) => String(row.map_id ?? '') === mapId && visible(String(row.id)));
+    const profile = resolveSpatialProfile({
+      map: mapRow,
+      container,
+      corridorEntityId: boundCorridorIdOf(mapRow),
+      members,
+      routes: routeRows.filter((row) => containerId !== ''
+        && (String(row.from_location_id ?? '') === containerId || String(row.to_location_id ?? '') === containerId)),
+    });
+    const points = (viewItem.points ?? []) as Array<Record<string, unknown>>;
+    const knownEntityIds = new Set<string>([
+      ...visibility.knownLocations,
+      ...visibility.visibleCharacters,
+      ...visibility.visibleItems,
+    ]);
+    for (const row of members) knownEntityIds.add(String(row.id));
+    if (containerId) knownEntityIds.add(containerId);
+    const visibleRoutes = ((viewItem.routes ?? []) as Array<Record<string, unknown>>).map((route) => ({
+      id: route.routeId,
+      from_location_id: route.fromLocationId,
+      to_location_id: route.toLocationId,
+      // 路线几何用 DTO 里**已投影**的那份：raw 行只有 geometry_json，不能拿来判「有没有几何」。
+      geometry: route.geometry ?? null,
+    }));
+    const assessment = assessMapCompleteness({
+      map: mapRow,
+      // 评估只认**本视图实际下发的**场景：POV 已在前面过滤完，秘密成员不会进
+      // expectedIds / renderedIds / missingIds，也不会改变数量与诊断。
+      scene: scene ?? null,
+      container,
+      profile: { layoutKind: profile.layoutKind, unsupported: profile.unsupported },
+      members,
+      characters: points.filter((point) => point.kind === 'character').map((point) => ({ id: point.entityId })),
+      items: points.filter((point) => point.kind === 'item').map((point) => ({ id: point.entityId })),
+      listIds: coarseList.map((entry) => entry.entityId),
+      routes: visibleRoutes,
+      knownEntityIds,
+      // 保存状态只由最终 ACK 决定；读视图读的是**已发布**的分支库，预览路径必须用 receipt 覆盖。
+      saveState: 'saved',
+      // 没有下发场景时，下发的状态就是权威（invalid/missing），不让评估另算一个。
+      ...(scene ? {} : { sceneState: sceneStatus }),
+    });
+
     items.push({
       mapId,
       scene,
-      coarseList: (projection.coarseList ?? []) as SpatialSceneItem['coarseList'],
+      coarseList,
       issues,
       sceneStatus: scene ? 'ready' : sceneStatus,
+      assessment,
     });
   }
 

@@ -23,11 +23,15 @@ import { reconcileOccupantsSpec, placeLooseItems } from './atlas-spatial-occupan
 import { applySceneGroup, buildSceneMutation, compileSceneGroup } from '../vendor/atlas-spatial/index.mjs';
 import {
   SPATIAL_REQUEST_KEY,
+  alignSqlFrameToPhysicalSize,
   ensureInitialSpatialFrame,
+  normalizeFrame,
   readSpatialFrame,
   spatialIssue,
   type SpatialScope,
 } from './atlas-spatial-frame.ts';
+import { resolveMapSpaceSize, readSpaceCanonical, locationSpaceSize } from './atlas-space-canonical.ts';
+import {completeLayoutClosure,supportedCorridor,normalizePlannedFrame} from './atlas-layout-closure.ts';
 
 type SqlRow = Record<string, unknown>;
 
@@ -49,10 +53,13 @@ export type ApplyPendingInput = {
   turnId: string;
   clockS?: number;
   maxJobs?: number;
+  autoPlan?: boolean;
+  sourceText?: string;
   ports: SpatialPorts;
 };
 
 export type ApplyPendingResult = {
+  completedMapIds?: string[];
   groups: GroupResult[];
   issues: Issue[];
   /** 已处理（成功/重复）的 requestId。 */
@@ -248,8 +255,8 @@ function rectOf(row: unknown): { x: number; y: number; w: number; h: number } | 
  * 这一步走自己的 savepoint：失败时整组恢复，已应用的场景不受影响。
  */
 function applyLooseItemMarkers(input: LoosePassInput): void {
-  const { db, mapId, markers, scope, isCurrent, turnId, operationId, ports } = input;
-  if (markers.length === 0) return;
+  const { db, mapId, scope, isCurrent, turnId, operationId, ports } = input;
+  if (input.markers.length === 0) return;
   if (!isCurrent()) return;
   const mapRow = readMapRow(db, mapId, scope.branchId, ports);
   if (!mapRow) return;
@@ -257,6 +264,14 @@ function applyLooseItemMarkers(input: LoosePassInput): void {
   const scene = read.scene as unknown as SqlRow | null;
   const layout = (scene?.layout ?? null) as SqlRow | null;
   if (!scene || layout?.kind !== 'floor') return;
+
+  // Child-space projection may have supplied a real furniture binding after
+  // occupant reconciliation. Preserve that compiled binding in the loose pass.
+  const boundIds = new Set((Array.isArray(layout.items) ? (layout.items as SqlRow[]) : [])
+    .filter((item) => typeof item.on === 'string' && item.on.length > 0)
+    .map((item) => String(item.id)));
+  const markers = input.markers.filter((item) => !boundIds.has(item.id));
+  if (markers.length === 0) return;
 
   const regions = new Map<string, Array<{ x: number; y: number }>>();
   for (const room of Array.isArray(layout.rooms) ? (layout.rooms as SqlRow[]) : []) {
@@ -634,6 +649,7 @@ export function applyPendingSpatialRequests(input: ApplyPendingInput): ApplyPend
   const issues: Issue[] = [];
   const processed: string[] = [];
   const pending: string[] = [];
+  const completedMapIds=new Set<string>();
   const ports = input.ports;
   const maxJobs = Number.isInteger(input.maxJobs) && (input.maxJobs as number) > 0 ? (input.maxJobs as number) : DEFAULT_MAX_JOBS;
   const turnId = input.turnId;
@@ -658,7 +674,7 @@ export function applyPendingSpatialRequests(input: ApplyPendingInput): ApplyPend
   const queue = collected.pending;
   if (queue.length === 0) return { groups, issues, processed, pending };
 
-  const locations = readTable(input.db, 'locations', scope.branchId, ports);
+  let locations = readTable(input.db, 'locations', scope.branchId, ports);
   const characters = readTable(input.db, 'characters', scope.branchId, ports);
   const items = readTable(input.db, 'items', scope.branchId, ports);
   const maps = readTable(input.db, 'maps', scope.branchId, ports);
@@ -668,6 +684,7 @@ export function applyPendingSpatialRequests(input: ApplyPendingInput): ApplyPend
   let stoppedByStale = false;
   for (let index = 0; index < queue.length; index += 1) {
     const job = queue[index];
+    locations=readTable(input.db,'locations',scope.branchId,ports);
     if (processed.length >= maxJobs) {
       pending.push(job.requestId);
       continue;
@@ -687,18 +704,41 @@ export function applyPendingSpatialRequests(input: ApplyPendingInput): ApplyPend
       pending.push(job.requestId);
       continue;
     }
+    if(input.autoPlan&&completedMapIds.has(job.mapId)&&!normalizeFrame(mapRow.frame_json).atlasLayoutRequest){processed.push(job.requestId);continue;}
+    if(input.autoPlan){
+      const size=resolveMapSpaceSize({maps:readTable(input.db,'maps',scope.branchId,ports),locations,mapRow,branchId:scope.branchId});
+      const normalized=size?normalizePlannedFrame(mapRow,size.resolution,locations,[...characters,...items],turnId,job.operationId+':frame'):null;
+      if(normalized){
+        const group={id:'layout-frame:'+job.operationId,opIds:[job.operationId+':frame'],dependsOn:[],readSet:[{table:'maps',rowId:job.mapId,rowRev:Number(mapRow.row_rev)}],mutations:[normalized]};
+        const applied=ports.applyGroups(input.db,[group],{branchId:scope.branchId,turnId,attemptId:ports.attemptId??'spatial',validate:true,journal:true});
+        groups.push(...applied.groups);
+        if(applied.groups.some(g=>g.status==='rejected'||g.status==='blocked')||applied.journalIssues.length){issues.push({code:'SPACE_FRAME_FAILED',path:'$.layout',message:'已知空间幅面未通过候选校验，原场景保留',severity:'error',retryable:false});continue;}
+        mapRow=readMapRow(input.db,job.mapId,scope.branchId,ports)??mapRow;
+      }
+    }
 
     // 新空地图先初始化一致尺度（有 scene / 已定位 / 已锁定时 retained，不写）。
     // W04：先按最后 SQL 归属对账占用者，再把结果喂给生成器。
     // 没有语义结构变化时这只是更新视觉锚点，不会重生房间/城市。
     const spec = plain(job.request.spec) ? { ...job.request.spec } : {};
+    if(input.autoPlan&&job.kind==='floor'&&!spec.corridorLocationRef){
+      const corridor=supportedCorridor(mapRow,locations,input.sourceText??'');
+      if(corridor)spec.corridorLocationRef=corridor;
+    }
     const frameRead = readSpatialFrame(mapRow.frame_json, { branchId: scope.branchId, mapId: job.mapId }, { mapId: job.mapId });
+    // P12/R03 §19.4：对账前先读本空间权威。请求省略 items 时，账本里的「物品↔陈设」绑定是权威，
+    // 不能让对账把已摆好的物品判成地面物品（那会掉到地上、并抹掉账本里的 itemId）。
+    const ledgerForOccupants = readSpaceCanonical(
+      plain(mapRow.frame_json) ? mapRow.frame_json : null,
+      typeof mapRow.container_location_id === 'string' ? mapRow.container_location_id : undefined,
+    );
     const occupants = reconcileOccupantsSpec({
       scene: frameRead.scene,
       requestSpec: spec,
       locations,
       characters,
       items,
+      spaceCanonical: ledgerForOccupants.canonical,
     });
     issues.push(...occupants.issues);
     spec.actors = occupants.spec.actors;
@@ -777,7 +817,90 @@ export function applyPendingSpatialRequests(input: ApplyPendingInput): ApplyPend
       mapRow = readMapRow(input.db, job.mapId, scope.branchId, ports) ?? mapRow;
     }
 
-    const compiled = compileSceneGroup({
+    // ── P12/R03 §19.3：空间尺寸已知、幅面表达不了 → 未锁定时调整 cols/rows + mpp ──
+    // 只在该空间有**可追踪**尺寸（作者确认 / canonical）或本图**首次出图**时动手：
+    // 老图仅凭父图足迹不改幅面（避免把已画好的图重新标定）。锁/确认幅面不符 → 明确诊断、不改锁。
+    const firstGeneration = (() => {
+      const frame = normalizeFrame(mapRow.frame_json);
+      return frame.atlasScene === undefined || frame.atlasScene === null;
+    })();
+    const currentMaps=readTable(input.db,'maps',scope.branchId,ports);
+    const spaceSize = resolveMapSpaceSize({ maps:currentMaps, locations, mapRow, branchId: scope.branchId, firstEstimate: null });
+    if (spaceSize) {
+      issues.push(...spaceSize.issues);
+      // §19.2：尺寸选择顺序的**裁决**也属于本轮回执 —— 「双方确认且矛盾」的 SPACE_SIZE_CONFLICT 在这里。
+      issues.push(...spaceSize.resolution.issues);
+      const basis = spaceSize.resolution.source;
+      if (basis === 'author' || basis === 'canonical' || firstGeneration) {
+        const alignment = alignSqlFrameToPhysicalSize({
+          mapRow,
+          widthM: spaceSize.resolution.widthM,
+          heightM: spaceSize.resolution.heightM,
+          scope,
+          currentScope: scope,
+          expectedRowRev: Number(mapRow.row_rev ?? 1),
+          turnId,
+          operationId: `${job.operationId}:fit`,
+          source: { kind: basis, referenceId: spaceSize.locationId },
+        });
+        issues.push(...alignment.issues);
+        // 空间权威（作者确认 / canonical）与幅面表达不了时：**明确列冲突并停止这张图**，
+        // 绝不带病生成（否则场景会按另一个物理尺寸画出来，等于发布半边变化）。
+        if (!alignment.ok && alignment.status !== 'retained' && (basis === 'author' || basis === 'canonical')) {
+          const failed = recordFailedSpatialRequest({
+            db: input.db,
+            mapRow,
+            mapId: job.mapId,
+            request: job.request,
+            issues: [...alignment.issues, ...issues.filter((i) => i.severity === 'error')],
+            turnId,
+            operationId: `${job.operationId}:failed`,
+            ports,
+          });
+          if (failed.group) groups.push(failed.group);
+          continue;
+        }
+        if (alignment.mutation) {
+          const fitGroup = {
+            id: `layout-fit:${job.operationId}`,
+            opIds: [`${job.operationId}:fit`],
+            dependsOn: [],
+            readSet: [{ table: 'maps', rowId: job.mapId, rowRev: Number(mapRow.row_rev ?? 1) }],
+            mutations: [alignment.mutation],
+          };
+          const appliedFit = ports.applyGroups(input.db, [fitGroup], {
+            branchId: scope.branchId,
+            turnId,
+            attemptId: ports.attemptId ?? 'spatial',
+            validate: true,
+            journal: true,
+          });
+          groups.push(...appliedFit.groups);
+          for (const message of appliedFit.journalIssues) {
+            issues.push({ code: 'JOURNAL_WRITE_FAILED', path: '$.turn_changes', message, severity: 'error', retryable: false });
+          }
+          const firstFit = appliedFit.groups[0] ?? null;
+          if (!firstFit || firstFit.status === 'rejected' || firstFit.status === 'blocked') {
+            const failed = recordFailedSpatialRequest({
+              db: input.db,
+              mapRow,
+              mapId: job.mapId,
+              request: job.request,
+              issues: [...alignment.issues, ...issues.filter((i) => i.severity === 'error')],
+              turnId,
+              operationId: `${job.operationId}:failed`,
+              ports,
+            });
+            if (failed.group) groups.push(failed.group);
+            continue;
+          }
+          // 重读：编译必须用调整幅面后的候选行。
+          mapRow = readMapRow(input.db, job.mapId, scope.branchId, ports) ?? mapRow;
+        }
+      }
+    }
+
+    let compiled = compileSceneGroup({
       request: { kind: job.kind, spec },
       scope,
       currentScope: { ...scope, viewMode: 'author' },
@@ -786,9 +909,26 @@ export function applyPendingSpatialRequests(input: ApplyPendingInput): ApplyPend
       characters,
       items,
       routes,
+      maps: currentMaps,
+      autoPlan: input.autoPlan===true,
       turnId,
       operationId: `${job.operationId}:scene`,
-    }) as { ok: boolean; status: string; scene?: unknown; issues?: Array<Record<string, unknown>>; group?: Record<string, unknown> | null };
+      // §19.2：把宿主解析出的尺寸权威交给编译器 —— 作者确认尺寸要**被记录**（basis=author），
+      // 已确认的矛盾事实不被生成器改写。少了它，账本永远是 estimated，§19.2 的「双方确认」分支不可达。
+      spaceSize,
+      childSpaces: Object.fromEntries(locations.filter(l=>l.map_id===job.mapId).flatMap(l=>{
+        const child=locationSpaceSize({maps:currentMaps,locations,locationId:String(l.id),branchId:scope.branchId});
+        const holder=currentMaps.find(m=>m.container_location_id===l.id&&m.status==='active');
+        const locked=holder?readSpaceCanonical(holder.frame_json,String(l.id)).canonical?.size?.locked:false;
+        return child?[[String(l.id),{...child,locked}]]:[];
+      })),
+    }) as { ok: boolean; status: string; scene?: unknown; issues?: Array<Record<string, unknown>>; group?: Record<string, unknown> | null;completedMapIds?:string[] };
+
+    if(input.autoPlan&&compiled.ok&&compiled.group){
+      const closure=completeLayoutClosure({group:compiled.group as never,maps:currentMaps,locations,characters,items,routes,scope,turnId,operationId:job.operationId});
+      if(!closure.ok)compiled={ok:false,status:'failed',issues:closure.issues?.map((i:SqlRow)=>({...i,severity:'error'})) as never};
+      else compiled={...compiled,group:closure.group as never,completedMapIds:closure.completedMapIds};
+    }
 
     const kitIssues = (compiled.issues ?? []).map((item) =>
       spatialIssue(item as never, { mapId: job.mapId, branchId: scope.branchId, revision: scope.revision, operationId: job.operationId, turnId }),
@@ -846,6 +986,7 @@ export function applyPendingSpatialRequests(input: ApplyPendingInput): ApplyPend
     }
 
     groups.push(...(applied.groups ?? []));
+    for(const mapId of compiled.completedMapIds??[])completedMapIds.add(mapId);
     // W05：地面物品没有支撑家具组时，用房间可通行区补视觉点（只追加 scene.layout.items）。
     applyLooseItemMarkers({
       db: input.db,
@@ -865,5 +1006,5 @@ export function applyPendingSpatialRequests(input: ApplyPendingInput): ApplyPend
   if (!stoppedByStale && !isCurrent()) {
     issues.push({ code: 'STALE_SCOPE', path: '$.scope', message: '布局处理期间世界已切换：已应用的组随候选一并放弃。', severity: 'error', retryable: false });
   }
-  return { groups, issues, processed, pending };
+  return { groups, issues, processed, pending,...(input.autoPlan?{completedMapIds:[...completedMapIds]}:{}) };
 }

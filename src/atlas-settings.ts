@@ -22,6 +22,8 @@ import {
   type AtlasApiPreset,
 } from "./atlas-api-client.ts";
 import { DEFAULT_SQL_PROMPT_SEGMENTS, buildSqlCompatiblePrompt } from './atlas-sql-prompts.ts';
+import { PROMPT_POLICY_VERSION } from './atlas-prompt-layers.ts';
+import { SPATIAL_CAPABILITIES } from './atlas-world-contract.ts';
 
 /**
  * C02 / E01：推进输出协议的类型。
@@ -1258,6 +1260,15 @@ export interface AtlasSettingsView {
     segments: Array<{ role: string; name: string; mainSlot?: string; content: string }>;
   };
   builtInSqlPrompt: AtlasSettingsView['builtInPrompt'];
+  /**
+   * P14/§21.5：策略层版本号。用户据此判断自己的预设是不是旧策略；升级**不会**改写已另存的预设。
+   */
+  promptPolicyVersion: string;
+  /**
+   * P14/§21.5：本版本**真实声明**的空间程序能力（只有全部打通的能力才在这里）。
+   * 界面必须照实展示，不能把未实现的能力写成已支持。
+   */
+  spatialCapabilities: string[];
   autoCommit: boolean;
   /** 0.9.22 推演是否附带世界书资料块（审核拦截逃生门）。 */
   loreSupplementEnabled: boolean;
@@ -1342,6 +1353,9 @@ export function settingsViewV2(settings: AtlasServerSettingsV2): AtlasSettingsVi
       id: BUILTIN_PROMPT_PRESET_ID, name: '内置 SQL 世界维护策略', readOnly: true,
       systemPrompt: '', segments: DEFAULT_SQL_PROMPT_SEGMENTS.map(s => ({ role: s.role, name: s.name!, content: s.content })),
     },
+    // P14/§21.5：策略版本与已声明能力——照实报，不把未实现的能力写进来。
+    promptPolicyVersion: PROMPT_POLICY_VERSION,
+    spatialCapabilities: [...SPATIAL_CAPABILITIES],
     autoCommit: settings.autoCommit,
     loreSupplementEnabled: settings.loreSupplementEnabled ?? true,
     worldTurnProtocol: normalizeWorldTurnProtocol(settings.worldTurnProtocol),

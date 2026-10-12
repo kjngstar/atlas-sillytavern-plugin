@@ -1,7 +1,7 @@
 /**
  * atlas-db-schema.test.mjs — T02 schema 断言（§17A A07–A28 完成定义）。
  *
- * 覆盖：恰 20 用户表、复合 FK 跨分支拒绝、零/有限负坐标有效、未知坐标 NULL、
+ * 覆盖：恰 21 用户表（schema3）、复合 FK 跨分支拒绝、零/有限负坐标有效、未知坐标 NULL、
  * 知识持有者互斥、同人双行程拒绝，以及各表 CHECK 的实际拒绝行为。
  */
 
@@ -17,6 +17,8 @@ import {
   tableColumnNames,
   USER_TABLE_COUNT,
   ATLAS_INDEXES,
+  SCHEMA_TABLE_COUNTS,
+  expectedTableCount,
 } from '../src/atlas-db-schema.ts';
 
 const SQL = await (await import('sql.js')).default();
@@ -25,17 +27,22 @@ async function fresh() {
   return makeSeedWith(SQL);
 }
 
-test('T02-01 用户表恰好 20 张，且覆盖 §1.1 总表单', async () => {
+test('T02-01 用户表恰好 21 张（schema3），且覆盖 §1.1 总表单', async () => {
   const seed = await fresh();
   try {
     const tables = userTables(seed.db);
-    assert.equal(tables.length, 20);
-    assert.equal(USER_TABLE_COUNT, 20);
+    // P09A：schema3 = 20 张既有表 + construction_progress。表数按**版本常量**断言，不写死数字。
+    assert.equal(ATLAS_SCHEMA_VERSION, 3);
+    assert.equal(SCHEMA_TABLE_COUNTS[3], 21);
+    assert.equal(expectedTableCount(3), 21);
+    assert.equal(tables.length, expectedTableCount(ATLAS_SCHEMA_VERSION));
+    assert.equal(USER_TABLE_COUNT, expectedTableCount(ATLAS_SCHEMA_VERSION));
     assert.deepEqual(tables, [...tables].sort());
     const expected = [
       'maps', 'locations', 'characters', 'items', 'factions', 'relations', 'routes', 'actions', 'journeys',
       'events', 'information', 'rumor_fronts', 'knowledge', 'channels',
       'entity_keys', 'branches', 'turns', 'turn_changes', 'mention_candidates', 'sync_outbox',
+      'construction_progress',
     ].sort();
     assert.deepEqual(tables, expected);
   } finally {
@@ -519,9 +526,9 @@ test('T02-25 内部表不套用共同字段 C；业务表主键为 (branch_id, i
   assert.deepEqual(primaryKeyColumns('mention_candidates').slice().sort(), ['branch_id', 'id']);
 });
 
-test('T02-26 所有 20 张表都有列清单；未知表名不通过 isKnownTable', () => {
+test('T02-26 所有 21 张表都有列清单；未知表名不通过 isKnownTable', () => {
   const tables = Object.keys(ATLAS_TABLE_COLUMNS);
-  assert.equal(tables.length, 20);
+  assert.equal(tables.length, expectedTableCount(ATLAS_SCHEMA_VERSION));
   for (const table of tables) {
     assert.ok(tableColumnNames(table).length > 2, `${table} 列数异常`);
   }
@@ -561,7 +568,7 @@ test('T02-29 installSchema 幂等：重复安装不报错且表数不变', async
   try {
     installSchema(seed.db);
     installSchema(seed.db);
-    assert.equal(userTables(seed.db).length, 20);
+    assert.equal(userTables(seed.db).length, USER_TABLE_COUNT);
   } finally {
     seed.close();
   }

@@ -96,6 +96,12 @@ function boot({data=BUILDING_DATA,host={},preferences={version:1,singleClickEnte
 function withUI(t,options){const ui=boot(options);t.after(ui.dispose);return ui;}
 
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
+test('生成布局直接完成空间规划，界面不要求用户修复或选择绘图档案',async t=>{
+ const ui=withUI(t);assert.equal(ui.w.document.querySelector('[data-map-profile]'),null);
+ ui.preview.page('diag');await tick();assert.equal(ui.w.document.querySelector('[data-history-preview]'),null);
+ assert.equal(ui.w.document.querySelector('[data-history-apply]'),null);
+});
+
 
 test('世界书读取开关呈现独立状态，点击只调用 ATLAS 读取端口',async t=>{
  const data=structuredClone(BUILDING_DATA);data.LORE=[{id:JSON.stringify(['Book','1']),kind:'Book',title:'城市资料',content:'中性地理资料',enabled:true,atlasReadable:false,keys:[]}];
@@ -419,6 +425,176 @@ test('S05：无备份时入口禁用并说明原因；有备份时显示 SHA256 
   assert.ok(!/\bdisabled\b/.test(ready),'有持久备份时按钮必须可点');
   assert.match(ready,/可导出/);
   assert.match(ready,new RegExp(sha.slice(0,16)),'必须给出 SHA256 让用户核对');
+});
+
+/**
+ * P14/§21.3：回执面板必须把「世界数据已保存 / 布局：… / 缺漏与语义：…」分开显示。
+ * 数据来自真实投影（referenceReceipts → referenceReceiptReport），DOM 只负责画。
+ */
+test('P14：回执面板分层显示保存 / 布局 / 缺漏，官道无场景时不许写「生成完成」',async t=>{
+  const receipts=[
+    {receiptId:'r-map',chatId:'chat-A',status:'committed',recordedAt:1,
+      detail:{operation:'build',coreSaved:true,receipt:{status:'committed',issues:[]},issues:[],
+        build:{sceneSummary:{ready:1,partial:0,missing:0},queue:{pendingTargets:0}}}},
+    {receiptId:'r-road',chatId:'chat-A',status:'committed',recordedAt:2,
+      detail:{operation:'build',coreSaved:true,receipt:{status:'committed',issues:[]},issues:[],
+        build:{sceneSummary:{ready:0,partial:0,missing:1}}}},
+  ];
+  const data=projectReferenceData({state:{chatId:'chat-A',receipts},mapView:view([WORLD,BUILDING_MAP]),
+    catalogView:view(CATALOG),viewMode:'author',scopeKey:'S1'});
+  const ui=withUI(t,{data}),doc=ui.w.document;
+  const tab=doc.querySelector('#dockTabs .dt[data-tab="receipt"]');
+  assert.ok(tab,'回执标签必须存在');
+  tab.click();await tick();
+  const layers=[...doc.querySelectorAll('.receipt-layers')];
+  assert.equal(layers.length,2,'两份地图回执各自分层，普通推演回执不加这三行');
+  const lines=layers.map(row=>[...row.children].map(li=>li.textContent.trim()));
+  assert.deepEqual(lines[0],['世界数据已保存','布局：生成完成','缺漏与语义：暂无可见缺项']);
+  assert.deepEqual(lines[1],['世界数据已保存','布局：更新失败','缺漏与语义：可见缺项 1 个']);
+  assert.ok(layers[1].querySelector('.rl-layout').classList.contains('rl-failed'),'无场景的图要标成更新失败');
+});
+
+/* ── P14/§21.4 · 复制功能的独立验收（真实按钮 + 真实 Clipboard Promise） ── */
+
+/**
+ * 纪律：不做「点了没报错就算通过」。这里检查 Clipboard API 的 Promise 真的被等到，
+ * 成功才提示成功、失败要把错误显示出来；没有 API 时给出替代路径。
+ * 内置浏览器限制与插件缺陷必须分开 —— 不因为 jsdom/某浏览器缺 API 就把通用功能判死。
+ */
+const LOG_FIXTURE = ({id = 'd1', level = 'error', code = 'LAYOUT_TASK_FAILED', message = '布局更新失败'} = {}) => ({
+  mapView: view([WORLD, BUILDING_MAP]), catalogView: view(CATALOG), viewMode: 'author', scopeKey: 'S1',
+  logsView: view([{logId: id, level, code, message, details: {mapId: 'bld-map'}, at: '2026-10-11 09:00'}]),
+});
+const diagData = (options) => projectReferenceData(LOG_FIXTURE(options));
+const clipboardOf = (w, impl) => Object.defineProperty(w.navigator, 'clipboard', {configurable: true, value: impl});
+const toastText = (w) => w.document.getElementById('toastWrap').textContent;
+const flush = () => new Promise((resolve) => setTimeout(resolve, 10));
+
+test('P14：点真实「复制当前列表」按钮 —— Promise 未完成前不许提前报成功，完成后复制的就是列表内容', async t => {
+  const ui = withUI(t, {data: diagData()});
+  const written = []; let settle;
+  clipboardOf(ui.w, {writeText: (text) => {written.push(text); return new Promise((resolve, reject) => {settle = {resolve, reject};});}});
+  ui.preview.page('diag');
+  await tick();
+  const button = ui.w.document.querySelector('[data-copy-diagnostics]');
+  assert.ok(button, '诊断页必须有「复制当前列表」按钮');
+  button.click();
+  await flush();
+  assert.equal(written.length, 1, '按钮点击必须真的调用 Clipboard API');
+  assert.equal(toastText(ui.w).includes('诊断已复制'), false, 'Promise 还没完成，不许提前宣布成功');
+  assert.match(written[0], /LAYOUT_TASK_FAILED/, '复制的必须是当前列表的真实内容');
+  assert.match(written[0], /布局更新失败/);
+  settle.resolve();
+  await flush();
+  assert.match(toastText(ui.w), /诊断已复制到剪贴板/);
+  assert.equal(ui.w.document.querySelectorAll('#toastWrap .toast.warn').length, 0, '成功路径不许顺带报警告');
+});
+
+test('P14：Clipboard 被拒绝时错误必须看得见（不许静默，也不许写成通用缺陷）', async t => {
+  const ui = withUI(t, {data: diagData()});
+  clipboardOf(ui.w, {writeText: () => Promise.reject(new Error('剪贴板被拒绝：document is not focused'))});
+  ui.preview.page('diag');
+  await tick();
+  ui.w.document.querySelector('[data-copy-diagnostics]').click();
+  await flush();
+  const warn = ui.w.document.querySelector('#toastWrap .toast.warn');
+  assert.ok(warn, '被拒绝时必须给可见的警告提示，而不是安静地失败');
+  assert.match(warn.textContent, /剪贴板被拒绝/, '提示要带上真实错误原因，便于定位是浏览器限制还是插件问题');
+});
+
+test('P14：环境没有 Clipboard API 时给替代路径，并把限制说清楚', async t => {
+  const ui = withUI(t, {data: diagData()});
+  assert.equal(ui.w.navigator.clipboard, undefined, 'jsdom 默认没有剪贴板，正是「不支持」这条路径');
+  ui.preview.page('diag');
+  await tick();
+  ui.w.document.querySelector('[data-copy-diagnostics]').click();
+  await flush();
+  const warn = ui.w.document.querySelector('#toastWrap .toast.warn');
+  assert.ok(warn);
+  assert.match(warn.textContent, /当前环境不支持剪贴板/);
+  assert.match(warn.textContent, /导出日志/, '必须给出可用的替代路径，不能只报错');
+});
+
+test('P14：地图 JSON 复制走真实导出结果；Promise 失败时不冒充复制成功', async t => {
+  const file = {scope: {mapCount: 2}, maps: [WORLD, BUILDING_MAP]};
+  const ui = withUI(t, {host: {exportMap: async () => ({filename: 'atlas-map-测试世界-r4.json', file})}});
+  ui.w.URL.createObjectURL = () => 'blob:http://localhost/export-fixture';
+  ui.w.URL.revokeObjectURL = () => {};
+  const written = []; let mode = 'ok';
+  clipboardOf(ui.w, {writeText: (text) => {written.push(text); return mode === 'ok' ? Promise.resolve() : Promise.reject(new Error('剪贴板不可用'));}});
+  ui.preview.go('world');
+  ui.w.document.querySelector('[data-export="map"]').click();
+  await flush();
+  const copy = ui.w.document.querySelector('#modalBody [data-copy-map-export]');
+  assert.ok(copy, '导出弹窗必须有独立的复制按钮（下载另走一条路）');
+  copy.click();
+  await flush();
+  assert.equal(written.length, 1);
+  const parsed = JSON.parse(written[0]);
+  assert.equal(parsed.scope.mapCount, 2, '复制的必须是同一次真实导出的结果');
+  assert.deepEqual(parsed.maps.map((m) => m.mapId), ['world', 'bld-map']);
+  assert.match(toastText(ui.w), /地图 JSON 已复制/);
+  mode = 'fail';
+  copy.click();
+  await flush();
+  assert.match(ui.w.document.querySelector('#toastWrap .toast.warn').textContent, /复制不可用/,
+    'Promise 被拒绝时要撤回成功语气并给出替代做法（展开 JSON 或下载链接）');
+});
+
+/* ── P14/§21.5 · 提示词分层：策略版本 / 能力版本 / 真实预览 ── */
+
+const ENGINE = {policyVersion: 'atlas-policy/2026-10-11', capabilities: ['corridor-binding/v1', 'space-canonical/v1', 'spatial-profile/v1'],
+  activePromptPresetId: null, suggested: {version: 'atlas-policy/2026-10-11', name: '内置 SQL 世界维护策略', segments: [
+    {role: 'system', name: '职责与输出', content: '你是 Atlas 世界状态维护器。', enabled: true},
+    {role: 'system', name: '越权与声明边界（atlas-policy/2026-10-11）', content: '不要把「已保存」声称为整个地图建设完成。', enabled: true}]}};
+const engineUI = (t, host = {}) => withUI(t, {host: {...host, initial: {presets: null, skin: null, preferences: {version: 1, singleClickEnter: false, legendCollapsed: false}, engine: ENGINE}}});
+
+test('P14：提示词页照实显示策略版本与程序真实声明的能力（不把未实现的能力写成已支持）', async t => {
+  const ui = engineUI(t);
+  ui.preview.page('prefs');
+  await tick();
+  const strip = ui.w.document.querySelector('.engine-strip');
+  assert.ok(strip, '提示词页必须有分层现状条');
+  assert.match(strip.textContent, /固定协议 → 用户策略 → 程序任务上下文/);
+  assert.match(strip.textContent, /atlas-policy\/2026-10-11/);
+  for (const capability of ENGINE.capabilities) assert.ok(strip.textContent.includes(capability), `能力 ${capability} 必须显示`);
+  assert.ok(!strip.textContent.includes('/v2'), '未声明的能力版本不得出现在界面上');
+  ui.w.document.querySelector('[data-settings-tab="assignments"]').click();
+  await tick();
+  assert.ok(ui.w.document.querySelector('.engine-strip'), '任务绑定页同样要能看到策略版本与能力');
+});
+
+test('P14：任务「请求预览」走真实组装结果（含分层标注），宿主没有该端口时要看得见', async t => {
+  const host = {previewMessages: async (task) => ({task, phase: task === 'repair' ? 'repair' : 'observe', promptSource: 'preset', coreSaved: false,
+    policyVersion: 'atlas-policy/2026-10-11', capabilities: ['space-canonical/v1'],
+    messages: [{role: 'system', content: '固定协议段', chars: 5}, {role: 'system', name: '作者策略', content: '用户策略段', chars: 5},
+      {role: 'user', content: '任务上下文段', chars: 6}]})};
+  const ui = engineUI(t, host);
+  ui.preview.page('prefs');
+  await tick();
+  ui.w.document.querySelector('[data-settings-tab="assignments"]').click();
+  await tick();
+  const button = ui.w.document.querySelector('[data-task-preview="advance"]');
+  assert.ok(button, '任务绑定必须有自己的请求预览入口');
+  button.click();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const body = ui.w.document.getElementById('modalBody').textContent;
+  assert.match(body, /固定协议/);
+  assert.match(body, /用户策略/);
+  assert.match(body, /任务上下文段/, '预览必须显示实际会发送的消息正文，而不是「已保存的请求配置」');
+  assert.match(body, /atlas-policy\/2026-10-11/);
+  assert.match(body, /space-canonical\/v1/);
+  assert.match(body, /没有发送模型请求/, '必须说明预览只读');
+
+  const denied = engineUI(t);
+  denied.preview.page('prefs');
+  await tick();
+  denied.w.document.querySelector('[data-settings-tab="assignments"]').click();
+  await tick();
+  denied.w.document.querySelector('[data-task-preview="repair"]').click();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.match(denied.w.document.getElementById('toastWrap').textContent, /没有提供请求预览/,
+    '宿主缺端口时必须明确报错，不许静默退回自造的预览');
 });
 
 /* 需要真实浏览器才有意义的断言（禁止在这里用 jsdom 冒充） */

@@ -56,7 +56,7 @@ async function fixture() {
     locationRow(T.DUP_1, { name: '重复间', kind: 'room' }),
     locationRow(T.DUP_2, { name: '重复间', kind: 'room' }),
   ];
-  const maps = [mapRow(T.MAP, { frame_json: JSON.stringify({ origin_x: 0, origin_y: 0, reference_width_cells: 40, reference_height_cells: 30 }) })];
+  const maps = [mapRow(T.MAP, { container_location_id: T.BLD, frame_json: JSON.stringify({ origin_x: 0, origin_y: 0, reference_width_cells: 40, reference_height_cells: 30 }) })];
 
   insertRows(db, 'entity_keys', locations.map((row) => ({ branch_id: BRANCH, id: row.id, kind: 'location' })));
   // 外键可延迟：先落 parent/map 全空的地点 → 再落地图 → 再回填
@@ -295,7 +295,9 @@ test('W07: 结构已 ready 且 contextHash 未变 → 不发建设请求；来�
   assert.ok(first, '没有建设状态时必须发任务');
   assert.deepEqual(first.focusLocationIds, [T.BLD], '结构已建成的焦点不产生缺项');
 
-  // 模拟上一层：布局完成 → 写 atlasWorldFill（M3-12 的口径）
+  // 模拟上一层：布局完成 → 写 atlasWorldFill（M3-12 的口径）。
+  // P07/R04：完成状态必须落在焦点地点**唯一的 active 容器图**上——T_MAP 就是 T_BLD 的内部图，
+  // 写到它的外部图上不算数。
   writeFrame(f.db, T.MAP, { ...(readFrame(f.db, T.MAP) ?? {}), [WORLD_FILL_FRAME_KEY]: {
     version: 1, policyVersion: 1, contextHash: first.contextHash, status: 'ready',
     completedTurnId: TURN, createdLocationIds: [], createdRouteIds: [], remainingLocationIds: [], reasonCode: null,

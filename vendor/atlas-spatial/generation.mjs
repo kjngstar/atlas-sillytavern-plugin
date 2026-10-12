@@ -1,6 +1,7 @@
 import * as E from './layout-core.mjs';
 import * as O from './overview-core.mjs';
-import {KIT_VERSION,SCENE_KIND,SCENE_VERSION,LIMITS,clone,finite,plain,stable,bytes,normalizeScope,diagnostic,failure,parseWholeArguments,checkSceneDocument,OVERVIEW_FEATURE_TYPES,OVERVIEW_SURFACES,OVERVIEW_ZONE_ROLES,OVERVIEW_ZONE_SIZES,OVERVIEW_DENSITIES,OVERVIEW_SECTORS,OVERVIEW_WIDTH_CLASSES,CITY_ENCLOSURES} from './contracts.mjs';
+import {fitEstimatedFloor} from './estimated-fit.mjs';
+import {KIT_VERSION,SCENE_KIND,SCENE_VERSION,LIMITS,clone,finite,plain,stable,bytes,normalizeScope,diagnostic,failure,parseWholeArguments,checkSceneDocument,parseSpaceLocalId,OVERVIEW_FEATURE_TYPES,OVERVIEW_SURFACES,OVERVIEW_ZONE_ROLES,OVERVIEW_ZONE_SIZES,OVERVIEW_DENSITIES,OVERVIEW_SECTORS,OVERVIEW_WIDTH_CLASSES,CITY_ENCLOSURES} from './contracts.mjs';
 
 const label=v=>typeof v==='string'?v.slice(0,120):'';
 const ids=v=>new Set(v instanceof Set?v:Array.isArray(v)?v:[]);
@@ -23,6 +24,15 @@ function setup(value,context,kind){
     else{w=cols;h=rows;units='cells';metricProposal=null;}
   }else{
     if(calibrated&&hasFrame){w=cols*mpp;h=rows*mpp;}
+    // P12/R03 §19.2：canonical 是**物理权威**。已有有效尺寸时，父图轮廓与子图内部布局都必须读它，
+    // 不能各自按 frame 再估一次（SPACE01/SPACE02）。缺失时才落到「首次估计」。
+    // 宿主已按 §19.2 顺序解析过尺寸时（`context.spaceSize`）以它为准：确认矛盾时宿主选的是作者事实，
+    // 而 frame 里的 canonical 可能仍是待裁决的旧事实 —— 不能拿旧账本去画新图。
+    const hostSize=plain(context?.spaceSize)&&finite(context.spaceSize.widthM)&&finite(context.spaceSize.heightM)&&context.spaceSize.widthM>0&&context.spaceSize.heightM>0?context.spaceSize:null;
+    const canonicalSize=hostSize??context?.spaceCanonical?.size;
+    if(canonicalSize&&finite(canonicalSize.widthM)&&finite(canonicalSize.heightM)&&canonicalSize.widthM>0&&canonicalSize.heightM>0){
+      w=canonicalSize.widthM;h=canonicalSize.heightM;
+    }
     if(!finite(w)||!finite(h)||w<=0||h<=0)throw new Error('EXTENT_REQUIRED');
     if(!calibrated){
       if(!hasFrame)throw new Error('FRAME_REQUIRED_FOR_CALIBRATION');
@@ -32,6 +42,14 @@ function setup(value,context,kind){
   }
   if((kind==='floor'&&(w>LIMITS.floorSide||h>LIMITS.floorSide))||(kind==='city'&&(w>LIMITS.citySide||h>LIMITS.citySide)))throw new Error('EXTENT_TOO_LARGE');
   const issues=[],spec={id:map.id,parentId:map.containerLocationId??null,name:label(map.name)||label(input.name)||map.id,width:w,height:h};
+  if(kind==='overview'){
+    // P06/N01：容器类别与名称由程序给出；确认轮廓只认「作者确认的多边形」——
+    // 确认宽高不等于确认矩形轮廓，所以这里只读 areas 锁，不读 room/building 的矩形锁。
+    spec.containerKind=map.containerKind??null;
+    spec.containerName=label(map.containerName)||null;
+    const selfAreaLock=context?.locks?.areas?.[map.containerLocationId];
+    spec.selfAreaPolygon=selfAreaLock?.points?.length>=3?selfAreaLock.points.map(p=>({x:p.x,y:p.y})):null;
+  }
   return {scope,input,map,known,spec,issues,mpp,units,metricProposal,previous:context.previousScene??null};
 }
 const same=(a,b)=>stable(normalizeScope(a))===stable(normalizeScope(b));
@@ -86,7 +104,8 @@ function finish(s,ctx,layoutFn){
   if(previous&&(previous.mapId!==s.map.id||previous.branchId!==s.scope.branchId))return failure('SCENE_SCOPE_MISMATCH','$.previousScene','旧场景属于另一地图或分支');
   if(previous&&s.input.rebuild!==true&&!plain(previous.constraints))s.issues.push(diagnostic('CONSTRAINTS_LEGACY','$.previousScene','旧场景缺少受控约束字段，本次按整图重建语义处理',{severity:'warning'}));
   const inputSignature=stable(s.spec);
-  if(previous?.inputSignature===inputSignature&&!(previous.layout?.issues?.length)&&checkSceneDocument(previous).length===0){return {ok:true,status:s.issues.length?'partial':'reused',scene:clone(previous),issues:s.issues,guard:{scope:s.scope,mapId:s.map.id,inputSignature},metricProposal:s.metricProposal};}
+  const deletedContents=[...deletionSet(s,'contents')];
+  if(previous?.inputSignature===inputSignature&&!(previous.layout?.issues?.length)&&checkSceneDocument(previous).length===0){return {ok:true,status:s.issues.length?'partial':'reused',scene:clone(previous),issues:s.issues,guard:{scope:s.scope,mapId:s.map.id,inputSignature},metricProposal:s.metricProposal,deletedContents};}
   const layout=layoutFn(s.spec,previous?.layout??null);
   for(const issue of layout.issues??[])s.issues.push(diagnostic(issue.code,'$.layout','空间约束未满足',{entityId:issue.id??null}));
   if(!layout.ok)return {ok:false,status:'failed',scene:null,kept:previous?clone(previous):null,issues:s.issues,guard:{scope:s.scope,mapId:s.map.id,inputSignature}};
@@ -96,22 +115,91 @@ function finish(s,ctx,layoutFn){
   // 审查必修1：受控约束字段随场景落盘，供下轮增量合并；POV 视图过滤会剥离该字段。
   if(Array.isArray(s.constraintKeys)&&s.constraintKeys.length)scene.constraints=Object.fromEntries(s.constraintKeys.filter(k=>s.spec[k]!==undefined).map(k=>[k,clone(s.spec[k])]));
   const checks=checkSceneDocument(scene);if(checks.length)return {ok:false,status:'failed',scene:null,kept:previous?clone(previous):null,issues:[...s.issues,...checks]};
-  return {ok:true,status:s.issues.length?'partial':'generated',scene,issues:s.issues,guard:{scope:s.scope,mapId:s.map.id,inputSignature},metricProposal:s.metricProposal};
+  return {ok:true,status:s.issues.length?'partial':'generated',scene,issues:s.issues,guard:{scope:s.scope,mapId:s.map.id,inputSignature},metricProposal:s.metricProposal,deletedContents};
 }
-export function generateFloor(value,context){
+/**
+ * P11/R03 §18：命名走廊绑定。
+ *
+ * - 省略 `corridorLocationRef` = 保持既有绑定（读已保存约束）；`null` = 显式解除。
+ * - 字符串必须是**本图**已登记的真实地点（不是家具局部 ID，也不是别图/远处的同名走廊）。
+ * - 绑定地点从合并后的普通 rooms 里移除（含 previousScene.constraints.rooms 带来的旧条目），
+ *   保证同一实体只表达一次；它仍然是通道，只是不再当普通房间排布。
+ * - 已确认的走廊几何（锁）与程序算出的通道位置冲突时拒绝重建，保留旧场景（绝不删锁后排版）。
+ */
+function rectLockOf(ctx,id){
+  for(const key of ['rooms','buildings']){
+    const v=ctx?.locks?.[key]?.[id];
+    if(v&&finite(v.x)&&finite(v.y)&&finite(v.w)&&finite(v.h)&&v.w>0&&v.h>0)return {x:v.x,y:v.y,w:v.w,h:v.h};
+  }
+  return null;
+}
+export function generateFloor(value,context){return fitEstimatedFloor(generateFloorOnce,value,context);}
+function generateFloorOnce(value,context){
   let s=null;
   try{
     s=setup(value,context,'floor');const ctx=context;
-    s.constraintKeys=['corridorWidth','rooms','contents','actors','items'];
+    s.constraintKeys=['corridorWidth','corridorLocationRef','rooms','contents','actors','items'];
     s.spec.corridorWidth=finite(s.input.corridorWidth)?s.input.corridorWidth:2;
-    s.spec.rooms=collectAndMerge(s,'rooms',LIMITS.rooms,'locations',r=>{const d=ctx.locks?.rooms?.[r.id]?.w>0?dimensions(ctx.locks.rooms[r.id]):dimensions(r);if(d.w>LIMITS.roomSide||d.h>LIMITS.roomSide||!['north','south'].includes(r.side)||r.role!==undefined&&!['indoor','outdoor','garden'].includes(r.role))throw new Error('ROOM_CONSTRAINT_UNSUPPORTED');const locked=trustedLock(ctx,'rooms',r.id);return {...d,side:r.side,...(r.role?{role:r.role}:{}),...(locked?{locked}:{} )};});
+    const previousRef=s.previous?.constraints?.corridorLocationRef;
+    const requestedRef=s.input.corridorLocationRef;
+    const corridorRef=requestedRef===undefined?(previousRef===undefined?null:previousRef):(requestedRef===null?null:String(requestedRef).trim());
+    s.spec.corridorLocationRef=corridorRef===undefined||corridorRef===''?null:corridorRef;
+    if(s.spec.corridorLocationRef){
+      const row=ctx.locationsById?.[s.spec.corridorLocationRef];
+      if(!row)throw new Error('CORRIDOR_LOCATION_REF_UNKNOWN');
+      if(String(row.map_id??'')!==s.map.id)throw new Error('CORRIDOR_LOCATION_REF_NOT_LOCAL');
+      if(s.spec.corridorLocationRef===s.map.containerLocationId)throw new Error('CORRIDOR_LOCATION_REF_IS_CONTAINER');
+      s.spec.corridorEntityId=s.spec.corridorLocationRef;
+      if(typeof row.name==='string'&&row.name)s.spec.corridorName=label(row.name);
+      const lock=rectLockOf(ctx,s.spec.corridorLocationRef);
+      if(lock)s.spec.corridorLock=lock;
+    }
+    s.spec.rooms=collectAndMerge(s,'rooms',LIMITS.rooms,'locations',r=>{const authority=r.id===s.map.containerLocationId?ctx.spaceSize??ctx.spaceCanonical?.size:ctx.childSpaces?.[r.id];const d=ctx.locks?.rooms?.[r.id]?.w>0?dimensions(ctx.locks.rooms[r.id]):authority?dimensions({w:authority.widthM,h:authority.heightM}):dimensions(r);if(d.w>LIMITS.roomSide||d.h>LIMITS.roomSide||!['north','south'].includes(r.side)||r.role!==undefined&&!['indoor','outdoor','garden'].includes(r.role))throw new Error('ROOM_CONSTRAINT_UNSUPPORTED');const locked=trustedLock(ctx,'rooms',r.id);return {...d,side:r.side,...(r.role?{role:r.role}:{}),...(locked?{locked}:{} )};});
+    // §18.2 第 4 条：rooms 中不得重复出现被绑定的走廊实体 —— 旧约束带来的条目同样要移除。
+    if(s.spec.corridorEntityId){
+      const before=s.spec.rooms.length;
+      s.spec.rooms=s.spec.rooms.filter(r=>r.id!==s.spec.corridorEntityId);
+      if(s.spec.rooms.length<before)s.issues.push(diagnostic('CORRIDOR_ROOM_DEDUPED','$.rooms','该地点已绑定为命名走廊，不再作为普通房间排布；同一实体只表达一次',{entityId:s.spec.corridorEntityId,severity:'warning'}));
+    }
     s.spec.singleRoom=s.spec.rooms.length===1&&s.spec.rooms[0].id===s.map.containerLocationId;
     if(!s.spec.rooms.length){const failed=failure('NO_VALID_ROOMS','$.rooms','没有可生成的有效房间',{kept:s.previous?clone(s.previous):null});failed.issues.push(...s.issues);return failed;}
     if(s.spec.rooms.reduce((n,r)=>n+Math.ceil(r.w/.2)*Math.ceil(r.h/.2),0)>LIMITS.navigationCells)throw new Error('NAVIGATION_BUDGET_EXCEEDED');
+    // §18.2 第 6 条：contents/actors 的 roomId 可以指向绑定的走廊（它是本图的通行空间，不是新实体）。
     const roomIds=new Set(s.spec.rooms.map(r=>r.id));
+    if(s.spec.corridorEntityId)roomIds.add(s.spec.corridorEntityId);
+    // P12/R03 §19.4：本空间**既有陈设账本**先行。同时刻只补细节/位置，不因换图重新生成整套家具：
+    // 账本里已登记而本次请求没提到的条目，按原 localId 的局部 id 回填（尺寸与身份沿用账本）。
+    const ledger=(Array.isArray(ctx?.spaceCanonical?.furnishing)?ctx.spaceCanonical.furnishing:[])
+      .filter(entry=>{
+        const parsed=parseSpaceLocalId(entry.localId);
+        return !!parsed&&parsed.locationId===s.map.containerLocationId&&!!parsed.contentId;
+      });
+    if(ledger.length&&s.spec.singleRoom){
+      const home=s.spec.rooms[0]?.id;
+      const own=id=>{const parsed=parseSpaceLocalId(id);return parsed?.locationId===s.map.containerLocationId?parsed.contentId:id;};
+      s.input.contents=(s.input.contents??[]).map(row=>plain(row)?{...row,id:own(row.id)}:row);
+      s.input.items=(s.input.items??[]).map(row=>plain(row)?{...row,on:own(row.on)}:row);
+      s.input.actors=(s.input.actors??[]).map(row=>plain(row)?{...row,...(row.near?{near:own(row.near)}:{})}:row);
+      if(Array.isArray(s.input.deletes?.contents))s.input.deletes.contents=s.input.deletes.contents.map(own);
+      const requested=new Set((s.input.contents??[]).map(row=>plain(row)?row.id:null).filter(id=>typeof id==='string'));
+      const requestedItems=new Set((s.input.items??[]).map(row=>plain(row)&&typeof row.id==='string'?row.id:null).filter(id=>!!id));
+      const seeded=[],seededItems=[];
+      for(const entry of ledger){
+        const parsed=parseSpaceLocalId(entry.localId);
+        if(!parsed||!parsed.contentId||deletionSet(s,'contents').has(parsed.contentId)||deletionSet(s,'contents').has(entry.localId))continue;
+        if(!home)break;
+        if(entry.quality==='confirmed'){const requestedRow=s.input.contents.find(row=>row?.id===parsed.contentId);if(requestedRow){requestedRow.w=entry.widthM;requestedRow.h=entry.heightM;}}
+        if(!requested.has(parsed.contentId))seeded.push({id:parsed.contentId,name:entry.name,type:entry.type,roomId:home,w:entry.widthM,h:entry.heightM});
+        // 账本记录了「哪件真实物品摆在这件陈设上」：请求没提也要沿用，否则换图会把物品掉到地上、
+        // 把 itemId 从账本里抹掉（身份与来源必须一致，§19.4）。
+        if(entry.itemId&&!requestedItems.has(entry.itemId))seededItems.push({id:entry.itemId,on:parsed.contentId});
+      }
+      if(seeded.length)s.input.contents=[...seeded,...(Array.isArray(s.input.contents)?s.input.contents:[])];
+      if(seededItems.length)s.input.items=[...seededItems,...(Array.isArray(s.input.items)?s.input.items:[])];
+    }
     s.spec.contents=collectAndMerge(s,'contents',LIMITS.contents,null,r=>{if(!roomIds.has(r.roomId))throw new Error('ROOM_REF_UNKNOWN');if(!FLOOR_FURNITURE_TYPES.includes(r.type))throw new Error('FURNITURE_TYPE_UNSUPPORTED');const locked=trustedLock(ctx,'contents',r.id);return {...dimensions(r),roomId:r.roomId,type:r.type,...(locked?{locked}:{})};});
     const groups=new Set(s.spec.contents.map(g=>g.id));
-    s.spec.actors=collectAndMerge(s,'actors',LIMITS.actors,'characters',r=>{if(!roomIds.has(r.roomId))throw new Error('ROOM_REF_UNKNOWN');if(r.near&&!groups.has(r.near))throw new Error('NEAR_REF_UNKNOWN');const position=trustedLock(ctx,'actors',r.id);return {roomId:r.roomId,...(r.near?{near:r.near}:{}),...(position?{position}:{})};});
+    s.spec.actors=collectAndMerge(s,'actors',LIMITS.actors,'characters',r=>{if(!roomIds.has(r.roomId)&&!(r.roomId===s.map.containerLocationId&&!s.spec.singleRoom))throw new Error('ROOM_REF_UNKNOWN');if(r.near&&!groups.has(r.near))throw new Error('NEAR_REF_UNKNOWN');const position=trustedLock(ctx,'actors',r.id);return {roomId:r.roomId,...(r.near?{near:r.near}:{}),...(position?{position}:{})};});
     s.spec.items=collectAndMerge(s,'items',LIMITS.items,'items',r=>{if(!groups.has(r.on))throw new Error('ITEM_SUPPORT_UNKNOWN');return {on:r.on};});
     return finish(s,ctx,E.floor);
   }catch(e){return failure(String(e.message),'$','生成请求不可用；保留已保存布局',{kept:context?.previousScene?clone(context.previousScene):null});}
@@ -142,6 +230,19 @@ export function generateCity(value,context){
  * - 单项无法放置只记 issue（带 id），绝不整图失败。
  */
 export function generateOverview(value,context){
+  const first=generateOverviewOnce(value,context);
+  if(!context.autoPlan||context.map.scaleLocked||context.map.scaleQuality==='confirmed'||!(context.map.metersPerCell>0)||!first.issues?.some(i=>/OVERVIEW_ZONE_NO_SPACE|OVERVIEW_ZONE_OUT_OF_BOUNDS/.test(i.code)))return first;
+  if(Object.values(context.locks??{}).some(v=>Object.keys(v??{}).length))return first;
+  const sizes=(first.scene?.constraints?.zones??value.zones??[]).map(z=>context.childSpaces?.[z.id]).filter(v=>v?.widthM>0&&v.heightM>0);
+  if(!sizes.length)return first;
+  const widthM=Math.ceil(Math.max(context.map.frame.cols*context.map.metersPerCell,sizes.reduce((n,s)=>n+s.widthM+2,2))*4)/4;
+  const heightM=Math.ceil(Math.max(context.map.frame.rows*context.map.metersPerCell,2*Math.max(...sizes.map(s=>s.heightM))+2)*4)/4;
+  if(widthM>LIMITS.citySide||heightM>LIMITS.citySide)return first;
+  const result=generateOverviewOnce(value,{...context,map:{...context.map,metersPerCell:.25,frame:{...context.map.frame,cols:widthM/.25,rows:heightM/.25}}});
+  if(result.ok&&!result.issues.some(i=>i.severity==='error')){result.plannedSize={widthM,heightM};result.metricProposal={metersPerCell:.25,scaleQuality:'estimated',basis:{source:'layout-capacity',widthM,heightM}};return result;}
+  return first;
+}
+function generateOverviewOnce(value,context){
   let s=null;
   try{
     s=setup(value,context,'overview');const ctx=context;
@@ -164,6 +265,8 @@ export function generateOverview(value,context){
     const pointOf=id=>{const p=ctx.locks?.points?.[id];return p&&finite(p.x)&&finite(p.y)?{x:p.x,y:p.y}:null;};
     s.spec.zones=collectAndMerge(s,'zones',LIMITS.zones,'locations',r=>{
       const out={};
+      const size=ctx.childSpaces?.[r.id];
+      if(s.units==='meters'&&size?.widthM>0&&size.heightM>0)out.physicalSize={w:size.widthM,h:size.heightM};
       // G05：单项非法只记 path/id 并跳过该项，绝不整图失败、也不静默当成合法枚举。
       if(r.role!==undefined){if(!OVERVIEW_ZONE_ROLES.includes(r.role))throw new Error('ZONE_ROLE_UNSUPPORTED');out.role=r.role;}
       if(r.size!==undefined){if(!OVERVIEW_ZONE_SIZES.includes(r.size))throw new Error('ZONE_SIZE_UNSUPPORTED');out.size=r.size;}
@@ -176,6 +279,8 @@ export function generateOverview(value,context){
       if(ctx.placement?.[r.id]==='proxy')out.placement='proxy';
       return out;
     });
+    // A standalone container is the whole space, never a small zone inside itself.
+    s.spec.zones=s.spec.zones.filter(z=>z.id!==s.map.containerLocationId);
     const zoneIds=new Set(s.spec.zones.map(z=>z.id));
     for(const z of s.spec.zones)if(z.near&&!zoneIds.has(z.near)&&!s.known.locations.has(z.near))s.issues.push(diagnostic('ZONE_NEAR_UNKNOWN','$.zones','near 指向的地点不在本分支引用表中，已忽略该提示',{severity:'warning',entityId:z.id}));
     s.spec.links=collectAndMerge(s,'links',LIMITS.links,'routes',r=>{
@@ -191,7 +296,7 @@ export function generateOverview(value,context){
       // G05：type 非法 → 抛出带 path/id 的单项目诊断，由 collection 捕获后跳过该项；其余图元照常生成。
       if(!OVERVIEW_FEATURE_TYPES.includes(r.type))throw new Error('FEATURE_TYPE_UNSUPPORTED');
       const out={type:r.type};
-      if(typeof r.zoneId==='string'&&r.zoneId)out.zoneId=r.zoneId;
+      if(typeof r.zoneId==='string'&&r.zoneId&&r.zoneId!==s.map.containerLocationId)out.zoneId=r.zoneId;
       if(r.density!==undefined){if(!OVERVIEW_DENSITIES.includes(r.density))throw new Error('FEATURE_DENSITY_UNSUPPORTED');out.density=r.density;}
       if(r.type==='watercourse'){
         // 02 §10：水系只给方向与宽度类别，路径由程序生成；缺方向就没有可绘制的河，按单项错误处理。

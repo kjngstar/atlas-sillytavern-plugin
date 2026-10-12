@@ -1,5 +1,28 @@
-import {normalizeScope,finite,plain,diagnostic,failure} from './contracts.mjs';
+import {normalizeScope,finite,plain,diagnostic,failure,FRAME_SPACE_CANONICAL_KEY,SPACE_CANONICAL_MAX_FURNISHING} from './contracts.mjs';
 import {readSceneFrame} from './storage.mjs';
+
+/**
+ * P12/R03 §19.1：读取本图持有的空间权威（`SpaceCanonicalV1`）。
+ *
+ * 身份必须是**本图的容器地点**：`locationId !== mapRow.container_location_id` 时一律不采用
+ * （宁缺勿乱 —— 短引用、地图标题、别图的空间都不当身份）。结构损坏同样不采用。
+ */
+function readSpaceCanonical(raw,locationId){
+  if(!locationId||!plain(raw)||raw.version!==1||raw.locationId!==locationId)return null;
+  const size=plain(raw.size)&&finite(raw.size.widthM)&&finite(raw.size.heightM)&&raw.size.widthM>0&&raw.size.heightM>0
+    ?{widthM:raw.size.widthM,heightM:raw.size.heightM,quality:raw.size.quality==='confirmed'?'confirmed':'estimated',locked:raw.size.locked===true,basis:plain(raw.size.basis)?raw.size.basis:null}
+    :null;
+  const list=Array.isArray(raw.furnishing)?raw.furnishing:[];
+  const furnishing=[];
+  for(const entry of list){
+    if(!plain(entry)||typeof entry.localId!=='string'||!entry.localId||typeof entry.type!=='string'||!entry.type)continue;
+    if(!finite(entry.widthM)||!finite(entry.heightM)||entry.widthM<=0||entry.heightM<=0)continue;
+    furnishing.push({localId:entry.localId,type:entry.type,name:typeof entry.name==='string'&&entry.name?entry.name:entry.type,itemId:typeof entry.itemId==='string'&&entry.itemId?entry.itemId:null,widthM:entry.widthM,heightM:entry.heightM,quality:entry.quality==='confirmed'?'confirmed':'layout'});
+  }
+  const revision=Number.isInteger(raw.revision)&&raw.revision>=0?raw.revision:0;
+  // 超限不下发裁剪结果：调用方必须看到 deferred 并自己决定（§19.1 不静默裁剪）。
+  return {version:1,locationId,revision,size,furnishing,deferred:furnishing.length>SPACE_CANONICAL_MAX_FURNISHING};
+}
 
 /**
  * M4-06：把当前分支、当前地图关联的真实行投影成布局上下文（只读纯函数）。
@@ -60,6 +83,10 @@ export function buildLayoutContext({scope,mapRow,locations=[],characters=[],item
     }
     // 代理入口：本图容器的逻辑直接子地点，坐标仍留在另一张旧图且没有 transform。
     const containerId=mapRow.container_location_id??null,placement={};
+    // P06/N01：容器的真实类别与名称由程序提供（不按名字猜用途，也不把「画法 overview」当成「世界」）。
+    const containerRow=containerId?ls.find(l=>l.id===containerId)??null:null;
+    const containerKind=containerRow?String(containerRow.kind):null;
+    const containerName=containerRow?String(containerRow.name??''):null;
     for(const l of ls){
       if(l.map_id===mapRow.id){placement[l.id]='local';continue;}
       if(containerId&&l.parent_location_id===containerId)placement[l.id]='proxy';
@@ -72,6 +99,8 @@ export function buildLayoutContext({scope,mapRow,locations=[],characters=[],item
     const routesById=directory(ownRoutes);
     const saved=readSceneFrame(frame,{branchId:scope.branchId,mapId:mapRow.id});
     if(!saved.ok)return saved;
-    return {ok:true,context:{scope,map:{id:mapRow.id,name:mapRow.name,containerLocationId:containerId,metersPerCell:calibrated?mpp:null,scaleQuality:mapRow.scale_quality,scaleLocked:Number(mapRow.scale_locked)===1,frame},entities:{locations:ls.map(l=>l.id),characters:cs.map(c=>c.id),items:its.map(i=>i.id),routes:rs.map(r=>r.id)},locationsById,routesById,placement,locks,previousScene:saved.scene,seed:mapRow.id},issues};
+    // P12/R03 §19.1：本图覆盖空间（container）的权威尺寸与陈设账本；身份不符/损坏 → null。
+    const spaceCanonical=readSpaceCanonical(plain(frame)?frame[FRAME_SPACE_CANONICAL_KEY]:null,containerId);
+    return {ok:true,context:{scope,map:{id:mapRow.id,name:mapRow.name,containerLocationId:containerId,containerKind,containerName,metersPerCell:calibrated?mpp:null,scaleQuality:mapRow.scale_quality,scaleLocked:Number(mapRow.scale_locked)===1,frame},entities:{locations:ls.map(l=>l.id),characters:cs.map(c=>c.id),items:its.map(i=>i.id),routes:rs.map(r=>r.id)},locationsById,routesById,placement,locks,previousScene:saved.scene,spaceCanonical,seed:mapRow.id},issues};
   }catch(e){return failure('CONTEXT_BUILD_FAILED','$','当前分支行或已保存场景不可读取',{detailCode:String(e.message)});}
 }

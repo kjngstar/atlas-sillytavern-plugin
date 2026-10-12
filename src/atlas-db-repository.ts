@@ -1,5 +1,5 @@
 import {buildSqlForegroundRequest} from './atlas-sql-model-context.ts';
-import {LAYOUT_CONTEXT_FRAME_KEY, buildSqlLayoutTask} from './atlas-sql-layout-task.ts';
+import {LAYOUT_CONTEXT_FRAME_KEY, buildSqlLayoutTask, computeMapLayoutSignature} from './atlas-sql-layout-task.ts';
 import {applySqlLegacyImport} from './atlas-sql-legacy-import.ts';
 /**
  * atlas-db-repository.ts — 业务存储唯一入口（B05–B09 / B17–B19 / E06 / E09）。
@@ -15,6 +15,7 @@ import type { ApplyGroupsContext } from './atlas-db-commit.ts';
 import type { RowMutation } from './atlas-ops-contract.ts';
 // E08：回退计划的唯一权威（逆因果序、中间楼定位、显式上限拒绝）。
 import { applyRollbackPlan, planRollback } from './atlas-db-rollback.ts';
+import { applyHistoryRepair, resolveMergedId } from './atlas-history-repair.ts';
 import { validateCandidate } from './atlas-db-invariants.ts';
 import { ATLAS_SEMANTIC_OPS } from './atlas-ops-contract.ts';
 import { buildAtomicGroups, orderGroups } from './atlas-ops-groups.ts';
@@ -37,8 +38,8 @@ import {
   runBound,
   userTableNames,
 } from './atlas-db-runtime.ts';
-import { ATLAS_SCHEMA_VERSION, currentSchemaVersion, installSchemaSafe } from './atlas-db-schema.ts';
-import { upgradeSchema1To2 } from './atlas-db-upgrade.ts';
+import { ATLAS_SCHEMA_VERSION, USER_TABLE_COUNT, currentSchemaVersion, expectedTableCount, installSchemaSafe } from './atlas-db-schema.ts';
+import { upgradeSchema } from './atlas-db-upgrade.ts';
 import { encodeSnapshot, sha256HexSync, sha256Hex } from './atlas-db-envelope.ts';
 import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
 import { queryChanges, queryDiagnostics, queryEntityDetail, queryMapView, queryNearby, querySimulationView } from './atlas-db-views.ts';
@@ -49,15 +50,48 @@ import { querySpatialScene } from './atlas-spatial-views.ts';
 import { queryTasks } from './atlas-task-views.ts';
 // M5-07：事件流只读口。走同一套 ctx（branch/revision/viewMode/pov），绝不引 writer。
 import { queryWorldFeed } from './atlas-world-feed.ts';
-import { collectKnownRefs, collectEntityRefs } from './atlas-sql-refs.ts';
+import { scanKnownRefs, collectEntityRefs } from './atlas-sql-refs.ts';
 export { collectKnownRefs, collectEntityRefs } from './atlas-sql-refs.ts';
 import { settleSqlTurn } from './atlas-sql-simulation.ts';
 import { compileSqlSceneMaps } from './atlas-sql-scene-maps.ts';
 import { applyPendingSpatialRequests, armLayoutRetry } from './atlas-spatial-candidate.ts';
 // M3-10/11/12：世界建设阶段接入 + 本回合局部模型预算 + 建设状态元数据。
 import { createGenerationBudget, bindModelBudget } from './atlas-sql-generation-budget.ts';
-import { WORLD_CONSTRUCTION_OPS, WORLD_FILL_FRAME_KEY, buildSqlWorldCompletionTask, normalizeConstructionOps } from './atlas-sql-world-completion.ts';
+import { WORLD_CONSTRUCTION_OPS, WORLD_FILL_FRAME_KEY, buildSqlWorldCompletionTask, normalizeCompletionPolicy, normalizeConstructionOps, orderCompletionTargets } from './atlas-sql-world-completion.ts';
+import { completionMapIds, completionOwnershipIssues, resolveCompletionMaps } from './atlas-world-completion-ownership.ts';
 import { dedupeWorldConstructionOps } from './atlas-sql-world-dedupe.ts';
+// P09B/R01：持久目标队列与公平重试。进度行只由程序以 bookkeeping 组写入，随同一候选 + ACK 落盘。
+import {
+  CONSTRUCTION_PAYLOAD_VERSION,
+  MAX_UNIT_ATTEMPTS,
+  acceptedSignature,
+  discoverTargets,
+  readProgressRows,
+  readScanState,
+  rowsInScope,
+  scopeKeyFor,
+  scopeRowMutation,
+  targetRowMutation,
+  targetSignature,
+  unitId as constructionUnitId,
+  unitRowMutation,
+  type DiscoveryResult,
+  type DiscoveryScanState,
+  type ProgressRow,
+  type ProgressStatus,
+} from './atlas-construction-progress.ts';
+import { allocateTargets, planNextUnits, schedulableUnits } from './atlas-construction-scheduler.ts';
+// P10/R02：持久来源块账本。游标是「连续成功前缀」的派生值，不是内存计数器。
+import {
+  canConfirmUnit,
+  chunkRowMutation,
+  readSourceLedger,
+  sourceRowMutation,
+  sourceSubjectKey,
+  summarizeSources,
+  type SourceSummary,
+} from './atlas-construction-sources.ts';
+import { WORLD_SOURCE_CHUNKING_VERSION, selectWorldConstructionSources, type WorldSourceChunk, type WorldSourceSelection, type WorldSourceEntry } from './atlas-sql-world-sources.ts';
 import { SPATIAL_REQUEST_KEY, SPATIAL_SCENE_KEY, normalizeFrame } from './atlas-spatial-frame.ts';
 import { projectPromptView } from './atlas-db-knowledge-view.ts';
 import type { SqlDatabase } from './atlas-db-runtime.ts';
@@ -86,7 +120,9 @@ import type {
   ViewResult,
 } from './atlas-ops-contract.ts';
 import type { SourceSnapshotEntry } from './atlas-ops-contract.ts';
-import type { GenerationTask, WorldFillStatus } from './atlas-world-contract.ts';
+// P09A：业务变化的判据（表 + 组用途），不靠 id 前缀。
+import { groupChangesBusiness } from './atlas-ops-contract.ts';
+import type { GenerationTask, PlanIssue, WorldFillStatus } from './atlas-world-contract.ts';
 
 export type RepositoryOptions = {
   chatUid: string;
@@ -129,6 +165,590 @@ function branchRootMapId(tables: ReturnType<typeof createTableReadPort>, branchI
   return branch ? String(branch.root_map_id ?? '') : '';
 }
 
+/* ------------------------------------------------------------------ *
+ * P09B/R01：持久目标队列（读 + 计划 + 变更表达）
+ * ------------------------------------------------------------------ */
+
+type ConstructionQueueUnit = {
+  id: string;
+  targetIds: string[];
+  sourceChunkKeys: string[];
+  inputSignature: string;
+  attemptCount: number;
+  /** 复用了已有单元（不新建行）；新建时需要写 unit 行。 */
+  existing: boolean;
+  /**
+   * P10/R02 §17.3：本单元**已接受**的 `new:` 别名 → 当前分支真实 ID。
+   *
+   * 部分成功时先存这里；下一次重试先把 `new:` 换成真实引用再冻结目录/编译，
+   * 因此不会重新创建同一地点或同一已绑定路线。
+   */
+  bindings: Record<string, string>;
+};
+
+type ConstructionQueuePlan = {
+  scopeKey: string;
+  /** 本批真正要建设的焦点（来自单元/新分配的目标）；空数组表示**没有待办**，不该发请求。 */
+  focusIds: string[];
+  unit: ConstructionQueueUnit | null;
+  discovery: DiscoveryResult;
+  scopeBefore: Record<string, unknown> | null;
+  targetBefore: Map<string, Record<string, unknown> | null>;
+  freshUnitCount: number;
+  retryUnitCount: number;
+  pendingTargetCount: number;
+  /**
+   * 本批**没被覆盖**、仍要等下一批的目标（保持 pending 行）。
+   * 它同时是旧兼容字段 `remainingLocationIds` 的来源：目标数超过单批上限时，
+   * 溢出的完整 ID 必须继续可见（不静默丢弃）。
+   */
+  remainingTargetIds: string[];
+  /** 发现阶段就产生的变更：目标 pending/suspended 行 + scope 扫描推进。 */
+  preMutations: RowMutation[];
+  /**
+   * 结构处理成功后：**本批真正被请求覆盖**的目标转 processed（签名取已接受业务状态），单元转 processed。
+   * 没被本批覆盖的目标（例如必要目录装不下而留在 remainingLocationIds）保持 pending，不谎报已处理。
+   */
+  processedMutations: (coveredIds: readonly string[], bindings?: Readonly<Record<string, string>>) => RowMutation[];
+  /** 结构处理失败：单元转 retry（attemptCount+1），目标退回 pending。 */
+  failedMutations: (code: string, bindings?: Readonly<Record<string, string>>) => RowMutation[];
+  /** P10/R02：本批的来源块账本计划（与目标队列同一表、同一 bookkeeping 组）。 */
+  sourcePlan: ConstructionSourcePlan | null;
+  /** 本批要发出去的来源选取结果（交给 buildSqlWorldCompletionTask，不再二次选取）。 */
+  sourceSelection: WorldSourceSelection | null;
+};
+
+/**
+ * P09B/R01：从 `construction_progress` 算出本批焦点与要落盘的变更。
+ *
+ * 发现（分页 + 签名比对）与调度（3 新 : 1 重试）都在这里；写入只表达成 RowMutation，
+ * 由调用方随同一候选 + ACK 落盘 —— 候选没保存时正式进度一个字节都不动。
+ */
+function planConstructionQueue(args: {
+  tables: ReturnType<typeof createTableReadPort>;
+  branchId: string;
+  chatUid: string;
+  mode: 'bootstrap' | 'local';
+  focusLocationIds: readonly string[];
+  /** 归一化后的建设策略（目标发现与优先级排序共用同一份，不各自归一化）。 */
+  policy: ReturnType<typeof normalizeCompletionPolicy>;
+  turnId: string;
+  /** P10/R02：来源快照与选取参数（与目标队列同一批算出，避免「账本一套、发出去一套」）。 */
+  sourceSnapshot?: readonly WorldSourceEntry[];
+  sourceFocusTerms?: readonly string[];
+  sourceMaxChars?: number;
+  sourceChunkChars?: number;
+  worldSourceCache?: Map<string, WorldSourceChunk[]>;
+}): ConstructionQueuePlan | null {
+  const { tables, branchId, mode, turnId } = args;
+  const rows = readProgressRows(tables, branchId);
+  const scopeKey = scopeKeyFor(mode, args.focusLocationIds);
+  const scopeRow = rowsInScope(rows, scopeKey, 'scope')[0] ?? null;
+  const discovery = discoverTargets({
+    tables,
+    branchId,
+    scopeKey,
+    focusIds: args.focusLocationIds,
+    rows,
+    maxAdditionalDepth: args.policy.maxAdditionalDepth,
+  });
+  const unitRows = rowsInScope(rows, scopeKey, 'unit');
+  const targetRows = rowsInScope(rows, scopeKey, 'target');
+  const targetBefore = new Map<string, Record<string, unknown> | null>();
+  for (const row of targetRows) targetBefore.set(row.subjectKey, row.raw);
+
+  const scanBefore = readScanState(scopeRow);
+  const next = planNextUnits(unitRows, 1, scanBefore.schedulerSeq);
+  // 待分配目标 = 该 scope **全部** pending 行 + 本轮新入队。
+  // 只看本轮 enqueueIds 会让上一轮扫描出来但没被选中的目标永远排不上队。
+  //
+  // 两级排序：
+  // 1) `last_served_seq` 升序 —— **一次都没轮到的目标先上**。否则一个反复失败的单元
+  //    会一直重发同一批高优先级目标，把后面的目标永远堵在外面（QUEUE02）；
+  // 2) 组内沿用原 planCandidates 的优先级（无结构 → 未分类祖先 → 缺连通 → 展开子地点 → 其余），
+  //    队列只决定「这一批处理其中的哪些」，不改变优先级本身。
+  const priorityRank = new Map(
+    orderCompletionTargets(tables, branchId, { mode, focusLocationIds: args.focusLocationIds }, args.policy)
+      .map((id, index) => [id, index] as const),
+  );
+  const servedSeq = new Map(targetRows.map((row) => [row.subjectKey, row.lastServedSeq] as const));
+  const pendingTargetIds = uniqueIds([
+    ...targetRows.filter((row) => row.status === 'pending').map((row) => row.subjectKey),
+    ...discovery.enqueueIds,
+  ]).sort((left, right) => {
+    const servedLeft = servedSeq.get(left) ?? 0;
+    const servedRight = servedSeq.get(right) ?? 0;
+    if (servedLeft !== servedRight) return servedLeft - servedRight;
+    const rankLeft = priorityRank.get(left) ?? Number.MAX_SAFE_INTEGER;
+    const rankRight = priorityRank.get(right) ?? Number.MAX_SAFE_INTEGER;
+    return rankLeft - rankRight || (left < right ? -1 : left > right ? 1 : 0);
+  });
+  const allocation = allocateTargets({
+    pendingTargetIds,
+    existingUnits: schedulableUnits(unitRows),
+    chosen: next.unit,
+  });
+
+  let schedulerSeq = scanBefore.schedulerSeq;
+  let allocationSeq = scanBefore.allocationSeq;
+  let unit: ConstructionQueueUnit | null = null;
+  let unitChunkKeys: string[] = [];
+  const reusedUnit = next.unit;
+  if (reusedUnit) {
+    schedulerSeq += 1;
+    // 既有（重试）单元：**只消费它冻结的块**，不另起一套选取（§17.2 第 5/6 条）。
+    unitChunkKeys = [...reusedUnit.sourceChunkKeys];
+  }
+
+  // P10/R02：来源账本计划。没有待处理目标时**一个块也不建行** —— 不为了记账而记账。
+  const wantSources = Boolean(reusedUnit) || allocation.targetIds.length > 0;
+  const sourcePlan = wantSources
+    ? planConstructionSources({
+        tables,
+        branchId,
+        chatUid: args.chatUid,
+        turnId,
+        scopeKey,
+        rows,
+        sourceSnapshot: args.sourceSnapshot ?? [],
+        focusTerms: args.sourceFocusTerms ?? [],
+        maxChars: args.sourceMaxChars,
+        chunkChars: args.sourceChunkChars,
+        cache: args.worldSourceCache,
+        frozenChunkKeys: unitChunkKeys,
+        mode,
+      })
+    : null;
+  if (sourcePlan) unitChunkKeys = [...sourcePlan.chunkKeys];
+
+  if (!reusedUnit && allocation.targetIds.length > 0) {
+    allocationSeq += 1;
+    schedulerSeq += 1;
+    const id = constructionUnitId(scopeKey, allocation.targetIds, unitChunkKeys, allocationSeq);
+    unit = {
+      id,
+      targetIds: allocation.targetIds,
+      sourceChunkKeys: unitChunkKeys,
+      inputSignature: sha256HexSync(JSON.stringify([unitSignatureSource(allocation.targetIds), CONSTRUCTION_PAYLOAD_VERSION])),
+      attemptCount: 0,
+      existing: false,
+      bindings: {},
+    };
+  } else if (reusedUnit) {
+    unit = {
+      id: reusedUnit.unitId,
+      targetIds: reusedUnit.targetIds,
+      sourceChunkKeys: unitChunkKeys,
+      inputSignature: reusedUnit.inputSignature,
+      attemptCount: reusedUnit.attemptCount,
+      existing: true,
+      bindings: { ...reusedUnit.bindings },
+    };
+  }
+
+  const scan: DiscoveryScanState = {
+    ...scanBefore,
+    scanAfterId: discovery.scan.scanAfterId,
+    scanCycle: discovery.scan.scanCycle,
+    allocationSeq,
+    schedulerSeq,
+  };
+  const ctx = { branchId, turnId, opId: `construction_progress_${turnId}` };
+  const unitBeforeOf = (id: string): Record<string, unknown> | null => {
+    const row = rowsInScope(readProgressRows(tables, branchId), scopeKey, 'unit').find((item) => item.subjectKey === id);
+    return row?.raw ?? null;
+  };
+  const preMutations: RowMutation[] = [
+    scopeRowMutation(ctx, scopeKey, scopeBeforeOf(scopeRow), scan, mode, args.focusLocationIds),
+  ];
+  for (const id of discovery.enqueueIds) {
+    const row = tables.selectOne('locations', branchId, id);
+    const signature = targetSignature(row ?? {});
+    preMutations.push(targetRowMutation(ctx, scopeKey, targetBefore.get(id) ?? null, id, signature, 'pending', { version: CONSTRUCTION_PAYLOAD_VERSION }));
+  }
+  for (const id of discovery.suspendTargetIds) {
+    const before = targetBefore.get(id) ?? null;
+    if (!before) continue;
+    preMutations.push(targetRowMutation(ctx, scopeKey, before, id, String(before.input_signature ?? ''), 'suspended', { version: CONSTRUCTION_PAYLOAD_VERSION }));
+  }
+  if (unit && !unit.existing) {
+    preMutations.push(unitRowMutation(ctx, scopeKey, null, unit.id, {
+      inputSignature: unit.inputSignature,
+      status: 'pending',
+      lastServedSeq: schedulerSeq,
+      targetIds: unit.targetIds,
+      sourceChunkKeys: unit.sourceChunkKeys,
+      catalogueHash: '',
+      attemptCount: 0,
+      bindings: unit.bindings,
+    }));
+  }
+  if (unit && unit.existing && sourcePlan) {
+    // 重试单元的冻结块键可能在当前快照里已经不存在（hash 变更 / 来源关闭 / 切分版本变化）。
+    // 把**真实存在的那部分**写回单元，后续结算只覆盖真正被消费的块，不假装消费了消失的块。
+    const frozenBefore = new Set(reusedUnit?.sourceChunkKeys ?? []);
+    const now = new Set(sourcePlan.chunkKeys);
+    const changed = frozenBefore.size !== now.size || [...frozenBefore].some((key) => !now.has(key));
+    if (changed) {
+      preMutations.push(unitRowMutation(ctx, scopeKey, unitBeforeOf(unit.id), unit.id, {
+        inputSignature: unit.inputSignature,
+        status: reusedUnit?.status === 'retry' ? 'retry' : 'pending',
+        lastServedSeq: reusedUnit?.lastServedSeq ?? schedulerSeq,
+        targetIds: unit.targetIds,
+        sourceChunkKeys: sourcePlan.chunkKeys,
+        catalogueHash: reusedUnit?.catalogueHash ?? '',
+        attemptCount: unit.attemptCount,
+        bindings: unit.bindings,
+      }));
+    }
+  }
+  if (sourcePlan) preMutations.push(...sourcePlan.preMutations);
+
+  return {
+    scopeKey,
+    focusIds: unit ? [...unit.targetIds] : [],
+    unit,
+    discovery,
+    scopeBefore: scopeBeforeOf(scopeRow),
+    targetBefore,
+    freshUnitCount: next.freshCount,
+    retryUnitCount: next.retryCount,
+    pendingTargetCount: discovery.enqueueIds.length,
+    remainingTargetIds: unit
+      ? uniqueIds(pendingTargetIds).filter((id) => !unit!.targetIds.includes(id))
+      : uniqueIds(pendingTargetIds),
+    preMutations,
+    sourcePlan,
+    sourceSelection: sourcePlan ? sourcePlan.selection : null,
+    processedMutations: (coveredIds: readonly string[], bindings?: Readonly<Record<string, string>>) => {
+      if (!unit) return [];
+      const out: RowMutation[] = [];
+      const port = tables;
+      const covered = new Set(coveredIds.map(String));
+      for (const id of unit.targetIds) {
+        if (!covered.has(id)) continue; // 本批没请求到的目标保持 pending，下一批继续。
+        const before = port.selectOne('locations', branchId, id);
+        // 签名记「已接受的业务状态」：本轮自己写的描述/结构不会立刻让签名失效。
+        out.push(targetRowMutation(ctx, scopeKey, targetBefore.get(id) ?? null, id, acceptedSignature(before ?? {}), 'processed', { version: CONSTRUCTION_PAYLOAD_VERSION }));
+      }
+      out.push(unitRowMutation(ctx, scopeKey, unitBeforeOf(unit.id), unit.id, {
+        inputSignature: unit.inputSignature,
+        status: 'processed',
+        lastServedSeq: schedulerSeq,
+        targetIds: unit.targetIds,
+        sourceChunkKeys: unit.sourceChunkKeys,
+        catalogueHash: '',
+        attemptCount: unit.attemptCount,
+        bindings: bindings ?? unit.bindings,
+      }));
+      return out;
+    },
+    failedMutations: (code: string, bindings?: Readonly<Record<string, string>>) => {
+      if (!unit) return [];
+      const out: RowMutation[] = [];
+      // 目标退回 pending，但**带上已服务序号**：下一批先照顾一次都没轮到的目标，
+      // 反复失败的目标不会把整条队伍堵死（QUEUE02）。
+      for (const id of unit.targetIds) {
+        const before = targetBefore.get(id) ?? null;
+        if (!before) continue;
+        out.push(targetRowMutation(ctx, scopeKey, before, id, String(before.input_signature ?? ''), 'pending', { version: CONSTRUCTION_PAYLOAD_VERSION }, schedulerSeq));
+      }
+      const attempts = unit.attemptCount + 1;
+      const exhausted = attempts >= MAX_UNIT_ATTEMPTS;
+      out.push(unitRowMutation(ctx, scopeKey, unitBeforeOf(unit.id), unit.id, {
+        inputSignature: unit.inputSignature,
+        // §16.3：超过自动重试额度后不再自动入队，等后续显式续建/正常任务；目标已退回 pending，不丢。
+        status: exhausted ? 'suspended' : 'retry',
+        lastServedSeq: schedulerSeq,
+        targetIds: unit.targetIds,
+        sourceChunkKeys: unit.sourceChunkKeys,
+        catalogueHash: '',
+        attemptCount: attempts,
+        failureCode: code,
+        exhausted,
+        bindings: bindings ?? unit.bindings,
+      }));
+      return out;
+    },
+  };
+}
+
+function scopeBeforeOf(row: ProgressRow | null): Record<string, unknown> | null {
+  return row?.raw ?? null;
+}
+
+/**
+ * P10/R02：本批的来源账本计划。
+ *
+ * 与目标队列同构：发现阶段只产生 pending 行，成功/失败在**同一 bookkeeping 组**里结算，
+ * 因此候选没保存时来源账本一个字节都不动。
+ */
+type ConstructionSourcePlan = {
+  scopeKey: string;
+  /** 本批单元冻结的块键（= 真正进入请求的块）。 */
+  chunkKeys: string[];
+  selection: WorldSourceSelection;
+  summary: SourceSummary;
+  preMutations: RowMutation[];
+  /** 结构处理成功：本批**真正消费**的块转 processed（未覆盖的保持原状）。 */
+  processedMutations: (consumedChunkKeys: readonly string[]) => RowMutation[];
+  /**
+   * 结构处理失败 / 部分成功：本批涉及的块转 retry（attempts+1），来源游标不前进。
+   * `exhausted` = 单元自动重试额度已用尽 → 块同时停牌（suspended），
+   * 这样它们能被**后续新单元**重新取到（否则失败单元的缺口永远补不上）。
+   */
+  retryMutations: (code: string, exhausted?: boolean) => RowMutation[];
+};
+
+/**
+ * 从 `construction_progress` 的来源/块行算出本批要消费的块与要落盘的变更。
+ *
+ * `frozenChunkKeys` 非空 = 既有（重试）单元：**只消费它冻结的块**，不另起一套选取；
+ * 这些键在当前快照里已不存在（原文 hash 变更 / 来源关闭 / 切分版本变化）时记入显式延期，
+ * 不会被当成空块静默略过（§17.1）。
+ */
+function planConstructionSources(args: {
+  tables: ReturnType<typeof createTableReadPort>;
+  branchId: string;
+  chatUid: string;
+  turnId: string;
+  scopeKey: string;
+  rows: readonly ProgressRow[];
+  sourceSnapshot: readonly WorldSourceEntry[];
+  focusTerms?: readonly string[];
+  maxChars?: number;
+  chunkChars?: number;
+  cache?: Map<string, WorldSourceChunk[]>;
+  frozenChunkKeys: readonly string[];
+  mode: 'bootstrap' | 'local';
+}): ConstructionSourcePlan {
+  const { branchId, turnId, scopeKey } = args;
+  const ctx = { branchId, turnId, opId: `construction_source_${turnId}` };
+  const ledger = readSourceLedger(args.rows, scopeKey);
+  // consume 模式的跳过集合 = 本 scope 已 processed 的块。「优先尚未处理的块」靠它实现；
+  // 已处理块不再重复装入「新来源」，但也**不删行**（已成功区间要留给 S8 跳过与回执）。
+  // 「尚未处理的块优先」在持久账本上的精确含义：**已经有账本行的块不再分给新单元**。
+  // - processed：已有效处理，绝不重复装入（§17.2 第 1 条）；
+  // - pending / retry：已经归属某个在途或待重试的单元，按 P09B 的单元调度来处理（§17.2 第 3 条）；
+  // - suspended：单元自动重试额度用尽而停牌 → **允许新单元重新拿到**（否则缺口永远补不上）。
+  const skip = new Set<string>();
+  for (const chunk of ledger.chunks.values()) {
+    if (chunk.status === 'pending' || chunk.status === 'retry' || chunk.status === 'processed') skip.add(chunk.chunkKey);
+  }
+
+  const selection = selectWorldConstructionSources({
+    snapshot: args.sourceSnapshot,
+    focusTerms: args.focusTerms ?? [],
+    chatId: args.chatUid,
+    branchId,
+    maxChars: args.maxChars,
+    chunkChars: args.chunkChars,
+    cache: args.cache,
+    mode: 'consume',
+    chunkingVersion: WORLD_SOURCE_CHUNKING_VERSION,
+    skipChunkKeys: skip,
+    onlyChunkKeys: args.frozenChunkKeys,
+  });
+
+  const preMutations: RowMutation[] = [];
+  const touchedSources = new Set<string>();
+
+  /**
+   * 某个来源结算后的「连续成功前缀」。
+   *
+   * 必须把**本批新选的块**（账本里还没有行）和**本批刚处理成功的块**一起算进去：
+   * 只看结算前的账本会把刚成功的块漏掉，游标就会永远停在 0。
+   */
+  const chunkView = (subjectKey: string): Array<{ chunkKey: string; start: number; end: number; status: ProgressStatus }> => {
+    const map = new Map<string, { chunkKey: string; start: number; end: number; status: ProgressStatus }>();
+    for (const chunk of ledger.chunksBySource.get(subjectKey) ?? []) {
+      map.set(chunk.chunkKey, { chunkKey: chunk.chunkKey, start: chunk.start, end: chunk.end, status: chunk.status });
+    }
+    for (const chunk of selection.chunks) {
+      if (sourceSubjectKey(chunk.sourceKey, chunk.contentHash) !== subjectKey) continue;
+      if (!map.has(chunk.chunkKey)) map.set(chunk.chunkKey, { chunkKey: chunk.chunkKey, start: chunk.start, end: chunk.end, status: 'pending' });
+    }
+    return [...map.values()].sort((left, right) => left.start - right.start || (left.chunkKey < right.chunkKey ? -1 : 1));
+  };
+  const prefixAfter = (subjectKey: string, processedNow: ReadonlySet<string>): number => {
+    let cursor = 0;
+    for (const chunk of chunkView(subjectKey)) {
+      if (chunk.start !== cursor) break; // 缺口：不越过
+      const done = chunk.status === 'processed' || processedNow.has(chunk.chunkKey);
+      if (!done) break;
+      cursor = chunk.end;
+    }
+    return cursor;
+  };
+  const readPrefix = (subjectKey: string): number => prefixAfter(subjectKey, new Set<string>());
+
+  // 来源行：新身份（含 hash 变更后的新 hash）建行；已存在且派生值变化的才更新。
+  const writeSource = (sourceKey: string, contentHash: string, kind: string, chars: number, chunkCount: number, hostTruncated: boolean, enabled: boolean): void => {
+    const subjectKey = sourceSubjectKey(sourceKey, contentHash);
+    touchedSources.add(subjectKey);
+    const existing = ledger.sources.get(subjectKey) ?? null;
+    const prefix = readPrefix(subjectKey);
+    const changed = !existing
+      || existing.kind !== kind
+      || existing.chars !== chars
+      || existing.chunkCount !== chunkCount
+      || existing.hostTruncated !== hostTruncated
+      || existing.contiguousPrefixEnd !== prefix
+      || existing.row.payload.enabled !== enabled;
+    if (!changed) return;
+    preMutations.push(sourceRowMutation(ctx, scopeKey, existing?.row.raw ?? null, {
+      sourceKey, contentHash, kind, chars, chunkCount, contiguousPrefixEnd: prefix, hostTruncated, enabled,
+    }));
+  };
+
+  for (const item of selection.known) {
+    const entry = (args.sourceSnapshot ?? []).find((row) => String(row?.key ?? '').trim() === item.sourceKey);
+    const enabled = entry ? entry.enabled !== false : false;
+    writeSource(item.sourceKey, item.contentHash, item.kind, item.chars, item.chunkCount, item.hostTruncated, enabled);
+  }
+
+  // 块行：只有「还不存在」的块才在发现阶段建 pending；已有行（processed/retry/suspended）
+  // 由结算阶段改写，发现阶段绝不把已处理块降级回 pending。
+  const chunkKeys: string[] = [];
+  for (const chunk of selection.chunks) {
+    chunkKeys.push(chunk.chunkKey);
+    if (ledger.chunks.has(chunk.chunkKey)) continue;
+    preMutations.push(chunkRowMutation(ctx, scopeKey, null, {
+      chunkKey: chunk.chunkKey,
+      sourceKey: chunk.sourceKey,
+      contentHash: chunk.contentHash,
+      chunkingVersion: chunk.chunkingVersion,
+      index: chunk.index,
+      total: chunk.total,
+      start: chunk.start,
+      end: chunk.end,
+      hardSplit: chunk.hardSplit,
+      status: 'pending',
+      attempts: 0,
+    }));
+  }
+
+  const consumedSet = (consumedChunkKeys: readonly string[]): Set<string> => new Set(consumedChunkKeys.map(String));
+  /**
+   * 结算后的来源行修正：游标前进才写。
+   *
+   * 来源行**可能只存在于本批的 preMutations 里**（第一次见到这个来源），
+   * 所以拿不到账本行时要退回 selection.known —— 否则刚成功的来源游标永远停在 0。
+   * 同一组内的「先建 pending 行、再改游标」由 mergeGroupMutations 合并成一条 insert。
+   */
+  const sourceFixups = (keys: Iterable<string>): RowMutation[] => {
+    const out: RowMutation[] = [];
+    const subjects = new Set<string>();
+    for (const key of keys) {
+      const chunk = ledger.chunks.get(key) ?? selection.chunks.find((item) => item.chunkKey === key);
+      if (!chunk || !chunk.sourceKey || !chunk.contentHash) continue;
+      subjects.add(sourceSubjectKey(chunk.sourceKey, chunk.contentHash));
+    }
+    const done = consumedSet([...keys]);
+    for (const subjectKey of subjects) {
+      const existing = ledger.sources.get(subjectKey) ?? null;
+      const known = selection.known.find((item) => sourceSubjectKey(item.sourceKey, item.contentHash) === subjectKey) ?? null;
+      if (!existing && !known) continue;
+      const prefix = prefixAfter(subjectKey, done);
+      if (prefix === readPrefix(subjectKey)) continue; // 游标没前进就不写（避免无意义的行版本膨胀）
+      const entry = (args.sourceSnapshot ?? []).find((row) => String(row?.key ?? '').trim() === (existing?.sourceKey ?? known!.sourceKey));
+      out.push(sourceRowMutation(ctx, scopeKey, existing?.row.raw ?? null, {
+        sourceKey: existing?.sourceKey ?? known!.sourceKey,
+        contentHash: existing?.contentHash ?? known!.contentHash,
+        kind: existing?.kind ?? known!.kind,
+        chars: existing?.chars ?? known!.chars,
+        chunkCount: existing?.chunkCount ?? known!.chunkCount,
+        contiguousPrefixEnd: prefix,
+        hostTruncated: existing?.hostTruncated ?? known!.hostTruncated,
+        enabled: existing ? existing.row.payload.enabled !== false : entry ? entry.enabled !== false : false,
+      }));
+    }
+    return out;
+  };
+
+  const chunkAfterOf = (key: string): { before: Record<string, unknown> | null; chunk: WorldSourceChunk | null } => {
+    const existing = ledger.chunks.get(key) ?? null;
+    const fromSelection = selection.chunks.find((item) => item.chunkKey === key) ?? null;
+    return { before: existing?.row.raw ?? null, chunk: fromSelection };
+  };
+
+  const summary = summarizeSources(args.rows, scopeKey);
+
+  return {
+    scopeKey,
+    chunkKeys,
+    selection,
+    summary,
+    preMutations,
+    processedMutations: (consumedChunkKeys: readonly string[]) => {
+      const consumed = consumedSet(consumedChunkKeys);
+      const out: RowMutation[] = [];
+      for (const key of chunkKeys) {
+        if (!consumed.has(key)) continue; // 本批没真正请求到的块保持原状，下一批继续。
+        const { before, chunk } = chunkAfterOf(key);
+        if (!chunk) continue;
+        out.push(chunkRowMutation(ctx, scopeKey, before, {
+          chunkKey: chunk.chunkKey, sourceKey: chunk.sourceKey, contentHash: chunk.contentHash,
+          chunkingVersion: chunk.chunkingVersion, index: chunk.index, total: chunk.total,
+          start: chunk.start, end: chunk.end, hardSplit: chunk.hardSplit,
+          status: 'processed', attempts: ledger.chunks.get(key)?.attempts ?? 0,
+        }));
+      }
+      out.push(...sourceFixups(consumed));
+      return out;
+    },
+    retryMutations: (code: string, exhausted = false) => {
+      const out: RowMutation[] = [];
+      for (const key of chunkKeys) {
+        const { before, chunk } = chunkAfterOf(key);
+        if (!chunk) continue;
+        const attempts = (ledger.chunks.get(key)?.attempts ?? 0) + 1;
+        out.push(chunkRowMutation(ctx, scopeKey, before, {
+          chunkKey: chunk.chunkKey, sourceKey: chunk.sourceKey, contentHash: chunk.contentHash,
+          chunkingVersion: chunk.chunkingVersion, index: chunk.index, total: chunk.total,
+          start: chunk.start, end: chunk.end, hardSplit: chunk.hardSplit,
+          status: exhausted ? 'suspended' : 'retry', attempts, failureCode: code,
+        }));
+      }
+      return out;
+    },
+  };
+}
+
+/**
+ * P09B/R01：把建设进度/调度的写入包成一个 **bookkeeping 组**。
+ *
+ * - `purpose: 'bookkeeping'`：允许写 `construction_progress`（`PROGRAM_ONLY_WRITE_TABLES`），
+ *   同时**不算世界业务变化**（不计入 `worldChanged`、不计入业务成功组）。
+ * - 同一批次里「先建 pending 行、成功后改 processed」由 `mergeGroupMutations` 合并成一条 insert，
+ *   不会对同一行写两次，也不会留下半截状态。
+ * - 与业务组同一 turnId、同一候选、同一 ACK：候选没保存时正式进度一个字节都不动。
+ */
+function constructionProgressGroup(
+  mutations: readonly RowMutation[],
+  dependsOn: readonly string[] = [],
+): AtomicGroup | null {
+  if (mutations.length === 0) return null;
+  return {
+    id: 'grp_construction_progress',
+    opIds: [...new Set(mutations.flatMap((m) => m.sourceOpIds))],
+    dependsOn: [...dependsOn],
+    readSet: [],
+    mutations: [...mutations],
+    purpose: 'bookkeeping',
+  };
+}
+
+/** 单元目标集合的稳定来源文本（只用于派生签名，不含时间/turnId）。 */
+function unitSignatureSource(targetIds: readonly string[]): string[] {
+  return [...new Set(targetIds)].sort();
+}
+
+/** 去重但**保持原顺序**（目标选择按优先级，不按 ID 重排）。 */
+function uniqueIds(values: readonly string[]): string[] {
+  return [...new Set(values)].filter((id) => id.length > 0);
+}
+
 /** 语义化位置合并：patch 里的 null 表示清空字段（与「保持」区分）。 */
 export function mergeChangedFields(
   target: Record<string, unknown> | null,
@@ -164,21 +784,36 @@ const CANONICAL_TABLES = new Set([
   'maps', 'locations', 'characters', 'items', 'factions', 'relations', 'routes', 'actions', 'journeys',
   'events', 'information', 'rumor_fronts', 'knowledge', 'channels', 'entity_keys', 'branches', 'turns',
   'turn_changes', 'mention_candidates', 'sync_outbox',
+  // P09A（schema3）：程序内部的建设进度/调度表。
+  'construction_progress',
 ]);
 
-/** 校验「用户表恰 20 张」——不是 20 张就明确报 schema 异常，不清库重建。 */
-export function assertTwentyTables(db: SqlDatabase): string[] {
+/**
+ * 校验用户表集合：默认要求当前版本的全部表；给 `expectedCount` 时按该版本的表数判断
+ * （旧档在升级前也必须先通过校验，不能因为本构建期待 21 张就先报坏库 —— MIG06）。
+ */
+export function assertCanonicalTables(db: SqlDatabase, options: { expectedCount?: number } = {}): string[] {
   const tables = userTableNames(db);
+  const expectedCount = Number.isInteger(options.expectedCount) ? (options.expectedCount as number) : CANONICAL_TABLES.size;
   const unexpected = tables.filter((t) => !CANONICAL_TABLES.has(t));
-  const missing = [...CANONICAL_TABLES].filter((t) => !tables.includes(t));
-  if (unexpected.length > 0 || missing.length > 0) {
+  const missing = expectedCount >= CANONICAL_TABLES.size ? [...CANONICAL_TABLES].filter((t) => !tables.includes(t)) : [];
+  const wrongCount = tables.length !== expectedCount;
+  if (unexpected.length > 0 || missing.length > 0 || wrongCount) {
     throw new AtlasDbError(
       'DB_SCHEMA_INVALID',
-      `用户表不是预期的 20 张（多 ${unexpected.length}，少 ${missing.length}）：多 ${unexpected.join(',')}；少 ${missing.join(',')}`,
-      { unexpected, missing },
+      `用户表不是预期的 ${expectedCount} 张（实际 ${tables.length}；多 ${unexpected.length}，少 ${missing.length}）：多 ${unexpected.join(',')}；少 ${missing.join(',')}`,
+      { unexpected, missing, expectedCount, actual: tables.length },
     );
   }
   return tables;
+}
+
+/**
+ * 兼容导出（旧名）：等价于「按当前构建的表数校验」。
+ * 不能只是把报错文字里的 20 改成 21 —— 版本感知的入口是 `assertCanonicalTables`。
+ */
+export function assertTwentyTables(db: SqlDatabase): string[] {
+  return assertCanonicalTables(db, { expectedCount: USER_TABLE_COUNT });
 }
 
 type StoredCandidate = CandidateInfo & { db: SqlDatabase; assets?:AtlasAssetRef[] };
@@ -186,6 +821,20 @@ type StoredCandidate = CandidateInfo & { db: SqlDatabase; assets?:AtlasAssetRef[
 /**
  * 创建 Repository。返回对象同时满足 §16.4 的 AtlasSqlRepository 与查询/诊断辅助方法。
  */
+/**
+ * R06：把一次模型请求的失败归类，供 attempts 记账展示。
+ *
+ * 只区分「取消 / 超时 / 其他错误」三类；没有 HTTP 响应的失败绝不写成 http_status。
+ */
+function failureKindOf(error: unknown): string {
+  const shape = error as { code?: unknown; name?: unknown } | null;
+  const code = String(shape?.code ?? '').toUpperCase();
+  const name = String(shape?.name ?? '');
+  if (name === 'AbortError' || code === 'ABORT_ERR' || code === 'CANCELLED' || code === 'CANCELED' || code === 'TURN_CANCELLED') return 'cancelled';
+  if (code === 'MODEL_TIMEOUT' || code === 'ETIMEDOUT' || name === 'TimeoutError') return 'timeout';
+  return 'error';
+}
+
 export function createSqlRepository(options: RepositoryOptions) {
   const now = options.now ?? (() => Date.now());
   const chatUid = options.chatUid;
@@ -374,14 +1023,16 @@ export function createSqlRepository(options: RepositoryOptions) {
       if (openOptions.bytes && openOptions.bytes.length > 0) {
         db = await openDatabase(openOptions.bytes);
         enableForeignKeys(db);
-        // 旧 schema1 档：先在副本上升级到 schema2（内部会临时关闭并恢复 FK），再校验 20 表。
+        // 旧档：先在**副本**上显式逐段升级（1→2→3；内部会临时关闭并恢复 FK），再校验表集合。
         // 升级失败会抛 DB_UPGRADE_FAILED 并保留原 bytes，绝不以 seedNewDatabase 作为错误后备。
-        if (currentSchemaVersion(db) < ATLAS_SCHEMA_VERSION) {
-          upgradeSchema1To2(db);
+        const schemaBeforeUpgrade = currentSchemaVersion(db);
+        if (schemaBeforeUpgrade < ATLAS_SCHEMA_VERSION) {
+          if (schemaBeforeUpgrade > 0) assertCanonicalTables(db, { expectedCount: expectedTableCount(schemaBeforeUpgrade) });
+          upgradeSchema(db);
           enableForeignKeys(db);
         }
-        assertTwentyTables(db);
-            const existingBranch = queryBound(db, 'SELECT id FROM branches WHERE id = ? LIMIT 1', [branchId]);
+        assertCanonicalTables(db, { expectedCount: expectedTableCount(currentSchemaVersion(db)) });
+        const existingBranch = queryBound(db, 'SELECT id FROM branches WHERE id = ? LIMIT 1', [branchId]);
         if (existingBranch.length === 0) {
           const anyBranch = queryBound(db, 'SELECT id FROM branches ORDER BY created_wall_ms LIMIT 1', []);
           if (anyBranch.length === 0) {
@@ -426,6 +1077,11 @@ export function createSqlRepository(options: RepositoryOptions) {
         case 'nearby':
           return queryNearby(ctx, query);
         case 'entity':
+          if(query.entityId&&query.entityKind&&['location','character','item','faction'].includes(query.entityKind)){
+            const table=({location:'locations',character:'characters',item:'items',faction:'factions'} as Record<string,string>)[query.entityKind];
+            const resolved=resolveMergedId({db:target,branchId:ctx.branchId,table,id:query.entityId});
+            return queryEntityDetail(ctx,{...query,entityId:resolved.resolvedId});
+          }
           return queryEntityDetail(ctx, query);
         case 'changes':
           return queryChanges(ctx, query);
@@ -668,7 +1324,22 @@ export function createSqlRepository(options: RepositoryOptions) {
     const candidate = await createCandidateImpl(anchor, 'turn');
     const candidateDb = (candidates.get(candidate.token) as StoredCandidate).db;
     const tables = createTableReadPort(candidateDb);
-    const foregroundKnownRefs = collectKnownRefs(tables, branchId);
+    /**
+     * P08/R05：本回合的**冻结引用目录**只算一次。
+     *
+     * 提示词要用的 entityRefs、编译要用的 knownRefs、纠错要用的 refs 全部取自这一份
+     * （`compileOperations` 的 scope 由它 seed），因此三者 alias 必然一致。
+     * 程序声明的必要引用（requiredRefs）在此无条件追加——第 51 张地图、第 206 个人
+     * 都能拿到 alias，而不必抬高每表固定条数上限。
+     */
+    const frozenScan = scanKnownRefs(tables, branchId, { requiredRefs: input.requiredRefs });
+    const foregroundKnownRefs = frozenScan.refs;
+    /**
+     * REF04：必要引用本身已超目录预算时**一次都不能发**（发送次数 0），
+     * 明确报 REF_REQUIRED_BUDGET_EXCEEDED，由调用方拆请求；绝不删掉必要项后继续发送。
+     */
+    const requiredCatalogueBudget = ATLAS_RUNTIME_LIMITS.refCatalogMaxEntries;
+    const requiredBudgetExceeded = frozenScan.requiredResolved > requiredCatalogueBudget;
     const clockBefore = currentClock();
     // A rolled-back floor may be regenerated with identical text; retain the old
     // audit turn and give its new commit generation a distinct identity.
@@ -677,6 +1348,24 @@ export function createSqlRepository(options: RepositoryOptions) {
     const allIssues: Issue[] = [];
     const parsedOperations: ParsedOperation[] = [];
     const attempts: Array<Record<string, unknown>> = [];
+    /**
+     * R06：模型尝试的统一记账。
+     *
+     * - `started_wall_ms` 必须在**调用 request 之前**取；`finished_wall_ms` 在请求真正结束
+     *   （成功 / 抛错 / 取消 / 超时）时取；`duration_ms = max(0, finished - started)`。
+     * - 失败路径**绝不**写 `http_status`：没有 HTTP 响应就不能伪造 200。
+     * - 一次请求只写一条：成功/失败共用同一个写入函数，不会 success + catch 重复记账。
+     * - 复用、重复确认、未触发模型的路径根本不调用本函数，所以不会凭空多出「0 ms 的模型请求」。
+     */
+    const recordAttempt = (entry: Record<string, unknown>): void => {
+      const finished = typeof entry.finished_wall_ms === 'number' ? entry.finished_wall_ms : now();
+      const started = typeof entry.started_wall_ms === 'number' ? entry.started_wall_ms : finished;
+      attempts.push({
+        id: `att_${attempts.length}`, ...entry,
+        started_wall_ms: started, finished_wall_ms: finished,
+        duration_ms: Math.max(0, finished - started),
+      });
+    };
     const turnBudget = createGenerationBudget();
     const modelPort = options.modelPort ? bindModelBudget(options.modelPort, turnBudget) : null;
     let explicitNoop = false;
@@ -701,9 +1390,21 @@ export function createSqlRepository(options: RepositoryOptions) {
         });
       });
     } else {
-      const phases: Phase[] = input.phaseBatches?.length ? input.phaseBatches : ['observe'];
+      // P09B/§16.4：continue 模式**不发前台请求**：队列里的下一单元与必要布局才是一次 continue 的全部工作。
+      const phases: Phase[] = input.constructionContinue ? [] : input.phaseBatches?.length ? input.phaseBatches : ['observe'];
+      if (requiredBudgetExceeded) {
+        // REF04：必要引用预算超限 → 本批发送次数 0（下面 phases 集合直接清空）。
+        modelPhaseFailed = true;
+        allIssues.push({
+          code: 'REF_REQUIRED_BUDGET_EXCEEDED',
+          path: '$.catalogue.requiredRefs',
+          message: `程序声明的必要引用 ${frozenScan.requiredResolved} 条已超过目录上限 ${requiredCatalogueBudget}：本批发送次数 0，不得删掉必要项后继续发送；请把可独立的地图/目标拆成多批。`,
+          severity: 'error',
+          retryable: false,
+        });
+      }
       let phaseIndex = 0;
-      for (const phase of phases) {
+      for (const phase of requiredBudgetExceeded ? [] : phases) {
         if (phaseIndex >= ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn) {
           allIssues.push({
             code: 'BUDGET_EXHAUSTED',
@@ -727,7 +1428,7 @@ export function createSqlRepository(options: RepositoryOptions) {
           });
           break;
         }
-        const request = buildSqlForegroundRequest(tables,branchId,input,phase,turnId);
+        const request = buildSqlForegroundRequest(tables,branchId,input,phase,turnId,foregroundKnownRefs);
         const startedWall = now();
         let response: ModelBatchResponse;
         try {
@@ -742,11 +1443,10 @@ export function createSqlRepository(options: RepositoryOptions) {
             severity: 'error',
             retryable: modelError.retryable ?? true,
           });
-          attempts.push({ id: `att_${attempts.length}`, kind: 'initial', phase, error: (err as Error).message });
+          recordAttempt({ kind: 'initial', phase, started_wall_ms: startedWall, failure_kind: failureKindOf(err), error: (err as Error).message });
           break;
         }
-        attempts.push({
-          id: `att_${attempts.length}`,
+        recordAttempt({
           kind: 'initial',
           phase,
           started_wall_ms: startedWall,
@@ -865,7 +1565,9 @@ export function createSqlRepository(options: RepositoryOptions) {
         attempts,
       });
 
-      const applied = applyGroups(candidateDb, ordered.order, {
+      if(input.historyRepair&&(!input.manual||!input.sceneOnly||parsedOperations.length))throw new AtlasDbError('HISTORY_SELECTION_INVALID','历史修复必须是独立手动候选，不能混入模型或其他操作',{});
+      const selectedGroups=input.historyRepair?[applyHistoryRepair({db:candidateDb,branchId,revision:rev,headTurnId:anchor.parentTurnId,turnId,chatUid,...input.historyRepair})]:ordered.order;
+      const applied = applyGroups(candidateDb, selectedGroups, {
         branchId,
         turnId,
         attemptId: input.manual ? 'manual' : 'model',
@@ -876,6 +1578,7 @@ export function createSqlRepository(options: RepositoryOptions) {
       for (const gi of applied.journalIssues) {
         allIssues.push({ code: 'JOURNAL_WRITE_FAILED', path: '$.turn_changes', message: gi, severity: 'error', retryable: false });
       }
+      if(input.historyRepair&&(applied.journalIssues.length||groupResults.some(g=>g.status==='rejected'||g.status==='blocked')))throw new AtlasDbError('HISTORY_REPAIR_FAILED','历史修复未通过引用、外键或日志校验；候选未发布',{groups:groupResults});
 
       const rejected = groupResults.filter((g) => g.status === 'rejected');
       const rejectedSnapshot = [...rejected];
@@ -928,33 +1631,118 @@ export function createSqlRepository(options: RepositoryOptions) {
         deferred: false,
         status: null as WorldFillStatus | null,
         reasonCode: null as string | null,
-        focusMapId: '',
+        /** 完成状态所属图（P07/R04）：每条焦点各自解析，不再用单张图代表整批。 */
+        completionMapIds: [] as string[],
         contextHash: '',
         task: null as GenerationTask<ModelBatchRequest> | null,
         createdLocationIds: [] as string[],
         createdRouteIds: [] as string[],
         remainingLocationIds: [] as string[],
+        /** P09B/R01：持久目标队列的本批计划（null = 未启用或状态不可用）。 */
+        queuePlan: null as ConstructionQueuePlan | null,
+        queue: null as null | { scopeKey: string; selectedTargets: number; pendingTargets: number; freshUnits: number; retryUnits: number; noPending: boolean },
+        /** 本批队列结算：processed（结构处理成功）/ retry（失败，等后续续建）/ none（未发出请求）。 */
+        queueOutcome: 'none' as 'none' | 'processed' | 'retry',
+        queueCovered: [] as string[],
+        queueFailureCode: '',
+        /** P10/R02：本批真正消费（进入请求）的来源块键。 */
+        sourceCovered: [] as string[],
+        /** P10/R02：本单元已接受的 new: 别名 → 真实 ID（部分成功时留给重试做转换）。 */
+        bindings: {} as Record<string, string>,
       };
       if (!input.manual && !input.constructionMode && input.worldCompletion && options.modelPort) {
-        const task = buildSqlWorldCompletionTask(tables, branchId, {
-          mode: input.worldCompletion.mode,
+        // P08/R05：必要引用装不下时 builder 返回 null 并把明确错误交回来（本批发送次数 0）。
+        const constructionReport: { issues: PlanIssue[] } = { issues: [] };
+        // P09B/R01：先由持久队列决定本批焦点。队列空了就不再发建设请求（零请求即「暂无待处理」）。
+        const queuePolicy = normalizeCompletionPolicy(input.worldCompletion.policy);
+        construction.queuePlan = planConstructionQueue({
+          tables,
+          branchId,
+          chatUid: anchor.chatUid,
+          mode: input.worldCompletion.mode === 'bootstrap' ? 'bootstrap' : 'local',
           focusLocationIds: input.worldCompletion.focusLocationIds,
+          policy: queuePolicy,
+          turnId,
+          // P10/R02：来源选取与目标队列在同一处算，两者共用同一份 chat/branch 缓存与预算。
+          sourceSnapshot,
+          sourceFocusTerms: input.worldCompletion.focusTerms,
+          sourceMaxChars: input.worldCompletion.sourceMaxChars,
+          sourceChunkChars: input.worldCompletion.sourceChunkChars,
+          worldSourceCache: input.worldSourceCache,
+        });
+        const queuePlan = construction.queuePlan;
+        if (queuePlan) {
+          construction.queue = {
+            scopeKey: queuePlan.scopeKey,
+            selectedTargets: queuePlan.focusIds.length,
+            pendingTargets: queuePlan.discovery.enqueueIds.length,
+            freshUnits: queuePlan.freshUnitCount,
+            retryUnits: queuePlan.retryUnitCount,
+            noPending: queuePlan.focusIds.length === 0,
+          };
+          if (queuePlan.discovery.truncated) {
+            allIssues.push({
+              code: 'WORLD_TARGETS_DISCOVERY_TRUNCATED',
+              path: '$.worldCompletion',
+              message: `本轮目标发现达到 ${queuePlan.discovery.scannedRows} 行上限；扫描游标已持久保存，下一批继续（不静默丢弃）。`,
+              severity: 'warning',
+              retryable: true,
+            });
+          }
+          // P10/R02：装不下的块是**显式延期**，不是静默截断。有不存在的冻结块（hash 变更等）也要说清楚。
+          const deferredChunks = queuePlan.sourceSelection?.deferred ?? [];
+          if (deferredChunks.length > 0) {
+            const missing = deferredChunks.filter((item) => item.index < 0).length;
+            allIssues.push({
+              code: 'WORLD_SOURCE_DEFERRED',
+              path: '$.worldCompletion.sources',
+              message: `来源块有 ${deferredChunks.length} 块本批未纳入（预算不足或原文已变化${missing > 0 ? `，其中 ${missing} 块在当前来源快照中已不存在` : ''}）；块键与偏移已持久保存，下一批继续。`,
+              severity: 'warning',
+              retryable: true,
+            });
+          }
+        }
+        const task = queuePlan && queuePlan.focusIds.length === 0 ? null : buildSqlWorldCompletionTask(tables, branchId, {
+          mode: input.worldCompletion.mode,
+          focusLocationIds: queuePlan ? queuePlan.focusIds : input.worldCompletion.focusLocationIds,
           policy: input.worldCompletion.policy,
           chatUid: anchor.chatUid,
           baseRevision: anchor.baseRevision,
           baseStorageRevision: anchor.baseStorageRevision,
           sourceSnapshot,
-        }, turnId, turnBudget.stageRemaining('geography'));
+          requiredRefs: input.requiredRefs,
+          // P10/R02：直接用队列算好的来源选取结果（同一份账本），不在这里二次选取。
+          sourceSelection: queuePlan?.sourceSelection ?? undefined,
+        }, turnId, turnBudget.stageRemaining('geography'), constructionReport);
+        if (constructionReport.issues.length > 0) {
+          allIssues.push(...constructionReport.issues.map((item) => ({
+            code: item.code,
+            path: item.path,
+            message: item.message,
+            severity: item.severity,
+            retryable: item.retryable,
+          })));
+          construction.deferred = true;
+          construction.reasonCode = construction.reasonCode ?? constructionReport.issues[0].code;
+        }
         if (!task) {
           // 无缺项 / contextHash 未变 / 无目标 / 没预算：不是失败，但要如实记 deferred。
           construction.deferred = true;
-          construction.reasonCode = turnBudget.stageRemaining('geography') === 0 ? 'MODEL_BUDGET_EXHAUSTED' : 'WORLD_CONSTRUCTION_NOT_NEEDED';
+          const queueEmpty = Boolean(construction.queue?.noPending);
+          construction.reasonCode = construction.reasonCode ?? (queueEmpty
+            ? 'WORLD_CONSTRUCTION_QUEUE_EMPTY'
+            : turnBudget.stageRemaining('geography') === 0 ? 'MODEL_BUDGET_EXHAUSTED' : 'WORLD_CONSTRUCTION_NOT_NEEDED');
           if (construction.reasonCode === 'MODEL_BUDGET_EXHAUSTED') allIssues.push({ code: 'MODEL_BUDGET_EXHAUSTED', path: '$.worldCompletion', message: '本轮传输额度已用尽，空间建设待下一批继续。', severity: 'warning', retryable: true });
         } else {
           construction.contextHash = task.contextHash;
-          construction.remainingLocationIds = task.remainingLocationIds;
-          const firstFocus = tables.selectOne('locations', branchId, task.focusLocationIds[0] ?? '');
-          construction.focusMapId = String(firstFocus?.map_id ?? '') || branchRootMapId(tables, branchId) || '';
+          // 旧口径 `remainingLocationIds` 继续成立：本任务自身的溢出 + **持久队列里没被本批覆盖**的目标。
+          // 这两者都是「下一批继续」的真实待办，任何一个都不能静默消失。
+          construction.remainingLocationIds = [...new Set([
+            ...task.remainingLocationIds,
+            ...(construction.queuePlan?.remainingTargetIds ?? []),
+          ])];
+          // 完成状态所属图在**场景地图步骤之后**再解析：容器图可能正是本轮 sceneMaps 才建出来的。
+          // 此处不再用 firstFocus.map_id（外部图）预填，避免读内部图、写外部图的归属错位。
           const claim = turnBudget.stageRemaining('geography') > 0 ? { ok: true } : { ok: false, reason: '本轮传输预算已用尽' };
           if (!claim.ok) {
             construction.deferred = true;
@@ -966,11 +1754,25 @@ export function createSqlRepository(options: RepositoryOptions) {
             preparationStep = 'before-construction';
             commitTransaction(candidateDb);
             transactionOpen = false;
+            // R06：起止必须在真正发起请求的前后取，且一次请求只记一条 attempt。
+            const constructionRequestStarted = now();
+            let constructionAttemptWritten = false;
+            const writeConstructionAttempt = (extra: Record<string, unknown>): void => {
+              if (constructionAttemptWritten) return;
+              constructionAttemptWritten = true;
+              recordAttempt({ kind: 'construction', phase: 'geography', started_wall_ms: constructionRequestStarted, ...extra });
+            };
             try {
-              const response = await modelPort!.request(task.request);
-              attempts.push({
-                id: `att_${attempts.length}`, kind: 'construction', phase: 'geography',
-                started_wall_ms: now(), finished_wall_ms: now(), http_status: response.httpStatus,
+              let response: ModelBatchResponse;
+              try {
+                response = await modelPort!.request(task.request);
+              } catch (requestError) {
+                // 失败 / 取消 / 超时同样要有真实起止与失败类型；没有响应就不写 http_status。
+                writeConstructionAttempt({ failure_kind: failureKindOf(requestError), error: (requestError as Error).message });
+                throw requestError;
+              }
+              writeConstructionAttempt({
+                http_status: response.httpStatus,
                 response_chars: response.text?.length ?? 0, response_hash: sha256HexSync(response.text ?? ''),
                 finish_reason: response.finishReason,
               });
@@ -985,6 +1787,12 @@ export function createSqlRepository(options: RepositoryOptions) {
               allIssues.push(...extracted.issues, ...parsedConstruction.issues);
               const readPort = createTableReadPort(candidateDb);
               const aliases = new Map(task.catalogue.knownRefs.map(ref => [ref.alias, ref.id]));
+              // P10/R02 §17.3 部分成功：上一次尝试**已接受**的 new: 别名 → 真实 ID。
+              // 重试先把它们换回当前分支真实引用，再去重/编译 —— 因此不会重新创建同一地点
+              // 或同一已绑定路线。转换只作用于注册的引用字段（ref / *_ref），不碰姓名、描述、
+              // 装饰 ID 或家具局部 ID（那些键名不是 ref 后缀）。
+              const reusedBindings: Record<string, string> = { ...(construction.queuePlan?.unit?.bindings ?? {}) };
+              for (const [alias, id] of Object.entries(reusedBindings)) aliases.set(alias, id);
               const resolveRefs = (value: unknown): unknown => typeof value === 'string' ? aliases.get(value) ?? value : Array.isArray(value) ? value.map(resolveRefs) : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([key, child]) => [key, key === 'ref' || key.endsWith('_ref') || typeof child === 'object' ? resolveRefs(child) : child])) : value;
               // 去重覆盖同一候选分支的全部现有地点；冻结的模型目录可能只含当前场所，
               // 不能因此把观察阶段已建成的远处房间再次新建。这里只扩展程序索引，不重编号模型 alias。
@@ -1005,6 +1813,12 @@ export function createSqlRepository(options: RepositoryOptions) {
                   constructionRefs.push({ alias: reused.id, id: reused.id, kind: 'location', rowRev: Number(row.row_rev ?? 0) });
                 }
               }
+              // 已绑定过的真实 ID 必须进目录（否则会被当成 new 再建一次）。
+              for (const id of Object.values(reusedBindings)) {
+                if (constructionRefs.some(ref => ref.id === id)) continue;
+                const row = existingLocations.find(item => item.id === id);
+                if (row) constructionRefs.push({ alias: id, id, kind: 'location', rowRev: Number(row.row_rev ?? 0) });
+              }
               const normalized = normalizeConstructionOps({
                 operations: deduped.operations,
                 knownIds: constructionRefs.map((ref) => ref.id),
@@ -1023,6 +1837,9 @@ export function createSqlRepository(options: RepositoryOptions) {
               if (constructionParsed.length === 0) {
                 construction.status = 'deferred';
                 construction.reasonCode = construction.reasonCode ?? 'WORLD_CONSTRUCTION_EMPTY';
+                // 模型没给出任何可应用的结构操作 → 这一单元没处理成功，进重试（不能静默丢弃目标）。
+                construction.queueOutcome = 'retry';
+                construction.queueFailureCode = 'WORLD_CONSTRUCTION_EMPTY';
               } else {
                 const compiledConstruction = compileOperations({
                   operations: constructionParsed, anchor, phase: 'geography', clockS: clockBefore, revision: rev,
@@ -1055,13 +1872,61 @@ export function createSqlRepository(options: RepositoryOptions) {
                 const rejected = appliedConstruction.groups.filter((g) => g.status === 'rejected' || g.status === 'blocked');
                 const ok = appliedConstruction.groups.filter((g) => g.status === 'applied' || g.status === 'duplicate');
                 // 独立合法地点可以保存；只有相关组失败时状态为 partial（W08）。
-                const pending = normalized.protectedDrops.length > 0 || normalized.issues.some(issue => issue.retryable) || deduped.issues.some(issue => issue.retryable) || task.remainingLocationIds.length > 0;
+                const pending = normalized.protectedDrops.length > 0 || normalized.issues.some(issue => issue.retryable) || deduped.issues.some(issue => issue.retryable) || task.remainingLocationIds.length > 0 || (construction.queuePlan?.remainingTargetIds.length ?? 0) > 0;
                 construction.status = rejected.length === 0 && !pending ? 'ready' : ok.length > 0 ? 'partial' : 'deferred';
                 if (pending) {
                   construction.reasonCode = 'WORLD_CONSTRUCTION_DEFERRED';
                   construction.remainingLocationIds = [...new Set([...construction.remainingLocationIds, ...task.focusLocationIds])];
                 }
                 if (rejected.length > 0) construction.reasonCode = 'WORLD_CONSTRUCTION_PARTIAL';
+                /* P10/R02 §17.3 保守整体确认：已接受的新实体登记绑定，供下一次重试先做转换。 */
+                const opRefById = new Map(constructionParsed.map((op) => [op.opId, String((op.value as Record<string, unknown>)?.ref ?? '')]));
+                for (const group of orderedConstruction.order) {
+                  if (!appliedGroupIds.has(group.id)) continue;
+                  const createdLocation = group.mutations.find((m) => m.table === 'locations' && m.before === null);
+                  const createdRoute = group.mutations.find((m) => m.table === 'routes' && m.before === null);
+                  if (!createdLocation && !createdRoute) continue;
+                  for (const opId of group.opIds) {
+                    const ref = opRefById.get(opId) ?? '';
+                    if (!ref.startsWith('new:')) continue; // 显式 new: 才需要绑定
+                    const target = createdLocation?.rowId ?? createdRoute?.rowId;
+                    if (target) construction.bindings[ref] = target;
+                  }
+                }
+                /* P09B/R01 + P10/R02：结构处理成功 → **本批真正请求到的目标**转 processed
+                   （这是「一次有效结构处理」，不是「世界完整」）；失败/被拒/被剔除 → 单元转 retry，
+                   等后续显式续建/正常任务再排。布局失败不在这里结算：它只进布局待办，
+                   不把已处理的结构单元退回建世界阶段（QUEUE05）。 */
+                const deferredOps = normalized.issues.some((issue) => issue.code === 'WORLD_CONSTRUCTION_DEFERRED');
+                const confirmation = canConfirmUnit({
+                  // 走到这里 = 请求已返回、未超时、未被判 stale（stale 会直接抛 STALE_BASE）。
+                  requestCompleted: true,
+                  payloadComplete: !parsedConstruction.incomplete,
+                  normalizedClean: normalized.protectedDrops.length === 0,
+                  appliedClean: rejected.length > 0 ? false : ok.length > 0,
+                  identityResolved: !deferredOps
+                    && !deduped.issues.some((issue) => issue.retryable)
+                    && !compiledConstruction.issues.some((issue) => issue.severity === 'error')
+                    && !groupsConstruction.issues.some((issue) => issue.severity === 'error'),
+                  // 账本写入与业务写入在**同一候选事务**里：候选没拿到 saved ACK 时整份信封被丢弃，
+                  // 账本一个字节都不会生效。所以这里为 true 是结构上成立的，不是「乐观假设」。
+                  savedAck: true,
+                });
+                if (confirmation.ok) {
+                  construction.queueOutcome = 'processed';
+                  construction.queueCovered = [...task.focusLocationIds];
+                  construction.sourceCovered = [...(construction.queuePlan?.sourcePlan?.chunkKeys ?? [])];
+                } else {
+                  construction.queueOutcome = 'retry';
+                  construction.queueFailureCode = confirmation.reasons[0] || construction.reasonCode || 'WORLD_CONSTRUCTION_PARTIAL';
+                  allIssues.push({
+                    code: 'WORLD_CONSTRUCTION_UNIT_RETRY',
+                    path: '$.worldCompletion.unit',
+                    message: `本单元未满足「一次有效结构处理」的全部条件（${confirmation.reasons.join('、')}）：已接受的业务组已保存，单元与来源块留 retry，不推进来源游标。`,
+                    severity: 'warning',
+                    retryable: true,
+                  });
+                }
               }
             } catch (error) {
               if (!transactionOpen) { beginTransaction(candidateDb); transactionOpen = true; }
@@ -1070,9 +1935,71 @@ export function createSqlRepository(options: RepositoryOptions) {
               construction.deferred = true;
               construction.status = 'deferred';
               construction.reasonCode = 'WORLD_CONSTRUCTION_FAILED';
+              // P09B/R01：请求/解析失败 → 单元转 retry（attemptCount+1），目标退回 pending 等下批。
+              construction.queueOutcome = 'retry';
+              construction.queueFailureCode = 'WORLD_CONSTRUCTION_FAILED';
+              construction.bindings = { ...(construction.queuePlan?.unit?.bindings ?? {}) };
               allIssues.push({ code: 'WORLD_CONSTRUCTION_FAILED', path: '$.worldCompletion', message: `世界建设未完成：${(error as Error).message}。本轮已登记的前景实体全部保留，可下一轮继续。`, severity: 'warning', retryable: true });
-              attempts.push({ id: `att_${attempts.length}`, kind: 'construction', phase: 'geography', error: (error as Error).message });
+              // R06：若失败发生在请求之前（编译/解析等），这里补一条带真实起止的记录；
+              // 若请求本身已记账，则不重复写第二条。
+              writeConstructionAttempt({ failure_kind: failureKindOf(error), error: (error as Error).message });
             }
+          }
+        }
+      }
+
+      /* ───────── P09B/R01：把本批队列结算落盘（bookkeeping 组，随同一 ACK）─────────
+         候选最终没保存时这里一个字节都不会生效 —— 正式调度次序不前进。
+         结构处理成功的目标变 processed；失败/被拒的单元转 retry；其余发现的 pending 目标保持，
+         下一批 3 新 : 1 重试的轮转继续把它们处理掉。 */
+      if (construction.queuePlan) {
+        const queuePlan = construction.queuePlan;
+        const settled = construction.queueOutcome === 'processed'
+          ? queuePlan.processedMutations(construction.queueCovered, construction.bindings)
+          : construction.queueOutcome === 'retry'
+            ? queuePlan.failedMutations(construction.queueFailureCode || 'WORLD_CONSTRUCTION_FAILED', construction.bindings)
+            : [];
+        /* P10/R02：来源账本结算与目标队列**同一个组、同一个 ACK**。
+           成功 → 本批真正消费的块转 processed，来源游标按「连续成功前缀」推进；
+           失败/部分成功 → 本批涉及的块转 retry，游标**不前进**（不越过缺口）。
+           未发出请求（none）时一个块状态都不改。 */
+        const sourceSettled = !queuePlan.sourcePlan ? [] : construction.queueOutcome === 'processed'
+          ? queuePlan.sourcePlan.processedMutations(construction.sourceCovered)
+          : construction.queueOutcome === 'retry'
+            ? queuePlan.sourcePlan.retryMutations(
+                construction.queueFailureCode || 'WORLD_CONSTRUCTION_FAILED',
+                (queuePlan.unit?.attemptCount ?? 0) + 1 >= MAX_UNIT_ATTEMPTS,
+              )
+            : [];
+        const progressGroup = constructionProgressGroup([...queuePlan.preMutations, ...settled, ...sourceSettled]);
+        if (progressGroup) {
+          if (!transactionOpen) { beginTransaction(candidateDb); transactionOpen = true; }
+          const appliedProgress = applyGroups(candidateDb, [progressGroup], { branchId, turnId, attemptId: 'construction-progress', validate: true });
+          groupResults.push(...appliedProgress.groups);
+          for (const message of appliedProgress.journalIssues) {
+            allIssues.push({ code: 'JOURNAL_WRITE_FAILED', path: '$.worldCompletion.progress', message, severity: 'error', retryable: false });
+          }
+          const failedProgress = appliedProgress.groups.filter((g) => g.status === 'rejected' || g.status === 'blocked');
+          if (failedProgress.length > 0) {
+            allIssues.push({
+              code: 'WORLD_CONSTRUCTION_PROGRESS_NOT_WRITTEN',
+              path: '$.worldCompletion.progress',
+              message: `建设进度未记账：${failedProgress[0].issues.map((i) => i.message).join('；') || failedProgress[0].status}。本批结构结果仍按实际写入记账。`,
+              severity: 'warning',
+              retryable: true,
+            });
+          }
+          /* 本批没覆盖完的目标仍要等下一批：它们已经落在持久 pending 行里，
+             同时继续出现在兼容字段 remainingLocationIds 中，且本批不能报 ready。 */
+          if (construction.queueOutcome === 'processed' && queuePlan.remainingTargetIds.length > 0 && construction.status === 'ready') {
+            construction.status = 'partial';
+            allIssues.push({
+              code: 'WORLD_TARGETS_TRUNCATED',
+              path: '$.worldCompletion',
+              message: `本批候选目标超过单批上限：已处理 ${queuePlan.focusIds.length} 个，剩余 ${queuePlan.remainingTargetIds.length} 个完整 ID 已进持久队列，下一批继续（不静默丢弃）。`,
+              severity: 'warning',
+              retryable: false,
+            });
           }
         }
       }
@@ -1081,8 +2008,8 @@ export function createSqlRepository(options: RepositoryOptions) {
         const imported=applySqlLegacyImport({db:candidateDb,branchId,turnId,clockS:clockBefore,nowWallMs:now(),rulesetVersion,makeId,legacy:input.legacyImport});
         groupResults.push(imported.result);allIssues.push(...imported.issues);
       }
-      if(input.sceneMaps||input.mapCalibration||input.mapBackground){
-        const mapGroup=compileSqlSceneMaps({db:candidateDb,branchId,turnId,clockS:clockBefore,makeId,ensureScenes:input.sceneMaps,calibration:input.mapCalibration,povName:input.povName,background:input.mapBackground});
+      if(input.sceneMaps||input.mapCalibration||input.mapBackground||input.mapProfile){
+        const mapGroup=compileSqlSceneMaps({db:candidateDb,branchId,turnId,clockS:clockBefore,makeId,ensureScenes:input.sceneMaps,calibration:input.mapCalibration,povName:input.povName,background:input.mapBackground,profile:input.mapProfile});
         if(mapGroup){
           const mapResult=applyGroups(candidateDb,[mapGroup],{branchId,turnId,attemptId:'scene-maps',validate:true});
           if(mapResult.journalIssues.length||mapResult.groups.some(group=>group.status==='rejected'||group.status==='blocked'))
@@ -1118,7 +2045,15 @@ export function createSqlRepository(options: RepositoryOptions) {
 
       // Entities/maps must exist before the model can reference them. Release the
       // isolated candidate transaction during the spatial model request as well.
-      let layoutTask=input.layoutMaps?buildSqlLayoutTask(candidateDb,branchId,input,turnId):null;
+      // P08/R05：布局目录的必要引用超预算时 builder 返回 null 并把明确错误交回来（本批发送次数 0）。
+      const layoutReport: { issues: PlanIssue[] } = { issues: [] };
+      const drainLayoutReport = (): void => {
+        if (layoutReport.issues.length === 0) return;
+        allIssues.push(...layoutReport.issues.map((item)=>({code:item.code,path:item.path,message:item.message,severity:item.severity,retryable:item.retryable})));
+        layoutReport.issues.length = 0;
+      };
+      let layoutTask=input.layoutMaps?buildSqlLayoutTask(candidateDb,branchId,input,turnId,layoutReport):null;
+      drainLayoutReport();
       const layoutTasks:NonNullable<typeof layoutTask>[]=[];
       // Spatial assembly completes the frozen set before this floor is published.
       // It cannot be starved by observation/construction/background's four-send budget.
@@ -1133,29 +2068,58 @@ export function createSqlRepository(options: RepositoryOptions) {
         layoutTasks.push(layoutTask);
         preparationStep='before-layout';
         commitTransaction(candidateDb);transactionOpen=false;
+        // R06：布局请求同样在真正发起前后取起止，一次请求只记一条 attempt。
+        const layoutStarted=now();
+        let layoutAttemptWritten=false;
+        const writeLayoutAttempt=(extra:Record<string,unknown>):void=>{
+          if(layoutAttemptWritten)return;
+          layoutAttemptWritten=true;
+          recordAttempt({kind:'layout',phase:'geography',started_wall_ms:layoutStarted,...extra});
+        };
         try{
           // Every real transport still claims the finite spatial plan's allowance.
-          const layoutStarted=now();
           let response=await layoutModelPort.request(layoutTask.request);
-          attempts.push({id:`att_${attempts.length}`,kind:'layout',phase:'geography',started_wall_ms:layoutStarted,finished_wall_ms:now(),http_status:response.httpStatus,response_chars:response.text?.length??0,response_hash:sha256HexSync(response.text??''),finish_reason:response.finishReason});
+          writeLayoutAttempt({http_status:response.httpStatus,response_chars:response.text?.length??0,response_hash:sha256HexSync(response.text??''),finish_reason:response.finishReason});
           if(input.isCurrent&&!input.isCurrent()||currentRevision()!==anchor.baseRevision)throw new AtlasDbError('STALE_BASE','布局生成期间聊天或世界修订已变化，候选不发布',{});
           let extracted=extractPayload(response.text??''),parsed=parseOperations(extracted.payload,{phase:'geography'});
+          const layoutRefs=layoutTask.catalogue.knownRefs;
+          const allowedRefs=new Set(layoutRefs.filter(r=>currentLayoutTask.mapIds.includes(r.id)).flatMap(r=>[r.id,r.alias]));
+          const hasRequestedLayout=()=>parsed.operations.some(op=>op.value.op==='map.layout.request'&&allowedRefs.has(op.value.ref??''));
           // Ask for a fresh complete response once. Never patch broken JSON locally or reuse partial lines as a full layout.
-          if(!parsed.operations.length&&parsed.issues.some(i=>i.code==='JSON_SYNTAX')&&!extracted.incomplete&&layoutBudget.remaining()>0){
-            const repairText=layoutTask.request.messages[1].content+'\n【布局格式纠错】上次回复不是合法 JSON，解析问题：'+parsed.issues.map(i=>i.message).join('；')+'\n重新生成以上地图的完整布局。只返回 JSONL，每张图一个完整 JSON 对象，所有键及字符串用双引号，不要代码围栏、解释、逗号连接两个对象或在字段内省略括号。';
+          const retryEmptyLayout=input.manual&&Array.isArray(input.layoutMaps);
+          const retryBrokenJson=!parsed.operations.length&&parsed.issues.some(i=>i.code==='JSON_SYNTAX');
+          if(!hasRequestedLayout()&&(retryEmptyLayout||retryBrokenJson)&&!extracted.incomplete&&layoutBudget.remaining()>0){
+            const reason=parsed.explicitNoop?'只返回了 noop':parsed.operations.length?'未返回本批地图引用的 map.layout.request':parsed.issues.some(i=>i.code==='JSON_SYNTAX')?'回复不是合法 JSON':'回复中没有布局操作';
+            const repairText=layoutTask.request.messages[1].content+'\n【布局回复纠错】上次'+reason+'。解析问题：'+(parsed.issues.map(i=>i.message).join('；')||'无语法错误，但没有本批布局')+'\n本批是用户明确请求生成或更新布局，不能以“正文无变化”判定 noop。重新生成以上地图的完整布局；缺少事实时保留估计/未知和锁，不编造实体。只返回 JSONL，每张图一个完整 JSON 对象，ref 必须使用本图目录引用：'+[...allowedRefs].join('、')+'。所有键及字符串用双引号，不要代码围栏、解释、逗号连接两个对象或在字段内省略括号。';
             const repairRequest={...layoutTask.request,batchId:layoutTask.request.batchId+'_format_retry',messages:layoutTask.request.messages.map((m,i)=>i===1?{...m,content:repairText}:m),promptInput:layoutTask.request.promptInput?{...layoutTask.request.promptInput,injectionText:repairText}:undefined};
-            allIssues.push({code:'LAYOUT_RESPONSE_RETRIED',path:'$.layout',message:'首次布局回复无法解析，已在本轮预算内请求一次完整格式纠错；原回复未写入地图。',severity:'warning',retryable:false});
+            allIssues.push({code:'LAYOUT_RESPONSE_RETRIED',path:'$.layout',message:`首次布局${reason}，已在本轮预算内请求一次完整回复纠错；原回复未写入地图。`,severity:'warning',retryable:false});
             const retryStarted=now();
             response=await layoutModelPort.request(repairRequest);
-            attempts.push({id:`att_${attempts.length}`,kind:'layout_repair',phase:'geography',started_wall_ms:retryStarted,finished_wall_ms:now(),http_status:response.httpStatus,response_chars:response.text?.length??0,response_hash:sha256HexSync(response.text??''),finish_reason:response.finishReason});
+            recordAttempt({kind:'layout_repair',phase:'geography',started_wall_ms:retryStarted,finished_wall_ms:now(),http_status:response.httpStatus,response_chars:response.text?.length??0,response_hash:sha256HexSync(response.text??''),finish_reason:response.finishReason});
             if(input.isCurrent&&!input.isCurrent()||currentRevision()!==anchor.baseRevision)throw new AtlasDbError('STALE_BASE','布局纠错期间聊天或世界修订已变化，候选不发布',{});
             extracted=extractPayload(response.text??'');parsed=parseOperations(extracted.payload,{phase:'geography'});
+          }
+          // Known geometry can be completed locally even when model detail output
+          // is malformed. Never parse or salvage fragments from that response.
+          if(input.manual&&Array.isArray(input.layoutMaps)){
+            const read=createTableReadPort(candidateDb);
+            for(const id of currentLayoutTask.mapIds){
+              const refs=layoutRefs.find(r=>r.id===id),map=read.selectOne('maps',branchId,id);
+              if(!refs||!map||parsed.operations.some(o=>o.value.op==='map.layout.request'&&(o.value.ref===id||o.value.ref===refs.alias)))continue;
+              const frame=normalizeFrame(map.frame_json),scene=frame.atlasScene as Record<string,unknown>|undefined;
+              const kind=currentLayoutTask.kinds[id];
+              const registeredContainer=map.container_location_id?read.selectOne('locations',branchId,String(map.container_location_id)):null;
+              const emptyOwn=Number(queryBound(candidateDb,"SELECT COUNT(*) n FROM locations WHERE branch_id=? AND map_id=? AND status='active'",[branchId,id])[0].n)===0;
+              const localSpec=registeredContainer?(scene?.constraints??(kind==='overview'&&emptyOwn?{surface:'mixed',zones:[],links:[],features:[]}:null)):null;
+              if(!localSpec)continue;
+              const local=parseOperations(JSON.stringify({op:'map.layout.request',ref:id,data:{kind,spec:localSpec},why:'程序基于已登记结构完成布局；模型新增细节未完成'}),{phase:'geography'});
+              parsed.operations.push(...local.operations);
+              allIssues.push({code:'LAYOUT_DETAILS_DEFERRED',path:'$.layout',message:`地图 ${id} 由程序基于已登记结构生成；模型本轮新增细节未通过协议校验，仍未完成。`,severity:'warning',retryable:true});
+            }
           }
           allIssues.push(...extracted.issues,...parsed.issues);
           // M4-23：解析必须用**原任务的冻结目录**，不能 await 回来再收一次 —— 候选期间新插入的
           // 行会让 alias 改指向，同一批回复就会被解到别的实体上。
-          const layoutRefs=layoutTask.catalogue.knownRefs;
-          const allowedRefs=new Set(layoutRefs.filter(r=>currentLayoutTask.mapIds.includes(r.id)).flatMap(r=>[r.id,r.alias]));
           const ops=parsed.operations.filter(op=>op.value.op==='map.layout.request'&&allowedRefs.has(op.value.ref??'')).map(op=>{
             const id=layoutRefs.find(r=>r.id===op.value.ref||r.alias===op.value.ref)?.id;
             const extent=id?currentLayoutTask.extents[id]:undefined;
@@ -1187,12 +2151,13 @@ export function createSqlRepository(options: RepositoryOptions) {
           if(!transactionOpen){beginTransaction(candidateDb);transactionOpen=true;}
           if(error instanceof AtlasDbError&&error.code==='STALE_BASE')throw error;
           allIssues.push({code:'LAYOUT_MODEL_FAILED',path:'$.layout',message:`空间布局未生成：${(error as Error).message} 已登记的世界数据保留，下一轮自动继续布局。`,severity:'warning',retryable:true});
-          attempts.push({id:`att_${attempts.length}`,kind:'layout',phase:'geography',error:(error as Error).message});
+          writeLayoutAttempt({failure_kind:failureKindOf(error),error:(error as Error).message});
         }
         // Continue the next chunk inside this same isolated candidate. No intermediate
         // save exposes point-only maps and no second UI click is required.
         const remaining=layoutTask.remainingLocationIds;
-        layoutTask=remaining.length?buildSqlLayoutTask(candidateDb,branchId,{...input,layoutMaps:remaining},`${turnId}_layout_${layoutTasks.length}`):null;
+        layoutTask=remaining.length?buildSqlLayoutTask(candidateDb,branchId,{...input,layoutMaps:remaining},`${turnId}_layout_${layoutTasks.length}`,layoutReport):null;
+        drainLayoutReport();
       }
       if(layoutTask)allIssues.push({code:'LAYOUT_BATCH_PENDING',path:'$.layout',message:`${layoutTask.mapIds.length+layoutTask.remainingLocationIds.length} 张地图的空间布局未完成（布局连接不可用或计划传输额度耗尽）；请查看本轮请求错误。`,severity:'warning',retryable:true});
 
@@ -1245,6 +2210,8 @@ export function createSqlRepository(options: RepositoryOptions) {
         isCurrent: spatialGuard,
         turnId,
         clockS: clockBefore,
+        autoPlan:true,
+        sourceText:[input.userText,input.assistantText,...sourceSnapshot.map(s=>s.text)].filter(Boolean).join('\n'),
         maxJobs:Math.max(ATLAS_RUNTIME_LIMITS.layoutMapsPerBatch,taskByMap.size),
         ports: spatialPorts,
       });
@@ -1253,13 +2220,15 @@ export function createSqlRepository(options: RepositoryOptions) {
 
       // M4-21 / M4-23：结构指纹结算 —— 只有「场景真的落成、请求已被消费」的图才记指纹。
       // 记上之后，成员/来源不变时 buildSqlLayoutTask 不再为同一张图重复请求模型（W07）。
-      if (pendingRequestByMap.size > 0 && taskByMap.size) {
+      if (pendingRequestByMap.size > 0 && taskByMap.size || spatial.completedMapIds?.length) {
         const processedRequests = new Set(spatial.processed);
         const ctxPort = createTableReadPort(candidateDb);
         const ctxMutations: RowMutation[] = [];
-        for (const [mapId, requestId] of pendingRequestByMap) {
-          const mapLayoutTask=taskByMap.get(mapId)!;
-          if (!processedRequests.has(requestId)) continue;
+        const completedMaps=new Map<string,string|undefined>(pendingRequestByMap);
+        for(const id of spatial.completedMapIds??[])if(!completedMaps.has(id))completedMaps.set(id,undefined);
+        for (const [mapId, requestId] of completedMaps) {
+          const mapLayoutTask=taskByMap.get(mapId);
+          if (requestId&&!processedRequests.has(requestId)) continue;
           const row = ctxPort.selectOne('maps', branchId, mapId);
           if (!row) continue;
           const rawFrame = row.frame_json;
@@ -1279,7 +2248,7 @@ export function createSqlRepository(options: RepositoryOptions) {
             before: { ...row },
             after: {
               ...row,
-              frame_json: { ...frame, [LAYOUT_CONTEXT_FRAME_KEY]: { version: 2, hash: mapLayoutTask.contextHashes?.[mapId]??mapLayoutTask.contextHash, completedTurnId: turnId } },
+              frame_json: { ...frame, [LAYOUT_CONTEXT_FRAME_KEY]: { version: 3, hash: computeMapLayoutSignature(ctxPort, branchId, mapId)??mapLayoutTask?.contextHashes?.[mapId]??mapLayoutTask?.contextHash, completedTurnId: turnId } },
               row_rev: Number(row.row_rev ?? 1) + 1,
               updated_turn_id: turnId,
             },
@@ -1303,15 +2272,37 @@ export function createSqlRepository(options: RepositoryOptions) {
         }
       }
 
-      // M3-12：建设状态元数据也必须进 journal —— 通过 RowMutation + applyGroups 保存，
+      // M3-12 / P07：建设状态元数据也必须进 journal —— 通过 RowMutation + applyGroups 保存，
       // 因此删楼回退时它跟业务数据一起被恢复，而不是散落在 frame 里改不回去。
-      if (construction.attempted && !construction.focusMapId) {
-        construction.focusMapId = String(tables.selectWhere('maps', { branch_id: branchId, container_location_id: construction.task?.focusLocationIds[0] ?? '' })[0]?.id ?? '') || branchRootMapId(tables, branchId) || '';
-      }
-      if (construction.attempted && construction.focusMapId) {
+      // 完成状态**逐地点**记在各自唯一的 active 容器图上；都没有容器图时只能 deferred，
+      // 并在分支根图留一条批次级兼容记录（绝不写成 ready）。旧代码用 firstFocus.map_id
+      // 把完成标记写到外部图、读时又用内部图，正是 R04。
+      if (construction.attempted) {
         const fillPort = createTableReadPort(candidateDb);
-        const mapRow = fillPort.selectOne('maps', branchId, construction.focusMapId);
-        if (mapRow) {
+        const focusIds = construction.task?.focusLocationIds ?? [];
+        const owners = resolveCompletionMaps(fillPort, branchId, focusIds);
+        const ownedMapIds = completionMapIds(owners);
+        for (const planIssue of completionOwnershipIssues(owners)) {
+          if (planIssue.severity === 'error') {
+            allIssues.push({ code: planIssue.code, path: planIssue.path, message: planIssue.message, severity: planIssue.severity, retryable: planIssue.retryable });
+          }
+        }
+        const needsContainer = owners.some((owner) => owner.needsContainerMap);
+        const conflicted = owners.some((owner) => owner.issues.some((item) => item.code === 'COMPLETION_CONTAINER_MAP_CONFLICT'));
+        if (needsContainer || conflicted) {
+          construction.deferred = true;
+          construction.reasonCode = construction.reasonCode ?? (conflicted ? 'WORLD_FILL_CONTAINER_MAP_CONFLICT' : 'WORLD_FILL_NEEDS_CONTAINER_MAP');
+        }
+        // 一张所属图都没有：只在根图写批次级兼容记录（status 不得为 ready），保住待办队列；
+        // 有归属时绝不回头写外部图。
+        const rootMapId = branchRootMapId(fillPort, branchId);
+        const compatOnly = ownedMapIds.length === 0;
+        const writeTargets = compatOnly ? (rootMapId ? [rootMapId] : []) : ownedMapIds;
+        const mutations: RowMutation[] = [];
+        let anyMapNotReady = false;
+        for (const mapId of writeTargets) {
+          const mapRow = fillPort.selectOne('maps', branchId, mapId);
+          if (!mapRow) continue;
           const rawFrame = mapRow.frame_json;
           const frame: Record<string, unknown> = rawFrame && typeof rawFrame === 'object' && !Array.isArray(rawFrame)
             ? { ...(rawFrame as Record<string, unknown>) }
@@ -1319,22 +2310,28 @@ export function createSqlRepository(options: RepositoryOptions) {
           let status: WorldFillStatus = construction.status ?? 'deferred';
           let reasonCode = construction.reasonCode;
           if (status === 'ready') {
-            if(!frame[SPATIAL_SCENE_KEY]){status='partial';reasonCode='WORLD_LAYOUT_PENDING';}
-            // ready 不能只看 HTTP 200：对应结构必须真的可绘制。
-            // 焦点图若仍有 pending / failed 的布局请求，本轮只能算 partial。
-            const pending = frame[SPATIAL_REQUEST_KEY];
-            const pendingStatus = pending && typeof pending === 'object' && !Array.isArray(pending)
-              ? String((pending as Record<string, unknown>).status ?? '')
-              : '';
-            if (pendingStatus === 'pending' || pendingStatus === 'failed') {
+            if (compatOnly) {
+              // 兼容记录不属于任何地点，绝不冒充 ready。
               status = 'partial';
-              reasonCode = 'WORLD_LAYOUT_PENDING';
-            }
-            const scene = frame[SPATIAL_SCENE_KEY] as { layout?: { issues?: unknown[] } } | undefined;
-            if (Array.isArray(scene?.layout?.issues) && scene.layout.issues.length > 0) {
-              status = 'partial';
-              reasonCode = 'WORLD_LAYOUT_PARTIAL';
-              construction.remainingLocationIds = [...new Set([...construction.remainingLocationIds, ...(construction.task?.focusLocationIds ?? [])])];
+              reasonCode = reasonCode ?? 'WORLD_FILL_NEEDS_CONTAINER_MAP';
+            } else {
+              if (!frame[SPATIAL_SCENE_KEY]) { status = 'partial'; reasonCode = 'WORLD_LAYOUT_PENDING'; }
+              // ready 不能只看 HTTP 200：对应结构必须真的可绘制。
+              // 所属图若仍有 pending / failed 的布局请求，本轮只能算 partial。
+              const pending = frame[SPATIAL_REQUEST_KEY];
+              const pendingStatus = pending && typeof pending === 'object' && !Array.isArray(pending)
+                ? String((pending as Record<string, unknown>).status ?? '')
+                : '';
+              if (pendingStatus === 'pending' || pendingStatus === 'failed') {
+                status = 'partial';
+                reasonCode = 'WORLD_LAYOUT_PENDING';
+              }
+              const scene = frame[SPATIAL_SCENE_KEY] as { layout?: { issues?: unknown[] } } | undefined;
+              if (Array.isArray(scene?.layout?.issues) && scene.layout.issues.length > 0) {
+                status = 'partial';
+                reasonCode = 'WORLD_LAYOUT_PARTIAL';
+                construction.remainingLocationIds = [...new Set([...construction.remainingLocationIds, ...focusIds])];
+              }
             }
           }
           frame[WORLD_FILL_FRAME_KEY] = {
@@ -1348,30 +2345,52 @@ export function createSqlRepository(options: RepositoryOptions) {
             createdRouteIds: construction.createdRouteIds.slice(0, ATLAS_RUNTIME_LIMITS.worldFillTargets),
             remainingLocationIds: construction.remainingLocationIds,
             reasonCode,
+            // 兼容记录显式标记：写它不代表该图拥有任何地点的完成状态。
+            ...(compatOnly ? { scope: 'batch-fallback' } : {}),
           };
+          construction.completionMapIds.push(mapId);
+          if (status !== 'ready') anyMapNotReady = true;
+          mutations.push({
+            table: 'maps',
+            rowId: mapId,
+            before: { ...mapRow },
+            after: { ...mapRow, frame_json: frame },
+            sourceOpIds: [],
+            basis: {
+              kind: 'simulation',
+              sources: [],
+              causes: [],
+              reason: compatOnly
+                ? '本轮世界建设的批次级兼容记录（容器图待建，不代表完成状态归属）'
+                : `地图 ${mapId} 所辖建设空间的完成状态（业务群组 + 布局可绘制性）`,
+              verification: 'causal',
+              certainty: 'inferred',
+            },
+          });
+        }
+        if (mutations.length === 0) {
+          construction.deferred = true;
+          construction.reasonCode = construction.reasonCode ?? 'WORLD_FILL_NO_TARGET_MAP';
+        } else {
+          // 批次 status 只是**汇总**：任何一张所属图没到 ready，整批就不能自称 ready。
+          if (anyMapNotReady && construction.status === 'ready') construction.status = 'partial';
           const fillOpId = `world_fill_${turnId}`;
           const fillGroup: AtomicGroup = {
             id: `grp_world_fill_${turnId}`,
             opIds: [fillOpId],
             dependsOn: [],
-            readSet: [{ table: 'maps', rowId: construction.focusMapId, rowRev: Number(mapRow.row_rev ?? 0) }],
-            mutations: [{
-              table: 'maps',
-              rowId: construction.focusMapId,
-              before: { ...mapRow },
-              after: { ...mapRow, frame_json: frame },
-              sourceOpIds: [fillOpId],
-              basis: { kind: 'simulation', sources: [], causes: [], reason: '本轮世界建设的实际应用结果（业务群组 + 布局可绘制性）', verification: 'causal', certainty: 'inferred' },
-            }],
+            // P09A/§15.4.13：建设进度/调度是程序记账，不是世界业务变化。
+            // 显式声明用途，回执与统计层据此分类，不再靠 id 前缀。
+            purpose: 'bookkeeping',
+            // 读集使用当前候选的真实 row_rev：一张图一条 readSet。
+            readSet: mutations.map((mutation) => ({ table: 'maps', rowId: mutation.rowId, rowRev: Number((mutation.before as Record<string, unknown>)?.row_rev ?? 0) })),
+            mutations: mutations.map((mutation) => ({ ...mutation, sourceOpIds: [fillOpId] })),
           };
           const appliedFill = applyGroups(candidateDb, [fillGroup], { branchId, turnId, attemptId: 'world-fill', validate: true });
           groupResults.push(...appliedFill.groups);
           for (const message of appliedFill.journalIssues) {
             allIssues.push({ code: 'JOURNAL_WRITE_FAILED', path: '$.worldFill', message, severity: 'error', retryable: false });
           }
-        } else {
-          construction.deferred = true;
-          construction.reasonCode = construction.reasonCode ?? 'WORLD_FILL_NO_TARGET_MAP';
         }
       }
 
@@ -1387,7 +2406,18 @@ export function createSqlRepository(options: RepositoryOptions) {
       }
 
       const appliedGroups = groupResults.filter((g) => g.status === 'applied');
-      worldChanged = simulation.worldChanged || appliedGroups.some((g) => g.changedRows > 0 && !g.groupId.startsWith('grp_world_fill_'));
+      // P09A/§15.4.13：按「写了哪些表 + 这个组的用途」判断世界是否真变化。
+      // 只写程序内部表（含建设进度）或显式 bookkeeping 的组不算业务变化：
+      // 不推进 revision、不计入业务成功组，也不借内部写入推进游戏时间。
+      const groupById = new Map(ordered.order.map((g) => [g.id, g] as const));
+      const businessChanged = appliedGroups.some((g) => {
+        if (g.changedRows <= 0) return false;
+        if (g.purpose === 'bookkeeping') return false;
+        const group = groupById.get(g.groupId);
+        // 组对象拿不到时保守计入（绝不静默吞掉真实业务变更）。
+        return group ? groupChangesBusiness(group) : true;
+      });
+      worldChanged = simulation.worldChanged || businessChanged;
       const newRevision = rev + (worldChanged || timeChanged ? 1 : 0);
 
       const receipt = buildReceipt({
@@ -1529,6 +2559,7 @@ export function createSqlRepository(options: RepositoryOptions) {
     request.anchor = args.anchor;
     request.sourceSnapshot = args.sourceSnapshot;
     let response: ModelBatchResponse;
+    const repairStartedWallMs = now();
     try {
       response = await args.modelPort.request(request);
     } catch (err) {
@@ -1539,11 +2570,27 @@ export function createSqlRepository(options: RepositoryOptions) {
         severity: 'error',
         retryable: true,
       });
+      // R06：纠错请求失败同样留真实起止与失败类型；没有响应不写 http_status。
+      const repairFailedWallMs = now();
+      args.attempts.push({
+        id: `att_${args.attempts.length}`,
+        kind: 'repair',
+        started_wall_ms: repairStartedWallMs,
+        finished_wall_ms: repairFailedWallMs,
+        duration_ms: Math.max(0, repairFailedWallMs - repairStartedWallMs),
+        failure_kind: failureKindOf(err),
+        error: (err as Error).message,
+        requested_operation_ids: failedOps.map((f) => f.op.opId),
+      });
       return { applied: [] };
     }
+    const repairFinishedWallMs = now();
     args.attempts.push({
       id: `att_${args.attempts.length}`,
       kind: 'repair',
+      started_wall_ms: repairStartedWallMs,
+      finished_wall_ms: repairFinishedWallMs,
+      duration_ms: Math.max(0, repairFinishedWallMs - repairStartedWallMs),
       requested_operation_ids: failedOps.map((f) => f.op.opId),
       http_status: response.httpStatus,
       response_chars: response.text?.length ?? 0,
@@ -1671,7 +2718,7 @@ export function createSqlRepository(options: RepositoryOptions) {
         status: 'committed',
         groups: [],
         issues: result_issues_of_rollback,
-        clockBeforeS: Number(targetTurn[0].clock_before_s ?? 0),
+        clockBeforeS: plan.clockBeforeS,
         clockAfterS: clockAfter,
         simulatedUntilS: clockAfter,
         worldChanged: true,

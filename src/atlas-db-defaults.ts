@@ -396,6 +396,16 @@ function defaultsFor(table: AtlasTableName): Record<string, unknown> {
         promoted_entity_id: null,
         status: 'watching',
       };
+    case 'construction_progress':
+      return {
+        scope_key: '',
+        kind: 'scope',
+        subject_key: '',
+        input_signature: '',
+        status: 'pending',
+        last_served_seq: 0,
+        payload_json: {},
+      };
     case 'sync_outbox':
       return {
         branch_id: '',
@@ -472,6 +482,13 @@ export function createRow(
   if (table === 'sync_outbox') {
     out.id = ctx.id;
     out.branch_id = ctx.branchId;
+  }
+  if (table === 'construction_progress') {
+    out.branch_id = ctx.branchId;
+    out.id = ctx.id;
+    out.row_rev = 1;
+    out.created_turn_id = ctx.turnId;
+    out.updated_turn_id = ctx.turnId;
   }
 
   // 列表列即使被显式写成 null 也要回到 []（列表默认不是 NULL）。

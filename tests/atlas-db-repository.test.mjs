@@ -20,6 +20,7 @@ import { createHostSaveAdapter, saveCandidate, reconcileUnknownSave } from '../s
 import { withChatCommitLock } from '../src/atlas-db-queue.ts';
 import { decodeSnapshot, encodeSnapshot, sha256Hex } from '../src/atlas-db-envelope.ts';
 import { queryBound } from '../src/atlas-db-runtime.ts';
+import { USER_TABLE_COUNT } from '../src/atlas-db-schema.ts';
 
 const SQL = await (await import('sql.js')).default();
 
@@ -70,7 +71,7 @@ test('T10-01 打开存档：20 表、seed turn、branch、没有「起点」地�
   const { repo } = await makeRepo();
   try {
     const db = repo.db;
-    assert.equal(userTables(db).length, 20);
+    assert.equal(userTables(db).length, USER_TABLE_COUNT);
     assert.deepEqual(foreignKeyCheck(db), []);
     const branch = queryBound(db, 'SELECT id, head_turn_id, revision FROM branches WHERE id = ?', [IDS.branchMain]);
     assert.equal(branch.length, 1);
@@ -90,7 +91,7 @@ test('T10-02 空库建世：只有 branch/seed turn，没有实体，也没有�
   const repo = createSqlRepository({ chatUid: 'chat-empty', branchId: IDS.branchMain, branchName: '主线', modelPort: model });
   try {
     await repo.open({});
-    assert.equal(userTables(repo.db).length, 20);
+    assert.equal(userTables(repo.db).length, USER_TABLE_COUNT);
     assert.equal(queryBound(repo.db, 'SELECT COUNT(*) AS n FROM branches')[0].n, 1);
     assert.equal(countRows(repo.db, 'locations', IDS.branchMain), 0);
     assert.equal(countRows(repo.db, 'characters', IDS.branchMain), 0);

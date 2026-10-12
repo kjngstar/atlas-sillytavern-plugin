@@ -18,6 +18,8 @@ import { createRow } from './atlas-db-defaults.ts';
 import { containerMapKind } from './atlas-ops-geography.ts';
 import { placeUnlocatedScenePoints } from './atlas-scene-layout.ts';
 import { normalizeSqlMapFrame } from './atlas-spatial-frame.ts';
+import { SPATIAL_PROFILE_FRAME_KEY, writeSpatialProfile } from './atlas-spatial-profile.ts';
+import type { SpatialProfileMode } from './atlas-spatial-profile.ts';
 import { queryBound, AtlasDbError } from './atlas-db-runtime.ts';
 import type { SqlDatabase } from './atlas-db-runtime.ts';
 import type { AtomicGroup, Issue, RowMutation } from './atlas-ops-contract.ts';
@@ -42,7 +44,9 @@ function containerRaw(value: unknown): string | null {
 }
 
 export function compileSqlSceneMaps(input:{db:SqlDatabase;branchId:string;turnId:string;clockS:number;operationId?:string;
-  makeId:(kind:string,opId:string,alias:string)=>string;calibration?:SqlMapCalibration;ensureScenes?:boolean;povName?:string;background?:{mapId:string;asset:import('./atlas-db-contract.ts').AtlasAssetRef|null}}):AtomicGroup|null {
+  makeId:(kind:string,opId:string,alias:string)=>string;calibration?:SqlMapCalibration;ensureScenes?:boolean;povName?:string;background?:{mapId:string;asset:import('./atlas-db-contract.ts').AtlasAssetRef|null};
+  /** P13/R03 §20：作者显式选择/清除绘图档案（`mode:null` = 清除，回到程序推导）。 */
+  profile?:{mapId:string;mode:SpatialProfileMode|null}}):AtomicGroup|null {
   const {db,branchId,turnId,clockS,makeId}=input,read=createTableReadPort(db);
   const locations=read.selectWhere('locations',{branch_id:branchId,status:'active'},SCENE_ROW_LIMIT+1);
   if(input.ensureScenes && Number(queryBound(db,"SELECT COUNT(*) AS n FROM locations WHERE branch_id=? AND status='active'",[branchId])[0].n)>SCENE_ROW_LIMIT)
@@ -214,6 +218,34 @@ export function compileSqlSceneMaps(input:{db:SqlDatabase;branchId:string;turnId
     const target=maps.find(map=>map.id===input.background!.mapId||input.background!.mapId==='world'&&map.id===root?.id);
     if(!target)throw new AtlasDbError('REF_UNKNOWN','底图对应地图不存在',{});
     change('maps',target,{...target,background_asset_key:input.background.asset?.key??null});
+  }
+  // P13/R03 §20：作者显式选择/锁定绘图档案 —— 与标定、底图走**同一条**候选 + journal 落盘路径。
+  // 这里只写 frame 里的档案命名空间；旧 scene 原样保留（新档案在下一轮布局才生效），
+  // 模式非法明确报错，绝不按地点名字猜一个档案。
+  if(input.profile){
+    const target=maps.find(map=>map.id===input.profile!.mapId||input.profile!.mapId==='world'&&map.id===root?.id);
+    if(!target)throw new AtlasDbError('REF_UNKNOWN','档案目标地图不存在',{});
+    if(input.profile.mode===null){
+      const frame={...(target.frame_json as Record<string,unknown>)};
+      delete frame[SPATIAL_PROFILE_FRAME_KEY];
+      change('maps',target,{...target,frame_json:frame});
+    }else{
+      const written=writeSpatialProfile(target.frame_json,{version:1,mode:input.profile.mode,basis:'author'});
+      if(!written.ok){
+        throw new AtlasDbError('INVALID_PAYLOAD',written.issues.map(item=>item.message).join('；')||'绘图档案不合法',{issues:written.issues});
+      }
+      change('maps',target,{...target,frame_json:written.frame});
+    }
+  }
+  // Resolve unique route ownership in the ordinary scene-construction group.
+  if(input.ensureScenes){
+    const currentLocations=locations.map(row=>changes.find(m=>m.table==='locations'&&m.rowId===row.id)?.after??row);
+    for(const key of queryBound(db,'SELECT id FROM routes WHERE branch_id=? AND map_id IS NULL',[branchId])){
+      const route=read.selectOne('routes',branchId,String(key.id))!;
+      if(route.map_id)continue;
+      const from=currentLocations.find(l=>l.id===route.from_location_id),to=currentLocations.find(l=>l.id===route.to_location_id);
+      if(from?.map_id&&from.map_id===to?.map_id)change('routes',route,{...route,map_id:from.map_id});
+    }
   }
   // 只有 warning 的组不会拖垮保存；零变更但仍有诊断时也照样回执，避免 remaining 被吞掉。
   if(!changes.length&&!opIssues.length)return null;

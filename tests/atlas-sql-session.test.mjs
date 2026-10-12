@@ -3,7 +3,7 @@
  *
  * 覆盖（§7.1–§7.3 / §16.1 / §16.4 / §18.3 T12+T13）：
  * - sqlMode 开关默认关闭，只接受严格 true；
- * - 新聊天（无信封）：source='new'、20 表、branch + migration turn、**没有「起点」地点**；
+ * - 新聊天（无信封）：source='new'、当前版本的全部用户表（schema3 = 21 张）、branch + migration turn、**没有「起点」地点**；
  *   第一轮成功提交后 `chatMetadata.atlas.database` 才有信封；
  * - 宿主保存失败：SESSION_WRITE_FAILED / coreSaved=false / 世界不发布 / 上一份信封逐字段不变；
  * - 宿主无完成信号（requested）：saved=false、保留候选、绝不 coreSaved=true；
@@ -28,6 +28,7 @@ import {
 import { createSqlRepository } from '../src/atlas-db-repository.ts';
 import { queryBound } from '../src/atlas-db-runtime.ts';
 import { countRows, foreignKeyCheck, userTables } from './fixtures/atlas-sql/seed.mjs';
+import { USER_TABLE_COUNT } from '../src/atlas-db-schema.ts';
 
 const NOW = 1_700_000_000_000;
 const now = () => NOW;
@@ -121,7 +122,7 @@ test('sqlMode：默认关闭；只接受严格 true 的三种形状', () => {
  * T12：新聊天 / 隔离
  * ================================================================== */
 
-test('T12-01 新聊天无信封：source=new、20 表、branch+migration turn、没有「起点」', async () => {
+test('T12-01 新聊天无信封：source=new、当前版本全部用户表、branch+migration turn、没有「起点」', async () => {
   const host = makeHost();
   const model = scriptedModel([locationOp('圣光学校', 'new:school')]);
   const session = await openSqlSession({
@@ -135,7 +136,7 @@ test('T12-01 新聊天无信封：source=new、20 表、branch+migration turn、
     assert.equal(session.source, 'new');
     assert.equal(session.envelopePresent, false);
     assert.equal(envelopeOf(host.chatMetadata), null, '成功提交前不得落盘');
-    assert.equal(userTables(session.repo.db).length, 20, '必须恰 20 张用户表');
+    assert.equal(userTables(session.repo.db).length, USER_TABLE_COUNT, '必须恰当前版本的用户表数（schema3 = 21）');
     assert.deepEqual(foreignKeyCheck(session.repo.db), []);
 
     const branch = queryBound(session.repo.db, 'SELECT * FROM branches WHERE id = ?', [session.branchId]);

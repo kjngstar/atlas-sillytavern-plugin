@@ -22,7 +22,7 @@ import type { TableReadPort } from './atlas-ops-compile-types.ts';
 import type { AtlasTableName } from './atlas-db-contract.ts';
 import type { KnownRef } from './atlas-sql-refs.ts';
 import type { RefKind } from './atlas-ops-contract.ts';
-import type { PlanIssue, TaskCatalogue, TaskRefInput } from './atlas-world-contract.ts';
+import type { PlanIssue, TaskCatalogue, TaskRefInput, RequiredRef } from './atlas-world-contract.ts';
 
 type SqlRow = Record<string, unknown>;
 
@@ -87,6 +87,18 @@ export function collectTaskRefs(tables: TableReadPort, input: TaskRefInput): Tas
 
   addAll(neededMaps, asStringArray(input.focusMapIds));
   addAll(neededLocations, asStringArray(input.focusLocationIds));
+
+  // ── 1b. 程序声明的必要引用：按 kind 无条件进「必要项」桶（P08/R05）────────
+  // 统一一种 (kind,id) 形状，不再为路线端点/主角/物品各加一个数组。
+  const requiredRefs: RequiredRef[] = (input.requiredRefs ?? [])
+    .map((ref) => ({ kind: ref?.kind, id: typeof ref?.id === 'string' ? ref.id.trim() : '' }))
+    .filter((ref): ref is RequiredRef => Boolean(ref.kind) && ref.id.length > 0);
+  const requiredNeeded = new Map<RefKind, Set<string>>();
+  for (const ref of requiredRefs) {
+    const bucket = requiredNeeded.get(ref.kind) ?? new Set<string>();
+    bucket.add(ref.id);
+    requiredNeeded.set(ref.kind, bucket);
+  }
 
   const readOne = (table: AtlasTableName, id: string): SqlRow | null => tables.selectOne(table, branchId, id) as SqlRow | null;
   const readWhere = (table: AtlasTableName, where: Record<string, unknown>): SqlRow[] =>
@@ -158,6 +170,18 @@ export function collectTaskRefs(tables: TableReadPort, input: TaskRefInput): Tas
     }
   }
 
+  // ── 5b. 程序声明的必要路线：端点必须补齐（断头的级联路线等于没有）──────
+  for (const routeId of requiredNeeded.get('route') ?? []) {
+    const row = readOne('routes', routeId);
+    if (!row) continue;
+    extraRoutes.add(routeId);
+    addAll(extraLocations, [
+      row.from_location_id === null || row.from_location_id === undefined ? null : String(row.from_location_id),
+      row.to_location_id === null || row.to_location_id === undefined ? null : String(row.to_location_id),
+    ]);
+    if (row.map_id !== null && row.map_id !== undefined) extraMaps.add(String(row.map_id));
+  }
+
   // ── 6. 必要 occupants：在图/在地点上的人与物 ──────────────────────────
   if (input.includeOccupants) {
     const hosts = selectedLocations();
@@ -186,9 +210,16 @@ export function collectTaskRefs(tables: TableReadPort, input: TaskRefInput): Tas
   const buckets: Record<string, { needed: Set<string>; extra: Set<string> }> = {
     locations: { needed: neededLocations, extra: extraLocations },
     maps: { needed: neededMaps, extra: extraMaps },
-    characters: { needed: new Set<string>(), extra: extraCharacters },
-    items: { needed: new Set<string>(), extra: extraItems },
-    routes: { needed: new Set<string>(), extra: extraRoutes },
+    characters: { needed: requiredNeeded.get('character') ?? new Set<string>(), extra: extraCharacters },
+    items: { needed: requiredNeeded.get('item') ?? new Set<string>(), extra: extraItems },
+    routes: { needed: requiredNeeded.get('route') ?? new Set<string>(), extra: extraRoutes },
+    factions: { needed: requiredNeeded.get('faction') ?? new Set<string>(), extra: new Set<string>() },
+    actions: { needed: requiredNeeded.get('action') ?? new Set<string>(), extra: new Set<string>() },
+    information: { needed: requiredNeeded.get('information') ?? new Set<string>(), extra: new Set<string>() },
+    knowledge: { needed: requiredNeeded.get('knowledge') ?? new Set<string>(), extra: new Set<string>() },
+    channels: { needed: requiredNeeded.get('channel') ?? new Set<string>(), extra: new Set<string>() },
+    journeys: { needed: requiredNeeded.get('journey') ?? new Set<string>(), extra: new Set<string>() },
+    events: { needed: requiredNeeded.get('event') ?? new Set<string>(), extra: new Set<string>() },
   };
 
   // 第一遍：所有表的必要项全量保留（目标/祖先/焦点图绝不因上限消失）。
@@ -240,14 +271,26 @@ export function collectTaskRefs(tables: TableReadPort, input: TaskRefInput): Tas
     rows[table] = tableRows;
   }
 
+  let requiredBudgetExceeded = false;
   if (neededTotal > maxEntries) {
-    issues.push({
-      code: 'REF_CATALOGUE_OVERSIZE',
-      path: '$.catalogue',
-      message: `必要引用 ${neededTotal} 条已超过目录上限 ${maxEntries}：必要项一律保留（目标与祖先不能丢），本次不再纳入任何非必要引用，请在调用方分批`,
-      severity: 'warning',
-      retryable: true,
-    });
+    // 程序声明的必要引用是无条件下发的：连它们都装不下时**不能删掉必要项继续发送**，
+    // 只能明确失败（REF04：发送次数为 0、错误明确），由调用方拆请求。
+    requiredBudgetExceeded = requiredRefs.length > 0;
+    issues.push(requiredBudgetExceeded
+      ? {
+          code: 'REF_REQUIRED_BUDGET_EXCEEDED',
+          path: '$.catalogue.requiredRefs',
+          message: `必要引用 ${neededTotal} 条超过目录上限 ${maxEntries}，且其中含 ${requiredRefs.length} 条程序声明的必要引用：不得删掉必要项后继续发送。本批发送次数 0，请把可独立的地图/目标拆成多批，或缩小依赖图。`,
+          severity: 'error',
+          retryable: false,
+        }
+      : {
+          code: 'REF_CATALOGUE_OVERSIZE',
+          path: '$.catalogue',
+          message: `必要引用 ${neededTotal} 条已超过目录上限 ${maxEntries}：必要项一律保留（目标与祖先不能丢），本次不再纳入任何非必要引用，请在调用方分批`,
+          severity: 'warning',
+          retryable: true,
+        });
   } else if (truncated > 0) {
     issues.push({
       code: 'REF_CATALOGUE_TRUNCATED',
@@ -262,5 +305,5 @@ export function collectTaskRefs(tables: TableReadPort, input: TaskRefInput): Tas
     knownRefs.map((ref) => `${ref.kind}\u0000${ref.id}\u0000${ref.rowRev ?? ''}`).join('\u0001'),
   );
 
-  return { knownRefs, rows, remainingIds, issues, catalogueHash };
+  return { knownRefs, rows, remainingIds, issues, catalogueHash, requiredBudgetExceeded };
 }

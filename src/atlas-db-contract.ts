@@ -452,7 +452,29 @@ export type SyncOutboxRow = {
   completed_wall_ms: number | null;
 };
 
-/** §3～6 全部 20 张表的行类型表。键名即 SQL 表名。 */
+/**
+ * P09A：独立建设进度表（schema3）。
+ *
+ * 这是**程序内部表**，不是模型可写实体，也不进模型短引用目录：
+ * 它只承载全局进度与公平重试所需的调度状态（scope/target/source/chunk/unit 五类行），
+ * 不再和地图 frame 的场景预算互相挤占。
+ */
+export type ConstructionProgressRow = {
+  branch_id: string;
+  id: string;
+  row_rev: number;
+  created_turn_id: string;
+  updated_turn_id: string;
+  scope_key: string;
+  kind: 'scope' | 'target' | 'source' | 'chunk' | 'unit';
+  subject_key: string;
+  input_signature: string;
+  status: 'pending' | 'processed' | 'retry' | 'suspended';
+  last_served_seq: number;
+  payload_json: string;
+};
+
+/** §3～6 全部 21 张表的行类型表。键名即 SQL 表名。 */
 export type AtlasRowMap = {
   maps: MapRow;
   locations: LocationRow;
@@ -474,6 +496,7 @@ export type AtlasRowMap = {
   turn_changes: TurnChangeRow;
   mention_candidates: MentionCandidateRow;
   sync_outbox: SyncOutboxRow;
+  construction_progress: ConstructionProgressRow;
 };
 
 export type AtlasTableName = keyof AtlasRowMap;
@@ -506,12 +529,17 @@ export const INTERNAL_TABLES: readonly AtlasTableName[] = [
   'turn_changes',
   'mention_candidates',
   'sync_outbox',
+  'construction_progress',
 ];
 
 /** §6.4 记录范围：14 业务表 + entity_keys + mention_candidates + branches 的可回退字段。 */
-export const JOURNALED_TABLES: readonly string[] = [...BUSINESS_TABLES, 'entity_keys', 'mention_candidates', 'branches'];
+export const JOURNALED_TABLES: readonly string[] = [
+  ...BUSINESS_TABLES, 'entity_keys', 'mention_candidates', 'branches',
+  // P09A：进度/调度行同样进 journal（可校验、可逆序恢复），不能借「内部表」名义绕过回退。
+  'construction_progress',
+];
 
-/** §1.1 全部 20 张用户表（用于「恰 20 张用户表」断言）。 */
+/** §1.1 全部 21 张用户表（用于「恰 21 张用户表」断言）。 */
 export const ATLAS_USER_TABLES: readonly AtlasTableName[] = [...BUSINESS_TABLES, ...INTERNAL_TABLES];
 
 export type AtlasRow<T extends AtlasTableName> = AtlasRowMap[T];

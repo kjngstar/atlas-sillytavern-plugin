@@ -14,9 +14,22 @@ import { ATLAS_LOCATION_KINDS_SQL } from './atlas-location-kinds.ts';
 /**
  * 数据库 schema 版本（PRAGMA user_version）。
  * 1 → 2：locations.kind 正式加入 floor；只扩展枚举，不加表、不加列。
+ * 2 → 3：新增程序内部表 construction_progress（独立建设进度与调度），旧 20 表不重建。
  * 该版本与旧模型协议 v2 无关，storage_version 仍为 1。
  */
-export const ATLAS_SCHEMA_VERSION = 2;
+export const ATLAS_SCHEMA_VERSION = 3;
+
+/**
+ * P09A/MIG06：各历史版本对应的用户表数量。
+ *
+ * 旧档校验必须按**它自己的版本**判断表数，否则升级前就会因为「期待 21 张」先报坏库。
+ */
+export const SCHEMA_TABLE_COUNTS: Readonly<Record<number, number>> = { 1: 20, 2: 20, 3: 21 };
+
+/** 给定 schema 版本应有的用户表数量；未知版本按当前构建的表数处理。 */
+export function expectedTableCount(version: number): number {
+  return SCHEMA_TABLE_COUNTS[version] ?? Object.keys(ATLAS_TABLE_COLUMNS).length;
+}
 
 export type ColumnSpec = {
   name: string;
@@ -137,6 +150,16 @@ export const ATLAS_TABLE_COLUMNS: Record<AtlasTableName, ColumnSpec[]> = {
     ...notNull('id', 'branch_id', 'target', 'projection_scope', 'target_revision', 'idempotency_key', 'payload_hash', 'status', 'attempt_count', 'created_wall_ms'),
     ...cols('requested_by_turn_id', 'next_retry_wall_ms', 'last_error_code', 'last_error_message', 'completed_wall_ms'),
   ],
+  /**
+   * P09A：建设进度/调度表。程序内部表，不是模型可写实体，也不进模型短引用目录。
+   * status 只有 pending/processed/retry/suspended —— 「已处理」不靠 ready 冒充，
+   * 布局失败与结构已处理可以分开记录（kind 决定这一行在描述什么）。
+   */
+  construction_progress: [
+    ...C_COLUMNS,
+    ...notNull('scope_key', 'kind', 'subject_key', 'input_signature', 'status', 'last_served_seq'),
+    ...cols('payload_json'),
+  ],
 };
 
 export function tableColumnNames(table: AtlasTableName): string[] {
@@ -245,6 +268,24 @@ export function turnsSql(): string {
   FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
   FOREIGN KEY (parent_turn_id) REFERENCES turns(id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
   CHECK (committed_revision IS NULL OR committed_revision >= base_revision)
+)`;
+}
+
+/** A29 construction_progress（schema3）：程序内部的建设进度与调度行。 */
+export function constructionProgressSql(): string {
+  return `CREATE TABLE IF NOT EXISTS construction_progress (
+  ${commonColumnsSql()},
+  scope_key TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('scope','target','source','chunk','unit')),
+  subject_key TEXT NOT NULL,
+  input_signature TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending','processed','retry','suspended')),
+  last_served_seq INTEGER NOT NULL DEFAULT 0 CHECK (last_served_seq >= 0),
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  PRIMARY KEY (branch_id, id),
+  UNIQUE (branch_id, scope_key, kind, subject_key),
+  FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+  ${COMMON_TURN_FKS}
 )`;
 }
 
@@ -887,6 +928,12 @@ export const ATLAS_INDEXES: readonly IndexSpec[] = [
     sql: 'CREATE UNIQUE INDEX IF NOT EXISTS idx_outbox_idempotency ON sync_outbox(idempotency_key)',
   },
   { name: 'idx_outbox_retry', table: 'sync_outbox', sql: 'CREATE INDEX IF NOT EXISTS idx_outbox_retry ON sync_outbox(status, next_retry_wall_ms)' },
+  // P09A：挑选待办与公平重试。唯一约束 (branch_id,scope_key,kind,subject_key) 自带索引，不重复加。
+  {
+    name: 'idx_construction_progress_pick',
+    table: 'construction_progress',
+    sql: 'CREATE INDEX IF NOT EXISTS idx_construction_progress_pick ON construction_progress(branch_id, scope_key, kind, status, last_served_seq, id)',
+  },
 ];
 
 /** 全部 DDL 语句（固定顺序，全部标识符为本文件常量）。 */
@@ -912,6 +959,7 @@ export function schemaStatements(): string[] {
     turnChangesSql(),
     mentionsSql(),
     outboxSql(),
+    constructionProgressSql(),
     entityKindTrigger('locations', 'location'),
     entityKindTriggerUpdate('locations', 'location'),
     entityKindTrigger('characters', 'character'),
@@ -937,7 +985,7 @@ export type MinimalDb = {
 };
 
 /**
- * A28：安装 20 表、索引与 schema_version。
+ * A28：安装全部用户表（schema3 为 21 张）、索引与 schema_version。
  * 幂等：已存在的表不重建；schema_version 写入 user_version。
  */
 export function installSchema(db: MinimalDb): void {
@@ -963,32 +1011,34 @@ export function currentSchemaVersion(db: MinimalDb): number {
 /**
  * 幂等安装：已存在的表不重建；只在需要时写 user_version。
  *
- * - 有表但数量不是 20：DB_SCHEMA_INVALID。
- * - user_version 高于本构建：DB_SCHEMA_UNSUPPORTED，不覆盖。
- * - 已有 20 表的旧版本库：DB_UPGRADE_REQUIRED，必须先走副本升级，
+ * - 有表但数量不是**该档版本**应有的数量：DB_SCHEMA_INVALID（旧档按旧数量判断，
+ *   不因本构建期待 21 张就先报坏库 —— MIG06）。
+ * - user_version 高于本构建：DB_SCHEMA_UNSUPPORTED，不覆盖，不降级。
+ * - 表数正确但版本偏低：DB_UPGRADE_REQUIRED，必须先走副本迁移，
  *   不得用 CREATE TABLE IF NOT EXISTS 假装升级完成。
  */
 export function installSchemaSafe(db: MinimalDb): void {
   const tables = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'");
   const names = new Set<string>((tables[0]?.values ?? []).map((row: unknown[]) => String(row[0])));
   const existing = names.size;
-  if (existing > 0 && names.size !== USER_TABLE_COUNT) {
-    const expected = new Set(Object.keys(ATLAS_TABLE_COLUMNS));
-    const unexpected = [...names].filter((n) => !expected.has(n));
-    const missing = [...expected].filter((n) => !names.has(n));
-    throw new Error(
-      `DB_SCHEMA_INVALID: 用户表不是预期的 ${USER_TABLE_COUNT} 张（多 ${unexpected.length}，少 ${missing.length}）：多 ${unexpected.join(',')}；少 ${missing.join(',')}`,
-    );
-  }
   const version = currentSchemaVersion(db);
   if (version > ATLAS_SCHEMA_VERSION) {
     throw new Error(
       `DB_SCHEMA_UNSUPPORTED: user_version=${version} 高于本构建支持的 schema${ATLAS_SCHEMA_VERSION}，拒绝覆盖。`,
     );
   }
-  if (existing === USER_TABLE_COUNT && version < ATLAS_SCHEMA_VERSION) {
+  const expectedCount = expectedTableCount(version);
+  if (existing > 0 && names.size !== expectedCount) {
+    const expected = new Set(Object.keys(ATLAS_TABLE_COLUMNS));
+    const unexpected = [...names].filter((n) => !expected.has(n));
+    const missing = [...expected].filter((n) => !names.has(n));
     throw new Error(
-      `DB_UPGRADE_REQUIRED: 已有 ${USER_TABLE_COUNT} 张表的 schema${version} 旧库，必须先经副本升级到 schema${ATLAS_SCHEMA_VERSION}。`,
+      `DB_SCHEMA_INVALID: 用户表不是预期的 ${expectedCount} 张（schema${version}；多 ${unexpected.length}，少 ${missing.length}）：多 ${unexpected.join(',')}；少 ${missing.join(',')}`,
+    );
+  }
+  if (existing === expectedCount && version < ATLAS_SCHEMA_VERSION) {
+    throw new Error(
+      `DB_UPGRADE_REQUIRED: 已有 ${expectedCount} 张表的 schema${version} 旧库，必须先经副本升级到 schema${ATLAS_SCHEMA_VERSION}。`,
     );
   }
   for (const sql of schemaStatements()) db.run(sql);

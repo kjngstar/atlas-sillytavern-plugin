@@ -3,7 +3,15 @@ import { migrateAtlasSettings, resolveWorldTurnPreset, sanitizeSettingsV2 } from
 import type { AtlasModelPort } from './atlas-db-contract.ts';
 import type { ModelBatchRequest } from './atlas-ops-contract.ts';
 import { DEFAULT_SQL_PROMPT_SEGMENTS, hasLegacySqlPromptProtocol } from './atlas-sql-prompts.ts';
+import { assemblePromptLayers } from './atlas-prompt-layers.ts';
 import { transportBudgetPort, type GenerationBudgetPort } from './atlas-sql-generation-budget.ts';
+
+/** 用户策略段的角色白名单：作者选定的角色必须原样保留，不合法才退回 system。 */
+const PROMPT_ROLES = new Set(['system', 'user', 'assistant']);
+function promptRole(role: unknown): 'system' | 'user' | 'assistant' {
+  const value = typeof role === 'string' ? role.trim().toLowerCase() : '';
+  return (PROMPT_ROLES.has(value) ? value : 'system') as 'system' | 'user' | 'assistant';
+}
 
 type Options = {
   readSettings: () => Promise<unknown>;
@@ -57,9 +65,12 @@ export function createSqlModelPort(options: Options): AtlasModelPort {
   if (custom.some(s => hasLegacySqlPromptProtocol(s.content))) {
     throw failure('SQL_PROMPT_INCOMPATIBLE', '活动提示词使用旧表格增量格式，与 SQL 语义操作不兼容。原预设已保留；请使用内置阶段提示词或另存兼容预设');
   }
-  const messages = [request.messages[0], ...custom.map(s => ({
-    role: s.role, content: substitutePromptPlaceholders(s.content, input),
-  })), ...request.messages.slice(1)];
+  const messages = assemblePromptLayers({
+    // §21.5 分层：固定协议（程序）→ 用户策略（作者，角色原样保留）→ 任务上下文（程序填充）。
+    protocol: request.messages[0]?.content ?? '',
+    policy: custom.map(s => ({ role: promptRole(s.role), content: substitutePromptPlaceholders(s.content, input) })),
+    task: request.messages.slice(1).map(m => m.content),
+  });
   return {preset,input,messages,promptSource: preset.systemPrompt?.trim()?'connection':preset.promptSegments?.length?'preset':'builtin'};
  }
  const port: AtlasModelPort = {
@@ -89,7 +100,7 @@ export function createSqlModelPort(options: Options): AtlasModelPort {
       });
       budget?.finishBatch(request.batchId, result.ok ? 'completed' : 'failed');
       if (!result.ok) throw failure(result.code, result.message, result.retryable);
-      return { batchId: request.batchId, text: result.text, finishReason: null,
+      return { batchId: request.batchId, text: result.text, finishReason: result.finishReason ?? null,
         httpStatus: result.status, durationMs: result.durationMs };
     },
   };

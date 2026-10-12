@@ -39,8 +39,13 @@ import type { Issue } from './atlas-ops-contract.ts';
 import { copySceneForBranch } from './atlas-spatial-branch.ts';
 
 /**
- * 分叉时复制的表（**恰好 16 张**）：14 张业务表 + entity_keys + mention_candidates。
+ * 分叉时复制的表（**恰好 17 张**）：14 张业务表 + entity_keys + mention_candidates
+ * + 建设进度表 construction_progress。
  * `turns`/`turn_changes` 共享祖先引用，`sync_outbox` 属于来源分支（§6.6：换分支停止旧任务并重建）。
+ *
+ * P09A/§15.4 第 8 条：进度行按**自有语义**复制 —— 同 ID、换 branch_id、`row_rev` 归 1、
+ * 共同审计列重建为分叉 turn。进度 ID 由 kind/scope_key/subject_key 稳定派生，
+ * 且唯一约束带 branch_id，因此父子两分支的进度互相独立、都能解析到本分支的实体身份。
  */
 export const FORK_COPY_TABLES: readonly AtlasTableName[] = [
   // 身份索引必须先写：四张实体表的 BEFORE INSERT 触发器要求同分支同 ID 的 entity_keys 已在。
@@ -60,6 +65,7 @@ export const FORK_COPY_TABLES: readonly AtlasTableName[] = [
   'knowledge',
   'channels',
   'mention_candidates',
+  'construction_progress',
 ];
 
 export type ForkBranchInput = {
@@ -73,7 +79,7 @@ export type ForkBranchInput = {
 };
 
 export type ForkBranchResult = {
-  /** 复制进新分支的**行数**（16 张表合计；不含 branches/new fork turn 自身）。 */
+  /** 复制进新分支的**行数**（17 张表合计；不含 branches/new fork turn 自身）。 */
   copiedRows: number;
   newBranchId: string;
   issues: Issue[];

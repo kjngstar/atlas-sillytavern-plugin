@@ -88,12 +88,22 @@ test('原版预设：新建 ID 碰撞被拒绝，普通更新不存在仍被拒�
 test('原版预设：异步保存失败后保留草稿，导出不包含 Key',async()=>{const window={crypto:{randomUUID:()=> 'unique'},TextEncoder},ctx=vm.createContext({window,TextEncoder,URL});vm.runInContext(readFileSync(new URL('../ui/atlas-reference/js/presets.js',import.meta.url),'utf8'),ctx);const initial=referencePresetDocument({});const store=window.AtlasPresetStore.create([],{storage:null,initialDocument:initial,onPersist:async()=>{throw Error('network failed');}});store.draft('prompt').segments[0].content='edited';await assert.rejects(store.save('prompt'),/network failed/);assert.equal(store.draft('prompt').segments[0].content,'edited');assert.notEqual(store.document.promptPresets[0].segments[0].content,'edited');assert.ok(!JSON.stringify(store.exportValue()).includes('apiKey'));});
 function mount(options={}){
  const dom=new JSDOM('<div id="root"></div>',{url:'http://localhost/'}),root=dom.window.document.getElementById('root');let state={chatId:'A',binding:options.unbound?null:{branchId:'main',enabled:options.bindingEnabled??true},stateData:{revision:3},receipts:[],panelOpen:true},context={chatId:'A',chatMetadata:{atlas:{database:{data:'A',sha256:'a'}}},extensionSettings:{atlas_world_sim:{sqlMode:options.enabled??true}}},calls=[],closes=0,loads=0,prefs={},settings=settingsViewV2(createDefaultSettingsV2());
- const sql={projectMapView:()=>null,toLegacyTurnReceipt};
+ const sql={projectMapView:()=>null,toLegacyTurnReceipt,LAYOUT_SIGNATURE_POLICY_VERSION:'layout-v3'};
  const api={request:async(method,path,body)=>{if(['/sql/chat/map/layout','/sql/chat/map/build'].includes(path)&&options.mapReply)return {status:200,body:{ok:true,data:await options.mapReply(path)}};if(path==='/sql/chat/map/layout'&&options.layoutFailure)return {status:500,body:{ok:false,error:{code:'TURN_FAILED',message:'布局格式错误',details:options.layoutFailure}}};if(path==='/sql/chat/ui-read'){calls.push(body);await options.delay?.(body);const data=body.kind==='map'?view([{...map,name:context.chatId}]):body.kind==='catalog'?view(cat):body.kind==='entity'?view([{kind:'character',character:{id:'C',name:context.chatId},position:{kind:'at_location'}}]):view([]);data.metadata={protagonistId:'C',snapshotSaved:!!context.chatMetadata.atlas?.database};return {status:200,body:{ok:true,data}};}if(method==='PUT'){const r=applySettingsCommand(settings,body);if(!r.ok)return {status:400,body:{ok:false,error:{message:r.message}}};settings={...settings,...r.settings};}return {status:200,body:{ok:true,data:settings}};},setRuntimeApiKeys:c=>calls.push({runtime:c.map(x=>({id:x.id,key:!!x.apiKey}))})};
  const core={recordExternalReceipt:(receipt,chatId,detail)=>{state.receipts=[...(state.receipts??[]),{...receipt,chatId,detail}];},getState:()=>state,setPage:()=>{},setPanelOpen:v=>{state.panelOpen=v;render();},setEnabled:async v=>{state.binding.enabled=v;calls.push({enabled:v});},manualAdvance:async()=>{calls.push({advance:true});if(options.advanceError)state.lastError=options.advanceError;},initializeWorld:async()=>false,retryLastCommit:async()=>{},refresh:async()=>{calls.push({refresh:true});}};
- const render=mountReferenceUi({root,core,api,getContext:()=>context,settingsPort:{read:async()=>prefs,write:async(_,v)=>{prefs=v;}},loadSqlRuntime:async()=>{loads++;if(options.unavailable)throw Error('SQL_CORE_UNAVAILABLE');return sql;}}),bridge=root.firstChild.__atlasHost;
+ const render=mountReferenceUi({root,core,api,getContext:()=>context,pluginVersion:options.pluginVersion,settingsPort:{read:async()=>prefs,write:async(_,v)=>{prefs=v;}},loadSqlRuntime:async()=>{loads++;if(options.unavailable)throw Error('SQL_CORE_UNAVAILABLE');return sql;}}),bridge=root.firstChild.__atlasHost;
  return {root,core,render,bridge,calls,get loads(){return loads;},get closes(){return closes;},get prefs(){return prefs;},saved(){context.chatMetadata.atlas.database={data:'saved-A',sha256:'saved-a',storage_revision:4};state={...state,stateData:{revision:4}};render();},noSnapshot(){context.chatMetadata.atlas={};render();},switch(id){state={...state,chatId:id,lastError:null};context={...context,chatId:id,chatMetadata:{atlas:{database:{data:id,sha256:id}}}};render();},off(){context.extensionSettings.atlas_world_sim.sqlMode=false;render();}};
 }
+
+test('真实宿主导出接通插件版本和 SQL 布局策略版本',async()=>{
+ const m=mount({pluginVersion:'0.9.87'});
+ try{
+  await m.bridge.boot();
+  const exported=await m.bridge.exportMap('world');
+  assert.equal(exported.file.metadata.pluginVersion,'0.9.87');
+  assert.equal(exported.file.metadata.layoutPolicyVersion,'layout-v3');
+ }finally{await m.render.dispose();}
+});
 
 test('地图写入后修订变化仍记录回执并刷新，切到其他聊天则不接收旧回执',async()=>{
  const receipt={turnId:'saved-layout',status:'partial',anchor:{branchId:'main'},groups:[{groupId:'layout',status:'applied'}],issues:[{code:'ROOM_REF_UNKNOWN',path:'$.contents[0]',severity:'error',message:'坏引用'}],worldChanged:true,timeChanged:false,clockBeforeS:0,clockAfterS:0};

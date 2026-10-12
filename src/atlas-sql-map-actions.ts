@@ -1,17 +1,25 @@
 import {imageAsset} from './atlas-sql-map-assets.ts';
+import {savedTurnHasScene} from './atlas-sql-receipt-evidence.ts';
 import {inspectSqlWorld} from './atlas-sql-inspect.ts';
 /** Explicit SQL map commands; legacy map routes never write this repository. */
 import { parseWorld } from '../lib/world-schema.ts';
-import { createTableReadPort } from './atlas-db-readport.ts';
+import { createTableReadPort, pageAllRows } from './atlas-db-readport.ts';
 import { collectKnownRefs } from './atlas-sql-refs.ts';
+import { findByNameExact } from './atlas-sql-ref-pages.ts';
 import { AtlasDbError } from './atlas-db-runtime.ts';
 import { stableHexHash } from './atlas-hash.ts';
 import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
 import { runSqlTurn, commitPreparedTurn } from './atlas-sql-session.ts';
 import type { SqlSession } from './atlas-sql-session.ts';
-import type { ModelOperation, TurnInput, SourceSnapshotEntry, PreparedCommit } from './atlas-ops-contract.ts';
-import type { WorldCompletionInput } from './atlas-world-contract.ts';
-import { WORLD_FILL_FRAME_KEY } from './atlas-sql-world-completion.ts';
+import type { ModelOperation, TurnInput, SourceSnapshotEntry, PreparedCommit, RequiredRef } from './atlas-ops-contract.ts';
+import type { WorldCompletionInput, WorldFillStatus } from './atlas-world-contract.ts';
+import { SPATIAL_CAPABILITIES } from './atlas-world-contract.ts';
+import { SPATIAL_PROFILE_MODES, normalizeRequestedProfileMode } from './atlas-spatial-profile.ts';
+import { readWorldFillState } from './atlas-sql-world-completion.ts';
+import { completionMapIds, resolveCompletionMaps } from './atlas-world-completion-ownership.ts';
+import { readProgressRows, readScanState, rowsInScope, scopeKeyFor, summarizeScope, discoverTargets } from './atlas-construction-progress.ts';
+import { summarizeSources } from './atlas-construction-sources.ts';
+import { planNextUnits } from './atlas-construction-scheduler.ts';
 
 const previews=new WeakMap<SqlSession,Map<string,{commit:PreparedCommit;sourceHash:string}>>();
 
@@ -26,25 +34,41 @@ export async function handleSqlMapAction(session:SqlSession,action:string,body:R
     previews.get(session)?.delete(String(body.previewId));
     return {coreSaved:true,status:'committed',receipt:result.receipt,issues:result.issues};
   }
-  const db=session.repo.db,read=createTableReadPort(db),refs=collectKnownRefs(read,session.branchId);
+  const db=session.repo.db,read=createTableReadPort(db);
+  // ── P08/R05：先用**真实 ID** 收齐本次动作的必要引用，再分配 alias ──────────
+  // 顺序很重要：alias 由「扫描结果 + 必要引用追加」共同决定，必要集合没定型就取 alias，
+  // 后面追加的一条会把编号整体挪位，先前写下的 alias 就会改指向。
+  const required:RequiredRef[]=[];
+  const requireRef=(kind:RequiredRef['kind'],id:unknown)=>{const text=String(id??'').trim();if(text)required.push({kind,id:text});};
+  let refsCache:ReturnType<typeof collectKnownRefs>|null=null;
+  const refs=()=>refsCache??(refsCache=collectKnownRefs(read,session.branchId,{requiredRefs:required}));
   const beforeLocations = new Set(read.selectWhere('locations',{branch_id:session.branchId,status:'active'},1000).map(row=>String(row.id)));
   const find=(table:'locations'|'characters'|'items',value:unknown)=>{
     const id=String(value??''),row=read.selectOne(table,session.branchId,id)??read.selectOne(table,session.branchId,id.replace(/^(?:loc|npc|item):/,''))??read.selectOne(table,session.branchId,`${table==='locations'?'loc':table==='characters'?'npc':'item'}:${id}`);
     if(!row)throw new AtlasDbError('REF_UNKNOWN',`目标${table==='locations'?'地点':table==='characters'?'人物':'物品'}不存在`,{});
+    requireRef(table==='locations'?'location':table==='characters'?'character':'item',row.id);
     return row;
   };
-  const ref=(id:unknown)=>{const entry=refs.find(r=>r.id===id);if(!entry)throw new AtlasDbError('REF_UNKNOWN','目标不在本次只读目录中',{});return entry.alias;};
+  const ref=(id:unknown)=>{const entry=refs().find(r=>r.id===id);if(!entry)throw new AtlasDbError('REF_UNKNOWN','目标不在本次只读目录中',{});return entry.alias;};
   const map=(value:unknown)=>{
-    const key=String(value??''),maps=read.selectWhere('maps',{branch_id:session.branchId,status:'active'},1000);
+    // REF02：跨页查图——第 51 张之后的图也必须能解析（不抬高 maps 全表 cap 50）。
+    const key=String(value??''),maps=pageAllRows(read,'maps',session.branchId,500).filter(row=>String(row.status??'active')==='active');
     const branch=read.selectOne('branches',session.branchId,session.branchId)!;
     const selected=maps.find(m=>m.id===key)|| (key==='world'?maps.find(m=>m.id===branch.root_map_id||!m.container_location_id):maps.find(m=>m.container_location_id===key||m.container_location_id===key.replace(/^loc:/,'')||m.container_location_id===`loc:${key}`));
-    if(!selected)throw new AtlasDbError('REF_UNKNOWN','目标地图不存在',{});return selected;
+    if(!selected)throw new AtlasDbError('REF_UNKNOWN','目标地图不存在',{});
+    requireRef('map',selected.id);
+    return selected;
   };
   const operations:ModelOperation[]=[],calibration:TurnInput['mapCalibration']=undefined;
   let mapBackground:TurnInput['mapBackground'];
+  /** P13/R03 §20：作者显式选择/清除绘图档案。 */
+  let mapProfile:TurnInput['mapProfile'];
   let layoutMaps:TurnInput['layoutMaps'];
   let worldCompletion:WorldCompletionInput|undefined;
   let constructionMode:TurnInput['constructionMode'];
+  /** P09B/§16.4：继续建设（程序模式）与本轮的稳定请求身份。 */
+  let constructionContinue=false;
+  let continueIdentity='';
   let mapCalibration:TurnInput['mapCalibration']=calibration,manual=true,phases:TurnInput['phaseBatches']=[];
   if(action==='map/layout'){
     layoutMaps=[String(map(body.mapId).id)];
@@ -70,14 +94,41 @@ export async function handleSqlMapAction(session:SqlSession,action:string,body:R
     constructionMode=body.constructionMode==='extract-only'?'extract-only':undefined;
     if(!constructionMode)layoutMaps='active';
     manual=false;phases=['observe'];
+    // P09B/§16.4：「继续建设」。不发前台请求，只推进持久队列里的下一单元；无待办时零请求返回。
+    if(body.continue===true&&!constructionMode){
+      const work=planConstructionDigest(read,session.branchId,mode,resolvedFocus,2,{
+        baseRevision:session.repo.internal.currentRevision(),
+        headTurnId:String(session.repo.internal.currentHeadTurnId()??''),
+      });
+      if(!work.hasNext){
+        return {coreSaved:false,status:'idle',pending:false,scopeKey:work.scopeKey,
+          selectedTargets:0,message:'暂无待处理：持久建设队列里没有下一单元，也没有新目标'};
+      }
+      phases=[];
+      constructionContinue=true;
+      continueIdentity=stableHexHash(JSON.stringify(['build-continue',work.scopeKey,work.nextUnitId,work.baseRevision,work.headTurnId]));
+    }
   }else if(action==='map/repair'){
     const report=inspectSqlWorld(session);
     if(!report.canApply||body.reportToken!==report.reportToken)throw new AtlasDbError('SQL_PREVIEW_EXPIRED','地图检查报告已变化，请重新检查',{});
+  }else if(action==='map/profile'){
+    // §20：作者手动选择档案是**显式布局语义变更** —— 只改绘图档案（frame 里的命名空间），
+    // 旧 scene 原样保留到下一轮候选成功；不接受"名字像驿站/庭院"这种猜测，
+    // 也不给模型开放随手写 frame 的入口：模式必须在合法枚举内，或显式 null 清除。
+    const target=String(body.mapId??'world');
+    const rawMode=body.mode===undefined?null:body.mode;
+    if(rawMode!==null&&normalizeRequestedProfileMode(rawMode)===null){
+      throw new AtlasDbError('ENUM_INVALID',`未知的绘图档案：${String(rawMode)}；合法值 ${SPATIAL_PROFILE_MODES.join(' / ')}（或用 null 清除）`,{allowed:[...SPATIAL_PROFILE_MODES]});
+    }
+    mapProfile={mapId:String(map(target).id),mode:rawMode===null?null:normalizeRequestedProfileMode(rawMode)};
   }else if(action==='map/image/set'){
     mapBackground={mapId:String(map(body.mapId??'world').id),asset:body.dataUrl===null?null:await imageAsset(body.dataUrl)};
   }else if(action==='map/move'){
-    const raw=String(body.entityId??''),kind=refs.find(r=>r.id===raw||r.id===raw.replace(/^(?:npc|item):/,''))?.kind;
-    const table=kind==='item'?'items':'characters',entity=find(table,raw),target=find('locations',body.toPointId);
+    // 先用真实 ID 在两张候选表上定位（**不**提前取 alias：必要引用集合没定型就编号会漂移）。
+    const raw=String(body.entityId??''),stripped=raw.replace(/^(?:npc|item):/,'');
+    const asCharacter=read.selectOne('characters',session.branchId,raw)??read.selectOne('characters',session.branchId,stripped);
+    const asItem=asCharacter?null:(read.selectOne('items',session.branchId,raw)??read.selectOne('items',session.branchId,stripped));
+    const table=asItem?'items':'characters',entity=find(table,raw),target=find('locations',body.toPointId);
     if(table==='characters')operations.push({op:'character.upsert',ref:ref(entity.id),data:{location_ref:ref(target.id),position:null},why:'作者纠偏当前位置'});
     else operations.push({op:'item.transfer',ref:ref(entity.id),data:{to:{location_ref:ref(target.id)}},why:'作者纠偏物品位置'});
   }else if(action==='map/topology'){
@@ -109,11 +160,22 @@ export async function handleSqlMapAction(session:SqlSession,action:string,body:R
       manual=false;phases=['geography'];
     }
   }else if(action==='map/protagonist'){
-    const candidates=read.selectWhere('characters',{branch_id:session.branchId,status:'active'},1000),name=String(body.name??body.playerName??'').trim();
-    const matches=candidates.filter(c=>c.name===name||Array.isArray(c.aliases_json)&&c.aliases_json.includes(name));
-    if(matches.length>1)throw new AtlasDbError('REF_AMBIGUOUS','主角名字匹配了多个档案，不能随机选择',{});
+    const name=String(body.name??body.playerName??'').trim();
     if(!name)throw new AtlasDbError('INVALID_PAYLOAD','主角名字不能为空',{});
-    for(const candidate of candidates.filter(row=>row.role==='protagonist'&&row.name!==name))operations.push({op:'character.upsert',ref:ref(candidate.id),data:{role:'npc'}});
+    // REF01/REF05：分页读全分支人物（不受 1,001 行硬上限影响），不再只看前面若干条。
+    const candidates=pageAllRows(read,'characters',session.branchId,500).filter(row=>String(row.status??'active')==='active');
+    // REF05：精确名称/别名匹配跨页进行；多个同名**一律报歧义**，不默认挑第一个。
+    const matches=findByNameExact(read,'characters',session.branchId,name).ids
+      .map(id=>read.selectOne('characters',session.branchId,id))
+      .filter((row):row is Record<string,unknown>=>row!==null)
+      .filter(row=>String(row.status??'active')==='active');
+    if(matches.length>1)throw new AtlasDbError('REF_AMBIGUOUS','主角名字匹配了多个档案，不能随机选择',{matches:matches.map(row=>String(row.id))});
+    // 本次动作引用到的角色先按真实 ID 登记为必要引用：排序末尾（第 206 个）的主角也能拿到 alias，
+    // 不必抬高 characters 每表 200 条的固定上限。
+    const demoted=candidates.filter(row=>row.role==='protagonist'&&row.name!==name);
+    for(const candidate of demoted)requireRef('character',candidate.id);
+    if(matches.length)requireRef('character',matches[0].id);
+    for(const candidate of demoted)operations.push({op:'character.upsert',ref:ref(candidate.id),data:{role:'npc'}});
     if(matches.length)operations.push({op:'character.upsert',ref:ref(matches[0].id),data:{role:'protagonist'}});
     else operations.push({op:'character.upsert',ref:'new:player',data:{name,role:'protagonist',importance:'core',identity:'用户主角'}});
   }else if(action==='map/import'){
@@ -144,10 +206,17 @@ export async function handleSqlMapAction(session:SqlSession,action:string,body:R
     sources.push({key:'map-task',kind:'estimate',text:`仅用 map.estimate 标定 ${scope}，不要修改其他地图或生成地点。`,hash:stableHexHash(scope)});
   }
   const hash=stableHexHash(JSON.stringify([action,body,sources]));
+  // §16.4：继续动作的请求身份由 scope + 下一单元 + 当前 baseRevision + 当前 head 稳定派生。
+  // 同一次动作的双击/网络重试 → 同一身份、同一冻结 body → 只有一个有效任务；
+  // 上一批 saved 后 head/revision 都变了 → 下一次 continue 不是上一条的 duplicate。
+  const authorLabel=constructionContinue?`${action}/continue`:action;
+  const identity=constructionContinue?(String(body.requestId??'').trim()||continueIdentity):(String(body.requestId??'').trim()||hash);
   const input:TurnInput={anchor:{chatUid:session.chatUid,branchId:session.branchId,parentTurnId:session.repo.internal.currentHeadTurnId(),
-    baseRevision:session.repo.internal.currentRevision(),baseStorageRevision:session.repo.storageRevision,hostMessageUid:`author:${action}:${body.requestId??hash}`,variantKey:'author',inputHash:hash},
+    baseRevision:session.repo.internal.currentRevision(),baseStorageRevision:session.repo.storageRevision,hostMessageUid:`author:${authorLabel}:${identity}`,variantKey:'author',inputHash:hash},
     userText:String(body.userText??''),assistantText:String(body.assistantText??''),sourceSnapshot:sources,phaseBatches:phases,manual,operations,
-    narrativeKind:'manual',sceneMaps:true,sceneOnly:true,layoutMaps,mapCalibration,mapBackground,worldCompletion,constructionMode,legacyImport:action==='map/import'?{atlas:{world:body.world,maps:body.maps??null}}:undefined,povName:action==='map/protagonist'?String(body.name??body.playerName??''):undefined,isCurrent:typeof body.isCurrent==='function'?body.isCurrent as ()=>boolean:undefined};
+    // P08/R05：本次动作按真实 ID 声明的必要引用，交给仓库统一追加进冻结目录。
+    requiredRefs:required.length?required:undefined,
+    narrativeKind:'manual',sceneMaps:true,sceneOnly:true,layoutMaps,mapCalibration,mapBackground,mapProfile,worldCompletion,constructionMode,constructionContinue,legacyImport:action==='map/import'?{atlas:{world:body.world,maps:body.maps??null}}:undefined,povName:action==='map/protagonist'?String(body.name??body.playerName??''):undefined,isCurrent:typeof body.isCurrent==='function'?body.isCurrent as ()=>boolean:undefined};
   if((action==='map/bootstrap'||action==='map/build')&&body.apply===false){
     const commit=await session.repo.prepareTurn(input),previewId=commit.token;
     let drafts=previews.get(session);if(!drafts){drafts=new Map();previews.set(session,drafts);}
@@ -164,40 +233,122 @@ export async function handleSqlMapAction(session:SqlSession,action:string,body:R
   const readBack=createTableReadPort(session.repo.db);
   const added = readBack.selectWhere('locations',{branch_id:session.branchId,status:'active'},1000).filter(row=>!beforeLocations.has(String(row.id)));
   const build=action==='map/build'?summarizeWorldFill(readBack,session.branchId,worldCompletion):undefined;
-  return {coreSaved:true,pointsAdded:added.filter(row=>row.kind!=='region').length,regionsAdded:added.filter(row=>row.kind==='region').length,status:action==='map/scale'?'calibrated':constructionMode==='extract-only'?'extracted':result.receipt.status,message:constructionMode==='extract-only'?'分块事实已登记；总体建设留到抽取结束后一次执行':'已保存到当前聊天的 SQL 数据库',...(build?{build}:{}),receipt:result.receipt,issues:result.issues};
+  return {coreSaved:true,...(action==='map/layout'?{sceneSaved:savedTurnHasScene(session.repo.db,result.receipt.turnId,String(body.mapId))}:{}),pointsAdded:added.filter(row=>row.kind!=='region').length,regionsAdded:added.filter(row=>row.kind==='region').length,status:action==='map/scale'?'calibrated':constructionMode==='extract-only'?'extracted':result.receipt.status,message:constructionMode==='extract-only'?'分块事实已登记；总体建设留到抽取结束后一次执行':'已保存到当前聊天的 SQL 数据库',...(build?{build}:{}),receipt:result.receipt,issues:result.issues};
 }
 
 /**
- * M3-13：把本次建设状态如实回报给调用方（bootstrap 预览 / 应用都要看得到）。
+ * P09B/§16.4：「继续建设」的**只读**前置判断。
  *
- * ready 只认程序写入的 frame 状态：HTTP 200 不算 ready；没有被应用就报 deferred，
- * 并把「还缺哪张图的布局」一并交出，让客户端可以接着调 map/layout。
+ * 无待办时必须零请求返回「暂无待处理」，所以这里先用持久进度行算一遍：
+ * 有可调度的单元、有本轮能发现的新目标、或还有 pending 目标 → 才真的开回合。
+ * 判定与仓库里的计划同源（同一 discoverTargets / planNextUnits / 同一持久 schedulerSeq），
+ * 刷新、换聊天、fork 之后读到的都是同一份真实进度，不靠内存计数。
+ */
+function planConstructionDigest(
+  read:ReturnType<typeof createTableReadPort>,
+  branchId:string,
+  mode:WorldCompletionInput['mode'],
+  focusIds:readonly string[],
+  maxAdditionalDepth:number,
+  state:{baseRevision:number;headTurnId:string},
+):{scopeKey:string;hasNext:boolean;nextUnitId:string|null;baseRevision:number;headTurnId:string}{
+  const rows=readProgressRows(read,branchId);
+  const scopeKey=scopeKeyFor(mode==='bootstrap'?'bootstrap':'local',focusIds);
+  const discovery=discoverTargets({tables:read,branchId,scopeKey,focusIds,rows,maxAdditionalDepth});
+  const unitRows=rowsInScope(rows,scopeKey,'unit');
+  const schedulerSeq=readScanState(rowsInScope(rows,scopeKey,'scope')[0]??null).schedulerSeq;
+  const next=planNextUnits(unitRows,1,schedulerSeq);
+  const pendingTargets=rowsInScope(rows,scopeKey,'target').filter(row=>row.status==='pending').length;
+  return {
+    scopeKey,
+    hasNext:Boolean(next.unit)||discovery.enqueueIds.length>0||pendingTargets>0,
+    nextUnitId:next.unit?.unitId??null,
+    baseRevision:state.baseRevision,
+    headTurnId:state.headTurnId,
+  };
+}
+
+/**
+ * M3-13 / P07：把本次建设状态如实回报给调用方（bootstrap 预览 / 应用都要看得到）。
+ *
+ * ready 只认程序写入的 frame 状态：HTTP 200 不算 ready；没有被应用就报 deferred。
+ * 完成状态**按地点所属的内部图**汇总（共用 resolveCompletionMaps），不再用第一张外部图代表整批；
+ * 每张图的状态单独交出，批次 status 只是汇总。没有任何内部图时退回根图上的批次级兼容记录，
+ * 但那一条绝不冒充完成状态归属。
  */
 function summarizeWorldFill(
   read:ReturnType<typeof createTableReadPort>,
   branchId:string,
   worldCompletion:WorldCompletionInput|undefined,
 ):Record<string,unknown>{
-  const focusIds=worldCompletion?.focusLocationIds??[];
-  const maps:string[]=[];
-  for(const id of focusIds){
-    const mapId=String(read.selectOne('locations',branchId,id)?.map_id??'');
-    if(mapId&&!maps.includes(mapId))maps.push(mapId);
+  const focusIds=[...new Set((worldCompletion?.focusLocationIds??[]).map(String).filter(Boolean))].sort();
+  const owners=resolveCompletionMaps(read,branchId,focusIds);
+  const ownedMapIds=completionMapIds(owners);
+  const root=String(read.selectOne('branches',branchId,branchId)?.root_map_id??'');
+  // 没有所属图时只看根图兼容记录；有归属时绝不回头读外部图。
+  const targetMaps=ownedMapIds.length>0?ownedMapIds:(root?[root]:[]);
+  const states=targetMaps.map(mapId=>({mapId,state:readWorldFillState(read,branchId,mapId)}));
+  const recorded=states.filter(entry=>entry.state);
+  const needsContainer=owners.some(owner=>owner.needsContainerMap);
+  const conflicted=owners.some(owner=>owner.issues.some(item=>item.code==='COMPLETION_CONTAINER_MAP_CONFLICT'));
+  let status:WorldFillStatus='deferred';
+  let reasonCode:string|null='WORLD_FILL_NOT_WRITTEN';
+  if(recorded.length>0){
+    const statuses=recorded.map(entry=>entry.state!.status);
+    status=statuses.every(value=>value==='ready')?'ready':statuses.some(value=>value==='partial')?'partial':'deferred';
+    reasonCode=recorded.find(entry=>entry.state!.reasonCode)?.state!.reasonCode??null;
   }
-  if(!maps.length){
-    const branch=read.selectOne('branches',branchId,branchId);
-    const root=String(branch?.root_map_id??'');
-    if(root)maps.push(root);
+  if(needsContainer||conflicted){
+    if(status==='ready')status='partial';
+    reasonCode=reasonCode??(conflicted?'WORLD_FILL_CONTAINER_MAP_CONFLICT':'WORLD_FILL_NEEDS_CONTAINER_MAP');
   }
-  const fill=maps.length?read.selectOne('maps',branchId,maps[0])?.frame_json as Record<string,unknown>|undefined:undefined;
-  const state=fill&&typeof fill[WORLD_FILL_FRAME_KEY]==='object'?fill[WORLD_FILL_FRAME_KEY] as Record<string,unknown>:null;
+  const first=recorded.find(entry=>entry.state!.remainingLocationIds.length>0)??recorded[0];
+  // P09B/§16.5：队列回执读的是**持久进度行**，不是内存计数 —— 刷新/换聊天后仍报真实进度。
+  const queue=worldCompletion
+    ? summarizeScope(
+        readProgressRows(read,branchId),
+        scopeKeyFor(worldCompletion.mode==='bootstrap'?'bootstrap':'local',worldCompletion.focusLocationIds),
+        focusIds.length,
+        reasonCode,
+      )
+    : null;
+  // P10/R02：来源账本回执（持久行派生）。游标是「连续成功前缀」，不是内存计数。
+  const sources=worldCompletion
+    ? summarizeSources(
+        readProgressRows(read,branchId),
+        scopeKeyFor(worldCompletion.mode==='bootstrap'?'bootstrap':'local',worldCompletion.focusLocationIds),
+      )
+    : null;
+  const sceneTally={ready:0,partial:0,missing:0};
+  for(const entry of states){
+    if(entry.state?.status==='ready')sceneTally.ready+=1;
+    else if(entry.state?.status==='partial')sceneTally.partial+=1;
+    else sceneTally.missing+=1;
+  }
   return {
     mode:worldCompletion?.mode??null,
     focusLocationIds:focusIds.slice(0,ATLAS_RUNTIME_LIMITS.worldFillTargets),
-    status:state?String(state.status??'deferred'):'deferred',
-    reasonCode:state?state.reasonCode??null:'WORLD_FILL_NOT_WRITTEN',
-    createdLocationIds:state&&Array.isArray(state.createdLocationIds)?state.createdLocationIds:[],
-    remainingLocationIds:state&&Array.isArray(state.remainingLocationIds)?state.remainingLocationIds:[],
-    focusMapId:maps[0]??null,
+    status,
+    reasonCode,
+    createdLocationIds:first?.state?.createdLocationIds??[],
+    createdRouteIds:first?.state?.createdRouteIds??[],
+    remainingLocationIds:first?.state?.remainingLocationIds??[],
+    // 完成状态所属图（内部图）；没有归属就如实为 null，不谎报外部图。
+    completionMapId:ownedMapIds[0]??null,
+    completionMapIds:ownedMapIds,
+    focusMapId:ownedMapIds[0]??(ownedMapIds.length===0&&!needsContainer&&!conflicted?root||null:null),
+    /** P10/R02：来源消费账本（sources/chunks/连续成功前缀/处理字符数）。 */
+    sources,
+    /** 逐图状态：批次 status 只是汇总，客户端可据这里决定对哪张图接着调 map/layout。 */
+    mapStatuses:states.map(entry=>({mapId:entry.mapId,status:entry.state?.status??'unrecorded'})),
+    /** §16.5：场景 ready / partial / missing 单独汇总。 */
+    sceneSummary:sceneTally,
+    /** §16.5：本批队列回执（选择目标数 / 有效处理数 / 待处理数 / 来源块数 / 重试单元数 / 延期原因）。 */
+    ...(queue?{queue}:{}),
+    /**
+     * P11/R03 §18：程序**实际支持**的空间契约能力（权威在 atlas-world-contract.ts）。
+     * 回执按真实常量下发，报告与测试都不许手写一份「已实现能力」清单。
+     */
+    capabilities:[...SPATIAL_CAPABILITIES],
   };
 }

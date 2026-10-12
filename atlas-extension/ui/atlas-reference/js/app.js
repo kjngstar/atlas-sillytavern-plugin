@@ -73,6 +73,16 @@ function showEntity(kind,id,focus=false){
  }
  select(kind,id,true);return true;
 }
+/**
+ * P14/§21.5：提示词分层的**引擎信息**——策略版本、程序真实声明的能力、内置建议预设。
+ * 全部来自宿主设置视图的真实字段；缺省就给空值，不编一个「已支持」的能力出来。
+ *
+ * 位置注意：必须放在下面那句 `AtlasMap.create(...)` **之前** ——
+ * 无头验收夹具（`tests/atlas-map-overview-acceptance.test.mjs`）拿那一行当切片锚点，
+ * 在只有 `window.AtlasMap` 的 vm 里跑标记筛选；把读宿主的代码挪到锚点之后会直接炸。
+ * （注释里刻意不写锚点原文，否则 `indexOf` 会先命中注释。）
+ */
+const engine=window.AtlasHost?.initial?.engine??{policyVersion:null,capabilities:[],activePromptPresetId:null,suggested:null};
 const map=window.AtlasMap.create($('#map'),$('#minimap'),{
  onSelect(m){if(m?.placeId){if(state.singleClickEnter&&m.node)navigate(m.node.id);else inspectPlace(m.placeId);return;}if(!m){state.selected=null;state.inspectorTab='cast';renderInspector();return;}if(m.node){if(state.singleClickEnter)navigate(m.node.id);else inspectPlace(m.node.id);return;}
   if(m.type==='char')select('character',m.id,true);
@@ -93,7 +103,10 @@ const map=window.AtlasMap.create($('#map'),$('#minimap'),{
  activeEdge:()=>state.selected?.kind==='message'||state.selected?.kind==='task'?state.selected.id:null,
  getMotion:()=>state.motion
 });
-const presetUI=window.AtlasPresetUI.create({root,store:presets,esc,toast,diagnostic,modal,renderPage,download,fetchModels:connection=>window.AtlasHost.fetchModels(connection)});
+const presetUI=window.AtlasPresetUI.create({root,store:presets,esc,toast,diagnostic,modal,renderPage,download,engine,
+ fetchModels:connection=>window.AtlasHost.fetchModels(connection),
+ /** 真实预览：走宿主 → 服务端同一条组装链；没有这个端口时明确报「预览不可用」。 */
+ previewMessages:task=>typeof window.AtlasHost.previewMessages==='function'?window.AtlasHost.previewMessages(task):Promise.reject(Error('当前宿主没有提供请求预览'))});
 function formatDistance(m){if(m>=1000)return `${+(m/1000).toFixed(2)} km`;return `${+m.toFixed(m<1?2:1)} m`;}
 function frameChrome(st){
  if(!st.node)return;
@@ -181,11 +194,21 @@ function eventLinksHTML(e){
   return rows.length?`<div class="section-label">关联对象</div><div class="detail-actions">${rows.join('')}</div>`:'';
 }
 function taskCard(t){return `<button class="task-card" style="--c:${t.c}" data-select-kind="task" data-select="${esc(t.id)}"><div class="tc-h"><span class="tc-n">${esc(t.n)}</span><em class="tc-st ${t.st}">${esc(t.stName)}</em></div><div class="tc-d">${esc(t.d)}</div>${t.p==null?'<div class="task-indeterminate">等待条件满足</div>':`<div class="tc-progress"><i style="width:${t.p}%"></i></div><div class="task-percent">${t.p}%</div>`}</button>`;}
-function receiptCard(r){const partial=r.detail?.receipt?.status==='partial',status=partial?'部分成功':{committed:'已提交',duplicate:'重复回执',failed:'失败','pending-review':'待审阅'}[r.status]||r.status,detail={status:r.status,...(r.detail??{}),...(r.logs?.length?{logs:r.logs}:{})};return `<div class="receipt-row"><i class="rc-ok ${r.ok&&!partial?'':'rc-fail'}"></i><div><b>推演回执 · ${esc(status)} · ${esc(r.t)}</b><p>${esc(r.m)}</p>${r.issue?`<code>${esc(r.issue)}</code>`:''}<details class="diagnostic-row"><summary>查看本轮日志</summary><pre>${esc(JSON.stringify(detail,null,2))}</pre></details></div>${r.retryable?`<button class="action-btn" data-retry="${esc(r.id)}">重试失败项</button>`:r.ok?`<span class="receipt-done">${esc(status)}</span>`:'<button class="action-btn" data-page="diag">查看诊断</button>'}</div>`;}
+/**
+ * P14/§21.3：回执分层 —— 「世界数据已保存」/「布局：…」/「缺漏与语义：…」分开写。
+ * report 由数据层从**真实结果字段**派生（见 referenceReceiptReport），这里只负责画；
+ * 没有 report（普通推演回执）就不画这三行，免得凭空多出一句「布局失败」。
+ */
+function receiptLayers(r){const p=r.report;if(!p)return '';
+  return `<ul class="receipt-layers"><li class="rl-core">${esc(p.core.label)}</li><li class="rl-layout rl-${esc(p.layout.state)}">${esc(p.layout.label)}</li><li class="rl-gaps">${esc(p.gaps.label)}</li></ul>`;}
+function receiptCard(r){const partial=r.detail?.receipt?.status==='partial',status=partial?'部分成功':{committed:'已提交',duplicate:'重复回执',failed:'失败','pending-review':'待审阅'}[r.status]||r.status,detail={status:r.status,...(r.detail??{}),...(r.logs?.length?{logs:r.logs}:{})};return `<div class="receipt-row"><i class="rc-ok ${r.ok&&!partial?'':'rc-fail'}"></i><div><b>推演回执 · ${esc(status)} · ${esc(r.t)}</b><p>${esc(r.m)}</p>${receiptLayers(r)}${r.issue?`<code>${esc(r.issue)}</code>`:''}<details class="diagnostic-row"><summary>查看本轮日志</summary><pre>${esc(JSON.stringify(detail,null,2))}</pre></details></div>${r.retryable?`<button class="action-btn" data-retry="${esc(r.id)}">重试失败项</button>`:r.ok?`<span class="receipt-done">${esc(status)}</span>`:'<button class="action-btn" data-page="diag">查看诊断</button>'}</div>`;}
 function enginePhaseText(engine=D.meta.engine??{}){return {'awaiting-reply':'等待酒馆正文完成…',queued:'推演排队中…','reading-context':'正在读取推演资料…',committing:'正在推演，等待回执…'}[engine.phase]||'正在处理…';}
 function renderDock(){
  $$('#dockTabs .dt').forEach(b=>{b.classList.toggle('active',b.dataset.tab===state.dock);b.setAttribute('aria-selected',b.dataset.tab===state.dock);});
  const el=$('#dockBody');
+ // §21.4：待确认的回退影响面板永远排在最前 —— 它是执行前必须看到的东西。
+ const rb=rollbackPanel();
+ if(rb){el.innerHTML=rb;return;}
  if(state.dock==='log'){const now=turnEvents(),old=historyEvents();
    el.innerHTML=`<div class="section-label">本轮世界动向 · ${now.length}</div><div class="event-list">${now.map(eventRow).join('')||'<p class="scope-note">本轮暂无新的世界动向</p>'}</div>`+
      (old.length?`<div class="section-label">历史记录 · ${old.length}</div><div class="event-list">${old.slice(0,60).map(eventRow).join('')}</div>`:'');}
@@ -278,7 +301,45 @@ function togglePanel(side){const left=side==='left',key=left?'leftClosed':'right
 function toast(text,kind='ok'){const n=document.createElement('div');n.className='toast '+kind;const dot=document.createElement('i');dot.className='td';const span=document.createElement('span');span.textContent=text;n.append(dot,span);$('#toastWrap').append(n);later(()=>{n.classList.add('out');later(()=>n.remove(),320);},2400);}
 function diagnostic(level,code,message,details=''){D.DIAGNOSTICS.unshift({id:'diag-'+Date.now(),t:clock()+':00',level,source:'preview',code,message,details});}
 function advanceDemo(){state.dock='receipt';$('#dock').classList.remove('collapsed');renderDock();return runHost('advance','推演请求已处理');}
-function undoDemo(){return runHost('undo','世界已回退');}
+/**
+ * P14/§21.4：回退必须先看真实影响再执行。
+ *
+ * 第一次点击只取**只读计划**（服务端同一个 planRollback）并弹影响面板；面板上的
+ * 「确认回退」才真的执行。旧宿主没有 rollbackPreview 时保持原行为（直接执行），
+ * 免得老宿主点了没反应。
+ */
+let rollbackPreview=null;
+function rollbackPanel(){
+  const p=rollbackPreview;if(!p)return '';
+  const floors=p.affectedTurns.map(t=>t.floor??t.turnId).filter(Boolean);
+  const list=(p.withheld?'（当前为主角视角，只给计数）':floors.length?floors.map(f=>`<li>${esc(f)}</li>`).join(''):'<li>无</li>');
+  const maps=p.withheld?'':(p.affectedMaps.length?p.affectedMaps.map(id=>`<li>${esc(id)}</li>`).join(''):'<li>无</li>');
+  const scopes=p.withheld?'':(p.affectedProgressScopes.length?p.affectedProgressScopes.map(k=>`<li>${esc(k)}</li>`).join(''):'<li>无</li>');
+  return `<div class="receipt-row" data-rollback-preview>
+    <i class="rc-ok rc-fail"></i><div><b>回退影响预览 · 目标楼层 ${esc(p.targetFloor??p.targetTurnId)}</b>
+    <ul class="receipt-layers">
+      <li class="rl-core">将一并撤销 ${p.affectedTurnCount} 楼（含目标楼）· 其中手动建设 ${p.manualTurnCount} 楼 · 计划步骤 ${p.steps} 步</li>
+      <li class="rl-gaps">受影响地图：${p.withheld?'—':'见下'} · 建设进度范围：${p.withheld?'—':'见下'}</li>
+      <li>时钟：${Math.round(p.clockBeforeS)} → ${Math.round(p.clockTargetS)} 秒</li>
+    </ul>
+    <details class="diagnostic-row" open><summary>受影响的楼层 / 地图 / 进度范围</summary>
+      <div class="prop-grid"><div><span class="scope-note">楼层</span><ul class="receipt-layers" data-rollback-floors>${list}</ul></div>
+      <div><span class="scope-note">地图</span><ul class="receipt-layers" data-rollback-maps>${maps}</ul></div>
+      <div><span class="scope-note">建设进度范围</span><ul class="receipt-layers" data-rollback-scopes>${scopes}</ul></div></div></details>
+    </div>
+    <button class="action-btn" data-rollback-confirm>确认回退</button>
+    <button class="action-btn" data-rollback-cancel>取消</button></div>`;
+}
+async function undoDemo(){
+  if(rollbackPreview){rollbackPreview=null;return runHost('undo','世界已回退');}
+  const host=window.AtlasHost??{};
+  if(typeof host.rollbackPreview!=='function')return runHost('undo','世界已回退');
+  let preview=null;
+  try{preview=await host.rollbackPreview();}catch(error){toast(error.message,'warn');return;}
+  if(preview===null||preview===undefined)return runHost('undo','世界已回退');
+  rollbackPreview=preview;state.dock='receipt';$('#dock').classList.remove('collapsed');renderDock();
+}
+function cancelRollback(){rollbackPreview=null;renderDock();}
 function resetDemo(){return runHost('refresh','已刷新当前世界');}
 function retry(){return runHost('retry','重试请求已处理');}
  function generateLayout(id=state.nodeId){return runHost('layout','空间布局已保存',id);}
@@ -385,6 +446,8 @@ function bind(){
   if(b.dataset.mode){state.mapMode=b.dataset.mode;map.setMode(state.mapMode);renderModes();return;}
   if(b.dataset.flag){map.setFlag(b.dataset.flag,!map.state[b.dataset.flag]);renderSwitches();return;}
   if(b.dataset.filterRegion){const id=b.dataset.filterRegion;if(id==='all')map.setFilter(new Set());else {const set=new Set(map.state.filter);set.has(id)?set.delete(id):set.add(id);map.setFilter(set);}renderChips();return;}
+  if(b.hasAttribute('data-rollback-confirm')){await undoDemo();return;}
+  if(b.hasAttribute('data-rollback-cancel')){cancelRollback();return;}
   if(b.dataset.tab){state.dock=b.dataset.tab;renderDock();$('#dock').classList.remove('collapsed');return;}
   if(b.dataset.catalogFilter){state.filter=b.dataset.catalogFilter;$$('[data-catalog-filter]').forEach(el=>el.classList.toggle('on',el===b));renderCatalog();return;}
   if(b.dataset.showFlow){showFlow(b.dataset.showFlow);return;}if(b.dataset.taskMap){showTask(b.dataset.taskMap);return;}

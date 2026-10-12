@@ -87,7 +87,7 @@ import * as B from './foundation.mjs';
       for(const f of ordered((spec.contents||[]).filter(f=>f.roomId===r.id)).sort((a,b)=>priority(b)-priority(a))){
         if(!Number.isFinite(f.w)||!Number.isFinite(f.h)||f.w<=0||f.h<=0||f.type==='reading'&&(f.w<2||f.h<2)){issues.push({id:f.id,code:'DETAIL_DIMENSION_INVALID'});continue;}
         // 陈设塞不进房间：明确到 ID，绝不能偷偷放大到穿墙。
-        if(f.type!=='light'&&f.type!=='decor'&&(f.w>inner.w+EPS||f.h>inner.h+EPS)&&!f.locked){issues.push({id:f.id,code:'DETAIL_TOO_LARGE'});continue;}
+        if(f.type!=='light'&&f.type!=='decor'&&!f.locked&&(f.w>inner.w+EPS||f.h>inner.h+EPS)&&(f.h>inner.w+EPS||f.w>inner.h+EPS)){issues.push({id:f.id,code:'DETAIL_TOO_LARGE'});continue;}
         const free=q=>B.contains(inner,q)&&!B.intersects(q,spine)&&!B.intersects(q,swing)&&!groups.filter(g=>g.roomId===r.id).some(g=>B.intersects(inflate(g,.28),q))&&!exact.some(p=>B.intersects(q,{x:p.x-.25,y:p.y-.25,w:.5,h:.5}));
         let chosen=null;
         const old=previous?.groups?.find(g=>g.id===f.id&&g.roomId===r.id&&g.w===f.w&&g.h===f.h);
@@ -107,6 +107,24 @@ import * as B from './foundation.mjs';
         if(!chosen&&!f.locked&&f.w!==f.h){
           for(let y=inner.y;y+f.w<=inner.y+inner.h+EPS&&!chosen;y+=.25)for(let x=inner.x;x+f.h<=inner.x+inner.w+EPS;x+=.25){
             const q={x,y,w:f.h,h:f.w};if(free(q)){chosen=q;break;}
+          }
+        }
+        // A straight spine is a preferred arrangement. A small room may instead use
+        // a connected path around furniture; test the actual door and interactions.
+        // Dimensions, locked coordinates and the door swing remain unchanged.
+        if(!chosen&&!f.locked){
+          const existing=groups.filter(g=>g.roomId===r.id),existingBodies=bodies.filter(b=>b.roomId===r.id);
+          const entry={x:door.x-.3,y:r.side==='north'?door.y-.6:door.y,w:.6,h:.6};
+          const freePath=q=>B.contains(inner,q)&&!B.intersects(q,swing)&&!B.intersects(q,entry)&&!existing.some(g=>B.intersects(inflate(g,.28),q))&&!exact.some(p=>B.intersects(q,{x:p.x-.25,y:p.y-.25,w:.5,h:.5}));
+          let tried=0;
+          for(const [w,h] of [[f.w,f.h],...(f.w!==f.h?[[f.h,f.w]]:[])]){
+            for(let y=inner.y;!chosen&&y+h<=inner.y+inner.h+EPS&&tried<64;y+=.25)for(let x=inner.x;!chosen&&x+w<=inner.x+inner.w+EPS&&tried<64;x+=.25){
+              const q={x,y,w,h};if(!freePath(q))continue;tried++;
+              const proposal=makeGroup({...f,w,h},r,x,y),nav=navigation(r,door,[...existingBodies,...proposal.bodies]);
+              const accessible=g=>[pt(g.x+g.w+.48,g.y+g.h/2),pt(g.x-.48,g.y+g.h/2),pt(g.x+g.w/2,g.y+g.h+.48),pt(g.x+g.w/2,g.y-.48)].some(p=>B.pointInside(inner,p)&&nav.reachable(p));
+              if([...existing,proposal].every(accessible)&&exact.every(nav.reachable))chosen=q;
+            }
+            if(chosen)break;
           }
         }
         if(!chosen){issues.push({id:f.id,code:'DETAIL_NO_SPACE'});continue;}
@@ -129,14 +147,54 @@ import * as B from './foundation.mjs';
         if(point)actors.push({...a,...point,mapId:spec.id,type:'person',quality:a.position?'confirmed':'layout'});else issues.push({id:a.id,code:a.position?'ACTOR_LOCK_CONFLICT':'ACTOR_NO_REACHABLE_POSITION'});
       }
     }
+    /**
+     * P11/R03 §18.2 第 6/7 条：绑定走廊是一个**通行空间**。
+     *
+     * - 走廊陈设只能贴上下两侧摆，中央一条 `passage` 净空永不占用（人要从这里走过去）；
+     * - 放不下的走廊陈设留一条带 ID 的缺项，绝不悄悄丢掉、也绝不挪进别的房间；
+     * - 走廊人物站在净空带上，与走廊陈设天然不重叠。
+     */
+    const cid=typeof spec.corridorEntityId==='string'&&spec.corridorEntityId?spec.corridorEntityId:spec.parentId;
+    const cspace=cid&&bare.corridor.h>0&&bare.corridor.w>0?bare.corridor:null;
+    if(cspace){
+      const ch=cspace.h,passage=Math.min(1.2,Math.max(.6,ch*.5)),band=(ch-passage)/2;
+      const strips=band>1e-6?[cspace.y,cspace.y+passage+band].map(y=>({x:cspace.x+.35,y,w:cspace.w-.7,h:band})):[];
+      const corridorGroups=[];
+      for(const f of ordered((spec.contents||[]).filter(f=>f.roomId===cid))){
+        if(!Number.isFinite(f.w)||!Number.isFinite(f.h)||f.w<=0||f.h<=0){issues.push({id:f.id,code:'DETAIL_DIMENSION_INVALID'});continue;}
+        const old=previous?.groups?.find(g=>g.id===f.id&&g.roomId===cid&&g.w===f.w&&g.h===f.h);
+        const free=q=>strips.some(s=>B.contains(s,q))&&!corridorGroups.some(g=>B.intersects(inflate(g,.28),q));
+        let chosen=old&&free(old)?old:null;
+        for(const s of strips)for(let x=s.x;!chosen&&x+f.w<=s.x+s.w+1e-8;x+=.25){const q={x,y:s.y,w:f.w,h:f.h};if(free(q))chosen=q;}
+        if(!chosen){issues.push({id:f.id,code:'DETAIL_NO_SPACE'});continue;}
+        const g=makeGroup({...f,w:chosen.w,h:chosen.h},{id:cid},chosen.x,chosen.y);
+        // 交互点落在中央净空带上：家具贴边、人站中间，点得到也不挡路。
+        g.interaction={x:chosen.x+chosen.w/2,y:cspace.y+ch/2};
+        corridorGroups.push(g);
+      }
+      groups.push(...corridorGroups);bodies.push(...corridorGroups.flatMap(g=>g.bodies));
+      for(const a of ordered((spec.actors||[]).filter(a=>a.roomId===cid||a.roomId===spec.parentId&&!bare.rooms.some(r=>r.id===a.roomId)))){
+        const old=previous?.actors?.find(p=>p.id===a.id&&p.roomId===cid);
+        const inside=p=>p&&p.x>=cspace.x+.3-1e-8&&p.x<=cspace.x+cspace.w-.3+1e-8&&p.y>=cspace.y-1e-8&&p.y<=cspace.y+ch+1e-8;
+        const free=p=>inside(p)&&!actors.some(q=>distance(p,q)<.7)&&!corridorGroups.some(g=>B.intersects(g,{x:p.x-.18,y:p.y-.18,w:.36,h:.36}));
+        let point=a.position||(old&&free(old)?old:null);
+        if(a.position&&!free(a.position)){issues.push({id:a.id,code:'ACTOR_LOCK_CONFLICT'});continue;}
+        if(!point)for(let x=cspace.x+.3;!point&&x<=cspace.x+cspace.w-.3+1e-8;x+=.75){const q={x,y:cspace.y+ch/2};if(free(q))point=q;}
+        if(point)actors.push({...a,...point,mapId:spec.id,type:'person',quality:a.position?'confirmed':'layout'});else issues.push({id:a.id,code:a.position?'ACTOR_LOCK_CONFLICT':'ACTOR_NO_REACHABLE_POSITION'});
+      }
+    }
     for(const i of spec.items||[]){
       const g=groups.find(g=>g.id===i.on),b=g?.bodies.find(b=>['table','desk','shelf','cabinet'].includes(b.type));
       if(b)items.push({...i,...center(b),roomId:g.roomId,type:'item',containerId:g.id,elevation:.8,quality:'layout'});else issues.push({id:i.id,code:'ITEM_CONTAINER_NOT_FOUND'});
     }
-    if(bare.corridor.h>0)for(let x=1.5;x<spec.width;x+=3)lamps.push({id:'hall-light:'+x,type:'light',roomId:'corridor',x,y:bare.corridor.y+.22,elevation:2.8});
-    for(const v of [...(spec.contents||[]),...(spec.actors||[])])if(!bare.rooms.some(r=>r.id===v.roomId))issues.push({id:v.id,code:'ROOM_REF_UNKNOWN'});
-    let path=[];if(actors.length>=2){
-      const [a,b]=actors,[ra,rb]=[a,b].map(a=>bare.rooms.find(r=>r.id===a.roomId)),[da,db]=[ra,rb].map(r=>bare.doors.find(d=>d.roomId===r.id));
+    if(bare.corridor.h>0)for(let x=1.5;x<spec.width;x+=3)lamps.push({id:'hall-light:'+x,type:'light',roomId:cid||'corridor',x,y:bare.corridor.y+.22,elevation:2.8});
+    const knownSpaces=new Set([...bare.rooms.map(r=>r.id),...(cid?[cid]:[])]);
+    for(const v of [...(spec.contents||[]),...(spec.actors||[])])if(!knownSpaces.has(v.roomId))issues.push({id:v.id,code:'ROOM_REF_UNKNOWN'});
+    // P11/R03：走廊里的行走者不属于任何房间，不能参与「房间→房间」的路径求解
+    // （否则 ra/rb 会是 undefined，整张图直接抛错）。房间内的行走者依旧取前两位。
+    const inRooms=actors.filter(a=>bare.rooms.some(r=>r.id===a.roomId));
+    let path=[];if(inRooms.length>=2){
+      const [a,b]=inRooms,[ra,rb]=[a,b].map(a=>bare.rooms.find(r=>r.id===a.roomId)),[da,db]=[ra,rb].map(r=>bare.doors.find(d=>d.roomId===r.id));
       const pa=navigation(ra,da,bodies.filter(x=>x.roomId===ra.id)).path(a),pb=navigation(rb,db,bodies.filter(x=>x.roomId===rb.id)).path(b),cy=bare.corridor.y+bare.corridor.h/2;
       if(pa&&pb)path=[...pa.reverse(),pt(da.x,da.y),pt(da.x,cy),pt(db.x,cy),pt(db.x,db.y),...pb];
     }

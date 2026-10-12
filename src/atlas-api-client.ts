@@ -71,6 +71,8 @@ export interface AtlasApiCallResult {
   /** 仅直连/代理 HTTP 可观察到供应商状态；宿主助手返回文本时为 null。 */
   status: number | null;
   durationMs: number;
+  /** 供应商明确给出的停止原因；缺失时不推测。 */
+  finishReason?: string;
   /** 0.9.14 自动救场提示（如 MiniMax 订阅密钥自动切换 Anthropic 路由），随引擎 world-turn 日志落档。 */
   notice?: string;
 }
@@ -463,7 +465,7 @@ export async function callAtlasWorldTurnApi(
       return fail(ATLAS_ERROR_CODES.SERVICE_OFFLINE, "无法连接推演服务，请检查网络或服务状态。", true);
     }
 
-    const parseCall = async (resp: Response): Promise<{ text: string | null; gatewayError: string | null; rawText: string; emptyChoices: boolean; truncated: boolean }> => {
+    const parseCall = async (resp: Response): Promise<{ text: string | null; gatewayError: string | null; rawText: string; emptyChoices: boolean; truncated: boolean; finishReason: string | null }> => {
       let rawText = "";
       try {
         rawText = typeof resp.text === "function" ? await awaitResponse(resp.text(), controller.signal) : JSON.stringify(await awaitResponse(resp.json(), controller.signal));
@@ -479,7 +481,8 @@ export async function callAtlasWorldTurnApi(
       // 0.9.54 A6：长度截断判定只认 finish_reason 恰好等于 "length"。
       // stop / 缺失 / null 一律 false——不猜测其他厂商停止码，也不因为「正文里刚好
       // 有完整 JSON」就当成没截断（截断优先，见下面的检查顺序）。
-      const truncated = choiceFinishReason(payload) === "length";
+      const finishReason = choiceFinishReason(payload);
+      const truncated = finishReason === "length";
       const text = extractAssistantText(payload, deps.responseTool?.name);
       if (text === null || text.trim().length === 0) {
         // 0.9.24 空回复专项：choices 数组存在且为空（Gemini 系安全过滤静默拦截的典型形状）
@@ -488,9 +491,9 @@ export async function callAtlasWorldTurnApi(
           Array.isArray((payload as { choices?: unknown }).choices) &&
           (payload as { choices: unknown[] }).choices.length === 0,
         );
-        return { text: null, gatewayError: gatewayErrorMessage(payload), rawText, emptyChoices, truncated };
+        return { text: null, gatewayError: gatewayErrorMessage(payload), rawText, emptyChoices, truncated, finishReason };
       }
-      return { text: text.trim(), gatewayError: null, rawText, emptyChoices: false, truncated };
+      return { text: text.trim(), gatewayError: null, rawText, emptyChoices: false, truncated, finishReason };
     };
 
     let parsed = await parseCall(response);
@@ -628,6 +631,7 @@ export async function callAtlasWorldTurnApi(
       text,
       status: mode === "custom" ? status : null,
       durationMs: now() - startedAt,
+      ...(parsed.finishReason ? { finishReason: parsed.finishReason } : {}),
       ...(rescueAttempted ? { notice: "已按 MiniMax 订阅密钥自动切换 Anthropic 路由（…/anthropic）重试成功。建议到「API」页把该连接的接口协议改为 Claude（Anthropic）、端点改为 …/anthropic 并保存。" } : {}),
     };
   } finally {

@@ -54,7 +54,7 @@ export function filterSceneForView(scene,{scope,visibleLocations=[],visibleChara
   if(!author){
     // Never pass internal diagnostics, input constraints or unknown extension fields to POV.
     const top=['kind','version','generator','mapId','branchId','sourceRevision','units','metersPerCell','metricQuality'];
-    const keys={floor:['id','name','kind','bounds','corridor','rooms','groups','bodies','doors','windows','lamps','doorSwings','actors','items','path'],city:['id','name','kind','bounds','wall','origin','river','riverPolygon','districts','roads','segments','gates','buildings','dock'],overview:['id','name','kind','bounds','surface','pins','shapes','routes','features']};
+    const keys={floor:['id','name','kind','bounds','corridor','rooms','groups','bodies','doors','windows','lamps','doorSwings','actors','items','path'],city:['id','name','kind','bounds','wall','origin','river','riverPolygon','districts','roads','segments','gates','buildings','dock'],overview:['id','name','kind','bounds','surface','pins','shapes','routes','features','selfArea']};
     const saved=d.layout;d=Object.fromEntries(top.filter(k=>d[k]!==undefined).map(k=>[k,d[k]]));d.layout=Object.fromEntries((keys[saved.kind]??[]).filter(k=>saved[k]!==undefined).map(k=>[k,saved[k]]));
   }
   const s=d.layout;
@@ -62,6 +62,16 @@ export function filterSceneForView(scene,{scope,visibleLocations=[],visibleChara
   const name=p=>({...p,name:names[p.id]??p.name??''});
   if(s.kind==='floor'){
     s.rooms=s.rooms.filter(r=>allowed(r.id,'location')).map(name);const rooms=new Set(s.rooms.map(r=>r.id));
+    /**
+     * P11/R03 §18.2 第 9 条 + COR06：命名走廊与房间共用同一套 POV 过滤。
+     * - 走廊可见（作者视角，或绑定地点在可见集合里）→ 走廊的陈设/人物/灯保留，实体 ID 与名称一起下发（点击导航要用它）；
+     * - 走廊不可见 → **连实体 ID、名称、陈设一起不下发**，只留程序几何（空间形状本身仍要画）。
+     * - 匿名辅助通道没有实体身份，保持原有行为：它的陈设本来就不属于任何房间。
+     */
+    const boundCorridor=typeof s.corridor?.entityId==='string'&&s.corridor.entityId?s.corridor.entityId:null;
+    const corridorVisible=author||(boundCorridor!==null&&L.has(boundCorridor));
+    if(boundCorridor!==null&&!corridorVisible){delete s.corridor.entityId;delete s.corridor.name;}
+    else if(boundCorridor!==null)rooms.add(boundCorridor);
     for(const key of ['groups','bodies','doors','windows','lamps','doorSwings'])s[key]=(s[key]??[]).filter(p=>rooms.has(p.roomId));
     s.actors=(s.actors??[]).filter(p=>rooms.has(p.roomId)&&allowed(p.id,'person')).map(name);s.items=(s.items??[]).filter(p=>rooms.has(p.roomId)&&allowed(p.id,'item')).map(name);s.path=[];
   }else if(s.kind==='city'){
@@ -82,6 +92,9 @@ export function filterSceneForView(scene,{scope,visibleLocations=[],visibleChara
     // M4-19：挂在不透明 zone 上的装饰连同其 ID/几何一起剔除；全图公开材质（无 zoneId）可以保留。
     const visibleZones=new Set(s.shapes.map(x=>x.id));
     s.features=(s.features??[]).filter(f=>author||!f.zoneId||visibleZones.has(f.zoneId));
+    // P06/OTH05：自身示意属于**当前地图容器**。容器在 POV 下不可见时，
+    // 它的范围、名称与 id 一律不下发（连"这里有个看不见的东西"都不暗示）。
+    if(!author&&s.selfArea&&!(typeof s.selfArea.locationId==='string'&&L.has(s.selfArea.locationId)))delete s.selfArea;
   }
   if(!author)d.layout=stripLayoutForPov(s);
   return {ok:true,scene:d,issues:[]};
@@ -93,7 +106,9 @@ const pick=(p,...fields)=>{if(!plain(p))return null;const out={};for(const f of 
 function stripLayoutForPov(s){
   const sanitize={
     floor:{
-      corridor:p=>pick(p,'x','y','w','h'),
+      // P11/R03 §18.2 第 9 条：走廊白名单保留过滤后的 entityId/name —— 点击、mark 去重、
+      // 子图导航共用同一个地点 ID。不可见时上面已经把这两个字段删掉了。
+      corridor:p=>pick(p,'id','entityId','name','x','y','w','h'),
       rooms:p=>pick(p,'id','name','x','y','w','h','side','role'),
       groups:p=>({...pick(p,'id','name','roomId','x','y','w','h'),...(Array.isArray(p.bodies)?{bodies:p.bodies.map(b=>pick(b,'x','y','w','h')).filter(Boolean)}:{})}),
       bodies:p=>pick(p,'x','y','w','h','roomId'),
@@ -123,6 +138,8 @@ function stripLayoutForPov(s){
       routes:p=>({...pick(p,'id','kind','mapId','quality','dashed','progress','fromLocationId','toLocationId'),...(Array.isArray(p.path)?{path:pickPoints(p.path)}:{})}),
       // 装饰只有视觉字段；type/zoneId/density 之外的一切（structureKey/placement/内部标记）一律不下发。
       features:p=>({...pick(p,'id','type','zoneId','density','decorative','quality','width','widthClass','fromSector','toSector'),...(Array.isArray(p.path)?{path:pickPoints(p.path)}:{}),...(Array.isArray(p.polygon)?{polygon:pickPoints(p.polygon)}:{})}),
+      // P06：自身示意只保留容器引用、名称、范围与质量/来源；内部标记一个都不下发。
+      selfArea:p=>({...pick(p,'locationId','name','quality','source'),...(Array.isArray(p.polygon)?{polygon:pickPoints(p.polygon)}:{})}),
     },
   }[s.kind]??{};
   const out={};
@@ -145,7 +162,46 @@ export function buildMapTree(mapItems,locationRows){
   return {nodes,childMapsByLocation:Object.fromEntries(byContainer),issues};
 }
 /** 送往 UI/iframe 前只保留可公开的 frame：场景、待生成 spec、世界填充进度都是内部字段。 */
-export function publicMapFrame(frame){const out=clone(frame??{});delete out.atlasScene;delete out.atlasLayoutRequest;delete out.atlasWorldFill;return out;}
+/**
+ * P01b：公开地图框架**白名单**。
+ *
+ * 历史做法是黑名单（clone 整个 frame_json 后 delete 三个已知内部键）：任何新增的内部命名空间
+ * （atlasLayoutContext、后续的建设进度 / 空间陈设账本 / 来源账本）都会默认跟着漏进公开 DTO
+ * 和地图分析导出，只靠「字段名不常见」防泄漏。白名单反过来：只有明确列出的幅面字段能出去。
+ */
+export const PUBLIC_FRAME_KEYS = ['origin_x','origin_y','cols','rows','reference_width_cells','reference_height_cells'];
+export function publicMapFrame(frame){
+  const source=plain(frame)?frame:{},out={};
+  for(const key of PUBLIC_FRAME_KEYS)if(Object.hasOwn(source,key)&&source[key]!==undefined)out[key]=clone(source[key]);
+  return out;
+}
+/**
+ * P12/R03 §19.1 / §19.4：空间权威（`SpaceCanonicalV1`）的公开投影。
+ *
+ * - author：尺寸（含**依据种类**）与全部陈设 —— 作者要能核对"这个 7.5×8 是谁给的"。
+ * - POV：**去掉尺寸原始依据**（basis.note / referenceId 一律不下发），且只下发 `visibleLocalIds`
+ *   里的家具；没有可见集合时不下发任何家具（隐藏家具的 itemId 因此不会泄漏）。
+ * - 无论哪种视图，`atlasSpaceCanonical` 都不会出现在 `publicMapFrame`（白名单外）。
+ */
+export function publicSpaceCanonical(canonical,{viewMode='author',visibleLocalIds=null}={}){
+  if(!plain(canonical)||typeof canonical.locationId!=='string'||!canonical.locationId)return null;
+  const pov=viewMode==='pov';
+  const size=plain(canonical.size)?{
+    widthM:canonical.size.widthM,
+    heightM:canonical.size.heightM,
+    quality:canonical.size.quality==='confirmed'?'confirmed':'estimated',
+    locked:canonical.size.locked===true,
+    ...(pov?{}:{basis:plain(canonical.size.basis)?{kind:canonical.size.basis.kind??'first-estimate',referenceId:typeof canonical.size.basis.referenceId==='string'?canonical.size.basis.referenceId:null,note:typeof canonical.size.basis.note==='string'?canonical.size.basis.note:''}:{kind:'first-estimate',referenceId:null,note:''}}),
+  }:null;
+  const visible=visibleLocalIds instanceof Set?visibleLocalIds:Array.isArray(visibleLocalIds)?new Set(visibleLocalIds):null;
+  const furnishing=[];
+  for(const entry of Array.isArray(canonical.furnishing)?canonical.furnishing:[]){
+    if(!plain(entry)||typeof entry.localId!=='string'||!entry.localId)continue;
+    if(visible?!visible.has(entry.localId):pov)continue;
+    furnishing.push({localId:entry.localId,type:entry.type,name:entry.name,itemId:typeof entry.itemId==='string'&&entry.itemId?entry.itemId:null,widthM:entry.widthM,heightM:entry.heightM,quality:entry.quality==='confirmed'?'confirmed':'layout'});
+  }
+  return {version:1,locationId:canonical.locationId,revision:Number.isInteger(canonical.revision)&&canonical.revision>=0?canonical.revision:0,size,furnishing};
+}
 /** Reconcile saved visual anchors with the same-revision SQL position projection. */
 export function hydrateScene(scene,projection){
   if(!projection?.ok||!projection.scene||scene.mapId!==projection.scene.mapId||scene.branchId!==projection.scene.branchId)return failure('PROJECTION_SCOPE_MISMATCH','$','几何文档与 SQL 现状不属于同一地图');

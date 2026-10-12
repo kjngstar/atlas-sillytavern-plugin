@@ -31,6 +31,27 @@ export type OverviewRoute={id:string;kind:'route';mapId?:string;path:Point[];qua
 export type OverviewFeature={id:string;type:OverviewFeatureType;zoneId?:string|null;density?:OverviewDensity;decorative:boolean;quality:SceneQuality;path?:Point[];width?:number;polygon?:Point[];fromSector?:OverviewSector;toSector?:OverviewSector;widthClass?:OverviewWidthClass};
 export type OverviewLayout={kind:'overview';id:string;name:string;bounds:Bounds;surface:OverviewSurface;pins:OverviewPin[];shapes:OverviewShape[];routes:OverviewRoute[];features:OverviewFeature[];issues?:Array<{id:string;code:string}>};
 
+/**
+ * P11/R03 §18：室内（floor）模板的输入与输出。
+ *
+ * `corridorLocationRef` 是命名走廊**唯一**的新增输入：省略=保持既有绑定，`null`=显式解除，
+ * 字符串=本图已登记的真实地点引用（解析后的规范 ID）。几何永远由程序算，模型不给走廊坐标。
+ */
+export type FloorSpec={
+  mapId?:string;rebuild?:boolean;width?:number;height?:number;corridorWidth?:number;
+  corridorLocationRef?:string|null;
+  rooms?:Array<{id:string;name?:string;side:'north'|'south';role?:'indoor'|'outdoor'|'garden';w?:number;h?:number}>;
+  contents?:Array<{id:string;name?:string;roomId:string;type:'shelf'|'desk'|'bench'|'reading'|'stairs'|'table'|'chair'|'bed'|'cabinet'|'doorway'|'light'|'decor';w:number;h:number}>;
+  actors?:Array<{id:string;name?:string;roomId:string;near?:string}>;
+  items?:Array<{id:string;name?:string;on:string}>;
+  deletes?:{rooms?:string[];contents?:string[];actors?:string[];items?:string[]};
+};
+/** 生成后的室内通道。`entityId` 只在绑定真实走廊后出现；匿名辅助通道没有实体身份。 */
+export type FloorCorridor={id:string;entityId?:string;name?:string;x:number;y:number;w:number;h:number;quality?:SceneQuality};
+/** 门拓扑：几何端点永远是程序走廊，`toEntityId` 是绑定走廊的语义端点。 */
+export type FloorEdge={from:string;to:'corridor';via:string;toEntityId?:string};
+export type FloorLayout={kind:'floor';id:string;name:string;bounds:Bounds;corridor:FloorCorridor;rooms:Array<{id:string;name:string;side:'north'|'south';role?:'indoor'|'outdoor'|'garden';x:number;y:number;w:number;h:number}>;doors:Array<{id:string;roomId:string;x:number;y:number;width:number}>;edges:FloorEdge[];issues?:Array<{id:string;code:string}>};
+
 /** 上下文锁：室内矩形（米）、确认点、任意确认多边形、确认路线几何；空间由 map.metersPerCell 决定。 */
 export type LayoutLocks={
   rooms:Record<string,Bounds>;buildings:Record<string,Bounds>;actors:Record<string,Point>;
@@ -51,7 +72,10 @@ export type GenerateResult={ok:boolean;status:string;scene:SceneDocument|null;is
 export type RowMutation={table:string;rowId:string;before:Record<string,any>|null;after:Record<string,any>|null;sourceOpIds:string[];basis:Record<string,unknown>};
 export type ScopeTicket={key:string|null;epoch:number};
 export type Renderer={state:Record<string,any>;setScene(doc:SceneDocument|null,options?:{preserveCamera?:boolean}):boolean;setCamera(camera:{s:number;x:number;y:number}):boolean;setOverlays(rows:unknown[]):boolean;setBackgroundImage(image:CanvasImageSource|null,bounds:Bounds,opacity?:number):boolean;draw(timestamp?:number):void;schedule():void;zoomBy(mult:number,anchor?:Point):void;fit():void;resize():void;selectById(id:string):any;focus(id:string):boolean;entities():any[];hit(point:Point):any;setPaused(paused:boolean):void;destroy():void};
-export declare const KIT_VERSION:string,SCENE_KIND:string,SCENE_VERSION:number,FRAME_SCENE_KEY:string;
+export declare const KIT_VERSION:string,SCENE_KIND:string,SCENE_VERSION:number,FRAME_SCENE_KEY:string,FRAME_SPACE_CANONICAL_KEY:string,SPACE_CANONICAL_MAX_FURNISHING:number;
+/** §19.4：布局陈设的稳定空间 localId（`space:<地点ID>:furn:<局部ID>`）及其反解；格式只此一处。 */
+export declare function spaceLocalId(locationId:string,contentId:string):string|null;
+export declare function parseSpaceLocalId(value:unknown):{locationId:string;contentId:string}|null;
 export declare const LIMITS:Readonly<Record<string,number>>,DEFAULT_THEME:Readonly<Record<string,string>>,TOOL_NAMES:readonly string[];
 export declare const OVERVIEW_FEATURE_TYPES:readonly OverviewFeatureType[];
 export declare const OVERVIEW_SURFACES:readonly OverviewSurface[];
@@ -83,7 +107,7 @@ export declare function executeSpatialTool(call:{name:string;arguments:unknown},
 export declare function pointOnPath(points:Point[],progress:number):Point&{distance:number;total:number}|null;
 export declare function placeMarkers(input:{region:Point[];markers:any[];obstacles?:Bounds[];previous?:any[];step?:number;clearance?:number}):Record<string,any>;
 export declare function buildOverlays(input:{mapId:string;rows:any[];positions?:any[];selectedEntityId?:string|null;showAllRelations?:boolean}):Record<string,any>;
-export declare function buildSceneMutation(input:{result:GenerateResult;mapRow:Record<string,any>;scope:Scope;currentScope:Scope;turnId:string;operationId:string;expectedRowRev:number}):{ok:boolean;status:string;mutation?:RowMutation|null;issues:Diagnostic[]};
+export declare function buildSceneMutation(input:{result:GenerateResult;mapRow:Record<string,any>;scope:Scope;currentScope:Scope;turnId:string;operationId:string;expectedRowRev:number;spaceSize?:{resolution:{source:string;widthM:number;heightM:number;referenceId?:string|null}}|null}):{ok:boolean;status:string;mutation?:RowMutation|null;issues:Diagnostic[]};
 export declare function readSceneFrame(frame:unknown,scope:{branchId:string;mapId:string}):{ok:boolean;scene:SceneDocument|null;issues:Diagnostic[]};
 export declare function sceneLocationGeometry(scene:SceneDocument):any[];
 export declare function unwrapViewResult(value:unknown,mode?:'direct'|'state-map'):Record<string,any>;
@@ -91,9 +115,15 @@ export declare function projectMapView(input:{view:Record<string,any>;mapId:stri
 export declare function filterSceneForView(scene:SceneDocument,options:{scope:Scope;visibleLocations?:string[];visibleCharacters?:string[];visibleItems?:string[];names?:Record<string,string>}):{ok:boolean;scene:SceneDocument|null;issues:Diagnostic[]};
 export declare function buildMapTree(maps:any[],locations:any[]):{nodes:any[];childMapsByLocation:Record<string,string[]>;issues:Diagnostic[]};
 export declare function publicMapFrame(frame:Record<string,unknown>):Record<string,unknown>;
+/** P12/R03 §19.1：空间权威的公开投影；POV 去掉尺寸原始依据与隐藏家具。 */
+export declare function publicSpaceCanonical(canonical:unknown,options?:{viewMode?:'pov'|'author';visibleLocalIds?:Set<string>|string[]|null}):{
+  version:1;locationId:string;revision:number;
+  size:{widthM:number;heightM:number;quality:'estimated'|'confirmed';locked:boolean;basis?:{kind:string;referenceId:string|null;note:string}}|null;
+  furnishing:Array<{localId:string;type:string;name:string;itemId:string|null;widthM:number;heightM:number;quality:'layout'|'confirmed'}>;
+}|null;
 export declare function hydrateScene(scene:SceneDocument,projection:Record<string,any>):{ok:boolean;scene:SceneDocument|null;issues:Diagnostic[]};
 export declare function buildLayoutContext(input:{scope:Scope;mapRow:Record<string,any>;locations?:any[];characters?:any[];items?:any[];routes?:any[]}):{ok:boolean;context?:GenerateContext;issues:Diagnostic[]};
 export declare function createSpatialRenderer(options:{canvas:HTMLCanvasElement;onSelect?:(entity:any)=>void;onHover?:(entity:any,point:Point|null)=>void;onViewport?:(viewport:any)=>void;onIssue?:(issue:Diagnostic)=>void;theme?:Record<string,string>;scaleBarWidth?:number;ownsGestures?:boolean;painterFactory?:Function;animate?:boolean}):Renderer;
-export declare function compileSceneGroup(options:{request:{kind:'floor'|'city'|'overview';spec:Record<string,unknown>};scope:Scope;currentScope:Scope;mapRow:Record<string,any>;locations:any[];characters?:any[];items?:any[];routes?:any[];turnId:string;operationId:string}):Record<string,any>;
+export declare function compileSceneGroup(options:{request:{kind:'floor'|'city'|'overview';spec:Record<string,unknown>};scope:Scope;currentScope:Scope;mapRow:Record<string,any>;locations:any[];characters?:any[];items?:any[];routes?:any[];maps?:any[];turnId:string;operationId:string;spaceSize?:unknown;childSpaces?:Record<string,{widthM:number;heightM:number;quality?:string;locked?:boolean}>;autoPlan?:boolean;planningProjection?:boolean}):Record<string,any>;
 export declare function applySceneGroup(db:any,group:any,ports:{insideCandidateTransaction:true;applyGroups:Function;queryBound:Function;isCurrent:()=>boolean;branchId:string;turnId:string;attemptId?:string}):Record<string,any>;
 export declare function prepareInitialFrame(input:{mapRow:Record<string,any>;scope:Scope;currentScope:Scope;locations?:any[];kind?:'floor'|'city'|'overview';widthM?:number;heightM?:number;turnId:string;operationId:string;expectedRowRev:number}):Record<string,any>;

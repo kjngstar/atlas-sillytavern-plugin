@@ -20,6 +20,7 @@ import { createSqlRepository } from '../src/atlas-db-repository.ts';
 import { queryBound } from '../src/atlas-db-runtime.ts';
 import { LEGACY_ENTITY_CAP, toLegacyTurnReceipt, toPovStateDto } from '../src/atlas-db-state-adapter.ts';
 import { insertRows, userTables } from './fixtures/atlas-sql/seed.mjs';
+import { USER_TABLE_COUNT } from '../src/atlas-db-schema.ts';
 
 const NOW = 1_700_000_000_000;
 const now = () => NOW;
@@ -249,7 +250,7 @@ test('H01 /sql/turn：宿主确认才 coreSaved=true；信封写进 chatMetadata
     assert.equal(data.legacyReceipt.status, 'committed');
     assert.equal(data.legacyReceipt.coreSaved, true);
     assert.equal(harness.core.sqlMode().sessions, 1, '同一 chat 只有一个会话（同一份世界权威）');
-    assert.equal(userTables(harness.repo.db).length, 20);
+    assert.equal(userTables(harness.repo.db).length, USER_TABLE_COUNT);
     assert.ok(harness.chatMetadata.atlas.database, '宿主确认后必须落盘信封');
     assert.equal(harness.chatMetadata.atlas.database.chat_uid, 'chat-sql');
 

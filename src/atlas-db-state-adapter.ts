@@ -531,7 +531,9 @@ export function toLegacyTurnReceipt(
   const groups: GroupResult[] = Array.isArray(receipt.groups) ? receipt.groups : [];
   const issues: Issue[] = Array.isArray(receipt.issues) ? receipt.issues : [];
   const succeeded = groups.filter((group) => group.status === 'applied' || group.status === 'duplicate');
-  const businessSucceeded=succeeded.filter(group=>!group.groupId.startsWith('grp_world_fill_'));
+  // P09A/§15.4.13：业务成功组按**组用途**分类，不再看 `grp_world_fill_` 名字前缀。
+  // 建设进度/调度这类程序记账组不算业务成功，但摘要里单独说明。
+  const businessSucceeded=succeeded.filter(group=>group.purpose!=='bookkeeping');
   const rejected = groups.filter((group) => group.status === 'rejected' || group.status === 'blocked');
 
   let status: 'committed' | 'noop' | 'failed';

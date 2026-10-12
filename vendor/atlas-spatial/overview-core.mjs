@@ -168,7 +168,7 @@ export function overview(spec,previous=null){
   const baseRadius=new Map();
   for(const z of zonesIn){
     const ratio=SIZE_RATIO[SIZE_SET.has(z.size)?z.size:'medium'];
-    baseRadius.set(z.id,S*ratio);
+    baseRadius.set(z.id,z.physicalSize?Math.max(z.physicalSize.w,z.physicalSize.h)/2:S*ratio);
   }
   const occupied=[];
   for(const z of zonesIn)if(finite(z.locked?.x)&&finite(z.locked.y))occupied.push({id:z.id,point:pt(z.locked.x,z.locked.y)});
@@ -192,7 +192,7 @@ export function overview(spec,previous=null){
         const index=startIndex+step,radius=gap*Math.sqrt(step+1),angle=index*GOLDEN_ANGLE;
         const c=pt(target.x+radius*Math.cos(angle),target.y+radius*Math.sin(angle));
         if(c.x<box.x0+r||c.x>box.x1-r||c.y<box.y0+r||c.y>box.y1-r)continue;
-        if(!occupied.every(o=>distance(c,o.point)>=gap))continue;
+        if(!occupied.every(o=>distance(c,o.point)>=gap+(z.physicalSize?r+(o.radius??0):o.radius??0)))continue;
         if(!obstacles.every(o=>!pointInPolygon(o.polygon,c)))continue;
         chosen=c;break;
       }
@@ -200,7 +200,7 @@ export function overview(spec,previous=null){
     }
     if(!chosen){issues.push({id:z.id,code:'OVERVIEW_ZONE_NO_SPACE'});continue;}
     sites.set(z.id,chosen);reasons.set(z.id,near?'layout:near':'layout:center');
-    occupied.push({id:z.id,point:chosen});
+    occupied.push({id:z.id,point:chosen,...(z.physicalSize?{radius:r}:{})});
   }
 
   // ── 步 3：几何。旧图元按结构签名原样复用；只有结构约束真的变了才局部更新。
@@ -209,7 +209,7 @@ export function overview(spec,previous=null){
   for(const z of zonesIn){
     const site=sites.get(z.id);
     if(!site)continue;
-    const structureKey=stable({role:z.role??null,size:z.size??null,sector:z.sector??null,near:z.near??null,locked:z.locked??null,lockedPolygon:z.lockedPolygon??null,...(SECTOR_ANGLE[z.sector]!==undefined?{placementPolicy:2}:{})});
+    const structureKey=stable({role:z.role??null,size:z.size??null,...(z.physicalSize?{physicalSize:z.physicalSize}:{}),sector:z.sector??null,near:z.near??null,locked:z.locked??null,lockedPolygon:z.lockedPolygon??null,...(SECTOR_ANGLE[z.sector]!==undefined?{placementPolicy:2}:{})});
     const placement=z.placement==='proxy'?'proxy':undefined;
     const prevShape=prevShapes.get(z.id);
     if(prevShape&&prevShape.structureKey===structureKey&&prevShape.polygon?.length>=3){
@@ -222,13 +222,14 @@ export function overview(spec,previous=null){
     }
     // 确认多边形逐点保留，绝不覆盖（G03）。
     let polygon=z.lockedPolygon?.length>=3?z.lockedPolygon.map(p=>pt(p.x,p.y)):null;
+    if(!polygon&&z.physicalSize){const {w,h}=z.physicalSize;polygon=[pt(site.x-w/2,site.y-h/2),pt(site.x+w/2,site.y-h/2),pt(site.x+w/2,site.y+h/2),pt(site.x-w/2,site.y+h/2)];}
     if(!polygon){
       let r=baseRadius.get(z.id);
       const nearest=occupied.filter(o=>o.id!==z.id).reduce((d,o)=>Math.min(d,distance(site,o.point)),Infinity);
       if(finite(nearest))r=Math.max(S*MIN_SIZE_RATIO,Math.min(r,nearest*0.35));
       polygon=zonePolygon(z,site.x,site.y,r,seed);
     }
-    const fitted=polygon.every(p=>finite(p.x)&&finite(p.y))?fitPolygon(polygon,box):null;
+    const fitted=polygon.every(p=>finite(p.x)&&finite(p.y))?(z.physicalSize?(polygon.every(p=>p.x>=box.x0&&p.x<=box.x1&&p.y>=box.y0&&p.y<=box.y1)?polygon:null):fitPolygon(polygon,box)):null;
     if(!fitted||fitted.length<3){
       issues.push({id:z.id,code:'OVERVIEW_ZONE_OUT_OF_BOUNDS'});
       continue;
@@ -237,6 +238,7 @@ export function overview(spec,previous=null){
     shapes.push({
       id:z.id,name:z.name??null,quality:z.lockedPolygon?.length>=3?'confirmed':'estimated',
       polygon:fitted,structureKey,
+      ...(z.physicalSize?{w:z.physicalSize.w,h:z.physicalSize.h}:{}),
       ...(lockedPoint?{locked:lockedPoint}:{}),
       ...(placement?{placement}:{}),
       ...(SIZE_SET.has(z.size)?{size:z.size}:{}),
@@ -386,8 +388,24 @@ export function overview(spec,previous=null){
     pushFeature({...base,polygon:fitted});
   }
 
+  // ── 步 7：自身示意（P06/N01）────────────────────────────────────────────
+  // 只有当本图**没有任何子地点轮廓**时才画容器自身：这是「空场地也看得见」的兜底，
+  // 不是给有子地点的图再叠一层大矩形。它不是新地点，也绝不进 shapes/features 的实体回写列表。
+  // 单位照旧走场景单位（未标定的格制示意由 UI 的 transform/metric 表达，不会被说成米制实测）。
+  let selfArea=null;
+  if(spec.parentId&&zonesIn.length===0){
+    const locked=Array.isArray(spec.selfAreaPolygon)&&spec.selfAreaPolygon.length>=3?spec.selfAreaPolygon.map(p=>pt(p.x,p.y)):null;
+    const source=locked&&locked.every(p=>finite(p.x)&&finite(p.y))?locked:[pt(box.x0,box.y0),pt(box.x1,box.y0),pt(box.x1,box.y1),pt(box.x0,box.y1)];
+    const fitted=fitPolygon(source,box);
+    if(fitted&&fitted.length>=3){
+      const confirmed=!!locked;
+      selfArea={locationId:spec.parentId,name:spec.containerName??null,polygon:fitted,
+        quality:confirmed?'confirmed':'layout',source:confirmed?'canonical':'frame'};
+    }
+  }
   return {
     ok:true,kind:'overview',id:spec.id,name:spec.name??spec.id,bounds:{x:0,y:0,w:W,h:H},surface,
+    ...(selfArea?{selfArea}:{}),
     pins:ordered(pins),shapes:ordered(shapes),routes:ordered(routes),features:ordered(features),issues,
   };
 }

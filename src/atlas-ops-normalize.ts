@@ -103,6 +103,9 @@ export const LAYOUT_SPEC_SCALARS = [
   'width',
   'height',
   'corridorWidth',
+  // P11/R03 §18.1：命名走廊的**唯一**新增输入。省略=保持既有绑定，null=显式解除，
+  // 字符串=本任务地点目录里的真实 location 引用（在 atlas-ops-refs 解析成规范 ID）。
+  'corridorLocationRef',
   'riverWidth',
   'blocksPerDistrict',
   'surface',
@@ -111,6 +114,9 @@ export const LAYOUT_SPEC_SCALARS = [
   'rebuild',
   'deletes',
 ] as const;
+
+/** P11：只有 floor 模板接受命名走廊绑定；city/overview 出现该键即结构错误。 */
+export const LAYOUT_FLOOR_ONLY_SCALARS = ['corridorLocationRef'] as const;
 
 /**
  * spec 里由程序独占的字段：AI 提供时忽略并警告。
@@ -263,6 +269,32 @@ export function normalizeLayoutSpec(
           `map.layout.request: spec.enclosure must be one of {${LAYOUT_CITY_ENCLOSURES.join(',')}}; got ${JSON.stringify(enclosure)}`,
           { severity: 'error', retryable: true, opId: op?.opId, line: op?.line })],
       };
+    }
+  }
+
+  // P11/R03 §18.2 第 1 条：corridorLocationRef 的形状与模板归属在这里拦死，
+  // 具体指向哪个地点由 atlas-ops-refs（实体解析）与生成器（属图校验）负责。
+  {
+    const raw = spec['corridorLocationRef'];
+    if (raw !== undefined && raw !== null) {
+      if (kind !== 'floor') {
+        return {
+          ok: false,
+          spec: null,
+          issues: [issue('ENUM_INVALID', '$.data.spec.corridorLocationRef',
+            `map.layout.request kind=${kind ?? '(unknown)'} does not accept spec.corridorLocationRef; only kind=floor has a named corridor`,
+            { severity: 'error', retryable: true, opId: op?.opId, line: op?.line })],
+        };
+      }
+      if (typeof raw !== 'string' || raw.trim() === '' || raw.length > MAX_LAYOUT_SPEC_ID_CHARS) {
+        return {
+          ok: false,
+          spec: null,
+          issues: [issue(ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING, '$.data.spec.corridorLocationRef',
+            `map.layout.request: spec.corridorLocationRef must be null (explicit unbind) or a non-empty location reference of at most ${MAX_LAYOUT_SPEC_ID_CHARS} chars; got ${JSON.stringify(raw)}. 首版一张 floor 至多一条主走廊，多条真实走廊暂不支持，也不许压成一个地点`,
+            { severity: 'error', retryable: true, opId: op?.opId, line: op?.line })],
+        };
+      }
     }
   }
 
@@ -615,6 +647,7 @@ export const OP_KNOWN_FIELDS: Record<string, readonly string[]> = {
     'modes',
     'access',
     'duration',
+    'status',
   ],
   /**
    * map.layout.request：模型只提交「当前地图的变化约束」，不输出完整 scene。
@@ -675,6 +708,8 @@ const OP_ENUM_DICTS: Record<string, Record<string, readonly string[]>> = {
   },
   'route.propose': {
     kind: ['adjacent', 'road', 'path', 'door', 'stairs', 'air', 'water', 'portal', 'estimated'],
+    // 与 routes.status 的 SQL CHECK 一致：这是责任状态，不是几何质量。
+    status: ['open', 'blocked', 'closed'],
   },
   'map.layout.request': {
     kind: LAYOUT_REQUEST_KINDS,

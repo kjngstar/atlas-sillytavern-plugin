@@ -16,7 +16,15 @@ import { scenePositions } from './atlas-scene-layout.ts';
 import { sqlVisibility } from './atlas-sql-visibility.ts';
 import { resolveMapTopology } from './atlas-map-topology.ts';
 import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
-import { publicMapFrame } from '../vendor/atlas-spatial/index.mjs';
+import { publicMapFrame, publicSpaceCanonical } from '../vendor/atlas-spatial/index.mjs';
+import { readSpaceCanonical } from './atlas-space-canonical.ts';
+import {
+  boundCorridorIdOf,
+  resolveSpatialProfile,
+  type ProfileLayoutKind,
+  type SpatialProfileBasis,
+  type SpatialProfileMode,
+} from './atlas-spatial-profile.ts';
 import type { SqlDatabase } from './atlas-db-runtime.ts';
 import type { ConnectionQuality, TopologyLocation, TopologyMap } from './atlas-world-contract.ts';
 import type { ViewQuery, ViewResult } from './atlas-ops-contract.ts';
@@ -167,6 +175,37 @@ export type MapViewItem = {
   }>;
   /** 只知粗粒度地点的人物，不进 points（避免和地点叠图标）。 */
   coarseList: Array<{ entityId: string; name: string; locationId: string; locationName: string | null; hidden?:boolean }>;
+  /**
+   * P12/R03 §19.1：本图覆盖空间的权威摘要（尺寸 + 陈设 localId），按视图过滤。
+   * 没有容器（根图/概览）或该空间还没有权威记录 → null。POV 下去掉尺寸原始依据与隐藏家具。
+   */
+  space?: {
+    version: 1;
+    locationId: string;
+    revision: number;
+    size: { widthM: number; heightM: number; quality: 'estimated' | 'confirmed'; locked: boolean; basis?: { kind: string; referenceId: string | null; note: string } } | null;
+    furnishing: Array<{ localId: string; type: string; name: string; itemId: string | null; widthM: number; heightM: number; quality: 'layout' | 'confirmed' }>;
+  } | null;
+  /**
+   * P13/R03 §20：本图的绘图档案裁决。`layoutKind` 就是这张图会用的生成模板；
+   * `navigationName` 说明「这一类空间叫什么」（不是给地点改名）；`partial` 为真时
+   * `unsupported` 列出当前生成器表达不了的登记成员（保留实体与事实，绝不替换类型凑成功）。
+   *
+   * 作者切档案是显式布局语义变更，必须立刻在预览可见；POV 只保留"这类空间叫什么"与
+   * 布局 kind，抹掉作者依据（basis）、责任范围与内部枚举差异（unsupported）。
+   */
+  profile: {
+    mode: SpatialProfileMode;
+    navigationName: string;
+    layoutKind: ProfileLayoutKind;
+    partial: boolean;
+    /** POV 下为 null（不下发作者依据）。 */
+    basis: SpatialProfileBasis | null;
+    /** POV 下为空（不下发内部责任范围）。 */
+    responsibility: string[];
+    /** POV 下为空（不借 unsupported 泄露隐藏成员 id）。 */
+    unsupported: Array<{ id: string; kind: string; reason: string }>;
+  };
   routes: Array<{
     routeId: string;
     fromId: string;
@@ -176,12 +215,20 @@ export type MapViewItem = {
     distanceM: number | null;
     dashed: boolean;
     allowedModes: string[];
+    /** P01b：路线责任状态。open 可通行 / blocked 保留几何并表达封锁 / closed 从活动集合排除。 */
+    status: string;
+    /** P01b：双向可通行。单向路线按 from→to 解释。 */
+    bidirectional: boolean;
+    /** P01b：几何修订号。使每图指纹与导出可判断几何是否变化。 */
+    geometryRev: number;
     /** M4/Q02：可绘制格坐标几何（{mapId,units:'cells',points}）；无几何 / 坏几何一律 null，不画假线。 */
     geometry: { mapId: string; units: 'cells'; points: Array<{ x: number; y: number }> } | null;
     /** M4/Q02：端点引用，供适配器判断路线在 POV 下是否可见。 */
     mapId: string;
     fromLocationId: string;
     toLocationId: string;
+    /** P01b：POV 下不可见路线显式标记（作者视图不下发该字段）。 */
+    hidden?: boolean;
   }>;
   frames: { frame: Record<string, unknown>; scaleBar: ReturnType<typeof computeViewportScaleBar> | null };
 };
@@ -378,8 +425,20 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
       }
     }
 
+    /**
+     * P01b：路线 POV 过滤在 DTO 层完成，与地点同源同判据。
+     *
+     * 判据：一条路线的**两个端点**都在主角已知地点集合内才可见。只要有一端是秘密地点，
+     * 整条路线（含 routeId、端点 ID、几何）都不下发 —— 否则「秘密端点的相邻关系」会从
+     * 路线的存在本身间接泄露。作者视图不下发 hidden 字段，保留全部路线。
+     */
     const mapRoutes = routes
       .filter((r) => (r.map_id ? String(r.map_id) === mapId : false))
+      .filter((r) =>
+        ctx.viewMode !== 'pov'
+        || (visibility.visible('location', String(r.from_location_id))
+          && visibility.visible('location', String(r.to_location_id))),
+      )
       .map((r) => {
         const projected = projectRouteGeometry(r, mapId);
         if (projected.issue) routeIssues.push(projected.issue);
@@ -392,6 +451,9 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
           distanceM: typeof r.distance_m === 'number' ? r.distance_m : null,
           dashed: String(r.geometry_quality) !== 'confirmed',
           allowedModes: Array.isArray(r.allowed_modes_json) ? (r.allowed_modes_json as string[]) : [],
+          status: String(r.status ?? 'open'),
+          bidirectional: Number(r.bidirectional ?? 1) === 1,
+          geometryRev: Number.isFinite(Number(r.geometry_rev)) ? Math.max(1, Number(r.geometry_rev)) : 1,
           /** M4/Q02：可绘制几何（格坐标）或 null；unknown/坏几何一律 null，绝不画假线。 */
           geometry: projected.geometry,
           // M4/Q02：适配器按端点引用判断路线可见性（审查必修 2），不随 DTO 下发就只能在 POV 全砍。
@@ -427,6 +489,51 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
       points:ctx.viewMode==='pov'?points.filter(point=>!point.hidden):points,
       coarseList:ctx.viewMode==='pov'?coarseList.filter(entry=>!entry.hidden):coarseList,
       routes: mapRoutes,
+      /**
+       * P12/R03 §19.1：本图覆盖空间的权威摘要（尺寸 + 布局陈设 localId）。
+       *
+       * 它**不是** `frame_json` 的一部分（`publicMapFrame` 白名单从不下发 `atlasSpaceCanonical`），
+       * 而是按视图过滤后的独立 DTO：author 视图给尺寸依据与全部陈设，POV 去掉了依据与隐藏家具。
+       */
+      space: (function spaceAuthority() {
+        const containerId = map.container_location_id ? String(map.container_location_id) : null;
+        if (!containerId) return null;
+        const read = readSpaceCanonical(map.frame_json, containerId);
+        return read.canonical ? publicSpaceCanonical(read.canonical, { viewMode: ctx.viewMode ?? 'author' }) : null;
+      })(),
+      /**
+       * P13/R03 §20：本图的绘图档案裁决（布局 kind 的来源、导航名、责任范围、partial 说明）。
+       *
+       * 作者切档案是**显式布局语义变更**，必须立刻在预览里可见 —— 所以走 DTO，
+       * 而不是只躺在 frame 的命名空间里等下一轮布局。POV 只看到"这一类空间叫什么"，
+       * 看不到作者依据与内部枚举差异。
+       */
+      profile: (function spatialProfile() {
+        const containerId = map.container_location_id ? String(map.container_location_id) : null;
+        // 成员与路线的口径必须与布局任务（atlas-sql-layout-task.ts）一致：本图登记的
+        // 非移动地点 + 以本图容器为端点的路线。否则「预览说 partial、布局说没事」会分叉。
+        const members = locations.filter((row) => String(row.map_id ?? '') === mapId && row.mobility !== 'mobile');
+        const profileRoutes = routes.filter((row) =>
+          containerId !== null
+          && (String(row.from_location_id ?? '') === containerId || String(row.to_location_id ?? '') === containerId));
+        const resolution = resolveSpatialProfile({
+          map,
+          container: container ?? null,
+          corridorEntityId: boundCorridorIdOf(map),
+          members,
+          routes: profileRoutes,
+        });
+        const viewMode = ctx.viewMode ?? 'author';
+        return {
+          mode: resolution.profile.mode,
+          navigationName: resolution.navigationName,
+          layoutKind: resolution.layoutKind,
+          partial: resolution.partial,
+          basis: viewMode === 'pov' ? null : resolution.profile.basis,
+          responsibility: viewMode === 'pov' ? [] : [...resolution.responsibility],
+          unsupported: viewMode === 'pov' ? [] : resolution.unsupported,
+        };
+      })(),
       frames: {
         // M4/Q02：POV/author 的普通地图响应都不含 atlasScene / atlasLayoutRequest。
         frame: publicMapFrame((map.frame_json ?? {}) as Record<string, unknown>),
@@ -441,9 +548,25 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
     items,
     metadata: {
       mapCount: mapIds.size,
-      readLimits:Object.fromEntries([['maps',1001,maps.length],['locations',2000,locations.length],['characters',2000,characters.length],['items',2000,itemRows.length],['routes',1000,routes.length]].map(([table,limit,shown])=>{
-        const total=Number(queryBound(ctx.db,`SELECT COUNT(*) n FROM ${table} WHERE branch_id=? AND status='active'`,[ctx.branchId])[0].n);
-        return [table,{limit,total,shown,truncated:Math.max(0,total-Number(shown))}];
+      /**
+       * P01c/E05：读数上限必须与**真实筛选条件**一致。
+       *
+       * routes 表的状态枚举是 open/blocked/closed —— 没有 'active'。旧实现统一用
+       * `status='active'` 计数，于是 1,001 条 open 路线被统计成 0 条，截断检测彻底失效。
+       * POV 只回报「本次可见读取是否超限」，不下发全库隐藏总数。
+       */
+      readLimits:Object.fromEntries(([
+        {table:'maps',limit:1001,shown:maps.length,where:`status='active'`},
+        {table:'locations',limit:2000,shown:locations.length,where:`status='active'`},
+        {table:'characters',limit:2000,shown:characters.length,where:`status='active'`},
+        {table:'items',limit:2000,shown:itemRows.length,where:`status='active'`},
+        {table:'routes',limit:1000,shown:routes.length,where:``},
+      ] as Array<{table:string;limit:number;shown:number;where:string}>).map(({table,limit,shown,where})=>{
+        const total=Number(queryBound(ctx.db,`SELECT COUNT(*) n FROM ${table} WHERE branch_id=?${where?` AND ${where}`:''}`,[ctx.branchId])[0].n);
+        const truncated=Math.max(0,total-Number(shown));
+        return [table,ctx.viewMode==='pov'
+          ? {limit,total:Number(shown),shown:Number(shown),truncated:0,overLimit:truncated>0}
+          : {limit,total,shown:Number(shown),truncated}];
       })),
       pointCount: items.reduce((n, m) => n + (m as MapViewItem).points.length, 0),
       coarseCount: items.reduce((n, m) => n + (m as MapViewItem).coarseList.length, 0),

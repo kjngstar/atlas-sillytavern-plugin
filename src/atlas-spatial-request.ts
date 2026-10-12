@@ -196,6 +196,15 @@ function mergeConstraints(
 /** 收集 spec 里解析完成、指向 location 的实体 ID（用于父图/子图校验）。 */
 function collectLocationRefs(spec: Record<string, unknown>): string[] {
   const out = new Set<string>();
+  const add = (value: unknown): void => {
+    if (typeof value !== 'string') return;
+    const trimmed = value.trim();
+    if (trimmed === '' || trimmed.startsWith('new:')) return;
+    out.add(trimmed);
+  };
+  // P11/R03 §18.2 第 1/2 条：命名的走廊地点必须与 rooms/contents 走同一套「必须属于本图」校验，
+  // 否则可以把远处同名的走廊拉进这张图。
+  add(spec['corridorLocationRef']);
   for (const [collection, fields] of Object.entries(LAYOUT_SPEC_REF_FIELDS)) {
     const rows = spec[collection];
     if (!Array.isArray(rows)) continue;
@@ -203,11 +212,7 @@ function collectLocationRefs(spec: Record<string, unknown>): string[] {
       if (!isPlainObject(row)) continue;
       for (const [field, kind] of Object.entries(fields)) {
         if (kind !== 'location') continue;
-        const value = row[field];
-        if (typeof value !== 'string') continue;
-        const trimmed = value.trim();
-        if (trimmed === '' || trimmed.startsWith('new:')) continue;
-        out.add(trimmed);
+        add(row[field]);
       }
     }
   }

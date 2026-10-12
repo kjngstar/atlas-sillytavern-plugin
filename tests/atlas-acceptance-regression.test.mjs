@@ -45,6 +45,32 @@ test('malformed layout gets one budgeted fresh response; only the valid response
  }finally{await repo.close();}
 });
 
+for (const firstReply of ['{"op":"noop"}', JSON.stringify({op:'map.layout.request',ref:'outside-batch',data:{kind:'overview',spec:{surface:'mixed'}}})]) {
+ test('layout retries a semantic empty response without applying foreign map references: '+firstReply.slice(0,32),async()=>{
+  const port=model((req,n)=>n===1?firstReply:JSON.stringify({op:'map.layout.request',ref:IDS.M1,data:{kind:'overview',spec:{zones:[{id:IDS.L1,name:'城市',role:'city',size:'medium'}]}}}));
+  const repo=await seeded(port);
+  try {
+   const p=await repo.prepareTurn(input({manual:true,phaseBatches:[],operations:[],worldCompletion:undefined,sceneMaps:true,layoutMaps:[IDS.M1]}));
+   assert.equal(port.calls.length,2);assert.ok(p.receipt.issues.some(i=>i.code==='LAYOUT_RESPONSE_RETRIED'));
+   assert.ok(!p.receipt.issues.some(i=>i.code==='LAYOUT_NOT_GENERATED'));
+   const saved=JSON.parse(queryBound(repo.getCandidate(p.token).db,'SELECT frame_json FROM maps WHERE id=?',[IDS.M1])[0].frame_json).atlasScene;
+   assert.ok(saved.layout.shapes.some(s=>s.id===IDS.L1));
+   assert.match(port.calls[1].messages[1].content,/没有本批布局|没有布局|本批地图引用|noop/);
+  } finally { await repo.close(); }
+ });
+}
+
+test('a repeated layout noop stops after one repair and preserves the saved scene',async()=>{
+ const port=model(()=>noop);const repo=await seeded(port);
+ try {
+  const before=queryBound(repo.db,'SELECT frame_json FROM maps WHERE id=?',[IDS.M1])[0].frame_json;
+  const p=await repo.prepareTurn(input({manual:true,phaseBatches:[],operations:[],worldCompletion:undefined,sceneMaps:true,layoutMaps:[IDS.M1]}));
+  assert.equal(port.calls.length,2);assert.ok(p.receipt.issues.some(i=>i.code==='LAYOUT_NOT_GENERATED'));
+  const after=queryBound(repo.getCandidate(p.token).db,'SELECT frame_json FROM maps WHERE id=?',[IDS.M1])[0].frame_json;
+  assert.deepEqual(JSON.parse(after).atlasScene,JSON.parse(before).atlasScene);
+ } finally { await repo.close(); }
+});
+
 test('successive layouts retain the container room and furniture while removing an actor who left',async()=>{
  const repo=await seeded(model(()=>noop),db=>{db.run('UPDATE characters SET location_id=?,map_id=?,grid_x=NULL,grid_y=NULL WHERE id IN (?,?)',[IDS.L3,IDS.M1,IDS.C1,IDS.C2]);db.run('UPDATE locations SET map_id=? WHERE id=?',[IDS.M1,IDS.L3]);});
  const layout=spec=>({op:'map.layout.request',ref:IDS.M2,data:{kind:'floor',spec}});
@@ -102,7 +128,9 @@ test('ready occupied and root maps do not block an unpainted city in the next au
 });
 
 test('empty bootstrap observes first, constructs its newly registered place, and restores native receipts without a global bucket', async()=>{
+ let refuseLayout=false;
  const port=model((req,n)=>{
+  if(refuseLayout)return noop;
   if(req.batchId.startsWith('layout_'))return JSON.parse(req.messages[1].content.split('\n').find(line=>line.startsWith('本图：')).slice(3)).map(scope=>JSON.stringify({op:'map.layout.request',ref:scope.map,data:{kind:scope.kind,spec:scope.kind==='floor'?{rooms:scope.baselineRooms}:{surface:'mixed'}}})).join('\n');
   return n===1?'{"op":"location.upsert","ref":"new:lodge","data":{"name":"新旅店","kind":"building"}}\n{"op":"character.upsert","ref":"new:pov","data":{"name":"测试主角","identity":"旅行者","role":"protagonist","location_ref":"new:lodge"}}':JSON.stringify({op:'location.upsert',ref:'new:kitchen',data:{name:'厨房',kind:'room',parent_ref:req.messages[1].content.match(/focus=([^、\n]+)/)[1]}});
  });
@@ -114,8 +142,16 @@ test('empty bootstrap observes first, constructs its newly registered place, and
   assert.match(port.calls[1].messages[1].content,/新旅店/);
   const places=queryBound(session.repo.db,'SELECT id,name,parent_location_id FROM locations',[]);assert.equal(places.find(p=>p.name==='厨房').parent_location_id,places.find(p=>p.name==='新旅店').id);
   const state=await handleSqlChatRequest(session,'state',{});assert.equal(state.receipts.length,1);assert.equal(state.receipts[0].detail.coreSaved,true);assert.ok(state.receipts[0].detail.receipt.groups.length);assert.equal(state.receipts[0].detail.attempts.length,4);
-  assert.ok(queryBound(session.repo.db,'SELECT frame_json FROM maps',[]).every(row=>JSON.parse(row.frame_json).atlasScene),'初建所有地图自动生成布局后统一保存');
+  assert.equal(state.receipts[0].detail.operation,'build');assert.equal(state.receipts[0].detail.sceneSaved,true);
+  assert.ok(queryBound(session.repo.db,'SELECT frame_json FROM maps',[]).every(row=>JSON.parse(row.frame_json).atlasScene),JSON.stringify({message:'初建所有地图自动生成布局后统一保存',issues:state.receipts[0].detail.receipt.issues,maps:queryBound(session.repo.db,'SELECT name,frame_json FROM maps',[])}));
   assert.ok(queryBound(session.repo.db,'SELECT frame_json FROM maps',[]).some(row=>JSON.parse(row.frame_json).atlasWorldFill));
+  const mapRow=queryBound(session.repo.db,'SELECT id,frame_json FROM maps LIMIT 1',[])[0];
+  refuseLayout=true;
+  const failed=await handleSqlMapAction(session,'map/layout',{chatId:hostRecord.chatUid,requestId:'empty-layout',mapId:mapRow.id});
+  assert.equal(failed.sceneSaved,false,'旧场景存在不能证明本轮生成成功');
+  assert.equal(queryBound(session.repo.db,'SELECT frame_json FROM maps WHERE id=?',[mapRow.id])[0].frame_json,mapRow.frame_json);
+  const restored=await handleSqlChatRequest(session,'state',{});
+  assert.equal(restored.receipts[0].detail.operation,'layout');assert.equal(restored.receipts[0].detail.sceneSaved,false);
  }finally{await provider.close();}
 });
 

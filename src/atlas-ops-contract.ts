@@ -84,6 +84,15 @@ export type RefEntry = {
   declaredByOpId: string | null;
 };
 
+/**
+ * P08/R05：程序侧声明的**必要引用**。
+ *
+ * 统一用 (kind,id) 表达，不再为「必要的路线」「必要的端点」「必要的人物」各加一种数组——
+ * 每多一种操作就得再加一个数组的设计迟早会漏。调用方（作者手动动作、程序任务）
+ * 用真实 ID 声明它们，目录构造必须无条件下发，也不能因为总量上限被截断。
+ */
+export type RequiredRef = { kind: RefKind; id: string };
+
 export type RowMutation = {
   table: string;
   rowId: string;
@@ -101,7 +110,17 @@ export type AtomicGroup = {
   mutations: RowMutation[];
   /** 成员 op 的编译期问题：零变更组若有 error 必须是 rejected，不能记成 applied。 */
   opIssues?: Issue[];
+  /**
+   * P09A/§15.4.13：这个组**干什么用**。缺省 `business`。
+   * 建设进度/调度这一类程序记账组显式声明 `bookkeeping`：
+   * 它们可以写业务表（例如给容器图补一条进度记录），但不算世界发生业务变化。
+   * 判据必须同时看「写了哪些表」和「这个组的用途」，不能只看 id 前缀。
+   */
+  purpose?: GroupPurpose;
 };
+
+/** P09A：组的用途分类。 */
+export type GroupPurpose = 'business' | 'bookkeeping';
 
 export type GroupResult = {
   groupId: string;
@@ -109,6 +128,8 @@ export type GroupResult = {
   status: 'applied' | 'duplicate' | 'rejected' | 'blocked';
   issues: Issue[];
   changedRows: number;
+  /** 与 `AtomicGroup.purpose` 一致：回执层据此区分业务变化与程序记账。 */
+  purpose?: GroupPurpose;
 };
 
 export type TurnReceipt = {
@@ -166,7 +187,54 @@ export const TURN_CHANGE_TABLES: readonly string[] = [
   'entity_keys',
   'mention_candidates',
   'branches',
+  // P09A（schema3）：进度/调度行同样进变更日志，可校验、可逆序恢复。
+  // 只允许**程序**生成这些变更；模型语义操作表不增加对它的表级写入。
+  'construction_progress',
 ];
+
+/**
+ * P09A/§15.4.13：写这些表**不代表**世界发生业务变化。
+ *
+ * 它们是程序内部表（提交元数据、变更日志、同步队列、建设进度）。
+ * 只写这些行的回合不得推进 revision、不得计入实体新增或业务成功组，
+ * 也不得借它推进游戏时间。
+ *
+ * 注意：这个清单只决定**统计口径**。它不表示这些表变成「可任意 rebase 的元数据」——
+ * 建设进度行带调度语义，仍写 journal、仍可逆序回退，也仍受 stale/base guard 约束。
+ */
+export const PROGRAM_INTERNAL_MUTATION_TABLES: readonly string[] = [
+  'branches',
+  'turns',
+  'turn_changes',
+  'sync_outbox',
+  'construction_progress',
+];
+
+/** 该表的写入是否属于业务变化。 */
+export function isBusinessMutationTable(table: string): boolean {
+  return !PROGRAM_INTERNAL_MUTATION_TABLES.includes(table);
+}
+
+/**
+ * P09A/§15.4 第 4 条：只允许**程序**写入的记账表。
+ *
+ * 模型语义操作列表里没有、也不会有这些表的写入口；编译器产的组默认是 `business`，
+ * 因此在 `applyGroups` 里，非 `bookkeeping` 组一旦想写这些表直接整组 rejected。
+ * 这样「进度只能由程序写」是结构约束，不是靠 review 记性。
+ */
+export const PROGRAM_ONLY_WRITE_TABLES: readonly string[] = ['construction_progress'];
+
+/**
+ * P09A/§15.4.13：一个组是否代表**业务**变化。
+ * 判据是「写到了哪些表 + 这个组的用途」，不是组 id 前缀：
+ * - 显式 `bookkeeping`（建设进度/调度记账）→ 不是业务变化；
+ * - 其余情况里只要有一步写到业务表 → 是业务变化；
+ * - 只写程序内部表的组 → 不是业务变化。
+ */
+export function groupChangesBusiness(group: { purpose?: GroupPurpose; mutations: readonly RowMutation[] }): boolean {
+  if (group.purpose === 'bookkeeping') return false;
+  return group.mutations.some((mutation) => isBusinessMutationTable(mutation.table));
+}
 
 /**
  * §8.4：15 个语义操作 + noop（0.9.76 起含 map.layout.request）。
@@ -326,6 +394,11 @@ export type TurnInput = {
   phaseBatches: Phase[];
   manual: boolean;
   narrativeKind?: 'narrative' | 'manual';
+  /**
+   * P08/R05：宿主/作者侧用**真实 ID** 声明的必要引用。编译期目录必须无条件收下它们，
+   * 且与提交时用的是同一份冻结目录（提示词、解析、编译、repair、零请求预览共用）。
+   */
+  requiredRefs?: RequiredRef[];
   /** Display locator only; stable identity remains anchor.hostMessageUid. */
   hostMessageIndex?: string;
   operations?: ModelOperation[];
@@ -335,9 +408,16 @@ export type TurnInput = {
   layoutMaps?: 'active' | string[];
   mapCalibration?: import('./atlas-sql-scene-maps.ts').SqlMapCalibration;
   sceneOnly?: boolean;
+  /** Explicit author selection; never accepted as a model operation. */
+  historyRepair?: import('./atlas-history-repair.ts').HistoryRepairSelection;
   /** Trusted author import, never supplied by a model operation. */
   legacyImport?: unknown;
   mapBackground?: {mapId:string;asset:import("./atlas-db-contract.ts").AtlasAssetRef|null};
+  /**
+   * P13/R03 §20：作者显式选择/清除绘图档案（`mode:null` = 清除，回到程序推导）。
+   * 宿主路由构造，绝不来自模型文本；只写 frame 里的档案，旧 scene 保留到下一轮布局成功。
+   */
+  mapProfile?: {mapId:string;mode:import("./atlas-spatial-profile.ts").SpatialProfileMode|null};
   povName?: string;
   /**
    * M3/W08：UI 显式重试布局。由宿主路由构造（ticket/opID 都在这里分配），
@@ -354,6 +434,17 @@ export type TurnInput = {
    * 抽取全部结束后才发一次总体建设，禁止每个分块重复扩建。
    */
   constructionMode?: 'extract-only';
+  /**
+   * P09B/§16.4：「继续建设」程序模式。跳过 observe/正文重放，**不发前台请求**，
+   * 只把持久队列里的下一个单元（和必要布局）跑完；narrativeKind=manual、sceneOnly、时间不推进。
+   * 是否真的有待办由调用方在发回合前先用持久进度判定（无待办时零请求返回「暂无待处理」）。
+   */
+  constructionContinue?: boolean;
+  /**
+   * P10/R02：本回合的来源块缓存（键已含 chat/branch，跨聊天绝不共用）。
+   * 只在本回合内复用，不持久；持久账本在 `construction_progress` 的 source/chunk 行里。
+   */
+  worldSourceCache?: Map<string, import('./atlas-sql-world-sources.ts').WorldSourceChunk[]>;
 };
 
 export type RollbackInput = {

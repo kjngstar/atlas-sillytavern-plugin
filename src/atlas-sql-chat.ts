@@ -1,4 +1,5 @@
 import {readSqlMapImage} from './atlas-sql-map-assets.ts';
+import {savedTurnHasScene,mapReceiptOperation} from './atlas-sql-receipt-evidence.ts';
 import {previewSqlTravel} from './atlas-sql-travel-preview.ts';
 import {inspectSqlWorld} from './atlas-sql-inspect.ts';
 import {buildSqlForegroundRequest} from './atlas-sql-model-context.ts';
@@ -13,6 +14,9 @@ import { querySqlCharacterTimeline } from './atlas-sql-timeline.ts';
 import { handleSqlMapAction } from './atlas-sql-map-actions.ts';
 import { toLegacyTurnReceipt } from './atlas-db-state-adapter.ts';
 import { runSqlTurn, runSqlRollback } from './atlas-sql-session.ts';
+import { planRollback } from './atlas-db-rollback.ts';
+import { summarizeRollbackPlan, type RollbackPreviewTurn } from './atlas-rollback-preview.ts';
+import { buildHistoryRepairPreview, resolveMergedId } from './atlas-history-repair.ts';
 import { runSqlModelRetry } from './atlas-sql-retry.ts';
 import type { SqlSession } from './atlas-sql-session.ts';
 import type { TurnAnchor, TurnInput } from './atlas-ops-contract.ts';
@@ -28,6 +32,15 @@ import {
 
 /** world-feed 过滤条件里唯一允许出现的键；别的键直接 INVALID_PAYLOAD。 */
 const FEED_FILTER_KEYS = ['category', 'mapId', 'entityId', 'currentTurnOnly'] as const;
+
+/**
+ * P14/§21.5：请求预览允许的阶段。
+ *
+ * 只开放**任务绑定对应的两个阶段**：初始化 / 普通推进 = observe，失败纠错 = repair。
+ * geography / decision / outcome 是内部子阶段，不由宿主任务直接触发，给它们做预览只会
+ * 让作者看到不会真正发送的东西——所以这里明确不认，非法值退回 observe 而不是照单全收。
+ */
+const PREVIEW_PHASES = ['observe', 'repair'] as const;
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -187,9 +200,13 @@ export async function handleSqlChatRequest(session: SqlSession, action: string, 
     {characterId:text(body.characterId),offset:typeof body.offset==='number'?body.offset:undefined,limit:typeof body.limit==='number'?body.limit:undefined});
   if(action==='preview'){
     if(!session.modelPort?.preview)throw new AtlasDbError('SQL_PREVIEW_UNAVAILABLE','当前模型端口未提供请求预览，未调用模型',{});
+    // §21.5：预览必须覆盖任务各自的真实阶段（初始化/普通推进=observe，修复=repair），
+    // 且与真实发送共用同一条组装链（`port.preview` 与 `port.request` 都走 `prepare`）。
+    const phase=(PREVIEW_PHASES as readonly string[]).includes(text(body.phase))?text(body.phase) as (typeof PREVIEW_PHASES)[number]:'observe';
     const sources=chatSources({...body,userText:text(body.userText),assistantText:text(body.assistantText),userMessageId:'preview',assistantMessageId:'preview'} as AtlasTurnCommitRequest,text(body.playerName));
-    const input:TurnInput={anchor:{chatUid:session.chatUid,branchId:session.branchId,parentTurnId:session.repo.internal.currentHeadTurnId(),hostMessageUid:'preview',variantKey:'preview',baseRevision:session.repo.internal.currentRevision(),baseStorageRevision:session.repo.storageRevision,inputHash:'preview'},userText:text(body.userText),assistantText:text(body.assistantText),sourceSnapshot:sources,phaseBatches:['observe'],manual:false};
-    return session.modelPort.preview(buildSqlForegroundRequest(createTableReadPort(session.repo.db),session.branchId,input,'observe','preview'));
+    const input:TurnInput={anchor:{chatUid:session.chatUid,branchId:session.branchId,parentTurnId:session.repo.internal.currentHeadTurnId(),hostMessageUid:'preview',variantKey:'preview',baseRevision:session.repo.internal.currentRevision(),baseStorageRevision:session.repo.storageRevision,inputHash:'preview'},userText:text(body.userText),assistantText:text(body.assistantText),sourceSnapshot:sources,phaseBatches:[phase],manual:false};
+    const preview=await session.modelPort.preview(buildSqlForegroundRequest(createTableReadPort(session.repo.db),session.branchId,input,phase,'preview'));
+    return {...preview,phase,coreSaved:false};
   }
   if (action === 'state') {
     const logicalBinding=binding(session);
@@ -199,13 +216,15 @@ export async function handleSqlChatRequest(session: SqlSession, action: string, 
     const retryContext=headRow&&toLegacyTurnReceipt(nativeReceipt).retryable===true?{
       turnId:String(headRow.id),assistantMessageId:floorIndex(headRow),hostMessageUid:String(headRow.host_message_uid),variantKey:String(headRow.host_variant_key),
     }:null;
-    const receipts = queryBound(session.repo.db, "SELECT receipt_json, attempts_json, created_wall_ms FROM turns WHERE branch_id=? AND status IN ('committed','partial','failed') ORDER BY created_wall_ms DESC, rowid DESC LIMIT 10", [session.branchId]).flatMap(row => {
+    const receipts = queryBound(session.repo.db, "SELECT id,host_message_uid,receipt_json, attempts_json, created_wall_ms FROM turns WHERE branch_id=? AND status IN ('committed','partial','failed') ORDER BY created_wall_ms DESC, rowid DESC LIMIT 10", [session.branchId]).flatMap(row => {
       try {
         const native = JSON.parse(String(row.receipt_json));
         if (!native?.turnId || !Array.isArray(native.groups) || !Array.isArray(native.issues)) return [];
         const legacy = toLegacyTurnReceipt(native, { coreSaved: true });
+        const operation=mapReceiptOperation(row.host_message_uid);
+        const sceneEvidence=operation?{operation,sceneSaved:savedTurnHasScene(session.repo.db,String(row.id))}:{};
         const attempts = JSON.parse(String(row.attempts_json ?? '[]')).map((attempt: Record<string, unknown>) => ({ stage: attempt.kind ?? attempt.phase, phase: attempt.phase, httpStatus: attempt.http_status, errorCode: attempt.error_code, message: attempt.error, responseChars:attempt.response_chars,finishReason:attempt.finish_reason,durationMs:typeof attempt.started_wall_ms==='number'&&typeof attempt.finished_wall_ms==='number'?attempt.finished_wall_ms-attempt.started_wall_ms:undefined,status: attempt.error ? 'failed' : 'completed' }));
-        return [{ ...legacy, status: native.status === 'noop' ? 'committed' : legacy.status, chatId: session.chatUid, recordedAt: Number(row.created_wall_ms), adoptedEventCount: 0, detail: { receipt: legacy.receipt, issues: legacy.issues, attempts, coreSaved: true } }];
+        return [{ ...legacy, status: native.status === 'noop' ? 'committed' : legacy.status, chatId: session.chatUid, recordedAt: Number(row.created_wall_ms), adoptedEventCount: 0, detail: { receipt: legacy.receipt, issues: legacy.issues, attempts, coreSaved: true,...sceneEvidence } }];
       } catch { return []; }
     });
     return {...querySqlSceneState({db:session.repo.db,branchId:session.branchId,revision:session.repo.internal.currentRevision(),
@@ -310,6 +329,94 @@ export async function handleSqlChatRequest(session: SqlSession, action: string, 
       receipt.retryable = result.issues.every(i => !['CHAT_CHANGED', 'SESSION_STALE', 'STALE_BASE', 'TURN_CANCELLED'].includes(i.code));
     }
     return { receipt, nativeReceipt: result.receipt, coreSaved: result.coreSaved, issues: result.issues };
+  }
+  /**
+   * P15/§22：历史数据修复**预览**（只读）。
+   *
+   * 交付的是诊断与候选：保留 ID / 退役 ID / 引用重定向 / 地图保留或退役 / 事实冲突 / 锁 /
+   * 预计变化量。**不执行**任何合并 —— 对真实存档的合并要作者显式选定方案后另走一次流程。
+   * `expectedPreviewHash` 是「作者看过的那份预览」的指纹：对不上就作废，不拿旧方案强写新库。
+   */
+  if (action === 'history-repair-preview') {
+    const revision = session.repo.internal.currentRevision();
+    const headTurnId = session.repo.internal.currentHeadTurnId();
+    const preview = buildHistoryRepairPreview({ db: session.repo.db, branchId: session.branchId, revision, headTurnId });
+    const expected = text(body.expectedPreviewHash);
+    if (expected && expected !== preview.previewHash) {
+      throw new AtlasDbError('HISTORY_PREVIEW_STALE', '世界在预览之后已经变化（目录或分支状态不同），请重新生成预览', {});
+    }
+    return { coreSaved: false, preview, issues: preview.actions.flatMap((row) => row.conflicts) };
+  }
+  /**
+   * §22.2 第 2 条：**当前态**读取把已合并的旧 ID 指向保留实体。只读解析，不写库。
+   * 环/超深明确报错（HISTORY_MERGE_CYCLE / HISTORY_MERGE_DEPTH_EXCEEDED），不挑一个了事。
+   */
+  if (action === 'merged-id-resolve') {
+    const resolution = resolveMergedId({
+      db: session.repo.db, branchId: session.branchId, table: text(body.table) || 'locations', id: text(body.id),
+    });
+    return { coreSaved: false, resolution };
+  }
+  if(action==='history-repair-apply'){
+    if(body.viewMode==='pov')throw new AtlasDbError('AUTHOR_VIEW_REQUIRED','历史修复只能从作者视图执行',{});
+    const previewHash=text(body.previewHash),actionIndexes=body.actionIndexes;
+    if(!previewHash||!Array.isArray(actionIndexes)||!actionIndexes.every(Number.isSafeInteger))throw new AtlasDbError('HISTORY_SELECTION_INVALID','需要预览指纹及明确选定的动作编号',{});
+    const revision=session.repo.internal.currentRevision();
+    const result=await runSqlTurn(session,{anchor:{chatUid:session.chatUid,branchId:session.branchId,parentTurnId:session.repo.internal.currentHeadTurnId(),hostMessageUid:`author:history-repair:${previewHash}`,variantKey:'history-repair',baseRevision:revision,baseStorageRevision:session.repo.storageRevision,inputHash:stableHexHash(JSON.stringify([previewHash,actionIndexes]))},userText:'',assistantText:'',sourceSnapshot:[],phaseBatches:[],manual:true,sceneOnly:true,historyRepair:{previewHash,actionIndexes},isCurrent:typeof body.isCurrent==='function'?body.isCurrent as ()=>boolean:undefined});
+    return {coreSaved:result.coreSaved,receipt:toLegacyTurnReceipt(result.receipt,{coreSaved:result.coreSaved}),nativeReceipt:result.receipt,issues:result.issues};
+  }
+  if(action==='history-repair-restore'){
+    if(body.viewMode==='pov')throw new AtlasDbError('AUTHOR_VIEW_REQUIRED','历史修复恢复只能从作者视图执行',{});
+    const turnId=text(body.turnId),current=session.repo.internal.currentRevision();
+    if(body.expectedRevision!==current)throw new AtlasDbError('STALE_BASE','历史修复之后世界已经变化，请先查看新的回退影响',{});
+    const turn=queryBound(session.repo.db,"SELECT id FROM turns WHERE id=? AND branch_id=? AND host_message_uid LIKE 'author:history-repair:%' AND status IN ('committed','partial')",[turnId,session.branchId])[0];
+    if(!turn||session.repo.internal.currentHeadTurnId()!==turnId)throw new AtlasDbError('HISTORY_RESTORE_NOT_HEAD','快捷恢复仅支持最后一次历史修复；有后续推演时需先查看完整回退计划',{});
+    const result=await runSqlRollback(session,{chatUid:session.chatUid,branchId:session.branchId,targetParentTurnId:turnId,expectedRevision:current});
+    return {coreSaved:result.coreSaved,receipt:toLegacyTurnReceipt(result.receipt,{coreSaved:result.coreSaved}),nativeReceipt:result.receipt,issues:result.issues};
+  }
+  if (action === 'rollback-preview') {    /**
+     * §21.4：回退**执行前**的影响预览。只读 —— 走同一个 `planRollback`，不建候选、不写库。
+     * 客户端拿到的是真实计划：目标楼层、将一并撤销的后续楼（含手动建设）、受影响地图与
+     * 建设进度范围、时钟目标值。
+     */
+    const floor = text(body.assistantMessageId);
+    const rows = queryBound(session.repo.db, "SELECT id,host_message_uid,decisions_json FROM turns WHERE branch_id=? AND kind='narrative' AND status IN ('committed','partial') ORDER BY committed_revision DESC,created_wall_ms DESC", [session.branchId]);
+    if (!rows.length) return { coreSaved: false, preview: null, reasonCode: 'NO_ROLLBACK_TARGET' };
+    const row = floor ? rows.find((entry) => floorIndex(entry) === floor) : rows[0];
+    if (!row) throw new AtlasDbError('SQL_ROLLBACK_FLOOR_MISMATCH', '目标楼层没有当前分支的有效 SQL 推演记录', {});
+    const expectedRevision = typeof body.expectedRevision === 'number' ? body.expectedRevision : session.repo.internal.currentRevision();
+    const plan = planRollback({
+      db: session.repo.db,
+      branchId: session.branchId,
+      targetTurnId: String(row.id),
+      expectedRevision,
+    });
+    const viewMode = body.viewMode === 'pov' ? 'pov' : 'author';
+    // 受影响楼层的真实行：楼层号 / 楼种 / 是否手动。读不到就不编。
+    const turnRows = plan.turns.length
+      ? queryBound(session.repo.db, `SELECT id,kind,status,host_message_uid,decisions_json FROM turns WHERE id IN (${plan.turns.map(() => '?').join(',')})`, [...plan.turns])
+      : [];
+    const byId = new Map(turnRows.map((entry) => [String(entry.id), entry]));
+    const turns: RollbackPreviewTurn[] = plan.turns.map((turnId) => {
+      const found = byId.get(turnId);
+      let decisions: Record<string, unknown> = {};
+      if (found) {
+        try {
+          const parsed: unknown = JSON.parse(String(found.decisions_json ?? '{}'));
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) decisions = parsed as Record<string, unknown>;
+        } catch {
+          decisions = {};
+        }
+      }
+      return {
+        turnId,
+        floor: found ? floorIndex(found) : null,
+        kind: found ? text(found.kind) : 'narrative',
+        manual: decisions.manual === true || text(decisions.narrativeKind) === 'manual',
+        status: found ? text(found.status) : null,
+      };
+    });
+    return { coreSaved: false, preview: summarizeRollbackPlan(plan, { turns, viewMode }), issues: plan.issues };
   }
   if (action === 'rollback') {
     const floor = text(body.assistantMessageId);

@@ -14,6 +14,12 @@ import type { RefScope } from './atlas-ops-refs.ts';
 export type TableReadPort = {
   selectOne(table: AtlasTableName, branchId: string, id: string): Record<string, unknown> | null;
   selectWhere(table: AtlasTableName, where: Record<string, unknown>, limit?: number): Array<Record<string, unknown>>;
+  /**
+   * P08/R05：程序白名单分页。表名只能是已知表，条件只有 `id > afterId`，
+   * 固定 `ORDER BY id ASC LIMIT pageSize` —— 不能把任意表名/条件交给 SQL。
+   * 省略时上层退回 selectWhere（有硬上限），因此需要跨越 1,001 行的路径必须实现它。
+   */
+  selectPage?(table: AtlasTableName, branchId: string, afterId: string | null, pageSize: number): Array<Record<string, unknown>>;
   nextSeq?: () => number;
 };
 

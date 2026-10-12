@@ -111,6 +111,9 @@ function receiptDetail(value:unknown,depth=0):unknown{
   if(value===null||typeof value==='number'||typeof value==='boolean')return value;
   if(!value||typeof value!=='object')return undefined;
   const keys=new Set(['turnId','status','summary','groups','groupId','opIds','changedRows','issues','code','message','path','schemaPath','severity','retryable','dependsOn','dependencies','dependency','opId','phase','stage','kind','attempt','attempts','batchId','httpStatus','durationMs','responseChars','finishReason','http_status','started_wall_ms','finished_wall_ms','response_chars','response_hash','finish_reason','error','errorCode','clockBeforeS','clockAfterS','simulatedUntilS','worldChanged','timeChanged','coreSaved','coreCommitted','receipt']);
+  // Map reports must survive the same sanitization used for durable SQL receipts.
+  // Keep summary counts only; per-entity source bodies and hidden queue IDs stay excluded.
+  for(const key of ['operation','sceneSaved','build','sceneSummary','ready','partial','missing','queue','pendingTargets'])keys.add(key);
   return Object.fromEntries(Object.entries(value).filter(([k])=>keys.has(k)).map(([k,v])=>[k,receiptDetail(v,depth+1)]));
 }
 

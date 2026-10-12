@@ -48,6 +48,7 @@ export { withChatCommitLock, commitLockMode } from './atlas-db-queue.ts';
 export { createAtlasHostPort, describeHostCapabilities, readEnvelope, ATLAS_DATABASE_KEY } from './atlas-host-port.ts';
 export { saveCandidate, createHostSaveAdapter, reconcileUnknownSave } from './atlas-host-save.ts';
 export { ATLAS_RUNTIME_LIMITS, ATLAS_FIELD_LIMITS } from './atlas-runtime-limits.ts';
+export { LAYOUT_SIGNATURE_POLICY_VERSION } from './atlas-layout-signature.ts';
 export { parseOperations, extractPayload, looksLikeSql } from './atlas-ops-parser.ts';
 export { normalizeOperation, validateMinimum } from './atlas-ops-normalize.ts';
 export { compileOperations } from './atlas-ops-compile.ts';

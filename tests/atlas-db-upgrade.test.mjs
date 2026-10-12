@@ -17,6 +17,7 @@ import {
   USER_TABLE_COUNT,
   installSchema,
   locationsSql,
+  expectedTableCount,
 } from '../src/atlas-db-schema.ts';
 import { UPGRADE_TEMP_TABLE, upgradeSchema1To2 } from '../src/atlas-db-upgrade.ts';
 import { AtlasDbError, loadSqlModule } from '../src/atlas-db-runtime.ts';
@@ -44,8 +45,11 @@ function locationsDdl(db) {
 }
 
 function rowCounts(db) {
+  const present = new Set(userTableNames(db));
   const out = {};
   for (const table of Object.keys(ATLAS_TABLE_COLUMNS)) {
+    // P09A：真 schema1/2 旧档没有 construction_progress，只统计实际存在的表。
+    if (!present.has(table)) continue;
     out[table] = Number(db.exec(`SELECT COUNT(*) FROM ${table}`)?.[0]?.values?.[0]?.[0] ?? -1);
   }
   return out;
@@ -72,10 +76,34 @@ function schema1LocationsSql() {
     .replace(SCHEMA1_LOCATIONS_MARKER, "'building','room'");
 }
 
-/** 用基线 DDL 把已 seed 的真实世界降级为 schema1 结构，并写 user_version=1。 */
-async function makeSchema1Bytes(SQL) {
+/**
+ * P09A：把已 seed 的真实世界降级为**真 schema2**：去掉 schema3 独有的 construction_progress
+ * 表及其索引，写 user_version=2。旧档必须是真旧结构，不允许「新 schema + 旧版本号」冒充。
+ */
+async function makeSchema2Bytes(SQL) {
   const seed = await makeSeedWith(SQL);
   const db = seed.db;
+  assert.ok(userTableNames(db).includes('construction_progress'), 'seed 应是当前 schema，含 construction_progress');
+  db.run('PRAGMA foreign_keys = OFF');
+  db.run('BEGIN');
+  db.run('DROP INDEX IF EXISTS idx_construction_progress_pick');
+  db.run('DROP TABLE IF EXISTS construction_progress');
+  db.run('COMMIT');
+  db.run('PRAGMA foreign_keys = ON');
+  db.run('PRAGMA user_version = 2');
+  assert.equal(pragmaNumber(db, 'user_version'), 2);
+  assert.equal(userTableNames(db).length, expectedTableCount(2), '真 schema2 恰 20 张表');
+  assert.ok(!userTableNames(db).includes('construction_progress'), 'schema2 不得有 schema3 的表');
+  const bytes = seed.exportBytes();
+  seed.close();
+  return bytes;
+}
+
+/** 用基线 DDL 把**真 schema2** 进一步降级为 schema1 结构，并写 user_version=1。 */
+async function makeSchema1Bytes(SQL) {
+  const bytes2 = await makeSchema2Bytes(SQL);
+  const seed = new SQL.Database(bytes2);
+  const db = seed;
   const attached = attachedNames(db);
   assert.ok(attached.length > 0, 'seed 库应带 locations 索引/触发器，才能验证重建');
   const before = locationKeys(db);
@@ -93,19 +121,20 @@ async function makeSchema1Bytes(SQL) {
 
   assert.equal(pragmaNumber(db, 'user_version'), 1);
   assert.ok(!locationsDdl(db).includes("'floor'"), 'schema1 档的 CHECK 不得含 floor');
-  const bytes = seed.exportBytes();
-  seed.close();
+  assert.equal(userTableNames(db).length, expectedTableCount(1), 'schema1 也是 20 张表');
+  const bytes = db.export();
+  db.close();
   return bytes;
 }
 
-test('S01 新空库是 schema2，CHECK 接受 floor 并拒绝未知 kind', async () => {
+test('S01 新空库是当前 schema（3），CHECK 接受 floor 并拒绝未知 kind', async () => {
   const SQL = await loadSqlModule();
   const db = new SQL.Database();
   db.run('PRAGMA foreign_keys = OFF');
   installSchema(db);
   assert.equal(pragmaNumber(db, 'user_version'), ATLAS_SCHEMA_VERSION);
-  assert.equal(ATLAS_SCHEMA_VERSION, 2);
-  assert.ok(locationsSql().includes("'floor'"), 'schema2 的 locations DDL 必须含 floor');
+  assert.equal(ATLAS_SCHEMA_VERSION, 3);
+  assert.ok(locationsSql().includes("'floor'"), 'schema2 起的 locations DDL 必须含 floor');
 
   const insert = (kind) => {
     const id = `loc_${kind}`;
@@ -117,12 +146,12 @@ test('S01 新空库是 schema2，CHECK 接受 floor 并拒绝未知 kind', async
       [id, kind],
     );
   };
-  assert.doesNotThrow(() => insert('floor'), 'schema2 必须允许 kind=floor');
+  assert.doesNotThrow(() => insert('floor'), 'schema2 起必须允许 kind=floor');
   assert.throws(() => insert('foobar'), /CHECK|constraint/i, '未知 kind 必须被 CHECK 拒绝');
   db.close();
 });
 
-test('S02 版本1完整升级：20 表值/主键集合不变、floor 可用、临时表不泄漏', async () => {
+test('S02 版本1完整升级到 2：20 表值/主键集合不变、floor 可用、临时表不泄漏', async () => {
   const SQL = await loadSqlModule();
   const bytes = await makeSchema1Bytes(SQL);
   const originalSha = sha256(bytes);
@@ -141,8 +170,11 @@ test('S02 版本1完整升级：20 表值/主键集合不变、floor 可用、�
 
   assert.equal(pragmaNumber(db, 'user_version'), 2, '升级成功后才写 user_version=2');
   assert.equal(pragmaNumber(db, 'foreign_keys'), 1, 'finally 必须把外键恢复为 1');
-  assert.deepEqual(userTableNames(db).sort(), Object.keys(ATLAS_TABLE_COLUMNS).sort(), '仍是 20 张表');
-  assert.equal(userTableNames(db).length, USER_TABLE_COUNT);
+  // P09A：upgradeSchema1To2 的固定目标是 schema2（20 张），不跟随 ATLAS_SCHEMA_VERSION=3。
+  const schema2Tables = Object.keys(ATLAS_TABLE_COLUMNS).filter((name) => name !== 'construction_progress');
+  assert.deepEqual(userTableNames(db).sort(), schema2Tables.sort(), '1→2 后恰是 schema2 的 20 张表');
+  assert.equal(userTableNames(db).length, expectedTableCount(2));
+  assert.ok(!userTableNames(db).includes('construction_progress'), '1→2 不越级建 schema3 的表');
   assert.ok(!userTableNames(db).includes(UPGRADE_TEMP_TABLE), '临时表不得泄漏进结果');
   assert.deepEqual(rowCounts(db), countsBefore, '各表行数在升级中不得改变');
   assert.deepEqual(locationKeys(db), keysBefore, 'locations 主键集合不得改变');

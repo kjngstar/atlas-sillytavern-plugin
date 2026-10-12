@@ -42,6 +42,16 @@ function povCtx(ctx) {
   return { ...ctx, viewMode: 'pov' };
 }
 
+test('POV 人物目录无需认识自己的 knowledge 行即可导航主角，未知远方人物仍不出现',async()=>{
+  const {seed,ctx}=await seeded();
+  try{
+    seed.db.run('DELETE FROM knowledge WHERE branch_id=?',[BRANCH]);
+    const catalog=queryCatalog(povCtx(ctx),{kind:'catalog',branchId:BRANCH,entityKind:'character'});
+    assert.ok(catalog.items.some(row=>row.entityId===ctx.povId));
+    assert.ok(!catalog.items.some(row=>row.entityId===IDS.C3));
+  }finally{seed.close();}
+});
+
 const HIDDEN = {
   room: 'L_SECRET',
   roomName: '密室',

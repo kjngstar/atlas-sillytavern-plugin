@@ -22,6 +22,7 @@ import { mergeGroupMutations, recordGroupChanges, mutationOperationKind, operati
 import { validateGroup } from './atlas-db-invariants.ts';
 import type { SqlDatabase } from './atlas-db-runtime.ts';
 import type { AtomicGroup, GroupResult, Issue, RowMutation } from './atlas-ops-contract.ts';
+import { PROGRAM_ONLY_WRITE_TABLES } from './atlas-ops-contract.ts';
 import type { AtlasTableName } from './atlas-db-contract.ts';
 
 export type ApplyGroupsContext = {
@@ -129,6 +130,28 @@ export function applyGroups(
         changedRows: 0,
       });
       blockedGroups.add(gid);
+      continue;
+    }
+
+    // P09A/§15.4 第 4 条：进度/调度表只有程序（显式 bookkeeping 组）能写。
+    // 模型语义操作编译出来的组默认是业务组，想写这些表直接整组 rejected，不给表级写入口。
+    const forbiddenWrite = group.mutations.find(
+      (m) => PROGRAM_ONLY_WRITE_TABLES.includes(m.table) && group.purpose !== 'bookkeeping',
+    );
+    if (forbiddenWrite) {
+      blockedGroups.add(gid);
+      results.push({
+        groupId: gid,
+        opIds: group.opIds,
+        status: 'rejected',
+        issues: [
+          issue('PROGRAM_TABLE_WRITE_FORBIDDEN', `表 ${forbiddenWrite.table} 只允许程序记账组写入；本组未声明 bookkeeping`, {
+            groupId: gid,
+            retryable: false,
+          }),
+        ],
+        changedRows: 0,
+      });
       continue;
     }
 
@@ -250,6 +273,14 @@ export function applyGroups(
       });
       blockedGroups.add(gid);
     }
+  }
+
+  // P09A/§15.4.13：把组的用途（业务变化 vs 程序记账）带到回执。
+  // 上层统计据此区分，不再靠 `grp_world_fill_` 这种 id 前缀猜。
+  const purposeById = new Map(orderedGroups.map((g) => [g.id, g.purpose] as const));
+  for (const result of results) {
+    const purpose = purposeById.get(result.groupId);
+    if (purpose !== undefined) result.purpose = purpose;
   }
 
   // §16.5：最终 COMMIT 前显式执行外键检查（不以 RELEASE SAVEPOINT 代替 deferred FK 检查）。

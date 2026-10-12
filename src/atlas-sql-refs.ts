@@ -1,5 +1,5 @@
 /** A model batch owns its alias catalogue. Later writes must never renumber it. */
-import type { RefKind, ParsedOperation, Phase } from './atlas-ops-contract.ts';
+import type { RefKind, ParsedOperation, Phase, RequiredRef } from './atlas-ops-contract.ts';
 import type { TableReadPort } from './atlas-ops-compile-types.ts';
 import type { AtlasTableName } from './atlas-db-contract.ts';
 import type { Opportunity } from './atlas-sim-opportunities.ts';
@@ -11,11 +11,115 @@ const CATALOG: Array<[AtlasTableName, string, RefKind, number]> = [
   ['information','N','information',200], ['routes','R','route',200], ['events','E','event',200],
   ['journeys','J','journey',200], ['channels','H','channel',100], ['knowledge','K','knowledge',200],
 ];
-export function collectKnownRefs(tables: TableReadPort, branchId: string): KnownRef[] {
-  return CATALOG.flatMap(([table,prefix,kind,limit]) => tables.selectWhere(table,{branch_id:branchId},limit)
-    .map((row,i) => ({alias:`${prefix}${i+1}`,id:String(row.id),kind,rowRev:typeof row.row_rev==='number'?row.row_rev:null})));
+
+export type KnownRefScan = {
+  refs: KnownRef[];
+  /** 声明为必要、但库里确实不存在（或不在本分支）的引用：调用方据此明确报错，不猜、不静默丢。 */
+  missingRequired: RequiredRef[];
+  /**
+   * 实际进目录的**程序声明必要引用**条数（已去重、已按 kind+id 归一）。
+   * 调用方用它对照目录预算判断 REF_REQUIRED_BUDGET_EXCEEDED：
+   * 必要项本身都装不下时**不得**删掉必要项继续发送。
+   */
+  requiredResolved: number;
+};
+
+/**
+ * 稳定的必要引用排序：先按目录里的 kind 顺序，再按 id。
+ * 提交目录与编译目录必须得到同一顺序，否则追加的 alias 编号会跟着漂移。
+ */
+function orderRequired(refs: readonly RequiredRef[] | undefined): RequiredRef[] {
+  if (!refs || refs.length === 0) return [];
+  const order = new Map<RefKind, number>(CATALOG.map(([, , kind], index) => [kind, index]));
+  const unique = new Map<string, RequiredRef>();
+  for (const ref of refs) {
+    const kind = ref?.kind;
+    const id = typeof ref?.id === 'string' ? ref.id.trim() : '';
+    if (!kind || !id || !order.has(kind)) continue;
+    unique.set(`${kind}\u0000${id}`, { kind, id });
+  }
+  return [...unique.values()].sort((left, right) => {
+    const leftOrder = order.get(left.kind) ?? 0;
+    const rightOrder = order.get(right.kind) ?? 0;
+    if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+    return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
+  });
 }
-export function collectEntityRefs(tables: TableReadPort, branchId: string, refs = collectKnownRefs(tables,branchId)): string[] {
+
+/**
+ * P08/R05：带必要引用的目录扫描。
+ *
+ * 扫描沿用每表固定条数（maps 50 / characters 200 …）——**不抬高全表 cap**；
+ * 程序用真实 ID 声明的必要引用在此之上无条件追加，编号接在各自前缀末尾，
+ * 因此既有 alias 一个都不动（同批重解析绝不重编号）。
+ */
+export function scanKnownRefs(
+  tables: TableReadPort,
+  branchId: string,
+  options?: { requiredRefs?: readonly RequiredRef[] },
+): KnownRefScan {
+  const refs: KnownRef[] = [];
+  const present = new Map<string, KnownRef>();
+  const counters = new Map<RefKind, number>();
+  const tableByKind = new Map<RefKind, { table: AtlasTableName; prefix: string }>();
+
+  for (const [table, prefix, kind, limit] of CATALOG) {
+    tableByKind.set(kind, { table, prefix });
+    const rows = tables.selectWhere(table, { branch_id: branchId }, limit);
+    let ordinal = 0;
+    for (const row of rows) {
+      ordinal += 1;
+      const id = String(row.id);
+      const key = `${kind}\u0000${id}`;
+      if (present.has(key)) continue;
+      const entry: KnownRef = { alias: `${prefix}${ordinal}`, id, kind, rowRev: typeof row.row_rev === 'number' ? row.row_rev : null };
+      present.set(key, entry);
+      refs.push(entry);
+    }
+    counters.set(kind, ordinal);
+  }
+
+  const missingRequired: RequiredRef[] = [];
+  let requiredResolved = 0;
+  for (const required of orderRequired(options?.requiredRefs)) {
+    const key = `${required.kind}\u0000${required.id}`;
+    if (present.has(key)) {
+      requiredResolved += 1;
+      continue;
+    }
+    const bucket = tableByKind.get(required.kind);
+    if (!bucket) continue;
+    const row = tables.selectOne(bucket.table, branchId, required.id);
+    if (!row) {
+      missingRequired.push(required);
+      continue;
+    }
+    const ordinal = (counters.get(required.kind) ?? 0) + 1;
+    counters.set(required.kind, ordinal);
+    const entry: KnownRef = {
+      alias: `${bucket.prefix}${ordinal}`,
+      id: required.id,
+      kind: required.kind,
+      rowRev: typeof row.row_rev === 'number' ? row.row_rev : null,
+    };
+    present.set(key, entry);
+    refs.push(entry);
+    requiredResolved += 1;
+  }
+
+  return { refs, missingRequired, requiredResolved };
+}
+
+/** 同 `scanKnownRefs`，只取 alias 表（既有调用点的兼容入口）。 */
+export function collectKnownRefs(
+  tables: TableReadPort,
+  branchId: string,
+  options?: { requiredRefs?: readonly RequiredRef[] },
+): KnownRef[] {
+  return scanKnownRefs(tables, branchId, options).refs;
+}
+
+export function collectEntityRefs(tables: TableReadPort, branchId: string, refs: readonly KnownRef[] = collectKnownRefs(tables,branchId)): string[] {
   return refs.map(ref => {
     const table=CATALOG.find(entry=>entry[2]===ref.kind)?.[0];
     const row=table?tables.selectOne(table,branchId,ref.id):null;

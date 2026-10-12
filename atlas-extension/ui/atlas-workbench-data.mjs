@@ -2,7 +2,10 @@
 export function visibleWorkbenchMaps(items, viewMode) {
   const rows = Array.isArray(items) ? items : [];
   if (viewMode !== 'pov') return rows;
-  const kept = new Set(rows.filter(row => !row.containerLocationId).map(row => String(row.mapId)));
+  // SQL exposes containerLocationKind only when the POV knows that container.
+  // A known place need not have a geographic pin to make its interior navigable.
+  const kept = new Set(rows.filter(row => !row.containerLocationId ||
+    typeof row.containerLocationKind === 'string' && row.containerLocationKind.length > 0).map(row => String(row.mapId)));
   for (let pass = 0; pass < rows.length; pass += 1) {
     const visible = new Set(rows.filter(row => kept.has(String(row.mapId))).flatMap(row =>
       (row.points ?? []).filter(point => point.kind === 'location' && point.hidden !== true).map(point => String(point.entityId))));

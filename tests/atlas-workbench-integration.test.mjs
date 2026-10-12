@@ -8,6 +8,13 @@ const maps = [
   { mapId: 'house', containerLocationId: 'loc:house', name: '建筑', points: [{ kind: 'location', entityId: 'loc:floor' }] },
   { mapId: 'floor', containerLocationId: 'loc:floor', name: '楼层', points: [] },
 ];
+
+test('POV 地图树保留服务端已确认可见但未定坐标的容器，不暴露未知容器',()=>{
+  const rows=[{mapId:'world',points:[]},
+    {mapId:'known-room',containerLocationId:'known-place',containerLocationKind:'room',points:[]},
+    {mapId:'hidden-room',containerLocationId:'secret-place',containerLocationKind:null,points:[]}];
+  assert.deepEqual(visibleWorkbenchMaps(rows,'pov').map(row=>row.mapId),['world','known-room']);
+});
 test('地图导航保留祖先链并转换 SQL 地点引用；循环不能进入', () => {
   assert.deepEqual(workbenchMapPath(maps, 'floor'), [{ pointId: 'house', name: '建筑' }, { pointId: 'floor', name: '楼层' }]);
   assert.deepEqual(workbenchMapPath(maps, 'world'), []);

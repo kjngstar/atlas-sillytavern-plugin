@@ -14,6 +14,7 @@ import type { Issue } from './atlas-ops-contract.ts';
 import type { SceneDocument } from '../vendor/atlas-spatial/index.mjs';
 import { placeMarkers } from '../vendor/atlas-spatial/index.mjs';
 import { spatialIssue } from './atlas-spatial-frame.ts';
+import { parseSpaceLocalId } from './atlas-space-canonical.ts';
 
 type SqlRow = Record<string, unknown>;
 
@@ -35,6 +36,13 @@ export type OccupantsInput = {
   items?: SqlRow[];
   /** 本轮结算出的有效位置（在途判定用）。 */
   effectivePositions?: EffectivePosition[];
+  /**
+   * P12/R03 §19.4：本空间权威（`SpaceCanonicalV1`）登记的真实物品 ↔ 陈设绑定。
+   *
+   * 账本是「哪件真实物品摆在哪件陈设上」的持久记录。请求省略 `items` 时，账本里的绑定必须
+   * 顶上来——否则对账会把已摆好的物品判成「地面物品」，既掉到地上、也把账本里的 `itemId` 抹掉。
+   */
+  spaceCanonical?: { furnishing?: Array<{ localId?: unknown; itemId?: unknown }> } | null;
 };
 
 export type ActorSpec = { id: string; roomId: string; near?: string; position?: { x: number; y: number } };
@@ -103,12 +111,22 @@ export function reconcileOccupantsSpec(input: OccupantsInput): OccupantsResult {
     const id = text(room?.id);
     if (id) roomIds.add(id);
   }
+  /**
+   * P11/R03 §18.2 第 6 条：绑定的命名走廊是**本图的通行空间**，不是新实体。
+   * 它的 roomId 与房间一样参与对账，否则走廊里的人物会被当成「房间不存在」而丢锚点。
+   */
+  const requestCorridor = text(requestSpec.corridorLocationRef);
+  if (requestCorridor) roomIds.add(requestCorridor);
   const layout = (scene?.layout ?? null) as SqlRow | null;
   if (layout?.kind === 'floor' && Array.isArray(layout.rooms)) {
     for (const room of layout.rooms as SqlRow[]) {
       const id = text(room?.id);
       if (id) roomIds.add(id);
     }
+  }
+  if (layout?.kind === 'floor') {
+    const boundCorridor = text((layout.corridor as SqlRow | undefined)?.entityId);
+    if (boundCorridor) roomIds.add(boundCorridor);
   }
 
   /* ── 家具组：id → roomId（局部视觉 ID，只在本次布局内有效） ── */
@@ -169,6 +187,16 @@ export function reconcileOccupantsSpec(input: OccupantsInput): OccupantsResult {
   };
   collectItems(requestSpec.items);
   collectItems(savedConstraints.items);
+
+  /* ── P12/R03 §19.4：空间权威里的「真实物品 ↔ 陈设」绑定 ── */
+  const ledgerBound = new Map<string, string>();
+  for (const entry of rows(input.spaceCanonical?.furnishing as unknown as SqlRow[])) {
+    const localId = text(entry?.localId);
+    const itemId = text(entry?.itemId);
+    if (!localId || !itemId) continue;
+    const parsed = parseSpaceLocalId(localId);
+    if (parsed && parsed.contentId) ledgerBound.set(itemId, parsed.contentId);
+  }
 
   /* ── 在途判定：本轮结算把他/它放到了别处 ── */
   const transit = new Set<string>();
@@ -264,7 +292,7 @@ export function reconcileOccupantsSpec(input: OccupantsInput): OccupantsResult {
       issues.push(warn('ITEM_HELD', '$.items.on', '物品已被持有或收纳，不再作为地面物品显示', id));
       continue;
     }
-    const on = text(raw?.on) || prevItems.get(id)?.on || '';
+    const on = text(raw?.on) || prevItems.get(id)?.on || ledgerBound.get(id) || '';
     const groupRoomId = on ? text(groupRoom.get(on)) : '';
     const actualRoom = text(row.location_id);
     if (on && groupIds.has(on) && groupRoomId && actualRoom && groupRoomId === actualRoom) {
@@ -284,7 +312,15 @@ export function reconcileOccupantsSpec(input: OccupantsInput): OccupantsResult {
   for (const row of groundInRoom) {
     const id = text(row?.id);
     if (!id || seenItems.has(id)) continue;
-    looseItemMarkers.push({ id, roomId: text(row.location_id), name: text(row.name) || id, type: 'item' });
+    const actualRoom = text(row?.location_id);
+    // §19.4：账本登记了支撑关系且陈设仍在本图同一房间 → 仍算「被支撑」，不做地面物品。
+    const boundOn = ledgerBound.get(id) ?? '';
+    if (boundOn && groupIds.has(boundOn) && text(groupRoom.get(boundOn)) === actualRoom) {
+      seenItems.add(id);
+      items.push({ id, on: boundOn });
+      continue;
+    }
+    looseItemMarkers.push({ id, roomId: actualRoom, name: text(row.name) || id, type: 'item' });
   }
 
   /* ── 迁出/失效锚点：省略=保持，所以必须显式表达删除 ── */

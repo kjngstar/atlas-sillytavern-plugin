@@ -201,6 +201,218 @@ export function normalizeSqlMapFrame(frame: unknown, ctx: SpatialIssueContext = 
   };
 }
 
+// ───────────────────────── P12/R03 §19.3：幅面与物理尺寸 ─────────────────────────
+
+/** 幅面格数下限（1 格）与上限（10000 格）：两个数都必须在合同域内。 */
+export const FRAME_FIT_MIN_CELLS = 1;
+export const FRAME_FIT_MAX_CELLS = 10000;
+/** 两轴相对误差上限：0.5%（§19.3 明文）。 */
+export const FRAME_FIT_TOLERANCE = 0.005;
+/** 未指定下限时，长边至少铺到 100 格（沿用既有初始幅面的可读性）。 */
+export const FRAME_FIT_MIN_LONG_SIDE = 100;
+
+export type FrameFitInput = {
+  widthM: number;
+  heightM: number;
+  cols?: number | null;
+  rows?: number | null;
+  /** 现有 scale；给了就必须是同一正 mpp，否则不算「匹配」。 */
+  metersPerCell?: number | null;
+  minLongSide?: number;
+  tolerance?: number;
+};
+
+export type FrameFitResult = {
+  ok: boolean;
+  cols: number | null;
+  rows: number | null;
+  metersPerCell: number | null;
+  /** 网格（cols/rows）是否必须改写；false 表示现有帧面已能表达该物理尺寸。 */
+  changed: boolean;
+  issues: Issue[];
+};
+
+const fitIssue = (code: string, message: string): Issue => ({ code, path: '$.frame_json', message, severity: 'error', retryable: false });
+
+/**
+ * §19.3 fitFrameToPhysicalSize：把物理尺寸（米）表达成 **1–10000 的整数 cols/rows + 同一个正 mpp**。
+ *
+ * - 优先**保留**已匹配的现有帧面：cols/rows 与 mpp 都能在两轴 0.5% 内表达该尺寸 → `changed:false`。
+ * - 需要重算时按 `width:height` 的最简整数比放大（长边至少 `minLongSide` 格），
+ *   因此两轴是**同一个** mpp，不存在「一轴对、一轴偏」的帧面。
+ * - 比值本身超出 10000 格 → `FRAME_FIT_UNREPRESENTABLE`：**宁可不表达，也不把确认尺寸量化成另一事实**。
+ */
+export function fitFrameToPhysicalSize(input: FrameFitInput): FrameFitResult {
+  const tolerance = typeof input.tolerance === 'number' && input.tolerance > 0 ? input.tolerance : FRAME_FIT_TOLERANCE;
+  const minLong = typeof input.minLongSide === 'number' && input.minLongSide >= 1 ? input.minLongSide : FRAME_FIT_MIN_LONG_SIDE;
+  const usable = (value: unknown): value is number =>
+    typeof value === 'number' && Number.isInteger(value) && value >= FRAME_FIT_MIN_CELLS && value <= FRAME_FIT_MAX_CELLS;
+  const near = (value: number, target: number): boolean =>
+    Math.abs(value - target) / Math.max(Math.abs(value), Math.abs(target), 1e-9) <= tolerance;
+  if (!Number.isFinite(input.widthM) || !Number.isFinite(input.heightM) || input.widthM <= 0 || input.heightM <= 0) {
+    return { ok: false, cols: null, rows: null, metersPerCell: null, changed: false, issues: [fitIssue('FRAME_FIT_INPUT_INVALID', `物理尺寸必须是有限正数：widthM=${JSON.stringify(input.widthM)} heightM=${JSON.stringify(input.heightM)}`)] };
+  }
+  // 1) 现有帧面已能表达 → 原样保留（连 mpp 也不动）。
+  if (usable(input.cols) && usable(input.rows)) {
+    const given = typeof input.metersPerCell === 'number' && Number.isFinite(input.metersPerCell) && input.metersPerCell > 0
+      ? input.metersPerCell
+      : input.widthM / input.cols;
+    if (given > 0 && near(input.cols * given, input.widthM) && near(input.rows * given, input.heightM)) {
+      return { ok: true, cols: input.cols, rows: input.rows, metersPerCell: given, changed: false, issues: [] };
+    }
+  }
+  // 2) 按最简整数比重算，保证两轴共用一个 mpp。
+  const w = Math.round(input.widthM * 1e6);
+  const h = Math.round(input.heightM * 1e6);
+  if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h) || w <= 0 || h <= 0) {
+    return { ok: false, cols: null, rows: null, metersPerCell: null, changed: true, issues: [fitIssue('FRAME_FIT_RANGE_INVALID', `尺寸无法转换为一致的整数格幅面：widthM=${input.widthM} heightM=${input.heightM}`)] };
+  }
+  const gcd = (a: number, b: number): number => (b ? gcd(b, a % b) : a);
+  const factor = gcd(w, h);
+  const ratioW = w / factor;
+  const ratioH = h / factor;
+  const multiple = Math.max(1, Math.ceil(minLong / Math.max(ratioW, ratioH)));
+  const cols = ratioW * multiple;
+  const rows = ratioH * multiple;
+  if (cols < FRAME_FIT_MIN_CELLS || rows < FRAME_FIT_MIN_CELLS || cols > FRAME_FIT_MAX_CELLS || rows > FRAME_FIT_MAX_CELLS) {
+    return { ok: false, cols: null, rows: null, metersPerCell: null, changed: true, issues: [fitIssue('FRAME_FIT_UNREPRESENTABLE', `宽高比 ${ratioW}:${ratioH} 在 1–${FRAME_FIT_MAX_CELLS} 整数格内无法表达（需要 ${cols}×${rows}）：不量化成另一个事实，先让作者校正尺寸或幅面`)] };
+  }
+  const metersPerCell = input.widthM / cols;
+  if (!near(cols * metersPerCell, input.widthM) || !near(rows * metersPerCell, input.heightM)) {
+    return { ok: false, cols: null, rows: null, metersPerCell: null, changed: true, issues: [fitIssue('FRAME_FIT_UNREPRESENTABLE', `整数格幅面 ${cols}×${rows} 无法在 ${(tolerance * 100).toFixed(1)}% 内保持 ${input.widthM}×${input.heightM} 米`)] };
+  }
+  const changed = cols !== input.cols || rows !== input.rows;
+  return { ok: true, cols, rows, metersPerCell, changed, issues: [] };
+}
+
+export type AlignFrameInput = {
+  mapRow: Record<string, unknown>;
+  widthM: number;
+  heightM: number;
+  scope: SpatialScope;
+  currentScope: SpatialScope;
+  expectedRowRev: number;
+  turnId: string;
+  operationId: string;
+  /** 尺寸来源说明（进诊断与 scale_basis_json，便于按来源查回来）。 */
+  source?: { kind: string; referenceId?: string | null } | null;
+};
+
+export type AlignFrameResult = {
+  ok: boolean;
+  status: 'retained' | 'aligned' | 'refused' | 'failed';
+  mutation: RowMutation | null;
+  fit: FrameFitResult | null;
+  issues: Issue[];
+};
+
+/**
+ * §19.3：让一张**已有**地图的幅面表达给定物理尺寸。
+ *
+ * - 帧面已匹配 / 无需改写 → `retained`（零变更）。
+ * - 未锁定、未确认 → 生成**一条普通 maps 变更**改写 cols/rows/mpp（与场景写回同一候选作用域、
+ *   同一 journal；调用方负责是否应用）。
+ * - `scale_locked` 或 `scale_quality='confirmed'` 且帧面表达不了 → `refused` + 明确诊断，
+ *   **绝不动锁**、也绝不为了适配模板去改确认比例尺。
+ */
+export function alignSqlFrameToPhysicalSize(input: AlignFrameInput): AlignFrameResult {
+  const before = input.mapRow;
+  const mapId = asStringId(before?.id);
+  const ctx: SpatialIssueContext = {
+    mapId: mapId ?? undefined,
+    branchId: input.scope?.branchId,
+    revision: input.scope?.revision,
+    operationId: input.operationId,
+    turnId: input.turnId,
+  };
+  if (!mapId || String(before.branch_id ?? '') !== String(input.scope?.branchId ?? '')) {
+    return { ok: false, status: 'failed', mutation: null, fit: null, issues: [spatialIssue({ code: 'MAP_ROW_MISMATCH', path: '$.mapRow', message: '地图行缺失或不属于当前分支，不调整幅面' }, ctx)] };
+  }
+  if (Number(before.row_rev) !== input.expectedRowRev) {
+    return { ok: false, status: 'failed', mutation: null, fit: null, issues: [spatialIssue({ code: 'STALE_ROW', path: '$.expectedRowRev', message: '地图行已被其他变更修改，不调整幅面' }, ctx)] };
+  }
+  const frame = normalizeSqlMapFrame(before.frame_json, ctx);
+  if (!frame.ok) {
+    return { ok: false, status: 'refused', mutation: null, fit: null, issues: frame.issues };
+  }
+  const fit = fitFrameToPhysicalSize({
+    widthM: input.widthM,
+    heightM: input.heightM,
+    cols: frame.cols,
+    rows: frame.rows,
+    metersPerCell: typeof before.meters_per_cell === 'number' ? before.meters_per_cell : null,
+  });
+  if (!fit.ok) {
+    return { ok: false, status: 'refused', mutation: null, fit, issues: fit.issues.map((item) => spatialIssue(item, ctx)) };
+  }
+  const currentMpp = typeof before.meters_per_cell === 'number' && Number.isFinite(before.meters_per_cell) ? before.meters_per_cell : null;
+  const mppChanged = fit.metersPerCell !== null && (currentMpp === null || Math.abs(currentMpp - fit.metersPerCell) > 1e-12);
+  if (!fit.changed && !mppChanged) {
+    return { ok: true, status: 'retained', mutation: null, fit, issues: [] };
+  }
+  if (Number(before.scale_locked ?? 0) === 1) {
+    return {
+      ok: false, status: 'refused', mutation: null, fit,
+      issues: [spatialIssue({
+        code: 'FRAME_SCALE_LOCKED_ASPECT_CONFLICT',
+        path: '$.maps.scale_locked',
+        message: `空间尺寸 ${input.widthM}×${input.heightM} m 与锁定幅面 ${frame.cols}×${frame.rows}（mpp=${currentMpp ?? 'null'}）不符：不修改比例尺锁、也不拉伸确认幅面，请作者显式解锁或校正尺寸`,
+        severity: 'warning',
+      }, ctx)],
+    };
+  }
+  if (String(before.scale_quality ?? '') === 'confirmed') {
+    return {
+      ok: false, status: 'refused', mutation: null, fit,
+      issues: [spatialIssue({
+        code: 'FRAME_CONFIRMED_ASPECT_CONFLICT',
+        path: '$.maps.scale_quality',
+        message: `空间尺寸 ${input.widthM}×${input.heightM} m 与已确认幅面 ${frame.cols}×${frame.rows}（mpp=${currentMpp ?? 'null'}）不符：确认比例尺不按模板量化，保留原事实并列冲突`,
+        severity: 'warning',
+      }, ctx)],
+    };
+  }
+  const nextFrame: Record<string, unknown> = {
+    ...frame.frame,
+    cols: fit.cols,
+    rows: fit.rows,
+    reference_width_cells: fit.cols,
+    reference_height_cells: fit.rows,
+  };
+  const after: Record<string, unknown> = {
+    ...before,
+    frame_json: nextFrame,
+    meters_per_cell: fit.metersPerCell,
+    scale_quality: 'estimated',
+    scale_basis_json: {
+      source: 'space-canonical',
+      locationId: input.source?.referenceId ?? null,
+      widthM: input.widthM,
+      heightM: input.heightM,
+      basis: input.source?.kind ?? 'space-size',
+    },
+    calibration_rev: Number(before.calibration_rev ?? 0) + 1,
+    row_rev: Number(before.row_rev ?? 1) + 1,
+    updated_turn_id: input.turnId,
+  };
+  return {
+    ok: true,
+    status: 'aligned',
+    fit,
+    issues: [],
+    mutation: {
+      table: 'maps',
+      rowId: mapId,
+      before: { ...before },
+      after,
+      sourceOpIds: [input.operationId],
+      basis: { kind: 'space-canonical', locationId: input.source?.referenceId ?? null, widthM: input.widthM, heightM: input.heightM },
+    },
+  };
+}
+
+const asStringId = (value: unknown): string | null => (typeof value === 'string' && value ? value : null);
+
 export type SpatialFrameRead = {
   ok: boolean;
   frame: Record<string, unknown>;
@@ -303,23 +515,24 @@ export function ensureInitialSpatialFrame(input: InitialFrameInput): InitialFram
   if (prepared.ok && prepared.mutation) {
     const after=prepared.mutation.after as Record<string,unknown>;
     const frame=normalizeFrame(after.frame_json);
-    // The kit's fixed 100-column estimate can produce fractional rows (12×8 m
-    // becomes 100×66.666…). Our SQL frame contract requires integers. Preserve
-    // the old grid when its aspect agrees; otherwise use an equivalent rational
-    // grid. Never round a row count and thereby change the physical dimensions.
-    if (!Number.isInteger(frame.rows) && input.kind!=='overview' && typeof input.widthM==='number' && typeof input.heightM==='number') {
+    // The kit's fixed 100-column estimate can produce fractional rows (12x8 m
+    // becomes 100x66.666...). Our SQL frame contract requires integers, and the
+    // two axes must share one meters_per_cell. P12/R03 19.3 factored that rule
+    // into fitFrameToPhysicalSize so there is exactly one implementation.
+    if ((input.kind!=='overview'||Number(after.meters_per_cell)>0) && typeof input.widthM==='number' && typeof input.heightM==='number'
+      && Number.isFinite(input.widthM) && Number.isFinite(input.heightM) && input.widthM>0 && input.heightM>0) {
       const original=normalizeSqlMapFrame(input.mapRow.frame_json);
-      const mpp=original.ok?input.widthM/original.cols!:Number.NaN;
-      if(original.ok&&Math.abs(original.rows!*mpp-input.heightM)<1e-8){
-        frame.cols=original.cols;frame.rows=original.rows;after.meters_per_cell=mpp;
-      }else{
-        const w=Math.round(input.widthM*1e6),h=Math.round(input.heightM*1e6);
-        const gcd=(a:number,b:number):number=>b?gcd(b,a%b):a;
-        if(!Number.isSafeInteger(w)||!Number.isSafeInteger(h)||w<=0||h<=0)return {ok:false,status:'failed',mutation:null,issues:[spatialIssue({code:'INITIAL_FRAME_RANGE_INVALID',path:'$.frame_json',message:'尺寸无法转换为一致的整数格幅面'},ctx)]};
-        const factor=gcd(w,h),multiple=Math.max(1,Math.ceil(100/(w/factor)));
-        frame.cols=w/factor*multiple;frame.rows=h/factor*multiple;after.meters_per_cell=input.widthM/Number(frame.cols);
-        if(Math.abs(Number(frame.rows)*Number(after.meters_per_cell)-input.heightM)>1e-8)return {ok:false,status:'failed',mutation:null,issues:[spatialIssue({code:'INITIAL_FRAME_RANGE_INVALID',path:'$.frame_json',message:'整数格幅面无法保持给定尺寸'},ctx)]};
+      const fit=fitFrameToPhysicalSize({
+        widthM:input.widthM,
+        heightM:input.heightM,
+        cols:original.ok?original.cols:null,
+        rows:original.ok?original.rows:null,
+        metersPerCell:null,
+      });
+      if(!fit.ok||fit.cols===null||fit.rows===null||fit.metersPerCell===null){
+        return { ok:false, status:'failed', mutation:null, issues:[...fit.issues, spatialIssue({code:'INITIAL_FRAME_RANGE_INVALID',path:'$.frame_json',message:'尺寸无法转换为一致的整数格幅面'},ctx)] };
       }
+      frame.cols=fit.cols;frame.rows=fit.rows;after.meters_per_cell=fit.metersPerCell;
     }
     // Old aliases must describe the same frame as cols/rows.
     frame.reference_width_cells=frame.cols;frame.reference_height_cells=frame.rows;
@@ -331,6 +544,7 @@ export function ensureInitialSpatialFrame(input: InitialFrameInput): InitialFram
     typeof input.widthM !== 'number' || typeof input.heightM !== 'number' ||
     !Number.isFinite(input.widthM) || !Number.isFinite(input.heightM) ||
     issues.some((item) => item.code === 'INITIAL_EXTENT_REQUIRED');
+  if (prepared.ok) return { ok: true, status: 'retained', mutation: null, issues };
   if (missing) {
     return {
       ok: true,

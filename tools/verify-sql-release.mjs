@@ -34,13 +34,20 @@ try {
     let saves = 0;
     const session = await mod.openSqlSession({ chatUid: 'release_verification', chatMetadata: metadata,
       saveSession: async () => { saves++; return true; } });
-    const tables = mod.userTableNames(session.repo.db);
+    const tables = mod.userTableNames(session.repo.db).slice().sort();
     const fk = mod.queryBound(session.repo.db, 'PRAGMA foreign_keys')[0].foreign_keys;
     const size = (await session.repo.exportCurrent()).length;
     await mod.closeSqlSession(session);
-    return { tables: tables.length, fk, size, saves, metadataUnchanged: Object.keys(metadata).length === 0 };
+    return { tables: tables.length, tableNames: tables,
+      declaredTables: Object.keys(mod.ATLAS_TABLE_COLUMNS).slice().sort(),
+      declaredTableCount: mod.USER_TABLE_COUNT, schemaVersion: mod.ATLAS_SCHEMA_VERSION,
+      fk, size, saves, metadataUnchanged: Object.keys(metadata).length === 0 };
   });
-  assert.equal(main.tables, 20); assert.equal(main.fk, 1); assert.ok(main.size > 1000);
+  // 表数不写死魔数：与 schema 自己声明的清单**逐名**比对 —— 少建一张、或建出未声明的表都会红。
+  assert.deepEqual(main.tableNames, main.declaredTables, 'release 建出的用户表必须与 schema 声明的清单逐名一致');
+  assert.equal(main.tables, main.declaredTableCount, 'userTableNames 数量必须等于 schema 导出的 USER_TABLE_COUNT');
+  assert.equal(main.schemaVersion, 3, '发布产物必须建出当前 schema 版本（改 schema 版本时同步本断言）');
+  assert.equal(main.fk, 1); assert.ok(main.size > 1000);
   assert.equal(main.saves, 0); assert.equal(main.metadataUnchanged, true);
   const worker = await page.evaluate(async () => {
     const worker = new Worker('/dist/atlas-sql-worker.js');
@@ -135,9 +142,16 @@ try {
   assert.equal(modelTurn.tableWritten, false); assert.equal(modelTurn.mixedFormat, false);
   const automaticChat = await startupPage.evaluate(async () => {
     const { core } = window.releaseStartup, host = window.releaseStartupHost;
-    let calls = 0;
-    window.TavernHelper.generateRaw = async () => {
+    let calls = 0, layoutCalls = 0, retryCalls = 0;
+    // 一次自动推进的模型请求**不止一次**：决策批 + 建设批 + 布局批（P09B/P12 起的既定契约，
+    // 单测 tests/atlas-acceptance-regression.test.mjs 按 batchId 逐批断言）。
+    // 因此这里不写死总次数，只按**可靠标记**统计：布局批（提示词含「本图：」）与
+    // 布局格式重试（提示词含「【布局格式纠错】」）——后者的出现意味着靠重试才拿到合法 JSON。
+    window.TavernHelper.generateRaw = async input => {
       calls++;
+      const text = (input?.ordered_prompts ?? []).map(part => String(part?.content ?? '')).join('\n');
+      if (text.includes('本图：')) layoutCalls++;
+      if (text.includes('【布局格式纠错】')) retryCalls++;
       return '{"op":"location.upsert","ref":"new:auto_archive","data":{"name":"自动聊天档案室","kind":"room"}}';
     };
     host.name1 = '发布用户主角';
@@ -158,15 +172,21 @@ try {
     await core.handleEvent('MESSAGE_DELETED', 1);
     for (let n = 0; n < 150 && core.getState().binding?.lastCommittedMessageId === '1'; n++) await new Promise(resolve => setTimeout(resolve, 20));
     const rolledBack = core.getState();
-    return { prepared, prepareSaves, commitSaves, calls,
+    return { prepared, prepareSaves, commitSaves, calls, layoutCalls, retryCalls,
       commitStatus: committed.receipts[0]?.status, floor: committed.binding?.lastCommittedMessageId,
       rollbackFloor: rolledBack.binding?.lastCommittedMessageId,
       rollbackSaves: window.releaseStartupSaves() - before - commitSaves,
       tableWritten: Boolean(host.chatMetadata.atlas?.tables), error: rolledBack.lastError };
   });
   assert.equal(automaticChat.prepared, true, JSON.stringify(automaticChat));
-  assert.equal(automaticChat.prepareSaves, 0); assert.equal(automaticChat.commitSaves, 1);
-  assert.equal(automaticChat.calls, 1); assert.equal(automaticChat.commitStatus, 'committed');
+  assert.equal(automaticChat.prepareSaves, 0);
+  // 多批模型请求（决策/建设/布局）仍然只允许**一次保存** —— 这是本段真正要守的不变量。
+  assert.equal(automaticChat.commitSaves, 1, `多批请求必须只产生一次保存：${JSON.stringify(automaticChat)}`);
+  assert.ok(automaticChat.calls >= 1, '自动推进必须真的发出模型请求');
+  assert.ok(automaticChat.calls <= 8, `请求次数应在设计预算内（不写死总数，只设上限防跑飞）：${automaticChat.calls}`);
+  assert.ok(automaticChat.layoutCalls >= 1, `新建房间应带出布局批：${JSON.stringify(automaticChat)}`);
+  assert.equal(automaticChat.retryCalls, 0, `不得靠布局格式重试凑通过：${JSON.stringify(automaticChat)}`);
+  assert.equal(automaticChat.commitStatus, 'committed');
   assert.equal(automaticChat.floor, '1'); assert.notEqual(automaticChat.rollbackFloor, '1');
   assert.equal(automaticChat.rollbackSaves, 1); assert.equal(automaticChat.tableWritten, false);
   console.log(JSON.stringify({ passed: true, main, worker,

@@ -13,10 +13,23 @@
   function floor(spec, previous = null) {
     const problems = [];
     const bounds = { x:0, y:0, w:spec.width, h:spec.height };
-    if (!finitePositive(spec.width) || !finitePositive(spec.height) || !finitePositive(spec.corridorWidth) || spec.corridorWidth >= spec.height || !validIds(spec.rooms) || spec.rooms.some(r => !finitePositive(r.w) || !finitePositive(r.h) || !['north','south'].includes(r.side))) {
+    if (!finitePositive(spec.width) || !finitePositive(spec.height) || !finitePositive(spec.corridorWidth) || !spec.singleRoom&&spec.corridorWidth >= spec.height || !validIds(spec.rooms) || spec.rooms.some(r => !finitePositive(r.w) || !finitePositive(r.h) || !['north','south'].includes(r.side))) {
       return {ok:false,issues:[issue(spec.id,'INPUT_INVALID')],kept:previous?clone(previous):null};
     }
     const corridor = { id:'corridor', x:0, y:(bounds.h-spec.corridorWidth)/2, w:bounds.w, h:spec.corridorWidth };
+    // P11/R03 §18.1：命名走廊绑定。几何**永远**由程序算（模型只给地点身份，绝不给坐标）；
+    // 实体身份可选，没有实体时仍是纯辅助通道（绝不为它新建一个地点）。
+    const corridorEntityId = typeof spec.corridorEntityId === 'string' && spec.corridorEntityId ? spec.corridorEntityId : null;
+    if (corridorEntityId) {
+      corridor.entityId = corridorEntityId;
+      if (typeof spec.corridorName === 'string' && spec.corridorName) corridor.name = spec.corridorName;
+    }
+    const lock = spec.corridorLock && [spec.corridorLock.x,spec.corridorLock.y,spec.corridorLock.w,spec.corridorLock.h].every(n=>typeof n==='number'&&Number.isFinite(n)) ? spec.corridorLock : null;
+    // §18.2 第 10 条：已确认的走廊几何与新通道位置冲突 → 拒绝重建并保留旧场景，绝不删锁后重排。
+    if (lock && !(Math.abs(lock.x-corridor.x)<1e-8 && Math.abs(lock.y-corridor.y)<1e-8 && Math.abs(lock.w-corridor.w)<1e-8 && Math.abs(lock.h-corridor.h)<1e-8)) {
+      return { ok:false, issues:[issue(corridorEntityId||'corridor','CORRIDOR_LOCK_CONFLICT')], kept:previous?clone(previous):null };
+    }
+    if (lock) corridor.quality = 'confirmed';
     const placed = [], old = new Map((previous?.rooms || []).map(r=>[r.id,r]));
     const candidate = r => ({...r, y:r.side==='north'?corridor.y-r.h:corridor.y+corridor.h});
     const admissible = r => contains({x:0.5,y:0.5,w:bounds.w-1,h:bounds.h-1},r) && !intersects(r,corridor) && !placed.some(p=>intersects(r,p)) && Math.abs((r.side==='north'?r.y+r.h:r.y)-(r.side==='north'?corridor.y:corridor.y+corridor.h)) < 1e-8;
@@ -29,6 +42,8 @@
       const r=specs[0],x=r.locked?.x??(bounds.w-r.w)/2,y=r.locked?.y??(bounds.h-r.h)/2;
       // A single room owns the whole canvas; its outer walls need no corridor margin.
       if(!contains(bounds,{x,y,w:r.w,h:r.h}))return {ok:false,issues:[issue(r.id,'ROOM_NO_SPACE')]};
+      // 单间房没有中央通道可走：绑定了命名走廊却只剩一间房是矛盾的，明确拒绝而不是悄悄把走廊压成 0×0。
+      if(corridorEntityId||lock)return {ok:false,issues:[issue(corridorEntityId||'corridor','CORRIDOR_LOCK_CONFLICT')],kept:previous?clone(previous):null};
       save(r,x,y,r.locked?'confirmed':'layout');corridor.x=0;corridor.y=y+r.h;corridor.w=0;corridor.h=0;
     }
     // Confirmed/manual geometry is reserved first. A contradiction is reported, never moved silently.
@@ -82,7 +97,9 @@
       }
     }
     for(const v of [...(spec.furniture||[]),...(spec.actors||[])]) if(!rooms.some(r=>r.id===v.roomId)) problems.push(issue(v.id,'ROOM_REF_UNKNOWN'));
-    return {ok:true,id:spec.id,name:spec.name,kind:'floor',bounds,corridor,rooms,doors,furniture,pins,edges:doors.map(d=>({from:d.roomId,to:'corridor',via:d.id})),issues:problems};
+    // §18.2 第 5 条：门的几何连接仍用程序走廊；绑定了真实走廊时另给**语义端点**，
+    // 几何（to:'corridor'）保持原样，旧路径拓扑与渲染一个字节都不变。
+    return {ok:true,id:spec.id,name:spec.name,kind:'floor',bounds,corridor,rooms,doors,furniture,pins,edges:doors.map(d=>({from:d.roomId,to:'corridor',via:d.id,...(corridorEntityId?{toEntityId:corridorEntityId}:{})})),issues:problems};
   }
   function city(spec){
     const cells={nw:[0,0],north:[1,0],ne:[2,0],west:[0,1],center:[1,1],east:[2,1],sw:[0,2],south:[1,2],se:[2,2]};

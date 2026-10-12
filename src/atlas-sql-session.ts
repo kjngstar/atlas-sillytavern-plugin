@@ -733,7 +733,8 @@ export async function runSqlRetry(session: SqlSession, input: Omit<FailedGroupRe
         }
         receipt.issues = [...receipt.issues.filter(i => !i.opId || !attemptedOps.has(i.opId)),
           ...result.groups.filter(g => g.status === 'rejected' || g.status === 'blocked').flatMap(g => g.issues)];
-        receipt.worldChanged = receipt.worldChanged || result.groups.some(g => g.changedRows > 0);
+        // P09A/§15.4.13：只写程序记账（bookkeeping）组的变更不算世界变化，不推进 revision。
+        receipt.worldChanged = receipt.worldChanged || result.groups.some(g => g.changedRows > 0 && g.purpose !== 'bookkeeping');
         const branchStatus=queryBound(candidate.db,'SELECT simulation_status FROM branches WHERE id=?',[session.branchId])[0]?.simulation_status;
         receipt.status = branchStatus==='catching_up'||branchStatus==='blocked'||receipt.groups.some(g => g.status === 'rejected' || g.status === 'blocked') ? 'partial' : 'committed';
         runBound(candidate.db, 'UPDATE turns SET receipt_json=?, status=? WHERE id=?',

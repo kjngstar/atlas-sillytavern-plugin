@@ -17,7 +17,7 @@ function fixture() {
   const calls = [];
   const port = createSqlModelPort({ readSettings: async () => settings, fetchFn: async (url, init) => {
     calls.push({ url, body: JSON.parse(init.body) });
-    return new Response(JSON.stringify({ choices: [{ message: { content: '{"op":"location.upsert","ref":"new:library","data":{"name":"图书馆"}}' } }] }), {
+    return new Response(JSON.stringify({ choices: [{ finish_reason:'stop', message: { content: '{"op":"location.upsert","ref":"new:library","data":{"name":"图书馆"}}' } }] }), {
       status: 200, headers: { 'Content-Type': 'application/json' },
     });
   } });
@@ -39,14 +39,18 @@ test('Q03: SQL stage reuses the selected API connection and sends only semantic 
   const f = fixture();
   const result = await f.port.request(request());
   assert.equal(result.httpStatus, 200);
+  assert.equal(result.finishReason, 'stop', '供应商停止原因必须传递到 SQL 请求日志，不能固定丢成 null');
   assert.equal(f.calls.length, 1);
   assert.equal(f.calls[0].body.model, 'fixture-model');
   assert.equal(f.calls[0].body.temperature, 0.4);
   assert.equal(f.calls[0].body.max_tokens, 9000, '保存的输出上限不得被阶段默认 4096 隐式压低');
   assert.ok(f.calls[0].body.messages[0].content.includes('character.upsert'));
   assert.equal(JSON.stringify(f.calls[0].body.messages).includes('<atlasEdit>'), false);
-  assert.deepEqual(f.calls[0].body.messages.slice(1, 7), DEFAULT_SQL_PROMPT_SEGMENTS.map(({role,content}) => ({role,content})));
-  assert.deepEqual(settingsViewV2(f.settings).builtInSqlPrompt.segments.map(({role,content}) => ({role,content})), f.calls[0].body.messages.slice(1,7));
+  // §21.5 分层：0 = 固定协议；紧随其后的策略段数由内置预设自身决定（策略加段不该让断言失真）。
+  const policyEnd = 1 + DEFAULT_SQL_PROMPT_SEGMENTS.length;
+  assert.deepEqual(f.calls[0].body.messages.slice(1, policyEnd), DEFAULT_SQL_PROMPT_SEGMENTS.map(({role,content}) => ({role,content})));
+  assert.deepEqual(settingsViewV2(f.settings).builtInSqlPrompt.segments.map(({role,content}) => ({role,content})), f.calls[0].body.messages.slice(1,policyEnd));
+  assert.ok(f.calls[0].body.messages.length > policyEnd, '策略层之后必须还有程序填写的任务上下文段');
 });
 
 test('Q03: SQL repair also honors a saved output limit above the stage default', async () => {
@@ -67,12 +71,16 @@ test('Q03: explicit SQL draft preserves the original and copied entries, only di
   assert.equal(built.ok, true); assert.equal(built.settings.activePromptPresetId, 'old');
   assert.equal(JSON.stringify(built.settings.promptPresets[0]), before);
   const draft = built.settings.promptPresets[1];
-  assert.equal(draft.segments[6].content, old.segments[0].content); assert.equal(draft.segments[6].enabled, false);
-  assert.deepEqual(draft.segments[7], old.segments[1]);
+  // 默认策略段数由内置预设自身决定：紧跟其后的才是迁移过来的原条目。
+  const defaults = DEFAULT_SQL_PROMPT_SEGMENTS.length;
+  assert.equal(draft.segments[defaults].content, old.segments[0].content); assert.equal(draft.segments[defaults].enabled, false);
+  assert.deepEqual(draft.segments[defaults + 1], old.segments[1]);
   Object.assign(f.settings, built.settings, { activePromptPresetId: draft.id });
   await f.port.request(request()); assert.equal(f.calls.length, 1);
   assert.equal(f.calls[0].body.messages.some(m => m.content.includes('<atlasEdit>')), false);
-  assert.equal(f.calls[0].body.messages[7].role, 'assistant');
+  // 分层：固定协议(0) → 用户策略(1..defaults+1) → 任务上下文；被保留的自定义段是策略层最后一段。
+  assert.equal(f.calls[0].body.messages[1 + defaults].role, 'assistant');
+  assert.equal(f.calls[0].body.messages[1 + defaults].content, old.segments[1].content);
 });
 
 test('Q03: full prompt entry capacity cannot silently truncate a compatibility draft', () => {

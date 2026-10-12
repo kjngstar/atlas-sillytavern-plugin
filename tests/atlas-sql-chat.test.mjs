@@ -5,9 +5,34 @@ import { createAtlasServerCore } from './legacy/atlas-server-fixture.ts';
 import { createBrowserSqlHost } from '../src/atlas-browser-sql-host.ts';
 import { loadAtlasSqlRuntime } from '../src/atlas-sql-session.ts';
 import { queryBound } from '../src/atlas-db-runtime.ts';
+import { referenceReceiptReport } from '../ui/atlas-reference-data.mjs';
 
 const room = '{"op":"location.upsert","ref":"new:library","data":{"name":"图书馆","kind":"room"}}';
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+test('地图回执经过真实 UI 过滤及 SQL 刷新后保留三层报告证据，仍剥除正文与密钥',async()=>{
+ const f=fixture({model:async req=>req.phase==='geography'?'{"op":"noop"}':room});
+ try{
+  await f.ui.refresh();
+  f.ui.recordExternalReceipt({receiptId:'map-structured',status:'committed',branchId:'main',previousTime:0,currentTime:0,currentLocationId:null,triggeredNpcIds:[],adoptedEventIds:[],summary:'地图已保存',retryable:false},'chat-auto',{
+   operation:'build',coreSaved:true,sceneSaved:true,build:{sceneSummary:{ready:1,partial:0,missing:0},queue:{pendingTargets:2,hiddenIds:['secret']}},requestBody:'private',apiKey:'secret'});
+  const detail=f.ui.getState().receipts[0].detail;
+  assert.equal(referenceReceiptReport(detail)?.layout.state,'ready');
+  assert.equal(referenceReceiptReport(detail)?.gaps.pendingTargets,2);
+  assert.equal(detail.sceneSaved,true);assert.equal(detail.requestBody,undefined);assert.equal(detail.apiKey,undefined);assert.equal(detail.build.queue.hiddenIds,undefined);
+  await f.prepare();await f.end();
+  const s=await f.provider.session('chat-auto');
+  const map=queryBound(s.repo.db,'SELECT id FROM maps LIMIT 1',[])[0];
+  const result=await f.server.handle('POST','/sql/chat/map/layout',{chatUid:'chat-auto',chatId:'chat-auto',requestId:'no-new-layout',mapId:map.id},{local:true});
+  assert.equal(result.status,200);
+  const calls=f.calls(),saves=f.saves();
+  f.restartUi();await f.ui.refresh();
+  const restored=f.ui.getState().receipts[0].detail;
+  assert.equal(restored.operation,'layout');assert.equal(restored.sceneSaved,false);
+  assert.equal(referenceReceiptReport(restored).layout.state,'failed');
+  assert.equal(f.calls(),calls);assert.equal(f.saves(),saves);
+ }finally{await f.close();}
+});
 
 test('failed external receipts retain SQL transport metadata while stripping bodies and keys',async()=>{
  const f=fixture({model:async()=>'{"op":"noop"}'});
