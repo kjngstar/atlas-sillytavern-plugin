@@ -178,3 +178,25 @@ export function allocateTargets(input: {
     .slice(0, UNIT_TARGET_LIMIT);
   return { targetIds, sourceChunkKeys: [], existingUnitId: null };
 }
+
+/** Select existing units and a bounded fresh allocation in the same rotation. */
+export function planNextAllocation(rows: readonly ProgressRow[], pendingTargetIds: readonly string[], schedulerSeq: number): {
+  chosen: ScheduledUnit | null; allocation: UnitAllocation; freshCount: number; retryCount: number;
+} {
+  const existing = schedulableUnits(rows);
+  const fresh = allocateTargets({ pendingTargetIds, existingUnits: existing, chosen: null });
+  const virtual: ScheduledUnit | null = fresh.targetIds.length ? {
+    unitId: 'new:allocation', status: 'pending', lastServedSeq: 0,
+    targetIds: fresh.targetIds, sourceChunkKeys: [], inputSignature: '', catalogueHash: '', attemptCount: 0, bindings: {},
+  } : null;
+  const pending = existing.filter(unit => unit.status === 'pending');
+  if (virtual) pending.push(virtual);
+  const retry = existing.filter(unit => unit.status === 'retry');
+  const picked = rotationOrder(pending, retry, schedulerSeq)[0] ?? null;
+  const chosen = picked === virtual ? null : picked;
+  return {
+    chosen,
+    allocation: chosen ? allocateTargets({ pendingTargetIds, existingUnits: existing, chosen }) : fresh,
+    freshCount: pending.length, retryCount: retry.length,
+  };
+}

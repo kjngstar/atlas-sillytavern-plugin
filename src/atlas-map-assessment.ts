@@ -268,7 +268,10 @@ export function assessMapCompleteness(input: MapAssessmentInput): MapAssessmentV
   const layoutContext = PLAIN(frame.atlasLayoutContext) ? (frame.atlasLayoutContext as Row) : null;
   const storedHash = input.storedLayoutHash ?? (layoutContext ? TEXT(layoutContext.hash) : '');
   const currentHash = input.currentLayoutHash ?? null;
-  const hashMatches = storedHash === '' || currentHash === null || storedHash === currentHash;
+  const verificationRequested = Object.hasOwn(input, 'currentLayoutHash');
+  const hashMatches = verificationRequested
+    ? Boolean(storedHash && currentHash && storedHash === currentHash)
+    : storedHash === '' || currentHash === null || storedHash === currentHash;
   if (storedHash !== '' && currentHash !== null && storedHash !== currentHash) {
     semanticIssues.push(issue('MAP_INPUTS_CHANGED', `${path}.frame_json.atlasLayoutContext`, '本图的结构输入已变化：场景仍是上一次的，标记为未对齐', 'warning'));
   }
@@ -296,7 +299,8 @@ export function assessMapCompleteness(input: MapAssessmentInput): MapAssessmentV
     matchesCurrentInputs,
     completeness,
     metricQuality,
-    semanticState: !sceneValid ? 'unknown' : semanticIssues.length > 0 ? 'issues' : 'consistent',
+    semanticState: !sceneValid ? 'unknown' : semanticIssues.length > 0 ? 'issues'
+      : verificationRequested && (!storedHash || !currentHash) ? 'unknown' : 'consistent',
     expectedIds,
     renderedIds,
     missingIds,

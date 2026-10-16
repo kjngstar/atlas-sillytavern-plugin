@@ -33,6 +33,8 @@ export type CompileContext = {
   tables: TableReadPort;
   /** Valid item creations already compiled in this batch; never writes the database. */
   newItemRows?: Map<string, Record<string, unknown>>;
+  /** Valid location facts from this batch, including updates; never writes SQL. */
+  candidateLocations?: Map<string, { row: Record<string, unknown>; opIds: string[] }>;
   /** 程序分配 ID（确定性，不透明）。 */
   makeId: (kind: string, opId: string, alias: string) => string;
   /** 当前分支 id（= anchor.branchId）。 */

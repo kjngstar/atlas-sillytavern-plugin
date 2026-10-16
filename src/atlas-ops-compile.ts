@@ -150,6 +150,7 @@ export function compileOperations(input: CompileOperationsInput): CompiledOperat
     sources: input.sources,
     tables: input.tables,
     newItemRows: new Map(),
+    candidateLocations: new Map(),
     makeId,
     branchId: input.anchor.branchId,
     // 审计列按「本次正在创建的楼」记账（见 CompileContext.turnId）。
@@ -184,7 +185,10 @@ export function compileOperations(input: CompileOperationsInput): CompiledOperat
 
   // 步骤 3：第二遍解析引用与最少参数，构建候选变更。
   const results: Array<{ opId: string; result: CompileResult }> = [];
-  for (const op of normalized) {
+  // Route geometry depends on valid endpoint facts, not merely declared IDs.
+  // Compile non-routes first while retaining original op IDs and response order.
+  const compilationOrder = [...normalized.filter(op => op.value.op !== 'route.propose'), ...normalized.filter(op => op.value.op === 'route.propose')];
+  for (const op of compilationOrder) {
     const minimum = validateMinimum(op.value, input.phase, { opId: op.opId, line: op.line });
     if (!minimum.ok) {
       issues.push(minimum.issue);
@@ -230,6 +234,10 @@ export function compileOperations(input: CompileOperationsInput): CompiledOperat
     issues.push(...compiled.issues);
     if (!compiled.issues.some(i => i.severity === 'error')) {
       for (const mutation of compiled.mutations) {
+        if (mutation.table === 'locations' && mutation.after) {
+          const prior = ctx.candidateLocations!.get(mutation.rowId);
+          ctx.candidateLocations!.set(mutation.rowId, { row: mutation.after, opIds: [...(prior?.opIds ?? []), op.opId] });
+        }
         if (mutation.table === 'items' && mutation.after && (mutation.before === null || ctx.newItemRows!.has(mutation.rowId))) {
           ctx.newItemRows!.set(mutation.rowId, mutation.after);
         }
@@ -237,6 +245,8 @@ export function compileOperations(input: CompileOperationsInput): CompiledOperat
     }
     results.push({ opId: op.opId, result: { ...compiled, issues: compiled.issues } });
   }
+  const responseOrder = new Map(normalized.map((op, index) => [op.opId, index]));
+  results.sort((a, b) => (responseOrder.get(a.opId) ?? 0) - (responseOrder.get(b.opId) ?? 0));
 
   // A declared new ID is a promise, not a saved entity. Record the producer of
   // every actual foreign-key value before grouping. A rejected declaration must

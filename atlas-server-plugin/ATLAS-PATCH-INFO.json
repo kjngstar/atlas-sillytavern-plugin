@@ -1,0 +1,79 @@
+{
+  "patchId": "atlas-0.9.89-rc.1-two-stage-20261016",
+  "baseVersion": "0.9.88",
+  "baseCommit": "b37054e168ca85fbf4b5592f2789b20bbc526def",
+  "baseHotfixId": "atlas-0.9.88-hotfix-20261014",
+  "schemaVersion": 3,
+  "fixes": [
+    "source-tail-continuation",
+    "same-batch-route-endpoints",
+    "explicit-topology-only-routes",
+    "fair-construction-scheduling",
+    "scene-input-alignment",
+    "two-stage-layout-evidence-extraction",
+    "verified-map-specific-layout-context",
+    "city-container-district-fallback",
+    "bounded-spatial-transport-retry",
+    "layout-length-response-rejection",
+    "source-segment-reference-extraction",
+    "per-map-evidence-failure-isolation",
+    "parent-child-initial-dimension-consistency",
+    "hierarchical-spatial-application",
+    "uncalibrated-frame-capacity-growth",
+    "distinct-route-reference-identities",
+    "layout-specific-json-prompt",
+    "spatial-retry-ui-state",
+    "pre-geometry-entity-reference-repair",
+    "registered-city-json-example"
+  ],
+  "validation": {
+    "fullTests": {
+      "tests": 2133,
+      "pass": 2133,
+      "fail": 0,
+      "skipped": 0
+    },
+    "typecheck": "passed",
+    "historicalFailureReplay": "parent-capacity-and-length-guards-passed",
+    "liveSingleMap": {
+      "injected502": true,
+      "modelRequests": 3,
+      "sceneSaved": true,
+      "nativeStatus": "committed",
+      "checks": 30,
+      "failed": [
+        "hover-keeps-anchors"
+      ],
+      "pageErrors": 0,
+      "build": "first-repair-build"
+    },
+    "liveFullTurn": {
+      "modelRequests": 13,
+      "sharedExtractionRequests": 1,
+      "layoutRequests": 9,
+      "registeredMaps": 9,
+      "scenesSaved": 9,
+      "sceneIssues": 0,
+      "nativeStatus": "partial",
+      "remainingStage": "observe-and-construction",
+      "checks": 30,
+      "failed": [
+        "live-turn-committed-a-new-outcome"
+      ],
+      "pageErrors": 0,
+      "integrity": "ok",
+      "foreignKeyErrors": 0
+    },
+    "liveFeatureBuild": "final repair logic before version-only synchronization from 0.9.88 to 0.9.89",
+    "releaseGates": {
+      "tests": 127,
+      "pass": 127,
+      "fail": 0,
+      "version": "0.9.89"
+    }
+  },
+  "baseHotfixSourcePatchSha256": "948ff80c6f3163994a22a7f5b418b87f71837aaef4d6191549a43f00be2208d1",
+  "releaseVersion": "0.9.89-rc.1",
+  "manifestVersion": "0.9.89",
+  "releaseChannel": "candidate"
+}

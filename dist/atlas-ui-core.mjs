@@ -3532,6 +3532,41 @@ var init_atlas_spatial_flow_views = __esm({
   }
 });
 
+// src/atlas-sql-task-refs.ts
+var init_atlas_sql_task_refs = __esm({
+  "src/atlas-sql-task-refs.ts"() {
+    "use strict";
+    init_atlas_runtime_limits();
+    init_atlas_hash();
+  }
+});
+
+// src/atlas-layout-signature.ts
+var init_atlas_layout_signature = __esm({
+  "src/atlas-layout-signature.ts"() {
+    "use strict";
+    init_atlas_hash();
+  }
+});
+
+// src/atlas-sql-layout-task.ts
+var init_atlas_sql_layout_task = __esm({
+  "src/atlas-sql-layout-task.ts"() {
+    "use strict";
+    init_atlas_db_readport();
+    init_atlas_sql_task_refs();
+    init_atlas_ops_prompts();
+    init_atlas_spatial_frame();
+    init_atlas_runtime_limits();
+    init_atlas_hash();
+    init_atlas_layout_signature();
+    init_atlas_world_contract();
+    init_atlas_prompt_layers();
+    init_atlas_space_canonical();
+    init_atlas_spatial_profile();
+  }
+});
+
 // src/atlas-map-assessment.ts
 var DECORATIVE_SCENE_KEYS;
 var init_atlas_map_assessment = __esm({
@@ -3550,6 +3585,8 @@ var init_atlas_spatial_views = __esm({
     init_atlas_db_runtime();
     init_atlas_db_views();
     init_atlas_sql_visibility();
+    init_atlas_db_readport();
+    init_atlas_sql_layout_task();
     init_atlas_map_assessment();
     init_atlas_spatial_profile();
     init_atlas_spatial();
@@ -3563,15 +3600,6 @@ var init_atlas_task_views = __esm({
     init_atlas_db_runtime();
     init_atlas_sim_motion();
     init_atlas_sql_visibility();
-  }
-});
-
-// src/atlas-sql-task-refs.ts
-var init_atlas_sql_task_refs = __esm({
-  "src/atlas-sql-task-refs.ts"() {
-    "use strict";
-    init_atlas_runtime_limits();
-    init_atlas_hash();
   }
 });
 
@@ -3633,30 +3661,12 @@ var init_atlas_construction_scheduler = __esm({
   }
 });
 
-// src/atlas-layout-signature.ts
-var init_atlas_layout_signature = __esm({
-  "src/atlas-layout-signature.ts"() {
+// src/atlas-layout-evidence.ts
+var init_atlas_layout_evidence = __esm({
+  "src/atlas-layout-evidence.ts"() {
     "use strict";
-    init_atlas_hash();
-  }
-});
-
-// src/atlas-sql-layout-task.ts
-var init_atlas_sql_layout_task = __esm({
-  "src/atlas-sql-layout-task.ts"() {
-    "use strict";
-    init_atlas_db_readport();
-    init_atlas_sql_task_refs();
-    init_atlas_ops_prompts();
-    init_atlas_spatial_frame();
-    init_atlas_runtime_limits();
-    init_atlas_hash();
-    init_atlas_layout_signature();
     init_atlas_sql_world_sources();
-    init_atlas_world_contract();
-    init_atlas_prompt_layers();
-    init_atlas_space_canonical();
-    init_atlas_spatial_profile();
+    init_atlas_hash();
   }
 });
 
@@ -4341,6 +4351,7 @@ var init_atlas_spatial_candidate = __esm({
 var init_atlas_sql_world_dedupe = __esm({
   "src/atlas-sql-world-dedupe.ts"() {
     "use strict";
+    init_atlas_hash();
   }
 });
 
@@ -4350,6 +4361,7 @@ var init_atlas_db_repository = __esm({
     "use strict";
     init_atlas_sql_model_context();
     init_atlas_sql_layout_task();
+    init_atlas_layout_evidence();
     init_atlas_sql_legacy_import();
     init_atlas_db_commit();
     init_atlas_db_rollback();
@@ -6450,7 +6462,7 @@ function createSqlModelPort(options) {
     const messages = assemblePromptLayers({
       // §21.5 分层：固定协议（程序）→ 用户策略（作者，角色原样保留）→ 任务上下文（程序填充）。
       protocol: request.messages[0]?.content ?? "",
-      policy: custom.map((s) => ({ role: promptRole(s.role), content: substitutePromptPlaceholders(s.content, input) })),
+      policy: request.promptMode === "atlas-spatial-extract" ? [] : custom.map((s) => ({ role: promptRole(s.role), content: substitutePromptPlaceholders(s.content, input) })),
       task: request.messages.slice(1).map((m) => m.content)
     });
     return { preset, input, messages, promptSource: preset.systemPrompt?.trim() ? "connection" : preset.promptSegments?.length ? "preset" : "builtin" };
@@ -6482,7 +6494,7 @@ function createSqlModelPort(options) {
         fetchFn: options.fetchFn,
         now: options.now,
         messagesOverride: messages,
-        ...preset.toolCalling ? { responseTool: { name: "emit_atlas_operations", description: "Return the complete Atlas operations exactly once as JSONL in content. Follow the stage operation contract; do not write text outside this call.", parameters: { type: "object", properties: { content: { type: "string", description: "Complete stage reply, one validated operation JSON object per line" } }, required: ["content"], additionalProperties: false } } } : {},
+        ...preset.toolCalling && request.promptMode !== "atlas-spatial-extract" ? { responseTool: { name: "emit_atlas_operations", description: "Return the complete Atlas operations exactly once as JSONL in content. Follow the stage operation contract; do not write text outside this call.", parameters: { type: "object", properties: { content: { type: "string", description: "Complete stage reply, one validated operation JSON object per line" } }, required: ["content"], additionalProperties: false } } } : {},
         // M3-03A：API 内部兼容路由的第二次真实发送，也走同一局部预算。缺预算 port 时不传，
         // 由 api-client 按最严策略拒发并明确报错（绝不隐藏重试）。
         ...budget ? { initialTransport: () => transportBudgetPort(budget, phase, request.batchId).claim(), rescueTransport: () => transportBudgetPort(budget, phase, request.batchId).claim() } : {}
@@ -9644,7 +9656,7 @@ function createAtlasSettingsRoutes(deps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.88",
+      version: "0.9.89",
       protocolVersion: 1,
       time: now()
     });
@@ -10127,7 +10139,7 @@ function toLegacyTurnReceipt(receipt, options = {}) {
     triggeredNpcIds: [],
     adoptedEventIds: [],
     summary: `统一回执：成功组 ${businessSucceeded.length}，失败组 ${rejected.length}，时间 ${receipt.clockBeforeS}→${receipt.clockAfterS}${succeeded.length > businessSucceeded.length ? "；另保存建设进度" : ""}${issues.length ? `；${issues.length} 项问题` : ""}`,
-    retryable: rejected.length > 0 || receipt.status === "partial" && issues.some((i) => i.retryable && ["MODEL_REQUEST_FAILED", "MODEL_BUDGET_EXHAUSTED", "ACTOR_BUDGET_EXHAUSTED", "OUTCOME_DEFERRED"].includes(i.code)),
+    retryable: rejected.length > 0 || receipt.status === "partial" && issues.some((i) => i.retryable && ["MODEL_REQUEST_FAILED", "MODEL_BUDGET_EXHAUSTED", "ACTOR_BUDGET_EXHAUSTED", "OUTCOME_DEFERRED", "LAYOUT_MODEL_FAILED", "LAYOUT_BATCH_PENDING", "LAYOUT_NOT_GENERATED", "LAYOUT_DETAILS_DEFERRED", "WORLD_CONSTRUCTION_UNIT_RETRY"].includes(i.code)),
     // 新接口读这里（完整分组与问题，不再另造一份 snake_case 回执）。
     receipt: {
       turnId: receipt.turnId,
@@ -10268,6 +10280,7 @@ init_atlas_sql_world_completion();
 init_atlas_world_completion_ownership();
 init_atlas_construction_progress();
 init_atlas_construction_sources();
+init_atlas_sql_world_sources();
 init_atlas_construction_scheduler();
 
 // src/atlas-sql-chat.ts

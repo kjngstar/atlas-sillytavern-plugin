@@ -14,6 +14,23 @@
  */
 
 import type { Issue, ModelOperation } from './atlas-ops-contract.ts';
+import { stableHexHash } from './atlas-hash.ts';
+
+/** A route identifier names the edge, never its location endpoint. */
+export function separateConstructionRouteRefs(operations:readonly ModelOperation[],locationAliases:readonly string[]=[]):{operations:ModelOperation[];issues:Issue[]}{
+  const locations=new Set([...locationAliases,...operations.filter(op=>op.op==='location.upsert').map(op=>String(op.ref??''))]);
+  const used=new Set(operations.map(op=>String(op.ref??''))),renamed=new Map<string,string>(),issues:Issue[]=[];
+  const result=operations.map(op=>{
+    if(op.op!=='route.propose'||!op.ref?.startsWith('new:')||!locations.has(op.ref))return op;
+    const base=`new:route:${stableHexHash(JSON.stringify([op.ref,op.data?.from_ref,op.data?.to_ref])).slice(0,16)}`;
+    let ref=base,index=1;
+    while(used.has(ref))ref=`${base}:${index++}`;
+    used.add(ref);renamed.set(op.ref,ref);
+    issues.push({code:'WORLD_ROUTE_REF_ASSIGNED',path:'$.ref',message:`路线与地点共用 ${op.ref}，已为路线分配独立引用 ${ref}；端点地点引用保持原身份。`,severity:'warning',retryable:false});
+    return {...op,ref};
+  });
+  return {operations:result.map(op=>typeof op.data?.route_ref==='string'&&renamed.has(op.data.route_ref)?{...op,data:{...op.data,route_ref:renamed.get(op.data.route_ref)}}:op),issues};
+}
 
 export type DedupeWorldOpsInput = {
   operations: readonly ModelOperation[];
@@ -110,9 +127,10 @@ function indexExisting(rows: readonly Record<string, unknown>[]): ExistingEntry[
  * - 名称为空：拒绝。
  */
 export function dedupeWorldConstructionOps(input: DedupeWorldOpsInput): DedupeWorldOpResult {
-  const operations = Array.isArray(input?.operations) ? input.operations : [];
+  const separated=separateConstructionRouteRefs(Array.isArray(input?.operations)?input.operations:[]);
+  const operations = separated.operations;
   const existing = indexExisting(input?.existingLocations ?? []);
-  const issues: Issue[] = [];
+  const issues: Issue[] = [...separated.issues];
   const reusedIds: DedupeWorldOpResult['reusedIds'] = [];
   const rejectedRefs: string[] = [];
 

@@ -358,6 +358,8 @@ export type ModelBatchRequest = {
   repairOfBatchId?: string;
   /** Read-only material for editable prompt segments; never treat it as instructions. */
   sourceSnapshot?: SourceSnapshotEntry[];
+  /** Auxiliary spatial excerpt stage uses the selected connection without SQL operation-format policy. */
+  promptMode?: 'atlas-spatial-extract';
   promptInput?: import('./atlas-api-client.ts').AtlasWorldTurnPromptInput;
 };
 

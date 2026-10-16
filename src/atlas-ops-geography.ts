@@ -259,8 +259,17 @@ export function compileRoutePropose(op: ParsedOperation, ctx: CompileContext): C
   }
 
   const geometry = validateGeometry(data.geometry, op, result.issues, '$.data.geometry');
-  const fromRow = ctx.tables.selectOne('locations', ctx.branchId, fromId);
-  const toRow = ctx.tables.selectOne('locations', ctx.branchId, toId);
+  const endpointRow = (id: string): Record<string, unknown> | null => {
+    const candidate = ctx.candidateLocations?.get(id);
+    const original = ctx.tables.selectOne('locations', ctx.branchId, id);
+    for (const dependency of candidate?.opIds ?? []) {
+      if (!result.dependencies.includes(dependency)) result.dependencies.push(dependency);
+    }
+    if (original) result.readSet.push({ table: 'locations', rowId: id, rowRev: Number(original.row_rev ?? 1) });
+    return candidate?.row ?? original;
+  };
+  const fromRow = endpointRow(fromId);
+  const toRow = endpointRow(toId);
   const fromMap = fromRow?.map_id ? String(fromRow.map_id) : null;
   const toMap = toRow?.map_id ? String(toRow.map_id) : null;
   /** 只有两端都在**同一张有效地图**上，归属才可推导；否则这条线只能是拓扑连接。 */

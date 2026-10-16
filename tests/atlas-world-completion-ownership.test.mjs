@@ -302,6 +302,7 @@ test('OWN04 无变化再次建设复用（NOT_NEEDED）；回退恢复内部图�
 
 test('OWN05 handleSqlMapAction 建设回执指向内部图，与仓库状态一致', async () => {
   const port = model((req, n) => {
+    if (req.batchId.includes('_evidence_')) return '{"facts":[]}';
     if (req.batchId.startsWith('layout_')) {
       const line = req.messages[1].content.split('\n').find((item) => item.startsWith('本图：'));
       return JSON.parse(line.slice(3))

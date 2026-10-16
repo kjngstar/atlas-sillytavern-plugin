@@ -23,6 +23,8 @@ const option=(key,fallback)=>{const i=process.argv.indexOf(key);return i<0?fallb
 const origin=option('--origin',process.env.ATLAS_ST_ORIGIN||'http://127.0.0.1:8000');
 const character=option('--character','Atlas 自动化验收');
 const wantLive=process.argv.includes('--live');
+const wantLiveLayout=process.argv.includes('--live-layout');
+const wantLiveCommit=process.argv.includes('--live-commit');
 const dir=option('--evidence-dir',process.env.ATLAS_EVIDENCE_DIR||'.tmp/tavern-world-construction');
 const extensionPath='/scripts/extensions/third-party/atlas-sillytavern-plugin';
 const chrome=process.env.ATLAS_CHROME_PATH||'C:/Program Files/Google/Chrome/Application/chrome.exe';
@@ -72,7 +74,7 @@ try{
     const ctx=SillyTavern.getContext();
     const bucket=ctx.extensionSettings.atlas_world_sim??(ctx.extensionSettings.atlas_world_sim={});
     window.__atlasAcceptance={handle,chatId:ctx.chatId,hadSqlMode:Object.hasOwn(bucket,'sqlMode'),sqlMode:bucket.sqlMode,
-      messages:JSON.stringify(ctx.chat),legacyHash:JSON.stringify(Object.fromEntries(['world','tables','maps','scene','simulation','binding','turns'].map(key=>[key,ctx.chatMetadata.atlas?.[key]]))),
+      messages:JSON.stringify(ctx.chat.map(message=>({mes:message.mes,is_user:message.is_user}))),legacyHash:JSON.stringify(Object.fromEntries(['world','tables','maps','scene','simulation','binding','turns'].map(key=>[key,ctx.chatMetadata.atlas?.[key]]))),
       databaseHash:ctx.chatMetadata.atlas?.database?.sha256??null};
     bucket.sqlMode=true;
     await handle.core.refresh();
@@ -165,7 +167,7 @@ try{
     await ext.disconnectAtlas();
     const remounted=await ext.connectAtlas();
     const now=SillyTavern.getContext();
-    const same={messages:JSON.stringify(now.chat)===window.__atlasAcceptance.messages,
+    const same={messages:JSON.stringify(now.chat.map(message=>({mes:message.mes,is_user:message.is_user})))===window.__atlasAcceptance.messages,
       legacy:JSON.stringify(Object.fromEntries(['world','tables','maps','scene','simulation','binding','turns'].map(key=>[key,now.chatMetadata.atlas?.[key]])))===window.__atlasAcceptance.legacyHash,
       database:(now.chatMetadata.atlas?.database?.sha256??null)===window.__atlasAcceptance.databaseHash,
       chatId:now.chatId===window.__atlasAcceptance.chatId,roots:document.querySelectorAll('#atlas-extension-panel-root').length,
@@ -175,6 +177,19 @@ try{
 
   // ── 9. 离线 model mock：在这条新建聊天里真的把世界建出来（不打后端） ────────
   // 操作词汇取自施工包 04「仅测试用」范例；实体名是本验收专用，不进任何生产文件。
+  // OpenAI 型酒馆主 API 直接走宿主生成端点，不经过 TavernHelper。
+  // 两条路径都要拦截，才能保证离线验收真的不调用外部模型。
+  let offlineRouteCalls=0;
+  const offlineRoute='**/api/backends/chat-completions/generate';
+  await page.route(offlineRoute,async route=>{
+    offlineRouteCalls++;
+    const content=offlineRouteCalls===1?[
+      '{"op":"location.upsert","ref":"new:harbor","data":{"name":"验收港湾","kind":"city","existence_quality":"confirmed"}}',
+      '{"op":"location.upsert","ref":"new:inn","data":{"name":"验收旅店","kind":"building","parent_ref":"new:harbor"}}',
+      '{"op":"character.upsert","ref":"new:keeper","data":{"name":"验收掌柜","identity":"旅店掌柜","importance":"core","location_ref":"new:inn"}}',
+    ].join('\n'):'{"op":"noop"}';
+    await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({choices:[{message:{role:'assistant',content},finish_reason:'stop'}]})});
+  });
   const built=await page.evaluate(async()=>{
     const handle=window.__atlasAcceptance.handle,ctx=SillyTavern.getContext();
     // kind 必须取 src/atlas-location-kinds.ts 的权威枚举（region/city/district/building/floor/room/natural/vehicle/other）；
@@ -206,7 +221,7 @@ try{
     if(commit.error||(commit.receipts>0&&commit.phase==='idle'))break;
     await delay(1000);
   }
-  report.offlineBuild={modelCalls:built.calls,...commit};
+  report.offlineBuild={modelCalls:built.calls+offlineRouteCalls,helperCalls:built.calls,hostRouteCalls:offlineRouteCalls,...commit};
   check('offline-mock-turn-committed',!commit.error&&commit.status==='committed',report.offlineBuild);
 
   await page.evaluate(async()=>{const h=window.__atlasAcceptance.handle;await h.core.refresh();h.core.setPage('map');h.rerender();});
@@ -232,11 +247,23 @@ try{
 
   await frame.evaluate(()=>{AtlasPreview.go(AtlasPreview.data.ROOT.id);AtlasPreview.map.fit(false);});await delay(500);
   const marks=async()=>frame.evaluate(()=>AtlasPreview.map.state.hits.map(h=>[h.m.id,Math.round(h.x),Math.round(h.y)]));
-  const hoverPoint=await frame.evaluate(()=>{const h=AtlasPreview.map.state.hits[0];if(!h)return null;const r=document.getElementById('map').getBoundingClientRect();return {x:r.left+h.x,y:r.top+h.y,id:h.m.id};});
-  const beforeHover=await marks();
-  if(hoverPoint){await page.mouse.move(hoverPoint.x,hoverPoint.y);await delay(300);}
+  let hoverBaseline=null;
+  for(let i=0;i<12&&!hoverBaseline;i++){
+    hoverBaseline=await frame.evaluate(()=>{const hits=AtlasPreview.map.state.hits,r=document.getElementById('map').getBoundingClientRect();
+      const h=hits.find(hit=>hit.x>=0&&hit.x<r.width&&hit.y>=0&&hit.y<r.height);if(!h)return null;
+      return {point:{x:r.left+h.x,y:r.top+h.y,id:h.m.id},marks:hits.map(hit=>[hit.m.id,Math.round(hit.x),Math.round(hit.y)])};});
+    if(!hoverBaseline)await delay(250);
+  }
+  const hoverPoint=hoverBaseline?.point??null;
+  const beforeHover=hoverBaseline?.marks??[];
+  if(hoverPoint){
+    const box=await (await frame.frameElement()).boundingBox();
+    if(box)await page.mouse.move(box.x+hoverPoint.x,box.y+hoverPoint.y);
+    await delay(300);
+  }
   const afterHover=await marks();
-  check('hover-keeps-anchors',!!hoverPoint&&JSON.stringify(beforeHover)===JSON.stringify(afterHover),{id:hoverPoint?.id??null,before:beforeHover.length,after:afterHover.length});
+  const hoverState=await frame.evaluate(()=>({hoverId:AtlasPreview.map.state.hover?.id??null,nodeId:AtlasPreview.map.state.node?.id??null,showMarks:AtlasPreview.map.state.showMarks}));
+  check('hover-keeps-anchors',!!hoverPoint&&JSON.stringify(beforeHover)===JSON.stringify(afterHover),{id:hoverPoint?.id??null,before:beforeHover,after:afterHover,...hoverState});
   const clicked=hoverPoint?await frame.evaluate(id=>{const c=AtlasPreview.data.CAST.find(x=>x.id===id)||AtlasPreview.data.LOCATIONS.find(x=>x.id===id);return c?.name??null;},hoverPoint.id):null;
   report.hoverTarget=clicked;
   await shot(page,'05-world-after-build');
@@ -259,38 +286,108 @@ try{
   await gotoPage('map');
 
   // ── 10. 可选：一次真实模型生成（默认不做） ────────────────────────────────
-  if(wantLive){
+  if(wantLiveLayout){
+    await page.unroute(offlineRoute);
+    await page.evaluate(()=>{const a=window.__atlasAcceptance;
+      if(a.previousTavernHelper===undefined)delete window.TavernHelper;else window.TavernHelper=a.previousTavernHelper;});
+    let injectedExtract502=false;
+    if(process.argv.includes('--inject-extract-502-once'))await page.route(offlineRoute,async route=>{
+      const body=route.request().postData()??'';
+      if(!injectedExtract502&&body.includes('第一步：从只读资料中提取')){
+        injectedExtract502=true;
+        await route.fulfill({status:502,contentType:'application/json',body:'{"error":{"message":"acceptance injected transient 502"}}'});
+      }else await route.continue();
+    });
+    const mapId=world.children[0]?.mapId??world.rootMapId;
+    let modelRequests=0;
+    const modelResponses=[];
+    page.on('request',request=>{if(new URL(request.url()).pathname==='/api/backends/chat-completions/generate')modelRequests++;});
+    page.on('response',async response=>{if(new URL(response.url()).pathname!=='/api/backends/chat-completions/generate')return;
+      try{const body=await response.json();modelResponses.push({status:response.status(),finishReason:body?.choices?.[0]?.finish_reason??null,content:String(body?.choices?.[0]?.message?.content??'').slice(0,4000)});}
+      catch(error){modelResponses.push({status:response.status(),error:String(error).slice(0,300)});}});
+    const outcome=await Promise.race([
+      frame.evaluate(id=>window.AtlasHost.layout(id),mapId).then(value=>({value}),error=>({error:String(error?.message??error)})),
+      delay(240000,undefined,{ref:false}).then(()=>({timeout:true})),
+    ]);
+    report.liveLayout={mapId,modelRequests,modelResponses,injectedExtract502,...outcome};
+    if(process.argv.includes('--inject-extract-502-once'))check('live-layout-extract-502-injected-once',injectedExtract502,{injectedExtract502});
+    check('live-layout-model-request-was-sent',modelRequests>0,{modelRequests});
+    check('live-layout-saved-a-scene',outcome.value?.coreSaved===true&&outcome.value?.sceneSaved===true,
+      {coreSaved:outcome.value?.coreSaved??false,sceneSaved:outcome.value?.sceneSaved??false,
+        issueCodes:(outcome.value?.issues??[]).map(issue=>issue.code),error:outcome.error??null,timeout:outcome.timeout??false});
+    await shot(page,'04-live-layout');
+  }else if(wantLive||wantLiveCommit){
+    await page.unroute(offlineRoute);
     // 真实生成前必须先摘掉 mock，否则「真实模型」只是个自欺的标签。
     await page.evaluate(()=>{const a=window.__atlasAcceptance;
       if(a.previousTavernHelper===undefined)delete window.TavernHelper;else window.TavernHelper=a.previousTavernHelper;});
     report.live={
       modelRequests:0,
+      modelStages:[],
       startedAt:new Date().toISOString()
     };
-    page.on('request',request=>{if(new URL(request.url()).pathname==='/api/backends/chat-completions/generate')report.live.modelRequests++;});
+    const modelRequestRows=new Map();
+    page.on('request',request=>{if(new URL(request.url()).pathname==='/api/backends/chat-completions/generate'){
+      report.live.modelRequests++;
+      const body=request.postData()??'';
+      const entry={index:report.live.modelRequests,stage:body.includes('第一步：从只读资料中提取')?'extract':body.includes('map.layout.request')?'layout':body.includes('worldCompletion')||body.includes('世界建设')?'construction':'other',requestChars:body.length,startedAt:new Date().toISOString()};
+      modelRequestRows.set(request,entry);
+      report.live.modelStages.push(entry);
+      console.log(`[live] request #${entry.index} ${entry.stage} ${entry.requestChars} chars`);
+    }});
+    page.on('response',async response=>{
+      const request=response.request(),entry=modelRequestRows.get(request);
+      if(!entry)return;
+      entry.httpStatus=response.status();
+      entry.elapsedMs=Date.now()-Date.parse(entry.startedAt);
+      try{
+        const body=await response.json(),choice=body?.choices?.[0];
+        entry.finishReason=choice?.finish_reason??null;
+        entry.outputChars=String(choice?.message?.content??'').length;
+      }catch(error){entry.responseError=String(error).slice(0,200);}
+      console.log(`[live] response #${entry.index} ${entry.httpStatus} ${entry.finishReason??'unknown'} ${entry.elapsedMs} ms`);
+    });
+    page.on('requestfailed',request=>{const entry=modelRequestRows.get(request);if(entry){entry.failed=request.failure()?.errorText??'request failed';entry.elapsedMs=Date.now()-Date.parse(entry.startedAt);}});
     // 基线必须**在发真实请求之前**取。离线回合已经留下一张回执，
     // 若仍用 `receipts>0` 判完成，等待循环会在真实网络请求发出之前就退出，
     // 把「真实模型已跑」误报成 live-model-request-was-sent=false（曾实测到）。
     const liveBaseline=await page.evaluate(()=>{const h=window.__atlasAcceptance.handle,s=h.core.getState();
       return {receiptId:s.receipts?.[0]?.receiptId??null,receipts:s.receipts?.length??0,chat:SillyTavern.getContext().chat.length};});
     report.live.baseline=liveBaseline;
-    const prompt=option('--prompt','我推开图书馆的门，走了进去。');
-    await page.evaluate(async text=>{const box=document.getElementById('send_textarea');box.value=text;
-      box.dispatchEvent(new Event('input',{bubbles:true}));
-      document.getElementById('send_but').click();},prompt);
+    const prompt=option('--prompt','我仍站在验收港湾的码头，只看周围。');
+    if(wantLiveCommit){
+      await page.evaluate(async text=>{
+        const ctx=SillyTavern.getContext(),e=ctx.event_types;
+        await ctx.eventSource.emit(e.GENERATION_STARTED,'normal',{},false);
+        ctx.chat.push({mes:text,is_user:true});
+        await ctx.eventSource.emit(e.MESSAGE_SENT,ctx.chat.length-1);
+        await window.__atlasAcceptance.handle.core.waitPendingTurn();
+        ctx.chat.push({mes:'你仍站在码头，看着周围的街道与旅店。',is_user:false});
+        await ctx.eventSource.emit(e.MESSAGE_RECEIVED,ctx.chat.length-1,'normal');
+        await ctx.eventSource.emit(e.GENERATION_ENDED,ctx.chat.length);
+        await ctx.eventSource.emit(e.GENERATION_ENDED_AFTER_COMMANDS,ctx.chat.length);
+      },prompt);
+    }else{
+      await page.evaluate(async text=>{const box=document.getElementById('send_textarea');box.value=text;
+        box.dispatchEvent(new Event('input',{bubbles:true}));
+        document.getElementById('send_but').click();},prompt);
+    }
     let settled=null;
-    for(let i=0;i<150;i++){
+    const livePolls=Math.ceil(Number(option('--live-timeout-ms','600000'))/2500);
+    for(let i=0;i<livePolls;i++){
       settled=await page.evaluate(()=>{const h=window.__atlasAcceptance.handle,s=h.core.getState();
-        const r=s.receipts?.[0];return {phase:s.turnPhase??null,error:s.lastError??null,receiptId:r?.receiptId??null,coreSaved:r?.detail?.coreSaved===true,nativeStatus:r?.detail?.receipt?.status??null,receipts:s.receipts?.length??0,lastReceipt:r?.status??null,chat:SillyTavern.getContext().chat.length};});
+        const r=s.receipts?.[0];return {phase:s.turnPhase??null,error:s.lastError??null,receiptId:r?.receiptId??null,coreSaved:r?.detail?.coreSaved===true,nativeStatus:r?.detail?.receipt?.status??null,issueCodes:(r?.detail?.receipt?.issues??[]).map(issue=>issue.code),receipts:s.receipts?.length??0,lastReceipt:r?.status??null,chat:SillyTavern.getContext().chat.length};});
       if(settled.error)break;
       // 「真回合结束」的判据必须是**结果**，不是「请求发出」——
       // 只看 modelRequests>0 会在回合仍在中途时提前退出，随后的收尾会把回合掐断，
       // 造成「HTTP 成功但没 commit」的假通过。这里要求回执或消息确实新增。
       if(settled.receiptId&&settled.receiptId!==liveBaseline.receiptId&&settled.coreSaved&&settled.phase==='idle')break;
+      if(i>0&&i%12===0)console.log(`[live] ${i*2.5}s phase=${settled.phase} requests=${report.live.modelRequests} receipts=${settled.receipts}`);
       await delay(2500);
     }
     report.live.settled=settled;
     report.live.modelRequestsIobserved=report.live.modelRequests;
+    report.live.savedNewOutcome=!!settled?.receiptId&&settled.receiptId!==liveBaseline.receiptId&&settled.coreSaved===true;
     report.live.committed=!!settled?.receiptId&&settled.receiptId!==liveBaseline.receiptId&&settled.coreSaved===true&&settled.nativeStatus==='committed';
     check('live-model-request-was-sent',report.live.modelRequests>0,{modelRequests:report.live.modelRequests});
     check('live-turn-settled-without-error',!settled?.error,settled);

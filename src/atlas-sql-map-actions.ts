@@ -18,7 +18,8 @@ import { SPATIAL_PROFILE_MODES, normalizeRequestedProfileMode } from './atlas-sp
 import { readWorldFillState } from './atlas-sql-world-completion.ts';
 import { completionMapIds, resolveCompletionMaps } from './atlas-world-completion-ownership.ts';
 import { readProgressRows, readScanState, rowsInScope, scopeKeyFor, summarizeScope, discoverTargets } from './atlas-construction-progress.ts';
-import { summarizeSources } from './atlas-construction-sources.ts';
+import { summarizeSources, readSourceLedger } from './atlas-construction-sources.ts';
+import { selectWorldConstructionSources } from './atlas-sql-world-sources.ts';
 import { planNextUnits } from './atlas-construction-scheduler.ts';
 
 const previews=new WeakMap<SqlSession,Map<string,{commit:PreparedCommit;sourceHash:string}>>();
@@ -60,6 +61,10 @@ export async function handleSqlMapAction(session:SqlSession,action:string,body:R
     return selected;
   };
   const operations:ModelOperation[]=[],calibration:TurnInput['mapCalibration']=undefined;
+  const sources:SourceSnapshotEntry[]=[];
+  for(const [key,kind] of [['loreSupplement','lorebook'],['assistantText','story'],['charDescription','lorebook'],['personaDescription','user']] as const){
+    const value=body[key];if(typeof value==='string'&&value)sources.push({key,kind,text:value,hash:stableHexHash(value)});
+  }
   let mapBackground:TurnInput['mapBackground'];
   /** P13/R03 §20：作者显式选择/清除绘图档案。 */
   let mapProfile:TurnInput['mapProfile'];
@@ -99,7 +104,7 @@ export async function handleSqlMapAction(session:SqlSession,action:string,body:R
       const work=planConstructionDigest(read,session.branchId,mode,resolvedFocus,2,{
         baseRevision:session.repo.internal.currentRevision(),
         headTurnId:String(session.repo.internal.currentHeadTurnId()??''),
-      });
+      },sources);
       if(!work.hasNext){
         return {coreSaved:false,status:'idle',pending:false,scopeKey:work.scopeKey,
           selectedTargets:0,message:'暂无待处理：持久建设队列里没有下一单元，也没有新目标'};
@@ -197,10 +202,6 @@ export async function handleSqlMapAction(session:SqlSession,action:string,body:R
       phases=['observe'];
     }else phases=['geography'];
   }else throw new AtlasDbError('INVALID_PAYLOAD','未知 SQL 地图动作',{});
-  const sources:SourceSnapshotEntry[]=[];
-  for(const [key,kind] of [['loreSupplement','lorebook'],['assistantText','story'],['charDescription','lorebook'],['personaDescription','user']] as const){
-    const value=body[key];if(typeof value==='string'&&value)sources.push({key,kind,text:value,hash:stableHexHash(value)});
-  }
   if(action==='map/scale'&&!manual){
     const m=map(body.mapId),scope=JSON.stringify({targetMap:ref(m.id),name:m.name,frame:m.frame_json,currentScale:m.meters_per_cell});
     sources.push({key:'map-task',kind:'estimate',text:`仅用 map.estimate 标定 ${scope}，不要修改其他地图或生成地点。`,hash:stableHexHash(scope)});
@@ -251,6 +252,7 @@ function planConstructionDigest(
   focusIds:readonly string[],
   maxAdditionalDepth:number,
   state:{baseRevision:number;headTurnId:string},
+  sourceSnapshot:readonly SourceSnapshotEntry[],
 ):{scopeKey:string;hasNext:boolean;nextUnitId:string|null;baseRevision:number;headTurnId:string}{
   const rows=readProgressRows(read,branchId);
   const scopeKey=scopeKeyFor(mode==='bootstrap'?'bootstrap':'local',focusIds);
@@ -259,10 +261,14 @@ function planConstructionDigest(
   const schedulerSeq=readScanState(rowsInScope(rows,scopeKey,'scope')[0]??null).schedulerSeq;
   const next=planNextUnits(unitRows,1,schedulerSeq);
   const pendingTargets=rowsInScope(rows,scopeKey,'target').filter(row=>row.status==='pending').length;
+  const ledger=readSourceLedger(rows,scopeKey);
+  const sourceSelection=selectWorldConstructionSources({snapshot:sourceSnapshot,chatId:'continue-preview',branchId,mode:'consume',
+    skipChunkKeys:new Set([...ledger.chunks.values()].filter(chunk=>['pending','retry','processed'].includes(chunk.status)).map(chunk=>chunk.chunkKey))});
+  const hasSourceWork=sourceSelection.chunks.length>0&&(focusIds.length>0||rowsInScope(rows,scopeKey,'target').some(row=>row.status==='processed'));
   return {
     scopeKey,
-    hasNext:Boolean(next.unit)||discovery.enqueueIds.length>0||pendingTargets>0,
-    nextUnitId:next.unit?.unitId??null,
+    hasNext:Boolean(next.unit)||discovery.enqueueIds.length>0||pendingTargets>0||hasSourceWork,
+    nextUnitId:next.unit?.unitId??(hasSourceWork?stableHexHash(sourceSelection.chunks.map(chunk=>chunk.chunkKey).join('\n')):null),
     baseRevision:state.baseRevision,
     headTurnId:state.headTurnId,
   };

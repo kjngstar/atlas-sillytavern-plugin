@@ -110,7 +110,7 @@ type PendingRequest = {
   request: SqlRow;
 };
 
-/** 候选事务内同步挑出 pending 请求，按 requestId 稳定排序（同 Id 再按 mapId）。 */
+/** 候选事务内同步挑出 pending 请求，先按父子依赖，再按地图和请求编号稳定排序。 */
 export function collectPendingRequests(
   db: SqlDatabase,
   scope: SpatialScope,
@@ -144,7 +144,20 @@ export function collectPendingRequests(
     const operationId = typeof request.operationId === 'string' && request.operationId ? request.operationId : requestId;
     found.push({ mapId, requestId, operationId, kind, request });
   }
-  found.sort((a, b) => (a.requestId === b.requestId ? (a.mapId < b.mapId ? -1 : a.mapId > b.mapId ? 1 : 0) : a.requestId < b.requestId ? -1 : 1));
+  // Physical projections flow from parents to children. Request hashes must not
+  // decide which conflicting first estimate becomes canonical.
+  const maps=readTable(db,'maps',scope.branchId,ports),locations=readTable(db,'locations',scope.branchId,ports);
+  const depth=(mapId:string):number=>{
+    const seen=new Set<string>();let current=mapId;
+    while(!seen.has(current)){
+      seen.add(current);
+      const map=maps.find(row=>row.id===current),container=locations.find(row=>row.id===map?.container_location_id);
+      if(!container?.map_id||container.map_id===current)break;
+      current=String(container.map_id);
+    }
+    return seen.size;
+  };
+  found.sort((a,b)=>depth(a.mapId)-depth(b.mapId)||(a.mapId<b.mapId?-1:a.mapId>b.mapId?1:a.requestId<b.requestId?-1:a.requestId>b.requestId?1:0));
   return { pending: found, issues };
 }
 

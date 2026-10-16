@@ -407,7 +407,7 @@ test('SIG05b 新生成失败时，旧 scene 与旧指纹都保留', async () => 
   const model = {
     async request(req) {
       // 观察与布局一律返回 noop：本轮布局拿不到任何 map.layout.request。
-      return { batchId: req.batchId, text: '{"op":"noop"}', finishReason: 'stop', httpStatus: 200, durationMs: 2 };
+      return { batchId: req.batchId, text: req.batchId.includes('_evidence_') ? '{"facts":[]}' : '{"op":"noop"}', finishReason: 'stop', httpStatus: 200, durationMs: 2 };
     },
   };
   const state = { ctx: { chatId: IDS.chatA, chatMetadata: { atlas: { schemaVersion: 1, world: { id: 'world_sig' } } }, saveMetadata: async () => true } };
