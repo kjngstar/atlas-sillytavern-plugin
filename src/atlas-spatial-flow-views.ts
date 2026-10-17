@@ -37,6 +37,9 @@ export type SpatialFlow = {
   path: FlowPath;
   crossMap: boolean;
   reason: string | null;
+  fromEntityId?: string;
+  toEntityId?: string;
+  messageId?: string;
 };
 
 function asArray(value: unknown): Array<Record<string, unknown>> {
@@ -114,6 +117,18 @@ export function querySpatialFlows(ctx: ViewContext, query: ViewQuery): ViewResul
     routes.set(String((row as Record<string, unknown>).id), row as Record<string, unknown>);
   }
   const items: SpatialFlow[] = [];
+  const knownInformation = new Set(visibility.projection.knownFacts.map(f => f.informationId));
+  const propagationGeometry = (payload: Record<string, unknown> | null, from: string | null, to: string | null) => {
+    const route = payload?.route_id ? routes.get(String(payload.route_id)) : undefined;
+    const routeMap = route?.map_id ? String(route.map_id) : null;
+    const forward = route && route.from_location_id === from && route.to_location_id === to;
+    const reverse = route && Number(route.bidirectional) === 1 && route.from_location_id === to && route.to_location_id === from;
+    if (!route || !routeMap || !mapId || routeMap !== mapId || !(forward || reverse))
+      return {path: null, crossMap: !!(mapId && routeMap && routeMap !== mapId), reason: 'NO_ROUTE_GEOMETRY'};
+    const geometry = projectRouteGeometry(route, routeMap).geometry;
+    return {path: geometry ? {...geometry, points: reverse ? [...geometry.points].reverse() : geometry.points} : null,
+      crossMap: false, reason: geometry ? null : 'NO_ROUTE_GEOMETRY'};
+  };
 
   /* —— 行程流 —— */
   if (wanted.includes('journey')) {
@@ -211,13 +226,15 @@ export function querySpatialFlows(ctx: ViewContext, query: ViewQuery): ViewResul
       const relation = raw as Record<string, unknown>;
       const subject = String(relation.subject_entity_id);
       const object = String(relation.object_entity_id);
-      if (isPov && !(visibility.knownCharacters.has(subject) && visibility.knownCharacters.has(object))) continue;
+      if (isPov && (relation.secrecy !== 'public' || !visibility.visible('character',subject) || !visibility.visible('character',object))) continue;
       const a = resolveEffectivePosition(ctx, subject, undefined, positionCache);
       const b = resolveEffectivePosition(ctx, object, undefined, positionCache);
       const onMap = a.kind === 'at_grid' && b.kind === 'at_grid' && a.mapId === b.mapId && (!mapId || a.mapId === mapId);
       items.push({
         flowId: String(relation.id),
         kind: 'relation',
+        fromEntityId: subject,
+        toEntityId: object,
         label: String(relation.label ?? relation.kind ?? ''),
         status: String(relation.status ?? ''),
         fromLocationId: null,
@@ -247,14 +264,16 @@ export function querySpatialFlows(ctx: ViewContext, query: ViewQuery): ViewResul
       if (!payload || String(payload.program_kind ?? '') !== 'rumor_delivery') continue;
       const from = payload.from_location_id === null || payload.from_location_id === undefined ? null : String(payload.from_location_id);
       const to = payload.to_location_id === null || payload.to_location_id === undefined ? null : String(payload.to_location_id);
-      if (isPov && to && !visibility.knownLocations.has(to)) continue;
+      if (isPov && (!from || !to || !visibility.knownLocations.has(from) || !visibility.knownLocations.has(to)
+        || !knownInformation.has(String(payload.information_id ?? '')))) continue;
       const depart = num(payload.depart_at_s);
       const arrive = num(payload.arrive_at_s);
       const progress = depart !== null && arrive !== null && arrive > depart ? clamp01((clock - depart) / (arrive - depart)) : null;
       items.push({
         flowId: String(action.id),
         kind: 'propagation',
-        label: `信息在途：${channelName.get(String(payload.via_channel_id ?? '')) || '未知渠道'}`,
+        messageId: String(payload.front_id ?? ''),
+        label: `消息传播：${channelName.get(String(payload.via_channel_id ?? '')) || (payload.route_id ? '沿登记路线' : '未知渠道')}`,
         status: String(action.status ?? ''),
         fromLocationId: from,
         toLocationId: to,
@@ -264,9 +283,7 @@ export function querySpatialFlows(ctx: ViewContext, query: ViewQuery): ViewResul
         etaMinS: arrive,
         etaMaxS: arrive,
         mapId,
-        path: null,
-        crossMap: false,
-        reason: 'NO_ROUTE_GEOMETRY',
+        ...propagationGeometry(payload, from, to),
       });
     }
     for (const raw of queryBound(ctx.db, "SELECT * FROM rumor_fronts WHERE branch_id = ? AND status = 'active'", [ctx.branchId])) {
@@ -277,22 +294,27 @@ export function querySpatialFlows(ctx: ViewContext, query: ViewQuery): ViewResul
         if (at && !visibility.knownLocations.has(at)) continue;
         if (!parseAudienceAllows(front.audience_json, visibility.povId ?? null)) continue;
       }
+      const sourceFront = front.source_front_id ? queryBound(ctx.db, 'SELECT location_id FROM rumor_fronts WHERE branch_id=? AND id=?', [ctx.branchId, String(front.source_front_id)])[0] : null;
+      const from = sourceFront?.location_id ? String(sourceFront.location_id) : null;
+      if (isPov && from && !visibility.knownLocations.has(from)) continue;
+      const sourceAction = front.source_action_id ? queryBound(ctx.db, 'SELECT payload_json FROM actions WHERE branch_id=? AND id=?', [ctx.branchId, String(front.source_action_id)])[0] : null;
+      const geometry = propagationGeometry(asObject(sourceAction?.payload_json), from, at);
       items.push({
         flowId: String(front.id),
         kind: 'propagation',
+        messageId: String(front.id),
         label: `风声传播到：${at ?? '未知地点'}`,
         status: String(front.status ?? ''),
-        fromLocationId: front.source_front_id === null || front.source_front_id === undefined ? null : String(front.source_front_id),
+        fromLocationId: from,
         toLocationId: at,
         moverEntityId: null,
-        progress: null,
+        progress: geometry.path ? 1 : null,
         progressQuality: 'unknown',
         etaMinS: null,
         etaMaxS: null,
         mapId,
-        path: null,
-        crossMap: false,
-        reason: 'ARRIVED_FRONT',
+        ...geometry,
+        reason: geometry.path ? null : 'ARRIVED_FRONT',
       });
     }
   }

@@ -39,10 +39,12 @@ function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
 
 function smooth(ctx, pts, closed){
   if(!pts || pts.length<2) return;
-  const p = closed ? pts.concat([pts[0],pts[1]]) : pts;
-  ctx.moveTo(p[0][0],p[0][1]);
-  for(let i=0;i<p.length-2;i++){
-    const p0=p[i],p1=p[i+1],p2=p[i+2],p3=p[i+3]||p2;
+  const n = pts.length;
+  const at = i => pts[closed ? (i+n)%n : clamp(i,0,n-1)];
+  ctx.moveTo(pts[0][0],pts[0][1]);
+  // 每段从当前点走到下一点；闭合段也用环绕邻点，避免漏点和直线接缝。
+  for(let i=0;i<(closed?n:n-1);i++){
+    const p0=at(i-1),p1=at(i),p2=at(i+1),p3=at(i+2);
     ctx.bezierCurveTo(
       p1[0]+(p2[0]-p0[0])/6, p1[1]+(p2[1]-p0[1])/6,
       p2[0]-(p3[0]-p1[0])/6, p2[1]-(p3[1]-p1[1])/6,
@@ -1551,6 +1553,15 @@ function create(canvas, mini, hooks){
   }
 
   /* ══════════ 雷达 / 覆盖层 ══════════ */
+  function relationLayer(){
+    for(const edge of hooks.getRelations?.(st.node.id)||[]){
+      const points=edge.points?.map(p=>W2S(...p));if(!points||points.length<2)continue;
+      ctx.save();ctx.beginPath();ctx.moveTo(...points[0]);points.slice(1).forEach(p=>ctx.lineTo(...p));
+      ctx.setLineDash([6,5]);ctx.lineWidth=1.7;ctx.strokeStyle=edge.c||C.amber;ctx.globalAlpha=.8;ctx.stroke();ctx.setLineDash([]);
+      if(st.showLabels){const a=points[0],b=points.at(-1);ctx.font='500 11px '+F.sans;ctx.textAlign='center';ctx.fillStyle=edge.c||C.amber;ctx.fillText(edge.name,(a[0]+b[0])/2,(a[1]+b[1])/2-9);}
+      ctx.restore();
+    }
+  }
   function radar(t){
     const hero = st.marks.find(m=>m.hero);
     let cx=st.vw/2, cy=st.vh/2;
@@ -1603,7 +1614,7 @@ function create(canvas, mini, hooks){
   function drawFlow(edge,t,journey){
     const [sx,sy]=W2S(...edge.from),[tx,ty]=W2S(...edge.to);
     const [mx,my]=edge.via?W2S(...edge.via):[(sx+tx)/2+(ty-sy)*.18,(sy+ty)/2-(tx-sx)*.18];
-    const active=hooks.activeEdge&&hooks.activeEdge()===edge.id,col=edge.c||C.green;
+    const activeKey=hooks.activeEdge?.(),active=activeKey===edge.id||!!edge.messageId&&activeKey===edge.messageId,col=edge.c||C.green;
     const route=edge.points?.length>1?edge.points.map(p=>W2S(...p)):null;
     const lengths=route?.slice(1).map((p,i)=>Math.hypot(p[0]-route[i][0],p[1]-route[i][1])),total=lengths?.reduce((n,x)=>n+x,0)||0;
     const at=k=>{if(!route)return [(1-k)*(1-k)*sx+2*(1-k)*k*mx+k*k*tx,(1-k)*(1-k)*sy+2*(1-k)*k*my+k*k*ty];let distance=Math.max(0,Math.min(1,k))*total;for(let i=0;i<lengths.length;i++){if(distance<=lengths[i]||i===lengths.length-1){const f=lengths[i]?distance/lengths[i]:0;return [route[i][0]+(route[i+1][0]-route[i][0])*f,route[i][1]+(route[i+1][1]-route[i][1])*f];}distance-=lengths[i];}return [sx,sy];};
@@ -1611,11 +1622,11 @@ function create(canvas, mini, hooks){
     ctx.setLineDash(journey?[4,8]:[7,11]);ctx.lineDashOffset=-t*22;
     ctx.strokeStyle=hexA(col,active?.95:.55);ctx.lineWidth=active?2.8:1.7;
     ctx.shadowColor=col;ctx.shadowBlur=active?14:7;ctx.stroke();ctx.setLineDash([]);
-    const positioned=!journey||Number.isFinite(edge.progress),k=journey?edge.progress:(t*.2)%1,[x,y]=at(k);
+    const committedProgress=journey||edge.kind==='propagation',positioned=!committedProgress||Number.isFinite(edge.progress),k=committedProgress?(edge.progress??0):(t*.2)%1,[x,y]=at(k);
     if(positioned){if(journey&&edge.entityKind==='vehicle')drawMark(ctx,{type:'vehicle',c:col,silent:true},x,y,t,false,false);else{ctx.beginPath();ctx.arc(x,y,journey?6:3.5,0,7);ctx.fillStyle=col;ctx.fill();}}
     const [hx,hy]=at(.5);
-    st.edgeHits.push({x:hx,y:hy,r:16,m:{type:journey?'journey':'message',id:edge.id,name:edge.name,sub:journey?'行程位置':'消息传播路径'}});
-    if(active||journey){ctx.shadowBlur=0;ctx.font='500 11px '+F.sans;ctx.fillStyle='#dce9fb';ctx.textAlign='center';ctx.fillText(edge.name,hx,hy-13);}
+    st.edgeHits.push({x:hx,y:hy,r:16,m:{type:journey?'journey':'message',id:journey?edge.id:edge.messageId||edge.id,name:edge.name,sub:journey?'行程位置':'消息传播路径'}});
+    if(active||journey||edge.kind==='propagation'){ctx.shadowBlur=0;ctx.font='500 11px '+F.sans;ctx.fillStyle='#dce9fb';ctx.textAlign='center';ctx.fillText(edge.name+(edge.kind==='propagation'&&Number.isFinite(edge.progress)?` · ${Math.round(edge.progress*100)}%`:''),hx,hy-13);}
     if(journey&&positioned)st.edgeHits.push({x,y,r:14,m:{type:edge.entityKind==='vehicle'?'vehicle':edge.entityKind==='location'?'poi':'char',...(edge.entityKind==='vehicle'||edge.entityKind==='location'?{placeId:edge.entityId}:{}),id:edge.entityId,name:edge.name}});
     ctx.restore();
   }
@@ -1717,6 +1728,7 @@ function create(canvas, mini, hooks){
     grid();
 
     if(st.showMarks){
+      if(st.showLinks)relationLayer();
       if(st.mode==='heat') heatLayer();
       if(st.mode==='flow') flowLayer(st.t);
       if(st.mode==='sim')  simLayer(st.t);

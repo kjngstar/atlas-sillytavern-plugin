@@ -19,7 +19,7 @@ import { computeMapLayoutSignatures } from './atlas-sql-layout-task.ts';
 import { assessMapCompleteness } from './atlas-map-assessment.ts';
 import type { MapAssessmentV1 } from './atlas-map-assessment.ts';
 import { boundCorridorIdOf, resolveSpatialProfile } from './atlas-spatial-profile.ts';
-import { filterSceneForView, hydrateScene, projectMapView, readSceneFrame } from '../vendor/atlas-spatial/index.mjs';
+import { filterSceneForView, hydrateScene, projectMapView, readSceneFrame, collectMapLocations } from '../vendor/atlas-spatial/index.mjs';
 import type { Diagnostic, SceneDocument } from '../vendor/atlas-spatial/index.mjs';
 import type { ViewQuery, ViewResult } from './atlas-ops-contract.ts';
 
@@ -197,7 +197,8 @@ export function querySpatialScene(ctx: ViewContext, query: ViewQuery): ViewResul
     const containerId = mapRow.container_location_id ? String(mapRow.container_location_id) : '';
     const container = containerId ? locationById.get(containerId) ?? null : null;
     const visible = (id: string): boolean => scope.viewMode !== 'pov' || visibility.knownLocations.has(id);
-    const members = locationRows.filter((row) => String(row.map_id ?? '') === mapId && visible(String(row.id)));
+    const members = collectMapLocations({ mapRow, maps: [...mapRows.values()], locations: locationRows })
+      .filter((row) => visible(String(row.id)));
     const profile = resolveSpatialProfile({
       map: mapRow,
       container,

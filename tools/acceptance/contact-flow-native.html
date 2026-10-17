@@ -1,0 +1,20 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Atlas 联系与传播 · SQL 完整界面验收</title>
+<style>html,body{margin:0;background:#030810;color:#cce2ef;font:13px/1.5 sans-serif}#fixture-label{position:fixed;bottom:2px;right:20px;z-index:20000;background:#142637;padding:3px 12px;border-radius:5px}#fixture-error{white-space:pre-wrap;padding:35px}</style>
+<div id="root"></div><div id="fixture-label">独立 SQL 验收存档 · 同一生产界面与只读 API · 不连接真实聊天</div><pre id="fixture-error"></pre>
+<script type="module">
+import * as engine from '../dist/atlas-ui-core.mjs';
+import * as sql from '../dist/atlas-sql.mjs';
+import {mountReferenceUi} from './atlas-reference-host.mjs';
+try{
+ const chatMetadata=await fetch('./contact-flow-snapshot.json').then(r=>r.json());
+ const record={chatUid:chatMetadata.atlas.database.chat_uid,branchId:chatMetadata.atlas.database.active_branch_id,chatMetadata,saveMetadata:async()=>{throw Error('独立验收不允许写存档');}};
+ const provider=engine.createBrowserSqlHost({enabled:()=>true,context:()=>record,loadRuntime:sql.loadAtlasSqlRuntime});
+ const server=engine.createAtlasServerCore({store:{read:async()=>null,write:async()=>{}},sqlSessionProvider:provider});
+ const api={request:(method,path,body)=>{if(method!=='GET'&&!path.endsWith('/ui-read')&&!path.endsWith('/state')&&!path.endsWith('/binding'))throw Error('此验收页只允许读取');return server.handle(method,path,body,{local:true});}};
+ const host={getChatId:()=>record.chatUid,readPanelOpen:()=>true,writePanelOpen(){},readBinding:()=>null,writeBinding:async()=>{},readData:()=>null,writeData(){},fillInput(){}};
+ const core=engine.createAtlasUiCore({host,api,emitter:{on(){},off(){}},sqlEnabled:()=>true});
+ await core.refresh();
+ const render=mountReferenceUi({root:document.getElementById('root'),core,api,getContext:()=>({chatId:record.chatUid,chatMetadata,extensionSettings:{atlas_world_sim:{sqlMode:true}}}),loadSqlRuntime:async()=>sql,pluginVersion:'0.9.90',settingsPort:{read:async()=>null,write:async()=>{}}});
+ addEventListener('pagehide',()=>{void render.dispose();void provider.close();});
+}catch(error){document.getElementById('fixture-error').textContent=error.stack;}
+</script></html>

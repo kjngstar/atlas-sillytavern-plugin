@@ -11,7 +11,7 @@
 
 import { decodeRow, encodeRow } from './atlas-db-codec.ts';
 import { ATLAS_TABLE_COLUMNS, isKnownTable, tableColumnNames } from './atlas-db-schema.ts';
-import { queryBound } from './atlas-db-runtime.ts';
+import { AtlasDbError, queryBound } from './atlas-db-runtime.ts';
 import type { AtlasTableName, SqlValue } from './atlas-db-contract.ts';
 import type { SqlDatabase } from './atlas-db-runtime.ts';
 import type { TableReadPort } from './atlas-ops-compile-types.ts';
@@ -23,6 +23,33 @@ function pkColumns(table: AtlasTableName): string[] {
 
 export function createTableReadPort(db: SqlDatabase): TableReadPort {
   return {
+    selectWherePage(table: AtlasTableName, where: Record<string, unknown>, afterId: string | null, pageSize: number): Array<Record<string, unknown>> {
+      if (!isKnownTable(table)) return [];
+      const size = Math.max(1, Math.min(500, Number.isFinite(pageSize) ? Math.floor(pageSize) : 500));
+      const columns = tableColumnNames(table);
+      const clauses: string[] = [];
+      const params: SqlValue[] = [];
+      for (const [key, value] of Object.entries(where)) {
+        if (!columns.includes(key)) continue;
+        if (value === null) clauses.push(`${key} IS NULL`);
+        else if (typeof value === 'boolean' || typeof value === 'number' || typeof value === 'string') {
+          clauses.push(`${key} = ?`);
+          params.push(typeof value === 'boolean' ? (value ? 1 : 0) : value);
+        } else if (Array.isArray(value)) {
+          const values: SqlValue[] = value.filter((v) => v === null || typeof v === 'number' || typeof v === 'string' || typeof v === 'boolean')
+            .map((v) => typeof v === 'boolean' ? (v ? 1 : 0) : v);
+          if (!values.length) clauses.push('0');
+          else { clauses.push(`${key} IN (${values.map(() => '?').join(',')})`); params.push(...values); }
+        }
+      }
+      if (afterId) { clauses.push('id > ?'); params.push(afterId); }
+      return queryBound(db, `SELECT * FROM ${table}${clauses.length ? ` WHERE ${clauses.join(' AND ')}` : ''} ORDER BY id ASC LIMIT ${size}`, params)
+        .map((raw) => {
+          const decoded = decodeRow(table, raw, { allowExtra: true });
+          if (!decoded.ok) throw new AtlasDbError('READ_DECODE_FAILED', `无法解码 ${table} 的分页记录`, { table, issues: decoded.issues });
+          return decoded.row as Record<string, unknown>;
+        });
+    },
     selectOne(table: AtlasTableName, branchId: string, id: string): Record<string, unknown> | null {
       if (!isKnownTable(table)) return null;
       const pks = pkColumns(table);
@@ -113,22 +140,46 @@ export function pageAllRows(
   branchId: string,
   pageSize = 500,
 ): Array<Record<string, unknown>> {
-  if (typeof tables.selectPage !== 'function') {
-    return tables.selectWhere(table, { branch_id: branchId }, 1001);
+  return pageWhereRows(tables, table, branchId, {}, pageSize);
+}
+
+/** Complete a directed read without treating the first SQL LIMIT as the whole result. */
+export function pageWhereRows(
+  tables: TableReadPort,
+  table: AtlasTableName,
+  branchId: string,
+  where: Record<string, unknown>,
+  pageSize = 500,
+): Array<Record<string, unknown>> {
+  const size = Math.max(1, Math.min(500, Number.isFinite(pageSize) ? Math.floor(pageSize) : 500));
+  const scoped = { ...where, branch_id: branchId };
+  if (!tables.selectWherePage && !tables.selectPage) {
+    const rows = tables.selectWhere(table, scoped, 1001);
+    if (rows.length >= 1001) throw new AtlasDbError('READ_PAGINATION_REQUIRED', `${table} 读取需要分页接口，不能返回截断记录`, { table, branchId });
+    return rows;
   }
+  const conditions = Object.entries(scoped).filter(([key]) => tableColumnNames(table).includes(key));
+  const matches = (row: Record<string, unknown>): boolean => conditions.every(([key, value]) => {
+    if (Array.isArray(value)) return value.includes(row[key]);
+    if (typeof value === 'boolean') return row[key] === value || row[key] === (value ? 1 : 0);
+    return row[key] === value;
+  });
   const out: Array<Record<string, unknown>> = [];
   let afterId: string | null = null;
   for (let guard = 0; guard < 10000; guard += 1) {
-    const page = tables.selectPage(table, branchId, afterId, pageSize);
-    if (page.length === 0) break;
-    out.push(...page);
-    const last = page[page.length - 1];
-    const nextId = last && last.id !== undefined && last.id !== null ? String(last.id) : '';
-    if (!nextId || nextId === afterId) break;
-    afterId = nextId;
-    if (page.length < pageSize) break;
+    const page: Array<Record<string, unknown>> = tables.selectWherePage
+      ? tables.selectWherePage(table, scoped, afterId, size)
+      : tables.selectPage!(table, branchId, afterId, size);
+    if (!page.length) return out;
+    for (const row of page) {
+      if (typeof row.id !== 'string' || !row.id || afterId !== null && row.id <= afterId)
+        throw new AtlasDbError('READ_CURSOR_INVALID', `${table} 的分页游标无效或没有向前推进`, { table, branchId });
+      afterId = row.id;
+      if (matches(row)) out.push(row);
+    }
+    if (page.length < size) return out;
   }
-  return out;
+  throw new AtlasDbError('READ_PAGE_BUDGET_EXCEEDED', `${table} 读取超过分页预算，不能宣称已读取完整记录`, { table, branchId });
 }
 
 /** 只读查询整表列名（供诊断/测试断言列序）。 */

@@ -82,9 +82,11 @@ test('E05 1,001 条 open 路线必须计数为 1,001 而非 0', async () => {
     assert.ok(limits, '必须回报 routes 的读取上限');
     assert.ok(limits.total >= ROUTE_COUNT, `1,001 条 open 路线必须被数出来，实际 total=${limits.total}`);
     assert.notEqual(limits.total, 0, '绝不能因为用 status=\'active\' 过滤而报 0');
-    assert.ok(limits.truncated > 0, `超出 1,000 上限必须标记截断，实际 truncated=${limits.truncated}`);
-    // 真实截断场景：导出必须被阻止，而不是悄悄产出一个「完整」文件。
-    assert.throws(() => buildMapAnalysisExport(fixture), /截断/);
+    assert.equal(limits.truncated, 0, '所有分页确实读完后不应继续假报截断');
+    assert.equal(limits.complete, true);
+    assert.equal(limits.shown, limits.total);
+    const exported = buildMapAnalysisExport(fixture);
+    assert.ok(exported.file.maps.find(map => map.mapId === IDS.M1).routes.length >= ROUTE_COUNT, '完整导出必须包含尾部路线');
   }, { mutate });
 });
 
@@ -103,6 +105,9 @@ test('E05 POV 不下发全库隐藏总数', async () => {
     const limits = mapView.metadata.readLimits.routes;
     assert.equal(limits.total, limits.shown, 'POV 不得回报全库隐藏总数');
     assert.equal(limits.truncated, 0, 'POV 不提供隐藏截断数量');
-    assert.equal(limits.overLimit, true, '但仍要标记本次可见读取已超限，避免导出不完整文件');
+    assert.equal(limits.overLimit, false, '所有分页已经完成，不再假报超限');
+    assert.equal(limits.complete, true);
+    const visibleRoutes = new Set(mapView.items.flatMap(map => map.routes.map(route => route.routeId)));
+    assert.equal(limits.total, visibleRoutes.size, 'POV 统计必须来自可见路线而不是私有全库数量');
   }, { mutate });
 });

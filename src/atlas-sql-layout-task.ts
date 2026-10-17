@@ -16,7 +16,8 @@
  * 5. **一次最多 2 张图**，超出部分进 remaining，不静默忘记。
  */
 
-import { createTableReadPort } from './atlas-db-readport.ts';
+import { createTableReadPort, pageAllRows } from './atlas-db-readport.ts';
+import { collectMapLocations, LIMITS } from '../vendor/atlas-spatial/index.mjs';
 import { collectTaskRefs } from './atlas-sql-task-refs.ts';
 import { buildStagePrompt } from './atlas-ops-prompts.ts';
 import { normalizeFrame, normalizeSqlMapFrame } from './atlas-spatial-frame.ts';
@@ -151,12 +152,19 @@ export function unknownLayoutEntityRefs(operations:readonly ModelOperation[],ref
     if(operation.op!=='map.layout.request')continue;
     const spec=operation.data?.spec;
     if(!spec||typeof spec!=='object'||Array.isArray(spec))continue;
-    for(const section of ['zones','districts','buildings','rooms','actors','items']){
+    // Local IDs (contents.id/features.id/actors.near/items.on) are intentionally excluded.
+    const entityFields: Record<string, readonly string[]> = {
+      zones: ['id', 'near'], links: ['id'], features: ['zoneId'],
+      districts: ['id'], buildings: ['id', 'districtId'], rooms: ['id'],
+      contents: ['roomId'], actors: ['id', 'roomId'], items: ['id'],
+    };
+    check((spec as Record<string, unknown>).corridorLocationRef);
+    for(const [section, fields] of Object.entries(entityFields)){
       const rows=(spec as Record<string,unknown>)[section];
       if(!Array.isArray(rows))continue;
       for(const row of rows){
-        if(!row||typeof row!=='object')continue;
-        check(row.id);check(row.roomId);check(row.districtId);
+        if(!row||typeof row!=='object'||Array.isArray(row))continue;
+        for(const field of fields)check((row as Record<string, unknown>)[field]);
       }
     }
   }
@@ -387,11 +395,13 @@ export type DerivedLayoutSites = {
  */
 export function deriveLayoutSites(tables: TableReadPort, branchId: string): DerivedLayoutSites {
   const issues: PlanIssue[] = [];
-  const locations = tables.selectWhere('locations', { branch_id: branchId, status: 'active' }, 1000) as SqlRow[];
-  const characters = tables.selectWhere('characters', { branch_id: branchId, status: 'active' }, 1000) as SqlRow[];
-  const items = tables.selectWhere('items', { branch_id: branchId, status: 'active' }, 1000) as SqlRow[];
-  const maps = tables.selectWhere('maps', { branch_id: branchId, status: 'active' }, 1000) as SqlRow[];
-  const routes = tables.selectWhere('routes', { branch_id: branchId }, 1000) as SqlRow[];
+  const active = (table: 'locations' | 'characters' | 'items' | 'maps'): SqlRow[] =>
+    pageAllRows(tables, table, branchId).filter((row) => row.status === 'active');
+  const locations = active('locations');
+  const characters = active('characters');
+  const items = active('items');
+  const maps = active('maps');
+  const routes = pageAllRows(tables, 'routes', branchId);
 
   const locationById = new Map<string, SqlRow>();
   for (const row of locations) {
@@ -407,7 +417,7 @@ export function deriveLayoutSites(tables: TableReadPort, branchId: string): Deri
     const containerId = asId(map.container_location_id);
     const container = containerId ? locationById.get(containerId) ?? null : null;
     // P13/R03 §20：档案先解析（作者选择 → 可信关系 → 类型默认），再决定布局 kind。
-    const ownForProfile = locations.filter((row) => String(row.map_id ?? '') === mapId && row.mobility !== 'mobile');
+    const ownForProfile = collectMapLocations({ mapRow: map, maps, locations }).filter((row) => row.mobility !== 'mobile');
     const profile = resolveSpatialProfile({
       map,
       container,
@@ -437,7 +447,7 @@ export function deriveLayoutSites(tables: TableReadPort, branchId: string): Deri
       rows = FALLBACK_ROWS;
     }
 
-    const own = locations.filter((row) => String(row.map_id ?? '') === mapId&&row.mobility!=='mobile');
+    const own = ownForProfile;
     const containerKind = String(container?.kind ?? '');
     const standalone = kind === 'floor' && own.length === 0
       && (containerKind === 'room' || containerKind === 'vehicle' || containerKind === 'floor' || containerKind === 'building');
@@ -738,11 +748,22 @@ export function buildSqlLayoutTask(
         kind: row.kind,
         description: row.description,
         parent: ref(row.parent_location_id),
+        placement: row.map_id === entry.mapId ? 'local' : 'proxy',
       })),
+      routes: derived.routes.filter((row) => row.map_id === entry.mapId && row.status !== 'closed' && ref(row.id))
+        .map((row) => ({ ref: ref(row.id), from: ref(row.from_location_id), to: ref(row.to_location_id),
+          kind: row.kind, status: row.status, bidirectional: canonicalFlag(row.bidirectional) === 1,
+          geometryQuality: row.geometry_quality, distanceM: row.distance_m ?? null })),
       actors: characters
-        .filter((row) => localIds.has(String(row.location_id ?? '')))
+        .filter((row) => localIds.has(String(row.location_id ?? '')) && ref(row.id) && ref(row.location_id))
+        .sort((a, b) => {
+          const priority = (row: SqlRow): number => row.role === 'protagonist' || input.requiredRefs?.some((r) => r.kind === 'character' && r.id === row.id) ? 0 : 1;
+          return priority(a) - priority(b) || byId(String(a.id), String(b.id));
+        })
+        .slice(0, LIMITS.actors)
         .map((row) => ({ ref: ref(row.id), name: row.name, roomId: ref(row.location_id) })),
-      items: items.filter(row=>localIds.has(String(row.location_id??'')))
+      items: items.filter(row=>localIds.has(String(row.location_id??'')) && !row.holder_character_id && !row.container_item_id && ref(row.id) && ref(row.location_id))
+        .slice(0, LIMITS.items)
         .map(row=>({ref:ref(row.id),name:row.name,kind:row.kind,description:row.description,roomId:ref(row.location_id)})),
       savedConstraints: aliasLayoutRefs(scene?.constraints ?? null, catalogue.knownRefs),
       layoutIssues: aliasLayoutRefs(sceneLayout?.issues ?? [], catalogue.knownRefs),
@@ -777,7 +798,7 @@ export function buildSqlLayoutTask(
     + 'overview 的 zone 必须是本图直属地点或目录里已有的代理入口；links 只能用目录中已登记的路线引用；feature 只是本图局部装饰，永远不产生新实体、也不产生新道路。'
     + '\ncity 的 districts 每项必须含 id、name、bank、order；bank 取 west/east，order 为整数。buildings 每项必须含 id、name、districtId、w、h。districts 至少一项；没有已登记街区时，以城市容器的地点引用作为自身街区。每个建筑的 districtId 必须对应本次或已保存街区，不能省略街区声明。新城市默认 enclosure="open"；无河流依据时 riverWidth=0。'
     + '\nfloor 的 rooms 每项用 id/name/w/h/side，side 只能 north 或 south；可选 role=indoor/outdoor/garden，分别表示室内、开放院落、园林。contents 每项用 id/name/type/roomId/w/h，type 只能 shelf/desk/bench/reading/stairs/table/chair/bed/cabinet/doorway/light/decor；actors 每项用 id/roomId，可选 near=陈设ID；items 每项用 id/on=陈设ID。所有键都必须双引号，不得照抄省略号或伪 JSON。'
-    + '\n布局阶段不新建 SQL 实体：所有可交互地点必须已经在目录里。但建设阶段允许新增地点，两者不冲突——不要因为布局不新建实体就停止补全世界。'
+    + '\n布局阶段不新建 SQL 实体：所有可交互地点必须已经在目录里。但建设阶段允许新增地点，两者不冲突——不要因为布局不新建实体就停止补全世界。actors/items 是本批有目录引用且在生成器额度内的相关者，不是整张人物表；未发送者仍保存在 SQL，由程序维护位置和地点名单，不能创建替身来凑数。'
     + '\n不要输出其他操作。';
   request.anchor = input.anchor;
   request.promptInput = {
@@ -837,7 +858,13 @@ export function buildSqlLayoutTask(
       ...(input.requiredRefs ?? []).map((item) => `${ref(item.id) ?? item.id}=必要引用(${item.kind})`),
     ],
     allowedOpsAndKinds: `map.layout.request、noop；本批地图 kind 只能是 ${layoutKinds.join('/')}（以每张图给定值为准，不得改写）`,
-    extents: scopes.map((scope) => `${scope.map}: ${scope.extent.width}×${scope.extent.height} ${scope.units}（框格 ${scope.frame.cols}×${scope.frame.rows}，${scope.frame.scaleLocked ? '比例尺已锁定' : '比例尺未锁定，按 1 格 = 1 单位处理'}）`).join('；'),
+    extents: scopes.map((scope) => {
+      const mpp = scope.frame.metersPerCell;
+      const units = typeof mpp === 'number' && mpp > 0 ? `1 格 = ${mpp} 米`
+        : scope.units === 'cells' ? '未标定；宽高及坐标以格为单位，不换算成米'
+          : '首次估计的物理幅面；比例尺由程序保存，不自行假定一格一米';
+      return `${scope.map}: ${scope.extent.width}×${scope.extent.height} ${scope.units}（框格 ${scope.frame.cols}×${scope.frame.rows}，${scope.frame.scaleLocked ? '比例尺已锁定' : '比例尺未锁定'}；${units}）`;
+    }).join('；'),
     locks: [
       `比例尺锁定图：${pending.filter((entry) => entry.map.scale_locked).map((entry) => ref(entry.mapId)).filter(Boolean).join('、') || '（无）'}`,
       'savedConstraints 的既有结构与稳定局部 ID 逐图保留，省略字段=保持、删除只能写 spec.deletes',

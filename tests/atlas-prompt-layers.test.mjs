@@ -80,7 +80,7 @@ test('PROMPT01 · 升级策略不动用户已另存的预设：读取视图与�
 });
 
 test('PROMPT01 · 新默认策略带明确版本标记，且版本号只出现在内置建议预设里', () => {
-  assert.equal(PROMPT_POLICY_VERSION, 'atlas-policy/2026-10-11');
+  assert.equal(PROMPT_POLICY_VERSION, 'atlas-policy/2026-10-16');
   const last = DEFAULT_SQL_PROMPT_SEGMENTS.at(-1);
   assert.equal(last.name, POLICY_SEGMENT_NAME);
   assert.ok(last.name.includes(PROMPT_POLICY_VERSION), '策略版本必须写在段名里，作者一眼能看出新旧');

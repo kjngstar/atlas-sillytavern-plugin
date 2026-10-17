@@ -16,6 +16,7 @@
 
 import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
 import { stableHexHash } from './atlas-hash.ts';
+import { pageWhereRows } from './atlas-db-readport.ts';
 import { collectTaskRefs } from './atlas-sql-task-refs.ts';
 import { completionMapIds, completionOwnershipIssues, resolveCompletionMaps } from './atlas-world-completion-ownership.ts';
 import { selectWorldConstructionSources, WORLD_SOURCE_MAX_CHARS, type WorldSourceChunk, type WorldSourceEntry, type WorldSourceSelection } from './atlas-sql-world-sources.ts';
@@ -119,7 +120,7 @@ function isActive(row: Record<string, unknown>): boolean {
 
 /** 读出某地点的直接子地点（定向查询，不做全表扫描）。 */
 function childrenOf(tables: TableReadPort, branchId: string, parentId: string): Array<Record<string, unknown>> {
-  const rows = tables.selectWhere('locations', { branch_id: branchId, parent_location_id: parentId });
+  const rows = pageWhereRows(tables, 'locations', branchId, { parent_location_id: parentId });
   return rows.filter((row) => isActive(row));
 }
 

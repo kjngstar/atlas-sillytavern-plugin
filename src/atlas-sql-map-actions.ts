@@ -69,6 +69,7 @@ export async function handleSqlMapAction(session:SqlSession,action:string,body:R
   /** P13/R03 §20：作者显式选择/清除绘图档案。 */
   let mapProfile:TurnInput['mapProfile'];
   let layoutMaps:TurnInput['layoutMaps'];
+  let layoutTargetMapId:string|undefined;
   let worldCompletion:WorldCompletionInput|undefined;
   let constructionMode:TurnInput['constructionMode'];
   /** P09B/§16.4：继续建设（程序模式）与本轮的稳定请求身份。 */
@@ -76,7 +77,8 @@ export async function handleSqlMapAction(session:SqlSession,action:string,body:R
   let continueIdentity='';
   let mapCalibration:TurnInput['mapCalibration']=calibration,manual=true,phases:TurnInput['phaseBatches']=[];
   if(action==='map/layout'){
-    layoutMaps=[String(map(body.mapId).id)];
+    layoutTargetMapId=String(map(body.mapId).id);
+    layoutMaps=[layoutTargetMapId];
   }else if(action==='map/build'){
     // M3-13：显式「建设世界」。manual narrativeKind + sceneOnly —— 只补结构，不推进世界时间。
     const mode:(WorldCompletionInput['mode'])=body.mode==='bootstrap'?'bootstrap':'local';
@@ -234,7 +236,7 @@ export async function handleSqlMapAction(session:SqlSession,action:string,body:R
   const readBack=createTableReadPort(session.repo.db);
   const added = readBack.selectWhere('locations',{branch_id:session.branchId,status:'active'},1000).filter(row=>!beforeLocations.has(String(row.id)));
   const build=action==='map/build'?summarizeWorldFill(readBack,session.branchId,worldCompletion):undefined;
-  return {coreSaved:true,...(action==='map/layout'?{sceneSaved:savedTurnHasScene(session.repo.db,result.receipt.turnId,String(body.mapId))}:{}),pointsAdded:added.filter(row=>row.kind!=='region').length,regionsAdded:added.filter(row=>row.kind==='region').length,status:action==='map/scale'?'calibrated':constructionMode==='extract-only'?'extracted':result.receipt.status,message:constructionMode==='extract-only'?'分块事实已登记；总体建设留到抽取结束后一次执行':'已保存到当前聊天的 SQL 数据库',...(build?{build}:{}),receipt:result.receipt,issues:result.issues};
+  return {coreSaved:true,...(action==='map/layout'?{sceneSaved:savedTurnHasScene(session.repo.db,result.receipt.turnId,layoutTargetMapId)}:{}),pointsAdded:added.filter(row=>row.kind!=='region').length,regionsAdded:added.filter(row=>row.kind==='region').length,status:action==='map/scale'?'calibrated':constructionMode==='extract-only'?'extracted':result.receipt.status,message:constructionMode==='extract-only'?'分块事实已登记；总体建设留到抽取结束后一次执行':'已保存到当前聊天的 SQL 数据库',...(build?{build}:{}),receipt:result.receipt,issues:result.issues};
 }
 
 /**

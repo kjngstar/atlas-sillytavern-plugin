@@ -1,4 +1,4 @@
-import {compileSceneGroup} from '../vendor/atlas-spatial/index.mjs';
+import {compileSceneGroup,collectMapLocations} from '../vendor/atlas-spatial/index.mjs';
 import {normalizeFrame,normalizeSqlMapFrame,fitFrameToPhysicalSize,alignSqlFrameToPhysicalSize,type SpatialScope} from './atlas-spatial-frame.ts';
 import {resolveMapSpaceSize,locationSpaceSize,readSpaceCanonical} from './atlas-space-canonical.ts';
 import type {AtomicGroup,RowMutation} from './atlas-ops-contract.ts';
@@ -37,7 +37,7 @@ export function completeLayoutClosure(input:{group:AtomicGroup;maps:Row[];locati
     if(++attempts>24)return {ok:false,issues:[{code:'SPACE_PROJECTION_LIMIT',path:'$.layout',message:'关联空间投影超过本轮有限预算；保留原组件',severity:'error',retryable:false}]};
     const container=locations.find(l=>l.id===map.container_location_id),scene=frame.atlasScene as Row|undefined;
     const layout=scene?.layout as Row|undefined;
-    const members=locations.filter(l=>l.map_id===mapId);
+    const members=collectMapLocations({mapRow:map,maps,locations});
     const profile=resolveSpatialProfile({map,container:container??null,members,routes:input.routes.filter(r=>r.map_id===mapId)});
     const kind=layout?profile.layoutKind:(['room','floor'].includes(String(container?.kind))&&canonical?'floor':null);
     if(kind!=='floor'&&kind!=='city'&&kind!=='overview')continue;

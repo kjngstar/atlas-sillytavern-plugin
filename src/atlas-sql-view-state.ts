@@ -1,6 +1,6 @@
 /** One immutable SQL read context supplies every panel, including legacy-shaped UI fields. */
 import { queryBound } from './atlas-db-runtime.ts';
-import { createTableReadPort } from './atlas-db-readport.ts';
+import { createTableReadPort, pageWhereRows } from './atlas-db-readport.ts';
 import { queryMapView, queryNearby, queryChanges, queryDiagnostics, querySimulationView } from './atlas-db-views.ts';
 // M4/Q08：只读口按明确键进 state.sqlViews；目录按需查询，不在 /state 预取整张目录。
 import { querySpatialFlows } from './atlas-spatial-flow-views.ts';
@@ -13,9 +13,9 @@ import type { ViewQuery } from './atlas-ops-contract.ts';
 
 export function querySqlSceneState(ctx: ViewContext, query: {chatUid:string;worldUid:string;worldName:string}) {
   const table=createTableReadPort(ctx.db), branch=queryBound(ctx.db,'SELECT * FROM branches WHERE id=?',[ctx.branchId])[0];
-  const locations=table.selectWhere('locations',{branch_id:ctx.branchId,status:'active'},1000);
-  const characters=table.selectWhere('characters',{branch_id:ctx.branchId,status:'active'},1000);
-  const items=table.selectWhere('items',{branch_id:ctx.branchId,status:'active'},1000);
+  const locations=pageWhereRows(table,'locations',ctx.branchId,{status:'active'});
+  const characters=pageWhereRows(table,'characters',ctx.branchId,{status:'active'});
+  const items=pageWhereRows(table,'items',ctx.branchId,{status:'active'});
   const counts=Object.fromEntries(['locations','characters','items'].map(name=>[name,Number(queryBound(ctx.db,`SELECT COUNT(*) AS n FROM ${name} WHERE branch_id=? AND status='active'`,[ctx.branchId])[0].n)]));
   const uniquePov=characters.filter(c=>c.role==='protagonist');
   const povId=ctx.povId ?? (branch?.pov_character_id?String(branch.pov_character_id):uniquePov.length===1?String(uniquePov[0].id):undefined);
@@ -75,5 +75,5 @@ export function querySqlSceneState(ctx: ViewContext, query: {chatUid:string;worl
       locations:{entries:locationsDto,total:counts.locations,truncated:counts.locations-locations.length},unplacedLocations:{entries:unplaced,total:unplaced.length,truncated:counts.locations-locations.length},
       locationOccupants:{entries:occupants,total:occupants.length,truncated:0},current:{locationId:currentLocationId,chain,position:player?position(String(player.id)):null}},
     sqlViews:{map,nearby,changes,diagnostics,simulation,scene,flows,tasks},catalogBase,changes:changes.items,simulationView:simulation.items[0]??null,
-    sqlMode:true,coreSaved:false,readLimits:{limit:1000,counts,truncated:Object.fromEntries(Object.entries(counts).map(([key,total])=>[key,Math.max(0,total-1000)]))}};
+    sqlMode:true,coreSaved:false,readLimits:{limit:null,pageSize:500,complete:true,counts,truncated:Object.fromEntries(Object.keys(counts).map(key=>[key,0]))}};
 }

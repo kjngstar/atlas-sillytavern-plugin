@@ -18,6 +18,7 @@
 
 import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
 import { stableHexHash } from './atlas-hash.ts';
+import { pageWhereRows } from './atlas-db-readport.ts';
 import type { TableReadPort } from './atlas-ops-compile-types.ts';
 import type { AtlasTableName } from './atlas-db-contract.ts';
 import type { KnownRef } from './atlas-sql-refs.ts';
@@ -41,9 +42,6 @@ const REF_TABLES: Array<{ table: AtlasTableName; prefix: string; kind: RefKind }
   { table: 'channels', prefix: 'H', kind: 'channel' },
   { table: 'knowledge', prefix: 'K', kind: 'knowledge' },
 ];
-
-/** 单次 selectWhere 的读取上限（与 readport 内部 clamp 一致，不新增第二套限制）。 */
-const SELECT_LIMIT = 1000;
 
 const rowId = (row: SqlRow | null | undefined): string | null => {
   if (!row) return null;
@@ -99,10 +97,19 @@ export function collectTaskRefs(tables: TableReadPort, input: TaskRefInput): Tas
     bucket.add(ref.id);
     requiredNeeded.set(ref.kind, bucket);
   }
+  addAll(neededLocations, requiredNeeded.get('location') ?? []);
+  addAll(neededMaps, requiredNeeded.get('map') ?? []);
+  // Required routes are indivisible dependencies, including endpoints and their coordinate frame.
+  for (const routeId of requiredNeeded.get('route') ?? []) {
+    const route = tables.selectOne('routes', branchId, routeId);
+    if (!route) continue;
+    addAll(neededLocations, [rowId({ id: route.from_location_id }), rowId({ id: route.to_location_id })]);
+    if (route.map_id) neededMaps.add(String(route.map_id));
+  }
 
   const readOne = (table: AtlasTableName, id: string): SqlRow | null => tables.selectOne(table, branchId, id) as SqlRow | null;
   const readWhere = (table: AtlasTableName, where: Record<string, unknown>): SqlRow[] =>
-    tables.selectWhere(table, { branch_id: branchId, ...where }, SELECT_LIMIT) as SqlRow[];
+    pageWhereRows(tables, table, branchId, where) as SqlRow[];
 
   // ── 2. 完整祖先链：父地点必须能一直查到根，且其地图也要能 resolve ────────
   const ancestorVisited = new Set<string>();
@@ -160,7 +167,8 @@ export function collectTaskRefs(tables: TableReadPort, input: TaskRefInput): Tas
         if (id === null || seenRoutes.has(id)) continue;
         seenRoutes.add(id);
         extraRoutes.add(id);
-        if (row.status !== undefined && String(row.status) !== 'active') continue;
+        // Routes use open/blocked/closed, never the entity-only status 'active'.
+        // Closed routes remain addressable for editing; the generator separately excludes their geometry.
         addAll(extraLocations, [
           row.from_location_id === null || row.from_location_id === undefined ? null : String(row.from_location_id),
           row.to_location_id === null || row.to_location_id === undefined ? null : String(row.to_location_id),

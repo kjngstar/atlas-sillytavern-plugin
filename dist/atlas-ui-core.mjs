@@ -68,12 +68,12 @@ var PROMPT_POLICY_VERSION, DEFAULT_POLICY_CONTENT, POLICY_SEGMENT_NAME, TASK_CON
 var init_atlas_prompt_layers = __esm({
   "src/atlas-prompt-layers.ts"() {
     "use strict";
-    PROMPT_POLICY_VERSION = "atlas-policy/2026-10-11";
+    PROMPT_POLICY_VERSION = "atlas-policy/2026-10-16";
     DEFAULT_POLICY_CONTENT = [
-      "只维护已经出现或有资料依据的世界结构。正文明确内容与估计必须区分；没有依据的地点、尺寸、路线和陈设不得标成已确认。",
+      "维护已有事实，并在建设阶段依据世界观、场所用途与已登记结构，适量补全有用途的普通功能地点；原文没有逐一点名不等于禁止建设，合理补全必须标 inferred 并说明 why。正文明确内容与估计必须区分，没有依据的地点、尺寸、路线和陈设不得标成已确认。",
       "地点身份由实体 ID 和父地点决定。同名但父地点不同的对象保持独立。新地点使用 new: 引用，复用已有地点时使用本批提供的引用。",
       "地图生成只输出程序允许的 map.layout.request 小约束，遵循程序给定的 overview/city/floor。不要输出完整 scene、画布坐标、seed 或自行修改比例尺。现有 floor 房间 role 只有 indoor/outdoor/garden。",
-      "已有房间、路线和作者锁优先保留。缺少资料时保持未知并说明原因，不通过补造实体使地图看起来完整。",
+      "已有房间、路线和作者锁优先保留。布局阶段只引用已登记实体，装饰不成为 SQL 地点或真实物品。确实缺少推断依据的用途与关系保持未知，不凭建设虚构重大历史、重大事件或已完成行动。",
       "路线有明确同图归属时提供正确 map_ref；跨图连接不拼接不同坐标系。装饰路纹不代表真实路线。",
       "对当前阶段没有必要变更时输出合法 noop；不要把「已保存」「发过请求」或「有一个场景」声称为整个地图建设完成。"
     ].join("\n");
@@ -2940,6 +2940,13 @@ var init_generation = __esm({
   }
 });
 
+// vendor/atlas-spatial/map-membership.mjs
+var init_map_membership = __esm({
+  "vendor/atlas-spatial/map-membership.mjs"() {
+    "use strict";
+  }
+});
+
 // vendor/atlas-spatial/placement.mjs
 var init_placement = __esm({
   "vendor/atlas-spatial/placement.mjs"() {
@@ -3014,6 +3021,7 @@ var init_host_context = __esm({
     "use strict";
     init_contracts();
     init_storage();
+    init_map_membership();
   }
 });
 
@@ -3059,6 +3067,7 @@ var init_atlas_spatial = __esm({
     "use strict";
     init_contracts();
     init_generation();
+    init_map_membership();
     init_placement();
     init_storage();
     init_view_adapter();
@@ -3538,6 +3547,7 @@ var init_atlas_sql_task_refs = __esm({
     "use strict";
     init_atlas_runtime_limits();
     init_atlas_hash();
+    init_atlas_db_readport();
   }
 });
 
@@ -3554,6 +3564,7 @@ var init_atlas_sql_layout_task = __esm({
   "src/atlas-sql-layout-task.ts"() {
     "use strict";
     init_atlas_db_readport();
+    init_atlas_spatial();
     init_atlas_sql_task_refs();
     init_atlas_ops_prompts();
     init_atlas_spatial_frame();
@@ -3624,6 +3635,7 @@ var init_atlas_sql_world_completion = __esm({
     "use strict";
     init_atlas_runtime_limits();
     init_atlas_hash();
+    init_atlas_db_readport();
     init_atlas_sql_task_refs();
     init_atlas_world_completion_ownership();
     init_atlas_sql_world_sources();
@@ -4341,6 +4353,8 @@ var init_atlas_spatial_candidate = __esm({
       rooms: "locations",
       districts: "locations",
       buildings: "locations",
+      zones: "locations",
+      links: "routes",
       actors: "characters",
       items: "items"
     });
@@ -9656,7 +9670,7 @@ function createAtlasSettingsRoutes(deps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.89",
+      version: "0.9.90",
       protocolVersion: 1,
       time: now()
     });

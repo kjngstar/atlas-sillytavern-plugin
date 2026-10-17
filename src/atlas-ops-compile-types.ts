@@ -20,6 +20,8 @@ export type TableReadPort = {
    * 省略时上层退回 selectWhere（有硬上限），因此需要跨越 1,001 行的路径必须实现它。
    */
   selectPage?(table: AtlasTableName, branchId: string, afterId: string | null, pageSize: number): Array<Record<string, unknown>>;
+  /** Program-owned filtered keyset query; columns still pass the schema whitelist. */
+  selectWherePage?(table: AtlasTableName, where: Record<string, unknown>, afterId: string | null, pageSize: number): Array<Record<string, unknown>>;
   nextSeq?: () => number;
 };
 

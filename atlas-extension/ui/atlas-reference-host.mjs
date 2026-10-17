@@ -2,6 +2,7 @@
 import { emptyReferenceData, projectReferenceData, referenceEntity,referenceReceipts,referenceDiagnostics } from './atlas-reference-data.mjs';
 import { referencePresetDocument, referenceSettingsCommands } from './atlas-reference-presets.mjs';
 import { buildMapAnalysisExport } from './atlas-map-export.mjs';
+import { projectReferenceFlows } from './atlas-reference-flows.mjs';
 
 /**
  * M6-01：事件流分页参数，镜像 `src/atlas-runtime-limits.ts` 的 feedPageMax。
@@ -222,6 +223,29 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
     }catch(error){actionError=error.message;throw error;}finally{actionBusy=false;deliver(latest);}
   }
   const bridge={boot,ready(){ready=true;deliver(latest);render();if(core.getState().panelOpen!==false)frame.contentWindow?.focus?.();},inspect,persistPresets,
+    async readFlows(mapId,selectedEntityId=null){
+      const ticket={...scope(),epoch},node=findNode(latest.ROOT,mapId),revision=latest.meta.revision;
+      if(!node||!ticket.state.binding)return null;
+      const dto=await query(ticket,'flows',{mapId:node.id,selectedEntityId,revision});
+      if(!dto||!live(ticket)||dto.metadata?.stale||dto.revision!==revision)return null;
+      return {scopeKey:latest.meta.scopeKey,revision,mapId:node.id,...projectReferenceFlows(dto,node)};
+    },
+    async onPage(page){
+      if(page!=='lore')return;
+      const ticket={...scope(),epoch};
+      try{await readLore();}catch(error){
+        if(!live(ticket))return;
+        emit({level:'error',source:'ui',code:'REFERENCE_LORE_READ_FAILED',details:{message:error.message}});
+        latest.LORE=[];
+        latest.DIAGNOSTICS.unshift({id:'lore-read-failed',t:'',level:'error',code:'REFERENCE_LORE_READ_FAILED',message:error.message});
+        deliver(latest);
+      }
+    },
+    async toggleLore(id){
+      if(viewMode!=='author')throw Error('请切换世界后台后修改世界书条目');
+      if(!lorePort?.toggle)throw Error('世界书启停端口不可用');
+      await lorePort.toggle(id);await readLore();
+    },
     downloadMap(filename,text){
       // Own the Blob in the top document: embedded browsers cannot download
       // a frame-owned Blob. Invoke synchronously from the explicit link click.
@@ -252,7 +276,7 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
       if(disposed||captured.key!==scope().key||captured.metadata!==context()?.chatMetadata||mapExportViews?.key!==scope().key)throw Error('世界或视角已变化，请重新导出地图');
       return buildMapAnalysisExport({data:latest,...mapExportViews,mapId,pluginVersion,layoutPolicyVersion:sqlMod?.LAYOUT_SIGNATURE_POLICY_VERSION??null});
     },
-    async setViewMode(mode){viewMode=mode==='author'?'author':'pov';await refresh(true);},
+    async setViewMode(mode){viewMode=mode==='author'?'author':'pov';await refresh(true);if(frame.contentWindow?.AtlasPreview?.state.page==='lore')await bridge.onPage('lore');},
     async setLoreRead(id,enabled){if(viewMode!=='author')throw Error('请切换世界后台后修改 ATLAS 读取设置');if(!lorePort?.setAtlasRead)throw Error('ATLAS 读取设置不可用');await lorePort.setAtlasRead(id,enabled);await readLore();},
     close(){core.setPanelOpen(false);},
     async setEnabled(enabled){if(actionBusy||core.getState().pendingTurn)throw Error('有回合正在处理，请稍后再试');if(!core.getState().binding)throw Error('请先建立当前聊天的世界');await core.setEnabled(enabled);await refresh(true);const s=core.getState();if(s.binding?.enabled!==enabled)throw Error(s.lastError??'推演开关未保存');},

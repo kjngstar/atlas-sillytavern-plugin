@@ -1,79 +1,119 @@
 {
-  "patchId": "atlas-0.9.89-rc.1-two-stage-20261016",
-  "baseVersion": "0.9.88",
-  "baseCommit": "b37054e168ca85fbf4b5592f2789b20bbc526def",
-  "baseHotfixId": "atlas-0.9.88-hotfix-20261014",
+  "patchId": "atlas-0.9.90-rc.1-20261017",
+  "baseVersion": "0.9.89",
+  "baseReleaseVersion": "0.9.89-rc.1",
+  "baseCommit": "e4874b9305c8f690706b7905016174425b71d07c",
   "schemaVersion": 3,
-  "fixes": [
-    "source-tail-continuation",
-    "same-batch-route-endpoints",
-    "explicit-topology-only-routes",
-    "fair-construction-scheduling",
-    "scene-input-alignment",
+  "releaseVersion": "0.9.90-rc.1",
+  "manifestVersion": "0.9.90",
+  "releaseChannel": "prerelease",
+  "preserved": [
     "two-stage-layout-evidence-extraction",
-    "verified-map-specific-layout-context",
-    "city-container-district-fallback",
-    "bounded-spatial-transport-retry",
-    "layout-length-response-rejection",
-    "source-segment-reference-extraction",
-    "per-map-evidence-failure-isolation",
-    "parent-child-initial-dimension-consistency",
-    "hierarchical-spatial-application",
+    "map-specific-source-context",
+    "bounded-transport-retry",
+    "one-map-per-layout-request",
+    "parent-child-canonical-dimensions",
     "uncalibrated-frame-capacity-growth",
-    "distinct-route-reference-identities",
-    "layout-specific-json-prompt",
-    "spatial-retry-ui-state",
-    "pre-geometry-entity-reference-repair",
-    "registered-city-json-example"
+    "source-tail-continuation"
   ],
+  "fixes": [
+    "worldbook-page-bridge",
+    "lore-scope-and-settings-stale-result-guards",
+    "host-lore-write-copy-before-save",
+    "logical-map-membership",
+    "cross-map-display-proxy-no-physical-writeback",
+    "complete-keyset-map-and-roster-reads",
+    "required-route-endpoint-catalogue",
+    "bounded-actor-markers-with-full-sql-roster",
+    "stale-zone-and-route-pruning",
+    "semantic-route-signature",
+    "calibrated-scale-prompt",
+    "entity-reference-preflight-all-entity-slots"
+  ],
+  "layoutPolicyVersion": "layout-v6",
+  "promptPolicyVersion": "atlas-policy/2026-10-16",
   "validation": {
     "fullTests": {
-      "tests": 2133,
-      "pass": 2133,
+      "tests": 2194,
+      "pass": 2194,
       "fail": 0,
       "skipped": 0
     },
     "typecheck": "passed",
-    "historicalFailureReplay": "parent-capacity-and-length-guards-passed",
-    "liveSingleMap": {
-      "injected502": true,
-      "modelRequests": 3,
-      "sceneSaved": true,
-      "nativeStatus": "committed",
-      "checks": 30,
-      "failed": [
-        "hover-keeps-anchors"
-      ],
-      "pageErrors": 0,
-      "build": "first-repair-build"
+    "pack": "passed",
+    "browser": {
+      "environment": "Codex in-app browser; production UI and read-only API with isolated synthetic SQL snapshot",
+      "relationToggle": "passed",
+      "messageEntry": "passed",
+      "propagationCommittedProgress": 0.4,
+      "povIsolation": "passed"
     },
-    "liveFullTurn": {
-      "modelRequests": 13,
-      "sharedExtractionRequests": 1,
-      "layoutRequests": 9,
-      "registeredMaps": 9,
-      "scenesSaved": 9,
-      "sceneIssues": 0,
-      "nativeStatus": "partial",
-      "remainingStage": "observe-and-construction",
-      "checks": 30,
-      "failed": [
-        "live-turn-committed-a-new-outcome"
-      ],
-      "pageErrors": 0,
-      "integrity": "ok",
-      "foreignKeyErrors": 0
+    "realTavern": {
+      "existingWorldSingleMapLayout": "committed; coreSaved=true; sceneSaved=true",
+      "worldbookEntries": 120,
+      "relationAndPropagationRecordsInOriginalAcceptanceChat": 0
     },
-    "liveFeatureBuild": "final repair logic before version-only synchronization from 0.9.88 to 0.9.89",
-    "releaseGates": {
-      "tests": 127,
-      "pass": 127,
+    "notVerified": [
+      "AI creation of relations and propagation tasks from new stories",
+      "universal external-model compatibility",
+      "complete automatic world construction"
+    ]
+  },
+  "localAcceptanceFixes": [
+    "resolved-map-id-for-scene-save-evidence",
+    "identical-regeneration-counts-only-with-current-scene-generator-journal",
+    "smooth-closed-contour-seam-and-open-endpoints",
+    "selected-entity-and-map-scoped-flow-query",
+    "relation-line-toggle-and-labels",
+    "persisted-propagation-route-and-source-resolution",
+    "committed-propagation-progress",
+    "stale-flow-response-and-pov-isolation"
+  ],
+  "localAcceptanceValidation": {
+    "fullTests": {
+      "tests": 2194,
+      "pass": 2194,
       "fail": 0,
-      "version": "0.9.89"
+      "skipped": 0
+    },
+    "typecheck": "passed",
+    "realTavern": {
+      "browser": "Codex in-app browser",
+      "chat": "dedicated Atlas acceptance chat",
+      "nativeStatus": "committed",
+      "coreSaved": true,
+      "sceneSaved": true,
+      "receiptIssues": 0,
+      "worldbookEntries": 120,
+      "loreTogglesRestored": true
+    },
+    "additionalServerRestart": false,
+    "additionalBackup": false,
+    "contactFlows": {
+      "environment": "Codex in-app browser; production UI and read-only API with isolated synthetic SQL snapshot",
+      "relationToggle": "passed",
+      "messageEntry": "passed",
+      "propagationCommittedProgress": 0.4,
+      "povIsolation": "passed"
     }
   },
-  "baseHotfixSourcePatchSha256": "948ff80c6f3163994a22a7f5b418b87f71837aaef4d6191549a43f00be2208d1",
-  "releaseVersion": "0.9.89-rc.1",
-  "manifestVersion": "0.9.89",
-  "releaseChannel": "candidate"
+  "releaseDate": "2026-10-17",
+  "upstreamPackageValidation": {
+    "fullTests": {
+      "tests": 2182,
+      "pass": 2182,
+      "fail": 0,
+      "skipped": 0
+    },
+    "typecheck": "passed",
+    "pack": "passed",
+    "browser": {
+      "environment": "Chromium + packaged extension + real sql.js + simulated Tavern host",
+      "checks": 81,
+      "failed": [],
+      "pageErrors": 0
+    },
+    "realTavernWithExternalModel": "not run in this environment",
+    "note": "Local repair build; not an upstream release or a claim of universal model compatibility."
+  }
 }

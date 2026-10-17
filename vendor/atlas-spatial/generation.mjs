@@ -99,6 +99,7 @@ function dimensions(raw){if(!finite(raw.w)||!finite(raw.h)||raw.w<=0||raw.h<=0)t
 /** 02 §6.4：程序陈设类型。solid 类型参与碰撞；light/decor/doorway/stairs 不挡路。 */
 const FLOOR_FURNITURE_TYPES=['shelf','desk','bench','reading','stairs','table','chair','bed','cabinet','doorway','light','decor'];
 function trustedLock(ctx,type,id){const v=ctx.locks?.[type]?.[id];return v&&finite(v.x)&&finite(v.y)?{x:v.x,y:v.y}:null;}
+const proxyPlacement=(ctx,id)=>ctx.placement?.[id]==='proxy'?{placement:'proxy'}:{};
 function finish(s,ctx,layoutFn){
   const previous=s.previous;
   if(previous&&(previous.mapId!==s.map.id||previous.branchId!==s.scope.branchId))return failure('SCENE_SCOPE_MISMATCH','$.previousScene','旧场景属于另一地图或分支');
@@ -107,6 +108,11 @@ function finish(s,ctx,layoutFn){
   const deletedContents=[...deletionSet(s,'contents')];
   if(previous?.inputSignature===inputSignature&&!(previous.layout?.issues?.length)&&checkSceneDocument(previous).length===0){return {ok:true,status:s.issues.length?'partial':'reused',scene:clone(previous),issues:s.issues,guard:{scope:s.scope,mapId:s.map.id,inputSignature},metricProposal:s.metricProposal,deletedContents};}
   const layout=layoutFn(s.spec,previous?.layout??null);
+  // Every template carries the program's proxy decision into saved geometry.
+  // A layout coordinate must never become a fabricated cross-map physical position.
+  for(const part of [...(layout.rooms??[]),...(layout.districts??[]),...(layout.buildings??[])]){
+    if(ctx.placement?.[part.id]==='proxy')part.placement='proxy';else delete part.placement;
+  }
   for(const issue of layout.issues??[])s.issues.push(diagnostic(issue.code,'$.layout','空间约束未满足',{entityId:issue.id??null}));
   if(!layout.ok)return {ok:false,status:'failed',scene:null,kept:previous?clone(previous):null,issues:s.issues,guard:{scope:s.scope,mapId:s.map.id,inputSignature}};
   // Saved physical coordinates and schematic positions remain different concepts.
@@ -154,7 +160,7 @@ function generateFloorOnce(value,context){
       const lock=rectLockOf(ctx,s.spec.corridorLocationRef);
       if(lock)s.spec.corridorLock=lock;
     }
-    s.spec.rooms=collectAndMerge(s,'rooms',LIMITS.rooms,'locations',r=>{const authority=r.id===s.map.containerLocationId?ctx.spaceSize??ctx.spaceCanonical?.size:ctx.childSpaces?.[r.id];const d=ctx.locks?.rooms?.[r.id]?.w>0?dimensions(ctx.locks.rooms[r.id]):authority?dimensions({w:authority.widthM,h:authority.heightM}):dimensions(r);if(d.w>LIMITS.roomSide||d.h>LIMITS.roomSide||!['north','south'].includes(r.side)||r.role!==undefined&&!['indoor','outdoor','garden'].includes(r.role))throw new Error('ROOM_CONSTRAINT_UNSUPPORTED');const locked=trustedLock(ctx,'rooms',r.id);return {...d,side:r.side,...(r.role?{role:r.role}:{}),...(locked?{locked}:{} )};});
+    s.spec.rooms=collectAndMerge(s,'rooms',LIMITS.rooms,'locations',r=>{const authority=r.id===s.map.containerLocationId?ctx.spaceSize??ctx.spaceCanonical?.size:ctx.childSpaces?.[r.id];const d=ctx.locks?.rooms?.[r.id]?.w>0?dimensions(ctx.locks.rooms[r.id]):authority?dimensions({w:authority.widthM,h:authority.heightM}):dimensions(r);if(d.w>LIMITS.roomSide||d.h>LIMITS.roomSide||!['north','south'].includes(r.side)||r.role!==undefined&&!['indoor','outdoor','garden'].includes(r.role))throw new Error('ROOM_CONSTRAINT_UNSUPPORTED');const locked=trustedLock(ctx,'rooms',r.id);return {...d,side:r.side,...(r.role?{role:r.role}:{}),...(locked?{locked}:{} ),...proxyPlacement(ctx,r.id)};});
     // §18.2 第 4 条：rooms 中不得重复出现被绑定的走廊实体 —— 旧约束带来的条目同样要移除。
     if(s.spec.corridorEntityId){
       const before=s.spec.rooms.length;
@@ -216,9 +222,9 @@ export function generateCity(value,context){
     // G07：新城市默认开放边界；旧档（无 enclosure 且有旧场景）保持原有城墙输出，升级不拆旧墙。
     if(s.input.enclosure!==undefined&&!CITY_ENCLOSURES.includes(s.input.enclosure))s.issues.push(diagnostic('ENCLOSURE_INVALID','$.enclosure','城市边界策略只能是 open 或 wall；已按既有/默认策略处理',{severity:'warning'}));
     s.spec.enclosure=CITY_ENCLOSURES.includes(s.input.enclosure)?s.input.enclosure:(s.previous?(s.previous.constraints?.enclosure??'wall'):'open');
-    s.spec.districts=collectAndMerge(s,'districts',LIMITS.districts,'locations',r=>{if(!['west','east'].includes(r.bank)||!finite(r.order))throw new Error('DISTRICT_CONSTRAINT_INVALID');return {bank:r.bank,order:r.order};});
+    s.spec.districts=collectAndMerge(s,'districts',LIMITS.districts,'locations',r=>{if(!['west','east'].includes(r.bank)||!finite(r.order))throw new Error('DISTRICT_CONSTRAINT_INVALID');return {bank:r.bank,order:r.order,...proxyPlacement(ctx,r.id)};});
     const districtIds=new Set(s.spec.districts.map(d=>d.id));
-    s.spec.buildings=collectAndMerge(s,'buildings',LIMITS.buildings,'locations',r=>{if(!districtIds.has(r.districtId))throw new Error('DISTRICT_REF_UNKNOWN');const locked=trustedLock(ctx,'buildings',r.id);return {...(ctx.locks?.buildings?.[r.id]?.w>0?dimensions(ctx.locks.buildings[r.id]):dimensions(r)),districtId:r.districtId,...(locked?{locked}:{})};});
+    s.spec.buildings=collectAndMerge(s,'buildings',LIMITS.buildings,'locations',r=>{if(!districtIds.has(r.districtId))throw new Error('DISTRICT_REF_UNKNOWN');const locked=trustedLock(ctx,'buildings',r.id);return {...(ctx.locks?.buildings?.[r.id]?.w>0?dimensions(ctx.locks.buildings[r.id]):dimensions(r)),districtId:r.districtId,...(locked?{locked}:{}),...proxyPlacement(ctx,r.id)};});
     return finish(s,ctx,E.city);
   }catch(e){return failure(String(e.message),'$','生成请求不可用；保留已保存布局',{kept:context?.previousScene?clone(context.previousScene):null});}
 }

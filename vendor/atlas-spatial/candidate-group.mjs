@@ -9,7 +9,7 @@ export function compileSceneGroup({request,scope,currentScope,mapRow,locations,c
   try{
   const generate=GENERATORS[request?.kind];
   if(!generate)return failure('LAYOUT_KIND_UNSUPPORTED','$.request.kind','使用 floor/city/overview；其他空间沿用现有轮廓');
-  const built=buildLayoutContext({scope,mapRow,locations,characters,items,routes});if(!built.ok)return built;
+  const built=buildLayoutContext({scope,mapRow,maps,locations,characters,items,routes});if(!built.ok)return built;
   const ctx={...built.context,currentScope,childSpaces,autoPlan,planningProjection},spec=clone(request.spec),membershipIssues=[];
   // P12/R03 §19.2：宿主解析出的尺寸权威（按「作者确认 → canonical → 父图足迹 → 首次估计」的顺序）
   // 是**本轮生成的物理依据**。发生确认矛盾时宿主选的是作者事实，而 frame 里的 canonical 可能还是
@@ -52,6 +52,7 @@ export function compileSceneGroup({request,scope,currentScope,mapRow,locations,c
     mutations.push({table:'locations',rowId:before.id,before:clone(before),after,sourceOpIds:[operationId],basis:{kind:'layout',mapId:mapRow.id,quality:geo.precision}});readSet.push({table:'locations',rowId:before.id,rowRev:before.row_rev});
   }
   for(const room of [...(result.scene.layout.rooms??[]),...(result.scene.layout.corridor?.entityId?[{...result.scene.layout.corridor,id:result.scene.layout.corridor.entityId}]:[])]){
+    if(room.placement==='proxy')continue;
     if(room.id===mapRow.container_location_id)continue;
     const holders=maps.filter(m=>m.branch_id===scope.branchId&&m.status==='active'&&m.container_location_id===room.id);
     if(holders.length!==1)continue;

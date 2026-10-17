@@ -128,3 +128,35 @@ test('invented entity IDs get one fresh repair before geometry while local furni
   assert.deepEqual(unknownLayoutEntityRefs([{op:'map.layout.request',data:{spec:{rooms:[{id:'L1'}],contents:[{id:'local-bed',roomId:'L1'}],actors:[{id:'C1',roomId:'L1',near:'local-bed'}],items:[{id:'I1',on:'local-bed'}]}}}],[{id:'location',alias:'L1'},{id:'character',alias:'C1'},{id:'item',alias:'I1'}]),[]);
  }finally{await repo.close();}
 });
+
+for (const [field, spec] of [
+ ['route', {links:[{id:'missing-route'}]}],
+ ['furniture-room', {contents:[{id:'local-desk',roomId:'missing-room'}]}],
+ ['zone-near', {zones:[{id:'L1',near:'missing-neighbor'}]}],
+ ['corridor', {corridorLocationRef:'missing-corridor'}],
+ ['feature-zone', {features:[{id:'local-forest',zoneId:'missing-zone'}]}],
+]) test(`repair preflight catches ${field} references without treating local IDs as entities`, () => {
+ const unknown=unknownLayoutEntityRefs([{op:'map.layout.request',data:{spec}}],[{id:'location',alias:'L1'}]);
+ assert.equal(unknown.length,1);assert.ok(unknown[0].startsWith('missing-'));
+ assert.ok(!unknown.some(id=>id.startsWith('local-')));
+});
+
+test('all valid entity slots accept aliases and raw IDs; decoration and furniture IDs stay local',()=>{
+ const refs=['location','room','route','character','item'].map((id,i)=>({id,alias:`X${i}`}));
+ const spec={zones:[{id:'X0',near:'room'}],links:[{id:'X2'}],features:[{id:'local-texture',zoneId:'X0'}],
+  corridorLocationRef:'room',districts:[{id:'location'}],buildings:[{id:'X1',districtId:'location'}],
+  rooms:[{id:'room'}],contents:[{id:'local-desk',roomId:'X1'}],actors:[{id:'X3',roomId:'room',near:'local-desk'}],items:[{id:'X4',on:'local-desk'}]};
+ assert.deepEqual(unknownLayoutEntityRefs([{op:'map.layout.request',data:{spec}}],refs),[]);
+});
+
+for(const repaired of [true,false])test(`unregistered route receives exactly one repair request (repaired=${repaired})`,async()=>{
+ const invalid=()=>JSON.stringify({op:'map.layout.request',ref:IDS.M1,data:{kind:'overview',spec:{surface:'mixed',zones:[{id:IDS.L1,name:'城市',role:'city',size:'medium'}],links:[{id:'missing-route'}]}}});
+ const {repo,calls}=await repoWith((req,n)=>({text:repaired&&n===2?validLayout():invalid(),finishReason:'stop'}));
+ try{
+  const result=await repo.prepareTurn(input());
+  assert.equal(calls.length,2,'never loop on a second invalid reply');
+  assert.match(calls[1].messages[1].content,/未登记实体引用 missing-route/);
+  assert.equal(result.receipt.issues.some(issue=>issue.code==='ENTITY_REF_UNKNOWN'),!repaired);
+  if(repaired)assert.ok(JSON.parse(queryBound(repo.getCandidate(result.token).db,'SELECT frame_json FROM maps WHERE id=?',[IDS.M1])[0].frame_json).atlasScene);
+ }finally{await repo.close();}
+});

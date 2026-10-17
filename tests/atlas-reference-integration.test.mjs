@@ -91,7 +91,7 @@ function mount(options={}){
  const sql={projectMapView:()=>null,toLegacyTurnReceipt,LAYOUT_SIGNATURE_POLICY_VERSION:'layout-v3'};
  const api={request:async(method,path,body)=>{if(['/sql/chat/map/layout','/sql/chat/map/build'].includes(path)&&options.mapReply)return {status:200,body:{ok:true,data:await options.mapReply(path)}};if(path==='/sql/chat/map/layout'&&options.layoutFailure)return {status:500,body:{ok:false,error:{code:'TURN_FAILED',message:'布局格式错误',details:options.layoutFailure}}};if(path==='/sql/chat/ui-read'){calls.push(body);await options.delay?.(body);const data=body.kind==='map'?view([{...map,name:context.chatId}]):body.kind==='catalog'?view(cat):body.kind==='entity'?view([{kind:'character',character:{id:'C',name:context.chatId},position:{kind:'at_location'}}]):view([]);data.metadata={protagonistId:'C',snapshotSaved:!!context.chatMetadata.atlas?.database};return {status:200,body:{ok:true,data}};}if(method==='PUT'){const r=applySettingsCommand(settings,body);if(!r.ok)return {status:400,body:{ok:false,error:{message:r.message}}};settings={...settings,...r.settings};}return {status:200,body:{ok:true,data:settings}};},setRuntimeApiKeys:c=>calls.push({runtime:c.map(x=>({id:x.id,key:!!x.apiKey}))})};
  const core={recordExternalReceipt:(receipt,chatId,detail)=>{state.receipts=[...(state.receipts??[]),{...receipt,chatId,detail}];},getState:()=>state,setPage:()=>{},setPanelOpen:v=>{state.panelOpen=v;render();},setEnabled:async v=>{state.binding.enabled=v;calls.push({enabled:v});},manualAdvance:async()=>{calls.push({advance:true});if(options.advanceError)state.lastError=options.advanceError;},initializeWorld:async()=>false,retryLastCommit:async()=>{},refresh:async()=>{calls.push({refresh:true});}};
- const render=mountReferenceUi({root,core,api,getContext:()=>context,pluginVersion:options.pluginVersion,settingsPort:{read:async()=>prefs,write:async(_,v)=>{prefs=v;}},loadSqlRuntime:async()=>{loads++;if(options.unavailable)throw Error('SQL_CORE_UNAVAILABLE');return sql;}}),bridge=root.firstChild.__atlasHost;
+ const render=mountReferenceUi({root,core,api,getContext:()=>context,pluginVersion:options.pluginVersion,lorePort:options.lorePort,emit:entry=>calls.push({diagnostic:entry}),diagnostics:()=>calls.filter(c=>c.diagnostic).map(c=>c.diagnostic),settingsPort:{read:async()=>prefs,write:async(_,v)=>{prefs=v;}},loadSqlRuntime:async()=>{loads++;if(options.unavailable)throw Error('SQL_CORE_UNAVAILABLE');return sql;}}),bridge=root.firstChild.__atlasHost;
  return {root,core,render,bridge,calls,get loads(){return loads;},get closes(){return closes;},get prefs(){return prefs;},saved(){context.chatMetadata.atlas.database={data:'saved-A',sha256:'saved-a',storage_revision:4};state={...state,stateData:{revision:4}};render();},noSnapshot(){context.chatMetadata.atlas={};render();},switch(id){state={...state,chatId:id,lastError:null};context={...context,chatId:id,chatMetadata:{atlas:{database:{data:id,sha256:id}}}};render();},off(){context.extensionSettings.atlas_world_sim.sqlMode=false;render();}};
 }
 
@@ -131,3 +131,29 @@ test('原版世界书：读取与启停对应真实宿主条目，保留其他�
 test('原版世界书：晚到读结果不带进切换后的聊天',async()=>{let ctx={chatId:'A',chatMetadata:{world_info:'Book'}},release;const pending=new Promise(r=>{release=r;}),port=createReferenceLorePort(()=>ctx,async()=>({loadWorldInfo:async()=>{await pending;return {entries:{1:{content:'private A'}}};}}));const read=port.read();await new Promise(r=>setTimeout(r,0));ctx={chatId:'B',chatMetadata:{}};release();assert.deepEqual(await read,[]);});
 test('原版行程：概览和已保存布局都按真实米格比例转换路线，不伪造未知进度',()=>{const d=projection({projectOverview:()=>({scene:{units:'meters',layout:{kind:'overview',bounds:{x:0,y:0,w:40,h:40},pins:[]}}}),flowView:view([{flowId:'J',kind:'journey',moverEntityId:'C',mapId:'world',progress:null,path:{units:'cells',points:[{x:0,y:0},{x:10,y:5},{x:20,y:20}]}}])});const edge=d.JOURNEYS.world[0];assert.deepEqual(edge.via,edge.points[1]);assert.equal(edge.entityId,'C');assert.equal(edge.progress,null);assert.ok(Math.abs(edge.to[0]-280)<1e-8);});
 test('原版行程：未标定的格路线不能假定一格一米画到米制布局上',()=>{const d=projection({mapView:view([{...map,metersPerCell:null}]),projectOverview:()=>({scene:{units:'meters',layout:{kind:'overview',bounds:{x:0,y:0,w:40,h:40},pins:[]}}}),flowView:view([{flowId:'J',kind:'journey',mapId:'world',path:{units:'cells',points:[{x:0,y:0},{x:10,y:5}]}}])});assert.deepEqual(d.JOURNEYS,{});});
+
+const patchLoreRow={id:'["NeutralBook","1"]',title:'Neutral geography',keys:['学校'],content:'Neutral book content',enabled:true};
+test('PATCH-LORE01 opening the lore page reads the host port and connects registered targets',async()=>{
+ let reads=0;const m=mount({lorePort:{read:async()=>{reads++;return [structuredClone(patchLoreRow)];}}});
+ try{await m.bridge.boot();await m.bridge.onPage('map');assert.equal(reads,0);await m.bridge.onPage('lore');
+  const data=(await m.bridge.boot()).data;assert.equal(reads,1);assert.equal(data.LORE[0].content,patchLoreRow.content);assert.equal(data.LORE[0].target,'L');
+ }finally{await m.render.dispose();}
+});
+test('PATCH-LORE02 the UI toggle calls the host port and rereads actual saved state',async()=>{
+ let enabled=true;const toggles=[];const m=mount({lorePort:{read:async()=>[{...patchLoreRow,enabled}],toggle:async id=>{toggles.push(id);enabled=!enabled;}}});
+ try{await m.bridge.boot();await m.bridge.toggleLore(patchLoreRow.id);assert.deepEqual(toggles,[patchLoreRow.id]);assert.equal((await m.bridge.boot()).data.LORE[0].enabled,false);
+  await m.bridge.setViewMode('pov');await assert.rejects(m.bridge.toggleLore(patchLoreRow.id),/世界后台/);assert.equal(toggles.length,1);
+ }finally{await m.render.dispose();}
+});
+test('PATCH-LORE03 a late host read cannot move lore from one chat into another',async()=>{
+ let release;const pending=new Promise(resolve=>{release=resolve;});const m=mount({lorePort:{read:async()=>{await pending;return [patchLoreRow];}}});
+ try{await m.bridge.boot();const reading=m.bridge.onPage('lore');m.switch('B');release();await reading;assert.deepEqual((await m.bridge.boot()).data.LORE,[]);
+ }finally{await m.render.dispose();}
+});
+test('PATCH-LORE04 lore read errors are visible diagnostics; POV does not read private lore',async()=>{
+ let reads=0;const m=mount({lorePort:{read:async()=>{reads++;throw Error('Neutral host read failure');}}});
+ try{await m.bridge.boot();await m.bridge.onPage('lore');const data=(await m.bridge.boot()).data;
+  assert.ok(data.DIAGNOSTICS.some(d=>d.code==='REFERENCE_LORE_READ_FAILED'));assert.ok(m.calls.some(c=>c.diagnostic?.code==='REFERENCE_LORE_READ_FAILED'));
+  await m.bridge.setViewMode('pov');await m.bridge.onPage('lore');assert.equal(reads,1);assert.deepEqual((await m.bridge.boot()).data.LORE,[]);
+ }finally{await m.render.dispose();}
+});

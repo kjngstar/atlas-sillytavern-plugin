@@ -1,5 +1,6 @@
 export * from './contracts.mjs';
 export * from './generation.mjs';
+export * from './map-membership.mjs';
 export * from './placement.mjs';
 export * from './storage.mjs';
 export * from './view-adapter.mjs';

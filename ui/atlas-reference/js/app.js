@@ -14,6 +14,18 @@ let preferenceStorage=window.AtlasHost.preferenceStorage;
 const preferences=ui.preferences(preferenceStorage);
 const state={page:'map',nodeId:D.meta.initialNodeId||D.ROOT.id,selected:null,inspectorTab:'cast',dock:'log',viewMode:D.meta.viewMode||'pov',mapMode:'map',open:new Set(),cameras:new Map(),query:'',filter:'all',settingsTab:'prompts',motion:true,leftClosed:false,rightClosed:false,branch:'main',advance:0,...preferences.value};
 const timers=new Set(),unlisten=[];
+let flowReadSequence=0,scopedFlows=null;
+function refreshFlows(){
+ const sequence=++flowReadSequence,scopeKey=D.meta.scopeKey,revision=D.meta.revision,mapId=state.nodeId;
+ const selectedEntityId=state.selected?.kind==='character'?state.selected.id:null;
+ scopedFlows=null;
+ if(typeof window.AtlasHost.readFlows!=='function')return;
+ void window.AtlasHost.readFlows(mapId,selectedEntityId).then(value=>{
+  if(sequence!==flowReadSequence||scopeKey!==D.meta.scopeKey||revision!==D.meta.revision||mapId!==state.nodeId)return;
+  if(!value||value.scopeKey!==scopeKey||value.revision!==revision||value.mapId!==mapId)return;
+  scopedFlows=value;renderPlace();renderDock();
+ }).catch(error=>{if(sequence===flowReadSequence)toast(error.message,'warn');});
+}
 let mapExportUrl=null;
 let mapExportText='';
 const presets=window.AtlasPresetStore.create(D.PROMPTS,{storage:null,initialDocument:window.AtlasHost.initial.presets,onPersist:window.AtlasHost.persistPresets});
@@ -53,11 +65,11 @@ function navigate(n,silent=false){
  map.setPath(n,path(n.id)||[n]);map.setFilter(new Set());
  const cam=state.cameras.get(n.id);if(cam){map.state.cam={x:cam.x,y:cam.y,s:cam.s*map.fitScale()/(cam.fit||map.fitScale())};map.state.tgt={...map.state.cam};}
  map.setMode(state.mapMode);map.setPaused(document.hidden);
- renderAll();requestAnimationFrame(()=>map.resize());
+ renderAll();refreshFlows();requestAnimationFrame(()=>map.resize());
  if(!silent)toast(`已进入 ${n.name}`);
  return true;
 }
-function select(kind,id,show=false){state.selected={kind,id};state.inspectorTab='details';renderInspector();if(show)openRight();const capturedScope=D.meta.scopeKey,capturedRevision=D.meta.revision;void window.AtlasHost.inspect(kind,id).then(value=>{if(!value||D.meta.scopeKey!==capturedScope||D.meta.revision!==capturedRevision||state.selected?.kind!==kind||state.selected?.id!==id)return;const row=kind==='character'?D.CAST.find(x=>x.id===id):kind==='item'?D.ITEMS.find(x=>x.id===id):kind==='message'?D.MESSAGES.find(x=>x.id===id):(kind==='task'||kind==='action'||kind==='journey')?D.TASKS.find(x=>x.id===id):(D.LOCATIONS||[]).find(x=>x.id===id);if(row)Object.assign(row,value);renderInspector();}).catch(error=>toast(error.message,'warn'));}
+function select(kind,id,show=false){state.selected={kind,id};refreshFlows();state.inspectorTab='details';renderInspector();if(show)openRight();const capturedScope=D.meta.scopeKey,capturedRevision=D.meta.revision;void window.AtlasHost.inspect(kind,id).then(value=>{if(!value||D.meta.scopeKey!==capturedScope||D.meta.revision!==capturedRevision||state.selected?.kind!==kind||state.selected?.id!==id)return;const row=kind==='character'?D.CAST.find(x=>x.id===id):kind==='item'?D.ITEMS.find(x=>x.id===id):kind==='message'?D.MESSAGES.find(x=>x.id===id):(kind==='task'||kind==='action'||kind==='journey')?D.TASKS.find(x=>x.id===id):(D.LOCATIONS||[]).find(x=>x.id===id);if(row)Object.assign(row,value);renderInspector();}).catch(error=>toast(error.message,'warn'));}
 function inspectPlace(id,focus=false){
  const n=byId(id);if(!n||!known(n))return false;
  if(focus){const chain=path(id)||[],parent=chain[chain.length-2];navigate(parent||n,true);map.refreshMarks();map.focusKey(id);}
@@ -84,7 +96,7 @@ function showEntity(kind,id,focus=false){
  */
 const engine=window.AtlasHost?.initial?.engine??{policyVersion:null,capabilities:[],activePromptPresetId:null,suggested:null};
 const map=window.AtlasMap.create($('#map'),$('#minimap'),{
- onSelect(m){if(m?.placeId){if(state.singleClickEnter&&m.node)navigate(m.node.id);else inspectPlace(m.placeId);return;}if(!m){state.selected=null;state.inspectorTab='cast';renderInspector();return;}if(m.node){if(state.singleClickEnter)navigate(m.node.id);else inspectPlace(m.node.id);return;}
+ onSelect(m){if(m?.placeId){if(state.singleClickEnter&&m.node)navigate(m.node.id);else inspectPlace(m.placeId);return;}if(!m){state.selected=null;refreshFlows();state.inspectorTab='cast';renderInspector();return;}if(m.node){if(state.singleClickEnter)navigate(m.node.id);else inspectPlace(m.node.id);return;}
   if(m.type==='char')select('character',m.id,true);
   else if(m.type==='item')select('item',m.id,true);
   else if(m.type==='message'||m.type==='sig')select('message',m.id||'m4',true);
@@ -99,7 +111,9 @@ const map=window.AtlasMap.create($('#map'),$('#minimap'),{
   if(m.type==='item'){const it=D.ITEMS.find(it=>it.id===m.id);return it?known(it)&&within(it.mapNodeId||it.locationId,n.id):false;}
   if(m.node)return known(m.node);if(m.type==='sig')return message(m.id)?known(message(m.id)):false;return true;
  });},
- getFlows:id=>(D.FLOWS[id]||[]).filter(known),getJourneys:id=>(D.JOURNEYS[id]||[]).filter(known),
+ getFlows:id=>(scopedFlows?.mapId===id?scopedFlows.flows:D.FLOWS[id]||[]).filter(known),
+ getJourneys:id=>(scopedFlows?.mapId===id?scopedFlows.journeys:D.JOURNEYS[id]||[]).filter(known),
+ getRelations:id=>scopedFlows?.mapId===id?scopedFlows.relations:[],
  activeEdge:()=>state.selected?.kind==='message'||state.selected?.kind==='task'?state.selected.id:null,
  getMotion:()=>state.motion
 });
@@ -135,11 +149,12 @@ function renderTree(){let count=0;const walk=(n,depth)=>{if(!known(n))return '';
  return `<div class="tree-row ${active?'on':''}" style="padding-left:${6+depth*12}px"><button class="tw ${open&&has?'open':''}" data-expand="${esc(n.id)}" aria-label="${open?'收起':'展开'}${esc(n.name)}" ${has?'':'disabled'}>${has?icon('chev'):''}</button><button class="tree-link" data-go="${esc(n.id)}"><i class="tdot" style="--c:${color[n.kind]||color.world}"></i><span class="tname">${esc(n.name)}</span>${sceneCast(n.id).length?`<em class="tflag live">${sceneCast(n.id).length}人</em>`:''}<em class="tnum">${esc(n.code)}</em></button></div>${has&&open?n.children.map(c=>walk(c,depth+1)).join(''):''}`;};
  $('#layerTree').innerHTML=walk(D.ROOT,0);$('#treeCount').textContent=count+' 节点';
 }
-const flags=[['showGrid','网格底图'],['showMarks','世界标记'],['showLabels','名称标签'],['showRadar','雷达扫描']];
+const flags=[['showGrid','网格底图'],['showMarks','世界标记'],['showLabels','名称标签'],['showLinks','人物联系线'],['showRadar','雷达扫描']];
 function renderSwitches(){const el=$('#switchList');el.innerHTML=flags.map(([k,t])=>`<button class="sw-row ${map.state[k]?'on':''}" data-flag="${k}" aria-pressed="${map.state[k]}"><span>${t}</span><i class="sw"></i></button>`).join('');$('#zGrid').classList.toggle('on',map.state.showGrid);}
 function renderChips(){const g=current().geo,arr=current().kind==='city'?(g.districts||[]):[];$('#regionChips').innerHTML=arr.length?`<button class="chip ${!map.state.filter.size?'on':''}" data-filter-region="all">全部</button>`+arr.map(d=>`<button class="chip ${map.state.filter.has(d.id)?'on':''}" data-filter-region="${esc(d.id)}">${esc(d.name)}</button>`).join(''):'<span class="scope-note">筛选会随当前地图切换</span>';}
 function renderPlace(){const n=current(),roster=sceneCast(),items=sceneItems();$('#placeCard').innerHTML=`<div class="pl-top"><div><div class="pl-name">${esc(n.name)}</div><div class="pl-path mono">${esc(n.code)} · ${esc(D.LEVELS.find(l=>l.key===n.kind)?.name||n.tag)} <span class="diagram-tag">空间示意</span></div></div></div><div class="pl-grid"><div class="pl-cell"><span>人物</span><b class="c">${roster.length}</b></div><div class="pl-cell"><span>物品</span><b class="a">${items.length}</b></div><div class="pl-cell"><span>消息</span><b class="v">${sceneMessages().length}</b></div></div>`;
  if(n.containerLocationId&&state.viewMode==='author')$('#placeCard').innerHTML+=`<div class="detail-actions"><button class="action-btn" data-layout="${esc(n.id)}" ${D.meta.engine?.busy?'disabled':''}>${n.hasLayout?'更新布局':'生成布局'}</button><span class="scope-note">${n.hasLayout?'已保存空间布局':'尚未生成空间布局'}</span></div>`;
+ if(scopedFlows?.mapId===n.id)$('#placeCard').innerHTML+=`<p class="scope-note" aria-live="polite">联系 ${scopedFlows.relations.length} · 传播 ${scopedFlows.flows.length} · 行程 ${scopedFlows.journeys.length}${state.selected?.kind==='character'?'':' · 选中人物查看联系'}</p>`;
  $('#scWorld').textContent=n.code+' · '+n.name;$('#scRatio').textContent=n.metric?'1 u ≈ '+formatDistance(n.metric):'未标定 · 坐标格';
  $('#ticker').textContent=D.EVENTS.filter(known).slice(0,2).map(e=>e.title).join('　 ·　 ');$('#ticker').style.animation='none';
 }
@@ -214,7 +229,7 @@ function renderDock(){
      (old.length?`<div class="section-label">历史记录 · ${old.length}</div><div class="event-list">${old.slice(0,60).map(eventRow).join('')}</div>`:'');}
  else if(state.dock==='tasks')el.innerHTML=`<div class="task-grid">${D.TASKS.filter(known).map(taskCard).join('')||empty('当前视角暂无后台任务')}</div>`;
  else if(state.dock==='receipt')el.innerHTML=(D.RECEIPTS.length?'<button class="action-btn" data-export="receipts">导出推演回执</button>':'')+D.RECEIPTS.map(receiptCard).join('')+(D.meta.engine?.error?`<div class="receipt-row"><i class="rc-ok rc-fail"></i><div><b>当前错误</b><p>${esc(D.meta.engine.error)}</p></div><button class="action-btn" data-page="diag">查看诊断</button></div>`:'')+(!D.RECEIPTS.length&&!D.meta.engine?.error?empty(D.meta.engine?.busy?'正在推演，等待回执…':'尚无推演回执；首次推演完成后在此查看结果与日志'):'');
- else el.innerHTML=`<div class="prop-grid">${D.MESSAGES.filter(known).map(m=>`<button class="propagation-row" data-show-flow="${esc(m.id)}"><i class="pd sm"></i><div><b>${esc(m.src)}</b><span>${esc(m.hops.join(' → '))}</span></div><em>${esc(m.status)}</em>${icon('chev')}</button>`).join('')}</div>`;
+ else el.innerHTML=`<div class="prop-grid">${D.MESSAGES.filter(known).map(m=>`<button class="propagation-row" data-show-flow="${esc(m.id)}"><i class="pd sm"></i><div><b>${esc(m.src)}</b><span>${esc(m.hops.join(' → '))}</span></div><em>${esc(m.status)}</em>${icon('chev')}</button>`).join('')}</div>`+(scopedFlows?.cards??[]).map(c=>`<p class="scope-note">${esc(c.name)} · ${{NO_ROUTE_GEOMETRY:'缺少已保存路线，暂不画线',ENDPOINTS_NOT_ON_MAP:'两端未定位在本图',ARRIVED_FRONT:'已到达；没有可显示的传播路径',SCALE_UNKNOWN:'地图尺度未标定',CROSS_MAP:'路径位于其他地图'}[c.reason]||'暂无可绘制路径'}</p>`).join('');
  $('#turnChip').textContent=`第 ${D.meta.turn} 轮 · ${clock()}`;
  $('#queueLabel').textContent=`${D.TASKS.filter(t=>known(t)&&t.st!=='done').length} 项后台动向`;
  $('#dockTabs [data-tab="tasks"] em').textContent=D.TASKS.filter(known).length;
@@ -293,7 +308,7 @@ function settingsHTML(){const tabs=[['prompts','提示词'],['connection','API �
 }
 function renderAll(){renderRail();renderCrumbs();renderLadder();renderTree();renderSwitches();renderChips();renderPlace();renderInspector();renderDock();renderPage();renderModes();}
 function renderModes(){$$('#viewModes .vm').forEach(b=>{b.classList.toggle('active',b.dataset.mode===state.mapMode);b.setAttribute('aria-pressed',b.dataset.mode===state.mapMode);});}
-function showFlow(id){const m=message(id);if(!m||!known(m))return;let destination=Object.keys(D.FLOWS).find(mapId=>(D.FLOWS[mapId]||[]).some(e=>e.id===id)&&mapId===state.nodeId)||Object.keys(D.FLOWS).find(mapId=>(D.FLOWS[mapId]||[]).some(e=>e.id===id));destination=destination||m.locationId;state.mapMode='flow';navigate(destination,true);map.setMode('flow');select('message',id,true);renderModes();}
+function showFlow(id){const m=message(id);if(!m||!known(m))return;let destination=Object.keys(D.FLOWS).find(mapId=>(D.FLOWS[mapId]||[]).some(e=>e.id===id)&&mapId===state.nodeId)||Object.keys(D.FLOWS).find(mapId=>(D.FLOWS[mapId]||[]).some(e=>e.id===id));destination=destination||m.mapNodeId||m.locationId;state.mapMode='flow';navigate(destination,true);map.setMode('flow');select('message',id,true);renderModes();}
 function showTask(id){const t=task(id);if(!t||!known(t))return;state.mapMode='sim';navigate(t.mapId,true);map.setMode('sim');select('task',id,true);renderModes();}
 function showEvent(id){const e=D.EVENTS.find(e=>e.id===id);if(!e||!known(e))return;if(byId(e.mapId))navigate(e.mapId,true);select('event',id,true);map.selectKey(e.target);}
 function openRight(){state.rightClosed=false;$('#panelRight').classList.remove('collapsed');root.classList.toggle('right-open',root.clientWidth<=720);$('#reopenRight').hidden=false;later(()=>map.resize(),280);}
@@ -443,7 +458,7 @@ function bind(){
   if(b.dataset.locate){showEntity(b.dataset.locate,b.dataset.locateId,true);return;}
   if(b.dataset.inspector){state.inspectorTab=b.dataset.inspector;renderInspector();return;}
   if(b.hasAttribute('data-clear-selection')){state.selected=null;state.inspectorTab='cast';renderInspector();return;}
-  if(b.dataset.mode){state.mapMode=b.dataset.mode;map.setMode(state.mapMode);renderModes();return;}
+  if(b.dataset.mode){state.mapMode=b.dataset.mode;map.setMode(state.mapMode);refreshFlows();renderModes();return;}
   if(b.dataset.flag){map.setFlag(b.dataset.flag,!map.state[b.dataset.flag]);renderSwitches();return;}
   if(b.dataset.filterRegion){const id=b.dataset.filterRegion;if(id==='all')map.setFilter(new Set());else {const set=new Set(map.state.filter);set.has(id)?set.delete(id):set.add(id);map.setFilter(set);}renderChips();return;}
   if(b.hasAttribute('data-rollback-confirm')){await undoDemo();return;}
@@ -508,7 +523,7 @@ function bind(){
  const observer=new ResizeObserver(()=>{if(!$('#appWindow').hidden)map.resize();});observer.observe($('#viewport'));unlisten.push(()=>observer.disconnect());
  listen(window,'pagehide',destroy);
 }
-function updateSnapshot(value,{resetScope=false}={}){const snapshot=clone(value);if(!snapshot?.meta||!snapshot.ROOT)throw Error('ATLAS_SNAPSHOT_INVALID');const page=state.page,id=state.nodeId,selected=state.selected,oldScope=D.meta?.scopeKey;for(const key of Object.keys(D))delete D[key];Object.assign(D,snapshot);state.viewMode=D.meta.viewMode;if(resetScope||oldScope!==D.meta.scopeKey){state.cameras.clear();state.selected=null;state.open.clear();}const next=nodes().find(n=>n.id===id)?id:D.meta.initialNodeId||D.ROOT.id;navigate(next,true);if(!resetScope&&oldScope===D.meta.scopeKey&&selected){const exists=selected.kind==='character'?D.CAST.some(x=>x.id===selected.id):selected.kind==='item'?D.ITEMS.some(x=>x.id===selected.id):selected.kind==='place'?!!byId(selected.id):selected.kind==='message'?!!message(selected.id):selected.kind==='task'?!!task(selected.id):selected.kind==='lore'?D.LORE.some(x=>x.id===selected.id):D.EVENTS.some(x=>x.id===selected.id);if(exists)state.selected=selected;}state.page=page;renderAll();map.setPaused(page!=='map'||document.hidden);}
+function updateSnapshot(value,{resetScope=false}={}){const snapshot=clone(value);if(!snapshot?.meta||!snapshot.ROOT)throw Error('ATLAS_SNAPSHOT_INVALID');const page=state.page,id=state.nodeId,selected=state.selected,oldScope=D.meta?.scopeKey;for(const key of Object.keys(D))delete D[key];Object.assign(D,snapshot);state.viewMode=D.meta.viewMode;if(resetScope||oldScope!==D.meta.scopeKey){state.cameras.clear();state.selected=null;state.open.clear();}const next=nodes().find(n=>n.id===id)?id:D.meta.initialNodeId||D.ROOT.id;navigate(next,true);if(!resetScope&&oldScope===D.meta.scopeKey&&selected){const exists=selected.kind==='character'?D.CAST.some(x=>x.id===selected.id):selected.kind==='item'?D.ITEMS.some(x=>x.id===selected.id):selected.kind==='place'?!!byId(selected.id):selected.kind==='message'?!!message(selected.id):selected.kind==='task'?!!task(selected.id):selected.kind==='lore'?D.LORE.some(x=>x.id===selected.id):D.EVENTS.some(x=>x.id===selected.id);if(exists)state.selected=selected;}state.page=page;renderAll();if(state.selected?.kind==='character')refreshFlows();map.setPaused(page!=='map'||document.hidden);}
 async function runHost(action,success,...args){const before=D.meta.scopeKey;try{await window.AtlasHost[action](...args);if(before===D.meta.scopeKey)toast(success);}catch(error){toast(error.message,'warn');if(before===D.meta.scopeKey){D.meta.engine??={};D.meta.engine.error=error.message;diagnostic('error','UI_ACTION_FAILED',error.message,{action});renderDock();renderPage();}window.AtlasHost.diagnostic({level:'error',source:'ui',code:'UI_ACTION_FAILED',details:{action,message:error.message}});}}
 function destroy(){if(mapExportUrl)URL.revokeObjectURL(mapExportUrl);mapExportUrl=null;mapExportText='';map.destroy();timers.forEach(clearTimeout);timers.clear();unlisten.splice(0).forEach(fn=>fn());}
 state.open=new Set((path(state.nodeId)||[]).map(n=>n.id));

@@ -31,7 +31,7 @@ import { stableHexHash } from './atlas-hash.ts';
  * 程序布局策略版本。改动布局算法语义（而不是改数据）时递增，
  * 让所有已保存的指纹一次性失效、重排一次，而不是永久卡在旧结果上。
  */
-export const LAYOUT_SIGNATURE_POLICY_VERSION = 'layout-v4';
+export const LAYOUT_SIGNATURE_POLICY_VERSION = 'layout-v6';
 
 /** 该图负责展示的地点（容器地点 + 本图成员）。 */
 export type LayoutSignatureMember = {
@@ -160,7 +160,7 @@ export function canonicalRouteGeometry(value: unknown): string | null {
   if (typeof parsed !== 'object' || Array.isArray(parsed)) return null;
   const record = parsed as Record<string, unknown>;
   const kind = typeof record.kind === 'string' ? record.kind : null;
-  const coordinates = Array.isArray(record.coordinates) ? record.coordinates : [];
+  const coordinates = Array.isArray(record.coordinates) ? record.coordinates : Array.isArray(record.points) ? record.points : [];
   const points: Array<number[]> = [];
   for (const point of coordinates) {
     const x = Array.isArray(point) ? Number(point[0]) : Number((point as Record<string, unknown>)?.x);

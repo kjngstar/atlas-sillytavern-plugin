@@ -1,5 +1,6 @@
 import {normalizeScope,finite,plain,diagnostic,failure,FRAME_SPACE_CANONICAL_KEY,SPACE_CANONICAL_MAX_FURNISHING} from './contracts.mjs';
 import {readSceneFrame} from './storage.mjs';
+import {collectMapLocations} from './map-membership.mjs';
 
 /**
  * P12/R03 §19.1：读取本图持有的空间权威（`SpaceCanonicalV1`）。
@@ -32,7 +33,7 @@ function readSpaceCanonical(raw,locationId){
  * - 逻辑直接子地点落在另一张旧坐标图且无 transform 时标 placementKind=proxy，只有本图实坐标当锁。
  * - 只读入参、不写库；调用方必须传作者范围的行，禁止把已裁剪的 POV 数据喂进来。
  */
-export function buildLayoutContext({scope,mapRow,locations=[],characters=[],items=[],routes=[]}={}){
+export function buildLayoutContext({scope,mapRow,maps=[],locations=[],characters=[],items=[],routes=[]}={}){
   try{
     scope=normalizeScope(scope);if(mapRow?.branch_id!==scope.branchId)return failure('MAP_BRANCH_MISMATCH','$.mapRow','地图与当前分支不匹配');
     const frame=typeof mapRow.frame_json==='string'?JSON.parse(mapRow.frame_json):mapRow.frame_json,mpp=mapRow.meters_per_cell;
@@ -45,7 +46,8 @@ export function buildLayoutContext({scope,mapRow,locations=[],characters=[],item
     const its=active(items).filter(i=>!i.holder_character_id&&!i.container_item_id);
     const calibrated=finite(mpp)&&mpp>0;
     const scale=calibrated?mpp:1;
-    const own=ls.filter(l=>l.map_id===mapRow.id),ownRoutes=rs.filter(r=>r.map_id===mapRow.id);
+    const members=collectMapLocations({mapRow,maps,locations:ls});
+    const own=members.filter(l=>l.map_id===mapRow.id),ownRoutes=rs.filter(r=>r.map_id===mapRow.id);
     const issues=[];
     const locks={rooms:{},buildings:{},actors:{},points:{},areas:{},routes:{}};
     const json=raw=>{if(raw===null||raw===undefined||raw==='')return null;if(typeof raw!=='string')return raw;try{return JSON.parse(raw);}catch{return undefined;}};
@@ -87,15 +89,15 @@ export function buildLayoutContext({scope,mapRow,locations=[],characters=[],item
     const containerRow=containerId?ls.find(l=>l.id===containerId)??null:null;
     const containerKind=containerRow?String(containerRow.kind):null;
     const containerName=containerRow?String(containerRow.name??''):null;
-    for(const l of ls){
+    for(const l of members){
       if(l.map_id===mapRow.id){placement[l.id]='local';continue;}
-      if(containerId&&l.parent_location_id===containerId)placement[l.id]='proxy';
+      placement[l.id]='proxy';
     }
     // 目录只含本图行 + 本图路线的双端点，不把整个 branch 的位置塞给模型。
     const directory=rows=>Object.fromEntries(rows.map(r=>[r.id,r]));
     const endpointIds=new Set();
     for(const r of ownRoutes){if(r.from_location_id)endpointIds.add(r.from_location_id);if(r.to_location_id)endpointIds.add(r.to_location_id);}
-    const locationsById=directory([...own,...ls.filter(l=>!own.includes(l)&&endpointIds.has(l.id))]);
+    const locationsById=directory([...members,...ls.filter(l=>!members.includes(l)&&(l.id===containerId||endpointIds.has(l.id)))]);
     const routesById=directory(ownRoutes);
     const saved=readSceneFrame(frame,{branchId:scope.branchId,mapId:mapRow.id});
     if(!saved.ok)return saved;
