@@ -1,119 +1,49 @@
 {
-  "patchId": "atlas-0.9.90-rc.1-20261017",
-  "baseVersion": "0.9.89",
-  "baseReleaseVersion": "0.9.89-rc.1",
-  "baseCommit": "e4874b9305c8f690706b7905016174425b71d07c",
+  "patchId": "atlas-0.9.91-rc.1-20261018",
+  "baseVersion": "0.9.90",
+  "baseReleaseVersion": "0.9.90-rc.1",
+  "baseCommit": "761c7ceabfa3e2c1851cdcc87a26e8d012fa27c9",
   "schemaVersion": 3,
-  "releaseVersion": "0.9.90-rc.1",
-  "manifestVersion": "0.9.90",
+  "releaseVersion": "0.9.91-rc.1",
+  "manifestVersion": "0.9.91",
   "releaseChannel": "prerelease",
-  "preserved": [
-    "two-stage-layout-evidence-extraction",
-    "map-specific-source-context",
-    "bounded-transport-retry",
-    "one-map-per-layout-request",
-    "parent-child-canonical-dimensions",
-    "uncalibrated-frame-capacity-growth",
-    "source-tail-continuation"
-  ],
-  "fixes": [
-    "worldbook-page-bridge",
-    "lore-scope-and-settings-stale-result-guards",
-    "host-lore-write-copy-before-save",
-    "logical-map-membership",
-    "cross-map-display-proxy-no-physical-writeback",
-    "complete-keyset-map-and-roster-reads",
-    "required-route-endpoint-catalogue",
-    "bounded-actor-markers-with-full-sql-roster",
-    "stale-zone-and-route-pruning",
-    "semantic-route-signature",
-    "calibrated-scale-prompt",
-    "entity-reference-preflight-all-entity-slots"
-  ],
   "layoutPolicyVersion": "layout-v6",
-  "promptPolicyVersion": "atlas-policy/2026-10-16",
-  "validation": {
-    "fullTests": {
-      "tests": 2194,
-      "pass": 2194,
-      "fail": 0,
-      "skipped": 0
-    },
-    "typecheck": "passed",
-    "pack": "passed",
-    "browser": {
-      "environment": "Codex in-app browser; production UI and read-only API with isolated synthetic SQL snapshot",
-      "relationToggle": "passed",
-      "messageEntry": "passed",
-      "propagationCommittedProgress": 0.4,
-      "povIsolation": "passed"
-    },
-    "realTavern": {
-      "existingWorldSingleMapLayout": "committed; coreSaved=true; sceneSaved=true",
-      "worldbookEntries": 120,
-      "relationAndPropagationRecordsInOriginalAcceptanceChat": 0
-    },
-    "notVerified": [
-      "AI creation of relations and propagation tasks from new stories",
-      "universal external-model compatibility",
-      "complete automatic world construction"
-    ]
-  },
-  "localAcceptanceFixes": [
-    "resolved-map-id-for-scene-save-evidence",
-    "identical-regeneration-counts-only-with-current-scene-generator-journal",
-    "smooth-closed-contour-seam-and-open-endpoints",
-    "selected-entity-and-map-scoped-flow-query",
-    "relation-line-toggle-and-labels",
-    "persisted-propagation-route-and-source-resolution",
-    "committed-propagation-progress",
-    "stale-flow-response-and-pov-isolation"
+  "fixes": [
+    "reverse-journey-route-orientation",
+    "reject-incomplete-disconnected-journey-geometry",
+    "journey-marker-segment-distance-projection",
+    "pov-known-message-and-arrival-filter",
+    "pov-message-time-and-expiry-filter",
+    "observe-relation-and-information-guidance",
+    "coarse-position-schematic-relation-anchors",
+    "shared-snapshot-flow-projection"
   ],
-  "localAcceptanceValidation": {
-    "fullTests": {
-      "tests": 2194,
+  "validation": {
+    "status": "passed",
+    "baselineTests": {
+      "total": 2194,
       "pass": 2194,
       "fail": 0,
       "skipped": 0
     },
-    "typecheck": "passed",
-    "realTavern": {
-      "browser": "Codex in-app browser",
-      "chat": "dedicated Atlas acceptance chat",
-      "nativeStatus": "committed",
-      "coreSaved": true,
-      "sceneSaved": true,
-      "receiptIssues": 0,
-      "worldbookEntries": 120,
-      "loreTogglesRestored": true
-    },
-    "additionalServerRestart": false,
-    "additionalBackup": false,
-    "contactFlows": {
-      "environment": "Codex in-app browser; production UI and read-only API with isolated synthetic SQL snapshot",
-      "relationToggle": "passed",
-      "messageEntry": "passed",
-      "propagationCommittedProgress": 0.4,
-      "povIsolation": "passed"
-    }
-  },
-  "releaseDate": "2026-10-17",
-  "upstreamPackageValidation": {
-    "fullTests": {
-      "tests": 2182,
-      "pass": 2182,
+    "tests": {
+      "total": 2204,
+      "pass": 2204,
       "fail": 0,
+      "cancelled": 0,
       "skipped": 0
     },
     "typecheck": "passed",
     "pack": "passed",
-    "browser": {
-      "environment": "Chromium + packaged extension + real sql.js + simulated Tavern host",
-      "checks": 81,
-      "failed": [],
+    "releaseSqlBrowser": "passed",
+    "browserChecks": {
+      "productionUi": 81,
+      "hostGeneration": 30,
+      "contactPropagation": 12,
+      "failed": 0,
       "pageErrors": 0
     },
-    "realTavernWithExternalModel": "not run in this environment",
-    "note": "Local repair build; not an upstream release or a claim of universal model compatibility."
+    "liveUserTavern": "not-run",
+    "externalModel": "not-run"
   }
 }

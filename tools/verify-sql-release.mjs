@@ -150,7 +150,13 @@ try {
     window.TavernHelper.generateRaw = async input => {
       calls++;
       const text = (input?.ordered_prompts ?? []).map(part => String(part?.content ?? '')).join('\n');
-      if (text.includes('本图：')) layoutCalls++;
+      if (text.includes('你是 Atlas 空间证据摘录器')) return '{"facts":[]}';
+      if (text.includes('本图：')) {
+        layoutCalls++;
+        const scopes=JSON.parse(text.split('\n').find(line=>line.startsWith('本图：')).slice(3));
+        return scopes.map(scope=>JSON.stringify({op:'map.layout.request',ref:scope.map,data:{kind:scope.kind,
+          spec:scope.kind==='floor'?{rooms:scope.baselineRooms}:scope.kind==='overview'?{surface:'land'}:{}}})).join('\n');
+      }
       if (text.includes('【布局格式纠错】')) retryCalls++;
       return '{"op":"location.upsert","ref":"new:auto_archive","data":{"name":"自动聊天档案室","kind":"room"}}';
     };

@@ -30,6 +30,8 @@ export type SpatialFlow = {
   toLocationId: string | null;
   moverEntityId: string | null;
   progress: number | null;
+  /** Geometry fraction for a journey's marker; null when it is on another map. */
+  pathProgress?: number | null;
   progressQuality: 'confirmed' | 'estimated' | 'unknown';
   etaMinS: number | null;
   etaMaxS: number | null;
@@ -117,7 +119,7 @@ export function querySpatialFlows(ctx: ViewContext, query: ViewQuery): ViewResul
     routes.set(String((row as Record<string, unknown>).id), row as Record<string, unknown>);
   }
   const items: SpatialFlow[] = [];
-  const knownInformation = new Set(visibility.projection.knownFacts.map(f => f.informationId));
+  const knownInformation = visibility.knownInformation;
   const propagationGeometry = (payload: Record<string, unknown> | null, from: string | null, to: string | null) => {
     const route = payload?.route_id ? routes.get(String(payload.route_id)) : undefined;
     const routeMap = route?.map_id ? String(route.map_id) : null;
@@ -149,8 +151,17 @@ export function querySpatialFlows(ctx: ViewContext, query: ViewQuery): ViewResul
       let anyEstimated = false;
       let crossMap = false;
       const points: Array<{ x: number; y: number }> = [];
+      let geometryComplete = true;
+      let previousVisible = -1;
+      let previousTo: string | null = null;
+      let routeOrigin = journey.origin_location_id == null ? null : String(journey.origin_location_id);
+      let visibleLength = 0;
+      let markerDistance: number | null = null;
       for (let i = 0; i < segments.length; i += 1) {
         const segment = segments[i];
+        const from = segment.fromLocationId ?? segment.from_location_id ?? routeOrigin;
+        const to = segment.toLocationId ?? segment.to_location_id;
+        routeOrigin = to == null ? null : String(to);
         const nominal = segmentNominalSeconds(segment);
         if (nominal === null) total = null;
         else {
@@ -161,6 +172,7 @@ export function querySpatialFlows(ctx: ViewContext, query: ViewQuery): ViewResul
         const routeId = segment.routeId ?? segment.route_id;
         const route = routeId === null || routeId === undefined ? undefined : routes.get(String(routeId));
         if (!route) {
+          geometryComplete = false;
           if (String(segment.quality ?? '') !== 'confirmed') anyEstimated = true;
           continue;
         }
@@ -169,8 +181,21 @@ export function querySpatialFlows(ctx: ViewContext, query: ViewQuery): ViewResul
           crossMap = true;
           continue;
         }
+        const forward = route.from_location_id === from && route.to_location_id === to;
+        const reverse = Number(route.bidirectional) === 1 && route.to_location_id === from && route.from_location_id === to;
         const projected = projectRouteGeometry(route, routeMapId ?? mapId ?? '');
-        if (projected.geometry) points.push(...projected.geometry.points);
+        if (!projected.geometry || !(forward || reverse)) { geometryComplete = false; continue; }
+        const leg = reverse ? [...projected.geometry.points].reverse() : projected.geometry.points;
+        // Disconnected runs must never become an invented straight bridge.
+        if (previousVisible >= 0 && (i !== previousVisible + 1 || previousTo !== from
+          || points.at(-1)?.x !== leg[0].x || points.at(-1)?.y !== leg[0].y)) geometryComplete = false;
+        const length = leg.slice(1).reduce((sum, p, n) => sum + Math.hypot(p.x-leg[n].x,p.y-leg[n].y), 0);
+        if (i === index && nominal !== null && nominal > 0) markerDistance = visibleLength + length * clamp01(timeDone/nominal);
+        if (String(journey.status) === 'arrived' && i === segments.length-1) markerDistance = visibleLength + length;
+        visibleLength += length;
+        points.push(...(previousVisible >= 0 ? leg.slice(1) : leg));
+        previousVisible = i;
+        previousTo = String(to);
       }
       if (total === null || total <= 0) {
         items.push({
@@ -196,6 +221,7 @@ export function querySpatialFlows(ctx: ViewContext, query: ViewQuery): ViewResul
       done += Math.max(0, Math.min(timeDone, currentNominal ?? 0));
       const eta = estimatedArrival(journey, clock);
       const status = String(journey.status ?? '');
+      const hasPath = geometryComplete && points.length >= 2 && mapId !== null;
       items.push({
         flowId: String(journey.id),
         kind: 'journey',
@@ -205,13 +231,14 @@ export function querySpatialFlows(ctx: ViewContext, query: ViewQuery): ViewResul
         toLocationId: destination,
         moverEntityId: mover,
         progress: status === 'arrived' ? 1 : clamp01(done / total),
+        pathProgress: hasPath && markerDistance !== null && visibleLength > 0 ? clamp01(markerDistance/visibleLength) : null,
         progressQuality: status === 'blocked' ? 'unknown' : anyEstimated ? 'estimated' : 'confirmed',
         etaMinS: eta.minS,
         etaMaxS: eta.maxS,
         mapId,
-        path: points.length >= 2 && mapId ? { mapId, units: 'cells', points } : null,
+        path: hasPath ? { mapId: mapId!, units: 'cells', points } : null,
         crossMap,
-        reason: points.length >= 2 && mapId ? null : crossMap ? 'CROSS_MAP' : 'NO_ROUTE_GEOMETRY',
+        reason: hasPath ? null : crossMap ? 'CROSS_MAP' : 'NO_ROUTE_GEOMETRY',
       });
     }
   }
@@ -291,6 +318,7 @@ export function querySpatialFlows(ctx: ViewContext, query: ViewQuery): ViewResul
       const at = front.location_id === null || front.location_id === undefined ? null : String(front.location_id);
       if (Number(front.first_available_at_s ?? 0) > clock) continue;
       if (isPov) {
+        if (!knownInformation.has(String(front.information_id))) continue;
         if (at && !visibility.knownLocations.has(at)) continue;
         if (!parseAudienceAllows(front.audience_json, visibility.povId ?? null)) continue;
       }

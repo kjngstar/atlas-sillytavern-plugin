@@ -78,7 +78,7 @@ const MINIMUM_HELP: Record<string, string> = {
   'plan.propose': 'actor_ref, goal, steps',
   'plan.revise': 'ref, change(pause/cancel/resume/replace_future)',
   'event.propose': 'title, phase(scheduled/observed/simulated)',
-  'information.propose': 'content',
+  'information.propose': 'content；可选 title、kind=observation/report/rumor/announcement/lie/hypothesis、truth=true/false/mixed/unknown、secrecy=public/restricted/secret（默认 restricted）；origin_ref=信息起源地点；spread_at_ref=已公开或可听到此消息的地点，建立当地风声；recipient_ref=明确已获知的人物或势力，建立认知。普通传播不创建新消息副本，不填写程序的传播进度和到达时间',
   'attention.propose': 'opportunity_ref, belief',
   'channel.upsert': 'owner_ref, kind, name',
   'map.estimate': 'ref + 尺寸或距离依据',
@@ -95,6 +95,7 @@ const PHASE_TASK: Record<Phase, string[]> = {
     '主角是用户人设；助手楼层显示名或角色卡标题只是宿主元数据，不能仅凭它建成主角或在场人物。',
     '地点包含关系、人物粗位置与精确坐标分开处理。学校内但教室未知，就只给学校引用。',
     '心理/倾向可以依据人物设定合理更新，并保持简短。',
+    '正文明确建立或改变人物关系时用 relation.upsert 保存；只有同场出现不证明互相认识。明确的消息、公告或传言用 information.propose 登记，公开发布写 secrecy=public 与 spread_at_ref，明确告知谁写 recipient_ref；地点有风声不等于主角已听见。不要把每句闲聊变成传言，也不要把秘密设成公开。',
     '已完成行为用 event.propose 的 activity={kind:dialogue/meal/rest/sleep/travel/combat/other,completed:true} 和 time_hint={elapsed_s:明确秒数} 或 {min_s,nominal_s,max_s}。未完成计划用completed:false，不能推进时间。已完成赶路可引用真实subject_ref人物和route_ref路线，由程序按距离及人物能力计算耗时。',
   ],
   geography: [

@@ -106,6 +106,7 @@ function fetchWindow(
     source.kind === 'event' ? 'l.secrecy AS secrecy' : `'public' AS secrecy`,
     source.kind === 'rumor' ? 'l.first_available_at_s AS first_available_at_s' : '0 AS first_available_at_s',
     source.kind === 'rumor' ? 'l.audience_json AS audience_json' : 'NULL AS audience_json',
+    source.kind === 'rumor' ? 'l.information_id AS information_id' : 'NULL AS information_id',
   ].join(', ');
   const where: string[] = ['l.branch_id = ?', 'l.status = ?'];
   const values: Array<string | number | null> = [ctx.branchId, options.status];
@@ -196,6 +197,7 @@ export function queryCatalog(ctx: ViewContext, query: ViewQuery): ViewResult {
     }
     // rumor：只给「已到达 + 在已知地点 + 面向主角公开」的风声。
     if (Number(row.first_available_at_s ?? 0) > clock) return false;
+    if (!visibility.knownInformation.has(String(row.information_id))) return false;
     if (locationId !== null && !visibility.knownLocations.has(locationId)) return false;
     return parseAudienceAllows(row.audience_json, visibility.povId ?? null);
   };

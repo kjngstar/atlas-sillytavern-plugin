@@ -81,3 +81,20 @@ test('界面切地图、选中对象或切聊天后，迟到的联系与传播�
  assert.equal(vm.runInContext('scopedFlows.relations[0].id',runtime),'new');assert.equal(renders.length,2);
  runtime.refreshFlows();runtime.D.meta.scopeKey='another-chat';pending[2].resolve({scopeKey:'A',revision:1,mapId:'map-B'});await Promise.resolve();assert.equal(vm.runInContext('scopedFlows',runtime),null);
 });
+
+test('仅有粗粒度地点的人物可用本图已有展示点连接关系，展示坐标不写回 SQL',async()=>{
+ const seed=await makeContactFlowSeed(SQL);
+ try{
+  seed.db.run("UPDATE characters SET grid_x=NULL,grid_y=NULL,map_id=NULL,coord_precision='unknown' WHERE branch_id=?",[seed.branchId]);
+  const before=Buffer.from(seed.db.export());
+  const dto=read(seed,{selectedEntityId:IDS.C1});
+  assert.equal(dto.items.find(f=>f.flowId==='REL_CONTACT').path,null);
+  const node={id:IDS.M1,transform:{units:'cells',scale:1,bounds:{x:0,y:0,w:100,h:100}},marks:[
+   {id:IDS.C1,type:'char',x:-10,y:5,quality:'proxy'}, {id:IDS.C2,type:'char',x:20,y:5,quality:'proxy'},
+  ]};
+  const relation=projectReferenceFlows(dto,node).relations[0];
+  assert.equal(relation.id,'REL_CONTACT');assert.equal(relation.schematic,true);assert.deepEqual(relation.points,[[-10,5],[20,5]]);
+  assert.deepEqual(Buffer.from(seed.db.export()),before);
+  assert.equal(projectReferenceFlows(dto,{...node,marks:node.marks.slice(0,1)}).relations.length,0);
+ }finally{seed.close();}
+});

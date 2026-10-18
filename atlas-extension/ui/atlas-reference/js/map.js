@@ -1558,7 +1558,7 @@ function create(canvas, mini, hooks){
       const points=edge.points?.map(p=>W2S(...p));if(!points||points.length<2)continue;
       ctx.save();ctx.beginPath();ctx.moveTo(...points[0]);points.slice(1).forEach(p=>ctx.lineTo(...p));
       ctx.setLineDash([6,5]);ctx.lineWidth=1.7;ctx.strokeStyle=edge.c||C.amber;ctx.globalAlpha=.8;ctx.stroke();ctx.setLineDash([]);
-      if(st.showLabels){const a=points[0],b=points.at(-1);ctx.font='500 11px '+F.sans;ctx.textAlign='center';ctx.fillStyle=edge.c||C.amber;ctx.fillText(edge.name,(a[0]+b[0])/2,(a[1]+b[1])/2-9);}
+      if(st.showLabels){const a=points[0],b=points.at(-1);ctx.font='500 11px '+F.sans;ctx.textAlign='center';ctx.fillStyle=edge.c||C.amber;ctx.fillText(edge.name+(edge.schematic?'（示意）':''),(a[0]+b[0])/2,(a[1]+b[1])/2-9);}
       ctx.restore();
     }
   }
@@ -1622,7 +1622,7 @@ function create(canvas, mini, hooks){
     ctx.setLineDash(journey?[4,8]:[7,11]);ctx.lineDashOffset=-t*22;
     ctx.strokeStyle=hexA(col,active?.95:.55);ctx.lineWidth=active?2.8:1.7;
     ctx.shadowColor=col;ctx.shadowBlur=active?14:7;ctx.stroke();ctx.setLineDash([]);
-    const committedProgress=journey||edge.kind==='propagation',positioned=!committedProgress||Number.isFinite(edge.progress),k=committedProgress?(edge.progress??0):(t*.2)%1,[x,y]=at(k);
+    const committedProgress=journey||edge.kind==='propagation',progress=journey&&edge.pathProgress!==undefined?edge.pathProgress:edge.progress,positioned=!committedProgress||Number.isFinite(progress),k=committedProgress?(progress??0):(t*.2)%1,[x,y]=at(k);
     if(positioned){if(journey&&edge.entityKind==='vehicle')drawMark(ctx,{type:'vehicle',c:col,silent:true},x,y,t,false,false);else{ctx.beginPath();ctx.arc(x,y,journey?6:3.5,0,7);ctx.fillStyle=col;ctx.fill();}}
     const [hx,hy]=at(.5);
     st.edgeHits.push({x:hx,y:hy,r:16,m:{type:journey?'journey':'message',id:journey?edge.id:edge.messageId||edge.id,name:edge.name,sub:journey?'行程位置':'消息传播路径'}});

@@ -2515,7 +2515,7 @@ var init_atlas_ops_prompts = __esm({
       "plan.propose": "actor_ref, goal, steps",
       "plan.revise": "ref, change(pause/cancel/resume/replace_future)",
       "event.propose": "title, phase(scheduled/observed/simulated)",
-      "information.propose": "content",
+      "information.propose": "content；可选 title、kind=observation/report/rumor/announcement/lie/hypothesis、truth=true/false/mixed/unknown、secrecy=public/restricted/secret（默认 restricted）；origin_ref=信息起源地点；spread_at_ref=已公开或可听到此消息的地点，建立当地风声；recipient_ref=明确已获知的人物或势力，建立认知。普通传播不创建新消息副本，不填写程序的传播进度和到达时间",
       "attention.propose": "opportunity_ref, belief",
       "channel.upsert": "owner_ref, kind, name",
       "map.estimate": "ref + 尺寸或距离依据",
@@ -2531,6 +2531,7 @@ var init_atlas_ops_prompts = __esm({
         "主角是用户人设；助手楼层显示名或角色卡标题只是宿主元数据，不能仅凭它建成主角或在场人物。",
         "地点包含关系、人物粗位置与精确坐标分开处理。学校内但教室未知，就只给学校引用。",
         "心理/倾向可以依据人物设定合理更新，并保持简短。",
+        "正文明确建立或改变人物关系时用 relation.upsert 保存；只有同场出现不证明互相认识。明确的消息、公告或传言用 information.propose 登记，公开发布写 secrecy=public 与 spread_at_ref，明确告知谁写 recipient_ref；地点有风声不等于主角已听见。不要把每句闲聊变成传言，也不要把秘密设成公开。",
         "已完成行为用 event.propose 的 activity={kind:dialogue/meal/rest/sleep/travel/combat/other,completed:true} 和 time_hint={elapsed_s:明确秒数} 或 {min_s,nominal_s,max_s}。未完成计划用completed:false，不能推进时间。已完成赶路可引用真实subject_ref人物和route_ref路线，由程序按距离及人物能力计算耗时。"
       ],
       geography: [
@@ -25034,6 +25035,15 @@ function sqlVisibility(ctx) {
   const povId = ctx.povId ?? (branch2?.pov_character_id ? String(branch2.pov_character_id) : protagonists.length === 1 ? String(protagonists[0].id) : null);
   const projection = projectForPov(ctx, { characterId: povId });
   const clock = Number(branch2?.clock_s ?? 0);
+  const knownInformation = new Set(queryBound(
+    ctx.db,
+    `SELECT DISTINCT i.id FROM knowledge k JOIN information i
+    ON i.branch_id=k.branch_id AND i.id=k.information_id
+    WHERE k.branch_id=? AND ${povId ? "k.knower_character_id=?" : "k.is_pov=1"}
+    AND k.status='active' AND i.status='active' AND k.first_received_at_s<=? AND i.created_at_s<=?
+    AND (i.expires_at_s IS NULL OR i.expires_at_s>?)`,
+    povId ? [ctx.branchId, povId, clock, clock, clock] : [ctx.branchId, clock, clock, clock]
+  ).map((row2) => String(row2.id)));
   const knownLocations = new Set(projection.knownLocations.filter((loc) => loc.firstReceivedAtS <= clock).map((loc) => loc.locationId));
   const knownCharacters = new Set(projection.knownCharacters.map((ch) => ch.entityId));
   const player = povId ? cache.characters?.get(povId) : null;
@@ -25063,6 +25073,7 @@ function sqlVisibility(ctx) {
     povId,
     here,
     projection,
+    knownInformation,
     knownLocations,
     knownCharacters,
     visibleCharacters,
@@ -25958,7 +25969,8 @@ function fetchWindow(db, source, ctx, options) {
     ...source.kind === "location" ? ["l.kind AS location_kind", "l.mobility AS mobility", "l.anchor_location_id AS anchor_location_id", "l.parent_location_id AS parent_location_id"] : [],
     source.kind === "event" ? "l.secrecy AS secrecy" : `'public' AS secrecy`,
     source.kind === "rumor" ? "l.first_available_at_s AS first_available_at_s" : "0 AS first_available_at_s",
-    source.kind === "rumor" ? "l.audience_json AS audience_json" : "NULL AS audience_json"
+    source.kind === "rumor" ? "l.audience_json AS audience_json" : "NULL AS audience_json",
+    source.kind === "rumor" ? "l.information_id AS information_id" : "NULL AS information_id"
   ].join(", ");
   const where = ["l.branch_id = ?", "l.status = ?"];
   const values = [ctx.branchId, options.status];
@@ -26039,6 +26051,7 @@ function queryCatalog(ctx, query) {
       return locationId === null || visibility.knownLocations.has(locationId);
     }
     if (Number(row2.first_available_at_s ?? 0) > clock) return false;
+    if (!visibility.knownInformation.has(String(row2.information_id))) return false;
     if (locationId !== null && !visibility.knownLocations.has(locationId)) return false;
     return parseAudienceAllows(row2.audience_json, visibility.povId ?? null);
   };
@@ -26197,7 +26210,7 @@ function querySpatialFlows(ctx, query) {
     routes.set(String(row2.id), row2);
   }
   const items = [];
-  const knownInformation = new Set(visibility.projection.knownFacts.map((f) => f.informationId));
+  const knownInformation = visibility.knownInformation;
   const propagationGeometry = (payload, from, to) => {
     const route = payload?.route_id ? routes.get(String(payload.route_id)) : void 0;
     const routeMap = route?.map_id ? String(route.map_id) : null;
@@ -26229,8 +26242,17 @@ function querySpatialFlows(ctx, query) {
       let anyEstimated = false;
       let crossMap = false;
       const points = [];
+      let geometryComplete = true;
+      let previousVisible = -1;
+      let previousTo = null;
+      let routeOrigin = journey.origin_location_id == null ? null : String(journey.origin_location_id);
+      let visibleLength = 0;
+      let markerDistance = null;
       for (let i = 0; i < segments.length; i += 1) {
         const segment = segments[i];
+        const from = segment.fromLocationId ?? segment.from_location_id ?? routeOrigin;
+        const to = segment.toLocationId ?? segment.to_location_id;
+        routeOrigin = to == null ? null : String(to);
         const nominal = segmentNominalSeconds(segment);
         if (nominal === null) total = null;
         else {
@@ -26241,6 +26263,7 @@ function querySpatialFlows(ctx, query) {
         const routeId = segment.routeId ?? segment.route_id;
         const route = routeId === null || routeId === void 0 ? void 0 : routes.get(String(routeId));
         if (!route) {
+          geometryComplete = false;
           if (String(segment.quality ?? "") !== "confirmed") anyEstimated = true;
           continue;
         }
@@ -26249,8 +26272,22 @@ function querySpatialFlows(ctx, query) {
           crossMap = true;
           continue;
         }
+        const forward = route.from_location_id === from && route.to_location_id === to;
+        const reverse = Number(route.bidirectional) === 1 && route.to_location_id === from && route.from_location_id === to;
         const projected = projectRouteGeometry(route, routeMapId ?? mapId ?? "");
-        if (projected.geometry) points.push(...projected.geometry.points);
+        if (!projected.geometry || !(forward || reverse)) {
+          geometryComplete = false;
+          continue;
+        }
+        const leg = reverse ? [...projected.geometry.points].reverse() : projected.geometry.points;
+        if (previousVisible >= 0 && (i !== previousVisible + 1 || previousTo !== from || points.at(-1)?.x !== leg[0].x || points.at(-1)?.y !== leg[0].y)) geometryComplete = false;
+        const length = leg.slice(1).reduce((sum, p, n) => sum + Math.hypot(p.x - leg[n].x, p.y - leg[n].y), 0);
+        if (i === index && nominal !== null && nominal > 0) markerDistance = visibleLength + length * clamp01(timeDone / nominal);
+        if (String(journey.status) === "arrived" && i === segments.length - 1) markerDistance = visibleLength + length;
+        visibleLength += length;
+        points.push(...previousVisible >= 0 ? leg.slice(1) : leg);
+        previousVisible = i;
+        previousTo = String(to);
       }
       if (total === null || total <= 0) {
         items.push({
@@ -26276,6 +26313,7 @@ function querySpatialFlows(ctx, query) {
       done += Math.max(0, Math.min(timeDone, currentNominal ?? 0));
       const eta = estimatedArrival(journey, clock);
       const status = String(journey.status ?? "");
+      const hasPath = geometryComplete && points.length >= 2 && mapId !== null;
       items.push({
         flowId: String(journey.id),
         kind: "journey",
@@ -26285,13 +26323,14 @@ function querySpatialFlows(ctx, query) {
         toLocationId: destination,
         moverEntityId: mover,
         progress: status === "arrived" ? 1 : clamp01(done / total),
+        pathProgress: hasPath && markerDistance !== null && visibleLength > 0 ? clamp01(markerDistance / visibleLength) : null,
         progressQuality: status === "blocked" ? "unknown" : anyEstimated ? "estimated" : "confirmed",
         etaMinS: eta.minS,
         etaMaxS: eta.maxS,
         mapId,
-        path: points.length >= 2 && mapId ? { mapId, units: "cells", points } : null,
+        path: hasPath ? { mapId, units: "cells", points } : null,
         crossMap,
-        reason: points.length >= 2 && mapId ? null : crossMap ? "CROSS_MAP" : "NO_ROUTE_GEOMETRY"
+        reason: hasPath ? null : crossMap ? "CROSS_MAP" : "NO_ROUTE_GEOMETRY"
       });
     }
   }
@@ -26366,6 +26405,7 @@ function querySpatialFlows(ctx, query) {
       const at = front.location_id === null || front.location_id === void 0 ? null : String(front.location_id);
       if (Number(front.first_available_at_s ?? 0) > clock) continue;
       if (isPov) {
+        if (!knownInformation.has(String(front.information_id))) continue;
         if (at && !visibility.knownLocations.has(at)) continue;
         if (!parseAudienceAllows(front.audience_json, visibility.povId ?? null)) continue;
       }

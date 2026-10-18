@@ -122,6 +122,31 @@ test('部分补交替换失败操作的旧诊断，保留成功组且不重复�
   assert.equal(queryBound(s.repo.db,'SELECT COUNT(*) n FROM characters',[])[0].n,1);
  }finally{await f.close();}
 });
+test('普通剧情的关系、公开风声和明确告知认知经过生产提交后持久保存，刷新不会重建',async()=>{
+ const f=fixture({model:async req=>{
+  if(req.phase!=='observe')return '{"op":"noop"}';
+  const prompt=req.messages.map(m=>m.content).join('\n');
+  assert.ok(prompt.includes('spread_at_ref')&&prompt.includes('recipient_ref'));
+  return [
+   {op:'location.upsert',ref:'new:square',data:{name:'公告广场',kind:'other'}},
+   {op:'character.upsert',ref:'new:player',data:{name:'用户主角',identity:'旅人',role:'protagonist',location_ref:'new:square'}},
+   {op:'character.upsert',ref:'new:herald',data:{name:'传令官',identity:'城中传令官',location_ref:'new:square'}},
+   {op:'relation.upsert',data:{subject_ref:'new:player',object_ref:'new:herald',kind:'knows',label:'刚刚相识',secrecy:'public'}},
+   {op:'information.propose',data:{title:'正午开门',content:'城门正午开放。',kind:'announcement',truth:'true',secrecy:'public',origin_ref:'new:square',spread_at_ref:'new:square',recipient_ref:'new:player'}},
+  ].map(JSON.stringify).join('\n');
+ }});
+ try{
+  await f.ui.refresh();await f.prepare();await f.end();
+  assert.equal(f.ui.getState().receipts[0].detail.coreSaved,true,JSON.stringify(f.ui.getState().receipts[0]));
+  const session=await f.provider.session('chat-auto');
+  for(const table of ['relations','information','rumor_fronts','knowledge'])assert.equal(queryBound(session.repo.db,`SELECT COUNT(*) n FROM ${table}`,[])[0].n,1,table);
+  assert.deepEqual(queryBound(session.repo.db,'PRAGMA foreign_key_check',[]),[]);
+  const saved=JSON.stringify(f.current.chatMetadata.atlas.database),calls=f.calls(),saves=f.saves();
+  f.restartUi();await f.ui.refresh();
+  assert.equal(JSON.stringify(f.current.chatMetadata.atlas.database),saved);assert.equal(f.calls(),calls);assert.equal(f.saves(),saves);
+ }finally{await f.close();}
+});
+
 function fixture({ response = room, model, identity, retryFloor, afterResponse, commitGuard, lore = '全部世界书原文：文风规则与地点。' } = {}) {
   let enabled = true, saves = 0, calls = 0, saveOk = true;
   const requests = [], batches = [];
