@@ -1,6 +1,7 @@
 /** Real SQL DTOs projected into the supplied UI's data contract. Never writes a world. */
 import { visibleWorkbenchMaps } from './atlas-workbench-data.mjs';
 import { projectReferenceFlows } from './atlas-reference-flows.mjs';
+import { projectMapContext } from './atlas-map-context.mjs';
 
 export const REFERENCE_LEVELS = [
   ['world','L0','世界'],['region','L1','地区'],['city','L2','城市'],['district','L3','街区'],
@@ -266,7 +267,7 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
           quality:text(sa.quality)||'layout',source:text(sa.source)||'frame',
           pts:sa.polygon.map(xy)};
       })(),
-      overviewFeatures:(layout.features??[]).flatMap(f=>{
+      overviewFeatures:(layout.features??[]).filter(f=>f.type!=='road_texture'||f.polygon?.length>=3).flatMap(f=>{
         if(!f||typeof f!=='object')return [];
         const zoneId=text(f.zoneId);
         if(!author&&zoneId&&!drawnZoneIds.has(zoneId))return [];
@@ -425,6 +426,7 @@ export function projectReferenceData({state={},mapView,sceneView,catalogView,tas
   out.LOCATIONS=catalog.filter(c=>c.entityKind==='location').map(c=>({id:c.entityId,name:c.name,description:c.summary??'',kind:'location',entityKind:c.locationKind,mobility:c.mobility,anchorLocationId:c.anchorLocationId,tag:c.mobility==='mobile'?'移动载具':'地点',code:c.mobility==='mobile'?'载具':'地点',mapId:c.mapId,children:[],known:true,
     childMapIds:maps.filter(m=>m.containerLocationId===c.entityId).map(m=>m.mapId)}));
   const locationMap=new Map(out.LOCATIONS.map(l=>[l.id,l]));
+  for(const location of out.LOCATIONS){const row=catalog.find(c=>c.entityId===location.id);location.parentLocationId=row?.parentLocationId??null;location.aliases=row?.aliases??[];}
   const mobileIds=new Set(out.LOCATIONS.filter(l=>l.mobility==='mobile').map(l=>l.id));
   const inTransit=new Set(items(flowView).filter(f=>f.kind==='journey'&&['moving','paused','blocked'].includes(f.status)).map(f=>f.moverEntityId));
   for(const n of nodes.values()){
@@ -434,6 +436,7 @@ export function projectReferenceData({state={},mapView,sceneView,catalogView,tas
     n.marks=n.marks.filter(mark=>!mobileIds.has(mark.id)||!inTransit.has(mark.id)&&pointIndex.has(mark.id));
     for(const mark of n.marks){if(mark.type==='poi'){const location=locationMap.get(mark.id),target=nodes.get(location?.childMapIds[0]);mark.node=target&&target!==n?{id:target.id,known:target.known!==false}:null;mark.placeId=mark.id;if(mobileIds.has(mark.id)){mark.type='vehicle';mark.sub=location.anchorLocationId?'停靠载具':'载具位置';}}}
   }
+  projectMapContext(nodes,out.LOCATIONS,{inTransit});
   const mapAt=id=>locationMap.get(id)?.childMapIds[0]??locationMap.get(id)?.mapId??null;
   out.CAST=catalog.filter(c=>c.entityKind==='character').map((c,i)=>{const p=pointIndex.get(c.entityId);return {id:c.entityId,name:c.name,initial:Array.from(c.name??'人').at(-1)||'人',role:p?.isProtagonist?'主角':'人物',c:COLORS[i%COLORS.length],
     state:c.locationId?'present':'unknown',tag:'已记录',locationId:c.locationId,mapNodeId:p?.mapId??mapAt(c.locationId)??c.mapId,description:c.summary??'',doing:'尚无行动记录',mind:'尚无后台想法记录',carry:[],known:true,

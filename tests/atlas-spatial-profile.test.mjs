@@ -196,7 +196,9 @@ test('SITE01 复合驿站：可见建筑 + 开放场院 + 入口；进入建筑�
       layoutMaps: [MAP_SITE, MAP_BLD],
     }, TURN);
     assert.ok(task, '有具体图必须产出布局任务');
-    const text = task.request.messages[1].content;
+    assert.deepEqual(task.mapIds,[MAP_SITE]);assert.deepEqual(task.remainingLocationIds,[MAP_BLD]);
+    const childTask=buildSqlLayoutTask(seed.db,BRANCH,{anchor:task.request.anchor,userText:'',assistantText:'',sourceSnapshot:[],layoutMaps:task.remainingLocationIds},TURN+'_child');
+    const text = task.request.messages[1].content+'\n'+childTask.request.messages[1].content;
     assert.ok(text.includes('compound=画外场与真实建筑足迹'), '复合档案的禁区必须进提示词');
     assert.ok(text.includes('interior=只画已登记房间与通道'), '室内档案的说明必须进提示词');
     assert.ok(!text.includes('compound=undefined'), '档案说明不能是空的');
@@ -239,14 +241,16 @@ test('SITE02 停靠场院不是室内模板；官道是已登记路线而不是�
       userText: '', assistantText: '', sourceSnapshot: [],
       layoutMaps: [MAP_YARD, MAP_ROAD],
     }, TURN);
-    const text = task.request.messages[1].content;
+    const remainingTask=task.remainingLocationIds.length?buildSqlLayoutTask(seed.db,BRANCH,{anchor:task.request.anchor,userText:'',assistantText:'',sourceSnapshot:[],layoutMaps:task.remainingLocationIds},TURN+'_next'):null;
+    const scopes=[...scopeOf(task),...(remainingTask?scopeOf(remainingTask):[])];
+    const text = task.request.messages[1].content+'\n'+(remainingTask?.request.messages[1].content??'');
     assert.ok(text.includes('outdoor=只画范围/足迹/入口'), '室外档案的禁区必须进提示词');
     assert.ok(text.includes('linear=路线必须是目录中已登记的 route'), '沿线档案必须声明路线来源');
-    const scopeYard = scopeOf(task).find((scope) => scope.name === '停靠场院');
+    const scopeYard = scopes.find((scope) => scope.name === '停靠场院');
     assert.equal(scopeYard.kind, 'overview');
     assert.deepEqual(scopeYard.baselineRooms, [], '室外图不能带室内 baselineRooms（不生成窗户/匿名房间）');
     assert.deepEqual(scopeYard.profile.unsupported.map((item) => item.kind), ['room']);
-    const scopeRoad = scopeOf(task).find((scope) => scope.name === '官道沿线');
+    const scopeRoad = scopes.find((scope) => scope.name === '官道沿线');
     assert.equal(scopeRoad.profile.mode, 'linear');
     assert.ok(scopeRoad.profile.forbidden.includes('把道路路线当作纯装饰纹理线'));
 

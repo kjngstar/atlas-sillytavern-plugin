@@ -24,6 +24,7 @@ import {
 import { DEFAULT_SQL_PROMPT_SEGMENTS, buildSqlCompatiblePrompt } from './atlas-sql-prompts.ts';
 import { PROMPT_POLICY_VERSION } from './atlas-prompt-layers.ts';
 import { SPATIAL_CAPABILITIES } from './atlas-world-contract.ts';
+import { DEFAULT_MODEL_BATCHING, MODEL_BATCHING_LIMITS, normalizeModelBatching, validModelBatching, type ModelBatchingSettings } from './atlas-model-batching.ts';
 
 /**
  * C02 / E01：推进输出协议的类型。
@@ -309,6 +310,8 @@ export interface AtlasServerSettingsV2 {
   activePromptPresetId: string | null;
   autoCommit: boolean;
   rpmLimit: number;
+  /** 0 means combine compatible work up to the connection's estimated capacity. */
+  modelBatching?: ModelBatchingSettings;
   /** 0.9.22 推演是否附带世界书资料块（被供应商审核拦截时的逃生门；缺省 true）。 */
   loreSupplementEnabled?: boolean;
   /** 运行时为 table-delta-v1；v1/v2 仅兼容旧设置读取，schemaVersion:2 是设置存档版本。 */
@@ -386,7 +389,7 @@ export type AtlasSettingsCommand =
   | { action: "replace.save"; preset: { id?: string; name: string; start: string; end: string; enabled?: boolean } }
   | { action: "replace.delete"; id: string }
   | { action: "replace.reset" }
-  | { action: "runtime.update"; autoCommit?: boolean; rpmLimit?: number; loreSupplementEnabled?: boolean; worldTurnProtocol?: AtlasWorldTurnProtocol };
+  | { action: "runtime.update"; autoCommit?: boolean; rpmLimit?: number; loreSupplementEnabled?: boolean; worldTurnProtocol?: AtlasWorldTurnProtocol; modelBatching?: ModelBatchingSettings };
 
 // ---------------------------------------------------------------------------
 // 基础工具
@@ -482,6 +485,7 @@ export function createDefaultSettingsV2(): AtlasServerSettingsV2 {
     activePromptPresetId: null,
     autoCommit: true,
     rpmLimit: 30,
+    modelBatching: { ...DEFAULT_MODEL_BATCHING },
     loreSupplementEnabled: true,
     // R06 / D-16：推进输出协议。0.9.57 起**新装默认 = table-delta-v1**（三表行增量）；
     // 旧 v1/v2 与非法值在读取时统一规范为 table-delta-v1；schemaVersion:2 是设置存档版本。
@@ -633,6 +637,7 @@ export function sanitizeSettingsV2(raw: unknown, deps: AtlasSettingsDeps = {}): 
     activePromptPresetId: activePrompt && promptPresets.some((p) => p.id === activePrompt) ? activePrompt : null,
     autoCommit: typeof record.autoCommit === "boolean" ? record.autoCommit : true,
     rpmLimit: isFiniteIntIn(record.rpmLimit, MIN_RPM, MAX_RPM) ? record.rpmLimit : 30,
+    modelBatching: normalizeModelBatching(record.modelBatching),
     loreSupplementEnabled: typeof record.loreSupplementEnabled === "boolean" ? record.loreSupplementEnabled : true,
     // R06：推进协议（非法值 → 缺省 v2）
     worldTurnProtocol: normalizeWorldTurnProtocol(record.worldTurnProtocol),
@@ -1026,6 +1031,10 @@ export function applySettingsCommand(
     }
     case "runtime.update": {
       const next: AtlasServerSettingsV2 = { ...settings };
+      if(command.modelBatching!==undefined){
+        if(!validModelBatching(command.modelBatching))return fail(settings,'INVALID_PAYLOAD',`分批上限必须为整数：人物 0..${MODEL_BATCHING_LIMITS.charactersPerBatch}，地图 0..${MODEL_BATCHING_LIMITS.mapsPerBatch}；0 表示自动合批。`);
+        next.modelBatching={...command.modelBatching};
+      }
       if (command.autoCommit !== undefined) {
         if (typeof command.autoCommit !== "boolean") return fail(settings, "INVALID_PAYLOAD", "自动提交必须是布尔值。");
         next.autoCommit = command.autoCommit;
@@ -1280,6 +1289,8 @@ export interface AtlasSettingsView {
    */
   legacyWorldTurnProtocol: AtlasLegacyWorldTurnProtocolNotice | null;
   rpmLimit: number;
+  modelBatching: ModelBatchingSettings;
+  modelBatchingLimits: ModelBatchingSettings;
   /** 0.9.16 内容替换规则库（含预制 + 手动，同库平等）。 */
   contentReplaceRules: AtlasContentReplaceRule[];
 }
@@ -1362,6 +1373,8 @@ export function settingsViewV2(settings: AtlasServerSettingsV2): AtlasSettingsVi
     // E01：旧值诊断——让作者看到「历史设置已升级为表格增量」，且原始设置未被改写
     legacyWorldTurnProtocol: legacyWorldTurnProtocolNotice(settings.worldTurnProtocol),
     rpmLimit: settings.rpmLimit,
+    modelBatching: normalizeModelBatching(settings.modelBatching),
+    modelBatchingLimits: { ...MODEL_BATCHING_LIMITS },
     contentReplaceRules: settings.contentReplaceRules ?? [],
   };
 }

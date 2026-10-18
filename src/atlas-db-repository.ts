@@ -54,6 +54,7 @@ import { queryWorldFeed } from './atlas-world-feed.ts';
 import { scanKnownRefs, collectEntityRefs } from './atlas-sql-refs.ts';
 export { collectKnownRefs, collectEntityRefs } from './atlas-sql-refs.ts';
 import { settleSqlTurn } from './atlas-sql-simulation.ts';
+import { logModelAttempts } from './atlas-model-attempts.ts';
 import { compileSqlSceneMaps } from './atlas-sql-scene-maps.ts';
 import { applyPendingSpatialRequests, armLayoutRetry } from './atlas-spatial-candidate.ts';
 // M3-10/11/12：世界建设阶段接入 + 本回合局部模型预算 + 建设状态元数据。
@@ -123,6 +124,7 @@ import type {
 import type { SourceSnapshotEntry } from './atlas-ops-contract.ts';
 // P09A：业务变化的判据（表 + 组用途），不靠 id 前缀。
 import { groupChangesBusiness } from './atlas-ops-contract.ts';
+import { normalizeGenerationOptions } from './atlas-model-batching.ts';
 import type { GenerationTask, PlanIssue, WorldFillStatus } from './atlas-world-contract.ts';
 
 export type RepositoryOptions = {
@@ -1336,6 +1338,12 @@ export function createSqlRepository(options: RepositoryOptions) {
     if (anchor.baseRevision !== rev) {
       throw new AtlasDbError('STALE_BASE', `基版本已变化：锚点 ${anchor.baseRevision}，当前 ${rev}`, { base: anchor.baseRevision, current: rev });
     }
+    let generationOptions=normalizeGenerationOptions(input.generationOptions);
+    if(input.generationOptions===undefined&&options.modelPort?.generationOptions){
+      generationOptions=normalizeGenerationOptions(await options.modelPort.generationOptions());
+      if(currentRevision()!==rev||input.isCurrent&&!input.isCurrent())throw new AtlasDbError('STALE_BASE','读取分批设置期间世界或聊天已变化',{});
+    }
+    input={...input,generationOptions};
 
     // 1) 隔离候选态
     const candidate = await createCandidateImpl(anchor, 'turn');
@@ -2049,7 +2057,8 @@ export function createSqlRepository(options: RepositoryOptions) {
       transactionOpen = false;
       const simulation = await settleSqlTurn({ db: candidateDb, branchId, anchor, turnId, clockBefore,
         sceneOnly:input.sceneOnly,
-        operations: input.sceneOnly?[]:parsedOperations, modelPort: input.manual||input.sceneOnly || !options.modelPort ? null : bindModelBudget(options.modelPort, turnBudget, 'background'),
+        generationOptions,
+        operations: input.sceneOnly?[]:parsedOperations, modelPort: input.manual||input.sceneOnly || !options.modelPort ? null : logModelAttempts(bindModelBudget(options.modelPort, turnBudget, 'background'),now,recordAttempt),
         // M3-11：settle 用**同一本回合预算**的剩余额度，不另起计数；被保留给到期后台的名额
         // 在 stageRemaining 里已经扣掉，所以建设不会抢先吃掉它。
         modelBudget: Math.max(0, turnBudget.stageRemaining('background')),
@@ -2075,31 +2084,26 @@ export function createSqlRepository(options: RepositoryOptions) {
       };
       let layoutTask=input.layoutMaps?buildSqlLayoutTask(candidateDb,branchId,input,turnId,layoutReport):null;
       drainLayoutReport();
-      // Output length grows with maps per reply. Freeze the selected map set,
-      // then request one complete map at a time inside the same candidate.
+      // Freeze the target set, then combine compatible maps inside its capacity.
       const pendingLayoutIds=layoutTask?[...layoutTask.mapIds,...layoutTask.remainingLocationIds]:[];
-      if(pendingLayoutIds.length>1){
-        layoutTask=buildSqlLayoutTask(candidateDb,branchId,{...input,layoutMaps:[pendingLayoutIds[0]]},`${turnId}_layout_0`,layoutReport);
-        drainLayoutReport();
-      }
+      const layoutParents=layoutTask?.parentMapIds??{};
       const evidenceMapRefs=pendingLayoutIds.map((id,index)=>({id,alias:`M${index+1}`,name:String(createTableReadPort(candidateDb).selectOne('maps',branchId,id)?.name??id)}));
       let layoutEvidenceCache:LayoutExcerpt[]|null=null;
       const evidenceBlockedMaps=new Set<string>();
+      const deferredLayoutIds=new Set<string>();
+      const retriedLayoutIds=new Set<string>();
+      const smallerLayoutBatches=new Map<string,number>();
       const layoutTasks:NonNullable<typeof layoutTask>[]=[];
-      // Spatial assembly completes the frozen set before this floor is published.
-      // It cannot be starved by observation/construction/background's four-send budget.
-      // Evidence extraction is a distinct bounded stage; every transport, including
-      // compatibility sends, shares this finite per-turn budget.
-      const layoutBatchCount=pendingLayoutIds.length;
-      const evidenceBatchEstimate=Math.min(24,Math.ceil(sourceSnapshot.reduce((sum,row)=>sum+(row.text?.length??0),0)/12000));
-      const layoutBudget=createGenerationBudget({limit:Math.max(1,layoutBatchCount*4+evidenceBatchEstimate*4)});
+      // Evidence, layout and compatibility retries spend the same four-send
+      // allowance as observation/construction. Map count must never multiply it.
+      const layoutBudget=turnBudget;
       const layoutModelPort=options.modelPort?bindModelBudget(options.modelPort,layoutBudget,'geography'):null;
       const requestSpatialWithTransportRetry=async(request:ModelBatchRequest,kind:string):Promise<ModelBatchResponse>=>{
         const started=now();
         try{return await layoutModelPort!.request(request);}
         catch(error){
           if((error as {retryable?:unknown})?.retryable!==true||layoutBudget.remaining()<=0)throw error;
-          recordAttempt({kind:`${kind}_transport_failed`,phase:'geography',started_wall_ms:started,finished_wall_ms:now(),input_chars:request.messages.reduce((sum,message)=>sum+message.content.length,0),failure_kind:failureKindOf(error),error:(error as Error).message});
+          recordAttempt({kind:`${kind}_transport_failed`,phase:'geography',started_wall_ms:started,finished_wall_ms:now(),input_chars:request.messages.reduce((sum,message)=>sum+message.content.length,0),...(request.batchTargets?{target_kind:request.batchTargets.kind,target_count:request.batchTargets.count}:{}),failure_kind:failureKindOf(error),error:(error as Error).message});
           allIssues.push({code:'LAYOUT_TRANSPORT_RETRIED',path:'$.layout',message:'空间模型连接出现可重试错误；本轮在额度内重新发送一次同一请求。',severity:'warning',retryable:false});
           await new Promise<void>(resolve=>setTimeout(resolve,1000));
           if(input.isCurrent&&!input.isCurrent()||currentRevision()!==anchor.baseRevision)throw new AtlasDbError('STALE_BASE','空间模型重试前聊天或世界修订已变化，候选不发布',{});
@@ -2108,22 +2112,148 @@ export function createSqlRepository(options: RepositoryOptions) {
       };
       let layoutApplied=false;
       let layoutEvidenceBlocked=false;
+      const completedSpatialMaps=new Set<string>();
+      let spatialPass=0;
+      // M3/W03：布局请求结算 —— 仍在同一个受控候选事务内，before 最终外键/不变量检查。
+      // 生成器是同步纯函数：这里不 await、不开新事务、不提交、不保存聊天。
+      const spatialGuard = input.isCurrent ?? (() => true);
+      const spatialPorts = {
+        applyGroups: (db: SqlDatabase, groups: unknown[], ctx: ApplyGroupsContext) => applyGroups(db, groups as AtomicGroup[], ctx),
+        isCurrent: spatialGuard,
+        branchId,
+        turnId,
+        attemptId: 'spatial',
+      };
+      // M3/W08：UI 显式重试 —— 先把 failed 请求重新武装成 pending（只改状态与 ID）。
+      if (input.layoutRetry && typeof input.layoutRetry.mapId === 'string' && input.layoutRetry.mapId) {
+        const armed = armLayoutRetry({
+          db: candidateDb,
+          branchId,
+          mapId: input.layoutRetry.mapId,
+          requestId: input.layoutRetry.requestId,
+          operationId: input.layoutRetry.operationId,
+          turnId,
+          ports: spatialPorts,
+        });
+        groupResults.push(...armed.groups);
+        allIssues.push(...armed.issues);
+      }
+
+      const materializeLayouts=():void=>{
+        spatialPass++;
+        // M4-21 / M4-23：本轮真正发出布局请求的图 → requestId，用于结算后写「结构指纹」。
+        // 只有本轮被队列消费掉的请求才记指纹：布局失败/空响应绝不能被记成「这张图已布局完成」。
+        const pendingRequestByMap = new Map<string, string>();
+        const taskByMap=new Map(layoutTasks.flatMap(task=>task.mapIds.map(mapId=>[mapId,task] as const)));
+        if (layoutApplied && taskByMap.size) {
+          const scanPort = createTableReadPort(candidateDb);
+          for (const mapId of taskByMap.keys()) {
+            const row = scanPort.selectOne('maps', branchId, mapId);
+            if (!row) continue;
+            const frame = normalizeFrame(row.frame_json);
+            const request = frame[SPATIAL_REQUEST_KEY];
+            if (!request || typeof request !== 'object' || Array.isArray(request)) continue;
+            if (String((request as Record<string, unknown>).status ?? 'pending') !== 'pending') continue;
+            const requestId = String((request as Record<string, unknown>).requestId ?? `req_${mapId}`);
+            pendingRequestByMap.set(mapId, requestId);
+          }
+        }
+
+        const spatial = applyPendingSpatialRequests({
+          db: candidateDb,
+          scope: { chatId: anchor.chatUid, branchId, revision: rev, viewMode: 'author' },
+          isCurrent: spatialGuard,
+          turnId,
+          clockS: clockBefore,
+          autoPlan:true,
+          sourceText:[input.userText,input.assistantText,...sourceSnapshot.map(s=>s.text)].filter(Boolean).join('\n'),
+          maxJobs:Math.max(ATLAS_RUNTIME_LIMITS.layoutMapsPerBatch,taskByMap.size),
+          ports: spatialPorts,
+        });
+        groupResults.push(...spatial.groups);
+        allIssues.push(...spatial.issues);
+        const processedNow=new Set(spatial.processed);
+        for(const [id,requestId] of pendingRequestByMap)if(processedNow.has(requestId))completedSpatialMaps.add(id);
+        for(const id of spatial.completedMapIds??[])completedSpatialMaps.add(id);
+
+        // M4-21 / M4-23：结构指纹结算 —— 只有「场景真的落成、请求已被消费」的图才记指纹。
+        // 记上之后，成员/来源不变时 buildSqlLayoutTask 不再为同一张图重复请求模型（W07）。
+        if (completedSpatialMaps.size) {
+          const processedRequests = new Set(spatial.processed);
+          const ctxPort = createTableReadPort(candidateDb);
+          const ctxMutations: RowMutation[] = [];
+          const completedMaps=new Map<string,string|undefined>([...completedSpatialMaps].map(id=>[id,undefined]));
+          for(const id of spatial.completedMapIds??[])if(!completedMaps.has(id))completedMaps.set(id,undefined);
+          for (const [mapId, requestId] of completedMaps) {
+            const mapLayoutTask=taskByMap.get(mapId);
+            if (requestId&&!processedRequests.has(requestId)) continue;
+            const row = ctxPort.selectOne('maps', branchId, mapId);
+            if (!row) continue;
+            const rawFrame = row.frame_json;
+            const frame: Record<string, unknown> = rawFrame && typeof rawFrame === 'object' && !Array.isArray(rawFrame)
+              ? { ...(rawFrame as Record<string, unknown>) }
+              : {};
+            // 场景没落成、或请求还挂着（pending/failed）→ 这轮没真正布局完，不许记指纹。
+            if (!frame.atlasScene) continue;
+            const request = frame[SPATIAL_REQUEST_KEY];
+            const requestStatus = request && typeof request === 'object' && !Array.isArray(request)
+              ? String((request as Record<string, unknown>).status ?? '')
+              : '';
+            if (requestStatus === 'pending' || requestStatus === 'failed') continue;
+            const hash=computeMapLayoutSignature(ctxPort,branchId,mapId)??mapLayoutTask?.contextHashes?.[mapId]??mapLayoutTask?.contextHash;
+            const priorContext=frame[LAYOUT_CONTEXT_FRAME_KEY] as {hash?:string;completedTurnId?:string}|undefined;
+            if(priorContext?.hash===hash&&priorContext?.completedTurnId===turnId)continue;
+            ctxMutations.push({
+              table: 'maps',
+              rowId: mapId,
+              before: { ...row },
+              after: {
+                ...row,
+                frame_json: { ...frame, [LAYOUT_CONTEXT_FRAME_KEY]: { version: 3, hash, completedTurnId: turnId } },
+                row_rev: Number(row.row_rev ?? 1) + 1,
+                updated_turn_id: turnId,
+              },
+              sourceOpIds: [`layout_ctx_${spatialPass}_${mapId}`],
+              basis: { kind: 'simulation', sources: [], causes: [], reason: `记录地图 ${mapId} 本轮布局所依据的结构指纹`, verification: 'causal', certainty: 'confirmed' },
+            });
+          }
+          if (ctxMutations.length > 0) {
+            const ctxGroup: AtomicGroup = {
+              id: `grp_layout_ctx_${turnId}_${spatialPass}`,
+              opIds: ctxMutations.map((m) => String((m.sourceOpIds ?? [])[0] ?? 'layout_ctx')),
+              dependsOn: [],
+              readSet: ctxMutations.map((m) => ({ table: 'maps', rowId: m.rowId, rowRev: Number((m.before as Record<string, unknown>).row_rev ?? 0) })),
+              mutations: ctxMutations,
+            };
+            const appliedCtx = applyGroups(candidateDb, [ctxGroup], { branchId, turnId, attemptId: 'layout-context', validate: true });
+            groupResults.push(...appliedCtx.groups);
+            for (const message of appliedCtx.journalIssues) {
+              allIssues.push({ code: 'JOURNAL_WRITE_FAILED', path: '$.layout.context', message, severity: 'error', retryable: false });
+            }
+          }
+        }
+
+      };
       while(layoutTask&&layoutModelPort&&layoutBudget.remaining()>0){
-        const currentLayoutTask=layoutTask;
+        let currentLayoutTask=layoutTask;
+        const attemptedMapIds=[...layoutTask.mapIds];
+        const returnedMapIds=new Set<string>();
+        let retryableBatchReply=false,splitAfterFailure=false;
         layoutTasks.push(layoutTask);
         preparationStep='before-layout';
         commitTransaction(candidateDb);transactionOpen=false;
         // R06：布局请求同样在真正发起前后取起止，一次请求只记一条 attempt。
-        const layoutStarted=now();
+        let layoutStarted:number|null=null;
         let layoutAttemptWritten=false;
         const writeLayoutAttempt=(extra:Record<string,unknown>):void=>{
-          if(layoutAttemptWritten)return;
+          if(layoutAttemptWritten||layoutStarted===null)return;
           layoutAttemptWritten=true;
-          recordAttempt({kind:'layout',phase:'geography',started_wall_ms:layoutStarted,...extra});
+          recordAttempt({kind:'layout',phase:'geography',started_wall_ms:layoutStarted,target_kind:'maps',target_count:currentLayoutTask.mapIds.length,estimated_output_tokens:currentLayoutTask.request.batchTargets?.estimatedOutputTokens,...extra});
         };
         try{
           if(layoutEvidenceCache===null){
-            const evidenceBatches=planLayoutEvidence(sourceSnapshot,evidenceMapRefs,anchor,`layout_${turnId}`);
+            const evidenceBatches=planLayoutEvidence(sourceSnapshot,evidenceMapRefs,anchor,`layout_${turnId}`,{maxBatches:1});
+            if(evidenceBatches[0]?.omittedBatches)allIssues.push({code:'LAYOUT_EVIDENCE_SCOPED',path:'$.layout.evidence',message:'资料较长，本次优先读取与所选地图有关的资料片段；其余内容未作为已验证位置依据。',severity:'warning',retryable:false});
             const layoutFacts:LayoutExcerpt[]=[];
             for(const batch of evidenceBatches){
               const evidenceStarted=now();
@@ -2161,29 +2291,38 @@ export function createSqlRepository(options: RepositoryOptions) {
             }
             layoutEvidenceCache=layoutFacts;
           }
-          if(currentLayoutTask.mapIds.some(id=>evidenceBlockedMaps.has(id)))throw new Error('本图位置依据未通过校验；其他地图继续，本图等待重试');
-          const layoutRequest=attachLayoutEvidence(layoutTask.request,layoutEvidenceCache,currentLayoutTask.mapIds);
+          const eligibleMaps=currentLayoutTask.mapIds.filter(id=>!evidenceBlockedMaps.has(id));
+          if(eligibleMaps.length!==currentLayoutTask.mapIds.length){
+            for(const id of currentLayoutTask.mapIds)if(evidenceBlockedMaps.has(id))deferredLayoutIds.add(id);
+            const narrowed=eligibleMaps.length?buildSqlLayoutTask(candidateDb,branchId,{...input,layoutMaps:eligibleMaps},`${turnId}_eligible_${layoutTasks.length}`,layoutReport):null;
+            if(!narrowed)throw new Error('本批位置依据未通过校验；其他地图继续，本批等待重试');
+            currentLayoutTask=layoutTask=narrowed;layoutTasks[layoutTasks.length-1]=narrowed;
+          }
+          const layoutRequest=attachLayoutEvidence(currentLayoutTask.request,layoutEvidenceCache,currentLayoutTask.mapIds);
           // Every real transport still claims the finite spatial plan's allowance.
+          layoutStarted=now();
           let response=await requestSpatialWithTransportRetry(layoutRequest,'layout');
           writeLayoutAttempt({input_chars:layoutRequest.messages.reduce((sum,message)=>sum+message.content.length,0),http_status:response.httpStatus,response_chars:response.text?.length??0,response_hash:sha256HexSync(response.text??''),finish_reason:response.finishReason});
           if(input.isCurrent&&!input.isCurrent()||currentRevision()!==anchor.baseRevision)throw new AtlasDbError('STALE_BASE','布局生成期间聊天或世界修订已变化，候选不发布',{});
-          if(response.finishReason==='length')throw new Error('空间布局输出被截断；本次响应未用于排版，原场景保留');
+          if(response.finishReason==='length')throw Object.assign(new Error('空间布局输出被截断；本次响应未用于排版，原场景保留'),{code:'LAYOUT_BATCH_TRUNCATED'});
           let extracted=extractPayload(response.text??''),parsed=parseOperations(extracted.payload,{phase:'geography'});
-          const layoutRefs=layoutTask.catalogue.knownRefs;
+          const layoutRefs=currentLayoutTask.catalogue.knownRefs;
           const allowedRefs=new Set(layoutRefs.filter(r=>currentLayoutTask.mapIds.includes(r.id)).flatMap(r=>[r.id,r.alias]));
           const hasRequestedLayout=()=>parsed.operations.some(op=>op.value.op==='map.layout.request'&&allowedRefs.has(op.value.ref??''));
           // Ask for a fresh complete response once. Never patch broken JSON locally or reuse partial lines as a full layout.
           const retryEmptyLayout=input.manual&&Array.isArray(input.layoutMaps);
           const retryBrokenJson=!parsed.operations.length&&parsed.issues.some(i=>i.code==='JSON_SYNTAX');
           const unknownEntityRefs=unknownLayoutEntityRefs(parsed.operations.map(operation=>operation.value),layoutRefs);
-          if((unknownEntityRefs.length>0||!hasRequestedLayout()&&(retryEmptyLayout||retryBrokenJson))&&!extracted.incomplete&&layoutBudget.remaining()>0){
+          retryableBatchReply=hasRequestedLayout()||retryEmptyLayout||retryBrokenJson||unknownEntityRefs.length>0;
+          if(currentLayoutTask.mapIds.length===1&&!retriedLayoutIds.has(currentLayoutTask.mapIds[0])&&(unknownEntityRefs.length>0||!hasRequestedLayout()&&(retryEmptyLayout||retryBrokenJson))&&!extracted.incomplete&&layoutBudget.remaining()>0){
+            retriedLayoutIds.add(currentLayoutTask.mapIds[0]);
             const reason=unknownEntityRefs.length?`使用了未登记实体引用 ${unknownEntityRefs.join('、')}`:parsed.explicitNoop?'只返回了 noop':parsed.operations.length?'未返回本批地图引用的 map.layout.request':parsed.issues.some(i=>i.code==='JSON_SYNTAX')?'回复不是合法 JSON':'回复中没有布局操作';
             const repairText=layoutRequest.messages[1].content+'\n【布局回复纠错】上次'+reason+'。解析问题：'+(parsed.issues.map(i=>i.message).join('；')||'无语法错误，但没有本批布局')+'\n本批是用户明确请求生成或更新布局，不能以“正文无变化”判定 noop。重新生成以上地图的完整布局；缺少事实时保留估计/未知和锁，不编造实体。只返回 JSONL，每张图一个完整 JSON 对象，ref 必须使用本图目录引用：'+[...allowedRefs].join('、')+'。所有键及字符串用双引号，不要代码围栏、解释、逗号连接两个对象或在字段内省略括号。';
             const repairRequest={...layoutRequest,batchId:layoutRequest.batchId+'_format_retry',messages:layoutRequest.messages.map((m,i)=>i===1?{...m,content:repairText}:m),promptInput:layoutRequest.promptInput?{...layoutRequest.promptInput,injectionText:repairText}:undefined};
             allIssues.push({code:'LAYOUT_RESPONSE_RETRIED',path:'$.layout',message:`首次布局${reason}，已在本轮预算内请求一次完整回复纠错；原回复未写入地图。`,severity:'warning',retryable:false});
             const retryStarted=now();
             response=await requestSpatialWithTransportRetry(repairRequest,'layout_repair');
-            recordAttempt({kind:'layout_repair',phase:'geography',started_wall_ms:retryStarted,finished_wall_ms:now(),input_chars:repairRequest.messages.reduce((sum,message)=>sum+message.content.length,0),http_status:response.httpStatus,response_chars:response.text?.length??0,response_hash:sha256HexSync(response.text??''),finish_reason:response.finishReason});
+            recordAttempt({kind:'layout_repair',phase:'geography',started_wall_ms:retryStarted,finished_wall_ms:now(),target_kind:'maps',target_count:currentLayoutTask.mapIds.length,estimated_output_tokens:repairRequest.batchTargets?.estimatedOutputTokens,input_chars:repairRequest.messages.reduce((sum,message)=>sum+message.content.length,0),http_status:response.httpStatus,response_chars:response.text?.length??0,response_hash:sha256HexSync(response.text??''),finish_reason:response.finishReason});
             if(input.isCurrent&&!input.isCurrent()||currentRevision()!==anchor.baseRevision)throw new AtlasDbError('STALE_BASE','布局纠错期间聊天或世界修订已变化，候选不发布',{});
             if(response.finishReason==='length')throw new Error('空间布局纠错输出被截断；本次响应未用于排版，原场景保留');
             extracted=extractPayload(response.text??'');parsed=parseOperations(extracted.payload,{phase:'geography'});
@@ -2209,12 +2348,12 @@ export function createSqlRepository(options: RepositoryOptions) {
           allIssues.push(...extracted.issues,...parsed.issues);
           // M4-23：解析必须用**原任务的冻结目录**，不能 await 回来再收一次 —— 候选期间新插入的
           // 行会让 alias 改指向，同一批回复就会被解到别的实体上。
-          const ops=parsed.operations.filter(op=>op.value.op==='map.layout.request'&&allowedRefs.has(op.value.ref??'')).map(op=>{
+          const ops=parsed.operations.filter(op=>op.value.op==='map.layout.request'&&allowedRefs.has(op.value.ref??'')&&(currentLayoutTask.mapIds.length===1||unknownLayoutEntityRefs([op.value],layoutRefs).length===0)).map(op=>{
             const id=layoutRefs.find(r=>r.id===op.value.ref||r.alias===op.value.ref)?.id;
             const extent=id?currentLayoutTask.extents[id]:undefined;
             const kind=id?currentLayoutTask.kinds[id]:undefined;
             const data=op.value.data,spec=data?.spec;
-            if(!id||!extent||!kind||!spec||typeof spec!=='object'||Array.isArray(spec))return {...op,opId:`layout_${op.opId}`};
+            if(!id||!extent||!kind||!spec||typeof spec!=='object'||Array.isArray(spec))return {...op,opId:`layout_${layoutTasks.length}_${op.opId}`};
             // 角色由真实容器决定：模型写错 kind 时以程序值为准（只记诊断，不按错误的 kind 生成）。
             if(data?.kind!==kind)allIssues.push({code:'LAYOUT_KIND_OVERRIDDEN',path:'$.layout.kind',message:`地图 ${id} 的角色由容器决定为 ${kind}，模型给出的 ${String(data?.kind ?? '(空)')} 已按 ${kind} 处理`,severity:'warning',retryable:false});
             // overview 的幅面由程序按地图框架给定（未标定时是格）：不把米制 width/height 塞回去冒充尺度。
@@ -2240,7 +2379,7 @@ export function createSqlRepository(options: RepositoryOptions) {
                 normalizedSpec={...normalizedSpec,districts:[{id:containerRef,name:cityName,bank:'west',order:0}]};
               }
             }
-            return {...op,opId:`layout_${op.opId}`,value:{...op.value,data:{...data,kind,spec:normalizedSpec}}};
+            return {...op,opId:`layout_${layoutTasks.length}_${op.opId}`,value:{...op.value,data:{...data,kind,spec:normalizedSpec}}};
           });
           if(!ops.length)allIssues.push({code:'LAYOUT_NOT_GENERATED',path:'$.layout',message:'模型没有返回空间布局约束；地图与布局尚未完成，已登记地点保留，下一轮自动继续布局',severity:'warning',retryable:true});
           const layoutCompiled=compileOperations({operations:ops,anchor,phase:'geography',clockS:clockBefore,revision:rev,
@@ -2251,6 +2390,8 @@ export function createSqlRepository(options: RepositoryOptions) {
           beginTransaction(candidateDb);transactionOpen=true;
           const appliedLayout=applyGroups(candidateDb,orderGroups(groups.groups).order,{branchId,turnId,attemptId:'layout',validate:true});
           groupResults.push(...appliedLayout.groups);parsedOperations.push(...ops);
+          const acceptedIds=new Set(appliedLayout.groups.filter(g=>g.status==='applied').flatMap(g=>g.opIds));
+          for(const op of ops)if(acceptedIds.has(op.opId)){const id=layoutRefs.find(r=>r.id===op.value.ref||r.alias===op.value.ref)?.id;if(id)returnedMapIds.add(id);}
           // 只有真拿到布局操作才算本轮「发过布局」；空响应 / 全被拒不算，否则会把失败伪装成成功。
           layoutApplied=layoutApplied||ops.length>0;
           for(const message of appliedLayout.journalIssues)allIssues.push({code:'JOURNAL_WRITE_FAILED',path:'$.layout',message,severity:'error',retryable:false});
@@ -2258,128 +2399,43 @@ export function createSqlRepository(options: RepositoryOptions) {
           if(!transactionOpen){beginTransaction(candidateDb);transactionOpen=true;}
           if(error instanceof AtlasDbError&&error.code==='STALE_BASE')throw error;
           if(layoutEvidenceCache===null)layoutEvidenceBlocked=true;
-          allIssues.push({code:'LAYOUT_MODEL_FAILED',path:'$.layout',message:`空间布局未生成：${(error as Error).message} 已登记的世界数据保留，下一轮自动继续布局。`,severity:'warning',retryable:true});
+          splitAfterFailure=(error as {code?:string}).code==='LAYOUT_BATCH_TRUNCATED'&&currentLayoutTask.mapIds.length>1&&!currentLayoutTask.mapIds.some(id=>retriedLayoutIds.has(id))&&layoutBudget.remaining()>0;
+          retryableBatchReply=splitAfterFailure;
+          allIssues.push(splitAfterFailure?{code:'LAYOUT_BATCH_SPLIT',path:'$.layout',message:'合批回复被截断，原回复未写入；剩余额度内缩小批量重试。',severity:'warning',retryable:false}:{code:'LAYOUT_MODEL_FAILED',path:'$.layout',message:`空间布局未生成：${(error as Error).message} 已登记的世界数据保留，下一轮自动继续布局。`,severity:'warning',retryable:true});
           writeLayoutAttempt({failure_kind:failureKindOf(error),error:(error as Error).message});
         }
         if(layoutEvidenceBlocked)break;
         // Continue the next chunk inside this same isolated candidate. No intermediate
         // save exposes point-only maps and no second UI click is required.
-        pendingLayoutIds.shift();
-        layoutTask=pendingLayoutIds.length?buildSqlLayoutTask(candidateDb,branchId,{...input,layoutMaps:[pendingLayoutIds[0]]},`${turnId}_layout_${layoutTasks.length}`,layoutReport):null;
+        materializeLayouts();
+        const retryIds:string[]=[];
+        for(const id of currentLayoutTask.mapIds){
+          if(completedSpatialMaps.has(id))continue;
+          if(!returnedMapIds.has(id)&&retryableBatchReply&&!retriedLayoutIds.has(id)&&layoutBudget.remaining()>0&&!evidenceBlockedMaps.has(id)){
+            retryIds.push(id);retriedLayoutIds.add(id);if(splitAfterFailure)smallerLayoutBatches.set(id,Math.max(1,Math.floor(currentLayoutTask.mapIds.length/2)));
+          }else deferredLayoutIds.add(id);
+        }
+        if(retryIds.length&&!splitAfterFailure)allIssues.push({code:'LAYOUT_MAP_REPLY_RETRIED',path:'$.layout',message:`本批仅补交 ${retryIds.length} 张未完成地图，已完成地图不重做。`,severity:'warning',retryable:false});
+        const consumed=new Set(attemptedMapIds);
+        pendingLayoutIds.splice(0,pendingLayoutIds.length,...pendingLayoutIds.filter(id=>!consumed.has(id)&&!completedSpatialMaps.has(id)));
+        pendingLayoutIds.unshift(...retryIds);
+        const parentBlocked=pendingLayoutIds.filter(id=>{
+          const seen=new Set<string>();let parent=layoutParents[id];
+          while(parent&&!seen.has(parent)){seen.add(parent);if(deferredLayoutIds.has(parent)||evidenceBlockedMaps.has(parent))return true;parent=layoutParents[parent];}
+          return false;
+        });
+        if(parentBlocked.length){
+          for(const id of parentBlocked)deferredLayoutIds.add(id);
+          const blocked=new Set(parentBlocked);pendingLayoutIds.splice(0,pendingLayoutIds.length,...pendingLayoutIds.filter(id=>!blocked.has(id)));
+          allIssues.push({code:'LAYOUT_PARENT_PENDING',path:'$.layout',message:`${parentBlocked.length} 张子图等待父图完成；本轮不消耗请求生成缺少父图依据的细节。`,severity:'warning',retryable:true});
+        }
+        layoutTask=pendingLayoutIds.length?buildSqlLayoutTask(candidateDb,branchId,{...input,layoutMaps:pendingLayoutIds,layoutBatchMapLimit:smallerLayoutBatches.get(pendingLayoutIds[0])},`${turnId}_layout_${layoutTasks.length}`,layoutReport):null;
+        if(layoutTask&&layoutTask.mapIds.some(id=>retriedLayoutIds.has(id))){const suffix='\n【未完成项补交】只处理本图目录列出的地图；已完成地图已从本批移除，不要重新生成。';layoutTask.request.messages[1].content+=suffix;layoutTask.request.promptInput!.injectionText=layoutTask.request.messages[1].content;}
         drainLayoutReport();
       }
-      if(layoutTask||evidenceBlockedMaps.size)allIssues.push({code:'LAYOUT_BATCH_PENDING',path:'$.layout',message:`${new Set([...pendingLayoutIds,...evidenceBlockedMaps]).size} 张地图的空间布局未完成（位置依据失败、布局连接不可用或计划传输额度耗尽）；请查看本轮请求错误。`,severity:'warning',retryable:true});
+      if(pendingLayoutIds.length||evidenceBlockedMaps.size||deferredLayoutIds.size)allIssues.push({code:'LAYOUT_BATCH_PENDING',path:'$.layout',message:`${new Set([...pendingLayoutIds,...evidenceBlockedMaps,...deferredLayoutIds]).size} 张地图保留为待细化。每次操作最多发送 4 次模型请求；已登记地点和已完成布局保留，可选中需要的地图后继续生成。`,severity:'warning',retryable:true});
 
-      // M3/W03：布局请求结算 —— 仍在同一个受控候选事务内，before 最终外键/不变量检查。
-      // 生成器是同步纯函数：这里不 await、不开新事务、不提交、不保存聊天。
-      const spatialGuard = input.isCurrent ?? (() => true);
-      const spatialPorts = {
-        applyGroups: (db: SqlDatabase, groups: unknown[], ctx: ApplyGroupsContext) => applyGroups(db, groups as AtomicGroup[], ctx),
-        isCurrent: spatialGuard,
-        branchId,
-        turnId,
-        attemptId: 'spatial',
-      };
-      // M3/W08：UI 显式重试 —— 先把 failed 请求重新武装成 pending（只改状态与 ID）。
-      if (input.layoutRetry && typeof input.layoutRetry.mapId === 'string' && input.layoutRetry.mapId) {
-        const armed = armLayoutRetry({
-          db: candidateDb,
-          branchId,
-          mapId: input.layoutRetry.mapId,
-          requestId: input.layoutRetry.requestId,
-          operationId: input.layoutRetry.operationId,
-          turnId,
-          ports: spatialPorts,
-        });
-        groupResults.push(...armed.groups);
-        allIssues.push(...armed.issues);
-      }
-
-      // M4-21 / M4-23：本轮真正发出布局请求的图 → requestId，用于结算后写「结构指纹」。
-      // 只有本轮被队列消费掉的请求才记指纹：布局失败/空响应绝不能被记成「这张图已布局完成」。
-      const pendingRequestByMap = new Map<string, string>();
-      const taskByMap=new Map(layoutTasks.flatMap(task=>task.mapIds.map(mapId=>[mapId,task] as const)));
-      if (layoutApplied && taskByMap.size) {
-        const scanPort = createTableReadPort(candidateDb);
-        for (const mapId of taskByMap.keys()) {
-          const row = scanPort.selectOne('maps', branchId, mapId);
-          if (!row) continue;
-          const frame = normalizeFrame(row.frame_json);
-          const request = frame[SPATIAL_REQUEST_KEY];
-          if (!request || typeof request !== 'object' || Array.isArray(request)) continue;
-          if (String((request as Record<string, unknown>).status ?? 'pending') !== 'pending') continue;
-          const requestId = String((request as Record<string, unknown>).requestId ?? `req_${mapId}`);
-          pendingRequestByMap.set(mapId, requestId);
-        }
-      }
-
-      const spatial = applyPendingSpatialRequests({
-        db: candidateDb,
-        scope: { chatId: anchor.chatUid, branchId, revision: rev, viewMode: 'author' },
-        isCurrent: spatialGuard,
-        turnId,
-        clockS: clockBefore,
-        autoPlan:true,
-        sourceText:[input.userText,input.assistantText,...sourceSnapshot.map(s=>s.text)].filter(Boolean).join('\n'),
-        maxJobs:Math.max(ATLAS_RUNTIME_LIMITS.layoutMapsPerBatch,taskByMap.size),
-        ports: spatialPorts,
-      });
-      groupResults.push(...spatial.groups);
-      allIssues.push(...spatial.issues);
-
-      // M4-21 / M4-23：结构指纹结算 —— 只有「场景真的落成、请求已被消费」的图才记指纹。
-      // 记上之后，成员/来源不变时 buildSqlLayoutTask 不再为同一张图重复请求模型（W07）。
-      if (pendingRequestByMap.size > 0 && taskByMap.size || spatial.completedMapIds?.length) {
-        const processedRequests = new Set(spatial.processed);
-        const ctxPort = createTableReadPort(candidateDb);
-        const ctxMutations: RowMutation[] = [];
-        const completedMaps=new Map<string,string|undefined>(pendingRequestByMap);
-        for(const id of spatial.completedMapIds??[])if(!completedMaps.has(id))completedMaps.set(id,undefined);
-        for (const [mapId, requestId] of completedMaps) {
-          const mapLayoutTask=taskByMap.get(mapId);
-          if (requestId&&!processedRequests.has(requestId)) continue;
-          const row = ctxPort.selectOne('maps', branchId, mapId);
-          if (!row) continue;
-          const rawFrame = row.frame_json;
-          const frame: Record<string, unknown> = rawFrame && typeof rawFrame === 'object' && !Array.isArray(rawFrame)
-            ? { ...(rawFrame as Record<string, unknown>) }
-            : {};
-          // 场景没落成、或请求还挂着（pending/failed）→ 这轮没真正布局完，不许记指纹。
-          if (!frame.atlasScene) continue;
-          const request = frame[SPATIAL_REQUEST_KEY];
-          const requestStatus = request && typeof request === 'object' && !Array.isArray(request)
-            ? String((request as Record<string, unknown>).status ?? '')
-            : '';
-          if (requestStatus === 'pending' || requestStatus === 'failed') continue;
-          ctxMutations.push({
-            table: 'maps',
-            rowId: mapId,
-            before: { ...row },
-            after: {
-              ...row,
-              frame_json: { ...frame, [LAYOUT_CONTEXT_FRAME_KEY]: { version: 3, hash: computeMapLayoutSignature(ctxPort, branchId, mapId)??mapLayoutTask?.contextHashes?.[mapId]??mapLayoutTask?.contextHash, completedTurnId: turnId } },
-              row_rev: Number(row.row_rev ?? 1) + 1,
-              updated_turn_id: turnId,
-            },
-            sourceOpIds: [`layout_ctx_${mapId}`],
-            basis: { kind: 'simulation', sources: [], causes: [], reason: `记录地图 ${mapId} 本轮布局所依据的结构指纹`, verification: 'causal', certainty: 'confirmed' },
-          });
-        }
-        if (ctxMutations.length > 0) {
-          const ctxGroup: AtomicGroup = {
-            id: `grp_layout_ctx_${turnId}`,
-            opIds: ctxMutations.map((m) => String((m.sourceOpIds ?? [])[0] ?? 'layout_ctx')),
-            dependsOn: [],
-            readSet: ctxMutations.map((m) => ({ table: 'maps', rowId: m.rowId, rowRev: Number((m.before as Record<string, unknown>).row_rev ?? 0) })),
-            mutations: ctxMutations,
-          };
-          const appliedCtx = applyGroups(candidateDb, [ctxGroup], { branchId, turnId, attemptId: 'layout-context', validate: true });
-          groupResults.push(...appliedCtx.groups);
-          for (const message of appliedCtx.journalIssues) {
-            allIssues.push({ code: 'JOURNAL_WRITE_FAILED', path: '$.layout.context', message, severity: 'error', retryable: false });
-          }
-        }
-      }
+      materializeLayouts();
 
       // M3-12 / P07：建设状态元数据也必须进 journal —— 通过 RowMutation + applyGroups 保存，
       // 因此删楼回退时它跟业务数据一起被恢复，而不是散落在 frame 里改不回去。

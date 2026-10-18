@@ -296,16 +296,19 @@ function create(canvas, mini, hooks){
    */
   const CONTENT_MIN_SPAN = 140;
   function contentExtent(){
-    if(st.kind==='floor')return null;
     const g=st.geo||{};
+    if(st.kind==='floor'&&!g.parentContext)return null;
     let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
     const put=(x,y)=>{if(!Number.isFinite(x)||!Number.isFinite(y))return;if(x<x0)x0=x;if(x>x1)x1=x;if(y<y0)y0=y;if(y>y1)y1=y;};
     const pts=list=>{if(Array.isArray(list))for(const p of list)if(Array.isArray(p))put(p[0],p[1]);};
     const box=(x,y,w,h)=>{if([x,y,w,h].every(Number.isFinite)){put(x,y);put(x+w,y+h);}};
     for(const s of g.overviewShapes||[])pts(s&&s.pts);
     for(const r of g.overviewRoutes||[])pts(r&&(r.points||r.path));
+    for(const r of g.corridorRoutes||[])pts(r.points);
     for(const f of g.overviewFeatures||[]){pts(f&&f.poly);pts(f&&f.line);}
     pts(g.selfArea&&g.selfArea.pts);
+    pts(g.parentContext?.active?.pts);
+    for(const sibling of g.parentContext?.siblings??[])pts(sibling.pts);
     for(const d of g.districts||[])pts(d&&d.pts);
     for(const L of g.lands||[])pts(L&&L.pts);
     for(const p of g.plots||[]){const r=p&&p.r;if(Array.isArray(r))put(r[0],r[1]),put(r[2],r[3]);}
@@ -326,6 +329,7 @@ function create(canvas, mini, hooks){
     return [x0,x1,y0,y1];
   }
   function fitExtent(){
+    if(st.geo.parentContext)return contentExtent()??extent();
     // Fit any standalone room to its actual geometry, without changing map units.
     const rooms=st.geo.rooms;
     if(st.kind==='floor'&&rooms?.length===1&&st.geo.corridor?.h===0){
@@ -385,15 +389,27 @@ function create(canvas, mini, hooks){
     else { bg.addColorStop(0,'#070b14'); bg.addColorStop(1,'#0a1120'); }
     ctx.fillStyle = bg; ctx.fillRect(x0-200,y0-200,(x1-x0)+400,(y1-y0)+400);
 
-    if(st.node.host&&st.node.sceneStatus!=='ready') { overviewMap(g); return; }
-    if(g.overviewShapes||g.overviewRoutes) { overviewMap(g); return; }
-    if(st.kind==='world')      worldMap(g);
+    const context=g.parentContext;
+    if(context){
+      for(const sibling of context.siblings){
+        ctx.beginPath();sibling.pts.forEach((p,i)=>i?ctx.lineTo(...p):ctx.moveTo(...p));ctx.closePath();
+        ctx.fillStyle='rgba(100,130,170,.035)';ctx.fill();ctx.strokeStyle='rgba(140,170,200,.45)';ctx.lineWidth=1/st.cam.s;ctx.setLineDash([5/st.cam.s,4/st.cam.s]);ctx.stroke();ctx.setLineDash([]);
+      }
+    }
+    ctx.save();
+    if(context?.active?.pts?.length>=3){ctx.beginPath();context.active.pts.forEach((p,i)=>i?ctx.lineTo(...p):ctx.moveTo(...p));ctx.closePath();ctx.clip();}
+    if(st.node.host&&st.node.sceneStatus!=='ready') overviewMap(g);
+    else if(g.overviewShapes||g.overviewRoutes) overviewMap(g);
+    else if(st.kind==='world') worldMap(g);
     else if(st.kind==='region')regionMap(g);
     else if(st.kind==='city')  cityMap(g);
     else if(st.kind==='district')districtMap(g);
     else if(st.kind==='building')buildingMap(g);
     else if(st.kind==='floor') floorMap(g);
     else                       roomMap(g);
+    for(const route of g.corridorRoutes??[]){ctx.beginPath();route.points.forEach((p,i)=>i?ctx.lineTo(...p):ctx.moveTo(...p));ctx.strokeStyle='rgba(127,212,255,.5)';ctx.lineWidth=1.2/st.cam.s;ctx.setLineDash([6/st.cam.s,4/st.cam.s]);ctx.stroke();ctx.setLineDash([]);}
+    ctx.restore();
+    if(context?.active){ctx.beginPath();context.active.pts.forEach((p,i)=>i?ctx.lineTo(...p):ctx.moveTo(...p));ctx.closePath();ctx.strokeStyle='rgba(67,224,255,.6)';ctx.lineWidth=1.4/st.cam.s;ctx.stroke();}
   }
 
   // SQL overview geometry is usable before a decorative floor/city layout
@@ -444,6 +460,7 @@ function create(canvas, mini, hooks){
       ctx.strokeStyle=route.dashed?'rgba(127,212,255,.42)':'rgba(67,224,255,.7)';
       ctx.lineWidth=(route.dashed?1.1:1.5)/cam;
       ctx.setLineDash(route.dashed?[6/cam,4/cam]:[]);ctx.stroke();
+      if(route.name&&st.showLabels){const a=route.points[0],b=route.points.at(-1);pushLabel((a[0]+b[0])/2,(a[1]+b[1])/2-12/cam,route.name+' · 连接示意','#a6b9cc','sub',true);}
     }
     ctx.setLineDash([]);
     // ⑤ 建筑群质感（只在 zone 自己声明了建成区 role 时加）
@@ -489,10 +506,12 @@ function create(canvas, mini, hooks){
         break;
       }
       case 'road_texture':{
-        // 路纹只是纹理：不进旅程/路径表，也不生成可点击实体。
-        path(line||poly);ctx.lineCap='round';
-        ctx.lineWidth=Math.max(f.width||0,1.2/cam);
-        ctx.setLineDash([5/cam,5/cam]);ctx.strokeStyle='rgba(200,220,240,.20)';ctx.stroke();
+        // Old snapshots contain an arbitrary map-wide curve. Never render that
+        // legacy path as geography; new textures are clipped to a known zone.
+        if(!poly)break;
+        path(poly);ctx.clip();const b=poly.reduce((b,p)=>[Math.min(b[0],p[0]),Math.max(b[1],p[0]),Math.min(b[2],p[1]),Math.max(b[3],p[1])],[Infinity,-Infinity,Infinity,-Infinity]);
+        ctx.strokeStyle='rgba(200,220,240,.12)';ctx.lineWidth=.7/cam;
+        for(let y=b[2];y<=b[3];y+=12/cam){ctx.beginPath();ctx.moveTo(b[0],y);ctx.lineTo(b[1],y);ctx.stroke();}
         break;
       }
       case 'forest_texture':{
@@ -704,7 +723,7 @@ function create(canvas, mini, hooks){
     (g.districts||[]).forEach(d=>{
       const on = st.filter.size===0 || st.filter.has(d.id);
       ctx.save(); ctx.globalAlpha = on?1:.16;
-      ctx.beginPath(); smooth(ctx,d.pts,true);
+      ctx.beginPath();d.pts.forEach((p,i)=>i?ctx.lineTo(...p):ctx.moveTo(...p));ctx.closePath();
       ctx.fillStyle = hexA(d.c,.10); ctx.fill();
       ctx.lineWidth=1.6/st.cam.s; ctx.strokeStyle=hexA(d.c,.42); ctx.stroke();
       ctx.setLineDash([4/st.cam.s,5/st.cam.s]);
@@ -714,7 +733,7 @@ function create(canvas, mini, hooks){
       let bx0=1e9,bx1=-1e9,by0=1e9,by1=-1e9;
       d.pts.forEach(p=>{ bx0=Math.min(bx0,p[0]); bx1=Math.max(bx1,p[0]); by0=Math.min(by0,p[1]); by1=Math.max(by1,p[1]); });
       ctx.save();
-      ctx.beginPath(); smooth(ctx,d.pts,true); ctx.clip();
+      ctx.beginPath();d.pts.forEach((p,i)=>i?ctx.lineTo(...p):ctx.moveTo(...p));ctx.closePath();ctx.clip();
       const rr = rng(hash(d.id));
       ctx.strokeStyle=hexA(d.c,.11); ctx.lineWidth=1/st.cam.s;
       for(let x=bx0;x<bx1;x+=36){ ctx.beginPath(); ctx.moveTo(x,by0); ctx.lineTo(x,by1); ctx.stroke(); }

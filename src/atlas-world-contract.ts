@@ -284,6 +284,8 @@ export type GenerationTask<Request> = {
 };
 
 export type LayoutTask<Request> = GenerationTask<Request> & {
+  /** Direct parent map for the complete queued selection; used to defer descendants of a failed parent. */
+  parentMapIds?: Record<string, string | null>;
   contextHashes?: Record<string,string>;
   mapIds: string[];
   kinds: Record<string, LayoutKind>;

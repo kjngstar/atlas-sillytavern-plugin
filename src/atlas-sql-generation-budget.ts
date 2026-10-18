@@ -1,5 +1,5 @@
 /**
- * atlas-sql-generation-budget.ts — M3-03 / M3-03A：传输预算（前景默认 4；空间组装使用冻结计划）。
+ * atlas-sql-generation-budget.ts — M3-03 / M3-03A：传输预算（全阶段与重试共享每次操作 4 次）。
  *
  * 纪律（改这个文件前先读一遍）：
  * 1. 预算约束的是**真实传输发送**，不是 `modelPort.request` 的调用次数：一次调用内部
@@ -15,7 +15,7 @@
 
 import type { AtlasModelPort } from './atlas-db-contract.ts';
 
-/** 前景默认预算：4 个真实传输发送，不限制后续冻结的空间组装计划。 */
+/** 每次操作共用预算：所有阶段、空间组装与重试合计最多 4 个真实传输发送。 */
 export const GENERATION_BUDGET_LIMIT = 4;
 
 export type BudgetAttemptStatus = 'requested' | 'completed' | 'failed';

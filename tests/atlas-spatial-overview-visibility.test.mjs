@@ -87,7 +87,7 @@ function overviewSpec(over = {}) {
     features: [
       { id: 'F_PUBLIC_FOREST', type: 'forest_texture', zoneId: PUB_B, density: 'medium' },
       { id: SECRET_FEATURE, type: 'forest_texture', zoneId: SECRET_ZONE, density: 'high' },
-      { id: 'F_FULLMAP', type: 'road_texture', density: 'low' },
+      { id: 'F_FULLMAP', type: 'forest_texture', density: 'low' },
     ],
     ...over,
   };
