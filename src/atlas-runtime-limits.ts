@@ -18,6 +18,8 @@ export const ATLAS_RUNTIME_LIMITS = {
   foregroundModelBatchesPerTurn: 4,
   pendingCandidateTtlMs: 10 * 60 * 1000,
   normalResponseTokens: 4096,
+  decisionOutputReserveTokens: 512,
+  decisionActorOutputTokens: 256,
   repairResponseTokens: 2048,
   modelTimeoutMs: 120000,
   mentionCandidates: 256,
@@ -40,8 +42,10 @@ export const ATLAS_RUNTIME_LIMITS = {
   newRoutesPerBatch: 16,
   /** 单个批次最多把本次目标再向下展开的父边数。 */
   additionalParentDepthPerBatch: 2,
-  /** 同一批次最多处理的地图数（优先当前具体图 + 必要宏观图）。 */
-  layoutMapsPerBatch: 2,
+  /** 同类型、同依赖层的地图尽量合批；实际批量还受输出与目录容量限制。 */
+  layoutMapsPerBatch: 8,
+  batchPromptChars: 48000,
+  batchOutputReserveTokens: 384,
   /** 单张概览图的分区上限（G11 场景体积预算）。 */
   overviewZoneLimit: 64,
   /** 单张概览图的地物上限。 */
@@ -86,7 +90,7 @@ export type AtlasRuntimeLimits = typeof ATLAS_RUNTIME_LIMITS;
  * 4096 输出预算 → 14 人；24 是上限，不是每次强塞 24 人。
  */
 export function decisionActorBudget(maxTokens: number): number {
-  const raw = Math.floor((Number(maxTokens) - 512) / 256);
+  const raw = Math.floor((Number(maxTokens) - ATLAS_RUNTIME_LIMITS.decisionOutputReserveTokens) / ATLAS_RUNTIME_LIMITS.decisionActorOutputTokens);
   const bounded = Math.min(ATLAS_RUNTIME_LIMITS.actorsPerDecisionBatch, Math.max(1, raw));
   return Number.isFinite(bounded) ? bounded : 1;
 }

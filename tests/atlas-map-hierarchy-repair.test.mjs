@@ -88,7 +88,7 @@ test('spatial assembly cannot multiply the four-send turn allowance by its numbe
  for(const id of ids)insertRows(seed.db,'maps',[createRow('maps',{name:id,kind:'world',frame_json:{cols:100,rows:100}},{branchId:IDS.branchMain,id,turnId:IDS.seedTurn,clockS:0,nowWallMs:1,rulesetVersion:'atlas-1'})]);
  const bytes=seed.exportBytes();seed.close();const calls=[];
  const repo=createSqlRepository({chatUid:IDS.chatA,branchId:IDS.branchMain,modelPort:{async request(req){calls.push(req);const scopes=JSON.parse(req.messages[1].content.split('\n').find(l=>l.startsWith('本图：')).slice(3));return {batchId:req.batchId,finishReason:'stop',httpStatus:200,text:scopes.map(s=>JSON.stringify({op:'map.layout.request',ref:s.map,data:{kind:'overview',spec:{surface:'mixed',zones:[],features:[],links:[]}}})).join('\n')};}}});
- try{await repo.open({bytes});const result=await repo.prepareTurn(input({layoutMaps:ids}));assert.equal(calls.length,4);assert.ok(result.receipt.issues.some(i=>i.code==='LAYOUT_BATCH_PENDING'));}finally{await repo.close();}
+ try{await repo.open({bytes});const result=await repo.prepareTurn(input({layoutMaps:ids,generationOptions:{maxTokens:8192,batching:{charactersPerBatch:0,mapsPerBatch:1}}}));assert.equal(calls.length,4);assert.ok(result.receipt.issues.some(i=>i.code==='LAYOUT_BATCH_PENDING'));}finally{await repo.close();}
 });
 test('location compilation rejects a self-anchor instead of persisting a vehicle position cycle',async()=>{
  const seed=await makeSeedWith(SQL),bytes=seed.exportBytes();seed.close();const repo=createSqlRepository({chatUid:IDS.chatA,branchId:IDS.branchMain});

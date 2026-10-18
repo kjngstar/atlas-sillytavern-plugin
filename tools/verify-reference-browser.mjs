@@ -182,6 +182,20 @@ try{
  // Failed save must retain the editable draft and original saved settings.
  const savedPrompt=JSON.stringify(settings.promptPresets);await f.locator('[data-prompt-content]').first().fill('x'.repeat(8001));await f.locator('[data-save-prompts]').click();check('failed-save-keeps-draft',(await f.locator('[data-prompt-content]').first().inputValue()).length===8001);
  settings=await p.evaluate(async()=> (await atlasPreviewConnection.api.request('GET','/settings')).body.data);check('failed-save-keeps-settings',JSON.stringify(settings.promptPresets)===savedPrompt);
+ // Batch settings use the real settings API and retain a rejected draft.
+ await f.locator('[data-settings-tab="assignments"]').click();
+ check('batching-default-auto',await f.locator('#batchCharacters').inputValue()==='0'&&await f.locator('#batchMaps').inputValue()==='0');
+ await f.locator('#batchCharacters').fill('20');await f.locator('#batchMaps').fill('6');await f.locator('[data-save-batching]').click();
+ await f.waitForFunction(()=>!AtlasPreview.presets.batchingDirty());
+ settings=await p.evaluate(async()=> (await atlasPreviewConnection.api.request('GET','/settings')).body.data);
+ check('batching-real-settings-save',settings.modelBatching.charactersPerBatch===20&&settings.modelBatching.mapsPerBatch===6,settings.modelBatching);
+ check('batching-host-storage',await p.evaluate(()=>SillyTavern.getContext().extensionSettings.atlas_world_sim.docs.docs.settings.modelBatching.mapsPerBatch===6));
+ const batchExport=await f.evaluate(()=>AtlasPreview.presets.exportValue());check('batching-export-no-key',batchExport.modelBatching.mapsPerBatch===6&&!JSON.stringify(batchExport).includes('apiKey'));
+ await f.locator('#batchMaps').fill('9');await f.locator('[data-save-batching]').click();
+ settings=await p.evaluate(async()=> (await atlasPreviewConnection.api.request('GET','/settings')).body.data);
+ check('batching-invalid-retains-settings-and-draft',settings.modelBatching.mapsPerBatch===6&&await f.locator('#batchMaps').inputValue()==='9'&&await f.evaluate(()=>AtlasPreview.presets.batchingDirty()));
+ await f.locator('#batchCharacters').fill('0');await f.locator('#batchMaps').fill('0');await f.locator('[data-save-batching]').click();await f.waitForFunction(()=>!AtlasPreview.presets.batchingDirty());
+ check('batching-reset-auto',await p.evaluate(async()=> (await atlasPreviewConnection.api.request('GET','/settings')).body.data.modelBatching.mapsPerBatch===0));
  // Real host book API, within the isolated preview fixture.
  await p.evaluate(()=>{const c=SillyTavern.getContext();c.chatMetadata.world_info='原版验收世界书';c.extensionSettings.atlas_world_sim.lorebooks??={};c.extensionSettings.atlas_world_sim.lorebooks['原版验收世界书']={entries:{1:{uid:1,comment:'真实世界书条目',key:['真实世界书条目'],content:'真实宿主资料',disable:false,order:90}}};});
  await f.locator('[data-view="lore"]').click();await f.waitForFunction(()=>AtlasPreview.data.LORE.some(x=>x.title==='真实世界书条目'));

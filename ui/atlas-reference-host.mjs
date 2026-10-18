@@ -118,6 +118,7 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
        * 没有任何能力/版本时给空值，不编一个默认能力。
        */
       engine:{
+        modelBatchingLimits:settings.modelBatchingLimits??{},
         policyVersion:typeof settings.promptPolicyVersion==='string'?settings.promptPolicyVersion:null,
         capabilities:Array.isArray(settings.spatialCapabilities)?[...settings.spatialCapabilities]:[],
         activePromptPresetId:settings.activePromptPresetId??null,

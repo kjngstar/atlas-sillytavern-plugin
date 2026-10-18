@@ -84,10 +84,11 @@ test('new parent and child task share the first physical estimate',async()=>{
   seed.db.run('UPDATE locations SET map_id=? WHERE id=? AND branch_id=?',['school-map',IDS.L3,IDS.branchMain]);
   seed.db.run('UPDATE maps SET meters_per_cell=NULL,scale_quality=?,frame_json=? WHERE id=? AND branch_id=?',['uncalibrated',JSON.stringify({cols:100,rows:100}),IDS.M2,IDS.branchMain]);
   const task=buildSqlLayoutTask(seed.db,IDS.branchMain,input({layoutMaps:['school-map',IDS.M2]}),'test');
-  const scopes=JSON.parse(task.request.messages[1].content.split('\n').find(l=>l.startsWith('本图：')).slice(3));
-  const parent=scopes.find(s=>s.baselineRooms?.some(r=>scopes.some(other=>other.container?.ref===r.id))),child=scopes.find(s=>s.map!==parent?.map);
-  assert.ok(parent&&child,JSON.stringify(scopes));
-  const footprint=parent.baselineRooms.find(r=>r.id===child.container.ref);
+  assert.deepEqual(task.mapIds,['school-map']);assert.deepEqual(task.remainingLocationIds,[IDS.M2]);
+  const childTask=buildSqlLayoutTask(seed.db,IDS.branchMain,input({layoutMaps:[IDS.M2]}),'child');
+  const parse=t=>JSON.parse(t.request.messages[1].content.split('\n').find(l=>l.startsWith('本图：')).slice(3))[0];
+  const parent=parse(task),child=parse(childTask),footprint=parent.baselineRooms.find(r=>r.name===child.container.name);
+  assert.ok(footprint,JSON.stringify({parent,child}));
   assert.equal(child.extent.width,footprint.w);assert.equal(child.extent.height,footprint.h);
  }finally{seed.close();}
 });

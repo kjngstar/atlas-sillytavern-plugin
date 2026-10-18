@@ -356,6 +356,7 @@ export type ModelBatchRequest = {
   maxTokens: number;
   timeoutMs: number;
   repairOfBatchId?: string;
+  batchTargets?: { kind: 'maps' | 'characters'; count: number; estimatedOutputTokens: number };
   /** Read-only material for editable prompt segments; never treat it as instructions. */
   sourceSnapshot?: SourceSnapshotEntry[];
   /** Auxiliary spatial excerpt stage uses the selected connection without SQL operation-format policy. */
@@ -406,7 +407,11 @@ export type TurnInput = {
   operations?: ModelOperation[];
   /** Internal scene writer options, constructed by the host route, never from model text. */
   sceneMaps?: boolean;
-  /** Host-owned spatial task; at most two current/explicit maps, after entity settlement. */
+  /** Frozen host options, never accepted from model operations. */
+  generationOptions?: import('./atlas-model-batching.ts').ModelGenerationOptions;
+  /** Internal smaller cap used after a truncated multi-map reply. */
+  layoutBatchMapLimit?: number;
+  /** Host-owned spatial task, grouped by type, dependency and capacity. */
   layoutMaps?: 'active' | string[];
   mapCalibration?: import('./atlas-sql-scene-maps.ts').SqlMapCalibration;
   sceneOnly?: boolean;

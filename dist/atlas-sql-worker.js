@@ -2170,6 +2170,8 @@
     foregroundModelBatchesPerTurn: 4,
     pendingCandidateTtlMs: 10 * 60 * 1e3,
     normalResponseTokens: 4096,
+    decisionOutputReserveTokens: 512,
+    decisionActorOutputTokens: 256,
     repairResponseTokens: 2048,
     modelTimeoutMs: 12e4,
     mentionCandidates: 256,
@@ -2191,8 +2193,10 @@
     newRoutesPerBatch: 16,
     /** 单个批次最多把本次目标再向下展开的父边数。 */
     additionalParentDepthPerBatch: 2,
-    /** 同一批次最多处理的地图数（优先当前具体图 + 必要宏观图）。 */
-    layoutMapsPerBatch: 2,
+    /** 同类型、同依赖层的地图尽量合批；实际批量还受输出与目录容量限制。 */
+    layoutMapsPerBatch: 8,
+    batchPromptChars: 48e3,
+    batchOutputReserveTokens: 384,
     /** 单张概览图的分区上限（G11 场景体积预算）。 */
     overviewZoneLimit: 64,
     /** 单张概览图的地物上限。 */
@@ -2225,7 +2229,7 @@
     actionPayloadRefLimit: 8
   };
   function decisionActorBudget(maxTokens) {
-    const raw = Math.floor((Number(maxTokens) - 512) / 256);
+    const raw = Math.floor((Number(maxTokens) - ATLAS_RUNTIME_LIMITS.decisionOutputReserveTokens) / ATLAS_RUNTIME_LIMITS.decisionActorOutputTokens);
     const bounded = Math.min(ATLAS_RUNTIME_LIMITS.actorsPerDecisionBatch, Math.max(1, raw));
     return Number.isFinite(bounded) ? bounded : 1;
   }
@@ -7220,6 +7224,27 @@ END`;
     return { ok: false, status: "failed", mutation: null, issues };
   }
 
+  // src/atlas-model-batching.ts
+  var MODEL_BATCHING_LIMITS = {
+    charactersPerBatch: ATLAS_RUNTIME_LIMITS.actorsPerDecisionBatch,
+    mapsPerBatch: ATLAS_RUNTIME_LIMITS.layoutMapsPerBatch
+  };
+  function normalizeModelBatching(value) {
+    const raw = value && typeof value === "object" ? value : {};
+    const count2 = (key) => typeof raw[key] === "number" && Number.isSafeInteger(raw[key]) && raw[key] >= 0 && raw[key] <= MODEL_BATCHING_LIMITS[key] ? raw[key] : 0;
+    return { charactersPerBatch: count2("charactersPerBatch"), mapsPerBatch: count2("mapsPerBatch") };
+  }
+  function normalizeGenerationOptions(value) {
+    return { maxTokens: typeof value?.maxTokens === "number" && Number.isSafeInteger(value.maxTokens) && value.maxTokens >= 0 ? value.maxTokens : 0, batching: normalizeModelBatching(value?.batching) };
+  }
+  function planningOutputTokens(options) {
+    return options?.maxTokens && options.maxTokens > 0 ? options.maxTokens : ATLAS_RUNTIME_LIMITS.normalResponseTokens;
+  }
+  function characterBatchLimit(options) {
+    const config = normalizeModelBatching(options?.batching);
+    return Math.min(config.charactersPerBatch || MODEL_BATCHING_LIMITS.charactersPerBatch, decisionActorBudget(planningOutputTokens(options)));
+  }
+
   // src/atlas-layout-signature.ts
   var LAYOUT_SIGNATURE_POLICY_VERSION = "layout-v7";
   var byId3 = (left, right) => left < right ? -1 : left > right ? 1 : 0;
@@ -8250,6 +8275,29 @@ ${lines.join("\n")}
       const held = mapByContainer.get(containerId);
       if (!held || entry.mapId < held.mapId) mapByContainer.set(containerId, entry);
     }
+    const entryByMap = new Map(entries.map((entry) => [entry.mapId, entry]));
+    const parentEntry = (entry) => {
+      let id = asId3(entry.container?.parent_location_id);
+      const seen = /* @__PURE__ */ new Set();
+      while (id && !seen.has(id)) {
+        seen.add(id);
+        const parent = mapByContainer.get(id);
+        if (parent && parent !== entry) return parent;
+        id = parentOf(id);
+      }
+      const outer = entryByMap.get(String(entry.container?.map_id ?? ""));
+      return outer !== entry ? outer : void 0;
+    };
+    const depth = (entry) => {
+      let current = entry, n = 0;
+      const seen = /* @__PURE__ */ new Set();
+      while (current && !seen.has(current.mapId)) {
+        seen.add(current.mapId);
+        current = parentEntry(current);
+        if (current) n++;
+      }
+      return n;
+    };
     let chosen = [];
     if (input.layoutMaps === "active") {
       const occupied = uniqueSorted(characters.map((row2) => asId3(row2.location_id)).filter((id) => id !== null));
@@ -8266,20 +8314,10 @@ ${lines.join("\n")}
         }
       }
       chosen = entries.filter((entry) => activePath.has(entry.mapId) ? occupiedSet.has(String(entry.container?.id)) || entry.own.length > 0 && (entry.kind !== "overview" || entry.own.length > 1) : entry.container === null && entry.own.length > 1);
-      const depth = (entry) => {
-        let id = asId3(entry.container?.parent_location_id), n = 0;
-        const seen = /* @__PURE__ */ new Set();
-        while (id && !seen.has(id)) {
-          seen.add(id);
-          n++;
-          id = parentOf(id);
-        }
-        return n;
-      };
       chosen.sort((a, b) => depth(a) - depth(b) || byId4(a.mapId, b.mapId));
     } else if (Array.isArray(input.layoutMaps)) {
       const requested = input.layoutMaps.map((id) => String(id));
-      chosen = entries.filter((entry) => requested.includes(entry.mapId)).sort((a, b) => requested.indexOf(a.mapId) - requested.indexOf(b.mapId));
+      chosen = entries.filter((entry) => requested.includes(entry.mapId)).sort((a, b) => depth(a) - depth(b) || requested.indexOf(a.mapId) - requested.indexOf(b.mapId));
     }
     if (chosen.length === 0) return null;
     const contextHashes = {};
@@ -8288,9 +8326,29 @@ ${lines.join("\n")}
     }
     chosen = chosen.filter((entry) => Array.isArray(input.layoutMaps) || !hasScene(entry.map) || storedLayoutHash(entry.map) !== contextHashes[entry.mapId]);
     if (!chosen.length) return null;
-    const batchLimit = ATLAS_RUNTIME_LIMITS.layoutMapsPerBatch;
-    const selected = chosen.slice(0, batchLimit);
-    const remaining = chosen.slice(batchLimit).map((entry) => entry.mapId);
+    const config = normalizeModelBatching(input.generationOptions?.batching);
+    const retryLimit = input.layoutBatchMapLimit;
+    const batchLimit = Math.min(
+      config.mapsPerBatch || ATLAS_RUNTIME_LIMITS.layoutMapsPerBatch,
+      typeof retryLimit === "number" && Number.isSafeInteger(retryLimit) && retryLimit > 0 ? retryLimit : ATLAS_RUNTIME_LIMITS.layoutMapsPerBatch
+    );
+    const outputBudget = Math.max(0, planningOutputTokens(input.generationOptions) - ATLAS_RUNTIME_LIMITS.batchOutputReserveTokens);
+    const first = chosen[0], selected = [];
+    let estimatedTokens = 0, inputChars = 0, estimatedRefs = 0;
+    for (const entry of chosen) {
+      if (entry.kind !== first.kind || depth(entry) !== depth(first) || selected.length >= batchLimit) continue;
+      const scene = normalizeFrame(entry.map.frame_json).atlasScene;
+      const savedChars = JSON.stringify(scene?.constraints ?? {}).length;
+      const tokens = Math.max(192 + entry.own.length * (entry.kind === "floor" ? 112 : 72), Math.ceil(savedChars / 2));
+      const chars = JSON.stringify(entry.own).length + savedChars, refs = entry.own.length + 1;
+      if (selected.length && (estimatedTokens + tokens > outputBudget || inputChars + chars > ATLAS_RUNTIME_LIMITS.batchPromptChars || estimatedRefs + refs > ATLAS_RUNTIME_LIMITS.refCatalogMaxEntries)) continue;
+      selected.push(entry);
+      estimatedTokens += tokens;
+      inputChars += chars;
+      estimatedRefs += refs;
+    }
+    const selectedIds = new Set(selected.map((entry) => entry.mapId));
+    const remaining = chosen.filter((entry) => !selectedIds.has(entry.mapId)).map((entry) => entry.mapId);
     const focusLocations = [];
     for (const entry of selected) {
       const containerId = asId3(entry.map.container_location_id);
@@ -8358,14 +8416,14 @@ ${lines.join("\n")}
         }));
         return known ? { ref: ref(id), name: row2.name, w: known.widthM, h: known.heightM, source: known.source, referenceId: known.referenceId, furnishing } : null;
       }).filter((item) => item !== null);
-      const parentEntry = container ? derived.entries.find((e) => e.mapId === container.map_id) : null;
-      const parentFrame = parentEntry ? normalizeFrame(parentEntry.map.frame_json) : null;
+      const parentEntry2 = container ? derived.entries.find((e) => e.mapId === container.map_id) : null;
+      const parentFrame = parentEntry2 ? normalizeFrame(parentEntry2.map.frame_json) : null;
       const parentScene = parentFrame?.atlasScene;
       const parentLayout = parentScene?.layout;
       const parentShapes = parentLayout ? [parentLayout.shapes, parentLayout.districts, parentLayout.rooms, parentLayout.buildings].flatMap((pool) => Array.isArray(pool) ? pool : []) : [];
       const parentFootprint = parentShapes.find((shape) => shape.id === container?.id);
       const parentContext = parentFootprint ? {
-        name: parentEntry.map.name,
+        name: parentEntry2.map.name,
         units: parentScene?.units ?? "unknown",
         footprint: { ...parentFootprint, id: ref(container.id) },
         siblings: parentShapes.filter((shape) => shape.id !== container?.id && ref(shape.id)).slice(0, 32).map((shape) => ({ ...shape, id: ref(shape.id) }))
@@ -8535,6 +8593,7 @@ ${lines.join("\n")}
       ]
     });
     request.messages[1].content += "\n【输出校验】本批要求生成或更新上述地图，不能因正文未变化只返回 noop。overview 的 surface 只能为 mixed/urban/forest/mountain/water/indoor/void；砂石、泥土、草地等具体材料可在 why 中说明，不得用 gravel/dirt/grass 作为 surface 枚举。未知或混合场地用 mixed。每个操作必须使用本批 map 引用及给定 kind，不输出解释正文。";
+    request.batchTargets = { kind: "maps", count: selected.length, estimatedOutputTokens: estimatedTokens };
     request.promptInput.injectionText = request.messages[1].content;
     return {
       request,
@@ -8549,6 +8608,7 @@ ${lines.join("\n")}
       contextHashes,
       focusLocationIds: uniqueSorted(focusLocations),
       remainingLocationIds: remaining,
+      parentMapIds: Object.fromEntries(chosen.map((entry) => [entry.mapId, parentEntry(entry)?.mapId ?? null])),
       mapIds: pendingIds,
       kinds: Object.fromEntries(pending.map((entry) => [entry.mapId, entry.kind])),
       extents: Object.fromEntries(pending.map((entry) => [entry.mapId, { ...entry.extent }])),
@@ -27283,6 +27343,13 @@ ${entry.text}`.toLowerCase();
     let cursor = Number(branch.simulation_cursor_s), catchingUp = false, batches = 0;
     const steps = [];
     const pendingActors = [];
+    const decidedAt = /* @__PURE__ */ new Map();
+    const decisionSignature = (id, opportunities) => {
+      const actor = queryBound(input.db, "SELECT status,physical_status FROM characters WHERE branch_id=? AND id=?", [input.branchId, id])[0];
+      const position = resolveEffectivePosition({ db: input.db, branchId: input.branchId }, id);
+      const context = buildDecisionContext({ actors: [{ entityId: id }], opportunities }, { db: input.db, branchId: input.branchId });
+      return sha256HexSync(JSON.stringify([actor, position, context.actorSlices], (key, value) => ["row_rev", "updated_turn_id", "evaluated_until_s", "reason_code"].includes(key) ? void 0 : value));
+    };
     const operationContexts = [];
     const assertCurrent = () => {
       if (input.isCurrent && !input.isCurrent()) throw new AtlasDbError("TURN_CANCELLED", "后台模型等待期间楼层已变化", {});
@@ -27298,6 +27365,10 @@ ${entry.text}`.toLowerCase();
       request.messages[1].content += "\n现有对象短引用：" + collectEntityRefs(tables, input.branchId, knownRefs).join("、");
       for (const [id, alias] of byId9) request.messages[1].content = request.messages[1].content.split(JSON.stringify(id)).join(JSON.stringify(alias));
       request.sourceSnapshot = [];
+      if (phase === "decision") {
+        const actors = JSON.parse(fields.actorSlices ?? "[]");
+        request.batchTargets = { kind: "characters", count: actors.length, estimatedOutputTokens: ATLAS_RUNTIME_LIMITS.decisionOutputReserveTokens + actors.length * ATLAS_RUNTIME_LIMITS.decisionActorOutputTokens };
+      }
       batches++;
       const response = await input.modelPort.request(request);
       assertCurrent();
@@ -27313,8 +27384,10 @@ ${entry.text}`.toLowerCase();
         dueEventIds,
         actorIds: phase === "decision" ? JSON.parse(fields.actorSlices ?? "[]").map((a) => a.entityId) : []
       };
+      let scopeRejected = false;
       if (phase === "decision") operations = operations.filter((op) => {
         if (inDecisionScope(op, context, tables, input.branchId)) return true;
+        scopeRejected = true;
         issues.push({ code: "ACTOR_SCOPE_VIOLATION", path: "$.decision", opId: op.opId, message: "决策仅能修改给定人物的心理、计划和有效接触认知，不能瞬移或改写其它人物", severity: "error", retryable: false });
         return false;
       });
@@ -27337,6 +27410,10 @@ ${entry.text}`.toLowerCase();
       issues.push(...compiled.issues, ...built.issues, ...ordered4.issues);
       groups.push(...result.groups);
       modelOperations.push(...operations);
+      if (phase === "decision" && !scopeRejected && (parsed.explicitNoop || operations.length > 0) && !payload.issues.some((i) => i.severity === "error") && !parsed.issues.some((i) => i.severity === "error") && !compiled.issues.some((i) => i.severity === "error") && !result.groups.some((g) => g.status === "rejected" || g.status === "blocked")) {
+        const currentOpportunities = collectOpportunities({ fromS: Number(branch.simulation_cursor_s), untilS: atS }, { db: input.db, branchId: input.branchId });
+        for (const id of context.actorIds) decidedAt.set(id, { clockS: atS, signature: decisionSignature(id, currentOpportunities) });
+      }
       return { changed: result.groups.some((g) => g.status === "applied" && g.changedRows > 0), noop: parsed.explicitNoop };
     };
     for (const actor of queryBound(input.db, "SELECT id,physical_status FROM characters WHERE branch_id=? AND physical_status IN ('dead','incapacitated')", [input.branchId])) {
@@ -27405,7 +27482,10 @@ ${entry.text}`.toLowerCase();
       }
       runBound(input.db, "UPDATE branches SET clock_s=?,clock_min_s=?,clock_max_s=?,simulation_cursor_s=? WHERE id=?", [clockAfter, clockMin, clockMax, cursor, input.branchId]);
       const opportunities = collectOpportunities({ fromS: Number(branch.simulation_cursor_s), untilS: cursor }, { db: input.db, branchId: input.branchId });
-      let actors = queryBound(input.db, "SELECT id FROM characters WHERE branch_id=? AND status='active' AND physical_status='alive' AND role!='protagonist' ORDER BY importance,id", [input.branchId]);
+      let actors = queryBound(input.db, "SELECT id FROM characters WHERE branch_id=? AND status='active' AND physical_status='alive' AND role!='protagonist' ORDER BY CASE importance WHEN 'core' THEN 0 WHEN 'recurring' THEN 1 ELSE 2 END,role,location_id,id", [input.branchId]).filter((actor) => {
+        const id = String(actor.id), previous = decidedAt.get(id);
+        return previous?.clockS !== cursor || previous.signature !== decisionSignature(id, opportunities);
+      });
       if (clockAfter === input.clockBefore && branch.simulation_status === "catching_up") {
         const prior = queryBound(input.db, "SELECT decisions_json FROM turns WHERE id=?", [String(branch.head_turn_id)])[0];
         const waiting = prior ? JSON.parse(String(prior.decisions_json)).pending_actors : void 0;
@@ -27413,13 +27493,19 @@ ${entry.text}`.toLowerCase();
       }
       if (!catchingUp && actors.length) {
         let processed = 0;
-        const count2 = decisionActorBudget(ATLAS_RUNTIME_LIMITS.normalResponseTokens);
-        for (; processed < actors.length && input.modelPort && batches < input.modelBudget; processed += count2) {
+        const count2 = characterBatchLimit(input.generationOptions);
+        while (processed < actors.length && input.modelPort && batches < input.modelBudget) {
           const actorIds = actors.slice(processed, processed + count2).map((c) => ({ entityId: String(c.id) }));
-          const contacts = opportunities.filter((o) => actorIds.some((a) => a.entityId === o.receiverEntityId));
+          let contacts = opportunities.filter((o) => actorIds.some((a) => a.entityId === o.receiverEntityId));
           const context = buildDecisionContext({ actors: actorIds, opportunities: contacts }, { db: input.db, branchId: input.branchId });
+          while (actorIds.length > 1 && JSON.stringify(context.actorSlices).length > ATLAS_RUNTIME_LIMITS.batchPromptChars) {
+            const removed = actorIds.pop();
+            context.actorSlices = context.actorSlices.filter((a) => a.entityId !== removed.entityId);
+          }
+          contacts = contacts.filter((o) => actorIds.some((a) => a.entityId === o.receiverEntityId));
           try {
             await ask("decision", { timeWindow: JSON.stringify({ fromS: input.clockBefore, untilS: cursor }), actorSlices: JSON.stringify(context.actorSlices), opportunities: JSON.stringify(contacts) }, cursor, contacts);
+            processed += actorIds.length;
           } catch (err) {
             if (err.code === "TURN_CANCELLED") throw err;
             issues.push({ code: "MODEL_REQUEST_FAILED", path: "$.decision", message: String(err.message), severity: "warning", retryable: true });
@@ -27452,6 +27538,37 @@ ${entry.text}`.toLowerCase();
     const journal = recordGroupChanges(input.db, { id: `simulation_${input.attemptKey ?? input.turnId}`, mutations, opIds: [`simulation:${input.attemptKey ?? input.turnId}`] }, { turnId: input.turnId, attemptId: input.attemptKey ?? "simulation", startSequence: seq });
     if (journal.issues.length) throw new AtlasDbError("JOURNAL_WRITE_FAILED", `后台变化不能可靠回退，候选不发布：${journal.issues.join("；")}`, { issues: journal.issues });
     return { elapsed, clockAfter, clockMin, clockMax, seed, randomDraws, simulatedUntil: cursor, catchingUp, pendingActors, steps, issues, groups, modelOperations, modelBatches: batches, operationContexts, worldChanged: mutations.some((m) => isBusinessMutationTable(m.table)) };
+  }
+
+  // src/atlas-model-attempts.ts
+  function logModelAttempts(port, now, record2) {
+    return { request: async (request) => {
+      const started = now();
+      const common = {
+        kind: request.phase,
+        phase: request.phase,
+        batch_id: request.batchId,
+        started_wall_ms: started,
+        input_chars: request.messages.reduce((sum, message) => sum + message.content.length, 0),
+        ...request.batchTargets ? { target_kind: request.batchTargets.kind, target_count: request.batchTargets.count, estimated_output_tokens: request.batchTargets.estimatedOutputTokens } : {}
+      };
+      try {
+        const response = await port.request(request);
+        record2({
+          ...common,
+          finished_wall_ms: now(),
+          http_status: response.httpStatus,
+          response_chars: response.text?.length ?? 0,
+          response_hash: sha256HexSync(response.text ?? ""),
+          finish_reason: response.finishReason
+        });
+        return response;
+      } catch (error) {
+        const code = error.code;
+        if (code !== "MODEL_BUDGET_EXHAUSTED" && code !== "MODEL_BATCH_DUPLICATE") record2({ ...common, finished_wall_ms: now(), error_code: code, error: error.message });
+        throw error;
+      }
+    } };
   }
 
   // src/atlas-sql-scene-maps.ts
@@ -31221,6 +31338,12 @@ ${chunk.text}`;
       if (anchor.baseRevision !== rev) {
         throw new AtlasDbError("STALE_BASE", `基版本已变化：锚点 ${anchor.baseRevision}，当前 ${rev}`, { base: anchor.baseRevision, current: rev });
       }
+      let generationOptions = normalizeGenerationOptions(input.generationOptions);
+      if (input.generationOptions === void 0 && options.modelPort?.generationOptions) {
+        generationOptions = normalizeGenerationOptions(await options.modelPort.generationOptions());
+        if (currentRevision() !== rev || input.isCurrent && !input.isCurrent()) throw new AtlasDbError("STALE_BASE", "读取分批设置期间世界或聊天已变化", {});
+      }
+      input = { ...input, generationOptions };
       const candidate = await createCandidateImpl(anchor, "turn");
       const candidateDb = candidates.get(candidate.token).db;
       const tables = createTableReadPort(candidateDb);
@@ -31845,8 +31968,9 @@ ${chunk.text}`;
           turnId,
           clockBefore,
           sceneOnly: input.sceneOnly,
+          generationOptions,
           operations: input.sceneOnly ? [] : parsedOperations,
-          modelPort: input.manual || input.sceneOnly || !options.modelPort ? null : bindModelBudget(options.modelPort, turnBudget, "background"),
+          modelPort: input.manual || input.sceneOnly || !options.modelPort ? null : logModelAttempts(bindModelBudget(options.modelPort, turnBudget, "background"), now, recordAttempt),
           // M3-11：settle 用**同一本回合预算**的剩余额度，不另起计数；被保留给到期后台的名额
           // 在 stageRemaining 里已经扣掉，所以建设不会抢先吃掉它。
           modelBudget: Math.max(0, turnBudget.stageRemaining("background")),
@@ -31869,13 +31993,13 @@ ${chunk.text}`;
         let layoutTask = input.layoutMaps ? buildSqlLayoutTask(candidateDb, branchId, input, turnId, layoutReport) : null;
         drainLayoutReport();
         const pendingLayoutIds = layoutTask ? [...layoutTask.mapIds, ...layoutTask.remainingLocationIds] : [];
-        if (pendingLayoutIds.length > 1) {
-          layoutTask = buildSqlLayoutTask(candidateDb, branchId, { ...input, layoutMaps: [pendingLayoutIds[0]] }, `${turnId}_layout_0`, layoutReport);
-          drainLayoutReport();
-        }
+        const layoutParents = layoutTask?.parentMapIds ?? {};
         const evidenceMapRefs = pendingLayoutIds.map((id, index) => ({ id, alias: `M${index + 1}`, name: String(createTableReadPort(candidateDb).selectOne("maps", branchId, id)?.name ?? id) }));
         let layoutEvidenceCache = null;
         const evidenceBlockedMaps = /* @__PURE__ */ new Set();
+        const deferredLayoutIds = /* @__PURE__ */ new Set();
+        const retriedLayoutIds = /* @__PURE__ */ new Set();
+        const smallerLayoutBatches = /* @__PURE__ */ new Map();
         const layoutTasks = [];
         const layoutBudget = turnBudget;
         const layoutModelPort = options.modelPort ? bindModelBudget(options.modelPort, layoutBudget, "geography") : null;
@@ -31885,7 +32009,7 @@ ${chunk.text}`;
             return await layoutModelPort.request(request);
           } catch (error) {
             if (error?.retryable !== true || layoutBudget.remaining() <= 0) throw error;
-            recordAttempt({ kind: `${kind}_transport_failed`, phase: "geography", started_wall_ms: started, finished_wall_ms: now(), input_chars: request.messages.reduce((sum, message) => sum + message.content.length, 0), failure_kind: failureKindOf(error), error: error.message });
+            recordAttempt({ kind: `${kind}_transport_failed`, phase: "geography", started_wall_ms: started, finished_wall_ms: now(), input_chars: request.messages.reduce((sum, message) => sum + message.content.length, 0), ...request.batchTargets ? { target_kind: request.batchTargets.kind, target_count: request.batchTargets.count } : {}, failure_kind: failureKindOf(error), error: error.message });
             allIssues.push({ code: "LAYOUT_TRANSPORT_RETRIED", path: "$.layout", message: "空间模型连接出现可重试错误；本轮在额度内重新发送一次同一请求。", severity: "warning", retryable: false });
             await new Promise((resolve) => setTimeout(resolve, 1e3));
             if (input.isCurrent && !input.isCurrent() || currentRevision() !== anchor.baseRevision) throw new AtlasDbError("STALE_BASE", "空间模型重试前聊天或世界修订已变化，候选不发布", {});
@@ -31894,18 +32018,127 @@ ${chunk.text}`;
         };
         let layoutApplied = false;
         let layoutEvidenceBlocked = false;
+        const completedSpatialMaps = /* @__PURE__ */ new Set();
+        let spatialPass = 0;
+        const spatialGuard = input.isCurrent ?? (() => true);
+        const spatialPorts = {
+          applyGroups: (db2, groups, ctx) => applyGroups(db2, groups, ctx),
+          isCurrent: spatialGuard,
+          branchId,
+          turnId,
+          attemptId: "spatial"
+        };
+        if (input.layoutRetry && typeof input.layoutRetry.mapId === "string" && input.layoutRetry.mapId) {
+          const armed = armLayoutRetry({
+            db: candidateDb,
+            branchId,
+            mapId: input.layoutRetry.mapId,
+            requestId: input.layoutRetry.requestId,
+            operationId: input.layoutRetry.operationId,
+            turnId,
+            ports: spatialPorts
+          });
+          groupResults.push(...armed.groups);
+          allIssues.push(...armed.issues);
+        }
+        const materializeLayouts = () => {
+          spatialPass++;
+          const pendingRequestByMap = /* @__PURE__ */ new Map();
+          const taskByMap = new Map(layoutTasks.flatMap((task) => task.mapIds.map((mapId) => [mapId, task])));
+          if (layoutApplied && taskByMap.size) {
+            const scanPort = createTableReadPort(candidateDb);
+            for (const mapId of taskByMap.keys()) {
+              const row2 = scanPort.selectOne("maps", branchId, mapId);
+              if (!row2) continue;
+              const frame = normalizeFrame(row2.frame_json);
+              const request = frame[SPATIAL_REQUEST_KEY];
+              if (!request || typeof request !== "object" || Array.isArray(request)) continue;
+              if (String(request.status ?? "pending") !== "pending") continue;
+              const requestId = String(request.requestId ?? `req_${mapId}`);
+              pendingRequestByMap.set(mapId, requestId);
+            }
+          }
+          const spatial = applyPendingSpatialRequests({
+            db: candidateDb,
+            scope: { chatId: anchor.chatUid, branchId, revision: rev, viewMode: "author" },
+            isCurrent: spatialGuard,
+            turnId,
+            clockS: clockBefore,
+            autoPlan: true,
+            sourceText: [input.userText, input.assistantText, ...sourceSnapshot.map((s) => s.text)].filter(Boolean).join("\n"),
+            maxJobs: Math.max(ATLAS_RUNTIME_LIMITS.layoutMapsPerBatch, taskByMap.size),
+            ports: spatialPorts
+          });
+          groupResults.push(...spatial.groups);
+          allIssues.push(...spatial.issues);
+          const processedNow = new Set(spatial.processed);
+          for (const [id, requestId] of pendingRequestByMap) if (processedNow.has(requestId)) completedSpatialMaps.add(id);
+          for (const id of spatial.completedMapIds ?? []) completedSpatialMaps.add(id);
+          if (completedSpatialMaps.size) {
+            const processedRequests = new Set(spatial.processed);
+            const ctxPort = createTableReadPort(candidateDb);
+            const ctxMutations = [];
+            const completedMaps = new Map([...completedSpatialMaps].map((id) => [id, void 0]));
+            for (const id of spatial.completedMapIds ?? []) if (!completedMaps.has(id)) completedMaps.set(id, void 0);
+            for (const [mapId, requestId] of completedMaps) {
+              const mapLayoutTask = taskByMap.get(mapId);
+              if (requestId && !processedRequests.has(requestId)) continue;
+              const row2 = ctxPort.selectOne("maps", branchId, mapId);
+              if (!row2) continue;
+              const rawFrame = row2.frame_json;
+              const frame = rawFrame && typeof rawFrame === "object" && !Array.isArray(rawFrame) ? { ...rawFrame } : {};
+              if (!frame.atlasScene) continue;
+              const request = frame[SPATIAL_REQUEST_KEY];
+              const requestStatus = request && typeof request === "object" && !Array.isArray(request) ? String(request.status ?? "") : "";
+              if (requestStatus === "pending" || requestStatus === "failed") continue;
+              const hash2 = computeMapLayoutSignature(ctxPort, branchId, mapId) ?? mapLayoutTask?.contextHashes?.[mapId] ?? mapLayoutTask?.contextHash;
+              const priorContext = frame[LAYOUT_CONTEXT_FRAME_KEY];
+              if (priorContext?.hash === hash2 && priorContext?.completedTurnId === turnId) continue;
+              ctxMutations.push({
+                table: "maps",
+                rowId: mapId,
+                before: { ...row2 },
+                after: {
+                  ...row2,
+                  frame_json: { ...frame, [LAYOUT_CONTEXT_FRAME_KEY]: { version: 3, hash: hash2, completedTurnId: turnId } },
+                  row_rev: Number(row2.row_rev ?? 1) + 1,
+                  updated_turn_id: turnId
+                },
+                sourceOpIds: [`layout_ctx_${spatialPass}_${mapId}`],
+                basis: { kind: "simulation", sources: [], causes: [], reason: `记录地图 ${mapId} 本轮布局所依据的结构指纹`, verification: "causal", certainty: "confirmed" }
+              });
+            }
+            if (ctxMutations.length > 0) {
+              const ctxGroup = {
+                id: `grp_layout_ctx_${turnId}_${spatialPass}`,
+                opIds: ctxMutations.map((m) => String((m.sourceOpIds ?? [])[0] ?? "layout_ctx")),
+                dependsOn: [],
+                readSet: ctxMutations.map((m) => ({ table: "maps", rowId: m.rowId, rowRev: Number(m.before.row_rev ?? 0) })),
+                mutations: ctxMutations
+              };
+              const appliedCtx = applyGroups(candidateDb, [ctxGroup], { branchId, turnId, attemptId: "layout-context", validate: true });
+              groupResults.push(...appliedCtx.groups);
+              for (const message of appliedCtx.journalIssues) {
+                allIssues.push({ code: "JOURNAL_WRITE_FAILED", path: "$.layout.context", message, severity: "error", retryable: false });
+              }
+            }
+          }
+        };
         while (layoutTask && layoutModelPort && layoutBudget.remaining() > 0) {
-          const currentLayoutTask = layoutTask;
+          let currentLayoutTask = layoutTask;
+          const attemptedMapIds = [...layoutTask.mapIds];
+          const returnedMapIds = /* @__PURE__ */ new Set();
+          let retryableBatchReply = false, splitAfterFailure = false;
           layoutTasks.push(layoutTask);
           preparationStep = "before-layout";
           commitTransaction(candidateDb);
           transactionOpen = false;
-          const layoutStarted = now();
+          let layoutStarted = null;
           let layoutAttemptWritten = false;
           const writeLayoutAttempt = (extra) => {
-            if (layoutAttemptWritten) return;
+            if (layoutAttemptWritten || layoutStarted === null) return;
             layoutAttemptWritten = true;
-            recordAttempt({ kind: "layout", phase: "geography", started_wall_ms: layoutStarted, ...extra });
+            recordAttempt({ kind: "layout", phase: "geography", started_wall_ms: layoutStarted, target_kind: "maps", target_count: currentLayoutTask.mapIds.length, estimated_output_tokens: currentLayoutTask.request.batchTargets?.estimatedOutputTokens, ...extra });
           };
           try {
             if (layoutEvidenceCache === null) {
@@ -31952,27 +32185,37 @@ ${chunk.text}`;
               }
               layoutEvidenceCache = layoutFacts;
             }
-            if (currentLayoutTask.mapIds.some((id) => evidenceBlockedMaps.has(id))) throw new Error("本图位置依据未通过校验；其他地图继续，本图等待重试");
-            const layoutRequest = attachLayoutEvidence(layoutTask.request, layoutEvidenceCache, currentLayoutTask.mapIds);
+            const eligibleMaps = currentLayoutTask.mapIds.filter((id) => !evidenceBlockedMaps.has(id));
+            if (eligibleMaps.length !== currentLayoutTask.mapIds.length) {
+              for (const id of currentLayoutTask.mapIds) if (evidenceBlockedMaps.has(id)) deferredLayoutIds.add(id);
+              const narrowed = eligibleMaps.length ? buildSqlLayoutTask(candidateDb, branchId, { ...input, layoutMaps: eligibleMaps }, `${turnId}_eligible_${layoutTasks.length}`, layoutReport) : null;
+              if (!narrowed) throw new Error("本批位置依据未通过校验；其他地图继续，本批等待重试");
+              currentLayoutTask = layoutTask = narrowed;
+              layoutTasks[layoutTasks.length - 1] = narrowed;
+            }
+            const layoutRequest = attachLayoutEvidence(currentLayoutTask.request, layoutEvidenceCache, currentLayoutTask.mapIds);
+            layoutStarted = now();
             let response = await requestSpatialWithTransportRetry(layoutRequest, "layout");
             writeLayoutAttempt({ input_chars: layoutRequest.messages.reduce((sum, message) => sum + message.content.length, 0), http_status: response.httpStatus, response_chars: response.text?.length ?? 0, response_hash: sha256HexSync(response.text ?? ""), finish_reason: response.finishReason });
             if (input.isCurrent && !input.isCurrent() || currentRevision() !== anchor.baseRevision) throw new AtlasDbError("STALE_BASE", "布局生成期间聊天或世界修订已变化，候选不发布", {});
-            if (response.finishReason === "length") throw new Error("空间布局输出被截断；本次响应未用于排版，原场景保留");
+            if (response.finishReason === "length") throw Object.assign(new Error("空间布局输出被截断；本次响应未用于排版，原场景保留"), { code: "LAYOUT_BATCH_TRUNCATED" });
             let extracted = extractPayload(response.text ?? ""), parsed = parseOperations(extracted.payload, { phase: "geography" });
-            const layoutRefs = layoutTask.catalogue.knownRefs;
+            const layoutRefs = currentLayoutTask.catalogue.knownRefs;
             const allowedRefs = new Set(layoutRefs.filter((r) => currentLayoutTask.mapIds.includes(r.id)).flatMap((r) => [r.id, r.alias]));
             const hasRequestedLayout = () => parsed.operations.some((op) => op.value.op === "map.layout.request" && allowedRefs.has(op.value.ref ?? ""));
             const retryEmptyLayout = input.manual && Array.isArray(input.layoutMaps);
             const retryBrokenJson = !parsed.operations.length && parsed.issues.some((i) => i.code === "JSON_SYNTAX");
             const unknownEntityRefs = unknownLayoutEntityRefs(parsed.operations.map((operation) => operation.value), layoutRefs);
-            if ((unknownEntityRefs.length > 0 || !hasRequestedLayout() && (retryEmptyLayout || retryBrokenJson)) && !extracted.incomplete && layoutBudget.remaining() > 0) {
+            retryableBatchReply = hasRequestedLayout() || retryEmptyLayout || retryBrokenJson || unknownEntityRefs.length > 0;
+            if (currentLayoutTask.mapIds.length === 1 && !retriedLayoutIds.has(currentLayoutTask.mapIds[0]) && (unknownEntityRefs.length > 0 || !hasRequestedLayout() && (retryEmptyLayout || retryBrokenJson)) && !extracted.incomplete && layoutBudget.remaining() > 0) {
+              retriedLayoutIds.add(currentLayoutTask.mapIds[0]);
               const reason = unknownEntityRefs.length ? `使用了未登记实体引用 ${unknownEntityRefs.join("、")}` : parsed.explicitNoop ? "只返回了 noop" : parsed.operations.length ? "未返回本批地图引用的 map.layout.request" : parsed.issues.some((i) => i.code === "JSON_SYNTAX") ? "回复不是合法 JSON" : "回复中没有布局操作";
               const repairText = layoutRequest.messages[1].content + "\n【布局回复纠错】上次" + reason + "。解析问题：" + (parsed.issues.map((i) => i.message).join("；") || "无语法错误，但没有本批布局") + "\n本批是用户明确请求生成或更新布局，不能以“正文无变化”判定 noop。重新生成以上地图的完整布局；缺少事实时保留估计/未知和锁，不编造实体。只返回 JSONL，每张图一个完整 JSON 对象，ref 必须使用本图目录引用：" + [...allowedRefs].join("、") + "。所有键及字符串用双引号，不要代码围栏、解释、逗号连接两个对象或在字段内省略括号。";
               const repairRequest = { ...layoutRequest, batchId: layoutRequest.batchId + "_format_retry", messages: layoutRequest.messages.map((m, i) => i === 1 ? { ...m, content: repairText } : m), promptInput: layoutRequest.promptInput ? { ...layoutRequest.promptInput, injectionText: repairText } : void 0 };
               allIssues.push({ code: "LAYOUT_RESPONSE_RETRIED", path: "$.layout", message: `首次布局${reason}，已在本轮预算内请求一次完整回复纠错；原回复未写入地图。`, severity: "warning", retryable: false });
               const retryStarted = now();
               response = await requestSpatialWithTransportRetry(repairRequest, "layout_repair");
-              recordAttempt({ kind: "layout_repair", phase: "geography", started_wall_ms: retryStarted, finished_wall_ms: now(), input_chars: repairRequest.messages.reduce((sum, message) => sum + message.content.length, 0), http_status: response.httpStatus, response_chars: response.text?.length ?? 0, response_hash: sha256HexSync(response.text ?? ""), finish_reason: response.finishReason });
+              recordAttempt({ kind: "layout_repair", phase: "geography", started_wall_ms: retryStarted, finished_wall_ms: now(), target_kind: "maps", target_count: currentLayoutTask.mapIds.length, estimated_output_tokens: repairRequest.batchTargets?.estimatedOutputTokens, input_chars: repairRequest.messages.reduce((sum, message) => sum + message.content.length, 0), http_status: response.httpStatus, response_chars: response.text?.length ?? 0, response_hash: sha256HexSync(response.text ?? ""), finish_reason: response.finishReason });
               if (input.isCurrent && !input.isCurrent() || currentRevision() !== anchor.baseRevision) throw new AtlasDbError("STALE_BASE", "布局纠错期间聊天或世界修订已变化，候选不发布", {});
               if (response.finishReason === "length") throw new Error("空间布局纠错输出被截断；本次响应未用于排版，原场景保留");
               extracted = extractPayload(response.text ?? "");
@@ -31995,12 +32238,12 @@ ${chunk.text}`;
               }
             }
             allIssues.push(...extracted.issues, ...parsed.issues);
-            const ops = parsed.operations.filter((op) => op.value.op === "map.layout.request" && allowedRefs.has(op.value.ref ?? "")).map((op) => {
+            const ops = parsed.operations.filter((op) => op.value.op === "map.layout.request" && allowedRefs.has(op.value.ref ?? "") && (currentLayoutTask.mapIds.length === 1 || unknownLayoutEntityRefs([op.value], layoutRefs).length === 0)).map((op) => {
               const id = layoutRefs.find((r) => r.id === op.value.ref || r.alias === op.value.ref)?.id;
               const extent = id ? currentLayoutTask.extents[id] : void 0;
               const kind = id ? currentLayoutTask.kinds[id] : void 0;
               const data = op.value.data, spec = data?.spec;
-              if (!id || !extent || !kind || !spec || typeof spec !== "object" || Array.isArray(spec)) return { ...op, opId: `layout_${op.opId}` };
+              if (!id || !extent || !kind || !spec || typeof spec !== "object" || Array.isArray(spec)) return { ...op, opId: `layout_${layoutTasks.length}_${op.opId}` };
               if (data?.kind !== kind) allIssues.push({ code: "LAYOUT_KIND_OVERRIDDEN", path: "$.layout.kind", message: `地图 ${id} 的角色由容器决定为 ${kind}，模型给出的 ${String(data?.kind ?? "(空)")} 已按 ${kind} 处理`, severity: "warning", retryable: false });
               const canvas = extent.units === "meters" ? { width: extent.width, height: extent.height } : {};
               const baseline = kind === "floor" ? currentLayoutTask.baselineRooms[id] ?? [] : [];
@@ -32020,7 +32263,7 @@ ${chunk.text}`;
                   normalizedSpec = { ...normalizedSpec, districts: [{ id: containerRef, name: cityName, bank: "west", order: 0 }] };
                 }
               }
-              return { ...op, opId: `layout_${op.opId}`, value: { ...op.value, data: { ...data, kind, spec: normalizedSpec } } };
+              return { ...op, opId: `layout_${layoutTasks.length}_${op.opId}`, value: { ...op.value, data: { ...data, kind, spec: normalizedSpec } } };
             });
             if (!ops.length) allIssues.push({ code: "LAYOUT_NOT_GENERATED", path: "$.layout", message: "模型没有返回空间布局约束；地图与布局尚未完成，已登记地点保留，下一轮自动继续布局", severity: "warning", retryable: true });
             const layoutCompiled = compileOperations({
@@ -32043,6 +32286,11 @@ ${chunk.text}`;
             const appliedLayout = applyGroups(candidateDb, orderGroups(groups.groups).order, { branchId, turnId, attemptId: "layout", validate: true });
             groupResults.push(...appliedLayout.groups);
             parsedOperations.push(...ops);
+            const acceptedIds = new Set(appliedLayout.groups.filter((g) => g.status === "applied").flatMap((g) => g.opIds));
+            for (const op of ops) if (acceptedIds.has(op.opId)) {
+              const id = layoutRefs.find((r) => r.id === op.value.ref || r.alias === op.value.ref)?.id;
+              if (id) returnedMapIds.add(id);
+            }
             layoutApplied = layoutApplied || ops.length > 0;
             for (const message of appliedLayout.journalIssues) allIssues.push({ code: "JOURNAL_WRITE_FAILED", path: "$.layout", message, severity: "error", retryable: false });
           } catch (error) {
@@ -32052,110 +32300,52 @@ ${chunk.text}`;
             }
             if (error instanceof AtlasDbError && error.code === "STALE_BASE") throw error;
             if (layoutEvidenceCache === null) layoutEvidenceBlocked = true;
-            allIssues.push({ code: "LAYOUT_MODEL_FAILED", path: "$.layout", message: `空间布局未生成：${error.message} 已登记的世界数据保留，下一轮自动继续布局。`, severity: "warning", retryable: true });
+            splitAfterFailure = error.code === "LAYOUT_BATCH_TRUNCATED" && currentLayoutTask.mapIds.length > 1 && !currentLayoutTask.mapIds.some((id) => retriedLayoutIds.has(id)) && layoutBudget.remaining() > 0;
+            retryableBatchReply = splitAfterFailure;
+            allIssues.push(splitAfterFailure ? { code: "LAYOUT_BATCH_SPLIT", path: "$.layout", message: "合批回复被截断，原回复未写入；剩余额度内缩小批量重试。", severity: "warning", retryable: false } : { code: "LAYOUT_MODEL_FAILED", path: "$.layout", message: `空间布局未生成：${error.message} 已登记的世界数据保留，下一轮自动继续布局。`, severity: "warning", retryable: true });
             writeLayoutAttempt({ failure_kind: failureKindOf(error), error: error.message });
           }
           if (layoutEvidenceBlocked) break;
-          pendingLayoutIds.shift();
-          layoutTask = pendingLayoutIds.length ? buildSqlLayoutTask(candidateDb, branchId, { ...input, layoutMaps: [pendingLayoutIds[0]] }, `${turnId}_layout_${layoutTasks.length}`, layoutReport) : null;
+          materializeLayouts();
+          const retryIds = [];
+          for (const id of currentLayoutTask.mapIds) {
+            if (completedSpatialMaps.has(id)) continue;
+            if (!returnedMapIds.has(id) && retryableBatchReply && !retriedLayoutIds.has(id) && layoutBudget.remaining() > 0 && !evidenceBlockedMaps.has(id)) {
+              retryIds.push(id);
+              retriedLayoutIds.add(id);
+              if (splitAfterFailure) smallerLayoutBatches.set(id, Math.max(1, Math.floor(currentLayoutTask.mapIds.length / 2)));
+            } else deferredLayoutIds.add(id);
+          }
+          if (retryIds.length && !splitAfterFailure) allIssues.push({ code: "LAYOUT_MAP_REPLY_RETRIED", path: "$.layout", message: `本批仅补交 ${retryIds.length} 张未完成地图，已完成地图不重做。`, severity: "warning", retryable: false });
+          const consumed = new Set(attemptedMapIds);
+          pendingLayoutIds.splice(0, pendingLayoutIds.length, ...pendingLayoutIds.filter((id) => !consumed.has(id) && !completedSpatialMaps.has(id)));
+          pendingLayoutIds.unshift(...retryIds);
+          const parentBlocked = pendingLayoutIds.filter((id) => {
+            const seen = /* @__PURE__ */ new Set();
+            let parent = layoutParents[id];
+            while (parent && !seen.has(parent)) {
+              seen.add(parent);
+              if (deferredLayoutIds.has(parent) || evidenceBlockedMaps.has(parent)) return true;
+              parent = layoutParents[parent];
+            }
+            return false;
+          });
+          if (parentBlocked.length) {
+            for (const id of parentBlocked) deferredLayoutIds.add(id);
+            const blocked = new Set(parentBlocked);
+            pendingLayoutIds.splice(0, pendingLayoutIds.length, ...pendingLayoutIds.filter((id) => !blocked.has(id)));
+            allIssues.push({ code: "LAYOUT_PARENT_PENDING", path: "$.layout", message: `${parentBlocked.length} 张子图等待父图完成；本轮不消耗请求生成缺少父图依据的细节。`, severity: "warning", retryable: true });
+          }
+          layoutTask = pendingLayoutIds.length ? buildSqlLayoutTask(candidateDb, branchId, { ...input, layoutMaps: pendingLayoutIds, layoutBatchMapLimit: smallerLayoutBatches.get(pendingLayoutIds[0]) }, `${turnId}_layout_${layoutTasks.length}`, layoutReport) : null;
+          if (layoutTask && layoutTask.mapIds.some((id) => retriedLayoutIds.has(id))) {
+            const suffix = "\n【未完成项补交】只处理本图目录列出的地图；已完成地图已从本批移除，不要重新生成。";
+            layoutTask.request.messages[1].content += suffix;
+            layoutTask.request.promptInput.injectionText = layoutTask.request.messages[1].content;
+          }
           drainLayoutReport();
         }
-        if (layoutTask || evidenceBlockedMaps.size) allIssues.push({ code: "LAYOUT_BATCH_PENDING", path: "$.layout", message: `${(/* @__PURE__ */ new Set([...pendingLayoutIds, ...evidenceBlockedMaps])).size} 张地图保留为待细化。每次操作最多发送 4 次模型请求；已登记地点和已完成布局保留，可选中需要的地图后继续生成。`, severity: "warning", retryable: true });
-        const spatialGuard = input.isCurrent ?? (() => true);
-        const spatialPorts = {
-          applyGroups: (db2, groups, ctx) => applyGroups(db2, groups, ctx),
-          isCurrent: spatialGuard,
-          branchId,
-          turnId,
-          attemptId: "spatial"
-        };
-        if (input.layoutRetry && typeof input.layoutRetry.mapId === "string" && input.layoutRetry.mapId) {
-          const armed = armLayoutRetry({
-            db: candidateDb,
-            branchId,
-            mapId: input.layoutRetry.mapId,
-            requestId: input.layoutRetry.requestId,
-            operationId: input.layoutRetry.operationId,
-            turnId,
-            ports: spatialPorts
-          });
-          groupResults.push(...armed.groups);
-          allIssues.push(...armed.issues);
-        }
-        const pendingRequestByMap = /* @__PURE__ */ new Map();
-        const taskByMap = new Map(layoutTasks.flatMap((task) => task.mapIds.map((mapId) => [mapId, task])));
-        if (layoutApplied && taskByMap.size) {
-          const scanPort = createTableReadPort(candidateDb);
-          for (const mapId of taskByMap.keys()) {
-            const row2 = scanPort.selectOne("maps", branchId, mapId);
-            if (!row2) continue;
-            const frame = normalizeFrame(row2.frame_json);
-            const request = frame[SPATIAL_REQUEST_KEY];
-            if (!request || typeof request !== "object" || Array.isArray(request)) continue;
-            if (String(request.status ?? "pending") !== "pending") continue;
-            const requestId = String(request.requestId ?? `req_${mapId}`);
-            pendingRequestByMap.set(mapId, requestId);
-          }
-        }
-        const spatial = applyPendingSpatialRequests({
-          db: candidateDb,
-          scope: { chatId: anchor.chatUid, branchId, revision: rev, viewMode: "author" },
-          isCurrent: spatialGuard,
-          turnId,
-          clockS: clockBefore,
-          autoPlan: true,
-          sourceText: [input.userText, input.assistantText, ...sourceSnapshot.map((s) => s.text)].filter(Boolean).join("\n"),
-          maxJobs: Math.max(ATLAS_RUNTIME_LIMITS.layoutMapsPerBatch, taskByMap.size),
-          ports: spatialPorts
-        });
-        groupResults.push(...spatial.groups);
-        allIssues.push(...spatial.issues);
-        if (pendingRequestByMap.size > 0 && taskByMap.size || spatial.completedMapIds?.length) {
-          const processedRequests = new Set(spatial.processed);
-          const ctxPort = createTableReadPort(candidateDb);
-          const ctxMutations = [];
-          const completedMaps = new Map(pendingRequestByMap);
-          for (const id of spatial.completedMapIds ?? []) if (!completedMaps.has(id)) completedMaps.set(id, void 0);
-          for (const [mapId, requestId] of completedMaps) {
-            const mapLayoutTask = taskByMap.get(mapId);
-            if (requestId && !processedRequests.has(requestId)) continue;
-            const row2 = ctxPort.selectOne("maps", branchId, mapId);
-            if (!row2) continue;
-            const rawFrame = row2.frame_json;
-            const frame = rawFrame && typeof rawFrame === "object" && !Array.isArray(rawFrame) ? { ...rawFrame } : {};
-            if (!frame.atlasScene) continue;
-            const request = frame[SPATIAL_REQUEST_KEY];
-            const requestStatus = request && typeof request === "object" && !Array.isArray(request) ? String(request.status ?? "") : "";
-            if (requestStatus === "pending" || requestStatus === "failed") continue;
-            ctxMutations.push({
-              table: "maps",
-              rowId: mapId,
-              before: { ...row2 },
-              after: {
-                ...row2,
-                frame_json: { ...frame, [LAYOUT_CONTEXT_FRAME_KEY]: { version: 3, hash: computeMapLayoutSignature(ctxPort, branchId, mapId) ?? mapLayoutTask?.contextHashes?.[mapId] ?? mapLayoutTask?.contextHash, completedTurnId: turnId } },
-                row_rev: Number(row2.row_rev ?? 1) + 1,
-                updated_turn_id: turnId
-              },
-              sourceOpIds: [`layout_ctx_${mapId}`],
-              basis: { kind: "simulation", sources: [], causes: [], reason: `记录地图 ${mapId} 本轮布局所依据的结构指纹`, verification: "causal", certainty: "confirmed" }
-            });
-          }
-          if (ctxMutations.length > 0) {
-            const ctxGroup = {
-              id: `grp_layout_ctx_${turnId}`,
-              opIds: ctxMutations.map((m) => String((m.sourceOpIds ?? [])[0] ?? "layout_ctx")),
-              dependsOn: [],
-              readSet: ctxMutations.map((m) => ({ table: "maps", rowId: m.rowId, rowRev: Number(m.before.row_rev ?? 0) })),
-              mutations: ctxMutations
-            };
-            const appliedCtx = applyGroups(candidateDb, [ctxGroup], { branchId, turnId, attemptId: "layout-context", validate: true });
-            groupResults.push(...appliedCtx.groups);
-            for (const message of appliedCtx.journalIssues) {
-              allIssues.push({ code: "JOURNAL_WRITE_FAILED", path: "$.layout.context", message, severity: "error", retryable: false });
-            }
-          }
-        }
+        if (pendingLayoutIds.length || evidenceBlockedMaps.size || deferredLayoutIds.size) allIssues.push({ code: "LAYOUT_BATCH_PENDING", path: "$.layout", message: `${(/* @__PURE__ */ new Set([...pendingLayoutIds, ...evidenceBlockedMaps, ...deferredLayoutIds])).size} 张地图保留为待细化。每次操作最多发送 4 次模型请求；已登记地点和已完成布局保留，可选中需要的地图后继续生成。`, severity: "warning", retryable: true });
+        materializeLayouts();
         if (construction.attempted) {
           const fillPort = createTableReadPort(candidateDb);
           const focusIds = construction.task?.focusLocationIds ?? [];

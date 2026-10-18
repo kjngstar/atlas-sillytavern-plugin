@@ -114,6 +114,109 @@ var init_atlas_world_contract = __esm({
   }
 });
 
+// src/atlas-runtime-limits.ts
+var ATLAS_RUNTIME_LIMITS, ATLAS_FIELD_LIMITS;
+var init_atlas_runtime_limits = __esm({
+  "src/atlas-runtime-limits.ts"() {
+    "use strict";
+    ATLAS_RUNTIME_LIMITS = {
+      responseUtf8Bytes: 256 * 1024,
+      operationsPerResponse: 64,
+      operationUtf8Bytes: 8 * 1024,
+      /** map.layout.request 的 spec 预算（与空间生成器 inputBytes 一致）。 */
+      layoutSpecUtf8Bytes: 64 * 1024,
+      responseJsonDepth: 16,
+      conditionDepth: 4,
+      repairAttemptsPerBatch: 1,
+      actorsPerDecisionBatch: 24,
+      foregroundModelBatchesPerTurn: 4,
+      pendingCandidateTtlMs: 10 * 60 * 1e3,
+      normalResponseTokens: 4096,
+      decisionOutputReserveTokens: 512,
+      decisionActorOutputTokens: 256,
+      repairResponseTokens: 2048,
+      modelTimeoutMs: 12e4,
+      mentionCandidates: 256,
+      locationDepth: 12,
+      containerDepth: 4,
+      actionPlanDepth: 2,
+      detailedAttemptsPerTurn: 20,
+      diagnosticPageSize: 100,
+      /** M4：只读目录视图单页上限（完整导出走游标，不允许一次全量）。 */
+      catalogViewMaxLimit: 200,
+      /** M4：只读目录视图默认页大小。 */
+      catalogViewDefaultLimit: 50,
+      // ── M3/M4 世界建设与广域生成的统一预算（01 §4）─────────────────────────
+      /** 一次显式「建设世界」的目标地点总量上限（分批完成，不是一次填满）。 */
+      worldFillTargets: 64,
+      /** 单个模型批次最多新增的交互地点数。 */
+      newLocationsPerBatch: 12,
+      /** 单个模型批次最多新增的合理路线数。 */
+      newRoutesPerBatch: 16,
+      /** 单个批次最多把本次目标再向下展开的父边数。 */
+      additionalParentDepthPerBatch: 2,
+      /** 同类型、同依赖层的地图尽量合批；实际批量还受输出与目录容量限制。 */
+      layoutMapsPerBatch: 8,
+      batchPromptChars: 48e3,
+      batchOutputReserveTokens: 384,
+      /** 单张概览图的分区上限（G11 场景体积预算）。 */
+      overviewZoneLimit: 64,
+      /** 单张概览图的地物上限。 */
+      overviewFeatureLimit: 128,
+      /** 单张概览图的连接（路线/水系）上限。 */
+      overviewLinkLimit: 128,
+      /** 保存场景（maps.frame_json.atlasScene）的 UTF-8 字节上限，与 vendor 生成器一致。 */
+      sceneSaveUtf8Bytes: 512 * 1024,
+      /** 定向引用目录单次解析的最大条目数（超过则要求更窄的目标范围）。 */
+      refCatalogMaxEntries: 512,
+      /** 事件流读取：单次扫描的回合数上限。 */
+      feedTurnsPerScan: 24,
+      /** 事件流读取：单页最大条数。 */
+      feedPageMax: 100,
+      /** 事件流读取：异常回溯的最大块数。 */
+      feedMaxScanBlocks: 8,
+      /** 事件流读取：单回合 journal 明细的硬上限（超出给明确诊断，不返回半轮）。 */
+      feedTurnJournalMax: 2e3
+    };
+    ATLAS_FIELD_LIMITS = {
+      aliasLimit: 8,
+      capabilityLimit: 16,
+      mobilityProfileLimit: 8,
+      itemPropertyLimit: 16,
+      participantsLimit: 16,
+      geometryVertexLimit: 256,
+      mentionRecentLimit: 8,
+      journeySegmentLimit: 32,
+      actionDependsLimit: 8,
+      actionPayloadRefLimit: 8
+    };
+  }
+});
+
+// src/atlas-model-batching.ts
+function normalizeModelBatching(value) {
+  const raw = value && typeof value === "object" ? value : {};
+  const count = (key) => typeof raw[key] === "number" && Number.isSafeInteger(raw[key]) && raw[key] >= 0 && raw[key] <= MODEL_BATCHING_LIMITS[key] ? raw[key] : 0;
+  return { charactersPerBatch: count("charactersPerBatch"), mapsPerBatch: count("mapsPerBatch") };
+}
+function validModelBatching(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const raw = value;
+  return Object.keys(DEFAULT_MODEL_BATCHING).every((key) => Number.isSafeInteger(raw[key]) && raw[key] >= 0 && raw[key] <= MODEL_BATCHING_LIMITS[key]);
+}
+var DEFAULT_MODEL_BATCHING, MODEL_BATCHING_LIMITS;
+var init_atlas_model_batching = __esm({
+  "src/atlas-model-batching.ts"() {
+    "use strict";
+    init_atlas_runtime_limits();
+    DEFAULT_MODEL_BATCHING = { charactersPerBatch: 0, mapsPerBatch: 0 };
+    MODEL_BATCHING_LIMITS = {
+      charactersPerBatch: ATLAS_RUNTIME_LIMITS.actorsPerDecisionBatch,
+      mapsPerBatch: ATLAS_RUNTIME_LIMITS.layoutMapsPerBatch
+    };
+  }
+});
+
 // src/atlas-sql-generation-budget.ts
 function transportBudgetPort(budget, stage, batchId) {
   return {
@@ -2558,81 +2661,6 @@ var init_atlas_db_journal = __esm({
   }
 });
 
-// src/atlas-runtime-limits.ts
-var ATLAS_RUNTIME_LIMITS, ATLAS_FIELD_LIMITS;
-var init_atlas_runtime_limits = __esm({
-  "src/atlas-runtime-limits.ts"() {
-    "use strict";
-    ATLAS_RUNTIME_LIMITS = {
-      responseUtf8Bytes: 256 * 1024,
-      operationsPerResponse: 64,
-      operationUtf8Bytes: 8 * 1024,
-      /** map.layout.request 的 spec 预算（与空间生成器 inputBytes 一致）。 */
-      layoutSpecUtf8Bytes: 64 * 1024,
-      responseJsonDepth: 16,
-      conditionDepth: 4,
-      repairAttemptsPerBatch: 1,
-      actorsPerDecisionBatch: 24,
-      foregroundModelBatchesPerTurn: 4,
-      pendingCandidateTtlMs: 10 * 60 * 1e3,
-      normalResponseTokens: 4096,
-      repairResponseTokens: 2048,
-      modelTimeoutMs: 12e4,
-      mentionCandidates: 256,
-      locationDepth: 12,
-      containerDepth: 4,
-      actionPlanDepth: 2,
-      detailedAttemptsPerTurn: 20,
-      diagnosticPageSize: 100,
-      /** M4：只读目录视图单页上限（完整导出走游标，不允许一次全量）。 */
-      catalogViewMaxLimit: 200,
-      /** M4：只读目录视图默认页大小。 */
-      catalogViewDefaultLimit: 50,
-      // ── M3/M4 世界建设与广域生成的统一预算（01 §4）─────────────────────────
-      /** 一次显式「建设世界」的目标地点总量上限（分批完成，不是一次填满）。 */
-      worldFillTargets: 64,
-      /** 单个模型批次最多新增的交互地点数。 */
-      newLocationsPerBatch: 12,
-      /** 单个模型批次最多新增的合理路线数。 */
-      newRoutesPerBatch: 16,
-      /** 单个批次最多把本次目标再向下展开的父边数。 */
-      additionalParentDepthPerBatch: 2,
-      /** 同一批次最多处理的地图数（优先当前具体图 + 必要宏观图）。 */
-      layoutMapsPerBatch: 2,
-      /** 单张概览图的分区上限（G11 场景体积预算）。 */
-      overviewZoneLimit: 64,
-      /** 单张概览图的地物上限。 */
-      overviewFeatureLimit: 128,
-      /** 单张概览图的连接（路线/水系）上限。 */
-      overviewLinkLimit: 128,
-      /** 保存场景（maps.frame_json.atlasScene）的 UTF-8 字节上限，与 vendor 生成器一致。 */
-      sceneSaveUtf8Bytes: 512 * 1024,
-      /** 定向引用目录单次解析的最大条目数（超过则要求更窄的目标范围）。 */
-      refCatalogMaxEntries: 512,
-      /** 事件流读取：单次扫描的回合数上限。 */
-      feedTurnsPerScan: 24,
-      /** 事件流读取：单页最大条数。 */
-      feedPageMax: 100,
-      /** 事件流读取：异常回溯的最大块数。 */
-      feedMaxScanBlocks: 8,
-      /** 事件流读取：单回合 journal 明细的硬上限（超出给明确诊断，不返回半轮）。 */
-      feedTurnJournalMax: 2e3
-    };
-    ATLAS_FIELD_LIMITS = {
-      aliasLimit: 8,
-      capabilityLimit: 16,
-      mobilityProfileLimit: 8,
-      itemPropertyLimit: 16,
-      participantsLimit: 16,
-      geometryVertexLimit: 256,
-      mentionRecentLimit: 8,
-      journeySegmentLimit: 32,
-      actionDependsLimit: 8,
-      actionPayloadRefLimit: 8
-    };
-  }
-});
-
 // src/atlas-map-topology.ts
 var init_atlas_map_topology = __esm({
   "src/atlas-map-topology.ts"() {
@@ -3569,6 +3597,7 @@ var init_atlas_sql_layout_task = __esm({
     init_atlas_ops_prompts();
     init_atlas_spatial_frame();
     init_atlas_runtime_limits();
+    init_atlas_model_batching();
     init_atlas_hash();
     init_atlas_layout_signature();
     init_atlas_world_contract();
@@ -4311,7 +4340,18 @@ var init_atlas_sql_simulation = __esm({
     init_atlas_db_readport();
     init_atlas_sql_refs();
     init_atlas_runtime_limits();
+    init_atlas_model_batching();
+    init_atlas_db_envelope();
+    init_atlas_sim_position();
     init_atlas_sim_random();
+  }
+});
+
+// src/atlas-model-attempts.ts
+var init_atlas_model_attempts = __esm({
+  "src/atlas-model-attempts.ts"() {
+    "use strict";
+    init_atlas_db_envelope();
   }
 });
 
@@ -4404,6 +4444,7 @@ var init_atlas_db_repository = __esm({
     init_atlas_sql_refs();
     init_atlas_sql_refs();
     init_atlas_sql_simulation();
+    init_atlas_model_attempts();
     init_atlas_sql_scene_maps();
     init_atlas_spatial_candidate();
     init_atlas_sql_generation_budget();
@@ -4417,6 +4458,7 @@ var init_atlas_db_repository = __esm({
     init_atlas_spatial_frame();
     init_atlas_db_knowledge_view();
     init_atlas_ops_contract();
+    init_atlas_model_batching();
   }
 });
 
@@ -5480,6 +5522,7 @@ ${s.content}`).join("\n\n") }];
 // src/atlas-settings.ts
 init_atlas_prompt_layers();
 init_atlas_world_contract();
+init_atlas_model_batching();
 
 // src/atlas-content-replace.ts
 var DEFAULT_CONTENT_REPLACE_RULES = [
@@ -5712,6 +5755,7 @@ function createDefaultSettingsV2() {
     activePromptPresetId: null,
     autoCommit: true,
     rpmLimit: 30,
+    modelBatching: { ...DEFAULT_MODEL_BATCHING },
     loreSupplementEnabled: true,
     // R06 / D-16：推进输出协议。0.9.57 起**新装默认 = table-delta-v1**（三表行增量）；
     // 旧 v1/v2 与非法值在读取时统一规范为 table-delta-v1；schemaVersion:2 是设置存档版本。
@@ -5838,6 +5882,7 @@ function sanitizeSettingsV2(raw, deps = {}) {
     activePromptPresetId: activePrompt && promptPresets.some((p) => p.id === activePrompt) ? activePrompt : null,
     autoCommit: typeof record.autoCommit === "boolean" ? record.autoCommit : true,
     rpmLimit: isFiniteIntIn(record.rpmLimit, MIN_RPM, MAX_RPM) ? record.rpmLimit : 30,
+    modelBatching: normalizeModelBatching(record.modelBatching),
     loreSupplementEnabled: typeof record.loreSupplementEnabled === "boolean" ? record.loreSupplementEnabled : true,
     // R06：推进协议（非法值 → 缺省 v2）
     worldTurnProtocol: normalizeWorldTurnProtocol(record.worldTurnProtocol)
@@ -6170,6 +6215,10 @@ function applySettingsCommand(settings, command, deps = {}) {
     }
     case "runtime.update": {
       const next = { ...settings };
+      if (command.modelBatching !== void 0) {
+        if (!validModelBatching(command.modelBatching)) return fail3(settings, "INVALID_PAYLOAD", `分批上限必须为整数：人物 0..${MODEL_BATCHING_LIMITS.charactersPerBatch}，地图 0..${MODEL_BATCHING_LIMITS.mapsPerBatch}；0 表示自动合批。`);
+        next.modelBatching = { ...command.modelBatching };
+      }
       if (command.autoCommit !== void 0) {
         if (typeof command.autoCommit !== "boolean") return fail3(settings, "INVALID_PAYLOAD", "自动提交必须是布尔值。");
         next.autoCommit = command.autoCommit;
@@ -6402,6 +6451,8 @@ function settingsViewV2(settings) {
     // E01：旧值诊断——让作者看到「历史设置已升级为表格增量」，且原始设置未被改写
     legacyWorldTurnProtocol: legacyWorldTurnProtocolNotice(settings.worldTurnProtocol),
     rpmLimit: settings.rpmLimit,
+    modelBatching: normalizeModelBatching(settings.modelBatching),
+    modelBatchingLimits: { ...MODEL_BATCHING_LIMITS },
     contentReplaceRules: settings.contentReplaceRules ?? []
   };
 }
@@ -6439,6 +6490,7 @@ function resolveWorldTurnPreset(settings) {
 // src/atlas-sql-model-port.ts
 init_atlas_prompt_layers();
 init_atlas_sql_generation_budget();
+init_atlas_model_batching();
 var PROMPT_ROLES = /* @__PURE__ */ new Set(["system", "user", "assistant"]);
 function promptRole(role) {
   const value = typeof role === "string" ? role.trim().toLowerCase() : "";
@@ -6482,6 +6534,11 @@ function createSqlModelPort(options) {
     return { preset, input, messages, promptSource: preset.systemPrompt?.trim() ? "connection" : preset.promptSegments?.length ? "preset" : "builtin" };
   }
   const port = {
+    async generationOptions() {
+      const raw = await options.readSettings();
+      const { settings } = raw && typeof raw === "object" && raw.schemaVersion === 2 ? sanitizeSettingsV2(raw) : migrateAtlasSettings(raw);
+      return { maxTokens: resolveWorldTurnPreset(settings)?.maxTokens ?? 0, batching: normalizeModelBatching(settings.modelBatching) };
+    },
     withBudget: (budget, stage) => createSqlModelPort({ ...options, budget, stage }),
     async preview(request) {
       const { input, messages, promptSource } = await prepare(request);
@@ -7579,6 +7636,7 @@ function receiptDetail(value, depth = 0) {
   if (!value || typeof value !== "object") return void 0;
   const keys = /* @__PURE__ */ new Set(["turnId", "status", "summary", "groups", "groupId", "opIds", "changedRows", "issues", "code", "message", "path", "schemaPath", "severity", "retryable", "dependsOn", "dependencies", "dependency", "opId", "phase", "stage", "kind", "attempt", "attempts", "batchId", "httpStatus", "durationMs", "responseChars", "finishReason", "http_status", "started_wall_ms", "finished_wall_ms", "response_chars", "response_hash", "finish_reason", "error", "errorCode", "clockBeforeS", "clockAfterS", "simulatedUntilS", "worldChanged", "timeChanged", "coreSaved", "coreCommitted", "receipt"]);
   for (const key of ["operation", "sceneSaved", "build", "sceneSummary", "ready", "partial", "missing", "queue", "pendingTargets"]) keys.add(key);
+  for (const key of ["target_kind", "target_count", "estimated_output_tokens"]) keys.add(key);
   return Object.fromEntries(Object.entries(value).filter(([k]) => keys.has(k)).map(([k, v]) => [k, receiptDetail(v, depth + 1)]));
 }
 var SIMULATION_VIEW_ROW_CAP = 64;
@@ -9670,7 +9728,7 @@ function createAtlasSettingsRoutes(deps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.92",
+      version: "0.9.93",
       protocolVersion: 1,
       time: now()
     });
@@ -10319,6 +10377,8 @@ init_atlas_db_outbox();
 init_atlas_db_journal();
 init_atlas_runtime_limits();
 init_atlas_sql_generation_budget();
+init_atlas_model_batching();
+init_atlas_model_attempts();
 
 // src/atlas-sql-retry.ts
 init_atlas_sql_generation_budget();

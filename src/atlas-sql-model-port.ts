@@ -5,6 +5,7 @@ import type { ModelBatchRequest } from './atlas-ops-contract.ts';
 import { DEFAULT_SQL_PROMPT_SEGMENTS, hasLegacySqlPromptProtocol } from './atlas-sql-prompts.ts';
 import { assemblePromptLayers } from './atlas-prompt-layers.ts';
 import { transportBudgetPort, type GenerationBudgetPort } from './atlas-sql-generation-budget.ts';
+import { normalizeModelBatching } from './atlas-model-batching.ts';
 
 /** 用户策略段的角色白名单：作者选定的角色必须原样保留，不合法才退回 system。 */
 const PROMPT_ROLES = new Set(['system', 'user', 'assistant']);
@@ -74,6 +75,11 @@ export function createSqlModelPort(options: Options): AtlasModelPort {
   return {preset,input,messages,promptSource: preset.systemPrompt?.trim()?'connection':preset.promptSegments?.length?'preset':'builtin'};
  }
  const port: AtlasModelPort = {
+  async generationOptions(){
+    const raw=await options.readSettings();
+    const {settings}=raw&&typeof raw==='object'&&(raw as {schemaVersion?:unknown}).schemaVersion===2?sanitizeSettingsV2(raw):migrateAtlasSettings(raw);
+    return {maxTokens:resolveWorldTurnPreset(settings)?.maxTokens??0,batching:normalizeModelBatching(settings.modelBatching)};
+  },
   withBudget: (budget, stage) => createSqlModelPort({ ...options, budget, stage }),
   async preview(request:ModelBatchRequest){
    const {input,messages,promptSource}=await prepare(request);

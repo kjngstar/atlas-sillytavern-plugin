@@ -8,6 +8,8 @@ import { enqueueProjectionSync, projectionHash } from './atlas-db-outbox.ts';
 import { recordGroupChanges } from './atlas-db-journal.ts';
 import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
 import { bindModelBudget, createGenerationBudget } from './atlas-sql-generation-budget.ts';
+import { normalizeGenerationOptions } from './atlas-model-batching.ts';
+import { logModelAttempts } from './atlas-model-attempts.ts';
 import type { SqlSession } from './atlas-sql-session.ts';
 import type { TurnReceipt } from './atlas-ops-contract.ts';
 
@@ -27,8 +29,15 @@ export async function runSqlResume(session: SqlSession, input: {turnId:string;is
     const anchor={...receipt.anchor,parentTurnId:input.turnId,baseRevision:session.repo.internal.currentRevision(),baseStorageRevision:session.repo.storageRevision};
     const candidate=await session.repo.createCandidate(anchor,'maintenance');
     try {
+      const generationOptions=normalizeGenerationOptions(await session.modelPort?.generationOptions?.());
+      assertCurrent();
+      const attempts:Array<Record<string,unknown>>=JSON.parse(String(row.attempts_json??'[]'));
+      const backgroundPort=session.modelPort?logModelAttempts(bindModelBudget(session.modelPort,createGenerationBudget(),'background'),session.now,entry=>{
+        const finished=Number(entry.finished_wall_ms),started=Number(entry.started_wall_ms);
+        attempts.push({id:`att_resume_${anchor.baseStorageRevision}_${attempts.length}`,...entry,duration_ms:Math.max(0,finished-started)});
+      }):null;
       const simulation=await settleSqlTurn({db:candidate.db,branchId:session.branchId,anchor,turnId:input.turnId,
-        clockBefore:Number(branch.clock_s),operations:[],modelPort:session.modelPort ? bindModelBudget(session.modelPort, createGenerationBudget(), 'background') : null,
+        clockBefore:Number(branch.clock_s),operations:[],modelPort:backgroundPort,generationOptions,
         modelBudget:ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn,makeId:session.repo.internal.makeId,
         isCurrent:()=>{assertCurrent();return true;},attemptKey:`resume_${anchor.baseStorageRevision}`});
       assertCurrent();
@@ -55,7 +64,7 @@ export async function runSqlResume(session: SqlSession, input: {turnId:string;is
       history.pending_actors=simulation.pendingActors;
       history.random_draws=(history.random_draws??[]).concat(simulation.randomDraws);
       for (const [key,op] of [['attention_decisions','attention.propose'],['outcome_decisions','event.propose']]) history[key]=(history[key]??[]).concat(simulation.modelOperations.filter(o=>o.value.op===op).map(o=>o.value));
-      runBound(candidate.db,'UPDATE turns SET receipt_json=?,decisions_json=?,status=? WHERE id=?',[JSON.stringify(receipt),JSON.stringify(history),receipt.status,input.turnId]);
+      runBound(candidate.db,'UPDATE turns SET receipt_json=?,decisions_json=?,attempts_json=?,status=? WHERE id=?',[JSON.stringify(receipt),JSON.stringify(history),JSON.stringify(attempts.slice(-ATLAS_RUNTIME_LIMITS.detailedAttemptsPerTurn)),receipt.status,input.turnId]);
       const check=validateCandidate(candidate.db,{branchId:session.branchId});
       if (!check.ok||foreignKeyCheck(candidate.db).length) throw new AtlasDbError('INVARIANT_FAILED','后台继续结算候选校验失败',{violations:check.violations});
       if (simulation.worldChanged) enqueueProjectionSync(candidate.db,{branchId:session.branchId,turnId:input.turnId,targetRevision:anchor.baseRevision,

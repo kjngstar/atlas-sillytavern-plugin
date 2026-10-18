@@ -19,7 +19,10 @@ import { recordGroupChanges } from './atlas-db-journal.ts';
 import { createTableReadPort } from './atlas-db-readport.ts';
 import { collectKnownRefs, collectEntityRefs, inDecisionScope } from './atlas-sql-refs.ts';
 import type { OperationContext } from './atlas-sql-refs.ts';
-import { ATLAS_RUNTIME_LIMITS, decisionActorBudget } from './atlas-runtime-limits.ts';
+import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
+import { characterBatchLimit, type ModelGenerationOptions } from './atlas-model-batching.ts';
+import { sha256HexSync } from './atlas-db-envelope.ts';
+import { resolveEffectivePosition } from './atlas-sim-position.ts';
 import { deriveSeed, drawForEvent, recordDraw, ATLAS_SIM_RULESET_VERSION } from './atlas-sim-random.ts';
 import type { RecordedDraw } from './atlas-sim-random.ts';
 import type { SqlDatabase } from './atlas-db-runtime.ts';
@@ -31,6 +34,7 @@ import type { ElapsedActivity } from './atlas-sim-time.ts';
 
 type Input = { db: SqlDatabase; branchId: string; anchor: TurnAnchor; turnId: string; clockBefore: number;
   sceneOnly?:boolean; operations: ParsedOperation[]; modelPort?: AtlasModelPort | null; modelBudget: number;
+  generationOptions?: ModelGenerationOptions;
   makeId: (kind: string, opId: string, alias: string) => string; isCurrent?: () => boolean; attemptKey?: string };
 
 function snapshot(input: Input): Map<string, Record<string, unknown>> {
@@ -98,6 +102,13 @@ export async function settleSqlTurn(input: Input) {
   let cursor = Number(branch.simulation_cursor_s), catchingUp = false, batches = 0;
   const steps: Array<Record<string, unknown>> = [];
   const pendingActors: string[] = [];
+  const decidedAt=new Map<string,{clockS:number;signature:string}>();
+  const decisionSignature=(id:string,opportunities:Opportunity[]):string=>{
+    const actor=queryBound(input.db,'SELECT status,physical_status FROM characters WHERE branch_id=? AND id=?',[input.branchId,id])[0];
+    const position=resolveEffectivePosition({db:input.db,branchId:input.branchId},id);
+    const context=buildDecisionContext({actors:[{entityId:id}],opportunities},{db:input.db,branchId:input.branchId});
+    return sha256HexSync(JSON.stringify([actor,position,context.actorSlices],(key,value)=>['row_rev','updated_turn_id','evaluated_until_s','reason_code'].includes(key)?undefined:value));
+  };
   const operationContexts: OperationContext[]=[];
   const assertCurrent = () => { if (input.isCurrent && !input.isCurrent()) throw new AtlasDbError('TURN_CANCELLED','后台模型等待期间楼层已变化',{}); };
   const ask = async (phase: Phase, fields: Partial<StagePromptInput>, atS: number, opportunities: Opportunity[] = [], dueEventIds: string[] = []) => {
@@ -113,6 +124,10 @@ export async function settleSqlTurn(input: Input) {
     // Structured fields, already serialized by callers, also use the same aliases.
     for (const [id,alias] of byId) request.messages[1].content=request.messages[1].content.split(JSON.stringify(id)).join(JSON.stringify(alias));
     request.sourceSnapshot=[];
+    if(phase==='decision'){
+      const actors=JSON.parse(fields.actorSlices??'[]') as Array<{entityId:string}>;
+      request.batchTargets={kind:'characters',count:actors.length,estimatedOutputTokens:ATLAS_RUNTIME_LIMITS.decisionOutputReserveTokens+actors.length*ATLAS_RUNTIME_LIMITS.decisionActorOutputTokens};
+    }
     batches++;
     const response = await input.modelPort.request(request); assertCurrent();
     const payload=extractPayload(response.text), parsed=parseOperations(payload.payload,{phase});
@@ -120,8 +135,10 @@ export async function settleSqlTurn(input: Input) {
     let operations=parsed.operations.map(op=>({...op,opId:`sim_${input.attemptKey ?? input.turnId}_${batches}_${op.opId}`}));
     const context: OperationContext={opIds:[],phase,clockS:atS,knownRefs,opportunities,dueEventIds,
       actorIds:phase==='decision'?(JSON.parse(fields.actorSlices ?? '[]') as Array<{entityId:string}>).map(a=>a.entityId):[]};
+    let scopeRejected=false;
     if (phase==='decision') operations=operations.filter(op=>{
       if (inDecisionScope(op,context,tables,input.branchId)) return true;
+      scopeRejected=true;
       issues.push({code:'ACTOR_SCOPE_VIOLATION',path:'$.decision',opId:op.opId,message:'决策仅能修改给定人物的心理、计划和有效接触认知，不能瞬移或改写其它人物',severity:'error',retryable:false});
       return false;
     });
@@ -131,6 +148,10 @@ export async function settleSqlTurn(input: Input) {
     const built=buildAtomicGroups(compiled.results.map(r=>({opId:r.opId,...r.result}))), ordered=orderGroups(built.groups);
     const result=applyGroups(input.db,ordered.order,{branchId:input.branchId,turnId:input.turnId,attemptId:'simulation',journal:false});
     issues.push(...compiled.issues,...built.issues,...ordered.issues); groups.push(...result.groups); modelOperations.push(...operations);
+    if(phase==='decision'&&!scopeRejected&&(parsed.explicitNoop||operations.length>0)&&!payload.issues.some(i=>i.severity==='error')&&!parsed.issues.some(i=>i.severity==='error')&&!compiled.issues.some(i=>i.severity==='error')&&!result.groups.some(g=>g.status==='rejected'||g.status==='blocked')){
+      const currentOpportunities=collectOpportunities({fromS:Number(branch.simulation_cursor_s),untilS:atS},{db:input.db,branchId:input.branchId});
+      for(const id of context.actorIds)decidedAt.set(id,{clockS:atS,signature:decisionSignature(id,currentOpportunities)});
+    }
     return {changed:result.groups.some(g=>g.status==='applied'&&g.changedRows>0),noop:parsed.explicitNoop};
   };
   for (const actor of queryBound(input.db,"SELECT id,physical_status FROM characters WHERE branch_id=? AND physical_status IN ('dead','incapacitated')",[input.branchId])) {
@@ -191,7 +212,10 @@ export async function settleSqlTurn(input: Input) {
     }
     runBound(input.db,'UPDATE branches SET clock_s=?,clock_min_s=?,clock_max_s=?,simulation_cursor_s=? WHERE id=?',[clockAfter,clockMin,clockMax,cursor,input.branchId]);
     const opportunities=collectOpportunities({fromS:Number(branch.simulation_cursor_s),untilS:cursor},{db:input.db,branchId:input.branchId});
-    let actors=queryBound(input.db,"SELECT id FROM characters WHERE branch_id=? AND status='active' AND physical_status='alive' AND role!='protagonist' ORDER BY importance,id",[input.branchId]);
+    let actors=queryBound(input.db,"SELECT id FROM characters WHERE branch_id=? AND status='active' AND physical_status='alive' AND role!='protagonist' ORDER BY CASE importance WHEN 'core' THEN 0 WHEN 'recurring' THEN 1 ELSE 2 END,role,location_id,id",[input.branchId]).filter(actor=>{
+      const id=String(actor.id),previous=decidedAt.get(id);
+      return previous?.clockS!==cursor||previous.signature!==decisionSignature(id,opportunities);
+    });
     if (clockAfter === input.clockBefore && branch.simulation_status === 'catching_up') {
       const prior=queryBound(input.db,'SELECT decisions_json FROM turns WHERE id=?',[String(branch.head_turn_id)])[0];
       const waiting=prior ? JSON.parse(String(prior.decisions_json)).pending_actors as string[]|undefined : undefined;
@@ -199,12 +223,14 @@ export async function settleSqlTurn(input: Input) {
     }
     if (!catchingUp && actors.length) {
       let processed=0;
-      const count=decisionActorBudget(ATLAS_RUNTIME_LIMITS.normalResponseTokens);
-      for (;processed<actors.length && input.modelPort && batches<input.modelBudget;processed+=count) {
+      const count=characterBatchLimit(input.generationOptions);
+      while(processed<actors.length && input.modelPort && batches<input.modelBudget) {
         const actorIds=actors.slice(processed,processed+count).map(c=>({entityId:String(c.id)}));
-        const contacts=opportunities.filter(o=>actorIds.some(a=>a.entityId===o.receiverEntityId));
+        let contacts=opportunities.filter(o=>actorIds.some(a=>a.entityId===o.receiverEntityId));
         const context=buildDecisionContext({actors:actorIds,opportunities:contacts},{db:input.db,branchId:input.branchId});
-        try { await ask('decision',{timeWindow:JSON.stringify({fromS:input.clockBefore,untilS:cursor}),actorSlices:JSON.stringify(context.actorSlices),opportunities:JSON.stringify(contacts)},cursor,contacts); }
+        while(actorIds.length>1&&JSON.stringify(context.actorSlices).length>ATLAS_RUNTIME_LIMITS.batchPromptChars){const removed=actorIds.pop()!;context.actorSlices=context.actorSlices.filter(a=>a.entityId!==removed.entityId);}
+        contacts=contacts.filter(o=>actorIds.some(a=>a.entityId===o.receiverEntityId));
+        try { await ask('decision',{timeWindow:JSON.stringify({fromS:input.clockBefore,untilS:cursor}),actorSlices:JSON.stringify(context.actorSlices),opportunities:JSON.stringify(contacts)},cursor,contacts);processed+=actorIds.length; }
         catch (err) { if ((err as {code?:string}).code==='TURN_CANCELLED') throw err; issues.push({code:'MODEL_REQUEST_FAILED',path:'$.decision',message:String((err as Error).message),severity:'warning',retryable:true}); break; }
       }
       if (processed<actors.length) { pendingActors.push(...actors.slice(processed).map(a=>String(a.id))); catchingUp=true; issues.push({code:'ACTOR_BUDGET_EXHAUSTED',path:'$.decision',message:'剩余人物判断已记录，等待后续批次',severity:'warning',retryable:true}); }

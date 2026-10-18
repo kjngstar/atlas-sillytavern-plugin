@@ -221,7 +221,7 @@ test('a missing parent cannot duplicate a registered corridor as an unrelated ro
 });
 
 test('an occupied room does not permanently starve its missing world overview',async()=>{
- const repo=await seeded(model(()=>noop),db=>db.run('UPDATE characters SET location_id=? WHERE id=?',[IDS.L3,IDS.C1]));try{const task=buildSqlLayoutTask(repo.db,IDS.branchMain,input({layoutMaps:'active'}),'layout-accept');assert.ok(task.mapIds.includes(IDS.M2));assert.ok(task.mapIds.includes(IDS.M1));assert.equal(task.kinds[IDS.M1],'overview');assert.equal(task.mapIds.length,2);}finally{await repo.close();}
+ const repo=await seeded(model(()=>noop),db=>db.run('UPDATE characters SET location_id=? WHERE id=?',[IDS.L3,IDS.C1]));try{const task=buildSqlLayoutTask(repo.db,IDS.branchMain,input({layoutMaps:'active'}),'layout-accept');assert.deepEqual(task.mapIds,[IDS.M1]);assert.deepEqual(task.remainingLocationIds,[IDS.M2]);assert.equal(task.kinds[IDS.M1],'overview');}finally{await repo.close();}
 });
 
 test('a coarse outdoor position can still request its missing world overview',async()=>{
@@ -230,10 +230,9 @@ test('a coarse outdoor position can still request its missing world overview',as
 
 test('automatic layout prepares the city ancestor before its occupied room',async()=>{
  const repo=await seeded(model(()=>noop),db=>{db.run('UPDATE characters SET location_id=?',[IDS.L3]);insertRows(db,'maps',[createRow('maps',{name:'测试城市内图',kind:'site',container_location_id:IDS.L1,frame_json:{cols:100,rows:80}},{branchId:IDS.branchMain,id:'queued-city',turnId:IDS.seedTurn,clockS:0,nowWallMs:1,rulesetVersion:'atlas-1'})]);});
- try{const first=buildSqlLayoutTask(repo.db,IDS.branchMain,input({layoutMaps:'active'}),'first');assert.equal(first.mapIds.length,2);
+ try{const first=buildSqlLayoutTask(repo.db,IDS.branchMain,input({layoutMaps:'active'}),'first');assert.deepEqual(first.mapIds,['queued-city']);assert.deepEqual(first.remainingLocationIds,[IDS.M2]);
   for(const mapId of first.mapIds){const row=queryBound(repo.db,'SELECT frame_json FROM maps WHERE id=?',[mapId])[0];const frame=JSON.parse(row.frame_json);frame.atlasScene={layout:{kind:first.kinds[mapId]}};frame.atlasLayoutContext={hash:first.contextHashes[mapId]};repo.db.run('UPDATE maps SET frame_json=? WHERE id=?',[JSON.stringify(frame),mapId]);}
-  assert.deepEqual(first.mapIds,['queued-city',IDS.M2]);
-  const next=buildSqlLayoutTask(repo.db,IDS.branchMain,input({layoutMaps:'active'}),'next');assert.equal(next,null);
+  const next=buildSqlLayoutTask(repo.db,IDS.branchMain,input({layoutMaps:'active'}),'next');assert.deepEqual(next.mapIds,[IDS.M2]);assert.deepEqual(next.remainingLocationIds,[]);
   const explicit=buildSqlLayoutTask(repo.db,IDS.branchMain,input({layoutMaps:[first.mapIds[0]]}),'explicit');assert.deepEqual(explicit.mapIds,[first.mapIds[0]],'手动更新不能被自动跳过规则吞掉');
  }finally{await repo.close();}
 });

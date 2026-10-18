@@ -13,7 +13,7 @@
  *    不是米。
  * 4. **引用目录必须冻结**：alias 由 `collectTaskRefs` 定向分配，不用全表 `collectKnownRefs`
  *    —— 图一多，第 70 张图就会掉出上限，alias 也会随插入顺序漂移。
- * 5. **一次最多 2 张图**，超出部分进 remaining，不静默忘记。
+ * 5. 同类型、同依赖层的地图按容量合批，超出部分进 remaining，不静默忘记。
  */
 
 import { createTableReadPort, pageAllRows } from './atlas-db-readport.ts';
@@ -22,6 +22,7 @@ import { collectTaskRefs } from './atlas-sql-task-refs.ts';
 import { buildStagePrompt } from './atlas-ops-prompts.ts';
 import { normalizeFrame, normalizeSqlMapFrame } from './atlas-spatial-frame.ts';
 import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
+import { normalizeModelBatching, planningOutputTokens } from './atlas-model-batching.ts';
 import { stableHexHash } from './atlas-hash.ts';
 import {
   canonicalAuthoredArea,
@@ -370,10 +371,10 @@ export type BuildLayoutTaskInput = TurnInput;
  * buildSqlLayoutTask：构造本轮的布局请求（或 null 表示本轮没有需要布局的图）。
  *
  * 选图优先级（`layoutMaps:'active'`）：
- * 1. 当前有人的「具体图」（成员真正站在里面）；
- * 2. 尚未绘制的根图（当前图存在也要给宏观概览留候选）；
- * 3. 所有已登记图：缺失或结构变化都在本轮排队，不以是否进入为条件。
- * 显式给定 `layoutMaps: string[]` 时按给定顺序取（允许无人图），仍受 layoutMapsPerBatch 限制。
+ * 1. 沿当前有人地点的祖先链，从根图到具体图依次生成；
+ * 2. 远处未进入的内部图留给显式请求；
+ * 3. 同类型且同依赖层的图尽量合批，父图完成后再构造子图上下文。
+ * 显式给定 `layoutMaps: string[]` 时允许无人图，父图优先、同层保持给定顺序。
  */
 export type DerivedLayoutSites = {
   entries: Entry[];
@@ -555,6 +556,13 @@ export function buildSqlLayoutTask(
     if (!held || entry.mapId < held.mapId) mapByContainer.set(containerId, entry);
   }
 
+  const entryByMap=new Map(entries.map(entry=>[entry.mapId,entry]));
+  const parentEntry=(entry:Entry):Entry|undefined=>{
+    let id=asId(entry.container?.parent_location_id);const seen=new Set<string>();
+    while(id&&!seen.has(id)){seen.add(id);const parent=mapByContainer.get(id);if(parent&&parent!==entry)return parent;id=parentOf(id);}
+    const outer=entryByMap.get(String(entry.container?.map_id??''));return outer!==entry?outer:undefined;
+  };
+  const depth=(entry:Entry):number=>{let current:Entry|undefined=entry,n=0;const seen=new Set<string>();while(current&&!seen.has(current.mapId)){seen.add(current.mapId);current=parentEntry(current);if(current)n++;}return n;};
   // ── 2. 选图 ────────────────────────────────────────────────────────────
   let chosen: Entry[] = [];
   if (input.layoutMaps === 'active') {
@@ -571,13 +579,12 @@ export function buildSqlLayoutTask(
     chosen=entries.filter(entry=>activePath.has(entry.mapId)
       ? occupiedSet.has(String(entry.container?.id))||entry.own.length>0&&(entry.kind!=='overview'||entry.own.length>1)
       : entry.container===null&&entry.own.length>1);
-    const depth=(entry:Entry)=>{let id=asId(entry.container?.parent_location_id),n=0;const seen=new Set<string>();while(id&&!seen.has(id)){seen.add(id);n++;id=parentOf(id);}return n;};
     chosen.sort((a,b)=>depth(a)-depth(b)||byId(a.mapId,b.mapId));
   } else if (Array.isArray(input.layoutMaps)) {
     const requested = input.layoutMaps.map((id) => String(id));
     chosen = entries
       .filter((entry) => requested.includes(entry.mapId))
-      .sort((a, b) => requested.indexOf(a.mapId) - requested.indexOf(b.mapId));
+      .sort((a, b) => depth(a)-depth(b)||requested.indexOf(a.mapId)-requested.indexOf(b.mapId));
   }
   if (chosen.length === 0) return null;
 
@@ -591,9 +598,24 @@ export function buildSqlLayoutTask(
   chosen=chosen.filter(entry=>Array.isArray(input.layoutMaps)||!hasScene(entry.map)||storedLayoutHash(entry.map)!==contextHashes[entry.mapId]);
   if(!chosen.length)return null;
 
-  const batchLimit = ATLAS_RUNTIME_LIMITS.layoutMapsPerBatch;
-  const selected = chosen.slice(0, batchLimit);
-  const remaining = chosen.slice(batchLimit).map((entry) => entry.mapId);
+  const config=normalizeModelBatching(input.generationOptions?.batching);
+  const retryLimit=input.layoutBatchMapLimit;
+  const batchLimit=Math.min(config.mapsPerBatch||ATLAS_RUNTIME_LIMITS.layoutMapsPerBatch,
+    typeof retryLimit==='number'&&Number.isSafeInteger(retryLimit)&&retryLimit>0?retryLimit:ATLAS_RUNTIME_LIMITS.layoutMapsPerBatch);
+  const outputBudget=Math.max(0,planningOutputTokens(input.generationOptions)-ATLAS_RUNTIME_LIMITS.batchOutputReserveTokens);
+  const first=chosen[0],selected:Entry[]=[];
+  let estimatedTokens=0,inputChars=0,estimatedRefs=0;
+  for(const entry of chosen){
+    if(entry.kind!==first.kind||depth(entry)!==depth(first)||selected.length>=batchLimit)continue;
+    const scene=normalizeFrame(entry.map.frame_json).atlasScene as SqlRow|undefined;
+    const savedChars=JSON.stringify(scene?.constraints??{}).length;
+    const tokens=Math.max(192+entry.own.length*(entry.kind==='floor'?112:72),Math.ceil(savedChars/2));
+    const chars=JSON.stringify(entry.own).length+savedChars,refs=entry.own.length+1;
+    if(selected.length&&(estimatedTokens+tokens>outputBudget||inputChars+chars>ATLAS_RUNTIME_LIMITS.batchPromptChars||estimatedRefs+refs>ATLAS_RUNTIME_LIMITS.refCatalogMaxEntries))continue;
+    selected.push(entry);estimatedTokens+=tokens;inputChars+=chars;estimatedRefs+=refs;
+  }
+  const selectedIds=new Set(selected.map(entry=>entry.mapId));
+  const remaining=chosen.filter(entry=>!selectedIds.has(entry.mapId)).map(entry=>entry.mapId);
 
   // ── 3. 冻结引用目录（失败或未执行时必须用同一份解析） ──────────────────
   const focusLocations: string[] = [];
@@ -878,6 +900,7 @@ export function buildSqlLayoutTask(
   });
   request.messages[1].content += '\n【输出校验】本批要求生成或更新上述地图，不能因正文未变化只返回 noop。overview 的 surface 只能为 mixed/urban/forest/mountain/water/indoor/void；砂石、泥土、草地等具体材料可在 why 中说明，不得用 gravel/dirt/grass 作为 surface 枚举。未知或混合场地用 mixed。每个操作必须使用本批 map 引用及给定 kind，不输出解释正文。';
   // 兼容预设的注入副本必须与最终任务一致（预览与真实发送不能两套）。
+  request.batchTargets={kind:'maps',count:selected.length,estimatedOutputTokens:estimatedTokens};
   request.promptInput.injectionText = request.messages[1].content;
 
   return {
@@ -893,6 +916,7 @@ export function buildSqlLayoutTask(
     contextHashes,
     focusLocationIds: uniqueSorted(focusLocations),
     remainingLocationIds: remaining,
+    parentMapIds:Object.fromEntries(chosen.map(entry=>[entry.mapId,parentEntry(entry)?.mapId??null])),
     mapIds: pendingIds,
     kinds: Object.fromEntries(pending.map((entry) => [entry.mapId, entry.kind])),
     extents: Object.fromEntries(pending.map((entry) => [entry.mapId, { ...entry.extent }])),
