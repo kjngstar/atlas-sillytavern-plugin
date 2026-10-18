@@ -17,7 +17,7 @@ import { buildSqlLayoutTask, baselineFloorRooms } from '../src/atlas-sql-layout-
 import { overview } from '../vendor/atlas-spatial/overview-core.mjs';
 const SQL = await (await import('sql.js')).default();
 const noop = '{"op":"noop"}';
-const model = fn => ({calls:[], async request(req){this.calls.push(req);return {batchId:req.batchId,text:fn(req,this.calls.length),httpStatus:200,durationMs:1};}});
+const model = fn => ({generationOptions:async()=>({maxTokens:4096,batching:{charactersPerBatch:0,mapsPerBatch:0,requestsPerOperation:4}}),calls:[], async request(req){this.calls.push(req);return {batchId:req.batchId,text:fn(req,this.calls.length),httpStatus:200,durationMs:1};}});
 const anchor = {chatUid:IDS.chatA,branchId:IDS.branchMain,parentTurnId:IDS.seedTurn,hostMessageUid:'accept-fix',variantKey:'v1',baseRevision:0,baseStorageRevision:0,inputHash:'accept-fix'};
 async function seeded(port, setup){const seed=await makeSeedWith(SQL);setup?.(seed.db);const bytes=seed.exportBytes();seed.close();const repo=createSqlRepository({chatUid:IDS.chatA,branchId:IDS.branchMain,modelPort:port});await repo.open({bytes});return repo;}
 const input = extra => ({anchor,userText:'合成验收',assistantText:'合成验收',sourceSnapshot:[],phaseBatches:['observe'],manual:false,sceneOnly:true,worldCompletion:{mode:'local',focusLocationIds:[IDS.L3]},...extra});
@@ -330,7 +330,7 @@ test('all deferred target IDs survive SQL persistence beyond the next batch limi
 });
 
 test('production repository shares four actual sends including MiniMax compatibility rescue with construction',async()=>{
- const calls=[];const settings={...createDefaultSettingsV2(),activeApiPresetId:'connection',apiPresets:[{id:'connection',name:'合成MiniMax',endpoint:'https://api.minimaxi.com/v1',apiKey:'sk-cp-synthetic',model:'MiniMax-M3',maxTokens:9000,temperature:.4,timeoutMs:30000,updatedAt:1}]};
+ const calls=[];const settings={...createDefaultSettingsV2(),modelBatching:{charactersPerBatch:0,mapsPerBatch:0,requestsPerOperation:4},activeApiPresetId:'connection',apiPresets:[{id:'connection',name:'合成MiniMax',endpoint:'https://api.minimaxi.com/v1',apiKey:'sk-cp-synthetic',model:'MiniMax-M3',maxTokens:9000,temperature:.4,timeoutMs:30000,updatedAt:1}]};
  const port=createSqlModelPort({readSettings:async()=>settings,fetchFn:async url=>{calls.push(String(url));const rescue=String(url).includes('/anthropic');return new Response(JSON.stringify(rescue?{choices:[{message:{content:noop}}]}:{error:{message:'Not Found'}}),{status:rescue?200:404});}});
  const repo=await seeded(port);try{const p=await repo.prepareTurn(input({phaseBatches:['observe','geography']}));assert.equal(calls.length,4);assert.equal(calls.filter(url=>url.includes('/anthropic')).length,2);assert.ok(p.receipt.issues.some(i=>i.code==='MODEL_BUDGET_EXHAUSTED'));assert.equal(p.receipt.status,'partial');}finally{await repo.close();}
 });

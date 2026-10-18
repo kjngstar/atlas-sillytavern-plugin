@@ -32,13 +32,14 @@ export async function runSqlResume(session: SqlSession, input: {turnId:string;is
       const generationOptions=normalizeGenerationOptions(await session.modelPort?.generationOptions?.());
       assertCurrent();
       const attempts:Array<Record<string,unknown>>=JSON.parse(String(row.attempts_json??'[]'));
-      const backgroundPort=session.modelPort?logModelAttempts(bindModelBudget(session.modelPort,createGenerationBudget(),'background'),session.now,entry=>{
+      const budget=createGenerationBudget({limit:generationOptions.batching.requestsPerOperation??0});
+      const backgroundPort=session.modelPort?logModelAttempts(bindModelBudget(session.modelPort,budget,'background'),session.now,entry=>{
         const finished=Number(entry.finished_wall_ms),started=Number(entry.started_wall_ms);
         attempts.push({id:`att_resume_${anchor.baseStorageRevision}_${attempts.length}`,...entry,duration_ms:Math.max(0,finished-started)});
       }):null;
       const simulation=await settleSqlTurn({db:candidate.db,branchId:session.branchId,anchor,turnId:input.turnId,
         clockBefore:Number(branch.clock_s),operations:[],modelPort:backgroundPort,generationOptions,
-        modelBudget:ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn,makeId:session.repo.internal.makeId,
+        modelBudget:budget.remaining(),makeId:session.repo.internal.makeId,
         isCurrent:()=>{assertCurrent();return true;},attemptKey:`resume_${anchor.baseStorageRevision}`});
       assertCurrent();
       if (anchor.baseRevision!==session.repo.internal.currentRevision()||anchor.baseStorageRevision!==session.repo.storageRevision) throw new AtlasDbError('STALE_BASE','后台等待期间快照已变化',{});

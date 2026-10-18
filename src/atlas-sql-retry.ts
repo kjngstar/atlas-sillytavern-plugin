@@ -10,6 +10,7 @@ import { extractPayload, parseOperations } from './atlas-ops-parser.ts';
 import { buildStagePrompt } from './atlas-ops-prompts.ts';
 import { runSqlResume } from './atlas-sql-resume.ts';
 import { bindModelBudget, createGenerationBudget } from './atlas-sql-generation-budget.ts';
+import { normalizeGenerationOptions } from './atlas-model-batching.ts';
 import { runSqlRetry } from './atlas-sql-session.ts';
 import { ATLAS_SEMANTIC_OPS } from './atlas-ops-contract.ts';
 import type { SqlSession } from './atlas-sql-session.ts';
@@ -80,7 +81,9 @@ async function retry(session: SqlSession, input: RetryInput): Promise<RetryResul
   const request = buildStagePrompt({ phase: 'repair', allowedOps, repairRefs: collectEntityRefs(tables, session.branchId, knownRefs.filter(ref=>!ref.alias.startsWith('new:'))).join('\n'),
     repairTickets: tickets.promptLines.join('\n'), sourceSnapshot: sources, batchId: 'retry_' + tickets.batchId, repairOfBatchId: tickets.batchId });
   request.anchor = anchor; request.sourceSnapshot = sources;
-  const response = await bindModelBudget(session.modelPort, createGenerationBudget(), 'repair').request(request);
+  const generationOptions=normalizeGenerationOptions(await session.modelPort.generationOptions?.());
+  assertCurrent();
+  const response = await bindModelBudget(session.modelPort, createGenerationBudget({limit:generationOptions.batching.requestsPerOperation??0}), 'repair').request(request);
   assertCurrent();
   if (revision !== session.repo.internal.currentRevision() || storageRevision !== session.repo.storageRevision) throw new AtlasDbError('STALE_BASE', '模型补交等待期间快照已变化，候选不发布', {});
   const payload = extractPayload(response.text);

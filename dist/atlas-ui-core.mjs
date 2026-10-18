@@ -128,8 +128,8 @@ var init_atlas_runtime_limits = __esm({
       responseJsonDepth: 16,
       conditionDepth: 4,
       repairAttemptsPerBatch: 1,
-      actorsPerDecisionBatch: 24,
-      foregroundModelBatchesPerTurn: 4,
+      /** 0: no user request-count cap; a positive saved setting opts into one. */
+      foregroundModelBatchesPerTurn: 0,
       pendingCandidateTtlMs: 10 * 60 * 1e3,
       normalResponseTokens: 4096,
       decisionOutputReserveTokens: 512,
@@ -155,9 +155,6 @@ var init_atlas_runtime_limits = __esm({
       newRoutesPerBatch: 16,
       /** 单个批次最多把本次目标再向下展开的父边数。 */
       additionalParentDepthPerBatch: 2,
-      /** 同类型、同依赖层的地图尽量合批；实际批量还受输出与目录容量限制。 */
-      layoutMapsPerBatch: 8,
-      batchPromptChars: 48e3,
       batchOutputReserveTokens: 384,
       /** 单张概览图的分区上限（G11 场景体积预算）。 */
       overviewZoneLimit: 64,
@@ -196,24 +193,21 @@ var init_atlas_runtime_limits = __esm({
 // src/atlas-model-batching.ts
 function normalizeModelBatching(value) {
   const raw = value && typeof value === "object" ? value : {};
-  const count = (key) => typeof raw[key] === "number" && Number.isSafeInteger(raw[key]) && raw[key] >= 0 && raw[key] <= MODEL_BATCHING_LIMITS[key] ? raw[key] : 0;
-  return { charactersPerBatch: count("charactersPerBatch"), mapsPerBatch: count("mapsPerBatch") };
+  const count = (key) => typeof raw[key] === "number" && Number.isSafeInteger(raw[key]) && raw[key] >= 0 ? raw[key] : 0;
+  return { charactersPerBatch: count("charactersPerBatch"), mapsPerBatch: count("mapsPerBatch"), requestsPerOperation: count("requestsPerOperation") };
 }
 function validModelBatching(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const raw = value;
-  return Object.keys(DEFAULT_MODEL_BATCHING).every((key) => Number.isSafeInteger(raw[key]) && raw[key] >= 0 && raw[key] <= MODEL_BATCHING_LIMITS[key]);
+  const valid = (v) => Number.isSafeInteger(v) && v >= 0;
+  return valid(raw.charactersPerBatch) && valid(raw.mapsPerBatch) && (raw.requestsPerOperation === void 0 || valid(raw.requestsPerOperation));
 }
-var DEFAULT_MODEL_BATCHING, MODEL_BATCHING_LIMITS;
+var DEFAULT_MODEL_BATCHING;
 var init_atlas_model_batching = __esm({
   "src/atlas-model-batching.ts"() {
     "use strict";
     init_atlas_runtime_limits();
-    DEFAULT_MODEL_BATCHING = { charactersPerBatch: 0, mapsPerBatch: 0 };
-    MODEL_BATCHING_LIMITS = {
-      charactersPerBatch: ATLAS_RUNTIME_LIMITS.actorsPerDecisionBatch,
-      mapsPerBatch: ATLAS_RUNTIME_LIMITS.layoutMapsPerBatch
-    };
+    DEFAULT_MODEL_BATCHING = { charactersPerBatch: 0, mapsPerBatch: 0, requestsPerOperation: 0 };
   }
 });
 
@@ -226,9 +220,12 @@ function transportBudgetPort(budget, stage, batchId) {
     }
   };
 }
+var GENERATION_BUDGET_LIMIT;
 var init_atlas_sql_generation_budget = __esm({
   "src/atlas-sql-generation-budget.ts"() {
     "use strict";
+    init_atlas_runtime_limits();
+    GENERATION_BUDGET_LIMIT = ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn;
   }
 });
 
@@ -6216,8 +6213,8 @@ function applySettingsCommand(settings, command, deps = {}) {
     case "runtime.update": {
       const next = { ...settings };
       if (command.modelBatching !== void 0) {
-        if (!validModelBatching(command.modelBatching)) return fail3(settings, "INVALID_PAYLOAD", `分批上限必须为整数：人物 0..${MODEL_BATCHING_LIMITS.charactersPerBatch}，地图 0..${MODEL_BATCHING_LIMITS.mapsPerBatch}；0 表示自动合批。`);
-        next.modelBatching = { ...command.modelBatching };
+        if (!validModelBatching(command.modelBatching)) return fail3(settings, "INVALID_PAYLOAD", "人物、地图与每次操作请求上限必须为非负安全整数；0 表示不限制。");
+        next.modelBatching = normalizeModelBatching({ ...command.modelBatching, requestsPerOperation: command.modelBatching.requestsPerOperation ?? settings.modelBatching?.requestsPerOperation ?? 0 });
       }
       if (command.autoCommit !== void 0) {
         if (typeof command.autoCommit !== "boolean") return fail3(settings, "INVALID_PAYLOAD", "自动提交必须是布尔值。");
@@ -6452,7 +6449,6 @@ function settingsViewV2(settings) {
     legacyWorldTurnProtocol: legacyWorldTurnProtocolNotice(settings.worldTurnProtocol),
     rpmLimit: settings.rpmLimit,
     modelBatching: normalizeModelBatching(settings.modelBatching),
-    modelBatchingLimits: { ...MODEL_BATCHING_LIMITS },
     contentReplaceRules: settings.contentReplaceRules ?? []
   };
 }
@@ -9728,7 +9724,7 @@ function createAtlasSettingsRoutes(deps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.93",
+      version: "0.9.94",
       protocolVersion: 1,
       time: now()
     });
@@ -10382,6 +10378,7 @@ init_atlas_model_attempts();
 
 // src/atlas-sql-retry.ts
 init_atlas_sql_generation_budget();
+init_atlas_model_batching();
 init_atlas_ops_contract();
 
 // src/atlas-sql-chat.ts

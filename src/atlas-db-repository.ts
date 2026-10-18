@@ -25,7 +25,7 @@ import { extractPayload, looksLikeSql, parseOperations } from './atlas-ops-parse
 import { buildRepairBatch, mergeRepair } from './atlas-ops-repair.ts';
 import { buildStagePrompt } from './atlas-ops-prompts.ts';
 import { enqueueProjectionSync, projectionHash } from './atlas-db-outbox.ts';
-import { createTableReadPort } from './atlas-db-readport.ts';
+import { createTableReadPort, pageAllRows } from './atlas-db-readport.ts';
 import { decodeRow } from './atlas-db-codec.ts';
 import {
   AtlasDbError,
@@ -124,7 +124,7 @@ import type {
 import type { SourceSnapshotEntry } from './atlas-ops-contract.ts';
 // P09A：业务变化的判据（表 + 组用途），不靠 id 前缀。
 import { groupChangesBusiness } from './atlas-ops-contract.ts';
-import { normalizeGenerationOptions } from './atlas-model-batching.ts';
+import { normalizeGenerationOptions, isModelBatchSizeFailure } from './atlas-model-batching.ts';
 import type { GenerationTask, PlanIssue, WorldFillStatus } from './atlas-world-contract.ts';
 
 export type RepositoryOptions = {
@@ -150,10 +150,10 @@ export function mergeRow(target: Record<string, unknown> | null, patch: Record<s
  * M3-11：已到期的后台决策工作量（用于「后台优先 = 预算优先」的名额保留）。
  *
  * 只认活着的 action（planned/ready/active）且 `next_check_s <= 当前世界时钟`；
- * 有界读取，不做全表扫描，也不把 clock/npc 的细小动作当成需要保留名额的工作。
+ * 分页检查分支行动，避免固定扫描前缀遗漏到期任务；不把 clock/npc 的细小动作当成需保留名额的工作。
  */
 function countDueBackgroundActions(tables: ReturnType<typeof createTableReadPort>, branchId: string, clockS: number): number {
-  const rows = tables.selectWhere('actions', { branch_id: branchId }, ATLAS_RUNTIME_LIMITS.actorsPerDecisionBatch);
+  const rows = pageAllRows(tables, 'actions', branchId);
   return rows.filter((row) => {
     const status = String(row.status ?? '');
     if (status !== 'planned' && status !== 'ready' && status !== 'active') return false;
@@ -1391,7 +1391,7 @@ export function createSqlRepository(options: RepositoryOptions) {
         duration_ms: Math.max(0, finished - started),
       });
     };
-    const turnBudget = createGenerationBudget();
+    const turnBudget = createGenerationBudget({limit:generationOptions.batching.requestsPerOperation??0});
     const modelPort = options.modelPort ? bindModelBudget(options.modelPort, turnBudget) : null;
     let explicitNoop = false;
     let responseIncomplete = false;
@@ -1430,11 +1430,11 @@ export function createSqlRepository(options: RepositoryOptions) {
       }
       let phaseIndex = 0;
       for (const phase of requiredBudgetExceeded ? [] : phases) {
-        if (phaseIndex >= ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn) {
+        if (turnBudget.limit>0&&phaseIndex >= turnBudget.limit) {
           allIssues.push({
             code: 'BUDGET_EXHAUSTED',
             path: '$.phaseBatches',
-            message: `前台模型批次数已达上限 ${ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn}；剩余阶段保存在行动队列并标记 catching_up`,
+            message: `前台模型批次数已达用户设置的上限 ${turnBudget.limit}；剩余阶段保存在行动队列并标记 catching_up`,
             severity: 'warning',
             retryable: true,
           });
@@ -2094,8 +2094,7 @@ export function createSqlRepository(options: RepositoryOptions) {
       const retriedLayoutIds=new Set<string>();
       const smallerLayoutBatches=new Map<string,number>();
       const layoutTasks:NonNullable<typeof layoutTask>[]=[];
-      // Evidence, layout and compatibility retries spend the same four-send
-      // allowance as observation/construction. Map count must never multiply it.
+      // All stages and retries share the optional request cap chosen by the user.
       const layoutBudget=turnBudget;
       const layoutModelPort=options.modelPort?bindModelBudget(options.modelPort,layoutBudget,'geography'):null;
       const requestSpatialWithTransportRetry=async(request:ModelBatchRequest,kind:string):Promise<ModelBatchResponse>=>{
@@ -2167,7 +2166,7 @@ export function createSqlRepository(options: RepositoryOptions) {
           clockS: clockBefore,
           autoPlan:true,
           sourceText:[input.userText,input.assistantText,...sourceSnapshot.map(s=>s.text)].filter(Boolean).join('\n'),
-          maxJobs:Math.max(ATLAS_RUNTIME_LIMITS.layoutMapsPerBatch,taskByMap.size),
+        maxJobs:Number.MAX_SAFE_INTEGER,
           ports: spatialPorts,
         });
         groupResults.push(...spatial.groups);
@@ -2399,9 +2398,9 @@ export function createSqlRepository(options: RepositoryOptions) {
           if(!transactionOpen){beginTransaction(candidateDb);transactionOpen=true;}
           if(error instanceof AtlasDbError&&error.code==='STALE_BASE')throw error;
           if(layoutEvidenceCache===null)layoutEvidenceBlocked=true;
-          splitAfterFailure=(error as {code?:string}).code==='LAYOUT_BATCH_TRUNCATED'&&currentLayoutTask.mapIds.length>1&&!currentLayoutTask.mapIds.some(id=>retriedLayoutIds.has(id))&&layoutBudget.remaining()>0;
+          splitAfterFailure=isModelBatchSizeFailure(error)&&currentLayoutTask.mapIds.length>1&&!currentLayoutTask.mapIds.some(id=>retriedLayoutIds.has(id))&&layoutBudget.remaining()>0;
           retryableBatchReply=splitAfterFailure;
-          allIssues.push(splitAfterFailure?{code:'LAYOUT_BATCH_SPLIT',path:'$.layout',message:'合批回复被截断，原回复未写入；剩余额度内缩小批量重试。',severity:'warning',retryable:false}:{code:'LAYOUT_MODEL_FAILED',path:'$.layout',message:`空间布局未生成：${(error as Error).message} 已登记的世界数据保留，下一轮自动继续布局。`,severity:'warning',retryable:true});
+          allIssues.push(splitAfterFailure?{code:'LAYOUT_BATCH_SPLIT',path:'$.layout',message:'合批超出模型容量或回复被截断，原回复未写入；缩小批量补交一次。',severity:'warning',retryable:false}:{code:'LAYOUT_MODEL_FAILED',path:'$.layout',message:`空间布局未生成：${(error as Error).message} 已登记的世界数据保留，下一轮自动继续布局。`,severity:'warning',retryable:true});
           writeLayoutAttempt({failure_kind:failureKindOf(error),error:(error as Error).message});
         }
         if(layoutEvidenceBlocked)break;
@@ -2433,7 +2432,7 @@ export function createSqlRepository(options: RepositoryOptions) {
         if(layoutTask&&layoutTask.mapIds.some(id=>retriedLayoutIds.has(id))){const suffix='\n【未完成项补交】只处理本图目录列出的地图；已完成地图已从本批移除，不要重新生成。';layoutTask.request.messages[1].content+=suffix;layoutTask.request.promptInput!.injectionText=layoutTask.request.messages[1].content;}
         drainLayoutReport();
       }
-      if(pendingLayoutIds.length||evidenceBlockedMaps.size||deferredLayoutIds.size)allIssues.push({code:'LAYOUT_BATCH_PENDING',path:'$.layout',message:`${new Set([...pendingLayoutIds,...evidenceBlockedMaps,...deferredLayoutIds]).size} 张地图保留为待细化。每次操作最多发送 4 次模型请求；已登记地点和已完成布局保留，可选中需要的地图后继续生成。`,severity:'warning',retryable:true});
+      if(pendingLayoutIds.length||evidenceBlockedMaps.size||deferredLayoutIds.size)allIssues.push({code:'LAYOUT_BATCH_PENDING',path:'$.layout',message:`${new Set([...pendingLayoutIds,...evidenceBlockedMaps,...deferredLayoutIds]).size} 张地图保留为待细化。${turnBudget.limit>0?`本次操作按用户设置最多发送 ${turnBudget.limit} 次模型请求；`:''}已登记地点和已完成布局保留，可选中需要的地图后继续生成。`,severity:'warning',retryable:true});
 
       materializeLayouts();
 

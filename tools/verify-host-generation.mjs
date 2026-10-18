@@ -3,19 +3,8 @@ import {spawn} from 'node:child_process';
 import {mkdirSync,writeFileSync} from 'node:fs';
 import {setTimeout as delay} from 'node:timers/promises';
 import {chromium} from 'playwright';
-// 权威预算常量：src/atlas-runtime-limits.ts 是唯一来源，此处只消费发布产物导出的同一份。
-// （本闸门原本就依赖 pack 产物 release/，因此引入已构建的 dist/ 不新增前置条件。）
-import {ATLAS_RUNTIME_LIMITS} from '../dist/atlas-sql.mjs';
-
-/**
- * 一轮前台推演的模型批次上限（决策批 + 建设批 + 布局批）。
- *
- * 旧版断言写死 `calls===N`（N = 楼层数），前提是「一楼层正好一次模型请求」。该前提早已失效：
- * 真实契约是单轮可发多批、由 foregroundModelBatchesPerTurn 封顶。故次数改按下限（每层至少一批决策）
- * 与上限（预算封顶）判定，**不再写第二份次数魔数**。
- */
-const MAX_BATCHES_PER_TURN=ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn;
-if(!Number.isInteger(MAX_BATCHES_PER_TURN)||MAX_BATCHES_PER_TURN<1)throw Error('foregroundModelBatchesPerTurn 未从发布产物取到，闸门拒绝以失效预算继续');
+// This fixture explicitly selects a four-request cap; the product default is unrestricted.
+const MAX_BATCHES_PER_TURN=4;
 /** 已完成 `turns` 个楼层时：每层至少一批决策调用，总量不得超过预算×楼层数。 */
 const callsWithinBudget=(s,turns)=>s.calls>=turns&&s.calls<=turns*MAX_BATCHES_PER_TURN;
 
@@ -35,14 +24,14 @@ async function open({afterOnly=false,configure=true,rewriteContext=false,readDur
    .replaceAll('../atlas-extension/','../release/atlas-ui-extension/');await route.fulfill({response:res,body:src});});
  await p.goto(`${base}/dev-preview/index.html`);await p.waitForFunction(()=>!!window.atlasPreviewConnection&&!!document.querySelector('iframe')?.contentWindow?.AtlasPreview);
  await p.evaluate(()=>atlasPreviewConnection.core.refresh());
- await p.evaluate(async ({configure,readDuringSave})=>{const c=SillyTavern.getContext();window.__calls=0;window.__saves=0;c.saveMetadata=async()=>{window.__saves++;
+ await p.evaluate(async ({configure,readDuringSave,requestLimit})=>{const c=SillyTavern.getContext();window.__calls=0;window.__saves=0;c.saveMetadata=async()=>{window.__saves++;
   if(readDuringSave)await atlasPreviewConnection.api.request('POST','/sql/chat/ui-read',{chatUid:c.chatId});};
   window.TavernHelper={generateRaw:async()=>{window.__calls++;if(window.__hold)await new Promise(resolve=>window.__release=resolve);
    return window.__calls===1?'{"op":"location.upsert","ref":"new:library","data":{"name":"图书馆","kind":"room"}}':'{"op":"noop"}';}};
   if(!configure)return;const api=atlasPreviewConnection.api;
-  const r=await api.request('PUT','/settings',{action:'batch',commands:[{action:'api.save',create:true,preset:{id:'test-main',name:'测试连接',connectionMode:'main',endpoint:'',model:'',maxTokens:1024,temperature:0.7,topP:1,timeoutMs:30000},apiKeyMode:'clear'},{action:'api.activate',id:'test-main'}]});
+  const r=await api.request('PUT','/settings',{action:'batch',commands:[{action:'runtime.update',modelBatching:{charactersPerBatch:0,mapsPerBatch:0,requestsPerOperation:requestLimit}},{action:'api.save',create:true,preset:{id:'test-main',name:'测试连接',connectionMode:'main',endpoint:'',model:'',maxTokens:1024,temperature:0.7,topP:1,timeoutMs:30000},apiKeyMode:'clear'},{action:'api.activate',id:'test-main'}]});
   if(r.status!==200)throw Error(JSON.stringify(r));
- },{configure,readDuringSave});
+ },{configure,readDuringSave,requestLimit:MAX_BATCHES_PER_TURN});
  return {p,f:p.frames().find(f=>f.url().includes('/atlas-reference/index.html'))};
 }
 async function floor(p,{user='走进图书馆',assistant='你走进了图书馆。',type='normal',params={},dryRun=false,alias='all'}={}){

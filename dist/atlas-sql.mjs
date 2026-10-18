@@ -2168,9 +2168,9 @@ var require_sql_wasm_browser = __commonJS({
 
 // src/atlas-runtime-limits.ts
 function decisionActorBudget(maxTokens) {
+  if (!Number.isFinite(maxTokens) || maxTokens <= 0) return Infinity;
   const raw = Math.floor((Number(maxTokens) - ATLAS_RUNTIME_LIMITS.decisionOutputReserveTokens) / ATLAS_RUNTIME_LIMITS.decisionActorOutputTokens);
-  const bounded2 = Math.min(ATLAS_RUNTIME_LIMITS.actorsPerDecisionBatch, Math.max(1, raw));
-  return Number.isFinite(bounded2) ? bounded2 : 1;
+  return Math.max(1, raw);
 }
 var ATLAS_RUNTIME_LIMITS, ATLAS_FIELD_LIMITS, ACTION_PAYLOAD_REF_LIMIT, ACTION_DEPENDS_LIMIT, CAPABILITY_LIMIT, MOBILITY_PROFILE_LIMIT, ALIAS_LIMIT, PARTICIPANTS_LIMIT, GEOMETRY_VERTEX_LIMIT, MENTION_RECENT_LIMIT, MENTION_LOREBOOK_LIMIT, MENTION_CONTEXT_SUMMARY_CHARS, WHY_MAX_CHARS, ITEM_PROPERTY_LIMIT;
 var init_atlas_runtime_limits = __esm({
@@ -2185,8 +2185,8 @@ var init_atlas_runtime_limits = __esm({
       responseJsonDepth: 16,
       conditionDepth: 4,
       repairAttemptsPerBatch: 1,
-      actorsPerDecisionBatch: 24,
-      foregroundModelBatchesPerTurn: 4,
+      /** 0: no user request-count cap; a positive saved setting opts into one. */
+      foregroundModelBatchesPerTurn: 0,
       pendingCandidateTtlMs: 10 * 60 * 1e3,
       normalResponseTokens: 4096,
       decisionOutputReserveTokens: 512,
@@ -2212,9 +2212,6 @@ var init_atlas_runtime_limits = __esm({
       newRoutesPerBatch: 16,
       /** 单个批次最多把本次目标再向下展开的父边数。 */
       additionalParentDepthPerBatch: 2,
-      /** 同类型、同依赖层的地图尽量合批；实际批量还受输出与目录容量限制。 */
-      layoutMapsPerBatch: 8,
-      batchPromptChars: 48e3,
       batchOutputReserveTokens: 384,
       /** 单张概览图的分区上限（G11 场景体积预算）。 */
       overviewZoneLimit: 64,
@@ -8415,28 +8412,27 @@ var init_atlas_spatial_frame = __esm({
 // src/atlas-model-batching.ts
 function normalizeModelBatching(value) {
   const raw = value && typeof value === "object" ? value : {};
-  const count2 = (key) => typeof raw[key] === "number" && Number.isSafeInteger(raw[key]) && raw[key] >= 0 && raw[key] <= MODEL_BATCHING_LIMITS[key] ? raw[key] : 0;
-  return { charactersPerBatch: count2("charactersPerBatch"), mapsPerBatch: count2("mapsPerBatch") };
+  const count2 = (key) => typeof raw[key] === "number" && Number.isSafeInteger(raw[key]) && raw[key] >= 0 ? raw[key] : 0;
+  return { charactersPerBatch: count2("charactersPerBatch"), mapsPerBatch: count2("mapsPerBatch"), requestsPerOperation: count2("requestsPerOperation") };
 }
 function normalizeGenerationOptions(value) {
   return { maxTokens: typeof value?.maxTokens === "number" && Number.isSafeInteger(value.maxTokens) && value.maxTokens >= 0 ? value.maxTokens : 0, batching: normalizeModelBatching(value?.batching) };
 }
 function planningOutputTokens(options) {
-  return options?.maxTokens && options.maxTokens > 0 ? options.maxTokens : ATLAS_RUNTIME_LIMITS.normalResponseTokens;
+  return options?.maxTokens && options.maxTokens > 0 ? options.maxTokens : Infinity;
 }
 function characterBatchLimit(options) {
   const config = normalizeModelBatching(options?.batching);
-  return Math.min(config.charactersPerBatch || MODEL_BATCHING_LIMITS.charactersPerBatch, decisionActorBudget(planningOutputTokens(options)));
+  return Math.min(config.charactersPerBatch || Infinity, decisionActorBudget(planningOutputTokens(options)));
 }
-var MODEL_BATCHING_LIMITS;
+function isModelBatchSizeFailure(error) {
+  const value = error;
+  return ["LAYOUT_BATCH_TRUNCATED", "CHARACTER_BATCH_TOO_LARGE"].includes(value?.code ?? "") || /context[_ -]?length[_ -]?exceeded|(?:maximum|exceed\w*).*context|context.*(?:window|length|limit)|(?:prompt|input).*(?:too long|too large)|payload too large/i.test(value?.message ?? "");
+}
 var init_atlas_model_batching = __esm({
   "src/atlas-model-batching.ts"() {
     "use strict";
     init_atlas_runtime_limits();
-    MODEL_BATCHING_LIMITS = {
-      charactersPerBatch: ATLAS_RUNTIME_LIMITS.actorsPerDecisionBatch,
-      mapsPerBatch: ATLAS_RUNTIME_LIMITS.layoutMapsPerBatch
-    };
   }
 });
 
@@ -9535,22 +9531,22 @@ function buildSqlLayoutTask(db, branchId, input, turnId, report) {
   const config = normalizeModelBatching(input.generationOptions?.batching);
   const retryLimit = input.layoutBatchMapLimit;
   const batchLimit = Math.min(
-    config.mapsPerBatch || ATLAS_RUNTIME_LIMITS.layoutMapsPerBatch,
-    typeof retryLimit === "number" && Number.isSafeInteger(retryLimit) && retryLimit > 0 ? retryLimit : ATLAS_RUNTIME_LIMITS.layoutMapsPerBatch
+    config.mapsPerBatch || Infinity,
+    ATLAS_RUNTIME_LIMITS.operationsPerResponse,
+    typeof retryLimit === "number" && Number.isSafeInteger(retryLimit) && retryLimit > 0 ? retryLimit : Infinity
   );
   const outputBudget = Math.max(0, planningOutputTokens(input.generationOptions) - ATLAS_RUNTIME_LIMITS.batchOutputReserveTokens);
   const first = chosen[0], selected = [];
-  let estimatedTokens = 0, inputChars = 0, estimatedRefs = 0;
+  let estimatedTokens = 0, estimatedRefs = 0;
   for (const entry of chosen) {
     if (entry.kind !== first.kind || depth(entry) !== depth(first) || selected.length >= batchLimit) continue;
     const scene = normalizeFrame(entry.map.frame_json).atlasScene;
     const savedChars = JSON.stringify(scene?.constraints ?? {}).length;
     const tokens = Math.max(192 + entry.own.length * (entry.kind === "floor" ? 112 : 72), Math.ceil(savedChars / 2));
-    const chars = JSON.stringify(entry.own).length + savedChars, refs = entry.own.length + 1;
-    if (selected.length && (estimatedTokens + tokens > outputBudget || inputChars + chars > ATLAS_RUNTIME_LIMITS.batchPromptChars || estimatedRefs + refs > ATLAS_RUNTIME_LIMITS.refCatalogMaxEntries)) continue;
+    const refs = entry.own.length + 1;
+    if (selected.length && (estimatedTokens + tokens > outputBudget || estimatedRefs + refs > ATLAS_RUNTIME_LIMITS.refCatalogMaxEntries)) continue;
     selected.push(entry);
     estimatedTokens += tokens;
-    inputChars += chars;
     estimatedRefs += refs;
   }
   const selectedIds = new Set(selected.map((entry) => entry.mapId));
@@ -29984,7 +29980,9 @@ async function settleSqlTurn(input) {
   const ask = async (phase, fields, atS, opportunities = [], dueEventIds = []) => {
     assertCurrent();
     if (!input.modelPort || batches >= input.modelBudget) throw new AtlasDbError("MODEL_BUDGET_EXHAUSTED", "后台判断等待下一次结算", {});
-    const tables = createTableReadPort(input.db), knownRefs = collectKnownRefs(tables, input.branchId);
+    const actorTargets = phase === "decision" ? JSON.parse(fields.actorSlices ?? "[]") : [];
+    if (actorTargets.length > ATLAS_RUNTIME_LIMITS.refCatalogMaxEntries) throw Object.assign(new Error("本批人物必要引用超出协议目录容量；先拆批，不发送该请求"), { code: "CHARACTER_BATCH_TOO_LARGE" });
+    const tables = createTableReadPort(input.db), knownRefs = collectKnownRefs(tables, input.branchId, { requiredRefs: actorTargets.map((actor) => ({ kind: "character", id: actor.entityId })) });
     opportunities.forEach((o, i) => knownRefs.push({ alias: `O${i + 1}`, id: o.id, kind: "opportunity", rowRev: null }));
     const byId9 = new Map(knownRefs.map((ref) => [ref.id, ref.alias]));
     const request = buildStagePrompt({ phase, ...fields, batchId: `sim_${input.turnId}_${batches}`, entityRefs: collectEntityRefs(tables, input.branchId, knownRefs) });
@@ -30000,6 +29998,9 @@ async function settleSqlTurn(input) {
     const response = await input.modelPort.request(request);
     assertCurrent();
     const payload = extractPayload(response.text), parsed = parseOperations(payload.payload, { phase });
+    if (phase === "decision" && (response.finishReason === "length" || payload.incomplete || parsed.incomplete)) {
+      throw Object.assign(new Error("人物批次回复不完整或超出协议容量；本次回复未写入"), { code: "CHARACTER_BATCH_TOO_LARGE" });
+    }
     issues.push(...payload.issues, ...parsed.issues);
     let operations = parsed.operations.map((op) => ({ ...op, opId: `sim_${input.attemptKey ?? input.turnId}_${batches}_${op.opId}` }));
     const context = {
@@ -30120,21 +30121,24 @@ async function settleSqlTurn(input) {
     }
     if (!catchingUp && actors.length) {
       let processed = 0;
-      const count2 = characterBatchLimit(input.generationOptions);
+      let count2 = Math.min(characterBatchLimit(input.generationOptions), ATLAS_RUNTIME_LIMITS.refCatalogMaxEntries);
+      const retriedActors = /* @__PURE__ */ new Set();
       while (processed < actors.length && input.modelPort && batches < input.modelBudget) {
         const actorIds = actors.slice(processed, processed + count2).map((c) => ({ entityId: String(c.id) }));
         let contacts = opportunities.filter((o) => actorIds.some((a) => a.entityId === o.receiverEntityId));
         const context = buildDecisionContext({ actors: actorIds, opportunities: contacts }, { db: input.db, branchId: input.branchId });
-        while (actorIds.length > 1 && JSON.stringify(context.actorSlices).length > ATLAS_RUNTIME_LIMITS.batchPromptChars) {
-          const removed = actorIds.pop();
-          context.actorSlices = context.actorSlices.filter((a) => a.entityId !== removed.entityId);
-        }
         contacts = contacts.filter((o) => actorIds.some((a) => a.entityId === o.receiverEntityId));
         try {
           await ask("decision", { timeWindow: JSON.stringify({ fromS: input.clockBefore, untilS: cursor }), actorSlices: JSON.stringify(context.actorSlices), opportunities: JSON.stringify(contacts) }, cursor, contacts);
           processed += actorIds.length;
         } catch (err) {
           if (err.code === "TURN_CANCELLED") throw err;
+          if (isModelBatchSizeFailure(err) && actorIds.length > 1 && !actorIds.some((actor) => retriedActors.has(actor.entityId)) && batches < input.modelBudget) {
+            for (const actor of actorIds) retriedActors.add(actor.entityId);
+            count2 = Math.max(1, Math.floor(actorIds.length / 2));
+            issues.push({ code: "CHARACTER_BATCH_SPLIT", path: "$.decision", message: "人物批次超出模型容量或回复不完整；原回复未写入，缩小批量补交一次。", severity: "warning", retryable: false });
+            continue;
+          }
           issues.push({ code: "MODEL_REQUEST_FAILED", path: "$.decision", message: String(err.message), severity: "warning", retryable: true });
           break;
         }
@@ -31661,7 +31665,8 @@ function cloneAttempts(attempts) {
 }
 function createGenerationBudget(input = {}) {
   const limit = input.limit ?? GENERATION_BUDGET_LIMIT;
-  if (!Number.isSafeInteger(limit) || limit < 1) throw new Error("MODEL_BUDGET_INVALID");
+  if (!Number.isSafeInteger(limit) || limit < 0) throw new Error("MODEL_BUDGET_INVALID");
+  const available = limit || Number.MAX_SAFE_INTEGER;
   const attemptList = cloneAttempts(input.attempts);
   const deferredList = [];
   let transports = attemptList.length;
@@ -31675,10 +31680,10 @@ function createGenerationBudget(input = {}) {
   return {
     limit,
     used: () => transports,
-    remaining: () => Math.max(0, limit - transports),
+    remaining: () => Math.max(0, available - transports),
     stageRemaining: (stage) => {
       const held = reserved && stage !== "background" ? 1 : 0;
-      return Math.max(0, limit - transports - held);
+      return Math.max(0, available - transports - held);
     },
     attempts: () => attemptList.map((attempt) => ({ ...attempt })),
     deferred: () => deferredList.map((item) => ({ ...item })),
@@ -31691,7 +31696,7 @@ function createGenerationBudget(input = {}) {
     },
     claimTransport: (stage, batchId) => {
       const held = reserved && stage !== "background" ? 1 : 0;
-      if (transports + held >= limit) {
+      if (limit > 0 && transports + held >= limit) {
         const reason = held > 0 ? `本回合模型预算 ${limit} 已用尽（实际发送 ${transports} 次），其中 1 个名额保留给已到期的后台任务` : `本回合模型预算 ${limit} 已用尽（实际发送 ${transports} 次），不再发送`;
         defer(stage, batchId, reason);
         return { ok: false, code: "MODEL_BUDGET_EXHAUSTED", reason };
@@ -31716,7 +31721,7 @@ function createGenerationBudget(input = {}) {
     },
     reserveBackground: (batchId) => {
       if (reserved) return false;
-      if (transports + 1 > limit) {
+      if (limit > 0 && transports + 1 > limit) {
         defer("background", batchId, `本回合模型预算 ${limit} 已用尽，后台任务未保留名额`);
         return false;
       }
@@ -31765,7 +31770,8 @@ var GENERATION_BUDGET_LIMIT;
 var init_atlas_sql_generation_budget = __esm({
   "src/atlas-sql-generation-budget.ts"() {
     "use strict";
-    GENERATION_BUDGET_LIMIT = 4;
+    init_atlas_runtime_limits();
+    GENERATION_BUDGET_LIMIT = ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn;
   }
 });
 
@@ -33238,7 +33244,7 @@ function mergeRow2(target, patch) {
   return { ...target ?? {}, ...patch };
 }
 function countDueBackgroundActions(tables, branchId, clockS) {
-  const rows4 = tables.selectWhere("actions", { branch_id: branchId }, ATLAS_RUNTIME_LIMITS.actorsPerDecisionBatch);
+  const rows4 = pageAllRows(tables, "actions", branchId);
   return rows4.filter((row2) => {
     const status = String(row2.status ?? "");
     if (status !== "planned" && status !== "ready" && status !== "active") return false;
@@ -34162,7 +34168,7 @@ function createSqlRepository(options) {
         duration_ms: Math.max(0, finished - started)
       });
     };
-    const turnBudget = createGenerationBudget();
+    const turnBudget = createGenerationBudget({ limit: generationOptions.batching.requestsPerOperation ?? 0 });
     const modelPort = options.modelPort ? bindModelBudget(options.modelPort, turnBudget) : null;
     let explicitNoop = false;
     let responseIncomplete = false;
@@ -34197,11 +34203,11 @@ function createSqlRepository(options) {
       }
       let phaseIndex = 0;
       for (const phase of requiredBudgetExceeded ? [] : phases) {
-        if (phaseIndex >= ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn) {
+        if (turnBudget.limit > 0 && phaseIndex >= turnBudget.limit) {
           allIssues.push({
             code: "BUDGET_EXHAUSTED",
             path: "$.phaseBatches",
-            message: `前台模型批次数已达上限 ${ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn}；剩余阶段保存在行动队列并标记 catching_up`,
+            message: `前台模型批次数已达用户设置的上限 ${turnBudget.limit}；剩余阶段保存在行动队列并标记 catching_up`,
             severity: "warning",
             retryable: true
           });
@@ -34861,7 +34867,7 @@ function createSqlRepository(options) {
           clockS: clockBefore,
           autoPlan: true,
           sourceText: [input.userText, input.assistantText, ...sourceSnapshot.map((s) => s.text)].filter(Boolean).join("\n"),
-          maxJobs: Math.max(ATLAS_RUNTIME_LIMITS.layoutMapsPerBatch, taskByMap.size),
+          maxJobs: Number.MAX_SAFE_INTEGER,
           ports: spatialPorts
         });
         groupResults.push(...spatial.groups);
@@ -35095,9 +35101,9 @@ function createSqlRepository(options) {
           }
           if (error instanceof AtlasDbError && error.code === "STALE_BASE") throw error;
           if (layoutEvidenceCache === null) layoutEvidenceBlocked = true;
-          splitAfterFailure = error.code === "LAYOUT_BATCH_TRUNCATED" && currentLayoutTask.mapIds.length > 1 && !currentLayoutTask.mapIds.some((id) => retriedLayoutIds.has(id)) && layoutBudget.remaining() > 0;
+          splitAfterFailure = isModelBatchSizeFailure(error) && currentLayoutTask.mapIds.length > 1 && !currentLayoutTask.mapIds.some((id) => retriedLayoutIds.has(id)) && layoutBudget.remaining() > 0;
           retryableBatchReply = splitAfterFailure;
-          allIssues.push(splitAfterFailure ? { code: "LAYOUT_BATCH_SPLIT", path: "$.layout", message: "合批回复被截断，原回复未写入；剩余额度内缩小批量重试。", severity: "warning", retryable: false } : { code: "LAYOUT_MODEL_FAILED", path: "$.layout", message: `空间布局未生成：${error.message} 已登记的世界数据保留，下一轮自动继续布局。`, severity: "warning", retryable: true });
+          allIssues.push(splitAfterFailure ? { code: "LAYOUT_BATCH_SPLIT", path: "$.layout", message: "合批超出模型容量或回复被截断，原回复未写入；缩小批量补交一次。", severity: "warning", retryable: false } : { code: "LAYOUT_MODEL_FAILED", path: "$.layout", message: `空间布局未生成：${error.message} 已登记的世界数据保留，下一轮自动继续布局。`, severity: "warning", retryable: true });
           writeLayoutAttempt({ failure_kind: failureKindOf(error), error: error.message });
         }
         if (layoutEvidenceBlocked) break;
@@ -35139,7 +35145,7 @@ function createSqlRepository(options) {
         }
         drainLayoutReport();
       }
-      if (pendingLayoutIds.length || evidenceBlockedMaps.size || deferredLayoutIds.size) allIssues.push({ code: "LAYOUT_BATCH_PENDING", path: "$.layout", message: `${(/* @__PURE__ */ new Set([...pendingLayoutIds, ...evidenceBlockedMaps, ...deferredLayoutIds])).size} 张地图保留为待细化。每次操作最多发送 4 次模型请求；已登记地点和已完成布局保留，可选中需要的地图后继续生成。`, severity: "warning", retryable: true });
+      if (pendingLayoutIds.length || evidenceBlockedMaps.size || deferredLayoutIds.size) allIssues.push({ code: "LAYOUT_BATCH_PENDING", path: "$.layout", message: `${(/* @__PURE__ */ new Set([...pendingLayoutIds, ...evidenceBlockedMaps, ...deferredLayoutIds])).size} 张地图保留为待细化。${turnBudget.limit > 0 ? `本次操作按用户设置最多发送 ${turnBudget.limit} 次模型请求；` : ""}已登记地点和已完成布局保留，可选中需要的地图后继续生成。`, severity: "warning", retryable: true });
       materializeLayouts();
       if (construction.attempted) {
         const fillPort = createTableReadPort(candidateDb);
@@ -40482,7 +40488,8 @@ async function runSqlResume(session, input) {
       const generationOptions = normalizeGenerationOptions(await session.modelPort?.generationOptions?.());
       assertCurrent();
       const attempts = JSON.parse(String(row2.attempts_json ?? "[]"));
-      const backgroundPort = session.modelPort ? logModelAttempts(bindModelBudget(session.modelPort, createGenerationBudget(), "background"), session.now, (entry) => {
+      const budget = createGenerationBudget({ limit: generationOptions.batching.requestsPerOperation ?? 0 });
+      const backgroundPort = session.modelPort ? logModelAttempts(bindModelBudget(session.modelPort, budget, "background"), session.now, (entry) => {
         const finished = Number(entry.finished_wall_ms), started = Number(entry.started_wall_ms);
         attempts.push({ id: `att_resume_${anchor.baseStorageRevision}_${attempts.length}`, ...entry, duration_ms: Math.max(0, finished - started) });
       }) : null;
@@ -40495,7 +40502,7 @@ async function runSqlResume(session, input) {
         operations: [],
         modelPort: backgroundPort,
         generationOptions,
-        modelBudget: ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn,
+        modelBudget: budget.remaining(),
         makeId: session.repo.internal.makeId,
         isCurrent: () => {
           assertCurrent();
@@ -40559,6 +40566,7 @@ async function runSqlResume(session, input) {
 
 // src/atlas-sql-retry.ts
 init_atlas_sql_generation_budget();
+init_atlas_model_batching();
 init_atlas_ops_contract();
 var flights = /* @__PURE__ */ new WeakMap();
 async function runSqlModelRetry(session, input) {
@@ -40648,7 +40656,9 @@ async function retry(session, input) {
   });
   request.anchor = anchor;
   request.sourceSnapshot = sources;
-  const response = await bindModelBudget(session.modelPort, createGenerationBudget(), "repair").request(request);
+  const generationOptions = normalizeGenerationOptions(await session.modelPort.generationOptions?.());
+  assertCurrent();
+  const response = await bindModelBudget(session.modelPort, createGenerationBudget({ limit: generationOptions.batching.requestsPerOperation ?? 0 }), "repair").request(request);
   assertCurrent();
   if (revision !== session.repo.internal.currentRevision() || storageRevision !== session.repo.storageRevision) throw new AtlasDbError("STALE_BASE", "模型补交等待期间快照已变化，候选不发布", {});
   const payload = extractPayload(response.text);

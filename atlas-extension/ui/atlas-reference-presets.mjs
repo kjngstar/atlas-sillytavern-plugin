@@ -14,7 +14,7 @@ export function referencePresetDocument(settings={},preferences={},defaultPrompt
   const fallback=pair(existingC.has(settings.activeApiPresetId)?settings.activeApiPresetId:connections[0].id,existingP.has(settings.activePromptPresetId)?settings.activePromptPresetId:promptPresets[0].id);
   const assignments={};for(const task of ['initialize','advance','repair']){const saved=preferences.assignments?.[task];assignments[task]=saved&&existingC.has(saved.connectionId)&&existingP.has(saved.promptPresetId)?clone(saved):clone(fallback);}
   const active=preferences.active&&existingC.has(preferences.active.connectionId)&&existingP.has(preferences.active.promptPresetId)?clone(preferences.active):fallback;
-  return {kind:'atlas-ui-presets',version:1,connections,promptPresets,active,assignments,modelBatching:clone(settings.modelBatching??{charactersPerBatch:0,mapsPerBatch:0})};
+  return {kind:'atlas-ui-presets',version:1,connections,promptPresets,active,assignments,modelBatching:{charactersPerBatch:0,mapsPerBatch:0,requestsPerOperation:0,...clone(settings.modelBatching??{})}};
 }
 
 export function referenceSettingsCommands(doc,settings={},action={}) {

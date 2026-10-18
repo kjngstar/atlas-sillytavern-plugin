@@ -600,19 +600,19 @@ export function buildSqlLayoutTask(
 
   const config=normalizeModelBatching(input.generationOptions?.batching);
   const retryLimit=input.layoutBatchMapLimit;
-  const batchLimit=Math.min(config.mapsPerBatch||ATLAS_RUNTIME_LIMITS.layoutMapsPerBatch,
-    typeof retryLimit==='number'&&Number.isSafeInteger(retryLimit)&&retryLimit>0?retryLimit:ATLAS_RUNTIME_LIMITS.layoutMapsPerBatch);
+  const batchLimit=Math.min(config.mapsPerBatch||Infinity,ATLAS_RUNTIME_LIMITS.operationsPerResponse,
+    typeof retryLimit==='number'&&Number.isSafeInteger(retryLimit)&&retryLimit>0?retryLimit:Infinity);
   const outputBudget=Math.max(0,planningOutputTokens(input.generationOptions)-ATLAS_RUNTIME_LIMITS.batchOutputReserveTokens);
   const first=chosen[0],selected:Entry[]=[];
-  let estimatedTokens=0,inputChars=0,estimatedRefs=0;
+  let estimatedTokens=0,estimatedRefs=0;
   for(const entry of chosen){
     if(entry.kind!==first.kind||depth(entry)!==depth(first)||selected.length>=batchLimit)continue;
     const scene=normalizeFrame(entry.map.frame_json).atlasScene as SqlRow|undefined;
     const savedChars=JSON.stringify(scene?.constraints??{}).length;
     const tokens=Math.max(192+entry.own.length*(entry.kind==='floor'?112:72),Math.ceil(savedChars/2));
-    const chars=JSON.stringify(entry.own).length+savedChars,refs=entry.own.length+1;
-    if(selected.length&&(estimatedTokens+tokens>outputBudget||inputChars+chars>ATLAS_RUNTIME_LIMITS.batchPromptChars||estimatedRefs+refs>ATLAS_RUNTIME_LIMITS.refCatalogMaxEntries))continue;
-    selected.push(entry);estimatedTokens+=tokens;inputChars+=chars;estimatedRefs+=refs;
+    const refs=entry.own.length+1;
+    if(selected.length&&(estimatedTokens+tokens>outputBudget||estimatedRefs+refs>ATLAS_RUNTIME_LIMITS.refCatalogMaxEntries))continue;
+    selected.push(entry);estimatedTokens+=tokens;estimatedRefs+=refs;
   }
   const selectedIds=new Set(selected.map(entry=>entry.mapId));
   const remaining=chosen.filter(entry=>!selectedIds.has(entry.mapId)).map(entry=>entry.mapId);

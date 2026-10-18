@@ -24,7 +24,7 @@ import {
 import { DEFAULT_SQL_PROMPT_SEGMENTS, buildSqlCompatiblePrompt } from './atlas-sql-prompts.ts';
 import { PROMPT_POLICY_VERSION } from './atlas-prompt-layers.ts';
 import { SPATIAL_CAPABILITIES } from './atlas-world-contract.ts';
-import { DEFAULT_MODEL_BATCHING, MODEL_BATCHING_LIMITS, normalizeModelBatching, validModelBatching, type ModelBatchingSettings } from './atlas-model-batching.ts';
+import { DEFAULT_MODEL_BATCHING, normalizeModelBatching, validModelBatching, type ModelBatchingSettings } from './atlas-model-batching.ts';
 
 /**
  * C02 / E01：推进输出协议的类型。
@@ -1032,8 +1032,8 @@ export function applySettingsCommand(
     case "runtime.update": {
       const next: AtlasServerSettingsV2 = { ...settings };
       if(command.modelBatching!==undefined){
-        if(!validModelBatching(command.modelBatching))return fail(settings,'INVALID_PAYLOAD',`分批上限必须为整数：人物 0..${MODEL_BATCHING_LIMITS.charactersPerBatch}，地图 0..${MODEL_BATCHING_LIMITS.mapsPerBatch}；0 表示自动合批。`);
-        next.modelBatching={...command.modelBatching};
+        if(!validModelBatching(command.modelBatching))return fail(settings,'INVALID_PAYLOAD','人物、地图与每次操作请求上限必须为非负安全整数；0 表示不限制。');
+        next.modelBatching=normalizeModelBatching({...command.modelBatching,requestsPerOperation:command.modelBatching.requestsPerOperation??settings.modelBatching?.requestsPerOperation??0});
       }
       if (command.autoCommit !== undefined) {
         if (typeof command.autoCommit !== "boolean") return fail(settings, "INVALID_PAYLOAD", "自动提交必须是布尔值。");
@@ -1290,7 +1290,6 @@ export interface AtlasSettingsView {
   legacyWorldTurnProtocol: AtlasLegacyWorldTurnProtocolNotice | null;
   rpmLimit: number;
   modelBatching: ModelBatchingSettings;
-  modelBatchingLimits: ModelBatchingSettings;
   /** 0.9.16 内容替换规则库（含预制 + 手动，同库平等）。 */
   contentReplaceRules: AtlasContentReplaceRule[];
 }
@@ -1374,7 +1373,6 @@ export function settingsViewV2(settings: AtlasServerSettingsV2): AtlasSettingsVi
     legacyWorldTurnProtocol: legacyWorldTurnProtocolNotice(settings.worldTurnProtocol),
     rpmLimit: settings.rpmLimit,
     modelBatching: normalizeModelBatching(settings.modelBatching),
-    modelBatchingLimits: { ...MODEL_BATCHING_LIMITS },
     contentReplaceRules: settings.contentReplaceRules ?? [],
   };
 }

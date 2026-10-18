@@ -13,11 +13,11 @@ const initial=[
  {op:'character.upsert',ref:'new:friend',data:{name:'同学',identity:'同班学生',location_ref:'new:room'}},
  {op:'item.upsert',ref:'new:book',data:{name:'课本',location_ref:'new:room'}},
 ];
-async function fixture(){
+async function fixture({requestsPerOperation=0}={}){
  let saves=0,calls=0,saveOk=true,layoutOverride=null,layoutFailure=false,response=initial.map(op=>JSON.stringify(op)).join('\n');
  const host={chatUid:'maps-real',branchId:'main',chatMetadata:{},saveMetadata:async()=>{saves++;return saveOk;}};
  const provider=createBrowserSqlHost({enabled:()=>true,context:()=>host,loadRuntime:loadAtlasSqlRuntime,
-  modelPort:{request:async request=>{calls++;
+  modelPort:{generationOptions:async()=>({maxTokens:0,batching:{charactersPerBatch:0,mapsPerBatch:0,requestsPerOperation}}),request:async request=>{calls++;
    if(layoutFailure&&request.allowedOps?.includes('map.layout.request'))throw new Error('fixture layout connection unavailable');
    if(request.batchId.includes('_evidence_'))return {batchId:request.batchId,text:'{"facts":[]}',finishReason:'stop'};
    const line=request.messages?.[1]?.content.split('\n').find(line=>line.startsWith('本图：'));
@@ -101,8 +101,8 @@ test('城市模型漏写街区时，只为已登记城市容器补齐自身街�
  }finally{await f.close();}
 });
 
-test('Q07 bootstrap previews actual scene layout without saving; applying uses the same candidate and all maps undo with their floor',async()=>{
- const f=await fixture();try{
+test('Q07 bootstrap honors an explicit four-request cap; preview and undo use the same candidate',async()=>{
+ const f=await fixture({requestsPerOperation:4});try{
   const req={assistantText:'在学校教室。',openingMessageId:'opening'};
   const preview=await f.send('map/bootstrap',{...req,apply:false});assert.equal(preview.status,200,JSON.stringify(preview.body));
   assert.equal(preview.body.data.newLocations.length,3);assert.equal(f.saves(),0);assert.equal(f.calls(),4);
@@ -129,6 +129,18 @@ test('Q07 bootstrap previews actual scene layout without saving; applying uses t
   const undo=await f.core.handle('POST','/sql/rollback',{chatUid:f.host.chatUid,targetParentTurnId:f.seed},{local:true});assert.equal(undo.body.data.coreSaved,true,JSON.stringify(undo.body));
   assert.equal(queryBound(f.session.repo.db,'SELECT COUNT(*) n FROM maps',[])[0].n,0);assert.equal(queryBound(f.session.repo.db,'SELECT root_map_id FROM branches',[])[0].root_map_id,null);
   await bootstrap(f);assert.equal(queryBound(f.session.repo.db,'SELECT COUNT(*) n FROM maps',[])[0].n,4);
+ }finally{await f.close();}
+});
+
+test('Q07 default bootstrap finishes available parent and child layouts beyond four requests without replaying the preview',async()=>{
+ const f=await fixture();try{
+  const req={assistantText:'在学校教室。',openingMessageId:'unrestricted-opening'};
+  const preview=await f.send('map/bootstrap',{...req,apply:false});assert.equal(preview.status,200,JSON.stringify(preview.body));
+  const calls=f.calls();assert.equal(calls,5);assert.equal(f.saves(),0);
+  const p=preview.body.data,result=await f.send('map/bootstrap',{...req,apply:true,previewId:p.previewId,baseRevision:p.baseRevision});
+  assert.equal(result.body.data.coreSaved,true,JSON.stringify(result.body));assert.equal(f.calls(),calls);assert.equal(f.saves(),1);
+  assert.equal(result.body.data.receipt.issues.some(issue=>issue.code==='LAYOUT_BATCH_PENDING'),false);
+  for(const name of ['城市','学校','教室']){const map=queryBound(f.session.repo.db,'SELECT frame_json FROM maps WHERE container_location_id=?',[row(f,'locations',name).id])[0];assert.ok(JSON.parse(map.frame_json).atlasScene,name);}
  }finally{await f.close();}
 });
 

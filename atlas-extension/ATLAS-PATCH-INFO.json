@@ -1,15 +1,14 @@
 {
-  "patchId": "atlas-0.9.93-rc.1-20261018",
-  "baseVersion": "0.9.91",
-  "baseReleaseVersion": "0.9.91-rc.1",
-  "baseCommit": "d19e4319cb45521920d4f4ec8d998354606540ec",
+  "patchId": "atlas-0.9.94-rc.1-20261018",
+  "baseVersion": "0.9.93",
+  "baseReleaseVersion": "0.9.93-rc.1",
+  "baseCommit": "eec9886a55002c30fcf97589600cd9f39f5fff20",
   "schemaVersion": 3,
-  "releaseVersion": "0.9.93-rc.1",
-  "manifestVersion": "0.9.93",
+  "releaseVersion": "0.9.94-rc.1",
+  "manifestVersion": "0.9.94",
   "releaseChannel": "prerelease",
   "layoutPolicyVersion": "layout-v7",
   "fixes": [
-    "shared-four-transport-generation-budget",
     "occupied-ancestor-layout-priority",
     "bounded-relevant-layout-evidence",
     "overview-relative-area-preservation",
@@ -28,41 +27,43 @@
     "materialize-parent-before-child-request",
     "defer-descendants-of-failed-parent",
     "skip-unchanged-same-time-actor-decision",
-    "durable-batch-target-counts"
+    "durable-batch-target-counts",
+    "zero-means-no-user-batch-limit",
+    "remove-fixed-character-and-map-caps",
+    "user-configurable-request-count-default-unrestricted",
+    "unspecified-output-keeps-unspecified-planning-budget",
+    "bounded-character-capacity-retry",
+    "required-references-for-large-character-batches",
+    "preserve-new-request-cap-on-older-settings-import"
   ],
   "validation": {
     "status": "passed",
     "baselineTests": {
-      "total": 2222,
-      "pass": 2222,
+      "total": 2240,
+      "pass": 2240,
       "fail": 0,
       "skipped": 0
     },
     "tests": {
-      "total": 2240,
-      "pass": 2240,
+      "total": 2252,
+      "pass": 2252,
       "fail": 0,
       "cancelled": 0,
       "skipped": 0
     },
-    "finalBackupRegression": {
-      "total": 66,
-      "pass": 66,
-      "fail": 0
-    },
     "typecheck": "passed",
     "pack": "passed",
-    "releaseSqlBrowser": "passed",
+    "sqlWasmRelease": "passed",
     "browserChecks": {
-      "productionUi": 87,
-      "hostGeneration": 30,
+      "productionUi": 89,
+      "hostEvents": 30,
       "contactPropagation": 12,
-      "localAnalysisReplay": 9,
-      "failed": 0,
-      "pageErrors": 0
+      "readOnlyMapReplay": 9,
+      "failures": 0,
+      "browserErrors": 0
     },
     "liveUserTavern": "not-run",
     "externalModel": "not-run"
   },
-  "modelBatchingPolicyVersion": "batch-v1"
+  "modelBatchingPolicyVersion": "batch-v2"
 }

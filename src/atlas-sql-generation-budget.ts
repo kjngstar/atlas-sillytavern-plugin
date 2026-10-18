@@ -1,5 +1,5 @@
 /**
- * atlas-sql-generation-budget.ts — M3-03 / M3-03A：传输预算（全阶段与重试共享每次操作 4 次）。
+ * atlas-sql-generation-budget.ts — user request-count limits; zero means unlimited.
  *
  * 纪律（改这个文件前先读一遍）：
  * 1. 预算约束的是**真实传输发送**，不是 `modelPort.request` 的调用次数：一次调用内部
@@ -14,9 +14,10 @@
  */
 
 import type { AtlasModelPort } from './atlas-db-contract.ts';
+import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
 
-/** 每次操作共用预算：所有阶段、空间组装与重试合计最多 4 个真实传输发送。 */
-export const GENERATION_BUDGET_LIMIT = 4;
+/** All stages share the saved user cap. Zero leaves request count unrestricted. */
+export const GENERATION_BUDGET_LIMIT = ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn;
 
 export type BudgetAttemptStatus = 'requested' | 'completed' | 'failed';
 export type BudgetAttempt = { stage: string; batchId: string; status: BudgetAttemptStatus };
@@ -55,7 +56,7 @@ export type GenerationBudgetPort = {
 export type CreateGenerationBudgetInput = {
   /** 本回合已经发出的尝试（前景 / 纠错），用来接着排队计数，不重算。 */
   attempts?: readonly BudgetAttempt[];
-  /** Frozen spatial work may use its own finite plan; foreground keeps the default four sends. */
+  /** 0 means unlimited; a positive integer limits actual transports. */
   limit?: number;
 };
 
@@ -65,7 +66,9 @@ function cloneAttempts(attempts: readonly BudgetAttempt[] | undefined): BudgetAt
 
 export function createGenerationBudget(input: CreateGenerationBudgetInput = {}): GenerationBudgetPort {
   const limit = input.limit ?? GENERATION_BUDGET_LIMIT;
-  if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('MODEL_BUDGET_INVALID');
+  if (!Number.isSafeInteger(limit) || limit < 0) throw new Error('MODEL_BUDGET_INVALID');
+  // Keep scheduler/JSON availability finite without imposing a practical count cap.
+  const available=limit||Number.MAX_SAFE_INTEGER;
   const attemptList = cloneAttempts(input.attempts);
   const deferredList: BudgetDeferred[] = [];
   // 每个既有 attempt 都对应一次已经发出的真实传输（含失败），所以它同样占额度。
@@ -82,10 +85,10 @@ export function createGenerationBudget(input: CreateGenerationBudgetInput = {}):
   return {
     limit,
     used: () => transports,
-    remaining: () => Math.max(0, limit - transports),
+    remaining: () => Math.max(0, available - transports),
     stageRemaining: (stage) => {
       const held = reserved && stage !== 'background' ? 1 : 0;
-      return Math.max(0, limit - transports - held);
+      return Math.max(0, available - transports - held);
     },
     attempts: () => attemptList.map((attempt) => ({ ...attempt })),
     deferred: () => deferredList.map((item) => ({ ...item })),
@@ -100,7 +103,7 @@ export function createGenerationBudget(input: CreateGenerationBudgetInput = {}):
 
     claimTransport: (stage, batchId) => {
       const held = reserved && stage !== 'background' ? 1 : 0;
-      if (transports + held >= limit) {
+      if (limit>0&&transports + held >= limit) {
         const reason = held > 0
           ? `本回合模型预算 ${limit} 已用尽（实际发送 ${transports} 次），其中 1 个名额保留给已到期的后台任务`
           : `本回合模型预算 ${limit} 已用尽（实际发送 ${transports} 次），不再发送`;
@@ -131,7 +134,7 @@ export function createGenerationBudget(input: CreateGenerationBudgetInput = {}):
     reserveBackground: (batchId) => {
       if (reserved) return false;
       // 保留额度不记入已用；但总账（已用 + 保留）不能超过上限。
-      if (transports + 1 > limit) {
+      if (limit>0&&transports + 1 > limit) {
         defer('background', batchId, `本回合模型预算 ${limit} 已用尽，后台任务未保留名额`);
         return false;
       }

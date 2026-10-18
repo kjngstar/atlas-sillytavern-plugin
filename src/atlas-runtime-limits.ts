@@ -14,8 +14,8 @@ export const ATLAS_RUNTIME_LIMITS = {
   responseJsonDepth: 16,
   conditionDepth: 4,
   repairAttemptsPerBatch: 1,
-  actorsPerDecisionBatch: 24,
-  foregroundModelBatchesPerTurn: 4,
+  /** 0: no user request-count cap; a positive saved setting opts into one. */
+  foregroundModelBatchesPerTurn: 0,
   pendingCandidateTtlMs: 10 * 60 * 1000,
   normalResponseTokens: 4096,
   decisionOutputReserveTokens: 512,
@@ -42,9 +42,6 @@ export const ATLAS_RUNTIME_LIMITS = {
   newRoutesPerBatch: 16,
   /** 单个批次最多把本次目标再向下展开的父边数。 */
   additionalParentDepthPerBatch: 2,
-  /** 同类型、同依赖层的地图尽量合批；实际批量还受输出与目录容量限制。 */
-  layoutMapsPerBatch: 8,
-  batchPromptChars: 48000,
   batchOutputReserveTokens: 384,
   /** 单张概览图的分区上限（G11 场景体积预算）。 */
   overviewZoneLimit: 64,
@@ -86,13 +83,12 @@ export const ATLAS_FIELD_LIMITS = {
 export type AtlasRuntimeLimits = typeof ATLAS_RUNTIME_LIMITS;
 
 /**
- * §16.2：首版按 `min(24, max(1, floor((maxTokens-512)/256)))` 得出人数预算。
- * 4096 输出预算 → 14 人；24 是上限，不是每次强塞 24 人。
+ * 按用户实际配置的输出上限估算容量；未指定时不加人数预算。
  */
 export function decisionActorBudget(maxTokens: number): number {
+  if(!Number.isFinite(maxTokens)||maxTokens<=0)return Infinity;
   const raw = Math.floor((Number(maxTokens) - ATLAS_RUNTIME_LIMITS.decisionOutputReserveTokens) / ATLAS_RUNTIME_LIMITS.decisionActorOutputTokens);
-  const bounded = Math.min(ATLAS_RUNTIME_LIMITS.actorsPerDecisionBatch, Math.max(1, raw));
-  return Number.isFinite(bounded) ? bounded : 1;
+  return Math.max(1,raw);
 }
 
 /** §4.3：每个 ActionPayload 最多 8 个显式实体引用。 */

@@ -20,7 +20,7 @@ import { createTableReadPort } from './atlas-db-readport.ts';
 import { collectKnownRefs, collectEntityRefs, inDecisionScope } from './atlas-sql-refs.ts';
 import type { OperationContext } from './atlas-sql-refs.ts';
 import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
-import { characterBatchLimit, type ModelGenerationOptions } from './atlas-model-batching.ts';
+import { characterBatchLimit, isModelBatchSizeFailure, type ModelGenerationOptions } from './atlas-model-batching.ts';
 import { sha256HexSync } from './atlas-db-envelope.ts';
 import { resolveEffectivePosition } from './atlas-sim-position.ts';
 import { deriveSeed, drawForEvent, recordDraw, ATLAS_SIM_RULESET_VERSION } from './atlas-sim-random.ts';
@@ -114,7 +114,9 @@ export async function settleSqlTurn(input: Input) {
   const ask = async (phase: Phase, fields: Partial<StagePromptInput>, atS: number, opportunities: Opportunity[] = [], dueEventIds: string[] = []) => {
     assertCurrent();
     if (!input.modelPort || batches >= input.modelBudget) throw new AtlasDbError('MODEL_BUDGET_EXHAUSTED','后台判断等待下一次结算',{});
-    const tables = createTableReadPort(input.db), knownRefs = collectKnownRefs(tables,input.branchId);
+    const actorTargets=phase==='decision'?JSON.parse(fields.actorSlices??'[]') as Array<{entityId:string}>:[];
+    if(actorTargets.length>ATLAS_RUNTIME_LIMITS.refCatalogMaxEntries)throw Object.assign(new Error('本批人物必要引用超出协议目录容量；先拆批，不发送该请求'),{code:'CHARACTER_BATCH_TOO_LARGE'});
+    const tables = createTableReadPort(input.db), knownRefs = collectKnownRefs(tables,input.branchId,{requiredRefs:actorTargets.map(actor=>({kind:'character' as const,id:actor.entityId}))});
     opportunities.forEach((o,i)=>knownRefs.push({alias:`O${i+1}`,id:o.id,kind:'opportunity',rowRev:null}));
     const byId = new Map(knownRefs.map(ref=>[ref.id,ref.alias]));
     // Replace internal IDs with the exact short references that the compiler receives.
@@ -131,6 +133,9 @@ export async function settleSqlTurn(input: Input) {
     batches++;
     const response = await input.modelPort.request(request); assertCurrent();
     const payload=extractPayload(response.text), parsed=parseOperations(payload.payload,{phase});
+    if(phase==='decision'&&(response.finishReason==='length'||payload.incomplete||parsed.incomplete)){
+      throw Object.assign(new Error('人物批次回复不完整或超出协议容量；本次回复未写入'),{code:'CHARACTER_BATCH_TOO_LARGE'});
+    }
     issues.push(...payload.issues,...parsed.issues);
     let operations=parsed.operations.map(op=>({...op,opId:`sim_${input.attemptKey ?? input.turnId}_${batches}_${op.opId}`}));
     const context: OperationContext={opIds:[],phase,clockS:atS,knownRefs,opportunities,dueEventIds,
@@ -223,15 +228,24 @@ export async function settleSqlTurn(input: Input) {
     }
     if (!catchingUp && actors.length) {
       let processed=0;
-      const count=characterBatchLimit(input.generationOptions);
+      let count=Math.min(characterBatchLimit(input.generationOptions),ATLAS_RUNTIME_LIMITS.refCatalogMaxEntries);
+      const retriedActors=new Set<string>();
       while(processed<actors.length && input.modelPort && batches<input.modelBudget) {
         const actorIds=actors.slice(processed,processed+count).map(c=>({entityId:String(c.id)}));
         let contacts=opportunities.filter(o=>actorIds.some(a=>a.entityId===o.receiverEntityId));
         const context=buildDecisionContext({actors:actorIds,opportunities:contacts},{db:input.db,branchId:input.branchId});
-        while(actorIds.length>1&&JSON.stringify(context.actorSlices).length>ATLAS_RUNTIME_LIMITS.batchPromptChars){const removed=actorIds.pop()!;context.actorSlices=context.actorSlices.filter(a=>a.entityId!==removed.entityId);}
         contacts=contacts.filter(o=>actorIds.some(a=>a.entityId===o.receiverEntityId));
         try { await ask('decision',{timeWindow:JSON.stringify({fromS:input.clockBefore,untilS:cursor}),actorSlices:JSON.stringify(context.actorSlices),opportunities:JSON.stringify(contacts)},cursor,contacts);processed+=actorIds.length; }
-        catch (err) { if ((err as {code?:string}).code==='TURN_CANCELLED') throw err; issues.push({code:'MODEL_REQUEST_FAILED',path:'$.decision',message:String((err as Error).message),severity:'warning',retryable:true}); break; }
+        catch (err) {
+          if ((err as {code?:string}).code==='TURN_CANCELLED') throw err;
+          if(isModelBatchSizeFailure(err)&&actorIds.length>1&&!actorIds.some(actor=>retriedActors.has(actor.entityId))&&batches<input.modelBudget){
+            for(const actor of actorIds)retriedActors.add(actor.entityId);
+            count=Math.max(1,Math.floor(actorIds.length/2));
+            issues.push({code:'CHARACTER_BATCH_SPLIT',path:'$.decision',message:'人物批次超出模型容量或回复不完整；原回复未写入，缩小批量补交一次。',severity:'warning',retryable:false});
+            continue;
+          }
+          issues.push({code:'MODEL_REQUEST_FAILED',path:'$.decision',message:String((err as Error).message),severity:'warning',retryable:true});break;
+        }
       }
       if (processed<actors.length) { pendingActors.push(...actors.slice(processed).map(a=>String(a.id))); catchingUp=true; issues.push({code:'ACTOR_BUDGET_EXHAUSTED',path:'$.decision',message:'剩余人物判断已记录，等待后续批次',severity:'warning',retryable:true}); }
     }

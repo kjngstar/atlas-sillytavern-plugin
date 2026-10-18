@@ -17,7 +17,7 @@ async function fixture({response='{"op":"noop"}',seed,background}={}) {
   const metadata={atlas:{database:await encodeSnapshot(db.export(),{chatUid:IDS.chatA,worldUid:'world-A',storageRevision:0,activeBranchId:IDS.branchMain})}};
   db.close(); let saved=true; const calls=[];
   const session=await openSqlSession({chatUid:IDS.chatA,branchId:IDS.branchMain,chatMetadata:metadata,saveSession:async()=>{if(!saved)throw new Error('host save failed');return {result:'saved',confirmed:true};},
-    modelPort:{request:async req=>{
+    modelPort:{generationOptions:async()=>({maxTokens:4096,batching:{charactersPerBatch:0,mapsPerBatch:0,requestsPerOperation:4}}),request:async req=>{
       calls.push(req); return {batchId:req.batchId,text:req.phase==='observe'?response:await background?.(req)??'{"op":"noop"}',httpStatus:200,durationMs:1};
     }}});
   const input=()=>({anchor:{chatUid:session.chatUid,branchId:session.branchId,parentTurnId:session.repo.internal.currentHeadTurnId(),hostMessageUid:'floor-time',variantKey:'v0',inputHash:'time',baseRevision:session.repo.internal.currentRevision(),baseStorageRevision:session.repo.storageRevision},

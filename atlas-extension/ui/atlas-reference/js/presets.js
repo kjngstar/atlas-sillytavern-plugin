@@ -42,8 +42,8 @@ function uniqueRows(rows,validator,label){
 }
 function batching(value={}){
  if(!value||typeof value!=='object'||Array.isArray(value))fail('分批设置格式不正确');
- const out={};for(const key of ['charactersPerBatch','mapsPerBatch']){
-  const count=value[key]??0;if(!Number.isSafeInteger(count)||count<0)fail('分批上限必须是非负整数，0 表示自动合批');out[key]=count;
+ const out={};for(const key of ['charactersPerBatch','mapsPerBatch','requestsPerOperation']){
+  const count=value[key]??0;if(!Number.isSafeInteger(count)||count<0)fail('上限必须是非负安全整数，0 表示不限制');out[key]=count;
  }return out;
 }
 function validateDoc(value,keepKey=false){
@@ -142,7 +142,7 @@ function create(seed,options={}){
  function parseImport(value){
   bounded(value);
   if(value?.kind==='atlas-preview-prompts')value={kind:'atlas-ui-preset-export',version:1,connections:[],promptPresets:[{id:uid('prompt'),name:'导入的提示词预设',segments:value.segments}]};
-  if(value?.kind==='atlas-ui-presets'){const parsed=publicDoc(value);if(value.modelBatching===undefined)delete parsed.modelBatching;return parsed;}
+  if(value?.kind==='atlas-ui-presets'){const parsed=publicDoc(value);if(value.modelBatching===undefined)delete parsed.modelBatching;else if(value.modelBatching.requestsPerOperation===undefined)delete parsed.modelBatching.requestsPerOperation;return parsed;}
   if(value?.kind!=='atlas-ui-preset-export'||value.version!==1)fail('预设文件格式或版本不支持');
   const connections=uniqueRows(value.connections,c=>connection(c,false),'API 预设'),promptPresets=uniqueRows(value.promptPresets,prompt,'提示词预设');
   if(!connections.length&&!promptPresets.length)fail('文件中没有可导入的预设');
@@ -154,7 +154,7 @@ function create(seed,options={}){
   for(const c of incoming.connections){const id=uid('connection');cMap.set(c.id,id);candidate.connections.push({...c,id,name:uniqueName(c.name,'connection',candidate.connections),rememberKey:false});}
   for(const p of incoming.promptPresets){const id=uid('prompt');pMap.set(p.id,id);candidate.promptPresets.push({...p,id,name:uniqueName(p.name,'prompt',candidate.promptPresets),segments:p.segments.map(s=>({...s,id:uid('segment')}))});}
   if(incoming.kind==='atlas-ui-presets'){
-   if(value.modelBatching!==undefined)candidate.modelBatching=clone(incoming.modelBatching);
+   if(value.modelBatching!==undefined)candidate.modelBatching={...candidate.modelBatching,...clone(incoming.modelBatching)};
    for(const task of TASKS)candidate.assignments[task]={connectionId:cMap.get(incoming.assignments[task].connectionId),promptPresetId:pMap.get(incoming.assignments[task].promptPresetId)};
    candidate.active={connectionId:cMap.get(incoming.active.connectionId),promptPresetId:pMap.get(incoming.active.promptPresetId)};
   }else{
