@@ -560,34 +560,19 @@ export function buildSqlLayoutTask(
   if (input.layoutMaps === 'active') {
     const occupied = uniqueSorted(characters.map((row) => asId(row.location_id)).filter((id): id is string => id !== null));
     const occupiedSet = new Set(occupied);
-    // 优先级 1：成员真正站在里面的具体图。
-    const hot = entries
-      .filter((entry) => entry.container !== null && occupiedSet.has(String(entry.container.id)))
-      .sort((a, b) => byId(a.mapId, b.mapId));
-    if (hot.length > 0) {
-      chosen = hot;
-    } else {
-      // 优先级 2：成员向上必经、但还没有场景的 missing 上级图。
-      const missing: Entry[] = [];
-      for (const locationId of occupied) {
-        let current: string | null = locationId;
-        const guard = new Set<string>();
-        while (current !== null && !guard.has(current)) {
-          guard.add(current);
-          const entry = mapByContainer.get(current);
-          if (entry) {
-            if (!hasScene(entry.map)) missing.push(entry);
-            break;
-          }
-          current = parentOf(current);
-        }
-      }
-      chosen = missing.sort((a, b) => byId(a.mapId, b.mapId));
+    // Automatic layout follows the occupied branch, not every room in the world.
+    // Parent geography is assembled first; remote interiors are generated only
+    // when explicitly requested. Single-child overview wrappers need no model.
+    const activePath=new Set<string>();
+    for(const locationId of occupied){
+      let id:string|null=locationId;const seen=new Set<string>();
+      while(id&&!seen.has(id)){seen.add(id);const entry=mapByContainer.get(id);if(entry)activePath.add(entry.mapId);id=parentOf(id);}
     }
-    if (occupied.length > 0) chosen.push(...entries.filter(entry => entry.container === null && !hasScene(entry.map) && !chosen.includes(entry)).sort((a,b)=>byId(a.mapId,b.mapId)));
-    // Every registered map participates, including unvisited spaces and changed ready maps.
-    // The fingerprint filter below keeps unchanged maps out of the model queue.
-    chosen.push(...entries.filter(entry=>!chosen.includes(entry)&&(entry.container!==null||entry.own.length>0)).sort((a,b)=>byId(a.mapId,b.mapId)));
+    chosen=entries.filter(entry=>activePath.has(entry.mapId)
+      ? occupiedSet.has(String(entry.container?.id))||entry.own.length>0&&(entry.kind!=='overview'||entry.own.length>1)
+      : entry.container===null&&entry.own.length>1);
+    const depth=(entry:Entry)=>{let id=asId(entry.container?.parent_location_id),n=0;const seen=new Set<string>();while(id&&!seen.has(id)){seen.add(id);n++;id=parentOf(id);}return n;};
+    chosen.sort((a,b)=>depth(a)-depth(b)||byId(a.mapId,b.mapId));
   } else if (Array.isArray(input.layoutMaps)) {
     const requested = input.layoutMaps.map((id) => String(id));
     chosen = entries
@@ -700,6 +685,17 @@ export function buildSqlLayoutTask(
         return known ? { ref: ref(id), name: row.name, w: known.widthM, h: known.heightM, source: known.source, referenceId: known.referenceId, furnishing } : null;
       })
       .filter((item): item is NonNullable<typeof item> => item !== null);
+    const parentEntry=container?derived.entries.find(e=>e.mapId===container.map_id):null;
+    const parentFrame=parentEntry?normalizeFrame(parentEntry.map.frame_json):null;
+    const parentScene=parentFrame?.atlasScene as SqlRow|undefined;
+    const parentLayout=parentScene?.layout as SqlRow|undefined;
+    const parentShapes=parentLayout?[parentLayout.shapes,parentLayout.districts,parentLayout.rooms,parentLayout.buildings].flatMap(pool=>Array.isArray(pool)?pool:[]):[];
+    const parentFootprint=parentShapes.find(shape=>shape.id===container?.id);
+    const parentContext=parentFootprint?{
+      name:parentEntry!.map.name,units:parentScene?.units??'unknown',
+      footprint:{...parentFootprint,id:ref(container!.id)},
+      siblings:parentShapes.filter(shape=>shape.id!==container?.id&&ref(shape.id)).slice(0,32).map(shape=>({...shape,id:ref(shape.id)})),
+    }:null;
     return {
       map: ref(entry.mapId),
       name: entry.map.name,
@@ -741,6 +737,7 @@ export function buildSqlLayoutTask(
       } : null,
       /** P12/R03 §19.3：父图要按这些尺寸投影子空间轮廓，不重新独立估计。 */
       childSpaces,
+      parentContext,
       baselineRooms,
       locations: local.map((row) => ({
         ref: ref(row.id),
@@ -800,6 +797,7 @@ export function buildSqlLayoutTask(
     + '\nfloor 的 rooms 每项用 id/name/w/h/side，side 只能 north 或 south；可选 role=indoor/outdoor/garden，分别表示室内、开放院落、园林。contents 每项用 id/name/type/roomId/w/h，type 只能 shelf/desk/bench/reading/stairs/table/chair/bed/cabinet/doorway/light/decor；actors 每项用 id/roomId，可选 near=陈设ID；items 每项用 id/on=陈设ID。所有键都必须双引号，不得照抄省略号或伪 JSON。'
     + '\n布局阶段不新建 SQL 实体：所有可交互地点必须已经在目录里。但建设阶段允许新增地点，两者不冲突——不要因为布局不新建实体就停止补全世界。actors/items 是本批有目录引用且在生成器额度内的相关者，不是整张人物表；未发送者仍保存在 SQL，由程序维护位置和地点名单，不能创建替身来凑数。'
     + '\n不要输出其他操作。';
+  request.messages[1].content += '\n父图中的本地点轮廓是下钻边界；子图用于细化同一个空间，不重画成一座无关的城市。相邻街区维持父图的相对方位，不能把外城区、内城区、中心区都复制成同一幅城市模板。size=large/medium/small 必须维持相对面积顺序；没有实体依据的 road_texture 不输出，真实道路仅使用已登记 links。';
   request.anchor = input.anchor;
   request.promptInput = {
     injectionText: request.messages[1].content,

@@ -258,6 +258,7 @@ function generateOverviewOnce(value,context){
     // G03：seed 由程序按地图给定；模型试图「换个 seed 重排」一律忽略并留下诊断，绝不因一次请求挪动已保存几何。
     if(s.input.seed!==undefined&&s.input.seed!==s.spec.seed)s.issues.push(diagnostic('SEED_OVERRIDDEN','$.seed','seed 由程序按地图给定，模型提供的值已忽略；已保存几何不会因此重排',{severity:'warning'}));
     s.spec.units=s.units; // 单位进入签名：拿到尺度后必须换成米制并重算，不能沿用格制场景。
+    s.spec.geometryPolicyVersion=3;
     // 02 §6.2：单位从格变米（或反向）时，把已保存的格几何整体缩放一次再复用；
     // 形状、实体 ID、相对位置与 seed 都不变，只是坐标系换了。
     {

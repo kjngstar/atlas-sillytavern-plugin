@@ -2086,13 +2086,9 @@ export function createSqlRepository(options: RepositoryOptions) {
       let layoutEvidenceCache:LayoutExcerpt[]|null=null;
       const evidenceBlockedMaps=new Set<string>();
       const layoutTasks:NonNullable<typeof layoutTask>[]=[];
-      // Spatial assembly completes the frozen set before this floor is published.
-      // It cannot be starved by observation/construction/background's four-send budget.
-      // Evidence extraction is a distinct bounded stage; every transport, including
-      // compatibility sends, shares this finite per-turn budget.
-      const layoutBatchCount=pendingLayoutIds.length;
-      const evidenceBatchEstimate=Math.min(24,Math.ceil(sourceSnapshot.reduce((sum,row)=>sum+(row.text?.length??0),0)/12000));
-      const layoutBudget=createGenerationBudget({limit:Math.max(1,layoutBatchCount*4+evidenceBatchEstimate*4)});
+      // Evidence, layout and compatibility retries spend the same four-send
+      // allowance as observation/construction. Map count must never multiply it.
+      const layoutBudget=turnBudget;
       const layoutModelPort=options.modelPort?bindModelBudget(options.modelPort,layoutBudget,'geography'):null;
       const requestSpatialWithTransportRetry=async(request:ModelBatchRequest,kind:string):Promise<ModelBatchResponse>=>{
         const started=now();
@@ -2123,7 +2119,8 @@ export function createSqlRepository(options: RepositoryOptions) {
         };
         try{
           if(layoutEvidenceCache===null){
-            const evidenceBatches=planLayoutEvidence(sourceSnapshot,evidenceMapRefs,anchor,`layout_${turnId}`);
+            const evidenceBatches=planLayoutEvidence(sourceSnapshot,evidenceMapRefs,anchor,`layout_${turnId}`,{maxBatches:1});
+            if(evidenceBatches[0]?.omittedBatches)allIssues.push({code:'LAYOUT_EVIDENCE_SCOPED',path:'$.layout.evidence',message:'资料较长，本次优先读取与所选地图有关的资料片段；其余内容未作为已验证位置依据。',severity:'warning',retryable:false});
             const layoutFacts:LayoutExcerpt[]=[];
             for(const batch of evidenceBatches){
               const evidenceStarted=now();
@@ -2268,7 +2265,7 @@ export function createSqlRepository(options: RepositoryOptions) {
         layoutTask=pendingLayoutIds.length?buildSqlLayoutTask(candidateDb,branchId,{...input,layoutMaps:[pendingLayoutIds[0]]},`${turnId}_layout_${layoutTasks.length}`,layoutReport):null;
         drainLayoutReport();
       }
-      if(layoutTask||evidenceBlockedMaps.size)allIssues.push({code:'LAYOUT_BATCH_PENDING',path:'$.layout',message:`${new Set([...pendingLayoutIds,...evidenceBlockedMaps]).size} 张地图的空间布局未完成（位置依据失败、布局连接不可用或计划传输额度耗尽）；请查看本轮请求错误。`,severity:'warning',retryable:true});
+      if(layoutTask||evidenceBlockedMaps.size)allIssues.push({code:'LAYOUT_BATCH_PENDING',path:'$.layout',message:`${new Set([...pendingLayoutIds,...evidenceBlockedMaps]).size} 张地图保留为待细化。每次操作最多发送 4 次模型请求；已登记地点和已完成布局保留，可选中需要的地图后继续生成。`,severity:'warning',retryable:true});
 
       // M3/W03：布局请求结算 —— 仍在同一个受控候选事务内，before 最终外键/不变量检查。
       // 生成器是同步纯函数：这里不 await、不开新事务、不提交、不保存聊天。

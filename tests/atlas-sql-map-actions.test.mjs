@@ -52,6 +52,8 @@ test('failed layout transport cannot count a retained old scene as a scene saved
  const f=await fixture();try{
   await bootstrap(f);
   const school=row(f,'locations','学校');
+  const prepared=await f.send('map/layout',{mapId:school.id,requestId:'prepare-existing-school-scene'});
+  assert.equal(prepared.body.data.sceneSaved,true,JSON.stringify(prepared.body));
   const target=queryBound(f.session.repo.db,'SELECT id,frame_json FROM maps WHERE container_location_id=?',[school.id])[0];
   const before=JSON.parse(target.frame_json).atlasScene;
   assert.ok(before);
@@ -103,16 +105,20 @@ test('Q07 bootstrap previews actual scene layout without saving; applying uses t
  const f=await fixture();try{
   const req={assistantText:'在学校教室。',openingMessageId:'opening'};
   const preview=await f.send('map/bootstrap',{...req,apply:false});assert.equal(preview.status,200,JSON.stringify(preview.body));
-  assert.equal(preview.body.data.newLocations.length,3);assert.equal(f.saves(),0);assert.equal(f.calls(),7);
+  assert.equal(preview.body.data.newLocations.length,3);assert.equal(f.saves(),0);assert.equal(f.calls(),4);
   assert.equal(queryBound(f.session.repo.db,'SELECT COUNT(*) n FROM locations',[])[0].n,0);
   const p=preview.body.data;
   const apply=await f.send('map/bootstrap',{...req,apply:true,previewId:p.previewId,baseRevision:p.baseRevision});assert.equal(apply.body.data.coreSaved,true,JSON.stringify(apply.body));
-  assert.equal(f.calls(),7);assert.equal(f.saves(),1);
+  assert.equal(f.calls(),4);assert.equal(f.saves(),1);
   const builtMaps=queryBound(f.session.repo.db,'SELECT frame_json FROM maps',[]);
-  assert.equal(builtMaps.filter(map=>JSON.parse(map.frame_json).atlasScene).length,4,JSON.stringify({message:'所有四张地图与两批布局必须在一次确认中一起保存',maps:builtMaps.map(map=>JSON.parse(map.frame_json)),receipt:apply.body.data.receipt}));
-  assert.ok(builtMaps.every(map=>JSON.parse(map.frame_json).atlasLayoutContext),'两批布局都必须记录结构指纹，避免下轮重复生成');
+  const ready=builtMaps.filter(map=>JSON.parse(map.frame_json).atlasScene);
+  assert.equal(ready.length,1,'四次请求内先完成上级图，其余地图登记保留');
+  assert.ok(ready.every(map=>JSON.parse(map.frame_json).atlasLayoutContext),'已完成地图记录结构指纹，避免下轮重复生成');
+  assert.ok(apply.body.data.receipt.issues.some(issue=>issue.code==='LAYOUT_BATCH_PENDING'));
   const branch=queryBound(f.session.repo.db,'SELECT * FROM branches',[])[0];assert.equal(branch.clock_s,0);assert.ok(branch.pov_character_id);assert.ok(branch.root_map_id);
   assert.equal(queryBound(f.session.repo.db,'SELECT COUNT(*) n FROM maps',[])[0].n,4);
+  const detail=await f.send('map/layout',{mapId:row(f,'locations','学校').id,requestId:'school-detail'});
+  assert.equal(detail.body.data.sceneSaved,true,JSON.stringify(detail.body));
   const state=(await f.send('state')).body.data;
   const room=state.sqlViews.map.items.find(m=>m.containerLocationId===row(f,'locations','教室').id);
   const parentMap=queryBound(f.session.repo.db,'SELECT frame_json FROM maps WHERE container_location_id=?',[row(f,'locations','学校').id])[0];
@@ -193,6 +199,8 @@ test('P13 map/profile 走真实命令链：作者切档案落盘、非法模式�
   const turn=await bootstrap(f);
   const school=row(f,'locations','学校');
   const mapId=queryBound(f.session.repo.db,`SELECT id FROM maps WHERE container_location_id = ?`,[school.id])[0].id;
+  const prepared=await f.send('map/layout',{mapId,requestId:'profile-existing-school-scene'});
+  assert.equal(prepared.body.data.sceneSaved,true,JSON.stringify(prepared.body));
   const frameBefore=queryBound(f.session.repo.db,`SELECT frame_json FROM maps WHERE id = ?`,[mapId])[0].frame_json;
   const sceneBefore=JSON.parse(frameBefore).atlasScene;
   assert.ok(sceneBefore,'bootstrap 之后学校图必须已有真实场景，否则本用例没在验"保留旧 scene"');

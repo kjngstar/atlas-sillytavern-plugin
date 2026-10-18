@@ -389,17 +389,24 @@ export function spaceCanonicalHolder(
 }
 
 /** 从某张图已保存的场景里找该地点在同一物理空间里的轮廓（父图足迹）。 */
-function footprintInScene(scene: Row | null, locationId: string): { widthM: number; heightM: number } | null {
+function footprintInScene(scene: Row | null, locationId: string, map: Row): { widthM: number; heightM: number } | null {
   if (!scene) return null;
   const layout = plain(scene.layout) ? scene.layout : null;
   if (!layout) return null;
+  const factor=scene.units==='meters'?1:scene.units==='cells'&&finite(map.meters_per_cell)&&map.meters_per_cell>0?map.meters_per_cell:null;
+  if(factor===null)return null;
   const pools: unknown[] = [layout.rooms, layout.buildings, layout.districts, layout.shapes, layout.corridor ? [layout.corridor] : []];
   for (const pool of pools) {
     if (!Array.isArray(pool)) continue;
     for (const entry of pool) {
       if (!plain(entry)) continue;
       if (asId(entry.id) !== locationId) continue;
-      if (validSide(entry.w) && validSide(entry.h)) return { widthM: entry.w, heightM: entry.h };
+      let w=entry.w,h=entry.h;
+      if(Array.isArray(entry.polygon)&&entry.polygon.length>=3){
+        const points=entry.polygon.map(p=>Array.isArray(p)?p:plain(p)?[p.x,p.y]:[]);
+        if(points.every(p=>p.length===2&&finite(p[0])&&finite(p[1]))){w=Math.max(...points.map(p=>p[0] as number))-Math.min(...points.map(p=>p[0] as number));h=Math.max(...points.map(p=>p[1] as number))-Math.min(...points.map(p=>p[1] as number));}
+      }
+      if (finite(w)&&finite(h)&&validSide(w*factor)&&validSide(h*factor)) return { widthM: w*factor, heightM: h*factor };
     }
   }
   return null;
@@ -459,7 +466,7 @@ export function locationSpaceSize(input: LocationSpaceSizeInput): LocationSpaceS
   if (parentMapId) {
     const parentMap = input.maps.find((row) => asId(row.id) === parentMapId) ?? null;
     if (parentMap) {
-      const footprint = footprintInScene(sceneOf(parentMap.frame_json, input.branchId ?? null, parentMapId), input.locationId);
+      const footprint = footprintInScene(sceneOf(parentMap.frame_json, input.branchId ?? null, parentMapId), input.locationId, parentMap);
       if (footprint) return { ...footprint, quality: 'estimated', source: 'parent-footprint', referenceId: parentMapId };
     }
   }
@@ -516,7 +523,7 @@ export function resolveMapSpaceSize(input: MapSpaceSizeInput): MapSpaceSizeResul
   if (parentMapId && parentMapId !== asId(input.mapRow.id)) {
     const parentMap = input.maps.find((row) => asId(row.id) === parentMapId) ?? null;
     if (parentMap) {
-      const footprint = footprintInScene(sceneOf(parentMap.frame_json, input.branchId ?? null, parentMapId), containerId);
+      const footprint = footprintInScene(sceneOf(parentMap.frame_json, input.branchId ?? null, parentMapId), containerId, parentMap);
       if (footprint) parentFootprint = { ...footprint, mapId: parentMapId };
     }
   }

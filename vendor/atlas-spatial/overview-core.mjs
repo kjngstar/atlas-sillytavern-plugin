@@ -16,7 +16,6 @@ const MAX_CANDIDATES=512;
 const GAP_FACTORS=[1,0.75,0.5];
 /** 初始半径 = 最短边 × 下列系数（02 §6.3 步 2）。 */
 const SIZE_RATIO={small:0.035,medium:0.065,large:0.10};
-const MIN_SIZE_RATIO=0.008;
 /** 水系宽度 = 最短边 × 下列系数（02 §10）。 */
 const WIDTH_RATIO={narrow:0.008,medium:0.015,wide:0.025};
 const DENSITY_INFLATE={low:1.12,medium:1.28,high:1.5};
@@ -171,7 +170,7 @@ export function overview(spec,previous=null){
     baseRadius.set(z.id,z.physicalSize?Math.max(z.physicalSize.w,z.physicalSize.h)/2:S*ratio);
   }
   const occupied=[];
-  for(const z of zonesIn)if(finite(z.locked?.x)&&finite(z.locked.y))occupied.push({id:z.id,point:pt(z.locked.x,z.locked.y)});
+  for(const z of zonesIn)if(finite(z.locked?.x)&&finite(z.locked.y))occupied.push({id:z.id,point:pt(z.locked.x,z.locked.y),radius:baseRadius.get(z.id)});
   const obstacles=[];
   for(const z of zonesIn)if(z.lockedPolygon?.length>=3)obstacles.push({id:z.id,polygon:z.lockedPolygon});
   // 注意：上一轮的估计多边形不进 obstacles——它是本程序自己的输出，且已通过 occupied 占位；
@@ -192,7 +191,7 @@ export function overview(spec,previous=null){
         const index=startIndex+step,radius=gap*Math.sqrt(step+1),angle=index*GOLDEN_ANGLE;
         const c=pt(target.x+radius*Math.cos(angle),target.y+radius*Math.sin(angle));
         if(c.x<box.x0+r||c.x>box.x1-r||c.y<box.y0+r||c.y>box.y1-r)continue;
-        if(!occupied.every(o=>distance(c,o.point)>=gap+(z.physicalSize?r+(o.radius??0):o.radius??0)))continue;
+        if(!occupied.every(o=>distance(c,o.point)>=r+(o.radius??0)+gap*.15))continue;
         if(!obstacles.every(o=>!pointInPolygon(o.polygon,c)))continue;
         chosen=c;break;
       }
@@ -200,7 +199,7 @@ export function overview(spec,previous=null){
     }
     if(!chosen){issues.push({id:z.id,code:'OVERVIEW_ZONE_NO_SPACE'});continue;}
     sites.set(z.id,chosen);reasons.set(z.id,near?'layout:near':'layout:center');
-    occupied.push({id:z.id,point:chosen,...(z.physicalSize?{radius:r}:{})});
+    occupied.push({id:z.id,point:chosen,radius:r});
   }
 
   // ── 步 3：几何。旧图元按结构签名原样复用；只有结构约束真的变了才局部更新。
@@ -209,7 +208,7 @@ export function overview(spec,previous=null){
   for(const z of zonesIn){
     const site=sites.get(z.id);
     if(!site)continue;
-    const structureKey=stable({role:z.role??null,size:z.size??null,...(z.physicalSize?{physicalSize:z.physicalSize}:{}),sector:z.sector??null,near:z.near??null,locked:z.locked??null,lockedPolygon:z.lockedPolygon??null,...(SECTOR_ANGLE[z.sector]!==undefined?{placementPolicy:2}:{})});
+    const structureKey=stable({role:z.role??null,size:z.size??null,...(z.physicalSize?{physicalSize:z.physicalSize}:{}),sector:z.sector??null,near:z.near??null,locked:z.locked??null,lockedPolygon:z.lockedPolygon??null,placementPolicy:3});
     const placement=z.placement==='proxy'?'proxy':undefined;
     const prevShape=prevShapes.get(z.id);
     if(prevShape&&prevShape.structureKey===structureKey&&prevShape.polygon?.length>=3){
@@ -225,8 +224,8 @@ export function overview(spec,previous=null){
     if(!polygon&&z.physicalSize){const {w,h}=z.physicalSize;polygon=[pt(site.x-w/2,site.y-h/2),pt(site.x+w/2,site.y-h/2),pt(site.x+w/2,site.y+h/2),pt(site.x-w/2,site.y+h/2)];}
     if(!polygon){
       let r=baseRadius.get(z.id);
-      const nearest=occupied.filter(o=>o.id!==z.id).reduce((d,o)=>Math.min(d,distance(site,o.point)),Infinity);
-      if(finite(nearest))r=Math.max(S*MIN_SIZE_RATIO,Math.min(r,nearest*0.35));
+      // Placement reserves the requested footprint. Shrinking each zone by its
+      // nearest neighbour inverted declared large/medium city sizes.
       polygon=zonePolygon(z,site.x,site.y,r,seed);
     }
     const fitted=polygon.every(p=>finite(p.x)&&finite(p.y))?(z.physicalSize?(polygon.every(p=>p.x>=box.x0&&p.x<=box.x1&&p.y>=box.y0&&p.y<=box.y1)?polygon:null):fitPolygon(polygon,box)):null;
@@ -297,7 +296,7 @@ export function overview(spec,previous=null){
   for(const f of featuresIn){
     if(!FEATURE_TYPES.has(f.type)){issues.push({id:f.id,code:'OVERVIEW_FEATURE_TYPE_INVALID'});continue;}
     const density=DENSITY_SET.has(f.density)?f.density:'medium';
-    const structureKey=stable({type:f.type,zoneId:f.zoneId??null,density,fromSector:f.fromSector??null,toSector:f.toSector??null,widthClass:f.widthClass??null});
+    const structureKey=stable({type:f.type,zoneId:f.zoneId??null,density,fromSector:f.fromSector??null,toSector:f.toSector??null,widthClass:f.widthClass??null,...(f.type==='road_texture'?{texturePolicy:2}:{})});
     const prev=prevFeatures.get(f.id);
     if(prev&&prev.structureKey===structureKey){pushFeature(clone(prev));continue;}
     // 装饰没有 SQL 身份：一律 decorative=true / quality=estimated，模型不能自称 confirmed。
@@ -356,11 +355,10 @@ export function overview(spec,previous=null){
       continue;
     }
     if(f.type==='road_texture'){
-      // 纹理不是道路：只画视觉带，绝不进 routes、绝不生成可通行边（G06）。
-      const R=randOf(`${seed}/texture/${f.id}`);
-      const path=[];
-      for(let i=0;i<=3;i++)path.push(pt(box.x0+(box.x1-box.x0)*(i/3),box.y0+(box.y1-box.y0)*(0.3+R()*0.4)));
-      pushFeature({...base,path,width:S*0.004,density});
+      // A texture is confined to its registered zone. It is never a random
+      // map-wide path that can be mistaken for a real inter-city road.
+      if(!zonePolygon){issues.push({id:f.id,code:'OVERVIEW_FEATURE_NO_BASIS'});continue;}
+      pushFeature({...base,polygon:clone(zonePolygon),width:S*0.004,density});
       continue;
     }
     // forest_texture / building_cluster / ruins_scatter：多边形型装饰。

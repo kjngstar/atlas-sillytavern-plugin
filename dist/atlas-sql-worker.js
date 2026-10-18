@@ -2418,6 +2418,9 @@
       "每张图的角色由程序给定，不得改写：overview（根图/地区/自然）填 zones/links/features/surface；city（城市/街区）填 districts/buildings/enclosure；floor（建筑/楼层/房间/载具）填 rooms/contents/actors/items。",
       "三种包含关系要分开：地点在容器内部（contained）→ 归入容器子图；只是相邻（adjacent）→ 用 routes 表达邻接；移动载具停靠（anchor）→ 用 anchor_ref。不要把载具当成固定建筑，也不要给相邻地区编造包含关系。",
       "城内地点归入城市子图，周边地点通过实际邻接/路线表达。移动载具不当作固定建筑。",
+      "连接两地的道路、官道和航线优先用 route.propose 登记两个真实端点，不创建一块与城市并列的道路区域，也不以 road_texture 代替通行路线。只有正文确有独立路段场景或途中设施时才另外建地点，并同时登记连接关系。",
+      "马车、船等载具用 kind=vehicle、mobility=mobile；车厢内部可有子图，但外部载具位置属于停靠地点或已有路线/旅程。anchor_ref 必须是实际停靠地点，绝不能指向载具自身；不能只建车厢而遗漏已明确的外部位置。资料没有行进起止时间或进度时不要编造旅程百分比。",
+      "资料标题和地图名称不是额外地理实体，例如同一国家的地图标题与国家本身合用一个地点身份，避免套出没有意义的重复层级。城市的相对大小只按资料依据给出；帝都/普通城市身份不等于已知实测面积。",
       "先根据给定资料判断地图大致现实尺寸；信息不足时给合理估计范围并说明 why，不能声称精确测量。",
       "不要利用界面标签排版坐标推出真实距离。用户已锁定的标定不修改。",
       "布局只提交这一张图上**发生变化**的约束：已有房间、家具、人物位置、物品不必每轮重写，未提及的一律保持原样，删除必须写 spec.deletes。",
@@ -4885,7 +4888,6 @@ END`;
   var MAX_CANDIDATES = 512;
   var GAP_FACTORS = [1, 0.75, 0.5];
   var SIZE_RATIO = { small: 0.035, medium: 0.065, large: 0.1 };
-  var MIN_SIZE_RATIO = 8e-3;
   var WIDTH_RATIO = { narrow: 8e-3, medium: 0.015, wide: 0.025 };
   var DENSITY_INFLATE = { low: 1.12, medium: 1.28, high: 1.5 };
   var SURFACE_SET = /* @__PURE__ */ new Set(["mixed", "urban", "forest", "mountain", "water", "indoor", "void"]);
@@ -5040,7 +5042,7 @@ END`;
       baseRadius.set(z.id, z.physicalSize ? Math.max(z.physicalSize.w, z.physicalSize.h) / 2 : S * ratio);
     }
     const occupied = [];
-    for (const z of zonesIn) if (finite(z.locked?.x) && finite(z.locked.y)) occupied.push({ id: z.id, point: pt2(z.locked.x, z.locked.y) });
+    for (const z of zonesIn) if (finite(z.locked?.x) && finite(z.locked.y)) occupied.push({ id: z.id, point: pt2(z.locked.x, z.locked.y), radius: baseRadius.get(z.id) });
     const obstacles = [];
     for (const z of zonesIn) if (z.lockedPolygon?.length >= 3) obstacles.push({ id: z.id, polygon: z.lockedPolygon });
     const sites = /* @__PURE__ */ new Map(), reasons = /* @__PURE__ */ new Map();
@@ -5063,7 +5065,7 @@ END`;
           const index = startIndex + step, radius = gap * Math.sqrt(step + 1), angle2 = index * GOLDEN_ANGLE;
           const c = pt2(target.x + radius * Math.cos(angle2), target.y + radius * Math.sin(angle2));
           if (c.x < box.x0 + r || c.x > box.x1 - r || c.y < box.y0 + r || c.y > box.y1 - r) continue;
-          if (!occupied.every((o) => distance2(c, o.point) >= gap + (z.physicalSize ? r + (o.radius ?? 0) : o.radius ?? 0))) continue;
+          if (!occupied.every((o) => distance2(c, o.point) >= r + (o.radius ?? 0) + gap * 0.15)) continue;
           if (!obstacles.every((o) => !pointInPolygon(o.polygon, c))) continue;
           chosen = c;
           break;
@@ -5076,14 +5078,14 @@ END`;
       }
       sites.set(z.id, chosen);
       reasons.set(z.id, near ? "layout:near" : "layout:center");
-      occupied.push({ id: z.id, point: chosen, ...z.physicalSize ? { radius: r } : {} });
+      occupied.push({ id: z.id, point: chosen, radius: r });
     }
     const shapes = [], pins = [];
     const shapePolygon = /* @__PURE__ */ new Map();
     for (const z of zonesIn) {
       const site = sites.get(z.id);
       if (!site) continue;
-      const structureKey = stable({ role: z.role ?? null, size: z.size ?? null, ...z.physicalSize ? { physicalSize: z.physicalSize } : {}, sector: z.sector ?? null, near: z.near ?? null, locked: z.locked ?? null, lockedPolygon: z.lockedPolygon ?? null, ...SECTOR_ANGLE[z.sector] !== void 0 ? { placementPolicy: 2 } : {} });
+      const structureKey = stable({ role: z.role ?? null, size: z.size ?? null, ...z.physicalSize ? { physicalSize: z.physicalSize } : {}, sector: z.sector ?? null, near: z.near ?? null, locked: z.locked ?? null, lockedPolygon: z.lockedPolygon ?? null, placementPolicy: 3 });
       const placement = z.placement === "proxy" ? "proxy" : void 0;
       const prevShape = prevShapes.get(z.id);
       if (prevShape && prevShape.structureKey === structureKey && prevShape.polygon?.length >= 3) {
@@ -5103,8 +5105,6 @@ END`;
       }
       if (!polygon2) {
         let r = baseRadius.get(z.id);
-        const nearest = occupied.filter((o) => o.id !== z.id).reduce((d, o) => Math.min(d, distance2(site, o.point)), Infinity);
-        if (finite(nearest)) r = Math.max(S * MIN_SIZE_RATIO, Math.min(r, nearest * 0.35));
         polygon2 = zonePolygon(z, site.x, site.y, r, seed);
       }
       const fitted = polygon2.every((p) => finite(p.x) && finite(p.y)) ? z.physicalSize ? polygon2.every((p) => p.x >= box.x0 && p.x <= box.x1 && p.y >= box.y0 && p.y <= box.y1) ? polygon2 : null : fitPolygon(polygon2, box) : null;
@@ -5187,7 +5187,7 @@ END`;
         continue;
       }
       const density = DENSITY_SET.has(f.density) ? f.density : "medium";
-      const structureKey = stable({ type: f.type, zoneId: f.zoneId ?? null, density, fromSector: f.fromSector ?? null, toSector: f.toSector ?? null, widthClass: f.widthClass ?? null });
+      const structureKey = stable({ type: f.type, zoneId: f.zoneId ?? null, density, fromSector: f.fromSector ?? null, toSector: f.toSector ?? null, widthClass: f.widthClass ?? null, ...f.type === "road_texture" ? { texturePolicy: 2 } : {} });
       const prev = prevFeatures.get(f.id);
       if (prev && prev.structureKey === structureKey) {
         pushFeature(clone(prev));
@@ -5252,10 +5252,11 @@ END`;
         continue;
       }
       if (f.type === "road_texture") {
-        const R = randOf(`${seed}/texture/${f.id}`);
-        const path = [];
-        for (let i = 0; i <= 3; i++) path.push(pt2(box.x0 + (box.x1 - box.x0) * (i / 3), box.y0 + (box.y1 - box.y0) * (0.3 + R() * 0.4)));
-        pushFeature({ ...base, path, width: S * 4e-3, density });
+        if (!zonePolygon2) {
+          issues.push({ id: f.id, code: "OVERVIEW_FEATURE_NO_BASIS" });
+          continue;
+        }
+        pushFeature({ ...base, polygon: clone(zonePolygon2), width: S * 4e-3, density });
         continue;
       }
       const source = zonePolygon2 ?? [pt2(box.x0, box.y0), pt2(box.x1, box.y0), pt2(box.x1, box.y1), pt2(box.x0, box.y1)];
@@ -5719,6 +5720,7 @@ END`;
       s.spec.seed = label(context.seed) || s.map.id;
       if (s.input.seed !== void 0 && s.input.seed !== s.spec.seed) s.issues.push(diagnostic("SEED_OVERRIDDEN", "$.seed", "seed 由程序按地图给定，模型提供的值已忽略；已保存几何不会因此重排", { severity: "warning" }));
       s.spec.units = s.units;
+      s.spec.geometryPolicyVersion = 3;
       {
         const prevScene = context?.previousScene;
         const flips = prevScene && prevScene.units !== s.units;
@@ -7219,7 +7221,7 @@ END`;
   }
 
   // src/atlas-layout-signature.ts
-  var LAYOUT_SIGNATURE_POLICY_VERSION = "layout-v6";
+  var LAYOUT_SIGNATURE_POLICY_VERSION = "layout-v7";
   var byId3 = (left, right) => left < right ? -1 : left > right ? 1 : 0;
   var str = (value) => typeof value === "string" && value ? value : null;
   var num = (value) => typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -7638,17 +7640,27 @@ ${lines.join("\n")}
     }
     return { holder: candidates[0] ?? null, issues: [] };
   }
-  function footprintInScene(scene, locationId) {
+  function footprintInScene(scene, locationId, map) {
     if (!scene) return null;
     const layout = plain2(scene.layout) ? scene.layout : null;
     if (!layout) return null;
+    const factor = scene.units === "meters" ? 1 : scene.units === "cells" && finite2(map.meters_per_cell) && map.meters_per_cell > 0 ? map.meters_per_cell : null;
+    if (factor === null) return null;
     const pools = [layout.rooms, layout.buildings, layout.districts, layout.shapes, layout.corridor ? [layout.corridor] : []];
     for (const pool of pools) {
       if (!Array.isArray(pool)) continue;
       for (const entry of pool) {
         if (!plain2(entry)) continue;
         if (asId(entry.id) !== locationId) continue;
-        if (validSide(entry.w) && validSide(entry.h)) return { widthM: entry.w, heightM: entry.h };
+        let w = entry.w, h = entry.h;
+        if (Array.isArray(entry.polygon) && entry.polygon.length >= 3) {
+          const points = entry.polygon.map((p) => Array.isArray(p) ? p : plain2(p) ? [p.x, p.y] : []);
+          if (points.every((p) => p.length === 2 && finite2(p[0]) && finite2(p[1]))) {
+            w = Math.max(...points.map((p) => p[0])) - Math.min(...points.map((p) => p[0]));
+            h = Math.max(...points.map((p) => p[1])) - Math.min(...points.map((p) => p[1]));
+          }
+        }
+        if (finite2(w) && finite2(h) && validSide(w * factor) && validSide(h * factor)) return { widthM: w * factor, heightM: h * factor };
       }
     }
     return null;
@@ -7684,7 +7696,7 @@ ${lines.join("\n")}
     if (parentMapId) {
       const parentMap = input.maps.find((row2) => asId(row2.id) === parentMapId) ?? null;
       if (parentMap) {
-        const footprint = footprintInScene(sceneOf(parentMap.frame_json, input.branchId ?? null, parentMapId), input.locationId);
+        const footprint = footprintInScene(sceneOf(parentMap.frame_json, input.branchId ?? null, parentMapId), input.locationId, parentMap);
         if (footprint) return { ...footprint, quality: "estimated", source: "parent-footprint", referenceId: parentMapId };
       }
     }
@@ -7710,7 +7722,7 @@ ${lines.join("\n")}
     if (parentMapId && parentMapId !== asId(input.mapRow.id)) {
       const parentMap = input.maps.find((row2) => asId(row2.id) === parentMapId) ?? null;
       if (parentMap) {
-        const footprint = footprintInScene(sceneOf(parentMap.frame_json, input.branchId ?? null, parentMapId), containerId);
+        const footprint = footprintInScene(sceneOf(parentMap.frame_json, input.branchId ?? null, parentMapId), containerId, parentMap);
         if (footprint) parentFootprint = { ...footprint, mapId: parentMapId };
       }
     }
@@ -8242,28 +8254,29 @@ ${lines.join("\n")}
     if (input.layoutMaps === "active") {
       const occupied = uniqueSorted(characters.map((row2) => asId3(row2.location_id)).filter((id) => id !== null));
       const occupiedSet = new Set(occupied);
-      const hot = entries.filter((entry) => entry.container !== null && occupiedSet.has(String(entry.container.id))).sort((a, b) => byId4(a.mapId, b.mapId));
-      if (hot.length > 0) {
-        chosen = hot;
-      } else {
-        const missing = [];
-        for (const locationId of occupied) {
-          let current = locationId;
-          const guard = /* @__PURE__ */ new Set();
-          while (current !== null && !guard.has(current)) {
-            guard.add(current);
-            const entry = mapByContainer.get(current);
-            if (entry) {
-              if (!hasScene(entry.map)) missing.push(entry);
-              break;
-            }
-            current = parentOf(current);
-          }
+      const activePath = /* @__PURE__ */ new Set();
+      for (const locationId of occupied) {
+        let id = locationId;
+        const seen = /* @__PURE__ */ new Set();
+        while (id && !seen.has(id)) {
+          seen.add(id);
+          const entry = mapByContainer.get(id);
+          if (entry) activePath.add(entry.mapId);
+          id = parentOf(id);
         }
-        chosen = missing.sort((a, b) => byId4(a.mapId, b.mapId));
       }
-      if (occupied.length > 0) chosen.push(...entries.filter((entry) => entry.container === null && !hasScene(entry.map) && !chosen.includes(entry)).sort((a, b) => byId4(a.mapId, b.mapId)));
-      chosen.push(...entries.filter((entry) => !chosen.includes(entry) && (entry.container !== null || entry.own.length > 0)).sort((a, b) => byId4(a.mapId, b.mapId)));
+      chosen = entries.filter((entry) => activePath.has(entry.mapId) ? occupiedSet.has(String(entry.container?.id)) || entry.own.length > 0 && (entry.kind !== "overview" || entry.own.length > 1) : entry.container === null && entry.own.length > 1);
+      const depth = (entry) => {
+        let id = asId3(entry.container?.parent_location_id), n = 0;
+        const seen = /* @__PURE__ */ new Set();
+        while (id && !seen.has(id)) {
+          seen.add(id);
+          n++;
+          id = parentOf(id);
+        }
+        return n;
+      };
+      chosen.sort((a, b) => depth(a) - depth(b) || byId4(a.mapId, b.mapId));
     } else if (Array.isArray(input.layoutMaps)) {
       const requested = input.layoutMaps.map((id) => String(id));
       chosen = entries.filter((entry) => requested.includes(entry.mapId)).sort((a, b) => requested.indexOf(a.mapId) - requested.indexOf(b.mapId));
@@ -8345,6 +8358,18 @@ ${lines.join("\n")}
         }));
         return known ? { ref: ref(id), name: row2.name, w: known.widthM, h: known.heightM, source: known.source, referenceId: known.referenceId, furnishing } : null;
       }).filter((item) => item !== null);
+      const parentEntry = container ? derived.entries.find((e) => e.mapId === container.map_id) : null;
+      const parentFrame = parentEntry ? normalizeFrame(parentEntry.map.frame_json) : null;
+      const parentScene = parentFrame?.atlasScene;
+      const parentLayout = parentScene?.layout;
+      const parentShapes = parentLayout ? [parentLayout.shapes, parentLayout.districts, parentLayout.rooms, parentLayout.buildings].flatMap((pool) => Array.isArray(pool) ? pool : []) : [];
+      const parentFootprint = parentShapes.find((shape) => shape.id === container?.id);
+      const parentContext = parentFootprint ? {
+        name: parentEntry.map.name,
+        units: parentScene?.units ?? "unknown",
+        footprint: { ...parentFootprint, id: ref(container.id) },
+        siblings: parentShapes.filter((shape) => shape.id !== container?.id && ref(shape.id)).slice(0, 32).map((shape) => ({ ...shape, id: ref(shape.id) }))
+      } : null;
       return {
         map: ref(entry.mapId),
         name: entry.map.name,
@@ -8386,6 +8411,7 @@ ${lines.join("\n")}
         } : null,
         /** P12/R03 §19.3：父图要按这些尺寸投影子空间轮廓，不重新独立估计。 */
         childSpaces,
+        parentContext,
         baselineRooms,
         locations: local.map((row2) => ({
           ref: ref(row2.id),
@@ -8437,6 +8463,7 @@ ${lines.join("\n")}
       ].join("\n")
     });
     request.messages[1].content += '\n每个操作外层只含 op、ref、data 和可选 why。op 固定 map.layout.request；ref 使用本图 map 引用；data 包含给定 kind 和 spec。下面提供本图完整合法 JSON 示例。幅面用程序给定 extent。\noverview 的 spec 可含 surface、zones、links、features。zone 用 id、name、role、size，可选 sector 与 near。role 取 city/settlement/forest/water/mountain/ruins/district/campus/land/other；size 取 small/medium/large；sector 取八方向或 center。link 的 id 必须是已登记路线引用。feature 用局部 id、type、可选 zoneId 和 density；density 取 low/medium/high，type 取 forest_texture/ridge/shore/building_cluster/road_texture/ruins_scatter/watercourse。overview 的 zone 必须是本图直属地点或目录里已有的代理入口；links 只能用目录中已登记的路线引用；feature 只是本图局部装饰，永远不产生新实体、也不产生新道路。\ncity 的 districts 每项必须含 id、name、bank、order；bank 取 west/east，order 为整数。buildings 每项必须含 id、name、districtId、w、h。districts 至少一项；没有已登记街区时，以城市容器的地点引用作为自身街区。每个建筑的 districtId 必须对应本次或已保存街区，不能省略街区声明。新城市默认 enclosure="open"；无河流依据时 riverWidth=0。\nfloor 的 rooms 每项用 id/name/w/h/side，side 只能 north 或 south；可选 role=indoor/outdoor/garden，分别表示室内、开放院落、园林。contents 每项用 id/name/type/roomId/w/h，type 只能 shelf/desk/bench/reading/stairs/table/chair/bed/cabinet/doorway/light/decor；actors 每项用 id/roomId，可选 near=陈设ID；items 每项用 id/on=陈设ID。所有键都必须双引号，不得照抄省略号或伪 JSON。\n布局阶段不新建 SQL 实体：所有可交互地点必须已经在目录里。但建设阶段允许新增地点，两者不冲突——不要因为布局不新建实体就停止补全世界。actors/items 是本批有目录引用且在生成器额度内的相关者，不是整张人物表；未发送者仍保存在 SQL，由程序维护位置和地点名单，不能创建替身来凑数。\n不要输出其他操作。';
+    request.messages[1].content += "\n父图中的本地点轮廓是下钻边界；子图用于细化同一个空间，不重画成一座无关的城市。相邻街区维持父图的相对方位，不能把外城区、内城区、中心区都复制成同一幅城市模板。size=large/medium/small 必须维持相对面积顺序；没有实体依据的 road_texture 不输出，真实道路仅使用已登记 links。";
     request.anchor = input.anchor;
     request.promptInput = {
       injectionText: request.messages[1].content,
@@ -8961,7 +8988,7 @@ ${entry.text}`.toLowerCase();
     }
     return segments;
   }
-  function planLayoutEvidence(snapshot2, maps, anchor, batchId) {
+  function planLayoutEvidence(snapshot2, maps, anchor, batchId, options = {}) {
     const chunks = [];
     const seen = /* @__PURE__ */ new Set();
     for (const source of snapshot2) {
@@ -8983,8 +9010,16 @@ ${entry.text}`.toLowerCase();
       chars += chunk.text.length;
     }
     if (group.length) groups.push(group);
-    if (groups.length > MAX_BATCHES) throw Object.assign(new Error(`布局依据有 ${groups.length} 批，超过单次 ${MAX_BATCHES} 批上限；请缩小资料范围后重试`), { code: "LAYOUT_EVIDENCE_LIMIT" });
-    return groups.map((items, index) => {
+    if (groups.length > MAX_BATCHES && options.maxBatches === void 0) throw Object.assign(new Error(`布局依据有 ${groups.length} 批，超过单次 ${MAX_BATCHES} 批上限；请缩小资料范围后重试`), { code: "LAYOUT_EVIDENCE_LIMIT" });
+    const maxBatches = Math.max(1, Math.min(MAX_BATCHES, Math.floor(options.maxBatches ?? MAX_BATCHES)));
+    const names = [...new Set(maps.flatMap((m) => [m.name, m.name.replace(/(?:地图|平面图|区域图)$/, "")]).filter((n) => n.length >= 2))];
+    const ranked = groups.map((chunks2, index) => {
+      const text3 = chunks2.map((c) => c.text).join("");
+      return { chunks: chunks2, index, score: names.reduce((score, name) => score + (text3.includes(name) ? 100 : 0), 0) + Math.min(40, (text3.match(/东侧|西侧|南侧|北侧|相邻|位于|道路|街区|城区|房间|建筑|河流/g) ?? []).length) };
+    });
+    const selected = ranked.sort((a, b) => b.score - a.score || b.index - a.index).slice(0, maxBatches).sort((a, b) => a.index - b.index);
+    return selected.map(({ chunks: batchChunks, index }) => {
+      let items = batchChunks;
       const first = items[0];
       if (first.start > 0) {
         const source = snapshot2.find((s) => s.key === first.sourceKey);
@@ -8998,7 +9033,7 @@ ${entry.text}`.toLowerCase();
         `只输出一个 JSON 对象：{"facts":[{"mapRef":"目录中的 id 或 alias","segmentRef":"下列 S 编号"}]}。本批最多 ${MAX_FACTS_PER_BATCH} 条；不相关则 facts=[]。只选择片段编号，不复制或改写原句，不推断、不补全、不输出布局。`,
         ...segments.map((s) => `【${s.ref} 来源 ${s.chunk.sourceKey} [${s.start},${s.end})】${s.text}`)
       ].join("\n");
-      return { chunks: items, request: {
+      return { chunks: items, omittedBatches: groups.length - selected.length, request: {
         batchId: `${batchId}_evidence_${index}`,
         phase: "geography",
         anchor,
@@ -16462,6 +16497,8 @@ ${entry.text}`.toLowerCase();
     if (Object.prototype.hasOwnProperty.call(data, "vehicle_profile")) changes.vehicle_profile_json = data.vehicle_profile ?? null;
     ensureLocationRef(data, "parent_ref", op, result.issues, changes, "parent_location_id", ["location"], ctx.scope);
     ensureLocationRef(data, "anchor_ref", op, result.issues, changes, "anchor_location_id", ["location"], ctx.scope);
+    if (changes.anchor_location_id === rowId2) result.issues.push(issue8("INVARIANT_LOCATION_ANCHOR_CYCLE", "$.data.anchor_ref", "载具或地点不能以自身作为停靠锚点；使用实际所在地点，行进状态使用旅程记录", op));
+    if (changes.parent_location_id === rowId2) result.issues.push(issue8("INVARIANT_LOCATION_PARENT_CYCLE", "$.data.parent_ref", "地点不能以自己为父地点", op));
     applyPosition(changes, data, op, result.issues, ctx.scope);
     if (result.issues.some((i) => i.severity === "error")) return result;
     if (creating) {
@@ -31840,9 +31877,7 @@ ${chunk.text}`;
         let layoutEvidenceCache = null;
         const evidenceBlockedMaps = /* @__PURE__ */ new Set();
         const layoutTasks = [];
-        const layoutBatchCount = pendingLayoutIds.length;
-        const evidenceBatchEstimate = Math.min(24, Math.ceil(sourceSnapshot.reduce((sum, row2) => sum + (row2.text?.length ?? 0), 0) / 12e3));
-        const layoutBudget = createGenerationBudget({ limit: Math.max(1, layoutBatchCount * 4 + evidenceBatchEstimate * 4) });
+        const layoutBudget = turnBudget;
         const layoutModelPort = options.modelPort ? bindModelBudget(options.modelPort, layoutBudget, "geography") : null;
         const requestSpatialWithTransportRetry = async (request, kind) => {
           const started = now();
@@ -31874,7 +31909,8 @@ ${chunk.text}`;
           };
           try {
             if (layoutEvidenceCache === null) {
-              const evidenceBatches = planLayoutEvidence(sourceSnapshot, evidenceMapRefs, anchor, `layout_${turnId}`);
+              const evidenceBatches = planLayoutEvidence(sourceSnapshot, evidenceMapRefs, anchor, `layout_${turnId}`, { maxBatches: 1 });
+              if (evidenceBatches[0]?.omittedBatches) allIssues.push({ code: "LAYOUT_EVIDENCE_SCOPED", path: "$.layout.evidence", message: "资料较长，本次优先读取与所选地图有关的资料片段；其余内容未作为已验证位置依据。", severity: "warning", retryable: false });
               const layoutFacts = [];
               for (const batch of evidenceBatches) {
                 const evidenceStarted = now();
@@ -32024,7 +32060,7 @@ ${chunk.text}`;
           layoutTask = pendingLayoutIds.length ? buildSqlLayoutTask(candidateDb, branchId, { ...input, layoutMaps: [pendingLayoutIds[0]] }, `${turnId}_layout_${layoutTasks.length}`, layoutReport) : null;
           drainLayoutReport();
         }
-        if (layoutTask || evidenceBlockedMaps.size) allIssues.push({ code: "LAYOUT_BATCH_PENDING", path: "$.layout", message: `${(/* @__PURE__ */ new Set([...pendingLayoutIds, ...evidenceBlockedMaps])).size} 张地图的空间布局未完成（位置依据失败、布局连接不可用或计划传输额度耗尽）；请查看本轮请求错误。`, severity: "warning", retryable: true });
+        if (layoutTask || evidenceBlockedMaps.size) allIssues.push({ code: "LAYOUT_BATCH_PENDING", path: "$.layout", message: `${(/* @__PURE__ */ new Set([...pendingLayoutIds, ...evidenceBlockedMaps])).size} 张地图保留为待细化。每次操作最多发送 4 次模型请求；已登记地点和已完成布局保留，可选中需要的地图后继续生成。`, severity: "warning", retryable: true });
         const spatialGuard = input.isCurrent ?? (() => true);
         const spatialPorts = {
           applyGroups: (db2, groups, ctx) => applyGroups(db2, groups, ctx),

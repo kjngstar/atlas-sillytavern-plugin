@@ -117,7 +117,7 @@ function generate(db, mapId, input, viewMode = 'author') {
  * OTH01：三类合法 other 容器都进入布局处理
  * ------------------------------------------------------------------ */
 
-test('OTH01 庭院 / 官道 / 停靠区三类 other 容器，自动与显式手动都进入布局处理', async () => {
+test('OTH01 庭院 / 官道 / 停靠区三类 other 容器，当前有人占用或显式手动时进入布局处理', async () => {
   const seed = await makeSeedWith(SQL);
   try {
     const cases = [
@@ -138,17 +138,12 @@ test('OTH01 庭院 / 官道 / 停靠区三类 other 容器，自动与显式手�
       assert.equal(explicit.request.promptInput.injectionText,explicit.request.messages[1].content);
     }
 
-    // 自动：本轮每批最多两张，逐批推进直到覆盖全部 other 图。
-    const seen = [];
-    let task = buildSqlLayoutTask(seed.db, BRANCH, turnInput(), 'turn_oth_auto');
-    let guard = 0;
-    while (task && guard < 6) {
-      seen.push(...task.mapIds);
-      const next = task.remainingLocationIds ?? [];
-      guard += 1;
-      task = next.length ? buildSqlLayoutTask(seed.db, BRANCH, turnInput({ layoutMaps: next }), `turn_oth_auto_${guard}`) : null;
+    // 自动仅细化当前分支，不为远处所有未访问场所逐张调用模型。
+    for(const item of cases){
+      seed.db.run('UPDATE characters SET location_id=? WHERE branch_id=? AND id=?',[item.containerId,BRANCH,IDS.C1]);
+      const task=buildSqlLayoutTask(seed.db,BRANCH,turnInput(),'turn_oth_auto');
+      assert.ok([...task.mapIds,...task.remainingLocationIds].includes(item.mapId),`${item.name} 有人在场时进入自动布局`);
     }
-    for (const item of cases) assert.ok(seen.includes(item.mapId), `${item.name} 自动流程必须被选中，实际 ${JSON.stringify(seen)}`);
   } finally {
     seed.close();
   }

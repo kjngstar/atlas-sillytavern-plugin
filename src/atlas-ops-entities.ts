@@ -309,6 +309,8 @@ export function compileLocationUpsert(op: ParsedOperation, ctx: CompileContext):
 
   ensureLocationRef(data, 'parent_ref', op, result.issues, changes, 'parent_location_id', ['location'], ctx.scope);
   ensureLocationRef(data, 'anchor_ref', op, result.issues, changes, 'anchor_location_id', ['location'], ctx.scope);
+  if (changes.anchor_location_id === rowId) result.issues.push(issue('INVARIANT_LOCATION_ANCHOR_CYCLE', '$.data.anchor_ref', '载具或地点不能以自身作为停靠锚点；使用实际所在地点，行进状态使用旅程记录', op));
+  if (changes.parent_location_id === rowId) result.issues.push(issue('INVARIANT_LOCATION_PARENT_CYCLE', '$.data.parent_ref', '地点不能以自己为父地点', op));
   applyPosition(changes, data, op, result.issues, ctx.scope);
 
   if (result.issues.some((i) => i.severity === 'error')) return result;
