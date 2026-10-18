@@ -16,7 +16,8 @@
  * 5. **一次最多 2 张图**，超出部分进 remaining，不静默忘记。
  */
 
-import { createTableReadPort } from './atlas-db-readport.ts';
+import { createTableReadPort, pageAllRows } from './atlas-db-readport.ts';
+import { collectMapLocations, LIMITS } from '../vendor/atlas-spatial/index.mjs';
 import { collectTaskRefs } from './atlas-sql-task-refs.ts';
 import { buildStagePrompt } from './atlas-ops-prompts.ts';
 import { normalizeFrame, normalizeSqlMapFrame } from './atlas-spatial-frame.ts';
@@ -29,10 +30,9 @@ import {
   computeLayoutInputSignature,
   type LayoutSignatureAuthorIntent,
 } from './atlas-layout-signature.ts';
-import { selectWorldConstructionSources } from './atlas-sql-world-sources.ts';
 import type { TableReadPort } from './atlas-ops-compile-types.ts';
 import type { SqlDatabase } from './atlas-db-runtime.ts';
-import type { ModelBatchRequest, TurnInput } from './atlas-ops-contract.ts';
+import type { ModelBatchRequest, ModelOperation, TurnInput } from './atlas-ops-contract.ts';
 import type { LayoutKind, LayoutTask, PlanIssue } from './atlas-world-contract.ts';
 import { CAPABILITY_CORRIDOR_BINDING, CAPABILITY_SPACE_CANONICAL, CAPABILITY_SPATIAL_PROFILE, hasSpatialCapability } from './atlas-world-contract.ts';
 import { formatTaskContext } from './atlas-prompt-layers.ts';
@@ -142,6 +142,33 @@ function aliasLayoutRefs(value:unknown, refs:readonly {id:string;alias:string}[]
   if(Array.isArray(value))return value.map(v=>aliasLayoutRefs(v,refs));
   if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value).map(([k,v])=>[k,aliasLayoutRefs(v,refs)]));
   return value;
+}
+
+/** Only entity-bearing IDs are checked; furniture and decoration retain local IDs. */
+export function unknownLayoutEntityRefs(operations:readonly ModelOperation[],refs:readonly {id:string;alias:string}[]):string[]{
+  const known=new Set(refs.flatMap(ref=>[ref.id,ref.alias])),unknown=new Set<string>();
+  const check=(value:unknown)=>{if(typeof value==='string'&&value&&!known.has(value))unknown.add(value);};
+  for(const operation of operations){
+    if(operation.op!=='map.layout.request')continue;
+    const spec=operation.data?.spec;
+    if(!spec||typeof spec!=='object'||Array.isArray(spec))continue;
+    // Local IDs (contents.id/features.id/actors.near/items.on) are intentionally excluded.
+    const entityFields: Record<string, readonly string[]> = {
+      zones: ['id', 'near'], links: ['id'], features: ['zoneId'],
+      districts: ['id'], buildings: ['id', 'districtId'], rooms: ['id'],
+      contents: ['roomId'], actors: ['id', 'roomId'], items: ['id'],
+    };
+    check((spec as Record<string, unknown>).corridorLocationRef);
+    for(const [section, fields] of Object.entries(entityFields)){
+      const rows=(spec as Record<string,unknown>)[section];
+      if(!Array.isArray(rows))continue;
+      for(const row of rows){
+        if(!row||typeof row!=='object'||Array.isArray(row))continue;
+        for(const field of fields)check((row as Record<string, unknown>)[field]);
+      }
+    }
+  }
+  return [...unknown];
 }
 
 type Entry = {
@@ -331,6 +358,12 @@ export function computeMapLayoutSignature(tables: TableReadPort, branchId: strin
   return signatureForEntry(entry, derived.routes, derived.maps);
 }
 
+/** One shared derivation for read-side alignment checks across visible maps. */
+export function computeMapLayoutSignatures(tables: TableReadPort, branchId: string): Map<string, string> {
+  const derived = deriveLayoutSites(tables, branchId);
+  return new Map(derived.entries.map(entry => [entry.mapId, signatureForEntry(entry, derived.routes, derived.maps)]));
+}
+
 export type BuildLayoutTaskInput = TurnInput;
 
 /**
@@ -362,11 +395,13 @@ export type DerivedLayoutSites = {
  */
 export function deriveLayoutSites(tables: TableReadPort, branchId: string): DerivedLayoutSites {
   const issues: PlanIssue[] = [];
-  const locations = tables.selectWhere('locations', { branch_id: branchId, status: 'active' }, 1000) as SqlRow[];
-  const characters = tables.selectWhere('characters', { branch_id: branchId, status: 'active' }, 1000) as SqlRow[];
-  const items = tables.selectWhere('items', { branch_id: branchId, status: 'active' }, 1000) as SqlRow[];
-  const maps = tables.selectWhere('maps', { branch_id: branchId, status: 'active' }, 1000) as SqlRow[];
-  const routes = tables.selectWhere('routes', { branch_id: branchId }, 1000) as SqlRow[];
+  const active = (table: 'locations' | 'characters' | 'items' | 'maps'): SqlRow[] =>
+    pageAllRows(tables, table, branchId).filter((row) => row.status === 'active');
+  const locations = active('locations');
+  const characters = active('characters');
+  const items = active('items');
+  const maps = active('maps');
+  const routes = pageAllRows(tables, 'routes', branchId);
 
   const locationById = new Map<string, SqlRow>();
   for (const row of locations) {
@@ -382,7 +417,7 @@ export function deriveLayoutSites(tables: TableReadPort, branchId: string): Deri
     const containerId = asId(map.container_location_id);
     const container = containerId ? locationById.get(containerId) ?? null : null;
     // P13/R03 §20：档案先解析（作者选择 → 可信关系 → 类型默认），再决定布局 kind。
-    const ownForProfile = locations.filter((row) => String(row.map_id ?? '') === mapId && row.mobility !== 'mobile');
+    const ownForProfile = collectMapLocations({ mapRow: map, maps, locations }).filter((row) => row.mobility !== 'mobile');
     const profile = resolveSpatialProfile({
       map,
       container,
@@ -412,7 +447,7 @@ export function deriveLayoutSites(tables: TableReadPort, branchId: string): Deri
       rows = FALLBACK_ROWS;
     }
 
-    const own = locations.filter((row) => String(row.map_id ?? '') === mapId&&row.mobility!=='mobile');
+    const own = ownForProfile;
     const containerKind = String(container?.kind ?? '');
     const standalone = kind === 'floor' && own.length === 0
       && (containerKind === 'room' || containerKind === 'vehicle' || containerKind === 'floor' || containerKind === 'building');
@@ -450,6 +485,27 @@ export function deriveLayoutSites(tables: TableReadPort, branchId: string): Deri
     if (authoritative && entry.kind !== 'overview') {
       entry.extent = { width: resolved.resolution.widthM, height: resolved.resolution.heightM, units: 'meters' };
     }
+  }
+  // Freeze first estimates from the parent footprint before either model sees
+  // them. A new room cannot be 7.5 m wide in its parent and 12 m in its own task.
+  const entryDepth=(entry:Entry):number=>{
+    const seen=new Set<string>();let current:Entry|undefined=entry;
+    while(current&&!seen.has(current.mapId)){
+      seen.add(current.mapId);
+      const parentId:unknown=current.container?.map_id;
+      current=entries.find(row=>row.mapId===parentId);
+    }
+    return seen.size;
+  };
+  for(const child of [...entries].sort((a,b)=>entryDepth(a)-entryDepth(b)||byId(a.mapId,b.mapId))){
+    if(child.kind!=='floor'||child.spaceSize?.resolution.source!=='first-estimate'||finite(child.map.meters_per_cell)&&child.map.meters_per_cell>0||child.map.scale_locked||hasScene(child.map))continue;
+    const parent=entries.find(entry=>entry.mapId===child.container?.map_id&&entry.kind==='floor');
+    if(!parent||!child.container)continue;
+    const planned=baselineFloorRooms(parent.own,parent.extent,id=>String(id),id=>locationSpaceSize({maps,locations,locationId:id,branchId}));
+    const footprint=planned.find(room=>room.id===child.container!.id);
+    if(!footprint)continue;
+    child.extent={width:footprint.w,height:footprint.h,units:'meters'};
+    child.spaceSize=resolveMapSpaceSize({maps,locations,mapRow:child.map,branchId,firstEstimate:{widthM:footprint.w,heightM:footprint.h}});
   }
   // 父图容纳不下已确定房间尺寸：只报告，**绝不按比例缩小确认房间**（§19.3 末段）。
   for (const entry of entries) {
@@ -620,7 +676,7 @@ export function buildSqlLayoutTask(
         side: 'north',
       }]
       : entry.kind==='floor' ? baselineFloorRooms(entry.own,entry.extent,ref,(id)=>{
-        const known = locationSpaceSize({ maps: derived.maps, locations: derived.locations, locationId: id, branchId });
+        const known = locationSpaceSize({ maps: derived.maps, locations: derived.locations, locationId: id, branchId })??derived.entries.find(e=>e.container?.id===id&&e.kind==='floor')?.spaceSize?.resolution;
         return known ? { widthM: known.widthM, heightM: known.heightM } : null;
       }) : [];
     const local = entry.standalone && container ? [container] : entry.own;
@@ -631,7 +687,8 @@ export function buildSqlLayoutTask(
       .map((row) => {
         const id = asId(row.id);
         if (!id) return null;
-        const known = locationSpaceSize({ maps: derived.maps, locations: derived.locations, locationId: id, branchId });
+        const planned=derived.entries.find(e=>e.container?.id===id&&e.kind==='floor')?.spaceSize?.resolution;
+        const known = locationSpaceSize({ maps: derived.maps, locations: derived.locations, locationId: id, branchId })??(planned?{widthM:planned.widthM,heightM:planned.heightM,source:'first-estimate',referenceId:id}:null);
         const holder = derived.maps.find((map) => map.container_location_id === id && map.status === 'active');
         const canonicalRead = holder ? readSpaceCanonical(holder.frame_json, id) : null;
         const canonical = canonicalRead?.ok && !canonicalRead.deferred ? canonicalRead.canonical : null;
@@ -691,11 +748,22 @@ export function buildSqlLayoutTask(
         kind: row.kind,
         description: row.description,
         parent: ref(row.parent_location_id),
+        placement: row.map_id === entry.mapId ? 'local' : 'proxy',
       })),
+      routes: derived.routes.filter((row) => row.map_id === entry.mapId && row.status !== 'closed' && ref(row.id))
+        .map((row) => ({ ref: ref(row.id), from: ref(row.from_location_id), to: ref(row.to_location_id),
+          kind: row.kind, status: row.status, bidirectional: canonicalFlag(row.bidirectional) === 1,
+          geometryQuality: row.geometry_quality, distanceM: row.distance_m ?? null })),
       actors: characters
-        .filter((row) => localIds.has(String(row.location_id ?? '')))
+        .filter((row) => localIds.has(String(row.location_id ?? '')) && ref(row.id) && ref(row.location_id))
+        .sort((a, b) => {
+          const priority = (row: SqlRow): number => row.role === 'protagonist' || input.requiredRefs?.some((r) => r.kind === 'character' && r.id === row.id) ? 0 : 1;
+          return priority(a) - priority(b) || byId(String(a.id), String(b.id));
+        })
+        .slice(0, LIMITS.actors)
         .map((row) => ({ ref: ref(row.id), name: row.name, roomId: ref(row.location_id) })),
-      items: items.filter(row=>localIds.has(String(row.location_id??'')))
+      items: items.filter(row=>localIds.has(String(row.location_id??'')) && !row.holder_character_id && !row.container_item_id && ref(row.id) && ref(row.location_id))
+        .slice(0, LIMITS.items)
         .map(row=>({ref:ref(row.id),name:row.name,kind:row.kind,description:row.description,roomId:ref(row.location_id)})),
       savedConstraints: aliasLayoutRefs(scene?.constraints ?? null, catalogue.knownRefs),
       layoutIssues: aliasLayoutRefs(sceneLayout?.issues ?? [], catalogue.knownRefs),
@@ -710,8 +778,7 @@ export function buildSqlLayoutTask(
     batchId: `layout_${turnId}`,
     mapScope: JSON.stringify(scopes),
     geoMissing: '必须为以上地图生成或更新可绘制空间布局，每张图一行 map.layout.request。仅有坐标点不算完成。',
-    geoSources: input.assistantText,
-    sourceSnapshot: input.sourceSnapshot,
+    geoSources: '第一步验证的位置依据将在发送布局请求前附加；本阶段不接收原始剧情或世界书。',
     mapLayoutIds: catalogue.knownRefs.map((item) => `${item.alias}=${item.id}`).join('\n'),
     mapLayoutFrame: [
       'extent 是程序给定的幅面；kind 与 units 以每张图给出的值为准，不得改写。',
@@ -726,23 +793,19 @@ export function buildSqlLayoutTask(
       '合理陈设可以按场所用途补全（estimated），不要求正文逐项点名。',
     ].join('\n'),
   });
-  request.messages[1].content += '\n完整操作外层必须为 {"op":"map.layout.request","ref":"本图map引用","data":{"kind":"overview或city或floor","spec":{...}},"why":"依据"}；spec 只写本次变化的约束，幅面用程序给的 extent。'
-    + '\noverview：spec={"surface":"mixed","zones":[{"id":地点引用,"name","role":"city/settlement/forest/water/mountain/ruins/district/campus/land/other","size":"small/medium/large","sector":"north/south/east/west/northeast/northwest/southeast/southwest/center","near":可选地点引用}],"links":[{"id":已登记route引用}],"features":[{"id":"本图局部装饰ID","type":"forest_texture/ridge/shore/building_cluster/road_texture/ruins_scatter/watercourse","zoneId":可选,"density":"low/medium/high"}]}。'
+  request.messages[1].content += '\n每个操作外层只含 op、ref、data 和可选 why。op 固定 map.layout.request；ref 使用本图 map 引用；data 包含给定 kind 和 spec。下面提供本图完整合法 JSON 示例。幅面用程序给定 extent。'
+    + '\noverview 的 spec 可含 surface、zones、links、features。zone 用 id、name、role、size，可选 sector 与 near。role 取 city/settlement/forest/water/mountain/ruins/district/campus/land/other；size 取 small/medium/large；sector 取八方向或 center。link 的 id 必须是已登记路线引用。feature 用局部 id、type、可选 zoneId 和 density；density 取 low/medium/high，type 取 forest_texture/ridge/shore/building_cluster/road_texture/ruins_scatter/watercourse。'
     + 'overview 的 zone 必须是本图直属地点或目录里已有的代理入口；links 只能用目录中已登记的路线引用；feature 只是本图局部装饰，永远不产生新实体、也不产生新道路。'
-    + '\ncity：spec={"districts":[{"id":地点引用,"name","bank":"west/east","order":整数}],"buildings":[{"id":地点引用,"name","districtId":地块引用,"w","h"}],"enclosure":"open/wall","riverWidth":数值}。没有已登记街区时允许用城市 container.ref 表示整个城市的单个范围；新城市默认 enclosure="open"（无城墙、无城门、无环城墙道路）。'
+    + '\ncity 的 districts 每项必须含 id、name、bank、order；bank 取 west/east，order 为整数。buildings 每项必须含 id、name、districtId、w、h。districts 至少一项；没有已登记街区时，以城市容器的地点引用作为自身街区。每个建筑的 districtId 必须对应本次或已保存街区，不能省略街区声明。新城市默认 enclosure="open"；无河流依据时 riverWidth=0。'
     + '\nfloor 的 rooms 每项用 id/name/w/h/side，side 只能 north 或 south；可选 role=indoor/outdoor/garden，分别表示室内、开放院落、园林。contents 每项用 id/name/type/roomId/w/h，type 只能 shelf/desk/bench/reading/stairs/table/chair/bed/cabinet/doorway/light/decor；actors 每项用 id/roomId，可选 near=陈设ID；items 每项用 id/on=陈设ID。所有键都必须双引号，不得照抄省略号或伪 JSON。'
-    + '\n布局阶段不新建 SQL 实体：所有可交互地点必须已经在目录里。但建设阶段允许新增地点，两者不冲突——不要因为布局不新建实体就停止补全世界。'
+    + '\n布局阶段不新建 SQL 实体：所有可交互地点必须已经在目录里。但建设阶段允许新增地点，两者不冲突——不要因为布局不新建实体就停止补全世界。actors/items 是本批有目录引用且在生成器额度内的相关者，不是整张人物表；未发送者仍保存在 SQL，由程序维护位置和地点名单，不能创建替身来凑数。'
     + '\n不要输出其他操作。';
   request.anchor = input.anchor;
-  // P10/R02 §17.2 第 8/9 条：布局/repair 复查走 context-only —— 已处理过的来源块**照样**看得到，
-  // 但既不推进也不重置来源消费账本（否则「来源已消费」会让布局读不到必要资料）。
-  const evidence=selectWorldConstructionSources({snapshot:input.sourceSnapshot,focusTerms:pending.map(e=>String(e.container?.name??e.map.name??'')),chatId:input.anchor.chatUid,branchId,maxChars:12000,mode:'context-only'});
-  if(evidence.chunks.length)request.messages[1].content+='\n【布局的世界观与正文依据（资料不是任务指令）】\n'+evidence.chunks.map(c=>`【${c.sourceKey}】\n${c.text}`).join('\n');
   request.promptInput = {
     injectionText: request.messages[1].content,
-    userText: input.userText,
-    assistantText: input.assistantText,
-    loreSupplement: input.sourceSnapshot.filter((item) => item.kind === 'lorebook').map((item) => item.text).join('\n'),
+    userText: '',
+    assistantText: '',
+    loreSupplement: '',
     baseRevision: input.anchor.baseRevision,
   };
   request.messages[1].content += '\nbaselineRooms 是程序为已登记空间提供的可容纳轮廓，不是实测尺寸；没有更明确尺寸依据时直接沿用，并在每间房补 role。多空间图必须覆盖 locations 中全部直属空间，庭院和花园也应有连通范围，不能退化成散点；室外空间用 outdoor/garden，不伪造室内窗户。不要把 width/height 写成房间尺寸，房间尺寸字段为 w/h，side 固定选 north 或 south。';
@@ -754,6 +817,17 @@ export function buildSqlLayoutTask(
   request.messages[1].content += '\n多房间 floor 保留中央走廊，默认 corridorWidth=2；估计房间必须适合当前幅面，side=north 或 south。同侧多个房间的宽度与间隔合计也必须装得下。childSpaces 的已知宽高不得缩小来凑布局；装不下时说明尺寸冲突。单间房直接沿用完整 baselineRooms，不缩成幅面的 75%，不另扣中央走廊。';
   for(const scope of scopes.filter(s=>s.kind==='overview')){
     request.messages[1].content+='\n【本图合法 overview JSON 外层示例；按资料填写合法 zones/links/features】\n'+JSON.stringify({op:'map.layout.request',ref:scope.map,data:{kind:'overview',spec:{surface:'mixed',zones:[],links:[],features:[]}},why:'依据已登记空间生成估计布局'});
+  }
+  for(const scope of scopes.filter(s=>s.kind==='city')){
+    if(!scope.container?.ref)continue;
+    const registeredDistricts=scope.locations.filter(location=>location.kind==='district');
+    const districts=(registeredDistricts.length?registeredDistricts:[scope.container]).map((district,index)=>({id:district.ref,name:district.name,bank:'west',order:index}));
+    const buildings=scope.locations.filter(location=>location.kind==='building').map(location=>{
+      const size=scope.childSpaces.find(space=>space.ref===location.ref);
+      return {id:location.ref,name:location.name,districtId:districts.find(district=>district.id===location.parent)?.id??districts[0].id,w:size?.w??24,h:size?.h??24};
+    });
+    request.messages[1].content+='\n【本图合法 city JSON 示例；所有实体引用均已登记】\n'+JSON.stringify({op:'map.layout.request',ref:scope.map,data:{kind:'city',spec:{districts,buildings,enclosure:'open',riverWidth:0}},why:'使用已登记城市范围生成估计布局'});
+    request.messages[1].content+='\ncity 的 districts.id 和 buildings.id 必须沿用上方已登记地点引用，不能使用 B1、B2 等自造编号。没有已登记建筑时 buildings=[]；不能为填满画面而新增可交互建筑。';
   }
   if (hasSpatialCapability(CAPABILITY_CORRIDOR_BINDING)) request.messages[1].content += '\n' + CORRIDOR_BINDING_PROMPT;
   if (hasSpatialCapability(CAPABILITY_SPACE_CANONICAL)) request.messages[1].content += '\n' + SPACE_CANONICAL_PROMPT;
@@ -784,17 +858,20 @@ export function buildSqlLayoutTask(
       ...(input.requiredRefs ?? []).map((item) => `${ref(item.id) ?? item.id}=必要引用(${item.kind})`),
     ],
     allowedOpsAndKinds: `map.layout.request、noop；本批地图 kind 只能是 ${layoutKinds.join('/')}（以每张图给定值为准，不得改写）`,
-    extents: scopes.map((scope) => `${scope.map}: ${scope.extent.width}×${scope.extent.height} ${scope.units}（框格 ${scope.frame.cols}×${scope.frame.rows}，${scope.frame.scaleLocked ? '比例尺已锁定' : '比例尺未锁定，按 1 格 = 1 单位处理'}）`).join('；'),
+    extents: scopes.map((scope) => {
+      const mpp = scope.frame.metersPerCell;
+      const units = typeof mpp === 'number' && mpp > 0 ? `1 格 = ${mpp} 米`
+        : scope.units === 'cells' ? '未标定；宽高及坐标以格为单位，不换算成米'
+          : '首次估计的物理幅面；比例尺由程序保存，不自行假定一格一米';
+      return `${scope.map}: ${scope.extent.width}×${scope.extent.height} ${scope.units}（框格 ${scope.frame.cols}×${scope.frame.rows}，${scope.frame.scaleLocked ? '比例尺已锁定' : '比例尺未锁定'}；${units}）`;
+    }).join('；'),
     locks: [
       `比例尺锁定图：${pending.filter((entry) => entry.map.scale_locked).map((entry) => ref(entry.mapId)).filter(Boolean).join('、') || '（无）'}`,
       'savedConstraints 的既有结构与稳定局部 ID 逐图保留，省略字段=保持、删除只能写 spec.deletes',
       '作者确认事实与已确认/锁定几何不得改写',
     ].join('；'),
     selectedTargetIds: scopes.map((scope) => String(scope.map)),
-    sourceBlocks: (input.sourceSnapshot ?? []).map((source) => ({
-      sourceKey: source.key, contentHash: source.hash, start: 0, end: source.text.length,
-      chunkKey: `${source.key}#0`, text: source.text,
-    })),
+    sourceBlocks: [],
     deferredSummary: `冻结目录未发送 ${catalogue.remainingIds.length} 项；本批只处理上面列出的目标，未发送内容不计入本批，也不要声称为它们做过处理`,
     priorBindings: [
       ...scopes.filter((scope) => scope.spaceSize).map((scope) => `space:${scope.spaceSize!.locationId}=${scope.spaceSize!.widthM}×${scope.spaceSize!.heightM}m`),

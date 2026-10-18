@@ -45,6 +45,116 @@ test('malformed layout gets one budgeted fresh response; only the valid response
  }finally{await repo.close();}
 });
 
+test('spatial excerpt repair runs once and layout receives only verified text',async()=>{
+ const quote='城市北面有一座灯塔。';
+ const port=model(req=>req.batchId.includes('_evidence_')
+  ? req.batchId.endsWith('_repair')?JSON.stringify({facts:[{mapRef:IDS.M1,quote}]}):'{"facts":['
+  : JSON.stringify({op:'map.layout.request',ref:IDS.M1,data:{kind:'overview',spec:{zones:[{id:IDS.L1,name:'城市',role:'city',size:'medium'}]}}}));
+ const repo=await seeded(port);
+ try{
+  const p=await repo.prepareTurn(input({manual:true,phaseBatches:[],operations:[],worldCompletion:undefined,sceneMaps:true,layoutMaps:[IDS.M1],sourceSnapshot:[{key:'lore-lighthouse',kind:'lorebook',hash:'hash-lighthouse',text:quote+' 无关正文'.repeat(300)}]}));
+  assert.deepEqual(port.calls.map(call=>call.batchId.includes('_evidence_')?'extract':'layout'),['extract','extract','layout']);
+  assert.ok(p.receipt.issues.some(issue=>issue.code==='LAYOUT_EVIDENCE_RETRIED'));
+  assert.ok(port.calls[2].messages[1].content.includes(quote));
+  assert.ok(!port.calls[2].messages[1].content.includes('无关正文'.repeat(20)));
+  assert.ok(JSON.parse(queryBound(repo.getCandidate(p.token).db,'SELECT frame_json FROM maps WHERE id=?',[IDS.M1])[0].frame_json).atlasScene);
+ }finally{await repo.close();}
+});
+
+test('transient extraction HTTP failure retries once before layout',async()=>{
+ const quote='城市北面有一座灯塔。';
+ const port={calls:[],async request(req){
+  this.calls.push(req);
+  if(this.calls.length===1)throw Object.assign(new Error('HTTP 502'),{code:'API_REQUEST_FAILED',retryable:true});
+  return {batchId:req.batchId,text:req.batchId.includes('_evidence_')?JSON.stringify({facts:[{mapRef:IDS.M1,quote}]}):JSON.stringify({op:'map.layout.request',ref:IDS.M1,data:{kind:'overview',spec:{zones:[{id:IDS.L1,name:'城市',role:'city',size:'medium'}]}}}),finishReason:'stop',httpStatus:200,durationMs:1};
+ }};
+ const repo=await seeded(port);
+ try{
+  const p=await repo.prepareTurn(input({manual:true,phaseBatches:[],operations:[],worldCompletion:undefined,sceneMaps:true,layoutMaps:[IDS.M1],sourceSnapshot:[{key:'lore',kind:'lorebook',hash:'h',text:quote}]}));
+  assert.equal(port.calls.length,3);
+  assert.match(port.calls[1].batchId,/_transport_retry$/);
+  assert.equal(p.receipt.status,'committed');
+  assert.ok(p.receipt.issues.some(issue=>issue.code==='LAYOUT_TRANSPORT_RETRIED'));
+  assert.ok(!p.receipt.issues.some(issue=>issue.code==='LAYOUT_MODEL_FAILED'));
+  assert.ok(JSON.parse(queryBound(repo.getCandidate(p.token).db,'SELECT frame_json FROM maps WHERE id=?',[IDS.M1])[0].frame_json).atlasScene);
+ }finally{await repo.close();}
+});
+
+test('transient layout HTTP failure retries the same map once',async()=>{
+ const port={calls:[],async request(req){
+  this.calls.push(req);
+  if(this.calls.length===2)throw Object.assign(new Error('HTTP 502'),{code:'API_REQUEST_FAILED',retryable:true});
+  return {batchId:req.batchId,text:req.batchId.includes('_evidence_')?'{"facts":[]}':JSON.stringify({op:'map.layout.request',ref:IDS.M1,data:{kind:'overview',spec:{zones:[{id:IDS.L1,name:'城市',role:'city',size:'medium'}]}}}),finishReason:'stop',httpStatus:200,durationMs:1};
+ }};
+ const repo=await seeded(port);
+ try{
+  const p=await repo.prepareTurn(input({manual:true,phaseBatches:[],operations:[],worldCompletion:undefined,sceneMaps:true,layoutMaps:[IDS.M1],sourceSnapshot:[{key:'lore',kind:'lorebook',hash:'h',text:'城市北面有一座灯塔。'}]}));
+  assert.equal(port.calls.length,3);
+  assert.match(port.calls[2].batchId,/_transport_retry$/);
+  assert.equal(p.receipt.status,'committed');
+  assert.ok(p.receipt.issues.some(issue=>issue.code==='LAYOUT_TRANSPORT_RETRIED'));
+  assert.ok(!p.receipt.issues.some(issue=>issue.code==='LAYOUT_MODEL_FAILED'));
+  assert.ok(JSON.parse(queryBound(repo.getCandidate(p.token).db,'SELECT frame_json FROM maps WHERE id=?',[IDS.M1])[0].frame_json).atlasScene);
+ }finally{await repo.close();}
+});
+
+test('two transient extraction failures stop after one retry and keep the saved map',async()=>{
+ const port={calls:[],async request(req){this.calls.push(req);throw Object.assign(new Error('HTTP 502'),{code:'API_REQUEST_FAILED',retryable:true});}};
+ const repo=await seeded(port);
+ try{
+  const before=queryBound(repo.db,'SELECT frame_json FROM maps WHERE id=?',[IDS.M1])[0].frame_json;
+  const p=await repo.prepareTurn(input({manual:true,phaseBatches:[],operations:[],worldCompletion:undefined,sceneMaps:true,layoutMaps:[IDS.M1],sourceSnapshot:[{key:'lore',kind:'lorebook',hash:'h',text:'城市北面有一座灯塔。'}]}));
+  assert.equal(port.calls.length,2);
+  assert.ok(p.receipt.issues.some(issue=>issue.code==='LAYOUT_MODEL_FAILED'));
+  assert.ok(p.receipt.issues.some(issue=>issue.code==='LAYOUT_BATCH_PENDING'));
+  assert.deepEqual(JSON.parse(queryBound(repo.getCandidate(p.token).db,'SELECT frame_json FROM maps WHERE id=?',[IDS.M1])[0].frame_json).atlasScene,JSON.parse(before).atlasScene);
+ }finally{await repo.close();}
+});
+
+test('unverifiable excerpts never reach layout or overwrite the map',async()=>{
+ const port=model(()=>'{"facts":[{"mapRef":"M1","quote":"原文没有的方位"}]}');
+ const repo=await seeded(port);
+ try{
+  const before=queryBound(repo.db,'SELECT frame_json FROM maps WHERE id=?',[IDS.M1])[0].frame_json;
+  const p=await repo.prepareTurn(input({manual:true,phaseBatches:[],operations:[],worldCompletion:undefined,sceneMaps:true,layoutMaps:[IDS.M1],sourceSnapshot:[{key:'lore',kind:'lorebook',hash:'h',text:'城市有一座灯塔。'}]}));
+  assert.equal(port.calls.length,2);
+  assert.ok(port.calls.every(call=>call.batchId.includes('_evidence_')));
+  assert.ok(p.receipt.issues.some(issue=>issue.code==='LAYOUT_MODEL_FAILED'));
+  assert.ok(p.receipt.issues.some(issue=>issue.code==='LAYOUT_BATCH_PENDING'&&issue.message.includes('1 张地图')));
+  const after=queryBound(repo.getCandidate(p.token).db,'SELECT frame_json FROM maps WHERE id=?',[IDS.M1])[0].frame_json;
+  assert.deepEqual(JSON.parse(after).atlasScene,JSON.parse(before).atlasScene);
+ }finally{await repo.close();}
+});
+
+test('one excerpt pass is shared across maps and facts stay map scoped',async()=>{
+ const quote='教室在学校的东侧。';
+ const port=model(req=>req.batchId.includes('_evidence_')
+  ? JSON.stringify({facts:[{mapRef:IDS.M2,quote}]})
+  : JSON.parse(req.messages[1].content.split('\n').find(line=>line.startsWith('本图：')).slice(3))
+    .map(scope=>JSON.stringify({op:'map.layout.request',ref:scope.map,data:{kind:scope.kind,spec:scope.kind==='floor'?{rooms:scope.baselineRooms}:{surface:'mixed'}}})).join('\n'));
+ const repo=await seeded(port);
+ try{
+  const p=await repo.prepareTurn(input({manual:true,phaseBatches:[],operations:[],worldCompletion:undefined,sceneMaps:true,layoutMaps:[IDS.M1,IDS.M2],sourceSnapshot:[{key:'lore-east',kind:'lorebook',hash:'h-east',text:quote}]}));
+  assert.deepEqual(port.calls.map(call=>call.batchId.includes('_evidence_')?'extract':'layout'),['extract','layout','layout']);
+  assert.ok(!port.calls[1].messages[1].content.includes(quote));
+  assert.ok(port.calls[2].messages[1].content.includes(quote));
+  assert.ok(!p.receipt.issues.some(issue=>issue.code==='LAYOUT_MODEL_FAILED'));
+ }finally{await repo.close();}
+});
+
+test('explicit length stop in excerpt stage never publishes a partial layout',async()=>{
+ const port={calls:[],async request(req){this.calls.push(req);return {batchId:req.batchId,text:'{"facts":[]}',finishReason:'length',httpStatus:200,durationMs:1};}};
+ const repo=await seeded(port);
+ try{
+  const before=queryBound(repo.db,'SELECT frame_json FROM maps WHERE id=?',[IDS.M1])[0].frame_json;
+  const p=await repo.prepareTurn(input({manual:true,phaseBatches:[],operations:[],worldCompletion:undefined,sceneMaps:true,layoutMaps:[IDS.M1,IDS.M2],sourceSnapshot:[{key:'lore',kind:'lorebook',hash:'h',text:'城市的灯塔在北面。'}]}));
+  assert.equal(port.calls.length,1);
+  assert.ok(p.receipt.issues.some(issue=>issue.code==='LAYOUT_MODEL_FAILED'&&issue.message.includes('截断')));
+  assert.ok(p.receipt.issues.some(issue=>issue.code==='LAYOUT_BATCH_PENDING'));
+  assert.deepEqual(JSON.parse(queryBound(repo.getCandidate(p.token).db,'SELECT frame_json FROM maps WHERE id=?',[IDS.M1])[0].frame_json).atlasScene,JSON.parse(before).atlasScene);
+ }finally{await repo.close();}
+});
+
 for (const firstReply of ['{"op":"noop"}', JSON.stringify({op:'map.layout.request',ref:'outside-batch',data:{kind:'overview',spec:{surface:'mixed'}}})]) {
  test('layout retries a semantic empty response without applying foreign map references: '+firstReply.slice(0,32),async()=>{
   const port=model((req,n)=>n===1?firstReply:JSON.stringify({op:'map.layout.request',ref:IDS.M1,data:{kind:'overview',spec:{zones:[{id:IDS.L1,name:'城市',role:'city',size:'medium'}]}}}));
@@ -131,17 +241,18 @@ test('empty bootstrap observes first, constructs its newly registered place, and
  let refuseLayout=false;
  const port=model((req,n)=>{
   if(refuseLayout)return noop;
+  if(req.batchId.includes('_evidence_'))return '{"facts":[]}';
   if(req.batchId.startsWith('layout_'))return JSON.parse(req.messages[1].content.split('\n').find(line=>line.startsWith('本图：')).slice(3)).map(scope=>JSON.stringify({op:'map.layout.request',ref:scope.map,data:{kind:scope.kind,spec:scope.kind==='floor'?{rooms:scope.baselineRooms}:{surface:'mixed'}}})).join('\n');
   return n===1?'{"op":"location.upsert","ref":"new:lodge","data":{"name":"新旅店","kind":"building"}}\n{"op":"character.upsert","ref":"new:pov","data":{"name":"测试主角","identity":"旅行者","role":"protagonist","location_ref":"new:lodge"}}':JSON.stringify({op:'location.upsert',ref:'new:kitchen',data:{name:'厨房',kind:'room',parent_ref:req.messages[1].content.match(/focus=([^、\n]+)/)[1]}});
  });
  const hostRecord={chatUid:'accept-bootstrap',branchId:'main',chatMetadata:{},saveMetadata:async()=>true};
  const provider=createBrowserSqlHost({enabled:()=>true,context:()=>hostRecord,loadRuntime:loadAtlasSqlRuntime,modelPort:port});
  try {const session=await provider.session(hostRecord.chatUid);await handleSqlMapAction(session,'map/bootstrap',{chatId:hostRecord.chatUid,requestId:'initial',assistantText:'主角进入有厨房的旅店。'});
-  assert.equal(port.calls.length,4);assert.ok(port.calls[1].batchId.startsWith('construction_'));assert.ok(port.calls.slice(2).every(call=>call.batchId.startsWith('layout_')));
+  assert.equal(port.calls.length,6);assert.ok(port.calls[1].batchId.startsWith('construction_'));assert.ok(port.calls.slice(2).every(call=>call.batchId.startsWith('layout_')));assert.equal(port.calls.filter(call=>call.batchId.includes('_evidence_')).length,1);
   assert.match(port.calls[1].messages[0].content,/parent_ref/);assert.match(port.calls[1].messages[0].content,/from_ref/);
   assert.match(port.calls[1].messages[1].content,/新旅店/);
   const places=queryBound(session.repo.db,'SELECT id,name,parent_location_id FROM locations',[]);assert.equal(places.find(p=>p.name==='厨房').parent_location_id,places.find(p=>p.name==='新旅店').id);
-  const state=await handleSqlChatRequest(session,'state',{});assert.equal(state.receipts.length,1);assert.equal(state.receipts[0].detail.coreSaved,true);assert.ok(state.receipts[0].detail.receipt.groups.length);assert.equal(state.receipts[0].detail.attempts.length,4);
+  const state=await handleSqlChatRequest(session,'state',{});assert.equal(state.receipts.length,1);assert.equal(state.receipts[0].detail.coreSaved,true);assert.ok(state.receipts[0].detail.receipt.groups.length);assert.equal(state.receipts[0].detail.attempts.length,6);
   assert.equal(state.receipts[0].detail.operation,'build');assert.equal(state.receipts[0].detail.sceneSaved,true);
   assert.ok(queryBound(session.repo.db,'SELECT frame_json FROM maps',[]).every(row=>JSON.parse(row.frame_json).atlasScene),JSON.stringify({message:'初建所有地图自动生成布局后统一保存',issues:state.receipts[0].detail.receipt.issues,maps:queryBound(session.repo.db,'SELECT name,frame_json FROM maps',[])}));
   assert.ok(queryBound(session.repo.db,'SELECT frame_json FROM maps',[]).some(row=>JSON.parse(row.frame_json).atlasWorldFill));
@@ -243,7 +354,7 @@ test('one candidate finishes every registered unvisited room beyond the foregrou
   const before=Buffer.from(repo.db.export());
   const p=await repo.prepareTurn(input({phaseBatches:['observe','geography'],worldCompletion:undefined,layoutMaps:'active'}));
   assert.deepEqual(Buffer.from(repo.db.export()),before,'所有布局结束前不发布候选');
-  assert.equal(port.calls.filter(req=>req.batchId.startsWith('layout_')).length,6);
+  assert.equal(port.calls.filter(req=>req.batchId.startsWith('layout_')).length,11);
   assert.ok(!p.receipt.issues.some(i=>i.code==='LAYOUT_BATCH_PENDING'||i.severity==='error'),JSON.stringify(p.receipt.issues));
   const frames=queryBound(repo.getCandidate(p.token).db,'SELECT frame_json FROM maps WHERE branch_id=?',[IDS.branchMain]).map(row=>JSON.parse(row.frame_json));
   assert.equal(frames.length,11);assert.ok(frames.every(f=>f.atlasScene&&f.atlasLayoutContext));

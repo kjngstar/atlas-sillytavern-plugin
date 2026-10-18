@@ -567,7 +567,7 @@ export function toLegacyTurnReceipt(
     triggeredNpcIds: [],
     adoptedEventIds: [],
     summary: `统一回执：成功组 ${businessSucceeded.length}，失败组 ${rejected.length}，时间 ${receipt.clockBeforeS}→${receipt.clockAfterS}${succeeded.length>businessSucceeded.length?'；另保存建设进度':''}${issues.length?`；${issues.length} 项问题`:''}`,
-    retryable: rejected.length > 0 || receipt.status==='partial' && issues.some(i=>i.retryable && ['MODEL_REQUEST_FAILED','MODEL_BUDGET_EXHAUSTED','ACTOR_BUDGET_EXHAUSTED','OUTCOME_DEFERRED'].includes(i.code)),
+    retryable: rejected.length > 0 || receipt.status==='partial' && issues.some(i=>i.retryable && ['MODEL_REQUEST_FAILED','MODEL_BUDGET_EXHAUSTED','ACTOR_BUDGET_EXHAUSTED','OUTCOME_DEFERRED','LAYOUT_MODEL_FAILED','LAYOUT_BATCH_PENDING','LAYOUT_NOT_GENERATED','LAYOUT_DETAILS_DEFERRED','WORLD_CONSTRUCTION_UNIT_RETRY'].includes(i.code)),
     // 新接口读这里（完整分组与问题，不再另造一份 snake_case 回执）。
     receipt: {
       turnId: receipt.turnId,

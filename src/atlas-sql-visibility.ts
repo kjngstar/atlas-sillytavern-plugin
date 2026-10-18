@@ -10,6 +10,13 @@ export function sqlVisibility(ctx: ViewContext) {
   const povId=ctx.povId ?? (branch?.pov_character_id?String(branch.pov_character_id):protagonists.length===1?String(protagonists[0].id):null);
   const projection=projectForPov(ctx,{characterId:povId});
   const clock=Number(branch?.clock_s??0);
+  // Public availability at a known place is not proof that the POV heard a message.
+  const knownInformation=new Set(queryBound(ctx.db,`SELECT DISTINCT i.id FROM knowledge k JOIN information i
+    ON i.branch_id=k.branch_id AND i.id=k.information_id
+    WHERE k.branch_id=? AND ${povId?'k.knower_character_id=?':'k.is_pov=1'}
+    AND k.status='active' AND i.status='active' AND k.first_received_at_s<=? AND i.created_at_s<=?
+    AND (i.expires_at_s IS NULL OR i.expires_at_s>?)`,
+    povId?[ctx.branchId,povId,clock,clock,clock]:[ctx.branchId,clock,clock,clock]).map(row=>String(row.id)));
   const knownLocations=new Set(projection.knownLocations.filter(loc=>loc.firstReceivedAtS<=clock).map(loc=>loc.locationId));
   const knownCharacters=new Set(projection.knownCharacters.map(ch=>ch.entityId));
   const player=povId?cache.characters?.get(povId):null;
@@ -29,6 +36,6 @@ export function sqlVisibility(ctx: ViewContext) {
       if(item.holder_character_id===povId||!item.holder_character_id&&!item.container_item_id&&item.location_id===here)visibleItems.add(String(item.id));
     }
   }
-  return {povId,here,projection,knownLocations,knownCharacters,visibleCharacters,visibleItems,
+  return {povId,here,projection,knownInformation,knownLocations,knownCharacters,visibleCharacters,visibleItems,
     visible:(kind:string,id:string)=>kind==='location'?knownLocations.has(id):kind==='character'?visibleCharacters.has(id):visibleItems.has(id)};
 }

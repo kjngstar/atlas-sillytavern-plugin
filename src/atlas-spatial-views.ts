@@ -14,10 +14,12 @@ import { queryBound } from './atlas-db-runtime.ts';
 import { queryMapView } from './atlas-db-views.ts';
 import type { ViewContext } from './atlas-db-views.ts';
 import { sqlVisibility } from './atlas-sql-visibility.ts';
+import { createTableReadPort } from './atlas-db-readport.ts';
+import { computeMapLayoutSignatures } from './atlas-sql-layout-task.ts';
 import { assessMapCompleteness } from './atlas-map-assessment.ts';
 import type { MapAssessmentV1 } from './atlas-map-assessment.ts';
 import { boundCorridorIdOf, resolveSpatialProfile } from './atlas-spatial-profile.ts';
-import { filterSceneForView, hydrateScene, projectMapView, readSceneFrame } from '../vendor/atlas-spatial/index.mjs';
+import { filterSceneForView, hydrateScene, projectMapView, readSceneFrame, collectMapLocations } from '../vendor/atlas-spatial/index.mjs';
 import type { Diagnostic, SceneDocument } from '../vendor/atlas-spatial/index.mjs';
 import type { ViewQuery, ViewResult } from './atlas-ops-contract.ts';
 
@@ -102,6 +104,10 @@ export function querySpatialScene(ctx: ViewContext, query: ViewQuery): ViewResul
   const locationById = new Map<string, Record<string, unknown>>();
   for (const row of locationRows) locationById.set(String(row.id), row);
   const visibility = sqlVisibility(ctx);
+  // Author signatures are never compared for POV: even a boolean could reveal
+  // hidden structural changes. POV reports alignment as unverified instead.
+  const currentSignatures = ctx.viewMode === 'pov' ? new Map<string, string>()
+    : computeMapLayoutSignatures(createTableReadPort(ctx.db), ctx.branchId);
   const scope = {
     chatId: ctx.chatId ?? `branch:${ctx.branchId}`,
     branchId: ctx.branchId,
@@ -191,7 +197,8 @@ export function querySpatialScene(ctx: ViewContext, query: ViewQuery): ViewResul
     const containerId = mapRow.container_location_id ? String(mapRow.container_location_id) : '';
     const container = containerId ? locationById.get(containerId) ?? null : null;
     const visible = (id: string): boolean => scope.viewMode !== 'pov' || visibility.knownLocations.has(id);
-    const members = locationRows.filter((row) => String(row.map_id ?? '') === mapId && visible(String(row.id)));
+    const members = collectMapLocations({ mapRow, maps: [...mapRows.values()], locations: locationRows })
+      .filter((row) => visible(String(row.id)));
     const profile = resolveSpatialProfile({
       map: mapRow,
       container,
@@ -230,6 +237,7 @@ export function querySpatialScene(ctx: ViewContext, query: ViewQuery): ViewResul
       knownEntityIds,
       // 保存状态只由最终 ACK 决定；读视图读的是**已发布**的分支库，预览路径必须用 receipt 覆盖。
       saveState: 'saved',
+      currentLayoutHash: currentSignatures.get(mapId) ?? null,
       // 没有下发场景时，下发的状态就是权威（invalid/missing），不让评估另算一个。
       ...(scene ? {} : { sceneState: sceneStatus }),
     });

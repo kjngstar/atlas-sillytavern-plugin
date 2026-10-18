@@ -161,42 +161,31 @@ test('QUEUE02 3 新 : 1 重试 的轮转与「失败目标不占满名额」', a
   assert.deepEqual(rotationOrder([], retry, 0).map((item) => item.unitId), ['r1'], '新单元为空时名额释放给重试');
   assert.deepEqual(rotationOrder(fresh, [], 3).map((item) => item.unitId), ['u1', 'u2', 'u3'], '重试为空时名额释放给新单元');
 
-  // 端到端：连续 3 次请求失败 → 单元按额度转 suspended，目标退回 pending 并带着已服务序号；
-  // 一次都没轮到的尾部目标下一批排在最前，因此不会被永久失败的目标堵死。
-  const ids = queuedIds(65);
-  let failures = 0;
+  // Production rotation: fresh targets must be considered before they have
+  // persistent unit rows. A failed first unit cannot consume fresh slots 2/3.
+  const ids = queuedIds(260);
   const port = model((req) => {
     if (!req.batchId.startsWith('construction_')) return noop;
-    failures += 1;
-    if (failures <= MAX_UNIT_ATTEMPTS) throw new Error('合成网络失败');
-    return promptFoci(req).slice(0, PATCH_OPS_PER_BATCH).map((focus) => JSON.stringify({ op: 'location.upsert', ref: focus, data: { description: '重试后核对' } })).join('\n');
+    throw new Error('合成网络失败');
   });
   const repo = await seeded(port, (db) => equip(db, ids));
   try {
     const focus = ids;
-    for (let attempt = 1; attempt <= MAX_UNIT_ATTEMPTS; attempt += 1) {
+    const selected=[];
+    for (let attempt = 0; attempt < 4; attempt += 1) {
       const prepared = await repo.prepareTurn(turnInput(repo, { worldCompletion: { mode: 'local', focusLocationIds: focus } }));
       await save(repo, prepared);
+      const served=unitRows(repo.db).sort((a,b)=>Number(b.last_served_seq)-Number(a.last_served_seq))[0];
+      selected.push(served.subject_key);
     }
-    const unitsAfterFail = unitRows(repo.db);
-    assert.equal(unitsAfterFail.length, 1, '反复失败的是同一个单元，不是每轮新建一个');
-    assert.equal(unitsAfterFail[0].status, 'suspended', `超过 ${MAX_UNIT_ATTEMPTS} 次自动重试后必须让出名额`);
-    assert.equal(JSON.parse(String(unitsAfterFail[0].payload_json)).exhausted, true);
-    assert.equal(targetRows(repo.db).filter((row) => row.status === 'processed').length, 0, '失败批次不能记成已处理');
-    assert.equal(targetRows(repo.db).filter((row) => row.status === 'pending').length, 65, '失败目标退回 pending，不丢');
-
-    // 目标行必须带已服务序号：否则下一批还会先挑同一批高优先级目标，尾部永远轮不到。
-    const servedFirst = targetRows(repo.db).filter((row) => row.subject_key !== ids[64]).every((row) => Number(row.last_served_seq) > 0);
-    assert.equal(servedFirst, true, '已被服务过的目标必须带序号');
-    assert.equal(Number(targetRows(repo.db).find((row) => row.subject_key === ids[64]).last_served_seq), 0);
-
-    // 下一批：没有可调度单元 → 新目标优先，尾部目标真的被处理。
-    const recovered = await repo.prepareTurn(turnInput(repo, { worldCompletion: { mode: 'local', focusLocationIds: focus } }));
-    await save(repo, recovered);
-    assert.equal(targetRows(repo.db).some((row) => row.subject_key === ids[64] && row.status === 'processed'), true, '永久失败的旧单元不能把新尾部永远挡在外面');
-    assert.equal(constructionCalls(port).length, MAX_UNIT_ATTEMPTS + 1);
-    assert.equal(unitRows(repo.db).filter((row) => row.status === 'suspended').length, 1);
-    assert.equal(unitRows(repo.db).filter((row) => row.status === 'processed').length, 1);
+    assert.equal(new Set(selected.slice(0,3)).size,3,'前三个实际名额处理三个不同新单元');
+    assert.equal(selected[3],selected[0],'第四个实际名额重试最早失败单元');
+    const units=unitRows(repo.db);
+    assert.equal(units.length,3);
+    assert.deepEqual(units.map(row=>JSON.parse(row.payload_json).attemptCount).sort(),[1,1,2]);
+    assert.equal(targetRows(repo.db).filter(row=>row.status==='processed').length,0);
+    assert.equal(targetRows(repo.db).filter(row=>row.status==='pending').length,260);
+    assert.equal(constructionCalls(port).length,4);
   } finally { await repo.close(); }
 });
 
@@ -377,6 +366,7 @@ test('QUEUE07 焦点变化不使另外 scope 的进度丢失', async () => {
 
 /** 初建：登记一个旅店并给它一张内部图；建设批次按标签里的焦点补描述。 */
 const bootstrapModel = () => model((req, n) => {
+  if (req.batchId.includes('_evidence_')) return '{"facts":[]}';
   if (req.batchId.startsWith('layout_')) {
     const line = req.messages[1].content.split('\n').find((item) => item.startsWith('本图：'));
     return JSON.parse(line.slice(3))

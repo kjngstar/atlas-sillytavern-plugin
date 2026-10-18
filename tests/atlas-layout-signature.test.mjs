@@ -152,7 +152,7 @@ test('SIG00 同一输入与顺序无关；策略版本变化会改变指纹', ()
 
   const otherPolicy = computeLayoutInputSignature({ ...base, policyVersion: 'layout-v99' });
   assert.notEqual(otherPolicy, computeLayoutInputSignature(base));
-  assert.equal(LAYOUT_SIGNATURE_POLICY_VERSION, 'layout-v4');
+  assert.equal(LAYOUT_SIGNATURE_POLICY_VERSION, 'layout-v6');
 
   const locked = computeLayoutInputSignature({ ...base, structureLocked: true });
   assert.notEqual(locked, computeLayoutInputSignature(base), '权威结构锁必须参与指纹');
@@ -407,7 +407,7 @@ test('SIG05b 新生成失败时，旧 scene 与旧指纹都保留', async () => 
   const model = {
     async request(req) {
       // 观察与布局一律返回 noop：本轮布局拿不到任何 map.layout.request。
-      return { batchId: req.batchId, text: '{"op":"noop"}', finishReason: 'stop', httpStatus: 200, durationMs: 2 };
+      return { batchId: req.batchId, text: req.batchId.includes('_evidence_') ? '{"facts":[]}' : '{"op":"noop"}', finishReason: 'stop', httpStatus: 200, durationMs: 2 };
     },
   };
   const state = { ctx: { chatId: IDS.chatA, chatMetadata: { atlas: { schemaVersion: 1, world: { id: 'world_sig' } } }, saveMetadata: async () => true } };

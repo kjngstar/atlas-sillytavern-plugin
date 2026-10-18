@@ -14,17 +14,19 @@ const initial=[
  {op:'item.upsert',ref:'new:book',data:{name:'课本',location_ref:'new:room'}},
 ];
 async function fixture(){
- let saves=0,calls=0,saveOk=true,layoutOverride=null,response=initial.map(op=>JSON.stringify(op)).join('\n');
+ let saves=0,calls=0,saveOk=true,layoutOverride=null,layoutFailure=false,response=initial.map(op=>JSON.stringify(op)).join('\n');
  const host={chatUid:'maps-real',branchId:'main',chatMetadata:{},saveMetadata:async()=>{saves++;return saveOk;}};
  const provider=createBrowserSqlHost({enabled:()=>true,context:()=>host,loadRuntime:loadAtlasSqlRuntime,
   modelPort:{request:async request=>{calls++;
+   if(layoutFailure&&request.allowedOps?.includes('map.layout.request'))throw new Error('fixture layout connection unavailable');
+   if(request.batchId.includes('_evidence_'))return {batchId:request.batchId,text:'{"facts":[]}',finishReason:'stop'};
    const line=request.messages?.[1]?.content.split('\n').find(line=>line.startsWith('本图：'));
    const layout=line?JSON.parse(line.slice(3)).map(scope=>JSON.stringify({op:'map.layout.request',ref:scope.map,data:{kind:scope.kind,spec:scope.kind==='floor'?{rooms:scope.baselineRooms}:scope.kind==='city'?{riverWidth:0,districts:[{id:scope.container.ref,name:scope.name,bank:'west',order:0}]}:{surface:'mixed'}}})).join('\n'):null;
    return {batchId:request.batchId,text:request.batchId.startsWith('construction_')?'{"op":"noop"}':layout?(layoutOverride??layout):response,finishReason:'stop'};}}});
  const core=createAtlasServerCore({store:{read:async()=>null,write:async()=>{throw Error('No legacy writer');}},sqlSessionProvider:provider});
  const send=(action,body={})=>core.handle('POST','/sql/chat/'+action,{chatId:host.chatUid,chatUid:host.chatUid,...body},{local:true});
  const session=await provider.session(host.chatUid),seed=session.repo.internal.currentHeadTurnId();
- return {host,provider,core,session,seed,send,saves:()=>saves,calls:()=>calls,setSave:ok=>{saveOk=ok;},setResponse:r=>{response=r;},setLayoutResponse:r=>{layoutOverride=r;},close:()=>provider.close()};
+ return {host,provider,core,session,seed,send,saves:()=>saves,calls:()=>calls,setSave:ok=>{saveOk=ok;},setResponse:r=>{response=r;},setLayoutResponse:r=>{layoutOverride=r;},setLayoutFailure:value=>{layoutFailure=value;},close:()=>provider.close()};
 }
 async function bootstrap(f){const request={assistantText:'你和同学在学校的教室里。',loreSupplement:'所有条目原文',openingMessageId:'opening'};
  const preview=await f.send('map/bootstrap',{...request,apply:false});assert.equal(preview.status,200,JSON.stringify(preview.body));
@@ -33,6 +35,34 @@ async function bootstrap(f){const request={assistantText:'你和同学在学校�
  assert.equal(applied.body.data.coreSaved,true,JSON.stringify(applied.body));return applied.body.data.receipt.turnId;
 }
 const row=(f,table,name)=>queryBound(f.session.repo.db,`SELECT * FROM ${table} WHERE name=?`,[name])[0];
+for(const prefixed of [false,true])test(`UI location reference resolves scene-save evidence to the real map (prefixed=${prefixed})`,async()=>{
+ const f=await fixture();try{
+  await bootstrap(f);
+  const school=row(f,'locations','学校');
+  const target=queryBound(f.session.repo.db,'SELECT id FROM maps WHERE container_location_id=?',[school.id])[0];
+  const result=await f.send('map/layout',{mapId:(prefixed?'loc:':'')+school.id,requestId:'ui-location-scene-'+prefixed});
+  assert.equal(result.status,200,JSON.stringify(result.body));
+  assert.equal(result.body.data.coreSaved,true);
+  assert.equal(result.body.data.sceneSaved,true,'UI 地点入口和实际地图 ID 必须使用同一张图的本轮保存证据');
+  assert.ok(result.body.data.receipt.groups.some(group=>group.groupId.endsWith(':scene')&&group.status==='applied'));
+  assert.ok(queryBound(f.session.repo.db,"SELECT 1 FROM turn_changes WHERE turn_id=? AND target_table='maps' AND target_row_id=?",[result.body.data.receipt.turnId,target.id]).length);
+ }finally{await f.close();}
+});
+test('failed layout transport cannot count a retained old scene as a scene saved this turn',async()=>{
+ const f=await fixture();try{
+  await bootstrap(f);
+  const school=row(f,'locations','学校');
+  const target=queryBound(f.session.repo.db,'SELECT id,frame_json FROM maps WHERE container_location_id=?',[school.id])[0];
+  const before=JSON.parse(target.frame_json).atlasScene;
+  assert.ok(before);
+  f.setLayoutFailure(true);
+  const result=await f.send('map/layout',{mapId:school.id,requestId:'ui-retain-old-scene'});
+  assert.equal(result.status,200,JSON.stringify(result.body));
+  assert.equal(result.body.data.sceneSaved,false);
+  assert.ok(result.body.data.receipt.issues.some(issue=>issue.code==='LAYOUT_MODEL_FAILED'));
+  assert.deepEqual(JSON.parse(queryBound(f.session.repo.db,'SELECT frame_json FROM maps WHERE id=?',[target.id])[0].frame_json).atlasScene,before);
+ }finally{await f.close();}
+});
 test('生成时坏 JSON 不阻止已登记独立场地的基础形状，模型细节仍如实延期',async()=>{
  const f=await fixture();try{
   f.setResponse([...initial,{op:'location.upsert',ref:'new:yard',data:{name:'验收庭院',kind:'other',parent_ref:'new:school'}}].map(o=>JSON.stringify(o)).join('\n'));
@@ -51,15 +81,33 @@ test('生成时坏 JSON 不阻止已登记独立场地的基础形状，模型�
  }finally{await f.close();}
 });
 
+test('城市模型漏写街区时，只为已登记城市容器补齐自身街区',async()=>{
+ const f=await fixture();try{
+  await bootstrap(f);
+  const city=row(f,'locations','城市'),school=row(f,'locations','学校');
+  const map=queryBound(f.session.repo.db,'SELECT * FROM maps WHERE container_location_id=?',[city.id])[0];
+  const frame=JSON.parse(map.frame_json);delete frame.atlasScene;delete frame.atlasLayoutContext;
+  f.session.repo.db.run('UPDATE maps SET frame_json=? WHERE id=?',[JSON.stringify(frame),map.id]);
+  f.setLayoutResponse(JSON.stringify({op:'map.layout.request',ref:map.id,data:{kind:'city',spec:{riverWidth:0,buildings:[{id:school.id,name:'学校',districtId:city.id,w:30,h:20}]}}}));
+  const result=await f.send('map/layout',{mapId:map.id,requestId:'city-missing-district'});
+  assert.equal(result.body.data.coreSaved,true,JSON.stringify(result.body));
+  assert.equal(result.body.data.sceneSaved,true,JSON.stringify(result.body));
+  const after=JSON.parse(queryBound(f.session.repo.db,'SELECT frame_json FROM maps WHERE id=?',[map.id])[0].frame_json);
+  assert.equal(after.atlasScene.constraints.districts[0].id,city.id);
+  assert.ok(after.atlasScene.layout.buildings.some(building=>building.id===school.id));
+  assert.ok(!result.body.data.receipt.issues.some(issue=>issue.code==='DISTRICT_REF_UNKNOWN'));
+ }finally{await f.close();}
+});
+
 test('Q07 bootstrap previews actual scene layout without saving; applying uses the same candidate and all maps undo with their floor',async()=>{
  const f=await fixture();try{
   const req={assistantText:'在学校教室。',openingMessageId:'opening'};
   const preview=await f.send('map/bootstrap',{...req,apply:false});assert.equal(preview.status,200,JSON.stringify(preview.body));
-  assert.equal(preview.body.data.newLocations.length,3);assert.equal(f.saves(),0);assert.equal(f.calls(),4);
+  assert.equal(preview.body.data.newLocations.length,3);assert.equal(f.saves(),0);assert.equal(f.calls(),7);
   assert.equal(queryBound(f.session.repo.db,'SELECT COUNT(*) n FROM locations',[])[0].n,0);
   const p=preview.body.data;
   const apply=await f.send('map/bootstrap',{...req,apply:true,previewId:p.previewId,baseRevision:p.baseRevision});assert.equal(apply.body.data.coreSaved,true,JSON.stringify(apply.body));
-  assert.equal(f.calls(),4);assert.equal(f.saves(),1);
+  assert.equal(f.calls(),7);assert.equal(f.saves(),1);
   const builtMaps=queryBound(f.session.repo.db,'SELECT frame_json FROM maps',[]);
   assert.equal(builtMaps.filter(map=>JSON.parse(map.frame_json).atlasScene).length,4,JSON.stringify({message:'所有四张地图与两批布局必须在一次确认中一起保存',maps:builtMaps.map(map=>JSON.parse(map.frame_json)),receipt:apply.body.data.receipt}));
   assert.ok(builtMaps.every(map=>JSON.parse(map.frame_json).atlasLayoutContext),'两批布局都必须记录结构指纹，避免下轮重复生成');

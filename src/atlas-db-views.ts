@@ -9,14 +9,14 @@
  */
 
 import { decodeRow } from './atlas-db-codec.ts';
-import { queryBound } from './atlas-db-runtime.ts';
+import { AtlasDbError, queryBound } from './atlas-db-runtime.ts';
 import { buildPositionCache, resolveEffectivePosition } from './atlas-sim-position.ts';
 import { computeViewportScaleBar } from './atlas-scale.ts';
 import { scenePositions } from './atlas-scene-layout.ts';
 import { sqlVisibility } from './atlas-sql-visibility.ts';
 import { resolveMapTopology } from './atlas-map-topology.ts';
 import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
-import { publicMapFrame, publicSpaceCanonical } from '../vendor/atlas-spatial/index.mjs';
+import { publicMapFrame, publicSpaceCanonical, collectMapLocations } from '../vendor/atlas-spatial/index.mjs';
 import { readSpaceCanonical } from './atlas-space-canonical.ts';
 import {
   boundCorridorIdOf,
@@ -114,6 +114,29 @@ function rows(ctx: ViewContext, table: AtlasTableName, where = '', params: Array
 function clampRevision(ctx: ViewContext, requested?: number): { ok: boolean; requested?: number; current: number } {
   if (requested === undefined || requested === null) return { ok: true, current: ctx.revision };
   return { ok: requested === ctx.revision, requested, current: ctx.revision };
+}
+
+/** A complete, branch-scoped view read. Preserve the existing tolerant legacy decoding. */
+function rowsAll(ctx: ViewContext, table: AtlasTableName, where = '', params: Array<string | number | null> = []): Array<Record<string, unknown>> {
+  const result: Array<Record<string, unknown>> = [];
+  let afterId: string | null = null;
+  for (let guard = 0; guard < 10000; guard += 1) {
+    const clauses = ['branch_id = ?'];
+    const values: Array<string | number | null> = [ctx.branchId];
+    if (where) { clauses.push(where); values.push(...params); }
+    if (afterId !== null) { clauses.push('id > ?'); values.push(afterId); }
+    const page = queryBound(ctx.db, `SELECT * FROM ${table} WHERE ${clauses.join(' AND ')} ORDER BY id ASC LIMIT 500`, values);
+    if (!page.length) return result;
+    for (const raw of page) {
+      const id = String(raw.id ?? '');
+      if (!id || afterId !== null && id <= afterId) throw new AtlasDbError('READ_CURSOR_INVALID', '地图只读分页游标不可用', { table });
+      afterId = id;
+      const decoded = decodeRow(table, raw, { allowExtra: true });
+      result.push(decoded.ok ? decoded.row as Record<string, unknown> : raw as Record<string, unknown>);
+    }
+    if (page.length < 500) return result;
+  }
+  throw new AtlasDbError('READ_PAGE_BUDGET_EXCEEDED', '地图读取超过分页预算，不能返回不完整地图', { table });
 }
 
 /**
@@ -238,21 +261,22 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
   const stale = staleResult(ctx, query.revision);
   if (stale) return stale;
 
-  const maps = rows(ctx, 'maps', '', [], 1001).filter((m) => String(m.status) === 'active');
+  const maps = rowsAll(ctx, 'maps', "status = 'active'");
   if (maps.length === 0) {
     return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { empty: true, reason: 'NO_MAP' } };
   }
-  const selected = query.mapId ? maps.filter((m) => String(m.id) === query.mapId) : maps;
-  const mapIds = new Set(selected.map((m) => String(m.id)));
-
-  const locations = rows(ctx, 'locations', "status = 'active'", [], 2000);
+  const locations = rowsAll(ctx, 'locations', "status = 'active'");
   const locationById = new Map(locations.map((l) => [String(l.id), l]));
-  const characters = rows(ctx, 'characters', "status = 'active'", [], 2000);
-  const itemRows = rows(ctx, 'items', "status = 'active'", [], 2000);
-  const routes = rows(ctx, 'routes', '', [], 1000);
+  const characters = rowsAll(ctx, 'characters', "status = 'active'");
+  const itemRows = rowsAll(ctx, 'items', "status = 'active'");
+  const routes = rowsAll(ctx, 'routes');
   // 一次预取全部相关行：逐实体解析若各自查库会退化成本规模的 N+1（实测 500 人规模 24s）。
   const positionCache = buildPositionCache({ db: ctx.db, branchId: ctx.branchId });
   const visibility=sqlVisibility(ctx);
+  // 地图导航可回落到公开根图；容器未被主角发现时由下面的 POV DTO 过滤内容，
+  // 不能把整张旧图删掉，否则会破坏 unclassified 导航与只读档案查询。
+  const selected = query.mapId ? maps.filter((m) => String(m.id) === query.mapId) : maps;
+  const mapIds = new Set(selected.map((m) => String(m.id)));
 
   // ── M2-05：从 SQL 构造统一 TopologyInput，只算一次导航父图（02 §3）──────────
   // POV 先按原 sqlVisibility 把地点筛成可见集合再算拓扑：隐藏祖先自然断链，
@@ -328,6 +352,9 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
     const mapId = String(map.id);
     const points: MapViewItem['points'] = [];
     const coarseList: MapViewItem['coarseList'] = [];
+    const displayMaps = ctx.viewMode === 'pov'
+      ? maps.filter((m) => !m.container_location_id || visibility.visible('location', String(m.container_location_id))) : maps;
+    const logicalIds = new Set(collectMapLocations({ mapRow: map, maps: displayMaps, locations: visibleLocations }).map((l) => String(l.id)));
     const container=map.container_location_id?locationById.get(String(map.container_location_id)):null;
     const leafScene=container && (container.kind==='room'||!locations.some(l=>l.parent_location_id===container.id))
       && !['region','city'].includes(String(container.kind));
@@ -347,6 +374,7 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
       }
       const locMap = loc.map_id ? String(loc.map_id) : null;
       if (locMap !== mapId) continue;
+      if (!logicalIds.has(locId)) continue;
       const precision = String(loc.coord_precision ?? 'unknown');
       if (precision === 'unknown' || typeof loc.grid_x !== 'number' || typeof loc.grid_y !== 'number') continue;
       points.push({
@@ -368,11 +396,12 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
       const position = resolveEffectivePosition({ db: ctx.db, branchId: ctx.branchId }, chId, undefined, positionCache);
       const locationId=position.kind==='at_location'?position.locationId:ch.location_id?String(ch.location_id):null;
       if (position.kind==='in_transit'||position.kind==='unknown') continue;
-      const ownCoordinates=ch.map_id===mapId && ch.coord_precision!=='unknown' && typeof ch.grid_x==='number' && typeof ch.grid_y==='number';
+      const belongsHere=!locationId||logicalIds.has(locationId)||leafScene&&locationId===container?.id;
+      const ownCoordinates=belongsHere&&ch.map_id===mapId && ch.coord_precision!=='unknown' && typeof ch.grid_x==='number' && typeof ch.grid_y==='number';
       if (leafScene && locationId===container?.id && !ownCoordinates) {
         const pin=layout.get(chId)!;
         points.push({entityId:chId,kind:'character',name:String(ch.name),mapId,x:pin.x,y:pin.y,precision:'layout',radius:null,markerQuality:'layout',locationId,isProtagonist:ch.id===ctx.povId});
-      } else if (ownCoordinates || position.kind === 'at_grid' && position.mapId === mapId) {
+      } else if (ownCoordinates || belongsHere && position.kind === 'at_grid' && position.mapId === mapId) {
         const grid=ownCoordinates?{x:ch.grid_x as number,y:ch.grid_y as number,precision:String(ch.coord_precision)}:position.kind==='at_grid'?position:null;
         if(!grid)continue;
         points.push({
@@ -393,7 +422,7 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
         const seen=new Set<string>();let loc=locationById.get(locationId);
         while(loc && !seen.has(String(loc.id))) {
           seen.add(String(loc.id));
-          if(loc.map_id===mapId){coarseList.push({entityId:chId,name:String(ch.name),locationId:String(loc.id),locationName:String(loc.name)});break;}
+          if(loc.map_id===mapId&&logicalIds.has(String(loc.id))){coarseList.push({entityId:chId,name:String(ch.name),locationId:String(loc.id),locationName:String(loc.name)});break;}
           loc=loc.parent_location_id?locationById.get(String(loc.parent_location_id)):undefined;
         }
       }
@@ -408,7 +437,7 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
         points.push({entityId:itemId,kind:'item',name:String(item.name),mapId,x:pin.x,y:pin.y,precision:'layout',radius:null,markerQuality:'layout',locationId:String(container.id)});
         continue;
       }
-      if (position.kind === 'at_grid' && position.mapId === mapId) {
+      if (position.kind === 'at_grid' && position.mapId === mapId && (!item.location_id || logicalIds.has(String(item.location_id)) || leafScene && item.location_id===container?.id)) {
         points.push({
           entityId: itemId,
           kind: 'item',
@@ -512,7 +541,7 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
         const containerId = map.container_location_id ? String(map.container_location_id) : null;
         // 成员与路线的口径必须与布局任务（atlas-sql-layout-task.ts）一致：本图登记的
         // 非移动地点 + 以本图容器为端点的路线。否则「预览说 partial、布局说没事」会分叉。
-        const members = locations.filter((row) => String(row.map_id ?? '') === mapId && row.mobility !== 'mobile');
+        const members = collectMapLocations({ mapRow: map, maps: displayMaps, locations: visibleLocations }).filter((row) => row.mobility !== 'mobile');
         const profileRoutes = routes.filter((row) =>
           containerId !== null
           && (String(row.from_location_id ?? '') === containerId || String(row.to_location_id ?? '') === containerId));
@@ -556,17 +585,16 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
        * POV 只回报「本次可见读取是否超限」，不下发全库隐藏总数。
        */
       readLimits:Object.fromEntries(([
-        {table:'maps',limit:1001,shown:maps.length,where:`status='active'`},
-        {table:'locations',limit:2000,shown:locations.length,where:`status='active'`},
-        {table:'characters',limit:2000,shown:characters.length,where:`status='active'`},
-        {table:'items',limit:2000,shown:itemRows.length,where:`status='active'`},
-        {table:'routes',limit:1000,shown:routes.length,where:``},
-      ] as Array<{table:string;limit:number;shown:number;where:string}>).map(({table,limit,shown,where})=>{
-        const total=Number(queryBound(ctx.db,`SELECT COUNT(*) n FROM ${table} WHERE branch_id=?${where?` AND ${where}`:''}`,[ctx.branchId])[0].n);
-        const truncated=Math.max(0,total-Number(shown));
-        return [table,ctx.viewMode==='pov'
-          ? {limit,total:Number(shown),shown:Number(shown),truncated:0,overLimit:truncated>0}
-          : {limit,total,shown:Number(shown),truncated}];
+        ['maps', maps, (row: Record<string, unknown>) => !row.container_location_id || visibility.visible('location', String(row.container_location_id))],
+        ['locations', locations, (row: Record<string, unknown>) => visibility.visible('location', String(row.id))],
+        ['characters', characters, (row: Record<string, unknown>) => visibility.visible('character', String(row.id))],
+        ['items', itemRows, (row: Record<string, unknown>) => visibility.visible('item', String(row.id))],
+        ['routes', routes, () => true],
+      ] as Array<[string, Array<Record<string, unknown>>, (row: Record<string, unknown>) => boolean]>).map(([table, source, visible]) => {
+        const shown = ctx.viewMode !== 'pov' ? source.length : table === 'routes'
+          ? new Set(items.flatMap((item) => (item.routes ?? []).map((route) => route.routeId))).size
+          : source.filter(visible).length;
+        return [table, { limit:null, pageSize:500, paginated:true, complete:true, total:shown, shown, truncated:0, overLimit:false }];
       })),
       pointCount: items.reduce((n, m) => n + (m as MapViewItem).points.length, 0),
       coarseCount: items.reduce((n, m) => n + (m as MapViewItem).coarseList.length, 0),
@@ -725,23 +753,23 @@ export function queryEntityDetail(ctx: ViewContext, query: ViewQuery): ViewResul
     if(visibility&&!visibility.knownLocations.has(entityId))return {branchId:ctx.branchId,revision:ctx.revision,items:[],metadata:{reason:'POV_UNKNOWN'}};
     const location = rows(ctx, 'locations', 'id = ?', [entityId], 1)[0];
     if (!location) return { branchId: ctx.branchId, revision: ctx.revision, items: [], metadata: { reason: 'ENTITY_UNKNOWN' } };
-    const children = rows(ctx, 'locations', 'parent_location_id = ?', [entityId], 200).filter(loc=>!visibility||visibility.knownLocations.has(String(loc.id)));
+    const children = rowsAll(ctx, 'locations', 'parent_location_id = ?', [entityId]).filter(loc=>!visibility||visibility.knownLocations.has(String(loc.id)));
     const cache=buildPositionCache(ctx);
-    const present = rows(ctx, 'characters', 'location_id = ? AND status = ?', [entityId, 'active'], 200)
+    const present = rowsAll(ctx, 'characters', 'location_id = ? AND status = ?', [entityId, 'active'])
       .filter(character=>!['in_transit','unknown'].includes(resolveEffectivePosition(ctx,String(character.id),undefined,cache).kind))
       .filter(character=>!visibility||visibility.visibleCharacters.has(String(character.id)))
       .map(character=>visibility?{id:character.id,name:character.name,location_id:character.location_id,physical_status:character.physical_status}:character);
     const events = rows(ctx, 'events', 'location_id = ?', [entityId], 200).filter(event=>!visibility||event.secrecy==='public'&&visibility.here===entityId&&event.status==='occurred');
     const fronts = visibility?[]:rows(ctx, 'rumor_fronts', 'location_id = ?', [entityId], 200);
     // M4/Q11：地面物品 = 直接落在本地点、且不在任何人/容器手里（手持与容器内不算地面）。
-    const groundItems = rows(ctx, 'items', "location_id = ? AND status = 'active' AND holder_character_id IS NULL AND container_item_id IS NULL", [entityId], 200)
+    const groundItems = rowsAll(ctx, 'items', "location_id = ? AND status = 'active' AND holder_character_id IS NULL AND container_item_id IS NULL", [entityId])
       .filter((entry) => !visibility || visibility.visibleItems.has(String(entry.id)))
       .map((entry) => (visibility ? { id: entry.id, name: entry.name, kind: entry.kind } : entry));
     // M4/Q11：子地图（同一地点可有多层楼层地图）与「在子地点里」的粗聚合在场名单。
-    const childMaps = rows(ctx, 'maps', "container_location_id = ? AND status = 'active'", [entityId], 50)
+    const childMaps = rowsAll(ctx, 'maps', "container_location_id = ? AND status = 'active'", [entityId])
       .map((map) => ({ mapId: String(map.id), name: String(map.name ?? ''), kind: String(map.kind ?? 'world') }));
     const childIds = new Set(children.map((child) => String(child.id)));
-    const coarsePresent = rows(ctx, 'characters', "status = 'active'", [], 2000)
+    const coarsePresent = rowsAll(ctx, 'characters', "status = 'active'")
       .filter((character) => {
         const at = String(character.location_id ?? '');
         return at !== entityId && childIds.has(at);

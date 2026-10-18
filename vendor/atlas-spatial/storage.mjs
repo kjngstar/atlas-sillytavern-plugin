@@ -130,7 +130,7 @@ export function sceneLocationGeometry(scene){
     :layout.kind==='city'?[...layout.districts,...layout.buildings.filter(b=>!b.decorative)]
       :(layout.shapes??[]).filter(s=>s&&s.placement!=='proxy');
   const centroid=polygon=>{let x=0,y=0;for(const q of polygon){x+=q.x;y+=q.y;}return {x:x/polygon.length,y:y/polygon.length};};
-  return parts.map(p=>{const polygon=Array.isArray(p.polygon)?p.polygon.map(q=>Array.isArray(q)?{x:q[0],y:q[1]}:q):[{x:p.x,y:p.y},{x:p.x+p.w,y:p.y},{x:p.x+p.w,y:p.y+p.h},{x:p.x,y:p.y+p.h}];
+  return parts.filter(p=>p.placement!=='proxy').map(p=>{const polygon=Array.isArray(p.polygon)?p.polygon.map(q=>Array.isArray(q)?{x:q[0],y:q[1]}:q):[{x:p.x,y:p.y},{x:p.x+p.w,y:p.y},{x:p.x+p.w,y:p.y+p.h},{x:p.x,y:p.y+p.h}];
     // 确认站点优先于多边形质心：已确认的点不能被估计轮廓重新落位。
     const locked=p.locked&&Number.isFinite(p.locked.x)&&Number.isFinite(p.locked.y)?p.locked:null;
     const point=locked??p.site??centroid(polygon);

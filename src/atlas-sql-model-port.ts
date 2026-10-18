@@ -68,7 +68,7 @@ export function createSqlModelPort(options: Options): AtlasModelPort {
   const messages = assemblePromptLayers({
     // §21.5 分层：固定协议（程序）→ 用户策略（作者，角色原样保留）→ 任务上下文（程序填充）。
     protocol: request.messages[0]?.content ?? '',
-    policy: custom.map(s => ({ role: promptRole(s.role), content: substitutePromptPlaceholders(s.content, input) })),
+    policy: request.promptMode === 'atlas-spatial-extract' ? [] : custom.map(s => ({ role: promptRole(s.role), content: substitutePromptPlaceholders(s.content, input) })),
     task: request.messages.slice(1).map(m => m.content),
   });
   return {preset,input,messages,promptSource: preset.systemPrompt?.trim()?'connection':preset.promptSegments?.length?'preset':'builtin'};
@@ -93,7 +93,7 @@ export function createSqlModelPort(options: Options): AtlasModelPort {
         timeoutMs: preset.timeoutMs ?? request.timeoutMs,
       }, input, {
         fetchFn: options.fetchFn, now: options.now, messagesOverride: messages,
-        ...(preset.toolCalling?{responseTool:{name:'emit_atlas_operations',description:'Return the complete Atlas operations exactly once as JSONL in content. Follow the stage operation contract; do not write text outside this call.',parameters:{type:'object',properties:{content:{type:'string',description:'Complete stage reply, one validated operation JSON object per line'}},required:['content'],additionalProperties:false}}}:{}),
+        ...(preset.toolCalling&&request.promptMode!=='atlas-spatial-extract'?{responseTool:{name:'emit_atlas_operations',description:'Return the complete Atlas operations exactly once as JSONL in content. Follow the stage operation contract; do not write text outside this call.',parameters:{type:'object',properties:{content:{type:'string',description:'Complete stage reply, one validated operation JSON object per line'}},required:['content'],additionalProperties:false}}}:{}),
         // M3-03A：API 内部兼容路由的第二次真实发送，也走同一局部预算。缺预算 port 时不传，
         // 由 api-client 按最严策略拒发并明确报错（绝不隐藏重试）。
         ...(budget ? { initialTransport: () => transportBudgetPort(budget, phase, request.batchId).claim(), rescueTransport: () => transportBudgetPort(budget, phase, request.batchId).claim() } : {}),

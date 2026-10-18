@@ -621,7 +621,7 @@ test('SRC09 布局/repair 复查走 context-only：看得到已处理块，但�
       const ledger = readSourceLedger(readProgressRows(createTableReadPort(repo.db), BRANCH), scopeKey);
       const subject = sourceSubjectKey('src9_lore', 'h_src9_lore');
       const list = ledger.chunksBySource.get(subject) ?? [];
-      if (list.length > 0 && list.every((chunk) => chunk.status === 'processed')) break;
+      if (contiguousProcessedPrefix(list) === LONG_TEXT.length) break;
     }
     const scopeKey = scopeKeyFor('local', rooms);
     // 只看**来源账本行**（scope 行的扫描游标本来就会随发现推进，那不是来源消费进度）。
@@ -630,6 +630,7 @@ test('SRC09 布局/repair 复查走 context-only：看得到已处理块，但�
       .map((row) => [row.id, row.status, row.row_rev, String(row.payload_json)]);
     const rowsBefore = ledgerSnapshot(repo.db);
     const summaryBefore = summarizeSources(readProgressRows(createTableReadPort(repo.db), BRANCH), scopeKey);
+    assert.equal(summaryBefore.processedChars, LONG_TEXT.length, '前置条件必须覆盖原文尾部，不能只检查已经登记的块');
     const chunksBefore = chunkRows(repo.db);
     assert.ok(chunksBefore.length > 0 && chunksBefore.every((row) => row.status === 'processed'), '前置条件：全部块已处理');
 

@@ -73,3 +73,30 @@ test('direct map and layout UI requests obey the same independent reading flag',
   assert.equal(sent.length,2);for(const body of sent)assert.equal(body.loreSupplement,'included geography');
  }finally{await render.dispose();dom.window.close()}
 });
+
+for(const change of ['character','chat-book','card-book','exclusions','additional-books'])test(`delayed lore read is discarded after ${change} changes within the same metadata`,async()=>{
+ const f=fixture();f.context.characters=[{data:{extensions:{world:'Book'}}},{data:{extensions:{world:'Other'}}}];
+ let release,extras=['Other'];const gate=new Promise(r=>{release=r});
+ const port=createReferenceLorePort(()=>f.context,async()=>({loadWorldInfo:async()=>{await gate;return f.books.Book;}}),async()=>extras);
+ const read=port.read();await new Promise(r=>setImmediate(r));
+ if(change==='character')f.context.characterId=1;
+ if(change==='chat-book')f.context.chatMetadata.world_info='Other';
+ if(change==='card-book')f.context.characters[0].data.extensions.world='Other';
+ if(change==='exclusions')f.context.extensionSettings.atlas_world_sim.excludedLoreEntries=[atlasLoreEntryId('Book',1)];
+ if(change==='additional-books')extras=[];
+ release();assert.deepEqual(await read,[]);
+});
+
+for(const action of ['toggle','setAtlasRead'])test(`delayed ${action} cannot write after a same-chat book binding change`,async()=>{
+ const f=fixture();let release,writes=0;const gate=new Promise(r=>{release=r});
+ const port=createReferenceLorePort(()=>f.context,async()=>({loadWorldInfo:async()=>{await gate;return f.books.Book;},saveWorldInfo:async()=>{writes++;}}));
+ const change=port[action](atlasLoreEntryId('Book',1),false);await new Promise(r=>setImmediate(r));
+ f.context.chatMetadata.world_info='Other';release();await assert.rejects(change,/世界书设置已变化/);
+ assert.equal(writes,0);assert.equal(f.saved,0);assert.equal(f.books.Book.entries[1].disable,false);
+});
+
+test('failed host persistence does not mutate a host-owned lore object',async()=>{
+ const f=fixture(),original=structuredClone(f.books.Book);
+ const port=createReferenceLorePort(()=>f.context,async()=>({loadWorldInfo:async()=>f.books.Book,saveWorldInfo:async()=>{throw Error('host save failed')}}));
+ await assert.rejects(port.toggle(atlasLoreEntryId('Book',1)),/host save failed/);assert.deepEqual(f.books.Book,original);
+});

@@ -183,6 +183,7 @@ export async function handleSqlChatRequest(session: SqlSession, action: string, 
     const maxLimit=isFeed?ATLAS_RUNTIME_LIMITS.feedPageMax:200;
     const query:ViewQuery={kind:kind as ViewQuery['kind'],branchId:session.branchId,viewMode:body.viewMode==='author'?'author':'pov',
       revision:typeof body.revision==='number'?body.revision:undefined,entityId:text(body.entityId)||undefined,mapId:text(body.mapId)||undefined,
+      selectedEntityId:text(body.selectedEntityId)||undefined,
       entityKind:(CATALOG_ENTITY_KINDS as readonly string[]).includes(text(body.entityKind))?body.entityKind as ViewQuery['entityKind']:undefined,
       cursor:text(body.cursor)||undefined,limit:Math.min(maxLimit,Math.max(1,typeof body.limit==='number'?body.limit:maxLimit))};
     if(isFeed){query.povId=resolveFeedPovId(session,text(body.povId));if(feedFilter)query.feedFilter=feedFilter;}

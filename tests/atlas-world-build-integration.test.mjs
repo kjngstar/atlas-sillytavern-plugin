@@ -207,8 +207,10 @@ test('W09: 一次出现且世界书有明确身份的重要人物当轮建档并
     assert.ok(room, '教室必须在地点表里');
     assert.equal(room.map_id, IDS.M2, '具体场所挂在自己的图上');
     const mapView = await repo.queryView({ kind: 'map', branchId: BRANCH, viewMode: 'author' });
-    const ids = mapView.items.flatMap((m) => [...(m.points ?? []), ...(m.coarseList ?? [])].map((p) => p.entityId));
+    const ids = mapView.items.flatMap((m) => [m.containerLocationId, ...[...(m.points ?? []), ...(m.coarseList ?? [])].map((p) => p.entityId)]);
     assert.equal(ids.includes(IDS.L3), true, '地点名单里必须有这间教室');
+    const detail = await repo.queryView({ kind: 'entity', entityKind:'location', branchId: BRANCH, entityId: IDS.L3, viewMode: 'author' });
+    assert.ok(detail.items.some(item => (item.present ?? []).some(character => character.id === ina[0].id)), '开场重要人物必须实际进入地点面板名单');
 
     // 下一轮正文只有泛指周围人物（空列表）：不得据此清掉已建档的人物。
     const second = await repo.prepareTurn({

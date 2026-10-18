@@ -20,7 +20,7 @@ import { AtlasDbError, queryBound } from './atlas-db-runtime.ts';
 import { decodeRow } from './atlas-db-codec.ts';
 import type { ApplyGroupsContext, ApplyGroupsResult } from './atlas-db-commit.ts';
 import { reconcileOccupantsSpec, placeLooseItems } from './atlas-spatial-occupants.ts';
-import { applySceneGroup, buildSceneMutation, compileSceneGroup } from '../vendor/atlas-spatial/index.mjs';
+import { applySceneGroup, buildSceneMutation, compileSceneGroup, collectMapLocations } from '../vendor/atlas-spatial/index.mjs';
 import {
   SPATIAL_REQUEST_KEY,
   alignSqlFrameToPhysicalSize,
@@ -110,7 +110,7 @@ type PendingRequest = {
   request: SqlRow;
 };
 
-/** 候选事务内同步挑出 pending 请求，按 requestId 稳定排序（同 Id 再按 mapId）。 */
+/** 候选事务内同步挑出 pending 请求，先按父子依赖，再按地图和请求编号稳定排序。 */
 export function collectPendingRequests(
   db: SqlDatabase,
   scope: SpatialScope,
@@ -144,7 +144,20 @@ export function collectPendingRequests(
     const operationId = typeof request.operationId === 'string' && request.operationId ? request.operationId : requestId;
     found.push({ mapId, requestId, operationId, kind, request });
   }
-  found.sort((a, b) => (a.requestId === b.requestId ? (a.mapId < b.mapId ? -1 : a.mapId > b.mapId ? 1 : 0) : a.requestId < b.requestId ? -1 : 1));
+  // Physical projections flow from parents to children. Request hashes must not
+  // decide which conflicting first estimate becomes canonical.
+  const maps=readTable(db,'maps',scope.branchId,ports),locations=readTable(db,'locations',scope.branchId,ports);
+  const depth=(mapId:string):number=>{
+    const seen=new Set<string>();let current=mapId;
+    while(!seen.has(current)){
+      seen.add(current);
+      const map=maps.find(row=>row.id===current),container=locations.find(row=>row.id===map?.container_location_id);
+      if(!container?.map_id||container.map_id===current)break;
+      current=String(container.map_id);
+    }
+    return seen.size;
+  };
+  found.sort((a,b)=>depth(a.mapId)-depth(b.mapId)||(a.mapId<b.mapId?-1:a.mapId>b.mapId?1:a.requestId<b.requestId?-1:a.requestId>b.requestId?1:0));
   return { pending: found, issues };
 }
 
@@ -455,11 +468,13 @@ const SCENE_MEMBER_KIND = Object.freeze({
   rooms: 'locations',
   districts: 'locations',
   buildings: 'locations',
+  zones: 'locations',
+  links: 'routes',
   actors: 'characters',
   items: 'items',
 } as const);
 
-type MemberKind = 'locations' | 'characters' | 'items';
+type MemberKind = 'locations' | 'characters' | 'items' | 'routes';
 
 function idsOf(rows: SqlRow[]): Set<string> {
   const out = new Set<string>();
@@ -498,6 +513,7 @@ export function collectSceneMemberIds(input: {
   locations: SqlRow[];
   characters: SqlRow[];
   items: SqlRow[];
+  routes?: SqlRow[];
 }): SceneMemberIds {
   const { mapId, maps, locations, characters, items } = input;
   const locationIds = new Set(locations.map((row) => String(row.id)));
@@ -505,33 +521,11 @@ export function collectSceneMemberIds(input: {
   // 不能因此把本图里的容器房间、家具与直接位于容器的角色当成已经搬走。
   const currentMap = maps.find((row) => String(row.id) === mapId && String(row.status ?? 'active') === 'active');
   const ownContainer = currentMap ? containerKey(currentMap.container_location_id, locationIds) : null;
-  const mapIdByContainer = new Map<string, string>();
-  let rootMapId: string | null = null;
-  for (const map of maps) {
-    if (String(map.status ?? 'active') !== 'active') continue;
-    const id = String(map.id);
-    const key = containerKey(map.container_location_id, locationIds);
-    if (key === null) {
-      // 容器为空 = 根图。多张根图时取 id 最小的一张，保证可复现。
-      if (rootMapId === null || id < rootMapId) rootMapId = id;
-      continue;
-    }
-    const held = mapIdByContainer.get(key);
-    if (held === undefined || id < held) mapIdByContainer.set(key, id);
-  }
-
-  const memberLocations = new Set<string>();
-  for (const location of locations) {
-    if (String(location.status ?? 'active') !== 'active') continue;
-    const id = String(location.id);
-    if (id === ownContainer || String(location.map_id ?? '') === mapId) {
-      memberLocations.add(id);
-      continue;
-    }
-    const parentKey = containerKey(location.parent_location_id, locationIds);
-    const owner = parentKey === null ? rootMapId : mapIdByContainer.get(parentKey) ?? null;
-    if (owner === mapId) memberLocations.add(id);
-  }
+  const memberLocations = new Set<string>(currentMap
+    ? collectMapLocations({ mapRow: currentMap, maps, locations }).map((row) => String(row.id)) : []);
+  if (ownContainer) memberLocations.add(ownContainer);
+  const routeRows = input.routes ?? [];
+  const memberRoutes = new Set(routeRows.filter((row) => String(row.map_id ?? '') === mapId && row.status !== 'closed').map((row) => String(row.id)));
 
   const memberCharacters = new Set<string>();
   for (const character of characters) {
@@ -553,8 +547,8 @@ export function collectSceneMemberIds(input: {
 
   return {
     mapId,
-    members: { locations: memberLocations, characters: memberCharacters, items: memberItems },
-    known: { locations: idsOf(locations), characters: idsOf(characters), items: idsOf(items) },
+    members: { locations: memberLocations, characters: memberCharacters, items: memberItems, routes: memberRoutes },
+    known: { locations: idsOf(locations), characters: idsOf(characters), items: idsOf(items), routes: idsOf(routeRows) },
   };
 }
 
@@ -596,8 +590,8 @@ export function pruneInvalidSceneMembers(input: {
     for (const entry of entries) {
       const id = plain(entry) && typeof (entry as SqlRow).id === 'string' ? String((entry as SqlRow).id) : '';
       // 不在实体表里的 id 是程序装饰/静态背景：保留，绝不误剪。
-      if (!id || !memberIds.known[kind].has(id)) continue;
-      if (memberIds.members[kind].has(id)) continue;
+      if (!id || !memberIds.known[kind]?.has(id)) continue;
+      if (memberIds.members[kind]?.has(id)) continue;
       bump(key, id);
     }
   }
@@ -748,7 +742,7 @@ export function applyPendingSpatialRequests(input: ApplyPendingInput): ApplyPend
     const stale = pruneInvalidSceneMembers({
       scene: frameRead.scene,
       mapId: job.mapId,
-      memberIds: collectSceneMemberIds({ mapId: job.mapId, maps, locations, characters, items }),
+      memberIds: collectSceneMemberIds({ mapId: job.mapId, maps, locations, characters, items, routes }),
     });
     issues.push(...stale.issues);
     const deletes: Record<string, string[]> = {};

@@ -42,6 +42,35 @@ test('独立房间视野适应实际房间，保留物理尺度与多房间整�
 /** 模块级工具区（hash/rng/smooth/rrect/glow + 概览背景）。 */
 const TOOLS = cut('function hash(s)', 'function create(canvas');
 
+test('闭合轮廓经过全部顶点且首尾切线连续，不出现折返和直线接缝',()=>{
+  const curves=[],moves=[];
+  let closed=0;
+  const ctx={moveTo:(...p)=>moves.push(p),bezierCurveTo:(...p)=>curves.push(p),closePath:()=>closed++};
+  const runtime=vm.createContext({ctx});
+  vm.runInContext(TOOLS,runtime);
+  const points=[[0,0],[100,0],[100,100],[0,100]];
+  runtime.smooth(ctx,points,true);
+  assert.deepEqual(moves,[[0,0]]);
+  assert.deepEqual(curves.map(p=>p.slice(4)),[...points.slice(1),points[0]]);
+  assert.equal(closed,1);
+  for(let i=0;i<curves.length;i++){
+    const current=curves[i],next=curves[(i+1)%curves.length];
+    for(let axis=0;axis<2;axis++)
+      assert.ok(Math.abs(current[4+axis]-current[2+axis]-(next[axis]-current[4+axis]))<1e-10,'连接处两侧的切线必须一致');
+  }
+});
+
+test('开放曲线保留每个端点，两点路径也能画出完整线段',()=>{
+  for(const points of [[[0,0],[100,0]],[[0,0],[100,0],[100,100],[0,100]]]){
+    const curves=[];
+    const ctx={moveTo(){},bezierCurveTo:(...p)=>curves.push(p),closePath(){assert.fail('开放曲线不得闭合');}};
+    const runtime=vm.createContext({ctx});
+    vm.runInContext(TOOLS,runtime);
+    runtime.smooth(ctx,points,false);
+    assert.deepEqual(curves.map(p=>p.slice(4)),points.slice(1));
+  }
+});
+
 function recordCtx(){
   const log = [];
   const c = {

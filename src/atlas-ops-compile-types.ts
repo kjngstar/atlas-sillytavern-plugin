@@ -20,6 +20,8 @@ export type TableReadPort = {
    * 省略时上层退回 selectWhere（有硬上限），因此需要跨越 1,001 行的路径必须实现它。
    */
   selectPage?(table: AtlasTableName, branchId: string, afterId: string | null, pageSize: number): Array<Record<string, unknown>>;
+  /** Program-owned filtered keyset query; columns still pass the schema whitelist. */
+  selectWherePage?(table: AtlasTableName, where: Record<string, unknown>, afterId: string | null, pageSize: number): Array<Record<string, unknown>>;
   nextSeq?: () => number;
 };
 
@@ -33,6 +35,8 @@ export type CompileContext = {
   tables: TableReadPort;
   /** Valid item creations already compiled in this batch; never writes the database. */
   newItemRows?: Map<string, Record<string, unknown>>;
+  /** Valid location facts from this batch, including updates; never writes SQL. */
+  candidateLocations?: Map<string, { row: Record<string, unknown>; opIds: string[] }>;
   /** 程序分配 ID（确定性，不透明）。 */
   makeId: (kind: string, opId: string, alias: string) => string;
   /** 当前分支 id（= anchor.branchId）。 */

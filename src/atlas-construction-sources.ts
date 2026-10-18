@@ -377,12 +377,15 @@ export type SourceSummary = {
 
 export function summarizeSources(rows: readonly ProgressRow[], scopeKey: string): SourceSummary {
   const ledger = readSourceLedger(rows, scopeKey);
-  const chunkList = [...ledger.chunks.values()];
+  const enabledSubjects = new Set([...ledger.sources.values()].filter(source => source.row.payload.enabled !== false).map(source => source.subjectKey));
+  const chunkList = [...ledger.chunks.values()].filter(chunk => enabledSubjects.has(sourceSubjectKey(chunk.sourceKey, chunk.contentHash)));
   const byStatus = (status: ProgressStatus): number => chunkList.filter((chunk) => chunk.status === status).length;
   const processedChars = chunkList.filter((chunk) => chunk.status === 'processed').reduce((sum, chunk) => sum + chunk.chars, 0);
-  const totalChars = chunkList.reduce((sum, chunk) => sum + chunk.chars, 0);
+  // Include unsent blocks; summing registered chunks falsely reports completion.
+  const totalChars = [...ledger.sources.values()].filter(source => enabledSubjects.has(source.subjectKey)).reduce((sum, source) => sum + source.chars, 0);
   let contiguousPrefixEnd = 0;
-  for (const list of ledger.chunksBySource.values()) {
+  for (const [subject, list] of ledger.chunksBySource) {
+    if (!enabledSubjects.has(subject)) continue;
     contiguousPrefixEnd = Math.max(contiguousPrefixEnd, contiguousProcessedPrefix(list));
   }
   return {

@@ -237,16 +237,8 @@ export function compileSqlSceneMaps(input:{db:SqlDatabase;branchId:string;turnId
       change('maps',target,{...target,frame_json:written.frame});
     }
   }
-  // Resolve unique route ownership in the ordinary scene-construction group.
-  if(input.ensureScenes){
-    const currentLocations=locations.map(row=>changes.find(m=>m.table==='locations'&&m.rowId===row.id)?.after??row);
-    for(const key of queryBound(db,'SELECT id FROM routes WHERE branch_id=? AND map_id IS NULL',[branchId])){
-      const route=read.selectOne('routes',branchId,String(key.id))!;
-      if(route.map_id)continue;
-      const from=currentLocations.find(l=>l.id===route.from_location_id),to=currentLocations.find(l=>l.id===route.to_location_id);
-      if(from?.map_id&&from.map_id===to?.map_id)change('routes',route,{...route,map_id:from.map_id});
-    }
-  }
+  // Null may be an explicit topology-only choice. New omitted ownership is
+  // resolved by the route compiler; historical nulls require a repair candidate.
   // 只有 warning 的组不会拖垮保存；零变更但仍有诊断时也照样回执，避免 remaining 被吞掉。
   if(!changes.length&&!opIssues.length)return null;
   return {id:opId,opIds:[opId],dependsOn:[],readSet:[],mutations:changes,opIssues};

@@ -1,5 +1,6 @@
 /** Real SQL DTOs projected into the supplied UI's data contract. Never writes a world. */
 import { visibleWorkbenchMaps } from './atlas-workbench-data.mjs';
+import { projectReferenceFlows } from './atlas-reference-flows.mjs';
 
 export const REFERENCE_LEVELS = [
   ['world','L0','世界'],['region','L1','地区'],['city','L2','城市'],['district','L3','街区'],
@@ -474,11 +475,14 @@ export function projectReferenceData({state={},mapView,sceneView,catalogView,tas
   for(const node of nodes.values())for(const mark of node.marks)if(mark.type==='char'){const c=out.CAST.find(c=>c.id===mark.id);if(c){mark.c=c.c;mark.initial=c.initial;mark.hero=mark.id===out.meta.protagonistId;}}
   out.RECEIPTS=referenceReceipts(state,items(logsView));
   out.DIAGNOSTICS=referenceDiagnostics([...items(logsView),...diagnostics,...(state.lastError?[typeof state.lastError==='string'?{message:state.lastError,code:'WORLD_ACTION_FAILED',level:'error'}:{...state.lastError,level:'error'}]:[])]);
-  for(const f of flows){const node=nodes.get(f.mapId);if(!node||!f.path?.points?.length)continue;const tr=node.transform,convert=f.path.units==='cells'&&tr.units==='meters';if(convert&&!(Number.isFinite(tr.metersPerCell)&&tr.metersPerCell>0))continue;const units=convert?tr.metersPerCell:1;
-    const points=f.path.points.map(p=>[(p.x*units-(tr.bounds.x??0)-tr.bounds.w/2)*tr.scale,(p.y*units-(tr.bounds.y??0)-tr.bounds.h/2)*tr.scale]);
-    const mover=locationMap.get(f.moverEntityId),vehicle=mobileIds.has(f.moverEntityId);
-    const edge={id:f.flowId,entityId:f.moverEntityId,entityKind:vehicle?'vehicle':mover?'location':'character',from:points[0],to:points.at(-1),via:points.length>2?points[Math.floor(points.length/2)]:null,points,progress:typeof f.progress==='number'?Math.min(1,Math.max(0,f.progress)):null,pct:typeof f.progress==='number'?f.progress*100:null,known:true,c:COLORS[3],name:mover?`${mover.name} · 在途`:f.label};
-    const bucket=f.kind==='journey'?out.JOURNEYS:out.FLOWS;(bucket[f.mapId]??=[]).push(edge);
+  for(const node of nodes.values()){
+    const projected=projectReferenceFlows(flowView,node);
+    if(projected.flows.length)out.FLOWS[node.id]=projected.flows;
+    if(projected.journeys.length)out.JOURNEYS[node.id]=projected.journeys.map(edge=>{
+      const mover=locationMap.get(edge.entityId),vehicle=mobileIds.has(edge.entityId);
+      return {...edge,entityKind:vehicle?'vehicle':mover?'location':edge.entityKind,pct:edge.progress===null?null:edge.progress*100,
+        name:mover?`${mover.name} · 在途`:edge.name};
+    });
   }
   return out;
 }

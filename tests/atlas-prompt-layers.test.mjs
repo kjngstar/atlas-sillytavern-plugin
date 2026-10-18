@@ -80,7 +80,7 @@ test('PROMPT01 · 升级策略不动用户已另存的预设：读取视图与�
 });
 
 test('PROMPT01 · 新默认策略带明确版本标记，且版本号只出现在内置建议预设里', () => {
-  assert.equal(PROMPT_POLICY_VERSION, 'atlas-policy/2026-10-11');
+  assert.equal(PROMPT_POLICY_VERSION, 'atlas-policy/2026-10-16');
   const last = DEFAULT_SQL_PROMPT_SEGMENTS.at(-1);
   assert.equal(last.name, POLICY_SEGMENT_NAME);
   assert.ok(last.name.includes(PROMPT_POLICY_VERSION), '策略版本必须写在段名里，作者一眼能看出新旧');
@@ -146,10 +146,9 @@ test('PROMPT02 · 布局任务的程序任务上下文：目录哈希真实、�
       assert.ok(text.includes(label), `任务上下文必须包含「${label}」`);
     }
     assert.match(text, /冻结目录哈希：[^\n]+/);
-    // 来源块身份来自真实快照（key/hash），不是编的。
-    assert.ok(text.includes('sourceKey=story:1'), '来源块必须列出真实 sourceKey');
-    assert.ok(text.includes('contentHash=hash-story-1'), '来源块必须列出真实 contentHash');
-    assert.ok(text.includes('chunkKey=story:1#0'));
+    // 布局模板不能再把未筛选的原始来源直接送到第二步。
+    assert.ok(!text.includes('你看见一座城镇。'));
+    assert.ok(!text.includes('sourceKey=story:1'));
     // 模板本身也必须逐条落地（不放任模板漂移）。
     for (const line of TASK_CONTEXT_TEMPLATE.split('\n')) {
       if (line.includes('{')) continue;
