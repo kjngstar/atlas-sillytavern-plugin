@@ -54,6 +54,8 @@ export type ApplyPendingInput = {
   clockS?: number;
   maxJobs?: number;
   autoPlan?: boolean;
+  respectParentDependencies?: boolean;
+  plannedExtents?: Record<string,{width:number;height:number;units:string}>;
   sourceText?: string;
   ports: SpatialPorts;
 };
@@ -675,6 +677,7 @@ export function applyPendingSpatialRequests(input: ApplyPendingInput): ApplyPend
   // M4-17：概览要按已登记路线决定「原样复用 / 估计折线」，所以候选内先读同分支 routes。
   const routes = readTable(input.db, 'routes', scope.branchId, ports);
 
+  const queuedMaps=new Set(queue.map(job=>job.mapId)),settledMaps=new Set<string>();
   let stoppedByStale = false;
   for (let index = 0; index < queue.length; index += 1) {
     const job = queue[index];
@@ -698,7 +701,14 @@ export function applyPendingSpatialRequests(input: ApplyPendingInput): ApplyPend
       pending.push(job.requestId);
       continue;
     }
-    if(input.autoPlan&&completedMapIds.has(job.mapId)&&!normalizeFrame(mapRow.frame_json).atlasLayoutRequest){processed.push(job.requestId);continue;}
+    if(input.respectParentDependencies){
+      const container=locations.find(row=>row.id===mapRow!.container_location_id);
+      const parent=String(container?.map_id??'');
+      if(parent&&parent!==job.mapId&&queuedMaps.has(parent)&&!settledMaps.has(parent)){
+        pending.push(job.requestId);issues.push({code:'LAYOUT_PARENT_PENDING',path:'$.layout',message:`子图 ${job.mapId} 等待父图 ${parent} 成功，保留已收到的约束，不单独重画。`,severity:'warning',retryable:true});continue;
+      }
+    }
+    if(input.autoPlan&&completedMapIds.has(job.mapId)&&!normalizeFrame(mapRow.frame_json).atlasLayoutRequest){processed.push(job.requestId);settledMaps.add(job.mapId);continue;}
     if(input.autoPlan){
       const size=resolveMapSpaceSize({maps:readTable(input.db,'maps',scope.branchId,ports),locations,mapRow,branchId:scope.branchId});
       const normalized=size?normalizePlannedFrame(mapRow,size.resolution,locations,[...characters,...items],turnId,job.operationId+':frame'):null;
@@ -911,8 +921,9 @@ export function applyPendingSpatialRequests(input: ApplyPendingInput): ApplyPend
       // 已确认的矛盾事实不被生成器改写。少了它，账本永远是 estimated，§19.2 的「双方确认」分支不可达。
       spaceSize,
       childSpaces: Object.fromEntries(locations.filter(l=>l.map_id===job.mapId).flatMap(l=>{
-        const child=locationSpaceSize({maps:currentMaps,locations,locationId:String(l.id),branchId:scope.branchId});
         const holder=currentMaps.find(m=>m.container_location_id===l.id&&m.status==='active');
+        const planned=holder?input.plannedExtents?.[String(holder.id)]:null;
+        const child=locationSpaceSize({maps:currentMaps,locations,locationId:String(l.id),branchId:scope.branchId})??(planned?.units==='meters'?{widthM:planned.width,heightM:planned.height,quality:'estimated',source:'first-estimate',referenceId:String(holder!.id)}:null);
         const locked=holder?readSpaceCanonical(holder.frame_json,String(l.id)).canonical?.size?.locked:false;
         return child?[[String(l.id),{...child,locked}]]:[];
       })),
@@ -930,10 +941,10 @@ export function applyPendingSpatialRequests(input: ApplyPendingInput): ApplyPend
     const errors = kitIssues.filter((item) => item.severity === 'error');
     issues.push(...kitIssues);
 
-    if (!compiled.ok || !compiled.group) {
+    if (!compiled.ok || !compiled.group || input.respectParentDependencies&&errors.length>0) {
       if (errors.length === 0) {
         // duplicate：内容与已保存场景相同且请求已被消费 → 不算失败。
-        processed.push(job.requestId);
+        processed.push(job.requestId);settledMaps.add(job.mapId);
         continue;
       }
       const failed = recordFailedSpatialRequest({
@@ -994,7 +1005,7 @@ export function applyPendingSpatialRequests(input: ApplyPendingInput): ApplyPend
       groups,
       issues,
     });
-    processed.push(job.requestId);
+    processed.push(job.requestId);settledMaps.add(job.mapId);
   }
 
   if (!stoppedByStale && !isCurrent()) {

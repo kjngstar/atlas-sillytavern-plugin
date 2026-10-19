@@ -142,23 +142,30 @@ try {
   assert.equal(modelTurn.tableWritten, false); assert.equal(modelTurn.mixedFormat, false);
   const automaticChat = await startupPage.evaluate(async () => {
     const { core } = window.releaseStartup, host = window.releaseStartupHost;
-    let calls = 0, layoutCalls = 0, retryCalls = 0;
-    // 一次自动推进的模型请求**不止一次**：决策批 + 建设批 + 布局批（P09B/P12 起的既定契约，
-    // 单测 tests/atlas-acceptance-regression.test.mjs 按 batchId 逐批断言）。
-    // 因此这里不写死总次数，只按**可靠标记**统计：布局批（提示词含「本图：」）与
-    // 布局格式重试（提示词含「【布局格式纠错】」）——后者的出现意味着靠重试才拿到合法 JSON。
+    let calls = 0, layoutCalls = 0, retryCalls = 0, layoutTargets=[],layoutKinds=[];
+    // Real packaged path: observation + construction + shared evidence + one
+    // mixed hierarchy layout request. Valid synthetic replies need no repair.
     window.TavernHelper.generateRaw = async input => {
       calls++;
       const text = (input?.ordered_prompts ?? []).map(part => String(part?.content ?? '')).join('\n');
       if (text.includes('你是 Atlas 空间证据摘录器')) return '{"facts":[]}';
       if (text.includes('本图：')) {
         layoutCalls++;
-        const scopes=JSON.parse(text.split('\n').find(line=>line.startsWith('本图：')).slice(3));
+        const scopes=JSON.parse(text.split('\n').find(line=>line.startsWith('本图：')).slice(3));layoutTargets.push(scopes.length);layoutKinds.push(...scopes.map(s=>s.kind));
         return scopes.map(scope=>JSON.stringify({op:'map.layout.request',ref:scope.map,data:{kind:scope.kind,
-          spec:scope.kind==='floor'?{rooms:scope.baselineRooms}:scope.kind==='overview'?{surface:'land'}:{}}})).join('\n');
+          spec:scope.kind==='floor'?{rooms:scope.baselineRooms}:scope.kind==='city'?{
+            districts:[{id:scope.container.ref,name:scope.container.name,bank:'west',order:0}],
+            buildings:scope.locations.filter(l=>l.kind==='building').map(l=>({id:l.ref,name:l.name,districtId:scope.container.ref,
+              w:scope.childSpaces.find(c=>c.ref===l.ref)?.w??24,h:scope.childSpaces.find(c=>c.ref===l.ref)?.h??24})),enclosure:'open',riverWidth:0
+          }:{surface:'mixed',zones:scope.locations.filter(l=>l.kind!=='room').map(l=>({id:l.ref,name:l.name,role:l.kind==='city'?'city':'other',size:'medium'})),features:[],links:[]}}})).join('\n');
       }
       if (text.includes('【布局格式纠错】')) retryCalls++;
-      return '{"op":"location.upsert","ref":"new:auto_archive","data":{"name":"自动聊天档案室","kind":"room"}}';
+      return calls===1?[
+        {op:'location.upsert',ref:'new:auto_city',data:{name:'发布验收城市',kind:'city'}},
+        {op:'location.upsert',ref:'new:auto_archive_building',data:{name:'发布验收档案馆',kind:'building',parent_ref:'new:auto_city'}},
+        {op:'location.upsert',ref:'new:auto_archive',data:{name:'自动聊天档案室',kind:'room',parent_ref:'new:auto_archive_building'}},
+        {op:'character.upsert',ref:'new:auto_pov',data:{name:'发布用户主角',identity:'档案馆访客',role:'protagonist',location_ref:'new:auto_archive'}},
+      ].map(JSON.stringify).join('\n'):'{"op":"noop"}';
     };
     host.name1 = '发布用户主角';
     host.chat.push({ is_user: true, mes: '进入档案室', send_date: 'release-user-1' });
@@ -178,7 +185,7 @@ try {
     await core.handleEvent('MESSAGE_DELETED', 1);
     for (let n = 0; n < 150 && core.getState().binding?.lastCommittedMessageId === '1'; n++) await new Promise(resolve => setTimeout(resolve, 20));
     const rolledBack = core.getState();
-    return { prepared, prepareSaves, commitSaves, calls, layoutCalls, retryCalls,
+    return { prepared, prepareSaves, commitSaves, calls, layoutCalls, retryCalls,layoutTargets,requestPlan:committed.receipts[0]?.detail?.receipt?.requestPlan??null,layoutKinds,issues:committed.receipts[0]?.detail?.issues,workBatching:(await window.releaseStartup.api.request('GET','/settings')).body.data?.workBatching,
       commitStatus: committed.receipts[0]?.status, floor: committed.binding?.lastCommittedMessageId,
       rollbackFloor: rolledBack.binding?.lastCommittedMessageId,
       rollbackSaves: window.releaseStartupSaves() - before - commitSaves,
@@ -188,10 +195,12 @@ try {
   assert.equal(automaticChat.prepareSaves, 0);
   // 多批模型请求（决策/建设/布局）仍然只允许**一次保存** —— 这是本段真正要守的不变量。
   assert.equal(automaticChat.commitSaves, 1, `多批请求必须只产生一次保存：${JSON.stringify(automaticChat)}`);
-  assert.ok(automaticChat.calls >= 1, '自动推进必须真的发出模型请求');
-  assert.ok(automaticChat.calls <= 8, `请求次数应在设计预算内（不写死总数，只设上限防跑飞）：${automaticChat.calls}`);
-  assert.ok(automaticChat.layoutCalls >= 1, `新建房间应带出布局批：${JSON.stringify(automaticChat)}`);
-  assert.equal(automaticChat.retryCalls, 0, `不得靠布局格式重试凑通过：${JSON.stringify(automaticChat)}`);
+  assert.equal(automaticChat.calls, 4, JSON.stringify(automaticChat));
+  assert.equal(automaticChat.layoutCalls, 1, '地图必须合并规划');
+  assert.ok(automaticChat.layoutTargets[0]>=3, JSON.stringify(automaticChat));
+  assert.deepEqual(new Set(automaticChat.layoutKinds),new Set(['overview','city','floor']));
+  assert.equal(automaticChat.retryCalls, 0, JSON.stringify(automaticChat));
+  assert.deepEqual(automaticChat.requestPlan?.usage,{normal:{observe:1,construction:1,evidence:1,maps:1},extra:0,transports:4});
   assert.equal(automaticChat.commitStatus, 'committed');
   assert.equal(automaticChat.floor, '1'); assert.notEqual(automaticChat.rollbackFloor, '1');
   assert.equal(automaticChat.rollbackSaves, 1); assert.equal(automaticChat.tableWritten, false);

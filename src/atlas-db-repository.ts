@@ -1,3 +1,4 @@
+import { workPlanLimits } from './atlas-work-batching.ts';
 import {buildSqlForegroundRequest} from './atlas-sql-model-context.ts';
 import {LAYOUT_CONTEXT_FRAME_KEY, buildSqlLayoutTask, computeMapLayoutSignature, unknownLayoutEntityRefs} from './atlas-sql-layout-task.ts';
 import { planLayoutEvidence, parseLayoutEvidence, attachLayoutEvidence, type LayoutExcerpt, type LayoutEvidenceRejection } from './atlas-layout-evidence.ts';
@@ -1343,7 +1344,7 @@ export function createSqlRepository(options: RepositoryOptions) {
       generationOptions=normalizeGenerationOptions(await options.modelPort.generationOptions());
       if(currentRevision()!==rev||input.isCurrent&&!input.isCurrent())throw new AtlasDbError('STALE_BASE','读取分批设置期间世界或聊天已变化',{});
     }
-    input={...input,generationOptions};
+    input={...input,generationOptions,...(generationOptions.workBatching&&input.worldCompletion?{worldCompletion:{...input.worldCompletion,policy:{...input.worldCompletion.policy,budgetMode:'workload',maxNewLocations:ATLAS_RUNTIME_LIMITS.operationsPerResponse,maxNewRoutes:ATLAS_RUNTIME_LIMITS.operationsPerResponse,maxAdditionalDepth:ATLAS_RUNTIME_LIMITS.locationDepth}}}:{})};
 
     // 1) 隔离候选态
     const candidate = await createCandidateImpl(anchor, 'turn');
@@ -1391,7 +1392,7 @@ export function createSqlRepository(options: RepositoryOptions) {
         duration_ms: Math.max(0, finished - started),
       });
     };
-    const turnBudget = createGenerationBudget({limit:generationOptions.batching.requestsPerOperation??0});
+    const turnBudget = createGenerationBudget({limit:generationOptions.batching.requestsPerOperation??0,workBatching:generationOptions.workBatching});
     const modelPort = options.modelPort ? bindModelBudget(options.modelPort, turnBudget) : null;
     let explicitNoop = false;
     let responseIncomplete = false;
@@ -2062,6 +2063,7 @@ export function createSqlRepository(options: RepositoryOptions) {
         // M3-11：settle 用**同一本回合预算**的剩余额度，不另起计数；被保留给到期后台的名额
         // 在 stageRemaining 里已经扣掉，所以建设不会抢先吃掉它。
         modelBudget: Math.max(0, turnBudget.stageRemaining('background')),
+        workBudget:turnBudget,
         makeId, isCurrent: input.isCurrent });
       beginTransaction(candidateDb);
       transactionOpen = true;
@@ -2082,6 +2084,7 @@ export function createSqlRepository(options: RepositoryOptions) {
         allIssues.push(...layoutReport.issues.map((item)=>({code:item.code,path:item.path,message:item.message,severity:item.severity,retryable:item.retryable})));
         layoutReport.issues.length = 0;
       };
+      let mapBatchesRemaining=generationOptions.workBatching?.mapBatches??Number.MAX_SAFE_INTEGER;
       let layoutTask=input.layoutMaps?buildSqlLayoutTask(candidateDb,branchId,input,turnId,layoutReport):null;
       drainLayoutReport();
       // Freeze the target set, then combine compatible maps inside its capacity.
@@ -2096,17 +2099,18 @@ export function createSqlRepository(options: RepositoryOptions) {
       const layoutTasks:NonNullable<typeof layoutTask>[]=[];
       // All stages and retries share the optional request cap chosen by the user.
       const layoutBudget=turnBudget;
+      const canSupplement=()=>!generationOptions.workBatching||(turnBudget.workUsage()?.extra??0)<generationOptions.workBatching.extraRequests;
       const layoutModelPort=options.modelPort?bindModelBudget(options.modelPort,layoutBudget,'geography'):null;
       const requestSpatialWithTransportRetry=async(request:ModelBatchRequest,kind:string):Promise<ModelBatchResponse>=>{
         const started=now();
         try{return await layoutModelPort!.request(request);}
         catch(error){
-          if((error as {retryable?:unknown})?.retryable!==true||layoutBudget.remaining()<=0)throw error;
+          if((error as {retryable?:unknown})?.retryable!==true||layoutBudget.remaining()<=0||!canSupplement())throw error;
           recordAttempt({kind:`${kind}_transport_failed`,phase:'geography',started_wall_ms:started,finished_wall_ms:now(),input_chars:request.messages.reduce((sum,message)=>sum+message.content.length,0),...(request.batchTargets?{target_kind:request.batchTargets.kind,target_count:request.batchTargets.count}:{}),failure_kind:failureKindOf(error),error:(error as Error).message});
           allIssues.push({code:'LAYOUT_TRANSPORT_RETRIED',path:'$.layout',message:'空间模型连接出现可重试错误；本轮在额度内重新发送一次同一请求。',severity:'warning',retryable:false});
           await new Promise<void>(resolve=>setTimeout(resolve,1000));
           if(input.isCurrent&&!input.isCurrent()||currentRevision()!==anchor.baseRevision)throw new AtlasDbError('STALE_BASE','空间模型重试前聊天或世界修订已变化，候选不发布',{});
-          return layoutModelPort!.request({...request,batchId:`${request.batchId}_transport_retry`});
+          return layoutModelPort!.request({...request,batchId:`${request.batchId}_transport_retry`,retryOf:request.batchId});
         }
       };
       let layoutApplied=false;
@@ -2165,6 +2169,8 @@ export function createSqlRepository(options: RepositoryOptions) {
           turnId,
           clockS: clockBefore,
           autoPlan:true,
+          respectParentDependencies:Boolean(generationOptions.workBatching),
+          plannedExtents:generationOptions.workBatching?Object.assign({},...layoutTasks.map(task=>task.extents)):undefined,
           sourceText:[input.userText,input.assistantText,...sourceSnapshot.map(s=>s.text)].filter(Boolean).join('\n'),
         maxJobs:Number.MAX_SAFE_INTEGER,
           ports: spatialPorts,
@@ -2233,7 +2239,7 @@ export function createSqlRepository(options: RepositoryOptions) {
         }
 
       };
-      while(layoutTask&&layoutModelPort&&layoutBudget.remaining()>0){
+      while(layoutTask&&layoutModelPort&&layoutBudget.remaining()>0&&(mapBatchesRemaining>0||layoutTask.mapIds.some(id=>retriedLayoutIds.has(id)))){
         let currentLayoutTask=layoutTask;
         const attemptedMapIds=[...layoutTask.mapIds];
         const returnedMapIds=new Set<string>();
@@ -2251,7 +2257,7 @@ export function createSqlRepository(options: RepositoryOptions) {
         };
         try{
           if(layoutEvidenceCache===null){
-            const evidenceBatches=planLayoutEvidence(sourceSnapshot,evidenceMapRefs,anchor,`layout_${turnId}`,{maxBatches:1});
+            const evidenceBatches=planLayoutEvidence(sourceSnapshot,evidenceMapRefs,anchor,`layout_${turnId}`,generationOptions.workBatching?{batchCount:generationOptions.workBatching.evidenceBatches}:{maxBatches:1});
             if(evidenceBatches[0]?.omittedBatches)allIssues.push({code:'LAYOUT_EVIDENCE_SCOPED',path:'$.layout.evidence',message:'资料较长，本次优先读取与所选地图有关的资料片段；其余内容未作为已验证位置依据。',severity:'warning',retryable:false});
             const layoutFacts:LayoutExcerpt[]=[];
             for(const batch of evidenceBatches){
@@ -2262,20 +2268,26 @@ export function createSqlRepository(options: RepositoryOptions) {
               if(evidenceResponse.finishReason==='length')throw new Error('位置依据提取输出被截断；本图未送入排版');
               const rejected:LayoutEvidenceRejection[]=[];
               let firstError:unknown=null,verified:LayoutExcerpt[]=[];
-              try { verified=parseLayoutEvidence(evidenceResponse.text??'',batch.chunks,evidenceMapRefs,rejected); }
+              try { verified=parseLayoutEvidence(evidenceResponse.text??'',batch.chunks,evidenceMapRefs,rejected,{complete:Boolean(generationOptions.workBatching)}); }
               catch(error){firstError=error;}
+              if((firstError||rejected.length)&&!canSupplement()){
+                const affected=firstError||rejected.some(r=>r.mapId===null)?evidenceMapRefs.map(m=>m.id):rejected.map(r=>r.mapId!);
+                for(const id of affected)evidenceBlockedMaps.add(id);
+                allIssues.push({code:"LAYOUT_EVIDENCE_PENDING",path:"$.layout.evidence",message:"部分位置依据未通过校验，额外请求额度已用尽；通过的片段保留，失败地图待处理。",severity:"warning",retryable:true});
+                layoutFacts.push(...verified);continue;
+              }
               if(firstError||rejected.length){
                 if(layoutBudget.remaining()<=0)throw firstError??new Error(rejected.map(r=>r.message).join('；'));
                 const affected=rejected.some(r=>r.mapId===null)||firstError?evidenceMapRefs.map(m=>m.id):[...new Set(rejected.map(r=>r.mapId!))];
                 const repairContent=batch.request.messages[1].content+'\n【格式纠错】准确问题：'+(firstError instanceof Error?firstError.message:JSON.stringify(rejected))+'. 请重新核对受影响地图 '+affected.join('、')+'，只返回完整 JSON {"facts":[{"mapRef":"目录引用","segmentRef":"本批 S 编号"}]}。只选择已提供片段编号，不抄写或改写原文。没有相关片段则 facts=[]。';
-                const repairRequest={...batch.request,batchId:batch.request.batchId+'_repair',messages:batch.request.messages.map((message,index)=>index===1?{...message,content:repairContent}:message),promptInput:{...batch.request.promptInput!,injectionText:repairContent}};
+                const repairRequest={...batch.request,batchId:batch.request.batchId+'_repair',retryOf:batch.request.batchId,messages:batch.request.messages.map((message,index)=>index===1?{...message,content:repairContent}:message),promptInput:{...batch.request.promptInput!,injectionText:repairContent}};
                 const repairStarted=now();
                 evidenceResponse=await requestSpatialWithTransportRetry(repairRequest,'layout_evidence_repair');
                 recordAttempt({kind:'layout_evidence_repair',phase:'geography',started_wall_ms:repairStarted,finished_wall_ms:now(),input_chars:repairRequest.messages.reduce((sum,message)=>sum+message.content.length,0),response_chars:evidenceResponse.text?.length??0,http_status:evidenceResponse.httpStatus,response_hash:sha256HexSync(evidenceResponse.text??''),finish_reason:evidenceResponse.finishReason});
                 if(input.isCurrent&&!input.isCurrent()||currentRevision()!==anchor.baseRevision)throw new AtlasDbError('STALE_BASE','位置依据纠错期间聊天或世界修订已变化，候选不发布',{});
                 if(evidenceResponse.finishReason==='length')throw new Error('位置依据纠错输出被截断；本图未送入排版');
                 const remaining:LayoutEvidenceRejection[]=[];
-                try { verified.push(...parseLayoutEvidence(evidenceResponse.text??'',batch.chunks,evidenceMapRefs,remaining)); }
+                try { verified.push(...parseLayoutEvidence(evidenceResponse.text??'',batch.chunks,evidenceMapRefs,remaining,{complete:Boolean(generationOptions.workBatching)})); }
                 catch(error){
                   if(firstError)throw error;
                   remaining.push(...affected.map(mapId=>({code:'LAYOUT_EVIDENCE_JSON',message:(error as Error).message,mapId,index:0})));
@@ -2298,6 +2310,9 @@ export function createSqlRepository(options: RepositoryOptions) {
             currentLayoutTask=layoutTask=narrowed;layoutTasks[layoutTasks.length-1]=narrowed;
           }
           const layoutRequest=attachLayoutEvidence(currentLayoutTask.request,layoutEvidenceCache,currentLayoutTask.mapIds);
+          const isSupplement=currentLayoutTask.mapIds.some(id=>retriedLayoutIds.has(id));
+          if(isSupplement)layoutRequest.retryOf=layoutTasks[0].request.batchId;
+          else mapBatchesRemaining--;
           // Every real transport still claims the finite spatial plan's allowance.
           layoutStarted=now();
           let response=await requestSpatialWithTransportRetry(layoutRequest,'layout');
@@ -2313,11 +2328,11 @@ export function createSqlRepository(options: RepositoryOptions) {
           const retryBrokenJson=!parsed.operations.length&&parsed.issues.some(i=>i.code==='JSON_SYNTAX');
           const unknownEntityRefs=unknownLayoutEntityRefs(parsed.operations.map(operation=>operation.value),layoutRefs);
           retryableBatchReply=hasRequestedLayout()||retryEmptyLayout||retryBrokenJson||unknownEntityRefs.length>0;
-          if(currentLayoutTask.mapIds.length===1&&!retriedLayoutIds.has(currentLayoutTask.mapIds[0])&&(unknownEntityRefs.length>0||!hasRequestedLayout()&&(retryEmptyLayout||retryBrokenJson))&&!extracted.incomplete&&layoutBudget.remaining()>0){
+          if(currentLayoutTask.mapIds.length===1&&!retriedLayoutIds.has(currentLayoutTask.mapIds[0])&&(unknownEntityRefs.length>0||!hasRequestedLayout()&&(retryEmptyLayout||retryBrokenJson))&&!extracted.incomplete&&layoutBudget.remaining()>0&&canSupplement()){
             retriedLayoutIds.add(currentLayoutTask.mapIds[0]);
             const reason=unknownEntityRefs.length?`使用了未登记实体引用 ${unknownEntityRefs.join('、')}`:parsed.explicitNoop?'只返回了 noop':parsed.operations.length?'未返回本批地图引用的 map.layout.request':parsed.issues.some(i=>i.code==='JSON_SYNTAX')?'回复不是合法 JSON':'回复中没有布局操作';
             const repairText=layoutRequest.messages[1].content+'\n【布局回复纠错】上次'+reason+'。解析问题：'+(parsed.issues.map(i=>i.message).join('；')||'无语法错误，但没有本批布局')+'\n本批是用户明确请求生成或更新布局，不能以“正文无变化”判定 noop。重新生成以上地图的完整布局；缺少事实时保留估计/未知和锁，不编造实体。只返回 JSONL，每张图一个完整 JSON 对象，ref 必须使用本图目录引用：'+[...allowedRefs].join('、')+'。所有键及字符串用双引号，不要代码围栏、解释、逗号连接两个对象或在字段内省略括号。';
-            const repairRequest={...layoutRequest,batchId:layoutRequest.batchId+'_format_retry',messages:layoutRequest.messages.map((m,i)=>i===1?{...m,content:repairText}:m),promptInput:layoutRequest.promptInput?{...layoutRequest.promptInput,injectionText:repairText}:undefined};
+            const repairRequest={...layoutRequest,retryOf:layoutRequest.batchId,batchId:layoutRequest.batchId+'_format_retry',messages:layoutRequest.messages.map((m,i)=>i===1?{...m,content:repairText}:m),promptInput:layoutRequest.promptInput?{...layoutRequest.promptInput,injectionText:repairText}:undefined};
             allIssues.push({code:'LAYOUT_RESPONSE_RETRIED',path:'$.layout',message:`首次布局${reason}，已在本轮预算内请求一次完整回复纠错；原回复未写入地图。`,severity:'warning',retryable:false});
             const retryStarted=now();
             response=await requestSpatialWithTransportRetry(repairRequest,'layout_repair');
@@ -2398,7 +2413,7 @@ export function createSqlRepository(options: RepositoryOptions) {
           if(!transactionOpen){beginTransaction(candidateDb);transactionOpen=true;}
           if(error instanceof AtlasDbError&&error.code==='STALE_BASE')throw error;
           if(layoutEvidenceCache===null)layoutEvidenceBlocked=true;
-          splitAfterFailure=isModelBatchSizeFailure(error)&&currentLayoutTask.mapIds.length>1&&!currentLayoutTask.mapIds.some(id=>retriedLayoutIds.has(id))&&layoutBudget.remaining()>0;
+          splitAfterFailure=!generationOptions.workBatching&&isModelBatchSizeFailure(error)&&currentLayoutTask.mapIds.length>1&&!currentLayoutTask.mapIds.some(id=>retriedLayoutIds.has(id))&&layoutBudget.remaining()>0;
           retryableBatchReply=splitAfterFailure;
           allIssues.push(splitAfterFailure?{code:'LAYOUT_BATCH_SPLIT',path:'$.layout',message:'合批超出模型容量或回复被截断，原回复未写入；缩小批量补交一次。',severity:'warning',retryable:false}:{code:'LAYOUT_MODEL_FAILED',path:'$.layout',message:`空间布局未生成：${(error as Error).message} 已登记的世界数据保留，下一轮自动继续布局。`,severity:'warning',retryable:true});
           writeLayoutAttempt({failure_kind:failureKindOf(error),error:(error as Error).message});
@@ -2410,7 +2425,7 @@ export function createSqlRepository(options: RepositoryOptions) {
         const retryIds:string[]=[];
         for(const id of currentLayoutTask.mapIds){
           if(completedSpatialMaps.has(id))continue;
-          if(!returnedMapIds.has(id)&&retryableBatchReply&&!retriedLayoutIds.has(id)&&layoutBudget.remaining()>0&&!evidenceBlockedMaps.has(id)){
+          if(!returnedMapIds.has(id)&&retryableBatchReply&&!retriedLayoutIds.has(id)&&layoutBudget.remaining()>0&&canSupplement()&&!evidenceBlockedMaps.has(id)){
             retryIds.push(id);retriedLayoutIds.add(id);if(splitAfterFailure)smallerLayoutBatches.set(id,Math.max(1,Math.floor(currentLayoutTask.mapIds.length/2)));
           }else deferredLayoutIds.add(id);
         }
@@ -2428,7 +2443,9 @@ export function createSqlRepository(options: RepositoryOptions) {
           const blocked=new Set(parentBlocked);pendingLayoutIds.splice(0,pendingLayoutIds.length,...pendingLayoutIds.filter(id=>!blocked.has(id)));
           allIssues.push({code:'LAYOUT_PARENT_PENDING',path:'$.layout',message:`${parentBlocked.length} 张子图等待父图完成；本轮不消耗请求生成缺少父图依据的细节。`,severity:'warning',retryable:true});
         }
-        layoutTask=pendingLayoutIds.length?buildSqlLayoutTask(candidateDb,branchId,{...input,layoutMaps:pendingLayoutIds,layoutBatchMapLimit:smallerLayoutBatches.get(pendingLayoutIds[0])},`${turnId}_layout_${layoutTasks.length}`,layoutReport):null;
+        const supplements=generationOptions.workBatching?pendingLayoutIds.filter(id=>retriedLayoutIds.has(id)):[];
+        const nextTargets=supplements.length?supplements:pendingLayoutIds;
+        layoutTask=nextTargets.length&&(mapBatchesRemaining>0||supplements.length>0)?buildSqlLayoutTask(candidateDb,branchId,{...input,generationOptions:{...generationOptions,...(generationOptions.workBatching?{workBatching:{...generationOptions.workBatching,mapBatches:supplements.length?1:mapBatchesRemaining}}:{})},layoutMaps:nextTargets,layoutBatchMapLimit:smallerLayoutBatches.get(pendingLayoutIds[0])},`${turnId}_layout_${layoutTasks.length}`,layoutReport):null;
         if(layoutTask&&layoutTask.mapIds.some(id=>retriedLayoutIds.has(id))){const suffix='\n【未完成项补交】只处理本图目录列出的地图；已完成地图已从本批移除，不要重新生成。';layoutTask.request.messages[1].content+=suffix;layoutTask.request.promptInput!.injectionText=layoutTask.request.messages[1].content;}
         drainLayoutReport();
       }
@@ -2601,6 +2618,7 @@ export function createSqlRepository(options: RepositoryOptions) {
       });
       if ((simulation.catchingUp || simulation.elapsed.quality === 'unknown') && receipt.status !== 'failed') receipt.status = 'partial';
       if (construction.attempted && construction.status !== 'ready' && receipt.status !== 'failed') receipt.status = 'partial';
+      if(generationOptions.workBatching)receipt.requestPlan={normalLimits:workPlanLimits(generationOptions.workBatching),extraLimit:generationOptions.workBatching.extraRequests,usage:turnBudget.workUsage()!};
       if (construction.reasonCode === 'MODEL_BUDGET_EXHAUSTED' && receipt.status !== 'failed') receipt.status = 'partial';
       if (input.layoutMaps && allIssues.some(issue => issue.severity === 'error')) {
         receipt.status = worldChanged || timeChanged ? 'partial' : 'failed';
@@ -2613,7 +2631,7 @@ export function createSqlRepository(options: RepositoryOptions) {
         receipt.status === 'failed' ? null : newRevision,
         JSON.stringify(receipt),
         JSON.stringify(attempts.slice(0, ATLAS_RUNTIME_LIMITS.detailedAttemptsPerTurn)),
-        JSON.stringify({ operations: parsedOperations.map((p) => p.value),
+        JSON.stringify({ work_usage:turnBudget.workUsage(),work_batching:generationOptions.workBatching,operations: parsedOperations.map((p) => p.value),
           operation_meta: parsedOperations.map(({ opId, line, rawHash }) => ({ opId, line, rawHash })),
           known_refs: foregroundKnownRefs,
           scene_maps: input.sceneMaps === true,

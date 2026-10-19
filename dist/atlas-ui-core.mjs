@@ -36,6 +36,33 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 
+// src/atlas-work-batching.ts
+function normalizeWorkBatching(value) {
+  const raw = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  return Object.fromEntries(Object.entries(DEFAULT_WORK_BATCHING).map(([key, fallback]) => {
+    const n = raw[key];
+    return [key, typeof n === "number" && Number.isSafeInteger(n) && n >= (key === "extraRequests" ? 0 : 1) ? n : fallback];
+  }));
+}
+function validWorkBatching(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const raw = value;
+  return Object.keys(DEFAULT_WORK_BATCHING).every((key) => Number.isSafeInteger(raw[key]) && raw[key] >= (key === "extraRequests" ? 0 : 1));
+}
+var DEFAULT_WORK_BATCHING;
+var init_atlas_work_batching = __esm({
+  "src/atlas-work-batching.ts"() {
+    "use strict";
+    DEFAULT_WORK_BATCHING = {
+      mapBatches: 1,
+      characterBatches: 1,
+      evidenceBatches: 1,
+      outcomeBatches: 1,
+      extraRequests: 1
+    };
+  }
+});
+
 // src/atlas-prompt-layers.ts
 function requireText2(code, label, value) {
   const raw = value === null || value === void 0 ? "" : String(value).trim();
@@ -207,6 +234,7 @@ var init_atlas_model_batching = __esm({
   "src/atlas-model-batching.ts"() {
     "use strict";
     init_atlas_runtime_limits();
+    init_atlas_work_batching();
     DEFAULT_MODEL_BATCHING = { charactersPerBatch: 0, mapsPerBatch: 0, requestsPerOperation: 0 };
   }
 });
@@ -225,6 +253,7 @@ var init_atlas_sql_generation_budget = __esm({
   "src/atlas-sql-generation-budget.ts"() {
     "use strict";
     init_atlas_runtime_limits();
+    init_atlas_work_batching();
     GENERATION_BUDGET_LIMIT = ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn;
   }
 });
@@ -3594,6 +3623,7 @@ var init_atlas_sql_layout_task = __esm({
     init_atlas_ops_prompts();
     init_atlas_spatial_frame();
     init_atlas_runtime_limits();
+    init_atlas_work_batching();
     init_atlas_model_batching();
     init_atlas_hash();
     init_atlas_layout_signature();
@@ -3703,6 +3733,7 @@ var init_atlas_construction_scheduler = __esm({
 var init_atlas_layout_evidence = __esm({
   "src/atlas-layout-evidence.ts"() {
     "use strict";
+    init_atlas_runtime_limits();
     init_atlas_sql_world_sources();
     init_atlas_hash();
   }
@@ -4318,6 +4349,7 @@ var init_atlas_sim_random = __esm({
 var init_atlas_sql_simulation = __esm({
   "src/atlas-sql-simulation.ts"() {
     "use strict";
+    init_atlas_work_batching();
     init_atlas_db_runtime();
     init_atlas_db_contract();
     init_atlas_ops_contract();
@@ -4410,6 +4442,7 @@ var init_atlas_sql_world_dedupe = __esm({
 var init_atlas_db_repository = __esm({
   "src/atlas-db-repository.ts"() {
     "use strict";
+    init_atlas_work_batching();
     init_atlas_sql_model_context();
     init_atlas_sql_layout_task();
     init_atlas_layout_evidence();
@@ -4620,6 +4653,9 @@ function createBrowserSqlHost(options) {
     }
   };
 }
+
+// src/atlas-sql-model-port.ts
+init_atlas_work_batching();
 
 // src/atlas-contract.ts
 var ATLAS_PROTOCOL_VERSION = 1;
@@ -5519,6 +5555,7 @@ ${s.content}`).join("\n\n") }];
 // src/atlas-settings.ts
 init_atlas_prompt_layers();
 init_atlas_world_contract();
+init_atlas_work_batching();
 init_atlas_model_batching();
 
 // src/atlas-content-replace.ts
@@ -5753,6 +5790,7 @@ function createDefaultSettingsV2() {
     autoCommit: true,
     rpmLimit: 30,
     modelBatching: { ...DEFAULT_MODEL_BATCHING },
+    workBatching: { ...DEFAULT_WORK_BATCHING },
     loreSupplementEnabled: true,
     // R06 / D-16：推进输出协议。0.9.57 起**新装默认 = table-delta-v1**（三表行增量）；
     // 旧 v1/v2 与非法值在读取时统一规范为 table-delta-v1；schemaVersion:2 是设置存档版本。
@@ -5880,6 +5918,7 @@ function sanitizeSettingsV2(raw, deps = {}) {
     autoCommit: typeof record.autoCommit === "boolean" ? record.autoCommit : true,
     rpmLimit: isFiniteIntIn(record.rpmLimit, MIN_RPM, MAX_RPM) ? record.rpmLimit : 30,
     modelBatching: normalizeModelBatching(record.modelBatching),
+    workBatching: normalizeWorkBatching(record.workBatching),
     loreSupplementEnabled: typeof record.loreSupplementEnabled === "boolean" ? record.loreSupplementEnabled : true,
     // R06：推进协议（非法值 → 缺省 v2）
     worldTurnProtocol: normalizeWorldTurnProtocol(record.worldTurnProtocol)
@@ -6212,6 +6251,10 @@ function applySettingsCommand(settings, command, deps = {}) {
     }
     case "runtime.update": {
       const next = { ...settings };
+      if (command.workBatching !== void 0) {
+        if (!validWorkBatching(command.workBatching)) return fail3(settings, "INVALID_PAYLOAD", "各类工作的分批数必须为正整数，额外请求额度必须为非负整数。");
+        next.workBatching = normalizeWorkBatching(command.workBatching);
+      }
       if (command.modelBatching !== void 0) {
         if (!validModelBatching(command.modelBatching)) return fail3(settings, "INVALID_PAYLOAD", "人物、地图与每次操作请求上限必须为非负安全整数；0 表示不限制。");
         next.modelBatching = normalizeModelBatching({ ...command.modelBatching, requestsPerOperation: command.modelBatching.requestsPerOperation ?? settings.modelBatching?.requestsPerOperation ?? 0 });
@@ -6449,6 +6492,7 @@ function settingsViewV2(settings) {
     legacyWorldTurnProtocol: legacyWorldTurnProtocolNotice(settings.worldTurnProtocol),
     rpmLimit: settings.rpmLimit,
     modelBatching: normalizeModelBatching(settings.modelBatching),
+    workBatching: normalizeWorkBatching(settings.workBatching),
     contentReplaceRules: settings.contentReplaceRules ?? []
   };
 }
@@ -6533,7 +6577,7 @@ function createSqlModelPort(options) {
     async generationOptions() {
       const raw = await options.readSettings();
       const { settings } = raw && typeof raw === "object" && raw.schemaVersion === 2 ? sanitizeSettingsV2(raw) : migrateAtlasSettings(raw);
-      return { maxTokens: resolveWorldTurnPreset(settings)?.maxTokens ?? 0, batching: normalizeModelBatching(settings.modelBatching) };
+      return { maxTokens: resolveWorldTurnPreset(settings)?.maxTokens ?? 0, batching: normalizeModelBatching(settings.modelBatching), workBatching: normalizeWorkBatching(settings.workBatching) };
     },
     withBudget: (budget, stage) => createSqlModelPort({ ...options, budget, stage }),
     async preview(request) {
@@ -6550,7 +6594,7 @@ function createSqlModelPort(options) {
       if (preset.toolCalling && ((preset.connectionMode ?? "custom") !== "custom" || (preset.apiFormat ?? "openai") !== "openai")) throw failure("TOOL_PROTOCOL_UNSUPPORTED", "函数输出目前仅支持自定义 OpenAI 兼容连接，请关闭函数输出或切换连接");
       const budget = options.budget;
       const phase = options.stage === "background" ? "background" : request.phase || options.stage || "observe";
-      const logical = budget?.claimBatch(phase, request.batchId);
+      const logical = budget?.claimBatch(phase, request.batchId, { kind: request.workClass ?? (request.batchTargets?.kind === "maps" ? "maps" : request.batchTargets?.kind === "characters" ? "characters" : request.promptMode === "atlas-spatial-extract" ? "evidence" : void 0), retry: Boolean(request.retryOf) || request.phase === "repair" });
       if (logical && !logical.ok) throw failure(logical.code, logical.reason);
       const result = await callAtlasWorldTurnApi({
         ...preset,
@@ -7633,6 +7677,7 @@ function receiptDetail(value, depth = 0) {
   const keys = /* @__PURE__ */ new Set(["turnId", "status", "summary", "groups", "groupId", "opIds", "changedRows", "issues", "code", "message", "path", "schemaPath", "severity", "retryable", "dependsOn", "dependencies", "dependency", "opId", "phase", "stage", "kind", "attempt", "attempts", "batchId", "httpStatus", "durationMs", "responseChars", "finishReason", "http_status", "started_wall_ms", "finished_wall_ms", "response_chars", "response_hash", "finish_reason", "error", "errorCode", "clockBeforeS", "clockAfterS", "simulatedUntilS", "worldChanged", "timeChanged", "coreSaved", "coreCommitted", "receipt"]);
   for (const key of ["operation", "sceneSaved", "build", "sceneSummary", "ready", "partial", "missing", "queue", "pendingTargets"]) keys.add(key);
   for (const key of ["target_kind", "target_count", "estimated_output_tokens"]) keys.add(key);
+  for (const key of ["requestPlan", "normalLimits", "extraLimit", "usage", "normal", "extra", "transports", "observe", "construction", "evidence", "maps", "characters", "outcomes"]) keys.add(key);
   return Object.fromEntries(Object.entries(value).filter(([k]) => keys.has(k)).map(([k, v]) => [k, receiptDetail(v, depth + 1)]));
 }
 var SIMULATION_VIEW_ROW_CAP = 64;
@@ -9724,7 +9769,7 @@ function createAtlasSettingsRoutes(deps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.94",
+      version: "0.9.95",
       protocolVersion: 1,
       time: now()
     });
@@ -10207,7 +10252,7 @@ function toLegacyTurnReceipt(receipt, options = {}) {
     triggeredNpcIds: [],
     adoptedEventIds: [],
     summary: `统一回执：成功组 ${businessSucceeded.length}，失败组 ${rejected.length}，时间 ${receipt.clockBeforeS}→${receipt.clockAfterS}${succeeded.length > businessSucceeded.length ? "；另保存建设进度" : ""}${issues.length ? `；${issues.length} 项问题` : ""}`,
-    retryable: rejected.length > 0 || receipt.status === "partial" && issues.some((i) => i.retryable && ["MODEL_REQUEST_FAILED", "MODEL_BUDGET_EXHAUSTED", "ACTOR_BUDGET_EXHAUSTED", "OUTCOME_DEFERRED", "LAYOUT_MODEL_FAILED", "LAYOUT_BATCH_PENDING", "LAYOUT_NOT_GENERATED", "LAYOUT_DETAILS_DEFERRED", "WORLD_CONSTRUCTION_UNIT_RETRY"].includes(i.code)),
+    retryable: rejected.length > 0 || receipt.status === "partial" && issues.some((i) => i.retryable && ["MODEL_REQUEST_FAILED", "MODEL_BUDGET_EXHAUSTED", "ACTOR_BUDGET_EXHAUSTED", "CHARACTER_BATCH_CAPACITY", "OUTCOME_DEFERRED", "LAYOUT_MODEL_FAILED", "LAYOUT_BATCH_CAPACITY", "LAYOUT_BATCH_PENDING", "LAYOUT_NOT_GENERATED", "LAYOUT_DETAILS_DEFERRED", "WORLD_CONSTRUCTION_UNIT_RETRY"].includes(i.code)),
     // 新接口读这里（完整分组与问题，不再另造一份 snake_case 回执）。
     receipt: {
       turnId: receipt.turnId,
@@ -10219,7 +10264,8 @@ function toLegacyTurnReceipt(receipt, options = {}) {
       clockAfterS: receipt.clockAfterS,
       simulatedUntilS: receipt.simulatedUntilS,
       worldChanged: receipt.worldChanged,
-      timeChanged: receipt.timeChanged
+      timeChanged: receipt.timeChanged,
+      ...receipt.requestPlan ? { requestPlan: receipt.requestPlan } : {}
     },
     groups,
     issues,
@@ -10268,6 +10314,9 @@ function toPovStateDto(projection, options = {}) {
     injectionUnchangedByViewMode: true
   };
 }
+
+// src/atlas-sql-session.ts
+init_atlas_work_batching();
 
 // src/atlas-sql-map-assets.ts
 init_atlas_db_envelope();
@@ -10366,6 +10415,7 @@ init_atlas_ops_parser();
 init_atlas_ops_prompts();
 
 // src/atlas-sql-resume.ts
+init_atlas_work_batching();
 init_atlas_db_runtime();
 init_atlas_db_invariants();
 init_atlas_sql_simulation();

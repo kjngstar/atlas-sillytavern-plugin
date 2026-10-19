@@ -330,7 +330,7 @@ test('all deferred target IDs survive SQL persistence beyond the next batch limi
 });
 
 test('production repository shares four actual sends including MiniMax compatibility rescue with construction',async()=>{
- const calls=[];const settings={...createDefaultSettingsV2(),modelBatching:{charactersPerBatch:0,mapsPerBatch:0,requestsPerOperation:4},activeApiPresetId:'connection',apiPresets:[{id:'connection',name:'合成MiniMax',endpoint:'https://api.minimaxi.com/v1',apiKey:'sk-cp-synthetic',model:'MiniMax-M3',maxTokens:9000,temperature:.4,timeoutMs:30000,updatedAt:1}]};
+ const calls=[];const settings={...createDefaultSettingsV2(),workBatching:{...createDefaultSettingsV2().workBatching,extraRequests:2},modelBatching:{charactersPerBatch:0,mapsPerBatch:0,requestsPerOperation:4},activeApiPresetId:'connection',apiPresets:[{id:'connection',name:'合成MiniMax',endpoint:'https://api.minimaxi.com/v1',apiKey:'sk-cp-synthetic',model:'MiniMax-M3',maxTokens:9000,temperature:.4,timeoutMs:30000,updatedAt:1}]};
  const port=createSqlModelPort({readSettings:async()=>settings,fetchFn:async url=>{calls.push(String(url));const rescue=String(url).includes('/anthropic');return new Response(JSON.stringify(rescue?{choices:[{message:{content:noop}}]}:{error:{message:'Not Found'}}),{status:rescue?200:404});}});
  const repo=await seeded(port);try{const p=await repo.prepareTurn(input({phaseBatches:['observe','geography']}));assert.equal(calls.length,4);assert.equal(calls.filter(url=>url.includes('/anthropic')).length,2);assert.ok(p.receipt.issues.some(i=>i.code==='MODEL_BUDGET_EXHAUSTED'));assert.equal(p.receipt.status,'partial');}finally{await repo.close();}
 });

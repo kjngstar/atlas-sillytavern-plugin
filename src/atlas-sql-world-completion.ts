@@ -97,12 +97,14 @@ export function normalizeCompletionPolicy(policy?: Partial<CompletionPolicy>): C
     const raw = typeof value === 'number' && Number.isFinite(value) ? Math.floor(value) : ceiling;
     return Math.min(ceiling, Math.max(floor, raw));
   };
+  const workload=policy?.budgetMode==='workload';
   return {
     version: 1,
     density: 'balanced',
-    maxNewLocations: clamp(policy?.maxNewLocations, ATLAS_RUNTIME_LIMITS.newLocationsPerBatch),
-    maxNewRoutes: clamp(policy?.maxNewRoutes, ATLAS_RUNTIME_LIMITS.newRoutesPerBatch),
-    maxAdditionalDepth: clamp(policy?.maxAdditionalDepth, ATLAS_RUNTIME_LIMITS.additionalParentDepthPerBatch) as 2,
+    ...(workload?{budgetMode:'workload' as const}:{}),
+    maxNewLocations: clamp(policy?.maxNewLocations, workload?ATLAS_RUNTIME_LIMITS.operationsPerResponse:ATLAS_RUNTIME_LIMITS.newLocationsPerBatch),
+    maxNewRoutes: clamp(policy?.maxNewRoutes, workload?ATLAS_RUNTIME_LIMITS.operationsPerResponse:ATLAS_RUNTIME_LIMITS.newRoutesPerBatch),
+    maxAdditionalDepth: clamp(policy?.maxAdditionalDepth, workload?ATLAS_RUNTIME_LIMITS.locationDepth:ATLAS_RUNTIME_LIMITS.additionalParentDepthPerBatch),
   };
 }
 

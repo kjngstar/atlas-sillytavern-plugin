@@ -22,6 +22,7 @@ import { collectTaskRefs } from './atlas-sql-task-refs.ts';
 import { buildStagePrompt } from './atlas-ops-prompts.ts';
 import { normalizeFrame, normalizeSqlMapFrame } from './atlas-spatial-frame.ts';
 import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
+import { workBatchSize } from './atlas-work-batching.ts';
 import { normalizeModelBatching, planningOutputTokens } from './atlas-model-batching.ts';
 import { stableHexHash } from './atlas-hash.ts';
 import {
@@ -600,19 +601,25 @@ export function buildSqlLayoutTask(
 
   const config=normalizeModelBatching(input.generationOptions?.batching);
   const retryLimit=input.layoutBatchMapLimit;
-  const batchLimit=Math.min(config.mapsPerBatch||Infinity,ATLAS_RUNTIME_LIMITS.operationsPerResponse,
+  const work=input.generationOptions?.workBatching;
+  const plannedSize=work?workBatchSize(chosen.length,work.mapBatches):Infinity;
+  const batchLimit=Math.min(plannedSize,config.mapsPerBatch||Infinity,ATLAS_RUNTIME_LIMITS.operationsPerResponse,
     typeof retryLimit==='number'&&Number.isSafeInteger(retryLimit)&&retryLimit>0?retryLimit:Infinity);
   const outputBudget=Math.max(0,planningOutputTokens(input.generationOptions)-ATLAS_RUNTIME_LIMITS.batchOutputReserveTokens);
   const first=chosen[0],selected:Entry[]=[];
   let estimatedTokens=0,estimatedRefs=0;
   for(const entry of chosen){
-    if(entry.kind!==first.kind||depth(entry)!==depth(first)||selected.length>=batchLimit)continue;
+    if((!work&&(entry.kind!==first.kind||depth(entry)!==depth(first)))||selected.length>=batchLimit)continue;
     const scene=normalizeFrame(entry.map.frame_json).atlasScene as SqlRow|undefined;
     const savedChars=JSON.stringify(scene?.constraints??{}).length;
     const tokens=Math.max(192+entry.own.length*(entry.kind==='floor'?112:72),Math.ceil(savedChars/2));
     const refs=entry.own.length+1;
     if(selected.length&&(estimatedTokens+tokens>outputBudget||estimatedRefs+refs>ATLAS_RUNTIME_LIMITS.refCatalogMaxEntries))continue;
     selected.push(entry);estimatedTokens+=tokens;estimatedRefs+=refs;
+  }
+  if(work&&selected.length<plannedSize){
+    report?.issues.push({code:'LAYOUT_BATCH_CAPACITY',path:'$.layout',message:'当前计划批次装不下完整目标；请增加地图分批数，或提高连接输出容量。没有额外发送或丢弃目标。',severity:'warning',retryable:true});
+    return null;
   }
   const selectedIds=new Set(selected.map(entry=>entry.mapId));
   const remaining=chosen.filter(entry=>!selectedIds.has(entry.mapId)).map(entry=>entry.mapId);
@@ -707,14 +714,14 @@ export function buildSqlLayoutTask(
         return known ? { ref: ref(id), name: row.name, w: known.widthM, h: known.heightM, source: known.source, referenceId: known.referenceId, furnishing } : null;
       })
       .filter((item): item is NonNullable<typeof item> => item !== null);
-    const parentEntry=container?derived.entries.find(e=>e.mapId===container.map_id):null;
-    const parentFrame=parentEntry?normalizeFrame(parentEntry.map.frame_json):null;
+    const drawnParent=container?derived.entries.find(e=>e.mapId===container.map_id):null;
+    const parentFrame=drawnParent?normalizeFrame(drawnParent.map.frame_json):null;
     const parentScene=parentFrame?.atlasScene as SqlRow|undefined;
     const parentLayout=parentScene?.layout as SqlRow|undefined;
     const parentShapes=parentLayout?[parentLayout.shapes,parentLayout.districts,parentLayout.rooms,parentLayout.buildings].flatMap(pool=>Array.isArray(pool)?pool:[]):[];
     const parentFootprint=parentShapes.find(shape=>shape.id===container?.id);
     const parentContext=parentFootprint?{
-      name:parentEntry!.map.name,units:parentScene?.units??'unknown',
+      name:drawnParent!.map.name,units:parentScene?.units??'unknown',
       footprint:{...parentFootprint,id:ref(container!.id)},
       siblings:parentShapes.filter(shape=>shape.id!==container?.id&&ref(shape.id)).slice(0,32).map(shape=>({...shape,id:ref(shape.id)})),
     }:null;
@@ -760,6 +767,7 @@ export function buildSqlLayoutTask(
       /** P12/R03 §19.3：父图要按这些尺寸投影子空间轮廓，不重新独立估计。 */
       childSpaces,
       parentContext,
+      hierarchy:{parentMap:ref(parentEntry(entry)?.mapId),depth:depth(entry),sharedSpace:ref(container?.id)},
       baselineRooms,
       locations: local.map((row) => ({
         ref: ref(row.id),
@@ -812,6 +820,7 @@ export function buildSqlLayoutTask(
       '合理陈设可以按场所用途补全（estimated），不要求正文逐项点名。',
     ].join('\n'),
   });
+  if(work)request.messages[1].content+='\n【整组地图规划】本批可同时包含不同种类和多层父子地图；一次返回所有列出地图的约束。hierarchy 标明父图与共享空间。父子共用 childSpaces/spaceSize 尺寸，程序从父到子求解坐标、继承轮廓；不为每层再请求，不输出独立坐标或改变父子归属。';
   request.messages[1].content += '\n每个操作外层只含 op、ref、data 和可选 why。op 固定 map.layout.request；ref 使用本图 map 引用；data 包含给定 kind 和 spec。下面提供本图完整合法 JSON 示例。幅面用程序给定 extent。'
     + '\noverview 的 spec 可含 surface、zones、links、features。zone 用 id、name、role、size，可选 sector 与 near。role 取 city/settlement/forest/water/mountain/ruins/district/campus/land/other；size 取 small/medium/large；sector 取八方向或 center。link 的 id 必须是已登记路线引用。feature 用局部 id、type、可选 zoneId 和 density；density 取 low/medium/high，type 取 forest_texture/ridge/shore/building_cluster/road_texture/ruins_scatter/watercourse。'
     + 'overview 的 zone 必须是本图直属地点或目录里已有的代理入口；links 只能用目录中已登记的路线引用；feature 只是本图局部装饰，永远不产生新实体、也不产生新道路。'

@@ -66,7 +66,7 @@ test('batch editor saves through runtime settings, exports no key and retains dr
 test('connection planning is read only and batching does not override actual API max_tokens',async()=>{
  const settings={...createDefaultSettingsV2(),modelBatching:{charactersPerBatch:20,mapsPerBatch:6,requestsPerOperation:0},activeApiPresetId:'api',apiPresets:[{id:'api',name:'test',endpoint:'https://example.test/v1',model:'mock',apiKey:'fixture-secret',maxTokens:12000,temperature:0.5,timeoutMs:30000,updatedAt:1}]};
  const bodies=[],port=createSqlModelPort({readSettings:async()=>settings,fetchFn:async(url,init)=>{bodies.push(JSON.parse(init.body));return new Response(JSON.stringify({choices:[{finish_reason:'stop',message:{content:'{"op":"noop"}'}}]}),{status:200});}});
- assert.deepEqual(await port.generationOptions(),{maxTokens:12000,batching:settings.modelBatching});assert.equal(bodies.length,0);
+ assert.deepEqual(await port.generationOptions(),{maxTokens:12000,batching:settings.modelBatching,workBatching:settings.workBatching});assert.equal(bodies.length,0);
  const req=buildStagePrompt({phase:'decision',actorSlices:'[]'});req.anchor=input().anchor;req.batchTargets={kind:'characters',count:20,estimatedOutputTokens:5632};
  await port.request(req);assert.equal(bodies[0].max_tokens,12000);assert.equal(JSON.stringify(bodies[0]).includes('batchTargets'),false);
  settings.apiPresets[0].maxTokens=0;await port.request({...req,batchId:req.batchId+'_unrestricted'});assert.equal(Object.hasOwn(bodies[1],'max_tokens'),false,'zero leaves the provider output parameter unspecified');

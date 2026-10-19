@@ -115,6 +115,7 @@ function receiptDetail(value:unknown,depth=0):unknown{
   // Keep summary counts only; per-entity source bodies and hidden queue IDs stay excluded.
   for(const key of ['operation','sceneSaved','build','sceneSummary','ready','partial','missing','queue','pendingTargets'])keys.add(key);
   for(const key of ['target_kind','target_count','estimated_output_tokens'])keys.add(key);
+  for(const key of ['requestPlan','normalLimits','extraLimit','usage','normal','extra','transports','observe','construction','evidence','maps','characters','outcomes'])keys.add(key);
   return Object.fromEntries(Object.entries(value).filter(([k])=>keys.has(k)).map(([k,v])=>[k,receiptDetail(v,depth+1)]));
 }
 

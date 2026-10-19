@@ -19,6 +19,7 @@ import {
   createGenerationBudget,
   transportBudgetPort,
 } from '../src/atlas-sql-generation-budget.ts';
+import {DEFAULT_WORK_BATCHING} from '../src/atlas-work-batching.ts';
 import { createSqlModelPort } from '../src/atlas-sql-model-port.ts';
 import { createDefaultSettingsV2 } from '../src/atlas-settings.ts';
 import { buildStagePrompt } from '../src/atlas-ops-prompts.ts';
@@ -331,4 +332,14 @@ test('M3-03A: transportBudgetPort 是预算的传输层领取口，拒绝时带�
   const roomy = createGenerationBudget({limit:4});
   assert.deepEqual(transportBudgetPort(roomy, 'geography', 'build_1').claim(), { ok: true });
   assert.equal(roomy.used(), 1);
+});
+
+test('work plan: compatibility fallback is an extra HTTP send, not a second free normal batch',async()=>{
+ for(const extraRequests of [0,1]){
+  const budget=createGenerationBudget({workBatching:{...DEFAULT_WORK_BATCHING,extraRequests}}),{fetchFn,calls}=rescueFetch(),port=minimaxFixture({budget,fetchFn});
+  const pending=port.request({...request('planned-map'),workClass:'maps'});
+  if(extraRequests)await pending;else await assert.rejects(pending,/额度|预算/);
+  assert.equal(calls.length,1+extraRequests);assert.equal(budget.used(),calls.length);
+  assert.equal(budget.workUsage().extra,extraRequests);assert.equal(budget.workUsage().normal.maps,1);
+ }
 });

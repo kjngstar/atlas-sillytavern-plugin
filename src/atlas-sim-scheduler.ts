@@ -54,6 +54,8 @@ export type SettleInput = {
   turnId: string;
   /** Formal repository applies bounded model results before marking a boundary resolved. */
   deferOutcome?: boolean;
+  coalesceModelWork?: boolean;
+  remainingWorkBatches?:(kind:'characters'|'outcomes')=>number;
 };
 
 export type SettleResult = {
@@ -377,7 +379,7 @@ function applyBoundary(input: SettleInput, boundary: Boundary, cursor: number): 
   return { step, issues, opportunities: [] };
 }
 
-function modelRequestFor(input: SettleInput, boundary: Boundary, cursor: number, batchesLeft: number): Record<string, unknown> {
+function modelRequestFor(input: SettleInput, boundary: Boundary, cursor: number, batchesLeft: number, cohort:Boundary[]=[boundary]): Record<string, unknown> {
   return {
     kind: 'boundary_decision',
     phase: 'outcome',
@@ -387,6 +389,7 @@ function modelRequestFor(input: SettleInput, boundary: Boundary, cursor: number,
     atS: boundary.atS,
     windowFromS: cursor,
     boundary: { kind: boundary.kind, stableId: boundary.stableId, refId: boundary.refId ?? null, payload: boundary.payload ?? {} },
+    ...(input.coalesceModelWork?{boundaries:cohort.map(b=>({kind:b.kind,stableId:b.stableId,refId:b.refId??null,payload:b.payload??{}}))}:{}),
     budgets: { modelBatchesLeft: batchesLeft },
     allowedOps: ['event.propose', 'information.propose'],
   };
@@ -428,7 +431,8 @@ export async function settleWindow(input: SettleInput): Promise<SettleResult> {
     if (!boundary) break;
 
     if (boundary.needsModel === true) {
-      if (!input.modelPort || batchesLeft <= 0) {
+      const workBatches=input.remainingWorkBatches?.(boundary.kind==='journey_node'?'characters':'outcomes')??Number.MAX_SAFE_INTEGER;
+      if (!input.modelPort || batchesLeft <= 0 || workBatches<=0) {
         // 停在最早未决的因果边界：不跳到终点，也不宣称全部成功（§9.6）。
         pending = boundary;
         steps.push({
@@ -452,11 +456,35 @@ export async function settleWindow(input: SettleInput): Promise<SettleResult> {
       }
       // 需要判断的边界：先落实程序可确定的后果（到达节点、行动完成），再用一次模型批次决定
       // 「注意/相信/停留/结果」；不把待决事件跳过（§9.1 / §9.6）。
-      const deterministic = boundary.kind === 'event_start' ? { step: {} as Record<string, unknown>, issues: [] as Issue[], opportunities: [] as Opportunity[] } : applyBoundary(input, boundary, cursor);
+      const cohort=[boundary];
+      if(input.coalesceModelWork&&['journey_node','action_complete'].includes(boundary.kind)){
+        const table=boundary.kind==='journey_node'?'journeys':'actions';
+        const actor=(b:Boundary)=>String(loadRows({db:input.db,branchId:input.branchId},table,'id = ?',[b.refId??''])[0]?.[table==='journeys'?'mover_entity_id':'actor_entity_id']??'');
+        const owners=new Set([actor(boundary)]);
+        for(const b of queue){
+          if(b.stableId===boundary.stableId||b.kind!==boundary.kind||b.atS!==boundary.atS||!b.needsModel)continue;
+          const owner=actor(b);if(!owner||owners.has(owner))continue;
+          const action=table==='actions'?loadRows({db:input.db,branchId:input.branchId},'actions','id = ?',[b.refId??''])[0]:null;
+          const deps=action?.depends_on_json;const dependencies=Array.isArray(deps)?deps:typeof deps==='string'?JSON.parse(deps):[];
+          if(dependencies.length)continue;
+          owners.add(owner);cohort.push(b);
+        }
+      }
+      if(input.coalesceModelWork)cohort.splice(Math.ceil(cohort.length/Math.min(cohort.length,workBatches)));
+      const deterministicSteps=cohort.map(b=>b.kind==='event_start'?{step:{} as Record<string,unknown>,issues:[] as Issue[],opportunities:[] as Opportunity[]}:applyBoundary(input,b,cursor));
+      const deterministic=deterministicSteps[0];
       batchesLeft -= 1;
       let modelBatch: Record<string, unknown>;
       try {
-        const response = await input.modelPort.request(modelRequestFor(input, boundary, cursor, batchesLeft));
+        const response = await input.modelPort.request(modelRequestFor(input, boundary, cursor, batchesLeft,cohort));
+        const accepted=(response as {resolvedIds?:string[]}|null)?.resolvedIds;
+        if(accepted){
+          for(const [i,b] of cohort.entries()){if(accepted.includes(b.stableId)){processed.add(b.stableId);steps.push({...deterministicSteps[i].step,boundaryId:b.stableId,kind:b.kind,atS:b.atS,modelBatch:true,sharedBatch:boundary.stableId});}issues.push(...deterministicSteps[i].issues);}
+          const unresolved=cohort.find(b=>!accepted.includes(b.stableId));
+          cursor=Math.max(cursor,boundary.atS);
+          if(unresolved){pending=unresolved;issues.push(issue("OUTCOME_PENDING",`boundary.${unresolved.stableId}`,"同批部分结果尚未落实，停在当前因果时刻，已完成结果保留","warning"));break;}
+          continue;
+        }
         modelBatch = { modelBatch: true, responseHash: responseHash(response), batchesLeft };
       } catch (err) {
         issues.push(...deterministic.issues);

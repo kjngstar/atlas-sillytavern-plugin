@@ -103,7 +103,8 @@ export async function handleSqlMapAction(session:SqlSession,action:string,body:R
     manual=false;phases=['observe'];
     // P09B/§16.4：「继续建设」。不发前台请求，只推进持久队列里的下一单元；无待办时零请求返回。
     if(body.continue===true&&!constructionMode){
-      const work=planConstructionDigest(read,session.branchId,mode,resolvedFocus,2,{
+      const options=await session.modelPort?.generationOptions?.();
+      const work=planConstructionDigest(read,session.branchId,mode,resolvedFocus,options?.workBatching?ATLAS_RUNTIME_LIMITS.locationDepth:2,{
         baseRevision:session.repo.internal.currentRevision(),
         headTurnId:String(session.repo.internal.currentHeadTurnId()??''),
       },sources);

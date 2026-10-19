@@ -1,11 +1,11 @@
 {
-  "patchId": "atlas-0.9.94-rc.1-20261018",
+  "patchId": "atlas-0.9.95-rc.1-20261019",
   "baseVersion": "0.9.93",
   "baseReleaseVersion": "0.9.93-rc.1",
   "baseCommit": "eec9886a55002c30fcf97589600cd9f39f5fff20",
   "schemaVersion": 3,
-  "releaseVersion": "0.9.94-rc.1",
-  "manifestVersion": "0.9.94",
+  "releaseVersion": "0.9.95-rc.1",
+  "manifestVersion": "0.9.95",
   "releaseChannel": "prerelease",
   "layoutPolicyVersion": "layout-v7",
   "fixes": [
@@ -20,50 +20,74 @@
     "polygon-footprint-size-unit-conversion",
     "parent-geometry-in-layout-context",
     "capacity-aware-character-batching",
-    "same-kind-and-depth-map-batching",
+    "legacy-map-batching-compatibility",
     "persistent-api-batch-settings",
     "targeted-missing-map-retry",
-    "bounded-truncated-batch-splitting",
+    "legacy-truncated-batch-splitting-compatibility",
     "materialize-parent-before-child-request",
     "defer-descendants-of-failed-parent",
     "skip-unchanged-same-time-actor-decision",
     "durable-batch-target-counts",
     "zero-means-no-user-batch-limit",
     "remove-fixed-character-and-map-caps",
-    "user-configurable-request-count-default-unrestricted",
+    "optional-global-request-insurance-cap",
     "unspecified-output-keeps-unspecified-planning-budget",
     "bounded-character-capacity-retry",
     "required-references-for-large-character-batches",
-    "preserve-new-request-cap-on-older-settings-import"
+    "preserve-new-request-cap-on-older-settings-import",
+    "workload-count-settings-default-one",
+    "mixed-kind-cross-depth-layout-batching",
+    "full-coverage-shared-spatial-evidence",
+    "shared-extra-transport-and-repair-quota",
+    "capacity-overflow-never-silently-expands-batch-count",
+    "durable-workload-usage-across-continuation",
+    "same-time-independent-outcome-cohorts",
+    "partial-outcome-cohort-preserves-pending-actions",
+    "planned-child-sizes-before-parent-projection",
+    "request-usage-in-native-receipts",
+    "workload-construction-removes-twelve-location-two-depth-split",
+    "request-counts-survive-ui-receipt-adaptation",
+    "batch-capacity-remains-retryable",
+    "legacy-settings-disclosure-preserved"
   ],
   "validation": {
     "status": "passed",
-    "baselineTests": {
-      "total": 2240,
-      "pass": 2240,
-      "fail": 0,
-      "skipped": 0
-    },
     "tests": {
-      "total": 2252,
-      "pass": 2252,
-      "fail": 0,
-      "cancelled": 0,
-      "skipped": 0
+      "total": 2270,
+      "pass": 2270,
+      "fail": 0
     },
     "typecheck": "passed",
     "pack": "passed",
-    "sqlWasmRelease": "passed",
-    "browserChecks": {
-      "productionUi": 89,
-      "hostEvents": 30,
-      "contactPropagation": 12,
-      "readOnlyMapReplay": 9,
-      "failures": 0,
-      "browserErrors": 0
+    "sqlRelease": {
+      "status": "passed",
+      "automaticTransports": 4,
+      "layoutRequests": 1,
+      "mapsInLayout": 4,
+      "extraTransports": 0
+    },
+    "referenceBrowser": {
+      "checks": 97,
+      "pass": 97,
+      "fail": 0
+    },
+    "hostGeneration": {
+      "checks": 30,
+      "pass": 30,
+      "fail": 0
+    },
+    "contactFlow": {
+      "checks": 12,
+      "pass": 12,
+      "fail": 0
+    },
+    "mapReplay": {
+      "checks": 9,
+      "pass": 9,
+      "fail": 0
     },
     "liveUserTavern": "not-run",
     "externalModel": "not-run"
   },
-  "modelBatchingPolicyVersion": "batch-v2"
+  "modelBatchingPolicyVersion": "batch-v3"
 }

@@ -133,6 +133,11 @@ export type GroupResult = {
 };
 
 export type TurnReceipt = {
+  requestPlan?: {
+    normalLimits: Record<import('./atlas-work-batching.ts').ModelWorkClass,number>;
+    extraLimit: number;
+    usage: import('./atlas-sql-generation-budget.ts').WorkPlanUsage;
+  };
   turnId: string;
   anchor: TurnAnchor;
   status: 'committed' | 'partial' | 'noop' | 'failed';
@@ -348,6 +353,9 @@ export const OP_FIELD_ALIASES: Record<string, string> = {
 };
 
 export type ModelBatchRequest = {
+  /** Workload scheduling metadata; never sent as provider parameters. */
+  workClass?: import('./atlas-work-batching.ts').ModelWorkClass;
+  retryOf?: string;
   batchId: string;
   phase: Phase;
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
