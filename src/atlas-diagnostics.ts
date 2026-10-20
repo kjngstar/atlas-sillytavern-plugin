@@ -25,11 +25,18 @@ export interface AtlasDiagnostic {
   outcome: AtlasDiagnosticOutcome;
   traceId?: string;
   attemptId?: string;
+  /** A single logical request; every transport attempt and its result share this reference. */
+  requestRef?: string;
+  pluginVersion?: string;
+  buildId?: string;
+  buildCommit?: string;
+  buildDirty?: boolean;
   chatRef?: string;
   /** A04：当前聊天的脱敏指纹（`ref-<16 位十六进制>`）。与 `chatRef` 并存，不改变旧字段含义。 */
   chatFingerprint?: string;
   httpStatus?: number;
   errorCode?: string;
+  causeCode?: string;
   retryable?: boolean;
   durationMs?: number;
   details?: Record<string, string | number | boolean | null>;
@@ -67,6 +74,11 @@ const DETAIL_KEYS = new Set([
   "droppedCount", "limitCount", "keptCount", "truncatedCount", "scannedCount",
   "candidateCount", "selectedCount", "outputChars", "chatMatch",
   "generationSequence", "generationType", "dryRun", "automaticTrigger", "quietPromptPresent", "completionSignal", "gated",
+  "requestRef", "batchRef", "pathRef", "modelRef", "model", "apiFormat", "method",
+  "timeoutMs", "maxTokens", "promptChars", "requestChars", "messageCount", "headersMs", "bodyMs",
+  "transportAttempt", "modelRequests", "retryKind", "failureStage", "cancelledBy", "errorName",
+  "issueCount", "issueIndex", "baseRevision", "revision", "storageRevision", "changedRows", "groupCount",
+  "rejectedGroups", "targetCount", "budgetUsed", "coreSaved", "sceneSaved", "saveConfirmed", "receiptStatus",
 ]);
 // 0.9.54 A9/A11：允许 `$` `[` `]`，否则 JSON 路径（$.relationUpdates[0].value）永远过不了
 // safeToken —— `$` 是 JSONPath 的根记号，缺它整条 schemaPath 都进不了诊断。
@@ -84,6 +96,11 @@ const SAFE_ROUTES = new Set([
   // 任何未列出的字符串一律被丢弃 —— 诊断里不允许出现任意路径（可能夹带 key 或用户内容）。
   "/sql/chat/ui-read", "/sql/chat/map/build", "/sql/chat/map/layout",
   "/sql/chat/rollback", "/sql/chat/repair", "/sql/upgrade-backup",
+  "/sql/chat/state", "/sql/chat/prepare", "/sql/chat/commit", "/sql/chat/retry", "/sql/chat/layout-retry",
+  "/sql/chat/preview", "/sql/chat/bind", "/sql/chat/bootstrap", "/sql/chat/enable", "/sql/chat/advance",
+  "/sql/chat/map/overview", "/sql/chat/map/normalize", "/sql/chat/rollback-preview",
+  "/sql/chat/history-repair-preview", "/sql/chat/history-repair", "/sql/turn", "/sql/retry",
+  "/sql/diagnostics/export", "/sql/diagnostics", "/sql/session/export", "/sql/session/import",
 ]);
 // M6-15：世界建设的阶段名（observe / geography / overview / world-build / layout / commit / rollback）
 // 走 `phase` 字段的既有安全原子校验（`SAFE_ATOM`，不接受 `://` 与外内容），无需另立白名单。
@@ -96,6 +113,11 @@ const SAFE_COLLECTIONS = new Set(["tasks", "signals", "deliveries", "edges", "ar
 // A04：计数字段（有限非负整数 + 上界钳制）。键名不在集合内时沿用旧的通用数值分支。
 const SAFE_COUNT_KEYS = new Set([
   "droppedCount", "limitCount", "keptCount", "truncatedCount", "scannedCount",
+]);
+const REQUEST_NUMBER_KEYS = new Set([
+  'timeoutMs', 'maxTokens', 'promptChars', 'requestChars', 'messageCount', 'headersMs', 'bodyMs',
+  'transportAttempt', 'modelRequests', 'issueCount', 'issueIndex', 'baseRevision', 'revision',
+  'storageRevision', 'changedRows', 'groupCount', 'rejectedGroups', 'targetCount', 'budgetUsed',
 ]);
 let nextId = 0;
 
@@ -375,6 +397,11 @@ export function sanitizeDiagnostic(raw: unknown, now: () => number = Date.now): 
   if (/^turn-[a-z0-9]+-[0-9]+$/.test(traceId)) entry.traceId = traceId;
   const attemptId = safeToken(value.attemptId);
   if (/^attempt-[0-9]+$/.test(attemptId)) entry.attemptId = attemptId;
+  if (isAtlasRefFingerprint(value.requestRef)) entry.requestRef = value.requestRef as string;
+  if (typeof value.pluginVersion === "string" && /^(?:\d+\.\d+\.\d+(?:-[a-z0-9.-]+)?|development)$/.test(value.pluginVersion)) entry.pluginVersion = value.pluginVersion;
+  if (typeof value.buildId === "string" && /^build-[a-f0-9]{16}$/.test(value.buildId)) entry.buildId = value.buildId;
+  if (typeof value.buildCommit === "string" && /^[a-f0-9]{40}$/.test(value.buildCommit)) entry.buildCommit = value.buildCommit;
+  if (typeof value.buildDirty === "boolean") entry.buildDirty = value.buildDirty;
   const chatRef = safeToken(value.chatRef);
   if (/^chat-[a-z0-9]{4,16}$/.test(chatRef)) entry.chatRef = chatRef;
   // A04：顶层聊天指纹。只接受指纹形态；裸 chatId（原始字符串）到不了这里，也不会被回退成 chatRef。
@@ -383,6 +410,7 @@ export function sanitizeDiagnostic(raw: unknown, now: () => number = Date.now): 
   if (typeof value.errorCode === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(value.errorCode)) {
     entry.errorCode = value.errorCode;
   }
+  if (typeof value.causeCode === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(value.causeCode)) entry.causeCode = value.causeCode;
   if (typeof value.httpStatus === "number" && Number.isInteger(value.httpStatus) &&
       value.httpStatus >= 100 && value.httpStatus <= 599) entry.httpStatus = value.httpStatus;
   if (typeof value.retryable === "boolean") entry.retryable = value.retryable;
@@ -397,7 +425,8 @@ export function sanitizeDiagnostic(raw: unknown, now: () => number = Date.now): 
       if (!DETAIL_KEYS.has(key)) continue;
       if (typeof detail === "string") {
         const token = safeToken(detail);
-        if (key === "route" && SAFE_ROUTES.has(token)) details[key] = token;
+        // Routes contain '/': validate against the exact allowlist before safeToken.
+        if (key === "route" && SAFE_ROUTES.has(detail)) details[key] = detail;
         else if(key==='transport'&&['chat-completions-raw','tavern-helper'].includes(token))details[key]=token;
         else if(key==='hostMainApi'&&['openai','textgenerationwebui','kobold','koboldhorde','novel'].includes(token))details[key]=token;
         else if(key==='finishReason'&&['stop','length','tool_calls','content_filter','STOP','MAX_TOKENS','SAFETY','RECITATION','OTHER','BLOCKLIST','PROHIBITED_CONTENT','SPII','MALFORMED_FUNCTION_CALL'].includes(token))details[key]=token;
@@ -411,13 +440,21 @@ export function sanitizeDiagnostic(raw: unknown, now: () => number = Date.now): 
         else if (key === "reasonCode" && /^[A-Z][A-Z0-9_]{0,63}$/.test(token)) details[key] = token;
         else if (key === "generationType" && ["normal", "quiet", "regenerate", "swipe", "continue", "impersonate", "unknown"].includes(token)) details[key] = token;
         else if (key === "completionSignal" && ["received", "ended", "after-commands"].includes(token)) details[key] = token;
+        else if (key === "method" && ["GET", "POST", "PUT", "DELETE", "PATCH"].includes(token)) details[key] = token;
+        else if (key === "apiFormat" && ["openai", "openai_responses", "claude", "gemini"].includes(token)) details[key] = token;
+        else if (key === "retryKind" && ["normal", "retry", "repair", "compatibility"].includes(token)) details[key] = token;
+        else if (key === "failureStage" && ["preparation", "budget", "request", "headers", "body", "parse", "validation", "commit", "save"].includes(token)) details[key] = token;
+        else if (key === "cancelledBy" && ["timeout", "transport", "host", "unknown"].includes(token)) details[key] = token;
+        else if (key === "errorName" && ["Error", "TypeError", "AbortError", "TimeoutError"].includes(token)) details[key] = token;
+        else if (key === "receiptStatus" && ["committed", "partial", "failed", "noop", "duplicate"].includes(token)) details[key] = token;
+        else if (key === "model" && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,95}$/.test(detail) && !/sk-|bearer|:\/\/|[a-f0-9]{32}/i.test(detail)) details[key] = detail;
         // 根路径 `$` 也是真实的 JSONPath：JSON 无法解析或顶层不是对象时解析器只返回 `$`。
         // 0.9.54 A9/A11：其余路径必须以 `$.` 或 `$[` 开头，
         // 否则任意「字母数字下划线点」字符串（例如一段裸密钥）都能冒充 schemaPath 混进诊断。
         // 旧字符集还缺 `[`、`]`，导致真正的数组下标路径（$.relationUpdates[0].value）
         // 反而被丢弃——「记录真实拒绝原因位置」形同虚设。此处两个方向一起收口：
         // 允许下标，但要求根记号，并继续拒绝引号 / 空格 / 中文 / 冒号。
-        else if (key === "schemaPath" && (token === "$" || /^\$(?:\.[A-Za-z0-9_]+|\[\d+\])+(?:\.[A-Za-z0-9_]+|\[\d+\])*$/.test(token))) details[key] = token;
+        else if (key === "schemaPath" && detail.length <= 120 && (token === "$" || /^\$(?:\.[A-Za-z0-9_]+|\[(?:\d+|\*)\])+$/.test(detail))) details[key] = detail;
         else if (key === "protocolVersion" && /^v?[0-9.]{1,16}$/.test(token)) details[key] = token;
         else if (key === "event" && /^[A-Z][A-Z0-9_]{0,63}$/.test(token)) details[key] = token;
         else if (key === "stage" && /^[a-z][a-z0-9_-]{0,63}$/.test(token)) details[key] = token;
@@ -451,6 +488,8 @@ export function sanitizeDiagnostic(raw: unknown, now: () => number = Date.now): 
         if (typeof detail === "number" && Number.isInteger(detail) && detail >= 0 && detail <= 100_000) {
           details[key] = detail;
         }
+      } else if (REQUEST_NUMBER_KEYS.has(key)) {
+        if (typeof detail === 'number' && Number.isSafeInteger(detail) && detail >= 0) details[key] = detail;
       } else if (SAFE_COUNT_KEYS.has(key)) {
         // A04：计数字段只接受有限非负整数，布尔 / null / 小数 / 负数一律丢弃，并钳到上界。
         if (typeof detail === "number" && Number.isInteger(detail) && detail >= 0) {
@@ -472,6 +511,7 @@ export function sanitizeDiagnostic(raw: unknown, now: () => number = Date.now): 
 }
 
 export function createAtlasDiagnosticsSink(options: {
+  metadata?: Pick<AtlasDiagnostic, "pluginVersion" | "buildId" | "buildCommit" | "buildDirty">;
   now?: () => number;
   capacity?: number;
   persist?: StoragePort | null;
@@ -589,11 +629,16 @@ export function createAtlasDiagnosticsSink(options: {
   return {
     emit(raw: AtlasDiagnosticInput): AtlasDiagnostic | null {
       try {
-        const entry = sanitizeDiagnostic(raw, now);
+        const entry = sanitizeDiagnostic({ ...options.metadata, ...raw }, now);
         if (!entry) return null;
         const last = entries[entries.length - 1];
-        if (last && last.code === entry.code && last.phase === entry.phase &&
+        // Only polling noise may fold. Errors and actual model sends stay individually countable.
+        if (last && ["API_CALL_COMPLETE", "ENGINE_HEALTH_OK", "STATE_REFRESH_COMPLETE"].includes(entry.code) &&
+            entry.level !== "error" && entry.level !== "warn" && last.level === entry.level &&
+            !entry.requestRef && !last.requestRef && last.code === entry.code && last.phase === entry.phase &&
             last.traceId === entry.traceId && last.source === entry.source &&
+            last.chatRef === entry.chatRef && last.chatFingerprint === entry.chatFingerprint &&
+            last.httpStatus === entry.httpStatus && last.outcome === entry.outcome &&
             last.errorCode === entry.errorCode && JSON.stringify(last.details) === JSON.stringify(entry.details) &&
             Date.parse(entry.at) - Date.parse(last.at) < 2000) {
           last.count = (last.count ?? 1) + 1;

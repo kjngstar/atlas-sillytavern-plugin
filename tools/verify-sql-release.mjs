@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const pluginVersion=JSON.parse(readFileSync(resolve(root,'package.json'),'utf8')).version;
 const release = resolve(root, 'release/atlas-ui-extension');
 const requests = [];
 const server = createServer((req, res) => {
@@ -142,6 +143,8 @@ try {
   assert.equal(modelTurn.tableWritten, false); assert.equal(modelTurn.mixedFormat, false);
   const automaticChat = await startupPage.evaluate(async () => {
     const { core } = window.releaseStartup, host = window.releaseStartupHost;
+    const ext = await import('/index.js');
+    const previousDiagnostics = new Set(ext.getAtlasSafeDiagnosticsSnapshot().map(entry => entry.id));
     let calls = 0, layoutCalls = 0, retryCalls = 0, layoutTargets=[],layoutKinds=[];
     // Real packaged path: observation + construction + shared evidence + one
     // mixed hierarchy layout request. Valid synthetic replies need no repair.
@@ -185,7 +188,12 @@ try {
     await core.handleEvent('MESSAGE_DELETED', 1);
     for (let n = 0; n < 150 && core.getState().binding?.lastCommittedMessageId === '1'; n++) await new Promise(resolve => setTimeout(resolve, 20));
     const rolledBack = core.getState();
+    const diagnosticRows = ext.getAtlasSafeDiagnosticsSnapshot().filter(entry => !previousDiagnostics.has(entry.id));
+    const modelStarts = diagnosticRows.filter(entry => entry.code === 'MODEL_REQUEST_STARTED');
+    const commitLog = diagnosticRows.find(entry => ['API_CALL_COMPLETE','API_CALL_PARTIAL'].includes(entry.code) && entry.details?.route === '/sql/chat/commit');
+    const uiLog = diagnosticRows.find(entry => entry.code === 'COMMIT_SUCCEEDED');
     return { prepared, prepareSaves, commitSaves, calls, layoutCalls, retryCalls,layoutTargets,requestPlan:committed.receipts[0]?.detail?.receipt?.requestPlan??null,layoutKinds,issues:committed.receipts[0]?.detail?.issues,workBatching:(await window.releaseStartup.api.request('GET','/settings')).body.data?.workBatching,
+      diagnosticEvidence:{modelStarts,commitLog,uiLog},
       commitStatus: committed.receipts[0]?.status, floor: committed.binding?.lastCommittedMessageId,
       rollbackFloor: rolledBack.binding?.lastCommittedMessageId,
       rollbackSaves: window.releaseStartupSaves() - before - commitSaves,
@@ -204,10 +212,43 @@ try {
   assert.equal(automaticChat.commitStatus, 'committed');
   assert.equal(automaticChat.floor, '1'); assert.notEqual(automaticChat.rollbackFloor, '1');
   assert.equal(automaticChat.rollbackSaves, 1); assert.equal(automaticChat.tableWritten, false);
+  const evidence=automaticChat.diagnosticEvidence;
+  assert.equal(evidence.modelStarts.length, automaticChat.calls, '真实模型发送逐次入日志，不以轮询折叠次数充数');
+  assert.equal(new Set(evidence.modelStarts.map(entry=>entry.requestRef)).size,automaticChat.calls);
+  assert.ok(evidence.modelStarts.every(entry=>entry.pluginVersion===pluginVersion&&/^build-[a-f0-9]{16}$/.test(entry.buildId)));
+  assert.ok(evidence.commitLog,JSON.stringify(evidence));
+  assert.equal(evidence.commitLog.details.coreSaved,true);
+  assert.equal(evidence.commitLog.details.saveConfirmed,true);
+  assert.equal(evidence.commitLog.details.modelRequests,automaticChat.calls);
+  assert.ok(evidence.modelStarts.every(entry=>entry.details.turnRef===evidence.commitLog.details.turnRef),'提取、建设与布局请求属于同一回合');
+  assert.equal(evidence.uiLog.details.turnRef,evidence.commitLog.details.turnRef,'界面与引擎按同一回合关联');
+  const timeoutEvidence=await startupPage.evaluate(async()=>{
+    const ext=await import('/index.js'),api=window.releaseStartup.api,host=window.releaseStartupHost;
+    const before=new Set(ext.getAtlasSafeDiagnosticsSnapshot().map(entry=>entry.id));
+    const current=(await api.request('GET','/settings')).body.data;
+    const preset=current.apiPresets.find(p=>p.id===current.activeApiPresetId);
+    const update=await api.request('PUT','/settings',{action:'api.save',apiKeyMode:'keep',preset:{...preset,timeoutMs:1000}});
+    if(!update.body.ok)throw Error(JSON.stringify(update.body));
+    let calls=0;window.TavernHelper.generateRaw=()=>{calls++;return new Promise(()=>{});};
+    const saves=window.releaseStartupSaves();
+    const response=await api.request('POST','/sql/turn',{chatUid:host.chatId,branchId:'main',hostMessageUid:'timeout-fixture',variantKey:'original',inputHash:'timeout-fixture',userText:'等候',assistantText:'你在原地等候。'});
+    const rows=ext.getAtlasSafeDiagnosticsSnapshot().filter(entry=>!before.has(entry.id));
+    return {status:response.status,calls,saves:window.releaseStartupSaves()-saves,
+      failures:rows.filter(entry=>entry.code==='MODEL_REQUEST_FAILED'),engine:rows.find(entry=>entry.code==='API_CALL_FAILED'),
+      starts:rows.filter(entry=>entry.code==='MODEL_REQUEST_STARTED').length};
+  });
+  assert.equal(timeoutEvidence.status,500);
+  assert.equal(timeoutEvidence.saves,0,'模型超时没有产生保存');
+  assert.equal(timeoutEvidence.calls,timeoutEvidence.starts);
+  assert.equal(timeoutEvidence.failures[0].errorCode,'API_TIMEOUT');
+  assert.equal(timeoutEvidence.failures[0].details.timeoutMs,1000);
+  assert.equal(timeoutEvidence.failures[0].details.cancelledBy,'timeout');
+  assert.equal(timeoutEvidence.engine.causeCode,'API_TIMEOUT');
   console.log(JSON.stringify({ passed: true, main, worker,
     startup: { offSqlMode: off.sqlMode, coreSaved: started.turn.coreSaved, saves: started.saves, stored: started.stored },
     modelTurn,
     automaticChat,
+    timeoutEvidence,
     wasmRequests: requests.filter(path => path.endsWith('.wasm')) }, null, 2));
 } finally {
   await browser?.close();

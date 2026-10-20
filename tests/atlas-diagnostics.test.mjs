@@ -69,7 +69,7 @@ test("diagnostic sanitizer rejects all unlisted text and original identifiers", 
   assert.equal(entry.details.responseChars, 12);
 });
 
-test("diagnostics ring keeps recent errors under info pressure and merges repeats", () => {
+test("diagnostics ring keeps recent errors under info pressure without folding failures", () => {
   let clock = 1000;
   const sink = createAtlasDiagnosticsSink({ now: () => clock, capacity: 100 });
   sink.emit(base);
@@ -85,7 +85,8 @@ test("diagnostics ring keeps recent errors under info pressure and merges repeat
   clock += 100;
   sink.emit(base);
   const last = sink.getSnapshot().at(-1);
-  assert.equal(last.count, 2);
+  assert.equal(last.count, undefined);
+  assert.equal(sink.getSnapshot().filter(entry => entry.code === base.code).length, 3);
   assert.equal(sink.exportSafe("chat-other"), "");
 });
 

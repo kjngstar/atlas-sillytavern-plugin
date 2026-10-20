@@ -6,6 +6,14 @@
   var __getOwnPropNames = Object.getOwnPropertyNames;
   var __getProtoOf = Object.getPrototypeOf;
   var __hasOwnProp = Object.prototype.hasOwnProperty;
+  var __esm = (fn, res, err) => function __init() {
+    if (err) throw err[0];
+    try {
+      return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
+    } catch (e) {
+      throw err = [e], e;
+    }
+  };
   var __commonJS = (cb, mod) => function __require() {
     try {
       return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
@@ -30,9 +38,16 @@
     mod
   ));
 
+  // <define:__ATLAS_BUILD_INFO__>
+  var init_define_ATLAS_BUILD_INFO = __esm({
+    "<define:__ATLAS_BUILD_INFO__>"() {
+    }
+  });
+
   // node_modules/sql.js/dist/sql-wasm-browser.js
   var require_sql_wasm_browser = __commonJS({
     "node_modules/sql.js/dist/sql-wasm-browser.js"(exports, module) {
+      init_define_ATLAS_BUILD_INFO();
       var initSqlJsPromise = void 0;
       var initSqlJs2 = function(moduleConfig) {
         if (initSqlJsPromise) {
@@ -2156,7 +2171,14 @@
     }
   });
 
+  // src/atlas-sql-worker-entry.ts
+  init_define_ATLAS_BUILD_INFO();
+
+  // src/atlas-db-repository.ts
+  init_define_ATLAS_BUILD_INFO();
+
   // src/atlas-work-batching.ts
+  init_define_ATLAS_BUILD_INFO();
   var DEFAULT_WORK_BATCHING = {
     mapBatches: 1,
     characterBatches: 1,
@@ -2178,7 +2200,14 @@
     return { observe: 1, construction: 1, evidence: settings.evidenceBatches, maps: settings.mapBatches, characters: settings.characterBatches, outcomes: settings.outcomeBatches };
   }
 
+  // src/atlas-sql-model-context.ts
+  init_define_ATLAS_BUILD_INFO();
+
+  // src/atlas-ops-prompts.ts
+  init_define_ATLAS_BUILD_INFO();
+
   // src/atlas-runtime-limits.ts
+  init_define_ATLAS_BUILD_INFO();
   var ATLAS_RUNTIME_LIMITS = {
     responseUtf8Bytes: 256 * 1024,
     operationsPerResponse: 64,
@@ -2266,6 +2295,7 @@
   var ITEM_PROPERTY_LIMIT = 16;
 
   // src/atlas-ops-contract.ts
+  init_define_ATLAS_BUILD_INFO();
   var PROGRAM_INTERNAL_MUTATION_TABLES = [
     "branches",
     "turns",
@@ -2555,6 +2585,7 @@
   }
 
   // src/atlas-sql-refs.ts
+  init_define_ATLAS_BUILD_INFO();
   var CATALOG = [
     ["locations", "L", "location", 200],
     ["characters", "C", "character", 200],
@@ -2685,7 +2716,20 @@
     return request;
   }
 
+  // src/atlas-sql-layout-task.ts
+  init_define_ATLAS_BUILD_INFO();
+
+  // src/atlas-db-readport.ts
+  init_define_ATLAS_BUILD_INFO();
+
+  // src/atlas-db-codec.ts
+  init_define_ATLAS_BUILD_INFO();
+
+  // src/atlas-db-schema.ts
+  init_define_ATLAS_BUILD_INFO();
+
   // src/atlas-location-kinds.ts
+  init_define_ATLAS_BUILD_INFO();
   var ATLAS_LOCATION_KINDS = [
     "region",
     "city",
@@ -3776,9 +3820,11 @@ END`;
   }
 
   // src/atlas-db-runtime.ts
+  init_define_ATLAS_BUILD_INFO();
   var import_sql = __toESM(require_sql_wasm_browser(), 1);
 
   // src/atlas-db-assets.ts
+  init_define_ATLAS_BUILD_INFO();
   var import_meta = {};
   var ATLAS_SQL_VENDOR_FILES = [
     {
@@ -4147,7 +4193,11 @@ END`;
     throw new AtlasDbError("READ_PAGE_BUDGET_EXCEEDED", `${table} 读取超过分页预算，不能宣称已读取完整记录`, { table, branchId });
   }
 
+  // vendor/atlas-spatial/index.mjs
+  init_define_ATLAS_BUILD_INFO();
+
   // vendor/atlas-spatial/contracts.mjs
+  init_define_ATLAS_BUILD_INFO();
   var KIT_VERSION = "atlas-spatial-kit/1";
   var SCENE_KIND = "atlas-scene";
   var SCENE_VERSION = 1;
@@ -4361,7 +4411,14 @@ END`;
     return issues;
   }
 
+  // vendor/atlas-spatial/generation.mjs
+  init_define_ATLAS_BUILD_INFO();
+
+  // vendor/atlas-spatial/layout-core.mjs
+  init_define_ATLAS_BUILD_INFO();
+
   // vendor/atlas-spatial/foundation.mjs
+  init_define_ATLAS_BUILD_INFO();
   var clone2 = (value) => JSON.parse(JSON.stringify(value));
   var finitePositive = (n) => typeof n === "number" && Number.isFinite(n) && n > 0;
   var intersects = (a, b) => a.x < b.x + b.w - 1e-8 && a.x + a.w > b.x + 1e-8 && a.y < b.y + b.h - 1e-8 && a.y + a.h > b.y + 1e-8;
@@ -4912,6 +4969,7 @@ END`;
   }
 
   // vendor/atlas-spatial/overview-core.mjs
+  init_define_ATLAS_BUILD_INFO();
   var PAD = 0.06;
   var LOCK_PAD = 0.1;
   var EPS2 = 1e-6;
@@ -5371,6 +5429,7 @@ END`;
   }
 
   // vendor/atlas-spatial/estimated-fit.mjs
+  init_define_ATLAS_BUILD_INFO();
   function fitEstimatedFloor(generate, value, context) {
     const first = generate(value, context);
     if (!context.autoPlan) return first;
@@ -5838,6 +5897,7 @@ END`;
   }
 
   // vendor/atlas-spatial/map-membership.mjs
+  init_define_ATLAS_BUILD_INFO();
   function collectMapLocations({ mapRow, maps = [], locations = [] } = {}) {
     if (!mapRow?.id) return [];
     const branchId = mapRow.branch_id;
@@ -5873,6 +5933,7 @@ END`;
   }
 
   // vendor/atlas-spatial/placement.mjs
+  init_define_ATLAS_BUILD_INFO();
   function placeMarkers({ region, markers, obstacles = [], previous = [], step = 0.25, clearance = 0.25 } = {}) {
     if (!Array.isArray(region) || region.length < 3 || !region.every((p) => finite(p.x) && finite(p.y)) || !Array.isArray(markers) || markers.length > LIMITS.markers || !finite(step) || step <= 0 || !finite(clearance) || clearance <= 0) return failure("PLACEMENT_INPUT_INVALID", "$", "需要有效多边形、标点列表、步长和间距");
     const xs = region.map((p) => p.x), ys = region.map((p) => p.y), minX = Math.min(...xs), minY = Math.min(...ys), maxX = Math.max(...xs), maxY = Math.max(...ys);
@@ -5915,6 +5976,7 @@ END`;
   }
 
   // vendor/atlas-spatial/storage.mjs
+  init_define_ATLAS_BUILD_INFO();
   function record(v) {
     if (typeof v === "string") return JSON.parse(v);
     if (plain(v)) return clone(v);
@@ -6065,6 +6127,7 @@ END`;
   }
 
   // vendor/atlas-spatial/view-adapter.mjs
+  init_define_ATLAS_BUILD_INFO();
   function projectMapView({ view, mapId, scope } = {}) {
     try {
       scope = normalizeScope(scope);
@@ -6312,7 +6375,14 @@ END`;
   }
 
   // vendor/atlas-spatial/tools.mjs
+  init_define_ATLAS_BUILD_INFO();
   var TOOL_NAMES = Object.freeze(["atlas_generate_floor", "atlas_generate_city", "atlas_place_markers", "atlas_build_overlays", "atlas_generate_overview"]);
+
+  // vendor/atlas-spatial/renderer.mjs
+  init_define_ATLAS_BUILD_INFO();
+
+  // vendor/atlas-spatial/renderer-drawing.mjs
+  init_define_ATLAS_BUILD_INFO();
 
   // vendor/atlas-spatial/renderer.mjs
   var DEFAULT_THEME = Object.freeze({ bg: "#060a12", grid: "#4977a125", wall: "#b2d4ef", mint: "#39e0a0", gold: "#ffc247", blue: "#7fd4ff", text: "#dce9fb", muted: "#91a9c3", floor: "#101d2f", cyan: "#43e0ff", violet: "#9b6bff" });
@@ -6329,6 +6399,7 @@ END`;
   var FEATURE_TINT = Object.freeze({ forest_texture: "#2fbf8f", ridge: "#91a9c3", shore: "#7fd4ff", building_cluster: "#ffc247", road_texture: "#b2cdeb", ruins_scatter: "#9b6bff", watercourse: "#3fa9ff" });
 
   // vendor/atlas-spatial/host-context.mjs
+  init_define_ATLAS_BUILD_INFO();
   function readSpaceCanonical(raw, locationId) {
     if (!locationId || !plain(raw) || raw.version !== 1 || raw.locationId !== locationId) return null;
     const size = plain(raw.size) && finite(raw.size.widthM) && finite(raw.size.heightM) && raw.size.widthM > 0 && raw.size.heightM > 0 ? { widthM: raw.size.widthM, heightM: raw.size.heightM, quality: raw.size.quality === "confirmed" ? "confirmed" : "estimated", locked: raw.size.locked === true, basis: plain(raw.size.basis) ? raw.size.basis : null } : null;
@@ -6426,7 +6497,11 @@ END`;
     }
   }
 
+  // vendor/atlas-spatial/candidate-group.mjs
+  init_define_ATLAS_BUILD_INFO();
+
   // vendor/atlas-spatial/space-projection.mjs
+  init_define_ATLAS_BUILD_INFO();
   function projectChildFurnishing(spec, ctx) {
     const aliases = /* @__PURE__ */ new Map(), key = (room, id) => room + "\0" + id;
     for (const [room, canonical] of Object.entries(ctx.childCanonical ?? {})) {
@@ -6561,6 +6636,7 @@ END`;
   }
 
   // vendor/atlas-spatial/candidate-apply.mjs
+  init_define_ATLAS_BUILD_INFO();
   function applySceneGroup(db, group, ports) {
     if (ports?.insideCandidateTransaction !== true) return failure("CANDIDATE_TRANSACTION_REQUIRED", "$", "只能在宿主已有的候选事务内应用布局");
     if (!group) return { ok: true, status: "duplicate", groups: [], issues: [] };
@@ -6592,6 +6668,7 @@ END`;
   }
 
   // vendor/atlas-spatial/initial-frame.mjs
+  init_define_ATLAS_BUILD_INFO();
   function prepareInitialFrame({ mapRow, scope, currentScope, locations = [], kind = null, widthM, heightM, turnId, operationId, expectedRowRev } = {}) {
     try {
       if (!sameScope(scope, currentScope)) return failure("STALE_SCOPE", "$.scope", "初始化时作用域已经改变");
@@ -6621,7 +6698,11 @@ END`;
     }
   }
 
+  // src/atlas-spatial-request.ts
+  init_define_ATLAS_BUILD_INFO();
+
   // src/atlas-ops-compile-types.ts
+  init_define_ATLAS_BUILD_INFO();
   function emptyCompileResult() {
     return { mutations: [], readSet: [], dependencies: [], issues: [] };
   }
@@ -6647,6 +6728,7 @@ END`;
   }
 
   // src/atlas-ops-refs.ts
+  init_define_ATLAS_BUILD_INFO();
   function refKindPrefix(kind) {
     switch (kind) {
       case "location":
@@ -7451,7 +7533,11 @@ END`;
     return out;
   }
 
+  // src/atlas-ops-normalize.ts
+  init_define_ATLAS_BUILD_INFO();
+
   // src/atlas-ops-errors.ts
+  init_define_ATLAS_BUILD_INFO();
   var ATLAS_ERROR_CODES = Object.freeze({
     JSON_SYNTAX: "JSON_SYNTAX",
     WRAPPER_INCOMPLETE: "WRAPPER_INCOMPLETE",
@@ -8845,7 +8931,11 @@ END`;
     return list2.includes(field);
   }
 
+  // src/atlas-ops-entities.ts
+  init_define_ATLAS_BUILD_INFO();
+
   // src/atlas-db-defaults.ts
+  init_define_ATLAS_BUILD_INFO();
   var LIST_COLUMNS = /* @__PURE__ */ new Set([
     "aliases_json",
     "mobility_profiles_json",
@@ -9330,6 +9420,7 @@ END`;
   }
 
   // src/atlas-db-mentions.ts
+  init_define_ATLAS_BUILD_INFO();
   var MENTION_CANDIDATE_LIMIT = ATLAS_RUNTIME_LIMITS.mentionCandidates;
   var MENTION_RECENT_TURNS_LIMIT = MENTION_RECENT_LIMIT;
   var KIND_HINTS = ["character", "location", "item", "faction", "unknown"];
@@ -10718,7 +10809,11 @@ END`;
     return result;
   }
 
+  // src/atlas-sql-task-refs.ts
+  init_define_ATLAS_BUILD_INFO();
+
   // src/atlas-hash.ts
+  init_define_ATLAS_BUILD_INFO();
   var nodeCrypto;
   function getNodeCrypto() {
     if (nodeCrypto !== void 0) return nodeCrypto;
@@ -10991,6 +11086,7 @@ END`;
   }
 
   // src/atlas-spatial-frame.ts
+  init_define_ATLAS_BUILD_INFO();
   var SPATIAL_REQUEST_KEY = "atlasLayoutRequest";
   var SPATIAL_SCENE_KEY = FRAME_SCENE_KEY;
   function spatialIssue(input, ctx = {}) {
@@ -11355,6 +11451,7 @@ END`;
   }
 
   // src/atlas-model-batching.ts
+  init_define_ATLAS_BUILD_INFO();
   function normalizeModelBatching(value) {
     const raw = value && typeof value === "object" ? value : {};
     const count2 = (key) => typeof raw[key] === "number" && Number.isSafeInteger(raw[key]) && raw[key] >= 0 ? raw[key] : 0;
@@ -11376,6 +11473,7 @@ END`;
   }
 
   // src/atlas-layout-signature.ts
+  init_define_ATLAS_BUILD_INFO();
   var LAYOUT_SIGNATURE_POLICY_VERSION = "layout-v9";
   var byId3 = (left, right) => left < right ? -1 : left > right ? 1 : 0;
   var str2 = (value) => typeof value === "string" && value ? value : null;
@@ -11467,6 +11565,7 @@ END`;
   }
 
   // src/atlas-world-contract.ts
+  init_define_ATLAS_BUILD_INFO();
   var SPATIAL_CAPABILITIES = ["corridor-binding/v1", "space-canonical/v1", "spatial-profile/v1"];
   var CAPABILITY_CORRIDOR_BINDING = "corridor-binding/v1";
   var CAPABILITY_SPACE_CANONICAL = "space-canonical/v1";
@@ -11476,6 +11575,7 @@ END`;
   }
 
   // src/atlas-prompt-layers.ts
+  init_define_ATLAS_BUILD_INFO();
   var PROMPT_POLICY_VERSION = "atlas-policy/2026-10-16";
   var DEFAULT_POLICY_CONTENT = [
     "维护已有事实，并在建设阶段依据世界观、场所用途与已登记结构，适量补全有用途的普通功能地点；原文没有逐一点名不等于禁止建设，合理补全必须标 inferred 并说明 why。正文明确内容与估计必须区分，没有依据的地点、尺寸、路线和陈设不得标成已确认。",
@@ -11559,6 +11659,7 @@ ${lines.join("\n")}
   }
 
   // src/atlas-space-canonical.ts
+  init_define_ATLAS_BUILD_INFO();
   var SPACE_CANONICAL_FRAME_KEY = FRAME_SPACE_CANONICAL_KEY;
   var SPACE_CANONICAL_VERSION = 1;
   var SPACE_CANONICAL_MAX_FURNISHING2 = SPACE_CANONICAL_MAX_FURNISHING;
@@ -11896,6 +11997,7 @@ ${lines.join("\n")}
   }
 
   // src/atlas-spatial-profile.ts
+  init_define_ATLAS_BUILD_INFO();
   var SPATIAL_PROFILE_FRAME_KEY = "atlasSpatialProfile";
   var SPATIAL_PROFILE_VERSION = 1;
   var SPATIAL_PROFILE_MODES = Object.freeze(["interior", "circulation", "outdoor", "linear", "compound", "unknown"]);
@@ -12800,7 +12902,11 @@ ${lines.join("\n")}
     };
   }
 
+  // src/atlas-layout-evidence.ts
+  init_define_ATLAS_BUILD_INFO();
+
   // src/atlas-sql-world-sources.ts
+  init_define_ATLAS_BUILD_INFO();
   var WORLD_SOURCE_CHUNK_CHARS = 2e3;
   var WORLD_SOURCE_MAX_CHARS = 24e3;
   var WORLD_SOURCE_CHUNKING_VERSION = 1;
@@ -13372,7 +13478,11 @@ ${entry.text}`.toLowerCase();
     };
   }
 
+  // src/atlas-sql-legacy-import.ts
+  init_define_ATLAS_BUILD_INFO();
+
   // src/atlas-db-contract.ts
+  init_define_ATLAS_BUILD_INFO();
   var BUSINESS_TABLES = [
     "maps",
     "locations",
@@ -13409,6 +13519,7 @@ ${entry.text}`.toLowerCase();
   var ATLAS_USER_TABLES = [...BUSINESS_TABLES, ...INTERNAL_TABLES];
 
   // src/atlas-db-migrate.ts
+  init_define_ATLAS_BUILD_INFO();
   var LEGACY_WORLD_MAP_ID = "world";
   var USER_TABLES = Object.keys(ATLAS_TABLE_COLUMNS);
   function isPlainObject5(value) {
@@ -14896,6 +15007,7 @@ ${entry.text}`.toLowerCase();
   }
 
   // src/atlas-db-journal.ts
+  init_define_ATLAS_BUILD_INFO();
   function isJournaledTable(table) {
     return JOURNALED_TABLES.includes(table);
   }
@@ -15080,7 +15192,14 @@ ${entry.text}`.toLowerCase();
     return { result: { groupId: opId, opIds: [opId], status: mutations.length ? "applied" : "duplicate", issues, changedRows: mutations.length }, issues };
   }
 
+  // src/atlas-db-commit.ts
+  init_define_ATLAS_BUILD_INFO();
+
+  // src/atlas-db-invariants.ts
+  init_define_ATLAS_BUILD_INFO();
+
   // src/atlas-map-topology.ts
+  init_define_ATLAS_BUILD_INFO();
   var ACTIVE = "active";
   var DEFAULT_MAX_DEPTH = 12;
   function topologyIssue(code, message, severity, extra = {}) {
@@ -16156,6 +16275,7 @@ ${entry.text}`.toLowerCase();
   }
 
   // src/atlas-db-rollback.ts
+  init_define_ATLAS_BUILD_INFO();
   var ROLLBACK_DEFAULT_MAX_TURNS = 200;
   var ROLLBACK_DEFAULT_MAX_STEPS = 5e3;
   var NON_JOURNALED_TABLES = /* @__PURE__ */ new Set(["turns", "turn_changes", "sync_outbox"]);
@@ -16535,6 +16655,7 @@ ${entry.text}`.toLowerCase();
   }
 
   // src/atlas-history-repair.ts
+  init_define_ATLAS_BUILD_INFO();
   var HISTORY_REPAIR_PREVIEW_VERSION = 1;
   var HISTORY_SCAN_PAGE = 200;
   var HISTORY_SCAN_MAX_PAGES = 500;
@@ -16946,6 +17067,7 @@ ${entry.text}`.toLowerCase();
   }
 
   // src/atlas-ops-groups.ts
+  init_define_ATLAS_BUILD_INFO();
   function stableHash2(text3) {
     let h = 2166136261;
     for (let i = 0; i < text3.length; i += 1) {
@@ -17195,7 +17317,11 @@ ${entry.text}`.toLowerCase();
     return { order, blockedBy, issues };
   }
 
+  // src/atlas-ops-compile.ts
+  init_define_ATLAS_BUILD_INFO();
+
   // src/atlas-ops-sources.ts
+  init_define_ATLAS_BUILD_INFO();
   function makeIssue3(code, path, message, severity, retryable, opId, line) {
     const issue22 = { code, path, message, severity, retryable };
     if (opId !== void 0) issue22.opId = opId;
@@ -17517,6 +17643,7 @@ ${entry.text}`.toLowerCase();
   }
 
   // src/atlas-ops-relations.ts
+  init_define_ATLAS_BUILD_INFO();
   var RELATION_FIELDS = /* @__PURE__ */ new Set([
     "subject_ref",
     "object_ref",
@@ -17658,6 +17785,7 @@ ${entry.text}`.toLowerCase();
   }
 
   // src/atlas-ops-actions.ts
+  init_define_ATLAS_BUILD_INFO();
   var STEP_KINDS = ["prepare", "travel", "wait", "interact", "transmit", "investigate", "act"];
   var ACTION_SECRECY = ["public", "restricted", "secret"];
   function issue11(code, path, message, op, extra = {}) {
@@ -18036,6 +18164,7 @@ ${entry.text}`.toLowerCase();
   }
 
   // src/atlas-ops-events.ts
+  init_define_ATLAS_BUILD_INFO();
   var EVENT_KINDS = ["ceremony", "conflict", "arrival", "passage", "discovery", "trade", "communication", "incident", "other"];
   var EVENT_PHASES2 = ["scheduled", "observed", "simulated"];
   var SECRECY = ["public", "restricted", "secret"];
@@ -18310,6 +18439,7 @@ ${entry.text}`.toLowerCase();
   }
 
   // src/atlas-ops-information.ts
+  init_define_ATLAS_BUILD_INFO();
   var INFORMATION_KINDS = ["observation", "report", "rumor", "announcement", "lie", "hypothesis"];
   var TRUTH_STATUS = ["true", "false", "mixed", "unknown"];
   var SECRECY2 = ["public", "restricted", "secret"];
@@ -18753,6 +18883,7 @@ ${entry.text}`.toLowerCase();
   }
 
   // src/atlas-ops-geography.ts
+  init_define_ATLAS_BUILD_INFO();
   var ROUTE_KINDS = ["adjacent", "road", "path", "door", "stairs", "air", "water", "portal", "estimated"];
   var GEOMETRY_QUALITY = ["confirmed", "estimated", "unknown"];
   var ROUTE_STATUS = ["open", "blocked", "closed"];
@@ -19355,6 +19486,7 @@ ${entry.text}`.toLowerCase();
   }
 
   // src/atlas-ops-parser.ts
+  init_define_ATLAS_BUILD_INFO();
   var UTF8_ENCODER = new TextEncoder();
   function utf8ByteLength(text3) {
     return UTF8_ENCODER.encode(text3).byteLength;
@@ -19890,6 +20022,7 @@ ${entry.text}`.toLowerCase();
   }
 
   // src/atlas-ops-repair.ts
+  init_define_ATLAS_BUILD_INFO();
   var SHA256_K2 = new Uint32Array([
     1116352408,
     1899447441,
@@ -20302,7 +20435,11 @@ ${entry.text}`.toLowerCase();
     return { operations, issues, consumedTickets, exceededScope };
   }
 
+  // src/atlas-db-outbox.ts
+  init_define_ATLAS_BUILD_INFO();
+
   // src/atlas-db-envelope.ts
+  init_define_ATLAS_BUILD_INFO();
   var B64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
   function bytesToBase64(bytes2) {
     const B = globalThis.Buffer;
@@ -20419,6 +20556,7 @@ ${entry.text}`.toLowerCase();
   }
 
   // src/atlas-db-upgrade.ts
+  init_define_ATLAS_BUILD_INFO();
   var UPGRADE_TEMP_TABLE = "_atlas_locations_upgrade_2";
   function pragmaNumber(db, pragma) {
     const result = db.exec(`PRAGMA ${pragma}`);
@@ -20702,7 +20840,11 @@ ${entry.text}`.toLowerCase();
     return { changed, from, to: pragmaNumber(db, "user_version"), issues };
   }
 
+  // src/atlas-db-views.ts
+  init_define_ATLAS_BUILD_INFO();
+
   // src/atlas-sim-position.ts
+  init_define_ATLAS_BUILD_INFO();
   function row(db, table, branchId, id) {
     const rows4 = queryBound(db, `SELECT * FROM ${table} WHERE branch_id = ? AND id = ? LIMIT 1`, [branchId, id]);
     if (rows4.length === 0) return null;
@@ -20905,6 +21047,7 @@ ${entry.text}`.toLowerCase();
   }
 
   // src/atlas-scale.ts
+  init_define_ATLAS_BUILD_INFO();
   function finitePositiveNumber(value) {
     if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return null;
     return value;
@@ -20954,6 +21097,7 @@ ${entry.text}`.toLowerCase();
   }
 
   // src/atlas-scene-layout.ts
+  init_define_ATLAS_BUILD_INFO();
   var GOLDEN_ANGLE2 = 2.399963229728653;
   var MAX_CANDIDATES2 = 512;
   var GAP_RETRY_FACTORS = [1, 0.75, 0.5];
@@ -21156,7 +21300,20 @@ ${entry.text}`.toLowerCase();
     return result;
   }
 
+  // src/atlas-sql-visibility.ts
+  init_define_ATLAS_BUILD_INFO();
+
+  // src/atlas-db-knowledge-view.ts
+  init_define_ATLAS_BUILD_INFO();
+
+  // src/atlas-scene-context.ts
+  init_define_ATLAS_BUILD_INFO();
+
+  // src/atlas-sim-opportunities.ts
+  init_define_ATLAS_BUILD_INFO();
+
   // src/atlas-sim-actions.ts
+  init_define_ATLAS_BUILD_INFO();
   var CONDITION_DEPTH = ATLAS_RUNTIME_LIMITS.conditionDepth;
   var CONTAINER_DEPTH2 = ATLAS_RUNTIME_LIMITS.containerDepth;
   var EVENT_KIND_BY_ACTION = {
@@ -21652,6 +21809,7 @@ ${entry.text}`.toLowerCase();
   }
 
   // src/atlas-sim-motion.ts
+  init_define_ATLAS_BUILD_INFO();
   var MOVEMENT_SPEED_PRESETS = {
     walk: { min_mps: 0.8, nominal_mps: 1.4, max_mps: 1.8 },
     ride: { min_mps: 2, nominal_mps: 4, max_mps: 8 },
@@ -23670,6 +23828,7 @@ ${entry.text}`.toLowerCase();
   }
 
   // src/atlas-catalog-views.ts
+  init_define_ATLAS_BUILD_INFO();
   var infoTitle = (alias) => `(SELECT i.title FROM information i WHERE i.branch_id = ${alias}.branch_id AND i.id = ${alias}.information_id)`;
   var infoSummary = (alias) => `(SELECT i.content FROM information i WHERE i.branch_id = ${alias}.branch_id AND i.id = ${alias}.information_id)`;
   var SOURCES = {
@@ -23866,6 +24025,7 @@ ${entry.text}`.toLowerCase();
   }
 
   // src/atlas-spatial-flow-views.ts
+  init_define_ATLAS_BUILD_INFO();
   function asArray4(value) {
     if (Array.isArray(value)) return value.filter((v) => v !== null && typeof v === "object");
     if (typeof value === "string" && value.trim()) {
@@ -24169,7 +24329,11 @@ ${entry.text}`.toLowerCase();
     };
   }
 
+  // src/atlas-spatial-views.ts
+  init_define_ATLAS_BUILD_INFO();
+
   // src/atlas-map-assessment.ts
+  init_define_ATLAS_BUILD_INFO();
   var PLAIN2 = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
   var TEXT2 = (value) => typeof value === "string" && value.length > 0 ? value : "";
   var sortedUnique = (values) => [...new Set(values)].filter((id) => id.length > 0).sort();
@@ -24529,6 +24693,7 @@ ${entry.text}`.toLowerCase();
   }
 
   // src/atlas-task-views.ts
+  init_define_ATLAS_BUILD_INFO();
   function num8(value) {
     const n = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : NaN;
     return Number.isFinite(n) ? n : null;
@@ -24676,7 +24841,11 @@ ${entry.text}`.toLowerCase();
     };
   }
 
+  // src/atlas-world-feed.ts
+  init_define_ATLAS_BUILD_INFO();
+
   // src/atlas-world-feed-history.ts
+  init_define_ATLAS_BUILD_INFO();
   var BOOKKEEPING_COLUMNS = /* @__PURE__ */ new Set(["row_rev", "updated_turn_id"]);
   var HISTORICAL_TURN_STATUSES = ["committed", "partial"];
   var HISTORICAL_DEFAULT_TABLES = ["characters", "locations", "information"];
@@ -24915,6 +25084,7 @@ ${entry.text}`.toLowerCase();
   }
 
   // src/atlas-world-feed-events.ts
+  init_define_ATLAS_BUILD_INFO();
   var EVENT_EFFECT_TABLES = /* @__PURE__ */ new Set(["characters", "items", "locations", "actions"]);
   var finite4 = (v) => typeof v === "number" && Number.isFinite(v);
   var str8 = (v) => typeof v === "string" ? v : "";
@@ -25068,6 +25238,7 @@ ${entry.text}`.toLowerCase();
   }
 
   // src/atlas-world-feed-transitions.ts
+  init_define_ATLAS_BUILD_INFO();
   var finite5 = (v) => typeof v === "number" && Number.isFinite(v);
   var str9 = (v) => typeof v === "string" ? v : "";
   function planIssue3(code, path, message, extra = {}) {
@@ -25378,6 +25549,7 @@ ${entry.text}`.toLowerCase();
   }
 
   // src/atlas-world-feed-visibility.ts
+  init_define_ATLAS_BUILD_INFO();
   function planIssue4(code, path, message, extra = {}) {
     return { code, path, message, severity: "warning", retryable: false, ...extra };
   }
@@ -25464,6 +25636,7 @@ ${entry.text}`.toLowerCase();
   }
 
   // src/atlas-world-feed-cursor.ts
+  init_define_ATLAS_BUILD_INFO();
   var B64_ALPHABET2 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
   var B64_LOOKUP = (() => {
     const map = /* @__PURE__ */ new Map();
@@ -25962,7 +26135,11 @@ ${entry.text}`.toLowerCase();
     };
   }
 
+  // src/atlas-sql-simulation.ts
+  init_define_ATLAS_BUILD_INFO();
+
   // src/atlas-sim-time.ts
+  init_define_ATLAS_BUILD_INFO();
   var ACTIVITY_DEFAULTS = {
     dialogue: { min_s: 0, nominal_s: 0, max_s: 0 },
     meal: { min_s: 900, nominal_s: 1800, max_s: 3600 },
@@ -26263,7 +26440,11 @@ ${entry.text}`.toLowerCase();
     };
   }
 
+  // src/atlas-sim-scheduler.ts
+  init_define_ATLAS_BUILD_INFO();
+
   // src/atlas-sim-propagation.ts
+  init_define_ATLAS_BUILD_INFO();
   var PROPAGATION_CHECK_INTERVAL_S = 3600;
   var CARRIER_PREFERENCE = ["walk", "ride", "ground_vehicle", "water", "flight", "flight_narrative_aircraft"];
   var TERRAIN_TABLE2 = TERRAIN_MULTIPLIERS;
@@ -27108,6 +27289,7 @@ ${entry.text}`.toLowerCase();
   }
 
   // src/atlas-sim-decision-context.ts
+  init_define_ATLAS_BUILD_INFO();
   function decodeRows(table, rows4) {
     const out = [];
     for (const row2 of rows4) {
@@ -27176,6 +27358,7 @@ ${entry.text}`.toLowerCase();
   }
 
   // src/atlas-sim-outcome-context.ts
+  init_define_ATLAS_BUILD_INFO();
   var OUTCOME_ALLOWED_OPS = ["event.propose", "information.propose"];
   function isPlainObject18(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -27345,6 +27528,7 @@ ${entry.text}`.toLowerCase();
   }
 
   // src/atlas-sim-random.ts
+  init_define_ATLAS_BUILD_INFO();
   var ATTENTION_PROBABILITIES = {
     low: 0.2,
     normal: 0.5,
@@ -27713,6 +27897,7 @@ ${entry.text}`.toLowerCase();
   }
 
   // src/atlas-model-attempts.ts
+  init_define_ATLAS_BUILD_INFO();
   function logModelAttempts(port, now, record2) {
     return { request: async (request) => {
       const started = now();
@@ -27744,6 +27929,7 @@ ${entry.text}`.toLowerCase();
   }
 
   // src/atlas-sql-scene-maps.ts
+  init_define_ATLAS_BUILD_INFO();
   var SCENE_ROW_LIMIT = 1e3;
   var CONTAINER_FRAME_CELLS = { room: { cols: 12, rows: 8 }, other: { cols: 100, rows: 100 } };
   function containerRaw(value) {
@@ -27987,7 +28173,11 @@ ${entry.text}`.toLowerCase();
     return { id: opId, opIds: [opId], dependsOn: [], readSet: [], mutations: changes, opIssues };
   }
 
+  // src/atlas-spatial-candidate.ts
+  init_define_ATLAS_BUILD_INFO();
+
   // src/atlas-spatial-occupants.ts
+  init_define_ATLAS_BUILD_INFO();
   function rows3(list2) {
     return Array.isArray(list2) ? list2 : [];
   }
@@ -28304,6 +28494,7 @@ ${entry.text}`.toLowerCase();
   }
 
   // src/atlas-layout-closure.ts
+  init_define_ATLAS_BUILD_INFO();
   function completeLayoutClosure(input) {
     const { scope, turnId, operationId } = input;
     let maps = structuredClone(input.maps), locations = structuredClone(input.locations);
@@ -29140,6 +29331,155 @@ ${entry.text}`.toLowerCase();
   }
 
   // src/atlas-sql-generation-budget.ts
+  init_define_ATLAS_BUILD_INFO();
+
+  // src/atlas-request-diagnostics.ts
+  init_define_ATLAS_BUILD_INFO();
+
+  // src/atlas-diagnostics.ts
+  init_define_ATLAS_BUILD_INFO();
+  var REF_PREFIX = "ref-";
+  var REF_HEX_CHARS = 16;
+  var REF_DIGITS = REF_HEX_CHARS * 4;
+  var REF_MASK = (1n << BigInt(REF_DIGITS)) - 1n;
+  var REF_OFFSET_64 = 0xcbf29ce484222325n;
+  var REF_PRIME_64 = 0x100000001b3n;
+  var REF_MIX_1 = 0xbf58476d1ce4e5b9n;
+  var REF_MIX_2 = 0x94d049bb133111ebn;
+  function refUtf8Bytes(value) {
+    return new TextEncoder().encode(typeof value === "string" ? value : "");
+  }
+  function atlasRefFingerprint(raw) {
+    const bytes2 = refUtf8Bytes(raw);
+    let hash2 = REF_OFFSET_64;
+    for (let index = 0; index < bytes2.length; index += 1) {
+      hash2 ^= BigInt(bytes2[index]);
+      hash2 = hash2 * REF_PRIME_64 & REF_MASK;
+    }
+    hash2 ^= hash2 >> 30n;
+    hash2 = hash2 * REF_MIX_1 & REF_MASK;
+    hash2 ^= hash2 >> 27n;
+    hash2 = hash2 * REF_MIX_2 & REF_MASK;
+    hash2 ^= hash2 >> 31n;
+    return REF_PREFIX + hash2.toString(16).padStart(REF_HEX_CHARS, "0");
+  }
+  var SPATIAL_DETAILS = Object.freeze([
+    "chatFingerprint",
+    "branchRef",
+    "mapRef",
+    "entityRef",
+    "operationRef",
+    "module",
+    "function",
+    "phase",
+    "sceneStatus",
+    "bytes",
+    "reasonCode"
+  ]);
+  var ATLAS_NAMED_DIAGNOSTICS = Object.freeze({
+    // B：异步迁移 / 写入迟到的聊天身份已与当前上下文不符 → 丢弃，不写回任何表。
+    SESSION_IDENTITY_MISMATCH: Object.freeze({
+      code: "SESSION_IDENTITY_MISMATCH",
+      level: "warn",
+      source: "storage",
+      details: Object.freeze(["chatFingerprint", "branchRef", "reasonCode", "stage"])
+    }),
+    // C05：simulation 损坏 → 读视图报错并保留用户原文，绝不静默归空覆盖。
+    SIMULATION_CORRUPT: Object.freeze({
+      code: "SIMULATION_CORRUPT",
+      level: "error",
+      source: "storage",
+      details: Object.freeze(["chatFingerprint", "branchRef", "schemaPath", "reasonCode"])
+    }),
+    // C：有界截断如实上报（必须同时给出保留/丢弃数量，不能悄悄丢数据）。
+    SIMULATION_TRUNCATED: Object.freeze({
+      code: "SIMULATION_TRUNCATED",
+      level: "warn",
+      source: "engine",
+      details: Object.freeze([
+        "chatFingerprint",
+        "branchRef",
+        "collection",
+        "droppedCount",
+        "keptCount",
+        "limitCount",
+        "reasonCode"
+      ])
+    }),
+    // B04/B05/D10：世界书重建发现条目属于别的聊天 → 丢弃，不写共享主卡书。
+    LOREBOOK_STALE_CHAT_DROPPED: Object.freeze({
+      code: "LOREBOOK_STALE_CHAT_DROPPED",
+      level: "warn",
+      source: "lorebook",
+      details: Object.freeze(["chatFingerprint", "branchRef", "reasonCode", "stage"])
+    }),
+    // D01/D02：后台任务/信号传播被阻塞（NO_PATH / NO_TIME / TOO_FAR…）→ 如实记录，不假装已抵达。
+    BACKGROUND_BLOCKED: Object.freeze({
+      code: "BACKGROUND_BLOCKED",
+      level: "info",
+      source: "engine",
+      details: Object.freeze([
+        "chatFingerprint",
+        "branchRef",
+        "turnRef",
+        "taskRef",
+        "actorRef",
+        "locationRef",
+        "reasonCode"
+      ])
+    }),
+    // U13：frame_json 不可读 / 与场景契约不符（保留其他地图，不静默归空）。
+    SPATIAL_FRAME_INVALID: Object.freeze({
+      code: "SPATIAL_FRAME_INVALID",
+      level: "error",
+      source: "storage",
+      details: SPATIAL_DETAILS
+    }),
+    // U13：旧修订场景被拿来更新当前地图 → 跳过本次投影，不清掉已有效的旧图。
+    SPATIAL_SCENE_STALE: Object.freeze({
+      code: "SPATIAL_SCENE_STALE",
+      level: "warn",
+      source: "ui",
+      details: SPATIAL_DETAILS
+    }),
+    // U13：候选布局写入失败（整组回退，回执原样给 UI）。
+    SPATIAL_LAYOUT_FAILED: Object.freeze({
+      code: "SPATIAL_LAYOUT_FAILED",
+      level: "error",
+      source: "map",
+      details: SPATIAL_DETAILS
+    }),
+    // U13：路线几何不可用作行走路线（单项跳过，其他路线继续）。
+    SPATIAL_ROUTE_INVALID: Object.freeze({
+      code: "SPATIAL_ROUTE_INVALID",
+      level: "warn",
+      source: "map",
+      details: SPATIAL_DETAILS
+    }),
+    // U13：作用域不一致（分支 / 修订 / 视角），拒绝跨聊天或跨分支落地。
+    SPATIAL_SCOPE_MISMATCH: Object.freeze({
+      code: "SPATIAL_SCOPE_MISMATCH",
+      level: "warn",
+      source: "ui",
+      details: SPATIAL_DETAILS
+    })
+  });
+
+  // src/atlas-request-diagnostics.ts
+  function atlasDiagnosticContext(value = {}) {
+    const chat = String(value.chatUid ?? value.chatId ?? "");
+    const branch = String(value.branchId ?? "main");
+    const floor3 = value.hostMessageUid ?? value.assistantMessageId ?? value.messageId;
+    const details = {};
+    if (chat) details.branchRef = atlasRefFingerprint(JSON.stringify([chat, branch]));
+    if (chat && floor3) details.turnRef = atlasRefFingerprint(JSON.stringify([chat, branch, String(floor3), String(value.variantKey || value.swipeId || "original")]));
+    if (value.mapId) details.mapRef = atlasRefFingerprint(String(value.mapId));
+    if (typeof value.baseRevision === "number") details.baseRevision = value.baseRevision;
+    if (typeof value.baseStorageRevision === "number") details.storageRevision = value.baseStorageRevision;
+    return { ...chat ? { chatFingerprint: atlasRefFingerprint(chat) } : {}, details };
+  }
+
+  // src/atlas-sql-generation-budget.ts
   var GENERATION_BUDGET_LIMIT = ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn;
   function cloneAttempts(attempts) {
     return (attempts ?? []).map((attempt) => ({ stage: String(attempt.stage), batchId: String(attempt.batchId), status: attempt.status }));
@@ -29163,6 +29503,7 @@ ${entry.text}`.toLowerCase();
       deferredList.push({ stage, batchId, reason });
     };
     return {
+      ...input.diagnosticAnchor ? { diagnosticContext: atlasDiagnosticContext(input.diagnosticAnchor) } : {},
       limit,
       used: () => transports,
       remaining: () => Math.min(planRemaining(), Math.max(0, available - transports)),
@@ -29268,7 +29609,11 @@ ${entry.text}`.toLowerCase();
     return port.withBudget ? port.withBudget(budget, stage) : budgetedModelPort(port, budget, stage);
   }
 
+  // src/atlas-sql-world-completion.ts
+  init_define_ATLAS_BUILD_INFO();
+
   // src/atlas-world-completion-ownership.ts
+  init_define_ATLAS_BUILD_INFO();
   function asId4(value) {
     const text3 = typeof value === "string" ? value : value === null || value === void 0 ? "" : String(value);
     return text3.trim();
@@ -29850,6 +30195,7 @@ ${chunk.text}`;
   }
 
   // src/atlas-sql-world-dedupe.ts
+  init_define_ATLAS_BUILD_INFO();
   function separateConstructionRouteRefs(operations, locationAliases = []) {
     const locations = /* @__PURE__ */ new Set([...locationAliases, ...operations.filter((op) => op.op === "location.upsert").map((op) => String(op.ref ?? ""))]);
     const used = new Set(operations.map((op) => String(op.ref ?? ""))), renamed = /* @__PURE__ */ new Map(), issues = [];
@@ -30064,6 +30410,7 @@ ${chunk.text}`;
   }
 
   // src/atlas-construction-progress.ts
+  init_define_ATLAS_BUILD_INFO();
   var CONSTRUCTION_PAYLOAD_VERSION = 1;
   var CONSTRUCTION_QUEUE_POLICY_VERSION = 1;
   var DISCOVERY_PAGE_SIZE = 200;
@@ -30355,6 +30702,7 @@ ${chunk.text}`;
   }
 
   // src/atlas-construction-scheduler.ts
+  init_define_ATLAS_BUILD_INFO();
   function byId8(left, right) {
     return left < right ? -1 : left > right ? 1 : 0;
   }
@@ -30460,6 +30808,7 @@ ${chunk.text}`;
   }
 
   // src/atlas-construction-sources.ts
+  init_define_ATLAS_BUILD_INFO();
   var SOURCE_LEDGER_PAYLOAD_VERSION = 1;
   var SOURCE_LEDGER_POLICY_VERSION = 1;
   function str16(value) {
@@ -31602,7 +31951,7 @@ ${chunk.text}`;
           duration_ms: Math.max(0, finished - started)
         });
       };
-      const turnBudget = createGenerationBudget({ limit: generationOptions.batching.requestsPerOperation ?? 0, workBatching: generationOptions.workBatching });
+      const turnBudget = createGenerationBudget({ diagnosticAnchor: input.anchor, limit: generationOptions.batching.requestsPerOperation ?? 0, workBatching: generationOptions.workBatching });
       const modelPort = options.modelPort ? bindModelBudget(options.modelPort, turnBudget) : null;
       let explicitNoop = false;
       let responseIncomplete = false;
@@ -33220,6 +33569,7 @@ ${chunk.text}`;
   }
 
   // src/atlas-db-worker.ts
+  init_define_ATLAS_BUILD_INFO();
   var WORKER_METHODS = [
     "open",
     "query",

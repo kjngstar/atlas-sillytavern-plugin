@@ -83,7 +83,7 @@ async function retry(session: SqlSession, input: RetryInput): Promise<RetryResul
   request.anchor = anchor; request.sourceSnapshot = sources;
   const generationOptions=normalizeGenerationOptions(await session.modelPort.generationOptions?.());
   assertCurrent();
-  const budget=createGenerationBudget({limit:generationOptions.batching.requestsPerOperation??0,workBatching:generationOptions.workBatching,workUsage:history.work_usage??undefined});
+  const budget=createGenerationBudget({diagnosticAnchor:anchor,limit:generationOptions.batching.requestsPerOperation??0,workBatching:generationOptions.workBatching,workUsage:history.work_usage??undefined});
   const response = await bindModelBudget(session.modelPort, budget, 'repair').request(request);
   assertCurrent();
   if (revision !== session.repo.internal.currentRevision() || storageRevision !== session.repo.storageRevision) throw new AtlasDbError('STALE_BASE', '模型补交等待期间快照已变化，候选不发布', {});

@@ -26,6 +26,7 @@ import {
 } from "./atlas-contract.ts";
 import { parseAtlasLorebookPlans, type AtlasLorebookPlans } from "./atlas-lorebook.ts";
 import type { AtlasDiagnosticInput } from "./atlas-diagnostics.ts";
+import { atlasDiagnosticContext, diagnosticIssues } from './atlas-request-diagnostics.ts';
 import { createAtlasGenerationLifecycle, type AtlasGenerationMetadata, type AtlasGenerationSignal } from "./atlas-generation-lifecycle.ts";
 
 /** 内置默认推演提示词（API 页「查看内置默认提示词」用；开发态 src 直载时也必须可见）。 */
@@ -1540,12 +1541,16 @@ export function createAtlasUiCore(deps: {
     const revision = generationRevision;
     const identity = useSql ? deps.getCommitIdentity?.(value) : null;
     const hostGuard = useSql ? deps.createCommitGuard?.(value) : undefined;
+    const commitContext = atlasDiagnosticContext({ chatUid: value.chatId, branchId: state.binding?.branchId ?? 'main',
+      hostMessageUid: identity?.messageUID ?? value.assistantMessageId, variantKey: identity?.variantKey ?? swipeId ?? 'original' });
+    const commitDiagnostic = (event: AtlasDiagnosticInput) => diagnostic({ ...event, ...commitContext,
+      details: { ...commitContext.details, ...event.details } });
     const isCurrent = () => !disposed && host.getChatId() === value.chatId && state.chatId === value.chatId
       && generationRevision === revision && useSql === sqlEnabled() && (hostGuard?.() ?? deps.isCommitCurrent?.(value) ?? true)
       && (!identity || JSON.stringify(deps.getCommitIdentity?.(value)) === JSON.stringify(identity));
     if (useSql) { sqlPartialTurnId = null; sqlRetryRestored = false; sqlRetryRequest = value; }
     if (state.chatId === value.chatId) setState({ turnPhase: "committing" });
-    diagnostic({ level: "info", source: "ui", code: "COMMIT_STARTED",
+    commitDiagnostic({ level: "info", source: "ui", code: "COMMIT_STARTED",
       operation: "commit", phase: "request", outcome: "started" });
     try {
       const result = await api.request("POST", useSql ? '/sql/chat/commit' : "/turns/commit", {
@@ -1579,7 +1584,7 @@ export function createAtlasUiCore(deps: {
       const stale = state.chatId !== value.chatId;
       if (result.status === 200 && body.ok && receiptParsed?.ok && (!useSql || body.data?.coreSaved === true || receiptParsed.value.status === 'failed')) {
         const receiptStatus = receiptParsed.value.status;
-        diagnostic({
+        commitDiagnostic({
           level: receiptStatus === "failed" ? "error" : "info", source: "ui",
           code: receiptStatus === "committed" ? "COMMIT_SUCCEEDED" :
             receiptStatus === "duplicate" ? "TURN_DUPLICATE" : "COMMIT_FAILED",
@@ -1587,7 +1592,8 @@ export function createAtlasUiCore(deps: {
           outcome: receiptStatus === "committed" ? "success" :
             receiptStatus === "duplicate" ? "skipped" : "failed",
           httpStatus: result.status, retryable: receiptParsed.value.retryable,
-          details: { coreCommitted: receiptStatus === "committed" || receiptStatus === "duplicate" },
+          details: { coreCommitted: receiptStatus === "committed" || receiptStatus === "duplicate",
+            ...(typeof body.data?.coreSaved === 'boolean' ? { coreSaved: body.data.coreSaved, saveConfirmed: body.data.coreSaved } : {}) },
         });
         if (stale) diagnostic({ level: "warn", source: "ui", code: "STALE_CHAT_RESPONSE_DROPPED",
           operation: "commit", phase: "receipt", outcome: "skipped" });
@@ -1643,9 +1649,13 @@ export function createAtlasUiCore(deps: {
         }
         return;
       }
-      diagnostic({ level: "error", source: "ui", code: "COMMIT_FAILED",
+      const failedReceipt = body.error?.details?.receipt as { issues?: unknown } | undefined;
+      const causes = diagnosticIssues(failedReceipt?.issues, body.data?.issues);
+      commitDiagnostic({ level: "error", source: "ui", code: "COMMIT_FAILED",
         operation: "commit", phase: "response", outcome: "failed",
-        httpStatus: result.status, errorCode: body.error?.code, retryable: true });
+        httpStatus: result.status, errorCode: body.error?.code, retryable: body.error?.retryable !== false,
+        causeCode: typeof causes[0]?.code === 'string' ? causes[0].code : undefined,
+        details: { issueCount: causes.length, failureStage: 'commit' } });
       if(!stale)addReceipt({receiptId:value.turnId,status:'failed',branchId:state.binding?.branchId??null,previousTime:state.binding?.worldTimeCursor??0,currentTime:state.binding?.worldTimeCursor??0,
         currentLocationId:state.binding?.currentLocationId??null,triggeredNpcIds:[],adoptedEventIds:[],summary:body.error?.message??`世界推演失败（HTTP ${result.status}）`,retryable:body.error?.retryable!==false},value.chatId,
         {...body.error?.details,errorCode:body.error?.code,httpStatus:result.status,message:body.error?.message,coreSaved:false});
@@ -1664,9 +1674,10 @@ export function createAtlasUiCore(deps: {
           lastError: body.error?.message ?? `世界推演失败（HTTP ${result.status}），可从「变化」页重试。`,
         }),
       });
-    } catch {
-      diagnostic({ level: "error", source: "ui", code: "COMMIT_FAILED",
-        operation: "commit", phase: "request", outcome: "failed", retryable: true });
+    } catch (error) {
+      commitDiagnostic({ level: "error", source: "ui", code: "COMMIT_FAILED",
+        operation: "commit", phase: "request", outcome: "failed", retryable: true,
+        errorCode: (error as {code?:string})?.code, details: { failureStage: 'request' } });
       const stale = state.chatId !== value.chatId || (useSql && !isCurrent());
       if(!stale)addReceipt({receiptId:value.turnId,status:'failed',branchId:state.binding?.branchId??null,previousTime:state.binding?.worldTimeCursor??0,currentTime:state.binding?.worldTimeCursor??0,
         currentLocationId:state.binding?.currentLocationId??null,triggeredNpcIds:[],adoptedEventIds:[],summary:'世界推演失败：服务不可用',retryable:true},value.chatId,{errorCode:'SERVICE_UNAVAILABLE',coreSaved:false});

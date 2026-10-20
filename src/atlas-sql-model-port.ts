@@ -7,6 +7,8 @@ import { DEFAULT_SQL_PROMPT_SEGMENTS, hasLegacySqlPromptProtocol } from './atlas
 import { assemblePromptLayers } from './atlas-prompt-layers.ts';
 import { transportBudgetPort, type GenerationBudgetPort } from './atlas-sql-generation-budget.ts';
 import { normalizeModelBatching } from './atlas-model-batching.ts';
+import { atlasDiagnosticContext, observeDiagnostic, type DiagnosticObserver } from './atlas-request-diagnostics.ts';
+import { atlasRefFingerprint } from './atlas-diagnostics.ts';
 
 /** 用户策略段的角色白名单：作者选定的角色必须原样保留，不合法才退回 system。 */
 const PROMPT_ROLES = new Set(['system', 'user', 'assistant']);
@@ -19,6 +21,7 @@ type Options = {
   readSettings: () => Promise<unknown>;
   fetchFn?: typeof fetch;
   now?: () => number;
+  onDiagnostic?: DiagnosticObserver;
   /**
    * M3-03 / M3-03A：本回合局部模型预算。提供时——
    * 1) 每个真实发送前统一 claim（含 API 内部兼容路由的第二次发送）；
@@ -88,18 +91,38 @@ export function createSqlModelPort(options: Options): AtlasModelPort {
     missing:{worldState:Boolean(input.injectionText),lastTurn:false,recentContext:Boolean(input.assistantText)},coreSaved:false};
   },
   async request(request:ModelBatchRequest){
-   const {preset,input,messages}=await prepare(request);
+   const scoped = options.budget?.diagnosticContext ?? atlasDiagnosticContext(request.anchor);
+   const context = { ...scoped, details: { ...scoped.details, batchRef: atlasRefFingerprint(request.batchId),
+     stage: request.promptMode === 'atlas-spatial-extract' ? 'spatial-extract' : options.stage && options.stage !== 'observe' ? options.stage : request.phase,
+     phase: request.phase,
+     retryKind: request.phase === 'repair' ? 'repair' : request.retryOf || request.repairOfBatchId ? 'retry' : 'normal',
+     ...(request.batchTargets ? { targetCount: request.batchTargets.count } : {}) } };
+   let prepared;
+   try { prepared = await prepare(request); }
+   catch (error) {
+     observeDiagnostic(options.onDiagnostic, { ...context, level: 'error', source: 'model', code: 'MODEL_REQUEST_FAILED',
+       operation: 'generation', phase: 'preparation', outcome: 'failed', errorCode: (error as {code?:string})?.code,
+       details: { ...context.details, failureStage: 'preparation', modelRequests: 0 } });
+     throw error;
+   }
+   const {preset,input,messages}=prepared;
       if(preset.toolCalling&&((preset.connectionMode??'custom')!=='custom'||(preset.apiFormat??'openai')!=='openai'))throw failure('TOOL_PROTOCOL_UNSUPPORTED','函数输出目前仅支持自定义 OpenAI 兼容连接，请关闭函数输出或切换连接');
       const budget = options.budget;
       const phase = options.stage === 'background' ? 'background' : request.phase || options.stage || 'observe';
       const logical = budget?.claimBatch(phase, request.batchId,{kind:request.workClass??(request.batchTargets?.kind==='maps'?'maps':request.batchTargets?.kind==='characters'?'characters':request.promptMode==='atlas-spatial-extract'?'evidence':undefined),retry:Boolean(request.retryOf)||request.phase==='repair'});
-      if (logical && !logical.ok) throw failure(logical.code, logical.reason);
+      if (logical && !logical.ok) {
+        observeDiagnostic(options.onDiagnostic, { ...context, level: 'warn', source: 'model', code: 'MODEL_REQUEST_DEFERRED',
+          operation: 'generation', phase: 'budget', outcome: 'skipped', errorCode: logical.code,
+          details: { ...context.details, failureStage: 'budget', modelRequests: 0, budgetUsed: budget?.used() ?? 0 } });
+        throw failure(logical.code, logical.reason);
+      }
       const result = await callAtlasWorldTurnApi({ ...preset,
         // Output length comes only from the connection; stages must not add a hidden cap.
         maxTokens: preset.maxTokens,
         timeoutMs: preset.timeoutMs ?? request.timeoutMs,
       }, input, {
         fetchFn: options.fetchFn, now: options.now, messagesOverride: messages,
+        onDiagnostic: options.onDiagnostic, diagnosticContext: context,
         ...(preset.toolCalling&&request.promptMode!=='atlas-spatial-extract'?{responseTool:{name:'emit_atlas_operations',description:'Return the complete Atlas operations exactly once as JSONL in content. Follow the stage operation contract; do not write text outside this call.',parameters:{type:'object',properties:{content:{type:'string',description:'Complete stage reply, one validated operation JSON object per line'}},required:['content'],additionalProperties:false}}}:{}),
         // M3-03A：API 内部兼容路由的第二次真实发送，也走同一局部预算。缺预算 port 时不传，
         // 由 api-client 按最严策略拒发并明确报错（绝不隐藏重试）。

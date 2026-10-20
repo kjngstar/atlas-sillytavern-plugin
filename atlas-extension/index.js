@@ -778,7 +778,7 @@ function currentChatRef() {
 }
 
 function emitAtlasDiagnostic(event) {
-  const entry = { ...event, ...(event.chatRef ? {} : { chatRef: currentChatRef() }) };
+  const entry = { ...event, ...(event.chatRef || event.chatFingerprint ? {} : { chatRef: currentChatRef() }) };
   if (atlasDiagnostics) return atlasDiagnostics.emit(entry);
   pendingDiagnostics.push(entry);
   if (pendingDiagnostics.length > 100) pendingDiagnostics.shift();
@@ -2012,7 +2012,7 @@ function ensureWorkbenchStylesheet() {
 
 function renderPanel(core, root, api, store, mod, skinPort = null) {
   return mountReferenceUi({root,core,api,getContext:()=>globalThis.SillyTavern?.getContext?.(),settingsPort:skinPort,lorePort:createReferenceLorePort(()=>globalThis.SillyTavern?.getContext?.(),loadStWorldInfo,async()=>{try{return await globalThis.TavernHelper?.getCharWorldbookNames?.('current')??[];}catch{return [];}}),
-    diagnostics:()=>atlasDiagnostics?.getSnapshot?.()??pendingDiagnostics,emit:emitAtlasDiagnostic,defaultPrompt:mod.DEFAULT_WORLD_TURN_SYSTEM_PROMPT??'',pluginVersion:ATLAS_EXTENSION_VERSION});
+    diagnostics:()=>atlasDiagnostics?.getSnapshot?.()??pendingDiagnostics,emit:emitAtlasDiagnostic,defaultPrompt:mod.DEFAULT_WORLD_TURN_SYSTEM_PROMPT??'',pluginVersion:ATLAS_EXTENSION_VERSION,diagnosticTools:mod});
 }
 
 // ---------------------------------------------------------------------------
@@ -2823,35 +2823,17 @@ async function connectOnce() {
       archiveEnabled = diagnosticArchive?.getItem("atlas:safe-diagnostics-archive-enabled:v1") === "true";
     } catch { /* private mode */ }
     atlasDiagnostics = mod.createAtlasDiagnosticsSink({
-      persist: diagnosticStorage, archive: diagnosticArchive, archiveEnabled,
+      persist: diagnosticStorage, archive: diagnosticArchive, archiveEnabled, capacity: 2000,
+      metadata: { ...mod.ATLAS_BUILD_INFO, pluginVersion: ATLAS_EXTENSION_VERSION },
     });
     for (const event of pendingDiagnostics) atlasDiagnostics.emit(event);
     pendingDiagnostics.length = 0;
 
-    /** 模型请求日志包装：记录每条推演 HTTP 的状态 / 耗时 / 响应片段（脱敏）。 */
-    const loggingModelFetch = async (input, init) => {
-      const startedAt = Date.now();
-      try {
-        const response = await globalThis.fetch(input, init);
-        emitAtlasDiagnostic({
-          level: response.ok ? "info" : "error", source: "model",
-          code: response.ok ? "MODEL_HTTP_COMPLETE" : "MODEL_HTTP_FAILED",
-          operation: "generation", phase: "response",
-          outcome: response.ok ? "success" : "failed",
-          httpStatus: response.status, durationMs: Date.now() - startedAt,
-          details: { route: "model-proxy", mode: "custom" },
-        });
-        return response;
-      } catch (error) {
-        emitAtlasDiagnostic({
-          level: "error", source: "model", code: "MODEL_NETWORK_FAILED",
-          operation: "generation", phase: "request", outcome: "failed",
-          durationMs: Date.now() - startedAt, retryable: true,
-          details: { route: "model-proxy", mode: "custom" },
-        });
-        throw error;
-      }
-    };
+    // The API client records each actual transport and its classified failure once.
+    // A fetch rejection here can be our own timeout cancellation, not a network outage.
+    const loggingModelFetch = (input, init) => globalThis.fetch(input, init);
+    emitAtlasDiagnostic({ level: 'info', source: 'host', code: 'RUNTIME_STARTED',
+      operation: 'runtime', phase: 'load', outcome: 'success' });
 
     const context = () => SillyTavern.getContext();
     const initialSettings = context()?.extensionSettings;
@@ -2892,6 +2874,7 @@ async function connectOnce() {
     // 其余走酒馆后端代理（custom 源 / claude / makersuite 协议映射）。
     const getTavernHelper = () => globalThis.TavernHelper ?? globalThis.getTavernHelper?.() ?? null;
     const hostDispatchFetch = async (input, init) => {
+      const modelDiagnosticScope = mod.diagnosticSignalContext(init?.signal);
       let mode = null;
       try {
         const parsed = typeof init?.body === "string" ? JSON.parse(init.body) : null;
@@ -2911,13 +2894,13 @@ async function connectOnce() {
         let hostTransport = null;
         try { const parsed=JSON.parse(hostBody);hostError=parsed?.error;hostTransport=parsed?.hostTransport; } catch { /* 无正文不记录原文 */ }
         emitAtlasDiagnostic({
-          level: response.ok ? "info" : "error", source: "model",
+          ...modelDiagnosticScope, level: response.ok ? "info" : "error", source: "model",
           code: response.ok ? "MODEL_HOST_COMPLETE" : "MODEL_HOST_FAILED",
           operation: "generation", phase: "response",
           outcome: response.ok ? "success" : "failed",
           durationMs: Date.now() - startedAt,
           ...(hostError?.code ? { errorCode: hostError.code, retryable: hostError.retryable === true } : {}),
-          details: { route: "host-model", mode,
+          details: { ...modelDiagnosticScope.details, route: "host-model", mode,
             ...(hostTransport ?? {}),
             ...(hostError?.reasonCode ? { reasonCode: hostError.reasonCode } : {}),
             responseChars: response.ok ? (JSON.parse(hostBody)?.choices?.[0]?.message?.content?.length ?? 0) : 0 },
@@ -2925,10 +2908,10 @@ async function connectOnce() {
         return response;
       } catch (error) {
         emitAtlasDiagnostic({
-          level: "error", source: "model", code: "MODEL_HOST_FAILED",
+          ...modelDiagnosticScope, level: "error", source: "model", code: "MODEL_HOST_FAILED",
           operation: "generation", phase: "request", outcome: "failed",
           durationMs: Date.now() - startedAt, retryable: true,
-          details: { route: "host-model", mode },
+          details: { ...modelDiagnosticScope.details, route: "host-model", mode },
         });
         throw error;
       }
@@ -2939,7 +2922,7 @@ async function connectOnce() {
         const saved = await engineStore.read("settings");
         if (!saved?.apiPresets) return saved;
         return { ...saved, apiPresets: saved.apiPresets.map(p => runtimeApiKeys.has(p.id) ? { ...p, apiKey: runtimeApiKeys.get(p.id) } : p) };
-      }, fetchFn: hostDispatchFetch }),
+      }, fetchFn: hostDispatchFetch, onDiagnostic: emitAtlasDiagnostic }),
       enabled: () => context()?.extensionSettings?.[ATLAS_SETTINGS_KEY]?.[ATLAS_SQL_MODE_SETTING] === true,
       context: () => {
         const record = atlasContextRecord(context);
@@ -2996,36 +2979,11 @@ async function connectOnce() {
       emitAtlasDiagnostic({ level: "warn", source: "storage", code: "PENDING_RECONCILE_FAILED",
         operation: "reconcile", phase: "session-read", outcome: "failed" });
     }
-    // 引擎请求包装：每个 dispatch 记一条日志（方法 + 路径 + 结果码，绝不记请求体）
-    const logApiCall = async (method, path, call) => {
-      const startedAt = Date.now();
-      try {
-        const result = await call();
-        const status = typeof result?.status === "number" ? result.status : undefined;
-        const receipt = result?.body?.data?.receipt;
-        const failed = result?.body?.ok === false || receipt?.status === "failed" ||
-          (status !== undefined && status >= 400);
-        const duplicate = receipt?.status === "duplicate";
-        emitAtlasDiagnostic({
-          level: failed ? "error" : "info", source: "engine",
-          code: failed ? "API_CALL_FAILED" : duplicate ? "TURN_DUPLICATE" : "API_CALL_COMPLETE",
-          operation: "api", phase: "response",
-          outcome: failed ? "failed" : duplicate ? "skipped" : "success",
-          httpStatus: status,
-          errorCode: result?.body?.error?.code ?? receipt?.errorCode,
-          durationMs: Date.now() - startedAt,
-          details: { route: path },
-        });
-        return result;
-      } catch (error) {
-        emitAtlasDiagnostic({
-          level: "error", source: "engine", code: "API_DISPATCH_EXCEPTION",
-          operation: "api", phase: "request", outcome: "failed",
-          durationMs: Date.now() - startedAt, details: { route: path },
-        });
-        throw error;
-      }
-    };
+    const logApiCall = mod.createAtlasApiDiagnosticLogger({
+      emit: emitAtlasDiagnostic,
+      context: () => ({ chatUid: String(context()?.chatId ?? ''),
+        branchId: readAtlasSession(context)?.binding?.branchId ?? 'main' }),
+    });
     const innerApi = mod.createLocalAtlasApi(engine);
     // 0.9.42 会话承载：会话路由请求自动带上 chatMetadata.atlas（世界文档），
     // 响应带回新会话（rev+1）自动写回聊天并触发存档——世界数据的往返只在此一处。

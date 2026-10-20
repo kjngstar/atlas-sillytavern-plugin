@@ -10,7 +10,9 @@
  */
 
 import { createRequire } from "node:module";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -39,7 +41,24 @@ function loadEsbuild() {
 
 export async function buildAll({ log = () => {} } = {}) {
   const esbuild = loadEsbuild();
-  const common = { bundle: true, format: "esm", sourcemap: false, charset: "utf8", logLevel: "silent" };
+  // Hash runtime sources, including uncommitted edits. Generated bundles are excluded
+  // so repeated builds are deterministic and do not hash their own previous output.
+  const hash = createHash('sha256');
+  const hashInput = (path) => {
+    const absolute = join(root, path);
+    if (statSync(absolute).isDirectory()) {
+      for (const name of readdirSync(absolute).sort()) hashInput(`${path}/${name}`);
+    } else { hash.update(path); hash.update(readFileSync(absolute)); }
+  };
+  for (const path of ['package.json', 'manifest.json', 'index.js', 'src', 'ui', 'lib', 'vendor', 'tools/build.mjs']) hashInput(path);
+  const info = { pluginVersion: JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version,
+    buildId: `build-${hash.digest('hex').slice(0, 16)}` };
+  try {
+    info.buildCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    info.buildDirty = !!execFileSync('git', ['status', '--porcelain', '--untracked-files=normal', '--', 'package.json', 'manifest.json', 'index.js', 'src', 'ui', 'lib', 'vendor', 'tools/build.mjs'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  } catch { /* Source archives have a source hash even without a .git directory. */ }
+  const common = { bundle: true, format: "esm", sourcemap: false, charset: "utf8", logLevel: "silent",
+    define: { __ATLAS_BUILD_INFO__: JSON.stringify(info) } };
   await esbuild.build({
     ...common,
     entryPoints: [join(root, "src", "atlas-browser-entry.ts")],
@@ -87,7 +106,7 @@ export async function buildAll({ log = () => {} } = {}) {
     ...common,
     // Worker 用经典脚本加载（new Worker(url)），必须是自包含 IIFE。
     // define 把 sql.js 的 ESM 检测分支固定为浏览器语义（Worker 里没有 Node 全局）。
-    define: { "process.env.npm_package_version": '"1.14.1"' },
+    define: { ...common.define, "process.env.npm_package_version": '"1.14.1"' },
     entryPoints: [join(root, "src", "atlas-sql-worker-entry.ts")],
     outfile: join(sqlDist, "atlas-sql-worker.js"),
     format: "iife",
