@@ -1,3 +1,4 @@
+import { normalizeWorkBatching } from './atlas-work-batching.ts';
 import { callAtlasWorldTurnApi, substitutePromptPlaceholders, type AtlasWorldTurnPromptInput } from './atlas-api-client.ts';
 import { migrateAtlasSettings, resolveWorldTurnPreset, sanitizeSettingsV2 } from './atlas-settings.ts';
 import type { AtlasModelPort } from './atlas-db-contract.ts';
@@ -78,7 +79,7 @@ export function createSqlModelPort(options: Options): AtlasModelPort {
   async generationOptions(){
     const raw=await options.readSettings();
     const {settings}=raw&&typeof raw==='object'&&(raw as {schemaVersion?:unknown}).schemaVersion===2?sanitizeSettingsV2(raw):migrateAtlasSettings(raw);
-    return {maxTokens:resolveWorldTurnPreset(settings)?.maxTokens??0,batching:normalizeModelBatching(settings.modelBatching)};
+    return {maxTokens:resolveWorldTurnPreset(settings)?.maxTokens??0,batching:normalizeModelBatching(settings.modelBatching),workBatching:normalizeWorkBatching(settings.workBatching)};
   },
   withBudget: (budget, stage) => createSqlModelPort({ ...options, budget, stage }),
   async preview(request:ModelBatchRequest){
@@ -91,7 +92,7 @@ export function createSqlModelPort(options: Options): AtlasModelPort {
       if(preset.toolCalling&&((preset.connectionMode??'custom')!=='custom'||(preset.apiFormat??'openai')!=='openai'))throw failure('TOOL_PROTOCOL_UNSUPPORTED','函数输出目前仅支持自定义 OpenAI 兼容连接，请关闭函数输出或切换连接');
       const budget = options.budget;
       const phase = options.stage === 'background' ? 'background' : request.phase || options.stage || 'observe';
-      const logical = budget?.claimBatch(phase, request.batchId);
+      const logical = budget?.claimBatch(phase, request.batchId,{kind:request.workClass??(request.batchTargets?.kind==='maps'?'maps':request.batchTargets?.kind==='characters'?'characters':request.promptMode==='atlas-spatial-extract'?'evidence':undefined),retry:Boolean(request.retryOf)||request.phase==='repair'});
       if (logical && !logical.ok) throw failure(logical.code, logical.reason);
       const result = await callAtlasWorldTurnApi({ ...preset,
         // Output length comes only from the connection; stages must not add a hidden cap.

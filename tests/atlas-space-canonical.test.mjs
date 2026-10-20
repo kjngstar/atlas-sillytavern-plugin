@@ -21,7 +21,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as Kit from '../vendor/atlas-spatial/index.mjs';
-import { makeSeedWith, IDS, insertRows, selectOne } from './fixtures/atlas-sql/seed.mjs';
+import { makeSeedWith, IDS, insertRows, selectOne, foreignKeyCheck } from './fixtures/atlas-sql/seed.mjs';
 import { applyGroups } from '../src/atlas-db-commit.ts';
 import { queryBound } from '../src/atlas-db-runtime.ts';
 import { decodeRow } from '../src/atlas-db-codec.ts';
@@ -295,6 +295,60 @@ test('SPACE01：父图房间 7.5×8 m → 生成子图后物理宽高匹配（ex
 });
 
 // ───────────────────────── SPACE02 · 复进不二次估计/不第二套家具 ─────────────────────────
+
+test('无成功场景的失败请求也向下次规划提供稳定陈设约束及错误',async()=>{
+ const seed=await roomSeed(),db=seed.db;
+ try{
+  const frame=readFrame(db,MAP_ROOM);
+  frame.atlasLayoutRequest.status='failed';
+  frame.atlasLayoutRequest.issues=[{code:'DETAIL_NO_SPACE',message:'desk-1 未放下',severity:'error'}];
+  writeFrame(db,MAP_ROOM,frame);
+  const task=buildSqlLayoutTask(db,BRANCH,{anchor:{chatUid:IDS.chatA,branchId:BRANCH,baseRevision:0,baseStorageRevision:0},userText:'',assistantText:'',sourceSnapshot:[],layoutMaps:[MAP_ROOM]},'retry-constraints');
+  assert.ok(task);
+  const [scope]=floorScopesOf(task);
+  assert.equal(scope.constraintStatus,'failed');
+  assert.ok(scope.savedConstraints.contents.some(c=>c.id==='desk-1'));
+  assert.ok(scope.layoutIssues.some(i=>i.code==='DETAIL_NO_SPACE'));
+  assert.equal(readFrame(db,MAP_ROOM).atlasScene,undefined,'构造任务不假造成功场景');
+ }finally{seed.close();}
+});
+
+test('首次计划的矩形幅面在生成前实际标定，不把物理长宽套进旧正方格框',async()=>{
+ const seed=await roomSeed(),db=seed.db;db.run('BEGIN');try{
+  db.run('UPDATE maps SET frame_json=?,meters_per_cell=NULL,scale_quality=? WHERE id=?',[JSON.stringify({cols:100,rows:100}),'uncalibrated',MAP_BLD]);
+  armRequest(db,MAP_BLD,pendingRequest('rect-first',{width:26,height:51,rooms:[{id:ROOM,w:ROOM_W,h:ROOM_H,side:'north'},{id:HALL,w:4,h:3,side:'south'}],contents:[],actors:[],items:[]}));
+  const out=applyPendingSpatialRequests({db,scope:SCOPE,turnId:TURN,ports:makePorts(),autoPlan:true,plannedExtents:{[MAP_BLD]:{width:26,height:51,units:'meters'}}});
+  assert.deepEqual(out.issues.filter(i=>i.severity==='error'),[],JSON.stringify(out.issues));
+  const frame=readFrame(db,MAP_BLD),map=readRow(db,MAP_BLD);
+  assert.deepEqual([frame.atlasScene.layout.bounds.w,frame.atlasScene.layout.bounds.h],[26,51]);
+  assert.ok(Math.abs(frame.cols*map.meters_per_cell-26)<1e-8);
+  assert.ok(Math.abs(frame.rows*map.meters_per_cell-51)<1e-8);
+  assert.deepEqual(foreignKeyCheck(db),[]);
+ }finally{db.run('ROLLBACK');seed.close();}
+});
+
+test('未标定父图中的确认长宽走真实候选提交，父子共享尺寸且原事实保留',async()=>{
+  const seed=await roomSeed(),db=seed.db;
+  db.run('BEGIN');
+  try{
+    const dimensions={kind:'dimensions',widthM:12,heightM:8,quality:'confirmed',source:'story'};
+    db.run('UPDATE locations SET area_geometry_json = ?, coord_precision = ? WHERE id = ? AND branch_id = ?',[JSON.stringify(dimensions),'layout',ROOM,BRANCH]);
+    // 模拟刚登记的父图：尚未得到比例尺，旧默认约束只有 7.5×8。
+    db.run('UPDATE maps SET meters_per_cell = NULL, scale_quality = ? WHERE id = ? AND branch_id = ?',['uncalibrated',MAP_BLD,BRANCH]);
+    const out=applyPendingSpatialRequests({db,scope:SCOPE,turnId:TURN,ports:makePorts(),autoPlan:true});
+    assert.deepEqual(out.issues.filter(i=>i.severity==='error'),[],JSON.stringify(out.issues));
+    assert.ok(out.processed.includes('req_room_1'));
+    const child=readFrame(db,MAP_ROOM),parent=readFrame(db,MAP_BLD);
+    assert.deepEqual([child.atlasScene.layout.bounds.w,child.atlasScene.layout.bounds.h],[12,8]);
+    assert.deepEqual([canonicalOf(child,ROOM).size.widthM,canonicalOf(child,ROOM).size.heightM],[12,8]);
+    const footprint=parent.atlasScene.layout.rooms.find(r=>r.id===ROOM);
+    assert.deepEqual([footprint.w,footprint.h],[12,8]);
+    assert.notEqual(footprint.quality,'confirmed','确认长宽不确认父图落位');
+    const location=selectOne(db,'locations',BRANCH,ROOM);
+    assert.deepEqual(JSON.parse(location.area_geometry_json),dimensions);
+    assert.deepEqual(foreignKeyCheck(db),[]);
+  }finally{db.run('ROLLBACK');seed.close();}
+});
 
 test('父图复用子空间陈设账本与真实物品绑定，不把子空间家具登记到建筑账本',async()=>{
  const seed=await roomSeed(),db=seed.db;db.run('BEGIN');

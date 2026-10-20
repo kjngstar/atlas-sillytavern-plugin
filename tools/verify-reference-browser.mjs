@@ -8,7 +8,7 @@ import {generateFloor,generateCity,generateOverview} from '../vendor/atlas-spati
 const dir=process.env.ATLAS_EVIDENCE_DIR||'.tmp/reference-browser';mkdirSync(dir,{recursive:true});
 const port=Number(process.env.ATLAS_VERIFY_PORT||4296),base=process.env.ATLAS_REVIEW_BASE||`http://127.0.0.1:${port}`;
 const report={checks:{},errors:[],failed:[],startedAt:new Date().toISOString()};
-const check=(name,ok,detail)=>{report.checks[name]={ok:!!ok,detail};if(!ok)report.failed.push(name);};
+const check=(name,ok,detail)=>{report.checks[name]={ok:!!ok,detail};if(!ok)report.failed.push(name);writeFileSync(`${dir}/progress.json`,JSON.stringify({last:name,checks:Object.keys(report.checks).length,failed:report.failed}));};
 const server=process.env.ATLAS_REVIEW_BASE?null:spawn(process.execPath,['dev-preview/serve.mjs'],{env:{...process.env,ATLAS_PREVIEW_PORT:String(port),ATLAS_PREVIEW_NO_OPEN:'1'},stdio:'ignore'});
 const browser=await chromium.launch({headless:true,executablePath:process.env.ATLAS_CHROME_PATH||'C:/Program Files/Google/Chrome/Application/chrome.exe'});
 // Host fixture follows SillyTavern public/scripts/extensions.js: html receives
@@ -16,7 +16,7 @@ const browser=await chromium.launch({headless:true,executablePath:process.env.AT
 const wandFixture=`<button id="extensionsMenuButton">扩展菜单</button><div id="extensionsMenu" style="display:none;position:fixed;left:20px;top:20px;z-index:100001;background:#333"></div><script>
 window.__wandVisible=false;document.getElementById('extensionsMenuButton').onclick=()=>{window.__wandVisible=!window.__wandVisible;document.getElementById('extensionsMenu').style.display=window.__wandVisible?'block':'none';};
 document.documentElement.addEventListener('click',e=>{if(window.__wandVisible&&!e.target.closest('#extensionsMenuButton')){window.__wandVisible=false;document.getElementById('extensionsMenu').style.display='none';}});</script>`;
-async function open(options={}){const p=await browser.newPage({viewport:{width:1600,height:1000}});p.on('pageerror',e=>report.errors.push(e.message));p.on('response',r=>{if(r.status()>=400)report.errors.push(`${r.status()} ${r.url()}`);});if(options.scene)await p.addInitScript(scene=>window.__reviewScene=scene,options.scene);await p.route('**/dev-preview/index.html',async route=>{const res=await route.fetch(),src=await res.text(),marker='await sqlRuntime.closeSqlSession(migrated.session);';if(!src.includes(marker))throw Error('fixture boundary changed');await route.fulfill({response:res,body:(options.scene?src.replace(marker,`const db=migrated.session.repo.db;
+async function open(options={}){const p=await browser.newPage({viewport:{width:1600,height:1000}});p.setDefaultTimeout(30000);p.on('pageerror',e=>report.errors.push(e.message));p.on('response',r=>{if(r.status()>=400)report.errors.push(`${r.status()} ${r.url()}`);});if(options.scene)await p.addInitScript(scene=>window.__reviewScene=scene,options.scene);await p.route('**/dev-preview/index.html',async route=>{const res=await route.fetch(),src=await res.text(),marker='await sqlRuntime.closeSqlSession(migrated.session);';if(!src.includes(marker))throw Error('fixture boundary changed');await route.fulfill({response:res,body:(options.scene?src.replace(marker,`const db=migrated.session.repo.db;
 const frame=JSON.parse(db.exec("SELECT frame_json FROM maps WHERE id='world' AND branch_id='main'")[0].values[0][0]);
 frame.atlasScene=window.__reviewScene;db.run("UPDATE maps SET frame_json=? WHERE id='world' AND branch_id='main'",[JSON.stringify(frame)]);
 const saved=await sqlRuntime.persistSqlSession(migrated.session);if(!saved.saved)throw Error(JSON.stringify(saved.issues));${marker}`):options.fresh?src.replace(marker,marker+'contextValue.chatMetadata={};'):src).replaceAll('../atlas-extension/','../release/atlas-ui-extension/').replace('<body>','<body>'+wandFixture)});});
@@ -184,18 +184,36 @@ try{
  settings=await p.evaluate(async()=> (await atlasPreviewConnection.api.request('GET','/settings')).body.data);check('failed-save-keeps-settings',JSON.stringify(settings.promptPresets)===savedPrompt);
  // Batch settings use the real settings API and retain a rejected draft.
  await f.locator('[data-settings-tab="assignments"]').click();
- check('batching-default-auto',await f.locator('#batchCharacters').inputValue()==='0'&&await f.locator('#batchMaps').inputValue()==='0');
- await f.locator('#batchCharacters').fill('20');await f.locator('#batchMaps').fill('6');await f.locator('[data-save-batching]').click();
+ if(!await f.locator('[data-batch-legacy]').evaluate(el=>el.open))await f.locator('[data-batch-legacy] summary').click();
+ check('batching-default-auto',await f.locator('#batchCharacters').inputValue()==='0'&&await f.locator('#batchMaps').inputValue()==='0'&&await f.locator('#batchRequests').inputValue()==='0');
+ await f.locator('#batchCharacters').fill('120');await f.locator('#batchMaps').fill('90');await f.locator('#batchRequests').fill('12');await f.locator('[data-save-batching]').click();
  await f.waitForFunction(()=>!AtlasPreview.presets.batchingDirty());
  settings=await p.evaluate(async()=> (await atlasPreviewConnection.api.request('GET','/settings')).body.data);
- check('batching-real-settings-save',settings.modelBatching.charactersPerBatch===20&&settings.modelBatching.mapsPerBatch===6,settings.modelBatching);
- check('batching-host-storage',await p.evaluate(()=>SillyTavern.getContext().extensionSettings.atlas_world_sim.docs.docs.settings.modelBatching.mapsPerBatch===6));
- const batchExport=await f.evaluate(()=>AtlasPreview.presets.exportValue());check('batching-export-no-key',batchExport.modelBatching.mapsPerBatch===6&&!JSON.stringify(batchExport).includes('apiKey'));
- await f.locator('#batchMaps').fill('9');await f.locator('[data-save-batching]').click();
+ check('legacy-batching-disclosure-survives-save',await f.locator('[data-batch-legacy]').evaluate(el=>el.open));
+ check('batching-no-fixed-input-max',await f.evaluate(()=>['batchCharacters','batchMaps','batchRequests'].every(id=>!document.getElementById(id).hasAttribute('max'))));
+ check('batching-real-settings-save',settings.modelBatching.charactersPerBatch===120&&settings.modelBatching.mapsPerBatch===90&&settings.modelBatching.requestsPerOperation===12,settings.modelBatching);
+ check('batching-host-storage',await p.evaluate(()=>SillyTavern.getContext().extensionSettings.atlas_world_sim.docs.docs.settings.modelBatching.mapsPerBatch===90));
+ const batchExport=await f.evaluate(()=>AtlasPreview.presets.exportValue());check('batching-export-no-key',batchExport.modelBatching.mapsPerBatch===90&&!JSON.stringify(batchExport).includes('apiKey'));
+ await p.screenshot({path:`${dir}/native-batching-settings.png`});await p.setViewportSize({width:390,height:844});await delay(150);
+ check('batching-mobile-no-overflow',await f.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth));await p.screenshot({path:`${dir}/native-batching-mobile.png`});await p.setViewportSize({width:1600,height:1000});
+ if(!await f.locator('[data-batch-legacy]').evaluate(el=>el.open))await f.locator('[data-batch-legacy] summary').click();
+ await f.locator('#batchMaps').fill('-1');await f.locator('[data-save-batching]').click();
  settings=await p.evaluate(async()=> (await atlasPreviewConnection.api.request('GET','/settings')).body.data);
- check('batching-invalid-retains-settings-and-draft',settings.modelBatching.mapsPerBatch===6&&await f.locator('#batchMaps').inputValue()==='9'&&await f.evaluate(()=>AtlasPreview.presets.batchingDirty()));
- await f.locator('#batchCharacters').fill('0');await f.locator('#batchMaps').fill('0');await f.locator('[data-save-batching]').click();await f.waitForFunction(()=>!AtlasPreview.presets.batchingDirty());
+ check('batching-invalid-retains-settings-and-draft',settings.modelBatching.mapsPerBatch===90&&await f.locator('#batchMaps').inputValue()==='-1'&&await f.evaluate(()=>AtlasPreview.presets.batchingDirty()));
+ await f.locator('#batchCharacters').fill('0');await f.locator('#batchMaps').fill('0');await f.locator('#batchRequests').fill('0');await f.locator('[data-save-batching]').click();await f.waitForFunction(()=>!AtlasPreview.presets.batchingDirty());
  check('batching-reset-auto',await p.evaluate(async()=> (await atlasPreviewConnection.api.request('GET','/settings')).body.data.modelBatching.mapsPerBatch===0));
+ // New workload counts are independent of legacy object limits and survive host persistence.
+ check('workload-default-one',await f.evaluate(()=>['workMaps','workCharacters','workEvidence','workOutcomes','workExtra'].every(id=>document.getElementById(id).value==='1')));
+ await f.locator('#workMaps').fill('3');await f.locator('#workCharacters').fill('2');await f.locator('#workExtra').fill('0');await f.locator('[data-save-work-batching]').click();await f.waitForFunction(()=>!AtlasPreview.presets.workDirty());
+ settings=await p.evaluate(async()=> (await atlasPreviewConnection.api.request('GET','/settings')).body.data);
+ check('workload-real-settings-save',settings.workBatching.mapBatches===3&&settings.workBatching.characterBatches===2&&settings.workBatching.extraRequests===0,settings.workBatching);
+ check('workload-host-storage',await p.evaluate(()=>SillyTavern.getContext().extensionSettings.atlas_world_sim.docs.docs.settings.workBatching.mapBatches===3));
+ check('workload-export-no-key',await f.evaluate(()=>{const v=AtlasPreview.presets.exportValue();return v.workBatching.mapBatches===3&&!JSON.stringify(v).includes('apiKey');}));
+ await f.locator('#workMaps').fill('0');await f.locator('[data-save-work-batching]').click();check('workload-invalid-keeps-draft',await f.locator('#workMaps').inputValue()==='0'&&await f.evaluate(()=>AtlasPreview.presets.workDirty()));
+ settings=await p.evaluate(async()=> (await atlasPreviewConnection.api.request('GET','/settings')).body.data);check('workload-invalid-keeps-saved',settings.workBatching.mapBatches===3);
+ await f.locator('#workMaps').fill('1');await f.locator('#workCharacters').fill('1');await f.locator('#workExtra').fill('1');await f.locator('[data-save-work-batching]').click();await f.waitForFunction(()=>!AtlasPreview.presets.workDirty());
+ await f.evaluate(()=>document.getElementById('workMaps').scrollIntoView({block:'center'}));await p.screenshot({path:`${dir}/native-workload-settings.png`});await p.setViewportSize({width:390,height:844});await delay(150);
+ check('workload-mobile-no-overflow',await f.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth));await p.screenshot({path:`${dir}/native-workload-mobile.png`});await p.setViewportSize({width:1600,height:1000});
  // Real host book API, within the isolated preview fixture.
  await p.evaluate(()=>{const c=SillyTavern.getContext();c.chatMetadata.world_info='原版验收世界书';c.extensionSettings.atlas_world_sim.lorebooks??={};c.extensionSettings.atlas_world_sim.lorebooks['原版验收世界书']={entries:{1:{uid:1,comment:'真实世界书条目',key:['真实世界书条目'],content:'真实宿主资料',disable:false,order:90}}};});
  await f.locator('[data-view="lore"]').click();await f.waitForFunction(()=>AtlasPreview.data.LORE.some(x=>x.title==='真实世界书条目'));

@@ -152,7 +152,7 @@ test('SIG00 同一输入与顺序无关；策略版本变化会改变指纹', ()
 
   const otherPolicy = computeLayoutInputSignature({ ...base, policyVersion: 'layout-v99' });
   assert.notEqual(otherPolicy, computeLayoutInputSignature(base));
-  assert.equal(LAYOUT_SIGNATURE_POLICY_VERSION, 'layout-v7');
+  assert.equal(LAYOUT_SIGNATURE_POLICY_VERSION, 'layout-v9');
 
   const locked = computeLayoutInputSignature({ ...base, structureLocked: true });
   assert.notEqual(locked, computeLayoutInputSignature(base), '权威结构锁必须参与指纹');
@@ -231,6 +231,19 @@ test('SIG01 路线新增 / 关闭 / 方向 / 端点 / 确认几何变化都让 M
 /* ------------------------------------------------------------------ *
  * SIG02：无关变化不使该图失效
  * ------------------------------------------------------------------ */
+
+test('确认长宽变化使父图失效，生成的估计落点不触发循环',async()=>{
+  const seed=await makeSeedWith(SQL);
+  try{
+    const setSize=(widthM)=>seed.db.run('UPDATE locations SET area_geometry_json = ?, coord_precision = ? WHERE id = ? AND branch_id = ?',[JSON.stringify({kind:'dimensions',widthM,heightM:8,quality:'confirmed',source:'story'}),'layout',IDS.L1,BRANCH]);
+    setSize(12);
+    const first=signatureOf(seed.db,IDS.M1);
+    seed.db.run('UPDATE locations SET grid_x = 15, grid_y = 20 WHERE id = ? AND branch_id = ?',[IDS.L1,BRANCH]);
+    assert.equal(signatureOf(seed.db,IDS.M1),first);
+    setSize(13);
+    assert.notEqual(signatureOf(seed.db,IDS.M1),first);
+  }finally{seed.close();}
+});
 
 test('SIG02 人物移动 / 远处无关实体 / row_rev 变化都不动 M1 指纹', async () => {
   const seed = await makeSeedWith(SQL);

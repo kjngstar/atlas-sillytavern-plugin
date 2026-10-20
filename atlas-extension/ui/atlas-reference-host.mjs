@@ -15,7 +15,9 @@ const ATLAS_FEED_MAX_PAGES=20;
 export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort,diagnostics=()=>[],emit=()=>{},defaultPrompt='',pluginVersion=null,fetchFn=globalThis.fetch,loadSqlRuntime=()=>import(new URL('../dist/atlas-sql.mjs',import.meta.url).href)}) {
   root.replaceChildren();root.className='atlas-native-ui-host';root.id='atlas-extension-panel-root';
   root.setAttribute('role','application');root.setAttribute('aria-label','阿特拉斯世界工作台');
-  Object.assign(root.style,{position:'fixed',inset:'0',zIndex:'10000',padding:'0',margin:'0',background:'transparent'});
+  // Tavern themes may transform a zero-height html element, making fixed inset
+  // resolve against that element. Size the host from the viewport explicitly.
+  Object.assign(root.style,{position:'fixed',inset:'0',width:'100vw',height:'100dvh',zIndex:'10000',padding:'0',margin:'0',background:'transparent'});
   const frame=root.ownerDocument.createElement('iframe');frame.title='ATLAS 世界工作台';
   frame.setAttribute('aria-label','原版 ATLAS 世界工作台');
   Object.assign(frame.style,{display:'block',width:'100%',height:'100%',border:'0',background:'transparent'});
@@ -118,7 +120,6 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
        * 没有任何能力/版本时给空值，不编一个默认能力。
        */
       engine:{
-        modelBatchingLimits:settings.modelBatchingLimits??{},
         policyVersion:typeof settings.promptPolicyVersion==='string'?settings.promptPolicyVersion:null,
         capabilities:Array.isArray(settings.spatialCapabilities)?[...settings.spatialCapabilities]:[],
         activePromptPresetId:settings.activePromptPresetId??null,

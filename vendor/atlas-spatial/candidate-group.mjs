@@ -2,7 +2,7 @@ import {buildLayoutContext} from './host-context.mjs';
 import {generateFloor,generateCity,generateOverview} from './generation.mjs';
 import {buildSceneMutation,sceneLocationGeometry,canonicalForScene} from './storage.mjs';
 import {projectChildFurnishing} from './space-projection.mjs';
-import {clone,finite,plain,diagnostic,failure,stable,FRAME_SPACE_CANONICAL_KEY,SPACE_CANONICAL_MAX_FURNISHING,bytes,LIMITS} from './contracts.mjs';
+import {clone,finite,plain,diagnostic,failure,stable,FRAME_SPACE_CANONICAL_KEY,SPACE_CANONICAL_MAX_FURNISHING,bytes,LIMITS,readMetricDimensions} from './contracts.mjs';
 const GENERATORS={floor:generateFloor,city:generateCity,overview:generateOverview};
 /** Compile one layout request to the existing AtomicGroup shape. No database writes. */
 export function compileSceneGroup({request,scope,currentScope,mapRow,locations,characters,items,routes=[],maps=[],turnId,operationId,spaceSize=null,childSpaces={},autoPlan=false,planningProjection=false}={}){
@@ -10,7 +10,12 @@ export function compileSceneGroup({request,scope,currentScope,mapRow,locations,c
   const generate=GENERATORS[request?.kind];
   if(!generate)return failure('LAYOUT_KIND_UNSUPPORTED','$.request.kind','使用 floor/city/overview；其他空间沿用现有轮廓');
   const built=buildLayoutContext({scope,mapRow,maps,locations,characters,items,routes});if(!built.ok)return built;
-  const ctx={...built.context,currentScope,childSpaces,autoPlan,planningProjection},spec=clone(request.spec),membershipIssues=[];
+  const dimensionFacts=Object.fromEntries((locations??[]).filter(l=>l.branch_id===scope.branchId&&l.status==='active'&&l.map_id===mapRow.id).flatMap(l=>{
+    const area=typeof l.area_geometry_json==='string'?JSON.parse(l.area_geometry_json):l.area_geometry_json;
+    const size=area?.quality==='confirmed'?readMetricDimensions(area):null;
+    return size?[[l.id,{...size,quality:'confirmed',source:'author'}]]:[];
+  }));
+  const ctx={...built.context,currentScope,childSpaces:{...childSpaces,...dimensionFacts},autoPlan,planningProjection},spec=clone(request.spec),membershipIssues=[];
   // P12/R03 §19.2：宿主解析出的尺寸权威（按「作者确认 → canonical → 父图足迹 → 首次估计」的顺序）
   // 是**本轮生成的物理依据**。发生确认矛盾时宿主选的是作者事实，而 frame 里的 canonical 可能还是
   // 待裁决的旧事实 —— 生成器不能拿旧账本去画新图（那会画出另一个物理尺寸，等于发布半边变化）。
@@ -45,8 +50,11 @@ export function compileSceneGroup({request,scope,currentScope,mapRow,locations,c
     if(before.map_id!==mapRow.id)return failure('LOCATION_MAP_MISMATCH','$.locations.map_id','不能通过摆放把地点迁移到另一地图',{entityId:before.id});
     if(before.coord_precision==='exact'&&finite(before.grid_x)&&finite(before.grid_y)&&(Math.abs(before.grid_x-geo.gridX)>1e-6||Math.abs(before.grid_y-geo.gridY)>1e-6))return failure('LOCATION_GEOMETRY_LOCK_CONFLICT','$.locations','当前模板无法满足已确认的地点坐标；保留原场景',{entityId:before.id});
     const area=typeof before.area_geometry_json==='string'?JSON.parse(before.area_geometry_json):before.area_geometry_json;
-    if(area?.quality==='confirmed'&&geo.area.quality!=='confirmed')return failure('CONFIRMED_AREA_LOCKED','$.locations.area_geometry_json','不能用示意轮廓覆盖作者确认的范围');
-    const after={...clone(before),grid_x:geo.gridX,grid_y:geo.gridY,coord_precision:before.coord_precision==='exact'?'exact':geo.precision,area_geometry_json:geo.area};
+    const dimensions=area?.quality==='confirmed'?readMetricDimensions(area):null;
+    if(area?.quality==='confirmed'&&!dimensions&&geo.area.quality!=='confirmed')return failure('CONFIRMED_AREA_LOCKED','$.locations.area_geometry_json','不能用示意轮廓覆盖作者确认的范围');
+    // A confirmed size is independent of placement. Keep it verbatim; the scene
+    // owns the estimated footprint, and the child canonical shares this size.
+    const after={...clone(before),grid_x:geo.gridX,grid_y:geo.gridY,coord_precision:before.coord_precision==='exact'?'exact':geo.precision,area_geometry_json:dimensions?clone(area):geo.area};
     if(stable([before.grid_x,before.grid_y,before.coord_precision,area])===stable([after.grid_x,after.grid_y,after.coord_precision,after.area_geometry_json]))continue;
     after.row_rev=before.row_rev+1;after.updated_turn_id=turnId;
     mutations.push({table:'locations',rowId:before.id,before:clone(before),after,sourceOpIds:[operationId],basis:{kind:'layout',mapId:mapRow.id,quality:geo.precision}});readSet.push({table:'locations',rowId:before.id,rowRev:before.row_rev});

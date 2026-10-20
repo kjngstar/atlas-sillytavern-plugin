@@ -9,6 +9,13 @@ export const FRAME_SCENE_KEY = 'atlasScene';
 export const FRAME_SPACE_CANONICAL_KEY = 'atlasSpaceCanonical';
 /** 首版陈设条目上限：超限明确 deferred，不静默裁剪、不放宽预算。 */
 export const SPACE_CANONICAL_MAX_FURNISHING = 128;
+/** Physical dimensions carry no position or parent-map polygon. */
+export function readMetricDimensions(area) {
+  if (!area || area.kind !== 'dimensions' || !['confirmed','estimated'].includes(area.quality)) return null;
+  const {widthM,heightM}=area;
+  if (![widthM,heightM].every(v=>Number.isFinite(v)&&v>=.2&&v<=20000)) return null;
+  return {widthM,heightM};
+}
 /**
  * P12/R03 §19.4：布局陈设的稳定空间 localId = `space:<地点ID>:furn:<局部ID>`。
  *

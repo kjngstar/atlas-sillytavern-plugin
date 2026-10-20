@@ -1,3 +1,4 @@
+import { workPlanLimits } from './atlas-work-batching.ts';
 /** Resume saved background work without repeating the narrative or elapsed time. */
 import { AtlasDbError, queryBound, runBound, foreignKeyCheck } from './atlas-db-runtime.ts';
 import { withChatCommitLock } from './atlas-db-queue.ts';
@@ -32,13 +33,15 @@ export async function runSqlResume(session: SqlSession, input: {turnId:string;is
       const generationOptions=normalizeGenerationOptions(await session.modelPort?.generationOptions?.());
       assertCurrent();
       const attempts:Array<Record<string,unknown>>=JSON.parse(String(row.attempts_json??'[]'));
-      const backgroundPort=session.modelPort?logModelAttempts(bindModelBudget(session.modelPort,createGenerationBudget(),'background'),session.now,entry=>{
+      const history=JSON.parse(String(row.decisions_json));
+      const budget=createGenerationBudget({limit:generationOptions.batching.requestsPerOperation??0,workBatching:generationOptions.workBatching,workUsage:history.work_usage??undefined});
+      const backgroundPort=session.modelPort?logModelAttempts(bindModelBudget(session.modelPort,budget,'background'),session.now,entry=>{
         const finished=Number(entry.finished_wall_ms),started=Number(entry.started_wall_ms);
         attempts.push({id:`att_resume_${anchor.baseStorageRevision}_${attempts.length}`,...entry,duration_ms:Math.max(0,finished-started)});
       }):null;
       const simulation=await settleSqlTurn({db:candidate.db,branchId:session.branchId,anchor,turnId:input.turnId,
         clockBefore:Number(branch.clock_s),operations:[],modelPort:backgroundPort,generationOptions,
-        modelBudget:ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn,makeId:session.repo.internal.makeId,
+        modelBudget:budget.remaining(),workBudget:budget,makeId:session.repo.internal.makeId,
         isCurrent:()=>{assertCurrent();return true;},attemptKey:`resume_${anchor.baseStorageRevision}`});
       assertCurrent();
       if (anchor.baseRevision!==session.repo.internal.currentRevision()||anchor.baseStorageRevision!==session.repo.storageRevision) throw new AtlasDbError('STALE_BASE','后台等待期间快照已变化',{});
@@ -51,12 +54,13 @@ export async function runSqlResume(session: SqlSession, input: {turnId:string;is
       const journal=recordGroupChanges(candidate.db,{id:opId,opIds:[opId],mutations:[{table:'branches',rowId:session.branchId,before:previous,after,sourceOpIds:[opId],basis:{kind:'simulation'}}]},
         {turnId:input.turnId,attemptId:opId,startSequence:seq});
       if (journal.issues.length) throw new AtlasDbError('JOURNAL_WRITE_FAILED','继续结算无法记录回退',{});
-      const pendingCodes=new Set(['MODEL_REQUEST_FAILED','MODEL_BUDGET_EXHAUSTED','ACTOR_BUDGET_EXHAUSTED','OUTCOME_DEFERRED','OUTCOME_PENDING']);
+      const pendingCodes=new Set(['MODEL_REQUEST_FAILED','MODEL_BUDGET_EXHAUSTED','ACTOR_BUDGET_EXHAUSTED','OUTCOME_DEFERRED','OUTCOME_PENDING','CHARACTER_BATCH_CAPACITY']);
       receipt.issues=receipt.issues.filter(i=>!pendingCodes.has(i.code)); receipt.issues.push(...simulation.issues);
       receipt.groups.push(...simulation.groups); receipt.simulatedUntilS=simulation.simulatedUntil;
       receipt.worldChanged ||= simulation.worldChanged;
       receipt.status=simulation.catchingUp||receipt.groups.some(g=>g.status==='rejected'||g.status==='blocked')?'partial':'committed';
-      const history=JSON.parse(String(row.decisions_json));
+      history.work_usage=budget.workUsage();history.work_batching=generationOptions.workBatching;
+      if(generationOptions.workBatching)receipt.requestPlan={normalLimits:workPlanLimits(generationOptions.workBatching),extraLimit:generationOptions.workBatching.extraRequests,usage:budget.workUsage()!};
       history.operations.push(...simulation.modelOperations.map(op=>op.value));
       history.operation_meta.push(...simulation.modelOperations.map(({opId,line,rawHash})=>({opId,line,rawHash})));
       history.operation_context=(history.operation_context??[]).concat(simulation.operationContexts);

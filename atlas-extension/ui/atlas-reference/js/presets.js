@@ -42,9 +42,12 @@ function uniqueRows(rows,validator,label){
 }
 function batching(value={}){
  if(!value||typeof value!=='object'||Array.isArray(value))fail('分批设置格式不正确');
- const out={};for(const key of ['charactersPerBatch','mapsPerBatch']){
-  const count=value[key]??0;if(!Number.isSafeInteger(count)||count<0)fail('分批上限必须是非负整数，0 表示自动合批');out[key]=count;
+ const out={};for(const key of ['charactersPerBatch','mapsPerBatch','requestsPerOperation']){
+  const count=value[key]??0;if(!Number.isSafeInteger(count)||count<0)fail('上限必须是非负安全整数，0 表示不限制');out[key]=count;
  }return out;
+}
+function workBatching(value={}){
+ const out={};for(const key of ['mapBatches','characterBatches','evidenceBatches','outcomeBatches','extraRequests']){const n=value[key]??1;if(!Number.isSafeInteger(n)||n<(key==='extraRequests'?0:1))fail('分批数必须是正整数；额外请求额度可以为 0');out[key]=n;}return out;
 }
 function validateDoc(value,keepKey=false){
  if(!value||value.kind!=='atlas-ui-presets'||value.version!==1)fail('预设文件格式或版本不支持');
@@ -54,7 +57,7 @@ function validateDoc(value,keepKey=false){
  const hasC=id=>connections.some(c=>c.id===id),hasP=id=>promptPresets.some(p=>p.id===id);
  function pair(p){if(!p||!hasC(p.connectionId)||!hasP(p.promptPresetId))fail('任务绑定或当前预设引用了不存在的预设');return {connectionId:p.connectionId,promptPresetId:p.promptPresetId};}
  const active=pair(value.active),assignments={};for(const task of TASKS)assignments[task]=pair(value.assignments?.[task]);
- return {kind:'atlas-ui-presets',version:1,connections,promptPresets,active,assignments,modelBatching:batching(value.modelBatching)};
+ return {kind:'atlas-ui-presets',version:1,connections,promptPresets,active,assignments,modelBatching:batching(value.modelBatching),workBatching:workBatching(value.workBatching)};
 }
 function bytes(value){return new TextEncoder().encode(JSON.stringify(value)).byteLength;}
 function bounded(value){if(bytes(value)>LIMITS.bytes)fail('预设配置超过 1.5 MB，请减少段落或拆分文件');return value;}
@@ -74,7 +77,7 @@ function defaults(seed){
  ];
  const active={connectionId:connections[0].id,promptPresetId:promptPresets[0].id};
  const assignments={initialize:{connectionId:active.connectionId,promptPresetId:'prompt-map'},advance:clone(active),repair:{connectionId:active.connectionId,promptPresetId:'prompt-repair'}};
- return {kind:'atlas-ui-presets',version:1,connections,promptPresets,active,assignments,modelBatching:batching()};
+ return {kind:'atlas-ui-presets',version:1,connections,promptPresets,active,assignments,modelBatching:batching(),workBatching:workBatching()};
 }
 function create(seed,options={}){
  let doc=defaults(seed),storage=null,storageMode='session',storageError='',loadError='';
@@ -93,7 +96,7 @@ function create(seed,options={}){
   return drafts[name].get(id);
  }
  if(options.initialDocument)doc=validateDoc(clone(options.initialDocument),true);doc.connections.forEach(c=>{if(c.apiKey)keys.set(c.id,c.apiKey);});let committed=clone(doc);
- let batchingDraft=clone(doc.modelBatching);
+ let batchingDraft=clone(doc.modelBatching),workDraft=clone(doc.workBatching);
  function persisted(){return bounded(validateDoc(doc,true));}
  async function persist(action={kind:'selection'}){if(options.onPersist){try{const value=persisted();value.connections.forEach(c=>{c.apiKey=keys.get(c.id)||c.apiKey||'';});await options.onPersist(value,action);committed=clone(doc);storageMode='local';storageError='';return true;}catch(error){doc=clone(committed);storageError=error.message;throw error;}}
   try{if(!storage)fail('浏览器不允许本地保存');storage.setItem(STORAGE_KEY,JSON.stringify(persisted()));storageMode='local';storageError='';return true;}
@@ -105,6 +108,10 @@ function create(seed,options={}){
   const candidate=clone(doc);candidate[name][candidate[name].findIndex(p=>p.id===d.id)]=value;bounded(validateDoc(candidate,true));
   doc=candidate;if(type==='connection'){keys.set(d.id,d.apiKey||'');drafts[name].set(d.id,{...clone(value),apiKey:d.apiKey||''});}else drafts[name].set(d.id,clone(value));
   loadError='';return persist({kind:'save',type,id:d.id});
+ }
+ async function saveWorkBatching(){
+  doc={...doc,workBatching:workBatching(workDraft),modelBatching:{...doc.modelBatching,charactersPerBatch:0,mapsPerBatch:0}};
+  const saved=await persist({kind:'work-batching'});workDraft=clone(doc.workBatching);batchingDraft=clone(doc.modelBatching);return saved;
  }
  async function saveBatching(){
   doc={...doc,modelBatching:batching(batchingDraft)};
@@ -142,7 +149,7 @@ function create(seed,options={}){
  function parseImport(value){
   bounded(value);
   if(value?.kind==='atlas-preview-prompts')value={kind:'atlas-ui-preset-export',version:1,connections:[],promptPresets:[{id:uid('prompt'),name:'导入的提示词预设',segments:value.segments}]};
-  if(value?.kind==='atlas-ui-presets'){const parsed=publicDoc(value);if(value.modelBatching===undefined)delete parsed.modelBatching;return parsed;}
+  if(value?.kind==='atlas-ui-presets'){const parsed=publicDoc(value);if(value.modelBatching===undefined)delete parsed.modelBatching;else if(value.modelBatching.requestsPerOperation===undefined)delete parsed.modelBatching.requestsPerOperation;if(value.workBatching===undefined)delete parsed.workBatching;return parsed;}
   if(value?.kind!=='atlas-ui-preset-export'||value.version!==1)fail('预设文件格式或版本不支持');
   const connections=uniqueRows(value.connections,c=>connection(c,false),'API 预设'),promptPresets=uniqueRows(value.promptPresets,prompt,'提示词预设');
   if(!connections.length&&!promptPresets.length)fail('文件中没有可导入的预设');
@@ -154,18 +161,20 @@ function create(seed,options={}){
   for(const c of incoming.connections){const id=uid('connection');cMap.set(c.id,id);candidate.connections.push({...c,id,name:uniqueName(c.name,'connection',candidate.connections),rememberKey:false});}
   for(const p of incoming.promptPresets){const id=uid('prompt');pMap.set(p.id,id);candidate.promptPresets.push({...p,id,name:uniqueName(p.name,'prompt',candidate.promptPresets),segments:p.segments.map(s=>({...s,id:uid('segment')}))});}
   if(incoming.kind==='atlas-ui-presets'){
-   if(value.modelBatching!==undefined)candidate.modelBatching=clone(incoming.modelBatching);
+   if(value.workBatching!==undefined)candidate.workBatching=clone(incoming.workBatching);
+   if(value.modelBatching!==undefined)candidate.modelBatching={...candidate.modelBatching,...clone(incoming.modelBatching)};
    for(const task of TASKS)candidate.assignments[task]={connectionId:cMap.get(incoming.assignments[task].connectionId),promptPresetId:pMap.get(incoming.assignments[task].promptPresetId)};
    candidate.active={connectionId:cMap.get(incoming.active.connectionId),promptPresetId:pMap.get(incoming.active.promptPresetId)};
   }else{
    if(cMap.size)candidate.active.connectionId=cMap.values().next().value;
    if(pMap.size)candidate.active.promptPresetId=pMap.values().next().value;
   }
-  bounded(validateDoc(candidate,true));doc=candidate;await persist({kind:'import'});batchingDraft=clone(doc.modelBatching);return {connections:cMap.size,prompts:pMap.size};
+  bounded(validateDoc(candidate,true));doc=candidate;await persist({kind:'import'});batchingDraft=clone(doc.modelBatching);workDraft=clone(doc.workBatching);return {connections:cMap.size,prompts:pMap.size};
  }
  return {
   get document(){return publicDoc(doc);},get status(){return {mode:storageMode,error:storageError,loadError};},
   draft,dirty,save,switchTo,add,remove,rename,discard,assign,resolve,exportValue,parseImport,importValue,
+  workDraft:()=>workDraft,workDirty:()=>JSON.stringify(workDraft)!==JSON.stringify(doc.workBatching),saveWorkBatching,
   batchDraft:()=>batchingDraft,batchingDirty:()=>JSON.stringify(batchingDraft)!==JSON.stringify(doc.modelBatching),saveBatching,
   uid,get limits(){return {...LIMITS};},storageKey:STORAGE_KEY
  };

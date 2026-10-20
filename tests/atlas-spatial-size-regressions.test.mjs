@@ -77,3 +77,20 @@ test('实际过大的家具仍明确缺项，不靠缩小家具通过',()=>{
  assert.equal(out.ok,true);assert.equal(out.scene.layout.groups.length,0);
  assert.ok(out.issues.some(i=>i.code==='DETAIL_TOO_LARGE'));
 });
+
+test('四乘三米厨房先放操作台，柜架不因 ID 排序占掉可用空间',()=>{
+ const ctx=context({width:24,height:24,container:'inn',rooms:['hall','kitchen']});
+ ctx.childSpaces={hall:{widthM:12,heightM:8,quality:'confirmed'},kitchen:{widthM:4,heightM:3,quality:'confirmed'}};
+ const spec={rooms:[{id:'hall',w:12,h:8,side:'north'},{id:'kitchen',w:4,h:3,side:'south'}],contents:[
+  {id:'kitchen_counter',roomId:'kitchen',type:'table',w:2.4,h:.7},
+  {id:'kitchen_cabinet',roomId:'kitchen',type:'cabinet',w:1.2,h:.6},
+  {id:'kitchen_shelf',roomId:'kitchen',type:'shelf',w:1.5,h:.4},
+ ]};
+ const out=Kit.generateFloor(spec,ctx);
+ assert.equal(out.ok,true,JSON.stringify(out.issues));
+ assert.equal(out.scene.layout.groups.length,3,JSON.stringify(out.issues));
+ assert.ok(out.scene.layout.groups.every(g=>g.interaction),'每件陈设仍可达');
+ assert.deepEqual(out.scene.layout.rooms.find(r=>r.id==='kitchen').w,4);
+ assert.deepEqual(out.scene.layout.rooms.find(r=>r.id==='kitchen').h,3);
+ assert.ok(!out.issues.some(i=>i.severity==='error'),JSON.stringify(out.issues));
+});

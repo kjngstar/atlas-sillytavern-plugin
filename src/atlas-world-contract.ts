@@ -96,7 +96,8 @@ export type CompletionPolicy = {
   density: 'balanced';
   maxNewLocations: number;
   maxNewRoutes: number;
-  maxAdditionalDepth: 2;
+  maxAdditionalDepth: number;
+  budgetMode?: 'workload';
 };
 
 export type WorldCompletionInput = {

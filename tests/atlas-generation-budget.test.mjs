@@ -19,6 +19,7 @@ import {
   createGenerationBudget,
   transportBudgetPort,
 } from '../src/atlas-sql-generation-budget.ts';
+import {DEFAULT_WORK_BATCHING} from '../src/atlas-work-batching.ts';
 import { createSqlModelPort } from '../src/atlas-sql-model-port.ts';
 import { createDefaultSettingsV2 } from '../src/atlas-settings.ts';
 import { buildStagePrompt } from '../src/atlas-ops-prompts.ts';
@@ -93,9 +94,17 @@ function rescueFetch(outcome = 'success') {
 // W06 · 预算 4
 // ---------------------------------------------------------------------------
 
-test('W06: 记账基础——limit 固定 4，从既有 attempts 初始化，失败不退还，剩下余额如实', () => {
-  const budget = createGenerationBudget();
-  assert.equal(budget.limit, GENERATION_BUDGET_LIMIT);
+test('default transport budget is unrestricted and zero stays compatible with finite scheduler counters',()=>{
+ const budget=createGenerationBudget();assert.equal(budget.limit,0);
+ for(let n=0;n<50;n++){assert.equal(budget.claimBatch('decision',String(n)).ok,true);assert.equal(budget.claimTransport('decision',String(n)).ok,true);}
+ assert.equal(budget.used(),50);assert.ok(Number.isSafeInteger(budget.remaining())&&budget.remaining()>0);assert.equal(budget.deferred().length,0);
+ assert.equal(budget.claimBatch('decision','49').ok,false,'unrestricted requests still deduplicate logical batches');
+ for(const limit of [-1,1.5,Infinity,Number.MAX_SAFE_INTEGER+1])assert.throws(()=>createGenerationBudget({limit}),/MODEL_BUDGET_INVALID/);
+});
+
+test('W06: 记账基础——用户显式限制 4 次，从既有 attempts 初始化，失败不退还，剩下余额如实', () => {
+  const budget = createGenerationBudget({limit:4});
+  assert.equal(GENERATION_BUDGET_LIMIT,0);
   assert.equal(budget.limit, 4);
   assert.equal(budget.used(), 0);
   assert.equal(budget.remaining(), 4);
@@ -121,7 +130,7 @@ test('W06: 记账基础——limit 固定 4，从既有 attempts 初始化，失
   assert.equal(budget.attempts().find((a) => a.batchId === 'rep_1').status, 'failed');
 
   // 从既有 attempts 初始化：每个既有 attempt 对应一次已发出的真实传输
-  const resumed = createGenerationBudget({ attempts: [attempt('observe', 'obs_1'), attempt('repair', 'rep_1', 'failed')] });
+  const resumed = createGenerationBudget({ limit:4,attempts: [attempt('observe', 'obs_1'), attempt('repair', 'rep_1', 'failed')] });
   assert.equal(resumed.used(), 2, '既有 attempts 接着排队，不重算');
   assert.equal(resumed.remaining(), 2);
 });
@@ -129,7 +138,7 @@ test('W06: 记账基础——limit 固定 4，从既有 attempts 初始化，失
 test('W06: 固定优先级——observe1 + repair1 + 到期后台1，前景只剩 1，建设与布局二选一，另一个 deferred', () => {
   // 本回合已发出：observe 1 + repair 1（纠错也计数）
   const budget = createGenerationBudget({
-    attempts: [attempt('observe', 'obs_1'), attempt('repair', 'rep_1')],
+    limit:4,attempts: [attempt('observe', 'obs_1'), attempt('repair', 'rep_1')],
   });
   assert.equal(budget.used(), 2);
 
@@ -165,7 +174,7 @@ test('W06: 固定优先级——observe1 + repair1 + 到期后台1，前景只�
 });
 
 test('W06: 后台保留也不能越过上限（总账封顶），且 reservation 未使用时可释放重领', () => {
-  const budget = createGenerationBudget({ attempts: [attempt('observe', 'a'), attempt('repair', 'b'), attempt('decision', 'c')] });
+  const budget = createGenerationBudget({ limit:4,attempts: [attempt('observe', 'a'), attempt('repair', 'b'), attempt('decision', 'c')] });
   assert.equal(budget.used(), 3);
   assert.equal(budget.reserveBackground('bg_1'), true, '还剩 1 个名额，可保留');
   assert.equal(budget.stageRemaining('geography'), 0, '保留占满后前景无余额');
@@ -178,7 +187,7 @@ test('W06: 后台保留也不能越过上限（总账封顶），且 reservation
 });
 
 test('W06: budgetedModelPort 统一 claim 真实请求；4 次后第 5 次拒绝并 deferred（含失败与纠错计数）', async () => {
-  const budget = createGenerationBudget();
+  const budget = createGenerationBudget({limit:4});
   const failing = fakeModelPort('fail');
   const ok = fakeModelPort('ok');
 
@@ -216,7 +225,7 @@ test('W06: budgetedModelPort 统一 claim 真实请求；4 次后第 5 次拒绝
 // ---------------------------------------------------------------------------
 
 test('W13: 一次 modelPort.request 内部第二次 fetchFn 发送也占额度——逻辑批次 1 条，传输发送 2 次', async () => {
-  const budget = createGenerationBudget();
+  const budget = createGenerationBudget({limit:4});
   const { fetchFn, calls } = rescueFetch();
   const port = minimaxFixture({ budget, fetchFn });
 
@@ -239,7 +248,7 @@ test('W13: 一次 modelPort.request 内部第二次 fetchFn 发送也占额度�
 
 test('W13: 无余额时不发隐藏重试——只发首次，返回明确原因，保留首次失败原错误', async () => {
   // 前景只剩 1 个名额：首次发送吃掉它，兼容路由的第二次必然领不到
-  const budget = createGenerationBudget({ attempts: [attempt('observe', 'a'), attempt('repair', 'b'), attempt('decision', 'c')] });
+  const budget = createGenerationBudget({ limit:4,attempts: [attempt('observe', 'a'), attempt('repair', 'b'), attempt('decision', 'c')] });
   assert.equal(budget.remaining(), 1);
   const { fetchFn, calls } = rescueFetch();
   const port = minimaxFixture({ budget, fetchFn });
@@ -261,7 +270,7 @@ test('W13: 无余额时不发隐藏重试——只发首次，返回明确原因
 });
 
 test('W13: 首次发送本身被拒时也不落到传输层（预算先于网络）', async () => {
-  const budget = createGenerationBudget({ attempts: [attempt('a', 'a'), attempt('b', 'b'), attempt('c', 'c'), attempt('d', 'd')] });
+  const budget = createGenerationBudget({ limit:4,attempts: [attempt('a', 'a'), attempt('b', 'b'), attempt('c', 'c'), attempt('d', 'd')] });
   const { fetchFn, calls } = rescueFetch();
   const port = minimaxFixture({ budget, fetchFn });
 
@@ -273,7 +282,7 @@ test('W13: 首次发送本身被拒时也不落到传输层（预算先于网络
 });
 
 test('W13: 非兼容路由的单次请求只计一次', async () => {
-  const budget = createGenerationBudget();
+  const budget = createGenerationBudget({limit:4});
   const calls = [];
   const fetchFn = async (input) => {
     calls.push(typeof input === 'string' ? input : input.toString());
@@ -297,8 +306,8 @@ test('W13: 非兼容路由的单次请求只计一次', async () => {
 });
 
 test('W13: 不同聊天 / 并发任务的预算互相隔离（无全局 activeBudget）', async () => {
-  const chatA = createGenerationBudget();
-  const chatB = createGenerationBudget();
+  const chatA = createGenerationBudget({limit:4});
+  const chatB = createGenerationBudget({limit:4});
 
   // 把 A 的额度打满
   for (let i = 0; i < 4; i += 1) {
@@ -315,12 +324,22 @@ test('W13: 不同聊天 / 并发任务的预算互相隔离（无全局 activeBu
 });
 
 test('M3-03A: transportBudgetPort 是预算的传输层领取口，拒绝时带出原因', () => {
-  const budget = createGenerationBudget({ attempts: [attempt('a', 'a'), attempt('b', 'b'), attempt('c', 'c'), attempt('d', 'd')] });
+  const budget = createGenerationBudget({ limit:4,attempts: [attempt('a', 'a'), attempt('b', 'b'), attempt('c', 'c'), attempt('d', 'd')] });
   const claim = transportBudgetPort(budget, 'geography', 'build_1').claim();
   assert.equal(claim.ok, false);
   assert.match(claim.reason, /已用尽/);
 
-  const roomy = createGenerationBudget();
+  const roomy = createGenerationBudget({limit:4});
   assert.deepEqual(transportBudgetPort(roomy, 'geography', 'build_1').claim(), { ok: true });
   assert.equal(roomy.used(), 1);
+});
+
+test('work plan: compatibility fallback is an extra HTTP send, not a second free normal batch',async()=>{
+ for(const extraRequests of [0,1]){
+  const budget=createGenerationBudget({workBatching:{...DEFAULT_WORK_BATCHING,extraRequests}}),{fetchFn,calls}=rescueFetch(),port=minimaxFixture({budget,fetchFn});
+  const pending=port.request({...request('planned-map'),workClass:'maps'});
+  if(extraRequests)await pending;else await assert.rejects(pending,/额度|预算/);
+  assert.equal(calls.length,1+extraRequests);assert.equal(budget.used(),calls.length);
+  assert.equal(budget.workUsage().extra,extraRequests);assert.equal(budget.workUsage().normal.maps,1);
+ }
 });

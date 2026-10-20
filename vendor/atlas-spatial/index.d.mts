@@ -75,6 +75,7 @@ export type Renderer={state:Record<string,any>;setScene(doc:SceneDocument|null,o
 export declare const KIT_VERSION:string,SCENE_KIND:string,SCENE_VERSION:number,FRAME_SCENE_KEY:string,FRAME_SPACE_CANONICAL_KEY:string,SPACE_CANONICAL_MAX_FURNISHING:number;
 /** §19.4：布局陈设的稳定空间 localId（`space:<地点ID>:furn:<局部ID>`）及其反解；格式只此一处。 */
 export declare function spaceLocalId(locationId:string,contentId:string):string|null;
+export declare function readMetricDimensions(area:unknown):{widthM:number;heightM:number}|null;
 export declare function parseSpaceLocalId(value:unknown):{locationId:string;contentId:string}|null;
 export declare const LIMITS:Readonly<Record<string,number>>,DEFAULT_THEME:Readonly<Record<string,string>>,TOOL_NAMES:readonly string[];
 export declare const OVERVIEW_FEATURE_TYPES:readonly OverviewFeatureType[];

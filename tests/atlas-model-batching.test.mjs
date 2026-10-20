@@ -7,7 +7,7 @@ import {createSqlRepository} from '../src/atlas-db-repository.ts';
 import {createRow} from '../src/atlas-db-defaults.ts';
 import {queryBound} from '../src/atlas-db-runtime.ts';
 import {createDefaultSettingsV2,applySettingsCommand,sanitizeSettingsV2,settingsViewV2} from '../src/atlas-settings.ts';
-import {characterBatchLimit} from '../src/atlas-model-batching.ts';
+import {characterBatchLimit,planningOutputTokens} from '../src/atlas-model-batching.ts';
 import {createSqlModelPort} from '../src/atlas-sql-model-port.ts';
 import {buildStagePrompt} from '../src/atlas-ops-prompts.ts';
 import {buildSqlLayoutTask} from '../src/atlas-sql-layout-task.ts';
@@ -32,13 +32,14 @@ async function mapFixture(count,options={}){
  }}});await repo.open({bytes});return {repo,calls,ids};
 }
 
-test('batch settings migrate with automatic defaults, persist strictly and publish UI limits',()=>{
+test('batch settings default to unrestricted and accept user counts above the former maxima',()=>{
  const defaults=createDefaultSettingsV2();delete defaults.modelBatching;
- assert.deepEqual(sanitizeSettingsV2(defaults).settings.modelBatching,{charactersPerBatch:0,mapsPerBatch:0});
- const saved=applySettingsCommand(defaults,{action:'runtime.update',modelBatching:{charactersPerBatch:20,mapsPerBatch:6}});
- assert.equal(saved.ok,true);assert.deepEqual(settingsViewV2(sanitizeSettingsV2(saved.settings).settings).modelBatching,{charactersPerBatch:20,mapsPerBatch:6});
- assert.deepEqual(settingsViewV2(saved.settings).modelBatchingLimits,{charactersPerBatch:24,mapsPerBatch:8});
- for(const bad of [null,[],{charactersPerBatch:1},{charactersPerBatch:25,mapsPerBatch:0},{charactersPerBatch:2,mapsPerBatch:9},{charactersPerBatch:1.5,mapsPerBatch:1},{charactersPerBatch:'2',mapsPerBatch:1}]){
+ assert.deepEqual(sanitizeSettingsV2(defaults).settings.modelBatching,{charactersPerBatch:0,mapsPerBatch:0,requestsPerOperation:0});
+ const saved=applySettingsCommand(defaults,{action:'runtime.update',modelBatching:{charactersPerBatch:200,mapsPerBatch:120,requestsPerOperation:50}});
+ assert.equal(saved.ok,true);assert.deepEqual(settingsViewV2(sanitizeSettingsV2(saved.settings).settings).modelBatching,{charactersPerBatch:200,mapsPerBatch:120,requestsPerOperation:50});
+ assert.equal(Object.hasOwn(settingsViewV2(saved.settings),'modelBatchingLimits'),false);
+ const old=applySettingsCommand(saved.settings,{action:'runtime.update',modelBatching:{charactersPerBatch:0,mapsPerBatch:0}});assert.deepEqual(old.settings.modelBatching,{charactersPerBatch:0,mapsPerBatch:0,requestsPerOperation:50});
+ for(const bad of [null,[],{charactersPerBatch:1},{charactersPerBatch:-1,mapsPerBatch:0},{charactersPerBatch:2,mapsPerBatch:Number.MAX_SAFE_INTEGER+1},{charactersPerBatch:1.5,mapsPerBatch:1},{charactersPerBatch:'2',mapsPerBatch:1},{charactersPerBatch:0,mapsPerBatch:0,requestsPerOperation:-1}]){
   const rejected=applySettingsCommand(saved.settings,{action:'runtime.update',modelBatching:bad});assert.equal(rejected.ok,false);assert.deepEqual(rejected.settings.modelBatching,saved.settings.modelBatching);
  }
 });
@@ -50,36 +51,40 @@ test('batch editor saves through runtime settings, exports no key and retains dr
  const store=w.AtlasPresetStore.create([],{storage:null,initialDocument:referencePresetDocument(settings),onPersist:async(doc,action)=>{
   if(reject)throw Error('save unavailable');for(const command of referenceSettingsCommands(doc,settings,action)){const result=applySettingsCommand(settings,command);assert.equal(result.ok,true);settings=result.settings;}
  }});
- Object.assign(store.batchDraft(),{charactersPerBatch:18,mapsPerBatch:4});await store.saveBatching();
- assert.deepEqual(settings.modelBatching,{charactersPerBatch:18,mapsPerBatch:4});assert.equal(store.batchingDirty(),false);
+ Object.assign(store.batchDraft(),{charactersPerBatch:18,mapsPerBatch:4,requestsPerOperation:0});await store.saveBatching();
+ assert.deepEqual(settings.modelBatching,{charactersPerBatch:18,mapsPerBatch:4,requestsPerOperation:0});assert.equal(store.batchingDirty(),false);
  const backup=JSON.parse(JSON.stringify(store.exportValue()));assert.deepEqual(backup.modelBatching,settings.modelBatching);assert.ok(!JSON.stringify(backup).includes('apiKey'));
  reject=true;store.batchDraft().mapsPerBatch=2;await assert.rejects(store.saveBatching(),/save unavailable/);
  assert.equal(store.document.modelBatching.mapsPerBatch,4);assert.equal(store.batchDraft().mapsPerBatch,2);assert.equal(store.batchingDirty(),true);
- reject=false;delete backup.modelBatching;await store.importValue(store.parseImport(backup));assert.deepEqual(settings.modelBatching,{charactersPerBatch:18,mapsPerBatch:4},'old backup keeps current batch settings through the UI confirmation step');
- backup.modelBatching={charactersPerBatch:10,mapsPerBatch:2};await store.importValue(store.parseImport(backup));assert.deepEqual(settings.modelBatching,backup.modelBatching);
+ reject=false;delete backup.modelBatching;await store.importValue(store.parseImport(backup));assert.deepEqual(settings.modelBatching,{charactersPerBatch:18,mapsPerBatch:4,requestsPerOperation:0},'old backup keeps current batch settings through the UI confirmation step');
+ backup.modelBatching={charactersPerBatch:10,mapsPerBatch:2,requestsPerOperation:0};await store.importValue(store.parseImport(backup));assert.deepEqual(settings.modelBatching,backup.modelBatching);
+ store.batchDraft().requestsPerOperation=7;await store.saveBatching();
+ const oldBatchBackup=JSON.parse(JSON.stringify(store.exportValue()));delete oldBatchBackup.modelBatching.requestsPerOperation;
+ await store.importValue(store.parseImport(oldBatchBackup));assert.equal(settings.modelBatching.requestsPerOperation,7,'an old backup cannot silently clear a saved request cap');
 });
 
 test('connection planning is read only and batching does not override actual API max_tokens',async()=>{
- const settings={...createDefaultSettingsV2(),modelBatching:{charactersPerBatch:20,mapsPerBatch:6},activeApiPresetId:'api',apiPresets:[{id:'api',name:'test',endpoint:'https://example.test/v1',model:'mock',apiKey:'fixture-secret',maxTokens:12000,temperature:0.5,timeoutMs:30000,updatedAt:1}]};
+ const settings={...createDefaultSettingsV2(),modelBatching:{charactersPerBatch:20,mapsPerBatch:6,requestsPerOperation:0},activeApiPresetId:'api',apiPresets:[{id:'api',name:'test',endpoint:'https://example.test/v1',model:'mock',apiKey:'fixture-secret',maxTokens:12000,temperature:0.5,timeoutMs:30000,updatedAt:1}]};
  const bodies=[],port=createSqlModelPort({readSettings:async()=>settings,fetchFn:async(url,init)=>{bodies.push(JSON.parse(init.body));return new Response(JSON.stringify({choices:[{finish_reason:'stop',message:{content:'{"op":"noop"}'}}]}),{status:200});}});
- assert.deepEqual(await port.generationOptions(),{maxTokens:12000,batching:settings.modelBatching});assert.equal(bodies.length,0);
+ assert.deepEqual(await port.generationOptions(),{maxTokens:12000,batching:settings.modelBatching,workBatching:settings.workBatching});assert.equal(bodies.length,0);
  const req=buildStagePrompt({phase:'decision',actorSlices:'[]'});req.anchor=input().anchor;req.batchTargets={kind:'characters',count:20,estimatedOutputTokens:5632};
  await port.request(req);assert.equal(bodies[0].max_tokens,12000);assert.equal(JSON.stringify(bodies[0]).includes('batchTargets'),false);
- assert.equal(characterBatchLimit({maxTokens:8192}),24);assert.equal(characterBatchLimit({maxTokens:4096}),14);assert.equal(characterBatchLimit({maxTokens:1024}),2);assert.equal(characterBatchLimit({maxTokens:8192,batching:{charactersPerBatch:5,mapsPerBatch:0}}),5);
+ settings.apiPresets[0].maxTokens=0;await port.request({...req,batchId:req.batchId+'_unrestricted'});assert.equal(Object.hasOwn(bodies[1],'max_tokens'),false,'zero leaves the provider output parameter unspecified');
+ assert.equal(characterBatchLimit({maxTokens:8192}),30);assert.equal(characterBatchLimit({maxTokens:4096}),14);assert.equal(characterBatchLimit({maxTokens:1024}),2);assert.equal(characterBatchLimit({maxTokens:8192,batching:{charactersPerBatch:5,mapsPerBatch:0}}),5);
 });
 
 for(const count of [8,12])test(`${count} compatible maps share capacity-bounded layout batches and one evidence pass`,async()=>{
  const f=await mapFixture(count);try{
   const result=await f.repo.prepareTurn(input({layoutMaps:f.ids,sourceSnapshot:[{key:'s',kind:'story',hash:'synthetic',text:'这些地图属于同一个合成测试世界。'}]}));
-  const layouts=f.calls.filter(req=>req.batchTargets?.kind==='maps');assert.deepEqual(layouts.map(req=>req.batchTargets.count),count===8?[8]:[8,4]);
-  assert.equal(f.calls.filter(req=>req.batchId.includes('_evidence_')).length,1);assert.equal(f.calls.length,Math.ceil(count/8)+1);
+  const layouts=f.calls.filter(req=>req.batchTargets?.kind==='maps');assert.deepEqual(layouts.map(req=>req.batchTargets.count),[count]);
+  assert.equal(f.calls.filter(req=>req.batchId.includes('_evidence_')).length,1);assert.equal(f.calls.length,2);
   for(const id of f.ids)assert.ok(scene(f.repo.getCandidate(result.token).db,id),id);
   assert.equal(result.receipt.issues.some(i=>i.code==='LAYOUT_BATCH_PENDING'),false,JSON.stringify(result.receipt.issues));
  }finally{await f.repo.close();}
 });
 
 test('configured map cap splits requests while preserving the shared four-send allowance',async()=>{
- const f=await mapFixture(12,{generation:{maxTokens:8192,batching:{charactersPerBatch:0,mapsPerBatch:2}}});try{
+ const f=await mapFixture(12,{generation:{maxTokens:8192,batching:{charactersPerBatch:0,mapsPerBatch:2,requestsPerOperation:4}}});try{
   const result=await f.repo.prepareTurn(input({layoutMaps:f.ids}));assert.deepEqual(f.calls.map(req=>req.batchTargets.count),[2,2,2,2]);
   assert.ok(result.receipt.issues.some(i=>i.code==='LAYOUT_BATCH_PENDING'));assert.equal(f.ids.filter(id=>scene(f.repo.getCandidate(result.token).db,id)).length,8);
  }finally{await f.repo.close();}
@@ -123,13 +128,13 @@ test('parent layout materializes inherited geometry and avoids a redundant child
  }finally{await f.repo.close();}
 });
 
-async function actorFixture(total,charactersPerBatch=0,configure){
+async function actorFixture(total,charactersPerBatch=0,configure,{maxTokens=8192,requestsPerOperation=0,respond}={}){
  const seed=await makeSeedWith(SQL);for(let i=4;i<total;i++){
-  const id=`student-${String(i).padStart(2,'0')}`;insertRows(seed.db,'entity_keys',[{branch_id:IDS.branchMain,id,kind:'character'}]);insertRows(seed.db,'characters',[row('characters',id,{name:`学生${i}`,role:'npc',importance:'supporting',location_id:IDS.L3,status:'active',physical_status:'alive'})]);
+  const id=`student-${String(i).padStart(4,'0')}`;insertRows(seed.db,'entity_keys',[{branch_id:IDS.branchMain,id,kind:'character'}]);insertRows(seed.db,'characters',[row('characters',id,{name:`学生${i}`,role:'npc',importance:'supporting',location_id:IDS.L3,status:'active',physical_status:'alive'})]);
  }
  configure?.(seed.db);
  const metadata={atlas:{database:await encodeSnapshot(seed.exportBytes(),{chatUid:IDS.chatA,worldUid:'batch-world',storageRevision:0,activeBranchId:IDS.branchMain})}};seed.close();const calls=[];
- const session=await openSqlSession({chatUid:IDS.chatA,branchId:IDS.branchMain,chatMetadata:metadata,saveSession:async()=>({result:'saved',confirmed:true}),modelPort:{generationOptions:async()=>({maxTokens:8192,batching:{charactersPerBatch,mapsPerBatch:0}}),request:async req=>{calls.push(req);return {batchId:req.batchId,httpStatus:200,finishReason:'stop',text:req.phase==='observe'?JSON.stringify({op:'event.propose',data:{title:'休息结束',phase:'observed',activity:{kind:'rest',completed:true},time_hint:{elapsed_s:60}}}):'{"op":"noop"}'};}}});
+ const session=await openSqlSession({chatUid:IDS.chatA,branchId:IDS.branchMain,chatMetadata:metadata,saveSession:async()=>({result:'saved',confirmed:true}),modelPort:{generationOptions:async()=>({maxTokens,batching:{charactersPerBatch,mapsPerBatch:0,requestsPerOperation}}),request:async req=>{calls.push(req);const override=await respond?.(req,calls.length);return {batchId:req.batchId,httpStatus:200,finishReason:'stop',...override,text:override?.text??(req.phase==='observe'?JSON.stringify({op:'event.propose',data:{title:'休息结束',phase:'observed',activity:{kind:'rest',completed:true},time_hint:{elapsed_s:60}}}):'{"op":"noop"}')};}}});
  return {session,calls,turn:()=>runSqlTurn(session,input({manual:false,sceneOnly:false,phaseBatches:['observe'],assistantText:'休息了一分钟。'}))};
 }
 test('20 actors use one decision request at the configured connection capacity and are recorded in logs',async()=>{
@@ -139,7 +144,7 @@ test('20 actors use one decision request at the configured connection capacity a
  }finally{await f.session.repo.close();}
 });
 test('configured actor batches resume only pending actors and retain the same setting on continuation',async()=>{
- const f=await actorFixture(20,5);try{
+ const f=await actorFixture(20,5,undefined,{requestsPerOperation:4});try{
   const result=await f.turn();assert.equal(result.coreSaved,true);assert.equal(result.receipt.status,'partial');assert.deepEqual(f.calls.filter(req=>req.phase==='decision').map(req=>req.batchTargets.count),[5,5,5]);
   const resumed=await runSqlModelRetry(f.session,{turnId:result.receipt.turnId});assert.equal(resumed.coreSaved,true);assert.equal(resumed.receipt.status,'committed');assert.deepEqual(f.calls.filter(req=>req.phase==='decision').map(req=>req.batchTargets.count),[5,5,5,5]);
   const actors=f.calls.filter(req=>req.phase==='decision').flatMap(req=>JSON.parse(req.messages[1].content.match(/待判断角色及各自认知：(.*)/)[1]).map(a=>a.entityId));assert.equal(new Set(actors).size,20);
@@ -197,4 +202,77 @@ test('a host change during settings retrieval aborts before a model call or cand
  const seed=await makeSeedWith(SQL),bytes=seed.exportBytes();seed.close();let current=true,calls=0;
  const repo=createSqlRepository({chatUid:IDS.chatA,branchId:IDS.branchMain,modelPort:{generationOptions:async()=>{current=false;return {maxTokens:8192,batching:{charactersPerBatch:0,mapsPerBatch:0}};},request:async()=>{calls++;throw Error('must not send');}}});
  try{await repo.open({bytes});const before=await repo.exportCurrent();await assert.rejects(repo.prepareTurn(input({layoutMaps:[IDS.M1],isCurrent:()=>current})),{code:'STALE_BASE'});assert.equal(calls,0);assert.deepEqual(await repo.exportCurrent(),before);}finally{await repo.close();}
+});
+
+test('zero batch and output limits do not invent a 4096-token or 24-person quota',async()=>{
+ assert.equal(planningOutputTokens({maxTokens:0}),Infinity);assert.equal(characterBatchLimit({maxTokens:0}),Infinity);
+ const f=await actorFixture(50,0,undefined,{maxTokens:0});try{
+  const result=await f.turn();assert.equal(result.coreSaved,true);assert.equal(result.receipt.status,'committed');
+  assert.deepEqual(f.calls.filter(req=>req.phase==='decision').map(req=>req.batchTargets.count),[50]);
+ }finally{await f.session.repo.close();}
+});
+
+test('a configured large output allowance expands batches beyond 24 actors',async()=>{
+ const f=await actorFixture(50,0,undefined,{maxTokens:16384});try{
+  const result=await f.turn();assert.equal(result.coreSaved,true);assert.deepEqual(f.calls.filter(req=>req.phase==='decision').map(req=>req.batchTargets.count),[50]);
+ }finally{await f.session.repo.close();}
+});
+
+test('default request count permits all configured actor batches beyond the former four calls',async()=>{
+ const f=await actorFixture(20,3);try{
+  const result=await f.turn();assert.equal(result.coreSaved,true);assert.equal(result.receipt.status,'committed');assert.equal(f.calls.length,8);
+  assert.deepEqual(f.calls.filter(req=>req.phase==='decision').map(req=>req.batchTargets.count),[3,3,3,3,3,3,2]);
+ }finally{await f.session.repo.close();}
+});
+
+test('default request count completes all map batches beyond the former four calls',async()=>{
+ const f=await mapFixture(12,{generation:{maxTokens:0,batching:{charactersPerBatch:0,mapsPerBatch:2}}});try{
+  const result=await f.repo.prepareTurn(input({layoutMaps:f.ids}));assert.deepEqual(f.calls.map(req=>req.batchTargets.count),[2,2,2,2,2,2]);
+  assert.equal(result.receipt.issues.some(i=>i.code==='LAYOUT_BATCH_PENDING'),false);for(const id of f.ids)assert.ok(scene(f.repo.getCandidate(result.token).db,id));
+ }finally{await f.repo.close();}
+});
+
+test('user map limits above eight persist and are used by actual requests',async()=>{
+ const f=await mapFixture(20,{generation:{maxTokens:0,batching:{charactersPerBatch:0,mapsPerBatch:20}}});try{
+  const result=await f.repo.prepareTurn(input({layoutMaps:f.ids}));assert.deepEqual(f.calls.map(req=>req.batchTargets.count),[20]);for(const id of f.ids)assert.ok(scene(f.repo.getCandidate(result.token).db,id));
+ }finally{await f.repo.close();}
+});
+
+test('truncated character replies are discarded and only then split once',async()=>{
+ const f=await actorFixture(50,0,undefined,{maxTokens:0,respond:(req,n)=>req.phase==='decision'?{finishReason:n===2?'length':'stop',text:n===2?JSON.stringify({op:'character.upsert',ref:'C2',data:{thought:'被截断的回复不得写入'}}):'{"op":"noop"}'}:undefined});try{
+  const result=await f.turn();assert.equal(result.coreSaved,true);assert.equal(result.receipt.status,'committed');
+  assert.deepEqual(f.calls.filter(req=>req.phase==='decision').map(req=>req.batchTargets.count),[50,25,25]);assert.ok(result.receipt.issues.some(i=>i.code==='CHARACTER_BATCH_SPLIT'));
+  assert.equal(queryBound(f.session.repo.db,'SELECT thought FROM characters WHERE branch_id=? AND id=?',[IDS.branchMain,IDS.C2])[0].thought,'');
+ }finally{await f.session.repo.close();}
+});
+
+test('context overflow shrinks a map batch while keeping transport retries bounded',async()=>{
+ const f=await mapFixture(12,{generation:{maxTokens:0,batching:{charactersPerBatch:0,mapsPerBatch:0}},respond:(req,n)=>{if(n===1)throw Error('context_length_exceeded');return {text:reply(req)};}});try{
+  const result=await f.repo.prepareTurn(input({layoutMaps:f.ids}));assert.deepEqual(f.calls.map(req=>req.batchTargets.count),[12,6,6]);assert.ok(result.receipt.issues.some(i=>i.code==='LAYOUT_BATCH_SPLIT'));for(const id of f.ids)assert.ok(scene(f.repo.getCandidate(result.token).db,id));
+ }finally{await f.repo.close();}
+});
+
+test('unlimited request count cannot cause an endless retry of a permanently failing actor batch',async()=>{
+ const f=await actorFixture(50,0,undefined,{maxTokens:0,respond:req=>{if(req.phase==='decision')throw Error('context_length_exceeded');}});try{
+  const result=await f.turn();assert.equal(result.coreSaved,true);assert.equal(result.receipt.status,'partial');assert.deepEqual(f.calls.filter(req=>req.phase==='decision').map(req=>req.batchTargets.count),[50,25]);
+  assert.ok(result.receipt.issues.some(i=>i.code==='MODEL_REQUEST_FAILED'));
+ }finally{await f.session.repo.close();}
+});
+
+test('a large unrestricted actor batch includes references beyond the old 200-row catalogue prefix',async()=>{
+ const f=await actorFixture(250,0,undefined,{maxTokens:0,respond:req=>{
+  if(req.phase!=='decision')return;
+  const actors=JSON.parse(req.messages[1].content.match(/待判断角色及各自认知：(.*)/)[1]);return {text:JSON.stringify({op:'character.upsert',ref:actors.at(-1).entityId,data:{thought:'末尾人物已决策'}})};
+ }});try{
+  const result=await f.turn();assert.equal(result.coreSaved,true,JSON.stringify(result));assert.equal(result.receipt.status,'committed');assert.deepEqual(f.calls.filter(req=>req.phase==='decision').map(req=>req.batchTargets.count),[250]);
+  assert.equal(queryBound(f.session.repo.db,'SELECT thought FROM characters WHERE branch_id=? AND id=?',[IDS.branchMain,'student-0249'])[0].thought,'末尾人物已决策');
+ }finally{await f.session.repo.close();}
+});
+
+test('unrestricted actors split at actual reference protocol capacity without exhausting a retry',async()=>{
+ const f=await actorFixture(600,0,undefined,{maxTokens:0});try{
+  const result=await f.turn();assert.equal(result.coreSaved,true);assert.equal(result.receipt.status,'committed');
+  assert.deepEqual(f.calls.filter(req=>req.phase==='decision').map(req=>req.batchTargets.count),[512,88]);
+  assert.equal(result.receipt.issues.some(i=>i.code==='CHARACTER_BATCH_SPLIT'),false);
+ }finally{await f.session.repo.close();}
 });

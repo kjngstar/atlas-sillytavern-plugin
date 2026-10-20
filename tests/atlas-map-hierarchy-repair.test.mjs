@@ -82,13 +82,23 @@ test('only visible sibling maps enter the inherited context',()=>{
  assert.deepEqual(f.outer.geo.parentContext.siblings,[]);assert.equal(f.outer.marks.some(m=>m.id==='inner'),false);
 });
 
+test('室内图按物理房间显示，不把室外同级地图纳入适应视野范围',()=>{
+ const f=familyFixture();f.outer.kind='building';f.outer.renderKind='floor';
+ const extent=[...f.outer.extent],geometry=structuredClone(f.outer.geo);
+ projectMapContext(f.nodes,f.locations);
+ assert.deepEqual(f.outer.extent,extent);
+ assert.deepEqual(f.outer.geo,geometry);
+ assert.equal(f.outer.marks.some(m=>m.context),false);
+ assert.ok(f.inner.geo.parentContext,'地理分区仍保留父图上下文');
+});
+
 const input=extra=>({anchor:{chatUid:IDS.chatA,branchId:IDS.branchMain,parentTurnId:IDS.seedTurn,hostMessageUid:'hierarchy-fix',variantKey:'v1',baseRevision:0,baseStorageRevision:0,inputHash:'hierarchy-fix'},userText:'',assistantText:'查看地图。',sourceSnapshot:[],manual:true,sceneOnly:true,phaseBatches:[],operations:[],...extra});
 test('spatial assembly cannot multiply the four-send turn allowance by its number of maps',async()=>{
  const seed=await makeSeedWith(SQL),ids=Array.from({length:8},(_,i)=>`budget-map-${i}`);
  for(const id of ids)insertRows(seed.db,'maps',[createRow('maps',{name:id,kind:'world',frame_json:{cols:100,rows:100}},{branchId:IDS.branchMain,id,turnId:IDS.seedTurn,clockS:0,nowWallMs:1,rulesetVersion:'atlas-1'})]);
  const bytes=seed.exportBytes();seed.close();const calls=[];
  const repo=createSqlRepository({chatUid:IDS.chatA,branchId:IDS.branchMain,modelPort:{async request(req){calls.push(req);const scopes=JSON.parse(req.messages[1].content.split('\n').find(l=>l.startsWith('本图：')).slice(3));return {batchId:req.batchId,finishReason:'stop',httpStatus:200,text:scopes.map(s=>JSON.stringify({op:'map.layout.request',ref:s.map,data:{kind:'overview',spec:{surface:'mixed',zones:[],features:[],links:[]}}})).join('\n')};}}});
- try{await repo.open({bytes});const result=await repo.prepareTurn(input({layoutMaps:ids,generationOptions:{maxTokens:8192,batching:{charactersPerBatch:0,mapsPerBatch:1}}}));assert.equal(calls.length,4);assert.ok(result.receipt.issues.some(i=>i.code==='LAYOUT_BATCH_PENDING'));}finally{await repo.close();}
+ try{await repo.open({bytes});const result=await repo.prepareTurn(input({layoutMaps:ids,generationOptions:{maxTokens:8192,batching:{charactersPerBatch:0,mapsPerBatch:1,requestsPerOperation:4}}}));assert.equal(calls.length,4);assert.ok(result.receipt.issues.some(i=>i.code==='LAYOUT_BATCH_PENDING'));}finally{await repo.close();}
 });
 test('location compilation rejects a self-anchor instead of persisting a vehicle position cycle',async()=>{
  const seed=await makeSeedWith(SQL),bytes=seed.exportBytes();seed.close();const repo=createSqlRepository({chatUid:IDS.chatA,branchId:IDS.branchMain});

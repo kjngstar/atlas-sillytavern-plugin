@@ -24,6 +24,8 @@ import { createTableReadPort } from '../src/atlas-db-readport.ts';
 import { compileSqlSceneMaps } from '../src/atlas-sql-scene-maps.ts';
 import { buildSqlLayoutTask, deriveLayoutSites } from '../src/atlas-sql-layout-task.ts';
 import { queryMapView } from '../src/atlas-db-views.ts';
+import { completeLayoutClosure } from '../src/atlas-layout-closure.ts';
+import { queryBound } from '../src/atlas-db-runtime.ts';
 import {
   SPATIAL_PROFILE_FRAME_KEY,
   boundCorridorIdOf,
@@ -160,6 +162,72 @@ const scopeOf = (task) => {
   }
   return scopes;
 };
+
+test('嵌套楼层收到父图尺寸时不提前保存成单间，后续真实房间请求可继续完成',async()=>{
+  const seed=await siteSeed();
+  try {
+    const floor='L_INNER',kitchen='L_KITCHEN',floorMap='M_INNER',hallMap='M_INNER_HALL',kitchenMap='M_INNER_KITCHEN';
+    insertRows(seed.db,'entity_keys',[floor,kitchen].map(id=>({branch_id:BRANCH,id,kind:'location'})));
+    insertRows(seed.db,'locations',[loc(floor,{kind:'floor',parent_location_id:BLD,map_id:MAP_BLD}),loc(kitchen,{kind:'room',parent_location_id:floor})]);
+    insertRows(seed.db,'maps',[mapRow(floorMap,{container_location_id:floor,frame_json:{cols:24,rows:24},meters_per_cell:1}),mapRow(hallMap,{container_location_id:ROOM}),mapRow(kitchenMap,{container_location_id:kitchen})]);
+    seed.db.run('UPDATE locations SET parent_location_id=?,map_id=?,area_geometry_json=? WHERE id=?',[floor,floorMap,JSON.stringify({kind:'dimensions',widthM:12,heightM:8,quality:'confirmed',source:'story'}),ROOM]);
+    seed.db.run('UPDATE locations SET map_id=?,area_geometry_json=? WHERE id=?',[floorMap,JSON.stringify({kind:'dimensions',widthM:4,heightM:3,quality:'confirmed',source:'story'}),kitchen]);
+    seed.db.run('UPDATE maps SET frame_json=?,meters_per_cell=1 WHERE id=?',[JSON.stringify({cols:25,rows:51}),MAP_BLD]);
+    const rows=()=>Object.fromEntries(['maps','locations','characters','items','routes'].map(table=>[table,queryBound(seed.db,'SELECT * FROM '+table)]));
+    const commit=(mapId,spec)=>{
+      const data=rows(),map=data.maps.find(m=>m.id===mapId);
+      const compiled=Kit.compileSceneGroup({request:{kind:'floor',spec},scope:SCOPE,currentScope:SCOPE,mapRow:map,...data,turnId:TURN,operationId:'nested:'+mapId,autoPlan:true});
+      assert.equal(compiled.ok,true,JSON.stringify(compiled.issues));
+      const closed=completeLayoutClosure({group:compiled.group,...data,scope:SCOPE,turnId:TURN,operationId:'nested:'+mapId});
+      assert.equal(closed.ok,true,JSON.stringify(closed.issues));
+      assert.equal(applyGroups(seed.db,[closed.group],applyCtx('nested:'+mapId)).groups[0].status,'applied');
+      return closed;
+    };
+    const first=commit(MAP_BLD,{rooms:[{id:floor,w:24,h:24,side:'north'}],contents:[],actors:[],items:[]});
+    assert.ok(!first.completedMapIds.includes(floorMap),'父图不能提前宣称多房间楼层完成');
+    assert.equal(frameOf(seed,floorMap).atlasScene,undefined);
+    commit(floorMap,{rooms:[{id:ROOM,w:12,h:8,side:'south'},{id:kitchen,w:4,h:3,side:'north'}],contents:[{id:'hall_table',roomId:ROOM,type:'table',w:2,h:1}],actors:[],items:[]});
+    const inner=frameOf(seed,floorMap),hall=frameOf(seed,hallMap),cook=frameOf(seed,kitchenMap);
+    assert.deepEqual(inner.atlasScene.layout.rooms.map(r=>r.id).sort(),[ROOM,kitchen].sort());
+    assert.deepEqual([hall.atlasScene.layout.bounds.w,hall.atlasScene.layout.bounds.h],[12,8]);
+    assert.deepEqual([cook.atlasScene.layout.bounds.w,cook.atlasScene.layout.bounds.h],[4,3]);
+    assert.equal(hall.atlasScene.layout.groups[0].id,'hall_table');
+    assert.deepEqual(inner.atlasScene.layout.issues,[]);
+  } finally { seed.close(); }
+});
+
+test('建筑内直接包含房间的 other 容器使用室内模板，并在首次估计中向上保留确认尺寸',async()=>{
+  const seed=await siteSeed();
+  try {
+    const floor='L_INNER',kitchen='L_KITCHEN',floorMap='M_INNER';
+    insertRows(seed.db,'entity_keys',[floor,kitchen].map(id=>({branch_id:BRANCH,id,kind:'location'})));
+    insertRows(seed.db,'locations',[
+      loc(floor,{name:'无名称线索的容器',kind:'other',parent_location_id:BLD,map_id:MAP_BLD}),
+      loc(kitchen,{kind:'room',parent_location_id:floor}),
+    ]);
+    insertRows(seed.db,'maps',[mapRow(floorMap,{container_location_id:floor})]);
+    seed.db.run('UPDATE locations SET parent_location_id=?,map_id=?,area_geometry_json=? WHERE id=?',[floor,floorMap,JSON.stringify({kind:'dimensions',widthM:12,heightM:8,quality:'confirmed',source:'story'}),ROOM]);
+    seed.db.run('UPDATE locations SET map_id=?,area_geometry_json=? WHERE id=?',[floorMap,JSON.stringify({kind:'dimensions',widthM:4,heightM:3,quality:'confirmed',source:'story'}),kitchen]);
+    const derived=deriveLayoutSites(createTableReadPort(seed.db),BRANCH),inner=entryOf(derived,floorMap),parent=entryOf(derived,MAP_BLD);
+    assert.equal(inner.kind,'floor');
+    assert.equal(inner.profile.profile.basis,'source-supported');
+    assert.ok(inner.extent.width>=12&&inner.extent.height>=8);
+    assert.ok(parent.extent.width>=inner.extent.width+1);
+    assert.ok(!derived.issues.some(i=>i.code==='PARENT_CAPACITY_CONFLICT'));
+    const task=buildSqlLayoutTask(seed.db,BRANCH,{anchor:{chatUid:IDS.chatA,branchId:BRANCH,baseRevision:0,baseStorageRevision:0},userText:'',assistantText:'',sourceSnapshot:[],layoutMaps:[MAP_BLD,floorMap],generationOptions:{workBatching:{mapBatches:1,characterBatches:1,evidenceBatches:1,outcomeBatches:1,extraRequests:1}}},TURN);
+    const scopes=scopeOf(task),parentScope=scopes.find(s=>s.map===task.catalogue.knownRefs.find(r=>r.id===MAP_BLD).alias),innerScope=scopes.find(s=>s.map===task.catalogue.knownRefs.find(r=>r.id===floorMap).alias);
+    const footprint=parentScope.baselineRooms.find(r=>r.id===task.catalogue.knownRefs.find(r=>r.id===floor).alias);
+    assert.deepEqual([footprint.w,footprint.h],[innerScope.extent.width,innerScope.extent.height]);
+    const hall=innerScope.baselineRooms.find(r=>r.id===task.catalogue.knownRefs.find(r=>r.id===ROOM).alias);
+    assert.deepEqual([hall.w,hall.h],[12,8]);
+    assert.equal(selectOne(seed.db,'locations',BRANCH,floor).kind,'other','派生绘图档案不篡改地点种类');
+    writeProfile(seed,floorMap,'outdoor');
+    assert.equal(entryOf(deriveLayoutSites(createTableReadPort(seed.db),BRANCH),floorMap).kind,'overview','作者选择继续优先');
+    seed.db.run('UPDATE maps SET scale_locked=1 WHERE id=?',[MAP_BLD]);
+    const locked=deriveLayoutSites(createTableReadPort(seed.db),BRANCH);
+    assert.equal(entryOf(locked,MAP_BLD).extent.width,24,'锁定父图不自动扩大');
+  } finally { seed.close(); }
+});
 
 // ───────────────────────── SITE01 · 复合驿站 ─────────────────────────
 

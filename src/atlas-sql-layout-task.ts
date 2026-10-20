@@ -18,10 +18,13 @@
 
 import { createTableReadPort, pageAllRows } from './atlas-db-readport.ts';
 import { collectMapLocations, LIMITS } from '../vendor/atlas-spatial/index.mjs';
+import { readMetricDimensions } from '../vendor/atlas-spatial/index.mjs';
+import { mergeLayoutConstraints } from './atlas-spatial-request.ts';
 import { collectTaskRefs } from './atlas-sql-task-refs.ts';
 import { buildStagePrompt } from './atlas-ops-prompts.ts';
 import { normalizeFrame, normalizeSqlMapFrame } from './atlas-spatial-frame.ts';
 import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
+import { workBatchSize } from './atlas-work-batching.ts';
 import { normalizeModelBatching, planningOutputTokens } from './atlas-model-batching.ts';
 import { stableHexHash } from './atlas-hash.ts';
 import {
@@ -278,6 +281,7 @@ function profileOf(map: SqlRow): string | null {
 
 const asText = (value: unknown): string | null => (typeof value === 'string' && value ? value : null);
 const asNumber = (value: unknown): number | null => (typeof value === 'number' && Number.isFinite(value) ? value : null);
+const normalizeArea=(value:unknown):SqlRow|null=>{try{const area=typeof value==='string'?JSON.parse(value):value;return area&&typeof area==='object'&&!Array.isArray(area)?area as SqlRow:null;}catch{return null;}};
 
 /**
  * 单张图的布局输入指纹（构建与保存两处共用同一条路径）。
@@ -299,16 +303,20 @@ function signatureForEntry(entry: Entry, routes: SqlRow[], maps:SqlRow[]): strin
   const authorIntent: LayoutSignatureAuthorIntent[] = [];
   for (const row of memberRows) {
     const precision = asText(row.coord_precision) ?? 'unknown';
+    const area=normalizeArea(row.area_geometry_json);
+    const dimensions=area?.quality==='confirmed'?readMetricDimensions(area):null;
     // 'layout' 是本轮生成器回写的估计落位，'unknown' 根本没有落位：
     // 两者都进指纹就会「自己写自己」，生成一次后立刻又判定失效。
-    if (precision === 'layout' || precision === 'unknown') continue;
+    const authoredPosition=precision!=='layout'&&precision!=='unknown';
+    if (!authoredPosition && !dimensions) continue;
     authorIntent.push({
       id: String(row.id),
-      precision,
-      gridX: asNumber(row.grid_x),
-      gridY: asNumber(row.grid_y),
-      uncertainty: asNumber(row.uncertainty_radius_cells),
+      precision:authoredPosition?precision:'unknown',
+      gridX: authoredPosition?asNumber(row.grid_x):null,
+      gridY: authoredPosition?asNumber(row.grid_y):null,
+      uncertainty: authoredPosition?asNumber(row.uncertainty_radius_cells):null,
       area: canonicalAuthoredArea(row.area_geometry_json),
+      dimensions,
     });
   }
   const owned = routes
@@ -422,6 +430,7 @@ export function deriveLayoutSites(tables: TableReadPort, branchId: string): Deri
     const profile = resolveSpatialProfile({
       map,
       container,
+      parentContainer: container ? locationById.get(String(container.parent_location_id)) ?? null : null,
       corridorEntityId: boundCorridorIdOf(map),
       members: ownForProfile,
       routes: routes.filter((row) => String(row.branch_id ?? branchId) === branchId
@@ -498,11 +507,35 @@ export function deriveLayoutSites(tables: TableReadPort, branchId: string): Deri
     }
     return seen.size;
   };
+  // Only fresh, uncalibrated estimates may grow to fit their registered child
+  // spaces. A nested floor must not inherit an arbitrary 8 m footprint while
+  // containing a confirmed 12 m hall. Saved/authoritative geometry stays fixed.
+  const expandable = (entry: Entry) => entry.kind === 'floor'
+    && entry.spaceSize?.resolution.source === 'first-estimate'
+    && !(finite(entry.map.meters_per_cell) && entry.map.meters_per_cell > 0)
+    && !entry.map.scale_locked && !hasScene(entry.map);
+  for (const entry of [...entries].sort((a,b)=>entryDepth(b)-entryDepth(a)||byId(a.mapId,b.mapId))) {
+    if (!expandable(entry) || entry.own.length === 0) continue;
+    const sizes = entry.own.map(row => {
+      const known = locationSpaceSize({maps, locations, locationId:String(row.id), branchId});
+      const child = entries.find(child => child.kind === 'floor' && child.container?.id === row.id && child.own.length > 0);
+      return known ? [known.widthM, known.heightM] : child ? [child.extent.width, child.extent.height] : [8, 8];
+    });
+    const perSide = Math.ceil(sizes.length / 2);
+    const minW = Math.max(...sizes.map(size=>size[0])) * perSide + 1;
+    const minH = Math.max(...sizes.map(size=>size[1])) * 2 + 3;
+    entry.extent = {...entry.extent, width:Math.max(entry.extent.width,minW), height:Math.max(entry.extent.height,minH)};
+    entry.spaceSize = resolveMapSpaceSize({maps,locations,mapRow:entry.map,branchId,firstEstimate:{widthM:entry.extent.width,heightM:entry.extent.height}});
+  }
   for(const child of [...entries].sort((a,b)=>entryDepth(a)-entryDepth(b)||byId(a.mapId,b.mapId))){
     if(child.kind!=='floor'||child.spaceSize?.resolution.source!=='first-estimate'||finite(child.map.meters_per_cell)&&child.map.meters_per_cell>0||child.map.scale_locked||hasScene(child.map))continue;
     const parent=entries.find(entry=>entry.mapId===child.container?.map_id&&entry.kind==='floor');
     if(!parent||!child.container)continue;
-    const planned=baselineFloorRooms(parent.own,parent.extent,id=>String(id),id=>locationSpaceSize({maps,locations,locationId:id,branchId}));
+    const planned=baselineFloorRooms(parent.own,parent.extent,id=>String(id),id=>{
+      const known=locationSpaceSize({maps,locations,locationId:id,branchId});
+      const nested=entries.find(entry=>entry.kind==='floor'&&entry.container?.id===id&&entry.own.length>0);
+      return known??(nested?{widthM:nested.extent.width,heightM:nested.extent.height}:null);
+    });
     const footprint=planned.find(room=>room.id===child.container!.id);
     if(!footprint)continue;
     child.extent={width:footprint.w,height:footprint.h,units:'meters'};
@@ -600,19 +633,25 @@ export function buildSqlLayoutTask(
 
   const config=normalizeModelBatching(input.generationOptions?.batching);
   const retryLimit=input.layoutBatchMapLimit;
-  const batchLimit=Math.min(config.mapsPerBatch||ATLAS_RUNTIME_LIMITS.layoutMapsPerBatch,
-    typeof retryLimit==='number'&&Number.isSafeInteger(retryLimit)&&retryLimit>0?retryLimit:ATLAS_RUNTIME_LIMITS.layoutMapsPerBatch);
+  const work=input.generationOptions?.workBatching;
+  const plannedSize=work?workBatchSize(chosen.length,work.mapBatches):Infinity;
+  const batchLimit=Math.min(plannedSize,config.mapsPerBatch||Infinity,ATLAS_RUNTIME_LIMITS.operationsPerResponse,
+    typeof retryLimit==='number'&&Number.isSafeInteger(retryLimit)&&retryLimit>0?retryLimit:Infinity);
   const outputBudget=Math.max(0,planningOutputTokens(input.generationOptions)-ATLAS_RUNTIME_LIMITS.batchOutputReserveTokens);
   const first=chosen[0],selected:Entry[]=[];
-  let estimatedTokens=0,inputChars=0,estimatedRefs=0;
+  let estimatedTokens=0,estimatedRefs=0;
   for(const entry of chosen){
-    if(entry.kind!==first.kind||depth(entry)!==depth(first)||selected.length>=batchLimit)continue;
+    if((!work&&(entry.kind!==first.kind||depth(entry)!==depth(first)))||selected.length>=batchLimit)continue;
     const scene=normalizeFrame(entry.map.frame_json).atlasScene as SqlRow|undefined;
     const savedChars=JSON.stringify(scene?.constraints??{}).length;
     const tokens=Math.max(192+entry.own.length*(entry.kind==='floor'?112:72),Math.ceil(savedChars/2));
-    const chars=JSON.stringify(entry.own).length+savedChars,refs=entry.own.length+1;
-    if(selected.length&&(estimatedTokens+tokens>outputBudget||inputChars+chars>ATLAS_RUNTIME_LIMITS.batchPromptChars||estimatedRefs+refs>ATLAS_RUNTIME_LIMITS.refCatalogMaxEntries))continue;
-    selected.push(entry);estimatedTokens+=tokens;inputChars+=chars;estimatedRefs+=refs;
+    const refs=entry.own.length+1;
+    if(selected.length&&(estimatedTokens+tokens>outputBudget||estimatedRefs+refs>ATLAS_RUNTIME_LIMITS.refCatalogMaxEntries))continue;
+    selected.push(entry);estimatedTokens+=tokens;estimatedRefs+=refs;
+  }
+  if(work&&selected.length<plannedSize){
+    report?.issues.push({code:'LAYOUT_BATCH_CAPACITY',path:'$.layout',message:'当前计划批次装不下完整目标；请增加地图分批数，或提高连接输出容量。没有额外发送或丢弃目标。',severity:'warning',retryable:true});
+    return null;
   }
   const selectedIds=new Set(selected.map(entry=>entry.mapId));
   const remaining=chosen.filter(entry=>!selectedIds.has(entry.mapId)).map(entry=>entry.mapId);
@@ -674,6 +713,10 @@ export function buildSqlLayoutTask(
     const sceneLayout = scene && typeof scene.layout === 'object' && scene.layout !== null && !Array.isArray(scene.layout)
       ? (scene.layout as SqlRow)
       : null;
+    const savedRequest=frame.atlasLayoutRequest && typeof frame.atlasLayoutRequest==='object' && !Array.isArray(frame.atlasLayoutRequest)?frame.atlasLayoutRequest as SqlRow:null;
+    const sceneConstraints=scene?.constraints && typeof scene.constraints==='object' && !Array.isArray(scene.constraints)?scene.constraints as SqlRow:null;
+    const requestConstraints=savedRequest?.spec && typeof savedRequest.spec==='object' && !Array.isArray(savedRequest.spec)?savedRequest.spec as SqlRow:null;
+    const retainedConstraints=requestConstraints?mergeLayoutConstraints(sceneConstraints,requestConstraints,false).spec:sceneConstraints;
     const baselineRooms = entry.standalone && container
       ? [{
         id: ref(container.id),
@@ -707,14 +750,14 @@ export function buildSqlLayoutTask(
         return known ? { ref: ref(id), name: row.name, w: known.widthM, h: known.heightM, source: known.source, referenceId: known.referenceId, furnishing } : null;
       })
       .filter((item): item is NonNullable<typeof item> => item !== null);
-    const parentEntry=container?derived.entries.find(e=>e.mapId===container.map_id):null;
-    const parentFrame=parentEntry?normalizeFrame(parentEntry.map.frame_json):null;
+    const drawnParent=container?derived.entries.find(e=>e.mapId===container.map_id):null;
+    const parentFrame=drawnParent?normalizeFrame(drawnParent.map.frame_json):null;
     const parentScene=parentFrame?.atlasScene as SqlRow|undefined;
     const parentLayout=parentScene?.layout as SqlRow|undefined;
     const parentShapes=parentLayout?[parentLayout.shapes,parentLayout.districts,parentLayout.rooms,parentLayout.buildings].flatMap(pool=>Array.isArray(pool)?pool:[]):[];
     const parentFootprint=parentShapes.find(shape=>shape.id===container?.id);
     const parentContext=parentFootprint?{
-      name:parentEntry!.map.name,units:parentScene?.units??'unknown',
+      name:drawnParent!.map.name,units:parentScene?.units??'unknown',
       footprint:{...parentFootprint,id:ref(container!.id)},
       siblings:parentShapes.filter(shape=>shape.id!==container?.id&&ref(shape.id)).slice(0,32).map(shape=>({...shape,id:ref(shape.id)})),
     }:null;
@@ -760,6 +803,7 @@ export function buildSqlLayoutTask(
       /** P12/R03 §19.3：父图要按这些尺寸投影子空间轮廓，不重新独立估计。 */
       childSpaces,
       parentContext,
+      hierarchy:{parentMap:ref(parentEntry(entry)?.mapId),depth:depth(entry),sharedSpace:ref(container?.id)},
       baselineRooms,
       locations: local.map((row) => ({
         ref: ref(row.id),
@@ -784,8 +828,9 @@ export function buildSqlLayoutTask(
       items: items.filter(row=>localIds.has(String(row.location_id??'')) && !row.holder_character_id && !row.container_item_id && ref(row.id) && ref(row.location_id))
         .slice(0, LIMITS.items)
         .map(row=>({ref:ref(row.id),name:row.name,kind:row.kind,description:row.description,roomId:ref(row.location_id)})),
-      savedConstraints: aliasLayoutRefs(scene?.constraints ?? null, catalogue.knownRefs),
-      layoutIssues: aliasLayoutRefs(sceneLayout?.issues ?? [], catalogue.knownRefs),
+      savedConstraints: aliasLayoutRefs(retainedConstraints, catalogue.knownRefs),
+      constraintStatus: savedRequest?(savedRequest.status??'pending'):'saved',
+      layoutIssues: aliasLayoutRefs([...(Array.isArray(sceneLayout?.issues)?sceneLayout.issues:[]),...(Array.isArray(savedRequest?.issues)?savedRequest.issues:[])], catalogue.knownRefs),
     };
   });
   const pendingIds = pending.map((entry) => entry.mapId);
@@ -812,6 +857,7 @@ export function buildSqlLayoutTask(
       '合理陈设可以按场所用途补全（estimated），不要求正文逐项点名。',
     ].join('\n'),
   });
+  if(work)request.messages[1].content+='\n【整组地图规划】本批可同时包含不同种类和多层父子地图；一次返回所有列出地图的约束。hierarchy 标明父图与共享空间。父子共用 childSpaces/spaceSize 尺寸，程序从父到子求解坐标、继承轮廓；不为每层再请求，不输出独立坐标或改变父子归属。';
   request.messages[1].content += '\n每个操作外层只含 op、ref、data 和可选 why。op 固定 map.layout.request；ref 使用本图 map 引用；data 包含给定 kind 和 spec。下面提供本图完整合法 JSON 示例。幅面用程序给定 extent。'
     + '\noverview 的 spec 可含 surface、zones、links、features。zone 用 id、name、role、size，可选 sector 与 near。role 取 city/settlement/forest/water/mountain/ruins/district/campus/land/other；size 取 small/medium/large；sector 取八方向或 center。link 的 id 必须是已登记路线引用。feature 用局部 id、type、可选 zoneId 和 density；density 取 low/medium/high，type 取 forest_texture/ridge/shore/building_cluster/road_texture/ruins_scatter/watercourse。'
     + 'overview 的 zone 必须是本图直属地点或目录里已有的代理入口；links 只能用目录中已登记的路线引用；feature 只是本图局部装饰，永远不产生新实体、也不产生新道路。'
@@ -834,6 +880,7 @@ export function buildSqlLayoutTask(
     request.messages[1].content+='\n【本图合法 JSON 外层示例；按资料补齐 contents，不照搬为空布局】\n'+JSON.stringify({op:'map.layout.request',ref:scope.map,data:{kind:'floor',spec:{rooms:scope.baselineRooms,contents:[],actors:scope.actors.map(a=>({id:a.ref,roomId:a.roomId})),items:[]}},why:'依据已登记空间生成估计布局'});
   }
   request.messages[1].content += '\n普通阅览桌用 type="table"，椅子单独用 type="chair"；reading 是桌子加四把椅子的整套组合，占地 w/h 均至少 2 米，不能用于 2×1 米的单张桌子。所有陈设用正数 w/h，完整占地必须装进房间。';
+  request.messages[1].content += '\nitems[].on 只能绑定本房间中具有支撑面的 table/desk/shelf/cabinet（reading 组合的桌面也可）。不能把物品绑定到 chair/bed/doorway/decor 上，也不能把椅子本身作为物品放在另一把椅子上。资料没有支撑关系时省略该物品绑定，由程序按真实归属放置地面标记，不要猜测它在桌上。';
   request.messages[1].content += '\n多房间 floor 保留中央走廊，默认 corridorWidth=2；估计房间必须适合当前幅面，side=north 或 south。同侧多个房间的宽度与间隔合计也必须装得下。childSpaces 的已知宽高不得缩小来凑布局；装不下时说明尺寸冲突。单间房直接沿用完整 baselineRooms，不缩成幅面的 75%，不另扣中央走廊。';
   for(const scope of scopes.filter(s=>s.kind==='overview')){
     request.messages[1].content+='\n【本图合法 overview JSON 外层示例；按资料填写合法 zones/links/features】\n'+JSON.stringify({op:'map.layout.request',ref:scope.map,data:{kind:'overview',spec:{surface:'mixed',zones:[],links:[],features:[]}},why:'依据已登记空间生成估计布局'});
@@ -854,6 +901,7 @@ export function buildSqlLayoutTask(
   if (hasSpatialCapability(CAPABILITY_SPATIAL_PROFILE)) request.messages[1].content += '\n' + SPATIAL_PROFILE_PROMPT;
   request.messages[1].content += '\noverview 的水系 feature 必须为 {"id":"本图局部水系ID","type":"watercourse","zoneId":"本图已登记水域引用（可选）","fromSector":"north","toSector":"south","widthClass":"narrow/medium/wide"}。fromSector/toSector 取 north/northeast/east/southeast/south/southwest/west/northwest 且不同；不要仅写 zoneId/density 而省略起终方向。方向是估计布局，不能标成已测量事实。';
   request.messages[1].content += '\n更新布局时，同一实物必须沿用 savedConstraints 的既有局部 id，不得换 id 重复添加。layoutIssues 是旧图未放下的陈设：按正文校正估计尺寸；若旧约束重复描述同一座椅或柜子，保留一个既有 id，用 spec.deletes={"contents":[重复的局部陈设id]} 显式清理重复约束，并同步 actors.near。不要删除已确认的锁定结构。';
+  request.messages[1].content += '\nsavedConstraints 同时包含已保存场景及上次失败/待处理请求的有效约束。constraintStatus=failed/pending 时，继续修正这些约束并沿用其中 ID，不能当作从未规划过而再建一套陈设；原约束不会因失败自动清空。layoutIssues 给出上次失败原因。';
   request.messages[1].content += '\n禁止把载具画成固定地块、城市分区或地理轮廓；载具的行程与停靠由引擎单独投影。只绘制本世界资料支持的水系、山脉、城墙；示例地图和通用模板中的地名与地形不能直接搬入另一个世界。未知地理关系保持估计或未知，不编造原文没有的确定地理事实。';
   // P13/R03 §20：把**实际采用的绘图档案**翻译成模型能执行的禁区。档案是"这张图画成什么"的
   // 显式决定，不能只躺在 scope JSON 里让模型自己悟——模板的 forbidden 必须逐条进提示词。

@@ -24,7 +24,8 @@ import {
 import { DEFAULT_SQL_PROMPT_SEGMENTS, buildSqlCompatiblePrompt } from './atlas-sql-prompts.ts';
 import { PROMPT_POLICY_VERSION } from './atlas-prompt-layers.ts';
 import { SPATIAL_CAPABILITIES } from './atlas-world-contract.ts';
-import { DEFAULT_MODEL_BATCHING, MODEL_BATCHING_LIMITS, normalizeModelBatching, validModelBatching, type ModelBatchingSettings } from './atlas-model-batching.ts';
+import { DEFAULT_WORK_BATCHING, normalizeWorkBatching, validWorkBatching, type WorkBatchingSettings } from './atlas-work-batching.ts';
+import { DEFAULT_MODEL_BATCHING, normalizeModelBatching, validModelBatching, type ModelBatchingSettings } from './atlas-model-batching.ts';
 
 /**
  * C02 / E01：推进输出协议的类型。
@@ -312,6 +313,7 @@ export interface AtlasServerSettingsV2 {
   rpmLimit: number;
   /** 0 means combine compatible work up to the connection's estimated capacity. */
   modelBatching?: ModelBatchingSettings;
+  workBatching?: WorkBatchingSettings;
   /** 0.9.22 推演是否附带世界书资料块（被供应商审核拦截时的逃生门；缺省 true）。 */
   loreSupplementEnabled?: boolean;
   /** 运行时为 table-delta-v1；v1/v2 仅兼容旧设置读取，schemaVersion:2 是设置存档版本。 */
@@ -389,7 +391,7 @@ export type AtlasSettingsCommand =
   | { action: "replace.save"; preset: { id?: string; name: string; start: string; end: string; enabled?: boolean } }
   | { action: "replace.delete"; id: string }
   | { action: "replace.reset" }
-  | { action: "runtime.update"; autoCommit?: boolean; rpmLimit?: number; loreSupplementEnabled?: boolean; worldTurnProtocol?: AtlasWorldTurnProtocol; modelBatching?: ModelBatchingSettings };
+  | { action: "runtime.update"; autoCommit?: boolean; rpmLimit?: number; loreSupplementEnabled?: boolean; worldTurnProtocol?: AtlasWorldTurnProtocol; modelBatching?: ModelBatchingSettings; workBatching?: WorkBatchingSettings };
 
 // ---------------------------------------------------------------------------
 // 基础工具
@@ -486,6 +488,7 @@ export function createDefaultSettingsV2(): AtlasServerSettingsV2 {
     autoCommit: true,
     rpmLimit: 30,
     modelBatching: { ...DEFAULT_MODEL_BATCHING },
+    workBatching: { ...DEFAULT_WORK_BATCHING },
     loreSupplementEnabled: true,
     // R06 / D-16：推进输出协议。0.9.57 起**新装默认 = table-delta-v1**（三表行增量）；
     // 旧 v1/v2 与非法值在读取时统一规范为 table-delta-v1；schemaVersion:2 是设置存档版本。
@@ -638,6 +641,7 @@ export function sanitizeSettingsV2(raw: unknown, deps: AtlasSettingsDeps = {}): 
     autoCommit: typeof record.autoCommit === "boolean" ? record.autoCommit : true,
     rpmLimit: isFiniteIntIn(record.rpmLimit, MIN_RPM, MAX_RPM) ? record.rpmLimit : 30,
     modelBatching: normalizeModelBatching(record.modelBatching),
+    workBatching: normalizeWorkBatching(record.workBatching),
     loreSupplementEnabled: typeof record.loreSupplementEnabled === "boolean" ? record.loreSupplementEnabled : true,
     // R06：推进协议（非法值 → 缺省 v2）
     worldTurnProtocol: normalizeWorldTurnProtocol(record.worldTurnProtocol),
@@ -1031,9 +1035,13 @@ export function applySettingsCommand(
     }
     case "runtime.update": {
       const next: AtlasServerSettingsV2 = { ...settings };
+      if(command.workBatching!==undefined){
+        if(!validWorkBatching(command.workBatching))return fail(settings,'INVALID_PAYLOAD','各类工作的分批数必须为正整数，额外请求额度必须为非负整数。');
+        next.workBatching=normalizeWorkBatching(command.workBatching);
+      }
       if(command.modelBatching!==undefined){
-        if(!validModelBatching(command.modelBatching))return fail(settings,'INVALID_PAYLOAD',`分批上限必须为整数：人物 0..${MODEL_BATCHING_LIMITS.charactersPerBatch}，地图 0..${MODEL_BATCHING_LIMITS.mapsPerBatch}；0 表示自动合批。`);
-        next.modelBatching={...command.modelBatching};
+        if(!validModelBatching(command.modelBatching))return fail(settings,'INVALID_PAYLOAD','人物、地图与每次操作请求上限必须为非负安全整数；0 表示不限制。');
+        next.modelBatching=normalizeModelBatching({...command.modelBatching,requestsPerOperation:command.modelBatching.requestsPerOperation??settings.modelBatching?.requestsPerOperation??0});
       }
       if (command.autoCommit !== undefined) {
         if (typeof command.autoCommit !== "boolean") return fail(settings, "INVALID_PAYLOAD", "自动提交必须是布尔值。");
@@ -1290,7 +1298,7 @@ export interface AtlasSettingsView {
   legacyWorldTurnProtocol: AtlasLegacyWorldTurnProtocolNotice | null;
   rpmLimit: number;
   modelBatching: ModelBatchingSettings;
-  modelBatchingLimits: ModelBatchingSettings;
+  workBatching: WorkBatchingSettings;
   /** 0.9.16 内容替换规则库（含预制 + 手动，同库平等）。 */
   contentReplaceRules: AtlasContentReplaceRule[];
 }
@@ -1374,7 +1382,7 @@ export function settingsViewV2(settings: AtlasServerSettingsV2): AtlasSettingsVi
     legacyWorldTurnProtocol: legacyWorldTurnProtocolNotice(settings.worldTurnProtocol),
     rpmLimit: settings.rpmLimit,
     modelBatching: normalizeModelBatching(settings.modelBatching),
-    modelBatchingLimits: { ...MODEL_BATCHING_LIMITS },
+    workBatching: normalizeWorkBatching(settings.workBatching),
     contentReplaceRules: settings.contentReplaceRules ?? [],
   };
 }

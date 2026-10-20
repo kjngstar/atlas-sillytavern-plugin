@@ -14,11 +14,12 @@ export function referencePresetDocument(settings={},preferences={},defaultPrompt
   const fallback=pair(existingC.has(settings.activeApiPresetId)?settings.activeApiPresetId:connections[0].id,existingP.has(settings.activePromptPresetId)?settings.activePromptPresetId:promptPresets[0].id);
   const assignments={};for(const task of ['initialize','advance','repair']){const saved=preferences.assignments?.[task];assignments[task]=saved&&existingC.has(saved.connectionId)&&existingP.has(saved.promptPresetId)?clone(saved):clone(fallback);}
   const active=preferences.active&&existingC.has(preferences.active.connectionId)&&existingP.has(preferences.active.promptPresetId)?clone(preferences.active):fallback;
-  return {kind:'atlas-ui-presets',version:1,connections,promptPresets,active,assignments,modelBatching:clone(settings.modelBatching??{charactersPerBatch:0,mapsPerBatch:0})};
+  return {kind:'atlas-ui-presets',version:1,connections,promptPresets,active,assignments,modelBatching:{charactersPerBatch:0,mapsPerBatch:0,requestsPerOperation:0,...clone(settings.modelBatching??{})},workBatching:{mapBatches:1,characterBatches:1,evidenceBatches:1,outcomeBatches:1,extraRequests:1,...clone(settings.workBatching??{})}};
 }
 
 export function referenceSettingsCommands(doc,settings={},action={}) {
   const commands=[];
+  if(["work-batching","import"].includes(action.kind)&&doc.workBatching&&(action.kind==='work-batching'||JSON.stringify(doc.workBatching)!==JSON.stringify(settings.workBatching)))commands.push({action:"runtime.update",workBatching:clone(doc.workBatching),...(action.kind==="work-batching"?{modelBatching:{...settings.modelBatching,charactersPerBatch:0,mapsPerBatch:0,requestsPerOperation:settings.modelBatching?.requestsPerOperation??0}}:{})});
   if(['batching','import'].includes(action.kind)&&doc.modelBatching&&JSON.stringify(doc.modelBatching)!==JSON.stringify(settings.modelBatching))commands.push({action:'runtime.update',modelBatching:clone(doc.modelBatching)});
   const selected=action.type==='connection'?doc.connections.find(x=>x.id===action.id):doc.promptPresets.find(x=>x.id===action.id);
   if(action.kind==='save'&&!selected)throw Error('预设不存在');

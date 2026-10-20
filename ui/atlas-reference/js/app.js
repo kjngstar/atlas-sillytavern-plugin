@@ -217,8 +217,8 @@ function taskCard(t){return `<button class="task-card" style="--c:${t.c}" data-s
 function receiptLayers(r){const p=r.report;if(!p)return '';
   return `<ul class="receipt-layers"><li class="rl-core">${esc(p.core.label)}</li><li class="rl-layout rl-${esc(p.layout.state)}">${esc(p.layout.label)}</li><li class="rl-gaps">${esc(p.gaps.label)}</li></ul>`;}
 function receiptBatches(detail){
- const attempts=detail?.attempts;if(!Array.isArray(attempts))return '';
- const parts=[];for(const [kind,label,unit] of [['characters','人物','位'],['maps','地图','张']]){
+ const attempts=Array.isArray(detail?.attempts)?detail.attempts:[];
+ const plan=detail?.receipt?.requestPlan,parts=[];if(plan?.usage&&Number.isSafeInteger(plan.usage.transports))parts.push(`实际发送 ${plan.usage.transports} 次；额外 ${plan.usage.extra}/${plan.extraLimit} 次`);for(const [kind,label,unit] of [['characters','人物','位'],['maps','地图','张']]){
   const batches=attempts.filter(a=>a.target_kind===kind&&Number.isSafeInteger(a.target_count)&&a.target_count>0).map(a=>a.target_count);
   if(batches.length)parts.push(`${label} ${batches.length} 批（${batches.join(' / ')} ${unit}）`);
  }return parts.length?`<p class="scope-note">本轮合批：${esc(parts.join('；'))}</p>`:'';
@@ -245,7 +245,7 @@ function renderDock(){
  const engine=D.meta.engine??{};$('#nextDemo').disabled=!!engine.busy||!engine.hasChat||!engine.sqlEnabled||engine.bound&&!engine.enabled;$('#nextDemo').textContent=engine.busy?enginePhaseText(engine):engine.bound?'立即推演':'建立当前世界';
 }
 function pageHeader(title,sub,extra=''){return `<div class="workspace-header"><div><span class="workspace-eyebrow">ATLAS · ${esc(D.meta.worldName)}</span><h2>${esc(title)}</h2><p>${esc(sub)}</p></div>${extra}</div>`;}
-function renderPage(){const el=$('#workspacePage');el.hidden=state.page==='map';$('#viewport').classList.toggle('page-open',state.page!=='map');
+function renderPage(){presetUI.captureState();const el=$('#workspacePage');el.hidden=state.page==='map';$('#viewport').classList.toggle('page-open',state.page!=='map');
  if(state.page==='map'){el.innerHTML='';return;}
  const descriptions={cast:'查看当前世界已记录的人物；选择卡片查看详情与位置。',items:'查看放置于地点或由人物持有的物品。',msgs:'查看已送达、传播中与待核实的消息。',sim:'查看后台准备、旅行与消息传播，选择任务可联动地图。',time:'按回合查看世界发生过的事情。',lore:'浏览启用资料与地图、人物之间的关联。',diag:'所有问题汇总在同一时间线，可展开完整内容。',prefs:'自由编辑分段角色与内容，调整界面外观。'};
  el.innerHTML=pageHeader(names[state.page],descriptions[state.page],`<button class="action-btn" data-page="map">${icon('map')}返回地图</button>`);

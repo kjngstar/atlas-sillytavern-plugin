@@ -10,6 +10,7 @@ import { extractPayload, parseOperations } from './atlas-ops-parser.ts';
 import { buildStagePrompt } from './atlas-ops-prompts.ts';
 import { runSqlResume } from './atlas-sql-resume.ts';
 import { bindModelBudget, createGenerationBudget } from './atlas-sql-generation-budget.ts';
+import { normalizeGenerationOptions } from './atlas-model-batching.ts';
 import { runSqlRetry } from './atlas-sql-session.ts';
 import { ATLAS_SEMANTIC_OPS } from './atlas-ops-contract.ts';
 import type { SqlSession } from './atlas-sql-session.ts';
@@ -39,7 +40,7 @@ async function retry(session: SqlSession, input: RetryInput): Promise<RetryResul
   const receipt = JSON.parse(String(row.receipt_json)) as TurnReceipt;
   const rejected = receipt.groups.filter(g => g.status === 'rejected' || g.status === 'blocked');
   if (!rejected.length) return runSqlResume(session,input);
-  const history = JSON.parse(String(row.decisions_json)) as { scene_maps?:boolean; operations: ParsedOperation['value'][]; operation_meta?: Array<Omit<ParsedOperation, 'value'>>; known_refs?: KnownRef[]; operation_context?: OperationContext[] };
+  const history = JSON.parse(String(row.decisions_json)) as { work_usage?:import("./atlas-sql-generation-budget.ts").WorkPlanUsage;scene_maps?:boolean; operations: ParsedOperation['value'][]; operation_meta?: Array<Omit<ParsedOperation, 'value'>>; known_refs?: KnownRef[]; operation_context?: OperationContext[] };
   if (!history.known_refs || !history.operation_meta || history.operation_meta.length !== history.operations.length) throw new AtlasDbError('SQL_RETRY_HISTORY_MISSING', '旧 SQL 回合缺少操作身份或原短引用记录，不能安全补交；请回退后重新推演，原存档未修改', {});
   if (!session.modelPort) throw new AtlasDbError('MODEL_PORT_MISSING', '补交没有活动模型端口', {});
   let operations = history.operations.map((value, index) => ({ ...history.operation_meta![index], value }));
@@ -80,7 +81,10 @@ async function retry(session: SqlSession, input: RetryInput): Promise<RetryResul
   const request = buildStagePrompt({ phase: 'repair', allowedOps, repairRefs: collectEntityRefs(tables, session.branchId, knownRefs.filter(ref=>!ref.alias.startsWith('new:'))).join('\n'),
     repairTickets: tickets.promptLines.join('\n'), sourceSnapshot: sources, batchId: 'retry_' + tickets.batchId, repairOfBatchId: tickets.batchId });
   request.anchor = anchor; request.sourceSnapshot = sources;
-  const response = await bindModelBudget(session.modelPort, createGenerationBudget(), 'repair').request(request);
+  const generationOptions=normalizeGenerationOptions(await session.modelPort.generationOptions?.());
+  assertCurrent();
+  const budget=createGenerationBudget({limit:generationOptions.batching.requestsPerOperation??0,workBatching:generationOptions.workBatching,workUsage:history.work_usage??undefined});
+  const response = await bindModelBudget(session.modelPort, budget, 'repair').request(request);
   assertCurrent();
   if (revision !== session.repo.internal.currentRevision() || storageRevision !== session.repo.storageRevision) throw new AtlasDbError('STALE_BASE', '模型补交等待期间快照已变化，候选不发布', {});
   const payload = extractPayload(response.text);
@@ -95,7 +99,7 @@ async function retry(session: SqlSession, input: RetryInput): Promise<RetryResul
     seedRefs:original.scope.all().filter(ref=>!failedIds.has(ref.declaredByOpId ?? '')) });
   const groups = buildAtomicGroups(compiled.results.map(r => ({ opId: r.opId, ...r.result })));
   const result = await runSqlRetry(session, { branchId: session.branchId, chatUid: session.chatUid, turnId: input.turnId,
-    currentHeadTurnId: input.turnId, attemptId: `retry_${storageRevision}`, groups: groups.groups, clockS: receipt.clockAfterS, sceneMaps:history.scene_maps, replacementOperations:corrected.operations, isCurrent: input.isCurrent });
+    currentHeadTurnId: input.turnId, attemptId: `retry_${storageRevision}`, groups: groups.groups, clockS: receipt.clockAfterS, sceneMaps:history.scene_maps, replacementOperations:corrected.operations, workUsage:budget.workUsage(), workBatching:generationOptions.workBatching, isCurrent: input.isCurrent });
   const updated = result.coreSaved ? JSON.parse(String(queryBound(session.repo.db, 'SELECT receipt_json FROM turns WHERE id=?', [input.turnId])[0].receipt_json)) as TurnReceipt : receipt;
   return { receipt: updated, coreSaved: result.coreSaved, issues: [...issues, ...compiled.issues, ...groups.issues, ...result.issues] };
 }
