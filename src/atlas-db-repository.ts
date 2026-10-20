@@ -1392,7 +1392,7 @@ export function createSqlRepository(options: RepositoryOptions) {
         duration_ms: Math.max(0, finished - started),
       });
     };
-    const turnBudget = createGenerationBudget({limit:generationOptions.batching.requestsPerOperation??0,workBatching:generationOptions.workBatching});
+    const turnBudget = createGenerationBudget({diagnosticAnchor:input.anchor,limit:generationOptions.batching.requestsPerOperation??0,workBatching:generationOptions.workBatching});
     const modelPort = options.modelPort ? bindModelBudget(options.modelPort, turnBudget) : null;
     let explicitNoop = false;
     let responseIncomplete = false;

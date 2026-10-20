@@ -23,6 +23,20 @@
       ],
       "linesRemoved": [],
       "currentSha256": "0b13be32695a6e973526f0c240f98dd2462b10d1f229f234f96cd2eae0c62e7f"
+    },
+    {
+      "file": "css/preview.css",
+      "commit": "55c4048",
+      "commitSubject": "fix: preserve spatial dimensions and nested layouts (0.9.96-rc.1)",
+      "reason": "补登记 0.9.96 已发布的窄屏关闭按钮修复：保留关闭按钮、隐藏最小化和最大化按钮；本补丁只补审计记录，不改样式。",
+      "linesAdded": [
+        " #atlasDemo .tb-right{gap:7px;}#atlasDemo .win-ctl{display:flex;margin-left:0;}",
+        " #atlasDemo .win-ctl .wc:not([data-act=\"close\"]){display:none;}"
+      ],
+      "linesRemoved": [
+        " #atlasDemo .tb-right{gap:7px;}#atlasDemo .win-ctl{display:none;}"
+      ],
+      "currentSha256": "1d13dd35f72e159b93482bc9f8457e8bdf3b9e89f95a935bc8febcc36743309f"
     }
   ]
 }

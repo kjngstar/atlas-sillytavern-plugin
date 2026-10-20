@@ -62,9 +62,23 @@ export function emptyReferenceData(meta = {}) {
     LOCATIONS:[],CAST:[],ITEMS:[],MESSAGES:[],TASKS:[],EVENTS:[],RECEIPTS:[],LORE:[],DIAGNOSTICS:[],FLOWS:{},JOURNEYS:{},PROMPTS:[]};
 }
 
-export function referenceDiagnostics(rows=[]){return rows.map((l,i)=>{
+/** Last-error strings and database DTOs also pass this boundary before display/export. */
+function safeLogRecord(raw){
+  try{return JSON.parse(JSON.stringify(raw, (key,value)=>{
+    if(/^(?:apiKey|api_key|authorization|headers|requestHeaders|request|prompt|rawResponse|responseText|endpoint)$/i.test(key))return undefined;
+    return typeof value==='string'?value.replace(/sk-[A-Za-z0-9_-]{4,}/g,'[redacted]')
+      .replace(/Bearer\s+[A-Za-z0-9._~+/=-]{4,}/gi,'Bearer [redacted]')
+      .replace(/((?:api[_-]?key|authorization|password|secret)\s*["']?\s*[:=]\s*["']?)[^\s"',;}]+/gi,'$1[redacted]')
+      .replace(/https?:\/\/[^\s"'<>]+/gi,'[endpoint]'):value;
+  }));}catch{return {code:'DIAGNOSTIC_UNREADABLE',level:'warn',message:'日志条目无法序列化'};}
+}
+export function referenceDiagnostics(rows=[]){return rows.map((raw,i)=>{
+  const l=safeLogRecord(raw)??{};
   const partial=l.kind==='failed_turn'&&l.status==='partial';
-  return {...l,id:l.logId??l.id??`log-${i}`,t:text(l.at??l.createdAt??''),
+  const original=l.at??l.createdAt??l.t;
+  const valid=(typeof original==='number'||typeof original==='string')&&Number.isFinite(new Date(original).getTime());
+  const at=valid?new Date(original).toISOString():l.observedAt??new Date().toISOString();
+  return {...l,id:l.logId??l.id??`log-${i}`,at,t:at,...(!valid?{observedAt:at,timestampSource:'observed'}:{}),
     level:l.level??(partial?'warn':l.kind==='issue'||l.kind==='failed_turn'?'error':'info'),
     code:l.code??(partial?'TURN_PARTIAL':l.kind==='failed_turn'?'TURN_FAILED':l.kind??'WORLD_LOG'),
     message:l.message??l.summary??(l.kind==='failed_turn'?`推演${partial?'部分提交':'失败'} · ${l.receipt?.issues?.length??l.issues?.length??l.issueCount??0} 项问题`:l.code??''),
@@ -477,7 +491,7 @@ export function projectReferenceData({state={},mapView,sceneView,catalogView,tas
   out.meta.initialNodeId=out.CAST.find(c=>c.id===out.meta.protagonistId)?.mapNodeId??out.ROOT.id;
   for(const node of nodes.values())for(const mark of node.marks)if(mark.type==='char'){const c=out.CAST.find(c=>c.id===mark.id);if(c){mark.c=c.c;mark.initial=c.initial;mark.hero=mark.id===out.meta.protagonistId;}}
   out.RECEIPTS=referenceReceipts(state,items(logsView));
-  out.DIAGNOSTICS=referenceDiagnostics([...items(logsView),...diagnostics,...(state.lastError?[typeof state.lastError==='string'?{message:state.lastError,code:'WORLD_ACTION_FAILED',level:'error'}:{...state.lastError,level:'error'}]:[])]);
+  out.DIAGNOSTICS=referenceDiagnostics([...items(logsView),...diagnostics,...(state.lastError?[typeof state.lastError==='string'?{message:state.lastError,code:'WORLD_ACTION_FAILED',level:'error',source:'ui'}:{...state.lastError,level:'error'}]:[])]);
   for(const node of nodes.values()){
     const projected=projectReferenceFlows(flowView,node);
     if(projected.flows.length)out.FLOWS[node.id]=projected.flows;

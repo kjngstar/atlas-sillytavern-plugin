@@ -17,6 +17,8 @@ import {
 } from "./atlas-contract.ts";
 // E03：表格增量契约的补充纪律段（§2.2 / §2.3）独立成文件，拼在「提交前核对」段尾部。
 import { TABLE_DELTA_DISCIPLINE_CONTENT } from "./atlas-prompt-discipline.ts";
+import { newDiagnosticRequestRef, observeDiagnostic, setDiagnosticSignalContext, type DiagnosticObserver, type DiagnosticContext } from './atlas-request-diagnostics.ts';
+import { atlasRefFingerprint } from './atlas-diagnostics.ts';
 
 /** A host adapter that ignores AbortSignal must still release the turn at the deadline. */
 function awaitResponse<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -353,6 +355,8 @@ export async function callAtlasWorldTurnApi(
   deps: {
     fetchFn?: typeof fetch;
     now?: () => number;
+    onDiagnostic?: DiagnosticObserver;
+    diagnosticContext?: DiagnosticContext;
     messagesOverride?: Array<{ role: string; content: string }>;
     responseTool?: { name: string; description: string; parameters: Record<string, unknown> };
     initialTransport?: () => { ok: boolean; reason?: string };
@@ -368,14 +372,38 @@ export async function callAtlasWorldTurnApi(
 ): Promise<AtlasApiCallResult | AtlasApiCallFailure> {
   const now = deps.now ?? Date.now;
   const startedAt = now();
-  const fail = (code: AtlasErrorCode, message: string, retryable: boolean, status?: number): AtlasApiCallFailure => ({
+  const requestRef = newDiagnosticRequestRef();
+  const context = deps.diagnosticContext ?? {};
+  let failureStage = 'preparation';
+  let transportAttempt = 0;
+  let upstreamStatus: number | undefined;
+  let networkErrorName: string | undefined;
+  const diagnosticDetails: NonNullable<import('./atlas-diagnostics.ts').AtlasDiagnosticInput['details']> = {
+    ...context.details, mode: preset.connectionMode ?? 'custom', apiFormat: preset.apiFormat ?? 'openai',
+    module: 'atlas-api-client', function: 'callAtlasWorldTurnApi', modelRef: atlasRefFingerprint(preset.model), streamed: false,
+    ...(/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,95}$/.test(preset.model) && !/sk-|bearer|:\/\/|[a-f0-9]{32}/i.test(preset.model) ? { model: preset.model } : {}),
+  };
+  const diagnostic = (code: string, failed = false, errorCode?: string, status?: number, retryable = false) => observeDiagnostic(deps.onDiagnostic, {
+    ...context, requestRef, level: failed ? 'error' : 'info', source: 'model', code,
+    operation: 'generation', phase: failed ? failureStage : code === 'MODEL_REQUEST_STARTED' ? 'request' : code === 'MODEL_RESPONSE_HEADERS' ? 'headers' : 'response',
+    outcome: failed ? 'failed' : code === 'MODEL_REQUEST_STARTED' ? 'started' : 'success',
+    errorCode, httpStatus: status, durationMs: now() - startedAt,
+    ...(failed ? { retryable } : {}),
+    details: { ...diagnosticDetails, transportAttempt, modelRequests: transportAttempt,
+      ...(failed ? { failureStage, ...(networkErrorName ? { errorName: networkErrorName } : {}),
+        ...(errorCode === 'API_TIMEOUT' ? { cancelledBy: 'timeout' } : {}) } : {}) },
+  });
+  const fail = (code: AtlasErrorCode, message: string, retryable: boolean, status?: number): AtlasApiCallFailure => {
+    diagnostic('MODEL_REQUEST_FAILED', true, code, status ?? upstreamStatus, retryable);
+    return {
     ok: false,
     code,
     message,
     retryable,
     ...(typeof status === "number" ? { status } : {}),
     durationMs: now() - startedAt,
-  });
+    };
+  };
 
   const mode = preset.connectionMode ?? "custom";
   // main / profile 模式不走自定义端点（宿主适配 fetch 承接），URL 仅作占位供日志与代理识别
@@ -401,6 +429,7 @@ export async function callAtlasWorldTurnApi(
   const topP = typeof preset.topP === "number" ? preset.topP : 0.95;
 
   const timeoutMs = Math.min(Math.max(preset.timeoutMs ?? 30_000, 1_000), 1_200_000);
+  Object.assign(diagnosticDetails, { timeoutMs, maxTokens: maxTokens ?? 0, promptChars: bodyMessages.reduce((n, m) => n + m.content.length, 0), messageCount: bodyMessages.length });
   const fetchFn = deps.fetchFn ?? globalThis.fetch;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -444,6 +473,23 @@ export async function callAtlasWorldTurnApi(
     return { url: requestUrl, headers, body };
   };
 
+  const send = async (payload: ReturnType<typeof buildPayload>, retryKind: 'normal' | 'compatibility'): Promise<Response> => {
+    failureStage = 'request';
+    transportAttempt++;
+    Object.assign(diagnosticDetails, { requestChars: payload.body.length,
+      retryKind: retryKind === 'compatibility' ? 'compatibility' : context.details?.retryKind ?? 'normal' });
+    setDiagnosticSignalContext(controller.signal, { ...context, requestRef, details: { ...diagnosticDetails, transportAttempt } });
+    const transportStartedAt = now();
+    diagnostic('MODEL_REQUEST_STARTED');
+    const response = await awaitResponse(fetchFn(payload.url, {
+      method: 'POST', headers: payload.headers, body: payload.body, signal: controller.signal,
+    }), controller.signal);
+    upstreamStatus = preset.connectionMode === 'main' || preset.connectionMode === 'profile' ? undefined : response.status;
+    diagnosticDetails.headersMs = now() - transportStartedAt;
+    diagnostic('MODEL_RESPONSE_HEADERS', false, undefined, upstreamStatus);
+    return response;
+  };
+
   try {
     let response: Response;
     let rescueAttempted = false;
@@ -451,27 +497,32 @@ export async function callAtlasWorldTurnApi(
     // 「本该重试但没发」——失败路径会把它并进 message，绝不静默。
     let rescueDeniedReason: string | null = null;
     const initial = buildPayload(false);
+    failureStage = 'budget';
     const initialClaim = deps.initialTransport?.();
     if (initialClaim && !initialClaim.ok) return fail(ATLAS_ERROR_CODES.MODEL_BUDGET_EXHAUSTED, initialClaim.reason ?? '本轮传输预算已用尽', false);
     try {
-      response = await awaitResponse(fetchFn(initial.url, {
-        method: "POST",
-        headers: initial.headers,
-        body: initial.body,
-        signal: controller.signal,
-      }), controller.signal);
-    } catch {
+      response = await send(initial, 'normal');
+    } catch (error) {
+      networkErrorName = (error as Error)?.name;
       if (controller.signal.aborted) return fail(ATLAS_ERROR_CODES.API_TIMEOUT, `推演请求超过 ${timeoutMs}ms 超时。`, true);
       return fail(ATLAS_ERROR_CODES.SERVICE_OFFLINE, "无法连接推演服务，请检查网络或服务状态。", true);
     }
 
     const parseCall = async (resp: Response): Promise<{ text: string | null; gatewayError: string | null; rawText: string; emptyChoices: boolean; truncated: boolean; finishReason: string | null }> => {
+      failureStage = 'body';
+      const bodyStartedAt = now();
       let rawText = "";
+      let bodyReadFailed = false;
       try {
         rawText = typeof resp.text === "function" ? await awaitResponse(resp.text(), controller.signal) : JSON.stringify(await awaitResponse(resp.json(), controller.signal));
-      } catch {
+      } catch (error) {
+        bodyReadFailed = true;
+        networkErrorName = (error as Error)?.name;
         rawText = "";
       }
+      diagnosticDetails.bodyMs = now() - bodyStartedAt;
+      diagnosticDetails.responseChars = rawText.length;
+      if (!controller.signal.aborted && !bodyReadFailed) failureStage = 'parse';
       let payload: unknown = null;
       try {
         payload = JSON.parse(rawText);
@@ -482,6 +533,7 @@ export async function callAtlasWorldTurnApi(
       // stop / 缺失 / null 一律 false——不猜测其他厂商停止码，也不因为「正文里刚好
       // 有完整 JSON」就当成没截断（截断优先，见下面的检查顺序）。
       const finishReason = choiceFinishReason(payload);
+      if (finishReason) diagnosticDetails.finishReason = finishReason;
       const truncated = finishReason === "length";
       const text = extractAssistantText(payload, deps.responseTool?.name);
       if (text === null || text.trim().length === 0) {
@@ -523,19 +575,14 @@ export async function callAtlasWorldTurnApi(
       } else {
         const rescue = buildPayload(true);
         try {
-          const rescueResponse = await awaitResponse(fetchFn(rescue.url, {
-            method: "POST",
-            headers: rescue.headers,
-            body: rescue.body,
-            signal: controller.signal,
-          }), controller.signal);
+          const rescueResponse = await send(rescue, 'compatibility');
           status = rescueResponse.status;
           const rescueParsed = await parseCall(rescueResponse);
           if (rescueParsed.text !== null) {
             parsed = rescueParsed;
             rescueAttempted = true;
           }
-        } catch { /* 救场失败 → 落回原错误路径 */ }
+        } catch (error) { networkErrorName = (error as Error)?.name; /* 救场失败 → 落回原错误路径 */ }
       }
     }
 
@@ -626,6 +673,7 @@ export async function callAtlasWorldTurnApi(
         false,
       );
     }
+    diagnostic('MODEL_REQUEST_COMPLETED', false, undefined, mode === 'custom' ? status : undefined);
     return {
       ok: true,
       text,

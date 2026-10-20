@@ -398,7 +398,7 @@ export function createAtlasSessionApi(deps) {
         }
         if (requestSession) payload = { ...(body ?? {}), session: requestSession };
       }
-      const result = await logCall(method, path, () => innerApi.request(method, path, payload));
+      const result = await logCall(method, path, () => innerApi.request(method, path, payload), payload);
       const firstWorld = method === "POST" && path === "/worlds/ensure-starter" &&
         !result?.body?.session?.binding;
       try {

@@ -34,7 +34,7 @@ export async function runSqlResume(session: SqlSession, input: {turnId:string;is
       assertCurrent();
       const attempts:Array<Record<string,unknown>>=JSON.parse(String(row.attempts_json??'[]'));
       const history=JSON.parse(String(row.decisions_json));
-      const budget=createGenerationBudget({limit:generationOptions.batching.requestsPerOperation??0,workBatching:generationOptions.workBatching,workUsage:history.work_usage??undefined});
+      const budget=createGenerationBudget({diagnosticAnchor:anchor,limit:generationOptions.batching.requestsPerOperation??0,workBatching:generationOptions.workBatching,workUsage:history.work_usage??undefined});
       const backgroundPort=session.modelPort?logModelAttempts(bindModelBudget(session.modelPort,budget,'background'),session.now,entry=>{
         const finished=Number(entry.finished_wall_ms),started=Number(entry.started_wall_ms);
         attempts.push({id:`att_resume_${anchor.baseStorageRevision}_${attempts.length}`,...entry,duration_ms:Math.max(0,finished-started)});

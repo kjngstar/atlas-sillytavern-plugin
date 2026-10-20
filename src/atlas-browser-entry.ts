@@ -13,6 +13,8 @@
 
 export { createBrowserSqlHost } from './atlas-browser-sql-host.ts';
 export { createSqlModelPort } from './atlas-sql-model-port.ts';
+export { ATLAS_BUILD_INFO } from './atlas-build-info.ts';
+export { atlasDiagnosticContext, createAtlasApiDiagnosticLogger, emitAtlasIssueDiagnostics, diagnosticIssues, diagnosticSignalContext } from './atlas-request-diagnostics.ts';
 // U10/U11：世界动向摘要（纯函数，浏览器入口随 ui-core bundle 供给 index.js）。
 export { buildVisibleWorldSummarySync } from './atlas-world-summary.ts';
 

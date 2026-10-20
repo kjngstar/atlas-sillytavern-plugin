@@ -40,9 +40,16 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 
+// <define:__ATLAS_BUILD_INFO__>
+var init_define_ATLAS_BUILD_INFO = __esm({
+  "<define:__ATLAS_BUILD_INFO__>"() {
+  }
+});
+
 // node_modules/sql.js/dist/sql-wasm-browser.js
 var require_sql_wasm_browser = __commonJS({
   "node_modules/sql.js/dist/sql-wasm-browser.js"(exports, module) {
+    init_define_ATLAS_BUILD_INFO();
     var initSqlJsPromise = void 0;
     var initSqlJs3 = function(moduleConfig) {
       if (initSqlJsPromise) {
@@ -2184,6 +2191,7 @@ var DEFAULT_WORK_BATCHING;
 var init_atlas_work_batching = __esm({
   "src/atlas-work-batching.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     DEFAULT_WORK_BATCHING = {
       mapBatches: 1,
       characterBatches: 1,
@@ -2204,6 +2212,7 @@ var ATLAS_RUNTIME_LIMITS, ATLAS_FIELD_LIMITS, ACTION_PAYLOAD_REF_LIMIT, ACTION_D
 var init_atlas_runtime_limits = __esm({
   "src/atlas-runtime-limits.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     ATLAS_RUNTIME_LIMITS = {
       responseUtf8Bytes: 256 * 1024,
       operationsPerResponse: 64,
@@ -2313,6 +2322,7 @@ var PROGRAM_INTERNAL_MUTATION_TABLES, PROGRAM_ONLY_WRITE_TABLES, ATLAS_SEMANTIC_
 var init_atlas_ops_contract = __esm({
   "src/atlas-ops-contract.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_runtime_limits();
     PROGRAM_INTERNAL_MUTATION_TABLES = [
       "branches",
@@ -2514,6 +2524,7 @@ var FORMAT_SEGMENT, MINIMUM_HELP, PHASE_TASK;
 var init_atlas_ops_prompts = __esm({
   "src/atlas-ops-prompts.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_runtime_limits();
     init_atlas_ops_contract();
     FORMAT_SEGMENT = [
@@ -2699,6 +2710,7 @@ var CATALOG;
 var init_atlas_sql_refs = __esm({
   "src/atlas-sql-refs.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     CATALOG = [
       ["locations", "L", "location", 200],
       ["characters", "C", "character", 200],
@@ -2745,6 +2757,7 @@ function buildSqlForegroundRequest(tables, branchId, input, phase, turnId, froze
 var init_atlas_sql_model_context = __esm({
   "src/atlas-sql-model-context.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_ops_prompts();
     init_atlas_sql_refs();
   }
@@ -2758,6 +2771,7 @@ var ATLAS_LOCATION_KINDS, ATLAS_LOCATION_KINDS_SQL;
 var init_atlas_location_kinds = __esm({
   "src/atlas-location-kinds.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     ATLAS_LOCATION_KINDS = [
       "region",
       "city",
@@ -3480,6 +3494,7 @@ var ATLAS_SCHEMA_VERSION, SCHEMA_TABLE_COUNTS, C_COLUMNS, ATLAS_TABLE_COLUMNS, C
 var init_atlas_db_schema = __esm({
   "src/atlas-db-schema.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_location_kinds();
     ATLAS_SCHEMA_VERSION = 3;
     SCHEMA_TABLE_COUNTS = { 1: 20, 2: 20, 3: 21 };
@@ -3861,6 +3876,7 @@ var BOOLEAN_COLUMNS;
 var init_atlas_db_codec = __esm({
   "src/atlas-db-codec.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_db_schema();
     BOOLEAN_COLUMNS = /* @__PURE__ */ new Set(["scale_locked", "bidirectional", "is_pov"]);
   }
@@ -3910,6 +3926,7 @@ var ATLAS_SQL_VENDOR_FILES;
 var init_atlas_db_assets = __esm({
   "src/atlas-db-assets.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     ATLAS_SQL_VENDOR_FILES = [
       {
         relative: "vendor/sql-wasm.js",
@@ -4094,6 +4111,7 @@ var import_sql, modulePromise, injectedModule, AtlasDbError;
 var init_atlas_db_runtime = __esm({
   "src/atlas-db-runtime.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     import_sql = __toESM(require_sql_wasm_browser(), 1);
     init_atlas_db_schema();
     init_atlas_db_assets();
@@ -4262,6 +4280,7 @@ function pageWhereRows(tables, table, branchId, where, pageSize = 500) {
 var init_atlas_db_readport = __esm({
   "src/atlas-db-readport.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_db_codec();
     init_atlas_db_schema();
     init_atlas_db_runtime();
@@ -4463,6 +4482,7 @@ var KIT_VERSION, SCENE_KIND, SCENE_VERSION, FRAME_SCENE_KEY, FRAME_SPACE_CANONIC
 var init_contracts = __esm({
   "vendor/atlas-spatial/contracts.mjs"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     KIT_VERSION = "atlas-spatial-kit/1";
     SCENE_KIND = "atlas-scene";
     SCENE_VERSION = 1;
@@ -4610,6 +4630,7 @@ var clone2, finitePositive, intersects, contains, pointInside, polygon, issue, o
 var init_foundation = __esm({
   "vendor/atlas-spatial/foundation.mjs"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     clone2 = (value) => JSON.parse(JSON.stringify(value));
     finitePositive = (n) => typeof n === "number" && Number.isFinite(n) && n > 0;
     intersects = (a, b) => a.x < b.x + b.w - 1e-8 && a.x + a.w > b.x + 1e-8 && a.y < b.y + b.h - 1e-8 && a.y + a.h > b.y + 1e-8;
@@ -5023,6 +5044,7 @@ var clone3, EPS, pt, center, inflate, corners, distance, segmentDistance, hash, 
 var init_layout_core = __esm({
   "vendor/atlas-spatial/layout-core.mjs"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_foundation();
     clone3 = clone2;
     EPS = 1e-7;
@@ -5500,6 +5522,7 @@ var PAD, LOCK_PAD, EPS2, GOLDEN_ANGLE, MAX_CANDIDATES, GAP_FACTORS, SIZE_RATIO, 
 var init_overview_core = __esm({
   "vendor/atlas-spatial/overview-core.mjs"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_contracts();
     PAD = 0.06;
     LOCK_PAD = 0.1;
@@ -5585,6 +5608,7 @@ function count(result) {
 var init_estimated_fit = __esm({
   "vendor/atlas-spatial/estimated-fit.mjs"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_contracts();
   }
 });
@@ -5996,6 +6020,7 @@ var label, ids, sort, same, MERGEABLE_KEYS, FLOOR_FURNITURE_TYPES, proxyPlacemen
 var init_generation = __esm({
   "vendor/atlas-spatial/generation.mjs"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_layout_core();
     init_overview_core();
     init_estimated_fit();
@@ -6047,6 +6072,7 @@ function collectMapLocations({ mapRow, maps = [], locations = [] } = {}) {
 var init_map_membership = __esm({
   "vendor/atlas-spatial/map-membership.mjs"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
   }
 });
 
@@ -6134,6 +6160,7 @@ function buildOverlays({ mapId, rows: rows4, positions, selectedEntityId = null,
 var init_placement = __esm({
   "vendor/atlas-spatial/placement.mjs"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_layout_core();
     init_contracts();
   }
@@ -6291,6 +6318,7 @@ var sizesAgree;
 var init_storage = __esm({
   "vendor/atlas-spatial/storage.mjs"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_contracts();
     sizesAgree = (a, b) => !!a && !!b && Math.abs(a.widthM - b.widthM) / Math.max(a.widthM, b.widthM, 1e-9) <= 5e-3 && Math.abs(a.heightM - b.heightM) / Math.max(a.heightM, b.heightM, 1e-9) <= 5e-3;
   }
@@ -6569,6 +6597,7 @@ var pickPoint, pickPoints, pick, PUBLIC_FRAME_KEYS;
 var init_view_adapter = __esm({
   "vendor/atlas-spatial/view-adapter.mjs"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_contracts();
     pickPoint = (q) => plain(q) ? { x: q.x, y: q.y } : null;
     pickPoints = (v) => Array.isArray(v) ? v.map(pickPoint).filter(Boolean) : [];
@@ -6587,6 +6616,7 @@ var TOOL_NAMES;
 var init_tools = __esm({
   "vendor/atlas-spatial/tools.mjs"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_generation();
     init_placement();
     init_contracts();
@@ -7069,6 +7099,7 @@ function createPainter(canvas, state, C, width, height) {
 var init_renderer_drawing = __esm({
   "vendor/atlas-spatial/renderer-drawing.mjs"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_layout_core();
   }
 });
@@ -7423,6 +7454,7 @@ var DEFAULT_THEME, OVERVIEW_SURFACE_PAINT, ZONE_ROLE_TINT, FEATURE_TINT, rgba;
 var init_renderer = __esm({
   "vendor/atlas-spatial/renderer.mjs"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_layout_core();
     init_renderer_drawing();
     init_contracts();
@@ -7545,6 +7577,7 @@ function buildLayoutContext({ scope, mapRow, maps = [], locations = [], characte
 var init_host_context = __esm({
   "vendor/atlas-spatial/host-context.mjs"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_contracts();
     init_storage();
     init_map_membership();
@@ -7606,6 +7639,7 @@ function projectChildFurnishing(spec, ctx) {
 var init_space_projection = __esm({
   "vendor/atlas-spatial/space-projection.mjs"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_contracts();
   }
 });
@@ -7693,6 +7727,7 @@ var GENERATORS;
 var init_candidate_group = __esm({
   "vendor/atlas-spatial/candidate-group.mjs"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_host_context();
     init_generation();
     init_storage();
@@ -7735,6 +7770,7 @@ function applySceneGroup(db, group, ports) {
 var init_candidate_apply = __esm({
   "vendor/atlas-spatial/candidate-apply.mjs"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_contracts();
   }
 });
@@ -7771,6 +7807,7 @@ function prepareInitialFrame({ mapRow, scope, currentScope, locations = [], kind
 var init_initial_frame = __esm({
   "vendor/atlas-spatial/initial-frame.mjs"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_contracts();
   }
 });
@@ -7779,6 +7816,7 @@ var init_initial_frame = __esm({
 var init_atlas_spatial = __esm({
   "vendor/atlas-spatial/index.mjs"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_contracts();
     init_generation();
     init_map_membership();
@@ -7821,6 +7859,7 @@ function mergeCompileResults(results) {
 var init_atlas_ops_compile_types = __esm({
   "src/atlas-ops-compile-types.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
   }
 });
 
@@ -8465,6 +8504,7 @@ var SHA256_K, NEW_PREFIX, REFERENCE_FIELD_KINDS, REFERENCE_FIELDS, OP_REF_KINDS,
 var init_atlas_ops_refs = __esm({
   "src/atlas-ops-refs.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     SHA256_K = new Uint32Array([
       1116352408,
       1899447441,
@@ -8698,6 +8738,7 @@ var ATLAS_ERROR_CODES, SECRET_RULES;
 var init_atlas_ops_errors = __esm({
   "src/atlas-ops-errors.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     ATLAS_ERROR_CODES = Object.freeze({
       JSON_SYNTAX: "JSON_SYNTAX",
       WRAPPER_INCOMPLETE: "WRAPPER_INCOMPLETE",
@@ -9630,6 +9671,7 @@ var LAYOUT_REQUEST_KINDS, LAYOUT_SPEC_COLLECTIONS, LAYOUT_KIND_COLLECTIONS, LAYO
 var init_atlas_ops_normalize = __esm({
   "src/atlas-ops-normalize.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_ops_contract();
     init_atlas_runtime_limits();
     init_atlas_ops_errors();
@@ -10504,6 +10546,7 @@ var LIST_COLUMNS, COMMON_TABLE_SET;
 var init_atlas_db_defaults = __esm({
   "src/atlas-db-defaults.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_db_schema();
     LIST_COLUMNS = /* @__PURE__ */ new Set([
       "aliases_json",
@@ -10853,6 +10896,7 @@ var MENTION_CANDIDATE_LIMIT, MENTION_RECENT_TURNS_LIMIT, KIND_HINTS, IMPORTANCE_
 var init_atlas_db_mentions = __esm({
   "src/atlas-db-mentions.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_db_codec();
     init_atlas_db_defaults();
     init_atlas_db_runtime();
@@ -11619,6 +11663,7 @@ var LOCATION_FIELDS, LOCATION_KINDS, LOCATION_EXISTENCE, CHARACTER_FIELDS, CHARA
 var init_atlas_ops_entities = __esm({
   "src/atlas-ops-entities.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_ops_compile_types();
     init_atlas_db_defaults();
     init_atlas_db_mentions();
@@ -11968,6 +12013,7 @@ var LAYOUT_REQUEST_CONFLICT, FLOOR_COLLECTIONS, CITY_COLLECTIONS, OVERVIEW_COLLE
 var init_atlas_spatial_request = __esm({
   "src/atlas-spatial-request.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_ops_compile_types();
     init_atlas_ops_refs();
     init_atlas_ops_normalize();
@@ -12027,6 +12073,7 @@ var nodeCrypto;
 var init_atlas_hash = __esm({
   "src/atlas-hash.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
   }
 });
 
@@ -12246,6 +12293,7 @@ var REF_TABLES, rowId, rowRev, byId2;
 var init_atlas_sql_task_refs = __esm({
   "src/atlas-sql-task-refs.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_runtime_limits();
     init_atlas_hash();
     init_atlas_db_readport();
@@ -12625,6 +12673,7 @@ var SPATIAL_REQUEST_KEY, SPATIAL_SCENE_KEY, SQL_MAP_FRAME_SIZE_FIELDS, FRAME_SIZ
 var init_atlas_spatial_frame = __esm({
   "src/atlas-spatial-frame.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_spatial();
     SPATIAL_REQUEST_KEY = "atlasLayoutRequest";
     SPATIAL_SCENE_KEY = FRAME_SCENE_KEY;
@@ -12667,6 +12716,7 @@ function isModelBatchSizeFailure(error) {
 var init_atlas_model_batching = __esm({
   "src/atlas-model-batching.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_runtime_limits();
     init_atlas_work_batching();
   }
@@ -12762,6 +12812,7 @@ var LAYOUT_SIGNATURE_POLICY_VERSION, byId3, str2, num2;
 var init_atlas_layout_signature = __esm({
   "src/atlas-layout-signature.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_hash();
     LAYOUT_SIGNATURE_POLICY_VERSION = "layout-v9";
     byId3 = (left, right) => left < right ? -1 : left > right ? 1 : 0;
@@ -12778,6 +12829,7 @@ var SPATIAL_CAPABILITIES, CAPABILITY_CORRIDOR_BINDING, CAPABILITY_SPACE_CANONICA
 var init_atlas_world_contract = __esm({
   "src/atlas-world-contract.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     SPATIAL_CAPABILITIES = ["corridor-binding/v1", "space-canonical/v1", "spatial-profile/v1"];
     CAPABILITY_CORRIDOR_BINDING = "corridor-binding/v1";
     CAPABILITY_SPACE_CANONICAL = "space-canonical/v1";
@@ -12837,6 +12889,7 @@ var PROMPT_POLICY_VERSION, DEFAULT_POLICY_CONTENT, POLICY_SEGMENT_NAME, TASK_CON
 var init_atlas_prompt_layers = __esm({
   "src/atlas-prompt-layers.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     PROMPT_POLICY_VERSION = "atlas-policy/2026-10-16";
     DEFAULT_POLICY_CONTENT = [
       "维护已有事实，并在建设阶段依据世界观、场所用途与已登记结构，适量补全有用途的普通功能地点；原文没有逐一点名不等于禁止建设，合理补全必须标 inferred 并说明 why。正文明确内容与估计必须区分，没有依据的地点、尺寸、路线和陈设不得标成已确认。",
@@ -13204,6 +13257,7 @@ var SPACE_CANONICAL_FRAME_KEY, SPACE_CANONICAL_VERSION, SPACE_CANONICAL_MAX_FURN
 var init_atlas_space_canonical = __esm({
   "src/atlas-space-canonical.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_spatial_frame();
     init_atlas_spatial();
     SPACE_CANONICAL_FRAME_KEY = FRAME_SPACE_CANONICAL_KEY;
@@ -13355,6 +13409,7 @@ var SPATIAL_PROFILE_FRAME_KEY, SPATIAL_PROFILE_VERSION, SPATIAL_PROFILE_MODES, S
 var init_atlas_spatial_profile = __esm({
   "src/atlas-spatial-profile.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_spatial_frame();
     SPATIAL_PROFILE_FRAME_KEY = "atlasSpatialProfile";
     SPATIAL_PROFILE_VERSION = 1;
@@ -14103,6 +14158,7 @@ var CORRIDOR_BINDING_PROMPT, SPACE_CANONICAL_PROMPT, SPATIAL_PROFILE_PROMPT, PRO
 var init_atlas_sql_layout_task = __esm({
   "src/atlas-sql-layout-task.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_db_readport();
     init_atlas_spatial();
     init_atlas_spatial();
@@ -14544,6 +14600,7 @@ var WORLD_SOURCE_CHUNK_CHARS, WORLD_SOURCE_MAX_CHARS, WORLD_SOURCE_CHUNKING_VERS
 var init_atlas_sql_world_sources = __esm({
   "src/atlas-sql-world-sources.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_hash();
     WORLD_SOURCE_CHUNK_CHARS = 2e3;
     WORLD_SOURCE_MAX_CHARS = 24e3;
@@ -14735,6 +14792,7 @@ var CHUNK_CHARS, BATCH_CHARS, MAX_BATCHES, MAX_FACTS_PER_BATCH;
 var init_atlas_layout_evidence = __esm({
   "src/atlas-layout-evidence.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_runtime_limits();
     init_atlas_sql_world_sources();
     init_atlas_hash();
@@ -14750,6 +14808,7 @@ var BUSINESS_TABLES, INTERNAL_TABLES, JOURNALED_TABLES, ATLAS_USER_TABLES;
 var init_atlas_db_contract = __esm({
   "src/atlas-db-contract.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     BUSINESS_TABLES = [
       "maps",
       "locations",
@@ -16817,6 +16876,7 @@ var LEGACY_WORLD_MAP_ID, USER_TABLES, CHARACTER_TYPES, FACTION_TYPES, NON_ITEM_T
 var init_atlas_db_migrate = __esm({
   "src/atlas-db-migrate.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_db_runtime();
     init_atlas_db_codec();
     init_atlas_db_defaults();
@@ -16995,6 +17055,7 @@ function readTurnChanges(db, turnId) {
 var init_atlas_db_journal = __esm({
   "src/atlas-db-journal.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_db_runtime();
     init_atlas_db_contract();
   }
@@ -17030,6 +17091,7 @@ function applySqlLegacyImport(input) {
 var init_atlas_sql_legacy_import = __esm({
   "src/atlas-sql-legacy-import.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_db_contract();
     init_atlas_db_runtime();
     init_atlas_db_codec();
@@ -17253,6 +17315,7 @@ var ACTIVE, DEFAULT_MAX_DEPTH;
 var init_atlas_map_topology = __esm({
   "src/atlas-map-topology.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     ACTIVE = "active";
     DEFAULT_MAX_DEPTH = 12;
   }
@@ -17879,6 +17942,7 @@ var LOCATION_DEPTH, CONTAINER_DEPTH, ACTION_PLAN_DEPTH, CAPABILITY_LIMIT2, MOBIL
 var init_atlas_db_invariants = __esm({
   "src/atlas-db-invariants.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_db_schema();
     init_atlas_db_runtime();
     init_atlas_runtime_limits();
@@ -18132,6 +18196,7 @@ function applyGroups(db, orderedGroups, ctx) {
 var init_atlas_db_commit = __esm({
   "src/atlas-db-commit.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_db_runtime();
     init_atlas_db_codec();
     init_atlas_db_schema();
@@ -18519,6 +18584,7 @@ var ROLLBACK_DEFAULT_MAX_TURNS, ROLLBACK_DEFAULT_MAX_STEPS, NON_JOURNALED_TABLES
 var init_atlas_db_rollback = __esm({
   "src/atlas-db-rollback.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_db_journal();
     init_atlas_db_repository();
     init_atlas_db_runtime();
@@ -18894,6 +18960,7 @@ var HISTORY_REPAIR_PREVIEW_VERSION, HISTORY_SCAN_PAGE, HISTORY_SCAN_MAX_PAGES, M
 var init_atlas_history_repair = __esm({
   "src/atlas-history-repair.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_db_runtime();
     init_atlas_hash();
     init_atlas_space_canonical();
@@ -19188,6 +19255,7 @@ var UnionFind;
 var init_atlas_ops_groups = __esm({
   "src/atlas-ops-groups.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     UnionFind = class {
       parent;
       constructor(n) {
@@ -19485,6 +19553,7 @@ var MENTAL_FIELDS, CAUSE_FIELD_KINDS;
 var init_atlas_ops_sources = __esm({
   "src/atlas-ops-sources.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_runtime_limits();
     MENTAL_FIELDS = [
       "thought",
@@ -19666,6 +19735,7 @@ var RELATION_FIELDS, RELATION_KINDS2, RELATION_ATTITUDE, RELATION_TRUST, RELATIO
 var init_atlas_ops_relations = __esm({
   "src/atlas-ops-relations.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_ops_compile_types();
     init_atlas_db_defaults();
     init_atlas_ops_refs();
@@ -20067,6 +20137,7 @@ var STEP_KINDS, ACTION_SECRECY;
 var init_atlas_ops_actions = __esm({
   "src/atlas-ops-actions.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_ops_compile_types();
     init_atlas_db_defaults();
     init_atlas_ops_refs();
@@ -20347,6 +20418,7 @@ var EVENT_KINDS, EVENT_PHASES2, SECRECY, CHARACTER_STATUS, LOCATION_STATUS, ACTI
 var init_atlas_ops_events = __esm({
   "src/atlas-ops-events.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_ops_compile_types();
     init_atlas_db_defaults();
     init_atlas_ops_refs();
@@ -20801,6 +20873,7 @@ var INFORMATION_KINDS, TRUTH_STATUS, SECRECY2, BELIEF, ATTENTION, CHANNEL_KINDS,
 var init_atlas_ops_information = __esm({
   "src/atlas-ops-information.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_ops_compile_types();
     init_atlas_db_defaults();
     init_atlas_ops_refs();
@@ -21204,6 +21277,7 @@ var ROUTE_KINDS, GEOMETRY_QUALITY, ROUTE_STATUS, DISTANCE_BASIS, SCALE_QUALITY, 
 var init_atlas_ops_geography = __esm({
   "src/atlas-ops-geography.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_ops_compile_types();
     init_atlas_db_defaults();
     init_atlas_ops_refs();
@@ -21416,6 +21490,7 @@ var COMPILERS;
 var init_atlas_ops_compile = __esm({
   "src/atlas-ops-compile.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_ops_compile_types();
     init_atlas_ops_refs();
     init_atlas_ops_normalize();
@@ -21973,6 +22048,7 @@ var UTF8_ENCODER, REASONING_OPEN_RE, REASONING_ANY_CLOSE_RE, FENCE_LINE_RE, ATLA
 var init_atlas_ops_parser = __esm({
   "src/atlas-ops-parser.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_hash();
     init_atlas_ops_contract();
     init_atlas_runtime_limits();
@@ -22342,6 +22418,7 @@ var SHA256_K2;
 var init_atlas_ops_repair = __esm({
   "src/atlas-ops-repair.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_runtime_limits();
     init_atlas_ops_refs();
     SHA256_K2 = new Uint32Array([
@@ -22603,6 +22680,7 @@ var B64_ALPHABET, HEX;
 var init_atlas_db_envelope = __esm({
   "src/atlas-db-envelope.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_hash();
     init_atlas_db_schema();
     init_atlas_db_runtime();
@@ -22722,6 +22800,7 @@ async function rebuildManagedLorebook(port, input) {
 var init_atlas_db_outbox = __esm({
   "src/atlas-db-outbox.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_db_runtime();
     init_atlas_db_codec();
     init_atlas_db_defaults();
@@ -23013,6 +23092,7 @@ var UPGRADE_TEMP_TABLE, SCHEMA_1_TO_2_TARGET, SCHEMA_2_TO_3_TARGET;
 var init_atlas_db_upgrade = __esm({
   "src/atlas-db-upgrade.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_db_schema();
     init_atlas_db_runtime();
     UPGRADE_TEMP_TABLE = "_atlas_locations_upgrade_2";
@@ -23225,6 +23305,7 @@ var MAX_CHAIN;
 var init_atlas_sim_position = __esm({
   "src/atlas-sim-position.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_db_runtime();
     init_atlas_db_codec();
     init_atlas_runtime_limits();
@@ -23281,6 +23362,7 @@ var SCALE_BAR_FIXED_PX, SCALE_BAR_FIXED_MIN_PX, SCALE_BAR_FIXED_INSET_PX;
 var init_atlas_scale = __esm({
   "src/atlas-scale.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     SCALE_BAR_FIXED_PX = 96;
     SCALE_BAR_FIXED_MIN_PX = 64;
     SCALE_BAR_FIXED_INSET_PX = 48;
@@ -23490,6 +23572,7 @@ var GOLDEN_ANGLE2, MAX_CANDIDATES2, GAP_RETRY_FACTORS;
 var init_atlas_scene_layout = __esm({
   "src/atlas-scene-layout.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     GOLDEN_ANGLE2 = 2.399963229728653;
     MAX_CANDIDATES2 = 512;
     GAP_RETRY_FACTORS = [1, 0.75, 0.5];
@@ -23516,6 +23599,7 @@ function renderSceneContext(scene, clues, maxChars = 1800) {
 var init_atlas_scene_context = __esm({
   "src/atlas-scene-context.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
   }
 });
 
@@ -24003,6 +24087,7 @@ var CONDITION_DEPTH, CONTAINER_DEPTH2, EVENT_KIND_BY_ACTION, BELIEF_RANK, OPEN_S
 var init_atlas_sim_actions = __esm({
   "src/atlas-sim-actions.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_db_runtime();
     init_atlas_db_codec();
     init_atlas_db_schema();
@@ -24679,6 +24764,7 @@ var MOVEMENT_SPEED_PRESETS, TERRAIN_MULTIPLIERS, TERRAIN_TABLE, NODE_REVIEW_DWEL
 var init_atlas_sim_motion = __esm({
   "src/atlas-sim-motion.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_db_runtime();
     init_atlas_db_codec();
     init_atlas_runtime_limits();
@@ -24991,6 +25077,7 @@ var PUBLIC_CONTACT_DWELL_S, OPPORTUNITY_BUCKET_S;
 var init_atlas_sim_opportunities = __esm({
   "src/atlas-sim-opportunities.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_db_runtime();
     init_atlas_db_codec();
     init_atlas_sim_position();
@@ -25232,6 +25319,7 @@ var BASE_BOUNDARIES;
 var init_atlas_db_knowledge_view = __esm({
   "src/atlas-db-knowledge-view.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_scene_context();
     init_atlas_db_runtime();
     init_atlas_db_codec();
@@ -25302,6 +25390,7 @@ function sqlVisibility(ctx) {
 var init_atlas_sql_visibility = __esm({
   "src/atlas-sql-visibility.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_db_knowledge_view();
     init_atlas_sim_position();
     init_atlas_db_runtime();
@@ -26141,6 +26230,7 @@ var LOG_SECRET_KEY, LOG_SECRET_VALUE;
 var init_atlas_db_views = __esm({
   "src/atlas-db-views.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_db_codec();
     init_atlas_db_runtime();
     init_atlas_sim_position();
@@ -26339,6 +26429,7 @@ var infoTitle, infoSummary, SOURCES;
 var init_atlas_catalog_views = __esm({
   "src/atlas-catalog-views.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_db_runtime();
     init_atlas_sql_visibility();
     init_atlas_ops_contract();
@@ -26669,6 +26760,7 @@ function querySpatialFlows(ctx, query) {
 var init_atlas_spatial_flow_views = __esm({
   "src/atlas-spatial-flow-views.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_db_views();
     init_atlas_db_runtime();
     init_atlas_sim_motion();
@@ -26842,6 +26934,7 @@ var PLAIN2, TEXT2, sortedUnique, DECORATIVE_SCENE_KEYS;
 var init_atlas_map_assessment = __esm({
   "src/atlas-map-assessment.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_spatial();
     PLAIN2 = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
     TEXT2 = (value) => typeof value === "string" && value.length > 0 ? value : "";
@@ -27046,6 +27139,7 @@ function querySpatialScene(ctx, query) {
 var init_atlas_spatial_views = __esm({
   "src/atlas-spatial-views.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_db_codec();
     init_atlas_db_runtime();
     init_atlas_db_views();
@@ -27208,6 +27302,7 @@ function queryTasks(ctx, query) {
 var init_atlas_task_views = __esm({
   "src/atlas-task-views.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_db_runtime();
     init_atlas_sim_motion();
     init_atlas_sql_visibility();
@@ -27450,6 +27545,7 @@ var BOOKKEEPING_COLUMNS, HISTORICAL_TURN_STATUSES, HISTORICAL_DEFAULT_TABLES, MA
 var init_atlas_world_feed_history = __esm({
   "src/atlas-world-feed-history.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_db_runtime();
     init_atlas_db_contract();
     BOOKKEEPING_COLUMNS = /* @__PURE__ */ new Set(["row_rev", "updated_turn_id"]);
@@ -27613,6 +27709,7 @@ var EVENT_EFFECT_TABLES, finite4, str8;
 var init_atlas_world_feed_events = __esm({
   "src/atlas-world-feed-events.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     EVENT_EFFECT_TABLES = /* @__PURE__ */ new Set(["characters", "items", "locations", "actions"]);
     finite4 = (v) => typeof v === "number" && Number.isFinite(v);
     str8 = (v) => typeof v === "string" ? v : "";
@@ -27913,6 +28010,7 @@ var finite5, str9, ACTION_KINDS, ACTION_VERB;
 var init_atlas_world_feed_transitions = __esm({
   "src/atlas-world-feed-transitions.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     finite5 = (v) => typeof v === "number" && Number.isFinite(v);
     str9 = (v) => typeof v === "string" ? v : "";
     ACTION_KINDS = {
@@ -28023,6 +28121,7 @@ function filterFeedCandidates(candidates, ctx) {
 var init_atlas_world_feed_visibility = __esm({
   "src/atlas-world-feed-visibility.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
   }
 });
 
@@ -28167,6 +28266,7 @@ var B64_ALPHABET2, B64_LOOKUP, FEED_CURSOR_MAX_CHARS, MAX_ID_CHARS, MAX_HASH_CHA
 var init_atlas_world_feed_cursor = __esm({
   "src/atlas-world-feed-cursor.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_hash();
     B64_ALPHABET2 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     B64_LOOKUP = (() => {
@@ -28523,6 +28623,7 @@ var FEED_TABLES, CONTEXT_TABLES, str10, PLACEHOLDER;
 var init_atlas_world_feed = __esm({
   "src/atlas-world-feed.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_db_runtime();
     init_atlas_runtime_limits();
     init_atlas_ops_contract();
@@ -28842,6 +28943,7 @@ var ACTIVITY_DEFAULTS, ZERO;
 var init_atlas_sim_time = __esm({
   "src/atlas-sim-time.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     ACTIVITY_DEFAULTS = {
       dialogue: { min_s: 0, nominal_s: 0, max_s: 0 },
       meal: { min_s: 900, nominal_s: 1800, max_s: 3600 },
@@ -29287,6 +29389,7 @@ var PROPAGATION_CHECK_INTERVAL_S, CARRIER_PREFERENCE, TERRAIN_TABLE2;
 var init_atlas_sim_propagation = __esm({
   "src/atlas-sim-propagation.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_db_runtime();
     init_atlas_db_codec();
     init_atlas_db_schema();
@@ -29711,6 +29814,7 @@ var SETTLE_MAX_STEPS;
 var init_atlas_sim_scheduler = __esm({
   "src/atlas-sim-scheduler.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_db_runtime();
     init_atlas_db_codec();
     init_atlas_db_schema();
@@ -29792,6 +29896,7 @@ function buildDecisionContext(batch, world3) {
 var init_atlas_sim_decision_context = __esm({
   "src/atlas-sim-decision-context.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_db_runtime();
     init_atlas_db_codec();
   }
@@ -29967,6 +30072,7 @@ var OUTCOME_ALLOWED_OPS, PRESENCE_KINDS;
 var init_atlas_sim_outcome_context = __esm({
   "src/atlas-sim-outcome-context.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_db_runtime();
     init_atlas_db_codec();
     init_atlas_sim_position();
@@ -30040,6 +30146,7 @@ var ATTENTION_PROBABILITIES, ATLAS_SIM_RULESET_VERSION;
 var init_atlas_sim_random = __esm({
   "src/atlas-sim-random.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     ATTENTION_PROBABILITIES = {
       low: 0.2,
       normal: 0.5,
@@ -30352,6 +30459,7 @@ async function settleSqlTurn(input) {
 var init_atlas_sql_simulation = __esm({
   "src/atlas-sql-simulation.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_work_batching();
     init_atlas_db_runtime();
     init_atlas_db_contract();
@@ -30412,6 +30520,7 @@ function logModelAttempts(port, now, record2) {
 var init_atlas_model_attempts = __esm({
   "src/atlas-model-attempts.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_db_envelope();
   }
 });
@@ -30661,6 +30770,7 @@ var SCENE_ROW_LIMIT, CONTAINER_FRAME_CELLS;
 var init_atlas_sql_scene_maps = __esm({
   "src/atlas-sql-scene-maps.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_db_readport();
     init_atlas_db_defaults();
     init_atlas_ops_geography();
@@ -30991,6 +31101,7 @@ function placeLooseItems(input) {
 var init_atlas_spatial_occupants = __esm({
   "src/atlas-spatial-occupants.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_spatial();
     init_atlas_spatial_frame();
     init_atlas_space_canonical();
@@ -31107,6 +31218,7 @@ function supportedCorridor(map, locations, sourceText) {
 var init_atlas_layout_closure = __esm({
   "src/atlas-layout-closure.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_spatial();
     init_atlas_spatial_frame();
     init_atlas_space_canonical();
@@ -31834,6 +31946,7 @@ var DEFAULT_MAX_JOBS, SPATIAL_REQUEST_KINDS, SCENE_MEMBER_KIND;
 var init_atlas_spatial_candidate = __esm({
   "src/atlas-spatial-candidate.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_db_runtime();
     init_atlas_db_codec();
     init_atlas_spatial_occupants();
@@ -31852,6 +31965,392 @@ var init_atlas_spatial_candidate = __esm({
       actors: "characters",
       items: "items"
     });
+  }
+});
+
+// src/atlas-diagnostics.ts
+function refUtf8Bytes(value) {
+  return new TextEncoder().encode(typeof value === "string" ? value : "");
+}
+function atlasRefFingerprint(raw) {
+  const bytes2 = refUtf8Bytes(raw);
+  let hash2 = REF_OFFSET_64;
+  for (let index = 0; index < bytes2.length; index += 1) {
+    hash2 ^= BigInt(bytes2[index]);
+    hash2 = hash2 * REF_PRIME_64 & REF_MASK;
+  }
+  hash2 ^= hash2 >> 30n;
+  hash2 = hash2 * REF_MIX_1 & REF_MASK;
+  hash2 ^= hash2 >> 27n;
+  hash2 = hash2 * REF_MIX_2 & REF_MASK;
+  hash2 ^= hash2 >> 31n;
+  return REF_PREFIX + hash2.toString(16).padStart(REF_HEX_CHARS, "0");
+}
+function isAtlasRefFingerprint(value) {
+  return typeof value === "string" && REF_PATTERN.test(value);
+}
+function safeToken(value, fallback = "") {
+  return typeof value === "string" && SAFE_ATOM.test(value) && !value.includes("://") ? value : fallback;
+}
+function redactWorldSecrets(value) {
+  let out = value;
+  out = out.replace(/\bsk-[A-Za-z0-9_-]{6,}/g, "sk-***");
+  out = out.replace(/\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/gi, "Bearer ***");
+  out = out.replace(
+    /((?:x-)?api[_-]?key|apikey|access[_-]?token|auth[_-]?token|authorization|password|passwd|secret|token)(\s*[:=]\s*)["']?[^\s"',;}\]]{4,}/gi,
+    "$1$2***"
+  );
+  out = out.replace(/\b[a-fA-F0-9]{32,}\b/g, (match) => `sha256:${match.slice(0, 12)}…(${match.length})`);
+  return out;
+}
+function worldRefFingerprint(value) {
+  if (typeof value !== "string") return null;
+  const token = safeToken(value);
+  if (!token) return null;
+  return isAtlasRefFingerprint(token) ? token : atlasRefFingerprint(token);
+}
+function worldToken(value) {
+  if (typeof value !== "string") return void 0;
+  const token = safeToken(value);
+  return token.length > 0 ? token : void 0;
+}
+function worldMessage(value) {
+  const text6 = typeof value === "string" ? value : value === void 0 || value === null ? "" : String(value);
+  const redacted = redactWorldSecrets(text6).replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
+  return redacted.length > WORLD_MESSAGE_MAX_CHARS ? `${redacted.slice(0, WORLD_MESSAGE_MAX_CHARS)}…` : redacted;
+}
+function worldPath(value) {
+  if (typeof value !== "string") return void 0;
+  const token = safeToken(value);
+  if (token === "$") return token;
+  return /^\$(?:\.[A-Za-z0-9_]+|\[\d+\])+$/.test(token) ? token : void 0;
+}
+function sanitizeWorldDetails(details, depth = 0) {
+  const out = {};
+  if (!details || typeof details !== "object" || Array.isArray(details)) return out;
+  for (const [key, value] of Object.entries(details)) {
+    const lowered = key.toLowerCase();
+    if (WORLD_SECRET_KEYS.has(lowered) || lowered === "coresaved") continue;
+    const safeKey = safeToken(key);
+    if (!safeKey) continue;
+    if (WORLD_TEXT_KEYS.has(lowered)) {
+      out[safeKey] = typeof value === "string" ? `[text:${value.length}chars]` : "[text]";
+      continue;
+    }
+    out[safeKey] = sanitizeWorldDetailValue(value, depth);
+  }
+  return out;
+}
+function sanitizeWorldDetailValue(value, depth) {
+  if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "string") {
+    const redacted = redactWorldSecrets(value);
+    return redacted.length > WORLD_DETAIL_STRING_MAX_CHARS ? `${redacted.slice(0, WORLD_DETAIL_STRING_MAX_CHARS)}…(${redacted.length})` : redacted;
+  }
+  if (Array.isArray(value)) {
+    if (depth >= WORLD_DETAIL_DEPTH) return `[array:${value.length}]`;
+    return value.slice(0, 16).map((item) => sanitizeWorldDetailValue(item, depth + 1));
+  }
+  if (typeof value === "object") {
+    if (depth >= WORLD_DETAIL_DEPTH) return "[object]";
+    const nested = sanitizeWorldDetails(value, depth + 1);
+    return Object.keys(nested).length > 0 ? nested : "[object]";
+  }
+  return null;
+}
+function normalizeWorldIssue(input, now = Date.now) {
+  const rawAt = typeof input?.at === "number" && Number.isFinite(input.at) ? input.at : now();
+  const level = LEVELS.has(input?.level) ? input.level : "error";
+  const moduleToken = worldToken(input?.module);
+  const codeToken = typeof input?.code === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(input.code) ? input.code : "UNEXPECTED_ERROR";
+  const details = sanitizeWorldDetails(input?.details);
+  const chatUid = worldRefFingerprint(input?.chatUid);
+  const branchId = worldRefFingerprint(input?.branchId);
+  const turnId = worldRefFingerprint(input?.turnId);
+  const attemptId = worldRefFingerprint(input?.attemptId);
+  const batchId = worldRefFingerprint(input?.batchId);
+  const opId = worldToken(input?.opId);
+  const groupId = worldToken(input?.groupId);
+  const path = worldPath(input?.path);
+  const line = typeof input?.line === "number" && Number.isInteger(input.line) && input.line >= 0 && input.line <= 1e5 ? input.line : void 0;
+  if (!moduleToken) {
+    details.diagnosticCode = "DIAGNOSTIC_MODULE_REQUIRED";
+    details.moduleRequired = true;
+  }
+  const detailBudget = new TextEncoder().encode(JSON.stringify(details)).length;
+  if (detailBudget > WORLD_DETAIL_MAX_BYTES) {
+    for (const key of Object.keys(details)) {
+      if (key === "diagnosticCode" || key === "moduleRequired") continue;
+      delete details[key];
+      if (new TextEncoder().encode(JSON.stringify(details)).length <= WORLD_DETAIL_MAX_BYTES) break;
+    }
+    details.detailsTruncated = true;
+    details.droppedDetailBytes = detailBudget;
+  }
+  const issue25 = {
+    at: new Date(rawAt).toISOString(),
+    level,
+    module: moduleToken ?? "",
+    code: codeToken,
+    chatUid,
+    branchId,
+    turnId,
+    attemptId,
+    batchId
+  };
+  if (opId !== void 0) issue25.opId = opId;
+  if (groupId !== void 0) issue25.groupId = groupId;
+  if (line !== void 0) issue25.line = line;
+  if (path !== void 0) issue25.path = path;
+  issue25.message = worldMessage(input?.message ?? input?.code ?? "");
+  issue25.details = details;
+  issue25.coreSaved = input?.coreSaved === true;
+  return issue25;
+}
+function normalizeWorldIssueList(issues, base, now = Date.now) {
+  const list2 = Array.isArray(issues) ? issues : [];
+  const at = now();
+  return list2.map((issue25) => {
+    const severity = typeof issue25?.severity === "string" ? issue25.severity : "error";
+    const level = severity === "warning" ? "warn" : LEVELS.has(severity) ? severity : "error";
+    const details = {};
+    if (issue25?.severity !== void 0) details.severity = severity;
+    if (issue25?.retryable !== void 0) details.retryable = issue25.retryable === true;
+    if (issue25?.dependencyId !== void 0) details.dependencyId = issue25.dependencyId;
+    return normalizeWorldIssue(
+      {
+        at,
+        level,
+        module: base?.module ?? "",
+        code: issue25?.code ?? "UNEXPECTED_ERROR",
+        chatUid: base?.chatUid,
+        branchId: base?.branchId,
+        turnId: base?.turnId,
+        attemptId: base?.attemptId,
+        batchId: base?.batchId,
+        opId: issue25?.opId,
+        groupId: issue25?.groupId,
+        line: issue25?.line,
+        path: issue25?.path,
+        message: issue25?.message ?? "",
+        details,
+        coreSaved: base?.coreSaved
+      },
+      () => at
+    );
+  });
+}
+function diagnosticsExportPage(entries, cursor, pageSize) {
+  const all = Array.isArray(entries) ? entries : [];
+  const requested = Number(pageSize);
+  const size = Number.isFinite(requested) && requested >= 1 ? Math.min(500, Math.trunc(requested)) : ATLAS_RUNTIME_LIMITS.diagnosticPageSize;
+  const requestedOffset = Number(cursor ?? 0);
+  const offset = Number.isFinite(requestedOffset) && requestedOffset > 0 ? Math.trunc(requestedOffset) : 0;
+  const items = all.slice(offset, offset + size);
+  const nextOffset = offset + items.length;
+  let droppedCount = 0;
+  let droppedReason;
+  for (const entry of all) {
+    const details = entry && typeof entry === "object" && !Array.isArray(entry) ? entry.details : void 0;
+    const reported = Number(details?.droppedCount ?? entry?.droppedCount);
+    if (!Number.isFinite(reported) || reported <= 0) continue;
+    droppedCount += Math.trunc(reported);
+    if (!droppedReason) {
+      const reason = details?.droppedReason ?? details?.reason;
+      droppedReason = typeof reason === "string" && reason.length > 0 ? redactWorldSecrets(reason).slice(0, 120) : "retention";
+    }
+  }
+  const page = {
+    items,
+    total: all.length,
+    droppedCount,
+    exportComplete: nextOffset >= all.length && droppedCount === 0
+  };
+  if (nextOffset < all.length) page.nextCursor = String(nextOffset);
+  if (droppedCount > 0) page.droppedReason = droppedReason ?? "retention";
+  return page;
+}
+var LEVELS, SAFE_ATOM, REF_PREFIX, REF_HEX_CHARS, REF_DIGITS, REF_MASK, REF_PATTERN, REF_OFFSET_64, REF_PRIME_64, REF_MIX_1, REF_MIX_2, SPATIAL_DETAILS, ATLAS_NAMED_DIAGNOSTICS, WORLD_TEXT_KEYS, WORLD_SECRET_KEYS, WORLD_MESSAGE_MAX_CHARS, WORLD_DETAIL_STRING_MAX_CHARS, WORLD_DETAIL_MAX_BYTES, WORLD_DETAIL_DEPTH;
+var init_atlas_diagnostics = __esm({
+  "src/atlas-diagnostics.ts"() {
+    "use strict";
+    init_define_ATLAS_BUILD_INFO();
+    init_atlas_runtime_limits();
+    LEVELS = /* @__PURE__ */ new Set(["debug", "info", "warn", "error"]);
+    SAFE_ATOM = /^[a-zA-Z0-9_.$:\[\]-]{1,120}$/;
+    REF_PREFIX = "ref-";
+    REF_HEX_CHARS = 16;
+    REF_DIGITS = REF_HEX_CHARS * 4;
+    REF_MASK = (1n << BigInt(REF_DIGITS)) - 1n;
+    REF_PATTERN = /^ref-[a-f0-9]{8,16}$/;
+    REF_OFFSET_64 = 0xcbf29ce484222325n;
+    REF_PRIME_64 = 0x100000001b3n;
+    REF_MIX_1 = 0xbf58476d1ce4e5b9n;
+    REF_MIX_2 = 0x94d049bb133111ebn;
+    SPATIAL_DETAILS = Object.freeze([
+      "chatFingerprint",
+      "branchRef",
+      "mapRef",
+      "entityRef",
+      "operationRef",
+      "module",
+      "function",
+      "phase",
+      "sceneStatus",
+      "bytes",
+      "reasonCode"
+    ]);
+    ATLAS_NAMED_DIAGNOSTICS = Object.freeze({
+      // B：异步迁移 / 写入迟到的聊天身份已与当前上下文不符 → 丢弃，不写回任何表。
+      SESSION_IDENTITY_MISMATCH: Object.freeze({
+        code: "SESSION_IDENTITY_MISMATCH",
+        level: "warn",
+        source: "storage",
+        details: Object.freeze(["chatFingerprint", "branchRef", "reasonCode", "stage"])
+      }),
+      // C05：simulation 损坏 → 读视图报错并保留用户原文，绝不静默归空覆盖。
+      SIMULATION_CORRUPT: Object.freeze({
+        code: "SIMULATION_CORRUPT",
+        level: "error",
+        source: "storage",
+        details: Object.freeze(["chatFingerprint", "branchRef", "schemaPath", "reasonCode"])
+      }),
+      // C：有界截断如实上报（必须同时给出保留/丢弃数量，不能悄悄丢数据）。
+      SIMULATION_TRUNCATED: Object.freeze({
+        code: "SIMULATION_TRUNCATED",
+        level: "warn",
+        source: "engine",
+        details: Object.freeze([
+          "chatFingerprint",
+          "branchRef",
+          "collection",
+          "droppedCount",
+          "keptCount",
+          "limitCount",
+          "reasonCode"
+        ])
+      }),
+      // B04/B05/D10：世界书重建发现条目属于别的聊天 → 丢弃，不写共享主卡书。
+      LOREBOOK_STALE_CHAT_DROPPED: Object.freeze({
+        code: "LOREBOOK_STALE_CHAT_DROPPED",
+        level: "warn",
+        source: "lorebook",
+        details: Object.freeze(["chatFingerprint", "branchRef", "reasonCode", "stage"])
+      }),
+      // D01/D02：后台任务/信号传播被阻塞（NO_PATH / NO_TIME / TOO_FAR…）→ 如实记录，不假装已抵达。
+      BACKGROUND_BLOCKED: Object.freeze({
+        code: "BACKGROUND_BLOCKED",
+        level: "info",
+        source: "engine",
+        details: Object.freeze([
+          "chatFingerprint",
+          "branchRef",
+          "turnRef",
+          "taskRef",
+          "actorRef",
+          "locationRef",
+          "reasonCode"
+        ])
+      }),
+      // U13：frame_json 不可读 / 与场景契约不符（保留其他地图，不静默归空）。
+      SPATIAL_FRAME_INVALID: Object.freeze({
+        code: "SPATIAL_FRAME_INVALID",
+        level: "error",
+        source: "storage",
+        details: SPATIAL_DETAILS
+      }),
+      // U13：旧修订场景被拿来更新当前地图 → 跳过本次投影，不清掉已有效的旧图。
+      SPATIAL_SCENE_STALE: Object.freeze({
+        code: "SPATIAL_SCENE_STALE",
+        level: "warn",
+        source: "ui",
+        details: SPATIAL_DETAILS
+      }),
+      // U13：候选布局写入失败（整组回退，回执原样给 UI）。
+      SPATIAL_LAYOUT_FAILED: Object.freeze({
+        code: "SPATIAL_LAYOUT_FAILED",
+        level: "error",
+        source: "map",
+        details: SPATIAL_DETAILS
+      }),
+      // U13：路线几何不可用作行走路线（单项跳过，其他路线继续）。
+      SPATIAL_ROUTE_INVALID: Object.freeze({
+        code: "SPATIAL_ROUTE_INVALID",
+        level: "warn",
+        source: "map",
+        details: SPATIAL_DETAILS
+      }),
+      // U13：作用域不一致（分支 / 修订 / 视角），拒绝跨聊天或跨分支落地。
+      SPATIAL_SCOPE_MISMATCH: Object.freeze({
+        code: "SPATIAL_SCOPE_MISMATCH",
+        level: "warn",
+        source: "ui",
+        details: SPATIAL_DETAILS
+      })
+    });
+    WORLD_TEXT_KEYS = /* @__PURE__ */ new Set([
+      "prompt",
+      "response",
+      "content",
+      "body",
+      "text",
+      "raw",
+      "rawtext",
+      "storytext",
+      "chatname",
+      "charactername",
+      "excerpt",
+      "quote",
+      "completion",
+      "message",
+      "assistanttext",
+      "usertext"
+    ]);
+    WORLD_SECRET_KEYS = /* @__PURE__ */ new Set([
+      "authorization",
+      "apikey",
+      "api_key",
+      "access_token",
+      "accesstoken",
+      "auth_token",
+      "authtoken",
+      "password",
+      "passwd",
+      "secret",
+      "token",
+      "bearertoken",
+      "bearer_token",
+      "cookie",
+      "setcookie",
+      "x-api-key",
+      "xapikey"
+    ]);
+    WORLD_MESSAGE_MAX_CHARS = 500;
+    WORLD_DETAIL_STRING_MAX_CHARS = 200;
+    WORLD_DETAIL_MAX_BYTES = 2048;
+    WORLD_DETAIL_DEPTH = 2;
+  }
+});
+
+// src/atlas-request-diagnostics.ts
+function atlasDiagnosticContext(value = {}) {
+  const chat = String(value.chatUid ?? value.chatId ?? "");
+  const branch2 = String(value.branchId ?? "main");
+  const floor3 = value.hostMessageUid ?? value.assistantMessageId ?? value.messageId;
+  const details = {};
+  if (chat) details.branchRef = atlasRefFingerprint(JSON.stringify([chat, branch2]));
+  if (chat && floor3) details.turnRef = atlasRefFingerprint(JSON.stringify([chat, branch2, String(floor3), String(value.variantKey || value.swipeId || "original")]));
+  if (value.mapId) details.mapRef = atlasRefFingerprint(String(value.mapId));
+  if (typeof value.baseRevision === "number") details.baseRevision = value.baseRevision;
+  if (typeof value.baseStorageRevision === "number") details.storageRevision = value.baseStorageRevision;
+  return { ...chat ? { chatFingerprint: atlasRefFingerprint(chat) } : {}, details };
+}
+var init_atlas_request_diagnostics = __esm({
+  "src/atlas-request-diagnostics.ts"() {
+    "use strict";
+    init_define_ATLAS_BUILD_INFO();
+    init_atlas_diagnostics();
   }
 });
 
@@ -31878,6 +32377,7 @@ function createGenerationBudget(input = {}) {
     deferredList.push({ stage, batchId, reason });
   };
   return {
+    ...input.diagnosticAnchor ? { diagnosticContext: atlasDiagnosticContext(input.diagnosticAnchor) } : {},
     limit,
     used: () => transports,
     remaining: () => Math.min(planRemaining(), Math.max(0, available - transports)),
@@ -31986,8 +32486,10 @@ var GENERATION_BUDGET_LIMIT;
 var init_atlas_sql_generation_budget = __esm({
   "src/atlas-sql-generation-budget.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_runtime_limits();
     init_atlas_work_batching();
+    init_atlas_request_diagnostics();
     GENERATION_BUDGET_LIMIT = ATLAS_RUNTIME_LIMITS.foregroundModelBatchesPerTurn;
   }
 });
@@ -32080,6 +32582,7 @@ function completionOwnershipIssues(owners) {
 var init_atlas_world_completion_ownership = __esm({
   "src/atlas-world-completion-ownership.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
   }
 });
 
@@ -32577,6 +33080,7 @@ var WORLD_FILL_FRAME_KEY, WORLD_CONSTRUCTION_OPS, WORLD_CONSTRUCTION_POLICY_VERS
 var init_atlas_sql_world_completion = __esm({
   "src/atlas-sql-world-completion.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_runtime_limits();
     init_atlas_hash();
     init_atlas_db_readport();
@@ -32809,6 +33313,7 @@ var isPlainObject20;
 var init_atlas_sql_world_dedupe = __esm({
   "src/atlas-sql-world-dedupe.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_hash();
     isPlainObject20 = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
   }
@@ -33121,6 +33626,7 @@ var CONSTRUCTION_PAYLOAD_VERSION, CONSTRUCTION_QUEUE_POLICY_VERSION, DISCOVERY_P
 var init_atlas_construction_progress = __esm({
   "src/atlas-construction-progress.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_runtime_limits();
     init_atlas_hash();
     CONSTRUCTION_PAYLOAD_VERSION = 1;
@@ -33257,6 +33763,7 @@ function planNextAllocation(rows4, pendingTargetIds, schedulerSeq) {
 var init_atlas_construction_scheduler = __esm({
   "src/atlas-construction-scheduler.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_construction_progress();
   }
 });
@@ -33462,6 +33969,7 @@ var SOURCE_LEDGER_PAYLOAD_VERSION, SOURCE_LEDGER_POLICY_VERSION;
 var init_atlas_construction_sources = __esm({
   "src/atlas-construction-sources.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_hash();
     init_atlas_construction_progress();
     init_atlas_sql_world_sources();
@@ -34412,7 +34920,7 @@ function createSqlRepository(options) {
         duration_ms: Math.max(0, finished - started)
       });
     };
-    const turnBudget = createGenerationBudget({ limit: generationOptions.batching.requestsPerOperation ?? 0, workBatching: generationOptions.workBatching });
+    const turnBudget = createGenerationBudget({ diagnosticAnchor: input.anchor, limit: generationOptions.batching.requestsPerOperation ?? 0, workBatching: generationOptions.workBatching });
     const modelPort = options.modelPort ? bindModelBudget(options.modelPort, turnBudget) : null;
     let explicitNoop = false;
     let responseIncomplete = false;
@@ -36080,6 +36588,7 @@ var CANONICAL_TABLES;
 var init_atlas_db_repository = __esm({
   "src/atlas-db-repository.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_work_batching();
     init_atlas_sql_model_context();
     init_atlas_sql_layout_task();
@@ -36314,6 +36823,7 @@ var FOREIGN_KEY_SENTINEL;
 var init_atlas_db_retry = __esm({
   "src/atlas-db-retry.ts"() {
     "use strict";
+    init_define_ATLAS_BUILD_INFO();
     init_atlas_db_commit();
     init_atlas_db_journal();
     init_atlas_ops_groups();
@@ -36324,6 +36834,7 @@ var init_atlas_db_retry = __esm({
 });
 
 // src/atlas-sql-browser-entry.ts
+init_define_ATLAS_BUILD_INFO();
 var import_sql2 = __toESM(require_sql_wasm_browser(), 1);
 init_atlas_db_repository();
 init_atlas_db_runtime();
@@ -36331,6 +36842,7 @@ init_atlas_db_schema();
 init_atlas_db_envelope();
 
 // src/atlas-db-worker.ts
+init_define_ATLAS_BUILD_INFO();
 var WORKER_METHODS = [
   "open",
   "query",
@@ -36537,6 +37049,7 @@ function createWorkerClient(worker, options = {}) {
 }
 
 // src/atlas-db-queue.ts
+init_define_ATLAS_BUILD_INFO();
 var inProcessQueues = /* @__PURE__ */ new Map();
 function getWebLocks() {
   const nav = globalThis.navigator;
@@ -36581,6 +37094,7 @@ async function withChatCommitLock(chatUid, fn) {
 }
 
 // src/atlas-host-port.ts
+init_define_ATLAS_BUILD_INFO();
 var ATLAS_SESSION_KEY = "atlas";
 var ATLAS_DATABASE_KEY = "database";
 function describeHostCapabilities(options) {
@@ -36744,6 +37258,7 @@ function createAtlasHostPort(options) {
 }
 
 // src/atlas-host-save.ts
+init_define_ATLAS_BUILD_INFO();
 function createHostSaveAdapter(options) {
   const saveFn = options.save ?? null;
   const canConfirm = options.canConfirm ?? Boolean(saveFn);
@@ -36905,11 +37420,13 @@ init_atlas_sim_position();
 init_atlas_db_outbox();
 
 // src/atlas-db-branches.ts
+init_define_ATLAS_BUILD_INFO();
 init_atlas_db_runtime();
 init_atlas_db_codec();
 init_atlas_db_schema();
 
 // src/atlas-spatial-branch.ts
+init_define_ATLAS_BUILD_INFO();
 init_atlas_spatial();
 init_atlas_spatial_frame();
 function issue22(code, path, message, severity = "warning") {
@@ -37183,373 +37700,16 @@ function copyTableRows(db, table, parentBranchId, newBranchId, forkTurnId, newRe
 init_atlas_db_retry();
 init_atlas_db_rollback();
 init_atlas_db_mentions();
-
-// src/atlas-diagnostics.ts
-init_atlas_runtime_limits();
-var LEVELS = /* @__PURE__ */ new Set(["debug", "info", "warn", "error"]);
-var SAFE_ATOM = /^[a-zA-Z0-9_.$:\[\]-]{1,120}$/;
-var REF_PREFIX = "ref-";
-var REF_HEX_CHARS = 16;
-var REF_DIGITS = REF_HEX_CHARS * 4;
-var REF_MASK = (1n << BigInt(REF_DIGITS)) - 1n;
-var REF_PATTERN = /^ref-[a-f0-9]{8,16}$/;
-var REF_OFFSET_64 = 0xcbf29ce484222325n;
-var REF_PRIME_64 = 0x100000001b3n;
-var REF_MIX_1 = 0xbf58476d1ce4e5b9n;
-var REF_MIX_2 = 0x94d049bb133111ebn;
-function refUtf8Bytes(value) {
-  return new TextEncoder().encode(typeof value === "string" ? value : "");
-}
-function atlasRefFingerprint(raw) {
-  const bytes2 = refUtf8Bytes(raw);
-  let hash2 = REF_OFFSET_64;
-  for (let index = 0; index < bytes2.length; index += 1) {
-    hash2 ^= BigInt(bytes2[index]);
-    hash2 = hash2 * REF_PRIME_64 & REF_MASK;
-  }
-  hash2 ^= hash2 >> 30n;
-  hash2 = hash2 * REF_MIX_1 & REF_MASK;
-  hash2 ^= hash2 >> 27n;
-  hash2 = hash2 * REF_MIX_2 & REF_MASK;
-  hash2 ^= hash2 >> 31n;
-  return REF_PREFIX + hash2.toString(16).padStart(REF_HEX_CHARS, "0");
-}
-function isAtlasRefFingerprint(value) {
-  return typeof value === "string" && REF_PATTERN.test(value);
-}
-var SPATIAL_DETAILS = Object.freeze([
-  "chatFingerprint",
-  "branchRef",
-  "mapRef",
-  "entityRef",
-  "operationRef",
-  "module",
-  "function",
-  "phase",
-  "sceneStatus",
-  "bytes",
-  "reasonCode"
-]);
-var ATLAS_NAMED_DIAGNOSTICS = Object.freeze({
-  // B：异步迁移 / 写入迟到的聊天身份已与当前上下文不符 → 丢弃，不写回任何表。
-  SESSION_IDENTITY_MISMATCH: Object.freeze({
-    code: "SESSION_IDENTITY_MISMATCH",
-    level: "warn",
-    source: "storage",
-    details: Object.freeze(["chatFingerprint", "branchRef", "reasonCode", "stage"])
-  }),
-  // C05：simulation 损坏 → 读视图报错并保留用户原文，绝不静默归空覆盖。
-  SIMULATION_CORRUPT: Object.freeze({
-    code: "SIMULATION_CORRUPT",
-    level: "error",
-    source: "storage",
-    details: Object.freeze(["chatFingerprint", "branchRef", "schemaPath", "reasonCode"])
-  }),
-  // C：有界截断如实上报（必须同时给出保留/丢弃数量，不能悄悄丢数据）。
-  SIMULATION_TRUNCATED: Object.freeze({
-    code: "SIMULATION_TRUNCATED",
-    level: "warn",
-    source: "engine",
-    details: Object.freeze([
-      "chatFingerprint",
-      "branchRef",
-      "collection",
-      "droppedCount",
-      "keptCount",
-      "limitCount",
-      "reasonCode"
-    ])
-  }),
-  // B04/B05/D10：世界书重建发现条目属于别的聊天 → 丢弃，不写共享主卡书。
-  LOREBOOK_STALE_CHAT_DROPPED: Object.freeze({
-    code: "LOREBOOK_STALE_CHAT_DROPPED",
-    level: "warn",
-    source: "lorebook",
-    details: Object.freeze(["chatFingerprint", "branchRef", "reasonCode", "stage"])
-  }),
-  // D01/D02：后台任务/信号传播被阻塞（NO_PATH / NO_TIME / TOO_FAR…）→ 如实记录，不假装已抵达。
-  BACKGROUND_BLOCKED: Object.freeze({
-    code: "BACKGROUND_BLOCKED",
-    level: "info",
-    source: "engine",
-    details: Object.freeze([
-      "chatFingerprint",
-      "branchRef",
-      "turnRef",
-      "taskRef",
-      "actorRef",
-      "locationRef",
-      "reasonCode"
-    ])
-  }),
-  // U13：frame_json 不可读 / 与场景契约不符（保留其他地图，不静默归空）。
-  SPATIAL_FRAME_INVALID: Object.freeze({
-    code: "SPATIAL_FRAME_INVALID",
-    level: "error",
-    source: "storage",
-    details: SPATIAL_DETAILS
-  }),
-  // U13：旧修订场景被拿来更新当前地图 → 跳过本次投影，不清掉已有效的旧图。
-  SPATIAL_SCENE_STALE: Object.freeze({
-    code: "SPATIAL_SCENE_STALE",
-    level: "warn",
-    source: "ui",
-    details: SPATIAL_DETAILS
-  }),
-  // U13：候选布局写入失败（整组回退，回执原样给 UI）。
-  SPATIAL_LAYOUT_FAILED: Object.freeze({
-    code: "SPATIAL_LAYOUT_FAILED",
-    level: "error",
-    source: "map",
-    details: SPATIAL_DETAILS
-  }),
-  // U13：路线几何不可用作行走路线（单项跳过，其他路线继续）。
-  SPATIAL_ROUTE_INVALID: Object.freeze({
-    code: "SPATIAL_ROUTE_INVALID",
-    level: "warn",
-    source: "map",
-    details: SPATIAL_DETAILS
-  }),
-  // U13：作用域不一致（分支 / 修订 / 视角），拒绝跨聊天或跨分支落地。
-  SPATIAL_SCOPE_MISMATCH: Object.freeze({
-    code: "SPATIAL_SCOPE_MISMATCH",
-    level: "warn",
-    source: "ui",
-    details: SPATIAL_DETAILS
-  })
-});
-function safeToken(value, fallback = "") {
-  return typeof value === "string" && SAFE_ATOM.test(value) && !value.includes("://") ? value : fallback;
-}
-var WORLD_TEXT_KEYS = /* @__PURE__ */ new Set([
-  "prompt",
-  "response",
-  "content",
-  "body",
-  "text",
-  "raw",
-  "rawtext",
-  "storytext",
-  "chatname",
-  "charactername",
-  "excerpt",
-  "quote",
-  "completion",
-  "message",
-  "assistanttext",
-  "usertext"
-]);
-var WORLD_SECRET_KEYS = /* @__PURE__ */ new Set([
-  "authorization",
-  "apikey",
-  "api_key",
-  "access_token",
-  "accesstoken",
-  "auth_token",
-  "authtoken",
-  "password",
-  "passwd",
-  "secret",
-  "token",
-  "bearertoken",
-  "bearer_token",
-  "cookie",
-  "setcookie",
-  "x-api-key",
-  "xapikey"
-]);
-var WORLD_MESSAGE_MAX_CHARS = 500;
-var WORLD_DETAIL_STRING_MAX_CHARS = 200;
-var WORLD_DETAIL_MAX_BYTES = 2048;
-var WORLD_DETAIL_DEPTH = 2;
-function redactWorldSecrets(value) {
-  let out = value;
-  out = out.replace(/\bsk-[A-Za-z0-9_-]{6,}/g, "sk-***");
-  out = out.replace(/\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/gi, "Bearer ***");
-  out = out.replace(
-    /((?:x-)?api[_-]?key|apikey|access[_-]?token|auth[_-]?token|authorization|password|passwd|secret|token)(\s*[:=]\s*)["']?[^\s"',;}\]]{4,}/gi,
-    "$1$2***"
-  );
-  out = out.replace(/\b[a-fA-F0-9]{32,}\b/g, (match) => `sha256:${match.slice(0, 12)}…(${match.length})`);
-  return out;
-}
-function worldRefFingerprint(value) {
-  if (typeof value !== "string") return null;
-  const token = safeToken(value);
-  if (!token) return null;
-  return isAtlasRefFingerprint(token) ? token : atlasRefFingerprint(token);
-}
-function worldToken(value) {
-  if (typeof value !== "string") return void 0;
-  const token = safeToken(value);
-  return token.length > 0 ? token : void 0;
-}
-function worldMessage(value) {
-  const text6 = typeof value === "string" ? value : value === void 0 || value === null ? "" : String(value);
-  const redacted = redactWorldSecrets(text6).replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
-  return redacted.length > WORLD_MESSAGE_MAX_CHARS ? `${redacted.slice(0, WORLD_MESSAGE_MAX_CHARS)}…` : redacted;
-}
-function worldPath(value) {
-  if (typeof value !== "string") return void 0;
-  const token = safeToken(value);
-  if (token === "$") return token;
-  return /^\$(?:\.[A-Za-z0-9_]+|\[\d+\])+$/.test(token) ? token : void 0;
-}
-function sanitizeWorldDetails(details, depth = 0) {
-  const out = {};
-  if (!details || typeof details !== "object" || Array.isArray(details)) return out;
-  for (const [key, value] of Object.entries(details)) {
-    const lowered = key.toLowerCase();
-    if (WORLD_SECRET_KEYS.has(lowered) || lowered === "coresaved") continue;
-    const safeKey = safeToken(key);
-    if (!safeKey) continue;
-    if (WORLD_TEXT_KEYS.has(lowered)) {
-      out[safeKey] = typeof value === "string" ? `[text:${value.length}chars]` : "[text]";
-      continue;
-    }
-    out[safeKey] = sanitizeWorldDetailValue(value, depth);
-  }
-  return out;
-}
-function sanitizeWorldDetailValue(value, depth) {
-  if (value === null || typeof value === "boolean") return value;
-  if (typeof value === "number") return Number.isFinite(value) ? value : null;
-  if (typeof value === "string") {
-    const redacted = redactWorldSecrets(value);
-    return redacted.length > WORLD_DETAIL_STRING_MAX_CHARS ? `${redacted.slice(0, WORLD_DETAIL_STRING_MAX_CHARS)}…(${redacted.length})` : redacted;
-  }
-  if (Array.isArray(value)) {
-    if (depth >= WORLD_DETAIL_DEPTH) return `[array:${value.length}]`;
-    return value.slice(0, 16).map((item) => sanitizeWorldDetailValue(item, depth + 1));
-  }
-  if (typeof value === "object") {
-    if (depth >= WORLD_DETAIL_DEPTH) return "[object]";
-    const nested = sanitizeWorldDetails(value, depth + 1);
-    return Object.keys(nested).length > 0 ? nested : "[object]";
-  }
-  return null;
-}
-function normalizeWorldIssue(input, now = Date.now) {
-  const rawAt = typeof input?.at === "number" && Number.isFinite(input.at) ? input.at : now();
-  const level = LEVELS.has(input?.level) ? input.level : "error";
-  const moduleToken = worldToken(input?.module);
-  const codeToken = typeof input?.code === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(input.code) ? input.code : "UNEXPECTED_ERROR";
-  const details = sanitizeWorldDetails(input?.details);
-  const chatUid = worldRefFingerprint(input?.chatUid);
-  const branchId = worldRefFingerprint(input?.branchId);
-  const turnId = worldRefFingerprint(input?.turnId);
-  const attemptId = worldRefFingerprint(input?.attemptId);
-  const batchId = worldRefFingerprint(input?.batchId);
-  const opId = worldToken(input?.opId);
-  const groupId = worldToken(input?.groupId);
-  const path = worldPath(input?.path);
-  const line = typeof input?.line === "number" && Number.isInteger(input.line) && input.line >= 0 && input.line <= 1e5 ? input.line : void 0;
-  if (!moduleToken) {
-    details.diagnosticCode = "DIAGNOSTIC_MODULE_REQUIRED";
-    details.moduleRequired = true;
-  }
-  const detailBudget = new TextEncoder().encode(JSON.stringify(details)).length;
-  if (detailBudget > WORLD_DETAIL_MAX_BYTES) {
-    for (const key of Object.keys(details)) {
-      if (key === "diagnosticCode" || key === "moduleRequired") continue;
-      delete details[key];
-      if (new TextEncoder().encode(JSON.stringify(details)).length <= WORLD_DETAIL_MAX_BYTES) break;
-    }
-    details.detailsTruncated = true;
-    details.droppedDetailBytes = detailBudget;
-  }
-  const issue25 = {
-    at: new Date(rawAt).toISOString(),
-    level,
-    module: moduleToken ?? "",
-    code: codeToken,
-    chatUid,
-    branchId,
-    turnId,
-    attemptId,
-    batchId
-  };
-  if (opId !== void 0) issue25.opId = opId;
-  if (groupId !== void 0) issue25.groupId = groupId;
-  if (line !== void 0) issue25.line = line;
-  if (path !== void 0) issue25.path = path;
-  issue25.message = worldMessage(input?.message ?? input?.code ?? "");
-  issue25.details = details;
-  issue25.coreSaved = input?.coreSaved === true;
-  return issue25;
-}
-function normalizeWorldIssueList(issues, base, now = Date.now) {
-  const list2 = Array.isArray(issues) ? issues : [];
-  const at = now();
-  return list2.map((issue25) => {
-    const severity = typeof issue25?.severity === "string" ? issue25.severity : "error";
-    const level = severity === "warning" ? "warn" : LEVELS.has(severity) ? severity : "error";
-    const details = {};
-    if (issue25?.severity !== void 0) details.severity = severity;
-    if (issue25?.retryable !== void 0) details.retryable = issue25.retryable === true;
-    if (issue25?.dependencyId !== void 0) details.dependencyId = issue25.dependencyId;
-    return normalizeWorldIssue(
-      {
-        at,
-        level,
-        module: base?.module ?? "",
-        code: issue25?.code ?? "UNEXPECTED_ERROR",
-        chatUid: base?.chatUid,
-        branchId: base?.branchId,
-        turnId: base?.turnId,
-        attemptId: base?.attemptId,
-        batchId: base?.batchId,
-        opId: issue25?.opId,
-        groupId: issue25?.groupId,
-        line: issue25?.line,
-        path: issue25?.path,
-        message: issue25?.message ?? "",
-        details,
-        coreSaved: base?.coreSaved
-      },
-      () => at
-    );
-  });
-}
-function diagnosticsExportPage(entries, cursor, pageSize) {
-  const all = Array.isArray(entries) ? entries : [];
-  const requested = Number(pageSize);
-  const size = Number.isFinite(requested) && requested >= 1 ? Math.min(500, Math.trunc(requested)) : ATLAS_RUNTIME_LIMITS.diagnosticPageSize;
-  const requestedOffset = Number(cursor ?? 0);
-  const offset = Number.isFinite(requestedOffset) && requestedOffset > 0 ? Math.trunc(requestedOffset) : 0;
-  const items = all.slice(offset, offset + size);
-  const nextOffset = offset + items.length;
-  let droppedCount = 0;
-  let droppedReason;
-  for (const entry of all) {
-    const details = entry && typeof entry === "object" && !Array.isArray(entry) ? entry.details : void 0;
-    const reported = Number(details?.droppedCount ?? entry?.droppedCount);
-    if (!Number.isFinite(reported) || reported <= 0) continue;
-    droppedCount += Math.trunc(reported);
-    if (!droppedReason) {
-      const reason = details?.droppedReason ?? details?.reason;
-      droppedReason = typeof reason === "string" && reason.length > 0 ? redactWorldSecrets(reason).slice(0, 120) : "retention";
-    }
-  }
-  const page = {
-    items,
-    total: all.length,
-    droppedCount,
-    exportComplete: nextOffset >= all.length && droppedCount === 0
-  };
-  if (nextOffset < all.length) page.nextCursor = String(nextOffset);
-  if (droppedCount > 0) page.droppedReason = droppedReason ?? "retention";
-  return page;
-}
-
-// src/atlas-sql-browser-entry.ts
+init_atlas_diagnostics();
 init_atlas_db_migrate();
 init_atlas_db_assets();
 
 // src/atlas-sql-session.ts
+init_define_ATLAS_BUILD_INFO();
 init_atlas_work_batching();
 
 // src/atlas-sql-map-assets.ts
+init_define_ATLAS_BUILD_INFO();
 init_atlas_db_envelope();
 init_atlas_db_runtime();
 async function imageAsset(dataUrl) {
@@ -37587,7 +37747,11 @@ init_atlas_db_outbox();
 init_atlas_runtime_limits();
 init_atlas_db_schema();
 
+// src/atlas-sql-chat.ts
+init_define_ATLAS_BUILD_INFO();
+
 // src/atlas-sql-receipt-evidence.ts
+init_define_ATLAS_BUILD_INFO();
 init_atlas_db_runtime();
 function savedTurnHasScene(db, turnId, mapId) {
   const rows4 = queryBound(db, "SELECT before_json,after_json,basis_json,target_row_id,group_id FROM turn_changes WHERE turn_id=? AND target_table='maps'" + (mapId ? " AND target_row_id=?" : ""), mapId ? [turnId, mapId] : [turnId]);
@@ -37612,6 +37776,7 @@ function mapReceiptOperation(hostMessageUid) {
 }
 
 // src/atlas-sql-travel-preview.ts
+init_define_ATLAS_BUILD_INFO();
 init_atlas_sim_motion();
 init_atlas_db_readport();
 function previewSqlTravel(session, destination) {
@@ -37640,6 +37805,7 @@ function previewSqlTravel(session, destination) {
 }
 
 // src/atlas-sql-inspect.ts
+init_define_ATLAS_BUILD_INFO();
 init_atlas_db_runtime();
 init_atlas_hash();
 init_atlas_map_topology();
@@ -37840,6 +38006,7 @@ init_atlas_sql_model_context();
 init_atlas_db_readport();
 
 // src/atlas-contract.ts
+init_define_ATLAS_BUILD_INFO();
 var ATLAS_ERROR_CODES2 = {
   /** 协议版本不兼容 */
   PROTOCOL_INCOMPATIBLE: "PROTOCOL_INCOMPATIBLE",
@@ -38049,6 +38216,7 @@ init_atlas_hash();
 init_atlas_db_runtime();
 
 // src/atlas-sql-view-state.ts
+init_define_ATLAS_BUILD_INFO();
 init_atlas_db_runtime();
 init_atlas_db_readport();
 init_atlas_db_views();
@@ -38058,6 +38226,7 @@ init_atlas_task_views();
 init_atlas_sim_position();
 
 // src/atlas-db-state-adapter.ts
+init_define_ATLAS_BUILD_INFO();
 var LEGACY_ENTITY_CAP = 500;
 function asRecord3(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -38685,6 +38854,7 @@ function querySqlSceneState(ctx, query) {
 }
 
 // src/atlas-sql-timeline.ts
+init_define_ATLAS_BUILD_INFO();
 init_atlas_db_runtime();
 function querySqlCharacterTimeline(ctx, input) {
   const id = input.characterId.replace(/^npc:/, ""), branchId = ctx.branchId;
@@ -38731,7 +38901,11 @@ function querySqlCharacterTimeline(ctx, input) {
   return { branchId, revision: ctx.revision, entries, total, offset, limit, nextOffset: offset + entries.length < total ? offset + entries.length : null };
 }
 
+// src/atlas-sql-map-actions.ts
+init_define_ATLAS_BUILD_INFO();
+
 // lib/world-schema.ts
+init_define_ATLAS_BUILD_INFO();
 var SCHEMA_VERSION = 1;
 var WORLD_BIBLE_MAX_ENTRIES = 80;
 var WORLD_BIBLE_MAX_KEYS = 24;
@@ -40296,6 +40470,7 @@ init_atlas_db_readport();
 init_atlas_sql_refs();
 
 // src/atlas-sql-ref-pages.ts
+init_define_ATLAS_BUILD_INFO();
 init_atlas_db_readport();
 function asId7(value) {
   if (value === null || value === void 0) return "";
@@ -40682,6 +40857,7 @@ function summarizeWorldFill(read, branchId, worldCompletion) {
 init_atlas_db_rollback();
 
 // src/atlas-rollback-preview.ts
+init_define_ATLAS_BUILD_INFO();
 var PROGRESS_TABLE = "construction_progress";
 var MAP_TABLE = "maps";
 var text4 = (value) => typeof value === "string" ? value : value === null || value === void 0 ? "" : String(value);
@@ -40730,6 +40906,7 @@ function summarizeRollbackPlan(plan, input = {}) {
 init_atlas_history_repair();
 
 // src/atlas-sql-retry.ts
+init_define_ATLAS_BUILD_INFO();
 init_atlas_db_runtime();
 init_atlas_db_readport();
 init_atlas_sql_refs();
@@ -40740,6 +40917,7 @@ init_atlas_ops_parser();
 init_atlas_ops_prompts();
 
 // src/atlas-sql-resume.ts
+init_define_ATLAS_BUILD_INFO();
 init_atlas_work_batching();
 init_atlas_db_runtime();
 init_atlas_db_invariants();
@@ -40770,7 +40948,7 @@ async function runSqlResume(session, input) {
       assertCurrent();
       const attempts = JSON.parse(String(row2.attempts_json ?? "[]"));
       const history = JSON.parse(String(row2.decisions_json));
-      const budget = createGenerationBudget({ limit: generationOptions.batching.requestsPerOperation ?? 0, workBatching: generationOptions.workBatching, workUsage: history.work_usage ?? void 0 });
+      const budget = createGenerationBudget({ diagnosticAnchor: anchor, limit: generationOptions.batching.requestsPerOperation ?? 0, workBatching: generationOptions.workBatching, workUsage: history.work_usage ?? void 0 });
       const backgroundPort = session.modelPort ? logModelAttempts(bindModelBudget(session.modelPort, budget, "background"), session.now, (entry) => {
         const finished = Number(entry.finished_wall_ms), started = Number(entry.started_wall_ms);
         attempts.push({ id: `att_resume_${anchor.baseStorageRevision}_${attempts.length}`, ...entry, duration_ms: Math.max(0, finished - started) });
@@ -40943,7 +41121,7 @@ async function retry(session, input) {
   request.sourceSnapshot = sources;
   const generationOptions = normalizeGenerationOptions(await session.modelPort.generationOptions?.());
   assertCurrent();
-  const budget = createGenerationBudget({ limit: generationOptions.batching.requestsPerOperation ?? 0, workBatching: generationOptions.workBatching, workUsage: history.work_usage ?? void 0 });
+  const budget = createGenerationBudget({ diagnosticAnchor: anchor, limit: generationOptions.batching.requestsPerOperation ?? 0, workBatching: generationOptions.workBatching, workUsage: history.work_usage ?? void 0 });
   const response = await bindModelBudget(session.modelPort, budget, "repair").request(request);
   assertCurrent();
   if (revision !== session.repo.internal.currentRevision() || storageRevision !== session.repo.storageRevision) throw new AtlasDbError("STALE_BASE", "模型补交等待期间快照已变化，候选不发布", {});

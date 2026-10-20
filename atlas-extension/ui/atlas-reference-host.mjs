@@ -12,7 +12,7 @@ import { projectReferenceFlows } from './atlas-reference-flows.mjs';
 const ATLAS_FEED_PAGE_MAX=100;
 const ATLAS_FEED_MAX_PAGES=20;
 
-export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort,diagnostics=()=>[],emit=()=>{},defaultPrompt='',pluginVersion=null,fetchFn=globalThis.fetch,loadSqlRuntime=()=>import(new URL('../dist/atlas-sql.mjs',import.meta.url).href)}) {
+export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort,diagnostics=()=>[],emit=()=>{},defaultPrompt='',pluginVersion=null,diagnosticTools={},fetchFn=globalThis.fetch,loadSqlRuntime=()=>import(new URL('../dist/atlas-sql.mjs',import.meta.url).href)}) {
   root.replaceChildren();root.className='atlas-native-ui-host';root.id='atlas-extension-panel-root';
   root.setAttribute('role','application');root.setAttribute('aria-label','阿特拉斯世界工作台');
   // Tavern themes may transform a zero-height html element, making fixed inset
@@ -24,16 +24,21 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
   let disposed=false,ready=false,viewMode='author',epoch=0,lastKey='',scopeId='',lastReadFailure='',latest=emptyReferenceData(),sqlMod=null,loading=null;
   let settings={},prefs={},presetDoc=null,presetQueue=Promise.resolve(),actionBusy=false,actionError=null,actionScope='';
   let mapExportViews=null;
+  let runtimeDiagnosticIds=new Set();
   const context=()=>{const c=getContext?.();return c?.chatMetadata?c:null;};
   function scope(){const s=core.getState(),c=context(),env=c?.chatMetadata?.atlas?.database,enabled=c?.extensionSettings?.atlas_world_sim?.sqlMode??s.stateData?.sqlModeEnabled??s.stateData?.sqlMode??true;return {state:s,context:c,metadata:c?.chatMetadata,enabled,key:JSON.stringify([s.chatId,c?.chatId??c?.chat_id,s.binding?.branchId??'main',env?.sha256,env?.storage_revision,s.stateData?.revision,viewMode,enabled]),data:env?.data};}
   function live(ticket){const now=scope();return !disposed&&ticket.epoch===epoch&&ticket.key===now.key&&ticket.data===now.data&&ticket.metadata===now.metadata;}
   // 写入完成后本聊天的 revision/hash 必然变化；此时只核对聊天和分支身份。
   // 读取仍使用 live() 的完整快照守卫，不能将旧读取应用到新的修订。
   function sameWorld(ticket){const now=scope();return !disposed&&ticket.state.chatId===now.state.chatId&&ticket.state.binding?.branchId===now.state.binding?.branchId&&ticket.metadata===now.metadata&&now.enabled;}
-  function deliver(data,resetScope=false){const s=core.getState();data.meta.engine={hasChat:!!s.chatId,bound:!!s.binding,enabled:s.binding?.enabled===true,sqlEnabled:scope().enabled,serviceStatus:s.serviceStatus??'checking',phase:s.turnPhase??'idle',busy:actionBusy||!!s.pendingTurn||['queued','reading-context','committing'].includes(s.turnPhase),error:actionScope===data.meta.scopeKey&&actionError? actionError:typeof s.lastError==='string'?s.lastError:s.lastError?.message??null};
-    data.RECEIPTS=referenceReceipts(s,data.DIAGNOSTICS);const ids=new Set(data.DIAGNOSTICS.map(d=>d.id));data.DIAGNOSTICS.push(...referenceDiagnostics(diagnostics()).filter(d=>!ids.has(d.id)));
-    if(data.meta.engine.error&&!data.DIAGNOSTICS.some(d=>d.message===data.meta.engine.error))data.DIAGNOSTICS.unshift({id:'engine-last-error',t:'',level:'error',code:'ENGINE_ACTION_FAILED',message:data.meta.engine.error});
-    latest=data;if(ready)frame.contentWindow?.AtlasPreview?.updateSnapshot(data,{resetScope});}
+  function deliver(data,resetScope=false,logsOnly=false){const s=core.getState();data.meta.engine={hasChat:!!s.chatId,bound:!!s.binding,enabled:s.binding?.enabled===true,sqlEnabled:scope().enabled,serviceStatus:s.serviceStatus??'checking',phase:s.turnPhase??'idle',busy:actionBusy||!!s.pendingTurn||['queued','reading-context','committing'].includes(s.turnPhase),error:actionScope===data.meta.scopeKey&&actionError? actionError:typeof s.lastError==='string'?s.lastError:s.lastError?.message??null};
+    const incoming=referenceDiagnostics(diagnostics()),byId=new Map(data.DIAGNOSTICS.filter(d=>!runtimeDiagnosticIds.has(d.id)).map(d=>[d.id,d]));
+    for(const entry of incoming)byId.set(entry.id,entry);
+    runtimeDiagnosticIds=new Set(incoming.map(d=>d.id));data.DIAGNOSTICS=[...byId.values()];
+    data.RECEIPTS=referenceReceipts(s,data.DIAGNOSTICS);
+    if(data.meta.engine.error&&!data.DIAGNOSTICS.some(d=>d.message===data.meta.engine.error))data.DIAGNOSTICS.unshift(...referenceDiagnostics([{id:'engine-last-error',level:'error',source:'ui',code:'ENGINE_ACTION_FAILED',message:data.meta.engine.error,
+      ...diagnosticTools.atlasDiagnosticContext?.({chatUid:s.chatId,branchId:s.binding?.branchId??'main'})}]));
+    latest=data;if(ready){const ui=frame.contentWindow?.AtlasPreview;if(logsOnly&&ui?.updateDiagnostics)ui.updateDiagnostics(data.DIAGNOSTICS);else ui?.updateSnapshot(data,{resetScope});}}
   // 错误要带上 code：调用方需要区分「游标过期，重读第一页就行」和「服务真的坏了」。
   async function request(method,path,body){const r=await api.request(method,path,body);if(r.status!==200||r.body?.ok===false){const error=Error(r.body?.error?.message??`请求失败（${r.status}）`);error.code=r.body?.error?.code??null;error.status=r.status;error.details=r.body?.error?.details??null;throw error;}return r.body?.data??r.body;}
   async function query(ticket,kind,extra={}){if(!live(ticket))return null;
@@ -73,8 +78,10 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
     if(disposed)return;
     const captured=scope(),worldScope=JSON.stringify([captured.state.chatId,captured.state.binding?.branchId,viewMode]);
     const changed=scopeId!==worldScope;scopeId=worldScope;
-    const key=captured.key+'|'+JSON.stringify([captured.state.receipts,captured.state.lastError,captured.state.binding?.enabled,captured.state.serviceStatus,captured.state.pendingTurn,captured.state.turnPhase,actionBusy,diagnostics().length]);
-    if(!force&&key===lastKey)return loading;
+    // Reading creates diagnostics. A log-only refresh must not start another read,
+    // rebuild the map, or detach a receipt's expanded details.
+    const key=captured.key+'|'+JSON.stringify([captured.state.receipts,captured.state.lastError,captured.state.binding?.enabled,captured.state.serviceStatus,captured.state.pendingTurn,captured.state.turnPhase,actionBusy]);
+    if(!force&&key===lastKey){deliver(latest,false,true);return loading;}
     lastKey=key;const ticket={...captured,epoch:++epoch};
     if(changed)deliver(emptyReferenceData({viewMode,scopeKey:worldScope,worldName:captured.state.binding?'正在读取当前世界':'尚未建立世界'}),true);
     loading=(async()=>{
@@ -146,7 +153,16 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
       receipt:result?.receipt,issues:result?.receipt?.issues??result?.issues,coreSaved:result?.coreSaved===true,
       ...(result?.build?{build:result.build}:{}),...extra};
     core.recordExternalReceipt?.(sqlMod.toLegacyTurnReceipt(result.receipt,{coreSaved:result.coreSaved}),captured.state.chatId,detail);
-    emit({level:result.receipt?.status==='partial'?'warn':'info',source:'map',code,operation,phase:'commit',outcome:result.receipt?.status==='partial'?'failed':'success'});
+    const scoped=diagnosticTools.atlasDiagnosticContext?.({...result.receipt?.anchor,chatUid:captured.state.chatId,
+      branchId:captured.state.binding?.branchId??'main',mapId:extra.mapId})??{};
+    const issues=diagnosticTools.diagnosticIssues?.(result.receipt?.issues,result.issues)??result.receipt?.issues??result.issues??[];
+    const status=result.receipt?.status,failed=status==='failed',partial=status==='partial';
+    const event={...scoped,level:failed?'error':partial?'warn':'info',source:'map',code,operation,phase:'commit',outcome:failed||partial?'failed':'success',
+      details:{...scoped.details,coreSaved:result.coreSaved===true,saveConfirmed:result.coreSaved===true,
+        ...(typeof extra.sceneSaved==='boolean'?{sceneSaved:extra.sceneSaved}:{}),
+        receiptStatus:result.receipt?.status??'noop',issueCount:issues.length}};
+    emit(event);
+    diagnosticTools.emitAtlasIssueDiagnostics?.(emit,event,issues);
   }
   /** 「有失败就报全」：地图类任务的每一处 map/path 问题都要露出来，不许只留第一条。 */
   function mapIssues(result){
@@ -295,7 +311,7 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
       // 布局回执的「布局：…」一行只能来自**真实证据**：候选保存确认 + 这张图真的有可画场景。
       // 官道这类没有 scene 的情况即便 coreSaved=true 也不许显示「生成完成」。
       recordMapReceipt(result,captured,'layout','LAYOUT_TASK_COMPLETE',
-        {sceneSaved:result.coreSaved===true&&result.sceneSaved===true&&node?.hasLayout===true});
+        {mapId,sceneSaved:result.coreSaved===true&&result.sceneSaved===true&&node?.hasLayout===true});
       if(result.coreSaved!==true)throw Error(mapIssues(result).join('；')||'本图布局未保存');
       if(!node?.hasLayout||result.sceneSaved!==true)throw Error(mapIssues(result).join('；')||'本轮没有保存新的可绘制布局，原布局已保留，请查看诊断');
       return result;
@@ -326,7 +342,7 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
           requestId:crypto.randomUUID(),mode:requested,...(requested==='local'?{focusLocationIds:focus}:{}),
           baseRevision:view.revision,...await sourceText(captured)});
         if(!sameWorld(captured))return null;
-        recordMapReceipt(result,captured,'build','WORLD_BUILD_TASK_COMPLETE');
+        recordMapReceipt(result,captured,'build','WORLD_BUILD_TASK_COMPLETE',{mapId});
         // 只有真保存了（coreSaved=true）才算「正式结果」；否则候选一律丢弃并报全部问题。
         if(result.coreSaved!==true)throw Error(mapIssues(result).join('；')||'本图建设未保存');
         await core.refresh();await refresh(true);

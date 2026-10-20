@@ -16,6 +16,7 @@
 import type { AtlasModelPort } from './atlas-db-contract.ts';
 import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
 import { workPlanLimits, type ModelWorkClass, type WorkBatchingSettings } from './atlas-work-batching.ts';
+import { atlasDiagnosticContext, type DiagnosticContext } from './atlas-request-diagnostics.ts';
 
 export type WorkPlanUsage = { normal: Partial<Record<ModelWorkClass,number>>; extra: number; transports: number };
 
@@ -30,6 +31,8 @@ export type BudgetClaimFailureCode = 'MODEL_BUDGET_EXHAUSTED' | 'MODEL_BATCH_DUP
 export type BudgetClaim = { ok: true; duplicate?: false } | { ok: false; code: BudgetClaimFailureCode; reason: string };
 
 export type GenerationBudgetPort = {
+  /** Diagnostic identity of this operation; never serialized or sent to the model. */
+  readonly diagnosticContext?: DiagnosticContext;
   readonly limit: number;
   /** 已占用的真实传输发送数（含失败）。 */
   used(): number;
@@ -58,6 +61,7 @@ export type GenerationBudgetPort = {
 };
 
 export type CreateGenerationBudgetInput = {
+  diagnosticAnchor?: Record<string, unknown>;
   /** 本回合已经发出的尝试（前景 / 纠错），用来接着排队计数，不重算。 */
   attempts?: readonly BudgetAttempt[];
   /** 0 means unlimited; a positive integer limits actual transports. */
@@ -93,6 +97,7 @@ export function createGenerationBudget(input: CreateGenerationBudgetInput = {}):
   };
 
   return {
+    ...(input.diagnosticAnchor ? { diagnosticContext: atlasDiagnosticContext(input.diagnosticAnchor) } : {}),
     limit,
     used: () => transports,
     remaining: () => Math.min(planRemaining(),Math.max(0, available - transports)),

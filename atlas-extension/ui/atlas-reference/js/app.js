@@ -288,13 +288,21 @@ function diagnosticMeta(d){
   if(t.path)bits.push(`path ${t.path}`);
   if(t.route)bits.push(`route ${t.route}`);
   if(d?.errorCode)bits.push(`错误码 ${d.errorCode}`);
+  if(d?.causeCode)bits.push(`底层原因 ${d.causeCode}`);
+  if(d?.requestRef)bits.push(`请求 ${d.requestRef}`);
+  if(t.turnRef)bits.push(`回合 ${t.turnRef}`);
+  if(typeof d?.durationMs==='number')bits.push(`耗时 ${d.durationMs}ms`);
+  if(typeof t.timeoutMs==='number')bits.push(`超时 ${t.timeoutMs}ms`);
+  if(typeof t.transportAttempt==='number')bits.push(`第 ${t.transportAttempt} 次发送`);
+  if(typeof d?.count==='number'&&d.count>1)bits.push(`折叠 ${d.count} 条同类日志`);
+  if(typeof t.coreSaved==='boolean')bits.push(t.coreSaved?'已确认保存':'未确认保存');
   if(typeof t.retryable==='boolean')bits.push(t.retryable?'可重试':'不可重试');
   if(Array.isArray(t.issues)&&t.issues.length)bits.push(`${t.issues.length} 项问题`);
   return bits.join(' · ');
 }
 function diagnosticGroups(rows){
   const groups=new Map();
-  for(const d of rows){const key=String(d.traceId??d.turnId??d.phase??'其他记录');if(!groups.has(key))groups.set(key,[]);groups.get(key).push(d);}
+  for(const d of rows){const key=String(d.details?.turnRef??d.traceId??d.requestRef??d.turnId??d.phase??'其他记录');if(!groups.has(key))groups.set(key,[]);groups.get(key).push(d);}
   return [...groups.entries()];
 }
 function backupPanelHTML(){
@@ -306,7 +314,7 @@ function diagnosticsHTML(){return `<div class="catalog-toolbar"><label class="se
 function diagnosticRows(q='',level='all'){
   const rows=D.DIAGNOSTICS.filter(d=>(level==='all'||d.level===level)&&JSON.stringify(d).toLowerCase().includes(q.toLowerCase()));
   if(!rows.length)return empty('没有符合条件的日志');
-  return diagnosticGroups(rows).map(([key,list])=>`<section class="diagnostic-group"><div class="section-label">${esc(key)} · ${list.length} 项</div>${list.map(d=>{const meta=diagnosticMeta(d);return `<details class="diagnostic-row ${esc(d.level)}"><summary><time>${esc(d.t)}</time><em>${esc(d.level)}</em><div><b>${esc(d.code)}</b><span>${esc(d.message)}</span>${meta?`<code class="diag-meta">${esc(meta)}</code>`:''}</div>${icon('chev')}</summary><pre>${esc(JSON.stringify(d,null,2))}</pre></details>`;}).join('')}</section>`).join('');
+  return diagnosticGroups(rows).map(([key,list])=>`<section class="diagnostic-group"><div class="section-label">${esc(key)} · ${list.length} 项</div>${list.map(d=>{const meta=diagnosticMeta(d);return `<details class="diagnostic-row ${esc(d.level)}" data-diagnostic-id="${esc(d.id)}"><summary><time>${esc(d.t)}</time><em>${esc(d.level)}</em><div><b>${esc(d.code)}</b><span>${esc(d.message)}</span>${meta?`<code class="diag-meta">${esc(meta)}</code>`:''}</div>${icon('chev')}</summary><pre>${esc(JSON.stringify(d,null,2))}</pre></details>`;}).join('')}</section>`).join('');
 }
 function settingsHTML(){const tabs=[['prompts','提示词'],['connection','API 连接'],['assignments','任务与分批'],['interaction','地图交互'],['appearance','外观']];let html=`<div class="settings-tabs" role="tablist" aria-label="预设分类">${tabs.map(([id,t])=>`<button class="filter-btn ${state.settingsTab===id?'on':''}" data-settings-tab="${id}" role="tab" aria-selected="${state.settingsTab===id}">${t}</button>`).join('')}</div>`;
  if(state.settingsTab==='interaction')return html+`<div class="appearance-form"><h3>地图交互</h3><label class="appearance-row"><span>单击地点直接进入子地图</span><input type="checkbox" data-single-click-enter ${state.singleClickEnter?'checked':''}></label><p class="scope-note">默认关闭：单击地点查看右栏信息，再点击「进入此地点」。人物、物品与消息始终单击查看详情。</p><label class="appearance-row"><span>收起地图图例</span><input type="checkbox" data-legend-collapsed ${state.legendCollapsed?'checked':''}></label><p class="scope-note">图例固定收纳在比例尺上方。比例尺长度保持不变，缩放只改变距离数值。</p><p class="scope-note">${preferences.persistent?'交互偏好保存在当前浏览器。':'当前环境无法保存到浏览器，偏好在本次打开期间有效。'}</p></div>`;
@@ -531,11 +539,19 @@ function bind(){
  listen(window,'pagehide',destroy);
 }
 function updateSnapshot(value,{resetScope=false}={}){const snapshot=clone(value);if(!snapshot?.meta||!snapshot.ROOT)throw Error('ATLAS_SNAPSHOT_INVALID');const page=state.page,id=state.nodeId,selected=state.selected,oldScope=D.meta?.scopeKey;for(const key of Object.keys(D))delete D[key];Object.assign(D,snapshot);state.viewMode=D.meta.viewMode;if(resetScope||oldScope!==D.meta.scopeKey){state.cameras.clear();state.selected=null;state.open.clear();}const next=nodes().find(n=>n.id===id)?id:D.meta.initialNodeId||D.ROOT.id;navigate(next,true);if(!resetScope&&oldScope===D.meta.scopeKey&&selected){const exists=selected.kind==='character'?D.CAST.some(x=>x.id===selected.id):selected.kind==='item'?D.ITEMS.some(x=>x.id===selected.id):selected.kind==='place'?!!byId(selected.id):selected.kind==='message'?!!message(selected.id):selected.kind==='task'?!!task(selected.id):selected.kind==='lore'?D.LORE.some(x=>x.id===selected.id):D.EVENTS.some(x=>x.id===selected.id);if(exists)state.selected=selected;}state.page=page;renderAll();if(state.selected?.kind==='character')refreshFlows();map.setPaused(page!=='map'||document.hidden);}
+function updateDiagnostics(rows){
+ D.DIAGNOSTICS=clone(rows);
+ const container=$('#diagnosticRows');if(!container)return;
+ const expanded=new Set([...container.querySelectorAll('details[open]')].map(node=>node.dataset.diagnosticId));
+ const search=$('#diagnosticSearch')?.value||'',level=$('#diagnosticLevel')?.value||'all';
+ container.innerHTML=diagnosticRows(search,level);
+ for(const node of container.querySelectorAll('details'))if(expanded.has(node.dataset.diagnosticId))node.open=true;
+}
 async function runHost(action,success,...args){const before=D.meta.scopeKey;try{await window.AtlasHost[action](...args);if(before===D.meta.scopeKey)toast(success);}catch(error){toast(error.message,'warn');if(before===D.meta.scopeKey){D.meta.engine??={};D.meta.engine.error=error.message;diagnostic('error','UI_ACTION_FAILED',error.message,{action});renderDock();renderPage();}window.AtlasHost.diagnostic({level:'error',source:'ui',code:'UI_ACTION_FAILED',details:{action,message:error.message}});}}
 function destroy(){if(mapExportUrl)URL.revokeObjectURL(mapExportUrl);mapExportUrl=null;mapExportText='';map.destroy();timers.forEach(clearTimeout);timers.clear();unlisten.splice(0).forEach(fn=>fn());}
 state.open=new Set((path(state.nodeId)||[]).map(n=>n.id));
 if(window.AtlasHost.initial.skin)applySkin(window.AtlasHost.initial.skin);applyInteractionPreferences();map.boot();bind();navigate(state.nodeId,true);
 requestAnimationFrame(()=>{map.resize();map.fit(false);});
-window.AtlasPreview={state,map,data:D,presets,updateSnapshot,setVisible:visible=>{map.setPaused(!visible||state.page!=='map');if(visible){$('#appWindow').hidden=false;map.resize();}},go:id=>navigate(id),page:setPage,select,inspectPlace,showEntity,showFlow,showTask,advance:advanceDemo,undo:undoDemo,reset:resetDemo,switchView,destroy,formatDistance,frameChrome,
+window.AtlasPreview={state,map,data:D,presets,updateSnapshot,updateDiagnostics,setVisible:visible=>{map.setPaused(!visible||state.page!=='map');if(visible){$('#appWindow').hidden=false;map.resize();}},go:id=>navigate(id),page:setPage,select,inspectPlace,showEntity,showFlow,showTask,advance:advanceDemo,undo:undoDemo,reset:resetDemo,switchView,destroy,formatDistance,frameChrome,
  turnEvents,historyEvents,eventLinksHTML,backupPanelHTML,buildMap,exportUpgradeBackup,refreshBackupStatus};
 })();

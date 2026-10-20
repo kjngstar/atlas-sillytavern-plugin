@@ -466,6 +466,21 @@ const LOG_FIXTURE = ({id = 'd1', level = 'error', code = 'LAYOUT_TASK_FAILED', m
   logsView: view([{logId: id, level, code, message, details: {mapId: 'bld-map'}, at: '2026-10-11 09:00'}]),
 });
 const diagData = (options) => projectReferenceData(LOG_FIXTURE(options));
+test('日志增量更新保留搜索和展开详情，不重建回执或地图',t=>{
+  const ui=withUI(t,{data:diagData()});ui.preview.page('diag');
+  const search=ui.w.document.querySelector('#diagnosticSearch');search.value='LAYOUT';
+  const detail=ui.w.document.querySelector('[data-diagnostic-id="d1"]');detail.open=true;
+  const dock=ui.w.document.querySelector('#dockBody'),before=dock.innerHTML;
+  const entry=ui.preview.data.DIAGNOSTICS[0];
+  ui.preview.updateDiagnostics([{...entry,count:18},{id:'next',code:'MODEL_REQUEST_FAILED',level:'error',message:'超时',details:{timeoutMs:300000}}]);
+  assert.equal(ui.w.document.querySelector('#diagnosticSearch'),search);
+  assert.equal(search.value,'LAYOUT');
+  assert.equal(ui.w.document.querySelector('[data-diagnostic-id="d1"]').open,true);
+  assert.equal(ui.w.document.querySelector('[data-diagnostic-id="next"]'),null,'当前搜索条件继续生效');
+  assert.match(ui.w.document.querySelector('#diagnosticRows').textContent,/折叠 18 条同类日志/);
+  assert.equal(dock.innerHTML,before,'单纯新增日志不重建回执详情');
+  assert.equal(ui.preview.data.DIAGNOSTICS.length,2);
+});
 const clipboardOf = (w, impl) => Object.defineProperty(w.navigator, 'clipboard', {configurable: true, value: impl});
 const toastText = (w) => w.document.getElementById('toastWrap').textContent;
 const flush = () => new Promise((resolve) => setTimeout(resolve, 10));
