@@ -162,6 +162,27 @@ test('T10-03 M1 最小贯通：观察正文 → 建人物+地点 → PreparedCom
   }
 });
 
+test('repair 对已成功创建的同批 new: 人物定位，不复制成同名 NPC', async () => {
+  const { repo, model } = await makeRepo({ responses: [
+    [
+      {op:'character.upsert',ref:'new:player',data:{name:'验收主角',role:'protagonist',importance:'core'}},
+      {op:'character.upsert',ref:'new:player',data:{location_ref:'L2'}},
+    ].map(JSON.stringify).join('\n'),
+    JSON.stringify({ticket:'R1',op:'character.upsert',ref:'new:player',data:{name:'验收主角',identity:'本轮行动主体',location_ref:'L2'}}),
+  ] });
+  try {
+    const prepared=await repo.prepareTurn({anchor:anchorFor(IDS.chatA,0),userText:'',assistantText:'验收主角走进圣光学校。',sourceSnapshot:SOURCE_SNAPSHOT,phaseBatches:['observe'],manual:false});
+    assert.equal(model.calls.length,2);
+    const candidate=repo.getCandidate(prepared.token);
+    const rows=queryBound(candidate.db,"SELECT id,role,location_id FROM characters WHERE name='验收主角'");
+    assert.equal(rows.length,1,'修复沿用已保存的实体 ID');
+    assert.equal(rows[0].role,'protagonist','定位修复不丢失已登记主角身份');
+    assert.equal(rows[0].location_id,IDS.L2);
+    assert.deepEqual(foreignKeyCheck(candidate.db),[]);
+    assert.ok(prepared.receipt.groups.every(g=>g.status==='applied'||g.status==='duplicate'));
+  } finally { await repo.close(); }
+});
+
 test('T10-04 P01 只有心理没有引文：不要求 quote，thought 变化，位置不变', async () => {
   const { repo } = await makeRepo({ responses: [caseById('P01').response] });
   try {

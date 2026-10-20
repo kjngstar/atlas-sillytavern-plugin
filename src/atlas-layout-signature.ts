@@ -31,7 +31,7 @@ import { stableHexHash } from './atlas-hash.ts';
  * 程序布局策略版本。改动布局算法语义（而不是改数据）时递增，
  * 让所有已保存的指纹一次性失效、重排一次，而不是永久卡在旧结果上。
  */
-export const LAYOUT_SIGNATURE_POLICY_VERSION = 'layout-v7';
+export const LAYOUT_SIGNATURE_POLICY_VERSION = 'layout-v9';
 
 /** 该图负责展示的地点（容器地点 + 本图成员）。 */
 export type LayoutSignatureMember = {
@@ -57,6 +57,7 @@ export type LayoutSignatureAuthorIntent = {
   uncertainty: number | null;
   /** 已作者确认的面积（canonical [[x,y],…]）；无则 null。 */
   area: readonly (readonly number[])[] | null;
+  dimensions?: {widthM:number;heightM:number}|null;
 };
 
 /** 按 P04 归属规则选出的路线。 */
@@ -103,7 +104,7 @@ export function computeLayoutInputSignature(input: LayoutSignatureInput): string
 
   const authorIntent = [...input.authorIntent]
     .sort((a, b) => byId(a.id, b.id))
-    .map((a) => [a.id, str(a.precision), num(a.gridX), num(a.gridY), num(a.uncertainty), a.area ?? null]);
+    .map((a) => [a.id, str(a.precision), num(a.gridX), num(a.gridY), num(a.uncertainty), a.area ?? null, a.dimensions ? [a.dimensions.widthM,a.dimensions.heightM] : null]);
 
   const routes = [...input.routes]
     .sort((a, b) => byId(a.id, b.id))

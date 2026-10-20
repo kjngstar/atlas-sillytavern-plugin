@@ -212,6 +212,8 @@ export type SpatialProfileResolution = {
 export type SpatialProfileInput = {
   map: Row;
   container: Row | null;
+  /** Structured containing place; names never determine an indoor profile. */
+  parentContainer?: Row | null;
   /** 本图已绑定的命名走廊地点（P11 的 corridor-binding）。 */
   corridorEntityId?: string | null;
   /** 本图负责的地点行（成员）：用于判定 unsupported/partial。 */
@@ -248,6 +250,11 @@ export function resolveSpatialProfile(input: SpatialProfileInput): SpatialProfil
     // 可信关系推导：本图绑定了一条真实的命名走廊 → 通行空间。这条比类型默认更可信，
     // 但它仍然**不覆盖**作者的显式选择（上一分支已经拦下了 author）。
     chosen = { mode: 'circulation', basis: 'source-supported', reason: `本图已绑定真实走廊 ${corridorEntityId}` };
+  } else if (containerKind === 'other'
+    && ['building', 'floor', 'room', 'vehicle'].includes(TEXT(input.parentContainer?.kind))
+    && (input.members ?? []).some(member => member.kind === 'room')
+    && !(input.members ?? []).some(member => ['region', 'natural', 'city', 'district', 'building'].includes(TEXT(member.kind)))) {
+    chosen = { mode: 'interior', basis: 'source-supported', reason: '该容器位于已登记室内容器内，并直接包含已登记房间' };
   } else if (containerKind==='building'&&(input.members??[]).some(m=>m.kind==='building')&&(input.members??[]).some(m=>['region','natural','other'].includes(String(m.kind)))) {
     chosen={mode:'compound',basis:'source-supported',reason:'已登记成员同时包含独立建筑与室外空间'};
   } else if (containerKind && TYPED_DEFAULT[containerKind]) {

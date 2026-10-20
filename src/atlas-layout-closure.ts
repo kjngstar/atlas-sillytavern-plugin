@@ -38,11 +38,14 @@ export function completeLayoutClosure(input:{group:AtomicGroup;maps:Row[];locati
     const container=locations.find(l=>l.id===map.container_location_id),scene=frame.atlasScene as Row|undefined;
     const layout=scene?.layout as Row|undefined;
     const members=collectMapLocations({mapRow:map,maps,locations});
-    const profile=resolveSpatialProfile({map,container:container??null,members,routes:input.routes.filter(r=>r.map_id===mapId)});
-    const kind=layout?profile.layoutKind:(['room','floor'].includes(String(container?.kind))&&canonical?'floor':null);
+    const profile=resolveSpatialProfile({map,container:container??null,parentContainer:locations.find(row=>row.id===container?.parent_location_id)??null,members,routes:input.routes.filter(r=>r.map_id===mapId)});
+    const pending=frame.atlasLayoutRequest as Row|undefined;
+    // A parent footprint establishes a non-leaf floor's size, not its internal
+    // layout. Leave it for its own pending request instead of inventing a self
+    // room and marking the real multi-room request completed.
+    const kind=layout||pending?.status==='pending'?profile.layoutKind:(members.length===0&&['room','floor'].includes(String(container?.kind))&&canonical?'floor':null);
     if(kind!=='floor'&&kind!=='city'&&kind!=='overview')continue;
     const spaceSize=resolveMapSpaceSize({maps,locations,mapRow:map,branchId:scope.branchId});
-    const pending=frame.atlasLayoutRequest as Row|undefined;
     let spec=structuredClone(pending?.status==='pending'?pending.spec:scene?.constraints??{}) as Row;
     if(kind==='floor'&&initialLedgers.has(mapId)&&canonical&&Array.isArray(spec.rooms)&&spec.rooms.length===1&&(spec.rooms[0] as Row).id===container?.id){
       // Legacy child guesses had no shared furniture identity. The first shared

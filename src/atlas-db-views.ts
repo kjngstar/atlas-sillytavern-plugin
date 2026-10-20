@@ -548,6 +548,7 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
         const resolution = resolveSpatialProfile({
           map,
           container: container ?? null,
+          parentContainer: visibleLocations.find(row=>row.id===container?.parent_location_id) ?? null,
           corridorEntityId: boundCorridorIdOf(map),
           members,
           routes: profileRoutes,

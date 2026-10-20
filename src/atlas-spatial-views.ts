@@ -202,6 +202,7 @@ export function querySpatialScene(ctx: ViewContext, query: ViewQuery): ViewResul
     const profile = resolveSpatialProfile({
       map: mapRow,
       container,
+      parentContainer: container ? locationById.get(String(container.parent_location_id)) ?? null : null,
       corridorEntityId: boundCorridorIdOf(mapRow),
       members,
       routes: routeRows.filter((row) => containerId !== ''

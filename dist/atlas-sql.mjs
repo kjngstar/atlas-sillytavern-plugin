@@ -2535,7 +2535,7 @@ var init_atlas_ops_prompts = __esm({
       "{{allowedOperationHelp}}"
     ].join("\n");
     MINIMUM_HELP = {
-      "location.upsert": "新建 name；修改 ref + 至少一个变更字段；kind=region/city/district/building/room/natural/vehicle/other；parent_ref=所属地点，mobility=fixed/mobile，anchor_ref=载具锚点；existence_quality=confirmed/inferred/hypothetical，正文明确事实用 confirmed，推断新增地点用 inferred，不能写 story（story 是来源名）；area={kind:cells,cells:[{x,y}],quality:confirmed/estimated,source:manual/story/worldbook/estimate} 或 {kind:polygon,points:[{x,y}],quality,source}；范围坐标沿用所属地图尺度，推断布局不证明真实距离；有已提供 map_ref 才能给 position={x,y,precision:exact/approximate/layout}",
+      "location.upsert": '新建 name；修改 ref + 至少一个变更字段；kind=region/city/district/building/room/natural/vehicle/other；parent_ref=所属地点，mobility=fixed/mobile，anchor_ref=载具锚点；existence_quality=confirmed/inferred/hypothetical，正文明确事实用 confirmed，推断新增地点用 inferred，不能写 story（story 是来源名）；仅知道房间长宽（米）、不知道父图位置时，area={kind:"dimensions",widthM:12,heightM:8,quality:"confirmed",source:"story"}，按资料填写实际数值，不编造从(0,0)起的轮廓；已知范围坐标才用 area={kind:cells,cells:[{x,y}],quality:confirmed/estimated,source:manual/story/worldbook/estimate} 或 {kind:polygon,points:[{x,y}],quality,source}，坐标沿用所属地图尺度，不把米数直接当格数；有已提供 map_ref 才能给 position={x,y,precision:exact/approximate/layout}',
       "character.upsert": "正式新建必须 data.name + data.identity / data.importance / data.importance_reason 至少一个；identity 写有依据的身份，不能只写 role 或 description 代替；role=protagonist/companion/npc，importance=core/recurring/supporting（不用 primary）；候选只需 data.name（data.registration=watch）；修改已有对象用 ref",
       "item.upsert": "新建 name，可用 placement={holder_ref|container_ref|location_ref} 指定初始落点；修改 ref；既有物品换落点用 item.transfer",
       "item.transfer": 'ref + data.to 对象：{"holder_ref":"人物引用"} / {"container_ref":"容器物品引用"} / {"location_ref":"地点引用"} / {"unknown":true} 四选一；to 不能直接写字符串。同批可先 item.upsert ref:"new:rope"，再 item.transfer ref:"new:rope"，转移是引用这个新物品，不是重复新建',
@@ -2558,7 +2558,9 @@ var init_atlas_ops_prompts = __esm({
         "识别有重要身份/实质世界书资料的人物，允许首楼建档；一闪而过的有名路人用character.upsert加registration=watch报告候选，完全无关无名群众不建档。",
         "每轮主动判断唯一主角当前实际所在地点；正文代词承接上文且唯一指向已到达地点时也更新 location_ref。意图、梦境、回忆、远方镜头不算抵达。",
         "主角是用户人设；助手楼层显示名或角色卡标题只是宿主元数据，不能仅凭它建成主角或在场人物。",
+        "同一新人物只声明一次：name、身份、role 和 location_ref 放在同一条 character.upsert 的 data 中。不要再用相同 new: 别名拆一条定位操作；已有主角使用目录中的正式引用。",
         "地点包含关系、人物粗位置与精确坐标分开处理。学校内但教室未知，就只给学校引用。",
+        '明确的楼层使用 kind="floor"，房间使用 kind="room"；不要把楼层登记为 other。若正文只说明某建筑的一间大厅，通常直接将大厅挂建筑，无需额外发明楼层容器。',
         "心理/倾向可以依据人物设定合理更新，并保持简短。",
         "正文明确建立或改变人物关系时用 relation.upsert 保存；只有同场出现不证明互相认识。明确的消息、公告或传言用 information.propose 登记，公开发布写 secrecy=public 与 spread_at_ref，明确告知谁写 recipient_ref；地点有风声不等于主角已听见。不要把每句闲聊变成传言，也不要把秘密设成公开。",
         "已完成行为用 event.propose 的 activity={kind:dialogue/meal/rest/sleep/travel/combat/other,completed:true} 和 time_hint={elapsed_s:明确秒数} 或 {min_s,nominal_s,max_s}。未完成计划用completed:false，不能推进时间。已完成赶路可引用真实subject_ref人物和route_ref路线，由程序按距离及人物能力计算耗时。"
@@ -4267,6 +4269,12 @@ var init_atlas_db_readport = __esm({
 });
 
 // vendor/atlas-spatial/contracts.mjs
+function readMetricDimensions(area) {
+  if (!area || area.kind !== "dimensions" || !["confirmed", "estimated"].includes(area.quality)) return null;
+  const { widthM, heightM } = area;
+  if (![widthM, heightM].every((v) => Number.isFinite(v) && v >= 0.2 && v <= 2e4)) return null;
+  return { widthM, heightM };
+}
 function spaceLocalId(locationId, contentId) {
   if (typeof locationId !== "string" || !locationId) return null;
   if (typeof contentId !== "string" || !contentId) return null;
@@ -4729,13 +4737,13 @@ function floor2(spec, previous = null) {
   if (!bare.ok) return bare;
   const groups = [], bodies = [], actors = [], items = [], windows = [], lamps = [], issues = [], doorSwings = [];
   for (const r of bare.rooms) {
-    const door = bare.doors.find((d) => d.roomId === r.id), aisle = spec.singleRoom ? 0.8 : 1.6, margin = spec.singleRoom ? 0.2 : 0.4;
-    const spine = { x: door.x - aisle / 2, y: r.y, w: aisle, h: r.h }, inner = { x: r.x + margin, y: r.y + (spec.singleRoom ? margin : 1), w: r.w - margin * 2, h: r.h - (spec.singleRoom ? margin * 2 : 1.4) };
+    const door = bare.doors.find((d) => d.roomId === r.id), aisle = spec.singleRoom ? 0.8 : 1.6, margin = 0.2;
+    const spine = { x: door.x - aisle / 2, y: r.y, w: aisle, h: r.h }, inner = { x: r.x + margin, y: r.y + margin, w: r.w - margin * 2, h: r.h - margin * 2 };
     const swing = { id: "swing:" + r.id, roomId: r.id, x: door.x - door.width / 2, y: r.side === "north" ? door.y - door.width : door.y, w: door.width, h: door.width };
     doorSwings.push(swing);
     const exact = (spec.actors || []).filter((a) => a.roomId === r.id && a.position).map((a) => ({ id: a.id, ...a.position }));
     const priority = (f) => f.locked ? 2 : previous?.groups?.some((g) => g.id === f.id) ? 1 : 0;
-    for (const f of ordered2((spec.contents || []).filter((f2) => f2.roomId === r.id)).sort((a, b) => priority(b) - priority(a))) {
+    for (const f of ordered2((spec.contents || []).filter((f2) => f2.roomId === r.id)).sort((a, b) => priority(b) - priority(a) || b.w * b.h - a.w * a.h)) {
       if (!Number.isFinite(f.w) || !Number.isFinite(f.h) || f.w <= 0 || f.h <= 0 || f.type === "reading" && (f.w < 2 || f.h < 2)) {
         issues.push({ id: f.id, code: "DETAIL_DIMENSION_INVALID" });
         continue;
@@ -7609,7 +7617,12 @@ function compileSceneGroup({ request, scope, currentScope, mapRow, locations, ch
     if (!generate) return failure("LAYOUT_KIND_UNSUPPORTED", "$.request.kind", "使用 floor/city/overview；其他空间沿用现有轮廓");
     const built = buildLayoutContext({ scope, mapRow, maps, locations, characters, items, routes });
     if (!built.ok) return built;
-    const ctx = { ...built.context, currentScope, childSpaces, autoPlan, planningProjection }, spec = clone(request.spec), membershipIssues = [];
+    const dimensionFacts = Object.fromEntries((locations ?? []).filter((l) => l.branch_id === scope.branchId && l.status === "active" && l.map_id === mapRow.id).flatMap((l) => {
+      const area = typeof l.area_geometry_json === "string" ? JSON.parse(l.area_geometry_json) : l.area_geometry_json;
+      const size = area?.quality === "confirmed" ? readMetricDimensions(area) : null;
+      return size ? [[l.id, { ...size, quality: "confirmed", source: "author" }]] : [];
+    }));
+    const ctx = { ...built.context, currentScope, childSpaces: { ...childSpaces, ...dimensionFacts }, autoPlan, planningProjection }, spec = clone(request.spec), membershipIssues = [];
     if (spaceSize && plain(spaceSize.resolution)) ctx.spaceSize = { widthM: spaceSize.resolution.widthM, heightM: spaceSize.resolution.heightM, source: spaceSize.resolution.source, quality: spaceSize.resolution.quality, locked: spaceSize.canonical?.size?.locked };
     if (request.kind === "floor") {
       ctx.childCanonical = Object.fromEntries(maps.filter((m) => m.branch_id === scope.branchId && m.status === "active" && locations.some((l) => l.id === m.container_location_id && l.map_id === mapRow.id)).flatMap((m) => {
@@ -7645,8 +7658,9 @@ function compileSceneGroup({ request, scope, currentScope, mapRow, locations, ch
       if (before.map_id !== mapRow.id) return failure("LOCATION_MAP_MISMATCH", "$.locations.map_id", "不能通过摆放把地点迁移到另一地图", { entityId: before.id });
       if (before.coord_precision === "exact" && finite(before.grid_x) && finite(before.grid_y) && (Math.abs(before.grid_x - geo.gridX) > 1e-6 || Math.abs(before.grid_y - geo.gridY) > 1e-6)) return failure("LOCATION_GEOMETRY_LOCK_CONFLICT", "$.locations", "当前模板无法满足已确认的地点坐标；保留原场景", { entityId: before.id });
       const area = typeof before.area_geometry_json === "string" ? JSON.parse(before.area_geometry_json) : before.area_geometry_json;
-      if (area?.quality === "confirmed" && geo.area.quality !== "confirmed") return failure("CONFIRMED_AREA_LOCKED", "$.locations.area_geometry_json", "不能用示意轮廓覆盖作者确认的范围");
-      const after = { ...clone(before), grid_x: geo.gridX, grid_y: geo.gridY, coord_precision: before.coord_precision === "exact" ? "exact" : geo.precision, area_geometry_json: geo.area };
+      const dimensions2 = area?.quality === "confirmed" ? readMetricDimensions(area) : null;
+      if (area?.quality === "confirmed" && !dimensions2 && geo.area.quality !== "confirmed") return failure("CONFIRMED_AREA_LOCKED", "$.locations.area_geometry_json", "不能用示意轮廓覆盖作者确认的范围");
+      const after = { ...clone(before), grid_x: geo.gridX, grid_y: geo.gridY, coord_precision: before.coord_precision === "exact" ? "exact" : geo.precision, area_geometry_json: dimensions2 ? clone(area) : geo.area };
       if (stable([before.grid_x, before.grid_y, before.coord_precision, area]) === stable([after.grid_x, after.grid_y, after.coord_precision, after.area_geometry_json])) continue;
       after.row_rev = before.row_rev + 1;
       after.updated_turn_id = turnId;
@@ -7777,6 +7791,4199 @@ var init_atlas_spatial = __esm({
     init_candidate_group();
     init_candidate_apply();
     init_initial_frame();
+  }
+});
+
+// src/atlas-ops-compile-types.ts
+function emptyCompileResult() {
+  return { mutations: [], readSet: [], dependencies: [], issues: [] };
+}
+function mergeCompileResults(results) {
+  const merged = { mutations: [], readSet: [], dependencies: [], issues: [] };
+  const readMap = /* @__PURE__ */ new Map();
+  for (const r of results) {
+    merged.mutations.push(...r.mutations);
+    merged.issues.push(...r.issues);
+    for (const dep of r.dependencies) if (!merged.dependencies.includes(dep)) merged.dependencies.push(dep);
+    for (const read of r.readSet) {
+      const key = `${read.table}\0${read.rowId}`;
+      const existing = readMap.get(key);
+      if (!existing || read.rowRev > existing.rowRev) readMap.set(key, read);
+    }
+    if (r.entityKeyWrites?.length) merged.entityKeyWrites = [...merged.entityKeyWrites ?? [], ...r.entityKeyWrites];
+    if (r.declaredRefs?.length) merged.declaredRefs = [...merged.declaredRefs ?? [], ...r.declaredRefs];
+    if (r.operationKeys?.length) merged.operationKeys = [...merged.operationKeys ?? [], ...r.operationKeys];
+    if (r.effects?.length) merged.effects = [...merged.effects ?? [], ...r.effects];
+  }
+  merged.readSet = [...readMap.values()];
+  return merged;
+}
+var init_atlas_ops_compile_types = __esm({
+  "src/atlas-ops-compile-types.ts"() {
+    "use strict";
+  }
+});
+
+// src/atlas-ops-refs.ts
+function refKindPrefix(kind) {
+  switch (kind) {
+    case "location":
+      return "loc";
+    case "character":
+      return "chr";
+    case "item":
+      return "itm";
+    case "faction":
+      return "fac";
+    case "map":
+      return "map";
+    case "route":
+      return "rte";
+    case "action":
+      return "act";
+    case "journey":
+      return "jrn";
+    case "event":
+      return "evt";
+    case "information":
+      return "inf";
+    case "knowledge":
+      return "kno";
+    case "channel":
+      return "chn";
+    case "relation":
+      return "rel";
+    case "rumor_front":
+      return "rfr";
+    case "opportunity":
+      return "opp";
+    case "mention":
+      return "mnt";
+    default:
+      return "ref";
+  }
+}
+function rotr32(value, bits) {
+  return (value >>> bits | value << 32 - bits) >>> 0;
+}
+function sha256Hex(text6) {
+  const message = new TextEncoder().encode(text6);
+  const paddedLength = (message.length + 8 >> 6) + 1 << 6;
+  const buffer = new Uint8Array(paddedLength);
+  buffer.set(message);
+  buffer[message.length] = 128;
+  const bitLength = message.length * 8;
+  const view = new DataView(buffer.buffer);
+  view.setUint32(paddedLength - 8, Math.floor(bitLength / 4294967296));
+  view.setUint32(paddedLength - 4, bitLength >>> 0);
+  const state = new Uint32Array([
+    1779033703,
+    3144134277,
+    1013904242,
+    2773480762,
+    1359893119,
+    2600822924,
+    528734635,
+    1541459225
+  ]);
+  const w = new Uint32Array(64);
+  for (let offset = 0; offset < paddedLength; offset += 64) {
+    for (let i = 0; i < 16; i += 1) w[i] = view.getUint32(offset + i * 4);
+    for (let i = 16; i < 64; i += 1) {
+      const x = w[i - 15];
+      const y = w[i - 2];
+      const s0 = rotr32(x, 7) ^ rotr32(x, 18) ^ x >>> 3;
+      const s1 = rotr32(y, 17) ^ rotr32(y, 19) ^ y >>> 10;
+      w[i] = w[i - 16] + s0 + w[i - 7] + s1 >>> 0;
+    }
+    let a = state[0];
+    let b = state[1];
+    let c = state[2];
+    let d = state[3];
+    let e = state[4];
+    let f = state[5];
+    let g = state[6];
+    let h = state[7];
+    for (let i = 0; i < 64; i += 1) {
+      const s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+      const ch = e & f ^ ~e & g;
+      const temp1 = h + s1 + ch + SHA256_K[i] + w[i] >>> 0;
+      const s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+      const maj = a & b ^ a & c ^ b & c;
+      const temp2 = s0 + maj >>> 0;
+      h = g;
+      g = f;
+      f = e;
+      e = d + temp1 >>> 0;
+      d = c;
+      c = b;
+      b = a;
+      a = temp1 + temp2 >>> 0;
+    }
+    state[0] = state[0] + a >>> 0;
+    state[1] = state[1] + b >>> 0;
+    state[2] = state[2] + c >>> 0;
+    state[3] = state[3] + d >>> 0;
+    state[4] = state[4] + e >>> 0;
+    state[5] = state[5] + f >>> 0;
+    state[6] = state[6] + g >>> 0;
+    state[7] = state[7] + h >>> 0;
+  }
+  let hex = "";
+  for (let i = 0; i < 8; i += 1) hex += state[i].toString(16).padStart(8, "0");
+  return hex;
+}
+function newAliasOf(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed.startsWith(NEW_PREFIX)) return null;
+  const alias = trimmed.slice(NEW_PREFIX.length).trim();
+  return alias.length > 0 ? alias : null;
+}
+function defaultMakeId(anchor, alias, opId, kind) {
+  const digest = sha256Hex([anchor.chatUid, anchor.branchId, anchor.variantKey, alias, opId].join("\0"));
+  return `${refKindPrefix(kind)}_${digest.slice(0, 24)}`;
+}
+function kindFromOp(op) {
+  const table = OP_REF_KINDS;
+  return table[op] ?? null;
+}
+function scanNewRefs(data, visit) {
+  const walk = (node, field, depth) => {
+    if (depth > MAX_SCAN_DEPTH) return;
+    if (typeof node === "string") {
+      const alias = newAliasOf(node);
+      if (alias !== null && REFERENCE_FIELDS.has(field)) {
+        visit({ alias, field, kind: REFERENCE_FIELD_KINDS[field] ?? null });
+      }
+      return;
+    }
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item, field, depth + 1);
+      return;
+    }
+    if (node !== null && typeof node === "object") {
+      for (const [key, value] of Object.entries(node)) walk(value, key, depth + 1);
+    }
+  };
+  if (data !== null && typeof data === "object") {
+    for (const [key, value] of Object.entries(data)) walk(value, key, 1);
+  }
+}
+function scalarRefPath(field) {
+  return `spec.${field}`;
+}
+function scanLayoutSpecRefs(spec, visit) {
+  if (spec === null || typeof spec !== "object") return;
+  const root = spec;
+  for (const [field, kind] of Object.entries(LAYOUT_SPEC_SCALAR_REF_FIELDS)) {
+    const alias = newAliasOf(root[field]);
+    if (alias === null) continue;
+    visit({ alias, path: scalarRefPath(field), kind, local: false });
+  }
+  for (const [collection2, fields] of Object.entries(LAYOUT_SPEC_REF_FIELDS)) {
+    const rows4 = root[collection2];
+    if (!Array.isArray(rows4)) continue;
+    for (let i = 0; i < rows4.length; i += 1) {
+      const row2 = rows4[i];
+      if (row2 === null || typeof row2 !== "object") continue;
+      const record2 = row2;
+      for (const [field, kind] of Object.entries(fields)) {
+        const alias = newAliasOf(record2[field]);
+        if (alias === null) continue;
+        visit({ alias, path: `spec.${collection2}[${i}].${field}`, kind, local: false });
+      }
+      for (const field of LAYOUT_LOCAL_FIELDS[collection2] ?? []) {
+        const alias = newAliasOf(record2[field]);
+        if (alias === null) continue;
+        visit({ alias, path: `spec.${collection2}[${i}].${field}`, kind: null, local: true });
+      }
+    }
+  }
+}
+function newAliasesOf(value) {
+  const out = [];
+  const seen = /* @__PURE__ */ new Set();
+  const push = (alias) => {
+    if (alias !== null && !seen.has(alias)) {
+      seen.add(alias);
+      out.push(alias);
+    }
+  };
+  if (value && typeof value === "object") {
+    push(newAliasOf(value.ref));
+    scanNewRefs(value.data, (hit) => push(hit.alias));
+    if (value.op === "map.layout.request") {
+      scanLayoutSpecRefs(
+        value.data?.["spec"],
+        (hit) => push(hit.alias)
+      );
+    }
+  }
+  return out;
+}
+function makeIssue(code, path, message, severity, retryable, where) {
+  const issue25 = { code, path, message, severity, retryable };
+  if (where && where.line !== void 0) issue25.line = where.line;
+  if (where && where.opId !== void 0) issue25.opId = where.opId;
+  if (where && where.groupId !== void 0) issue25.groupId = where.groupId;
+  if (where && where.dependencyId !== void 0) issue25.dependencyId = where.dependencyId;
+  return issue25;
+}
+function refPath(field) {
+  if (!field) return "$.ref";
+  return field.startsWith("$.") ? field : `$.data.${field}`;
+}
+function normalizeEntry(entry) {
+  const alias = typeof entry.alias === "string" ? entry.alias.trim() : "";
+  const bare = alias.startsWith(NEW_PREFIX) ? alias.slice(NEW_PREFIX.length).trim() : alias;
+  return {
+    alias: bare,
+    id: typeof entry.id === "string" ? entry.id : String(entry.id),
+    kind: entry.kind,
+    rowRev: typeof entry.rowRev === "number" ? entry.rowRev : null,
+    declaredByOpId: typeof entry.declaredByOpId === "string" ? entry.declaredByOpId : null
+  };
+}
+function createRefScope(seed = []) {
+  const byAlias = /* @__PURE__ */ new Map();
+  const byId9 = /* @__PURE__ */ new Map();
+  const ambiguousAliases = /* @__PURE__ */ new Set();
+  const order = [];
+  const orderKeys = /* @__PURE__ */ new Set();
+  const remember = (entry) => {
+    if (entry.alias.length === 0) return;
+    const key = `${entry.alias}\0${entry.id}`;
+    if (orderKeys.has(key)) return;
+    orderKeys.add(key);
+    order.push(entry);
+  };
+  const fillMissing = (target, incoming) => {
+    if (target.rowRev === null && incoming.rowRev !== null) target.rowRev = incoming.rowRev;
+    if (target.declaredByOpId === null && incoming.declaredByOpId !== null) {
+      target.declaredByOpId = incoming.declaredByOpId;
+    }
+  };
+  const register = (raw) => {
+    const entry = normalizeEntry(raw);
+    if (entry.alias.length === 0 && entry.id.length === 0) return;
+    let canonical = entry;
+    if (entry.alias.length > 0) {
+      const existing = byAlias.get(entry.alias);
+      if (!existing) {
+        byAlias.set(entry.alias, entry);
+      } else if (existing.id !== entry.id) {
+        ambiguousAliases.add(entry.alias);
+      } else {
+        fillMissing(existing, entry);
+        canonical = existing;
+      }
+    }
+    if (entry.id.length > 0) {
+      const existingById = byId9.get(entry.id);
+      if (!existingById) byId9.set(entry.id, entry);
+      else fillMissing(existingById, entry);
+    }
+    remember(canonical);
+  };
+  for (const entry of seed) register(entry);
+  return {
+    get(alias) {
+      const raw = typeof alias === "string" ? alias.trim() : "";
+      if (raw.length === 0) return null;
+      if (!ambiguousAliases.has(raw)) {
+        const direct = byAlias.get(raw);
+        if (direct) return direct;
+      }
+      if (raw.startsWith(NEW_PREFIX)) {
+        const bare = raw.slice(NEW_PREFIX.length).trim();
+        if (bare.length > 0 && !ambiguousAliases.has(bare)) {
+          const declared = byAlias.get(bare);
+          if (declared) return declared;
+        }
+      }
+      return byId9.get(raw) ?? null;
+    },
+    all() {
+      return [...order];
+    },
+    declare(entry) {
+      register(entry);
+    },
+    byId(id) {
+      const raw = typeof id === "string" ? id.trim() : "";
+      if (raw.length === 0) return null;
+      return byId9.get(raw) ?? null;
+    }
+  };
+}
+function declareRefs(ops, ctx) {
+  const issues = [];
+  const aliasById = /* @__PURE__ */ new Map();
+  const declared = [];
+  const list2 = Array.isArray(ops) ? ops : [];
+  const seedScope = createRefScope(ctx.seed ?? []);
+  const makeId = ctx.makeId ?? ((kind, opId, alias) => defaultMakeId(ctx.anchor, alias, opId, kind));
+  const hints = /* @__PURE__ */ new Map();
+  for (const op of list2) {
+    scanNewRefs(op?.value?.data, (hit) => {
+      if (hit.kind !== null && !hints.has(hit.alias)) hints.set(hit.alias, hit.kind);
+    });
+    if (op?.value?.op === "map.layout.request") {
+      scanLayoutSpecRefs(op?.value?.data?.["spec"], (hit) => {
+        if (hit.kind !== null && !hit.local && !hints.has(hit.alias)) hints.set(hit.alias, hit.kind);
+      });
+    }
+  }
+  const firstDeclaration = /* @__PURE__ */ new Map();
+  for (const op of list2) {
+    const value = op?.value;
+    const refRaw = typeof value?.ref === "string" ? value.ref.trim() : "";
+    const alias = newAliasOf(refRaw);
+    if (alias !== null && EXISTING_TARGET_OPS.has(String(value?.op))) continue;
+    if (alias === null) {
+      if (refRaw.length > 0) {
+        const seeded = seedScope.get(refRaw);
+        aliasById.set(refRaw, seeded ? seeded.id : refRaw);
+      }
+      continue;
+    }
+    const previous = firstDeclaration.get(alias);
+    if (previous) {
+      issues.push(
+        makeIssue(
+          "REF_AMBIGUOUS",
+          "$.ref",
+          `new:${alias} 在本批被重复声明：op ${previous.opId}（第 ${previous.line} 行）与 op ${op.opId}（第 ${op.line} 行）。不静默保留第一个，必须由模型消歧或分别使用新别名。`,
+          "error",
+          true,
+          { line: op.line, opId: op.opId }
+        )
+      );
+      continue;
+    }
+    firstDeclaration.set(alias, { opId: op.opId, line: op.line });
+    const opName = typeof value?.op === "string" ? value.op : "";
+    const kind = kindFromOp(opName) ?? hints.get(alias) ?? "mention";
+    const rawId = makeId(kind, op.opId, alias);
+    const id = typeof rawId === "string" && rawId.trim().length > 0 ? rawId.trim() : defaultMakeId(ctx.anchor, alias, op.opId, kind);
+    const entry = { alias, id, kind, rowRev: null, declaredByOpId: op.opId };
+    declared.push(entry);
+    aliasById.set(alias, id);
+  }
+  return { declared, aliasById, issues };
+}
+function expectedLabel(expectedKind) {
+  if (expectedKind === null) return "任意类型";
+  return Array.isArray(expectedKind) ? expectedKind.join("/") : expectedKind;
+}
+function kindAllowed(kind, expectedKind) {
+  if (expectedKind === null) return true;
+  return Array.isArray(expectedKind) ? expectedKind.includes(kind) : expectedKind === kind;
+}
+function checkKind(entry, raw, expectedKind, where) {
+  if (kindAllowed(entry.kind, expectedKind)) return { entry, issues: [] };
+  const opNote = where?.opId ? `（来源 op ${where.opId}）` : "";
+  return {
+    entry: null,
+    issues: [
+      makeIssue(
+        "REF_TYPE_MISMATCH",
+        refPath(where?.field),
+        `引用「${raw}」指向 ${entry.kind}（ID ${entry.id}），此处需要 ${expectedLabel(expectedKind)}${opNote}。`,
+        "error",
+        true,
+        { line: where?.line, opId: where?.opId }
+      )
+    ]
+  };
+}
+function resolveRef(ref, expectedKind, scope, where) {
+  const raw = typeof ref === "string" ? ref.trim() : "";
+  if (raw.length === 0) {
+    return {
+      entry: null,
+      issues: [
+        makeIssue(
+          "REF_UNKNOWN",
+          refPath(where?.field),
+          `引用为空（来源 op ${where?.opId ?? "未知"}），需要短引用、稳定 ID 或 new: 别名。`,
+          "error",
+          true,
+          { line: where?.line, opId: where?.opId }
+        )
+      ]
+    };
+  }
+  const isNew = raw.startsWith(NEW_PREFIX);
+  const alias = isNew ? raw.slice(NEW_PREFIX.length).trim() : raw;
+  const entries = scope.all();
+  const aliasMatches = entries.filter((entry) => entry.alias === alias);
+  let candidates = aliasMatches;
+  if (isNew) {
+    const declaredMatches = aliasMatches.filter((entry) => entry.declaredByOpId !== null);
+    candidates = declaredMatches.length > 0 ? declaredMatches : [];
+  }
+  if (candidates.length > 0) {
+    const ids2 = new Set(candidates.map((entry) => entry.id));
+    if (ids2.size > 1) {
+      const detail = candidates.map((entry) => `${entry.id}（${entry.kind}${entry.declaredByOpId ? `，声明自 op ${entry.declaredByOpId}` : ""}）`).join("、");
+      return {
+        entry: null,
+        issues: [
+          makeIssue(
+            "REF_AMBIGUOUS",
+            refPath(where?.field),
+            `引用「${raw}」匹配到多个对象：${detail}。不随机挑选，需要模型改用明确 ID 或消歧${where?.opId ? `（来源 op ${where.opId}）` : ""}。`,
+            "error",
+            true,
+            { line: where?.line, opId: where?.opId }
+          )
+        ]
+      };
+    }
+    return checkKind(candidates[0], raw, expectedKind, where);
+  }
+  if (isNew && aliasMatches.length > 0) {
+    return {
+      entry: null,
+      issues: [
+        makeIssue(
+          "REF_UNKNOWN",
+          refPath(where?.field),
+          `引用「${raw}」在本批没有被任何操作以 ref:"${raw}" 声明；存在的同别名对象不是本批新建，禁止按相似名字自动合并（来源 op ${where?.opId ?? "未知"}）。`,
+          "error",
+          true,
+          { line: where?.line, opId: where?.opId }
+        )
+      ]
+    };
+  }
+  if (!isNew) {
+    const byId9 = scope.byId(raw);
+    if (byId9) return checkKind(byId9, raw, expectedKind, where);
+  }
+  return {
+    entry: null,
+    issues: [
+      makeIssue(
+        "REF_UNKNOWN",
+        refPath(where?.field),
+        `引用「${raw}」无法解析：既不是本批 new: 声明，也不在程序提供的短引用/稳定 ID 中（来源 op ${where?.opId ?? "未知"}）。`,
+        "error",
+        true,
+        { line: where?.line, opId: where?.opId }
+      )
+    ]
+  };
+}
+function collectLocalIds(spec) {
+  const pool = /* @__PURE__ */ new Set();
+  for (const [collection2, fields] of Object.entries(LAYOUT_LOCAL_COLLECTIONS)) {
+    const rows4 = spec[collection2];
+    if (!Array.isArray(rows4)) continue;
+    for (const row2 of rows4) {
+      if (row2 === null || typeof row2 !== "object") continue;
+      for (const field of fields) {
+        const id = row2[field];
+        if (typeof id !== "string") continue;
+        const trimmed = id.trim();
+        if (trimmed.length === 0) continue;
+        pool.add(trimmed);
+        const bare = newAliasOf(trimmed);
+        if (bare !== null) pool.add(bare);
+      }
+    }
+  }
+  return pool;
+}
+function resolveLayoutSpecRefs(spec, scope, where) {
+  const issues = [];
+  const dependencies = [];
+  const seen = /* @__PURE__ */ new Set();
+  const out = { ...spec };
+  const localPool = collectLocalIds(spec);
+  for (const [field, kind] of Object.entries(LAYOUT_SPEC_SCALAR_REF_FIELDS)) {
+    const raw = spec[field];
+    if (raw === void 0 || raw === null) continue;
+    if (typeof raw !== "string") continue;
+    const rawText = raw.trim();
+    const resolved = resolveRef(rawText, kind, scope, {
+      opId: where?.opId,
+      line: where?.line,
+      field: scalarRefPath(field)
+    });
+    if (resolved.entry !== null) {
+      out[field] = resolved.entry.id;
+      if (!seen.has(resolved.entry.id)) {
+        seen.add(resolved.entry.id);
+        dependencies.push(resolved.entry.id);
+      }
+      continue;
+    }
+    let reported = false;
+    for (const item of resolved.issues) {
+      issues.push(item);
+      reported = true;
+    }
+    if (!reported) {
+      issues.push(
+        makeIssue(
+          "REF_UNKNOWN",
+          refPath(scalarRefPath(field)),
+          `引用「${rawText}」无法解析为${kind}；id 必须来自本任务地点目录（来源 op ${where?.opId ?? "未知"}）。`,
+          "error",
+          true,
+          { opId: where?.opId, line: where?.line }
+        )
+      );
+    }
+  }
+  for (const [collection2, fields] of Object.entries(LAYOUT_SPEC_REF_FIELDS)) {
+    const rows4 = spec[collection2];
+    if (!Array.isArray(rows4)) continue;
+    const nextRows = [];
+    for (let i = 0; i < rows4.length; i += 1) {
+      const row2 = rows4[i];
+      if (row2 === null || typeof row2 !== "object") {
+        nextRows.push(row2);
+        continue;
+      }
+      const record2 = { ...row2 };
+      for (const [field, kind] of Object.entries(fields)) {
+        const raw = record2[field];
+        if (typeof raw !== "string") continue;
+        const rawText = raw.trim();
+        if (rawText.length === 0) continue;
+        const resolved = resolveRef(rawText, kind, scope, {
+          opId: where?.opId,
+          line: where?.line,
+          field: `spec.${collection2}[${i}].${field}`
+        });
+        if (resolved.entry !== null) {
+          record2[field] = resolved.entry.id;
+          if (!seen.has(resolved.entry.id)) {
+            seen.add(resolved.entry.id);
+            dependencies.push(resolved.entry.id);
+          }
+          continue;
+        }
+        const isNewRef = rawText.startsWith(NEW_PREFIX);
+        for (const item of resolved.issues) {
+          if (!isNewRef && item.code === "REF_UNKNOWN") continue;
+          issues.push(item);
+        }
+      }
+      for (const field of LAYOUT_LOCAL_FIELDS[collection2] ?? []) {
+        const raw = record2[field];
+        const alias = newAliasOf(raw);
+        if (alias === null) continue;
+        const rawText = typeof raw === "string" ? raw.trim() : "";
+        if (localPool.has(rawText) || localPool.has(alias)) continue;
+        issues.push(
+          makeIssue(
+            "REF_UNKNOWN",
+            refPath(`spec.${collection2}[${i}].${field}`),
+            `局部引用「${alias}」不在本请求 spec.${LAYOUT_LOCAL_COLLECTION} 的家具 ID 中；near/on 只认家具组的局部视觉 ID，不建实体、不按名字猜（来源 op ${where?.opId ?? "未知"}）。`,
+            "error",
+            true,
+            { opId: where?.opId, line: where?.line }
+          )
+        );
+      }
+      nextRows.push(record2);
+    }
+    out[collection2] = nextRows;
+  }
+  const deletes = out["deletes"];
+  if (deletes !== null && typeof deletes === "object" && !Array.isArray(deletes)) {
+    const nextDeletes = { ...deletes };
+    for (const [collection2, kind] of Object.entries(LAYOUT_DELETE_REF_KINDS)) {
+      const list2 = nextDeletes[collection2];
+      if (!Array.isArray(list2)) continue;
+      const nextList = [];
+      for (let i = 0; i < list2.length; i += 1) {
+        const raw = list2[i];
+        if (typeof raw !== "string") {
+          nextList.push(raw);
+          continue;
+        }
+        const rawText = raw.trim();
+        if (rawText.length === 0) {
+          nextList.push(raw);
+          continue;
+        }
+        if (kind === null) {
+          nextList.push(rawText);
+          continue;
+        }
+        const resolved = resolveRef(rawText, kind, scope, {
+          opId: where?.opId,
+          line: where?.line,
+          field: `spec.deletes.${collection2}[${i}]`
+        });
+        if (resolved.entry !== null) {
+          nextList.push(resolved.entry.id);
+          if (!seen.has(resolved.entry.id)) {
+            seen.add(resolved.entry.id);
+            dependencies.push(resolved.entry.id);
+          }
+          continue;
+        }
+        const isNewRef = rawText.startsWith(NEW_PREFIX);
+        for (const item of resolved.issues) {
+          if (!isNewRef && item.code === "REF_UNKNOWN") continue;
+          issues.push(item);
+        }
+        nextList.push(rawText);
+      }
+      nextDeletes[collection2] = nextList;
+    }
+    out["deletes"] = nextDeletes;
+  }
+  return {
+    ok: !issues.some((item) => item.severity === "error"),
+    spec: out,
+    issues,
+    dependencies
+  };
+}
+function collectNewAliases(ops) {
+  const out = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const op of Array.isArray(ops) ? ops : []) {
+    for (const alias of newAliasesOf(op?.value)) {
+      if (!seen.has(alias)) {
+        seen.add(alias);
+        out.push(alias);
+      }
+    }
+  }
+  return out;
+}
+var SHA256_K, NEW_PREFIX, REFERENCE_FIELD_KINDS, REFERENCE_FIELDS, OP_REF_KINDS, EXISTING_TARGET_OPS, MAX_SCAN_DEPTH, LAYOUT_SPEC_REF_FIELDS, LAYOUT_LOCAL_COLLECTION, LAYOUT_SPEC_SCALAR_REF_FIELDS, LAYOUT_LOCAL_COLLECTIONS, LAYOUT_LOCAL_FIELDS, LAYOUT_DELETE_REF_KINDS;
+var init_atlas_ops_refs = __esm({
+  "src/atlas-ops-refs.ts"() {
+    "use strict";
+    SHA256_K = new Uint32Array([
+      1116352408,
+      1899447441,
+      3049323471,
+      3921009573,
+      961987163,
+      1508970993,
+      2453635748,
+      2870763221,
+      3624381080,
+      310598401,
+      607225278,
+      1426881987,
+      1925078388,
+      2162078206,
+      2614888103,
+      3248222580,
+      3835390401,
+      4022224774,
+      264347078,
+      604807628,
+      770255983,
+      1249150122,
+      1555081692,
+      1996064986,
+      2554220882,
+      2821834349,
+      2952996808,
+      3210313671,
+      3336571891,
+      3584528711,
+      113926993,
+      338241895,
+      666307205,
+      773529912,
+      1294757372,
+      1396182291,
+      1695183700,
+      1986661051,
+      2177026350,
+      2456956037,
+      2730485921,
+      2820302411,
+      3259730800,
+      3345764771,
+      3516065817,
+      3600352804,
+      4094571909,
+      275423344,
+      430227734,
+      506948616,
+      659060556,
+      883997877,
+      958139571,
+      1322822218,
+      1537002063,
+      1747873779,
+      1955562222,
+      2024104815,
+      2227730452,
+      2361852424,
+      2428436474,
+      2756734187,
+      3204031479,
+      3329325298
+    ]);
+    NEW_PREFIX = "new:";
+    REFERENCE_FIELD_KINDS = {
+      ref: null,
+      parent_ref: null,
+      location_ref: "location",
+      target_location_ref: "location",
+      anchor_ref: "location",
+      headquarters_ref: "location",
+      destination_ref: "location",
+      spread_at_ref: "location",
+      place_ref: "location",
+      origin_ref: "location",
+      via_refs: "location",
+      from_ref: "location",
+      to_ref: "location",
+      map_ref: "map",
+      item_ref: "item",
+      container_ref: "item",
+      event_ref: "event",
+      target_event_ref: "event",
+      wait_for_event_ref: "event",
+      information_ref: "information",
+      channel_ref: "channel",
+      opportunity_ref: "opportunity",
+      action_ref: "action",
+      requires_action_ref: "action",
+      route_ref: "route",
+      // 下面这些在字段表里是「实体」而不是某一种实体；RefKind 没有 entity，
+      // 因此默认按人物（最常见），具体类型由操作名或第二遍的类型检查兜住。
+      holder_ref: "character",
+      sender_ref: "character",
+      originator_ref: "character",
+      actor_ref: "character",
+      recipient_ref: "character",
+      subject_ref: "character",
+      object_ref: "character",
+      entity_ref: "character",
+      entity_id: "character",
+      owner_ref: "character",
+      target_ref: "character",
+      other_ref: "character",
+      participants: "character"
+    };
+    REFERENCE_FIELDS = new Set(Object.keys(REFERENCE_FIELD_KINDS));
+    OP_REF_KINDS = {
+      "location.upsert": "location",
+      "character.upsert": "character",
+      "item.upsert": "item",
+      "item.transfer": "item",
+      "faction.upsert": "faction",
+      "relation.upsert": "relation",
+      "plan.propose": "action",
+      "plan.revise": "action",
+      "event.propose": "event",
+      "information.propose": "information",
+      "attention.propose": "knowledge",
+      "channel.upsert": "channel",
+      "map.estimate": "map",
+      "map.layout.request": "map",
+      "route.propose": "route"
+    };
+    EXISTING_TARGET_OPS = /* @__PURE__ */ new Set(["item.transfer", "plan.revise", "map.estimate", "map.layout.request"]);
+    MAX_SCAN_DEPTH = 12;
+    LAYOUT_SPEC_REF_FIELDS = {
+      rooms: { id: "location" },
+      contents: { roomId: "location" },
+      actors: { id: "character", roomId: "location" },
+      items: { id: "item" },
+      districts: { id: "location" },
+      buildings: { id: "location", districtId: "location" },
+      // M4-02：概览集合（02 §10 / 契约 OverviewSpec）。
+      // zones.id 与 zones.near 是**地点**引用（命名河流作为已登记自然地点参与互动）；
+      // links.id 是**路线**引用（不得凭空造路）；features.zoneId 是地点引用，
+      // 而 features.id 是**本图局部视觉 ID**（不进 entity_keys，见 LAYOUT_LOCAL_COLLECTIONS）。
+      zones: { id: "location", near: "location" },
+      links: { id: "route" },
+      features: { zoneId: "location" }
+    };
+    LAYOUT_LOCAL_COLLECTION = "contents";
+    LAYOUT_SPEC_SCALAR_REF_FIELDS = {
+      corridorLocationRef: "location"
+    };
+    LAYOUT_LOCAL_COLLECTIONS = {
+      contents: ["id"],
+      features: ["id"]
+    };
+    LAYOUT_LOCAL_FIELDS = {
+      actors: ["near"],
+      items: ["on"]
+    };
+    LAYOUT_DELETE_REF_KINDS = {
+      zones: "location",
+      links: "route",
+      rooms: "location",
+      districts: "location",
+      buildings: "location",
+      actors: "character",
+      items: "item",
+      contents: null,
+      features: null
+    };
+  }
+});
+
+// src/atlas-ops-errors.ts
+function redactSecrets(text6) {
+  if (typeof text6 !== "string") return String(text6 ?? "");
+  let out = text6;
+  for (const [pattern, replacement] of SECRET_RULES) {
+    out = out.replace(pattern, replacement);
+  }
+  return out;
+}
+function asRecord(value) {
+  return typeof value === "object" && value !== null ? value : null;
+}
+function str(value) {
+  return typeof value === "string" ? value : void 0;
+}
+function num(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : void 0;
+}
+function safeText(error) {
+  if (typeof error === "string") return error;
+  const rec = asRecord(error);
+  const message = rec ? str(rec["message"]) : void 0;
+  if (message !== void 0) return message;
+  try {
+    return String(error);
+  } catch {
+    return "";
+  }
+}
+function toIssue(error, where = {}) {
+  const rec = asRecord(error);
+  const embedded = rec ? asRecord(rec["issue"]) : null;
+  const hasEmbedded = embedded !== null && typeof embedded["code"] === "string" && typeof embedded["message"] === "string";
+  const errorCode = rec ? str(rec["code"]) : void 0;
+  const code = (errorCode !== void 0 && errorCode !== "" ? errorCode : void 0) ?? (where.code !== void 0 && where.code !== "" ? where.code : void 0) ?? (hasEmbedded ? str(embedded["code"]) : void 0) ?? ATLAS_ERROR_CODES.INTERNAL_ERROR;
+  let message = where.message ?? (rec ? str(rec["message"]) : void 0);
+  if (message === void 0 && hasEmbedded) message = str(embedded["message"]);
+  if (message === void 0) message = safeText(error);
+  if (message.trim() === "") message = `atlas error: ${code}`;
+  const path = where.path ?? (rec ? str(rec["path"]) : void 0) ?? (hasEmbedded ? str(embedded["path"]) : void 0) ?? "$";
+  const line = where.line ?? (rec ? num(rec["line"]) : void 0) ?? (hasEmbedded ? num(embedded["line"]) : void 0);
+  const opId = where.opId ?? (rec ? str(rec["opId"]) : void 0) ?? (hasEmbedded ? str(embedded["opId"]) : void 0);
+  const groupId = where.groupId ?? (rec ? str(rec["groupId"]) : void 0) ?? (hasEmbedded ? str(embedded["groupId"]) : void 0);
+  const dependencyId = where.dependencyId ?? (rec ? str(rec["dependencyId"]) : void 0) ?? (hasEmbedded ? str(embedded["dependencyId"]) : void 0);
+  const severity = where.severity ?? (rec?.["severity"] === "warning" || rec?.["severity"] === "error" ? rec["severity"] : void 0) ?? (hasEmbedded ? embedded["severity"] === "warning" ? "warning" : "error" : void 0) ?? "error";
+  const retryable = where.retryable ?? (typeof rec?.["retryable"] === "boolean" ? rec["retryable"] : void 0) ?? (hasEmbedded && typeof embedded["retryable"] === "boolean" ? embedded["retryable"] : void 0) ?? false;
+  const issue25 = {
+    code,
+    path,
+    message: redactSecrets(message),
+    severity,
+    retryable
+  };
+  if (line !== void 0) issue25.line = line;
+  if (opId !== void 0) issue25.opId = opId;
+  if (groupId !== void 0) issue25.groupId = groupId;
+  if (dependencyId !== void 0) issue25.dependencyId = dependencyId;
+  return issue25;
+}
+var ATLAS_ERROR_CODES, SECRET_RULES;
+var init_atlas_ops_errors = __esm({
+  "src/atlas-ops-errors.ts"() {
+    "use strict";
+    ATLAS_ERROR_CODES = Object.freeze({
+      JSON_SYNTAX: "JSON_SYNTAX",
+      WRAPPER_INCOMPLETE: "WRAPPER_INCOMPLETE",
+      UNTERMINATED_REASONING: "UNTERMINATED_REASONING",
+      EMPTY_RESPONSE: "EMPTY_RESPONSE",
+      UNSUPPORTED_RESPONSE_FORMAT: "UNSUPPORTED_RESPONSE_FORMAT",
+      RESPONSE_TOO_LARGE: "RESPONSE_TOO_LARGE",
+      TOO_MANY_OPERATIONS: "TOO_MANY_OPERATIONS",
+      OPERATION_TOO_LARGE: "OPERATION_TOO_LARGE",
+      JSON_TOO_DEEP: "JSON_TOO_DEEP",
+      UNKNOWN_OPERATION: "UNKNOWN_OPERATION",
+      MINIMUM_FIELD_MISSING: "MINIMUM_FIELD_MISSING",
+      FIELD_IGNORED: "FIELD_IGNORED",
+      SYSTEM_FIELD_IGNORED: "SYSTEM_FIELD_IGNORED",
+      REF_UNKNOWN: "REF_UNKNOWN",
+      REF_AMBIGUOUS: "REF_AMBIGUOUS",
+      SOURCE_UNKNOWN: "SOURCE_UNKNOWN",
+      DEPENDENCY_FAILED: "DEPENDENCY_FAILED",
+      SQL_CONSTRAINT: "SQL_CONSTRAINT",
+      INVARIANT_FAILED: "INVARIANT_FAILED",
+      SESSION_STALE: "SESSION_STALE",
+      STALE_BASE: "STALE_BASE",
+      CHAT_CHANGED: "CHAT_CHANGED",
+      SESSION_WRITE_FAILED: "SESSION_WRITE_FAILED",
+      HOST_SAVE_UNAVAILABLE: "HOST_SAVE_UNAVAILABLE",
+      HOST_SAVE_UNCONFIRMED: "HOST_SAVE_UNCONFIRMED",
+      MODEL_TIMEOUT: "MODEL_TIMEOUT",
+      HTTP_ERROR: "HTTP_ERROR",
+      REPAIR_SCOPE_VIOLATION: "REPAIR_SCOPE_VIOLATION",
+      RETRY_BASE_CHANGED: "RETRY_BASE_CHANGED",
+      REPLAY_REQUIRED: "REPLAY_REQUIRED",
+      WORLD_SYNC_FAILED: "WORLD_SYNC_FAILED",
+      DB_WASM_LOAD_FAILED: "DB_WASM_LOAD_FAILED",
+      DB_SCHEMA_UNSUPPORTED: "DB_SCHEMA_UNSUPPORTED",
+      MENTION_TRACKED: "MENTION_TRACKED",
+      CONDITION_UNCOMPILED: "CONDITION_UNCOMPILED",
+      TIME_UNRESOLVED: "TIME_UNRESOLVED",
+      // M2：同一张图上的布局请求互相矛盾（mapId 不一致、kind 冲突、同批同 id 不同值、父图/子图混用）。
+      LAYOUT_REQUEST_CONFLICT: "LAYOUT_REQUEST_CONFLICT",
+      INTERNAL_ERROR: "INTERNAL_ERROR"
+    });
+    SECRET_RULES = [
+      [/\bsk-[A-Za-z0-9_-]{4,}/gi, "[redacted]"],
+      [/\bBearer\s+[A-Za-z0-9._~+/=-]{4,}/gi, "[redacted]"],
+      [
+        /\b(?:api[_-]?key|apikey|access[_-]?token|secret[_-]?key|authorization)["']?\s*[:=]\s*["']?[A-Za-z0-9._~+/-]{8,}["']?/gi,
+        "[redacted]"
+      ],
+      [/\b[A-Fa-f0-9]{32,}\b/g, "[redacted]"],
+      [/[A-Za-z0-9+/]{32,}={0,2}/g, "[redacted]"]
+    ];
+  }
+});
+
+// src/atlas-ops-normalize.ts
+function utf8Bytes(value) {
+  try {
+    return new TextEncoder().encode(JSON.stringify(value ?? null)).length;
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
+function normalizeLayoutSpec(data, op) {
+  const issues = [];
+  const spec = {};
+  const raw = data["spec"];
+  if (!isPlainObject2(raw)) {
+    return {
+      ok: false,
+      spec: null,
+      issues: [
+        issue2(
+          ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING,
+          "$.data.spec",
+          'map.layout.request requires data.spec as an object with the changed constraints (rooms/contents/actors/items or districts/buildings); example: {"op":"map.layout.request","ref":"M2","data":{"kind":"floor","spec":{"rooms":[{"id":"L3","side":"north","w":6,"h":5}]}}}',
+          { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
+        )
+      ]
+    };
+  }
+  const budget = ATLAS_RUNTIME_LIMITS.layoutSpecUtf8Bytes;
+  const size = utf8Bytes(raw);
+  if (size > budget) {
+    return {
+      ok: false,
+      spec: null,
+      issues: [
+        issue2(
+          ATLAS_ERROR_CODES.OPERATION_TOO_LARGE,
+          "$.data.spec",
+          `map.layout.request spec is ${size} bytes, over the ${budget} byte budget; split the request or describe fewer constraints`,
+          { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
+        )
+      ]
+    };
+  }
+  for (const key of Object.keys(raw)) {
+    if (LAYOUT_SPEC_PROGRAM_KEYS.includes(key)) {
+      issues.push(
+        issue2(
+          ATLAS_ERROR_CODES.SYSTEM_FIELD_IGNORED,
+          `$.data.spec.${key}`,
+          `map.layout.request: program-owned field spec.${key} ignored (identity, scale and seed come from the map row and the program)`,
+          { opId: op?.opId, line: op?.line }
+        )
+      );
+      continue;
+    }
+    spec[key] = raw[key];
+  }
+  const kindText = typeof data["kind"] === "string" ? data["kind"] : "";
+  const kind = LAYOUT_REQUEST_KINDS.includes(kindText) ? kindText : null;
+  const allowedCollections = kind ? LAYOUT_KIND_COLLECTIONS[kind] : LAYOUT_SPEC_COLLECTIONS;
+  for (const key of ["width", "height"]) {
+    const value = spec[key];
+    if (value === void 0 || value === null) continue;
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+      return {
+        ok: false,
+        spec: null,
+        issues: [
+          issue2(
+            "ENUM_INVALID",
+            `$.data.spec.${key}`,
+            `map.layout.request: spec.${key} must be a finite positive number`,
+            { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
+          )
+        ]
+      };
+    }
+  }
+  if (kind === "overview") {
+    const surface = spec["surface"];
+    if (surface !== void 0 && surface !== null && !LAYOUT_OVERVIEW_SURFACES.includes(String(surface))) {
+      return {
+        ok: false,
+        spec: null,
+        issues: [issue2(
+          "ENUM_INVALID",
+          "$.data.spec.surface",
+          `map.layout.request: spec.surface must be one of {${LAYOUT_OVERVIEW_SURFACES.join(",")}}; got ${JSON.stringify(surface)}`,
+          { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
+        )]
+      };
+    }
+  }
+  if (kind === "city") {
+    const enclosure = spec["enclosure"];
+    if (enclosure !== void 0 && enclosure !== null && !LAYOUT_CITY_ENCLOSURES.includes(String(enclosure))) {
+      return {
+        ok: false,
+        spec: null,
+        issues: [issue2(
+          "ENUM_INVALID",
+          "$.data.spec.enclosure",
+          `map.layout.request: spec.enclosure must be one of {${LAYOUT_CITY_ENCLOSURES.join(",")}}; got ${JSON.stringify(enclosure)}`,
+          { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
+        )]
+      };
+    }
+  }
+  {
+    const raw2 = spec["corridorLocationRef"];
+    if (raw2 !== void 0 && raw2 !== null) {
+      if (kind !== "floor") {
+        return {
+          ok: false,
+          spec: null,
+          issues: [issue2(
+            "ENUM_INVALID",
+            "$.data.spec.corridorLocationRef",
+            `map.layout.request kind=${kind ?? "(unknown)"} does not accept spec.corridorLocationRef; only kind=floor has a named corridor`,
+            { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
+          )]
+        };
+      }
+      if (typeof raw2 !== "string" || raw2.trim() === "" || raw2.length > MAX_LAYOUT_SPEC_ID_CHARS) {
+        return {
+          ok: false,
+          spec: null,
+          issues: [issue2(
+            ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING,
+            "$.data.spec.corridorLocationRef",
+            `map.layout.request: spec.corridorLocationRef must be null (explicit unbind) or a non-empty location reference of at most ${MAX_LAYOUT_SPEC_ID_CHARS} chars; got ${JSON.stringify(raw2)}. 首版一张 floor 至多一条主走廊，多条真实走廊暂不支持，也不许压成一个地点`,
+            { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
+          )]
+        };
+      }
+    }
+  }
+  for (const key of LAYOUT_SPEC_COLLECTIONS) {
+    const value = spec[key];
+    if (value === void 0 || value === null) continue;
+    if (!allowedCollections.includes(key)) {
+      return {
+        ok: false,
+        spec: null,
+        issues: [
+          issue2(
+            "ENUM_INVALID",
+            `$.data.spec.${key}`,
+            `map.layout.request kind=${kind ?? "(unknown)"} does not accept spec.${key}; allowed: {${allowedCollections.join(", ")}}`,
+            { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
+          )
+        ]
+      };
+    }
+    if (!Array.isArray(value)) {
+      return {
+        ok: false,
+        spec: null,
+        issues: [
+          issue2(
+            ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING,
+            `$.data.spec.${key}`,
+            `map.layout.request: spec.${key} must be an array`,
+            { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
+          )
+        ]
+      };
+    }
+    const limit = key === "zones" ? ATLAS_RUNTIME_LIMITS.overviewZoneLimit : key === "features" ? ATLAS_RUNTIME_LIMITS.overviewFeatureLimit : key === "links" ? ATLAS_RUNTIME_LIMITS.overviewLinkLimit : null;
+    if (limit !== null && value.length > limit) {
+      return {
+        ok: false,
+        spec: null,
+        issues: [
+          issue2(
+            ATLAS_ERROR_CODES.OPERATION_TOO_LARGE,
+            `$.data.spec.${key}`,
+            `map.layout.request: spec.${key} has ${value.length} entries, over the ${limit} limit; split the request`,
+            { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
+          )
+        ]
+      };
+    }
+    const seenIds = /* @__PURE__ */ new Set();
+    for (let i = 0; i < value.length; i += 1) {
+      const entry = value[i];
+      const path = `$.data.spec.${key}[${i}]`;
+      if (!isPlainObject2(entry)) {
+        return {
+          ok: false,
+          spec: null,
+          issues: [
+            issue2(
+              ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING,
+              path,
+              `map.layout.request: spec.${key}[${i}] must be an object with an id`,
+              { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
+            )
+          ]
+        };
+      }
+      const id = entry["id"];
+      if (typeof id !== "string" || id.trim() === "" || id.length > MAX_LAYOUT_SPEC_ID_CHARS) {
+        return {
+          ok: false,
+          spec: null,
+          issues: [
+            issue2(
+              ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING,
+              `${path}.id`,
+              `map.layout.request: spec.${key}[${i}].id must be a non-empty string of at most ${MAX_LAYOUT_SPEC_ID_CHARS} chars`,
+              { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
+            )
+          ]
+        };
+      }
+      if (seenIds.has(id)) {
+        return {
+          ok: false,
+          spec: null,
+          issues: [
+            issue2(
+              "ENUM_INVALID",
+              `${path}.id`,
+              `map.layout.request: spec.${key} has duplicate id ${JSON.stringify(id)}`,
+              { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
+            )
+          ]
+        };
+      }
+      seenIds.add(id);
+      if (kind === "overview") {
+        const rejected = overviewEntryIssue(key, entry, path, op);
+        if (rejected) return { ok: false, spec: null, issues: [rejected] };
+      }
+    }
+  }
+  const deletes = spec["deletes"];
+  if (deletes !== void 0 && deletes !== null) {
+    if (!isPlainObject2(deletes)) {
+      return {
+        ok: false,
+        spec: null,
+        issues: [
+          issue2(
+            ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING,
+            "$.data.spec.deletes",
+            "map.layout.request: spec.deletes must be an object mapping collection names to id arrays",
+            { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
+          )
+        ]
+      };
+    }
+    for (const [key, value] of Object.entries(deletes)) {
+      if (!allowedCollections.includes(key) || !Array.isArray(value)) {
+        return {
+          ok: false,
+          spec: null,
+          issues: [
+            issue2(
+              ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING,
+              `$.data.spec.deletes.${key}`,
+              `map.layout.request: spec.deletes.${key} must be an array of ids for kind=${kind ?? "(unknown)"}; allowed: {${allowedCollections.join(", ")}}`,
+              { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
+            )
+          ]
+        };
+      }
+    }
+  }
+  return { ok: true, spec, issues };
+}
+function overviewEntryIssue(collection2, entry, path, op) {
+  const bad = (field, message) => issue2(
+    "ENUM_INVALID",
+    `${path}.${field}`,
+    message,
+    { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
+  );
+  const inSet = (allowed, value) => allowed.includes(value);
+  if (collection2 === "zones") {
+    const role = entry["role"];
+    if (role === void 0 || role === null || !inSet(LAYOUT_OVERVIEW_ZONE_ROLES, role)) {
+      return bad("role", `overview zone role must be one of {${LAYOUT_OVERVIEW_ZONE_ROLES.join(",")}}; got ${JSON.stringify(role)}`);
+    }
+    const size = entry["size"];
+    if (size !== void 0 && size !== null && !inSet(LAYOUT_OVERVIEW_ZONE_SIZES, size)) {
+      return bad("size", `overview zone size must be one of {${LAYOUT_OVERVIEW_ZONE_SIZES.join(",")}}; got ${JSON.stringify(size)}`);
+    }
+    const sector = entry["sector"];
+    if (sector !== void 0 && sector !== null && !inSet(LAYOUT_OVERVIEW_ZONE_SECTORS, sector)) {
+      return bad("sector", `overview zone sector must be one of {${LAYOUT_OVERVIEW_ZONE_SECTORS.join(",")}}; got ${JSON.stringify(sector)}`);
+    }
+    return null;
+  }
+  if (collection2 === "features") {
+    const type = entry["type"];
+    if (type === void 0 || type === null || !inSet(LAYOUT_OVERVIEW_FEATURE_TYPES, type)) {
+      return bad("type", `overview feature type must be one of {${LAYOUT_OVERVIEW_FEATURE_TYPES.join(",")}}; got ${JSON.stringify(type)}`);
+    }
+    const density = entry["density"];
+    if (density !== void 0 && density !== null && !inSet(LAYOUT_OVERVIEW_DENSITIES, density)) {
+      return bad("density", `overview feature density must be one of {${LAYOUT_OVERVIEW_DENSITIES.join(",")}}; got ${JSON.stringify(density)}`);
+    }
+    for (const field of ["fromSector", "toSector"]) {
+      const value = entry[field];
+      if (value === void 0 || value === null) continue;
+      if (type !== "watercourse") return bad(field, `overview feature ${field} is only valid for type=watercourse`);
+      if (!inSet(LAYOUT_OVERVIEW_SECTORS, value)) {
+        return bad(field, `watercourse ${field} must be one of {${LAYOUT_OVERVIEW_SECTORS.join(",")}}; got ${JSON.stringify(value)}`);
+      }
+    }
+    const widthClass = entry["widthClass"];
+    if (widthClass !== void 0 && widthClass !== null) {
+      if (type !== "watercourse") return bad("widthClass", "overview feature widthClass is only valid for type=watercourse");
+      if (!inSet(LAYOUT_OVERVIEW_WIDTH_CLASSES, widthClass)) {
+        return bad("widthClass", `watercourse widthClass must be one of {${LAYOUT_OVERVIEW_WIDTH_CLASSES.join(",")}}; got ${JSON.stringify(widthClass)}`);
+      }
+    }
+    return null;
+  }
+  return null;
+}
+function issue2(code, path, message, extra = {}) {
+  return toIssue(new Error(message), { code, path, severity: "warning", ...extra });
+}
+function isPlainObject2(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function hasOwn(target, key) {
+  return Object.prototype.hasOwnProperty.call(target, key);
+}
+function truncateWhy(value) {
+  if (value.length <= WHY_MAX_CHARS) return value;
+  let out = value.slice(0, WHY_MAX_CHARS);
+  const last = out.charCodeAt(out.length - 1);
+  if (last >= 55296 && last <= 56319) out = out.slice(0, -1);
+  return out;
+}
+function matchEnum(value, dict) {
+  const lowered = value.trim().toLowerCase();
+  if (dict.includes(lowered)) return lowered;
+  const candidates = ZH_ENUM_CANDIDATES[value.trim()];
+  if (!candidates) return null;
+  for (const candidate of candidates) {
+    if (dict.includes(candidate)) return candidate;
+  }
+  return null;
+}
+function coerceNumeric(value, path, opName, issues) {
+  const reject = (shown) => {
+    issues.push(
+      issue2(ATLAS_ERROR_CODES.INVARIANT_FAILED, path, `${opName}: ${path} is ${shown}; NaN/Infinity are never legal`, {
+        severity: "error",
+        retryable: true
+      })
+    );
+    return { value: void 0, rejected: true };
+  };
+  if (typeof value === "number") {
+    if (Number.isFinite(value)) return { value, rejected: false };
+    return reject(String(value));
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed === "") return { value, rejected: false };
+    if (FULL_NUMBER_RE.test(trimmed)) {
+      const parsed = Number(trimmed);
+      if (Number.isFinite(parsed)) return { value: parsed, rejected: false };
+      return reject(JSON.stringify(value));
+    }
+    if (EXPLICIT_NON_FINITE_RE.test(trimmed)) return reject(JSON.stringify(value));
+    return { value, rejected: false };
+  }
+  return { value, rejected: false };
+}
+function normalizeValues(opName, data, issues) {
+  const dicts = OP_ENUM_DICTS[opName] ?? {};
+  const numeric = new Set(NUMERIC_FIELDS[opName] ?? []);
+  const out = {};
+  for (const key of Object.keys(data)) {
+    let next = data[key];
+    const dict = dicts[key];
+    if (dict && typeof next === "string") {
+      const fixed = matchEnum(next, dict);
+      if (fixed !== null) next = fixed;
+    }
+    if (numeric.has(key)) {
+      const coerced = coerceNumeric(next, `$.data.${key}`, opName, issues);
+      if (coerced.rejected) continue;
+      next = coerced.value;
+    }
+    if (key === "position" && isPlainObject2(next)) {
+      const position = { ...next };
+      for (const axis of ["x", "y"]) {
+        if (!hasOwn(position, axis)) continue;
+        const coerced = coerceNumeric(position[axis], `$.data.position.${axis}`, opName, issues);
+        if (coerced.rejected) delete position[axis];
+        else position[axis] = coerced.value;
+      }
+      next = position;
+    }
+    if (key === "why" && typeof next === "string" && next.length > WHY_MAX_CHARS) {
+      const truncated = truncateWhy(next);
+      issues.push(
+        issue2(
+          ATLAS_ERROR_CODES.FIELD_IGNORED,
+          "$.data.why",
+          `${opName}: why is ${next.length} chars, over the ${WHY_MAX_CHARS} char limit; truncated to ${truncated.length}`
+        )
+      );
+      next = truncated;
+    }
+    out[key] = next;
+  }
+  return out;
+}
+function normalizeOperation(raw, phase, allowedOps) {
+  const issues = [];
+  const ignoredFields = [];
+  const systemFields = [];
+  const allowed = new Set(allowedOps ?? allowedOpsForPhase(phase));
+  allowed.add(ATLAS_NOOP);
+  const allowedList = [...allowed].sort().join(", ");
+  const opName = typeof raw?.op === "string" ? raw.op.trim() : "";
+  if (opName === "" || !allowed.has(opName)) {
+    const reason = opName === "" ? "operation is missing op" : isSemanticOp(opName) ? `op ${opName} is not allowed in phase ${phase}` : `unknown op ${JSON.stringify(opName)}`;
+    issues.push(
+      issue2(ATLAS_ERROR_CODES.UNKNOWN_OPERATION, "$.op", `${reason}; allowed: ${allowedList}`, {
+        severity: "error",
+        retryable: true
+      })
+    );
+    return { op: null, issues, ignoredFields, systemFields };
+  }
+  const op = { op: opName };
+  if (typeof raw.ref === "string") {
+    const ref = raw.ref.trim();
+    if (ref !== "") op.ref = ref;
+  } else if (raw.ref !== void 0 && raw.ref !== null) {
+    issues.push(issue2(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.ref", `${opName}: ref must be a string; ignored`));
+  }
+  if (typeof raw.source === "string") {
+    op.source = raw.source.trim();
+  } else if (Array.isArray(raw.source)) {
+    const list2 = raw.source.filter((entry) => typeof entry === "string").map((entry) => entry.trim());
+    if (list2.length > 0) op.source = list2;
+    else issues.push(issue2(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.source", `${opName}: source has no usable entries; ignored`));
+  } else if (raw.source !== void 0 && raw.source !== null) {
+    issues.push(issue2(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.source", `${opName}: source must be a string or string array; ignored`));
+  }
+  if (typeof raw.why === "string") {
+    if (raw.why.length > WHY_MAX_CHARS) {
+      op.why = truncateWhy(raw.why);
+      issues.push(
+        issue2(
+          ATLAS_ERROR_CODES.FIELD_IGNORED,
+          "$.why",
+          `${opName}: why is ${raw.why.length} chars, over the ${WHY_MAX_CHARS} char limit; truncated to ${op.why.length}`
+        )
+      );
+    } else {
+      op.why = raw.why;
+    }
+  } else if (raw.why !== void 0 && raw.why !== null) {
+    issues.push(issue2(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.why", `${opName}: why must be a string; ignored`));
+  }
+  if (typeof raw.ticket === "string") op.ticket = raw.ticket.trim();
+  let data = null;
+  if (raw.data !== void 0 && raw.data !== null) {
+    if (!isPlainObject2(raw.data)) {
+      issues.push(issue2(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.data", `${opName}: data must be an object; ignored`));
+    } else {
+      const sourceData = raw.data;
+      const collected = {};
+      for (const key of Object.keys(sourceData)) {
+        const value = sourceData[key];
+        if (SYSTEM_OWNED_FIELDS.includes(key) && !isKnownFieldForOp(opName, key)) {
+          systemFields.push(key);
+          issues.push(
+            issue2(
+              ATLAS_ERROR_CODES.SYSTEM_FIELD_IGNORED,
+              `$.data.${key}`,
+              `${opName}: program-owned field ${key} ignored`
+            )
+          );
+          continue;
+        }
+        const aliasTarget = hasOwn(OP_FIELD_ALIASES, key) ? OP_FIELD_ALIASES[key] : void 0;
+        if (aliasTarget !== void 0) {
+          if (aliasTarget === "position.x" || aliasTarget === "position.y") {
+            if (!isKnownFieldForOp(opName, "position")) {
+              ignoredFields.push(key);
+              issues.push(
+                issue2(ATLAS_ERROR_CODES.FIELD_IGNORED, `$.data.${key}`, `${opName}: alias ${key} → position is not a legal field; ignored`)
+              );
+              continue;
+            }
+            const axis = aliasTarget === "position.x" ? "x" : "y";
+            const existing = hasOwn(collected, "position") ? collected["position"] : sourceData["position"];
+            if (existing !== void 0 && existing !== null && !isPlainObject2(existing)) {
+              ignoredFields.push(key);
+              issues.push(
+                issue2(ATLAS_ERROR_CODES.FIELD_IGNORED, `$.data.${key}`, `${opName}: position is not an object; alias ${key} ignored`)
+              );
+              continue;
+            }
+            const position = isPlainObject2(existing) ? { ...existing } : {};
+            if (hasOwn(position, axis)) {
+              ignoredFields.push(key);
+              issues.push(
+                issue2(ATLAS_ERROR_CODES.FIELD_IGNORED, `$.data.${key}`, `${opName}: position.${axis} already provided; alias ${key} ignored`)
+              );
+              collected["position"] = position;
+              continue;
+            }
+            position[axis] = value;
+            collected["position"] = position;
+            continue;
+          }
+          if (isKnownFieldForOp(opName, aliasTarget) && !hasOwn(sourceData, aliasTarget)) {
+            collected[aliasTarget] = value;
+            continue;
+          }
+          ignoredFields.push(key);
+          issues.push(
+            issue2(
+              ATLAS_ERROR_CODES.FIELD_IGNORED,
+              `$.data.${key}`,
+              `${opName}: alias ${key} → ${aliasTarget} is not usable here (target illegal or already present); ignored`
+            )
+          );
+          continue;
+        }
+        if (!isKnownFieldForOp(opName, key)) {
+          ignoredFields.push(key);
+          issues.push(
+            issue2(
+              ATLAS_ERROR_CODES.FIELD_IGNORED,
+              `$.data.${key}`,
+              `${opName}: unknown field ${key} ignored (operation continues)`
+            )
+          );
+          continue;
+        }
+        const previous = collected[key];
+        collected[key] = isPlainObject2(previous) && isPlainObject2(value) ? { ...value, ...previous } : value;
+      }
+      data = normalizeValues(opName, collected, issues);
+    }
+  }
+  if (data !== null) op.data = data;
+  return { op, issues, ignoredFields, systemFields };
+}
+function validateMinimum(op, phase, parsed) {
+  const opName = typeof op?.op === "string" ? op.op.trim() : "";
+  const rawData = op?.data;
+  const data = isPlainObject2(rawData) ? rawData : {};
+  const ref = typeof op?.ref === "string" ? op.ref.trim() : "";
+  const isNew = ref === "" || ref.startsWith("new:");
+  const changed = Object.keys(data).length > 0;
+  const has = (key) => hasOwn(data, key);
+  const text6 = (key) => typeof data[key] === "string" ? data[key].trim() : "";
+  const meaningful = (key) => {
+    if (!has(key)) return false;
+    const value = data[key];
+    if (value === void 0 || value === null) return false;
+    if (typeof value === "string") return value.trim() !== "";
+    return true;
+  };
+  const missingOf = (keys) => keys.filter((key) => !meaningful(key));
+  const fail4 = (path, message) => ({
+    ok: false,
+    issue: toIssue(new Error(`${message} (phase ${phase})`), {
+      code: ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING,
+      path,
+      line: parsed?.line,
+      opId: parsed?.opId,
+      severity: "error",
+      retryable: true
+    })
+  });
+  const createOrModify = (exampleName) => {
+    if (isNew) {
+      if (!meaningful("name")) {
+        return fail4(
+          "$.data.name",
+          `${opName} requires data.name (non-empty string) when creating; example: {"op":"${opName}","ref":"new:${exampleName}","data":{"name":"…"}}`
+        );
+      }
+      return { ok: true };
+    }
+    if (!changed) {
+      return fail4(
+        "$.data",
+        `${opName} modifies an existing object: requires ref plus at least one changed field in data; example: {"op":"${opName}","ref":"${ref}","data":{"description":"…"}}`
+      );
+    }
+    return { ok: true };
+  };
+  switch (opName) {
+    case "location.upsert":
+      return createOrModify("school");
+    case "character.upsert": {
+      if (text6("registration").toLowerCase() === "watch") {
+        if (!meaningful("name")) {
+          return fail4(
+            "$.data.name",
+            'character.upsert with registration=watch reports a candidate: requires data.name only; example: {"op":"character.upsert","data":{"registration":"watch","name":"戴兜帽的路人"}}'
+          );
+        }
+        return { ok: true };
+      }
+      if (isNew) {
+        if (!meaningful("name")) {
+          return fail4(
+            "$.data.name",
+            'character.upsert creating a character requires data.name; example: {"op":"character.upsert","ref":"new:elin","data":{"name":"艾琳","identity":"学校教师"}}'
+          );
+        }
+        const clue = ["identity", "importance", "importance_reason"].some((key) => meaningful(key));
+        if (!clue) {
+          return fail4(
+            "$.data.identity",
+            'character.upsert creating a formal character requires data.name plus one of identity / importance / importance_reason; example: {"op":"character.upsert","ref":"new:captain","data":{"name":"伊娜","identity":"王宫卫队长"}}'
+          );
+        }
+        return { ok: true };
+      }
+      if (!changed) {
+        return fail4(
+          "$.data",
+          `character.upsert modifies an existing character: requires ref plus at least one changed field in data; example: {"op":"character.upsert","ref":"${ref}","data":{"thought":"先观察。"}}`
+        );
+      }
+      return { ok: true };
+    }
+    case "item.upsert":
+      return createOrModify("sword");
+    case "item.transfer": {
+      if (ref === "") {
+        return fail4(
+          "$.ref",
+          'item.transfer requires ref naming the transferred item; example: {"op":"item.transfer","ref":"I1","data":{"to":{"holder_ref":"C1"}}}'
+        );
+      }
+      const to = data["to"];
+      if (!isPlainObject2(to)) {
+        return fail4(
+          "$.data.to",
+          'item.transfer requires data.to with exactly one of {holder_ref} | {container_ref} | {location_ref[,position]} | {unknown:true}; example: {"op":"item.transfer","ref":"I1","data":{"to":{"holder_ref":"C1"}}}'
+        );
+      }
+      const variants = [
+        typeof to["holder_ref"] === "string" && to["holder_ref"].trim() !== "",
+        typeof to["container_ref"] === "string" && to["container_ref"].trim() !== "",
+        typeof to["location_ref"] === "string" && to["location_ref"].trim() !== "",
+        to["unknown"] === true
+      ].filter(Boolean).length;
+      if (variants !== 1) {
+        return fail4(
+          "$.data.to",
+          `item.transfer requires exactly one destination form in data.to (holder_ref | container_ref | location_ref | unknown:true); got ${variants}`
+        );
+      }
+      return { ok: true };
+    }
+    case "faction.upsert":
+      return createOrModify("kingdom");
+    case "relation.upsert": {
+      if (ref !== "") return { ok: true };
+      const missing = missingOf(["subject_ref", "object_ref", "label"]);
+      if (missing.length > 0) {
+        return fail4(
+          `$.data.${missing[0]}`,
+          `relation.upsert requires subject_ref, object_ref and label (or ref to update an existing relation); missing: ${missing.join(", ")}; example: {"op":"relation.upsert","data":{"subject_ref":"C1","object_ref":"C2","label":"导师","kind":"knows"}}`
+        );
+      }
+      return { ok: true };
+    }
+    case "plan.propose": {
+      const missing = missingOf(["actor_ref", "goal"]);
+      const steps = data["steps"];
+      if (missing.length > 0) {
+        return fail4(
+          `$.data.${missing[0]}`,
+          `plan.propose requires actor_ref, goal and steps (array with at least one step); missing: ${missing.join(", ")}; example: {"op":"plan.propose","data":{"actor_ref":"C3","goal":"刺杀国王","steps":[{"kind":"prepare","title":"踩点"}]}}`
+        );
+      }
+      if (!Array.isArray(steps) || steps.length === 0) {
+        return fail4(
+          "$.data.steps",
+          'plan.propose requires data.steps as an array with at least one step; example: {"op":"plan.propose","data":{"actor_ref":"C3","goal":"刺杀国王","steps":[{"kind":"prepare","title":"踩点"}]}}'
+        );
+      }
+      return { ok: true };
+    }
+    case "plan.revise": {
+      if (ref === "") {
+        return fail4(
+          "$.ref",
+          'plan.revise requires ref naming the plan or action being revised; example: {"op":"plan.revise","ref":"A1","data":{"change":"pause"}}'
+        );
+      }
+      const change = text6("change").toLowerCase();
+      if (change === "") {
+        return fail4(
+          "$.data.change",
+          `plan.revise requires data.change ∈ {${PLAN_CHANGES.join(",")}}; example: {"op":"plan.revise","ref":"${ref}","data":{"change":"pause"}}`
+        );
+      }
+      if (!PLAN_CHANGES.includes(change)) {
+        return fail4(
+          "$.data.change",
+          `plan.revise change must be one of {${PLAN_CHANGES.join(",")}}; got ${JSON.stringify(text6("change"))}`
+        );
+      }
+      const steps = data["steps"];
+      if (change === "replace_future" && (!Array.isArray(steps) || steps.length === 0)) {
+        return fail4(
+          "$.data.steps",
+          'plan.revise with change=replace_future requires data.steps as an array with at least one step; example: {"op":"plan.revise","ref":"A1","data":{"change":"replace_future","steps":[{"kind":"travel","destination_ref":"L2"}]}}'
+        );
+      }
+      return { ok: true };
+    }
+    case "event.propose": {
+      if (!meaningful("title")) {
+        return fail4(
+          "$.data.title",
+          'event.propose requires data.title (non-empty string); example: {"op":"event.propose","data":{"title":"城门典礼","phase":"scheduled"}}'
+        );
+      }
+      const eventPhase = text6("phase").toLowerCase();
+      if (eventPhase === "") {
+        return fail4(
+          "$.data.phase",
+          `event.propose requires data.phase ∈ {${EVENT_PHASES.join(",")}}; example: {"op":"event.propose","data":{"title":"城门典礼","phase":"scheduled"}}`
+        );
+      }
+      if (!EVENT_PHASES.includes(eventPhase)) {
+        return fail4(
+          "$.data.phase",
+          `event.propose phase must be one of {${EVENT_PHASES.join(",")}}; got ${JSON.stringify(text6("phase"))}`
+        );
+      }
+      return { ok: true };
+    }
+    case "information.propose": {
+      if (!meaningful("content")) {
+        return fail4(
+          "$.data.content",
+          'information.propose requires data.content (non-empty string); example: {"op":"information.propose","data":{"content":"城门今晚戒严。"}}'
+        );
+      }
+      return { ok: true };
+    }
+    case "attention.propose": {
+      const missing = missingOf(["opportunity_ref"]);
+      if (missing.length > 0) {
+        return fail4(
+          "$.data.opportunity_ref",
+          'attention.propose requires data.opportunity_ref from the provided opportunities; example: {"op":"attention.propose","data":{"opportunity_ref":"O1","belief":"heard"}}'
+        );
+      }
+      const belief = text6("belief").toLowerCase();
+      if (belief === "") {
+        return fail4(
+          "$.data.belief",
+          `attention.propose requires data.belief ∈ {${BELIEFS.join(",")}}; example: {"op":"attention.propose","data":{"opportunity_ref":"O1","belief":"heard"}}`
+        );
+      }
+      if (!BELIEFS.includes(belief)) {
+        return fail4(
+          "$.data.belief",
+          `attention.propose belief must be one of {${BELIEFS.join(",")}}; got ${JSON.stringify(text6("belief"))}`
+        );
+      }
+      return { ok: true };
+    }
+    case "channel.upsert": {
+      const missing = missingOf(["owner_ref", "kind", "name"]);
+      if (missing.length > 0) {
+        return fail4(
+          `$.data.${missing[0]}`,
+          `channel.upsert requires owner_ref, kind and name; missing: ${missing.join(", ")}; example: {"op":"channel.upsert","data":{"owner_ref":"F1","kind":"faction_network","name":"暗卫报告网"}}`
+        );
+      }
+      return { ok: true };
+    }
+    case "map.estimate": {
+      if (ref === "") {
+        return fail4(
+          "$.ref",
+          'map.estimate requires ref naming the map; example: {"op":"map.estimate","ref":"M1","data":{"width_m":4200,"height_m":3100,"basis":"叙事里城市走一天"}}'
+        );
+      }
+      const sizeKeys = ["width_m", "height_m", "meters_per_cell_min", "meters_per_cell_max", "basis"];
+      if (!sizeKeys.some((key) => meaningful(key))) {
+        return fail4(
+          "$.data.width_m",
+          `map.estimate requires ref plus at least one of {${sizeKeys.join(", ")}}; example: {"op":"map.estimate","ref":"${ref}","data":{"width_m":4200,"basis":"叙事里城市走一天"}}`
+        );
+      }
+      return { ok: true };
+    }
+    case "route.propose": {
+      const missing = missingOf(["from_ref", "to_ref"]);
+      if (missing.length > 0) {
+        return fail4(
+          `$.data.${missing[0]}`,
+          `route.propose requires from_ref and to_ref; missing: ${missing.join(", ")}; example: {"op":"route.propose","data":{"from_ref":"L1","to_ref":"L2","kind":"road"}}`
+        );
+      }
+      return { ok: true };
+    }
+    case "map.layout.request": {
+      if (ref === "") {
+        return fail4(
+          "$.ref",
+          'map.layout.request requires ref naming the map; example: {"op":"map.layout.request","ref":"M2","data":{"kind":"floor","spec":{"rooms":[{"id":"L3","side":"north","w":6,"h":5}]}}}'
+        );
+      }
+      const kind = text6("kind").toLowerCase();
+      if (kind === "") {
+        return fail4(
+          "$.data.kind",
+          `map.layout.request requires data.kind ∈ {${LAYOUT_REQUEST_KINDS.join(",")}}; example: {"op":"map.layout.request","ref":"${ref}","data":{"kind":"floor","spec":{"rooms":[{"id":"L3","side":"north","w":6,"h":5}]}}}`
+        );
+      }
+      if (!LAYOUT_REQUEST_KINDS.includes(kind)) {
+        return fail4(
+          "$.data.kind",
+          `map.layout.request kind must be one of {${LAYOUT_REQUEST_KINDS.join(",")}}; got ${JSON.stringify(text6("kind"))}`
+        );
+      }
+      if (!meaningful("spec")) {
+        return fail4(
+          "$.data.spec",
+          `map.layout.request requires data.spec (object of changed constraints); example: {"op":"map.layout.request","ref":"${ref}","data":{"kind":"${kind}","spec":{"rooms":[{"id":"L3","side":"north","w":6,"h":5}]}}}`
+        );
+      }
+      const checked = normalizeLayoutSpec(data, parsed);
+      if (!checked.ok) {
+        const first = checked.issues.find((i) => i.severity === "error") ?? checked.issues[0];
+        return { ok: false, issue: first };
+      }
+      return { ok: true };
+    }
+    case ATLAS_NOOP:
+      return { ok: true };
+    default:
+      return {
+        ok: false,
+        issue: toIssue(
+          new Error(
+            `unknown or unsupported op ${JSON.stringify(opName)}; supported: ${[...ATLAS_SEMANTIC_OPS, ATLAS_NOOP].join(", ")} (phase ${phase})`
+          ),
+          {
+            code: ATLAS_ERROR_CODES.UNKNOWN_OPERATION,
+            path: "$.op",
+            line: parsed?.line,
+            opId: parsed?.opId,
+            severity: "error",
+            retryable: true
+          }
+        )
+      };
+  }
+}
+function isKnownFieldForOp(op, field) {
+  const list2 = OP_KNOWN_FIELDS[op];
+  if (!list2) return false;
+  return list2.includes(field);
+}
+var LAYOUT_REQUEST_KINDS, LAYOUT_SPEC_COLLECTIONS, LAYOUT_KIND_COLLECTIONS, LAYOUT_OVERVIEW_FEATURE_TYPES, LAYOUT_OVERVIEW_SURFACES, LAYOUT_OVERVIEW_ZONE_ROLES, LAYOUT_OVERVIEW_ZONE_SIZES, LAYOUT_OVERVIEW_DENSITIES, LAYOUT_OVERVIEW_SECTORS, LAYOUT_OVERVIEW_ZONE_SECTORS, LAYOUT_OVERVIEW_WIDTH_CLASSES, LAYOUT_CITY_ENCLOSURES, LAYOUT_SPEC_SCALARS, LAYOUT_SPEC_PROGRAM_KEYS, MAX_LAYOUT_SPEC_ID_CHARS, OP_KNOWN_FIELDS, OP_ENUM_DICTS, ZH_ENUM_CANDIDATES, NUMERIC_FIELDS, FULL_NUMBER_RE, EXPLICIT_NON_FINITE_RE, PLAN_CHANGES, EVENT_PHASES, BELIEFS;
+var init_atlas_ops_normalize = __esm({
+  "src/atlas-ops-normalize.ts"() {
+    "use strict";
+    init_atlas_ops_contract();
+    init_atlas_runtime_limits();
+    init_atlas_ops_errors();
+    init_atlas_location_kinds();
+    LAYOUT_REQUEST_KINDS = ["floor", "city", "overview"];
+    LAYOUT_SPEC_COLLECTIONS = [
+      "rooms",
+      "contents",
+      "actors",
+      "items",
+      "districts",
+      "buildings",
+      "zones",
+      "links",
+      "features"
+    ];
+    LAYOUT_KIND_COLLECTIONS = {
+      floor: ["rooms", "contents", "actors", "items"],
+      // city 只认街区/建筑（家具与人物属于室内模板，混用即冲突——与原实现同口径）。
+      city: ["districts", "buildings"],
+      overview: ["zones", "links", "features"]
+    };
+    LAYOUT_OVERVIEW_FEATURE_TYPES = [
+      "forest_texture",
+      "ridge",
+      "shore",
+      "building_cluster",
+      "road_texture",
+      "ruins_scatter",
+      "watercourse"
+    ];
+    LAYOUT_OVERVIEW_SURFACES = ["mixed", "urban", "forest", "mountain", "water", "indoor", "void"];
+    LAYOUT_OVERVIEW_ZONE_ROLES = [
+      "city",
+      "settlement",
+      "forest",
+      "water",
+      "mountain",
+      "ruins",
+      "district",
+      "campus",
+      "land",
+      "other"
+    ];
+    LAYOUT_OVERVIEW_ZONE_SIZES = ["small", "medium", "large"];
+    LAYOUT_OVERVIEW_DENSITIES = ["low", "medium", "high"];
+    LAYOUT_OVERVIEW_SECTORS = ["north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest"];
+    LAYOUT_OVERVIEW_ZONE_SECTORS = [...LAYOUT_OVERVIEW_SECTORS, "center"];
+    LAYOUT_OVERVIEW_WIDTH_CLASSES = ["narrow", "medium", "wide"];
+    LAYOUT_CITY_ENCLOSURES = ["open", "wall"];
+    LAYOUT_SPEC_SCALARS = [
+      "name",
+      "width",
+      "height",
+      "corridorWidth",
+      // P11/R03 §18.1：命名走廊的**唯一**新增输入。省略=保持既有绑定，null=显式解除，
+      // 字符串=本任务地点目录里的真实 location 引用（在 atlas-ops-refs 解析成规范 ID）。
+      "corridorLocationRef",
+      "riverWidth",
+      "blocksPerDistrict",
+      "surface",
+      "enclosure",
+      "mapId",
+      "rebuild",
+      "deletes"
+    ];
+    LAYOUT_SPEC_PROGRAM_KEYS = [
+      "id",
+      "parentId",
+      "seed",
+      "scope",
+      "chatId",
+      "chatUid",
+      "branchId",
+      "revision",
+      "rowRev",
+      "row_rev",
+      "locks",
+      "viewMode",
+      "requestId",
+      "operationId",
+      "createdTurnId",
+      "turnId",
+      "metersPerCell",
+      "scale",
+      "inputSignature"
+    ];
+    MAX_LAYOUT_SPEC_ID_CHARS = 160;
+    OP_KNOWN_FIELDS = {
+      "location.upsert": [
+        "name",
+        "aliases",
+        "kind",
+        "description",
+        "parent_ref",
+        "mobility",
+        "anchor_ref",
+        "map_ref",
+        "position",
+        "area",
+        "terrain",
+        "access",
+        "vehicle_profile",
+        "existence_quality"
+      ],
+      "character.upsert": [
+        "registration",
+        "name",
+        "aliases",
+        "role",
+        "identity",
+        "description",
+        "personality",
+        "importance",
+        "importance_reason",
+        "thought",
+        "action_tendency",
+        "physical_status",
+        "condition_note",
+        "location_ref",
+        "map_ref",
+        "position",
+        "mobility_profiles",
+        "capabilities"
+      ],
+      "item.upsert": [
+        "name",
+        "aliases",
+        "kind",
+        "description",
+        "quantity",
+        "unit",
+        "condition_note",
+        "properties",
+        "status",
+        "placement"
+      ],
+      "item.transfer": ["to", "quantity", "from", "owner_ref"],
+      "faction.upsert": [
+        "name",
+        "aliases",
+        "kind",
+        "description",
+        "goal",
+        "headquarters_ref",
+        "capabilities",
+        "status"
+      ],
+      "relation.upsert": [
+        "subject_ref",
+        "object_ref",
+        "label",
+        "kind",
+        "attitude",
+        "trust",
+        "description",
+        "secrecy",
+        "ends_after_s"
+      ],
+      "plan.propose": ["actor_ref", "goal", "steps", "target_ref", "target_location_ref", "target_event_ref", "secrecy"],
+      "plan.revise": ["change", "steps", "destination_ref", "why"],
+      "event.propose": [
+        "title",
+        "phase",
+        "kind",
+        "location_ref",
+        "route_ref",
+        "actor_ref",
+        "subject_ref",
+        "participants",
+        "action_ref",
+        "event_ref",
+        "time_hint",
+        "activity",
+        "result",
+        "effects",
+        "secrecy"
+      ],
+      "information.propose": [
+        "content",
+        "title",
+        "kind",
+        "event_ref",
+        "subject_ref",
+        "origin_ref",
+        "originator_ref",
+        "parent_ref",
+        "truth",
+        "secrecy",
+        "spread_at_ref",
+        "recipient_ref",
+        "payload"
+      ],
+      "attention.propose": ["opportunity_ref", "belief", "attention", "thought", "action_tendency", "reaction_goal"],
+      "channel.upsert": [
+        "owner_ref",
+        "kind",
+        "name",
+        "source_ref",
+        "source_location_ref",
+        "recipient_ref",
+        "recipient_location_ref",
+        "scope",
+        "requirements",
+        "latency",
+        "transport_mode",
+        "reliability",
+        "secrecy"
+      ],
+      "map.estimate": ["width_m", "height_m", "meters_per_cell_min", "meters_per_cell_max", "basis"],
+      "route.propose": [
+        "ref",
+        "from_ref",
+        "to_ref",
+        "kind",
+        "bidirectional",
+        "map_ref",
+        "geometry",
+        "quality",
+        "distance_m",
+        "distance_min_m",
+        "distance_max_m",
+        "terrain",
+        "modes",
+        "access",
+        "duration",
+        "status"
+      ],
+      /**
+       * map.layout.request：模型只提交「当前地图的变化约束」，不输出完整 scene。
+       * data = {kind: floor|city, spec: {…}}；程序负责生成几何并落库。
+       */
+      "map.layout.request": ["kind", "spec"],
+      [ATLAS_NOOP]: []
+    };
+    OP_ENUM_DICTS = {
+      "location.upsert": {
+        // 唯一来源：atlas-location-kinds.ts（含 floor）。此处不再复制字符串联合。
+        kind: [...ATLAS_LOCATION_KINDS],
+        mobility: ["fixed", "mobile"],
+        existence_quality: ["confirmed", "inferred", "hypothetical"]
+      },
+      "character.upsert": {
+        registration: ["auto", "watch"],
+        role: ["protagonist", "companion", "npc"],
+        importance: ["core", "recurring", "supporting"],
+        physical_status: ["alive", "incapacitated", "dead", "unknown"]
+      },
+      "item.upsert": {
+        kind: ["object", "resource", "document", "equipment", "container", "other"],
+        status: ["active", "consumed", "destroyed", "lost", "merged", "archived"]
+      },
+      "faction.upsert": {
+        kind: ["nation", "organization", "family", "team", "other"],
+        status: ["active", "dissolved", "merged", "archived"]
+      },
+      "relation.upsert": {
+        kind: ["member_of", "leads", "controls", "knows", "kinship", "ally", "hostile", "owes", "protects", "other"],
+        attitude: ["supportive", "neutral", "suspicious", "hostile", "unknown"],
+        trust: ["high", "medium", "low", "unknown"],
+        secrecy: ["public", "restricted", "secret"]
+      },
+      "plan.propose": { secrecy: ["public", "restricted", "secret"] },
+      "plan.revise": { change: ["pause", "cancel", "resume", "replace_future"] },
+      "event.propose": {
+        phase: ["scheduled", "observed", "simulated"],
+        kind: ["ceremony", "conflict", "arrival", "passage", "discovery", "trade", "communication", "incident", "other"],
+        secrecy: ["public", "restricted", "secret"]
+      },
+      "information.propose": {
+        kind: ["observation", "report", "rumor", "announcement", "lie", "hypothesis"],
+        truth: ["true", "false", "mixed", "unknown"],
+        secrecy: ["public", "restricted", "secret"]
+      },
+      "attention.propose": {
+        belief: ["heard", "doubted", "believed", "verified", "rejected"],
+        attention: ["low", "normal", "high"]
+      },
+      "channel.upsert": {
+        kind: ["contact", "faction_network", "messenger", "surveillance", "broadcast", "magic", "other"],
+        reliability: ["high", "medium", "low", "unknown"],
+        secrecy: ["public", "restricted", "secret"]
+      },
+      "route.propose": {
+        kind: ["adjacent", "road", "path", "door", "stairs", "air", "water", "portal", "estimated"],
+        // 与 routes.status 的 SQL CHECK 一致：这是责任状态，不是几何质量。
+        status: ["open", "blocked", "closed"]
+      },
+      "map.layout.request": {
+        kind: LAYOUT_REQUEST_KINDS
+      }
+    };
+    ZH_ENUM_CANDIDATES = {
+      公开: ["public"],
+      受限: ["restricted"],
+      秘密: ["secret"],
+      活着: ["alive"],
+      活著: ["alive"],
+      存活: ["alive"],
+      已死: ["dead"],
+      死亡: ["dead"],
+      死了: ["dead"],
+      未知: ["unknown"],
+      不明: ["unknown"],
+      普通: ["normal", "ordinary"],
+      正常: ["normal"],
+      高: ["high"],
+      中: ["medium"],
+      中等: ["medium"],
+      低: ["low"],
+      支持: ["supportive"],
+      中立: ["neutral"],
+      怀疑: ["suspicious", "doubted"],
+      存疑: ["doubted"],
+      敌视: ["hostile"],
+      敌对: ["hostile"],
+      真: ["true"],
+      假: ["false"],
+      真假混合: ["mixed"],
+      混合: ["mixed"],
+      听到: ["heard"],
+      听说: ["heard"],
+      相信: ["believed"],
+      证实: ["verified"],
+      确认: ["confirmed", "verified"],
+      拒绝: ["rejected"],
+      不信: ["rejected"],
+      预定: ["scheduled"],
+      计划: ["scheduled"],
+      观察到: ["observed"],
+      已观察: ["observed"],
+      推演: ["simulated"],
+      模拟: ["simulated"],
+      谣言: ["rumor"],
+      传闻: ["rumor"],
+      报告: ["report"],
+      观察: ["observation", "observed", "watch"],
+      宣布: ["announcement"],
+      谎言: ["lie"],
+      假设: ["hypothesis"],
+      自动: ["auto"],
+      关注: ["watch"],
+      候选: ["watch"],
+      主角: ["protagonist"],
+      同伴: ["companion"],
+      配角: ["supporting"],
+      常驻: ["recurring"],
+      核心: ["core"],
+      国家: ["nation"],
+      组织: ["organization"],
+      家族: ["family"],
+      团队: ["team"],
+      城市: ["city"],
+      区域: ["region"],
+      地区: ["region"],
+      建筑: ["building"],
+      房间: ["room"],
+      自然: ["natural"],
+      载具: ["vehicle"],
+      其他: ["other"],
+      固定: ["fixed"],
+      移动: ["mobile"],
+      推断: ["inferred"],
+      假设存在: ["hypothetical"],
+      活跃: ["active"],
+      已消耗: ["consumed"],
+      销毁: ["destroyed"],
+      丢失: ["lost"],
+      合并: ["merged"],
+      归档: ["archived"],
+      解散: ["dissolved"],
+      相邻: ["adjacent"],
+      道路: ["road"],
+      小路: ["path"],
+      门: ["door"],
+      楼梯: ["stairs"],
+      空中: ["air"],
+      水路: ["water"],
+      传送门: ["portal"],
+      估计: ["estimated"],
+      暂停: ["pause"],
+      取消: ["cancel"],
+      恢复: ["resume"],
+      替换未来: ["replace_future"],
+      成员: ["member_of"],
+      领导: ["leads"],
+      首领: ["leads"],
+      控制: ["controls"],
+      认识: ["knows"],
+      亲属: ["kinship"],
+      盟友: ["ally"],
+      欠: ["owes"],
+      保护: ["protects"],
+      联络: ["contact"],
+      组织网络: ["faction_network"],
+      信使: ["messenger"],
+      监视: ["surveillance"],
+      广播: ["broadcast"],
+      魔法: ["magic"]
+    };
+    NUMERIC_FIELDS = {
+      "item.upsert": ["quantity"],
+      "item.transfer": ["quantity"],
+      "relation.upsert": ["ends_after_s"],
+      "map.estimate": ["width_m", "height_m", "meters_per_cell_min", "meters_per_cell_max"],
+      "route.propose": ["distance_m", "distance_min_m", "distance_max_m"]
+    };
+    FULL_NUMBER_RE = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/;
+    EXPLICIT_NON_FINITE_RE = /^[+-]?(?:infinity|inf|nan)$/i;
+    PLAN_CHANGES = ["pause", "cancel", "resume", "replace_future"];
+    EVENT_PHASES = ["scheduled", "observed", "simulated"];
+    BELIEFS = ["heard", "doubted", "believed", "verified", "rejected"];
+  }
+});
+
+// src/atlas-db-defaults.ts
+function listDefault(table, column) {
+  if (!LIST_COLUMNS.has(column)) return null;
+  if (table === "journeys" && column === "segments_json") return [];
+  return [];
+}
+function defaultsFor(table) {
+  switch (table) {
+    case "maps":
+      return {
+        name: "",
+        kind: "world",
+        container_location_id: null,
+        description: "",
+        frame_json: { origin_x: 0, origin_y: 0, reference_width_cells: 1, reference_height_cells: 1 },
+        meters_per_cell: null,
+        scale_min_meters_per_cell: null,
+        scale_max_meters_per_cell: null,
+        scale_quality: "uncalibrated",
+        scale_basis_json: { refs: [], note: "" },
+        scale_locked: 0,
+        calibration_rev: 1,
+        background_asset_key: null,
+        default_terrain: "unknown",
+        status: "active"
+      };
+    case "locations":
+      return {
+        name: "",
+        aliases_json: [],
+        kind: "other",
+        description: "",
+        parent_location_id: null,
+        mobility: "fixed",
+        anchor_location_id: null,
+        map_id: null,
+        grid_x: null,
+        grid_y: null,
+        coord_precision: "unknown",
+        uncertainty_radius_cells: null,
+        area_geometry_json: null,
+        terrain: "unknown",
+        access_rules_json: null,
+        vehicle_profile_json: null,
+        existence_quality: "confirmed",
+        status: "active",
+        merged_into_id: null
+      };
+    case "characters":
+      return {
+        name: "",
+        aliases_json: [],
+        role: "npc",
+        identity: "",
+        description: "",
+        personality: "",
+        importance: "supporting",
+        importance_reason: "",
+        thought: "",
+        action_tendency: "",
+        physical_status: "unknown",
+        condition_note: "",
+        location_id: null,
+        map_id: null,
+        grid_x: null,
+        grid_y: null,
+        coord_precision: "unknown",
+        uncertainty_radius_cells: null,
+        mobility_profiles_json: [],
+        capabilities_json: [],
+        status: "active",
+        merged_into_id: null
+      };
+    case "items":
+      return {
+        name: "",
+        aliases_json: [],
+        kind: "other",
+        description: "",
+        quantity: null,
+        unit: "件",
+        condition_note: "",
+        owner_entity_id: null,
+        holder_character_id: null,
+        container_item_id: null,
+        location_id: null,
+        map_id: null,
+        grid_x: null,
+        grid_y: null,
+        coord_precision: "unknown",
+        uncertainty_radius_cells: null,
+        properties_json: [],
+        status: "active",
+        merged_into_id: null
+      };
+    case "factions":
+      return {
+        name: "",
+        aliases_json: [],
+        kind: "other",
+        description: "",
+        goal: "",
+        headquarters_location_id: null,
+        capabilities_json: [],
+        status: "active",
+        merged_into_id: null
+      };
+    case "relations":
+      return {
+        subject_entity_id: "",
+        object_entity_id: "",
+        kind: "other",
+        label: "",
+        attitude: "unknown",
+        trust: "unknown",
+        description: "",
+        basis_quality: "inferred",
+        secrecy: "restricted",
+        valid_from_s: 0,
+        valid_until_s: null,
+        status: "active"
+      };
+    case "routes":
+      return {
+        from_location_id: "",
+        to_location_id: "",
+        kind: "estimated",
+        bidirectional: 1,
+        map_id: null,
+        geometry_json: null,
+        geometry_quality: "unknown",
+        geometry_rev: 1,
+        distance_m: null,
+        distance_min_m: null,
+        distance_max_m: null,
+        distance_basis: "unknown",
+        terrain: "unknown",
+        allowed_modes_json: [],
+        access_rules_json: null,
+        travel_time_override_json: null,
+        status: "open",
+        status_reason: ""
+      };
+    case "actions":
+      return {
+        actor_entity_id: "",
+        parent_action_id: null,
+        kind: "act",
+        title: "",
+        intent: "",
+        target_entity_id: null,
+        target_location_id: null,
+        target_event_id: null,
+        trigger_json: null,
+        depends_on_json: [],
+        payload_json: null,
+        duration_json: null,
+        progress_s: 0,
+        earliest_start_s: null,
+        deadline_s: null,
+        next_check_s: null,
+        started_at_s: null,
+        finished_at_s: null,
+        evaluated_until_s: 0,
+        secrecy: "restricted",
+        priority: "normal",
+        status: "planned",
+        reason_code: null,
+        result_event_id: null
+      };
+    case "journeys":
+      return {
+        action_id: "",
+        mover_entity_id: "",
+        origin_location_id: "",
+        destination_location_id: "",
+        segments_json: [],
+        segment_index: 0,
+        segment_distance_done_m: null,
+        segment_time_done_s: 0,
+        last_reached_location_id: null,
+        stop_location_id: null,
+        started_at_s: 0,
+        last_advanced_at_s: 0,
+        estimated_arrival_min_s: null,
+        estimated_arrival_max_s: null,
+        arrived_at_s: null,
+        position_quality: "unlocated",
+        status: "moving",
+        stop_reason: null
+      };
+    case "events":
+      return {
+        title: "",
+        kind: "other",
+        summary: "",
+        location_id: null,
+        route_id: null,
+        route_progress_m: null,
+        subject_entity_id: null,
+        participants_json: [],
+        cause_action_id: null,
+        parent_event_id: null,
+        scheduled_start_s: null,
+        trigger_json: null,
+        occurred_at_s: null,
+        ended_at_s: null,
+        outcome: "",
+        secrecy: "restricted",
+        status: "scheduled"
+      };
+    case "information":
+      return {
+        kind: "observation",
+        title: "",
+        content: "",
+        source_event_id: null,
+        subject_entity_id: null,
+        payload_json: null,
+        origin_location_id: null,
+        originator_entity_id: null,
+        parent_information_id: null,
+        truth_status: "unknown",
+        secrecy: "restricted",
+        topic_key: "",
+        content_hash: "",
+        created_at_s: 0,
+        expires_at_s: null,
+        supersedes_information_id: null,
+        status: "active"
+      };
+    case "rumor_fronts":
+      return {
+        information_id: "",
+        location_id: "",
+        via_channel_id: null,
+        source_front_id: null,
+        source_action_id: null,
+        first_available_at_s: 0,
+        last_reinforced_at_s: 0,
+        next_spread_check_s: null,
+        expires_at_s: null,
+        reach: "local",
+        audience_json: { access: "public", tags: [] },
+        status: "active"
+      };
+    case "knowledge":
+      return {
+        knower_character_id: null,
+        knower_faction_id: null,
+        is_pov: 0,
+        information_id: "",
+        source_entity_id: null,
+        source_front_id: null,
+        source_channel_id: null,
+        first_received_at_s: 0,
+        last_confirmed_at_s: null,
+        belief: "heard",
+        attention: "normal",
+        reaction_note: "",
+        status: "active"
+      };
+    case "channels":
+      return {
+        name: "",
+        kind: "other",
+        owner_entity_id: "",
+        source_entity_id: null,
+        source_location_id: null,
+        recipient_entity_id: null,
+        recipient_location_id: null,
+        scope_json: { location_refs: [], entity_refs: [], topics: [] },
+        requirements_json: null,
+        latency_json: { quality: "unknown", basis_refs: [] },
+        transport_mode_key: null,
+        reliability: "unknown",
+        secrecy: "restricted",
+        basis_quality: "inferred",
+        valid_from_s: 0,
+        valid_until_s: null,
+        status: "active"
+      };
+    case "entity_keys":
+      return { branch_id: "", id: "", kind: "location" };
+    case "branches":
+      return {
+        parent_branch_id: null,
+        fork_turn_id: null,
+        head_turn_id: null,
+        revision: 0,
+        name: "",
+        pov_character_id: null,
+        root_map_id: null,
+        clock_s: 0,
+        clock_min_s: 0,
+        clock_max_s: 0,
+        calendar_label: null,
+        simulation_cursor_s: 0,
+        simulation_status: "current",
+        ruleset_version: "",
+        status: "active",
+        created_wall_ms: 0
+      };
+    case "turns":
+      return {
+        branch_id: "",
+        parent_turn_id: null,
+        host_message_uid: null,
+        host_variant_key: null,
+        kind: "narrative",
+        input_hash: "",
+        story_hash: null,
+        base_revision: 0,
+        committed_revision: null,
+        clock_before_s: 0,
+        elapsed_json: { quality: "unknown", basis_refs: [] },
+        clock_after_s: 0,
+        rng_seed: "",
+        ruleset_version: "",
+        decisions_json: { operations: [], attention_decisions: [], outcome_decisions: [], random_draws: [] },
+        receipt_json: null,
+        attempts_json: [],
+        status: "pending",
+        created_wall_ms: 0,
+        prepared_wall_ms: null
+      };
+    case "turn_changes":
+      return {
+        turn_id: "",
+        sequence: 1,
+        attempt_id: "",
+        group_id: "",
+        operation_id: "",
+        target_table: "",
+        target_row_id: "",
+        operation: "update",
+        before_json: null,
+        after_json: null,
+        basis_json: {},
+        summary: ""
+      };
+    case "mention_candidates":
+      return {
+        name: "",
+        normalized_name: "",
+        context_key: "",
+        kind_hint: "unknown",
+        first_turn_id: "",
+        last_turn_id: "",
+        distinct_turn_count: 1,
+        recent_turn_ids_json: [],
+        context_summary: "",
+        lorebook_source_keys_json: [],
+        importance_hint: "none",
+        promoted_entity_id: null,
+        status: "watching"
+      };
+    case "construction_progress":
+      return {
+        scope_key: "",
+        kind: "scope",
+        subject_key: "",
+        input_signature: "",
+        status: "pending",
+        last_served_seq: 0,
+        payload_json: {}
+      };
+    case "sync_outbox":
+      return {
+        branch_id: "",
+        requested_by_turn_id: null,
+        target: "managed_lorebook",
+        projection_scope: "pov",
+        target_revision: 0,
+        idempotency_key: "",
+        payload_hash: "",
+        status: "pending",
+        attempt_count: 0,
+        next_retry_wall_ms: null,
+        last_error_code: null,
+        last_error_message: null,
+        created_wall_ms: 0,
+        completed_wall_ms: null
+      };
+    default:
+      return {};
+  }
+}
+function createRow(table, input, ctx) {
+  if (!isKnownTable(table)) throw new Error(`CODEC_UNKNOWN_TABLE: ${String(table)}`);
+  const out = { ...defaultsFor(table), ...input };
+  if (COMMON_TABLE_SET.has(table)) {
+    out.branch_id = ctx.branchId;
+    out.id = ctx.id;
+    out.row_rev = 1;
+    out.created_turn_id = ctx.turnId;
+    out.updated_turn_id = ctx.turnId;
+  }
+  if (table === "entity_keys") {
+    out.branch_id = ctx.branchId;
+    out.id = ctx.id;
+  }
+  if (table === "mention_candidates") {
+    out.branch_id = ctx.branchId;
+    out.id = ctx.id;
+  }
+  if (table === "branches") {
+    out.id = ctx.id;
+  }
+  if (table === "turns") {
+    out.id = ctx.id;
+    out.branch_id = ctx.branchId;
+  }
+  if (table === "sync_outbox") {
+    out.id = ctx.id;
+    out.branch_id = ctx.branchId;
+  }
+  if (table === "construction_progress") {
+    out.branch_id = ctx.branchId;
+    out.id = ctx.id;
+    out.row_rev = 1;
+    out.created_turn_id = ctx.turnId;
+    out.updated_turn_id = ctx.turnId;
+  }
+  for (const key of LIST_COLUMNS) {
+    if (Object.prototype.hasOwnProperty.call(out, key) && out[key] === null) {
+      out[key] = listDefault(table, key);
+    }
+  }
+  if (table === "branches") out.created_wall_ms = ctx.nowWallMs;
+  if (table === "turns") out.created_wall_ms = ctx.nowWallMs;
+  if (table === "sync_outbox") out.created_wall_ms = ctx.nowWallMs;
+  if (table === "information" && (out.created_at_s === 0 || out.created_at_s === null)) out.created_at_s = ctx.clockS;
+  if (table === "rumor_fronts") {
+    if (out.first_available_at_s === 0 || out.first_available_at_s === null) out.first_available_at_s = ctx.clockS;
+    if (out.last_reinforced_at_s === 0 || out.last_reinforced_at_s === null) out.last_reinforced_at_s = ctx.clockS;
+  }
+  if (table === "knowledge" && (out.first_received_at_s === 0 || out.first_received_at_s === null)) {
+    out.first_received_at_s = ctx.clockS;
+  }
+  if (table === "relations" && (out.valid_from_s === 0 || out.valid_from_s === null)) out.valid_from_s = ctx.clockS;
+  if (table === "channels" && (out.valid_from_s === 0 || out.valid_from_s === null)) out.valid_from_s = ctx.clockS;
+  if (table === "journeys") {
+    if (out.started_at_s === 0 || out.started_at_s === null) out.started_at_s = ctx.clockS;
+    if (out.last_advanced_at_s === 0 || out.last_advanced_at_s === null) out.last_advanced_at_s = ctx.clockS;
+  }
+  if (table === "actions" && (out.evaluated_until_s === 0 || out.evaluated_until_s === null)) out.evaluated_until_s = ctx.clockS;
+  if (table === "turns") {
+    out.ruleset_version = out.ruleset_version || ctx.rulesetVersion;
+    out.clock_before_s = out.clock_before_s ?? ctx.clockS;
+    out.clock_after_s = out.clock_after_s ?? ctx.clockS;
+  }
+  if (table === "branches") out.ruleset_version = out.ruleset_version || ctx.rulesetVersion;
+  return out;
+}
+var LIST_COLUMNS, COMMON_TABLE_SET;
+var init_atlas_db_defaults = __esm({
+  "src/atlas-db-defaults.ts"() {
+    "use strict";
+    init_atlas_db_schema();
+    LIST_COLUMNS = /* @__PURE__ */ new Set([
+      "aliases_json",
+      "mobility_profiles_json",
+      "capabilities_json",
+      "properties_json",
+      "depends_on_json",
+      "participants_json",
+      "allowed_modes_json",
+      "segments_json",
+      "recent_turn_ids_json",
+      "lorebook_source_keys_json"
+    ]);
+    COMMON_TABLE_SET = /* @__PURE__ */ new Set([
+      "maps",
+      "locations",
+      "characters",
+      "items",
+      "factions",
+      "relations",
+      "routes",
+      "actions",
+      "journeys",
+      "events",
+      "information",
+      "rumor_fronts",
+      "knowledge",
+      "channels"
+    ]);
+  }
+});
+
+// src/atlas-db-mentions.ts
+function warning(code, path, message, extra = {}) {
+  return { code, path, message, severity: "warning", retryable: false, ...extra };
+}
+function decodeMentionRow(raw) {
+  const decoded = decodeRow("mention_candidates", raw, { allowExtra: true });
+  if (!decoded.ok) {
+    throw new AtlasDbError("CODEC_DECODE_FAILED", `mention_candidates 行解码失败：${decoded.issues.map((i) => i.path).join(", ")}`, {
+      issues: decoded.issues
+    });
+  }
+  return decoded.row;
+}
+function readerFromDb(db) {
+  return {
+    candidatesByName: (branchId, normalizedName) => readCandidates(db, branchId, "normalized_name = ?", [normalizedName]),
+    watchingCandidates: (branchId) => readCandidates(db, branchId, "status = 'watching'"),
+    turnWallTimes: (branchId) => turnWallTimes(db, branchId)
+  };
+}
+function readerFromPort(reads) {
+  const rows4 = (where, limit) => reads.selectWhere("mention_candidates", where, limit);
+  return {
+    candidatesByName: (branchId, normalizedName) => rows4({ branch_id: branchId, normalized_name: normalizedName }, 1e3),
+    watchingCandidates: (branchId) => rows4({ branch_id: branchId, status: "watching" }, 1e3),
+    turnWallTimes: (branchId) => {
+      const turns = reads.selectWhere("turns", { branch_id: branchId }, 5e3);
+      const out = /* @__PURE__ */ new Map();
+      for (const row2 of turns) {
+        const wall = Number(row2.created_wall_ms);
+        out.set(String(row2.id), Number.isFinite(wall) ? wall : 0);
+      }
+      return out;
+    }
+  };
+}
+function readCandidates(db, branchId, where = "", params = []) {
+  const rows4 = queryBound(
+    db,
+    `SELECT * FROM mention_candidates WHERE branch_id = ?${where ? ` AND ${where}` : ""} ORDER BY id ASC`,
+    [branchId, ...params]
+  );
+  return rows4.map(decodeMentionRow);
+}
+function stringList(value) {
+  if (!Array.isArray(value)) return [];
+  return value.filter((v) => typeof v === "string" && v.trim().length > 0).map((v) => v.trim());
+}
+function clampSummary(text6) {
+  return text6.trim().slice(0, MENTION_CONTEXT_SUMMARY_CHARS);
+}
+function uniqueStrings(values, limit) {
+  const out = [];
+  for (const value of values) {
+    if (value.length === 0 || out.includes(value)) continue;
+    out.push(value);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+function dedupeObservations(observations) {
+  const seen = /* @__PURE__ */ new Set();
+  const out = [];
+  for (const observation of observations) {
+    const name = typeof observation?.name === "string" ? observation.name.trim() : "";
+    if (name.length === 0) continue;
+    const key = `${normalizeName(name)}\0${(observation.identity ?? "").trim()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(observation);
+  }
+  return out;
+}
+function basisFor(turnId, reason, hasEvidence) {
+  return {
+    kind: "story",
+    sources: [],
+    causes: [{ kind: "turn", id: turnId }],
+    reason,
+    verification: hasEvidence ? "source_bound" : "causal",
+    certainty: hasEvidence ? "confirmed" : "inferred"
+  };
+}
+function hasSubstantialLorebook(observation, sourceKeys) {
+  const clue = `${observation.identity ?? ""}${observation.contextSummary ?? ""}`.trim();
+  return sourceKeys.length > 0 && clue.length > 0;
+}
+function desiredImportance(observation, sourceKeys, distinctTurnCount) {
+  const hint = observation.importanceHint && IMPORTANCE_HINTS.includes(observation.importanceHint) ? observation.importanceHint : "none";
+  if (hint === "core" || hasSubstantialLorebook(observation, sourceKeys)) return "core";
+  if (distinctTurnCount >= 2) return "review";
+  return hint === "review" ? "review" : "none";
+}
+function maxImportance(a, b) {
+  const left = typeof a === "string" && IMPORTANCE_HINTS.includes(a) ? a : "none";
+  return IMPORTANCE_RANK[left] >= IMPORTANCE_RANK[b] ? left : b;
+}
+function updateMentionCandidates(input) {
+  const issues = [];
+  const mutations = [];
+  if (!input.db && !input.reads) {
+    throw new AtlasDbError(
+      "MENTION_READ_SOURCE_REQUIRED",
+      "updateMentionCandidates 需要 db 或 reads 之一（只读端口即可，不能两者都缺）",
+      { branchId: input.branchId }
+    );
+  }
+  const reader = input.reads ? readerFromPort(input.reads) : readerFromDb(input.db);
+  const branchId = input.branchId;
+  const turnId = input.turnId;
+  const makeId = input.makeId;
+  const observations = dedupeObservations(input.observations ?? []);
+  const byName = /* @__PURE__ */ new Map();
+  const projected = /* @__PURE__ */ new Map();
+  const createdInBatch = /* @__PURE__ */ new Set();
+  const promoted = [];
+  let created = 0;
+  let updated = 0;
+  for (const observation of observations) {
+    const name = observation.name.trim();
+    const normalized = normalizeName(name);
+    if (normalized.length === 0) {
+      issues.push(warning("MENTION_NAME_REQUIRED", "$.observations.name", "候选必须有非空 name"));
+      continue;
+    }
+    const contextKey = (observation.identity ?? "").trim();
+    const summary = clampSummary(observation.contextSummary ?? observation.identity ?? "");
+    const sourceKeys = uniqueStrings(stringList(observation.lorebookSourceKeys), MENTION_LOREBOOK_LIMIT);
+    if (observation.kindHint !== void 0 && !KIND_HINTS.includes(observation.kindHint)) {
+      issues.push(warning("MENTION_KIND_INVALID", "$.observations.kindHint", `kind_hint 非法：${String(observation.kindHint)}`, { retryable: true }));
+    }
+    if (observation.importanceHint !== void 0 && !IMPORTANCE_HINTS.includes(observation.importanceHint)) {
+      issues.push(
+        warning("MENTION_IMPORTANCE_INVALID", "$.observations.importanceHint", `importance_hint 非法：${String(observation.importanceHint)}`, {
+          retryable: true
+        })
+      );
+    }
+    if (!byName.has(normalized)) byName.set(normalized, reader.candidatesByName(branchId, normalized));
+    const rows4 = byName.get(normalized);
+    const exact = rows4.find((row2) => String(row2.context_key ?? "") === contextKey);
+    const compatible = rows4.filter((row2) => {
+      const existingKey = String(row2.context_key ?? "");
+      if (existingKey.length === 0 || contextKey.length === 0) return true;
+      return existingKey === contextKey;
+    });
+    const existing = exact ?? (compatible.length === 1 ? compatible[0] : null);
+    if (!existing) {
+      const id2 = makeId("mention", contextKey.length > 0 ? contextKey : normalized, `mention:${normalized}:${observation.kindHint ?? "unknown"}`);
+      const row2 = createRow(
+        "mention_candidates",
+        {
+          name,
+          normalized_name: normalized,
+          context_key: contextKey,
+          kind_hint: observation.kindHint ?? "unknown",
+          first_turn_id: turnId,
+          last_turn_id: turnId,
+          distinct_turn_count: 1,
+          recent_turn_ids_json: [turnId],
+          context_summary: summary,
+          lorebook_source_keys_json: sourceKeys,
+          importance_hint: desiredImportance(observation, sourceKeys, 1),
+          promoted_entity_id: null,
+          status: "watching"
+        },
+        { branchId, id: id2, turnId, clockS: input.clockS, nowWallMs: input.nowWallMs, rulesetVersion: input.rulesetVersion }
+      );
+      mutations.push({
+        table: "mention_candidates",
+        rowId: id2,
+        before: null,
+        after: row2,
+        sourceOpIds: [`mention.observe:${id2}`],
+        basis: basisFor(turnId, `首次提及「${name}」（${observation.kindHint ?? "unknown"}）`, summary.length > 0 || sourceKeys.length > 0)
+      });
+      projected.set(id2, row2);
+      createdInBatch.add(id2);
+      created += 1;
+      continue;
+    }
+    const id = String(existing.id);
+    const recent = uniqueStrings(stringList(existing.recent_turn_ids_json), MENTION_RECENT_TURNS_LIMIT);
+    const alreadyCounted = observation.alreadyCountedThisTurn === true || recent.includes(turnId);
+    const distinctBefore = Math.max(1, Number(existing.distinct_turn_count ?? 1) || 1);
+    const distinctTurnCount = alreadyCounted ? distinctBefore : distinctBefore + 1;
+    const recentAfter = alreadyCounted ? recent : [...recent.filter((value) => value !== turnId), turnId].slice(-MENTION_RECENT_TURNS_LIMIT);
+    const status = String(existing.status ?? "watching");
+    const lorebookAfter = uniqueStrings([...stringList(existing.lorebook_source_keys_json), ...sourceKeys], MENTION_LOREBOOK_LIMIT);
+    const after = {
+      ...existing,
+      last_turn_id: turnId,
+      distinct_turn_count: distinctTurnCount,
+      recent_turn_ids_json: recentAfter,
+      context_key: String(existing.context_key ?? "").length > 0 ? existing.context_key : contextKey,
+      kind_hint: observation.kindHint && observation.kindHint !== "unknown" ? observation.kindHint : existing.kind_hint,
+      context_summary: summary.length > 0 ? summary : existing.context_summary,
+      lorebook_source_keys_json: lorebookAfter,
+      importance_hint: maxImportance(existing.importance_hint, desiredImportance(observation, lorebookAfter, distinctTurnCount)),
+      // 再次出现时把曾被淘汰的候选放回 watching；已建档（promoted）的候选保持指向实体。
+      status: status === "dismissed" ? "watching" : status
+    };
+    mutations.push({
+      table: "mention_candidates",
+      rowId: id,
+      before: existing,
+      after,
+      sourceOpIds: [`mention.observe:${id}`],
+      basis: basisFor(
+        turnId,
+        `${alreadyCounted ? "同一楼重试" : "再次提及"}「${name}」：distinct_turn_count=${distinctTurnCount}`,
+        summary.length > 0 || lorebookAfter.length > 0
+      )
+    });
+    projected.set(id, after);
+    updated += 1;
+    if (String(after.status) === "promoted" && !promoted.includes(id)) promoted.push(id);
+  }
+  const watchingRows = reader.watchingCandidates(branchId);
+  const watchingIds = new Set(watchingRows.map((row2) => String(row2.id)));
+  const watchingAfter = [];
+  for (const row2 of watchingRows) {
+    const id = String(row2.id);
+    const after = projected.get(id) ?? row2;
+    if (String(after.status) === "watching") watchingAfter.push(after);
+  }
+  for (const [id, row2] of projected) {
+    if (watchingIds.has(id)) continue;
+    if (String(row2.status) === "watching") watchingAfter.push(row2);
+  }
+  const over = watchingAfter.length - MENTION_CANDIDATE_LIMIT;
+  const evicted = [];
+  if (over > 0) {
+    const wallOf = reader.turnWallTimes(branchId);
+    const evictable = watchingAfter.filter((row2) => !createdInBatch.has(String(row2.id))).filter((row2) => String(row2.importance_hint ?? "none") !== "core").sort((a, b) => {
+      const rankA = String(a.importance_hint ?? "none") === "none" ? 0 : 1;
+      const rankB = String(b.importance_hint ?? "none") === "none" ? 0 : 1;
+      if (rankA !== rankB) return rankA - rankB;
+      const lastA = String(a.last_turn_id ?? "");
+      const lastB = String(b.last_turn_id ?? "");
+      const wallA = wallOf.get(lastA) ?? 0;
+      const wallB = wallOf.get(lastB) ?? 0;
+      if (wallA !== wallB) return wallA - wallB;
+      return lastA < lastB ? -1 : lastA > lastB ? 1 : 0;
+    });
+    for (const row2 of evictable) {
+      if (evicted.length >= over) break;
+      const id = String(row2.id);
+      const after = {
+        ...row2,
+        // 淘汰也记到当前 turn：变更属于本楼，回退时一并恢复（不是「悄悄消失」）。
+        last_turn_id: turnId,
+        status: "dismissed"
+      };
+      mutations.push({
+        table: "mention_candidates",
+        rowId: id,
+        before: row2,
+        after,
+        sourceOpIds: [`mention.evict:${id}`],
+        basis: basisFor(turnId, `候选上限 ${MENTION_CANDIDATE_LIMIT} 回收：「${String(row2.name ?? "")}」长期未出现且无重要依据`, false)
+      });
+      projected.set(id, after);
+      evicted.push(id);
+    }
+    const remaining = watchingAfter.length - evicted.length;
+    issues.push(
+      warning(
+        "MENTION_EVICTED",
+        "$.mention_candidates",
+        `未建档候选 ${watchingAfter.length} 超过上限 ${MENTION_CANDIDATE_LIMIT}：淘汰 ${evicted.length} 条（理由：importance_hint=none 且 last_turn_id 最旧；core/promoted 不淘汰）；剩余 ${remaining}`,
+        { retryable: false }
+      )
+    );
+  }
+  return { mutations, created, updated, promoted, evicted, issues };
+}
+function turnWallTimes(db, branchId) {
+  const rows4 = queryBound(db, "SELECT id, created_wall_ms FROM turns WHERE branch_id = ?", [branchId]);
+  const out = /* @__PURE__ */ new Map();
+  for (const row2 of rows4) {
+    const wall = Number(row2.created_wall_ms);
+    out.set(String(row2.id), Number.isFinite(wall) ? wall : 0);
+  }
+  return out;
+}
+function promoteMention(db, branchId, mentionId, entityId) {
+  const key = queryBound(db, "SELECT kind FROM entity_keys WHERE branch_id = ? AND id = ? LIMIT 1", [branchId, entityId]);
+  if (key.length === 0) {
+    throw new AtlasDbError("REF_UNKNOWN", `promoteMention 的实体身份不存在：${entityId}`, { branchId, mentionId, entityId });
+  }
+  const rows4 = queryBound(db, "SELECT * FROM mention_candidates WHERE branch_id = ? AND id = ? LIMIT 1", [branchId, mentionId]);
+  if (rows4.length === 0) {
+    throw new AtlasDbError("REF_UNKNOWN", `找不到提及候选：${mentionId}`, { branchId, mentionId, entityId });
+  }
+  const before = decodeMentionRow(rows4[0]);
+  const after = { ...before, status: "promoted", promoted_entity_id: entityId };
+  return {
+    table: "mention_candidates",
+    rowId: mentionId,
+    before,
+    after,
+    sourceOpIds: [`mention.promote:${mentionId}`],
+    basis: {
+      kind: "story",
+      sources: [],
+      causes: [{ kind: String(key[0].kind ?? "character"), id: entityId }],
+      reason: `提及候选「${String(before.name ?? mentionId)}」正式建档为实体 ${entityId}`,
+      verification: "causal",
+      certainty: "confirmed"
+    }
+  };
+}
+var MENTION_CANDIDATE_LIMIT, MENTION_RECENT_TURNS_LIMIT, KIND_HINTS, IMPORTANCE_HINTS, IMPORTANCE_RANK;
+var init_atlas_db_mentions = __esm({
+  "src/atlas-db-mentions.ts"() {
+    "use strict";
+    init_atlas_db_codec();
+    init_atlas_db_defaults();
+    init_atlas_db_runtime();
+    init_atlas_ops_entities();
+    init_atlas_runtime_limits();
+    MENTION_CANDIDATE_LIMIT = ATLAS_RUNTIME_LIMITS.mentionCandidates;
+    MENTION_RECENT_TURNS_LIMIT = MENTION_RECENT_LIMIT;
+    KIND_HINTS = ["character", "location", "item", "faction", "unknown"];
+    IMPORTANCE_HINTS = ["none", "review", "core"];
+    IMPORTANCE_RANK = { none: 0, review: 1, core: 2 };
+  }
+});
+
+// src/atlas-ops-entities.ts
+function issue3(code, path, message, op, extra = {}) {
+  return {
+    code,
+    path,
+    message,
+    severity: "error",
+    retryable: true,
+    opId: op.opId,
+    line: op.line,
+    ...extra
+  };
+}
+function fieldIgnoredWarning(op, fields) {
+  return {
+    code: "FIELD_IGNORED",
+    path: "$.data",
+    message: `本操作不写这些字段，已忽略：${fields.join("、")}`,
+    severity: "warning",
+    retryable: false,
+    opId: op.opId,
+    line: op.line
+  };
+}
+function isPlainObject3(v) {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+function dataOf(op) {
+  return isPlainObject3(op.value.data) ? op.value.data : {};
+}
+function asString(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+function asFiniteNumber(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  return null;
+}
+function applyPatch(existing, changes) {
+  const out = { ...existing };
+  for (const [key, value] of Object.entries(changes)) {
+    if (value === void 0) continue;
+    out[key] = value;
+  }
+  return out;
+}
+function readSetFor(ctx, table, rowId2) {
+  const row2 = ctx.tables.selectOne(table, ctx.branchId, rowId2);
+  const rowRev2 = row2 && typeof row2.row_rev === "number" ? row2.row_rev : 0;
+  return [{ table, rowId: rowId2, rowRev: rowRev2 }];
+}
+function mutation(table, rowId2, before, after, op, basis) {
+  return { table, rowId: rowId2, before, after, sourceOpIds: [op.opId], basis };
+}
+function turnIdOf(ctx) {
+  if (typeof ctx.turnId === "string" && ctx.turnId !== "") return ctx.turnId;
+  return ctx.turnId ?? ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
+}
+function basisFor2(ctx, op, extra = {}) {
+  if (ctx.basisFor) return ctx.basisFor(op, extra);
+  return {
+    kind: ctx.phase === "observe" ? "story" : "simulation",
+    sources: [],
+    causes: extra.causes ?? [],
+    reason: op.value.why ?? `${op.value.op} 语义操作`,
+    verification: ctx.phase === "observe" ? "source_bound" : "causal",
+    certainty: extra.certainty ?? (ctx.phase === "observe" ? "confirmed" : "inferred")
+  };
+}
+function entityKeyMutation(ctx, op, id, kind) {
+  const existing = ctx.tables.selectOne("entity_keys", ctx.branchId, id);
+  return mutation("entity_keys", id, existing, { branch_id: ctx.branchId, id, kind }, op, basisFor2(ctx, op));
+}
+function ensureAliases(value, op, path) {
+  if (value === void 0) return { value: null, issues: [] };
+  if (value === null) return { value: [], issues: [] };
+  if (!Array.isArray(value)) return { value: null, issues: [issue3("FIELD_TYPE_INVALID", path, "aliases 必须是字符串数组", op)] };
+  const list2 = value.filter((v) => typeof v === "string" && v.trim().length > 0).map((v) => v.trim());
+  if (list2.length > ALIAS_LIMIT) {
+    return {
+      value: list2.slice(0, ALIAS_LIMIT),
+      issues: [issue3("FIELD_LIMIT_EXCEEDED", path, `aliases 最多 ${ALIAS_LIMIT} 个，收到 ${list2.length} 个`, op)]
+    };
+  }
+  return { value: list2, issues: [] };
+}
+function applyPosition(target, data, op, issues, scope) {
+  if (!Object.prototype.hasOwnProperty.call(data, "position")) return;
+  const position = data.position;
+  if (position === null) {
+    target.grid_x = null;
+    target.grid_y = null;
+    target.map_id = null;
+    target.coord_precision = "unknown";
+    target.uncertainty_radius_cells = null;
+    return;
+  }
+  if (!isPlainObject3(position)) {
+    issues.push(issue3("FIELD_TYPE_INVALID", "$.data.position", "position 必须是 {x,y,precision,radius?}", op));
+    return;
+  }
+  const x = asFiniteNumber(position.x);
+  const y = asFiniteNumber(position.y);
+  if (x === null || y === null) {
+    issues.push(
+      issue3("COORD_INCOMPLETE", "$.data.position", "position 必须同时给出有限数字 x 与 y；不知道精确位置时请省略 position", op)
+    );
+    return;
+  }
+  const precision = position.precision === void 0 ? "approximate" : String(position.precision);
+  if (!["exact", "approximate", "layout", "unknown"].includes(precision)) {
+    issues.push(issue3("ENUM_INVALID", "$.data.position.precision", `coord precision 取值非法：${precision}`, op));
+    return;
+  }
+  const mapRefRaw = data.map_ref;
+  if (typeof mapRefRaw !== "string" || mapRefRaw.trim() === "") {
+    issues.push(issue3("COORD_MAP_REQUIRED", "$.data.map_ref", "给出坐标必须同时给出 map_ref（程序不把坐标默认挂到根图）", op));
+    return;
+  }
+  const mapResolved = resolveRef(mapRefRaw, "map", scope, { opId: op.opId, line: op.line, field: "map_ref" });
+  if (!mapResolved.entry) {
+    issues.push(...mapResolved.issues);
+    return;
+  }
+  target.map_id = mapResolved.entry.id;
+  target.grid_x = x;
+  target.grid_y = y;
+  target.coord_precision = precision;
+  const radius = asFiniteNumber(position.radius);
+  target.uncertainty_radius_cells = radius !== null && radius >= 0 ? radius : null;
+}
+function ensureLocationRef(data, field, op, issues, target, targetField, expectedKind, scope) {
+  if (!Object.prototype.hasOwnProperty.call(data, field)) return;
+  const raw = data[field];
+  if (raw === null) {
+    target[targetField] = null;
+    return;
+  }
+  if (typeof raw !== "string" || raw.trim() === "") {
+    issues.push(issue3("FIELD_TYPE_INVALID", `$.data.${field}`, `${field} 必须是引用字符串`, op));
+    return;
+  }
+  const resolved = resolveRef(raw, expectedKind, scope, { opId: op.opId, line: op.line, field });
+  if (!resolved.entry) {
+    issues.push(...resolved.issues);
+    return;
+  }
+  target[targetField] = resolved.entry.id;
+}
+function declaredRef(alias, id, kind, opId) {
+  return { alias, id, kind, rowRev: null, declaredByOpId: opId };
+}
+function normalizeName(name) {
+  return name.trim().replace(/\s+/g, " ").toLowerCase();
+}
+function compileLocationUpsert(op, ctx) {
+  const result = emptyCompileResult();
+  const data = dataOf(op);
+  const unknown = Object.keys(data).filter((k) => !LOCATION_FIELDS.has(k));
+  if (unknown.length) result.issues.push(fieldIgnoredWarning(op, unknown));
+  const ref = op.value.ref?.trim();
+  const resolvingExisting = Boolean(ref) && !ref.startsWith("new:");
+  const existing = resolvingExisting ? resolveRef(ref, "location", ctx.scope, { opId: op.opId, line: op.line, field: "ref" }) : null;
+  if (resolvingExisting && !existing?.entry) {
+    result.issues.push(...existing?.issues ?? [issue3("REF_UNKNOWN", "$.ref", `找不到地点引用：${ref}`, op)]);
+    return result;
+  }
+  const creating = !existing?.entry;
+  const rowId2 = existing?.entry ? existing.entry.id : ctx.makeId("location", op.opId, ref && ref.startsWith("new:") ? ref.slice(4) : `auto:${op.opId}`);
+  const before = existing?.entry ? ctx.tables.selectOne("locations", ctx.branchId, rowId2) : null;
+  if (!creating && !before) {
+    result.issues.push(issue3("REF_UNKNOWN", "$.ref", `引用存在但地点行不存在：${rowId2}`, op));
+    return result;
+  }
+  const changes = {};
+  const name = asString(data.name);
+  if (creating) {
+    if (!name) {
+      result.issues.push(issue3("MINIMUM_FIELD_MISSING", "$.data.name", "新建地点必须给 name", op));
+      return result;
+    }
+    changes.name = name;
+  } else if (Object.prototype.hasOwnProperty.call(data, "name")) {
+    if (!name) {
+      result.issues.push(issue3("FIELD_TYPE_INVALID", "$.data.name", "地点名称 trim 后不能为空", op));
+      return result;
+    }
+    changes.name = name;
+  }
+  const aliases = ensureAliases(data.aliases, op, "$.data.aliases");
+  result.issues.push(...aliases.issues);
+  if (aliases.value) changes.aliases_json = aliases.value;
+  if (Object.prototype.hasOwnProperty.call(data, "kind")) {
+    const kind = String(data.kind);
+    if (!LOCATION_KINDS.includes(kind)) result.issues.push(issue3("ENUM_INVALID", "$.data.kind", `地点类型非法：${kind}`, op));
+    else changes.kind = kind;
+  }
+  if (Object.prototype.hasOwnProperty.call(data, "description")) changes.description = String(data.description ?? "");
+  if (Object.prototype.hasOwnProperty.call(data, "terrain")) changes.terrain = asString(data.terrain) ?? "unknown";
+  if (Object.prototype.hasOwnProperty.call(data, "mobility")) {
+    const mobility = String(data.mobility);
+    if (!["fixed", "mobile"].includes(mobility)) result.issues.push(issue3("ENUM_INVALID", "$.data.mobility", `mobility 非法：${mobility}`, op));
+    else changes.mobility = mobility;
+  }
+  if (creating && !Object.prototype.hasOwnProperty.call(data, "mobility") && changes.kind === "vehicle") {
+    changes.mobility = "mobile";
+  }
+  if (Object.prototype.hasOwnProperty.call(data, "existence_quality")) {
+    const q = String(data.existence_quality);
+    if (!LOCATION_EXISTENCE.includes(q)) result.issues.push(issue3("ENUM_INVALID", "$.data.existence_quality", `existence_quality 非法：${q}`, op));
+    else changes.existence_quality = q;
+  }
+  if (Object.prototype.hasOwnProperty.call(data, "access")) changes.access_rules_json = data.access ?? null;
+  if (Object.prototype.hasOwnProperty.call(data, "area")) {
+    if (isPlainObject3(data.area) && data.area.kind === "dimensions" && !readMetricDimensions(data.area)) {
+      result.issues.push(issue3("SPACE_DIMENSIONS_INVALID", "$.data.area", "dimensions 需要 0.2–20000 米的 widthM/heightM 与 confirmed/estimated 质量；尺寸不包含父图坐标", op));
+    } else changes.area_geometry_json = data.area ?? null;
+  }
+  if (Object.prototype.hasOwnProperty.call(data, "vehicle_profile")) changes.vehicle_profile_json = data.vehicle_profile ?? null;
+  ensureLocationRef(data, "parent_ref", op, result.issues, changes, "parent_location_id", ["location"], ctx.scope);
+  ensureLocationRef(data, "anchor_ref", op, result.issues, changes, "anchor_location_id", ["location"], ctx.scope);
+  if (changes.anchor_location_id === rowId2) result.issues.push(issue3("INVARIANT_LOCATION_ANCHOR_CYCLE", "$.data.anchor_ref", "载具或地点不能以自身作为停靠锚点；使用实际所在地点，行进状态使用旅程记录", op));
+  if (changes.parent_location_id === rowId2) result.issues.push(issue3("INVARIANT_LOCATION_PARENT_CYCLE", "$.data.parent_ref", "地点不能以自己为父地点", op));
+  applyPosition(changes, data, op, result.issues, ctx.scope);
+  if (result.issues.some((i) => i.severity === "error")) return result;
+  if (creating) {
+    const row2 = createRow("locations", { ...changes }, {
+      branchId: ctx.branchId,
+      id: rowId2,
+      turnId: turnIdOf(ctx),
+      clockS: ctx.clockS,
+      nowWallMs: Date.now(),
+      rulesetVersion: "atlas-1"
+    });
+    result.mutations.push(entityKeyMutation(ctx, op, rowId2, "location"));
+    result.mutations.push(mutation("locations", rowId2, null, row2, op, basisFor2(ctx, op)));
+    result.entityKeyWrites = [{ id: rowId2, kind: "location" }];
+  } else {
+    const merged = applyPatch(before, changes);
+    if (merged.parent_location_id === rowId2) {
+      result.issues.push(issue3("INVARIANT_LOCATION_PARENT_CYCLE", "$.data.parent_ref", "地点不能以自己为父地点", op));
+      return result;
+    }
+    merged.row_rev = Number(before.row_rev ?? 1) + 1;
+    merged.updated_turn_id = turnIdOf(ctx);
+    result.mutations.push(mutation("locations", rowId2, before, merged, op, basisFor2(ctx, op)));
+    result.readSet.push(...readSetFor(ctx, "locations", rowId2));
+  }
+  result.declaredRefs = ref?.startsWith("new:") ? [declaredRef(ref, rowId2, "location", op.opId)] : [];
+  return result;
+}
+function mentionMutations(ctx, op, params) {
+  const observed = updateMentionCandidates({
+    reads: ctx.tables,
+    branchId: ctx.branchId,
+    turnId: turnIdOf(ctx),
+    clockS: ctx.clockS,
+    nowWallMs: Date.now(),
+    rulesetVersion: "atlas-1",
+    observations: [
+      {
+        name: params.name,
+        kindHint: "character",
+        identity: params.identity,
+        contextSummary: params.identity,
+        lorebookSourceKeys: params.sourceKeys,
+        importanceHint: params.importanceHint
+      }
+    ],
+    makeId: (kind, opId, alias) => ctx.makeId(kind, opId, alias)
+  });
+  void op;
+  return { mutations: observed.mutations, issues: observed.issues };
+}
+function compileCharacterUpsert(op, ctx) {
+  const result = emptyCompileResult();
+  const data = dataOf(op);
+  const unknown = Object.keys(data).filter((k) => !CHARACTER_FIELDS.has(k));
+  if (unknown.length) result.issues.push(fieldIgnoredWarning(op, unknown));
+  const ref = op.value.ref?.trim();
+  const registration = data.registration === void 0 ? "auto" : String(data.registration);
+  if (!["auto", "watch"].includes(registration)) {
+    result.issues.push(issue3("ENUM_INVALID", "$.data.registration", `registration 非法：${registration}`, op));
+    return result;
+  }
+  const resolvingExisting = Boolean(ref) && !ref.startsWith("new:");
+  const existing = resolvingExisting ? resolveRef(ref, "character", ctx.scope, { opId: op.opId, line: op.line, field: "ref" }) : null;
+  if (resolvingExisting && !existing?.entry) {
+    result.issues.push(...existing?.issues ?? [issue3("REF_UNKNOWN", "$.ref", `找不到人物引用：${ref}`, op)]);
+    return result;
+  }
+  const creating = !existing?.entry;
+  const name = asString(data.name);
+  const identity = asString(data.identity) ?? "";
+  const importanceReason = asString(data.importance_reason);
+  const hasImportance = Object.prototype.hasOwnProperty.call(data, "importance") || importanceReason !== null;
+  const hasBootstrapHint = identity !== "" || hasImportance;
+  const sourceKeys = Array.isArray(op.value.source) ? op.value.source : op.value.source ? [op.value.source] : [];
+  if (registration === "watch" && creating) {
+    if (!name) {
+      result.issues.push(issue3("MINIMUM_FIELD_MISSING", "$.data.name", "watch 候选至少需要 name", op));
+      return result;
+    }
+    const mention = mentionMutations(ctx, op, { name, identity, importanceHint: "review", sourceKeys });
+    result.mutations.push(...mention.mutations);
+    result.issues.push(...mention.issues);
+    result.issues.push({
+      code: "MENTION_TRACKED",
+      path: "$.data.name",
+      message: `「${name}」只进入临时提及候选，未创建人物实体（registration=watch）`,
+      severity: "warning",
+      retryable: false,
+      opId: op.opId,
+      line: op.line
+    });
+    return result;
+  }
+  if (creating && !hasBootstrapHint) {
+    if (name) {
+      const mention = mentionMutations(ctx, op, { name, identity, importanceHint: "review", sourceKeys });
+      result.mutations.push(...mention.mutations);
+      result.issues.push(...mention.issues);
+      result.issues.push({
+        code: "MENTION_TRACKED",
+        path: "$.data.name",
+        message: `「${name}」尚无身份/重要性线索，先记为临时提及候选，不创建人物实体`,
+        severity: "warning",
+        retryable: false,
+        opId: op.opId,
+        line: op.line
+      });
+      return result;
+    }
+    result.issues.push(
+      issue3("MINIMUM_FIELD_MISSING", "$.data.name", "新建人物必须给 name，并至少给 identity / importance / importance_reason 之一", op)
+    );
+    return result;
+  }
+  const rowId2 = existing?.entry ? existing.entry.id : ctx.makeId("character", op.opId, ref && ref.startsWith("new:") ? ref.slice(4) : `auto:${op.opId}`);
+  const before = existing?.entry ? ctx.tables.selectOne("characters", ctx.branchId, rowId2) : null;
+  if (!creating && !before) {
+    result.issues.push(issue3("REF_UNKNOWN", "$.ref", `引用存在但人物行不存在：${rowId2}`, op));
+    return result;
+  }
+  const changes = {};
+  if (creating) {
+    changes.name = name;
+  } else if (Object.prototype.hasOwnProperty.call(data, "name")) {
+    if (!name) {
+      result.issues.push(issue3("FIELD_TYPE_INVALID", "$.data.name", "人物名称 trim 后不能为空", op));
+      return result;
+    }
+    changes.name = name;
+  }
+  const aliases = ensureAliases(data.aliases, op, "$.data.aliases");
+  result.issues.push(...aliases.issues);
+  if (aliases.value) changes.aliases_json = aliases.value;
+  if (Object.prototype.hasOwnProperty.call(data, "role")) {
+    const role = String(data.role);
+    if (!CHARACTER_ROLES.includes(role)) result.issues.push(issue3("ENUM_INVALID", "$.data.role", `role 非法：${role}`, op));
+    else changes.role = role;
+  }
+  if (Object.prototype.hasOwnProperty.call(data, "importance")) {
+    const importance = String(data.importance);
+    if (!CHARACTER_IMPORTANCE.includes(importance)) result.issues.push(issue3("ENUM_INVALID", "$.data.importance", `importance 非法：${importance}`, op));
+    else changes.importance = importance;
+  }
+  if (Object.prototype.hasOwnProperty.call(data, "physical_status")) {
+    const st = String(data.physical_status);
+    if (!CHARACTER_PHYSICAL.includes(st)) result.issues.push(issue3("ENUM_INVALID", "$.data.physical_status", `physical_status 非法：${st}`, op));
+    else changes.physical_status = st;
+  }
+  for (const field of ["identity", "description", "personality", "thought", "action_tendency", "condition_note"]) {
+    if (Object.prototype.hasOwnProperty.call(data, field)) {
+      changes[field] = typeof data[field] === "string" ? data[field] : data[field] === null ? "" : String(data[field]);
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(data, "importance_reason")) {
+    changes.importance_reason = typeof data.importance_reason === "string" ? data.importance_reason : String(data.importance_reason ?? "");
+  }
+  if (Object.prototype.hasOwnProperty.call(data, "mobility_profiles")) {
+    const list2 = Array.isArray(data.mobility_profiles) ? data.mobility_profiles : null;
+    if (!list2) result.issues.push(issue3("FIELD_TYPE_INVALID", "$.data.mobility_profiles", "mobility_profiles 必须是数组", op));
+    else if (list2.length > MOBILITY_PROFILE_LIMIT) result.issues.push(issue3("FIELD_LIMIT_EXCEEDED", "$.data.mobility_profiles", `最多 ${MOBILITY_PROFILE_LIMIT} 种移动方式`, op));
+    else changes.mobility_profiles_json = list2;
+  }
+  if (Object.prototype.hasOwnProperty.call(data, "capabilities")) {
+    const list2 = Array.isArray(data.capabilities) ? data.capabilities : null;
+    if (!list2) result.issues.push(issue3("FIELD_TYPE_INVALID", "$.data.capabilities", "capabilities 必须是数组", op));
+    else if (list2.length > CAPABILITY_LIMIT) result.issues.push(issue3("FIELD_LIMIT_EXCEEDED", "$.data.capabilities", `最多 ${CAPABILITY_LIMIT} 项能力`, op));
+    else changes.capabilities_json = list2;
+  }
+  if (ctx.phase === "decision" && !creating) {
+    const allowed = /* @__PURE__ */ new Set(["thought", "action_tendency", "importance", "importance_reason", "condition_note", "physical_status"]);
+    const illegal = Object.keys(changes).filter((k) => !allowed.has(k));
+    if (illegal.length) {
+      result.issues.push(
+        issue3("PHASE_FIELD_NOT_ALLOWED", "$.data", `decision 阶段不得修改这些字段：${illegal.join("、")}（本阶段只写想法/倾向/注意）`, op)
+      );
+      return result;
+    }
+  }
+  ensureLocationRef(data, "location_ref", op, result.issues, changes, "location_id", ["location"], ctx.scope);
+  if (before && Object.prototype.hasOwnProperty.call(changes, "location_id") && changes.location_id !== before.location_id && !Object.prototype.hasOwnProperty.call(data, "position")) {
+    Object.assign(changes, { map_id: null, grid_x: null, grid_y: null, coord_precision: "unknown", uncertainty_radius_cells: null });
+  }
+  applyPosition(changes, data, op, result.issues, ctx.scope);
+  if (result.issues.some((i) => i.severity === "error")) return result;
+  if (creating) {
+    const row2 = createRow("characters", { ...changes }, {
+      branchId: ctx.branchId,
+      id: rowId2,
+      turnId: turnIdOf(ctx),
+      clockS: ctx.clockS,
+      nowWallMs: Date.now(),
+      rulesetVersion: "atlas-1"
+    });
+    result.mutations.push(entityKeyMutation(ctx, op, rowId2, "character"));
+    result.mutations.push(mutation("characters", rowId2, null, row2, op, basisFor2(ctx, op)));
+    result.entityKeyWrites = [{ id: rowId2, kind: "character" }];
+  } else {
+    const merged = applyPatch(before, changes);
+    merged.row_rev = Number(before.row_rev ?? 1) + 1;
+    merged.updated_turn_id = turnIdOf(ctx);
+    result.mutations.push(mutation("characters", rowId2, before, merged, op, basisFor2(ctx, op)));
+    result.readSet.push(...readSetFor(ctx, "characters", rowId2));
+  }
+  result.declaredRefs = ref?.startsWith("new:") ? [declaredRef(ref, rowId2, "character", op.opId)] : [];
+  return result;
+}
+function compileItemUpsert(op, ctx) {
+  const result = emptyCompileResult();
+  const data = dataOf(op);
+  const unknown = Object.keys(data).filter((k) => !ITEM_FIELDS.has(k));
+  if (unknown.length) result.issues.push(fieldIgnoredWarning(op, unknown));
+  const ref = op.value.ref?.trim();
+  const resolvingExisting = Boolean(ref) && !ref.startsWith("new:");
+  const existing = resolvingExisting ? resolveRef(ref, "item", ctx.scope, { opId: op.opId, line: op.line, field: "ref" }) : null;
+  if (resolvingExisting && !existing?.entry) {
+    result.issues.push(...existing?.issues ?? [issue3("REF_UNKNOWN", "$.ref", `找不到物品引用：${ref}`, op)]);
+    return result;
+  }
+  const creating = !existing?.entry;
+  const name = asString(data.name);
+  if (creating && !name) {
+    result.issues.push(issue3("MINIMUM_FIELD_MISSING", "$.data.name", "新建物品必须给 name", op));
+    return result;
+  }
+  const rowId2 = existing?.entry ? existing.entry.id : ctx.makeId("item", op.opId, ref && ref.startsWith("new:") ? ref.slice(4) : `auto:${op.opId}`);
+  const before = existing?.entry ? ctx.tables.selectOne("items", ctx.branchId, rowId2) : null;
+  if (!creating && !before) {
+    result.issues.push(issue3("REF_UNKNOWN", "$.ref", `引用存在但物品行不存在：${rowId2}`, op));
+    return result;
+  }
+  const changes = {};
+  if (creating) changes.name = name;
+  else if (Object.prototype.hasOwnProperty.call(data, "name")) changes.name = name;
+  const aliases = ensureAliases(data.aliases, op, "$.data.aliases");
+  result.issues.push(...aliases.issues);
+  if (aliases.value) changes.aliases_json = aliases.value;
+  if (Object.prototype.hasOwnProperty.call(data, "kind")) {
+    const kind = String(data.kind);
+    if (!ITEM_KINDS.includes(kind)) result.issues.push(issue3("ENUM_INVALID", "$.data.kind", `物品类别非法：${kind}`, op));
+    else changes.kind = kind;
+  }
+  if (Object.prototype.hasOwnProperty.call(data, "status")) {
+    const st = String(data.status);
+    if (!ITEM_STATUS.includes(st)) result.issues.push(issue3("ENUM_INVALID", "$.data.status", `物品状态非法：${st}`, op));
+    else changes.status = st;
+  }
+  if (Object.prototype.hasOwnProperty.call(data, "description")) changes.description = String(data.description ?? "");
+  if (Object.prototype.hasOwnProperty.call(data, "condition_note")) changes.condition_note = String(data.condition_note ?? "");
+  if (Object.prototype.hasOwnProperty.call(data, "unit")) changes.unit = asString(data.unit) ?? "件";
+  if (Object.prototype.hasOwnProperty.call(data, "quantity")) {
+    if (data.quantity === null) {
+      changes.quantity = null;
+    } else {
+      const q = asFiniteNumber(data.quantity);
+      if (q === null || q < 0) {
+        result.issues.push(issue3("QUANTITY_INVALID", "$.data.quantity", "quantity 必须是有限非负数或 null（未知）", op));
+      } else {
+        changes.quantity = q;
+        if (q === 0) changes.status = "consumed";
+      }
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(data, "properties")) {
+    const list2 = Array.isArray(data.properties) ? data.properties : null;
+    if (!list2) result.issues.push(issue3("FIELD_TYPE_INVALID", "$.data.properties", "properties 必须是数组", op));
+    else if (list2.length > ITEM_PROPERTY_LIMIT) result.issues.push(issue3("FIELD_LIMIT_EXCEEDED", "$.data.properties", `properties 最多 ${ITEM_PROPERTY_LIMIT} 项`, op));
+    else changes.properties_json = list2;
+  }
+  if (creating && Object.prototype.hasOwnProperty.call(data, "placement")) {
+    const placement = data.placement;
+    if (isPlainObject3(placement)) {
+      if (Object.prototype.hasOwnProperty.call(placement, "holder_ref")) {
+        const r = resolveRef(String(placement.holder_ref), "character", ctx.scope, { opId: op.opId, field: "placement.holder_ref" });
+        if (r.entry) changes.holder_character_id = r.entry.id;
+        else result.issues.push(...r.issues);
+      } else if (Object.prototype.hasOwnProperty.call(placement, "container_ref")) {
+        const r = resolveRef(String(placement.container_ref), "item", ctx.scope, { opId: op.opId, field: "placement.container_ref" });
+        if (r.entry) changes.container_item_id = r.entry.id;
+        else result.issues.push(...r.issues);
+      } else if (Object.prototype.hasOwnProperty.call(placement, "location_ref")) {
+        const r = resolveRef(String(placement.location_ref), "location", ctx.scope, { opId: op.opId, field: "placement.location_ref" });
+        if (r.entry) changes.location_id = r.entry.id;
+        else result.issues.push(...r.issues);
+      } else {
+        result.issues.push(issue3("TRANSFER_TARGET_CONFLICT", "$.data.placement", "placement 需要 holder_ref / container_ref / location_ref 之一", op));
+      }
+    } else {
+      result.issues.push(issue3("FIELD_TYPE_INVALID", "$.data.placement", "placement 必须是 {holder_ref|container_ref|location_ref}", op));
+    }
+  }
+  if (result.issues.some((i) => i.severity === "error")) return result;
+  if (creating) {
+    const row2 = createRow("items", { ...changes }, {
+      branchId: ctx.branchId,
+      id: rowId2,
+      turnId: turnIdOf(ctx),
+      clockS: ctx.clockS,
+      nowWallMs: Date.now(),
+      rulesetVersion: "atlas-1"
+    });
+    result.mutations.push(entityKeyMutation(ctx, op, rowId2, "item"));
+    result.mutations.push(mutation("items", rowId2, null, row2, op, basisFor2(ctx, op)));
+    result.entityKeyWrites = [{ id: rowId2, kind: "item" }];
+  } else {
+    const merged = applyPatch(before, changes);
+    merged.row_rev = Number(before.row_rev ?? 1) + 1;
+    merged.updated_turn_id = turnIdOf(ctx);
+    result.mutations.push(mutation("items", rowId2, before, merged, op, basisFor2(ctx, op)));
+    result.readSet.push(...readSetFor(ctx, "items", rowId2));
+  }
+  result.declaredRefs = ref?.startsWith("new:") ? [declaredRef(ref, rowId2, "item", op.opId)] : [];
+  return result;
+}
+function compileItemTransfer(op, ctx) {
+  const result = emptyCompileResult();
+  const data = dataOf(op);
+  const ref = op.value.ref?.trim();
+  if (!ref) {
+    result.issues.push(issue3("MINIMUM_FIELD_MISSING", "$.ref", "item.transfer 需要 ref", op));
+    return result;
+  }
+  const resolved = resolveRef(ref, "item", ctx.scope, { opId: op.opId, line: op.line, field: "ref" });
+  if (!resolved.entry) {
+    result.issues.push(...resolved.issues);
+    return result;
+  }
+  const rowId2 = resolved.entry.id;
+  const before = ctx.tables.selectOne("items", ctx.branchId, rowId2) ?? ctx.newItemRows?.get(rowId2) ?? null;
+  if (!before) {
+    result.issues.push(issue3("REF_UNKNOWN", "$.ref", `物品行不存在：${rowId2}`, op));
+    return result;
+  }
+  const to = data.to;
+  if (!isPlainObject3(to)) {
+    result.issues.push(issue3("MINIMUM_FIELD_MISSING", "$.data.to", "item.transfer 需要 to={holder_ref|container_ref|location_ref|unknown}", op));
+    return result;
+  }
+  const kinds = ["holder_ref", "container_ref", "location_ref"].filter(
+    (k) => Object.prototype.hasOwnProperty.call(to, k) && to[k] !== null
+  );
+  const isUnknown = to.unknown === true;
+  if (isUnknown && kinds.length > 0) {
+    result.issues.push(issue3("TRANSFER_TARGET_CONFLICT", "$.data.to", "to 的落点互斥：unknown 不能与 holder_ref/container_ref/location_ref 同时出现", op));
+    return result;
+  }
+  if (!isUnknown && kinds.length !== 1) {
+    result.issues.push(issue3("TRANSFER_TARGET_CONFLICT", "$.data.to", `to 必须且只能给出一种落点（收到 ${kinds.length} 种）`, op));
+    return result;
+  }
+  const changes = {
+    holder_character_id: null,
+    container_item_id: null,
+    location_id: null,
+    map_id: null,
+    grid_x: null,
+    grid_y: null,
+    coord_precision: "unknown",
+    uncertainty_radius_cells: null
+  };
+  if (kinds[0] === "holder_ref") {
+    const r = resolveRef(String(to.holder_ref), "character", ctx.scope, { opId: op.opId, field: "to.holder_ref" });
+    if (!r.entry) {
+      result.issues.push(...r.issues);
+      return result;
+    }
+    changes.holder_character_id = r.entry.id;
+  } else if (kinds[0] === "container_ref") {
+    const r = resolveRef(String(to.container_ref), "item", ctx.scope, { opId: op.opId, field: "to.container_ref" });
+    if (!r.entry) {
+      result.issues.push(...r.issues);
+      return result;
+    }
+    if (r.entry.id === rowId2) {
+      result.issues.push(issue3("INVARIANT_CONTAINER_CYCLE", "$.data.to.container_ref", "物品不能装在自己里面", op));
+      return result;
+    }
+    changes.container_item_id = r.entry.id;
+  } else if (kinds[0] === "location_ref") {
+    const r = resolveRef(String(to.location_ref), "location", ctx.scope, { opId: op.opId, field: "to.location_ref" });
+    if (!r.entry) {
+      result.issues.push(...r.issues);
+      return result;
+    }
+    changes.location_id = r.entry.id;
+    if (isPlainObject3(to.position)) {
+      const x = asFiniteNumber(to.position.x);
+      const y = asFiniteNumber(to.position.y);
+      const mapRef = typeof data.map_ref === "string" ? data.map_ref : null;
+      if (x !== null && y !== null && mapRef) {
+        const mr = resolveRef(mapRef, "map", ctx.scope, { opId: op.opId, field: "map_ref" });
+        if (mr.entry) {
+          changes.map_id = mr.entry.id;
+          changes.grid_x = x;
+          changes.grid_y = y;
+          changes.coord_precision = String(to.position.precision ?? "approximate");
+        } else {
+          result.issues.push(...mr.issues);
+        }
+      }
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(data, "owner_ref")) {
+    if (data.owner_ref === null) {
+      changes.owner_entity_id = null;
+    } else {
+      const r = resolveRef(String(data.owner_ref), ["character", "faction"], ctx.scope, { opId: op.opId, field: "owner_ref" });
+      if (!r.entry) {
+        result.issues.push(...r.issues);
+        return result;
+      }
+      changes.owner_entity_id = r.entry.id;
+    }
+  }
+  const movedQty = Object.prototype.hasOwnProperty.call(data, "quantity") ? asFiniteNumber(data.quantity) : null;
+  const heldQty = typeof before.quantity === "number" ? before.quantity : null;
+  if (Object.prototype.hasOwnProperty.call(data, "quantity") && (movedQty === null || movedQty <= 0)) {
+    result.issues.push(issue3("QUANTITY_INVALID", "$.data.quantity", "转移数量必须为正有限数", op));
+    return result;
+  }
+  if (movedQty !== null && heldQty !== null && movedQty > heldQty) {
+    result.issues.push(issue3("QUANTITY_INSUFFICIENT", "$.data.quantity", `转移数量 ${movedQty} 超过持有量 ${heldQty}`, op));
+    return result;
+  }
+  if (result.issues.some((i) => i.severity === "error")) return result;
+  const turnId = turnIdOf(ctx);
+  if (movedQty !== null && heldQty !== null && movedQty < heldQty) {
+    const remaining = heldQty - movedQty;
+    const sourceAfter = applyPatch(before, { quantity: remaining, row_rev: Number(before.row_rev ?? 1) + 1, updated_turn_id: turnId });
+    result.mutations.push(mutation("items", rowId2, before, sourceAfter, op, basisFor2(ctx, op)));
+    const newId = ctx.makeId("item", op.opId, `split:${rowId2}:${movedQty}`);
+    const newRow = createRow(
+      "items",
+      { ...before, ...changes, quantity: movedQty },
+      { branchId: ctx.branchId, id: newId, turnId, clockS: ctx.clockS, nowWallMs: Date.now(), rulesetVersion: "atlas-1" }
+    );
+    newRow.row_rev = 1;
+    result.mutations.push(entityKeyMutation(ctx, op, newId, "item"));
+    result.mutations.push(mutation("items", newId, null, newRow, op, basisFor2(ctx, op)));
+    result.entityKeyWrites = [{ id: newId, kind: "item" }];
+    result.operationKeys = [{ groupKey: `item:${rowId2}`, opKey: `transfer:${op.opId}` }];
+    result.readSet.push(...readSetFor(ctx, "items", rowId2));
+    return result;
+  }
+  const after = applyPatch(before, { ...changes, row_rev: Number(before.row_rev ?? 1) + 1, updated_turn_id: turnId });
+  if (movedQty !== null && heldQty !== null) after.quantity = Math.max(0, heldQty - movedQty);
+  if (after.quantity === 0) after.status = "consumed";
+  result.mutations.push(mutation("items", rowId2, before, after, op, basisFor2(ctx, op)));
+  result.operationKeys = [{ groupKey: `item:${rowId2}`, opKey: `transfer:${op.opId}` }];
+  result.readSet.push(...readSetFor(ctx, "items", rowId2));
+  return result;
+}
+function compileFactionUpsert(op, ctx) {
+  const result = emptyCompileResult();
+  const data = dataOf(op);
+  const unknown = Object.keys(data).filter((k) => !FACTION_FIELDS.has(k));
+  if (unknown.length) result.issues.push(fieldIgnoredWarning(op, unknown));
+  const ref = op.value.ref?.trim();
+  const resolvingExisting = Boolean(ref) && !ref.startsWith("new:");
+  const existing = resolvingExisting ? resolveRef(ref, "faction", ctx.scope, { opId: op.opId, line: op.line, field: "ref" }) : null;
+  if (resolvingExisting && !existing?.entry) {
+    result.issues.push(...existing?.issues ?? [issue3("REF_UNKNOWN", "$.ref", `找不到势力引用：${ref}`, op)]);
+    return result;
+  }
+  const creating = !existing?.entry;
+  const name = asString(data.name);
+  if (creating && !name) {
+    result.issues.push(issue3("MINIMUM_FIELD_MISSING", "$.data.name", "新建势力必须给 name", op));
+    return result;
+  }
+  const rowId2 = existing?.entry ? existing.entry.id : ctx.makeId("faction", op.opId, ref && ref.startsWith("new:") ? ref.slice(4) : `auto:${op.opId}`);
+  const before = existing?.entry ? ctx.tables.selectOne("factions", ctx.branchId, rowId2) : null;
+  if (!creating && !before) {
+    result.issues.push(issue3("REF_UNKNOWN", "$.ref", `引用存在但势力行不存在：${rowId2}`, op));
+    return result;
+  }
+  const changes = {};
+  if (creating) changes.name = name;
+  else if (Object.prototype.hasOwnProperty.call(data, "name")) changes.name = name;
+  const aliases = ensureAliases(data.aliases, op, "$.data.aliases");
+  result.issues.push(...aliases.issues);
+  if (aliases.value) changes.aliases_json = aliases.value;
+  if (Object.prototype.hasOwnProperty.call(data, "kind")) {
+    const kind = String(data.kind);
+    if (!FACTION_KINDS.includes(kind)) result.issues.push(issue3("ENUM_INVALID", "$.data.kind", `势力类型非法：${kind}`, op));
+    else changes.kind = kind;
+  }
+  if (Object.prototype.hasOwnProperty.call(data, "status")) {
+    const st = String(data.status);
+    if (!FACTION_STATUS.includes(st)) result.issues.push(issue3("ENUM_INVALID", "$.data.status", `势力状态非法：${st}`, op));
+    else changes.status = st;
+  }
+  if (Object.prototype.hasOwnProperty.call(data, "description")) changes.description = String(data.description ?? "");
+  if (Object.prototype.hasOwnProperty.call(data, "goal")) changes.goal = String(data.goal ?? "");
+  if (Object.prototype.hasOwnProperty.call(data, "capabilities")) {
+    const list2 = Array.isArray(data.capabilities) ? data.capabilities : null;
+    if (!list2) result.issues.push(issue3("FIELD_TYPE_INVALID", "$.data.capabilities", "capabilities 必须是数组", op));
+    else if (list2.length > CAPABILITY_LIMIT) result.issues.push(issue3("FIELD_LIMIT_EXCEEDED", "$.data.capabilities", `最多 ${CAPABILITY_LIMIT} 项能力`, op));
+    else changes.capabilities_json = list2;
+  }
+  ensureLocationRef(data, "headquarters_ref", op, result.issues, changes, "headquarters_location_id", ["location"], ctx.scope);
+  if (result.issues.some((i) => i.severity === "error")) return result;
+  const turnId = turnIdOf(ctx);
+  if (creating) {
+    const row2 = createRow("factions", { ...changes }, {
+      branchId: ctx.branchId,
+      id: rowId2,
+      turnId,
+      clockS: ctx.clockS,
+      nowWallMs: Date.now(),
+      rulesetVersion: "atlas-1"
+    });
+    result.mutations.push(entityKeyMutation(ctx, op, rowId2, "faction"));
+    result.mutations.push(mutation("factions", rowId2, null, row2, op, basisFor2(ctx, op)));
+    result.entityKeyWrites = [{ id: rowId2, kind: "faction" }];
+  } else {
+    const merged = applyPatch(before, changes);
+    merged.row_rev = Number(before.row_rev ?? 1) + 1;
+    merged.updated_turn_id = turnId;
+    result.mutations.push(mutation("factions", rowId2, before, merged, op, basisFor2(ctx, op)));
+    result.readSet.push(...readSetFor(ctx, "factions", rowId2));
+  }
+  result.declaredRefs = ref?.startsWith("new:") ? [declaredRef(ref, rowId2, "faction", op.opId)] : [];
+  return result;
+}
+var LOCATION_FIELDS, LOCATION_KINDS, LOCATION_EXISTENCE, CHARACTER_FIELDS, CHARACTER_ROLES, CHARACTER_IMPORTANCE, CHARACTER_PHYSICAL, ITEM_FIELDS, ITEM_KINDS, ITEM_STATUS, FACTION_FIELDS, FACTION_KINDS, FACTION_STATUS;
+var init_atlas_ops_entities = __esm({
+  "src/atlas-ops-entities.ts"() {
+    "use strict";
+    init_atlas_ops_compile_types();
+    init_atlas_db_defaults();
+    init_atlas_db_mentions();
+    init_atlas_ops_refs();
+    init_atlas_runtime_limits();
+    init_atlas_location_kinds();
+    init_atlas_spatial();
+    LOCATION_FIELDS = /* @__PURE__ */ new Set([
+      "name",
+      "aliases",
+      "kind",
+      "description",
+      "parent_ref",
+      "mobility",
+      "anchor_ref",
+      "map_ref",
+      "position",
+      "area",
+      "terrain",
+      "access",
+      "vehicle_profile",
+      "existence_quality"
+    ]);
+    LOCATION_KINDS = ATLAS_LOCATION_KINDS;
+    LOCATION_EXISTENCE = ["confirmed", "inferred", "hypothetical"];
+    CHARACTER_FIELDS = /* @__PURE__ */ new Set([
+      "registration",
+      "name",
+      "aliases",
+      "role",
+      "identity",
+      "description",
+      "personality",
+      "importance",
+      "importance_reason",
+      "thought",
+      "action_tendency",
+      "physical_status",
+      "condition_note",
+      "location_ref",
+      "map_ref",
+      "position",
+      "mobility_profiles",
+      "capabilities"
+    ]);
+    CHARACTER_ROLES = ["protagonist", "companion", "npc"];
+    CHARACTER_IMPORTANCE = ["core", "recurring", "supporting"];
+    CHARACTER_PHYSICAL = ["alive", "incapacitated", "dead", "unknown"];
+    ITEM_FIELDS = /* @__PURE__ */ new Set([
+      "name",
+      "aliases",
+      "kind",
+      "description",
+      "quantity",
+      "unit",
+      "condition_note",
+      "properties",
+      "status",
+      "placement"
+    ]);
+    ITEM_KINDS = ["object", "resource", "document", "equipment", "container", "other"];
+    ITEM_STATUS = ["active", "consumed", "destroyed", "lost", "merged", "archived"];
+    FACTION_FIELDS = /* @__PURE__ */ new Set(["name", "aliases", "kind", "description", "goal", "headquarters_ref", "capabilities", "status"]);
+    FACTION_KINDS = ["nation", "organization", "family", "team", "other"];
+    FACTION_STATUS = ["active", "dissolved", "merged", "archived"];
+  }
+});
+
+// src/atlas-spatial-request.ts
+function isPlainObject4(v) {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+function issue4(code, path, message, op, extra = {}) {
+  return { code, path, message, severity: "error", retryable: true, opId: op.opId, line: op.line, ...extra };
+}
+function mutation2(table, rowId2, before, after, op, basis) {
+  return { table, rowId: rowId2, before, after, sourceOpIds: [op.opId], basis };
+}
+function basisOf(ctx, op) {
+  if (ctx.basisFor) return ctx.basisFor(op, { certainty: "inferred" });
+  return {
+    kind: ctx.phase === "geography" ? "estimate" : ctx.phase === "observe" ? "story" : "simulation",
+    sources: [],
+    causes: [],
+    reason: op.value.why ?? "布局约束请求",
+    verification: ctx.phase === "observe" ? "source_bound" : "causal",
+    certainty: "inferred"
+  };
+}
+function canonicalJson(value) {
+  if (value === null || value === void 0) return "null";
+  if (Array.isArray(value)) return `[${value.map((v) => canonicalJson(v)).join(",")}]`;
+  if (typeof value === "object") {
+    const obj = value;
+    return `{${Object.keys(obj).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(obj[k])}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+function signatureOf(text6) {
+  let out = "";
+  let seed = 2166136261;
+  while (out.length < 32) {
+    let h = seed;
+    for (let i = 0; i < text6.length; i += 1) {
+      h ^= text6.charCodeAt(i) + out.length;
+      h = Math.imul(h, 16777619) >>> 0;
+    }
+    out += h.toString(16).padStart(8, "0");
+    seed = (h ^ 2654435769) >>> 0;
+  }
+  return out.slice(0, 32);
+}
+function mergeRow(existing, incoming, path, strict, conflicts) {
+  const out = { ...existing };
+  for (const [key, value] of Object.entries(incoming)) {
+    if (!(key in out)) {
+      out[key] = value;
+      continue;
+    }
+    if (isPlainObject4(value) && isPlainObject4(out[key])) {
+      out[key] = mergeRow(out[key], value, `${path}.${key}`, strict, conflicts);
+      continue;
+    }
+    if (canonicalJson(out[key]) === canonicalJson(value)) continue;
+    if (strict) conflicts.push(`${path}.${key}`);
+    out[key] = value;
+  }
+  return out;
+}
+function mergeLayoutConstraints(baseSpec, incoming, strict) {
+  const conflicts = [];
+  const out = isPlainObject4(baseSpec) ? { ...baseSpec } : {};
+  const deletes = incoming["deletes"];
+  if (isPlainObject4(deletes)) {
+    out["deletes"] = deletes;
+    for (const [collection2, ids2] of Object.entries(deletes)) {
+      if (!Array.isArray(ids2)) continue;
+      const rows4 = out[collection2];
+      if (!Array.isArray(rows4)) continue;
+      const drop = new Set(ids2.map((v) => String(v)));
+      out[collection2] = rows4.filter((row2) => !(isPlainObject4(row2) && drop.has(String(row2["id"]))));
+    }
+  }
+  for (const collection2 of LAYOUT_SPEC_COLLECTIONS) {
+    const rows4 = incoming[collection2];
+    if (!Array.isArray(rows4)) continue;
+    const byId9 = /* @__PURE__ */ new Map();
+    for (const row2 of Array.isArray(out[collection2]) ? out[collection2] : []) {
+      if (isPlainObject4(row2)) byId9.set(String(row2["id"]), row2);
+    }
+    for (const raw of rows4) {
+      if (!isPlainObject4(raw)) continue;
+      const id = String(raw["id"]);
+      const existing = byId9.get(id);
+      byId9.set(id, existing ? mergeRow(existing, raw, `spec.${collection2}[${id}]`, strict, conflicts) : { ...raw });
+    }
+    out[collection2] = [...byId9.values()];
+  }
+  for (const key of LAYOUT_SPEC_SCALARS) {
+    if (DIRECTIVE_KEYS.includes(key)) continue;
+    const value = incoming[key];
+    if (value === void 0) continue;
+    if (strict && key in out && canonicalJson(out[key]) !== canonicalJson(value)) {
+      conflicts.push(`spec.${key}`);
+      continue;
+    }
+    out[key] = value;
+  }
+  delete out["rebuild"];
+  return { spec: out, conflicts };
+}
+function collectLocationRefs(spec) {
+  const out = /* @__PURE__ */ new Set();
+  const add2 = (value) => {
+    if (typeof value !== "string") return;
+    const trimmed = value.trim();
+    if (trimmed === "" || trimmed.startsWith("new:")) return;
+    out.add(trimmed);
+  };
+  add2(spec["corridorLocationRef"]);
+  for (const [collection2, fields] of Object.entries(LAYOUT_SPEC_REF_FIELDS)) {
+    const rows4 = spec[collection2];
+    if (!Array.isArray(rows4)) continue;
+    for (const row2 of rows4) {
+      if (!isPlainObject4(row2)) continue;
+      for (const [field, kind] of Object.entries(fields)) {
+        if (kind !== "location") continue;
+        add2(row2[field]);
+      }
+    }
+  }
+  return [...out];
+}
+function compileMapLayoutRequest(op, ctx) {
+  const result = emptyCompileResult();
+  const data = op.value.data ?? {};
+  const kind = typeof data["kind"] === "string" ? data["kind"].trim().toLowerCase() : "";
+  if (kind !== "floor" && kind !== "city" && kind !== "overview") {
+    result.issues.push(
+      issue4(
+        ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING,
+        "$.data.kind",
+        `map.layout.request kind must be one of {floor,city,overview}; got ${JSON.stringify(data["kind"] ?? null)}`,
+        op
+      )
+    );
+    return result;
+  }
+  const cleaned = normalizeLayoutSpec(data, { opId: op.opId, line: op.line });
+  result.issues.push(...cleaned.issues);
+  if (!cleaned.ok || !cleaned.spec) return result;
+  const spec = { ...cleaned.spec };
+  const ref = op.value.ref?.trim() ?? "";
+  if (ref === "") {
+    result.issues.push(issue4(ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING, "$.ref", "map.layout.request 需要 ref 指定地图", op));
+    return result;
+  }
+  const resolved = resolveRef(ref, "map", ctx.scope, { opId: op.opId, line: op.line, field: "ref" });
+  if (!resolved.entry) {
+    result.issues.push(...resolved.issues);
+    return result;
+  }
+  const mapId = resolved.entry.id;
+  const before = ctx.tables.selectOne("maps", ctx.branchId, mapId);
+  if (!before) {
+    result.issues.push(issue4(ATLAS_ERROR_CODES.REF_UNKNOWN, "$.ref", `地图行不存在：${mapId}`, op));
+    return result;
+  }
+  const specMapId = typeof spec["mapId"] === "string" ? spec["mapId"].trim() : "";
+  if (specMapId !== "" && specMapId !== mapId) {
+    result.issues.push(
+      issue4(
+        LAYOUT_REQUEST_CONFLICT,
+        "$.data.spec.mapId",
+        `spec.mapId（${specMapId}）与 ref 解析出的地图（${mapId}）不一致；同一请求不能跨图。`,
+        op
+      )
+    );
+    return result;
+  }
+  spec["mapId"] = mapId;
+  const allowed = KIND_COLLECTIONS[kind] ?? FLOOR_COLLECTIONS;
+  for (const collection2 of LAYOUT_SPEC_COLLECTIONS) {
+    if (allowed.includes(collection2)) continue;
+    const rows4 = spec[collection2];
+    if (Array.isArray(rows4) && rows4.length > 0) {
+      result.issues.push(
+        issue4(
+          LAYOUT_REQUEST_CONFLICT,
+          `$.data.spec.${collection2}`,
+          `kind=${kind} 的布局请求不接受 ${collection2}；floor / city / overview 是三套模板，引用不可混用。`,
+          op
+        )
+      );
+      return result;
+    }
+  }
+  const refs = resolveLayoutSpecRefs(spec, ctx.scope, { opId: op.opId, line: op.line });
+  result.issues.push(...refs.issues);
+  if (!refs.ok || !refs.spec) return result;
+  const resolvedSpec = refs.spec;
+  for (const id of collectLocationRefs(resolvedSpec)) {
+    const row2 = ctx.tables.selectOne("locations", ctx.branchId, id);
+    if (!row2) continue;
+    const owner = row2["map_id"] === null || row2["map_id"] === void 0 ? "" : String(row2["map_id"]);
+    if (owner !== "" && owner !== mapId && id !== before.container_location_id) {
+      result.issues.push(
+        issue4(
+          LAYOUT_REQUEST_CONFLICT,
+          "$.data.spec",
+          `实体 ${id} 属于另一张图（${owner}），不能出现在 ${mapId} 的布局里：父图/子图引用不可混用。`,
+          op
+        )
+      );
+      return result;
+    }
+  }
+  const frame = isPlainObject4(before.frame_json) ? before.frame_json : {};
+  const saved = isPlainObject4(frame["atlasLayoutRequest"]) ? frame["atlasLayoutRequest"] : null;
+  const savedSpec = saved && isPlainObject4(saved["spec"]) ? saved["spec"] : null;
+  const savedKind = saved && typeof saved["kind"] === "string" ? String(saved["kind"]) : null;
+  let state = BATCH_STATE.get(ctx);
+  if (!state) {
+    state = /* @__PURE__ */ new Map();
+    BATCH_STATE.set(ctx, state);
+  }
+  const previous = state.get(mapId);
+  if (savedKind !== null && savedKind !== kind) {
+    result.issues.push(
+      issue4(
+        LAYOUT_REQUEST_CONFLICT,
+        "$.data.kind",
+        `该图已保存 kind=${savedKind} 的布局请求，本次是 ${kind}；同一张图的两套模板不能并存，请先显式重建。`,
+        op
+      )
+    );
+    return result;
+  }
+  if (previous && previous.kind !== kind) {
+    result.issues.push(
+      issue4(LAYOUT_REQUEST_CONFLICT, "$.data.kind", `同批前一个请求是 ${previous.kind}，本次是 ${kind}。`, op)
+    );
+    return result;
+  }
+  const merged = mergeLayoutConstraints(previous ? previous.spec : savedSpec, resolvedSpec, previous !== void 0);
+  if (merged.conflicts.length > 0) {
+    result.issues.push(
+      issue4(
+        LAYOUT_REQUEST_CONFLICT,
+        `$.data.spec.${merged.conflicts[0].replace(/^spec\./, "")}`,
+        `本次请求与同批已编译的约束在 ${merged.conflicts.join("、")} 上冲突；不静默覆盖，请合并成一条或改用不同 id。`,
+        op
+      )
+    );
+    return result;
+  }
+  state.set(mapId, { kind, spec: merged.spec });
+  const requestId = ctx.makeId("layout_request", op.opId, `map:${mapId}`);
+  const turnId = ctx.turnId ?? ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
+  const rebuild = spec["rebuild"] === true;
+  const signature2 = signatureOf(canonicalJson({ kind, mapId, spec: merged.spec, rebuild }));
+  const dependencies = [mapId, ...refs.dependencies];
+  for (const id of dependencies) if (!result.dependencies.includes(id)) result.dependencies.push(id);
+  result.readSet.push({ table: "maps", rowId: mapId, rowRev: Number(before.row_rev ?? 1) });
+  const savedSignature = saved && typeof saved["inputSignature"] === "string" ? String(saved["inputSignature"]) : null;
+  if (savedSignature === signature2) return result;
+  const nextFrame = { ...frame };
+  nextFrame["atlasLayoutRequest"] = {
+    requestId,
+    operationId: op.opId,
+    createdTurnId: turnId,
+    kind,
+    mapId,
+    rebuild,
+    spec: merged.spec,
+    inputSignature: signature2
+  };
+  const after = applyPatch(before, {
+    frame_json: nextFrame,
+    row_rev: Number(before.row_rev ?? 1) + 1,
+    updated_turn_id: turnId
+  });
+  result.mutations.push(mutation2("maps", mapId, before, after, op, basisOf(ctx, op)));
+  return result;
+}
+var LAYOUT_REQUEST_CONFLICT, FLOOR_COLLECTIONS, CITY_COLLECTIONS, OVERVIEW_COLLECTIONS, KIND_COLLECTIONS, DIRECTIVE_KEYS, BATCH_STATE;
+var init_atlas_spatial_request = __esm({
+  "src/atlas-spatial-request.ts"() {
+    "use strict";
+    init_atlas_ops_compile_types();
+    init_atlas_ops_refs();
+    init_atlas_ops_normalize();
+    init_atlas_ops_entities();
+    init_atlas_ops_errors();
+    LAYOUT_REQUEST_CONFLICT = ATLAS_ERROR_CODES.LAYOUT_REQUEST_CONFLICT;
+    FLOOR_COLLECTIONS = LAYOUT_KIND_COLLECTIONS.floor;
+    CITY_COLLECTIONS = LAYOUT_KIND_COLLECTIONS.city;
+    OVERVIEW_COLLECTIONS = LAYOUT_KIND_COLLECTIONS.overview;
+    KIND_COLLECTIONS = {
+      floor: FLOOR_COLLECTIONS,
+      city: CITY_COLLECTIONS,
+      overview: OVERVIEW_COLLECTIONS
+    };
+    DIRECTIVE_KEYS = ["deletes", "rebuild"];
+    BATCH_STATE = /* @__PURE__ */ new WeakMap();
   }
 });
 
@@ -8468,34 +12675,34 @@ var init_atlas_model_batching = __esm({
 // src/atlas-layout-signature.ts
 function computeLayoutInputSignature(input) {
   const policy = input.policyVersion ?? LAYOUT_SIGNATURE_POLICY_VERSION;
-  const members = [...input.members].sort((a, b) => byId3(a.id, b.id)).map((m) => [m.id, str(m.name), str(m.kind), str(m.parent), str(m.anchor), str(m.description), str(m.mobility)]);
-  const authorIntent = [...input.authorIntent].sort((a, b) => byId3(a.id, b.id)).map((a) => [a.id, str(a.precision), num(a.gridX), num(a.gridY), num(a.uncertainty), a.area ?? null]);
+  const members = [...input.members].sort((a, b) => byId3(a.id, b.id)).map((m) => [m.id, str2(m.name), str2(m.kind), str2(m.parent), str2(m.anchor), str2(m.description), str2(m.mobility)]);
+  const authorIntent = [...input.authorIntent].sort((a, b) => byId3(a.id, b.id)).map((a) => [a.id, str2(a.precision), num2(a.gridX), num2(a.gridY), num2(a.uncertainty), a.area ?? null, a.dimensions ? [a.dimensions.widthM, a.dimensions.heightM] : null]);
   const routes = [...input.routes].sort((a, b) => byId3(a.id, b.id)).map((r) => [
     r.id,
-    str(r.from),
-    str(r.to),
-    str(r.mapId),
-    str(r.status),
-    num(r.bidirectional),
-    str(r.kind),
-    str(r.geometry),
-    str(r.geometryQuality),
-    num(r.geometryRev)
+    str2(r.from),
+    str2(r.to),
+    str2(r.mapId),
+    str2(r.status),
+    num2(r.bidirectional),
+    str2(r.kind),
+    str2(r.geometry),
+    str2(r.geometryQuality),
+    num2(r.geometryRev)
   ]);
   const payload = [
     policy,
     input.mapId,
     input.layoutKind,
-    str(input.profile),
+    str2(input.profile),
     input.units,
-    num(input.extent?.width),
-    num(input.extent?.height),
+    num2(input.extent?.width),
+    num2(input.extent?.height),
     input.structureLocked ? 1 : 0,
-    num(input.sizeLedgerRev),
+    num2(input.sizeLedgerRev),
     members,
     authorIntent,
     routes,
-    [...input.spaceLedger ?? []].sort((a, b) => byId3(a.locationId, b.locationId)).map((s) => [s.locationId, num(s.revision), num(s.widthM), num(s.heightM)])
+    [...input.spaceLedger ?? []].sort((a, b) => byId3(a.locationId, b.locationId)).map((s) => [s.locationId, num2(s.revision), num2(s.widthM), num2(s.heightM)])
   ];
   return stableHexHash(JSON.stringify(payload));
 }
@@ -8551,15 +12758,15 @@ function canonicalAuthoredArea(value) {
   }
   return out;
 }
-var LAYOUT_SIGNATURE_POLICY_VERSION, byId3, str, num;
+var LAYOUT_SIGNATURE_POLICY_VERSION, byId3, str2, num2;
 var init_atlas_layout_signature = __esm({
   "src/atlas-layout-signature.ts"() {
     "use strict";
     init_atlas_hash();
-    LAYOUT_SIGNATURE_POLICY_VERSION = "layout-v7";
+    LAYOUT_SIGNATURE_POLICY_VERSION = "layout-v9";
     byId3 = (left, right) => left < right ? -1 : left > right ? 1 : 0;
-    str = (value) => typeof value === "string" && value ? value : null;
-    num = (value) => typeof value === "number" && Number.isFinite(value) ? value : null;
+    str2 = (value) => typeof value === "string" && value ? value : null;
+    num2 = (value) => typeof value === "number" && Number.isFinite(value) ? value : null;
   }
 });
 
@@ -8679,7 +12886,7 @@ function sizesAgree2(left, right, tolerance = SPACE_SIZE_REL_TOLERANCE) {
   };
   return near(left.widthM, right.widthM) && near(left.heightM, right.heightM);
 }
-function issue2(code, path, message, severity = "error") {
+function issue5(code, path, message, severity = "error") {
   return { code, path, message, severity, retryable: false };
 }
 function readFurnishing(raw, locationId) {
@@ -8728,26 +12935,26 @@ function readSpaceCanonical2(frame, expectedLocationId) {
   if (raw === void 0 || raw === null) return { ok: true, canonical: null, deferred: false, issues: [] };
   const path = `$.frame_json.${SPACE_CANONICAL_FRAME_KEY}`;
   if (!plain2(raw)) {
-    return { ok: false, canonical: null, deferred: false, issues: [issue2("SPACE_CANONICAL_INVALID", path, "空间权威记录不是对象，本轮按未登记处理（不采用坏记录）")] };
+    return { ok: false, canonical: null, deferred: false, issues: [issue5("SPACE_CANONICAL_INVALID", path, "空间权威记录不是对象，本轮按未登记处理（不采用坏记录）")] };
   }
   if (raw.version !== SPACE_CANONICAL_VERSION) {
     return {
       ok: false,
       canonical: null,
       deferred: false,
-      issues: [issue2("SPACE_CANONICAL_VERSION_UNSUPPORTED", path, `空间权威版本 ${JSON.stringify(raw.version)} 不是 ${SPACE_CANONICAL_VERSION}，本轮不采用`)]
+      issues: [issue5("SPACE_CANONICAL_VERSION_UNSUPPORTED", path, `空间权威版本 ${JSON.stringify(raw.version)} 不是 ${SPACE_CANONICAL_VERSION}，本轮不采用`)]
     };
   }
   const locationId = asId(raw.locationId);
   if (!locationId) {
-    return { ok: false, canonical: null, deferred: false, issues: [issue2("SPACE_CANONICAL_INVALID", path, "空间权威缺少 locationId：空间身份必须以真实地点 ID 表达")] };
+    return { ok: false, canonical: null, deferred: false, issues: [issue5("SPACE_CANONICAL_INVALID", path, "空间权威缺少 locationId：空间身份必须以真实地点 ID 表达")] };
   }
   if (expectedLocationId && locationId !== expectedLocationId) {
     return {
       ok: false,
       canonical: null,
       deferred: false,
-      issues: [issue2("SPACE_CANONICAL_IDENTITY_MISMATCH", path, `本图持有的是 ${locationId} 的空间权威，与期望的 ${expectedLocationId} 不符；不混用、不迁移`)]
+      issues: [issue5("SPACE_CANONICAL_IDENTITY_MISMATCH", path, `本图持有的是 ${locationId} 的空间权威，与期望的 ${expectedLocationId} 不符；不混用、不迁移`)]
     };
   }
   const revision = finite2(raw.revision) && Number.isInteger(raw.revision) && raw.revision >= 0 ? raw.revision : 0;
@@ -8757,14 +12964,14 @@ function readSpaceCanonical2(frame, expectedLocationId) {
   for (let index = 0; index < rawList.length; index += 1) {
     const entry = readFurnishing(rawList[index], locationId);
     if (!entry) {
-      issues.push(issue2("SPACE_FURNISHING_INVALID", `${path}.furnishing[${index}]`, "陈设账本条目不可用：localId 必须是本空间的 space:<locationId>:furn:<id>，且尺寸为正数；该项跳过，其他项继续", "warning"));
+      issues.push(issue5("SPACE_FURNISHING_INVALID", `${path}.furnishing[${index}]`, "陈设账本条目不可用：localId 必须是本空间的 space:<locationId>:furn:<id>，且尺寸为正数；该项跳过，其他项继续", "warning"));
       continue;
     }
     furnishing.push(entry);
   }
   const deferred = furnishing.length > SPACE_CANONICAL_MAX_FURNISHING2;
   if (deferred) {
-    issues.push(issue2(
+    issues.push(issue5(
       "SPACE_FURNISHING_DEFERRED",
       `${path}.furnishing`,
       `空间陈设账本已有 ${furnishing.length} 条，超过首版上限 ${SPACE_CANONICAL_MAX_FURNISHING2}：本轮明确 deferred（不追加、不静默裁剪），原记录完整保留`,
@@ -8774,8 +12981,7 @@ function readSpaceCanonical2(frame, expectedLocationId) {
   return { ok: true, canonical: { version: 1, locationId, revision, size: readSize(raw.size), furnishing }, deferred, issues };
 }
 function confirmedAreaSize(row2, parentMap) {
-  const metersPerCell = parentMap?.meters_per_cell;
-  if (!row2 || !parentMap || asId(parentMap.id) !== asId(row2.map_id) || !finite2(metersPerCell) || metersPerCell <= 0) return null;
+  if (!row2) return null;
   const raw = row2.area_geometry_json;
   const area = typeof raw === "string" ? (() => {
     try {
@@ -8784,7 +12990,11 @@ function confirmedAreaSize(row2, parentMap) {
       return null;
     }
   })() : raw;
-  if (!plain2(area) || area.quality !== "confirmed" || area.kind !== "polygon" || !Array.isArray(area.points)) return null;
+  if (!plain2(area) || area.quality !== "confirmed") return null;
+  const dimensions2 = readMetricDimensions(area);
+  if (dimensions2) return dimensions2;
+  const metersPerCell = parentMap?.meters_per_cell;
+  if (!parentMap || asId(parentMap.id) !== asId(row2.map_id) || !finite2(metersPerCell) || metersPerCell <= 0 || area.kind !== "polygon" || !Array.isArray(area.points)) return null;
   const points = area.points.filter(plain2).filter((p) => finite2(p.x) && finite2(p.y));
   if (points.length < 4) return null;
   const xs = points.map((p) => p.x);
@@ -9011,7 +13221,7 @@ var init_atlas_space_canonical = __esm({
 });
 
 // src/atlas-spatial-profile.ts
-function issue3(code, path, message, severity = "warning", extra = {}) {
+function issue6(code, path, message, severity = "warning", extra = {}) {
   return { code, path, message, severity, retryable: false, ...extra };
 }
 function readSpatialProfile(frame) {
@@ -9020,16 +13230,16 @@ function readSpatialProfile(frame) {
   try {
     raw = PLAIN(frame) ? frame[SPATIAL_PROFILE_FRAME_KEY] : void 0;
   } catch {
-    return { ok: false, profile: null, issues: [issue3("SPATIAL_PROFILE_UNREADABLE", path, "地图框架无法读取，本轮不采用任何档案", "error")] };
+    return { ok: false, profile: null, issues: [issue6("SPATIAL_PROFILE_UNREADABLE", path, "地图框架无法读取，本轮不采用任何档案", "error")] };
   }
   if (raw === void 0 || raw === null) return { ok: true, profile: null, issues: [] };
-  if (!PLAIN(raw)) return { ok: false, profile: null, issues: [issue3("SPATIAL_PROFILE_INVALID", path, "档案记录不是对象，本轮不采用")] };
+  if (!PLAIN(raw)) return { ok: false, profile: null, issues: [issue6("SPATIAL_PROFILE_INVALID", path, "档案记录不是对象，本轮不采用")] };
   if (raw.version !== SPATIAL_PROFILE_VERSION) {
-    return { ok: false, profile: null, issues: [issue3("SPATIAL_PROFILE_VERSION_UNSUPPORTED", path, `档案版本 ${String(raw.version)} 不受支持（本版只认 ${SPATIAL_PROFILE_VERSION}），本轮不采用`)] };
+    return { ok: false, profile: null, issues: [issue6("SPATIAL_PROFILE_VERSION_UNSUPPORTED", path, `档案版本 ${String(raw.version)} 不受支持（本版只认 ${SPATIAL_PROFILE_VERSION}），本轮不采用`)] };
   }
   const mode = raw.mode;
   if (!isMode(mode)) {
-    return { ok: false, profile: null, issues: [issue3("SPATIAL_PROFILE_MODE_INVALID", path, `档案模式 ${String(mode)} 不在合法枚举内，本轮不采用（不按名字猜）`)] };
+    return { ok: false, profile: null, issues: [issue6("SPATIAL_PROFILE_MODE_INVALID", path, `档案模式 ${String(mode)} 不在合法枚举内，本轮不采用（不按名字猜）`)] };
   }
   const basis = isBasis(raw.basis) ? raw.basis : "author";
   return { ok: true, profile: { version: 1, mode, basis }, issues: [] };
@@ -9038,10 +13248,10 @@ function writeSpatialProfile(frame, profile) {
   const source = normalizeFrame(frame);
   const path = `$.frame_json.${SPATIAL_PROFILE_FRAME_KEY}`;
   if (!isMode(profile?.mode) || !isBasis(profile?.basis)) {
-    return { ok: false, frame: source, issues: [issue3("SPATIAL_PROFILE_INVALID", path, "待写入的档案不合法：模式与依据都必须在合法枚举内", "error")] };
+    return { ok: false, frame: source, issues: [issue6("SPATIAL_PROFILE_INVALID", path, "待写入的档案不合法：模式与依据都必须在合法枚举内", "error")] };
   }
   if (profile.version !== SPATIAL_PROFILE_VERSION) {
-    return { ok: false, frame: source, issues: [issue3("SPATIAL_PROFILE_VERSION_UNSUPPORTED", path, `只写版本 ${SPATIAL_PROFILE_VERSION} 的档案`, "error")] };
+    return { ok: false, frame: source, issues: [issue6("SPATIAL_PROFILE_VERSION_UNSUPPORTED", path, `只写版本 ${SPATIAL_PROFILE_VERSION} 的档案`, "error")] };
   }
   return { ok: true, frame: { ...source, [SPATIAL_PROFILE_FRAME_KEY]: { version: 1, mode: profile.mode, basis: profile.basis } }, issues: [] };
 }
@@ -9061,6 +13271,8 @@ function resolveSpatialProfile(input) {
     chosen = { mode: stored.profile.mode, basis: "author", reason: "作者显式选择档案" };
   } else if (corridorEntityId) {
     chosen = { mode: "circulation", basis: "source-supported", reason: `本图已绑定真实走廊 ${corridorEntityId}` };
+  } else if (containerKind === "other" && ["building", "floor", "room", "vehicle"].includes(TEXT(input.parentContainer?.kind)) && (input.members ?? []).some((member) => member.kind === "room") && !(input.members ?? []).some((member) => ["region", "natural", "city", "district", "building"].includes(TEXT(member.kind)))) {
+    chosen = { mode: "interior", basis: "source-supported", reason: "该容器位于已登记室内容器内，并直接包含已登记房间" };
   } else if (containerKind === "building" && (input.members ?? []).some((m) => m.kind === "building") && (input.members ?? []).some((m) => ["region", "natural", "other"].includes(String(m.kind)))) {
     chosen = { mode: "compound", basis: "source-supported", reason: "已登记成员同时包含独立建筑与室外空间" };
   } else if (containerKind && TYPED_DEFAULT[containerKind]) {
@@ -9099,10 +13311,10 @@ function resolveSpatialProfile(input) {
     }
   }
   if (chosen.mode === "linear" && routes.length === 0) {
-    issues.push(issue3("SPATIAL_PROFILE_NO_REGISTERED_ROUTE", path, "沿线档案没有任何已登记路线：本轮只画场地足迹，不把 road_texture 装饰当作路线", "warning"));
+    issues.push(issue6("SPATIAL_PROFILE_NO_REGISTERED_ROUTE", path, "沿线档案没有任何已登记路线：本轮只画场地足迹，不把 road_texture 装饰当作路线", "warning"));
   }
   if (unsupported.length > 0) {
-    issues.push(issue3(
+    issues.push(issue6(
       "SPATIAL_PROFILE_MEMBER_UNSUPPORTED",
       path,
       `档案 ${chosen.mode} 下有 ${unsupported.length} 个成员不受当前生成器支持：本轮按 partial 处理，保留实体与事实，不替换类型凑成功`,
@@ -9111,7 +13323,7 @@ function resolveSpatialProfile(input) {
     ));
   }
   if (!containerKind && !stored.profile) {
-    issues.push(issue3("SPATIAL_PROFILE_NEUTRAL", path, "这张图没有任何容器类型或作者档案：按中性概览处理，不假装已确认用途", "warning"));
+    issues.push(issue6("SPATIAL_PROFILE_NEUTRAL", path, "这张图没有任何容器类型或作者档案：按中性概览处理，不假装已确认用途", "warning"));
   }
   return {
     profile: { version: 1, mode: chosen.mode, basis: chosen.basis },
@@ -9318,14 +13530,18 @@ function signatureForEntry(entry, routes, maps) {
   const authorIntent = [];
   for (const row2 of memberRows) {
     const precision = asText2(row2.coord_precision) ?? "unknown";
-    if (precision === "layout" || precision === "unknown") continue;
+    const area = normalizeArea(row2.area_geometry_json);
+    const dimensions2 = area?.quality === "confirmed" ? readMetricDimensions(area) : null;
+    const authoredPosition = precision !== "layout" && precision !== "unknown";
+    if (!authoredPosition && !dimensions2) continue;
     authorIntent.push({
       id: String(row2.id),
-      precision,
-      gridX: asNumber(row2.grid_x),
-      gridY: asNumber(row2.grid_y),
-      uncertainty: asNumber(row2.uncertainty_radius_cells),
-      area: canonicalAuthoredArea(row2.area_geometry_json)
+      precision: authoredPosition ? precision : "unknown",
+      gridX: authoredPosition ? asNumber(row2.grid_x) : null,
+      gridY: authoredPosition ? asNumber(row2.grid_y) : null,
+      uncertainty: authoredPosition ? asNumber(row2.uncertainty_radius_cells) : null,
+      area: canonicalAuthoredArea(row2.area_geometry_json),
+      dimensions: dimensions2
     });
   }
   const owned = routes.filter((row2) => asText2(row2.map_id) === entry.mapId).map((row2) => ({
@@ -9393,6 +13609,7 @@ function deriveLayoutSites(tables, branchId) {
     const profile = resolveSpatialProfile({
       map,
       container,
+      parentContainer: container ? locationById.get(String(container.parent_location_id)) ?? null : null,
       corridorEntityId: boundCorridorIdOf(map),
       members: ownForProfile,
       routes: routes.filter((row2) => String(row2.branch_id ?? branchId) === branchId && (String(row2.from_location_id ?? "") === containerId || String(row2.to_location_id ?? "") === containerId))
@@ -9458,11 +13675,29 @@ function deriveLayoutSites(tables, branchId) {
     }
     return seen.size;
   };
+  const expandable = (entry) => entry.kind === "floor" && entry.spaceSize?.resolution.source === "first-estimate" && !(finite3(entry.map.meters_per_cell) && entry.map.meters_per_cell > 0) && !entry.map.scale_locked && !hasScene(entry.map);
+  for (const entry of [...entries].sort((a, b) => entryDepth(b) - entryDepth(a) || byId4(a.mapId, b.mapId))) {
+    if (!expandable(entry) || entry.own.length === 0) continue;
+    const sizes = entry.own.map((row2) => {
+      const known = locationSpaceSize({ maps, locations, locationId: String(row2.id), branchId });
+      const child = entries.find((child2) => child2.kind === "floor" && child2.container?.id === row2.id && child2.own.length > 0);
+      return known ? [known.widthM, known.heightM] : child ? [child.extent.width, child.extent.height] : [8, 8];
+    });
+    const perSide = Math.ceil(sizes.length / 2);
+    const minW = Math.max(...sizes.map((size) => size[0])) * perSide + 1;
+    const minH = Math.max(...sizes.map((size) => size[1])) * 2 + 3;
+    entry.extent = { ...entry.extent, width: Math.max(entry.extent.width, minW), height: Math.max(entry.extent.height, minH) };
+    entry.spaceSize = resolveMapSpaceSize({ maps, locations, mapRow: entry.map, branchId, firstEstimate: { widthM: entry.extent.width, heightM: entry.extent.height } });
+  }
   for (const child of [...entries].sort((a, b) => entryDepth(a) - entryDepth(b) || byId4(a.mapId, b.mapId))) {
     if (child.kind !== "floor" || child.spaceSize?.resolution.source !== "first-estimate" || finite3(child.map.meters_per_cell) && child.map.meters_per_cell > 0 || child.map.scale_locked || hasScene(child.map)) continue;
     const parent = entries.find((entry) => entry.mapId === child.container?.map_id && entry.kind === "floor");
     if (!parent || !child.container) continue;
-    const planned = baselineFloorRooms(parent.own, parent.extent, (id) => String(id), (id) => locationSpaceSize({ maps, locations, locationId: id, branchId }));
+    const planned = baselineFloorRooms(parent.own, parent.extent, (id) => String(id), (id) => {
+      const known = locationSpaceSize({ maps, locations, locationId: id, branchId });
+      const nested = entries.find((entry) => entry.kind === "floor" && entry.container?.id === id && entry.own.length > 0);
+      return known ?? (nested ? { widthM: nested.extent.width, heightM: nested.extent.height } : null);
+    });
     const footprint = planned.find((room) => room.id === child.container.id);
     if (!footprint) continue;
     child.extent = { width: footprint.w, height: footprint.h, units: "meters" };
@@ -9624,6 +13859,10 @@ function buildSqlLayoutTask(db, branchId, input, turnId, report) {
     const frame = normalizeFrame(entry.map.frame_json);
     const scene = frame.atlasScene && typeof frame.atlasScene === "object" && !Array.isArray(frame.atlasScene) ? frame.atlasScene : null;
     const sceneLayout = scene && typeof scene.layout === "object" && scene.layout !== null && !Array.isArray(scene.layout) ? scene.layout : null;
+    const savedRequest = frame.atlasLayoutRequest && typeof frame.atlasLayoutRequest === "object" && !Array.isArray(frame.atlasLayoutRequest) ? frame.atlasLayoutRequest : null;
+    const sceneConstraints = scene?.constraints && typeof scene.constraints === "object" && !Array.isArray(scene.constraints) ? scene.constraints : null;
+    const requestConstraints = savedRequest?.spec && typeof savedRequest.spec === "object" && !Array.isArray(savedRequest.spec) ? savedRequest.spec : null;
+    const retainedConstraints = requestConstraints ? mergeLayoutConstraints(sceneConstraints, requestConstraints, false).spec : sceneConstraints;
     const baselineRooms = entry.standalone && container ? [{
       id: ref(container.id),
       name: container.name,
@@ -9733,8 +13972,9 @@ function buildSqlLayoutTask(db, branchId, input, turnId, report) {
         return priority(a) - priority(b) || byId4(String(a.id), String(b.id));
       }).slice(0, LIMITS.actors).map((row2) => ({ ref: ref(row2.id), name: row2.name, roomId: ref(row2.location_id) })),
       items: items.filter((row2) => localIds.has(String(row2.location_id ?? "")) && !row2.holder_character_id && !row2.container_item_id && ref(row2.id) && ref(row2.location_id)).slice(0, LIMITS.items).map((row2) => ({ ref: ref(row2.id), name: row2.name, kind: row2.kind, description: row2.description, roomId: ref(row2.location_id) })),
-      savedConstraints: aliasLayoutRefs(scene?.constraints ?? null, catalogue.knownRefs),
-      layoutIssues: aliasLayoutRefs(sceneLayout?.issues ?? [], catalogue.knownRefs)
+      savedConstraints: aliasLayoutRefs(retainedConstraints, catalogue.knownRefs),
+      constraintStatus: savedRequest ? savedRequest.status ?? "pending" : "saved",
+      layoutIssues: aliasLayoutRefs([...Array.isArray(sceneLayout?.issues) ? sceneLayout.issues : [], ...Array.isArray(savedRequest?.issues) ? savedRequest.issues : []], catalogue.knownRefs)
     };
   });
   const pendingIds = pending.map((entry) => entry.mapId);
@@ -9776,6 +14016,7 @@ function buildSqlLayoutTask(db, branchId, input, turnId, report) {
     request.messages[1].content += "\n【本图合法 JSON 外层示例；按资料补齐 contents，不照搬为空布局】\n" + JSON.stringify({ op: "map.layout.request", ref: scope.map, data: { kind: "floor", spec: { rooms: scope.baselineRooms, contents: [], actors: scope.actors.map((a) => ({ id: a.ref, roomId: a.roomId })), items: [] } }, why: "依据已登记空间生成估计布局" });
   }
   request.messages[1].content += '\n普通阅览桌用 type="table"，椅子单独用 type="chair"；reading 是桌子加四把椅子的整套组合，占地 w/h 均至少 2 米，不能用于 2×1 米的单张桌子。所有陈设用正数 w/h，完整占地必须装进房间。';
+  request.messages[1].content += "\nitems[].on 只能绑定本房间中具有支撑面的 table/desk/shelf/cabinet（reading 组合的桌面也可）。不能把物品绑定到 chair/bed/doorway/decor 上，也不能把椅子本身作为物品放在另一把椅子上。资料没有支撑关系时省略该物品绑定，由程序按真实归属放置地面标记，不要猜测它在桌上。";
   request.messages[1].content += "\n多房间 floor 保留中央走廊，默认 corridorWidth=2；估计房间必须适合当前幅面，side=north 或 south。同侧多个房间的宽度与间隔合计也必须装得下。childSpaces 的已知宽高不得缩小来凑布局；装不下时说明尺寸冲突。单间房直接沿用完整 baselineRooms，不缩成幅面的 75%，不另扣中央走廊。";
   for (const scope of scopes.filter((s) => s.kind === "overview")) {
     request.messages[1].content += "\n【本图合法 overview JSON 外层示例；按资料填写合法 zones/links/features】\n" + JSON.stringify({ op: "map.layout.request", ref: scope.map, data: { kind: "overview", spec: { surface: "mixed", zones: [], links: [], features: [] } }, why: "依据已登记空间生成估计布局" });
@@ -9796,6 +14037,7 @@ function buildSqlLayoutTask(db, branchId, input, turnId, report) {
   if (hasSpatialCapability(CAPABILITY_SPATIAL_PROFILE)) request.messages[1].content += "\n" + SPATIAL_PROFILE_PROMPT;
   request.messages[1].content += '\noverview 的水系 feature 必须为 {"id":"本图局部水系ID","type":"watercourse","zoneId":"本图已登记水域引用（可选）","fromSector":"north","toSector":"south","widthClass":"narrow/medium/wide"}。fromSector/toSector 取 north/northeast/east/southeast/south/southwest/west/northwest 且不同；不要仅写 zoneId/density 而省略起终方向。方向是估计布局，不能标成已测量事实。';
   request.messages[1].content += '\n更新布局时，同一实物必须沿用 savedConstraints 的既有局部 id，不得换 id 重复添加。layoutIssues 是旧图未放下的陈设：按正文校正估计尺寸；若旧约束重复描述同一座椅或柜子，保留一个既有 id，用 spec.deletes={"contents":[重复的局部陈设id]} 显式清理重复约束，并同步 actors.near。不要删除已确认的锁定结构。';
+  request.messages[1].content += "\nsavedConstraints 同时包含已保存场景及上次失败/待处理请求的有效约束。constraintStatus=failed/pending 时，继续修正这些约束并沿用其中 ID，不能当作从未规划过而再建一套陈设；原约束不会因失败自动清空。layoutIssues 给出上次失败原因。";
   request.messages[1].content += "\n禁止把载具画成固定地块、城市分区或地理轮廓；载具的行程与停靠由引擎单独投影。只绘制本世界资料支持的水系、山脉、城墙；示例地图和通用模板中的地名与地形不能直接搬入另一个世界。未知地理关系保持估计或未知，不编造原文没有的确定地理事实。";
   const profileModes = [...new Set(pending.map((entry) => entry.profile.profile.mode))].sort();
   if (profileModes.length) {
@@ -9857,12 +14099,14 @@ function buildSqlLayoutTask(db, branchId, input, turnId, report) {
     )
   };
 }
-var CORRIDOR_BINDING_PROMPT, SPACE_CANONICAL_PROMPT, SPATIAL_PROFILE_PROMPT, PROFILE_PROMPT, LAYOUT_CONTEXT_FRAME_KEY, OVERVIEW_CONTAINER_KINDS, CITY_CONTAINER_KINDS, FLOOR_CONTAINER_KINDS, FLOOR_BASE_SIDE_M, ROOM_BASE_SIDE_M, CITY_BASE_SIDE_M, FALLBACK_COLS, FALLBACK_ROWS, asId3, finite3, byId4, uniqueSorted, SPATIAL_PROFILE_FRAME_KEY2, asText2, asNumber;
+var CORRIDOR_BINDING_PROMPT, SPACE_CANONICAL_PROMPT, SPATIAL_PROFILE_PROMPT, PROFILE_PROMPT, LAYOUT_CONTEXT_FRAME_KEY, OVERVIEW_CONTAINER_KINDS, CITY_CONTAINER_KINDS, FLOOR_CONTAINER_KINDS, FLOOR_BASE_SIDE_M, ROOM_BASE_SIDE_M, CITY_BASE_SIDE_M, FALLBACK_COLS, FALLBACK_ROWS, asId3, finite3, byId4, uniqueSorted, SPATIAL_PROFILE_FRAME_KEY2, asText2, asNumber, normalizeArea;
 var init_atlas_sql_layout_task = __esm({
   "src/atlas-sql-layout-task.ts"() {
     "use strict";
     init_atlas_db_readport();
     init_atlas_spatial();
+    init_atlas_spatial();
+    init_atlas_spatial_request();
     init_atlas_sql_task_refs();
     init_atlas_ops_prompts();
     init_atlas_spatial_frame();
@@ -9902,11 +14146,19 @@ var init_atlas_sql_layout_task = __esm({
     SPATIAL_PROFILE_FRAME_KEY2 = "atlasSpatialProfile";
     asText2 = (value) => typeof value === "string" && value ? value : null;
     asNumber = (value) => typeof value === "number" && Number.isFinite(value) ? value : null;
+    normalizeArea = (value) => {
+      try {
+        const area = typeof value === "string" ? JSON.parse(value) : value;
+        return area && typeof area === "object" && !Array.isArray(area) ? area : null;
+      } catch {
+        return null;
+      }
+    };
   }
 });
 
 // src/atlas-sql-world-sources.ts
-function makeIssue(code, path, message, severity, retryable) {
+function makeIssue2(code, path, message, severity, retryable) {
   return { code, path, message, severity, retryable };
 }
 function looksHostTruncated(text6) {
@@ -10051,7 +14303,7 @@ function selectWorldConstructionSources(input) {
     identity.set(key, { contentHash, derived });
     if (derived && text6.length > 0) {
       issues.push(
-        makeIssue(
+        makeIssue2(
           "SOURCE_IDENTITY_DERIVED",
           `$.sources.${key}`,
           `来源「${key}」没有可用的内容 hash；已按**实际原文**派生稳定摘要 ${contentHash}（不会持久空 hash）。`,
@@ -10087,7 +14339,7 @@ function selectWorldConstructionSources(input) {
     }
     if (hostTruncated) {
       issues.push(
-        makeIssue(
+        makeIssue2(
           "WORLD_SOURCE_HOST_TRUNCATED",
           `$.sources.${key}`,
           `来源「${key}」的文本疑似被宿主 / UI 截断（尾部省略号），不能当成完整资料；已按实际到手内容分块。`,
@@ -10122,7 +14374,7 @@ function selectWorldConstructionSources(input) {
     }
     if (sourceChunks.length > 1) {
       issues.push(
-        makeIssue(
+        makeIssue2(
           "WORLD_SOURCE_CHUNKED",
           `$.sources.${key}`,
           `来源「${key}」共 ${text6.length} 字，按段落边界切为 ${sourceChunks.length} 块（含边界偏移），尾部内容可读。`,
@@ -10264,7 +14516,7 @@ function selectWorldConstructionSources(input) {
   }
   if (remaining.some((item) => item.reason.startsWith("本次来源预算"))) {
     issues.push(
-      makeIssue(
+      makeIssue2(
         "WORLD_SOURCE_TRUNCATED",
         "$.sources",
         `本次来源预算 ${maxChars} 字符不足；未纳入的来源、剩余字符数与具体延期块已记入 remaining/deferred，未静默 slice。`,
@@ -10535,510 +14787,19 @@ var init_atlas_db_contract = __esm({
   }
 });
 
-// src/atlas-db-defaults.ts
-function listDefault(table, column) {
-  if (!LIST_COLUMNS.has(column)) return null;
-  if (table === "journeys" && column === "segments_json") return [];
-  return [];
-}
-function defaultsFor(table) {
-  switch (table) {
-    case "maps":
-      return {
-        name: "",
-        kind: "world",
-        container_location_id: null,
-        description: "",
-        frame_json: { origin_x: 0, origin_y: 0, reference_width_cells: 1, reference_height_cells: 1 },
-        meters_per_cell: null,
-        scale_min_meters_per_cell: null,
-        scale_max_meters_per_cell: null,
-        scale_quality: "uncalibrated",
-        scale_basis_json: { refs: [], note: "" },
-        scale_locked: 0,
-        calibration_rev: 1,
-        background_asset_key: null,
-        default_terrain: "unknown",
-        status: "active"
-      };
-    case "locations":
-      return {
-        name: "",
-        aliases_json: [],
-        kind: "other",
-        description: "",
-        parent_location_id: null,
-        mobility: "fixed",
-        anchor_location_id: null,
-        map_id: null,
-        grid_x: null,
-        grid_y: null,
-        coord_precision: "unknown",
-        uncertainty_radius_cells: null,
-        area_geometry_json: null,
-        terrain: "unknown",
-        access_rules_json: null,
-        vehicle_profile_json: null,
-        existence_quality: "confirmed",
-        status: "active",
-        merged_into_id: null
-      };
-    case "characters":
-      return {
-        name: "",
-        aliases_json: [],
-        role: "npc",
-        identity: "",
-        description: "",
-        personality: "",
-        importance: "supporting",
-        importance_reason: "",
-        thought: "",
-        action_tendency: "",
-        physical_status: "unknown",
-        condition_note: "",
-        location_id: null,
-        map_id: null,
-        grid_x: null,
-        grid_y: null,
-        coord_precision: "unknown",
-        uncertainty_radius_cells: null,
-        mobility_profiles_json: [],
-        capabilities_json: [],
-        status: "active",
-        merged_into_id: null
-      };
-    case "items":
-      return {
-        name: "",
-        aliases_json: [],
-        kind: "other",
-        description: "",
-        quantity: null,
-        unit: "件",
-        condition_note: "",
-        owner_entity_id: null,
-        holder_character_id: null,
-        container_item_id: null,
-        location_id: null,
-        map_id: null,
-        grid_x: null,
-        grid_y: null,
-        coord_precision: "unknown",
-        uncertainty_radius_cells: null,
-        properties_json: [],
-        status: "active",
-        merged_into_id: null
-      };
-    case "factions":
-      return {
-        name: "",
-        aliases_json: [],
-        kind: "other",
-        description: "",
-        goal: "",
-        headquarters_location_id: null,
-        capabilities_json: [],
-        status: "active",
-        merged_into_id: null
-      };
-    case "relations":
-      return {
-        subject_entity_id: "",
-        object_entity_id: "",
-        kind: "other",
-        label: "",
-        attitude: "unknown",
-        trust: "unknown",
-        description: "",
-        basis_quality: "inferred",
-        secrecy: "restricted",
-        valid_from_s: 0,
-        valid_until_s: null,
-        status: "active"
-      };
-    case "routes":
-      return {
-        from_location_id: "",
-        to_location_id: "",
-        kind: "estimated",
-        bidirectional: 1,
-        map_id: null,
-        geometry_json: null,
-        geometry_quality: "unknown",
-        geometry_rev: 1,
-        distance_m: null,
-        distance_min_m: null,
-        distance_max_m: null,
-        distance_basis: "unknown",
-        terrain: "unknown",
-        allowed_modes_json: [],
-        access_rules_json: null,
-        travel_time_override_json: null,
-        status: "open",
-        status_reason: ""
-      };
-    case "actions":
-      return {
-        actor_entity_id: "",
-        parent_action_id: null,
-        kind: "act",
-        title: "",
-        intent: "",
-        target_entity_id: null,
-        target_location_id: null,
-        target_event_id: null,
-        trigger_json: null,
-        depends_on_json: [],
-        payload_json: null,
-        duration_json: null,
-        progress_s: 0,
-        earliest_start_s: null,
-        deadline_s: null,
-        next_check_s: null,
-        started_at_s: null,
-        finished_at_s: null,
-        evaluated_until_s: 0,
-        secrecy: "restricted",
-        priority: "normal",
-        status: "planned",
-        reason_code: null,
-        result_event_id: null
-      };
-    case "journeys":
-      return {
-        action_id: "",
-        mover_entity_id: "",
-        origin_location_id: "",
-        destination_location_id: "",
-        segments_json: [],
-        segment_index: 0,
-        segment_distance_done_m: null,
-        segment_time_done_s: 0,
-        last_reached_location_id: null,
-        stop_location_id: null,
-        started_at_s: 0,
-        last_advanced_at_s: 0,
-        estimated_arrival_min_s: null,
-        estimated_arrival_max_s: null,
-        arrived_at_s: null,
-        position_quality: "unlocated",
-        status: "moving",
-        stop_reason: null
-      };
-    case "events":
-      return {
-        title: "",
-        kind: "other",
-        summary: "",
-        location_id: null,
-        route_id: null,
-        route_progress_m: null,
-        subject_entity_id: null,
-        participants_json: [],
-        cause_action_id: null,
-        parent_event_id: null,
-        scheduled_start_s: null,
-        trigger_json: null,
-        occurred_at_s: null,
-        ended_at_s: null,
-        outcome: "",
-        secrecy: "restricted",
-        status: "scheduled"
-      };
-    case "information":
-      return {
-        kind: "observation",
-        title: "",
-        content: "",
-        source_event_id: null,
-        subject_entity_id: null,
-        payload_json: null,
-        origin_location_id: null,
-        originator_entity_id: null,
-        parent_information_id: null,
-        truth_status: "unknown",
-        secrecy: "restricted",
-        topic_key: "",
-        content_hash: "",
-        created_at_s: 0,
-        expires_at_s: null,
-        supersedes_information_id: null,
-        status: "active"
-      };
-    case "rumor_fronts":
-      return {
-        information_id: "",
-        location_id: "",
-        via_channel_id: null,
-        source_front_id: null,
-        source_action_id: null,
-        first_available_at_s: 0,
-        last_reinforced_at_s: 0,
-        next_spread_check_s: null,
-        expires_at_s: null,
-        reach: "local",
-        audience_json: { access: "public", tags: [] },
-        status: "active"
-      };
-    case "knowledge":
-      return {
-        knower_character_id: null,
-        knower_faction_id: null,
-        is_pov: 0,
-        information_id: "",
-        source_entity_id: null,
-        source_front_id: null,
-        source_channel_id: null,
-        first_received_at_s: 0,
-        last_confirmed_at_s: null,
-        belief: "heard",
-        attention: "normal",
-        reaction_note: "",
-        status: "active"
-      };
-    case "channels":
-      return {
-        name: "",
-        kind: "other",
-        owner_entity_id: "",
-        source_entity_id: null,
-        source_location_id: null,
-        recipient_entity_id: null,
-        recipient_location_id: null,
-        scope_json: { location_refs: [], entity_refs: [], topics: [] },
-        requirements_json: null,
-        latency_json: { quality: "unknown", basis_refs: [] },
-        transport_mode_key: null,
-        reliability: "unknown",
-        secrecy: "restricted",
-        basis_quality: "inferred",
-        valid_from_s: 0,
-        valid_until_s: null,
-        status: "active"
-      };
-    case "entity_keys":
-      return { branch_id: "", id: "", kind: "location" };
-    case "branches":
-      return {
-        parent_branch_id: null,
-        fork_turn_id: null,
-        head_turn_id: null,
-        revision: 0,
-        name: "",
-        pov_character_id: null,
-        root_map_id: null,
-        clock_s: 0,
-        clock_min_s: 0,
-        clock_max_s: 0,
-        calendar_label: null,
-        simulation_cursor_s: 0,
-        simulation_status: "current",
-        ruleset_version: "",
-        status: "active",
-        created_wall_ms: 0
-      };
-    case "turns":
-      return {
-        branch_id: "",
-        parent_turn_id: null,
-        host_message_uid: null,
-        host_variant_key: null,
-        kind: "narrative",
-        input_hash: "",
-        story_hash: null,
-        base_revision: 0,
-        committed_revision: null,
-        clock_before_s: 0,
-        elapsed_json: { quality: "unknown", basis_refs: [] },
-        clock_after_s: 0,
-        rng_seed: "",
-        ruleset_version: "",
-        decisions_json: { operations: [], attention_decisions: [], outcome_decisions: [], random_draws: [] },
-        receipt_json: null,
-        attempts_json: [],
-        status: "pending",
-        created_wall_ms: 0,
-        prepared_wall_ms: null
-      };
-    case "turn_changes":
-      return {
-        turn_id: "",
-        sequence: 1,
-        attempt_id: "",
-        group_id: "",
-        operation_id: "",
-        target_table: "",
-        target_row_id: "",
-        operation: "update",
-        before_json: null,
-        after_json: null,
-        basis_json: {},
-        summary: ""
-      };
-    case "mention_candidates":
-      return {
-        name: "",
-        normalized_name: "",
-        context_key: "",
-        kind_hint: "unknown",
-        first_turn_id: "",
-        last_turn_id: "",
-        distinct_turn_count: 1,
-        recent_turn_ids_json: [],
-        context_summary: "",
-        lorebook_source_keys_json: [],
-        importance_hint: "none",
-        promoted_entity_id: null,
-        status: "watching"
-      };
-    case "construction_progress":
-      return {
-        scope_key: "",
-        kind: "scope",
-        subject_key: "",
-        input_signature: "",
-        status: "pending",
-        last_served_seq: 0,
-        payload_json: {}
-      };
-    case "sync_outbox":
-      return {
-        branch_id: "",
-        requested_by_turn_id: null,
-        target: "managed_lorebook",
-        projection_scope: "pov",
-        target_revision: 0,
-        idempotency_key: "",
-        payload_hash: "",
-        status: "pending",
-        attempt_count: 0,
-        next_retry_wall_ms: null,
-        last_error_code: null,
-        last_error_message: null,
-        created_wall_ms: 0,
-        completed_wall_ms: null
-      };
-    default:
-      return {};
-  }
-}
-function createRow(table, input, ctx) {
-  if (!isKnownTable(table)) throw new Error(`CODEC_UNKNOWN_TABLE: ${String(table)}`);
-  const out = { ...defaultsFor(table), ...input };
-  if (COMMON_TABLE_SET.has(table)) {
-    out.branch_id = ctx.branchId;
-    out.id = ctx.id;
-    out.row_rev = 1;
-    out.created_turn_id = ctx.turnId;
-    out.updated_turn_id = ctx.turnId;
-  }
-  if (table === "entity_keys") {
-    out.branch_id = ctx.branchId;
-    out.id = ctx.id;
-  }
-  if (table === "mention_candidates") {
-    out.branch_id = ctx.branchId;
-    out.id = ctx.id;
-  }
-  if (table === "branches") {
-    out.id = ctx.id;
-  }
-  if (table === "turns") {
-    out.id = ctx.id;
-    out.branch_id = ctx.branchId;
-  }
-  if (table === "sync_outbox") {
-    out.id = ctx.id;
-    out.branch_id = ctx.branchId;
-  }
-  if (table === "construction_progress") {
-    out.branch_id = ctx.branchId;
-    out.id = ctx.id;
-    out.row_rev = 1;
-    out.created_turn_id = ctx.turnId;
-    out.updated_turn_id = ctx.turnId;
-  }
-  for (const key of LIST_COLUMNS) {
-    if (Object.prototype.hasOwnProperty.call(out, key) && out[key] === null) {
-      out[key] = listDefault(table, key);
-    }
-  }
-  if (table === "branches") out.created_wall_ms = ctx.nowWallMs;
-  if (table === "turns") out.created_wall_ms = ctx.nowWallMs;
-  if (table === "sync_outbox") out.created_wall_ms = ctx.nowWallMs;
-  if (table === "information" && (out.created_at_s === 0 || out.created_at_s === null)) out.created_at_s = ctx.clockS;
-  if (table === "rumor_fronts") {
-    if (out.first_available_at_s === 0 || out.first_available_at_s === null) out.first_available_at_s = ctx.clockS;
-    if (out.last_reinforced_at_s === 0 || out.last_reinforced_at_s === null) out.last_reinforced_at_s = ctx.clockS;
-  }
-  if (table === "knowledge" && (out.first_received_at_s === 0 || out.first_received_at_s === null)) {
-    out.first_received_at_s = ctx.clockS;
-  }
-  if (table === "relations" && (out.valid_from_s === 0 || out.valid_from_s === null)) out.valid_from_s = ctx.clockS;
-  if (table === "channels" && (out.valid_from_s === 0 || out.valid_from_s === null)) out.valid_from_s = ctx.clockS;
-  if (table === "journeys") {
-    if (out.started_at_s === 0 || out.started_at_s === null) out.started_at_s = ctx.clockS;
-    if (out.last_advanced_at_s === 0 || out.last_advanced_at_s === null) out.last_advanced_at_s = ctx.clockS;
-  }
-  if (table === "actions" && (out.evaluated_until_s === 0 || out.evaluated_until_s === null)) out.evaluated_until_s = ctx.clockS;
-  if (table === "turns") {
-    out.ruleset_version = out.ruleset_version || ctx.rulesetVersion;
-    out.clock_before_s = out.clock_before_s ?? ctx.clockS;
-    out.clock_after_s = out.clock_after_s ?? ctx.clockS;
-  }
-  if (table === "branches") out.ruleset_version = out.ruleset_version || ctx.rulesetVersion;
-  return out;
-}
-var LIST_COLUMNS, COMMON_TABLE_SET;
-var init_atlas_db_defaults = __esm({
-  "src/atlas-db-defaults.ts"() {
-    "use strict";
-    init_atlas_db_schema();
-    LIST_COLUMNS = /* @__PURE__ */ new Set([
-      "aliases_json",
-      "mobility_profiles_json",
-      "capabilities_json",
-      "properties_json",
-      "depends_on_json",
-      "participants_json",
-      "allowed_modes_json",
-      "segments_json",
-      "recent_turn_ids_json",
-      "lorebook_source_keys_json"
-    ]);
-    COMMON_TABLE_SET = /* @__PURE__ */ new Set([
-      "maps",
-      "locations",
-      "characters",
-      "items",
-      "factions",
-      "relations",
-      "routes",
-      "actions",
-      "journeys",
-      "events",
-      "information",
-      "rumor_fronts",
-      "knowledge",
-      "channels"
-    ]);
-  }
-});
-
 // src/atlas-db-migrate.ts
-function isPlainObject2(value) {
+function isPlainObject5(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-function hasOwn(obj, key) {
+function hasOwn2(obj, key) {
   return Object.prototype.hasOwnProperty.call(obj, key);
 }
-function str2(value) {
+function str3(value) {
   if (typeof value === "string") return value.trim();
   if (typeof value === "number" && Number.isFinite(value)) return String(value);
   return "";
 }
-function num2(value) {
+function num3(value) {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string" && value.trim().length > 0) {
     const parsed = Number(value);
@@ -11050,7 +14811,7 @@ function strList(value, max = 8) {
   if (!Array.isArray(value)) return [];
   const out = [];
   for (const item of value) {
-    const text6 = str2(item);
+    const text6 = str3(item);
     if (text6.length > 0 && !out.includes(text6) && out.length < max) out.push(text6);
   }
   return out;
@@ -11066,7 +14827,7 @@ function stableHash(text6) {
 function clip2(text6, max) {
   return text6.length <= max ? text6 : text6.slice(0, max);
 }
-function issue4(code, path, message, severity = "warning", retryable = false) {
+function issue7(code, path, message, severity = "warning", retryable = false) {
   return { code, path, message, severity, retryable };
 }
 function bump(mapped, key, by = 1) {
@@ -11074,15 +14835,15 @@ function bump(mapped, key, by = 1) {
 }
 function locateAtlas(raw) {
   const problems = [];
-  if (!isPlainObject2(raw)) return { atlas: null, problems: ["SESSION_NOT_OBJECT"] };
+  if (!isPlainObject5(raw)) return { atlas: null, problems: ["SESSION_NOT_OBJECT"] };
   const meta = raw.chatMetadata;
-  if (meta !== void 0 && meta !== null && !isPlainObject2(meta)) {
+  if (meta !== void 0 && meta !== null && !isPlainObject5(meta)) {
     problems.push("CHAT_METADATA_NOT_OBJECT");
   }
-  let atlas = isPlainObject2(meta) ? meta.atlas : void 0;
+  let atlas = isPlainObject5(meta) ? meta.atlas : void 0;
   if (atlas === void 0 || atlas === null) atlas = raw.atlas;
   if (atlas === void 0 || atlas === null) return { atlas: null, problems };
-  if (!isPlainObject2(atlas)) {
+  if (!isPlainObject5(atlas)) {
     problems.push("ATLAS_NOT_OBJECT");
     return { atlas: null, problems };
   }
@@ -11091,7 +14852,7 @@ function locateAtlas(raw) {
 function collectPeriodLabels(atlas) {
   const labels = [];
   const push = (value) => {
-    const text6 = str2(value);
+    const text6 = str3(value);
     if (text6.length > 0 && !labels.includes(text6)) labels.push(text6);
   };
   push(atlas.period);
@@ -11099,7 +14860,7 @@ function collectPeriodLabels(atlas) {
   push(atlas.calendarLabel);
   push(atlas.calendar_label);
   const world3 = atlas.world;
-  if (isPlainObject2(world3)) {
+  if (isPlainObject5(world3)) {
     push(world3.period);
     push(world3.periodLabel);
     push(world3.calendarLabel);
@@ -11113,24 +14874,24 @@ function readLegacySources(atlas) {
   const tablesRaw = atlas.tables;
   if (tablesRaw !== void 0 && tablesRaw !== null) {
     tablesPresent = true;
-    if (!isPlainObject2(tablesRaw)) {
+    if (!isPlainObject5(tablesRaw)) {
       problems.push("TABLES_NOT_OBJECT");
-    } else if (hasOwn(tablesRaw, "locations") || hasOwn(tablesRaw, "characters") || hasOwn(tablesRaw, "items")) {
+    } else if (hasOwn2(tablesRaw, "locations") || hasOwn2(tablesRaw, "characters") || hasOwn2(tablesRaw, "items")) {
       for (const key of ["locations", "characters", "items"]) {
-        if (hasOwn(tablesRaw, key) && !Array.isArray(tablesRaw[key])) problems.push(`${key.toUpperCase()}_NOT_ARRAY`);
+        if (hasOwn2(tablesRaw, key) && !Array.isArray(tablesRaw[key])) problems.push(`${key.toUpperCase()}_NOT_ARRAY`);
       }
       tables.push({ key: "flat", payload: tablesRaw });
-    } else if (isPlainObject2(tablesRaw.branches)) {
+    } else if (isPlainObject5(tablesRaw.branches)) {
       const branchIds = Object.keys(tablesRaw.branches).sort();
       if (branchIds.length === 0) problems.push("TABLES_BRANCHES_EMPTY");
       for (const branchKey of branchIds) {
         const payload = tablesRaw.branches[branchKey];
-        if (!isPlainObject2(payload)) {
+        if (!isPlainObject5(payload)) {
           problems.push(`TABLES_BRANCH_${branchKey}_NOT_OBJECT`);
           continue;
         }
         for (const key of ["locations", "characters", "items"]) {
-          if (hasOwn(payload, key) && !Array.isArray(payload[key])) problems.push(`${key.toUpperCase()}_NOT_ARRAY`);
+          if (hasOwn2(payload, key) && !Array.isArray(payload[key])) problems.push(`${key.toUpperCase()}_NOT_ARRAY`);
         }
         tables.push({ key: branchKey, payload });
       }
@@ -11140,29 +14901,29 @@ function readLegacySources(atlas) {
   }
   let world3 = null;
   if (atlas.world !== void 0 && atlas.world !== null) {
-    if (!isPlainObject2(atlas.world)) {
+    if (!isPlainObject5(atlas.world)) {
       problems.push("WORLD_NOT_OBJECT");
     } else {
       world3 = atlas.world;
       for (const key of ["points", "characterStates", "entityRecords", "characters"]) {
-        if (hasOwn(world3, key) && !Array.isArray(world3[key])) problems.push(`WORLD_${key.toUpperCase()}_NOT_ARRAY`);
+        if (hasOwn2(world3, key) && !Array.isArray(world3[key])) problems.push(`WORLD_${key.toUpperCase()}_NOT_ARRAY`);
       }
     }
   }
   let maps = null;
   if (atlas.maps !== void 0 && atlas.maps !== null) {
-    if (!isPlainObject2(atlas.maps)) problems.push("MAPS_NOT_OBJECT");
+    if (!isPlainObject5(atlas.maps)) problems.push("MAPS_NOT_OBJECT");
     else maps = atlas.maps;
   }
   let simulation = null;
   if (atlas.simulation !== void 0 && atlas.simulation !== null) {
-    if (!isPlainObject2(atlas.simulation)) {
+    if (!isPlainObject5(atlas.simulation)) {
       problems.push("SIMULATION_NOT_OBJECT");
     } else {
       simulation = atlas.simulation;
-      if (hasOwn(simulation, "branches") && !isPlainObject2(simulation.branches)) problems.push("SIMULATION_BRANCHES_NOT_OBJECT");
+      if (hasOwn2(simulation, "branches") && !isPlainObject5(simulation.branches)) problems.push("SIMULATION_BRANCHES_NOT_OBJECT");
       for (const key of ["tasks", "signals", "deliveries"]) {
-        if (hasOwn(simulation, key) && !Array.isArray(simulation[key])) problems.push(`SIMULATION_${key.toUpperCase()}_NOT_ARRAY`);
+        if (hasOwn2(simulation, key) && !Array.isArray(simulation[key])) problems.push(`SIMULATION_${key.toUpperCase()}_NOT_ARRAY`);
       }
     }
   }
@@ -11184,11 +14945,11 @@ function rowList(payload, key) {
 function toCandidates(rows4, kind, origin, skipped) {
   const out = [];
   rows4.forEach((row2, index) => {
-    if (!isPlainObject2(row2)) {
+    if (!isPlainObject5(row2)) {
       skipped.push({ kind, legacyId: "", reason: `ROW_NOT_OBJECT@${origin}[${index}]` });
       return;
     }
-    out.push({ kind, legacyId: str2(row2.id), index, raw: row2, origin: `${origin}[${index}]` });
+    out.push({ kind, legacyId: str3(row2.id), index, raw: row2, origin: `${origin}[${index}]` });
   });
   return out;
 }
@@ -11198,17 +14959,17 @@ function worldCandidates(world3, skipped) {
   const items = [];
   const points = Array.isArray(world3.points) ? world3.points : [];
   points.forEach((point, index) => {
-    if (!isPlainObject2(point)) {
+    if (!isPlainObject5(point)) {
       skipped.push({ kind: "location", legacyId: "", reason: `WORLD_POINT_NOT_OBJECT[${index}]` });
       return;
     }
     const raw = point.id;
-    const pointId = str2(raw);
+    const pointId = str3(raw);
     if (pointId.length === 0) {
       skipped.push({ kind: "location", legacyId: "", reason: `WORLD_POINT_ID_MISSING[${index}]` });
       return;
     }
-    const parentId = str2(point.parentPointId);
+    const parentId = str3(point.parentPointId);
     locations.push({
       kind: "location",
       legacyId: `loc:${pointId}`,
@@ -11216,7 +14977,7 @@ function worldCandidates(world3, skipped) {
       origin: `$.world.points[${index}]`,
       raw: {
         id: `loc:${pointId}`,
-        name: str2(point.name) || `地点 ${pointId}`,
+        name: str3(point.name) || `地点 ${pointId}`,
         mapId: LEGACY_WORLD_MAP_ID,
         gridX: point.x,
         gridY: point.y,
@@ -11230,37 +14991,37 @@ function worldCandidates(world3, skipped) {
   });
   const archiveNames = /* @__PURE__ */ new Map();
   for (const entry of Array.isArray(world3.characters) ? world3.characters : []) {
-    if (!isPlainObject2(entry)) continue;
-    const id = str2(entry.id);
+    if (!isPlainObject5(entry)) continue;
+    const id = str3(entry.id);
     if (id.length === 0) continue;
-    archiveNames.set(id, { name: str2(entry.name), description: str2(entry.description), role: str2(entry.role) });
+    archiveNames.set(id, { name: str3(entry.name), description: str3(entry.description), role: str3(entry.role) });
   }
   const records = Array.isArray(world3.entityRecords) ? world3.entityRecords : [];
   for (const record2 of records) {
-    if (!isPlainObject2(record2)) continue;
-    const id = str2(record2.id);
+    if (!isPlainObject5(record2)) continue;
+    const id = str3(record2.id);
     if (id.length === 0) continue;
-    const type = str2(record2.type).toLowerCase();
+    const type = str3(record2.type).toLowerCase();
     if (isCharacterType(type)) {
-      const baseline = isPlainObject2(record2.baseline) ? record2.baseline : {};
-      archiveNames.set(id, { name: str2(record2.name), description: str2(baseline.description ?? baseline.summary), role: str2(baseline.role ?? archiveNames.get(id)?.role) });
+      const baseline = isPlainObject5(record2.baseline) ? record2.baseline : {};
+      archiveNames.set(id, { name: str3(record2.name), description: str3(baseline.description ?? baseline.summary), role: str3(baseline.role ?? archiveNames.get(id)?.role) });
     }
   }
   const states = Array.isArray(world3.characterStates) ? world3.characterStates : [];
   const seenCharacters = /* @__PURE__ */ new Set();
   states.forEach((state, index) => {
-    if (!isPlainObject2(state)) {
+    if (!isPlainObject5(state)) {
       skipped.push({ kind: "character", legacyId: "", reason: `WORLD_CHARACTER_STATE_NOT_OBJECT[${index}]` });
       return;
     }
-    const characterId = str2(state.characterId);
+    const characterId = str3(state.characterId);
     if (characterId.length === 0) {
       skipped.push({ kind: "character", legacyId: "", reason: `WORLD_CHARACTER_ID_MISSING[${index}]` });
       return;
     }
     seenCharacters.add(characterId);
     const archive = archiveNames.get(characterId);
-    const pointId = str2(state.currentPointId);
+    const pointId = str3(state.currentPointId);
     characters.push({
       kind: "character",
       legacyId: `npc:${characterId}`,
@@ -11272,7 +15033,7 @@ function worldCandidates(world3, skipped) {
         description: archive?.description ?? "",
         role: archive?.role ?? "",
         locationId: pointId.length > 0 ? `loc:${pointId}` : null,
-        currentAction: str2(state.status),
+        currentAction: str3(state.status),
         presence: null
       }
     });
@@ -11291,20 +15052,20 @@ function worldCandidates(world3, skipped) {
   }
   let itemIndex = 0;
   for (const record2 of records) {
-    if (!isPlainObject2(record2)) {
+    if (!isPlainObject5(record2)) {
       skipped.push({ kind: "item", legacyId: "", reason: "WORLD_ENTITY_NOT_OBJECT" });
       continue;
     }
-    const id = str2(record2.id);
+    const id = str3(record2.id);
     if (id.length === 0) {
       skipped.push({ kind: "item", legacyId: "", reason: "WORLD_ENTITY_ID_MISSING" });
       continue;
     }
-    const type = str2(record2.type).toLowerCase();
+    const type = str3(record2.type).toLowerCase();
     if (isCharacterType(type) || isFactionType(type) || isNonItemType(type)) continue;
-    const baseline = isPlainObject2(record2.baseline) ? record2.baseline : {};
-    const anchor = isPlainObject2(record2.mapAnchor) ? record2.mapAnchor : null;
-    const pointId = anchor ? str2(anchor.pointId) : "";
+    const baseline = isPlainObject5(record2.baseline) ? record2.baseline : {};
+    const anchor = isPlainObject5(record2.mapAnchor) ? record2.mapAnchor : null;
+    const pointId = anchor ? str3(anchor.pointId) : "";
     items.push({
       kind: "item",
       legacyId: `item:${id}`,
@@ -11312,10 +15073,10 @@ function worldCandidates(world3, skipped) {
       origin: `$.world.entityRecords[${itemIndex}]`,
       raw: {
         id: `item:${id}`,
-        name: str2(record2.name) || id,
-        description: str2(baseline.description ?? baseline.summary),
-        status: str2(baseline.status),
-        holderCharacterId: str2(baseline.holderCharacterId ?? baseline.holder ?? baseline.owner) || null,
+        name: str3(record2.name) || id,
+        description: str3(baseline.description ?? baseline.summary),
+        status: str3(baseline.status),
+        holderCharacterId: str3(baseline.holderCharacterId ?? baseline.holder ?? baseline.owner) || null,
         locationId: pointId.length > 0 ? `loc:${pointId}` : null
       }
     });
@@ -11351,7 +15112,7 @@ function collectEntityCandidates(raw, branchId) {
       const archives = new Map(worldCandidates(sources.world, []).characters.map((row2) => [row2.legacyId, row2.raw]));
       characters = characters.map((row2) => {
         const archive = archives.get(row2.legacyId);
-        return archive && !str2(row2.raw.role) ? { ...row2, raw: { ...row2.raw, role: archive.role } } : row2;
+        return archive && !str3(row2.raw.role) ? { ...row2, raw: { ...row2.raw, role: archive.role } } : row2;
       });
     }
   } else if (sources.world) {
@@ -11360,7 +15121,7 @@ function collectEntityCandidates(raw, branchId) {
     characters = fromWorld.characters;
     items = fromWorld.items;
   }
-  const retired = new Set(isPlainObject2(atlas.scene) && Array.isArray(atlas.scene.retiredPointIds) ? atlas.scene.retiredPointIds.map((value) => String(value).replace(/^loc:/, "")) : []);
+  const retired = new Set(isPlainObject5(atlas.scene) && Array.isArray(atlas.scene.retiredPointIds) ? atlas.scene.retiredPointIds.map((value) => String(value).replace(/^loc:/, "")) : []);
   locations = locations.map((row2) => retired.has(row2.legacyId.replace(/^loc:/, "")) ? { ...row2, raw: { ...row2.raw, status: "archived" } } : row2);
   const factions = [];
   if (selected) {
@@ -11383,16 +15144,16 @@ function collectEntityCandidates(raw, branchId) {
   if (sources.world) {
     const records = Array.isArray(sources.world.entityRecords) ? sources.world.entityRecords : [];
     records.forEach((record2, index) => {
-      if (!isPlainObject2(record2)) return;
-      if (!isFactionType(str2(record2.type).toLowerCase())) return;
-      const id = str2(record2.id);
-      const baseline = isPlainObject2(record2.baseline) ? record2.baseline : {};
+      if (!isPlainObject5(record2)) return;
+      if (!isFactionType(str3(record2.type).toLowerCase())) return;
+      const id = str3(record2.id);
+      const baseline = isPlainObject5(record2.baseline) ? record2.baseline : {};
       factions.push({
         kind: "faction",
         legacyId: id,
         index,
         origin: `$.world.entityRecords[${index}]`,
-        raw: { id, name: str2(record2.name) || id, description: str2(baseline.description ?? baseline.summary) }
+        raw: { id, name: str3(record2.name) || id, description: str3(baseline.description ?? baseline.summary) }
       });
     });
   }
@@ -11404,10 +15165,10 @@ function collectEntityCandidates(raw, branchId) {
     const list2 = character.raw.relations;
     if (!Array.isArray(list2)) continue;
     list2.forEach((entry, index) => {
-      const raw2 = isPlainObject2(entry) ? { subjectId: character.legacyId, ...entry } : { subjectId: character.legacyId, description: str2(entry) };
+      const raw2 = isPlainObject5(entry) ? { subjectId: character.legacyId, ...entry } : { subjectId: character.legacyId, description: str3(entry) };
       relations.push({
         kind: "relation",
-        legacyId: str2(raw2.id),
+        legacyId: str3(raw2.id),
         index,
         raw: raw2,
         origin: `${character.origin}.relations[${index}]`
@@ -11417,7 +15178,7 @@ function collectEntityCandidates(raw, branchId) {
   const rumors = [];
   for (const location2 of locations) {
     for (const text6 of strList(location2.raw.rumors, 20)) {
-      rumors.push({ locationId: location2.legacyId, locationName: str2(location2.raw.name), text: text6, origin: `${location2.origin}.rumors` });
+      rumors.push({ locationId: location2.legacyId, locationName: str3(location2.raw.name), text: text6, origin: `${location2.origin}.rumors` });
     }
   }
   return { locations, characters, items, factions, relations, rumors, skipped, branchKey, others, problems };
@@ -11430,7 +15191,7 @@ function countMaps(sources) {
   if (sources.maps) {
     maps = 1;
     const submaps = sources.maps.submaps;
-    if (isPlainObject2(submaps)) maps += Object.keys(submaps).length;
+    if (isPlainObject5(submaps)) maps += Object.keys(submaps).length;
   }
   return maps;
 }
@@ -11439,11 +15200,11 @@ function countSimulationTasks(sources) {
   if (!simulation) return 0;
   if (Array.isArray(simulation.tasks)) return simulation.tasks.length;
   const branches = simulation.branches;
-  if (!isPlainObject2(branches)) return 0;
+  if (!isPlainObject5(branches)) return 0;
   let total = 0;
   for (const key of Object.keys(branches).sort()) {
     const branch2 = branches[key];
-    if (isPlainObject2(branch2) && Array.isArray(branch2.tasks)) total += branch2.tasks.length;
+    if (isPlainObject5(branch2) && Array.isArray(branch2.tasks)) total += branch2.tasks.length;
   }
   return total;
 }
@@ -11465,7 +15226,7 @@ function inspectLegacySession(raw) {
     }
   }
   if (raw === void 0 || raw === null) return empty("empty", "NO_SESSION_DOCUMENT");
-  if (!isPlainObject2(raw)) return empty("corrupt", `SESSION_NOT_OBJECT: ${typeof raw}`);
+  if (!isPlainObject5(raw)) return empty("corrupt", `SESSION_NOT_OBJECT: ${typeof raw}`);
   const located = locateAtlas(raw);
   if (located.problems.length > 0 && located.atlas === null) {
     return empty("corrupt", located.problems.join(", "));
@@ -11473,11 +15234,11 @@ function inspectLegacySession(raw) {
   if (located.atlas === null) return empty("empty", "NO_ATLAS_METADATA");
   const atlas = located.atlas;
   if (atlas.database !== void 0 && atlas.database !== null) {
-    if (!isPlainObject2(atlas.database)) return empty("corrupt", "DATABASE_ENVELOPE_NOT_OBJECT");
+    if (!isPlainObject5(atlas.database)) return empty("corrupt", "DATABASE_ENVELOPE_NOT_OBJECT");
     const envelope = atlas.database;
-    const format = str2(envelope.format);
+    const format = str3(envelope.format);
     const data = typeof envelope.data === "string" ? envelope.data : "";
-    const schemaVersion = num2(envelope.schema_version);
+    const schemaVersion = num3(envelope.schema_version);
     if (format !== "atlas-sqlite" || schemaVersion === null || data.length === 0) {
       return empty("corrupt", `DATABASE_ENVELOPE_INVALID: format=${format || "missing"}, data=${data.length}B, schema_version=${schemaVersion ?? "missing"}`);
     }
@@ -11508,34 +15269,34 @@ function inspectLegacySession(raw) {
   let items = 0;
   let factions = 0;
   for (const candidate of candidates.locations) {
-    if (str2(candidate.raw.name).length === 0) {
+    if (str3(candidate.raw.name).length === 0) {
       skipped.push({ kind: "location", legacyId: candidate.legacyId, reason: "NAME_MISSING" });
       continue;
     }
     locations += 1;
   }
   for (const candidate of candidates.characters) {
-    if (str2(candidate.raw.name).length === 0) {
+    if (str3(candidate.raw.name).length === 0) {
       skipped.push({ kind: "character", legacyId: candidate.legacyId, reason: "NAME_MISSING" });
       continue;
     }
     characters += 1;
   }
   for (const candidate of candidates.items) {
-    if (str2(candidate.raw.name).length === 0) {
+    if (str3(candidate.raw.name).length === 0) {
       skipped.push({ kind: "item", legacyId: candidate.legacyId, reason: "NAME_MISSING" });
       continue;
     }
     items += 1;
   }
   for (const candidate of candidates.factions) {
-    if (str2(candidate.raw.name).length === 0) {
+    if (str3(candidate.raw.name).length === 0) {
       skipped.push({ kind: "faction", legacyId: candidate.legacyId, reason: "NAME_MISSING" });
       continue;
     }
     factions += 1;
   }
-  const knownLocations = new Set(candidates.locations.filter((c) => str2(c.raw.name).length > 0).map((c) => c.legacyId));
+  const knownLocations = new Set(candidates.locations.filter((c) => str3(c.raw.name).length > 0).map((c) => c.legacyId));
   const fronts = candidates.rumors.filter((rumor) => knownLocations.has(rumor.locationId)).length;
   const plan = {
     entityKeys: locations + characters + items + factions,
@@ -11561,8 +15322,8 @@ function inspectLegacySession(raw) {
   return { kind: "legacy", counts, reason: reasons.join(" | "), plan };
 }
 function mapLocationKind(value) {
-  const key = str2(value).toLowerCase();
-  if (LOCATION_KINDS.has(key)) return key;
+  const key = str3(value).toLowerCase();
+  if (LOCATION_KINDS2.has(key)) return key;
   const aliases = {
     town: "city",
     village: "city",
@@ -11604,8 +15365,8 @@ function containerMapKind(locationKind) {
   return "site";
 }
 function mapItemKind(value) {
-  const key = str2(value).toLowerCase();
-  if (ITEM_KINDS.has(key)) return key;
+  const key = str3(value).toLowerCase();
+  if (ITEM_KINDS2.has(key)) return key;
   if (["weapon", "armor", "tool", "equipment", "武器", "装备", "护甲"].includes(key)) return "equipment";
   if (["book", "letter", "document", "书籍", "信件", "文件"].includes(key)) return "document";
   if (["bag", "box", "container", "箱", "包"].includes(key)) return "container";
@@ -11613,7 +15374,7 @@ function mapItemKind(value) {
   return "other";
 }
 function mapItemStatus(value) {
-  const key = str2(value).toLowerCase();
+  const key = str3(value).toLowerCase();
   if (ITEM_STATUSES.has(key)) return key;
   if (["已销毁", "destroyed", "destroy"].includes(key)) return "destroyed";
   if (["已消耗", "consumed", "used"].includes(key)) return "consumed";
@@ -11623,7 +15384,7 @@ function mapItemStatus(value) {
   return "active";
 }
 function mapPhysicalStatus(value) {
-  const key = str2(value).toLowerCase();
+  const key = str3(value).toLowerCase();
   if (["alive", "incapacitated", "dead", "unknown"].includes(key)) return key;
   if (["存活", "活着", "alive"].includes(key)) return "alive";
   if (["死亡", "已死", "dead"].includes(key)) return "dead";
@@ -11631,22 +15392,22 @@ function mapPhysicalStatus(value) {
   return "unknown";
 }
 function mapImportance(value) {
-  const key = str2(value).toLowerCase();
+  const key = str3(value).toLowerCase();
   if (["core", "recurring", "supporting"].includes(key)) return key;
   if (["核心", "关键", "core", "main"].includes(key)) return "core";
   if (["常驻", "重要", "recurring"].includes(key)) return "recurring";
   return "supporting";
 }
 function mapRole(value) {
-  const key = str2(value).toLowerCase();
+  const key = str3(value).toLowerCase();
   if (["protagonist", "companion", "npc"].includes(key)) return key;
   if (["主角", "主人公", "protagonist"].includes(key)) return "protagonist";
   if (["同伴", "伙伴", "companion"].includes(key)) return "companion";
   return "npc";
 }
 function mapFactionKind(value) {
-  const key = str2(value).toLowerCase();
-  if (FACTION_KINDS.has(key)) return key;
+  const key = str3(value).toLowerCase();
+  if (FACTION_KINDS2.has(key)) return key;
   if (["国家", "王国", "nation", "country"].includes(key)) return "nation";
   if (["家族", "family", "clan"].includes(key)) return "family";
   if (["小队", "team", "party"].includes(key)) return "team";
@@ -11654,7 +15415,7 @@ function mapFactionKind(value) {
   return "other";
 }
 function mapRelationKind(value) {
-  const key = str2(value).toLowerCase();
+  const key = str3(value).toLowerCase();
   if (RELATION_KINDS.has(key)) return key;
   const aliases = {
     member: "member_of",
@@ -11725,15 +15486,15 @@ function withSavepoint(db, fn) {
 }
 function findPeriodLabel(raw) {
   for (const field of PERIOD_FIELDS) {
-    if (hasOwn(raw, field)) {
-      const value = str2(raw[field]);
+    if (hasOwn2(raw, field)) {
+      const value = str3(raw[field]);
       if (value.length > 0) return `${field}=${value}`;
     }
   }
   return null;
 }
 function describeProblem(path, message, code) {
-  return issue4(code, path, message, "warning", true);
+  return issue7(code, path, message, "warning", true);
 }
 function resolveMapRef(db, ctx, state, legacyMapId, mapsDoc, locationById) {
   if (legacyMapId.length === 0) return null;
@@ -11767,7 +15528,7 @@ function resolveMapRef(db, ctx, state, legacyMapId, mapsDoc, locationById) {
         db,
         "maps",
         {
-          name: str2(mapsDoc?.name) || "世界图",
+          name: str3(mapsDoc?.name) || "世界图",
           kind: "world",
           frame_json: frame,
           meters_per_cell: calibration,
@@ -11780,21 +15541,21 @@ function resolveMapRef(db, ctx, state, legacyMapId, mapsDoc, locationById) {
       );
     });
     if (!created.ok) {
-      state.issues.push(issue4("LEGACY_MAP_CREATE_FAILED", `$.maps.${legacyMapId}`, `旧根图建档失败：${created.message}`, "warning", true));
+      state.issues.push(issue7("LEGACY_MAP_CREATE_FAILED", `$.maps.${legacyMapId}`, `旧根图建档失败：${created.message}`, "warning", true));
       state.cache.set(legacyMapId, null);
       return null;
     }
     state.created += 1;
     state.issues.push(
-      issue4("LEGACY_MAP_CREATED", `$.maps.${legacyMapId}`, `按旧地图文档建立根图 rows=1（id=${LEGACY_WORLD_MAP_ID}）`, "warning", false)
+      issue7("LEGACY_MAP_CREATED", `$.maps.${legacyMapId}`, `按旧地图文档建立根图 rows=1（id=${LEGACY_WORLD_MAP_ID}）`, "warning", false)
     );
     state.cache.set(legacyMapId, LEGACY_WORLD_MAP_ID);
     return LEGACY_WORLD_MAP_ID;
   }
   if (mapsDoc) {
-    const submaps = isPlainObject2(mapsDoc.submaps) ? mapsDoc.submaps : null;
+    const submaps = isPlainObject5(mapsDoc.submaps) ? mapsDoc.submaps : null;
     const pointKey = legacyMapId.startsWith("loc:") ? legacyMapId.slice(4) : legacyMapId;
-    const described = submaps !== null && (hasOwn(submaps, legacyMapId) || hasOwn(submaps, pointKey));
+    const described = submaps !== null && (hasOwn2(submaps, legacyMapId) || hasOwn2(submaps, pointKey));
     const host = locationById.get(legacyMapId);
     if (described) {
       const existingContainer = queryOne(
@@ -11827,13 +15588,13 @@ function resolveMapRef(db, ctx, state, legacyMapId, mapsDoc, locationById) {
         );
       });
       if (!created.ok) {
-        state.issues.push(issue4("LEGACY_MAP_CREATE_FAILED", `$.maps.${legacyMapId}`, `旧子图建档失败：${created.message}`, "warning", true));
+        state.issues.push(issue7("LEGACY_MAP_CREATE_FAILED", `$.maps.${legacyMapId}`, `旧子图建档失败：${created.message}`, "warning", true));
         state.cache.set(legacyMapId, null);
         return null;
       }
       state.created += 1;
       state.issues.push(
-        issue4(
+        issue7(
           "LEGACY_MAP_CONVERTED",
           `$.maps.${legacyMapId}`,
           `旧「mapId 等于地点 ID」约定已死：为 ${legacyMapId} 建立独立容器图 ${mapId}（不再把地点 ID 当地图 ID）`,
@@ -11847,7 +15608,7 @@ function resolveMapRef(db, ctx, state, legacyMapId, mapsDoc, locationById) {
   }
   if (!state.cache.has(legacyMapId)) {
     state.issues.push(
-      issue4(
+      issue7(
         "LEGACY_MAP_UNRESOLVED",
         `$.maps.${legacyMapId}`,
         `旧 mapId「${legacyMapId}」不对应任何真实地图：保留实体粗位置，坐标置空（不猜地图，也不把坐标塞进别的地图）`,
@@ -11862,15 +15623,15 @@ function resolveMapRef(db, ctx, state, legacyMapId, mapsDoc, locationById) {
 function mapsFrame(mapsDoc, mapId = "world") {
   const fallback = { origin_x: 0, origin_y: 0, cols: 100, rows: 100, reference_width_cells: 100, reference_height_cells: 100 };
   if (!mapsDoc) return fallback;
-  const submaps = isPlainObject2(mapsDoc.submaps) ? mapsDoc.submaps : {};
+  const submaps = isPlainObject5(mapsDoc.submaps) ? mapsDoc.submaps : {};
   const sub = submaps[mapId] ?? submaps[mapId.replace(/^loc:/, "")];
-  const frame = mapId !== "world" && isPlainObject2(sub) && isPlainObject2(sub.frame) ? sub.frame : isPlainObject2(mapsDoc.frame) ? mapsDoc.frame : null;
+  const frame = mapId !== "world" && isPlainObject5(sub) && isPlainObject5(sub.frame) ? sub.frame : isPlainObject5(mapsDoc.frame) ? mapsDoc.frame : null;
   if (!frame) return fallback;
-  const cols2 = num2(frame.cols) ?? num2(frame.reference_width_cells);
-  const rows4 = num2(frame.rows) ?? num2(frame.reference_height_cells);
+  const cols2 = num3(frame.cols) ?? num3(frame.reference_width_cells);
+  const rows4 = num3(frame.rows) ?? num3(frame.reference_height_cells);
   return {
-    origin_x: num2(frame.origin_x) ?? 0,
-    origin_y: num2(frame.origin_y) ?? 0,
+    origin_x: num3(frame.origin_x) ?? 0,
+    origin_y: num3(frame.origin_y) ?? 0,
     cols: cols2 !== null && cols2 > 0 ? cols2 : 100,
     rows: rows4 !== null && rows4 > 0 ? rows4 : 100,
     reference_width_cells: cols2 !== null && cols2 > 0 ? cols2 : fallback.reference_width_cells,
@@ -11879,11 +15640,11 @@ function mapsFrame(mapsDoc, mapId = "world") {
 }
 function mapsCalibration(mapsDoc, mapId) {
   if (!mapsDoc) return null;
-  const calibrations = isPlainObject2(mapsDoc.calibrations) ? mapsDoc.calibrations : null;
+  const calibrations = isPlainObject5(mapsDoc.calibrations) ? mapsDoc.calibrations : null;
   if (!calibrations) return null;
   const entry = calibrations[mapId];
-  if (!isPlainObject2(entry)) return null;
-  const distancePerCell = num2(entry.metersPerCell) ?? num2(entry.meters_per_cell) ?? (str2(entry.unit).toLowerCase() === "m" || str2(entry.unit) === "米" ? num2(entry.distancePerCell) : null);
+  if (!isPlainObject5(entry)) return null;
+  const distancePerCell = num3(entry.metersPerCell) ?? num3(entry.meters_per_cell) ?? (str3(entry.unit).toLowerCase() === "m" || str3(entry.unit) === "米" ? num3(entry.distancePerCell) : null);
   return distancePerCell !== null && distancePerCell > 0 ? distancePerCell : null;
 }
 function restoreLegacySceneMaps(raw, db, ctx) {
@@ -11894,7 +15655,7 @@ function restoreLegacySceneMaps(raw, db, ctx) {
   const resolveMap = (legacyId) => maps.find((map) => legacyId === "world" ? !map.container_location_id : map.container_location_id === legacyId || map.container_location_id === `loc:${legacyId}`);
   for (const [table, rows4] of [["locations", candidates.locations], ["characters", candidates.characters], ["items", candidates.items]]) {
     for (const candidate of rows4) {
-      const x = num2(candidate.raw.gridX ?? candidate.raw.x), y = num2(candidate.raw.gridY ?? candidate.raw.y), legacyMapId = str2(candidate.raw.mapId ?? candidate.raw.map_id);
+      const x = num3(candidate.raw.gridX ?? candidate.raw.x), y = num3(candidate.raw.gridY ?? candidate.raw.y), legacyMapId = str3(candidate.raw.mapId ?? candidate.raw.map_id);
       if (x === null || y === null || !legacyMapId) continue;
       const row2 = queryOne(db, `SELECT * FROM ${table} WHERE branch_id=? AND id=?`, [ctx.branchId, candidate.legacyId]);
       if (!row2 || row2.status === "archived" || table === "items" && (row2.holder_character_id || row2.container_item_id)) continue;
@@ -11914,18 +15675,18 @@ function restoreLegacySceneMaps(raw, db, ctx) {
       );
     }
   }
-  const calibrations = isPlainObject2(sources.maps?.calibrations) ? sources.maps.calibrations : {};
+  const calibrations = isPlainObject5(sources.maps?.calibrations) ? sources.maps.calibrations : {};
   for (const [legacyId, rawCalibration] of Object.entries(calibrations)) {
-    if (!isPlainObject2(rawCalibration)) continue;
+    if (!isPlainObject5(rawCalibration)) continue;
     const locationId = legacyId.startsWith("loc:") ? legacyId : `loc:${legacyId}`;
     if (legacyId !== "world" && !locations.has(locationId) && !locations.has(legacyId)) continue;
-    const map = resolveMap(legacyId), meters = num2(rawCalibration.metersPerCell ?? rawCalibration.meters_per_cell);
+    const map = resolveMap(legacyId), meters = num3(rawCalibration.metersPerCell ?? rawCalibration.meters_per_cell);
     if (!map || meters === null || meters <= 0) continue;
     const locked = rawCalibration.locked === true;
     runBound(
       db,
       "UPDATE maps SET meters_per_cell=?,scale_min_meters_per_cell=?,scale_max_meters_per_cell=?,scale_quality=?,scale_locked=?,calibration_rev=? WHERE branch_id=? AND id=?",
-      [meters, meters, meters, locked ? "confirmed" : "estimated", locked ? 1 : 0, Math.max(1, num2(rawCalibration.revision) ?? 1), ctx.branchId, String(map.id)]
+      [meters, meters, meters, locked ? "confirmed" : "estimated", locked ? 1 : 0, Math.max(1, num3(rawCalibration.revision) ?? 1), ctx.branchId, String(map.id)]
     );
   }
   return issues;
@@ -11938,7 +15699,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
   if (plan.kind === "corrupt") {
     return {
       mapped,
-      issues: [issue4("LEGACY_CORRUPT", "$", `旧档损坏（${plan.reason}）：拒绝迁移，先修复或导出旧档备份`, "error", false)],
+      issues: [issue7("LEGACY_CORRUPT", "$", `旧档损坏（${plan.reason}）：拒绝迁移，先修复或导出旧档备份`, "error", false)],
       skipped
     };
   }
@@ -11946,7 +15707,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
     return {
       mapped,
       issues: [
-        issue4(
+        issue7(
           "ALREADY_IMPORTED",
           "$",
           `会话文档里已有 SQLite 存档信封（${plan.kind}）：不重复导入旧三表，避免重复造世界`,
@@ -11988,7 +15749,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
   if (!branch2) {
     return {
       mapped,
-      issues: [issue4("REF_UNKNOWN", "$.branchId", `目标分支不存在：${ctx.branchId}`, "error", true)],
+      issues: [issue7("REF_UNKNOWN", "$.branchId", `目标分支不存在：${ctx.branchId}`, "error", true)],
       skipped
     };
   }
@@ -11999,7 +15760,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
   }
   for (const label2 of periodLabels) {
     issues.push(
-      issue4(
+      issue7(
         "PERIOD_NOT_CONVERTED",
         "$.period",
         `旧时间抽象「${label2}」没有可靠现实分钟含义：保留为日历标签（branches.calendar_label），新时间轴从迁移基点相对 0 开始，不折算成秒`,
@@ -12013,7 +15774,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
       runBound(db, "UPDATE branches SET calendar_label = COALESCE(calendar_label, ?) WHERE id = ?", [periodLabels.join(" / "), ctx.branchId]);
     });
     if (!created.ok) {
-      issues.push(issue4("LEGACY_CALENDAR_LABEL_FAILED", "$.period", `旧日历标签写入失败：${created.message}`, "warning", true));
+      issues.push(issue7("LEGACY_CALENDAR_LABEL_FAILED", "$.period", `旧日历标签写入失败：${created.message}`, "warning", true));
     }
   }
   let ownsTransaction = false;
@@ -12032,7 +15793,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
     const legacyToSql = /* @__PURE__ */ new Map();
     const parentLinks = [];
     for (const candidate of candidates.locations) {
-      const name = str2(candidate.raw.name);
+      const name = str3(candidate.raw.name);
       if (name.length === 0) {
         skipped.push({ kind: "location", legacyId: candidate.legacyId, reason: "NAME_MISSING" });
         issues.push(describeProblem(candidate.origin, `旧地点缺少名称：不编造地名，保留在 skipped`, "LEGACY_NAME_MISSING"));
@@ -12051,14 +15812,14 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
       const keyKind = checkEntityKey(db, ctx.branchId, id, "location");
       if (keyKind !== null) {
         skipped.push({ kind: "location", legacyId: candidate.legacyId, reason: keyKind });
-        issues.push(issue4("ENTITY_KEY_KIND_CONFLICT", candidate.origin, `entity_keys 里 ${id} 已是 ${keyKind}，不能同时是地点`, "error", false));
+        issues.push(issue7("ENTITY_KEY_KIND_CONFLICT", candidate.origin, `entity_keys 里 ${id} 已是 ${keyKind}，不能同时是地点`, "error", false));
         continue;
       }
-      const parentLegacyId = str2(candidate.raw.parentLocationId ?? candidate.raw.parentRef ?? candidate.raw.parentId);
-      const legacyMapId = str2(candidate.raw.mapId ?? candidate.raw.map_id);
+      const parentLegacyId = str3(candidate.raw.parentLocationId ?? candidate.raw.parentRef ?? candidate.raw.parentId);
+      const legacyMapId = str3(candidate.raw.mapId ?? candidate.raw.map_id);
       const mapId = resolveMapRef(db, ctx, mapState, legacyMapId, mapsDoc, locationById);
-      const gridX = num2(candidate.raw.gridX ?? candidate.raw.x);
-      const gridY = num2(candidate.raw.gridY ?? candidate.raw.y);
+      const gridX = num3(candidate.raw.gridX ?? candidate.raw.x);
+      const gridY = num3(candidate.raw.gridY ?? candidate.raw.y);
       const hasGrid = mapId !== null && gridX !== null && gridY !== null;
       const created = withSavepoint(db, () => {
         insertEntityKey(db, ctx.branchId, id, "location");
@@ -12069,14 +15830,14 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
             name,
             aliases_json: strList(candidate.raw.aliases ?? candidate.raw.aliases_json),
             kind,
-            description: str2(candidate.raw.description),
+            description: str3(candidate.raw.description),
             parent_location_id: null,
-            mobility: str2(candidate.raw.mobility) === "mobile" ? "mobile" : "fixed",
+            mobility: str3(candidate.raw.mobility) === "mobile" ? "mobile" : "fixed",
             map_id: hasGrid ? mapId : null,
             grid_x: hasGrid ? gridX : null,
             grid_y: hasGrid ? gridY : null,
-            coord_precision: hasGrid ? str2(candidate.raw.coordinateStatus) === "confirmed" ? "exact" : "approximate" : "unknown",
-            terrain: str2(candidate.raw.terrain) || "unknown",
+            coord_precision: hasGrid ? str3(candidate.raw.coordinateStatus) === "confirmed" ? "exact" : "approximate" : "unknown",
+            terrain: str3(candidate.raw.terrain) || "unknown",
             existence_quality: "confirmed",
             status: mapLocationStatus(candidate.raw.status)
           },
@@ -12085,7 +15846,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
       });
       if (!created.ok) {
         skipped.push({ kind: "location", legacyId: candidate.legacyId, reason: `SQL_CONSTRAINT: ${created.message}` });
-        issues.push(issue4("LEGACY_ROW_REJECTED", candidate.origin, `旧地点「${name}」写入被拒：${created.message}`, "error", true));
+        issues.push(issue7("LEGACY_ROW_REJECTED", candidate.origin, `旧地点「${name}」写入被拒：${created.message}`, "error", true));
         continue;
       }
       if (legacyMapId.length > 0 && !hasGrid) {
@@ -12124,7 +15885,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
     }
     const factionIds = /* @__PURE__ */ new Map();
     for (const candidate of candidates.factions) {
-      const name = str2(candidate.raw.name);
+      const name = str3(candidate.raw.name);
       if (name.length === 0) {
         skipped.push({ kind: "faction", legacyId: candidate.legacyId, reason: "NAME_MISSING" });
         continue;
@@ -12142,7 +15903,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
         skipped.push({ kind: "faction", legacyId: candidate.legacyId || name, reason: keyKind });
         continue;
       }
-      const headquartersRef = str2(candidate.raw.headquartersLocationId ?? candidate.raw.headquartersRef);
+      const headquartersRef = str3(candidate.raw.headquartersLocationId ?? candidate.raw.headquartersRef);
       const headquartersId = headquartersRef.length > 0 ? legacyToSql.get(headquartersRef) ?? null : null;
       const created = withSavepoint(db, () => {
         insertEntityKey(db, ctx.branchId, id, "faction");
@@ -12153,8 +15914,8 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
             name,
             aliases_json: strList(candidate.raw.aliases),
             kind: mapFactionKind(candidate.raw.kind ?? candidate.raw.type),
-            description: str2(candidate.raw.description),
-            goal: str2(candidate.raw.goal),
+            description: str3(candidate.raw.description),
+            goal: str3(candidate.raw.goal),
             headquarters_location_id: headquartersId
           },
           { ...rowCtx, id }
@@ -12162,7 +15923,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
       });
       if (!created.ok) {
         skipped.push({ kind: "faction", legacyId: candidate.legacyId || name, reason: `SQL_CONSTRAINT: ${created.message}` });
-        issues.push(issue4("LEGACY_ROW_REJECTED", candidate.origin, `旧势力「${name}」写入被拒：${created.message}`, "error", true));
+        issues.push(issue7("LEGACY_ROW_REJECTED", candidate.origin, `旧势力「${name}」写入被拒：${created.message}`, "error", true));
         continue;
       }
       factionIds.set(name, id);
@@ -12170,7 +15931,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
       bump(mapped, "kind:entityKeys");
     }
     for (const candidate of candidates.characters) {
-      const name = str2(candidate.raw.name);
+      const name = str3(candidate.raw.name);
       if (name.length === 0) {
         skipped.push({ kind: "character", legacyId: candidate.legacyId, reason: "NAME_MISSING" });
         issues.push(describeProblem(candidate.origin, "旧人物缺少名称：不编造人名，保留在 skipped", "LEGACY_NAME_MISSING"));
@@ -12186,10 +15947,10 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
       const keyKind = checkEntityKey(db, ctx.branchId, id, "character");
       if (keyKind !== null) {
         skipped.push({ kind: "character", legacyId: candidate.legacyId, reason: keyKind });
-        issues.push(issue4("ENTITY_KEY_KIND_CONFLICT", candidate.origin, `entity_keys 里 ${id} 已是 ${keyKind}，不能同时是人物`, "error", false));
+        issues.push(issue7("ENTITY_KEY_KIND_CONFLICT", candidate.origin, `entity_keys 里 ${id} 已是 ${keyKind}，不能同时是人物`, "error", false));
         continue;
       }
-      const locationLegacyId = str2(candidate.raw.locationId ?? candidate.raw.locationRef ?? candidate.raw.location_id);
+      const locationLegacyId = str3(candidate.raw.locationId ?? candidate.raw.locationRef ?? candidate.raw.location_id);
       const locationId = locationLegacyId.length > 0 ? legacyToSql.get(locationLegacyId) ?? (rowExists(db, "locations", ctx.branchId, locationLegacyId) ? locationLegacyId : null) : null;
       if (locationLegacyId.length > 0 && locationId === null) {
         issues.push(
@@ -12200,10 +15961,10 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
           )
         );
       }
-      const legacyMapId = str2(candidate.raw.mapId ?? candidate.raw.map_id);
+      const legacyMapId = str3(candidate.raw.mapId ?? candidate.raw.map_id);
       const mapId = resolveMapRef(db, ctx, mapState, legacyMapId, mapsDoc, locationById);
-      const gridX = num2(candidate.raw.gridX ?? candidate.raw.x);
-      const gridY = num2(candidate.raw.gridY ?? candidate.raw.y);
+      const gridX = num3(candidate.raw.gridX ?? candidate.raw.x);
+      const gridY = num3(candidate.raw.gridY ?? candidate.raw.y);
       const hasGrid = mapId !== null && gridX !== null && gridY !== null;
       const created = withSavepoint(db, () => {
         insertEntityKey(db, ctx.branchId, id, "character");
@@ -12215,20 +15976,20 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
             name,
             aliases_json: strList(candidate.raw.aliases),
             role: mapRole(candidate.raw.role),
-            identity: str2(candidate.raw.identity),
-            description: str2(candidate.raw.description),
-            personality: str2(candidate.raw.personality),
+            identity: str3(candidate.raw.identity),
+            description: str3(candidate.raw.description),
+            personality: str3(candidate.raw.personality),
             importance: mapImportance(candidate.raw.importance),
-            importance_reason: str2(candidate.raw.importanceReason) || "迁移自旧档",
-            thought: str2(candidate.raw.thought),
-            action_tendency: str2(candidate.raw.actionTendency ?? candidate.raw.action_tendency),
+            importance_reason: str3(candidate.raw.importanceReason) || "迁移自旧档",
+            thought: str3(candidate.raw.thought),
+            action_tendency: str3(candidate.raw.actionTendency ?? candidate.raw.action_tendency),
             physical_status: mapPhysicalStatus(candidate.raw.physicalStatus ?? candidate.raw.physical_status),
-            condition_note: str2(candidate.raw.conditionNote),
+            condition_note: str3(candidate.raw.conditionNote),
             location_id: absent ? null : locationId,
             map_id: !absent && hasGrid ? mapId : null,
             grid_x: !absent && hasGrid ? gridX : null,
             grid_y: !absent && hasGrid ? gridY : null,
-            coord_precision: !absent && hasGrid ? str2(candidate.raw.coordinateStatus) === "confirmed" ? "exact" : "approximate" : "unknown",
+            coord_precision: !absent && hasGrid ? str3(candidate.raw.coordinateStatus) === "confirmed" ? "exact" : "approximate" : "unknown",
             mobility_profiles_json: Array.isArray(candidate.raw.mobilityProfiles) ? candidate.raw.mobilityProfiles : [],
             capabilities_json: Array.isArray(candidate.raw.capabilities) ? candidate.raw.capabilities : [],
             status: absent ? "archived" : "active"
@@ -12238,7 +15999,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
       });
       if (!created.ok) {
         skipped.push({ kind: "character", legacyId: candidate.legacyId, reason: `SQL_CONSTRAINT: ${created.message}` });
-        issues.push(issue4("LEGACY_ROW_REJECTED", candidate.origin, `旧人物「${name}」写入被拒：${created.message}`, "error", true));
+        issues.push(issue7("LEGACY_ROW_REJECTED", candidate.origin, `旧人物「${name}」写入被拒：${created.message}`, "error", true));
         continue;
       }
       legacyToSql.set(candidate.legacyId, id);
@@ -12247,7 +16008,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
       mapped[`legacy:${candidate.legacyId || id}`] = mapped["kind:characters"] ?? 1;
     }
     for (const candidate of candidates.items) {
-      const name = str2(candidate.raw.name);
+      const name = str3(candidate.raw.name);
       if (name.length === 0) {
         skipped.push({ kind: "item", legacyId: candidate.legacyId, reason: "NAME_MISSING" });
         issues.push(describeProblem(candidate.origin, "旧物品缺少名称：不编造名称，保留在 skipped", "LEGACY_NAME_MISSING"));
@@ -12265,7 +16026,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
         skipped.push({ kind: "item", legacyId: candidate.legacyId, reason: keyKind });
         continue;
       }
-      const holderLegacyId = str2(candidate.raw.holderCharacterId ?? candidate.raw.holderRef ?? candidate.raw.holder);
+      const holderLegacyId = str3(candidate.raw.holderCharacterId ?? candidate.raw.holderRef ?? candidate.raw.holder);
       const holderId = holderLegacyId.length > 0 ? legacyToSql.get(holderLegacyId) ?? (rowExists(db, "characters", ctx.branchId, holderLegacyId) ? holderLegacyId : null) : null;
       if (holderLegacyId.length > 0 && holderId === null) {
         issues.push(
@@ -12276,7 +16037,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
           )
         );
       }
-      const locationLegacyId = str2(candidate.raw.locationId ?? candidate.raw.locationRef ?? candidate.raw.location_id);
+      const locationLegacyId = str3(candidate.raw.locationId ?? candidate.raw.locationRef ?? candidate.raw.location_id);
       const locationId = holderId !== null ? null : locationLegacyId.length > 0 ? legacyToSql.get(locationLegacyId) ?? (rowExists(db, "locations", ctx.branchId, locationLegacyId) ? locationLegacyId : null) : null;
       if (holderId === null && locationLegacyId.length > 0 && locationId === null) {
         issues.push(
@@ -12287,14 +16048,14 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
           )
         );
       }
-      const legacyMapId = str2(candidate.raw.mapId ?? candidate.raw.map_id);
+      const legacyMapId = str3(candidate.raw.mapId ?? candidate.raw.map_id);
       const mapId = holderId === null ? resolveMapRef(db, ctx, mapState, legacyMapId, mapsDoc, locationById) : null;
-      const gridX = num2(candidate.raw.gridX ?? candidate.raw.x);
-      const gridY = num2(candidate.raw.gridY ?? candidate.raw.y);
+      const gridX = num3(candidate.raw.gridX ?? candidate.raw.x);
+      const gridY = num3(candidate.raw.gridY ?? candidate.raw.y);
       const hasGrid = mapId !== null && gridX !== null && gridY !== null;
-      const ownerLegacyId = str2(candidate.raw.ownerEntityId ?? candidate.raw.ownerRef ?? candidate.raw.owner);
+      const ownerLegacyId = str3(candidate.raw.ownerEntityId ?? candidate.raw.ownerRef ?? candidate.raw.owner);
       const ownerId = ownerLegacyId.length > 0 ? legacyToSql.get(ownerLegacyId) ?? (entityKeyExists(db, ctx.branchId, ownerLegacyId) ? ownerLegacyId : null) : null;
-      const quantity = num2(candidate.raw.quantity);
+      const quantity = num3(candidate.raw.quantity);
       const created = withSavepoint(db, () => {
         insertEntityKey(db, ctx.branchId, id, "item");
         insertRow(
@@ -12304,17 +16065,17 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
             name,
             aliases_json: strList(candidate.raw.aliases),
             kind: mapItemKind(candidate.raw.kind ?? candidate.raw.type),
-            description: str2(candidate.raw.description),
+            description: str3(candidate.raw.description),
             quantity: quantity !== null && quantity >= 0 ? quantity : null,
-            unit: str2(candidate.raw.unit) || "件",
-            condition_note: str2(candidate.raw.conditionNote),
+            unit: str3(candidate.raw.unit) || "件",
+            condition_note: str3(candidate.raw.conditionNote),
             owner_entity_id: ownerId,
             holder_character_id: holderId,
             location_id: locationId,
             map_id: hasGrid ? mapId : null,
             grid_x: hasGrid ? gridX : null,
             grid_y: hasGrid ? gridY : null,
-            coord_precision: hasGrid ? str2(candidate.raw.coordinateStatus) === "confirmed" ? "exact" : "approximate" : "unknown",
+            coord_precision: hasGrid ? str3(candidate.raw.coordinateStatus) === "confirmed" ? "exact" : "approximate" : "unknown",
             properties_json: Array.isArray(candidate.raw.properties) ? candidate.raw.properties : [],
             status: mapItemStatus(candidate.raw.status)
           },
@@ -12323,7 +16084,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
       });
       if (!created.ok) {
         skipped.push({ kind: "item", legacyId: candidate.legacyId, reason: `SQL_CONSTRAINT: ${created.message}` });
-        issues.push(issue4("LEGACY_ROW_REJECTED", candidate.origin, `旧物品「${name}」写入被拒：${created.message}`, "error", true));
+        issues.push(issue7("LEGACY_ROW_REJECTED", candidate.origin, `旧物品「${name}」写入被拒：${created.message}`, "error", true));
         continue;
       }
       legacyToSql.set(candidate.legacyId, id);
@@ -12389,20 +16150,20 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
       });
       if (!created.ok) {
         skipped.push({ kind: "information", legacyId: contentHash, reason: `SQL_CONSTRAINT: ${created.message}` });
-        issues.push(issue4("LEGACY_ROW_REJECTED", rumor.origin, `风声「${clip2(content, 40)}」写入被拒：${created.message}`, "error", true));
+        issues.push(issue7("LEGACY_ROW_REJECTED", rumor.origin, `风声「${clip2(content, 40)}」写入被拒：${created.message}`, "error", true));
         continue;
       }
       bump(mapped, "kind:information");
       if (originLocationId !== null) bump(mapped, "kind:fronts");
     }
     for (const candidate of candidates.relations) {
-      const description = str2(candidate.raw.description ?? candidate.raw.text ?? candidate.raw.note);
-      const subjectRef = str2(candidate.raw.subjectId ?? candidate.raw.subjectEntityId ?? candidate.raw.subjectRef ?? candidate.raw.from ?? candidate.raw.subject);
-      const objectRef = str2(candidate.raw.objectId ?? candidate.raw.objectEntityId ?? candidate.raw.objectRef ?? candidate.raw.to ?? candidate.raw.object);
+      const description = str3(candidate.raw.description ?? candidate.raw.text ?? candidate.raw.note);
+      const subjectRef = str3(candidate.raw.subjectId ?? candidate.raw.subjectEntityId ?? candidate.raw.subjectRef ?? candidate.raw.from ?? candidate.raw.subject);
+      const objectRef = str3(candidate.raw.objectId ?? candidate.raw.objectEntityId ?? candidate.raw.objectRef ?? candidate.raw.to ?? candidate.raw.object);
       const subjectId = subjectRef.length > 0 ? legacyToSql.get(subjectRef) ?? (entityKeyExists(db, ctx.branchId, subjectRef) ? subjectRef : null) : null;
       const objectId = objectRef.length > 0 ? legacyToSql.get(objectRef) ?? (entityKeyExists(db, ctx.branchId, objectRef) ? objectRef : null) : null;
       if (subjectId === null || objectId === null) {
-        const reason = objectRef.length === 0 && subjectId !== null ? `RELATION_OBJECT_UNRESOLVED: ${clip2(description || str2(candidate.raw.label) || "(无描述)", 120)}` : `RELATION_ENDPOINT_UNRESOLVED: subject=${subjectRef || "missing"} object=${objectRef || "missing"} description=${clip2(description, 120)}`;
+        const reason = objectRef.length === 0 && subjectId !== null ? `RELATION_OBJECT_UNRESOLVED: ${clip2(description || str3(candidate.raw.label) || "(无描述)", 120)}` : `RELATION_ENDPOINT_UNRESOLVED: subject=${subjectRef || "missing"} object=${objectRef || "missing"} description=${clip2(description, 120)}`;
         skipped.push({ kind: "relation", legacyId: candidate.legacyId, reason });
         issues.push(
           describeProblem(
@@ -12418,7 +16179,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
         continue;
       }
       const kind = mapRelationKind(candidate.raw.kind);
-      const label2 = str2(candidate.raw.label);
+      const label2 = str3(candidate.raw.label);
       const duplicate = queryOne(
         db,
         "SELECT id FROM relations WHERE branch_id = ? AND subject_entity_id = ? AND object_entity_id = ? AND kind = ? AND label = ? LIMIT 1",
@@ -12451,7 +16212,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
       });
       if (!created.ok) {
         skipped.push({ kind: "relation", legacyId: candidate.legacyId, reason: `SQL_CONSTRAINT: ${created.message}` });
-        issues.push(issue4("LEGACY_ROW_REJECTED", candidate.origin, `旧关系写入被拒：${created.message}`, "error", true));
+        issues.push(issue7("LEGACY_ROW_REJECTED", candidate.origin, `旧关系写入被拒：${created.message}`, "error", true));
         continue;
       }
       bump(mapped, "kind:relations");
@@ -12479,13 +16240,13 @@ function checkEntityKey(db, branchId, id, kind) {
 function resolveCandidateId(candidate, ctx, issues, extraAlias = "") {
   const legacyId = candidate.legacyId;
   if (legacyId.length > 0) return legacyId;
-  const alias = `${candidate.kind}:${extraAlias || str2(candidate.raw.name)}#${candidate.index}`;
+  const alias = `${candidate.kind}:${extraAlias || str3(candidate.raw.name)}#${candidate.index}`;
   const minted = ctx.makeId(candidate.kind, `migration.${candidate.kind}`, alias);
   issues.push(
-    issue4(
+    issue7(
       "LEGACY_ID_MINTED",
       candidate.origin,
-      `旧${candidate.kind}「${str2(candidate.raw.name)}」缺少 id：按旧档内容铸造确定性 ID ${minted}（同输入必得同 ID，重复导入可识别）`,
+      `旧${candidate.kind}「${str3(candidate.raw.name)}」缺少 id：按旧档内容铸造确定性 ID ${minted}（同输入必得同 ID，重复导入可识别）`,
       "warning",
       false
     )
@@ -12493,7 +16254,7 @@ function resolveCandidateId(candidate, ctx, issues, extraAlias = "") {
   return minted;
 }
 function mapLocationStatus(value) {
-  const key = str2(value).toLowerCase();
+  const key = str3(value).toLowerCase();
   if (["active", "destroyed", "merged", "archived"].includes(key)) return key;
   if (["已毁灭", "destroyed"].includes(key)) return "destroyed";
   if (["已合并", "merged"].includes(key)) return "merged";
@@ -12501,11 +16262,11 @@ function mapLocationStatus(value) {
   return "active";
 }
 function simulationBranch(simulation, branchId) {
-  if (isPlainObject2(simulation.branches)) {
+  if (isPlainObject5(simulation.branches)) {
     const keys = Object.keys(simulation.branches).sort();
     const key = keys.includes(branchId) ? branchId : keys.includes("canon") ? "canon" : keys[0];
     const branch2 = key === void 0 ? void 0 : simulation.branches[key];
-    if (isPlainObject2(branch2)) return { key, branch: branch2 };
+    if (isPlainObject5(branch2)) return { key, branch: branch2 };
     return null;
   }
   if (Array.isArray(simulation.tasks) || Array.isArray(simulation.signals) || Array.isArray(simulation.deliveries)) {
@@ -12516,7 +16277,7 @@ function simulationBranch(simulation, branchId) {
 function simRows(branch2, key) {
   const value = branch2[key];
   if (!Array.isArray(value)) return [];
-  return value.filter((row2) => isPlainObject2(row2));
+  return value.filter((row2) => isPlainObject5(row2));
 }
 function mapActionKind(kind) {
   switch (kind) {
@@ -12565,34 +16326,34 @@ function migrateLegacySimulation(plan, raw, db, ctx) {
   if (plan.kind === "corrupt") {
     return {
       mapped,
-      issues: [issue4("LEGACY_CORRUPT", "$.simulation", `旧档损坏（${plan.reason}）：拒绝迁移推演段`, "error", false)],
+      issues: [issue7("LEGACY_CORRUPT", "$.simulation", `旧档损坏（${plan.reason}）：拒绝迁移推演段`, "error", false)],
       blocked
     };
   }
   if (plan.kind === "new_format" || plan.kind === "already_migrated") {
     return {
       mapped,
-      issues: [issue4("ALREADY_IMPORTED", "$.simulation", `会话文档里已有 SQLite 存档信封（${plan.kind}）：不重复导入旧推演段`, "warning", false)],
+      issues: [issue7("ALREADY_IMPORTED", "$.simulation", `会话文档里已有 SQLite 存档信封（${plan.kind}）：不重复导入旧推演段`, "warning", false)],
       blocked
     };
   }
   const simulation = sources.simulation;
   if (!simulation) {
-    issues.push(issue4("LEGACY_SIMULATION_ABSENT", "$.simulation", "旧档没有 simulation 段：没有需要迁移的推演任务", "warning", false));
+    issues.push(issue7("LEGACY_SIMULATION_ABSENT", "$.simulation", "旧档没有 simulation 段：没有需要迁移的推演任务", "warning", false));
     return { mapped, issues, blocked };
   }
   const selected = simulationBranch(simulation, ctx.branchId);
   if (!selected) {
-    issues.push(issue4("LEGACY_SIMULATION_SHAPE_UNKNOWN", "$.simulation", "旧 simulation 段既不是 branches 映射也不是平铺 tasks/signals/deliveries", "error", false));
+    issues.push(issue7("LEGACY_SIMULATION_SHAPE_UNKNOWN", "$.simulation", "旧 simulation 段既不是 branches 映射也不是平铺 tasks/signals/deliveries", "error", false));
     return { mapped, issues, blocked };
   }
   const branch2 = queryOne(db, "SELECT id FROM branches WHERE id = ? LIMIT 1", [ctx.branchId]);
   if (!branch2) {
-    return { mapped, issues: [issue4("REF_UNKNOWN", "$.branchId", `目标分支不存在：${ctx.branchId}`, "error", true)], blocked };
+    return { mapped, issues: [issue7("REF_UNKNOWN", "$.branchId", `目标分支不存在：${ctx.branchId}`, "error", true)], blocked };
   }
   for (const label2 of sources.periodLabels) {
     issues.push(
-      issue4(
+      issue7(
         "PERIOD_NOT_CONVERTED",
         "$.simulation",
         `旧 period「${label2}」不折算成秒：迁移后的时间字段一律使用迁移基点相对 0`,
@@ -12613,14 +16374,14 @@ function migrateLegacySimulation(plan, raw, db, ctx) {
   const channelIds = /* @__PURE__ */ new Map();
   try {
     for (const task of simRows(selected.branch, "tasks")) {
-      const legacyId = str2(task.id);
-      const topic = str2(task.topic);
+      const legacyId = str3(task.id);
+      const topic = str3(task.topic);
       const title = clip2(topic || legacyId || "旧推演任务", 60);
-      const actorRef = str2(task.actorCharacterId);
+      const actorRef = str3(task.actorCharacterId);
       const actorId = actorRef.length > 0 ? entityKeyExists(db, ctx.branchId, actorRef) ? actorRef : null : null;
       const periodLabel = findPeriodLabel(task);
       if (periodLabel !== null) {
-        issues.push(issue4("PERIOD_NOT_CONVERTED", `$.simulation.tasks.${legacyId}`, `任务 ${legacyId} 的 ${periodLabel} 不折算成秒`, "warning", false));
+        issues.push(issue7("PERIOD_NOT_CONVERTED", `$.simulation.tasks.${legacyId}`, `任务 ${legacyId} 的 ${periodLabel} 不折算成秒`, "warning", false));
       }
       if (actorId === null) {
         blocked.push({
@@ -12629,7 +16390,7 @@ function migrateLegacySimulation(plan, raw, db, ctx) {
           reason: `ACTOR_UNRESOLVED: actorCharacterId=${actorRef || "missing"}${periodLabel ? ` (${periodLabel})` : ""}`
         });
         issues.push(
-          issue4(
+          issue7(
             "LEGACY_TASK_BLOCKED",
             `$.simulation.tasks.${legacyId}`,
             `旧任务 ${legacyId}「${title}」的 actor 无法解析：保留 blocked 待审，不编造执行者`,
@@ -12639,17 +16400,17 @@ function migrateLegacySimulation(plan, raw, db, ctx) {
         );
         continue;
       }
-      const actionId = legacyId.length > 0 ? legacyId : makeId("action", "migration.action", `${ctx.branchId}:${title}:${str2(task.createdTurnKey)}`);
+      const actionId = legacyId.length > 0 ? legacyId : makeId("action", "migration.action", `${ctx.branchId}:${title}:${str3(task.createdTurnKey)}`);
       if (rowExists(db, "actions", ctx.branchId, actionId)) {
         bump(mapped, "kind:alreadyImported");
         actionIds.set(legacyId, actionId);
         issues.push(describeProblem(`$.simulation.tasks.${legacyId}`, `旧任务 ${legacyId} 已导入，跳过`, "ALREADY_IMPORTED"));
         continue;
       }
-      const targetLocationRef = str2(task.targetLocationId);
-      const originLocationRef = str2(task.originLocationId);
+      const targetLocationRef = str3(task.targetLocationId);
+      const originLocationRef = str3(task.originLocationId);
       const targetLocationId = targetLocationRef.length > 0 && rowExists(db, "locations", ctx.branchId, targetLocationRef) ? targetLocationRef : null;
-      const kind = mapActionKind(str2(task.kind));
+      const kind = mapActionKind(str3(task.kind));
       const created = withSavepoint(db, () => {
         insertRow(
           db,
@@ -12660,30 +16421,30 @@ function migrateLegacySimulation(plan, raw, db, ctx) {
             title,
             intent: topic,
             target_location_id: kind === "travel" ? targetLocationId : null,
-            payload_json: { migration: { source: "legacy_simulation", legacyId, originLocationId: originLocationRef || null, visibility: str2(task.visibility) || null } },
+            payload_json: { migration: { source: "legacy_simulation", legacyId, originLocationId: originLocationRef || null, visibility: str3(task.visibility) || null } },
             progress_s: 0,
             // 旧 period 不写进任何 *_s 字段：时间轴从相对 0 开始。
             evaluated_until_s: 0,
-            secrecy: str2(task.visibility) === "hidden" ? "secret" : "restricted",
+            secrecy: str3(task.visibility) === "hidden" ? "secret" : "restricted",
             priority: "normal",
-            status: mapActionStatus(str2(task.status)),
-            reason_code: periodLabel !== null ? `PERIOD_NOT_CONVERTED:${periodLabel}` : str2(task.reasonCode) || null
+            status: mapActionStatus(str3(task.status)),
+            reason_code: periodLabel !== null ? `PERIOD_NOT_CONVERTED:${periodLabel}` : str3(task.reasonCode) || null
           },
           { ...rowCtx, id: actionId }
         );
       });
       if (!created.ok) {
         blocked.push({ kind: "task", legacyId, reason: `SQL_CONSTRAINT: ${created.message}` });
-        issues.push(issue4("LEGACY_TASK_BLOCKED", `$.simulation.tasks.${legacyId}`, `旧任务写入被拒：${created.message}`, "error", true));
+        issues.push(issue7("LEGACY_TASK_BLOCKED", `$.simulation.tasks.${legacyId}`, `旧任务写入被拒：${created.message}`, "error", true));
         continue;
       }
       actionIds.set(legacyId, actionId);
       bump(mapped, "kind:actions");
     }
     for (const signal of simRows(selected.branch, "signals")) {
-      const legacyId = str2(signal.id);
-      const topic = str2(signal.topic);
-      const originRef = str2(signal.originLocationId);
+      const legacyId = str3(signal.id);
+      const topic = str3(signal.topic);
+      const originRef = str3(signal.originLocationId);
       const originLocationId = originRef.length > 0 && rowExists(db, "locations", ctx.branchId, originRef) ? originRef : null;
       if (originLocationId === null && originRef.length > 0) {
         issues.push(
@@ -12692,7 +16453,7 @@ function migrateLegacySimulation(plan, raw, db, ctx) {
       }
       const periodLabel = findPeriodLabel(signal);
       if (periodLabel !== null) {
-        issues.push(issue4("PERIOD_NOT_CONVERTED", `$.simulation.signals.${legacyId}`, `signal ${legacyId} 的 ${periodLabel} 不折算成秒`, "warning", false));
+        issues.push(issue7("PERIOD_NOT_CONVERTED", `$.simulation.signals.${legacyId}`, `signal ${legacyId} 的 ${periodLabel} 不折算成秒`, "warning", false));
       }
       const contentHash = `signal_${stableHash(topic)}`;
       const existing = queryOne(db, "SELECT id FROM information WHERE branch_id = ? AND content_hash = ? LIMIT 1", [ctx.branchId, contentHash]);
@@ -12716,12 +16477,12 @@ function migrateLegacySimulation(plan, raw, db, ctx) {
             title: clip2(topic, 24),
             content: topic,
             truth_status: "unknown",
-            secrecy: str2(signal.visibility) === "hidden" ? "secret" : "restricted",
+            secrecy: str3(signal.visibility) === "hidden" ? "secret" : "restricted",
             topic_key: `signal:${stableHash(topic)}`,
             content_hash: contentHash,
             created_at_s: 0,
             origin_location_id: originLocationId,
-            status: str2(signal.status) === "cancelled" ? "retracted" : "active"
+            status: str3(signal.status) === "cancelled" ? "retracted" : "active"
           },
           { ...rowCtx, id: informationId }
         );
@@ -12734,10 +16495,10 @@ function migrateLegacySimulation(plan, raw, db, ctx) {
       bump(mapped, "kind:information");
     }
     for (const channel of simRows(selected.branch, "channels")) {
-      const name = str2(channel.name);
-      const ownerRef = str2(channel.ownerEntityId ?? channel.ownerId);
+      const name = str3(channel.name);
+      const ownerRef = str3(channel.ownerEntityId ?? channel.ownerId);
       const ownerId = ownerRef.length > 0 && entityKeyExists(db, ctx.branchId, ownerRef) ? ownerRef : null;
-      const legacyId = str2(channel.id);
+      const legacyId = str3(channel.id);
       if (name.length === 0 || ownerId === null) {
         blocked.push({ kind: "channel", legacyId, reason: `CHANNEL_OWNER_UNRESOLVED: owner=${ownerRef || "missing"}` });
         continue;
@@ -12754,12 +16515,12 @@ function migrateLegacySimulation(plan, raw, db, ctx) {
           "channels",
           {
             name,
-            kind: ["contact", "faction_network", "messenger", "surveillance", "broadcast", "magic", "other"].includes(str2(channel.kind)) ? str2(channel.kind) : "other",
+            kind: ["contact", "faction_network", "messenger", "surveillance", "broadcast", "magic", "other"].includes(str3(channel.kind)) ? str3(channel.kind) : "other",
             owner_entity_id: ownerId,
-            source_entity_id: entityKeyExists(db, ctx.branchId, str2(channel.sourceEntityId)) ? str2(channel.sourceEntityId) : null,
-            source_location_id: rowExists(db, "locations", ctx.branchId, str2(channel.sourceLocationId)) ? str2(channel.sourceLocationId) : null,
-            recipient_entity_id: entityKeyExists(db, ctx.branchId, str2(channel.recipientEntityId)) ? str2(channel.recipientEntityId) : null,
-            recipient_location_id: rowExists(db, "locations", ctx.branchId, str2(channel.recipientLocationId)) ? str2(channel.recipientLocationId) : null,
+            source_entity_id: entityKeyExists(db, ctx.branchId, str3(channel.sourceEntityId)) ? str3(channel.sourceEntityId) : null,
+            source_location_id: rowExists(db, "locations", ctx.branchId, str3(channel.sourceLocationId)) ? str3(channel.sourceLocationId) : null,
+            recipient_entity_id: entityKeyExists(db, ctx.branchId, str3(channel.recipientEntityId)) ? str3(channel.recipientEntityId) : null,
+            recipient_location_id: rowExists(db, "locations", ctx.branchId, str3(channel.recipientLocationId)) ? str3(channel.recipientLocationId) : null,
             scope_json: { location_refs: [], entity_refs: [], topics: strList(channel.topics) },
             latency_json: { quality: "unknown", basis_refs: [], note: "旧 period 不折算成秒" },
             reliability: "unknown",
@@ -12778,23 +16539,23 @@ function migrateLegacySimulation(plan, raw, db, ctx) {
       bump(mapped, "kind:channels");
     }
     for (const delivery of simRows(selected.branch, "deliveries")) {
-      const legacyId = str2(delivery.id);
-      const signalId = str2(delivery.signalId);
+      const legacyId = str3(delivery.id);
+      const signalId = str3(delivery.signalId);
       const informationId = informationIds.get(signalId) ?? (rowExists(db, "information", ctx.branchId, signalId) ? signalId : null);
       if (informationId === null) {
         blocked.push({ kind: "delivery", legacyId, reason: `SIGNAL_UNRESOLVED: signalId=${signalId || "missing"}` });
         issues.push(
-          issue4("LEGACY_DELIVERY_BLOCKED", `$.simulation.deliveries.${legacyId}`, `旧送达 ${legacyId} 的信号未迁移：保留 blocked 待审`, "warning", true)
+          issue7("LEGACY_DELIVERY_BLOCKED", `$.simulation.deliveries.${legacyId}`, `旧送达 ${legacyId} 的信号未迁移：保留 blocked 待审`, "warning", true)
         );
         continue;
       }
       const periodLabel = findPeriodLabel(delivery);
       if (periodLabel !== null) {
-        issues.push(issue4("PERIOD_NOT_CONVERTED", `$.simulation.deliveries.${legacyId}`, `送达 ${legacyId} 的 ${periodLabel} 不折算成秒`, "warning", false));
+        issues.push(issue7("PERIOD_NOT_CONVERTED", `$.simulation.deliveries.${legacyId}`, `送达 ${legacyId} 的 ${periodLabel} 不折算成秒`, "warning", false));
       }
-      const recipientType = str2(delivery.recipientType);
-      const recipientRef = str2(delivery.recipientId);
-      const via = str2(delivery.via);
+      const recipientType = str3(delivery.recipientType);
+      const recipientRef = str3(delivery.recipientId);
+      const via = str3(delivery.via);
       if (recipientType === "character") {
         if (!rowExists(db, "characters", ctx.branchId, recipientRef)) {
           blocked.push({ kind: "delivery", legacyId, reason: `RECIPIENT_UNRESOLVED: character=${recipientRef || "missing"}` });
@@ -12813,10 +16574,10 @@ function migrateLegacySimulation(plan, raw, db, ctx) {
               knower_character_id: recipientRef,
               is_pov: 0,
               information_id: informationId,
-              source_entity_id: entityKeyExists(db, ctx.branchId, str2(delivery.fromLocationId)) ? str2(delivery.fromLocationId) : null,
+              source_entity_id: entityKeyExists(db, ctx.branchId, str3(delivery.fromLocationId)) ? str3(delivery.fromLocationId) : null,
               first_received_at_s: 0,
               // 旧 confidence：confirmed→believed、rumor→heard、disputed→doubted。
-              belief: str2(delivery.confidence) === "confirmed" ? "believed" : str2(delivery.confidence) === "disputed" ? "doubted" : "heard",
+              belief: str3(delivery.confidence) === "confirmed" ? "believed" : str3(delivery.confidence) === "disputed" ? "doubted" : "heard",
               attention: "normal",
               reaction_note: via.length > 0 ? `旧渠道：${via}` : "",
               status: "active"
@@ -12871,14 +16632,14 @@ function migrateLegacySimulation(plan, raw, db, ctx) {
       }
       bump(mapped, "kind:fronts");
     }
-    const topology = isPlainObject2(selected.branch.geoTopology) ? selected.branch.geoTopology : null;
+    const topology = isPlainObject5(selected.branch.geoTopology) ? selected.branch.geoTopology : null;
     if (topology) {
       const edges = Array.isArray(topology.edges) ? topology.edges : [];
       for (const edge of edges) {
-        if (!isPlainObject2(edge)) continue;
-        const legacyId = str2(edge.id);
-        const fromRef = str2(edge.fromPointId ?? edge.fromLocationId ?? edge.from);
-        const toRef = str2(edge.toPointId ?? edge.toLocationId ?? edge.to);
+        if (!isPlainObject5(edge)) continue;
+        const legacyId = str3(edge.id);
+        const fromRef = str3(edge.fromPointId ?? edge.fromLocationId ?? edge.from);
+        const toRef = str3(edge.toPointId ?? edge.toLocationId ?? edge.to);
         const fromId = rowExists(db, "locations", ctx.branchId, fromRef) ? fromRef : null;
         const toId = rowExists(db, "locations", ctx.branchId, toRef) ? toRef : null;
         if (fromId === null || toId === null || fromId === toId) {
@@ -12903,7 +16664,7 @@ function migrateLegacySimulation(plan, raw, db, ctx) {
               distance_basis: "unknown",
               geometry_quality: "unknown",
               allowed_modes_json: [],
-              status: str2(edge.status) === "blocked" ? "blocked" : "open"
+              status: str3(edge.status) === "blocked" ? "blocked" : "open"
             },
             { ...rowCtx, id: routeId }
           );
@@ -12917,31 +16678,31 @@ function migrateLegacySimulation(plan, raw, db, ctx) {
       for (const key of ["areas", "vehicles"]) {
         const rows4 = Array.isArray(topology[key]) ? topology[key] : [];
         for (const row2 of rows4) {
-          if (!isPlainObject2(row2)) continue;
-          const id = str2(row2.locationId ?? row2.id), location2 = queryOne(db, "SELECT id,map_id FROM locations WHERE branch_id=? AND id=?", [ctx.branchId, id]);
-          if (location2 && key === "areas" && Array.isArray(row2.cells) && row2.cells.length <= 256 && row2.cells.every((cell) => isPlainObject2(cell) && Number.isInteger(cell.x) && Number.isInteger(cell.y) && Number(cell.x) >= 0 && Number(cell.y) >= 0)) {
+          if (!isPlainObject5(row2)) continue;
+          const id = str3(row2.locationId ?? row2.id), location2 = queryOne(db, "SELECT id,map_id FROM locations WHERE branch_id=? AND id=?", [ctx.branchId, id]);
+          if (location2 && key === "areas" && Array.isArray(row2.cells) && row2.cells.length <= 256 && row2.cells.every((cell) => isPlainObject5(cell) && Number.isInteger(cell.x) && Number.isInteger(cell.y) && Number(cell.x) >= 0 && Number(cell.y) >= 0)) {
             runBound(
               db,
               "UPDATE locations SET area_geometry_json=?,updated_turn_id=? WHERE branch_id=? AND id=?",
-              [JSON.stringify({ kind: "cells", cells: row2.cells, source: ["manual", "story", "worldbook"].includes(str2(row2.evidence)) ? str2(row2.evidence) : "migration", quality: "confirmed" }), ctx.turnId, ctx.branchId, id]
+              [JSON.stringify({ kind: "cells", cells: row2.cells, source: ["manual", "story", "worldbook"].includes(str3(row2.evidence)) ? str3(row2.evidence) : "migration", quality: "confirmed" }), ctx.turnId, ctx.branchId, id]
             );
             bump(mapped, "kind:areas");
             continue;
           }
           if (location2 && key === "vehicles") {
-            const anchor = str2(row2.atLocationId), resolved = anchor && rowExists(db, "locations", ctx.branchId, anchor) ? anchor : null;
+            const anchor = str3(row2.atLocationId), resolved = anchor && rowExists(db, "locations", ctx.branchId, anchor) ? anchor : null;
             runBound(
               db,
               "UPDATE locations SET mobility=?,anchor_location_id=?,vehicle_profile_json=?,updated_turn_id=? WHERE branch_id=? AND id=?",
-              ["mobile", str2(row2.status) === "stopped" ? resolved : null, JSON.stringify({ legacy_status: row2.status, legacy_route_id: row2.routeEdgeId ?? null }), ctx.turnId, ctx.branchId, id]
+              ["mobile", str3(row2.status) === "stopped" ? resolved : null, JSON.stringify({ legacy_status: row2.status, legacy_route_id: row2.routeEdgeId ?? null }), ctx.turnId, ctx.branchId, id]
             );
-            if (row2.status === "en-route") issues.push(issue4("LEGACY_VEHICLE_TRANSIT_BLOCKED", "$.simulation.geoTopology.vehicles", "旧载具在途记录缺少真实耗时；保留移动载具和旧行程，停靠地点未知", "warning", false));
+            if (row2.status === "en-route") issues.push(issue7("LEGACY_VEHICLE_TRANSIT_BLOCKED", "$.simulation.geoTopology.vehicles", "旧载具在途记录缺少真实耗时；保留移动载具和旧行程，停靠地点未知", "warning", false));
             bump(mapped, "kind:vehicles");
             continue;
           }
           blocked.push({
             kind: key === "areas" ? "area" : "vehicle",
-            legacyId: str2(row2.id),
+            legacyId: str3(row2.id),
             reason: `TOPOLOGY_${key.toUpperCase()}_UNMAPPED: 旧地块/载具缺少有效地点或范围，保留在旧档备份待审`
           });
         }
@@ -12978,7 +16739,7 @@ function finalizeMigration(db, ctx) {
   const missing = USER_TABLES.filter((name) => !names.includes(name));
   if (unexpected.length > 0 || missing.length > 0) {
     issues.push(
-      issue4(
+      issue7(
         "DB_SCHEMA_INVALID",
         "$",
         `用户表不是预期的 ${USER_TABLES.length} 张（多 ${unexpected.length}，少 ${missing.length}）：多 ${unexpected.join(",")}；少 ${missing.join(",")}`,
@@ -12990,7 +16751,7 @@ function finalizeMigration(db, ctx) {
   const violations = foreignKeyCheck(db);
   if (violations.length > 0) {
     issues.push(
-      issue4(
+      issue7(
         "SQL_CONSTRAINT",
         "$",
         `外键检查未通过：${violations.map((v) => `${v.table}->${v.parent}`).join(", ")}`,
@@ -13012,14 +16773,14 @@ function finalizeMigration(db, ctx) {
   );
   for (const orphan of orphans) {
     issues.push(
-      issue4("MIGRATION_ENTITY_DETAIL_MISSING", "$.entity_keys", `身份 ${String(orphan.id)}（${String(orphan.kind)}）没有对应详情行`, "error", false)
+      issue7("MIGRATION_ENTITY_DETAIL_MISSING", "$.entity_keys", `身份 ${String(orphan.id)}（${String(orphan.kind)}）没有对应详情行`, "error", false)
     );
   }
   const failed = issues.some((i) => i.severity === "error");
   if (failed) return { ok: false, issues };
   if (fromSchemaVersion >= ATLAS_SCHEMA_VERSION && current >= ATLAS_SCHEMA_VERSION) {
     issues.push(
-      issue4(
+      issue7(
         "MIGRATION_ALREADY_FINALIZED",
         "$",
         `schema_version 已经是 ${current}：不重复迁移、不重建世界（幂等）`,
@@ -13032,7 +16793,7 @@ function finalizeMigration(db, ctx) {
   try {
     db.run(`PRAGMA user_version = ${ATLAS_SCHEMA_VERSION}`);
   } catch (err) {
-    issues.push(issue4("MIGRATION_FINALIZE_FAILED", "$", `写入 schema_version 失败：${err.message}`, "error", true));
+    issues.push(issue7("MIGRATION_FINALIZE_FAILED", "$", `写入 schema_version 失败：${err.message}`, "error", true));
     return { ok: false, issues };
   }
   return { ok: true, issues };
@@ -13052,7 +16813,7 @@ function legacyBackupPayload(raw, options = {}) {
     payload: detach(located.atlas ?? raw)
   };
 }
-var LEGACY_WORLD_MAP_ID, USER_TABLES, CHARACTER_TYPES, FACTION_TYPES, NON_ITEM_TYPES, LOCATION_KINDS, ITEM_KINDS, ITEM_STATUSES, FACTION_KINDS, RELATION_KINDS, savepointCounter, PERIOD_FIELDS;
+var LEGACY_WORLD_MAP_ID, USER_TABLES, CHARACTER_TYPES, FACTION_TYPES, NON_ITEM_TYPES, LOCATION_KINDS2, ITEM_KINDS2, ITEM_STATUSES, FACTION_KINDS2, RELATION_KINDS, savepointCounter, PERIOD_FIELDS;
 var init_atlas_db_migrate = __esm({
   "src/atlas-db-migrate.ts"() {
     "use strict";
@@ -13065,10 +16826,10 @@ var init_atlas_db_migrate = __esm({
     CHARACTER_TYPES = /* @__PURE__ */ new Set(["npc", "character", "person", "char", "人物", "角色"]);
     FACTION_TYPES = /* @__PURE__ */ new Set(["faction", "organization", "org", "group", "guild", "clan", "party", "势力", "组织", "团体", "公会", "阵营"]);
     NON_ITEM_TYPES = /* @__PURE__ */ new Set(["city", "region", "nation", "country", "realm", "location", "place", "城市", "地区", "国家", "地点"]);
-    LOCATION_KINDS = /* @__PURE__ */ new Set(["region", "city", "district", "building", "room", "natural", "vehicle", "other"]);
-    ITEM_KINDS = /* @__PURE__ */ new Set(["object", "resource", "document", "equipment", "container", "other"]);
+    LOCATION_KINDS2 = /* @__PURE__ */ new Set(["region", "city", "district", "building", "room", "natural", "vehicle", "other"]);
+    ITEM_KINDS2 = /* @__PURE__ */ new Set(["object", "resource", "document", "equipment", "container", "other"]);
     ITEM_STATUSES = /* @__PURE__ */ new Set(["active", "consumed", "destroyed", "lost", "merged", "archived"]);
-    FACTION_KINDS = /* @__PURE__ */ new Set(["nation", "organization", "family", "team", "other"]);
+    FACTION_KINDS2 = /* @__PURE__ */ new Set(["nation", "organization", "family", "team", "other"]);
     RELATION_KINDS = /* @__PURE__ */ new Set(["member_of", "leads", "controls", "knows", "kinship", "ally", "hostile", "owes", "protects", "other"]);
     savepointCounter = 0;
     PERIOD_FIELDS = ["period", "createdPeriod", "publishedPeriod", "receivedPeriod", "nextEligiblePeriod", "worldTimeCursor", "periodLabel"];
@@ -13501,7 +17262,7 @@ var init_atlas_map_topology = __esm({
 function violation(code, table, rowId2, field, message, beforeAfter) {
   return { code, table, rowId: rowId2, field, message, beforeAfter };
 }
-function toIssue(v) {
+function toIssue2(v) {
   return {
     code: v.code,
     path: `${v.table}.${v.field}`,
@@ -14002,7 +17763,7 @@ function validateCandidate(db, options) {
   return {
     ok: violations.length === 0,
     violations,
-    issues: violations.map(toIssue),
+    issues: violations.map(toIssue2),
     checked
   };
 }
@@ -14159,7 +17920,7 @@ var init_atlas_db_invariants = __esm({
 });
 
 // src/atlas-db-commit.ts
-function issue5(code, message, extra = {}) {
+function issue8(code, message, extra = {}) {
   return { code, path: "$", message, severity: "error", retryable: true, ...extra };
 }
 function applyMutation(db, m, branchId) {
@@ -14215,7 +17976,7 @@ function applyGroups(db, orderedGroups, ctx) {
         groupId: gid,
         opIds: group.opIds,
         status: "blocked",
-        issues: [issue5("DEPENDENCY_FAILED", `上游组 ${root} 未成功：本组不执行`, { groupId: gid, dependencyId: root, retryable: true })],
+        issues: [issue8("DEPENDENCY_FAILED", `上游组 ${root} 未成功：本组不执行`, { groupId: gid, dependencyId: root, retryable: true })],
         changedRows: 0
       });
       blockedGroups.add(gid);
@@ -14231,7 +17992,7 @@ function applyGroups(db, orderedGroups, ctx) {
         opIds: group.opIds,
         status: "rejected",
         issues: [
-          issue5("PROGRAM_TABLE_WRITE_FORBIDDEN", `表 ${forbiddenWrite.table} 只允许程序记账组写入；本组未声明 bookkeeping`, {
+          issue8("PROGRAM_TABLE_WRITE_FORBIDDEN", `表 ${forbiddenWrite.table} 只允许程序记账组写入；本组未声明 bookkeeping`, {
             groupId: gid,
             retryable: false
           })
@@ -14328,7 +18089,7 @@ function applyGroups(db, orderedGroups, ctx) {
         opIds: group.opIds,
         status: "rejected",
         issues: [
-          issue5(code, dbErr.message ?? String(err), {
+          issue8(code, dbErr.message ?? String(err), {
             groupId: gid,
             retryable: code !== "INVARIANT_FAILED"
           })
@@ -14354,7 +18115,7 @@ function applyGroups(db, orderedGroups, ctx) {
           opIds: [],
           status: "rejected",
           issues: [
-            issue5("SQL_CONSTRAINT", `整批应用后外键检查未通过：${summary}`, {
+            issue8("SQL_CONSTRAINT", `整批应用后外键检查未通过：${summary}`, {
               retryable: false
             })
           ],
@@ -14895,20 +18656,20 @@ function buildHistoryRepairPreview(input) {
     const ambiguousRoot = parentId === null && withChildren.length >= 2;
     const containerAmbiguous = withChildren.length >= 2 && !ambiguousRoot;
     const conflicts = [];
-    if (routes.rows.some((route) => ids2.includes(text(route.from_location_id)) && ids2.includes(text(route.to_location_id)))) conflicts.push(issue6("REPAIR_ROUTE_SELF_LINK", "$.routes", "合并后已有路线会变成同地点到自身；先明确处理这条旧路线再合并", "error"));
-    if (ambiguousRoot) conflicts.push(issue6(
+    if (routes.rows.some((route) => ids2.includes(text(route.from_location_id)) && ids2.includes(text(route.to_location_id)))) conflicts.push(issue9("REPAIR_ROUTE_SELF_LINK", "$.routes", "合并后已有路线会变成同地点到自身；先明确处理这条旧路线再合并", "error"));
+    if (ambiguousRoot) conflicts.push(issue9(
       "REPAIR_AMBIGUOUS_SAME_NAME_ROOT",
       "$.locations",
       `根层有 ${members.length} 个同名对象且各有独立子图，来源与城市子树需要人工判断；预览不选保留对象`,
       "error"
     ));
-    if (containerAmbiguous) conflicts.push(issue6(
+    if (containerAmbiguous) conflicts.push(issue9(
       "REPAIR_CONTAINER_AMBIGUOUS",
       "$.maps.container_location_id",
       `${withChildren.length} 个候选各有处于 active 状态的容器图；先决定唯一容器图再合并，否则会出现两张同容器 active 图`,
       "error"
     ));
-    if (shapes.size > 1) conflicts.push(issue6(
+    if (shapes.size > 1) conflicts.push(issue9(
       "REPAIR_CONFIRMED_GEOMETRY_CONFLICT",
       "$.locations.area_geometry_json",
       "候选之间的确认几何不一致；不合并确认尺寸，等作者显式选定",
@@ -14985,21 +18746,21 @@ function buildHistoryRepairPreview(input) {
     const sourceLabel = (row2) => `${row2.source === "canonical" ? text(map.id) : text(row2.referenceId)}（${row2.widthM}×${row2.heightM}m · ${row2.source}${row2.quality === "confirmed" ? " · 已确认" : ""}${row2.source === "canonical" && locked ? " · 已锁定" : ""}）`;
     const conflicts = [];
     if (locked) {
-      conflicts.push(issue6(
+      conflicts.push(issue9(
         "REPAIR_LOCKED_FACT",
         `$.frame_json.${SPACE_CANONICAL_FRAME_KEY}`,
         `地点 ${container} 的 canonical 尺寸被锁定；锁定事实不参与自动采纳，父图投影 ${parentSrc.widthM}×${parentSrc.heightM}m 原样保留`,
         "error"
       ));
     } else if (confirmedConflict) {
-      conflicts.push(issue6(
+      conflicts.push(issue9(
         "REPAIR_CONFIRMED_SIZE_CONFLICT",
         `$.frame_json.${SPACE_CANONICAL_FRAME_KEY}`,
         `地点 ${container} 的 canonical 尺寸已是确认级，与父图投影 ${parentSrc.widthM}×${parentSrc.heightM}m 不一致；确认尺寸不自动覆盖，等作者显式选定`,
         "error"
       ));
     } else {
-      conflicts.push(issue6(
+      conflicts.push(issue9(
         "REPAIR_SIZE_MISMATCH",
         `$.frame_json.${SPACE_CANONICAL_FRAME_KEY}`,
         `地点 ${container} 的父图投影 ${parentSrc.widthM}×${parentSrc.heightM}m 与 canonical ${canonicalSrc.widthM}×${canonicalSrc.heightM}m 不一致（超出 ${SPACE_SIZE_REL_TOLERANCE * 100}% 容差）；推荐采用 canonical ${canonicalSrc.widthM}×${canonicalSrc.heightM}m`
@@ -15129,7 +18890,7 @@ function applyHistoryRepair(input) {
   }
   return { id: opId, opIds: [opId], dependsOn: [], mutations: [...mutations.values()], readSet: [...mutations.values()].flatMap((m) => typeof m.before?.row_rev === "number" ? [{ table: m.table, rowId: m.rowId, rowRev: m.before.row_rev }] : []) };
 }
-var HISTORY_REPAIR_PREVIEW_VERSION, HISTORY_SCAN_PAGE, HISTORY_SCAN_MAX_PAGES, MERGE_REDIRECT_MAX_DEPTH, MERGED_TABLES, HistoryRepairError, fail2, text, idOf, LOCATION_REFERENCE_COLUMNS, issue6;
+var HISTORY_REPAIR_PREVIEW_VERSION, HISTORY_SCAN_PAGE, HISTORY_SCAN_MAX_PAGES, MERGE_REDIRECT_MAX_DEPTH, MERGED_TABLES, HistoryRepairError, fail2, text, idOf, LOCATION_REFERENCE_COLUMNS, issue9;
 var init_atlas_history_repair = __esm({
   "src/atlas-history-repair.ts"() {
     "use strict";
@@ -15188,7 +18949,7 @@ var init_atlas_history_repair = __esm({
       { table: "channels", column: "recipient_location_id" },
       { table: "mention_candidates", column: "promoted_entity_id" }
     ];
-    issue6 = (code, path, message, severity = "warning") => ({ code, path, message, severity });
+    issue9 = (code, path, message, severity = "warning") => ({ code, path, message, severity });
   }
 });
 
@@ -15445,2257 +19206,6 @@ var init_atlas_ops_groups = __esm({
         if (ra !== rb) this.parent[Math.max(ra, rb)] = Math.min(ra, rb);
       }
     };
-  }
-});
-
-// src/atlas-ops-compile-types.ts
-function emptyCompileResult() {
-  return { mutations: [], readSet: [], dependencies: [], issues: [] };
-}
-function mergeCompileResults(results) {
-  const merged = { mutations: [], readSet: [], dependencies: [], issues: [] };
-  const readMap = /* @__PURE__ */ new Map();
-  for (const r of results) {
-    merged.mutations.push(...r.mutations);
-    merged.issues.push(...r.issues);
-    for (const dep of r.dependencies) if (!merged.dependencies.includes(dep)) merged.dependencies.push(dep);
-    for (const read of r.readSet) {
-      const key = `${read.table}\0${read.rowId}`;
-      const existing = readMap.get(key);
-      if (!existing || read.rowRev > existing.rowRev) readMap.set(key, read);
-    }
-    if (r.entityKeyWrites?.length) merged.entityKeyWrites = [...merged.entityKeyWrites ?? [], ...r.entityKeyWrites];
-    if (r.declaredRefs?.length) merged.declaredRefs = [...merged.declaredRefs ?? [], ...r.declaredRefs];
-    if (r.operationKeys?.length) merged.operationKeys = [...merged.operationKeys ?? [], ...r.operationKeys];
-    if (r.effects?.length) merged.effects = [...merged.effects ?? [], ...r.effects];
-  }
-  merged.readSet = [...readMap.values()];
-  return merged;
-}
-var init_atlas_ops_compile_types = __esm({
-  "src/atlas-ops-compile-types.ts"() {
-    "use strict";
-  }
-});
-
-// src/atlas-ops-refs.ts
-function refKindPrefix(kind) {
-  switch (kind) {
-    case "location":
-      return "loc";
-    case "character":
-      return "chr";
-    case "item":
-      return "itm";
-    case "faction":
-      return "fac";
-    case "map":
-      return "map";
-    case "route":
-      return "rte";
-    case "action":
-      return "act";
-    case "journey":
-      return "jrn";
-    case "event":
-      return "evt";
-    case "information":
-      return "inf";
-    case "knowledge":
-      return "kno";
-    case "channel":
-      return "chn";
-    case "relation":
-      return "rel";
-    case "rumor_front":
-      return "rfr";
-    case "opportunity":
-      return "opp";
-    case "mention":
-      return "mnt";
-    default:
-      return "ref";
-  }
-}
-function rotr32(value, bits) {
-  return (value >>> bits | value << 32 - bits) >>> 0;
-}
-function sha256Hex(text6) {
-  const message = new TextEncoder().encode(text6);
-  const paddedLength = (message.length + 8 >> 6) + 1 << 6;
-  const buffer = new Uint8Array(paddedLength);
-  buffer.set(message);
-  buffer[message.length] = 128;
-  const bitLength = message.length * 8;
-  const view = new DataView(buffer.buffer);
-  view.setUint32(paddedLength - 8, Math.floor(bitLength / 4294967296));
-  view.setUint32(paddedLength - 4, bitLength >>> 0);
-  const state = new Uint32Array([
-    1779033703,
-    3144134277,
-    1013904242,
-    2773480762,
-    1359893119,
-    2600822924,
-    528734635,
-    1541459225
-  ]);
-  const w = new Uint32Array(64);
-  for (let offset = 0; offset < paddedLength; offset += 64) {
-    for (let i = 0; i < 16; i += 1) w[i] = view.getUint32(offset + i * 4);
-    for (let i = 16; i < 64; i += 1) {
-      const x = w[i - 15];
-      const y = w[i - 2];
-      const s0 = rotr32(x, 7) ^ rotr32(x, 18) ^ x >>> 3;
-      const s1 = rotr32(y, 17) ^ rotr32(y, 19) ^ y >>> 10;
-      w[i] = w[i - 16] + s0 + w[i - 7] + s1 >>> 0;
-    }
-    let a = state[0];
-    let b = state[1];
-    let c = state[2];
-    let d = state[3];
-    let e = state[4];
-    let f = state[5];
-    let g = state[6];
-    let h = state[7];
-    for (let i = 0; i < 64; i += 1) {
-      const s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
-      const ch = e & f ^ ~e & g;
-      const temp1 = h + s1 + ch + SHA256_K[i] + w[i] >>> 0;
-      const s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
-      const maj = a & b ^ a & c ^ b & c;
-      const temp2 = s0 + maj >>> 0;
-      h = g;
-      g = f;
-      f = e;
-      e = d + temp1 >>> 0;
-      d = c;
-      c = b;
-      b = a;
-      a = temp1 + temp2 >>> 0;
-    }
-    state[0] = state[0] + a >>> 0;
-    state[1] = state[1] + b >>> 0;
-    state[2] = state[2] + c >>> 0;
-    state[3] = state[3] + d >>> 0;
-    state[4] = state[4] + e >>> 0;
-    state[5] = state[5] + f >>> 0;
-    state[6] = state[6] + g >>> 0;
-    state[7] = state[7] + h >>> 0;
-  }
-  let hex = "";
-  for (let i = 0; i < 8; i += 1) hex += state[i].toString(16).padStart(8, "0");
-  return hex;
-}
-function newAliasOf(value) {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  if (!trimmed.startsWith(NEW_PREFIX)) return null;
-  const alias = trimmed.slice(NEW_PREFIX.length).trim();
-  return alias.length > 0 ? alias : null;
-}
-function defaultMakeId(anchor, alias, opId, kind) {
-  const digest = sha256Hex([anchor.chatUid, anchor.branchId, anchor.variantKey, alias, opId].join("\0"));
-  return `${refKindPrefix(kind)}_${digest.slice(0, 24)}`;
-}
-function kindFromOp(op) {
-  const table = OP_REF_KINDS;
-  return table[op] ?? null;
-}
-function scanNewRefs(data, visit) {
-  const walk = (node, field, depth) => {
-    if (depth > MAX_SCAN_DEPTH) return;
-    if (typeof node === "string") {
-      const alias = newAliasOf(node);
-      if (alias !== null && REFERENCE_FIELDS.has(field)) {
-        visit({ alias, field, kind: REFERENCE_FIELD_KINDS[field] ?? null });
-      }
-      return;
-    }
-    if (Array.isArray(node)) {
-      for (const item of node) walk(item, field, depth + 1);
-      return;
-    }
-    if (node !== null && typeof node === "object") {
-      for (const [key, value] of Object.entries(node)) walk(value, key, depth + 1);
-    }
-  };
-  if (data !== null && typeof data === "object") {
-    for (const [key, value] of Object.entries(data)) walk(value, key, 1);
-  }
-}
-function scalarRefPath(field) {
-  return `spec.${field}`;
-}
-function scanLayoutSpecRefs(spec, visit) {
-  if (spec === null || typeof spec !== "object") return;
-  const root = spec;
-  for (const [field, kind] of Object.entries(LAYOUT_SPEC_SCALAR_REF_FIELDS)) {
-    const alias = newAliasOf(root[field]);
-    if (alias === null) continue;
-    visit({ alias, path: scalarRefPath(field), kind, local: false });
-  }
-  for (const [collection2, fields] of Object.entries(LAYOUT_SPEC_REF_FIELDS)) {
-    const rows4 = root[collection2];
-    if (!Array.isArray(rows4)) continue;
-    for (let i = 0; i < rows4.length; i += 1) {
-      const row2 = rows4[i];
-      if (row2 === null || typeof row2 !== "object") continue;
-      const record2 = row2;
-      for (const [field, kind] of Object.entries(fields)) {
-        const alias = newAliasOf(record2[field]);
-        if (alias === null) continue;
-        visit({ alias, path: `spec.${collection2}[${i}].${field}`, kind, local: false });
-      }
-      for (const field of LAYOUT_LOCAL_FIELDS[collection2] ?? []) {
-        const alias = newAliasOf(record2[field]);
-        if (alias === null) continue;
-        visit({ alias, path: `spec.${collection2}[${i}].${field}`, kind: null, local: true });
-      }
-    }
-  }
-}
-function newAliasesOf(value) {
-  const out = [];
-  const seen = /* @__PURE__ */ new Set();
-  const push = (alias) => {
-    if (alias !== null && !seen.has(alias)) {
-      seen.add(alias);
-      out.push(alias);
-    }
-  };
-  if (value && typeof value === "object") {
-    push(newAliasOf(value.ref));
-    scanNewRefs(value.data, (hit) => push(hit.alias));
-    if (value.op === "map.layout.request") {
-      scanLayoutSpecRefs(
-        value.data?.["spec"],
-        (hit) => push(hit.alias)
-      );
-    }
-  }
-  return out;
-}
-function makeIssue2(code, path, message, severity, retryable, where) {
-  const issue25 = { code, path, message, severity, retryable };
-  if (where && where.line !== void 0) issue25.line = where.line;
-  if (where && where.opId !== void 0) issue25.opId = where.opId;
-  if (where && where.groupId !== void 0) issue25.groupId = where.groupId;
-  if (where && where.dependencyId !== void 0) issue25.dependencyId = where.dependencyId;
-  return issue25;
-}
-function refPath(field) {
-  if (!field) return "$.ref";
-  return field.startsWith("$.") ? field : `$.data.${field}`;
-}
-function normalizeEntry(entry) {
-  const alias = typeof entry.alias === "string" ? entry.alias.trim() : "";
-  const bare = alias.startsWith(NEW_PREFIX) ? alias.slice(NEW_PREFIX.length).trim() : alias;
-  return {
-    alias: bare,
-    id: typeof entry.id === "string" ? entry.id : String(entry.id),
-    kind: entry.kind,
-    rowRev: typeof entry.rowRev === "number" ? entry.rowRev : null,
-    declaredByOpId: typeof entry.declaredByOpId === "string" ? entry.declaredByOpId : null
-  };
-}
-function createRefScope(seed = []) {
-  const byAlias = /* @__PURE__ */ new Map();
-  const byId9 = /* @__PURE__ */ new Map();
-  const ambiguousAliases = /* @__PURE__ */ new Set();
-  const order = [];
-  const orderKeys = /* @__PURE__ */ new Set();
-  const remember = (entry) => {
-    if (entry.alias.length === 0) return;
-    const key = `${entry.alias}\0${entry.id}`;
-    if (orderKeys.has(key)) return;
-    orderKeys.add(key);
-    order.push(entry);
-  };
-  const fillMissing = (target, incoming) => {
-    if (target.rowRev === null && incoming.rowRev !== null) target.rowRev = incoming.rowRev;
-    if (target.declaredByOpId === null && incoming.declaredByOpId !== null) {
-      target.declaredByOpId = incoming.declaredByOpId;
-    }
-  };
-  const register = (raw) => {
-    const entry = normalizeEntry(raw);
-    if (entry.alias.length === 0 && entry.id.length === 0) return;
-    let canonical = entry;
-    if (entry.alias.length > 0) {
-      const existing = byAlias.get(entry.alias);
-      if (!existing) {
-        byAlias.set(entry.alias, entry);
-      } else if (existing.id !== entry.id) {
-        ambiguousAliases.add(entry.alias);
-      } else {
-        fillMissing(existing, entry);
-        canonical = existing;
-      }
-    }
-    if (entry.id.length > 0) {
-      const existingById = byId9.get(entry.id);
-      if (!existingById) byId9.set(entry.id, entry);
-      else fillMissing(existingById, entry);
-    }
-    remember(canonical);
-  };
-  for (const entry of seed) register(entry);
-  return {
-    get(alias) {
-      const raw = typeof alias === "string" ? alias.trim() : "";
-      if (raw.length === 0) return null;
-      if (!ambiguousAliases.has(raw)) {
-        const direct = byAlias.get(raw);
-        if (direct) return direct;
-      }
-      if (raw.startsWith(NEW_PREFIX)) {
-        const bare = raw.slice(NEW_PREFIX.length).trim();
-        if (bare.length > 0 && !ambiguousAliases.has(bare)) {
-          const declared = byAlias.get(bare);
-          if (declared) return declared;
-        }
-      }
-      return byId9.get(raw) ?? null;
-    },
-    all() {
-      return [...order];
-    },
-    declare(entry) {
-      register(entry);
-    },
-    byId(id) {
-      const raw = typeof id === "string" ? id.trim() : "";
-      if (raw.length === 0) return null;
-      return byId9.get(raw) ?? null;
-    }
-  };
-}
-function declareRefs(ops, ctx) {
-  const issues = [];
-  const aliasById = /* @__PURE__ */ new Map();
-  const declared = [];
-  const list2 = Array.isArray(ops) ? ops : [];
-  const seedScope = createRefScope(ctx.seed ?? []);
-  const makeId = ctx.makeId ?? ((kind, opId, alias) => defaultMakeId(ctx.anchor, alias, opId, kind));
-  const hints = /* @__PURE__ */ new Map();
-  for (const op of list2) {
-    scanNewRefs(op?.value?.data, (hit) => {
-      if (hit.kind !== null && !hints.has(hit.alias)) hints.set(hit.alias, hit.kind);
-    });
-    if (op?.value?.op === "map.layout.request") {
-      scanLayoutSpecRefs(op?.value?.data?.["spec"], (hit) => {
-        if (hit.kind !== null && !hit.local && !hints.has(hit.alias)) hints.set(hit.alias, hit.kind);
-      });
-    }
-  }
-  const firstDeclaration = /* @__PURE__ */ new Map();
-  for (const op of list2) {
-    const value = op?.value;
-    const refRaw = typeof value?.ref === "string" ? value.ref.trim() : "";
-    const alias = newAliasOf(refRaw);
-    if (alias !== null && EXISTING_TARGET_OPS.has(String(value?.op))) continue;
-    if (alias === null) {
-      if (refRaw.length > 0) {
-        const seeded = seedScope.get(refRaw);
-        aliasById.set(refRaw, seeded ? seeded.id : refRaw);
-      }
-      continue;
-    }
-    const previous = firstDeclaration.get(alias);
-    if (previous) {
-      issues.push(
-        makeIssue2(
-          "REF_AMBIGUOUS",
-          "$.ref",
-          `new:${alias} 在本批被重复声明：op ${previous.opId}（第 ${previous.line} 行）与 op ${op.opId}（第 ${op.line} 行）。不静默保留第一个，必须由模型消歧或分别使用新别名。`,
-          "error",
-          true,
-          { line: op.line, opId: op.opId }
-        )
-      );
-      continue;
-    }
-    firstDeclaration.set(alias, { opId: op.opId, line: op.line });
-    const opName = typeof value?.op === "string" ? value.op : "";
-    const kind = kindFromOp(opName) ?? hints.get(alias) ?? "mention";
-    const rawId = makeId(kind, op.opId, alias);
-    const id = typeof rawId === "string" && rawId.trim().length > 0 ? rawId.trim() : defaultMakeId(ctx.anchor, alias, op.opId, kind);
-    const entry = { alias, id, kind, rowRev: null, declaredByOpId: op.opId };
-    declared.push(entry);
-    aliasById.set(alias, id);
-  }
-  return { declared, aliasById, issues };
-}
-function expectedLabel(expectedKind) {
-  if (expectedKind === null) return "任意类型";
-  return Array.isArray(expectedKind) ? expectedKind.join("/") : expectedKind;
-}
-function kindAllowed(kind, expectedKind) {
-  if (expectedKind === null) return true;
-  return Array.isArray(expectedKind) ? expectedKind.includes(kind) : expectedKind === kind;
-}
-function checkKind(entry, raw, expectedKind, where) {
-  if (kindAllowed(entry.kind, expectedKind)) return { entry, issues: [] };
-  const opNote = where?.opId ? `（来源 op ${where.opId}）` : "";
-  return {
-    entry: null,
-    issues: [
-      makeIssue2(
-        "REF_TYPE_MISMATCH",
-        refPath(where?.field),
-        `引用「${raw}」指向 ${entry.kind}（ID ${entry.id}），此处需要 ${expectedLabel(expectedKind)}${opNote}。`,
-        "error",
-        true,
-        { line: where?.line, opId: where?.opId }
-      )
-    ]
-  };
-}
-function resolveRef(ref, expectedKind, scope, where) {
-  const raw = typeof ref === "string" ? ref.trim() : "";
-  if (raw.length === 0) {
-    return {
-      entry: null,
-      issues: [
-        makeIssue2(
-          "REF_UNKNOWN",
-          refPath(where?.field),
-          `引用为空（来源 op ${where?.opId ?? "未知"}），需要短引用、稳定 ID 或 new: 别名。`,
-          "error",
-          true,
-          { line: where?.line, opId: where?.opId }
-        )
-      ]
-    };
-  }
-  const isNew = raw.startsWith(NEW_PREFIX);
-  const alias = isNew ? raw.slice(NEW_PREFIX.length).trim() : raw;
-  const entries = scope.all();
-  const aliasMatches = entries.filter((entry) => entry.alias === alias);
-  let candidates = aliasMatches;
-  if (isNew) {
-    const declaredMatches = aliasMatches.filter((entry) => entry.declaredByOpId !== null);
-    candidates = declaredMatches.length > 0 ? declaredMatches : [];
-  }
-  if (candidates.length > 0) {
-    const ids2 = new Set(candidates.map((entry) => entry.id));
-    if (ids2.size > 1) {
-      const detail = candidates.map((entry) => `${entry.id}（${entry.kind}${entry.declaredByOpId ? `，声明自 op ${entry.declaredByOpId}` : ""}）`).join("、");
-      return {
-        entry: null,
-        issues: [
-          makeIssue2(
-            "REF_AMBIGUOUS",
-            refPath(where?.field),
-            `引用「${raw}」匹配到多个对象：${detail}。不随机挑选，需要模型改用明确 ID 或消歧${where?.opId ? `（来源 op ${where.opId}）` : ""}。`,
-            "error",
-            true,
-            { line: where?.line, opId: where?.opId }
-          )
-        ]
-      };
-    }
-    return checkKind(candidates[0], raw, expectedKind, where);
-  }
-  if (isNew && aliasMatches.length > 0) {
-    return {
-      entry: null,
-      issues: [
-        makeIssue2(
-          "REF_UNKNOWN",
-          refPath(where?.field),
-          `引用「${raw}」在本批没有被任何操作以 ref:"${raw}" 声明；存在的同别名对象不是本批新建，禁止按相似名字自动合并（来源 op ${where?.opId ?? "未知"}）。`,
-          "error",
-          true,
-          { line: where?.line, opId: where?.opId }
-        )
-      ]
-    };
-  }
-  if (!isNew) {
-    const byId9 = scope.byId(raw);
-    if (byId9) return checkKind(byId9, raw, expectedKind, where);
-  }
-  return {
-    entry: null,
-    issues: [
-      makeIssue2(
-        "REF_UNKNOWN",
-        refPath(where?.field),
-        `引用「${raw}」无法解析：既不是本批 new: 声明，也不在程序提供的短引用/稳定 ID 中（来源 op ${where?.opId ?? "未知"}）。`,
-        "error",
-        true,
-        { line: where?.line, opId: where?.opId }
-      )
-    ]
-  };
-}
-function collectLocalIds(spec) {
-  const pool = /* @__PURE__ */ new Set();
-  for (const [collection2, fields] of Object.entries(LAYOUT_LOCAL_COLLECTIONS)) {
-    const rows4 = spec[collection2];
-    if (!Array.isArray(rows4)) continue;
-    for (const row2 of rows4) {
-      if (row2 === null || typeof row2 !== "object") continue;
-      for (const field of fields) {
-        const id = row2[field];
-        if (typeof id !== "string") continue;
-        const trimmed = id.trim();
-        if (trimmed.length === 0) continue;
-        pool.add(trimmed);
-        const bare = newAliasOf(trimmed);
-        if (bare !== null) pool.add(bare);
-      }
-    }
-  }
-  return pool;
-}
-function resolveLayoutSpecRefs(spec, scope, where) {
-  const issues = [];
-  const dependencies = [];
-  const seen = /* @__PURE__ */ new Set();
-  const out = { ...spec };
-  const localPool = collectLocalIds(spec);
-  for (const [field, kind] of Object.entries(LAYOUT_SPEC_SCALAR_REF_FIELDS)) {
-    const raw = spec[field];
-    if (raw === void 0 || raw === null) continue;
-    if (typeof raw !== "string") continue;
-    const rawText = raw.trim();
-    const resolved = resolveRef(rawText, kind, scope, {
-      opId: where?.opId,
-      line: where?.line,
-      field: scalarRefPath(field)
-    });
-    if (resolved.entry !== null) {
-      out[field] = resolved.entry.id;
-      if (!seen.has(resolved.entry.id)) {
-        seen.add(resolved.entry.id);
-        dependencies.push(resolved.entry.id);
-      }
-      continue;
-    }
-    let reported = false;
-    for (const item of resolved.issues) {
-      issues.push(item);
-      reported = true;
-    }
-    if (!reported) {
-      issues.push(
-        makeIssue2(
-          "REF_UNKNOWN",
-          refPath(scalarRefPath(field)),
-          `引用「${rawText}」无法解析为${kind}；id 必须来自本任务地点目录（来源 op ${where?.opId ?? "未知"}）。`,
-          "error",
-          true,
-          { opId: where?.opId, line: where?.line }
-        )
-      );
-    }
-  }
-  for (const [collection2, fields] of Object.entries(LAYOUT_SPEC_REF_FIELDS)) {
-    const rows4 = spec[collection2];
-    if (!Array.isArray(rows4)) continue;
-    const nextRows = [];
-    for (let i = 0; i < rows4.length; i += 1) {
-      const row2 = rows4[i];
-      if (row2 === null || typeof row2 !== "object") {
-        nextRows.push(row2);
-        continue;
-      }
-      const record2 = { ...row2 };
-      for (const [field, kind] of Object.entries(fields)) {
-        const raw = record2[field];
-        if (typeof raw !== "string") continue;
-        const rawText = raw.trim();
-        if (rawText.length === 0) continue;
-        const resolved = resolveRef(rawText, kind, scope, {
-          opId: where?.opId,
-          line: where?.line,
-          field: `spec.${collection2}[${i}].${field}`
-        });
-        if (resolved.entry !== null) {
-          record2[field] = resolved.entry.id;
-          if (!seen.has(resolved.entry.id)) {
-            seen.add(resolved.entry.id);
-            dependencies.push(resolved.entry.id);
-          }
-          continue;
-        }
-        const isNewRef = rawText.startsWith(NEW_PREFIX);
-        for (const item of resolved.issues) {
-          if (!isNewRef && item.code === "REF_UNKNOWN") continue;
-          issues.push(item);
-        }
-      }
-      for (const field of LAYOUT_LOCAL_FIELDS[collection2] ?? []) {
-        const raw = record2[field];
-        const alias = newAliasOf(raw);
-        if (alias === null) continue;
-        const rawText = typeof raw === "string" ? raw.trim() : "";
-        if (localPool.has(rawText) || localPool.has(alias)) continue;
-        issues.push(
-          makeIssue2(
-            "REF_UNKNOWN",
-            refPath(`spec.${collection2}[${i}].${field}`),
-            `局部引用「${alias}」不在本请求 spec.${LAYOUT_LOCAL_COLLECTION} 的家具 ID 中；near/on 只认家具组的局部视觉 ID，不建实体、不按名字猜（来源 op ${where?.opId ?? "未知"}）。`,
-            "error",
-            true,
-            { opId: where?.opId, line: where?.line }
-          )
-        );
-      }
-      nextRows.push(record2);
-    }
-    out[collection2] = nextRows;
-  }
-  const deletes = out["deletes"];
-  if (deletes !== null && typeof deletes === "object" && !Array.isArray(deletes)) {
-    const nextDeletes = { ...deletes };
-    for (const [collection2, kind] of Object.entries(LAYOUT_DELETE_REF_KINDS)) {
-      const list2 = nextDeletes[collection2];
-      if (!Array.isArray(list2)) continue;
-      const nextList = [];
-      for (let i = 0; i < list2.length; i += 1) {
-        const raw = list2[i];
-        if (typeof raw !== "string") {
-          nextList.push(raw);
-          continue;
-        }
-        const rawText = raw.trim();
-        if (rawText.length === 0) {
-          nextList.push(raw);
-          continue;
-        }
-        if (kind === null) {
-          nextList.push(rawText);
-          continue;
-        }
-        const resolved = resolveRef(rawText, kind, scope, {
-          opId: where?.opId,
-          line: where?.line,
-          field: `spec.deletes.${collection2}[${i}]`
-        });
-        if (resolved.entry !== null) {
-          nextList.push(resolved.entry.id);
-          if (!seen.has(resolved.entry.id)) {
-            seen.add(resolved.entry.id);
-            dependencies.push(resolved.entry.id);
-          }
-          continue;
-        }
-        const isNewRef = rawText.startsWith(NEW_PREFIX);
-        for (const item of resolved.issues) {
-          if (!isNewRef && item.code === "REF_UNKNOWN") continue;
-          issues.push(item);
-        }
-        nextList.push(rawText);
-      }
-      nextDeletes[collection2] = nextList;
-    }
-    out["deletes"] = nextDeletes;
-  }
-  return {
-    ok: !issues.some((item) => item.severity === "error"),
-    spec: out,
-    issues,
-    dependencies
-  };
-}
-function collectNewAliases(ops) {
-  const out = [];
-  const seen = /* @__PURE__ */ new Set();
-  for (const op of Array.isArray(ops) ? ops : []) {
-    for (const alias of newAliasesOf(op?.value)) {
-      if (!seen.has(alias)) {
-        seen.add(alias);
-        out.push(alias);
-      }
-    }
-  }
-  return out;
-}
-var SHA256_K, NEW_PREFIX, REFERENCE_FIELD_KINDS, REFERENCE_FIELDS, OP_REF_KINDS, EXISTING_TARGET_OPS, MAX_SCAN_DEPTH, LAYOUT_SPEC_REF_FIELDS, LAYOUT_LOCAL_COLLECTION, LAYOUT_SPEC_SCALAR_REF_FIELDS, LAYOUT_LOCAL_COLLECTIONS, LAYOUT_LOCAL_FIELDS, LAYOUT_DELETE_REF_KINDS;
-var init_atlas_ops_refs = __esm({
-  "src/atlas-ops-refs.ts"() {
-    "use strict";
-    SHA256_K = new Uint32Array([
-      1116352408,
-      1899447441,
-      3049323471,
-      3921009573,
-      961987163,
-      1508970993,
-      2453635748,
-      2870763221,
-      3624381080,
-      310598401,
-      607225278,
-      1426881987,
-      1925078388,
-      2162078206,
-      2614888103,
-      3248222580,
-      3835390401,
-      4022224774,
-      264347078,
-      604807628,
-      770255983,
-      1249150122,
-      1555081692,
-      1996064986,
-      2554220882,
-      2821834349,
-      2952996808,
-      3210313671,
-      3336571891,
-      3584528711,
-      113926993,
-      338241895,
-      666307205,
-      773529912,
-      1294757372,
-      1396182291,
-      1695183700,
-      1986661051,
-      2177026350,
-      2456956037,
-      2730485921,
-      2820302411,
-      3259730800,
-      3345764771,
-      3516065817,
-      3600352804,
-      4094571909,
-      275423344,
-      430227734,
-      506948616,
-      659060556,
-      883997877,
-      958139571,
-      1322822218,
-      1537002063,
-      1747873779,
-      1955562222,
-      2024104815,
-      2227730452,
-      2361852424,
-      2428436474,
-      2756734187,
-      3204031479,
-      3329325298
-    ]);
-    NEW_PREFIX = "new:";
-    REFERENCE_FIELD_KINDS = {
-      ref: null,
-      parent_ref: null,
-      location_ref: "location",
-      target_location_ref: "location",
-      anchor_ref: "location",
-      headquarters_ref: "location",
-      destination_ref: "location",
-      spread_at_ref: "location",
-      place_ref: "location",
-      origin_ref: "location",
-      via_refs: "location",
-      from_ref: "location",
-      to_ref: "location",
-      map_ref: "map",
-      item_ref: "item",
-      container_ref: "item",
-      event_ref: "event",
-      target_event_ref: "event",
-      wait_for_event_ref: "event",
-      information_ref: "information",
-      channel_ref: "channel",
-      opportunity_ref: "opportunity",
-      action_ref: "action",
-      requires_action_ref: "action",
-      route_ref: "route",
-      // 下面这些在字段表里是「实体」而不是某一种实体；RefKind 没有 entity，
-      // 因此默认按人物（最常见），具体类型由操作名或第二遍的类型检查兜住。
-      holder_ref: "character",
-      sender_ref: "character",
-      originator_ref: "character",
-      actor_ref: "character",
-      recipient_ref: "character",
-      subject_ref: "character",
-      object_ref: "character",
-      entity_ref: "character",
-      entity_id: "character",
-      owner_ref: "character",
-      target_ref: "character",
-      other_ref: "character",
-      participants: "character"
-    };
-    REFERENCE_FIELDS = new Set(Object.keys(REFERENCE_FIELD_KINDS));
-    OP_REF_KINDS = {
-      "location.upsert": "location",
-      "character.upsert": "character",
-      "item.upsert": "item",
-      "item.transfer": "item",
-      "faction.upsert": "faction",
-      "relation.upsert": "relation",
-      "plan.propose": "action",
-      "plan.revise": "action",
-      "event.propose": "event",
-      "information.propose": "information",
-      "attention.propose": "knowledge",
-      "channel.upsert": "channel",
-      "map.estimate": "map",
-      "map.layout.request": "map",
-      "route.propose": "route"
-    };
-    EXISTING_TARGET_OPS = /* @__PURE__ */ new Set(["item.transfer", "plan.revise", "map.estimate", "map.layout.request"]);
-    MAX_SCAN_DEPTH = 12;
-    LAYOUT_SPEC_REF_FIELDS = {
-      rooms: { id: "location" },
-      contents: { roomId: "location" },
-      actors: { id: "character", roomId: "location" },
-      items: { id: "item" },
-      districts: { id: "location" },
-      buildings: { id: "location", districtId: "location" },
-      // M4-02：概览集合（02 §10 / 契约 OverviewSpec）。
-      // zones.id 与 zones.near 是**地点**引用（命名河流作为已登记自然地点参与互动）；
-      // links.id 是**路线**引用（不得凭空造路）；features.zoneId 是地点引用，
-      // 而 features.id 是**本图局部视觉 ID**（不进 entity_keys，见 LAYOUT_LOCAL_COLLECTIONS）。
-      zones: { id: "location", near: "location" },
-      links: { id: "route" },
-      features: { zoneId: "location" }
-    };
-    LAYOUT_LOCAL_COLLECTION = "contents";
-    LAYOUT_SPEC_SCALAR_REF_FIELDS = {
-      corridorLocationRef: "location"
-    };
-    LAYOUT_LOCAL_COLLECTIONS = {
-      contents: ["id"],
-      features: ["id"]
-    };
-    LAYOUT_LOCAL_FIELDS = {
-      actors: ["near"],
-      items: ["on"]
-    };
-    LAYOUT_DELETE_REF_KINDS = {
-      zones: "location",
-      links: "route",
-      rooms: "location",
-      districts: "location",
-      buildings: "location",
-      actors: "character",
-      items: "item",
-      contents: null,
-      features: null
-    };
-  }
-});
-
-// src/atlas-ops-errors.ts
-function redactSecrets(text6) {
-  if (typeof text6 !== "string") return String(text6 ?? "");
-  let out = text6;
-  for (const [pattern, replacement] of SECRET_RULES) {
-    out = out.replace(pattern, replacement);
-  }
-  return out;
-}
-function asRecord(value) {
-  return typeof value === "object" && value !== null ? value : null;
-}
-function str3(value) {
-  return typeof value === "string" ? value : void 0;
-}
-function num3(value) {
-  return typeof value === "number" && Number.isFinite(value) ? value : void 0;
-}
-function safeText(error) {
-  if (typeof error === "string") return error;
-  const rec = asRecord(error);
-  const message = rec ? str3(rec["message"]) : void 0;
-  if (message !== void 0) return message;
-  try {
-    return String(error);
-  } catch {
-    return "";
-  }
-}
-function toIssue2(error, where = {}) {
-  const rec = asRecord(error);
-  const embedded = rec ? asRecord(rec["issue"]) : null;
-  const hasEmbedded = embedded !== null && typeof embedded["code"] === "string" && typeof embedded["message"] === "string";
-  const errorCode = rec ? str3(rec["code"]) : void 0;
-  const code = (errorCode !== void 0 && errorCode !== "" ? errorCode : void 0) ?? (where.code !== void 0 && where.code !== "" ? where.code : void 0) ?? (hasEmbedded ? str3(embedded["code"]) : void 0) ?? ATLAS_ERROR_CODES.INTERNAL_ERROR;
-  let message = where.message ?? (rec ? str3(rec["message"]) : void 0);
-  if (message === void 0 && hasEmbedded) message = str3(embedded["message"]);
-  if (message === void 0) message = safeText(error);
-  if (message.trim() === "") message = `atlas error: ${code}`;
-  const path = where.path ?? (rec ? str3(rec["path"]) : void 0) ?? (hasEmbedded ? str3(embedded["path"]) : void 0) ?? "$";
-  const line = where.line ?? (rec ? num3(rec["line"]) : void 0) ?? (hasEmbedded ? num3(embedded["line"]) : void 0);
-  const opId = where.opId ?? (rec ? str3(rec["opId"]) : void 0) ?? (hasEmbedded ? str3(embedded["opId"]) : void 0);
-  const groupId = where.groupId ?? (rec ? str3(rec["groupId"]) : void 0) ?? (hasEmbedded ? str3(embedded["groupId"]) : void 0);
-  const dependencyId = where.dependencyId ?? (rec ? str3(rec["dependencyId"]) : void 0) ?? (hasEmbedded ? str3(embedded["dependencyId"]) : void 0);
-  const severity = where.severity ?? (rec?.["severity"] === "warning" || rec?.["severity"] === "error" ? rec["severity"] : void 0) ?? (hasEmbedded ? embedded["severity"] === "warning" ? "warning" : "error" : void 0) ?? "error";
-  const retryable = where.retryable ?? (typeof rec?.["retryable"] === "boolean" ? rec["retryable"] : void 0) ?? (hasEmbedded && typeof embedded["retryable"] === "boolean" ? embedded["retryable"] : void 0) ?? false;
-  const issue25 = {
-    code,
-    path,
-    message: redactSecrets(message),
-    severity,
-    retryable
-  };
-  if (line !== void 0) issue25.line = line;
-  if (opId !== void 0) issue25.opId = opId;
-  if (groupId !== void 0) issue25.groupId = groupId;
-  if (dependencyId !== void 0) issue25.dependencyId = dependencyId;
-  return issue25;
-}
-var ATLAS_ERROR_CODES, SECRET_RULES;
-var init_atlas_ops_errors = __esm({
-  "src/atlas-ops-errors.ts"() {
-    "use strict";
-    ATLAS_ERROR_CODES = Object.freeze({
-      JSON_SYNTAX: "JSON_SYNTAX",
-      WRAPPER_INCOMPLETE: "WRAPPER_INCOMPLETE",
-      UNTERMINATED_REASONING: "UNTERMINATED_REASONING",
-      EMPTY_RESPONSE: "EMPTY_RESPONSE",
-      UNSUPPORTED_RESPONSE_FORMAT: "UNSUPPORTED_RESPONSE_FORMAT",
-      RESPONSE_TOO_LARGE: "RESPONSE_TOO_LARGE",
-      TOO_MANY_OPERATIONS: "TOO_MANY_OPERATIONS",
-      OPERATION_TOO_LARGE: "OPERATION_TOO_LARGE",
-      JSON_TOO_DEEP: "JSON_TOO_DEEP",
-      UNKNOWN_OPERATION: "UNKNOWN_OPERATION",
-      MINIMUM_FIELD_MISSING: "MINIMUM_FIELD_MISSING",
-      FIELD_IGNORED: "FIELD_IGNORED",
-      SYSTEM_FIELD_IGNORED: "SYSTEM_FIELD_IGNORED",
-      REF_UNKNOWN: "REF_UNKNOWN",
-      REF_AMBIGUOUS: "REF_AMBIGUOUS",
-      SOURCE_UNKNOWN: "SOURCE_UNKNOWN",
-      DEPENDENCY_FAILED: "DEPENDENCY_FAILED",
-      SQL_CONSTRAINT: "SQL_CONSTRAINT",
-      INVARIANT_FAILED: "INVARIANT_FAILED",
-      SESSION_STALE: "SESSION_STALE",
-      STALE_BASE: "STALE_BASE",
-      CHAT_CHANGED: "CHAT_CHANGED",
-      SESSION_WRITE_FAILED: "SESSION_WRITE_FAILED",
-      HOST_SAVE_UNAVAILABLE: "HOST_SAVE_UNAVAILABLE",
-      HOST_SAVE_UNCONFIRMED: "HOST_SAVE_UNCONFIRMED",
-      MODEL_TIMEOUT: "MODEL_TIMEOUT",
-      HTTP_ERROR: "HTTP_ERROR",
-      REPAIR_SCOPE_VIOLATION: "REPAIR_SCOPE_VIOLATION",
-      RETRY_BASE_CHANGED: "RETRY_BASE_CHANGED",
-      REPLAY_REQUIRED: "REPLAY_REQUIRED",
-      WORLD_SYNC_FAILED: "WORLD_SYNC_FAILED",
-      DB_WASM_LOAD_FAILED: "DB_WASM_LOAD_FAILED",
-      DB_SCHEMA_UNSUPPORTED: "DB_SCHEMA_UNSUPPORTED",
-      MENTION_TRACKED: "MENTION_TRACKED",
-      CONDITION_UNCOMPILED: "CONDITION_UNCOMPILED",
-      TIME_UNRESOLVED: "TIME_UNRESOLVED",
-      // M2：同一张图上的布局请求互相矛盾（mapId 不一致、kind 冲突、同批同 id 不同值、父图/子图混用）。
-      LAYOUT_REQUEST_CONFLICT: "LAYOUT_REQUEST_CONFLICT",
-      INTERNAL_ERROR: "INTERNAL_ERROR"
-    });
-    SECRET_RULES = [
-      [/\bsk-[A-Za-z0-9_-]{4,}/gi, "[redacted]"],
-      [/\bBearer\s+[A-Za-z0-9._~+/=-]{4,}/gi, "[redacted]"],
-      [
-        /\b(?:api[_-]?key|apikey|access[_-]?token|secret[_-]?key|authorization)["']?\s*[:=]\s*["']?[A-Za-z0-9._~+/-]{8,}["']?/gi,
-        "[redacted]"
-      ],
-      [/\b[A-Fa-f0-9]{32,}\b/g, "[redacted]"],
-      [/[A-Za-z0-9+/]{32,}={0,2}/g, "[redacted]"]
-    ];
-  }
-});
-
-// src/atlas-ops-normalize.ts
-function utf8Bytes(value) {
-  try {
-    return new TextEncoder().encode(JSON.stringify(value ?? null)).length;
-  } catch {
-    return Number.POSITIVE_INFINITY;
-  }
-}
-function normalizeLayoutSpec(data, op) {
-  const issues = [];
-  const spec = {};
-  const raw = data["spec"];
-  if (!isPlainObject3(raw)) {
-    return {
-      ok: false,
-      spec: null,
-      issues: [
-        issue7(
-          ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING,
-          "$.data.spec",
-          'map.layout.request requires data.spec as an object with the changed constraints (rooms/contents/actors/items or districts/buildings); example: {"op":"map.layout.request","ref":"M2","data":{"kind":"floor","spec":{"rooms":[{"id":"L3","side":"north","w":6,"h":5}]}}}',
-          { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
-        )
-      ]
-    };
-  }
-  const budget = ATLAS_RUNTIME_LIMITS.layoutSpecUtf8Bytes;
-  const size = utf8Bytes(raw);
-  if (size > budget) {
-    return {
-      ok: false,
-      spec: null,
-      issues: [
-        issue7(
-          ATLAS_ERROR_CODES.OPERATION_TOO_LARGE,
-          "$.data.spec",
-          `map.layout.request spec is ${size} bytes, over the ${budget} byte budget; split the request or describe fewer constraints`,
-          { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
-        )
-      ]
-    };
-  }
-  for (const key of Object.keys(raw)) {
-    if (LAYOUT_SPEC_PROGRAM_KEYS.includes(key)) {
-      issues.push(
-        issue7(
-          ATLAS_ERROR_CODES.SYSTEM_FIELD_IGNORED,
-          `$.data.spec.${key}`,
-          `map.layout.request: program-owned field spec.${key} ignored (identity, scale and seed come from the map row and the program)`,
-          { opId: op?.opId, line: op?.line }
-        )
-      );
-      continue;
-    }
-    spec[key] = raw[key];
-  }
-  const kindText = typeof data["kind"] === "string" ? data["kind"] : "";
-  const kind = LAYOUT_REQUEST_KINDS.includes(kindText) ? kindText : null;
-  const allowedCollections = kind ? LAYOUT_KIND_COLLECTIONS[kind] : LAYOUT_SPEC_COLLECTIONS;
-  for (const key of ["width", "height"]) {
-    const value = spec[key];
-    if (value === void 0 || value === null) continue;
-    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
-      return {
-        ok: false,
-        spec: null,
-        issues: [
-          issue7(
-            "ENUM_INVALID",
-            `$.data.spec.${key}`,
-            `map.layout.request: spec.${key} must be a finite positive number`,
-            { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
-          )
-        ]
-      };
-    }
-  }
-  if (kind === "overview") {
-    const surface = spec["surface"];
-    if (surface !== void 0 && surface !== null && !LAYOUT_OVERVIEW_SURFACES.includes(String(surface))) {
-      return {
-        ok: false,
-        spec: null,
-        issues: [issue7(
-          "ENUM_INVALID",
-          "$.data.spec.surface",
-          `map.layout.request: spec.surface must be one of {${LAYOUT_OVERVIEW_SURFACES.join(",")}}; got ${JSON.stringify(surface)}`,
-          { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
-        )]
-      };
-    }
-  }
-  if (kind === "city") {
-    const enclosure = spec["enclosure"];
-    if (enclosure !== void 0 && enclosure !== null && !LAYOUT_CITY_ENCLOSURES.includes(String(enclosure))) {
-      return {
-        ok: false,
-        spec: null,
-        issues: [issue7(
-          "ENUM_INVALID",
-          "$.data.spec.enclosure",
-          `map.layout.request: spec.enclosure must be one of {${LAYOUT_CITY_ENCLOSURES.join(",")}}; got ${JSON.stringify(enclosure)}`,
-          { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
-        )]
-      };
-    }
-  }
-  {
-    const raw2 = spec["corridorLocationRef"];
-    if (raw2 !== void 0 && raw2 !== null) {
-      if (kind !== "floor") {
-        return {
-          ok: false,
-          spec: null,
-          issues: [issue7(
-            "ENUM_INVALID",
-            "$.data.spec.corridorLocationRef",
-            `map.layout.request kind=${kind ?? "(unknown)"} does not accept spec.corridorLocationRef; only kind=floor has a named corridor`,
-            { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
-          )]
-        };
-      }
-      if (typeof raw2 !== "string" || raw2.trim() === "" || raw2.length > MAX_LAYOUT_SPEC_ID_CHARS) {
-        return {
-          ok: false,
-          spec: null,
-          issues: [issue7(
-            ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING,
-            "$.data.spec.corridorLocationRef",
-            `map.layout.request: spec.corridorLocationRef must be null (explicit unbind) or a non-empty location reference of at most ${MAX_LAYOUT_SPEC_ID_CHARS} chars; got ${JSON.stringify(raw2)}. 首版一张 floor 至多一条主走廊，多条真实走廊暂不支持，也不许压成一个地点`,
-            { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
-          )]
-        };
-      }
-    }
-  }
-  for (const key of LAYOUT_SPEC_COLLECTIONS) {
-    const value = spec[key];
-    if (value === void 0 || value === null) continue;
-    if (!allowedCollections.includes(key)) {
-      return {
-        ok: false,
-        spec: null,
-        issues: [
-          issue7(
-            "ENUM_INVALID",
-            `$.data.spec.${key}`,
-            `map.layout.request kind=${kind ?? "(unknown)"} does not accept spec.${key}; allowed: {${allowedCollections.join(", ")}}`,
-            { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
-          )
-        ]
-      };
-    }
-    if (!Array.isArray(value)) {
-      return {
-        ok: false,
-        spec: null,
-        issues: [
-          issue7(
-            ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING,
-            `$.data.spec.${key}`,
-            `map.layout.request: spec.${key} must be an array`,
-            { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
-          )
-        ]
-      };
-    }
-    const limit = key === "zones" ? ATLAS_RUNTIME_LIMITS.overviewZoneLimit : key === "features" ? ATLAS_RUNTIME_LIMITS.overviewFeatureLimit : key === "links" ? ATLAS_RUNTIME_LIMITS.overviewLinkLimit : null;
-    if (limit !== null && value.length > limit) {
-      return {
-        ok: false,
-        spec: null,
-        issues: [
-          issue7(
-            ATLAS_ERROR_CODES.OPERATION_TOO_LARGE,
-            `$.data.spec.${key}`,
-            `map.layout.request: spec.${key} has ${value.length} entries, over the ${limit} limit; split the request`,
-            { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
-          )
-        ]
-      };
-    }
-    const seenIds = /* @__PURE__ */ new Set();
-    for (let i = 0; i < value.length; i += 1) {
-      const entry = value[i];
-      const path = `$.data.spec.${key}[${i}]`;
-      if (!isPlainObject3(entry)) {
-        return {
-          ok: false,
-          spec: null,
-          issues: [
-            issue7(
-              ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING,
-              path,
-              `map.layout.request: spec.${key}[${i}] must be an object with an id`,
-              { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
-            )
-          ]
-        };
-      }
-      const id = entry["id"];
-      if (typeof id !== "string" || id.trim() === "" || id.length > MAX_LAYOUT_SPEC_ID_CHARS) {
-        return {
-          ok: false,
-          spec: null,
-          issues: [
-            issue7(
-              ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING,
-              `${path}.id`,
-              `map.layout.request: spec.${key}[${i}].id must be a non-empty string of at most ${MAX_LAYOUT_SPEC_ID_CHARS} chars`,
-              { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
-            )
-          ]
-        };
-      }
-      if (seenIds.has(id)) {
-        return {
-          ok: false,
-          spec: null,
-          issues: [
-            issue7(
-              "ENUM_INVALID",
-              `${path}.id`,
-              `map.layout.request: spec.${key} has duplicate id ${JSON.stringify(id)}`,
-              { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
-            )
-          ]
-        };
-      }
-      seenIds.add(id);
-      if (kind === "overview") {
-        const rejected = overviewEntryIssue(key, entry, path, op);
-        if (rejected) return { ok: false, spec: null, issues: [rejected] };
-      }
-    }
-  }
-  const deletes = spec["deletes"];
-  if (deletes !== void 0 && deletes !== null) {
-    if (!isPlainObject3(deletes)) {
-      return {
-        ok: false,
-        spec: null,
-        issues: [
-          issue7(
-            ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING,
-            "$.data.spec.deletes",
-            "map.layout.request: spec.deletes must be an object mapping collection names to id arrays",
-            { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
-          )
-        ]
-      };
-    }
-    for (const [key, value] of Object.entries(deletes)) {
-      if (!allowedCollections.includes(key) || !Array.isArray(value)) {
-        return {
-          ok: false,
-          spec: null,
-          issues: [
-            issue7(
-              ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING,
-              `$.data.spec.deletes.${key}`,
-              `map.layout.request: spec.deletes.${key} must be an array of ids for kind=${kind ?? "(unknown)"}; allowed: {${allowedCollections.join(", ")}}`,
-              { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
-            )
-          ]
-        };
-      }
-    }
-  }
-  return { ok: true, spec, issues };
-}
-function overviewEntryIssue(collection2, entry, path, op) {
-  const bad = (field, message) => issue7(
-    "ENUM_INVALID",
-    `${path}.${field}`,
-    message,
-    { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
-  );
-  const inSet = (allowed, value) => allowed.includes(value);
-  if (collection2 === "zones") {
-    const role = entry["role"];
-    if (role === void 0 || role === null || !inSet(LAYOUT_OVERVIEW_ZONE_ROLES, role)) {
-      return bad("role", `overview zone role must be one of {${LAYOUT_OVERVIEW_ZONE_ROLES.join(",")}}; got ${JSON.stringify(role)}`);
-    }
-    const size = entry["size"];
-    if (size !== void 0 && size !== null && !inSet(LAYOUT_OVERVIEW_ZONE_SIZES, size)) {
-      return bad("size", `overview zone size must be one of {${LAYOUT_OVERVIEW_ZONE_SIZES.join(",")}}; got ${JSON.stringify(size)}`);
-    }
-    const sector = entry["sector"];
-    if (sector !== void 0 && sector !== null && !inSet(LAYOUT_OVERVIEW_ZONE_SECTORS, sector)) {
-      return bad("sector", `overview zone sector must be one of {${LAYOUT_OVERVIEW_ZONE_SECTORS.join(",")}}; got ${JSON.stringify(sector)}`);
-    }
-    return null;
-  }
-  if (collection2 === "features") {
-    const type = entry["type"];
-    if (type === void 0 || type === null || !inSet(LAYOUT_OVERVIEW_FEATURE_TYPES, type)) {
-      return bad("type", `overview feature type must be one of {${LAYOUT_OVERVIEW_FEATURE_TYPES.join(",")}}; got ${JSON.stringify(type)}`);
-    }
-    const density = entry["density"];
-    if (density !== void 0 && density !== null && !inSet(LAYOUT_OVERVIEW_DENSITIES, density)) {
-      return bad("density", `overview feature density must be one of {${LAYOUT_OVERVIEW_DENSITIES.join(",")}}; got ${JSON.stringify(density)}`);
-    }
-    for (const field of ["fromSector", "toSector"]) {
-      const value = entry[field];
-      if (value === void 0 || value === null) continue;
-      if (type !== "watercourse") return bad(field, `overview feature ${field} is only valid for type=watercourse`);
-      if (!inSet(LAYOUT_OVERVIEW_SECTORS, value)) {
-        return bad(field, `watercourse ${field} must be one of {${LAYOUT_OVERVIEW_SECTORS.join(",")}}; got ${JSON.stringify(value)}`);
-      }
-    }
-    const widthClass = entry["widthClass"];
-    if (widthClass !== void 0 && widthClass !== null) {
-      if (type !== "watercourse") return bad("widthClass", "overview feature widthClass is only valid for type=watercourse");
-      if (!inSet(LAYOUT_OVERVIEW_WIDTH_CLASSES, widthClass)) {
-        return bad("widthClass", `watercourse widthClass must be one of {${LAYOUT_OVERVIEW_WIDTH_CLASSES.join(",")}}; got ${JSON.stringify(widthClass)}`);
-      }
-    }
-    return null;
-  }
-  return null;
-}
-function issue7(code, path, message, extra = {}) {
-  return toIssue2(new Error(message), { code, path, severity: "warning", ...extra });
-}
-function isPlainObject3(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function hasOwn2(target, key) {
-  return Object.prototype.hasOwnProperty.call(target, key);
-}
-function truncateWhy(value) {
-  if (value.length <= WHY_MAX_CHARS) return value;
-  let out = value.slice(0, WHY_MAX_CHARS);
-  const last = out.charCodeAt(out.length - 1);
-  if (last >= 55296 && last <= 56319) out = out.slice(0, -1);
-  return out;
-}
-function matchEnum(value, dict) {
-  const lowered = value.trim().toLowerCase();
-  if (dict.includes(lowered)) return lowered;
-  const candidates = ZH_ENUM_CANDIDATES[value.trim()];
-  if (!candidates) return null;
-  for (const candidate of candidates) {
-    if (dict.includes(candidate)) return candidate;
-  }
-  return null;
-}
-function coerceNumeric(value, path, opName, issues) {
-  const reject = (shown) => {
-    issues.push(
-      issue7(ATLAS_ERROR_CODES.INVARIANT_FAILED, path, `${opName}: ${path} is ${shown}; NaN/Infinity are never legal`, {
-        severity: "error",
-        retryable: true
-      })
-    );
-    return { value: void 0, rejected: true };
-  };
-  if (typeof value === "number") {
-    if (Number.isFinite(value)) return { value, rejected: false };
-    return reject(String(value));
-  }
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (trimmed === "") return { value, rejected: false };
-    if (FULL_NUMBER_RE.test(trimmed)) {
-      const parsed = Number(trimmed);
-      if (Number.isFinite(parsed)) return { value: parsed, rejected: false };
-      return reject(JSON.stringify(value));
-    }
-    if (EXPLICIT_NON_FINITE_RE.test(trimmed)) return reject(JSON.stringify(value));
-    return { value, rejected: false };
-  }
-  return { value, rejected: false };
-}
-function normalizeValues(opName, data, issues) {
-  const dicts = OP_ENUM_DICTS[opName] ?? {};
-  const numeric = new Set(NUMERIC_FIELDS[opName] ?? []);
-  const out = {};
-  for (const key of Object.keys(data)) {
-    let next = data[key];
-    const dict = dicts[key];
-    if (dict && typeof next === "string") {
-      const fixed = matchEnum(next, dict);
-      if (fixed !== null) next = fixed;
-    }
-    if (numeric.has(key)) {
-      const coerced = coerceNumeric(next, `$.data.${key}`, opName, issues);
-      if (coerced.rejected) continue;
-      next = coerced.value;
-    }
-    if (key === "position" && isPlainObject3(next)) {
-      const position = { ...next };
-      for (const axis of ["x", "y"]) {
-        if (!hasOwn2(position, axis)) continue;
-        const coerced = coerceNumeric(position[axis], `$.data.position.${axis}`, opName, issues);
-        if (coerced.rejected) delete position[axis];
-        else position[axis] = coerced.value;
-      }
-      next = position;
-    }
-    if (key === "why" && typeof next === "string" && next.length > WHY_MAX_CHARS) {
-      const truncated = truncateWhy(next);
-      issues.push(
-        issue7(
-          ATLAS_ERROR_CODES.FIELD_IGNORED,
-          "$.data.why",
-          `${opName}: why is ${next.length} chars, over the ${WHY_MAX_CHARS} char limit; truncated to ${truncated.length}`
-        )
-      );
-      next = truncated;
-    }
-    out[key] = next;
-  }
-  return out;
-}
-function normalizeOperation(raw, phase, allowedOps) {
-  const issues = [];
-  const ignoredFields = [];
-  const systemFields = [];
-  const allowed = new Set(allowedOps ?? allowedOpsForPhase(phase));
-  allowed.add(ATLAS_NOOP);
-  const allowedList = [...allowed].sort().join(", ");
-  const opName = typeof raw?.op === "string" ? raw.op.trim() : "";
-  if (opName === "" || !allowed.has(opName)) {
-    const reason = opName === "" ? "operation is missing op" : isSemanticOp(opName) ? `op ${opName} is not allowed in phase ${phase}` : `unknown op ${JSON.stringify(opName)}`;
-    issues.push(
-      issue7(ATLAS_ERROR_CODES.UNKNOWN_OPERATION, "$.op", `${reason}; allowed: ${allowedList}`, {
-        severity: "error",
-        retryable: true
-      })
-    );
-    return { op: null, issues, ignoredFields, systemFields };
-  }
-  const op = { op: opName };
-  if (typeof raw.ref === "string") {
-    const ref = raw.ref.trim();
-    if (ref !== "") op.ref = ref;
-  } else if (raw.ref !== void 0 && raw.ref !== null) {
-    issues.push(issue7(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.ref", `${opName}: ref must be a string; ignored`));
-  }
-  if (typeof raw.source === "string") {
-    op.source = raw.source.trim();
-  } else if (Array.isArray(raw.source)) {
-    const list2 = raw.source.filter((entry) => typeof entry === "string").map((entry) => entry.trim());
-    if (list2.length > 0) op.source = list2;
-    else issues.push(issue7(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.source", `${opName}: source has no usable entries; ignored`));
-  } else if (raw.source !== void 0 && raw.source !== null) {
-    issues.push(issue7(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.source", `${opName}: source must be a string or string array; ignored`));
-  }
-  if (typeof raw.why === "string") {
-    if (raw.why.length > WHY_MAX_CHARS) {
-      op.why = truncateWhy(raw.why);
-      issues.push(
-        issue7(
-          ATLAS_ERROR_CODES.FIELD_IGNORED,
-          "$.why",
-          `${opName}: why is ${raw.why.length} chars, over the ${WHY_MAX_CHARS} char limit; truncated to ${op.why.length}`
-        )
-      );
-    } else {
-      op.why = raw.why;
-    }
-  } else if (raw.why !== void 0 && raw.why !== null) {
-    issues.push(issue7(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.why", `${opName}: why must be a string; ignored`));
-  }
-  if (typeof raw.ticket === "string") op.ticket = raw.ticket.trim();
-  let data = null;
-  if (raw.data !== void 0 && raw.data !== null) {
-    if (!isPlainObject3(raw.data)) {
-      issues.push(issue7(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.data", `${opName}: data must be an object; ignored`));
-    } else {
-      const sourceData = raw.data;
-      const collected = {};
-      for (const key of Object.keys(sourceData)) {
-        const value = sourceData[key];
-        if (SYSTEM_OWNED_FIELDS.includes(key) && !isKnownFieldForOp(opName, key)) {
-          systemFields.push(key);
-          issues.push(
-            issue7(
-              ATLAS_ERROR_CODES.SYSTEM_FIELD_IGNORED,
-              `$.data.${key}`,
-              `${opName}: program-owned field ${key} ignored`
-            )
-          );
-          continue;
-        }
-        const aliasTarget = hasOwn2(OP_FIELD_ALIASES, key) ? OP_FIELD_ALIASES[key] : void 0;
-        if (aliasTarget !== void 0) {
-          if (aliasTarget === "position.x" || aliasTarget === "position.y") {
-            if (!isKnownFieldForOp(opName, "position")) {
-              ignoredFields.push(key);
-              issues.push(
-                issue7(ATLAS_ERROR_CODES.FIELD_IGNORED, `$.data.${key}`, `${opName}: alias ${key} → position is not a legal field; ignored`)
-              );
-              continue;
-            }
-            const axis = aliasTarget === "position.x" ? "x" : "y";
-            const existing = hasOwn2(collected, "position") ? collected["position"] : sourceData["position"];
-            if (existing !== void 0 && existing !== null && !isPlainObject3(existing)) {
-              ignoredFields.push(key);
-              issues.push(
-                issue7(ATLAS_ERROR_CODES.FIELD_IGNORED, `$.data.${key}`, `${opName}: position is not an object; alias ${key} ignored`)
-              );
-              continue;
-            }
-            const position = isPlainObject3(existing) ? { ...existing } : {};
-            if (hasOwn2(position, axis)) {
-              ignoredFields.push(key);
-              issues.push(
-                issue7(ATLAS_ERROR_CODES.FIELD_IGNORED, `$.data.${key}`, `${opName}: position.${axis} already provided; alias ${key} ignored`)
-              );
-              collected["position"] = position;
-              continue;
-            }
-            position[axis] = value;
-            collected["position"] = position;
-            continue;
-          }
-          if (isKnownFieldForOp(opName, aliasTarget) && !hasOwn2(sourceData, aliasTarget)) {
-            collected[aliasTarget] = value;
-            continue;
-          }
-          ignoredFields.push(key);
-          issues.push(
-            issue7(
-              ATLAS_ERROR_CODES.FIELD_IGNORED,
-              `$.data.${key}`,
-              `${opName}: alias ${key} → ${aliasTarget} is not usable here (target illegal or already present); ignored`
-            )
-          );
-          continue;
-        }
-        if (!isKnownFieldForOp(opName, key)) {
-          ignoredFields.push(key);
-          issues.push(
-            issue7(
-              ATLAS_ERROR_CODES.FIELD_IGNORED,
-              `$.data.${key}`,
-              `${opName}: unknown field ${key} ignored (operation continues)`
-            )
-          );
-          continue;
-        }
-        const previous = collected[key];
-        collected[key] = isPlainObject3(previous) && isPlainObject3(value) ? { ...value, ...previous } : value;
-      }
-      data = normalizeValues(opName, collected, issues);
-    }
-  }
-  if (data !== null) op.data = data;
-  return { op, issues, ignoredFields, systemFields };
-}
-function validateMinimum(op, phase, parsed) {
-  const opName = typeof op?.op === "string" ? op.op.trim() : "";
-  const rawData = op?.data;
-  const data = isPlainObject3(rawData) ? rawData : {};
-  const ref = typeof op?.ref === "string" ? op.ref.trim() : "";
-  const isNew = ref === "" || ref.startsWith("new:");
-  const changed = Object.keys(data).length > 0;
-  const has = (key) => hasOwn2(data, key);
-  const text6 = (key) => typeof data[key] === "string" ? data[key].trim() : "";
-  const meaningful = (key) => {
-    if (!has(key)) return false;
-    const value = data[key];
-    if (value === void 0 || value === null) return false;
-    if (typeof value === "string") return value.trim() !== "";
-    return true;
-  };
-  const missingOf = (keys) => keys.filter((key) => !meaningful(key));
-  const fail4 = (path, message) => ({
-    ok: false,
-    issue: toIssue2(new Error(`${message} (phase ${phase})`), {
-      code: ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING,
-      path,
-      line: parsed?.line,
-      opId: parsed?.opId,
-      severity: "error",
-      retryable: true
-    })
-  });
-  const createOrModify = (exampleName) => {
-    if (isNew) {
-      if (!meaningful("name")) {
-        return fail4(
-          "$.data.name",
-          `${opName} requires data.name (non-empty string) when creating; example: {"op":"${opName}","ref":"new:${exampleName}","data":{"name":"…"}}`
-        );
-      }
-      return { ok: true };
-    }
-    if (!changed) {
-      return fail4(
-        "$.data",
-        `${opName} modifies an existing object: requires ref plus at least one changed field in data; example: {"op":"${opName}","ref":"${ref}","data":{"description":"…"}}`
-      );
-    }
-    return { ok: true };
-  };
-  switch (opName) {
-    case "location.upsert":
-      return createOrModify("school");
-    case "character.upsert": {
-      if (text6("registration").toLowerCase() === "watch") {
-        if (!meaningful("name")) {
-          return fail4(
-            "$.data.name",
-            'character.upsert with registration=watch reports a candidate: requires data.name only; example: {"op":"character.upsert","data":{"registration":"watch","name":"戴兜帽的路人"}}'
-          );
-        }
-        return { ok: true };
-      }
-      if (isNew) {
-        if (!meaningful("name")) {
-          return fail4(
-            "$.data.name",
-            'character.upsert creating a character requires data.name; example: {"op":"character.upsert","ref":"new:elin","data":{"name":"艾琳","identity":"学校教师"}}'
-          );
-        }
-        const clue = ["identity", "importance", "importance_reason"].some((key) => meaningful(key));
-        if (!clue) {
-          return fail4(
-            "$.data.identity",
-            'character.upsert creating a formal character requires data.name plus one of identity / importance / importance_reason; example: {"op":"character.upsert","ref":"new:captain","data":{"name":"伊娜","identity":"王宫卫队长"}}'
-          );
-        }
-        return { ok: true };
-      }
-      if (!changed) {
-        return fail4(
-          "$.data",
-          `character.upsert modifies an existing character: requires ref plus at least one changed field in data; example: {"op":"character.upsert","ref":"${ref}","data":{"thought":"先观察。"}}`
-        );
-      }
-      return { ok: true };
-    }
-    case "item.upsert":
-      return createOrModify("sword");
-    case "item.transfer": {
-      if (ref === "") {
-        return fail4(
-          "$.ref",
-          'item.transfer requires ref naming the transferred item; example: {"op":"item.transfer","ref":"I1","data":{"to":{"holder_ref":"C1"}}}'
-        );
-      }
-      const to = data["to"];
-      if (!isPlainObject3(to)) {
-        return fail4(
-          "$.data.to",
-          'item.transfer requires data.to with exactly one of {holder_ref} | {container_ref} | {location_ref[,position]} | {unknown:true}; example: {"op":"item.transfer","ref":"I1","data":{"to":{"holder_ref":"C1"}}}'
-        );
-      }
-      const variants = [
-        typeof to["holder_ref"] === "string" && to["holder_ref"].trim() !== "",
-        typeof to["container_ref"] === "string" && to["container_ref"].trim() !== "",
-        typeof to["location_ref"] === "string" && to["location_ref"].trim() !== "",
-        to["unknown"] === true
-      ].filter(Boolean).length;
-      if (variants !== 1) {
-        return fail4(
-          "$.data.to",
-          `item.transfer requires exactly one destination form in data.to (holder_ref | container_ref | location_ref | unknown:true); got ${variants}`
-        );
-      }
-      return { ok: true };
-    }
-    case "faction.upsert":
-      return createOrModify("kingdom");
-    case "relation.upsert": {
-      if (ref !== "") return { ok: true };
-      const missing = missingOf(["subject_ref", "object_ref", "label"]);
-      if (missing.length > 0) {
-        return fail4(
-          `$.data.${missing[0]}`,
-          `relation.upsert requires subject_ref, object_ref and label (or ref to update an existing relation); missing: ${missing.join(", ")}; example: {"op":"relation.upsert","data":{"subject_ref":"C1","object_ref":"C2","label":"导师","kind":"knows"}}`
-        );
-      }
-      return { ok: true };
-    }
-    case "plan.propose": {
-      const missing = missingOf(["actor_ref", "goal"]);
-      const steps = data["steps"];
-      if (missing.length > 0) {
-        return fail4(
-          `$.data.${missing[0]}`,
-          `plan.propose requires actor_ref, goal and steps (array with at least one step); missing: ${missing.join(", ")}; example: {"op":"plan.propose","data":{"actor_ref":"C3","goal":"刺杀国王","steps":[{"kind":"prepare","title":"踩点"}]}}`
-        );
-      }
-      if (!Array.isArray(steps) || steps.length === 0) {
-        return fail4(
-          "$.data.steps",
-          'plan.propose requires data.steps as an array with at least one step; example: {"op":"plan.propose","data":{"actor_ref":"C3","goal":"刺杀国王","steps":[{"kind":"prepare","title":"踩点"}]}}'
-        );
-      }
-      return { ok: true };
-    }
-    case "plan.revise": {
-      if (ref === "") {
-        return fail4(
-          "$.ref",
-          'plan.revise requires ref naming the plan or action being revised; example: {"op":"plan.revise","ref":"A1","data":{"change":"pause"}}'
-        );
-      }
-      const change = text6("change").toLowerCase();
-      if (change === "") {
-        return fail4(
-          "$.data.change",
-          `plan.revise requires data.change ∈ {${PLAN_CHANGES.join(",")}}; example: {"op":"plan.revise","ref":"${ref}","data":{"change":"pause"}}`
-        );
-      }
-      if (!PLAN_CHANGES.includes(change)) {
-        return fail4(
-          "$.data.change",
-          `plan.revise change must be one of {${PLAN_CHANGES.join(",")}}; got ${JSON.stringify(text6("change"))}`
-        );
-      }
-      const steps = data["steps"];
-      if (change === "replace_future" && (!Array.isArray(steps) || steps.length === 0)) {
-        return fail4(
-          "$.data.steps",
-          'plan.revise with change=replace_future requires data.steps as an array with at least one step; example: {"op":"plan.revise","ref":"A1","data":{"change":"replace_future","steps":[{"kind":"travel","destination_ref":"L2"}]}}'
-        );
-      }
-      return { ok: true };
-    }
-    case "event.propose": {
-      if (!meaningful("title")) {
-        return fail4(
-          "$.data.title",
-          'event.propose requires data.title (non-empty string); example: {"op":"event.propose","data":{"title":"城门典礼","phase":"scheduled"}}'
-        );
-      }
-      const eventPhase = text6("phase").toLowerCase();
-      if (eventPhase === "") {
-        return fail4(
-          "$.data.phase",
-          `event.propose requires data.phase ∈ {${EVENT_PHASES.join(",")}}; example: {"op":"event.propose","data":{"title":"城门典礼","phase":"scheduled"}}`
-        );
-      }
-      if (!EVENT_PHASES.includes(eventPhase)) {
-        return fail4(
-          "$.data.phase",
-          `event.propose phase must be one of {${EVENT_PHASES.join(",")}}; got ${JSON.stringify(text6("phase"))}`
-        );
-      }
-      return { ok: true };
-    }
-    case "information.propose": {
-      if (!meaningful("content")) {
-        return fail4(
-          "$.data.content",
-          'information.propose requires data.content (non-empty string); example: {"op":"information.propose","data":{"content":"城门今晚戒严。"}}'
-        );
-      }
-      return { ok: true };
-    }
-    case "attention.propose": {
-      const missing = missingOf(["opportunity_ref"]);
-      if (missing.length > 0) {
-        return fail4(
-          "$.data.opportunity_ref",
-          'attention.propose requires data.opportunity_ref from the provided opportunities; example: {"op":"attention.propose","data":{"opportunity_ref":"O1","belief":"heard"}}'
-        );
-      }
-      const belief = text6("belief").toLowerCase();
-      if (belief === "") {
-        return fail4(
-          "$.data.belief",
-          `attention.propose requires data.belief ∈ {${BELIEFS.join(",")}}; example: {"op":"attention.propose","data":{"opportunity_ref":"O1","belief":"heard"}}`
-        );
-      }
-      if (!BELIEFS.includes(belief)) {
-        return fail4(
-          "$.data.belief",
-          `attention.propose belief must be one of {${BELIEFS.join(",")}}; got ${JSON.stringify(text6("belief"))}`
-        );
-      }
-      return { ok: true };
-    }
-    case "channel.upsert": {
-      const missing = missingOf(["owner_ref", "kind", "name"]);
-      if (missing.length > 0) {
-        return fail4(
-          `$.data.${missing[0]}`,
-          `channel.upsert requires owner_ref, kind and name; missing: ${missing.join(", ")}; example: {"op":"channel.upsert","data":{"owner_ref":"F1","kind":"faction_network","name":"暗卫报告网"}}`
-        );
-      }
-      return { ok: true };
-    }
-    case "map.estimate": {
-      if (ref === "") {
-        return fail4(
-          "$.ref",
-          'map.estimate requires ref naming the map; example: {"op":"map.estimate","ref":"M1","data":{"width_m":4200,"height_m":3100,"basis":"叙事里城市走一天"}}'
-        );
-      }
-      const sizeKeys = ["width_m", "height_m", "meters_per_cell_min", "meters_per_cell_max", "basis"];
-      if (!sizeKeys.some((key) => meaningful(key))) {
-        return fail4(
-          "$.data.width_m",
-          `map.estimate requires ref plus at least one of {${sizeKeys.join(", ")}}; example: {"op":"map.estimate","ref":"${ref}","data":{"width_m":4200,"basis":"叙事里城市走一天"}}`
-        );
-      }
-      return { ok: true };
-    }
-    case "route.propose": {
-      const missing = missingOf(["from_ref", "to_ref"]);
-      if (missing.length > 0) {
-        return fail4(
-          `$.data.${missing[0]}`,
-          `route.propose requires from_ref and to_ref; missing: ${missing.join(", ")}; example: {"op":"route.propose","data":{"from_ref":"L1","to_ref":"L2","kind":"road"}}`
-        );
-      }
-      return { ok: true };
-    }
-    case "map.layout.request": {
-      if (ref === "") {
-        return fail4(
-          "$.ref",
-          'map.layout.request requires ref naming the map; example: {"op":"map.layout.request","ref":"M2","data":{"kind":"floor","spec":{"rooms":[{"id":"L3","side":"north","w":6,"h":5}]}}}'
-        );
-      }
-      const kind = text6("kind").toLowerCase();
-      if (kind === "") {
-        return fail4(
-          "$.data.kind",
-          `map.layout.request requires data.kind ∈ {${LAYOUT_REQUEST_KINDS.join(",")}}; example: {"op":"map.layout.request","ref":"${ref}","data":{"kind":"floor","spec":{"rooms":[{"id":"L3","side":"north","w":6,"h":5}]}}}`
-        );
-      }
-      if (!LAYOUT_REQUEST_KINDS.includes(kind)) {
-        return fail4(
-          "$.data.kind",
-          `map.layout.request kind must be one of {${LAYOUT_REQUEST_KINDS.join(",")}}; got ${JSON.stringify(text6("kind"))}`
-        );
-      }
-      if (!meaningful("spec")) {
-        return fail4(
-          "$.data.spec",
-          `map.layout.request requires data.spec (object of changed constraints); example: {"op":"map.layout.request","ref":"${ref}","data":{"kind":"${kind}","spec":{"rooms":[{"id":"L3","side":"north","w":6,"h":5}]}}}`
-        );
-      }
-      const checked = normalizeLayoutSpec(data, parsed);
-      if (!checked.ok) {
-        const first = checked.issues.find((i) => i.severity === "error") ?? checked.issues[0];
-        return { ok: false, issue: first };
-      }
-      return { ok: true };
-    }
-    case ATLAS_NOOP:
-      return { ok: true };
-    default:
-      return {
-        ok: false,
-        issue: toIssue2(
-          new Error(
-            `unknown or unsupported op ${JSON.stringify(opName)}; supported: ${[...ATLAS_SEMANTIC_OPS, ATLAS_NOOP].join(", ")} (phase ${phase})`
-          ),
-          {
-            code: ATLAS_ERROR_CODES.UNKNOWN_OPERATION,
-            path: "$.op",
-            line: parsed?.line,
-            opId: parsed?.opId,
-            severity: "error",
-            retryable: true
-          }
-        )
-      };
-  }
-}
-function isKnownFieldForOp(op, field) {
-  const list2 = OP_KNOWN_FIELDS[op];
-  if (!list2) return false;
-  return list2.includes(field);
-}
-var LAYOUT_REQUEST_KINDS, LAYOUT_SPEC_COLLECTIONS, LAYOUT_KIND_COLLECTIONS, LAYOUT_OVERVIEW_FEATURE_TYPES, LAYOUT_OVERVIEW_SURFACES, LAYOUT_OVERVIEW_ZONE_ROLES, LAYOUT_OVERVIEW_ZONE_SIZES, LAYOUT_OVERVIEW_DENSITIES, LAYOUT_OVERVIEW_SECTORS, LAYOUT_OVERVIEW_ZONE_SECTORS, LAYOUT_OVERVIEW_WIDTH_CLASSES, LAYOUT_CITY_ENCLOSURES, LAYOUT_SPEC_SCALARS, LAYOUT_SPEC_PROGRAM_KEYS, MAX_LAYOUT_SPEC_ID_CHARS, OP_KNOWN_FIELDS, OP_ENUM_DICTS, ZH_ENUM_CANDIDATES, NUMERIC_FIELDS, FULL_NUMBER_RE, EXPLICIT_NON_FINITE_RE, PLAN_CHANGES, EVENT_PHASES, BELIEFS;
-var init_atlas_ops_normalize = __esm({
-  "src/atlas-ops-normalize.ts"() {
-    "use strict";
-    init_atlas_ops_contract();
-    init_atlas_runtime_limits();
-    init_atlas_ops_errors();
-    init_atlas_location_kinds();
-    LAYOUT_REQUEST_KINDS = ["floor", "city", "overview"];
-    LAYOUT_SPEC_COLLECTIONS = [
-      "rooms",
-      "contents",
-      "actors",
-      "items",
-      "districts",
-      "buildings",
-      "zones",
-      "links",
-      "features"
-    ];
-    LAYOUT_KIND_COLLECTIONS = {
-      floor: ["rooms", "contents", "actors", "items"],
-      // city 只认街区/建筑（家具与人物属于室内模板，混用即冲突——与原实现同口径）。
-      city: ["districts", "buildings"],
-      overview: ["zones", "links", "features"]
-    };
-    LAYOUT_OVERVIEW_FEATURE_TYPES = [
-      "forest_texture",
-      "ridge",
-      "shore",
-      "building_cluster",
-      "road_texture",
-      "ruins_scatter",
-      "watercourse"
-    ];
-    LAYOUT_OVERVIEW_SURFACES = ["mixed", "urban", "forest", "mountain", "water", "indoor", "void"];
-    LAYOUT_OVERVIEW_ZONE_ROLES = [
-      "city",
-      "settlement",
-      "forest",
-      "water",
-      "mountain",
-      "ruins",
-      "district",
-      "campus",
-      "land",
-      "other"
-    ];
-    LAYOUT_OVERVIEW_ZONE_SIZES = ["small", "medium", "large"];
-    LAYOUT_OVERVIEW_DENSITIES = ["low", "medium", "high"];
-    LAYOUT_OVERVIEW_SECTORS = ["north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest"];
-    LAYOUT_OVERVIEW_ZONE_SECTORS = [...LAYOUT_OVERVIEW_SECTORS, "center"];
-    LAYOUT_OVERVIEW_WIDTH_CLASSES = ["narrow", "medium", "wide"];
-    LAYOUT_CITY_ENCLOSURES = ["open", "wall"];
-    LAYOUT_SPEC_SCALARS = [
-      "name",
-      "width",
-      "height",
-      "corridorWidth",
-      // P11/R03 §18.1：命名走廊的**唯一**新增输入。省略=保持既有绑定，null=显式解除，
-      // 字符串=本任务地点目录里的真实 location 引用（在 atlas-ops-refs 解析成规范 ID）。
-      "corridorLocationRef",
-      "riverWidth",
-      "blocksPerDistrict",
-      "surface",
-      "enclosure",
-      "mapId",
-      "rebuild",
-      "deletes"
-    ];
-    LAYOUT_SPEC_PROGRAM_KEYS = [
-      "id",
-      "parentId",
-      "seed",
-      "scope",
-      "chatId",
-      "chatUid",
-      "branchId",
-      "revision",
-      "rowRev",
-      "row_rev",
-      "locks",
-      "viewMode",
-      "requestId",
-      "operationId",
-      "createdTurnId",
-      "turnId",
-      "metersPerCell",
-      "scale",
-      "inputSignature"
-    ];
-    MAX_LAYOUT_SPEC_ID_CHARS = 160;
-    OP_KNOWN_FIELDS = {
-      "location.upsert": [
-        "name",
-        "aliases",
-        "kind",
-        "description",
-        "parent_ref",
-        "mobility",
-        "anchor_ref",
-        "map_ref",
-        "position",
-        "area",
-        "terrain",
-        "access",
-        "vehicle_profile",
-        "existence_quality"
-      ],
-      "character.upsert": [
-        "registration",
-        "name",
-        "aliases",
-        "role",
-        "identity",
-        "description",
-        "personality",
-        "importance",
-        "importance_reason",
-        "thought",
-        "action_tendency",
-        "physical_status",
-        "condition_note",
-        "location_ref",
-        "map_ref",
-        "position",
-        "mobility_profiles",
-        "capabilities"
-      ],
-      "item.upsert": [
-        "name",
-        "aliases",
-        "kind",
-        "description",
-        "quantity",
-        "unit",
-        "condition_note",
-        "properties",
-        "status",
-        "placement"
-      ],
-      "item.transfer": ["to", "quantity", "from", "owner_ref"],
-      "faction.upsert": [
-        "name",
-        "aliases",
-        "kind",
-        "description",
-        "goal",
-        "headquarters_ref",
-        "capabilities",
-        "status"
-      ],
-      "relation.upsert": [
-        "subject_ref",
-        "object_ref",
-        "label",
-        "kind",
-        "attitude",
-        "trust",
-        "description",
-        "secrecy",
-        "ends_after_s"
-      ],
-      "plan.propose": ["actor_ref", "goal", "steps", "target_ref", "target_location_ref", "target_event_ref", "secrecy"],
-      "plan.revise": ["change", "steps", "destination_ref", "why"],
-      "event.propose": [
-        "title",
-        "phase",
-        "kind",
-        "location_ref",
-        "route_ref",
-        "actor_ref",
-        "subject_ref",
-        "participants",
-        "action_ref",
-        "event_ref",
-        "time_hint",
-        "activity",
-        "result",
-        "effects",
-        "secrecy"
-      ],
-      "information.propose": [
-        "content",
-        "title",
-        "kind",
-        "event_ref",
-        "subject_ref",
-        "origin_ref",
-        "originator_ref",
-        "parent_ref",
-        "truth",
-        "secrecy",
-        "spread_at_ref",
-        "recipient_ref",
-        "payload"
-      ],
-      "attention.propose": ["opportunity_ref", "belief", "attention", "thought", "action_tendency", "reaction_goal"],
-      "channel.upsert": [
-        "owner_ref",
-        "kind",
-        "name",
-        "source_ref",
-        "source_location_ref",
-        "recipient_ref",
-        "recipient_location_ref",
-        "scope",
-        "requirements",
-        "latency",
-        "transport_mode",
-        "reliability",
-        "secrecy"
-      ],
-      "map.estimate": ["width_m", "height_m", "meters_per_cell_min", "meters_per_cell_max", "basis"],
-      "route.propose": [
-        "ref",
-        "from_ref",
-        "to_ref",
-        "kind",
-        "bidirectional",
-        "map_ref",
-        "geometry",
-        "quality",
-        "distance_m",
-        "distance_min_m",
-        "distance_max_m",
-        "terrain",
-        "modes",
-        "access",
-        "duration",
-        "status"
-      ],
-      /**
-       * map.layout.request：模型只提交「当前地图的变化约束」，不输出完整 scene。
-       * data = {kind: floor|city, spec: {…}}；程序负责生成几何并落库。
-       */
-      "map.layout.request": ["kind", "spec"],
-      [ATLAS_NOOP]: []
-    };
-    OP_ENUM_DICTS = {
-      "location.upsert": {
-        // 唯一来源：atlas-location-kinds.ts（含 floor）。此处不再复制字符串联合。
-        kind: [...ATLAS_LOCATION_KINDS],
-        mobility: ["fixed", "mobile"],
-        existence_quality: ["confirmed", "inferred", "hypothetical"]
-      },
-      "character.upsert": {
-        registration: ["auto", "watch"],
-        role: ["protagonist", "companion", "npc"],
-        importance: ["core", "recurring", "supporting"],
-        physical_status: ["alive", "incapacitated", "dead", "unknown"]
-      },
-      "item.upsert": {
-        kind: ["object", "resource", "document", "equipment", "container", "other"],
-        status: ["active", "consumed", "destroyed", "lost", "merged", "archived"]
-      },
-      "faction.upsert": {
-        kind: ["nation", "organization", "family", "team", "other"],
-        status: ["active", "dissolved", "merged", "archived"]
-      },
-      "relation.upsert": {
-        kind: ["member_of", "leads", "controls", "knows", "kinship", "ally", "hostile", "owes", "protects", "other"],
-        attitude: ["supportive", "neutral", "suspicious", "hostile", "unknown"],
-        trust: ["high", "medium", "low", "unknown"],
-        secrecy: ["public", "restricted", "secret"]
-      },
-      "plan.propose": { secrecy: ["public", "restricted", "secret"] },
-      "plan.revise": { change: ["pause", "cancel", "resume", "replace_future"] },
-      "event.propose": {
-        phase: ["scheduled", "observed", "simulated"],
-        kind: ["ceremony", "conflict", "arrival", "passage", "discovery", "trade", "communication", "incident", "other"],
-        secrecy: ["public", "restricted", "secret"]
-      },
-      "information.propose": {
-        kind: ["observation", "report", "rumor", "announcement", "lie", "hypothesis"],
-        truth: ["true", "false", "mixed", "unknown"],
-        secrecy: ["public", "restricted", "secret"]
-      },
-      "attention.propose": {
-        belief: ["heard", "doubted", "believed", "verified", "rejected"],
-        attention: ["low", "normal", "high"]
-      },
-      "channel.upsert": {
-        kind: ["contact", "faction_network", "messenger", "surveillance", "broadcast", "magic", "other"],
-        reliability: ["high", "medium", "low", "unknown"],
-        secrecy: ["public", "restricted", "secret"]
-      },
-      "route.propose": {
-        kind: ["adjacent", "road", "path", "door", "stairs", "air", "water", "portal", "estimated"],
-        // 与 routes.status 的 SQL CHECK 一致：这是责任状态，不是几何质量。
-        status: ["open", "blocked", "closed"]
-      },
-      "map.layout.request": {
-        kind: LAYOUT_REQUEST_KINDS
-      }
-    };
-    ZH_ENUM_CANDIDATES = {
-      公开: ["public"],
-      受限: ["restricted"],
-      秘密: ["secret"],
-      活着: ["alive"],
-      活著: ["alive"],
-      存活: ["alive"],
-      已死: ["dead"],
-      死亡: ["dead"],
-      死了: ["dead"],
-      未知: ["unknown"],
-      不明: ["unknown"],
-      普通: ["normal", "ordinary"],
-      正常: ["normal"],
-      高: ["high"],
-      中: ["medium"],
-      中等: ["medium"],
-      低: ["low"],
-      支持: ["supportive"],
-      中立: ["neutral"],
-      怀疑: ["suspicious", "doubted"],
-      存疑: ["doubted"],
-      敌视: ["hostile"],
-      敌对: ["hostile"],
-      真: ["true"],
-      假: ["false"],
-      真假混合: ["mixed"],
-      混合: ["mixed"],
-      听到: ["heard"],
-      听说: ["heard"],
-      相信: ["believed"],
-      证实: ["verified"],
-      确认: ["confirmed", "verified"],
-      拒绝: ["rejected"],
-      不信: ["rejected"],
-      预定: ["scheduled"],
-      计划: ["scheduled"],
-      观察到: ["observed"],
-      已观察: ["observed"],
-      推演: ["simulated"],
-      模拟: ["simulated"],
-      谣言: ["rumor"],
-      传闻: ["rumor"],
-      报告: ["report"],
-      观察: ["observation", "observed", "watch"],
-      宣布: ["announcement"],
-      谎言: ["lie"],
-      假设: ["hypothesis"],
-      自动: ["auto"],
-      关注: ["watch"],
-      候选: ["watch"],
-      主角: ["protagonist"],
-      同伴: ["companion"],
-      配角: ["supporting"],
-      常驻: ["recurring"],
-      核心: ["core"],
-      国家: ["nation"],
-      组织: ["organization"],
-      家族: ["family"],
-      团队: ["team"],
-      城市: ["city"],
-      区域: ["region"],
-      地区: ["region"],
-      建筑: ["building"],
-      房间: ["room"],
-      自然: ["natural"],
-      载具: ["vehicle"],
-      其他: ["other"],
-      固定: ["fixed"],
-      移动: ["mobile"],
-      推断: ["inferred"],
-      假设存在: ["hypothetical"],
-      活跃: ["active"],
-      已消耗: ["consumed"],
-      销毁: ["destroyed"],
-      丢失: ["lost"],
-      合并: ["merged"],
-      归档: ["archived"],
-      解散: ["dissolved"],
-      相邻: ["adjacent"],
-      道路: ["road"],
-      小路: ["path"],
-      门: ["door"],
-      楼梯: ["stairs"],
-      空中: ["air"],
-      水路: ["water"],
-      传送门: ["portal"],
-      估计: ["estimated"],
-      暂停: ["pause"],
-      取消: ["cancel"],
-      恢复: ["resume"],
-      替换未来: ["replace_future"],
-      成员: ["member_of"],
-      领导: ["leads"],
-      首领: ["leads"],
-      控制: ["controls"],
-      认识: ["knows"],
-      亲属: ["kinship"],
-      盟友: ["ally"],
-      欠: ["owes"],
-      保护: ["protects"],
-      联络: ["contact"],
-      组织网络: ["faction_network"],
-      信使: ["messenger"],
-      监视: ["surveillance"],
-      广播: ["broadcast"],
-      魔法: ["magic"]
-    };
-    NUMERIC_FIELDS = {
-      "item.upsert": ["quantity"],
-      "item.transfer": ["quantity"],
-      "relation.upsert": ["ends_after_s"],
-      "map.estimate": ["width_m", "height_m", "meters_per_cell_min", "meters_per_cell_max"],
-      "route.propose": ["distance_m", "distance_min_m", "distance_max_m"]
-    };
-    FULL_NUMBER_RE = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/;
-    EXPLICIT_NON_FINITE_RE = /^[+-]?(?:infinity|inf|nan)$/i;
-    PLAN_CHANGES = ["pause", "cancel", "resume", "replace_future"];
-    EVENT_PHASES = ["scheduled", "observed", "simulated"];
-    BELIEFS = ["heard", "doubted", "believed", "verified", "rejected"];
   }
 });
 
@@ -18027,1157 +19537,11 @@ var init_atlas_ops_sources = __esm({
   }
 });
 
-// src/atlas-db-mentions.ts
-function warning(code, path, message, extra = {}) {
-  return { code, path, message, severity: "warning", retryable: false, ...extra };
-}
-function decodeMentionRow(raw) {
-  const decoded = decodeRow("mention_candidates", raw, { allowExtra: true });
-  if (!decoded.ok) {
-    throw new AtlasDbError("CODEC_DECODE_FAILED", `mention_candidates 行解码失败：${decoded.issues.map((i) => i.path).join(", ")}`, {
-      issues: decoded.issues
-    });
-  }
-  return decoded.row;
-}
-function readerFromDb(db) {
-  return {
-    candidatesByName: (branchId, normalizedName) => readCandidates(db, branchId, "normalized_name = ?", [normalizedName]),
-    watchingCandidates: (branchId) => readCandidates(db, branchId, "status = 'watching'"),
-    turnWallTimes: (branchId) => turnWallTimes(db, branchId)
-  };
-}
-function readerFromPort(reads) {
-  const rows4 = (where, limit) => reads.selectWhere("mention_candidates", where, limit);
-  return {
-    candidatesByName: (branchId, normalizedName) => rows4({ branch_id: branchId, normalized_name: normalizedName }, 1e3),
-    watchingCandidates: (branchId) => rows4({ branch_id: branchId, status: "watching" }, 1e3),
-    turnWallTimes: (branchId) => {
-      const turns = reads.selectWhere("turns", { branch_id: branchId }, 5e3);
-      const out = /* @__PURE__ */ new Map();
-      for (const row2 of turns) {
-        const wall = Number(row2.created_wall_ms);
-        out.set(String(row2.id), Number.isFinite(wall) ? wall : 0);
-      }
-      return out;
-    }
-  };
-}
-function readCandidates(db, branchId, where = "", params = []) {
-  const rows4 = queryBound(
-    db,
-    `SELECT * FROM mention_candidates WHERE branch_id = ?${where ? ` AND ${where}` : ""} ORDER BY id ASC`,
-    [branchId, ...params]
-  );
-  return rows4.map(decodeMentionRow);
-}
-function stringList(value) {
-  if (!Array.isArray(value)) return [];
-  return value.filter((v) => typeof v === "string" && v.trim().length > 0).map((v) => v.trim());
-}
-function clampSummary(text6) {
-  return text6.trim().slice(0, MENTION_CONTEXT_SUMMARY_CHARS);
-}
-function uniqueStrings(values, limit) {
-  const out = [];
-  for (const value of values) {
-    if (value.length === 0 || out.includes(value)) continue;
-    out.push(value);
-    if (out.length >= limit) break;
-  }
-  return out;
-}
-function dedupeObservations(observations) {
-  const seen = /* @__PURE__ */ new Set();
-  const out = [];
-  for (const observation of observations) {
-    const name = typeof observation?.name === "string" ? observation.name.trim() : "";
-    if (name.length === 0) continue;
-    const key = `${normalizeName(name)}\0${(observation.identity ?? "").trim()}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(observation);
-  }
-  return out;
-}
-function basisFor(turnId, reason, hasEvidence) {
-  return {
-    kind: "story",
-    sources: [],
-    causes: [{ kind: "turn", id: turnId }],
-    reason,
-    verification: hasEvidence ? "source_bound" : "causal",
-    certainty: hasEvidence ? "confirmed" : "inferred"
-  };
-}
-function hasSubstantialLorebook(observation, sourceKeys) {
-  const clue = `${observation.identity ?? ""}${observation.contextSummary ?? ""}`.trim();
-  return sourceKeys.length > 0 && clue.length > 0;
-}
-function desiredImportance(observation, sourceKeys, distinctTurnCount) {
-  const hint = observation.importanceHint && IMPORTANCE_HINTS.includes(observation.importanceHint) ? observation.importanceHint : "none";
-  if (hint === "core" || hasSubstantialLorebook(observation, sourceKeys)) return "core";
-  if (distinctTurnCount >= 2) return "review";
-  return hint === "review" ? "review" : "none";
-}
-function maxImportance(a, b) {
-  const left = typeof a === "string" && IMPORTANCE_HINTS.includes(a) ? a : "none";
-  return IMPORTANCE_RANK[left] >= IMPORTANCE_RANK[b] ? left : b;
-}
-function updateMentionCandidates(input) {
-  const issues = [];
-  const mutations = [];
-  if (!input.db && !input.reads) {
-    throw new AtlasDbError(
-      "MENTION_READ_SOURCE_REQUIRED",
-      "updateMentionCandidates 需要 db 或 reads 之一（只读端口即可，不能两者都缺）",
-      { branchId: input.branchId }
-    );
-  }
-  const reader = input.reads ? readerFromPort(input.reads) : readerFromDb(input.db);
-  const branchId = input.branchId;
-  const turnId = input.turnId;
-  const makeId = input.makeId;
-  const observations = dedupeObservations(input.observations ?? []);
-  const byName = /* @__PURE__ */ new Map();
-  const projected = /* @__PURE__ */ new Map();
-  const createdInBatch = /* @__PURE__ */ new Set();
-  const promoted = [];
-  let created = 0;
-  let updated = 0;
-  for (const observation of observations) {
-    const name = observation.name.trim();
-    const normalized = normalizeName(name);
-    if (normalized.length === 0) {
-      issues.push(warning("MENTION_NAME_REQUIRED", "$.observations.name", "候选必须有非空 name"));
-      continue;
-    }
-    const contextKey = (observation.identity ?? "").trim();
-    const summary = clampSummary(observation.contextSummary ?? observation.identity ?? "");
-    const sourceKeys = uniqueStrings(stringList(observation.lorebookSourceKeys), MENTION_LOREBOOK_LIMIT);
-    if (observation.kindHint !== void 0 && !KIND_HINTS.includes(observation.kindHint)) {
-      issues.push(warning("MENTION_KIND_INVALID", "$.observations.kindHint", `kind_hint 非法：${String(observation.kindHint)}`, { retryable: true }));
-    }
-    if (observation.importanceHint !== void 0 && !IMPORTANCE_HINTS.includes(observation.importanceHint)) {
-      issues.push(
-        warning("MENTION_IMPORTANCE_INVALID", "$.observations.importanceHint", `importance_hint 非法：${String(observation.importanceHint)}`, {
-          retryable: true
-        })
-      );
-    }
-    if (!byName.has(normalized)) byName.set(normalized, reader.candidatesByName(branchId, normalized));
-    const rows4 = byName.get(normalized);
-    const exact = rows4.find((row2) => String(row2.context_key ?? "") === contextKey);
-    const compatible = rows4.filter((row2) => {
-      const existingKey = String(row2.context_key ?? "");
-      if (existingKey.length === 0 || contextKey.length === 0) return true;
-      return existingKey === contextKey;
-    });
-    const existing = exact ?? (compatible.length === 1 ? compatible[0] : null);
-    if (!existing) {
-      const id2 = makeId("mention", contextKey.length > 0 ? contextKey : normalized, `mention:${normalized}:${observation.kindHint ?? "unknown"}`);
-      const row2 = createRow(
-        "mention_candidates",
-        {
-          name,
-          normalized_name: normalized,
-          context_key: contextKey,
-          kind_hint: observation.kindHint ?? "unknown",
-          first_turn_id: turnId,
-          last_turn_id: turnId,
-          distinct_turn_count: 1,
-          recent_turn_ids_json: [turnId],
-          context_summary: summary,
-          lorebook_source_keys_json: sourceKeys,
-          importance_hint: desiredImportance(observation, sourceKeys, 1),
-          promoted_entity_id: null,
-          status: "watching"
-        },
-        { branchId, id: id2, turnId, clockS: input.clockS, nowWallMs: input.nowWallMs, rulesetVersion: input.rulesetVersion }
-      );
-      mutations.push({
-        table: "mention_candidates",
-        rowId: id2,
-        before: null,
-        after: row2,
-        sourceOpIds: [`mention.observe:${id2}`],
-        basis: basisFor(turnId, `首次提及「${name}」（${observation.kindHint ?? "unknown"}）`, summary.length > 0 || sourceKeys.length > 0)
-      });
-      projected.set(id2, row2);
-      createdInBatch.add(id2);
-      created += 1;
-      continue;
-    }
-    const id = String(existing.id);
-    const recent = uniqueStrings(stringList(existing.recent_turn_ids_json), MENTION_RECENT_TURNS_LIMIT);
-    const alreadyCounted = observation.alreadyCountedThisTurn === true || recent.includes(turnId);
-    const distinctBefore = Math.max(1, Number(existing.distinct_turn_count ?? 1) || 1);
-    const distinctTurnCount = alreadyCounted ? distinctBefore : distinctBefore + 1;
-    const recentAfter = alreadyCounted ? recent : [...recent.filter((value) => value !== turnId), turnId].slice(-MENTION_RECENT_TURNS_LIMIT);
-    const status = String(existing.status ?? "watching");
-    const lorebookAfter = uniqueStrings([...stringList(existing.lorebook_source_keys_json), ...sourceKeys], MENTION_LOREBOOK_LIMIT);
-    const after = {
-      ...existing,
-      last_turn_id: turnId,
-      distinct_turn_count: distinctTurnCount,
-      recent_turn_ids_json: recentAfter,
-      context_key: String(existing.context_key ?? "").length > 0 ? existing.context_key : contextKey,
-      kind_hint: observation.kindHint && observation.kindHint !== "unknown" ? observation.kindHint : existing.kind_hint,
-      context_summary: summary.length > 0 ? summary : existing.context_summary,
-      lorebook_source_keys_json: lorebookAfter,
-      importance_hint: maxImportance(existing.importance_hint, desiredImportance(observation, lorebookAfter, distinctTurnCount)),
-      // 再次出现时把曾被淘汰的候选放回 watching；已建档（promoted）的候选保持指向实体。
-      status: status === "dismissed" ? "watching" : status
-    };
-    mutations.push({
-      table: "mention_candidates",
-      rowId: id,
-      before: existing,
-      after,
-      sourceOpIds: [`mention.observe:${id}`],
-      basis: basisFor(
-        turnId,
-        `${alreadyCounted ? "同一楼重试" : "再次提及"}「${name}」：distinct_turn_count=${distinctTurnCount}`,
-        summary.length > 0 || lorebookAfter.length > 0
-      )
-    });
-    projected.set(id, after);
-    updated += 1;
-    if (String(after.status) === "promoted" && !promoted.includes(id)) promoted.push(id);
-  }
-  const watchingRows = reader.watchingCandidates(branchId);
-  const watchingIds = new Set(watchingRows.map((row2) => String(row2.id)));
-  const watchingAfter = [];
-  for (const row2 of watchingRows) {
-    const id = String(row2.id);
-    const after = projected.get(id) ?? row2;
-    if (String(after.status) === "watching") watchingAfter.push(after);
-  }
-  for (const [id, row2] of projected) {
-    if (watchingIds.has(id)) continue;
-    if (String(row2.status) === "watching") watchingAfter.push(row2);
-  }
-  const over = watchingAfter.length - MENTION_CANDIDATE_LIMIT;
-  const evicted = [];
-  if (over > 0) {
-    const wallOf = reader.turnWallTimes(branchId);
-    const evictable = watchingAfter.filter((row2) => !createdInBatch.has(String(row2.id))).filter((row2) => String(row2.importance_hint ?? "none") !== "core").sort((a, b) => {
-      const rankA = String(a.importance_hint ?? "none") === "none" ? 0 : 1;
-      const rankB = String(b.importance_hint ?? "none") === "none" ? 0 : 1;
-      if (rankA !== rankB) return rankA - rankB;
-      const lastA = String(a.last_turn_id ?? "");
-      const lastB = String(b.last_turn_id ?? "");
-      const wallA = wallOf.get(lastA) ?? 0;
-      const wallB = wallOf.get(lastB) ?? 0;
-      if (wallA !== wallB) return wallA - wallB;
-      return lastA < lastB ? -1 : lastA > lastB ? 1 : 0;
-    });
-    for (const row2 of evictable) {
-      if (evicted.length >= over) break;
-      const id = String(row2.id);
-      const after = {
-        ...row2,
-        // 淘汰也记到当前 turn：变更属于本楼，回退时一并恢复（不是「悄悄消失」）。
-        last_turn_id: turnId,
-        status: "dismissed"
-      };
-      mutations.push({
-        table: "mention_candidates",
-        rowId: id,
-        before: row2,
-        after,
-        sourceOpIds: [`mention.evict:${id}`],
-        basis: basisFor(turnId, `候选上限 ${MENTION_CANDIDATE_LIMIT} 回收：「${String(row2.name ?? "")}」长期未出现且无重要依据`, false)
-      });
-      projected.set(id, after);
-      evicted.push(id);
-    }
-    const remaining = watchingAfter.length - evicted.length;
-    issues.push(
-      warning(
-        "MENTION_EVICTED",
-        "$.mention_candidates",
-        `未建档候选 ${watchingAfter.length} 超过上限 ${MENTION_CANDIDATE_LIMIT}：淘汰 ${evicted.length} 条（理由：importance_hint=none 且 last_turn_id 最旧；core/promoted 不淘汰）；剩余 ${remaining}`,
-        { retryable: false }
-      )
-    );
-  }
-  return { mutations, created, updated, promoted, evicted, issues };
-}
-function turnWallTimes(db, branchId) {
-  const rows4 = queryBound(db, "SELECT id, created_wall_ms FROM turns WHERE branch_id = ?", [branchId]);
-  const out = /* @__PURE__ */ new Map();
-  for (const row2 of rows4) {
-    const wall = Number(row2.created_wall_ms);
-    out.set(String(row2.id), Number.isFinite(wall) ? wall : 0);
-  }
-  return out;
-}
-function promoteMention(db, branchId, mentionId, entityId) {
-  const key = queryBound(db, "SELECT kind FROM entity_keys WHERE branch_id = ? AND id = ? LIMIT 1", [branchId, entityId]);
-  if (key.length === 0) {
-    throw new AtlasDbError("REF_UNKNOWN", `promoteMention 的实体身份不存在：${entityId}`, { branchId, mentionId, entityId });
-  }
-  const rows4 = queryBound(db, "SELECT * FROM mention_candidates WHERE branch_id = ? AND id = ? LIMIT 1", [branchId, mentionId]);
-  if (rows4.length === 0) {
-    throw new AtlasDbError("REF_UNKNOWN", `找不到提及候选：${mentionId}`, { branchId, mentionId, entityId });
-  }
-  const before = decodeMentionRow(rows4[0]);
-  const after = { ...before, status: "promoted", promoted_entity_id: entityId };
-  return {
-    table: "mention_candidates",
-    rowId: mentionId,
-    before,
-    after,
-    sourceOpIds: [`mention.promote:${mentionId}`],
-    basis: {
-      kind: "story",
-      sources: [],
-      causes: [{ kind: String(key[0].kind ?? "character"), id: entityId }],
-      reason: `提及候选「${String(before.name ?? mentionId)}」正式建档为实体 ${entityId}`,
-      verification: "causal",
-      certainty: "confirmed"
-    }
-  };
-}
-var MENTION_CANDIDATE_LIMIT, MENTION_RECENT_TURNS_LIMIT, KIND_HINTS, IMPORTANCE_HINTS, IMPORTANCE_RANK;
-var init_atlas_db_mentions = __esm({
-  "src/atlas-db-mentions.ts"() {
-    "use strict";
-    init_atlas_db_codec();
-    init_atlas_db_defaults();
-    init_atlas_db_runtime();
-    init_atlas_ops_entities();
-    init_atlas_runtime_limits();
-    MENTION_CANDIDATE_LIMIT = ATLAS_RUNTIME_LIMITS.mentionCandidates;
-    MENTION_RECENT_TURNS_LIMIT = MENTION_RECENT_LIMIT;
-    KIND_HINTS = ["character", "location", "item", "faction", "unknown"];
-    IMPORTANCE_HINTS = ["none", "review", "core"];
-    IMPORTANCE_RANK = { none: 0, review: 1, core: 2 };
-  }
-});
-
-// src/atlas-ops-entities.ts
-function issue8(code, path, message, op, extra = {}) {
-  return {
-    code,
-    path,
-    message,
-    severity: "error",
-    retryable: true,
-    opId: op.opId,
-    line: op.line,
-    ...extra
-  };
-}
-function fieldIgnoredWarning(op, fields) {
-  return {
-    code: "FIELD_IGNORED",
-    path: "$.data",
-    message: `本操作不写这些字段，已忽略：${fields.join("、")}`,
-    severity: "warning",
-    retryable: false,
-    opId: op.opId,
-    line: op.line
-  };
-}
-function isPlainObject4(v) {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-function dataOf(op) {
-  return isPlainObject4(op.value.data) ? op.value.data : {};
-}
-function asString(value) {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
-}
-function asFiniteNumber(value) {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  return null;
-}
-function applyPatch(existing, changes) {
-  const out = { ...existing };
-  for (const [key, value] of Object.entries(changes)) {
-    if (value === void 0) continue;
-    out[key] = value;
-  }
-  return out;
-}
-function readSetFor(ctx, table, rowId2) {
-  const row2 = ctx.tables.selectOne(table, ctx.branchId, rowId2);
-  const rowRev2 = row2 && typeof row2.row_rev === "number" ? row2.row_rev : 0;
-  return [{ table, rowId: rowId2, rowRev: rowRev2 }];
-}
-function mutation(table, rowId2, before, after, op, basis) {
-  return { table, rowId: rowId2, before, after, sourceOpIds: [op.opId], basis };
-}
-function turnIdOf(ctx) {
-  if (typeof ctx.turnId === "string" && ctx.turnId !== "") return ctx.turnId;
-  return ctx.turnId ?? ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
-}
-function basisFor2(ctx, op, extra = {}) {
-  if (ctx.basisFor) return ctx.basisFor(op, extra);
-  return {
-    kind: ctx.phase === "observe" ? "story" : "simulation",
-    sources: [],
-    causes: extra.causes ?? [],
-    reason: op.value.why ?? `${op.value.op} 语义操作`,
-    verification: ctx.phase === "observe" ? "source_bound" : "causal",
-    certainty: extra.certainty ?? (ctx.phase === "observe" ? "confirmed" : "inferred")
-  };
-}
-function entityKeyMutation(ctx, op, id, kind) {
-  const existing = ctx.tables.selectOne("entity_keys", ctx.branchId, id);
-  return mutation("entity_keys", id, existing, { branch_id: ctx.branchId, id, kind }, op, basisFor2(ctx, op));
-}
-function ensureAliases(value, op, path) {
-  if (value === void 0) return { value: null, issues: [] };
-  if (value === null) return { value: [], issues: [] };
-  if (!Array.isArray(value)) return { value: null, issues: [issue8("FIELD_TYPE_INVALID", path, "aliases 必须是字符串数组", op)] };
-  const list2 = value.filter((v) => typeof v === "string" && v.trim().length > 0).map((v) => v.trim());
-  if (list2.length > ALIAS_LIMIT) {
-    return {
-      value: list2.slice(0, ALIAS_LIMIT),
-      issues: [issue8("FIELD_LIMIT_EXCEEDED", path, `aliases 最多 ${ALIAS_LIMIT} 个，收到 ${list2.length} 个`, op)]
-    };
-  }
-  return { value: list2, issues: [] };
-}
-function applyPosition(target, data, op, issues, scope) {
-  if (!Object.prototype.hasOwnProperty.call(data, "position")) return;
-  const position = data.position;
-  if (position === null) {
-    target.grid_x = null;
-    target.grid_y = null;
-    target.map_id = null;
-    target.coord_precision = "unknown";
-    target.uncertainty_radius_cells = null;
-    return;
-  }
-  if (!isPlainObject4(position)) {
-    issues.push(issue8("FIELD_TYPE_INVALID", "$.data.position", "position 必须是 {x,y,precision,radius?}", op));
-    return;
-  }
-  const x = asFiniteNumber(position.x);
-  const y = asFiniteNumber(position.y);
-  if (x === null || y === null) {
-    issues.push(
-      issue8("COORD_INCOMPLETE", "$.data.position", "position 必须同时给出有限数字 x 与 y；不知道精确位置时请省略 position", op)
-    );
-    return;
-  }
-  const precision = position.precision === void 0 ? "approximate" : String(position.precision);
-  if (!["exact", "approximate", "layout", "unknown"].includes(precision)) {
-    issues.push(issue8("ENUM_INVALID", "$.data.position.precision", `coord precision 取值非法：${precision}`, op));
-    return;
-  }
-  const mapRefRaw = data.map_ref;
-  if (typeof mapRefRaw !== "string" || mapRefRaw.trim() === "") {
-    issues.push(issue8("COORD_MAP_REQUIRED", "$.data.map_ref", "给出坐标必须同时给出 map_ref（程序不把坐标默认挂到根图）", op));
-    return;
-  }
-  const mapResolved = resolveRef(mapRefRaw, "map", scope, { opId: op.opId, line: op.line, field: "map_ref" });
-  if (!mapResolved.entry) {
-    issues.push(...mapResolved.issues);
-    return;
-  }
-  target.map_id = mapResolved.entry.id;
-  target.grid_x = x;
-  target.grid_y = y;
-  target.coord_precision = precision;
-  const radius = asFiniteNumber(position.radius);
-  target.uncertainty_radius_cells = radius !== null && radius >= 0 ? radius : null;
-}
-function ensureLocationRef(data, field, op, issues, target, targetField, expectedKind, scope) {
-  if (!Object.prototype.hasOwnProperty.call(data, field)) return;
-  const raw = data[field];
-  if (raw === null) {
-    target[targetField] = null;
-    return;
-  }
-  if (typeof raw !== "string" || raw.trim() === "") {
-    issues.push(issue8("FIELD_TYPE_INVALID", `$.data.${field}`, `${field} 必须是引用字符串`, op));
-    return;
-  }
-  const resolved = resolveRef(raw, expectedKind, scope, { opId: op.opId, line: op.line, field });
-  if (!resolved.entry) {
-    issues.push(...resolved.issues);
-    return;
-  }
-  target[targetField] = resolved.entry.id;
-}
-function declaredRef(alias, id, kind, opId) {
-  return { alias, id, kind, rowRev: null, declaredByOpId: opId };
-}
-function normalizeName(name) {
-  return name.trim().replace(/\s+/g, " ").toLowerCase();
-}
-function compileLocationUpsert(op, ctx) {
-  const result = emptyCompileResult();
-  const data = dataOf(op);
-  const unknown = Object.keys(data).filter((k) => !LOCATION_FIELDS.has(k));
-  if (unknown.length) result.issues.push(fieldIgnoredWarning(op, unknown));
-  const ref = op.value.ref?.trim();
-  const resolvingExisting = Boolean(ref) && !ref.startsWith("new:");
-  const existing = resolvingExisting ? resolveRef(ref, "location", ctx.scope, { opId: op.opId, line: op.line, field: "ref" }) : null;
-  if (resolvingExisting && !existing?.entry) {
-    result.issues.push(...existing?.issues ?? [issue8("REF_UNKNOWN", "$.ref", `找不到地点引用：${ref}`, op)]);
-    return result;
-  }
-  const creating = !existing?.entry;
-  const rowId2 = existing?.entry ? existing.entry.id : ctx.makeId("location", op.opId, ref && ref.startsWith("new:") ? ref.slice(4) : `auto:${op.opId}`);
-  const before = existing?.entry ? ctx.tables.selectOne("locations", ctx.branchId, rowId2) : null;
-  if (!creating && !before) {
-    result.issues.push(issue8("REF_UNKNOWN", "$.ref", `引用存在但地点行不存在：${rowId2}`, op));
-    return result;
-  }
-  const changes = {};
-  const name = asString(data.name);
-  if (creating) {
-    if (!name) {
-      result.issues.push(issue8("MINIMUM_FIELD_MISSING", "$.data.name", "新建地点必须给 name", op));
-      return result;
-    }
-    changes.name = name;
-  } else if (Object.prototype.hasOwnProperty.call(data, "name")) {
-    if (!name) {
-      result.issues.push(issue8("FIELD_TYPE_INVALID", "$.data.name", "地点名称 trim 后不能为空", op));
-      return result;
-    }
-    changes.name = name;
-  }
-  const aliases = ensureAliases(data.aliases, op, "$.data.aliases");
-  result.issues.push(...aliases.issues);
-  if (aliases.value) changes.aliases_json = aliases.value;
-  if (Object.prototype.hasOwnProperty.call(data, "kind")) {
-    const kind = String(data.kind);
-    if (!LOCATION_KINDS2.includes(kind)) result.issues.push(issue8("ENUM_INVALID", "$.data.kind", `地点类型非法：${kind}`, op));
-    else changes.kind = kind;
-  }
-  if (Object.prototype.hasOwnProperty.call(data, "description")) changes.description = String(data.description ?? "");
-  if (Object.prototype.hasOwnProperty.call(data, "terrain")) changes.terrain = asString(data.terrain) ?? "unknown";
-  if (Object.prototype.hasOwnProperty.call(data, "mobility")) {
-    const mobility = String(data.mobility);
-    if (!["fixed", "mobile"].includes(mobility)) result.issues.push(issue8("ENUM_INVALID", "$.data.mobility", `mobility 非法：${mobility}`, op));
-    else changes.mobility = mobility;
-  }
-  if (creating && !Object.prototype.hasOwnProperty.call(data, "mobility") && changes.kind === "vehicle") {
-    changes.mobility = "mobile";
-  }
-  if (Object.prototype.hasOwnProperty.call(data, "existence_quality")) {
-    const q = String(data.existence_quality);
-    if (!LOCATION_EXISTENCE.includes(q)) result.issues.push(issue8("ENUM_INVALID", "$.data.existence_quality", `existence_quality 非法：${q}`, op));
-    else changes.existence_quality = q;
-  }
-  if (Object.prototype.hasOwnProperty.call(data, "access")) changes.access_rules_json = data.access ?? null;
-  if (Object.prototype.hasOwnProperty.call(data, "area")) changes.area_geometry_json = data.area ?? null;
-  if (Object.prototype.hasOwnProperty.call(data, "vehicle_profile")) changes.vehicle_profile_json = data.vehicle_profile ?? null;
-  ensureLocationRef(data, "parent_ref", op, result.issues, changes, "parent_location_id", ["location"], ctx.scope);
-  ensureLocationRef(data, "anchor_ref", op, result.issues, changes, "anchor_location_id", ["location"], ctx.scope);
-  if (changes.anchor_location_id === rowId2) result.issues.push(issue8("INVARIANT_LOCATION_ANCHOR_CYCLE", "$.data.anchor_ref", "载具或地点不能以自身作为停靠锚点；使用实际所在地点，行进状态使用旅程记录", op));
-  if (changes.parent_location_id === rowId2) result.issues.push(issue8("INVARIANT_LOCATION_PARENT_CYCLE", "$.data.parent_ref", "地点不能以自己为父地点", op));
-  applyPosition(changes, data, op, result.issues, ctx.scope);
-  if (result.issues.some((i) => i.severity === "error")) return result;
-  if (creating) {
-    const row2 = createRow("locations", { ...changes }, {
-      branchId: ctx.branchId,
-      id: rowId2,
-      turnId: turnIdOf(ctx),
-      clockS: ctx.clockS,
-      nowWallMs: Date.now(),
-      rulesetVersion: "atlas-1"
-    });
-    result.mutations.push(entityKeyMutation(ctx, op, rowId2, "location"));
-    result.mutations.push(mutation("locations", rowId2, null, row2, op, basisFor2(ctx, op)));
-    result.entityKeyWrites = [{ id: rowId2, kind: "location" }];
-  } else {
-    const merged = applyPatch(before, changes);
-    if (merged.parent_location_id === rowId2) {
-      result.issues.push(issue8("INVARIANT_LOCATION_PARENT_CYCLE", "$.data.parent_ref", "地点不能以自己为父地点", op));
-      return result;
-    }
-    merged.row_rev = Number(before.row_rev ?? 1) + 1;
-    merged.updated_turn_id = turnIdOf(ctx);
-    result.mutations.push(mutation("locations", rowId2, before, merged, op, basisFor2(ctx, op)));
-    result.readSet.push(...readSetFor(ctx, "locations", rowId2));
-  }
-  result.declaredRefs = ref?.startsWith("new:") ? [declaredRef(ref, rowId2, "location", op.opId)] : [];
-  return result;
-}
-function mentionMutations(ctx, op, params) {
-  const observed = updateMentionCandidates({
-    reads: ctx.tables,
-    branchId: ctx.branchId,
-    turnId: turnIdOf(ctx),
-    clockS: ctx.clockS,
-    nowWallMs: Date.now(),
-    rulesetVersion: "atlas-1",
-    observations: [
-      {
-        name: params.name,
-        kindHint: "character",
-        identity: params.identity,
-        contextSummary: params.identity,
-        lorebookSourceKeys: params.sourceKeys,
-        importanceHint: params.importanceHint
-      }
-    ],
-    makeId: (kind, opId, alias) => ctx.makeId(kind, opId, alias)
-  });
-  void op;
-  return { mutations: observed.mutations, issues: observed.issues };
-}
-function compileCharacterUpsert(op, ctx) {
-  const result = emptyCompileResult();
-  const data = dataOf(op);
-  const unknown = Object.keys(data).filter((k) => !CHARACTER_FIELDS.has(k));
-  if (unknown.length) result.issues.push(fieldIgnoredWarning(op, unknown));
-  const ref = op.value.ref?.trim();
-  const registration = data.registration === void 0 ? "auto" : String(data.registration);
-  if (!["auto", "watch"].includes(registration)) {
-    result.issues.push(issue8("ENUM_INVALID", "$.data.registration", `registration 非法：${registration}`, op));
-    return result;
-  }
-  const resolvingExisting = Boolean(ref) && !ref.startsWith("new:");
-  const existing = resolvingExisting ? resolveRef(ref, "character", ctx.scope, { opId: op.opId, line: op.line, field: "ref" }) : null;
-  if (resolvingExisting && !existing?.entry) {
-    result.issues.push(...existing?.issues ?? [issue8("REF_UNKNOWN", "$.ref", `找不到人物引用：${ref}`, op)]);
-    return result;
-  }
-  const creating = !existing?.entry;
-  const name = asString(data.name);
-  const identity = asString(data.identity) ?? "";
-  const importanceReason = asString(data.importance_reason);
-  const hasImportance = Object.prototype.hasOwnProperty.call(data, "importance") || importanceReason !== null;
-  const hasBootstrapHint = identity !== "" || hasImportance;
-  const sourceKeys = Array.isArray(op.value.source) ? op.value.source : op.value.source ? [op.value.source] : [];
-  if (registration === "watch" && creating) {
-    if (!name) {
-      result.issues.push(issue8("MINIMUM_FIELD_MISSING", "$.data.name", "watch 候选至少需要 name", op));
-      return result;
-    }
-    const mention = mentionMutations(ctx, op, { name, identity, importanceHint: "review", sourceKeys });
-    result.mutations.push(...mention.mutations);
-    result.issues.push(...mention.issues);
-    result.issues.push({
-      code: "MENTION_TRACKED",
-      path: "$.data.name",
-      message: `「${name}」只进入临时提及候选，未创建人物实体（registration=watch）`,
-      severity: "warning",
-      retryable: false,
-      opId: op.opId,
-      line: op.line
-    });
-    return result;
-  }
-  if (creating && !hasBootstrapHint) {
-    if (name) {
-      const mention = mentionMutations(ctx, op, { name, identity, importanceHint: "review", sourceKeys });
-      result.mutations.push(...mention.mutations);
-      result.issues.push(...mention.issues);
-      result.issues.push({
-        code: "MENTION_TRACKED",
-        path: "$.data.name",
-        message: `「${name}」尚无身份/重要性线索，先记为临时提及候选，不创建人物实体`,
-        severity: "warning",
-        retryable: false,
-        opId: op.opId,
-        line: op.line
-      });
-      return result;
-    }
-    result.issues.push(
-      issue8("MINIMUM_FIELD_MISSING", "$.data.name", "新建人物必须给 name，并至少给 identity / importance / importance_reason 之一", op)
-    );
-    return result;
-  }
-  const rowId2 = existing?.entry ? existing.entry.id : ctx.makeId("character", op.opId, ref && ref.startsWith("new:") ? ref.slice(4) : `auto:${op.opId}`);
-  const before = existing?.entry ? ctx.tables.selectOne("characters", ctx.branchId, rowId2) : null;
-  if (!creating && !before) {
-    result.issues.push(issue8("REF_UNKNOWN", "$.ref", `引用存在但人物行不存在：${rowId2}`, op));
-    return result;
-  }
-  const changes = {};
-  if (creating) {
-    changes.name = name;
-  } else if (Object.prototype.hasOwnProperty.call(data, "name")) {
-    if (!name) {
-      result.issues.push(issue8("FIELD_TYPE_INVALID", "$.data.name", "人物名称 trim 后不能为空", op));
-      return result;
-    }
-    changes.name = name;
-  }
-  const aliases = ensureAliases(data.aliases, op, "$.data.aliases");
-  result.issues.push(...aliases.issues);
-  if (aliases.value) changes.aliases_json = aliases.value;
-  if (Object.prototype.hasOwnProperty.call(data, "role")) {
-    const role = String(data.role);
-    if (!CHARACTER_ROLES.includes(role)) result.issues.push(issue8("ENUM_INVALID", "$.data.role", `role 非法：${role}`, op));
-    else changes.role = role;
-  }
-  if (Object.prototype.hasOwnProperty.call(data, "importance")) {
-    const importance = String(data.importance);
-    if (!CHARACTER_IMPORTANCE.includes(importance)) result.issues.push(issue8("ENUM_INVALID", "$.data.importance", `importance 非法：${importance}`, op));
-    else changes.importance = importance;
-  }
-  if (Object.prototype.hasOwnProperty.call(data, "physical_status")) {
-    const st = String(data.physical_status);
-    if (!CHARACTER_PHYSICAL.includes(st)) result.issues.push(issue8("ENUM_INVALID", "$.data.physical_status", `physical_status 非法：${st}`, op));
-    else changes.physical_status = st;
-  }
-  for (const field of ["identity", "description", "personality", "thought", "action_tendency", "condition_note"]) {
-    if (Object.prototype.hasOwnProperty.call(data, field)) {
-      changes[field] = typeof data[field] === "string" ? data[field] : data[field] === null ? "" : String(data[field]);
-    }
-  }
-  if (Object.prototype.hasOwnProperty.call(data, "importance_reason")) {
-    changes.importance_reason = typeof data.importance_reason === "string" ? data.importance_reason : String(data.importance_reason ?? "");
-  }
-  if (Object.prototype.hasOwnProperty.call(data, "mobility_profiles")) {
-    const list2 = Array.isArray(data.mobility_profiles) ? data.mobility_profiles : null;
-    if (!list2) result.issues.push(issue8("FIELD_TYPE_INVALID", "$.data.mobility_profiles", "mobility_profiles 必须是数组", op));
-    else if (list2.length > MOBILITY_PROFILE_LIMIT) result.issues.push(issue8("FIELD_LIMIT_EXCEEDED", "$.data.mobility_profiles", `最多 ${MOBILITY_PROFILE_LIMIT} 种移动方式`, op));
-    else changes.mobility_profiles_json = list2;
-  }
-  if (Object.prototype.hasOwnProperty.call(data, "capabilities")) {
-    const list2 = Array.isArray(data.capabilities) ? data.capabilities : null;
-    if (!list2) result.issues.push(issue8("FIELD_TYPE_INVALID", "$.data.capabilities", "capabilities 必须是数组", op));
-    else if (list2.length > CAPABILITY_LIMIT) result.issues.push(issue8("FIELD_LIMIT_EXCEEDED", "$.data.capabilities", `最多 ${CAPABILITY_LIMIT} 项能力`, op));
-    else changes.capabilities_json = list2;
-  }
-  if (ctx.phase === "decision" && !creating) {
-    const allowed = /* @__PURE__ */ new Set(["thought", "action_tendency", "importance", "importance_reason", "condition_note", "physical_status"]);
-    const illegal = Object.keys(changes).filter((k) => !allowed.has(k));
-    if (illegal.length) {
-      result.issues.push(
-        issue8("PHASE_FIELD_NOT_ALLOWED", "$.data", `decision 阶段不得修改这些字段：${illegal.join("、")}（本阶段只写想法/倾向/注意）`, op)
-      );
-      return result;
-    }
-  }
-  ensureLocationRef(data, "location_ref", op, result.issues, changes, "location_id", ["location"], ctx.scope);
-  if (before && Object.prototype.hasOwnProperty.call(changes, "location_id") && changes.location_id !== before.location_id && !Object.prototype.hasOwnProperty.call(data, "position")) {
-    Object.assign(changes, { map_id: null, grid_x: null, grid_y: null, coord_precision: "unknown", uncertainty_radius_cells: null });
-  }
-  applyPosition(changes, data, op, result.issues, ctx.scope);
-  if (result.issues.some((i) => i.severity === "error")) return result;
-  if (creating) {
-    const row2 = createRow("characters", { ...changes }, {
-      branchId: ctx.branchId,
-      id: rowId2,
-      turnId: turnIdOf(ctx),
-      clockS: ctx.clockS,
-      nowWallMs: Date.now(),
-      rulesetVersion: "atlas-1"
-    });
-    result.mutations.push(entityKeyMutation(ctx, op, rowId2, "character"));
-    result.mutations.push(mutation("characters", rowId2, null, row2, op, basisFor2(ctx, op)));
-    result.entityKeyWrites = [{ id: rowId2, kind: "character" }];
-  } else {
-    const merged = applyPatch(before, changes);
-    merged.row_rev = Number(before.row_rev ?? 1) + 1;
-    merged.updated_turn_id = turnIdOf(ctx);
-    result.mutations.push(mutation("characters", rowId2, before, merged, op, basisFor2(ctx, op)));
-    result.readSet.push(...readSetFor(ctx, "characters", rowId2));
-  }
-  result.declaredRefs = ref?.startsWith("new:") ? [declaredRef(ref, rowId2, "character", op.opId)] : [];
-  return result;
-}
-function compileItemUpsert(op, ctx) {
-  const result = emptyCompileResult();
-  const data = dataOf(op);
-  const unknown = Object.keys(data).filter((k) => !ITEM_FIELDS.has(k));
-  if (unknown.length) result.issues.push(fieldIgnoredWarning(op, unknown));
-  const ref = op.value.ref?.trim();
-  const resolvingExisting = Boolean(ref) && !ref.startsWith("new:");
-  const existing = resolvingExisting ? resolveRef(ref, "item", ctx.scope, { opId: op.opId, line: op.line, field: "ref" }) : null;
-  if (resolvingExisting && !existing?.entry) {
-    result.issues.push(...existing?.issues ?? [issue8("REF_UNKNOWN", "$.ref", `找不到物品引用：${ref}`, op)]);
-    return result;
-  }
-  const creating = !existing?.entry;
-  const name = asString(data.name);
-  if (creating && !name) {
-    result.issues.push(issue8("MINIMUM_FIELD_MISSING", "$.data.name", "新建物品必须给 name", op));
-    return result;
-  }
-  const rowId2 = existing?.entry ? existing.entry.id : ctx.makeId("item", op.opId, ref && ref.startsWith("new:") ? ref.slice(4) : `auto:${op.opId}`);
-  const before = existing?.entry ? ctx.tables.selectOne("items", ctx.branchId, rowId2) : null;
-  if (!creating && !before) {
-    result.issues.push(issue8("REF_UNKNOWN", "$.ref", `引用存在但物品行不存在：${rowId2}`, op));
-    return result;
-  }
-  const changes = {};
-  if (creating) changes.name = name;
-  else if (Object.prototype.hasOwnProperty.call(data, "name")) changes.name = name;
-  const aliases = ensureAliases(data.aliases, op, "$.data.aliases");
-  result.issues.push(...aliases.issues);
-  if (aliases.value) changes.aliases_json = aliases.value;
-  if (Object.prototype.hasOwnProperty.call(data, "kind")) {
-    const kind = String(data.kind);
-    if (!ITEM_KINDS2.includes(kind)) result.issues.push(issue8("ENUM_INVALID", "$.data.kind", `物品类别非法：${kind}`, op));
-    else changes.kind = kind;
-  }
-  if (Object.prototype.hasOwnProperty.call(data, "status")) {
-    const st = String(data.status);
-    if (!ITEM_STATUS.includes(st)) result.issues.push(issue8("ENUM_INVALID", "$.data.status", `物品状态非法：${st}`, op));
-    else changes.status = st;
-  }
-  if (Object.prototype.hasOwnProperty.call(data, "description")) changes.description = String(data.description ?? "");
-  if (Object.prototype.hasOwnProperty.call(data, "condition_note")) changes.condition_note = String(data.condition_note ?? "");
-  if (Object.prototype.hasOwnProperty.call(data, "unit")) changes.unit = asString(data.unit) ?? "件";
-  if (Object.prototype.hasOwnProperty.call(data, "quantity")) {
-    if (data.quantity === null) {
-      changes.quantity = null;
-    } else {
-      const q = asFiniteNumber(data.quantity);
-      if (q === null || q < 0) {
-        result.issues.push(issue8("QUANTITY_INVALID", "$.data.quantity", "quantity 必须是有限非负数或 null（未知）", op));
-      } else {
-        changes.quantity = q;
-        if (q === 0) changes.status = "consumed";
-      }
-    }
-  }
-  if (Object.prototype.hasOwnProperty.call(data, "properties")) {
-    const list2 = Array.isArray(data.properties) ? data.properties : null;
-    if (!list2) result.issues.push(issue8("FIELD_TYPE_INVALID", "$.data.properties", "properties 必须是数组", op));
-    else if (list2.length > ITEM_PROPERTY_LIMIT) result.issues.push(issue8("FIELD_LIMIT_EXCEEDED", "$.data.properties", `properties 最多 ${ITEM_PROPERTY_LIMIT} 项`, op));
-    else changes.properties_json = list2;
-  }
-  if (creating && Object.prototype.hasOwnProperty.call(data, "placement")) {
-    const placement = data.placement;
-    if (isPlainObject4(placement)) {
-      if (Object.prototype.hasOwnProperty.call(placement, "holder_ref")) {
-        const r = resolveRef(String(placement.holder_ref), "character", ctx.scope, { opId: op.opId, field: "placement.holder_ref" });
-        if (r.entry) changes.holder_character_id = r.entry.id;
-        else result.issues.push(...r.issues);
-      } else if (Object.prototype.hasOwnProperty.call(placement, "container_ref")) {
-        const r = resolveRef(String(placement.container_ref), "item", ctx.scope, { opId: op.opId, field: "placement.container_ref" });
-        if (r.entry) changes.container_item_id = r.entry.id;
-        else result.issues.push(...r.issues);
-      } else if (Object.prototype.hasOwnProperty.call(placement, "location_ref")) {
-        const r = resolveRef(String(placement.location_ref), "location", ctx.scope, { opId: op.opId, field: "placement.location_ref" });
-        if (r.entry) changes.location_id = r.entry.id;
-        else result.issues.push(...r.issues);
-      } else {
-        result.issues.push(issue8("TRANSFER_TARGET_CONFLICT", "$.data.placement", "placement 需要 holder_ref / container_ref / location_ref 之一", op));
-      }
-    } else {
-      result.issues.push(issue8("FIELD_TYPE_INVALID", "$.data.placement", "placement 必须是 {holder_ref|container_ref|location_ref}", op));
-    }
-  }
-  if (result.issues.some((i) => i.severity === "error")) return result;
-  if (creating) {
-    const row2 = createRow("items", { ...changes }, {
-      branchId: ctx.branchId,
-      id: rowId2,
-      turnId: turnIdOf(ctx),
-      clockS: ctx.clockS,
-      nowWallMs: Date.now(),
-      rulesetVersion: "atlas-1"
-    });
-    result.mutations.push(entityKeyMutation(ctx, op, rowId2, "item"));
-    result.mutations.push(mutation("items", rowId2, null, row2, op, basisFor2(ctx, op)));
-    result.entityKeyWrites = [{ id: rowId2, kind: "item" }];
-  } else {
-    const merged = applyPatch(before, changes);
-    merged.row_rev = Number(before.row_rev ?? 1) + 1;
-    merged.updated_turn_id = turnIdOf(ctx);
-    result.mutations.push(mutation("items", rowId2, before, merged, op, basisFor2(ctx, op)));
-    result.readSet.push(...readSetFor(ctx, "items", rowId2));
-  }
-  result.declaredRefs = ref?.startsWith("new:") ? [declaredRef(ref, rowId2, "item", op.opId)] : [];
-  return result;
-}
-function compileItemTransfer(op, ctx) {
-  const result = emptyCompileResult();
-  const data = dataOf(op);
-  const ref = op.value.ref?.trim();
-  if (!ref) {
-    result.issues.push(issue8("MINIMUM_FIELD_MISSING", "$.ref", "item.transfer 需要 ref", op));
-    return result;
-  }
-  const resolved = resolveRef(ref, "item", ctx.scope, { opId: op.opId, line: op.line, field: "ref" });
-  if (!resolved.entry) {
-    result.issues.push(...resolved.issues);
-    return result;
-  }
-  const rowId2 = resolved.entry.id;
-  const before = ctx.tables.selectOne("items", ctx.branchId, rowId2) ?? ctx.newItemRows?.get(rowId2) ?? null;
-  if (!before) {
-    result.issues.push(issue8("REF_UNKNOWN", "$.ref", `物品行不存在：${rowId2}`, op));
-    return result;
-  }
-  const to = data.to;
-  if (!isPlainObject4(to)) {
-    result.issues.push(issue8("MINIMUM_FIELD_MISSING", "$.data.to", "item.transfer 需要 to={holder_ref|container_ref|location_ref|unknown}", op));
-    return result;
-  }
-  const kinds = ["holder_ref", "container_ref", "location_ref"].filter(
-    (k) => Object.prototype.hasOwnProperty.call(to, k) && to[k] !== null
-  );
-  const isUnknown = to.unknown === true;
-  if (isUnknown && kinds.length > 0) {
-    result.issues.push(issue8("TRANSFER_TARGET_CONFLICT", "$.data.to", "to 的落点互斥：unknown 不能与 holder_ref/container_ref/location_ref 同时出现", op));
-    return result;
-  }
-  if (!isUnknown && kinds.length !== 1) {
-    result.issues.push(issue8("TRANSFER_TARGET_CONFLICT", "$.data.to", `to 必须且只能给出一种落点（收到 ${kinds.length} 种）`, op));
-    return result;
-  }
-  const changes = {
-    holder_character_id: null,
-    container_item_id: null,
-    location_id: null,
-    map_id: null,
-    grid_x: null,
-    grid_y: null,
-    coord_precision: "unknown",
-    uncertainty_radius_cells: null
-  };
-  if (kinds[0] === "holder_ref") {
-    const r = resolveRef(String(to.holder_ref), "character", ctx.scope, { opId: op.opId, field: "to.holder_ref" });
-    if (!r.entry) {
-      result.issues.push(...r.issues);
-      return result;
-    }
-    changes.holder_character_id = r.entry.id;
-  } else if (kinds[0] === "container_ref") {
-    const r = resolveRef(String(to.container_ref), "item", ctx.scope, { opId: op.opId, field: "to.container_ref" });
-    if (!r.entry) {
-      result.issues.push(...r.issues);
-      return result;
-    }
-    if (r.entry.id === rowId2) {
-      result.issues.push(issue8("INVARIANT_CONTAINER_CYCLE", "$.data.to.container_ref", "物品不能装在自己里面", op));
-      return result;
-    }
-    changes.container_item_id = r.entry.id;
-  } else if (kinds[0] === "location_ref") {
-    const r = resolveRef(String(to.location_ref), "location", ctx.scope, { opId: op.opId, field: "to.location_ref" });
-    if (!r.entry) {
-      result.issues.push(...r.issues);
-      return result;
-    }
-    changes.location_id = r.entry.id;
-    if (isPlainObject4(to.position)) {
-      const x = asFiniteNumber(to.position.x);
-      const y = asFiniteNumber(to.position.y);
-      const mapRef = typeof data.map_ref === "string" ? data.map_ref : null;
-      if (x !== null && y !== null && mapRef) {
-        const mr = resolveRef(mapRef, "map", ctx.scope, { opId: op.opId, field: "map_ref" });
-        if (mr.entry) {
-          changes.map_id = mr.entry.id;
-          changes.grid_x = x;
-          changes.grid_y = y;
-          changes.coord_precision = String(to.position.precision ?? "approximate");
-        } else {
-          result.issues.push(...mr.issues);
-        }
-      }
-    }
-  }
-  if (Object.prototype.hasOwnProperty.call(data, "owner_ref")) {
-    if (data.owner_ref === null) {
-      changes.owner_entity_id = null;
-    } else {
-      const r = resolveRef(String(data.owner_ref), ["character", "faction"], ctx.scope, { opId: op.opId, field: "owner_ref" });
-      if (!r.entry) {
-        result.issues.push(...r.issues);
-        return result;
-      }
-      changes.owner_entity_id = r.entry.id;
-    }
-  }
-  const movedQty = Object.prototype.hasOwnProperty.call(data, "quantity") ? asFiniteNumber(data.quantity) : null;
-  const heldQty = typeof before.quantity === "number" ? before.quantity : null;
-  if (Object.prototype.hasOwnProperty.call(data, "quantity") && (movedQty === null || movedQty <= 0)) {
-    result.issues.push(issue8("QUANTITY_INVALID", "$.data.quantity", "转移数量必须为正有限数", op));
-    return result;
-  }
-  if (movedQty !== null && heldQty !== null && movedQty > heldQty) {
-    result.issues.push(issue8("QUANTITY_INSUFFICIENT", "$.data.quantity", `转移数量 ${movedQty} 超过持有量 ${heldQty}`, op));
-    return result;
-  }
-  if (result.issues.some((i) => i.severity === "error")) return result;
-  const turnId = turnIdOf(ctx);
-  if (movedQty !== null && heldQty !== null && movedQty < heldQty) {
-    const remaining = heldQty - movedQty;
-    const sourceAfter = applyPatch(before, { quantity: remaining, row_rev: Number(before.row_rev ?? 1) + 1, updated_turn_id: turnId });
-    result.mutations.push(mutation("items", rowId2, before, sourceAfter, op, basisFor2(ctx, op)));
-    const newId = ctx.makeId("item", op.opId, `split:${rowId2}:${movedQty}`);
-    const newRow = createRow(
-      "items",
-      { ...before, ...changes, quantity: movedQty },
-      { branchId: ctx.branchId, id: newId, turnId, clockS: ctx.clockS, nowWallMs: Date.now(), rulesetVersion: "atlas-1" }
-    );
-    newRow.row_rev = 1;
-    result.mutations.push(entityKeyMutation(ctx, op, newId, "item"));
-    result.mutations.push(mutation("items", newId, null, newRow, op, basisFor2(ctx, op)));
-    result.entityKeyWrites = [{ id: newId, kind: "item" }];
-    result.operationKeys = [{ groupKey: `item:${rowId2}`, opKey: `transfer:${op.opId}` }];
-    result.readSet.push(...readSetFor(ctx, "items", rowId2));
-    return result;
-  }
-  const after = applyPatch(before, { ...changes, row_rev: Number(before.row_rev ?? 1) + 1, updated_turn_id: turnId });
-  if (movedQty !== null && heldQty !== null) after.quantity = Math.max(0, heldQty - movedQty);
-  if (after.quantity === 0) after.status = "consumed";
-  result.mutations.push(mutation("items", rowId2, before, after, op, basisFor2(ctx, op)));
-  result.operationKeys = [{ groupKey: `item:${rowId2}`, opKey: `transfer:${op.opId}` }];
-  result.readSet.push(...readSetFor(ctx, "items", rowId2));
-  return result;
-}
-function compileFactionUpsert(op, ctx) {
-  const result = emptyCompileResult();
-  const data = dataOf(op);
-  const unknown = Object.keys(data).filter((k) => !FACTION_FIELDS.has(k));
-  if (unknown.length) result.issues.push(fieldIgnoredWarning(op, unknown));
-  const ref = op.value.ref?.trim();
-  const resolvingExisting = Boolean(ref) && !ref.startsWith("new:");
-  const existing = resolvingExisting ? resolveRef(ref, "faction", ctx.scope, { opId: op.opId, line: op.line, field: "ref" }) : null;
-  if (resolvingExisting && !existing?.entry) {
-    result.issues.push(...existing?.issues ?? [issue8("REF_UNKNOWN", "$.ref", `找不到势力引用：${ref}`, op)]);
-    return result;
-  }
-  const creating = !existing?.entry;
-  const name = asString(data.name);
-  if (creating && !name) {
-    result.issues.push(issue8("MINIMUM_FIELD_MISSING", "$.data.name", "新建势力必须给 name", op));
-    return result;
-  }
-  const rowId2 = existing?.entry ? existing.entry.id : ctx.makeId("faction", op.opId, ref && ref.startsWith("new:") ? ref.slice(4) : `auto:${op.opId}`);
-  const before = existing?.entry ? ctx.tables.selectOne("factions", ctx.branchId, rowId2) : null;
-  if (!creating && !before) {
-    result.issues.push(issue8("REF_UNKNOWN", "$.ref", `引用存在但势力行不存在：${rowId2}`, op));
-    return result;
-  }
-  const changes = {};
-  if (creating) changes.name = name;
-  else if (Object.prototype.hasOwnProperty.call(data, "name")) changes.name = name;
-  const aliases = ensureAliases(data.aliases, op, "$.data.aliases");
-  result.issues.push(...aliases.issues);
-  if (aliases.value) changes.aliases_json = aliases.value;
-  if (Object.prototype.hasOwnProperty.call(data, "kind")) {
-    const kind = String(data.kind);
-    if (!FACTION_KINDS2.includes(kind)) result.issues.push(issue8("ENUM_INVALID", "$.data.kind", `势力类型非法：${kind}`, op));
-    else changes.kind = kind;
-  }
-  if (Object.prototype.hasOwnProperty.call(data, "status")) {
-    const st = String(data.status);
-    if (!FACTION_STATUS.includes(st)) result.issues.push(issue8("ENUM_INVALID", "$.data.status", `势力状态非法：${st}`, op));
-    else changes.status = st;
-  }
-  if (Object.prototype.hasOwnProperty.call(data, "description")) changes.description = String(data.description ?? "");
-  if (Object.prototype.hasOwnProperty.call(data, "goal")) changes.goal = String(data.goal ?? "");
-  if (Object.prototype.hasOwnProperty.call(data, "capabilities")) {
-    const list2 = Array.isArray(data.capabilities) ? data.capabilities : null;
-    if (!list2) result.issues.push(issue8("FIELD_TYPE_INVALID", "$.data.capabilities", "capabilities 必须是数组", op));
-    else if (list2.length > CAPABILITY_LIMIT) result.issues.push(issue8("FIELD_LIMIT_EXCEEDED", "$.data.capabilities", `最多 ${CAPABILITY_LIMIT} 项能力`, op));
-    else changes.capabilities_json = list2;
-  }
-  ensureLocationRef(data, "headquarters_ref", op, result.issues, changes, "headquarters_location_id", ["location"], ctx.scope);
-  if (result.issues.some((i) => i.severity === "error")) return result;
-  const turnId = turnIdOf(ctx);
-  if (creating) {
-    const row2 = createRow("factions", { ...changes }, {
-      branchId: ctx.branchId,
-      id: rowId2,
-      turnId,
-      clockS: ctx.clockS,
-      nowWallMs: Date.now(),
-      rulesetVersion: "atlas-1"
-    });
-    result.mutations.push(entityKeyMutation(ctx, op, rowId2, "faction"));
-    result.mutations.push(mutation("factions", rowId2, null, row2, op, basisFor2(ctx, op)));
-    result.entityKeyWrites = [{ id: rowId2, kind: "faction" }];
-  } else {
-    const merged = applyPatch(before, changes);
-    merged.row_rev = Number(before.row_rev ?? 1) + 1;
-    merged.updated_turn_id = turnId;
-    result.mutations.push(mutation("factions", rowId2, before, merged, op, basisFor2(ctx, op)));
-    result.readSet.push(...readSetFor(ctx, "factions", rowId2));
-  }
-  result.declaredRefs = ref?.startsWith("new:") ? [declaredRef(ref, rowId2, "faction", op.opId)] : [];
-  return result;
-}
-var LOCATION_FIELDS, LOCATION_KINDS2, LOCATION_EXISTENCE, CHARACTER_FIELDS, CHARACTER_ROLES, CHARACTER_IMPORTANCE, CHARACTER_PHYSICAL, ITEM_FIELDS, ITEM_KINDS2, ITEM_STATUS, FACTION_FIELDS, FACTION_KINDS2, FACTION_STATUS;
-var init_atlas_ops_entities = __esm({
-  "src/atlas-ops-entities.ts"() {
-    "use strict";
-    init_atlas_ops_compile_types();
-    init_atlas_db_defaults();
-    init_atlas_db_mentions();
-    init_atlas_ops_refs();
-    init_atlas_runtime_limits();
-    init_atlas_location_kinds();
-    LOCATION_FIELDS = /* @__PURE__ */ new Set([
-      "name",
-      "aliases",
-      "kind",
-      "description",
-      "parent_ref",
-      "mobility",
-      "anchor_ref",
-      "map_ref",
-      "position",
-      "area",
-      "terrain",
-      "access",
-      "vehicle_profile",
-      "existence_quality"
-    ]);
-    LOCATION_KINDS2 = ATLAS_LOCATION_KINDS;
-    LOCATION_EXISTENCE = ["confirmed", "inferred", "hypothetical"];
-    CHARACTER_FIELDS = /* @__PURE__ */ new Set([
-      "registration",
-      "name",
-      "aliases",
-      "role",
-      "identity",
-      "description",
-      "personality",
-      "importance",
-      "importance_reason",
-      "thought",
-      "action_tendency",
-      "physical_status",
-      "condition_note",
-      "location_ref",
-      "map_ref",
-      "position",
-      "mobility_profiles",
-      "capabilities"
-    ]);
-    CHARACTER_ROLES = ["protagonist", "companion", "npc"];
-    CHARACTER_IMPORTANCE = ["core", "recurring", "supporting"];
-    CHARACTER_PHYSICAL = ["alive", "incapacitated", "dead", "unknown"];
-    ITEM_FIELDS = /* @__PURE__ */ new Set([
-      "name",
-      "aliases",
-      "kind",
-      "description",
-      "quantity",
-      "unit",
-      "condition_note",
-      "properties",
-      "status",
-      "placement"
-    ]);
-    ITEM_KINDS2 = ["object", "resource", "document", "equipment", "container", "other"];
-    ITEM_STATUS = ["active", "consumed", "destroyed", "lost", "merged", "archived"];
-    FACTION_FIELDS = /* @__PURE__ */ new Set(["name", "aliases", "kind", "description", "goal", "headquarters_ref", "capabilities", "status"]);
-    FACTION_KINDS2 = ["nation", "organization", "family", "team", "other"];
-    FACTION_STATUS = ["active", "dissolved", "merged", "archived"];
-  }
-});
-
 // src/atlas-ops-relations.ts
-function issue9(code, path, message, op, extra = {}) {
+function issue10(code, path, message, op, extra = {}) {
   return { code, path, message, severity: "error", retryable: true, opId: op.opId, line: op.line, ...extra };
 }
-function basisOf(ctx, op) {
+function basisOf2(ctx, op) {
   if (ctx.basisFor) return ctx.basisFor(op);
   return {
     kind: ctx.phase === "observe" ? "story" : "simulation",
@@ -19207,7 +19571,7 @@ function compileRelationUpsert(op, ctx) {
     rowId2 = r.entry.id;
     existingRow = ctx.tables.selectOne("relations", ctx.branchId, rowId2);
     if (!existingRow) {
-      result.issues.push(issue9("REF_UNKNOWN", "$.ref", `关系引用存在但行不存在：${rowId2}`, op));
+      result.issues.push(issue10("REF_UNKNOWN", "$.ref", `关系引用存在但行不存在：${rowId2}`, op));
       return result;
     }
     subjectId = String(existingRow.subject_entity_id);
@@ -19215,18 +19579,18 @@ function compileRelationUpsert(op, ctx) {
   } else {
     const subject = resolveRef(String(data.subject_ref ?? ""), null, ctx.scope, { opId: op.opId, field: "subject_ref" });
     if (!subject.entry) {
-      result.issues.push(...subject.issues.length ? subject.issues : [issue9("MINIMUM_FIELD_MISSING", "$.data.subject_ref", "relation.upsert 需要 subject_ref", op)]);
+      result.issues.push(...subject.issues.length ? subject.issues : [issue10("MINIMUM_FIELD_MISSING", "$.data.subject_ref", "relation.upsert 需要 subject_ref", op)]);
       return result;
     }
     const object = resolveRef(String(data.object_ref ?? ""), null, ctx.scope, { opId: op.opId, field: "object_ref" });
     if (!object.entry) {
-      result.issues.push(...object.issues.length ? object.issues : [issue9("MINIMUM_FIELD_MISSING", "$.data.object_ref", "relation.upsert 需要 object_ref", op)]);
+      result.issues.push(...object.issues.length ? object.issues : [issue10("MINIMUM_FIELD_MISSING", "$.data.object_ref", "relation.upsert 需要 object_ref", op)]);
       return result;
     }
     subjectId = subject.entry.id;
     objectId = object.entry.id;
     if (subjectId === objectId) {
-      result.issues.push(issue9("RELATION_SELF_TARGET", "$.data.object_ref", "关系的主体和客体不能是同一条身份", op));
+      result.issues.push(issue10("RELATION_SELF_TARGET", "$.data.object_ref", "关系的主体和客体不能是同一条身份", op));
       return result;
     }
     const kind = data.kind === void 0 ? "other" : String(data.kind);
@@ -19242,24 +19606,24 @@ function compileRelationUpsert(op, ctx) {
   const changes = {};
   if (Object.prototype.hasOwnProperty.call(data, "kind")) {
     const kind = String(data.kind);
-    if (!RELATION_KINDS2.includes(kind)) result.issues.push(issue9("ENUM_INVALID", "$.data.kind", `关系类型非法：${kind}`, op));
+    if (!RELATION_KINDS2.includes(kind)) result.issues.push(issue10("ENUM_INVALID", "$.data.kind", `关系类型非法：${kind}`, op));
     else changes.kind = kind;
   }
   if (Object.prototype.hasOwnProperty.call(data, "label")) changes.label = asString(data.label) ?? "";
   if (Object.prototype.hasOwnProperty.call(data, "attitude")) {
     const attitude = String(data.attitude);
-    if (!RELATION_ATTITUDE.includes(attitude)) result.issues.push(issue9("ENUM_INVALID", "$.data.attitude", `attitude 非法：${attitude}`, op));
+    if (!RELATION_ATTITUDE.includes(attitude)) result.issues.push(issue10("ENUM_INVALID", "$.data.attitude", `attitude 非法：${attitude}`, op));
     else changes.attitude = attitude;
   }
   if (Object.prototype.hasOwnProperty.call(data, "trust")) {
     const trust = String(data.trust);
-    if (!RELATION_TRUST.includes(trust)) result.issues.push(issue9("ENUM_INVALID", "$.data.trust", `trust 非法：${trust}`, op));
+    if (!RELATION_TRUST.includes(trust)) result.issues.push(issue10("ENUM_INVALID", "$.data.trust", `trust 非法：${trust}`, op));
     else changes.trust = trust;
   }
   if (Object.prototype.hasOwnProperty.call(data, "description")) changes.description = String(data.description ?? "");
   if (Object.prototype.hasOwnProperty.call(data, "secrecy")) {
     const secrecy = String(data.secrecy);
-    if (!RELATION_SECRECY.includes(secrecy)) result.issues.push(issue9("ENUM_INVALID", "$.data.secrecy", `secrecy 非法：${secrecy}`, op));
+    if (!RELATION_SECRECY.includes(secrecy)) result.issues.push(issue10("ENUM_INVALID", "$.data.secrecy", `secrecy 非法：${secrecy}`, op));
     else changes.secrecy = secrecy;
   }
   if (Object.prototype.hasOwnProperty.call(data, "ends_after_s")) {
@@ -19270,7 +19634,7 @@ function compileRelationUpsert(op, ctx) {
     } else if (typeof ends === "number" && Number.isFinite(ends)) {
       changes.valid_until_s = ctx.clockS + ends;
     } else {
-      result.issues.push(issue9("FIELD_TYPE_INVALID", "$.data.ends_after_s", "ends_after_s 必须是有限秒数或 null", op));
+      result.issues.push(issue10("FIELD_TYPE_INVALID", "$.data.ends_after_s", "ends_after_s 必须是有限秒数或 null", op));
     }
   }
   if (result.issues.some((i) => i.severity === "error")) return result;
@@ -19285,7 +19649,7 @@ function compileRelationUpsert(op, ctx) {
       before: existingRow,
       after: merged,
       sourceOpIds: [op.opId],
-      basis: basisOf(ctx, op)
+      basis: basisOf2(ctx, op)
     });
     result.readSet.push({ table: "relations", rowId: rowId2, rowRev: Number(existingRow.row_rev ?? 1) });
   } else {
@@ -19294,7 +19658,7 @@ function compileRelationUpsert(op, ctx) {
       { subject_entity_id: subjectId, object_entity_id: objectId, basis_quality: ctx.phase === "observe" ? "confirmed" : "inferred", ...changes },
       { branchId: ctx.branchId, id: rowId2, turnId, clockS: ctx.clockS, nowWallMs: Date.now(), rulesetVersion: "atlas-1" }
     );
-    result.mutations.push({ table: "relations", rowId: rowId2, before: null, after: row2, sourceOpIds: [op.opId], basis: basisOf(ctx, op) });
+    result.mutations.push({ table: "relations", rowId: rowId2, before: null, after: row2, sourceOpIds: [op.opId], basis: basisOf2(ctx, op) });
   }
   return result;
 }
@@ -19325,10 +19689,10 @@ var init_atlas_ops_relations = __esm({
 });
 
 // src/atlas-ops-actions.ts
-function issue10(code, path, message, op, extra = {}) {
+function issue11(code, path, message, op, extra = {}) {
   return { code, path, message, severity: "error", retryable: true, opId: op.opId, line: op.line, ...extra };
 }
-function basisOf2(ctx, op, causes = []) {
+function basisOf3(ctx, op, causes = []) {
   if (ctx.basisFor) return ctx.basisFor(op, { causes, certainty: "inferred" });
   return {
     kind: "simulation",
@@ -19339,26 +19703,26 @@ function basisOf2(ctx, op, causes = []) {
     certainty: "inferred"
   };
 }
-function isPlainObject5(v) {
+function isPlainObject6(v) {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
-function mutation2(table, rowId2, before, after, op, basis) {
+function mutation3(table, rowId2, before, after, op, basis) {
   return { table, rowId: rowId2, before, after, sourceOpIds: [op.opId], basis };
 }
 function normalizeSteps(steps, op, ctx, issues) {
   if (!Array.isArray(steps) || steps.length === 0) {
-    issues.push(issue10("MINIMUM_FIELD_MISSING", "$.data.steps", "plan.propose 需要至少一个 step", op));
+    issues.push(issue11("MINIMUM_FIELD_MISSING", "$.data.steps", "plan.propose 需要至少一个 step", op));
     return [];
   }
   const out = [];
   steps.forEach((raw, i) => {
-    if (!isPlainObject5(raw)) {
-      issues.push(issue10("FIELD_TYPE_INVALID", `$.data.steps[${i}]`, "step 必须是对象", op));
+    if (!isPlainObject6(raw)) {
+      issues.push(issue11("FIELD_TYPE_INVALID", `$.data.steps[${i}]`, "step 必须是对象", op));
       return;
     }
     const kind = String(raw.kind ?? "");
     if (!STEP_KINDS.includes(kind)) {
-      issues.push(issue10("ENUM_INVALID", `$.data.steps[${i}].kind`, `step.kind 非法：${kind}`, op));
+      issues.push(issue11("ENUM_INVALID", `$.data.steps[${i}].kind`, `step.kind 非法：${kind}`, op));
       return;
     }
     const payload = {};
@@ -19379,7 +19743,7 @@ function normalizeSteps(steps, op, ctx, issues) {
     if (kind === "travel") {
       const destination = resolveOne(raw.destination_ref, ["location"], `steps[${i}].destination_ref`);
       if (!destination) {
-        issues.push(issue10("MINIMUM_FIELD_MISSING", `$.data.steps[${i}].destination_ref`, "travel step 需要 destination_ref", op));
+        issues.push(issue11("MINIMUM_FIELD_MISSING", `$.data.steps[${i}].destination_ref`, "travel step 需要 destination_ref", op));
         return;
       }
       targetLocationId = destination;
@@ -19404,7 +19768,7 @@ function normalizeSteps(steps, op, ctx, issues) {
         conditionUncompiled = raw.wait_for_status;
       } else {
         issues.push(
-          issue10("MINIMUM_FIELD_MISSING", `$.data.steps[${i}]`, "wait step 需要 wait_for_event_ref 或明确条件；时间未知的典礼不要编一个具体时刻", op)
+          issue11("MINIMUM_FIELD_MISSING", `$.data.steps[${i}]`, "wait step 需要 wait_for_event_ref 或明确条件；时间未知的典礼不要编一个具体时刻", op)
         );
         return;
       }
@@ -19413,7 +19777,7 @@ function normalizeSteps(steps, op, ctx, issues) {
       const channelId = resolveOne(raw.channel_ref, ["channel"], `steps[${i}].channel_ref`);
       const recipient = resolveOne(raw.recipient_ref, ["character", "faction", "location"], `steps[${i}].recipient_ref`);
       if (!informationId || !recipient) {
-        issues.push(issue10("MINIMUM_FIELD_MISSING", `$.data.steps[${i}]`, "transmit step 需要 information_ref 与 recipient_ref", op));
+        issues.push(issue11("MINIMUM_FIELD_MISSING", `$.data.steps[${i}]`, "transmit step 需要 information_ref 与 recipient_ref", op));
         return;
       }
       payload.information_ref = informationId;
@@ -19423,7 +19787,7 @@ function normalizeSteps(steps, op, ctx, issues) {
     } else if (kind === "interact") {
       const other = resolveOne(raw.target_ref, null, `steps[${i}].target_ref`);
       if (!other) {
-        issues.push(issue10("MINIMUM_FIELD_MISSING", `$.data.steps[${i}].target_ref`, "interact step 需要 target_ref", op));
+        issues.push(issue11("MINIMUM_FIELD_MISSING", `$.data.steps[${i}].target_ref`, "interact step 需要 target_ref", op));
         return;
       }
       payload.other_ref = other;
@@ -19451,7 +19815,7 @@ function normalizeSteps(steps, op, ctx, issues) {
       payload.capability_key = typeof raw.capability_key === "string" ? raw.capability_key : null;
       const stakes = raw.stakes === void 0 ? "ordinary" : String(raw.stakes);
       if (!["ordinary", "major"].includes(stakes)) {
-        issues.push(issue10("ENUM_INVALID", `$.data.steps[${i}].stakes`, `stakes 非法：${stakes}`, op));
+        issues.push(issue11("ENUM_INVALID", `$.data.steps[${i}].stakes`, `stakes 非法：${stakes}`, op));
         return;
       }
       payload.stakes = stakes;
@@ -19459,7 +19823,7 @@ function normalizeSteps(steps, op, ctx, issues) {
       payload.outcome_policy = ["rules", "model_with_checks"].includes(policy) ? policy : "model_with_checks";
     }
     let durationHint = null;
-    if (isPlainObject5(raw.duration_hint)) {
+    if (isPlainObject6(raw.duration_hint)) {
       const hint = raw.duration_hint;
       const min = typeof hint.min_s === "number" ? hint.min_s : null;
       const nominal = typeof hint.nominal_s === "number" ? hint.nominal_s : null;
@@ -19467,7 +19831,7 @@ function normalizeSteps(steps, op, ctx, issues) {
       if (min !== null && nominal !== null && max !== null && min >= 0 && min <= nominal && nominal <= max) {
         durationHint = { min_s: min, nominal_s: nominal, max_s: max, quality: "estimated", basis_refs: [] };
       } else if (min !== null || nominal !== null || max !== null) {
-        issues.push(issue10("DURATION_ORDER_INVALID", `$.data.steps[${i}].duration_hint`, "duration_hint 必须 0≤min≤nominal≤max", op));
+        issues.push(issue11("DURATION_ORDER_INVALID", `$.data.steps[${i}].duration_hint`, "duration_hint 必须 0≤min≤nominal≤max", op));
       }
     }
     if (typeof raw.requires_action_ref === "string" && raw.requires_action_ref.trim() !== "") {
@@ -19506,13 +19870,13 @@ function compilePlanPropose(op, ctx) {
   const actor = resolveRef(String(data.actor_ref ?? ""), null, ctx.scope, { opId: op.opId, line: op.line, field: "actor_ref" });
   if (!actor.entry) {
     result.issues.push(
-      ...actor.issues.length ? actor.issues : [issue10("MINIMUM_FIELD_MISSING", "$.data.actor_ref", "plan.propose 需要 actor_ref", op)]
+      ...actor.issues.length ? actor.issues : [issue11("MINIMUM_FIELD_MISSING", "$.data.actor_ref", "plan.propose 需要 actor_ref", op)]
     );
     return result;
   }
   const goal = asString(data.goal);
   if (!goal) {
-    result.issues.push(issue10("MINIMUM_FIELD_MISSING", "$.data.goal", "plan.propose 需要 goal", op));
+    result.issues.push(issue11("MINIMUM_FIELD_MISSING", "$.data.goal", "plan.propose 需要 goal", op));
     return result;
   }
   const steps = normalizeSteps(data.steps, op, ctx, result.issues);
@@ -19521,7 +19885,7 @@ function compilePlanPropose(op, ctx) {
   if (data.secrecy !== void 0) {
     const s = String(data.secrecy);
     if (!ACTION_SECRECY.includes(s)) {
-      result.issues.push(issue10("ENUM_INVALID", "$.data.secrecy", `secrecy 非法：${s}`, op));
+      result.issues.push(issue11("ENUM_INVALID", "$.data.secrecy", `secrecy 非法：${s}`, op));
       return result;
     }
     secrecy = s;
@@ -19542,7 +19906,7 @@ function compilePlanPropose(op, ctx) {
     },
     { branchId: ctx.branchId, id: planId, turnId, clockS: ctx.clockS, nowWallMs: Date.now(), rulesetVersion: "atlas-1" }
   );
-  result.mutations.push(mutation2("actions", planId, null, parentRow, op, basisOf2(ctx, op)));
+  result.mutations.push(mutation3("actions", planId, null, parentRow, op, basisOf3(ctx, op)));
   const stepIds = [];
   steps.forEach((step, index) => {
     const stepId = ctx.makeId("action", op.opId, `step:${index}:${step.kind}`);
@@ -19572,7 +19936,7 @@ function compilePlanPropose(op, ctx) {
       },
       { branchId: ctx.branchId, id: stepId, turnId, clockS: ctx.clockS, nowWallMs: Date.now(), rulesetVersion: "atlas-1" }
     );
-    result.mutations.push(mutation2("actions", stepId, null, row2, op, basisOf2(ctx, op)));
+    result.mutations.push(mutation3("actions", stepId, null, row2, op, basisOf3(ctx, op)));
     if (step.conditionUncompiled) {
       result.issues.push({
         code: "CONDITION_UNCOMPILED",
@@ -19597,12 +19961,12 @@ function compilePlanRevise(op, ctx) {
   if (unknown.length) result.issues.push(fieldIgnoredWarning(op, unknown));
   const ref = (op.value.ref ?? asString(data.ref))?.trim();
   if (!ref) {
-    result.issues.push(issue10("MINIMUM_FIELD_MISSING", "$.ref", "plan.revise 需要 ref", op));
+    result.issues.push(issue11("MINIMUM_FIELD_MISSING", "$.ref", "plan.revise 需要 ref", op));
     return result;
   }
   const change = data.change === void 0 ? "" : String(data.change);
   if (!["pause", "cancel", "resume", "replace_future"].includes(change)) {
-    result.issues.push(issue10("MINIMUM_FIELD_MISSING", "$.data.change", "change 必须是 pause/cancel/resume/replace_future", op));
+    result.issues.push(issue11("MINIMUM_FIELD_MISSING", "$.data.change", "change 必须是 pause/cancel/resume/replace_future", op));
     return result;
   }
   const resolved = resolveRef(ref, "action", ctx.scope, { opId: op.opId, line: op.line, field: "ref" });
@@ -19613,7 +19977,7 @@ function compilePlanRevise(op, ctx) {
   const rowId2 = resolved.entry.id;
   const before = ctx.tables.selectOne("actions", ctx.branchId, rowId2);
   if (!before) {
-    result.issues.push(issue10("REF_UNKNOWN", "$.ref", `行动引用存在但行不存在：${rowId2}`, op));
+    result.issues.push(issue11("REF_UNKNOWN", "$.ref", `行动引用存在但行不存在：${rowId2}`, op));
     return result;
   }
   const turnId = ctx.turnId ?? ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
@@ -19629,14 +19993,14 @@ function compilePlanRevise(op, ctx) {
   };
   if (change === "pause") {
     if (before.status === "completed" || before.status === "cancelled") {
-      result.issues.push(issue10("ACTION_STATE_INVALID", "$.data.change", `已结束的行动（${before.status}）不能暂停`, op));
+      result.issues.push(issue11("ACTION_STATE_INVALID", "$.data.change", `已结束的行动（${before.status}）不能暂停`, op));
       return result;
     }
     touches.push({ rowId: rowId2, row: before, target: applyTo(before, { status: "paused", reason_code: "PLAN_PAUSED" }) });
     for (const c of children) touches.push({ rowId: String(c.id), row: c, target: applyTo(c, { status: "paused", reason_code: "PLAN_PAUSED" }) });
   } else if (change === "resume") {
     if (!["paused", "blocked"].includes(String(before.status))) {
-      result.issues.push(issue10("ACTION_STATE_INVALID", "$.data.change", `只有 paused/blocked 的行动可以恢复（当前 ${before.status}）`, op));
+      result.issues.push(issue11("ACTION_STATE_INVALID", "$.data.change", `只有 paused/blocked 的行动可以恢复（当前 ${before.status}）`, op));
       return result;
     }
     touches.push({ rowId: rowId2, row: before, target: applyTo(before, { status: "planned", reason_code: null }) });
@@ -19656,7 +20020,7 @@ function compilePlanRevise(op, ctx) {
     const steps = normalizeSteps(data.steps, op, ctx, result.issues);
     if (result.issues.some((i) => i.severity === "error")) return result;
     if (steps.length === 0) {
-      result.issues.push(issue10("MINIMUM_FIELD_MISSING", "$.data.steps", "replace_future 需要新的 steps", op));
+      result.issues.push(issue11("MINIMUM_FIELD_MISSING", "$.data.steps", "replace_future 需要新的 steps", op));
       return result;
     }
     for (const c of children) {
@@ -19683,7 +20047,7 @@ function compilePlanRevise(op, ctx) {
         },
         { branchId: ctx.branchId, id: stepId, turnId, clockS: ctx.clockS, nowWallMs: Date.now(), rulesetVersion: "atlas-1" }
       );
-      result.mutations.push(mutation2("actions", stepId, null, row2, op, basisOf2(ctx, op)));
+      result.mutations.push(mutation3("actions", stepId, null, row2, op, basisOf3(ctx, op)));
     });
     if (Object.prototype.hasOwnProperty.call(data, "destination_ref")) {
       const dest = resolveRef(String(data.destination_ref), "location", ctx.scope, { opId: op.opId, field: "destination_ref" });
@@ -19694,7 +20058,7 @@ function compilePlanRevise(op, ctx) {
   }
   if (result.issues.some((i) => i.severity === "error")) return result;
   for (const t of touches) {
-    result.mutations.push(mutation2("actions", t.rowId, t.row, t.target, op, basisOf2(ctx, op)));
+    result.mutations.push(mutation3("actions", t.rowId, t.row, t.target, op, basisOf3(ctx, op)));
     result.readSet.push({ table: "actions", rowId: t.rowId, rowRev: Number(t.row.row_rev ?? 1) });
   }
   return result;
@@ -19714,22 +20078,22 @@ var init_atlas_ops_actions = __esm({
 });
 
 // src/atlas-ops-events.ts
-function issue11(code, path, message, op, extra = {}) {
+function issue12(code, path, message, op, extra = {}) {
   return { code, path, message, severity: "error", retryable: true, opId: op.opId, line: op.line, ...extra };
 }
-function isPlainObject6(v) {
+function isPlainObject7(v) {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
-function mutation3(table, rowId2, before, after, op, basis) {
+function mutation4(table, rowId2, before, after, op, basis) {
   return { table, rowId: rowId2, before, after, sourceOpIds: [op.opId], basis };
 }
 function timeHintToEstimate(hint, op, issues) {
-  if (!isPlainObject6(hint)) return { quality: "unknown", basis_refs: [] };
+  if (!isPlainObject7(hint)) return { quality: "unknown", basis_refs: [] };
   const elapsed = typeof hint.elapsed_s === "number" && Number.isFinite(hint.elapsed_s) ? hint.elapsed_s : null;
   const min = typeof hint.min_s === "number" && Number.isFinite(hint.min_s) ? hint.min_s : null;
   const max = typeof hint.max_s === "number" && Number.isFinite(hint.max_s) ? hint.max_s : null;
   if (elapsed !== null && elapsed < 0) {
-    issues.push(issue11("DURATION_NEGATIVE", "$.data.time_hint.elapsed_s", "elapsed_s 不能为负", op));
+    issues.push(issue12("DURATION_NEGATIVE", "$.data.time_hint.elapsed_s", "elapsed_s 不能为负", op));
     return { quality: "unknown", basis_refs: [] };
   }
   if (elapsed !== null) {
@@ -19739,7 +20103,7 @@ function timeHintToEstimate(hint, op, issues) {
     const lo = min ?? 0;
     const hi = max ?? lo;
     if (hi < lo) {
-      issues.push(issue11("DURATION_ORDER_INVALID", "$.data.time_hint", "time_hint 需要 min_s ≤ max_s", op));
+      issues.push(issue12("DURATION_ORDER_INVALID", "$.data.time_hint", "time_hint 需要 min_s ≤ max_s", op));
       return { quality: "unknown", basis_refs: [] };
     }
     return { min_s: lo, nominal_s: Math.round((lo + hi) / 2), max_s: hi, quality: "estimated", basis_refs: [] };
@@ -19770,12 +20134,12 @@ function compileEventPropose(op, ctx) {
   if (unknown.length) result.issues.push(fieldIgnoredWarning(op, unknown));
   const title = asString(data.title);
   if (!title) {
-    result.issues.push(issue11("MINIMUM_FIELD_MISSING", "$.data.title", "event.propose 需要 title", op));
+    result.issues.push(issue12("MINIMUM_FIELD_MISSING", "$.data.title", "event.propose 需要 title", op));
     return result;
   }
   const phase = data.phase === void 0 ? "" : String(data.phase);
   if (!EVENT_PHASES2.includes(phase)) {
-    result.issues.push(issue11("MINIMUM_FIELD_MISSING", "$.data.phase", "event.propose 需要 phase=scheduled/observed/simulated", op));
+    result.issues.push(issue12("MINIMUM_FIELD_MISSING", "$.data.phase", "event.propose 需要 phase=scheduled/observed/simulated", op));
     return result;
   }
   const resolveOne = (value, kinds, field) => {
@@ -19795,28 +20159,28 @@ function compileEventPropose(op, ctx) {
   const scheduledCause = parentEventId && ctx.sources.dueEventIds?.includes(parentEventId);
   if (phase === "simulated" && !causeActionId && !scheduledCause) {
     result.issues.push(
-      issue11("SIMULATED_EVENT_UNBOUND", "$.data.action_ref", "simulated 事件必须绑定真实到期行动（action_ref）；不能凭标题落实结果", op)
+      issue12("SIMULATED_EVENT_UNBOUND", "$.data.action_ref", "simulated 事件必须绑定真实到期行动（action_ref）；不能凭标题落实结果", op)
     );
     return result;
   }
   const participants = [];
   if (Array.isArray(data.participants)) {
     for (const raw of data.participants.slice(0, PARTICIPANTS_LIMIT)) {
-      if (!isPlainObject6(raw)) continue;
+      if (!isPlainObject7(raw)) continue;
       const refValue = raw.entity_ref ?? raw.ref ?? raw.entity_id;
       const id = resolveOne(refValue, ["character", "faction", "item", "location"], "participants");
       if (!id) continue;
       participants.push({ entity_id: id, role: typeof raw.role === "string" ? raw.role : "participant" });
     }
     if (data.participants.length > PARTICIPANTS_LIMIT) {
-      result.issues.push(issue11("FIELD_LIMIT_EXCEEDED", "$.data.participants", `participants 最多 ${PARTICIPANTS_LIMIT} 个`, op));
+      result.issues.push(issue12("FIELD_LIMIT_EXCEEDED", "$.data.participants", `participants 最多 ${PARTICIPANTS_LIMIT} 个`, op));
     }
   }
   let secrecy = "restricted";
   if (data.secrecy !== void 0) {
     const s = String(data.secrecy);
     if (!SECRECY.includes(s)) {
-      result.issues.push(issue11("ENUM_INVALID", "$.data.secrecy", `secrecy 非法：${s}`, op));
+      result.issues.push(issue12("ENUM_INVALID", "$.data.secrecy", `secrecy 非法：${s}`, op));
       return result;
     }
     secrecy = s;
@@ -19825,7 +20189,7 @@ function compileEventPropose(op, ctx) {
   if (data.kind !== void 0) {
     const k = String(data.kind);
     if (!EVENT_KINDS.includes(k)) {
-      result.issues.push(issue11("ENUM_INVALID", "$.data.kind", `事件类型非法：${k}`, op));
+      result.issues.push(issue12("ENUM_INVALID", "$.data.kind", `事件类型非法：${k}`, op));
       return result;
     }
     kind = k;
@@ -19833,7 +20197,7 @@ function compileEventPropose(op, ctx) {
   const elapsed = timeHintToEstimate(data.time_hint, op, result.issues);
   const occurredAt = phase === "scheduled" ? null : ctx.clockS;
   const status = phase === "scheduled" ? "scheduled" : "occurred";
-  const scheduledStart = phase === "scheduled" ? typeof data.time_hint === "object" && isPlainObject6(data.time_hint) && typeof data.time_hint.at_s === "number" ? data.time_hint.at_s : null : occurredAt;
+  const scheduledStart = phase === "scheduled" ? typeof data.time_hint === "object" && isPlainObject7(data.time_hint) && typeof data.time_hint.at_s === "number" ? data.time_hint.at_s : null : occurredAt;
   const previous = scheduledCause ? ctx.tables.selectOne("events", ctx.branchId, parentEventId) : null;
   const eventId = previous ? String(previous.id) : ctx.makeId("event", op.opId, `event:${title}`);
   const turnId = ctx.turnId ?? ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
@@ -19863,23 +20227,23 @@ function compileEventPropose(op, ctx) {
     row2.row_rev = Number(previous.row_rev) + 1;
     row2.scheduled_start_s = previous.scheduled_start_s;
   }
-  result.mutations.push(mutation3("events", eventId, previous, row2, op, basisWith(ctx, op, causeActionId ? [{ kind: "action", id: causeActionId }] : [])));
+  result.mutations.push(mutation4("events", eventId, previous, row2, op, basisWith(ctx, op, causeActionId ? [{ kind: "action", id: causeActionId }] : [])));
   result.effects = [{ kind: "event_time_estimate", eventId, elapsed, phase }];
   const effects = data.effects;
   if (effects !== void 0) {
     if (!Array.isArray(effects)) {
-      result.issues.push(issue11("FIELD_TYPE_INVALID", "$.data.effects", "effects 必须是数组", op));
+      result.issues.push(issue12("FIELD_TYPE_INVALID", "$.data.effects", "effects 必须是数组", op));
       return result;
     }
     for (let i = 0; i < effects.length; i += 1) {
       const eff = effects[i];
-      if (!isPlainObject6(eff)) {
-        result.issues.push(issue11("FIELD_TYPE_INVALID", `$.data.effects[${i}]`, "effect 必须是对象", op));
+      if (!isPlainObject7(eff)) {
+        result.issues.push(issue12("FIELD_TYPE_INVALID", `$.data.effects[${i}]`, "effect 必须是对象", op));
         continue;
       }
       const type = String(eff.type ?? "");
       if (!EFFECT_TYPES.includes(type)) {
-        result.issues.push(issue11("EFFECT_TYPE_UNSUPPORTED", `$.data.effects[${i}].type`, `不允许的事件效果类型：${type}`, op));
+        result.issues.push(issue12("EFFECT_TYPE_UNSUPPORTED", `$.data.effects[${i}].type`, `不允许的事件效果类型：${type}`, op));
         continue;
       }
       if (type === "character_status") {
@@ -19887,12 +20251,12 @@ function compileEventPropose(op, ctx) {
         if (!targetId) continue;
         const value = String(eff.value ?? "");
         if (!CHARACTER_STATUS.includes(value)) {
-          result.issues.push(issue11("ENUM_INVALID", `$.data.effects[${i}].value`, `character_status 取值非法：${value}`, op));
+          result.issues.push(issue12("ENUM_INVALID", `$.data.effects[${i}].value`, `character_status 取值非法：${value}`, op));
           continue;
         }
         const before = ctx.tables.selectOne("characters", ctx.branchId, targetId);
         if (!before) {
-          result.issues.push(issue11("REF_UNKNOWN", `$.data.effects[${i}].target_ref`, `人物不存在：${targetId}`, op));
+          result.issues.push(issue12("REF_UNKNOWN", `$.data.effects[${i}].target_ref`, `人物不存在：${targetId}`, op));
           continue;
         }
         const after = applyPatch(before, {
@@ -19900,7 +20264,7 @@ function compileEventPropose(op, ctx) {
           row_rev: Number(before.row_rev ?? 1) + 1,
           updated_turn_id: turnId
         });
-        result.mutations.push(mutation3("characters", targetId, before, after, op, basisWith(ctx, op, [{ kind: "event", id: eventId }])));
+        result.mutations.push(mutation4("characters", targetId, before, after, op, basisWith(ctx, op, [{ kind: "event", id: eventId }])));
         result.readSet.push({ table: "characters", rowId: targetId, rowRev: Number(before.row_rev ?? 1) });
         if (value === "dead" || value === "incapacitated") {
           result.effects.push({ kind: "halt_actor_work", entityId: targetId, reasonCode: value === "dead" ? "ACTOR_DEAD" : "ACTOR_INCAPACITATED" });
@@ -19910,28 +20274,28 @@ function compileEventPropose(op, ctx) {
         if (!targetId) continue;
         const value = String(eff.value ?? "");
         if (!LOCATION_STATUS.includes(value)) {
-          result.issues.push(issue11("ENUM_INVALID", `$.data.effects[${i}].value`, `location_status 取值非法：${value}`, op));
+          result.issues.push(issue12("ENUM_INVALID", `$.data.effects[${i}].value`, `location_status 取值非法：${value}`, op));
           continue;
         }
         const before = ctx.tables.selectOne("locations", ctx.branchId, targetId);
         if (!before) {
-          result.issues.push(issue11("REF_UNKNOWN", `$.data.effects[${i}].target_ref`, `地点不存在：${targetId}`, op));
+          result.issues.push(issue12("REF_UNKNOWN", `$.data.effects[${i}].target_ref`, `地点不存在：${targetId}`, op));
           continue;
         }
         const after = applyPatch(before, { status: value, row_rev: Number(before.row_rev ?? 1) + 1, updated_turn_id: turnId });
-        result.mutations.push(mutation3("locations", targetId, before, after, op, basisWith(ctx, op, [{ kind: "event", id: eventId }])));
+        result.mutations.push(mutation4("locations", targetId, before, after, op, basisWith(ctx, op, [{ kind: "event", id: eventId }])));
         result.readSet.push({ table: "locations", rowId: targetId, rowRev: Number(before.row_rev ?? 1) });
       } else if (type === "action_result") {
         const actionId = resolveOne(eff.action_ref, ["action"], `effects[${i}].action_ref`);
         if (!actionId) continue;
         const value = String(eff.value ?? "");
         if (!ACTION_RESULT.includes(value)) {
-          result.issues.push(issue11("ENUM_INVALID", `$.data.effects[${i}].value`, `action_result 取值非法：${value}`, op));
+          result.issues.push(issue12("ENUM_INVALID", `$.data.effects[${i}].value`, `action_result 取值非法：${value}`, op));
           continue;
         }
         const before = ctx.tables.selectOne("actions", ctx.branchId, actionId);
         if (!before) {
-          result.issues.push(issue11("REF_UNKNOWN", `$.data.effects[${i}].action_ref`, `行动不存在：${actionId}`, op));
+          result.issues.push(issue12("REF_UNKNOWN", `$.data.effects[${i}].action_ref`, `行动不存在：${actionId}`, op));
           continue;
         }
         const after = applyPatch(before, {
@@ -19941,7 +20305,7 @@ function compileEventPropose(op, ctx) {
           row_rev: Number(before.row_rev ?? 1) + 1,
           updated_turn_id: turnId
         });
-        result.mutations.push(mutation3("actions", actionId, before, after, op, basisWith(ctx, op, [{ kind: "event", id: eventId }])));
+        result.mutations.push(mutation4("actions", actionId, before, after, op, basisWith(ctx, op, [{ kind: "event", id: eventId }])));
         result.readSet.push({ table: "actions", rowId: actionId, rowRev: Number(before.row_rev ?? 1) });
       } else if (type === "item_transfer") {
         const itemRef = eff.item_ref;
@@ -19999,16 +20363,16 @@ var init_atlas_ops_events = __esm({
 });
 
 // src/atlas-ops-information.ts
-function issue12(code, path, message, op, extra = {}) {
+function issue13(code, path, message, op, extra = {}) {
   return { code, path, message, severity: "error", retryable: true, opId: op.opId, line: op.line, ...extra };
 }
-function isPlainObject7(v) {
+function isPlainObject8(v) {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
-function mutation4(table, rowId2, before, after, op, basis) {
+function mutation5(table, rowId2, before, after, op, basis) {
   return { table, rowId: rowId2, before, after, sourceOpIds: [op.opId], basis };
 }
-function basisOf3(ctx, op, causes = []) {
+function basisOf4(ctx, op, causes = []) {
   if (ctx.basisFor) return ctx.basisFor(op, { causes, certainty: "inferred" });
   return {
     kind: ctx.phase === "observe" ? "story" : "simulation",
@@ -20056,7 +20420,7 @@ function compileInformationPropose(op, ctx) {
   if (unknown.length) result.issues.push(fieldIgnoredWarning(op, unknown));
   const content = asString(data.content);
   if (!content) {
-    result.issues.push(issue12("MINIMUM_FIELD_MISSING", "$.data.content", "information.propose 需要 content", op));
+    result.issues.push(issue13("MINIMUM_FIELD_MISSING", "$.data.content", "information.propose 需要 content", op));
     return result;
   }
   const resolveOne = (value, kinds, field) => {
@@ -20072,7 +20436,7 @@ function compileInformationPropose(op, ctx) {
   if (data.kind !== void 0) {
     const k = String(data.kind);
     if (!INFORMATION_KINDS.includes(k)) {
-      result.issues.push(issue12("ENUM_INVALID", "$.data.kind", `信息性质非法：${k}`, op));
+      result.issues.push(issue13("ENUM_INVALID", "$.data.kind", `信息性质非法：${k}`, op));
       return result;
     }
     kind = k;
@@ -20081,7 +20445,7 @@ function compileInformationPropose(op, ctx) {
   if (data.truth !== void 0) {
     const t = String(data.truth);
     if (!TRUTH_STATUS.includes(t)) {
-      result.issues.push(issue12("ENUM_INVALID", "$.data.truth", `truth 非法：${t}`, op));
+      result.issues.push(issue13("ENUM_INVALID", "$.data.truth", `truth 非法：${t}`, op));
       return result;
     }
     truth = t;
@@ -20090,7 +20454,7 @@ function compileInformationPropose(op, ctx) {
   if (data.secrecy !== void 0) {
     const s = String(data.secrecy);
     if (!SECRECY2.includes(s)) {
-      result.issues.push(issue12("ENUM_INVALID", "$.data.secrecy", `secrecy 非法：${s}`, op));
+      result.issues.push(issue13("ENUM_INVALID", "$.data.secrecy", `secrecy 非法：${s}`, op));
       return result;
     }
     secrecy = s;
@@ -20102,8 +20466,8 @@ function compileInformationPropose(op, ctx) {
   const parentId = resolveOne(data.parent_ref, ["information"], "parent_ref");
   const spreadAtLocationId = resolveOne(data.spread_at_ref, ["location"], "spread_at_ref");
   const recipientId = resolveOne(data.recipient_ref, ["character", "faction"], "recipient_ref");
-  if (data.payload !== void 0 && data.payload !== null && !isPlainObject7(data.payload)) {
-    result.issues.push(issue12("FIELD_TYPE_INVALID", "$.data.payload", "payload 必须是 SubjectPayload 对象", op));
+  if (data.payload !== void 0 && data.payload !== null && !isPlainObject8(data.payload)) {
+    result.issues.push(issue13("FIELD_TYPE_INVALID", "$.data.payload", "payload 必须是 SubjectPayload 对象", op));
     return result;
   }
   const hash2 = contentHashOf(content);
@@ -20114,13 +20478,13 @@ function compileInformationPropose(op, ctx) {
   if (duplicate) {
     result.effects = [{ kind: "information_reused", informationId: infoId, spreadAtLocationId, recipientId }];
     result.mutations.push(
-      mutation4(
+      mutation5(
         "information",
         infoId,
         duplicate,
         applyPatch(duplicate, { row_rev: Number(duplicate.row_rev ?? 1) + 1, updated_turn_id: turnId }),
         op,
-        basisOf3(ctx, op)
+        basisOf4(ctx, op)
       )
     );
     result.readSet.push({ table: "information", rowId: infoId, rowRev: Number(duplicate.row_rev ?? 1) });
@@ -20145,7 +20509,7 @@ function compileInformationPropose(op, ctx) {
       },
       { branchId: ctx.branchId, id: infoId, turnId, clockS: ctx.clockS, nowWallMs: Date.now(), rulesetVersion: "atlas-1" }
     );
-    result.mutations.push(mutation4("information", infoId, null, row2, op, basisOf3(ctx, op)));
+    result.mutations.push(mutation5("information", infoId, null, row2, op, basisOf4(ctx, op)));
     result.effects = [{ kind: "information_created", informationId: infoId, spreadAtLocationId, recipientId }];
   }
   if (spreadAtLocationId) {
@@ -20153,13 +20517,13 @@ function compileInformationPropose(op, ctx) {
     const existingFront = ctx.tables.selectOne("rumor_fronts", ctx.branchId, frontId);
     if (existingFront) {
       result.mutations.push(
-        mutation4(
+        mutation5(
           "rumor_fronts",
           frontId,
           existingFront,
           applyPatch(existingFront, { last_reinforced_at_s: ctx.clockS, row_rev: Number(existingFront.row_rev ?? 1) + 1, updated_turn_id: turnId }),
           op,
-          basisOf3(ctx, op)
+          basisOf4(ctx, op)
         )
       );
     } else {
@@ -20177,7 +20541,7 @@ function compileInformationPropose(op, ctx) {
         },
         { branchId: ctx.branchId, id: frontId, turnId, clockS: ctx.clockS, nowWallMs: Date.now(), rulesetVersion: "atlas-1" }
       );
-      result.mutations.push(mutation4("rumor_fronts", frontId, null, front, op, basisOf3(ctx, op)));
+      result.mutations.push(mutation5("rumor_fronts", frontId, null, front, op, basisOf4(ctx, op)));
     }
     result.effects.push({ kind: "front_available", informationId: infoId, locationId: spreadAtLocationId, frontId });
   }
@@ -20200,10 +20564,10 @@ function compileInformationPropose(op, ctx) {
         },
         { branchId: ctx.branchId, id: knowledgeId, turnId, clockS: ctx.clockS, nowWallMs: Date.now(), rulesetVersion: "atlas-1" }
       );
-      result.mutations.push(mutation4("knowledge", knowledgeId, null, row2, op, basisOf3(ctx, op)));
+      result.mutations.push(mutation5("knowledge", knowledgeId, null, row2, op, basisOf4(ctx, op)));
     }
   }
-  if (!kind) result.issues.push(issue12("ENUM_INVALID", "$.data.kind", "信息性质无法解析", op));
+  if (!kind) result.issues.push(issue13("ENUM_INVALID", "$.data.kind", "信息性质无法解析", op));
   return result;
 }
 function compileAttentionPropose(op, ctx) {
@@ -20214,26 +20578,26 @@ function compileAttentionPropose(op, ctx) {
   if (unknown.length) result.issues.push(fieldIgnoredWarning(op, unknown));
   const opportunityRef = op.value.ref?.trim() || asString(data.opportunity_ref);
   if (!opportunityRef) {
-    result.issues.push(issue12("MINIMUM_FIELD_MISSING", "$.data.opportunity_ref", "attention.propose 需要 opportunity_ref", op));
+    result.issues.push(issue13("MINIMUM_FIELD_MISSING", "$.data.opportunity_ref", "attention.propose 需要 opportunity_ref", op));
     return result;
   }
   const opportunity = resolveRef(opportunityRef, ["opportunity"], ctx.scope, { opId: op.opId, line: op.line, field: "opportunity_ref" });
   if (!opportunity.entry) {
     result.issues.push(
-      ...opportunity.issues.length ? opportunity.issues : [issue12("OPPORTUNITY_UNKNOWN", "$.data.opportunity_ref", `没有这个接触机会：${opportunityRef}；无机会不能让人物凭空获知消息`, op)]
+      ...opportunity.issues.length ? opportunity.issues : [issue13("OPPORTUNITY_UNKNOWN", "$.data.opportunity_ref", `没有这个接触机会：${opportunityRef}；无机会不能让人物凭空获知消息`, op)]
     );
     return result;
   }
   const belief = data.belief === void 0 ? "" : String(data.belief);
   if (!BELIEF.includes(belief)) {
-    result.issues.push(issue12("MINIMUM_FIELD_MISSING", "$.data.belief", "attention.propose 需要 belief=heard/doubted/believed/verified/rejected", op));
+    result.issues.push(issue13("MINIMUM_FIELD_MISSING", "$.data.belief", "attention.propose 需要 belief=heard/doubted/believed/verified/rejected", op));
     return result;
   }
   let attention = "normal";
   if (data.attention !== void 0) {
     const a = String(data.attention);
     if (!ATTENTION.includes(a)) {
-      result.issues.push(issue12("ENUM_INVALID", "$.data.attention", `attention 非法：${a}`, op));
+      result.issues.push(issue13("ENUM_INVALID", "$.data.attention", `attention 非法：${a}`, op));
       return result;
     }
     attention = a;
@@ -20246,7 +20610,7 @@ function compileAttentionPropose(op, ctx) {
     const informationId = contact?.informationId ? ctx.tables.selectOne("information", ctx.branchId, contact.informationId) : null;
     if (!receiver || !informationId) {
       result.issues.push(
-        issue12(
+        issue13(
           "OPPORTUNITY_NOT_MATERIALIZED",
           "$.data.opportunity_ref",
           `机会 ${opportunity.entry.id} 尚未物化为接收者+信息的认知行：请由程序先建立机会`,
@@ -20269,7 +20633,7 @@ function compileAttentionPropose(op, ctx) {
     row_rev: Number(target.row_rev ?? 1) + 1,
     updated_turn_id: turnId
   });
-  result.mutations.push(mutation4("knowledge", String(target.id), row2, after, op, basisOf3(ctx, op)));
+  result.mutations.push(mutation5("knowledge", String(target.id), row2, after, op, basisOf4(ctx, op)));
   if (row2) result.readSet.push({ table: "knowledge", rowId: String(target.id), rowRev: Number(row2.row_rev ?? 1) });
   if (typeof data.action_tendency === "string" || typeof data.thought === "string") {
     const knowerId = target.knower_character_id ? String(target.knower_character_id) : null;
@@ -20282,7 +20646,7 @@ function compileAttentionPropose(op, ctx) {
           row_rev: Number(character.row_rev ?? 1) + 1,
           updated_turn_id: turnId
         });
-        result.mutations.push(mutation4("characters", knowerId, character, charAfter, op, basisOf3(ctx, op)));
+        result.mutations.push(mutation5("characters", knowerId, character, charAfter, op, basisOf4(ctx, op)));
         result.readSet.push({ table: "characters", rowId: knowerId, rowRev: Number(character.row_rev ?? 1) });
       }
     }
@@ -20313,7 +20677,7 @@ function compileChannelUpsert(op, ctx) {
   const ref = op.value.ref?.trim();
   const existing = ref && !ref.startsWith("new:") ? resolveRef(ref, "channel", ctx.scope, { opId: op.opId, line: op.line, field: "ref" }) : null;
   if (ref && !ref.startsWith("new:") && !existing?.entry) {
-    result.issues.push(...existing?.issues ?? [issue12("REF_UNKNOWN", "$.ref", `找不到渠道引用：${ref}`, op)]);
+    result.issues.push(...existing?.issues ?? [issue13("REF_UNKNOWN", "$.ref", `找不到渠道引用：${ref}`, op)]);
     return result;
   }
   const creating = !existing?.entry;
@@ -20328,17 +20692,17 @@ function compileChannelUpsert(op, ctx) {
   };
   const ownerId = resolveOne(data.owner_ref, ["character", "faction", "item"], "owner_ref");
   if (creating && !ownerId) {
-    result.issues.push(issue12("MINIMUM_FIELD_MISSING", "$.data.owner_ref", "channel.upsert 需要 owner_ref", op));
+    result.issues.push(issue13("MINIMUM_FIELD_MISSING", "$.data.owner_ref", "channel.upsert 需要 owner_ref", op));
     return result;
   }
   const kind = data.kind === void 0 ? "" : String(data.kind);
   if (creating && !CHANNEL_KINDS.includes(kind)) {
-    result.issues.push(issue12("MINIMUM_FIELD_MISSING", "$.data.kind", `channel.upsert 需要 kind（${CHANNEL_KINDS.join("/")}）`, op));
+    result.issues.push(issue13("MINIMUM_FIELD_MISSING", "$.data.kind", `channel.upsert 需要 kind（${CHANNEL_KINDS.join("/")}）`, op));
     return result;
   }
   const name = asString(data.name);
   if (creating && !name) {
-    result.issues.push(issue12("MINIMUM_FIELD_MISSING", "$.data.name", "channel.upsert 需要 name", op));
+    result.issues.push(issue13("MINIMUM_FIELD_MISSING", "$.data.name", "channel.upsert 需要 name", op));
     return result;
   }
   const sourceEntityId = resolveOne(data.source_ref, ["character", "faction", "item"], "source_ref");
@@ -20346,14 +20710,14 @@ function compileChannelUpsert(op, ctx) {
   const recipientEntityId = resolveOne(data.recipient_ref, ["character", "faction"], "recipient_ref");
   const recipientLocationId = resolveOne(data.recipient_location_ref, ["location"], "recipient_location_ref");
   if (recipientEntityId && recipientLocationId) {
-    result.issues.push(issue12("CHANNEL_RECIPIENT_CONFLICT", "$.data", "recipient 实体/地点至多一个", op));
+    result.issues.push(issue13("CHANNEL_RECIPIENT_CONFLICT", "$.data", "recipient 实体/地点至多一个", op));
     return result;
   }
-  if (data.scope !== void 0 && data.scope !== null && !isPlainObject7(data.scope)) {
-    result.issues.push(issue12("FIELD_TYPE_INVALID", "$.data.scope", "scope 必须是 {location_refs,entity_refs,radius_m?,topics}", op));
+  if (data.scope !== void 0 && data.scope !== null && !isPlainObject8(data.scope)) {
+    result.issues.push(issue13("FIELD_TYPE_INVALID", "$.data.scope", "scope 必须是 {location_refs,entity_refs,radius_m?,topics}", op));
     return result;
   }
-  const scope = isPlainObject7(data.scope) ? data.scope : { location_refs: [], entity_refs: [], topics: [] };
+  const scope = isPlainObject8(data.scope) ? data.scope : { location_refs: [], entity_refs: [], topics: [] };
   const scopeLocationRefs = [];
   if (Array.isArray(scope.location_refs)) {
     for (const v of scope.location_refs) {
@@ -20371,7 +20735,7 @@ function compileChannelUpsert(op, ctx) {
   const hasScope = scopeLocationRefs.length > 0 || scopeEntityRefs.length > 0;
   if (creating && !sourceEntityId && !sourceLocationId && !hasScope) {
     result.issues.push(
-      issue12("CHANNEL_SCOPE_REQUIRED", "$.data", "渠道必须至少有一项 source_ref / source_location_ref 或有效 scope；范围不能默认为整个世界", op)
+      issue13("CHANNEL_SCOPE_REQUIRED", "$.data", "渠道必须至少有一项 source_ref / source_location_ref 或有效 scope；范围不能默认为整个世界", op)
     );
     return result;
   }
@@ -20379,7 +20743,7 @@ function compileChannelUpsert(op, ctx) {
   if (data.reliability !== void 0) {
     const r = String(data.reliability);
     if (!RELIABILITY.includes(r)) {
-      result.issues.push(issue12("ENUM_INVALID", "$.data.reliability", `reliability 非法：${r}`, op));
+      result.issues.push(issue13("ENUM_INVALID", "$.data.reliability", `reliability 非法：${r}`, op));
       return result;
     }
     reliability = r;
@@ -20388,13 +20752,13 @@ function compileChannelUpsert(op, ctx) {
   if (data.secrecy !== void 0) {
     const s = String(data.secrecy);
     if (!SECRECY2.includes(s)) {
-      result.issues.push(issue12("ENUM_INVALID", "$.data.secrecy", `secrecy 非法：${s}`, op));
+      result.issues.push(issue13("ENUM_INVALID", "$.data.secrecy", `secrecy 非法：${s}`, op));
       return result;
     }
     secrecy = s;
   }
-  if (data.requirements !== void 0 && data.requirements !== null && !isPlainObject7(data.requirements)) {
-    result.issues.push(issue12("FIELD_TYPE_INVALID", "$.data.requirements", "requirements 必须是条件对象", op));
+  if (data.requirements !== void 0 && data.requirements !== null && !isPlainObject8(data.requirements)) {
+    result.issues.push(issue13("FIELD_TYPE_INVALID", "$.data.requirements", "requirements 必须是条件对象", op));
     return result;
   }
   const turnId = ctx.turnId ?? ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
@@ -20410,7 +20774,7 @@ function compileChannelUpsert(op, ctx) {
     recipient_location_id: recipientLocationId,
     scope_json: { location_refs: scopeLocationRefs, entity_refs: scopeEntityRefs, radius_m: scope.radius_m ?? null, topics: Array.isArray(scope.topics) ? scope.topics : [] },
     requirements_json: data.requirements ?? null,
-    latency_json: isPlainObject7(data.latency) ? data.latency : { quality: "unknown", basis_refs: [] },
+    latency_json: isPlainObject8(data.latency) ? data.latency : { quality: "unknown", basis_refs: [] },
     transport_mode_key: typeof data.transport_mode === "string" ? data.transport_mode : null,
     reliability,
     secrecy
@@ -20418,7 +20782,7 @@ function compileChannelUpsert(op, ctx) {
   if (result.issues.some((i) => i.severity === "error")) return result;
   if (before) {
     const after = applyPatch(before, { ...changes, row_rev: Number(before.row_rev ?? 1) + 1, updated_turn_id: turnId });
-    result.mutations.push(mutation4("channels", rowId2, before, after, op, basisOf3(ctx, op)));
+    result.mutations.push(mutation5("channels", rowId2, before, after, op, basisOf4(ctx, op)));
     result.readSet.push({ table: "channels", rowId: rowId2, rowRev: Number(before.row_rev ?? 1) });
   } else {
     const row2 = createRow("channels", changes, {
@@ -20429,7 +20793,7 @@ function compileChannelUpsert(op, ctx) {
       nowWallMs: Date.now(),
       rulesetVersion: "atlas-1"
     });
-    result.mutations.push(mutation4("channels", rowId2, null, row2, op, basisOf3(ctx, op)));
+    result.mutations.push(mutation5("channels", rowId2, null, row2, op, basisOf4(ctx, op)));
   }
   return result;
 }
@@ -20452,16 +20816,16 @@ var init_atlas_ops_information = __esm({
 });
 
 // src/atlas-ops-geography.ts
-function issue13(code, path, message, op, extra = {}) {
+function issue14(code, path, message, op, extra = {}) {
   return { code, path, message, severity: "error", retryable: true, opId: op.opId, line: op.line, ...extra };
 }
-function isPlainObject8(v) {
+function isPlainObject9(v) {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
-function mutation5(table, rowId2, before, after, op, basis) {
+function mutation6(table, rowId2, before, after, op, basis) {
   return { table, rowId: rowId2, before, after, sourceOpIds: [op.opId], basis };
 }
-function basisOf4(ctx, op) {
+function basisOf5(ctx, op) {
   if (ctx.basisFor) return ctx.basisFor(op, { certainty: "inferred" });
   return {
     kind: ctx.phase === "geography" ? "estimate" : ctx.phase === "observe" ? "story" : "simulation",
@@ -20480,7 +20844,7 @@ function compileMapEstimate(op, ctx) {
   if (unknown.length) result.issues.push(fieldIgnoredWarning(op, unknown));
   const ref = op.value.ref?.trim();
   if (!ref) {
-    result.issues.push(issue13("MINIMUM_FIELD_MISSING", "$.ref", "map.estimate 需要 ref", op));
+    result.issues.push(issue14("MINIMUM_FIELD_MISSING", "$.ref", "map.estimate 需要 ref", op));
     return result;
   }
   const resolved = resolveRef(ref, "map", ctx.scope, { opId: op.opId, line: op.line, field: "ref" });
@@ -20491,11 +20855,11 @@ function compileMapEstimate(op, ctx) {
   const mapId = resolved.entry.id;
   const before = ctx.tables.selectOne("maps", ctx.branchId, mapId);
   if (!before) {
-    result.issues.push(issue13("REF_UNKNOWN", "$.ref", `地图行不存在：${mapId}`, op));
+    result.issues.push(issue14("REF_UNKNOWN", "$.ref", `地图行不存在：${mapId}`, op));
     return result;
   }
   if (Number(before.scale_locked) === 1) {
-    result.issues.push(issue13("MAP_SCALE_LOCKED", "$.ref", "用户已锁定该图标定，map.estimate 不修改", op, { retryable: false }));
+    result.issues.push(issue14("MAP_SCALE_LOCKED", "$.ref", "用户已锁定该图标定，map.estimate 不修改", op, { retryable: false }));
     return result;
   }
   const widthM = typeof data.width_m === "number" && Number.isFinite(data.width_m) ? data.width_m : null;
@@ -20505,25 +20869,25 @@ function compileMapEstimate(op, ctx) {
   const basis = asString(data.basis);
   if (widthM === null && heightM === null && minCell === null && maxCell === null) {
     result.issues.push(
-      issue13("MINIMUM_FIELD_MISSING", "$.data", "map.estimate 需要尺寸（width_m/height_m）或比例尺依据（meters_per_cell_min/max）；不能声称精确测量", op)
+      issue14("MINIMUM_FIELD_MISSING", "$.data", "map.estimate 需要尺寸（width_m/height_m）或比例尺依据（meters_per_cell_min/max）；不能声称精确测量", op)
     );
     return result;
   }
   for (const [name, value] of [["width_m", widthM], ["height_m", heightM], ["meters_per_cell_min", minCell], ["meters_per_cell_max", maxCell]]) {
     if (value !== null && value <= 0) {
-      result.issues.push(issue13("MAP_SCALE_NOT_POSITIVE", `$.data.${name}`, `${name} 必须为正数`, op));
+      result.issues.push(issue14("MAP_SCALE_NOT_POSITIVE", `$.data.${name}`, `${name} 必须为正数`, op));
       return result;
     }
   }
   if (minCell !== null && maxCell !== null && minCell > maxCell) {
-    result.issues.push(issue13("MAP_SCALE_ORDER_INVALID", "$.data", "meters_per_cell_min 不能大于 meters_per_cell_max", op));
+    result.issues.push(issue14("MAP_SCALE_ORDER_INVALID", "$.data", "meters_per_cell_min 不能大于 meters_per_cell_max", op));
     return result;
   }
-  let frame = isPlainObject8(before.frame_json) ? before.frame_json : {};
+  let frame = isPlainObject9(before.frame_json) ? before.frame_json : {};
   if (data.frame !== void 0) {
-    const f = isPlainObject8(data.frame) ? data.frame : null;
+    const f = isPlainObject9(data.frame) ? data.frame : null;
     if (!f || !Number.isInteger(f.cols) || !Number.isInteger(f.rows) || Number(f.cols) < 1 || Number(f.rows) < 1 || Number(f.cols) > 1e4 || Number(f.rows) > 1e4) {
-      result.issues.push(issue13("FRAME_INVALID", "$.data.frame", "frame.cols/rows 必须是 1～10000 的整数", op));
+      result.issues.push(issue14("FRAME_INVALID", "$.data.frame", "frame.cols/rows 必须是 1～10000 的整数", op));
       return result;
     }
     frame = { ...frame, cols: f.cols, rows: f.rows, reference_width_cells: f.cols, reference_height_cells: f.rows };
@@ -20562,40 +20926,40 @@ function compileMapEstimate(op, ctx) {
     row_rev: Number(before.row_rev ?? 1) + 1,
     updated_turn_id: turnId
   });
-  result.mutations.push(mutation5("maps", mapId, before, after, op, basisOf4(ctx, op)));
+  result.mutations.push(mutation6("maps", mapId, before, after, op, basisOf5(ctx, op)));
   result.readSet.push({ table: "maps", rowId: mapId, rowRev: Number(before.row_rev ?? 1) });
   return result;
 }
 function validateGeometry(geometry, op, issues, path) {
   if (geometry === void 0 || geometry === null) return null;
-  if (!isPlainObject8(geometry)) {
-    issues.push(issue13("GEOMETRY_INVALID", path, "geometry 必须是 {kind,coordinates}", op));
+  if (!isPlainObject9(geometry)) {
+    issues.push(issue14("GEOMETRY_INVALID", path, "geometry 必须是 {kind,coordinates}", op));
     return null;
   }
   const kind = String(geometry.kind ?? "");
   if (!["point", "line", "polygon"].includes(kind)) {
-    issues.push(issue13("GEOMETRY_INVALID", path, `geometry.kind 非法：${kind}`, op));
+    issues.push(issue14("GEOMETRY_INVALID", path, `geometry.kind 非法：${kind}`, op));
     return null;
   }
   if (!Array.isArray(geometry.coordinates)) {
-    issues.push(issue13("GEOMETRY_INVALID", path, "geometry.coordinates 必须是数组", op));
+    issues.push(issue14("GEOMETRY_INVALID", path, "geometry.coordinates 必须是数组", op));
     return null;
   }
   if (geometry.coordinates.length > GEOMETRY_VERTEX_LIMIT) {
-    issues.push(issue13("GEOMETRY_TOO_MANY_VERTICES", path, `geometry 顶点上限 ${GEOMETRY_VERTEX_LIMIT}，收到 ${geometry.coordinates.length}`, op));
+    issues.push(issue14("GEOMETRY_TOO_MANY_VERTICES", path, `geometry 顶点上限 ${GEOMETRY_VERTEX_LIMIT}，收到 ${geometry.coordinates.length}`, op));
     return null;
   }
   const coords = [];
   for (const point of geometry.coordinates) {
-    const pair = Array.isArray(point) ? point : isPlainObject8(point) ? [point.x, point.y] : null;
+    const pair = Array.isArray(point) ? point : isPlainObject9(point) ? [point.x, point.y] : null;
     if (!pair || pair.length < 2) {
-      issues.push(issue13("GEOMETRY_INVALID", path, "geometry.coordinates 每项必须是 [x,y]", op));
+      issues.push(issue14("GEOMETRY_INVALID", path, "geometry.coordinates 每项必须是 [x,y]", op));
       return null;
     }
     const x = Number(pair[0]);
     const y = Number(pair[1]);
     if (!Number.isFinite(x) || !Number.isFinite(y)) {
-      issues.push(issue13("GEOMETRY_INVALID", path, "geometry 坐标必须是有限数字（NaN/Infinity 非法）", op));
+      issues.push(issue14("GEOMETRY_INVALID", path, "geometry 坐标必须是有限数字（NaN/Infinity 非法）", op));
       return null;
     }
     coords.push([x, y]);
@@ -20627,7 +20991,7 @@ function compileRoutePropose(op, ctx) {
   const ref = op.value.ref?.trim();
   const existingRow = ref && !ref.startsWith("new:") ? resolveRef(ref, "route", ctx.scope, { opId: op.opId, line: op.line, field: "ref" }) : null;
   if (ref && !ref.startsWith("new:") && !existingRow?.entry) {
-    result.issues.push(...existingRow?.issues ?? [issue13("REF_UNKNOWN", "$.ref", `找不到路线引用：${ref}`, op)]);
+    result.issues.push(...existingRow?.issues ?? [issue14("REF_UNKNOWN", "$.ref", `找不到路线引用：${ref}`, op)]);
     return result;
   }
   const fromRef = data.from_ref ?? null;
@@ -20647,17 +21011,17 @@ function compileRoutePropose(op, ctx) {
   const rowId2 = existingRow?.entry ? existingRow.entry.id : ctx.makeId("route", op.opId, ref && ref.startsWith("new:") ? ref : `route:${fromId}:${toId}`);
   const before = existingRow?.entry ? ctx.tables.selectOne("routes", ctx.branchId, rowId2) : null;
   if (existingRow?.entry && !before) {
-    result.issues.push(issue13("REF_UNKNOWN", "$.ref", `路线行不存在：${rowId2}`, op));
+    result.issues.push(issue14("REF_UNKNOWN", "$.ref", `路线行不存在：${rowId2}`, op));
     return result;
   }
   if (!fromId) fromId = before ? String(before.from_location_id) : null;
   if (!toId) toId = before ? String(before.to_location_id) : null;
   if (!fromId || !toId) {
-    result.issues.push(issue13("MINIMUM_FIELD_MISSING", "$.data", "route.propose 需要 from_ref 与 to_ref", op));
+    result.issues.push(issue14("MINIMUM_FIELD_MISSING", "$.data", "route.propose 需要 from_ref 与 to_ref", op));
     return result;
   }
   if (fromId === toId) {
-    result.issues.push(issue13("ROUTE_SELF_LOOP", "$.data", "路线两端不能是同一地点", op));
+    result.issues.push(issue14("ROUTE_SELF_LOOP", "$.data", "路线两端不能是同一地点", op));
     return result;
   }
   const geometry = validateGeometry(data.geometry, op, result.issues, "$.data.geometry");
@@ -20689,7 +21053,7 @@ function compileRoutePropose(op, ctx) {
     mapId = sameMap;
   }
   if (mapId !== null && sameMap !== mapId) {
-    result.issues.push(issue13(
+    result.issues.push(issue14(
       "ROUTE_MAP_MISMATCH",
       "$.data.map_ref",
       `路线归属图 ${mapId} 与端点所在图不一致（from=${fromMap ?? "未知"}，to=${toMap ?? "未知"}）：不静默改归属，也不拼接跨图坐标`,
@@ -20698,7 +21062,7 @@ function compileRoutePropose(op, ctx) {
     return result;
   }
   if (geometry && mapId === null) {
-    result.issues.push(issue13(
+    result.issues.push(issue14(
       "ROUTE_GEOMETRY_CROSS_MAP",
       "$.data.geometry",
       "两端地点无法归属到同一张地图：跨图连接不要给几何（用两端地点与耗时表达）",
@@ -20710,7 +21074,7 @@ function compileRoutePropose(op, ctx) {
   if (data.status !== void 0) {
     const s = String(data.status);
     if (!ROUTE_STATUS.includes(s)) {
-      result.issues.push(issue13("ENUM_INVALID", "$.data.status", `路线状态非法：${s}`, op));
+      result.issues.push(issue14("ENUM_INVALID", "$.data.status", `路线状态非法：${s}`, op));
       return result;
     }
     status = s;
@@ -20719,7 +21083,7 @@ function compileRoutePropose(op, ctx) {
   if (data.kind !== void 0) {
     const k = String(data.kind);
     if (!ROUTE_KINDS.includes(k)) {
-      result.issues.push(issue13("ENUM_INVALID", "$.data.kind", `路线类型非法：${k}`, op));
+      result.issues.push(issue14("ENUM_INVALID", "$.data.kind", `路线类型非法：${k}`, op));
       return result;
     }
     kind = k;
@@ -20728,7 +21092,7 @@ function compileRoutePropose(op, ctx) {
   if (data.quality !== void 0) {
     const q = String(data.quality);
     if (!GEOMETRY_QUALITY.includes(q)) {
-      result.issues.push(issue13("ENUM_INVALID", "$.data.quality", `geometry quality 非法：${q}`, op));
+      result.issues.push(issue14("ENUM_INVALID", "$.data.quality", `geometry quality 非法：${q}`, op));
       return result;
     }
     quality = q;
@@ -20738,20 +21102,20 @@ function compileRoutePropose(op, ctx) {
   const distanceMax = typeof data.distance_max_m === "number" && Number.isFinite(data.distance_max_m) ? data.distance_max_m : null;
   for (const [name, value] of [["distance_m", distanceM], ["distance_min_m", distanceMin], ["distance_max_m", distanceMax]]) {
     if (value !== null && value < 0) {
-      result.issues.push(issue13("DISTANCE_NEGATIVE", `$.data.${name}`, `${name} 不能为负`, op));
+      result.issues.push(issue14("DISTANCE_NEGATIVE", `$.data.${name}`, `${name} 不能为负`, op));
       return result;
     }
   }
   if (distanceMin !== null && distanceM !== null && distanceMin > distanceM) {
-    result.issues.push(issue13("DISTANCE_ORDER_INVALID", "$.data", "distance_min_m 不能大于 distance_m", op));
+    result.issues.push(issue14("DISTANCE_ORDER_INVALID", "$.data", "distance_min_m 不能大于 distance_m", op));
     return result;
   }
   if (distanceMax !== null && distanceM !== null && distanceM > distanceMax) {
-    result.issues.push(issue13("DISTANCE_ORDER_INVALID", "$.data", "distance_m 不能大于 distance_max_m", op));
+    result.issues.push(issue14("DISTANCE_ORDER_INVALID", "$.data", "distance_m 不能大于 distance_max_m", op));
     return result;
   }
   if (distanceMin !== null && distanceMax !== null && distanceMin > distanceMax) {
-    result.issues.push(issue13("DISTANCE_ORDER_INVALID", "$.data", "distance_min_m 不能大于 distance_max_m", op));
+    result.issues.push(issue14("DISTANCE_ORDER_INVALID", "$.data", "distance_min_m 不能大于 distance_max_m", op));
     return result;
   }
   const modes = [];
@@ -20759,24 +21123,24 @@ function compileRoutePropose(op, ctx) {
     for (const m of data.modes) {
       const mode = String(m);
       if (!MOBILITY_MODES.includes(mode)) {
-        result.issues.push(issue13("ENUM_INVALID", "$.data.modes", `移动方式非法：${mode}`, op));
+        result.issues.push(issue14("ENUM_INVALID", "$.data.modes", `移动方式非法：${mode}`, op));
         return result;
       }
       modes.push(mode);
     }
   }
-  if (data.access !== void 0 && data.access !== null && !isPlainObject8(data.access)) {
-    result.issues.push(issue13("FIELD_TYPE_INVALID", "$.data.access", "access 必须是条件对象", op));
+  if (data.access !== void 0 && data.access !== null && !isPlainObject9(data.access)) {
+    result.issues.push(issue14("FIELD_TYPE_INVALID", "$.data.access", "access 必须是条件对象", op));
     return result;
   }
-  if (data.duration !== void 0 && data.duration !== null && !isPlainObject8(data.duration)) {
-    result.issues.push(issue13("FIELD_TYPE_INVALID", "$.data.duration", "duration 必须是 TimeEstimate 对象", op));
+  if (data.duration !== void 0 && data.duration !== null && !isPlainObject9(data.duration)) {
+    result.issues.push(issue14("FIELD_TYPE_INVALID", "$.data.duration", "duration 必须是 TimeEstimate 对象", op));
     return result;
   }
   const distanceBasis = before ? String(before.distance_basis) : "unknown";
   const resolvedBasis = distanceM !== null || distanceMin !== null || distanceMax !== null ? data.quality === "confirmed" ? "calibrated" : "estimated" : distanceBasis;
   if (!DISTANCE_BASIS.includes(resolvedBasis)) {
-    result.issues.push(issue13("ENUM_INVALID", "$.data", "distance_basis 无法确定", op));
+    result.issues.push(issue14("ENUM_INVALID", "$.data", "distance_basis 无法确定", op));
     return result;
   }
   if (result.issues.some((i) => i.severity === "error")) return result;
@@ -20803,7 +21167,7 @@ function compileRoutePropose(op, ctx) {
       row_rev: Number(before.row_rev ?? 1) + 1,
       updated_turn_id: turnId
     });
-    result.mutations.push(mutation5("routes", rowId2, before, after, op, basisOf4(ctx, op)));
+    result.mutations.push(mutation6("routes", rowId2, before, after, op, basisOf5(ctx, op)));
     result.readSet.push({ table: "routes", rowId: rowId2, rowRev: Number(before.row_rev ?? 1) });
   } else {
     const row2 = createRow(
@@ -20828,7 +21192,7 @@ function compileRoutePropose(op, ctx) {
       },
       { branchId: ctx.branchId, id: rowId2, turnId, clockS: ctx.clockS, nowWallMs: Date.now(), rulesetVersion: "atlas-1" }
     );
-    result.mutations.push(mutation5("routes", rowId2, null, row2, op, basisOf4(ctx, op)));
+    result.mutations.push(mutation6("routes", rowId2, null, row2, op, basisOf5(ctx, op)));
   }
   result.declaredRefs = ref?.startsWith("new:") ? [{ alias: ref, id: rowId2, kind: "route", rowRev: null, declaredByOpId: op.opId }] : [];
   return result;
@@ -20864,306 +21228,6 @@ var init_atlas_ops_geography = __esm({
       room: "interior",
       vehicle: "interior"
     };
-  }
-});
-
-// src/atlas-spatial-request.ts
-function isPlainObject9(v) {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-function issue14(code, path, message, op, extra = {}) {
-  return { code, path, message, severity: "error", retryable: true, opId: op.opId, line: op.line, ...extra };
-}
-function mutation6(table, rowId2, before, after, op, basis) {
-  return { table, rowId: rowId2, before, after, sourceOpIds: [op.opId], basis };
-}
-function basisOf5(ctx, op) {
-  if (ctx.basisFor) return ctx.basisFor(op, { certainty: "inferred" });
-  return {
-    kind: ctx.phase === "geography" ? "estimate" : ctx.phase === "observe" ? "story" : "simulation",
-    sources: [],
-    causes: [],
-    reason: op.value.why ?? "布局约束请求",
-    verification: ctx.phase === "observe" ? "source_bound" : "causal",
-    certainty: "inferred"
-  };
-}
-function canonicalJson(value) {
-  if (value === null || value === void 0) return "null";
-  if (Array.isArray(value)) return `[${value.map((v) => canonicalJson(v)).join(",")}]`;
-  if (typeof value === "object") {
-    const obj = value;
-    return `{${Object.keys(obj).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(obj[k])}`).join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "null";
-}
-function signatureOf(text6) {
-  let out = "";
-  let seed = 2166136261;
-  while (out.length < 32) {
-    let h = seed;
-    for (let i = 0; i < text6.length; i += 1) {
-      h ^= text6.charCodeAt(i) + out.length;
-      h = Math.imul(h, 16777619) >>> 0;
-    }
-    out += h.toString(16).padStart(8, "0");
-    seed = (h ^ 2654435769) >>> 0;
-  }
-  return out.slice(0, 32);
-}
-function mergeRow(existing, incoming, path, strict, conflicts) {
-  const out = { ...existing };
-  for (const [key, value] of Object.entries(incoming)) {
-    if (!(key in out)) {
-      out[key] = value;
-      continue;
-    }
-    if (isPlainObject9(value) && isPlainObject9(out[key])) {
-      out[key] = mergeRow(out[key], value, `${path}.${key}`, strict, conflicts);
-      continue;
-    }
-    if (canonicalJson(out[key]) === canonicalJson(value)) continue;
-    if (strict) conflicts.push(`${path}.${key}`);
-    out[key] = value;
-  }
-  return out;
-}
-function mergeConstraints(baseSpec, incoming, strict) {
-  const conflicts = [];
-  const out = isPlainObject9(baseSpec) ? { ...baseSpec } : {};
-  const deletes = incoming["deletes"];
-  if (isPlainObject9(deletes)) {
-    out["deletes"] = deletes;
-    for (const [collection2, ids2] of Object.entries(deletes)) {
-      if (!Array.isArray(ids2)) continue;
-      const rows4 = out[collection2];
-      if (!Array.isArray(rows4)) continue;
-      const drop = new Set(ids2.map((v) => String(v)));
-      out[collection2] = rows4.filter((row2) => !(isPlainObject9(row2) && drop.has(String(row2["id"]))));
-    }
-  }
-  for (const collection2 of LAYOUT_SPEC_COLLECTIONS) {
-    const rows4 = incoming[collection2];
-    if (!Array.isArray(rows4)) continue;
-    const byId9 = /* @__PURE__ */ new Map();
-    for (const row2 of Array.isArray(out[collection2]) ? out[collection2] : []) {
-      if (isPlainObject9(row2)) byId9.set(String(row2["id"]), row2);
-    }
-    for (const raw of rows4) {
-      if (!isPlainObject9(raw)) continue;
-      const id = String(raw["id"]);
-      const existing = byId9.get(id);
-      byId9.set(id, existing ? mergeRow(existing, raw, `spec.${collection2}[${id}]`, strict, conflicts) : { ...raw });
-    }
-    out[collection2] = [...byId9.values()];
-  }
-  for (const key of LAYOUT_SPEC_SCALARS) {
-    if (DIRECTIVE_KEYS.includes(key)) continue;
-    const value = incoming[key];
-    if (value === void 0) continue;
-    if (strict && key in out && canonicalJson(out[key]) !== canonicalJson(value)) {
-      conflicts.push(`spec.${key}`);
-      continue;
-    }
-    out[key] = value;
-  }
-  delete out["rebuild"];
-  return { spec: out, conflicts };
-}
-function collectLocationRefs(spec) {
-  const out = /* @__PURE__ */ new Set();
-  const add2 = (value) => {
-    if (typeof value !== "string") return;
-    const trimmed = value.trim();
-    if (trimmed === "" || trimmed.startsWith("new:")) return;
-    out.add(trimmed);
-  };
-  add2(spec["corridorLocationRef"]);
-  for (const [collection2, fields] of Object.entries(LAYOUT_SPEC_REF_FIELDS)) {
-    const rows4 = spec[collection2];
-    if (!Array.isArray(rows4)) continue;
-    for (const row2 of rows4) {
-      if (!isPlainObject9(row2)) continue;
-      for (const [field, kind] of Object.entries(fields)) {
-        if (kind !== "location") continue;
-        add2(row2[field]);
-      }
-    }
-  }
-  return [...out];
-}
-function compileMapLayoutRequest(op, ctx) {
-  const result = emptyCompileResult();
-  const data = op.value.data ?? {};
-  const kind = typeof data["kind"] === "string" ? data["kind"].trim().toLowerCase() : "";
-  if (kind !== "floor" && kind !== "city" && kind !== "overview") {
-    result.issues.push(
-      issue14(
-        ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING,
-        "$.data.kind",
-        `map.layout.request kind must be one of {floor,city,overview}; got ${JSON.stringify(data["kind"] ?? null)}`,
-        op
-      )
-    );
-    return result;
-  }
-  const cleaned = normalizeLayoutSpec(data, { opId: op.opId, line: op.line });
-  result.issues.push(...cleaned.issues);
-  if (!cleaned.ok || !cleaned.spec) return result;
-  const spec = { ...cleaned.spec };
-  const ref = op.value.ref?.trim() ?? "";
-  if (ref === "") {
-    result.issues.push(issue14(ATLAS_ERROR_CODES.MINIMUM_FIELD_MISSING, "$.ref", "map.layout.request 需要 ref 指定地图", op));
-    return result;
-  }
-  const resolved = resolveRef(ref, "map", ctx.scope, { opId: op.opId, line: op.line, field: "ref" });
-  if (!resolved.entry) {
-    result.issues.push(...resolved.issues);
-    return result;
-  }
-  const mapId = resolved.entry.id;
-  const before = ctx.tables.selectOne("maps", ctx.branchId, mapId);
-  if (!before) {
-    result.issues.push(issue14(ATLAS_ERROR_CODES.REF_UNKNOWN, "$.ref", `地图行不存在：${mapId}`, op));
-    return result;
-  }
-  const specMapId = typeof spec["mapId"] === "string" ? spec["mapId"].trim() : "";
-  if (specMapId !== "" && specMapId !== mapId) {
-    result.issues.push(
-      issue14(
-        LAYOUT_REQUEST_CONFLICT,
-        "$.data.spec.mapId",
-        `spec.mapId（${specMapId}）与 ref 解析出的地图（${mapId}）不一致；同一请求不能跨图。`,
-        op
-      )
-    );
-    return result;
-  }
-  spec["mapId"] = mapId;
-  const allowed = KIND_COLLECTIONS[kind] ?? FLOOR_COLLECTIONS;
-  for (const collection2 of LAYOUT_SPEC_COLLECTIONS) {
-    if (allowed.includes(collection2)) continue;
-    const rows4 = spec[collection2];
-    if (Array.isArray(rows4) && rows4.length > 0) {
-      result.issues.push(
-        issue14(
-          LAYOUT_REQUEST_CONFLICT,
-          `$.data.spec.${collection2}`,
-          `kind=${kind} 的布局请求不接受 ${collection2}；floor / city / overview 是三套模板，引用不可混用。`,
-          op
-        )
-      );
-      return result;
-    }
-  }
-  const refs = resolveLayoutSpecRefs(spec, ctx.scope, { opId: op.opId, line: op.line });
-  result.issues.push(...refs.issues);
-  if (!refs.ok || !refs.spec) return result;
-  const resolvedSpec = refs.spec;
-  for (const id of collectLocationRefs(resolvedSpec)) {
-    const row2 = ctx.tables.selectOne("locations", ctx.branchId, id);
-    if (!row2) continue;
-    const owner = row2["map_id"] === null || row2["map_id"] === void 0 ? "" : String(row2["map_id"]);
-    if (owner !== "" && owner !== mapId && id !== before.container_location_id) {
-      result.issues.push(
-        issue14(
-          LAYOUT_REQUEST_CONFLICT,
-          "$.data.spec",
-          `实体 ${id} 属于另一张图（${owner}），不能出现在 ${mapId} 的布局里：父图/子图引用不可混用。`,
-          op
-        )
-      );
-      return result;
-    }
-  }
-  const frame = isPlainObject9(before.frame_json) ? before.frame_json : {};
-  const saved = isPlainObject9(frame["atlasLayoutRequest"]) ? frame["atlasLayoutRequest"] : null;
-  const savedSpec = saved && isPlainObject9(saved["spec"]) ? saved["spec"] : null;
-  const savedKind = saved && typeof saved["kind"] === "string" ? String(saved["kind"]) : null;
-  let state = BATCH_STATE.get(ctx);
-  if (!state) {
-    state = /* @__PURE__ */ new Map();
-    BATCH_STATE.set(ctx, state);
-  }
-  const previous = state.get(mapId);
-  if (savedKind !== null && savedKind !== kind) {
-    result.issues.push(
-      issue14(
-        LAYOUT_REQUEST_CONFLICT,
-        "$.data.kind",
-        `该图已保存 kind=${savedKind} 的布局请求，本次是 ${kind}；同一张图的两套模板不能并存，请先显式重建。`,
-        op
-      )
-    );
-    return result;
-  }
-  if (previous && previous.kind !== kind) {
-    result.issues.push(
-      issue14(LAYOUT_REQUEST_CONFLICT, "$.data.kind", `同批前一个请求是 ${previous.kind}，本次是 ${kind}。`, op)
-    );
-    return result;
-  }
-  const merged = mergeConstraints(previous ? previous.spec : savedSpec, resolvedSpec, previous !== void 0);
-  if (merged.conflicts.length > 0) {
-    result.issues.push(
-      issue14(
-        LAYOUT_REQUEST_CONFLICT,
-        `$.data.spec.${merged.conflicts[0].replace(/^spec\./, "")}`,
-        `本次请求与同批已编译的约束在 ${merged.conflicts.join("、")} 上冲突；不静默覆盖，请合并成一条或改用不同 id。`,
-        op
-      )
-    );
-    return result;
-  }
-  state.set(mapId, { kind, spec: merged.spec });
-  const requestId = ctx.makeId("layout_request", op.opId, `map:${mapId}`);
-  const turnId = ctx.turnId ?? ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
-  const rebuild = spec["rebuild"] === true;
-  const signature2 = signatureOf(canonicalJson({ kind, mapId, spec: merged.spec, rebuild }));
-  const dependencies = [mapId, ...refs.dependencies];
-  for (const id of dependencies) if (!result.dependencies.includes(id)) result.dependencies.push(id);
-  result.readSet.push({ table: "maps", rowId: mapId, rowRev: Number(before.row_rev ?? 1) });
-  const savedSignature = saved && typeof saved["inputSignature"] === "string" ? String(saved["inputSignature"]) : null;
-  if (savedSignature === signature2) return result;
-  const nextFrame = { ...frame };
-  nextFrame["atlasLayoutRequest"] = {
-    requestId,
-    operationId: op.opId,
-    createdTurnId: turnId,
-    kind,
-    mapId,
-    rebuild,
-    spec: merged.spec,
-    inputSignature: signature2
-  };
-  const after = applyPatch(before, {
-    frame_json: nextFrame,
-    row_rev: Number(before.row_rev ?? 1) + 1,
-    updated_turn_id: turnId
-  });
-  result.mutations.push(mutation6("maps", mapId, before, after, op, basisOf5(ctx, op)));
-  return result;
-}
-var LAYOUT_REQUEST_CONFLICT, FLOOR_COLLECTIONS, CITY_COLLECTIONS, OVERVIEW_COLLECTIONS, KIND_COLLECTIONS, DIRECTIVE_KEYS, BATCH_STATE;
-var init_atlas_spatial_request = __esm({
-  "src/atlas-spatial-request.ts"() {
-    "use strict";
-    init_atlas_ops_compile_types();
-    init_atlas_ops_refs();
-    init_atlas_ops_normalize();
-    init_atlas_ops_entities();
-    init_atlas_ops_errors();
-    LAYOUT_REQUEST_CONFLICT = ATLAS_ERROR_CODES.LAYOUT_REQUEST_CONFLICT;
-    FLOOR_COLLECTIONS = LAYOUT_KIND_COLLECTIONS.floor;
-    CITY_COLLECTIONS = LAYOUT_KIND_COLLECTIONS.city;
-    OVERVIEW_COLLECTIONS = LAYOUT_KIND_COLLECTIONS.overview;
-    KIND_COLLECTIONS = {
-      floor: FLOOR_COLLECTIONS,
-      city: CITY_COLLECTIONS,
-      overview: OVERVIEW_COLLECTIONS
-    };
-    DIRECTIVE_KEYS = ["deletes", "rebuild"];
-    BATCH_STATE = /* @__PURE__ */ new WeakMap();
   }
 });
 
@@ -21388,7 +21452,7 @@ function utf8ByteLength(text6) {
   return UTF8_ENCODER.encode(text6).byteLength;
 }
 function issue15(code, path, message, extra = {}) {
-  return toIssue2(new Error(message), { code, path, ...extra });
+  return toIssue(new Error(message), { code, path, ...extra });
 }
 function normalizeText(text6) {
   let out = text6;
@@ -25598,6 +25662,7 @@ function queryMapView(ctx, query) {
         const resolution = resolveSpatialProfile({
           map,
           container: container ?? null,
+          parentContainer: visibleLocations.find((row2) => row2.id === container?.parent_location_id) ?? null,
           corridorEntityId: boundCorridorIdOf(map),
           members,
           routes: profileRoutes
@@ -26917,6 +26982,7 @@ function querySpatialScene(ctx, query) {
     const profile = resolveSpatialProfile({
       map: mapRow,
       container,
+      parentContainer: container ? locationById.get(String(container.parent_location_id)) ?? null : null,
       corridorEntityId: boundCorridorIdOf(mapRow),
       members,
       routes: routeRows.filter((row2) => containerId !== "" && (String(row2.from_location_id ?? "") === containerId || String(row2.to_location_id ?? "") === containerId))
@@ -30966,11 +31032,11 @@ function completeLayoutClosure(input) {
     const container = locations.find((l) => l.id === map.container_location_id), scene = frame.atlasScene;
     const layout = scene?.layout;
     const members = collectMapLocations({ mapRow: map, maps, locations });
-    const profile = resolveSpatialProfile({ map, container: container ?? null, members, routes: input.routes.filter((r) => r.map_id === mapId) });
-    const kind = layout ? profile.layoutKind : ["room", "floor"].includes(String(container?.kind)) && canonical ? "floor" : null;
+    const profile = resolveSpatialProfile({ map, container: container ?? null, parentContainer: locations.find((row2) => row2.id === container?.parent_location_id) ?? null, members, routes: input.routes.filter((r) => r.map_id === mapId) });
+    const pending = frame.atlasLayoutRequest;
+    const kind = layout || pending?.status === "pending" ? profile.layoutKind : members.length === 0 && ["room", "floor"].includes(String(container?.kind)) && canonical ? "floor" : null;
     if (kind !== "floor" && kind !== "city" && kind !== "overview") continue;
     const spaceSize = resolveMapSpaceSize({ maps, locations, mapRow: map, branchId: scope.branchId });
-    const pending = frame.atlasLayoutRequest;
     let spec = structuredClone(pending?.status === "pending" ? pending.spec : scene?.constraints ?? {});
     if (kind === "floor" && initialLedgers.has(mapId) && canonical && Array.isArray(spec.rooms) && spec.rooms.length === 1 && spec.rooms[0].id === container?.id) {
       const ids2 = new Set(canonical.furnishing.map((f) => f.localId.split(":furn:")[1]));
@@ -31590,7 +31656,9 @@ function applyPendingSpatialRequests(input) {
       return frame.atlasScene === void 0 || frame.atlasScene === null;
     })();
     const currentMaps = readTable(input.db, "maps", scope.branchId, ports);
-    const spaceSize = resolveMapSpaceSize({ maps: currentMaps, locations, mapRow, branchId: scope.branchId, firstEstimate: null });
+    const plannedExtent = input.plannedExtents?.[job.mapId];
+    const firstEstimate = plannedExtent?.units === "meters" ? { widthM: plannedExtent.width, heightM: plannedExtent.height } : null;
+    const spaceSize = resolveMapSpaceSize({ maps: currentMaps, locations, mapRow, branchId: scope.branchId, firstEstimate });
     if (spaceSize) {
       issues.push(...spaceSize.issues);
       issues.push(...spaceSize.resolution.issues);
@@ -32239,7 +32307,12 @@ ${chunk.text}`;
   const catalogueRows = new Map(Object.values(catalogue.rows).flat().map((row2) => [String(row2.id), row2]));
   const refLines = catalogue.knownRefs.map((ref) => {
     const row2 = catalogueRows.get(ref.id);
-    return `${ref.alias}=${ref.id}/${ref.kind} ${JSON.stringify({ name: row2?.name, kind: row2?.kind, parent_ref: row2?.parent_location_id })}`;
+    return `${ref.alias}=${ref.id}/${ref.kind} ${JSON.stringify({
+      name: row2?.name,
+      kind: row2?.kind,
+      parent_ref: row2?.parent_location_id,
+      ...row2?.area_geometry_json ? { area: row2.area_geometry_json, area_protected: row2.existence_quality === "confirmed" } : {}
+    })}`;
   });
   const memberLines = plan.memberLines.length > 0 ? plan.memberLines : ["（无）"];
   const lockLines = plan.lockLines.length > 0 ? plan.lockLines : ["（无）"];
@@ -32396,6 +32469,20 @@ function normalizeConstructionOps(input) {
     }
     const isNew = ref.startsWith("new:") || ref.length > 0 && !known.has(ref);
     const facts = input.protectedLocationFacts?.[ref];
+    let unchangedArea = false;
+    if (!isNew && facts?.area && "area" in data && facts.areaValue !== void 0) {
+      let savedArea = facts.areaValue;
+      if (typeof savedArea === "string") {
+        try {
+          savedArea = JSON.parse(savedArea);
+        } catch {
+        }
+      }
+      if (stable(savedArea) === stable(data.area)) {
+        delete data.area;
+        unchangedArea = true;
+      }
+    }
     if (!isNew && facts) {
       const protectedFields = [
         ...facts.parentRef && "parent_ref" in data && data.parent_ref !== facts.parentRef ? ["parent_ref"] : [],
@@ -32435,6 +32522,11 @@ function normalizeConstructionOps(input) {
         data.existence_quality = "inferred";
         downgraded.push(ref);
       }
+    }
+    if (!isNew && Object.keys(data).length === 0 && protectedDrops.includes(ref)) continue;
+    if (!isNew && Object.keys(data).length === 0 && unchangedArea) {
+      operations.push({ op: "noop", why: "已有确认尺寸/范围相同，保持原事实" });
+      continue;
     }
     operations.push({ ...op, data });
   }
@@ -32493,6 +32585,7 @@ var init_atlas_sql_world_completion = __esm({
     init_atlas_sql_world_sources();
     init_atlas_spatial_frame();
     init_atlas_ops_prompts();
+    init_atlas_spatial();
     WORLD_FILL_FRAME_KEY = "atlasWorldFill";
     WORLD_CONSTRUCTION_OPS = ["location.upsert", "route.propose", "map.estimate", "noop"];
     WORLD_CONSTRUCTION_POLICY_VERSION = 1;
@@ -34728,16 +34821,18 @@ function createSqlRepository(options) {
                 protectedLocationFacts: Object.fromEntries(existingLocations.map((row2) => [String(row2.id), {
                   ...row2.existence_quality === "confirmed" && row2.parent_location_id ? { parentRef: String(row2.parent_location_id) } : {},
                   position: row2.coord_precision === "exact",
-                  area: row2.existence_quality === "confirmed" && !!row2.area_geometry_json
+                  area: row2.existence_quality === "confirmed" && !!row2.area_geometry_json,
+                  areaValue: row2.area_geometry_json
                 }])),
                 policy: input.worldCompletion.policy
               });
               allIssues.push(...deduped.issues, ...normalized.issues);
-              const constructionParsed = normalized.operations.map((value, index) => {
+              const cleanNoop = !parsedConstruction.incomplete && !parsedConstruction.issues.some((issue25) => issue25.severity === "error") && normalized.protectedDrops.length === 0 && normalized.operations.every((op) => op.op === "noop") && (normalized.operations.length > 0 || parsedConstruction.explicitNoop);
+              const constructionParsed = normalized.operations.filter((op) => op.op !== "noop").map((value, index) => {
                 const raw = JSON.stringify(value);
                 return { opId: `cons_${index}_${sha256HexSync(raw).slice(0, 8)}`, line: index + 1, rawHash: sha256HexSync(raw), value };
               });
-              if (constructionParsed.length === 0) {
+              if (constructionParsed.length === 0 && !cleanNoop) {
                 construction.status = "deferred";
                 construction.reasonCode = construction.reasonCode ?? "WORLD_CONSTRUCTION_EMPTY";
                 construction.queueOutcome = "retry";
@@ -34811,7 +34906,7 @@ function createSqlRepository(options) {
                   requestCompleted: true,
                   payloadComplete: !parsedConstruction.incomplete,
                   normalizedClean: normalized.protectedDrops.length === 0,
-                  appliedClean: rejected2.length > 0 ? false : ok2.length > 0,
+                  appliedClean: rejected2.length > 0 ? false : ok2.length > 0 || cleanNoop,
                   identityResolved: !deferredOps && !deduped.issues.some((issue25) => issue25.retryable) && !compiledConstruction.issues.some((issue25) => issue25.severity === "error") && !groupsConstruction.issues.some((issue25) => issue25.severity === "error"),
                   // 账本写入与业务写入在**同一候选事务**里：候选没拿到 saved ACK 时整份信封被丢弃，
                   // 账本一个字节都不会生效。所以这里为 true 是结构上成立的，不是「乐观假设」。
@@ -35615,8 +35710,16 @@ function createSqlRepository(options) {
     args.allIssues.push(...merged.issues);
     if (merged.operations.length === 0) return { applied: [] };
     const tables = createTableReadPort(args.candidateDb);
+    const entityTables = { "character.upsert": "characters", "location.upsert": "locations", "item.upsert": "items", "faction.upsert": "factions" };
+    const repairOperations = merged.operations.map((op) => {
+      const table = entityTables[op.value.op];
+      const ref = op.value.ref;
+      const entry = table && ref?.startsWith("new:") ? args.compiled.scope.get(ref) : null;
+      if (!table || !entry || !tables.selectOne(table, branchId, entry.id)) return op;
+      return { ...op, value: { ...op.value, ref: entry.id } };
+    });
     const recompiled = compileOperations({
-      operations: merged.operations,
+      operations: repairOperations,
       anchor: args.anchor,
       phase: "repair",
       clockS: args.clockBefore,

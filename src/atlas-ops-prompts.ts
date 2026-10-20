@@ -69,7 +69,7 @@ const FORMAT_SEGMENT = [
 ].join('\n');
 
 const MINIMUM_HELP: Record<string, string> = {
-  'location.upsert': '新建 name；修改 ref + 至少一个变更字段；kind=region/city/district/building/room/natural/vehicle/other；parent_ref=所属地点，mobility=fixed/mobile，anchor_ref=载具锚点；existence_quality=confirmed/inferred/hypothetical，正文明确事实用 confirmed，推断新增地点用 inferred，不能写 story（story 是来源名）；area={kind:cells,cells:[{x,y}],quality:confirmed/estimated,source:manual/story/worldbook/estimate} 或 {kind:polygon,points:[{x,y}],quality,source}；范围坐标沿用所属地图尺度，推断布局不证明真实距离；有已提供 map_ref 才能给 position={x,y,precision:exact/approximate/layout}',
+  'location.upsert': '新建 name；修改 ref + 至少一个变更字段；kind=region/city/district/building/room/natural/vehicle/other；parent_ref=所属地点，mobility=fixed/mobile，anchor_ref=载具锚点；existence_quality=confirmed/inferred/hypothetical，正文明确事实用 confirmed，推断新增地点用 inferred，不能写 story（story 是来源名）；仅知道房间长宽（米）、不知道父图位置时，area={kind:"dimensions",widthM:12,heightM:8,quality:"confirmed",source:"story"}，按资料填写实际数值，不编造从(0,0)起的轮廓；已知范围坐标才用 area={kind:cells,cells:[{x,y}],quality:confirmed/estimated,source:manual/story/worldbook/estimate} 或 {kind:polygon,points:[{x,y}],quality,source}，坐标沿用所属地图尺度，不把米数直接当格数；有已提供 map_ref 才能给 position={x,y,precision:exact/approximate/layout}',
   'character.upsert': '正式新建必须 data.name + data.identity / data.importance / data.importance_reason 至少一个；identity 写有依据的身份，不能只写 role 或 description 代替；role=protagonist/companion/npc，importance=core/recurring/supporting（不用 primary）；候选只需 data.name（data.registration=watch）；修改已有对象用 ref',
   'item.upsert': '新建 name，可用 placement={holder_ref|container_ref|location_ref} 指定初始落点；修改 ref；既有物品换落点用 item.transfer',
   'item.transfer': 'ref + data.to 对象：{"holder_ref":"人物引用"} / {"container_ref":"容器物品引用"} / {"location_ref":"地点引用"} / {"unknown":true} 四选一；to 不能直接写字符串。同批可先 item.upsert ref:"new:rope"，再 item.transfer ref:"new:rope"，转移是引用这个新物品，不是重复新建',
@@ -93,7 +93,9 @@ const PHASE_TASK: Record<Phase, string[]> = {
     '识别有重要身份/实质世界书资料的人物，允许首楼建档；一闪而过的有名路人用character.upsert加registration=watch报告候选，完全无关无名群众不建档。',
     '每轮主动判断唯一主角当前实际所在地点；正文代词承接上文且唯一指向已到达地点时也更新 location_ref。意图、梦境、回忆、远方镜头不算抵达。',
     '主角是用户人设；助手楼层显示名或角色卡标题只是宿主元数据，不能仅凭它建成主角或在场人物。',
+    '同一新人物只声明一次：name、身份、role 和 location_ref 放在同一条 character.upsert 的 data 中。不要再用相同 new: 别名拆一条定位操作；已有主角使用目录中的正式引用。',
     '地点包含关系、人物粗位置与精确坐标分开处理。学校内但教室未知，就只给学校引用。',
+    '明确的楼层使用 kind="floor"，房间使用 kind="room"；不要把楼层登记为 other。若正文只说明某建筑的一间大厅，通常直接将大厅挂建筑，无需额外发明楼层容器。',
     '心理/倾向可以依据人物设定合理更新，并保持简短。',
     '正文明确建立或改变人物关系时用 relation.upsert 保存；只有同场出现不证明互相认识。明确的消息、公告或传言用 information.propose 登记，公开发布写 secrecy=public 与 spread_at_ref，明确告知谁写 recipient_ref；地点有风声不等于主角已听见。不要把每句闲聊变成传言，也不要把秘密设成公开。',
     '已完成行为用 event.propose 的 activity={kind:dialogue/meal/rest/sleep/travel/combat/other,completed:true} 和 time_hint={elapsed_s:明确秒数} 或 {min_s,nominal_s,max_s}。未完成计划用completed:false，不能推进时间。已完成赶路可引用真实subject_ref人物和route_ref路线，由程序按距离及人物能力计算耗时。',

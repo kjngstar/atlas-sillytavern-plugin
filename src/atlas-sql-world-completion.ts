@@ -24,6 +24,7 @@ import { SPATIAL_SCENE_KEY } from './atlas-spatial-frame.ts';
 import type { TableReadPort } from './atlas-ops-compile-types.ts';
 import type { ModelBatchRequest, Issue, ModelOperation, RequiredRef } from './atlas-ops-contract.ts';
 import { buildStagePrompt } from './atlas-ops-prompts.ts';
+import { stable } from '../vendor/atlas-spatial/index.mjs';
 import type { CompletionPolicy, GenerationTask, PlanIssue, TaskCatalogue, WorldCompletionMode, WorldFillState } from './atlas-world-contract.ts';
 
 /** frame_json 里保存世界建设状态的命名空间键（M3-12 写、此处读）。 */
@@ -374,7 +375,9 @@ function buildConstructionRequest(
   const catalogueRows = new Map(Object.values(catalogue.rows).flat().map(row => [String(row.id), row]));
   const refLines = catalogue.knownRefs.map((ref) => {
     const row = catalogueRows.get(ref.id);
-    return `${ref.alias}=${ref.id}/${ref.kind} ${JSON.stringify({ name: row?.name, kind: row?.kind, parent_ref: row?.parent_location_id })}`;
+    return `${ref.alias}=${ref.id}/${ref.kind} ${JSON.stringify({ name: row?.name, kind: row?.kind, parent_ref: row?.parent_location_id,
+      ...(row?.area_geometry_json?{area:row.area_geometry_json,area_protected:row.existence_quality==='confirmed'}:{}),
+    })}`;
   });
   const memberLines = plan.memberLines.length > 0 ? plan.memberLines : ['（无）'];
   const lockLines = plan.lockLines.length > 0 ? plan.lockLines : ['（无）'];
@@ -542,7 +545,7 @@ export type NormalizeConstructionInput = {
   supportedNewRefs?: readonly string[];
   /** 已确认非空父关系 / 坐标锁定的地点 ID：不许被建设任务随意改动。 */
   lockedLocationIds?: readonly string[];
-  protectedLocationFacts?: Readonly<Record<string, { parentRef?: string; position?: boolean; area?: boolean }>>;
+  protectedLocationFacts?: Readonly<Record<string, { parentRef?: string; position?: boolean; area?: boolean; areaValue?: unknown }>>;
   /** 目录里已存在的实体 ID（用于区分「新地点」与「改旧对象」）。 */
   knownIds?: readonly string[];
   /** 合法 new: 父链（定义在本批内的 new 引用集合）。 */
@@ -616,6 +619,12 @@ export function normalizeConstructionOps(input: NormalizeConstructionInput): Nor
     }
     const isNew = ref.startsWith('new:') || (ref.length > 0 && !known.has(ref));
     const facts = input.protectedLocationFacts?.[ref];
+    let unchangedArea=false;
+    if (!isNew && facts?.area && 'area' in data && facts.areaValue !== undefined) {
+      let savedArea=facts.areaValue;
+      if (typeof savedArea==='string') { try { savedArea=JSON.parse(savedArea); } catch { /* invalid facts stay protected */ } }
+      if (stable(savedArea)===stable(data.area)) { delete data.area; unchangedArea=true; }
+    }
     if (!isNew && facts) {
       const protectedFields = [
         ...(facts.parentRef && 'parent_ref' in data && data.parent_ref !== facts.parentRef ? ['parent_ref'] : []),
@@ -662,6 +671,10 @@ export function normalizeConstructionOps(input: NormalizeConstructionInput): Nor
         downgraded.push(ref);
       }
     }
+    // Protected-only updates have no business mutation. Keep their protection
+    // diagnostics/retry bookkeeping without passing an invalid empty upsert.
+    if (!isNew && Object.keys(data).length === 0 && protectedDrops.includes(ref)) continue;
+    if (!isNew && Object.keys(data).length === 0 && unchangedArea) { operations.push({op:'noop',why:'已有确认尺寸/范围相同，保持原事实'}); continue; }
     operations.push({ ...op, data });
   }
 

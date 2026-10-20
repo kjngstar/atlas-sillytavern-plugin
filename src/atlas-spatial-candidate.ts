@@ -829,7 +829,10 @@ export function applyPendingSpatialRequests(input: ApplyPendingInput): ApplyPend
       return frame.atlasScene === undefined || frame.atlasScene === null;
     })();
     const currentMaps=readTable(input.db,'maps',scope.branchId,ports);
-    const spaceSize = resolveMapSpaceSize({ maps:currentMaps, locations, mapRow, branchId: scope.branchId, firstEstimate: null });
+    const plannedExtent = input.plannedExtents?.[job.mapId];
+    const firstEstimate = plannedExtent?.units === 'meters'
+      ? { widthM: plannedExtent.width, heightM: plannedExtent.height } : null;
+    const spaceSize = resolveMapSpaceSize({ maps:currentMaps, locations, mapRow, branchId: scope.branchId, firstEstimate });
     if (spaceSize) {
       issues.push(...spaceSize.issues);
       // §19.2：尺寸选择顺序的**裁决**也属于本轮回执 —— 「双方确认且矛盾」的 SPACE_SIZE_CONFLICT 在这里。

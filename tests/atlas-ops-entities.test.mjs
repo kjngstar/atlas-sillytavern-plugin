@@ -42,6 +42,24 @@ import {
 const SQL = await (await import('sql.js')).default();
 const WALL_OLD = 1_700_000_000_000;
 
+test('地点物理长宽独立保存且拒绝无效尺寸，不虚构父图坐标',async()=>{
+  const seed=await makeSeedWith(SQL);
+  try{
+    const area={kind:'dimensions',widthM:12,heightM:8,quality:'confirmed',source:'story'};
+    const out=compile(seed,JSON.stringify({op:'location.upsert',ref:'new:size-room',data:{name:'尺寸验收房间',kind:'room',area}}));
+    assert.deepEqual(out.compiled.issues.filter(i=>i.severity==='error'),[]);
+    const row=out.compiled.merged.mutations.find(m=>m.table==='locations').after;
+    assert.deepEqual(row.area_geometry_json,area);
+    assert.equal(row.grid_x,null);
+    assert.equal(row.grid_y,null);
+    for(const broken of [{...area,widthM:0},{...area,heightM:Infinity},{...area,quality:'story'}]){
+      const invalid=compile(seed,JSON.stringify({op:'location.upsert',ref:'new:bad-size',data:{name:'无效尺寸',area:broken}}));
+      assert.ok(invalid.compiled.issues.some(i=>i.code==='SPACE_DIMENSIONS_INVALID'));
+      assert.deepEqual(invalid.compiled.merged.mutations,[]);
+    }
+  }finally{seed.close();}
+});
+
 /** 真实编译路径：模型原始文本 → 解析 → 编译（不执行 SQL）。 */
 function compile(seed, responseText, { phase = 'observe', sources = null, anchor = makeAnchor(), refs = null } = {}) {
   const extracted = extractPayload(responseText);

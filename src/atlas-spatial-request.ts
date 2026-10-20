@@ -140,7 +140,7 @@ function mergeRow(
  * 增量合并：省略=保持、显式 deletes 才删除、同 id 逐键合并。
  * strict=true 用于「同批后一个请求并进前一个」——此时同键不同值是矛盾，不是更新。
  */
-function mergeConstraints(
+export function mergeLayoutConstraints(
   baseSpec: Record<string, unknown> | null,
   incoming: Record<string, unknown>,
   strict: boolean,
@@ -359,7 +359,7 @@ export function compileMapLayoutRequest(op: ParsedOperation, ctx: CompileContext
   }
 
   // 同批累积在已编译候选态进行：第二个请求并入第一个的结果，不抹掉前一个独立房间。
-  const merged = mergeConstraints(previous ? previous.spec : savedSpec, resolvedSpec, previous !== undefined);
+  const merged = mergeLayoutConstraints(previous ? previous.spec : savedSpec, resolvedSpec, previous !== undefined);
   if (merged.conflicts.length > 0) {
     result.issues.push(
       issue(

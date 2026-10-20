@@ -1856,15 +1856,21 @@ export function createSqlRepository(options: RepositoryOptions) {
                 protectedLocationFacts: Object.fromEntries(existingLocations.map(row => [String(row.id), {
                   ...(row.existence_quality === 'confirmed' && row.parent_location_id ? { parentRef: String(row.parent_location_id) } : {}),
                   position: row.coord_precision === 'exact', area: row.existence_quality === 'confirmed' && !!row.area_geometry_json,
+                  areaValue: row.area_geometry_json,
                 }])),
                 policy: input.worldCompletion.policy,
               });
               allIssues.push(...deduped.issues, ...normalized.issues);
-              const constructionParsed: ParsedOperation[] = normalized.operations.map((value, index) => {
+              const cleanNoop = !parsedConstruction.incomplete
+                && !parsedConstruction.issues.some(issue=>issue.severity==='error')
+                && normalized.protectedDrops.length===0
+                && normalized.operations.every(op=>op.op==='noop')
+                && (normalized.operations.length>0 || parsedConstruction.explicitNoop);
+              const constructionParsed: ParsedOperation[] = normalized.operations.filter(op=>op.op!=='noop').map((value, index) => {
                 const raw = JSON.stringify(value);
                 return { opId: `cons_${index}_${sha256HexSync(raw).slice(0, 8)}`, line: index + 1, rawHash: sha256HexSync(raw), value };
               });
-              if (constructionParsed.length === 0) {
+              if (constructionParsed.length === 0 && !cleanNoop) {
                 construction.status = 'deferred';
                 construction.reasonCode = construction.reasonCode ?? 'WORLD_CONSTRUCTION_EMPTY';
                 // 模型没给出任何可应用的结构操作 → 这一单元没处理成功，进重试（不能静默丢弃目标）。
@@ -1933,7 +1939,7 @@ export function createSqlRepository(options: RepositoryOptions) {
                   requestCompleted: true,
                   payloadComplete: !parsedConstruction.incomplete,
                   normalizedClean: normalized.protectedDrops.length === 0,
-                  appliedClean: rejected.length > 0 ? false : ok.length > 0,
+                  appliedClean: rejected.length > 0 ? false : ok.length > 0 || cleanNoop,
                   identityResolved: !deferredOps
                     && !deduped.issues.some((issue) => issue.retryable)
                     && !compiledConstruction.issues.some((issue) => issue.severity === 'error')
@@ -2792,8 +2798,19 @@ export function createSqlRepository(options: RepositoryOptions) {
     if (merged.operations.length === 0) return { applied: [] };
 
     const tables = createTableReadPort(args.candidateDb);
+    // A failed second upsert can still target a new: alias whose first upsert
+    // was already saved in this candidate. Repair must update that exact row,
+    // rather than derive another ID from the failed operation's opId.
+    const entityTables = { 'character.upsert': 'characters', 'location.upsert': 'locations', 'item.upsert': 'items', 'faction.upsert': 'factions' } as const;
+    const repairOperations = merged.operations.map(op => {
+      const table = entityTables[op.value.op as keyof typeof entityTables];
+      const ref = op.value.ref;
+      const entry = table && ref?.startsWith('new:') ? args.compiled.scope.get(ref) : null;
+      if (!table || !entry || !tables.selectOne(table, branchId, entry.id)) return op;
+      return { ...op, value: { ...op.value, ref: entry.id } };
+    });
     const recompiled = compileOperations({
-      operations: merged.operations,
+      operations: repairOperations,
       anchor: args.anchor,
       phase: 'repair',
       clockS: args.clockBefore,

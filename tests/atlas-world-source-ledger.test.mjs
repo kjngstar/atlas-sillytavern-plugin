@@ -128,6 +128,22 @@ const sourceEntry = (key, text, hash = `h_${key}`) => ({ key, kind: 'lorebook', 
 
 const sourceSnapshotOf = (entries) => entries;
 
+test('建设重复已确认尺寸不误判失败，真实保存后来源单元可以处理完成',async()=>{
+  const room='repeated_size_room',area={kind:'dimensions',widthM:12,heightM:8,quality:'confirmed',source:'story'};
+  const port=model(req=>req.batchId.startsWith('construction_')?JSON.stringify({op:'location.upsert',ref:room,data:{area}}):noop);
+  const repo=await seeded(port,db=>{
+    equip(db,[room]);
+    db.run('UPDATE locations SET existence_quality = ?, area_geometry_json = ? WHERE id = ? AND branch_id = ?',['confirmed',JSON.stringify(area),room,BRANCH]);
+  });
+  try{
+    const prepared=await repo.prepareTurn(turnInput(repo,{worldCompletion:{mode:'local',focusLocationIds:[room]},sourceSnapshot:[sourceEntry('repeated_size_source','房间长十二米，宽八米。')]}));
+    await save(repo,prepared);
+    assert.equal(constructionCalls(port).length,1);
+    assert.ok(unitRows(repo.db).some(row=>row.status==='processed'),JSON.stringify(prepared.receipt));
+    assert.equal(queryBound(repo.db,'SELECT area_geometry_json FROM locations WHERE id = ? AND branch_id = ?',[room,BRANCH])[0].area_geometry_json,JSON.stringify(area));
+  }finally{await repo.close();}
+});
+
 /* ------------------------------------------------------------------ *
  * SRC02：块偏移与 JS slice 一致、连续拼接无遗漏/无重叠
  * ------------------------------------------------------------------ */

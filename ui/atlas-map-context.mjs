@@ -61,6 +61,9 @@ export function projectMapContext(nodes,locations,{inTransit=new Set()}={}){
  }
  const depth=node=>{let current=node,n=0;const seen=new Set();while(current&&!seen.has(current.id)){seen.add(current.id);n++;current=nodes.get(current.parentMapId);}return n;};
  for(const node of [...nodes.values()].sort((a,b)=>depth(a)-depth(b))){
+  // Interior coordinates describe physical rooms, not a geographic zoom into
+  // the parent's schematic footprint. Exterior peers must not expand its fit.
+  if((node.renderKind??node.kind)==='floor')continue;
   if(!node.parentMapId||!node.containerLocationId||byId.get(node.containerLocationId)?.mobility==='mobile')continue;
   const parent=nodes.get(node.parentMapId),active=parent&&outline(parent,node.containerLocationId);
   if(!active)continue;

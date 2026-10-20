@@ -292,7 +292,8 @@
 @container atlas-preview (max-width:1100px){
  #atlasDemo .panel-left{flex-basis:206px;}#atlasDemo .panel-right{flex-basis:268px;}
  #atlasDemo .brand-txt{display:none;}#atlasDemo .brand{width:46px;min-width:46px;}
- #atlasDemo .tb-right{gap:7px;}#atlasDemo .win-ctl{display:none;}
+ #atlasDemo .tb-right{gap:7px;}#atlasDemo .win-ctl{display:flex;margin-left:0;}
+ #atlasDemo .win-ctl .wc:not([data-act="close"]){display:none;}
  #atlasDemo .hud-place{width:184px;}#atlasDemo .hud-mini{width:152px;}#atlasDemo #minimap{width:128px;height:80px;}
  #atlasDemo .hud-modes{top:134px;left:16px;right:auto;}
  #atlasDemo .hud-nav{top:16px;}#atlasDemo .hud-ticker{display:none;}

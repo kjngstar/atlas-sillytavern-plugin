@@ -24,6 +24,7 @@ import {
   SPACE_CANONICAL_MAX_FURNISHING as KIT_MAX_FURNISHING,
   spaceLocalId,
   parseSpaceLocalId,
+  readMetricDimensions,
 } from '../vendor/atlas-spatial/index.mjs';
 import type { PlanIssue } from './atlas-world-contract.ts';
 
@@ -256,15 +257,19 @@ export type SpaceSizeResolution = {
 
 /** 从 locations 行的确认多边形读轴对齐宽高；非轴对齐（斜置/非矩形）返回 null。 */
 export function confirmedAreaSize(row: Row | null, parentMap: Row | null): { widthM: number; heightM: number } | null {
-  // SQL geometry is expressed in cells of the location's owning map.
-  const metersPerCell = parentMap?.meters_per_cell;
-  if (!row || !parentMap || asId(parentMap.id) !== asId(row.map_id)
-    || !finite(metersPerCell) || metersPerCell <= 0) return null;
+  if (!row) return null;
   const raw = row.area_geometry_json;
   const area = typeof raw === 'string'
     ? (() => { try { return JSON.parse(raw) as unknown; } catch { return null; } })()
     : raw;
-  if (!plain(area) || area.quality !== 'confirmed' || area.kind !== 'polygon' || !Array.isArray(area.points)) return null;
+  if (!plain(area) || area.quality !== 'confirmed') return null;
+  const dimensions=readMetricDimensions(area);
+  if (dimensions) return dimensions;
+  // Positioned SQL polygons use cells of the owning map. A metric size does not.
+  const metersPerCell = parentMap?.meters_per_cell;
+  if (!parentMap || asId(parentMap.id) !== asId(row.map_id)
+    || !finite(metersPerCell) || metersPerCell <= 0
+    || area.kind !== 'polygon' || !Array.isArray(area.points)) return null;
   const points = area.points.filter(plain).filter((p) => finite(p.x) && finite(p.y));
   if (points.length < 4) return null;
   const xs = points.map((p) => p.x as number);

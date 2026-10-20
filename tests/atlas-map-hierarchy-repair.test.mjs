@@ -82,6 +82,16 @@ test('only visible sibling maps enter the inherited context',()=>{
  assert.deepEqual(f.outer.geo.parentContext.siblings,[]);assert.equal(f.outer.marks.some(m=>m.id==='inner'),false);
 });
 
+test('室内图按物理房间显示，不把室外同级地图纳入适应视野范围',()=>{
+ const f=familyFixture();f.outer.kind='building';f.outer.renderKind='floor';
+ const extent=[...f.outer.extent],geometry=structuredClone(f.outer.geo);
+ projectMapContext(f.nodes,f.locations);
+ assert.deepEqual(f.outer.extent,extent);
+ assert.deepEqual(f.outer.geo,geometry);
+ assert.equal(f.outer.marks.some(m=>m.context),false);
+ assert.ok(f.inner.geo.parentContext,'地理分区仍保留父图上下文');
+});
+
 const input=extra=>({anchor:{chatUid:IDS.chatA,branchId:IDS.branchMain,parentTurnId:IDS.seedTurn,hostMessageUid:'hierarchy-fix',variantKey:'v1',baseRevision:0,baseStorageRevision:0,inputHash:'hierarchy-fix'},userText:'',assistantText:'查看地图。',sourceSnapshot:[],manual:true,sceneOnly:true,phaseBatches:[],operations:[],...extra});
 test('spatial assembly cannot multiply the four-send turn allowance by its number of maps',async()=>{
  const seed=await makeSeedWith(SQL),ids=Array.from({length:8},(_,i)=>`budget-map-${i}`);

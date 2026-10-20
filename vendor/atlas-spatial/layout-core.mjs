@@ -79,12 +79,17 @@ import * as B from './foundation.mjs';
     const bare=B.floor({...spec,furniture:[],actors:[]},previous);if(!bare.ok)return bare;
     const groups=[],bodies=[],actors=[],items=[],windows=[],lamps=[],issues=[],doorSwings=[];
     for(const r of bare.rooms){
-      const door=bare.doors.find(d=>d.roomId===r.id),aisle=spec.singleRoom?.8:1.6,margin=spec.singleRoom?.2:.4;
-      const spine={x:door.x-aisle/2,y:r.y,w:aisle,h:r.h},inner={x:r.x+margin,y:r.y+(spec.singleRoom?margin:1),w:r.w-margin*2,h:r.h-(spec.singleRoom?margin*2:1.4)};
+      const door=bare.doors.find(d=>d.roomId===r.id),aisle=spec.singleRoom?.8:1.6,margin=.2;
+      // A room has the same usable interior in its parent and its own map.
+      // Door swing and navigation reserve entry clearance explicitly below.
+      const spine={x:door.x-aisle/2,y:r.y,w:aisle,h:r.h},inner={x:r.x+margin,y:r.y+margin,w:r.w-margin*2,h:r.h-margin*2};
       const swing={id:'swing:'+r.id,roomId:r.id,x:door.x-door.width/2,y:r.side==='north'?door.y-door.width:door.y,w:door.width,h:door.width};doorSwings.push(swing);
       const exact=(spec.actors||[]).filter(a=>a.roomId===r.id&&a.position).map(a=>({id:a.id,...a.position}));
       const priority=f=>f.locked?2:previous?.groups?.some(g=>g.id===f.id)?1:0;
-      for(const f of ordered((spec.contents||[]).filter(f=>f.roomId===r.id)).sort((a,b)=>priority(b)-priority(a))){
+      // Reserve locked/saved furniture first, then the largest new footprint.
+      // Small cabinets must not consume the only accessible counter position
+      // merely because their IDs happen to sort before the counter's ID.
+      for(const f of ordered((spec.contents||[]).filter(f=>f.roomId===r.id)).sort((a,b)=>priority(b)-priority(a)||b.w*b.h-a.w*a.h)){
         if(!Number.isFinite(f.w)||!Number.isFinite(f.h)||f.w<=0||f.h<=0||f.type==='reading'&&(f.w<2||f.h<2)){issues.push({id:f.id,code:'DETAIL_DIMENSION_INVALID'});continue;}
         // 陈设塞不进房间：明确到 ID，绝不能偷偷放大到穿墙。
         if(f.type!=='light'&&f.type!=='decor'&&!f.locked&&(f.w>inner.w+EPS||f.h>inner.h+EPS)&&(f.h>inner.w+EPS||f.w>inner.h+EPS)){issues.push({id:f.id,code:'DETAIL_TOO_LARGE'});continue;}

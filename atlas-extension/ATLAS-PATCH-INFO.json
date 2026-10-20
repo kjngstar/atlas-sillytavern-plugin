@@ -1,13 +1,13 @@
 {
-  "patchId": "atlas-0.9.95-rc.1-20261019",
-  "baseVersion": "0.9.93",
-  "baseReleaseVersion": "0.9.93-rc.1",
-  "baseCommit": "eec9886a55002c30fcf97589600cd9f39f5fff20",
+  "patchId": "atlas-0.9.96-rc.1-20261020",
+  "baseVersion": "0.9.95",
+  "baseReleaseVersion": "0.9.95-rc.1",
+  "baseCommit": "1e8655aa71527dea0bf32305fb64b02be42448ea",
   "schemaVersion": 3,
-  "releaseVersion": "0.9.95-rc.1",
-  "manifestVersion": "0.9.95",
+  "releaseVersion": "0.9.96-rc.1",
+  "manifestVersion": "0.9.96",
   "releaseChannel": "prerelease",
-  "layoutPolicyVersion": "layout-v7",
+  "layoutPolicyVersion": "layout-v9",
   "fixes": [
     "occupied-ancestor-layout-priority",
     "bounded-relevant-layout-evidence",
@@ -48,46 +48,58 @@
     "workload-construction-removes-twelve-location-two-depth-split",
     "request-counts-survive-ui-receipt-adaptation",
     "batch-capacity-remains-retryable",
-    "legacy-settings-disclosure-preserved"
+    "legacy-settings-disclosure-preserved",
+    "independent-confirmed-room-dimensions",
+    "preserve-author-dimensions-across-parent-child-scenes",
+    "construction-protected-noop-save-ack",
+    "repair-reuses-already-created-candidate-identity",
+    "failed-layout-constraints-retained",
+    "floor-furniture-placement-capacity",
+    "indoor-viewport-context",
+    "nested-interior-container-profile",
+    "bottom-up-initial-space-capacity",
+    "nonleaf-floor-not-completed-by-parent-projection",
+    "planned-first-extent-calibrated-before-generation",
+    "workbench-dynamic-height-and-close-control",
+    "independent-confirmed-room-dimensions",
+    "preserve-author-dimensions-across-parent-child-scenes",
+    "construction-protected-noop-save-ack",
+    "repair-reuses-already-created-candidate-identity",
+    "failed-layout-constraints-retained",
+    "floor-furniture-placement-capacity",
+    "indoor-viewport-context",
+    "nested-interior-container-profile",
+    "bottom-up-initial-space-capacity",
+    "nonleaf-floor-not-completed-by-parent-projection",
+    "planned-first-extent-calibrated-before-generation",
+    "workbench-dynamic-height-and-close-control"
   ],
   "validation": {
-    "status": "passed",
+    "status": "prerelease-with-live-limitations",
     "tests": {
-      "total": 2270,
-      "pass": 2270,
+      "total": 2285,
+      "pass": 2285,
+      "fail": 0
+    },
+    "targetedRegression": {
+      "total": 264,
+      "pass": 264,
       "fail": 0
     },
     "typecheck": "passed",
     "pack": "passed",
-    "sqlRelease": {
-      "status": "passed",
-      "automaticTransports": 4,
-      "layoutRequests": 1,
-      "mapsInLayout": 4,
-      "extraTransports": 0
+    "releaseAudit": "passed",
+    "liveUserTavern": {
+      "status": "partial",
+      "earlierM3": "blank-chat generation, save and reload passed on earlier local build",
+      "finalM31": "failed: first request exceeded 300000ms; final live generation not completed"
     },
-    "referenceBrowser": {
-      "checks": 97,
-      "pass": 97,
-      "fail": 0
-    },
-    "hostGeneration": {
-      "checks": 30,
-      "pass": 30,
-      "fail": 0
-    },
-    "contactFlow": {
-      "checks": 12,
-      "pass": 12,
-      "fail": 0
-    },
-    "mapReplay": {
-      "checks": 9,
-      "pass": 9,
-      "fail": 0
-    },
-    "liveUserTavern": "not-run",
-    "externalModel": "not-run"
+    "externalModel": "not-fully-accepted",
+    "knownLimitations": [
+      "Final MiniMax-M3.1 live acceptance remains incomplete after first-request timeout.",
+      "Only occupied branches and relevant ancestors receive automatic layouts.",
+      "Missing elapsed-time evidence remains unknown and may yield a partial receipt."
+    ]
   },
   "modelBatchingPolicyVersion": "batch-v3"
 }
