@@ -87,3 +87,76 @@ test('display configuration rejects cycles, unknown slots and unsupported versio
 test('preference migration and async failures retain the latest UI selection',async()=>{const pending=gate();let calls=0;const preferences=model.preferences({getItem:()=>JSON.stringify({version:1,singleClickEnter:true,legendCollapsed:true}),setItem:()=>++calls===1?pending.promise:Promise.resolve()});assert.equal(preferences.value.singleClickEnter,true);preferences.set('profileId','mapOnly');preferences.set('profileId','full');await preferences.flush();pending.reject(Error('old failure'));await tick();assert.equal(preferences.persistent,true);assert.equal(preferences.value.profileId,'full');});
 
 test('failed image decoding never replaces an installed skin package',async()=>{const c=controller({assetLoader:{prepare:async()=>{throw Object.assign(Error('bad image'),{code:'SKIN_IMAGE_DECODE_FAILED'});}}});const previous={...pack(),name:'previous'};c.packs.set(previous.id,previous);assert.equal((await c.api.install(pack())).ok,false);assert.equal(c.packs.get(previous.id),previous);assert.equal(c.current.id,'builtin.starmap');c.api.destroy();});
+
+test('successful same-ID retry replaces the preview in the catalog, selection and startup preference',async()=>{
+ let denied=true,c; c=controller({host:{putSkinPack:async p=>{if(denied)throw Error('quota');c.packs.set(p.id,p);}}});
+ try{
+  const old={...pack(),name:'old preview',theme:theme({assets:pack().theme.assets,tokens:{'ui.accent':'#111111'}})};
+  const updated={...old,name:'new installed',theme:{...old.theme,tokens:{'ui.accent':'#222222'}}};
+  assert.equal((await c.api.install(old)).saved,false);denied=false;
+  assert.equal((await c.api.install(updated)).saved,true);
+  assert.deepEqual(await c.api.list(),[{id:updated.id,name:updated.name}]);
+  await c.api.setSkin('builtin.starmap');assert.equal((await c.api.setSkin(updated.id)).saved,true);
+  assert.equal(c.current.tokens['ui.accent'],'#222222');
+  assert.equal((await readSkinPack(await c.api.exportPack())).theme.tokens['ui.accent'],'#222222');
+  const restarted=controller({host:{getSkinPack:async id=>c.packs.get(id)}});
+  try{assert.equal((await restarted.api.start(c.saved.at(-1))).ok,true);assert.equal(restarted.current.tokens['ui.accent'],'#222222');}finally{restarted.api.destroy();}
+ }finally{c.api.destroy();}
+});
+
+test('an older successful install does not evict a later same-ID failed-storage preview',async()=>{
+ const pending=gate();let writes=0,c;c=controller({host:{putSkinPack:async p=>{if(++writes===1){await pending.promise;c.packs.set(p.id,p);}else throw Error('quota');}}});
+ try{
+  const first=c.api.install({...pack(),name:'older stored'});await tick();
+  const latest={...pack(),name:'latest preview',theme:theme({assets:pack().theme.assets,tokens:{'ui.accent':'#333333'}})};
+  const second=c.api.install(latest);await tick();pending.resolve();
+  assert.equal((await first).errorCode,'SKIN_SUPERSEDED');assert.equal((await second).saved,false);
+  assert.deepEqual(await c.api.list(),[{id:latest.id,name:latest.name,previewOnly:true}]);
+  await c.api.setSkin('builtin.starmap');await c.api.setSkin(latest.id);assert.equal(c.current.tokens['ui.accent'],'#333333');
+ }finally{pending.resolve();c.api.destroy();}
+});
+
+test('removal blocks selection and reinstallation until deletion has finished',async()=>{
+ const entered=gate(),finish=gate();let puts=0,c;c=controller({host:{putSkinPack:async p=>{puts++;c.packs.set(p.id,p);},removeSkinPack:async id=>{entered.resolve();await finish.promise;c.packs.delete(id);}}});
+ try{
+  await c.api.install(pack());const removing=c.api.remove('user.test');await entered.promise;
+  assert.equal((await c.api.setSkin('user.test')).errorCode,'SKIN_REMOVING');
+  assert.equal((await c.api.setSkin(pack().theme)).errorCode,'SKIN_REMOVING');
+  assert.equal((await c.api.install(pack())).errorCode,'SKIN_REMOVING');assert.equal(puts,1);
+  finish.resolve();assert.equal((await removing).ok,true);
+  assert.equal(c.current.id,'builtin.starmap');assert.equal(c.saved.at(-1).id,'builtin.starmap');assert.equal(c.packs.size,0);
+  assert.equal((await c.api.install(pack())).saved,true);
+ }finally{finish.resolve();c.api.destroy();}
+});
+
+test('a skin read started before removal cannot restore a deleted inactive package',async()=>{
+ const pending=gate(),original=pack(),c=controller({host:{getSkinPack:()=>pending.promise}});c.packs.set(original.id,original);
+ try{
+  const selecting=c.api.setSkin(original.id);assert.equal((await c.api.remove(original.id)).ok,true);
+  pending.resolve(original);assert.equal((await selecting).errorCode,'SKIN_SUPERSEDED');
+  assert.equal(c.current.id,'builtin.starmap');assert.equal(c.packs.size,0);assert.equal(c.saved.length,0);
+ }finally{pending.resolve(original);c.api.destroy();}
+});
+
+test('removal cancels an inactive skin decode and releases its prepared resources',async()=>{
+ const pending=gate();let releases=0;const c=controller({assetLoader:{prepare:()=>pending.promise}});c.packs.set('user.test',pack());
+ try{
+  const selecting=c.api.setSkin('user.test');await tick();assert.equal((await c.api.remove('user.test')).ok,true);
+  pending.resolve({resources:{},release(){releases++;}});assert.equal((await selecting).errorCode,'SKIN_SUPERSEDED');
+  assert.equal(releases,1);assert.equal(c.current.id,'builtin.starmap');assert.equal(c.saved.length,0);
+ }finally{c.api.destroy();}
+});
+
+test('failed deletion releases its guard so the retained package can be selected again',async()=>{
+ const c=controller({host:{removeSkinPack:async()=>{throw Error('denied');}}});
+ try{await c.api.install(pack());assert.equal((await c.api.remove('user.test')).ok,false);assert.equal(c.packs.size,1);assert.equal((await c.api.setSkin('user.test')).saved,true);}finally{c.api.destroy();}
+});
+
+test('duplicate removal does not cancel fallback persistence or delete the same package twice',async()=>{
+ const entered=gate(),finish=gate();let block=false,deletes=0,c;c=controller({host:{saveSkin:async skin=>{if(block){entered.resolve();await finish.promise;}c.saved.push(skin);},removeSkinPack:async id=>{deletes++;c.packs.delete(id);}}});
+ try{
+  await c.api.install(pack());block=true;const removing=c.api.remove('user.test');await entered.promise;
+  assert.equal((await c.api.remove('user.test')).errorCode,'SKIN_REMOVING');finish.resolve();
+  assert.equal((await removing).ok,true);assert.equal(deletes,1);assert.equal(c.saved.at(-1).id,'builtin.starmap');
+ }finally{finish.resolve();c.api.destroy();}
+});

@@ -63,6 +63,40 @@ export async function verifySkins({open,check,dir}){
   check('skins:reload-restores-images',await f.evaluate(()=>AtlasPreview.getSkin().id==='user.browser-acceptance'&&__skinMetricsSnapshot().bitmaps===1));
   const removed=await f.evaluate(()=>AtlasPreview.removeSkin('user.browser-acceptance'));const released=await f.evaluate(()=>({skin:AtlasPreview.getSkin().id,metrics:__skinMetricsSnapshot()}));
   check('skins:remove-fallback-releases-resources',removed.ok&&released.skin==='builtin.starmap'&&released.metrics.urls===0&&released.metrics.bitmaps===0,released);
+  const recovery=await f.evaluate(async()=>{
+   const canvas=document.createElement('canvas');canvas.width=32;canvas.height=32;
+   const {writeSkinPack}=await import('../atlas-skin-pack.mjs');
+   async function file(name,color){
+    const ctx=canvas.getContext('2d');ctx.fillStyle=color;ctx.fillRect(0,0,32,32);
+    const bytes=new Uint8Array(await(await new Promise(resolve=>canvas.toBlob(resolve,'image/png'))).arrayBuffer());
+    const theme={...AtlasSkinRuntime.builtin('builtin.starmap'),id:'user.browser-recovery',tokens:{'ui.accent':color},assets:{characterMarker:'dot'}};
+    return new File([await writeSkinPack({id:theme.id,name,theme,files:[{id:'dot',path:'assets/dot.png',mime:'image/png',width:32,height:32,bytes}]})],'recovery.zip');
+   }
+   const put=AtlasHost.putSkinPack;let preview;
+   try{AtlasHost.putSkinPack=async()=>{throw Error('Fixture: temporary storage failure');};preview=await AtlasPreview.importSkinFile(await file('old preview','#111111'));}finally{AtlasHost.putSkinPack=put;}
+   const installed=await AtlasPreview.importSkinFile(await file('new installed','#222222')),catalog=await AtlasPreview.listSkins();
+   await AtlasPreview.setTheme('builtin.starmap');const selected=await AtlasPreview.setTheme('user.browser-recovery');
+   const disk=await AtlasHost.getSkinPack('user.browser-recovery');
+   return {previewSaved:preview.saved,installedSaved:installed.saved,selectedSaved:selected.saved,catalog,activeColor:AtlasPreview.getSkin().tokens['ui.accent'],diskColor:disk.theme.tokens['ui.accent']};
+  });
+  check('skins:storage-retry-replaces-preview',recovery.previewSaved===false&&recovery.installedSaved===true&&recovery.catalog.some(row=>row.id==='user.browser-recovery'&&row.name==='new installed'&&!row.previewOnly),recovery);
+  check('skins:reselects-reinstalled-version',recovery.selectedSaved&&recovery.activeColor==='#222222'&&recovery.diskColor==='#222222',recovery);
+  await p.reload();await p.waitForFunction(()=>!!document.querySelector('iframe')?.contentWindow?.AtlasPreview);f=p.frames().find(frame=>frame.url().includes('/atlas-reference/index.html'));await f.evaluate(()=>AtlasPreview.appearanceReady);
+  check('skins:retry-restores-on-reload',await f.evaluate(()=>AtlasPreview.getSkin().id==='user.browser-recovery'&&AtlasPreview.getSkin().tokens['ui.accent']==='#222222'&&__skinMetricsSnapshot().bitmaps===1));
+  const deletion=await f.evaluate(async()=>{
+   const remove=AtlasHost.removeSkinPack;let enter,finish;
+   const entered=new Promise(resolve=>enter=resolve),waiting=new Promise(resolve=>finish=resolve);
+   AtlasHost.removeSkinPack=async id=>{enter();await waiting;return remove(id);};
+   const pending=AtlasPreview.removeSkin('user.browser-recovery');
+   try{
+    await Promise.race([entered,pending.then(()=>{throw Error('Deletion did not reach storage');})]);const selection=await AtlasPreview.setTheme('user.browser-recovery');finish();const result=await pending;
+    const boot=await AtlasHost.boot();return {selectionError:selection.errorCode,removed:result.ok,activeId:AtlasPreview.getSkin().id,startupId:boot.skin.id,exists:!!await AtlasHost.getSkinPack('user.browser-recovery'),metrics:__skinMetricsSnapshot()};
+   }finally{finish();AtlasHost.removeSkinPack=remove;await pending;}
+  });
+  check('skins:removal-blocks-reselection',deletion.selectionError==='SKIN_REMOVING'&&deletion.removed,deletion);
+  check('skins:removed-package-has-no-startup-reference',deletion.activeId==='builtin.starmap'&&deletion.startupId==='builtin.starmap'&&!deletion.exists&&deletion.metrics.urls===0&&deletion.metrics.bitmaps===0,deletion);
+  // boot() above refreshes the host snapshot and queues layout; settle it before the close assertion.
+  await f.evaluate(()=>new Promise(requestAnimationFrame));
   await f.evaluate(()=>{AtlasHost.close();AtlasPreview.updateSnapshot(AtlasPreview.data);AtlasPreview.go(AtlasPreview.state.nodeId);});
   check('skins:closed-host-remains-paused',await f.evaluate(()=>AtlasPreview.map.state.paused&&__skinMetricsSnapshot().rafs===0));
   writeFileSync(`${dir}/skin-snapshot.json`,JSON.stringify(await f.evaluate(()=>AtlasPreview.data)));
