@@ -74,6 +74,21 @@ test('small kitchen lights do not consume floor space or displace furniture when
  assert.deepEqual(reopened.scene.layout,added.scene.layout);
 });
 
+test('kitchen door openings do not displace storage furniture or block the walking route',()=>{
+ const ctx={...baseCtx(['kitchen']),map:{id:'map-1',name:'厨房',containerLocationId:'kitchen',metersPerCell:1,frame:{cols:4,rows:3}}};
+ const contents=[
+  {id:'counter',roomId:'kitchen',type:'desk',w:2.5,h:1},
+  {id:'shelf',roomId:'kitchen',type:'shelf',w:1.5,h:.6},
+  {id:'cabinet',roomId:'kitchen',type:'cabinet',w:1,h:.6},
+  {id:'door1',roomId:'kitchen',type:'doorway',w:1,h:1},
+  {id:'door2',roomId:'kitchen',type:'doorway',w:1,h:.4}];
+ const result=Kit.generateFloor({rooms:[{id:'kitchen',w:4,h:3,side:'north'}],contents},ctx);
+ assert.deepEqual(result.issues,[]);
+ assert.equal(result.scene.layout.groups.length,5);
+ assert.ok(result.scene.layout.bodies.filter(b=>b.type==='doorway').every(b=>!b.solid));
+ assert.ok(result.scene.layout.groups.filter(g=>['desk','shelf','cabinet'].includes(g.type)).every(g=>g.interaction));
+});
+
 // ---------- 必修1：增量约束合并 ----------
 
 test('审查1：六房间基础上只请求一个新增房间，结果为七房间且旧房间位置保留',()=>{

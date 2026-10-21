@@ -29,6 +29,7 @@ import * as B from './foundation.mjs';
   const rand=s=>{let n=hash(s);return()=>{n=(Math.imul(n,1664525)+1013904223)>>>0;return n/4294967296;};};
   const ordered=a=>[...a].sort((a,b)=>a.id.localeCompare(b.id,'en'));
   // 02 §6.4：solid 类型参与碰撞，light/decor/doorway/stairs 不挡路；marker 与家具渲染形状分开。
+  const FLOOR_OVERLAYS=new Set(['light','doorway']);
   const SOLID_TYPES=new Set(['shelf','desk','bench','reading','table','chair','bed','cabinet']);
   function makeGroup(f,r,x,y){
     const group={id:f.id,name:f.name,type:f.type,roomId:r.id,x,y,w:f.w,h:f.h,quality:'layout'},bodies=[];
@@ -93,9 +94,9 @@ import * as B from './foundation.mjs';
         if(!Number.isFinite(f.w)||!Number.isFinite(f.h)||f.w<=0||f.h<=0||f.type==='reading'&&(f.w<2||f.h<2)){issues.push({id:f.id,code:'DETAIL_DIMENSION_INVALID'});continue;}
         // 陈设塞不进房间：明确到 ID，绝不能偷偷放大到穿墙。
         if(f.type!=='light'&&f.type!=='decor'&&!f.locked&&(f.w>inner.w+EPS||f.h>inner.h+EPS)&&(f.h>inner.w+EPS||f.w>inner.h+EPS)){issues.push({id:f.id,code:'DETAIL_TOO_LARGE'});continue;}
-        // Lights have non-solid bodies. Their projection can overlap furniture or
-        // the walking route, and must not reserve floor space for later furniture.
-        const free=q=>B.contains(inner,q)&&(f.type==='light'||!B.intersects(q,spine)&&!B.intersects(q,swing)&&!groups.filter(g=>g.roomId===r.id&&g.type!=='light').some(g=>B.intersects(inflate(g,.28),q))&&!exact.some(p=>B.intersects(q,{x:p.x-.25,y:p.y-.25,w:.5,h:.5})));
+        // Lights and door openings have non-solid bodies. Their projection can
+        // overlap the walking route without reserving furniture floor space.
+        const free=q=>B.contains(inner,q)&&(FLOOR_OVERLAYS.has(f.type)||!B.intersects(q,spine)&&!B.intersects(q,swing)&&!groups.filter(g=>g.roomId===r.id&&!FLOOR_OVERLAYS.has(g.type)).some(g=>B.intersects(inflate(g,.28),q))&&!exact.some(p=>B.intersects(q,{x:p.x-.25,y:p.y-.25,w:.5,h:.5})));
         let chosen=null;
         const old=previous?.groups?.find(g=>g.id===f.id&&g.roomId===r.id&&g.w===f.w&&g.h===f.h);
         if(old&&free(old))chosen=old;
@@ -120,7 +121,7 @@ import * as B from './foundation.mjs';
         // a connected path around furniture; test the actual door and interactions.
         // Dimensions, locked coordinates and the door swing remain unchanged.
         if(!chosen&&!f.locked){
-          const existing=groups.filter(g=>g.roomId===r.id&&g.type!=='light'),existingBodies=bodies.filter(b=>b.roomId===r.id);
+          const existing=groups.filter(g=>g.roomId===r.id&&!FLOOR_OVERLAYS.has(g.type)),existingBodies=bodies.filter(b=>b.roomId===r.id);
           const entry={x:door.x-.3,y:r.side==='north'?door.y-.6:door.y,w:.6,h:.6};
           const freePath=q=>B.contains(inner,q)&&!B.intersects(q,swing)&&!B.intersects(q,entry)&&!existing.some(g=>B.intersects(inflate(g,.28),q))&&!exact.some(p=>B.intersects(q,{x:p.x-.25,y:p.y-.25,w:.5,h:.5}));
           let tried=0;
@@ -144,7 +145,7 @@ import * as B from './foundation.mjs';
       for(const g of groups.filter(g=>g.roomId===r.id)){
         const edgePoints=[pt(g.x+g.w+.48,g.y+g.h/2),pt(g.x-.48,g.y+g.h/2),pt(g.x+g.w/2,g.y+g.h+.48),pt(g.x+g.w/2,g.y-.48)];
         g.interaction=edgePoints.find(p=>B.pointInside(inner,p)&&nav.reachable(p))||null;
-        if(!g.interaction&&g.type!=='light')issues.push({id:g.id,code:'DETAIL_NOT_REACHABLE'});
+        if(!g.interaction&&!FLOOR_OVERLAYS.has(g.type))issues.push({id:g.id,code:'DETAIL_NOT_REACHABLE'});
       }
       for(const a of ordered((spec.actors||[]).filter(a=>a.roomId===r.id))){
         const target=groups.find(g=>g.id===a.near),old=previous?.actors?.find(p=>p.id===a.id&&p.roomId===a.roomId&&p.near===a.near),p=a.position||old||(target?.interaction||null);
