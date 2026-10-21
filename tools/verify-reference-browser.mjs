@@ -102,8 +102,10 @@ try{
      return {tag:el?.tagName??null,owner:owner?owner.tagName:null,text:owner?owner.textContent:null};},[box.x+box.width/2,box.y+box.height/2,ownerSelector]);};
  const childMapId=await f.evaluate(()=>AtlasPreview.data.ROOT.children.find(n=>n.host&&n.containerLocationId)?.id??null);
  if(childMapId){await f.evaluate(id=>AtlasPreview.go(id),childMapId);await delay(300);
+   await f.locator('#placeCard > summary').click();
    const hud=await hitTest(f.locator('#placeCard [data-layout]'),'[data-layout]');
    check('U01-hud-layout-button-clickable',!!hud&&hud.owner==='BUTTON',hud);
+   await f.locator('#placeCard > summary').click();
    // U02：74px 线长固定 —— 折叠图例、折叠左栏、缩放都只改读数，不改线长。
    const scaleNow=async()=>f.locator('.sc-line i').evaluate(el=>({width:el.dataset.width,distance:el.dataset.distance,label:document.getElementById('scaleLabel').textContent}));
    const s0=await scaleNow();
@@ -144,7 +146,8 @@ try{
    await f.evaluate(()=>AtlasPreview.go(AtlasPreview.data.ROOT.id));await f.locator('#zFit').click();await delay(350);
    const marks=async()=>f.evaluate(()=>AtlasPreview.map.state.hits.map(h=>[h.m.id,Math.round(h.x),Math.round(h.y)]));
    const rect=await f.locator('#map').boundingBox();
-   const hoverPoint=await f.evaluate(()=>{const h=AtlasPreview.map.state.hits[0];if(!h)return null;const r=document.getElementById('map').getBoundingClientRect();return {x:r.left+h.x,y:r.top+h.y,id:h.m.id};});
+   // The collapsible header is interactive: hover a mark exposed on the canvas, not under a HUD control.
+   const hoverPoint=await f.evaluate(()=>{const canvas=document.getElementById('map'),r=canvas.getBoundingClientRect();const h=AtlasPreview.map.state.hits.find(h=>document.elementFromPoint(r.left+h.x,r.top+h.y)===canvas);return h?{x:r.left+h.x,y:r.top+h.y,id:h.m.id}:null;});
    const beforeHover=await marks();
    if(hoverPoint){await p.mouse.move(hoverPoint.x,hoverPoint.y);await delay(250);}
    const afterHover=await marks();

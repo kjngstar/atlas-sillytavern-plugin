@@ -97,3 +97,16 @@
 /* ── 7. P14/§21.5 提示词分层的现状条：协议 / 策略版本 / 已声明能力 ── */
 #atlasDemo .engine-strip{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center;margin:0 0 10px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel-2);}
 #atlasDemo .engine-strip .engine-cell{color:var(--txt-2);font-size:11px;line-height:1.5;}
+
+/* 地点概况默认收起，地图上只留一行可展开的标题。 */
+#atlasDemo .hud-place{padding:0;}
+#atlasDemo .pl-summary{display:flex;align-items:center;gap:8px;min-height:40px;padding:10px 12px;list-style:none;cursor:pointer;pointer-events:auto;}
+#atlasDemo .pl-summary::-webkit-details-marker{display:none;}
+#atlasDemo .pl-summary .pl-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;}
+#atlasDemo .pl-summary-hint{color:var(--txt-3);font-size:10px;}
+#atlasDemo .pl-summary svg{width:14px;height:14px;flex-shrink:0;color:var(--txt-2);}
+#atlasDemo .hud-place[open]>.pl-summary svg{transform:rotate(180deg);}
+#atlasDemo .pl-summary:hover{color:var(--cyan);}
+#atlasDemo .pl-summary:focus-visible{outline:2px solid var(--cyan);outline-offset:-3px;border-radius:inherit;}
+#atlasDemo .pl-body{padding:0 12px 12px;pointer-events:auto;}
+#atlasDemo .pl-body>.pl-path{margin-top:0;}
