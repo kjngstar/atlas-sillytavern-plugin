@@ -402,7 +402,7 @@ function resetDemo(){return runHost('refresh','已刷新当前世界');}
 function retry(){return runHost('retry','重试请求已处理');}
  function generateLayout(id=state.nodeId){return runHost('layout','空间布局已保存',id);}
 function switchView(){return window.AtlasHost.setViewMode(state.viewMode==='author'?'pov':'author').catch(error=>toast(error.message,'warn'));}
-function download(name,content,type='application/json'){const blob=new Blob([content],{type}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;a.click();later(()=>URL.revokeObjectURL(url),1000);}
+function download(name,content,type='application/json'){if(window.AtlasHost.downloadFile){window.AtlasHost.downloadFile(name,content,type);return;}const blob=new Blob([content],{type}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;a.click();later(()=>URL.revokeObjectURL(url),1000);}
 /** M6-11③：显式建设本图。切页/缩放/打开地图都不会走到这里，只有按钮会。 */
 function buildMap(mapId){return runHost('build','本图建设已提交',mapId,{mode:'local'});}
 /** M6-18：导出升级前原档。失败必须给明确原因并写进统一诊断，成功则让用户核对 SHA256。 */

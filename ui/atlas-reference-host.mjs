@@ -268,14 +268,15 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
       if(!lorePort?.toggle)throw Error('世界书启停端口不可用');
       await lorePort.toggle(id);await readLore();
     },
-    downloadMap(filename,text){
+    downloadFile(filename,content,type='application/json'){
       // Own the Blob in the top document: embedded browsers cannot download
       // a frame-owned Blob. Invoke synchronously from the explicit link click.
       const doc=root.ownerDocument,win=doc.defaultView;
-      const url=win.URL.createObjectURL(new win.Blob([text],{type:'application/json'}));
+      const url=win.URL.createObjectURL(new win.Blob([content],{type}));
       const link=doc.createElement('a');link.href=url;link.download=filename;link.hidden=true;doc.body.append(link);
-      link.click();link.remove();setTimeout(()=>win.URL.revokeObjectURL(url),60000);
+      link.click();link.remove();win.setTimeout(()=>win.URL.revokeObjectURL(url),60000);
     },
+    downloadMap(filename,text){return bridge.downloadFile(filename,text);},
     async fetchModels(connection){
       if(connection?.provider==='sillytavern')throw Error('酒馆主连接的模型请在酒馆 API 设置中选择；自定义连接可在这里获取模型');
       let url;try{url=new URL(String(connection?.url??'').trim());}catch{throw Error('请先填写有效的 API 地址');}

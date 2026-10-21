@@ -95,6 +95,24 @@ function mount(options={}){
  return {root,core,render,bridge,calls,get loads(){return loads;},get closes(){return closes;},get prefs(){return prefs;},saved(){context.chatMetadata.atlas.database={data:'saved-A',sha256:'saved-a',storage_revision:4};state={...state,stateData:{revision:4}};render();},noSnapshot(){context.chatMetadata.atlas={};render();},switch(id){state={...state,chatId:id,lastError:null};context={...context,chatId:id,chatMetadata:{atlas:{database:{data:id,sha256:id}}}};render();},off(){context.extensionSettings.atlas_world_sim.sqlMode=false;render();}};
 }
 
+test('skin ZIP and map downloads belong to the host document and retain binary bytes',async()=>{
+ const m=mount(),win=m.root.ownerDocument.defaultView,blobs=[],clicks=[],cleanup=[],revoked=[];
+ win.URL.createObjectURL=blob=>{assert.ok(blob instanceof win.Blob);blobs.push(blob);return 'blob:host-'+blobs.length;};
+ win.URL.revokeObjectURL=url=>revoked.push(url);win.setTimeout=fn=>{cleanup.push(fn);return cleanup.length;};
+ win.HTMLAnchorElement.prototype.click=function(){clicks.push({name:this.download,url:this.href,attached:this.isConnected,host:this.ownerDocument===win.document});};
+ try{
+  const bytes=vm.runInNewContext('new Uint8Array([80,75,0,255])'),source=readFileSync(new URL('../ui/atlas-reference/js/app.js',import.meta.url),'utf8');
+  const start=source.indexOf('function download('),end=source.indexOf('/** M6-11',start);
+  vm.runInNewContext(source.slice(start,end)+"\ndownload('atlas-skin.zip',bytes,'application/zip');",{window:{AtlasHost:m.bridge},bytes});
+  m.bridge.downloadMap('map.json','{"map":true}');
+  assert.deepEqual(clicks,[{name:'atlas-skin.zip',url:'blob:host-1',attached:true,host:true},{name:'map.json',url:'blob:host-2',attached:true,host:true}]);
+  assert.equal(blobs[0].type,'application/zip');assert.equal(blobs[1].type,'application/json');
+  const decoded=await new Promise((resolve,reject)=>{const reader=new win.FileReader();reader.onload=()=>resolve(new Uint8Array(reader.result));reader.onerror=reject;reader.readAsArrayBuffer(blobs[0]);});
+  assert.deepEqual([...decoded],[80,75,0,255]);assert.equal(win.document.querySelector('a[download]'),null);
+  cleanup.forEach(fn=>fn());assert.deepEqual(revoked,['blob:host-1','blob:host-2']);
+ }finally{await m.render.dispose();win.close();}
+});
+
 test('真实宿主导出接通插件版本和 SQL 布局策略版本',async()=>{
  const m=mount({pluginVersion:'0.9.87'});
  try{
