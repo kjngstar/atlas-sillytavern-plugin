@@ -55,6 +55,25 @@ test('没有河流资料的城市仍生成可读多边形、道路和建筑，�
  assert.deepEqual(Kit.checkSceneDocument(result.scene),[]);
 });
 
+test('small kitchen lights do not consume floor space or displace furniture when added or reloaded',()=>{
+ const ctx={...baseCtx(['kitchen']),map:{id:'map-1',name:'厨房',containerLocationId:'kitchen',metersPerCell:1,frame:{cols:4,rows:3}}};
+ const furniture=[{id:'counter',roomId:'kitchen',type:'desk',w:2,h:.8},{id:'cabinet',roomId:'kitchen',type:'cabinet',w:1,h:.6}];
+ const rooms=[{id:'kitchen',name:'厨房',w:4,h:3,side:'north'}];
+ const first=Kit.generateFloor({rooms,contents:furniture},ctx);
+ assert.equal(first.ok,true,JSON.stringify(first.issues));
+ const lights=Array.from({length:3},(_,i)=>({id:'light-'+i,roomId:'kitchen',type:'light',w:.8,h:.8}));
+ const added=Kit.generateFloor({rooms,contents:[...furniture,...lights]},{...ctx,previousScene:first.scene});
+ assert.deepEqual(added.issues,[]);
+ assert.equal(added.scene.layout.groups.length,5);
+ for(const old of first.scene.layout.groups)assert.deepEqual(added.scene.layout.groups.find(g=>g.id===old.id),old);
+ assert.ok(added.scene.layout.bodies.filter(b=>b.type==='light').every(b=>b.solid===false));
+ const fresh=Kit.generateFloor({rooms,contents:[...furniture,...lights]},ctx);
+ assert.deepEqual(fresh.issues,[]);
+ assert.equal(fresh.scene.layout.groups.length,5);
+ const reopened=Kit.generateFloor({rooms,contents:[...furniture,...lights]},{...ctx,previousScene:Kit.clone(added.scene)});
+ assert.deepEqual(reopened.scene.layout,added.scene.layout);
+});
+
 // ---------- 必修1：增量约束合并 ----------
 
 test('审查1：六房间基础上只请求一个新增房间，结果为七房间且旧房间位置保留',()=>{
