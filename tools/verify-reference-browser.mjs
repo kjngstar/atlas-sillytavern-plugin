@@ -3,26 +3,29 @@ import {spawn,execFileSync} from 'node:child_process';
 import {readFileSync,writeFileSync,mkdirSync} from 'node:fs';
 import {createHash} from 'node:crypto';
 import {setTimeout as delay} from 'node:timers/promises';
-import {chromium} from 'playwright';
+import {launchAtlasBrowser} from './atlas-browser.mjs';
+import {instrumentSkins,verifySkins} from './verify-ui-skins.mjs';
 import {generateFloor,generateCity,generateOverview} from '../vendor/atlas-spatial/index.mjs';
 const dir=process.env.ATLAS_EVIDENCE_DIR||'.tmp/reference-browser';mkdirSync(dir,{recursive:true});
 const port=Number(process.env.ATLAS_VERIFY_PORT||4296),base=process.env.ATLAS_REVIEW_BASE||`http://127.0.0.1:${port}`;
 const report={checks:{},errors:[],failed:[],startedAt:new Date().toISOString()};
 const check=(name,ok,detail)=>{report.checks[name]={ok:!!ok,detail};if(!ok)report.failed.push(name);writeFileSync(`${dir}/progress.json`,JSON.stringify({last:name,checks:Object.keys(report.checks).length,failed:report.failed}));};
 const server=process.env.ATLAS_REVIEW_BASE?null:spawn(process.execPath,['dev-preview/serve.mjs'],{env:{...process.env,ATLAS_PREVIEW_PORT:String(port),ATLAS_PREVIEW_NO_OPEN:'1'},stdio:'ignore'});
-const browser=await chromium.launch({headless:true,executablePath:process.env.ATLAS_CHROME_PATH||'C:/Program Files/Google/Chrome/Application/chrome.exe'});
+const browser=await launchAtlasBrowser();
 // Host fixture follows SillyTavern public/scripts/extensions.js: html receives
 // the item click and closes the wand menu, maintaining its visibility flag.
 const wandFixture=`<button id="extensionsMenuButton">扩展菜单</button><div id="extensionsMenu" style="display:none;position:fixed;left:20px;top:20px;z-index:100001;background:#333"></div><script>
 window.__wandVisible=false;document.getElementById('extensionsMenuButton').onclick=()=>{window.__wandVisible=!window.__wandVisible;document.getElementById('extensionsMenu').style.display=window.__wandVisible?'block':'none';};
 document.documentElement.addEventListener('click',e=>{if(window.__wandVisible&&!e.target.closest('#extensionsMenuButton')){window.__wandVisible=false;document.getElementById('extensionsMenu').style.display='none';}});</script>`;
-async function open(options={}){const p=await browser.newPage({viewport:{width:1600,height:1000}});p.setDefaultTimeout(30000);p.on('pageerror',e=>report.errors.push(e.message));p.on('response',r=>{if(r.status()>=400)report.errors.push(`${r.status()} ${r.url()}`);});if(options.scene)await p.addInitScript(scene=>window.__reviewScene=scene,options.scene);await p.route('**/dev-preview/index.html',async route=>{const res=await route.fetch(),src=await res.text(),marker='await sqlRuntime.closeSqlSession(migrated.session);';if(!src.includes(marker))throw Error('fixture boundary changed');await route.fulfill({response:res,body:(options.scene?src.replace(marker,`const db=migrated.session.repo.db;
+async function open(options={}){const p=await browser.newPage({viewport:{width:1600,height:1000}});p.setDefaultTimeout(30000);if(options.instrument)await p.addInitScript(instrumentSkins);p.on('pageerror',e=>report.errors.push(e.message));p.on('response',r=>{if(r.status()>=400)report.errors.push(`${r.status()} ${r.url()}`);});if(options.scene)await p.addInitScript(scene=>window.__reviewScene=scene,options.scene);await p.route('**/dev-preview/index.html',async route=>{const res=await route.fetch(),src=await res.text(),marker='await sqlRuntime.closeSqlSession(migrated.session);';if(!src.includes(marker))throw Error('fixture boundary changed');await route.fulfill({response:res,body:(options.scene?src.replace(marker,`const db=migrated.session.repo.db;
 const frame=JSON.parse(db.exec("SELECT frame_json FROM maps WHERE id='world' AND branch_id='main'")[0].values[0][0]);
 frame.atlasScene=window.__reviewScene;db.run("UPDATE maps SET frame_json=? WHERE id='world' AND branch_id='main'",[JSON.stringify(frame)]);
 const saved=await sqlRuntime.persistSqlSession(migrated.session);if(!saved.saved)throw Error(JSON.stringify(saved.issues));${marker}`):options.fresh?src.replace(marker,marker+'contextValue.chatMetadata={};'):src).replaceAll('../atlas-extension/','../release/atlas-ui-extension/').replace('<body>','<body>'+wandFixture)});});
+ if(options.persist)await p.route('**/dev-preview/index.html',async route=>{const res=await route.fetch();let text=await res.text();text=text.replace('const extensionSettings = { atlas_world_sim: { panelOpen: true, docs: null } };',`const extensionSettings = JSON.parse(localStorage.getItem('atlas-skin-acceptance-settings')||'null') || { atlas_world_sim: { panelOpen: true, docs: null } };`);text=text.replace('saveSettingsDebounced: () => {},',`saveSettingsDebounced: () => {localStorage.setItem('atlas-skin-acceptance-settings',JSON.stringify(extensionSettings));},`);text=text.replace('writeAll: (docs) => { extensionSettings.atlas_world_sim.docs = docs; },',`writeAll: (docs) => { extensionSettings.atlas_world_sim.docs = docs;localStorage.setItem('atlas-skin-acceptance-settings',JSON.stringify(extensionSettings)); },`);await route.fulfill({response:res,body:text.replaceAll('../atlas-extension/','../release/atlas-ui-extension/').replace('<body>','<body>'+wandFixture)});});
  await p.goto(`${base}/dev-preview/index.html`);await p.waitForFunction(()=>!!document.querySelector('iframe')?.contentWindow?.AtlasPreview&&!!window.atlasPreviewConnection,{timeout:20000});const f=p.frames().find(f=>f.url().includes('/atlas-reference/index.html'));return {p,f};}
 try{
  for(let i=0;i<40;i++){try{if((await fetch(`${base}/dev-preview/index.html`)).ok)break;}catch{}await delay(250);}
+ if(process.argv.includes('--skins-only')){await verifySkins({open,check,dir});check('no-browser-errors',report.errors.length===0,report.errors);}else{
  /**
   * M7-02：原样式基线不再靠硬编码 hash。
   *
@@ -262,9 +265,13 @@ try{
      featureTypes:(AtlasPreview.map.state.geo.overviewFeatures??[]).map(x=>x.type),surface:AtlasPreview.map.state.geo.surface??null}));
    check(`saved-${kind}`,expectTier[kind](actual),actual);
    check(`saved-${kind}-painted`,(await ff.evaluate(()=>{const c=document.getElementById('map'),a=c.getContext('2d').getImageData(0,0,c.width,c.height).data,s=new Set();for(let i=0;i<a.length;i+=64)s.add(`${a[i]},${a[i+1]},${a[i+2]}`);return s.size;}))>18);
-   await proof.screenshot({path:`${dir}/native-${kind}.png`});await proof.close();
+   await proof.screenshot({path:`${dir}/native-${kind}.png`});
+   const facts=()=>ff.evaluate(()=>({geo:JSON.stringify(AtlasPreview.map.state.geo),marks:AtlasPreview.map.state.marks.map(m=>[m.id,m.x,m.y]),x:AtlasPreview.map.state.cam.x,y:AtlasPreview.map.state.cam.y,zoom:Number((AtlasPreview.map.state.cam.s/AtlasPreview.map.fitScale()).toFixed(6))}));
+   const beforeStyle=await facts(),pixels=await ff.locator('#map').screenshot();await ff.evaluate(()=>AtlasPreview.setTheme('builtin.parchment'));await ff.evaluate(()=>AtlasPreview.map.resize());const afterStyle=await facts();
+   check(`skin-${kind}-preserves-geography`,JSON.stringify(beforeStyle)===JSON.stringify(afterStyle));check(`skin-${kind}-changes-pixels`,!pixels.equals(await ff.locator('#map').screenshot()));await proof.screenshot({path:`${dir}/skin-${kind}.png`});await proof.close();
  }
  await f.evaluate(()=>AtlasHost.close());check('host-close',await p.locator('.atlas-native-ui-host').evaluate(el=>el.style.display==='none'));await p.evaluate(()=>atlasPreviewConnection.core.setPanelOpen(true));check('host-reopen',await p.locator('.atlas-native-ui-host').evaluate(el=>el.style.display!=='none'));
+ if((process.env.ATLAS_VERIFY_SKINS==='1'||process.argv.includes('--skins')))await verifySkins({open,check,dir});
  check('no-browser-errors',report.errors.length===0,report.errors);await p.close();
-}catch(e){report.failed.push(e.stack);}finally{report.finishedAt=new Date().toISOString();writeFileSync(`${dir}/evidence.json`,JSON.stringify(report,null,2));await browser.close();server?.kill();}
+}}catch(e){report.failed.push(e.stack);}finally{report.finishedAt=new Date().toISOString();writeFileSync(`${dir}/evidence.json`,JSON.stringify(report,null,2));await browser.close();server?.kill();}
 console.log(JSON.stringify({checks:Object.keys(report.checks).length,failed:report.failed,errors:report.errors,evidence:dir},null,2));if(report.failed.length)process.exitCode=1;

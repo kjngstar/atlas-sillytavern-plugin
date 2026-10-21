@@ -11,12 +11,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync,existsSync} from 'node:fs';
 import {JSDOM} from 'jsdom';
+import * as appearance from '../ui/atlas-appearance-controller.mjs';
 import {projectReferenceData} from '../ui/atlas-reference-data.mjs';
 
 const read=rel=>readFileSync(new URL(rel,import.meta.url),'utf8');
 const HTML=read('../ui/atlas-reference/index.html');
 const OVERRIDES=read('../ui/atlas-reference/css/atlas-world-overrides.css');
-const SCRIPT_ORDER=['map.js','presets.js','preset-ui.js','ui-model.js','app.js'];
+const SCRIPT_ORDER=['skin-runtime.js','map.js','presets.js','preset-ui.js','ui-model.js','app.js'];
 const CODE=SCRIPT_ORDER.map(name=>[name,read(`../ui/atlas-reference/js/${name}`)]);
 
 /** 记录式 2D 替身：只保证真实代码能跑完一帧，不产出、也不断言任何像素。 */
@@ -80,7 +81,7 @@ function boot({data=BUILDING_DATA,host={},preferences={version:1,singleClickEnte
     exportUpgradeBackup:async()=>{const error=Error('当前聊天没有可导出的升级前原档备份（或备份不属于本聊天）');error.code='BACKUP_NOT_AVAILABLE';throw error;},
     ...host,
   };
-  w.AtlasHost=hostPort;
+  w.AtlasHost=hostPort;w.AtlasAppearance=appearance;
   w.ATLAS_DEMO_DATA=JSON.parse(JSON.stringify(data));
   for(const [name,code] of CODE)w.eval(`/* ${name} */\n${code}`);
   /**
@@ -234,7 +235,7 @@ test('U02：74px 线长恒定 —— 同一张图缩放 1/2/4 倍，读数按反
 
 test('U02：override 样式层在原样式之后加载，且 74px 不被折叠/布局改动',()=>{
   const links=[...HTML.matchAll(/<link rel="stylesheet" href="([^"]+)"/g)].map(m=>m[1]);
-  assert.deepEqual(links,['css/atlas.css','css/preview.css','css/atlas-world-overrides.css'],'功能样式必须排在原样式之后');
+  assert.deepEqual(links,['css/atlas.css','css/preview.css','css/atlas-world-overrides.css','css/atlas-view-profiles.css','css/atlas-skin-overrides.css'],'功能样式必须排在原样式之后');
   for(const href of links)assert.ok(existsSync(new URL(`../ui/atlas-reference/${href}`,import.meta.url)),`${href} 必须真实存在（网络不得 404）`);
   assert.match(OVERRIDES,/\.hud-scale \.sc-line i\{width:74px;flex:0 0 74px;min-width:74px;max-width:74px;\}/,'比例尺线长必须在样式层被钉死');
   assert.match(OVERRIDES,/\.hud-legend\{order:1;\}/);
@@ -620,4 +621,26 @@ test('U03/U02/U04：像素与手势类断言明确交给浏览器门禁',()=>{
   const gate=read('../tools/verify-reference-browser.mjs');
   assert.ok(BROWSER_ONLY.length>0);
   assert.match(gate,/playwright|chromium|chrome/i,'真实浏览器门禁必须存在（M7-02）');
+});
+
+test('外观与显示配置共享同一 Canvas、世界投影和手动折叠状态',async t=>{
+ const ui=withUI(t);await ui.preview.appearanceReady;const canvas=ui.w.document.querySelector('#map'),data=JSON.stringify(ui.preview.data),map=ui.preview.map;
+ ui.w.document.querySelector('#leftCollapse').click();
+ for(const id of ['mapFocus','mapOnly','full'])assert.equal((await ui.preview.setUIProfile(id)).ok,true);
+ assert.equal(ui.w.document.querySelector('#map'),canvas);assert.equal(ui.preview.map,map);assert.equal(ui.preview.state.leftClosed,true);assert.equal(JSON.stringify(ui.preview.data),data);assert.equal(ui.calls.build.length,0);
+});
+test('显示配置保留逻辑设置页、输入节点、草稿、光标和滚动',async t=>{
+ const ui=withUI(t);await ui.preview.appearanceReady;ui.preview.page('prefs');ui.w.document.querySelector('[data-insert-prompt]').click();await tick();const input=ui.w.document.querySelector('textarea');assert.ok(input);input.value='未保存的分段草稿';input.dispatchEvent(new ui.w.Event('input',{bubbles:true}));input.focus();input.setSelectionRange(2,5);input.scrollTop=13;const workspace=ui.w.document.querySelector('#workspacePage');workspace.scrollTop=29;
+ await ui.preview.setUIProfile('mapOnly');assert.equal(ui.preview.state.page,'prefs');assert.equal(ui.preview.effectivePage(),'map');assert.equal(workspace.hidden,true);
+ await ui.preview.setUIProfile('full');assert.equal(ui.w.document.querySelector('textarea'),input);assert.equal(input.value,'未保存的分段草稿');assert.equal(input.selectionStart,2);assert.equal(input.selectionEnd,5);assert.equal(workspace.scrollTop,29);
+});
+test('关闭宿主后快照和导航不会重新启动地图动画',async t=>{
+ const ui=withUI(t);await ui.preview.appearanceReady;ui.preview.setVisible(false);ui.preview.updateSnapshot(ui.preview.data);ui.preview.go('world');assert.equal(ui.preview.map.state.paused,true);await ui.preview.setUIProfile('mapOnly');assert.equal(ui.preview.map.state.paused,true);ui.preview.setVisible(true);assert.equal(ui.preview.map.state.paused,false);
+});
+test('皮肤切换保留地图事实、选择与相机，非法配置保留上一外观',async t=>{
+ const ui=withUI(t);await ui.preview.appearanceReady;const before=JSON.stringify(ui.preview.data),cam={...ui.preview.map.state.tgt};assert.equal((await ui.preview.setTheme('builtin.parchment')).ok,true);assert.equal(ui.preview.getSkin().mapStyles.markers,'seal');assert.equal(JSON.stringify(ui.preview.data),before);assert.deepEqual({...ui.preview.map.state.tgt},cam);
+ const previous=ui.preview.getSkin();assert.equal((await ui.preview.setSkin({...previous,tokens:{'ui.accent':'bad'}})).ok,false);assert.deepEqual(ui.preview.getSkin(),previous);
+});
+test('跨聊天重置地图选择、搜索与相机缓存，保留全局界面偏好',async t=>{
+ const ui=withUI(t);await ui.preview.appearanceReady;await ui.preview.setUIProfile('mapOnly');ui.preview.state.query='旧聊天';ui.preview.state.cameras.set('old',{x:9,y:9,s:2});ui.preview.select('character','C1');const next=JSON.parse(JSON.stringify(ui.preview.data));next.meta.scopeKey='new-chat';ui.preview.updateSnapshot(next,{resetScope:true});assert.equal(ui.preview.state.selected,null);assert.equal(ui.preview.state.query,'');assert.equal(ui.preview.state.cameras.has('old'),false);assert.equal(ui.preview.state.profileId,'mapOnly');
 });

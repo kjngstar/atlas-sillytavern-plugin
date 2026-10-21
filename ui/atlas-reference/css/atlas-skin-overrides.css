@@ -1,0 +1,48 @@
+/* Scoped adapters follow the supplied stylesheet. No arbitrary skin CSS. */
+#atlasDemo .app-window{border-radius:var(--r-lg);}
+#atlasDemo[data-skin-frame="minimal"] .app-window{box-shadow:0 12px 40px #0005;backdrop-filter:none;}
+#atlasDemo[data-skin-frame="minimal"] .win-border,#atlasDemo[data-skin-frame="minimal"] .corner{display:none;}
+#atlasDemo[data-skin-frame="parchment"] .app-window{border:1px solid var(--line-2);box-shadow:0 20px 60px #0004;}
+#atlasDemo[data-skin-frame="parchment"] .win-border{background:none;border:1px solid var(--line-2);}
+#atlasDemo[style*="--skin-window-frame"] .app-window{border:var(--skin-frame-width,8px) solid transparent;border-image-source:var(--skin-window-frame);border-image-slice:var(--skin-frame-slice,16) fill;border-image-width:var(--skin-frame-width,8px);border-image-repeat:stretch;}
+#atlasDemo[style*="--skin-panel-texture"] .panel{background-image:var(--skin-panel-texture);background-repeat:repeat;}
+#atlasDemo[data-skin-panels="paper"] .panel{background-color:var(--panel-1);backdrop-filter:none;box-shadow:none;}
+#atlasDemo[data-skin-panels="flat"] .panel{background:var(--panel-1);backdrop-filter:none;box-shadow:none;}
+#atlasDemo[data-skin-buttons="outlined"] .action-btn,#atlasDemo[data-skin-buttons="outlined"] .filter-btn,#atlasDemo[data-skin-buttons="outlined"] .nav-b{border:1px solid var(--line-2);border-radius:var(--r-sm);box-shadow:none;}
+#atlasDemo[data-skin-buttons="flat"] .action-btn,#atlasDemo[data-skin-buttons="flat"] .filter-btn,#atlasDemo[data-skin-buttons="flat"] .nav-b{border:0;border-radius:2px;box-shadow:none;background:var(--panel-1);}
+#atlasDemo[data-skin-icons="boxed"] .rail-btn svg{border:1px solid currentColor;border-radius:4px;padding:2px;filter:none;}
+#atlasDemo[data-skin-base="parchment"]{--bg-0:#e6d8b3;--bg-1:#f3e9d3;--cyan-d:#825128;--green:#346a54;--amber:#99771c;--pink:#b3445c;--violet:#754a90;--blue:#35657b;--glow-c:none;--glow-v:none;}
+#atlasDemo[data-skin-base="parchment"] .stage,#atlasDemo[data-skin-base="parchment"] .win-noise{display:none;}
+#atlasDemo[data-skin-base="parchment"] .app-window{background:var(--win-1);}
+#atlasDemo[data-skin-base="parchment"] .titlebar,#atlasDemo[data-skin-base="parchment"] .rail,#atlasDemo[data-skin-base="parchment"] .panel,#atlasDemo[data-skin-base="parchment"] .dock,#atlasDemo[data-skin-base="parchment"] .p-head{background:var(--panel-1);color:var(--txt);border-color:var(--line-2);}
+#atlasDemo[data-skin-base="parchment"] .hud,#atlasDemo[data-skin-base="parchment"] .map-selection,#atlasDemo[data-skin-base="parchment"] .modal-panel,#atlasDemo[data-skin-base="parchment"] .palette{background:var(--win-1);color:var(--txt);border-color:var(--line-2);box-shadow:0 4px 18px #80644335;}
+#atlasDemo[data-skin-base="parchment"] .workspace-page{background:var(--panel-1);color:var(--txt);}
+#atlasDemo[data-skin-base="parchment"] :is(.cast-card,.item-card,.task-card,.message-card,.lore-card,.preset-card,.appearance-form,.connection-card,.assignment-card,.propagation-row,.detail-field,.pl-cell){background:var(--panel-1);color:var(--txt);border-color:var(--line-2);box-shadow:none;}
+#atlasDemo[data-skin-base="parchment"] :is(input,select,textarea,.search-field,.prompt-editor,.diagnostic-detail,.diagnostic-card){background:#fff9eb;color:var(--txt);border-color:var(--line-2);}
+#atlasDemo[data-skin-base="parchment"] :is(.scope-note,.field-v,.field-k,.cc-mind,.cc-doing,.cc-sub,.detail-text,.event-summary,.tc-d,.log-msg,.propagation-row span,.settings-tabs){color:var(--txt-2);}
+#atlasDemo[data-skin-base="parchment"] :is(.rail-btn.active,.filter-btn.on,.crumb.cur,.dt.active,.sw-row.on .sw,.top-next,.it.active,.dh-tab.on){background:var(--cyan);color:var(--skin-on-accent,#fff8eb);border-color:var(--cyan);text-shadow:none;}
+#atlasDemo[data-skin-base="parchment"] .rail-ava{background:var(--cyan);color:var(--skin-on-accent,#fff8eb);box-shadow:none;}
+#atlasDemo[data-skin-base="parchment"] .dl-cell.cur .dl-bar{background:var(--cyan);box-shadow:none;}
+#atlasDemo[data-skin-base="parchment"] .hud-modes button{color:var(--txt-2);}
+#atlasDemo[data-skin-base="parchment"] .hud-modes button.on{background:var(--cyan);color:var(--skin-on-accent,#fff8eb);}
+#atlasDemo[style*="--skin-spacing"] .p-sec{padding:var(--skin-spacing);}
+#atlasDemo[style*="--skin-marker-character"] .pt.char{background:var(--skin-marker-character,var(--cyan));}
+#atlasDemo[style*="--skin-marker-place"] .pt.poi{background:var(--skin-marker-place,var(--violet));}
+#atlasDemo[style*="--skin-marker-item"] .pt.item{background:var(--skin-marker-item,var(--amber));}
+#atlasDemo[style*="--skin-marker-message"] .pt.sig{background:var(--skin-marker-message,var(--green));}
+#atlasDemo[style*="--skin-marker-event"] .pt.evt{background:var(--skin-marker-event,var(--pink));}
+#atlasDemo[style*="--skin-marker-exit"] .pt.exit{background:var(--skin-marker-exit,#7fd4ff);}
+#atlasDemo[data-skin-base="parchment"] :is(.brand-name,.pl-name,.cc-name,.mc-src,.tc-n,.lr-m b,.rc-m b,.prop .pv){color:var(--txt);text-shadow:none;}
+#atlasDemo[data-skin-base="parchment"] .cc-line .v.mind{color:var(--txt-2);}
+#atlasDemo[data-skin-base="parchment"] .tree-row.on{color:var(--txt);background:#e8dcc0;box-shadow:inset 0 0 0 1px var(--line-2);}
+#atlasDemo[data-skin-base="parchment"] :is(.cc-tag,.tflag.live,.tag-s.g,.tc-st.run){color:var(--green);}
+#atlasDemo[data-skin-base="parchment"] :is(.cc-tag.away,.tag-s.a,.tc-st.wait){color:var(--cyan);}
+#atlasDemo[data-skin-base="parchment"] :is(.rail-badge,.tag-s.p){color:var(--violet);}
+#atlasDemo[data-skin-base="parchment"] :is(.tag-s.r,.tc-st.block){color:#98364c;}
+#atlasDemo[data-skin-base="parchment"] :is(.stat-pill,.stat-pill.ghost,.depth-ladder){background:var(--panel-1);border-color:var(--line-2);}
+#atlasDemo[data-skin-base="parchment"] .sw-row.on .sw{background:var(--cyan);border-color:var(--cyan);box-shadow:none;}
+#atlasDemo[data-skin-base="parchment"] .sw-row.on .sw::after{background:#fff8eb;box-shadow:none;}
+#atlasDemo[data-skin-base="parchment"] .dl-cell.cur .dl-bar{background:var(--cyan);border-color:var(--cyan);box-shadow:none;}
+#atlasDemo[data-skin-base="parchment"] .dl-cell.cur .dl-bar::after{display:none;}
+#atlasDemo[data-skin-base="parchment"] :is(.vm.active,.nav-b.on,.pal-i.sel,.chip.on){background:var(--cyan);color:var(--skin-on-accent,#fff8eb);box-shadow:none;}
+#atlasDemo[style*="--skin-marker-exit"] .pt.vehicle{background:var(--skin-marker-exit,#7fd4ff);}

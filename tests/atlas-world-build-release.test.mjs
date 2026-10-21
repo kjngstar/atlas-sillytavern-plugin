@@ -150,7 +150,7 @@ test('I10：CSS 保护基线（供给原版）与功能 override 是两层，互
   const html = read('ui', 'atlas-reference', 'index.html');
   assert.match(html, /href="css\/atlas-world-overrides\.css"/, 'override 必须被页面真实加载');
   const links = [...html.matchAll(/<link rel="stylesheet" href="([^"]+)"/g)].map((m) => m[1]);
-  assert.equal(links.at(-1), 'css/atlas-world-overrides.css', 'override 必须排在原样式之后，才能覆盖原观感');
+  assert.deepEqual(links.slice(-3), ['css/atlas-world-overrides.css','css/atlas-view-profiles.css','css/atlas-skin-overrides.css'], '功能、显示与皮肤覆盖依次位于原样式之后');
   for (const href of links) assert.ok(existsSync(at('ui', 'atlas-reference', href)), `${href} 必须真实存在（发布后网络不得 404）`);
 });
 

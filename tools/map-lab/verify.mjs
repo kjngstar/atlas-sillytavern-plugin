@@ -1,14 +1,13 @@
-import { chromium } from 'playwright';
+import {launchAtlasBrowser} from '../atlas-browser.mjs';
+import {execFile} from 'node:child_process';
+import {promisify} from 'node:util';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { createMapLabFixture } from './fixtures.mjs';
-import { createDefaultSettingsV2, settingsViewV2 } from '../../src/atlas-settings.ts';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const output = join(root, 'artifacts/map-lab');
-const browser = await chromium.launch({ headless: true,
-  executablePath: process.env.ATLAS_CHROME_PATH || 'C:/Program Files/Google/Chrome/Application/chrome.exe' });
+const browser=await launchAtlasBrowser();
 const report = { checks: [], networkRequests: [], browserErrors: [] };
 const check = (name, data) => { report.checks.push({ name, data }); console.log(name, JSON.stringify(data)); };
 try {
@@ -75,57 +74,10 @@ try {
   await page.screenshot({ path: join(output, 'classroom-1280.png') });
   assert.deepEqual(report.networkRequests, []);
 
-  // Exercise the actual Atlas panel, with fixture-only requests intercepted in this browser.
-  const panel = await browser.newPage({ viewport: { width: 1280, height: 820 } });
-  panel.on('pageerror', error => report.browserErrors.push(String(error)));
-  const prefix = '/scripts/extensions/third-party/atlas-sillytavern-plugin/';
-  const files = new Map(['index.js', 'style.css', 'dist/atlas-ui-core.mjs'].map(path => [path, readFileSync(join(root, path), 'utf8')]));
-  await panel.route('**/*', route => {
-    const pathname = new URL(route.request().url()).pathname;
-    if (pathname === '/fixture') return route.fulfill({ contentType: 'text/html', body: '<!doctype html><html><head></head><body style="margin:0"></body></html>' });
-    const key = pathname.slice(prefix.length);
-    if (!pathname.startsWith(prefix) || !files.has(key)) return route.abort();
-    return route.fulfill({ contentType: key.endsWith('.css') ? 'text/css' : 'text/javascript', body: files.get(key) });
-  });
-  await panel.goto('http://atlas-map-validation.invalid/fixture');
-  const fixture = createMapLabFixture();
-  await panel.evaluate(async ({ view, settings, prefix }) => {
-    const source = await (await fetch(prefix + 'index.js')).text();
-    const module = await import(URL.createObjectURL(new Blob([source + '\nexport { renderPanel };'], { type: 'text/javascript' })));
-    const mod = await import(prefix + 'dist/atlas-ui-core.mjs');
-    const css = document.createElement('link'); css.rel = 'stylesheet'; css.href = prefix + 'style.css'; document.head.append(css);
-    await new Promise(resolve => css.onload = resolve);
-    const state = { page: 'map', panelOpen: true, receipts: [], serviceStatus: 'online', mode: 'online', chatId: 'map-lab-fixture',
-      stateData: { chatId: 'map-lab-fixture', worldId: 'map-lab-fixture', worldName: '地图交互验收', currentTime: 1,
-        currentLocationId: '6', tableMap: view, map: { points: [], regions: [], submaps: {}, pointMeta: {}, calibrations: {} }, npcDirectory: [], objectDirectory: [], regions: [] } };
-    const core = { getState: () => state, setPage: () => {}, setPanelOpen: () => {}, refresh: async () => {} };
-    const root = document.createElement('div'); document.body.append(root);
-    module.renderPanel(core, root, { request: async () => ({ status: 200, body: { ok: true, data: settings } }) }, { read: async () => null }, mod);
-  }, { view: fixture.view, settings: settingsViewV2(createDefaultSettingsV2()), prefix });
-  for (let id = 1; id <= 5; id++) {
-    await panel.locator(`.aw-point[data-point-id="${id}"]`).click();
-    await panel.locator('.aw-mappanel button').filter({ hasText: '进入内部地图' }).click();
-  }
-  for (const width of [1280, 540]) {
-    await panel.setViewportSize({ width, height: 820 }); await panel.waitForTimeout(100);
-    const room = panel.locator('.aw-floorplan-room[data-child-id="6"]');
-    await room.click({ position: { x: 5, y: 5 } });
-    assert.match(await panel.locator('.aw-mappanel').innerText(), /二年三班教室/);
-    await panel.evaluate(() => document.querySelector('.aw-viewport').dispatchEvent(new MouseEvent('click')));
-    const result = await panel.evaluate(() => {
-      const area = document.querySelector('.aw-floorplan-room[data-child-id="6"]'),
-        stage = document.querySelector('.aw-stage'), view = document.querySelector('.aw-viewport').getBoundingClientRect(),
-        tools = document.querySelector('.aw-maptools').getBoundingClientRect(), crumbs = document.querySelector('.aw-mapcrumb').getBoundingClientRect();
-      const scale = new DOMMatrix(getComputedStyle(stage).transform).a;
-      return { rooms: document.querySelectorAll('.aw-floorplan-room[data-child-id]').length,
-        overlap: tools.bottom > crumbs.top + 1 || crumbs.bottom > view.top + 1,
-        screenBorderWidth: parseFloat(getComputedStyle(area).boxShadow.match(/[-\d.]+px/g).at(-1)) * scale };
-    });
-    assert.equal(result.rooms, 6); assert.equal(result.overlap, false);
-    assert.ok(Math.abs(result.screenBorderWidth - 1.5) < .05);
-    await panel.screenshot({ path: join(output, `atlas-building-${width}.png`) });
-    check(`atlas-region-interaction-${width}`, result);
-  }
+  // The retired .aw-* panel cannot validate today's native iframe. Run its current gate.
+  await page.close();await browser.close();
+  const nativeDir=join(output,'native-reference');const result=await promisify(execFile)(process.execPath,['tools/verify-reference-browser.mjs'],{cwd:root,env:{...process.env,ATLAS_VERIFY_SKINS:'0',ATLAS_VERIFY_PORT:'4299',ATLAS_EVIDENCE_DIR:nativeDir},maxBuffer:8*1024*1024});
+  console.log(result.stdout);const evidence=JSON.parse(readFileSync(join(nativeDir,'evidence.json'),'utf8'));assert.deepEqual(evidence.failed,[]);assert.deepEqual(evidence.errors,[]);check('current-packaged-ui',{checks:Object.keys(evidence.checks).length,errors:evidence.errors.length,evidence:nativeDir});
   assert.deepEqual(report.browserErrors, []);
   writeFileSync(join(output, 'verification.json'), JSON.stringify(report, null, 2));
   console.log('All map browser checks passed; no SillyTavern writes or model API calls.');

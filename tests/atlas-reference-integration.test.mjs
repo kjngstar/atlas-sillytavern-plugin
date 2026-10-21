@@ -27,7 +27,7 @@ const cat=[{entityId:'L',entityKind:'location',name:'学校',mapId:'world'},{ent
 
 test('界面更新同一个快照对象不会清空地图；坏快照保留可用画面',()=>{
  const D={meta:{scopeKey:'A',viewMode:'author',initialNodeId:'world'},ROOT:{id:'world'},CAST:[],ITEMS:[]};
- const context=vm.createContext({D,state:{page:'map',nodeId:'world',selected:null,cameras:new Map(),open:new Set()},clone:v=>JSON.parse(JSON.stringify(v)),nodes:()=>[D.ROOT],navigate:()=>{},renderAll:()=>{},map:{setPaused(){}},document:{hidden:false}});
+ const context=vm.createContext({D,state:{page:'map',nodeId:'world',selected:null,cameras:new Map(),open:new Set()},clone:v=>JSON.parse(JSON.stringify(v)),nodes:()=>[D.ROOT],navigate:()=>{},refreshFlows:()=>{},applyUIProfile:()=>{},syncMapVisibility:()=>{},renderAll:()=>{},map:{setPaused(){}},document:{hidden:false}});
  const code=readFileSync(new URL('../ui/atlas-reference/js/app.js',import.meta.url),'utf8');
  vm.runInContext(code.slice(code.indexOf('function updateSnapshot('),code.indexOf('async function runHost(')),context);
  context.updateSnapshot(D);assert.equal(D.meta.scopeKey,'A');assert.equal(D.ROOT.id,'world');

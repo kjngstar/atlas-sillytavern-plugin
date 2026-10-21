@@ -1,0 +1,10 @@
+/* Profiles change visibility; the DOM, manual collapse state and canvas stay shared. */
+#atlasDemo [data-profile-hidden]{display:none!important;}
+#atlasDemo .profile-switcher{max-width:112px;padding:7px;border:1px solid var(--line-2);border-radius:var(--r-sm);background:var(--win-1);color:var(--txt);font:11px var(--sans);}
+#atlasDemo .map-selection{position:absolute;right:16px;bottom:20px;width:min(340px,calc(100% - 32px));max-height:48%;overflow:auto;z-index:8;padding:14px;border:1px solid var(--line-2);border-radius:var(--r-md);background:var(--win-1);box-shadow:0 8px 25px #0005;}
+#atlasDemo .map-selection>header{display:flex;gap:12px;justify-content:space-between;align-items:center;margin-bottom:12px;}
+#atlasDemo .map-selection>header button{padding:6px;}
+#atlasDemo[data-ui-profile="mapFocus"] .viewport,#atlasDemo[data-ui-profile="mapOnly"] .viewport{flex:1;min-width:0;}
+#atlasDemo[data-ui-profile="mapOnly"] .hud-scale{bottom:16px;}
+#atlasDemo[data-ui-profile="mapOnly"] .hud-nav{top:77px;}
+@media(max-width:720px){#atlasDemo .profile-switcher{max-width:94px;padding:5px;font-size:10px;}#atlasDemo .map-selection{bottom:66px;max-height:45%;}}

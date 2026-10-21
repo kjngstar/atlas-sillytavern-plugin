@@ -20,7 +20,7 @@ const cut = (from, to) => SOURCE.slice(SOURCE.indexOf(from), SOURCE.indexOf(to))
 test('独立房间视野适应实际房间，保留物理尺度与多房间整图视野',()=>{
  const room={x:-90,y:35,w:80,h:120};
  const st={kind:'floor',node:{extent:[-540,540,-340,360]},geo:{rooms:[room],corridor:{h:0}},vw:800,vh:600,cam:{},tgt:{}};
- const runtime=vm.createContext({st,EXTENT:{},Math,Number});
+ const runtime=vm.createContext({canvasStyle:null,texturePattern:null,skinColor:(_layer,_part,fallback)=>fallback,st,EXTENT:{},Math,Number});
  vm.runInContext(cut('function extent()', 'function W2S('),runtime);
  vm.runInContext('fit(false)',runtime);
  assert.equal(st.cam.x,-50);assert.equal(st.cam.y,95);
@@ -46,7 +46,7 @@ test('闭合轮廓经过全部顶点且首尾切线连续，不出现折返和�
   const curves=[],moves=[];
   let closed=0;
   const ctx={moveTo:(...p)=>moves.push(p),bezierCurveTo:(...p)=>curves.push(p),closePath:()=>closed++};
-  const runtime=vm.createContext({ctx});
+  const runtime=vm.createContext({canvasStyle:null,texturePattern:null,skinColor:(_layer,_part,fallback)=>fallback,ctx});
   vm.runInContext(TOOLS,runtime);
   const points=[[0,0],[100,0],[100,100],[0,100]];
   runtime.smooth(ctx,points,true);
@@ -64,7 +64,7 @@ test('开放曲线保留每个端点，两点路径也能画出完整线段',()=
   for(const points of [[[0,0],[100,0]],[[0,0],[100,0],[100,100],[0,100]]]){
     const curves=[];
     const ctx={moveTo(){},bezierCurveTo:(...p)=>curves.push(p),closePath(){assert.fail('开放曲线不得闭合');}};
-    const runtime=vm.createContext({ctx});
+    const runtime=vm.createContext({canvasStyle:null,texturePattern:null,skinColor:(_layer,_part,fallback)=>fallback,ctx});
     vm.runInContext(TOOLS,runtime);
     runtime.smooth(ctx,points,false);
     assert.deepEqual(curves.map(p=>p.slice(4)),points.slice(1));
@@ -97,7 +97,7 @@ const strokes = (log, style) => log.filter(e => e.op === 'stroke' && e.stroke ==
 
 /** 在 vm 里拼出 map.js 的指定区段，并注入 canvas/st/pushLabel 替身。 */
 function mapRuntime({ctx, st, pushLabel, sections}){
-  const runtime = vm.createContext({
+  const runtime = vm.createContext({canvasStyle:null,texturePattern:null,skinColor:(_layer,_part,fallback)=>fallback,
     ctx, st, pushLabel,C:{cyan:'#43e0ff'},
     extent: () => [-50, 50, -50, 50],
     hexA: (c, a) => c + '@' + a,
@@ -330,7 +330,7 @@ test('M6-07 · 网格范围跟随可见视口（平移后仍铺满画面），�
 
 test('M6-07 · 比例尺：线长恒定 74 CSS px，distance=74/px×metric，未标定用格、估计加约', () => {
   const source=readFileSync(new URL('../ui/atlas-reference/js/ui-model.js',import.meta.url),'utf8');
-  const runtime=vm.createContext({});
+  const runtime=vm.createContext({canvasStyle:null,texturePattern:null,skinColor:(_layer,_part,fallback)=>fallback,});
   vm.runInContext(source,runtime);
   const ui=runtime.AtlasUIModel;
   assert.equal(ui.SCALE_WIDTH_PX,74);
@@ -369,7 +369,7 @@ test('M6-07 · 比例尺：线长恒定 74 CSS px，distance=74/px×metric，未
 /* ── M6-10：悬停锚点稳定、标签避让、命中与绘制同源 ── */
 
 const MODULE = cut('const C = {', 'function create(canvas');
-const BODY = cut('function create(canvas', 'return { create, C };');
+const BODY = cut('function create(canvas', 'return { create, C,PAINTER_REGISTRY,layerPaint,paintSemantic };');
 
 /** 记录式 canvas：额外记下 arc 的半径与 fillText 的落点，用来断言"画在哪"。 */
 function paintLog(){
@@ -405,7 +405,7 @@ function rendererHarness({node, path, hooks={}, width=400, height=300}){
   const mini={width:0,height:0,style:{},getContext:()=>mctx,getBoundingClientRect:()=>({width:200,height:120})};
   // hexA 用真实实现：颜色透明度是断言的一部分，不能替换成假字符串。
   const realHexA=(hex,a)=>{const h=String(hex).replace('#','');const r=parseInt(h.substr(0,2),16),g=parseInt(h.substr(2,2),16),b=parseInt(h.substr(4,2),16);return `rgba(${r},${g},${b},${a})`;};
-  const runtime=vm.createContext({
+  const runtime=vm.createContext({canvasStyle:null,texturePattern:null,skinColor:(_layer,_part,fallback)=>fallback,
     Math,Number,Array,Object,String,JSON,console,Set,Map,performance:{now:()=>0},
     requestAnimationFrame:()=>0, cancelAnimationFrame(){}, window:{devicePixelRatio:1},
     hexA:realHexA, ctx, mctx, canvas, mini,
