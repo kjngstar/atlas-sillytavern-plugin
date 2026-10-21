@@ -69,7 +69,9 @@
   "validation": {
     "status": "prerelease-with-live-limitations",
     "tests": {
-      "status": "pending-release-rerun"
+      "total": 2303,
+      "pass": 2303,
+      "fail": 0
     },
     "targetedRegression": {
       "total": 36,
@@ -97,7 +99,8 @@
       "pass": 99,
       "fail": 0,
       "errors": 0
-    }
+    },
+    "sqlRelease": "passed"
   },
   "modelBatchingPolicyVersion": "batch-v3"
 }
