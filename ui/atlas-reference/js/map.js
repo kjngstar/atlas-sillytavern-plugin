@@ -1012,14 +1012,22 @@ function create(canvas, mini, hooks){
 
     // 门
     ctx.save();
+    const renderedOpenings=new Set();
     (g.doors||[]).forEach(d=>{
+      // Two room sides describe one physical opening, including POV data
+      // whose private route IDs are intentionally removed.
+      const key=`${d.x}:${d.y}:${d.w}:${d.wall==='east'||d.wall==='west'?'v':'h'}`;
+      if(renderedOpenings.has(key))return;renderedOpenings.add(key);
+      const vertical=d.wall==='east'||d.wall==='west';
+      ctx.save();ctx.translate(d.x,d.y);if(vertical)ctx.rotate(Math.PI/2);
       ctx.beginPath();
-      ctx.moveTo(d.x-d.w/2, d.y); ctx.lineTo(d.x+d.w/2, d.y);
+      ctx.moveTo(-d.w/2, 0); ctx.lineTo(d.w/2, 0);
       ctx.strokeStyle='rgba(10,16,26,1)'; ctx.lineWidth=7/st.cam.s; ctx.stroke();
       ctx.strokeStyle='rgba(255,225,150,.85)'; ctx.lineWidth=2/st.cam.s; ctx.stroke();
-      ctx.beginPath(); ctx.arc(d.x+d.w/2, d.y, d.w*.42, Math.PI, Math.PI*1.5);
+      ctx.beginPath(); ctx.arc(d.w/2, 0, d.w*.42, Math.PI, Math.PI*1.5);
       ctx.setLineDash([3/st.cam.s,3/st.cam.s]);
       ctx.strokeStyle='rgba(255,225,150,.35)'; ctx.lineWidth=1/st.cam.s; ctx.stroke();
+      ctx.restore();
     });
     ctx.restore();
 

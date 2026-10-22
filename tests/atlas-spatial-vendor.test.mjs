@@ -84,7 +84,8 @@ test('kitchen door openings do not displace storage furniture or block the walki
   {id:'door2',roomId:'kitchen',type:'doorway',w:1,h:.4}];
  const result=Kit.generateFloor({rooms:[{id:'kitchen',w:4,h:3,side:'north'}],contents},ctx);
  assert.deepEqual(result.issues,[]);
- assert.equal(result.scene.layout.groups.length,5);
+ assert.equal(result.scene.layout.groups.length,3);
+ assert.deepEqual(result.scene.layout.doors[0].sourceContentIds,['door1','door2']);
  assert.ok(result.scene.layout.bodies.filter(b=>b.type==='doorway').every(b=>!b.solid));
  assert.ok(result.scene.layout.groups.filter(g=>['desk','shelf','cabinet'].includes(g.type)).every(g=>g.interaction));
 });
@@ -103,7 +104,7 @@ test('live kitchen regression: wall boundary closes a sub-grid gap without growi
  const result=Kit.generateFloor(spec,ctx);
  assert.deepEqual(result.issues,[]);
  assert.deepEqual(result.scene.layout.bounds,{x:0,y:0,w:4,h:3});
- assert.deepEqual(new Set(result.scene.layout.groups.map(g=>g.id)),new Set(contents.map(g=>g.id)));
+ assert.deepEqual(new Set(result.scene.layout.groups.map(g=>g.id)),new Set(contents.filter(g=>g.type!=='doorway').map(g=>g.id)));
  const cabinet=result.scene.layout.groups.find(g=>g.id==='kitchen_storage_cabinet');
  assert.equal(cabinet.w,1);assert.equal(cabinet.h,.4);
  assert.ok(Math.abs(cabinet.y+cabinet.h-2.8)<1e-7,'cabinet fits against the exact inner boundary, between quarter-grid samples');

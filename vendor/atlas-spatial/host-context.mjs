@@ -1,4 +1,4 @@
-import {normalizeScope,finite,plain,diagnostic,failure,FRAME_SPACE_CANONICAL_KEY,SPACE_CANONICAL_MAX_FURNISHING} from './contracts.mjs';
+import {normalizeScope,finite,plain,diagnostic,failure,parseSpaceLocalId,FRAME_SPACE_CANONICAL_KEY,SPACE_CANONICAL_MAX_FURNISHING} from './contracts.mjs';
 import {readSceneFrame} from './storage.mjs';
 import {collectMapLocations} from './map-membership.mjs';
 
@@ -95,6 +95,22 @@ export function buildLayoutContext({scope,mapRow,maps=[],locations=[],characters
     }
     // 目录只含本图行 + 本图路线的双端点，不把整个 branch 的位置塞给模型。
     const directory=rows=>Object.fromEntries(rows.map(r=>[r.id,r]));
+    const roomIds=new Set(members.filter(l=>l.kind==='room').map(l=>l.id));
+    const memberIds=new Set(members.filter(l=>['room','other'].includes(l.kind)).map(l=>l.id));
+    const roomConnections=rs.filter(r=>memberIds.has(r.from_location_id)&&memberIds.has(r.to_location_id)&&(roomIds.has(r.from_location_id)||roomIds.has(r.to_location_id))&&r.from_location_id!==r.to_location_id&&['adjacent','door','estimated'].includes(r.kind)&&r.status==='open')
+      .map(r=>({id:r.id,from:r.from_location_id,to:r.to_location_id}));
+    const externalRoomIds=rs.filter(r=>r.status==='open'&&(r.from_location_id===containerId||r.to_location_id===containerId))
+      .flatMap(r=>[r.from_location_id,r.to_location_id]).filter(id=>memberIds.has(id));
+    let entryDoors=[],parentGroups=[];
+    const parent=maps.find(m=>m.branch_id===scope.branchId&&m.id!==mapRow.id&&m.id===ls.find(l=>l.id===containerId)?.map_id);
+    if(parent){
+      const parentFrame=json(parent.frame_json),layout=parentFrame?.atlasScene?.layout;
+      const room=layout?.rooms?.find(r=>r.id===containerId);
+      if(room&&parentFrame.atlasScene.units==='meters'){
+        entryDoors=(layout.doors??[]).filter(d=>d.roomId===containerId).map(d=>({...d,x:d.x-room.x,y:d.y-room.y,sourceRoomSize:{w:room.w,h:room.h}}));
+        parentGroups=(layout.groups??[]).filter(g=>g.roomId===containerId).map(g=>({...g,id:parseSpaceLocalId(g.id)?.contentId??g.id,x:g.x-room.x,y:g.y-room.y,sourceRoomSize:{w:room.w,h:room.h}}));
+      }
+    }
     const endpointIds=new Set();
     for(const r of ownRoutes){if(r.from_location_id)endpointIds.add(r.from_location_id);if(r.to_location_id)endpointIds.add(r.to_location_id);}
     const locationsById=directory([...members,...ls.filter(l=>!members.includes(l)&&(l.id===containerId||endpointIds.has(l.id)))]);
@@ -103,6 +119,6 @@ export function buildLayoutContext({scope,mapRow,maps=[],locations=[],characters
     if(!saved.ok)return saved;
     // P12/R03 §19.1：本图覆盖空间（container）的权威尺寸与陈设账本；身份不符/损坏 → null。
     const spaceCanonical=readSpaceCanonical(plain(frame)?frame[FRAME_SPACE_CANONICAL_KEY]:null,containerId);
-    return {ok:true,context:{scope,map:{id:mapRow.id,name:mapRow.name,containerLocationId:containerId,containerKind,containerName,metersPerCell:calibrated?mpp:null,scaleQuality:mapRow.scale_quality,scaleLocked:Number(mapRow.scale_locked)===1,frame},entities:{locations:ls.map(l=>l.id),characters:cs.map(c=>c.id),items:its.map(i=>i.id),routes:rs.map(r=>r.id)},locationsById,routesById,placement,locks,previousScene:saved.scene,spaceCanonical,seed:mapRow.id},issues};
+    return {ok:true,context:{scope,map:{id:mapRow.id,name:mapRow.name,containerLocationId:containerId,containerKind,containerName,metersPerCell:calibrated?mpp:null,scaleQuality:mapRow.scale_quality,scaleLocked:Number(mapRow.scale_locked)===1,frame},entities:{locations:ls.map(l=>l.id),characters:cs.map(c=>c.id),items:its.map(i=>i.id),routes:rs.map(r=>r.id)},locationsById,routesById,roomConnections,externalRoomIds,entryDoors,parentGroups,placement,locks,previousScene:saved.scene,spaceCanonical,seed:mapRow.id},issues};
   }catch(e){return failure('CONTEXT_BUILD_FAILED','$','当前分支行或已保存场景不可读取',{detailCode:String(e.message)});}
 }

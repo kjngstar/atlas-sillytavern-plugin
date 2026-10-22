@@ -9,6 +9,7 @@ type Row=Record<string,unknown>;
 export function completeLayoutClosure(input:{group:AtomicGroup;maps:Row[];locations:Row[];characters:Row[];items:Row[];routes:Row[];scope:SpatialScope;turnId:string;operationId:string}){
   const {scope,turnId,operationId}=input;
   let maps=structuredClone(input.maps),locations=structuredClone(input.locations);
+  const removedFurnishing=new Map<string,Set<string>>();
   const mutations=new Map<string,RowMutation>(),queue:string[]=[],seen=new Set<string>(),initialLedgers=new Set<string>(),completed=new Set<string>(input.group.mutations.filter(m=>m.table==='maps').slice(0,1).map(m=>m.rowId));
   const merge=(mutation:RowMutation)=>{
     const key=mutation.table+'\0'+mutation.rowId,old=mutations.get(key);
@@ -18,7 +19,20 @@ export function completeLayoutClosure(input:{group:AtomicGroup;maps:Row[];locati
     if(mutation.table==='maps')maps=maps.map(row=>row.id===mutation.rowId?structuredClone(merged.after!):row);
     if(mutation.table==='locations')locations=locations.map(row=>row.id===mutation.rowId?structuredClone(merged.after!):row);
     if(mutation.table==='maps'){
-      const a=normalizeFrame(mutation.after?.frame_json).atlasSpaceCanonical as Row|undefined,b=normalizeFrame(mutation.before?.frame_json).atlasSpaceCanonical;
+      const afterFrame=normalizeFrame(mutation.after?.frame_json),beforeFrame=normalizeFrame(mutation.before?.frame_json);
+      const a=afterFrame.atlasSpaceCanonical as Row|undefined,b=beforeFrame.atlasSpaceCanonical as Row|undefined;
+      if(a&&b&&Array.isArray(b.furnishing)&&Array.isArray(a.furnishing)){
+        const ids=new Set((a.furnishing as Row[]).map(f=>f.localId));
+        const removed=removedFurnishing.get(String(a.locationId))??new Set<string>();
+        for(const f of b.furnishing as Row[])if(typeof f.localId==='string'&&!ids.has(f.localId))removed.add(f.localId);
+        removedFurnishing.set(String(a.locationId),removed);
+      }
+      const layout=(afterFrame.atlasScene as Row|undefined)?.layout as Row|undefined;
+      const oldLayout=(beforeFrame.atlasScene as Row|undefined)?.layout as Row|undefined;
+      for(const room of (layout?.rooms??[]) as Row[]){
+        const projection=(l:Row|undefined)=>JSON.stringify([(l?.rooms as Row[]|undefined)?.find(r=>r.id===room.id),(l?.doors as Row[]|undefined)?.filter(d=>d.roomId===room.id)]);
+        if(projection(layout)!==projection(oldLayout))for(const child of maps.filter(m=>m.container_location_id===room.id&&m.id!==mutation.rowId))queue.push(String(child.id));
+      }
       if(a&&JSON.stringify(a)!==JSON.stringify(b)){
         if(!b)initialLedgers.add(mutation.rowId);
         queue.push(mutation.rowId);
@@ -32,7 +46,9 @@ export function completeLayoutClosure(input:{group:AtomicGroup;maps:Row[];locati
   while(queue.length){
     const mapId=queue.shift()!,map=maps.find(m=>m.id===mapId&&m.status==='active');if(!map)continue;
     const frame=normalizeFrame(map.frame_json),canonical=readSpaceCanonical(frame,String(map.container_location_id)).canonical;
-    const signature=mapId+JSON.stringify([canonical,locations.filter(l=>l.map_id===mapId).map(l=>[l.id,locationSpaceSize({maps,locations,locationId:String(l.id),branchId:scope.branchId})])]);
+    const parentMap=maps.find(m=>m.id===locations.find(l=>l.id===map.container_location_id)?.map_id);
+    const parentLayout=(normalizeFrame(parentMap?.frame_json).atlasScene as Row|undefined)?.layout as Row|undefined;
+    const signature=mapId+JSON.stringify([canonical,(parentLayout?.rooms as Row[]|undefined)?.find(r=>r.id===map.container_location_id),(parentLayout?.doors as Row[]|undefined)?.filter(d=>d.roomId===map.container_location_id),locations.filter(l=>l.map_id===mapId).map(l=>[l.id,locationSpaceSize({maps,locations,locationId:String(l.id),branchId:scope.branchId})])]);
     if(seen.has(signature))continue;seen.add(signature);
     if(++attempts>24)return {ok:false,issues:[{code:'SPACE_PROJECTION_LIMIT',path:'$.layout',message:'关联空间投影超过本轮有限预算；保留原组件',severity:'error',retryable:false}]};
     const container=locations.find(l=>l.id===map.container_location_id),scene=frame.atlasScene as Row|undefined;
@@ -47,6 +63,18 @@ export function completeLayoutClosure(input:{group:AtomicGroup;maps:Row[];locati
     if(kind!=='floor'&&kind!=='city'&&kind!=='overview')continue;
     const spaceSize=resolveMapSpaceSize({maps,locations,mapRow:map,branchId:scope.branchId});
     let spec=structuredClone(pending?.status==='pending'?pending.spec:scene?.constraints??{}) as Row;
+    if(kind==='floor'&&removedFurnishing.size){
+      const contents=(spec.contents??[]) as Row[];
+      const deleted=contents.filter(f=>{const ids=removedFurnishing.get(String(f.roomId));return ids?.has(String(f.id))||ids?.has('space:'+f.roomId+':furn:'+f.id);}).map(f=>String(f.id));
+      if(deleted.length){
+        const ids=new Set(deleted),oldDeletes=(spec.deletes??{}) as Row;
+        const removedItems=((spec.items??[]) as Row[]).filter(i=>ids.has(String(i.on))).map(i=>String(i.id));
+        spec.deletes={...oldDeletes,contents:[...new Set([...((oldDeletes.contents??[]) as string[]),...deleted])],items:[...new Set([...((oldDeletes.items??[]) as string[]),...removedItems])]};
+        spec.contents=contents.filter(f=>!ids.has(String(f.id)));
+        spec.items=((spec.items??[]) as Row[]).filter(i=>!ids.has(String(i.on)));
+        spec.actors=((spec.actors??[]) as Row[]).map(a=>{if(!ids.has(String(a.near)))return a;const next={...a};delete next.near;return next;});
+      }
+    }
     if(kind==='floor'&&initialLedgers.has(mapId)&&canonical&&Array.isArray(spec.rooms)&&spec.rooms.length===1&&(spec.rooms[0] as Row).id===container?.id){
       // Legacy child guesses had no shared furniture identity. The first shared
       // ledger becomes the single source; keep old frames in the ordinary journal.

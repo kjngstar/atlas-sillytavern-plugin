@@ -112,7 +112,7 @@ function stripLayoutForPov(s){
       rooms:p=>pick(p,'id','name','x','y','w','h','side','role'),
       groups:p=>({...pick(p,'id','name','roomId','x','y','w','h'),...(Array.isArray(p.bodies)?{bodies:p.bodies.map(b=>pick(b,'x','y','w','h')).filter(Boolean)}:{})}),
       bodies:p=>pick(p,'x','y','w','h','roomId'),
-      doors:p=>pick(p,'x','y','width','roomId'),
+      doors:p=>pick(p,'x','y','width','roomId','wall'),
       windows:p=>pick(p,'x','y','roomId'),
       lamps:p=>pick(p,'x','y','roomId'),
       doorSwings:p=>pick(p,'x','y','w','h','roomId'),

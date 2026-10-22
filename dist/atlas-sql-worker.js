@@ -2479,6 +2479,7 @@
       "先根据给定资料判断地图大致现实尺寸；信息不足时给合理估计范围并说明 why，不能声称精确测量。",
       "不要利用界面标签排版坐标推出真实距离。用户已锁定的标定不修改。",
       "布局只提交这一张图上**发生变化**的约束：已有房间、家具、人物位置、物品不必每轮重写，未提及的一律保持原样，删除必须写 spec.deletes。",
+      "同一物理陈设在父图与子图复用稳定 ID，不因切换地图新增一套；已有账本的额外陈设必须明确 additional=true。门洞由程序根据墙面与登记连接生成，不作为 contents 家具排进房间中央。建筑图中的楼层轮廓只表达层级与通路，不再复制大厅长桌、厨房操作台等下级房间的家具。",
       "不要输出完整 scene、几何坐标、seed 或比例尺；这些由程序生成并保管，模型给的是约束不是成品。",
       "没有河流/水域资料时不要选 city 模板的水系结构；没有依据就不给 riverWidth，也不给每张图强塞城墙或树林。新城市默认 enclosure=open。地块与建筑用程序给定的 ID 引用，不要凭名字猜 ID。",
       "布局阶段不新建 SQL 实体：可交互地点必须已经在目录里。但建设阶段允许新增地点，两者不冲突——不要因为布局不新建实体就停止补全世界。"
@@ -4471,6 +4472,40 @@ END`;
       else save(r, rect.x, rect.y, "confirmed");
     }
     if (problems.length) return { ok: false, issues: problems, kept: previous ? clone2(previous) : null };
+    const edges = (spec.roomConnections ?? []).filter((e) => specs.some((r) => r.id === e.from) && specs.some((r) => r.id === e.to));
+    const visited = /* @__PURE__ */ new Set();
+    for (const start of specs) {
+      if (visited.has(start.id) || !edges.some((e) => e.from === start.id || e.to === start.id)) continue;
+      const component = [start];
+      visited.add(start.id);
+      for (let i = 0; i < component.length; i++) for (const edge of edges) {
+        const id = edge.from === component[i].id ? edge.to : edge.to === component[i].id ? edge.from : null;
+        if (id && !visited.has(id)) {
+          visited.add(id);
+          component.push(specs.find((r) => r.id === id));
+        }
+      }
+      if (component.some((r) => r.locked)) continue;
+      let proposal = null;
+      const prior = component.map((r) => old.get(r.id));
+      const touching = (a, b) => a && b && Math.abs(a.x + a.w - b.x) < 1e-7 && Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y) >= 0.8;
+      if (prior.every((p, i) => p && p.w === component[i].w && p.h === component[i].h && admissible(p)) && edges.filter((e) => component.some((r) => r.id === e.from)).every((e) => {
+        const a = old.get(e.from), b = old.get(e.to);
+        return touching(a, b) || touching(b, a);
+      })) proposal = prior;
+      if (!proposal && prior.some((p) => p?.quality === "confirmed")) return { ok: false, issues: [issue(start.id, "ROOM_CONNECTION_UNSATISFIED")], kept: previous ? clone2(previous) : null };
+      for (const side of [start.side, start.side === "north" ? "south" : "north"]) for (let x = 0.5; !proposal && x <= bounds.w - 0.5; x += 0.5) {
+        let nextX = x;
+        const row2 = component.map((r) => {
+          const p = candidate({ ...r, side, x: nextX });
+          nextX += r.w;
+          return p;
+        });
+        if (row2.every(admissible)) proposal = row2;
+      }
+      if (proposal) for (const r of proposal) save(r, r.x, r.y, "layout");
+      else return { ok: false, issues: [issue(start.id, "ROOM_CONNECTION_NO_SPACE")], kept: previous ? clone2(previous) : null };
+    }
     for (const r of specs.filter((r2) => !r2.locked && !placed.some((p) => p.id === r2.id))) {
       const p = old.get(r.id);
       if (p && p.side === r.side && p.w === r.w && p.h === r.h && admissible(p)) save(r, p.x, p.y, p.quality);
@@ -4488,7 +4523,29 @@ END`;
       else problems.push(issue(r.id, "ROOM_NO_SPACE"));
     }
     if (problems.length) return { ok: false, issues: problems, kept: previous ? clone2(previous) : null };
-    const rooms = ordered(placed), doors = rooms.map((r) => ({ id: "door:" + r.id, roomId: r.id, x: r.x + r.w / 2, y: r.side === "north" ? r.y + r.h : r.y, width: Math.min(1.2, r.w - 0.2) }));
+    const rooms = ordered(placed), doors = [];
+    const linked = new Set(edges.flatMap((e) => [e.from, e.to]));
+    for (const r of rooms) if (!linked.has(r.id) || (spec.externalRoomIds ?? []).includes(r.id)) doors.push({ id: "door:" + r.id, roomId: r.id, x: r.x + r.w / 2, y: r.side === "north" ? r.y + r.h : r.y, wall: r.side === "north" ? "south" : "north", width: Math.min(1.2, r.w - 0.2), quality: "layout" });
+    for (const edge of edges) {
+      const a = rooms.find((r) => r.id === edge.from), b = rooms.find((r) => r.id === edge.to);
+      const left = a.x < b.x ? a : b, right = left === a ? b : a;
+      const low = Math.max(left.y, right.y), high = Math.min(left.y + left.h, right.y + right.h);
+      if (Math.abs(left.x + left.w - right.x) > 1e-7 || high - low < 0.8) return { ok: false, issues: [issue(edge.id, "ROOM_CONNECTION_UNSATISFIED")], kept: previous ? clone2(previous) : null };
+      const width = Math.min(1.2, high - low - 0.4), x = right.x;
+      const min = low + width / 2 + 0.2, max = high - width / 2 - 0.2, y = Math.max(min, Math.min(max, low + (high - low) * (spec.doorBias ?? 0.5)));
+      for (const [r, to, wall] of [[left, right, "east"], [right, left, "west"]]) doors.push({ id: "door:" + edge.id + ":" + r.id, routeId: edge.id, roomId: r.id, toRoomId: to.id, x, y, width, wall, quality: "layout" });
+    }
+    if (spec.singleRoom && spec.entryDoors?.length) {
+      doors.length = 0;
+      const room = rooms[0];
+      for (const door of spec.entryDoors) {
+        const wall = door.wall ?? (Math.abs(door.x) < 1e-7 ? "west" : Math.abs(door.x - room.w) < 1e-7 ? "east" : Math.abs(door.y) < 1e-7 ? "north" : "south");
+        const vertical = wall === "east" || wall === "west", coordinate = vertical ? door.y : door.x, extent = vertical ? room.h : room.w;
+        const boundary = wall === "east" ? Math.abs(door.x - room.w) : wall === "west" ? Math.abs(door.x) : wall === "north" ? Math.abs(door.y) : Math.abs(door.y - room.h);
+        if (!finitePositive(door.width) || boundary > 1e-7 || coordinate - door.width / 2 < 0 || coordinate + door.width / 2 > extent) return { ok: false, issues: [issue(door.id, "ENTRY_DOOR_INVALID")], kept: previous ? clone2(previous) : null };
+        doors.push({ ...door, wall, roomId: room.id, x: room.x + door.x, y: room.y + door.y });
+      }
+    }
     const furniture = [], pins = [];
     const oldFurniture = new Map((previous?.furniture || []).map((f) => [f.id, f]));
     for (const r of rooms) {
@@ -4538,7 +4595,7 @@ END`;
       }
     }
     for (const v of [...spec.furniture || [], ...spec.actors || []]) if (!rooms.some((r) => r.id === v.roomId)) problems.push(issue(v.id, "ROOM_REF_UNKNOWN"));
-    return { ok: true, id: spec.id, name: spec.name, kind: "floor", bounds, corridor, rooms, doors, furniture, pins, edges: doors.map((d) => ({ from: d.roomId, to: "corridor", via: d.id, ...corridorEntityId ? { toEntityId: corridorEntityId } : {} })), issues: problems };
+    return { ok: true, id: spec.id, name: spec.name, kind: "floor", bounds, corridor, rooms, doors, furniture, pins, edges: doors.map((d) => ({ from: d.roomId, to: d.toRoomId ?? "corridor", via: d.id, ...d.routeId ? { routeId: d.routeId } : {}, ...corridorEntityId && !d.toRoomId ? { toEntityId: corridorEntityId } : {} })), issues: problems };
   }
 
   // vendor/atlas-spatial/layout-core.mjs
@@ -4604,6 +4661,16 @@ END`;
     };
   };
   var ordered2 = (a) => [...a].sort((a2, b) => a2.id.localeCompare(b.id, "en"));
+  function scanAxis(start, end) {
+    const values = [];
+    for (let p = start; p <= end + EPS; p += 0.25) values.push(p);
+    if (end >= start - EPS && (!values.length || end - values.at(-1) > EPS)) values.push(end);
+    return values;
+  }
+  var FLOOR_OVERLAYS = /* @__PURE__ */ new Set(["light", "doorway"]);
+  var verticalDoor = (d) => d.wall === "east" || d.wall === "west";
+  var inward = (d, amount) => d.interior ? pt(d.x, d.y) : pt(d.x + (d.wall === "west" ? amount : d.wall === "east" ? -amount : 0), d.y + (d.wall === "south" ? -amount : amount));
+  var entryRect = (d, width, depth) => verticalDoor(d) ? { x: d.wall === "east" ? d.x - depth : d.x, y: d.y - width / 2, w: depth, h: width } : { x: d.x - width / 2, y: d.wall === "south" ? d.y - depth : d.y, w: width, h: depth };
   var SOLID_TYPES = /* @__PURE__ */ new Set(["shelf", "desk", "bench", "reading", "table", "chair", "bed", "cabinet"]);
   function makeGroup(f, r, x, y) {
     const group = { id: f.id, name: f.name, type: f.type, roomId: r.id, x, y, w: f.w, h: f.h, quality: "layout" }, bodies = [];
@@ -4647,7 +4714,7 @@ END`;
       }
       return best;
     };
-    const start = nearest(pt(door.x, door.y + (room.side === "north" ? -0.45 : 0.45))), parent = Array(positions.length).fill(-2), queue = [];
+    const start = nearest(inward({ ...door, wall: door.wall ?? (room.side === "north" ? "south" : "north") }, 0.45)), parent = Array(positions.length).fill(-2), queue = [];
     if (start >= 0) {
       parent[start] = -1;
       queue.push(start);
@@ -4677,19 +4744,36 @@ END`;
     } };
   }
   function floor2(spec, previous = null) {
+    if (spec.parentGroups?.length) previous = { ...previous, groups: [...(previous?.groups ?? []).filter((g) => !spec.parentGroups.some((p) => p.id === g.id)), ...spec.parentGroups] };
+    let best = floorOnce(spec, previous);
+    const movable = spec.roomConnections?.length && !spec.entryDoors?.length;
+    const unresolved = (out) => out.ok && (out.issues ?? []).some((i) => ["DETAIL_NO_SPACE", "DETAIL_NOT_REACHABLE", "DOOR_NOT_REACHABLE"].includes(i.code));
+    if (movable && unresolved(best)) for (const doorBias of [0.18, 0.82]) {
+      const candidate = floorOnce({ ...spec, doorBias }, previous);
+      if (candidate.ok && candidate.issues.length < best.issues.length) best = candidate;
+      if (!unresolved(best)) break;
+    }
+    return best;
+  }
+  function floorOnce(spec, previous = null) {
     const collections = ["contents", "actors", "items"];
     if (collections.some((k) => spec[k] !== void 0 && (!Array.isArray(spec[k]) || spec[k].some((v) => !v || typeof v.id !== "string" || !v.id) || new Set(spec[k].map((v) => v.id)).size !== spec[k].length))) return { ok: false, issues: [{ id: spec.id, code: "DETAIL_INPUT_INVALID" }], kept: previous ? clone3(previous) : null };
     const bare = floor({ ...spec, furniture: [], actors: [] }, previous);
     if (!bare.ok) return bare;
     const groups = [], bodies = [], actors = [], items = [], windows = [], lamps = [], issues = [], doorSwings = [];
     for (const r of bare.rooms) {
-      const door = bare.doors.find((d) => d.roomId === r.id), aisle = spec.singleRoom ? 0.8 : 1.6, margin = 0.2;
-      const spine = { x: door.x - aisle / 2, y: r.y, w: aisle, h: r.h }, inner = { x: r.x + margin, y: r.y + margin, w: r.w - margin * 2, h: r.h - margin * 2 };
-      const swing = { id: "swing:" + r.id, roomId: r.id, x: door.x - door.width / 2, y: r.side === "north" ? door.y - door.width : door.y, w: door.width, h: door.width };
-      doorSwings.push(swing);
+      const roomDoors = bare.doors.filter((d) => d.roomId === r.id), door = roomDoors[0], aisle = spec.singleRoom ? 0.8 : 1.6, margin = 0.2;
+      const spine = verticalDoor(door) ? { x: r.x, y: door.y - aisle / 2, w: r.w, h: aisle } : { x: door.x - aisle / 2, y: r.y, w: aisle, h: r.h }, inner = { x: r.x + margin, y: r.y + margin, w: r.w - margin * 2, h: r.h - margin * 2 };
+      const swings = roomDoors.map((d) => ({ id: "swing:" + d.id, roomId: r.id, ...entryRect(d, d.width, d.width) }));
+      doorSwings.push(...swings);
       const exact = (spec.actors || []).filter((a) => a.roomId === r.id && a.position).map((a) => ({ id: a.id, ...a.position }));
       const priority = (f) => f.locked ? 2 : previous?.groups?.some((g) => g.id === f.id) ? 1 : 0;
       for (const f of ordered2((spec.contents || []).filter((f2) => f2.roomId === r.id)).sort((a, b) => priority(b) - priority(a) || b.w * b.h - a.w * a.h)) {
+        if (f.type === "doorway") {
+          if (roomDoors.length === 1) roomDoors[0].sourceContentIds = [...roomDoors[0].sourceContentIds ?? [], f.id];
+          else issues.push({ id: f.id, code: "DOOR_TARGET_UNSPECIFIED" });
+          continue;
+        }
         if (!Number.isFinite(f.w) || !Number.isFinite(f.h) || f.w <= 0 || f.h <= 0 || f.type === "reading" && (f.w < 2 || f.h < 2)) {
           issues.push({ id: f.id, code: "DETAIL_DIMENSION_INVALID" });
           continue;
@@ -4698,7 +4782,7 @@ END`;
           issues.push({ id: f.id, code: "DETAIL_TOO_LARGE" });
           continue;
         }
-        const free = (q) => contains(inner, q) && !intersects(q, spine) && !intersects(q, swing) && !groups.filter((g2) => g2.roomId === r.id).some((g2) => intersects(inflate(g2, 0.28), q)) && !exact.some((p) => intersects(q, { x: p.x - 0.25, y: p.y - 0.25, w: 0.5, h: 0.5 }));
+        const free = (q) => contains(inner, q) && (FLOOR_OVERLAYS.has(f.type) || !intersects(q, spine) && !swings.some((s) => intersects(q, s)) && !groups.filter((g2) => g2.roomId === r.id && !FLOOR_OVERLAYS.has(g2.type)).some((g2) => intersects(inflate(g2, 0.28), q)) && !exact.some((p) => intersects(q, { x: p.x - 0.25, y: p.y - 0.25, w: 0.5, h: 0.5 })));
         let chosen = null;
         const old = previous?.groups?.find((g2) => g2.id === f.id && g2.roomId === r.id && g2.w === f.w && g2.h === f.h);
         if (old && free(old)) chosen = old;
@@ -4711,7 +4795,7 @@ END`;
           }
         }
         const candidates = [];
-        if (!chosen) for (let y = inner.y; y + f.h <= inner.y + inner.h + EPS; y += 0.25) for (let x = inner.x; x + f.w <= inner.x + inner.w + EPS; x += 0.25) {
+        if (!chosen) for (const y of scanAxis(inner.y, inner.y + inner.h - f.h)) for (const x of scanAxis(inner.x, inner.x + inner.w - f.w)) {
           const q = { x, y, w: f.w, h: f.h };
           if (free(q)) {
             const score = f.type === "shelf" ? Math.abs(y - (r.side === "north" ? inner.y : inner.y + inner.h - f.h)) : distance(center(q), pt(r.x + r.w * 0.25, door.y + (r.side === "north" ? -2.2 : 2.2)));
@@ -4720,7 +4804,8 @@ END`;
         }
         if (!chosen) chosen = candidates.sort((a, b) => a.score - b.score || a.q.y - b.q.y || a.q.x - b.q.x)[0]?.q;
         if (!chosen && !f.locked && f.w !== f.h) {
-          for (let y = inner.y; y + f.w <= inner.y + inner.h + EPS && !chosen; y += 0.25) for (let x = inner.x; x + f.h <= inner.x + inner.w + EPS; x += 0.25) {
+          for (const y of scanAxis(inner.y, inner.y + inner.h - f.w)) for (const x of scanAxis(inner.x, inner.x + inner.w - f.h)) {
+            if (chosen) break;
             const q = { x, y, w: f.h, h: f.w };
             if (free(q)) {
               chosen = q;
@@ -4729,12 +4814,13 @@ END`;
           }
         }
         if (!chosen && !f.locked) {
-          const existing = groups.filter((g2) => g2.roomId === r.id), existingBodies = bodies.filter((b) => b.roomId === r.id);
-          const entry = { x: door.x - 0.3, y: r.side === "north" ? door.y - 0.6 : door.y, w: 0.6, h: 0.6 };
-          const freePath = (q) => contains(inner, q) && !intersects(q, swing) && !intersects(q, entry) && !existing.some((g2) => intersects(inflate(g2, 0.28), q)) && !exact.some((p) => intersects(q, { x: p.x - 0.25, y: p.y - 0.25, w: 0.5, h: 0.5 }));
+          const existing = groups.filter((g2) => g2.roomId === r.id && !FLOOR_OVERLAYS.has(g2.type)), existingBodies = bodies.filter((b) => b.roomId === r.id);
+          const entries = roomDoors.map((d) => entryRect(d, 0.6, 0.6));
+          const freePath = (q) => contains(inner, q) && !swings.some((s) => intersects(q, s)) && !entries.some((s) => intersects(q, s)) && !existing.some((g2) => intersects(inflate(g2, 0.28), q)) && !exact.some((p) => intersects(q, { x: p.x - 0.25, y: p.y - 0.25, w: 0.5, h: 0.5 }));
           let tried = 0;
           for (const [w, h] of [[f.w, f.h], ...f.w !== f.h ? [[f.h, f.w]] : []]) {
-            for (let y = inner.y; !chosen && y + h <= inner.y + inner.h + EPS && tried < 64; y += 0.25) for (let x = inner.x; !chosen && x + w <= inner.x + inner.w + EPS && tried < 64; x += 0.25) {
+            for (const y of scanAxis(inner.y, inner.y + inner.h - h)) for (const x of scanAxis(inner.x, inner.x + inner.w - w)) {
+              if (chosen || tried >= 64) break;
               const q = { x, y, w, h };
               if (!freePath(q)) continue;
               tried++;
@@ -4758,10 +4844,11 @@ END`;
       if (!["outdoor", "garden"].includes(r.role)) for (let i = 0; i < Math.max(1, Math.floor(r.w / 3)); i++) windows.push({ id: "window:" + r.id + ":" + i, type: "window", roomId: r.id, x: r.x + (i + 0.5) * r.w / Math.max(1, Math.floor(r.w / 3)), y: outerY, width: 1.2, elevation: 1.1 });
       lamps.push({ id: "light:" + r.id, type: "light", roomId: r.id, x: door.x, y: r.y + r.h * 0.45, elevation: 2.8 });
       const nav = navigation(r, door, bodies.filter((b) => b.roomId === r.id));
+      for (const d of roomDoors) if (!nav.reachable(inward(d, 0.45))) issues.push({ id: d.id, code: "DOOR_NOT_REACHABLE" });
       for (const g of groups.filter((g2) => g2.roomId === r.id)) {
         const edgePoints = [pt(g.x + g.w + 0.48, g.y + g.h / 2), pt(g.x - 0.48, g.y + g.h / 2), pt(g.x + g.w / 2, g.y + g.h + 0.48), pt(g.x + g.w / 2, g.y - 0.48)];
         g.interaction = edgePoints.find((p) => pointInside(inner, p) && nav.reachable(p)) || null;
-        if (!g.interaction) issues.push({ id: g.id, code: "DETAIL_NOT_REACHABLE" });
+        if (!g.interaction && !FLOOR_OVERLAYS.has(g.type)) issues.push({ id: g.id, code: "DETAIL_NOT_REACHABLE" });
       }
       for (const a of ordered2((spec.actors || []).filter((a2) => a2.roomId === r.id))) {
         const target = groups.find((g) => g.id === a.near), old = previous?.actors?.find((p2) => p2.id === a.id && p2.roomId === a.roomId && p2.near === a.near), p = a.position || old || (target?.interaction || null);
@@ -4779,6 +4866,10 @@ END`;
       const strips = band > 1e-6 ? [cspace.y, cspace.y + passage + band].map((y) => ({ x: cspace.x + 0.35, y, w: cspace.w - 0.7, h: band })) : [];
       const corridorGroups = [];
       for (const f of ordered2((spec.contents || []).filter((f2) => f2.roomId === cid))) {
+        if (f.type === "doorway") {
+          issues.push({ id: f.id, code: "DOOR_TARGET_UNSPECIFIED" });
+          continue;
+        }
         if (!Number.isFinite(f.w) || !Number.isFinite(f.h) || f.w <= 0 || f.h <= 0) {
           issues.push({ id: f.id, code: "DETAIL_DIMENSION_INVALID" });
           continue;
@@ -4828,9 +4919,40 @@ END`;
     const inRooms = actors.filter((a) => bare.rooms.some((r) => r.id === a.roomId));
     let path = [];
     if (inRooms.length >= 2) {
-      const [a, b] = inRooms, [ra, rb] = [a, b].map((a2) => bare.rooms.find((r) => r.id === a2.roomId)), [da, db] = [ra, rb].map((r) => bare.doors.find((d) => d.roomId === r.id));
-      const pa = navigation(ra, da, bodies.filter((x) => x.roomId === ra.id)).path(a), pb = navigation(rb, db, bodies.filter((x) => x.roomId === rb.id)).path(b), cy = bare.corridor.y + bare.corridor.h / 2;
-      if (pa && pb) path = [...pa.reverse(), pt(da.x, da.y), pt(da.x, cy), pt(db.x, cy), pt(db.x, db.y), ...pb];
+      const [a, b] = inRooms, queue = [a.roomId], parents = /* @__PURE__ */ new Map([[a.roomId, null]]);
+      const graph = bare.edges.flatMap((e) => e.to === "corridor" ? [e, { from: e.to, to: e.from, via: e.via }] : [e]);
+      for (let i = 0; i < queue.length && !parents.has(b.roomId); i++) for (const e of graph.filter((e2) => e2.from === queue[i])) if (!parents.has(e.to)) {
+        parents.set(e.to, e);
+        queue.push(e.to);
+      }
+      if (parents.has(b.roomId)) {
+        const hops = [];
+        let id = b.roomId;
+        while (parents.get(id)) {
+          const e = parents.get(id);
+          hops.unshift(e);
+          id = e.from;
+        }
+        let cursor = a, valid = true;
+        for (const e of hops) {
+          const d = bare.doors.find((d2) => d2.id === e.via), room2 = bare.rooms.find((r) => r.id === e.from);
+          if (room2) {
+            const line2 = navigation(room2, { ...cursor, interior: true }, bodies.filter((x) => x.roomId === room2.id)).path(inward(d, 0.45));
+            if (!line2) {
+              valid = false;
+              break;
+            }
+            path.push(...line2, pt(d.x, d.y));
+          } else {
+            const cy = bare.corridor.y + bare.corridor.h / 2;
+            path.push(pt(cursor.x, cy), pt(d.x, cy), pt(d.x, d.y));
+          }
+          cursor = e.to === "corridor" ? pt(d.x, d.y) : inward(bare.doors.find((other) => other.roomId === e.to && other.routeId && other.routeId === d.routeId) ?? d, 0.45);
+        }
+        const room = bare.rooms.find((r) => r.id === b.roomId), line = navigation(room, { ...cursor, interior: true }, bodies.filter((x) => x.roomId === room.id)).path(b);
+        if (valid && line) path.push(...line);
+        else path = [];
+      }
     }
     return { ...bare, groups, bodies, actors, items, windows, lamps, doorSwings, path, issues };
   }
@@ -5692,6 +5814,15 @@ END`;
         if (s.spec.rooms.length < before) s.issues.push(diagnostic("CORRIDOR_ROOM_DEDUPED", "$.rooms", "该地点已绑定为命名走廊，不再作为普通房间排布；同一实体只表达一次", { entityId: s.spec.corridorEntityId, severity: "warning" }));
       }
       s.spec.singleRoom = s.spec.rooms.length === 1 && s.spec.rooms[0].id === s.map.containerLocationId;
+      if (s.spec.singleRoom && ctx.parentGroups?.length) s.spec.parentGroups = ctx.parentGroups.filter((g) => Math.abs(g.sourceRoomSize.w - s.spec.rooms[0].w) < 1e-7 && Math.abs(g.sourceRoomSize.h - s.spec.rooms[0].h) < 1e-7).map((g) => ({ id: g.id, roomId: g.roomId, x: g.x + (s.spec.width - s.spec.rooms[0].w) / 2, y: g.y + (s.spec.height - s.spec.rooms[0].h) / 2, w: g.w, h: g.h }));
+      const actualRooms = new Set(s.spec.rooms.map((r) => r.id));
+      s.spec.roomConnections = (ctx.roomConnections ?? []).filter((edge) => actualRooms.has(edge.from) && actualRooms.has(edge.to));
+      s.spec.externalRoomIds = (ctx.externalRoomIds ?? []).filter((id) => actualRooms.has(id));
+      if (s.spec.singleRoom && ctx.entryDoors?.length) s.spec.entryDoors = clone(ctx.entryDoors).map((d) => {
+        const room = s.spec.rooms[0], size = d.sourceRoomSize;
+        if (size && d.quality !== "confirmed") return { ...d, x: d.x * room.w / size.w, y: d.y * room.h / size.h };
+        return d;
+      });
       if (!s.spec.rooms.length) {
         const failed = failure("NO_VALID_ROOMS", "$.rooms", "没有可生成的有效房间", { kept: s.previous ? clone(s.previous) : null });
         failed.issues.push(...s.issues);
@@ -5714,6 +5845,12 @@ END`;
         s.input.items = (s.input.items ?? []).map((row2) => plain(row2) ? { ...row2, on: own(row2.on) } : row2);
         s.input.actors = (s.input.actors ?? []).map((row2) => plain(row2) ? { ...row2, ...row2.near ? { near: own(row2.near) } : {} } : row2);
         if (Array.isArray(s.input.deletes?.contents)) s.input.deletes.contents = s.input.deletes.contents.map(own);
+        const registered = new Set(ledger.map((entry) => parseSpaceLocalId(entry.localId).contentId));
+        for (const row2 of s.previous?.constraints?.contents ?? []) if (row2.roomId === home) registered.add(own(row2.id));
+        const existingItems = new Set(ledger.map((entry) => entry.itemId).filter(Boolean));
+        const supported = new Set((s.input.items ?? []).filter((row2) => s.known.items.has(row2.id) && !existingItems.has(row2.id)).map((row2) => row2.on));
+        const unknown = (s.input.contents ?? []).filter((row2) => plain(row2) && !registered.has(row2.id) && row2.additional !== true && !supported.has(row2.id));
+        if (unknown.length) return { ...failure("FURNISHING_ID_UNREGISTERED", "$.contents", "已有空间的陈设必须沿用账本 ID；只有显式 additional=true 才追加新陈设", { kept: s.previous ? clone(s.previous) : null }), issues: unknown.map((row2) => diagnostic("FURNISHING_ID_UNREGISTERED", "$.contents", "该陈设不是既有空间身份，不能因换图重复生成；请复用 furnishingInventory 的 ID 或明确新增依据", { entityId: row2.id })) };
         const requested = new Set((s.input.contents ?? []).map((row2) => plain(row2) ? row2.id : null).filter((id) => typeof id === "string"));
         const requestedItems = new Set((s.input.items ?? []).map((row2) => plain(row2) && typeof row2.id === "string" ? row2.id : null).filter((id) => !!id));
         const seeded = [], seededItems = [];
@@ -6276,7 +6413,7 @@ END`;
         rooms: (p) => pick(p, "id", "name", "x", "y", "w", "h", "side", "role"),
         groups: (p) => ({ ...pick(p, "id", "name", "roomId", "x", "y", "w", "h"), ...Array.isArray(p.bodies) ? { bodies: p.bodies.map((b) => pick(b, "x", "y", "w", "h")).filter(Boolean) } : {} }),
         bodies: (p) => pick(p, "x", "y", "w", "h", "roomId"),
-        doors: (p) => pick(p, "x", "y", "width", "roomId"),
+        doors: (p) => pick(p, "x", "y", "width", "roomId", "wall"),
         windows: (p) => pick(p, "x", "y", "roomId"),
         lamps: (p) => pick(p, "x", "y", "roomId"),
         doorSwings: (p) => pick(p, "x", "y", "w", "h", "roomId"),
@@ -6481,6 +6618,20 @@ END`;
         placement[l.id] = "proxy";
       }
       const directory = (rows4) => Object.fromEntries(rows4.map((r) => [r.id, r]));
+      const roomIds = new Set(members.filter((l) => l.kind === "room").map((l) => l.id));
+      const memberIds = new Set(members.filter((l) => ["room", "other"].includes(l.kind)).map((l) => l.id));
+      const roomConnections = rs.filter((r) => memberIds.has(r.from_location_id) && memberIds.has(r.to_location_id) && (roomIds.has(r.from_location_id) || roomIds.has(r.to_location_id)) && r.from_location_id !== r.to_location_id && ["adjacent", "door", "estimated"].includes(r.kind) && r.status === "open").map((r) => ({ id: r.id, from: r.from_location_id, to: r.to_location_id }));
+      const externalRoomIds = rs.filter((r) => r.status === "open" && (r.from_location_id === containerId || r.to_location_id === containerId)).flatMap((r) => [r.from_location_id, r.to_location_id]).filter((id) => memberIds.has(id));
+      let entryDoors = [], parentGroups = [];
+      const parent = maps.find((m) => m.branch_id === scope.branchId && m.id !== mapRow.id && m.id === ls.find((l) => l.id === containerId)?.map_id);
+      if (parent) {
+        const parentFrame = json(parent.frame_json), layout = parentFrame?.atlasScene?.layout;
+        const room = layout?.rooms?.find((r) => r.id === containerId);
+        if (room && parentFrame.atlasScene.units === "meters") {
+          entryDoors = (layout.doors ?? []).filter((d) => d.roomId === containerId).map((d) => ({ ...d, x: d.x - room.x, y: d.y - room.y, sourceRoomSize: { w: room.w, h: room.h } }));
+          parentGroups = (layout.groups ?? []).filter((g) => g.roomId === containerId).map((g) => ({ ...g, id: parseSpaceLocalId(g.id)?.contentId ?? g.id, x: g.x - room.x, y: g.y - room.y, sourceRoomSize: { w: room.w, h: room.h } }));
+        }
+      }
       const endpointIds = /* @__PURE__ */ new Set();
       for (const r of ownRoutes) {
         if (r.from_location_id) endpointIds.add(r.from_location_id);
@@ -6491,7 +6642,7 @@ END`;
       const saved = readSceneFrame(frame, { branchId: scope.branchId, mapId: mapRow.id });
       if (!saved.ok) return saved;
       const spaceCanonical = readSpaceCanonical(plain(frame) ? frame[FRAME_SPACE_CANONICAL_KEY] : null, containerId);
-      return { ok: true, context: { scope, map: { id: mapRow.id, name: mapRow.name, containerLocationId: containerId, containerKind, containerName, metersPerCell: calibrated ? mpp : null, scaleQuality: mapRow.scale_quality, scaleLocked: Number(mapRow.scale_locked) === 1, frame }, entities: { locations: ls.map((l) => l.id), characters: cs.map((c) => c.id), items: its.map((i) => i.id), routes: rs.map((r) => r.id) }, locationsById, routesById, placement, locks, previousScene: saved.scene, spaceCanonical, seed: mapRow.id }, issues };
+      return { ok: true, context: { scope, map: { id: mapRow.id, name: mapRow.name, containerLocationId: containerId, containerKind, containerName, metersPerCell: calibrated ? mpp : null, scaleQuality: mapRow.scale_quality, scaleLocked: Number(mapRow.scale_locked) === 1, frame }, entities: { locations: ls.map((l) => l.id), characters: cs.map((c) => c.id), items: its.map((i) => i.id), routes: rs.map((r) => r.id) }, locationsById, routesById, roomConnections, externalRoomIds, entryDoors, parentGroups, placement, locks, previousScene: saved.scene, spaceCanonical, seed: mapRow.id }, issues };
     } catch (e) {
       return failure("CONTEXT_BUILD_FAILED", "$", "当前分支行或已保存场景不可读取", { detailCode: String(e.message) });
     }
@@ -6575,6 +6726,33 @@ END`;
           return record2?.version === 1 && record2.locationId === m.container_location_id && record2.furnishing?.length <= SPACE_CANONICAL_MAX_FURNISHING ? [[record2.locationId, record2]] : autoPlan ? [[String(m.container_location_id), { furnishing: [] }]] : [];
         }));
         ctx.itemsById = Object.fromEntries((items ?? []).filter((i) => i.branch_id === scope.branchId && i.status === "active" && !i.holder_character_id && !i.container_item_id).map((i) => [i.id, i]));
+        if (autoPlan) {
+          const delegated = /* @__PURE__ */ new Set();
+          spec.contents = (spec.contents ?? []).filter((row2) => {
+            const nested = locations.some((l) => l.branch_id === scope.branchId && l.status === "active" && l.parent_location_id === row2.roomId);
+            const known = (ctx.childCanonical[row2.roomId]?.furnishing ?? []).some((f) => (parseSpaceLocalId(f.localId)?.contentId ?? f.localId) === (parseSpaceLocalId(row2.id)?.contentId ?? row2.id)) || (ctx.previousScene?.constraints?.contents ?? []).some((f) => f.id === row2.id && f.roomId === row2.roomId);
+            const supported = (spec.items ?? []).some((i) => i.on === row2.id && ctx.itemsById[i.id]?.location_id === row2.roomId);
+            if (!nested || known || supported || row2.additional === true) return true;
+            delegated.add(row2.id);
+            membershipIssues.push(diagnostic("FURNISHING_DETAIL_DELEGATED", "$.contents", "该容器包含下级空间；新估计陈设应在实际房间中生成，不另登记一套容器家具", { entityId: row2.id, severity: "warning" }));
+            return false;
+          });
+          spec.actors = (spec.actors ?? []).map((a) => {
+            if (!delegated.has(a.near)) return a;
+            const next = { ...a };
+            delete next.near;
+            return next;
+          });
+        }
+        for (const [room, canonical] of Object.entries(ctx.childCanonical)) {
+          if (!canonical.furnishing.length) continue;
+          const registered = new Set(canonical.furnishing.map((entry) => parseSpaceLocalId(entry.localId)?.contentId));
+          for (const row2 of ctx.previousScene?.constraints?.contents ?? []) if (row2.roomId === room) registered.add(parseSpaceLocalId(row2.id)?.contentId ?? row2.id);
+          const knownItems = new Set(canonical.furnishing.map((entry) => entry.itemId).filter(Boolean));
+          const supported = new Set((spec.items ?? []).filter((i) => ctx.itemsById[i.id]?.location_id === room && !knownItems.has(i.id)).map((i) => i.on));
+          const unknown = (spec.contents ?? []).filter((row2) => row2.roomId === room && !registered.has(parseSpaceLocalId(row2.id)?.contentId ?? row2.id) && row2.additional !== true && !supported.has(row2.id));
+          if (unknown.length) return { ...failure("FURNISHING_ID_UNREGISTERED", "$.contents", "父图必须复用子空间账本中的陈设 ID；只有明确新增才使用 additional=true", { kept: ctx.previousScene ? clone(ctx.previousScene) : null }), issues: unknown.map((row2) => diagnostic("FURNISHING_ID_UNREGISTERED", "$.contents", "此子空间已有陈设，不能换 ID 重复添加", { entityId: row2.id })) };
+        }
         projectChildFurnishing(spec, ctx);
         const chars = new Map((characters ?? []).filter((c) => c.branch_id === scope.branchId && c.status === "active").map((c) => [c.id, c]));
         const groundItems = new Map((items ?? []).filter((i) => i.branch_id === scope.branchId && i.status === "active" && !i.holder_character_id && !i.container_item_id).map((i) => [i.id, i]));
@@ -11474,7 +11652,7 @@ END`;
 
   // src/atlas-layout-signature.ts
   init_define_ATLAS_BUILD_INFO();
-  var LAYOUT_SIGNATURE_POLICY_VERSION = "layout-v9";
+  var LAYOUT_SIGNATURE_POLICY_VERSION = "layout-v12";
   var byId3 = (left, right) => left < right ? -1 : left > right ? 1 : 0;
   var str2 = (value) => typeof value === "string" && value ? value : null;
   var num2 = (value) => typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -12693,7 +12871,8 @@ ${lines.join("\n")}
           h: item.heightM,
           ...item.itemId ? { item: ref(item.itemId) } : {}
         }));
-        return known ? { ref: ref(id), name: row2.name, w: known.widthM, h: known.heightM, source: known.source, referenceId: known.referenceId, furnishing } : null;
+        const nested = derived.locations.some((location) => location.parent_location_id === id && location.status === "active");
+        return known ? { ref: ref(id), name: row2.name, w: known.widthM, h: known.heightM, source: known.source, referenceId: known.referenceId, detailScope: nested ? "descendants" : "self", furnishing } : null;
       }).filter((item) => item !== null);
       const drawnParent = container ? derived.entries.find((e) => e.mapId === container.map_id) : null;
       const parentFrame = drawnParent ? normalizeFrame(drawnParent.map.frame_json) : null;
@@ -12744,7 +12923,15 @@ ${lines.join("\n")}
           widthM: entry.spaceSize.resolution.widthM,
           heightM: entry.spaceSize.resolution.heightM,
           revision: entry.spaceSize.canonical?.revision ?? 0,
-          furnishing: Math.min(entry.spaceSize.canonical?.furnishing.length ?? 0, SPACE_CANONICAL_MAX_FURNISHING2)
+          furnishing: Math.min(entry.spaceSize.canonical?.furnishing.length ?? 0, SPACE_CANONICAL_MAX_FURNISHING2),
+          furnishingInventory: (entry.spaceSize.canonical?.furnishing ?? []).slice(0, SPACE_CANONICAL_MAX_FURNISHING2).map((item) => ({
+            id: item.localId,
+            type: item.type,
+            name: item.name,
+            w: item.widthM,
+            h: item.heightM,
+            ...item.itemId ? { item: ref(item.itemId) } : {}
+          }))
         } : null,
         /** P12/R03 §19.3：父图要按这些尺寸投影子空间轮廓，不重新独立估计。 */
         childSpaces,
@@ -12819,7 +13006,9 @@ ${lines.join("\n")}
     }
     request.messages[1].content += '\n普通阅览桌用 type="table"，椅子单独用 type="chair"；reading 是桌子加四把椅子的整套组合，占地 w/h 均至少 2 米，不能用于 2×1 米的单张桌子。所有陈设用正数 w/h，完整占地必须装进房间。';
     request.messages[1].content += "\nitems[].on 只能绑定本房间中具有支撑面的 table/desk/shelf/cabinet（reading 组合的桌面也可）。不能把物品绑定到 chair/bed/doorway/decor 上，也不能把椅子本身作为物品放在另一把椅子上。资料没有支撑关系时省略该物品绑定，由程序按真实归属放置地面标记，不要猜测它在桌上。";
-    request.messages[1].content += "\n多房间 floor 保留中央走廊，默认 corridorWidth=2；估计房间必须适合当前幅面，side=north 或 south。同侧多个房间的宽度与间隔合计也必须装得下。childSpaces 的已知宽高不得缩小来凑布局；装不下时说明尺寸冲突。单间房直接沿用完整 baselineRooms，不缩成幅面的 75%，不另扣中央走廊。";
+    request.messages[1].content += "\n空间身份规则：spaceSize.furnishingInventory 和 childSpaces[].furnishing 是同一物理空间已经登记的陈设。必须沿用其中的 id；省略的既有陈设仍会保留，不要换名或换局部 id 再造一套。已有账本的空间中，新增陈设必须明确 additional=true，且确有新增依据；仅换父图/子图或补布局不属于新增。门洞不是地面家具，不要在 contents 里估计 doorway；程序根据房间边界与已有连接生成门，不能把门摆在房间中间。";
+    request.messages[1].content += "\n层级归属规则：childSpaces.detailScope=descendants 表示该轮廓内部还有已登记子空间，本层只画容器轮廓与通路。大厅的长桌和厨房的操作台应由大厅、厨房各自的空间账本管理，不能又给包含它们的楼层轮廓摆一份。若 savedConstraints 曾在楼层轮廓重复摆放这些后代陈设，用 spec.deletes.contents 显式移除该层重复投影；真实归属于楼层公共通道的陈设保持原身份。";
+    request.messages[1].content += "\n多房间 floor 由程序保留通行空间，默认 corridorWidth=2；已有 door/adjacent/estimated 房间连接由程序安排共墙门，不能用走廊隔开直接连通的两间房；估计房间必须适合当前幅面，side=north 或 south。同侧多个房间的宽度与间隔合计也必须装得下。childSpaces 的已知宽高不得缩小来凑布局；装不下时说明尺寸冲突。单间房直接沿用完整 baselineRooms，不缩成幅面的 75%，不另扣中央走廊。";
     for (const scope of scopes.filter((s) => s.kind === "overview")) {
       request.messages[1].content += "\n【本图合法 overview JSON 外层示例；按资料填写合法 zones/links/features】\n" + JSON.stringify({ op: "map.layout.request", ref: scope.map, data: { kind: "overview", spec: { surface: "mixed", zones: [], links: [], features: [] } }, why: "依据已登记空间生成估计布局" });
     }
@@ -28498,6 +28687,7 @@ ${entry.text}`.toLowerCase();
   function completeLayoutClosure(input) {
     const { scope, turnId, operationId } = input;
     let maps = structuredClone(input.maps), locations = structuredClone(input.locations);
+    const removedFurnishing = /* @__PURE__ */ new Map();
     const mutations = /* @__PURE__ */ new Map(), queue = [], seen = /* @__PURE__ */ new Set(), initialLedgers = /* @__PURE__ */ new Set(), completed = new Set(input.group.mutations.filter((m) => m.table === "maps").slice(0, 1).map((m) => m.rowId));
     const merge = (mutation8) => {
       const key = mutation8.table + "\0" + mutation8.rowId, old = mutations.get(key);
@@ -28507,7 +28697,20 @@ ${entry.text}`.toLowerCase();
       if (mutation8.table === "maps") maps = maps.map((row2) => row2.id === mutation8.rowId ? structuredClone(merged.after) : row2);
       if (mutation8.table === "locations") locations = locations.map((row2) => row2.id === mutation8.rowId ? structuredClone(merged.after) : row2);
       if (mutation8.table === "maps") {
-        const a = normalizeFrame(mutation8.after?.frame_json).atlasSpaceCanonical, b = normalizeFrame(mutation8.before?.frame_json).atlasSpaceCanonical;
+        const afterFrame = normalizeFrame(mutation8.after?.frame_json), beforeFrame = normalizeFrame(mutation8.before?.frame_json);
+        const a = afterFrame.atlasSpaceCanonical, b = beforeFrame.atlasSpaceCanonical;
+        if (a && b && Array.isArray(b.furnishing) && Array.isArray(a.furnishing)) {
+          const ids2 = new Set(a.furnishing.map((f) => f.localId));
+          const removed = removedFurnishing.get(String(a.locationId)) ?? /* @__PURE__ */ new Set();
+          for (const f of b.furnishing) if (typeof f.localId === "string" && !ids2.has(f.localId)) removed.add(f.localId);
+          removedFurnishing.set(String(a.locationId), removed);
+        }
+        const layout = afterFrame.atlasScene?.layout;
+        const oldLayout = beforeFrame.atlasScene?.layout;
+        for (const room of layout?.rooms ?? []) {
+          const projection = (l) => JSON.stringify([l?.rooms?.find((r) => r.id === room.id), l?.doors?.filter((d) => d.roomId === room.id)]);
+          if (projection(layout) !== projection(oldLayout)) for (const child of maps.filter((m) => m.container_location_id === room.id && m.id !== mutation8.rowId)) queue.push(String(child.id));
+        }
         if (a && JSON.stringify(a) !== JSON.stringify(b)) {
           if (!b) initialLedgers.add(mutation8.rowId);
           queue.push(mutation8.rowId);
@@ -28522,7 +28725,9 @@ ${entry.text}`.toLowerCase();
       const mapId = queue.shift(), map = maps.find((m) => m.id === mapId && m.status === "active");
       if (!map) continue;
       const frame = normalizeFrame(map.frame_json), canonical = readSpaceCanonical2(frame, String(map.container_location_id)).canonical;
-      const signature2 = mapId + JSON.stringify([canonical, locations.filter((l) => l.map_id === mapId).map((l) => [l.id, locationSpaceSize({ maps, locations, locationId: String(l.id), branchId: scope.branchId })])]);
+      const parentMap = maps.find((m) => m.id === locations.find((l) => l.id === map.container_location_id)?.map_id);
+      const parentLayout = normalizeFrame(parentMap?.frame_json).atlasScene?.layout;
+      const signature2 = mapId + JSON.stringify([canonical, parentLayout?.rooms?.find((r) => r.id === map.container_location_id), parentLayout?.doors?.filter((d) => d.roomId === map.container_location_id), locations.filter((l) => l.map_id === mapId).map((l) => [l.id, locationSpaceSize({ maps, locations, locationId: String(l.id), branchId: scope.branchId })])]);
       if (seen.has(signature2)) continue;
       seen.add(signature2);
       if (++attempts > 24) return { ok: false, issues: [{ code: "SPACE_PROJECTION_LIMIT", path: "$.layout", message: "关联空间投影超过本轮有限预算；保留原组件", severity: "error", retryable: false }] };
@@ -28535,6 +28740,26 @@ ${entry.text}`.toLowerCase();
       if (kind !== "floor" && kind !== "city" && kind !== "overview") continue;
       const spaceSize = resolveMapSpaceSize({ maps, locations, mapRow: map, branchId: scope.branchId });
       let spec = structuredClone(pending?.status === "pending" ? pending.spec : scene?.constraints ?? {});
+      if (kind === "floor" && removedFurnishing.size) {
+        const contents = spec.contents ?? [];
+        const deleted = contents.filter((f) => {
+          const ids2 = removedFurnishing.get(String(f.roomId));
+          return ids2?.has(String(f.id)) || ids2?.has("space:" + f.roomId + ":furn:" + f.id);
+        }).map((f) => String(f.id));
+        if (deleted.length) {
+          const ids2 = new Set(deleted), oldDeletes = spec.deletes ?? {};
+          const removedItems = (spec.items ?? []).filter((i) => ids2.has(String(i.on))).map((i) => String(i.id));
+          spec.deletes = { ...oldDeletes, contents: [.../* @__PURE__ */ new Set([...oldDeletes.contents ?? [], ...deleted])], items: [.../* @__PURE__ */ new Set([...oldDeletes.items ?? [], ...removedItems])] };
+          spec.contents = contents.filter((f) => !ids2.has(String(f.id)));
+          spec.items = (spec.items ?? []).filter((i) => !ids2.has(String(i.on)));
+          spec.actors = (spec.actors ?? []).map((a) => {
+            if (!ids2.has(String(a.near))) return a;
+            const next = { ...a };
+            delete next.near;
+            return next;
+          });
+        }
+      }
       if (kind === "floor" && initialLedgers.has(mapId) && canonical && Array.isArray(spec.rooms) && spec.rooms.length === 1 && spec.rooms[0].id === container?.id) {
         const ids2 = new Set(canonical.furnishing.map((f) => f.localId.split(":furn:")[1]));
         const oldConstraints = scene?.constraints;

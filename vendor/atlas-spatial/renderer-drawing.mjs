@@ -137,10 +137,15 @@ const ctx=canvas.getContext('2d');
           }ctx.restore();
         }
       }
-      for(const d of s.doors){const r=s.rooms.find(r=>r.id===d.roomId),sign=r.side==='north'?-1:1,a={x:d.x-d.width/2,y:d.y};
-        line([a,{x:d.x+d.width/2,y:d.y}],'#0b1422',3.5);
-        line([a,{x:a.x,y:d.y+sign*d.width}],'#f6d9a38f',1);
-        const q=p(a);ctx.save();ctx.beginPath();ctx.strokeStyle='#f6d9a340';ctx.lineWidth=.65;ctx.setLineDash([2.3,2.6]);ctx.arc(q.x,q.y,d.width*k,sign<0?-Math.PI/2:0,sign<0?0:Math.PI/2);ctx.stroke();ctx.restore();
+      const drawnDoors=new Set();
+      for(const d of s.doors){
+        const key=`${d.x}:${d.y}:${d.width}:${d.wall==='east'||d.wall==='west'?'v':'h'}`;if(drawnDoors.has(key))continue;drawnDoors.add(key);
+        const r=s.rooms.find(r=>r.id===d.roomId),wall=d.wall??(r.side==='north'?'south':'north'),vertical=wall==='east'||wall==='west';
+        const a={x:d.x-(vertical?0:d.width/2),y:d.y-(vertical?d.width/2:0)},end={x:d.x+(vertical?0:d.width/2),y:d.y+(vertical?d.width/2:0)};
+        line([a,end],'#0b1422',3.5);
+        line([a,{x:a.x+(wall==='west'?d.width:wall==='east'?-d.width:0),y:a.y+(wall==='north'?d.width:wall==='south'?-d.width:0)}],'#f6d9a38f',1);
+        const angles={west:[0,Math.PI/2],east:[Math.PI/2,Math.PI],north:[0,Math.PI/2],south:[-Math.PI/2,0]}[wall];
+        const q=p(a);ctx.save();ctx.beginPath();ctx.strokeStyle='#f6d9a340';ctx.lineWidth=.65;ctx.setLineDash([2.3,2.6]);ctx.arc(q.x,q.y,d.width*k,...angles);ctx.stroke();ctx.restore();
       }
       for(let i=0;i<s.rooms.length;i++){const r=s.rooms[i];text(r.name,{x:r.x+r.w/2,y:r.y+.52},r.id===focus?'#bcefff':'#a2b7d2',12);}
 
