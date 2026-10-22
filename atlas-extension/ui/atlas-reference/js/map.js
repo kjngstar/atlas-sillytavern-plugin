@@ -264,18 +264,28 @@ function create(canvas, mini, hooks){
   let frameId=0,canvasStyle=null,acceptedSkin=null,texturePattern=null;
   function setSkin(value){
     if(value!==null){
-      const keys=['background','gridColor','labelColor','labelBackground','markerShape','markerColors','markerImages','painters','palette','texture','textureOpacity'];
+      const keys=['background','gridColor','labelColor','labelBackground','markerShape','markerColors','markerImages','painters','palette','texture','textureOpacity','backdrop','backdropOpacity'];
       if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).some(k=>!keys.includes(k)))throw Error('MAP_SKIN_INVALID');
       for(const key of ['background','gridColor','labelColor','labelBackground'])if(value[key]!=null&&!/^#[0-9a-f]{6}$/i.test(value[key]))throw Error('MAP_SKIN_COLOR_INVALID');
       for(const color of [...Object.values(value.markerColors||{}),...Object.values(value.palette||{})])if(!/^#[0-9a-f]{6}$/i.test(color))throw Error('MAP_SKIN_COLOR_INVALID');
       if(!['classic','seal'].includes(value.markerShape||'classic')||Object.entries(value.painters||{}).some(([k,v])=>k==='markers'?!['classic','seal'].includes(v):!PAINTER_REGISTRY[k]?.[v]))throw Error('MAP_SKIN_PAINTER_INVALID');
       if(value.textureOpacity!==undefined&&(!Number.isFinite(value.textureOpacity)||value.textureOpacity<0||value.textureOpacity>.3))throw Error('MAP_SKIN_OPACITY_INVALID');
+      if(value.backdropOpacity!==undefined&&(!Number.isFinite(value.backdropOpacity)||value.backdropOpacity<0||value.backdropOpacity>.5))throw Error('MAP_SKIN_OPACITY_INVALID');
+      if(value.backdrop&&(!Number.isFinite(value.backdrop.width)||!Number.isFinite(value.backdrop.height)||value.backdrop.width<=0||value.backdrop.height<=0))throw Error('MAP_SKIN_IMAGE_INVALID');
     }
     const pattern=value?.texture?ctx.createPattern(value.texture,'repeat'):null;
-    const original=!value||!value.background&&!value.gridColor&&!value.labelColor&&!value.labelBackground&&(value.markerShape||'classic')==='classic'&&!Object.keys(value.markerColors||{}).length&&!Object.keys(value.markerImages||{}).length&&!Object.keys(value.palette||{}).length&&!value.texture&&Object.entries(value.painters||{}).every(([k,v])=>v===(k==='markers'?'classic':'original'));
+    const original=!value||!value.background&&!value.gridColor&&!value.labelColor&&!value.labelBackground&&(value.markerShape||'classic')==='classic'&&!Object.keys(value.markerColors||{}).length&&!Object.keys(value.markerImages||{}).length&&!Object.keys(value.palette||{}).length&&!value.texture&&!value.backdrop&&Object.entries(value.painters||{}).every(([k,v])=>v===(k==='markers'?'classic':'original'));
     acceptedSkin=value;canvasStyle=original?null:{...value,markerColors:{...value.markerColors},markerImages:{...value.markerImages},painters:{...value.painters},palette:{...value.palette}};texturePattern=pattern;return true;
   }
-  function skinColor(layer,part,fallback){if(!canvasStyle)return fallback;const color=layerPaint(canvasStyle,layer)[part];if(!color)return fallback;const alpha=typeof fallback==='string'?fallback.match(/rgba\([^)]*,\s*([\d.]+)\)$/)?.[1]:null;return alpha?hexA(color,Number(alpha)):part==='fill'?hexA(color,.18):color;}
+  function skinColor(layer,part,fallback){
+    if(!canvasStyle)return fallback;
+    const color=layerPaint(canvasStyle,layer)[part];if(!color)return fallback;
+    const alpha=typeof fallback==='string'?fallback.match(/rgba\([^)]*,\s*([\d.]+)\)$/)?.[1]:null;
+    // Ink on light paper needs visible strokes; retain the ordering between
+    // estimated and confirmed alpha, and leave their dash patterns untouched.
+    if(alpha){const a=Number(alpha),ink=part==='stroke'&&canvasStyle.painters?.[layer]==='ink';return hexA(color,ink&&a>0?.35+.65*a:a);}
+    return part==='fill'?hexA(color,.18):color;
+  }
 
   const listeners=[];
   function listen(target,type,handler,opts){target.addEventListener(type,handler,opts);listeners.push(()=>target.removeEventListener(type,handler,opts));}
@@ -410,6 +420,14 @@ function create(canvas, mini, hooks){
     else { bg.addColorStop(0,'#070b14'); bg.addColorStop(1,'#0a1120'); }
     ctx.fillStyle = canvasStyle?.background||bg; ctx.fillRect(x0-200,y0-200,(x1-x0)+400,(y1-y0)+400);
     if(texturePattern){ctx.save();ctx.globalAlpha=canvasStyle.textureOpacity??.12;ctx.fillStyle=texturePattern;ctx.fillRect(x0-200,y0-200,(x1-x0)+400,(y1-y0)+400);ctx.restore();}
+    // Decorative paper art is pinned to the viewport, below all world geometry.
+    // It never supplies terrain, locations, hit targets or knowledge.
+    if(canvasStyle?.backdrop){
+      const image=canvasStyle.backdrop,vw=x1-x0,vh=y1-y0,scale=Math.max(vw/image.width,vh/image.height);
+      const sw=vw/scale,sh=vh/scale;
+      ctx.save();ctx.globalAlpha=canvasStyle.backdropOpacity??.16;
+      ctx.drawImage(image,(image.width-sw)/2,(image.height-sh)/2,sw,sh,x0,y0,vw,vh);ctx.restore();
+    }
 
     const context=g.parentContext;
     if(context){
@@ -916,14 +934,14 @@ function create(canvas, mini, hooks){
     if(c.w>0&&c.h>0){
     ctx.save();
     ctx.beginPath(); rrect(ctx,c.x,c.y-c.h/2,c.w,c.h,8);
-    ctx.fillStyle='rgba(38,62,98,.55)'; ctx.fill();
-    ctx.strokeStyle='rgba(140,200,255,.28)'; ctx.lineWidth=1.4/st.cam.s; ctx.stroke();
+    ctx.fillStyle=skinColor('corridor','fill','rgba(38,62,98,.55)'); ctx.fill();
+    ctx.strokeStyle=skinColor('corridor','stroke','rgba(140,200,255,.28)'); ctx.lineWidth=1.4/st.cam.s; ctx.stroke();
     ctx.setLineDash([8/st.cam.s,8/st.cam.s]);
-    ctx.strokeStyle='rgba(67,224,255,.22)'; ctx.lineWidth=1.2/st.cam.s;
+    ctx.strokeStyle=skinColor('corridor','stroke','rgba(67,224,255,.22)'); ctx.lineWidth=1.2/st.cam.s;
     ctx.beginPath(); ctx.moveTo(c.x+14,c.y); ctx.lineTo(c.x+c.w-14,c.y); ctx.stroke();
     ctx.setLineDash([]);
     // 走廊铺地
-    ctx.strokeStyle='rgba(150,205,255,.06)'; ctx.lineWidth=1/st.cam.s;
+    ctx.strokeStyle=skinColor('corridor','stroke','rgba(150,205,255,.06)'); ctx.lineWidth=1/st.cam.s;
     for(let x=c.x+10;x<c.x+c.w-8;x+=48){ ctx.beginPath(); ctx.moveTo(x,c.y-c.h/2+4); ctx.lineTo(x,c.y+c.h/2-4); ctx.stroke(); }
     // 壁灯
     for(let x=c.x+56;x<c.x+c.w-30;x+=126){
@@ -1039,8 +1057,8 @@ function create(canvas, mini, hooks){
     const stampX=st.node.host?measureRight-228:296,stampY=st.node.host?planTop-62:-302;
     ctx.save();
     ctx.beginPath(); rrect(ctx,stampX,stampY,228,50,4);
-    ctx.fillStyle='rgba(8,14,24,.82)'; ctx.fill();
-    ctx.strokeStyle='rgba(120,200,255,.35)'; ctx.lineWidth=1/st.cam.s; ctx.stroke();
+    ctx.fillStyle=canvasStyle?.labelBackground||'rgba(8,14,24,.82)'; ctx.fill();
+    ctx.strokeStyle=skinColor('floorWall','stroke','rgba(120,200,255,.35)'); ctx.lineWidth=1/st.cam.s; ctx.stroke();
     ctx.restore();
     pushLabel(stampX+114, stampY+5, (st.path[st.path.length-2]||{}).name || '建筑图', '#bcd6ee', 'name', true);
     pushLabel(stampX+114, stampY+18, st.node.host?`空间示意 · 单位 ${st.node.metric?'m':'格'}`:`比例 1:${Math.round(0.085/mpp*140)} · ATLAS 制图`, 'rgba(140,170,200,.85)', 'sub', true);
@@ -2005,3 +2023,4 @@ function create(canvas, mini, hooks){
 }
 return { create, C,PAINTER_REGISTRY,layerPaint,paintSemantic };
 })();
+

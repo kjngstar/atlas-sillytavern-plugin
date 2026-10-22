@@ -4,7 +4,7 @@
 const FONT_REGISTRY=Object.freeze({sans:'"Atlas Preview Sans","Segoe UI","Microsoft YaHei",sans-serif',serif:'Georgia,"Noto Serif SC","Songti SC","Atlas Preview Sans",serif',mono:'Consolas,"Atlas Preview Sans",monospace'});
 const COMPONENT_REGISTRY=Object.freeze({frame:['starmap','parchment','minimal'],panels:['glass','paper','flat'],buttons:['glow','outlined','flat'],icons:['line','boxed']});
 const MAP_STYLE_REGISTRY=Object.freeze({markers:['classic','seal'],road:['original','ink','technical'],water:['original','ink','technical'],buildingOutline:['original','ink','technical'],floorWall:['original','ink','technical'],furniture:['original','ink','technical']});
-const ASSET_ROLES=Object.freeze(['windowFrame','panelTexture','mapTexture','characterMarker','placeMarker','itemMarker','messageMarker','eventMarker','exitMarker']);
+const ASSET_ROLES=Object.freeze(['windowFrame','windowBackdrop','avatarFrame','panelTexture','mapTexture','mapBackdrop','characterMarker','placeMarker','itemMarker','messageMarker','eventMarker','exitMarker']);
 const TOKEN_REGISTRY=Object.freeze({
  'ui.window.bg':['--win-1','--win-2'],'ui.window.border':['--line-2','--line-3'],'ui.panel.bg':['--panel-1','--panel-2','--glass'],'ui.panel.border':['--line'],
  'ui.text.primary':['--txt'],'ui.text.muted':['--txt-2','--txt-3','--txt-4'],'ui.text.onAccent':['--skin-on-accent'],'ui.accent':['--cyan'],
@@ -12,10 +12,10 @@ const TOKEN_REGISTRY=Object.freeze({
  'ui.window.frameSlice':['--skin-frame-slice'],'ui.window.frameWidth':['--skin-frame-width'],'ui.font.family':['--sans'],
  'map.canvas.bg':['--skin-map-bg'],'map.grid.minor':[],'map.label.primary':[],'map.label.background':[],
  ...Object.fromEntries(['character','place','item','message','event','exit'].map(k=>['map.marker.'+k,['--skin-marker-'+k]])),
- ...Object.fromEntries(['road.stroke','water.stroke','water.fill','buildingOutline.stroke','buildingOutline.fill','floorWall.stroke','furniture.stroke','furniture.fill'].map(k=>['map.'+k,[]])),
- 'map.texture.opacity':['--skin-texture-opacity']
+ ...Object.fromEntries(['road.stroke','water.stroke','water.fill','buildingOutline.stroke','buildingOutline.fill','floorWall.stroke','floorWall.fill','corridor.stroke','corridor.fill','furniture.stroke','furniture.fill'].map(k=>['map.'+k,[]])),
+ 'map.texture.opacity':['--skin-texture-opacity'],'map.backdrop.opacity':[]
 });
-const numeric={'ui.window.radius':[0,28],'ui.panel.radius':[0,24],'ui.control.radius':[0,20],'ui.spacing':[8,24],'ui.window.frameSlice':[1,256],'ui.window.frameWidth':[1,24],'map.texture.opacity':[0,.30]};
+const numeric={'ui.window.radius':[0,28],'ui.panel.radius':[0,24],'ui.control.radius':[0,20],'ui.spacing':[8,24],'ui.window.frameSlice':[1,256],'ui.window.frameWidth':[1,24],'map.texture.opacity':[0,.30],'map.backdrop.opacity':[0,.50]};
 const TOKEN_RULES=Object.freeze(Object.fromEntries(Object.keys(TOKEN_REGISTRY).map(k=>[k,numeric[k]?{type:'number',min:numeric[k][0],max:numeric[k][1]}:k==='ui.font.family'?{type:'enum',values:Object.keys(FONT_REGISTRY)}:{type:'color'}])));
 const BASE={kind:'atlas-ui-theme',schemaVersion:1,id:'builtin.starmap',baseTheme:'builtin.starmap',tokens:{},components:{frame:'starmap',panels:'glass',buttons:'glow',icons:'line'},mapStyles:{markers:'classic',road:'original',water:'original',buildingOutline:'original',floorWall:'original',furniture:'original'},options:{motion:true,radar:true,coordinates:false},assets:{}};
 const PAPER={...BASE,id:'builtin.parchment',baseTheme:'builtin.parchment',tokens:{'ui.window.bg':'#f3e9d3','ui.window.border':'#aa8451','ui.panel.bg':'#f3e9d3','ui.panel.border':'#c4a777','ui.text.primary':'#3f3527','ui.text.muted':'#78674d','ui.text.onAccent':'#fff8eb','ui.accent':'#825128','ui.font.family':'serif','map.canvas.bg':'#e6d8b3','map.grid.minor':'#9f8b62','map.label.primary':'#3f3527','map.label.background':'#f4e9d0','map.marker.character':'#994b34','map.marker.place':'#754a90','map.marker.item':'#99771c','map.marker.message':'#346a54','map.marker.event':'#b3445c','map.marker.exit':'#35657b'},components:{frame:'parchment',panels:'paper',buttons:'outlined',icons:'boxed'},mapStyles:{markers:'seal',road:'ink',water:'ink',buildingOutline:'ink',floorWall:'ink',furniture:'ink'},options:{motion:false,radar:false,coordinates:false}};
@@ -50,7 +50,7 @@ function resolve(value){
 function canvasStyle(skin,resources={}){
  const t=skin.tokens,markerColors={},markerImages={},roles={char:'character',poi:'place',item:'item',sig:'message',evt:'event',exit:'exit'};
  for(const [kind,role]of Object.entries(roles)){if(t['map.marker.'+role])markerColors[kind]=t['map.marker.'+role];const resource=resources[role+'Marker'];if(resource?.bitmap)markerImages[kind]=resource.bitmap;}
- return {background:t['map.canvas.bg']||null,gridColor:t['map.grid.minor']||null,labelColor:t['map.label.primary']||null,labelBackground:t['map.label.background']||null,markerShape:skin.mapStyles.markers,markerColors,markerImages,painters:{...skin.mapStyles},palette:Object.fromEntries(Object.entries(t).filter(([k])=>/^map\.(road|water|buildingOutline|floorWall|furniture)\./.test(k)).map(([k,v])=>[k.slice(4),v])),texture:resources.mapTexture?.bitmap||null,textureOpacity:t['map.texture.opacity']??.12};
+ return {background:t['map.canvas.bg']||null,gridColor:t['map.grid.minor']||null,labelColor:t['map.label.primary']||null,labelBackground:t['map.label.background']||null,markerShape:skin.mapStyles.markers,markerColors,markerImages,painters:{...skin.mapStyles},palette:Object.fromEntries(Object.entries(t).filter(([k])=>/^map\.(road|water|buildingOutline|floorWall|corridor|furniture)\./.test(k)).map(([k,v])=>[k.slice(4),v])),texture:resources.mapTexture?.bitmap||null,textureOpacity:t['map.texture.opacity']??.12,backdrop:resources.mapBackdrop?.bitmap||null,backdropOpacity:t['map.backdrop.opacity']??.16};
 }
 let applied=new WeakMap();
 function apply(value,{root,map,resources={}}){
@@ -59,10 +59,12 @@ function apply(value,{root,map,resources={}}){
  const skin=result.skin;
  try{
   for(const list of Object.values(TOKEN_REGISTRY))for(const key of list)root.style.removeProperty(key);
-  for(const k of ['--skin-window-frame','--skin-panel-texture'])root.style.removeProperty(k);
+  for(const k of ['--skin-window-frame','--skin-window-backdrop','--skin-avatar-frame','--skin-panel-texture'])root.style.removeProperty(k);
   for(const [k,v]of Object.entries(skin.tokens))for(const name of TOKEN_REGISTRY[k])root.style.setProperty(name,k==='ui.font.family'?FONT_REGISTRY[v]:typeof v==='number'&&k!=='ui.window.frameSlice'&&k!=='map.texture.opacity'?v+'px':String(v));
   if(resources.windowFrame?.url){root.style.setProperty('--skin-window-frame',`url("${resources.windowFrame.url}")`);root.style.setProperty('--skin-frame-slice',String(skin.tokens['ui.window.frameSlice']??16));root.style.setProperty('--skin-frame-width',(skin.tokens['ui.window.frameWidth']??8)+'px');}
   if(resources.panelTexture?.url)root.style.setProperty('--skin-panel-texture',`url("${resources.panelTexture.url}")`);
+  if(resources.windowBackdrop?.url)root.style.setProperty('--skin-window-backdrop',`url("${resources.windowBackdrop.url}")`);
+  if(resources.avatarFrame?.url)root.style.setProperty('--skin-avatar-frame',`url("${resources.avatarFrame.url}")`);
   root.dataset.skinBase=skin.baseTheme.split('.')[1];for(const key of Object.keys(COMPONENT_REGISTRY))root.dataset['skin'+key[0].toUpperCase()+key.slice(1)]=skin.components[key];
   root.dataset.motion=skin.options.motion?'full':'reduced';root.classList.toggle('show-coordinates',skin.options.coordinates);map.setFlag('showRadar',skin.options.radar);
   const style=canvasStyle(skin,resources);if(map.setSkin(style)===false)fail('SKIN_CANVAS_APPLY_FAILED');
@@ -77,3 +79,4 @@ function apply(value,{root,map,resources={}}){
 const api={TOKEN_REGISTRY,TOKEN_RULES,FONT_REGISTRY,COMPONENT_REGISTRY,MAP_STYLE_REGISTRY,ASSET_ROLES,validate,resolve,migrate,canvasStyle,apply,builtin};
 if(typeof module==='object'&&module.exports)module.exports=api;else host.AtlasSkinRuntime=api;
 })(typeof window==='object'?window:globalThis);
+

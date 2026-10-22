@@ -46,3 +46,25 @@
 #atlasDemo[data-skin-base="parchment"] .dl-cell.cur .dl-bar::after{display:none;}
 #atlasDemo[data-skin-base="parchment"] :is(.vm.active,.nav-b.on,.pal-i.sel,.chip.on){background:var(--cyan);color:var(--skin-on-accent,#fff8eb);box-shadow:none;}
 #atlasDemo[style*="--skin-marker-exit"] .pt.vehicle{background:var(--skin-marker-exit,#7fd4ff);}
+
+/* Optional local artwork roles, shared by installed themes. */
+#atlasDemo[style*="--skin-window-backdrop"]{background:var(--bg-0) var(--skin-window-backdrop) center/cover no-repeat;}
+#atlasDemo[style*="--skin-window-backdrop"] .titlebar{background-image:linear-gradient(90deg,var(--panel-1),transparent),var(--skin-window-backdrop);background-position:center;background-size:cover;}
+#atlasDemo[style*="--skin-window-frame"] :is(.win-border,.corner){display:none;}
+#atlasDemo[style*="--skin-panel-texture"] :is(.panel,.dock,.dock-head,.p-head,.scope-note,.toast,.tooltip,.map-selection){background-image:var(--skin-panel-texture);background-repeat:repeat;}
+#atlasDemo[style*="--skin-avatar-frame"] :is(.cc-ava,.rail-ava){position:relative;isolation:isolate;overflow:visible;}
+#atlasDemo[style*="--skin-avatar-frame"] :is(.cc-ava,.rail-ava)::before{content:"";position:absolute;inset:-3px;pointer-events:none;z-index:1;border:7px solid transparent;border-image:var(--skin-avatar-frame) var(--skin-frame-slice,48)/7px stretch;}
+#atlasDemo[style*="--skin-avatar-frame"] .cc-ava .st{z-index:2;}
+#atlasDemo[data-skin-base="parchment"] :is(.toast,.tooltip,.depth-ladder,.scale,.map-tools,.window-restore){background-color:var(--panel-1);color:var(--txt);border-color:var(--line-2);box-shadow:0 3px 14px #4e412921;}
+#atlasDemo[data-skin-base="parchment"] :is(.toast,.scope-note){color:var(--txt);border-color:var(--line-2);}
+#atlasDemo[data-skin-base="parchment"] .toast .td{box-shadow:none;}
+#atlasDemo[data-skin-base="parchment"] .toast.warn{border-color:#956d2c;}
+#atlasDemo[data-skin-base="parchment"] :is(.cc-ava,.it-ico){color:var(--txt);background-color:var(--panel-1)!important;box-shadow:none;}
+#atlasDemo[data-skin-base="parchment"] :is(.win-streams,.titlebar::after){display:none;}
+#atlasDemo[data-skin-base="parchment"] .mark{filter:none;}
+#atlasDemo[data-skin-base="parchment"] .mk-r1{stroke:var(--line-2);}
+#atlasDemo[data-skin-base="parchment"] .mk-r2{stroke:var(--cyan);}
+#atlasDemo[data-skin-base="parchment"] :is(.nav-b,.action-btn,.filter-btn,.vm,.chip,.win-btn,.panel-toggle,.dt,.dh-tab,.hud-btn){color:var(--txt);text-shadow:none;}
+#atlasDemo[data-skin-base="parchment"] :is(.nav-b.on,.action-btn.primary,.filter-btn.on,.vm.active,.chip.on,.dt.active,.dh-tab.on,.top-next){background:var(--cyan);color:var(--skin-on-accent,#fff8eb);box-shadow:none;}
+#atlasDemo[data-skin-base="parchment"] :is(.nav-b,.action-btn,.filter-btn,.vm,.chip,.win-btn,.panel-toggle):focus-visible{outline:2px solid var(--cyan);outline-offset:3px;}
+

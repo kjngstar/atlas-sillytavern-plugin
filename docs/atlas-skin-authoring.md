@@ -61,7 +61,8 @@
 | 道路 | `map.road.stroke` |
 | 水系 | `map.water.stroke`、`map.water.fill` |
 | 建筑 | `map.buildingOutline.stroke`、`map.buildingOutline.fill` |
-| 墙体 | `map.floorWall.stroke` |
+| 墙体 | `map.floorWall.stroke`、`map.floorWall.fill` |
+| 走廊 | `map.corridor.stroke`、`map.corridor.fill` |
 | 陈设 | `map.furniture.stroke`、`map.furniture.fill` |
 
 | 数值或枚举 Token | 合法值 |
@@ -74,6 +75,7 @@
 | `ui.window.frameWidth` | 1–24，显示宽度 |
 | `ui.font.family` | `sans` / `serif` / `mono` |
 | `map.texture.opacity` | 0–0.30 |
+| `map.backdrop.opacity` | 0–0.50；装饰背景透明度，默认 0.16 |
 
 字体采用内置字体族与本地回退；中文保留插件随附字体回退。颜色 token 可继承基底；将非默认 token 设置为自定义值会启用对应视觉适配。
 
@@ -107,8 +109,11 @@ ZIP 根目录必须包含 `manifest.json`；图片仅允许位于 `assets/` 下�
 | 资源角色 | 用法 |
 |---|---|
 | `windowFrame` | 九宫格边框；建议 64–256 px 方图，四角清晰，中间保持适合拉伸的纹理 |
+| `windowBackdrop` | 窗口与标题栏背景；等比覆盖，不提供世界几何 |
+| `avatarFrame` | 头像九宫格框；复用窗框切片参数，伪元素不接收指针事件 |
 | `panelTexture` | 面板重复纹理，建议 64–256 px 无缝图 |
 | `mapTexture` | 地图重复纹理，受透明度 token 控制 |
+| `mapBackdrop` | 地图装饰背景；按视口等比裁切，在几何之前绘制，受 `map.backdrop.opacity` 控制 |
 | `characterMarker` | 人物标点 |
 | `placeMarker` | 地点标点 |
 | `itemMarker` | 物品标点 |
@@ -117,6 +122,8 @@ ZIP 根目录必须包含 `manifest.json`；图片仅允许位于 `assets/` 下�
 | `exitMarker` | 出入口；移动载具复用该图片角色 |
 
 标点图显示为 24×24 CSS px，中心为原有坐标与命中锚点。建议制作 48×48 或 96×96 的透明图；不要在图片中烘焙位置、名称或距离。窗口图片通过受控 `border-image` 应用，无原始样式注入。
+
+`windowBackdrop`、`mapBackdrop`、`avatarFrame` 和走廊/墙面填色是山河志交付新增的 v1 可选字段；旧版本会按未知字段拒绝，需先更新扩展。原有 v1 皮肤无需改动。制作与安装示例见 [山河志](../skins/shanhezhi/README.md)。
 
 只支持静态 PNG/WebP。拒绝 SVG、APNG、动画 WebP、脚本、HTML、远程资源，以及与 MIME/真实图片尺寸不一致的文件。
 
@@ -168,3 +175,4 @@ await AtlasPreview.setUIProfile('mapOnly'); // 独立的显示范围配置
 | `atlas-skin-assets.mjs` | 串行解码、共享引用与释放 |
 | `atlas-skin-storage.mjs` | 宿主 IndexedDB、用户隔离、配额与原子替换 |
 | `atlas-reference/js/map.js` | 原有路径、命中和受控绘制样式 |
+
