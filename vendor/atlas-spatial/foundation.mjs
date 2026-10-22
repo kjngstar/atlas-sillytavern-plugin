@@ -91,7 +91,12 @@
     if(problems.length) return {ok:false,issues:problems,kept:previous?clone(previous):null};
     const rooms=ordered(placed), doors=[];
     const linked=new Set(edges.flatMap(e=>[e.from,e.to]));
-    for(const r of rooms)if(!linked.has(r.id)||(spec.externalRoomIds??[]).includes(r.id))doors.push({id:'door:'+r.id,roomId:r.id,x:r.x+r.w/2,y:r.side==='north'?r.y+r.h:r.y,wall:r.side==='north'?'south':'north',width:Math.min(1.2,r.w-0.2),quality:'layout'});
+    for(const r of rooms){
+      const outside=(spec.externalConnections??[]).filter(edge=>edge.from===r.id);
+      if(outside.length&&r.w/(outside.length+1)<=.2)return {ok:false,issues:[issue(r.id,'ROOM_CONNECTION_NO_SPACE')],kept:previous?clone(previous):null};
+      if(outside.length)for(const [i,edge] of outside.entries())doors.push({id:'door:'+edge.id+':'+r.id,routeId:edge.id,roomId:r.id,toRoomId:edge.to,x:r.x+r.w*(i+1)/(outside.length+1),y:r.side==='north'?r.y+r.h:r.y,wall:r.side==='north'?'south':'north',width:Math.min(1.2,r.w/(outside.length+1)-.2),quality:'layout'});
+      else if(!linked.has(r.id)||(spec.externalRoomIds??[]).includes(r.id))doors.push({id:'door:'+r.id,roomId:r.id,x:r.x+r.w/2,y:r.side==='north'?r.y+r.h:r.y,wall:r.side==='north'?'south':'north',width:Math.min(1.2,r.w-0.2),quality:'layout'});
+    }
     for(const edge of edges){
       const a=rooms.find(r=>r.id===edge.from),b=rooms.find(r=>r.id===edge.to);
       const left=a.x<b.x?a:b,right=left===a?b:a;

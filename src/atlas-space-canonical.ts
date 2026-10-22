@@ -136,7 +136,9 @@ function readFurnishing(raw: unknown, locationId: string): SpaceCanonicalFurnish
   if (!localId || !type) return null;
   const parsed = parseSpaceLocalId(localId);
   if (!parsed || parsed.locationId !== locationId) return null;
-  if (!validSide(raw.widthM) || !validSide(raw.heightM)) return null;
+  // 陈设可小于房间的最小边长，例如薄门洞与小灯具。
+  if (!finite(raw.widthM) || raw.widthM <= 0 || raw.widthM > SPACE_MAX_SIDE_M
+    || !finite(raw.heightM) || raw.heightM <= 0 || raw.heightM > SPACE_MAX_SIDE_M) return null;
   const itemId = asId(raw.itemId);
   return {
     localId,

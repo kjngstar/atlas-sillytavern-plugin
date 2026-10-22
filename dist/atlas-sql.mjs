@@ -4607,7 +4607,12 @@ function floor(spec, previous = null) {
   if (problems.length) return { ok: false, issues: problems, kept: previous ? clone2(previous) : null };
   const rooms = ordered(placed), doors = [];
   const linked = new Set(edges.flatMap((e) => [e.from, e.to]));
-  for (const r of rooms) if (!linked.has(r.id) || (spec.externalRoomIds ?? []).includes(r.id)) doors.push({ id: "door:" + r.id, roomId: r.id, x: r.x + r.w / 2, y: r.side === "north" ? r.y + r.h : r.y, wall: r.side === "north" ? "south" : "north", width: Math.min(1.2, r.w - 0.2), quality: "layout" });
+  for (const r of rooms) {
+    const outside = (spec.externalConnections ?? []).filter((edge) => edge.from === r.id);
+    if (outside.length && r.w / (outside.length + 1) <= 0.2) return { ok: false, issues: [issue(r.id, "ROOM_CONNECTION_NO_SPACE")], kept: previous ? clone2(previous) : null };
+    if (outside.length) for (const [i, edge] of outside.entries()) doors.push({ id: "door:" + edge.id + ":" + r.id, routeId: edge.id, roomId: r.id, toRoomId: edge.to, x: r.x + r.w * (i + 1) / (outside.length + 1), y: r.side === "north" ? r.y + r.h : r.y, wall: r.side === "north" ? "south" : "north", width: Math.min(1.2, r.w / (outside.length + 1) - 0.2), quality: "layout" });
+    else if (!linked.has(r.id) || (spec.externalRoomIds ?? []).includes(r.id)) doors.push({ id: "door:" + r.id, roomId: r.id, x: r.x + r.w / 2, y: r.side === "north" ? r.y + r.h : r.y, wall: r.side === "north" ? "south" : "north", width: Math.min(1.2, r.w - 0.2), quality: "layout" });
+  }
   for (const edge of edges) {
     const a = rooms.find((r) => r.id === edge.from), b = rooms.find((r) => r.id === edge.to);
     const left = a.x < b.x ? a : b, right = left === a ? b : a;
@@ -4751,10 +4756,8 @@ function makeGroup(f, r, x, y) {
     for (const [dx, dy] of [[0.1, 0.72], [f.w - 0.45, 0.72], [0.1, f.h - 1.07], [f.w - 0.45, f.h - 1.07]]) add2("chair", x + dx, y + dy, 0.35, 0.35);
   } else if (f.type === "table") {
     add2("table", x, y, f.w, f.h);
-    if (f.w > 1.2 && f.h > 1.2) for (const [dx, dy] of [[0.12, 0.12], [f.w - 0.47, 0.12], [0.12, f.h - 0.47], [f.w - 0.47, f.h - 0.47]]) add2("chair", x + dx, y + dy, 0.35, 0.35);
   } else if (f.type === "desk") {
     add2("desk", x, y, f.w, f.h * 0.68);
-    if (f.w > 1.1 && f.h > 0.8) add2("chair", x + f.w - 0.4, y + f.h - 0.38, 0.35, 0.35);
   } else if (f.type === "bed") {
     add2("bed", x, y, f.w, f.h);
     if (f.w > 0.9 && f.h > 0.9) add2("pillow", x + 0.1, y + 0.1, Math.max(0.2, f.w - 0.2), 0.25);
@@ -4854,9 +4857,18 @@ function floorOnce(spec, previous = null) {
         continue;
       }
       const free = (q) => contains(inner, q) && (FLOOR_OVERLAYS.has(f.type) || !intersects(q, spine) && !swings.some((s) => intersects(q, s)) && !groups.filter((g2) => g2.roomId === r.id && !FLOOR_OVERLAYS.has(g2.type)).some((g2) => intersects(inflate(g2, 0.28), q)) && !exact.some((p) => intersects(q, { x: p.x - 0.25, y: p.y - 0.25, w: 0.5, h: 0.5 })));
+      const existing = groups.filter((g2) => g2.roomId === r.id && !FLOOR_OVERLAYS.has(g2.type)), existingBodies = bodies.filter((b) => b.roomId === r.id);
+      const entries = roomDoors.map((d) => entryRect(d, 0.6, 0.6));
+      const freePath = (q) => contains(inner, q) && !swings.some((s) => intersects(q, s)) && !entries.some((s) => intersects(q, s)) && !existing.some((g2) => intersects(inflate(g2, 0.28), q)) && !exact.some((p) => intersects(q, { x: p.x - 0.25, y: p.y - 0.25, w: 0.5, h: 0.5 }));
+      const reachablePlacement = (q) => {
+        if (!freePath(q)) return false;
+        const proposal = makeGroup({ ...f, w: q.w, h: q.h }, r, q.x, q.y), nav2 = navigation(r, door, [...existingBodies, ...proposal.bodies]);
+        const accessible = (g2) => [pt(g2.x + g2.w + 0.48, g2.y + g2.h / 2), pt(g2.x - 0.48, g2.y + g2.h / 2), pt(g2.x + g2.w / 2, g2.y + g2.h + 0.48), pt(g2.x + g2.w / 2, g2.y - 0.48)].some((p) => pointInside(inner, p) && nav2.reachable(p));
+        return [...existing, proposal].every(accessible) && exact.every(nav2.reachable) && roomDoors.every((d) => nav2.reachable(inward(d, 0.45)));
+      };
       let chosen = null;
-      const old = previous?.groups?.find((g2) => g2.id === f.id && g2.roomId === r.id && g2.w === f.w && g2.h === f.h);
-      if (old && free(old)) chosen = old;
+      const old = previous?.groups?.find((g2) => g2.id === f.id && g2.roomId === r.id && (g2.w === f.w && g2.h === f.h || !f.locked && g2.w === f.h && g2.h === f.w));
+      if (old && (free(old) || !f.locked && reachablePlacement(old))) chosen = old;
       if (f.locked) {
         const q = { ...f, ...f.locked };
         if (free(q)) chosen = q;
@@ -4885,9 +4897,6 @@ function floorOnce(spec, previous = null) {
         }
       }
       if (!chosen && !f.locked) {
-        const existing = groups.filter((g2) => g2.roomId === r.id && !FLOOR_OVERLAYS.has(g2.type)), existingBodies = bodies.filter((b) => b.roomId === r.id);
-        const entries = roomDoors.map((d) => entryRect(d, 0.6, 0.6));
-        const freePath = (q) => contains(inner, q) && !swings.some((s) => intersects(q, s)) && !entries.some((s) => intersects(q, s)) && !existing.some((g2) => intersects(inflate(g2, 0.28), q)) && !exact.some((p) => intersects(q, { x: p.x - 0.25, y: p.y - 0.25, w: 0.5, h: 0.5 }));
         let tried = 0;
         for (const [w, h] of [[f.w, f.h], ...f.w !== f.h ? [[f.h, f.w]] : []]) {
           for (const y of scanAxis(inner.y, inner.y + inner.h - h)) for (const x of scanAxis(inner.x, inner.x + inner.w - w)) {
@@ -4895,9 +4904,7 @@ function floorOnce(spec, previous = null) {
             const q = { x, y, w, h };
             if (!freePath(q)) continue;
             tried++;
-            const proposal = makeGroup({ ...f, w, h }, r, x, y), nav2 = navigation(r, door, [...existingBodies, ...proposal.bodies]);
-            const accessible = (g2) => [pt(g2.x + g2.w + 0.48, g2.y + g2.h / 2), pt(g2.x - 0.48, g2.y + g2.h / 2), pt(g2.x + g2.w / 2, g2.y + g2.h + 0.48), pt(g2.x + g2.w / 2, g2.y - 0.48)].some((p) => pointInside(inner, p) && nav2.reachable(p));
-            if ([...existing, proposal].every(accessible) && exact.every(nav2.reachable)) chosen = q;
+            if (reachablePlacement(q)) chosen = q;
           }
           if (chosen) break;
         }
@@ -5906,6 +5913,7 @@ function generateFloorOnce(value, context) {
   try {
     s = setup(value, context, "floor");
     const ctx = context;
+    s.spec.detailPolicy = "explicit-furniture-v2";
     s.constraintKeys = ["corridorWidth", "corridorLocationRef", "rooms", "contents", "actors", "items"];
     s.spec.corridorWidth = finite(s.input.corridorWidth) ? s.input.corridorWidth : 2;
     const previousRef = s.previous?.constraints?.corridorLocationRef;
@@ -5938,7 +5946,8 @@ function generateFloorOnce(value, context) {
     if (s.spec.singleRoom && ctx.parentGroups?.length) s.spec.parentGroups = ctx.parentGroups.filter((g) => Math.abs(g.sourceRoomSize.w - s.spec.rooms[0].w) < 1e-7 && Math.abs(g.sourceRoomSize.h - s.spec.rooms[0].h) < 1e-7).map((g) => ({ id: g.id, roomId: g.roomId, x: g.x + (s.spec.width - s.spec.rooms[0].w) / 2, y: g.y + (s.spec.height - s.spec.rooms[0].h) / 2, w: g.w, h: g.h }));
     const actualRooms = new Set(s.spec.rooms.map((r) => r.id));
     s.spec.roomConnections = (ctx.roomConnections ?? []).filter((edge) => actualRooms.has(edge.from) && actualRooms.has(edge.to));
-    s.spec.externalRoomIds = (ctx.externalRoomIds ?? []).filter((id) => actualRooms.has(id));
+    s.spec.externalConnections = (ctx.roomConnections ?? []).filter((edge) => actualRooms.has(edge.from) !== actualRooms.has(edge.to)).map((edge) => actualRooms.has(edge.from) ? edge : { ...edge, from: edge.to, to: edge.from });
+    s.spec.externalRoomIds = [.../* @__PURE__ */ new Set([...(ctx.externalRoomIds ?? []).filter((id) => actualRooms.has(id)), ...s.spec.externalConnections.map((edge) => edge.from)])];
     if (s.spec.singleRoom && ctx.entryDoors?.length) s.spec.entryDoors = clone(ctx.entryDoors).map((d) => {
       const room = s.spec.rooms[0], size = d.sourceRoomSize;
       if (size && d.quality !== "confirmed") return { ...d, x: d.x * room.w / size.w, y: d.y * room.h / size.h };
@@ -7824,7 +7833,8 @@ function compileSceneGroup({ request, scope, currentScope, mapRow, locations, ch
       if (autoPlan) {
         const delegated = /* @__PURE__ */ new Set();
         spec.contents = (spec.contents ?? []).filter((row2) => {
-          const nested = locations.some((l) => l.branch_id === scope.branchId && l.status === "active" && l.parent_location_id === row2.roomId);
+          const owner = locations.find((l) => l.branch_id === scope.branchId && l.id === row2.roomId);
+          const nested = locations.some((l) => l.branch_id === scope.branchId && l.status === "active" && l.parent_location_id === row2.roomId && (owner?.kind !== "room" || l.kind !== "other"));
           const known = (ctx.childCanonical[row2.roomId]?.furnishing ?? []).some((f) => (parseSpaceLocalId(f.localId)?.contentId ?? f.localId) === (parseSpaceLocalId(row2.id)?.contentId ?? row2.id)) || (ctx.previousScene?.constraints?.contents ?? []).some((f) => f.id === row2.id && f.roomId === row2.roomId);
           const supported = (spec.items ?? []).some((i) => i.on === row2.id && ctx.itemsById[i.id]?.location_id === row2.roomId);
           if (!nested || known || supported || row2.additional === true) return true;
@@ -12998,7 +13008,7 @@ var init_atlas_layout_signature = __esm({
     "use strict";
     init_define_ATLAS_BUILD_INFO();
     init_atlas_hash();
-    LAYOUT_SIGNATURE_POLICY_VERSION = "layout-v12";
+    LAYOUT_SIGNATURE_POLICY_VERSION = "layout-v13";
     byId3 = (left, right) => left < right ? -1 : left > right ? 1 : 0;
     str2 = (value) => typeof value === "string" && value ? value : null;
     num2 = (value) => typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -13133,7 +13143,7 @@ function readFurnishing(raw, locationId) {
   if (!localId || !type) return null;
   const parsed = parseSpaceLocalId(localId);
   if (!parsed || parsed.locationId !== locationId) return null;
-  if (!validSide(raw.widthM) || !validSide(raw.heightM)) return null;
+  if (!finite2(raw.widthM) || raw.widthM <= 0 || raw.widthM > SPACE_MAX_SIDE_M || !finite2(raw.heightM) || raw.heightM <= 0 || raw.heightM > SPACE_MAX_SIDE_M) return null;
   const itemId = asId(raw.itemId);
   return {
     localId,
@@ -13873,7 +13883,7 @@ function deriveLayoutSites(tables, branchId) {
     }
     const own = ownForProfile;
     const containerKind = String(container?.kind ?? "");
-    const standalone = kind === "floor" && own.length === 0 && (containerKind === "room" || containerKind === "vehicle" || containerKind === "floor" || containerKind === "building");
+    const standalone = kind === "floor" && (own.length === 0 || containerKind === "room" && own.every((row2) => row2.kind === "other")) && (containerKind === "room" || containerKind === "vehicle" || containerKind === "floor" || containerKind === "building");
     entries.push({
       map,
       mapId,
@@ -14114,7 +14124,7 @@ function buildSqlLayoutTask(db, branchId, input, turnId, report) {
     }) : [];
     const local = entry.standalone && container ? [container] : entry.own;
     const localIds = new Set(local.map((row2) => String(row2.id)));
-    const childSpaces = entry.own.map((row2) => {
+    const childSpaces = entry.own.filter((row2) => !(container?.kind === "room" && row2.kind === "other")).map((row2) => {
       const id = asId3(row2.id);
       if (!id) return null;
       const planned = derived.entries.find((e) => e.container?.id === id && e.kind === "floor")?.spaceSize?.resolution;
@@ -14130,7 +14140,7 @@ function buildSqlLayoutTask(db, branchId, input, turnId, report) {
         h: item.heightM,
         ...item.itemId ? { item: ref(item.itemId) } : {}
       }));
-      const nested = derived.locations.some((location2) => location2.parent_location_id === id && location2.status === "active");
+      const nested = derived.locations.some((location2) => location2.parent_location_id === id && location2.status === "active" && (row2.kind !== "room" || location2.kind !== "other"));
       return known ? { ref: ref(id), name: row2.name, w: known.widthM, h: known.heightM, source: known.source, referenceId: known.referenceId, detailScope: nested ? "descendants" : "self", furnishing } : null;
     }).filter((item) => item !== null);
     const drawnParent = container ? derived.entries.find((e) => e.mapId === container.map_id) : null;
@@ -14189,8 +14199,14 @@ function buildSqlLayoutTask(db, branchId, input, turnId, report) {
           name: item.name,
           w: item.widthM,
           h: item.heightM,
+          quality: item.quality,
           ...item.itemId ? { item: ref(item.itemId) } : {}
-        }))
+        })),
+        furnishingReview: Object.values((entry.spaceSize.canonical?.furnishing ?? []).slice(0, SPACE_CANONICAL_MAX_FURNISHING2).reduce((groups, item) => {
+          const name = item.name.trim();
+          if (name) (groups[name] ??= []).push(item.localId);
+          return groups;
+        }, /* @__PURE__ */ Object.create(null))).filter((ids2) => ids2.length > 1).map((ids2) => ({ ids: ids2, reason: "same-name-review" }))
       } : null,
       /** P12/R03 §19.3：父图要按这些尺寸投影子空间轮廓，不重新独立估计。 */
       childSpaces,
@@ -14266,7 +14282,9 @@ function buildSqlLayoutTask(db, branchId, input, turnId, report) {
   request.messages[1].content += '\n普通阅览桌用 type="table"，椅子单独用 type="chair"；reading 是桌子加四把椅子的整套组合，占地 w/h 均至少 2 米，不能用于 2×1 米的单张桌子。所有陈设用正数 w/h，完整占地必须装进房间。';
   request.messages[1].content += "\nitems[].on 只能绑定本房间中具有支撑面的 table/desk/shelf/cabinet（reading 组合的桌面也可）。不能把物品绑定到 chair/bed/doorway/decor 上，也不能把椅子本身作为物品放在另一把椅子上。资料没有支撑关系时省略该物品绑定，由程序按真实归属放置地面标记，不要猜测它在桌上。";
   request.messages[1].content += "\n空间身份规则：spaceSize.furnishingInventory 和 childSpaces[].furnishing 是同一物理空间已经登记的陈设。必须沿用其中的 id；省略的既有陈设仍会保留，不要换名或换局部 id 再造一套。已有账本的空间中，新增陈设必须明确 additional=true，且确有新增依据；仅换父图/子图或补布局不属于新增。门洞不是地面家具，不要在 contents 里估计 doorway；程序根据房间边界与已有连接生成门，不能把门摆在房间中间。";
+  request.messages[1].content += "\n旧图恢复规则：furnishingReview 列出同名陈设候选，必须逐组核查，不能把历史错误重复当作必须保留的物理事实。quality=layout 是布局估计，不是作者确认。有明确数量依据的两把同名椅子应保留；同一厨房操作台或照明曾在父子图分别估计、但没有第二件依据时，保留一个既有 id，并用 spec.deletes.contents 显式删除另一个 id。禁止仅靠同名由程序自动合并，也不允许删作者确认或绑定不同真实物品的两件陈设。why 中说明核查结论；删除使用候选中的完整 id。";
   request.messages[1].content += "\n层级归属规则：childSpaces.detailScope=descendants 表示该轮廓内部还有已登记子空间，本层只画容器轮廓与通路。大厅的长桌和厨房的操作台应由大厅、厨房各自的空间账本管理，不能又给包含它们的楼层轮廓摆一份。若 savedConstraints 曾在楼层轮廓重复摆放这些后代陈设，用 spec.deletes.contents 显式移除该层重复投影；真实归属于楼层公共通道的陈设保持原身份。";
+  request.messages[1].content += "\n单间房内 kind=other 的储藏角、桌边等子地点只表示局部区域，不说明存在隔墙。baselineRooms 只有房间自身时，保持整个房间作为一块物理空间，不为这些角落额外分房或扣走廊；只有明确登记的 room 子空间才参与分房。";
   request.messages[1].content += "\n多房间 floor 由程序保留通行空间，默认 corridorWidth=2；已有 door/adjacent/estimated 房间连接由程序安排共墙门，不能用走廊隔开直接连通的两间房；估计房间必须适合当前幅面，side=north 或 south。同侧多个房间的宽度与间隔合计也必须装得下。childSpaces 的已知宽高不得缩小来凑布局；装不下时说明尺寸冲突。单间房直接沿用完整 baselineRooms，不缩成幅面的 75%，不另扣中央走廊。";
   for (const scope of scopes.filter((s) => s.kind === "overview")) {
     request.messages[1].content += "\n【本图合法 overview JSON 外层示例；按资料填写合法 zones/links/features】\n" + JSON.stringify({ op: "map.layout.request", ref: scope.map, data: { kind: "overview", spec: { surface: "mixed", zones: [], links: [], features: [] } }, why: "依据已登记空间生成估计布局" });

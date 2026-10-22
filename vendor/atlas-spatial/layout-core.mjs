@@ -50,10 +50,8 @@ import * as B from './foundation.mjs';
       for(const [dx,dy]of [[.1,.72],[f.w-.45,.72],[.1,f.h-1.07],[f.w-.45,f.h-1.07]])add('chair',x+dx,y+dy,.35,.35);
     }else if(f.type==='table'){
       add('table',x,y,f.w,f.h);
-      if(f.w>1.2&&f.h>1.2)for(const [dx,dy]of [[.12,.12],[f.w-.47,.12],[.12,f.h-.47],[f.w-.47,f.h-.47]])add('chair',x+dx,y+dy,.35,.35);
     }else if(f.type==='desk'){
       add('desk',x,y,f.w,f.h*.68);
-      if(f.w>1.1&&f.h>.8)add('chair',x+f.w-.4,y+f.h-.38,.35,.35);
     }else if(f.type==='bed'){
       add('bed',x,y,f.w,f.h);
       if(f.w>.9&&f.h>.9)add('pillow',x+.1,y+.1,Math.max(.2,f.w-.2),.25);
@@ -127,9 +125,18 @@ import * as B from './foundation.mjs';
         // Lights and door openings have non-solid bodies. Their projection can
         // overlap the walking route without reserving furniture floor space.
         const free=q=>B.contains(inner,q)&&(FLOOR_OVERLAYS.has(f.type)||!B.intersects(q,spine)&&!swings.some(s=>B.intersects(q,s))&&!groups.filter(g=>g.roomId===r.id&&!FLOOR_OVERLAYS.has(g.type)).some(g=>B.intersects(inflate(g,.28),q))&&!exact.some(p=>B.intersects(q,{x:p.x-.25,y:p.y-.25,w:.5,h:.5})));
+        const existing=groups.filter(g=>g.roomId===r.id&&!FLOOR_OVERLAYS.has(g.type)),existingBodies=bodies.filter(b=>b.roomId===r.id);
+        const entries=roomDoors.map(d=>entryRect(d,.6,.6));
+        const freePath=q=>B.contains(inner,q)&&!swings.some(s=>B.intersects(q,s))&&!entries.some(s=>B.intersects(q,s))&&!existing.some(g=>B.intersects(inflate(g,.28),q))&&!exact.some(p=>B.intersects(q,{x:p.x-.25,y:p.y-.25,w:.5,h:.5}));
+        const reachablePlacement=q=>{
+          if(!freePath(q))return false;
+          const proposal=makeGroup({...f,w:q.w,h:q.h},r,q.x,q.y),nav=navigation(r,door,[...existingBodies,...proposal.bodies]);
+          const accessible=g=>[pt(g.x+g.w+.48,g.y+g.h/2),pt(g.x-.48,g.y+g.h/2),pt(g.x+g.w/2,g.y+g.h+.48),pt(g.x+g.w/2,g.y-.48)].some(p=>B.pointInside(inner,p)&&nav.reachable(p));
+          return [...existing,proposal].every(accessible)&&exact.every(nav.reachable)&&roomDoors.every(d=>nav.reachable(inward(d,.45)));
+        };
         let chosen=null;
-        const old=previous?.groups?.find(g=>g.id===f.id&&g.roomId===r.id&&g.w===f.w&&g.h===f.h);
-        if(old&&free(old))chosen=old;
+        const old=previous?.groups?.find(g=>g.id===f.id&&g.roomId===r.id&&(g.w===f.w&&g.h===f.h||!f.locked&&g.w===f.h&&g.h===f.w));
+        if(old&&(free(old)||!f.locked&&reachablePlacement(old)))chosen=old;
         if(f.locked){const q={...f,...f.locked};if(free(q))chosen=q;else{issues.push({id:f.id,code:'DETAIL_LOCK_CONFLICT'});continue;}}
         const candidates=[];
         if(!chosen)for(const y of scanAxis(inner.y,inner.y+inner.h-f.h))for(const x of scanAxis(inner.x,inner.x+inner.w-f.w)){
@@ -152,17 +159,12 @@ import * as B from './foundation.mjs';
         // a connected path around furniture; test the actual door and interactions.
         // Dimensions, locked coordinates and the door swing remain unchanged.
         if(!chosen&&!f.locked){
-          const existing=groups.filter(g=>g.roomId===r.id&&!FLOOR_OVERLAYS.has(g.type)),existingBodies=bodies.filter(b=>b.roomId===r.id);
-          const entries=roomDoors.map(d=>entryRect(d,.6,.6));
-          const freePath=q=>B.contains(inner,q)&&!swings.some(s=>B.intersects(q,s))&&!entries.some(s=>B.intersects(q,s))&&!existing.some(g=>B.intersects(inflate(g,.28),q))&&!exact.some(p=>B.intersects(q,{x:p.x-.25,y:p.y-.25,w:.5,h:.5}));
           let tried=0;
           for(const [w,h] of [[f.w,f.h],...(f.w!==f.h?[[f.h,f.w]]:[])]){
             for(const y of scanAxis(inner.y,inner.y+inner.h-h))for(const x of scanAxis(inner.x,inner.x+inner.w-w)){
               if(chosen||tried>=64)break;
               const q={x,y,w,h};if(!freePath(q))continue;tried++;
-              const proposal=makeGroup({...f,w,h},r,x,y),nav=navigation(r,door,[...existingBodies,...proposal.bodies]);
-              const accessible=g=>[pt(g.x+g.w+.48,g.y+g.h/2),pt(g.x-.48,g.y+g.h/2),pt(g.x+g.w/2,g.y+g.h+.48),pt(g.x+g.w/2,g.y-.48)].some(p=>B.pointInside(inner,p)&&nav.reachable(p));
-              if([...existing,proposal].every(accessible)&&exact.every(nav.reachable))chosen=q;
+              if(reachablePlacement(q))chosen=q;
             }
             if(chosen)break;
           }

@@ -38,6 +38,9 @@ test('普通地点类型的室外入口仍与大厅真实连通，不被隔离�
  const out=Kit.generateFloor({...spec,rooms:[...spec.rooms,{id:'entry',side:'north',role:'outdoor',w:8,h:8}],actors:[{id:'a',roomId:'entry'},{id:'b',roomId:'kitchen'}]},ctx);
  assert.deepEqual(out.issues,[]);assert.equal(out.scene.layout.doors.filter(d=>d.routeId==='entry-hall').length,2);
  assert.ok(out.scene.layout.path.length>0);assert.ok(!out.scene.layout.windows.some(w=>w.roomId==='entry'));
+ const interior=Kit.generateFloor(spec,ctx);assert.deepEqual(interior.issues,[]);
+ const exit=interior.scene.layout.doors.find(d=>d.routeId==='entry-hall');
+ assert.equal(exit.roomId,'hall');assert.equal(exit.toRoomId,'entry','室外入口不画入楼层时，也必须保留通往真实入口的门');
 });
 test('子图继承父图同一面墙上的入口，不另猜门的位置',()=>{
  const parent=Kit.generateFloor(spec,context()).scene;
@@ -69,7 +72,21 @@ test('3×1 工作台遇到共墙门时选择合法门位，父子图保持同一
  const room=parent.scene.layout.rooms.find(r=>r.id==='kitchen');
  for(const g of parent.scene.layout.groups){const local=child.scene.layout.groups.find(c=>c.id===g.id);assert.ok([local.x-(g.x-room.x),local.y-(g.y-room.y),local.w-g.w,local.h-g.h].every(delta=>Math.abs(delta)<1e-7));}
  assert.equal(child.scene.layout.groups.find(g=>g.id==='counter').w,3);
+ assert.ok(!child.scene.layout.bodies.some(b=>b.type==='chair'),'厨房工作台不能凭空附带一把椅子');
  const door=parent.scene.layout.doors.find(d=>d.roomId==='kitchen');assert.notEqual(door.y,room.y+room.h/2,'不固定用房间正中门位');
+});
+test('父图旋转后的长条操作台下钻时仍保留同一朝向和坐标',()=>{
+ const contents=[{id:'counter',roomId:'kitchen',type:'desk',w:1,h:2.5},{id:'shelf',roomId:'kitchen',type:'shelf',w:1.5,h:.6}];
+ const parent=Kit.generateFloor({...spec,contents:contents.map(f=>f.id==='counter'?{...f,w:2.5,h:1}:f)},context());assert.deepEqual(parent.issues,[]);
+ const row={...floor,frame_json:{...floor.frame_json,atlasScene:parent.scene}};
+ const child=Kit.generateFloor({rooms:[{id:'kitchen',side:'north',w:4,h:3}],contents},context(kitchen,{maps:[row,kitchen]}));
+ assert.deepEqual(child.issues,[]);
+ const room=parent.scene.layout.rooms.find(r=>r.id==='kitchen');
+ for(const g of parent.scene.layout.groups){const local=child.scene.layout.groups.find(c=>c.id===g.id);assert.ok([local.x-(g.x-room.x),local.y-(g.y-room.y),local.w-g.w,local.h-g.h].every(delta=>Math.abs(delta)<1e-7),JSON.stringify({parent:g,child:local}));}
+ const legacy=structuredClone(child.scene),signature=JSON.parse(legacy.inputSignature);signature.detailPolicy='explicit-furniture-v1';legacy.inputSignature=JSON.stringify(signature);
+ Object.assign(legacy.layout.groups.find(g=>g.id==='counter'),{w:1,h:2.5});
+ const repaired=Kit.generateFloor({rooms:[{id:'kitchen',side:'north',w:4,h:3}],contents},{...context(kitchen,{maps:[row,kitchen]}),previousScene:legacy});
+ assert.equal(repaired.status,'generated','旧策略的成功缓存也必须重新求解');assert.deepEqual(repaired.scene.layout.groups,child.scene.layout.groups);
 });
 test('换到子图必须复用账本 ID，不能换一个 ID 再加同一盏灯；同名独立物品仍可明确新增',()=>{
  const ctx=context(kitchen);ctx.spaceCanonical={furnishing:[{localId:'space:kitchen:furn:lamp',type:'light',name:'照明',widthM:.2,heightM:.2,quality:'layout'}]};

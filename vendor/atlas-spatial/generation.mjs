@@ -144,6 +144,7 @@ function generateFloorOnce(value,context){
   let s=null;
   try{
     s=setup(value,context,'floor');const ctx=context;
+    s.spec.detailPolicy='explicit-furniture-v2';
     s.constraintKeys=['corridorWidth','corridorLocationRef','rooms','contents','actors','items'];
     s.spec.corridorWidth=finite(s.input.corridorWidth)?s.input.corridorWidth:2;
     const previousRef=s.previous?.constraints?.corridorLocationRef;
@@ -171,7 +172,8 @@ function generateFloorOnce(value,context){
     if(s.spec.singleRoom&&ctx.parentGroups?.length)s.spec.parentGroups=ctx.parentGroups.filter(g=>Math.abs(g.sourceRoomSize.w-s.spec.rooms[0].w)<1e-7&&Math.abs(g.sourceRoomSize.h-s.spec.rooms[0].h)<1e-7).map(g=>({id:g.id,roomId:g.roomId,x:g.x+(s.spec.width-s.spec.rooms[0].w)/2,y:g.y+(s.spec.height-s.spec.rooms[0].h)/2,w:g.w,h:g.h}));
     const actualRooms=new Set(s.spec.rooms.map(r=>r.id));
     s.spec.roomConnections=(ctx.roomConnections??[]).filter(edge=>actualRooms.has(edge.from)&&actualRooms.has(edge.to));
-    s.spec.externalRoomIds=(ctx.externalRoomIds??[]).filter(id=>actualRooms.has(id));
+    s.spec.externalConnections=(ctx.roomConnections??[]).filter(edge=>actualRooms.has(edge.from)!==actualRooms.has(edge.to)).map(edge=>actualRooms.has(edge.from)?edge:{...edge,from:edge.to,to:edge.from});
+    s.spec.externalRoomIds=[...new Set([...(ctx.externalRoomIds??[]).filter(id=>actualRooms.has(id)),...s.spec.externalConnections.map(edge=>edge.from)])];
     if(s.spec.singleRoom&&ctx.entryDoors?.length)s.spec.entryDoors=clone(ctx.entryDoors).map(d=>{
       const room=s.spec.rooms[0],size=d.sourceRoomSize;
       // An estimated footprint may be resized atomically with its parent.
