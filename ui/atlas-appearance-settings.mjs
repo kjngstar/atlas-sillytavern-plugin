@@ -13,7 +13,7 @@ export function appearanceSettingsHTML({skin,catalog=[],runtime}){
  for(const [key,label,fallback]of [['ui.accent','强调色','#43e0ff'],['ui.text.primary','文字颜色','#dce9fb'],['map.canvas.bg','地图底色','#03050a'],['map.road.stroke','道路颜色','#806443']])html+=row(label,`<input ${key==='ui.accent'?'id="skinAccent" ':''}data-skin-token="${key}" type="color" value="${esc(skin.tokens[key]||fallback)}">`);
  const mapLabels={markers:'地图标点',road:'道路笔触',water:'水系笔触',buildingOutline:'建筑轮廓',floorWall:'室内墙体',furniture:'陈设笔触'};
  for(const [key,values]of Object.entries(runtime.MAP_STYLE_REGISTRY))html+=row(mapLabels[key],select('data-skin-map-style',key,values,skin.mapStyles[key]));
- for(const [key,label]of [['radar','地图雷达扫描'],['motion','界面动画'],['coordinates','显示坐标读数']])html+=row(label,`<input type="checkbox" data-appearance-${key} ${skin.options[key]?'checked':''}>`);
+ for(const [key,label]of [['radar','室外距离参考环'],['motion','界面动画'],['coordinates','显示坐标读数']])html+=row(label,`<input type="checkbox" data-appearance-${key} ${skin.options[key]?'checked':''}>`);
  html+='<div class="detail-actions"><button class="action-btn" data-export="skin">导出当前皮肤</button><button class="action-btn" data-export-skin-pack>导出完整皮肤包</button><label class="action-btn">导入皮肤<input id="skinImport" type="file" accept=".json,.zip,application/json,application/zip" hidden></label><button class="action-btn" data-skin-reset>恢复默认外观</button></div>';
  if(!skin.id.startsWith('builtin.'))html+='<button class="action-btn" data-remove-skin>移除当前皮肤</button>';
  return html+'<p class="scope-note">JSON 保存配置；ZIP 可包含静态 PNG/WebP 图片。存储失败时保留本次预览，可导出备份。</p></div>';

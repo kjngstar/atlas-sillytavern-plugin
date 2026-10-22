@@ -77,7 +77,7 @@ function recordCtx(){
     fillStyle: '', strokeStyle: '', lineWidth: 0, lineCap: '', lineJoin: '', font: '',
     textAlign: '', textBaseline: '', globalAlpha: 1, shadowBlur: 0, shadowColor: '', dash: [],
     save(){}, restore(){}, beginPath(){}, closePath(){}, moveTo(){}, lineTo(){},
-    bezierCurveTo(){}, quadraticCurveTo(){}, rect(){}, ellipse(){}, clip(){}, fillText(){},
+    bezierCurveTo(){}, quadraticCurveTo(){}, rect(){}, ellipse(){}, clip(){}, fillText(text,x,y){log.push({op:'text',text,x,y});},
     measureText: () => ({width: 10}), drawImage(){}, translate(){}, scale(){}, rotate(){}, setTransform(){},
     fill(){ log.push({op: 'fill', fill: str(c.fillStyle)}); },
     stroke(){ log.push({op: 'stroke', stroke: str(c.strokeStyle), dash: [...c.dash]}); },
@@ -98,7 +98,7 @@ const strokes = (log, style) => log.filter(e => e.op === 'stroke' && e.stroke ==
 /** 在 vm 里拼出 map.js 的指定区段，并注入 canvas/st/pushLabel 替身。 */
 function mapRuntime({ctx, st, pushLabel, sections}){
   const runtime = vm.createContext({canvasStyle:null,texturePattern:null,skinColor:(_layer,_part,fallback)=>fallback,
-    ctx, st, pushLabel,C:{cyan:'#43e0ff'},
+    ctx, st, pushLabel,C:{cyan:'#43e0ff'},F:{sans:'sans-serif'},W2S:(x,y)=>[x,y],
     extent: () => [-50, 50, -50, 50],
     hexA: (c, a) => c + '@' + a,
     Math, Number, Array, Object, String, JSON, console,
@@ -198,7 +198,8 @@ test('G08 · 通用陈设各自有可辨画法，实体障碍与装饰分开', (
   assert.equal(strokes(log, 'rgba(255,205,130,.40)'), 1, '柜');
   assert.equal(strokes(log, 'rgba(200,230,255,.5)'), 1, '桌');
   assert.equal(strokes(log, 'rgba(200,225,255,.42)'), 1, '椅');
-  assert.equal(strokes(log, 'rgba(255,225,150,.45)'), 1, '门洞');
+  assert.equal(strokes(log, 'rgba(255,225,150,.45)'), 0, '无墙朝向的门洞不再画斜虚线');
+  assert.equal(runtime.st.utilitySymbols.filter(s=>s.kind==='doorway').length,1,'门洞交给带名称的设施符号层');
   assert.equal(strokes(log, 'rgba(180,205,235,.22)'), 1, '装饰块');
   // 实体（solid）实线、装饰（doorway/decor）虚线：G08 要求两者一眼可分。
   const solid = log.find(e => e.op === 'stroke' && e.stroke === 'rgba(200,230,255,.5)');
@@ -211,10 +212,39 @@ test('G08 · 灯光画在陈设与人物下方', () => {
   const geo = floorGeo();
   const {runtime, log} = sceneRuntime(FLOOR, geo);
   runtime.floorMap(geo);
-  const lamp = indexOfOp(log, e => e.op === 'fill' && e.fill === 'rgba(255,232,180,.85)');
+  const lamp = indexOfOp(log, e => e.op === 'fill' && e.fill === 'gradient');
   const furn = indexOfOp(log, e => e.op === 'stroke' && e.stroke === 'rgba(200,230,255,.5)');
   assert.ok(lamp >= 0, '灯必须被画出来');
   assert.ok(furn > lamp, '灯必须压在所有陈设之下');
+});
+
+test('overlapping door and lamp symbols are named, separated and screen-sized without changing physical geometry',()=>{
+ const {runtime,log,st}=sceneRuntime(FLOOR,{},{});
+ const input=[{kind:'light',x:100,y:100},{kind:'doorway',x:100,y:100},{kind:'light',x:101,y:101}];
+ st.utilitySymbols=structuredClone(input);
+ runtime.drawUtilities();
+ assert.deepEqual(st.utilitySymbols,input,'display grouping must not alter source positions or identities');
+ assert.deepEqual(log.filter(e=>e.op==='text').map(e=>e.text),['照明 ×2','门洞']);
+ assert.equal(st.utilityBoxes.length,2);
+ const [a,b]=st.utilityBoxes;
+ assert.ok(a.x+a.w<=b.x||b.x+b.w<=a.x||a.y+a.h<=b.y||b.y+b.h<=a.y,'facility labels must not overlap');
+ assert.ok(st.utilityBoxes.every(b=>b.h===24));
+ log.length=0;st.cam.s=5;runtime.drawUtilities();
+ assert.ok(st.utilityBoxes.every(b=>b.h===24),'zoom must not enlarge facility symbols into furniture-sized blobs');
+ st.showLabels=false;log.length=0;runtime.drawUtilities();
+ assert.equal(log.filter(e=>e.op==='text').length,0);
+ assert.ok(st.utilityBoxes.every(b=>b.w===22),'hiding labels retains recognizable icons');
+});
+
+test('radar never paints a spotlight over indoor furniture; outdoor radar uses only faint range rings',()=>{
+ const {ctx,log}=recordCtx();const st={kind:'floor',marks:[],vw:400,vh:300};
+ const runtime=vm.createContext({ctx,st,Math});
+ vm.runInContext(cut('function radar(', 'function heatLayer('),runtime);
+ for(const kind of ['building','floor','room']){st.kind=kind;runtime.radar(1);}
+ assert.equal(log.length,0);
+ st.kind='region';runtime.radar(1);
+ assert.equal(log.filter(e=>e.op==='stroke').length,3);
+ assert.equal(log.filter(e=>e.op==='fill').length,0,'no map-wide sector fill');
 });
 
 test('U01 · 房间副标题只写真实 status，不出现示例文案「禁书区」', () => {

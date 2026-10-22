@@ -977,8 +977,7 @@ function create(canvas, mini, hooks){
       const rg=ctx.createRadialGradient(l.x,l.y,1,l.x,l.y,rad);
       rg.addColorStop(0,'rgba(255,214,140,.20)'); rg.addColorStop(1,'rgba(255,214,140,0)');
       ctx.beginPath(); ctx.arc(l.x,l.y,rad,0,7); ctx.fillStyle=rg; ctx.fill();
-      ctx.beginPath(); ctx.arc(l.x,l.y,2.6,0,7); ctx.fillStyle='rgba(255,232,180,.85)';
-      ctx.shadowColor='rgba(255,220,150,.9)'; ctx.shadowBlur=10/st.cam.s; ctx.fill();
+      // Ambient light is a soft background, not a second physical lamp marker.
       ctx.restore();
     });
 
@@ -1045,9 +1044,54 @@ function create(canvas, mini, hooks){
    * - 真实类型优先：读 `f.type`（M6-03 从场景的真实 body.type 投影而来）。
    *   POV 场景的服务端白名单会剥掉 body.type，此时 `f.detail===false`、
    *   这里画一块中性块 —— **不猜**它是一张床还是一张桌。
-   * - `f.solid===false`（灯、门洞、摆件）走虚线淡描：G08 要求实体障碍与装饰一眼可分。
+   * - 灯与门洞用屏幕空间设施符号；实体家具继续按真实尺寸画轮廓。
    * - 渲染靠 `f.r`（4 元组绝对坐标）；`x,y,w,h` 是所属房间，仅用于 fallback 着色。
    */
+  function queueUtility(kind,x,y){
+    (st.utilitySymbols??=[]).push({kind,x,y});
+  }
+  function drawUtilities(){
+    const groups=[];
+    for(const symbol of st.utilitySymbols??[]){
+      const [x,y]=W2S(symbol.x,symbol.y);
+      if(x<0||x>st.vw||y<0||y>st.vh)continue;
+      const existing=groups.find(g=>g.kind===symbol.kind&&Math.hypot(g.x-x,g.y-y)<12);
+      if(existing)existing.count++;else groups.push({...symbol,x,y,count:1});
+    }
+    const occupied=(st.marks??[]).map(m=>{const [x,y]=W2S(m.x,m.y);return {x:x-17,y:y-17,w:34,h:34};});
+    st.utilityBoxes=[];
+    ctx.save();ctx.shadowBlur=0;ctx.lineWidth=1.2;ctx.setLineDash([]);
+    ctx.font='500 11px '+F.sans;ctx.textBaseline='middle';ctx.textAlign='left';
+    for(const g of groups){
+      const text=(g.kind==='light'?'照明':'门洞')+(g.count>1?' ×'+g.count:'');
+      const w=st.showLabels?ctx.measureText(text).width+31:22,h=24;
+      const offsets=g.kind==='light'?[[12,-30],[-w-12,-30],[12,12],[-w-12,12]]:[[12,12],[-w-12,12],[12,-30],[-w-12,-30]];
+      let box;
+      for(const distance of [0,30,60,90]){
+        box=offsets.map(([dx,dy])=>({x:g.x+dx,y:g.y+dy+(dy<0?-distance:distance),w,h})).find(b=>b.x>=6&&b.y>=6&&b.x+b.w<=st.vw-6&&b.y+b.h<=st.vh-6&&!occupied.some(o=>b.x<o.x+o.w+4&&b.x+b.w>o.x-4&&b.y<o.y+o.h+4&&b.y+b.h>o.y-4));
+        if(box)break;
+      }
+      if(!box)continue;
+      occupied.push(box);st.utilityBoxes.push(box);
+      const color=skinColor('furniture','stroke',g.kind==='light'?'#f4d68c':'#9ed2db');
+      ctx.beginPath();ctx.moveTo(g.x,g.y);ctx.lineTo(clamp(g.x,box.x,box.x+box.w),clamp(g.y,box.y,box.y+box.h));
+      ctx.strokeStyle=hexA(color,.55);ctx.stroke();
+      ctx.beginPath();rrect(ctx,box.x,box.y,w,h,6);
+      ctx.fillStyle=canvasStyle?.labelBackground?hexA(canvasStyle.labelBackground,.96):'rgba(8,18,30,.96)';ctx.fill();ctx.strokeStyle=hexA(color,.65);ctx.stroke();
+      const x=box.x+11,y=box.y+12;
+      ctx.beginPath();
+      if(g.kind==='light'){
+        ctx.arc(x,y-3,4,0,Math.PI*2);ctx.moveTo(x-2,y+2);ctx.lineTo(x+2,y+2);ctx.moveTo(x-2,y+5);ctx.lineTo(x+2,y+5);
+        for(const [dx,dy] of [[0,-10],[-7,-6],[7,-6]]){ctx.moveTo(x+dx*.75,y+dy*.75);ctx.lineTo(x+dx,y+dy);}
+      }else{
+        ctx.moveTo(x-5,y+6);ctx.lineTo(x-5,y-7);ctx.lineTo(x+5,y-7);ctx.lineTo(x+5,y+6);
+        ctx.moveTo(x-3,y+6);ctx.lineTo(x-3,y-5);ctx.lineTo(x+3,y-3);ctx.lineTo(x+3,y+6);ctx.closePath();
+      }
+      ctx.strokeStyle=color;ctx.stroke();
+      if(st.showLabels){ctx.fillStyle=canvasStyle?.labelColor||color;ctx.fillText(text,box.x+24,y);}
+    }
+    ctx.restore();
+  }
   function drawFurn(f,x,y,w,h,tint){
     const r=f.r||[x,y,x+w,y+h];
     const [a,b,c2,d]=r;
@@ -1146,18 +1190,13 @@ function create(canvas, mini, hooks){
         break;
       }
       case 'light':{
-        // 灯不是障碍：只画一小圈光，且永远在人物下方（本函数在 marker 之前调用）。
-        ctx.beginPath(); ctx.arc(a+bw/2,b+bh/2,Math.max(2,Math.min(bw,bh)/2),0,7);
-        ctx.fillStyle=skinColor('furniture','fill','rgba(255,228,170,.28)'); ctx.fill();
-        ctx.strokeStyle=skinColor('furniture','stroke','rgba(255,232,180,.5)'); ctx.lineWidth=0.9/st.cam.s;
-        ctx.setLineDash([2/st.cam.s,2/st.cam.s]); ctx.stroke(); ctx.setLineDash([]);
+        queueUtility('light',a+bw/2,b+bh/2);
         break;
       }
       case 'doorway':{
-        // 门洞是通行结构：画门槛，不画实体填充，也不参与碰撞。
-        ctx.beginPath(); ctx.moveTo(a,b); ctx.lineTo(c2,d);
-        ctx.strokeStyle=skinColor('furniture','stroke','rgba(255,225,150,.45)'); ctx.lineWidth=1.4/st.cam.s;
-        ctx.setLineDash([4/st.cam.s,3/st.cam.s]); ctx.stroke(); ctx.setLineDash([]);
+        // Only the saved structural doors draw wall openings. A furnishing
+        // doorway has no wall orientation, so show a named symbol at its anchor.
+        queueUtility('doorway',a+bw/2,b+bh/2);
         break;
       }
       case 'stairs':{
@@ -1295,8 +1334,6 @@ function create(canvas, mini, hooks){
       const rg=ctx.createRadialGradient(l[0],l[1],2,l[0],l[1],96);
       rg.addColorStop(0,'rgba(255,214,140,.20)'); rg.addColorStop(1,'rgba(255,214,140,0)');
       ctx.beginPath(); ctx.arc(l[0],l[1],96,0,7); ctx.fillStyle=rg; ctx.fill();
-      ctx.beginPath(); ctx.arc(l[0],l[1],4.5,0,7); ctx.fillStyle='rgba(255,230,170,.9)';
-      ctx.shadowColor='rgba(255,220,150,.9)'; ctx.shadowBlur=14/st.cam.s; ctx.fill();
     });
     // 墙
     ctx.save();
@@ -1549,7 +1586,7 @@ function create(canvas, mini, hooks){
   function drawLabels(){
     ctx.save();
     ctx.textAlign='center'; ctx.textBaseline='top';
-    const occupied=[];
+    const occupied=[...(st.utilityBoxes??[])];
     const items=st.labels.map((l,i)=>{
       const [sx,sy]= l.scr ? [l.x,l.y] : W2S(l.x,l.y);
       return {l,sx,sy,i,rank:labelRank(l)};
@@ -1610,32 +1647,16 @@ function create(canvas, mini, hooks){
     }
   }
   function radar(t){
+    // Interior plans need legible furniture and doors, not a map-wide spotlight.
+    if(['building','floor','room'].includes(st.kind))return;
     const hero = st.marks.find(m=>m.hero);
     let cx=st.vw/2, cy=st.vh/2;
     if(hero){ const p=W2S(hero.x,hero.y); cx=p[0]; cy=p[1]; }
-    const R = Math.hypot(st.vw,st.vh)*.62;
-    const a = (t*0.5)%(Math.PI*2);
     ctx.save();
-    ctx.globalCompositeOperation='lighter';
-    let g;
-    try{
-      g = ctx.createConicGradient(a, cx, cy);
-      g.addColorStop(0,'rgba(67,224,255,.14)');
-      g.addColorStop(.06,'rgba(67,224,255,.05)');
-      g.addColorStop(.14,'rgba(67,224,255,0)');
-      g.addColorStop(1,'rgba(67,224,255,0)');
-    }catch(e){
-      g = ctx.createRadialGradient(cx,cy,0,cx,cy,R);
-      g.addColorStop(0,'rgba(67,224,255,.08)'); g.addColorStop(1,'rgba(67,224,255,0)');
-    }
-    ctx.beginPath();
-    ctx.moveTo(cx,cy); ctx.arc(cx,cy,R,a,a+Math.PI*.5); ctx.closePath();
-    ctx.fillStyle=g; ctx.fill();
-    // 距离环
-    ctx.globalCompositeOperation='source-over';
+    // Thin, low-contrast range rings do not recolor the map beneath them.
     [90,170,260].forEach((r,i)=>{
       ctx.beginPath(); ctx.arc(cx,cy,r,0,7);
-      ctx.strokeStyle=`rgba(67,224,255,${.10-i*.025})`; ctx.lineWidth=1; ctx.stroke();
+      ctx.strokeStyle=`rgba(67,224,255,${.055-i*.015})`; ctx.lineWidth=1; ctx.stroke();
     });
     ctx.restore();
   }
@@ -1762,7 +1783,7 @@ function create(canvas, mini, hooks){
 
     ctx.setTransform(st.dpr,0,0,st.dpr,0,0);
     ctx.clearRect(0,0,st.vw,st.vh);
-    st.labels=[];st.edgeHits=[];st.hits=[];
+    st.labels=[];st.edgeHits=[];st.hits=[];st.utilitySymbols=[];st.utilityBoxes=[];
 
     ctx.save();
     ctx.translate(st.vw/2, st.vh/2);
@@ -1774,6 +1795,7 @@ function create(canvas, mini, hooks){
     // M6-07①：网格走**屏幕空间** —— 线宽恒为 1 物理像素，既不受缩放影响，
     // 也不会像被 CSS 放大的位图那样糊掉。
     grid();
+    drawUtilities();
 
     if(st.showMarks){
       if(st.showLinks)relationLayer();
