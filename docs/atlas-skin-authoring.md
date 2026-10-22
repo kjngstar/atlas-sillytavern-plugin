@@ -56,6 +56,8 @@
 | 面板 | `ui.panel.bg`、`ui.panel.border` |
 | 文字 | `ui.text.primary`、`ui.text.muted`、`ui.text.onAccent` |
 | 强调色 | `ui.accent` |
+| 选中项 | `ui.selection.bg`、`ui.selection.text` |
+| 状态提示 | `ui.status.info/success/warning/error` |
 | 地图 | `map.canvas.bg`、`map.grid.minor`、`map.label.primary`、`map.label.background` |
 | 标点与图例 | `map.marker.character/place/item/message/event/exit` |
 | 道路 | `map.road.stroke` |
@@ -73,6 +75,8 @@
 | `ui.spacing` | 8–24 |
 | `ui.window.frameSlice` | 1–256，无单位图片切片数值 |
 | `ui.window.frameWidth` | 1–24，显示宽度 |
+| `ui.panel/control/input/selection.frameSlice` | 各角色分别填写；1–256，无单位图片切片数值 |
+| `ui.panel/control/input/selection.frameWidth` | 各角色分别填写；1–16，显示宽度，单位为 CSS px |
 | `ui.font.family` | `sans` / `serif` / `mono` |
 | `map.texture.opacity` | 0–0.30 |
 | `map.backdrop.opacity` | 0–0.50；装饰背景透明度，默认 0.16 |
@@ -112,6 +116,12 @@ ZIP 根目录必须包含 `manifest.json`；图片仅允许位于 `assets/` 下�
 | `windowBackdrop` | 窗口与标题栏背景；等比覆盖，不提供世界几何 |
 | `avatarFrame` | 头像九宫格框；复用窗框切片参数，伪元素不接收指针事件 |
 | `panelTexture` | 面板重复纹理，建议 64–256 px 无缝图 |
+| `panelFrame` | 面板、浮层与选择详情框的九宫格边框；使用 `ui.panel.frameSlice/frameWidth` |
+| `controlFrame` | 按钮、导航项、工具按钮的普通边框；使用 `ui.control.frameSlice/frameWidth` |
+| `controlActiveFrame` | 悬停、键盘焦点、按下及激活按钮的边框；与 `controlFrame` 共用切片参数，不作用于禁用项 |
+| `inputFrame` | 文本输入框、多行文本、下拉框及搜索框边框；使用 `ui.input.frameSlice/frameWidth` |
+| `selectionFrame` | 已选中树节点、卡片和命令项的叠加边框；使用 `ui.selection.frameSlice/frameWidth`，不接收指针事件 |
+| `divider` | 面板与底部栏标题下的分隔纹；按可用宽度和 12 px 高度显示 |
 | `mapTexture` | 地图重复纹理，受透明度 token 控制 |
 | `mapBackdrop` | 地图装饰背景；按视口等比裁切，在几何之前绘制，受 `map.backdrop.opacity` 控制 |
 | `characterMarker` | 人物标点 |
@@ -123,7 +133,9 @@ ZIP 根目录必须包含 `manifest.json`；图片仅允许位于 `assets/` 下�
 
 标点图显示为 24×24 CSS px，中心为原有坐标与命中锚点。建议制作 48×48 或 96×96 的透明图；不要在图片中烘焙位置、名称或距离。窗口图片通过受控 `border-image` 应用，无原始样式注入。
 
-`windowBackdrop`、`mapBackdrop`、`avatarFrame` 和走廊/墙面填色是山河志交付新增的 v1 可选字段；旧版本会按未知字段拒绝，需先更新扩展。原有 v1 皮肤无需改动。制作与安装示例见 [山河志](../skins/shanhezhi/README.md)。
+`windowBackdrop`、`mapBackdrop`、`avatarFrame`、六个控件图片角色及走廊/墙面填色是山河志交付新增的 v1 可选字段；旧版扩展会按未知字段拒绝，需先更新扩展。原有 v1 皮肤无需改动；没有新角色时保留原样式。制作与安装示例见 [山河志](../skins/shanhezhi/README.md)。
+
+小控件应使用透明中心、直线边轨和紧凑留边的素材。`border-image` 只拉伸边轨，四角按切片显示；宽高不同的普通/激活素材需分别适配至相同切片参数。多个角色可以复用一个文件，例如面板、普通按钮和输入框共享薄金框。装饰边框保留原有 DOM、事件、禁用语义与键盘操作；错误输入框通过 `aria-invalid="true"` 保留状态色边框。
 
 只支持静态 PNG/WebP。拒绝 SVG、APNG、动画 WebP、脚本、HTML、远程资源，以及与 MIME/真实图片尺寸不一致的文件。
 
