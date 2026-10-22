@@ -152,7 +152,7 @@ test('SIG00 同一输入与顺序无关；策略版本变化会改变指纹', ()
 
   const otherPolicy = computeLayoutInputSignature({ ...base, policyVersion: 'layout-v99' });
   assert.notEqual(otherPolicy, computeLayoutInputSignature(base));
-  assert.equal(LAYOUT_SIGNATURE_POLICY_VERSION, 'layout-v10');
+  assert.equal(LAYOUT_SIGNATURE_POLICY_VERSION, 'layout-v11');
 
   const locked = computeLayoutInputSignature({ ...base, structureLocked: true });
   assert.notEqual(locked, computeLayoutInputSignature(base), '权威结构锁必须参与指纹');

@@ -89,6 +89,33 @@ test('kitchen door openings do not displace storage furniture or block the walki
  assert.ok(result.scene.layout.groups.filter(g=>['desk','shelf','cabinet'].includes(g.type)).every(g=>g.interaction));
 });
 
+test('live kitchen regression: wall boundary closes a sub-grid gap without growing the room or dropping furniture',()=>{
+ const ctx={...baseCtx(['kitchen']),map:{id:'map-1',name:'厨房',containerLocationId:'kitchen',metersPerCell:.25,frame:{cols:16,rows:12}},spaceSize:{widthM:4,heightM:3,quality:'confirmed'}};
+ const contents=[
+  {id:'L4_kitchen_counter',name:'厨房操作台',roomId:'kitchen',type:'desk',w:1,h:2.5},
+  {id:'L4_kitchen_shelf',roomId:'kitchen',type:'shelf',w:1.5,h:.6},
+  {id:'L4_kitchen_light',roomId:'kitchen',type:'light',w:.2,h:.2},
+  {id:'kitchen_worktable',name:'厨房操作台',roomId:'kitchen',type:'table',w:1.8,h:.7},
+  {id:'kitchen_storage_cabinet',roomId:'kitchen',type:'cabinet',w:1,h:.4},
+  {id:'kitchen_door_to_hall',roomId:'kitchen',type:'doorway',w:.8,h:.15},
+  {id:'kitchen_light',roomId:'kitchen',type:'light',w:.2,h:.2}];
+ const spec={rooms:[{id:'kitchen',w:4,h:3,side:'south'}],contents};
+ const result=Kit.generateFloor(spec,ctx);
+ assert.deepEqual(result.issues,[]);
+ assert.deepEqual(result.scene.layout.bounds,{x:0,y:0,w:4,h:3});
+ assert.deepEqual(new Set(result.scene.layout.groups.map(g=>g.id)),new Set(contents.map(g=>g.id)));
+ const cabinet=result.scene.layout.groups.find(g=>g.id==='kitchen_storage_cabinet');
+ assert.equal(cabinet.w,1);assert.equal(cabinet.h,.4);
+ assert.ok(Math.abs(cabinet.y+cabinet.h-2.8)<1e-7,'cabinet fits against the exact inner boundary, between quarter-grid samples');
+ assert.ok(cabinet.interaction,'cabinet remains reachable');
+ const solids=result.scene.layout.bodies.filter(b=>b.solid);
+ for(const a of solids)for(const b of solids)if(a.groupId!==b.groupId)assert.ok(!(a.x<b.x+b.w-1e-7&&a.x+a.w>b.x+1e-7&&a.y<b.y+b.h-1e-7&&a.y+a.h>b.y+1e-7),'solid furniture must not overlap');
+ const reopened=Kit.generateFloor(spec,{...ctx,previousScene:Kit.clone(result.scene)});
+ assert.deepEqual(reopened.scene.layout,result.scene.layout);
+ const impossible=Kit.generateFloor({...spec,contents:[...contents,{id:'oversize',roomId:'kitchen',type:'cabinet',w:5,h:5}]},ctx);
+ assert.ok(impossible.issues.some(i=>i.entityId==='oversize'&&i.code==='DETAIL_TOO_LARGE'));
+});
+
 // ---------- 必修1：增量约束合并 ----------
 
 test('审查1：六房间基础上只请求一个新增房间，结果为七房间且旧房间位置保留',()=>{

@@ -28,6 +28,14 @@ import * as B from './foundation.mjs';
   const hash=s=>{let n=2166136261;for(const c of String(s)){n^=c.charCodeAt(0);n=Math.imul(n,16777619);}return n>>>0;};
   const rand=s=>{let n=hash(s);return()=>{n=(Math.imul(n,1664525)+1013904223)>>>0;return n/4294967296;};};
   const ordered=a=>[...a].sort((a,b)=>a.id.localeCompare(b.id,'en'));
+  // A fixed grid can miss a valid wall-adjacent placement when the remaining
+  // gap is narrower than its step. Always include the exact far boundary.
+  function scanAxis(start,end){
+    const values=[];
+    for(let p=start;p<=end+EPS;p+=.25)values.push(p);
+    if(end>=start-EPS&&(!values.length||end-values.at(-1)>EPS))values.push(end);
+    return values;
+  }
   // 02 §6.4：solid 类型参与碰撞，light/decor/doorway/stairs 不挡路；marker 与家具渲染形状分开。
   const FLOOR_OVERLAYS=new Set(['light','doorway']);
   const SOLID_TYPES=new Set(['shelf','desk','bench','reading','table','chair','bed','cabinet']);
@@ -102,7 +110,7 @@ import * as B from './foundation.mjs';
         if(old&&free(old))chosen=old;
         if(f.locked){const q={...f,...f.locked};if(free(q))chosen=q;else{issues.push({id:f.id,code:'DETAIL_LOCK_CONFLICT'});continue;}}
         const candidates=[];
-        if(!chosen)for(let y=inner.y;y+f.h<=inner.y+inner.h+EPS;y+=.25)for(let x=inner.x;x+f.w<=inner.x+inner.w+EPS;x+=.25){
+        if(!chosen)for(const y of scanAxis(inner.y,inner.y+inner.h-f.h))for(const x of scanAxis(inner.x,inner.x+inner.w-f.w)){
           const q={x,y,w:f.w,h:f.h};if(free(q)){
             // Shelves face the outer wall; tables prefer the door-facing half. These are preferences, not coordinates.
             const score=f.type==='shelf'?Math.abs(y-(r.side==='north'?inner.y:inner.y+inner.h-f.h)):distance(center(q),pt(r.x+r.w*.25,door.y+(r.side==='north'?-2.2:2.2)));
@@ -113,7 +121,8 @@ import * as B from './foundation.mjs';
         // In a narrow carriage a bench or cabinet can fit along the other axis.
         // Preserve the original orientation whenever it fits; locked furniture stays fixed.
         if(!chosen&&!f.locked&&f.w!==f.h){
-          for(let y=inner.y;y+f.w<=inner.y+inner.h+EPS&&!chosen;y+=.25)for(let x=inner.x;x+f.h<=inner.x+inner.w+EPS;x+=.25){
+          for(const y of scanAxis(inner.y,inner.y+inner.h-f.w))for(const x of scanAxis(inner.x,inner.x+inner.w-f.h)){
+            if(chosen)break;
             const q={x,y,w:f.h,h:f.w};if(free(q)){chosen=q;break;}
           }
         }
@@ -126,7 +135,8 @@ import * as B from './foundation.mjs';
           const freePath=q=>B.contains(inner,q)&&!B.intersects(q,swing)&&!B.intersects(q,entry)&&!existing.some(g=>B.intersects(inflate(g,.28),q))&&!exact.some(p=>B.intersects(q,{x:p.x-.25,y:p.y-.25,w:.5,h:.5}));
           let tried=0;
           for(const [w,h] of [[f.w,f.h],...(f.w!==f.h?[[f.h,f.w]]:[])]){
-            for(let y=inner.y;!chosen&&y+h<=inner.y+inner.h+EPS&&tried<64;y+=.25)for(let x=inner.x;!chosen&&x+w<=inner.x+inner.w+EPS&&tried<64;x+=.25){
+            for(const y of scanAxis(inner.y,inner.y+inner.h-h))for(const x of scanAxis(inner.x,inner.x+inner.w-w)){
+              if(chosen||tried>=64)break;
               const q={x,y,w,h};if(!freePath(q))continue;tried++;
               const proposal=makeGroup({...f,w,h},r,x,y),nav=navigation(r,door,[...existingBodies,...proposal.bodies]);
               const accessible=g=>[pt(g.x+g.w+.48,g.y+g.h/2),pt(g.x-.48,g.y+g.h/2),pt(g.x+g.w/2,g.y+g.h+.48),pt(g.x+g.w/2,g.y-.48)].some(p=>B.pointInside(inner,p)&&nav.reachable(p));
