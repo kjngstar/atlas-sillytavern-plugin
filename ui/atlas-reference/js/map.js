@@ -1052,7 +1052,7 @@ function create(canvas, mini, hooks){
    * - 真实类型优先：读 `f.type`（M6-03 从场景的真实 body.type 投影而来）。
    *   POV 场景的服务端白名单会剥掉 body.type，此时 `f.detail===false`、
    *   这里画一块中性块 —— **不猜**它是一张床还是一张桌。
-   * - 灯与门洞用屏幕空间设施符号；实体家具继续按真实尺寸画轮廓。
+   * - 灯光只作背景光晕，不画悬浮标签；旧门洞提示使用设施符号。
    * - 渲染靠 `f.r`（4 元组绝对坐标）；`x,y,w,h` 是所属房间，仅用于 fallback 着色。
    */
   function queueUtility(kind,x,y){
@@ -1061,6 +1061,7 @@ function create(canvas, mini, hooks){
   function drawUtilities(){
     const groups=[];
     for(const symbol of st.utilitySymbols??[]){
+      if(symbol.kind!=='doorway')continue;
       const [x,y]=W2S(symbol.x,symbol.y);
       if(x<0||x>st.vw||y<0||y>st.vh)continue;
       const existing=groups.find(g=>g.kind===symbol.kind&&Math.hypot(g.x-x,g.y-y)<12);
@@ -1071,9 +1072,9 @@ function create(canvas, mini, hooks){
     ctx.save();ctx.shadowBlur=0;ctx.lineWidth=1.2;ctx.setLineDash([]);
     ctx.font='500 11px '+F.sans;ctx.textBaseline='middle';ctx.textAlign='left';
     for(const g of groups){
-      const text=(g.kind==='light'?'照明':'门洞')+(g.count>1?' ×'+g.count:'');
+      const text='门洞'+(g.count>1?' ×'+g.count:'');
       const w=st.showLabels?ctx.measureText(text).width+31:22,h=24;
-      const offsets=g.kind==='light'?[[12,-30],[-w-12,-30],[12,12],[-w-12,12]]:[[12,12],[-w-12,12],[12,-30],[-w-12,-30]];
+      const offsets=[[12,12],[-w-12,12],[12,-30],[-w-12,-30]];
       let box;
       for(const distance of [0,30,60,90]){
         box=offsets.map(([dx,dy])=>({x:g.x+dx,y:g.y+dy+(dy<0?-distance:distance),w,h})).find(b=>b.x>=6&&b.y>=6&&b.x+b.w<=st.vw-6&&b.y+b.h<=st.vh-6&&!occupied.some(o=>b.x<o.x+o.w+4&&b.x+b.w>o.x-4&&b.y<o.y+o.h+4&&b.y+b.h>o.y-4));
@@ -1081,17 +1082,14 @@ function create(canvas, mini, hooks){
       }
       if(!box)continue;
       occupied.push(box);st.utilityBoxes.push(box);
-      const color=skinColor('furniture','stroke',g.kind==='light'?'#f4d68c':'#9ed2db');
+      const color=skinColor('furniture','stroke','#9ed2db');
       ctx.beginPath();ctx.moveTo(g.x,g.y);ctx.lineTo(clamp(g.x,box.x,box.x+box.w),clamp(g.y,box.y,box.y+box.h));
       ctx.strokeStyle=hexA(color,.55);ctx.stroke();
       ctx.beginPath();rrect(ctx,box.x,box.y,w,h,6);
       ctx.fillStyle=canvasStyle?.labelBackground?hexA(canvasStyle.labelBackground,.96):'rgba(8,18,30,.96)';ctx.fill();ctx.strokeStyle=hexA(color,.65);ctx.stroke();
       const x=box.x+11,y=box.y+12;
       ctx.beginPath();
-      if(g.kind==='light'){
-        ctx.arc(x,y-3,4,0,Math.PI*2);ctx.moveTo(x-2,y+2);ctx.lineTo(x+2,y+2);ctx.moveTo(x-2,y+5);ctx.lineTo(x+2,y+5);
-        for(const [dx,dy] of [[0,-10],[-7,-6],[7,-6]]){ctx.moveTo(x+dx*.75,y+dy*.75);ctx.lineTo(x+dx,y+dy);}
-      }else{
+      {
         ctx.moveTo(x-5,y+6);ctx.lineTo(x-5,y-7);ctx.lineTo(x+5,y-7);ctx.lineTo(x+5,y+6);
         ctx.moveTo(x-3,y+6);ctx.lineTo(x-3,y-5);ctx.lineTo(x+3,y-3);ctx.lineTo(x+3,y+6);ctx.closePath();
       }
@@ -1198,7 +1196,7 @@ function create(canvas, mini, hooks){
         break;
       }
       case 'light':{
-        queueUtility('light',a+bw/2,b+bh/2);
+        // Ambient lighting is drawn below furniture; no bulb badge or leader line.
         break;
       }
       case 'doorway':{

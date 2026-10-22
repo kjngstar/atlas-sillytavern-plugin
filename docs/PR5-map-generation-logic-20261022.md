@@ -44,4 +44,6 @@
 
 证据：[修复前](pr5-map-generation-20261022/old-kitchen-before.png)、[修复后](pr5-map-generation-20261022/old-kitchen-after.png)、[厨房与父楼层导出摘录](pr5-map-generation-20261022/old-map-after.json)。
 
+外观后续调整：按用户要求移除「照明」悬浮标签的灯泡图标、文字框与引线，保留背景光晕和照明数据。21 项渲染回归及打包通过；酒馆内置浏览器刷新同一厨房验证标签已消失，见[无照明标签截图](pr5-map-generation-20261022/light-label-removed.png)。
+
 整体推演回执仍为 `partial`，保留此前 `TIME_UNRESOLVED` 与其他待布局地图状态；这与上述局部布局成功分开记录，不宣称 PR5 整体验收完成。

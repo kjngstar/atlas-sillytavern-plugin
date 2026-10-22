@@ -218,16 +218,14 @@ test('G08 · 灯光画在陈设与人物下方', () => {
   assert.ok(furn > lamp, '灯必须压在所有陈设之下');
 });
 
-test('overlapping door and lamp symbols are named, separated and screen-sized without changing physical geometry',()=>{
+test('lighting has no floating badge; legacy doorway symbols stay screen-sized without changing physical geometry',()=>{
  const {runtime,log,st}=sceneRuntime(FLOOR,{},{});
  const input=[{kind:'light',x:100,y:100},{kind:'doorway',x:100,y:100},{kind:'light',x:101,y:101}];
  st.utilitySymbols=structuredClone(input);
  runtime.drawUtilities();
  assert.deepEqual(st.utilitySymbols,input,'display grouping must not alter source positions or identities');
- assert.deepEqual(log.filter(e=>e.op==='text').map(e=>e.text),['照明 ×2','门洞']);
- assert.equal(st.utilityBoxes.length,2);
- const [a,b]=st.utilityBoxes;
- assert.ok(a.x+a.w<=b.x||b.x+b.w<=a.x||a.y+a.h<=b.y||b.y+b.h<=a.y,'facility labels must not overlap');
+ assert.deepEqual(log.filter(e=>e.op==='text').map(e=>e.text),['门洞']);
+ assert.equal(st.utilityBoxes.length,1,'lighting must not reserve a badge box or leader line');
  assert.ok(st.utilityBoxes.every(b=>b.h===24));
  log.length=0;st.cam.s=5;runtime.drawUtilities();
  assert.ok(st.utilityBoxes.every(b=>b.h===24),'zoom must not enlarge facility symbols into furniture-sized blobs');
