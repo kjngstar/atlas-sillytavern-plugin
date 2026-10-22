@@ -1,0 +1,96 @@
+{
+  "kind": "offline-generator-audit",
+  "modelCalled": false,
+  "input": {
+    "rooms": [
+      {
+        "id": "A_hall",
+        "name": "A_hall",
+        "side": "north",
+        "w": 8,
+        "h": 8
+      },
+      {
+        "id": "B_kitchen",
+        "name": "B_kitchen",
+        "side": "north",
+        "w": 4,
+        "h": 4
+      },
+      {
+        "id": "C_store",
+        "name": "C_store",
+        "side": "north",
+        "w": 4,
+        "h": 4
+      },
+      {
+        "id": "D_guest",
+        "name": "D_guest",
+        "side": "north",
+        "w": 4,
+        "h": 4
+      }
+    ],
+    "contents": []
+  },
+  "connections": [
+    [
+      "A_hall",
+      "B_kitchen"
+    ],
+    [
+      "A_hall",
+      "C_store"
+    ],
+    [
+      "A_hall",
+      "D_guest"
+    ]
+  ],
+  "result": {
+    "ok": false,
+    "issues": [
+      {
+        "code": "ROOM_CONNECTION_UNSATISFIED",
+        "path": "$.layout",
+        "message": "空间约束未满足",
+        "severity": "error",
+        "entityId": "r1",
+        "retryable": false,
+        "module": "atlas-spatial-kit"
+      }
+    ]
+  },
+  "feasibleCounterexample": [
+    {
+      "id": "A_hall",
+      "x": 10,
+      "y": 6,
+      "w": 8,
+      "h": 8
+    },
+    {
+      "id": "B_kitchen",
+      "x": 18,
+      "y": 6,
+      "w": 4,
+      "h": 4
+    },
+    {
+      "id": "C_store",
+      "x": 10,
+      "y": 2,
+      "w": 4,
+      "h": 4
+    },
+    {
+      "id": "D_guest",
+      "x": 10,
+      "y": 14,
+      "w": 4,
+      "h": 4
+    }
+  ],
+  "note": "分叉邻接图在40×24米内有无重叠共墙解；当前生成器把连接分量排成单行，不能支持该拓扑。"
+}

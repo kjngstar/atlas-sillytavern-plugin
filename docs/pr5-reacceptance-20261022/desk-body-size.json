@@ -1,0 +1,27 @@
+{
+  "kind": "offline-generator-audit",
+  "modelCalled": false,
+  "declared": {
+    "type": "desk",
+    "w": 2,
+    "h": 1
+  },
+  "group": {
+    "w": 2,
+    "h": 1
+  },
+  "solidBodies": [
+    {
+      "id": "desk:desk",
+      "type": "desk",
+      "x": 0.95,
+      "y": 3.2,
+      "w": 2,
+      "h": 0.68,
+      "groupId": "desk",
+      "roomId": "r",
+      "solid": true
+    }
+  ],
+  "issues": []
+}

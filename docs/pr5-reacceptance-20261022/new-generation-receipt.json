@@ -1,0 +1,404 @@
+[
+  {
+    "id": "turn_5801ccbe39ea53af83c3c35a",
+    "turn": 1,
+    "t": "2026/10/22 19:09:49",
+    "ok": true,
+    "status": "committed",
+    "retryable": true,
+    "m": "统一回执：成功组 16，失败组 1，时间 0→120；另保存建设进度；7 项问题",
+    "issue": "",
+    "detail": {
+      "receipt": {
+        "turnId": "turn_5801ccbe39ea53af83c3c35a",
+        "status": "partial",
+        "groups": [
+          {
+            "groupId": "grp_236f3195",
+            "opIds": [
+              "op_0_92f58982",
+              "op_1_a3f98882",
+              "op_2_3880031e",
+              "op_3_a6e18a10",
+              "op_4_1d1c9330",
+              "op_5_2cae83bf",
+              "op_6_14f443fe",
+              "op_7_f4bab5f9",
+              "op_8_ecc4142b",
+              "op_9_2cd2c064",
+              "op_10_2b1ca301",
+              "op_12_d87af0f3",
+              "op_13_c94e8bd0",
+              "op_14_a51c9ba0",
+              "op_15_e839833e",
+              "op_16_68bd0941",
+              "op_17_deb31634",
+              "op_18_52d79571"
+            ],
+            "status": "applied",
+            "issues": [],
+            "changedRows": 34
+          },
+          {
+            "groupId": "grp_fd99b8cb",
+            "opIds": [
+              "op_11_30b3f5bf"
+            ],
+            "status": "rejected",
+            "issues": [
+              {
+                "code": "REF_UNKNOWN",
+                "path": "$.ref",
+                "message": "引用存在但物品行不存在：itm_aae0fbc1836d2236412dc69b",
+                "severity": "error",
+                "retryable": true,
+                "opId": "op_11_30b3f5bf",
+                "groupId": "grp_fd99b8cb"
+              }
+            ],
+            "changedRows": 0
+          },
+          {
+            "groupId": "grp_0fe67b9f",
+            "opIds": [
+              "cons_1_e8d11211",
+              "cons_7_e482354f"
+            ],
+            "status": "applied",
+            "issues": [],
+            "changedRows": 3
+          },
+          {
+            "groupId": "grp_2fdfdf3a",
+            "opIds": [
+              "cons_5_54c0a4c5"
+            ],
+            "status": "applied",
+            "issues": [],
+            "changedRows": 1
+          },
+          {
+            "groupId": "grp_3cf4eb29",
+            "opIds": [
+              "cons_2_d7f46312"
+            ],
+            "status": "applied",
+            "issues": [],
+            "changedRows": 1
+          },
+          {
+            "groupId": "grp_69ab9744",
+            "opIds": [
+              "cons_0_24884fba",
+              "cons_6_015d4ccd"
+            ],
+            "status": "applied",
+            "issues": [],
+            "changedRows": 3
+          },
+          {
+            "groupId": "grp_6c4702eb",
+            "opIds": [
+              "cons_4_5724386d"
+            ],
+            "status": "applied",
+            "issues": [],
+            "changedRows": 1
+          },
+          {
+            "groupId": "grp_9b91a3a8",
+            "opIds": [
+              "cons_3_e52dac2c"
+            ],
+            "status": "applied",
+            "issues": [],
+            "changedRows": 1
+          },
+          {
+            "groupId": "grp_construction_progress",
+            "opIds": [
+              "construction_progress_turn_5801ccbe39ea53af83c3c35a",
+              "construction_source_turn_5801ccbe39ea53af83c3c35a"
+            ],
+            "status": "applied",
+            "issues": [],
+            "changedRows": 14
+          },
+          {
+            "groupId": "scene_maps_turn_5801ccbe39ea53af83c3c35a",
+            "opIds": [
+              "scene_maps_turn_5801ccbe39ea53af83c3c35a"
+            ],
+            "status": "applied",
+            "issues": [],
+            "changedRows": 18
+          },
+          {
+            "groupId": "grp_6c4c3832",
+            "opIds": [
+              "layout_1_op_1_7224b5c5"
+            ],
+            "status": "applied",
+            "issues": [],
+            "changedRows": 1
+          },
+          {
+            "groupId": "grp_99404ad3",
+            "opIds": [
+              "layout_1_op_0_36890888"
+            ],
+            "status": "applied",
+            "issues": [],
+            "changedRows": 1
+          },
+          {
+            "groupId": "layout-fit:layout_1_op_0_36890888",
+            "opIds": [
+              "layout_1_op_0_36890888:fit"
+            ],
+            "status": "applied",
+            "issues": [],
+            "changedRows": 1
+          },
+          {
+            "groupId": "layout-failed:layout_1_op_0_36890888:failed",
+            "opIds": [
+              "layout_1_op_0_36890888:failed"
+            ],
+            "status": "applied",
+            "issues": [],
+            "changedRows": 1
+          },
+          {
+            "groupId": "layout-fit:layout_1_op_1_7224b5c5",
+            "opIds": [
+              "layout_1_op_1_7224b5c5:fit"
+            ],
+            "status": "applied",
+            "issues": [],
+            "changedRows": 1
+          },
+          {
+            "groupId": "layout:layout_1_op_1_7224b5c5:scene",
+            "opIds": [
+              "layout_1_op_1_7224b5c5:scene"
+            ],
+            "status": "applied",
+            "issues": [],
+            "changedRows": 1
+          },
+          {
+            "groupId": "layout-items:layout_1_op_1_7224b5c5",
+            "opIds": [
+              "layout_1_op_1_7224b5c5:items"
+            ],
+            "status": "applied",
+            "issues": [],
+            "changedRows": 1
+          },
+          {
+            "groupId": "grp_layout_ctx_turn_5801ccbe39ea53af83c3c35a_2",
+            "opIds": [
+              "layout_ctx_2_map_8781c4044c6162d462d1e14c"
+            ],
+            "status": "applied",
+            "issues": [],
+            "changedRows": 1
+          },
+          {
+            "groupId": "grp_world_fill_turn_5801ccbe39ea53af83c3c35a",
+            "opIds": [
+              "world_fill_turn_5801ccbe39ea53af83c3c35a"
+            ],
+            "status": "applied",
+            "issues": [],
+            "changedRows": 6
+          }
+        ],
+        "issues": [
+          {
+            "code": "REF_TYPE_MISMATCH",
+            "path": "$.data.placement.holder_ref",
+            "message": "引用「new:long-table」指向 item（ID itm_669ab708ea15ffd4f2416580），此处需要 character（来源 op op_11_30b3f5bf）。",
+            "severity": "error",
+            "retryable": true,
+            "opId": "op_11_30b3f5bf"
+          },
+          {
+            "code": "REF_UNKNOWN",
+            "path": "$.ref",
+            "message": "引用存在但物品行不存在：itm_aae0fbc1836d2236412dc69b",
+            "severity": "error",
+            "retryable": true,
+            "opId": "op_11_30b3f5bf"
+          },
+          {
+            "code": "ITEM_LOCATION_MISMATCH",
+            "path": "$.items.on",
+            "message": "物品不在本布局的房间内，移除该锚点（itm_b898f54da30263a63775e5bf）",
+            "severity": "warning",
+            "retryable": false
+          },
+          {
+            "code": "ROOM_CONNECTION_UNSATISFIED",
+            "path": "$.layout",
+            "message": "空间约束未满足 ｜ mapId=map_7312a8f0e7fbf90ca860fe30 ｜ branchId=main ｜ revision=0 ｜ operationId=layout_1_op_0_36890888 ｜ turnId=turn_5801ccbe39ea53af83c3c35a ｜ entityId=rte_b666f0f5c7d53a76a4e35f5f",
+            "severity": "error",
+            "retryable": false
+          },
+          {
+            "code": "LAYOUT_PARENT_PENDING",
+            "path": "$.layout",
+            "message": "子图 map_8781c4044c6162d462d1e14c 等待父图 map_7312a8f0e7fbf90ca860fe30 成功，保留已收到的约束，不单独重画。",
+            "severity": "warning",
+            "retryable": true
+          },
+          {
+            "code": "LAYOUT_BATCH_PENDING",
+            "path": "$.layout",
+            "message": "2 张地图保留为待细化。已登记地点和已完成布局保留，可选中需要的地图后继续生成。",
+            "severity": "warning",
+            "retryable": true
+          },
+          {
+            "code": "ITEM_LOCATION_MISMATCH",
+            "path": "$.items.on",
+            "message": "物品不在本布局的房间内，移除该锚点（itm_b898f54da30263a63775e5bf）",
+            "severity": "warning",
+            "retryable": false
+          }
+        ],
+        "clockBeforeS": 0,
+        "clockAfterS": 120,
+        "simulatedUntilS": 120,
+        "worldChanged": true,
+        "timeChanged": true,
+        "requestPlan": {
+          "normalLimits": {
+            "observe": 1,
+            "construction": 1,
+            "evidence": 1,
+            "maps": 1,
+            "characters": 1,
+            "outcomes": 1
+          },
+          "extraLimit": 1,
+          "usage": {
+            "normal": {
+              "observe": 1,
+              "construction": 1,
+              "evidence": 1,
+              "maps": 1
+            },
+            "extra": 1,
+            "transports": 5
+          }
+        }
+      },
+      "issues": [
+        {
+          "code": "REF_TYPE_MISMATCH",
+          "path": "$.data.placement.holder_ref",
+          "message": "引用「new:long-table」指向 item（ID itm_669ab708ea15ffd4f2416580），此处需要 character（来源 op op_11_30b3f5bf）。",
+          "severity": "error",
+          "retryable": true,
+          "opId": "op_11_30b3f5bf"
+        },
+        {
+          "code": "REF_UNKNOWN",
+          "path": "$.ref",
+          "message": "引用存在但物品行不存在：itm_aae0fbc1836d2236412dc69b",
+          "severity": "error",
+          "retryable": true,
+          "opId": "op_11_30b3f5bf"
+        },
+        {
+          "code": "ITEM_LOCATION_MISMATCH",
+          "path": "$.items.on",
+          "message": "物品不在本布局的房间内，移除该锚点（itm_b898f54da30263a63775e5bf）",
+          "severity": "warning",
+          "retryable": false
+        },
+        {
+          "code": "ROOM_CONNECTION_UNSATISFIED",
+          "path": "$.layout",
+          "message": "空间约束未满足 ｜ mapId=map_7312a8f0e7fbf90ca860fe30 ｜ branchId=main ｜ revision=0 ｜ operationId=layout_1_op_0_36890888 ｜ turnId=turn_5801ccbe39ea53af83c3c35a ｜ entityId=rte_b666f0f5c7d53a76a4e35f5f",
+          "severity": "error",
+          "retryable": false
+        },
+        {
+          "code": "LAYOUT_PARENT_PENDING",
+          "path": "$.layout",
+          "message": "子图 map_8781c4044c6162d462d1e14c 等待父图 map_7312a8f0e7fbf90ca860fe30 成功，保留已收到的约束，不单独重画。",
+          "severity": "warning",
+          "retryable": true
+        },
+        {
+          "code": "LAYOUT_BATCH_PENDING",
+          "path": "$.layout",
+          "message": "2 张地图保留为待细化。已登记地点和已完成布局保留，可选中需要的地图后继续生成。",
+          "severity": "warning",
+          "retryable": true
+        },
+        {
+          "code": "ITEM_LOCATION_MISMATCH",
+          "path": "$.items.on",
+          "message": "物品不在本布局的房间内，移除该锚点（itm_b898f54da30263a63775e5bf）",
+          "severity": "warning",
+          "retryable": false
+        }
+      ],
+      "attempts": [
+        {
+          "stage": "initial",
+          "phase": "observe",
+          "httpStatus": 200,
+          "responseChars": 4002,
+          "finishReason": "stop",
+          "durationMs": 200397,
+          "status": "completed"
+        },
+        {
+          "stage": "repair",
+          "httpStatus": 200,
+          "responseChars": 184,
+          "durationMs": 19847,
+          "status": "completed"
+        },
+        {
+          "stage": "construction",
+          "phase": "geography",
+          "httpStatus": 200,
+          "responseChars": 1313,
+          "finishReason": "stop",
+          "durationMs": 90163,
+          "status": "completed"
+        },
+        {
+          "stage": "layout_evidence",
+          "phase": "geography",
+          "httpStatus": 200,
+          "responseChars": 489,
+          "finishReason": "stop",
+          "durationMs": 37008,
+          "status": "completed"
+        },
+        {
+          "stage": "layout",
+          "phase": "geography",
+          "httpStatus": 200,
+          "responseChars": 1879,
+          "finishReason": "stop",
+          "target_kind": "maps",
+          "target_count": 2,
+          "estimated_output_tokens": 944,
+          "durationMs": 192326,
+          "status": "completed"
+        }
+      ],
+      "coreSaved": true
+    },
+    "report": null,
+    "evidenceNote": "回执摘录：省略重复的客户端变更日志；原始 UI 导出文件保留在本机。原生 receipt、issues、attempts 与保存状态原样保留。"
+  }
+]
