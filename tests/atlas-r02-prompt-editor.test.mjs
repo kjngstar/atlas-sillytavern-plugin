@@ -1,4 +1,4 @@
-import {readUiSource} from './ui-source-helper.mjs';
+import {readLegacyUiSource} from './ui-source-helper.mjs';
 /**
  * atlas-r02-prompt-editor.test.mjs — R02 推进编辑器状态模型回归测试。
  *
@@ -37,7 +37,7 @@ async function mount() {
   const style = document.createElement("style");
   style.textContent = readFileSync(resolve(root, "style.css"), "utf8");
   document.head.append(style);
-  const source = readUiSource(resolve(root, "index.js"));
+  const source = readLegacyUiSource(resolve(root, "index.js"));
   const { renderPanel } = await import("data:text/javascript;base64," + Buffer.from(source + "\nexport {renderPanel};").toString("base64"));
   const { createDefaultSettingsV2, settingsViewV2 } = await import(pathToFileURL(resolve(root, "src/atlas-settings.ts")).href);
   const { DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA } = await import(pathToFileURL(resolve(root, "src/atlas-api-client.ts")).href);

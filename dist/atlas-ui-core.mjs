@@ -40,7 +40,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 var define_ATLAS_BUILD_INFO_default;
 var init_define_ATLAS_BUILD_INFO = __esm({
   "<define:__ATLAS_BUILD_INFO__>"() {
-    define_ATLAS_BUILD_INFO_default = { pluginVersion: "0.9.96", buildId: "build-00a1aab4c9e6fa55", buildCommit: "b2c1aa361ba9d3e39ebb37e7a9952a7a204592c2", buildDirty: true };
+    define_ATLAS_BUILD_INFO_default = { pluginVersion: "0.9.96", buildId: "build-ad59f4f4ca82e809", buildCommit: "5562592b6bc20977c077a8784323cc0e311c291e", buildDirty: false };
   }
 });
 
@@ -525,7 +525,7 @@ var init_atlas_diagnostics = __esm({
     init_atlas_runtime_limits();
     LEVELS = /* @__PURE__ */ new Set(["debug", "info", "warn", "error"]);
     SOURCES = /* @__PURE__ */ new Set(["host", "ui", "engine", "model", "storage", "lorebook", "map"]);
-    OUTCOMES = /* @__PURE__ */ new Set(["started", "success", "skipped", "failed", "recovered"]);
+    OUTCOMES = /* @__PURE__ */ new Set(["started", "success", "partial", "skipped", "failed", "recovered"]);
     SAFE_SCENE_STATUS = /* @__PURE__ */ new Set(["ready", "missing", "invalid", "empty"]);
     DETAIL_KEYS = /* @__PURE__ */ new Set([
       "route",
@@ -950,8 +950,8 @@ function createAtlasApiDiagnosticLogger(options) {
       const scoped = anchor ? atlasDiagnosticContext(anchor) : captured;
       const issues = diagnosticIssues(data.issues, native?.issues, error2?.details?.issues);
       const groups = records(native?.groups);
-      const failed = response.body?.ok === false || native?.status === "failed" || (response.status ?? 0) >= 400;
       const partial = native?.status === "partial";
+      const failed = response.body?.ok === false || native?.status === "failed" || partial && data.coreSaved === false || (response.status ?? 0) >= 400;
       const duplicate = native?.status === "duplicate";
       const cause = issues.find((issue) => issue.severity !== "warning" && issue.code !== "TURN_FAILED")?.code;
       const plan = native?.requestPlan;
@@ -961,7 +961,7 @@ function createAtlasApiDiagnosticLogger(options) {
         level: failed ? "error" : partial ? "warn" : "info",
         code: failed ? "API_CALL_FAILED" : partial ? "API_CALL_PARTIAL" : duplicate ? "TURN_DUPLICATE" : "API_CALL_COMPLETE",
         phase: "response",
-        outcome: failed || partial ? "failed" : duplicate ? "skipped" : "success",
+        outcome: failed ? "failed" : partial ? "partial" : duplicate ? "skipped" : "success",
         httpStatus: response.status,
         errorCode: error2?.code,
         causeCode: typeof cause === "string" ? cause : void 0,
@@ -3814,11 +3814,20 @@ var init_contracts = __esm({
   }
 });
 
+// vendor/atlas-spatial/room-topology.mjs
+var init_room_topology = __esm({
+  "vendor/atlas-spatial/room-topology.mjs"() {
+    "use strict";
+    init_define_ATLAS_BUILD_INFO();
+  }
+});
+
 // vendor/atlas-spatial/foundation.mjs
 var init_foundation = __esm({
   "vendor/atlas-spatial/foundation.mjs"() {
     "use strict";
     init_define_ATLAS_BUILD_INFO();
+    init_room_topology();
   }
 });
 
@@ -4812,6 +4821,15 @@ var init_atlas_ops_normalize = __esm({
   }
 });
 
+// src/atlas-layout-signature.ts
+var init_atlas_layout_signature = __esm({
+  "src/atlas-layout-signature.ts"() {
+    "use strict";
+    init_define_ATLAS_BUILD_INFO();
+    init_atlas_hash();
+  }
+});
+
 // src/atlas-spatial-request.ts
 var LAYOUT_REQUEST_CONFLICT, FLOOR_COLLECTIONS, CITY_COLLECTIONS, OVERVIEW_COLLECTIONS;
 var init_atlas_spatial_request = __esm({
@@ -4823,6 +4841,7 @@ var init_atlas_spatial_request = __esm({
     init_atlas_ops_normalize();
     init_atlas_ops_entities();
     init_atlas_ops_errors();
+    init_atlas_layout_signature();
     LAYOUT_REQUEST_CONFLICT = ATLAS_ERROR_CODES2.LAYOUT_REQUEST_CONFLICT;
     FLOOR_COLLECTIONS = LAYOUT_KIND_COLLECTIONS.floor;
     CITY_COLLECTIONS = LAYOUT_KIND_COLLECTIONS.city;
@@ -4838,15 +4857,6 @@ var init_atlas_sql_task_refs = __esm({
     init_atlas_runtime_limits();
     init_atlas_hash();
     init_atlas_db_readport();
-  }
-});
-
-// src/atlas-layout-signature.ts
-var init_atlas_layout_signature = __esm({
-  "src/atlas-layout-signature.ts"() {
-    "use strict";
-    init_define_ATLAS_BUILD_INFO();
-    init_atlas_hash();
   }
 });
 
@@ -10176,17 +10186,19 @@ function createAtlasUiCore(deps) {
       const stale = state.chatId !== value.chatId;
       if (result.status === 200 && body.ok && receiptParsed?.ok && (!useSql || body.data?.coreSaved === true || receiptParsed.value.status === "failed")) {
         const receiptStatus = receiptParsed.value.status;
+        const nativePartial = body.data?.nativeReceipt?.status === "partial";
         commitDiagnostic({
-          level: receiptStatus === "failed" ? "error" : "info",
+          level: receiptStatus === "failed" ? "error" : nativePartial ? "warn" : "info",
           source: "ui",
-          code: receiptStatus === "committed" ? "COMMIT_SUCCEEDED" : receiptStatus === "duplicate" ? "TURN_DUPLICATE" : "COMMIT_FAILED",
+          code: receiptStatus === "committed" ? nativePartial ? "COMMIT_PARTIAL" : "COMMIT_SUCCEEDED" : receiptStatus === "duplicate" ? "TURN_DUPLICATE" : "COMMIT_FAILED",
           operation: "commit",
           phase: "receipt",
-          outcome: receiptStatus === "committed" ? "success" : receiptStatus === "duplicate" ? "skipped" : "failed",
+          outcome: receiptStatus === "committed" ? nativePartial ? "partial" : "success" : receiptStatus === "duplicate" ? "skipped" : "failed",
           httpStatus: result.status,
           retryable: receiptParsed.value.retryable,
           details: {
             coreCommitted: receiptStatus === "committed" || receiptStatus === "duplicate",
+            ...nativePartial ? { receiptStatus: "partial" } : {},
             ...typeof body.data?.coreSaved === "boolean" ? { coreSaved: body.data.coreSaved, saveConfirmed: body.data.coreSaved } : {}
           }
         });

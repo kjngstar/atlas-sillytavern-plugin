@@ -6,11 +6,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { createWorkbenchModel, workbenchCameraKey, workbenchScopeKey } from "../ui/atlas-workbench-model.mjs";
-import { mapsForLocation, mapPath, parentMapOf, renderMapTree } from "../ui/atlas-map-tree.mjs";
-import { createCatalogController, renderCatalog, SEARCH_LIMIT } from "../ui/atlas-catalog-panel.mjs";
-import { createWorkbenchMapController, isDragMovement } from "../ui/atlas-map-controller.mjs";
-import { redactLogText, logGroupKey } from "../ui/atlas-unified-log-panel.mjs";
+import { createWorkbenchModel, workbenchCameraKey, workbenchScopeKey } from "./fixtures/legacy-ui/modules/atlas-workbench-model.mjs";
+import { mapsForLocation, mapPath, parentMapOf, renderMapTree } from "./fixtures/legacy-ui/modules/atlas-map-tree.mjs";
+import { createCatalogController, renderCatalog, SEARCH_LIMIT } from "./fixtures/legacy-ui/modules/atlas-catalog-panel.mjs";
+import { createWorkbenchMapController, isDragMovement } from "./fixtures/legacy-ui/modules/atlas-map-controller.mjs";
+import { redactLogText, logGroupKey } from "./fixtures/legacy-ui/modules/atlas-unified-log-panel.mjs";
 import { buildVisibleWorldSummary, buildVisibleWorldSummarySync } from "../src/atlas-world-summary.ts";
 
 const SCOPE_A = { chatId: "chat-a", branchId: "b1", revision: 7, viewMode: "pov", povId: "pov-1" };

@@ -18,6 +18,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameS
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildAll } from "./build.mjs";
+import {syncUiTree} from './sync-ui.mjs';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const releaseDir = join(root, "release");
@@ -97,7 +98,7 @@ function copyReleaseFile(from, to) {
   writeFileAtomic(to, stripDevFallback(content));
 }
 
-copyTree(join(root, 'ui'), join(root, 'atlas-extension', 'ui'));
+syncUiTree(join(root, 'ui'), join(root, 'atlas-extension', 'ui'),{write:writeFileAtomic});
 
 // 3) 根文件先同步到 UI 镜像，确保本次发布副本读到的就是当前版本。
 // 根 = 权威源；index.js 镜像只允许开发回退行这一处差异。
@@ -129,7 +130,10 @@ for (const target of PACK_TARGETS) {
   for (const entry of readdirSync(target.from)) {
     if (EXCLUDE_DIRS.has(entry)) continue;
     const from = join(target.from, entry);
-    if (statSync(from).isDirectory()) copyTree(from, join(to, entry));
+    if (statSync(from).isDirectory()) {
+      if(entry==='ui')syncUiTree(from,join(to,entry),{write:writeFileAtomic});
+      else copyTree(from, join(to, entry));
+    }
     else if (ENTRY_FILES.has(entry)) copyReleaseFile(from, join(to, entry));
     else writeFileAtomic(join(to, entry), readFileSync(from));
   }

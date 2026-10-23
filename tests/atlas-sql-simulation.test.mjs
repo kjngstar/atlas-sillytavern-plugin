@@ -34,6 +34,22 @@ const add=(db,table,data)=>{
 const action=(db,overrides={})=>add(db,'actions',{id:'work',actor_entity_id:IDS.C2,kind:'prepare',title:'整理货物',status:'active',started_at_s:0,evaluated_until_s:0,
   duration_json:{min_s:30,nominal_s:30,max_s:30,quality:'explicit',basis_refs:[]},...overrides});
 
+test('SQL 顺序活动按稳定 ref 相加，前向引用和无关行不改变耗时，回退与重复通知不累加',async()=>{
+ const walk={op:'event.propose',ref:'new:walk',data:{title:'先步行一分钟',phase:'observed',activity:{kind:'travel',completed:true},time_hint:{elapsed_s:60}}};
+ const talk={op:'event.propose',ref:'new:talk',data:{title:'随后交谈两分钟',phase:'observed',activity:{kind:'dialogue',completed:true},time_hint:{elapsed_s:120,after_ref:'new:walk'}}};
+ for(const operations of [[walk,{op:'noop'},talk],[talk,{op:'noop'},walk]]){
+  const f=await fixture({response:operations.map(op=>JSON.stringify(op)).join('\n')});
+  try{const r=await f.turn();assert.equal(r.coreSaved,true);assert.equal(r.receipt.clockAfterS,180);assert.ok(!r.receipt.issues.some(i=>i.code==='TIME_RELATION_CONFLICT'));const calls=f.calls.length;const repeated=await f.turn();assert.equal(repeated.receipt.clockAfterS,180);assert.equal(f.calls.length,calls);await f.undo(r.receipt.turnId);assert.equal(f.session.repo.internal.currentClock(),0);}finally{await f.session.repo.close();}
+ }
+});
+test('SQL 同时活动取 max，错误/环形时间引用产生可见诊断，不能伪称明确时间',async()=>{
+ for(const mode of ['same','missing','cycle']){
+  const operations=[{op:'event.propose',ref:'new:walk',data:{title:'步行',phase:'observed',activity:{kind:'travel',completed:true},time_hint:{elapsed_s:60,...mode==='cycle'?{after_ref:'new:talk'}:{}}}},{op:'event.propose',ref:'new:talk',data:{title:'交谈',phase:'observed',activity:{kind:'dialogue',completed:true},time_hint:{elapsed_s:120,...mode==='same'?{same_interval_as:'new:walk'}:{after_ref:mode==='missing'?'new:absent':'new:walk'}}}}];
+  const f=await fixture({response:operations.map(op=>JSON.stringify(op)).join('\n')});
+  try{const r=await f.turn();assert.equal(r.coreSaved,true);assert.equal(r.receipt.clockAfterS,120);assert.equal(r.receipt.issues.some(i=>i.code==='TIME_RELATION_CONFLICT'),mode!=='same');const elapsed=JSON.parse(queryBound(f.session.repo.db,'SELECT elapsed_json FROM turns WHERE id=?',[r.receipt.turnId])[0].elapsed_json);if(mode!=='same')assert.equal(elapsed.quality,'estimated');}finally{await f.session.repo.close();}
+ }
+});
+
 test('SQL repair preserves the original aliases when successful inserts renumber the live catalogue',async()=>{
   let repairs=0;
   const f=await fixture({seed:db=>add(db,'locations',{id:'z-office',name:'原办公室',kind:'room'}),

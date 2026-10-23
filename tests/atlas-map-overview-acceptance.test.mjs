@@ -18,7 +18,7 @@ const catalog=[{entityId:'place',entityKind:'location',name:'测试建筑',mapId
  {entityId:'item',entityKind:'item',name:'测试物品',locationId:'place',mapId:'world'}];
 const app=readFileSync(new URL('../ui/atlas-reference/js/app.js',import.meta.url),'utf8');
 function markerHarness(D){
- const ctx=vm.createContext({D,state:{nodeId:'inside',viewMode:'author'},window:{AtlasMap:{create:(_a,_b,c)=>{ctx.options=c;return {};}}},$:()=>null,frameChrome:()=>{}});
+ const ctx=vm.createContext({canvasStyle:null,texturePattern:null,skinColor:(_layer,_part,fallback)=>fallback,D,state:{nodeId:'inside',viewMode:'author'},window:{AtlasMap:{create:(_a,_b,c)=>{ctx.options=c;return {};}}},$:()=>null,frameChrome:()=>{}});
  vm.runInContext(app.slice(app.indexOf('function nodes('),app.indexOf('function message(')),ctx);
  vm.runInContext(app.slice(app.indexOf('const map=window.AtlasMap.create('),app.indexOf('const presetUI=')),ctx);
  return ctx;
@@ -64,7 +64,7 @@ test('损坏的单条路径或范围被忽略，不影响其余合法几何',()=
 test('没有陈设布局时，原渲染器仍实际描绘 SQL 概览路线与范围',()=>{
  const calls=[],ctx={createLinearGradient:()=>({addColorStop(){}}),fillRect(){},save(){},restore(){},beginPath(){},moveTo(){},lineTo(){},closePath(){},fill(){calls.push('fill');},stroke(){calls.push('stroke');},setLineDash(value){calls.push(Array.from(value));}};
  const source=readFileSync(new URL('../ui/atlas-reference/js/map.js',import.meta.url),'utf8');
- const runtime=vm.createContext({ctx,st:{node:{host:true,sceneStatus:'missing'},cam:{s:1},kind:'world'},extent:()=>[-50,50,-50,50],hexA:()=> 'test'});
+ const runtime=vm.createContext({canvasStyle:null,texturePattern:null,skinColor:(_layer,_part,fallback)=>fallback,ctx,st:{node:{host:true,sceneStatus:'missing'},cam:{s:1},kind:'world'},extent:()=>[-50,50,-50,50],hexA:()=> 'test'});
  // 概览渲染依赖模块级的面形材质/装饰缓存工具，夹具必须把这段上下文一起注入。
  vm.runInContext(source.slice(source.indexOf('/* ───────── M6-05 概览背景'),source.indexOf('function create(canvas'))
    +source.slice(source.indexOf('function terrainWorld('),source.indexOf('function worldMap(')),runtime);
@@ -202,7 +202,7 @@ function recordCtx(){
 }
 function overviewRuntime(ctx,st){
  const source=readFileSync(new URL('../ui/atlas-reference/js/map.js',import.meta.url),'utf8');
- const runtime=vm.createContext({ctx,st,extent:()=>[-50,50,-50,50],hexA:(c,a)=>c+'@'+a});
+ const runtime=vm.createContext({canvasStyle:null,texturePattern:null,skinColor:(_layer,_part,fallback)=>fallback,ctx,st,extent:()=>[-50,50,-50,50],hexA:(c,a)=>c+'@'+a});
  // 工具区（hash/rng/smooth/rrect/glow + M6-05 概览背景）与世界空间渲染段必须一起注入，
  // 否则 terrainWorld 里的装饰绘制找不到 smooth/hexA 这些模块级依赖。
  vm.runInContext(source.slice(source.indexOf('function hash(s)'),source.indexOf('function create(canvas'))

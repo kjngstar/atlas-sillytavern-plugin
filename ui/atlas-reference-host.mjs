@@ -23,6 +23,10 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
   Object.assign(frame.style,{display:'block',width:'100%',height:'100%',border:'0',background:'transparent'});
   let disposed=false,ready=false,viewMode='author',epoch=0,lastKey='',scopeId='',lastReadFailure='',latest=emptyReferenceData(),sqlMod=null,loading=null;
   let settings={},prefs={},presetDoc=null,presetQueue=Promise.resolve(),actionBusy=false,actionError=null,actionScope='';
+  let preferencesQueue=Promise.resolve(),skinStorage=null,skinOpening=null,ownerOpening=null;
+  function writeUiPreferences(patch){const copy=JSON.parse(JSON.stringify(patch));const pending=preferencesQueue.then(async()=>{if(disposed)throw Error('UI_DISPOSED');if(typeof settingsPort?.write!=='function')throw Error('UI_STORAGE_UNAVAILABLE');const next={...prefs,...copy};await settingsPort.write('referenceUiPreferences',next);prefs=next;return true;});preferencesQueue=pending.catch(()=>{});return pending;}
+  async function getSkinStorage(){if(!skinOpening)skinOpening=import('./atlas-skin-storage.mjs').then(({createSkinStorage})=>skinStorage=createSkinStorage({indexedDB:root.ownerDocument.defaultView?.indexedDB}));const store=await skinOpening;if(disposed){store.dispose();throw Error('UI_DISPOSED');}return store;}
+  async function skinOwner(create=false){if(prefs.skinLibraryKey)return prefs.skinLibraryKey;if(!create)return null;if(!ownerOpening)ownerOpening=(async()=>{const id=root.ownerDocument.defaultView?.crypto?.randomUUID?.();if(!id)throw Error('SKIN_STORAGE_UNAVAILABLE');await writeUiPreferences({skinLibraryKey:id});return id;})().catch(error=>{ownerOpening=null;throw error;});return ownerOpening;}
   let mapExportViews=null;
   let runtimeDiagnosticIds=new Set();
   const context=()=>{const c=getContext?.();return c?.chatMetadata?c:null;};
@@ -156,8 +160,8 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
     const scoped=diagnosticTools.atlasDiagnosticContext?.({...result.receipt?.anchor,chatUid:captured.state.chatId,
       branchId:captured.state.binding?.branchId??'main',mapId:extra.mapId})??{};
     const issues=diagnosticTools.diagnosticIssues?.(result.receipt?.issues,result.issues)??result.receipt?.issues??result.issues??[];
-    const status=result.receipt?.status,failed=status==='failed',partial=status==='partial';
-    const event={...scoped,level:failed?'error':partial?'warn':'info',source:'map',code,operation,phase:'commit',outcome:failed||partial?'failed':'success',
+    const status=result.receipt?.status,partial=status==='partial',failed=status==='failed'||partial&&result.coreSaved===false;
+    const event={...scoped,level:failed?'error':partial?'warn':'info',source:'map',code,operation,phase:'commit',outcome:failed?'failed':partial?'partial':'success',
       details:{...scoped.details,coreSaved:result.coreSaved===true,saveConfirmed:result.coreSaved===true,
         ...(typeof extra.sceneSaved==='boolean'?{sceneSaved:extra.sceneSaved}:{}),
         receiptStatus:result.receipt?.status??'noop',issueCount:issues.length}};
@@ -222,7 +226,7 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
       const commands=referenceSettingsCommands(doc,current,action);
       if(commands.length)settings=await request('PUT','/settings',{action:'batch',commands});else settings=current;
       api.setRuntimeApiKeys?.(doc.connections);
-      prefs={...prefs,active:doc.active,assignments:doc.assignments,drafts:{connections:doc.connections.filter(c=>!settings.apiPresets?.some(x=>x.id===c.id)).map(({apiKey,...c})=>c),promptPresets:doc.promptPresets.filter(p=>!settings.promptPresets?.some(x=>x.id===p.id))}};await settingsPort?.write?.('referenceUiPreferences',prefs);
+      await writeUiPreferences({active:doc.active,assignments:doc.assignments,drafts:{connections:doc.connections.filter(c=>!settings.apiPresets?.some(x=>x.id===c.id)).map(({apiKey,...c})=>c),promptPresets:doc.promptPresets.filter(p=>!settings.promptPresets?.some(x=>x.id===p.id))}});
       presetDoc=doc;return true;
     };
     const pending=presetQueue.then(task);presetQueue=pending.catch(()=>{});return pending;
@@ -264,14 +268,15 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
       if(!lorePort?.toggle)throw Error('世界书启停端口不可用');
       await lorePort.toggle(id);await readLore();
     },
-    downloadMap(filename,text){
+    downloadFile(filename,content,type='application/json'){
       // Own the Blob in the top document: embedded browsers cannot download
       // a frame-owned Blob. Invoke synchronously from the explicit link click.
       const doc=root.ownerDocument,win=doc.defaultView;
-      const url=win.URL.createObjectURL(new win.Blob([text],{type:'application/json'}));
+      const url=win.URL.createObjectURL(new win.Blob([content],{type}));
       const link=doc.createElement('a');link.href=url;link.download=filename;link.hidden=true;doc.body.append(link);
-      link.click();link.remove();setTimeout(()=>win.URL.revokeObjectURL(url),60000);
+      link.click();link.remove();win.setTimeout(()=>win.URL.revokeObjectURL(url),60000);
     },
+    downloadMap(filename,text){return bridge.downloadFile(filename,text);},
     async fetchModels(connection){
       if(connection?.provider==='sillytavern')throw Error('酒馆主连接的模型请在酒馆 API 设置中选择；自定义连接可在这里获取模型');
       let url;try{url=new URL(String(connection?.url??'').trim());}catch{throw Error('请先填写有效的 API 地址');}
@@ -387,13 +392,17 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
       const captured=scope();const result=await request('POST','/sql/chat/rollback',{chatUid:captured.state.chatId,chatId:captured.state.chatId,assistantMessageId:String(messageId)});
       if(result.coreSaved!==true)throw Error(result.issues?.map(x=>x.message).join('；')||'回退未保存');await core.refresh();await refresh(true);},
     async refresh(){await core.refresh();await refresh(true);},
-    async savePreferences(value){prefs={...prefs,interaction:value};await settingsPort?.write?.('referenceUiPreferences',prefs);},
-    async saveSkin(value){prefs={...prefs,skin:value};await settingsPort?.write?.('referenceUiPreferences',prefs);},
+    async savePreferences(value){if(!value||![1,2].includes(value.version)||value.profileId!==undefined&&!['full','mapFocus','mapOnly'].includes(value.profileId))throw Error('UI_PREFERENCE_INVALID');return writeUiPreferences({interaction:value});},
+    async saveSkin(value){return writeUiPreferences({skin:value});},
+    async listSkinPacks(){const owner=await skinOwner();return owner?(await getSkinStorage()).list(owner):[];},
+    async getSkinPack(id){const owner=await skinOwner();return owner?(await getSkinStorage()).get(owner,id):null;},
+    async putSkinPack(pack){const owner=await skinOwner(true);return (await getSkinStorage()).put(owner,pack);},
+    async removeSkinPack(id){const owner=await skinOwner();return owner?(await getSkinStorage()).remove(owner,id):true;},
     diagnostic(entry){emit(entry);},
   };
   frame.__atlasHost=bridge;frame.src=new URL('./atlas-reference/index.html',import.meta.url).href;root.append(frame);
   let wasOpen=false;
   const render=()=>{const open=core.getState().panelOpen!==false;root.style.display=open?'':'none';if(ready){frame.contentWindow?.AtlasPreview?.setVisible?.(open);if(open&&!wasOpen)frame.contentWindow?.focus?.();}wasOpen=open;void refresh();};
-  render.dispose=async()=>{disposed=true;epoch++;ready=false;frame.contentWindow?.AtlasPreview?.destroy?.();frame.__atlasHost=null;frame.remove();};
+  render.dispose=async()=>{disposed=true;skinStorage?.dispose();epoch++;ready=false;frame.contentWindow?.AtlasPreview?.destroy?.();frame.__atlasHost=null;frame.remove();};
   core.__renderPage=render;render();return render;
 }

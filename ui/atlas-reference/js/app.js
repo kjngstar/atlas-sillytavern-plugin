@@ -14,7 +14,7 @@ let preferenceStorage=window.AtlasHost.preferenceStorage;
 const preferences=ui.preferences(preferenceStorage);
 const state={page:'map',nodeId:D.meta.initialNodeId||D.ROOT.id,selected:null,inspectorTab:'cast',dock:'log',viewMode:D.meta.viewMode||'pov',mapMode:'map',open:new Set(),cameras:new Map(),query:'',filter:'all',settingsTab:'prompts',motion:true,leftClosed:false,rightClosed:false,branch:'main',advance:0,...preferences.value};
 const timers=new Set(),unlisten=[];
-let flowReadSequence=0,scopedFlows=null;
+let flowReadSequence=0,scopedFlows=null,disposed=false,hostVisible=true,profileSequence=0,layoutFrame=0,layoutWaiters=[],fullFocus=null;
 function refreshFlows(){
  const sequence=++flowReadSequence,scopeKey=D.meta.scopeKey,revision=D.meta.revision,mapId=state.nodeId;
  const selectedEntityId=state.selected?.kind==='character'?state.selected.id:null;
@@ -28,6 +28,8 @@ function refreshFlows(){
 }
 let mapExportUrl=null;
 let mapExportText='';
+let activeSkin=window.AtlasSkinRuntime.builtin('builtin.starmap'),skinCatalog=[],skinCatalogSequence=0;
+
 const presets=window.AtlasPresetStore.create(D.PROMPTS,{storage:null,initialDocument:window.AtlasHost.initial.presets,onPersist:window.AtlasHost.persistPresets});
 function later(fn,ms){const id=setTimeout(()=>{timers.delete(id);fn();},ms);timers.add(id);return id;}
 function listen(el,type,fn,opt){el.addEventListener(type,fn,opt);unlisten.push(()=>el.removeEventListener(type,fn,opt));}
@@ -56,20 +58,45 @@ function sceneItems(id=state.nodeId){return D.ITEMS.filter(it=>within(it.mapNode
 function sceneMessages(id=state.nodeId){return D.MESSAGES.filter(m=>(within(m.mapNodeId||m.locationId,id)||within(id,m.mapNodeId||m.locationId))&&known(m));}
 function message(id){return D.MESSAGES.find(m=>m.id===id);}
 function task(id){return D.TASKS.find(t=>t.id===id);}
-function setPage(page){window.AtlasHost.onPage?.(page);state.page=names[page]?page:'map';state.query='';state.filter='all';renderPage();renderRail();map.setPaused(state.page!=='map'||document.hidden);if(state.page==='map')requestAnimationFrame(()=>map.resize());}
-function navigate(n,silent=false){
+function effectivePage(){return ui.resolveUIProfile(state.profileId).profile.behavior.forceMapPage?'map':state.page;}
+function syncMapVisibility(){map.setPaused(disposed||!hostVisible||document.hidden||effectivePage()!=='map');}
+function resizeAfterLayout(){
+ if(disposed)return Promise.resolve({ok:false,errorCode:'UI_DISPOSED'});
+ if(!hostVisible||document.hidden||!$('#viewport').getBoundingClientRect().width)return Promise.resolve({ok:true,layoutPending:true});
+ return new Promise(resolve=>{layoutWaiters.push(resolve);if(layoutFrame)return;layoutFrame=requestAnimationFrame(()=>{layoutFrame=0;let result;try{if(!disposed&&hostVisible&&!document.hidden)map.resize();result={ok:!disposed};}catch(error){result={ok:false,errorCode:'UI_PROFILE_LAYOUT_FAILED',message:error.message};}layoutWaiters.splice(0).forEach(done=>done(result));});});
+}
+function renderSelectionOverlay(){const el=$('#mapSelection');if(!el)return;const show=ui.resolveUIProfile(state.profileId).profile.behavior.selectionPresentation==='map-overlay'&&!!state.selected&&!state.overlayDismissed;el.hidden=!show;if(show)$('#mapSelectionBody').innerHTML=detailHTML();}
+function applyUIProfile(){
+ const profile=ui.resolveUIProfile(state.profileId).profile;root.dataset.uiProfile=profile.id;
+ for(const el of $$('[data-ui-slot]'))el.toggleAttribute('data-profile-hidden',profile.visible[el.dataset.uiSlot]===false);
+ for(const [id,slot]of [['reopenLeft','locationTree'],['reopenRight','inspector']])$('#'+id).toggleAttribute('data-profile-hidden',!profile.visible[slot]);
+ $('#profileSwitcher').value=profile.id;$('#workspacePage').hidden=effectivePage()==='map';$('#viewport').classList.toggle('page-open',effectivePage()!=='map');renderSelectionOverlay();syncMapVisibility();
+}
+async function setUIProfile(id){
+ if(disposed)return {ok:false,errorCode:'UI_DISPOSED'};const result=ui.resolveUIProfile(id);if(!result.ok)return result;
+ const ticket=++profileSequence,previous=state.profileId;
+ if(previous==='full'&&id!=='full'){const element=document.activeElement;fullFocus={element,start:element?.selectionStart,end:element?.selectionEnd,scroll:element?.scrollTop,workspace:$('#workspacePage').scrollTop};}
+ state.profileId=id;applyUIProfile();const measured=await resizeAfterLayout();
+ if(ticket!==profileSequence||disposed)return {ok:false,errorCode:'UI_PROFILE_SUPERSEDED'};
+ if(!measured.ok){state.profileId=previous;applyUIProfile();diagnostic('warn','UI_PROFILE_RECOVERED','布局失败，已恢复上一显示配置');return measured;}
+ if(id==='full'&&fullFocus){const saved=fullFocus;fullFocus=null;$('#workspacePage').scrollTop=saved.workspace;if(saved.element?.isConnected){saved.element.focus({preventScroll:true});if(saved.start!=null)saved.element.setSelectionRange?.(saved.start,saved.end);saved.element.scrollTop=saved.scroll;}}
+ preferences.set('profileId',id);const saved=await preferences.flush();if(ticket!==profileSequence||disposed)return {ok:false,errorCode:'UI_PROFILE_SUPERSEDED'};
+ return {ok:true,profileId:id,saved:saved.ok,layoutPending:measured.layoutPending===true,warnings:saved.ok?[]:['UI_PREFERENCE_SAVE_FAILED']};
+}
+function setPage(page){window.AtlasHost.onPage?.(page);state.page=names[page]?page:'map';if(state.page!=='map'&&state.profileId!=='full')void setUIProfile('full');state.query='';state.filter='all';renderPage();renderRail();syncMapVisibility();if(effectivePage()==='map')void resizeAfterLayout();}
+function navigate(n,silent=false,{preserveWorkspace=false,logicalPage=null,resetScope=false}={}){
  if(typeof n==='string')n=byId(n);if(!n||!known(n))return false;if(!n.host){const child=byId(n.childMapIds?.[0]);if(!child)return false;n=child;}
- if(map.state.node)state.cameras.set(state.nodeId,{...map.state.tgt,fit:map.fitScale()});
- state.nodeId=n.id;state.selected=null;state.inspectorTab='cast';state.page='map';
+ if(map.state.node&&!resetScope)state.cameras.set(state.nodeId,{...map.state.tgt,fit:map.fitScale()});
+ state.nodeId=n.id;state.selected=null;state.overlayDismissed=false;state.inspectorTab='cast';state.page=logicalPage||'map';
  for(const v of path(n.id)||[])state.open.add(v.id);
  map.setPath(n,path(n.id)||[n]);map.setFilter(new Set());
  const cam=state.cameras.get(n.id);if(cam){map.state.cam={x:cam.x,y:cam.y,s:cam.s*map.fitScale()/(cam.fit||map.fitScale())};map.state.tgt={...map.state.cam};}
- map.setMode(state.mapMode);map.setPaused(document.hidden);
- renderAll();refreshFlows();requestAnimationFrame(()=>map.resize());
+ map.setMode(state.mapMode);syncMapVisibility();
+ renderAll({preserveWorkspace});refreshFlows();void resizeAfterLayout();
  if(!silent)toast(`已进入 ${n.name}`);
  return true;
 }
-function select(kind,id,show=false){state.selected={kind,id};refreshFlows();state.inspectorTab='details';renderInspector();if(show)openRight();const capturedScope=D.meta.scopeKey,capturedRevision=D.meta.revision;void window.AtlasHost.inspect(kind,id).then(value=>{if(!value||D.meta.scopeKey!==capturedScope||D.meta.revision!==capturedRevision||state.selected?.kind!==kind||state.selected?.id!==id)return;const row=kind==='character'?D.CAST.find(x=>x.id===id):kind==='item'?D.ITEMS.find(x=>x.id===id):kind==='message'?D.MESSAGES.find(x=>x.id===id):(kind==='task'||kind==='action'||kind==='journey')?D.TASKS.find(x=>x.id===id):(D.LOCATIONS||[]).find(x=>x.id===id);if(row)Object.assign(row,value);renderInspector();}).catch(error=>toast(error.message,'warn'));}
+function select(kind,id,show=false){state.overlayDismissed=false;state.selected={kind,id};refreshFlows();state.inspectorTab='details';renderInspector();if(show)openRight();const capturedScope=D.meta.scopeKey,capturedRevision=D.meta.revision;void window.AtlasHost.inspect(kind,id).then(value=>{if(!value||D.meta.scopeKey!==capturedScope||D.meta.revision!==capturedRevision||state.selected?.kind!==kind||state.selected?.id!==id)return;const row=kind==='character'?D.CAST.find(x=>x.id===id):kind==='item'?D.ITEMS.find(x=>x.id===id):kind==='message'?D.MESSAGES.find(x=>x.id===id):(kind==='task'||kind==='action'||kind==='journey')?D.TASKS.find(x=>x.id===id):(D.LOCATIONS||[]).find(x=>x.id===id);if(row)Object.assign(row,value);renderInspector();}).catch(error=>toast(error.message,'warn'));}
 function inspectPlace(id,focus=false){
  const n=byId(id);if(!n||!known(n))return false;
  if(focus){const chain=path(id)||[],parent=chain[chain.length-2];navigate(parent||n,true);map.refreshMarks();map.focusKey(id);}
@@ -149,12 +176,13 @@ function renderTree(){let count=0;const walk=(n,depth)=>{if(!known(n))return '';
  return `<div class="tree-row ${active?'on':''}" style="padding-left:${6+depth*12}px"><button class="tw ${open&&has?'open':''}" data-expand="${esc(n.id)}" aria-label="${open?'收起':'展开'}${esc(n.name)}" ${has?'':'disabled'}>${has?icon('chev'):''}</button><button class="tree-link" data-go="${esc(n.id)}"><i class="tdot" style="--c:${color[n.kind]||color.world}"></i><span class="tname">${esc(n.name)}</span>${sceneCast(n.id).length?`<em class="tflag live">${sceneCast(n.id).length}人</em>`:''}<em class="tnum">${esc(n.code)}</em></button></div>${has&&open?n.children.map(c=>walk(c,depth+1)).join(''):''}`;};
  $('#layerTree').innerHTML=walk(D.ROOT,0);$('#treeCount').textContent=count+' 节点';
 }
-const flags=[['showGrid','网格底图'],['showMarks','世界标记'],['showLabels','名称标签'],['showLinks','人物联系线'],['showRadar','雷达扫描']];
+const flags=[['showGrid','网格底图'],['showMarks','世界标记'],['showLabels','名称标签'],['showLinks','人物联系线'],['showRadar','室外距离环']];
 function renderSwitches(){const el=$('#switchList');el.innerHTML=flags.map(([k,t])=>`<button class="sw-row ${map.state[k]?'on':''}" data-flag="${k}" aria-pressed="${map.state[k]}"><span>${t}</span><i class="sw"></i></button>`).join('');$('#zGrid').classList.toggle('on',map.state.showGrid);}
 function renderChips(){const g=current().geo,arr=current().kind==='city'?(g.districts||[]):[];$('#regionChips').innerHTML=arr.length?`<button class="chip ${!map.state.filter.size?'on':''}" data-filter-region="all">全部</button>`+arr.map(d=>`<button class="chip ${map.state.filter.has(d.id)?'on':''}" data-filter-region="${esc(d.id)}">${esc(d.name)}</button>`).join(''):'<span class="scope-note">筛选会随当前地图切换</span>';}
-function renderPlace(){const n=current(),roster=sceneCast(),items=sceneItems();$('#placeCard').innerHTML=`<div class="pl-top"><div><div class="pl-name">${esc(n.name)}</div><div class="pl-path mono">${esc(n.code)} · ${esc(D.LEVELS.find(l=>l.key===n.kind)?.name||n.tag)} <span class="diagram-tag">空间示意</span></div></div></div><div class="pl-grid"><div class="pl-cell"><span>人物</span><b class="c">${roster.length}</b></div><div class="pl-cell"><span>物品</span><b class="a">${items.length}</b></div><div class="pl-cell"><span>消息</span><b class="v">${sceneMessages().length}</b></div></div>`;
- if(n.containerLocationId&&state.viewMode==='author')$('#placeCard').innerHTML+=`<div class="detail-actions"><button class="action-btn" data-layout="${esc(n.id)}" ${D.meta.engine?.busy?'disabled':''}>${n.hasLayout?'更新布局':'生成布局'}</button><span class="scope-note">${n.hasLayout?'已保存空间布局':'尚未生成空间布局'}</span></div>`;
- if(scopedFlows?.mapId===n.id)$('#placeCard').innerHTML+=`<p class="scope-note" aria-live="polite">联系 ${scopedFlows.relations.length} · 传播 ${scopedFlows.flows.length} · 行程 ${scopedFlows.journeys.length}${state.selected?.kind==='character'?'':' · 选中人物查看联系'}</p>`;
+function renderPlace(){const n=current(),roster=sceneCast(),items=sceneItems();let body=`<div class="pl-path mono">${esc(n.code)} · ${esc(D.LEVELS.find(l=>l.key===n.kind)?.name||n.tag)} <span class="diagram-tag">空间示意</span></div><div class="pl-grid"><div class="pl-cell"><span>人物</span><b class="c">${roster.length}</b></div><div class="pl-cell"><span>物品</span><b class="a">${items.length}</b></div><div class="pl-cell"><span>消息</span><b class="v">${sceneMessages().length}</b></div></div>`;
+ if(n.containerLocationId&&state.viewMode==='author')body+=`<div class="detail-actions"><button class="action-btn" data-layout="${esc(n.id)}" ${D.meta.engine?.busy?'disabled':''}>${n.hasLayout?'更新布局':'生成布局'}</button><span class="scope-note">${n.hasLayout?'已保存空间布局':'尚未生成空间布局'}</span></div>`;
+ if(scopedFlows?.mapId===n.id)body+=`<p class="scope-note" aria-live="polite">联系 ${scopedFlows.relations.length} · 传播 ${scopedFlows.flows.length} · 行程 ${scopedFlows.journeys.length}${state.selected?.kind==='character'?'':' · 选中人物查看联系'}</p>`;
+ $('#placeCard').innerHTML=`<summary class="pl-summary"><span class="pl-name">${esc(n.name)}</span><span class="pl-summary-hint">概况</span>${icon('chev-d')}</summary><div class="pl-body">${body}</div>`;
  $('#scWorld').textContent=n.code+' · '+n.name;$('#scRatio').textContent=n.metric?'1 u ≈ '+formatDistance(n.metric):'未标定 · 坐标格';
  $('#ticker').textContent=D.EVENTS.filter(known).slice(0,2).map(e=>e.title).join('　 ·　 ');$('#ticker').style.animation='none';
 }
@@ -181,7 +209,7 @@ function detailHTML(){const s=state.selected;if(!s)return '';
  if(s.kind==='lore'){const l=D.LORE.find(l=>l.id===s.id);if(!l)return '';return `<div class="detail-tags"><em>${esc(l.kind)}</em><em>${l.enabled?'已启用':'已停用'}</em></div><h3>${esc(l.title)}</h3><p class="detail-text">${esc(l.content)}</p><button class="action-btn" data-lore-target="${esc(l.id)}">查看关联对象</button>`;}
  return `<h3>${esc(s.name||'地图对象')}</h3>${field('信息',s.sub||'点击层级树可查看所属地点。')}`;
 }
-function renderInspector(){const n=current(),sel=state.selected;if(!sel&&state.inspectorTab==='details')state.inspectorTab='cast';$('#insTitle').textContent=sel?'对象详情':n.name;const tabs=$('#inspTabs');tabs.innerHTML=sel?`<button class="it active" data-inspector="details">详情</button><button class="it" data-clear-selection>返回地点</button>`:[['cast','人物',sceneCast().length],['items','物品',sceneItems().length],['msgs','消息',sceneMessages().length],['lore','地点','']].map(([k,t,num])=>`<button class="it ${state.inspectorTab===k?'active':''}" data-inspector="${k}">${t} <em>${num}</em></button>`).join('');
+function renderInspector(){renderSelectionOverlay();const n=current(),sel=state.selected;if(!sel&&state.inspectorTab==='details')state.inspectorTab='cast';$('#insTitle').textContent=sel?'对象详情':n.name;const tabs=$('#inspTabs');tabs.innerHTML=sel?`<button class="it active" data-inspector="details">详情</button><button class="it" data-clear-selection>返回地点</button>`:[['cast','人物',sceneCast().length],['items','物品',sceneItems().length],['msgs','消息',sceneMessages().length],['lore','地点','']].map(([k,t,num])=>`<button class="it ${state.inspectorTab===k?'active':''}" data-inspector="${k}">${t} <em>${num}</em></button>`).join('');
  const el=$('#inspector');if(sel){el.innerHTML=detailHTML();return;}
  if(state.inspectorTab==='cast')el.innerHTML=`<div class="scope-caption">${esc(n.name)} · 本地图的人物</div>`+(sceneCast().map(c=>castCard(c)).join('')||empty('这里暂无已记录的在场人物'));
  else if(state.inspectorTab==='items')el.innerHTML=sceneItems().map(itemCard).join('')||empty('这里暂无已记录的物品');
@@ -245,8 +273,8 @@ function renderDock(){
  const engine=D.meta.engine??{};$('#nextDemo').disabled=!!engine.busy||!engine.hasChat||!engine.sqlEnabled||engine.bound&&!engine.enabled;$('#nextDemo').textContent=engine.busy?enginePhaseText(engine):engine.bound?'立即推演':'建立当前世界';
 }
 function pageHeader(title,sub,extra=''){return `<div class="workspace-header"><div><span class="workspace-eyebrow">ATLAS · ${esc(D.meta.worldName)}</span><h2>${esc(title)}</h2><p>${esc(sub)}</p></div>${extra}</div>`;}
-function renderPage(){presetUI.captureState();const el=$('#workspacePage');el.hidden=state.page==='map';$('#viewport').classList.toggle('page-open',state.page!=='map');
- if(state.page==='map'){el.innerHTML='';return;}
+function renderPage(){presetUI.captureState();const el=$('#workspacePage');el.hidden=effectivePage()==='map';$('#viewport').classList.toggle('page-open',effectivePage()!=='map');
+ if(effectivePage()==='map'){if(state.page==='map')el.replaceChildren();return;}
  const descriptions={cast:'查看当前世界已记录的人物；选择卡片查看详情与位置。',items:'查看放置于地点或由人物持有的物品。',msgs:'查看已送达、传播中与待核实的消息。',sim:'查看后台准备、旅行与消息传播，选择任务可联动地图。',time:'按回合查看世界发生过的事情。',lore:'浏览启用资料与地图、人物之间的关联。',diag:'所有问题汇总在同一时间线，可展开完整内容。',prefs:'自由编辑分段角色与内容，调整界面外观。'};
  el.innerHTML=pageHeader(names[state.page],descriptions[state.page],`<button class="action-btn" data-page="map">${icon('map')}返回地图</button>`);
  if(['cast','items','msgs'].includes(state.page)){
@@ -319,14 +347,14 @@ function diagnosticRows(q='',level='all'){
 function settingsHTML(){const tabs=[['prompts','提示词'],['connection','API 连接'],['assignments','任务与分批'],['interaction','地图交互'],['appearance','外观']];let html=`<div class="settings-tabs" role="tablist" aria-label="预设分类">${tabs.map(([id,t])=>`<button class="filter-btn ${state.settingsTab===id?'on':''}" data-settings-tab="${id}" role="tab" aria-selected="${state.settingsTab===id}">${t}</button>`).join('')}</div>`;
  if(state.settingsTab==='interaction')return html+`<div class="appearance-form"><h3>地图交互</h3><label class="appearance-row"><span>单击地点直接进入子地图</span><input type="checkbox" data-single-click-enter ${state.singleClickEnter?'checked':''}></label><p class="scope-note">默认关闭：单击地点查看右栏信息，再点击「进入此地点」。人物、物品与消息始终单击查看详情。</p><label class="appearance-row"><span>收起地图图例</span><input type="checkbox" data-legend-collapsed ${state.legendCollapsed?'checked':''}></label><p class="scope-note">图例固定收纳在比例尺上方。比例尺长度保持不变，缩放只改变距离数值。</p><p class="scope-note">${preferences.persistent?'交互偏好保存在当前浏览器。':'当前环境无法保存到浏览器，偏好在本次打开期间有效。'}</p></div>`;
  if(state.settingsTab!=='appearance')return html+presetUI.render(state.settingsTab);
- return html+`<div class="appearance-form"><h3>星幕 · 界面外观</h3><p>保留层级结构与交互，按偏好调整视觉。</p><label class="appearance-row"><span>界面强调色</span><input id="skinAccent" type="color" value="${state.accent||'#43e0ff'}"></label><label class="appearance-row"><span>地图雷达扫描</span><input type="checkbox" data-appearance-radar ${map.state.showRadar?'checked':''}></label><label class="appearance-row"><span>界面动画</span><input type="checkbox" data-appearance-motion ${state.motion?'checked':''}></label><label class="appearance-row"><span>显示坐标读数</span><input type="checkbox" data-appearance-coordinates ${root.classList.contains('show-coordinates')?'checked':''}></label><div class="detail-actions"><button class="action-btn" data-export="skin">导出皮肤</button><label class="action-btn">导入皮肤<input id="skinImport" type="file" accept=".json,application/json" hidden></label><button class="action-btn" data-skin-reset>恢复默认外观</button></div><p class="scope-note">皮肤包含颜色与显示选项，导入后立即预览。</p></div>`;
+ return html+window.AtlasAppearance.appearanceSettingsHTML({skin:skinValue(),catalog:skinCatalog,runtime:window.AtlasSkinRuntime});
 }
-function renderAll(){renderRail();renderCrumbs();renderLadder();renderTree();renderSwitches();renderChips();renderPlace();renderInspector();renderDock();renderPage();renderModes();}
+function renderAll({preserveWorkspace=false}={}){renderRail();renderCrumbs();renderLadder();renderTree();renderSwitches();renderChips();renderPlace();renderInspector();renderDock();if(!preserveWorkspace)renderPage();renderModes();applyUIProfile();}
 function renderModes(){$$('#viewModes .vm').forEach(b=>{b.classList.toggle('active',b.dataset.mode===state.mapMode);b.setAttribute('aria-pressed',b.dataset.mode===state.mapMode);});}
 function showFlow(id){const m=message(id);if(!m||!known(m))return;let destination=Object.keys(D.FLOWS).find(mapId=>(D.FLOWS[mapId]||[]).some(e=>e.id===id)&&mapId===state.nodeId)||Object.keys(D.FLOWS).find(mapId=>(D.FLOWS[mapId]||[]).some(e=>e.id===id));destination=destination||m.mapNodeId||m.locationId;state.mapMode='flow';navigate(destination,true);map.setMode('flow');select('message',id,true);renderModes();}
 function showTask(id){const t=task(id);if(!t||!known(t))return;state.mapMode='sim';navigate(t.mapId,true);map.setMode('sim');select('task',id,true);renderModes();}
 function showEvent(id){const e=D.EVENTS.find(e=>e.id===id);if(!e||!known(e))return;if(byId(e.mapId))navigate(e.mapId,true);select('event',id,true);map.selectKey(e.target);}
-function openRight(){state.rightClosed=false;$('#panelRight').classList.remove('collapsed');root.classList.toggle('right-open',root.clientWidth<=720);$('#reopenRight').hidden=false;later(()=>map.resize(),280);}
+function openRight(){if(ui.resolveUIProfile(state.profileId).profile.behavior.selectionPresentation==='map-overlay'){renderSelectionOverlay();return;}state.rightClosed=false;$('#panelRight').classList.remove('collapsed');root.classList.toggle('right-open',root.clientWidth<=720);$('#reopenRight').hidden=false;later(()=>map.resize(),280);}
 function togglePanel(side){const left=side==='left',key=left?'leftClosed':'rightClosed',panel=$(left?'#panelLeft':'#panelRight');state[key]=!state[key];panel.classList.toggle('collapsed',state[key]);root.classList.toggle(left?'left-open':'right-open',!state[key]&&root.clientWidth<=(left?960:720));$(left?'#reopenLeft':'#reopenRight').hidden=false;later(()=>map.resize(),280);}
 function toast(text,kind='ok'){const n=document.createElement('div');n.className='toast '+kind;const dot=document.createElement('i');dot.className='td';const span=document.createElement('span');span.textContent=text;n.append(dot,span);$('#toastWrap').append(n);later(()=>{n.classList.add('out');later(()=>n.remove(),320);},2400);}
 function diagnostic(level,code,message,details=''){D.DIAGNOSTICS.unshift({id:'diag-'+Date.now(),t:clock()+':00',level,source:'preview',code,message,details});}
@@ -374,7 +402,7 @@ function resetDemo(){return runHost('refresh','已刷新当前世界');}
 function retry(){return runHost('retry','重试请求已处理');}
  function generateLayout(id=state.nodeId){return runHost('layout','空间布局已保存',id);}
 function switchView(){return window.AtlasHost.setViewMode(state.viewMode==='author'?'pov':'author').catch(error=>toast(error.message,'warn'));}
-function download(name,content,type='application/json'){const blob=new Blob([content],{type}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;a.click();later(()=>URL.revokeObjectURL(url),1000);}
+function download(name,content,type='application/json'){if(window.AtlasHost.downloadFile){window.AtlasHost.downloadFile(name,content,type);return;}const blob=new Blob([content],{type}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;a.click();later(()=>URL.revokeObjectURL(url),1000);}
 /** M6-11③：显式建设本图。切页/缩放/打开地图都不会走到这里，只有按钮会。 */
 function buildMap(mapId){return runHost('build','本图建设已提交',mapId,{mode:'local'});}
 /** M6-18：导出升级前原档。失败必须给明确原因并写进统一诊断，成功则让用户核对 SHA256。 */
@@ -415,11 +443,17 @@ async function exportData(kind){
    modal('导出当前地图',`<p>已准备 ${result.file.scope.mapCount} 张地图（含子图）的布局、坐标与组装约束。</p><p><a class="action-btn" href="${esc(mapExportUrl)}" download="${esc(result.filename)}">下载地图 JSON</a> <button class="action-btn" data-copy-map-export>复制地图 JSON</button></p><p class="scope-note">此文件用于分析，不是可直接导入的存档。</p><details><summary>查看 JSON</summary><pre>${esc(mapExportText)}</pre></details>`);
    if(window.AtlasHost.downloadMap){const text=mapExportText;$('#modalBody a[download]').onclick=event=>{event.preventDefault();window.AtlasHost.downloadMap(result.filename,text);};}
   }catch(error){toast(error.message,'warn');}
- }else if(kind==='receipts')download('atlas-turn-receipts.json',JSON.stringify(D.RECEIPTS,null,2));else if(kind==='diagnostics')download('atlas-preview-diagnostics.jsonl',D.DIAGNOSTICS.map(d=>JSON.stringify(d)).join('\n'),'application/x-ndjson');else download('atlas-preview-skin.json',JSON.stringify({kind:'atlas-preview-skin',version:1,accent:state.accent||'#43e0ff',motion:state.motion,radar:map.state.showRadar,coordinates:root.classList.contains('show-coordinates')},null,2));
+ }else if(kind==='receipts')download('atlas-turn-receipts.json',JSON.stringify(D.RECEIPTS,null,2));else if(kind==='diagnostics')download('atlas-preview-diagnostics.jsonl',D.DIAGNOSTICS.map(d=>JSON.stringify(d)).join('\n'),'application/x-ndjson');else if(Object.keys(skinValue().assets).length)download('atlas-skin.zip',await appearance.exportPack(),'application/zip');else download('atlas-ui-theme.json',JSON.stringify(skinValue(),null,2));
 }
-function skinValue(){return {kind:'atlas-preview-skin',version:1,accent:state.accent||'#43e0ff',motion:state.motion,radar:map.state.showRadar,coordinates:root.classList.contains('show-coordinates')};}
-function saveSkin(){void window.AtlasHost.saveSkin(skinValue()).catch(error=>toast(error.message,'warn'));}
-function applySkin(s){if(s.kind!=='atlas-preview-skin'||s.version!==1||!/^#[0-9a-f]{6}$/i.test(s.accent))throw new Error('皮肤格式不支持，请使用导出的皮肤文件。');state.accent=s.accent;root.style.setProperty('--cyan',s.accent);state.motion=s.motion!==false;root.dataset.motion=state.motion?'full':'reduced';map.setFlag('showRadar',s.radar!==false);root.classList.toggle('show-coordinates',s.coordinates===true);renderSwitches();}
+function skinValue(){return clone(activeSkin);}
+function applySkin(value,resources={}){const result=window.AtlasSkinRuntime.apply(value,{root,map,resources});if(result.ok){activeSkin=result.skin;state.accent=activeSkin.tokens['ui.accent']||'#43e0ff';state.motion=activeSkin.options.motion;renderSwitches();}return result;}
+async function refreshSkinCatalog(){const sequence=++skinCatalogSequence,rows=await appearance.list();if(!disposed&&sequence===skinCatalogSequence){skinCatalog=rows;if(state.page==='prefs'&&state.settingsTab==='appearance')renderPage();}}
+const appearance=window.AtlasAppearance.createAppearanceController({runtime:window.AtlasSkinRuntime,host:window.AtlasHost,apply:applySkin,getSkin:skinValue,diagnostic:entry=>window.AtlasHost.diagnostic(entry)});
+async function setSkin(value){const result=await appearance.setSkin(value);if(!result.ok&&result.errorCode!=='SKIN_SUPERSEDED')toast(result.message||result.errorCode,'warn');if(result.ok)await resizeAfterLayout();return result;}
+async function setTheme(id){return setSkin(id);}
+async function updateSkin(section,key,value){const next=skinValue();next[section][key]=value;return setSkin(next);}
+async function importSkin(file){const result=await appearance.importFile(file);if(result.ok){await refreshSkinCatalog();toast(result.saved?'皮肤已安装并保存':'皮肤已应用，本次预览尚未保存');renderPage();}else if(result.errorCode!=='SKIN_SUPERSEDED')toast(result.message||result.errorCode,'warn');return result;}
+
 function modal(title,body){$('#modalTitle').textContent=title;$('#modalBody').innerHTML=body;$('#demoModal').hidden=false;$('#modalClose').focus();}
 let paletteList=[],paletteIndex=0;
 function paletteCommands(){return [
@@ -486,7 +520,7 @@ function bind(){
   if(b.hasAttribute('data-backup-recheck')){state.backupChecked=false;state.backup=undefined;renderPage();refreshBackupStatus(true);return;}
   if(b.hasAttribute('data-copy-diagnostics')){copyDiagnostics();return;}
   if(b.dataset.event){showEvent(b.dataset.event);return;}if(b.dataset.retry){retry(b.dataset.retry);return;}
-  if(b.dataset.settingsTab){state.settingsTab=b.dataset.settingsTab;renderPage();return;}
+  if(b.dataset.settingsTab){state.settingsTab=b.dataset.settingsTab;renderPage();if(state.settingsTab==='appearance')void refreshSkinCatalog();return;}
   if(b.hasAttribute('data-copy-map-export')){try{await navigator.clipboard.writeText(mapExportText);toast('地图 JSON 已复制');}catch{toast('复制不可用，请展开 JSON 后复制或使用下载链接','warn');}return;}
   if(b.dataset.export){await exportData(b.dataset.export);return;}
   if(b.dataset.loreToggle){try{await window.AtlasHost.toggleLore(b.dataset.loreToggle);toast('世界书条目已更新');}catch(error){toast(error.message,'warn');}return;}
@@ -494,23 +528,25 @@ function bind(){
   if(b.dataset.loreTarget){const l=D.LORE.find(l=>l.id===b.dataset.loreTarget);if(!l.target){toast('当前条目没有匹配到已记录对象','warn');return;}if(byId(l.target))navigate(l.target);else showEntity('character',l.target,true);return;}
   if(b.hasAttribute('data-demo-next')){advanceDemo();return;}
   if(b.hasAttribute('data-layout')){generateLayout(b.dataset.layout);return;}
-  if(b.hasAttribute('data-skin-reset')){applySkin({kind:'atlas-preview-skin',version:1,accent:'#43e0ff',motion:true,radar:true,coordinates:false});saveSkin();renderPage();return;}
+  if(b.hasAttribute('data-skin-reset')){await setTheme('builtin.starmap');renderPage();return;}
+  if(b.hasAttribute('data-export-skin-pack')){try{download('atlas-skin.zip',await appearance.exportPack(),'application/zip');}catch(error){toast(error.message,'warn');}return;}
+  if(b.hasAttribute('data-remove-skin')){const result=await appearance.remove(activeSkin.id);if(!result.ok)toast(result.errorCode,'warn');await refreshSkinCatalog();renderPage();return;}
   if(b.dataset.command!=null){runCommand(+b.dataset.command);return;}
   if(b.classList.contains('rail-ava')||b.id==='viewBadge'){switchView();return;}
  });
  listen(root,'input',e=>{const el=e.target;if(presetUI.input(el))return;if(el.id==='catalogSearch'){state.query=el.value;renderCatalog();}if(el.id==='palInput'){paletteIndex=0;renderPalette();}
   if(el.id==='diagnosticSearch')$('#diagnosticRows').innerHTML=diagnosticRows(el.value,$('#diagnosticLevel').value);
-  if(el.id==='skinAccent'){state.accent=el.value;root.style.setProperty('--cyan',el.value);saveSkin();}
+  if(el.id==='skinAccent')void updateSkin('tokens','ui.accent',el.value);
  });
  listen(root,'change',async e=>{const el=e.target;if(await presetUI.change(el))return;
   if(el.id==='diagnosticLevel')$('#diagnosticRows').innerHTML=diagnosticRows($('#diagnosticSearch').value,el.value);
-  if(el.hasAttribute('data-appearance-radar')){map.setFlag('showRadar',el.checked);renderSwitches();}
-  if(el.hasAttribute('data-appearance-motion')){state.motion=el.checked;root.dataset.motion=el.checked?'full':'reduced';}
-  if(el.hasAttribute('data-appearance-coordinates'))root.classList.toggle('show-coordinates',el.checked);
+  if(el.id==='profileSwitcher'){await setUIProfile(el.value);return;}
+  if(el.hasAttribute('data-skin-select')){await setTheme(el.value);renderPage();return;}
+  for(const [attribute,section]of [['skinComponent','components'],['skinMapStyle','mapStyles'],['skinToken','tokens']])if(el.dataset[attribute]){await updateSkin(section,el.dataset[attribute],el.type==='range'?Number(el.value):el.value);return;}
+  for(const key of ['radar','motion','coordinates'])if(el.hasAttribute('data-appearance-'+key)){await updateSkin('options',key,el.checked);return;}
   if(el.hasAttribute('data-single-click-enter'))setPreference('singleClickEnter',el.checked);
   if(el.hasAttribute('data-legend-collapsed'))setPreference('legendCollapsed',el.checked);
-  if(el.hasAttribute('data-appearance-radar')||el.hasAttribute('data-appearance-motion')||el.hasAttribute('data-appearance-coordinates'))saveSkin();
-  if(el.id==='skinImport'&&el.files?.[0]){try{applySkin(JSON.parse(await el.files[0].text()));saveSkin();renderPage();toast('皮肤已导入');}catch(err){toast(err.message,'warn');}}
+  if(el.id==='skinImport'&&el.files?.[0])await importSkin(el.files[0]);
  });
  $('#zIn').onclick=()=>map.zoomBy(1.3);$('#zOut').onclick=()=>map.zoomBy(1/1.3);$('#zFit').onclick=()=>map.fit(true);
  $('#zGrid').onclick=()=>{map.setFlag('showGrid',!map.state.showGrid);renderSwitches();};
@@ -525,20 +561,32 @@ function bind(){
  $('.palette-backdrop').onclick=closePalette;
  $('#modalClose').onclick=()=>$('#demoModal').hidden=true;
  $('#demoModal').onclick=e=>{if(e.target===$('#demoModal'))$('#demoModal').hidden=true;};
- $$('.wc').forEach(b=>b.onclick=()=>{if(b.dataset.act==='max'){root.classList.toggle('maximized');map.resize();}else{window.AtlasHost.close();map.setPaused(true);}});
- $('#windowRestore').onclick=()=>{$('#appWindow').hidden=false;$('#windowRestore').hidden=true;map.resize();map.setPaused(state.page!=='map');};
+ $('#closeMapSelection').onclick=()=>{state.overlayDismissed=true;renderSelectionOverlay();$('#map').focus({preventScroll:true});};
+ $('#expandMapSelection').onclick=async()=>{state.page='map';await setUIProfile('full');renderPage();openRight();};
+ $$('.wc').forEach(b=>b.onclick=()=>{if(b.dataset.act==='max'){root.classList.toggle('maximized');void resizeAfterLayout();}else{hostVisible=false;syncMapVisibility();window.AtlasHost.close();}});
+ $('#windowRestore').onclick=()=>{$('#appWindow').hidden=false;$('#windowRestore').hidden=true;hostVisible=true;syncMapVisibility();void resizeAfterLayout();};
  listen(document,'keydown',e=>{
+  if(!hostVisible||document.hidden)return;
   const editing=/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName);
   if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='k'){e.preventDefault();openPalette();return;}
-  if(e.key==='Escape'){closePalette();$('#demoModal').hidden=true;root.classList.remove('left-open','right-open');$('#reopenLeft').hidden=false;$('#reopenRight').hidden=false;return;}
+  if(e.key==='Escape'){if(!$('#mapSelection').hidden){state.overlayDismissed=true;renderSelectionOverlay();$('#map').focus({preventScroll:true});return;}closePalette();$('#demoModal').hidden=true;root.classList.remove('left-open','right-open');$('#reopenLeft').hidden=false;$('#reopenRight').hidden=false;return;}
   if($('#paletteWrap').classList.contains('on')){if(e.key==='ArrowDown'||e.key==='ArrowUp'){e.preventDefault();paletteIndex+=e.key==='ArrowDown'?1:-1;renderPalette();}if(e.key==='Enter'){e.preventDefault();runCommand();}return;}
   if(editing)return;if(e.key.toLowerCase()==='g'&&D.meta.protagonistId)showEntity('character',D.meta.protagonistId,true);if(e.key.toLowerCase()==='f')map.fit(true);
  });
- listen(document,'visibilitychange',()=>map.setPaused(document.hidden||state.page!=='map'));
+ listen(document,'visibilitychange',()=>{syncMapVisibility();if(!document.hidden&&hostVisible)void resizeAfterLayout();});
  const observer=new ResizeObserver(()=>{if(!$('#appWindow').hidden)map.resize();});observer.observe($('#viewport'));unlisten.push(()=>observer.disconnect());
  listen(window,'pagehide',destroy);
 }
-function updateSnapshot(value,{resetScope=false}={}){const snapshot=clone(value);if(!snapshot?.meta||!snapshot.ROOT)throw Error('ATLAS_SNAPSHOT_INVALID');const page=state.page,id=state.nodeId,selected=state.selected,oldScope=D.meta?.scopeKey;for(const key of Object.keys(D))delete D[key];Object.assign(D,snapshot);state.viewMode=D.meta.viewMode;if(resetScope||oldScope!==D.meta.scopeKey){state.cameras.clear();state.selected=null;state.open.clear();}const next=nodes().find(n=>n.id===id)?id:D.meta.initialNodeId||D.ROOT.id;navigate(next,true);if(!resetScope&&oldScope===D.meta.scopeKey&&selected){const exists=selected.kind==='character'?D.CAST.some(x=>x.id===selected.id):selected.kind==='item'?D.ITEMS.some(x=>x.id===selected.id):selected.kind==='place'?!!byId(selected.id):selected.kind==='message'?!!message(selected.id):selected.kind==='task'?!!task(selected.id):selected.kind==='lore'?D.LORE.some(x=>x.id===selected.id):D.EVENTS.some(x=>x.id===selected.id);if(exists)state.selected=selected;}state.page=page;renderAll();if(state.selected?.kind==='character')refreshFlows();map.setPaused(page!=='map'||document.hidden);}
+function updateSnapshot(value,{resetScope=false}={}){
+ const snapshot=clone(value);if(!snapshot?.meta||!snapshot.ROOT)throw Error('ATLAS_SNAPSHOT_INVALID');
+ const page=state.page,id=state.nodeId,selected=state.selected,sameScope=!resetScope&&D.meta?.scopeKey===snapshot.meta.scopeKey;
+ for(const key of Object.keys(D))delete D[key];Object.assign(D,snapshot);state.viewMode=D.meta.viewMode;
+ if(!sameScope){state.cameras.clear();state.open.clear();state.query='';state.filter='all';fullFocus=null;}
+ const next=sameScope&&nodes().find(n=>n.id===id)?id:D.meta.initialNodeId||D.ROOT.id;
+ navigate(next,true,{preserveWorkspace:page==='prefs',logicalPage:sameScope||page==='prefs'?page:'map',resetScope:!sameScope});
+ if(sameScope&&selected){const row=selected.kind==='character'?D.CAST.find(x=>x.id===selected.id):selected.kind==='item'?D.ITEMS.find(x=>x.id===selected.id):selected.kind==='place'?byId(selected.id):selected.kind==='message'?message(selected.id):selected.kind==='task'?task(selected.id):selected.kind==='lore'?D.LORE.find(x=>x.id===selected.id):D.EVENTS.find(x=>x.id===selected.id);if(row&&known(row)){state.selected=selected;map.selectKey(selected.id);renderInspector();}}
+ refreshFlows();applyUIProfile();syncMapVisibility();
+}
 function updateDiagnostics(rows){
  D.DIAGNOSTICS=clone(rows);
  const container=$('#diagnosticRows');if(!container)return;
@@ -548,10 +596,11 @@ function updateDiagnostics(rows){
  for(const node of container.querySelectorAll('details'))if(expanded.has(node.dataset.diagnosticId))node.open=true;
 }
 async function runHost(action,success,...args){const before=D.meta.scopeKey;try{await window.AtlasHost[action](...args);if(before===D.meta.scopeKey)toast(success);}catch(error){toast(error.message,'warn');if(before===D.meta.scopeKey){D.meta.engine??={};D.meta.engine.error=error.message;diagnostic('error','UI_ACTION_FAILED',error.message,{action});renderDock();renderPage();}window.AtlasHost.diagnostic({level:'error',source:'ui',code:'UI_ACTION_FAILED',details:{action,message:error.message}});}}
-function destroy(){if(mapExportUrl)URL.revokeObjectURL(mapExportUrl);mapExportUrl=null;mapExportText='';map.destroy();timers.forEach(clearTimeout);timers.clear();unlisten.splice(0).forEach(fn=>fn());}
+function destroy(){if(disposed)return;disposed=true;profileSequence++;skinCatalogSequence++;flowReadSequence++;appearance.destroy();cancelAnimationFrame(layoutFrame);layoutFrame=0;layoutWaiters.splice(0).forEach(resolve=>resolve({ok:false,errorCode:'UI_DISPOSED'}));if(mapExportUrl)URL.revokeObjectURL(mapExportUrl);mapExportUrl=null;mapExportText='';map.destroy();timers.forEach(clearTimeout);timers.clear();unlisten.splice(0).forEach(fn=>fn());}
 state.open=new Set((path(state.nodeId)||[]).map(n=>n.id));
-if(window.AtlasHost.initial.skin)applySkin(window.AtlasHost.initial.skin);applyInteractionPreferences();map.boot();bind();navigate(state.nodeId,true);
-requestAnimationFrame(()=>{map.resize();map.fit(false);});
-window.AtlasPreview={state,map,data:D,presets,updateSnapshot,updateDiagnostics,setVisible:visible=>{map.setPaused(!visible||state.page!=='map');if(visible){$('#appWindow').hidden=false;map.resize();}},go:id=>navigate(id),page:setPage,select,inspectPlace,showEntity,showFlow,showTask,advance:advanceDemo,undo:undoDemo,reset:resetDemo,switchView,destroy,formatDistance,frameChrome,
+applySkin('builtin.starmap');applyInteractionPreferences();map.boot();bind();navigate(state.nodeId,true);applyUIProfile();
+const appearanceReady=appearance.start(window.AtlasHost.initial.skin||'builtin.starmap').then(result=>{void refreshSkinCatalog();return result;});
+void resizeAfterLayout();
+window.AtlasPreview={appearanceReady,importSkinFile:importSkin,exportSkinPack:()=>appearance.exportPack(),listSkins:()=>appearance.list(),removeSkin:id=>appearance.remove(id),setUIProfile,setTheme,setSkin,getSkin:skinValue,effectivePage,state,map,data:D,presets,updateSnapshot,updateDiagnostics,setVisible:visible=>{const changed=hostVisible!==!!visible;hostVisible=!!visible;syncMapVisibility();if(visible){$('#appWindow').hidden=false;if(changed)void resizeAfterLayout();}},go:id=>navigate(id),page:setPage,select,inspectPlace,showEntity,showFlow,showTask,advance:advanceDemo,undo:undoDemo,reset:resetDemo,switchView,destroy,formatDistance,frameChrome,
  turnEvents,historyEvents,eventLinksHTML,backupPanelHTML,buildMap,exportUpgradeBackup,refreshBackupStatus};
 })();

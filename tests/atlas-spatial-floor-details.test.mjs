@@ -173,7 +173,7 @@ test('G08：家具在房间内、实体不穿墙、doorways 可达、solid 与�
 
   // 1) 六件合法陈设都在，超大床与错误类型都没进场景。
   const groupIds = scene.layout.groups.map((g) => g.id).sort();
-  assert.deepEqual(groupIds, ['F_BED', 'F_BENCH', 'F_CAB', 'F_DESK', 'F_DOOR', 'F_LAMP']);
+  assert.deepEqual(groupIds, ['F_BED', 'F_BENCH', 'F_CAB', 'F_DESK', 'F_LAMP']);
   assert.ok(!groupIds.includes('F_HUGE'), '塞不进房间的床绝不能偷偷放大到穿墙');
   assert.ok(!groupIds.includes('F_WEIRD'), '不支持的陈设类型不能进场景');
 
@@ -192,7 +192,8 @@ test('G08：家具在房间内、实体不穿墙、doorways 可达、solid 与�
     assert.equal(b.solid, SOLID_TYPES.has(b.type), `实体 ${b.id}(${b.type}) 的 solid 标记与类型不一致`);
   }
   assert.ok(scene.layout.bodies.some((b) => b.type === 'bed' && b.solid === true), '床必须挡路');
-  assert.ok(scene.layout.bodies.some((b) => b.type === 'doorway' && b.solid === false), '门洞是通行结构，永不参与碰撞');
+  assert.ok(!scene.layout.bodies.some((b) => b.type === 'doorway'), '门洞不能成为房间内的家具');
+  assert.ok(scene.layout.doors.some(d=>d.sourceContentIds?.includes('F_DOOR')), '旧门洞 ID 绑定到结构门');
   assert.ok(scene.layout.bodies.some((b) => b.type === 'light' && b.solid === false), '灯是装饰，不挡路');
 
   // 4) 人物与地面物品的 markder 都在自己房间内，且人物没站进实体里。
@@ -255,13 +256,14 @@ test('G08：家具摆满后门口与通道依旧可达，没有一件家具被�
     !result.issues.some((i) => i.code === 'DETAIL_NOT_REACHABLE' || i.code === 'DETAIL_NO_SPACE'),
     JSON.stringify(result.issues),
   );
-  assert.equal(result.scene.layout.groups.length, 5, '五件陈设都要落位');
+  assert.equal(result.scene.layout.groups.length, 4, '四件陈设落位，门洞绑定到结构门');
   const roomById = new Map(result.scene.layout.rooms.map((r) => [r.id, r]));
   for (const g of result.scene.layout.groups) {
     assert.ok(g.interaction && pointIn(roomById.get(g.roomId), g.interaction), `家具 ${g.id} 不可达`);
   }
   // 门口结构永远不挡路，人物依旧能站到该房间。
-  assert.ok(result.scene.layout.bodies.some((b) => b.type === 'doorway' && b.solid === false));
+  assert.ok(!result.scene.layout.bodies.some((b) => b.type === 'doorway'));
+  assert.ok(result.scene.layout.doors.some(d=>d.sourceContentIds?.includes('F_DOOR')));
   assert.ok(result.scene.layout.actors.some((a) => a.id === C_STAR && a.roomId === R_CLASS));
 });
 

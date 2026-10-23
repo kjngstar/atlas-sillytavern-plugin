@@ -1,10 +1,10 @@
 {
-  "patchId": "atlas-0.9.96-rc.1-20261020",
-  "baseVersion": "0.9.95",
-  "baseReleaseVersion": "0.9.95-rc.1",
-  "baseCommit": "1e8655aa71527dea0bf32305fb64b02be42448ea",
+  "patchId": "atlas-0.9.96-rc.2-20261021",
+  "baseVersion": "0.9.96",
+  "baseReleaseVersion": "0.9.96-rc.1",
+  "baseCommit": "b2c1aa361ba9d3e39ebb37e7a9952a7a204592c2",
   "schemaVersion": 3,
-  "releaseVersion": "0.9.96-rc.1",
+  "releaseVersion": "0.9.96-rc.2",
   "manifestVersion": "0.9.96",
   "releaseChannel": "prerelease",
   "layoutPolicyVersion": "layout-v9",
@@ -61,29 +61,21 @@
     "nonleaf-floor-not-completed-by-parent-projection",
     "planned-first-extent-calibrated-before-generation",
     "workbench-dynamic-height-and-close-control",
-    "independent-confirmed-room-dimensions",
-    "preserve-author-dimensions-across-parent-child-scenes",
-    "construction-protected-noop-save-ack",
-    "repair-reuses-already-created-candidate-identity",
-    "failed-layout-constraints-retained",
-    "floor-furniture-placement-capacity",
-    "indoor-viewport-context",
-    "nested-interior-container-profile",
-    "bottom-up-initial-space-capacity",
-    "nonleaf-floor-not-completed-by-parent-projection",
-    "planned-first-extent-calibrated-before-generation",
-    "workbench-dynamic-height-and-close-control"
+    "request-stage-and-turn-diagnostics",
+    "preserve-underlying-api-errors-and-save-confirmation",
+    "incremental-diagnostic-ui-refresh",
+    "collapsed-place-summary-by-default"
   ],
   "validation": {
     "status": "prerelease-with-live-limitations",
     "tests": {
-      "total": 2285,
-      "pass": 2285,
+      "total": 2303,
+      "pass": 2303,
       "fail": 0
     },
     "targetedRegression": {
-      "total": 264,
-      "pass": 264,
+      "total": 36,
+      "pass": 36,
       "fail": 0
     },
     "typecheck": "passed",
@@ -91,15 +83,24 @@
     "releaseAudit": "passed",
     "liveUserTavern": {
       "status": "partial",
-      "earlierM3": "blank-chat generation, save and reload passed on earlier local build",
-      "finalM31": "failed: first request exceeded 300000ms; final live generation not completed"
+      "testedCommit": "148db95effc6d6b1d89a436e9cded078fc32f821",
+      "m3": "5 real requests completed; host save confirmed; hall restored after reload; kitchen layout still missing",
+      "m31": "HTTP 200 error JSON; RESPONSE_MALFORMED; no world commit",
+      "uiChange": "36 targeted tests and 99 browser checks passed after collapsible summary change"
     },
     "externalModel": "not-fully-accepted",
     "knownLimitations": [
-      "Final MiniMax-M3.1 live acceptance remains incomplete after first-request timeout.",
-      "Only occupied branches and relevant ancestors receive automatic layouts.",
+      "MiniMax-M3.1 returned an error JSON response during live acceptance.",
+      "Kitchen layout remains ungenerated in the dedicated live test chat.",
       "Missing elapsed-time evidence remains unknown and may yield a partial receipt."
-    ]
+    ],
+    "workbenchBrowser": {
+      "total": 99,
+      "pass": 99,
+      "fail": 0,
+      "errors": 0
+    },
+    "sqlRelease": "passed"
   },
   "modelBatchingPolicyVersion": "batch-v3"
 }

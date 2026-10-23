@@ -19,9 +19,11 @@
 
 export type ElapsedFacts = {
   activities?: Array<{
+    ref?: string;
+    aliases?: string[];
     kind: 'dialogue' | 'meal' | 'rest' | 'sleep' | 'travel' | 'combat' | 'other';
     completed: boolean;
-    hint?: { elapsed_s?: number; min_s?: number; max_s?: number; same_interval_as?: string; after_ref?: string; text?: string };
+    hint?: { elapsed_s?: number; min_s?: number; nominal_s?: number; max_s?: number; same_interval_as?: string; after_ref?: string; text?: string };
   }>;
   explicitElapsedS?: number | null;
 };
@@ -138,6 +140,7 @@ function buildNode(activity: ElapsedActivity, index: number, conflicts: string[]
   };
   const ref = explicitRef(activity);
   if (ref) node.aliases.push(ref);
+  for(const alias of activity.aliases??[])if(typeof alias==='string'&&alias.trim())node.aliases.push(alias);
 
   if (!activity?.completed) {
     // 计划不是经过的时间：「打算睡觉」「刚吃一口」贡献 0。
@@ -247,16 +250,20 @@ export function deriveElapsedInterval(facts: ElapsedFacts, base: { clockS: numbe
     const kind = node.label.split(':')[1] ?? '';
     kindCount.set(kind, (kindCount.get(kind) ?? 0) + 1);
   }
-  const refMap = new Map<string, number>();
+  const refMap = new Map<string, number | null>();
   nodes.forEach((node) => {
     const kind = node.label.split(':')[1] ?? '';
     const aliases = [...node.aliases];
     if ((kindCount.get(kind) ?? 0) === 1) aliases.push(kind);
-    for (const alias of aliases) if (!refMap.has(alias)) refMap.set(alias, node.index);
+    for (const alias of aliases) {
+      if (!refMap.has(alias)) refMap.set(alias, node.index);
+      else if(refMap.get(alias)!==node.index)refMap.set(alias,null);
+    }
   });
   const resolve = (raw: string | null): number | null => {
     if (!raw) return null;
     const hit = refMap.get(raw);
+    if(hit===null){conflicts.push(`AMBIGUOUS_ACTIVITY_REF:${raw}`);return null;}
     if (hit === undefined) {
       conflicts.push(`UNRESOLVED_ACTIVITY_REF:${raw}`);
       return null;
@@ -291,6 +298,7 @@ export function deriveElapsedInterval(facts: ElapsedFacts, base: { clockS: numbe
       }
       const target = resolve(node.sameRef);
       if (target !== null && target !== node.index) union(node.index, target);
+      else if(target===node.index)conflicts.push(`SAME_INTERVAL_SELF:${node.label}`);
     }
     if (node.afterRef) {
       const target = resolve(node.afterRef);
@@ -395,7 +403,7 @@ export function deriveElapsedInterval(facts: ElapsedFacts, base: { clockS: numbe
   const resolved = normalize(total ?? { ...ZERO });
 
   const allExplicit = nodes.every((n) => n.quality === 'explicit');
-  const estimated = nodes.some((n) => n.quality === 'estimated') || implicitSameGroup;
+  const estimated = nodes.some((n) => n.quality === 'estimated') || implicitSameGroup || conflicts.length>0;
   const quality: ElapsedInterval['quality'] = allExplicit && !estimated ? 'explicit' : 'estimated';
 
   const basis = dedupe([...nodes.flatMap((n) => n.basis), ...(implicitSameGroup ? ['SAME_INTERVAL_INFERRED'] : []), clockRef]);

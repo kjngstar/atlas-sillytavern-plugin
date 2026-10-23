@@ -5,7 +5,7 @@
 <link rel="stylesheet" href="css/atlas.css">
 <link rel="stylesheet" href="css/preview.css">
 <!-- M6-14：世界建设功能层的增量样式，必须排在原样式之后才能生效；原样式与字体保持基线不动。 -->
-<link rel="stylesheet" href="css/atlas-world-overrides.css"><style data-standalone="true">body{margin:0;padding:24px;background:#02050a;color:#dce9fb;}#atlasDemo{height:max(660px,calc(100dvh - 48px));}#atlasDemo.maximized{height:100dvh;}@media(max-width:720px){body{padding:0;}#atlasDemo{height:max(660px,100dvh);}}</style></head>
+<link rel="stylesheet" href="css/atlas-world-overrides.css"><link rel="stylesheet" href="css/atlas-view-profiles.css"><link rel="stylesheet" href="css/atlas-skin-overrides.css"><style data-standalone="true">body{margin:0;padding:24px;background:#02050a;color:#dce9fb;}#atlasDemo{height:max(660px,calc(100dvh - 48px));}#atlasDemo.maximized{height:100dvh;}@media(max-width:720px){body{padding:0;}#atlasDemo{height:max(660px,100dvh);}}</style></head>
 <body><div id="atlasDemo" data-motion="full" aria-label="ATLAS 世界地图世界工作台">
 
 <!-- ═══════════ 图标精灵 ═══════════ -->
@@ -56,7 +56,7 @@
   <div class="win-streams"><i></i><i></i><i></i><i></i><i></i><i></i></div>
 
   <!-- ── 标题栏 ── -->
-  <header class="titlebar" id="titlebar">
+  <header class="titlebar" id="titlebar" data-ui-slot="titlebar">
     <div class="brand">
       <div class="mark">
         <svg viewBox="0 0 44 44">
@@ -73,9 +73,9 @@
       </div>
     </div>
 
-    <div class="crumbs" id="crumbs"></div>
+    <div class="crumbs" id="crumbs" data-ui-slot="breadcrumb"></div>
 
-    <div class="tb-right">
+    <div class="tb-right"><select id="profileSwitcher" class="profile-switcher" data-ui-slot="profileSwitcher" aria-label="界面显示范围"><option value="full">完整界面</option><option value="mapFocus">地图专注</option><option value="mapOnly">纯地图</option></select>
       <div class="stat-pill" id="syncPill">
         <span class="pd"></span>
         <span class="sp-k">SYNC</span>
@@ -97,7 +97,7 @@
   <div class="win-body">
 
     <!-- ── 图标导航 ── -->
-    <nav class="rail">
+    <nav class="rail" data-ui-slot="rail">
       <div class="rail-group">
         <button class="rail-btn active" data-view="map"><svg><use href="#i-map"></use></svg><span>地图</span></button>
         <button class="rail-btn" data-view="cast"><svg><use href="#i-users"></use></svg><span>人物</span></button>
@@ -115,7 +115,7 @@
     </nav>
 
     <!-- ── 左面板 ── -->
-    <aside class="panel panel-left" id="panelLeft">
+    <aside class="panel panel-left" id="panelLeft" data-ui-slot="locationTree">
       <div class="p-head">
         <div class="p-title"><svg class="p-ico"><use href="#i-layers"></use></svg><span>层级图层</span></div>
         <div class="p-head-act">
@@ -148,7 +148,7 @@
 
     <!-- ── 地图视口 ── -->
     <main class="viewport" id="viewport">
-      <canvas id="map" role="img" aria-label="世界地图；拖动平移，滚轮缩放，单击地点查看信息"></canvas>
+      <canvas id="map" tabindex="0" data-ui-slot="map" role="img" aria-label="世界地图；拖动平移，滚轮缩放，单击地点查看信息"></canvas>
       <div class="vp-grain"></div>
 
       <!-- 角标 -->
@@ -156,10 +156,10 @@
       <span class="corner c-bl"></span><span class="corner c-br"></span>
 
       <!-- 当前地点卡 -->
-      <div class="hud hud-place" id="placeCard"></div>
+      <details class="hud hud-place" id="placeCard" data-ui-slot="placeSummary"></details>
 
       <!-- 视图模式 -->
-      <div class="hud hud-modes" id="viewModes">
+      <div class="hud hud-modes" id="viewModes" data-ui-slot="mapModes">
         <button class="vm active" data-mode="map">地图</button>
         <button class="vm" data-mode="flow">消息流</button>
         <button class="vm" data-mode="sim">推演视图</button>
@@ -168,7 +168,7 @@
 
       <!-- 图例与比例尺共用左下角收纳区 -->
       <div class="hud-readout">
-       <div class="hud hud-legend" id="legend">
+       <div class="hud hud-legend" id="legend" data-ui-slot="legend">
         <div class="lg-h"><span>图例</span><button class="lg-t" id="legendToggle" aria-expanded="true" aria-controls="legendBody">收起</button></div>
         <div class="lg-body" id="legendBody">
           <div class="lg-i"><i class="pt char"></i>人物</div>
@@ -180,14 +180,14 @@
           <div class="lg-i"><i class="pt exit"></i>出入口</div>
         </div>
        </div>
-       <div class="hud hud-scale">
+       <div class="hud hud-scale" data-ui-slot="scaleBar">
         <div class="sc-line"><i aria-hidden="true"></i><span id="scaleLabel">20 m</span></div>
         <div class="sc-coord" id="coordLabel">X 000.0 · Y 000.0</div>
        </div>
       </div>
 
       <!-- 导航控件 -->
-      <div class="hud hud-nav">
+      <div class="hud hud-nav" data-ui-slot="mapControls">
         <button class="nav-b" id="zIn" data-tip="放大" aria-label="放大地图"><svg><use href="#i-plus"></use></svg></button>
         <button class="nav-b" id="zOut" data-tip="缩小" aria-label="缩小地图"><svg><use href="#i-minus"></use></svg></button>
         <button class="nav-b" id="zFit" data-tip="适应视野" aria-label="适应视野"><svg><use href="#i-target"></use></svg></button>
@@ -196,20 +196,20 @@
       </div>
 
       <!-- 小地图 -->
-      <div class="hud hud-mini">
+      <div class="hud hud-mini" data-ui-slot="minimap">
         <div class="mm-h"><span>OVERVIEW</span><em id="mmZoom">100%</em></div>
         <canvas id="minimap" width="212" height="132"></canvas>
       </div>
 
       <!-- 底部状态条 -->
-      <div class="hud hud-ticker">
+      <div class="hud hud-ticker" data-ui-slot="ticker">
         <div class="tk-live"><span class="pd"></span>LIVE</div>
         <div class="tk-track"><div class="tk-run" id="ticker">正在同步世界状态…</div></div>
       </div>
-    <section id="workspacePage" class="workspace-page" hidden=""></section></main>
+    <section id="mapSelection" class="map-selection" aria-label="地图对象详情" hidden><header><button id="expandMapSelection" class="action-btn">展开完整详情</button><button id="closeMapSelection" aria-label="关闭地图详情">×</button></header><div id="mapSelectionBody"></div></section><section id="workspacePage" class="workspace-page" hidden=""></section></main>
 
     <!-- ── 右面板 ── -->
-    <aside class="panel panel-right" id="panelRight">
+    <aside class="panel panel-right" id="panelRight" data-ui-slot="inspector">
       <div class="p-head">
         <div class="p-title"><svg class="p-ico"><use href="#i-pin"></use></svg><span id="insTitle">当前地图</span></div>
         <div class="p-head-act">
@@ -230,7 +230,7 @@
   </div>
 
   <!-- ── 底部 dock ── -->
-  <footer class="dock" id="dock">
+  <footer class="dock" id="dock" data-ui-slot="eventDock">
     <div class="dock-head">
       <div class="dh-tabs" id="dockTabs">
         <button class="dt active" data-tab="log">事件流</button>
@@ -276,4 +276,4 @@
 
 
 
-</div><script src="js/host-bootstrap.js"></script></body></html>
+</div><script type="application/json" id="atlas-boot-scripts">["js/skin-runtime.js","js/map.js","js/presets.js","js/preset-ui.js","js/ui-model.js","js/app.js"]</script><script src="js/host-bootstrap.js"></script></body></html>

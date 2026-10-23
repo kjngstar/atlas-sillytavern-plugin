@@ -41,16 +41,16 @@ export type FloorSpec={
   mapId?:string;rebuild?:boolean;width?:number;height?:number;corridorWidth?:number;
   corridorLocationRef?:string|null;
   rooms?:Array<{id:string;name?:string;side:'north'|'south';role?:'indoor'|'outdoor'|'garden';w?:number;h?:number}>;
-  contents?:Array<{id:string;name?:string;roomId:string;type:'shelf'|'desk'|'bench'|'reading'|'stairs'|'table'|'chair'|'bed'|'cabinet'|'doorway'|'light'|'decor';w:number;h:number}>;
+  contents?:Array<{id:string;name?:string;roomId:string;additional?:boolean;type:'shelf'|'desk'|'bench'|'reading'|'stairs'|'table'|'chair'|'bed'|'cabinet'|'doorway'|'light'|'decor';w:number;h:number}>;
   actors?:Array<{id:string;name?:string;roomId:string;near?:string}>;
   items?:Array<{id:string;name?:string;on:string}>;
   deletes?:{rooms?:string[];contents?:string[];actors?:string[];items?:string[]};
 };
 /** 生成后的室内通道。`entityId` 只在绑定真实走廊后出现；匿名辅助通道没有实体身份。 */
 export type FloorCorridor={id:string;entityId?:string;name?:string;x:number;y:number;w:number;h:number;quality?:SceneQuality};
-/** 门拓扑：几何端点永远是程序走廊，`toEntityId` 是绑定走廊的语义端点。 */
-export type FloorEdge={from:string;to:'corridor';via:string;toEntityId?:string};
-export type FloorLayout={kind:'floor';id:string;name:string;bounds:Bounds;corridor:FloorCorridor;rooms:Array<{id:string;name:string;side:'north'|'south';role?:'indoor'|'outdoor'|'garden';x:number;y:number;w:number;h:number}>;doors:Array<{id:string;roomId:string;x:number;y:number;width:number}>;edges:FloorEdge[];issues?:Array<{id:string;code:string}>};
+/** 门拓扑：真实房间直连时指向另一房间，否则指向通道。 */
+export type FloorEdge={from:string;to:string;via:string;toEntityId?:string;routeId?:string};
+export type FloorLayout={kind:'floor';id:string;name:string;bounds:Bounds;corridor:FloorCorridor;rooms:Array<{id:string;name:string;side:'north'|'south';role?:'indoor'|'outdoor'|'garden';x:number;y:number;w:number;h:number}>;doors:Array<{id:string;roomId:string;x:number;y:number;width:number;wall?:'north'|'south'|'east'|'west';routeId?:string;toRoomId?:string;sourceContentIds?:string[]}>;edges:FloorEdge[];issues?:Array<{id:string;code:string}>};
 
 /** 上下文锁：室内矩形（米）、确认点、任意确认多边形、确认路线几何；空间由 map.metersPerCell 决定。 */
 export type LayoutLocks={

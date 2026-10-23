@@ -413,6 +413,50 @@ test('父子同轮生成只建一份共享陈设，后排的旧请求不重建�
  }finally{db.run('ROLLBACK');seed.close();}
 });
 
+test('房间内的 other 储藏角不触发分房与中央走廊，模型仍收到完整物理房间',async()=>{
+ const seed=await roomSeed(),db=seed.db;db.run('BEGIN');try{
+  insertRows(db,'entity_keys',[{branch_id:BRANCH,id:'storage-corner',kind:'location'}]);
+  insertRows(db,'locations',[loc('storage-corner',{kind:'other',name:'储藏角',parent_location_id:ROOM,map_id:MAP_ROOM})]);
+  const task=buildSqlLayoutTask(db,BRANCH,{anchor:{chatUid:IDS.chatA,branchId:BRANCH,baseRevision:0,baseStorageRevision:0},userText:'',assistantText:'',sourceSnapshot:[],layoutMaps:[MAP_ROOM]},'corner-task');
+  const [room]=floorScopesOf(task);assert.equal(room.baselineRooms.length,1);assert.equal(room.baselineRooms[0].name,'书房');
+  assert.deepEqual([room.baselineRooms[0].w,room.baselineRooms[0].h],[ROOM_W,ROOM_H]);
+  assert.deepEqual(room.childSpaces,[]);assert.ok(!room.locations.some(l=>l.name==='储藏角'));
+  assert.ok(selectOne(db,'locations',BRANCH,'storage-corner'),'局部地点保留，只是不冒充另一间有墙的房间');
+ }finally{db.run('ROLLBACK');seed.close();}
+});
+
+test('共墙门变化即使不改尺寸与陈设账本，也同步已保存的子图入口',async()=>{
+ const seed=await roomSeed(),db=seed.db;db.run('BEGIN');try{
+  const first=applyPendingSpatialRequests({db,scope:SCOPE,turnId:TURN,ports:makePorts(),autoPlan:true});
+  assert.deepEqual(first.issues.filter(i=>i.severity==='error'),[]);
+  const before=canonicalOf(readFrame(db,MAP_ROOM),ROOM);
+  insertRows(db,'routes',[{branch_id:BRANCH,id:'door-between-rooms',created_turn_id:IDS.seedTurn,updated_turn_id:IDS.seedTurn,from_location_id:ROOM,to_location_id:HALL,kind:'door'}]);
+  armRequest(db,MAP_BLD,pendingRequest('connect-room',{rooms:[{id:ROOM,w:ROOM_W,h:ROOM_H,side:'north'},{id:HALL,w:4,h:3,side:'south'}]}));
+  const out=applyPendingSpatialRequests({db,scope:SCOPE,turnId:TURN,ports:makePorts(),autoPlan:true});
+  assert.deepEqual(out.issues.filter(i=>i.severity==='error'),[],JSON.stringify(out.issues));
+  const parent=readFrame(db,MAP_BLD).atlasScene.layout,child=readFrame(db,MAP_ROOM).atlasScene.layout;
+  const room=parent.rooms.find(r=>r.id===ROOM),door=parent.doors.find(d=>d.roomId===ROOM);
+  assert.equal(door.routeId,'door-between-rooms');
+  assert.deepEqual(child.doors.map(d=>[d.wall,d.x,d.y]),[[door.wall,door.x-room.x,door.y-room.y]]);
+  assert.deepEqual(canonicalOf(readFrame(db,MAP_ROOM),ROOM),before,'只变门不能再造陈设或改变物理尺寸');
+ }finally{db.run('ROLLBACK');seed.close();}
+});
+
+test('子图显式删除陈设同步父图投影，不被旧父图约束复活',async()=>{
+ const seed=await roomSeed(),db=seed.db;db.run('BEGIN');try{
+  const first=applyPendingSpatialRequests({db,scope:SCOPE,turnId:TURN,ports:makePorts(),autoPlan:true});
+  assert.deepEqual(first.issues.filter(i=>i.severity==='error'),[]);
+  assert.ok(readFrame(db,MAP_BLD).atlasScene.layout.groups.some(g=>g.id===spaceLocalId(ROOM,'desk-1')));
+  armRequest(db,MAP_ROOM,pendingRequest('remove-desk',{deletes:{contents:['desk-1'],items:[ITEM_DESK]}}));
+  const out=applyPendingSpatialRequests({db,scope:SCOPE,turnId:TURN,ports:makePorts(),autoPlan:true});
+  assert.deepEqual(out.issues.filter(i=>i.severity==='error'),[],JSON.stringify(out.issues));
+  assert.deepEqual(canonicalOf(readFrame(db,MAP_ROOM),ROOM).furnishing,[]);
+  assert.ok(!readFrame(db,MAP_BLD).atlasScene.layout.groups.some(g=>g.id===spaceLocalId(ROOM,'desk-1')));
+  assert.ok(!readFrame(db,MAP_BLD).atlasScene.constraints.contents.some(g=>g.id===spaceLocalId(ROOM,'desk-1')));
+  assert.deepEqual(foreignKeyCheck(db),[]);
+ }finally{db.run('ROLLBACK');seed.close();}
+});
+
 test('SPACE02：canonical 不变时再次进入子图不产生第二次尺寸估计、不出现第二套家具', async () => {
   const seed = await roomSeed();
   const db = seed.db;
@@ -858,6 +902,28 @@ test('空间权威有界：超上限明确 deferred 且保留原记录，坏记�
   assert.deepEqual(holder.issues[0].relatedIds, ['M_A', 'M_B']);
 });
 
+test('陈设账本接受薄门洞和小灯具，仍拒绝零尺寸与负尺寸', () => {
+  const entries=[['door',1,.15],['light',.05,.05],['zero',0,1],['negative',1,-.1]].map(([id,w,h])=>({localId:spaceLocalId(ROOM,id),type:'decor',name:id,widthM:w,heightM:h,quality:'layout'}));
+  const result=readSpaceCanonical({[SPACE_CANONICAL_FRAME_KEY]:{version:1,locationId:ROOM,revision:1,size:null,furnishing:entries}},ROOM);
+  assert.deepEqual(result.canonical.furnishing.map(item=>item.name),['door','light']);
+  assert.equal(result.issues.length,2);
+});
+
+test('同名旧陈设只列为模型核查候选，不静默合并确认家具或多把椅子', async () => {
+  const seed=await roomSeed();
+  try {
+    const frame=readFrame(seed.db,MAP_ROOM);
+    const furnishing=['old','new'].map((id,index)=>({localId:spaceLocalId(ROOM,id),type:'light',name:'照明',widthM:.2,heightM:.2,quality:index?'confirmed':'layout'}));
+    writeFrame(seed.db,MAP_ROOM,{...frame,[SPACE_CANONICAL_FRAME_KEY]:{version:1,locationId:ROOM,revision:2,size:null,furnishing}});
+    const task=buildSqlLayoutTask(seed.db,BRANCH,{anchor:{chatUid:IDS.chatA,branchId:BRANCH,baseRevision:0,baseStorageRevision:0},userText:'',assistantText:'',sourceSnapshot:[],layoutMaps:[MAP_ROOM]},'turn_review');
+    const [scope]=floorScopesOf(task);
+    assert.deepEqual(scope.spaceSize.furnishingReview,[{ids:furnishing.map(item=>item.localId),reason:'same-name-review'}]);
+    assert.deepEqual(scope.spaceSize.furnishingInventory.map(item=>item.quality),['layout','confirmed']);
+    assert.equal(readSpaceCanonical(readFrame(seed.db,MAP_ROOM),ROOM).canonical.furnishing.length,2);
+    assert.match(task.request.messages[1].content,/有明确数量依据的两把同名椅子应保留/);
+  } finally {seed.close();}
+});
+
 test('布局任务读 canonical 尺寸：extent 与 baselineRooms 都以权威为准，能力清单同步', async () => {
   const seed = await roomSeed();
   const db = seed.db;
@@ -869,7 +935,7 @@ test('布局任务读 canonical 尺寸：extent 与 baselineRooms 都以权威�
       [SPACE_CANONICAL_FRAME_KEY]: {
         version: 1, locationId: ROOM, revision: 2,
         size: { widthM: 9, heightM: 6, quality: 'estimated', locked: false, basis: { kind: 'first-estimate', referenceId: null, note: '旧估计' } },
-        furnishing: [],
+        furnishing: [{localId:spaceLocalId(ROOM,'registered-light'),type:'light',name:'照明',widthM:.2,heightM:.2,quality:'layout'}],
       } });
     const row = selectOne(db, 'maps', BRANCH, MAP_ROOM);
     const resolved = resolveMapSpaceSize({
@@ -900,6 +966,7 @@ test('布局任务读 canonical 尺寸：extent 与 baselineRooms 都以权威�
     assert.equal(scope.spaceSize.revision, 2);
     assert.equal(scope.spaceSize.widthM, 9);
     assert.equal(scope.spaceSize.heightM, 6);
+    assert.deepEqual(scope.spaceSize.furnishingInventory,[{id:spaceLocalId(ROOM,'registered-light'),type:'light',name:'照明',w:.2,h:.2,quality:'layout'}], '模型必须拿到可复用的陈设 ID 和明细，不能只给数量');
     assert.deepEqual(scope.childSpaces, [], '书房自己没有下级空间，不许凭空列子空间');
     assert.ok(scope.baselineRooms.length > 0, '子图必须有基线房间示意');
     assert.ok(scope.baselineRooms.every((r) => r.w <= 9 && r.h <= 6), JSON.stringify(scope.baselineRooms));

@@ -32,3 +32,17 @@ test('reference audit distinguishes runtime, type, test, experiment and unknown 
     assert.ok(result.unknown.some(row => row.reason === 'computed-reference' && row.expression === 'candidate'));
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test('reference audit follows the same HTML script manifest used by the production bootstrap',()=>{
+ const root=mkdtempSync(join(tmpdir(),'atlas-html-audit-'));
+ try{
+  mkdirSync(join(root,'ui/js'),{recursive:true});
+  writeFileSync(join(root,'ui/index.html'),'<script type="application/json" id="atlas-boot-scripts">["js/app.js"]</script><script src="js/bootstrap.js"></script>');
+  writeFileSync(join(root,'ui/js/bootstrap.js'),'window.boot=true;');
+  writeFileSync(join(root,'ui/js/app.js'),'import "../appearance.mjs";');
+  writeFileSync(join(root,'ui/appearance.mjs'),'export const active=true;');
+  const r=auditSourceReferences(root,{productionRoots:['ui/index.html'],generatedEntries:{}});
+  for(const file of ['ui/index.html','ui/js/bootstrap.js','ui/js/app.js','ui/appearance.mjs'])assert.ok(r.modules.find(m=>m.file===file).uses.includes('production'),file);
+  assert.deepEqual(r.unknown,[]);
+ }finally{rmSync(root,{recursive:true,force:true});}
+});

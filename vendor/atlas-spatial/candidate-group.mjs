@@ -2,7 +2,7 @@ import {buildLayoutContext} from './host-context.mjs';
 import {generateFloor,generateCity,generateOverview} from './generation.mjs';
 import {buildSceneMutation,sceneLocationGeometry,canonicalForScene} from './storage.mjs';
 import {projectChildFurnishing} from './space-projection.mjs';
-import {clone,finite,plain,diagnostic,failure,stable,FRAME_SPACE_CANONICAL_KEY,SPACE_CANONICAL_MAX_FURNISHING,bytes,LIMITS,readMetricDimensions} from './contracts.mjs';
+import {clone,finite,plain,diagnostic,failure,stable,parseSpaceLocalId,FRAME_SPACE_CANONICAL_KEY,SPACE_CANONICAL_MAX_FURNISHING,bytes,LIMITS,readMetricDimensions} from './contracts.mjs';
 const GENERATORS={floor:generateFloor,city:generateCity,overview:generateOverview};
 /** Compile one layout request to the existing AtomicGroup shape. No database writes. */
 export function compileSceneGroup({request,scope,currentScope,mapRow,locations,characters,items,routes=[],maps=[],turnId,operationId,spaceSize=null,childSpaces={},autoPlan=false,planningProjection=false}={}){
@@ -23,6 +23,29 @@ export function compileSceneGroup({request,scope,currentScope,mapRow,locations,c
   if(request.kind==='floor'){
     ctx.childCanonical=Object.fromEntries(maps.filter(m=>m.branch_id===scope.branchId&&m.status==='active'&&locations.some(l=>l.id===m.container_location_id&&l.map_id===mapRow.id)).flatMap(m=>{const frame=typeof m.frame_json==='string'?JSON.parse(m.frame_json):m.frame_json,record=frame?.[FRAME_SPACE_CANONICAL_KEY];return record?.version===1&&record.locationId===m.container_location_id&&record.furnishing?.length<=SPACE_CANONICAL_MAX_FURNISHING?[[record.locationId,record]]:autoPlan?[[String(m.container_location_id),{furnishing:[]}]]:[];}));
     ctx.itemsById=Object.fromEntries((items??[]).filter(i=>i.branch_id===scope.branchId&&i.status==='active'&&!i.holder_character_id&&!i.container_item_id).map(i=>[i.id,i]));
+    if(autoPlan){
+      const delegated=new Set();
+      spec.contents=(spec.contents??[]).filter(row=>{
+        const owner=locations.find(l=>l.branch_id===scope.branchId&&l.id===row.roomId);
+        const nested=locations.some(l=>l.branch_id===scope.branchId&&l.status==='active'&&l.parent_location_id===row.roomId&&(owner?.kind!=='room'||l.kind!=='other'));
+        const known=(ctx.childCanonical[row.roomId]?.furnishing??[]).some(f=>(parseSpaceLocalId(f.localId)?.contentId??f.localId)===(parseSpaceLocalId(row.id)?.contentId??row.id))||(ctx.previousScene?.constraints?.contents??[]).some(f=>f.id===row.id&&f.roomId===row.roomId);
+        const supported=(spec.items??[]).some(i=>i.on===row.id&&ctx.itemsById[i.id]?.location_id===row.roomId);
+        if(!nested||known||supported||row.additional===true)return true;
+        delegated.add(row.id);membershipIssues.push(diagnostic('FURNISHING_DETAIL_DELEGATED','$.contents','该容器包含下级空间；新估计陈设应在实际房间中生成，不另登记一套容器家具',{entityId:row.id,severity:'warning'}));return false;
+      });
+      spec.actors=(spec.actors??[]).map(a=>{if(!delegated.has(a.near))return a;const next={...a};delete next.near;return next;});
+    }
+    for(const [room,canonical] of Object.entries(ctx.childCanonical)){
+      if(!canonical.furnishing.length)continue;
+      const registered=new Set(canonical.furnishing.map(entry=>parseSpaceLocalId(entry.localId)?.contentId));
+      // A valid constraint can precede its drawable placement. Retrying that
+      // same saved identity must not be mistaken for creating another object.
+      for(const row of ctx.previousScene?.constraints?.contents??[])if(row.roomId===room)registered.add(parseSpaceLocalId(row.id)?.contentId??row.id);
+      const knownItems=new Set(canonical.furnishing.map(entry=>entry.itemId).filter(Boolean));
+      const supported=new Set((spec.items??[]).filter(i=>ctx.itemsById[i.id]?.location_id===room&&!knownItems.has(i.id)).map(i=>i.on));
+      const unknown=(spec.contents??[]).filter(row=>row.roomId===room&&!registered.has(parseSpaceLocalId(row.id)?.contentId??row.id)&&row.additional!==true&&!supported.has(row.id));
+      if(unknown.length)return {...failure('FURNISHING_ID_UNREGISTERED','$.contents','父图必须复用子空间账本中的陈设 ID；只有明确新增才使用 additional=true',{kept:ctx.previousScene?clone(ctx.previousScene):null}),issues:unknown.map(row=>diagnostic('FURNISHING_ID_UNREGISTERED','$.contents','此子空间已有陈设，不能换 ID 重复添加',{entityId:row.id}))};
+    }
     projectChildFurnishing(spec,ctx);
     const chars=new Map((characters??[]).filter(c=>c.branch_id===scope.branchId&&c.status==='active').map(c=>[c.id,c]));
     const groundItems=new Map((items??[]).filter(i=>i.branch_id===scope.branchId&&i.status==='active'&&!i.holder_character_id&&!i.container_item_id).map(i=>[i.id,i]));

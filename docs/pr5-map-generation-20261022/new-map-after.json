@@ -1,0 +1,1493 @@
+{
+  "kind": "atlas-map-analysis",
+  "version": 2,
+  "exportedAt": "2026-10-22T09:47:27.367Z",
+  "metadata": {
+    "pluginVersion": "0.9.96",
+    "layoutPolicyVersion": "layout-v12",
+    "generatorVersions": [
+      "atlas-spatial-kit/1"
+    ]
+  },
+  "scope": {
+    "branchId": "main",
+    "revision": 5,
+    "viewMode": "author",
+    "rootMapId": "map_08584e2ac13e07c8278330a6",
+    "includeDescendants": true,
+    "mapCount": 4,
+    "originalMapCount": 9
+  },
+  "maps": [
+    {
+      "mapId": "map_78c7d7fb5b0b0506e39471fd",
+      "name": "晨光旅舍",
+      "containerLocationId": "loc_6b86ef6f57577cae43d6e6a1",
+      "parentMapId": "map_c64f17d6776ab23050d0b32a",
+      "sceneStatus": "ready",
+      "scene": {
+        "kind": "atlas-scene",
+        "version": 1,
+        "generator": "atlas-spatial-kit/1",
+        "mapId": "map_78c7d7fb5b0b0506e39471fd",
+        "branchId": "main",
+        "sourceRevision": 2,
+        "units": "meters",
+        "metersPerCell": 0.5,
+        "metricQuality": "estimated",
+        "inputSignature": "{\"actors\":[],\"contents\":[],\"corridorLocationRef\":null,\"corridorWidth\":2,\"externalRoomIds\":[],\"height\":51,\"id\":\"map_78c7d7fb5b0b0506e39471fd\",\"items\":[],\"name\":\"晨光旅舍\",\"parentId\":\"loc_6b86ef6f57577cae43d6e6a1\",\"roomConnections\":[],\"rooms\":[{\"h\":24,\"id\":\"loc_f8d9c4e334a96a2231c38111\",\"name\":\"一层\",\"role\":\"indoor\",\"side\":\"north\",\"w\":25}],\"singleRoom\":false,\"width\":26}",
+        "layout": {
+          "ok": true,
+          "id": "map_78c7d7fb5b0b0506e39471fd",
+          "name": "晨光旅舍",
+          "kind": "floor",
+          "bounds": {
+            "x": 0,
+            "y": 0,
+            "w": 26,
+            "h": 51
+          },
+          "corridor": {
+            "id": "corridor",
+            "x": 0,
+            "y": 24.5,
+            "w": 26,
+            "h": 2
+          },
+          "rooms": [
+            {
+              "id": "loc_f8d9c4e334a96a2231c38111",
+              "name": "一层",
+              "side": "north",
+              "role": "indoor",
+              "x": 0.5,
+              "y": 0.5,
+              "w": 25,
+              "h": 24,
+              "quality": "layout",
+              "mapId": "map_78c7d7fb5b0b0506e39471fd",
+              "parentId": "loc_6b86ef6f57577cae43d6e6a1",
+              "polygon": [
+                [
+                  0.5,
+                  0.5
+                ],
+                [
+                  25.5,
+                  0.5
+                ],
+                [
+                  25.5,
+                  24.5
+                ],
+                [
+                  0.5,
+                  24.5
+                ]
+              ]
+            }
+          ],
+          "doors": [
+            {
+              "id": "door:loc_f8d9c4e334a96a2231c38111",
+              "roomId": "loc_f8d9c4e334a96a2231c38111",
+              "x": 13,
+              "y": 24.5,
+              "wall": "south",
+              "width": 1.2,
+              "quality": "layout"
+            }
+          ],
+          "furniture": [],
+          "pins": [],
+          "edges": [
+            {
+              "from": "loc_f8d9c4e334a96a2231c38111",
+              "to": "corridor",
+              "via": "door:loc_f8d9c4e334a96a2231c38111"
+            }
+          ],
+          "issues": [],
+          "groups": [],
+          "bodies": [],
+          "actors": [],
+          "items": [],
+          "windows": [
+            {
+              "id": "window:loc_f8d9c4e334a96a2231c38111:0",
+              "type": "window",
+              "roomId": "loc_f8d9c4e334a96a2231c38111",
+              "x": 2.0625,
+              "y": 0.5,
+              "width": 1.2,
+              "elevation": 1.1
+            },
+            {
+              "id": "window:loc_f8d9c4e334a96a2231c38111:1",
+              "type": "window",
+              "roomId": "loc_f8d9c4e334a96a2231c38111",
+              "x": 5.1875,
+              "y": 0.5,
+              "width": 1.2,
+              "elevation": 1.1
+            },
+            {
+              "id": "window:loc_f8d9c4e334a96a2231c38111:2",
+              "type": "window",
+              "roomId": "loc_f8d9c4e334a96a2231c38111",
+              "x": 8.3125,
+              "y": 0.5,
+              "width": 1.2,
+              "elevation": 1.1
+            },
+            {
+              "id": "window:loc_f8d9c4e334a96a2231c38111:3",
+              "type": "window",
+              "roomId": "loc_f8d9c4e334a96a2231c38111",
+              "x": 11.4375,
+              "y": 0.5,
+              "width": 1.2,
+              "elevation": 1.1
+            },
+            {
+              "id": "window:loc_f8d9c4e334a96a2231c38111:4",
+              "type": "window",
+              "roomId": "loc_f8d9c4e334a96a2231c38111",
+              "x": 14.5625,
+              "y": 0.5,
+              "width": 1.2,
+              "elevation": 1.1
+            },
+            {
+              "id": "window:loc_f8d9c4e334a96a2231c38111:5",
+              "type": "window",
+              "roomId": "loc_f8d9c4e334a96a2231c38111",
+              "x": 17.6875,
+              "y": 0.5,
+              "width": 1.2,
+              "elevation": 1.1
+            },
+            {
+              "id": "window:loc_f8d9c4e334a96a2231c38111:6",
+              "type": "window",
+              "roomId": "loc_f8d9c4e334a96a2231c38111",
+              "x": 20.8125,
+              "y": 0.5,
+              "width": 1.2,
+              "elevation": 1.1
+            },
+            {
+              "id": "window:loc_f8d9c4e334a96a2231c38111:7",
+              "type": "window",
+              "roomId": "loc_f8d9c4e334a96a2231c38111",
+              "x": 23.9375,
+              "y": 0.5,
+              "width": 1.2,
+              "elevation": 1.1
+            }
+          ],
+          "lamps": [
+            {
+              "id": "light:loc_f8d9c4e334a96a2231c38111",
+              "type": "light",
+              "roomId": "loc_f8d9c4e334a96a2231c38111",
+              "x": 13,
+              "y": 11.3,
+              "elevation": 2.8
+            }
+          ],
+          "doorSwings": [
+            {
+              "id": "swing:door:loc_f8d9c4e334a96a2231c38111",
+              "roomId": "loc_f8d9c4e334a96a2231c38111",
+              "x": 12.4,
+              "y": 23.3,
+              "w": 1.2,
+              "h": 1.2
+            }
+          ],
+          "path": []
+        },
+        "constraints": {
+          "corridorWidth": 2,
+          "corridorLocationRef": null,
+          "rooms": [
+            {
+              "w": 25,
+              "h": 24,
+              "side": "north",
+              "role": "indoor",
+              "id": "loc_f8d9c4e334a96a2231c38111",
+              "name": "一层"
+            }
+          ],
+          "contents": [],
+          "actors": [],
+          "items": []
+        }
+      },
+      "issues": []
+    },
+    {
+      "mapId": "map_e0a80e21f091c0be90cc9d1f",
+      "name": "一层",
+      "containerLocationId": "loc_f8d9c4e334a96a2231c38111",
+      "parentMapId": "map_78c7d7fb5b0b0506e39471fd",
+      "sceneStatus": "ready",
+      "scene": {
+        "kind": "atlas-scene",
+        "version": 1,
+        "generator": "atlas-spatial-kit/1",
+        "mapId": "map_e0a80e21f091c0be90cc9d1f",
+        "branchId": "main",
+        "sourceRevision": 4,
+        "units": "meters",
+        "metersPerCell": 0.25,
+        "metricQuality": "estimated",
+        "inputSignature": "{\"actors\":[{\"id\":\"chr_2dc142c0581435dc82324850\",\"name\":\"chr_2dc142c0581435dc82324850\",\"near\":\"space:loc_3741bd8d9d67dbc4b336a965:furn:chair_i2\",\"roomId\":\"loc_3741bd8d9d67dbc4b336a965\"},{\"id\":\"chr_a371b27615de7450c308027a\",\"name\":\"chr_a371b27615de7450c308027a\",\"near\":\"space:loc_3741bd8d9d67dbc4b336a965:furn:table_i3\",\"roomId\":\"loc_3741bd8d9d67dbc4b336a965\"}],\"contents\":[{\"h\":1,\"id\":\"space:loc_3741bd8d9d67dbc4b336a965:furn:chair_i2\",\"name\":\"椅子\",\"roomId\":\"loc_3741bd8d9d67dbc4b336a965\",\"type\":\"chair\",\"w\":1},{\"h\":1,\"id\":\"space:loc_3741bd8d9d67dbc4b336a965:furn:chair_i4\",\"name\":\"椅子\",\"roomId\":\"loc_3741bd8d9d67dbc4b336a965\",\"type\":\"chair\",\"w\":1},{\"h\":1,\"id\":\"space:loc_3741bd8d9d67dbc4b336a965:furn:table_i3\",\"name\":\"长桌\",\"roomId\":\"loc_3741bd8d9d67dbc4b336a965\",\"type\":\"table\",\"w\":2},{\"h\":1,\"id\":\"space:loc_7506fc5f802c70aa5eaafc15:furn:kitchen_shelf\",\"name\":\"厨房置物架\",\"roomId\":\"loc_7506fc5f802c70aa5eaafc15\",\"type\":\"shelf\",\"w\":1},{\"h\":1,\"id\":\"space:loc_7506fc5f802c70aa5eaafc15:furn:kitchen_worktable\",\"name\":\"厨房工作台\",\"roomId\":\"loc_7506fc5f802c70aa5eaafc15\",\"type\":\"desk\",\"w\":3}],\"corridorLocationRef\":null,\"corridorWidth\":2,\"externalConnections\":[{\"from\":\"loc_3741bd8d9d67dbc4b336a965\",\"id\":\"rte_938b590837a5d39c52e75b38\",\"to\":\"loc_201adfc6f73cdc10c7d02982\"}],\"externalRoomIds\":[\"loc_3741bd8d9d67dbc4b336a965\"],\"height\":24,\"id\":\"map_e0a80e21f091c0be90cc9d1f\",\"items\":[{\"id\":\"itm_1b649d9ec1e4b898e6977ed2\",\"name\":\"itm_1b649d9ec1e4b898e6977ed2\",\"on\":\"space:loc_3741bd8d9d67dbc4b336a965:furn:table_i3\"}],\"name\":\"一层\",\"parentId\":\"loc_f8d9c4e334a96a2231c38111\",\"roomConnections\":[{\"from\":\"loc_3741bd8d9d67dbc4b336a965\",\"id\":\"rte_95862625f76cd6ea08eccbd7\",\"to\":\"loc_7506fc5f802c70aa5eaafc15\"}],\"rooms\":[{\"h\":8,\"id\":\"loc_3741bd8d9d67dbc4b336a965\",\"name\":\"一层大厅\",\"role\":\"indoor\",\"side\":\"south\",\"w\":12},{\"h\":3,\"id\":\"loc_7506fc5f802c70aa5eaafc15\",\"name\":\"厨房\",\"role\":\"indoor\",\"side\":\"north\",\"w\":4}],\"singleRoom\":false,\"width\":25}",
+        "layout": {
+          "ok": true,
+          "id": "map_e0a80e21f091c0be90cc9d1f",
+          "name": "一层",
+          "kind": "floor",
+          "bounds": {
+            "x": 0,
+            "y": 0,
+            "w": 25,
+            "h": 24
+          },
+          "corridor": {
+            "id": "corridor",
+            "x": 0,
+            "y": 11,
+            "w": 25,
+            "h": 2
+          },
+          "rooms": [
+            {
+              "id": "loc_3741bd8d9d67dbc4b336a965",
+              "name": "一层大厅",
+              "side": "south",
+              "role": "indoor",
+              "x": 0.5,
+              "y": 13,
+              "w": 12,
+              "h": 8,
+              "quality": "layout",
+              "mapId": "map_e0a80e21f091c0be90cc9d1f",
+              "parentId": "loc_f8d9c4e334a96a2231c38111",
+              "polygon": [
+                [
+                  0.5,
+                  13
+                ],
+                [
+                  12.5,
+                  13
+                ],
+                [
+                  12.5,
+                  21
+                ],
+                [
+                  0.5,
+                  21
+                ]
+              ]
+            },
+            {
+              "id": "loc_7506fc5f802c70aa5eaafc15",
+              "name": "厨房",
+              "side": "south",
+              "role": "indoor",
+              "x": 12.5,
+              "y": 13,
+              "w": 4,
+              "h": 3,
+              "quality": "layout",
+              "mapId": "map_e0a80e21f091c0be90cc9d1f",
+              "parentId": "loc_f8d9c4e334a96a2231c38111",
+              "polygon": [
+                [
+                  12.5,
+                  13
+                ],
+                [
+                  16.5,
+                  13
+                ],
+                [
+                  16.5,
+                  16
+                ],
+                [
+                  12.5,
+                  16
+                ]
+              ]
+            }
+          ],
+          "doors": [
+            {
+              "id": "door:rte_938b590837a5d39c52e75b38:loc_3741bd8d9d67dbc4b336a965",
+              "routeId": "rte_938b590837a5d39c52e75b38",
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "toRoomId": "loc_201adfc6f73cdc10c7d02982",
+              "x": 6.5,
+              "y": 13,
+              "wall": "north",
+              "width": 1.2,
+              "quality": "layout"
+            },
+            {
+              "id": "door:rte_95862625f76cd6ea08eccbd7:loc_3741bd8d9d67dbc4b336a965",
+              "routeId": "rte_95862625f76cd6ea08eccbd7",
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "toRoomId": "loc_7506fc5f802c70aa5eaafc15",
+              "x": 12.5,
+              "y": 13.799999999999999,
+              "width": 1.2,
+              "wall": "east",
+              "quality": "layout"
+            },
+            {
+              "id": "door:rte_95862625f76cd6ea08eccbd7:loc_7506fc5f802c70aa5eaafc15",
+              "routeId": "rte_95862625f76cd6ea08eccbd7",
+              "roomId": "loc_7506fc5f802c70aa5eaafc15",
+              "toRoomId": "loc_3741bd8d9d67dbc4b336a965",
+              "x": 12.5,
+              "y": 13.799999999999999,
+              "width": 1.2,
+              "wall": "west",
+              "quality": "layout"
+            }
+          ],
+          "furniture": [],
+          "pins": [],
+          "edges": [
+            {
+              "from": "loc_3741bd8d9d67dbc4b336a965",
+              "to": "loc_201adfc6f73cdc10c7d02982",
+              "via": "door:rte_938b590837a5d39c52e75b38:loc_3741bd8d9d67dbc4b336a965",
+              "routeId": "rte_938b590837a5d39c52e75b38"
+            },
+            {
+              "from": "loc_3741bd8d9d67dbc4b336a965",
+              "to": "loc_7506fc5f802c70aa5eaafc15",
+              "via": "door:rte_95862625f76cd6ea08eccbd7:loc_3741bd8d9d67dbc4b336a965",
+              "routeId": "rte_95862625f76cd6ea08eccbd7"
+            },
+            {
+              "from": "loc_7506fc5f802c70aa5eaafc15",
+              "to": "loc_3741bd8d9d67dbc4b336a965",
+              "via": "door:rte_95862625f76cd6ea08eccbd7:loc_7506fc5f802c70aa5eaafc15",
+              "routeId": "rte_95862625f76cd6ea08eccbd7"
+            }
+          ],
+          "issues": [],
+          "groups": [
+            {
+              "id": "space:loc_3741bd8d9d67dbc4b336a965:furn:table_i3",
+              "name": "长桌",
+              "type": "table",
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "x": 2.45,
+              "y": 15.45,
+              "w": 2,
+              "h": 1,
+              "quality": "layout",
+              "bodies": [
+                {
+                  "id": "space:loc_3741bd8d9d67dbc4b336a965:furn:table_i3:table",
+                  "type": "table",
+                  "x": 2.45,
+                  "y": 15.45,
+                  "w": 2,
+                  "h": 1,
+                  "groupId": "space:loc_3741bd8d9d67dbc4b336a965:furn:table_i3",
+                  "roomId": "loc_3741bd8d9d67dbc4b336a965",
+                  "solid": true
+                }
+              ],
+              "interaction": {
+                "x": 4.93,
+                "y": 15.95
+              }
+            },
+            {
+              "id": "space:loc_3741bd8d9d67dbc4b336a965:furn:chair_i2",
+              "name": "椅子",
+              "type": "chair",
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "x": 2.95,
+              "y": 16.95,
+              "w": 1,
+              "h": 1,
+              "quality": "layout",
+              "bodies": [
+                {
+                  "id": "space:loc_3741bd8d9d67dbc4b336a965:furn:chair_i2:chair",
+                  "type": "chair",
+                  "x": 2.95,
+                  "y": 16.95,
+                  "w": 1,
+                  "h": 1,
+                  "groupId": "space:loc_3741bd8d9d67dbc4b336a965:furn:chair_i2",
+                  "roomId": "loc_3741bd8d9d67dbc4b336a965",
+                  "solid": true
+                }
+              ],
+              "interaction": {
+                "x": 4.43,
+                "y": 17.45
+              }
+            },
+            {
+              "id": "space:loc_3741bd8d9d67dbc4b336a965:furn:chair_i4",
+              "name": "椅子",
+              "type": "chair",
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "x": 2.95,
+              "y": 13.95,
+              "w": 1,
+              "h": 1,
+              "quality": "layout",
+              "bodies": [
+                {
+                  "id": "space:loc_3741bd8d9d67dbc4b336a965:furn:chair_i4:chair",
+                  "type": "chair",
+                  "x": 2.95,
+                  "y": 13.95,
+                  "w": 1,
+                  "h": 1,
+                  "groupId": "space:loc_3741bd8d9d67dbc4b336a965:furn:chair_i4",
+                  "roomId": "loc_3741bd8d9d67dbc4b336a965",
+                  "solid": true
+                }
+              ],
+              "interaction": {
+                "x": 4.43,
+                "y": 14.45
+              }
+            },
+            {
+              "id": "space:loc_7506fc5f802c70aa5eaafc15:furn:kitchen_worktable",
+              "name": "厨房工作台",
+              "type": "desk",
+              "roomId": "loc_7506fc5f802c70aa5eaafc15",
+              "x": 12.7,
+              "y": 14.799999999999999,
+              "w": 3,
+              "h": 1,
+              "quality": "layout",
+              "bodies": [
+                {
+                  "id": "space:loc_7506fc5f802c70aa5eaafc15:furn:kitchen_worktable:desk",
+                  "type": "desk",
+                  "x": 12.7,
+                  "y": 14.799999999999999,
+                  "w": 3,
+                  "h": 0.68,
+                  "groupId": "space:loc_7506fc5f802c70aa5eaafc15:furn:kitchen_worktable",
+                  "roomId": "loc_7506fc5f802c70aa5eaafc15",
+                  "solid": true
+                },
+                {
+                  "id": "space:loc_7506fc5f802c70aa5eaafc15:furn:kitchen_worktable:chair:1",
+                  "type": "chair",
+                  "x": 15.299999999999999,
+                  "y": 15.419999999999998,
+                  "w": 0.35,
+                  "h": 0.35,
+                  "groupId": "space:loc_7506fc5f802c70aa5eaafc15:furn:kitchen_worktable",
+                  "roomId": "loc_7506fc5f802c70aa5eaafc15",
+                  "solid": true
+                }
+              ],
+              "interaction": {
+                "x": 16.18,
+                "y": 15.299999999999999
+              }
+            },
+            {
+              "id": "space:loc_7506fc5f802c70aa5eaafc15:furn:kitchen_shelf",
+              "name": "厨房置物架",
+              "type": "shelf",
+              "roomId": "loc_7506fc5f802c70aa5eaafc15",
+              "x": 13.7,
+              "y": 13.2,
+              "w": 1,
+              "h": 1,
+              "quality": "layout",
+              "bodies": [
+                {
+                  "id": "space:loc_7506fc5f802c70aa5eaafc15:furn:kitchen_shelf:shelf",
+                  "type": "shelf",
+                  "x": 13.7,
+                  "y": 13.2,
+                  "w": 1,
+                  "h": 1,
+                  "groupId": "space:loc_7506fc5f802c70aa5eaafc15:furn:kitchen_shelf",
+                  "roomId": "loc_7506fc5f802c70aa5eaafc15",
+                  "solid": true
+                }
+              ],
+              "interaction": {
+                "x": 15.18,
+                "y": 13.7
+              }
+            }
+          ],
+          "bodies": [
+            {
+              "id": "space:loc_3741bd8d9d67dbc4b336a965:furn:table_i3:table",
+              "type": "table",
+              "x": 2.45,
+              "y": 15.45,
+              "w": 2,
+              "h": 1,
+              "groupId": "space:loc_3741bd8d9d67dbc4b336a965:furn:table_i3",
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "solid": true
+            },
+            {
+              "id": "space:loc_3741bd8d9d67dbc4b336a965:furn:chair_i2:chair",
+              "type": "chair",
+              "x": 2.95,
+              "y": 16.95,
+              "w": 1,
+              "h": 1,
+              "groupId": "space:loc_3741bd8d9d67dbc4b336a965:furn:chair_i2",
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "solid": true
+            },
+            {
+              "id": "space:loc_3741bd8d9d67dbc4b336a965:furn:chair_i4:chair",
+              "type": "chair",
+              "x": 2.95,
+              "y": 13.95,
+              "w": 1,
+              "h": 1,
+              "groupId": "space:loc_3741bd8d9d67dbc4b336a965:furn:chair_i4",
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "solid": true
+            },
+            {
+              "id": "space:loc_7506fc5f802c70aa5eaafc15:furn:kitchen_worktable:desk",
+              "type": "desk",
+              "x": 12.7,
+              "y": 14.799999999999999,
+              "w": 3,
+              "h": 0.68,
+              "groupId": "space:loc_7506fc5f802c70aa5eaafc15:furn:kitchen_worktable",
+              "roomId": "loc_7506fc5f802c70aa5eaafc15",
+              "solid": true
+            },
+            {
+              "id": "space:loc_7506fc5f802c70aa5eaafc15:furn:kitchen_worktable:chair:1",
+              "type": "chair",
+              "x": 15.299999999999999,
+              "y": 15.419999999999998,
+              "w": 0.35,
+              "h": 0.35,
+              "groupId": "space:loc_7506fc5f802c70aa5eaafc15:furn:kitchen_worktable",
+              "roomId": "loc_7506fc5f802c70aa5eaafc15",
+              "solid": true
+            },
+            {
+              "id": "space:loc_7506fc5f802c70aa5eaafc15:furn:kitchen_shelf:shelf",
+              "type": "shelf",
+              "x": 13.7,
+              "y": 13.2,
+              "w": 1,
+              "h": 1,
+              "groupId": "space:loc_7506fc5f802c70aa5eaafc15:furn:kitchen_shelf",
+              "roomId": "loc_7506fc5f802c70aa5eaafc15",
+              "solid": true
+            }
+          ],
+          "actors": [
+            {
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "near": "space:loc_3741bd8d9d67dbc4b336a965:furn:chair_i2",
+              "id": "chr_2dc142c0581435dc82324850",
+              "name": "羽风灵",
+              "x": 4.43,
+              "y": 17.45,
+              "mapId": "map_e0a80e21f091c0be90cc9d1f",
+              "type": "person",
+              "quality": "layout"
+            },
+            {
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "near": "space:loc_3741bd8d9d67dbc4b336a965:furn:table_i3",
+              "id": "chr_a371b27615de7450c308027a",
+              "name": "林安",
+              "x": 1.9700000000000002,
+              "y": 15.95,
+              "mapId": "map_e0a80e21f091c0be90cc9d1f",
+              "type": "person",
+              "quality": "layout"
+            }
+          ],
+          "items": [],
+          "windows": [
+            {
+              "id": "window:loc_3741bd8d9d67dbc4b336a965:0",
+              "type": "window",
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "x": 2,
+              "y": 21,
+              "width": 1.2,
+              "elevation": 1.1
+            },
+            {
+              "id": "window:loc_3741bd8d9d67dbc4b336a965:1",
+              "type": "window",
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "x": 5,
+              "y": 21,
+              "width": 1.2,
+              "elevation": 1.1
+            },
+            {
+              "id": "window:loc_3741bd8d9d67dbc4b336a965:2",
+              "type": "window",
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "x": 8,
+              "y": 21,
+              "width": 1.2,
+              "elevation": 1.1
+            },
+            {
+              "id": "window:loc_3741bd8d9d67dbc4b336a965:3",
+              "type": "window",
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "x": 11,
+              "y": 21,
+              "width": 1.2,
+              "elevation": 1.1
+            },
+            {
+              "id": "window:loc_7506fc5f802c70aa5eaafc15:0",
+              "type": "window",
+              "roomId": "loc_7506fc5f802c70aa5eaafc15",
+              "x": 14.5,
+              "y": 16,
+              "width": 1.2,
+              "elevation": 1.1
+            }
+          ],
+          "lamps": [
+            {
+              "id": "light:loc_3741bd8d9d67dbc4b336a965",
+              "type": "light",
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "x": 6.5,
+              "y": 16.6,
+              "elevation": 2.8
+            },
+            {
+              "id": "light:loc_7506fc5f802c70aa5eaafc15",
+              "type": "light",
+              "roomId": "loc_7506fc5f802c70aa5eaafc15",
+              "x": 12.5,
+              "y": 14.35,
+              "elevation": 2.8
+            }
+          ],
+          "doorSwings": [
+            {
+              "id": "swing:door:rte_938b590837a5d39c52e75b38:loc_3741bd8d9d67dbc4b336a965",
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "x": 5.9,
+              "y": 13,
+              "w": 1.2,
+              "h": 1.2
+            },
+            {
+              "id": "swing:door:rte_95862625f76cd6ea08eccbd7:loc_3741bd8d9d67dbc4b336a965",
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "x": 11.3,
+              "y": 13.2,
+              "w": 1.2,
+              "h": 1.2
+            },
+            {
+              "id": "swing:door:rte_95862625f76cd6ea08eccbd7:loc_7506fc5f802c70aa5eaafc15",
+              "roomId": "loc_7506fc5f802c70aa5eaafc15",
+              "x": 12.5,
+              "y": 13.2,
+              "w": 1.2,
+              "h": 1.2
+            }
+          ],
+          "path": []
+        },
+        "constraints": {
+          "corridorWidth": 2,
+          "corridorLocationRef": null,
+          "rooms": [
+            {
+              "w": 12,
+              "h": 8,
+              "side": "south",
+              "role": "indoor",
+              "id": "loc_3741bd8d9d67dbc4b336a965",
+              "name": "一层大厅"
+            },
+            {
+              "w": 4,
+              "h": 3,
+              "side": "north",
+              "role": "indoor",
+              "id": "loc_7506fc5f802c70aa5eaafc15",
+              "name": "厨房"
+            }
+          ],
+          "contents": [
+            {
+              "w": 1,
+              "h": 1,
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "type": "chair",
+              "id": "space:loc_3741bd8d9d67dbc4b336a965:furn:chair_i2",
+              "name": "椅子"
+            },
+            {
+              "w": 1,
+              "h": 1,
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "type": "chair",
+              "id": "space:loc_3741bd8d9d67dbc4b336a965:furn:chair_i4",
+              "name": "椅子"
+            },
+            {
+              "w": 2,
+              "h": 1,
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "type": "table",
+              "id": "space:loc_3741bd8d9d67dbc4b336a965:furn:table_i3",
+              "name": "长桌"
+            },
+            {
+              "w": 1,
+              "h": 1,
+              "roomId": "loc_7506fc5f802c70aa5eaafc15",
+              "type": "shelf",
+              "id": "space:loc_7506fc5f802c70aa5eaafc15:furn:kitchen_shelf",
+              "name": "厨房置物架"
+            },
+            {
+              "w": 3,
+              "h": 1,
+              "roomId": "loc_7506fc5f802c70aa5eaafc15",
+              "type": "desk",
+              "id": "space:loc_7506fc5f802c70aa5eaafc15:furn:kitchen_worktable",
+              "name": "厨房工作台"
+            }
+          ],
+          "actors": [
+            {
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "near": "space:loc_3741bd8d9d67dbc4b336a965:furn:chair_i2",
+              "id": "chr_2dc142c0581435dc82324850",
+              "name": "chr_2dc142c0581435dc82324850"
+            },
+            {
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "near": "space:loc_3741bd8d9d67dbc4b336a965:furn:table_i3",
+              "id": "chr_a371b27615de7450c308027a",
+              "name": "chr_a371b27615de7450c308027a"
+            }
+          ],
+          "items": [
+            {
+              "on": "space:loc_3741bd8d9d67dbc4b336a965:furn:table_i3",
+              "id": "itm_1b649d9ec1e4b898e6977ed2",
+              "name": "itm_1b649d9ec1e4b898e6977ed2"
+            }
+          ]
+        }
+      },
+      "issues": []
+    },
+    {
+      "mapId": "map_2e032a9dc47e45cec5bde9fb",
+      "name": "一层大厅",
+      "containerLocationId": "loc_3741bd8d9d67dbc4b336a965",
+      "parentMapId": "map_e0a80e21f091c0be90cc9d1f",
+      "sceneStatus": "ready",
+      "scene": {
+        "kind": "atlas-scene",
+        "version": 1,
+        "generator": "atlas-spatial-kit/1",
+        "mapId": "map_2e032a9dc47e45cec5bde9fb",
+        "branchId": "main",
+        "sourceRevision": 4,
+        "units": "meters",
+        "metersPerCell": 1,
+        "metricQuality": "estimated",
+        "inputSignature": "{\"actors\":[{\"id\":\"chr_2dc142c0581435dc82324850\",\"name\":\"chr_2dc142c0581435dc82324850\",\"roomId\":\"loc_3741bd8d9d67dbc4b336a965\"},{\"id\":\"chr_a371b27615de7450c308027a\",\"name\":\"chr_a371b27615de7450c308027a\",\"roomId\":\"loc_3741bd8d9d67dbc4b336a965\"}],\"contents\":[{\"h\":1,\"id\":\"chair_i2\",\"name\":\"椅子\",\"roomId\":\"loc_3741bd8d9d67dbc4b336a965\",\"type\":\"chair\",\"w\":1},{\"h\":1,\"id\":\"chair_i4\",\"name\":\"椅子\",\"roomId\":\"loc_3741bd8d9d67dbc4b336a965\",\"type\":\"chair\",\"w\":1},{\"h\":1,\"id\":\"table_i3\",\"name\":\"长桌\",\"roomId\":\"loc_3741bd8d9d67dbc4b336a965\",\"type\":\"table\",\"w\":2}],\"corridorLocationRef\":null,\"corridorWidth\":2,\"entryDoors\":[{\"id\":\"door:rte_938b590837a5d39c52e75b38:loc_3741bd8d9d67dbc4b336a965\",\"quality\":\"layout\",\"roomId\":\"loc_3741bd8d9d67dbc4b336a965\",\"routeId\":\"rte_938b590837a5d39c52e75b38\",\"sourceRoomSize\":{\"h\":8,\"w\":12},\"toRoomId\":\"loc_201adfc6f73cdc10c7d02982\",\"wall\":\"north\",\"width\":1.2,\"x\":6,\"y\":0},{\"id\":\"door:rte_95862625f76cd6ea08eccbd7:loc_3741bd8d9d67dbc4b336a965\",\"quality\":\"layout\",\"roomId\":\"loc_3741bd8d9d67dbc4b336a965\",\"routeId\":\"rte_95862625f76cd6ea08eccbd7\",\"sourceRoomSize\":{\"h\":8,\"w\":12},\"toRoomId\":\"loc_7506fc5f802c70aa5eaafc15\",\"wall\":\"east\",\"width\":1.2,\"x\":12,\"y\":0.7999999999999989}],\"externalConnections\":[],\"externalRoomIds\":[],\"height\":8,\"id\":\"map_2e032a9dc47e45cec5bde9fb\",\"items\":[{\"id\":\"itm_1b649d9ec1e4b898e6977ed2\",\"name\":\"itm_1b649d9ec1e4b898e6977ed2\",\"on\":\"table_i3\"}],\"name\":\"一层大厅\",\"parentGroups\":[{\"h\":1,\"id\":\"table_i3\",\"roomId\":\"loc_3741bd8d9d67dbc4b336a965\",\"w\":2,\"x\":1.9500000000000002,\"y\":2.4499999999999993},{\"h\":1,\"id\":\"chair_i2\",\"roomId\":\"loc_3741bd8d9d67dbc4b336a965\",\"w\":1,\"x\":2.45,\"y\":3.9499999999999993},{\"h\":1,\"id\":\"chair_i4\",\"roomId\":\"loc_3741bd8d9d67dbc4b336a965\",\"w\":1,\"x\":2.45,\"y\":0.9499999999999993}],\"parentId\":\"loc_3741bd8d9d67dbc4b336a965\",\"roomConnections\":[],\"rooms\":[{\"h\":8,\"id\":\"loc_3741bd8d9d67dbc4b336a965\",\"name\":\"一层大厅\",\"role\":\"indoor\",\"side\":\"north\",\"w\":12}],\"singleRoom\":true,\"width\":12}",
+        "layout": {
+          "ok": true,
+          "id": "map_2e032a9dc47e45cec5bde9fb",
+          "name": "一层大厅",
+          "kind": "floor",
+          "bounds": {
+            "x": 0,
+            "y": 0,
+            "w": 12,
+            "h": 8
+          },
+          "corridor": {
+            "id": "corridor",
+            "x": 0,
+            "y": 8,
+            "w": 0,
+            "h": 0
+          },
+          "rooms": [
+            {
+              "id": "loc_3741bd8d9d67dbc4b336a965",
+              "name": "一层大厅",
+              "side": "north",
+              "role": "indoor",
+              "x": 0,
+              "y": 0,
+              "w": 12,
+              "h": 8,
+              "quality": "layout",
+              "mapId": "map_2e032a9dc47e45cec5bde9fb",
+              "parentId": "loc_3741bd8d9d67dbc4b336a965",
+              "polygon": [
+                [
+                  0,
+                  0
+                ],
+                [
+                  12,
+                  0
+                ],
+                [
+                  12,
+                  8
+                ],
+                [
+                  0,
+                  8
+                ]
+              ]
+            }
+          ],
+          "doors": [
+            {
+              "id": "door:rte_938b590837a5d39c52e75b38:loc_3741bd8d9d67dbc4b336a965",
+              "routeId": "rte_938b590837a5d39c52e75b38",
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "toRoomId": "loc_201adfc6f73cdc10c7d02982",
+              "x": 6,
+              "y": 0,
+              "wall": "north",
+              "width": 1.2,
+              "quality": "layout",
+              "sourceRoomSize": {
+                "w": 12,
+                "h": 8
+              }
+            },
+            {
+              "id": "door:rte_95862625f76cd6ea08eccbd7:loc_3741bd8d9d67dbc4b336a965",
+              "routeId": "rte_95862625f76cd6ea08eccbd7",
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "toRoomId": "loc_7506fc5f802c70aa5eaafc15",
+              "x": 12,
+              "y": 0.7999999999999989,
+              "width": 1.2,
+              "wall": "east",
+              "quality": "layout",
+              "sourceRoomSize": {
+                "w": 12,
+                "h": 8
+              }
+            }
+          ],
+          "furniture": [],
+          "pins": [],
+          "edges": [
+            {
+              "from": "loc_3741bd8d9d67dbc4b336a965",
+              "to": "loc_201adfc6f73cdc10c7d02982",
+              "via": "door:rte_938b590837a5d39c52e75b38:loc_3741bd8d9d67dbc4b336a965",
+              "routeId": "rte_938b590837a5d39c52e75b38"
+            },
+            {
+              "from": "loc_3741bd8d9d67dbc4b336a965",
+              "to": "loc_7506fc5f802c70aa5eaafc15",
+              "via": "door:rte_95862625f76cd6ea08eccbd7:loc_3741bd8d9d67dbc4b336a965",
+              "routeId": "rte_95862625f76cd6ea08eccbd7"
+            }
+          ],
+          "issues": [],
+          "groups": [
+            {
+              "id": "table_i3",
+              "name": "长桌",
+              "type": "table",
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "x": 1.9500000000000002,
+              "y": 2.4499999999999993,
+              "w": 2,
+              "h": 1,
+              "quality": "layout",
+              "bodies": [
+                {
+                  "id": "table_i3:table",
+                  "type": "table",
+                  "x": 1.9500000000000002,
+                  "y": 2.4499999999999993,
+                  "w": 2,
+                  "h": 1,
+                  "groupId": "table_i3",
+                  "roomId": "loc_3741bd8d9d67dbc4b336a965",
+                  "solid": true
+                }
+              ],
+              "interaction": {
+                "x": 4.43,
+                "y": 2.9499999999999993
+              }
+            },
+            {
+              "id": "chair_i2",
+              "name": "椅子",
+              "type": "chair",
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "x": 2.45,
+              "y": 3.9499999999999993,
+              "w": 1,
+              "h": 1,
+              "quality": "layout",
+              "bodies": [
+                {
+                  "id": "chair_i2:chair",
+                  "type": "chair",
+                  "x": 2.45,
+                  "y": 3.9499999999999993,
+                  "w": 1,
+                  "h": 1,
+                  "groupId": "chair_i2",
+                  "roomId": "loc_3741bd8d9d67dbc4b336a965",
+                  "solid": true
+                }
+              ],
+              "interaction": {
+                "x": 3.93,
+                "y": 4.449999999999999
+              }
+            },
+            {
+              "id": "chair_i4",
+              "name": "椅子",
+              "type": "chair",
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "x": 2.45,
+              "y": 0.9499999999999993,
+              "w": 1,
+              "h": 1,
+              "quality": "layout",
+              "bodies": [
+                {
+                  "id": "chair_i4:chair",
+                  "type": "chair",
+                  "x": 2.45,
+                  "y": 0.9499999999999993,
+                  "w": 1,
+                  "h": 1,
+                  "groupId": "chair_i4",
+                  "roomId": "loc_3741bd8d9d67dbc4b336a965",
+                  "solid": true
+                }
+              ],
+              "interaction": {
+                "x": 3.93,
+                "y": 1.4499999999999993
+              }
+            }
+          ],
+          "bodies": [
+            {
+              "id": "table_i3:table",
+              "type": "table",
+              "x": 1.9500000000000002,
+              "y": 2.4499999999999993,
+              "w": 2,
+              "h": 1,
+              "groupId": "table_i3",
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "solid": true
+            },
+            {
+              "id": "chair_i2:chair",
+              "type": "chair",
+              "x": 2.45,
+              "y": 3.9499999999999993,
+              "w": 1,
+              "h": 1,
+              "groupId": "chair_i2",
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "solid": true
+            },
+            {
+              "id": "chair_i4:chair",
+              "type": "chair",
+              "x": 2.45,
+              "y": 0.9499999999999993,
+              "w": 1,
+              "h": 1,
+              "groupId": "chair_i4",
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "solid": true
+            }
+          ],
+          "actors": [
+            {
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "id": "chr_2dc142c0581435dc82324850",
+              "name": "羽风灵",
+              "x": 5.9,
+              "y": 3.9000000000000004,
+              "mapId": "map_2e032a9dc47e45cec5bde9fb",
+              "type": "person",
+              "quality": "layout"
+            },
+            {
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "id": "chr_a371b27615de7450c308027a",
+              "name": "林安",
+              "x": 6.5,
+              "y": 4.3,
+              "mapId": "map_2e032a9dc47e45cec5bde9fb",
+              "type": "person",
+              "quality": "layout"
+            }
+          ],
+          "items": [
+            {
+              "on": "table_i3",
+              "id": "itm_1b649d9ec1e4b898e6977ed2",
+              "name": "茶壶",
+              "x": 2.95,
+              "y": 2.9499999999999993,
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "type": "item",
+              "containerId": "table_i3",
+              "elevation": 0.8,
+              "quality": "layout"
+            }
+          ],
+          "windows": [
+            {
+              "id": "window:loc_3741bd8d9d67dbc4b336a965:0",
+              "type": "window",
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "x": 1.5,
+              "y": 0,
+              "width": 1.2,
+              "elevation": 1.1
+            },
+            {
+              "id": "window:loc_3741bd8d9d67dbc4b336a965:1",
+              "type": "window",
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "x": 4.5,
+              "y": 0,
+              "width": 1.2,
+              "elevation": 1.1
+            },
+            {
+              "id": "window:loc_3741bd8d9d67dbc4b336a965:2",
+              "type": "window",
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "x": 7.5,
+              "y": 0,
+              "width": 1.2,
+              "elevation": 1.1
+            },
+            {
+              "id": "window:loc_3741bd8d9d67dbc4b336a965:3",
+              "type": "window",
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "x": 10.5,
+              "y": 0,
+              "width": 1.2,
+              "elevation": 1.1
+            }
+          ],
+          "lamps": [
+            {
+              "id": "light:loc_3741bd8d9d67dbc4b336a965",
+              "type": "light",
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "x": 6,
+              "y": 3.6,
+              "elevation": 2.8
+            }
+          ],
+          "doorSwings": [
+            {
+              "id": "swing:door:rte_938b590837a5d39c52e75b38:loc_3741bd8d9d67dbc4b336a965",
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "x": 5.4,
+              "y": 0,
+              "w": 1.2,
+              "h": 1.2
+            },
+            {
+              "id": "swing:door:rte_95862625f76cd6ea08eccbd7:loc_3741bd8d9d67dbc4b336a965",
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "x": 10.8,
+              "y": 0.19999999999999896,
+              "w": 1.2,
+              "h": 1.2
+            }
+          ],
+          "path": []
+        },
+        "constraints": {
+          "corridorWidth": 2,
+          "corridorLocationRef": null,
+          "rooms": [
+            {
+              "w": 12,
+              "h": 8,
+              "side": "north",
+              "role": "indoor",
+              "id": "loc_3741bd8d9d67dbc4b336a965",
+              "name": "一层大厅"
+            }
+          ],
+          "contents": [
+            {
+              "w": 1,
+              "h": 1,
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "type": "chair",
+              "id": "chair_i2",
+              "name": "椅子"
+            },
+            {
+              "w": 1,
+              "h": 1,
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "type": "chair",
+              "id": "chair_i4",
+              "name": "椅子"
+            },
+            {
+              "w": 2,
+              "h": 1,
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "type": "table",
+              "id": "table_i3",
+              "name": "长桌"
+            }
+          ],
+          "actors": [
+            {
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "id": "chr_2dc142c0581435dc82324850",
+              "name": "chr_2dc142c0581435dc82324850"
+            },
+            {
+              "roomId": "loc_3741bd8d9d67dbc4b336a965",
+              "id": "chr_a371b27615de7450c308027a",
+              "name": "chr_a371b27615de7450c308027a"
+            }
+          ],
+          "items": [
+            {
+              "on": "table_i3",
+              "id": "itm_1b649d9ec1e4b898e6977ed2",
+              "name": "itm_1b649d9ec1e4b898e6977ed2"
+            }
+          ]
+        }
+      },
+      "issues": []
+    },
+    {
+      "mapId": "map_418dcbd1e7fc7f96627abb2f",
+      "name": "厨房",
+      "containerLocationId": "loc_7506fc5f802c70aa5eaafc15",
+      "parentMapId": "map_e0a80e21f091c0be90cc9d1f",
+      "sceneStatus": "ready",
+      "scene": {
+        "kind": "atlas-scene",
+        "version": 1,
+        "generator": "atlas-spatial-kit/1",
+        "mapId": "map_418dcbd1e7fc7f96627abb2f",
+        "branchId": "main",
+        "sourceRevision": 3,
+        "units": "meters",
+        "metersPerCell": 0.04,
+        "metricQuality": "estimated",
+        "inputSignature": "{\"actors\":[],\"contents\":[{\"h\":1,\"id\":\"kitchen_shelf\",\"name\":\"厨房置物架\",\"roomId\":\"loc_7506fc5f802c70aa5eaafc15\",\"type\":\"shelf\",\"w\":1},{\"h\":1,\"id\":\"kitchen_worktable\",\"name\":\"厨房工作台\",\"roomId\":\"loc_7506fc5f802c70aa5eaafc15\",\"type\":\"desk\",\"w\":3}],\"corridorLocationRef\":null,\"corridorWidth\":2,\"entryDoors\":[{\"id\":\"door:rte_95862625f76cd6ea08eccbd7:loc_7506fc5f802c70aa5eaafc15\",\"quality\":\"layout\",\"roomId\":\"loc_7506fc5f802c70aa5eaafc15\",\"routeId\":\"rte_95862625f76cd6ea08eccbd7\",\"sourceRoomSize\":{\"h\":3,\"w\":4},\"toRoomId\":\"loc_3741bd8d9d67dbc4b336a965\",\"wall\":\"west\",\"width\":1.2,\"x\":0,\"y\":0.7999999999999989}],\"externalRoomIds\":[],\"height\":3,\"id\":\"map_418dcbd1e7fc7f96627abb2f\",\"items\":[],\"name\":\"厨房\",\"parentGroups\":[{\"h\":1,\"id\":\"kitchen_worktable\",\"roomId\":\"loc_7506fc5f802c70aa5eaafc15\",\"w\":3,\"x\":0.1999999999999993,\"y\":1.799999999999999},{\"h\":1,\"id\":\"kitchen_shelf\",\"roomId\":\"loc_7506fc5f802c70aa5eaafc15\",\"w\":1,\"x\":1.1999999999999993,\"y\":0.1999999999999993}],\"parentId\":\"loc_7506fc5f802c70aa5eaafc15\",\"roomConnections\":[],\"rooms\":[{\"h\":3,\"id\":\"loc_7506fc5f802c70aa5eaafc15\",\"name\":\"厨房\",\"side\":\"north\",\"w\":4}],\"singleRoom\":true,\"width\":4}",
+        "layout": {
+          "ok": true,
+          "id": "map_418dcbd1e7fc7f96627abb2f",
+          "name": "厨房",
+          "kind": "floor",
+          "bounds": {
+            "x": 0,
+            "y": 0,
+            "w": 4,
+            "h": 3
+          },
+          "corridor": {
+            "id": "corridor",
+            "x": 0,
+            "y": 3,
+            "w": 0,
+            "h": 0
+          },
+          "rooms": [
+            {
+              "id": "loc_7506fc5f802c70aa5eaafc15",
+              "name": "厨房",
+              "side": "north",
+              "x": 0,
+              "y": 0,
+              "w": 4,
+              "h": 3,
+              "quality": "layout",
+              "mapId": "map_418dcbd1e7fc7f96627abb2f",
+              "parentId": "loc_7506fc5f802c70aa5eaafc15",
+              "polygon": [
+                [
+                  0,
+                  0
+                ],
+                [
+                  4,
+                  0
+                ],
+                [
+                  4,
+                  3
+                ],
+                [
+                  0,
+                  3
+                ]
+              ]
+            }
+          ],
+          "doors": [
+            {
+              "id": "door:rte_95862625f76cd6ea08eccbd7:loc_7506fc5f802c70aa5eaafc15",
+              "routeId": "rte_95862625f76cd6ea08eccbd7",
+              "roomId": "loc_7506fc5f802c70aa5eaafc15",
+              "toRoomId": "loc_3741bd8d9d67dbc4b336a965",
+              "x": 0,
+              "y": 0.7999999999999989,
+              "width": 1.2,
+              "wall": "west",
+              "quality": "layout",
+              "sourceRoomSize": {
+                "w": 4,
+                "h": 3
+              }
+            }
+          ],
+          "furniture": [],
+          "pins": [],
+          "edges": [
+            {
+              "from": "loc_7506fc5f802c70aa5eaafc15",
+              "to": "loc_3741bd8d9d67dbc4b336a965",
+              "via": "door:rte_95862625f76cd6ea08eccbd7:loc_7506fc5f802c70aa5eaafc15",
+              "routeId": "rte_95862625f76cd6ea08eccbd7"
+            }
+          ],
+          "issues": [],
+          "groups": [
+            {
+              "id": "kitchen_worktable",
+              "name": "厨房工作台",
+              "type": "desk",
+              "roomId": "loc_7506fc5f802c70aa5eaafc15",
+              "x": 0.1999999999999993,
+              "y": 1.799999999999999,
+              "w": 3,
+              "h": 1,
+              "quality": "layout",
+              "bodies": [
+                {
+                  "id": "kitchen_worktable:desk",
+                  "type": "desk",
+                  "x": 0.1999999999999993,
+                  "y": 1.799999999999999,
+                  "w": 3,
+                  "h": 0.68,
+                  "groupId": "kitchen_worktable",
+                  "roomId": "loc_7506fc5f802c70aa5eaafc15",
+                  "solid": true
+                },
+                {
+                  "id": "kitchen_worktable:chair:1",
+                  "type": "chair",
+                  "x": 2.7999999999999994,
+                  "y": 2.419999999999999,
+                  "w": 0.35,
+                  "h": 0.35,
+                  "groupId": "kitchen_worktable",
+                  "roomId": "loc_7506fc5f802c70aa5eaafc15",
+                  "solid": true
+                }
+              ],
+              "interaction": {
+                "x": 3.6799999999999993,
+                "y": 2.299999999999999
+              }
+            },
+            {
+              "id": "kitchen_shelf",
+              "name": "厨房置物架",
+              "type": "shelf",
+              "roomId": "loc_7506fc5f802c70aa5eaafc15",
+              "x": 1.2,
+              "y": 0.2,
+              "w": 1,
+              "h": 1,
+              "quality": "layout",
+              "bodies": [
+                {
+                  "id": "kitchen_shelf:shelf",
+                  "type": "shelf",
+                  "x": 1.2,
+                  "y": 0.2,
+                  "w": 1,
+                  "h": 1,
+                  "groupId": "kitchen_shelf",
+                  "roomId": "loc_7506fc5f802c70aa5eaafc15",
+                  "solid": true
+                }
+              ],
+              "interaction": {
+                "x": 2.68,
+                "y": 0.7
+              }
+            }
+          ],
+          "bodies": [
+            {
+              "id": "kitchen_worktable:desk",
+              "type": "desk",
+              "x": 0.1999999999999993,
+              "y": 1.799999999999999,
+              "w": 3,
+              "h": 0.68,
+              "groupId": "kitchen_worktable",
+              "roomId": "loc_7506fc5f802c70aa5eaafc15",
+              "solid": true
+            },
+            {
+              "id": "kitchen_worktable:chair:1",
+              "type": "chair",
+              "x": 2.7999999999999994,
+              "y": 2.419999999999999,
+              "w": 0.35,
+              "h": 0.35,
+              "groupId": "kitchen_worktable",
+              "roomId": "loc_7506fc5f802c70aa5eaafc15",
+              "solid": true
+            },
+            {
+              "id": "kitchen_shelf:shelf",
+              "type": "shelf",
+              "x": 1.2,
+              "y": 0.2,
+              "w": 1,
+              "h": 1,
+              "groupId": "kitchen_shelf",
+              "roomId": "loc_7506fc5f802c70aa5eaafc15",
+              "solid": true
+            }
+          ],
+          "actors": [],
+          "items": [],
+          "windows": [
+            {
+              "id": "window:loc_7506fc5f802c70aa5eaafc15:0",
+              "type": "window",
+              "roomId": "loc_7506fc5f802c70aa5eaafc15",
+              "x": 2,
+              "y": 0,
+              "width": 1.2,
+              "elevation": 1.1
+            }
+          ],
+          "lamps": [
+            {
+              "id": "light:loc_7506fc5f802c70aa5eaafc15",
+              "type": "light",
+              "roomId": "loc_7506fc5f802c70aa5eaafc15",
+              "x": 0,
+              "y": 1.35,
+              "elevation": 2.8
+            }
+          ],
+          "doorSwings": [
+            {
+              "id": "swing:door:rte_95862625f76cd6ea08eccbd7:loc_7506fc5f802c70aa5eaafc15",
+              "roomId": "loc_7506fc5f802c70aa5eaafc15",
+              "x": 0,
+              "y": 0.19999999999999896,
+              "w": 1.2,
+              "h": 1.2
+            }
+          ],
+          "path": []
+        },
+        "constraints": {
+          "corridorWidth": 2,
+          "corridorLocationRef": null,
+          "rooms": [
+            {
+              "w": 4,
+              "h": 3,
+              "side": "north",
+              "id": "loc_7506fc5f802c70aa5eaafc15",
+              "name": "厨房"
+            }
+          ],
+          "contents": [
+            {
+              "w": 1,
+              "h": 1,
+              "roomId": "loc_7506fc5f802c70aa5eaafc15",
+              "type": "shelf",
+              "id": "kitchen_shelf",
+              "name": "厨房置物架"
+            },
+            {
+              "w": 3,
+              "h": 1,
+              "roomId": "loc_7506fc5f802c70aa5eaafc15",
+              "type": "desk",
+              "id": "kitchen_worktable",
+              "name": "厨房工作台"
+            }
+          ],
+          "actors": [],
+          "items": []
+        }
+      },
+      "issues": []
+    }
+  ],
+  "notes": [
+    "此摘录仅保留建筑、楼层、大厅、厨房四张验收相关图；原始导出包含9张地图。"
+  ]
+}

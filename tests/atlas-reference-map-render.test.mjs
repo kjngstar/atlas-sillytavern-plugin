@@ -20,7 +20,7 @@ const cut = (from, to) => SOURCE.slice(SOURCE.indexOf(from), SOURCE.indexOf(to))
 test('独立房间视野适应实际房间，保留物理尺度与多房间整图视野',()=>{
  const room={x:-90,y:35,w:80,h:120};
  const st={kind:'floor',node:{extent:[-540,540,-340,360]},geo:{rooms:[room],corridor:{h:0}},vw:800,vh:600,cam:{},tgt:{}};
- const runtime=vm.createContext({st,EXTENT:{},Math,Number});
+ const runtime=vm.createContext({canvasStyle:null,texturePattern:null,skinColor:(_layer,_part,fallback)=>fallback,st,EXTENT:{},Math,Number});
  vm.runInContext(cut('function extent()', 'function W2S('),runtime);
  vm.runInContext('fit(false)',runtime);
  assert.equal(st.cam.x,-50);assert.equal(st.cam.y,95);
@@ -46,7 +46,7 @@ test('闭合轮廓经过全部顶点且首尾切线连续，不出现折返和�
   const curves=[],moves=[];
   let closed=0;
   const ctx={moveTo:(...p)=>moves.push(p),bezierCurveTo:(...p)=>curves.push(p),closePath:()=>closed++};
-  const runtime=vm.createContext({ctx});
+  const runtime=vm.createContext({canvasStyle:null,texturePattern:null,skinColor:(_layer,_part,fallback)=>fallback,ctx});
   vm.runInContext(TOOLS,runtime);
   const points=[[0,0],[100,0],[100,100],[0,100]];
   runtime.smooth(ctx,points,true);
@@ -64,7 +64,7 @@ test('开放曲线保留每个端点，两点路径也能画出完整线段',()=
   for(const points of [[[0,0],[100,0]],[[0,0],[100,0],[100,100],[0,100]]]){
     const curves=[];
     const ctx={moveTo(){},bezierCurveTo:(...p)=>curves.push(p),closePath(){assert.fail('开放曲线不得闭合');}};
-    const runtime=vm.createContext({ctx});
+    const runtime=vm.createContext({canvasStyle:null,texturePattern:null,skinColor:(_layer,_part,fallback)=>fallback,ctx});
     vm.runInContext(TOOLS,runtime);
     runtime.smooth(ctx,points,false);
     assert.deepEqual(curves.map(p=>p.slice(4)),points.slice(1));
@@ -77,7 +77,7 @@ function recordCtx(){
     fillStyle: '', strokeStyle: '', lineWidth: 0, lineCap: '', lineJoin: '', font: '',
     textAlign: '', textBaseline: '', globalAlpha: 1, shadowBlur: 0, shadowColor: '', dash: [],
     save(){}, restore(){}, beginPath(){}, closePath(){}, moveTo(){}, lineTo(){},
-    bezierCurveTo(){}, quadraticCurveTo(){}, rect(){}, ellipse(){}, clip(){}, fillText(){},
+    bezierCurveTo(){}, quadraticCurveTo(){}, rect(){}, ellipse(){}, clip(){}, fillText(text,x,y){log.push({op:'text',text,x,y});},
     measureText: () => ({width: 10}), drawImage(){}, translate(){}, scale(){}, rotate(){}, setTransform(){},
     fill(){ log.push({op: 'fill', fill: str(c.fillStyle)}); },
     stroke(){ log.push({op: 'stroke', stroke: str(c.strokeStyle), dash: [...c.dash]}); },
@@ -97,8 +97,8 @@ const strokes = (log, style) => log.filter(e => e.op === 'stroke' && e.stroke ==
 
 /** 在 vm 里拼出 map.js 的指定区段，并注入 canvas/st/pushLabel 替身。 */
 function mapRuntime({ctx, st, pushLabel, sections}){
-  const runtime = vm.createContext({
-    ctx, st, pushLabel,C:{cyan:'#43e0ff'},
+  const runtime = vm.createContext({canvasStyle:null,texturePattern:null,skinColor:(_layer,_part,fallback)=>fallback,
+    ctx, st, pushLabel,C:{cyan:'#43e0ff'},F:{sans:'sans-serif'},W2S:(x,y)=>[x,y],
     extent: () => [-50, 50, -50, 50],
     hexA: (c, a) => c + '@' + a,
     Math, Number, Array, Object, String, JSON, console,
@@ -198,7 +198,8 @@ test('G08 · 通用陈设各自有可辨画法，实体障碍与装饰分开', (
   assert.equal(strokes(log, 'rgba(255,205,130,.40)'), 1, '柜');
   assert.equal(strokes(log, 'rgba(200,230,255,.5)'), 1, '桌');
   assert.equal(strokes(log, 'rgba(200,225,255,.42)'), 1, '椅');
-  assert.equal(strokes(log, 'rgba(255,225,150,.45)'), 1, '门洞');
+  assert.equal(strokes(log, 'rgba(255,225,150,.45)'), 0, '无墙朝向的门洞不再画斜虚线');
+  assert.equal(runtime.st.utilitySymbols.filter(s=>s.kind==='doorway').length,1,'门洞交给带名称的设施符号层');
   assert.equal(strokes(log, 'rgba(180,205,235,.22)'), 1, '装饰块');
   // 实体（solid）实线、装饰（doorway/decor）虚线：G08 要求两者一眼可分。
   const solid = log.find(e => e.op === 'stroke' && e.stroke === 'rgba(200,230,255,.5)');
@@ -211,10 +212,37 @@ test('G08 · 灯光画在陈设与人物下方', () => {
   const geo = floorGeo();
   const {runtime, log} = sceneRuntime(FLOOR, geo);
   runtime.floorMap(geo);
-  const lamp = indexOfOp(log, e => e.op === 'fill' && e.fill === 'rgba(255,232,180,.85)');
+  const lamp = indexOfOp(log, e => e.op === 'fill' && e.fill === 'gradient');
   const furn = indexOfOp(log, e => e.op === 'stroke' && e.stroke === 'rgba(200,230,255,.5)');
   assert.ok(lamp >= 0, '灯必须被画出来');
   assert.ok(furn > lamp, '灯必须压在所有陈设之下');
+});
+
+test('lighting has no floating badge; legacy doorway symbols stay screen-sized without changing physical geometry',()=>{
+ const {runtime,log,st}=sceneRuntime(FLOOR,{},{});
+ const input=[{kind:'light',x:100,y:100},{kind:'doorway',x:100,y:100},{kind:'light',x:101,y:101}];
+ st.utilitySymbols=structuredClone(input);
+ runtime.drawUtilities();
+ assert.deepEqual(st.utilitySymbols,input,'display grouping must not alter source positions or identities');
+ assert.deepEqual(log.filter(e=>e.op==='text').map(e=>e.text),['门洞']);
+ assert.equal(st.utilityBoxes.length,1,'lighting must not reserve a badge box or leader line');
+ assert.ok(st.utilityBoxes.every(b=>b.h===24));
+ log.length=0;st.cam.s=5;runtime.drawUtilities();
+ assert.ok(st.utilityBoxes.every(b=>b.h===24),'zoom must not enlarge facility symbols into furniture-sized blobs');
+ st.showLabels=false;log.length=0;runtime.drawUtilities();
+ assert.equal(log.filter(e=>e.op==='text').length,0);
+ assert.ok(st.utilityBoxes.every(b=>b.w===22),'hiding labels retains recognizable icons');
+});
+
+test('radar never paints a spotlight over indoor furniture; outdoor radar uses only faint range rings',()=>{
+ const {ctx,log}=recordCtx();const st={kind:'floor',marks:[],vw:400,vh:300};
+ const runtime=vm.createContext({ctx,st,Math});
+ vm.runInContext(cut('function radar(', 'function heatLayer('),runtime);
+ for(const kind of ['building','floor','room']){st.kind=kind;runtime.radar(1);}
+ assert.equal(log.length,0);
+ st.kind='region';runtime.radar(1);
+ assert.equal(log.filter(e=>e.op==='stroke').length,3);
+ assert.equal(log.filter(e=>e.op==='fill').length,0,'no map-wide sector fill');
 });
 
 test('U01 · 房间副标题只写真实 status，不出现示例文案「禁书区」', () => {
@@ -330,7 +358,7 @@ test('M6-07 · 网格范围跟随可见视口（平移后仍铺满画面），�
 
 test('M6-07 · 比例尺：线长恒定 74 CSS px，distance=74/px×metric，未标定用格、估计加约', () => {
   const source=readFileSync(new URL('../ui/atlas-reference/js/ui-model.js',import.meta.url),'utf8');
-  const runtime=vm.createContext({});
+  const runtime=vm.createContext({canvasStyle:null,texturePattern:null,skinColor:(_layer,_part,fallback)=>fallback,});
   vm.runInContext(source,runtime);
   const ui=runtime.AtlasUIModel;
   assert.equal(ui.SCALE_WIDTH_PX,74);
@@ -369,7 +397,7 @@ test('M6-07 · 比例尺：线长恒定 74 CSS px，distance=74/px×metric，未
 /* ── M6-10：悬停锚点稳定、标签避让、命中与绘制同源 ── */
 
 const MODULE = cut('const C = {', 'function create(canvas');
-const BODY = cut('function create(canvas', 'return { create, C };');
+const BODY = cut('function create(canvas', 'return { create, C,PAINTER_REGISTRY,layerPaint,paintSemantic };');
 
 /** 记录式 canvas：额外记下 arc 的半径与 fillText 的落点，用来断言"画在哪"。 */
 function paintLog(){
@@ -405,7 +433,7 @@ function rendererHarness({node, path, hooks={}, width=400, height=300}){
   const mini={width:0,height:0,style:{},getContext:()=>mctx,getBoundingClientRect:()=>({width:200,height:120})};
   // hexA 用真实实现：颜色透明度是断言的一部分，不能替换成假字符串。
   const realHexA=(hex,a)=>{const h=String(hex).replace('#','');const r=parseInt(h.substr(0,2),16),g=parseInt(h.substr(2,2),16),b=parseInt(h.substr(4,2),16);return `rgba(${r},${g},${b},${a})`;};
-  const runtime=vm.createContext({
+  const runtime=vm.createContext({canvasStyle:null,texturePattern:null,skinColor:(_layer,_part,fallback)=>fallback,
     Math,Number,Array,Object,String,JSON,console,Set,Map,performance:{now:()=>0},
     requestAnimationFrame:()=>0, cancelAnimationFrame(){}, window:{devicePixelRatio:1},
     hexA:realHexA, ctx, mctx, canvas, mini,

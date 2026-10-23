@@ -82,9 +82,11 @@ export async function settleSqlTurn(input: Input) {
       const route=event?.route_id?tables.selectOne('routes',input.branchId,event.route_id):null;
       if(actor&&route) hint=computeTravelInterval(input,actor,route,typeof activity.mode==='string'?activity.mode:undefined)??undefined;
     }
-    activities.push({kind,completed:activity.completed !== false,hint});
+    const eventIds=queryBound(input.db,"SELECT target_row_id FROM turn_changes WHERE turn_id=? AND operation_id=? AND target_table='events'",[input.turnId,op.opId]).map(row=>String(row.target_row_id));
+    activities.push({kind,completed:activity.completed !== false,hint,ref:op.value.ref??op.opId,aliases:[op.opId,...eventIds]});
   }
   const elapsed = deriveElapsedInterval({activities:activities.length?activities:[{kind:'dialogue',completed:true}]},{clockS:input.clockBefore});
+  for(const conflict of new Set(elapsed.conflicts))issues.push({code:'TIME_RELATION_CONFLICT',path:'$.elapsed.conflicts',message:`时间关系未能完整解析，使用保守估计：${conflict}`,severity:'warning',retryable:false});
   if (elapsed.quality==='unknown') issues.push({code:'TIME_UNRESOLVED',path:'$.elapsed',message:'已完成行为缺少可结算的耗时依据，时钟保持原值，未知不当成零耗时',severity:'warning',retryable:false});
   const clockAfter = input.clockBefore + (elapsed.quality==='unknown'?0:elapsed.nominalS);
   // Observed changes describe the completed narrative's current state. Bind their

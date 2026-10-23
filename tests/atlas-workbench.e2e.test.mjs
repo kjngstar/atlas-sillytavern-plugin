@@ -63,7 +63,7 @@ function buildHost(doc, overrides = {}) {
 }
 
 async function mount(doc, host, ports = {}) {
-  const { mountWorkbench } = await import("../ui/atlas-workbench-shell.mjs");
+  const { mountWorkbench } = await import("./fixtures/legacy-ui/modules/atlas-workbench-shell.mjs");
   return mountWorkbench(host, ports);
 }
 
@@ -88,14 +88,14 @@ test('原版样式与字体随生产包分发，正式文档有实际加载入�
 test("U08 返工回归：视图类型不被查询参数覆盖（控制器侧防线）", () => {
   // 进度验收 20261006 指出的 P1：{kind, ...query} 会把目录查询的视图类型覆盖成 entityKind 值。
   // 防线 = 合并顺序：kind 放在 query 之后，查询参数永远无法覆盖视图类型。
-  const controllerSource = readFileSync(join(root, "ui", "atlas-sql-view-controller.mjs"), "utf8");
+  const controllerSource = readFileSync(join(root, "tests", "fixtures", "legacy-ui", "modules", "atlas-sql-view-controller.mjs"), "utf8");
   assert.ok(
     /\{\s*\.\.\.scopedQuery,\s*kind\s*\}/.test(controllerSource),
     "sqlQueryView 必须以 { ...query, kind } 合并（kind 最后落地，不可被覆盖）",
   );
   // 行为层由 tests/atlas-workbench.test.mjs 的「目录查询 kind=视图类型」用例覆盖（query.kind 不携带）。
   // 面板侧防线：目录控制器传 entityKind，不传 kind
-  const panelSource = readFileSync(join(root, "ui", "atlas-catalog-panel.mjs"), "utf8");
+  const panelSource = readFileSync(join(root, "tests", "fixtures", "legacy-ui", "modules", "atlas-catalog-panel.mjs"), "utf8");
   assert.ok(/entityKind:\s*kind/.test(panelSource), "目录面板必须用 entityKind 传实体种类");
 });
 

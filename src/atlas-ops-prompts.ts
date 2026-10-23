@@ -99,6 +99,7 @@ const PHASE_TASK: Record<Phase, string[]> = {
     '心理/倾向可以依据人物设定合理更新，并保持简短。',
     '正文明确建立或改变人物关系时用 relation.upsert 保存；只有同场出现不证明互相认识。明确的消息、公告或传言用 information.propose 登记，公开发布写 secrecy=public 与 spread_at_ref，明确告知谁写 recipient_ref；地点有风声不等于主角已听见。不要把每句闲聊变成传言，也不要把秘密设成公开。',
     '已完成行为用 event.propose 的 activity={kind:dialogue/meal/rest/sleep/travel/combat/other,completed:true} 和 time_hint={elapsed_s:明确秒数} 或 {min_s,nominal_s,max_s}。未完成计划用completed:false，不能推进时间。已完成赶路可引用真实subject_ref人物和route_ref路线，由程序按距离及人物能力计算耗时。',
+    '同一正文中的行为有明确先后（先、随后、之后、再）时，每个 event.propose 使用唯一 ref="new:别名"，后一个 time_hint.after_ref 指向本轮前一个事件的 ref；同时进行才用 time_hint.same_interval_as。两者互斥，不用 a0 等数组下标，不引用被省略或无效的事件。例如先走60秒再交谈120秒：第一条 ref="new:walk",time_hint={elapsed_s:60}；第二条 ref="new:talk",time_hint={elapsed_s:120,after_ref:"new:walk"}。顺序应合计180秒，同时应取120秒；没有依据不要自行声称先后。',
   ],
   geography: [
     '任务：处理这一张地图的层级、范围标定或路线估计。',
@@ -111,6 +112,7 @@ const PHASE_TASK: Record<Phase, string[]> = {
     '先根据给定资料判断地图大致现实尺寸；信息不足时给合理估计范围并说明 why，不能声称精确测量。',
     '不要利用界面标签排版坐标推出真实距离。用户已锁定的标定不修改。',
     '布局只提交这一张图上**发生变化**的约束：已有房间、家具、人物位置、物品不必每轮重写，未提及的一律保持原样，删除必须写 spec.deletes。',
+    '同一物理陈设在父图与子图复用稳定 ID，不因切换地图新增一套；已有账本的额外陈设必须明确 additional=true。门洞由程序根据墙面与登记连接生成，不作为 contents 家具排进房间中央。建筑图中的楼层轮廓只表达层级与通路，不再复制大厅长桌、厨房操作台等下级房间的家具。',
     '不要输出完整 scene、几何坐标、seed 或比例尺；这些由程序生成并保管，模型给的是约束不是成品。',
     '没有河流/水域资料时不要选 city 模板的水系结构；没有依据就不给 riverWidth，也不给每张图强塞城墙或树林。新城市默认 enclosure=open。地块与建筑用程序给定的 ID 引用，不要凭名字猜 ID。',
     '布局阶段不新建 SQL 实体：可交互地点必须已经在目录里。但建设阶段允许新增地点，两者不冲突——不要因为布局不新建实体就停止补全世界。',

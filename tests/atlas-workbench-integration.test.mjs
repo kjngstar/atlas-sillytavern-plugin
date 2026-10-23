@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { visibleWorkbenchMaps, workbenchMapPath, workbenchEntity } from '../ui/atlas-workbench-data.mjs';
-import { createWorkbenchMapController } from '../ui/atlas-map-controller.mjs';
+import { createWorkbenchMapController } from './fixtures/legacy-ui/modules/atlas-map-controller.mjs';
 
 const maps = [
   { mapId: 'world', points: [{ kind: 'location', entityId: 'loc:house', hidden: true }] },

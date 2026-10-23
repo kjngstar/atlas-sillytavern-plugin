@@ -55,6 +55,68 @@ test('没有河流资料的城市仍生成可读多边形、道路和建筑，�
  assert.deepEqual(Kit.checkSceneDocument(result.scene),[]);
 });
 
+test('small kitchen lights do not consume floor space or displace furniture when added or reloaded',()=>{
+ const ctx={...baseCtx(['kitchen']),map:{id:'map-1',name:'厨房',containerLocationId:'kitchen',metersPerCell:1,frame:{cols:4,rows:3}}};
+ const furniture=[{id:'counter',roomId:'kitchen',type:'desk',w:2,h:.8},{id:'cabinet',roomId:'kitchen',type:'cabinet',w:1,h:.6}];
+ const rooms=[{id:'kitchen',name:'厨房',w:4,h:3,side:'north'}];
+ const first=Kit.generateFloor({rooms,contents:furniture},ctx);
+ assert.equal(first.ok,true,JSON.stringify(first.issues));
+ const lights=Array.from({length:3},(_,i)=>({id:'light-'+i,roomId:'kitchen',type:'light',w:.8,h:.8}));
+ const added=Kit.generateFloor({rooms,contents:[...furniture,...lights]},{...ctx,previousScene:first.scene});
+ assert.deepEqual(added.issues,[]);
+ assert.equal(added.scene.layout.groups.length,5);
+ for(const old of first.scene.layout.groups)assert.deepEqual(added.scene.layout.groups.find(g=>g.id===old.id),old);
+ assert.ok(added.scene.layout.bodies.filter(b=>b.type==='light').every(b=>b.solid===false));
+ const fresh=Kit.generateFloor({rooms,contents:[...furniture,...lights]},ctx);
+ assert.deepEqual(fresh.issues,[]);
+ assert.equal(fresh.scene.layout.groups.length,5);
+ const reopened=Kit.generateFloor({rooms,contents:[...furniture,...lights]},{...ctx,previousScene:Kit.clone(added.scene)});
+ assert.deepEqual(reopened.scene.layout,added.scene.layout);
+});
+
+test('kitchen door openings do not displace storage furniture or block the walking route',()=>{
+ const ctx={...baseCtx(['kitchen']),map:{id:'map-1',name:'厨房',containerLocationId:'kitchen',metersPerCell:1,frame:{cols:4,rows:3}}};
+ const contents=[
+  {id:'counter',roomId:'kitchen',type:'desk',w:2.5,h:1},
+  {id:'shelf',roomId:'kitchen',type:'shelf',w:1.5,h:.6},
+  {id:'cabinet',roomId:'kitchen',type:'cabinet',w:1,h:.6},
+  {id:'door1',roomId:'kitchen',type:'doorway',w:1,h:1},
+  {id:'door2',roomId:'kitchen',type:'doorway',w:1,h:.4}];
+ const result=Kit.generateFloor({rooms:[{id:'kitchen',w:4,h:3,side:'north'}],contents},ctx);
+ assert.deepEqual(result.issues,[]);
+ assert.equal(result.scene.layout.groups.length,3);
+ assert.deepEqual(result.scene.layout.doors[0].sourceContentIds,['door1','door2']);
+ assert.ok(result.scene.layout.bodies.filter(b=>b.type==='doorway').every(b=>!b.solid));
+ assert.ok(result.scene.layout.groups.filter(g=>['desk','shelf','cabinet'].includes(g.type)).every(g=>g.interaction));
+});
+
+test('live kitchen regression: wall boundary closes a sub-grid gap without growing the room or dropping furniture',()=>{
+ const ctx={...baseCtx(['kitchen']),map:{id:'map-1',name:'厨房',containerLocationId:'kitchen',metersPerCell:.25,frame:{cols:16,rows:12}},spaceSize:{widthM:4,heightM:3,quality:'confirmed'}};
+ const contents=[
+  {id:'L4_kitchen_counter',name:'厨房操作台',roomId:'kitchen',type:'desk',w:1,h:2.5},
+  {id:'L4_kitchen_shelf',roomId:'kitchen',type:'shelf',w:1.5,h:.6},
+  {id:'L4_kitchen_light',roomId:'kitchen',type:'light',w:.2,h:.2},
+  {id:'kitchen_worktable',name:'厨房操作台',roomId:'kitchen',type:'table',w:1.8,h:.7},
+  {id:'kitchen_storage_cabinet',roomId:'kitchen',type:'cabinet',w:1,h:.4},
+  {id:'kitchen_door_to_hall',roomId:'kitchen',type:'doorway',w:.8,h:.15},
+  {id:'kitchen_light',roomId:'kitchen',type:'light',w:.2,h:.2}];
+ const spec={rooms:[{id:'kitchen',w:4,h:3,side:'south'}],contents};
+ const result=Kit.generateFloor(spec,ctx);
+ assert.deepEqual(result.issues,[]);
+ assert.deepEqual(result.scene.layout.bounds,{x:0,y:0,w:4,h:3});
+ assert.deepEqual(new Set(result.scene.layout.groups.map(g=>g.id)),new Set(contents.filter(g=>g.type!=='doorway').map(g=>g.id)));
+ const cabinet=result.scene.layout.groups.find(g=>g.id==='kitchen_storage_cabinet');
+ assert.equal(cabinet.w,1);assert.equal(cabinet.h,.4);
+ assert.ok(Math.abs(cabinet.y+cabinet.h-2.8)<1e-7,'cabinet fits against the exact inner boundary, between quarter-grid samples');
+ assert.ok(cabinet.interaction,'cabinet remains reachable');
+ const solids=result.scene.layout.bodies.filter(b=>b.solid);
+ for(const a of solids)for(const b of solids)if(a.groupId!==b.groupId)assert.ok(!(a.x<b.x+b.w-1e-7&&a.x+a.w>b.x+1e-7&&a.y<b.y+b.h-1e-7&&a.y+a.h>b.y+1e-7),'solid furniture must not overlap');
+ const reopened=Kit.generateFloor(spec,{...ctx,previousScene:Kit.clone(result.scene)});
+ assert.deepEqual(reopened.scene.layout,result.scene.layout);
+ const impossible=Kit.generateFloor({...spec,contents:[...contents,{id:'oversize',roomId:'kitchen',type:'cabinet',w:5,h:5}]},ctx);
+ assert.ok(impossible.issues.some(i=>i.entityId==='oversize'&&i.code==='DETAIL_TOO_LARGE'));
+});
+
 // ---------- 必修1：增量约束合并 ----------
 
 test('审查1：六房间基础上只请求一个新增房间，结果为七房间且旧房间位置保留',()=>{

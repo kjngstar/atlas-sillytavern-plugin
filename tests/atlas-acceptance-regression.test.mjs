@@ -189,7 +189,7 @@ test('successive layouts retain the container room and furniture while removing 
  try{
   const first=await save({operations:[layout({width:12,height:8,singleRoom:true,rooms:[{id:IDS.L3,w:12,h:8,side:'north'}],contents:[{id:'old-bench',type:'bench',roomId:IDS.L3,w:2,h:1}],actors:[{id:IDS.C1,roomId:IDS.L3},{id:IDS.C2,roomId:IDS.L3}]})]});
   assert.ok(scene().constraints.contents.some(c=>c.id==='old-bench'));
-  const second=await save({anchor:{...anchor,parentTurnId:first.receipt.turnId,hostMessageUid:'accept-second',inputHash:'accept-second',baseRevision:1,baseStorageRevision:1},operations:[{op:'character.upsert',ref:IDS.C2,data:{location_ref:IDS.L1}},layout({contents:[{id:'new-desk',type:'table',roomId:IDS.L3,w:2,h:1}]})]});
+  const second=await save({anchor:{...anchor,parentTurnId:first.receipt.turnId,hostMessageUid:'accept-second',inputHash:'accept-second',baseRevision:1,baseStorageRevision:1},operations:[{op:'character.upsert',ref:IDS.C2,data:{location_ref:IDS.L1}},layout({contents:[{id:'new-desk',type:'table',roomId:IDS.L3,w:2,h:1,additional:true}]})]});
   assert.ok(scene().constraints.rooms.some(r=>r.id===IDS.L3));
   assert.deepEqual(scene().constraints.contents.map(c=>c.id).sort(),['new-desk','old-bench']);
   assert.ok(scene().constraints.actors.some(c=>c.id===IDS.C1));assert.ok(!scene().constraints.actors.some(c=>c.id===IDS.C2));

@@ -459,7 +459,7 @@ export function deriveLayoutSites(tables: TableReadPort, branchId: string): Deri
 
     const own = ownForProfile;
     const containerKind = String(container?.kind ?? '');
-    const standalone = kind === 'floor' && own.length === 0
+    const standalone = kind === 'floor' && (own.length === 0 || containerKind==='room'&&own.every(row=>row.kind==='other'))
       && (containerKind === 'room' || containerKind === 'vehicle' || containerKind === 'floor' || containerKind === 'building');
     entries.push({
       map,
@@ -734,6 +734,7 @@ export function buildSqlLayoutTask(
     // P12/R03 §19.3：父图轮廓是子空间权威尺寸在**父坐标系**里的投影；这里把已知尺寸随 scope 下发，
     // 但坐标仍由本图自己的布局决定（局部坐标允许不同，物理宽高必须一致）。
     const childSpaces = entry.own
+      .filter(row=>!(container?.kind==='room'&&row.kind==='other'))
       .map((row) => {
         const id = asId(row.id);
         if (!id) return null;
@@ -747,7 +748,8 @@ export function buildSqlLayoutTask(
           w: item.widthM, h: item.heightM,
           ...(item.itemId ? { item: ref(item.itemId) } : {}),
         }));
-        return known ? { ref: ref(id), name: row.name, w: known.widthM, h: known.heightM, source: known.source, referenceId: known.referenceId, furnishing } : null;
+        const nested=derived.locations.some(location=>location.parent_location_id===id&&location.status==='active'&&(row.kind!=='room'||location.kind!=='other'));
+        return known ? { ref: ref(id), name: row.name, w: known.widthM, h: known.heightM, source: known.source, referenceId: known.referenceId, detailScope:nested?'descendants':'self', furnishing } : null;
       })
       .filter((item): item is NonNullable<typeof item> => item !== null);
     const drawnParent=container?derived.entries.find(e=>e.mapId===container.map_id):null;
@@ -799,6 +801,16 @@ export function buildSqlLayoutTask(
         heightM: entry.spaceSize.resolution.heightM,
         revision: entry.spaceSize.canonical?.revision ?? 0,
         furnishing: Math.min(entry.spaceSize.canonical?.furnishing.length ?? 0, SPACE_CANONICAL_MAX_FURNISHING),
+        furnishingInventory: (entry.spaceSize.canonical?.furnishing??[]).slice(0,SPACE_CANONICAL_MAX_FURNISHING).map(item=>({
+          id:item.localId,type:item.type,name:item.name,w:item.widthM,h:item.heightM,
+          quality:item.quality,
+          ...(item.itemId?{item:ref(item.itemId)}:{}),
+        })),
+        furnishingReview: Object.values((entry.spaceSize.canonical?.furnishing??[]).slice(0,SPACE_CANONICAL_MAX_FURNISHING).reduce<Record<string, string[]>>((groups,item)=>{
+          const name=item.name.trim();
+          if(name)(groups[name]??=[]).push(item.localId);
+          return groups;
+        },Object.create(null))).filter(ids=>ids.length>1).map(ids=>({ids,reason:'same-name-review'})),
       } : null,
       /** P12/R03 §19.3：父图要按这些尺寸投影子空间轮廓，不重新独立估计。 */
       childSpaces,
@@ -881,7 +893,11 @@ export function buildSqlLayoutTask(
   }
   request.messages[1].content += '\n普通阅览桌用 type="table"，椅子单独用 type="chair"；reading 是桌子加四把椅子的整套组合，占地 w/h 均至少 2 米，不能用于 2×1 米的单张桌子。所有陈设用正数 w/h，完整占地必须装进房间。';
   request.messages[1].content += '\nitems[].on 只能绑定本房间中具有支撑面的 table/desk/shelf/cabinet（reading 组合的桌面也可）。不能把物品绑定到 chair/bed/doorway/decor 上，也不能把椅子本身作为物品放在另一把椅子上。资料没有支撑关系时省略该物品绑定，由程序按真实归属放置地面标记，不要猜测它在桌上。';
-  request.messages[1].content += '\n多房间 floor 保留中央走廊，默认 corridorWidth=2；估计房间必须适合当前幅面，side=north 或 south。同侧多个房间的宽度与间隔合计也必须装得下。childSpaces 的已知宽高不得缩小来凑布局；装不下时说明尺寸冲突。单间房直接沿用完整 baselineRooms，不缩成幅面的 75%，不另扣中央走廊。';
+  request.messages[1].content += '\n空间身份规则：spaceSize.furnishingInventory 和 childSpaces[].furnishing 是同一物理空间已经登记的陈设。必须沿用其中的 id；省略的既有陈设仍会保留，不要换名或换局部 id 再造一套。已有账本的空间中，新增陈设必须明确 additional=true，且确有新增依据；仅换父图/子图或补布局不属于新增。门洞不是地面家具，不要在 contents 里估计 doorway；程序根据房间边界与已有连接生成门，不能把门摆在房间中间。';
+  request.messages[1].content += '\n旧图恢复规则：furnishingReview 列出同名陈设候选，必须逐组核查，不能把历史错误重复当作必须保留的物理事实。quality=layout 是布局估计，不是作者确认。有明确数量依据的两把同名椅子应保留；同一厨房操作台或照明曾在父子图分别估计、但没有第二件依据时，保留一个既有 id，并用 spec.deletes.contents 显式删除另一个 id。禁止仅靠同名由程序自动合并，也不允许删作者确认或绑定不同真实物品的两件陈设。why 中说明核查结论；删除使用候选中的完整 id。';
+  request.messages[1].content += '\n层级归属规则：childSpaces.detailScope=descendants 表示该轮廓内部还有已登记子空间，本层只画容器轮廓与通路。大厅的长桌和厨房的操作台应由大厅、厨房各自的空间账本管理，不能又给包含它们的楼层轮廓摆一份。若 savedConstraints 曾在楼层轮廓重复摆放这些后代陈设，用 spec.deletes.contents 显式移除该层重复投影；真实归属于楼层公共通道的陈设保持原身份。';
+  request.messages[1].content += '\n单间房内 kind=other 的储藏角、桌边等子地点只表示局部区域，不说明存在隔墙。baselineRooms 只有房间自身时，保持整个房间作为一块物理空间，不为这些角落额外分房或扣走廊；只有明确登记的 room 子空间才参与分房。';
+  request.messages[1].content += '\n多房间 floor 由程序保留通行空间，默认 corridorWidth=2；已有 door/adjacent/estimated 房间连接由程序安排共墙门，不能用走廊隔开直接连通的两间房；估计房间必须适合当前幅面，side=north 或 south。同侧多个房间的宽度与间隔合计也必须装得下。childSpaces 的已知宽高不得缩小来凑布局；装不下时说明尺寸冲突。单间房直接沿用完整 baselineRooms，不缩成幅面的 75%，不另扣中央走廊。';
   for(const scope of scopes.filter(s=>s.kind==='overview')){
     request.messages[1].content+='\n【本图合法 overview JSON 外层示例；按资料填写合法 zones/links/features】\n'+JSON.stringify({op:'map.layout.request',ref:scope.map,data:{kind:'overview',spec:{surface:'mixed',zones:[],links:[],features:[]}},why:'依据已登记空间生成估计布局'});
   }

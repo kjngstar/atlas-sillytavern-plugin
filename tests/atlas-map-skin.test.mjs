@@ -34,7 +34,7 @@ const {
   atlasMapSkinToCssVars,
   applyAtlasMapSkin,
   exportAtlasMapSkin,
-} = await import("../index.js");
+} = await import("./fixtures/legacy-ui/skin.mjs");
 
 // C5（0.9.54）：距离换算已统一到 src/atlas-scale.ts 唯一权威实现，
 // index.js 不再转出该算法（旧实现为 index.js 内的重复副本）。
@@ -50,7 +50,7 @@ test("注册表合约：每个 --am-* 令牌必须在 style.css 有消费点", (
 });
 
 test("注册表合约：枚举令牌的每个值都有 CSS 值映射", async () => {
-  const { ATLAS_MAP_SKIN_TOKENS: serverCopy } = await import("../index.js");
+  const { ATLAS_MAP_SKIN_TOKENS: serverCopy } = await import("./fixtures/legacy-ui/skin.mjs");
   for (const [key, spec] of Object.entries(serverCopy)) {
     if (spec.type !== "enum") continue;
     assert.ok(spec.enum.length >= 2, `${key} 枚举非空`);

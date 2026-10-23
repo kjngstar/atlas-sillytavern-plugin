@@ -87,15 +87,15 @@ export function createAtlasApiDiagnosticLogger(options: {
       const scoped = anchor ? atlasDiagnosticContext(anchor) : captured;
       const issues = diagnosticIssues(data.issues, native?.issues, error?.details?.issues);
       const groups = records(native?.groups);
-      const failed = response.body?.ok === false || native?.status === 'failed' || (response.status ?? 0) >= 400;
       const partial = native?.status === 'partial';
+      const failed = response.body?.ok === false || native?.status === 'failed' || partial && data.coreSaved===false || (response.status ?? 0) >= 400;
       const duplicate = native?.status === 'duplicate';
       const cause = issues.find(issue => issue.severity !== 'warning' && issue.code !== 'TURN_FAILED')?.code;
       const plan = native?.requestPlan as { usage?: { transports?: number } } | undefined;
       const event: AtlasDiagnosticInput = { ...base, ...scoped,
         level: failed ? 'error' : partial ? 'warn' : 'info',
         code: failed ? 'API_CALL_FAILED' : partial ? 'API_CALL_PARTIAL' : duplicate ? 'TURN_DUPLICATE' : 'API_CALL_COMPLETE',
-        phase: 'response', outcome: failed || partial ? 'failed' : duplicate ? 'skipped' : 'success',
+        phase: 'response', outcome: failed ? 'failed' : partial ? 'partial' : duplicate ? 'skipped' : 'success',
         httpStatus: response.status, errorCode: error?.code, causeCode: typeof cause === 'string' ? cause : undefined,
         durationMs: now() - startedAt,
         details: { ...base.details, ...scoped.details, issueCount: issues.length,

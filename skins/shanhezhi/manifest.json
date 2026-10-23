@@ -1,0 +1,177 @@
+{
+  "kind": "atlas-skin-pack",
+  "schemaVersion": 1,
+  "skinApiVersion": 1,
+  "id": "user.shanhezhi",
+  "name": "山河志 · 青绿宣纸",
+  "theme": {
+    "kind": "atlas-ui-theme",
+    "schemaVersion": 1,
+    "id": "user.shanhezhi",
+    "baseTheme": "builtin.parchment",
+    "tokens": {
+      "ui.window.bg": "#f4eddd",
+      "ui.window.border": "#947546",
+      "ui.panel.bg": "#f4eddd",
+      "ui.panel.border": "#b8a47c",
+      "ui.text.primary": "#302b24",
+      "ui.text.muted": "#68604e",
+      "ui.text.onAccent": "#fff9ea",
+      "ui.accent": "#255f55",
+      "ui.font.family": "serif",
+      "ui.window.radius": 4,
+      "ui.panel.radius": 4,
+      "ui.control.radius": 3,
+      "ui.window.frameSlice": 52,
+      "ui.window.frameWidth": 20,
+      "map.canvas.bg": "#f3ead8",
+      "map.grid.minor": "#b4a585",
+      "map.label.primary": "#40372c",
+      "map.label.background": "#fbf5e7",
+      "map.marker.character": "#9c3f36",
+      "map.marker.place": "#255f55",
+      "map.marker.item": "#836128",
+      "map.marker.message": "#405e77",
+      "map.marker.event": "#82494e",
+      "map.marker.exit": "#5a5940",
+      "map.road.stroke": "#846437",
+      "map.water.stroke": "#376f77",
+      "map.water.fill": "#9abeb2",
+      "map.buildingOutline.stroke": "#62583e",
+      "map.buildingOutline.fill": "#c1b38e",
+      "map.floorWall.stroke": "#5e513e",
+      "map.floorWall.fill": "#d4c8a6",
+      "map.corridor.stroke": "#9a855c",
+      "map.corridor.fill": "#c9b993",
+      "map.furniture.stroke": "#6f5035",
+      "map.furniture.fill": "#b39262",
+      "map.texture.opacity": 0.12,
+      "map.backdrop.opacity": 0.22,
+      "ui.panel.frameSlice": 40,
+      "ui.panel.frameWidth": 10,
+      "ui.control.frameSlice": 32,
+      "ui.control.frameWidth": 6,
+      "ui.input.frameSlice": 40,
+      "ui.input.frameWidth": 6,
+      "ui.selection.frameSlice": 16,
+      "ui.selection.frameWidth": 6,
+      "ui.selection.bg": "#e9e9d8",
+      "ui.selection.text": "#302b24",
+      "ui.status.info": "#405e77",
+      "ui.status.success": "#255f55",
+      "ui.status.warning": "#805b26",
+      "ui.status.error": "#963e35"
+    },
+    "components": {
+      "frame": "parchment",
+      "panels": "paper",
+      "buttons": "outlined",
+      "icons": "boxed"
+    },
+    "mapStyles": {
+      "markers": "seal",
+      "road": "ink",
+      "water": "ink",
+      "buildingOutline": "ink",
+      "floorWall": "ink",
+      "furniture": "ink"
+    },
+    "options": {
+      "motion": false,
+      "radar": false,
+      "coordinates": false
+    },
+    "assets": {
+      "windowFrame": "jade-frame",
+      "windowBackdrop": "mountains",
+      "avatarFrame": "jade-avatar",
+      "panelTexture": "xuan-paper",
+      "mapTexture": "xuan-paper",
+      "mapBackdrop": "mountains",
+      "characterMarker": "character-seal",
+      "placeMarker": "place-seal",
+      "itemMarker": "item-seal",
+      "messageMarker": "message-seal",
+      "eventMarker": "event-seal",
+      "exitMarker": "exit-seal",
+      "panelFrame": "panel-frame",
+      "controlFrame": "panel-frame",
+      "controlActiveFrame": "control-frame",
+      "inputFrame": "panel-frame",
+      "selectionFrame": "selection-frame",
+      "divider": "section-divider"
+    }
+  },
+  "assets": [
+    {
+      "id": "mountains",
+      "path": "assets/mountains.webp",
+      "mime": "image/webp"
+    },
+    {
+      "id": "xuan-paper",
+      "path": "assets/xuan-paper.webp",
+      "mime": "image/webp"
+    },
+    {
+      "id": "jade-frame",
+      "path": "assets/jade-frame.png",
+      "mime": "image/png"
+    },
+    {
+      "id": "character-seal",
+      "path": "assets/character.png",
+      "mime": "image/png"
+    },
+    {
+      "id": "place-seal",
+      "path": "assets/place.png",
+      "mime": "image/png"
+    },
+    {
+      "id": "item-seal",
+      "path": "assets/item.png",
+      "mime": "image/png"
+    },
+    {
+      "id": "message-seal",
+      "path": "assets/message.png",
+      "mime": "image/png"
+    },
+    {
+      "id": "event-seal",
+      "path": "assets/event.png",
+      "mime": "image/png"
+    },
+    {
+      "id": "exit-seal",
+      "path": "assets/exit.png",
+      "mime": "image/png"
+    },
+    {
+      "id": "panel-frame",
+      "path": "assets/panel-frame.png",
+      "mime": "image/png"
+    },
+    {
+      "id": "control-frame",
+      "path": "assets/control-frame.png",
+      "mime": "image/png"
+    },
+    {
+      "id": "selection-frame",
+      "path": "assets/selection-frame.png",
+      "mime": "image/png"
+    },
+    {
+      "id": "section-divider",
+      "path": "assets/divider.png",
+      "mime": "image/png"
+    },
+    {
+      "id": "jade-avatar",
+      "path": "assets/jade-avatar.png",
+      "mime": "image/png"
+    }
+  ]
+}

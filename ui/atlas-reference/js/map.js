@@ -156,6 +156,11 @@ function ptsVisible(pts, r){
  * 既混进了 25/250 这种非 1-2-5 档，又会在极端缩放下**饱和在 1000** ——
  * 缩到很小时循环步长再也跟不上，只能刷出上万条线。现在按当前缩放现算，永不饱和。
  */
+const PAINTER_REGISTRY=Object.freeze(Object.fromEntries([
+ ['road','#806443','#806443','#72b3dd','#72b3dd'],['water','#4e8290','#98bac0','#70c7e5','#193f55'],['buildingOutline','#806f55','#cfbd97','#93bbdb','#193249'],['floorWall','#776750','#d7c7a7','#a9d0eb','#20394b'],['furniture','#806f55','#bbaa8a','#b1cbe0','#29485b']
+].map(([key,stroke,fill,technicalStroke,technicalFill])=>[key,Object.freeze({original:Object.freeze({stroke:null,fill:null,join:'round'}),ink:Object.freeze({stroke,fill,join:'round'}),technical:Object.freeze({stroke:technicalStroke,fill:technicalFill,join:'miter'})})])));
+function layerPaint(style,layer){const pen=PAINTER_REGISTRY[layer]?.[style?.painters?.[layer]||'original'];return {stroke:style?.palette?.[layer+'.stroke']||pen?.stroke,fill:style?.palette?.[layer+'.fill']||pen?.fill,join:pen?.join||'round'};}
+function paintSemantic(ctx,layer,shape,style){if(!style)return false;const pen=layerPaint(style,layer);if(!pen.stroke&&!pen.fill)return false;ctx.save();ctx.lineJoin=pen.join;ctx.lineCap=pen.join==='miter'?'butt':'round';ctx.shadowBlur=0;if(shape.fill){ctx.fillStyle=pen.fill||shape.fillColor;ctx.globalAlpha=shape.opacity??.18;ctx.fill();ctx.globalAlpha=1;}ctx.strokeStyle=pen.stroke||shape.stroke;ctx.lineWidth=(shape.width||1.4)/(shape.scale||1);ctx.setLineDash(shape.dashed?[5/(shape.scale||1),4/(shape.scale||1)]:[]);ctx.stroke();ctx.restore();return true;}
 function gridStep(camS, minPx, maxPx){
   const lo=minPx==null?12:minPx, hi=maxPx==null?40:maxPx;
   if(!Number.isFinite(camS)||camS<=0)return null;
@@ -176,7 +181,7 @@ function gridStep(camS, minPx, maxPx){
  * 纯函数式入口（只吃 ctx + 几何参数），所以可以直接单测线数、坐标范围与线宽，
  * 不必去构造整个 canvas 生命周期。
  */
-function paintGrid(ctx, {cam, vw, vh, dpr, step, maxLines}){
+function paintGrid(ctx, {cam, vw, vh, dpr, step, maxLines, color}){
   const limit=maxLines==null?2000:maxLines;
   if(!ctx||!cam||!Number.isFinite(cam.s)||cam.s<=0)return 0;
   if(!Number.isFinite(cam.x)||!Number.isFinite(cam.y)||!Number.isFinite(vw)||!Number.isFinite(vh))return 0;
@@ -192,13 +197,13 @@ function paintGrid(ctx, {cam, vw, vh, dpr, step, maxLines}){
   let count=0;
   for(let x=Math.floor(x0/step)*step; x<=x1 && count<limit; x+=step, count++){
     const major=Math.abs(Math.round(x/step))%5===0;
-    ctx.strokeStyle=major?'rgba(110,190,255,.20)':'rgba(110,190,255,.075)';
+    ctx.strokeStyle=color?'rgba('+[1,3,5].map(i=>parseInt(color.slice(i,i+2),16)).join(',')+','+(major?.20:.075)+')':major?'rgba(110,190,255,.20)':'rgba(110,190,255,.075)';
     const px=align(sx(x));
     ctx.beginPath(); ctx.moveTo(px,0); ctx.lineTo(px,vh); ctx.stroke();
   }
   for(let y=Math.floor(y0/step)*step; y<=y1 && count<limit; y+=step, count++){
     const major=Math.abs(Math.round(y/step))%5===0;
-    ctx.strokeStyle=major?'rgba(110,190,255,.20)':'rgba(110,190,255,.075)';
+    ctx.strokeStyle=color?'rgba('+[1,3,5].map(i=>parseInt(color.slice(i,i+2),16)).join(',')+','+(major?.20:.075)+')':major?'rgba(110,190,255,.20)':'rgba(110,190,255,.075)';
     const py=align(sy(y));
     ctx.beginPath(); ctx.moveTo(0,py); ctx.lineTo(vw,py); ctx.stroke();
   }
@@ -256,7 +261,32 @@ function create(canvas, mini, hooks){
     hits:[], edgeHits:[], labels:[], ghost:[], marks:[], paused:false, destroyed:false
   };
   hooks = hooks||{};
-  let frameId=0;
+  let frameId=0,canvasStyle=null,acceptedSkin=null,texturePattern=null;
+  function setSkin(value){
+    if(value!==null){
+      const keys=['background','gridColor','labelColor','labelBackground','markerShape','markerColors','markerImages','painters','palette','texture','textureOpacity','backdrop','backdropOpacity'];
+      if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).some(k=>!keys.includes(k)))throw Error('MAP_SKIN_INVALID');
+      for(const key of ['background','gridColor','labelColor','labelBackground'])if(value[key]!=null&&!/^#[0-9a-f]{6}$/i.test(value[key]))throw Error('MAP_SKIN_COLOR_INVALID');
+      for(const color of [...Object.values(value.markerColors||{}),...Object.values(value.palette||{})])if(!/^#[0-9a-f]{6}$/i.test(color))throw Error('MAP_SKIN_COLOR_INVALID');
+      if(!['classic','seal'].includes(value.markerShape||'classic')||Object.entries(value.painters||{}).some(([k,v])=>k==='markers'?!['classic','seal'].includes(v):!PAINTER_REGISTRY[k]?.[v]))throw Error('MAP_SKIN_PAINTER_INVALID');
+      if(value.textureOpacity!==undefined&&(!Number.isFinite(value.textureOpacity)||value.textureOpacity<0||value.textureOpacity>.3))throw Error('MAP_SKIN_OPACITY_INVALID');
+      if(value.backdropOpacity!==undefined&&(!Number.isFinite(value.backdropOpacity)||value.backdropOpacity<0||value.backdropOpacity>.5))throw Error('MAP_SKIN_OPACITY_INVALID');
+      if(value.backdrop&&(!Number.isFinite(value.backdrop.width)||!Number.isFinite(value.backdrop.height)||value.backdrop.width<=0||value.backdrop.height<=0))throw Error('MAP_SKIN_IMAGE_INVALID');
+    }
+    const pattern=value?.texture?ctx.createPattern(value.texture,'repeat'):null;
+    const original=!value||!value.background&&!value.gridColor&&!value.labelColor&&!value.labelBackground&&(value.markerShape||'classic')==='classic'&&!Object.keys(value.markerColors||{}).length&&!Object.keys(value.markerImages||{}).length&&!Object.keys(value.palette||{}).length&&!value.texture&&!value.backdrop&&Object.entries(value.painters||{}).every(([k,v])=>v===(k==='markers'?'classic':'original'));
+    acceptedSkin=value;canvasStyle=original?null:{...value,markerColors:{...value.markerColors},markerImages:{...value.markerImages},painters:{...value.painters},palette:{...value.palette}};texturePattern=pattern;return true;
+  }
+  function skinColor(layer,part,fallback){
+    if(!canvasStyle)return fallback;
+    const color=layerPaint(canvasStyle,layer)[part];if(!color)return fallback;
+    const alpha=typeof fallback==='string'?fallback.match(/rgba\([^)]*,\s*([\d.]+)\)$/)?.[1]:null;
+    // Ink on light paper needs visible strokes; retain the ordering between
+    // estimated and confirmed alpha, and leave their dash patterns untouched.
+    if(alpha){const a=Number(alpha),ink=part==='stroke'&&canvasStyle.painters?.[layer]==='ink';return hexA(color,ink&&a>0?.35+.65*a:a);}
+    return part==='fill'?hexA(color,.18):color;
+  }
+
   const listeners=[];
   function listen(target,type,handler,opts){target.addEventListener(type,handler,opts);listeners.push(()=>target.removeEventListener(type,handler,opts));}
 
@@ -265,6 +295,7 @@ function create(canvas, mini, hooks){
     const previousFit=st.node?fitScale():null;
     const oldWidth=st.vw,oldHeight=st.vh;
     const r = canvas.parentElement.getBoundingClientRect();
+    if(r.width<=0||r.height<=0)return {ok:true,deferred:true};
     st.dpr = Math.min(window.devicePixelRatio||1, 2);
     st.vw = Math.max(1, r.width); st.vh = Math.max(1, r.height);
     // Setting a canvas dimension clears its bitmap, even if the value is unchanged.
@@ -387,7 +418,16 @@ function create(canvas, mini, hooks){
     else if(st.kind==='region'){ bg.addColorStop(0,'#07130f'); bg.addColorStop(1,'#0a1a14'); }
     else if(st.kind==='city'){ bg.addColorStop(0,'#080b16'); bg.addColorStop(1,'#0b1020'); }
     else { bg.addColorStop(0,'#070b14'); bg.addColorStop(1,'#0a1120'); }
-    ctx.fillStyle = bg; ctx.fillRect(x0-200,y0-200,(x1-x0)+400,(y1-y0)+400);
+    ctx.fillStyle = canvasStyle?.background||bg; ctx.fillRect(x0-200,y0-200,(x1-x0)+400,(y1-y0)+400);
+    if(texturePattern){ctx.save();ctx.globalAlpha=canvasStyle.textureOpacity??.12;ctx.fillStyle=texturePattern;ctx.fillRect(x0-200,y0-200,(x1-x0)+400,(y1-y0)+400);ctx.restore();}
+    // Decorative paper art is pinned to the viewport, below all world geometry.
+    // It never supplies terrain, locations, hit targets or knowledge.
+    if(canvasStyle?.backdrop){
+      const image=canvasStyle.backdrop,vw=x1-x0,vh=y1-y0,scale=Math.max(vw/image.width,vh/image.height);
+      const sw=vw/scale,sh=vh/scale;
+      ctx.save();ctx.globalAlpha=canvasStyle.backdropOpacity??.16;
+      ctx.drawImage(image,(image.width-sw)/2,(image.height-sh)/2,sw,sh,x0,y0,vw,vh);ctx.restore();
+    }
 
     const context=g.parentContext;
     if(context){
@@ -407,7 +447,7 @@ function create(canvas, mini, hooks){
     else if(st.kind==='building')buildingMap(g);
     else if(st.kind==='floor') floorMap(g);
     else                       roomMap(g);
-    for(const route of g.corridorRoutes??[]){ctx.beginPath();route.points.forEach((p,i)=>i?ctx.lineTo(...p):ctx.moveTo(...p));ctx.strokeStyle='rgba(127,212,255,.5)';ctx.lineWidth=1.2/st.cam.s;ctx.setLineDash([6/st.cam.s,4/st.cam.s]);ctx.stroke();ctx.setLineDash([]);}
+    for(const route of g.corridorRoutes??[]){ctx.beginPath();route.points.forEach((p,i)=>i?ctx.lineTo(...p):ctx.moveTo(...p));ctx.strokeStyle=skinColor('road','stroke','rgba(127,212,255,.5)');ctx.lineWidth=1.2/st.cam.s;ctx.setLineDash([6/st.cam.s,4/st.cam.s]);ctx.stroke();ctx.setLineDash([]);}
     ctx.restore();
     if(context?.active){ctx.beginPath();context.active.pts.forEach((p,i)=>i?ctx.lineTo(...p):ctx.moveTo(...p));ctx.closePath();ctx.strokeStyle='rgba(67,224,255,.6)';ctx.lineWidth=1.4/st.cam.s;ctx.stroke();}
   }
@@ -444,8 +484,8 @@ function create(canvas, mini, hooks){
     for(const shape of g.overviewShapes||[]){
       if(!ptsVisible(shape.pts,r)) continue;
       ctx.beginPath();shape.pts.forEach((p,i)=>i?ctx.lineTo(p[0],p[1]):ctx.moveTo(p[0],p[1]));ctx.closePath();
-      ctx.fillStyle=hexA(shape.c,.10);ctx.fill();
-      ctx.strokeStyle=hexA(shape.c,shape.proxy?.36:.48);ctx.lineWidth=1/cam;
+      ctx.fillStyle=skinColor('buildingOutline','fill',hexA(shape.c,.10));ctx.fill();
+      ctx.strokeStyle=skinColor('buildingOutline','stroke',hexA(shape.c,shape.proxy?.36:.48));ctx.lineWidth=1/cam;
       ctx.setLineDash(shape.quality==='exact'||shape.quality==='confirmed'?[]:[5/cam,4/cam]);ctx.stroke();
       // proxy：轮廓在别的图上，这里是"入口示意" —— 叠一圈点线把它和实测轮廓分开。
       if(shape.proxy){ctx.setLineDash([1.5/cam,3/cam]);ctx.strokeStyle='rgba(255,194,71,.5)';ctx.stroke();}
@@ -457,7 +497,7 @@ function create(canvas, mini, hooks){
     for(const route of g.overviewRoutes||[]){
       if(!ptsVisible(route.points,r)) continue;
       ctx.beginPath();route.points.forEach((p,i)=>i?ctx.lineTo(p[0],p[1]):ctx.moveTo(p[0],p[1]));
-      ctx.strokeStyle=route.dashed?'rgba(127,212,255,.42)':'rgba(67,224,255,.7)';
+      ctx.strokeStyle=skinColor('road','stroke',route.dashed?'rgba(127,212,255,.42)':'rgba(67,224,255,.7)');
       ctx.lineWidth=(route.dashed?1.1:1.5)/cam;
       ctx.setLineDash(route.dashed?[6/cam,4/cam]:[]);ctx.stroke();
       if(route.name&&st.showLabels){const a=route.points[0],b=route.points.at(-1);pushLabel((a[0]+b[0])/2,(a[1]+b[1])/2-12/cam,route.name+' · 连接示意','#a6b9cc','sub',true);}
@@ -494,9 +534,9 @@ function create(canvas, mini, hooks){
         // G01：水系必须是"有宽度的线"，不能退化成一个蓝点；宽度是真实正数且随缩放走。
         const w=Math.max(f.width||0,2.2/cam);
         path(line);ctx.lineCap='round';
-        ctx.lineWidth=w*1.9;ctx.strokeStyle='rgba(24,96,150,.30)';ctx.stroke();
-        ctx.lineWidth=w;ctx.strokeStyle='rgba(90,215,255,.55)';
-        ctx.shadowColor='rgba(67,224,255,.55)';ctx.shadowBlur=10/cam;ctx.stroke();
+        ctx.lineWidth=w*1.9;ctx.strokeStyle=skinColor('water','stroke','rgba(24,96,150,.30)');ctx.stroke();
+        ctx.lineWidth=w;ctx.strokeStyle=skinColor('water','stroke','rgba(90,215,255,.55)');
+        ctx.shadowColor='rgba(67,224,255,.55)';ctx.shadowBlur=canvasStyle?0:10/cam;ctx.stroke();
         break;
       }
       case 'shore':{
@@ -629,7 +669,7 @@ function create(canvas, mini, hooks){
     // 航路
     ctx.save();
     ctx.setLineDash([9/st.cam.s, 9/st.cam.s]);
-    ctx.strokeStyle='rgba(155,107,255,.45)'; ctx.lineWidth=1.5/st.cam.s;
+    ctx.strokeStyle=skinColor('road','stroke','rgba(155,107,255,.45)'); ctx.lineWidth=1.5/st.cam.s;
     (g.routes||[]).forEach(([a,b])=>{ ctx.beginPath(); ctx.moveTo(a[0],a[1]); ctx.lineTo(b[0],b[1]); ctx.stroke(); });
     ctx.restore();
     // 海域注记
@@ -683,8 +723,8 @@ function create(canvas, mini, hooks){
       ctx.save();
       ctx.beginPath(); smooth(ctx,wobbly(g.lake.c[0],g.lake.c[1],1,20,0,seed),true);
       ctx.beginPath(); ctx.ellipse(g.lake.c[0],g.lake.c[1],g.lake.rx,g.lake.ry,0,0,Math.PI*2);
-      ctx.fillStyle='rgba(30,130,180,.4)'; ctx.fill();
-      ctx.strokeStyle='rgba(90,225,255,.5)'; ctx.lineWidth=1.6/st.cam.s;
+      ctx.fillStyle=skinColor('water','fill','rgba(30,130,180,.4)'); ctx.fill();
+      ctx.strokeStyle=skinColor('water','stroke','rgba(90,225,255,.5)'); ctx.lineWidth=1.6/st.cam.s;
       ctx.shadowColor='rgba(67,224,255,.5)'; ctx.shadowBlur=12/st.cam.s; ctx.stroke();
       ctx.restore();
     }
@@ -693,15 +733,15 @@ function create(canvas, mini, hooks){
       ctx.save();
       ctx.beginPath(); smooth(ctx,g.river,false);
       ctx.lineCap='round';
-      ctx.lineWidth=9/st.cam.s; ctx.strokeStyle='rgba(30,130,190,.30)'; ctx.stroke();
-      ctx.lineWidth=3.4/st.cam.s; ctx.strokeStyle='rgba(110,235,255,.75)';
+      ctx.lineWidth=9/st.cam.s; ctx.strokeStyle=skinColor('water','stroke','rgba(30,130,190,.30)'); ctx.stroke();
+      ctx.lineWidth=3.4/st.cam.s; ctx.strokeStyle=skinColor('water','stroke','rgba(110,235,255,.75)');
       ctx.shadowColor='rgba(67,224,255,.7)'; ctx.shadowBlur=10/st.cam.s; ctx.stroke();
       ctx.restore();
     }
     // 道路
     ctx.save();
     ctx.setLineDash([7/st.cam.s,7/st.cam.s]);
-    ctx.strokeStyle='rgba(255,194,71,.42)'; ctx.lineWidth=1.7/st.cam.s;
+    ctx.strokeStyle=skinColor('road','stroke','rgba(255,194,71,.42)'); ctx.lineWidth=1.7/st.cam.s;
     (g.roads||[]).forEach(([a,b])=>{ ctx.beginPath(); ctx.moveTo(a[0],a[1]); ctx.lineTo(b[0],b[1]); ctx.stroke(); });
     ctx.restore();
   }
@@ -713,9 +753,9 @@ function create(canvas, mini, hooks){
     if(g.river){
       ctx.save(); ctx.lineCap='round';
       ctx.beginPath(); smooth(ctx,g.river,false);
-      ctx.lineWidth=g.riverWidth||42/st.cam.s; ctx.strokeStyle='rgba(20,90,140,.30)'; ctx.stroke();
-      ctx.lineWidth=(g.riverWidth||42/st.cam.s)*26/42; ctx.strokeStyle='rgba(32,140,200,.5)'; ctx.stroke();
-      ctx.lineWidth=4/st.cam.s; ctx.strokeStyle='rgba(120,240,255,.55)';
+      ctx.lineWidth=g.riverWidth||42/st.cam.s; ctx.strokeStyle=skinColor('water','stroke','rgba(20,90,140,.30)'); ctx.stroke();
+      ctx.lineWidth=(g.riverWidth||42/st.cam.s)*26/42; ctx.strokeStyle=skinColor('water','stroke','rgba(32,140,200,.5)'); ctx.stroke();
+      ctx.lineWidth=4/st.cam.s; ctx.strokeStyle=skinColor('water','stroke','rgba(120,240,255,.55)');
       ctx.shadowColor='rgba(67,224,255,.6)'; ctx.shadowBlur=14/st.cam.s; ctx.stroke();
       ctx.restore();
     }
@@ -770,18 +810,18 @@ function create(canvas, mini, hooks){
     const [gx0,gx1,gxs] = g.grid.x, [gy0,gy1,gys] = g.grid.y;
     for(let x=gx0;x<=gx1;x+=gxs){
       const major = Math.round((x-gx0)/gxs)%3===0;
-      ctx.strokeStyle = major?'rgba(150,205,255,.28)':'rgba(130,180,240,.14)';
+      ctx.strokeStyle=skinColor('road','stroke',major?'rgba(150,205,255,.28)':'rgba(130,180,240,.14)');
       ctx.lineWidth = (major?2.4:1.2)/st.cam.s;
       ctx.beginPath(); ctx.moveTo(x,gy0-20); ctx.lineTo(x,gy1+20); ctx.stroke();
     }
     for(let y=gy0;y<=gy1;y+=gys){
       const major = Math.round((y-gy0)/gys)%3===0;
-      ctx.strokeStyle = major?'rgba(150,205,255,.28)':'rgba(130,180,240,.14)';
+      ctx.strokeStyle=skinColor('road','stroke',major?'rgba(150,205,255,.28)':'rgba(130,180,240,.14)');
       ctx.lineWidth = (major?2.4:1.2)/st.cam.s;
       ctx.beginPath(); ctx.moveTo(gx0-20,y); ctx.lineTo(gx1+20,y); ctx.stroke();
     }
     // 对角大道
-    ctx.strokeStyle='rgba(255,194,71,.30)'; ctx.lineWidth=3.4/st.cam.s; ctx.lineCap='round';
+    ctx.strokeStyle=skinColor('road','stroke','rgba(255,194,71,.30)'); ctx.lineWidth=3.4/st.cam.s; ctx.lineCap='round';
     (g.avenues||[]).forEach(a=>{
       ctx.beginPath(); ctx.moveTo(a.from[0],a.from[1]); ctx.lineTo(a.to[0],a.to[1]); ctx.stroke();
     });
@@ -792,7 +832,7 @@ function create(canvas, mini, hooks){
       ctx.beginPath();
       smooth(ctx,wobbly(g.park.c[0],g.park.c[1],g.park.rx,20,.1,seed+3),true);
       ctx.fillStyle='rgba(40,190,140,.13)'; ctx.fill();
-      ctx.strokeStyle='rgba(57,224,160,.4)'; ctx.lineWidth=1.4/st.cam.s; ctx.stroke();
+      ctx.strokeStyle=skinColor('road','stroke','rgba(57,224,160,.4)'); ctx.lineWidth=1.4/st.cam.s; ctx.stroke();
       ctx.fillStyle='rgba(57,224,160,.30)';
       for(let i=0;i<44;i++){
         const a=rnd()*Math.PI*2, rr=Math.sqrt(rnd())*g.park.rx;
@@ -805,7 +845,7 @@ function create(canvas, mini, hooks){
       ctx.save();
       for(let k=3;k>=1;k--){
         ctx.beginPath(); ctx.arc(g.plaza.c[0],g.plaza.c[1],g.plaza.r*k/3,0,7);
-        ctx.strokeStyle=`rgba(155,107,255,${.10+k*.06})`; ctx.lineWidth=1.4/st.cam.s; ctx.stroke();
+        ctx.strokeStyle=skinColor('road','stroke',`rgba(155,107,255,${.10+k*.06})`); ctx.lineWidth=1.4/st.cam.s; ctx.stroke();
       }
       ctx.restore();
     }
@@ -818,9 +858,9 @@ function create(canvas, mini, hooks){
       const grd = ctx.createLinearGradient(x0,y0,x0,y1);
       grd.addColorStop(0,'rgba(52,86,128,.62)'); grd.addColorStop(1,'rgba(26,46,74,.62)');
       ctx.fillStyle=grd; ctx.fill();
-      ctx.strokeStyle='rgba(150,205,255,.26)'; ctx.lineWidth=1.2/st.cam.s; ctx.stroke();
+      ctx.strokeStyle=skinColor('road','stroke','rgba(150,205,255,.26)'); ctx.lineWidth=1.2/st.cam.s; ctx.stroke();
       // 屋顶细节
-      ctx.strokeStyle='rgba(180,225,255,.14)';
+      ctx.strokeStyle=skinColor('road','stroke','rgba(180,225,255,.14)');
       for(let k=0;k<4;k++){
         const yy=y0+pad+8+k*((y1-y0-pad*2-16)/4);
         ctx.beginPath(); ctx.moveTo(x0+pad+6,yy); ctx.lineTo(x1-pad-6,yy); ctx.stroke();
@@ -842,24 +882,24 @@ function create(canvas, mini, hooks){
     ctx.closePath();
     const grd = ctx.createLinearGradient(0,-320,0,340);
     grd.addColorStop(0,'rgba(30,56,92,.62)'); grd.addColorStop(1,'rgba(16,32,56,.62)');
-    ctx.fillStyle=grd; ctx.fill();
-    ctx.lineWidth=3/st.cam.s; ctx.strokeStyle='rgba(120,215,255,.6)';
+    ctx.fillStyle=skinColor('buildingOutline','fill',grd); ctx.fill();
+    ctx.lineWidth=3/st.cam.s; ctx.strokeStyle=skinColor('buildingOutline','stroke','rgba(120,215,255,.6)');
     ctx.shadowColor='rgba(67,224,255,.6)'; ctx.shadowBlur=16/st.cam.s; ctx.stroke();
     ctx.restore();
     // 中庭
     ctx.save();
     ctx.beginPath(); rrect(ctx,g.atrium.x-g.atrium.w/2,g.atrium.y-g.atrium.h/2,g.atrium.w,g.atrium.h,10);
-    ctx.fillStyle='rgba(120,200,255,.10)'; ctx.fill();
-    ctx.setLineDash([10/st.cam.s,7/st.cam.s]); ctx.strokeStyle='rgba(150,215,255,.45)';
+    ctx.fillStyle=skinColor('buildingOutline','fill','rgba(120,200,255,.10)'); ctx.fill();
+    ctx.setLineDash([10/st.cam.s,7/st.cam.s]); ctx.strokeStyle=skinColor('buildingOutline','stroke','rgba(150,215,255,.45)');
     ctx.lineWidth=1.6/st.cam.s; ctx.stroke();
     ctx.restore();
     // 楼梯
     (g.stairs||[]).forEach(s=>{
       ctx.save();
       ctx.beginPath(); rrect(ctx,s.x,s.y-s.h/2,s.w,s.h,6);
-      ctx.fillStyle='rgba(155,107,255,.16)'; ctx.fill();
-      ctx.strokeStyle='rgba(155,107,255,.5)'; ctx.lineWidth=1.4/st.cam.s; ctx.stroke();
-      ctx.strokeStyle='rgba(200,175,255,.35)';
+      ctx.fillStyle=skinColor('buildingOutline','fill','rgba(155,107,255,.16)'); ctx.fill();
+      ctx.strokeStyle=skinColor('buildingOutline','stroke','rgba(155,107,255,.5)'); ctx.lineWidth=1.4/st.cam.s; ctx.stroke();
+      ctx.strokeStyle=skinColor('buildingOutline','stroke','rgba(200,175,255,.35)');
       for(let i=1;i<6;i++){
         const x=s.x+s.w*i/6;
         ctx.beginPath(); ctx.moveTo(x,s.y-s.h/2+5); ctx.lineTo(x,s.y+s.h/2-5); ctx.stroke();
@@ -874,8 +914,8 @@ function create(canvas, mini, hooks){
       const grd=ctx.createLinearGradient(x,y,x,y+wg.h);
       if(wg.live){ grd.addColorStop(0,'rgba(30,110,150,.55)'); grd.addColorStop(1,'rgba(14,56,84,.55)'); }
       else { grd.addColorStop(0,'rgba(38,66,104,.5)'); grd.addColorStop(1,'rgba(20,38,62,.5)'); }
-      ctx.fillStyle=grd; ctx.fill();
-      ctx.strokeStyle = wg.live?'rgba(67,224,255,.75)':'rgba(150,205,255,.3)';
+      ctx.fillStyle=skinColor('buildingOutline','fill',grd); ctx.fill();
+      ctx.strokeStyle=skinColor('buildingOutline','stroke',wg.live?'rgba(67,224,255,.75)':'rgba(150,205,255,.3)');
       ctx.lineWidth=(wg.live?2.2:1.4)/st.cam.s;
       if(wg.live){ ctx.shadowColor='rgba(67,224,255,.7)'; ctx.shadowBlur=14/st.cam.s; }
       ctx.stroke();
@@ -894,14 +934,14 @@ function create(canvas, mini, hooks){
     if(c.w>0&&c.h>0){
     ctx.save();
     ctx.beginPath(); rrect(ctx,c.x,c.y-c.h/2,c.w,c.h,8);
-    ctx.fillStyle='rgba(38,62,98,.55)'; ctx.fill();
-    ctx.strokeStyle='rgba(140,200,255,.28)'; ctx.lineWidth=1.4/st.cam.s; ctx.stroke();
+    ctx.fillStyle=skinColor('corridor','fill','rgba(38,62,98,.55)'); ctx.fill();
+    ctx.strokeStyle=skinColor('corridor','stroke','rgba(140,200,255,.28)'); ctx.lineWidth=1.4/st.cam.s; ctx.stroke();
     ctx.setLineDash([8/st.cam.s,8/st.cam.s]);
-    ctx.strokeStyle='rgba(67,224,255,.22)'; ctx.lineWidth=1.2/st.cam.s;
+    ctx.strokeStyle=skinColor('corridor','stroke','rgba(67,224,255,.22)'); ctx.lineWidth=1.2/st.cam.s;
     ctx.beginPath(); ctx.moveTo(c.x+14,c.y); ctx.lineTo(c.x+c.w-14,c.y); ctx.stroke();
     ctx.setLineDash([]);
     // 走廊铺地
-    ctx.strokeStyle='rgba(150,205,255,.06)'; ctx.lineWidth=1/st.cam.s;
+    ctx.strokeStyle=skinColor('corridor','stroke','rgba(150,205,255,.06)'); ctx.lineWidth=1/st.cam.s;
     for(let x=c.x+10;x<c.x+c.w-8;x+=48){ ctx.beginPath(); ctx.moveTo(x,c.y-c.h/2+4); ctx.lineTo(x,c.y+c.h/2-4); ctx.stroke(); }
     // 壁灯
     for(let x=c.x+56;x<c.x+c.w-30;x+=126){
@@ -928,14 +968,14 @@ function create(canvas, mini, hooks){
       const x=r.x, y=r.y, w=r.w, h=r.h;
       const live = !!r.live;
       const tint = r.tint || { vault:'67,224,255', hall:'155,107,255', desk:'57,224,160', small:'127,212,255', stair:'150,160,190', exit:'255,194,71' }[r.kind]||'120,180,255';
-      ctx.save();
+      ctx.save();if(canvasStyle)ctx.lineJoin=layerPaint(canvasStyle,'floorWall').join;
       ctx.beginPath(); rrect(ctx,x,y,w,h,6);
       const grd=ctx.createLinearGradient(x,y,x+w,y+h);
       grd.addColorStop(0,`rgba(${tint},${live?.22:.11})`);
       grd.addColorStop(1,`rgba(${tint},${live?.07:.03})`);
-      ctx.fillStyle=grd; ctx.fill();
-      ctx.strokeStyle=`rgba(${tint},${live?.85:.35})`; ctx.lineWidth=(live?2.2:1.3)/st.cam.s;
-      if(live){ ctx.shadowColor=`rgba(${tint},.8)`; ctx.shadowBlur=16/st.cam.s; }
+      ctx.fillStyle=skinColor('floorWall','fill',grd); ctx.fill();
+      ctx.strokeStyle=skinColor('floorWall','stroke',`rgba(${tint},${live?.85:.35})`); ctx.lineWidth=(live?2.2:1.3)/st.cam.s;
+      if(live){ ctx.shadowColor=`rgba(${tint},.8)`; ctx.shadowBlur=canvasStyle?0:16/st.cam.s; }
       ctx.stroke();
       if(r.role==='garden'||r.role==='outdoor'){
         // Surface material only. These strokes are not furniture or new world entities.
@@ -955,8 +995,7 @@ function create(canvas, mini, hooks){
       const rg=ctx.createRadialGradient(l.x,l.y,1,l.x,l.y,rad);
       rg.addColorStop(0,'rgba(255,214,140,.20)'); rg.addColorStop(1,'rgba(255,214,140,0)');
       ctx.beginPath(); ctx.arc(l.x,l.y,rad,0,7); ctx.fillStyle=rg; ctx.fill();
-      ctx.beginPath(); ctx.arc(l.x,l.y,2.6,0,7); ctx.fillStyle='rgba(255,232,180,.85)';
-      ctx.shadowColor='rgba(255,220,150,.9)'; ctx.shadowBlur=10/st.cam.s; ctx.fill();
+      // Ambient light is a soft background, not a second physical lamp marker.
       ctx.restore();
     });
 
@@ -991,14 +1030,22 @@ function create(canvas, mini, hooks){
 
     // 门
     ctx.save();
+    const renderedOpenings=new Set();
     (g.doors||[]).forEach(d=>{
+      // Two room sides describe one physical opening, including POV data
+      // whose private route IDs are intentionally removed.
+      const key=`${d.x}:${d.y}:${d.w}:${d.wall==='east'||d.wall==='west'?'v':'h'}`;
+      if(renderedOpenings.has(key))return;renderedOpenings.add(key);
+      const vertical=d.wall==='east'||d.wall==='west';
+      ctx.save();ctx.translate(d.x,d.y);if(vertical)ctx.rotate(Math.PI/2);
       ctx.beginPath();
-      ctx.moveTo(d.x-d.w/2, d.y); ctx.lineTo(d.x+d.w/2, d.y);
+      ctx.moveTo(-d.w/2, 0); ctx.lineTo(d.w/2, 0);
       ctx.strokeStyle='rgba(10,16,26,1)'; ctx.lineWidth=7/st.cam.s; ctx.stroke();
       ctx.strokeStyle='rgba(255,225,150,.85)'; ctx.lineWidth=2/st.cam.s; ctx.stroke();
-      ctx.beginPath(); ctx.arc(d.x+d.w/2, d.y, d.w*.42, Math.PI, Math.PI*1.5);
+      ctx.beginPath(); ctx.arc(d.w/2, 0, d.w*.42, Math.PI, Math.PI*1.5);
       ctx.setLineDash([3/st.cam.s,3/st.cam.s]);
       ctx.strokeStyle='rgba(255,225,150,.35)'; ctx.lineWidth=1/st.cam.s; ctx.stroke();
+      ctx.restore();
     });
     ctx.restore();
 
@@ -1010,8 +1057,8 @@ function create(canvas, mini, hooks){
     const stampX=st.node.host?measureRight-228:296,stampY=st.node.host?planTop-62:-302;
     ctx.save();
     ctx.beginPath(); rrect(ctx,stampX,stampY,228,50,4);
-    ctx.fillStyle='rgba(8,14,24,.82)'; ctx.fill();
-    ctx.strokeStyle='rgba(120,200,255,.35)'; ctx.lineWidth=1/st.cam.s; ctx.stroke();
+    ctx.fillStyle=canvasStyle?.labelBackground||'rgba(8,14,24,.82)'; ctx.fill();
+    ctx.strokeStyle=skinColor('floorWall','stroke','rgba(120,200,255,.35)'); ctx.lineWidth=1/st.cam.s; ctx.stroke();
     ctx.restore();
     pushLabel(stampX+114, stampY+5, (st.path[st.path.length-2]||{}).name || '建筑图', '#bcd6ee', 'name', true);
     pushLabel(stampX+114, stampY+18, st.node.host?`空间示意 · 单位 ${st.node.metric?'m':'格'}`:`比例 1:${Math.round(0.085/mpp*140)} · ATLAS 制图`, 'rgba(140,170,200,.85)', 'sub', true);
@@ -1023,9 +1070,52 @@ function create(canvas, mini, hooks){
    * - 真实类型优先：读 `f.type`（M6-03 从场景的真实 body.type 投影而来）。
    *   POV 场景的服务端白名单会剥掉 body.type，此时 `f.detail===false`、
    *   这里画一块中性块 —— **不猜**它是一张床还是一张桌。
-   * - `f.solid===false`（灯、门洞、摆件）走虚线淡描：G08 要求实体障碍与装饰一眼可分。
+   * - 灯光只作背景光晕，不画悬浮标签；旧门洞提示使用设施符号。
    * - 渲染靠 `f.r`（4 元组绝对坐标）；`x,y,w,h` 是所属房间，仅用于 fallback 着色。
    */
+  function queueUtility(kind,x,y){
+    (st.utilitySymbols??=[]).push({kind,x,y});
+  }
+  function drawUtilities(){
+    const groups=[];
+    for(const symbol of st.utilitySymbols??[]){
+      if(symbol.kind!=='doorway')continue;
+      const [x,y]=W2S(symbol.x,symbol.y);
+      if(x<0||x>st.vw||y<0||y>st.vh)continue;
+      const existing=groups.find(g=>g.kind===symbol.kind&&Math.hypot(g.x-x,g.y-y)<12);
+      if(existing)existing.count++;else groups.push({...symbol,x,y,count:1});
+    }
+    const occupied=(st.marks??[]).map(m=>{const [x,y]=W2S(m.x,m.y);return {x:x-17,y:y-17,w:34,h:34};});
+    st.utilityBoxes=[];
+    ctx.save();ctx.shadowBlur=0;ctx.lineWidth=1.2;ctx.setLineDash([]);
+    ctx.font='500 11px '+F.sans;ctx.textBaseline='middle';ctx.textAlign='left';
+    for(const g of groups){
+      const text='门洞'+(g.count>1?' ×'+g.count:'');
+      const w=st.showLabels?ctx.measureText(text).width+31:22,h=24;
+      const offsets=[[12,12],[-w-12,12],[12,-30],[-w-12,-30]];
+      let box;
+      for(const distance of [0,30,60,90]){
+        box=offsets.map(([dx,dy])=>({x:g.x+dx,y:g.y+dy+(dy<0?-distance:distance),w,h})).find(b=>b.x>=6&&b.y>=6&&b.x+b.w<=st.vw-6&&b.y+b.h<=st.vh-6&&!occupied.some(o=>b.x<o.x+o.w+4&&b.x+b.w>o.x-4&&b.y<o.y+o.h+4&&b.y+b.h>o.y-4));
+        if(box)break;
+      }
+      if(!box)continue;
+      occupied.push(box);st.utilityBoxes.push(box);
+      const color=skinColor('furniture','stroke','#9ed2db');
+      ctx.beginPath();ctx.moveTo(g.x,g.y);ctx.lineTo(clamp(g.x,box.x,box.x+box.w),clamp(g.y,box.y,box.y+box.h));
+      ctx.strokeStyle=hexA(color,.55);ctx.stroke();
+      ctx.beginPath();rrect(ctx,box.x,box.y,w,h,6);
+      ctx.fillStyle=canvasStyle?.labelBackground?hexA(canvasStyle.labelBackground,.96):'rgba(8,18,30,.96)';ctx.fill();ctx.strokeStyle=hexA(color,.65);ctx.stroke();
+      const x=box.x+11,y=box.y+12;
+      ctx.beginPath();
+      {
+        ctx.moveTo(x-5,y+6);ctx.lineTo(x-5,y-7);ctx.lineTo(x+5,y-7);ctx.lineTo(x+5,y+6);
+        ctx.moveTo(x-3,y+6);ctx.lineTo(x-3,y-5);ctx.lineTo(x+3,y-3);ctx.lineTo(x+3,y+6);ctx.closePath();
+      }
+      ctx.strokeStyle=color;ctx.stroke();
+      if(st.showLabels){ctx.fillStyle=canvasStyle?.labelColor||color;ctx.fillText(text,box.x+24,y);}
+    }
+    ctx.restore();
+  }
   function drawFurn(f,x,y,w,h,tint){
     const r=f.r||[x,y,x+w,y+h];
     const [a,b,c2,d]=r;
@@ -1035,25 +1125,25 @@ function create(canvas, mini, hooks){
     const solid=f.solid===true;
     const stroke=solid?'rgba(214,232,255,.5)':'rgba(200,220,240,.30)';
     const fill=solid?'rgba(200,225,255,.15)':'rgba(200,220,240,.07)';
-    ctx.save();
+    ctx.save();if(canvasStyle)ctx.lineJoin=layerPaint(canvasStyle,'furniture').join;
     if(!known||kind==='decor'){
       // 不知道是什么，只标"这里有一件东西"，不编形状。
       ctx.beginPath(); rrect(ctx,a,b,bw,bh,3);
-      ctx.fillStyle='rgba(170,200,235,.07)'; ctx.fill();
-      ctx.strokeStyle='rgba(180,205,235,.22)'; ctx.lineWidth=1/st.cam.s;
+      ctx.fillStyle=skinColor('furniture','fill','rgba(170,200,235,.07)'); ctx.fill();
+      ctx.strokeStyle=skinColor('furniture','stroke','rgba(180,205,235,.22)'); ctx.lineWidth=1/st.cam.s;
       ctx.setLineDash([3/st.cam.s,3/st.cam.s]); ctx.stroke(); ctx.setLineDash([]);
       ctx.restore(); return;
     }
     switch(kind){
       case 'shelf':{
         ctx.beginPath(); rrect(ctx,a,b,bw,bh,3);
-        ctx.fillStyle='rgba(255,194,71,.14)'; ctx.fill();
-        ctx.strokeStyle='rgba(255,194,71,.45)'; ctx.lineWidth=1.1/st.cam.s; ctx.stroke();
+        ctx.fillStyle=skinColor('furniture','fill','rgba(255,194,71,.14)'); ctx.fill();
+        ctx.strokeStyle=skinColor('furniture','stroke','rgba(255,194,71,.45)'); ctx.lineWidth=1.1/st.cam.s; ctx.stroke();
         // 隔板数量是**画法参数**（约每 1.1 世界单位一层），不是世界数据；
         // 旧代码读 `f.n`，而 `n` 从来没被任何数据源产出过 —— 那是个固定的假数字。
         const horiz=bw>bh;
         const n=Math.max(2,Math.min(8,Math.round((horiz?bw:bh)/1.1)));
-        ctx.strokeStyle='rgba(255,214,130,.35)';
+        ctx.strokeStyle=skinColor('furniture','stroke','rgba(255,214,130,.35)');
         for(let i=1;i<n;i++){
           ctx.beginPath();
           if(horiz){ const xx=a+bw*i/n; ctx.moveTo(xx,b+3); ctx.lineTo(xx,d-3); }
@@ -1064,85 +1154,80 @@ function create(canvas, mini, hooks){
       }
       case 'table':{
         ctx.beginPath(); rrect(ctx,a,b,bw,bh,8);
-        ctx.fillStyle='rgba(200,225,255,.16)'; ctx.fill();
-        ctx.strokeStyle='rgba(200,230,255,.5)'; ctx.lineWidth=1.4/st.cam.s; ctx.stroke();
+        ctx.fillStyle=skinColor('furniture','fill','rgba(200,225,255,.16)'); ctx.fill();
+        ctx.strokeStyle=skinColor('furniture','stroke','rgba(200,230,255,.5)'); ctx.lineWidth=1.4/st.cam.s; ctx.stroke();
         break;
       }
       case 'desk':{
         ctx.beginPath(); rrect(ctx,a,b,bw,bh,3);
-        ctx.fillStyle='rgba(140,200,255,.12)'; ctx.fill();
-        ctx.strokeStyle='rgba(150,210,255,.4)'; ctx.lineWidth=1.1/st.cam.s; ctx.stroke();
+        ctx.fillStyle=skinColor('furniture','fill','rgba(140,200,255,.12)'); ctx.fill();
+        ctx.strokeStyle=skinColor('furniture','stroke','rgba(150,210,255,.4)'); ctx.lineWidth=1.1/st.cam.s; ctx.stroke();
         break;
       }
       case 'chair':{
         ctx.beginPath(); rrect(ctx,a,b,bw,bh,2);
-        ctx.fillStyle='rgba(190,215,250,.14)'; ctx.fill();
-        ctx.strokeStyle='rgba(200,225,255,.42)'; ctx.lineWidth=1/st.cam.s; ctx.stroke();
+        ctx.fillStyle=skinColor('furniture','fill','rgba(190,215,250,.14)'); ctx.fill();
+        ctx.strokeStyle=skinColor('furniture','stroke','rgba(200,225,255,.42)'); ctx.lineWidth=1/st.cam.s; ctx.stroke();
         // 椅背：沿短边画一道，让人一眼看出朝向
         ctx.beginPath();
         if(bw>=bh){ ctx.moveTo(a+1,b+1); ctx.lineTo(c2-1,b+1); }
         else { ctx.moveTo(a+1,b+1); ctx.lineTo(a+1,d-1); }
-        ctx.lineWidth=2/st.cam.s; ctx.strokeStyle='rgba(200,225,255,.6)'; ctx.stroke();
+        ctx.lineWidth=2/st.cam.s; ctx.strokeStyle=skinColor('furniture','stroke','rgba(200,225,255,.6)'); ctx.stroke();
         break;
       }
       case 'bed':{
         ctx.beginPath(); rrect(ctx,a,b,bw,bh,4);
-        ctx.fillStyle='rgba(155,107,255,.14)'; ctx.fill();
-        ctx.strokeStyle='rgba(180,150,255,.45)'; ctx.lineWidth=1.2/st.cam.s; ctx.stroke();
+        ctx.fillStyle=skinColor('furniture','fill','rgba(155,107,255,.14)'); ctx.fill();
+        ctx.strokeStyle=skinColor('furniture','stroke','rgba(180,150,255,.45)'); ctx.lineWidth=1.2/st.cam.s; ctx.stroke();
         // 枕头（短边一侧）+ 被沿
-        ctx.fillStyle='rgba(210,195,255,.22)';
+        ctx.fillStyle=skinColor('furniture','fill','rgba(210,195,255,.22)');
         if(bh>=bw){ ctx.beginPath(); rrect(ctx,a+2,b+2,bw-4,Math.min(bh*.22,7),2); ctx.fill();
           ctx.beginPath(); ctx.moveTo(a+2,b+bh*.42); ctx.lineTo(c2-2,b+bh*.42); }
         else { ctx.beginPath(); rrect(ctx,a+2,b+2,Math.min(bw*.22,7),bh-4,2); ctx.fill();
           ctx.beginPath(); ctx.moveTo(a+bw*.42,b+2); ctx.lineTo(a+bw*.42,d-2); }
-        ctx.strokeStyle='rgba(210,195,255,.35)'; ctx.lineWidth=1/st.cam.s; ctx.stroke();
+        ctx.strokeStyle=skinColor('furniture','stroke','rgba(210,195,255,.35)'); ctx.lineWidth=1/st.cam.s; ctx.stroke();
         break;
       }
       case 'pillow':{
         ctx.beginPath(); rrect(ctx,a,b,bw,bh,Math.min(bw,bh)/2);
-        ctx.fillStyle='rgba(210,195,255,.20)'; ctx.fill(); ctx.strokeStyle=stroke; ctx.lineWidth=1/st.cam.s; ctx.stroke();
+        ctx.fillStyle=skinColor('furniture','fill','rgba(210,195,255,.20)'); ctx.fill(); ctx.strokeStyle=skinColor('furniture','stroke',stroke); ctx.lineWidth=1/st.cam.s; ctx.stroke();
         break;
       }
       case 'cabinet':{
         ctx.beginPath(); rrect(ctx,a,b,bw,bh,2);
-        ctx.fillStyle='rgba(255,194,71,.10)'; ctx.fill();
-        ctx.strokeStyle='rgba(255,205,130,.40)'; ctx.lineWidth=1.2/st.cam.s; ctx.stroke();
+        ctx.fillStyle=skinColor('furniture','fill','rgba(255,194,71,.10)'); ctx.fill();
+        ctx.strokeStyle=skinColor('furniture','stroke','rgba(255,205,130,.40)'); ctx.lineWidth=1.2/st.cam.s; ctx.stroke();
         // 双开门 + 把手
         ctx.beginPath();
         if(bw>=bh){ const mx=a+bw/2; ctx.moveTo(mx,b+1); ctx.lineTo(mx,d-1); }
         else { const my=b+bh/2; ctx.moveTo(a+1,my); ctx.lineTo(c2-1,my); }
-        ctx.strokeStyle='rgba(255,205,130,.28)'; ctx.lineWidth=0.9/st.cam.s; ctx.stroke();
+        ctx.strokeStyle=skinColor('furniture','stroke','rgba(255,205,130,.28)'); ctx.lineWidth=0.9/st.cam.s; ctx.stroke();
         ctx.beginPath(); ctx.arc(bw>=bh?a+bw*.42:a+bw*.45, bh>=bw?b+bh*.42:b+bh*.45, 0.9, 0, 7);
-        ctx.fillStyle='rgba(255,215,150,.6)'; ctx.fill();
+        ctx.fillStyle=skinColor('furniture','fill','rgba(255,215,150,.6)'); ctx.fill();
         break;
       }
       case 'rug':{
         ctx.beginPath(); rrect(ctx,a,b,bw,bh,14);
-        ctx.fillStyle=`rgba(${tint},.10)`; ctx.fill();
+        ctx.fillStyle=skinColor('furniture','fill',`rgba(${tint},.10)`); ctx.fill();
         ctx.setLineDash([6/st.cam.s,6/st.cam.s]);
-        ctx.strokeStyle=`rgba(${tint},.4)`; ctx.lineWidth=1.2/st.cam.s; ctx.stroke(); ctx.setLineDash([]);
+        ctx.strokeStyle=skinColor('furniture','stroke',`rgba(${tint},.4)`); ctx.lineWidth=1.2/st.cam.s; ctx.stroke(); ctx.setLineDash([]);
         break;
       }
       case 'light':{
-        // 灯不是障碍：只画一小圈光，且永远在人物下方（本函数在 marker 之前调用）。
-        ctx.beginPath(); ctx.arc(a+bw/2,b+bh/2,Math.max(2,Math.min(bw,bh)/2),0,7);
-        ctx.fillStyle='rgba(255,228,170,.28)'; ctx.fill();
-        ctx.strokeStyle='rgba(255,232,180,.5)'; ctx.lineWidth=0.9/st.cam.s;
-        ctx.setLineDash([2/st.cam.s,2/st.cam.s]); ctx.stroke(); ctx.setLineDash([]);
+        // Ambient lighting is drawn below furniture; no bulb badge or leader line.
         break;
       }
       case 'doorway':{
-        // 门洞是通行结构：画门槛，不画实体填充，也不参与碰撞。
-        ctx.beginPath(); ctx.moveTo(a,b); ctx.lineTo(c2,d);
-        ctx.strokeStyle='rgba(255,225,150,.45)'; ctx.lineWidth=1.4/st.cam.s;
-        ctx.setLineDash([4/st.cam.s,3/st.cam.s]); ctx.stroke(); ctx.setLineDash([]);
+        // Only the saved structural doors draw wall openings. A furnishing
+        // doorway has no wall orientation, so show a named symbol at its anchor.
+        queueUtility('doorway',a+bw/2,b+bh/2);
         break;
       }
       case 'stairs':{
         ctx.beginPath(); rrect(ctx,a,b,bw,bh,2);
-        ctx.fillStyle='rgba(160,175,205,.12)'; ctx.fill();
-        ctx.strokeStyle='rgba(170,190,225,.38)'; ctx.lineWidth=1/st.cam.s; ctx.stroke();
-        ctx.strokeStyle='rgba(170,190,225,.26)';
+        ctx.fillStyle=skinColor('furniture','fill','rgba(160,175,205,.12)'); ctx.fill();
+        ctx.strokeStyle=skinColor('furniture','stroke','rgba(170,190,225,.38)'); ctx.lineWidth=1/st.cam.s; ctx.stroke();
+        ctx.strokeStyle=skinColor('furniture','stroke','rgba(170,190,225,.26)');
         const steps=Math.max(2,Math.round((bw>=bh?bw:bh)/1.2));
         for(let i=1;i<steps;i++){
           ctx.beginPath();
@@ -1154,8 +1239,8 @@ function create(canvas, mini, hooks){
       }
       default:{
         ctx.beginPath(); rrect(ctx,a,b,bw,bh,3);
-        ctx.fillStyle=fill; ctx.fill();
-        ctx.strokeStyle=stroke; ctx.lineWidth=1/st.cam.s;
+        ctx.fillStyle=skinColor('furniture','fill',fill); ctx.fill();
+        ctx.strokeStyle=skinColor('furniture','stroke',stroke); ctx.lineWidth=1/st.cam.s;
         if(!solid)ctx.setLineDash([3/st.cam.s,3/st.cam.s]);
         ctx.stroke(); ctx.setLineDash([]);
       }
@@ -1178,7 +1263,7 @@ function create(canvas, mini, hooks){
     ctx.beginPath(); rrect(ctx,W.x,W.y,W.w,W.h,4);
     const grd=ctx.createRadialGradient(0,0,20,0,0,Math.max(W.w,W.h)*.62);
     grd.addColorStop(0,'rgba(28,50,80,.72)'); grd.addColorStop(1,'rgba(12,22,38,.85)');
-    ctx.fillStyle=grd; ctx.fill();
+    ctx.fillStyle=skinColor('floorWall','fill',grd); ctx.fill();
     // 地板砖
     ctx.save(); ctx.clip();
     ctx.strokeStyle='rgba(150,205,255,.055)'; ctx.lineWidth=.8/st.cam.s;
@@ -1273,13 +1358,11 @@ function create(canvas, mini, hooks){
       const rg=ctx.createRadialGradient(l[0],l[1],2,l[0],l[1],96);
       rg.addColorStop(0,'rgba(255,214,140,.20)'); rg.addColorStop(1,'rgba(255,214,140,0)');
       ctx.beginPath(); ctx.arc(l[0],l[1],96,0,7); ctx.fillStyle=rg; ctx.fill();
-      ctx.beginPath(); ctx.arc(l[0],l[1],4.5,0,7); ctx.fillStyle='rgba(255,230,170,.9)';
-      ctx.shadowColor='rgba(255,220,150,.9)'; ctx.shadowBlur=14/st.cam.s; ctx.fill();
     });
     // 墙
     ctx.save();
     ctx.beginPath(); rrect(ctx,W.x,W.y,W.w,W.h,4);
-    ctx.lineWidth=7/st.cam.s; ctx.strokeStyle='rgba(140,215,255,.75)';
+    ctx.lineWidth=7/st.cam.s; ctx.strokeStyle=skinColor('floorWall','stroke','rgba(140,215,255,.75)');
     ctx.shadowColor='rgba(67,224,255,.65)'; ctx.shadowBlur=16/st.cam.s; ctx.stroke();
     ctx.lineWidth=2/st.cam.s; ctx.strokeStyle='rgba(220,245,255,.5)'; ctx.stroke();
     // 门洞
@@ -1315,7 +1398,7 @@ function create(canvas, mini, hooks){
       ||!Number.isFinite(st.vw)||!Number.isFinite(st.vh)) return;
     const step=gridStep(cam.s);
     if(!(step>0)) return;
-    paintGrid(ctx,{cam,vw:st.vw,vh:st.vh,dpr:st.dpr,step});
+    paintGrid(ctx,{cam,vw:st.vw,vh:st.vh,dpr:st.dpr,step,color:canvasStyle?.gridColor});
   }
 
   /** `rank` 越小越优先（0 = 选中/悬停）。不传就按标签种类给默认优先级。 */
@@ -1400,12 +1483,18 @@ function create(canvas, mini, hooks){
   }
 
   function drawMark(ctx,m,sx,sy,t,hover,sel){
-    const col = m.c || ({char:C.cyan,item:C.amber,poi:C.violet,sig:C.green,evt:C.pink,exit:C.blue}[m.type]||C.cyan);
+    const col = canvasStyle?.markerColors[m.type] || m.c || ({char:C.cyan,item:C.amber,poi:C.violet,sig:C.green,evt:C.pink,exit:C.blue}[m.type]||C.cyan);
     const dim = m.dim ? .35 : 1;
     ctx.save();
     ctx.globalAlpha = dim;
 
-    if(m.type==='char'){
+    if(canvasStyle?.markerImages?.[m.type]||m.type==='vehicle'&&canvasStyle?.markerImages?.exit){
+      ctx.drawImage(canvasStyle.markerImages[m.type]||canvasStyle.markerImages.exit,sx-12,sy-12,24,24);if(hover||sel||m.hero){ctx.beginPath();ctx.arc(sx,sy,15,0,7);ctx.strokeStyle=col;ctx.lineWidth=sel?2:1;ctx.stroke();}
+    }else if(canvasStyle?.markerShape==='seal'&&['char','poi','item','exit'].includes(m.type)){
+      ctx.save();ctx.translate(sx,sy);ctx.fillStyle=canvasStyle.labelBackground||'#f4e9d0';ctx.strokeStyle=col;ctx.lineWidth=1.6;ctx.beginPath();
+      if(m.type==='char')ctx.arc(0,0,11,0,7);else if(m.type==='poi'){ctx.moveTo(0,-12);ctx.lineTo(11,0);ctx.lineTo(0,12);ctx.lineTo(-11,0);ctx.closePath();}else rrect(ctx,-9,-9,18,18,2);
+      ctx.fill();ctx.stroke();ctx.beginPath();ctx.arc(0,0,3,0,7);ctx.fillStyle=col;ctx.fill();ctx.restore();
+    }else if(m.type==='char'){
       if(m.hero){
         ctx.save();
         ctx.translate(sx,sy); ctx.rotate(t*0.35);
@@ -1521,7 +1610,7 @@ function create(canvas, mini, hooks){
   function drawLabels(){
     ctx.save();
     ctx.textAlign='center'; ctx.textBaseline='top';
-    const occupied=[];
+    const occupied=[...(st.utilityBoxes??[])];
     const items=st.labels.map((l,i)=>{
       const [sx,sy]= l.scr ? [l.x,l.y] : W2S(l.x,l.y);
       return {l,sx,sy,i,rank:labelRank(l)};
@@ -1540,7 +1629,7 @@ function create(canvas, mini, hooks){
       // 被挪开的标签用 leader 线指回自己的锚点（物理位置不变，只是文字让位）。
       if(spot.leader){
         ctx.beginPath(); ctx.moveTo(sx,sy); ctx.lineTo(spot.lx,spot.ly);
-        ctx.strokeStyle=hexA(l.color,.5); ctx.lineWidth=1; ctx.stroke();
+        ctx.strokeStyle=hexA((canvasStyle?.labelColor||l.color),.5); ctx.lineWidth=1; ctx.stroke();
       }
       const cx=spot.box.x+spot.box.w/2;
       if(l.kind==='live'){
@@ -1548,24 +1637,24 @@ function create(canvas, mini, hooks){
         const w=ctx.measureText(l.text).width;
         ctx.beginPath();
         rrect(ctx, cx-w/2-8, spot.box.y-2, w+16, 18, 9);
-        ctx.fillStyle='rgba(6,14,24,.82)'; ctx.fill();
-        ctx.strokeStyle=hexA(l.color,.45); ctx.lineWidth=1; ctx.stroke();
-        ctx.fillStyle=l.color;
-        ctx.shadowColor=l.color; ctx.shadowBlur=10;
+        ctx.fillStyle=canvasStyle?.labelBackground?hexA(canvasStyle.labelBackground,.94):'rgba(6,14,24,.82)'; ctx.fill();
+        ctx.strokeStyle=hexA((canvasStyle?.labelColor||l.color),.45); ctx.lineWidth=1; ctx.stroke();
+        ctx.fillStyle=(canvasStyle?.labelColor||l.color);
+        ctx.shadowColor=(canvasStyle?.labelColor||l.color); ctx.shadowBlur=10;
         ctx.fillText(l.text, cx, spot.box.y+1);
         ctx.shadowBlur=0;
       } else if(l.kind==='name'){
         ctx.font='500 11px '+F.sans;
         const w=ctx.measureText(l.text).width;
         ctx.beginPath(); rrect(ctx, cx-w/2-6, spot.box.y-1, w+12, 15, 7);
-        ctx.fillStyle='rgba(5,11,20,.72)'; ctx.fill();
-        ctx.fillStyle=l.color; ctx.fillText(l.text, cx, spot.box.y);
+        ctx.fillStyle=canvasStyle?.labelBackground?hexA(canvasStyle.labelBackground,.9):'rgba(5,11,20,.72)'; ctx.fill();
+        ctx.fillStyle=(canvasStyle?.labelColor||l.color); ctx.fillText(l.text, cx, spot.box.y);
       } else {
         ctx.font='400 11px '+F.mono;
         const w=ctx.measureText(l.text).width;
-        ctx.fillStyle='rgba(6,12,20,.78)';
+        ctx.fillStyle=canvasStyle?.labelBackground?hexA(canvasStyle.labelBackground,.9):'rgba(6,12,20,.78)';
         ctx.fillRect(cx-w/2-3, spot.box.y-1, w+6, 12);
-        ctx.fillStyle=l.color; ctx.fillText(l.text, cx, spot.box.y);
+        ctx.fillStyle=(canvasStyle?.labelColor||l.color); ctx.fillText(l.text, cx, spot.box.y);
       }
     }
     ctx.restore();
@@ -1582,32 +1671,16 @@ function create(canvas, mini, hooks){
     }
   }
   function radar(t){
+    // Interior plans need legible furniture and doors, not a map-wide spotlight.
+    if(['building','floor','room'].includes(st.kind))return;
     const hero = st.marks.find(m=>m.hero);
     let cx=st.vw/2, cy=st.vh/2;
     if(hero){ const p=W2S(hero.x,hero.y); cx=p[0]; cy=p[1]; }
-    const R = Math.hypot(st.vw,st.vh)*.62;
-    const a = (t*0.5)%(Math.PI*2);
     ctx.save();
-    ctx.globalCompositeOperation='lighter';
-    let g;
-    try{
-      g = ctx.createConicGradient(a, cx, cy);
-      g.addColorStop(0,'rgba(67,224,255,.14)');
-      g.addColorStop(.06,'rgba(67,224,255,.05)');
-      g.addColorStop(.14,'rgba(67,224,255,0)');
-      g.addColorStop(1,'rgba(67,224,255,0)');
-    }catch(e){
-      g = ctx.createRadialGradient(cx,cy,0,cx,cy,R);
-      g.addColorStop(0,'rgba(67,224,255,.08)'); g.addColorStop(1,'rgba(67,224,255,0)');
-    }
-    ctx.beginPath();
-    ctx.moveTo(cx,cy); ctx.arc(cx,cy,R,a,a+Math.PI*.5); ctx.closePath();
-    ctx.fillStyle=g; ctx.fill();
-    // 距离环
-    ctx.globalCompositeOperation='source-over';
+    // Thin, low-contrast range rings do not recolor the map beneath them.
     [90,170,260].forEach((r,i)=>{
       ctx.beginPath(); ctx.arc(cx,cy,r,0,7);
-      ctx.strokeStyle=`rgba(67,224,255,${.10-i*.025})`; ctx.lineWidth=1; ctx.stroke();
+      ctx.strokeStyle=`rgba(67,224,255,${.055-i*.015})`; ctx.lineWidth=1; ctx.stroke();
     });
     ctx.restore();
   }
@@ -1656,6 +1729,7 @@ function create(canvas, mini, hooks){
   }
 
   function edgeFade(){
+    if(canvasStyle?.background)return;
     const g=ctx.createRadialGradient(st.vw/2,st.vh/2,Math.min(st.vw,st.vh)*.42,st.vw/2,st.vh/2,Math.max(st.vw,st.vh)*.78);
     g.addColorStop(0,'rgba(4,8,14,0)'); g.addColorStop(1,'rgba(4,8,14,.5)');
     ctx.fillStyle=g; ctx.fillRect(0,0,st.vw,st.vh);
@@ -1666,7 +1740,7 @@ function create(canvas, mini, hooks){
     const w=mini.width/st.dpr, h=mini.height/st.dpr;
     mctx.setTransform(st.dpr,0,0,st.dpr,0,0);
     mctx.clearRect(0,0,w,h);
-    mctx.fillStyle='rgba(4,9,16,.9)'; mctx.fillRect(0,0,w,h);
+    mctx.fillStyle=canvasStyle?.background||'rgba(4,9,16,.9)'; mctx.fillRect(0,0,w,h);
     const [x0,x1,y0,y1]=extent();
     const s = Math.min(w/((x1-x0)*1.06), h/((y1-y0)*1.06));
     const cx=w/2, cy=h/2;
@@ -1709,7 +1783,7 @@ function create(canvas, mini, hooks){
     mctx.setLineDash([]);
     // 标记
     st.marks.forEach(m=>{ const q=T(m.x,m.y); mctx.beginPath(); mctx.arc(q[0],q[1],2.2,0,7);
-      mctx.fillStyle=m.c||({char:C.cyan,item:C.amber,poi:C.violet,sig:C.green,exit:C.blue}[m.type]||C.cyan); mctx.fill(); });
+      mctx.fillStyle=canvasStyle?.markerColors[m.type]||m.c||({char:C.cyan,item:C.amber,poi:C.violet,sig:C.green,exit:C.blue}[m.type]||C.cyan); mctx.fill(); });
     // 视口框
     const [ax,ay]=S2W(0,0), [bx,by]=S2W(st.vw,st.vh);
     const p1=T(ax,ay), p2=T(bx,by);
@@ -1733,7 +1807,7 @@ function create(canvas, mini, hooks){
 
     ctx.setTransform(st.dpr,0,0,st.dpr,0,0);
     ctx.clearRect(0,0,st.vw,st.vh);
-    st.labels=[];st.edgeHits=[];st.hits=[];
+    st.labels=[];st.edgeHits=[];st.hits=[];st.utilitySymbols=[];st.utilityBoxes=[];
 
     ctx.save();
     ctx.translate(st.vw/2, st.vh/2);
@@ -1745,6 +1819,7 @@ function create(canvas, mini, hooks){
     // M6-07①：网格走**屏幕空间** —— 线宽恒为 1 物理像素，既不受缩放影响，
     // 也不会像被 CSS 放大的位图那样糊掉。
     grid();
+    drawUtilities();
 
     if(st.showMarks){
       if(st.showLinks)relationLayer();
@@ -1760,28 +1835,6 @@ function create(canvas, mini, hooks){
     drawMini();
     if(hooks.onFrame) hooks.onFrame(st);
     if(!once)frameId=requestAnimationFrame(frame);
-  }
-
-  function drawGhosts(){
-    const cast = (hooks.remoteCast&&hooks.remoteCast())||[];
-    cast.slice(0,3).forEach((c2,i)=>{
-      const x=st.vw-158, y=110+i*76;
-      ctx.save();
-      ctx.globalAlpha=.95;
-      ctx.beginPath(); rrect(ctx,x-8,y-14,150,44,10);
-      ctx.fillStyle='rgba(10,18,30,.9)'; ctx.fill();
-      ctx.strokeStyle=hexA(c2.c,.55); ctx.lineWidth=1; ctx.stroke();
-      ctx.beginPath(); ctx.arc(x+8,y+8,7,0,7); ctx.fillStyle=hexA(c2.c,.9); ctx.fill();
-      ctx.fillStyle='#04121c'; ctx.font='700 8px '+F.sans; ctx.textAlign='center'; ctx.textBaseline='middle';
-      ctx.fillText(c2.initial, x+8, y+8.5);
-      ctx.textAlign='left'; ctx.textBaseline='alphabetic';
-      ctx.fillStyle='#dce9fb';
-      ctx.font='600 11px '+F.sans;
-      ctx.fillText(c2.name, x+22, y+4);
-      ctx.fillStyle='rgba(140,170,200,.85)'; ctx.font='9px '+F.mono;
-      ctx.fillText(c2.dist+' · '+c2.tag, x+22, y+17);
-      ctx.restore();
-    });
   }
 
   /* ══════════ 交互 ══════════ */
@@ -1911,7 +1964,7 @@ function create(canvas, mini, hooks){
   }
 
   return {
-    state:st, boot, resize, fit, setPath, zoomBy, locate, selectKey, focusKey, refreshMarks, setPaused, destroy,
+    state:st,setSkin,get skin(){return acceptedSkin;}, boot, resize, fit, setPath, zoomBy, locate, selectKey, focusKey, refreshMarks, setPaused, destroy,
     setEnterHandler,
     get marks(){ return st.marks; },
     setMode(m){ st.mode=m; },
@@ -1946,5 +1999,6 @@ function create(canvas, mini, hooks){
     gridStep, paintGrid
   };
 }
-return { create, C };
+return { create, C,PAINTER_REGISTRY,layerPaint,paintSemantic };
 })();
+

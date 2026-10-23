@@ -11,7 +11,7 @@
 import { ATLAS_RUNTIME_LIMITS } from "./atlas-runtime-limits.ts";
 export type AtlasDiagnosticLevel = "debug" | "info" | "warn" | "error";
 export type AtlasDiagnosticSource = "host" | "ui" | "engine" | "model" | "storage" | "lorebook" | "map";
-export type AtlasDiagnosticOutcome = "started" | "success" | "skipped" | "failed" | "recovered";
+export type AtlasDiagnosticOutcome = "started" | "success" | "partial" | "skipped" | "failed" | "recovered";
 
 export interface AtlasDiagnostic {
   schemaVersion: 1;
@@ -50,7 +50,7 @@ export type AtlasDiagnosticInput = Omit<AtlasDiagnostic, "schemaVersion" | "id" 
 type StoragePort = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 const LEVELS = new Set(["debug", "info", "warn", "error"]);
 const SOURCES = new Set(["host", "ui", "engine", "model", "storage", "lorebook", "map"]);
-const OUTCOMES = new Set(["started", "success", "skipped", "failed", "recovered"]);
+const OUTCOMES = new Set(["started", "success", "partial", "skipped", "failed", "recovered"]);
 /** U13：场景状态枚举（与 Q03 的 SpatialSceneStatus + 空态对齐），不是这个集合的值一律丢弃。 */
 const SAFE_SCENE_STATUS = new Set(["ready", "missing", "invalid", "empty"]);
 const DETAIL_KEYS = new Set([

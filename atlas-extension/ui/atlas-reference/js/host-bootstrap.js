@@ -8,10 +8,13 @@
     const initial=await host.boot();window.AtlasHost=host;host.initial=initial;
     window.ATLAS_DEMO_DATA=JSON.parse(JSON.stringify(initial.data));
     const interaction=initial.preferences??{version:1,singleClickEnter:false,legendCollapsed:false};
-    host.preferenceStorage={getItem:()=>JSON.stringify(interaction),setItem:(_,value)=>{Object.assign(interaction,JSON.parse(value));void host.savePreferences(interaction).catch(error=>host.diagnostic({level:'warn',source:'ui',code:'UI_PREFERENCE_SAVE_FAILED',details:{message:error.message}}));}};
-    for(const name of ['map','presets','preset-ui','ui-model','app']){
-      await new Promise((resolve,reject)=>{const script=document.createElement('script');script.src=`js/${name}.js`;script.onload=resolve;script.onerror=()=>reject(Error(`UI_ASSET_LOAD_FAILED:${name}`));document.body.append(script);});
+    host.preferenceStorage={getItem:()=>JSON.stringify(interaction),setItem:(_,value)=>{Object.assign(interaction,JSON.parse(value));return host.savePreferences({...interaction});}};
+    window.AtlasAppearance=await import('../../atlas-appearance-controller.mjs');
+    const scripts=JSON.parse(document.getElementById('atlas-boot-scripts').textContent);
+    for(const src of scripts){
+      await new Promise((resolve,reject)=>{const script=document.createElement('script');script.src=src;script.onload=resolve;script.onerror=()=>reject(Error(`UI_ASSET_LOAD_FAILED:${src}`));document.body.append(script);});
     }
+    await window.AtlasPreview?.appearanceReady;
     const badge=root.querySelector('.demo-badge');if(badge)badge.textContent='ATLAS';
     root.style.visibility='';host.ready();
   }catch(error){

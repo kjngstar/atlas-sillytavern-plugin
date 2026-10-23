@@ -27,7 +27,7 @@ const cat=[{entityId:'L',entityKind:'location',name:'学校',mapId:'world'},{ent
 
 test('界面更新同一个快照对象不会清空地图；坏快照保留可用画面',()=>{
  const D={meta:{scopeKey:'A',viewMode:'author',initialNodeId:'world'},ROOT:{id:'world'},CAST:[],ITEMS:[]};
- const context=vm.createContext({D,state:{page:'map',nodeId:'world',selected:null,cameras:new Map(),open:new Set()},clone:v=>JSON.parse(JSON.stringify(v)),nodes:()=>[D.ROOT],navigate:()=>{},renderAll:()=>{},map:{setPaused(){}},document:{hidden:false}});
+ const context=vm.createContext({D,state:{page:'map',nodeId:'world',selected:null,cameras:new Map(),open:new Set()},clone:v=>JSON.parse(JSON.stringify(v)),nodes:()=>[D.ROOT],navigate:()=>{},refreshFlows:()=>{},applyUIProfile:()=>{},syncMapVisibility:()=>{},renderAll:()=>{},map:{setPaused(){}},document:{hidden:false}});
  const code=readFileSync(new URL('../ui/atlas-reference/js/app.js',import.meta.url),'utf8');
  vm.runInContext(code.slice(code.indexOf('function updateSnapshot('),code.indexOf('async function runHost(')),context);
  context.updateSnapshot(D);assert.equal(D.meta.scopeKey,'A');assert.equal(D.ROOT.id,'world');
@@ -95,6 +95,24 @@ function mount(options={}){
  return {root,core,render,bridge,calls,get loads(){return loads;},get closes(){return closes;},get prefs(){return prefs;},saved(){context.chatMetadata.atlas.database={data:'saved-A',sha256:'saved-a',storage_revision:4};state={...state,stateData:{revision:4}};render();},noSnapshot(){context.chatMetadata.atlas={};render();},switch(id){state={...state,chatId:id,lastError:null};context={...context,chatId:id,chatMetadata:{atlas:{database:{data:id,sha256:id}}}};render();},off(){context.extensionSettings.atlas_world_sim.sqlMode=false;render();}};
 }
 
+test('skin ZIP and map downloads belong to the host document and retain binary bytes',async()=>{
+ const m=mount(),win=m.root.ownerDocument.defaultView,blobs=[],clicks=[],cleanup=[],revoked=[];
+ win.URL.createObjectURL=blob=>{assert.ok(blob instanceof win.Blob);blobs.push(blob);return 'blob:host-'+blobs.length;};
+ win.URL.revokeObjectURL=url=>revoked.push(url);win.setTimeout=fn=>{cleanup.push(fn);return cleanup.length;};
+ win.HTMLAnchorElement.prototype.click=function(){clicks.push({name:this.download,url:this.href,attached:this.isConnected,host:this.ownerDocument===win.document});};
+ try{
+  const bytes=vm.runInNewContext('new Uint8Array([80,75,0,255])'),source=readFileSync(new URL('../ui/atlas-reference/js/app.js',import.meta.url),'utf8');
+  const start=source.indexOf('function download('),end=source.indexOf('/** M6-11',start);
+  vm.runInNewContext(source.slice(start,end)+"\ndownload('atlas-skin.zip',bytes,'application/zip');",{window:{AtlasHost:m.bridge},bytes});
+  m.bridge.downloadMap('map.json','{"map":true}');
+  assert.deepEqual(clicks,[{name:'atlas-skin.zip',url:'blob:host-1',attached:true,host:true},{name:'map.json',url:'blob:host-2',attached:true,host:true}]);
+  assert.equal(blobs[0].type,'application/zip');assert.equal(blobs[1].type,'application/json');
+  const decoded=await new Promise((resolve,reject)=>{const reader=new win.FileReader();reader.onload=()=>resolve(new Uint8Array(reader.result));reader.onerror=reject;reader.readAsArrayBuffer(blobs[0]);});
+  assert.deepEqual([...decoded],[80,75,0,255]);assert.equal(win.document.querySelector('a[download]'),null);
+  cleanup.forEach(fn=>fn());assert.deepEqual(revoked,['blob:host-1','blob:host-2']);
+ }finally{await m.render.dispose();win.close();}
+});
+
 test('真实宿主导出接通插件版本和 SQL 布局策略版本',async()=>{
  const m=mount({pluginVersion:'0.9.87'});
  try{
@@ -110,7 +128,7 @@ test('地图写入后修订变化仍记录回执并刷新，切到其他聊天�
  for(const action of ['layout','build']){
   let m; m=mount({mapReply:async()=>{m.saved();return {receipt,coreSaved:true};}});await m.bridge.boot();
   try{await m.bridge[action]('world');}catch(error){assert.equal(action,'layout');assert.match(error.message,/ROOM_REF_UNKNOWN/);}
-  assert.equal(m.core.getState().receipts.length,1,action+' 保存后的修订不能吞掉回执');assert.equal(m.core.getState().receipts[0].detail.receipt.turnId,receipt.turnId);assert.ok(m.calls.some(c=>c.refresh));await m.render.dispose();
+  assert.equal(m.core.getState().receipts.length,1,action+' 保存后的修订不能吞掉回执');assert.equal(m.core.getState().receipts[0].detail.receipt.turnId,receipt.turnId);assert.ok(m.calls.some(c=>c.refresh));assert.equal(m.calls.find(c=>c.diagnostic?.code===(action==='layout'?'LAYOUT_TASK_COMPLETE':'WORLD_BUILD_TASK_COMPLETE')).diagnostic.outcome,'partial');await m.render.dispose();
   let switched; switched=mount({mapReply:async()=>{switched.switch('B');return {receipt,coreSaved:true};}});await switched.bridge.boot();assert.equal(await switched.bridge[action]('world'),null);assert.equal(switched.core.getState().receipts.length,0);assert.ok(!switched.calls.some(c=>c.refresh));await switched.render.dispose();
  }
 });

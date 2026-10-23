@@ -28,7 +28,19 @@ import * as B from './foundation.mjs';
   const hash=s=>{let n=2166136261;for(const c of String(s)){n^=c.charCodeAt(0);n=Math.imul(n,16777619);}return n>>>0;};
   const rand=s=>{let n=hash(s);return()=>{n=(Math.imul(n,1664525)+1013904223)>>>0;return n/4294967296;};};
   const ordered=a=>[...a].sort((a,b)=>a.id.localeCompare(b.id,'en'));
+  // A fixed grid can miss a valid wall-adjacent placement when the remaining
+  // gap is narrower than its step. Always include the exact far boundary.
+  function scanAxis(start,end){
+    const values=[];
+    for(let p=start;p<=end+EPS;p+=.25)values.push(p);
+    if(end>=start-EPS&&(!values.length||end-values.at(-1)>EPS))values.push(end);
+    return values;
+  }
   // 02 §6.4：solid 类型参与碰撞，light/decor/doorway/stairs 不挡路；marker 与家具渲染形状分开。
+  const FLOOR_OVERLAYS=new Set(['light','doorway']);
+  const verticalDoor=d=>d.wall==='east'||d.wall==='west';
+  const inward=(d,amount)=>d.interior?pt(d.x,d.y):pt(d.x+(d.wall==='west'?amount:d.wall==='east'?-amount:0),d.y+(d.wall==='south'?-amount:amount));
+  const entryRect=(d,width,depth)=>verticalDoor(d)?{x:d.wall==='east'?d.x-depth:d.x,y:d.y-width/2,w:depth,h:width}:{x:d.x-width/2,y:d.wall==='south'?d.y-depth:d.y,w:width,h:depth};
   const SOLID_TYPES=new Set(['shelf','desk','bench','reading','table','chair','bed','cabinet']);
   function makeGroup(f,r,x,y){
     const group={id:f.id,name:f.name,type:f.type,roomId:r.id,x,y,w:f.w,h:f.h,quality:'layout'},bodies=[];
@@ -38,10 +50,8 @@ import * as B from './foundation.mjs';
       for(const [dx,dy]of [[.1,.72],[f.w-.45,.72],[.1,f.h-1.07],[f.w-.45,f.h-1.07]])add('chair',x+dx,y+dy,.35,.35);
     }else if(f.type==='table'){
       add('table',x,y,f.w,f.h);
-      if(f.w>1.2&&f.h>1.2)for(const [dx,dy]of [[.12,.12],[f.w-.47,.12],[.12,f.h-.47],[f.w-.47,f.h-.47]])add('chair',x+dx,y+dy,.35,.35);
     }else if(f.type==='desk'){
-      add('desk',x,y,f.w,f.h*.68);
-      if(f.w>1.1&&f.h>.8)add('chair',x+f.w-.4,y+f.h-.38,.35,.35);
+      add('desk',x,y,f.w,f.h);
     }else if(f.type==='bed'){
       add('bed',x,y,f.w,f.h);
       if(f.w>.9&&f.h>.9)add('pillow',x+.1,y+.1,Math.max(.2,f.w-.2),.25);
@@ -66,7 +76,7 @@ import * as B from './foundation.mjs';
       free.push(p.x<=room.x+room.w-radius&&p.x>=room.x+radius&&p.y<=room.y+room.h-radius&&p.y>=room.y+radius&&!blocked.some(b=>B.pointInside(b,p)));
     }
     const nearest=p=>{let best=-1,d=Infinity;for(let i=0;i<positions.length;i++)if(free[i]&&distance(p,positions[i])<d){best=i;d=distance(p,positions[i]);}return best;};
-    const start=nearest(pt(door.x,door.y+(room.side==='north'?-.45:.45))),parent=Array(positions.length).fill(-2),queue=[];
+    const start=nearest(inward({...door,wall:door.wall??(room.side==='north'?'south':'north')},.45)),parent=Array(positions.length).fill(-2),queue=[];
     if(start>=0){parent[start]=-1;queue.push(start);}
     for(let q=0;q<queue.length;q++){const n=queue[q],x=n%nx,y=Math.floor(n/nx);for(const [dx,dy]of [[-1,0],[1,0],[0,-1],[0,1]]){
       const xx=x+dx,yy=y+dy,m=yy*nx+xx;if(xx>=0&&xx<nx&&yy>=0&&yy<ny&&free[m]&&parent[m]===-2){parent[m]=n;queue.push(m);}
@@ -74,32 +84,68 @@ import * as B from './foundation.mjs';
     return {positions,free,parent,nearest,reachable:p=>{const n=nearest(p);return n>=0&&distance(positions[n],p)<step*1.5&&parent[n]!==-2;},path:p=>{let n=nearest(p);if(n<0||parent[n]===-2)return null;const line=[];while(n>=0){line.push(positions[n]);n=parent[n];}return line.reverse();}};
   }
   function floor(spec,previous=null){
+    if(spec.parentGroups?.length)previous={...previous,groups:[...(previous?.groups??[]).filter(g=>!spec.parentGroups.some(p=>p.id===g.id)),...spec.parentGroups]};
+    let best=floorOnce(spec,previous);
+    const movable=spec.roomConnections?.length&&!spec.entryDoors?.length;
+    const unresolved=out=>out.ok&&(out.issues??[]).some(i=>['DETAIL_NO_SPACE','DETAIL_NOT_REACHABLE','DOOR_NOT_REACHABLE'].includes(i.code));
+    if(movable&&unresolved(best))for(const doorBias of [.18,.82]){
+      const candidate=floorOnce({...spec,doorBias},previous);
+      if(candidate.ok&&candidate.issues.length<best.issues.length)best=candidate;
+      if(!unresolved(best))break;
+    }
+    // A full-size counter may divide a small room under the first greedy choice.
+    // Retry wall-first alternatives, without reducing footprints or moving locks.
+    if(unresolved(best)&&(spec.contents?.length??0)<=24){
+      const candidate=floorOnce({...spec,wallFirst:true},previous);
+      if(candidate.ok&&candidate.issues.length<best.issues.length)best=candidate;
+    }
+    return best;
+  }
+  function floorOnce(spec,previous=null){
     const collections=['contents','actors','items'];
     if(collections.some(k=>spec[k]!==undefined&&(!Array.isArray(spec[k])||spec[k].some(v=>!v||typeof v.id!=='string'||!v.id)||new Set(spec[k].map(v=>v.id)).size!==spec[k].length)))return {ok:false,issues:[{id:spec.id,code:'DETAIL_INPUT_INVALID'}],kept:previous?clone(previous):null};
     const bare=B.floor({...spec,furniture:[],actors:[]},previous);if(!bare.ok)return bare;
     const groups=[],bodies=[],actors=[],items=[],windows=[],lamps=[],issues=[],doorSwings=[];
     for(const r of bare.rooms){
-      const door=bare.doors.find(d=>d.roomId===r.id),aisle=spec.singleRoom?.8:1.6,margin=.2;
+      const roomDoors=bare.doors.filter(d=>d.roomId===r.id),door=roomDoors[0],aisle=spec.singleRoom?.8:1.6,margin=.2;
       // A room has the same usable interior in its parent and its own map.
       // Door swing and navigation reserve entry clearance explicitly below.
-      const spine={x:door.x-aisle/2,y:r.y,w:aisle,h:r.h},inner={x:r.x+margin,y:r.y+margin,w:r.w-margin*2,h:r.h-margin*2};
-      const swing={id:'swing:'+r.id,roomId:r.id,x:door.x-door.width/2,y:r.side==='north'?door.y-door.width:door.y,w:door.width,h:door.width};doorSwings.push(swing);
+      const spine=verticalDoor(door)?{x:r.x,y:door.y-aisle/2,w:r.w,h:aisle}:{x:door.x-aisle/2,y:r.y,w:aisle,h:r.h},inner={x:r.x+margin,y:r.y+margin,w:r.w-margin*2,h:r.h-margin*2};
+      const swings=roomDoors.map(d=>({id:'swing:'+d.id,roomId:r.id,...entryRect(d,d.width,d.width)}));doorSwings.push(...swings);
       const exact=(spec.actors||[]).filter(a=>a.roomId===r.id&&a.position).map(a=>({id:a.id,...a.position}));
       const priority=f=>f.locked?2:previous?.groups?.some(g=>g.id===f.id)?1:0;
       // Reserve locked/saved furniture first, then the largest new footprint.
       // Small cabinets must not consume the only accessible counter position
       // merely because their IDs happen to sort before the counter's ID.
       for(const f of ordered((spec.contents||[]).filter(f=>f.roomId===r.id)).sort((a,b)=>priority(b)-priority(a)||b.w*b.h-a.w*a.h)){
+        // Legacy doorway hints describe an opening, never a loose floor object.
+        // Keep their identity on the structural door rather than inventing a second door.
+        if(f.type==='doorway'){
+          if(roomDoors.length===1)roomDoors[0].sourceContentIds=[...(roomDoors[0].sourceContentIds??[]),f.id];
+          else issues.push({id:f.id,code:'DOOR_TARGET_UNSPECIFIED'});
+          continue;
+        }
         if(!Number.isFinite(f.w)||!Number.isFinite(f.h)||f.w<=0||f.h<=0||f.type==='reading'&&(f.w<2||f.h<2)){issues.push({id:f.id,code:'DETAIL_DIMENSION_INVALID'});continue;}
         // 陈设塞不进房间：明确到 ID，绝不能偷偷放大到穿墙。
         if(f.type!=='light'&&f.type!=='decor'&&!f.locked&&(f.w>inner.w+EPS||f.h>inner.h+EPS)&&(f.h>inner.w+EPS||f.w>inner.h+EPS)){issues.push({id:f.id,code:'DETAIL_TOO_LARGE'});continue;}
-        const free=q=>B.contains(inner,q)&&!B.intersects(q,spine)&&!B.intersects(q,swing)&&!groups.filter(g=>g.roomId===r.id).some(g=>B.intersects(inflate(g,.28),q))&&!exact.some(p=>B.intersects(q,{x:p.x-.25,y:p.y-.25,w:.5,h:.5}));
+        // Lights and door openings have non-solid bodies. Their projection can
+        // overlap the walking route without reserving furniture floor space.
+        const free=q=>B.contains(inner,q)&&(FLOOR_OVERLAYS.has(f.type)||!B.intersects(q,spine)&&!swings.some(s=>B.intersects(q,s))&&!groups.filter(g=>g.roomId===r.id&&!FLOOR_OVERLAYS.has(g.type)).some(g=>B.intersects(inflate(g,.28),q))&&!exact.some(p=>B.intersects(q,{x:p.x-.25,y:p.y-.25,w:.5,h:.5})));
+        const existing=groups.filter(g=>g.roomId===r.id&&!FLOOR_OVERLAYS.has(g.type)),existingBodies=bodies.filter(b=>b.roomId===r.id);
+        const entries=roomDoors.map(d=>entryRect(d,.6,.6));
+        const freePath=q=>B.contains(inner,q)&&!swings.some(s=>B.intersects(q,s))&&!entries.some(s=>B.intersects(q,s))&&!existing.some(g=>B.intersects(inflate(g,.28),q))&&!exact.some(p=>B.intersects(q,{x:p.x-.25,y:p.y-.25,w:.5,h:.5}));
+        const reachablePlacement=q=>{
+          if(!freePath(q))return false;
+          const proposal=makeGroup({...f,w:q.w,h:q.h},r,q.x,q.y),nav=navigation(r,door,[...existingBodies,...proposal.bodies]);
+          const accessible=g=>[pt(g.x+g.w+.48,g.y+g.h/2),pt(g.x-.48,g.y+g.h/2),pt(g.x+g.w/2,g.y+g.h+.48),pt(g.x+g.w/2,g.y-.48)].some(p=>B.pointInside(inner,p)&&nav.reachable(p));
+          return [...existing,proposal].every(accessible)&&exact.every(nav.reachable)&&roomDoors.every(d=>nav.reachable(inward(d,.45)));
+        };
         let chosen=null;
-        const old=previous?.groups?.find(g=>g.id===f.id&&g.roomId===r.id&&g.w===f.w&&g.h===f.h);
-        if(old&&free(old))chosen=old;
+        const old=previous?.groups?.find(g=>g.id===f.id&&g.roomId===r.id&&(g.w===f.w&&g.h===f.h||!f.locked&&g.w===f.h&&g.h===f.w));
+        if(old&&(!spec.wallFirst||f.locked)&&(free(old)||!f.locked&&reachablePlacement(old)))chosen=old;
         if(f.locked){const q={...f,...f.locked};if(free(q))chosen=q;else{issues.push({id:f.id,code:'DETAIL_LOCK_CONFLICT'});continue;}}
         const candidates=[];
-        if(!chosen)for(let y=inner.y;y+f.h<=inner.y+inner.h+EPS;y+=.25)for(let x=inner.x;x+f.w<=inner.x+inner.w+EPS;x+=.25){
+        if(!chosen)for(const y of scanAxis(inner.y,inner.y+inner.h-f.h))for(const x of scanAxis(inner.x,inner.x+inner.w-f.w)){
           const q={x,y,w:f.w,h:f.h};if(free(q)){
             // Shelves face the outer wall; tables prefer the door-facing half. These are preferences, not coordinates.
             const score=f.type==='shelf'?Math.abs(y-(r.side==='north'?inner.y:inner.y+inner.h-f.h)):distance(center(q),pt(r.x+r.w*.25,door.y+(r.side==='north'?-2.2:2.2)));
@@ -110,7 +156,8 @@ import * as B from './foundation.mjs';
         // In a narrow carriage a bench or cabinet can fit along the other axis.
         // Preserve the original orientation whenever it fits; locked furniture stays fixed.
         if(!chosen&&!f.locked&&f.w!==f.h){
-          for(let y=inner.y;y+f.w<=inner.y+inner.h+EPS&&!chosen;y+=.25)for(let x=inner.x;x+f.h<=inner.x+inner.w+EPS;x+=.25){
+          for(const y of scanAxis(inner.y,inner.y+inner.h-f.w))for(const x of scanAxis(inner.x,inner.x+inner.w-f.h)){
+            if(chosen)break;
             const q={x,y,w:f.h,h:f.w};if(free(q)){chosen=q;break;}
           }
         }
@@ -118,19 +165,18 @@ import * as B from './foundation.mjs';
         // a connected path around furniture; test the actual door and interactions.
         // Dimensions, locked coordinates and the door swing remain unchanged.
         if(!chosen&&!f.locked){
-          const existing=groups.filter(g=>g.roomId===r.id),existingBodies=bodies.filter(b=>b.roomId===r.id);
-          const entry={x:door.x-.3,y:r.side==='north'?door.y-.6:door.y,w:.6,h:.6};
-          const freePath=q=>B.contains(inner,q)&&!B.intersects(q,swing)&&!B.intersects(q,entry)&&!existing.some(g=>B.intersects(inflate(g,.28),q))&&!exact.some(p=>B.intersects(q,{x:p.x-.25,y:p.y-.25,w:.5,h:.5}));
           let tried=0;
+          const alternatives=[];
           for(const [w,h] of [[f.w,f.h],...(f.w!==f.h?[[f.h,f.w]]:[])]){
-            for(let y=inner.y;!chosen&&y+h<=inner.y+inner.h+EPS&&tried<64;y+=.25)for(let x=inner.x;!chosen&&x+w<=inner.x+inner.w+EPS&&tried<64;x+=.25){
-              const q={x,y,w,h};if(!freePath(q))continue;tried++;
-              const proposal=makeGroup({...f,w,h},r,x,y),nav=navigation(r,door,[...existingBodies,...proposal.bodies]);
-              const accessible=g=>[pt(g.x+g.w+.48,g.y+g.h/2),pt(g.x-.48,g.y+g.h/2),pt(g.x+g.w/2,g.y+g.h+.48),pt(g.x+g.w/2,g.y-.48)].some(p=>B.pointInside(inner,p)&&nav.reachable(p));
-              if([...existing,proposal].every(accessible)&&exact.every(nav.reachable))chosen=q;
+            for(const y of scanAxis(inner.y,inner.y+inner.h-h))for(const x of scanAxis(inner.x,inner.x+inner.w-w)){
+              const q={x,y,w,h};if(freePath(q))alternatives.push(q);
             }
-            if(chosen)break;
           }
+          if(spec.wallFirst)alternatives.sort((a,b)=>{
+            const wall=q=>Math.min(q.x-inner.x,q.y-inner.y,inner.x+inner.w-q.x-q.w,inner.y+inner.h-q.y-q.h);
+            return wall(a)-wall(b)||distance(center(b),door)-distance(center(a),door)||a.y-b.y||a.x-b.x;
+          });
+          for(const q of alternatives){if(chosen||tried++>=64)break;if(reachablePlacement(q))chosen=q;}
         }
         if(!chosen){issues.push({id:f.id,code:'DETAIL_NO_SPACE'});continue;}
         const g=makeGroup({...f,w:chosen.w,h:chosen.h},r,chosen.x,chosen.y);if(f.locked)g.quality='confirmed';groups.push(g);bodies.push(...g.bodies);
@@ -139,10 +185,11 @@ import * as B from './foundation.mjs';
       if(!['outdoor','garden'].includes(r.role))for(let i=0;i<Math.max(1,Math.floor(r.w/3));i++)windows.push({id:'window:'+r.id+':'+i,type:'window',roomId:r.id,x:r.x+(i+.5)*r.w/Math.max(1,Math.floor(r.w/3)),y:outerY,width:1.2,elevation:1.1});
       lamps.push({id:'light:'+r.id,type:'light',roomId:r.id,x:door.x,y:r.y+r.h*.45,elevation:2.8});
       const nav=navigation(r,door,bodies.filter(b=>b.roomId===r.id));
+      for(const d of roomDoors)if(!nav.reachable(inward(d,.45)))issues.push({id:d.id,code:'DOOR_NOT_REACHABLE'});
       for(const g of groups.filter(g=>g.roomId===r.id)){
         const edgePoints=[pt(g.x+g.w+.48,g.y+g.h/2),pt(g.x-.48,g.y+g.h/2),pt(g.x+g.w/2,g.y+g.h+.48),pt(g.x+g.w/2,g.y-.48)];
         g.interaction=edgePoints.find(p=>B.pointInside(inner,p)&&nav.reachable(p))||null;
-        if(!g.interaction)issues.push({id:g.id,code:'DETAIL_NOT_REACHABLE'});
+        if(!g.interaction&&!FLOOR_OVERLAYS.has(g.type))issues.push({id:g.id,code:'DETAIL_NOT_REACHABLE'});
       }
       for(const a of ordered((spec.actors||[]).filter(a=>a.roomId===r.id))){
         const target=groups.find(g=>g.id===a.near),old=previous?.actors?.find(p=>p.id===a.id&&p.roomId===a.roomId&&p.near===a.near),p=a.position||old||(target?.interaction||null);
@@ -166,6 +213,7 @@ import * as B from './foundation.mjs';
       const strips=band>1e-6?[cspace.y,cspace.y+passage+band].map(y=>({x:cspace.x+.35,y,w:cspace.w-.7,h:band})):[];
       const corridorGroups=[];
       for(const f of ordered((spec.contents||[]).filter(f=>f.roomId===cid))){
+        if(f.type==='doorway'){issues.push({id:f.id,code:'DOOR_TARGET_UNSPECIFIED'});continue;}
         if(!Number.isFinite(f.w)||!Number.isFinite(f.h)||f.w<=0||f.h<=0){issues.push({id:f.id,code:'DETAIL_DIMENSION_INVALID'});continue;}
         const old=previous?.groups?.find(g=>g.id===f.id&&g.roomId===cid&&g.w===f.w&&g.h===f.h);
         const free=q=>strips.some(s=>B.contains(s,q))&&!corridorGroups.some(g=>B.intersects(inflate(g,.28),q));
@@ -199,9 +247,22 @@ import * as B from './foundation.mjs';
     // （否则 ra/rb 会是 undefined，整张图直接抛错）。房间内的行走者依旧取前两位。
     const inRooms=actors.filter(a=>bare.rooms.some(r=>r.id===a.roomId));
     let path=[];if(inRooms.length>=2){
-      const [a,b]=inRooms,[ra,rb]=[a,b].map(a=>bare.rooms.find(r=>r.id===a.roomId)),[da,db]=[ra,rb].map(r=>bare.doors.find(d=>d.roomId===r.id));
-      const pa=navigation(ra,da,bodies.filter(x=>x.roomId===ra.id)).path(a),pb=navigation(rb,db,bodies.filter(x=>x.roomId===rb.id)).path(b),cy=bare.corridor.y+bare.corridor.h/2;
-      if(pa&&pb)path=[...pa.reverse(),pt(da.x,da.y),pt(da.x,cy),pt(db.x,cy),pt(db.x,db.y),...pb];
+      const [a,b]=inRooms,queue=[a.roomId],parents=new Map([[a.roomId,null]]);
+      const graph=bare.edges.flatMap(e=>e.to==='corridor'?[e,{from:e.to,to:e.from,via:e.via}]:[e]);
+      for(let i=0;i<queue.length&&!parents.has(b.roomId);i++)for(const e of graph.filter(e=>e.from===queue[i]))if(!parents.has(e.to)){parents.set(e.to,e);queue.push(e.to);}
+      if(parents.has(b.roomId)){
+        const hops=[];let id=b.roomId;
+        while(parents.get(id)){const e=parents.get(id);hops.unshift(e);id=e.from;}
+        let cursor=a,valid=true;
+        for(const e of hops){
+          const d=bare.doors.find(d=>d.id===e.via),room=bare.rooms.find(r=>r.id===e.from);
+          if(room){const line=navigation(room,{...cursor,interior:true},bodies.filter(x=>x.roomId===room.id)).path(inward(d,.45));if(!line){valid=false;break;}path.push(...line,pt(d.x,d.y));}
+          else {const cy=bare.corridor.y+bare.corridor.h/2;path.push(pt(cursor.x,cy),pt(d.x,cy),pt(d.x,d.y));}
+          cursor=e.to==='corridor'?pt(d.x,d.y):inward(bare.doors.find(other=>other.roomId===e.to&&other.routeId&&other.routeId===d.routeId)??d,.45);
+        }
+        const room=bare.rooms.find(r=>r.id===b.roomId),line=navigation(room,{...cursor,interior:true},bodies.filter(x=>x.roomId===room.id)).path(b);
+        if(valid&&line)path.push(...line);else path=[];
+      }
     }
     return {...bare,groups,bodies,actors,items,windows,lamps,doorSwings,path,issues};
   }

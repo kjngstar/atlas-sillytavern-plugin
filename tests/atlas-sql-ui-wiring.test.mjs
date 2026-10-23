@@ -1,4 +1,4 @@
-import {readUiSource} from './ui-source-helper.mjs';
+import {readLegacyUiSource} from './ui-source-helper.mjs';
 /**
  * atlas-sql-ui-wiring.test.mjs — H05–H08 / H12（SQL 世界数据 UI 接线）定向验收。
  *
@@ -27,7 +27,7 @@ import { encodeSnapshot } from '../src/atlas-db-envelope.ts';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 /** 发布镜像 = 真实扩展入口（与 atlas-changes-page / atlas-extension-harness 同源）。 */
-const INDEX_SOURCE = readUiSource(join(root, "atlas-extension", "index.js"));
+const INDEX_SOURCE = readLegacyUiSource(join(root, "atlas-extension", "index.js"));
 
 /** 每个 mount 用唯一 URL：data: URL 模块按 URL 缓存，串用会让模块级状态跨用例泄漏。 */
 let mountSeq = 0;

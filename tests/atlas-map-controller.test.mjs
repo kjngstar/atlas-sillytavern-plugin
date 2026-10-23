@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {JSDOM} from 'jsdom';
-import {createMapController,markerPopupPosition} from '../ui/atlas-map-controller.mjs';
+import {createMapController,markerPopupPosition} from './fixtures/legacy-ui/modules/atlas-map-controller.mjs';
 import {createPanGesture,createPinchTracker} from '../src/atlas-map-interactions.ts';
 import {panCameraBy,zoomCameraAtPoint} from '../src/atlas-map-camera.ts';
 

@@ -1,0 +1,131 @@
+{
+  "kind": "persisted-live-generation-audit",
+  "revision": 1,
+  "elapsed": {
+    "minS": 120,
+    "nominalS": 120,
+    "maxS": 120,
+    "quality": "estimated",
+    "basisRefs": [
+      "TRAVEL_COMPUTED",
+      "HINT_ELAPSED",
+      "SAME_INTERVAL_INFERRED",
+      "clock_s:0"
+    ],
+    "conflicts": []
+  },
+  "events": [
+    {
+      "op": "event.propose",
+      "data": {
+        "title": "从南院步行进入大厅",
+        "phase": "observed",
+        "subject_ref": "new:protagonist",
+        "activity": {
+          "kind": "travel",
+          "completed": true
+        },
+        "time_hint": {
+          "elapsed_s": 60
+        }
+      },
+      "source": "story:manual-a-1792667189092"
+    },
+    {
+      "op": "event.propose",
+      "data": {
+        "title": "与掌柜林安交谈",
+        "phase": "observed",
+        "subject_ref": "new:protagonist",
+        "activity": {
+          "kind": "dialogue",
+          "completed": true
+        },
+        "time_hint": {
+          "elapsed_s": 120
+        }
+      },
+      "source": "story:manual-a-1792667189092"
+    }
+  ],
+  "items": [
+    {
+      "id": "itm_669ab708ea15ffd4f2416580",
+      "name": "长桌",
+      "location": "大厅"
+    },
+    {
+      "id": "itm_ea6f570f81e0ce3aeecb1e55",
+      "name": "独立椅子一",
+      "location": "大厅"
+    },
+    {
+      "id": "itm_fbebf9ebd880c8484ff1a3a7",
+      "name": "独立椅子二",
+      "location": "大厅"
+    },
+    {
+      "id": "itm_b898f54da30263a63775e5bf",
+      "name": "操作台",
+      "location": "厨房西北角工作区"
+    },
+    {
+      "id": "itm_707a89ff7817057c55c5265f",
+      "name": "储物柜",
+      "location": "厨房"
+    },
+    {
+      "id": "itm_a6944585868309fa4406ef2b",
+      "name": "灯",
+      "location": "厨房"
+    },
+    {
+      "id": "itm_d80d8a39010ee7642bb8d121",
+      "name": "货架一",
+      "location": "储藏室"
+    },
+    {
+      "id": "itm_898c6421a043eadc40d88c41",
+      "name": "货架二",
+      "location": "储藏室"
+    }
+  ],
+  "routes": [
+    {
+      "id": "rte_206cc9eda2d1e8da20751c4b",
+      "from": "储藏室",
+      "to": "储藏室双货架区",
+      "kind": "estimated"
+    },
+    {
+      "id": "rte_3cfd136f591d286eb9472629",
+      "from": "厨房",
+      "to": "厨房西北角工作区",
+      "kind": "estimated"
+    },
+    {
+      "id": "rte_b666f0f5c7d53a76a4e35f5f",
+      "from": "大厅",
+      "to": "厨房",
+      "kind": "estimated"
+    },
+    {
+      "id": "rte_baff3f7918281d962d0c6bf3",
+      "from": "大厅",
+      "to": "大厅长桌就座区",
+      "kind": "estimated"
+    },
+    {
+      "id": "rte_a1bf88a93d67193e75161a07",
+      "from": "大厅",
+      "to": "南院",
+      "kind": "estimated"
+    },
+    {
+      "id": "rte_a69d6cda4b31a704201e2df2",
+      "from": "厨房",
+      "to": "储藏室",
+      "kind": "estimated"
+    }
+  ]
+}

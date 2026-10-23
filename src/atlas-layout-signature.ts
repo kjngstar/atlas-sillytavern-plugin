@@ -31,7 +31,7 @@ import { stableHexHash } from './atlas-hash.ts';
  * 程序布局策略版本。改动布局算法语义（而不是改数据）时递增，
  * 让所有已保存的指纹一次性失效、重排一次，而不是永久卡在旧结果上。
  */
-export const LAYOUT_SIGNATURE_POLICY_VERSION = 'layout-v9';
+export const LAYOUT_SIGNATURE_POLICY_VERSION = 'layout-v14';
 
 /** 该图负责展示的地点（容器地点 + 本图成员）。 */
 export type LayoutSignatureMember = {

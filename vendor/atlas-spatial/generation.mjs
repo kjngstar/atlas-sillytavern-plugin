@@ -113,7 +113,7 @@ function finish(s,ctx,layoutFn){
   for(const part of [...(layout.rooms??[]),...(layout.districts??[]),...(layout.buildings??[])]){
     if(ctx.placement?.[part.id]==='proxy')part.placement='proxy';else delete part.placement;
   }
-  for(const issue of layout.issues??[])s.issues.push(diagnostic(issue.code,'$.layout','空间约束未满足',{entityId:issue.id??null}));
+  for(const issue of layout.issues??[])s.issues.push(diagnostic(issue.code,'$.layout',issue.code==='ROOM_TOPOLOGY_SEARCH_LIMIT'?'房间连接搜索达到本地计算预算，旧场景已保留；请调整单图房间数量或布局条件':issue.code==='ROOM_CONNECTION_NO_SPACE'?'未找到同时满足房间尺寸、连接和锁定位置的布局':'空间约束未满足',{entityId:issue.id??null}));
   if(!layout.ok)return {ok:false,status:'failed',scene:null,kept:previous?clone(previous):null,issues:s.issues,guard:{scope:s.scope,mapId:s.map.id,inputSignature}};
   // Saved physical coordinates and schematic positions remain different concepts.
   for(const a of layout.actors??[])if(!ctx.locks?.actors?.[a.id])a.quality='layout';
@@ -144,6 +144,7 @@ function generateFloorOnce(value,context){
   let s=null;
   try{
     s=setup(value,context,'floor');const ctx=context;
+    s.spec.detailPolicy='four-way-full-size-furniture-v3';
     s.constraintKeys=['corridorWidth','corridorLocationRef','rooms','contents','actors','items'];
     s.spec.corridorWidth=finite(s.input.corridorWidth)?s.input.corridorWidth:2;
     const previousRef=s.previous?.constraints?.corridorLocationRef;
@@ -168,6 +169,18 @@ function generateFloorOnce(value,context){
       if(s.spec.rooms.length<before)s.issues.push(diagnostic('CORRIDOR_ROOM_DEDUPED','$.rooms','该地点已绑定为命名走廊，不再作为普通房间排布；同一实体只表达一次',{entityId:s.spec.corridorEntityId,severity:'warning'}));
     }
     s.spec.singleRoom=s.spec.rooms.length===1&&s.spec.rooms[0].id===s.map.containerLocationId;
+    if(s.spec.singleRoom&&ctx.parentGroups?.length)s.spec.parentGroups=ctx.parentGroups.filter(g=>Math.abs(g.sourceRoomSize.w-s.spec.rooms[0].w)<1e-7&&Math.abs(g.sourceRoomSize.h-s.spec.rooms[0].h)<1e-7).map(g=>({id:g.id,roomId:g.roomId,x:g.x+(s.spec.width-s.spec.rooms[0].w)/2,y:g.y+(s.spec.height-s.spec.rooms[0].h)/2,w:g.w,h:g.h}));
+    const actualRooms=new Set(s.spec.rooms.map(r=>r.id));
+    s.spec.roomConnections=(ctx.roomConnections??[]).filter(edge=>actualRooms.has(edge.from)&&actualRooms.has(edge.to));
+    s.spec.externalConnections=(ctx.roomConnections??[]).filter(edge=>actualRooms.has(edge.from)!==actualRooms.has(edge.to)).map(edge=>actualRooms.has(edge.from)?edge:{...edge,from:edge.to,to:edge.from});
+    s.spec.externalRoomIds=[...new Set([...(ctx.externalRoomIds??[]).filter(id=>actualRooms.has(id)),...s.spec.externalConnections.map(edge=>edge.from)])];
+    if(s.spec.singleRoom&&ctx.entryDoors?.length)s.spec.entryDoors=clone(ctx.entryDoors).map(d=>{
+      const room=s.spec.rooms[0],size=d.sourceRoomSize;
+      // An estimated footprint may be resized atomically with its parent.
+      // Keep the same wall and proportional opening along that wall.
+      if(size&&d.quality!=='confirmed')return {...d,x:d.x*room.w/size.w,y:d.y*room.h/size.h};
+      return d;
+    });
     if(!s.spec.rooms.length){const failed=failure('NO_VALID_ROOMS','$.rooms','没有可生成的有效房间',{kept:s.previous?clone(s.previous):null});failed.issues.push(...s.issues);return failed;}
     if(s.spec.rooms.reduce((n,r)=>n+Math.ceil(r.w/.2)*Math.ceil(r.h/.2),0)>LIMITS.navigationCells)throw new Error('NAVIGATION_BUDGET_EXCEEDED');
     // §18.2 第 6 条：contents/actors 的 roomId 可以指向绑定的走廊（它是本图的通行空间，不是新实体）。
@@ -187,6 +200,12 @@ function generateFloorOnce(value,context){
       s.input.items=(s.input.items??[]).map(row=>plain(row)?{...row,on:own(row.on)}:row);
       s.input.actors=(s.input.actors??[]).map(row=>plain(row)?{...row,...(row.near?{near:own(row.near)}:{})}:row);
       if(Array.isArray(s.input.deletes?.contents))s.input.deletes.contents=s.input.deletes.contents.map(own);
+      const registered=new Set(ledger.map(entry=>parseSpaceLocalId(entry.localId).contentId));
+      for(const row of s.previous?.constraints?.contents??[])if(row.roomId===home)registered.add(own(row.id));
+      const existingItems=new Set(ledger.map(entry=>entry.itemId).filter(Boolean));
+      const supported=new Set((s.input.items??[]).filter(row=>s.known.items.has(row.id)&&!existingItems.has(row.id)).map(row=>row.on));
+      const unknown=(s.input.contents??[]).filter(row=>plain(row)&&!registered.has(row.id)&&row.additional!==true&&!supported.has(row.id));
+      if(unknown.length)return {...failure('FURNISHING_ID_UNREGISTERED','$.contents','已有空间的陈设必须沿用账本 ID；只有显式 additional=true 才追加新陈设',{kept:s.previous?clone(s.previous):null}),issues:unknown.map(row=>diagnostic('FURNISHING_ID_UNREGISTERED','$.contents','该陈设不是既有空间身份，不能因换图重复生成；请复用 furnishingInventory 的 ID 或明确新增依据',{entityId:row.id}))};
       const requested=new Set((s.input.contents??[]).map(row=>plain(row)?row.id:null).filter(id=>typeof id==='string'));
       const requestedItems=new Set((s.input.items??[]).map(row=>plain(row)&&typeof row.id==='string'?row.id:null).filter(id=>!!id));
       const seeded=[],seededItems=[];

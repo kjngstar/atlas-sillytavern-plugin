@@ -13,13 +13,17 @@
     "verify:workbench": "node tools/verify-workbench-browser.mjs",
     "verify:host-generation": "node tools/verify-host-generation.mjs",
     "map:lab": "node tools/map-lab/build.mjs",
-    "map:verify": "node --experimental-strip-types tools/map-lab/verify.mjs"
+    "map:verify": "node --experimental-strip-types tools/map-lab/verify.mjs",
+    "verify:reference": "node tools/verify-reference-browser.mjs",
+    "verify:skins": "node tools/verify-reference-browser.mjs --skins",
+    "verify:skin-performance": "node tools/verify-ui-skin-performance.mjs"
   },
   "dependencies": {
     "sql.js": "1.14.1"
   },
   "devDependencies": {
     "esbuild": "^0.28.0",
+    "fake-indexeddb": "^6.2.2",
     "jsdom": "^30.1.0",
     "leaflet": "1.9.4",
     "leaflet.markercluster": "1.5.3",
