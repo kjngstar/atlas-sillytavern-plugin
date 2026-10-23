@@ -5,6 +5,7 @@ import {createHash} from 'node:crypto';
 import {setTimeout as delay} from 'node:timers/promises';
 import {launchAtlasBrowser} from './atlas-browser.mjs';
 import {instrumentSkins,verifySkins} from './verify-ui-skins.mjs';
+import {verifyMapWidgets} from './verify-map-widgets.mjs';
 import {generateFloor,generateCity,generateOverview} from '../vendor/atlas-spatial/index.mjs';
 const dir=process.env.ATLAS_EVIDENCE_DIR||'.tmp/reference-browser';mkdirSync(dir,{recursive:true});
 const port=Number(process.env.ATLAS_VERIFY_PORT||4296),base=process.env.ATLAS_REVIEW_BASE||`http://127.0.0.1:${port}`;
@@ -25,7 +26,8 @@ const saved=await sqlRuntime.persistSqlSession(migrated.session);if(!saved.saved
  await p.goto(`${base}/dev-preview/index.html`);await p.waitForFunction(()=>!!document.querySelector('iframe')?.contentWindow?.AtlasPreview&&!!window.atlasPreviewConnection,{timeout:20000});const f=p.frames().find(f=>f.url().includes('/atlas-reference/index.html'));return {p,f};}
 try{
  for(let i=0;i<40;i++){try{if((await fetch(`${base}/dev-preview/index.html`)).ok)break;}catch{}await delay(250);}
- if(process.argv.includes('--skins-only')){await verifySkins({open,check,dir});check('no-browser-errors',report.errors.length===0,report.errors);}else{
+ if(process.argv.includes('--map-widgets-only')){await verifyMapWidgets({open,check,dir});check('no-browser-errors',report.errors.length===0,report.errors);}
+ else if(process.argv.includes('--skins-only')){await verifySkins({open,check,dir});check('no-browser-errors',report.errors.length===0,report.errors);}else{
  /**
   * M7-02：原样式基线不再靠硬编码 hash。
   *
@@ -81,6 +83,8 @@ try{
  await p.evaluate(()=>atlasPreviewConnection.core.setEnabled(false));await f.locator('[data-view="sim"]').click();await f.waitForFunction(()=>AtlasPreview.data.meta.engine.enabled===false);check('paused-chat-control',await f.locator('[data-engine-enable="true"]').isVisible()&&await f.locator('#nextDemo').isDisabled());await f.locator('[data-engine-enable="true"]').click();await f.waitForFunction(()=>AtlasPreview.data.meta.engine.enabled===true);check('enable-chat-real-host',await p.evaluate(()=>atlasPreviewConnection.core.getState().binding.enabled===true));
  await f.locator('[data-open-backend="connection"]').click();check('backend-connection-entry',await f.locator('#connectionProvider').isVisible());await f.locator('[data-view="sim"]').click();
  await p.evaluate(()=>{window.__originalManual=atlasPreviewConnection.core.manualAdvance;atlasPreviewConnection.core.manualAdvance=async()=>{throw Error('验收故障：API_NOT_CONFIGURED');};});await f.locator('[data-demo-next]').click();await f.waitForFunction(()=>!!document.querySelector('[data-engine-error]'));check('advance-error-stays-visible',(await f.locator('[data-engine-error]').innerText()).includes('API_NOT_CONFIGURED'));await f.locator('[data-page="diag"]').first().click();check('advance-error-in-diagnostics',(await f.locator('#diagnosticRows').innerText()).includes('API_NOT_CONFIGURED'));await p.evaluate(()=>{atlasPreviewConnection.core.manualAdvance=window.__originalManual;});await f.locator('[data-view="map"]').click();
+ check('map-widgets-collapsed-by-default',await f.locator('#mapHudWidgets').isHidden()&&await f.locator('#mapWidgetsToggle').getAttribute('aria-expanded')==='false');
+ await f.locator('#mapWidgetsToggle').click();
  const zoom=()=>f.evaluate(()=>AtlasPreview.map.state.tgt.s);
  const z=await zoom();await f.locator('#zIn').click();await delay(250);check('zoom-in',(await zoom())>z);await f.locator('#zOut').click();await delay(250);check('zoom-out',Math.abs((await zoom())-z)<0.001);
  const width=await f.locator('.sc-line i').evaluate(el=>el.dataset.width);check('original-scale-74px',width==='74',width);

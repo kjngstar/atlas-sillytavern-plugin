@@ -3,7 +3,7 @@ import {spawn} from 'node:child_process';
 import {mkdirSync,writeFileSync} from 'node:fs';
 import {setTimeout as pause} from 'node:timers/promises';
 import assert from 'node:assert/strict';
-import {chromium} from 'playwright';
+import {launchAtlasBrowser} from './atlas-browser.mjs';
 
 const dir=process.env.ATLAS_EVIDENCE_DIR||'.tmp/contact-flow-browser';
 const port=Number(process.env.ATLAS_VERIFY_PORT||8791);
@@ -15,7 +15,7 @@ const server=spawn(process.execPath,['--experimental-strip-types','tools/prepare
 let browser;
 try{
   for(let i=0;i<100;i++){try{if((await fetch(url)).ok)break;}catch{}await pause(100);}
-  browser=await chromium.launch({headless:true,...(process.env.ATLAS_CHROME_PATH?{executablePath:process.env.ATLAS_CHROME_PATH}:{})});
+  browser=await launchAtlasBrowser();
   const page=await browser.newPage({viewport:{width:1600,height:1000}});
   page.on('pageerror',error=>report.errors.push(error.message));
   await page.goto(url);
@@ -36,7 +36,8 @@ try{
   check('C2-toggle-state-off',await frame.locator('[data-flag="showLinks"]').getAttribute('aria-pressed')==='false');
   await frame.locator('[data-flag="showLinks"]').click();
   check('C2-toggle-restores',await frame.locator('[data-flag="showLinks"]').getAttribute('aria-pressed')==='true');
-  await frame.locator('#viewModes [data-mode="flow"]').click();
+  await frame.locator('#mapWidgetsToggle').click();
+  await frame.locator('#mapModeSwitcher').selectOption('flow');
   value=await dto();
   const flow=value.flows.find(f=>f.id==='ACT_TRANSMIT');
   check('P1-registered-polyline',flow?.points.length===4&&flow.progress===.4,flow);

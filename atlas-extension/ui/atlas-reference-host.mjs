@@ -392,7 +392,7 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
       const captured=scope();const result=await request('POST','/sql/chat/rollback',{chatUid:captured.state.chatId,chatId:captured.state.chatId,assistantMessageId:String(messageId)});
       if(result.coreSaved!==true)throw Error(result.issues?.map(x=>x.message).join('；')||'回退未保存');await core.refresh();await refresh(true);},
     async refresh(){await core.refresh();await refresh(true);},
-    async savePreferences(value){if(!value||![1,2].includes(value.version)||value.profileId!==undefined&&!['full','mapFocus','mapOnly'].includes(value.profileId))throw Error('UI_PREFERENCE_INVALID');return writeUiPreferences({interaction:value});},
+    async savePreferences(value){if(!value||![1,2,3].includes(value.version)||value.profileId!==undefined&&!['full','mapFocus','mapOnly'].includes(value.profileId))throw Error('UI_PREFERENCE_INVALID');return writeUiPreferences({interaction:value});},
     async saveSkin(value){return writeUiPreferences({skin:value});},
     async listSkinPacks(){const owner=await skinOwner();return owner?(await getSkinStorage()).list(owner):[];},
     async getSkinPack(id){const owner=await skinOwner();return owner?(await getSkinStorage()).get(owner,id):null;},

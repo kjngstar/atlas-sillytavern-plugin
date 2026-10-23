@@ -93,6 +93,26 @@ test('室内图按物理房间显示，不把室外同级地图纳入适应视�
 });
 
 const input=extra=>({anchor:{chatUid:IDS.chatA,branchId:IDS.branchMain,parentTurnId:IDS.seedTurn,hostMessageUid:'hierarchy-fix',variantKey:'v1',baseRevision:0,baseStorageRevision:0,inputHash:'hierarchy-fix'},userText:'',assistantText:'查看地图。',sourceSnapshot:[],manual:true,sceneOnly:true,phaseBatches:[],operations:[],...extra});
+test('layout guidance follows the actual batch kinds and final preview matches the sent task',async()=>{
+ const seed=await makeSeedWith(SQL);
+ try{
+  for(const [mapId,kind,included,excluded] of [[IDS.M1,'overview','overview 的水系','floor 的 rooms'],[IDS.M2,'floor','floor 的 rooms','overview 的水系']]){
+   const task=buildSqlLayoutTask(seed.db,IDS.branchMain,input({layoutMaps:[mapId]}),'kind-prompt');
+   const text=task.request.messages[1].content;
+   assert.match(text,new RegExp(included));assert.equal(text.includes(excluded),false);
+   assert.equal(text.includes('city 的 districts 每项'),false);
+   assert.equal(text.includes('city 至少 900×700'),false);
+   assert.match(text,/尺寸冲突时保留确认值/);assert.match(text,/更新只补缺项或修正 layoutIssues/);
+   const examples=text.split('\n').filter(line=>line.startsWith('{"op":"map.layout.request"')).map(JSON.parse);
+   assert.ok(examples.length>0);for(const row of examples){assert.equal(row.data.kind,kind);assert.equal(Object.hasOwn(row.data.spec,'contents'),false);}
+   assert.equal(task.request.promptInput.injectionText,text);
+  }
+  const batch=buildSqlLayoutTask(seed.db,IDS.branchMain,input({layoutMaps:[IDS.M1,IDS.M2]}),'mixed-prompt');
+  // A dependency-limited batch only advertises the kinds it actually sends.
+  const scopes=JSON.parse(batch.request.messages[1].content.split('\n').find(l=>l.startsWith('本图：')).slice(3));
+  for(const kind of new Set(scopes.map(s=>s.kind)))assert.ok(batch.request.messages[1].content.includes(kind==='floor'?'floor 的 rooms':'overview 的 spec'));
+ }finally{seed.close();}
+});
 test('spatial assembly cannot multiply the four-send turn allowance by its number of maps',async()=>{
  const seed=await makeSeedWith(SQL),ids=Array.from({length:8},(_,i)=>`budget-map-${i}`);
  for(const id of ids)insertRows(seed.db,'maps',[createRow('maps',{name:id,kind:'world',frame_json:{cols:100,rows:100}},{branchId:IDS.branchMain,id,turnId:IDS.seedTurn,clockS:0,nowWallMs:1,rulesetVersion:'atlas-1'})]);

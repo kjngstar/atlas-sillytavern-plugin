@@ -345,12 +345,12 @@ function diagnosticRows(q='',level='all'){
   return diagnosticGroups(rows).map(([key,list])=>`<section class="diagnostic-group"><div class="section-label">${esc(key)} · ${list.length} 项</div>${list.map(d=>{const meta=diagnosticMeta(d);return `<details class="diagnostic-row ${esc(d.level)}" data-diagnostic-id="${esc(d.id)}"><summary><time>${esc(d.t)}</time><em>${esc(d.level)}</em><div><b>${esc(d.code)}</b><span>${esc(d.message)}</span>${meta?`<code class="diag-meta">${esc(meta)}</code>`:''}</div>${icon('chev')}</summary><pre>${esc(JSON.stringify(d,null,2))}</pre></details>`;}).join('')}</section>`).join('');
 }
 function settingsHTML(){const tabs=[['prompts','提示词'],['connection','API 连接'],['assignments','任务与分批'],['interaction','地图交互'],['appearance','外观']];let html=`<div class="settings-tabs" role="tablist" aria-label="预设分类">${tabs.map(([id,t])=>`<button class="filter-btn ${state.settingsTab===id?'on':''}" data-settings-tab="${id}" role="tab" aria-selected="${state.settingsTab===id}">${t}</button>`).join('')}</div>`;
- if(state.settingsTab==='interaction')return html+`<div class="appearance-form"><h3>地图交互</h3><label class="appearance-row"><span>单击地点直接进入子地图</span><input type="checkbox" data-single-click-enter ${state.singleClickEnter?'checked':''}></label><p class="scope-note">默认关闭：单击地点查看右栏信息，再点击「进入此地点」。人物、物品与消息始终单击查看详情。</p><label class="appearance-row"><span>收起地图图例</span><input type="checkbox" data-legend-collapsed ${state.legendCollapsed?'checked':''}></label><p class="scope-note">图例固定收纳在比例尺上方。比例尺长度保持不变，缩放只改变距离数值。</p><p class="scope-note">${preferences.persistent?'交互偏好保存在当前浏览器。':'当前环境无法保存到浏览器，偏好在本次打开期间有效。'}</p></div>`;
+ if(state.settingsTab==='interaction')return html+`<div class="appearance-form"><h3>地图交互</h3><label class="appearance-row"><span>单击地点直接进入子地图</span><input type="checkbox" data-single-click-enter ${state.singleClickEnter?'checked':''}></label><p class="scope-note">默认关闭：单击地点查看右栏信息，再点击「进入此地点」。人物、物品与消息始终单击查看详情。</p><label class="appearance-row"><span>收起地图工具</span><input type="checkbox" data-map-widgets-collapsed ${state.mapWidgetsCollapsed?'checked':''}></label><p class="scope-note">默认只显示「地图工具」入口，点击可展开地点卡、视图选择、缩放、小地图、图例和状态条；不改变地图位置或缩放。</p><label class="appearance-row"><span>收起地图图例</span><input type="checkbox" data-legend-collapsed ${state.legendCollapsed?'checked':''}></label><p class="scope-note">图例固定收纳在比例尺上方。比例尺长度保持不变，缩放只改变距离数值。</p><p class="scope-note">${preferences.persistent?'交互偏好保存在当前浏览器。':'当前环境无法保存到浏览器，偏好在本次打开期间有效。'}</p></div>`;
  if(state.settingsTab!=='appearance')return html+presetUI.render(state.settingsTab);
  return html+window.AtlasAppearance.appearanceSettingsHTML({skin:skinValue(),catalog:skinCatalog,runtime:window.AtlasSkinRuntime});
 }
 function renderAll({preserveWorkspace=false}={}){renderRail();renderCrumbs();renderLadder();renderTree();renderSwitches();renderChips();renderPlace();renderInspector();renderDock();if(!preserveWorkspace)renderPage();renderModes();applyUIProfile();}
-function renderModes(){$$('#viewModes .vm').forEach(b=>{b.classList.toggle('active',b.dataset.mode===state.mapMode);b.setAttribute('aria-pressed',b.dataset.mode===state.mapMode);});}
+function renderModes(){$('#mapModeSwitcher').value=state.mapMode;}
 function showFlow(id){const m=message(id);if(!m||!known(m))return;let destination=Object.keys(D.FLOWS).find(mapId=>(D.FLOWS[mapId]||[]).some(e=>e.id===id)&&mapId===state.nodeId)||Object.keys(D.FLOWS).find(mapId=>(D.FLOWS[mapId]||[]).some(e=>e.id===id));destination=destination||m.mapNodeId||m.locationId;state.mapMode='flow';navigate(destination,true);map.setMode('flow');select('message',id,true);renderModes();}
 function showTask(id){const t=task(id);if(!t||!known(t))return;state.mapMode='sim';navigate(t.mapId,true);map.setMode('sim');select('task',id,true);renderModes();}
 function showEvent(id){const e=D.EVENTS.find(e=>e.id===id);if(!e||!known(e))return;if(byId(e.mapId))navigate(e.mapId,true);select('event',id,true);map.selectKey(e.target);}
@@ -483,6 +483,12 @@ function openPalette(){$('#paletteWrap').classList.add('on');$('#palInput').valu
 function closePalette(){$('#paletteWrap').classList.remove('on');}
 function runCommand(i=paletteIndex){const c=paletteList[i];if(!c)return;closePalette();c.run();}
 function applyInteractionPreferences(){
+ const widgets=$('#mapHudWidgets'),toggle=$('#mapWidgetsToggle'),wasHidden=widgets.hidden;
+ if(state.mapWidgetsCollapsed&&widgets.contains(document.activeElement))toggle.focus({preventScroll:true});
+ widgets.hidden=state.mapWidgetsCollapsed;
+ toggle.setAttribute('aria-expanded',String(!state.mapWidgetsCollapsed));
+ toggle.querySelector('span').textContent=state.mapWidgetsCollapsed?'地图工具':'收起工具';
+ if(wasHidden&&!widgets.hidden)map.resize();
  $('#legend').classList.toggle('collapsed',state.legendCollapsed);
  $('#legendToggle').textContent=state.legendCollapsed?'展开':'收起';
  $('#legendToggle').setAttribute('aria-expanded',String(!state.legendCollapsed));
@@ -507,7 +513,6 @@ function bind(){
   if(b.dataset.locate){showEntity(b.dataset.locate,b.dataset.locateId,true);return;}
   if(b.dataset.inspector){state.inspectorTab=b.dataset.inspector;renderInspector();return;}
   if(b.hasAttribute('data-clear-selection')){state.selected=null;state.inspectorTab='cast';renderInspector();return;}
-  if(b.dataset.mode){state.mapMode=b.dataset.mode;map.setMode(state.mapMode);refreshFlows();renderModes();return;}
   if(b.dataset.flag){map.setFlag(b.dataset.flag,!map.state[b.dataset.flag]);renderSwitches();return;}
   if(b.dataset.filterRegion){const id=b.dataset.filterRegion;if(id==='all')map.setFilter(new Set());else {const set=new Set(map.state.filter);set.has(id)?set.delete(id):set.add(id);map.setFilter(set);}renderChips();return;}
   if(b.hasAttribute('data-rollback-confirm')){await undoDemo();return;}
@@ -541,11 +546,13 @@ function bind(){
  listen(root,'change',async e=>{const el=e.target;if(await presetUI.change(el))return;
   if(el.id==='diagnosticLevel')$('#diagnosticRows').innerHTML=diagnosticRows($('#diagnosticSearch').value,el.value);
   if(el.id==='profileSwitcher'){await setUIProfile(el.value);return;}
+  if(el.id==='mapModeSwitcher'){state.mapMode=el.value;map.setMode(state.mapMode);refreshFlows();renderModes();return;}
   if(el.hasAttribute('data-skin-select')){await setTheme(el.value);renderPage();return;}
   for(const [attribute,section]of [['skinComponent','components'],['skinMapStyle','mapStyles'],['skinToken','tokens']])if(el.dataset[attribute]){await updateSkin(section,el.dataset[attribute],el.type==='range'?Number(el.value):el.value);return;}
   for(const key of ['radar','motion','coordinates'])if(el.hasAttribute('data-appearance-'+key)){await updateSkin('options',key,el.checked);return;}
   if(el.hasAttribute('data-single-click-enter'))setPreference('singleClickEnter',el.checked);
   if(el.hasAttribute('data-legend-collapsed'))setPreference('legendCollapsed',el.checked);
+  if(el.hasAttribute('data-map-widgets-collapsed'))setPreference('mapWidgetsCollapsed',el.checked);
   if(el.id==='skinImport'&&el.files?.[0])await importSkin(el.files[0]);
  });
  $('#zIn').onclick=()=>map.zoomBy(1.3);$('#zOut').onclick=()=>map.zoomBy(1/1.3);$('#zFit').onclick=()=>map.fit(true);
@@ -556,6 +563,7 @@ function bind(){
  $('#reopenRight').onclick=()=>{if(state.rightClosed)togglePanel('right');else root.classList.toggle('right-open');};
  $('#dockToggle').onclick=()=>{$('#dock').classList.toggle('collapsed');later(()=>map.resize(),280);};
  $('#legendToggle').onclick=()=>setPreference('legendCollapsed',!state.legendCollapsed);
+ $('#mapWidgetsToggle').onclick=()=>setPreference('mapWidgetsCollapsed',!state.mapWidgetsCollapsed);
  $('#nextDemo').onclick=advanceDemo;$('#undoDemo').onclick=undoDemo;$('#resetDemo').onclick=resetDemo;
  $('#btnPalette').onclick=openPalette;$('#btnSettings').onclick=()=>setPage('prefs');
  $('.palette-backdrop').onclick=closePalette;

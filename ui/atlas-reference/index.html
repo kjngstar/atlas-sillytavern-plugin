@@ -155,15 +155,19 @@
       <span class="corner c-tl"></span><span class="corner c-tr"></span>
       <span class="corner c-bl"></span><span class="corner c-br"></span>
 
+      <button class="map-widget-toggle hud-btn" id="mapWidgetsToggle" aria-expanded="false" aria-controls="mapHudWidgets"><svg aria-hidden="true"><use href="#i-sliders"></use></svg><span>地图工具</span></button>
+      <div class="map-hud-widgets" id="mapHudWidgets" hidden>
       <!-- 当前地点卡 -->
       <details class="hud hud-place" id="placeCard" data-ui-slot="placeSummary"></details>
 
       <!-- 视图模式 -->
       <div class="hud hud-modes" id="viewModes" data-ui-slot="mapModes">
-        <button class="vm active" data-mode="map">地图</button>
-        <button class="vm" data-mode="flow">消息流</button>
-        <button class="vm" data-mode="sim">推演视图</button>
-        <button class="vm" data-mode="heat">热力</button>
+        <select class="profile-switcher" id="mapModeSwitcher" aria-label="地图视图">
+          <option value="map">地图</option>
+          <option value="flow">消息流</option>
+          <option value="sim">推演视图</option>
+          <option value="heat">热力</option>
+        </select>
       </div>
 
       <!-- 图例与比例尺共用左下角收纳区 -->
@@ -205,6 +209,7 @@
       <div class="hud hud-ticker" data-ui-slot="ticker">
         <div class="tk-live"><span class="pd"></span>LIVE</div>
         <div class="tk-track"><div class="tk-run" id="ticker">正在同步世界状态…</div></div>
+      </div>
       </div>
     <section id="mapSelection" class="map-selection" aria-label="地图对象详情" hidden><header><button id="expandMapSelection" class="action-btn">展开完整详情</button><button id="closeMapSelection" aria-label="关闭地图详情">×</button></header><div id="mapSelectionBody"></div></section><section id="workspacePage" class="workspace-page" hidden=""></section></main>
 

@@ -199,7 +199,7 @@ test('PROMPT03 · 每项声明的能力都有真实契约对应：字段 / scope
   const canonical = await import('../src/atlas-space-canonical.ts');
   assert.equal(canonical.SPACE_CANONICAL_VERSION, 1, 'space-canonical/v1 声明必须有真实版本常量');
 
-  // 布局提示词里必须能看到三项能力的契约文字（否则等于声明了却没告诉模型）。
+  // 室内布局提示词包含三项相关能力；概览图不接收室内专属字段。
   const seed = await makeSeedWith(SQL);
   const bytes = seed.exportBytes(); seed.close();
   const repo = createSqlRepository({ chatUid: IDS.chatA, branchId: IDS.branchMain, modelPort: { calls: [], async request(req) { this.calls.push(req); return { batchId: req.batchId, text: '{"op":"noop"}', httpStatus: 200, durationMs: 1 }; } } });
@@ -207,7 +207,7 @@ test('PROMPT03 · 每项声明的能力都有真实契约对应：字段 / scope
   try {
     const anchor = { chatUid: IDS.chatA, branchId: IDS.branchMain, parentTurnId: IDS.seedTurn, hostMessageUid: 'caps', variantKey: 'v1', baseRevision: 0, baseStorageRevision: 0, inputHash: 'caps' };
     const task = buildSqlLayoutTask(repo.db, IDS.branchMain, {
-      anchor, userText: 'u', assistantText: 'a', manual: false, sourceSnapshot: [], phaseBatches: ['observe'], sceneOnly: true, layoutMaps: 'active',
+      anchor, userText: 'u', assistantText: 'a', manual: false, sourceSnapshot: [], phaseBatches: ['observe'], sceneOnly: true, layoutMaps: [IDS.M2],
     }, 'caps');
     const text = task.request.messages[1].content;
     assert.ok(text.includes(CAPABILITY_CORRIDOR_BINDING), 'corridor-binding/v1 已声明 → 文字必须进提示词');

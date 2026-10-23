@@ -15,6 +15,9 @@
     "map:lab": "node tools/map-lab/build.mjs",
     "map:verify": "node --experimental-strip-types tools/map-lab/verify.mjs",
     "verify:reference": "node tools/verify-reference-browser.mjs",
+    "verify:map-widgets": "node tools/verify-reference-browser.mjs --map-widgets-only",
+    "artwork:prompts": "node tools/artwork-prompts.mjs",
+    "test:artwork": "python3 -m unittest discover -s tests -p test_artwork_image.py",
     "verify:skins": "node tools/verify-reference-browser.mjs --skins",
     "verify:skin-performance": "node tools/verify-ui-skin-performance.mjs"
   },
