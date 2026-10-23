@@ -167,6 +167,7 @@ test('partial layout keeps saved state and emits every distinct issue, with hash
   await log('POST', '/sql/chat/map/layout', async () => ({ status: 200, body: { ok: true,
     data: { coreSaved: true, sceneSaved: false, issues, receipt: { status: 'partial', anchor, issues, groups: [{ status: 'applied', changedRows: 2 }] } } } }), anchor);
   const done = r.rows().find(e => e.code === 'API_CALL_PARTIAL');
+  assert.equal(done.outcome,'partial');
   assert.equal(done.details.coreSaved, true);
   assert.equal(done.details.sceneSaved, false);
   assert.equal(done.details.changedRows, 2);
@@ -190,6 +191,12 @@ test('only polling logs fold; errors and real model sends remain individually co
   r.emit({ ...poll, source: 'model', code: 'MODEL_REQUEST_STARTED' });
   r.emit({ ...poll, source: 'model', code: 'MODEL_REQUEST_STARTED' });
   assert.equal(r.rows().filter(e => e.code === 'MODEL_REQUEST_STARTED').length, 2);
+});
+
+test('a partial candidate without confirmed save remains a failed operation',async()=>{
+ const r=recorder(),log=createAtlasApiDiagnosticLogger({emit:r.emit});
+ await log('POST','/sql/chat/map/layout',async()=>({status:200,body:{ok:true,data:{coreSaved:false,receipt:{status:'partial',anchor,issues:[]}}}}),anchor);
+ const done=r.rows().find(e=>e.code==='API_CALL_FAILED');assert.ok(done);assert.equal(done.outcome,'failed');assert.equal(done.level,'error');assert.equal(done.details.coreSaved,false);
 });
 
 test('SQL model and host commit derive the same turn reference and export phase, batch and unlimited output budget', async () => {

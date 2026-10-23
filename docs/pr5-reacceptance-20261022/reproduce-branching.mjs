@@ -23,6 +23,7 @@ for(const b of feasible.slice(1)){
 }
 const result=Kit.generateFloor({rooms,contents:[]},{...built.context,currentScope:scope});
 console.log(JSON.stringify({ok:result.ok,issues:result.issues,feasibleCounterexample:feasible},null,2));
-// This audit reproduces a known open defect, rather than asserting it is correct.
-assert.equal(result.ok,false,'If fixed, update the audit report and promote this case to a passing regression');
-assert.ok(result.issues.some(i=>i.code==='ROOM_CONNECTION_UNSATISFIED'));
+// Promoted to a passing regression on 2026-10-23; the original report is historical.
+assert.equal(result.ok,true,JSON.stringify(result.issues));
+assert.deepEqual(result.issues,[]);
+assert.equal(result.scene.layout.doors.length,6);

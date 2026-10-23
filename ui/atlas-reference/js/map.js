@@ -1837,28 +1837,6 @@ function create(canvas, mini, hooks){
     if(!once)frameId=requestAnimationFrame(frame);
   }
 
-  function drawGhosts(){
-    const cast = (hooks.remoteCast&&hooks.remoteCast())||[];
-    cast.slice(0,3).forEach((c2,i)=>{
-      const x=st.vw-158, y=110+i*76;
-      ctx.save();
-      ctx.globalAlpha=.95;
-      ctx.beginPath(); rrect(ctx,x-8,y-14,150,44,10);
-      ctx.fillStyle='rgba(10,18,30,.9)'; ctx.fill();
-      ctx.strokeStyle=hexA(c2.c,.55); ctx.lineWidth=1; ctx.stroke();
-      ctx.beginPath(); ctx.arc(x+8,y+8,7,0,7); ctx.fillStyle=hexA(c2.c,.9); ctx.fill();
-      ctx.fillStyle='#04121c'; ctx.font='700 8px '+F.sans; ctx.textAlign='center'; ctx.textBaseline='middle';
-      ctx.fillText(c2.initial, x+8, y+8.5);
-      ctx.textAlign='left'; ctx.textBaseline='alphabetic';
-      ctx.fillStyle='#dce9fb';
-      ctx.font='600 11px '+F.sans;
-      ctx.fillText(c2.name, x+22, y+4);
-      ctx.fillStyle='rgba(140,170,200,.85)'; ctx.font='9px '+F.mono;
-      ctx.fillText(c2.dist+' · '+c2.tag, x+22, y+17);
-      ctx.restore();
-    });
-  }
-
   /* ══════════ 交互 ══════════ */
   function hitTest(mx,my){
     let best=null, bd=1e9;

@@ -1,4 +1,4 @@
-import {atlasContextRecord, ATLAS_SESSION_KEY} from './atlas-host-context.mjs';
+import {atlasContextRecord, ATLAS_SESSION_KEY} from '../../../../ui/atlas-host-context.mjs';
 /** Read-only snapshot lifecycle. It never returns legacy data when SQL is selected. */
 export function createSqlViewController(deps) {
  const {state,data,getContext,sqlMode,getViewMode,emitAtlasDiagnostic,emitSqlBridgeMissing,renderPage,atlasSqlCoreStatus,ATLAS_SQL_VIEW_KEYS,ATLAS_SQL_MODE_SETTING}=deps;

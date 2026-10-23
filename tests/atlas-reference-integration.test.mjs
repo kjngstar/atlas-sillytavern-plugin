@@ -128,7 +128,7 @@ test('地图写入后修订变化仍记录回执并刷新，切到其他聊天�
  for(const action of ['layout','build']){
   let m; m=mount({mapReply:async()=>{m.saved();return {receipt,coreSaved:true};}});await m.bridge.boot();
   try{await m.bridge[action]('world');}catch(error){assert.equal(action,'layout');assert.match(error.message,/ROOM_REF_UNKNOWN/);}
-  assert.equal(m.core.getState().receipts.length,1,action+' 保存后的修订不能吞掉回执');assert.equal(m.core.getState().receipts[0].detail.receipt.turnId,receipt.turnId);assert.ok(m.calls.some(c=>c.refresh));await m.render.dispose();
+  assert.equal(m.core.getState().receipts.length,1,action+' 保存后的修订不能吞掉回执');assert.equal(m.core.getState().receipts[0].detail.receipt.turnId,receipt.turnId);assert.ok(m.calls.some(c=>c.refresh));assert.equal(m.calls.find(c=>c.diagnostic?.code===(action==='layout'?'LAYOUT_TASK_COMPLETE':'WORLD_BUILD_TASK_COMPLETE')).diagnostic.outcome,'partial');await m.render.dispose();
   let switched; switched=mount({mapReply:async()=>{switched.switch('B');return {receipt,coreSaved:true};}});await switched.bridge.boot();assert.equal(await switched.bridge[action]('world'),null);assert.equal(switched.core.getState().receipts.length,0);assert.ok(!switched.calls.some(c=>c.refresh));await switched.render.dispose();
  }
 });

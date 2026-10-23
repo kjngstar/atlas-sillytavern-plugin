@@ -149,7 +149,7 @@ test('普通剧情的关系、公开风声和明确告知认知经过生产提�
 
 function fixture({ response = room, model, identity, retryFloor, afterResponse, commitGuard, lore = '全部世界书原文：文风规则与地点。' } = {}) {
   let enabled = true, saves = 0, calls = 0, saveOk = true;
-  const requests = [], batches = [];
+  const requests = [], batches = [], diagnostics=[];
   const current = { chatUid: 'chat-auto', branchId: 'main', chatMetadata: {}, saveMetadata: async () => { saves++; return saveOk; } };
   let live = current;
   const provider = createBrowserSqlHost({ enabled: () => enabled, context: () => live, loadRuntime: loadAtlasSqlRuntime,
@@ -160,6 +160,7 @@ function fixture({ response = room, model, identity, retryFloor, afterResponse, 
     readBinding: () => { throw Error('SQL must not read or migrate the old session'); }, writeBinding: async b => { current.chatMetadata.atlas.sqlChatEnabled = b.enabled; },
     readData: () => null, writeData() {}, fillInput() {} };
   const makeUi = () => createAtlasUiCore({ host, emitter: { on() {}, off() {} }, sqlEnabled: () => enabled,
+    onDiagnostic:event=>diagnostics.push(event),
     api: { request: async (method, path, body) => { requests.push({ method, path, body }); const result=await server.handle(method, path, body, { local: true }); afterResponse?.(path,result); return result; } },
     adaptEvent: (_event, payload) => payload ?? null, endedDebounceMs: 0, mutationDebounceMs: 0,
     getPlayerName: () => '用户主角', getLoreSupplement: async () => lore,
@@ -176,7 +177,7 @@ function fixture({ response = room, model, identity, retryFloor, afterResponse, 
   async function prepare(id = '0') { await ui.handleEvent('MESSAGE_SENT', { kind: 'message-sent', messageId: id, userText: '走进图书馆' }); assert.ok(ui.getState().pendingTurn); }
   async function end(id = '1') { await ui.handleEvent('GENERATION_ENDED', { kind: 'generation-ended', assistantMessageId: id, assistantText: '你走进了图书馆。' }); await pause(5); await ui.handleEvent('FLUSH'); }
   async function mutate(kind = 'message-deleted', id = '1') { await ui.handleEvent('MESSAGE_DELETED', { kind, messageId: id }); await pause(5); await ui.handleEvent('FLUSH'); }
-  return { get ui(){return ui;}, restartUi(){ui.dispose();ui=makeUi();}, server, provider, current, requests, batches, prepare, end, mutate,
+  return { get ui(){return ui;}, restartUi(){ui.dispose();ui=makeUi();}, server, provider, current, requests, batches, diagnostics, prepare, end, mutate,
     calls: () => calls, saves: () => saves, setSave: value => { saveOk = value; }, setEnabled: value => { enabled = value; },
     switchChat: () => { live = { ...current, chatUid: 'chat-other', chatMetadata: {} }; },
     async close() { ui.dispose(); await provider.close(); },
@@ -415,6 +416,8 @@ test('Q03 partial UI retry repairs failed operations only; host failure and repe
     await f.ui.refresh(); await f.prepare(); await f.end();
     const session = await f.provider.session('chat-auto');
     assert.equal(f.ui.getState().receipts[0].status, 'committed'); assert.ok(f.ui.getState().retryableCommit);
+    const partial=f.diagnostics.find(e=>e.code==='COMMIT_PARTIAL');assert.ok(partial);assert.equal(partial.outcome,'partial');assert.equal(partial.level,'warn');assert.equal(partial.details.coreSaved,true);assert.equal(partial.details.receiptStatus,'partial');
+    assert.ok(!f.diagnostics.some(e=>e.code==='COMMIT_FAILED'),'部分保存不冒充整轮失败');
     const head = session.repo.internal.currentHeadTurnId(), revision = session.repo.internal.currentRevision();
     const quantity = () => queryBound(session.repo.db, 'SELECT quantity FROM items', [])[0].quantity;
     assert.equal(quantity(), 5);

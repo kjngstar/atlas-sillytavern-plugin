@@ -29,9 +29,9 @@ Node 插件也注入同一 SQL 运行时，聊天信封原子保存到 `sql-chat
 | 模块 | 职责 |
 | --- | --- |
 | `ui/atlas-host-context.mjs` | 宿主会话、身份和迟到响应守卫，注入 context 端口 |
-| `ui/atlas-sql-view-controller.mjs` | 只读快照连接、视图缓存、失效与关闭 |
+| `ui/atlas-reference-host.mjs` | 当前 UI 的只读快照、回执、视图刷新与宿主操作 |
 | `ui/atlas-scene-ui-adapter.mjs` | 地图、附近和兼容数据的纯只读适配，无 DOM/持久化 |
-| `ui/atlas-map-controller.mjs` | 相机、层级栈、手势、弹卡位置、resize 与 cleanup |
+| `ui/atlas-reference/js/map.js` | 当前 Canvas 地图、相机、手势与资源清理 |
 | `src/atlas-production-server.ts` | 正式路由分发，拒绝已退出的旧写入口 |
 | `src/atlas-server-contract.ts` | 宿主/存储类型契约，独立于旧执行器 |
 | `src/atlas-settings-routes.ts` | 设置命令、脱敏响应与访问控制 |
@@ -53,3 +53,5 @@ Leaflet 地图实验台仍是独立实验；正式渲染复用原网格、相机
 正文推演与后台阶段按需要调用模型，重复通知不再请求；预热/预览不调用模型。
 世界书按启用条目原顺序与明确预算发送，不按内容筛除；作者视图不扩大正文注入认知范围。
 完整施工与实机证据见 `docs/atlas-architecture-cleanup-progress.md`。
+
+旧工作台模块、旧皮肤 API 与面板辅助定义已归档到 `tests/fixtures/legacy-ui/`，不再随正式 UI 分发。`readLegacyUiSource` 明确只服务历史合约；当前入口用 `atlas-reference-*` 测试与浏览器门禁覆盖。HTML 的 `atlas-boot-scripts` 同时供运行时与引用审计读取，不能把动态皮肤模块误删。

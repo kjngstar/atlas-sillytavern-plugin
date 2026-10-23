@@ -1,5 +1,5 @@
 // Pure geometry. No fixture, DOM, storage or model calls.
-
+import {placeConnectedRooms,sharedRoomWall} from './room-topology.mjs';
 
   const clone = value => JSON.parse(JSON.stringify(value));
   const finitePositive = n => typeof n === 'number' && Number.isFinite(n) && n > 0;
@@ -38,6 +38,15 @@
       placed.push({...rect,mapId:spec.id,parentId:spec.parentId,polygon:polygon(rect)});
     };
     const specs=ordered(spec.rooms);
+    const edges=(spec.roomConnections??[]).filter(e=>specs.some(r=>r.id===e.from)&&specs.some(r=>r.id===e.to));
+    const linked=new Set(edges.flatMap(e=>[e.from,e.to]));
+    const corridorEntrants=new Set(specs.filter(r=>{
+      const outside=(spec.externalConnections??[]).filter(e=>e.from===r.id);
+      return outside.length?outside.some(e=>e.to===corridorEntityId):!linked.has(r.id)||(spec.externalRoomIds??[]).includes(r.id);
+    }).map(r=>r.id));
+    // A fully connected direct-room layout does not need an invented corridor band.
+    const directOnly=edges.length>0&&!corridorEntityId&&!lock&&corridorEntrants.size===0;
+    const roomFits=r=>contains(directOnly?bounds:{x:.5,y:.5,w:bounds.w-1,h:bounds.h-1},r)&&(directOnly||!intersects(r,corridor))&&(!corridorEntrants.has(r.id)||sharedRoomWall(r,corridor))&&!placed.some(p=>p.id!==r.id&&intersects(r,p));
     if(spec.singleRoom&&specs.length===1){
       const r=specs[0],x=r.locked?.x??(bounds.w-r.w)/2,y=r.locked?.y??(bounds.h-r.h)/2;
       // A single room owns the whole canvas; its outer walls need no corridor margin.
@@ -49,13 +58,12 @@
     // Confirmed/manual geometry is reserved first. A contradiction is reported, never moved silently.
     for(const r of specs.filter(r=>r.locked&&!placed.some(p=>p.id===r.id))){
       const rect={...r,...r.locked};
-      if(!Number.isFinite(rect.x)||!Number.isFinite(rect.y)||!admissible(rect)) problems.push(issue(r.id,'LOCK_CONFLICT'));
+      if(!Number.isFinite(rect.x)||!Number.isFinite(rect.y)||!(linked.has(r.id)?roomFits(rect):admissible(rect))) problems.push(issue(r.id,'LOCK_CONFLICT'));
       else save(r,rect.x,rect.y,'confirmed');
     }
     if(problems.length) return {ok:false,issues:problems,kept:previous?clone(previous):null};
     // Connected rooms share a wall. The corridor template must not separate a
     // known direct room connection into two unrelated rows of rooms.
-    const edges=(spec.roomConnections??[]).filter(e=>specs.some(r=>r.id===e.from)&&specs.some(r=>r.id===e.to));
     const visited=new Set();
     for(const start of specs){
       if(visited.has(start.id)||!edges.some(e=>e.from===start.id||e.to===start.id))continue;
@@ -64,19 +72,23 @@
         const id=edge.from===component[i].id?edge.to:edge.to===component[i].id?edge.from:null;
         if(id&&!visited.has(id)){visited.add(id);component.push(specs.find(r=>r.id===id));}
       }
-      if(component.some(r=>r.locked))continue;
       let proposal=null;
       const prior=component.map(r=>old.get(r.id));
-      const touching=(a,b)=>a&&b&&Math.abs(a.x+a.w-b.x)<1e-7&&Math.min(a.y+a.h,b.y+b.h)-Math.max(a.y,b.y)>=.8;
-      if(prior.every((p,i)=>p&&p.w===component[i].w&&p.h===component[i].h&&admissible(p))&&edges.filter(e=>component.some(r=>r.id===e.from)).every(e=>{const a=old.get(e.from),b=old.get(e.to);return touching(a,b)||touching(b,a);}))proposal=prior;
-      if(!proposal&&prior.some(p=>p?.quality==='confirmed'))return {ok:false,issues:[issue(start.id,'ROOM_CONNECTION_UNSATISFIED')],kept:previous?clone(previous):null};
-      for(const side of [start.side,start.side==='north'?'south':'north'])for(let x=.5;!proposal&&x<=bounds.w-.5;x+=.5){
+      const componentEdges=edges.filter(e=>component.some(r=>r.id===e.from));
+      const connected=rs=>componentEdges.every(e=>sharedRoomWall(rs.find(r=>r.id===e.from),rs.find(r=>r.id===e.to)));
+      if(prior.every((p,i)=>p&&p.w===component[i].w&&p.h===component[i].h&&roomFits(p)&&(!component[i].locked||p.x===component[i].locked.x&&p.y===component[i].locked.y))&&prior.every((p,i)=>prior.slice(i+1).every(q=>!intersects(p,q)))&&connected(prior))proposal=prior;
+      const fixed=component.some(r=>r.locked||old.get(r.id)?.quality==='confirmed');
+      for(const side of [start.side,start.side==='north'?'south':'north'])for(let x=.5;!fixed&&!proposal&&x<=bounds.w-.5;x+=.5){
         let nextX=x;
         const row=component.map(r=>{const p=candidate({...r,side,x:nextX});nextX+=r.w;return p;});
-        if(row.every(admissible))proposal=row;
+        if(row.every(roomFits)&&connected(row))proposal=row;
       }
-      if(proposal)for(const r of proposal)save(r,r.x,r.y,'layout');
-      else return {ok:false,issues:[issue(start.id,'ROOM_CONNECTION_NO_SPACE')],kept:previous?clone(previous):null};
+      if(!proposal){
+        const solved=placeConnectedRooms({rooms:component,edges:componentEdges,bounds:directOnly?bounds:{x:.5,y:.5,w:bounds.w-1,h:bounds.h-1},obstacles:[...placed.filter(p=>!component.some(r=>r.id===p.id)),...(directOnly?[]:[corridor])],contacts:new Map(component.filter(r=>corridorEntrants.has(r.id)).map(r=>[r.id,corridor])),previous:previous?.rooms??[]});
+        if(!solved.ok)return {ok:false,issues:[issue(start.id,solved.code)],kept:previous?clone(previous):null};
+        proposal=solved.rooms;
+      }
+      for(const r of proposal)if(!placed.some(p=>p.id===r.id))save(corridorEntrants.has(r.id)?{...r,side:Math.abs(r.y+r.h-corridor.y)<1e-7?'north':'south'}:r,r.x,r.y,r.quality==='confirmed'?'confirmed':'layout');
     }
     // Preserve unchanged geometry from the saved layout before placing new rooms.
     for(const r of specs.filter(r=>!r.locked&&!placed.some(p=>p.id===r.id))){
@@ -90,7 +102,6 @@
     }
     if(problems.length) return {ok:false,issues:problems,kept:previous?clone(previous):null};
     const rooms=ordered(placed), doors=[];
-    const linked=new Set(edges.flatMap(e=>[e.from,e.to]));
     for(const r of rooms){
       const outside=(spec.externalConnections??[]).filter(edge=>edge.from===r.id);
       if(outside.length&&r.w/(outside.length+1)<=.2)return {ok:false,issues:[issue(r.id,'ROOM_CONNECTION_NO_SPACE')],kept:previous?clone(previous):null};
@@ -99,13 +110,14 @@
     }
     for(const edge of edges){
       const a=rooms.find(r=>r.id===edge.from),b=rooms.find(r=>r.id===edge.to);
-      const left=a.x<b.x?a:b,right=left===a?b:a;
-      const low=Math.max(left.y,right.y),high=Math.min(left.y+left.h,right.y+right.h);
-      if(Math.abs(left.x+left.w-right.x)>1e-7||high-low<.8)return {ok:false,issues:[issue(edge.id,'ROOM_CONNECTION_UNSATISFIED')],kept:previous?clone(previous):null};
-      const width=Math.min(1.2,high-low-.4),x=right.x;
-      const min=low+width/2+.2,max=high-width/2-.2,y=Math.max(min,Math.min(max,low+(high-low)*(spec.doorBias??.5)));
-      for(const [r,to,wall] of [[left,right,'east'],[right,left,'west']])doors.push({id:'door:'+edge.id+':'+r.id,routeId:edge.id,roomId:r.id,toRoomId:to.id,x,y,width,wall,quality:'layout'});
+      const shared=sharedRoomWall(a,b);
+      if(!shared)return {ok:false,issues:[issue(edge.id,'ROOM_CONNECTION_UNSATISFIED')],kept:previous?clone(previous):null};
+      const {low,high}=shared,width=Math.min(1.2,high-low-.4);
+      const min=low+width/2+.2,max=high-width/2-.2,along=Math.max(min,Math.min(max,low+(high-low)*(spec.doorBias??.5)));
+      const x=shared.axis==='x'?shared.coordinate:along,y=shared.axis==='y'?shared.coordinate:along;
+      for(const [r,to,wall] of [[a,b,shared.wallA],[b,a,shared.wallB]])doors.push({id:'door:'+edge.id+':'+r.id,routeId:edge.id,roomId:r.id,toRoomId:to.id,x,y,width,wall,quality:'layout'});
     }
+    if(directOnly&&!doors.some(d=>!d.toRoomId)){corridor.x=0;corridor.y=0;corridor.w=0;corridor.h=0;}
     if(spec.singleRoom&&spec.entryDoors?.length){
       doors.length=0;const room=rooms[0];
       for(const door of spec.entryDoors){

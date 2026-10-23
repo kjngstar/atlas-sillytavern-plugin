@@ -280,3 +280,10 @@ test('T16-08 区间次序不变量在每类事实下都成立', () => {
     assertIntervalInvariant(result, label);
   }
 });
+
+test('stable activity aliases survive reordering; duplicate and self references are visible conflicts',()=>{
+ const walk={kind:'travel',completed:true,ref:'new:walk',aliases:['op-walk','event-walk'],hint:{elapsed_s:60}},talk={kind:'dialogue',completed:true,ref:'new:talk',hint:{elapsed_s:120,after_ref:'event-walk'}};
+ assert.equal(deriveElapsedInterval({activities:[talk,walk]},CLOCK).nominalS,180);
+ const ambiguous=deriveElapsedInterval({activities:[walk,{...walk,ref:'new:other'},talk]},CLOCK);assert.ok(ambiguous.conflicts.includes('AMBIGUOUS_ACTIVITY_REF:event-walk'));assert.equal(ambiguous.quality,'estimated');
+ const self=deriveElapsedInterval({activities:[{...walk,hint:{elapsed_s:60,same_interval_as:'new:walk'}}]},CLOCK);assert.ok(self.conflicts.some(x=>x.startsWith('SAME_INTERVAL_SELF:')));assert.equal(self.quality,'estimated');
+});

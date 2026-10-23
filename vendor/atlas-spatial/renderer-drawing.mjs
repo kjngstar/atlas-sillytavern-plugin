@@ -52,8 +52,8 @@ const ctx=canvas.getContext('2d');
     }
     function floor(){const s=state.scene,k=state.cam.s,palette=[C.cyan,C.violet,C.blue,C.mint,C.blue,C.gold];
       const focus=state.selected?.roomId||(state.selected?.type==='room'?state.selected.id:null)||s.actors[0]?.roomId;
-      ctx.save();ctx.shadowColor='#000000';ctx.shadowBlur=18;rounded(s.corridor,gradient(s.corridor,'#28476570','#16243e70'),'#8bc6f44d',1,.23);ctx.restore();
-      for(let x=.6;x<s.bounds.w;x+=1.7)line([{x,y:s.corridor.y+.1},{x,y:s.corridor.y+s.corridor.h-.1}],'#8ec9ee0c',.65);
+      if(s.corridor.w>0&&s.corridor.h>0){ctx.save();ctx.shadowColor='#000000';ctx.shadowBlur=18;rounded(s.corridor,gradient(s.corridor,'#28476570','#16243e70'),'#8bc6f44d',1,.23);ctx.restore();
+      for(let x=.6;x<s.bounds.w;x+=1.7)line([{x,y:s.corridor.y+.1},{x,y:s.corridor.y+s.corridor.h-.1}],'#8ec9ee0c',.65);}
       for(let i=0;i<s.rooms.length;i++){
         const r=s.rooms[i],color=palette[i%palette.length],active=r.id===focus;
         ctx.save();ctx.shadowColor=active?color:'#000000';ctx.shadowBlur=active?12:8;
@@ -151,7 +151,7 @@ const ctx=canvas.getContext('2d');
 
       for(const item of s.items)diamond(item,C.gold);
       for(const actor of s.actors)dot(actor,state.selected?.id===actor.id?C.cyan:C.mint,actor.name);
-      text('中央走廊',{x:s.corridor.x+s.corridor.w/2,y:s.corridor.y+s.corridor.h/2},'#88a7c69e',11);
+      if(s.corridor.w>0&&s.corridor.h>0)text('中央走廊',{x:s.corridor.x+s.corridor.w/2,y:s.corridor.y+s.corridor.h/2},'#88a7c69e',11);
       // Dimension annotation is a drawing aid, computed from the floor's actual bounds.
       if(width()>480){const y=s.bounds.h-.35;line([{x:.5,y},{x:s.bounds.w-.5,y}],'#86badc30',.65);for(let x=.5;x<s.bounds.w;x+=5)line([{x,y:y-.15},{x,y:y+.15}],'#86badc50',.6);text((s.bounds.w-1).toFixed(0)+' m · 楼层空间示意',{x:s.bounds.w/2,y:y-.35},'#91b8cf9e',11);}
     }

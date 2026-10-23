@@ -1,4 +1,4 @@
-import {readUiSource} from './ui-source-helper.mjs';
+import {readLegacyUiSource} from './ui-source-helper.mjs';
 /**
  * atlas-r01-map-visibility.test.mjs — R01 地图可见性 / 图层拆分回归测试。
  *
@@ -32,7 +32,7 @@ test("R01: 地图工具显示、hint 不遮挡、网格平铺、底图网格分�
   style.textContent = readFileSync(resolve(root, "style.css"), "utf8");
   document.head.append(style);
 
-  const source = readUiSource(resolve(root, "index.js"));
+  const source = readLegacyUiSource(resolve(root, "index.js"));
   const { renderPanel } = await import("data:text/javascript;base64," + Buffer.from(source + "\nexport {renderPanel};").toString("base64"));
   const { createDefaultSettingsV2, settingsViewV2 } = await import(pathToFileURL(resolve(root, "src/atlas-settings.ts")).href);
   const { DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA } = await import(pathToFileURL(resolve(root, "src/atlas-api-client.ts")).href);
@@ -163,7 +163,7 @@ test("R01: 有底图时网格仍被绘制（叠加默认）且缓存键含底图
   const style = document.createElement("style");
   style.textContent = readFileSync(resolve(root, "style.css"), "utf8");
   document.head.append(style);
-  const source = readUiSource(resolve(root, "index.js"));
+  const source = readLegacyUiSource(resolve(root, "index.js"));
   const { renderPanel } = await import("data:text/javascript;base64," + Buffer.from(source + "\nexport {renderPanel};").toString("base64"));
   const { createDefaultSettingsV2, settingsViewV2 } = await import(pathToFileURL(resolve(root, "src/atlas-settings.ts")).href);
   const { DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA } = await import(pathToFileURL(resolve(root, "src/atlas-api-client.ts")).href);

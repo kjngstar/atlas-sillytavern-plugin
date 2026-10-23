@@ -1,4 +1,4 @@
-import { atlasPointRefOf, atlasSqlFilterByViewMode, atlasClockLabel } from './atlas-scene-ui-adapter.mjs';
+import { atlasPointRefOf, atlasSqlFilterByViewMode, atlasClockLabel } from '../../../../ui/atlas-scene-ui-adapter.mjs';
 
 // A presentation layer over the existing workbench. It never saves world data.
 const ICONS = {

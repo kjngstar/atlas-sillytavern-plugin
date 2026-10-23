@@ -26,6 +26,7 @@ import {
 } from './atlas-ops-normalize.ts';
 import { applyPatch } from './atlas-ops-entities.ts';
 import { ATLAS_ERROR_CODES } from './atlas-ops-errors.ts';
+import { LAYOUT_SIGNATURE_POLICY_VERSION } from './atlas-layout-signature.ts';
 
 /** 规格中本操作专属的错误码（已登记进 ATLAS_ERROR_CODES）。 */
 const LAYOUT_REQUEST_CONFLICT = ATLAS_ERROR_CODES.LAYOUT_REQUEST_CONFLICT;
@@ -376,7 +377,7 @@ export function compileMapLayoutRequest(op: ParsedOperation, ctx: CompileContext
   const requestId = ctx.makeId('layout_request', op.opId, `map:${mapId}`);
   const turnId = ctx.turnId ?? ctx.anchor.parentTurnId ?? `turn_${ctx.anchor.hostMessageUid}`;
   const rebuild = spec['rebuild'] === true;
-  const signature = signatureOf(canonicalJson({ kind, mapId, spec: merged.spec, rebuild }));
+  const signature = signatureOf(canonicalJson({ policy:LAYOUT_SIGNATURE_POLICY_VERSION,kind, mapId, spec: merged.spec, rebuild }));
 
   const dependencies = [mapId, ...refs.dependencies];
   for (const id of dependencies) if (!result.dependencies.includes(id)) result.dependencies.push(id);

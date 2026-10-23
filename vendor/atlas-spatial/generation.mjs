@@ -113,7 +113,7 @@ function finish(s,ctx,layoutFn){
   for(const part of [...(layout.rooms??[]),...(layout.districts??[]),...(layout.buildings??[])]){
     if(ctx.placement?.[part.id]==='proxy')part.placement='proxy';else delete part.placement;
   }
-  for(const issue of layout.issues??[])s.issues.push(diagnostic(issue.code,'$.layout','空间约束未满足',{entityId:issue.id??null}));
+  for(const issue of layout.issues??[])s.issues.push(diagnostic(issue.code,'$.layout',issue.code==='ROOM_TOPOLOGY_SEARCH_LIMIT'?'房间连接搜索达到本地计算预算，旧场景已保留；请调整单图房间数量或布局条件':issue.code==='ROOM_CONNECTION_NO_SPACE'?'未找到同时满足房间尺寸、连接和锁定位置的布局':'空间约束未满足',{entityId:issue.id??null}));
   if(!layout.ok)return {ok:false,status:'failed',scene:null,kept:previous?clone(previous):null,issues:s.issues,guard:{scope:s.scope,mapId:s.map.id,inputSignature}};
   // Saved physical coordinates and schematic positions remain different concepts.
   for(const a of layout.actors??[])if(!ctx.locks?.actors?.[a.id])a.quality='layout';
@@ -144,7 +144,7 @@ function generateFloorOnce(value,context){
   let s=null;
   try{
     s=setup(value,context,'floor');const ctx=context;
-    s.spec.detailPolicy='explicit-furniture-v2';
+    s.spec.detailPolicy='four-way-full-size-furniture-v3';
     s.constraintKeys=['corridorWidth','corridorLocationRef','rooms','contents','actors','items'];
     s.spec.corridorWidth=finite(s.input.corridorWidth)?s.input.corridorWidth:2;
     const previousRef=s.previous?.constraints?.corridorLocationRef;

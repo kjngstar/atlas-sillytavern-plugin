@@ -1,4 +1,4 @@
-import {readUiSource} from './ui-source-helper.mjs';
+import {readLegacyUiSource} from './ui-source-helper.mjs';
 /**
  * atlas-browser-replay.test.mjs — G03（测试部分）：离线工作台的**浏览器级回放**。
  *
@@ -67,7 +67,7 @@ async function mountReplay(state) {
   document.head.append(style);
 
   mountSeq += 1;
-  const source = `${readUiSource(join(root, "index.js"))}\nexport { renderPanel };\n// g03-replay-${mountSeq}`;
+  const source = `${readLegacyUiSource(join(root, "index.js"))}\nexport { renderPanel };\n// g03-replay-${mountSeq}`;
   const { renderPanel } = await import(
     "data:text/javascript;base64," + Buffer.from(source).toString("base64")
   );

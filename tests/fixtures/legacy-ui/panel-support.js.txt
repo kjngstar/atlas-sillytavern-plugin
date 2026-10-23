@@ -1,0 +1,107 @@
+const NPC_REASON_LABELS = {
+  samePoint: "同地点",
+  nearbyPoint: "附近地点",
+  sameRegion: "同地区",
+  route: "路线",
+  schedule: "日程",
+  relation: "关系",
+  keyword: "关键词",
+  random: "随机事件",
+};
+
+/**
+ * D04：位置来源 → 用户可读标签（口径 = `AtlasCharacterRow.positionSource`）。
+ * 「这条位置是怎么来的」是作者纠偏时最需要知道的一件事：正文观察 / 日程 / 程序模拟 / 你手动拖的。
+ */
+const POSITION_SOURCE_LABELS = {
+  narrative: "正文观察",
+  inferred: "剧情推测",
+  simulation: "程序推演",
+  manual: "作者手动",
+  routine: "日程",
+  unknown: "来源未知",
+  /** H06：位置来自 SQL 世界库（`resolveEffectivePosition` 的解析结果）。 */
+  sql: "SQL 世界库解析",
+};
+
+/**
+ * H06/H07（§10.2）：位置质量 → 用户可读标签。
+ *
+ * 界面必须让作者一眼看出「这个点是量出来的还是估出来的」：
+ * `exact` = 已确认；`approximate` = 合理近似（带范围）；`layout` = 排版示意（不是物理距离）；
+ * `coarse` = 只知道在这个地点（不画点，进名单）。
+ */
+const SQL_POSITION_QUALITY_LABELS = {
+  exact: "位置已确认",
+  approximate: "位置为估计",
+  layout: "仅为示意布局",
+  coarse: "仅知所在地点",
+  unknown: "位置未知",
+};
+
+/** H07：`queryNearby` 的 relevance → 用户可读标签（与 G02 的取值一一对应）。 */
+const SQL_NEARBY_REASON_LABELS = {
+  same_map: "同图相关者",
+  same_location: "同地点",
+  same_region: "同地区",
+};
+
+/**
+ * D05：`tableMap.nearby` 的人物索引（键 = 去掉 `npc:` 前缀的实体 id）。
+ *
+ * `nearby` 是**全量人物表**（含远方，按"是否在身边"排序），所以除了建索引还要标出
+ * `__isNear`：位置 = 当前地点，或当前地点的**子地点**（与 `projectTablesToMapView` 同一口径；
+ * 根地点之间不算相邻——两座城相距几十格）。`__` 前缀字段只在 UI 内部用，不落任何数据。
+ */
+/** 回执状态 → 用户可读标签（与 core 的 AtlasTurnReceiptStatus 对齐）。 */
+const STATUS_LABELS = {
+  committed: "已提交",
+  duplicate: "重复通知",
+  "pending-review": "待审阅",
+  failed: "失败",
+};
+
+/** 底图 dataURL 缓存（worldId → dataUrl | null），避免每次重绘重新拉取。 */
+const mapImageCache = new Map();
+
+
+/**
+ * 0.9.50（M05 动态比例尺条，纯函数，可测）：
+ * 「1 格 = N 米」是地图数据（标定）；左下角标尺条是随相机变化的显示——
+ * 两者关联但不互相修改。S = metersPerCell，P = 当前每格 CSS 像素（cellPx × zoom），
+ * metersPerPixel = S / P；候选标尺距离 D 取 1、2、5 × 10^n 米，
+ * 优先选使标尺条约 80-160 CSS 像素宽的 D（窗口内取最接近 120px 的候选；
+ * 全部候选都在窗外时取与窗口最近的一条）；选定后按真实值绘制，
+ * 不把条长硬截到像素值而保留原标签。
+ */
+
+
+/**
+ * U03 返工：新工作台样式的生产加载入口——<link> 相对本模块 URL 注入一次。
+ * data: URL（测试注入）等非层级地址解析失败时跳过：测试环境用源码/产物断言兜底，
+ * 真实浏览器（http 服务形态）则必须实际加载（验收点：document.styleSheets 包含它）。
+ */
+function ensureWorkbenchStylesheet() {
+  if (typeof document === "undefined" || document.getElementById("atlas-workbench-css")) return;
+  let href = null;
+  try {
+    href = new URL("./ui/atlas-workbench.css", import.meta.url).href;
+  } catch {
+    return; // data: 等非层级模块地址：跳过，不抛错
+  }
+  if (!/^https?:|^file:|^\/|[a-zA-Z]:[\\/]/.test(String(href))) return;
+  const link = document.createElement("link");
+  link.id = "atlas-workbench-css";
+  link.rel = "stylesheet";
+  link.href = String(href);
+  document.head.append(link);
+}
+
+function currentLoreSelectionContext(mode, assistantText = "") {
+  const ctx = SillyTavern.getContext();
+  const recentAssistantTexts = (Array.isArray(ctx?.chat) ? ctx.chat : [])
+    .filter((message) => message?.is_user === false && typeof message?.mes === "string" && message.mes.trim())
+    .slice(-10).map((message) => message.mes);
+  return { chatId: String(ctx?.chatId ?? ""), characterId: ctx?.characterId ?? null,
+    mode, userText: "", assistantText, recentAssistantTexts };
+}

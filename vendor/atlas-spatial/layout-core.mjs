@@ -51,7 +51,7 @@ import * as B from './foundation.mjs';
     }else if(f.type==='table'){
       add('table',x,y,f.w,f.h);
     }else if(f.type==='desk'){
-      add('desk',x,y,f.w,f.h*.68);
+      add('desk',x,y,f.w,f.h);
     }else if(f.type==='bed'){
       add('bed',x,y,f.w,f.h);
       if(f.w>.9&&f.h>.9)add('pillow',x+.1,y+.1,Math.max(.2,f.w-.2),.25);
@@ -92,6 +92,12 @@ import * as B from './foundation.mjs';
       const candidate=floorOnce({...spec,doorBias},previous);
       if(candidate.ok&&candidate.issues.length<best.issues.length)best=candidate;
       if(!unresolved(best))break;
+    }
+    // A full-size counter may divide a small room under the first greedy choice.
+    // Retry wall-first alternatives, without reducing footprints or moving locks.
+    if(unresolved(best)&&(spec.contents?.length??0)<=24){
+      const candidate=floorOnce({...spec,wallFirst:true},previous);
+      if(candidate.ok&&candidate.issues.length<best.issues.length)best=candidate;
     }
     return best;
   }
@@ -136,7 +142,7 @@ import * as B from './foundation.mjs';
         };
         let chosen=null;
         const old=previous?.groups?.find(g=>g.id===f.id&&g.roomId===r.id&&(g.w===f.w&&g.h===f.h||!f.locked&&g.w===f.h&&g.h===f.w));
-        if(old&&(free(old)||!f.locked&&reachablePlacement(old)))chosen=old;
+        if(old&&(!spec.wallFirst||f.locked)&&(free(old)||!f.locked&&reachablePlacement(old)))chosen=old;
         if(f.locked){const q={...f,...f.locked};if(free(q))chosen=q;else{issues.push({id:f.id,code:'DETAIL_LOCK_CONFLICT'});continue;}}
         const candidates=[];
         if(!chosen)for(const y of scanAxis(inner.y,inner.y+inner.h-f.h))for(const x of scanAxis(inner.x,inner.x+inner.w-f.w)){
@@ -160,14 +166,17 @@ import * as B from './foundation.mjs';
         // Dimensions, locked coordinates and the door swing remain unchanged.
         if(!chosen&&!f.locked){
           let tried=0;
+          const alternatives=[];
           for(const [w,h] of [[f.w,f.h],...(f.w!==f.h?[[f.h,f.w]]:[])]){
             for(const y of scanAxis(inner.y,inner.y+inner.h-h))for(const x of scanAxis(inner.x,inner.x+inner.w-w)){
-              if(chosen||tried>=64)break;
-              const q={x,y,w,h};if(!freePath(q))continue;tried++;
-              if(reachablePlacement(q))chosen=q;
+              const q={x,y,w,h};if(freePath(q))alternatives.push(q);
             }
-            if(chosen)break;
           }
+          if(spec.wallFirst)alternatives.sort((a,b)=>{
+            const wall=q=>Math.min(q.x-inner.x,q.y-inner.y,inner.x+inner.w-q.x-q.w,inner.y+inner.h-q.y-q.h);
+            return wall(a)-wall(b)||distance(center(b),door)-distance(center(a),door)||a.y-b.y||a.x-b.x;
+          });
+          for(const q of alternatives){if(chosen||tried++>=64)break;if(reachablePlacement(q))chosen=q;}
         }
         if(!chosen){issues.push({id:f.id,code:'DETAIL_NO_SPACE'});continue;}
         const g=makeGroup({...f,w:chosen.w,h:chosen.h},r,chosen.x,chosen.y);if(f.locked)g.quality='confirmed';groups.push(g);bodies.push(...g.bodies);

@@ -160,8 +160,8 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
     const scoped=diagnosticTools.atlasDiagnosticContext?.({...result.receipt?.anchor,chatUid:captured.state.chatId,
       branchId:captured.state.binding?.branchId??'main',mapId:extra.mapId})??{};
     const issues=diagnosticTools.diagnosticIssues?.(result.receipt?.issues,result.issues)??result.receipt?.issues??result.issues??[];
-    const status=result.receipt?.status,failed=status==='failed',partial=status==='partial';
-    const event={...scoped,level:failed?'error':partial?'warn':'info',source:'map',code,operation,phase:'commit',outcome:failed||partial?'failed':'success',
+    const status=result.receipt?.status,partial=status==='partial',failed=status==='failed'||partial&&result.coreSaved===false;
+    const event={...scoped,level:failed?'error':partial?'warn':'info',source:'map',code,operation,phase:'commit',outcome:failed?'failed':partial?'partial':'success',
       details:{...scoped.details,coreSaved:result.coreSaved===true,saveConfirmed:result.coreSaved===true,
         ...(typeof extra.sceneSaved==='boolean'?{sceneSaved:extra.sceneSaved}:{}),
         receiptStatus:result.receipt?.status??'noop',issueCount:issues.length}};

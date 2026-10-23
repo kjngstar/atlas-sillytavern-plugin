@@ -1,7 +1,8 @@
-import {createMapController,markerPopupPosition,createWorkbenchMapController} from './ui/atlas-map-controller.mjs';
-import { createStarmapShell, atlasWorkbenchTree } from './ui/atlas-starmap-shell.mjs';
-import { mountWorkbench } from './ui/atlas-workbench-shell.mjs';
-import { createSqlViewController } from './ui/atlas-sql-view-controller.mjs';
+import {atlasClockLabel,atlasLegacyNearby,buildTableMapNpcIndex,atlasMapSource,atlasMapLayerInput,atlasMapOccupants} from './ui/atlas-scene-ui-adapter.mjs';
+import {createMapController,markerPopupPosition,createWorkbenchMapController} from './legacy-modules/atlas-map-controller.mjs';
+import { createStarmapShell, atlasWorkbenchTree } from './legacy-modules/atlas-starmap-shell.mjs';
+import { mountWorkbench } from './legacy-modules/atlas-workbench-shell.mjs';
+import { createSqlViewController } from './legacy-modules/atlas-sql-view-controller.mjs';
 import { visibleWorkbenchMaps, workbenchMapPath, workbenchEntity } from './ui/atlas-workbench-data.mjs';
 function renderHistoricalPanel(core, root, api, store, mod, skinPort = null) {
   ensureWorkbenchStylesheet();

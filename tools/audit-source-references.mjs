@@ -7,6 +7,7 @@ const slash = value => value.replaceAll('\\', '/');
 export const DEFAULT_ROOTS = [
   'index.js', 'src/atlas-browser-entry.ts', 'src/atlas-sql-browser-entry.ts',
   'src/atlas-sql-worker-entry.ts', 'src/atlas-production-server.ts', 'atlas-server-plugin/index.mjs',
+  'ui/atlas-reference/index.html',
 ];
 const GENERATED_ENTRIES = {
   'dist/atlas-ui-core.mjs': 'src/atlas-browser-entry.ts',
@@ -31,10 +32,10 @@ export function auditSourceReferences(root, { productionRoots = DEFAULT_ROOTS, g
       if (entry.name.startsWith('.') || IGNORED.has(entry.name)) continue;
       const path = join(directory, entry.name);
       if (entry.isDirectory()) walk(path);
-      else if (/\.(?:ts|mjs|js)$/.test(entry.name)) files.push(slash(relative(root, path)));
+      else if (/\.(?:ts|mjs|js|html)$/.test(entry.name)) files.push(slash(relative(root, path)));
     }
   };
-  for (const directory of ['src', 'lib', 'ui', 'tools', 'tests', 'atlas-server-plugin']) walk(join(root, directory));
+  for (const directory of ['src', 'lib', 'ui', 'vendor', 'tools', 'tests', 'atlas-server-plugin']) walk(join(root, directory));
   for (const file of productionRoots) if (existsSync(join(root, file)) && !files.includes(file)) files.push(file);
   files.sort();
   const present = new Set(files);
@@ -50,6 +51,23 @@ export function auditSourceReferences(root, { productionRoots = DEFAULT_ROOTS, g
   };
   for (const file of files) {
     const text = readFileSync(join(root, file), 'utf8');
+    if(extname(file)==='.html'){
+      const addHtml=(specifier,line,kind)=>{
+        if(/^(?:[a-z]+:|\/\/)/i.test(specifier)){external.push({from:file,specifier,line,kind,typeOnly:false});return;}
+        const to=targetOf(file,specifier.startsWith('.')?specifier:'./'+specifier);
+        const row={from:file,specifier,line,kind,typeOnly:false};
+        if(to)edges.push({...row,to});else unknown.push({...row,reason:'unresolved-relative-reference'});
+      };
+      for(const match of text.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi)){
+        const line=text.slice(0,match.index).split('\n').length,src=match[1].match(/\bsrc\s*=\s*["']([^"']+)["']/i);
+        if(src)addHtml(src[1],line,'html-script');
+        if(/\bid\s*=\s*["']atlas-boot-scripts["']/i.test(match[1])){
+          try{const scripts=JSON.parse(match[2]);if(!Array.isArray(scripts)||scripts.some(x=>typeof x!=='string'))throw Error('invalid script list');for(const script of scripts)addHtml(script,line,'html-boot-script');}
+          catch{unknown.push({from:file,line,kind:'html-boot-script',reason:'invalid-script-manifest'});}
+        }
+      }
+      continue;
+    }
     const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true,
       extname(file) === '.ts' ? ts.ScriptKind.TS : ts.ScriptKind.JS);
     const add = (node, specifier, kind, typeOnly = false) => {

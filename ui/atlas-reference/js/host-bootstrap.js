@@ -10,8 +10,9 @@
     const interaction=initial.preferences??{version:1,singleClickEnter:false,legendCollapsed:false};
     host.preferenceStorage={getItem:()=>JSON.stringify(interaction),setItem:(_,value)=>{Object.assign(interaction,JSON.parse(value));return host.savePreferences({...interaction});}};
     window.AtlasAppearance=await import('../../atlas-appearance-controller.mjs');
-    for(const name of ['skin-runtime','map','presets','preset-ui','ui-model','app']){
-      await new Promise((resolve,reject)=>{const script=document.createElement('script');script.src=`js/${name}.js`;script.onload=resolve;script.onerror=()=>reject(Error(`UI_ASSET_LOAD_FAILED:${name}`));document.body.append(script);});
+    const scripts=JSON.parse(document.getElementById('atlas-boot-scripts').textContent);
+    for(const src of scripts){
+      await new Promise((resolve,reject)=>{const script=document.createElement('script');script.src=src;script.onload=resolve;script.onerror=()=>reject(Error(`UI_ASSET_LOAD_FAILED:${src}`));document.body.append(script);});
     }
     await window.AtlasPreview?.appearanceReady;
     const badge=root.querySelector('.demo-badge');if(badge)badge.textContent='ATLAS';

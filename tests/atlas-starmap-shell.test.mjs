@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
-import { atlasWorkbenchTree, createStarmapShell } from '../ui/atlas-starmap-shell.mjs';
+import { atlasWorkbenchTree, createStarmapShell } from './fixtures/legacy-ui/modules/atlas-starmap-shell.mjs';
 
 const location = (entityId, name, extra = {}) => ({ entityId, name, kind: 'location', ...extra });
 const maps = [

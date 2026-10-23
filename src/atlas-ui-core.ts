@@ -1584,15 +1584,17 @@ export function createAtlasUiCore(deps: {
       const stale = state.chatId !== value.chatId;
       if (result.status === 200 && body.ok && receiptParsed?.ok && (!useSql || body.data?.coreSaved === true || receiptParsed.value.status === 'failed')) {
         const receiptStatus = receiptParsed.value.status;
+        const nativePartial=(body.data?.nativeReceipt as {status?:string}|undefined)?.status==='partial';
         commitDiagnostic({
-          level: receiptStatus === "failed" ? "error" : "info", source: "ui",
-          code: receiptStatus === "committed" ? "COMMIT_SUCCEEDED" :
+          level: receiptStatus === "failed" ? "error" : nativePartial ? "warn" : "info", source: "ui",
+          code: receiptStatus === "committed" ? nativePartial ? "COMMIT_PARTIAL" : "COMMIT_SUCCEEDED" :
             receiptStatus === "duplicate" ? "TURN_DUPLICATE" : "COMMIT_FAILED",
           operation: "commit", phase: "receipt",
-          outcome: receiptStatus === "committed" ? "success" :
+          outcome: receiptStatus === "committed" ? nativePartial ? "partial" : "success" :
             receiptStatus === "duplicate" ? "skipped" : "failed",
           httpStatus: result.status, retryable: receiptParsed.value.retryable,
           details: { coreCommitted: receiptStatus === "committed" || receiptStatus === "duplicate",
+            ...(nativePartial?{receiptStatus:'partial'}:{}),
             ...(typeof body.data?.coreSaved === 'boolean' ? { coreSaved: body.data.coreSaved, saveConfirmed: body.data.coreSaved } : {}) },
         });
         if (stale) diagnostic({ level: "warn", source: "ui", code: "STALE_CHAT_RESPONSE_DROPPED",

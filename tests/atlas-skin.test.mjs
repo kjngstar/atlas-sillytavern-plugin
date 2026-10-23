@@ -23,7 +23,7 @@ globalThis.document = dom.window.document;
 globalThis.HTMLElement = dom.window.HTMLElement;
 
 const { ATLAS_SKIN_VARIABLES, ATLAS_SKIN_THEMES, normalizeAtlasSkinTheme, applyAtlasSkin } =
-  await import("../atlas-extension/index.js");
+  await import("./fixtures/legacy-ui/skin.mjs");
 
 const cssText = readFileSync(fileURLToPath(new URL("../style.css", import.meta.url)), "utf8");
 

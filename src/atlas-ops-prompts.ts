@@ -99,6 +99,7 @@ const PHASE_TASK: Record<Phase, string[]> = {
     '心理/倾向可以依据人物设定合理更新，并保持简短。',
     '正文明确建立或改变人物关系时用 relation.upsert 保存；只有同场出现不证明互相认识。明确的消息、公告或传言用 information.propose 登记，公开发布写 secrecy=public 与 spread_at_ref，明确告知谁写 recipient_ref；地点有风声不等于主角已听见。不要把每句闲聊变成传言，也不要把秘密设成公开。',
     '已完成行为用 event.propose 的 activity={kind:dialogue/meal/rest/sleep/travel/combat/other,completed:true} 和 time_hint={elapsed_s:明确秒数} 或 {min_s,nominal_s,max_s}。未完成计划用completed:false，不能推进时间。已完成赶路可引用真实subject_ref人物和route_ref路线，由程序按距离及人物能力计算耗时。',
+    '同一正文中的行为有明确先后（先、随后、之后、再）时，每个 event.propose 使用唯一 ref="new:别名"，后一个 time_hint.after_ref 指向本轮前一个事件的 ref；同时进行才用 time_hint.same_interval_as。两者互斥，不用 a0 等数组下标，不引用被省略或无效的事件。例如先走60秒再交谈120秒：第一条 ref="new:walk",time_hint={elapsed_s:60}；第二条 ref="new:talk",time_hint={elapsed_s:120,after_ref:"new:walk"}。顺序应合计180秒，同时应取120秒；没有依据不要自行声称先后。',
   ],
   geography: [
     '任务：处理这一张地图的层级、范围标定或路线估计。',

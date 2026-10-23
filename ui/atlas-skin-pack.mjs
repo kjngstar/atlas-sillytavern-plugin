@@ -2,7 +2,6 @@
 export const SKIN_PACK_LIMITS=Object.freeze({zip:8*1024*1024,total:32*1024*1024,resource:8*1024*1024,manifest:64*1024,entries:96,side:2048,pixels:8388608});
 const fail=code=>{throw Object.assign(Error(code),{code});};
 const ascii=new TextDecoder('utf-8',{fatal:true}),encoder=new TextEncoder();
-const own=(v,k)=>Object.prototype.hasOwnProperty.call(v,k);
 function fields(v,keys){if(!v||typeof v!=='object'||Array.isArray(v)||Object.keys(v).some(k=>!keys.includes(k)))fail('SKIN_PACK_FIELD_INVALID');}
 function bytesOf(v){if(Object.prototype.toString.call(v)==='[object ArrayBuffer]')return new Uint8Array(v);if(ArrayBuffer.isView(v))return new Uint8Array(v.buffer,v.byteOffset,v.byteLength);fail('SKIN_PACK_BYTES_INVALID');}
 function pathAllowed(path){return path==='manifest.json'||/^assets\/(?:[a-zA-Z0-9_-][a-zA-Z0-9_.-]*\/)*[a-zA-Z0-9_-][a-zA-Z0-9_.-]*\.(png|webp)$/.test(path);}

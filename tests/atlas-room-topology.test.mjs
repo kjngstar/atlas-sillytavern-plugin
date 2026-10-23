@@ -108,7 +108,7 @@ test('父图也必须复用子空间陈设 ID，不能从另一视角再加一�
 });
 test('不能满足直接连接时拒绝生成并保留原图，不用走廊冒充相通',()=>{
  const ctx=context(),previous=Kit.generateFloor(spec,ctx).scene;
- const out=Kit.generateFloor(spec,{...ctx,map:{...ctx.map,frame:{cols:13,rows:24}},previousScene:previous});
+ const out=Kit.generateFloor(spec,{...ctx,map:{...ctx.map,frame:{cols:11,rows:24}},previousScene:previous});
  assert.equal(out.ok,false);assert.ok(out.issues.some(i=>i.code==='ROOM_CONNECTION_NO_SPACE'));assert.deepEqual(out.kept,previous);
  const portal=context(floor,{routes:[{...routes[0],kind:'portal'}]});assert.deepEqual(portal.roomConnections,[],'传送门不能强制共墙');
 });

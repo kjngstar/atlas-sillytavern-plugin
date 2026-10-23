@@ -2,7 +2,7 @@
 import {spawn} from 'node:child_process';
 import {mkdirSync,writeFileSync} from 'node:fs';
 import {setTimeout as delay} from 'node:timers/promises';
-import {chromium} from 'playwright';
+import {launchAtlasBrowser} from './atlas-browser.mjs';
 // This fixture explicitly selects a four-request cap; the product default is unrestricted.
 const MAX_BATCHES_PER_TURN=4;
 /** 已完成 `turns` 个楼层时：每层至少一批决策调用，总量不得超过预算×楼层数。 */
@@ -13,7 +13,7 @@ const port=Number(process.env.ATLAS_VERIFY_PORT||4298),base=`http://127.0.0.1:${
 const report={checks:{},errors:[],failed:[]};
 function check(name,ok,detail){report.checks[name]={ok:!!ok,detail};if(!ok)report.failed.push(name);}
 const server=spawn(process.execPath,['dev-preview/serve.mjs'],{env:{...process.env,ATLAS_PREVIEW_PORT:String(port),ATLAS_PREVIEW_NO_OPEN:'1'},stdio:'ignore'});
-const browser=await chromium.launch({headless:true,executablePath:process.env.ATLAS_CHROME_PATH||'C:/Program Files/Google/Chrome/Application/chrome.exe'});
+const browser=await launchAtlasBrowser();
 async function open({afterOnly=false,configure=true,rewriteContext=false,readDuringSave=false}={}){
  const p=await browser.newPage({viewport:{width:1600,height:1000}});p.on('pageerror',e=>report.errors.push(e.message));
  if(rewriteContext)await p.route('**/release/atlas-ui-extension/index.js',async route=>{const res=await route.fetch();const src=await res.text();const marker='getCommitContext: async (assistantText) => {';
