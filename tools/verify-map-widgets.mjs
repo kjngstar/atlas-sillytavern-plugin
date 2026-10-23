@@ -21,21 +21,42 @@ export async function verifyMapWidgets({open,check,dir}){
  check('widgets:restore-preserves-mode-and-legend',await f.locator('#mapModeSwitcher').inputValue()==='heat'&&await f.locator('#legendToggle').getAttribute('aria-expanded')==='false');
  await p.screenshot({path:`${dir}/map-tools-expanded.png`});
  // Check actual hit targets across skin/profile/small viewport combinations.
- for(const width of [360,540,720,1280,1440]){
-  await p.setViewportSize({width,height:1000});
+ const viewports=[
+  ...[360,540,720,1280,1440].map(width=>({width,height:1000})),
+  ...[1009,1100,1280,1440].map(width=>({width,height:720})),
+ ];
+ for(const {width,height} of viewports){
+  await p.setViewportSize({width,height});
   for(const skin of ['builtin.starmap','builtin.parchment'])for(const profile of ['full','mapFocus','mapOnly']){
    await f.evaluate(async({skin,profile})=>{await AtlasPreview.setTheme(skin);await AtlasPreview.setUIProfile(profile);},{skin,profile});
    const geometry=await f.evaluate(()=>{const toggle=document.getElementById('mapWidgetsToggle'),box=toggle.getBoundingClientRect(),viewport=document.getElementById('viewport').getBoundingClientRect();return {hit:document.elementFromPoint(box.x+box.width/2,box.y+box.height/2)?.closest('button')===toggle,inside:box.x>=viewport.x&&box.right<=viewport.right,overflow:document.documentElement.scrollWidth>innerWidth};});
-   check(`widgets:restore-accessible:${width}:${skin}:${profile}`,geometry.hit&&geometry.inside&&!geometry.overflow,geometry);
+   check(`widgets:restore-accessible:${width}x${height}:${skin}:${profile}`,geometry.hit&&geometry.inside&&!geometry.overflow,geometry);
    // A one-frame center sample races HUD/profile transitions. Trial clicks
    // verify each real target is visible, stable and unobstructed without zooming.
    const hits=[];
-   for(const id of ['mapModeSwitcher','zIn','zOut','zFit','zGrid']){
-    const target=f.locator('#'+id);if(id==='mapModeSwitcher'&&profile==='mapOnly')continue;
-    await target.click({trial:true});hits.push(id);
+   for(const selector of ['#mapModeSwitcher','#zIn','#zOut','#zFit','#zGrid','[data-export="map"]']){
+    const target=f.locator(selector);if(selector==='#mapModeSwitcher'&&profile==='mapOnly')continue;
+    const box=await target.boundingBox();
+    await target.click({trial:true,position:{x:box.width/2,y:box.height/2}});hits.push(selector);
    }
-   check(`widgets:expanded-hit-targets:${width}:${skin}:${profile}`,true,hits);
-   await f.locator('#mapWidgetsToggle').click();check(`widgets:hide:${width}:${skin}:${profile}`,await f.locator('#mapHudWidgets').isHidden());
+   check(`widgets:expanded-hit-targets:${width}x${height}:${skin}:${profile}`,true,hits);
+   if(height===720&&profile==='full'){
+    const clear=await f.evaluate(()=>{
+     const mini=document.querySelector('.hud-mini'),a=mini.getBoundingClientRect();
+     return !mini.getClientRects().length||['.hud-nav','.hud-readout'].every(selector=>{const b=document.querySelector(selector).getBoundingClientRect();return a.right<=b.left||a.left>=b.right||a.bottom<=b.top||a.top>=b.bottom;});
+    });
+    check(`widgets:short-map-no-hud-overlap:${width}:${skin}`,clear);
+    const grid=f.locator('#zGrid'),wasOn=await grid.evaluate(el=>el.classList.contains('on'));
+    await grid.click({position:{x:17,y:17}});
+    check(`widgets:short-map-grid-click:${width}:${skin}`,await grid.evaluate(el=>el.classList.contains('on'))!==wasOn);
+    await grid.click({position:{x:17,y:17}});
+    await f.locator('[data-export="map"]').click({position:{x:17,y:17}});
+    await f.locator('#demoModal').waitFor({state:'visible'});
+    check(`widgets:short-map-export-click:${width}:${skin}`,(await f.locator('#modalBody').innerText()).includes('下载地图 JSON'));
+    await f.locator('#modalClose').click();
+    await p.screenshot({path:`${dir}/map-tools-short-${width}-${skin.split('.').pop()}.png`});
+   }
+   await f.locator('#mapWidgetsToggle').click();check(`widgets:hide:${width}x${height}:${skin}:${profile}`,await f.locator('#mapHudWidgets').isHidden());
    await f.locator('#mapWidgetsToggle').click();
    if(width===360&&profile==='full'&&skin==='builtin.parchment')await p.screenshot({path:`${dir}/map-tools-mobile.png`});
   }

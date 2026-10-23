@@ -26,7 +26,7 @@ def decode(path):
 
 def audit(directory):
     base = Path(directory).resolve()
-    manifest = json.loads((base / "manifest.json").read_text())
+    manifest = json.loads((base / "manifest.json").read_text(encoding="utf-8"))
     roles = manifest["theme"].get("assets", {})
     if roles.get("avatarFrame") and roles.get("avatarFrame") == roles.get("windowFrame"):
         raise ValueError("ARTWORK_AVATAR_NEEDS_OWN_FRAME")

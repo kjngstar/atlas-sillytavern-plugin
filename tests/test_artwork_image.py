@@ -1,8 +1,10 @@
 """Run with: python -m unittest discover -s tests -p test_artwork_image.py"""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from PIL import Image
@@ -17,6 +19,26 @@ class ArtworkTest(unittest.TestCase):
     def test_shipped_skins_decode(self):
         for name in ("qingkong-xinjian", "shanhezhi"):
             self.assertTrue(artwork.audit(ROOT / "skins" / name)["ok"])
+
+    def test_build_shipped_skins_without_utf8_mode(self):
+        # Exercise the real Node -> Python builder with a non-UTF-8 locale,
+        # including on Linux CI; disabling coercion keeps LC_ALL=C as ASCII.
+        env = dict(os.environ, PYTHONUTF8="0", PYTHONCOERCECLOCALE="0",
+                   LC_ALL="C", ATLAS_ARTWORK_PYTHON=sys.executable)
+        for name in ("qingkong-xinjian", "shanhezhi"):
+            with self.subTest(skin=name), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "skin.zip"
+                result = subprocess.run([
+                    "node", "--input-type=module", "-e",
+                    "import {buildArtworkSkin} from './tools/build-artwork-skin.mjs';"
+                    "console.log(JSON.stringify(await buildArtworkSkin({directory:process.argv[1],output:process.argv[2]})));",
+                    str(ROOT / "skins" / name), str(output),
+                ], cwd=ROOT, env=env, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace"))
+                report = json.loads(result.stdout.decode("utf-8"))
+                self.assertTrue(output.is_file())
+                self.assertTrue(report["pixelAudit"]["ok"])
+                self.assertEqual(len(report["pixelAudit"]["images"]), report["assets"])
 
     def test_contain_preserves_shape_alpha_and_source(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -51,7 +73,7 @@ class ArtworkTest(unittest.TestCase):
                 (base / "manifest.json").write_text(json.dumps(manifest))
                 output = base / "skin.zip"
                 output.write_bytes(b"previous")
-                result = subprocess.run(["node", "--input-type=module", "-e", "import {buildArtworkSkin} from './tools/build-artwork-skin.mjs';await buildArtworkSkin({directory:process.argv[1],output:process.argv[2]});", str(base), str(output)], cwd=ROOT, capture_output=True)
+                result = subprocess.run(["node", "--input-type=module", "-e", "import {buildArtworkSkin} from './tools/build-artwork-skin.mjs';await buildArtworkSkin({directory:process.argv[1],output:process.argv[2]});", str(base), str(output)], cwd=ROOT, env=dict(os.environ, ATLAS_ARTWORK_PYTHON=sys.executable), capture_output=True)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(output.read_bytes(), b"previous")
 

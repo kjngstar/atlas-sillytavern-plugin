@@ -20,6 +20,8 @@
 #atlasDemo .hud-modes{top:16px;right:124px;left:auto;padding:0;border:0;background:none;box-shadow:none;transform:none;}
 #atlasDemo .hud-modes select{width:102px;min-height:34px;}
 #atlasDemo .hud-nav{top:68px;}
+/* Reserve the right-hand navigation column even when the map is short. */
+#atlasDemo .hud-mini{right:72px;}
 @media(max-width:1100px){
  #atlasDemo .hud-modes{top:76px;left:16px;right:auto;}
  #atlasDemo .hud-nav{top:68px;}
