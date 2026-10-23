@@ -1,0 +1,163 @@
+{
+  "kind": "atlas-skin-pack",
+  "schemaVersion": 1,
+  "skinApiVersion": 1,
+  "id": "user.qingkong-xinjian",
+  "name": "晴空信笺",
+  "theme": {
+    "kind": "atlas-ui-theme",
+    "schemaVersion": 1,
+    "id": "user.qingkong-xinjian",
+    "baseTheme": "builtin.parchment",
+    "tokens": {
+      "ui.window.bg": "#f5f8fa",
+      "ui.window.border": "#8cb6cd",
+      "ui.panel.bg": "#fbf9f2",
+      "ui.panel.border": "#c8dbe6",
+      "ui.text.primary": "#233d52",
+      "ui.text.muted": "#52677a",
+      "ui.text.onAccent": "#ffffff",
+      "ui.accent": "#27678f",
+      "ui.font.family": "sans",
+      "ui.window.radius": 14,
+      "ui.panel.radius": 8,
+      "ui.control.radius": 6,
+      "ui.spacing": 14,
+      "ui.window.frameSlice": 60,
+      "ui.window.frameWidth": 18,
+      "ui.panel.frameSlice": 24,
+      "ui.panel.frameWidth": 6,
+      "ui.control.frameSlice": 24,
+      "ui.control.frameWidth": 4,
+      "ui.input.frameSlice": 24,
+      "ui.input.frameWidth": 4,
+      "ui.selection.frameSlice": 24,
+      "ui.selection.frameWidth": 4,
+      "ui.selection.bg": "#e4f1f9",
+      "ui.selection.text": "#233d52",
+      "ui.status.info": "#27678f",
+      "ui.status.success": "#346e60",
+      "ui.status.warning": "#875d25",
+      "ui.status.error": "#a14848",
+      "map.canvas.bg": "#f5f9fb",
+      "map.grid.minor": "#bccfdc",
+      "map.label.primary": "#29465b",
+      "map.label.background": "#fcfaf4",
+      "map.marker.character": "#326b94",
+      "map.marker.place": "#3a7793",
+      "map.marker.item": "#916b35",
+      "map.marker.message": "#4a75a0",
+      "map.marker.event": "#a16c2c",
+      "map.marker.exit": "#397c88",
+      "map.road.stroke": "#537c96",
+      "map.water.stroke": "#568eac",
+      "map.water.fill": "#c1e1ee",
+      "map.buildingOutline.stroke": "#6388a0",
+      "map.buildingOutline.fill": "#e0ebef",
+      "map.floorWall.stroke": "#47667e",
+      "map.floorWall.fill": "#c3d6e1",
+      "map.corridor.stroke": "#7398af",
+      "map.corridor.fill": "#dceaf2",
+      "map.furniture.stroke": "#8c7250",
+      "map.furniture.fill": "#ead9bd",
+      "map.texture.opacity": 0.08,
+      "map.backdrop.opacity": 0.18
+    },
+    "components": {
+      "frame": "parchment",
+      "panels": "paper",
+      "buttons": "outlined",
+      "icons": "line"
+    },
+    "mapStyles": {
+      "markers": "classic",
+      "road": "technical",
+      "water": "ink",
+      "buildingOutline": "ink",
+      "floorWall": "technical",
+      "furniture": "ink"
+    },
+    "options": {
+      "motion": false,
+      "radar": false,
+      "coordinates": false
+    },
+    "assets": {
+      "windowFrame": "cloud-frame",
+      "windowBackdrop": "sky-letter",
+      "avatarFrame": "cloud-frame",
+      "panelTexture": "letter-paper",
+      "panelFrame": "letter-frame",
+      "controlFrame": "letter-frame",
+      "controlActiveFrame": "letter-frame",
+      "inputFrame": "letter-frame",
+      "selectionFrame": "letter-frame",
+      "divider": "airmail-divider",
+      "mapTexture": "letter-paper",
+      "mapBackdrop": "sky-letter",
+      "characterMarker": "character",
+      "placeMarker": "place",
+      "itemMarker": "item",
+      "messageMarker": "message",
+      "eventMarker": "event",
+      "exitMarker": "exit"
+    }
+  },
+  "assets": [
+    {
+      "id": "airmail-divider",
+      "path": "assets/airmail-divider.png",
+      "mime": "image/png"
+    },
+    {
+      "id": "character",
+      "path": "assets/character.png",
+      "mime": "image/png"
+    },
+    {
+      "id": "cloud-frame",
+      "path": "assets/cloud-frame.png",
+      "mime": "image/png"
+    },
+    {
+      "id": "event",
+      "path": "assets/event.png",
+      "mime": "image/png"
+    },
+    {
+      "id": "exit",
+      "path": "assets/exit.png",
+      "mime": "image/png"
+    },
+    {
+      "id": "item",
+      "path": "assets/item.png",
+      "mime": "image/png"
+    },
+    {
+      "id": "letter-frame",
+      "path": "assets/letter-frame.png",
+      "mime": "image/png"
+    },
+    {
+      "id": "letter-paper",
+      "path": "assets/letter-paper.webp",
+      "mime": "image/webp"
+    },
+    {
+      "id": "message",
+      "path": "assets/message.png",
+      "mime": "image/png"
+    },
+    {
+      "id": "place",
+      "path": "assets/place.png",
+      "mime": "image/png"
+    },
+    {
+      "id": "sky-letter",
+      "path": "assets/sky-letter.webp",
+      "mime": "image/webp"
+    }
+  ]
+}

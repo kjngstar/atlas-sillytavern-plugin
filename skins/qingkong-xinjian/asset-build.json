@@ -1,0 +1,263 @@
+{
+  "method": "built-in image_gen; alpha-preserving crop, resize and encoding with Pillow",
+  "generatedOn": "2026-10-23",
+  "generation": {
+    "method": "built-in image_gen",
+    "date": "2026-10-23",
+    "prompts": {
+      "backdrop": "Use case: stylized-concept. Asset type: finished wide raster background artwork for a real application skin titled 晴空信笺, meaning Clear Sky Letters. Create an elegant airy illustrated letter-paper world: very pale warm ivory fine stationery paper across the middle, luminous soft sky blue around the outer edges, delicate sunlit white cumulus clouds near the upper corners and bottom edge, a small folded blue paper envelope and one gently floating ivory paper airplane at the far lower-right edge. Restrained watercolor and refined gouache, fine natural paper grain, clean contemporary Japanese stationery sensibility, tranquil daylight. Wide landscape 3:2 composition. The central 75 percent must be exceptionally quiet almost blank ivory-blue paper, light and low contrast to sit behind dense UI and a map. Peripheral details only, no large objects in the center. Flat artwork fills the whole canvas edge to edge. No UI mockup, no lettering, no logos, no watermark, no gradients that become dark, no photographic desk, no frame.",
+      "frame": "Use case: stylized-concept. Asset type: a SINGLE real transparent 9-slice square UI window frame asset for the application skin 晴空信笺 (Clear Sky Letters). Square front-on orthographic image, centered nearly filling the canvas with equal 3 percent transparent outside margin. Entire inside of the square frame is fully transparent, not white paper. A refined thin layered stationery border in clear sky blue and warm off-white paper, a precise dark muted blue hairline keyline and subtle paper emboss. A small sculpted soft white cloud hugs each corner, tiny elegant pale-gold sun detail at upper right. Clouds stay entirely within the outer 14 percent of the image. Middle stretches of all four edges are simple straight continuous narrow blue paper strips suitable for 9-slice stretching; corners occupy less than 18 percent of each edge. Gently rounded corners, no perspective. Quiet sophisticated flat gouache with exquisite paper grain and just a touch of relief, crisply readable at small scale. Transparent background and transparent large central opening. No letters, no logos, no watermark, no checkerboard, no filled background, no separate icons, no mockup.",
+      "markers": "Use case: stylized-concept. Asset type: one finished transparent game/UI icon sprite atlas for the skin 晴空信笺 / Clear Sky Letters. Six distinct tiny stationery enamel illustrations, arranged in an exact regular 3 columns by 2 rows square grid with generous empty transparent gutters and no overlap. Each cell has one centered icon and the same scale. Top row left: a small friendly person bust silhouette with blue hair and cream shirt, representing character. Top row middle: a charming tiny blue-roofed white house with a small location-pin outline, representing place. Top row right: a neatly tied cream parcel with a blue ribbon, representing item. Bottom row left: an open ivory envelope with a blue folded letter, representing message. Bottom row middle: a radiant warm golden sun with a tiny blue ribbon, representing event. Bottom row right: a clean sky-blue compass arrow pointing northeast emerging from a tiny open white doorway, representing exit. Cohesive premium painted paper-cut and enamel style, flat orthographic, chunky simple silhouettes, muted dark blue keylines, ivory and sky blue with very restrained peach and gold. All six must be distinguishable when reduced to 32 pixels. Actual transparent background throughout, transparent gaps, no tile backgrounds, no text, no labels, no shadows outside each icon, no watermark. Square atlas.",
+      "control": "Use case: stylized-concept. Asset type: SINGLE transparent square 9-slice UI control border for 晴空信笺 / Clear Sky Letters application skin. Front-on orthographic square, equal 4 percent transparent margin outside. A very slim, restrained double-line frame made of pale blue letter-paper ribbon, warm ivory inner lip and a fine muted navy outline. Gently rounded stationery corners, tiny warm-gold pin at each corner but absolutely no clouds, flowers, letters or other ornaments. All four edges are perfectly straight simple narrow strips in their middle 70 percent, for stretching into both long buttons and large rectangular panels. Border occupies only the outer 8 percent, central 80 percent COMPLETELY TRANSPARENT. Subtle premium fine-paper texture. Crisp high clarity at small size, understated, flat not dimensional, no drop shadow. Transparent outside AND transparent center; no checkerboard, no white fill, no text, no mockup, no other objects.",
+      "paper": "Use case: stylized-concept. Asset type: one seamless square raster texture tile for the 晴空信笺 / Clear Sky Letters application skin, used behind small dark text. Uniform extremely pale warm ivory fine cotton letter paper with a faint cool blue undertone, microscopic delicate fibers and subtle natural grain. Flat evenly lit top-down material scan, no scene. Nearly invisible variation: maximum subtlety, no marks, no decorations, no seams, no folds, no corners, no vignette, no noise speckles, no text, no ruled lines, no cloud illustrations. Edge-to-edge seamless paper only.",
+      "divider": "Use case: stylized-concept. Asset type: one transparent horizontal UI section divider ornament for 晴空信笺 / Clear Sky Letters. Single centered horizontal delicate muted sky-blue ink line spanning 88 percent of a very wide canvas, a tiny ivory folded paper airplane with a fine dark-blue outline in the middle and a subtle small golden sun disk behind it, short dotted airmail flight trails adjoining the airplane. Restrained refined paper-cut gouache illustration, crisp and clean, no words. Wide 3:1 image, divider occupies only central 35 percent of height, huge actual transparent empty space above and below and transparent outside. Keep the ornament tiny and the line hair-thin, designed to render at 160 pixels wide in a letter-paper interface. No frame, no filled background, no checkerboard, no text, no logos, no watermark."
+    },
+    "files": {
+      "backdrop": "exec-415128a0-0dd2-4df1-b3b8-30d837e64ef6.png",
+      "frame": "exec-ac4ceede-1a1d-4195-a139-ae4ac112c191.png",
+      "markers": "exec-9dc31f38-cb6d-4f80-ab97-eae4a0703d2e.png",
+      "control": "exec-ccf77ab4-2969-451f-87ab-30fc8210f3ea.png",
+      "paper": "exec-464129df-db38-450f-b901-c8f50777adbf.png",
+      "divider": "exec-4ebdf34e-9825-41f4-88bb-5724c8c6fb7c.png"
+    },
+    "sourceSha256": {
+      "backdrop": "5dffc3954688d5bfdeca423a6b5e7d573501b7e7116ec4c35ab429f026bb1c88",
+      "frame": "f449eb14322e09753caab29c7517797d592f9170f45346152d864c0a26557c87",
+      "markers": "9d2b6fa15ceb5e814a995fa18becd1810808a88b60ec417473907b2ead06ea90",
+      "control": "27bb3869b8a0b9ed2cbbd8a7cf6c1be5a43188657f643c1fcd9e1388663d308a",
+      "paper": "a62fca2c51b7a6c9fda1f76835b86d580a207e7b442f2ec7153cc4dc0de3873c",
+      "divider": "3171cf1dbf8a30ef89a85431f7469ed1eac48b3f8805b2065fbf545ca0f846ec"
+    }
+  },
+  "runtimeAssets": [
+    {
+      "path": "assets/sky-letter.webp",
+      "width": 1536,
+      "height": 1024,
+      "bytes": 86004,
+      "sha256": "936074520e284fc81045cbac05ad72db06847413fd217a7738b03f37e91a05f8",
+      "crop": null
+    },
+    {
+      "path": "assets/letter-paper.webp",
+      "width": 256,
+      "height": 256,
+      "bytes": 1428,
+      "sha256": "376400c9ddfd654d2e94fd4746e4bf746df5a6709e075eade5b6610c49572f56",
+      "crop": null
+    },
+    {
+      "path": "assets/cloud-frame.png",
+      "width": 256,
+      "height": 256,
+      "bytes": 32821,
+      "sha256": "4a9b533849854b76bdd7caee6930428b1363bbad47545cd1443a0886cb6401ba",
+      "crop": [
+        20,
+        29,
+        1234,
+        1211
+      ]
+    },
+    {
+      "path": "assets/letter-frame.png",
+      "width": 192,
+      "height": 192,
+      "bytes": 12416,
+      "sha256": "2b96aaa2064427e81f86171143c8872f96f0270f2a218b4a01c544b250e06332",
+      "crop": [
+        51,
+        53,
+        1204,
+        1201
+      ]
+    },
+    {
+      "path": "assets/airmail-divider.png",
+      "width": 512,
+      "height": 112,
+      "bytes": 28824,
+      "sha256": "ef9ed547f0227bf54d5b68f5fc31653ef7d01fadae8fac4183c700c556ddf28a",
+      "crop": [
+        88,
+        293,
+        2084,
+        429
+      ]
+    },
+    {
+      "path": "assets/character.png",
+      "width": 96,
+      "height": 96,
+      "bytes": 13317,
+      "sha256": "ede5d77bef32e9c9eda7df638c41834ee8cf383c86d09faea5345259d79d58a5",
+      "crop": {
+        "sourceCell": [
+          0,
+          0,
+          418,
+          627
+        ],
+        "trimWithinCell": [
+          37,
+          172,
+          384,
+          615
+        ],
+        "fitBox": [
+          84,
+          84
+        ],
+        "transparentCanvas": [
+          96,
+          96
+        ]
+      }
+    },
+    {
+      "path": "assets/place.png",
+      "width": 96,
+      "height": 96,
+      "bytes": 16063,
+      "sha256": "3cc2d6286499ec5f5ea47d61796dbbf4b7d9819d829c2df134f9f5eeecc0b0d8",
+      "crop": {
+        "sourceCell": [
+          418,
+          0,
+          836,
+          627
+        ],
+        "trimWithinCell": [
+          22,
+          214,
+          417,
+          582
+        ],
+        "fitBox": [
+          84,
+          84
+        ],
+        "transparentCanvas": [
+          96,
+          96
+        ]
+      }
+    },
+    {
+      "path": "assets/item.png",
+      "width": 96,
+      "height": 96,
+      "bytes": 16310,
+      "sha256": "957bb4723eddad31b95ea5b4ef09d884a46a73d7e127660b93ceed55a85ea735",
+      "crop": {
+        "sourceCell": [
+          836,
+          0,
+          1254,
+          627
+        ],
+        "trimWithinCell": [
+          36,
+          240,
+          398,
+          575
+        ],
+        "fitBox": [
+          84,
+          84
+        ],
+        "transparentCanvas": [
+          96,
+          96
+        ]
+      }
+    },
+    {
+      "path": "assets/message.png",
+      "width": 96,
+      "height": 96,
+      "bytes": 14527,
+      "sha256": "7f721c616fd48646196f03009e54860cd1470a9a21de59a47f4f8b6faf979484",
+      "crop": {
+        "sourceCell": [
+          0,
+          627,
+          418,
+          1254
+        ],
+        "trimWithinCell": [
+          34,
+          119,
+          394,
+          451
+        ],
+        "fitBox": [
+          84,
+          84
+        ],
+        "transparentCanvas": [
+          96,
+          96
+        ]
+      }
+    },
+    {
+      "path": "assets/event.png",
+      "width": 96,
+      "height": 96,
+      "bytes": 15001,
+      "sha256": "a7ea7a93f491e29a0a3a76cfa9f324a1af36d176e4c87b1c3e02eeac9bd19c47",
+      "crop": {
+        "sourceCell": [
+          418,
+          627,
+          836,
+          1254
+        ],
+        "trimWithinCell": [
+          31,
+          80,
+          389,
+          445
+        ],
+        "fitBox": [
+          84,
+          84
+        ],
+        "transparentCanvas": [
+          96,
+          96
+        ]
+      }
+    },
+    {
+      "path": "assets/exit.png",
+      "width": 96,
+      "height": 96,
+      "bytes": 15351,
+      "sha256": "a109f6064ac4591716d9c8c3271e3464414357df316eba3ded8bc44eec26c014",
+      "crop": {
+        "sourceCell": [
+          836,
+          627,
+          1254,
+          1254
+        ],
+        "trimWithinCell": [
+          49,
+          112,
+          390,
+          443
+        ],
+        "fitBox": [
+          84,
+          84
+        ],
+        "transparentCanvas": [
+          96,
+          96
+        ]
+      }
+    }
+  ]
+}
