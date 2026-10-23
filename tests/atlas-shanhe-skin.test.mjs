@@ -19,16 +19,16 @@ function rootFixture(){
 }
 test('Shanhe real artwork roundtrips through the shipped ZIP importer within budgets',async()=>{
  const original=await artwork(),bytes=await writeSkinPack(original),restored=await readSkinPack(bytes);
- assert.equal(restored.id,'user.shanhezhi');assert.equal(restored.files.length,13);assert.equal(Object.keys(restored.theme.assets).length,18);
+ assert.equal(restored.id,'user.shanhezhi');assert.equal(restored.files.length,14);assert.equal(Object.keys(restored.theme.assets).length,18);
  assert.ok(bytes.length<512*1024);assert.ok(original.files.reduce((n,f)=>n+f.width*f.height,0)<SKIN_PACK_LIMITS.pixels);
  for(const file of restored.files){assert.deepEqual(file.bytes,original.files.find(f=>f.id===file.id).bytes);assert.ok(file.width<=2048&&file.height<=2048);}
 });
-test('18 artwork roles share exactly 13 decoded resources and release each exactly once',async()=>{
+test('18 artwork roles share exactly 14 decoded resources and release each exactly once',async()=>{
  const pack=await artwork();let created=0,decoded=0,revoked=0,closed=0;
  const loader=createSkinAssetLoader({urlApi:{createObjectURL:()=>`blob:fixture-${++created}`,revokeObjectURL:()=>revoked++},decode:async blob=>{decoded++;const info=imageInfo(new Uint8Array(await blob.arrayBuffer()),blob.type);return {...info,close:()=>closed++};}});
  const prepared=await loader.prepare(pack,pack.theme);
- assert.equal(created,13);assert.equal(decoded,13);assert.equal(prepared.resources.mapBackdrop,prepared.resources.windowBackdrop);assert.equal(prepared.resources.avatarFrame,prepared.resources.windowFrame);assert.equal(prepared.resources.mapTexture,prepared.resources.panelTexture);assert.equal(prepared.resources.inputFrame,prepared.resources.panelFrame);assert.equal(prepared.resources.controlFrame,prepared.resources.panelFrame);
- prepared.release();prepared.release();assert.equal(revoked,13);assert.equal(closed,13);
+ assert.equal(created,14);assert.equal(decoded,14);assert.equal(prepared.resources.mapBackdrop,prepared.resources.windowBackdrop);assert.notEqual(prepared.resources.avatarFrame,prepared.resources.windowFrame);assert.equal(prepared.resources.mapTexture,prepared.resources.panelTexture);assert.equal(prepared.resources.inputFrame,prepared.resources.panelFrame);assert.equal(prepared.resources.controlFrame,prepared.resources.panelFrame);
+ prepared.release();prepared.release();assert.equal(revoked,14);assert.equal(closed,14);
 });
 test('switching to starmap clears every optional artwork URL and the map backdrop',async()=>{
  const pack=await artwork(),root=rootFixture(),map={state:{showRadar:true},setFlag(_key,value){this.state.showRadar=value;},setSkin(value){this.skin=value;return true;}};
@@ -39,6 +39,17 @@ test('switching to starmap clears every optional artwork URL and the map backdro
  for(const key of Object.values(runtime.CSS_ASSET_ROLES))assert.equal(root.style.getPropertyValue(key),'');
  for(const key of ['--skin-selection-bg','--skin-status-error','--skin-control-width','--skin-panel-slice'])assert.equal(root.style.getPropertyValue(key),'');
  assert.equal(map.skin.backdrop,null);assert.equal(map.skin.texture,null);assert.equal(root.dataset.skinBase,'starmap');
+});
+test('older packs reusing the square window frame leave avatars free of that frame',async()=>{
+ const pack=await artwork(),root=rootFixture(),map={state:{showRadar:true},setFlag(){},setSkin(){return true;}};
+ const legacy={...pack.theme,assets:{...pack.theme.assets,avatarFrame:pack.theme.assets.windowFrame}};
+ const shared={url:'blob:old-square-frame',bitmap:{width:256,height:256}};
+ assert.equal(runtime.apply(legacy,{root,map,resources:{windowFrame:shared,avatarFrame:shared}}).ok,true);
+ assert.match(root.style.getPropertyValue('--skin-window-frame'),/old-square-frame/);
+ assert.equal(root.style.getPropertyValue('--skin-avatar-frame'),'');
+ const avatar={url:'blob:round-avatar',bitmap:{width:128,height:128}};
+ assert.equal(runtime.apply(pack.theme,{root,map,resources:{windowFrame:shared,avatarFrame:avatar}}).ok,true);
+ assert.match(root.style.getPropertyValue('--skin-avatar-frame'),/round-avatar/);
 });
 test('a failed Canvas appearance transaction restores the previous artwork and CSS',async()=>{
  const pack=await artwork(),root=rootFixture(),map={state:{showRadar:true},setFlag(_k,v){this.state.showRadar=v;},setSkin(){return true;}};
@@ -77,7 +88,7 @@ test('install, export, restart and remove keep the portable artwork with the cor
  const host={saveSkin:async s=>{saved=s;},putSkinPack:async p=>packs.set(p.id,p),getSkinPack:async id=>packs.get(id),listSkinPacks:async()=>[...packs.values()].map(p=>({id:p.id,name:p.name})),removeSkinPack:async id=>packs.delete(id)};
  const make=()=>createAppearanceController({runtime,host,getSkin:()=>chosen,apply:s=>{chosen=s;return {ok:true,skin:s};},assetLoader:{prepare:async()=>({resources:{},release(){releases++;}})}});
  let controller=make();assert.equal((await controller.install(pack)).saved,true);assert.equal(saved.id,pack.id);
- const exported=await readSkinPack(await controller.exportPack());assert.equal(exported.files.length,13);controller.destroy();
+ const exported=await readSkinPack(await controller.exportPack());assert.equal(exported.files.length,14);controller.destroy();
  controller=make();assert.equal((await controller.start(saved)).ok,true);assert.equal(chosen.id,pack.id);
  assert.equal((await controller.remove(pack.id)).ok,true);assert.equal(saved.id,'builtin.starmap');assert.equal(packs.size,0);assert.ok(releases>=3);controller.destroy();
 });

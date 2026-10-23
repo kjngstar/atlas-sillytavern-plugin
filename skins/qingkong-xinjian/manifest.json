@@ -22,7 +22,6 @@
       "ui.window.radius": 14,
       "ui.panel.radius": 8,
       "ui.control.radius": 6,
-      "ui.spacing": 14,
       "ui.window.frameSlice": 60,
       "ui.window.frameWidth": 18,
       "ui.panel.frameSlice": 24,
@@ -85,7 +84,7 @@
     "assets": {
       "windowFrame": "cloud-frame",
       "windowBackdrop": "sky-letter",
-      "avatarFrame": "cloud-frame",
+      "avatarFrame": "cloud-avatar",
       "panelTexture": "letter-paper",
       "panelFrame": "letter-frame",
       "controlFrame": "letter-frame",
@@ -158,6 +157,11 @@
       "id": "sky-letter",
       "path": "assets/sky-letter.webp",
       "mime": "image/webp"
+    },
+    {
+      "id": "cloud-avatar",
+      "path": "assets/cloud-avatar.png",
+      "mime": "image/png"
     }
   ]
 }

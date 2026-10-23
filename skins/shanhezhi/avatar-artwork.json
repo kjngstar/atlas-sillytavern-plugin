@@ -1,0 +1,20 @@
+{
+  "method": "built-in image_gen",
+  "generatedOn": "2026-10-23",
+  "prompt": "Use case: stylized-concept. Asset type: a SINGLE tiny circular avatar medallion FRAME for a real application skin called 山河志, a refined Chinese landscape and celadon xuan-paper skin. A perfectly round slim celadon jade ring with restrained antique muted gold keylines and a delicate small cloud-scroll accent integrated into the ring at lower left. A tiny vermilion seal-color dot at upper right, abstract not lettering. Elegant Chinese painted jade and gold on fine paper sensibility, flat front-on, no perspective, no glow. It will be displayed only 42 pixels across around a dark-green Chinese initial, so keep decoration extremely simple and readable. The central round opening, at least 76 percent of diameter, MUST be genuinely fully transparent and empty. The entire outside of the round ring MUST be genuinely transparent. Exact centered circular silhouette with even 6 percent margins. No square or rectangular outline, no corners, no rectangular panel, no portrait, no letters, no calligraphy, no logo, no watermark, no shadow.",
+  "source": "exec-a50277de-5f12-43bb-bbe9-a2028f172934.png",
+  "sourceSha256": "5af98bf77b7f3a8e4b02d3fcba35ad70edc77f1fbd311b21b4fe158bff3f0c47",
+  "runtimeAsset": {
+    "path": "assets/jade-avatar.png",
+    "width": 128,
+    "height": 128,
+    "bytes": 16447,
+    "sha256": "3882a73fc8d064c1ca142e7e44d91672bf5ec9271e1db0fca53dc96addc1e5a3",
+    "crop": [
+      110,
+      128,
+      1142,
+      1127
+    ]
+  }
+}

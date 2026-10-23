@@ -65,7 +65,9 @@ function apply(value,{root,map,resources={}}){
   for(const list of Object.values(TOKEN_REGISTRY))for(const key of list)root.style.removeProperty(key);
   for(const k of Object.values(CSS_ASSET_ROLES))root.style.removeProperty(k);
   for(const [k,v]of Object.entries(skin.tokens))for(const name of TOKEN_REGISTRY[k])root.style.setProperty(name,k==='ui.font.family'?FONT_REGISTRY[v]:typeof v==='number'&&!k.endsWith('.frameSlice')&&!k.endsWith('.opacity')?v+'px':String(v));
-  for(const [role,key]of Object.entries(CSS_ASSET_ROLES))if(resources[role]?.url)root.style.setProperty(key,`url("${resources[role].url}")`);
+  // Older packs reused a square window frame for avatars. Keep their themed
+  // monograms clean until a dedicated avatar frame is installed.
+  for(const [role,key]of Object.entries(CSS_ASSET_ROLES))if(resources[role]?.url&&!(role==='avatarFrame'&&skin.assets.avatarFrame===skin.assets.windowFrame))root.style.setProperty(key,`url("${resources[role].url}")`);
   if(resources.windowFrame?.url){root.style.setProperty('--skin-window-frame',`url("${resources.windowFrame.url}")`);root.style.setProperty('--skin-frame-slice',String(skin.tokens['ui.window.frameSlice']??16));root.style.setProperty('--skin-frame-width',(skin.tokens['ui.window.frameWidth']??8)+'px');}
   root.dataset.skinBase=skin.baseTheme.split('.')[1];for(const key of Object.keys(COMPONENT_REGISTRY))root.dataset['skin'+key[0].toUpperCase()+key.slice(1)]=skin.components[key];
   root.dataset.motion=skin.options.motion?'full':'reduced';root.classList.toggle('show-coordinates',skin.options.coordinates);map.setFlag('showRadar',skin.options.radar);

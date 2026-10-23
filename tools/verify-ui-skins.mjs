@@ -51,7 +51,7 @@ export async function verifySkins({open,check,dir}){
    const {writeSkinPack}=await import('../atlas-skin-pack.mjs'),theme={...AtlasSkinRuntime.builtin('builtin.parchment'),id:'user.browser-acceptance',assets:{windowFrame:'frame',panelTexture:'frame',mapTexture:'frame',characterMarker:'frame'}};
    const data=await writeSkinPack({id:theme.id,name:'图片链路验收素材',theme,files:[{id:'frame',path:'assets/frame.png',mime:'image/png',width:64,height:64,bytes}]});return AtlasPreview.importSkinFile(new File([data],'acceptance.zip',{type:'application/zip'}));
   });
-  const images=await f.evaluate(()=>({metrics:__skinMetricsSnapshot(),frame:getComputedStyle(document.getElementById('appWindow')).borderImageSource,skin:AtlasPreview.getSkin()}));
+  const images=await f.evaluate(()=>({metrics:__skinMetricsSnapshot(),frame:getComputedStyle(document.querySelector('.win-border')).borderImageSource,skin:AtlasPreview.getSkin()}));
   check('skins:real-image-install-deduplication',install.ok&&install.saved&&images.metrics.urls===1&&images.metrics.bitmaps===1&&images.frame.includes('blob:'),images);
   await p.screenshot({path:`${dir}/asset-theme-full.png`});
   await f.evaluate(()=>AtlasPreview.setUIProfile('mapOnly'));

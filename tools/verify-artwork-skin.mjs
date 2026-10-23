@@ -7,7 +7,7 @@ import {instrumentSkins} from './verify-ui-skins.mjs';
 import {readSkinPack} from '../ui/atlas-skin-pack.mjs';
 
 const root=process.cwd();
-const path=resolve(process.argv[2]||'skins/qingkong-xinjian/Atlas-QingkongXinjian-1.0.0.zip');
+const path=resolve(process.argv[2]||'skins/qingkong-xinjian/Atlas-QingkongXinjian-1.0.1.zip');
 const local=relative(root,path);
 if(local.startsWith('..')||local===path)throw Error('Skin ZIP must be inside the project');
 const pack=await readSkinPack(await readFile(path));
@@ -53,12 +53,24 @@ try {
   }
   await page.goto(base+'/dev-preview/index.html');
   let frame=await open();
+  const geometry=()=>frame.evaluate(()=>{
+    const rect=selector=>{const b=document.querySelector(selector).getBoundingClientRect();return [b.x,b.y,b.width,b.height];};
+    const s=AtlasPreview.map.state;
+    return {window:rect('#appWindow'),viewport:rect('#viewport'),canvas:rect('#map'),rail:rect('.rail-btn'),
+      avatar:rect('.cc-ava'),tree:rect('.tree-row'),camera:[s.cam.x,s.cam.y,s.cam.s],target:[s.tgt.x,s.tgt.y,s.tgt.s],node:AtlasPreview.state.nodeId};
+  });
+  const sameGeometry=(a,b)=>['window','viewport','canvas','rail','avatar','tree','camera','target'].every(key=>a[key].every((n,i)=>Math.abs(n-b[key][i])<.01))&&a.node===b.node;
   const database=await page.evaluate(()=>JSON.stringify(SillyTavern.getContext().chatMetadata.atlas.database));
   // Use the actual file input and its change handler, then inspect the installed state.
   await frame.evaluate(()=>AtlasPreview.page('prefs'));
   await frame.locator('[data-settings-tab="appearance"]').click();
+  await frame.evaluate(()=>{const s=AtlasPreview.map.state;s.cam={...s.tgt};});
+  const beforeImport=await geometry();
   await frame.locator('#skinImport').setInputFiles(path);
   await frame.waitForFunction(id=>AtlasPreview.getSkin().id===id,pack.id);
+  await frame.evaluate(()=>new Promise(requestAnimationFrame));
+  const afterImport=await geometry();
+  check('import-keeps-layout-and-camera',sameGeometry(beforeImport,afterImport),{before:beforeImport,after:afterImport});
   const installed=await frame.evaluate(async id=>({
     saved:!!await AtlasHost.getSkinPack(id),catalog:await AtlasPreview.listSkins(),metrics:__skinMetricsSnapshot()
   }),pack.id);
@@ -69,6 +81,13 @@ try {
     return Object.fromEntries(Object.values(AtlasSkinRuntime.CSS_ASSET_ROLES).map(role=>[role,style.getPropertyValue(role)]));
   });
   check('all-css-artwork-roles-loaded',Object.values(roles).every(value=>value.includes('blob:')),Object.keys(roles));
+  const avatar=await frame.evaluate(()=>{
+    const el=document.querySelector('.cc-ava'),style=getComputedStyle(el),frame=getComputedStyle(el,'::before');
+    return {background:style.backgroundImage,fill:style.backgroundColor,ink:style.color,radius:style.borderRadius,
+      frame:frame.backgroundImage,borderImage:frame.borderImageSource,
+      railBorder:getComputedStyle(document.querySelector('.rail-btn')).borderImageSource};
+  });
+  check('avatar-and-small-icons-have-no-square-image-border',avatar.frame.includes('blob:')&&avatar.borderImage==='none'&&avatar.railBorder==='none'&&!avatar.background.includes('linear-gradient'),avatar);
   const controls=await frame.evaluate(()=>{
     const input=document.querySelector('[data-skin-select]');
     const button=document.querySelector('[data-skin-reset]');
@@ -93,6 +112,14 @@ try {
         canvas:document.getElementById('map').width>0
       }));
       check('layout-'+width+'-'+profile,layout.profile===profile&&!layout.overflow&&layout.controls&&layout.canvas,layout);
+      await frame.evaluate(()=>{const m=AtlasPreview.map,s=m.state;s.cam={x:103,y:-71,s:m.fitScale()*1.47};s.tgt={...s.cam};m.setPaused(true);});
+      await frame.evaluate(()=>AtlasPreview.setTheme('builtin.starmap'));
+      const before=await geometry();
+      await frame.evaluate(()=>AtlasPreview.setTheme('builtin.parchment'));
+      const paper=await geometry();
+      await frame.evaluate(id=>AtlasPreview.setTheme(id),pack.id);
+      const after=await geometry();
+      check('switch-keeps-geometry-'+width+'-'+profile,sameGeometry(before,paper)&&sameGeometry(before,after),{before,paper,after});
       if(width===360&&profile==='full')await page.screenshot({path:dir+'/mobile.png'});
     }
   }
@@ -124,6 +151,15 @@ try {
     return snapshots;
   },pack.id);
   check('ten-switches-reclaim-images',cycles.every((m,i)=>m.urls===(i%2?count:0)&&m.bitmaps===(i%2?count:0)),cycles.map(m=>({urls:m.urls,bitmaps:m.bitmaps})));
+  const legacy=await frame.evaluate(async()=>{
+    const theme=AtlasPreview.getSkin();theme.assets.avatarFrame=theme.assets.windowFrame;
+    const applied=await AtlasPreview.setSkin(theme);
+    const avatar=document.querySelector('.entity-avatar')||document.querySelector('.cc-ava')||document.querySelector('.rail-ava');
+    return {ok:applied.ok,frame:getComputedStyle(document.getElementById('atlasDemo')).getPropertyValue('--skin-avatar-frame'),
+      background:getComputedStyle(avatar).backgroundImage,pseudo:getComputedStyle(avatar,'::before').content};
+  });
+  check('legacy-window-frame-is-not-reused-on-avatars',legacy.ok&&!legacy.frame&&!legacy.background.includes('linear-gradient')&&legacy.pseudo==='none',legacy);
+  await frame.evaluate(id=>AtlasPreview.setTheme(id),pack.id);
   check('world-unchanged',database===await page.evaluate(()=>JSON.stringify(SillyTavern.getContext().chatMetadata.atlas.database)));
   await page.reload();frame=await open();
   const restored=await frame.evaluate(()=>({id:AtlasPreview.getSkin().id,metrics:__skinMetricsSnapshot()}));

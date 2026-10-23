@@ -16,7 +16,7 @@ const host={initial:null,preferenceStorage:null,boot:async()=>({data,skin,prefer
 iframe.__atlasHost=host;
 host.inspect=async(kind,id)=>({character:data.CAST,item:data.ITEMS,message:data.MESSAGES,task:data.TASKS,action:data.TASKS,journey:data.TASKS,location:data.LOCATIONS}[kind]||[]).find(row=>row.id===id)||null;
 window.__skinFixture={data,host,iframe};
-window.addEventListener('atlas-fixture-ready',async()=>{try{const ui=iframe.contentWindow.AtlasPreview;await ui.appearanceReady;const blob=await(await fetch('../release/Atlas-ShanheZhi-1.1.0.zip')).blob();const installed=await ui.importSkinFile(new File([blob],'shanhezhi.zip'));if(!installed.ok)throw Error(JSON.stringify(installed));document.getElementById('result').textContent='贴图已安装 · 无模型调用';window.__shanheReady=true;}catch(e){document.getElementById('failure').textContent=e.stack;}});
+window.addEventListener('atlas-fixture-ready',async()=>{try{const ui=iframe.contentWindow.AtlasPreview;await ui.appearanceReady;const blob=await(await fetch('../skins/shanhezhi/Atlas-ShanheZhi-1.1.1.zip')).blob();const installed=await ui.importSkinFile(new File([blob],'shanhezhi.zip'));if(!installed.ok)throw Error(JSON.stringify(installed));document.getElementById('result').textContent='贴图已安装 · 无模型调用';window.__shanheReady=true;}catch(e){document.getElementById('failure').textContent=e.stack;}});
 document.addEventListener('click',async e=>{const b=e.target.closest('button');if(!b)return;try{const ui=iframe.contentWindow.AtlasPreview;if(b.dataset.theme)await ui.setTheme(b.dataset.theme);if(b.dataset.profile)await ui.setUIProfile(b.dataset.profile);}catch(e){document.getElementById('failure').textContent=e.message;}});
 iframe.src='../ui/atlas-reference/index.html';
 </script></html>

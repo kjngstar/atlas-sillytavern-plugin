@@ -22,7 +22,6 @@
       "ui.window.radius": 4,
       "ui.panel.radius": 4,
       "ui.control.radius": 3,
-      "ui.spacing": 14,
       "ui.window.frameSlice": 52,
       "ui.window.frameWidth": 20,
       "map.canvas.bg": "#f3ead8",
@@ -85,7 +84,7 @@
     "assets": {
       "windowFrame": "jade-frame",
       "windowBackdrop": "mountains",
-      "avatarFrame": "jade-frame",
+      "avatarFrame": "jade-avatar",
       "panelTexture": "xuan-paper",
       "mapTexture": "xuan-paper",
       "mapBackdrop": "mountains",
@@ -167,6 +166,11 @@
     {
       "id": "section-divider",
       "path": "assets/divider.png",
+      "mime": "image/png"
+    },
+    {
+      "id": "jade-avatar",
+      "path": "assets/jade-avatar.png",
       "mime": "image/png"
     }
   ]

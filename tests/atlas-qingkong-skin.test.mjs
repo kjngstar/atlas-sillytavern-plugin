@@ -6,17 +6,17 @@ import {readSkinPack,SKIN_PACK_LIMITS} from '../ui/atlas-skin-pack.mjs';
 import '../ui/atlas-reference/js/skin-runtime.js';
 
 const directory=new URL('../skins/qingkong-xinjian/',import.meta.url);
-const load=async()=>readSkinPack(await readFile(new URL('Atlas-QingkongXinjian-1.0.0.zip',directory)));
+const load=async()=>readSkinPack(await readFile(new URL('Atlas-QingkongXinjian-1.0.1.zip',directory)));
 
 test('Qingkong install ZIP contains all 18 supported artwork roles within the image budget',async()=>{
   const pack=await load();
   assert.equal(pack.id,'user.qingkong-xinjian');
   assert.equal(pack.name,'晴空信笺');
-  assert.equal(pack.files.length,11);
+  assert.equal(pack.files.length,12);
   assert.deepEqual(Object.keys(pack.theme.assets).sort(),[...AtlasSkinRuntime.ASSET_ROLES].sort());
-  assert.equal(new Set(Object.values(pack.theme.assets)).size,11);
+  assert.equal(new Set(Object.values(pack.theme.assets)).size,12);
   assert.ok(pack.files.reduce((n,f)=>n+f.width*f.height,0)<SKIN_PACK_LIMITS.pixels);
-  assert.ok((await readFile(new URL('Atlas-QingkongXinjian-1.0.0.zip',directory))).length<512*1024);
+  assert.ok((await readFile(new URL('Atlas-QingkongXinjian-1.0.1.zip',directory))).length<512*1024);
 });
 
 test('Qingkong shipped ZIP matches the checked-in manifest and exact artwork bytes',async()=>{

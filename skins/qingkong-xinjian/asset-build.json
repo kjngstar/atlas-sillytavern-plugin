@@ -10,7 +10,8 @@
       "markers": "Use case: stylized-concept. Asset type: one finished transparent game/UI icon sprite atlas for the skin 晴空信笺 / Clear Sky Letters. Six distinct tiny stationery enamel illustrations, arranged in an exact regular 3 columns by 2 rows square grid with generous empty transparent gutters and no overlap. Each cell has one centered icon and the same scale. Top row left: a small friendly person bust silhouette with blue hair and cream shirt, representing character. Top row middle: a charming tiny blue-roofed white house with a small location-pin outline, representing place. Top row right: a neatly tied cream parcel with a blue ribbon, representing item. Bottom row left: an open ivory envelope with a blue folded letter, representing message. Bottom row middle: a radiant warm golden sun with a tiny blue ribbon, representing event. Bottom row right: a clean sky-blue compass arrow pointing northeast emerging from a tiny open white doorway, representing exit. Cohesive premium painted paper-cut and enamel style, flat orthographic, chunky simple silhouettes, muted dark blue keylines, ivory and sky blue with very restrained peach and gold. All six must be distinguishable when reduced to 32 pixels. Actual transparent background throughout, transparent gaps, no tile backgrounds, no text, no labels, no shadows outside each icon, no watermark. Square atlas.",
       "control": "Use case: stylized-concept. Asset type: SINGLE transparent square 9-slice UI control border for 晴空信笺 / Clear Sky Letters application skin. Front-on orthographic square, equal 4 percent transparent margin outside. A very slim, restrained double-line frame made of pale blue letter-paper ribbon, warm ivory inner lip and a fine muted navy outline. Gently rounded stationery corners, tiny warm-gold pin at each corner but absolutely no clouds, flowers, letters or other ornaments. All four edges are perfectly straight simple narrow strips in their middle 70 percent, for stretching into both long buttons and large rectangular panels. Border occupies only the outer 8 percent, central 80 percent COMPLETELY TRANSPARENT. Subtle premium fine-paper texture. Crisp high clarity at small size, understated, flat not dimensional, no drop shadow. Transparent outside AND transparent center; no checkerboard, no white fill, no text, no mockup, no other objects.",
       "paper": "Use case: stylized-concept. Asset type: one seamless square raster texture tile for the 晴空信笺 / Clear Sky Letters application skin, used behind small dark text. Uniform extremely pale warm ivory fine cotton letter paper with a faint cool blue undertone, microscopic delicate fibers and subtle natural grain. Flat evenly lit top-down material scan, no scene. Nearly invisible variation: maximum subtlety, no marks, no decorations, no seams, no folds, no corners, no vignette, no noise speckles, no text, no ruled lines, no cloud illustrations. Edge-to-edge seamless paper only.",
-      "divider": "Use case: stylized-concept. Asset type: one transparent horizontal UI section divider ornament for 晴空信笺 / Clear Sky Letters. Single centered horizontal delicate muted sky-blue ink line spanning 88 percent of a very wide canvas, a tiny ivory folded paper airplane with a fine dark-blue outline in the middle and a subtle small golden sun disk behind it, short dotted airmail flight trails adjoining the airplane. Restrained refined paper-cut gouache illustration, crisp and clean, no words. Wide 3:1 image, divider occupies only central 35 percent of height, huge actual transparent empty space above and below and transparent outside. Keep the ornament tiny and the line hair-thin, designed to render at 160 pixels wide in a letter-paper interface. No frame, no filled background, no checkerboard, no text, no logos, no watermark."
+      "divider": "Use case: stylized-concept. Asset type: one transparent horizontal UI section divider ornament for 晴空信笺 / Clear Sky Letters. Single centered horizontal delicate muted sky-blue ink line spanning 88 percent of a very wide canvas, a tiny ivory folded paper airplane with a fine dark-blue outline in the middle and a subtle small golden sun disk behind it, short dotted airmail flight trails adjoining the airplane. Restrained refined paper-cut gouache illustration, crisp and clean, no words. Wide 3:1 image, divider occupies only central 35 percent of height, huge actual transparent empty space above and below and transparent outside. Keep the ornament tiny and the line hair-thin, designed to render at 160 pixels wide in a letter-paper interface. No frame, no filled background, no checkerboard, no text, no logos, no watermark.",
+      "avatar": "Use case: stylized-concept. Asset type: a SINGLE tiny circular avatar medallion FRAME for a real application skin called 晴空信笺, Clear Sky Letters. A perfectly round slim sky-blue paper and warm ivory ring, with two very small soft white cloud wisps nestled along the upper-left outside edge and a tiny muted golden sun dot at the lower-right edge. Refined clean contemporary stationery illustration, crisp muted navy hairline outer definition, delicate paper texture, flat front-on, no perspective. It will be displayed only 42 pixels across around a dark-blue Chinese initial, so use simple readable shapes. The central round opening, at least 76 percent of diameter, MUST be genuinely fully transparent and empty. The entire background outside the round medallion MUST also be genuinely transparent. Exact centered circular silhouette with even 6 percent margins on all sides. No square or rectangular outline, no corners, no rectangular panel, no portrait, no letters, no text, no logo, no watermark, no shadow."
     },
     "files": {
       "backdrop": "exec-415128a0-0dd2-4df1-b3b8-30d837e64ef6.png",
@@ -18,7 +19,8 @@
       "markers": "exec-9dc31f38-cb6d-4f80-ab97-eae4a0703d2e.png",
       "control": "exec-ccf77ab4-2969-451f-87ab-30fc8210f3ea.png",
       "paper": "exec-464129df-db38-450f-b901-c8f50777adbf.png",
-      "divider": "exec-4ebdf34e-9825-41f4-88bb-5724c8c6fb7c.png"
+      "divider": "exec-4ebdf34e-9825-41f4-88bb-5724c8c6fb7c.png",
+      "avatar": "exec-17c1c5a6-2ac7-4766-a925-1ae899fa8d6b.png"
     },
     "sourceSha256": {
       "backdrop": "5dffc3954688d5bfdeca423a6b5e7d573501b7e7116ec4c35ab429f026bb1c88",
@@ -26,7 +28,8 @@
       "markers": "9d2b6fa15ceb5e814a995fa18becd1810808a88b60ec417473907b2ead06ea90",
       "control": "27bb3869b8a0b9ed2cbbd8a7cf6c1be5a43188657f643c1fcd9e1388663d308a",
       "paper": "a62fca2c51b7a6c9fda1f76835b86d580a207e7b442f2ec7153cc4dc0de3873c",
-      "divider": "3171cf1dbf8a30ef89a85431f7469ed1eac48b3f8805b2065fbf545ca0f846ec"
+      "divider": "3171cf1dbf8a30ef89a85431f7469ed1eac48b3f8805b2065fbf545ca0f846ec",
+      "avatar": "21381d9e9d38c2541f683ed23429e37e7181f0b4e4ddad6b159220c22bc04a0b"
     }
   },
   "runtimeAssets": [
@@ -258,6 +261,19 @@
           96
         ]
       }
+    },
+    {
+      "path": "assets/cloud-avatar.png",
+      "width": 128,
+      "height": 128,
+      "bytes": 15691,
+      "sha256": "f6834d8adc14fdba853293016ea0b900f3f959c426f00c061c3372b60a46a05d",
+      "crop": [
+        102,
+        110,
+        1152,
+        1145
+      ]
     }
   ]
 }
