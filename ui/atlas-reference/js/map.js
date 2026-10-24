@@ -418,16 +418,23 @@ function create(canvas, mini, hooks){
     else if(st.kind==='region'){ bg.addColorStop(0,'#07130f'); bg.addColorStop(1,'#0a1a14'); }
     else if(st.kind==='city'){ bg.addColorStop(0,'#080b16'); bg.addColorStop(1,'#0b1020'); }
     else { bg.addColorStop(0,'#070b14'); bg.addColorStop(1,'#0a1120'); }
-    ctx.fillStyle = canvasStyle?.background||bg; ctx.fillRect(x0-200,y0-200,(x1-x0)+400,(y1-y0)+400);
-    if(texturePattern){ctx.save();ctx.globalAlpha=canvasStyle.textureOpacity??.12;ctx.fillStyle=texturePattern;ctx.fillRect(x0-200,y0-200,(x1-x0)+400,(y1-y0)+400);ctx.restore();}
+    // Paper is a viewport layer, not a finite world rectangle. Cover physical
+    // edge pixels too when fractional CSS sizes are rounded to the DPR bitmap.
+    const screenBackdrop=!!(canvasStyle?.background||texturePattern||canvasStyle?.backdrop);
+    const [bx,by,bw,bh]=screenBackdrop?[0,0,Math.ceil(w*st.dpr)/st.dpr,Math.ceil(h*st.dpr)/st.dpr]:[x0-200,y0-200,(x1-x0)+400,(y1-y0)+400];
+    ctx.save();
+    if(screenBackdrop){ctx.setTransform(st.dpr,0,0,st.dpr,0,0);ctx.globalAlpha=1;}
+    ctx.fillStyle = canvasStyle?.background||bg; ctx.fillRect(bx,by,bw,bh);
+    if(texturePattern){ctx.save();ctx.globalAlpha=canvasStyle.textureOpacity??.12;ctx.fillStyle=texturePattern;ctx.fillRect(bx,by,bw,bh);ctx.restore();}
     // Decorative paper art is pinned to the viewport, below all world geometry.
     // It never supplies terrain, locations, hit targets or knowledge.
     if(canvasStyle?.backdrop){
-      const image=canvasStyle.backdrop,vw=x1-x0,vh=y1-y0,scale=Math.max(vw/image.width,vh/image.height);
+      const image=canvasStyle.backdrop,vw=bw,vh=bh,scale=Math.max(vw/image.width,vh/image.height);
       const sw=vw/scale,sh=vh/scale;
       ctx.save();ctx.globalAlpha=canvasStyle.backdropOpacity??.16;
-      ctx.drawImage(image,(image.width-sw)/2,(image.height-sh)/2,sw,sh,x0,y0,vw,vh);ctx.restore();
+      ctx.drawImage(image,(image.width-sw)/2,(image.height-sh)/2,sw,sh,bx,by,vw,vh);ctx.restore();
     }
+    ctx.restore();
 
     const context=g.parentContext;
     if(context){

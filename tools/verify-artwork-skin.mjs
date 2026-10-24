@@ -5,6 +5,7 @@ import {resolve,relative} from 'node:path';
 import {launchAtlasBrowser} from './atlas-browser.mjs';
 import {instrumentSkins} from './verify-ui-skins.mjs';
 import {readSkinPack} from '../ui/atlas-skin-pack.mjs';
+import {verifyMapBackdrop} from './verify-map-backdrop.mjs';
 
 const root=process.cwd();
 const path=resolve(process.argv[2]||'skins/qingkong-xinjian/Atlas-QingkongXinjian-1.0.1.zip');
@@ -101,6 +102,7 @@ try {
   check('input-focus-and-disabled-feedback',controls.inputFrame.includes('blob:')&&parseFloat(controls.focusWidth)>=2&&parseFloat(controls.disabled)<.6,controls);
   await page.screenshot({path:dir+'/controls.png'});
   await frame.evaluate(()=>AtlasPreview.page('map'));
+  await verifyMapBackdrop({page,frame,check,dir});
   await page.screenshot({path:dir+'/desktop.png'});
   for(const width of [360,720,1440]) {
     await page.setViewportSize({width,height:1000});

@@ -58,11 +58,11 @@ function resolveUIProfile(id,registry=PROFILE_REGISTRY){
 }
 function deriveEffectiveLayout(profile,manual={}){return {layout:profile.layout,visible:profile.visible,panels:{leftClosed:manual.leftClosed===true,rightClosed:manual.rightClosed===true},effectivePage:profile.behavior.forceMapPage?'map':manual.page||'map'};}
 function preferences(storage){
- let saved={singleClickEnter:false,legendCollapsed:false,profileId:'full'},persistent=!!storage,status='idle',lastSave=Promise.resolve({ok:!!storage}),sequence=0;
- try{const value=JSON.parse(storage.getItem(PREFERENCE_KEY)||'null');if(value&&(value.version===1||value.version===2)){for(const k of ['singleClickEnter','legendCollapsed'])if(typeof value[k]==='boolean')saved[k]=value[k];if(PROFILE_IDS.includes(value.profileId))saved.profileId=value.profileId;}}catch(_){persistent=false;}
+ let saved={singleClickEnter:false,legendCollapsed:false,mapWidgetsCollapsed:true,profileId:'full'},persistent=!!storage,status='idle',lastSave=Promise.resolve({ok:!!storage}),sequence=0;
+ try{const value=JSON.parse(storage?.getItem(PREFERENCE_KEY)||'null');if(value&&[1,2,3].includes(value.version)){for(const k of ['singleClickEnter','legendCollapsed','mapWidgetsCollapsed'])if(typeof value[k]==='boolean')saved[k]=value[k];if(PROFILE_IDS.includes(value.profileId))saved.profileId=value.profileId;}}catch(_){persistent=false;}
  return {get value(){return {...saved};},get persistent(){return persistent;},get status(){return status;},flush:()=>lastSave,
  set(key,value){if(!Object.hasOwn(saved,key)||(key==='profileId'?!PROFILE_IDS.includes(value):typeof value!=='boolean'))return false;saved[key]=value;status='pending';const ticket=++sequence;
- try{if(!storage)throw Error('UI_STORAGE_UNAVAILABLE');lastSave=Promise.resolve(storage.setItem(PREFERENCE_KEY,JSON.stringify({version:2,...saved}))).then(()=>{if(ticket===sequence){persistent=true;status='saved';}return {ok:true};},error=>{if(ticket===sequence){persistent=false;status='failed';}return {ok:false,errorCode:'UI_PREFERENCE_SAVE_FAILED',message:error.message};});}
+ try{if(!storage)throw Error('UI_STORAGE_UNAVAILABLE');lastSave=Promise.resolve(storage.setItem(PREFERENCE_KEY,JSON.stringify({version:3,...saved}))).then(()=>{if(ticket===sequence){persistent=true;status='saved';}return {ok:true};},error=>{if(ticket===sequence){persistent=false;status='failed';}return {ok:false,errorCode:'UI_PREFERENCE_SAVE_FAILED',message:error.message};});}
  catch(error){persistent=false;status='failed';lastSave=Promise.resolve({ok:false,errorCode:'UI_PREFERENCE_SAVE_FAILED',message:error.message});}return true;}}
 }
 const api={SCALE_WIDTH_PX,SEARCH_LIMIT,PREFERENCE_KEY,PROFILE_SLOTS,PROFILE_IDS,PROFILE_REGISTRY,validateUIProfile,resolveUIProfile,deriveEffectiveLayout,fixedScale,search,preferences};

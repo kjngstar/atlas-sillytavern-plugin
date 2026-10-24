@@ -13129,6 +13129,8 @@ ${lines.join("\n")}
       };
     });
     const pendingIds = pending.map((entry) => entry.mapId);
+    const layoutKinds = [...new Set(scopes.map((scope) => scope.kind))].sort();
+    const hasFloor = layoutKinds.includes("floor"), hasCity = layoutKinds.includes("city"), hasOverview = layoutKinds.includes("overview");
     const request = buildStagePrompt({
       phase: "geography",
       allowedOps: ["map.layout.request", "noop"],
@@ -13140,18 +13142,17 @@ ${lines.join("\n")}
       mapLayoutFrame: [
         "extent 是程序给定的幅面；kind 与 units 以每张图给出的值为准，不得改写。",
         "units=cells 表示这张图还没标定，width/height 是格数，不是米；units=meters 时 width/height 才是米。",
-        "floor 通常是 12×8 或 24×24 米量级；city 至少 900×700 米；overview 直接用程序给的格幅面。",
+        "逐图使用实际 extent、spaceSize 与 childSpaces；不以通用模板的默认大小覆盖它们。",
         "已有尺度时 extent = cols×metersPerCell、rows×metersPerCell；不要自己换算比例尺。"
       ].join("\n"),
       mapLayoutLocks: [
         "保留 savedConstraints 的既有结构与稳定局部 ID；省略字段表示保持，不表示删除。",
         "已确认/锁定的几何与作者确认的事实不得改写。",
-        "没有河流依据时 riverWidth=0；没有生态依据的城市允许无河、无城墙、无树林。",
-        "合理陈设可以按场所用途补全（estimated），不要求正文逐项点名。"
+        "资料支持的事实优先于用途估计；估计不升级为作者确认，不为填满画面添加实体或装饰。"
       ].join("\n")
     });
     if (work) request.messages[1].content += "\n【整组地图规划】本批可同时包含不同种类和多层父子地图；一次返回所有列出地图的约束。hierarchy 标明父图与共享空间。父子共用 childSpaces/spaceSize 尺寸，程序从父到子求解坐标、继承轮廓；不为每层再请求，不输出独立坐标或改变父子归属。";
-    request.messages[1].content += '\n每个操作外层只含 op、ref、data 和可选 why。op 固定 map.layout.request；ref 使用本图 map 引用；data 包含给定 kind 和 spec。下面提供本图完整合法 JSON 示例。幅面用程序给定 extent。\noverview 的 spec 可含 surface、zones、links、features。zone 用 id、name、role、size，可选 sector 与 near。role 取 city/settlement/forest/water/mountain/ruins/district/campus/land/other；size 取 small/medium/large；sector 取八方向或 center。link 的 id 必须是已登记路线引用。feature 用局部 id、type、可选 zoneId 和 density；density 取 low/medium/high，type 取 forest_texture/ridge/shore/building_cluster/road_texture/ruins_scatter/watercourse。overview 的 zone 必须是本图直属地点或目录里已有的代理入口；links 只能用目录中已登记的路线引用；feature 只是本图局部装饰，永远不产生新实体、也不产生新道路。\ncity 的 districts 每项必须含 id、name、bank、order；bank 取 west/east，order 为整数。buildings 每项必须含 id、name、districtId、w、h。districts 至少一项；没有已登记街区时，以城市容器的地点引用作为自身街区。每个建筑的 districtId 必须对应本次或已保存街区，不能省略街区声明。新城市默认 enclosure="open"；无河流依据时 riverWidth=0。\nfloor 的 rooms 每项用 id/name/w/h/side，side 只能 north 或 south；可选 role=indoor/outdoor/garden，分别表示室内、开放院落、园林。contents 每项用 id/name/type/roomId/w/h，type 只能 shelf/desk/bench/reading/stairs/table/chair/bed/cabinet/doorway/light/decor；actors 每项用 id/roomId，可选 near=陈设ID；items 每项用 id/on=陈设ID。所有键都必须双引号，不得照抄省略号或伪 JSON。\n布局阶段不新建 SQL 实体：所有可交互地点必须已经在目录里。但建设阶段允许新增地点，两者不冲突——不要因为布局不新建实体就停止补全世界。actors/items 是本批有目录引用且在生成器额度内的相关者，不是整张人物表；未发送者仍保存在 SQL，由程序维护位置和地点名单，不能创建替身来凑数。\n不要输出其他操作。';
+    request.messages[1].content += "\n每个操作外层只含 op、ref、data 和可选 why。op 固定 map.layout.request；ref 使用本图 map 引用；data 包含给定 kind 和 spec。下面提供本图完整合法 JSON 示例。幅面用程序给定 extent。" + (hasOverview ? "\noverview 的 spec 可含 surface、zones、links、features。zone 用 id、name、role、size，可选 sector 与 near。role 取 city/settlement/forest/water/mountain/ruins/district/campus/land/other；size 取 small/medium/large；sector 取八方向或 center。link 的 id 必须是已登记路线引用。feature 用局部 id、type、可选 zoneId 和 density；density 取 low/medium/high，type 取 forest_texture/ridge/shore/building_cluster/road_texture/ruins_scatter/watercourse。overview 的 zone 必须是本图直属地点或目录里已有的代理入口；links 只能用目录中已登记的路线引用；feature 只是本图局部装饰，永远不产生新实体、也不产生新道路。" : "") + (hasCity ? '\ncity 的 districts 每项必须含 id、name、bank、order；bank 取 west/east，order 为整数。buildings 每项必须含 id、name、districtId、w、h。districts 至少一项；没有已登记街区时，以城市容器的地点引用作为自身街区。每个建筑的 districtId 必须对应本次或已保存街区，不能省略街区声明。新城市默认 enclosure="open"；无河流依据时 riverWidth=0。' : "") + (hasFloor ? "\nfloor 的 rooms 每项用 id/name/w/h/side，side 只能 north 或 south；可选 role=indoor/outdoor/garden，分别表示室内、开放院落、园林。contents 每项用 id/name/type/roomId/w/h，type 只能 shelf/desk/bench/reading/stairs/table/chair/bed/cabinet/doorway/light/decor；actors 每项用 id/roomId，可选 near=陈设ID；items 每项用 id/on=陈设ID。所有键都必须双引号，不得照抄省略号或伪 JSON。" : "") + "\n布局阶段不新建 SQL 实体：所有可交互地点必须已经在目录里。但建设阶段允许新增地点，两者不冲突——不要因为布局不新建实体就停止补全世界。actors/items 是本批有目录引用且在生成器额度内的相关者，不是整张人物表；未发送者仍保存在 SQL，由程序维护位置和地点名单，不能创建替身来凑数。\n不要输出其他操作。";
     request.messages[1].content += "\n父图中的本地点轮廓是下钻边界；子图用于细化同一个空间，不重画成一座无关的城市。相邻街区维持父图的相对方位，不能把外城区、内城区、中心区都复制成同一幅城市模板。size=large/medium/small 必须维持相对面积顺序；没有实体依据的 road_texture 不输出，真实道路仅使用已登记 links。";
     request.anchor = input.anchor;
     request.promptInput = {
@@ -13161,20 +13162,22 @@ ${lines.join("\n")}
       loreSupplement: "",
       baseRevision: input.anchor.baseRevision
     };
-    request.messages[1].content += "\nbaselineRooms 是程序为已登记空间提供的可容纳轮廓，不是实测尺寸；没有更明确尺寸依据时直接沿用，并在每间房补 role。多空间图必须覆盖 locations 中全部直属空间，庭院和花园也应有连通范围，不能退化成散点；室外空间用 outdoor/garden，不伪造室内窗户。不要把 width/height 写成房间尺寸，房间尺寸字段为 w/h，side 固定选 north 或 south。";
-    request.messages[1].content += "\n细节要求：按世界观和各空间用途组装陈设，不能只返回 rooms 空轮廓。正文点名的家具优先；没有逐件描写时可补用途合理的示意家具，每个有明确用途的室内空间通常 2–4 件，空置房间或室外空间可不补。卧室可估计床与储物柜，书房可估计书桌与书架，工作空间按资料选择桌台和储物；不得把同一套陈设复制进每间房，不使用示例世界地名或剧情。局部陈设不是新增 SQL 物品，所有坐标与通行由程序计算。";
-    for (const scope of scopes.filter((s) => s.kind === "floor")) {
-      request.messages[1].content += "\n【本图合法 JSON 外层示例；按资料补齐 contents，不照搬为空布局】\n" + JSON.stringify({ op: "map.layout.request", ref: scope.map, data: { kind: "floor", spec: { rooms: scope.baselineRooms, contents: [], actors: scope.actors.map((a) => ({ id: a.ref, roomId: a.roomId })), items: [] } }, why: "依据已登记空间生成估计布局" });
+    if (hasFloor) {
+      request.messages[1].content += "\nbaselineRooms 是程序为已登记空间提供的可容纳轮廓，不是实测尺寸；没有更明确尺寸依据时直接沿用，并在每间房补 role。多空间图必须覆盖 locations 中全部直属空间，庭院和花园也应有连通范围，不能退化成散点；室外空间用 outdoor/garden，不伪造室内窗户。不要把 width/height 写成房间尺寸，房间尺寸字段为 w/h，side 固定选 north 或 south。";
+      request.messages[1].content += "\n细节要求：按世界观和各空间用途组装陈设，不能只返回 rooms 空轮廓。正文点名的家具优先；没有逐件描写时可补用途合理的示意家具，每个有明确用途的室内空间通常 2–4 件，空置房间或室外空间可不补。卧室可估计床与储物柜，书房可估计书桌与书架，工作空间按资料选择桌台和储物；不得把同一套陈设复制进每间房，不使用示例世界地名或剧情。局部陈设不是新增 SQL 物品，所有坐标与通行由程序计算。";
+      for (const scope of scopes.filter((s) => s.kind === "floor")) {
+        request.messages[1].content += "\n【本图合法 JSON 外层示例；按资料补齐 contents，不照搬为空布局】\n" + JSON.stringify({ op: "map.layout.request", ref: scope.map, data: { kind: "floor", spec: { rooms: scope.baselineRooms, actors: scope.actors.map((a) => ({ id: a.ref, roomId: a.roomId })) } }, why: "依据已登记空间生成估计布局" });
+      }
+      request.messages[1].content += '\n普通阅览桌用 type="table"，椅子单独用 type="chair"；reading 是桌子加四把椅子的整套组合，占地 w/h 均至少 2 米，不能用于 2×1 米的单张桌子。所有陈设用正数 w/h，完整占地必须装进房间。';
+      request.messages[1].content += "\nitems[].on 只能绑定本房间中具有支撑面的 table/desk/shelf/cabinet（reading 组合的桌面也可）。不能把物品绑定到 chair/bed/doorway/decor 上，也不能把椅子本身作为物品放在另一把椅子上。资料没有支撑关系时省略该物品绑定，由程序按真实归属放置地面标记，不要猜测它在桌上。";
+      request.messages[1].content += "\n空间身份规则：spaceSize.furnishingInventory 和 childSpaces[].furnishing 是同一物理空间已经登记的陈设。必须沿用其中的 id；省略的既有陈设仍会保留，不要换名或换局部 id 再造一套。已有账本的空间中，新增陈设必须明确 additional=true，且确有新增依据；仅换父图/子图或补布局不属于新增。门洞不是地面家具，不要在 contents 里估计 doorway；程序根据房间边界与已有连接生成门，不能把门摆在房间中间。";
+      request.messages[1].content += "\n旧图恢复规则：furnishingReview 列出同名陈设候选，必须逐组核查，不能把历史错误重复当作必须保留的物理事实。quality=layout 是布局估计，不是作者确认。有明确数量依据的两把同名椅子应保留；同一厨房操作台或照明曾在父子图分别估计、但没有第二件依据时，保留一个既有 id，并用 spec.deletes.contents 显式删除另一个 id。禁止仅靠同名由程序自动合并，也不允许删作者确认或绑定不同真实物品的两件陈设。why 中说明核查结论；删除使用候选中的完整 id。";
+      request.messages[1].content += "\n层级归属规则：childSpaces.detailScope=descendants 表示该轮廓内部还有已登记子空间，本层只画容器轮廓与通路。大厅的长桌和厨房的操作台应由大厅、厨房各自的空间账本管理，不能又给包含它们的楼层轮廓摆一份。若 savedConstraints 曾在楼层轮廓重复摆放这些后代陈设，用 spec.deletes.contents 显式移除该层重复投影；真实归属于楼层公共通道的陈设保持原身份。";
+      request.messages[1].content += "\n单间房内 kind=other 的储藏角、桌边等子地点只表示局部区域，不说明存在隔墙。baselineRooms 只有房间自身时，保持整个房间作为一块物理空间，不为这些角落额外分房或扣走廊；只有明确登记的 room 子空间才参与分房。";
+      request.messages[1].content += "\n多房间 floor 由程序保留通行空间，默认 corridorWidth=2；已有 door/adjacent/estimated 房间连接由程序安排共墙门，不能用走廊隔开直接连通的两间房；估计房间必须适合当前幅面，side=north 或 south。同侧多个房间的宽度与间隔合计也必须装得下。childSpaces 的已知宽高不得缩小来凑布局；装不下时说明尺寸冲突。单间房直接沿用完整 baselineRooms，不缩成幅面的 75%，不另扣中央走廊。";
     }
-    request.messages[1].content += '\n普通阅览桌用 type="table"，椅子单独用 type="chair"；reading 是桌子加四把椅子的整套组合，占地 w/h 均至少 2 米，不能用于 2×1 米的单张桌子。所有陈设用正数 w/h，完整占地必须装进房间。';
-    request.messages[1].content += "\nitems[].on 只能绑定本房间中具有支撑面的 table/desk/shelf/cabinet（reading 组合的桌面也可）。不能把物品绑定到 chair/bed/doorway/decor 上，也不能把椅子本身作为物品放在另一把椅子上。资料没有支撑关系时省略该物品绑定，由程序按真实归属放置地面标记，不要猜测它在桌上。";
-    request.messages[1].content += "\n空间身份规则：spaceSize.furnishingInventory 和 childSpaces[].furnishing 是同一物理空间已经登记的陈设。必须沿用其中的 id；省略的既有陈设仍会保留，不要换名或换局部 id 再造一套。已有账本的空间中，新增陈设必须明确 additional=true，且确有新增依据；仅换父图/子图或补布局不属于新增。门洞不是地面家具，不要在 contents 里估计 doorway；程序根据房间边界与已有连接生成门，不能把门摆在房间中间。";
-    request.messages[1].content += "\n旧图恢复规则：furnishingReview 列出同名陈设候选，必须逐组核查，不能把历史错误重复当作必须保留的物理事实。quality=layout 是布局估计，不是作者确认。有明确数量依据的两把同名椅子应保留；同一厨房操作台或照明曾在父子图分别估计、但没有第二件依据时，保留一个既有 id，并用 spec.deletes.contents 显式删除另一个 id。禁止仅靠同名由程序自动合并，也不允许删作者确认或绑定不同真实物品的两件陈设。why 中说明核查结论；删除使用候选中的完整 id。";
-    request.messages[1].content += "\n层级归属规则：childSpaces.detailScope=descendants 表示该轮廓内部还有已登记子空间，本层只画容器轮廓与通路。大厅的长桌和厨房的操作台应由大厅、厨房各自的空间账本管理，不能又给包含它们的楼层轮廓摆一份。若 savedConstraints 曾在楼层轮廓重复摆放这些后代陈设，用 spec.deletes.contents 显式移除该层重复投影；真实归属于楼层公共通道的陈设保持原身份。";
-    request.messages[1].content += "\n单间房内 kind=other 的储藏角、桌边等子地点只表示局部区域，不说明存在隔墙。baselineRooms 只有房间自身时，保持整个房间作为一块物理空间，不为这些角落额外分房或扣走廊；只有明确登记的 room 子空间才参与分房。";
-    request.messages[1].content += "\n多房间 floor 由程序保留通行空间，默认 corridorWidth=2；已有 door/adjacent/estimated 房间连接由程序安排共墙门，不能用走廊隔开直接连通的两间房；估计房间必须适合当前幅面，side=north 或 south。同侧多个房间的宽度与间隔合计也必须装得下。childSpaces 的已知宽高不得缩小来凑布局；装不下时说明尺寸冲突。单间房直接沿用完整 baselineRooms，不缩成幅面的 75%，不另扣中央走廊。";
     for (const scope of scopes.filter((s) => s.kind === "overview")) {
-      request.messages[1].content += "\n【本图合法 overview JSON 外层示例；按资料填写合法 zones/links/features】\n" + JSON.stringify({ op: "map.layout.request", ref: scope.map, data: { kind: "overview", spec: { surface: "mixed", zones: [], links: [], features: [] } }, why: "依据已登记空间生成估计布局" });
+      request.messages[1].content += "\n【本图合法 overview JSON 外层示例；按资料填写合法 zones/links/features】\n" + JSON.stringify({ op: "map.layout.request", ref: scope.map, data: { kind: "overview", spec: { surface: "mixed" } }, why: "依据已登记空间生成估计布局" });
     }
     for (const scope of scopes.filter((s) => s.kind === "city")) {
       if (!scope.container?.ref) continue;
@@ -13187,18 +13190,17 @@ ${lines.join("\n")}
       request.messages[1].content += "\n【本图合法 city JSON 示例；所有实体引用均已登记】\n" + JSON.stringify({ op: "map.layout.request", ref: scope.map, data: { kind: "city", spec: { districts, buildings, enclosure: "open", riverWidth: 0 } }, why: "使用已登记城市范围生成估计布局" });
       request.messages[1].content += "\ncity 的 districts.id 和 buildings.id 必须沿用上方已登记地点引用，不能使用 B1、B2 等自造编号。没有已登记建筑时 buildings=[]；不能为填满画面而新增可交互建筑。";
     }
-    if (hasSpatialCapability(CAPABILITY_CORRIDOR_BINDING)) request.messages[1].content += "\n" + CORRIDOR_BINDING_PROMPT;
+    if (hasFloor && hasSpatialCapability(CAPABILITY_CORRIDOR_BINDING)) request.messages[1].content += "\n" + CORRIDOR_BINDING_PROMPT;
     if (hasSpatialCapability(CAPABILITY_SPACE_CANONICAL)) request.messages[1].content += "\n" + SPACE_CANONICAL_PROMPT;
     if (hasSpatialCapability(CAPABILITY_SPATIAL_PROFILE)) request.messages[1].content += "\n" + SPATIAL_PROFILE_PROMPT;
-    request.messages[1].content += '\noverview 的水系 feature 必须为 {"id":"本图局部水系ID","type":"watercourse","zoneId":"本图已登记水域引用（可选）","fromSector":"north","toSector":"south","widthClass":"narrow/medium/wide"}。fromSector/toSector 取 north/northeast/east/southeast/south/southwest/west/northwest 且不同；不要仅写 zoneId/density 而省略起终方向。方向是估计布局，不能标成已测量事实。';
-    request.messages[1].content += '\n更新布局时，同一实物必须沿用 savedConstraints 的既有局部 id，不得换 id 重复添加。layoutIssues 是旧图未放下的陈设：按正文校正估计尺寸；若旧约束重复描述同一座椅或柜子，保留一个既有 id，用 spec.deletes={"contents":[重复的局部陈设id]} 显式清理重复约束，并同步 actors.near。不要删除已确认的锁定结构。';
+    if (hasOverview) request.messages[1].content += '\noverview 的水系 feature 必须为 {"id":"本图局部水系ID","type":"watercourse","zoneId":"本图已登记水域引用（可选）","fromSector":"north","toSector":"south","widthClass":"narrow/medium/wide"}。fromSector/toSector 取 north/northeast/east/southeast/south/southwest/west/northwest 且不同；不要仅写 zoneId/density 而省略起终方向。方向是估计布局，不能标成已测量事实。';
+    if (hasFloor) request.messages[1].content += '\n更新布局时，同一实物必须沿用 savedConstraints 的既有局部 id，不得换 id 重复添加。layoutIssues 是旧图未放下的陈设：按正文校正估计尺寸；若旧约束重复描述同一座椅或柜子，保留一个既有 id，用 spec.deletes={"contents":[重复的局部陈设id]} 显式清理重复约束，并同步 actors.near。不要删除已确认的锁定结构。';
     request.messages[1].content += "\nsavedConstraints 同时包含已保存场景及上次失败/待处理请求的有效约束。constraintStatus=failed/pending 时，继续修正这些约束并沿用其中 ID，不能当作从未规划过而再建一套陈设；原约束不会因失败自动清空。layoutIssues 给出上次失败原因。";
     request.messages[1].content += "\n禁止把载具画成固定地块、城市分区或地理轮廓；载具的行程与停靠由引擎单独投影。只绘制本世界资料支持的水系、山脉、城墙；示例地图和通用模板中的地名与地形不能直接搬入另一个世界。未知地理关系保持估计或未知，不编造原文没有的确定地理事实。";
     const profileModes = [...new Set(pending.map((entry) => entry.profile.profile.mode))].sort();
     if (profileModes.length) {
       request.messages[1].content += "\n【本图绘图档案（决定用哪套模板，不是给地点改名）】" + profileModes.map((mode) => `${mode}=${PROFILE_PROMPT[mode]}`).join(" ");
     }
-    const layoutKinds = [...new Set(scopes.map((scope) => scope.kind))].sort();
     request.messages[1].content += "\n【本批任务上下文（程序填写，不是可选项）】\n" + formatTaskContext({
       phase: "geography",
       chatUid: input.anchor.chatUid,
@@ -13229,7 +13231,8 @@ ${lines.join("\n")}
         ...scopes.flatMap((scope) => (scope.childSpaces ?? []).map((child) => `childSpace:${child.ref ?? child.referenceId}=${child.w}×${child.h}m`))
       ]
     });
-    request.messages[1].content += "\n【输出校验】本批要求生成或更新上述地图，不能因正文未变化只返回 noop。overview 的 surface 只能为 mixed/urban/forest/mountain/water/indoor/void；砂石、泥土、草地等具体材料可在 why 中说明，不得用 gravel/dirt/grass 作为 surface 枚举。未知或混合场地用 mixed。每个操作必须使用本批 map 引用及给定 kind，不输出解释正文。";
+    if (hasOverview) request.messages[1].content += "\noverview 的 surface 只能为 mixed/urban/forest/mountain/water/indoor/void；砂石、泥土、草地等具体材料可在 why 中说明，不得用 gravel/dirt/grass 作为 surface 枚举。未知或混合场地用 mixed。";
+    request.messages[1].content += "\n【提交前核对，不输出核对过程】逐一覆盖本批每张 map，且每图只提交一行 map.layout.request；kind 与引用逐图匹配，不能串用另一张图的局部陈设。初次生成补齐已登记空间；更新只补缺项或修正 layoutIssues，保留其它约束。示例只展示合法字段，不是空布局答案。尺寸冲突时保留确认值并在 why 说明，不能缩小已确认空间或删除锁定结构来凑成功。程序判定实际可绘制结果，模型不要声称校验已经通过。不得因正文未变化只返回 noop，不输出解释正文。";
     request.batchTargets = { kind: "maps", count: selected.length, estimatedOutputTokens: estimatedTokens };
     request.promptInput.injectionText = request.messages[1].content;
     return {

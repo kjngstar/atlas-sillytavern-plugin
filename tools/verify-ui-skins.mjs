@@ -19,6 +19,7 @@ export async function verifySkins({open,check,dir}){
  try{
   await f.evaluate(()=>AtlasPreview.appearanceReady);const databaseBefore=await p.evaluate(()=>JSON.stringify(SillyTavern.getContext().chatMetadata.atlas.database));
   await f.evaluate(()=>{window.__originalCanvas=document.getElementById('map');window.__businessCalls=[];for(const key of ['advance','layout','build','undo']){const original=AtlasHost[key];AtlasHost[key]=(...args)=>{window.__businessCalls.push(key);return original?.(...args);};}});
+  await f.locator('#mapWidgetsToggle').click();
   const before=await sample();
   for(const theme of ['builtin.starmap','builtin.parchment'])for(const profile of ['full','mapFocus','mapOnly']){
    const result=await f.evaluate(async({theme,profile})=>{await AtlasPreview.setTheme(theme);await AtlasPreview.setUIProfile(profile);return {skin:AtlasPreview.getSkin().id,profile:AtlasPreview.state.profileId,node:AtlasPreview.state.nodeId,sameCanvas:document.getElementById('map')===window.__originalCanvas,center:[AtlasPreview.map.state.cam.x,AtlasPreview.map.state.cam.y]};},{theme,profile});

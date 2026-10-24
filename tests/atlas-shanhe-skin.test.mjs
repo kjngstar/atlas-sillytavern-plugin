@@ -67,14 +67,33 @@ test('optional artwork tokens retain a typed whitelist and reject remote image r
 const mapSource=readFileSync(new URL('../ui/atlas-reference/js/map.js',import.meta.url),'utf8');
 const cut=(a,b)=>mapSource.slice(mapSource.indexOf(a),mapSource.indexOf(b));
 test('backdrop is drawn below geometry with a viewport cover crop and no world mutation',()=>{
- const log=[],st={kind:'world',node:{host:false},cam:{s:1}},g={},before=JSON.stringify(g);
- const ctx={fillRect(){log.push('background');},save(){},restore(){},createLinearGradient(){return {addColorStop(){}};},drawImage(...args){log.push(args);}};
+ const log=[],st={kind:'world',node:{host:false},cam:{s:1},dpr:2},g={},before=JSON.stringify(g);
+ const ctx={fillRect(){log.push('background');},setTransform(){},save(){},restore(){},createLinearGradient(){return {addColorStop(){}};},drawImage(...args){log.push(args);}};
  const sandbox=vm.createContext({ctx,st,SURFACE_PAINT:{},canvasStyle:{background:'#f3ead8',backdrop:{width:1536,height:1024},backdropOpacity:.22},texturePattern:null,extent:()=>[-400,400,-200,200],worldMap:()=>log.push('geometry'),pushLabel(){}});
  // terrainWorld ends at the next renderer function, so braces remain intact.
  const start=mapSource.indexOf('  function terrainWorld('),end=mapSource.indexOf('\n  function ',start+12);
  vm.runInContext(mapSource.slice(start,end),sandbox);sandbox.terrainWorld(g,800,400);
  assert.equal(log[0],'background');assert.ok(Array.isArray(log[1]));assert.equal(log[2],'geometry');
- const image=log[1];assert.equal(image.length,9);assert.deepEqual(image.slice(5),[-400,-200,800,400]);assert.equal(JSON.stringify(g),before);
+ const image=log[1];assert.equal(image.length,9);assert.deepEqual(image.slice(5),[0,0,800,400]);assert.equal(JSON.stringify(g),before);
+});
+test('skin backgrounds cover fractional viewport pixels and restore the camera transform before geometry',()=>{
+ for(const skin of [{background:'#f3ead8'}, {backdrop:{width:64,height:32}}, {texture:true}]){
+  const fills=[],events=[],stack=[];let transform='camera';
+  const ctx={save(){stack.push(transform);},restore(){transform=stack.pop();},setTransform(...args){transform=args;},fillRect(...args){fills.push({args,transform});},drawImage(){},createLinearGradient(){return {addColorStop(){}};}};
+  const sandbox=vm.createContext({ctx,st:{kind:'world',node:{host:false},dpr:2},SURFACE_PAINT:{},canvasStyle:skin,texturePattern:skin.texture?{}:null,extent:()=>[-5,5,-4,4],worldMap:()=>events.push(transform),pushLabel(){}});
+  const start=mapSource.indexOf('  function terrainWorld('),end=mapSource.indexOf('\n  function ',start+12);
+  vm.runInContext(mapSource.slice(start,end),sandbox);sandbox.terrainWorld({},801.25,600.25);
+  for(const fill of fills){assert.deepEqual(Array.from(fill.args),[0,0,801.5,600.5]);assert.deepEqual(Array.from(fill.transform),[2,0,0,2,0,0]);}
+  assert.deepEqual(events,['camera']);
+ }
+});
+test('the original dark appearance retains its existing world-space background',()=>{
+ const fills=[],transforms=[];
+ const ctx={save(){},restore(){},setTransform(...args){transforms.push(args);},fillRect(...args){fills.push(args);},createLinearGradient(){return {addColorStop(){}};}};
+ const sandbox=vm.createContext({ctx,st:{kind:'world',node:{host:false},dpr:1},SURFACE_PAINT:{},canvasStyle:null,texturePattern:null,extent:()=>[-5,5,-4,4],worldMap(){},pushLabel(){}});
+ const start=mapSource.indexOf('  function terrainWorld('),end=mapSource.indexOf('\n  function ',start+12);
+ vm.runInContext(mapSource.slice(start,end),sandbox);sandbox.terrainWorld({},800,600);
+ assert.deepEqual(fills,[[-205,-204,410,408]]);assert.deepEqual(transforms,[]);
 });
 test('ink stroke contrast stays ordered by quality and default appearance is untouched',()=>{
  const sandbox=vm.createContext({canvasStyle:{painters:{furniture:'ink'}},layerPaint:()=>({stroke:'#6f5035'}),hexA:(color,alpha)=>({color,alpha})});

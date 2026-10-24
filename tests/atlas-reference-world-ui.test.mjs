@@ -97,6 +97,33 @@ function boot({data=BUILDING_DATA,host={},preferences={version:1,singleClickEnte
 function withUI(t,options){const ui=boot(options);t.after(ui.dispose);return ui;}
 
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
+test('map tools start tucked away and retain canvas, camera, selection and independent legend state',async t=>{
+ const {w,preview,calls}=withUI(t),doc=w.document,canvas=doc.getElementById('map'),toggle=doc.getElementById('mapWidgetsToggle'),widgets=doc.getElementById('mapHudWidgets');
+ assert.equal(widgets.hidden,true);assert.equal(toggle.getAttribute('aria-expanded'),'false');
+ const camera=JSON.stringify(preview.map.state.tgt),node=preview.state.nodeId;
+ preview.showEntity('character','C1');const selected=JSON.stringify(preview.state.selected);
+ toggle.click();assert.equal(widgets.hidden,false);
+ doc.getElementById('legendToggle').click();
+ const select=doc.getElementById('mapModeSwitcher');select.value='heat';select.dispatchEvent(new w.Event('change',{bubbles:true}));await tick();
+ toggle.click();toggle.click();
+ assert.equal(doc.getElementById('map'),canvas);assert.equal(JSON.stringify(preview.map.state.tgt),camera);assert.equal(preview.state.nodeId,node);
+ assert.equal(JSON.stringify(preview.state.selected),selected);assert.equal(preview.state.mapMode,'heat');assert.equal(select.value,'heat');
+ assert.equal(doc.getElementById('legendToggle').getAttribute('aria-expanded'),'false');
+ await preview.setUIProfile('mapOnly');assert.equal(widgets.hidden,false);assert.equal(toggle.hasAttribute('data-profile-hidden'),false);
+ assert.equal(calls.build.length,0);
+});
+test('the restored map-tools preference is independent of profile and survives saving another preference',async t=>{
+ const ui=withUI(t,{preferences:{version:3,mapWidgetsCollapsed:false,legendCollapsed:true,profileId:'mapFocus'}});
+ assert.equal(ui.w.document.getElementById('mapHudWidgets').hidden,false);
+ ui.w.document.getElementById('legendToggle').click();await tick();
+ assert.equal(ui.store.version,3);assert.equal(ui.store.mapWidgetsCollapsed,false);assert.equal(ui.store.profileId,'mapFocus');
+});
+test('failed map-tools persistence keeps the session choice and leaves the restore control usable',async t=>{
+ const ui=withUI(t,{host:{preferenceStorage:{getItem:()=>null,setItem:()=>Promise.reject(Error('denied'))}}});
+ const toggle=ui.w.document.getElementById('mapWidgetsToggle');toggle.click();await tick();
+ assert.equal(ui.w.document.getElementById('mapHudWidgets').hidden,false);
+ toggle.click();await tick();assert.equal(ui.w.document.getElementById('mapHudWidgets').hidden,true);assert.equal(toggle.getAttribute('aria-expanded'),'false');
+});
 test('生成布局直接完成空间规划，界面不要求用户修复或选择绘图档案',async t=>{
  const ui=withUI(t);assert.equal(ui.w.document.querySelector('[data-map-profile]'),null);
  ui.preview.page('diag');await tick();assert.equal(ui.w.document.querySelector('[data-history-preview]'),null);

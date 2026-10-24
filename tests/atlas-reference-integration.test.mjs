@@ -95,6 +95,19 @@ function mount(options={}){
  return {root,core,render,bridge,calls,get loads(){return loads;},get closes(){return closes;},get prefs(){return prefs;},saved(){context.chatMetadata.atlas.database={data:'saved-A',sha256:'saved-a',storage_revision:4};state={...state,stateData:{revision:4}};render();},noSnapshot(){context.chatMetadata.atlas={};render();},switch(id){state={...state,chatId:id,lastError:null};context={...context,chatId:id,chatMetadata:{atlas:{database:{data:id,sha256:id}}}};render();},off(){context.extensionSettings.atlas_world_sim.sqlMode=false;render();}};
 }
 
+test('the real host saves v3 map-widget preferences while still accepting v1 and v2',async()=>{
+ const m=mount();
+ try{
+  await m.bridge.boot();
+  for(const version of [1,2,3]){
+   const value={version,singleClickEnter:false,legendCollapsed:true,mapWidgetsCollapsed:false,profileId:'mapFocus'};
+   await m.bridge.savePreferences(value);assert.deepEqual(m.prefs.interaction,value);
+   assert.deepEqual((await m.bridge.boot()).preferences,value);
+  }
+  await assert.rejects(m.bridge.savePreferences({version:4}),/UI_PREFERENCE_INVALID/);
+ }finally{await m.render.dispose();}
+});
+
 test('skin ZIP and map downloads belong to the host document and retain binary bytes',async()=>{
  const m=mount(),win=m.root.ownerDocument.defaultView,blobs=[],clicks=[],cleanup=[],revoked=[];
  win.URL.createObjectURL=blob=>{assert.ok(blob instanceof win.Blob);blobs.push(blob);return 'blob:host-'+blobs.length;};
