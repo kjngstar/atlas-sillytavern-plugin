@@ -113,6 +113,7 @@ export function checkSceneDocument(doc){
     for(let i=0;i<shape[key].length;i++)bad(shape[key][i],validate,'$.layout.'+key+'['+i+']');
   };
   if(shape?.kind==='floor'){
+    if(shape.hostArea!==undefined)bad(shape.hostArea,p=>rect(p)&&typeof p.id==='string'&&p.id.length>0&&p.x>=b.x-eps&&p.y>=b.y-eps&&p.x+p.w<=b.x+b.w+eps&&p.y+p.h<=b.y+b.h+eps,'$.layout.hostArea');
     bad(shape.corridor,p=>rect(p)||(plain(p)&&[p.x,p.y,p.w,p.h].every(finite)&&p.w===0&&p.h===0&&!p.entityId&&shape.rooms?.length>0),'$.layout.corridor');
     // P11/R03 §18.1：命名走廊绑定。程序几何 ID 永远是 'corridor'，实体身份可选；
     // 绑定的地点**不得**同时出现在普通 rooms 里（同一实体只表达一次）。

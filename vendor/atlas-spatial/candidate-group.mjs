@@ -27,6 +27,7 @@ export function compileSceneGroup({request,scope,currentScope,mapRow,locations,c
       const delegated=new Set();
       spec.contents=(spec.contents??[]).filter(row=>{
         const owner=locations.find(l=>l.branch_id===scope.branchId&&l.id===row.roomId);
+        if(owner?.kind==='room'&&owner.id===mapRow.container_location_id)return true;
         const nested=locations.some(l=>l.branch_id===scope.branchId&&l.status==='active'&&l.parent_location_id===row.roomId&&(owner?.kind!=='room'||l.kind!=='other'));
         const known=(ctx.childCanonical[row.roomId]?.furnishing??[]).some(f=>(parseSpaceLocalId(f.localId)?.contentId??f.localId)===(parseSpaceLocalId(row.id)?.contentId??row.id))||(ctx.previousScene?.constraints?.contents??[]).some(f=>f.id===row.id&&f.roomId===row.roomId);
         const supported=(spec.items??[]).some(i=>i.on===row.id&&ctx.itemsById[i.id]?.location_id===row.roomId);

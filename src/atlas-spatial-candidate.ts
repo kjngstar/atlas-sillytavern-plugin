@@ -289,6 +289,9 @@ function applyLooseItemMarkers(input: LoosePassInput): void {
   if (markers.length === 0) return;
 
   const regions = new Map<string, Array<{ x: number; y: number }>>();
+  const host=plain(layout.hostArea)?layout.hostArea:null;
+  const hostRect=host?rectOf(host):null;
+  if(hostRect&&typeof host?.id==='string')regions.set(host.id,[{x:hostRect.x,y:hostRect.y},{x:hostRect.x+hostRect.w,y:hostRect.y},{x:hostRect.x+hostRect.w,y:hostRect.y+hostRect.h},{x:hostRect.x,y:hostRect.y+hostRect.h}]);
   for (const room of Array.isArray(layout.rooms) ? (layout.rooms as SqlRow[]) : []) {
     const id = typeof room?.id === 'string' ? room.id : '';
     const rect = rectOf(room);
@@ -305,6 +308,7 @@ function applyLooseItemMarkers(input: LoosePassInput): void {
     if (id && roomId) roomOfGroup.set(id, roomId);
   }
   const obstacles = new Map<string, Array<{ x: number; y: number; w: number; h: number }>>();
+  if(hostRect&&typeof host?.id==='string')obstacles.set(host.id,(Array.isArray(layout.rooms)?layout.rooms as SqlRow[]:[]).map(rectOf).filter((r):r is NonNullable<typeof r>=>r!==null));
   for (const group of Array.isArray(layout.groups) ? (layout.groups as SqlRow[]) : []) {
     const id = typeof group?.id === 'string' ? group.id : '';
     const roomId = roomOfGroup.get(id);
@@ -325,7 +329,7 @@ function applyLooseItemMarkers(input: LoosePassInput): void {
     ...(scene as SqlRow),
     layout: {
       ...layout,
-      items: [...keptItems, ...placed.points.map((p) => ({ id: p.id, x: p.x, y: p.y, quality: p.quality, name: p.name }))],
+      items: [...keptItems, ...placed.points.map((p) => ({ id: p.id, roomId:p.roomId, x: p.x, y: p.y, quality: p.quality, name: p.name }))],
     },
   };
   const rebuilt = buildSceneMutation({
@@ -739,6 +743,7 @@ export function applyPendingSpatialRequests(input: ApplyPendingInput): ApplyPend
     const occupants = reconcileOccupantsSpec({
       scene: frameRead.scene,
       requestSpec: spec,
+      container:(()=>{const row=locations.find(l=>l.id===mapRow!.container_location_id);return row?{id:row.id,kind:row.kind}:null;})(),
       locations,
       characters,
       items,

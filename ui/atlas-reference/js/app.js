@@ -170,10 +170,15 @@ function renderRail(){
  $('[data-view="msgs"] .rail-badge').textContent=D.MESSAGES.filter(known).length;
  $('[data-view="sim"] .rail-badge').textContent=D.TASKS.filter(t=>known(t)&&t.st!=='done').length;
 }
-function renderCrumbs(){const arr=path(state.nodeId)||[D.ROOT];$('#crumbs').innerHTML=arr.map((n,i)=>`${i?'<span class="crumb-sep">›</span>':''}<button class="crumb ${i===arr.length-1?'cur':''}" data-go="${esc(n.id)}"><span class="lv">${esc(n.code)}</span><span>${esc(n.name)}</span></button>`).join('');}
-function renderLadder(){const arr=path(state.nodeId)||[];$('#depthLadder').innerHTML=D.LEVELS.map((lv,i)=>{const n=arr.find(n=>n.code===lv.code);return `<button class="dl-cell ${n?(n.id===state.nodeId?'cur':'done'):''}" ${n?`data-go="${esc(n.id)}"`:'disabled'} aria-label="${esc(lv.name+(n?'，'+n.name:'，未建立'))}"><div class="dl-bar"></div><div class="dl-lb">${lv.code}</div></button>`;}).join('');}
+function renderCrumbs(){const arr=path(state.nodeId)||[D.ROOT];$('#crumbs').innerHTML=arr.map((n,i)=>`${i?'<span class="crumb-sep">›</span>':''}<button class="crumb ${i===arr.length-1?'cur':''}" data-go="${esc(n.id)}"><span class="lv">${esc(n.tag||n.code)}</span><span>${esc(n.name)}</span></button>`).join('');
+ const select=$('#floorSwitcher'),choices=current().floorChoices||[];select.hidden=!choices.length;select.innerHTML=choices.map(c=>`<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('');select.value=state.nodeId;}
+function renderLadder(){const arr=path(state.nodeId)||[];$('#depthLadder').innerHTML=arr.map(n=>`<button class="dl-cell ${n.id===state.nodeId?'cur':'done'}" data-go="${esc(n.id)}" aria-label="${esc((n.tag||n.code)+'，'+n.name)}" title="${esc(n.name)}"><div class="dl-bar"></div><div class="dl-lb">${esc(n.tag||n.code)}</div></button>`).join('');}
+function renderSpaceNavigation(){const n=current(),groups=n.spaceGroups||[],coverage=n.spaceCoverage;
+ const el=$('#spaceNavigation'),open=el.querySelector('details')?.open===true;el.hidden=!groups.length;
+ el.innerHTML=groups.length?`<details class="space-navigation" ${open?'open':''}><summary>本图空间 · ${coverage.total}${coverage.unplaced?`<em>${coverage.unplaced} 处位置待完善</em>`:''}</summary>${groups.map(g=>`<section><div class="section-label">${esc(g.label)}</div>${g.entries.map(c=>`<button class="child-location" data-go="${esc(c.id)}"><span>${esc(c.name)}</span><em>${!c.represented?'位置待完善':!c.hasLayout?'内部待布局':'查看'}</em>›</button>`).join('')}</section>`).join('')}<p class="scope-note">入口按已有归属分组；没有楼层依据的房间保留原归属。位置待完善不代表地点不存在。</p></details>`:'';
+}
 function renderTree(){let count=0;const walk=(n,depth)=>{if(!known(n))return '';count++;const has=n.children?.some(known),open=state.open.has(n.id),active=n.id===state.nodeId;
- return `<div class="tree-row ${active?'on':''}" style="padding-left:${6+depth*12}px"><button class="tw ${open&&has?'open':''}" data-expand="${esc(n.id)}" aria-label="${open?'收起':'展开'}${esc(n.name)}" ${has?'':'disabled'}>${has?icon('chev'):''}</button><button class="tree-link" data-go="${esc(n.id)}"><i class="tdot" style="--c:${color[n.kind]||color.world}"></i><span class="tname">${esc(n.name)}</span>${sceneCast(n.id).length?`<em class="tflag live">${sceneCast(n.id).length}人</em>`:''}<em class="tnum">${esc(n.code)}</em></button></div>${has&&open?n.children.map(c=>walk(c,depth+1)).join(''):''}`;};
+ return `<div class="tree-row ${active?'on':''}" style="padding-left:${6+depth*12}px"><button class="tw ${open&&has?'open':''}" data-expand="${esc(n.id)}" aria-label="${open?'收起':'展开'}${esc(n.name)}" ${has?'':'disabled'}>${has?icon('chev'):''}</button><button class="tree-link" data-go="${esc(n.id)}" title="${esc((n.tag||n.code)+(n.hasLayout===false?' · 内部待布局':''))}"><i class="tdot" style="--c:${color[n.kind]||color.world}"></i><span class="tname">${esc(n.name)}</span>${sceneCast(n.id).length?`<em class="tflag live">${sceneCast(n.id).length}人</em>`:''}<em class="tnum">${esc(n.tag||n.code)}</em></button></div>${has&&open?n.children.map(c=>walk(c,depth+1)).join(''):''}`;};
  $('#layerTree').innerHTML=walk(D.ROOT,0);$('#treeCount').textContent=count+' 节点';
 }
 const flags=[['showGrid','网格底图'],['showMarks','世界标记'],['showLabels','名称标签'],['showLinks','人物联系线'],['showRadar','室外距离环']];
@@ -349,7 +354,7 @@ function settingsHTML(){const tabs=[['prompts','提示词'],['connection','API �
  if(state.settingsTab!=='appearance')return html+presetUI.render(state.settingsTab);
  return html+window.AtlasAppearance.appearanceSettingsHTML({skin:skinValue(),catalog:skinCatalog,runtime:window.AtlasSkinRuntime});
 }
-function renderAll({preserveWorkspace=false}={}){renderRail();renderCrumbs();renderLadder();renderTree();renderSwitches();renderChips();renderPlace();renderInspector();renderDock();if(!preserveWorkspace)renderPage();renderModes();applyUIProfile();}
+function renderAll({preserveWorkspace=false}={}){renderRail();renderCrumbs();renderLadder();renderTree();renderSpaceNavigation();renderSwitches();renderChips();renderPlace();renderInspector();renderDock();if(!preserveWorkspace)renderPage();renderModes();applyUIProfile();}
 function renderModes(){$('#mapModeSwitcher').value=state.mapMode;}
 function showFlow(id){const m=message(id);if(!m||!known(m))return;let destination=Object.keys(D.FLOWS).find(mapId=>(D.FLOWS[mapId]||[]).some(e=>e.id===id)&&mapId===state.nodeId)||Object.keys(D.FLOWS).find(mapId=>(D.FLOWS[mapId]||[]).some(e=>e.id===id));destination=destination||m.mapNodeId||m.locationId;state.mapMode='flow';navigate(destination,true);map.setMode('flow');select('message',id,true);renderModes();}
 function showTask(id){const t=task(id);if(!t||!known(t))return;state.mapMode='sim';navigate(t.mapId,true);map.setMode('sim');select('task',id,true);renderModes();}
@@ -547,6 +552,7 @@ function bind(){
   if(el.id==='diagnosticLevel')$('#diagnosticRows').innerHTML=diagnosticRows($('#diagnosticSearch').value,el.value);
   if(el.id==='profileSwitcher'){await setUIProfile(el.value);return;}
   if(el.id==='mapModeSwitcher'){state.mapMode=el.value;map.setMode(state.mapMode);refreshFlows();renderModes();return;}
+  if(el.id==='floorSwitcher'){navigate(el.value);return;}
   if(el.hasAttribute('data-skin-select')){await setTheme(el.value);renderPage();return;}
   for(const [attribute,section]of [['skinComponent','components'],['skinMapStyle','mapStyles'],['skinToken','tokens']])if(el.dataset[attribute]){await updateSkin(section,el.dataset[attribute],el.type==='range'?Number(el.value):el.value);return;}
   for(const key of ['radar','motion','coordinates'])if(el.hasAttribute('data-appearance-'+key)){await updateSkin('options',key,el.checked);return;}

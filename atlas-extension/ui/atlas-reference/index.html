@@ -74,6 +74,7 @@
     </div>
 
     <div class="crumbs" id="crumbs" data-ui-slot="breadcrumb"></div>
+    <select id="floorSwitcher" class="profile-switcher floor-switcher" aria-label="切换建筑楼层" hidden></select>
 
     <div class="tb-right"><select id="profileSwitcher" class="profile-switcher" data-ui-slot="profileSwitcher" aria-label="界面显示范围"><option value="full">完整界面</option><option value="mapFocus">地图专注</option><option value="mapOnly">纯地图</option></select>
       <div class="stat-pill" id="syncPill">
@@ -127,6 +128,7 @@
       <div class="depth-ladder" id="depthLadder"></div>
 
       <div class="p-scroll">
+        <div class="p-sec" id="spaceNavigation"></div>
         <div class="p-sec">
           <div class="sec-h"><span>地图树</span><em id="treeCount">—</em></div>
           <div class="tree" id="layerTree"></div>
