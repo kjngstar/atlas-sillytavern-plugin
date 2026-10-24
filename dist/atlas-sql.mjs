@@ -4372,6 +4372,7 @@ function checkSceneDocument(doc) {
     for (let i = 0; i < shape[key].length; i++) bad(shape[key][i], validate, "$.layout." + key + "[" + i + "]");
   };
   if (shape?.kind === "floor") {
+    if (shape.hostArea !== void 0) bad(shape.hostArea, (p) => rect(p) && typeof p.id === "string" && p.id.length > 0 && p.x >= b.x - eps && p.y >= b.y - eps && p.x + p.w <= b.x + b.w + eps && p.y + p.h <= b.y + b.h + eps, "$.layout.hostArea");
     bad(shape.corridor, (p) => rect(p) || plain(p) && [p.x, p.y, p.w, p.h].every(finite) && p.w === 0 && p.h === 0 && !p.entityId && shape.rooms?.length > 0, "$.layout.corridor");
     const c = shape.corridor;
     if (plain(c) && c.entityId !== void 0 && c.entityId !== null) {
@@ -4980,9 +4981,28 @@ function floorOnce(spec, previous = null) {
   if (collections.some((k) => spec[k] !== void 0 && (!Array.isArray(spec[k]) || spec[k].some((v) => !v || typeof v.id !== "string" || !v.id) || new Set(spec[k].map((v) => v.id)).size !== spec[k].length))) return { ok: false, issues: [{ id: spec.id, code: "DETAIL_INPUT_INVALID" }], kept: previous ? clone3(previous) : null };
   const bare = floor({ ...spec, furniture: [], actors: [] }, previous);
   if (!bare.ok) return bare;
+  const host = spec.hostRoom ? { ...bare.bounds, id: spec.hostRoom.id, name: spec.hostRoom.name, side: "south", host: true, quality: "layout" } : null;
+  if (host) {
+    const candidates = spec.hostEntryDoors?.length ? spec.hostEntryDoors : [0.5, 0.2, 0.8].flatMap((t) => [
+      { x: host.w * t, y: host.h, wall: "south" },
+      { x: host.w * t, y: 0, wall: "north" },
+      { x: 0, y: host.h * t, wall: "west" },
+      { x: host.w, y: host.h * t, wall: "east" }
+    ]).map((d, i) => ({ ...d, id: "entry:" + host.id + ":" + i, width: Math.min(1.2, host.w - 0.4, host.h - 0.4), quality: "layout" }));
+    const valid = (d) => {
+      const vertical = verticalDoor(d), along = vertical ? d.y : d.x, side = vertical ? host.h : host.w;
+      const boundary = d.wall === "north" ? d.y : d.wall === "south" ? d.y - host.h : d.wall === "west" ? d.x : d.x - host.w;
+      return Math.abs(boundary) < EPS2 && d.width > 0 && along - d.width / 2 >= 0 && along + d.width / 2 <= side && !bare.rooms.some((r) => intersects(inflate(r, 0.18), entryRect(d, d.width, 0.6)));
+    };
+    const entries = spec.hostEntryDoors?.length ? candidates : candidates.filter(valid).slice(0, 1);
+    if (!entries.length || entries.some((d) => !valid(d))) return { ok: false, issues: [{ id: host.id, code: "HOST_ENTRY_BLOCKED" }], kept: previous ? clone3(previous) : null };
+    bare.doors.push(...entries.map((d) => ({ ...d, roomId: host.id })));
+  }
   const groups = [], bodies = [], actors = [], items = [], windows = [], lamps = [], issues = [], doorSwings = [];
-  for (const r of bare.rooms) {
-    const roomDoors = bare.doors.filter((d) => d.roomId === r.id), door = roomDoors[0], aisle = spec.singleRoom ? 0.8 : 1.6, margin = 0.2;
+  for (const r of [...bare.rooms, ...host ? [host] : []]) {
+    const roomDoors = bare.doors.filter((d) => d.roomId === r.id), door = roomDoors[0], aisle = spec.singleRoom || r.host ? 0.8 : 1.6, margin = 0.2;
+    const partitions = r.host ? bare.rooms.map((child) => ({ ...child, solid: true })) : [];
+    const roomBodies = () => [...bodies.filter((b) => b.roomId === r.id), ...partitions];
     const spine = verticalDoor(door) ? { x: r.x, y: door.y - aisle / 2, w: r.w, h: aisle } : { x: door.x - aisle / 2, y: r.y, w: aisle, h: r.h }, inner = { x: r.x + margin, y: r.y + margin, w: r.w - margin * 2, h: r.h - margin * 2 };
     const swings = roomDoors.map((d) => ({ id: "swing:" + d.id, roomId: r.id, ...entryRect(d, d.width, d.width) }));
     doorSwings.push(...swings);
@@ -5002,13 +5022,13 @@ function floorOnce(spec, previous = null) {
         issues.push({ id: f.id, code: "DETAIL_TOO_LARGE" });
         continue;
       }
-      const free = (q) => contains(inner, q) && (FLOOR_OVERLAYS.has(f.type) || !intersects(q, spine) && !swings.some((s) => intersects(q, s)) && !groups.filter((g2) => g2.roomId === r.id && !FLOOR_OVERLAYS.has(g2.type)).some((g2) => intersects(inflate(g2, 0.28), q)) && !exact.some((p) => intersects(q, { x: p.x - 0.25, y: p.y - 0.25, w: 0.5, h: 0.5 })));
+      const free = (q) => contains(inner, q) && !partitions.some((p) => intersects(inflate(p, 0.18), q)) && (FLOOR_OVERLAYS.has(f.type) || !intersects(q, spine) && !swings.some((s) => intersects(q, s)) && !groups.filter((g2) => g2.roomId === r.id && !FLOOR_OVERLAYS.has(g2.type)).some((g2) => intersects(inflate(g2, 0.28), q)) && !exact.some((p) => intersects(q, { x: p.x - 0.25, y: p.y - 0.25, w: 0.5, h: 0.5 })));
       const existing = groups.filter((g2) => g2.roomId === r.id && !FLOOR_OVERLAYS.has(g2.type)), existingBodies = bodies.filter((b) => b.roomId === r.id);
       const entries = roomDoors.map((d) => entryRect(d, 0.6, 0.6));
-      const freePath = (q) => contains(inner, q) && !swings.some((s) => intersects(q, s)) && !entries.some((s) => intersects(q, s)) && !existing.some((g2) => intersects(inflate(g2, 0.28), q)) && !exact.some((p) => intersects(q, { x: p.x - 0.25, y: p.y - 0.25, w: 0.5, h: 0.5 }));
+      const freePath = (q) => contains(inner, q) && !partitions.some((p) => intersects(inflate(p, 0.18), q)) && !swings.some((s) => intersects(q, s)) && !entries.some((s) => intersects(q, s)) && !existing.some((g2) => intersects(inflate(g2, 0.28), q)) && !exact.some((p) => intersects(q, { x: p.x - 0.25, y: p.y - 0.25, w: 0.5, h: 0.5 }));
       const reachablePlacement = (q) => {
         if (!freePath(q)) return false;
-        const proposal = makeGroup({ ...f, w: q.w, h: q.h }, r, q.x, q.y), nav2 = navigation(r, door, [...existingBodies, ...proposal.bodies]);
+        const proposal = makeGroup({ ...f, w: q.w, h: q.h }, r, q.x, q.y), nav2 = navigation(r, door, [...existingBodies, ...partitions, ...proposal.bodies]);
         const accessible = (g2) => [pt(g2.x + g2.w + 0.48, g2.y + g2.h / 2), pt(g2.x - 0.48, g2.y + g2.h / 2), pt(g2.x + g2.w / 2, g2.y + g2.h + 0.48), pt(g2.x + g2.w / 2, g2.y - 0.48)].some((p) => pointInside(inner, p) && nav2.reachable(p));
         return [...existing, proposal].every(accessible) && exact.every(nav2.reachable) && roomDoors.every((d) => nav2.reachable(inward(d, 0.45)));
       };
@@ -5070,9 +5090,9 @@ function floorOnce(spec, previous = null) {
       bodies.push(...g.bodies);
     }
     const outerY = r.side === "north" ? r.y : r.y + r.h;
-    if (!["outdoor", "garden"].includes(r.role)) for (let i = 0; i < Math.max(1, Math.floor(r.w / 3)); i++) windows.push({ id: "window:" + r.id + ":" + i, type: "window", roomId: r.id, x: r.x + (i + 0.5) * r.w / Math.max(1, Math.floor(r.w / 3)), y: outerY, width: 1.2, elevation: 1.1 });
+    if ((!host || r.host) && !["outdoor", "garden"].includes(r.role)) for (let i = 0; i < Math.max(1, Math.floor(r.w / 3)); i++) windows.push({ id: "window:" + r.id + ":" + i, type: "window", roomId: r.id, x: r.x + (i + 0.5) * r.w / Math.max(1, Math.floor(r.w / 3)), y: outerY, width: 1.2, elevation: 1.1 });
     lamps.push({ id: "light:" + r.id, type: "light", roomId: r.id, x: door.x, y: r.y + r.h * 0.45, elevation: 2.8 });
-    const nav = navigation(r, door, bodies.filter((b) => b.roomId === r.id));
+    const nav = navigation(r, door, roomBodies());
     for (const d of roomDoors) if (!nav.reachable(inward(d, 0.45))) issues.push({ id: d.id, code: "DOOR_NOT_REACHABLE" });
     for (const g of groups.filter((g2) => g2.roomId === r.id)) {
       const edgePoints = [pt(g.x + g.w + 0.48, g.y + g.h / 2), pt(g.x - 0.48, g.y + g.h / 2), pt(g.x + g.w / 2, g.y + g.h + 0.48), pt(g.x + g.w / 2, g.y - 0.48)];
@@ -5088,7 +5108,7 @@ function floorOnce(spec, previous = null) {
       else issues.push({ id: a.id, code: a.position ? "ACTOR_LOCK_CONFLICT" : "ACTOR_NO_REACHABLE_POSITION" });
     }
   }
-  const cid = typeof spec.corridorEntityId === "string" && spec.corridorEntityId ? spec.corridorEntityId : spec.parentId;
+  const cid = typeof spec.corridorEntityId === "string" && spec.corridorEntityId ? spec.corridorEntityId : host ? null : spec.parentId;
   const cspace = cid && bare.corridor.h > 0 && bare.corridor.w > 0 ? bare.corridor : null;
   if (cspace) {
     const ch = cspace.h, passage = Math.min(1.2, Math.max(0.6, ch * 0.5)), band = (ch - passage) / 2;
@@ -5142,8 +5162,8 @@ function floorOnce(spec, previous = null) {
     if (b) items.push({ ...i, ...center(b), roomId: g.roomId, type: "item", containerId: g.id, elevation: 0.8, quality: "layout" });
     else issues.push({ id: i.id, code: "ITEM_CONTAINER_NOT_FOUND" });
   }
-  if (bare.corridor.h > 0) for (let x = 1.5; x < spec.width; x += 3) lamps.push({ id: "hall-light:" + x, type: "light", roomId: cid || "corridor", x, y: bare.corridor.y + 0.22, elevation: 2.8 });
-  const knownSpaces = /* @__PURE__ */ new Set([...bare.rooms.map((r) => r.id), ...cid ? [cid] : []]);
+  if (!host && bare.corridor.h > 0) for (let x = 1.5; x < spec.width; x += 3) lamps.push({ id: "hall-light:" + x, type: "light", roomId: cid || "corridor", x, y: bare.corridor.y + 0.22, elevation: 2.8 });
+  const knownSpaces = /* @__PURE__ */ new Set([...bare.rooms.map((r) => r.id), ...cid ? [cid] : [], ...host ? [host.id] : []]);
   for (const v of [...spec.contents || [], ...spec.actors || []]) if (!knownSpaces.has(v.roomId)) issues.push({ id: v.id, code: "ROOM_REF_UNKNOWN" });
   const inRooms = actors.filter((a) => bare.rooms.some((r) => r.id === a.roomId));
   let path = [];
@@ -5183,7 +5203,7 @@ function floorOnce(spec, previous = null) {
       else path = [];
     }
   }
-  return { ...bare, groups, bodies, actors, items, windows, lamps, doorSwings, path, issues };
+  return { ...bare, ...host ? { hostArea: host } : {}, groups, bodies, actors, items, windows, lamps, doorSwings, path, issues };
 }
 function splitWater(a, b, river) {
   const point = (t) => pt(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t), cuts = [0, 1];
@@ -6082,6 +6102,7 @@ function generateFloorOnce(value, context) {
       if (lock) s.spec.corridorLock = lock;
     }
     s.spec.rooms = collectAndMerge(s, "rooms", LIMITS.rooms, "locations", (r) => {
+      if (r.id !== s.map.containerLocationId && ctx.locationsById?.[r.id]?.kind === "floor") throw new Error("VERTICAL_SPACE_NAVIGATION_ONLY");
       const authority = r.id === s.map.containerLocationId ? ctx.spaceSize ?? ctx.spaceCanonical?.size : ctx.childSpaces?.[r.id];
       const d = ctx.locks?.rooms?.[r.id]?.w > 0 ? dimensions(ctx.locks.rooms[r.id]) : authority ? dimensions({ w: authority.widthM, h: authority.heightM }) : dimensions(r);
       if (d.w > LIMITS.roomSide || d.h > LIMITS.roomSide || !["north", "south"].includes(r.side) || r.role !== void 0 && !["indoor", "outdoor", "garden"].includes(r.role)) throw new Error("ROOM_CONSTRAINT_UNSUPPORTED");
@@ -6094,6 +6115,13 @@ function generateFloorOnce(value, context) {
       if (s.spec.rooms.length < before) s.issues.push(diagnostic("CORRIDOR_ROOM_DEDUPED", "$.rooms", "该地点已绑定为命名走廊，不再作为普通房间排布；同一实体只表达一次", { entityId: s.spec.corridorEntityId, severity: "warning" }));
     }
     s.spec.singleRoom = s.spec.rooms.length === 1 && s.spec.rooms[0].id === s.map.containerLocationId;
+    if (!s.spec.singleRoom && s.map.containerKind === "room") {
+      s.spec.hostRoom = { id: s.map.containerLocationId, name: s.map.containerName ?? s.map.name };
+      s.spec.hostEntryDoors = (ctx.entryDoors ?? []).map((d) => {
+        const size = d.sourceRoomSize;
+        return size && d.quality !== "confirmed" ? { ...d, x: d.x * s.spec.width / size.w, y: d.y * s.spec.height / size.h } : d;
+      });
+    }
     if (s.spec.singleRoom && ctx.parentGroups?.length) s.spec.parentGroups = ctx.parentGroups.filter((g) => Math.abs(g.sourceRoomSize.w - s.spec.rooms[0].w) < 1e-7 && Math.abs(g.sourceRoomSize.h - s.spec.rooms[0].h) < 1e-7).map((g) => ({ id: g.id, roomId: g.roomId, x: g.x + (s.spec.width - s.spec.rooms[0].w) / 2, y: g.y + (s.spec.height - s.spec.rooms[0].h) / 2, w: g.w, h: g.h }));
     const actualRooms = new Set(s.spec.rooms.map((r) => r.id));
     s.spec.roomConnections = (ctx.roomConnections ?? []).filter((edge) => actualRooms.has(edge.from) && actualRooms.has(edge.to));
@@ -6109,15 +6137,16 @@ function generateFloorOnce(value, context) {
       failed.issues.push(...s.issues);
       return failed;
     }
-    if (s.spec.rooms.reduce((n, r) => n + Math.ceil(r.w / 0.2) * Math.ceil(r.h / 0.2), 0) > LIMITS.navigationCells) throw new Error("NAVIGATION_BUDGET_EXCEEDED");
+    if (s.spec.rooms.reduce((n, r) => n + Math.ceil(r.w / 0.2) * Math.ceil(r.h / 0.2), s.spec.hostRoom ? Math.ceil(s.spec.width / 0.2) * Math.ceil(s.spec.height / 0.2) : 0) > LIMITS.navigationCells) throw new Error("NAVIGATION_BUDGET_EXCEEDED");
     const roomIds = new Set(s.spec.rooms.map((r) => r.id));
+    if (s.spec.hostRoom) roomIds.add(s.spec.hostRoom.id);
     if (s.spec.corridorEntityId) roomIds.add(s.spec.corridorEntityId);
     const ledger = (Array.isArray(ctx?.spaceCanonical?.furnishing) ? ctx.spaceCanonical.furnishing : []).filter((entry) => {
       const parsed = parseSpaceLocalId(entry.localId);
       return !!parsed && parsed.locationId === s.map.containerLocationId && !!parsed.contentId;
     });
-    if (ledger.length && s.spec.singleRoom) {
-      const home = s.spec.rooms[0]?.id;
+    if (ledger.length && (s.spec.singleRoom || s.spec.hostRoom)) {
+      const home = s.spec.hostRoom?.id ?? s.spec.rooms[0]?.id;
       const own = (id) => {
         const parsed = parseSpaceLocalId(id);
         return parsed?.locationId === s.map.containerLocationId ? parsed.contentId : id;
@@ -6183,7 +6212,7 @@ function generateCity(value, context) {
     if (s.input.riverWidth !== void 0 && (!finite(s.input.riverWidth) || s.input.riverWidth < 0)) return failure("RIVER_CONSTRAINT_INVALID", "$.riverWidth", "河宽应为非负数，零表示无水系", { kept: s.previous ? clone(s.previous) : null });
     s.spec.riverWidth = s.input.riverWidth ?? 0;
     s.spec.seed = label(context.seed) || s.map.id;
-    s.spec.blocksPerDistrict = Number.isInteger(s.input.blocksPerDistrict) ? Math.max(0, Math.min(LIMITS.blocksPerDistrict, s.input.blocksPerDistrict)) : 8;
+    s.spec.blocksPerDistrict = Number.isInteger(s.input.blocksPerDistrict) ? Math.max(0, Math.min(LIMITS.blocksPerDistrict, s.input.blocksPerDistrict)) : s.previous?.constraints?.blocksPerDistrict ?? 0;
     if (s.input.enclosure !== void 0 && !CITY_ENCLOSURES.includes(s.input.enclosure)) s.issues.push(diagnostic("ENCLOSURE_INVALID", "$.enclosure", "城市边界策略只能是 open 或 wall；已按既有/默认策略处理", { severity: "warning" }));
     s.spec.enclosure = CITY_ENCLOSURES.includes(s.input.enclosure) ? s.input.enclosure : s.previous ? s.previous.constraints?.enclosure ?? "wall" : "open";
     s.spec.districts = collectAndMerge(s, "districts", LIMITS.districts, "locations", (r) => {
@@ -6192,9 +6221,21 @@ function generateCity(value, context) {
     });
     const districtIds = new Set(s.spec.districts.map((d) => d.id));
     s.spec.buildings = collectAndMerge(s, "buildings", LIMITS.buildings, "locations", (r) => {
-      if (!districtIds.has(r.districtId)) throw new Error("DISTRICT_REF_UNKNOWN");
+      let districtId = r.districtId;
+      const row2 = ctx.locationsById?.[r.id], parent = row2?.parent_location_id, assigned = ctx.locationsById?.[districtId];
       const locked = trustedLock(ctx, "buildings", r.id);
-      return { ...ctx.locks?.buildings?.[r.id]?.w > 0 ? dimensions(ctx.locks.buildings[r.id]) : dimensions(r), districtId: r.districtId, ...locked ? { locked } : {}, ...proxyPlacement(ctx, r.id) };
+      if (parent && assigned?.kind === "district" && districtId !== parent) {
+        if (locked) throw new Error("DISTRICT_MEMBERSHIP_CONFLICT");
+        if (districtIds.has(parent)) districtId = parent;
+        else if (parent === s.map.containerLocationId && s.spec.districts.length < LIMITS.districts) {
+          s.spec.districts.push({ id: parent, name: s.map.containerName ?? s.map.name, bank: "west", order: s.spec.districts.length });
+          districtIds.add(parent);
+          districtId = parent;
+        } else throw new Error("DISTRICT_MEMBERSHIP_CONFLICT");
+        s.issues.push(diagnostic("BUILDING_DISTRICT_RECONCILED", "$.buildings", "建筑分区与已登记归属不符，已保留真实归属，不把示意排位当作包含关系", { severity: "warning", entityId: r.id }));
+      }
+      if (!districtIds.has(districtId)) throw new Error("DISTRICT_REF_UNKNOWN");
+      return { ...ctx.locks?.buildings?.[r.id]?.w > 0 ? dimensions(ctx.locks.buildings[r.id]) : dimensions(r), districtId, ...locked ? { locked } : {}, ...proxyPlacement(ctx, r.id) };
     });
     return finish(s, ctx, city);
   } catch (e) {
@@ -6244,6 +6285,7 @@ function generateOverviewOnce(value, context) {
       return p && finite(p.x) && finite(p.y) ? { x: p.x, y: p.y } : null;
     };
     s.spec.zones = collectAndMerge(s, "zones", LIMITS.zones, "locations", (r) => {
+      if (r.id !== s.map.containerLocationId && ctx.locationsById?.[r.id]?.kind === "floor") throw new Error("VERTICAL_SPACE_NAVIGATION_ONLY");
       const out = {};
       const size = ctx.childSpaces?.[r.id];
       if (s.units === "meters" && size?.widthM > 0 && size.heightM > 0) out.physicalSize = { w: size.widthM, h: size.heightM };
@@ -6282,6 +6324,7 @@ function generateOverviewOnce(value, context) {
       return out;
     });
     s.spec.features = collectAndMerge(s, "features", LIMITS.features, null, (r) => {
+      if (ctx.locationsById?.[r.zoneId]?.kind === "floor") throw new Error("VERTICAL_SPACE_NAVIGATION_ONLY");
       if (!OVERVIEW_FEATURE_TYPES.includes(r.type)) throw new Error("FEATURE_TYPE_UNSUPPORTED");
       const out = { type: r.type };
       if (typeof r.zoneId === "string" && r.zoneId && r.zoneId !== s.map.containerLocationId) out.zoneId = r.zoneId;
@@ -6711,7 +6754,7 @@ function filterSceneForView(scene, { scope, visibleLocations = [], visibleCharac
   const L = new Set(visibleLocations), C = new Set(visibleCharacters), I = new Set(visibleItems), author = scope.viewMode === "author";
   if (!author) {
     const top = ["kind", "version", "generator", "mapId", "branchId", "sourceRevision", "units", "metersPerCell", "metricQuality"];
-    const keys = { floor: ["id", "name", "kind", "bounds", "corridor", "rooms", "groups", "bodies", "doors", "windows", "lamps", "doorSwings", "actors", "items", "path"], city: ["id", "name", "kind", "bounds", "wall", "origin", "river", "riverPolygon", "districts", "roads", "segments", "gates", "buildings", "dock"], overview: ["id", "name", "kind", "bounds", "surface", "pins", "shapes", "routes", "features", "selfArea"] };
+    const keys = { floor: ["id", "name", "kind", "bounds", "corridor", "rooms", "hostArea", "groups", "bodies", "doors", "windows", "lamps", "doorSwings", "actors", "items", "path"], city: ["id", "name", "kind", "bounds", "wall", "origin", "river", "riverPolygon", "districts", "roads", "segments", "gates", "buildings", "dock"], overview: ["id", "name", "kind", "bounds", "surface", "pins", "shapes", "routes", "features", "selfArea"] };
     const saved = d.layout;
     d = Object.fromEntries(top.filter((k) => d[k] !== void 0).map((k) => [k, d[k]]));
     d.layout = Object.fromEntries((keys[saved.kind] ?? []).filter((k) => saved[k] !== void 0).map((k) => [k, saved[k]]));
@@ -6722,6 +6765,12 @@ function filterSceneForView(scene, { scope, visibleLocations = [], visibleCharac
   if (s.kind === "floor") {
     s.rooms = s.rooms.filter((r) => allowed(r.id, "location")).map(name);
     const rooms = new Set(s.rooms.map((r) => r.id));
+    if (s.hostArea) {
+      if (allowed(s.hostArea.id, "location")) {
+        s.hostArea = name(s.hostArea);
+        rooms.add(s.hostArea.id);
+      } else delete s.hostArea;
+    }
     const boundCorridor = typeof s.corridor?.entityId === "string" && s.corridor.entityId ? s.corridor.entityId : null;
     const corridorVisible = author || boundCorridor !== null && L.has(boundCorridor);
     if (boundCorridor !== null && !corridorVisible) {
@@ -6765,6 +6814,7 @@ function stripLayoutForPov(s) {
       // 子图导航共用同一个地点 ID。不可见时上面已经把这两个字段删掉了。
       corridor: (p) => pick(p, "id", "entityId", "name", "x", "y", "w", "h"),
       rooms: (p) => pick(p, "id", "name", "x", "y", "w", "h", "side", "role"),
+      hostArea: (p) => pick(p, "id", "name", "x", "y", "w", "h", "quality"),
       groups: (p) => ({ ...pick(p, "id", "name", "roomId", "x", "y", "w", "h"), ...Array.isArray(p.bodies) ? { bodies: p.bodies.map((b) => pick(b, "x", "y", "w", "h")).filter(Boolean) } : {} }),
       bodies: (p) => pick(p, "x", "y", "w", "h", "roomId"),
       doors: (p) => pick(p, "x", "y", "width", "roomId", "wall"),
@@ -7987,6 +8037,7 @@ function compileSceneGroup({ request, scope, currentScope, mapRow, locations, ch
         const delegated = /* @__PURE__ */ new Set();
         spec.contents = (spec.contents ?? []).filter((row2) => {
           const owner = locations.find((l) => l.branch_id === scope.branchId && l.id === row2.roomId);
+          if (owner?.kind === "room" && owner.id === mapRow.container_location_id) return true;
           const nested = locations.some((l) => l.branch_id === scope.branchId && l.status === "active" && l.parent_location_id === row2.roomId && (owner?.kind !== "room" || l.kind !== "other"));
           const known = (ctx.childCanonical[row2.roomId]?.furnishing ?? []).some((f) => (parseSpaceLocalId(f.localId)?.contentId ?? f.localId) === (parseSpaceLocalId(row2.id)?.contentId ?? row2.id)) || (ctx.previousScene?.constraints?.contents ?? []).some((f) => f.id === row2.id && f.roomId === row2.roomId);
           const supported = (spec.items ?? []).some((i) => i.on === row2.id && ctx.itemsById[i.id]?.location_id === row2.roomId);
@@ -12215,7 +12266,7 @@ var init_atlas_layout_signature = __esm({
     "use strict";
     init_define_ATLAS_BUILD_INFO();
     init_atlas_hash();
-    LAYOUT_SIGNATURE_POLICY_VERSION = "layout-v14";
+    LAYOUT_SIGNATURE_POLICY_VERSION = "layout-v15";
     byId2 = (left, right) => left < right ? -1 : left > right ? 1 : 0;
     str2 = (value) => typeof value === "string" && value ? value : null;
     num2 = (value) => typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -13675,6 +13726,8 @@ function resolveSpatialProfile(input) {
     chosen = { mode: "circulation", basis: "source-supported", reason: `本图已绑定真实走廊 ${corridorEntityId}` };
   } else if (containerKind === "other" && ["building", "floor", "room", "vehicle"].includes(TEXT(input.parentContainer?.kind)) && (input.members ?? []).some((member) => member.kind === "room") && !(input.members ?? []).some((member) => ["region", "natural", "city", "district", "building"].includes(TEXT(member.kind)))) {
     chosen = { mode: "interior", basis: "source-supported", reason: "该容器位于已登记室内容器内，并直接包含已登记房间" };
+  } else if (containerKind === "building" && (input.members ?? []).some((m) => m.kind === "floor")) {
+    chosen = { mode: "compound", basis: "source-supported", reason: "已登记楼层有独立子图；建筑本图展示总览和楼层入口，未明确楼层的房间不擅自分层" };
   } else if (containerKind === "building" && (input.members ?? []).some((m) => m.kind === "building") && (input.members ?? []).some((m) => ["region", "natural", "other"].includes(String(m.kind)))) {
     chosen = { mode: "compound", basis: "source-supported", reason: "已登记成员同时包含独立建筑与室外空间" };
   } else if (containerKind && TYPED_DEFAULT[containerKind]) {
@@ -13702,7 +13755,9 @@ function resolveSpatialProfile(input) {
     const id = String(member.id ?? "");
     const kind = TEXT(member.kind);
     if (!kind) continue;
-    if (chosen.mode === "outdoor" && INDOOR_KINDS.has(kind)) {
+    if (kind === "floor" && (chosen.mode === "interior" || chosen.mode === "compound")) {
+      pushUnsupported(id, kind, "楼层由独立楼层入口展示，不作为同层平面房间或室外足迹");
+    } else if (chosen.mode === "outdoor" && INDOOR_KINDS.has(kind)) {
       pushUnsupported(id, kind, "室外档案不生成匿名室内房间：等该地点自己的室内图");
     } else if (chosen.mode === "interior" && OUTDOOR_KINDS.has(kind)) {
       pushUnsupported(id, kind, "室内档案不把明确室外的成员塞进普通房间：它需要自己的室外/复合图");
@@ -13828,7 +13883,7 @@ var init_atlas_spatial_profile = __esm({
 
 // src/atlas-sql-layout-task.ts
 function baselineFloorRooms(locations, extent2, ref, sizeOf) {
-  const local = [...locations].sort((a, b) => byId4(String(a.id), String(b.id)));
+  const local = locations.filter((row2) => row2.kind !== "floor").sort((a, b) => byId4(String(a.id), String(b.id)));
   const perSide = Math.ceil(local.length / 2);
   if (!perSide) return [];
   const w = Math.floor(Math.min(8, (extent2.width - 1) / perSide) * 2) / 2;
@@ -14058,7 +14113,8 @@ function deriveLayoutSites(tables, branchId) {
       locations,
       mapRow: entry.map,
       branchId,
-      firstEstimate: { widthM: entry.extent.width, heightM: entry.extent.height }
+      // An uncalibrated overview extent is in cells, never physical metres.
+      firstEstimate: entry.extent.units === "meters" ? { widthM: entry.extent.width, heightM: entry.extent.height } : null
     });
     if (!resolved) continue;
     entry.spaceSize = resolved;
@@ -14081,13 +14137,13 @@ function deriveLayoutSites(tables, branchId) {
   const expandable = (entry) => entry.kind === "floor" && entry.spaceSize?.resolution.source === "first-estimate" && !(finite3(entry.map.meters_per_cell) && entry.map.meters_per_cell > 0) && !entry.map.scale_locked && !hasScene(entry.map);
   for (const entry of [...entries].sort((a, b) => entryDepth(b) - entryDepth(a) || byId4(a.mapId, b.mapId))) {
     if (!expandable(entry) || entry.own.length === 0) continue;
-    const sizes = entry.own.map((row2) => {
+    const sizes = entry.own.filter((row2) => row2.kind !== "floor").sort((a, b) => byId4(String(a.id), String(b.id))).map((row2) => {
       const known = locationSpaceSize({ maps, locations, locationId: String(row2.id), branchId });
       const child = entries.find((child2) => child2.kind === "floor" && child2.container?.id === row2.id && child2.own.length > 0);
       return known ? [known.widthM, known.heightM] : child ? [child.extent.width, child.extent.height] : [8, 8];
     });
-    const perSide = Math.ceil(sizes.length / 2);
-    const minW = Math.max(...sizes.map((size) => size[0])) * perSide + 1;
+    if (!sizes.length) continue;
+    const minW = Math.max(...[0, 1].map((side) => sizes.reduce((sum, size, i) => sum + (i % 2 === side ? size[0] : 0), 0))) + 1;
     const minH = Math.max(...sizes.map((size) => size[1])) * 2 + 3;
     entry.extent = { ...entry.extent, width: Math.max(entry.extent.width, minW), height: Math.max(entry.extent.height, minH) };
     entry.spaceSize = resolveMapSpaceSize({ maps, locations, mapRow: entry.map, branchId, firstEstimate: { widthM: entry.extent.width, heightM: entry.extent.height } });
@@ -14109,6 +14165,7 @@ function deriveLayoutSites(tables, branchId) {
   for (const entry of entries) {
     if (entry.kind !== "floor" || entry.own.length === 0) continue;
     for (const row2 of entry.own) {
+      if (row2.kind === "floor") continue;
       const childId = asId3(row2.id);
       if (!childId || childId === asId3(entry.map.container_location_id)) continue;
       const child = locationSpaceSize({ maps, locations, locationId: childId, branchId });
@@ -14276,7 +14333,7 @@ function buildSqlLayoutTask(db, branchId, input, turnId, report) {
       const known = locationSpaceSize({ maps: derived.maps, locations: derived.locations, locationId: id, branchId }) ?? derived.entries.find((e) => e.container?.id === id && e.kind === "floor")?.spaceSize?.resolution;
       return known ? { widthM: known.widthM, heightM: known.heightM } : null;
     }) : [];
-    const local = entry.standalone && container ? [container] : entry.own;
+    const local = entry.standalone && container ? [container] : container?.kind === "room" ? [container, ...entry.own] : entry.own;
     const localIds = new Set(local.map((row2) => String(row2.id)));
     const childSpaces = entry.own.filter((row2) => !(container?.kind === "room" && row2.kind === "other")).map((row2) => {
       const id = asId3(row2.id);
@@ -14366,6 +14423,7 @@ function buildSqlLayoutTask(db, branchId, input, turnId, report) {
       childSpaces,
       parentContext,
       hierarchy: { parentMap: ref(parentEntry(entry)?.mapId), depth: depth(entry), sharedSpace: ref(container?.id) },
+      verticalSpaces: entry.own.filter((row2) => row2.kind === "floor").map((row2) => ({ ref: ref(row2.id), name: row2.name, kind: row2.kind })),
       baselineRooms,
       locations: local.map((row2) => ({
         ref: ref(row2.id),
@@ -14452,11 +14510,15 @@ function buildSqlLayoutTask(db, branchId, input, turnId, report) {
     const districts = (registeredDistricts.length ? registeredDistricts : [scope.container]).map((district, index) => ({ id: district.ref, name: district.name, bank: "west", order: index }));
     const buildings = scope.locations.filter((location2) => location2.kind === "building").map((location2) => {
       const size = scope.childSpaces.find((space) => space.ref === location2.ref);
-      return { id: location2.ref, name: location2.name, districtId: districts.find((district) => district.id === location2.parent)?.id ?? districts[0].id, w: size?.w ?? 24, h: size?.h ?? 24 };
+      return { id: location2.ref, name: location2.name, districtId: districts.find((district) => district.id === location2.parent)?.id ?? scope.container.ref, w: size?.w ?? 24, h: size?.h ?? 24 };
     });
-    request.messages[1].content += "\n【本图合法 city JSON 示例；所有实体引用均已登记】\n" + JSON.stringify({ op: "map.layout.request", ref: scope.map, data: { kind: "city", spec: { districts, buildings, enclosure: "open", riverWidth: 0 } }, why: "使用已登记城市范围生成估计布局" });
+    if (buildings.some((building) => building.districtId === scope.container.ref) && !districts.some((d) => d.id === scope.container.ref)) districts.push({ id: scope.container.ref, name: scope.container.name, bank: "west", order: districts.length });
+    request.messages[1].content += "\n【本图合法 city JSON 示例；所有实体引用均已登记】\n" + JSON.stringify({ op: "map.layout.request", ref: scope.map, data: { kind: "city", spec: { districts, buildings, enclosure: "open", riverWidth: 0, blocksPerDistrict: 0 } }, why: "使用已登记城市范围生成估计布局" });
     request.messages[1].content += "\ncity 的 districts.id 和 buildings.id 必须沿用上方已登记地点引用，不能使用 B1、B2 等自造编号。没有已登记建筑时 buildings=[]；不能为填满画面而新增可交互建筑。";
   }
+  if (scopes.some((scope) => scope.verticalSpaces.length)) request.messages[1].content += "\nverticalSpaces 是上下楼层入口，由界面的楼层导航展示。不要把它们放进 rooms、zones 或 buildings，也不把整层用门连接到同层走廊。房间只保留已登记的归属；没有楼层依据时不能擅自迁到一楼或二楼。";
+  if (scopes.some((scope) => scope.container?.kind === "room")) request.messages[1].content += "\n房间包含已登记子房间时，baselineRooms 只列子房间；程序另外保留容器房间自身的可用地面。厨房的操作台、厨内人物仍用厨房容器的 roomId，不能迁入储物间，也不能因为存在储物间就省略厨房本身的陈设与人物。不要把容器再次塞进 rooms 形成重叠房间。";
+  if (hasCity) request.messages[1].content += "\n建筑的 districtId 不能凭相邻或示意排位推断为另一个已登记街区。没有已登记街区归属的建筑使用当前城市容器作为自身分区，不把住所强行归入温室区等任意首个街区。默认 blocksPerDistrict=0，先表达真实地点与道路，不用装饰街块填满地图。";
   if (hasFloor && hasSpatialCapability(CAPABILITY_CORRIDOR_BINDING)) request.messages[1].content += "\n" + CORRIDOR_BINDING_PROMPT;
   if (hasSpatialCapability(CAPABILITY_SPACE_CANONICAL)) request.messages[1].content += "\n" + SPACE_CANONICAL_PROMPT;
   if (hasSpatialCapability(CAPABILITY_SPATIAL_PROFILE)) request.messages[1].content += "\n" + SPATIAL_PROFILE_PROMPT;
@@ -27171,6 +27233,7 @@ function renderedEntityIds(scene, known) {
     const selfId = selfArea ? TEXT2(selfArea.locationId) : "";
     if (selfId) selfIds.add(selfId);
   } else if (kind === "floor") {
+    if (PLAIN2(layout.hostArea) && TEXT2(layout.hostArea.id)) selfIds.add(TEXT2(layout.hostArea.id));
     for (const room of Array.isArray(layout.rooms) ? layout.rooms : []) addAny(room?.id);
     const corridor = PLAIN2(layout.corridor) ? layout.corridor : null;
     const corridorEntity = corridor ? TEXT2(corridor.entityId) : "";
@@ -31189,6 +31252,7 @@ function reconcileOccupantsSpec(input) {
   const mapId = text2(scene?.mapId) || "";
   const branchId = text2(scene?.branchId) || "";
   const roomIds = /* @__PURE__ */ new Set();
+  if (input.container?.kind === "room" && text2(input.container.id)) roomIds.add(text2(input.container.id));
   for (const room of rows3(requestSpec.rooms)) {
     const id = text2(room?.id);
     if (id) roomIds.add(id);
@@ -31203,6 +31267,8 @@ function reconcileOccupantsSpec(input) {
     }
   }
   if (layout?.kind === "floor") {
+    const hostId = plain3(layout.hostArea) ? text2(layout.hostArea.id) : "";
+    if (hostId) roomIds.add(hostId);
     const boundCorridor = text2(layout.corridor?.entityId);
     if (boundCorridor) roomIds.add(boundCorridor);
   }
@@ -31779,6 +31845,9 @@ function applyLooseItemMarkers(input) {
   const markers = input.markers.filter((item) => !boundIds.has(item.id));
   if (markers.length === 0) return;
   const regions = /* @__PURE__ */ new Map();
+  const host = plain4(layout.hostArea) ? layout.hostArea : null;
+  const hostRect = host ? rectOf(host) : null;
+  if (hostRect && typeof host?.id === "string") regions.set(host.id, [{ x: hostRect.x, y: hostRect.y }, { x: hostRect.x + hostRect.w, y: hostRect.y }, { x: hostRect.x + hostRect.w, y: hostRect.y + hostRect.h }, { x: hostRect.x, y: hostRect.y + hostRect.h }]);
   for (const room of Array.isArray(layout.rooms) ? layout.rooms : []) {
     const id = typeof room?.id === "string" ? room.id : "";
     const rect = rectOf(room);
@@ -31794,6 +31863,7 @@ function applyLooseItemMarkers(input) {
     if (id && roomId) roomOfGroup.set(id, roomId);
   }
   const obstacles = /* @__PURE__ */ new Map();
+  if (hostRect && typeof host?.id === "string") obstacles.set(host.id, (Array.isArray(layout.rooms) ? layout.rooms : []).map(rectOf).filter((r) => r !== null));
   for (const group2 of Array.isArray(layout.groups) ? layout.groups : []) {
     const id = typeof group2?.id === "string" ? group2.id : "";
     const roomId = roomOfGroup.get(id);
@@ -31812,7 +31882,7 @@ function applyLooseItemMarkers(input) {
     ...scene,
     layout: {
       ...layout,
-      items: [...keptItems, ...placed.points.map((p) => ({ id: p.id, x: p.x, y: p.y, quality: p.quality, name: p.name }))]
+      items: [...keptItems, ...placed.points.map((p) => ({ id: p.id, roomId: p.roomId, x: p.x, y: p.y, quality: p.quality, name: p.name }))]
     }
   };
   const rebuilt = buildSceneMutation({
@@ -32102,6 +32172,10 @@ function applyPendingSpatialRequests(input) {
     const occupants = reconcileOccupantsSpec({
       scene: frameRead.scene,
       requestSpec: spec,
+      container: (() => {
+        const row2 = locations.find((l) => l.id === mapRow.container_location_id);
+        return row2 ? { id: row2.id, kind: row2.kind } : null;
+      })(),
       locations,
       characters,
       items,

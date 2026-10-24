@@ -31,6 +31,8 @@ export type OccupantsInput = {
   scene: SceneDocument | null;
   /** 本轮布局请求里的约束（rooms / contents / actors / items）。 */
   requestSpec: SqlRow;
+  /** Actual SQL container; a room with child rooms still has its own occupants. */
+  container?: {id:unknown;kind:unknown} | null;
   locations?: SqlRow[];
   characters?: SqlRow[];
   items?: SqlRow[];
@@ -107,6 +109,7 @@ export function reconcileOccupantsSpec(input: OccupantsInput): OccupantsResult {
 
   /* ── 房间集合：本轮请求 + 已保存场景（都在同一张图上才对账） ── */
   const roomIds = new Set<string>();
+  if(input.container?.kind==='room'&&text(input.container.id))roomIds.add(text(input.container.id));
   for (const room of rows(requestSpec.rooms as SqlRow[])) {
     const id = text(room?.id);
     if (id) roomIds.add(id);
@@ -125,6 +128,8 @@ export function reconcileOccupantsSpec(input: OccupantsInput): OccupantsResult {
     }
   }
   if (layout?.kind === 'floor') {
+    const hostId=plain(layout.hostArea)?text(layout.hostArea.id):'';
+    if(hostId)roomIds.add(hostId);
     const boundCorridor = text((layout.corridor as SqlRow | undefined)?.entityId);
     if (boundCorridor) roomIds.add(boundCorridor);
   }

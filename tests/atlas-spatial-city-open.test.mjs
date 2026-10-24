@@ -33,7 +33,7 @@ const BASE = {
 // ───────────────────────── G07-A · 新城市默认开放：不画假城墙 ─────────────────────────
 
 test('G07：enclosure=open + riverWidth=0 → 无假城墙、无城门、无环城墙道路', () => {
-  const result = Kit.generateCity({ ...BASE, enclosure: 'open', riverWidth: 0 }, cityCtx());
+  const result = Kit.generateCity({ ...BASE, enclosure: 'open', riverWidth: 0, blocksPerDistrict:2 }, cityCtx());
   assert.equal(result.ok, true, JSON.stringify(result.issues));
   const layout = result.scene.layout;
 

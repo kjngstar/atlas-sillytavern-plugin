@@ -105,9 +105,26 @@ import * as B from './foundation.mjs';
     const collections=['contents','actors','items'];
     if(collections.some(k=>spec[k]!==undefined&&(!Array.isArray(spec[k])||spec[k].some(v=>!v||typeof v.id!=='string'||!v.id)||new Set(spec[k].map(v=>v.id)).size!==spec[k].length)))return {ok:false,issues:[{id:spec.id,code:'DETAIL_INPUT_INVALID'}],kept:previous?clone(previous):null};
     const bare=B.floor({...spec,furniture:[],actors:[]},previous);if(!bare.ok)return bare;
+    const host=spec.hostRoom?{...bare.bounds,id:spec.hostRoom.id,name:spec.hostRoom.name,side:'south',host:true,quality:'layout'}:null;
+    if(host){
+      const candidates=spec.hostEntryDoors?.length?spec.hostEntryDoors:[.5,.2,.8].flatMap(t=>[
+        {x:host.w*t,y:host.h,wall:'south'},{x:host.w*t,y:0,wall:'north'},
+        {x:0,y:host.h*t,wall:'west'},{x:host.w,y:host.h*t,wall:'east'},
+      ]).map((d,i)=>({...d,id:'entry:'+host.id+':'+i,width:Math.min(1.2,host.w-.4,host.h-.4),quality:'layout'}));
+      const valid=d=>{
+        const vertical=verticalDoor(d),along=vertical?d.y:d.x,side=vertical?host.h:host.w;
+        const boundary=d.wall==='north'?d.y:d.wall==='south'?d.y-host.h:d.wall==='west'?d.x:d.x-host.w;
+        return Math.abs(boundary)<EPS&&d.width>0&&along-d.width/2>=0&&along+d.width/2<=side&&!bare.rooms.some(r=>B.intersects(inflate(r,.18),entryRect(d,d.width,.6)));
+      };
+      const entries=spec.hostEntryDoors?.length?candidates:candidates.filter(valid).slice(0,1);
+      if(!entries.length||entries.some(d=>!valid(d)))return {ok:false,issues:[{id:host.id,code:'HOST_ENTRY_BLOCKED'}],kept:previous?clone(previous):null};
+      bare.doors.push(...entries.map(d=>({...d,roomId:host.id})));
+    }
     const groups=[],bodies=[],actors=[],items=[],windows=[],lamps=[],issues=[],doorSwings=[];
-    for(const r of bare.rooms){
-      const roomDoors=bare.doors.filter(d=>d.roomId===r.id),door=roomDoors[0],aisle=spec.singleRoom?.8:1.6,margin=.2;
+    for(const r of [...bare.rooms,...(host?[host]:[])]){
+      const roomDoors=bare.doors.filter(d=>d.roomId===r.id),door=roomDoors[0],aisle=(spec.singleRoom||r.host)?.8:1.6,margin=.2;
+      const partitions=r.host?bare.rooms.map(child=>({...child,solid:true})):[];
+      const roomBodies=()=>[...bodies.filter(b=>b.roomId===r.id),...partitions];
       // A room has the same usable interior in its parent and its own map.
       // Door swing and navigation reserve entry clearance explicitly below.
       const spine=verticalDoor(door)?{x:r.x,y:door.y-aisle/2,w:r.w,h:aisle}:{x:door.x-aisle/2,y:r.y,w:aisle,h:r.h},inner={x:r.x+margin,y:r.y+margin,w:r.w-margin*2,h:r.h-margin*2};
@@ -130,13 +147,13 @@ import * as B from './foundation.mjs';
         if(f.type!=='light'&&f.type!=='decor'&&!f.locked&&(f.w>inner.w+EPS||f.h>inner.h+EPS)&&(f.h>inner.w+EPS||f.w>inner.h+EPS)){issues.push({id:f.id,code:'DETAIL_TOO_LARGE'});continue;}
         // Lights and door openings have non-solid bodies. Their projection can
         // overlap the walking route without reserving furniture floor space.
-        const free=q=>B.contains(inner,q)&&(FLOOR_OVERLAYS.has(f.type)||!B.intersects(q,spine)&&!swings.some(s=>B.intersects(q,s))&&!groups.filter(g=>g.roomId===r.id&&!FLOOR_OVERLAYS.has(g.type)).some(g=>B.intersects(inflate(g,.28),q))&&!exact.some(p=>B.intersects(q,{x:p.x-.25,y:p.y-.25,w:.5,h:.5})));
+        const free=q=>B.contains(inner,q)&&!partitions.some(p=>B.intersects(inflate(p,.18),q))&&(FLOOR_OVERLAYS.has(f.type)||!B.intersects(q,spine)&&!swings.some(s=>B.intersects(q,s))&&!groups.filter(g=>g.roomId===r.id&&!FLOOR_OVERLAYS.has(g.type)).some(g=>B.intersects(inflate(g,.28),q))&&!exact.some(p=>B.intersects(q,{x:p.x-.25,y:p.y-.25,w:.5,h:.5})));
         const existing=groups.filter(g=>g.roomId===r.id&&!FLOOR_OVERLAYS.has(g.type)),existingBodies=bodies.filter(b=>b.roomId===r.id);
         const entries=roomDoors.map(d=>entryRect(d,.6,.6));
-        const freePath=q=>B.contains(inner,q)&&!swings.some(s=>B.intersects(q,s))&&!entries.some(s=>B.intersects(q,s))&&!existing.some(g=>B.intersects(inflate(g,.28),q))&&!exact.some(p=>B.intersects(q,{x:p.x-.25,y:p.y-.25,w:.5,h:.5}));
+        const freePath=q=>B.contains(inner,q)&&!partitions.some(p=>B.intersects(inflate(p,.18),q))&&!swings.some(s=>B.intersects(q,s))&&!entries.some(s=>B.intersects(q,s))&&!existing.some(g=>B.intersects(inflate(g,.28),q))&&!exact.some(p=>B.intersects(q,{x:p.x-.25,y:p.y-.25,w:.5,h:.5}));
         const reachablePlacement=q=>{
           if(!freePath(q))return false;
-          const proposal=makeGroup({...f,w:q.w,h:q.h},r,q.x,q.y),nav=navigation(r,door,[...existingBodies,...proposal.bodies]);
+          const proposal=makeGroup({...f,w:q.w,h:q.h},r,q.x,q.y),nav=navigation(r,door,[...existingBodies,...partitions,...proposal.bodies]);
           const accessible=g=>[pt(g.x+g.w+.48,g.y+g.h/2),pt(g.x-.48,g.y+g.h/2),pt(g.x+g.w/2,g.y+g.h+.48),pt(g.x+g.w/2,g.y-.48)].some(p=>B.pointInside(inner,p)&&nav.reachable(p));
           return [...existing,proposal].every(accessible)&&exact.every(nav.reachable)&&roomDoors.every(d=>nav.reachable(inward(d,.45)));
         };
@@ -182,9 +199,9 @@ import * as B from './foundation.mjs';
         const g=makeGroup({...f,w:chosen.w,h:chosen.h},r,chosen.x,chosen.y);if(f.locked)g.quality='confirmed';groups.push(g);bodies.push(...g.bodies);
       }
       const outerY=r.side==='north'?r.y:r.y+r.h;
-      if(!['outdoor','garden'].includes(r.role))for(let i=0;i<Math.max(1,Math.floor(r.w/3));i++)windows.push({id:'window:'+r.id+':'+i,type:'window',roomId:r.id,x:r.x+(i+.5)*r.w/Math.max(1,Math.floor(r.w/3)),y:outerY,width:1.2,elevation:1.1});
+      if((!host||r.host)&&!['outdoor','garden'].includes(r.role))for(let i=0;i<Math.max(1,Math.floor(r.w/3));i++)windows.push({id:'window:'+r.id+':'+i,type:'window',roomId:r.id,x:r.x+(i+.5)*r.w/Math.max(1,Math.floor(r.w/3)),y:outerY,width:1.2,elevation:1.1});
       lamps.push({id:'light:'+r.id,type:'light',roomId:r.id,x:door.x,y:r.y+r.h*.45,elevation:2.8});
-      const nav=navigation(r,door,bodies.filter(b=>b.roomId===r.id));
+      const nav=navigation(r,door,roomBodies());
       for(const d of roomDoors)if(!nav.reachable(inward(d,.45)))issues.push({id:d.id,code:'DOOR_NOT_REACHABLE'});
       for(const g of groups.filter(g=>g.roomId===r.id)){
         const edgePoints=[pt(g.x+g.w+.48,g.y+g.h/2),pt(g.x-.48,g.y+g.h/2),pt(g.x+g.w/2,g.y+g.h+.48),pt(g.x+g.w/2,g.y-.48)];
@@ -206,7 +223,7 @@ import * as B from './foundation.mjs';
      * - 放不下的走廊陈设留一条带 ID 的缺项，绝不悄悄丢掉、也绝不挪进别的房间；
      * - 走廊人物站在净空带上，与走廊陈设天然不重叠。
      */
-    const cid=typeof spec.corridorEntityId==='string'&&spec.corridorEntityId?spec.corridorEntityId:spec.parentId;
+    const cid=typeof spec.corridorEntityId==='string'&&spec.corridorEntityId?spec.corridorEntityId:host?null:spec.parentId;
     const cspace=cid&&bare.corridor.h>0&&bare.corridor.w>0?bare.corridor:null;
     if(cspace){
       const ch=cspace.h,passage=Math.min(1.2,Math.max(.6,ch*.5)),band=(ch-passage)/2;
@@ -240,8 +257,8 @@ import * as B from './foundation.mjs';
       const g=groups.find(g=>g.id===i.on),b=g?.bodies.find(b=>['table','desk','shelf','cabinet'].includes(b.type));
       if(b)items.push({...i,...center(b),roomId:g.roomId,type:'item',containerId:g.id,elevation:.8,quality:'layout'});else issues.push({id:i.id,code:'ITEM_CONTAINER_NOT_FOUND'});
     }
-    if(bare.corridor.h>0)for(let x=1.5;x<spec.width;x+=3)lamps.push({id:'hall-light:'+x,type:'light',roomId:cid||'corridor',x,y:bare.corridor.y+.22,elevation:2.8});
-    const knownSpaces=new Set([...bare.rooms.map(r=>r.id),...(cid?[cid]:[])]);
+    if(!host&&bare.corridor.h>0)for(let x=1.5;x<spec.width;x+=3)lamps.push({id:'hall-light:'+x,type:'light',roomId:cid||'corridor',x,y:bare.corridor.y+.22,elevation:2.8});
+    const knownSpaces=new Set([...bare.rooms.map(r=>r.id),...(cid?[cid]:[]),...(host?[host.id]:[])]);
     for(const v of [...(spec.contents||[]),...(spec.actors||[])])if(!knownSpaces.has(v.roomId))issues.push({id:v.id,code:'ROOM_REF_UNKNOWN'});
     // P11/R03：走廊里的行走者不属于任何房间，不能参与「房间→房间」的路径求解
     // （否则 ra/rb 会是 undefined，整张图直接抛错）。房间内的行走者依旧取前两位。
@@ -264,7 +281,7 @@ import * as B from './foundation.mjs';
         if(valid&&line)path.push(...line);else path=[];
       }
     }
-    return {...bare,groups,bodies,actors,items,windows,lamps,doorSwings,path,issues};
+    return {...bare,...(host?{hostArea:host}:{}),groups,bodies,actors,items,windows,lamps,doorSwings,path,issues};
   }
   const riverX=(river,y)=>river.cx+river.amplitude*Math.sin((y/river.height*2-.35)*Math.PI);
   const water=(river,p)=>Math.abs(p.x-riverX(river,p.y))<river.width/2-EPS;

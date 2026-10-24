@@ -64,6 +64,10 @@ export function projectMapContext(nodes,locations,{inTransit=new Set()}={}){
   // Interior coordinates describe physical rooms, not a geographic zoom into
   // the parent's schematic footprint. Exterior peers must not expand its fit.
   if((node.renderKind??node.kind)==='floor')continue;
+  // Macro positions are schematic, not a transform into local metres.
+  // Neighbouring cities belong in the parent map; districts still share their
+  // parent's boundary. A building's interior also has its own coordinate frame.
+  if(['city','building','room','floor'].includes(node.kind))continue;
   if(!node.parentMapId||!node.containerLocationId||byId.get(node.containerLocationId)?.mobility==='mobile')continue;
   const parent=nodes.get(node.parentMapId),active=parent&&outline(parent,node.containerLocationId);
   if(!active)continue;
